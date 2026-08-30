@@ -38,6 +38,7 @@ afterAll(async () => {
 function makeHub(): SessionHub {
   return new SessionHub({
     store,
+    workspaceRoot: process.cwd(),
     deps: makeDeps([assistantResult({ texts: ["ack"] })]),
   });
 }
@@ -58,6 +59,7 @@ describe("sanitize — goal/taskFocus absent on a v4 file loaded by v5 (sanitize
         cwd: process.cwd(),
         sanitized_at: new Date().toISOString(),
         checkpoints: [],
+        workspaceRoot: process.cwd(),
       },
     });
     const loaded = await store.load(id);
@@ -82,6 +84,7 @@ describe("post-#605 T2: legacy taskFocus key is dropped on load (sanitize)", () 
         cwd: process.cwd(),
         sanitized_at: new Date().toISOString(),
         checkpoints: [],
+        workspaceRoot: process.cwd(),
         taskFocus: {
           text: "stale",
           updatedAt: "2026-08-13T00:00:00.000Z",

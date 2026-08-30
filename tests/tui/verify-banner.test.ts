@@ -411,6 +411,7 @@ describe("端到端:createTuiBridge.postMessage 透传 verify DTO", () => {
   test("verifyConfig 缺席 → TuiPostResult.verify 字段缺席 (SC7)", async () => {
     const bridge = createTuiBridge({
       dataDir,
+      workspaceRoot: dataDir,
       deps: makeDeps([assistantResult({ texts: ["ok"] })]),
       inflight: createInflightRegistry(),
     });
@@ -428,6 +429,7 @@ describe("端到端:createTuiBridge.postMessage 透传 verify DTO", () => {
       rmSync(marker, { force: true });
       const bridge = createTuiBridge({
         dataDir,
+        workspaceRoot: dataDir,
         deps: makeDeps([assistantResult({ texts: ["fixed"] })]),
         inflight: createInflightRegistry(),
         verifyConfig: { command: passScript },

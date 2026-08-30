@@ -21,6 +21,7 @@ import {
   type CreateWorkerDepsOptions,
 } from "../../src/harness/subagent/worker.ts";
 import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
+import { getAgentEntry } from "../../src/harness/subagent/catalog.ts";
 import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
 import type {
   SubAgentEnvelope,
@@ -409,6 +410,26 @@ describe("subagent worker: CreateWorkerDepsOptions seam 字段 (类型契约)", 
 
       assert.ok(system.includes(marker));
       assert.ok(!system.includes("memory_recall"));
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("无 AGENTS.md 时 worker 仍注入 general-purpose persona 且不抛", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "iknow-worker-no-agents-"));
+    try {
+      const deps = await createWorkerDeps({
+        env: TEST_ENV,
+        sandboxRoot: cwd,
+        cwd,
+        userHome: cwd,
+        model: createStubModel({ responses: [] }),
+        skillCatalog: createSkillCatalog([]),
+        trace: createNoopTraceService(),
+      });
+
+      const system = (await deps.system?.()) ?? "";
+      assert.ok(system.includes(getAgentEntry("general-purpose").body));
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

@@ -98,6 +98,12 @@ export async function buildHarnessEngine(
      *  到 build-engine(priority chain `[explicit, env, cwd]` 在 build-engine
      *  层执行)。CLI 入口(runChat/runOneShot/runTui/runServe)各自解析后透传。 */
     workspaceRoot?: string;
+    /**
+     * T6 / worktree-mcp-rebind-lifecycle:稳定主 checkout root。首次装配捕获后
+     * 跨 rebind 原样透传；`resolveMcpRoots` 由此派生 `mcpConfigRoot`。wrapper
+     * 只透传，不从 `process.cwd()` 重算。
+     */
+    productRoot?: string;
     /** Crash diagnostics / worker trace root for subagent lifecycle evidence. */
     subagentDiagnosticsDir?: string;
     /** Trace service for unconditional subagent lifecycle evidence. */
@@ -164,6 +170,7 @@ export async function buildHarnessEngine(
     ...(opts.graphMode ? { graphMode: opts.graphMode } : {}),
     ...(opts.todoDir ? { todoDir: opts.todoDir } : {}),
     ...(resolvedWorkspaceRoot ? { workspaceRoot: resolvedWorkspaceRoot } : {}),
+    ...(opts.productRoot ? { productRoot: opts.productRoot } : {}),
     ...(opts.subagentDiagnosticsDir
       ? { subagentDiagnosticsDir: opts.subagentDiagnosticsDir }
       : {}),

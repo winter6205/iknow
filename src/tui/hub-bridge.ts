@@ -33,6 +33,7 @@ import type {
   SubAgentManager,
   SubagentInfo,
 } from "../harness/subagent/manager.js";
+import type { SubAgentTerminalNotice } from "../harness/subagent/mailbox.js";
 import type {
   AutoMemoryHook,
   OverlayPrefetchFn,
@@ -125,6 +126,14 @@ export interface TuiBridge {
     readonly thinking?: WireThinkingOverride;
     readonly onStream?: (event: HarnessStreamEvent) => void;
   }) => Promise<TuiPostResult>;
+  /** T4: host wake subscription; absent manager is a no-op (ask-safe). */
+  readonly subscribeSubagentTerminal: (
+    subscriber: (notice: SubAgentTerminalNotice) => void
+  ) => () => void;
+  /** T4: run a silent turn with the pending terminal drain. */
+  readonly wakeFromSubagent: (
+    conversationId: string
+  ) => Promise<TuiPostResult | undefined>;
   readonly listSessions: () => ReturnType<SessionHub["listSessions"]>;
   readonly loadSessionFile: (conversationId: string) => Promise<SessionFileV1>;
   /** 手动压缩会话（/compact）。返回 `{ compacted, cancelled? }`,`compacted`
@@ -167,6 +176,13 @@ export interface TuiBridge {
 export interface CreateTuiBridgeOptions {
   /** 会话池根目录；缺省 ~/.iknow（与 serve 同款 resolveServeDataDir）。 */
   readonly dataDir?: string;
+  /** T1: resolved workspace root used when lazily creating a session. */
+  readonly workspaceRoot?: string;
+  /**
+   * T6:稳定 productRoot（启动 workspace）。单向透传给 SessionHub，不在
+   * bridge 内重算 MCP 路径策略。
+   */
+  readonly productRoot?: string;
   /** harness deps（产品路径传 buildTuiDeps 结果；测试注入 stub deps）。 */
   readonly deps: LoopEngineDeps;
   readonly defaultJsonMode?: boolean;
@@ -254,6 +270,14 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     // settings-hot-reload（T3）:env 源 + 变化回调透传（缺省 → 行为零变化）。
     ...(opts.envProvider ? { envProvider: opts.envProvider } : {}),
     ...(opts.onEnvChange ? { onEnvChange: opts.onEnvChange } : {}),
+    // T1: the bridge's resolved root is also the hub's engine/state anchor.
+    ...(opts.workspaceRoot !== undefined
+      ? { workspaceRoot: opts.workspaceRoot }
+      : {}),
+    // T6:稳定 productRoot 单向透传（缺席 → hub 回退 workspaceRoot）。
+    ...(opts.productRoot !== undefined
+      ? { productRoot: opts.productRoot }
+      : {}),
     // Review High-1 (2026-08-29):注入 deps 的启动根 + per-root 重建缝透传。
     ...(opts.engineRoot !== undefined
       ? { injectedEngineRoot: opts.engineRoot }
@@ -279,6 +303,9 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     store,
     ensureSession: async (conversationId) => {
       if (conversationId !== undefined) return conversationId;
+      if (opts.workspaceRoot !== undefined) {
+        await hub.bindWorkspace(opts.workspaceRoot);
+      }
       const created = await hub.createSession();
       return created.session.conversation_id;
     },
@@ -299,6 +326,17 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
           ...(thinking !== undefined ? { thinking } : {}),
         });
         return toPostResult(resp);
+      } finally {
+        opts.inflight.unmark(conversationId);
+      }
+    },
+    subscribeSubagentTerminal:
+      opts.subagentManager?.subscribe ?? (() => () => {}),
+    wakeFromSubagent: async (conversationId) => {
+      opts.inflight.mark(conversationId);
+      try {
+        const resp = await hub.wakeFromSubagent({ conversationId });
+        return resp === undefined ? undefined : toPostResult(resp);
       } finally {
         opts.inflight.unmark(conversationId);
       }

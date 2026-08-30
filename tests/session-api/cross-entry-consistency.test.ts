@@ -71,6 +71,7 @@ beforeAll(async () => {
   // Hub B owns 1 scripted response for the N+1th round.
   hubA = new SessionHub({
     store: storeA,
+    workspaceRoot: cwd,
     deps: makeDeps([
       assistantResult({ texts: ["assistant-A-round-1"] }),
       assistantResult({ texts: ["assistant-A-round-2"] }),
@@ -78,6 +79,7 @@ beforeAll(async () => {
   });
   hubB = new SessionHub({
     store: storeB,
+    workspaceRoot: cwd,
     deps: makeDeps([assistantResult({ texts: ["assistant-B-round-N+1"] })]),
   });
 });
@@ -271,6 +273,7 @@ describe("T5 (#622) cross-entry rewind: hub head-move is visible to an independe
     const storeC = new SessionStore(baseDir, cwd);
     const hubC = new SessionHub({
       store: storeC,
+      workspaceRoot: cwd,
       deps: makeDeps([
         assistantResult({ texts: ["cross-rw-a1"] }),
         assistantResult({ texts: ["cross-rw-a2"] }),

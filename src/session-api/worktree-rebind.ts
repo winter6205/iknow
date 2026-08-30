@@ -52,7 +52,12 @@ export interface WorktreeRebindStore {
 }
 
 export interface TaskWorktreeProvisionerOpts {
-  readonly store: WorktreeRebindStore;
+  /**
+   * Optional legacy persistence hook for callers outside SessionHub.
+   * SessionHub deliberately omits it and persists the returned root through
+   * its dirty-root conditional-save protocol.
+   */
+  readonly store?: WorktreeRebindStore;
   readonly runGit?: GitRunner;
   readonly now?: () => string;
 }
@@ -222,30 +227,32 @@ export function createTaskWorktreeProvisioner(
       );
     }
 
-    // 2. rebind ONLY this session's root (session file update after the tree
-    //    exists; store failures leave the tree in place — operator-visible,
-    //    main repo untouched, next attempt reports branch_exists per ADR §3)
-    let file: SessionFileV1;
-    try {
-      file = await opts.store.load(conversationId);
-    } catch (err) {
-      throw new WorktreeIsolationError(
-        "rebind_failed",
-        `worktree isolation: cannot load session ${conversationId} for rebind: ${errorMessage(err)}`
-      );
-    }
-    const updated: SessionFileV1 = {
-      ...file,
-      workspaceRoot: worktreePath,
-      updatedAt: now(),
-    };
-    try {
-      await opts.store.save({ id: conversationId, file: updated });
-    } catch (err) {
-      throw new WorktreeIsolationError(
-        "rebind_failed",
-        `worktree isolation: cannot persist rebind for session ${conversationId}: ${errorMessage(err)}`
-      );
+    // 2. Preserve the historical standalone persistence hook when supplied.
+    // SessionHub omits it so the host can observe this returned root and
+    // persist it together with the turn through conditionalSave.
+    if (opts.store !== undefined) {
+      let file: SessionFileV1;
+      try {
+        file = await opts.store.load(conversationId);
+      } catch (err) {
+        throw new WorktreeIsolationError(
+          "rebind_failed",
+          `worktree isolation: cannot load session ${conversationId} for rebind: ${errorMessage(err)}`
+        );
+      }
+      const updated: SessionFileV1 = {
+        ...file,
+        workspaceRoot: worktreePath,
+        updatedAt: now(),
+      };
+      try {
+        await opts.store.save({ id: conversationId, file: updated });
+      } catch (err) {
+        throw new WorktreeIsolationError(
+          "rebind_failed",
+          `worktree isolation: cannot persist rebind for session ${conversationId}: ${errorMessage(err)}`
+        );
+      }
     }
 
     bound.set(conversationId, worktreePath);

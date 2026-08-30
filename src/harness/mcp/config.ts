@@ -1,24 +1,31 @@
 /**
- * T3 (#344) — MCP 两级 config 解析器。
+ * T3 (plans/worktree-mcp-rebind-lifecycle.md) — MCP 两级 config 解析器。
  *
- * 加载顺序:用户级 `~/.iknow/mcp.json` → 项目级 `<cwd>/.iknow/mcp.json`,
+ * 加载顺序:用户级 `~/.iknow/mcp.json` → 项目级 `<mcpConfigRoot>/.iknow/mcp.json`,
  * 同名 server 项目级 **条目级整体覆盖** 用户级(无字段级深合并,
  * SC1 — 整段对象替换)。每条 server 通过 `{type:"stdio"|"remote"}` 判别
  * 联合校验;`disabled:true` 或 `enabled:false` → status=disabled。
  * 坏条目跳过 + warn 恰好一行,reason **绝不包含 env/command 字段值**
  * (SC7)。
  *
+ * 项目级路径**只**由调用方注入的 `mcpConfigRoot`(稳定 product/main checkout)
+ * 派生,绝不读 task worktree / `process.cwd()`。
+ *
  * Never 区:不读 `~/.claude.json` / `.kiro/settings/mcp.json`(G2 D1 决议)。
  *
  * 设计要点:
- *  - 路径参数化(`{ home, cwd }`),不读真实 ~/.iknow,测试用 tmp fixture。
+ *  - 路径参数化(`{ home, mcpConfigRoot }`),不读真实 ~/.iknow,测试用 tmp fixture。
  *  - 顶层形态兼容:既认 `mcpServers` 包裹,也认顶层直接是 server map。
- *  - 文件缺失 / JSON 损坏 / 顶层非对象 → 静默降级为空,不抛、不阻塞启动。
+ *  - 文件缺失 → 该级空集,继续。
+ *  - 非缺失 IO / JSON 损坏 / 顶层非对象 → 抛 `McpLifecycleError`
+ *    kind `config_load_failed`(启动边界可 catch 后降级为无 MCP)。
  *  - 缺 type 时按 `url` 字段存在判 remote,否则 stdio(容错策略)。
  *  - 输出数组按 server 名字母序,便于上层做差分 / diff 稳定。
  */
 import { promises as fs } from "node:fs";
 import path from "node:path";
+
+import { McpLifecycleError } from "../errors.js";
 
 /**
  * 单个 MCP server 的源(user 级 / project 级)。
@@ -75,33 +82,33 @@ export interface McpConfigResult {
 /**
  * 加载器入参。
  *
- * - `home` ≡ `~/.iknow`(用户级)
- * - `cwd` ≡ 当前工作目录(项目级)
+ * - `home` ≡ `~`(用户级读 `<home>/.iknow/mcp.json`)
+ * - `mcpConfigRoot` ≡ 稳定 product/main checkout(项目级读
+ *   `<mcpConfigRoot>/.iknow/mcp.json`);**不是** task worktree / process.cwd()
  *
- * 两个字段都强制必填,避免运行时隐式读 process.env 造成
- * 跨机器不可重现。调用方(CLI / serve / TUI)按 env.ts SSOT 解析后注入。
+ * 两个字段都强制必填,避免运行时隐式读 process.env / process.cwd() 造成
+ * 跨机器不可重现。调用方按 resolver 返回的 `mcpConfigRoot` 注入。
  */
 export interface LoadMcpConfigOpts {
   readonly home: string;
-  readonly cwd: string;
+  readonly mcpConfigRoot: string;
 }
 
 /**
  * 主入口。读两级 mcp.json,合并 + 校验 + 坏条目隔离 + warn 一行。
  *
- * 失败模式全部降级:
+ * 失败模式:
  *  - 任一文件缺失 → 该级为空,继续。
- *  - JSON 损坏 → warn 一行,该级为空,继续。
- *  - 顶层非对象 / 顶层 mcpServers 不是对象 → warn 一行,该级为空,继续。
+ *  - 非缺失 IO / JSON 损坏 / 顶层非对象 / server map 非对象 →
+ *    抛 `McpLifecycleError`(`config_load_failed`)。
+ *    // EXIT: config load failed → no MCP manager, preserve harness startup
  *  - 单个 server 条目坏 → warn 一行,该条目跳过,其他继续。
- *
- * 不抛:启动路径禁止因配置问题挂掉。
  */
 export async function loadMcpConfig(
   opts: LoadMcpConfigOpts
 ): Promise<McpConfigResult> {
   const userPath = path.join(opts.home, ".iknow", "mcp.json");
-  const projectPath = path.join(opts.cwd, ".iknow", "mcp.json");
+  const projectPath = path.join(opts.mcpConfigRoot, ".iknow", "mcp.json");
 
   const userEntries = await readLevelConfig(userPath, "user");
   const projectEntries = await readLevelConfig(projectPath, "project");
@@ -157,9 +164,12 @@ async function readLevelConfig(
   } catch (err) {
     const e = err as NodeJS.ErrnoException;
     if (e.code === "ENOENT") return new Map(); // 缺失 → 空级,降级
-    // 其他 IO 错误 → warn + 空(避免挂掉启动)
-    warnSkip(level, `io error reading ${filePath}: ${e.code ?? "unknown"}`);
-    return new Map();
+    // EXIT: config load failed → no MCP manager, preserve harness startup
+    throw new McpLifecycleError(
+      "config_load_failed",
+      `${level} level io error reading config file: ${e.code ?? "unknown"}`,
+      { cause: err }
+    );
   }
 
   let parsed: unknown;
@@ -167,14 +177,20 @@ async function readLevelConfig(
     parsed = JSON.parse(raw);
   } catch (err) {
     const e = err as Error;
-    // JSON 损坏:warn 行不含 env 值,仅路径 + 错误简短描述
-    warnSkip(level, `invalid JSON in ${filePath}: ${e.message.slice(0, 80)}`);
-    return new Map();
+    // EXIT: config load failed → no MCP manager, preserve harness startup
+    throw new McpLifecycleError(
+      "config_load_failed",
+      `${level} level invalid JSON in config file: ${e.message.slice(0, 80)}`,
+      { cause: err }
+    );
   }
 
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    warnSkip(level, `top-level is not an object in ${filePath}`);
-    return new Map();
+    // EXIT: config load failed → no MCP manager, preserve harness startup
+    throw new McpLifecycleError(
+      "config_load_failed",
+      `${level} level top-level is not an object in config file`
+    );
   }
 
   // 顶层形态:优先 `mcpServers` 包裹;若不存在,回退到"顶层直接是 server map"。
@@ -186,8 +202,11 @@ async function readLevelConfig(
     mapSource === null ||
     Array.isArray(mapSource)
   ) {
-    warnSkip(level, `server map is not an object in ${filePath}`);
-    return new Map();
+    // EXIT: config load failed → no MCP manager, preserve harness startup
+    throw new McpLifecycleError(
+      "config_load_failed",
+      `${level} level server map is not an object in config file`
+    );
   }
 
   const out = new Map<string, RawServerEntry>();
@@ -312,9 +331,4 @@ function normalizeStringRecord(
  */
 function warnEntry(name: string, reason: string): void {
   console.warn(`[mcp/config] server '${name}' skipped: ${reason}`);
-}
-
-/** 单级整体坏掉(JSON 损坏 / 顶层非对象)时 warn。 */
-function warnSkip(level: McpServerSource, reason: string): void {
-  console.warn(`[mcp/config] ${level} level skipped: ${reason}`);
 }

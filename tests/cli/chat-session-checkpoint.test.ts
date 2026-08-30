@@ -118,6 +118,7 @@ describe("persistChatSessionCheckpoint", () => {
   it("cancelled 有增量 → 落盘 checkpoint(interruptReason=cancelled, 累计 turnCount)", async () => {
     const s = await storeFor();
     const id = "cancelled-progress";
+    const workspaceRoot = process.cwd();
     await persistChatSessionCheckpoint({
       store: s,
       conversationId: id,
@@ -129,6 +130,7 @@ describe("persistChatSessionCheckpoint", () => {
         turnCount: 1,
       }),
       priorMessages: [],
+      ...({ workspaceRoot } as { readonly workspaceRoot: string }),
     });
     const file = await s.load(id);
     assert.equal(file.turnCount, 1);
@@ -136,6 +138,8 @@ describe("persistChatSessionCheckpoint", () => {
     assert.equal(file.checkpoints?.[0]?.interruptReason, "cancelled");
     assert.equal(file.checkpoints?.[0]?.turnIndex, 1);
     assert.equal(file.checkpoints?.[0]?.messagesCount, 2);
+    assert.equal(file.workspaceRoot, workspaceRoot);
+    assert.equal(file.cwd, workspaceRoot);
   });
 
   it("completed → 落盘但无 checkpoint 记录(interruptReason=null 不 append)", async () => {
@@ -151,11 +155,32 @@ describe("persistChatSessionCheckpoint", () => {
         turnCount: 1,
       }),
       priorMessages: [],
+      workspaceRoot: process.cwd(),
     });
     const file = await s.load(id);
     assert.equal(file.jsonMode, true);
     assert.equal(file.turnCount, 1);
     assert.deepEqual(file.checkpoints, []);
+  });
+
+  it("fresh completed without workspaceRoot → refuse bootstrap and warn", async () => {
+    const s = await storeFor();
+    const collector = warnCollector();
+    await persistChatSessionCheckpoint({
+      store: s,
+      conversationId: "rootless-completed",
+      jsonMode: false,
+      result: buildResult({
+        stopReason: "completed",
+        messages: [userMsg("q"), assistantMsg("a")],
+        turnCount: 1,
+      }),
+      priorMessages: [],
+      warn: collector.warn,
+    });
+    assert.deepEqual(await s.list(), []);
+    assert.equal(collector.lines.length, 1);
+    assert.match(collector.lines[0]!, /workspace root is required/);
   });
 
   it("resumed-then-cancelled: 同 conversationId 二次写 → turnIndex 从既有累计(镜像 hub 约定)", async () => {
@@ -173,6 +198,7 @@ describe("persistChatSessionCheckpoint", () => {
         turnCount: 1,
       }),
       priorMessages: [],
+      workspaceRoot: process.cwd(),
     });
     let file = await s.load(id);
     assert.equal(file.turnCount, 1);
@@ -215,6 +241,7 @@ describe("persistChatSessionCheckpoint", () => {
         turnCount: 1,
       }),
       priorMessages: [],
+      workspaceRoot: process.cwd(),
     });
     await persistChatSessionCheckpoint({
       store: s,
@@ -251,6 +278,7 @@ describe("persistChatSessionCheckpoint", () => {
       }),
       priorMessages: [],
       warn: collector.warn,
+      workspaceRoot: process.cwd(),
     });
     assert.equal(collector.lines.length, 1, "必须 emit 一条 warn");
     assert.match(collector.lines[0]!, /write_failed/);
@@ -278,6 +306,7 @@ describe("persistChatSessionCheckpoint", () => {
       }),
       priorMessages: [],
       warn: collector.warn,
+      workspaceRoot: process.cwd(),
     });
     assert.equal(collector.lines.length, 0, "load 错误走静默重建,不发 warn");
     // 文件已被本 turn 成功覆盖。
@@ -312,6 +341,7 @@ describe("processChatLine checkpoint 落盘接线", () => {
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["answer"] })],
       checkpointStore: s,
+      workspaceRoot: process.cwd(),
       stateOverrides: { conversationId: "pcl-completed" },
     });
     const r = await processChatLine({ line: "q", ctx });
@@ -330,6 +360,7 @@ describe("processChatLine checkpoint 落盘接线", () => {
       responses: [assistantResult({ texts: ["never"] })],
       checkpointStore: s,
       abortController: controller,
+      workspaceRoot: process.cwd(),
       delayMs: 100,
       stateOverrides: { conversationId: "pcl-cancelled" },
     });

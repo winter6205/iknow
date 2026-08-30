@@ -70,6 +70,7 @@ async function seedGoal(id: string, goal: GoalState): Promise<void> {
     cwd: process.cwd(),
     sanitized_at: now,
     checkpoints: [],
+    workspaceRoot: process.cwd(),
     goal,
   };
   await store.save({ id, file });
@@ -102,6 +103,7 @@ function makeHub(nResponses: number): SessionHub {
   const verifyConfig: VerifyConfig = { command: "" };
   return new SessionHub({
     store,
+    workspaceRoot: process.cwd(),
     deps: makeDeps(responses),
     verifyConfig,
   });

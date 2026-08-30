@@ -95,6 +95,7 @@ import { createSkillCatalog } from "./skill/catalog.js";
 import type { SkillCatalog } from "./skill/catalog.js";
 import { loadMcpConfig } from "./mcp/config.js";
 import { createMcpManager, type McpManager } from "./mcp/manager.js";
+import { resolveMcpRoots, type McpRoots } from "./mcp/roots.js";
 import {
   createSubAgentManager,
   type SubAgentManager,
@@ -152,6 +153,13 @@ export type BuildEngineOpts = {
    * > env > cwd 的优先顺序由 resolver 层保证。
    */
   readonly workspaceRoot?: string;
+  /**
+   * T5 / worktree-mcp-rebind-lifecycle:稳定主 checkout root。`resolveMcpRoots`
+   * 由此派生 `mcpConfigRoot`；跨 rebind 不变。缺省 → 与 `workspaceRoot` 同值
+   *（T6 前 hosts 可显式传 `productRoot === workspaceRoot`；本桥保持编译与
+   * 既有单根调用可跑）。
+   */
+  readonly productRoot?: string;
   /** #337 T8 测试缝:MCP client 工厂覆盖(注入 stub,SC8 慢 connect 断言)。 */
   readonly createMcpClient?: (
     server: import("./mcp/config.js").McpServerConfig
@@ -249,6 +257,12 @@ export type BuiltEngine = {
    */
   readonly mcpManager?: McpManager;
   /**
+   * T5:本次装配解析出的双根(`workspaceRoot` + `mcpConfigRoot`)。
+   * surface === "ask" 或缺席 MCP 装配时不透出。Hub reload(T7)消费此句柄，
+   * 不得再发明 cwd/config 策略。
+   */
+  readonly mcpRoots?: McpRoots;
+  /**
    * #361 Phase D:动态 MCP 工具全量源(reg.catalog.all() 含 registerExternal
    * 追加的 mcp__* 工具;inner 冻结快照不含)。TUI deps 据此平铺
    * `{ server, tool }[]`(listMcpTools);server 名反解在 deps.ts。
@@ -344,10 +358,28 @@ export async function buildHarnessEngine(
       cwd,
       env: { [WORKSPACE_ROOT_ENV_KEY]: env.workspaceRoot },
     });
+  // T5:非 ask 表面一次 resolveMcpRoots — 同一组 roots 驱动 config /
+  // manager cwd / ACI FS root / BuiltEngine.mcpRoots。显式 sandboxRoot
+  // 不一致 → root_mismatch（fail-closed，不 spawn）。ask 跳过 resolver，
+  // 保留既有 sandboxRoot = opts.sandboxRoot ?? cwd。
+  // productRoot 缺省桥接到 workspaceRoot（T6 前 hosts 可传等值）。
+  let mcpRoots: McpRoots | undefined;
+  let sandboxRoot: string;
+  if (surface !== "ask") {
+    mcpRoots = resolveMcpRoots({
+      workspaceRoot,
+      productRoot: opts.productRoot ?? workspaceRoot,
+      ...(opts.sandboxRoot !== undefined
+        ? { expectedWorkspaceRoot: opts.sandboxRoot }
+        : {}),
+    });
+    sandboxRoot = mcpRoots.workspaceRoot;
+  } else {
+    sandboxRoot = opts.sandboxRoot ?? cwd;
+  }
   // ADR-0019 (T2): memory root 落 `<workspaceRoot>/.iknow/memory/...`
   // (per-root memory 决策)。cwd 仍作 hash 输入,项目命名空间隔离保留。
   const memoryDir = resolveProjectMemoryDir(cwd, workspaceRoot);
-  const sandboxRoot = opts.sandboxRoot ?? cwd;
   // 10 件工具集 SSOT 工厂(append-only 顺序;env.web 透传 IKNOW_WEB_PROXY /
   // IKNOW_WEB_SEARCH_URL)。proxyUrl 非法 → 装配期同步抛(见 registry.ts)。
   // #194 T6:reg 按 memoryEnabled 条件化构造 — enabled 时传 memoryDir(reg.inner 10
@@ -512,9 +544,14 @@ export async function buildHarnessEngine(
   let reg: AciRegistry | undefined;
   let mcpManager: McpManager | undefined;
   if (surface !== "ask") {
-    const config = await loadMcpConfig({ home: userHome, cwd });
+    // T5:config / manager 只消费上方一次 resolve 的 mcpRoots —— 禁止再读 cwd。
+    const config = await loadMcpConfig({
+      home: userHome,
+      mcpConfigRoot: mcpRoots!.mcpConfigRoot,
+    });
     mcpManager = (opts.createMcpManager ?? createMcpManager)({
       config: config.servers,
+      workspaceRoot: mcpRoots!.workspaceRoot,
       // 闭包捕获 reg holder — mcpManager.start() 异步触发时 reg 已赋值。
       registerExternal: (defs) => {
         if (!reg) {
@@ -881,6 +918,7 @@ export async function buildHarnessEngine(
     // listMcpTools)。全 surface 通用装配件,非 TUI 专用 — 不改变既有消费方。
     skillCatalog,
     ...(mcpManager ? { mcpManager } : {}),
+    ...(mcpRoots ? { mcpRoots } : {}),
     catalog: reg.catalog,
     // D-α T3:host 每次 run() 前调 beginRound() 拍快照(chat / hub 两处 run
     // 入口)。缺席 = 本入口没接 overlay。

@@ -127,6 +127,7 @@ async function mountAppAsync(
     });
   const bridge = createTuiBridge({
     dataDir,
+    workspaceRoot: dataDir,
     deps,
     inflight: createInflightRegistry(),
   });

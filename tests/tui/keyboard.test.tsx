@@ -86,6 +86,7 @@ async function renderMultilineApp(opts: { readonly width?: number } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-multiline-"));
   const bridge = createTuiBridge({
     dataDir,
+    workspaceRoot: dataDir,
     deps: makeDeps([assistantResult({ texts: ["多行回复"] })]),
     inflight: createInflightRegistry(),
   });
@@ -143,6 +144,7 @@ async function renderAppWithThinking() {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-kbd-"));
   const bridge = createTuiBridge({
     dataDir,
+    workspaceRoot: dataDir,
     deps: makeDeps([
       assistantResult({
         texts: ["正式回答"],
@@ -340,6 +342,7 @@ async function renderEffortApp() {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-effort-"));
   const bridge = createTuiBridge({
     dataDir,
+    workspaceRoot: dataDir,
     deps: makeDeps([assistantResult({ texts: [] })]),
     inflight: createInflightRegistry(),
   });

@@ -307,6 +307,7 @@ describe("端到端:bridge postMessage 透传 agent_status 事件", () => {
       );
       const bridge = createTuiBridge({
         dataDir: baseDir,
+        workspaceRoot: baseDir,
         // makeDeps 不带 agentStatus;显式补上 chat surface 的装配形状
         //(build-engine surface !== "ask" 时装 agentStatus,见 build-engine.ts)。
         deps: {

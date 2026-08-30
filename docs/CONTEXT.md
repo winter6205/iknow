@@ -134,14 +134,26 @@ _Avoid_: 空参数时塞中文 demo query
 **Session HTTP API** / **session-api**: Host 多会话面（`src/session-api/`，`node:http`）：create / message / command / reset；每条 message 返回 JSON；非 tool schema。
 _Avoid_: 在 Session API 之外另起前端直连；把 harness 工具逐一包成 REST
 
+**legacy archived/invalid session**: 遗留 session file 缺少或包含非法 `workspaceRoot`（包括路径边界校验失败）的分类；load/list 可以暴露该分类，但 execute 必须在 engine 前拒绝，并提示 recreate 或 bind。该分类不允许通过 cwd 回填恢复为可执行 session。
+_Avoid_: 把 legacy unbound 当作正常兼容态；静默迁移；把 archived/invalid 当成已删除
+
+**Hub dirty root**: SessionHub 按 `conversationId` 持有的待持久化 session-root rebind；仅当 harness provision 返回不同根时记录，conditional save 成功后才清除。它是保存协调状态，不是第二份 workspaceRoot 权威。
+_Avoid_: 每次 provision 都标 dirty；保存失败先清除 dirty root；让 cli/tui 绕过 Hub 直接写 session file
+
+**Hub-visible provision seam**: harness isolation 的既有 provision 契约经 SessionHub 可观察的接缝；Hub 只观察返回根并维护 dirty root，不改变 harness 的 provision contract，也不把 session worktree 变成 serve 多根。
+_Avoid_: 在 TUI 私有路径另起 provision；把 harness isolation 当 product workspace 选择；让 provision 失败静默回退
+
 **iknow serve**: CLI host，跑 Session API + 静态产品 UI（`web/dist` 优先，回退 `web/`）。
 _Avoid_: 把 frontend-only server 当生产路径但不代理 `/api`
 
-**workspace（serve 主根）**: 用户在 product SPA 选定的已存在绝对目录；Web 上唯一项目锚。绑定后三锚合一。ADR-0023：serve 缺省不是 cwd。
+**workspace（serve 主根）**: serve session 的产品项目根，来源可以是 product SPA 选定的已存在绝对目录、显式 flag/env，或当前 serve 的显式默认绑定 `<homedir>/.iknow/default`；绑定后三锚合一。ADR-0023：serve 不把进程 cwd 当作隐式主根。
 _Avoid_: 把 serve 缺省说成 `process.cwd()`；与 `workspaceRoot` 字段、`home`（global 配置锚）、`sandboxRoot` 混同
 
-**workspaceRoot**: per-root 操作状态锚（memory / sessions / tasks / settings 写回 fallback / serve data）；默认 `process.cwd()`，可被 `--workspace-root` 或 `IKNOW_WORKSPACE_ROOT` 覆盖。不含用户画像。ADR-0019 D1.1；画像根见 ADR-0025。
+**workspaceRoot**: session 绑定的 per-root 操作状态锚（memory / sessions / tasks / settings 写回 fallback / serve data）；配置解析器仍可按 ADR-0019 D1.1 以 `process.cwd()` 生成默认值，但 session 创建前必须把解析值校验并明确写入。serve 无 flag/env 时的默认绑定值是 `<homedir>/.iknow/default`。不含用户画像。画像根见 ADR-0025。
 _Avoid_: 用 workspaceRoot 当 `user.md` / `BOOTSTRAP.md` / 用户级 `AGENTS.md` / 用户 `rules/` 的物理根；把 identity seed 跟启动目录绑在一起
+
+**required workspaceRoot**: 新 session 创建时必须存在且通过校验的绝对 `workspaceRoot` 绑定；`cli chat`、`tui`、`serve` 都不能写入没有该绑定的 session file。执行阶段若绑定缺失或非法，必须在 engine 之前拒绝。
+_Avoid_: 把 resolver 的默认值当成已写入的 session 绑定；用 `process.cwd()` 回填缺失字段；把 serve 的 `~/.iknow/default` 默认绑定称为 unbound
 
 **user.md**: 全局用户画像，唯一落点 `~/.iknow/user.md`（测试缝 = `userHome/.iknow/user.md`）；每 turn 注入 `user_profile` 段，改文件下一轮生效。ADR-0025。
 _Avoid_: 项目 `.iknow/user.md`；per-root persona；把画像当成 workspace 状态
@@ -152,8 +164,8 @@ _Avoid_: 把 `<workspaceRoot>/.iknow/AGENTS.md` 当作用户级层；把用户�
 **BOOTSTRAP.md**: 首启引导种子，与 `user.md` 同根（`~/.iknow/BOOTSTRAP.md`）；文件存在则注入 bootstrap 段，agent 删除该文件即完成。`state.json.bootstrap_seeded` 只防止重复 seed，不是完成条件。
 _Avoid_: 每个仓库一份 BOOTSTRAP；用 workspaceRoot 下的 BOOTSTRAP.md 当引导；把 bootstrap_seeded=true 当成「用户已填完画像」
 
-**unbound**: serve hub 尚未绑定主根。此时不得 buildHarnessEngine 用进程 cwd，不得 postMessage。
-_Avoid_: unbound 时 buildHarnessEngine 或 postMessage；把 unbound 说成「默认 cwd」
+**unbound**: 没有可校验 `workspaceRoot` 的过渡或遗留无效状态，不是正常产品状态。创建必须拒绝；execute 必须在 engine 前 typed reject；legacy session 进入 archived/invalid 分类。serve 当前无 flag/env 时绑定 `<homedir>/.iknow/default`，不属于 unbound。
+_Avoid_: unbound 时 buildHarnessEngine 或 postMessage；把 unbound 说成「默认 cwd」；用 cwd 回填 legacy session
 
 **product SPA (web/)**: Vite + React + TypeScript chat console；同源 Session client；JSON 侧栏。
 _Avoid_: 零依赖静态壳当产品；展示层省略 trace 字段
@@ -212,8 +224,11 @@ _Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 
 **前景 spawn / 后景 spawn**: `spawn_subagent` 的两种结果契约（#361 裁决，ADR-0014）——前景（`wait:true`，默认）= handler 同步等 worker 到终态、envelope 直接作 tool_result 返回，当回合闭环；后景（`wait:false`，显式选项）= 立即返回 task_id，结果经 host 唤醒/drain 通道回传。worker 恒为独立进程，与前景/后景正交。
 _Avoid_: 把前景/后景与进程隔离混同；泛化的"同步/异步"；把 V1"立即返回 task_id"当默认契约（已被反转）
 
-**host drain**: host 侧把 completed 子代理 envelope 浓缩成一条消息、注入下一轮 run() priorMessages 的机制（#356 V1，`src/harness/subagent/host-drain.ts`）；只 drain completed，不修改 buffer 状态。#361 裁决后仅在异步臂（`wait:false`）生效，且须阻塞轮询至至少一个 worker 到终态；终态被 V2 事件驱动唤醒取代。
-_Avoid_: 把 drain 与"结果获取"混同（前景 spawn 不经 drain）；让 agent 侧直接消费 manager buffer；把 drain 被动挂"下一轮用户输入"当作可靠唤醒源
+**host drain**: host 把 completed 子代理的父可见信封浓缩成一条带固定前缀的消息、拼进下一次 `run()` 的 priorMessages；只读 buffer、不改状态。后景臂下：已有终态则立刻浓缩；仅 running 则立刻空返。叫醒主模型靠 mailbox，不靠用户再打一行，也不靠在 `run()` 边界空转等待。
+_Avoid_: 把 drain 与"结果获取"混同（前景 spawn 不经 drain）；让 agent 侧直接消费 manager buffer；把 drain 被动挂"下一轮用户输入"或阻塞轮询当作可靠唤醒源
+
+**mailbox**: 后景 spawn 的子→父终态回传通道。只投终态浓缩结果，不承载运行中消息，也不是子↔子协议。
+_Avoid_: 进度流；swarm / 子代理互投；把 mailbox 当 D-δ 低层 messaging
 
 **父可见信封**: 子代理交差给父模型看的那一层——短摘要、改过的路径、成败与停因；不是终稿全文，也不是磁盘上的代码。
 _Avoid_: 把完整 result 当任务产物；把汇报截断当成任务失败
@@ -301,6 +316,12 @@ _Avoid_: 默认 ON；把 git worktree 混成 serve 主根或 `workspaceRoot` 多
 
 **session worktree rebind**: worktree isolation mode ON 下首次 mutate 成功后，把**当前会话**生效的根锚（cwd / `workspaceRoot` 取值）切到本会话 task worktree 的动作；只影响本会话——不 checkout 其它会话 / 其它 worktree 的 HEAD，push / 开 PR 不拖动主仓或其它 worktree 当前分支。同会话并发首次 mutate 建树幂等（一棵树、一个 task 分支）。ADR-0037。
 _Avoid_: 改绑波及其它会话；把 rebind 当 serve 主根重绑（ADR-0023 unbound / recents 语义不变）；让 rebind 触发 settings 重载；把改绑后的根错当成 product workspace 多根
+
+**productRoot**: 每个产品入口首次装配确定的稳定主 checkout root；session worktree rebind 后保持不变，不随当前 task worktree 改写。
+_Avoid_: workspaceRoot；task worktree root；product workspace 多根
+
+**mcpConfigRoot**: 由 productRoot 派生、跨 session worktree rebind 保持稳定的 MCP 配置根；只读取 `<mcpConfigRoot>/.iknow/mcp.json`，不切换到 task worktree。
+_Avoid_: workspaceRoot；task worktree；process.cwd()
 
 ## Relationships
 

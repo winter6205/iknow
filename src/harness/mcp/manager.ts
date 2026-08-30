@@ -23,6 +23,8 @@
  * 不用 schema-normalize：见 D1 探针结论 + spec 假设 9（ajv strict × MCP
  * inputSchema 三组形态全 PASS）。registerExternal 走 T1 已有的 ajv 实例。
  */
+import path from "node:path";
+
 import {
   Client as SdkClient,
   type CallToolResult as SdkCallToolResult,
@@ -31,7 +33,7 @@ import {
   type Tool as SdkTool,
 } from "@modelcontextprotocol/client";
 import { StdioClientTransport as SdkStdioTransport } from "@modelcontextprotocol/client/stdio";
-import { ToolExecutionError, errorMessage } from "../errors.js";
+import { McpLifecycleError, ToolExecutionError, errorMessage } from "../errors.js";
 import type { AciToolDef } from "../aci/types.js";
 import { toAciToolDef } from "./adapter.js";
 import type { McpServerConfig, McpStdioServer } from "./config.js";
@@ -162,9 +164,22 @@ export interface McpClientHandle {
   ) => Promise<{ readonly contents: readonly SdkResourceContents[] }>;
 }
 
+/** createClient / createRealClient 共用的 stdio transport 参数。 */
+export interface McpTransportOpts {
+  /** stdio 子进程 cwd（= resolver 返回的 workspaceRoot）。 */
+  readonly cwd: string;
+}
+
 export interface McpManagerOptions {
   /** T3 产物的两级合并 server 列表。 */
   readonly config: readonly McpServerConfig[];
+  /**
+   * T4 — resolver 返回的当前 session/task root。stdio child 的 cwd，
+   * 也是 MCP 工具 FS root。缺席 / 空白 / 非绝对 → 构造期抛
+   * `McpLifecycleError`（`missing_cwd` / `invalid_cwd`），绝不回退
+   * `process.cwd()`。
+   */
+  readonly workspaceRoot: string;
   /** T1 的 registerExternal 缝，把 mcp__ 工具追加进 ACI registry。 */
   readonly registerExternal: (defs: readonly AciToolDef[]) => void;
   /**
@@ -180,8 +195,14 @@ export interface McpManagerOptions {
   readonly timeoutMsOverride?: number;
   /** 工具调用超时（adapter 把 tier=long 映射到 30 min，这里给单测覆盖口）。 */
   readonly callTimeoutMsOverride?: number;
-  /** 抽象 client 工厂；测试覆盖；生产 = `createRealClient`。 */
-  readonly createClient?: (server: McpServerConfig) => McpClientHandle;
+  /**
+   * 抽象 client 工厂；测试覆盖；生产 = `createRealClient`。
+   * 第二参 `transport.cwd` 恒等于 manager 持有的 `workspaceRoot`。
+   */
+  readonly createClient?: (
+    server: McpServerConfig,
+    transport: McpTransportOpts
+  ) => McpClientHandle;
 }
 
 export interface McpManager {
@@ -255,11 +276,19 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 60_000;
 const DEFAULT_CALL_TIMEOUT_MS = 1_800_000; // long 档（参见 aci/types.ts TIMEOUT_TIER_MS）
 
 export function createMcpManager(opts: McpManagerOptions): McpManager {
+  const workspaceRoot = requireWorkspaceRoot(opts.workspaceRoot);
   const timeoutMs = opts.timeoutMsOverride ?? DEFAULT_CONNECT_TIMEOUT_MS;
   const callTimeoutMs = opts.callTimeoutMsOverride ?? DEFAULT_CALL_TIMEOUT_MS;
 
   /** 按 name 索引 slot。 */
   const slots = new Map<string, Slot>();
+
+  /**
+   * 生命周期代数：shutdown / reload 入口递增。bootSlot 捕获启动时的代数，
+   * 迟到的 connect/listTools/list_changed 若代数已变 → 跳过注册与 flip-back
+   * （T4：late connect 不能越过已终结的 manager 生命周期）。
+   */
+  let bootGeneration = 0;
 
   /**
    * 按 config 重置 slots —— 构造器 + reload 共用（reload 先 await
@@ -334,25 +363,38 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
 
   /** 后台启动某一个 server。 */
   function bootSlot(slot: Slot): Promise<void> {
-    const created = opts.createClient
-      ? opts.createClient(slot.config)
-      : createRealClient(slot.config);
+    const gen = bootGeneration;
+    const transportOpts: McpTransportOpts = { cwd: workspaceRoot };
+    let created: McpClientHandle;
+    try {
+      created = opts.createClient
+        ? opts.createClient(slot.config, transportOpts)
+        : createRealClient(slot.config, transportOpts);
+    } catch (err) {
+      // EXIT: spawn/factory throw → typed failed slot; start() must not hang or reject
+      markFailed(slot, errorMessage(err));
+      return Promise.resolve();
+    }
     slot.handle = created;
     slot.callAbort = new AbortController();
 
     const timeoutHandle = setTimeout(() => {
       // 超时先设标记再标 failed：bootSlot 靠它判断"迟到成功可否翻回"（#378）。
       // 真抛错路径不设此标记 —— 失败即定型，不翻。
+      // 生命周期已终结（shutdown/reload）则跳过：避免把已 failed 槽再写超时残因。
+      if (gen !== bootGeneration) return;
       slot.timedOut = true;
       markFailed(slot, "connect timeout");
     }, timeoutMs);
 
     // 注册 onclose → failed（不重连）。list_changed → 增量重注册。
     created.onClose(() => {
+      if (gen !== bootGeneration) return;
       if (slot.state !== "connected") return;
       markFailed(slot, "connection closed by server");
     });
     created.onListChanged((tools) => {
+      if (gen !== bootGeneration) return;
       if (slot.state !== "connected") return;
       try {
         registerTools(slot, tools);
@@ -371,7 +413,13 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
         await created.connect();
       } catch (err) {
         clearTimeout(timeoutHandle);
+        if (gen !== bootGeneration) return;
         markFailed(slot, errorMessage(err));
+        return;
+      }
+      // 生命周期已终结：迟到 connect 不得继续 listTools / 注册 / flip-back。
+      if (gen !== bootGeneration) {
+        clearTimeout(timeoutHandle);
         return;
       }
       // connect 期间可能已被超时器标 failed。仅"超时后迟到成功"允许继续走
@@ -388,6 +436,7 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
       try {
         const tools = await created.listTools();
         clearTimeout(timeoutHandle);
+        if (gen !== bootGeneration) return;
         if (slot.state !== "pending") {
           // 超时后迟到成功：同一 bootSlot 任务内翻回 connected。
           // registerTools 由 `registered` 集合去重，重复调用幂等。
@@ -405,6 +454,7 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
         slot.state = "connected";
       } catch (err) {
         clearTimeout(timeoutHandle);
+        if (gen !== bootGeneration) return;
         markFailed(slot, errorMessage(err));
       }
     })();
@@ -447,6 +497,8 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
   }
 
   async function shutdown(): Promise<void> {
+    // 先递增代数，阻断一切在途 bootSlot / list_changed 的迟到注册。
+    bootGeneration += 1;
     const tasks: Promise<void>[] = [];
     for (const slot of slots.values()) {
       if (slot.state === "disabled") continue;
@@ -669,8 +721,14 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
  * 仅 stdio 走此路径；remote (url) 暂不实现，registerTo 时 manager 应当
  * 过滤掉 remote，或上层装配层把 remote 视为 disabled（spec 假设 9 + T7
  * 验收 bound）。
+ *
+ * `opts.cwd` 是 stdio 子进程工作目录（= manager 的 workspaceRoot）；相对
+ * command / 相对 args 路径均相对此根解析，不继承 `process.cwd()`。
  */
-export function createRealClient(server: McpServerConfig): McpClientHandle {
+export function createRealClient(
+  server: McpServerConfig,
+  opts: McpTransportOpts
+): McpClientHandle {
   if (server.kind !== "stdio") {
     throw new Error(
       `createRealClient: only stdio is wired up, got kind=${server.kind} for server '${server.name}'`
@@ -687,6 +745,7 @@ export function createRealClient(server: McpServerConfig): McpClientHandle {
     env: (server as McpStdioServer).entry.env
       ? { ...(server as McpStdioServer).entry.env }
       : undefined,
+    cwd: opts.cwd,
     stderr: "pipe",
   });
 
@@ -816,6 +875,44 @@ export function createRealClient(server: McpServerConfig): McpClientHandle {
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+/**
+ * 构造期校验 manager 的 workspaceRoot。缺席 → `missing_cwd`；空白 / 非绝对
+ * / 含 NUL → `invalid_cwd`。不做 process.cwd() 回退；规范化与 roots.ts 同形
+ * （manager 只消费已解析的 workspaceRoot，不引入 productRoot）。
+ */
+function requireWorkspaceRoot(value: string | undefined): string {
+  if (typeof value !== "string") {
+    throw new McpLifecycleError(
+      "missing_cwd",
+      "workspaceRoot is required and was not provided"
+    );
+  }
+  const trimmed = value.trim();
+  if (trimmed === "" || trimmed.includes("\0")) {
+    throw new McpLifecycleError(
+      "invalid_cwd",
+      "workspaceRoot must be a normalizable absolute path"
+    );
+  }
+  const normalized = path.normalize(trimmed);
+  if (!path.isAbsolute(normalized)) {
+    throw new McpLifecycleError(
+      "invalid_cwd",
+      "workspaceRoot must be an absolute path"
+    );
+  }
+  // 去掉结尾分隔符，但保留文件系统根本身。
+  const { root } = path.parse(normalized);
+  let out = normalized;
+  while (
+    out.length > root.length &&
+    (out.endsWith(path.sep) || out.endsWith("/"))
+  ) {
+    out = out.slice(0, -1);
+  }
+  return out;
+}
 
 function sanitize(value: string): string {
   return value.replace(/[^A-Za-z0-9_]/g, "_");

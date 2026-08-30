@@ -54,6 +54,7 @@ async function mountAppAsync(
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-cursor-move-"));
   const bridge = createTuiBridge({
     dataDir,
+    workspaceRoot: dataDir,
     deps: makeDeps(responses),
     inflight: createInflightRegistry(),
   });

@@ -303,6 +303,20 @@ describe("spawn_subagent — AciToolDef 元数据", () => {
     expect(timeoutDesc).toMatch(/2\s*h/i);
   });
 
+  it("wait schema describes terminal wake as the async completion path", () => {
+    const { manager } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    const schema = tool.inputSchema as {
+      properties: Record<string, { description?: string }>;
+    };
+    const waitDescription = schema.properties.wait?.description ?? "";
+
+    expect(waitDescription).toMatch(/terminal completion/i);
+    expect(waitDescription).toMatch(/silent run/i);
+    expect(waitDescription).toMatch(/explicit status query/i);
+    expect(waitDescription).not.toMatch(/poll with subagent_result/i);
+  });
+
   it("#357 T1: inputSchema 含 sandboxRoot 字段(string,可选)", () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
@@ -391,6 +405,25 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
     expect(description).not.toMatch(/sole ground truth|ground truth/i);
     expect(description).not.toMatch(/full result envelope/i);
     expect(description).not.toMatch(/Fork|worktree/i);
+  });
+
+  it("wait:false → chat/tui/serve rely on terminal wake, not polling, while wait:true wording stays blocking", () => {
+    const waitFalseStart = description.indexOf("Pass `wait:false`");
+    const capacityStart = description.indexOf("At most", waitFalseStart);
+    const waitFalseGuidance = description.slice(
+      waitFalseStart,
+      capacityStart
+    );
+
+    expect(waitFalseGuidance).toMatch(/mailbox/i);
+    expect(waitFalseGuidance).toMatch(/subscribe/i);
+    expect(waitFalseGuidance).toMatch(/silent run/i);
+    expect(waitFalseGuidance).toMatch(/chat\/tui\/serve/i);
+    expect(waitFalseGuidance).toMatch(/primary completion path/i);
+    expect(waitFalseGuidance).not.toMatch(/poll later/i);
+    expect(description).toContain(
+      "Default `wait:true` — the call blocks until the sub-agent finishes"
+    );
   });
 
   it("不写入嵌套政策(nested / one level / caps at 等措辞)", () => {

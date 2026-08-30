@@ -73,6 +73,10 @@ trace 为 ground truth）实测发现两个叠加问题：
 - 回退 = `wait` 默认值反转回异步 + 恢复 drain 被动注入；引导层与验收断言
   独立于该回退。
 
+## Amendment (2026-08-29)
+
+事件驱动唤醒不再是本 ADR 的暂缓项。默认契约仍是前景 spawn；后景臂在 chat / tui / serve 经 mailbox 终态投递，由 host 自发起 `run()` 注入 host drain 浓缩结果。ask 不装配该通道。`run()` 边界不再为「至少一个终态」阻塞轮询。范围与切片见 `plans/subagent-cancel-wait.md`。
+
 ## Evidence pointers
 
 - issue #361 — 实测证据（4 次 e2e trace 0 spawn、幻觉报告）与根因分析。

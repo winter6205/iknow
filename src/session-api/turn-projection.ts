@@ -17,7 +17,7 @@ import type {
 } from "../harness/index.js";
 import { isAgentStatusText } from "../harness/agent-status.js";
 import { isSubagentDrainText } from "../harness/subagent/host-drain.js";
-import type { ThinkingView, ToolCallView } from "./contract.js";
+import type { ActivityItem, ThinkingView, ToolCallView } from "./contract.js";
 
 /**
  * Joined text of a message's text blocks (" "-separated; "" when none).
@@ -209,6 +209,205 @@ function buildToolCallViews(
     }
   }
   return foundUse ? views : undefined;
+}
+
+type ActivityDraft =
+  | { readonly type: "text"; readonly text: string }
+  | {
+      readonly type: "tool";
+      readonly id: string;
+      readonly name: string;
+      readonly input: unknown;
+    };
+
+type ToolResultView = { readonly text: string; readonly isError: boolean };
+
+/**
+ * Project assistant text and tool_use blocks in native block order.
+ *
+ * `tool_result` blocks are collected separately because they normally arrive
+ * in a later user message. Runtime validation is intentionally defensive:
+ * this is a display projection and malformed persisted data must not prevent
+ * the rest of a session from being rendered.
+ */
+export function projectActivity(
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  mask: TextMask
+): readonly ActivityItem[] {
+  // EXIT: malformed/non-array or empty input has no activity to project.
+  if (!Array.isArray(messages) || messages.length === 0) return [];
+  const { drafts, resultsById } = scanActivityMessages(messages);
+  return mapActivityDrafts(drafts, resultsById, mask);
+}
+
+type ActivityScan = {
+  readonly drafts: readonly ActivityDraft[];
+  readonly resultsById: ReadonlyMap<string, ToolResultView>;
+};
+
+function scanActivityMessages(messages: ReadonlyArray<unknown>): ActivityScan {
+  const drafts: ActivityDraft[] = [];
+  const resultsById = new Map<string, ToolResultView>();
+  for (const rawMessage of messages) {
+    scanActivityMessage(rawMessage, drafts, resultsById);
+  }
+  return { drafts, resultsById };
+}
+
+function scanActivityMessage(
+  rawMessage: unknown,
+  drafts: ActivityDraft[],
+  resultsById: Map<string, ToolResultView>
+): void {
+  try {
+    if (!isRecord(rawMessage) || !Array.isArray(rawMessage.content)) return;
+    scanActivityBlocks(
+      rawMessage.content,
+      rawMessage.role === "assistant",
+      drafts,
+      resultsById
+    );
+  } catch {
+    // EXIT: skip a malformed message while preserving other activity.
+  }
+}
+
+function scanActivityBlocks(
+  blocks: readonly unknown[],
+  isAssistant: boolean,
+  drafts: ActivityDraft[],
+  resultsById: Map<string, ToolResultView>
+): void {
+  for (const rawBlock of blocks) {
+    if (!isRecord(rawBlock)) continue;
+    const block = rawBlock;
+    if (block.type === "tool_result") {
+      collectActivityToolResult(block, resultsById);
+      continue;
+    }
+    if (!isAssistant) continue;
+    const draft = toActivityDraft(block);
+    if (draft !== undefined) drafts.push(draft);
+  }
+}
+
+function toActivityDraft(
+  block: Record<string, unknown>
+): ActivityDraft | undefined {
+  if (block.type === "text") {
+    if (typeof block.text !== "string" || block.text.length === 0) {
+      // EXIT: skip empty or malformed text block.
+      return undefined;
+    }
+    return { type: "text", text: block.text };
+  }
+  if (block.type === "tool_use") {
+    if (!isValidActivityToolUse(block)) {
+      // EXIT: skip malformed tool_use.
+      return undefined;
+    }
+    return {
+      type: "tool",
+      id: block.id,
+      name: block.name,
+      input: block.input,
+    };
+  }
+  // EXIT: skip unknown block.
+  return undefined;
+}
+
+function isValidActivityToolUse(
+  block: Record<string, unknown>
+): block is Record<string, unknown> & {
+  readonly id: string;
+  readonly name: string;
+  readonly input: unknown;
+} {
+  return (
+    typeof block.id === "string" &&
+    block.id.length > 0 &&
+    typeof block.name === "string" &&
+    block.name.length > 0 &&
+    Object.prototype.hasOwnProperty.call(block, "input") &&
+    block.input !== undefined
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function mapActivityDrafts(
+  drafts: readonly ActivityDraft[],
+  resultsById: ReadonlyMap<string, ToolResultView>,
+  mask: TextMask
+): readonly ActivityItem[] {
+  return drafts.map((draft): ActivityItem => {
+    if (draft.type === "text") {
+      return { type: "text", text: mask(draft.text) };
+    }
+    const result = resultsById.get(draft.id);
+    // EXIT: tool without result is still emitted with an empty output preview.
+    return {
+      type: "tool",
+      tool: buildActivityToolView(draft, result, mask),
+    };
+  });
+}
+
+function collectActivityToolResult(
+  block: Record<string, unknown>,
+  resultsById: Map<string, ToolResultView>
+): void {
+  try {
+    if (
+      typeof block.tool_use_id !== "string" ||
+      block.tool_use_id.length === 0
+    ) {
+      // EXIT: unpaired tool_result ignored.
+      return;
+    }
+    if (resultsById.has(block.tool_use_id)) {
+      // EXIT: duplicate tool_result ignored.
+      return;
+    }
+    resultsById.set(block.tool_use_id, {
+      text: toolResultText(block.content),
+      isError: block.is_error === true,
+    });
+  } catch {
+    // EXIT: malformed tool_result ignored.
+  }
+}
+
+function buildActivityToolView(
+  draft: Extract<ActivityDraft, { type: "tool" }>,
+  result: ToolResultView | undefined,
+  mask: TextMask
+): ToolCallView {
+  const inputJson = serializeToolInput(draft.input);
+  const inputPreview = truncate(mask(inputJson), MAX_TOOL_INPUT_PREVIEW_CHARS);
+  const rawOutput = result === undefined ? "" : mask(result.text);
+  return {
+    id: draft.id,
+    name: draft.name,
+    inputPreview,
+    outputPreview: truncate(rawOutput, MAX_TOOL_OUTPUT_PREVIEW_CHARS),
+    isError: result?.isError ?? false,
+    truncated: rawOutput.length > MAX_TOOL_OUTPUT_PREVIEW_CHARS,
+  };
+}
+
+const TOOL_INPUT_PREVIEW_EXIT = "// EXIT: tool input preview unavailable";
+
+function serializeToolInput(input: unknown): string {
+  try {
+    return JSON.stringify(input) ?? TOOL_INPUT_PREVIEW_EXIT;
+  } catch {
+    // EXIT: unserializable tool input gets an explicit safe preview marker.
+    return TOOL_INPUT_PREVIEW_EXIT;
+  }
 }
 
 // -- #604 T1: 任务摘录（compact 边界现抽现贴） -------------------------------

@@ -18,6 +18,10 @@ import {
 } from "./envelope.js";
 import type { SubAgentEnvelope, WorkerEnvelope } from "./envelope.js";
 import type { SubAgentDefinition } from "./role.js";
+import {
+  createSubAgentMailbox,
+  type SubAgentMailbox,
+} from "./mailbox.js";
 import { SubAgentSandboxRootError } from "../errors.js";
 import type {
   TraceService,
@@ -84,8 +88,8 @@ export interface SubAgentManager {
   ) => Promise<SubAgentEnvelope>;
   /** abort in-flight + SIGTERM 子孙 + ≥5s 兜底 SIGKILL(SC12)。 */
   readonly shutdown: () => Promise<void>;
-  /** T7 host-drain 需要的最小只读枚举:返回当前 buffer 内 completed 任务列表。 */
-  readonly drainCompleted: () => ReadonlyArray<{
+  /** T7 host-drain 需要的最小只读枚举:返回当前 buffer 内终态任务列表。 */
+  readonly drainCompleted: (conversationId?: string) => ReadonlyArray<{
     readonly taskId: string;
     readonly envelope: SubAgentEnvelope;
   }>;
@@ -107,6 +111,11 @@ export interface SubAgentManager {
    * 语义决策。taskPreview 截断 ≤120 见 SubagentInfo 注释。
    */
   readonly listSubagents: () => ReadonlyArray<SubagentInfo>;
+  /**
+   * T3: notify the host when a terminal result is available. The notification
+   * contains only immutable handoff facts; the manager buffer remains intact.
+   */
+  readonly subscribe: SubAgentMailbox["subscribe"];
 }
 
 /** spawn DI 工厂签名:由调用方注入(fake 测试 / 生产 defaultSubAgentSpawn)。 */
@@ -388,6 +397,7 @@ export function createSubAgentManager(opts: {
   const waitPollers = new Set<ReturnType<typeof setInterval>>();
   /** 未决 waitFor 的 settleReject 引用:shutdown 时主动拒绝,SC16 不悬挂。 */
   const waitRejecters = new Set<(reason: unknown) => void>();
+  const terminalMailbox = createSubAgentMailbox();
   /** #358 T4: trace 句柄 closure 捕获, spawn/state_change/stop 三处共用。 */
   const trace = opts.trace;
   const maxConcurrentWorkers =
@@ -461,6 +471,36 @@ export function createSubAgentManager(opts: {
   ): void {
     if (task.stoppedEmitted) return;
     task.stoppedEmitted = true;
+    if (
+      task.envelope !== undefined &&
+      task.def.excludeFromHostDrain !== true
+    ) {
+      const envelope = task.envelope;
+      terminalMailbox.publish({
+        taskId: task.id,
+        ...(task.def.conversationId !== undefined
+          ? { conversationId: task.def.conversationId }
+          : {}),
+        status: envelope.status,
+        summary: envelope.summary,
+        result: envelope.result,
+        ...(envelope.fileRefs !== undefined
+          ? { fileRefs: envelope.fileRefs }
+          : {}),
+        ...(envelope.reason !== undefined
+          ? { reason: envelope.reason }
+          : {}),
+        ...(envelope.stop_reason !== undefined
+          ? { stop_reason: envelope.stop_reason }
+          : {}),
+        ...(envelope.truncated !== undefined
+          ? { truncated: envelope.truncated }
+          : {}),
+        ...(envelope.totalLength !== undefined
+          ? { totalLength: envelope.totalLength }
+          : {}),
+      });
+    }
     const endedAt = new Date().toISOString();
     // #358 T7: 终态 ISO 随 single-emit 锁存一次 (listSubagents 读它当 endedAt)。
     task.endedAt = endedAt;
@@ -1171,18 +1211,21 @@ export function createSubAgentManager(opts: {
 
     // 4. 清空 tasks map。
     tasks.clear();
+    terminalMailbox.clear();
   }
 
-  function drainCompleted(): ReadonlyArray<{
+  function drainCompleted(conversationId?: string): ReadonlyArray<{
     readonly taskId: string;
     readonly envelope: SubAgentEnvelope;
   }> {
     const out: { taskId: string; envelope: SubAgentEnvelope }[] = [];
     for (const [id, task] of tasks) {
       if (
-        task.state === "completed" &&
+        (task.state === "completed" || task.state === "failed") &&
         task.envelope &&
-        task.def.excludeFromHostDrain !== true
+        task.def.excludeFromHostDrain !== true &&
+        (conversationId === undefined ||
+          task.def.conversationId === conversationId)
       ) {
         out.push({ taskId: id, envelope: task.envelope });
       }
@@ -1199,5 +1242,6 @@ export function createSubAgentManager(opts: {
     listActive,
     abortTask,
     listSubagents,
+    subscribe: terminalMailbox.subscribe,
   });
 }

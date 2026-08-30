@@ -31,6 +31,7 @@ import { createStubModel } from "../../src/harness/stubs/stub-model.js";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.js";
 import type { LoopState } from "../../src/harness/model-adapter/types.js";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.js";
+import type { SubAgentTerminalNotice } from "../../src/harness/subagent/mailbox.js";
 import {
   MINIMAL_SDK_MESSAGE,
   makeTestLlmEnv,
@@ -76,6 +77,7 @@ describe("hub-bridge lazy create（SC 1）", () => {
     const inflight = createInflightRegistry();
     return createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: makeDeps(responses),
       inflight,
     });
@@ -100,6 +102,20 @@ describe("hub-bridge lazy create（SC 1）", () => {
     expect(await bridge.ensureSession(id)).toBe(id);
   });
 
+  test("ensureSession(undefined) persists the bridge workspaceRoot", async () => {
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      workspaceRoot: baseDir,
+      deps: makeDeps([]),
+      inflight: createInflightRegistry(),
+    });
+
+    const id = await bridge.ensureSession(undefined);
+    const file = await bridge.loadSessionFile(id);
+    expect(file.workspaceRoot).toBe(baseDir);
+    expect(file.cwd).toBe(baseDir);
+  });
+
   test("ensureSession(已建档 id) → 原样返回，不新建", async () => {
     const bridge = makeBridge([]);
     const created = await bridge.hub.createSession();
@@ -122,6 +138,7 @@ describe("hub-bridge postMessage", () => {
     const inflight = createInflightRegistry();
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: makeDeps([assistantResult({ texts: ["你好，世界"] })]),
       inflight,
     });
@@ -145,6 +162,7 @@ describe("hub-bridge postMessage", () => {
     const inflight = createInflightRegistry();
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: makeDeps([]),
       inflight,
     });
@@ -157,6 +175,7 @@ describe("hub-bridge postMessage", () => {
   test("listSessions 代理 store.list()（过滤空会话）", async () => {
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: makeDeps([assistantResult({ texts: ["答复"] })]),
       inflight: createInflightRegistry(),
     });
@@ -210,6 +229,7 @@ describe("hub-bridge postMessage lastUsage（T3）", () => {
     };
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: makeDeps([assistantResult({ texts: ["你好"], usage })]),
       inflight: createInflightRegistry(),
     });
@@ -228,6 +248,7 @@ describe("hub-bridge postMessage lastUsage（T3）", () => {
   test("wire 无 lastUsage → null（等价 RunResult.lastUsage=null 语义）", async () => {
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: makeDeps([assistantResult({ texts: ["你好"] })]),
       inflight: createInflightRegistry(),
     });
@@ -254,6 +275,7 @@ describe("hub-bridge compactSession（/compact）", () => {
     // 4 个 assistant 应答 → 8 条消息 > DEFAULT_KEEP_RECENT=6 → 实际压缩。
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: makeDeps(
         Array.from({ length: 4 }, (_, i) =>
           assistantResult({ texts: [`answer ${i}`] })
@@ -278,6 +300,7 @@ describe("hub-bridge compactSession（/compact）", () => {
   test("missing session → 抛错（not_found 透传）", async () => {
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: makeDeps([]),
       inflight: createInflightRegistry(),
     });
@@ -290,6 +313,7 @@ describe("hub-bridge compactSession（/compact）", () => {
   test("opts.signal / opts.onStream 透传到 hub(返回 boolean 不变)", async () => {
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: makeDeps(
         Array.from({ length: 4 }, (_, i) =>
           assistantResult({ texts: [`answer ${i}`] })
@@ -317,6 +341,7 @@ describe("hub-bridge compactSession（/compact）", () => {
   test("pre-aborted signal → compacted=false,会话保持原样", async () => {
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: makeDeps(
         Array.from({ length: 4 }, (_, i) =>
           assistantResult({ texts: [`answer ${i}`] })
@@ -357,13 +382,14 @@ describe("hub-bridge continueSession（T4 /continue）", () => {
       schemaVersion: CURRENT_SCHEMA_VERSION,
       conversation_id: id,
       title: "do",
-      cwd: "/tmp/proj",
+      cwd: baseDir,
       sanitized_at: new Date().toISOString(),
       messages: [...messages],
       jsonMode: false,
       turnCount: 1,
       updatedAt: new Date().toISOString(),
       checkpoints: [],
+      workspaceRoot: baseDir,
     };
   }
 
@@ -373,6 +399,7 @@ describe("hub-bridge continueSession（T4 /continue）", () => {
     const inflight = createInflightRegistry();
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: {
         ...inner,
         adapter: {
@@ -406,6 +433,7 @@ describe("hub-bridge continueSession（T4 /continue）", () => {
     const inflight = createInflightRegistry();
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: {
         ...inner,
         adapter: {
@@ -477,6 +505,7 @@ describe("hub-bridge subagentManager 透传（#365 T3）", () => {
       ],
       // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
       listSubagents: () => [],
+      subscribe: () => () => {},
     };
 
     const seen: LoopState[] = [];
@@ -494,6 +523,7 @@ describe("hub-bridge subagentManager 透传（#365 T3）", () => {
 
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: { ...makeDeps([]), adapter: capAdapter },
       inflight: createInflightRegistry(),
       subagentManager: fakeMgr,
@@ -512,7 +542,83 @@ describe("hub-bridge subagentManager 透传（#365 T3）", () => {
       )
       .join("\n");
     expect(joined).toContain("## Sub-agent t3-task result: t3 fake subagent");
-    expect(joined).toContain("t3 body");
+    expect(joined).toContain("t3 fake subagent");
+  });
+
+  test("terminal wake runs silently and does not create typed input history", async () => {
+    let completed: ReadonlyArray<{
+      readonly taskId: string;
+      readonly envelope: {
+        readonly status: "ok";
+        readonly summary: string;
+        readonly result: string;
+      };
+    }> = [];
+    let subscriber: ((notice: SubAgentTerminalNotice) => void) | undefined;
+    const manager = {
+      spawn: () => ({ taskId: "wake-task" }),
+      queryBuffer: () => ({ status: "not_found" as const }),
+      waitFor: async () => {
+        throw new Error("unused");
+      },
+      shutdown: async () => {},
+      drainCompleted: () => completed,
+      listActive: () => [],
+      abortTask: () => false,
+      listSubagents: () => [],
+      subscribe: (listener: (notice: SubAgentTerminalNotice) => void) => {
+        subscriber = listener;
+        return () => {
+          subscriber = undefined;
+        };
+      },
+    } as SubAgentManager;
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      workspaceRoot: baseDir,
+      deps: makeDeps([assistantResult({ texts: ["woken"] })]),
+      inflight: createInflightRegistry(),
+      subagentManager: manager,
+    });
+    const id = await bridge.ensureSession(undefined);
+    completed = [
+      {
+        taskId: "wake-task",
+        envelope: {
+          status: "ok",
+          summary: "done",
+          result: "result",
+        },
+      },
+    ];
+    subscriber?.({
+      taskId: "wake-task",
+      status: "ok",
+      summary: "done",
+      result: "result",
+    });
+
+    const result = await bridge.wakeFromSubagent(id);
+
+    expect(result?.finalText).toBe("woken");
+    const file = await bridge.loadSessionFile(id);
+    const drain = file.messages.find((message) =>
+      message.content.some(
+        (block) =>
+          block.type === "text" &&
+          block.text.startsWith("## Sub-agent wake-task result:")
+      )
+    );
+    expect(drain).toBeDefined();
+    expect(
+      file.messages
+        .filter((message) => message.role === "user")
+        .some((message) =>
+          message.content.some(
+            (block) => block.type === "text" && block.text === "woken"
+          )
+        )
+    ).toBe(false);
   });
 });
 
@@ -545,6 +651,7 @@ describe("hub-bridge postMessage thinking 透传（T2）", () => {
     const inflight = createInflightRegistry();
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: makeDeps([]),
       inflight,
       // overrideEnv 与 run.tsx 同款透传：override 重建 adapter 时使用该 env，
@@ -573,6 +680,7 @@ describe("hub-bridge postMessage thinking 透传（T2）", () => {
     const inflight = createInflightRegistry();
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: makeDeps([]),
       inflight,
       overrideEnv: makeTestLlmEnv({ baseUrl: capture.origin }),
@@ -595,6 +703,7 @@ describe("hub-bridge postMessage thinking 透传（T2）", () => {
     capture = await startLlmCapture(MINIMAL_SDK_MESSAGE);
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: makeDeps([assistantResult({ texts: ["cached reply"] })]),
       inflight: createInflightRegistry(),
       overrideEnv: makeTestLlmEnv({ baseUrl: capture.origin }),
@@ -625,6 +734,7 @@ describe("hub-bridge overrideEnv 透传（T2）", () => {
     try {
       const bridge = createTuiBridge({
         dataDir: baseDir,
+        workspaceRoot: baseDir,
         deps: makeDeps([]),
         inflight: createInflightRegistry(),
         // baseUrl 钉到 capture：透传生效 → hub 的 override 路径连上 capture。
@@ -648,6 +758,7 @@ describe("hub-bridge overrideEnv 透传（T2）", () => {
     const inflight = createInflightRegistry();
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: makeDeps([assistantResult({ texts: ["cached"] })]),
       inflight,
     });
@@ -678,6 +789,7 @@ describe("hub-bridge envProvider / onEnvChange 透传（T4）", () => {
       let currentModel = "model-t4-1";
       const bridge = createTuiBridge({
         dataDir: baseDir,
+        workspaceRoot: baseDir,
         // deps 必须注入（SessionHub 构造守卫：无 askUser 时必须有 deps）；
         // 首次 postMessage 用注入 stub（不联网），reloadFromEnv 后才走 envProvider
         // 重建真实 adapter —— 这正是 T4 热更新的最小面通路。
@@ -718,6 +830,7 @@ describe("hub-bridge envProvider / onEnvChange 透传（T4）", () => {
       const received: string[] = [];
       const bridge = createTuiBridge({
         dataDir: baseDir,
+        workspaceRoot: baseDir,
         deps: makeDeps([]),
         inflight: createInflightRegistry(),
         envProvider: () =>
@@ -843,9 +956,9 @@ describe("hub-bridge engineRoot / buildEngine 转发（review High-1）", () => 
         return { deps: injected, builtAt: root };
       },
     });
-    expect(
-      await ensure(bridge.hub, "/anywhere/.iknow/worktrees/conv-2")
-    ).toBe(injected);
+    expect(await ensure(bridge.hub, "/anywhere/.iknow/worktrees/conv-2")).toBe(
+      injected
+    );
     expect(built).toBe(0);
   });
 });

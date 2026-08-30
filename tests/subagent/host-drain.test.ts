@@ -31,16 +31,18 @@ import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 /** 构造 fake SubAgentManager,只暴露 drainCompleted (host drain 唯一依赖面)。 */
 function fakeManager(
   completed: ReadonlyArray<{ taskId: string; envelope: SubAgentEnvelope }>,
-  listActiveImpl: () => ReadonlyArray<string> = () => []
+  listActiveImpl: () => ReadonlyArray<string> = () => [],
+  waitForImpl: SubAgentManager["waitFor"] = async () => {
+    throw new Error("not used by host-drain");
+  },
+  drainCompletedImpl: SubAgentManager["drainCompleted"] = () => completed
 ): SubAgentManager {
   return {
     spawn: () => ({ taskId: "unused" }),
     queryBuffer: () => ({ status: "not_found" }),
-    waitFor: async () => {
-      throw new Error("not used by host-drain");
-    },
+    waitFor: waitForImpl,
     shutdown: async () => {},
-    drainCompleted: () => completed,
+    drainCompleted: drainCompletedImpl,
     listActive: listActiveImpl,
     abortTask: () => false,
     // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
@@ -64,6 +66,24 @@ describe("drainPendingSubagents (SC7 host-drain)", () => {
   it("manager 内无 completed → 空串", async () => {
     const mgr = fakeManager([]);
     assert.equal(await drainPendingSubagents(mgr), "");
+  });
+
+  it("仍有 running worker → 立刻空返且不调用 waitFor (无轮询)", async () => {
+    let waitCalls = 0;
+    const mgr = fakeManager(
+      [],
+      () => ["tid-running"],
+      async () => {
+        waitCalls++;
+        throw new Error("waitFor must not be called by host-drain");
+      }
+    );
+
+    assert.equal(
+      await drainPendingSubagents(mgr, { pollMs: 1, timeoutMs: 10_000 }),
+      ""
+    );
+    assert.equal(waitCalls, 0);
   });
 
   it("1 个 completed → 单一 user message (## Sub-agent <id> result: <summary>\\n\\n[result])", async () => {
@@ -142,6 +162,23 @@ describe("drainPendingSubagents (SC7 host-drain)", () => {
       out,
       "## Sub-agent tid-fail result: exit code=1\n\nexit code=1"
     );
+  });
+
+  it("manager drain 出错 → 空串且不抛", async () => {
+    const mgr = fakeManager(
+      [],
+      () => [],
+      async () => {
+        throw new Error("waitFor must not be called by host-drain");
+      },
+      () => {
+        throw new Error("buffer unavailable");
+      }
+    );
+
+    await assert.doesNotReject(async () => {
+      assert.equal(await drainPendingSubagents(mgr), "");
+    });
   });
 });
 

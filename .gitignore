@@ -133,7 +133,10 @@ docs/harness-report
 .reference/
 .iknow/
 !.iknow/
+.iknow/*
+!.iknow/mcp.json
 !.iknow/skills/
+!.iknow/skills/**
 .iknow/permissions.toml
 .qoder/
 AGENTS.md
@@ -154,5 +157,4 @@ node_modules
 !.cursor/vendor/
 !.cursor/vendor/**
 archive
-.iknow
 docs/demos

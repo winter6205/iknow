@@ -50,6 +50,12 @@ import {
   type OverlayPrefetchFn,
 } from "../harness/memory/index.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
+import {
+  createSubagentWake,
+  queryableSubagentTaskIds,
+  toSubagentWakeError,
+  type SubagentWake,
+} from "../harness/subagent/host-wake.js";
 import type {
   SubAgentManager,
   SubagentInfo,
@@ -59,6 +65,7 @@ import {
   createTaskWorktreeProvisioner,
   type TaskWorktreeProvisioner,
 } from "./worktree-rebind.js";
+import type { WorktreeProvisionContext } from "../harness/isolation/worktree-gate.js";
 import type { AskUser } from "../harness/permission/types.js";
 import type {
   ServeAskUserHandle,
@@ -87,7 +94,11 @@ import {
 } from "../config/workspaces-recents.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
-import { MaxTurnsExceeded } from "../harness/errors.js";
+import {
+  MaxTurnsExceeded,
+  McpLifecycleError,
+  errorMessage,
+} from "../harness/errors.js";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -97,6 +108,10 @@ import type { SkillCatalog } from "../harness/skill/catalog.js";
 import { createSkillBody } from "../harness/skill/body.js";
 import type { McpManager } from "../harness/mcp/manager.js";
 import { loadMcpConfig } from "../harness/mcp/config.js";
+import {
+  resolveMcpRoots,
+  type McpRoots,
+} from "../harness/mcp/roots.js";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
@@ -147,6 +162,7 @@ import {
   extractRecentUserTasks,
   isTurnQuery,
   messageText,
+  projectActivity,
   projectThinkingView,
   projectToolCalls,
   TASK_EXCERPT_PREFIX,
@@ -163,6 +179,65 @@ function safeParse(s: string): unknown {
     return JSON.parse(s);
   } catch {
     return s;
+  }
+}
+
+/**
+ * Validate the root at the session-creation boundary as well as at the
+ * entrypoint.  `SessionHub` is also constructed directly by tests and host
+ * adapters, so trusting the constructor option here would allow malformed
+ * roots to reach `SessionStore.save()` and would turn a create validation
+ * failure into a disk-write failure.
+ */
+function requireCreateWorkspaceRoot(root: unknown): string {
+  if (typeof root !== "string" || root.length === 0) {
+    throw new ValidationError(
+      "workspace root is required to create a session",
+      { field: "workspaceRoot" }
+    );
+  }
+  if (root.length > MAX_WORKSPACE_ROOT_CHARS) {
+    throw new ValidationError("workspace root exceeds the maximum length", {
+      field: "workspaceRoot",
+    });
+  }
+  try {
+    return resolveWorkspaceRoot({ explicit: root });
+  } catch {
+    throw new ValidationError(
+      "workspace root must be an absolute existing directory",
+      { field: "workspaceRoot" }
+    );
+  }
+}
+
+/**
+ * Validate the root loaded from a session before any execution work.
+ *
+ * Session files are intentionally Postel on load so legacy sessions remain
+ * inspectable. They are not executable, however: an absent root is unbound
+ * and a present root must still be an absolute existing workspace. Never
+ * substitute cwd here.
+ */
+function requireBoundRoot(root: unknown): string {
+  if (typeof root !== "string" || root.trim().length === 0) {
+    throw new ValidationError(
+      "workspace is unbound; bind a workspace before executing this session",
+      { field: "workspaceRoot" }
+    );
+  }
+  if (root.length > MAX_WORKSPACE_ROOT_CHARS) {
+    throw new ValidationError("workspace root exceeds the maximum length", {
+      field: "workspaceRoot",
+    });
+  }
+  try {
+    return resolveWorkspaceRoot({ explicit: root });
+  } catch {
+    throw new ValidationError(
+      "workspace root is invalid; bind an existing absolute directory",
+      { field: "workspaceRoot" }
+    );
   }
 }
 
@@ -371,6 +446,8 @@ export function projectMessagesToTurns(
     const turnMessages = messages.slice(i, end);
     const finalText = findFinalTextInSlice(turnMessages);
     turnIndex++;
+    const activity = projectActivity(turnMessages, mask);
+    const hasActivityTools = activity.some((item) => item.type === "tool");
     const thinking = projectThinkingView(turnMessages, mask);
     const toolCalls = projectToolCalls(turnMessages, mask);
     turns.push({
@@ -379,6 +456,7 @@ export function projectMessagesToTurns(
         finalText,
         stopReason: "completed",
         turnCount: turnIndex,
+        ...(hasActivityTools ? { activity } : {}),
         ...(thinking !== undefined ? { thinking } : {}),
         ...(toolCalls !== undefined ? { toolCalls } : {}),
       },
@@ -506,6 +584,13 @@ export type SessionHubOptions = {
    */
   readonly workspaceRoot?: string;
   /**
+   * T6 / worktree-mcp-rebind-lifecycle:稳定主 checkout / bind root。
+   * 首次装配捕获后跨 rebind 不变；`buildProductionEngine` 透传给
+   * `buildHarnessEngine.productRoot`，由此派生 `mcpConfigRoot`。缺席 →
+   * 回退 `workspaceRoot` / 当前装配 root（T6 前单根形态）。
+   */
+  readonly productRoot?: string;
+  /**
    * #128 T8:验证闭环配置 (settings.verify 段经 serve.ts 构造传入)。
    * 缺席 = 透明关闭, postMessage 走原 run 路径逐字节不变 (SC7);
    * 配置时每轮 run 被 runVerifyLoop 包裹 (仅 StopReason=completed 触发
@@ -551,6 +636,12 @@ export type SessionHubOptions = {
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
     overlayMemoryPrefetch?: OverlayPrefetchFn;
+    /** T6/T7：生产装配透出的双根；reload 事务只消费 active engine 的这份。 */
+    mcpRoots?: McpRoots;
+    /** T7：per-engine MCP manager；激活时收口旧 face 再公开。 */
+    mcpManager?: McpManager;
+    /** T7：与 mcpManager 同源的 ACI catalog（listMcpTools 可见面）。 */
+    catalog?: AciCatalog;
   }>;
   /**
    * serve-workspace T3: recents/trust 名单的 home 根（落
@@ -558,6 +649,19 @@ export type SessionHubOptions = {
    * 缺席 → bindWorkspace 保持 T2 语义（无 trust gate、不落 recents）。
    */
   readonly recentsHome?: string;
+};
+
+/** Per-root BuiltEngine cache entry (Map value + activateMcpFace 输入). */
+type HubEngineEntry = {
+  deps: LoopEngineDeps;
+  shutdown?: () => Promise<void>;
+  subagentManager?: SubAgentManager;
+  graphAssembly?: GraphAssembly;
+  autoMemory?: AutoMemoryHook;
+  overlayMemoryPrefetch?: OverlayPrefetchFn;
+  mcpRoots?: McpRoots;
+  mcpManager?: McpManager;
+  catalog?: AciCatalog;
 };
 
 // -- stop-reason persistence decision (T1: replaced DROP_REASONS set) ---------
@@ -578,6 +682,8 @@ export class SessionHub {
   private readonly store: SessionStore;
   /** ADR-0037 T3:task worktree 建树 + 仅本会话根改绑的 host 缝。 */
   private readonly worktreeProvisioner: TaskWorktreeProvisioner;
+  /** T3: roots returned by provision but not yet persisted with the turn. */
+  private readonly dirtyWorktreeRoots = new Map<string, string>();
   private cachedDeps: LoopEngineDeps | undefined;
   private readonly defaults: {
     jsonMode: boolean;
@@ -604,8 +710,17 @@ export class SessionHub {
   private readonly surface: "chat" | "tui" | "ask" | "serve" | undefined;
   /** #356 T7: subagent manager（host drain 消费面；懒取见 ensureDeps）。 */
   private subagentManager: SubAgentManager | undefined;
+  /** T4: serve-only terminal wake subscription; TUI owns its UI-aware wake. */
+  private subagentWake: SubagentWake | undefined;
+  /** Coarse serve target: the most recently addressed conversation. */
+  private lastConversationId: string | undefined;
   /** review-fix (M1 / H1): per-root state anchor 缓存；serve 入口解析后透传。 */
   private readonly workspaceRoot: string | undefined;
+  /**
+   * T6:稳定 productRoot（启动 bind root）。跨 per-root 重建不变；
+   * `buildProductionEngine` / reload 只消费它派生的 mcpConfigRoot。
+   */
+  private readonly productRoot: string | undefined;
   /** #128 T8: 验证闭环配置（settings.verify 段；缺席 = 透明关闭）。 */
   private readonly verifyConfig: VerifyConfig | undefined;
   /** #356 High#4: built.shutdown 缓存（组合句柄；ensureDeps 懒取，hub.shutdown 触发）。 */
@@ -615,7 +730,16 @@ export class SessionHub {
   private mcpManager: McpManager | undefined;
   private aciCatalog: AciCatalog | undefined;
   private mcpHome: string | undefined;
-  private mcpCwd: string | undefined;
+  /**
+   * T7：当前对外可见的 active engine 双根（per-engine，非含糊单 cwd）。
+   * reload 只读这份；切 engine 时由 activateMcpFace 更新。
+   */
+  private activeMcpRoots: McpRoots | undefined;
+  /**
+   * T7：MCP reload 串行链。并发 reloadMcp coalesce 到同一队列，
+   * 每个 promise 都有明确成功/失败终点（不悬挂）。
+   */
+  private mcpReloadChain: Promise<unknown> = Promise.resolve();
   /**
    * settings-hot-reload（T3）:env 源（缺省 → ensureDeps 内部 loadIknowEnv）。
    * reloadFromEnv 用它拿新 env 重建 adapter；onEnvChange 在成功替换后触发。
@@ -659,10 +783,18 @@ export class SessionHub {
         shutdown?: () => Promise<void>;
         subagentManager?: SubAgentManager;
         graphAssembly?: GraphAssembly;
+        mcpRoots?: McpRoots;
+        mcpManager?: McpManager;
+        catalog?: AciCatalog;
       }>)
     | undefined;
   /** serve picker bind (T2); session file workspaceRoot is the engine Map key. */
   private boundRoot: string | undefined;
+  /**
+   * T7：最近一次 activate 的 engine root。listMcp / reload 走 ensureDeps 时
+   * 优先用它，避免 bindRoot（主 checkout）把已激活的 worktree face 抢回去。
+   */
+  private activeEngineRoot: string | undefined;
   /** D-α T3 / ADR-0030: graph 编排 overlay holder（serve / TUI 注入；缺席 =
    *  本入口未接 overlay → run_graph 与编排段都不存在）。 */
   private readonly graphMode: GraphModeContext | undefined;
@@ -675,19 +807,11 @@ export class SessionHub {
   /** serve-workspace T3: recents/trust roster home (absent → T2 behavior). */
   private readonly recentsHome: string | undefined;
   /** Per-root BuiltEngine cache (same root shared across sessions). */
-  private readonly engineByRoot = new Map<
-    string,
-    {
-      deps: LoopEngineDeps;
-      shutdown?: () => Promise<void>;
-      subagentManager?: SubAgentManager;
-      graphAssembly?: GraphAssembly;
-      autoMemory?: AutoMemoryHook;
-      overlayMemoryPrefetch?: OverlayPrefetchFn;
-    }
-  >();
+  private readonly engineByRoot = new Map<string, HubEngineEntry>();
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
+  /** Actual active work count; `inflight` retains resolved chain sentinels. */
+  private readonly activeTurnCounts = new Map<string, number>();
   /**
    * auto-memory T1: session-level prefetch dedup — per-conversation sets of
    * already-injected memory ids. Host-side state only (never loop-engine).
@@ -723,10 +847,19 @@ export class SessionHub {
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
     this.subagentManager = opts.subagentManager;
+    if (this.surface === "serve" && this.subagentManager !== undefined) {
+      this.attachSubagentWake(this.subagentManager);
+    }
     this.autoMemory = opts.autoMemory;
     this.overlayMemoryPrefetch = opts.overlayMemoryPrefetch;
     // review-fix (M1 / H1): per-root state anchor 缓存。
     this.workspaceRoot = opts.workspaceRoot;
+    // T6:稳定 productRoot（缺席 → workspaceRoot，保持单根形态可编译可跑）。
+    this.productRoot = opts.productRoot ?? opts.workspaceRoot;
+    // An entry-resolved root is already a valid bind for hosts that assemble
+    // the Hub with a root (serve/TUI). Picker-driven hosts can still call
+    // bindWorkspace later to change it.
+    this.boundRoot = opts.workspaceRoot;
     this.recentsHome = opts.recentsHome;
     this.verifyConfig = opts.verifyConfig;
     this.envProvider = opts.envProvider;
@@ -739,10 +872,42 @@ export class SessionHub {
     // buildProductionEngine / ensureDeps 兜底路径注入 provision 缝。T4:
     // 会话已在本会话 task worktree 的 passthrough / 外来根 fail-closed
     // 都由 provision 按会话锚定，hub 不传 conversation-agnostic 标记。
-    this.worktreeProvisioner = createTaskWorktreeProvisioner({ store: this.store });
+    // Root persistence belongs to this Hub's dirty-root conditional-save
+    // protocol. The provisioner only creates/returns the task worktree here.
+    this.worktreeProvisioner = createTaskWorktreeProvisioner({});
   }
 
   // -- public API --------------------------------------------------------------
+
+  /**
+   * Hub-visible provision seam for harness hosts (including TUI). A
+   * successful changed result is recorded for this conversation and is
+   * persisted only by the next conditional save.
+   */
+  async provisionWorktree(ctx: WorktreeProvisionContext): Promise<string> {
+    const provisionedRoot = await this.worktreeProvisioner.provision(ctx);
+    if (ctx.conversationId !== undefined) {
+      this.markWorktreeRootDirty({
+        conversationId: ctx.conversationId,
+        currentRoot: ctx.root,
+        provisionedRoot,
+      });
+    }
+    return provisionedRoot;
+  }
+
+  private markWorktreeRootDirty(opts: {
+    readonly conversationId: string;
+    readonly currentRoot: string;
+    readonly provisionedRoot: string;
+  }): void {
+    if (opts.provisionedRoot === opts.currentRoot) return;
+    // Keep the first successful changed root until its save succeeds. This
+    // prevents a concurrent provision result from replacing a retryable root.
+    if (!this.dirtyWorktreeRoots.has(opts.conversationId)) {
+      this.dirtyWorktreeRoots.set(opts.conversationId, opts.provisionedRoot);
+    }
+  }
 
   /**
    * Snapshot of pending ask requests (process-global; v0 serve hosts one
@@ -774,6 +939,7 @@ export class SessionHub {
    * ask/deps-injected 形态无 built → 缓存缺席 → no-op(行为零变化)。
    */
   async shutdown(): Promise<void> {
+    this.subagentWake?.dispose();
     await this.cachedShutdown?.();
     for (const entry of this.engineByRoot.values()) {
       await entry.shutdown?.();
@@ -956,9 +1122,9 @@ export class SessionHub {
   async createSession(
     req?: CreateSessionRequest
   ): Promise<CreateSessionResponse> {
+    const root = requireCreateWorkspaceRoot(this.boundRoot);
     const id = randomUUID();
     const now = new Date().toISOString();
-    const root = this.boundRoot;
     const file: SessionFileV1 = {
       schemaVersion: CURRENT_SCHEMA_VERSION,
       conversation_id: id,
@@ -967,10 +1133,10 @@ export class SessionHub {
       turnCount: 0,
       updatedAt: now,
       title: "",
-      cwd: root ?? process.cwd(),
+      cwd: root,
       sanitized_at: now,
       checkpoints: [],
-      ...(root !== undefined ? { workspaceRoot: root } : {}),
+      workspaceRoot: root,
     };
     await this.store.save({ id, file });
     return {
@@ -993,14 +1159,17 @@ export class SessionHub {
     readonly signal?: AbortSignal;
     readonly thinking?: ThinkingOverride;
     readonly onStream?: (event: HarnessStreamEvent) => void;
+    /** T4 internal host wake; not accepted by the HTTP adapter. */
+    readonly silent?: boolean;
   }): Promise<PostMessageResponse> {
     const { conversationId, text } = opts;
+    const silent = opts.silent === true;
     // #408 T3: leading `## GOAL:` re-pins the session goal. Detect BEFORE
     // validateText so the goal text (not the raw directive) is what gets
     // validated and run. `null` = no directive → whole text is the query.
     // `""` = empty directive → stripped to empty → validateText rejects
     // below (goal unchanged, since we only persist after run succeeds).
-    const goalDirective = parseGoalCommand(text);
+    const goalDirective = silent ? null : parseGoalCommand(text);
     // #458 T5: validate goal text length/non-empty BEFORE serialize so an
     // over-long `## GOAL: ...` never reaches the pin path / store. Empty
     // directive is skipped (goalDirective === "") and falls through to
@@ -1024,17 +1193,17 @@ export class SessionHub {
     }
     const query =
       pinText ?? (goalDirective !== null ? goalDirective : text.trim());
-    this.validateText(query);
-    return this.serialize({
+    if (!silent) this.validateText(query);
+    this.lastConversationId = conversationId;
+    const activeCount = this.activeTurnCounts.get(conversationId) ?? 0;
+    this.activeTurnCounts.set(conversationId, activeCount + 1);
+    const operation = this.serialize<PostMessageResponse>({
       conversationId,
       work: async () => {
         let session = await this.store.load(conversationId);
-        if (this.surface === "serve" && session.workspaceRoot === undefined) {
-          throw new ValidationError(
-            "workspace is unbound; select a workspace before sending",
-            { field: "workspaceRoot" }
-          );
-        }
+        // EXIT: reject-execute-before-engine — legacy/unbound sessions are
+        // inspectable but must never reach trace, postMessage, or the engine.
+        const boundRoot = requireBoundRoot(session.workspaceRoot);
         // #458 T5/T12: hoist the trace service so the `## GOAL:` pin block
         // (below) and runDeps share one TraceService instance for this
         // postMessage (avoid double construction; same file writer closure).
@@ -1072,7 +1241,7 @@ export class SessionHub {
             conversationId,
           });
         }
-        const baseDeps = await this.ensureDeps(session.workspaceRoot);
+        const baseDeps = await this.ensureDeps(boundRoot);
         // D-α T3 / ADR-0030:round 边界 —— 一条 postMessage = 一次 run()。
         // 在这里拍 graph 装配快照（紧接 ensureDeps，同一串行槽位内，拍的
         // 一定是本次要用的那台 engine），overlay 翻键因此「下一条消息才
@@ -1223,7 +1392,12 @@ export class SessionHub {
               // #356 T7 (SC7):host drain — serve 入口每轮 run() 前,把 manager 内
               // completed 子代理结果浓缩成 user message,拼入 priorMessages 末尾。
               // 空 manager / 无 completed → priorMessages 不变 (行为零变化)。
-              const drained = await drainPendingSubagents(this.subagentManager);
+              const drained = await drainPendingSubagents(
+                this.subagentManager,
+                {
+                  conversationId,
+                }
+              );
               const drainedMsg: AnthropicNativeMessage = {
                 role: "user",
                 content: [{ type: "text", text: drained }],
@@ -1235,7 +1409,7 @@ export class SessionHub {
               // （drain 浓缩消息在内存历史里先于 query，链上也须同序）。
               queryCommitPrefix = [
                 ...(drained ? [drainedMsg] : []),
-                buildUserCommit(query),
+                ...(query.length > 0 ? [buildUserCommit(query)] : []),
               ];
               // #408 T5: verify-loop terminal outcome (only set when verifyConfig
               // is configured). Captured here so the post-run write-back can
@@ -1254,63 +1428,71 @@ export class SessionHub {
               // trace 仅在 traceOut 配置时注入 (records 落盘, T7 已处理可选)。
               // 注意: runVerifyLoop 的首轮 runFn 不带 priorMessages / onStream,
               // 闭包必须兜底 hub 侧的 priorMessages 与 wrappedOnStream。
-              const runOutcome = this.verifyConfig
-                ? await runVerifyLoop({
-                    runFn: (text, o) =>
-                      attachPrefetch(text).then((effective) => {
-                        queryCommitPrefix = [
-                          ...(drained ? [drainedMsg] : []),
-                          buildUserCommit(effective),
-                        ];
-                        return run(effective, runDeps, o?.signal, {
-                          priorMessages: o?.priorMessages ?? priorMessages,
-                          onStream: o?.onStream ?? wrappedOnStream,
-                        });
-                      }),
-                    // ADR-0024: two modules, not `goal.text ?? query`. Non-empty
-                    // goal → auto (userText = goal.text); else HITL (userText =
-                    // query). taskFocus never entered verify input (#473) and
-                    // is gone with #605 T2's retirement.
-                    completionMode:
-                      session.goal !== undefined && session.goal.text.length > 0
-                        ? "auto"
-                        : "hitl",
-                    userText:
-                      session.goal !== undefined && session.goal.text.length > 0
-                        ? session.goal.text
-                        : query,
-                    config: this.verifyConfig,
-                    sessionId: conversationId,
-                    signal: opts.signal,
-                    trace: runDeps.trace,
-                    cwd: session.workspaceRoot ?? process.cwd(),
-                    // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
-                    // (command 缺失/空串时分类器接管, spec Objective);缺席
-                    // (ask 形态) → undefined, verify-loop 自然走透明关闭向后兼容。
-                    runClassifier:
-                      this.subagentManager === undefined
-                        ? undefined
-                        : createRunClassifierFromManager({
-                            manager: this.subagentManager,
-                            ...(this.verifyConfig.classifierModel !== undefined
-                              ? {
-                                  classifierModel:
-                                    this.verifyConfig.classifierModel,
-                                }
-                              : {}),
-                          }),
-                  })
-                : await (async () => {
-                    const effective = await attachPrefetch(query);
-                    queryCommitPrefix = [
-                      ...(drained ? [drainedMsg] : []),
-                      buildUserCommit(effective),
-                    ];
-                    return run(effective, runDeps, opts.signal, {
-                      priorMessages,
-                      onStream: wrappedOnStream,
-                    });
-                  })();
+              const runOutcome =
+                !silent && this.verifyConfig
+                  ? await runVerifyLoop({
+                      runFn: (text, o) =>
+                        attachPrefetch(text).then((effective) => {
+                          queryCommitPrefix = [
+                            ...(drained ? [drainedMsg] : []),
+                            buildUserCommit(effective),
+                          ];
+                          return run(effective, runDeps, o?.signal, {
+                            priorMessages: o?.priorMessages ?? priorMessages,
+                            onStream: o?.onStream ?? wrappedOnStream,
+                          });
+                        }),
+                      // ADR-0024: two modules, not `goal.text ?? query`. Non-empty
+                      // goal → auto (userText = goal.text); else HITL (userText =
+                      // query). taskFocus never entered verify input (#473) and
+                      // is gone with #605 T2's retirement.
+                      completionMode:
+                        session.goal !== undefined &&
+                        session.goal.text.length > 0
+                          ? "auto"
+                          : "hitl",
+                      userText:
+                        session.goal !== undefined &&
+                        session.goal.text.length > 0
+                          ? session.goal.text
+                          : query,
+                      config: this.verifyConfig,
+                      sessionId: conversationId,
+                      signal: opts.signal,
+                      trace: runDeps.trace,
+                      cwd: boundRoot,
+                      // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
+                      // (command 缺失/空串时分类器接管, spec Objective);缺席
+                      // (ask 形态) → undefined, verify-loop 自然走透明关闭向后兼容。
+                      runClassifier:
+                        this.subagentManager === undefined
+                          ? undefined
+                          : createRunClassifierFromManager({
+                              manager: this.subagentManager,
+                              ...(this.verifyConfig.classifierModel !==
+                              undefined
+                                ? {
+                                    classifierModel:
+                                      this.verifyConfig.classifierModel,
+                                  }
+                                : {}),
+                            }),
+                    })
+                  : await (async () => {
+                      const effective = silent
+                        ? ""
+                        : await attachPrefetch(query);
+                      queryCommitPrefix = [
+                        ...(drained ? [drainedMsg] : []),
+                        ...(effective.length > 0
+                          ? [buildUserCommit(effective)]
+                          : []),
+                      ];
+                      return run(effective, runDeps, opts.signal, {
+                        priorMessages,
+                        onStream: wrappedOnStream,
+                      });
+                    })();
               const result = runOutcome.result;
               // #408 T5: capture the terminal outcome for post-run write-back.
               verifyOutcome =
@@ -1359,7 +1541,7 @@ export class SessionHub {
               this.notifyAutoMemory(
                 s.finalResult,
                 s.priorCount,
-                session.workspaceRoot,
+                boundRoot,
                 conversationId
               );
               // #458 T5 (SC8): goal.status write-back on verify-loop terminal
@@ -1419,15 +1601,17 @@ export class SessionHub {
               }
             },
             decideContinue: async (s) =>
-              this.applyHubAutoContinue({
-                conversationId,
-                result: s.finalResult,
-                priorCount: s.priorCount,
-                ...(s.verifyOutcome !== undefined
-                  ? { verifyOutcome: s.verifyOutcome }
-                  : {}),
-                records: s.verifyRecords,
-              }),
+              silent
+                ? false
+                : this.applyHubAutoContinue({
+                    conversationId,
+                    result: s.finalResult,
+                    priorCount: s.priorCount,
+                    ...(s.verifyOutcome !== undefined
+                      ? { verifyOutcome: s.verifyOutcome }
+                      : {}),
+                    records: s.verifyRecords,
+                  }),
             buildStop: async (s) => ({
               session: this.summarize({
                 file: await this.store.load(conversationId),
@@ -1455,7 +1639,7 @@ export class SessionHub {
             },
           });
         } catch (err) {
-          await this.applyHubAutoError(conversationId, err);
+          if (!silent) await this.applyHubAutoError(conversationId, err);
           if (err instanceof MaxTurnsExceeded) {
             // ADR-0011:不 save — run 前 session 已在盘上,throw 路径不产出
             // 可落盘的新 messages,故不调 conditionalSave(否则会写空 messages
@@ -1482,6 +1666,47 @@ export class SessionHub {
         }
       },
     });
+    void operation.then(
+      () => this.releaseActiveTurn(conversationId),
+      () => this.releaseActiveTurn(conversationId)
+    );
+    return operation;
+  }
+
+  /**
+   * T4: run one silent parent turn for a terminal subagent handoff.
+   * `undefined` means the manager has no host-visible terminal result; no
+   * model call is made and no synthetic success is returned.
+   */
+  async wakeFromSubagent(opts: {
+    readonly conversationId: string;
+    readonly signal?: AbortSignal;
+    readonly thinking?: ThinkingOverride;
+    readonly onStream?: (event: HarnessStreamEvent) => void;
+  }): Promise<PostMessageResponse | undefined> {
+    const drained = await drainPendingSubagents(this.subagentManager, {
+      conversationId: opts.conversationId,
+    });
+    if (drained.length === 0) return undefined;
+    const taskIds = queryableSubagentTaskIds(
+      this.subagentManager,
+      opts.conversationId
+    );
+    try {
+      return await this.postMessage({
+        conversationId: opts.conversationId,
+        text: "",
+        signal: opts.signal,
+        thinking: opts.thinking,
+        onStream: opts.onStream,
+        silent: true,
+      });
+    } catch (error) {
+      throw toSubagentWakeError(error, {
+        taskIds,
+        queryable: this.subagentManager !== undefined,
+      });
+    }
   }
 
   async resetSession(
@@ -1735,12 +1960,9 @@ export class SessionHub {
     opts?: CompactCallerOpts
   ): Promise<PostMessageResponse> {
     const session = await this.store.load(conversationId);
-    if (this.surface === "serve" && session.workspaceRoot === undefined) {
-      throw new ValidationError(
-        "workspace is unbound; select a workspace before sending",
-        { field: "workspaceRoot" }
-      );
-    }
+    // EXIT: reject-execute-before-engine — continue has the same boundary
+    // contract as postMessage on every host surface.
+    const boundRoot = requireBoundRoot(session.workspaceRoot);
     const verdict = evaluateContinuePending({
       messages: session.messages,
       ...(session.goal !== undefined ? { goal: session.goal } : {}),
@@ -1748,7 +1970,7 @@ export class SessionHub {
     if (!verdict.ok) {
       throw continuePredicateError(verdict.exit);
     }
-    const deps = await this.ensureDeps(session.workspaceRoot);
+    const deps = await this.ensureDeps(boundRoot);
     const trace = this.createTrace(conversationId);
     const runDeps: LoopEngineDeps = {
       ...deps,
@@ -1900,12 +2122,88 @@ export class SessionHub {
   }
 
   async reloadMcp(): Promise<readonly McpServerStatusDto[]> {
-    await this.ensureDeps();
-    if (this.mcpManager) {
+    // T7:串行化 / coalesce——每个调用方 promise 都有 typed 成功或失败终点。
+    const run = this.mcpReloadChain.then(
+      () => this.reloadMcpTransaction(),
+      () => this.reloadMcpTransaction()
+    );
+    this.mcpReloadChain = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  /**
+   * T7 active-root reload 事务：先校验 active engine 的 mcpRoots，再加载
+   * config / 调 manager.reload。失败路径不得让旧+新 manager 同时成为对外
+   * 成功面；坏根在 shutdown 好 manager 之前拒绝。
+   */
+  private async reloadMcpTransaction(): Promise<
+    readonly McpServerStatusDto[]
+  > {
+    // 已有可见 face 时不再 ensureDeps：避免 cache-hit activate 覆盖本事务
+    // 要校验的 active mcpRoots，也缩小 rebind∩reload 窗口。
+    if (!this.mcpManager || this.activeMcpRoots === undefined) {
+      await this.ensureDeps();
+    }
+    const manager = this.mcpManager;
+    if (!manager) {
+      return this.listMcpServers();
+    }
+
+    // Root 校验必须先于 manager.reload（后者会 shutdown 旧 slots）。
+    let validated: McpRoots;
+    try {
+      const roots = this.activeMcpRoots;
+      if (roots === undefined) {
+        throw new McpLifecycleError(
+          "missing_cwd",
+          "active engine mcpRoots are required for MCP reload"
+        );
+      }
+      // mcpConfigRoot 合同上等于稳定 productRoot；用 resolver 再验一次。
+      validated = resolveMcpRoots({
+        workspaceRoot: roots.workspaceRoot,
+        productRoot: roots.mcpConfigRoot,
+      });
+      if (this.productRoot !== undefined) {
+        const fromProduct = resolveMcpRoots({
+          workspaceRoot: roots.workspaceRoot,
+          productRoot: this.productRoot,
+        });
+        if (fromProduct.mcpConfigRoot !== validated.mcpConfigRoot) {
+          throw new McpLifecycleError(
+            "root_mismatch",
+            "active mcpConfigRoot does not match hub productRoot"
+          );
+        }
+      }
+    } catch (err) {
+      // EXIT: bad roots → reject before shutdown of good manager
+      if (err instanceof McpLifecycleError) throw err;
+      throw new McpLifecycleError(
+        "reload_failed",
+        errorMessage(err),
+        { cause: err }
+      );
+    }
+
+    try {
       const home = this.mcpHome ?? homedir();
-      const cwd = this.mcpCwd ?? process.cwd();
-      const cfg = await loadMcpConfig({ home, cwd });
-      await this.mcpManager.reload(cfg.servers);
+      const cfg = await loadMcpConfig({
+        home,
+        mcpConfigRoot: validated.mcpConfigRoot,
+      });
+      await manager.reload(cfg.servers);
+    } catch (err) {
+      // EXIT: reload failed → retain one coherent failed/old state; never report mixed success
+      if (err instanceof McpLifecycleError) throw err;
+      throw new McpLifecycleError(
+        "reload_failed",
+        errorMessage(err),
+        { cause: err }
+      );
     }
     return this.listMcpServers();
   }
@@ -2081,6 +2379,35 @@ export class SessionHub {
     });
   }
 
+  private attachSubagentWake(manager: SubAgentManager): void {
+    if (this.subagentWake !== undefined || this.surface !== "serve") return;
+    this.subagentWake = createSubagentWake({
+      manager,
+      isIdle: () =>
+        this.lastConversationId !== undefined &&
+        !this.activeTurnCounts.has(this.lastConversationId),
+      wake: async () => {
+        const conversationId = this.lastConversationId;
+        if (conversationId === undefined) return;
+        await this.wakeFromSubagent({ conversationId });
+      },
+      onError: (error) => {
+        console.warn("[serve] subagent wake failed", error);
+      },
+    });
+  }
+
+  private releaseActiveTurn(conversationId: string): void {
+    const count = this.activeTurnCounts.get(conversationId);
+    if (count === undefined || count <= 1) {
+      this.activeTurnCounts.delete(conversationId);
+      this.subagentWake?.flush();
+      return;
+    }
+    this.activeTurnCounts.set(conversationId, count - 1);
+    this.subagentWake?.flush();
+  }
+
   /**
    * Serialize operations on the same conversation_id (spec A15).
    * Different ids run in parallel; same id chains sequentially.
@@ -2148,37 +2475,93 @@ export class SessionHub {
     readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
   }): Promise<boolean> {
     const { conversationId, session, result, priorMessages } = opts;
-    if (!shouldPersistCheckpoint(result, priorMessages)) return false;
+    const shouldPersist = shouldPersistCheckpoint(result, priorMessages);
+    const dirtyRoot = this.dirtyWorktreeRoots.get(conversationId);
+    if (!shouldPersist && dirtyRoot === undefined) return false;
     const now = new Date().toISOString();
-    const turnCount = session.turnCount + result.turnCount;
-    const interruptReason = toInterruptReason(result.stopReason);
-    // appendCheckpoint compares record.messagesCount to session.messages.length
-    // for its delta=0 guard, so it must receive the session BEFORE new messages
-    // are merged in (otherwise delta = 0 would always be false and the guard
-    // never fires). Compute the checkpointed session first, then merge the
-    // post-run messages / turnCount / metadata on top.
-    const withCheckpoint =
-      interruptReason === null
-        ? session
-        : appendCheckpoint(session, {
-            turnIndex: turnCount,
-            messagesCount: result.messages.length,
-            interruptedAt: now,
-            interruptReason,
-            ...(result.lastUsage !== null
-              ? { lastUsage: result.lastUsage }
-              : {}),
-          });
-    const updated: SessionFileV1 = {
-      ...withCheckpoint,
-      messages: result.messages,
-      turnCount,
-      updatedAt: now,
-      schemaVersion: CURRENT_SCHEMA_VERSION,
-      title: extractTitle(result.messages),
-    };
-    await this.store.save({ id: conversationId, file: updated });
+    const updated = shouldPersist
+      ? (() => {
+          const turnCount = session.turnCount + result.turnCount;
+          const interruptReason = toInterruptReason(result.stopReason);
+          // appendCheckpoint compares record.messagesCount to
+          // session.messages.length for its delta=0 guard, so it must receive
+          // the session BEFORE new messages are merged in.
+          const withCheckpoint =
+            interruptReason === null
+              ? session
+              : appendCheckpoint(session, {
+                  turnIndex: turnCount,
+                  messagesCount: result.messages.length,
+                  interruptedAt: now,
+                  interruptReason,
+                  ...(result.lastUsage !== null
+                    ? { lastUsage: result.lastUsage }
+                    : {}),
+                });
+          return {
+            ...withCheckpoint,
+            messages: result.messages,
+            turnCount,
+            updatedAt: now,
+            schemaVersion: CURRENT_SCHEMA_VERSION,
+            title: extractTitle(result.messages),
+          };
+        })()
+      : session;
+    await this.consumeDirtyRootOnSave(conversationId, async (root) => {
+      // EXIT: report-save-failure-and-retain-dirty-root — SessionStore's
+      // typed error propagates; consumeDirtyRootOnSave clears only after this
+      // write resolves successfully.
+      await this.store.save({
+        id: conversationId,
+        file:
+          root === undefined ? updated : { ...updated, workspaceRoot: root },
+      });
+    });
     return true;
+  }
+
+  private async consumeDirtyRootOnSave(
+    conversationId: string,
+    save: (root: string | undefined) => Promise<void>
+  ): Promise<void> {
+    const dirtyRoot = this.dirtyWorktreeRoots.get(conversationId);
+    await save(dirtyRoot);
+    if (
+      dirtyRoot !== undefined &&
+      this.dirtyWorktreeRoots.get(conversationId) === dirtyRoot
+    ) {
+      this.dirtyWorktreeRoots.delete(conversationId);
+    }
+  }
+
+  /**
+   * T7：切换对外可见的 MCP face。旧 manager 先 shutdown（或保持为唯一失败面），
+   * 再公开新 manager / roots / catalog——禁止旧+新同时成功。
+   */
+  private async activateMcpFace(entry: {
+    readonly mcpManager?: McpManager;
+    readonly mcpRoots?: McpRoots;
+    readonly catalog?: AciCatalog;
+  }): Promise<void> {
+    const nextManager = entry.mcpManager;
+    const prevManager = this.mcpManager;
+    if (
+      prevManager !== undefined &&
+      nextManager !== undefined &&
+      prevManager !== nextManager
+    ) {
+      await prevManager.shutdown();
+    }
+    if (entry.mcpRoots) {
+      this.activeMcpRoots = entry.mcpRoots;
+    }
+    if (nextManager !== undefined) {
+      this.mcpManager = nextManager;
+    }
+    if (entry.catalog !== undefined) {
+      this.aciCatalog = entry.catalog;
+    }
   }
 
   /**
@@ -2186,29 +2569,36 @@ export class SessionHub {
    * (picker `boundRoot` is only the fallback when listSkills etc. have no
    * session). Production assembly sets cwd/workspaceRoot/sandboxRoot equal.
    */
-  private async getOrBuildEngine(root: string): Promise<{
-    deps: LoopEngineDeps;
-    shutdown?: () => Promise<void>;
-    subagentManager?: SubAgentManager;
-    graphAssembly?: GraphAssembly;
-    autoMemory?: AutoMemoryHook;
-    overlayMemoryPrefetch?: OverlayPrefetchFn;
-  }> {
+  private async getOrBuildEngine(root: string): Promise<HubEngineEntry> {
     const hit = this.engineByRoot.get(root);
-    if (hit) return hit;
+    if (hit) {
+      this.activeEngineRoot = root;
+      await this.activateMcpFace(hit);
+      return hit;
+    }
     const built = this.buildEngine
       ? await this.buildEngine(root)
       : await this.buildProductionEngine(root);
-    const entry = {
+    const entry: HubEngineEntry = {
       deps: built.deps,
       shutdown: built.shutdown,
       subagentManager: built.subagentManager,
       graphAssembly: built.graphAssembly,
       autoMemory: built.autoMemory,
       overlayMemoryPrefetch: built.overlayMemoryPrefetch,
+      ...(built.mcpRoots ? { mcpRoots: built.mcpRoots } : {}),
+      ...(built.mcpManager ? { mcpManager: built.mcpManager } : {}),
+      ...("catalog" in built && built.catalog
+        ? { catalog: built.catalog }
+        : {}),
     };
     this.engineByRoot.set(root, entry);
+    this.activeEngineRoot = root;
+    await this.activateMcpFace(entry);
     this.subagentManager = this.subagentManager ?? built.subagentManager;
+    if (this.subagentManager !== undefined) {
+      this.attachSubagentWake(this.subagentManager);
+    }
     this.autoMemory = this.autoMemory ?? built.autoMemory;
     this.overlayMemoryPrefetch =
       this.overlayMemoryPrefetch ?? built.overlayMemoryPrefetch;
@@ -2222,6 +2612,9 @@ export class SessionHub {
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
     overlayMemoryPrefetch?: OverlayPrefetchFn;
+    mcpRoots?: McpRoots;
+    mcpManager?: McpManager;
+    catalog?: AciCatalog;
   }> {
     if (!this.askUser) {
       throw new Error(
@@ -2229,12 +2622,15 @@ export class SessionHub {
       );
     }
     const env = this.envProvider ? this.envProvider() : loadIknowEnv();
+    // T6:productRoot 稳定；workspaceRoot/cwd/sandboxRoot 跟随当前 task root。
+    const productRoot = this.productRoot ?? this.workspaceRoot ?? root;
     const built = await buildHarnessEngine({
       env,
       askUser: this.askUser,
       cwd: root,
       sandboxRoot: root,
       workspaceRoot: root,
+      productRoot,
       // Review High-2 (hard req 9): reuse the startup settings object — a
       // worktree-rooted loadIknowSettings({cwd}) would silently drop project
       // settings (`.iknow/` is gitignored inside the worktree).
@@ -2246,7 +2642,7 @@ export class SessionHub {
       // worktree 由 provision fail-closed（typed foreign_worktree）。
       worktreeIsolation: {
         provision: ({ conversationId, root: sessionRoot }) =>
-          this.worktreeProvisioner.provision({ conversationId, root: sessionRoot }),
+          this.provisionWorktree({ conversationId, root: sessionRoot }),
       },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
@@ -2263,10 +2659,9 @@ export class SessionHub {
         : {}),
     });
     this.skillCatalog = built.skillCatalog;
-    this.mcpManager = built.mcpManager;
-    this.aciCatalog = built.catalog;
     this.mcpHome = homedir();
-    this.mcpCwd = root;
+    // T7:mcpManager / catalog / mcpRoots 由 getOrBuildEngine → activateMcpFace
+    // 统一切换，避免此处抢先覆盖导致旧 manager 未收口。
     return built;
   }
 
@@ -2286,7 +2681,7 @@ export class SessionHub {
       // 离开该根（worktree rebind）→ 落到 per-root 引擎重建（buildEngine 缝
       // / 生产装配），与 hub.ts 两条装配路径行为一致；未声明 → 短路语义与
       // 今日逐字节一致。
-      const mapRoot = sessionRoot ?? this.boundRoot;
+      const mapRoot = sessionRoot ?? this.activeEngineRoot ?? this.boundRoot;
       if (
         mapRoot !== undefined &&
         this.injectedEngineRoot !== undefined &&
@@ -2299,9 +2694,10 @@ export class SessionHub {
       this.activeGraphAssembly = this.injectedGraphAssembly;
       return this.cachedDeps ?? this.injectedDeps;
     }
-    const mapRoot = sessionRoot ?? this.boundRoot;
+    const mapRoot = sessionRoot ?? this.activeEngineRoot ?? this.boundRoot;
     if (mapRoot !== undefined) {
       // D-α T3:per-root 多引擎时,活跃快照跟着本次解析到的那台走。
+      // T7:优先 activeEngineRoot，避免 MCP list/reload 被 bindRoot 抢回主仓 face。
       const entry = await this.getOrBuildEngine(mapRoot);
       this.activeGraphAssembly = entry.graphAssembly;
       return entry.deps;
@@ -2343,7 +2739,7 @@ export class SessionHub {
       // passthrough 由 provision 按会话锚定，不设 initiallyBound。
       worktreeIsolation: {
         provision: ({ conversationId, root: sessionRoot }) =>
-          this.worktreeProvisioner.provision({ conversationId, root: sessionRoot }),
+          this.provisionWorktree({ conversationId, root: sessionRoot }),
       },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
@@ -2355,6 +2751,8 @@ export class SessionHub {
       // 让 build-engine 的 bash fence 对齐 serve 的 identity seed / dataDir
       // (同一 per-root 锚点,不落回 sandboxRoot|cwd)。
       ...(this.workspaceRoot ? { workspaceRoot: this.workspaceRoot } : {}),
+      // T6:稳定 productRoot（缺席时 build-engine 桥接为 workspaceRoot）。
+      ...(this.productRoot ? { productRoot: this.productRoot } : {}),
       todoDir: resolveSessionTodoDir({ surface: "serve" }),
       ...(this.traceOut !== undefined
         ? {
@@ -2367,10 +2765,12 @@ export class SessionHub {
     // D-α T3:单引擎（未 bind 根）路径的活跃快照。
     this.activeGraphAssembly = built.graphAssembly;
     this.skillCatalog = built.skillCatalog;
-    this.mcpManager = built.mcpManager;
-    this.aciCatalog = built.catalog;
     this.mcpHome = homedir();
-    this.mcpCwd = process.cwd();
+    await this.activateMcpFace({
+      ...(built.mcpManager ? { mcpManager: built.mcpManager } : {}),
+      ...(built.mcpRoots ? { mcpRoots: built.mcpRoots } : {}),
+      ...(built.catalog ? { catalog: built.catalog } : {}),
+    });
     // #356 T7: serve 懒取 subagent manager — buildHarnessEngine 在 surface !==
     // "ask" 时自建;constructor 注入优先 (测试缝),未注入则取 built 的。
     this.subagentManager = this.subagentManager ?? built.subagentManager;
@@ -2446,12 +2846,12 @@ export class SessionHub {
     workspaceRoot?: string,
     conversationId?: string
   ): void {
-    // EXIT: a bound session uses only the per-root hook; constructor injection
-    // remains the fallback when no workspaceRoot is on the session file.
+    // EXIT: prefer the per-root hook for bound sessions; constructor injection
+    // remains the fallback for injected-deps hosts without a per-root cache.
     const autoMemory =
       workspaceRoot === undefined
         ? this.autoMemory
-        : this.engineByRoot.get(workspaceRoot)?.autoMemory;
+        : (this.engineByRoot.get(workspaceRoot)?.autoMemory ?? this.autoMemory);
     const sessionKey =
       this.surface === "serve"
         ? conversationId
@@ -2509,6 +2909,8 @@ export class SessionHub {
     const rawFinalText = result.finalText ?? "";
     const maskedFinalText = mask(rawFinalText);
     const turnMessages = opts.turnMessages ?? result.messages;
+    const activity = projectActivity(turnMessages, mask);
+    const hasActivityTools = activity.some((item) => item.type === "tool");
     const thinking = projectThinkingView(turnMessages, mask);
     const toolCalls = projectToolCalls(turnMessages, mask);
     return {
@@ -2517,6 +2919,7 @@ export class SessionHub {
         finalText: maskedFinalText,
         stopReason: result.stopReason,
         turnCount: result.turnCount,
+        ...(hasActivityTools ? { activity } : {}),
         // T1: optional fields — omitted entirely when undefined (byte-stable
         // for turns without thinking or tool use).
         ...(thinking !== undefined ? { thinking } : {}),

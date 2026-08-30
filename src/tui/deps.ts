@@ -107,6 +107,11 @@ export interface BuildTuiDepsOptions {
    */
   readonly workspaceRoot?: string;
   /**
+   * T6 / worktree-mcp-rebind-lifecycle:稳定主 checkout root。首次装配捕获后
+   * 跨 rebind 原样透传；reload 的 mcpConfigRoot 只由此派生，禁止用 cwd 重算。
+   */
+  readonly productRoot?: string;
+  /**
    * 观测性地板:JSONL trace 写目录。在场时把 subagent 三事件交给 build-engine
    * （与 serve hub 同形：`<traceOut>/subagent.jsonl`）。
    */
@@ -270,6 +275,8 @@ export async function buildTuiDeps(
     ...(opts.cwd ? { cwd } : {}),
     // ADR-0019 (T2): per-root state anchor 透传到 build-engine。
     ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
+    // T6:稳定 productRoot 透传（缺席 → build-engine 桥接为 workspaceRoot）。
+    ...(opts.productRoot ? { productRoot: opts.productRoot } : {}),
     // 观测性地板:traceOut 在场 → subagent 三事件落 `<traceOut>/subagent.jsonl`。
     ...(subagentTrace !== undefined
       ? { subagentTrace, subagentDiagnosticsDir: traceOut }
@@ -298,9 +305,13 @@ export async function buildTuiDeps(
   // reload 实现：重读两级 config（可被用户改 ~/.iknow/mcp.json 或项目级
   // mcp.json 后触发）,manager.reload 内部 shutdown + 重建 + 后台 start。
   // 幂等：无 mcp.json → servers 空 → reload 空集。
+  // T6:mcpConfigRoot 锁定装配时的 productRoot / BuiltEngine.mcpRoots，
+  // 不随 task cwd 漂移，也不读 process.cwd()。
+  const mcpConfigRoot =
+    built.mcpRoots?.mcpConfigRoot ?? opts.productRoot ?? opts.workspaceRoot ?? cwd;
   const reload = async (): Promise<void> => {
     if (!mcpManager) return;
-    const cfg = await loadMcpConfig({ home: userHome, cwd });
+    const cfg = await loadMcpConfig({ home: userHome, mcpConfigRoot });
     await mcpManager.reload(cfg.servers);
   };
 

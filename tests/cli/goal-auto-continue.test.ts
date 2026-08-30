@@ -101,6 +101,7 @@ function chatCtx(id: string, nResponses: number) {
   const ctx = makeCtx({
     responses,
     checkpointStore: store,
+    workspaceRoot: baseDir,
     stateOverrides: { conversationId: id },
   });
   const verifyConfig: VerifyConfig = { command: "" };

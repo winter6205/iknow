@@ -127,6 +127,7 @@ function buildHarness(cfg: McpServerConfig): Harness {
   const registry = createAciRegistry([toolSearch]);
   toolSearchHolder.reg = registry;
   const manager = createMcpManager({
+    workspaceRoot: repoRoot,
     config: [cfg],
     registerExternal: (defs) => {
       // 真实调用 AciRegistry.registerExternal — 验证 Gate 2

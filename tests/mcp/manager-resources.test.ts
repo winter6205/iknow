@@ -26,6 +26,9 @@ import {
 import { ToolExecutionError } from "../../src/harness/errors.ts";
 import type { McpServerConfig } from "../../src/harness/mcp/config.ts";
 
+/** T4 fixture — absolute workspace root for manager cwd contract. */
+const TEST_WORKSPACE_ROOT = "/tmp/iknow-mcp-manager-resources-workspace";
+
 // ---------------------------------------------------------------------------
 // Resource stub client —— 在 manager.test.ts makeStubClient 基础上加 resource
 // 通道（listResources / readResource）；既有 callTool/listTools 不变。
@@ -186,6 +189,7 @@ describe("manager.listResources / readResource — normal path", () => {
     const r = sampleResource("a", "file:///a.txt");
     const b = sampleResource("b", "file:///b.txt");
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("only")],
       registerExternal: () => {},
       createClient: () =>
@@ -219,6 +223,7 @@ describe("manager.listResources / readResource — normal path", () => {
       sampleResource("b2", "x://b/2"),
     ];
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("alpha"), makeStdio("beta")],
       registerExternal: () => {},
       createClient: (cfg) => {
@@ -256,6 +261,7 @@ describe("manager.listResources / readResource — normal path", () => {
   it("returns blob content (base64) from readResource", async () => {
     const b64 = Buffer.from("binary-data").toString("base64");
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("blob-srv")],
       registerExternal: () => {},
       createClient: () =>
@@ -281,6 +287,7 @@ describe("manager.listResources / readResource — normal path", () => {
 describe("listResources / readResource — empty input", () => {
   it("returns empty aggregates when manager was constructed but not started", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("never")],
       registerExternal: () => {},
       createClient: () =>
@@ -299,6 +306,7 @@ describe("listResources / readResource — empty input", () => {
 
   it("throws ToolExecutionError for empty server name", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("only")],
       registerExternal: () => {},
       createClient: () =>
@@ -313,6 +321,7 @@ describe("listResources / readResource — empty input", () => {
 
   it("throws ToolExecutionError for empty uri", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("only")],
       registerExternal: () => {},
       createClient: () =>
@@ -333,6 +342,7 @@ describe("listResources / readResource — empty input", () => {
 describe("listResources / readResource — invalid input", () => {
   it("throws ToolExecutionError when server name is not configured", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("real")],
       registerExternal: () => {},
       createClient: () =>
@@ -347,6 +357,7 @@ describe("listResources / readResource — invalid input", () => {
 
   it("readResource on a disabled server throws ToolExecutionError (failed state)", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdioDisabled("off")],
       registerExternal: () => {},
       createClient: () =>
@@ -361,6 +372,7 @@ describe("listResources / readResource — invalid input", () => {
 
   it("listResources reports disabled server in perServer.state (without throwing)", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdioDisabled("off")],
       registerExternal: () => {},
       createClient: () =>
@@ -376,6 +388,7 @@ describe("listResources / readResource — invalid input", () => {
 
   it("propagates SDK reject from listResources as ToolExecutionError", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("flaky")],
       registerExternal: () => {},
       createClient: () =>
@@ -403,6 +416,7 @@ describe("listResources / readResource — overflow / boundaries", () => {
       all.push(sampleResource(`r${i}`, `x://srv/${i}`));
     }
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("big")],
       registerExternal: () => {},
       createClient: () =>
@@ -420,6 +434,7 @@ describe("listResources / readResource — overflow / boundaries", () => {
 
   it("passes cursor through to the underlying SDK call", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("page")],
       registerExternal: () => {},
       createClient: () =>
@@ -449,6 +464,7 @@ describe("listResources / readResource — overflow / boundaries", () => {
 describe("listResources / readResource — concurrent / exception", () => {
   it("issues two concurrent readResource calls across two servers, both resolve independently", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("a"), makeStdio("b")],
       registerExternal: () => {},
       createClient: (cfg) => {
@@ -478,6 +494,7 @@ describe("listResources / readResource — concurrent / exception", () => {
 
   it("AbortError from SDK surfaces as ToolExecutionError (does not hang)", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("abort-srv")],
       registerExternal: () => {},
       createClient: () =>
@@ -502,6 +519,7 @@ describe("listResources / readResource — concurrent / exception", () => {
   it("readResource when server transitioned from connected to failed throws ToolExecutionError with state info", async () => {
     const handles: McpClientHandle[] = [];
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("tw")],
       registerExternal: () => {},
       createClient: () => {

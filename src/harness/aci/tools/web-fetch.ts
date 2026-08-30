@@ -6,7 +6,7 @@
  *   - html content-type → HTML→文本提取（跳过 script/style + 实体解码 + 折叠空白）。
  *   - 输出头：URL（最终）/ Status / Content-Type / Window；正文前注入
  *     UNTRUSTED_BANNER 防 prompt injection（外部内容当数据，不当指令）。
- *   - max_chars 窗口（默认 12000，schema 下限 500 上限 16000）+ start_chars
+ *   - max_chars 窗口（默认 8000，schema 下限 500 上限 16000）+ start_chars
  *     续抓。工具层保证整段 output ≤ FETCH_OUTPUT_BUDGET（对齐 ADR-0006）。
  *
  * ACI 元数据：category=read-only（权限层默认 allow）、isConcurrencySafe=true、
@@ -19,16 +19,17 @@
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
-import { htmlToText } from "./html-text.js";
+import { extractMainContent, htmlToText } from "./html-text.js";
 import {
   createDefaultGuardDeps,
   fetchPublicResponse,
   type GuardDeps,
   type GuardFetchFn,
   type GuardLookupFn,
+  type GuardPublicResponse,
 } from "./network-guard.js";
 
-const DEFAULT_MAX_CHARS = 12_000;
+const DEFAULT_MAX_CHARS = 8_000;
 const MIN_MAX_CHARS = 500;
 const MAX_MAX_CHARS = 16_000;
 const FETCH_TIMEOUT_MS = 15_000;
@@ -81,16 +82,31 @@ interface FetchInput {
 export function createWebFetchTool(deps?: WebFetchToolDeps): AciToolDef {
   // fail-fast:代理配置在装配时即过 SSRF 语法校验(对齐 web_search)。
   const guardDeps = resolveGuardDeps(deps);
+  const responseCache = new Map<string, Promise<GuardPublicResponse>>();
   const handler = async (
     input: unknown,
     ctx?: ToolExecutionContext
   ): Promise<string> => {
     const parsed = compileFetchInput(input);
-    const response = await fetchPublicResponse(parsed.url, guardDeps, {
-      tool: "web_fetch",
-      timeoutMs: FETCH_TIMEOUT_MS,
-      signal: ctx?.signal,
-    });
+    const cachedResponse = responseCache.get(parsed.url);
+    const cacheHit = cachedResponse !== undefined;
+    const responsePromise =
+      cachedResponse ??
+      fetchPublicResponse(parsed.url, guardDeps, {
+        tool: "web_fetch",
+        timeoutMs: FETCH_TIMEOUT_MS,
+        signal: ctx?.signal,
+      });
+    if (!cacheHit) {
+      responseCache.set(parsed.url, responsePromise);
+      responsePromise.catch(() => {
+        // EXIT: failed responses are not retained; a later miss may retry.
+        if (responseCache.get(parsed.url) === responsePromise) {
+          responseCache.delete(parsed.url);
+        }
+      });
+    }
+    const response = await responsePromise;
     const text = renderFetchBody(
       response.body,
       response.contentType,
@@ -127,7 +143,7 @@ export function createWebFetchTool(deps?: WebFetchToolDeps): AciToolDef {
   return Object.freeze({
     name: "web_fetch",
     description:
-      "Fetch a single web page when you have the URL (from web_search or the user); for bulk or interactive flows use a browser instead. Returns the final URL, HTTP status, content type, Representation, a Window line (start / returned / original_length), and the body wrapped in an untrusted-content banner. as=text (default) extracts HTML to plain text; as=html returns the markup when the content type includes html. Optional start_chars (default 0) selects the window; the next call continues at start+returned. max_chars 500..16000 (default 12000). SSRF guard rejects non-http(s) URLs, private/internal targets, and non-2xx responses; redirects validated hop-by-hop up to 5 hops.",
+      "Fetch a single web page when you have the URL (from web_search or the user); for bulk or interactive flows use a browser instead. Returns the final URL, HTTP status, content type, Representation, a Window line (start / returned / original_length), and the body wrapped in an untrusted-content banner. as=text (default) extracts the main HTML content to plain text; as=html returns the markup when the content type includes html. Optional start_chars (default 0) selects the window; the next call continues at start+returned. max_chars 500..16000 (default 8000). SSRF guard rejects non-http(s) URLs, private/internal targets, and non-2xx responses; redirects validated hop-by-hop up to 5 hops.",
     inputSchema: {
       type: "object",
       properties: {
@@ -180,7 +196,7 @@ function resolveGuardDeps(deps?: WebFetchToolDeps): GuardDeps {
   };
 }
 
-/** 入参校验：url 非空；max_chars clamp；start_chars 缺省 0，非法则抛。 */
+/** 入参校验：url 非空；max_chars/start_chars 非法则抛。 */
 function compileFetchInput(input: unknown): FetchInput {
   const obj = (input ?? {}) as {
     url?: unknown;
@@ -193,20 +209,26 @@ function compileFetchInput(input: unknown): FetchInput {
   }
   return {
     url: obj.url,
-    maxChars: clampMaxChars(obj.max_chars),
+    maxChars: compileMaxChars(obj.max_chars),
     startChars: compileStartChars(obj.start_chars),
     as: compileAs(obj.as),
   };
 }
 
-/** max_chars clamp：非有限数 → 默认；越界 → 边界值。 */
-function clampMaxChars(raw: unknown): number {
-  if (typeof raw !== "number" || !Number.isFinite(raw))
-    return DEFAULT_MAX_CHARS;
-  const floored = Math.floor(raw);
-  if (floored < MIN_MAX_CHARS) return MIN_MAX_CHARS;
-  if (floored > MAX_MAX_CHARS) return MAX_MAX_CHARS;
-  return floored;
+function compileMaxChars(raw: unknown): number {
+  if (raw === undefined) return DEFAULT_MAX_CHARS;
+  const valid =
+    typeof raw === "number" &&
+    Number.isFinite(raw) &&
+    Number.isInteger(raw) &&
+    raw >= MIN_MAX_CHARS &&
+    raw <= MAX_MAX_CHARS;
+  if (!valid) {
+    throw new ToolExecutionError(
+      `web_fetch: max_chars must be an integer between ${MIN_MAX_CHARS} and ${MAX_MAX_CHARS}`
+    );
+  }
+  return raw;
 }
 
 function compileStartChars(raw: unknown): number {
@@ -268,7 +290,12 @@ function renderFetchBody(
     return body.trim();
   }
   if (isHtmlContentType(contentType)) {
-    return htmlToText(body).trim();
+    try {
+      return extractMainContent(body);
+    } catch {
+      // EXIT: main-content extraction failure falls back to the established full-page renderer.
+      return htmlToText(body).trim();
+    }
   }
   return body.trim();
 }
@@ -315,8 +342,7 @@ function sliceFetchWindow(
     take = Math.min(take, Math.max(0, budget - BODY_TRUNCATION_MARKER.length));
   }
   const body = text.slice(from, from + take);
-  const marker =
-    from + body.length < text.length ? BODY_TRUNCATION_MARKER : "";
+  const marker = from + body.length < text.length ? BODY_TRUNCATION_MARKER : "";
   return { start, returned: body.length, body, marker };
 }
 

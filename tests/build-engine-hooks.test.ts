@@ -57,6 +57,9 @@ describe("buildHarnessEngine — #365 T1 hooks 透传观测缝", () => {
       const built = await buildHarnessEngine({
         env: makeEnv("sk-test-t1-hooks-1"),
         askUser: createNoAskUser(),
+        cwd: root,
+        workspaceRoot: root,
+        productRoot: root,
         sandboxRoot: root,
         hooks,
       });
@@ -98,6 +101,9 @@ describe("buildHarnessEngine — #365 T1 hooks 透传观测缝", () => {
       const built = await buildHarnessEngine({
         env: makeEnv("sk-test-t1-nohooks-1"),
         askUser: createNoAskUser(),
+        cwd: root,
+        workspaceRoot: root,
+        productRoot: root,
         sandboxRoot: root,
       });
 

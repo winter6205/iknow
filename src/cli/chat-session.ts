@@ -26,7 +26,7 @@ import {
   type SlashEffect,
 } from "./slash.js";
 import type { SessionContext } from "../shared/schema.js";
-import { isIknowError } from "../shared/errors.js";
+import { isIknowError, ValidationError } from "../shared/errors.js";
 import { MaxTurnsExceeded } from "../harness/errors.js";
 import { maxTurnsNotice } from "./max-turns.js";
 import {
@@ -50,6 +50,13 @@ import {
 } from "../harness/memory/index.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
+import {
+  createSubagentWake,
+  queryableSubagentTaskIds,
+  toSubagentWakeError,
+  type SubagentWake,
+  type SubagentWakeError,
+} from "../harness/subagent/host-wake.js";
 import {
   createViolationCounter,
   wireKillSessionNotification,
@@ -191,6 +198,8 @@ export type ChatSessionOpts = {
    * SIGINT/SIGTERM 必须收口**活跃**引擎，而非停留在初始引擎）。
    */
   readonly engineShutdown?: { current?: () => Promise<void> };
+  /** T1: resolved workspace root used by fresh checkpoint bootstraps. */
+  readonly workspaceRoot?: string;
 };
 
 /**
@@ -238,6 +247,8 @@ export type ChatLineContext = {
    * 跳过持久化,行为零变化。
    */
   checkpointStore?: SessionStore;
+  /** T1: resolved root persisted when a fresh checkpoint file is bootstrapped. */
+  workspaceRoot?: string;
   /**
    * #356 T7:同 ChatSessionOpts.subagentManager,runChatSession 透传。
    * 缺席(undefined)= 不调 drain,行为零变化。可变 —— rebind 重建后由
@@ -399,6 +410,8 @@ export type ProcessChatLineResult = {
   stderr?: string;
   /** True when this line was a user query that ran the agent. */
   ranQuery?: boolean;
+  /** T6: a silent subagent handoff failed; no completion was fabricated. */
+  wakeFailure?: SubagentWakeError;
 };
 
 export interface ProcessChatLineOpts {
@@ -606,6 +619,9 @@ async function runSkipAppendAndPresent(opts: {
         store: ctx.checkpointStore,
         conversationId: ctx.state.conversationId,
         jsonMode: ctx.state.jsonMode,
+        ...(ctx.workspaceRoot !== undefined
+          ? { workspaceRoot: ctx.workspaceRoot }
+          : {}),
         result,
         priorMessages,
       });
@@ -656,6 +672,80 @@ async function runSkipAppendAndPresent(opts: {
       stderr: formatChatError(err),
       ranQuery: true,
     };
+  }
+}
+
+/**
+ * T4: consume a terminal subagent handoff without inventing a user input.
+ * The drain is a prior user message for the model, but it never goes through
+ * the readline/input-history path.
+ */
+export async function runChatSubagentWake(opts: {
+  readonly ctx: ChatLineContext;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
+}): Promise<ProcessChatLineResult> {
+  const { ctx } = opts;
+  const drained = await drainPendingSubagents(ctx.subagentManager);
+  if (drained.length === 0) return { quit: false, output: "" };
+  const box = busyBox(ctx);
+  if (box.value) return { quit: false, output: "" };
+  box.value = true;
+  ctx.graphAssembly?.beginRound();
+  const priorMessages = Object.freeze([
+    ...ctx.state.messages,
+    Object.freeze({
+      role: "user" as const,
+      content: Object.freeze([
+        Object.freeze({ type: "text" as const, text: drained }),
+      ]),
+    }),
+  ]);
+  try {
+    const { result, trace } = await runHarness(
+      "",
+      ctx.deps,
+      ctx.abortController?.signal,
+      {
+        priorMessages,
+        appendUserText: false,
+        ...(opts.onStream !== undefined ? { onStream: opts.onStream } : {}),
+      }
+    );
+    if (ctx.checkpointStore && ctx.state.conversationId !== null) {
+      await persistChatSessionCheckpoint({
+        store: ctx.checkpointStore,
+        conversationId: ctx.state.conversationId,
+        jsonMode: ctx.state.jsonMode,
+        result,
+        priorMessages: ctx.state.messages,
+      });
+    }
+    if (
+      result.stopReason !== "protocolError" &&
+      result.stopReason !== "emptyFinalResponse"
+    ) {
+      ctx.state.messages = Object.freeze([...result.messages]);
+    }
+    return presentChatTurn({
+      ctx,
+      result,
+      trace,
+      priorMessages,
+    });
+  } catch (err) {
+    const wakeError = toSubagentWakeError(err, {
+      taskIds: queryableSubagentTaskIds(ctx.subagentManager),
+      queryable: ctx.subagentManager !== undefined,
+    });
+    return {
+      quit: false,
+      output: "",
+      stderr: formatChatError(wakeError),
+      ranQuery: false,
+      wakeFailure: wakeError,
+    };
+  } finally {
+    box.value = false;
   }
 }
 
@@ -995,6 +1085,9 @@ async function runChatQueryLine(
             store: ctx.checkpointStore,
             conversationId: ctx.state.conversationId,
             jsonMode: ctx.state.jsonMode,
+            ...(ctx.workspaceRoot !== undefined
+              ? { workspaceRoot: ctx.workspaceRoot }
+              : {}),
             result: s.result,
             priorMessages: s.priorMessages,
           });
@@ -1239,7 +1332,12 @@ async function processSlash(opts: {
       if (effect.action === "clear") {
         return goalClear(store, conversationId);
       }
-      const pinned = await goalPin(store, conversationId, effect);
+      const pinned = await goalPin(
+        store,
+        conversationId,
+        effect,
+        ctx.workspaceRoot
+      );
       if (pinned.stderr !== undefined || ctx.verifyConfig === undefined) {
         return pinned;
       }
@@ -1335,7 +1433,8 @@ async function goalClear(
 async function goalPin(
   store: SessionStore,
   conversationId: string,
-  effect: Extract<SlashEffect, { type: "goal" }>
+  effect: Extract<SlashEffect, { type: "goal" }>,
+  workspaceRoot?: string
 ): Promise<ProcessChatLineResult> {
   const text = effect.text.trim();
   if (text.length === 0) {
@@ -1349,7 +1448,7 @@ async function goalPin(
   if (invalid !== null) {
     return { quit: false, output: "", stderr: `goal rejected: ${invalid}` };
   }
-  const loaded = await loadGoalTarget(store, conversationId);
+  const loaded = await loadGoalTarget(store, conversationId, workspaceRoot);
   if (!loaded.ok) return loaded.result;
   return savePinnedGoal(
     store,
@@ -1364,7 +1463,8 @@ async function goalPin(
  *  SessionFileV1(从零 pin);其它 typed 错误 → 返回 stderr 渲染结果。 */
 async function loadGoalTarget(
   store: SessionStore,
-  conversationId: string
+  conversationId: string,
+  workspaceRoot?: string
 ): Promise<
   | { ok: true; file: SessionFileV1 }
   | { ok: false; result: ProcessChatLineResult }
@@ -1376,7 +1476,13 @@ async function loadGoalTarget(
       isSessionStoreErrorKind(err) &&
       (err as SessionStoreError).kind === "not_found"
     ) {
-      return { ok: true, file: freshSessionFile(conversationId) };
+      return {
+        ok: true,
+        file: freshSessionFile(
+          conversationId,
+          requireSessionWorkspaceRoot(workspaceRoot)
+        ),
+      };
     }
     return {
       ok: false,
@@ -1390,7 +1496,10 @@ async function loadGoalTarget(
 }
 
 /** 最小合法 SessionFileV1(形状与 persistChatSessionCheckpoint 的重建一致)。 */
-function freshSessionFile(conversationId: string): SessionFileV1 {
+function freshSessionFile(
+  conversationId: string,
+  workspaceRoot: string
+): SessionFileV1 {
   const now = new Date().toISOString();
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -1400,10 +1509,21 @@ function freshSessionFile(conversationId: string): SessionFileV1 {
     turnCount: 0,
     updatedAt: now,
     title: "",
-    cwd: process.cwd(),
+    cwd: workspaceRoot,
     sanitized_at: now,
     checkpoints: [],
+    workspaceRoot,
   };
+}
+
+function requireSessionWorkspaceRoot(workspaceRoot: string | undefined): string {
+  if (workspaceRoot === undefined || workspaceRoot.trim().length === 0) {
+    throw new ValidationError(
+      "workspace root is required to create a session",
+      { field: "workspaceRoot" }
+    );
+  }
+  return workspaceRoot;
 }
 
 /** pinGoal + 原子写;save 失败 → typed-error 渲染,不 crash。 */
@@ -1534,10 +1654,20 @@ export async function persistChatSessionCheckpoint(opts: {
   readonly jsonMode: boolean;
   readonly result: RunResult;
   readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
+  /** Resolved root for a new conversation bootstrap. */
+  readonly workspaceRoot?: string;
   /** 落盘失败 / 读坏文件时的 stderr 通知(缺省静默 — 观察者纪律)。 */
   readonly warn?: (line: string) => void;
 }): Promise<void> {
-  const { store, conversationId, jsonMode, result, priorMessages, warn } = opts;
+  const {
+    store,
+    conversationId,
+    jsonMode,
+    result,
+    priorMessages,
+    warn,
+    workspaceRoot,
+  } = opts;
   try {
     if (!shouldPersistCheckpoint(result, priorMessages)) return;
     let session: SessionFileV1;
@@ -1555,9 +1685,10 @@ export async function persistChatSessionCheckpoint(opts: {
         turnCount: 0,
         updatedAt: new Date().toISOString(),
         title: "",
-        cwd: process.cwd(),
+        cwd: requireSessionWorkspaceRoot(workspaceRoot),
         sanitized_at: new Date().toISOString(),
         checkpoints: [],
+        workspaceRoot: requireSessionWorkspaceRoot(workspaceRoot),
       };
     }
     const now = new Date().toISOString();
@@ -1615,8 +1746,10 @@ export function createChatSessionCommitHook(opts: {
   readonly conversationId: string;
   readonly jsonMode: boolean;
   readonly getPriors: () => ReadonlyArray<AnthropicNativeMessage>;
+  /** Resolved root for a new conversation bootstrap. */
+  readonly workspaceRoot?: string;
 }): (messages: ReadonlyArray<AnthropicNativeMessage>) => Promise<void> {
-  const { store, conversationId, jsonMode, getPriors } = opts;
+  const { store, conversationId, jsonMode, getPriors, workspaceRoot } = opts;
   return async (messages) => {
     try {
       await store.appendEvents({ id: conversationId, events: [...messages] });
@@ -1644,9 +1777,10 @@ export function createChatSessionCommitHook(opts: {
         turnCount: 0,
         updatedAt: now,
         title: "",
-        cwd: process.cwd(),
+        cwd: requireSessionWorkspaceRoot(workspaceRoot),
         sanitized_at: now,
         checkpoints: [],
+        workspaceRoot: requireSessionWorkspaceRoot(workspaceRoot),
       };
       priors = getPriors();
     }
@@ -1828,6 +1962,9 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     conversationId,
     jsonMode: state.jsonMode,
     getPriors: () => state.messages,
+    ...(opts.workspaceRoot !== undefined
+      ? { workspaceRoot: opts.workspaceRoot }
+      : {}),
   });
   const wrapChatDeps = (base: LoopEngineDeps): LoopEngineDeps => ({
     ...base,
@@ -1857,6 +1994,9 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     graphAssembly: opts.graphAssembly,
     abortController,
     checkpointStore,
+    ...(opts.workspaceRoot !== undefined
+      ? { workspaceRoot: opts.workspaceRoot }
+      : {}),
     subagentManager: opts.subagentManager,
     verifyConfig: opts.verifyConfig,
     autoMemory: opts.autoMemory,
@@ -1986,6 +2126,7 @@ async function runInteractive(opts: {
 
   // Serialize turns: never start next line / prompt until previous finishes.
   let chain: Promise<void> = Promise.resolve();
+  let wakeController: SubagentWake | undefined;
 
   const handle = async (line: string): Promise<void> => {
     busy = true;
@@ -2098,8 +2239,41 @@ async function runInteractive(opts: {
       }
     } finally {
       busy = false;
+      wakeController?.flush();
     }
   };
+
+  wakeController = createSubagentWake({
+    manager: ctx.subagentManager,
+    isIdle: () => !busy && !closed,
+    wake: async () => {
+      busy = true;
+      try {
+        const wakeRun = chain.then(async () => {
+          const result = await runChatSubagentWake({ ctx });
+          if (result.stderr) writeErr(result.stderr);
+          if (result.output) {
+            writeOut(result.output);
+            if (result.ranQuery) writeOut(TTY_ANSWER_SEP);
+          }
+        });
+        chain = wakeRun.catch((error: unknown) => {
+          const wakeError = toSubagentWakeError(error, {
+            reason: "wakeFailed",
+            taskIds: queryableSubagentTaskIds(ctx.subagentManager),
+            queryable: ctx.subagentManager !== undefined,
+          });
+          writeErr(formatChatError(wakeError));
+          // EXIT: keep the serialized wake chain usable after reporting this
+          // undelivered wake; never turn the failure into a success summary.
+        });
+        await chain;
+      } finally {
+        busy = false;
+      }
+    },
+    onError: (error) => writeErr(formatChatError(error)),
+  });
 
   // W2 扩展：Shift+Tab 切换权限模式（default ↔ full_auto；plan 走
   // /permissions plan 命令不进循环）。REPL 用 readline：terminal:true 时
@@ -2157,6 +2331,7 @@ async function runInteractive(opts: {
         });
     });
     rl.on("close", () => {
+      wakeController.dispose();
       process.off("SIGINT", onSigint);
       rl.removeListener("SIGINT", onSigint);
       // 卸载 Shift+Tab keypress 监听；与 SIGINT cleanup 同位（不积攒）。
