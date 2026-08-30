@@ -7,7 +7,8 @@
   "types": "dist/index.d.ts",
   "bin": {
     "iknow": "dist/cli.js",
-    "iknow-trace-mcp": "scripts/iknow-trace-mcp.cjs"
+    "iknow-trace-mcp": "scripts/iknow-trace-mcp.cjs",
+    "iknow-lsp-mcp": "scripts/iknow-lsp-mcp.cjs"
   },
   "exports": {
     ".": {

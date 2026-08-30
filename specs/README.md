@@ -36,6 +36,7 @@
 - `224-tool-extension-path.md` — 工具扩展路径（lazy / discover / visibleSchemas + tool_search）
 - `251-lsp-tool.md` — LSP 工具（自建客户端 + TS 首期）
 - `302-lsp-multilang.md` — LSP 多语言泛化
+- `lsp-mcp-server.md` — stdio MCP（SDK 2.0）暴露 10 件只读 `lsp_*`；plan 内嵌 ACR
 - `337-skill-mcp-extension.md` — skill + MCP 扩展源
 - `406-secret-roundtrip-mask.md` — Secret roundtrip mask（supersedes `#126` hook-system）
 
