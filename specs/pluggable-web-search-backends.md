@@ -13,7 +13,7 @@
 6. 三态 fail-closed：
    - `backend = "bing"` 或未设 + 无任何 keyed key → Bing HTML（默认路径，与既有完全一致）
    - `backend = keyed` + 对应 key 缺失 / 占位符解析失败 → typed `ToolExecutionError`（含 backend id + 提示 env / settings 字段）
-   - `backend` 未设 + `EXA_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY` 任一已设 → typed `ToolExecutionError`（防配错静默回 Bing）
+   - `backend` 未设 + 任意 vendor key 已设 → 走默认 Bing（key 未生效；operator 漏选 backend 不报错，由 loader 的 `IKNOW_WEB_SEARCH_BACKEND` 默认值 `"bing"` 自然兜底）
    - 上游非 2xx（含 401 / 429 / 5xx）→ typed `ToolExecutionError`，message 含 upstream status + endpoint 域名，**不**带 key 字面值 / Authorization header
 7. Adapter interface 形态（同文件 `BACKENDS` 表，按 `id` 分派；不开子目录）：
    ```ts
@@ -34,7 +34,7 @@
    ```
 8. 投影规则：所有 adapter 收敛到 Bing-shape `{title, snippet, url}`；T2 字段 cap 一刀切，adapter 不写自家 cap。
    - Tavily: `result.title` / `result.content` / `result.url`；**忽略 `result.answer`**
-   - Exa: `result.title` / `result.highlights[0].text ?? result.text` / `result.url`
+   - Exa: `result.title` / `result.highlights[0] ?? result.text` / `result.url`（真 Exa API 的 `highlights` 是 `string[]`，非 spec 初稿假设的 `Array<{text:string}>` —— 已通过 T8 probe 验证；spec 初稿 8.Assumption 与真 API 偏差已在本 spec 修订时更正）
    - Brave: v1 不实现 `project()`，stub `fetchResults` 抛 typed `not_shipped` error
 9. `search_url` 覆写参数在 `backend != "bing"` 时 **schema reject**（typed `ToolExecutionError`：search_url only valid with backend="bing"）；不走 SSRF 验证路径。`backend = "bing"` 时既有 SSRF 路径不动。
 10. 测试矩阵：stub-only 默认（每 backend 一文件，7 类边界）+ integration fail-closed（4 状态）+ opt-in real HTTP smoke（`scripts/probe-search-backends.ts`）；Brave v1 真 HTTP 不测试。
@@ -73,12 +73,12 @@
 1. `npm run typecheck` exit 0。
 2. `npx vitest run tests/harness/aci/tools/web-search tests/integration/search-backend-fail-closed` exit 0。
 3. stub 单元测试覆盖至少九类：basic / empty / field-cap / **concurrent（同 query 并发去重，parametrize over backend id）** / **parse（vendor 畸形响应 → `SearchBackendError` kind=`parse`，非 silent empty）** / Tavily `result.answer` 忽略 / Exa `highlights[0]` 优先 / non-2xx / timeout；**meta-not-leak** 类按 Out-of-scope 标记 v1 跳过（无 envelope meta 通道）。
-4. integration fail-closed 测试覆盖：① `backend=exa + EXA_API_KEY 缺失` → typed `ToolExecutionError`；② `EXA_API_KEY` 占位符解析失败 → typed error；③ `EXA_API_KEY` 已设但 `IKNOW_WEB_SEARCH_BACKEND` 未设 → typed error；④ `backend=tavily + search_url 传入` → schema reject。
+4. integration fail-closed 测试覆盖：① `backend=exa + EXA_API_KEY 缺失` → typed `ToolExecutionError`；② `EXA_API_KEY` 占位符解析失败 → typed error；③ ~~`EXA_API_KEY` 已设但 `IKNOW_WEB_SEARCH_BACKEND` 未设 → typed error（已撤销）~~：loader 的 `IKNOW_WEB_SEARCH_BACKEND` 默认值 `"bing"` 让此路径在真 loader 不可达；归入默认 Bing 路径（SC #5）。集成测试 `tests/integration/search-backend-fail-closed.test.ts` 中 state ③ 用「loadIknowEnv 后手动 override `searchBackend=undefined`」覆盖 handler entry 的 `assertBackendConfig` 防御路径（防回归：未来若有人改 loader 让 `searchBackend` 可能 `undefined` 时仍 fail-closed），但**不是**真实用户路径。④ `backend=tavily + search_url 传入` → schema reject。
 5. 既有 Bing HTML 路径（`backend="bing"` 或未设 + 无 key）在无 `EXA_API_KEY` 等的纯净环境下与 v0 行为字节级一致（同 fixture 跑同 query 出同输出）。
 6. 既有 `search_url` SSRF 验证（`backend="bing"` 时）路径不动；既有 web-search 单测全绿。
 7. `npm run probe:search-backends` 在 `EXA_API_KEY` 已设时跑通（≥1 结果、字段非空）；缺 key 时 fail-fast（exit ≠ 0 + stderr 提示，不 silent skip）。
 8. Brave / Tavily stub：被 `IKNOW_WEB_SEARCH_BACKEND=brave|tavily` 选中时抛 typed `not_shipped` error，message 含 backend id。
-9. T2 字段 cap（snippet / title / 单条 + 总条）跨 `[bing, exa, tavily, brave]` 一致施加（parametrize over backend id）；既有 `web-search.test.ts:455 describe("createWebSearchTool — concurrency")` 的「同 query 并发去重」用例扩到四个 backend（既有 `resultCache` 不动，行为天然共享；新增 parametrize 即可，不复制代码）。
+9. T2 字段 cap（snippet ≤ 500 / title ≤ 200 / 总条 ≤ max_results）跨 `[bing, exa, tavily, brave]` 一致施加（`MAX_SNIPPET_CHARS=500` 是 pre-existing 常量，本 PR 不动；spec 初稿口误「280」是文档笔误，已更正）；既有 `web-search.test.ts:455 describe("createWebSearchTool — concurrency")` 的「同 query 并发去重」用例扩到四个 backend（既有 `resultCache` 不动，行为天然共享；新增 parametrize 即可，不复制代码）。
 10. 既有 `network-guard.ts` / `html-text.ts` / `web-fetch.ts` 文件零改动。
 
 ## Open Questions
@@ -92,7 +92,7 @@
 - `src/harness/aci/tools/web-search.ts` 既有 Bing HTML 解析（`cn.bing.com/search` 默认）+ `search_url` 覆写 + `parseResults` 按 hostname 分派 Bing/DDG（`web-search.ts:228-237`）
 - `src/harness/aci/tools/network-guard.ts` SSRF 校验（`backend="bing"` 路径零变化）
 - `src/harness/aci/tools/registry.ts` `web_search` ACI 注册（tool 名不变）
-- T2 既有 per-field cap（snippet ≤ 280 / title ≤ 200 / 总条 ≤ max_results）+ 同 query dedup（`web-search.ts:88 resultCache`）
+- T2 既有 per-field cap（snippet ≤ 500 / title ≤ 200 / 总条 ≤ max_results）+ 同 query dedup（`web-search.ts:88 resultCache`）
 - ADR-0004 契约 X / Y1（plain-string tool output，model 视野纯字符串）
 - ADR-0006（executor 20000 字符总闸 / 工具不自称 truncated/total）
 - ADR-0008 D6（chars/N 估算只供 compact 判据；本 spec 不改 compact）
