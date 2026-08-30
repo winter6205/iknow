@@ -77,6 +77,12 @@ _Avoid_: 工具自填 structured metadata 进 model tool_result；把 bash 例�
 **observability side-channel**: (#298) 工具观测旁路——handler 返 envelope `{ output, meta? }`；executor 拆分后仅 `output` 字符串化进 model-facing tool_result，`meta`（典型如 edit_file/write_file 的 `oldContent`/`newContent`）经 `PostToolUseHook.payload` → `TuiToolEvent.payload` → `LiveToolRun` 字段供 TUI diff 预览等观测消费者，永不进模型视野。ADR-0004（supersede Y1）。
 _Avoid_: 把 meta 拼入 model tool_result；让 TUI / Web 直接读 handler 原始返回对象
 
+**web_search backend selection**: `web_search` ACI 工具的后端选择面——按 `WebEnv.searchBackend` 显式选定（默认 `"bing"` / `cn.bing.com/search` HTML）；keyed backend 缺 key / 占位符解析失败 / backend 未设但 keyed key 已设一律 typed ToolExecutionError，无静默降级；零 key 默认路径与既有 Bing HTML 行为字节级一致。`specs/pluggable-web-search-backends.md`。
+_Avoid_: 把 "fallback" 与 "default" 混名（无 fallback）；让 keyed 失败时静默降级到 Bing；把 backend 字段塞进 settings.json（非 LLM 字段走 env 链，不进 settings 单承载，ADR-0015 §5）
+
+**search backend adapter seam**: `web_search` ACI 工具的可插拔 HTTP 后端接缝——同文件 `BACKENDS: Record<SearchBackendId, SearchBackend>` 表 + `selectBackend(id)` 分派；每家 adapter 投影到 Bing-shape `{title, snippet, url}`，T2 字段 cap 一刀切；v1 仅 Exa 真 HTTP，Tavily / Brave schema 占位（`fetchResults` 抛 typed `not_shipped`）；handler envelope `{output, meta?: {adapter, latencyMs, requestId?}}` 走 observability side-channel（v1 因 executor `isEnvelope` 白名单未扩，meta 通道推迟）；非 bing backend 拒 `search_url` 覆写。
+_Avoid_: 给每家 adapter 写自家 field cap；让 keyed key 解析失败改 silent empty；让 TUI/Web 直接读 handler 原始返回对象（破 observability side-channel）；不查 backend 就读 key
+
 **ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；当前 8 件：`bash` / `read_file` / `grep` / `glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`，SSOT 工厂 = `src/harness/aci/tools/registry.ts:createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取，工具数永不同步漂移（#141 / #191 / a277f68）。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。
 _Avoid_: 在 harness 之外另起 tool 注册表；在 entry point 手写工具数组（#228 决议 D4——`memory_recall` / `memory_save` 入 SSOT 8+2=10）；让工具返回结构化 metadata
 
