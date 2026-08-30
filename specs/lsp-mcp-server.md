@@ -1,6 +1,6 @@
 # Spec: lsp-mcp-server — stdio MCP server 暴露 10 件只读 `lsp_*`（SDK 2.0）
 
-> 输入：操作员 2026-08-30「做成 SDK 2.0 的 MCP 服务」+ 先前抽取裁决（library 核 + MCP 表面，不做 Cursor plugin；写工具首版不带）。
+> 输入：操作员 2026-08-30「做成 SDK 2.0 的 MCP 服务」+ 配置写 README、先不登记项目 mcp.json。
 > 对标：`specs/trace-mcp-server.md` 的 SDK / 分发形态。
 
 ## Assumptions
@@ -19,8 +19,8 @@
 
 ## Boundaries
 
-- **Does:** `LspClientPool` + `resolveBin`；`src/lsp-mcp/` + bin + docs 示例；10 件 read-only tools；vitest in-memory + 启动校验。
-- **Out of this spec:** Cursor plugin；写类 LSP；独立发包；HTTP MCP；Go/Rust server。
+- **Does:** `LspClientPool` + `resolveBin`；`src/lsp-mcp/` + bin + README 可复制示例；10 件 read-only tools（进程内 ACI 不拆）；vitest in-memory + 启动校验。
+- **Out of this spec:** 登记仓库 `.iknow/mcp.json`；Cursor plugin；写类 LSP；独立发包；HTTP MCP；Go/Rust server。
 
 ## Success Criteria
 
@@ -30,6 +30,7 @@
 4. 缺失 `--root` 目录 → stderr 可读、exit ≠ 0、stdout 空。
 5. 源码无 `legacy: 'reject'`。
 6. 两个 `LspClientPool` 不共享缓存（client 单测）。
+7. README 含 `iknow-lsp-mcp` 配置示例；仓库 `.iknow/mcp.json` 无 `iknow-lsp` 条目。
 
 ## ACR
 

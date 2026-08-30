@@ -5,11 +5,6 @@
       "command": "npx",
       "args": ["-y", "codebase-memory-mcp"]
     },
-    "iknow-lsp": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["tsx", "src/lsp-mcp/main.ts", "--root", "."]
-    },
     "iknow-trace": {
       "type": "stdio",
       "command": "npx",

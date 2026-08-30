@@ -1,7 +1,7 @@
-import { mkdirSync } from "node:fs";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 
@@ -130,5 +130,16 @@ describe("lsp MCP server (SDK 2.0)", () => {
     } finally {
       await connected.close();
     }
+  });
+
+  it("documents config in README and does not register iknow-lsp in repo mcp.json", () => {
+    const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+    const readme = readFileSync(join(repoRoot, "README.md"), "utf8");
+    expect(readme).toMatch(/iknow-lsp-mcp/);
+    expect(readme).toMatch(/--root/);
+    const mcp = JSON.parse(
+      readFileSync(join(repoRoot, ".iknow", "mcp.json"), "utf8")
+    ) as { mcpServers?: Record<string, unknown> };
+    expect(mcp.mcpServers?.["iknow-lsp"]).toBeUndefined();
   });
 });
