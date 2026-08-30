@@ -162,7 +162,6 @@ import {
   extractRecentUserTasks,
   isTurnQuery,
   messageText,
-  projectActivity,
   projectThinkingView,
   projectToolCalls,
   TASK_EXCERPT_PREFIX,
@@ -446,8 +445,6 @@ export function projectMessagesToTurns(
     const turnMessages = messages.slice(i, end);
     const finalText = findFinalTextInSlice(turnMessages);
     turnIndex++;
-    const activity = projectActivity(turnMessages, mask);
-    const hasActivityTools = activity.some((item) => item.type === "tool");
     const thinking = projectThinkingView(turnMessages, mask);
     const toolCalls = projectToolCalls(turnMessages, mask);
     turns.push({
@@ -456,7 +453,6 @@ export function projectMessagesToTurns(
         finalText,
         stopReason: "completed",
         turnCount: turnIndex,
-        ...(hasActivityTools ? { activity } : {}),
         ...(thinking !== undefined ? { thinking } : {}),
         ...(toolCalls !== undefined ? { toolCalls } : {}),
       },
@@ -2909,8 +2905,6 @@ export class SessionHub {
     const rawFinalText = result.finalText ?? "";
     const maskedFinalText = mask(rawFinalText);
     const turnMessages = opts.turnMessages ?? result.messages;
-    const activity = projectActivity(turnMessages, mask);
-    const hasActivityTools = activity.some((item) => item.type === "tool");
     const thinking = projectThinkingView(turnMessages, mask);
     const toolCalls = projectToolCalls(turnMessages, mask);
     return {
@@ -2919,7 +2913,6 @@ export class SessionHub {
         finalText: maskedFinalText,
         stopReason: result.stopReason,
         turnCount: result.turnCount,
-        ...(hasActivityTools ? { activity } : {}),
         // T1: optional fields — omitted entirely when undefined (byte-stable
         // for turns without thinking or tool use).
         ...(thinking !== undefined ? { thinking } : {}),
