@@ -41,6 +41,10 @@ On a TTY, bare `iknow` opens chat. Piped / non-TTY with no args prints usage.
 
 Configure the model in `settings.json` (`llm.model`, `llm.apiKey` as a literal or `${VAR}`). Details: [`docs/llm-config-quickstart.md`](docs/llm-config-quickstart.md).
 
+## Probes
+
+- `npm run probe:search-backends` — opt-in Exa real HTTP smoke for `web_search` (fail-closed if `EXA_API_KEY` is unset; not collected by `npm test`).
+
 ## Optional: expose LSP tools to another coding agent
 
 iknow already uses 10 read-only `lsp_*` tools in-process. `iknow-lsp-mcp` is an extra stdio MCP server with the **same** tools, for Cursor / Claude Code / similar hosts. Do not remove the built-in tools; this is a second door, not a move.
