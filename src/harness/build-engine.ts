@@ -60,6 +60,7 @@ import {
 } from "../config/settings.js";
 import {
   createWorktreeIsolationExecutor,
+  taskWorktreeOwnerOf,
   type WorktreeIsolationHostOpts,
 } from "./isolation/worktree-gate.js";
 import type { IknowEnv } from "../config/env.js";
@@ -463,7 +464,17 @@ export async function buildHarnessEngine(
         createSubAgentManager({
           spawn: createDefaultSubAgentSpawn(
             opts.subagentDiagnosticsDir,
-            workspaceRoot
+            workspaceRoot,
+            // T5 (hard req 7): 子代理继承父会话改绑后的根 —— 引擎被重建到
+            // task worktree（hub buildProductionEngine / CLI rebuildDeps 把
+            // cwd/workspaceRoot 切到 `<repo>/.iknow/worktrees/<convId>`）时，
+            // worker 子进程以该根为 cwd 启动；未改绑（主仓根，非 task
+            // worktree 形状）时不传 → 子进程继承父进程 cwd，行为与今日逐
+            // 字节一致。worker 注册表从不携带 isolation 缝 → 子代理不触发
+            // 第二棵树 / 二次 provision（worker-tool-surface 测试钉住）。
+            taskWorktreeOwnerOf(workspaceRoot) !== undefined
+              ? workspaceRoot
+              : undefined
           ),
           sandboxRoot,
           trace: opts.subagentTrace ?? createNoopTraceService(),
@@ -506,8 +517,16 @@ export async function buildHarnessEngine(
       );
     }
   }
-  // #126 T5:settings 对象缝 —— 已上移至 LSP 装配点之前（二期 B7：settings.lsp
-  // 注入 LspCtx），此处沿用同一份 settings。
+  // ADR-0037 T3/T4:worktree isolation host 缝 + 开关判定上移到 registry
+  // 装配之前 —— T4 的 create-task-worktree ACI 工具与 mutate 门禁共用同一
+  // 判定源（isolationEnabled），保证「工具在场 ⇔ 门禁已武装」；开关 OFF 时
+  // 工具面与今日逐字节一致。开关只在启动加载点读一次（硬要求 9）。
+  // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）
+  // 已上移至 LSP 装配点之前（二期 B7：settings.lsp 注入 LspCtx），此处沿用
+  // 同一份 settings（line 398）。
+  const isolationHost = opts.worktreeIsolation;
+  const isolationEnabled =
+    isolationHost !== undefined && resolveWorktreeOnMutate(settings);
   // #406 T4:secret 处理模式 —— settings.secrets.mode 驱动装配。缺省 = "roundtrip"
   // （识别 + 占位符替换 + bash 还原 + 输出 mask）；"block" = 旧 deny-only
   // preToolUse guard（#126 兼容路径），roundtrip 机制整体关闭。非法值已被
@@ -629,6 +648,25 @@ export async function buildHarnessEngine(
     ...(opts.subagentDiagnosticsDir
       ? { traceDir: opts.subagentDiagnosticsDir }
       : {}),
+    // ADR-0037 T4:创建工作树 ACI 工具的条件化装配 —— 与 mutate 门禁同一
+    // 判定源（isolationEnabled，见上方上移注释）；host provision 缝透传给
+    // registry，handler 闭包绑定 sandboxRoot = 会话当前根。OFF / worker /
+    // hub-less 入口不透传 → 工具不入注册表（Gate 3 镜像过滤）。
+    ...(isolationEnabled && isolationHost
+      ? {
+          worktreeProvision: isolationHost.provision,
+          // T7:enter 缝在场时透传（与 provision 同一 isolationEnabled 判定源）；
+          // 缺席（TUI 只接 provision）→ enter-task-worktree 不入注册表。
+          ...(isolationHost.worktreeEnter
+            ? { worktreeEnter: isolationHost.worktreeEnter }
+            : {}),
+          // T8:exit 缝在场时透传（同一 isolationEnabled 判定源）；缺席 →
+          // exit-task-worktree 不入注册表。
+          ...(isolationHost.worktreeExit
+            ? { worktreeExit: isolationHost.worktreeExit }
+            : {}),
+        }
+      : {}),
   });
   // #337:动态 registry 包装 —— 让 inner executor 能解析 registerExternal
   // 动态注册的 mcp__ 工具。`reg.inner` 是构造期快照（aci-registry.ts:71），
@@ -671,12 +709,10 @@ export async function buildHarnessEngine(
     },
   });
 
-  // ADR-0037 T3:mutate 门禁（harness executor 缝）。开关只在启动加载点读一次
-  // （settings 已在上方解析，硬要求 9）；host 缝（provision / initiallyBound）
-  // 由 session-api hub 注入。OFF / host 缺席 → 不包装，行为与今日逐字节一致。
-  const isolationHost = opts.worktreeIsolation;
-  const isolationEnabled =
-    isolationHost !== undefined && resolveWorktreeOnMutate(settings);
+  // ADR-0037 T3:mutate 门禁（harness executor 缝）。开关判定已上移（同一
+  // isolationEnabled 同时驱动 T4 create-task-worktree 工具的条件化装配，
+  // 见上方 registry 调用）；host 缝（provision / initiallyBound）由
+  // session-api hub 注入。OFF / host 缺席 → 不包装，行为与今日逐字节一致。
   const loopExecutor = isolationEnabled
     ? createWorktreeIsolationExecutor({
         enabled: true,

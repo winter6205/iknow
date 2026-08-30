@@ -5,10 +5,12 @@
  * Strategy assembly half, SC 1/3/4/5/10, Boundaries Always — append-only 纪律,
  * 文件截断不丢字符).
  *
- * Order locked (ADR-0009 Decision 1+3+4):
- *   user AGENTS + user rules
+ * Order locked (ADR-0009 Decision 1+3+4; D2 amended 2026-08-30, #841 T6):
+ *   user AGENTS (+ user rules bodies in "bodies" mode)
  *   ↓ [PRIORITY_DECLARATION] — exactly once, between user and project
- *   project AGENTS + project rules
+ *   project AGENTS (+ project rules bodies in "bodies" mode)
+ *   ↓ [RULES_MANIFEST segment] — "manifest" mode only (parent opener):
+ *     paths + read_file guidance, never bodies
  *   ↓ [EXISTENCE_POINTER] — only when the memory library is non-empty
  *   ↓ [memory_catalog + English discipline] — autoExtract === true and ≥1 live
  *   ↓ [promote 段 (if any)] — autoExtract === true (specs/auto-memory-layering.md),
@@ -25,6 +27,7 @@ import {
   findProjectAgents,
   findUserAgents,
   listRulesFiles,
+  type MemoryLayerEntry,
 } from "./discovery.js";
 import { formatMemoryCatalog } from "./catalog.js";
 import { listPromotableEntries, PROMOTE_SEGMENT_CAP } from "./promote.js";
@@ -38,6 +41,29 @@ export const PRIORITY_DECLARATION =
 /** Locked by spec SC 5 (only when the memory library holds ≥1 entry). */
 export const EXISTENCE_POINTER =
   "A memory library is available. Use memory_recall(query) to retrieve past experience.";
+
+/**
+ * How `.iknow/rules/*.md` files enter the static layer
+ * (ADR-0009 D2 amended 2026-08-30 — plans/worktree-isolation-model-provision.md T6).
+ *
+ * - "bodies" (default): read each rules file and inject its (truncated) body.
+ *   Used by the general-purpose worker path (identity staticInstructions) and
+ *   the auto-memory ingest context — the worker opener contract stays intact.
+ * - "manifest": never read rule bodies. Inject one index segment listing the
+ *   absolute paths plus read-path guidance so the model opens a file on
+ *   demand with `read_file`. Used by the parent session opener (chat / tui /
+ *   serve via assembleSystemPrompt): the opener must not dump every rules
+ *   body, and a missing / empty rules dir simply yields no segment (not
+ *   fatal).
+ */
+export type RulesInjectionMode = "bodies" | "manifest";
+
+/** Rules manifest segment title (parent opener, "manifest" mode only). */
+export const RULES_MANIFEST_TITLE = "## Rules index";
+
+/** Rules manifest read-path guidance line (parent opener, "manifest" mode). */
+export const RULES_MANIFEST_GUIDANCE =
+  "The following instruction rule files are available on disk. Their bodies are not injected at session start; read one with the read_file tool when its guidance applies:";
 
 /** Per-file cap (spec SC 3 + Boundaries Always). Measured against UTF-16 length. */
 const FILE_CAP = 12000;
@@ -66,26 +92,44 @@ export interface AssemblyContext {
   readonly promoteEntries?: ReadonlyArray<MemoryEntryV1>;
 }
 
-/** Compose only the static instruction layer, without memory-library content. */
+/** Compose only the static instruction layer, without memory-library content.
+ *  `rulesMode` defaults to "bodies" (worker opener contract, unchanged);
+ *  the parent session opener passes "manifest" via assembleSystemPrompt. */
 export async function assembleStaticSystemPrompt(
-  ctx: Pick<AssemblyContext, "cwd" | "userHome" | "workspaceRoot">
+  ctx: Pick<AssemblyContext, "cwd" | "userHome" | "workspaceRoot">,
+  opts: { readonly rulesMode?: RulesInjectionMode } = {}
 ): Promise<string> {
-  const user = await loadStaticLayer(ctx.userHome, "user");
-  const project = await loadStaticLayer(ctx.cwd, "project");
+  const rulesMode = opts.rulesMode ?? "bodies";
+  const user = await loadStaticLayer(ctx.userHome, "user", rulesMode);
+  const project = await loadStaticLayer(ctx.cwd, "project", rulesMode);
   const parts: string[] = [];
   if (user) parts.push(user);
   if (project) {
     if (user) parts.push(PRIORITY_DECLARATION);
     parts.push(project);
   }
+  if (rulesMode === "manifest") {
+    // #841 T6: parent opener carries a rules index (paths + read-path
+    // guidance), never the bodies. Missing / empty rules dirs → no segment.
+    const [userRules, projectRules] = await Promise.all([
+      listRulesFiles(ctx.userHome, "user"),
+      listRulesFiles(ctx.cwd, "project"),
+    ]);
+    const manifest = rulesManifestSegment([...userRules, ...projectRules]);
+    if (manifest) parts.push(manifest);
+  }
   return parts.join("\n\n");
 }
 
-/** Compose the layered system prompt per the locked order (see file header). */
+/** Compose the layered system prompt per the locked order (see file header).
+ *  Parent session opener (chat / tui / serve via refresh.createSystemResolver):
+ *  rules enter as a manifest, not bodies (#841 T6 / ADR-0009 D2 amended). */
 export async function assembleSystemPrompt(
   ctx: AssemblyContext
 ): Promise<string> {
-  const staticPrompt = await assembleStaticSystemPrompt(ctx);
+  const staticPrompt = await assembleStaticSystemPrompt(ctx, {
+    rulesMode: "manifest",
+  });
   const hasMemory = await memoryLibraryNonEmpty(ctx.memoryDir);
   const parts: string[] = staticPrompt ? [staticPrompt] : [];
   if (hasMemory) parts.push(EXISTENCE_POINTER);
@@ -104,16 +148,19 @@ export async function assembleSystemPrompt(
 
 // -- helpers (each thin, nested ≤4) -----------------------------------------
 
-/** Read AGENTS.md + sorted rules for one scope; return joined, truncated text. */
+/** Read AGENTS.md + (bodies mode only) sorted rules for one scope. */
 async function loadStaticLayer(
   root: string,
-  scope: "user" | "project"
+  scope: "user" | "project",
+  rulesMode: RulesInjectionMode
 ): Promise<string> {
   const agents =
     scope === "user"
       ? await findUserAgents(root)
       : await findProjectAgents(root);
-  const rules = await listRulesFiles(root, scope);
+  // "manifest" mode never reads rule bodies — discovery for the manifest
+  // segment happens once, scope-joined, in assembleStaticSystemPrompt.
+  const rules = rulesMode === "bodies" ? await listRulesFiles(root, scope) : [];
   const chunks: string[] = [];
   if (agents) {
     const text = await readOrEmpty(agents.path);
@@ -124,6 +171,16 @@ async function loadStaticLayer(
     if (text) chunks.push(truncate(text));
   }
   return chunks.join("\n\n");
+}
+
+/** Render the rules index segment: title + guidance + one path per line.
+ *  No rules (missing / empty dir) → undefined so no empty segment renders. */
+function rulesManifestSegment(
+  rules: ReadonlyArray<MemoryLayerEntry>
+): string | undefined {
+  if (rules.length === 0) return undefined;
+  const lines = rules.map((r) => `- ${r.path}`);
+  return `${RULES_MANIFEST_TITLE}\n${RULES_MANIFEST_GUIDANCE}\n${lines.join("\n")}`;
 }
 
 /**

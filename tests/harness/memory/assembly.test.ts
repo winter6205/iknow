@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assembleSystemPrompt,
+  assembleStaticSystemPrompt,
   EXISTENCE_POINTER,
   MEMORY_CATALOG_DISCIPLINE,
   MEMORY_CATALOG_MAX_CHARS,
@@ -140,15 +141,19 @@ describe("assembleSystemPrompt", () => {
     );
   });
 
-  it("orders rules by filename asc within each layer", async () => {
+  it("lists rules paths in filename asc order in the rules manifest (#841 T6)", async () => {
     await mkdirP(join(cwd, ".iknow", "rules"));
     await write(join(cwd, ".iknow", "rules", "zzz.md"), "LATE");
     await write(join(cwd, ".iknow", "rules", "aaa.md"), "EARLY");
 
     const out = await assembleSystemPrompt(ctx());
-    assert.ok(out.indexOf("EARLY") !== -1);
-    assert.ok(out.indexOf("LATE") !== -1);
-    assert.ok(out.indexOf("EARLY") < out.indexOf("LATE"));
+    const iAaa = out.indexOf(join(cwd, ".iknow", "rules", "aaa.md"));
+    const iZzz = out.indexOf(join(cwd, ".iknow", "rules", "zzz.md"));
+    assert.ok(iAaa !== -1, "aaa.md path present in manifest");
+    assert.ok(iZzz !== -1, "zzz.md path present in manifest");
+    assert.ok(iAaa < iZzz, "manifest paths sorted by filename asc");
+    assert.ok(!out.includes("EARLY"), "rule body not injected");
+    assert.ok(!out.includes("LATE"), "rule body not injected");
   });
 
   // -- existence pointer -----------------------------------------------------
@@ -281,7 +286,11 @@ describe("assembleSystemPrompt", () => {
     const out = await assembleSystemPrompt(ctx({ workspaceRoot }));
 
     assert.ok(out.includes("USER AGENTS"), "user AGENTS.md from userHome");
-    assert.ok(out.includes("USER RULE"), "user rules from userHome");
+    assert.ok(
+      out.includes(join(userHome, ".iknow", "rules", "user1.md")),
+      "user rules path from userHome in the manifest"
+    );
+    assert.ok(!out.includes("USER RULE"), "user rule body not injected");
     assert.ok(out.includes("PROJECT AGENTS"), "project layer still from cwd");
     assert.ok(out.includes(PRIORITY_DECLARATION), "priority declaration kept");
     assert.ok(
@@ -382,5 +391,75 @@ describe("assembleSystemPrompt — memory_catalog", () => {
     const catalog = out.slice(out.indexOf(MEMORY_CATALOG_DISCIPLINE));
     assert.ok(catalog.length <= MEMORY_CATALOG_MAX_CHARS);
     assert.ok(!catalog.includes("\n### "), "truncated catalog is not promote");
+  });
+});
+
+// -- rules manifest (parent session opener, #841 T6 / ADR-0009 D2 amended) ---
+
+describe("assembleSystemPrompt — rules manifest (#841 T6)", () => {
+  it("does not dump rule bodies when multiple rules files exist; lists paths instead", async () => {
+    await mkdirP(join(userHome, ".iknow", "rules"));
+    await write(join(userHome, ".iknow", "rules", "aaa.md"), "USER RULE BODY");
+    await write(join(userHome, ".iknow", "rules", "bbb.md"), "USER RULE TWO");
+    await mkdirP(join(cwd, ".iknow", "rules"));
+    await write(join(cwd, "AGENTS.md"), "PROJECT AGENTS");
+    await write(join(cwd, ".iknow", "rules", "proj.md"), "PROJECT RULE BODY");
+
+    const out = await assembleSystemPrompt(ctx());
+
+    // Bodies stay on disk — the opener carries the manifest, not the text.
+    assert.ok(!out.includes("USER RULE BODY"), "user rule body absent");
+    assert.ok(!out.includes("USER RULE TWO"), "second user rule body absent");
+    assert.ok(!out.includes("PROJECT RULE BODY"), "project rule body absent");
+
+    // The manifest lists absolute paths so the read path stays usable.
+    assert.ok(
+      out.includes(join(userHome, ".iknow", "rules", "aaa.md")),
+      "user rule path listed"
+    );
+    assert.ok(
+      out.includes(join(userHome, ".iknow", "rules", "bbb.md")),
+      "second user rule path listed"
+    );
+    assert.ok(
+      out.includes(join(cwd, ".iknow", "rules", "proj.md")),
+      "project rule path listed"
+    );
+    assert.ok(out.includes("read_file"), "manifest points at the read path");
+
+    // Manifest follows the project AGENTS layer (locked order preserved).
+    assert.ok(
+      out.indexOf(join(cwd, ".iknow", "rules", "proj.md")) >
+        out.indexOf("PROJECT AGENTS"),
+      "rules manifest comes after the project layer"
+    );
+  });
+
+  it("starts a session normally when the rules directories are missing", async () => {
+    await write(join(cwd, "AGENTS.md"), "PROJECT AGENTS");
+    const out = await assembleSystemPrompt(ctx());
+    assert.ok(out.includes("PROJECT AGENTS"), "AGENTS layer present");
+    assert.ok(!out.includes("Rules index"), "no empty rules manifest");
+  });
+
+  it("treats an empty rules directory as no rules (no manifest segment)", async () => {
+    await mkdirP(join(cwd, ".iknow", "rules"));
+    await mkdirP(join(userHome, ".iknow", "rules"));
+    const out = await assembleSystemPrompt(ctx());
+    assert.ok(!out.includes("Rules index"), "empty dirs → no manifest");
+    assert.equal(out, "", "no rules and no AGENTS → empty static layer");
+  });
+
+  it("still injects rule bodies through the worker path (assembleStaticSystemPrompt)", async () => {
+    // ADR-0009 D2 amended: general-purpose workers keep full static injection;
+    // only the parent opener (assembleSystemPrompt) switches to the manifest.
+    await mkdirP(join(cwd, ".iknow", "rules"));
+    await write(join(cwd, ".iknow", "rules", "proj.md"), "WORKER RULE BODY");
+
+    const workerOut = await assembleStaticSystemPrompt(ctx());
+    assert.ok(
+      workerOut.includes("WORKER RULE BODY"),
+      "worker path still injects the body"
+    );
   });
 });

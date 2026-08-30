@@ -36,6 +36,7 @@ import {
   makeCtx,
   makeDeps,
 } from "./_fixtures.ts";
+import { captureStderrOf } from "../_helpers/capture-stderr.ts";
 
 const roots: string[] = [];
 
@@ -69,23 +70,8 @@ function afterEachCleanup(): void {
   });
 }
 
-/** stderr 拦截（writeErr SSOT）—— 可见降级 / 静默性断言共用。 */
-async function captureStderr(fn: () => Promise<void>): Promise<string> {
-  const chunks: string[] = [];
-  const origWrite = process.stderr.write.bind(process.stderr);
-  (process as { stderr: { write: unknown } }).stderr.write = (
-    chunk: string | Uint8Array
-  ) => {
-    chunks.push(String(chunk));
-    return true;
-  };
-  try {
-    await fn();
-  } finally {
-    process.stderr.write = origWrite;
-  }
-  return chunks.join("");
-}
+// stderr 拦截走共享 helper captureStderrOf（writeErr SSOT）—— 可见降级 /
+// 静默性断言共用（suppress 语义）。
 
 function makeManagerStub(
   opts: { readonly drain?: Array<{ taskId: string; envelope: SubAgentEnvelope }> } = {}
@@ -184,7 +170,7 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
     // 会话文件缺席（not_found）→ 静默（typed not_found 是「无 rebind 信号」
     // 的正常形态，不算错误）
     ctx.state.conversationId = "conv-unknown";
-    const stderr = await captureStderr(async () => {
+    const stderr = await captureStderrOf(async () => {
       await processChatLine({ line: "q2", ctx });
     });
     assert.equal(rebuilds, 0);
@@ -216,7 +202,7 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
 
     // refresh 的可见降级走 process.stderr（writeErr SSOT）—— 拦截捕获
     let r;
-    const stderr = await captureStderr(async () => {
+    const stderr = await captureStderrOf(async () => {
       r = await processChatLine({ line: "q", ctx });
     });
     assert.equal(r.ranQuery, true);
@@ -386,7 +372,7 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
     };
 
     let r;
-    const stderr = await captureStderr(async () => {
+    const stderr = await captureStderrOf(async () => {
       r = await processChatLine({ line: "q", ctx });
     });
     assert.equal(r.ranQuery, true);

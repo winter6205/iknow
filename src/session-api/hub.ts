@@ -879,9 +879,23 @@ export class SessionHub {
    * Hub-visible provision seam for harness hosts (including TUI). A
    * successful changed result is recorded for this conversation and is
    * persisted only by the next conditional save.
+   *
+   * T7 adoption anchor: the conversation's PERSISTED workspaceRoot is loaded
+   * here and handed to the provisioner — a session durably anchored at the
+   * engine's (task-worktree-shaped) root has explicitly entered it, so
+   * provision adopts it even on another conversation's tree. An unknown
+   * session contributes no anchor (fail-closed contract unchanged).
    */
   async provisionWorktree(ctx: WorktreeProvisionContext): Promise<string> {
-    const provisionedRoot = await this.worktreeProvisioner.provision(ctx);
+    const anchorSessionRoot = await this.loadSessionWorkspaceRoot(
+      ctx.conversationId
+    );
+    const provisionedRoot = await this.worktreeProvisioner.provision(
+      ctx,
+      anchorSessionRoot === undefined
+        ? undefined
+        : { sessionWorkspaceRoot: anchorSessionRoot }
+    );
     if (ctx.conversationId !== undefined) {
       this.markWorktreeRootDirty({
         conversationId: ctx.conversationId,
@@ -890,6 +904,80 @@ export class SessionHub {
       });
     }
     return provisionedRoot;
+  }
+
+  /** Best-effort persisted workspaceRoot read for the T7 adoption anchor. */
+  private async loadSessionWorkspaceRoot(
+    conversationId: string | undefined
+  ): Promise<string | undefined> {
+    if (conversationId === undefined || conversationId.length === 0) {
+      return undefined;
+    }
+    try {
+      const file = await this.store.load(conversationId);
+      return file.workspaceRoot;
+    } catch {
+      return undefined; // unknown session → no anchor, fail-closed downstream
+    }
+  }
+
+  /**
+   * T7 Hub-visible enter seam (serve/chat harness hosts; TUI wires
+   * provision-only): move this conversation onto an EXISTING task worktree
+   * of this repository (owner = targetConversationId). The provisioner
+   * validates the tree (exists /
+   * linked / same repo) and rebinds in memory; the changed root is recorded
+   * for this conversation and persisted only by the next conditional save —
+   * the same dirty-root protocol the create path uses. The tree itself is
+   * never created, moved, or checked out.
+   */
+  async enterWorktree(ctx: {
+    conversationId?: string;
+    root: string;
+    targetConversationId: string;
+  }): Promise<string> {
+    const enteredRoot = await this.worktreeProvisioner.enter(ctx);
+    if (ctx.conversationId !== undefined) {
+      this.markWorktreeRootDirty({
+        conversationId: ctx.conversationId,
+        currentRoot: ctx.root,
+        provisionedRoot: enteredRoot,
+      });
+    }
+    return enteredRoot;
+  }
+
+  /**
+   * T8 Hub-visible exit seam (serve/chat harness hosts; TUI wires
+   * provision-only): move this conversation back to its main repo root from
+   * the task worktree it is currently on. The provisioner derives the main
+   * root from the tree
+   * (restart-safe) and rebinds in memory; the changed root is recorded for
+   * this conversation and persisted only by the next conditional save. The
+   * task worktree is preserved — no `git worktree remove` anywhere.
+   */
+  async exitWorktree(ctx: {
+    conversationId?: string;
+    root: string;
+  }): Promise<string> {
+    const anchorSessionRoot = await this.loadSessionWorkspaceRoot(
+      ctx.conversationId
+    );
+    const repoRoot = await this.worktreeProvisioner.exit({
+      conversationId: ctx.conversationId,
+      root: ctx.root,
+      ...(anchorSessionRoot !== undefined
+        ? { sessionWorkspaceRoot: anchorSessionRoot }
+        : {}),
+    });
+    if (ctx.conversationId !== undefined) {
+      this.markWorktreeRootDirty({
+        conversationId: ctx.conversationId,
+        currentRoot: ctx.root,
+        provisionedRoot: repoRoot,
+      });
+    }
+    return repoRoot;
   }
 
   private markWorktreeRootDirty(opts: {
@@ -2639,6 +2727,13 @@ export class SessionHub {
       worktreeIsolation: {
         provision: ({ conversationId, root: sessionRoot }) =>
           this.provisionWorktree({ conversationId, root: sessionRoot }),
+        // T7:enter-task-worktree 工具缝 —— 会话显式进入本仓已存在的 task
+        // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
+        worktreeEnter: ({ conversationId, root: sessionRoot, targetConversationId }) =>
+          this.enterWorktree({ conversationId, root: sessionRoot, targetConversationId }),
+        // T8:exit-task-worktree 工具缝 —— 会话回到主仓根，树保留不删。
+        worktreeExit: ({ conversationId, root: sessionRoot }) =>
+          this.exitWorktree({ conversationId, root: sessionRoot }),
       },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
@@ -2736,6 +2831,13 @@ export class SessionHub {
       worktreeIsolation: {
         provision: ({ conversationId, root: sessionRoot }) =>
           this.provisionWorktree({ conversationId, root: sessionRoot }),
+        // T7:enter-task-worktree 工具缝 —— 会话显式进入本仓已存在的 task
+        // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
+        worktreeEnter: ({ conversationId, root: sessionRoot, targetConversationId }) =>
+          this.enterWorktree({ conversationId, root: sessionRoot, targetConversationId }),
+        // T8:exit-task-worktree 工具缝 —— 会话回到主仓根，树保留不删。
+        worktreeExit: ({ conversationId, root: sessionRoot }) =>
+          this.exitWorktree({ conversationId, root: sessionRoot }),
       },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),

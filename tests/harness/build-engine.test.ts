@@ -1092,3 +1092,62 @@ describe("buildHarnessEngine — #558 T2 默认不注入 coordinator 段", () =>
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// #841 T6 / ADR-0009 D2 amended: 父会话 (chat / tui / serve) 开场不灌 rules
+// 正文 —— 三条装配路径共用 build-engine deps.system,只注入带路径的 rules
+// 清单 + 读路径指引;无 rules 目录时会话正常开始。
+// ---------------------------------------------------------------------------
+describe("buildHarnessEngine — #841 T6 父会话 rules 清单化", () => {
+  const surfaces = ["chat", "tui", "serve"] as const;
+
+  for (const surface of surfaces) {
+    it(`${surface}: deps.system() lists rule paths, never rule bodies`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "iknow-t6-rules-"));
+      try {
+        const rulesDir = join(root, ".iknow", "rules");
+        await mkdir(rulesDir, { recursive: true });
+        await writeFile(join(rulesDir, "alpha.md"), "ALPHA RULE BODY");
+        await writeFile(join(rulesDir, "beta.md"), "BETA RULE BODY");
+
+        const built = await buildHarnessEngine({
+          env: makeEnv(`sk-test-t6-${surface}`),
+          askUser: createNoAskUser(),
+          surface,
+          userHome: join(root, "home"),
+          cwd: root,
+        });
+
+        const systemText = (await built.deps.system?.()) ?? "";
+        expect(systemText).not.toContain("ALPHA RULE BODY");
+        expect(systemText).not.toContain("BETA RULE BODY");
+        expect(systemText).toContain(join(rulesDir, "alpha.md"));
+        expect(systemText).toContain(join(rulesDir, "beta.md"));
+        expect(systemText).toContain("read_file");
+
+        if (built.shutdown) await built.shutdown();
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("chat: missing rules directory → session system still resolves (not fatal)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t6-norules-"));
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t6-norules"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        userHome: join(root, "home"),
+        cwd: root,
+      });
+      const systemText = (await built.deps.system?.()) ?? "";
+      expect(systemText).not.toContain("Rules index");
+      expect(systemText.length).toBeGreaterThan(0);
+      if (built.shutdown) await built.shutdown();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});

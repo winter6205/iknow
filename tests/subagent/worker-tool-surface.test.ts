@@ -94,8 +94,11 @@ const TEST_ENV: IknowEnv = {
  * spawn_subagent / subagent_result（subagentManager 缺席），todo_write
  * （todoDir 缺席），list_mcp_resources / read_mcp_resource（mcpManager 缺席），
  * bash_output / bash_stop（backgroundManager 缺席,#502 T3 同门），
- * run_graph（graphAssembly 缺席）。
- * 全量 32 - 缺席 10 = 22，与 ACI_TOOLSET_NAMES 在 worker 装配路径下
+ * run_graph（graphAssembly 缺席），create-task-worktree（T4:worktreeProvision
+ * host 缝缺席 —— worker 装配路径不注入建树缝），enter-task-worktree /
+ * exit-task-worktree（T7/T8:worktreeEnter / worktreeExit host 缝缺席 ——
+ * worker 装配路径不注入 enter/exit 缝）。
+ * 全量 35 - 缺席 13 = 22，与 ACI_TOOLSET_NAMES 在 worker 装配路径下
  * 实际生效集合一致。
  */
 const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
@@ -463,3 +466,30 @@ async function buildWorkerWithFullSkillCatalog(): Promise<LoopEngineDeps> {
   };
   return createWorkerDeps(opts);
 }
+
+// ---------------------------------------------------------------------------
+// T7/T8 (plans/worktree-isolation-model-provision.md) — worktree enter/exit
+// 缝缺席钉子：worker 装配路径从不注入 worktreeEnter / worktreeExit host 缝
+// （子代理不进入他人 task worktree / 不改绑父会话根），两个新工具名必须缺席。
+// ---------------------------------------------------------------------------
+
+describe("worker tool surface: T7/T8 worktree enter/exit 缝缺席", () => {
+  it("worker 装配路径不传 enter/exit 缝 → 双面均不含 enter/exit-task-worktree", async () => {
+    const deps = await buildWorkerWithFullSkillCatalog();
+    const innerNames = deps.registry.list().map((d) => d.name);
+    assert.ok(
+      !innerNames.includes("enter-task-worktree"),
+      `worker surface should exclude enter-task-worktree, got: ${innerNames.join(", ")}`
+    );
+    assert.ok(
+      !innerNames.includes("exit-task-worktree"),
+      `worker surface should exclude exit-task-worktree, got: ${innerNames.join(", ")}`
+    );
+    if (!deps.promptTools) {
+      return;
+    }
+    const promptNames = deps.promptTools().map((d) => d.name);
+    assert.ok(!promptNames.includes("enter-task-worktree"));
+    assert.ok(!promptNames.includes("exit-task-worktree"));
+  });
+});

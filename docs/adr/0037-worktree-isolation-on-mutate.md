@@ -1,8 +1,11 @@
-# 0037. 可选 worktree 隔离门禁：mutate 时建树并改绑会话（默认 OFF）
+# 0037. 可选 worktree 隔离门禁：拦写 → 模型调 ACI 工具建树改绑 → 模型自己再写（默认 OFF）
 
 Date: 2026-08-29
 
-Status: accepted
+Status: accepted (amended 2026-08-30: 建树职责由 host 自动建树改为模型调用「创建工作树 ACI 工具」)
+
+> **Amendment 2026-08-30**（issue #836 / 地图 #829）：ON 时门禁**只拦写、不自动 `git worktree add`**——建 task worktree 与会话根改绑由**模型调用「创建工作树 ACI 工具」**完成（成功 = 树在且会话根已切到该路径）；Host 不同波重放被拦的写，被拦的写由模型在新根上自己再调。原文 Decision 1 中「首次 mutate 被拦截 → host `git worktree add` 建树改绑」的读法 **superseded**。同批修订：说明书（rules）改为按需读——父会话不整段灌 rules、缺目录视为空，见 ADR-0009 D2 的 amended 说明与 `docs/CONTEXT.md` 术语「说明书读法」。
+> **Amendment 2026-08-30（工具面扩展，issue #839 / 地图 #829）**：enter/exit 对称工具——`enter-task-worktree` **显式进入**一棵本仓已存在的 task worktree（含他人树；授权锚 = 持久化的 `session.workspaceRoot`，只由工具成功 + 会话保存写成外来树，故是天然的显式进入持久记录；provision 据此 adoption 放行该会话在其上的 mutate），`exit-task-worktree` **回到主仓根**（主仓根由树经 git common dir 派生，重启安全）；exit **树保留不删**（孤儿树自动删除仍是明确非目标）。门禁本体不变。
 
 ## Context
 
@@ -17,19 +20,19 @@ ADR-0023 裁决 4 曾锁定「v1 = 单根 + recents + 三锚合一；worktree/�
 ### 1. 开关两态（硬要求 1）
 
 - **OFF（默认）**：会话行为与今日完全一致——读、写、permission、目录全部现状，不新增任何拦截点。
-- **ON**：会话可**只读**主仓（read / grep / glob / 只读 bash 等读路径放行，可留在主仓）；一旦出现**写路径**（write_file / edit_file / 会改工作区的 bash 等 mutate），首次 mutate 被拦截落盘 → `git worktree add` 建 task worktree（含 task 分支）→ 把**当前会话**的根锚改绑到该 worktree → 此后本会话 mutate 只进该根。已绑定本会话 task worktree 时写路径直接放行，不建第二棵树。
+- **ON**：会话可**只读**主仓（read / grep / glob / 只读 bash 等读路径放行，可留在主仓；项目相对读路径不改写到主仓绝对路径）。一旦出现**写路径**（write_file / edit_file / 会改工作区的 bash 等 mutate），门禁把该写**拦住**——host **不自动** `git worktree add`，而是由**模型调用「创建工作树 ACI 工具」**完成建 task worktree（含 task 分支）与**当前会话**根锚改绑；工具成功 = 树已在且会话根已切到该路径，此后本会话 mutate 只进该根。工具成功后 Host 只保证路径已切：**不同波重放**被拦的写、不偷偷代执行，被拦的写由模型在下一回合于新根上**自己再调**；也不要求操作员 `/continue`。已绑定本会话 task worktree 时写路径直接放行，不建第二棵树。
 
 ### 2. 改绑只影响本会话（硬要求 2–5）
 
-创建 worktree 必须改绑本会话——只建树不绑定 = 不合格。改绑不 checkout 其它会话 / 其它 worktree 的 HEAD；在 task worktree 内 push / 开 PR 不得拖动主仓或其它 worktree 的当前分支。主仓并行共写不是目标形态：本功能是**可选隔离**，不是替操作员猜「是否开任务」。
+创建 worktree 必须改绑本会话——只建树不绑定 = 不合格。改绑不 checkout 其它会话 / 其它 worktree 的 HEAD；在 task worktree 内 push / 开 PR 不得拖动主仓或其它 worktree 的当前分支。主仓并行共写不是目标形态：本功能是**可选隔离**，不是替操作员猜「是否开任务」。子代理 spawn 自父会话，跟随父会话改绑后的同一棵树，不触发第二棵树（装配面由实施 bullet 落实）。
 
 ### 3. task worktree / task 分支名已存在时的确定性策略（硬要求 8）
 
-按 fail-closed 处理：**报可见 typed 错误，不静默覆盖、不复用归属不明的树、不 checkout 其它会话的 HEAD**。同会话内的并发首次 mutate（硬要求 7）不在此列——建树幂等，多条写路径在建树完成前同时到达也只产生一个 worktree / 一个 task 分支，不双写主仓。
+按 fail-closed 处理：创建工作树 ACI 工具向模型返回**可见 typed 错误，不静默覆盖、不复用归属不明的树、不 checkout 其它会话的 HEAD**。同会话内的并发首次 mutate（硬要求 7）不在此列——建树幂等，多条写路径在建树完成前同时到达也只产生一个 worktree / 一个 task 分支，不双写主仓。
 
 ### 4. `workspaceRoot` 边界（与 ADR-0019 / ADR-0023 的关系）
 
-`workspaceRoot`（ADR-0019 D1.1，per-root 状态锚，默认 `process.cwd()`）与 serve 主根（ADR-0023，显式选定 + unbound 语义）的规则都不变。改绑动作 = 把**本会话生效**的根锚（cwd / workspaceRoot 取值）切到 task worktree 路径，遵循既有锚的解析与校验规则（含 `WorkspaceRootError` 惯例）；它不是 serve 主根重绑，不触碰 recents / trust，也不是把 git worktree 提升为 product workspace 多根。
+`workspaceRoot`（ADR-0019 D1.1，per-root 状态锚，默认 `process.cwd()`）与 serve 主根（ADR-0023，显式选定 + unbound 语义）的规则都不变。改绑动作 = 把**本会话生效**的根锚（cwd / workspaceRoot 取值）切到 task worktree 路径，遵循既有锚的解析与校验规则（含 `WorkspaceRootError` 惯例）；它不是 serve 主根重绑，不触碰 recents / trust，也不是把 git worktree 提升为 product workspace 多根。主仓的物理路径不切——主仓检出保持只读原位，被切的只有本会话生效根。
 
 ### 5. 配置读取合同（硬要求 9）
 
@@ -37,7 +40,7 @@ ADR-0023 裁决 4 曾锁定「v1 = 单根 + recents + 三锚合一；worktree/�
 
 ### 6. 失败语义 fail-closed（硬要求 6）
 
-主仓不是 git 仓库 / git 不可用 / `git worktree add` 失败 / 改绑失败：mutate 一律被拦下并给出**typed、非空、可见**的错误（对齐 harness fault-class 与 session-api `WorkspaceRootError` 的类型化错误惯例），**不静默放行写主仓**——建树/绑定失败后的主仓零写入是验收项，不是隐含假设。开关本身缺失或非法回落 OFF，即回落至今日行为，同一 fail-closed 来源。
+主仓不是 git 仓库 / git 不可用 / 创建工作树 ACI 工具失败（`git worktree add` 或改绑失败）：mutate 一律被拦下并给出**typed、非空、可见**的错误（对齐 harness fault-class 与 session-api `WorkspaceRootError` 的类型化错误惯例），**不静默放行写主仓**——建树/绑定失败后的主仓零写入是验收项，不是隐含假设。开关本身缺失或非法回落 OFF，即回落至今日行为，同一 fail-closed 来源。
 
 ## Consequences
 
@@ -60,4 +63,5 @@ ADR-0023 裁决 4 曾锁定「v1 = 单根 + recents + 三锚合一；worktree/�
 ## Evidence
 
 - `plans/worktree-isolation-on-mutate.md` ACR 5/5 PASS（2026-08-29；bounded-context-guardian / defensive-contract-validator / error-handling-enforcer / complexity-anti-drift / minimal-change-verifier 全 yes）。
+- `plans/worktree-isolation-model-provision.md` ACR 5/5 PASS（2026-08-30）——amendment 来源（issue #836，地图 #829）。
 - 实施证据由后续 bullets（settings 面 → mutate 门禁 + 改绑 → passthrough → 操作员可见状态）各单 commit 提供，本 ADR 为 decision record，不含运行时代码。

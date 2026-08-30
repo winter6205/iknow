@@ -245,6 +245,9 @@ _Avoid_: 静默排队；让用户每次填写要派几个
 **说明书静态层**: 用户级与项目级 AGENTS.md 及 rules，可注入通用 worker 的 system；与记忆工具、自动抽取、记忆库灌窗分开开关。
 _Avoid_: 用 memoryEnabled 一把关掉说明书；把说明书和 memory_recall 绑死
 
+**说明书读法**: 说明书（rules）的发现与装载纪律——用户级 `~/.iknow/rules/` 与项目级 `.iknow/rules/` 目录缺失或为空**视为空集、不 fatal**（worker 不得因缺目录退出，不要求操作员先 mkdir）；父会话（chat / tui / serve）**不把全部 rules 正文灌入开场上下文**，模型按需用读路径打开具体 rules 文件；干活 general-purpose 子代理开场注入**已存在**的 AGENTS.md 与 `.iknow/rules/*.md`；explore 子代理不注入项目说明书正文；硬约束仍走权限层（`.iknow/permissions.toml`），不搬进说明书正文。ADR-0009 D2 的 amended 读法（2026-08-30）。
+_Avoid_: 缺目录 fatal / `scandir` ENOENT 让 worker 退出；父会话开场整段灌 rules 正文；把硬约束从权限层搬进说明书；explore 注入说明书正文；把「按需读」读成「永不注入」（general-purpose 子代理开场仍注入已存在文件）
+
 **graph mode**: 会话级编排 overlay，不是 PermissionMode。Shift+Tab 三态轮 `Default → Auto → Graph → Default`（`/graph` 为非 TTY 对等物）；进 Graph 后**下一次 `run()` 装配**才注入编排段并露出 `run_graph`，过程中切换不拦、不中途重装配。ADR-0030。
 _Avoid_: 第四种 PermissionMode；把 `src/harness/graph/` 写进 prompt；env gate 才注入；进图改 ask/auto；切模式当下 round 热替换工具面
 
@@ -317,10 +320,19 @@ _Avoid_: 打开 `resultCaptured` 往 tool_call 抄正文；把投影当会话账
 **crash 取证无条件**: `subagent_spawn`/`subagent_state_change`/`subagent_stop` 生命周期事件与 stderr 指针文件在所有产品入口（含 chat REPL）落盘，与主循环 content trace 的入口开关解耦。ADR-0035（对 ADR-0003 D10 的范围修正）。
 _Avoid_: 把生命周期事件绑回 `--trace-out`；把该扩张理解为 content trace 进 chat REPL
 
-**worktree isolation mode**（`settings.isolation.worktreeOnMutate`，默认 OFF）: 全局隔离开关——OFF 时会话行为与今日完全一致；ON 时会话可只读主仓，首次 mutate（写路径）被拦截 → `git worktree add` 建 task worktree（含 task 分支）→ **session worktree rebind** 到该树，此后本会话 mutate 只进该根；已绑定则放行，不建第二棵树。只在启动加载点读取一次；config 层不读 git、不持会话状态；改绑不隐式重载 project settings。建树/绑定失败与主仓非 git 仓库一律 fail-closed：typed 可见错误，不静默放行写主仓。task worktree / 分支名已存在 → 报错不覆盖。ADR-0037（对 ADR-0023「worktree/多根只读推迟」的窄面 reopen；git worktree ≠ product workspace 多根）。
-_Avoid_: 默认 ON；把 git worktree 混成 serve 主根或 `workspaceRoot` 多根；config 层读 git 或持会话状态；改绑后隐式重载 settings；建树失败静默写主仓；只建树不改绑会话；同名树静默覆盖
+**worktree isolation mode**（`settings.isolation.worktreeOnMutate`，默认 OFF）: 全局隔离开关——OFF 时会话行为与今日完全一致；ON 时会话可只读主仓（相对读路径不改写到主仓绝对路径），首次 mutate（写路径）被拦截——host **不自动** `git worktree add`——模型调用**创建工作树 ACI 工具**完成建 task worktree（含 task 分支）与 **session worktree rebind**，此后本会话 mutate 只进该根；已绑定则放行，不建第二棵树。工具成功后 Host 只保证路径已切：不同波重放被拦的写，由模型在新根上自己再调，不要求操作员 `/continue`。只在启动加载点读取一次；config 层不读 git、不持会话状态；改绑不隐式重载 project settings。建树/绑定失败与主仓非 git 仓库一律 fail-closed：typed 可见错误，不静默放行写主仓。task worktree / 分支名已存在 → typed 错误不覆盖。ADR-0037（amended 2026-08-30：建树由 host 自动改为模型调 ACI 工具；对 ADR-0023「worktree/多根只读推迟」的窄面 reopen；git worktree ≠ product workspace 多根）。
+_Avoid_: 默认 ON；把 git worktree 混成 serve 主根或 `workspaceRoot` 多根；config 层读 git 或持会话状态；改绑后隐式重载 settings；建树失败静默写主仓；只建树不改绑会话；同名树静默覆盖；门禁自动 `git worktree add`；让 Host 同波代执行被拦的写
 
-**session worktree rebind**: worktree isolation mode ON 下首次 mutate 成功后，把**当前会话**生效的根锚（cwd / `workspaceRoot` 取值）切到本会话 task worktree 的动作；只影响本会话——不 checkout 其它会话 / 其它 worktree 的 HEAD，push / 开 PR 不拖动主仓或其它 worktree 当前分支。同会话并发首次 mutate 建树幂等（一棵树、一个 task 分支）。ADR-0037。
+**创建工作树 ACI 工具**: worktree isolation mode ON 时模型可见的 ACI 工具三件面之一（create / enter / exit，均经 host 缝注入 build-engine 条件装配，worker / hub-less 工具面缺席）——创建本会话 task worktree（含 task 分支）并把当前会话根锚改绑到该树；内部走既有 provision 缝（**Hub-visible provision seam**），不另起建树路径。成功 = 树在且会话根已切到该路径；同名 task worktree / 分支 → typed 错误，不覆盖、不复用归属不明的树；失败 → typed 错误且主仓零写入。ADR-0037（amended 2026-08-30）。
+_Avoid_: 让门禁自动建树；只建树不改绑；绕过 provision 缝另起建树路径；把工具失败当静默成功；对同会话并发建树不幂等
+
+**enter-task-worktree（进入工作树工具）**: worktree isolation mode ON 时模型可见的显式进入工具——会话（锚在主仓）经 owner conversationId 进入一棵**本仓已存在**的 task worktree（含他人会话的树），目标路径由 SSOT `taskWorktreePath` 派生，**不收自由路径**。授权 = 持久锚：改绑的持久记录（`session.workspaceRoot` === 引擎 task-worktree 形状根）写明「该会话显式在此树上」，provision 据此 adoption 放行其 mutate——重启安全，无进程内状态依赖。目标不存在 → typed `worktree_not_found`；非本仓 linked worktree / 调用方已在树内 → typed `foreign_worktree`；成功仅改绑本会话，主仓零写入、树内容零污染。ADR-0037（amended 2026-08-30，issue #839）。
+_Avoid_: 收自由路径当输入；无持久锚就放行外来树上的 mutate；把进入树会话的 session 文件改写当成改绑波及他人；让 worker 子代理获得该工具
+
+**exit-task-worktree（退出工作树工具）**: worktree isolation mode ON 时模型可见的对称退出工具——无参数；会话当前 task worktree 保留不删（孤儿树自动删除是明确非目标），会话根回到主仓根（由树经 `git rev-parse --path-format=absolute --git-common-dir` 派生，重启安全）；经 dirty-root conditionalSave 持久化后下一回合门禁在主仓重新武装（拦写 + 指向建树工具）。当前未改绑 → typed `rebind_failed`，非静默 no-op。ADR-0037（amended 2026-08-30，issue #839）。
+_Avoid_: 顺带删除树或分支；把 exit 当成静默 no-op；退出后同回合继续在旧树上写
+
+**session worktree rebind**: worktree isolation mode ON 下模型调用创建工作树 ACI 工具、建树并改绑成功后，把**当前会话**生效的根锚（cwd / `workspaceRoot` 取值）切到本会话 task worktree 的动作；只影响本会话——不 checkout 其它会话 / 其它 worktree 的 HEAD，push / 开 PR 不拖动主仓或其它 worktree 当前分支。同会话并发建树幂等（一棵树、一个 task 分支）；父会话改绑后 spawn 的子代理继承该根，不另建树。ADR-0037。
 _Avoid_: 改绑波及其它会话；把 rebind 当 serve 主根重绑（ADR-0023 unbound / recents 语义不变）；让 rebind 触发 settings 重载；把改绑后的根错当成 product workspace 多根
 
 **productRoot**: 每个产品入口首次装配确定的稳定主 checkout root；session worktree rebind 后保持不变，不随当前 task worktree 改写。
@@ -362,6 +374,9 @@ _Avoid_: workspaceRoot；task worktree；process.cwd()
 - **tool_result projection vs tool_call.result**: 投影只读 messages；不把 stdout 抄到 `tool_call` 行
 - **crash 取证无条件 vs ADR-0003 D10**: 生命周期三类事件 ≠ content trace；D10 的 chat REPL 排除只对 content trace 继续成立
 - **worktree isolation mode vs workspaceRoot vs workspace（serve 主根）**: git worktree 是会话级 mutate 物理隔离；`workspaceRoot` 是 per-root 状态锚（ADR-0019）；serve 主根是显式选定锚（ADR-0023）。rebind 只切本会话生效根，不改锚规则本身
+- **创建工作树 ACI 工具 vs worktree isolation mode**: 门禁只拦不建；建树与改绑都由模型经该工具完成，内部走 Hub-visible provision seam；Host 不同波重放被拦的写
+- **enter/exit 对称工具 vs 持久锚**: enter 的授权与 exit 的目标判定都读持久锚（`session.workspaceRoot` 的树形状记录），不依赖进程内 bound 状态；exit 保留树，enter 只改绑本会话
+- **说明书静态层 vs 说明书读法**: 静态层说「哪些文件算说明书」；读法说「缺了怎么办、谁在什么时机拿到正文」——缺目录视为空、不 fatal，父会话按需读不整段灌，general-purpose 子代理开场注入已有文件，explore 不注入
 - **user.md vs user-level AGENTS.md vs 项目 AGENTS.md**: 画像与用户级行为约定同根 `~/.iknow/`、对所有项目生效；项目仓库根 `AGENTS.md` 叠在用户级之上且项目优先；都不是记忆库事实文件
 
 ## Flagged ambiguities
