@@ -8,7 +8,8 @@
  *
  * 124/T5 增量：包一层 per-tool tier + interruptBehavior 路由:
  *   - 工具 catalog 中声明的 `timeoutTier` 覆盖 Loop Engine 传入的 timeoutMs(#124 决策 3-4)。
- *   - interruptBehavior="cancel" 透传 caller 的 AbortSignal 到 inner;timeout 命中返 "timeout"。
+ *   - interruptBehavior="cancel" 透传 caller 的 AbortSignal 到 inner;caller abort
+ *     立即抢占等待并返 "cancelled",timeout 命中返 "timeout"。
  *   - interruptBehavior="block" 不透传 caller signal(只透传由 tier timeout 控制的
  *     新 AbortController),handler 跑完自然完成;若 caller signal 在等待期内 abort,
  *     收尾时把 ok 结果转换成 execution_failed { message: "cancelled" }(无 partial,
@@ -318,6 +319,7 @@ async function routeOneCall(opts: {
     result = await awaitInnerOrTier({
       innerPromise,
       tierSignal: tierAbort.signal,
+      callerSignal: isBlock ? undefined : callerSignal,
       call,
       // partial salvage 只对会产出 partial 的工具(bash)开放;其余工具 tier
       // 命中即返回 timeout,不等 handler 收尾(防 stub/良性 handler 拖慢路径)。
@@ -392,49 +394,65 @@ async function routeOneCall(opts: {
 }
 
 /**
- * await inner,但 tier abort 先到时进入有界 salvage 窗口(取回 handler 已
- * flush 的 partial)。返回最终的 ToolExecutionResult:
+ * await inner; tier/caller abort 先到时按需进入有界 salvage 窗口(取回
+ * handler 已 flush 的 partial)。返回最终的 ToolExecutionResult:
  *   - inner 先 settle → 其结果;
- *   - tier 先到 + salvage 内 inner settle → 其结果(由调用方按 tierAbort.aborted 归一 timeout + partial);
- *   - tier 先到 + salvage 超时 inner 未 settle → execution_failed { timeout }(无 partial)。
+ *   - caller 先到 + salvage 内 inner settle → 其结果(由调用方归一 cancelled + partial);
+ *   - tier 先到 + salvage 内 inner settle → 其结果(由调用方归一 timeout + partial);
+ *   - abort 先到 + salvage 超时 inner 未 settle → 对应 execution_failed(无 partial)。
  */
 async function awaitInnerOrTier(opts: {
   readonly innerPromise: Promise<ReadonlyArray<ToolExecutionResult>>;
   readonly tierSignal: AbortSignal;
+  /** cancel tier 的 caller signal;block tier 刻意不传。 */
+  readonly callerSignal: AbortSignal | undefined;
   readonly call: ToolCall;
-  /** salvage 窗口(ms);0 = 不 salvage,tier 命中即返回 timeout。 */
+  /** salvage 窗口(ms);0 = abort 命中即返回对应的取消/超时结果。 */
   readonly salvageMs: number;
 }): Promise<ToolExecutionResult> {
-  const { innerPromise, tierSignal, call, salvageMs } = opts;
+  const { innerPromise, tierSignal, callerSignal, call, salvageMs } = opts;
 
   const tierFired = abortPromise(tierSignal);
+  const callerFired =
+    callerSignal === undefined
+      ? undefined
+      : abortPromise(callerSignal, "caller");
   const winner = await Promise.race<
     | { kind: "inner"; arr: ReadonlyArray<ToolExecutionResult> }
     | { kind: "timer" }
-  >([innerPromise.then((arr) => ({ kind: "inner" as const, arr })), tierFired]);
+    | { kind: "caller" }
+  >([
+    innerPromise.then((arr) => ({ kind: "inner" as const, arr })),
+    tierFired,
+    ...(callerFired === undefined ? [] : [callerFired]),
+  ]);
 
   if (winner.kind === "inner") {
     return winner.arr[0] as ToolExecutionResult;
   }
 
+  if (winner.kind === "caller") {
+    // caller 抢占只结束界面等待。bash 仍给既有 salvage 窗口取回 partial;
+    // 其它工具不等待 handler,handler 可能继续在后台运行。
+    if (salvageMs > 0) {
+      const salvaged = await awaitDuringSalvage(innerPromise, salvageMs);
+      if (salvaged !== undefined) return salvaged;
+    }
+    void innerPromise.catch(() => undefined);
+    return {
+      kind: "execution_failed",
+      toolUseId: call.id,
+      message: "cancelled",
+    };
+  }
+
   // tier 先到:abort 已透传给 handler。salvageMs>0 时给有界窗口取回 partial。
   if (salvageMs > 0) {
-    const salvageGrace = new Promise<{ kind: "grace" }>((resolveGrace) => {
-      const t = setTimeout(() => resolveGrace({ kind: "grace" }), salvageMs);
-      if (t.unref) t.unref();
-    });
-    const salvaged = await Promise.race<
-      | { kind: "inner"; arr: ReadonlyArray<ToolExecutionResult> }
-      | { kind: "grace" }
-    >([
-      innerPromise.then((arr) => ({ kind: "inner" as const, arr })),
-      salvageGrace,
-    ]);
-
-    if (salvaged.kind === "inner") {
+    const salvaged = await awaitDuringSalvage(innerPromise, salvageMs);
+    if (salvaged !== undefined) {
       // handler 在 salvage 窗口内收尾了 — 交出它已 flush 的结果,调用方按
       // tierAbort.aborted 归一 timeout 并注入 partial。
-      return salvaged.arr[0] as ToolExecutionResult;
+      return salvaged;
     }
   }
 
@@ -447,14 +465,37 @@ async function awaitInnerOrTier(opts: {
   };
 }
 
+async function awaitDuringSalvage(
+  innerPromise: Promise<ReadonlyArray<ToolExecutionResult>>,
+  salvageMs: number
+): Promise<ToolExecutionResult | undefined> {
+  const salvageGrace = new Promise<{ kind: "grace" }>((resolveGrace) => {
+    const t = setTimeout(() => resolveGrace({ kind: "grace" }), salvageMs);
+    if (t.unref) t.unref();
+  });
+  const salvaged = await Promise.race<
+    | { kind: "inner"; arr: ReadonlyArray<ToolExecutionResult> }
+    | { kind: "grace" }
+  >([
+    innerPromise.then((arr) => ({ kind: "inner" as const, arr })),
+    salvageGrace,
+  ]);
+  return salvaged.kind === "inner"
+    ? (salvaged.arr[0] as ToolExecutionResult)
+    : undefined;
+}
+
 /** signal abort 时 resolve 的 promise(已 abort 立即 resolve)。 */
-function abortPromise(signal: AbortSignal): Promise<{ kind: "timer" }> {
+function abortPromise(
+  signal: AbortSignal,
+  kind: "timer" | "caller" = "timer"
+): Promise<{ kind: "timer" } | { kind: "caller" }> {
   return new Promise((resolveTimer) => {
     if (signal.aborted) {
-      resolveTimer({ kind: "timer" });
+      resolveTimer({ kind });
       return;
     }
-    signal.addEventListener("abort", () => resolveTimer({ kind: "timer" }), {
+    signal.addEventListener("abort", () => resolveTimer({ kind }), {
       once: true,
     });
   });

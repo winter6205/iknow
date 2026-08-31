@@ -314,6 +314,102 @@ describe("SC17 — interruptBehavior routing", () => {
     }
   });
 
+  it("cancel 工具: caller abort 抢占不响应 signal 的 handler,并保留后台运行事实", async () => {
+    let releaseHandler: (() => void) | undefined;
+    let handlerFinished = false;
+    let resolveHandlerStarted!: () => void;
+    const handlerStarted = new Promise<void>((resolve) => {
+      resolveHandlerStarted = resolve;
+    });
+    let resolveUnderlyingFinished!: () => void;
+    const underlyingFinished = new Promise<void>((resolve) => {
+      resolveUnderlyingFinished = resolve;
+    });
+    const tool: AciToolDef = Object.freeze({
+      name: "uncooperative-cancelie",
+      description: "test uncooperative cancelie",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: async (): Promise<unknown> => {
+        resolveHandlerStarted();
+        await new Promise<void>((resolve) => {
+          releaseHandler = resolve;
+        });
+        handlerFinished = true;
+        resolveUnderlyingFinished();
+        return { done: true };
+      },
+      aci: Object.freeze({
+        category: "read-only" as const,
+        isConcurrencySafe: true,
+        interruptBehavior: "cancel" as const,
+        timeoutTier: "default" as const,
+      }),
+    });
+    (globalThis as { __catalog?: ReturnType<typeof makeCatalog> }).__catalog =
+      makeCatalog([tool]);
+    const inner: Executor = Object.freeze({
+      executeAll: async (
+        calls: ReadonlyArray<ToolCall>,
+        signal?: AbortSignal
+      ): Promise<ReadonlyArray<ToolExecutionResult>> => {
+        const call = calls[0]!;
+        const def = (
+          globalThis as { __catalog?: ReturnType<typeof makeCatalog> }
+        ).__catalog?.get(call.name);
+        if (!def) {
+          return [
+            {
+              kind: "tool_not_found",
+              toolUseId: call.id,
+              toolName: call.name,
+            },
+          ];
+        }
+        const payload = await def.handler(call.input, { signal });
+        return [
+          {
+            kind: "ok",
+            toolUseId: call.id,
+            payload: [{ type: "text", text: JSON.stringify(payload) }],
+          },
+        ];
+      },
+    });
+    const aciExec = createAciExecutor({
+      inner,
+      catalog: (globalThis as { __catalog?: ReturnType<typeof makeCatalog> })
+        .__catalog!,
+      timeoutMsOverride: 1_000,
+    });
+    const caller = new AbortController();
+    const execution = aciExec.executeAll(
+      [{ id: "u1", name: "uncooperative-cancelie", input: {} }],
+      caller.signal
+    );
+    await handlerStarted;
+    caller.abort();
+
+    try {
+      const settledBeforeTier = await Promise.race<
+        ReadonlyArray<ToolExecutionResult> | undefined
+      >([
+        execution,
+        new Promise<undefined>((resolve) => setTimeout(resolve, 100)),
+      ]);
+      assert.notEqual(settledBeforeTier, undefined);
+      assert.equal(handlerFinished, false);
+      const result = settledBeforeTier?.[0];
+      assert.equal(result?.kind, "execution_failed");
+      if (result?.kind === "execution_failed") {
+        assert.equal(result.message, "cancelled");
+      }
+    } finally {
+      releaseHandler?.();
+      await execution;
+      await underlyingFinished;
+    }
+  });
+
   it("block 工具: caller signal 不透传 → handler 干净完成;caller abort 后转 cancelled(无 partial)", async () => {
     // block 工具:resolve 在 100ms,但我们在 20ms caller abort。
     const tool = makeTool({

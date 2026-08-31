@@ -70,16 +70,18 @@ export function createReadMcpResourceTool(
 ): AciToolDef {
   const handler = async (
     input: unknown,
-    _ctx?: ToolExecutionContext
+    ctx?: ToolExecutionContext
   ): Promise<string> => {
     const parsed = compileReadInput(input);
     const manager = resolveManager(deps.getManager);
 
     let result: ReadResourceResult;
     try {
-      // 当前 manager.readResource(server, uri) 契约无 signal 入参（M3 决议
-      // 边界：abort 走状态机失败路径，handler 不透传 signal）。
-      result = await manager.readResource(parsed.server, parsed.uri);
+      // ADR-0039 重开并推翻 M3 的旧决议：manager 已支持 signal，
+      // read_mcp_resource 必须透传 ctx.signal 以兑现 cancel metadata。
+      result = await manager.readResource(parsed.server, parsed.uri, {
+        signal: ctx?.signal,
+      });
     } catch (err) {
       if (err instanceof ToolExecutionError) throw err;
       throw new ToolExecutionError(
