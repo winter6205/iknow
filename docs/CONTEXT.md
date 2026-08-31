@@ -251,6 +251,12 @@ _Avoid_: 把完整 result 当任务产物；把汇报截断当成任务失败
 **子代理并发上限**: 同时处于 starting/running 的 worker 硬顶，可配、默认 15；发几张由模型决定，超限立即失败、不排队。
 _Avoid_: 静默排队；让用户每次填写要派几个
 
+**子代理根归属**: 子代理是**父会话的执行臂**，继承父会话当前生效根；不是独立隔离单元。父会话已 rebind 时与父共享同一棵 task worktree；manager 层用父 `conversationId`，worker/LoopEngine 层用自己的 `conversationId`。父会话尚未 rebind 时，满足只读门禁的子代理可留在主仓，但不创建独立 worktree。ADR-0040。
+_Avoid_: 每个子代理单独建 worktree；把子代理的 worker `conversationId` 当成父会话路由 ID；把主仓只读放行误读成独立根
+
+**派发门禁判据**: 按**有效工具面能力**推导，**不按角色名匹配**。两维同时成立才允许留在主仓只读运行：(1) 有效工具面不含 `write_file` 也不含 `edit_file`；(2) 有效工具面不含 `bash`，或该角色 `bashMode === "readonly"`。任一维不成立即判为会写；未知角色 fail-closed 判为会写。ADR-0040。
+_Avoid_: 用角色名白名单代替能力判定；把父代理 `disallowedTools` 当成 `bashMode` 覆盖；未知角色默认放行
+
 **说明书静态层**: 用户级与项目级 AGENTS.md 及 rules，可注入通用 worker 的 system；与记忆工具、自动抽取、记忆库灌窗分开开关。
 _Avoid_: 用 memoryEnabled 一把关掉说明书；把说明书和 memory_recall 绑死
 
