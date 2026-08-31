@@ -43,7 +43,7 @@ import { startLspWarmup } from "./lsp/warmup.js";
 import { DEFAULT_LSP_IDLE_TIMEOUT_MS } from "./lsp/client.js";
 import type { LspCtx } from "./lsp/types.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
-import type { Registry } from "./tools/types.js";
+import type { Registry, ToolCall } from "./tools/types.js";
 import type { RegistryImpl } from "./tools/registry.js";
 import type { ValidateFunction } from "ajv";
 import { homedir } from "node:os";
@@ -60,8 +60,10 @@ import {
 } from "../config/settings.js";
 import {
   createWorktreeIsolationExecutor,
+  classifyCall,
   mainCheckoutOf,
   taskWorktreeOwnerOf,
+  type MutateClass,
   type WorktreeIsolationHostOpts,
 } from "./isolation/worktree-gate.js";
 import type { IknowEnv } from "../config/env.js";
@@ -107,6 +109,7 @@ import {
   createSubAgentManager,
   type SubAgentManager,
 } from "./subagent/manager.js";
+import { assessSubagentIsolation } from "./subagent/capability.js";
 import {
   createDefaultSubAgentSpawn,
   resolveSubagentTraceDir,
@@ -822,6 +825,32 @@ export async function buildHarnessEngine(
     },
   });
 
+  // T4 / ADR-0040: `spawn_subagent` is read-only only when the child's
+  // effective capability surface passes both dimensions from capability.ts.
+  // The role default mirrors spawn-subagent-tool.ts; malformed role values are
+  // deliberately mapped to an unknown role so the classifier stays fail-closed
+  // before the inner executor performs schema validation.
+  const classifyWithSubagentIsolation = (call: ToolCall): MutateClass => {
+    if (call.name !== "spawn_subagent") return classifyCall(call);
+    const input = (call.input ?? {}) as Record<string, unknown>;
+    const rawRole = input.subagent_type;
+    const role =
+      rawRole === undefined
+        ? "general-purpose"
+        : typeof rawRole === "string"
+          ? rawRole
+          : "__invalid_subagent_type__";
+    const disallowedTools = Array.isArray(input.disallowedTools)
+      ? (input.disallowedTools as ReadonlyArray<string>)
+      : undefined;
+    const decision = assessSubagentIsolation({
+      role,
+      availableTools: reg.catalog.all().map((tool) => tool.name),
+      ...(disallowedTools !== undefined ? { disallowedTools } : {}),
+    });
+    return decision.conclusion === "readonly" ? "read" : "mutate";
+  };
+
   // ADR-0037 T3:mutate 门禁（harness executor 缝）。开关判定已上移（同一
   // isolationEnabled 同时驱动 T4 create-task-worktree 工具的条件化装配，
   // 见上方 registry 调用）；host 缝（provision / initiallyBound）由
@@ -835,6 +864,7 @@ export async function buildHarnessEngine(
         // 同根 no-op;外来根 → typed foreign_worktree）——host 缝不再携带
         // conversation-agnostic 的 initiallyBound（per-root 引擎可服务多个
         // 会话，引擎级 bound 标记会把别会话的 mutate 一并放行）。
+        classify: classifyWithSubagentIsolation,
         inner: executor,
       })
     : executor;
