@@ -95,6 +95,70 @@ describe("ACI permission gate — caller abort", () => {
     assert.equal(handlerCalls, 0);
   });
 
+  it("does not execute after an uncooperative AskUser approves late", async () => {
+    let handlerCalls = 0;
+    const tool: AciToolDef = Object.freeze({
+      name: "edit_file",
+      description: "test edit_file",
+      inputSchema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+      handler: async () => {
+        handlerCalls += 1;
+        return "must not execute";
+      },
+      aci: Object.freeze({
+        category: "write" as const,
+        isConcurrencySafe: false,
+        interruptBehavior: "block" as const,
+        timeoutTier: "default" as const,
+      }),
+    });
+    const registry = createRegistry([tool]);
+    const catalog: AciCatalog = Object.freeze({
+      get: (name) => (name === tool.name ? tool : undefined),
+      all: () => Object.freeze([tool]),
+    });
+
+    let resolvePromptStarted!: () => void;
+    const promptStarted = new Promise<void>((resolve) => {
+      resolvePromptStarted = resolve;
+    });
+    let lateApprove!: () => void;
+    const askUser: AskUser = async () => {
+      resolvePromptStarted();
+      return new Promise<boolean>((resolve) => {
+        lateApprove = () => resolve(true);
+      });
+    };
+
+    const controller = new AbortController();
+    const aciExecutor = createAciExecutor({
+      inner: createExecutor(registry),
+      catalog,
+      policy: createPermissionPolicy(),
+      askUser,
+    });
+    const execution = aciExecutor.executeAll(
+      [{ id: "u1", name: tool.name, input: { path: "x.ts" } }],
+      controller.signal
+    );
+
+    await promptStarted;
+    controller.abort();
+    lateApprove();
+
+    const result = (await execution)[0]!;
+    assert.equal(handlerCalls, 0, "late approval must not reach the handler");
+    assert.equal(result.kind, "execution_failed");
+    if (result.kind === "execution_failed") {
+      assert.equal(result.message, "cancelled");
+    }
+  });
+
   it("fails closed when AskUser throws without rejecting the ACI execution", async () => {
     let handlerCalls = 0;
     const tool: AciToolDef = Object.freeze({

@@ -237,6 +237,18 @@ export function createPermissionRuntime(
         // a tool side effect merely because the user prompt failed.
         approved = false;
       }
+      if (isAborted(signal)) {
+        // EXIT: caller cancellation wins over a late approval; AskUser cannot
+        // revive a call after the permission wait has been cancelled.
+        return {
+          kind: "blocked",
+          result: {
+            kind: "execution_failed",
+            toolUseId: call.id,
+            message: CANCELLED_RESULT_MESSAGE,
+          },
+        };
+      }
       if (!approved) {
         return {
           kind: "blocked",

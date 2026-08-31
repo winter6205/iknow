@@ -20,6 +20,8 @@ import {
   type HookErrorEvent,
 } from "../../../src/harness/permission/permission-executor.js";
 import { createPermissionPolicy } from "../../../src/harness/permission/policy.js";
+import { createExecutor } from "../../../src/harness/tools/executor.js";
+import { createRegistry } from "../../../src/harness/tools/registry.js";
 import type {
   AciToolDef,
   AciCategory,
@@ -319,6 +321,57 @@ describe("createPermissionExecutor — cancellable ask path", () => {
       assert.equal(result[0]!.message, "cancelled");
     }
     assert.equal(calls.length, 0);
+  });
+
+  it("ignores approval returned after caller abort", async () => {
+    let handlerCalls = 0;
+    const tool = Object.freeze({
+      ...makeAciTool({ name: "edit_file", category: "write" }),
+      inputSchema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+      handler: async () => {
+        handlerCalls += 1;
+        return "must not execute";
+      },
+    });
+    const registry = createRegistry([tool]);
+    const controller = new AbortController();
+    let resolvePromptStarted!: () => void;
+    const promptStarted = new Promise<void>((resolve) => {
+      resolvePromptStarted = resolve;
+    });
+    let lateApprove!: () => void;
+    const askUser: AskUser = async () => {
+      resolvePromptStarted();
+      return new Promise<boolean>((resolve) => {
+        lateApprove = () => resolve(true);
+      });
+    };
+    const ex = createPermissionExecutor({
+      inner: createExecutor(registry),
+      registry,
+      policy: createPermissionPolicy(),
+      askUser,
+    });
+
+    const execution = ex.executeAll(
+      [{ id: "u1", name: tool.name, input: { path: "x.ts" } }],
+      controller.signal
+    );
+    await promptStarted;
+    controller.abort();
+    lateApprove();
+
+    const result = (await execution)[0]!;
+    assert.equal(handlerCalls, 0, "late approval must not reach the handler");
+    assert.equal(result.kind, "execution_failed");
+    if (result.kind === "execution_failed") {
+      assert.equal(result.message, "cancelled");
+    }
   });
 
   it("AskUser errors fail closed as a user denial instead of rejecting executeAll", async () => {
