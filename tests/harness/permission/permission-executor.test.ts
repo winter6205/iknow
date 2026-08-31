@@ -32,6 +32,7 @@ import type {
   ToolDef,
 } from "../../../src/harness/tools/types.js";
 import type {
+  AskUser,
   PreToolUseHook,
   PostToolUseHook,
 } from "../../../src/harness/permission/types.js";
@@ -273,6 +274,72 @@ describe("createPermissionExecutor — ask path", () => {
     if (r.kind === "execution_failed") {
       assert.ok(r.message.startsWith("[user_denied]"));
       assert.ok(r.message.includes("user declined"));
+    }
+    assert.equal(calls.length, 0);
+  });
+});
+
+describe("createPermissionExecutor — cancellable ask path", () => {
+  it("aborting while AskUser waits returns the typed cancelled result immediately", async () => {
+    const tool = makeAciTool({ name: "edit_file", category: "write" });
+    const reg = makeRegistry([tool]);
+    const { executor: inner, calls } = makeInnerSpy();
+    const controller = new AbortController();
+    const askUser: AskUser = (ctx) =>
+      new Promise<boolean>((resolve) => {
+        ctx.signal?.addEventListener("abort", () => resolve(false), {
+          once: true,
+        });
+      });
+    const ex = createPermissionExecutor({
+      inner,
+      registry: reg,
+      policy: createPermissionPolicy(),
+      askUser,
+    });
+
+    const execution = ex.executeAll(
+      [{ id: "u1", name: "edit_file", input: { path: "x.ts" } }],
+      controller.signal
+    );
+    await Promise.resolve();
+    controller.abort();
+
+    const result = await Promise.race([
+      execution,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("permission ask did not cancel")),
+          100
+        )
+      ),
+    ]);
+    assert.equal(result[0]!.kind, "execution_failed");
+    if (result[0]!.kind === "execution_failed") {
+      assert.equal(result[0]!.message, "cancelled");
+    }
+    assert.equal(calls.length, 0);
+  });
+
+  it("AskUser errors fail closed as a user denial instead of rejecting executeAll", async () => {
+    const tool = makeAciTool({ name: "edit_file", category: "write" });
+    const reg = makeRegistry([tool]);
+    const { executor: inner, calls } = makeInnerSpy();
+    const ex = createPermissionExecutor({
+      inner,
+      registry: reg,
+      policy: createPermissionPolicy(),
+      askUser: async () => {
+        throw new Error("approval inlet failed");
+      },
+    });
+
+    const result = await ex.executeAll([
+      { id: "u1", name: "edit_file", input: { path: "x.ts" } },
+    ]);
+    assert.equal(result[0]!.kind, "execution_failed");
+    if (result[0]!.kind === "execution_failed") {
+      assert.ok(result[0]!.message.startsWith("[user_denied]"));
     }
     assert.equal(calls.length, 0);
   });

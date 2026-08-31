@@ -8,7 +8,7 @@
  *
  * 语义：
  *  - ask(ctx) 分配 `ask-N`，挂 fail-closed 定时器（默认 60s，unref）；
- *  - 仅 resolveAsk(id, true) 可放行；超时 / 未知 id → false；
+ *  - 仅 resolveAsk(id, true) 可放行；超时 / caller abort / 未知 id → false；
  *  - pending() 供 UI 渲染提示（工具名 + summaryHint + id）。
  */
 import type { AskUser } from "../harness/permission/types.js";
@@ -44,6 +44,8 @@ export function createTuiAskUserBridge(opts?: {
       readonly info: TuiPendingAsk;
       readonly resolve: (v: boolean) => void;
       readonly timer: ReturnType<typeof setTimeout>;
+      readonly signal: AbortSignal | undefined;
+      readonly onAbort: () => void;
     }
   >();
   let counter = 0;
@@ -57,12 +59,14 @@ export function createTuiAskUserBridge(opts?: {
     if (!entry) return false;
     queue.delete(id);
     clearTimeout(entry.timer);
+    entry.signal?.removeEventListener("abort", entry.onAbort);
     entry.resolve(approved);
     notify();
     return true;
   }
 
   const ask: AskUser = (ctx) => {
+    if (ctx.signal?.aborted === true) return Promise.resolve(false);
     counter += 1;
     const id = `ask-${counter}`;
     return new Promise<boolean>((resolve) => {
@@ -71,6 +75,9 @@ export function createTuiAskUserBridge(opts?: {
         settle(id, false);
       }, timeoutMs);
       if (typeof timer.unref === "function") timer.unref();
+      const onAbort = (): void => {
+        settle(id, false);
+      };
       queue.set(id, {
         info: {
           id,
@@ -80,8 +87,14 @@ export function createTuiAskUserBridge(opts?: {
         },
         resolve,
         timer,
+        signal: ctx.signal,
+        onAbort,
       });
-      notify();
+      if (ctx.signal !== undefined) {
+        ctx.signal.addEventListener("abort", onAbort, { once: true });
+        if (ctx.signal.aborted) settle(id, false);
+      }
+      if (queue.has(id)) notify();
     });
   };
 
