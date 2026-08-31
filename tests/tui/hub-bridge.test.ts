@@ -903,6 +903,67 @@ describe("hub-bridge listSubagents 投影（#358 T7）", () => {
     });
     expect(bridge.listSubagents()).toBe(projection);
   });
+
+  test("list 与 terminal subscription 都按 parent conversationId 过滤", () => {
+    const mailbox = createSubAgentMailbox();
+    const sessionATask = {
+      taskId: "session-a-task",
+      state: "completed" as const,
+      taskPreview: "A",
+      startedAt: "2026-08-31T00:00:00.000Z",
+    };
+    const sessionBTask = {
+      taskId: "session-b-task",
+      state: "completed" as const,
+      taskPreview: "B",
+      startedAt: "2026-08-31T00:00:00.000Z",
+    };
+    const manager: SubAgentManager = {
+      spawn: () => ({ taskId: "unused" }),
+      queryBuffer: () => ({ status: "not_found" }),
+      waitFor: async () => {
+        throw new Error("unused");
+      },
+      shutdown: async () => {},
+      drainCompleted: () => [],
+      listActive: () => [],
+      abortTask: () => false,
+      listSubagents: (conversationId) =>
+        conversationId === "session-a"
+          ? [sessionATask]
+          : [sessionATask, sessionBTask],
+      subscribe: mailbox.subscribe,
+    };
+    const bridge = createTuiBridge({
+      deps: makeDeps([]),
+      inflight: createInflightRegistry(),
+      subagentManager: manager,
+    });
+    const notices: string[] = [];
+    const unsubscribe = bridge.subscribeSubagentTerminal(
+      (notice) => notices.push(notice.taskId),
+      "session-a"
+    );
+
+    expect(bridge.listSubagents("session-a")).toEqual([sessionATask]);
+    mailbox.publish({
+      taskId: "session-a-task",
+      conversationId: "session-a",
+      status: "ok",
+      summary: "done",
+      result: "result",
+    });
+    mailbox.publish({
+      taskId: "session-b-task",
+      conversationId: "session-b",
+      status: "ok",
+      summary: "done",
+      result: "result",
+    });
+
+    expect(notices).toEqual(["session-a-task"]);
+    unsubscribe();
+  });
 });
 
 // ---------------------------------------------------------------------------

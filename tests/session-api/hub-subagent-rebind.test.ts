@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -171,5 +171,47 @@ describe("SessionHub subagent manager aggregation across rebind", () => {
         { timeout: 2_000 }
       )
       .toBe(true);
+  });
+
+  it("does not wake the most recent session for another session's terminal notice", async () => {
+    const baseDir = await mkdtemp(
+      join(tmpdir(), "iknow-hub-subagent-wake-scope-")
+    );
+    cleanup.push(baseDir);
+    const mailbox = createSubAgentMailbox();
+    const manager: SubAgentManager = {
+      spawn: () => ({ taskId: "unused" }),
+      queryBuffer: () => ({ status: "not_found" }),
+      waitFor: async () => {
+        throw new Error("unused");
+      },
+      shutdown: async () => {},
+      drainCompleted: () => [],
+      listActive: () => [],
+      abortTask: () => false,
+      listSubagents: () => [],
+      subscribe: mailbox.subscribe,
+    };
+    const hub = new SessionHub({
+      store: new SessionStore(baseDir),
+      deps: makeDeps([]),
+      subagentManager: manager,
+      surface: "serve",
+    });
+    const wake = vi.spyOn(hub, "wakeFromSubagent").mockResolvedValue(undefined);
+    (hub as unknown as { lastConversationId: string }).lastConversationId =
+      "session-b";
+
+    mailbox.publish({
+      taskId: "session-a-task",
+      conversationId: "session-a",
+      status: "ok",
+      summary: "A done",
+      result: "A result",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(wake).not.toHaveBeenCalled();
+    await hub.shutdown();
   });
 });

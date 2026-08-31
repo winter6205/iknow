@@ -142,4 +142,120 @@ describe("createSubagentManagerRegistry", () => {
     expect(notices).toEqual(["first-live", "second-live"]);
     unsubscribe();
   });
+
+  it("filters list projections by parent conversation across every root manager", () => {
+    const first = readManager(
+      (conversationId) =>
+        conversationId === "session-a"
+          ? [completed("first-a")]
+          : [completed("first-a"), completed("first-b")],
+      (conversationId) =>
+        conversationId === "session-a"
+          ? [
+              {
+                taskId: "first-a",
+                state: "completed",
+                taskPreview: "A",
+                startedAt: "2026-08-31T00:00:00.000Z",
+              },
+            ]
+          : [
+              {
+                taskId: "first-a",
+                state: "completed",
+                taskPreview: "A",
+                startedAt: "2026-08-31T00:00:00.000Z",
+              },
+              {
+                taskId: "first-b",
+                state: "completed",
+                taskPreview: "B",
+                startedAt: "2026-08-31T00:00:00.000Z",
+              },
+            ]
+    );
+    const second = readManager(
+      (conversationId) =>
+        conversationId === "session-a"
+          ? [completed("second-a")]
+          : [completed("second-a"), completed("second-b")],
+      (conversationId) =>
+        conversationId === "session-a"
+          ? [
+              {
+                taskId: "second-a",
+                state: "running",
+                taskPreview: "A",
+                startedAt: "2026-08-31T00:00:00.000Z",
+              },
+            ]
+          : [
+              {
+                taskId: "second-a",
+                state: "running",
+                taskPreview: "A",
+                startedAt: "2026-08-31T00:00:00.000Z",
+              },
+              {
+                taskId: "second-b",
+                state: "failed",
+                taskPreview: "B",
+                startedAt: "2026-08-31T00:00:00.000Z",
+              },
+            ]
+    );
+    const registry = createSubagentManagerRegistry();
+    registry.register(first);
+    registry.register(second);
+
+    expect(
+      registry.drainCompleted("session-a").map(({ taskId }) => taskId)
+    ).toEqual(["first-a", "second-a"]);
+    expect(
+      registry.listSubagents("session-a").map(({ taskId }) => taskId)
+    ).toEqual(["first-a", "second-a"]);
+    expect(registry.listSubagents().map(({ taskId }) => taskId)).toEqual([
+      "first-a",
+      "first-b",
+      "second-a",
+      "second-b",
+    ]);
+  });
+
+  it("filters terminal subscriptions by parent conversation across every root manager", () => {
+    const first = readManager(() => []);
+    const second = readManager(() => []);
+    const registry = createSubagentManagerRegistry();
+    registry.register(first);
+    registry.register(second);
+    const notices: string[] = [];
+    const unsubscribe = registry.subscribe((notice) => {
+      notices.push(notice.taskId);
+    }, "session-a");
+
+    first.publish({
+      taskId: "first-a",
+      conversationId: "session-a",
+      status: "ok",
+      summary: "done",
+      result: "result",
+    });
+    first.publish({
+      taskId: "first-b",
+      conversationId: "session-b",
+      status: "ok",
+      summary: "done",
+      result: "result",
+    });
+    second.publish({
+      taskId: "second-a",
+      conversationId: "session-a",
+      status: "ok",
+      summary: "done",
+      result: "result",
+    });
+
+    expect(notices).toEqual(["first-a", "second-a"]);
+    unsubscribe();
+  });
 });

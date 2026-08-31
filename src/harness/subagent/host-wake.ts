@@ -238,6 +238,10 @@ export function createSubagentWake(
   let unsubscribe: () => void = () => {};
   if (subscribe !== undefined) {
     try {
+      const subscriptionConversationId =
+        typeof options.conversationId === "string"
+          ? options.conversationId
+          : undefined;
       unsubscribe =
         subscribe((notice) => {
           if (
@@ -247,7 +251,7 @@ export function createSubagentWake(
           ) {
             request(notice);
           }
-        }) ?? (() => {});
+        }, subscriptionConversationId) ?? (() => {});
     } catch (error) {
       reportFailure("watcherUnavailable", error, [], true);
     }

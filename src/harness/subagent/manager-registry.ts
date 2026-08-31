@@ -1,7 +1,10 @@
 import { errorMessage } from "../errors.js";
 import type { SubAgentEnvelope } from "./envelope.js";
 import type { SubagentInfo } from "./manager.js";
-import type { SubAgentTerminalSubscriber } from "./mailbox.js";
+import type {
+  SubAgentTerminalNotice,
+  SubAgentTerminalSubscriber,
+} from "./mailbox.js";
 
 export interface SubagentManagerDrainView {
   readonly drainCompleted: (conversationId?: string) => ReadonlyArray<{
@@ -11,11 +14,16 @@ export interface SubagentManagerDrainView {
 }
 
 export interface SubagentManagerWakeView extends SubagentManagerDrainView {
-  readonly subscribe: (subscriber: SubAgentTerminalSubscriber) => () => void;
+  readonly subscribe: (
+    subscriber: SubAgentTerminalSubscriber,
+    conversationId?: string
+  ) => () => void;
 }
 
 export interface SubagentManagerReadView extends SubagentManagerWakeView {
-  readonly listSubagents: () => ReadonlyArray<SubagentInfo>;
+  readonly listSubagents: (
+    conversationId?: string
+  ) => ReadonlyArray<SubagentInfo>;
 }
 
 export class SubagentManagerDrainError extends Error {
@@ -44,7 +52,10 @@ export interface SubagentManagerRegistry extends SubagentManagerReadView {
   readonly register: (manager: SubagentManagerReadView | undefined) => void;
 }
 
-type SubscriberSubscriptions = Map<SubagentManagerReadView, () => void>;
+interface SubscriberSubscriptions {
+  readonly conversationId?: string;
+  readonly managers: Map<SubagentManagerReadView, () => void>;
+}
 
 function reportObserverDiagnostic(scope: string, error: unknown): void {
   try {
@@ -76,8 +87,19 @@ export function createSubagentManagerRegistry(
     subscriptions: SubscriberSubscriptions
   ): void => {
     try {
-      const unsubscribe = manager.subscribe(subscriber);
-      subscriptions.set(manager, unsubscribe);
+      const scopedSubscriber =
+        subscriptions.conversationId === undefined
+          ? subscriber
+          : (notice: SubAgentTerminalNotice): void => {
+              if (notice.conversationId === subscriptions.conversationId) {
+                subscriber(notice);
+              }
+            };
+      const unsubscribe = manager.subscribe(
+        scopedSubscriber,
+        subscriptions.conversationId
+      );
+      subscriptions.managers.set(manager, unsubscribe);
     } catch (error) {
       reportObserverDiagnostic("manager subscribe failed", error);
     }
@@ -124,20 +146,28 @@ export function createSubagentManagerRegistry(
     return drained;
   };
 
-  const listSubagents = (): ReadonlyArray<SubagentInfo> => {
+  const listSubagents = (
+    conversationId?: string
+  ): ReadonlyArray<SubagentInfo> => {
     if (managers.size === 0) return [];
     if (managers.size === 1)
-      return managers.values().next().value!.listSubagents();
+      return managers.values().next().value!.listSubagents(conversationId);
     const listed: SubagentInfo[] = [];
     for (const manager of managers) {
-      listed.push(...manager.listSubagents());
+      listed.push(...manager.listSubagents(conversationId));
     }
     return listed;
   };
 
-  const subscribe = (subscriber: SubAgentTerminalSubscriber): (() => void) => {
+  const subscribe = (
+    subscriber: SubAgentTerminalSubscriber,
+    conversationId?: string
+  ): (() => void) => {
     if (subscribers.has(subscriber)) return () => {};
-    const subscriptions: SubscriberSubscriptions = new Map();
+    const subscriptions: SubscriberSubscriptions = {
+      conversationId,
+      managers: new Map(),
+    };
     subscribers.set(subscriber, subscriptions);
     for (const manager of managers) {
       attach(manager, subscriber, subscriptions);
@@ -148,14 +178,14 @@ export function createSubagentManagerRegistry(
       if (!active) return;
       active = false;
       subscribers.delete(subscriber);
-      for (const unsubscribe of subscriptions.values()) {
+      for (const unsubscribe of subscriptions.managers.values()) {
         try {
           unsubscribe();
         } catch (error) {
           reportObserverDiagnostic("manager unsubscribe failed", error);
         }
       }
-      subscriptions.clear();
+      subscriptions.managers.clear();
     };
   };
 

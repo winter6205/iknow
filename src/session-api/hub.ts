@@ -1032,19 +1032,20 @@ export class SessionHub {
     conversationId: string
   ): Promise<ReadonlyArray<SubagentInfo>> {
     await this.store.load(conversationId);
-    return this.subagentManagers.listSubagents();
+    return this.subagentManagers.listSubagents(conversationId);
   }
 
-  /** T1: TUI/host read-only terminal subscription across every root manager. */
+  /** T1: TUI/host read-only terminal subscription scoped to one session. */
   subscribeSubagentTerminal(
-    subscriber: SubAgentTerminalSubscriber
+    subscriber: SubAgentTerminalSubscriber,
+    conversationId?: string
   ): () => void {
-    return this.subagentManagers.subscribe(subscriber);
+    return this.subagentManagers.subscribe(subscriber, conversationId);
   }
 
-  /** T1: TUI/host read-only projection across every root manager. */
-  listSubagents(): ReadonlyArray<SubagentInfo> {
-    return this.subagentManagers.listSubagents();
+  /** T1: TUI/host read-only projection; omit scope only for a global view. */
+  listSubagents(conversationId?: string): ReadonlyArray<SubagentInfo> {
+    return this.subagentManagers.listSubagents(conversationId);
   }
 
   /**
@@ -2493,6 +2494,7 @@ export class SessionHub {
     if (this.subagentWake !== undefined || this.surface !== "serve") return;
     this.subagentWake = createSubagentWake({
       manager,
+      conversationId: () => this.lastConversationId,
       isIdle: () =>
         this.lastConversationId !== undefined &&
         !this.activeTurnCounts.has(this.lastConversationId),
