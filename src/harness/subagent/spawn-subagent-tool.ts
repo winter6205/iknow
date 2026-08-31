@@ -50,6 +50,7 @@ import {
   builtinCatalogResolver,
   type AgentCatalogResolver,
 } from "./catalog.js";
+import { resolveSubagentCapabilities } from "./capability.js";
 
 /**
  * 依赖注入：`manager` 父代理侧子代理生命周期 / 状态机 / buffer / shutdown 链
@@ -224,28 +225,13 @@ export function createSpawnSubAgentTool(
       // —— 否则 explore 角色的 [edit_file, write_file] 不进入 wire,worker 工具
       // 面仍含这两个工具 (T8 acceptance "tool surface 无 edit_file/write_file" 失守)。
       const subagentType = obj.subagent_type;
-      let resolvedRole: string | undefined;
-      let catalogDisallowed: ReadonlyArray<string> | undefined;
-      if (subagentType === undefined) {
-        const entry = catalog.get("general-purpose");
-        resolvedRole = entry.id;
-        catalogDisallowed = entry.disallowedTools;
-      } else if (typeof subagentType !== "string") {
+      if (subagentType !== undefined && typeof subagentType !== "string") {
         // ajv strict 已拒, 此处防御
         throw new ToolExecutionError(
           "spawn_subagent: subagent_type must be a string"
         );
-      } else {
-        try {
-          const entry = catalog.get(subagentType); // fail-fast unknown
-          resolvedRole = subagentType;
-          catalogDisallowed = entry.disallowedTools;
-        } catch {
-          throw new ToolExecutionError(
-            `spawn_subagent: unknown subagent_type '${subagentType}'`
-          );
-        }
       }
+      const requestedRole = subagentType ?? "general-purpose";
       // catalog entry.disallowedTools 与 obj.disallowedTools union (Set 去重)。
       // 两者均缺省 → undefined (V1 baseline,不动 def.disallowedTools 字段)。
       // 仅有 catalog → 应用 catalog deny (e.g. explore → [edit_file, write_file])。
@@ -254,17 +240,33 @@ export function createSpawnSubAgentTool(
       const parentDisallowed = Array.isArray(obj.disallowedTools)
         ? (obj.disallowedTools as ReadonlyArray<string>)
         : undefined;
-      const mergedDisallowed =
-        parentDisallowed || catalogDisallowed
-          ? Object.freeze(
-              Array.from(
-                new Set<string>([
-                  ...(parentDisallowed ?? []),
-                  ...(catalogDisallowed ?? []),
-                ])
-              )
-            )
-          : undefined;
+      let capabilities: ReturnType<typeof resolveSubagentCapabilities>;
+      try {
+        capabilities = resolveSubagentCapabilities({
+          role: requestedRole,
+          parentDisallowedTools: parentDisallowed,
+          catalog,
+        });
+      } catch (err) {
+        // Preserve the pre-extraction policy: an invalid custom catalog is
+        // converted for an explicit type, while the default-role lookup
+        // remains a direct typed catalog failure.
+        if (subagentType === undefined) throw err;
+        throw new ToolExecutionError(
+          `spawn_subagent: unknown subagent_type '${subagentType}'`
+        );
+      }
+      if (capabilities.catalogError !== undefined) {
+        if (subagentType === undefined) throw capabilities.catalogError;
+        throw new ToolExecutionError(
+          `spawn_subagent: unknown subagent_type '${subagentType}'`
+        );
+      }
+      const resolvedRole =
+        subagentType === undefined
+          ? (capabilities.catalogRole ?? requestedRole)
+          : requestedRole;
+      const mergedDisallowed = capabilities.disallowedTools;
       // 装配 SubAgentDefinition：可选字段透传，缺失字段从 def 上省略（manager
       // 端按 SubAgentDefinition 自身字段约束走 default deny / 默认 maxTurns 等）。
       // #356 High #1 修复：task 必填透传进 def（此前漏掉 → buildWorkerPayload

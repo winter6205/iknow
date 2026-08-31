@@ -57,6 +57,7 @@ import type { HarnessStreamEvent } from "../stream.js";
 import { MaxTurnsExceeded, ProtocolError } from "../errors.js";
 import type { AnthropicNativeMessage } from "../model-adapter/types.js";
 import { getAgentEntry, AgentCatalogLookupError } from "./catalog.js";
+import { resolveSubagentCapabilities, type BashMode } from "./capability.js";
 import {
   parseWorkerEnvelope,
   truncateEnvelopeResult,
@@ -116,36 +117,6 @@ function resolveConstraintsText(role: string | undefined): string | undefined {
     if (err instanceof AgentCatalogLookupError) {
       log(`role '${role}' not in catalog; falling back to V1 baseline`);
       return undefined;
-    }
-    throw err;
-  }
-}
-
-/**
- * #562 T6: 查 catalog 取 bashMode 派生出 worker 装配期的 bash 模式。
- *
- * 继承 plan T6 fallback 链路:
- *   - role 缺省 → 返回 "any" (V1 baseline 等价; worker 不显式 grep,
- *     但 deps.bashMode 字段总会显式设置, 让 wiring 显式可见);
- *   - role 已知 (catalog 命中, e.g. "explore") → 返回 entry.bashMode,
- *     缺省视为 "any" (catalog 默认 / explore 外其他角色不强制 readonly);
- *   - role 未知 → 返回 "any" (defense-in-depth, 不静默吞掉 — 装配期
- *     catch AgentCatalogLookupError 后写一行 log, 装配仍走 "any" 显式
- *     透传, 与 resolvePersonaBody / resolveConstraintsText 同形态);
- *
- * 显式 "any":bash handler 不启用 readonly validator, fence 不收
- * cwdReadonly —— 字节与 V1 一致。返回类型收窄到 "any" | "readonly",
- * 编译期保证调用方分支覆盖完整。
- */
-function resolveBashMode(role: string | undefined): "any" | "readonly" {
-  if (role === undefined) return "any";
-  try {
-    const entry = getAgentEntry(role);
-    return entry.bashMode ?? "any";
-  } catch (err) {
-    if (err instanceof AgentCatalogLookupError) {
-      log(`role '${role}' not in catalog; bashMode fallback to 'any'`);
-      return "any";
     }
     throw err;
   }
@@ -327,11 +298,19 @@ export async function createWorkerRuntime(
   // 独立 registry: 不依赖父注册表 (spec 假设 4)。worker 子进程不含
   // spawn_subagent (SC9) —— registry.ts 不传 subagentManager, 该工具不在
   // factories 里 (T2 才把两件工具 append 进 ACI_TOOLSET_NAMES)。
-  // #562 T6: bashMode 透传到 bash 工具工厂。优先 opts.bashMode 显式覆盖,
-  // 否则 resolveBashMode(role) 派生 (role 缺省 / 未知 → "any" fallback)。
+  // #562 T6: bashMode 与 catalog deny 均由同一能力解析源派生；显式
+  // opts.bashMode 只保留既有测试/未来注入 seam，不改变 catalog 的 deny。
   const isJudge = opts.role === "judge";
-  const bashMode: "any" | "readonly" =
-    opts.bashMode ?? (isJudge ? "any" : resolveBashMode(opts.role));
+  const capabilities = isJudge
+    ? { bashMode: "any" as const, disallowedTools: opts.disallowedTools }
+    : resolveSubagentCapabilities({
+        role: opts.role,
+        parentDisallowedTools: opts.disallowedTools,
+      });
+  if (capabilities.catalogError !== undefined) {
+    log(`role '${opts.role}' not in catalog; bashMode fallback to 'any'`);
+  }
+  const bashMode: BashMode = opts.bashMode ?? capabilities.bashMode;
   // lsp-optimization 二期 B6/B7 closeout: worker 同构装配 LSP notifier +
   // warmup（与 build-engine 同缝）。SSOT: LspCtx.directory ≡ sandboxRoot。
   // worker 不读 settings 文件，但注入 idleTimeoutMs 缺省（10min），与
@@ -348,7 +327,9 @@ export async function createWorkerRuntime(
     skillCatalog,
     onEdit: (file) => lspNotifier.invalidate(file),
     lspCtx,
-    ...(opts.disallowedTools ? { disallowedTools: opts.disallowedTools } : {}),
+    ...(capabilities.disallowedTools !== undefined
+      ? { disallowedTools: capabilities.disallowedTools }
+      : {}),
     // ADR-0019 (review-fix H3): spread-guard 透传 —— 缺席时 registry
     // 内部 fallback sandboxRoot(legacy 字节不变)。
     ...(opts.workspaceRoot !== undefined
