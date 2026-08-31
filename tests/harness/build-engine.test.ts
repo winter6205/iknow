@@ -21,6 +21,15 @@ import type { IknowEnv } from "../../src/config/env.ts";
 import { createMcpManager } from "../../src/harness/mcp/manager.ts";
 import type { McpClientHandle } from "../../src/harness/mcp/manager.ts";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
+import { createWorkerDeps } from "../../src/harness/subagent/worker.ts";
+import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
+import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
+import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
+import { assessSubagentIsolation } from "../../src/harness/subagent/capability.ts";
+import {
+  FILE_WRITE_TOOL_NAMES,
+  SYMBOL_MUTATE_TOOL_NAMES,
+} from "../../src/harness/aci/tools/symbol-mutate.ts";
 import type { ToolExecutionResult } from "../../src/harness/tools/types.ts";
 
 // Order is load-bearing: it must match the `aciTools` array in
@@ -1252,11 +1261,69 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       const result = await runSpawn(built, {
         task: "inspect the repository",
         subagent_type: "explore",
+        disallowedTools: [...FILE_WRITE_TOOL_NAMES],
         wait: false,
       });
 
       expect(result.kind).toBe("ok");
       expect(spawnedTasks).toEqual(["inspect the repository"]);
+      expect(provisioned).toBe(0);
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks explore when the real worker surface retains symbol writers", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-symbol-worker-"));
+    const workerDeps = await createWorkerDeps({
+      env: makeEnv("sk-test-t4-symbol-worker"),
+      sandboxRoot: root,
+      model: createStubModel({ responses: [] }),
+      skillCatalog: createSkillCatalog([]),
+      trace: createNoopTraceService(),
+      system: () => undefined,
+      role: "explore",
+    });
+    const workerToolNames = workerDeps.registry.list().map((tool) => tool.name);
+    const workerDecision = assessSubagentIsolation({
+      role: "explore",
+      availableTools: workerToolNames,
+    });
+    let provisioned = 0;
+    try {
+      expect(workerToolNames).toEqual(
+        expect.arrayContaining([...SYMBOL_MUTATE_TOOL_NAMES])
+      );
+      expect(workerDecision.conclusion).toBe("write");
+      expect(workerDecision.reason).toBe("write_tools_available");
+
+      const { manager, spawnedTasks } = makeTestSubagentManager();
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-symbol-gate"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        subagentManager: manager,
+        worktreeIsolation: {
+          provision: async () => {
+            provisioned += 1;
+            return root;
+          },
+        },
+      });
+
+      const result = await runSpawn(built, {
+        task: "inspect the repository",
+        subagent_type: "explore",
+        wait: false,
+      });
+
+      expect(result.kind).toBe("execution_failed");
+      expect(result.message).toContain("create-task-worktree ACI tool");
+      expect(spawnedTasks).toEqual([]);
       expect(provisioned).toBe(0);
       await built.shutdown?.();
     } finally {

@@ -3,6 +3,9 @@ import {
   builtinCatalogResolver,
   type AgentCatalogResolver,
 } from "./catalog.js";
+import { FILE_WRITE_TOOL_NAMES } from "../aci/tools/symbol-mutate.js";
+
+const FILE_WRITE_TOOL_NAME_SET = new Set<string>(FILE_WRITE_TOOL_NAMES);
 
 export type BashMode = "any" | "readonly";
 
@@ -128,9 +131,10 @@ export interface SubagentIsolationDecision {
 /**
  * Decide whether a subagent has a read-only effective capability surface.
  *
- * Both dimensions must pass: `edit_file` and `write_file` must be absent, and
- * `bash` must be absent or backed by the catalog's readonly mode. Unknown
- * roles fail closed even when the supplied tool surface happens to be empty.
+ * Both dimensions must pass: the effective surface must contain no direct
+ * workspace file-write tool, and `bash` must be absent or backed by the
+ * catalog's readonly mode. Unknown roles fail closed even when the supplied
+ * tool surface happens to be empty.
  */
 export function assessSubagentIsolation(
   opts: AssessSubagentIsolationOptions
@@ -154,10 +158,7 @@ export function assessSubagentIsolation(
     };
   }
 
-  if (
-    effectiveTools.includes("edit_file") ||
-    effectiveTools.includes("write_file")
-  ) {
+  if (effectiveTools.some((name) => FILE_WRITE_TOOL_NAME_SET.has(name))) {
     return {
       conclusion: "write",
       reason: "write_tools_available",

@@ -110,6 +110,7 @@ import {
   type SubAgentManager,
 } from "./subagent/manager.js";
 import { assessSubagentIsolation } from "./subagent/capability.js";
+import { buildWorkerToolSurface } from "./subagent/role.js";
 import {
   createDefaultSubAgentSpawn,
   resolveSubagentTraceDir,
@@ -784,6 +785,21 @@ export async function buildHarnessEngine(
         }
       : {}),
   });
+  // ADR-0040: the parent catalog is not the worker surface. Rebuild the
+  // worker registry through the same factory with the worker-only option
+  // shape (no parent managers, state tools, or worktree host seams), then
+  // apply the worker deny-list path in the classifier below. This keeps
+  // host-only write-category tools such as create-task-worktree and bash_stop
+  // out of the isolation decision without maintaining a second exclusion list.
+  const workerBaseTools = isolationEnabled
+    ? createDefaultAciRegistry({
+        env,
+        sandboxRoot,
+        skillCatalog,
+        lspCtx,
+        ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+      }).catalog.all()
+    : [];
   // #337:动态 registry 包装 —— 让 inner executor 能解析 registerExternal
   // 动态注册的 mcp__ 工具。`reg.inner` 是构造期快照（aci-registry.ts:71），
   // 本身的 `get/getValidator/list` 契约不变（T1 已锁 inner.list() 快照）。
@@ -843,9 +859,13 @@ export async function buildHarnessEngine(
     const disallowedTools = Array.isArray(input.disallowedTools)
       ? (input.disallowedTools as ReadonlyArray<string>)
       : undefined;
+    const effectiveWorkerTools = buildWorkerToolSurface(
+      workerBaseTools,
+      disallowedTools
+    );
     const decision = assessSubagentIsolation({
       role,
-      availableTools: reg.catalog.all().map((tool) => tool.name),
+      availableTools: effectiveWorkerTools.map((tool) => tool.name),
       ...(disallowedTools !== undefined ? { disallowedTools } : {}),
     });
     return decision.conclusion === "readonly" ? "read" : "mutate";

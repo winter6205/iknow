@@ -810,6 +810,18 @@ export const SYMBOL_MUTATE_TOOL_NAMES = Object.freeze([
   "safe_delete_symbol",
 ] as const);
 
+/**
+ * Worker 可直接写 workspace 文件的能力 SSOT。
+ *
+ * `category: "write"` 还包含工作树生命周期与进程控制工具；它们不属于
+ * worker 的文件写能力面，不能直接拿 category 推导隔离结论。
+ */
+export const FILE_WRITE_TOOL_NAMES = Object.freeze([
+  "edit_file",
+  "write_file",
+  ...SYMBOL_MUTATE_TOOL_NAMES,
+] as const);
+
 /** 装配入口（`registry.ts` 调用点）。
  *
  * 与 `createSymbolQueryToolSet(ctx)` 同形态：ctx 由 build-engine 装配期

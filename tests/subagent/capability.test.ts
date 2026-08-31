@@ -10,6 +10,7 @@ import {
   resolveBashMode,
   resolveSubagentCapabilities,
 } from "../../src/harness/subagent/capability.ts";
+import { SYMBOL_MUTATE_TOOL_NAMES } from "../../src/harness/aci/tools/symbol-mutate.ts";
 
 describe("subagent capability derivation", () => {
   it("merges parent and catalog deny lists once, preserving first-seen order", () => {
@@ -72,6 +73,23 @@ describe("subagent isolation capability", () => {
     assert.equal(decision.conclusion, "write");
     assert.equal(decision.reason, "bash_mode_not_readonly");
     assert.deepEqual(decision.effectiveTools, ["bash", "read_file"]);
+  });
+
+  it("rejects symbol writers when the parent only denies legacy file tools and bash", () => {
+    const decision = assessSubagentIsolation({
+      role: "explore",
+      availableTools: [
+        "bash",
+        "edit_file",
+        "write_file",
+        ...SYMBOL_MUTATE_TOOL_NAMES,
+      ],
+      disallowedTools: ["edit_file", "write_file", "bash"],
+    });
+
+    assert.equal(decision.conclusion, "write");
+    assert.equal(decision.reason, "write_tools_available");
+    assert.deepEqual(decision.effectiveTools, [...SYMBOL_MUTATE_TOOL_NAMES]);
   });
 
   it("allows a general-purpose role when all write-capable tools are denied", () => {

@@ -34,6 +34,11 @@ import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { ACI_TOOLSET_NAMES } from "../../src/harness/aci/tools/registry.ts";
+import { assessSubagentIsolation } from "../../src/harness/subagent/capability.ts";
+import {
+  FILE_WRITE_TOOL_NAMES,
+  SYMBOL_MUTATE_TOOL_NAMES,
+} from "../../src/harness/aci/tools/symbol-mutate.ts";
 
 // ---------------------------------------------------------------------------
 // Constants & fixtures
@@ -338,6 +343,52 @@ describe("worker tool surface: 权限 — 判官只读（allow-list 推导）", 
         `判官 catalog.get(${denied}) 应返回 undefined`
       );
     }
+  });
+});
+
+describe("worker tool surface: 隔离门禁 — symbol 写工具", () => {
+  it("真实 explore worker 工具面含 symbol 写工具时应判为可写", async () => {
+    const deps = await createWorkerDeps(hermeticOpts({ role: "explore" }));
+    const workerToolNames = deps.registry.list().map((tool) => tool.name);
+
+    for (const name of SYMBOL_MUTATE_TOOL_NAMES) {
+      assert.ok(
+        workerToolNames.includes(name),
+        `真实 worker 工具面应包含 ${name}`
+      );
+    }
+
+    const decision = assessSubagentIsolation({
+      role: "explore",
+      availableTools: workerToolNames,
+    });
+    assert.equal(decision.conclusion, "write");
+    assert.equal(decision.reason, "write_tools_available");
+  });
+
+  it("真实 explore worker 工具面不含文件写工具时仍判为只读", async () => {
+    const deps = await createWorkerDeps(
+      hermeticOpts({
+        role: "explore",
+        disallowedTools: [...FILE_WRITE_TOOL_NAMES],
+      })
+    );
+    const workerToolNames = deps.registry.list().map((tool) => tool.name);
+
+    for (const name of FILE_WRITE_TOOL_NAMES) {
+      assert.ok(
+        !workerToolNames.includes(name),
+        `真实 worker 工具面不应包含 ${name}`
+      );
+    }
+
+    const decision = assessSubagentIsolation({
+      role: "explore",
+      availableTools: workerToolNames,
+      disallowedTools: [...FILE_WRITE_TOOL_NAMES],
+    });
+    assert.equal(decision.conclusion, "readonly");
+    assert.equal(decision.reason, "write_tools_denied_bash_readonly");
   });
 });
 
