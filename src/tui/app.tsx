@@ -2141,7 +2141,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     const isCtrlC = e.ctrl && e.name === "c";
 
     if (graphViewOpen && graphProgress !== null) {
-      if (isCtrlC) logCtrlCDisposition("preempted");
       applyGraphViewKey(
         {
           key: e.name,
@@ -2158,7 +2157,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           openDetail: () => setGraphNodeDetail(true),
         }
       );
-      return;
+      if (!isCtrlC) return;
     }
 
     const graphKey = reduceGraphChromeFocus({
@@ -2167,7 +2166,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       key: e.name,
     });
     if (graphChromeFocus === "graph") {
-      if (isCtrlC) logCtrlCDisposition("preempted");
       if (graphKey.openView === true) {
         const ids =
           graphProgress === null
@@ -2176,13 +2174,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         setGraphSelectedId(ids[0] ?? null);
         setGraphNodeDetail(false);
         setGraphViewOpen(true);
-        return;
+        if (!isCtrlC) return;
       }
       if (graphKey.focus !== graphChromeFocus) {
         setGraphChromeFocus(graphKey.focus);
-        return;
+        if (!isCtrlC) return;
       }
-      return;
+      if (!isCtrlC) return;
     }
 
     // Shift+Tab 切 agent mode（W2 权限轮 + D-α graph overlay 的三态轮；
