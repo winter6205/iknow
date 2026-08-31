@@ -36,7 +36,11 @@ import { existsSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { errorMessage } from "../errors.js";
 import { validateReadonlyCommand } from "../aci/tools/bash-readonly.js";
-import type { Executor, ToolCall, ToolExecutionResult } from "../tools/types.js";
+import type {
+  Executor,
+  ToolCall,
+  ToolExecutionResult,
+} from "../tools/types.js";
 
 /** Visible message prefix for every gate-produced block (SSOT for tests). */
 export const WORKTREE_ISOLATION_PREFIX = "[worktree_isolation]";
@@ -129,9 +133,17 @@ export const defaultGitRunner: GitRunner = (args, cwd) =>
       [...args],
       { cwd, encoding: "utf8" },
       (err, stdout, stderr) => {
-        if (err && (err as NodeJS.ErrnoException).code !== undefined && typeof (err as NodeJS.ErrnoException).code === "number") {
+        if (
+          err &&
+          (err as NodeJS.ErrnoException).code !== undefined &&
+          typeof (err as NodeJS.ErrnoException).code === "number"
+        ) {
           // git exited non-zero — a normal result, not a spawn failure
-          resolve({ code: err.code as number, stdout: String(stdout), stderr: String(stderr) });
+          resolve({
+            code: err.code as number,
+            stdout: String(stdout),
+            stderr: String(stderr),
+          });
           return;
         }
         if (err) {
@@ -281,6 +293,24 @@ export function taskWorktreeOwnerOf(root: string): string | undefined {
   return basename(root);
 }
 
+/**
+ * T6 (plans/worktree-session-roots.md / ADR-0037 §4): the stable main checkout
+ * that owns `root` — `root` itself when it is not task-worktree-shaped,
+ * otherwise the repo three levels up (`<main>/.iknow/worktrees/<conv>`).
+ *
+ * This is the `productRoot` derivation hosts need when they hold **only** a
+ * session root: after a rebind (and after a restart that resumes a session
+ * already anchored on a tree) the session root is the tree, and identity /
+ * per-root state must still resolve to the main checkout. Same naming SSOT as
+ * `taskWorktreeOwnerOf`, so it is a pure path derivation — no git call, no
+ * `process.cwd()` fallback.
+ */
+export function mainCheckoutOf(root: string): string {
+  return taskWorktreeOwnerOf(root) === undefined
+    ? root
+    : dirname(dirname(dirname(root)));
+}
+
 // -- gate executor ----------------------------------------------------------------
 
 /**
@@ -306,7 +336,9 @@ export interface WorktreeProvisionContext {
  * Shared by the gate's host opts, the `create-task-worktree` ACI tool deps,
  * and the session-api provisioner — no per-module structural copies.
  */
-export type WorktreeProvisionFn = (ctx: WorktreeProvisionContext) => Promise<string>;
+export type WorktreeProvisionFn = (
+  ctx: WorktreeProvisionContext
+) => Promise<string>;
 
 /**
  * T7 explicit-enter seam context: a session (conversationId) anchored at the
@@ -462,7 +494,10 @@ export function createWorktreeIsolationExecutor(
     return fresh;
   };
 
-  const setState = (conversationId: string | undefined, next: GateSessionState): void => {
+  const setState = (
+    conversationId: string | undefined,
+    next: GateSessionState
+  ): void => {
     states.set(conversationId ?? "", next);
   };
 
@@ -532,7 +567,15 @@ export function createWorktreeIsolationExecutor(
     onStream?: (event: import("../stream.js").HarnessStreamEvent) => void
   ): Promise<ReadonlyArray<ToolExecutionResult>> => {
     if (!enabled) {
-      return inner.executeAll(calls, signal, timeoutMs, conversationId, onSettled, turnId, onStream);
+      return inner.executeAll(
+        calls,
+        signal,
+        timeoutMs,
+        conversationId,
+        onSettled,
+        turnId,
+        onStream
+      );
     }
     let anyMutate = false;
     for (const call of calls) {
@@ -542,7 +585,15 @@ export function createWorktreeIsolationExecutor(
       }
     }
     if (!anyMutate) {
-      return inner.executeAll(calls, signal, timeoutMs, conversationId, onSettled, turnId, onStream);
+      return inner.executeAll(
+        calls,
+        signal,
+        timeoutMs,
+        conversationId,
+        onSettled,
+        turnId,
+        onStream
+      );
     }
     // mixed / mutating batch: per-call gating (read calls still batched one
     // by one so onSettled keeps the input index alignment)
@@ -550,10 +601,30 @@ export function createWorktreeIsolationExecutor(
     for (const [index, call] of calls.entries()) {
       let result: ToolExecutionResult;
       if (classify(call) === "read") {
-        [result] = await inner.executeAll([call], signal, timeoutMs, conversationId, undefined, turnId, onStream);
+        [result] = await inner.executeAll(
+          [call],
+          signal,
+          timeoutMs,
+          conversationId,
+          undefined,
+          turnId,
+          onStream
+        );
       } else {
         const blocked = await gateMutate(call, conversationId);
-        result = blocked ?? (await inner.executeAll([call], signal, timeoutMs, conversationId, undefined, turnId, onStream))[0]!;
+        result =
+          blocked ??
+          (
+            await inner.executeAll(
+              [call],
+              signal,
+              timeoutMs,
+              conversationId,
+              undefined,
+              turnId,
+              onStream
+            )
+          )[0]!;
       }
       await onSettled?.(result, index);
       out.push(result);

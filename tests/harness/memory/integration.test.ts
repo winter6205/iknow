@@ -5,8 +5,8 @@
  * SC 1–15 + Boundaries Always — append-only, no real ~/.iknow writes).
  *
  * What this file asserts end-to-end:
- *   a. Dual-entry assembly consistency (chat vs serve over the same cwd → byte-
- *      identical system strings; different cwd → no cross-pollution because
+ *   a. Dual-entry assembly consistency (chat vs serve over the same projectIdentityRoot → byte-
+ *      identical system strings; different projectIdentityRoot → no cross-pollution because
  *      project namespaces resolve to different memory dirs).
  *   b. per-turn mtime refresh (after T7 wiring): mid-session AGENTS.md edits
  *      are reflected in the next turn's resolved system string.
@@ -23,7 +23,7 @@
  *
  * No real ~/.iknow writes (spec Boundaries Always — user-level path ALWAYS =
  * ~/.iknow, but tests must not pollute it): every test uses tmpdir-derived
- * memoryDir / userHome / cwd.
+ * memoryDir / userHome / projectIdentityRoot.
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -61,7 +61,7 @@ const roots: string[] = [];
 
 beforeEach(() => {
   // Each test gets a fresh root; child paths are constructed in-test so we
-  // can prove cross-cwd namespace isolation without leaking state across
+  // can prove cross-projectIdentityRoot namespace isolation without leaking state across
   // cases. No real ~/.iknow writes happen anywhere in this file.
 });
 
@@ -79,22 +79,26 @@ async function setupProject(
     readonly userAgentsBody?: string;
   } = {}
 ): Promise<{
-  cwd: string;
+  projectIdentityRoot: string;
   userHome: string;
   memoryDir: string;
 }> {
   const root = await mkdtemp(join(tmpdir(), "iknow-int-"));
   roots.push(root);
-  const cwd = join(root, "project");
+  const projectIdentityRoot = join(root, "project");
   const userHome = join(root, "home");
   const memoryDir = join(root, "memory");
-  await Promise.all([mkdir(cwd), mkdir(userHome), mkdir(memoryDir)]);
+  await Promise.all([
+    mkdir(projectIdentityRoot),
+    mkdir(userHome),
+    mkdir(memoryDir),
+  ]);
   // Pre-create the .iknow parents so writes below never race on ENOENT for a
   // missing directory (the red phase caught this bug; the production code
   // never touches real ~/.iknow).
   await Promise.all([
     mkdir(join(userHome, ".iknow"), { recursive: true }),
-    mkdir(join(cwd, ".iknow"), { recursive: true }),
+    mkdir(join(projectIdentityRoot, ".iknow"), { recursive: true }),
   ]);
   if (opts.userAgentsBody !== undefined) {
     await writeFile(
@@ -109,10 +113,14 @@ async function setupProject(
     await writeFile(join(rulesDir, "user-rule.md"), opts.userRuleBody, "utf8");
   }
   if (opts.agentsBody !== undefined) {
-    await writeFile(join(cwd, "AGENTS.md"), opts.agentsBody, "utf8");
+    await writeFile(
+      join(projectIdentityRoot, "AGENTS.md"),
+      opts.agentsBody,
+      "utf8"
+    );
   }
   if (opts.projectRuleBody !== undefined) {
-    const rulesDir = join(cwd, ".iknow", "rules");
+    const rulesDir = join(projectIdentityRoot, ".iknow", "rules");
     await mkdir(rulesDir, { recursive: true });
     await writeFile(
       join(rulesDir, "proj-rule.md"),
@@ -120,23 +128,27 @@ async function setupProject(
       "utf8"
     );
   }
-  return { cwd, userHome, memoryDir };
+  return { projectIdentityRoot, userHome, memoryDir };
 }
 
 function ctxOf(p: {
-  readonly cwd: string;
+  readonly projectIdentityRoot: string;
   readonly userHome: string;
   readonly memoryDir: string;
 }): AssemblyContext {
-  return { cwd: p.cwd, userHome: p.userHome, memoryDir: p.memoryDir };
+  return {
+    projectIdentityRoot: p.projectIdentityRoot,
+    userHome: p.userHome,
+    memoryDir: p.memoryDir,
+  };
 }
 
 // =============================================================================
-// a. Dual-entry assembly consistency (chat vs serve over the same cwd)
+// a. Dual-entry assembly consistency (chat vs serve over the same projectIdentityRoot)
 // =============================================================================
 
 describe("dual-entry assembly consistency (chat vs serve)", () => {
-  it("two harness instances over the same cwd produce byte-identical system strings", async () => {
+  it("two harness instances over the same projectIdentityRoot produce byte-identical system strings", async () => {
     const p = await setupProject({
       agentsBody: "PROJECT AGENTS",
       projectRuleBody: "PROJECT RULE",
@@ -159,7 +171,7 @@ describe("dual-entry assembly consistency (chat vs serve)", () => {
     assert.equal(
       chatSystem,
       serveSystem,
-      "two harness instances over the same cwd must produce identical system strings (chat vs serve consistency)"
+      "two harness instances over the same projectIdentityRoot must produce identical system strings (chat vs serve consistency)"
     );
     // And the resolved content carries the priority declaration (locks SC 4).
     assert.ok(chatSystem.includes(PRIORITY_DECLARATION));
@@ -173,9 +185,9 @@ describe("dual-entry assembly consistency (chat vs serve)", () => {
     assert.equal(first, second);
   });
 
-  it("different cwd projects do not pollute each other (namespace isolation)", async () => {
+  it("different projectIdentityRoot projects do not pollute each other (namespace isolation)", async () => {
     // Two distinct projects with distinct AGENTS.md bodies. Each resolves to
-    // a different project memory dir (basename + sha1(cwd)[:12]) so the
+    // a different project memory dir (basename + sha1(projectIdentityRoot)[:12]) so the
     // memory library segment (when present) is namespaced.
     const projA = await setupProject({
       agentsBody: "PROJECT A ONLY",
@@ -206,9 +218,9 @@ describe("dual-entry assembly consistency (chat vs serve)", () => {
     );
     // Namespace proof: resolveProjectMemoryDir is the canonical seam.
     assert.notEqual(
-      resolveProjectMemoryDir(projA.cwd),
-      resolveProjectMemoryDir(projB.cwd),
-      "project memory dirs must differ per cwd"
+      resolveProjectMemoryDir(projA.projectIdentityRoot),
+      resolveProjectMemoryDir(projB.projectIdentityRoot),
+      "project memory dirs must differ per projectIdentityRoot"
     );
   });
 });
@@ -229,7 +241,11 @@ describe("per-turn mtime refresh", () => {
     );
 
     await tick();
-    await writeFile(join(p.cwd, "AGENTS.md"), "PROJECT-V2", "utf8");
+    await writeFile(
+      join(p.projectIdentityRoot, "AGENTS.md"),
+      "PROJECT-V2",
+      "utf8"
+    );
     const second = await resolver();
     assert.ok(
       second !== undefined && second.includes("PROJECT-V2"),
@@ -264,14 +280,21 @@ describe("per-turn mtime refresh", () => {
     assert.ok(initial.includes("PROJ-A"));
     // #841 T6: the parent opener lists the rule path, never the body.
     assert.ok(
-      initial.includes(join(p.cwd, ".iknow", "rules", "proj-rule.md")),
+      initial.includes(
+        join(p.projectIdentityRoot, ".iknow", "rules", "proj-rule.md")
+      ),
       "rule path listed in the manifest"
     );
     assert.ok(!initial.includes("PROJ-RULE-A"), "rule body absent");
 
     await tick();
-    await writeFile(join(p.cwd, "AGENTS.md"), "PROJ-B", "utf8");
-    const rulePath = join(p.cwd, ".iknow", "rules", "proj-rule.md");
+    await writeFile(join(p.projectIdentityRoot, "AGENTS.md"), "PROJ-B", "utf8");
+    const rulePath = join(
+      p.projectIdentityRoot,
+      ".iknow",
+      "rules",
+      "proj-rule.md"
+    );
     await writeFile(rulePath, "PROJ-RULE-B", "utf8");
     const refreshed = await resolver();
     assert.ok(refreshed !== undefined);

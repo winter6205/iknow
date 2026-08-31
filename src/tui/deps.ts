@@ -111,6 +111,8 @@ export interface BuildTuiDepsOptions {
    * 跨 rebind 原样透传；reload 的 mcpConfigRoot 只由此派生，禁止用 cwd 重算。
    */
   readonly productRoot?: string;
+  /** Review (round 2/3):跨 rebind 稳定的项目身份根（启动 cwd）。 */
+  readonly projectIdentityRoot?: string;
   /**
    * 观测性地板:JSONL trace 写目录。在场时把 subagent 三事件交给 build-engine
    * （与 serve hub 同形：`<traceOut>/subagent.jsonl`）。
@@ -274,9 +276,21 @@ export async function buildTuiDeps(
     ...(opts.userHome ? { userHome } : {}),
     ...(opts.cwd ? { cwd } : {}),
     // ADR-0019 (T2): per-root state anchor 透传到 build-engine。
-    ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
+    // 判在场一律 `!== undefined`（三个根同规则，review round 5）：空串必须
+    // 透下去触 SSOT 的 fail-closed，真值判会把它吞掉再静默回退。
+    ...(opts.workspaceRoot !== undefined
+      ? { workspaceRoot: opts.workspaceRoot }
+      : {}),
     // T6:稳定 productRoot 透传（缺席 → build-engine 桥接为 workspaceRoot）。
-    ...(opts.productRoot ? { productRoot: opts.productRoot } : {}),
+    ...(opts.productRoot !== undefined
+      ? { productRoot: opts.productRoot }
+      : {}),
+    // Review (round 2/3):启动期项目身份根透传（缺席 → build-engine 退
+    // `mainCheckoutOf(cwd)`）。判在场用 `!== undefined`:空串要透下去触 SSOT
+    // 的 fail-closed，真值判会吞掉它（review round 4）。
+    ...(opts.projectIdentityRoot !== undefined
+      ? { projectIdentityRoot: opts.projectIdentityRoot }
+      : {}),
     // 观测性地板:traceOut 在场 → subagent 三事件落 `<traceOut>/subagent.jsonl`。
     ...(subagentTrace !== undefined
       ? { subagentTrace, subagentDiagnosticsDir: traceOut }
@@ -308,7 +322,10 @@ export async function buildTuiDeps(
   // T6:mcpConfigRoot 锁定装配时的 productRoot / BuiltEngine.mcpRoots，
   // 不随 task cwd 漂移，也不读 process.cwd()。
   const mcpConfigRoot =
-    built.mcpRoots?.mcpConfigRoot ?? opts.productRoot ?? opts.workspaceRoot ?? cwd;
+    built.mcpRoots?.mcpConfigRoot ??
+    opts.productRoot ??
+    opts.workspaceRoot ??
+    cwd;
   const reload = async (): Promise<void> => {
     if (!mcpManager) return;
     const cfg = await loadMcpConfig({ home: userHome, mcpConfigRoot });

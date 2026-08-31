@@ -25,17 +25,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { processChatLine } from "../../src/cli/chat-session.ts";
-import { SessionStore, CURRENT_SCHEMA_VERSION } from "../../src/session-api/store/index.ts";
+import {
+  SessionStore,
+  CURRENT_SCHEMA_VERSION,
+} from "../../src/session-api/store/index.ts";
 import type { SessionFileV1 } from "../../src/session-api/store/index.ts";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 import type { GraphAssembly } from "../../src/harness/graph/assembly.ts";
-import type { AutoMemoryHook, OverlayPrefetchFn } from "../../src/harness/memory/index.ts";
-import {
-  assistantResult,
-  makeCtx,
-  makeDeps,
-} from "./_fixtures.ts";
+import type {
+  AutoMemoryHook,
+  OverlayPrefetchFn,
+} from "../../src/harness/memory/index.ts";
+import { assistantResult, makeCtx, makeDeps } from "./_fixtures.ts";
 import { captureStderrOf } from "../_helpers/capture-stderr.ts";
 
 const roots: string[] = [];
@@ -74,7 +76,9 @@ function afterEachCleanup(): void {
 // 静默性断言共用（suppress 语义）。
 
 function makeManagerStub(
-  opts: { readonly drain?: Array<{ taskId: string; envelope: SubAgentEnvelope }> } = {}
+  opts: {
+    readonly drain?: Array<{ taskId: string; envelope: SubAgentEnvelope }>;
+  } = {}
 ): SubAgentManager {
   return {
     spawn: () => ({ taskId: "t-1" }),
@@ -100,7 +104,10 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
     const conversationId = "conv-rebind-1";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
-    await store.save({ id: conversationId, file: makeSessionFile(conversationId, mainRoot) });
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, mainRoot),
+    });
 
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["turn-1"] })],
@@ -149,7 +156,10 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
     const store = new SessionStore(dir);
     const conversationId = "conv-rebind-2";
     const mainRoot = join(dir, "main");
-    await store.save({ id: conversationId, file: makeSessionFile(conversationId, mainRoot) });
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, mainRoot),
+    });
 
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["turn-1"] })],
@@ -183,7 +193,10 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
     const conversationId = "conv-rebind-3";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
-    await store.save({ id: conversationId, file: makeSessionFile(conversationId, mainRoot) });
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, mainRoot),
+    });
 
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["turn-1"] })],
@@ -218,7 +231,10 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
     const conversationId = "conv-rebind-handles";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
-    await store.save({ id: conversationId, file: makeSessionFile(conversationId, mainRoot) });
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, mainRoot),
+    });
 
     let oldShutdownCalls = 0;
     const shutdownOrder: string[] = [];
@@ -300,7 +316,10 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
     const conversationId = "conv-rebind-drain";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
-    await store.save({ id: conversationId, file: makeSessionFile(conversationId, mainRoot) });
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, mainRoot),
+    });
 
     let oldDrainCalls = 0;
     const oldManager = makeManagerStub();
@@ -315,7 +334,11 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
       return [
         {
           taskId: "task-1",
-          envelope: { status: "ok", summary: "done", result: "subagent result" },
+          envelope: {
+            status: "ok",
+            summary: "done",
+            result: "subagent result",
+          },
         },
       ];
     };
@@ -341,7 +364,11 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
     await processChatLine({ line: "q", ctx });
     assert.equal(ctx.subagentManager, newManager);
     assert.equal(newDrainCalls, 1, "rebind 后当回合 drain 必须消费新 manager");
-    assert.equal(oldDrainCalls, 0, "旧 manager 不再被 drain（活跃引擎 spawn 进新 manager）");
+    assert.equal(
+      oldDrainCalls,
+      0,
+      "旧 manager 不再被 drain（活跃引擎 spawn 进新 manager）"
+    );
   });
 
   it("store.load 非 not_found 错误（io_error 等）→ stderr 可见降级，不重建", async () => {
@@ -349,7 +376,10 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
     const store = new SessionStore(dir);
     const conversationId = "conv-rebind-ioerr";
     const mainRoot = join(dir, "main");
-    await store.save({ id: conversationId, file: makeSessionFile(conversationId, mainRoot) });
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, mainRoot),
+    });
 
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["turn-1"] })],
@@ -390,7 +420,10 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
     const conversationId = "conv-rebind-slash";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
-    await store.save({ id: conversationId, file: makeSessionFile(conversationId, mainRoot) });
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, mainRoot),
+    });
     const file = await store.load(conversationId);
     await store.save({
       id: conversationId,
@@ -433,7 +466,9 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
       join(import.meta.dirname, "..", "..", "src", "cli", "chat-session.ts"),
       "utf8"
     );
-    expect(sessionSrc.includes("engineShutdown: opts.engineShutdown")).toBe(true);
+    expect(sessionSrc.includes("engineShutdown: opts.engineShutdown")).toBe(
+      true
+    );
   });
 });
 
@@ -465,8 +500,12 @@ describe("T6 — chat stable productRoot threading (worktree-mcp-rebind-lifecycl
       "utf8"
     );
     expect(src).toMatch(/productRoot\?:\s*string/);
-    expect(src).toMatch(/opts\.productRoot\s*\?\s*\{\s*productRoot:\s*opts\.productRoot/);
     // wrapper 不得用 process.cwd() 派生 productRoot
     expect(src).not.toMatch(/productRoot:\s*process\.cwd\(\)/);
+    // 「确实透传到了」由真跑守门：tests/cli/runtime-forwards-roots.test.ts 断言
+    // 每个根都落到 build-engine 的 opts 上。这里不再钉转发的**写法** ——
+    // round 4 起 wrapper 不手写白名单，改为 rest 整体透传（手写白名单只关住
+    // 「宿主写了接口没声明的字段」一个方向，反方向漏接编译全绿）。
+    expect(src).toMatch(/withoutUndefined\(passthrough\)/);
   });
 });

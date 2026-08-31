@@ -60,6 +60,7 @@ import {
 } from "../config/settings.js";
 import {
   createWorktreeIsolationExecutor,
+  mainCheckoutOf,
   taskWorktreeOwnerOf,
   type WorktreeIsolationHostOpts,
 } from "./isolation/worktree-gate.js";
@@ -97,6 +98,11 @@ import type { SkillCatalog } from "./skill/catalog.js";
 import { loadMcpConfig } from "./mcp/config.js";
 import { createMcpManager, type McpManager } from "./mcp/manager.js";
 import { resolveMcpRoots, type McpRoots } from "./mcp/roots.js";
+import {
+  resolveInstallRoot,
+  resolveSessionRoots,
+  type SessionRoots,
+} from "./session-roots.js";
 import {
   createSubAgentManager,
   type SubAgentManager,
@@ -144,10 +150,15 @@ export type BuildEngineOpts = {
   readonly cwd?: string;
   /**
    * ADR-0019 (T2, D1.1/D1.4): per-root state anchor — CLI `--workspace-root`
-   * flag / env `IKNOW_WORKSPACE_ROOT`。per-root consumers 全部在本层消费:
-   *   - identity workspace seed always `<userHome>/.iknow` (issue #584)
-   *   - memoryDir(resolveProjectMemoryDir ← workspaceRoot)
-   *   - skill scanner userhome 档
+   * flag / env `IKNOW_WORKSPACE_ROOT`。
+   *
+   * T4 (plans/worktree-session-roots.md / ADR-0037 §4 amended 2026-08-31):
+   * 改绑后宿主把它切到 task worktree，所以它**只在自身不是 task worktree 时**
+   * 充当状态锚（记忆库 / tasks 登记）；是树时退到 `sessionRoots.productRoot`
+   * —— 这样 `--workspace-root` 重定向仍生效而状态不落进树。本字段留在
+   * **写与围栏**一侧：fs-policy 的保护路径与 bwrap bind root（task worktree
+   * 位于 `<productRoot>/.iknow/worktrees/…` 之下，若把状态锚设成 productRoot，
+   * 树内所有写都会被自己的状态围栏拦死）。
    * `workspaceRoot` **不**加入 `LoopEngineDeps`(ACR minimal-change-verifier)。
    * 缺省 → `resolveWorkspaceRoot({ env: process.env })`(priority chain
    * `[explicit, env, cwd]`;T1 resolver SSOT)。opts.workspaceRoot(CLI 显式)
@@ -161,6 +172,32 @@ export type BuildEngineOpts = {
    * 既有单根调用可跑）。
    */
   readonly productRoot?: string;
+  /**
+   * Review (round 2/3): **项目身份根** —— 用户此刻在做的那个项目，跨改绑稳定。
+   * 一处钉住，四个消费者共用：项目 `AGENTS.md` / `.iknow/rules` / 项目 skills
+   * 的发现根、记忆库命名空间名（`<basename>-<sha1>`）、`read_file` 的主仓只读
+   * 放行、以及子代理继承的身份根。
+   *
+   * 为什么它**不是** `productRoot`：`productRoot` 同时承担 `mcpConfigRoot` 与
+   * 状态锚，宿主按 ADR-0019 把它取自 `workspaceRoot`；而 `--workspace-root <dir>`
+   * 重定向档下 `<dir>` 不是项目（`dir ≠ cwd`），拿它查身份会让项目自己的
+   * `AGENTS.md` / rules / skills 静默消失（今日走的是 `cwd`）。
+   *
+   * 为什么**不能每次装配现算**：改绑后宿主把 `cwd` 切成 task worktree，现算就只
+   * 能退到主 checkout —— 启动 cwd 是仓内子目录时记忆库命名空间会从 `app-<sha1>`
+   * 跳到 `<repo>-<sha1>`。宿主在启动装配 opts 里钉一次（rebind 只覆盖 `cwd` /
+   * `workspaceRoot`），因此跨改绑不动。
+   *
+   * 缺省 → `mainCheckoutOf(cwd)`：未改绑时逐字节等于今日的 `cwd`，改绑后退到主
+   * checkout 而不是落进树。
+   */
+  readonly projectIdentityRoot?: string;
+  /**
+   * T2 (plans/worktree-session-roots.md) 测试缝:iknow 自身安装根。生产缺省
+   * → `resolveInstallRoot()`（锚 `import.meta.url`，与会话根、`process.cwd()`
+   * 都无关）。单测注入 tmp fixture 以断言 worker bootstrap 不问会话根。
+   */
+  readonly installRoot?: string;
   /** #337 T8 测试缝:MCP client 工厂覆盖(注入 stub,SC8 慢 connect 断言)。 */
   readonly createMcpClient?: (
     server: import("./mcp/config.js").McpServerConfig
@@ -264,6 +301,13 @@ export type BuiltEngine = {
    */
   readonly mcpRoots?: McpRoots;
   /**
+   * T2 (plans/worktree-session-roots.md):本次装配的会话三根 SSOT
+   * (`productRoot` / `taskRoot` / `installRoot`，ADR-0037 §4)。所有 surface
+   * 都透出——项目身份、per-root 状态与 worker bootstrap 的消费者只问这里，
+   * 不再自行拼 `join(cwd, '.iknow', …)` 或读 `process.cwd()`。
+   */
+  readonly sessionRoots: SessionRoots;
+  /**
    * #361 Phase D:动态 MCP 工具全量源(reg.catalog.all() 含 registerExternal
    * 追加的 mcp__* 工具;inner 冻结快照不含)。TUI deps 据此平铺
    * `{ server, tool }[]`(listMcpTools);server 名反解在 deps.ts。
@@ -363,13 +407,15 @@ export async function buildHarnessEngine(
   // manager cwd / ACI FS root / BuiltEngine.mcpRoots。显式 sandboxRoot
   // 不一致 → root_mismatch（fail-closed，不 spawn）。ask 跳过 resolver，
   // 保留既有 sandboxRoot = opts.sandboxRoot ?? cwd。
-  // productRoot 缺省桥接到 workspaceRoot（T6 前 hosts 可传等值）。
+  // productRoot 缺省经 `mainCheckoutOf` 推导而不是裸取 workspaceRoot：改绑后
+  // 宿主把 workspaceRoot 也切到树上，裸回退会让漏接 productRoot 的宿主从
+  // gitignored 的空树读身份 / 落状态（review Medium）。未改绑时两者同值。
   let mcpRoots: McpRoots | undefined;
   let sandboxRoot: string;
   if (surface !== "ask") {
     mcpRoots = resolveMcpRoots({
       workspaceRoot,
-      productRoot: opts.productRoot ?? workspaceRoot,
+      productRoot: opts.productRoot ?? mainCheckoutOf(workspaceRoot),
       ...(opts.sandboxRoot !== undefined
         ? { expectedWorkspaceRoot: opts.sandboxRoot }
         : {}),
@@ -378,9 +424,50 @@ export async function buildHarnessEngine(
   } else {
     sandboxRoot = opts.sandboxRoot ?? cwd;
   }
-  // ADR-0019 (T2): memory root 落 `<workspaceRoot>/.iknow/memory/...`
-  // (per-root memory 决策)。cwd 仍作 hash 输入,项目命名空间隔离保留。
-  const memoryDir = resolveProjectMemoryDir(cwd, workspaceRoot);
+  // T2 (plans/worktree-session-roots.md / ADR-0037 §4):会话三根 SSOT。
+  // 非 ask 面的根校验仍由上方 `resolveMcpRoots` 承担（`McpLifecycleError`
+  // kind 分工对既有调用方不变），这里只把已校验的值按角色归位并补
+  // `installRoot`；ask 面没有 MCP resolver，三根解析就是它的校验点。
+  //   productRoot → 项目身份 + per-root 状态（跨 rebind 不动）
+  //   taskRoot    → 写与工具 cwd（= sandboxRoot，rebind 后是 task worktree）
+  //   installRoot → worker bootstrap（锚 import.meta.url，不问会话根）
+  const sessionRoots = resolveSessionRoots({
+    productRoot:
+      mcpRoots?.mcpConfigRoot ??
+      opts.productRoot ??
+      mainCheckoutOf(workspaceRoot),
+    taskRoot: sandboxRoot,
+    installRoot: opts.installRoot ?? resolveInstallRoot(),
+    // 取值在装配层（宿主钉的值优先，缺席退 cwd），校验在 SSOT —— 显式传空串 /
+    // 相对值一律 typed fail-closed，与另外三根同规则。
+    //
+    // `mainCheckoutOf` 对**两条路径都**生效：身份根不可以是 task worktree。
+    // 宿主钉的是启动 cwd，而 exit 后树是保留不删的（ADR-0037 §4），所以操作员
+    // 完全可能在一棵遗留树里起 `iknow chat` —— 只归一化 fallback 会让「钉了」
+    // 比「没钉」更差：钉住空树 → 项目说明书 / rules / skills 全部消失，而没钉
+    // 时反而能回到主仓（review round 4 实测）。
+    projectIdentityRoot: mainCheckoutOf(opts.projectIdentityRoot ?? cwd),
+  });
+  // Review (round 2/3): 项目身份根 —— 身份发现（AGENTS.md / rules / 项目
+  // skills / 子代理继承）与记忆库命名空间共用它，**不**用 `productRoot`：后者
+  // 取自 `workspaceRoot`，在 `--workspace-root <dir>` 重定向档下不是项目本身。
+  const projectIdentityRoot = sessionRoots.projectIdentityRoot;
+  // ADR-0019 (T2): memory root 落 `<anchor>/.iknow/memory/<namespace>`。
+  // T4 review High-1: 「落哪个根」(anchor) 与「叫什么名」(namespace) 是两个
+  // 决策，必须分开推。
+  //   anchor    = workspaceRoot，除非它已经是 task worktree（改绑后宿主把
+  //               workspaceRoot 也切到树上）—— 那时退回 productRoot。这样
+  //               ADR-0019 D1.3 的 `--workspace-root <dir>` 重定向仍然生效，
+  //               同时状态永不落进 gitignored 的树。
+  //   namespace = `projectIdentityRoot`（宿主启动时钉下的项目身份），未改绑时
+  //               逐字节等于今日的 `resolveProjectMemoryDir(cwd, workspaceRoot)`。
+  // 反例（回归来源）：两者都取 productRoot 时，`--workspace-root $HOME` 档下
+  // productRoot 缺省 = $HOME，同锚下多个项目会塌进同一个命名空间。
+  const stateAnchor =
+    taskWorktreeOwnerOf(workspaceRoot) === undefined
+      ? workspaceRoot
+      : sessionRoots.productRoot;
+  const memoryDir = resolveProjectMemoryDir(projectIdentityRoot, stateAnchor);
   // 10 件工具集 SSOT 工厂(append-only 顺序;env.web 透传 IKNOW_WEB_PROXY /
   // IKNOW_WEB_SEARCH_URL)。proxyUrl 非法 → 装配期同步抛(见 registry.ts)。
   // #194 T6:reg 按 memoryEnabled 条件化构造 — enabled 时传 memoryDir(reg.inner 10
@@ -431,7 +518,8 @@ export async function buildHarnessEngine(
   const skillCatalog: SkillCatalog = createSkillCatalog(
     await createSkillScanner({
       userHome,
-      cwd,
+      // T3:项目 skills 是项目身份 → projectIdentityRoot（跨 rebind 不动）。
+      projectIdentityRoot,
       env: process.env,
     }).scan()
   );
@@ -462,9 +550,19 @@ export async function buildHarnessEngine(
         // T4: 并发上限由 env.subagent.maxConcurrentWorkers 透传;缺席时
         // manager 回退默认 15。
         createSubAgentManager({
-          spawn: createDefaultSubAgentSpawn(
-            opts.subagentDiagnosticsDir,
+          spawn: createDefaultSubAgentSpawn({
+            ...(opts.subagentDiagnosticsDir !== undefined
+              ? { traceDir: opts.subagentDiagnosticsDir }
+              : {}),
             workspaceRoot,
+            // T3 (plans/worktree-session-roots.md): 干活子代理注入的说明书
+            // 是 **主仓上已存在** 的 AGENTS.md 与 rules，不是树上的空拷贝 ——
+            // 子进程 cwd 可能是裸树，身份发现不能问它。传的是父会话的项目身份根。
+            projectIdentityRoot,
+            // T5 (硬要求 6): worker bootstrap（tsx loader）锚 installRoot ——
+            // 子进程 cwd 是裸 task worktree 时那里没有 node_modules，cwd 相对
+            // 解析会以 `Cannot find package 'tsx'` 崩掉。
+            installRoot: sessionRoots.installRoot,
             // T5 (hard req 7): 子代理继承父会话改绑后的根 —— 引擎被重建到
             // task worktree（hub buildProductionEngine / CLI rebuildDeps 把
             // cwd/workspaceRoot 切到 `<repo>/.iknow/worktrees/<convId>`）时，
@@ -472,10 +570,10 @@ export async function buildHarnessEngine(
             // worktree 形状）时不传 → 子进程继承父进程 cwd，行为与今日逐
             // 字节一致。worker 注册表从不携带 isolation 缝 → 子代理不触发
             // 第二棵树 / 二次 provision（worker-tool-surface 测试钉住）。
-            taskWorktreeOwnerOf(workspaceRoot) !== undefined
-              ? workspaceRoot
-              : undefined
-          ),
+            ...(taskWorktreeOwnerOf(workspaceRoot) !== undefined
+              ? { sessionRoot: workspaceRoot }
+              : {}),
+          }),
           sandboxRoot,
           trace: opts.subagentTrace ?? createNoopTraceService(),
           diagnosticsDir:
@@ -487,13 +585,16 @@ export async function buildHarnessEngine(
   // #502 T3:bash background 任务管理器 — 条件装配（surface !== "ask"）：
   //   - chat/tui/serve 生产自建 createBackgroundTaskManager({
   //       tasksDir: resolveTasksDir(workspaceRoot), spawn: defaultBackgroundSpawn })
-  //     —— registry 落 <workspaceRoot>/.iknow/tasks（ADR-0021 D1.3）。
+  //     —— registry 落 <productRoot>/.iknow/tasks（ADR-0021 D1.3）。
   //   - ask 不创建（SC8 oneshot 即用即抛；T4 bash_output/bash_stop 也缺席）。
-  //   与 subagentManager 同门：workspaceRoot 已在上方解析，per-root 命名空间锚。
+  //   T4 (ADR-0037 §4): 登记表是 per-root 状态，锚与 memoryDir 同一个
+  //   `stateAnchor`（改绑后 = productRoot；未改绑 = workspaceRoot，保住
+  //   `--workspace-root` 重定向）—— 改绑后 bash_output / bash_stop 仍看得见
+  //   改绑前起的任务，树上不另开一份登记。
   const backgroundManager: BackgroundTaskManager | undefined =
     surface !== "ask"
       ? createBackgroundTaskManager({
-          tasksDir: resolveTasksDir(workspaceRoot),
+          tasksDir: resolveTasksDir(stateAnchor),
           spawn: defaultBackgroundSpawn,
         })
       : undefined;
@@ -504,7 +605,7 @@ export async function buildHarnessEngine(
   if (typeof process !== "undefined") {
     try {
       const summary = await reapStaleTasks({
-        tasksDir: resolveTasksDir(workspaceRoot),
+        tasksDir: resolveTasksDir(stateAnchor),
       });
       if (summary.reaped.length > 0) {
         console.warn(
@@ -609,6 +710,18 @@ export async function buildHarnessEngine(
   reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
+    // T3:只读放行项目身份文件所在的主仓（ADR-0037 §1 允许只读主仓）。registry
+    // 只把它透给 read_file —— bash / write / edit 拿不到，写不进主仓。
+    //
+    // 只在**隔离开且已改绑**时放行（review round 3/4）：这条放行是本分支新增
+    // 的，"今日"是**不放行**，所以开关 OFF 必须一条都不给（硬要求 5）。门必须
+    // 同时看 `isolationEnabled` —— `taskWorktreeOwnerOf` 只是路径形状判断，
+    // 单靠它会让一个恰好长得像 `<X>/.iknow/worktrees/<name>` 的 cwd 在隔离
+    // 关闭时就拿到沙箱外的读放行。与 T7/T8 缝同一个判定源。
+    ...(isolationEnabled &&
+    taskWorktreeOwnerOf(sessionRoots.taskRoot) !== undefined
+      ? { projectIdentityRoot }
+      : {}),
     // D-α T3:run_graph 条件化装配 —— 需要 overlay(graphAssembly)与编排
     // 底座(subagentManager)同时在场;registry 内部同门再判一次。
     ...(graphAssembly ? { graphAssembly } : {}),
@@ -808,7 +921,10 @@ export async function buildHarnessEngine(
     // available skills)。deps.system 内部 disabled 过滤后渲染 <available_skills>
     // 段。
     system: createIknowSystemResolver({
+      // cwd 只喂 "Project path" 展示段（模型要知道自己真实在哪写）；
+      // 项目身份发现走 projectIdentityRoot（T3 / ADR-0037 §4）。
       cwd,
+      projectIdentityRoot,
       userHome,
       workspaceRoot,
       surface,
@@ -816,7 +932,7 @@ export async function buildHarnessEngine(
       ...(memoryToolsEnabled
         ? {
             memoryResolver: createSystemResolver({
-              cwd,
+              projectIdentityRoot,
               userHome,
               // ADR-0019 (T2):memoryResolver ctx 也带 workspaceRoot —
               // refresh discover + assemble 的 user-scope 物理根同源。
@@ -908,7 +1024,11 @@ export async function buildHarnessEngine(
           dream: dreamOn,
           flags: memoryFlags,
           staticLayer: () =>
-            assembleStaticSystemPrompt({ cwd, userHome, workspaceRoot }),
+            assembleStaticSystemPrompt({
+              projectIdentityRoot,
+              userHome,
+              workspaceRoot,
+            }),
           onError: (error) => {
             console.warn(
               `[memory/auto] ingest skipped: ${
@@ -955,6 +1075,7 @@ export async function buildHarnessEngine(
     skillCatalog,
     ...(mcpManager ? { mcpManager } : {}),
     ...(mcpRoots ? { mcpRoots } : {}),
+    sessionRoots,
     catalog: reg.catalog,
     // D-α T3:host 每次 run() 前调 beginRound() 拍快照(chat / hub 两处 run
     // 入口)。缺席 = 本入口没接 overlay。

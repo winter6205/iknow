@@ -341,11 +341,19 @@ _Avoid_: 收自由路径当输入；无持久锚就放行外来树上的 mutate�
 **exit-task-worktree（退出工作树工具）**: worktree isolation mode ON 时模型可见的对称退出工具——无参数；会话当前 task worktree 保留不删（孤儿树自动删除是明确非目标），会话根回到主仓根（由树经 `git rev-parse --path-format=absolute --git-common-dir` 派生，重启安全）；经 dirty-root conditionalSave 持久化后下一回合门禁在主仓重新武装（拦写 + 指向建树工具）。当前未改绑 → typed `rebind_failed`，非静默 no-op。ADR-0037（amended 2026-08-30，issue #839）。
 _Avoid_: 顺带删除树或分支；把 exit 当成静默 no-op；退出后同回合继续在旧树上写
 
-**session worktree rebind**: worktree isolation mode ON 下模型调用创建工作树 ACI 工具、建树并改绑成功后，把**当前会话**生效的根锚（cwd / `workspaceRoot` 取值）切到本会话 task worktree 的动作；只影响本会话——不 checkout 其它会话 / 其它 worktree 的 HEAD，push / 开 PR 不拖动主仓或其它 worktree 当前分支。同会话并发建树幂等（一棵树、一个 task 分支）；父会话改绑后 spawn 的子代理继承该根，不另建树。ADR-0037。
-_Avoid_: 改绑波及其它会话；把 rebind 当 serve 主根重绑（ADR-0023 unbound / recents 语义不变）；让 rebind 触发 settings 重载；把改绑后的根错当成 product workspace 多根
+**session worktree rebind**: worktree isolation mode ON 下模型调用创建工作树 ACI 工具、建树并改绑成功后，把**当前会话**的 `taskRoot` 切到本会话 task worktree 的动作（`productRoot` / `installRoot` 不动，ADR-0037 §4 amended 2026-08-31）；只影响本会话——不 checkout 其它会话 / 其它 worktree 的 HEAD，push / 开 PR 不拖动主仓或其它 worktree 当前分支。同会话并发建树幂等（一棵树、一个 task 分支）；父会话改绑后 spawn 的子代理继承该根，不另建树。ADR-0037。
+_Avoid_: 改绑波及其它会话；把 rebind 当 serve 主根重绑（ADR-0023 unbound / recents 语义不变）；让 rebind 触发 settings 重载；顺带搬走项目身份或 per-root 状态；把改绑后的根错当成 product workspace 多根
 
-**productRoot**: 每个产品入口首次装配确定的稳定主 checkout root；session worktree rebind 后保持不变，不随当前 task worktree 改写。
-_Avoid_: workspaceRoot；task worktree root；product workspace 多根
+**productRoot**: 每个产品入口首次装配确定的稳定主 checkout root；session worktree rebind 后保持不变，不随当前 task worktree 改写。`mcp.json` 只问它。项目身份改问 `projectIdentityRoot`（见该词条）；per-root 状态（记忆库落盘根 / tasks 登记）的锚仍是 `workspaceRoot`，仅当它自身已是 task worktree 时退到 `productRoot`（保住 `--workspace-root` 重定向，同时状态不落进树）。settings 锚在启动时解析的根，改绑不重载（ADR-0037 §4/§5 amended 2026-08-31）。
+
+**projectIdentityRoot**: 用户此刻在做的那个项目根（今日 = 启动 cwd），宿主在启动装配 opts 里钉一次，session worktree rebind 只覆盖 `cwd` / `workspaceRoot`，本值不动。项目身份的唯一来源——rules / 项目 `AGENTS.md` / `permissions.toml` / 项目 skills 发现、子代理继承的身份根、记忆库命名空间名、`read_file` 在**隔离开且已改绑**时的主仓只读放行（开关 OFF 或未改绑都不放行，读沙箱与今日一致）。与 `productRoot` 分开的原因：后者被宿主取自 `workspaceRoot`，`--workspace-root <dir>` 重定向档下 `<dir>` 不是项目。缺席时退 cwd（hub 重建多一级：钉下的值 → `boundRoot` → `root`）；装配层对钉下的值与回退值一律套 `mainCheckoutOf`，身份根不得是 task worktree（在遗留树里启动时钉住空树会让身份整条消失）；它是会话根 SSOT 的第四个角色，空 / 相对值 typed fail-closed（ADR-0037 §4 amended 2026-08-31）。
+_Avoid_: workspaceRoot；task worktree root；product workspace 多根；只当它是 MCP 配置根
+
+**taskRoot**: 本会话当前的 task worktree root（创建 / 进入工作树工具切过去，退出工具切回主仓）；session worktree rebind **只切这一个根**。写与工具 cwd 只问它——写工具 / 会改工作区的 bash / git / LSP 目录 / 子代理工作目录；项目身份与 per-root 状态一概不问它。ADR-0037 §4。
+_Avoid_: workspaceRoot 兼当写隔离根；把它当记忆 / settings / 说明书根；往它上面 seed 一份 `.iknow`
+
+**installRoot**: iknow 运行时自身的安装位置，worker bootstrap 由它解析 tsx 与 iknow 自身依赖（锚在 `import.meta.url`，不随会话根走）。与用户项目的 `node_modules` 无关，故裸 task worktree 上真 worker 仍能起。ADR-0037 §4。
+_Avoid_: 用户项目 node_modules；taskRoot；子进程 cwd 相对解析
 
 **mcpConfigRoot**: 由 productRoot 派生、跨 session worktree rebind 保持稳定的 MCP 配置根；只读取 `<mcpConfigRoot>/.iknow/mcp.json`，不切换到 task worktree。
 _Avoid_: workspaceRoot；task worktree；process.cwd()

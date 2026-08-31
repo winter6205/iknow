@@ -29,6 +29,7 @@ import {
   classifyCall,
   createTaskWorktree,
   createWorktreeIsolationExecutor,
+  mainCheckoutOf,
   taskWorktreeOwnerOf,
   WORKTREE_ISOLATION_PREFIX,
 } from "../../../src/harness/isolation/worktree-gate.ts";
@@ -263,6 +264,36 @@ describe("taskWorktreeOwnerOf", () => {
     expect(taskWorktreeOwnerOf("/repo/.iknow/worktrees")).toBeUndefined();
     expect(taskWorktreeOwnerOf("/repo/.iknow/other/conv-1")).toBeUndefined();
     expect(taskWorktreeOwnerOf("")).toBeUndefined();
+  });
+});
+
+// -- mainCheckoutOf (T6 productRoot derivation from a session root) ------------
+
+describe("mainCheckoutOf", () => {
+  it("strips the task-worktree suffix to the owning main checkout", () => {
+    expect(mainCheckoutOf("/repo/.iknow/worktrees/conv-1")).toBe("/repo");
+    expect(mainCheckoutOf("/deep/nest/repo/.iknow/worktrees/abc-123")).toBe(
+      "/deep/nest/repo"
+    );
+  });
+
+  it("is identity on roots that are not task-worktree-shaped", () => {
+    // 未改绑的会话根、主仓下的普通目录、手工建的无关 worktree —— 都原样返回，
+    // 不猜、不上溯、不回退 process.cwd()。
+    expect(mainCheckoutOf("/repo")).toBe("/repo");
+    expect(mainCheckoutOf("/repo/.iknow")).toBe("/repo/.iknow");
+    expect(mainCheckoutOf("/repo/.iknow/worktrees")).toBe(
+      "/repo/.iknow/worktrees"
+    );
+    expect(mainCheckoutOf("/elsewhere/manual-tree")).toBe(
+      "/elsewhere/manual-tree"
+    );
+    expect(mainCheckoutOf("")).toBe("");
+  });
+
+  it("is idempotent: applying it to its own output changes nothing", () => {
+    const once = mainCheckoutOf("/repo/.iknow/worktrees/conv-1");
+    expect(mainCheckoutOf(once)).toBe(once);
   });
 });
 

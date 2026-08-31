@@ -38,6 +38,7 @@ import { existsSync, statSync } from "node:fs";
 
 import {
   createTaskWorktree,
+  mainCheckoutOf,
   taskWorktreeOwnerOf,
   WorktreeIsolationError,
   defaultGitRunner,
@@ -185,7 +186,7 @@ export function taskWorktreeBranch(conversationId: string): string {
  * `bindWorkspace` legitimately persists the MAIN root as workspaceRoot, and
  * that must never render as a worktree binding.
  */
-export { taskWorktreeOwnerOf };
+export { taskWorktreeOwnerOf, mainCheckoutOf };
 
 /**
  * Review Medium-1 (2026-08-29): the conversationId is concatenated verbatim

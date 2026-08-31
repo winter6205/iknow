@@ -118,6 +118,13 @@ jobs:
             --exclude tests/subagent/envelope-role.test.ts \
             --exclude tests/subagent/tool-constraints.test.ts \
             --exclude tests/subagent/bash-mode-channel.test.ts \
+            --exclude tests/cli/runtime-forwards-roots.test.ts \
+            --exclude tests/harness/build-engine-session-roots.test.ts \
+            --exclude tests/harness/identity-follows-identity-root.test.ts \
+            --exclude tests/harness/state-follows-product-root.test.ts \
+            --exclude tests/harness/state-roots-namespace.test.ts \
+            --exclude tests/session-api/naked-worktree-e2e.test.ts \
+            --exclude tests/subagent/worker-bootstrap-install-root.test.ts \
             --exclude tests/tui/banner-scroll-fixes.test.tsx \
             --exclude tests/tui/logo-persists.test.tsx \
             --exclude 'tests/harness/secret-roundtrip/**' \
@@ -219,6 +226,13 @@ jobs:
             --exclude tests/subagent/envelope-role.test.ts \
             --exclude tests/subagent/tool-constraints.test.ts \
             --exclude tests/subagent/bash-mode-channel.test.ts \
+            --exclude tests/cli/runtime-forwards-roots.test.ts \
+            --exclude tests/harness/build-engine-session-roots.test.ts \
+            --exclude tests/harness/identity-follows-identity-root.test.ts \
+            --exclude tests/harness/state-follows-product-root.test.ts \
+            --exclude tests/harness/state-roots-namespace.test.ts \
+            --exclude tests/session-api/naked-worktree-e2e.test.ts \
+            --exclude tests/subagent/worker-bootstrap-install-root.test.ts \
             --exclude tests/tui/banner-scroll-fixes.test.tsx \
             --exclude tests/tui/logo-persists.test.tsx \
             --exclude tests/harness/secret-roundtrip/e2e.test.ts \

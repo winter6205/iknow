@@ -70,8 +70,13 @@ const FILE_CAP = 12000;
 
 /**
  * Inputs needed to compose the layered system prompt.
- *   cwd + userHome: discovery roots for the static layer (AGENTS.md + rules).
- *     user scope reads `<userHome>/.iknow/`; project scope stays at `<cwd>`.
+ *   projectIdentityRoot + userHome: discovery roots for the static layer
+ *     (AGENTS.md + rules). user scope reads `<userHome>/.iknow/`; project
+ *     scope reads `<projectIdentityRoot>/` — T3 (plans/worktree-session-roots.md
+ *     / ADR-0037 §4): the project identity root the host pinned at startup,
+ *     NOT the cwd. A worktree rebind moves the cwd onto a gitignored task
+ *     worktree; the project's instructions must not move with it (and must not
+ *     be seeded onto the tree either).
  *   workspaceRoot: ADR-0019 (T2) per-root state anchor — memoryDir and the
  *     other per-root state live under it, but the user static layer does not
  *     (a project-local `.iknow/AGENTS.md` must not become user-level).
@@ -84,7 +89,7 @@ const FILE_CAP = 12000;
  *   promoteEntries: optional injection — used by tests + per-turn refresh hook.
  */
 export interface AssemblyContext {
-  readonly cwd: string;
+  readonly projectIdentityRoot: string;
   readonly userHome: string;
   readonly workspaceRoot?: string;
   readonly memoryDir: string;
@@ -96,12 +101,19 @@ export interface AssemblyContext {
  *  `rulesMode` defaults to "bodies" (worker opener contract, unchanged);
  *  the parent session opener passes "manifest" via assembleSystemPrompt. */
 export async function assembleStaticSystemPrompt(
-  ctx: Pick<AssemblyContext, "cwd" | "userHome" | "workspaceRoot">,
+  ctx: Pick<
+    AssemblyContext,
+    "projectIdentityRoot" | "userHome" | "workspaceRoot"
+  >,
   opts: { readonly rulesMode?: RulesInjectionMode } = {}
 ): Promise<string> {
   const rulesMode = opts.rulesMode ?? "bodies";
   const user = await loadStaticLayer(ctx.userHome, "user", rulesMode);
-  const project = await loadStaticLayer(ctx.cwd, "project", rulesMode);
+  const project = await loadStaticLayer(
+    ctx.projectIdentityRoot,
+    "project",
+    rulesMode
+  );
   const parts: string[] = [];
   if (user) parts.push(user);
   if (project) {
@@ -113,7 +125,7 @@ export async function assembleStaticSystemPrompt(
     // guidance), never the bodies. Missing / empty rules dirs → no segment.
     const [userRules, projectRules] = await Promise.all([
       listRulesFiles(ctx.userHome, "user"),
-      listRulesFiles(ctx.cwd, "project"),
+      listRulesFiles(ctx.projectIdentityRoot, "project"),
     ]);
     const manifest = rulesManifestSegment([...userRules, ...projectRules]);
     if (manifest) parts.push(manifest);

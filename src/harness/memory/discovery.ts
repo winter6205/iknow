@@ -52,11 +52,19 @@ async function tryReadEntry(path: string): Promise<MemoryLayerEntry | null> {
   }
 }
 
-/** Project-level AGENTS.md (<cwd>/AGENTS.md). */
+/**
+ * Project-level AGENTS.md (`<projectRoot>/AGENTS.md`).
+ *
+ * T3 (plans/worktree-session-roots.md / ADR-0037 §4): `projectRoot` is the
+ * session's `projectIdentityRoot` — the project identity the host pinned at
+ * startup — NOT the current cwd.
+ * After a worktree rebind the cwd is a gitignored task worktree with no
+ * AGENTS.md, and the project's instructions must not vanish with it.
+ */
 export async function findProjectAgents(
-  cwd: string
+  projectRoot: string
 ): Promise<MemoryLayerEntry | null> {
-  return tryReadEntry(join(cwd, "AGENTS.md"));
+  return tryReadEntry(join(projectRoot, "AGENTS.md"));
 }
 
 /** User-level AGENTS.md (~/.iknow/AGENTS.md). */
@@ -68,14 +76,16 @@ export async function findUserAgents(
 
 /** Return all *.md entries under the matching rules dir, sorted by filename asc. */
 export async function listRulesFiles(
-  cwd: string,
+  root: string,
   scope: "user" | "project"
 ): Promise<ReadonlyArray<MemoryLayerEntry>> {
   // Both scopes live under `<root>/.iknow/rules/` — for scope 'user' the first
-  // arg is the user home (~), for 'project' it is the project cwd. The `.iknow`
-  // suffix is identical for both (spec OQ5: user/project rules both glob
-  // `.iknow/rules/*.md`).
-  const rulesDir = join(cwd, ".iknow", "rules");
+  // arg is the user home (~), for 'project' it is the session's
+  // `projectIdentityRoot` (T3 / ADR-0037 §4: the project identity the host
+  // pinned at startup, never the task worktree). The
+  // `.iknow` suffix is identical for both (spec OQ5: user/project rules both
+  // glob `.iknow/rules/*.md`).
+  const rulesDir = join(root, ".iknow", "rules");
   const names: string[] = [];
   for await (const name of safeDir(rulesDir)) {
     if (name.endsWith(".md")) names.push(name);

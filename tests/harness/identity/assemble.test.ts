@@ -22,6 +22,7 @@ describe("memory_layer slot — resolver 降级契约", () => {
       await writeFile(join(cwd, "AGENTS.md"), marker);
       const resolver = createIknowSystemResolver({
         cwd,
+        projectIdentityRoot: cwd,
         userHome,
         surface: "ask",
         memoryEnabled: false,
@@ -41,6 +42,7 @@ describe("memory_layer slot — resolver 降级契约", () => {
   it("memoryEnabled=false → memory_layer absent (ask 全 opt-out)", async () => {
     const resolver = createIknowSystemResolver({
       cwd: "/tmp",
+      projectIdentityRoot: "/tmp",
       userHome: "/tmp",
       surface: "ask",
       memoryEnabled: false,
@@ -54,6 +56,7 @@ describe("memory_layer slot — resolver 降级契约", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const resolver = createIknowSystemResolver({
       cwd: "/tmp",
+      projectIdentityRoot: "/tmp",
       userHome: "/tmp",
       surface: "ask",
       memoryEnabled: true,
@@ -72,6 +75,7 @@ describe("memory_layer slot — resolver 降级契约", () => {
   it("memoryEnabled=true 但 memoryResolver 缺席 → memory_layer absent, 不抛", async () => {
     const resolver = createIknowSystemResolver({
       cwd: "/tmp",
+      projectIdentityRoot: "/tmp",
       userHome: "/tmp",
       surface: "ask",
       memoryEnabled: true,
@@ -90,6 +94,7 @@ describe("assemble persona root is userHome (issue #584 T2)", () => {
       const out =
         (await assembleIdentityContext({
           cwd: home,
+          projectIdentityRoot: home,
           userHome: home,
           workspaceRoot: join(home, "project"),
           bootstrapActive: false,
@@ -116,6 +121,7 @@ describe("assemble persona root is userHome (issue #584 T2)", () => {
       const out =
         (await assembleIdentityContext({
           cwd: project,
+          projectIdentityRoot: project,
           userHome: home,
           workspaceRoot: project,
           bootstrapActive: true,
@@ -146,6 +152,7 @@ describe("assemble persona root is userHome (issue #584 T2)", () => {
       const out =
         (await assembleIdentityContext({
           cwd: project,
+          projectIdentityRoot: project,
           userHome: home,
           workspaceRoot: project,
           bootstrapActive: true,
@@ -164,6 +171,7 @@ describe("assemble persona root is userHome (issue #584 T2)", () => {
     const longHome = join("/tmp", "x".repeat(8000));
     const out = await assembleIdentityContext({
       cwd: "/tmp",
+      projectIdentityRoot: "/tmp",
       userHome: longHome,
       workspaceRoot: "/tmp/short-project",
       bootstrapActive: true,
@@ -184,6 +192,7 @@ describe("assemble persona root is userHome (issue #584 T2)", () => {
       await expect(
         assembleIdentityContext({
           cwd: home,
+          projectIdentityRoot: home,
           userHome: home,
           workspaceRoot: join(home, "project"),
           bootstrapActive: false,

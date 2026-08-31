@@ -63,6 +63,7 @@ import type {
 import { getVersion } from "../cli/usage.js"; // SC-W 6/7: agentVersion 注入(与 session-api/http.ts 同向 import,无循环)
 import {
   createTaskWorktreeProvisioner,
+  mainCheckoutOf,
   type TaskWorktreeProvisioner,
 } from "./worktree-rebind.js";
 import type { WorktreeProvisionContext } from "../harness/isolation/worktree-gate.js";
@@ -108,10 +109,7 @@ import type { SkillCatalog } from "../harness/skill/catalog.js";
 import { createSkillBody } from "../harness/skill/body.js";
 import type { McpManager } from "../harness/mcp/manager.js";
 import { loadMcpConfig } from "../harness/mcp/config.js";
-import {
-  resolveMcpRoots,
-  type McpRoots,
-} from "../harness/mcp/roots.js";
+import { resolveMcpRoots, type McpRoots } from "../harness/mcp/roots.js";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
@@ -587,6 +585,16 @@ export type SessionHubOptions = {
    */
   readonly productRoot?: string;
   /**
+   * Review round 3 (ADR-0037 §4): 项目身份根 —— 宿主启动时钉一次，跨 rebind
+   * 不变。`buildProductionEngine` 透传给 `buildHarnessEngine`。
+   *
+   * 缺席回退链是 `boundRoot`（picker / `--workspace-root` 绑定的那个路径）再到
+   * `mainCheckoutOf(root)`：`bindWorkspace` 只校验绝对且存在，**不**要求是仓根，
+   * 所以绑到 `/repo/packages/app` 完全合法；改绑后拿 `root` 现算会让身份与记忆
+   * 库命名空间从子目录跳到仓根。
+   */
+  readonly projectIdentityRoot?: string;
+  /**
    * #128 T8:验证闭环配置 (settings.verify 段经 serve.ts 构造传入)。
    * 缺席 = 透明关闭, postMessage 走原 run 路径逐字节不变 (SC7);
    * 配置时每轮 run 被 runVerifyLoop 包裹 (仅 StopReason=completed 触发
@@ -717,6 +725,7 @@ export class SessionHub {
    * `buildProductionEngine` / reload 只消费它派生的 mcpConfigRoot。
    */
   private readonly productRoot: string | undefined;
+  private readonly projectIdentityRoot: string | undefined;
   /** #128 T8: 验证闭环配置（settings.verify 段；缺席 = 透明关闭）。 */
   private readonly verifyConfig: VerifyConfig | undefined;
   /** #356 High#4: built.shutdown 缓存（组合句柄；ensureDeps 懒取，hub.shutdown 触发）。 */
@@ -852,6 +861,7 @@ export class SessionHub {
     this.workspaceRoot = opts.workspaceRoot;
     // T6:稳定 productRoot（缺席 → workspaceRoot，保持单根形态可编译可跑）。
     this.productRoot = opts.productRoot ?? opts.workspaceRoot;
+    this.projectIdentityRoot = opts.projectIdentityRoot;
     // An entry-resolved root is already a valid bind for hosts that assemble
     // the Hub with a root (serve/TUI). Picker-driven hosts can still call
     // bindWorkspace later to change it.
@@ -2223,9 +2233,7 @@ export class SessionHub {
    * config / 调 manager.reload。失败路径不得让旧+新 manager 同时成为对外
    * 成功面；坏根在 shutdown 好 manager 之前拒绝。
    */
-  private async reloadMcpTransaction(): Promise<
-    readonly McpServerStatusDto[]
-  > {
+  private async reloadMcpTransaction(): Promise<readonly McpServerStatusDto[]> {
     // 已有可见 face 时不再 ensureDeps：避免 cache-hit activate 覆盖本事务
     // 要校验的 active mcpRoots，也缩小 rebind∩reload 窗口。
     if (!this.mcpManager || this.activeMcpRoots === undefined) {
@@ -2266,11 +2274,9 @@ export class SessionHub {
     } catch (err) {
       // EXIT: bad roots → reject before shutdown of good manager
       if (err instanceof McpLifecycleError) throw err;
-      throw new McpLifecycleError(
-        "reload_failed",
-        errorMessage(err),
-        { cause: err }
-      );
+      throw new McpLifecycleError("reload_failed", errorMessage(err), {
+        cause: err,
+      });
     }
 
     try {
@@ -2283,11 +2289,9 @@ export class SessionHub {
     } catch (err) {
       // EXIT: reload failed → retain one coherent failed/old state; never report mixed success
       if (err instanceof McpLifecycleError) throw err;
-      throw new McpLifecycleError(
-        "reload_failed",
-        errorMessage(err),
-        { cause: err }
-      );
+      throw new McpLifecycleError("reload_failed", errorMessage(err), {
+        cause: err,
+      });
     }
     return this.listMcpServers();
   }
@@ -2707,7 +2711,19 @@ export class SessionHub {
     }
     const env = this.envProvider ? this.envProvider() : loadIknowEnv();
     // T6:productRoot 稳定；workspaceRoot/cwd/sandboxRoot 跟随当前 task root。
-    const productRoot = this.productRoot ?? this.workspaceRoot ?? root;
+    // 末档从 `root` 改为 `mainCheckoutOf(root)`（T6 / ADR-0037 §4）：宿主没显式
+    // 传两个根时（serve 默认、TUI 之外的调用方），改绑后 root 就是 task 树，
+    // 直接当 productRoot 会把项目身份与 per-root 状态一起搬到裸树上。树是
+    // `<main>/.iknow/worktrees/<conv>`，主 checkout 由同一命名 SSOT 派生，
+    // 重启后恢复到树上的会话同样得到主仓。
+    const productRoot =
+      this.productRoot ?? this.workspaceRoot ?? mainCheckoutOf(root);
+    // Review round 3:项目身份根与 productRoot 分开 —— 后者服务 mcpConfigRoot /
+    // 状态锚，取自宿主的 workspaceRoot；身份要的是操作员绑定的那个项目。
+    // `bindWorkspace` 不要求绑定路径是仓根（只校验绝对且存在），所以
+    // `boundRoot` 可能是 `/repo/packages/app`；拿 `root` 现算会在改绑后跳到仓根。
+    const projectIdentityRoot =
+      this.projectIdentityRoot ?? this.boundRoot ?? mainCheckoutOf(root);
     const built = await buildHarnessEngine({
       env,
       askUser: this.askUser,
@@ -2715,6 +2731,7 @@ export class SessionHub {
       sandboxRoot: root,
       workspaceRoot: root,
       productRoot,
+      projectIdentityRoot,
       // Review High-2 (hard req 9): reuse the startup settings object — a
       // worktree-rooted loadIknowSettings({cwd}) would silently drop project
       // settings (`.iknow/` is gitignored inside the worktree).
@@ -2729,8 +2746,16 @@ export class SessionHub {
           this.provisionWorktree({ conversationId, root: sessionRoot }),
         // T7:enter-task-worktree 工具缝 —— 会话显式进入本仓已存在的 task
         // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
-        worktreeEnter: ({ conversationId, root: sessionRoot, targetConversationId }) =>
-          this.enterWorktree({ conversationId, root: sessionRoot, targetConversationId }),
+        worktreeEnter: ({
+          conversationId,
+          root: sessionRoot,
+          targetConversationId,
+        }) =>
+          this.enterWorktree({
+            conversationId,
+            root: sessionRoot,
+            targetConversationId,
+          }),
         // T8:exit-task-worktree 工具缝 —— 会话回到主仓根，树保留不删。
         worktreeExit: ({ conversationId, root: sessionRoot }) =>
           this.exitWorktree({ conversationId, root: sessionRoot }),
@@ -2833,8 +2858,16 @@ export class SessionHub {
           this.provisionWorktree({ conversationId, root: sessionRoot }),
         // T7:enter-task-worktree 工具缝 —— 会话显式进入本仓已存在的 task
         // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
-        worktreeEnter: ({ conversationId, root: sessionRoot, targetConversationId }) =>
-          this.enterWorktree({ conversationId, root: sessionRoot, targetConversationId }),
+        worktreeEnter: ({
+          conversationId,
+          root: sessionRoot,
+          targetConversationId,
+        }) =>
+          this.enterWorktree({
+            conversationId,
+            root: sessionRoot,
+            targetConversationId,
+          }),
         // T8:exit-task-worktree 工具缝 —— 会话回到主仓根，树保留不删。
         worktreeExit: ({ conversationId, root: sessionRoot }) =>
           this.exitWorktree({ conversationId, root: sessionRoot }),

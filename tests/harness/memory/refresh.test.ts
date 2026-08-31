@@ -21,11 +21,15 @@ const roots: string[] = [];
 async function makeContext() {
   const root = await mkdtemp(join(tmpdir(), "iknow-refresh-"));
   roots.push(root);
-  const cwd = join(root, "project");
+  const projectIdentityRoot = join(root, "project");
   const userHome = join(root, "home");
   const memoryDir = join(root, "memory");
-  await Promise.all([mkdir(cwd), mkdir(userHome), mkdir(memoryDir)]);
-  return { cwd, userHome, memoryDir };
+  await Promise.all([
+    mkdir(projectIdentityRoot),
+    mkdir(userHome),
+    mkdir(memoryDir),
+  ]);
+  return { projectIdentityRoot, userHome, memoryDir };
 }
 
 async function tick(): Promise<void> {
@@ -42,7 +46,7 @@ afterEach(async () => {
 describe("createSystemResolver", () => {
   it("returns the cached system when tracked mtimes are unchanged (zero reassembly)", async () => {
     const ctx = await makeContext();
-    await writeFile(join(ctx.cwd, "AGENTS.md"), "project-v1");
+    await writeFile(join(ctx.projectIdentityRoot, "AGENTS.md"), "project-v1");
     const resolver = createSystemResolver(ctx);
     expect(await resolver()).toContain("project-v1");
     // Second call: no mtime change → schemaREADME cache hit, no disk reassembly.
@@ -52,7 +56,7 @@ describe("createSystemResolver", () => {
 
   it("refreshes when a project AGENTS.md mtime changes", async () => {
     const ctx = await makeContext();
-    const agents = join(ctx.cwd, "AGENTS.md");
+    const agents = join(ctx.projectIdentityRoot, "AGENTS.md");
     await writeFile(agents, "project-v1");
     const resolver = createSystemResolver(ctx);
     await resolver();
@@ -63,7 +67,10 @@ describe("createSystemResolver", () => {
 
   it("keeps system content stable across cache hits", async () => {
     const ctx = await makeContext();
-    await writeFile(join(ctx.cwd, "AGENTS.md"), "stable-project");
+    await writeFile(
+      join(ctx.projectIdentityRoot, "AGENTS.md"),
+      "stable-project"
+    );
     const resolver = createSystemResolver(ctx);
     const first = await resolver();
     expect(await resolver()).toBe(first);
@@ -71,7 +78,7 @@ describe("createSystemResolver", () => {
 
   it("tracks rule files independently (body edit triggers re-assembly, text stays manifest-only)", async () => {
     const ctx = await makeContext();
-    const projectRules = join(ctx.cwd, ".iknow", "rules");
+    const projectRules = join(ctx.projectIdentityRoot, ".iknow", "rules");
     const userRules = join(ctx.userHome, ".iknow", "rules");
     await Promise.all([
       mkdir(projectRules, { recursive: true }),
@@ -101,7 +108,7 @@ describe("createSystemResolver", () => {
 
   it("treats a deleted tracked file as absent without throwing", async () => {
     const ctx = await makeContext();
-    const agents = join(ctx.cwd, "AGENTS.md");
+    const agents = join(ctx.projectIdentityRoot, "AGENTS.md");
     await writeFile(agents, "removed-content");
     const resolver = createSystemResolver(ctx);
     await resolver();
@@ -113,7 +120,7 @@ describe("createSystemResolver", () => {
 
   it("tracks userHome AGENTS.md even when workspaceRoot is set", async () => {
     const base = await makeContext();
-    const workspaceRoot = join(base.cwd, "..", "workspace");
+    const workspaceRoot = join(base.projectIdentityRoot, "..", "workspace");
     await mkdir(workspaceRoot, { recursive: true });
     const ctx = { ...base, workspaceRoot };
     const userAgents = join(ctx.userHome, ".iknow", "AGENTS.md");
@@ -129,10 +136,13 @@ describe("createSystemResolver", () => {
 
   it("ignores workspaceRoot/.iknow/AGENTS.md as a user layer", async () => {
     const base = await makeContext();
-    const workspaceRoot = join(base.cwd, "..", "workspace");
+    const workspaceRoot = join(base.projectIdentityRoot, "..", "workspace");
     await mkdir(join(workspaceRoot, ".iknow"), { recursive: true });
     await writeFile(join(workspaceRoot, ".iknow", "AGENTS.md"), "ws-agents");
-    await writeFile(join(base.cwd, "AGENTS.md"), "project-only");
+    await writeFile(
+      join(base.projectIdentityRoot, "AGENTS.md"),
+      "project-only"
+    );
 
     const resolved = await createSystemResolver({ ...base, workspaceRoot })();
     expect(resolved).toContain("project-only");
@@ -141,9 +151,9 @@ describe("createSystemResolver", () => {
 
   it("does not throw when the userHome layer is absent", async () => {
     const base = await makeContext();
-    const workspaceRoot = join(base.cwd, "..", "workspace");
+    const workspaceRoot = join(base.projectIdentityRoot, "..", "workspace");
     await mkdir(workspaceRoot, { recursive: true });
-    await writeFile(join(base.cwd, "AGENTS.md"), "project-v1");
+    await writeFile(join(base.projectIdentityRoot, "AGENTS.md"), "project-v1");
 
     const resolver = createSystemResolver({ ...base, workspaceRoot });
     await expect(resolver()).resolves.toContain("project-v1");
@@ -153,7 +163,10 @@ describe("createSystemResolver", () => {
 
   it("dedupes concurrent first-call assembly (no duplicate discover/assemble)", async () => {
     const ctx = await makeContext();
-    await writeFile(join(ctx.cwd, "AGENTS.md"), "concurrent-v1");
+    await writeFile(
+      join(ctx.projectIdentityRoot, "AGENTS.md"),
+      "concurrent-v1"
+    );
     const resolver = createSystemResolver(ctx);
     // 同一 tick 内派发多个并发调用 —— serve 多会话共享同一 resolver 时会发生。
     const results = await Promise.all([
@@ -169,7 +182,7 @@ describe("createSystemResolver", () => {
 
   it("does not poison the cache when assembleSystemPrompt throws (next call retries)", async () => {
     const ctx = await makeContext();
-    await writeFile(join(ctx.cwd, "AGENTS.md"), "retry-v1");
+    await writeFile(join(ctx.projectIdentityRoot, "AGENTS.md"), "retry-v1");
     // 第一次装配失败 + 第二次成功
     spiedAssemble
       .mockRejectedValueOnce(new Error("transient failure"))

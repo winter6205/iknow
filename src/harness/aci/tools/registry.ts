@@ -227,6 +227,14 @@ export interface CreateDefaultAciRegistryOptions {
    *  absent — preserves existing registry callers that don't thread
    *  per-root state. */
   readonly workspaceRoot?: string;
+  /** T3 (plans/worktree-session-roots.md / ADR-0037 §4): 项目身份根 —— 会话
+   *  **已改绑**时额外放行的只读根。只透给 `read_file`(只读放行身份根上的项目
+   *  身份文件——改绑后 sandboxRoot 是 task worktree，身份根路径本会越界，而
+   *  ADR-0037 §1 明确允许只读它)。**不**透给 bash / write / edit —— 写不得
+   *  出沙箱。这条放行的门(隔离开关打开 **且** taskRoot 是 task worktree)在
+   *  build-engine 装配层；本层只消费已开门的透传值。缺席 / 等于 sandboxRoot
+   *  → 无额外读根(与今日逐字节一致)。 */
+  readonly projectIdentityRoot?: string;
   /** #406 T3:per-engine secret registry。透传给 bash 工具工厂——handler
    *  执行前把占位符还原为真值（见 bash.ts restore 段）。缺席时 bash 命令
    *  原样透传（行为 byte-identical，向后兼容）。 */
@@ -426,7 +434,13 @@ export function createDefaultAciRegistry(
         // #562 T6: bashMode 透传 — readonly 模式触发 validator + fence cwdReadonly。
         ...(bashMode !== undefined ? { bashMode } : {}),
       }),
-    read_file: () => createReadFileTool(sandboxRoot, { workspaceRoot }),
+    read_file: () =>
+      createReadFileTool(sandboxRoot, {
+        workspaceRoot,
+        ...(opts.projectIdentityRoot !== undefined
+          ? { projectIdentityRoot: opts.projectIdentityRoot }
+          : {}),
+      }),
     grep: () => createGrepTool(sandboxRoot),
     glob: () => createGlobTool(sandboxRoot),
     edit_file: () => createEditFileTool(sandboxRoot, { onEdit }),

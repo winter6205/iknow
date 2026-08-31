@@ -24,7 +24,10 @@ import {
   DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
 } from "./settings.js";
 import { LLM_MODEL_MISSING_MESSAGE } from "./messages.js";
-import { WORKSPACE_ROOT_ENV_KEY } from "./workspace-root.js";
+import {
+  PRODUCT_ROOT_ENV_KEY,
+  WORKSPACE_ROOT_ENV_KEY,
+} from "./workspace-root.js";
 
 export interface LlmEnv {
   baseUrl: string;
@@ -310,6 +313,14 @@ export interface IknowEnv {
    * for relative / missing paths.
    */
   workspaceRoot: string | undefined;
+  /**
+   * T3 (plans/worktree-session-roots.md / ADR-0037 §4): 项目身份根，读
+   * `IKNOW_PRODUCT_ROOT`。父会话 spawn 子代理时注入本变量，让 worker 的
+   * rules / 项目 `AGENTS.md` / 项目 skills 发现落在**主仓**而不是它自己的
+   * cwd（改绑后那是一棵 gitignored 的裸树）。unset → undefined，worker 回落
+   * 到 cwd（未改绑时两者同值，字节不变）。
+   */
+  productRoot: string | undefined;
 }
 
 /** Placeholder values treated as "no real secret set" (case-insensitive). */
@@ -844,6 +855,12 @@ export function loadIknowEnv(
     workspaceRoot: envOptional({
       file,
       key: WORKSPACE_ROOT_ENV_KEY,
+    }),
+    // T3 (ADR-0037 §4): 项目身份根。同 workspaceRoot 的 envOptional 纪律
+    // （empty/unset → undefined）；消费者是 subagent worker 的身份发现。
+    productRoot: envOptional({
+      file,
+      key: PRODUCT_ROOT_ENV_KEY,
     }),
     loop: {
       detectToolLoop:

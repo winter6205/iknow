@@ -33,22 +33,35 @@ const mockState = vi.hoisted(() => ({
   spawnFactoryArgs: [] as Array<{
     readonly traceDir: unknown;
     readonly workspaceRoot: unknown;
+    readonly projectIdentityRoot: unknown;
+    readonly installRoot: unknown;
     readonly sessionRoot: unknown;
   }>,
-  managerOpts: undefined as
-    | { readonly sandboxRoot?: string }
-    | undefined,
+  managerOpts: undefined as { readonly sandboxRoot?: string } | undefined,
 }));
 
 vi.mock("../../src/harness/subagent/spawn.ts", async (importActual) => {
-  const actual = await importActual<
-    typeof import("../../src/harness/subagent/spawn.ts")
-  >();
+  const actual =
+    await importActual<typeof import("../../src/harness/subagent/spawn.ts")>();
   return {
     ...actual,
     createDefaultSubAgentSpawn: vi.fn(
-      (traceDir?: string, workspaceRoot?: string, sessionRoot?: string) => {
-        mockState.spawnFactoryArgs.push({ traceDir, workspaceRoot, sessionRoot });
+      (
+        opts: {
+          readonly traceDir?: string;
+          readonly workspaceRoot?: string;
+          readonly projectIdentityRoot?: string;
+          readonly installRoot?: string;
+          readonly sessionRoot?: string;
+        } = {}
+      ) => {
+        mockState.spawnFactoryArgs.push({
+          traceDir: opts.traceDir,
+          workspaceRoot: opts.workspaceRoot,
+          projectIdentityRoot: opts.projectIdentityRoot,
+          installRoot: opts.installRoot,
+          sessionRoot: opts.sessionRoot,
+        });
         // fake spawn factory: build-engine only wires it into the manager;
         // the manager is mocked below with a fake child, so this is never run.
         return (() => {
@@ -154,6 +167,7 @@ describe("buildHarnessEngine — subagent spawn inherits the rebound root (T5)",
       // pass cwd = workspaceRoot = the task worktree
       cwd: wtRoot,
       workspaceRoot: wtRoot,
+      productRoot: repoDir,
     });
 
     expect(built.subagentManager).toBeDefined();
@@ -163,6 +177,14 @@ describe("buildHarnessEngine — subagent spawn inherits the rebound root (T5)",
     expect(args.sessionRoot).toBe(wtRoot);
     // workspace-root env SSOT unchanged
     expect(args.workspaceRoot).toBe(wtRoot);
+    // T3 (plans/worktree-session-roots.md): 身份根不跟树走 —— worker 的
+    // rules / 项目 AGENTS.md / 项目 skills 仍读主仓。
+    expect(args.projectIdentityRoot).toBe(repoDir);
+    expect(args.projectIdentityRoot).not.toBe(args.sessionRoot);
+    // T5 (硬要求 6): bootstrap 锚 iknow 自身安装根，与两个项目根都无关 ——
+    // 裸树上没有 node_modules，从 cwd 解析 tsx 会崩。
+    expect(args.installRoot).toBe(built!.sessionRoots.installRoot);
+    expect(args.installRoot).not.toBe(args.sessionRoot);
     // and the manager's parent sandboxRoot is the same tree: the worker
     // envelope's sandboxRoot inherits it (SC8) — same worktree, cwd AND sandbox
     expect(mockState.managerOpts?.sandboxRoot).toBe(wtRoot);
@@ -181,6 +203,8 @@ describe("buildHarnessEngine — subagent spawn inherits the rebound root (T5)",
     const args = mockState.spawnFactoryArgs[0]!;
     expect(args.sessionRoot).toBeUndefined();
     expect(args.workspaceRoot).toBe(repoDir);
+    // 未改绑时身份根与会话根同值 —— 行为与今日一致。
+    expect(args.projectIdentityRoot).toBe(repoDir);
     expect(mockState.managerOpts?.sandboxRoot).toBe(repoDir);
   });
 });

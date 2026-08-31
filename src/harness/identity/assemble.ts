@@ -56,7 +56,17 @@ export type IdentitySegmentKind = (typeof IKNOW_ASSEMBLY_ORDER)[number];
  *  "Available tools:" 名录段;缺席或返回 undefined/空数组 → 跳过,
  *  输出与无此缝完全一致 (KV 缓存字节级稳定契约,字段缺席 → 不写空 system)。 */
 export interface AssemblyContext {
+  /**
+   * 本会话生效的工作目录（改绑后 = task worktree）。只用于 "Project path"
+   * 展示段——模型需要知道自己真实在哪写。**不**用于项目身份发现。
+   */
   readonly cwd: string;
+  /**
+   * T3 (plans/worktree-session-roots.md / ADR-0037 §4)：项目身份根 —— 宿主
+   * 启动时钉一次的「用户此刻在做的项目」。项目 `AGENTS.md` / `.iknow/rules`
+   * 的唯一发现根，跨 rebind 不变。
+   */
+  readonly projectIdentityRoot: string;
   readonly userHome: string;
   /**
    * Per-root state for memory/sessions/settings. Persona files
@@ -143,7 +153,10 @@ export function shouldIncludeBootstrap(
  *  #194 T6:增 `memoryEnabled` + `memoryResolver` 透传到 ctx,驱动 memory_layer
  *  段降级装配(ask surface 默认 memoryEnabled=false)。 */
 export function createIknowSystemResolver(opts: {
+  /** 展示用工作目录（改绑后 = task worktree）；不参与身份发现。 */
   readonly cwd: string;
+  /** T3：项目身份发现根 = 宿主启动时钉下的项目身份根（ADR-0037 §4）。 */
+  readonly projectIdentityRoot: string;
   readonly userHome: string;
   readonly surface: "chat" | "tui" | "ask" | "serve";
   readonly memoryEnabled: boolean;
@@ -173,6 +186,7 @@ export function createIknowSystemResolver(opts: {
   return () =>
     assembleIdentityContext({
       cwd: opts.cwd,
+      projectIdentityRoot: opts.projectIdentityRoot,
       userHome: opts.userHome,
       ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
       bootstrapActive,

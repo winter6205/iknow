@@ -183,6 +183,11 @@ export interface CreateTuiBridgeOptions {
    * bridge 内重算 MCP 路径策略。
    */
   readonly productRoot?: string;
+  /**
+   * Review round 3:项目身份根（启动 cwd）。单向透传给 SessionHub —— hub 在
+   * per-root 重建时要拿它查身份，不能用会话当前根现算。
+   */
+  readonly projectIdentityRoot?: string;
   /** harness deps（产品路径传 buildTuiDeps 结果；测试注入 stub deps）。 */
   readonly deps: LoopEngineDeps;
   readonly defaultJsonMode?: boolean;
@@ -275,6 +280,9 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
       ? { workspaceRoot: opts.workspaceRoot }
       : {}),
     // T6:稳定 productRoot 单向透传（缺席 → hub 回退 workspaceRoot）。
+    ...(opts.projectIdentityRoot !== undefined
+      ? { projectIdentityRoot: opts.projectIdentityRoot }
+      : {}),
     ...(opts.productRoot !== undefined
       ? { productRoot: opts.productRoot }
       : {}),

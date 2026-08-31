@@ -218,6 +218,14 @@ export interface CreateWorkerDepsOptions {
    *  缺席 → registry 内部 fallback 到 sandboxRoot(legacy 形态)。 */
   readonly workspaceRoot?: string;
   /**
+   * T3 (plans/worktree-session-roots.md / ADR-0037 §4): 项目身份发现根 =
+   * 父会话钉下的 `projectIdentityRoot`（spawn 时经 `IKNOW_PRODUCT_ROOT` 传入，
+   * env var 名沿用既有 wire）。rules / 项目 `AGENTS.md` / 项目 skills 都读它，
+   * 而不是 worker 自己的 cwd —— 改绑后 cwd 是一棵没有 `.iknow` 的裸树。
+   * 缺席 → 回落 cwd（未改绑时两者同值，字节不变）。
+   */
+  readonly projectIdentityRoot?: string;
+  /**
    * #556 T2: 来自 envelope.role 的 seam 副本 (runSubagentWorker 透传)。
    * worker 装配期查 catalog 取 body 注入 persona 段; 缺省 / 未知 → 走 V1
    * baseline (不入 persona 段, 不注入额外 deny, 详见 plan T2 防御契约)。
@@ -276,6 +284,8 @@ export async function createWorkerRuntime(
   const { env, sandboxRoot } = opts;
   const userHome = opts.userHome ?? homedir();
   const cwd = opts.cwd ?? process.cwd();
+  // T3: 身份发现根。父会话没传（未改绑 / 旧 wire）→ 回落 cwd，与今日同值。
+  const projectIdentityRoot = opts.projectIdentityRoot ?? cwd;
   const defaultTraceDir = resolve(
     opts.workspaceRoot ?? cwd,
     DEFAULT_WORKER_TRACE_DIR
@@ -307,7 +317,11 @@ export async function createWorkerRuntime(
   const skillCatalog =
     opts.skillCatalog ??
     createSkillCatalog(
-      await createSkillScanner({ userHome, cwd, env: process.env }).scan()
+      await createSkillScanner({
+        userHome,
+        projectIdentityRoot,
+        env: process.env,
+      }).scan()
     );
 
   // 独立 registry: 不依赖父注册表 (spec 假设 4)。worker 子进程不含
@@ -363,6 +377,7 @@ export async function createWorkerRuntime(
     : (opts.system ??
       createIknowSystemResolver({
         cwd,
+        projectIdentityRoot,
         userHome,
         surface: "ask",
         memoryEnabled: false,
@@ -808,6 +823,13 @@ export async function runSubagentWorker(): Promise<void> {
             env: { [WORKSPACE_ROOT_ENV_KEY]: env.workspaceRoot },
           }),
         }
+      : {}),
+    // T3 (ADR-0037 §4): 父会话经 IKNOW_PRODUCT_ROOT 传下来的项目身份根。
+    // `env.productRoot` 是 env var 那侧的名字（wire 不改），进程内的选项面
+    // 叫 `projectIdentityRoot`。缺席（未改绑 / 旧 wire）→ 不传 →
+    // createWorkerRuntime 回落 cwd。
+    ...(env.productRoot !== undefined
+      ? { projectIdentityRoot: env.productRoot }
       : {}),
   });
   // D-α 观测地板: fileRefs 的派生源 = 本 worker 实际装配出的 ACI catalog

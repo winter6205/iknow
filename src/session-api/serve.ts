@@ -158,6 +158,9 @@ export async function startSessionServe(
     // 与稳定 productRoot（MCP config）同源；rebind 不改 productRoot。
     workspaceRoot: productRoot,
     productRoot,
+    // Review round 3:serve 的项目身份根就是启动绑定的那个根（可能是仓内子
+    // 目录 —— `--workspace-root` 与 picker 都不要求仓根）；改绑不改它。
+    projectIdentityRoot: productRoot,
     // serve-workspace T4 (ADR-0023): recents/trust 名单落 home —— 显式
     // `--workspace-root` / `IKNOW_WORKSPACE_ROOT` 预绑时以 confirmTrust=true
     // 写入 `<homedir>/.iknow/workspaces.json`(规则 3:显式指定 = 显式信任)。

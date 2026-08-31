@@ -30,16 +30,18 @@ import type { MemoryEntryV1 } from "../../../src/harness/memory/index.ts";
 
 // -- tmpdir fixtures --------------------------------------------------------
 
-let cwd: string;
+let projectIdentityRoot: string;
 let userHome: string;
 let memoryDir: string;
 const written: string[] = [];
 
 beforeEach(async () => {
-  cwd = await mkdtemp(join(tmpdir(), "assembly-cwd-"));
+  projectIdentityRoot = await mkdtemp(
+    join(tmpdir(), "assembly-projectIdentityRoot-")
+  );
   userHome = await mkdtemp(join(tmpdir(), "assembly-home-"));
   memoryDir = await mkdtemp(join(tmpdir(), "assembly-mem-"));
-  written.push(cwd, userHome, memoryDir);
+  written.push(projectIdentityRoot, userHome, memoryDir);
 });
 
 afterEach(async () => {
@@ -78,7 +80,7 @@ const memoryEntry = (
 });
 
 function ctx(overrides?: Partial<AssemblyContext>): AssemblyContext {
-  return { cwd, userHome, memoryDir, ...overrides };
+  return { projectIdentityRoot, userHome, memoryDir, ...overrides };
 }
 
 // -- three-layer assembly order ---------------------------------------------
@@ -88,9 +90,12 @@ describe("assembleSystemPrompt", () => {
     await mkdirP(join(userHome, ".iknow", "rules"));
     await write(join(userHome, ".iknow", "AGENTS.md"), "USER AGENTS");
     await write(join(userHome, ".iknow", "rules", "user1.md"), "USER RULE");
-    await mkdirP(join(cwd, ".iknow", "rules"));
-    await write(join(cwd, "AGENTS.md"), "PROJECT AGENTS");
-    await write(join(cwd, ".iknow", "rules", "proj1.md"), "PROJECT RULE");
+    await mkdirP(join(projectIdentityRoot, ".iknow", "rules"));
+    await write(join(projectIdentityRoot, "AGENTS.md"), "PROJECT AGENTS");
+    await write(
+      join(projectIdentityRoot, ".iknow", "rules", "proj1.md"),
+      "PROJECT RULE"
+    );
     // A memory entry file makes the memory library non-empty.
     await write(join(memoryDir, "mem-1.md"), "# mem");
     const promoteEntries = [memoryEntry("mem-1", "Memory one", "body one")];
@@ -125,8 +130,8 @@ describe("assembleSystemPrompt", () => {
   it("emits the priority declaration exactly once, between user and project", async () => {
     await mkdirP(join(userHome, ".iknow", "rules"));
     await write(join(userHome, ".iknow", "AGENTS.md"), "USER BODY");
-    await mkdirP(join(cwd, ".iknow", "rules"));
-    await write(join(cwd, "AGENTS.md"), "PROJECT BODY");
+    await mkdirP(join(projectIdentityRoot, ".iknow", "rules"));
+    await write(join(projectIdentityRoot, "AGENTS.md"), "PROJECT BODY");
 
     const out = await assembleSystemPrompt(ctx());
     const count = out.split(PRIORITY_DECLARATION).length - 1;
@@ -142,13 +147,20 @@ describe("assembleSystemPrompt", () => {
   });
 
   it("lists rules paths in filename asc order in the rules manifest (#841 T6)", async () => {
-    await mkdirP(join(cwd, ".iknow", "rules"));
-    await write(join(cwd, ".iknow", "rules", "zzz.md"), "LATE");
-    await write(join(cwd, ".iknow", "rules", "aaa.md"), "EARLY");
+    await mkdirP(join(projectIdentityRoot, ".iknow", "rules"));
+    await write(join(projectIdentityRoot, ".iknow", "rules", "zzz.md"), "LATE");
+    await write(
+      join(projectIdentityRoot, ".iknow", "rules", "aaa.md"),
+      "EARLY"
+    );
 
     const out = await assembleSystemPrompt(ctx());
-    const iAaa = out.indexOf(join(cwd, ".iknow", "rules", "aaa.md"));
-    const iZzz = out.indexOf(join(cwd, ".iknow", "rules", "zzz.md"));
+    const iAaa = out.indexOf(
+      join(projectIdentityRoot, ".iknow", "rules", "aaa.md")
+    );
+    const iZzz = out.indexOf(
+      join(projectIdentityRoot, ".iknow", "rules", "zzz.md")
+    );
     assert.ok(iAaa !== -1, "aaa.md path present in manifest");
     assert.ok(iZzz !== -1, "zzz.md path present in manifest");
     assert.ok(iAaa < iZzz, "manifest paths sorted by filename asc");
@@ -179,7 +191,7 @@ describe("assembleSystemPrompt", () => {
 
   it("truncates a file over 12000 chars with a [truncated N chars] marker", async () => {
     const big = "x".repeat(12100);
-    await write(join(cwd, "AGENTS.md"), big);
+    await write(join(projectIdentityRoot, "AGENTS.md"), big);
     const out = await assembleSystemPrompt(ctx());
     assert.ok(
       out.includes("[truncated 100 chars]"),
@@ -190,7 +202,7 @@ describe("assembleSystemPrompt", () => {
 
   it("keeps a file at or under the cap untruncated", async () => {
     const small = "y".repeat(12000);
-    await write(join(cwd, "AGENTS.md"), small);
+    await write(join(projectIdentityRoot, "AGENTS.md"), small);
     const out = await assembleSystemPrompt(ctx());
     assert.ok(!out.includes("[truncated"), "no truncation marker expected");
     assert.ok(out.includes("y".repeat(12000)));
@@ -241,7 +253,7 @@ describe("assembleSystemPrompt", () => {
         entries: { "note-1": { recall_count: 5, sessions: ["a", "b"] } },
       })
     );
-    await write(join(cwd, "AGENTS.md"), "PROJECT AGENTS");
+    await write(join(projectIdentityRoot, "AGENTS.md"), "PROJECT AGENTS");
 
     const out = await assembleSystemPrompt(ctx());
 
@@ -281,7 +293,7 @@ describe("assembleSystemPrompt", () => {
     await mkdirP(join(userHome, ".iknow", "rules"));
     await write(join(userHome, ".iknow", "AGENTS.md"), "USER AGENTS");
     await write(join(userHome, ".iknow", "rules", "user1.md"), "USER RULE");
-    await write(join(cwd, "AGENTS.md"), "PROJECT AGENTS");
+    await write(join(projectIdentityRoot, "AGENTS.md"), "PROJECT AGENTS");
 
     const out = await assembleSystemPrompt(ctx({ workspaceRoot }));
 
@@ -291,7 +303,10 @@ describe("assembleSystemPrompt", () => {
       "user rules path from userHome in the manifest"
     );
     assert.ok(!out.includes("USER RULE"), "user rule body not injected");
-    assert.ok(out.includes("PROJECT AGENTS"), "project layer still from cwd");
+    assert.ok(
+      out.includes("PROJECT AGENTS"),
+      "project layer still from projectIdentityRoot"
+    );
     assert.ok(out.includes(PRIORITY_DECLARATION), "priority declaration kept");
     assert.ok(
       !out.includes("WS AGENTS"),
@@ -310,7 +325,7 @@ describe("assembleSystemPrompt", () => {
   it("treats a missing user layer as empty when workspaceRoot is set", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "assembly-ws-"));
     written.push(workspaceRoot);
-    await write(join(cwd, "AGENTS.md"), "PROJECT ONLY");
+    await write(join(projectIdentityRoot, "AGENTS.md"), "PROJECT ONLY");
 
     const out = await assembleSystemPrompt(ctx({ workspaceRoot }));
     assert.equal(out, "PROJECT ONLY");
@@ -401,9 +416,12 @@ describe("assembleSystemPrompt — rules manifest (#841 T6)", () => {
     await mkdirP(join(userHome, ".iknow", "rules"));
     await write(join(userHome, ".iknow", "rules", "aaa.md"), "USER RULE BODY");
     await write(join(userHome, ".iknow", "rules", "bbb.md"), "USER RULE TWO");
-    await mkdirP(join(cwd, ".iknow", "rules"));
-    await write(join(cwd, "AGENTS.md"), "PROJECT AGENTS");
-    await write(join(cwd, ".iknow", "rules", "proj.md"), "PROJECT RULE BODY");
+    await mkdirP(join(projectIdentityRoot, ".iknow", "rules"));
+    await write(join(projectIdentityRoot, "AGENTS.md"), "PROJECT AGENTS");
+    await write(
+      join(projectIdentityRoot, ".iknow", "rules", "proj.md"),
+      "PROJECT RULE BODY"
+    );
 
     const out = await assembleSystemPrompt(ctx());
 
@@ -422,28 +440,28 @@ describe("assembleSystemPrompt — rules manifest (#841 T6)", () => {
       "second user rule path listed"
     );
     assert.ok(
-      out.includes(join(cwd, ".iknow", "rules", "proj.md")),
+      out.includes(join(projectIdentityRoot, ".iknow", "rules", "proj.md")),
       "project rule path listed"
     );
     assert.ok(out.includes("read_file"), "manifest points at the read path");
 
     // Manifest follows the project AGENTS layer (locked order preserved).
     assert.ok(
-      out.indexOf(join(cwd, ".iknow", "rules", "proj.md")) >
+      out.indexOf(join(projectIdentityRoot, ".iknow", "rules", "proj.md")) >
         out.indexOf("PROJECT AGENTS"),
       "rules manifest comes after the project layer"
     );
   });
 
   it("starts a session normally when the rules directories are missing", async () => {
-    await write(join(cwd, "AGENTS.md"), "PROJECT AGENTS");
+    await write(join(projectIdentityRoot, "AGENTS.md"), "PROJECT AGENTS");
     const out = await assembleSystemPrompt(ctx());
     assert.ok(out.includes("PROJECT AGENTS"), "AGENTS layer present");
     assert.ok(!out.includes("Rules index"), "no empty rules manifest");
   });
 
   it("treats an empty rules directory as no rules (no manifest segment)", async () => {
-    await mkdirP(join(cwd, ".iknow", "rules"));
+    await mkdirP(join(projectIdentityRoot, ".iknow", "rules"));
     await mkdirP(join(userHome, ".iknow", "rules"));
     const out = await assembleSystemPrompt(ctx());
     assert.ok(!out.includes("Rules index"), "empty dirs → no manifest");
@@ -453,8 +471,11 @@ describe("assembleSystemPrompt — rules manifest (#841 T6)", () => {
   it("still injects rule bodies through the worker path (assembleStaticSystemPrompt)", async () => {
     // ADR-0009 D2 amended: general-purpose workers keep full static injection;
     // only the parent opener (assembleSystemPrompt) switches to the manifest.
-    await mkdirP(join(cwd, ".iknow", "rules"));
-    await write(join(cwd, ".iknow", "rules", "proj.md"), "WORKER RULE BODY");
+    await mkdirP(join(projectIdentityRoot, ".iknow", "rules"));
+    await write(
+      join(projectIdentityRoot, ".iknow", "rules", "proj.md"),
+      "WORKER RULE BODY"
+    );
 
     const workerOut = await assembleStaticSystemPrompt(ctx());
     assert.ok(

@@ -2,7 +2,9 @@
 
 Date: 2026-08-29
 
-Status: accepted (amended 2026-08-30: 建树职责由 host 自动建树改为模型调用「创建工作树 ACI 工具」)
+Status: accepted
+
+> Amendments: 2026-08-30 建树职责由 host 自动建树改为模型调用「创建工作树 ACI 工具」；2026-08-31 改绑只切 `taskRoot`（§4 重写）。
 
 > **Amendment 2026-08-30**（issue #836 / 地图 #829）：ON 时门禁**只拦写、不自动 `git worktree add`**——建 task worktree 与会话根改绑由**模型调用「创建工作树 ACI 工具」**完成（成功 = 树在且会话根已切到该路径）；Host 不同波重放被拦的写，被拦的写由模型在新根上自己再调。原文 Decision 1 中「首次 mutate 被拦截 → host `git worktree add` 建树改绑」的读法 **superseded**。同批修订：说明书（rules）改为按需读——父会话不整段灌 rules、缺目录视为空，见 ADR-0009 D2 的 amended 说明与 `docs/CONTEXT.md` 术语「说明书读法」。
 > **Amendment 2026-08-30（工具面扩展，issue #839 / 地图 #829）**：enter/exit 对称工具——`enter-task-worktree` **显式进入**一棵本仓已存在的 task worktree（含他人树；授权锚 = 持久化的 `session.workspaceRoot`，只由工具成功 + 会话保存写成外来树，故是天然的显式进入持久记录；provision 据此 adoption 放行该会话在其上的 mutate），`exit-task-worktree` **回到主仓根**（主仓根由树经 git common dir 派生，重启安全）；exit **树保留不删**（孤儿树自动删除仍是明确非目标）。门禁本体不变。
@@ -30,9 +32,24 @@ ADR-0023 裁决 4 曾锁定「v1 = 单根 + recents + 三锚合一；worktree/�
 
 按 fail-closed 处理：创建工作树 ACI 工具向模型返回**可见 typed 错误，不静默覆盖、不复用归属不明的树、不 checkout 其它会话的 HEAD**。同会话内的并发首次 mutate（硬要求 7）不在此列——建树幂等，多条写路径在建树完成前同时到达也只产生一个 worktree / 一个 task 分支，不双写主仓。
 
-### 4. `workspaceRoot` 边界（与 ADR-0019 / ADR-0023 的关系）
+### 4. 会话根按角色分工：改绑只切 `taskRoot`（与 ADR-0019 / ADR-0023 的关系）
 
-`workspaceRoot`（ADR-0019 D1.1，per-root 状态锚，默认 `process.cwd()`）与 serve 主根（ADR-0023，显式选定 + unbound 语义）的规则都不变。改绑动作 = 把**本会话生效**的根锚（cwd / workspaceRoot 取值）切到 task worktree 路径，遵循既有锚的解析与校验规则（含 `WorkspaceRootError` 惯例）；它不是 serve 主根重绑，不触碰 recents / trust，也不是把 git worktree 提升为 product workspace 多根。主仓的物理路径不切——主仓检出保持只读原位，被切的只有本会话生效根。
+> **Amendment 2026-08-31**（issue #855 / 地图 #829，`plans/worktree-session-roots.md`）：本节原文把「本会话生效的根锚」写成 `cwd` / `workspaceRoot` **一并**切到 task worktree，等于让 ADR-0019 的 per-root 状态锚与写隔离根撞在同一字段上——改绑后记忆库、tasks 登记、settings、说明书、permissions、项目 skills 全部跟着搬到 gitignored 的空树上。该读法 **superseded**：改绑只切 `taskRoot`。
+
+会话按**角色**持四个根，互不兼任（`productRoot` / `taskRoot` / `installRoot` 是会话根，`projectIdentityRoot` 是项目根 —— 改绑不动它）：
+
+- **`productRoot`** — 开会话时的主 checkout，首次装配钉死，跨 rebind 与进程重启不变（重启时可由 task 树的 git common dir 派生，与 exit 工具同源）。`mcp.json` 只问它（`mcpConfigRoot` 由它派生，ADR-0037 amendment 2026-08-30 已落地，保持不变）。**项目身份**（rules / 项目 `AGENTS.md` / `permissions.toml` / 项目 skills 发现、子代理继承的身份根、记忆库命名空间名）不问 `productRoot` 而问 **`projectIdentityRoot`** —— 用户此刻在做的那个项目，宿主启动时钉一次（今日 = 启动 cwd），跨改绑不动，缺席时退 cwd（hub 的 per-root 重建多一级中间回退：钉下的值 → 当前 `boundRoot` → `root`）。装配层对**钉下的值与回退值一律套 `mainCheckoutOf`** —— 身份根不得是 task worktree：exit 后树保留不删，操作员可能在遗留树里启动，只归一化回退会让「钉了」比「没钉」更差（钉住空树 = 项目 rules / `AGENTS.md` / skills 全部消失，review round 4 实测）；取值在装配层定，**校验走会话根 SSOT**（`resolveSessionRoots` 的第四个角色，空 / 相对值 typed fail-closed，绝不按 `process.cwd()` 解释）。两者必须分开：宿主按 ADR-0019 把 `productRoot` 取自 `workspaceRoot`，而 `--workspace-root <dir>` 重定向档下 `<dir>` 不是项目（`dir ≠ cwd`），拿它查身份会让项目自己的说明书 / rules / skills 静默消失（amendment 2026-08-31 review round 2 实测）。**per-root 状态**（记忆库落盘根 / tasks 登记）的锚是 `workspaceRoot`，但改绑后 `workspaceRoot` 自身已是树，此时退到 `productRoot`——因此 ADR-0019 D1.3 的 `--workspace-root <dir>` 重定向仍生效，而状态永不落进 gitignored 的树。记忆库的**命名空间名**由 `projectIdentityRoot` 决定，不由 `taskRoot` 也不由锚决定：同一锚下多个项目不得塌进同一命名空间。settings 的读 / watch / 写回锚在**启动时**解析的根，改绑不重载（见 §5），因此也不跟 `taskRoot`。
+- **`taskRoot`** — 本会话 task worktree（create / enter 切过去，exit 切回主仓）。**写与工具 cwd 只问它**：`write_file` / `edit_file` / 会改工作区的 bash / git / LSP 目录 / 子代理工作目录。
+- **`installRoot`** — iknow 运行时自身的安装位置（worker bootstrap 解析 tsx 与自身依赖）。**≠ 用户项目的 `node_modules`**，因此裸 task worktree 上真 worker 仍能起。
+
+ADR-0019 D1.1 的默认解析（`workspaceRoot` 默认 `process.cwd()`）与 serve 主根（ADR-0023，显式选定 + unbound 语义）都不变——改绑不是 serve 主根重绑，不触碰 recents / trust，也不是把 git worktree 提升为 product workspace 多根。主仓检出保持只读原位。
+
+配套硬约束：
+
+- 改绑成功**不复制、不 seed** 主仓 `.iknow/{rules,skills,memory,sessions,tasks}` 到树上；树上缺目录视为空，项目身份仍读 `projectIdentityRoot` 上的现有文件。
+- 调用方禁止用 `join(cwd, '.iknow', …)` 或 `join(workspaceRoot, '.iknow', …)` 充当项目身份；一律经会话根 SSOT 按角色取路径，缺根 / 相对路径 fail-closed，**不回退 `process.cwd()`**。
+- **父会话引擎**的工具 sandbox 在**隔离开关 ON 且已改绑时**（`isolationEnabled` 且 `taskRoot` 是 task worktree）对 `projectIdentityRoot` 放**只读**行（与 §1「读路径可留在主仓」同源；实现上是身份根整棵树的读放行 —— 它可能是主 checkout 的**子目录**，不是逐条身份路径白名单）；写仍不得进主仓。这条放行是本次改动新增的，OFF 档「今日」是**一条都不给**，所以门必须同时看开关：`taskWorktreeOwnerOf` 只是路径形状判断，单靠它会让一个恰好长成 `<X>/.iknow/worktrees/<name>` 的 cwd 在隔离关闭时拿到沙箱外的读放行（amendment 2026-08-31 review round 3/4 实测）。已知缺口（记在 `plans/worktree-session-roots.md` 的 follow-up 段，尚未开 issue）：只 `read_file` 拿到这条放行，`grep` / `glob` 仍限在 `taskRoot`；子代理 worker 的 registry 也没拿到（worker 的说明书是灌进去的，不靠读）。
+- 用户级 `~/.iknow`（画像、用户 rules / `AGENTS.md`、`init.sh`、trust）继续跟 `home`，既不跟 `productRoot` 也不跟 `taskRoot`。
 
 ### 5. 配置读取合同（硬要求 9）
 
