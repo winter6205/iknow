@@ -20,7 +20,7 @@
  *
  * ask 入口无 manager → 不调本函数 → 不行为变化。
  */
-import type { SubAgentManager } from "./manager.js";
+import type { SubagentManagerDrainView } from "./manager-registry.js";
 import { projectParentVisibleEnvelope } from "./envelope.js";
 
 /**
@@ -56,7 +56,7 @@ export interface DrainPendingSubagentsOpts {
  * `_opts` 仅为兼容既有调用方保留;running worker 不会触发等待。
  */
 export async function drainPendingSubagents(
-  manager: SubAgentManager | undefined,
+  manager: SubagentManagerDrainView | undefined,
   opts?: DrainPendingSubagentsOpts
 ): Promise<string> {
   if (manager === undefined) return "";

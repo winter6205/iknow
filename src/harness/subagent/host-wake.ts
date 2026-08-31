@@ -1,12 +1,10 @@
-import type { SubAgentManager } from "./manager.js";
+import type { SubagentManagerWakeView } from "./manager-registry.js";
 import type { SubAgentTerminalNotice } from "./mailbox.js";
 import { errorMessage } from "../errors.js";
 
 function reportObserverDiagnostic(scope: string, error: unknown): void {
   try {
-    process.stderr.write(
-      `[subagent-wake] ${scope}: ${errorMessage(error)}\n`
-    );
+    process.stderr.write(`[subagent-wake] ${scope}: ${errorMessage(error)}\n`);
   } catch (diagnosticError) {
     // EXIT: diagnostics are best-effort; a broken stderr must not rethrow into
     // a mailbox callback or cleanup path.
@@ -73,14 +71,12 @@ export function toSubagentWakeError(
  * wake failure.
  */
 export function queryableSubagentTaskIds(
-  manager: SubAgentManager | undefined,
+  manager: SubagentManagerWakeView | undefined,
   conversationId?: string
 ): readonly string[] {
   if (manager === undefined) return [];
   try {
-    return manager
-      .drainCompleted(conversationId)
-      .map(({ taskId }) => taskId);
+    return manager.drainCompleted(conversationId).map(({ taskId }) => taskId);
   } catch (error) {
     reportObserverDiagnostic("queryable task lookup failed", error);
     // EXIT: diagnostic lookup is fail-safe; no task ids can be asserted when
@@ -96,13 +92,13 @@ export interface SubagentWake {
 }
 
 export interface CreateSubagentWakeOptions {
-  readonly manager: SubAgentManager | undefined;
+  readonly manager: SubagentManagerWakeView | undefined;
   /**
    * Optional session scope for a host. A function keeps one subscription
    * usable while an interactive host switches sessions.
    */
   readonly conversationId?: string | (() => string | undefined);
-  readonly subscribe?: SubAgentManager["subscribe"];
+  readonly subscribe?: SubagentManagerWakeView["subscribe"];
   readonly isIdle: () => boolean;
   readonly wake: () => Promise<void>;
   readonly onError?: (error: unknown) => void;
@@ -160,11 +156,7 @@ export function createSubagentWake(
 
   const flush = (): void => {
     scheduled = false;
-    if (
-      disposed ||
-      running ||
-      (pendingTaskIds.size === 0 && !pendingAnonymous)
-    )
+    if (disposed || running || (pendingTaskIds.size === 0 && !pendingAnonymous))
       return;
     let conversationId: string | undefined;
     try {

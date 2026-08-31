@@ -338,8 +338,8 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
         opts.inflight.unmark(conversationId);
       }
     },
-    subscribeSubagentTerminal:
-      opts.subagentManager?.subscribe ?? (() => () => {}),
+    subscribeSubagentTerminal: (subscriber) =>
+      hub.subscribeSubagentTerminal(subscriber),
     wakeFromSubagent: async (conversationId) => {
       opts.inflight.mark(conversationId);
       try {
@@ -399,7 +399,7 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     inflight: opts.inflight,
     contextWindow: opts.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     // #358 T7: 子代理只读投影。无 manager（ask surface / 旧产品路径） → 空。
-    listSubagents: () => opts.subagentManager?.listSubagents() ?? [],
+    listSubagents: () => hub.listSubagents(),
   };
   return Object.freeze(bridge);
 }
