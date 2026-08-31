@@ -22,12 +22,18 @@
  */
 
 import assert from "node:assert/strict";
+import { spawn as spawnChild } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "vitest";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import {
   createWorkerDeps,
   type CreateWorkerDepsOptions,
 } from "../../src/harness/subagent/worker.ts";
+import { createSpawnSubAgentTool } from "../../src/harness/subagent/spawn-subagent-tool.ts";
+import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
 import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
 import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
@@ -389,6 +395,62 @@ describe("worker tool surface: 隔离门禁 — symbol 写工具", () => {
     });
     assert.equal(decision.conclusion, "readonly");
     assert.equal(decision.reason, "write_tools_denied_bash_readonly");
+  });
+});
+
+describe("worker tool surface: T3 catalog deny contract", () => {
+  it("intentionally narrows an explore worker surface while preserving the role wire bytes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t3-role-worker-"));
+    const payloads: WorkerEnvelope[] = [];
+    const manager = createSubAgentManager({
+      sandboxRoot: root,
+      spawn: (_def, _taskId, payload) => {
+        payloads.push(payload);
+        return spawnChild(
+          process.execPath,
+          ["-e", "setInterval(() => {}, 1000)"],
+          {
+            stdio: ["pipe", "pipe", "pipe"],
+          }
+        );
+      },
+    });
+
+    try {
+      // T3-before measurement: the same role/no-parent-deny input exposed
+      // edit_file and write_file. Current assembly deliberately consumes the
+      // catalog deny because leaving those tools available is a write bypass.
+      const deps = await createWorkerDeps(
+        hermeticOpts({ sandboxRoot: root, role: "explore" })
+      );
+      const workerToolNames = deps.registry.list().map((tool) => tool.name);
+      assert.ok(!workerToolNames.includes("edit_file"));
+      assert.ok(!workerToolNames.includes("write_file"));
+      assert.ok(workerToolNames.includes("rename_symbol"));
+
+      const tool = createSpawnSubAgentTool({ manager });
+      await tool.handler({
+        task: "explore-only",
+        subagent_type: "explore",
+        wait: false,
+      });
+
+      assert.equal(payloads.length, 1);
+      // The T3-before and current manager payloads are byte-identical:
+      // catalog deny + role remain explicit on the worker wire.
+      assert.equal(
+        JSON.stringify(payloads[0]),
+        JSON.stringify({
+          task: "explore-only",
+          sandboxRoot: root,
+          disallowedTools: ["edit_file", "write_file"],
+          role: "explore",
+        })
+      );
+    } finally {
+      await manager.shutdown();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 
