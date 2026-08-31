@@ -10,6 +10,7 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { spawn as spawnChild } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -20,7 +21,11 @@ import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import { createMcpManager } from "../../src/harness/mcp/manager.ts";
 import type { McpClientHandle } from "../../src/harness/mcp/manager.ts";
-import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
+import {
+  createSubAgentManager,
+  type SubAgentManager,
+} from "../../src/harness/subagent/manager.ts";
+import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { createWorkerDeps } from "../../src/harness/subagent/worker.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
@@ -161,6 +166,25 @@ function makeTestSubagentManager(): {
     subscribe: () => () => {},
   };
   return { manager, spawnedTasks };
+}
+
+function makeCapturingSubagentManager(sandboxRoot: string): {
+  readonly manager: SubAgentManager;
+  readonly payloads: WorkerEnvelope[];
+} {
+  const payloads: WorkerEnvelope[] = [];
+  const manager = createSubAgentManager({
+    sandboxRoot,
+    spawn: (_definition, _taskId, payload) => {
+      payloads.push(payload);
+      return spawnChild(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        { stdio: ["pipe", "pipe", "pipe"] }
+      );
+    },
+  });
+  return { manager, payloads };
 }
 
 async function runSpawn(
@@ -1433,6 +1457,8 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
     const taskRoot = join(root, ".iknow", "worktrees", "conv-1");
     await mkdir(taskRoot, { recursive: true });
     const { manager, spawnedTasks } = makeTestSubagentManager();
+    const { manager: reboundManager, payloads: reboundPayloads } =
+      makeCapturingSubagentManager(taskRoot);
     try {
       const mainBuilt = await buildHarnessEngine({
         env: makeEnv("sk-test-t4-rebound-main"),
@@ -1462,7 +1488,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
         projectIdentityRoot: root,
         userHome: join(root, "home"),
         settings: { isolation: { worktreeOnMutate: true } },
-        subagentManager: manager,
+        subagentManager: reboundManager,
         worktreeIsolation: { provision: async () => taskRoot },
       });
       const result = await runSpawn(reboundBuilt, {
@@ -1471,7 +1497,10 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       });
 
       expect(result.kind).toBe("ok");
-      expect(spawnedTasks).toEqual(["change the repository"]);
+      expect(spawnedTasks).toEqual([]);
+      expect(reboundPayloads).toHaveLength(1);
+      expect(reboundPayloads[0]?.task).toBe("change the repository");
+      expect(reboundPayloads[0]?.sandboxRoot).toBe(taskRoot);
       await reboundBuilt.shutdown?.();
     } finally {
       await rm(root, { recursive: true, force: true });
