@@ -225,7 +225,7 @@ async function runWave(opts: {
   }> = [];
   for (const item of opts.wave) {
     emitOnDecision(item, opts.policy, opts.onDecision);
-    const gate = await opts.perm.gateOne(item.call);
+    const gate = await opts.perm.gateOne(item.call, opts.signal);
     gated.push({
       item,
       blocked: gate.kind === "blocked" ? gate.result : undefined,
