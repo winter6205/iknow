@@ -228,7 +228,10 @@ describe("query_trace ACI tool", () => {
         error instanceof ToolExecutionError &&
         error.message.includes("record_id scan exhausted")
     );
-  });
+    // scan-exhausted 分支要求写满并扫完 QUERY_TRACE_MAX_RECORD_ID_SCAN+1 行：
+    // 单跑实测 3.8 s，多文件并发下实测 5.6 s > vitest 默认 5 s。超时只加在这一条，
+    // 不动 vitest.config.ts 的全局 testTimeout（那会放宽所有测的挂死检测）。
+  }, 120_000);
 
   it("rejects an unknown record_type with a typed validation error", async () => {
     const tool = createQueryTraceTool(makeTraceDir());
