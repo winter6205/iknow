@@ -30,9 +30,10 @@ const traceDirs: string[] = [];
 /**
  * What the core answers when there is nothing to answer with. Compared as a
  * parsed object, never as a whole string: JSON key order comes from the two
- * envelope literals in query-trace-core.ts (:86-92 and :342-356), no contract
- * fixes an order, and T4 consolidates exactly those literals — a string pin
- * would break there for a reason unrelated to behaviour.
+ * envelope literals in query-trace-core.ts (the handler's `envelope` object and
+ * `emptyResult()`), no contract fixes an order, and T4 consolidates exactly
+ * those literals — a string pin would break there for a reason unrelated to
+ * behaviour.
  */
 const EMPTY_ENVELOPE = {
   records: [],
@@ -145,9 +146,9 @@ describe("query_trace core input face", () => {
       });
       assert.equal(error.field, "resume_offset");
       // resume_offset has no declared upper bound: parseInteger's default
-      // `maximum` is Number.MAX_SAFE_INTEGER (query-trace-core.ts:200-205), so
-      // the message is built from that constant rather than a transcribed digit
-      // string.
+      // `maximum` is Number.MAX_SAFE_INTEGER (see parseInteger in
+      // query-trace-core.ts), so the message is built from that constant rather
+      // than a transcribed digit string.
       assert.equal(
         error.message,
         `query_trace: resume_offset must be an integer in 0..${Number.MAX_SAFE_INTEGER}`

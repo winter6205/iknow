@@ -18,6 +18,15 @@ import {
 export const QUERY_TRACE_DEFAULT_LIMIT = 100;
 export const QUERY_TRACE_MAX_LIMIT = 200;
 export const QUERY_TRACE_MAX_RECORD_ID_SCAN = 10_000;
+/**
+ * Bounds **how many whole records fit on a list page** — never how much of a
+ * single record survives. A `record_id` drill-down does not pass through this
+ * cap: the caller named that record, so it comes back verbatim, overshooting
+ * the cap on purpose.
+ *
+ * Retires when the read side gains an explicit size axis; see plan
+ * `trace-mcp-read-side-split` T6.
+ */
 export const QUERY_TRACE_RESPONSE_CAP = 4_000;
 export const QUERY_TRACE_PREVIEW_CAP = 400;
 
@@ -60,10 +69,12 @@ export function createQueryTraceCore(
 
   return async (input: unknown): Promise<string> => {
     const parsed = parseInput(input);
+    const serialize =
+      parsed.recordId === undefined ? serializeListPage : serializeDrillDown;
     const conversationId =
       parsed.conversationId ?? mostRecentConversationId(traceDir);
     if (conversationId === undefined) {
-      return serializeResponse(emptyResult());
+      return serialize(emptyResult());
     }
 
     const reader = createJsonlTraceReader({
@@ -83,13 +94,14 @@ export function createQueryTraceCore(
               projectDrillDownRecord(row, parsed.detail, traceDir)
             )
           );
-    return serializeResponse({
+    const envelope: ResponseEnvelope = {
       records,
       total: result.total,
       skipped_lines: result.skippedLines,
       truncated: result.truncated,
       offset: result.offset,
-    });
+    };
+    return serialize(envelope);
   };
 }
 
@@ -100,10 +112,7 @@ function parseInput(input: unknown): {
   readonly detail?: "messages" | "tool_results";
 } {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
-    throw new TraceQueryValidationError(
-      "input",
-      "input must be an object"
-    );
+    throw new TraceQueryValidationError("input", "input must be an object");
   }
   const raw = input as QueryTraceInput;
   const conversationId = optionalNonEmptyString(
@@ -126,8 +135,7 @@ function parseInput(input: unknown): {
     parseInteger(raw.limit, "limit", 1, QUERY_TRACE_MAX_LIMIT) ??
     QUERY_TRACE_DEFAULT_LIMIT;
   const detail = parseDetail(raw.detail);
-  const resumeOffset =
-    parseInteger(raw.resume_offset, "resume_offset", 0) ?? 0;
+  const resumeOffset = parseInteger(raw.resume_offset, "resume_offset", 0) ?? 0;
   return {
     ...(conversationId !== undefined ? { conversationId } : {}),
     ...(recordId !== undefined ? { recordId } : {}),
@@ -339,13 +347,15 @@ function preview(value: unknown): string {
     : `${text.slice(0, QUERY_TRACE_PREVIEW_CAP)}...[truncated]`;
 }
 
-function emptyResult(): {
-  readonly records: ReadonlyArray<TraceRecordRow>;
+interface ResponseEnvelope {
+  readonly records: ReadonlyArray<Record<string, unknown> | TraceRecordRow>;
   readonly total: number;
   readonly skipped_lines: number;
   readonly truncated: boolean;
   readonly offset: number;
-} {
+}
+
+function emptyResult(): ResponseEnvelope {
   return {
     records: [],
     total: 0,
@@ -355,54 +365,49 @@ function emptyResult(): {
   };
 }
 
-function serializeResponse(payload: {
-  readonly records: ReadonlyArray<Record<string, unknown> | TraceRecordRow>;
-  readonly total: number;
-  readonly skipped_lines: number;
-  readonly truncated: boolean;
-  readonly offset: number;
-}): string {
-  const output = JSON.stringify(payload);
-  if (output.length <= QUERY_TRACE_RESPONSE_CAP) return output;
-
-  const compactRecords = payload.records.map((record) => compactRecord(record));
-  for (let count = compactRecords.length; count >= 0; count--) {
-    const compact = JSON.stringify({
-      ...payload,
-      records: compactRecords.slice(0, count),
-      response_truncated: count !== compactRecords.length,
-    });
-    if (compact.length <= QUERY_TRACE_RESPONSE_CAP) return compact;
-  }
-  return JSON.stringify({
-    records: [],
-    total: payload.total,
-    skipped_lines: payload.skipped_lines,
-    truncated: true,
-    offset: payload.offset,
-    response_truncated: true,
-  });
+/**
+ * Drill-down face: the caller named one record, so that record is the answer.
+ * No cap applies here (see QUERY_TRACE_RESPONSE_CAP); nothing is dropped,
+ * shortened, or flagged. `record_id` matched nothing → the empty envelope.
+ *
+ * `findRecord` returns at most one row, so today both faces emit the same bytes
+ * for a drill-down — the list face's floor of one record already gets there. The
+ * split is kept on purpose: the cap must not sit on this path at all, and plan
+ * `trace-mcp-read-side-split` T6 replaces this body with the window contract
+ * without touching the list face.
+ */
+function serializeDrillDown(payload: ResponseEnvelope): string {
+  return JSON.stringify(payload);
 }
 
-function compactRecord(
-  record: Record<string, unknown> | TraceRecordRow
-): Record<string, unknown> {
-  const projected =
-    "messages" in record
-      ? projectRecordBase(record as TraceRecordRow)
-      : (record as Record<string, unknown>);
-  const compact: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(projected)) {
-    if (typeof value === "string") compact[key] = value.slice(0, 256);
-    else if (
-      typeof value === "number" ||
-      typeof value === "boolean" ||
-      value === null
-    ) {
-      compact[key] = value;
-    } else if (key === "error") {
-      compact[key] = value;
-    }
+/**
+ * List face: an over-cap page narrows by **whole records only**. Records are
+ * appended one at a time while the serialized envelope still fits, and the
+ * first record that would not fit ends the page. Nothing is ever truncated
+ * inside a record, and a page never shrinks to zero — when not even the first
+ * record fits, that record is returned whole and the response overshoots the
+ * cap rather than lying about it.
+ *
+ * The end-of-data signal is implicit (`records.length < limit`), so no
+ * metadata field accompanies this. `total` and `truncated` keep reporting what
+ * the reader reported until plan `trace-mcp-read-side-split` T7 takes them off
+ * the tool face.
+ */
+function serializeListPage(payload: ResponseEnvelope): string {
+  const fullPage = JSON.stringify(payload);
+  if (fullPage.length <= QUERY_TRACE_RESPONSE_CAP) return fullPage;
+
+  const envelopeOf = (count: number): string =>
+    JSON.stringify({ ...payload, records: payload.records.slice(0, count) });
+  // Start at 1, not 0: reaching here means there is at least one record (an
+  // empty page serializes far below the cap), and the floor of one is the
+  // whole point — a query that matched must not report an empty list.
+  let fitted = 1;
+  while (
+    fitted < payload.records.length &&
+    envelopeOf(fitted + 1).length <= QUERY_TRACE_RESPONSE_CAP
+  ) {
+    fitted += 1;
   }
-  return compact;
+  return envelopeOf(fitted);
 }

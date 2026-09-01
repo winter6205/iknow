@@ -12,12 +12,16 @@ import {
 } from "../../src/traceserver/query-trace-core.ts";
 
 /**
- * Characterization baseline for the shared `query_trace` core (plan
- * `trace-mcp-read-side-split` T2, spec SC14).
+ * Contract suite for the shared `query_trace` core (plan
+ * `trace-mcp-read-side-split` T2 + T3, spec SC14).
  *
- * Every assertion here describes what the UNMODIFIED core does today, including
- * the P0 silent field-drop, which is pinned as a passing assertion. T3 flips
- * these directions; nothing here is an xfail / skipped "known bug" test.
+ * T2 pinned what the unmodified core did today, the P0 silent field-drop
+ * included, as passing assertions and marked every one of them `// T3:`. T3
+ * landed, so those marked assertions now read the other way and pin the NEW
+ * contract instead: a page narrows by whole records only, a drilled record
+ * comes back complete, and no `response_truncated` flag claims otherwise.
+ * Everything else still describes current behaviour. Nothing here is an xfail /
+ * skipped "known bug" test.
  */
 
 const traceDirs: string[] = [];
@@ -96,13 +100,57 @@ function toolRoundTrips(pairCount: number, chars: number): unknown[] {
   return messages;
 }
 
+/**
+ * The payload every record of `writeNarrowingPageSession` carries. Shared with
+ * the assertions so an expected preview is derived from what was written, not
+ * re-templated next to it.
+ */
+const NARROWING_PAGE_MESSAGES = toolRoundTrips(2, 500);
+
+/**
+ * A session whose list page overshoots `QUERY_TRACE_RESPONSE_CAP` by a wide
+ * margin, so the serializer must narrow it by whole records. Records are
+ * written oldest-first and the reader emits them newest-first.
+ */
+function writeNarrowingPageSession(
+  traceDir: string,
+  conversationId: string,
+  count: number
+): void {
+  let content = "";
+  for (let i = 0; i < count; i++) {
+    content += jsonLine(
+      llmCallRow(conversationId, i, { messages: NARROWING_PAGE_MESSAGES })
+    );
+  }
+  writeSession(traceDir, conversationId, content);
+}
+
+/**
+ * A session holding one record too wide to fit the response cap on its own, so
+ * no narrowing can produce a non-empty page. Returns the written row, letting
+ * the caller assert the key set it expected to survive.
+ */
+function writeUnfittableRecordSession(
+  traceDir: string,
+  conversationId: string,
+  recordIndex: number,
+  fieldCount: number
+): Record<string, unknown> {
+  const wide: Record<string, unknown> = llmCallRow(conversationId, recordIndex);
+  for (let i = 0; i < fieldCount; i++) {
+    wide[`field_${i}`] = "q".repeat(400);
+  }
+  writeSession(traceDir, conversationId, jsonLine(wide));
+  return wide;
+}
+
 interface Envelope {
   records: Array<Record<string, unknown>>;
   total: number;
   skipped_lines: number;
   truncated: boolean;
   offset: number;
-  response_truncated?: boolean;
 }
 
 function envelope(json: string): Envelope {
@@ -111,6 +159,22 @@ function envelope(json: string): Envelope {
 
 function idsOf(page: ReadonlyArray<Record<string, unknown>>): unknown[] {
   return page.map((record) => record["llm_call_id"]);
+}
+
+/** The preview marker `preview()` (query-trace-core.ts) appends. */
+const MARKER = "...[truncated]";
+
+/**
+ * T3 retired `response_truncated` from the tool face: it tracked how many
+ * records survived the cap, never whether a field was dropped, so a record
+ * stripped of its `tool_results` still reported `false`. Assert the key is
+ * GONE — a `false` value would be the exact lie this ticket removes.
+ */
+function assertNoResponseTruncationFlag(parsed: Envelope, shape: string): void {
+  assert.ok(
+    !("response_truncated" in parsed),
+    `${shape} must not carry a response_truncated key at all`
+  );
 }
 
 describe("query_trace traceserver core", () => {
@@ -129,8 +193,8 @@ describe("query_trace traceserver core", () => {
       const record = parsed.records[0] ?? {};
 
       // Boundary class "empty" on the list face: the `messages.length > 0` guard
-      // (query-trace-core.ts:289-292) and the `toolResults.length > 0` guard
-      // (:295-299) mean an empty array yields no preview keys at all rather than
+      // and the `toolResults.length > 0` guard in projectRecord
+      // (query-trace-core.ts) mean an empty array yields no preview keys at all rather than
       // empty-string ones, so `messages_count: 0` is the only positive signal
       // that the projection ran.
       assert.equal(record["messages_count"], 0);
@@ -171,8 +235,8 @@ describe("query_trace traceserver core", () => {
       const record = parsed.records[0] ?? {};
 
       // Boundary class "empty" for a row that has no messages axis at all: the
-      // `record_type !== "llm_call"` early return (query-trace-core.ts:285)
-      // hands back projectRecordBase's verbatim scalar copy, so messages_count /
+      // projectRecord's `record_type !== "llm_call"` early return hands back
+      // projectRecordBase's verbatim scalar copy, so messages_count /
       // tool_result_count are never even created — not zero, absent.
       assert.ok(!("messages_count" in record));
       assert.ok(!("tool_result_count" in record));
@@ -217,8 +281,9 @@ describe("query_trace traceserver core", () => {
       );
       assert.equal(unmappedMessages.length, 1);
       assert.deepEqual(unmappedMessages[0]["value"], messages);
-      // The compacting branch never runs, so the flag is absent entirely.
-      assert.equal(parsed.response_truncated, undefined);
+      // A drill-down has no cap stage to pass at all, so there is no flag here
+      // to read.
+      assertNoResponseTruncationFlag(parsed, "the under-cap drilled record");
     });
 
     it("drills a messages_captured:false row as a bare record with no messages and no truncation signal", async () => {
@@ -239,32 +304,25 @@ describe("query_trace traceserver core", () => {
       const record = parsed.records[0] ?? {};
 
       // Boundary class "empty" on the drill-down face: the write side recorded
-      // that it captured nothing, and `detail: "messages"` returns the row
-      // verbatim (query-trace-core.ts:308), so `messages` is simply not a key of
-      // the response.
+      // that it captured nothing, and `detail: "messages"` makes
+      // projectDrillDownRecord return the row verbatim, so `messages` is simply
+      // not a key of the response.
       assert.equal(record["messages_captured"], false);
       // Near-vacuous on its own: this fixture never writes a `messages` key at
       // all. The load-bearing assertion is the key set below.
       assert.ok(!("messages" in record));
-      // And because that row is far under the cap, compactRecord never runs, so
-      // the envelope carries neither response_truncated nor truncated:true —
-      // there is no truncation signal of any kind to read as "nothing was
-      // captured".
-      assert.equal(parsed.response_truncated, undefined);
+      // Nothing on this path can claim truncation any more, so there is no
+      // signal of any kind left to misread as "nothing was captured".
+      assertNoResponseTruncationFlag(
+        parsed,
+        "the drilled messages_captured:false record"
+      );
       assert.equal(parsed.truncated, false);
-      // Honest finding: this shape and the P0 silent-drop shape below differ only
-      // by `raw` (plus the 256-char slicing compaction applies). `raw` is present
-      // here solely because this response is small enough that compactRecord never
-      // runs — projectRecordBase deletes it outright on the compacted path — and
-      // projectRecordBase also strips `messages` on both paths. So the discriminator
-      // tracks response SIZE, not capture status: no field encodes "a drop
-      // happened", which is why "never captured" and "silently dropped" stay
-      // indistinguishable to the caller. Note this hinges on `messages_captured`
-      // and `llm_call_id` remaining unmapped in fields.ts, which is what routes
-      // them into raw.unmapped; if that mapping is ever added, `raw` stops being
-      // the differentiator. T6 gives the drill-down a real contract
-      // (`get_record` + `record_not_found` / `window_overflow`) and T7 removes
-      // the implicit defaults; the conflation is resolved there, not by T3.
+      // `messages_captured: false` is the only field separating "this record
+      // really is empty" from "this record has content" — nothing encodes a drop
+      // happening. Note this key set hinges on `messages_captured` and
+      // `llm_call_id` staying unmapped in fields.ts, which is what routes them
+      // into `raw.unmapped`; add that mapping and `raw` stops carrying them.
       assert.deepEqual(
         Object.keys(record).sort(),
         [
@@ -279,7 +337,7 @@ describe("query_trace traceserver core", () => {
       );
     });
 
-    it("silently drops messages yet reports response_truncated:false when an oversize row is drilled with detail=messages", async () => {
+    it("returns an oversize drilled row complete, messages and every object field included, on detail=messages", async () => {
       const traceDir = makeTraceDir();
       const messages = toolRoundTrips(16, 300); // 32 messages
       const row = llmCallRow("c2", 2, {
@@ -305,33 +363,52 @@ describe("query_trace traceserver core", () => {
       const parsed = envelope(json);
       const record = parsed.records[0] ?? {};
 
-      // THE P0: the caller asked for messages, got a scalar stub back, and the
-      // response still claims it was not truncated.
-      // T3: flip site — every assertion in this block describes today's silent
-      // drop and is rewritten there (fields stop vanishing, and
-      // response_truncated leaves the tool face entirely).
-      assert.ok(!("messages" in record), "messages vanished from the record");
-      assert.ok(!("raw" in record), "raw vanished from the record");
-      assert.equal(parsed.response_truncated, false);
+      // Asserting the response overshoots the cap is deliberate: a record the
+      // caller named comes back whole, where the old behaviour shrank it to a
+      // scalar stub while claiming nothing had been truncated.
+      assert.ok(
+        Buffer.byteLength(json) > QUERY_TRACE_RESPONSE_CAP,
+        `a drilled record is returned whole even when it overshoots the cap, got ${Buffer.byteLength(json)}`
+      );
+      assert.deepEqual(record["messages"], messages);
+      // The reader's `raw` copy survives too: nothing on this path is stripped to
+      // make the response smaller.
+      assert.ok("raw" in record, "raw must survive the drill-down");
       assert.equal(parsed.records.length, 1);
       assert.equal(parsed.total, 1);
-      assert.ok(json.length <= QUERY_TRACE_RESPONSE_CAP);
-      // compactRecord keeps numbers/booleans/null and the `error` key only;
-      // every other object/array field is dropped with no signal.
+      assertNoResponseTruncationFlag(parsed, "an oversize drilled row");
+      // Scalars, nulls, objects and arrays alike: the whole field set is there,
+      // so usage / error / cache no longer disappear for their value types.
       assert.equal(record["model"], "claude-some-model");
       assert.equal(record["max_tokens"], 8192);
       assert.equal(record["stream"], true);
       assert.equal(record["cache"], null);
       assert.deepEqual(record["error"], { kind: "upstream" });
-      assert.ok(!("usage" in record));
+      assert.deepEqual(record["usage"], { input_tokens: 5 });
+      // The record's own key set is the fixture's key set plus the reader's `raw`
+      // — no field was dropped and none was invented. This is the shape-level
+      // version of "nothing is silently removed".
+      assert.deepEqual(
+        Object.keys(record).sort(),
+        [...Object.keys(row), "raw"].sort()
+      );
     });
 
-    it("silently drops tool_results yet reports response_truncated:false when the tool_results projection exceeds the response cap", async () => {
+    it("keeps the whole tool_results projection, one entry per result, when a drilled projection overshoots the response cap", async () => {
       const traceDir = makeTraceDir();
+      const pairCount = 16;
+      const messages = toolRoundTrips(pairCount, 300);
+      const expectedIds = messages.flatMap((message) => {
+        const content = (message as { content?: unknown }).content;
+        if (!Array.isArray(content)) return [];
+        return content
+          .map((part) => (part as Record<string, unknown>)["tool_use_id"])
+          .filter((id): id is string => typeof id === "string");
+      });
       const rawLine = writeSession(
         traceDir,
         "c3",
-        jsonLine(llmCallRow("c3", 3, { messages: toolRoundTrips(16, 300) }))
+        jsonLine(llmCallRow("c3", 3, { messages }))
       );
       assert.ok(Buffer.byteLength(rawLine) > QUERY_TRACE_RESPONSE_CAP);
 
@@ -343,32 +420,33 @@ describe("query_trace traceserver core", () => {
       const parsed = envelope(json);
       const record = parsed.records[0] ?? {};
 
-      // The documented T3 escape hatch (detail=tool_results) is hit by the same
-      // drop: 16 projections × a 300-char preview — 300 chars, not the
-      // TOOL_RESULT_PREVIEW_CAP=400 ceiling, because truncatePreview
-      // (project-tool-results.ts:172-178) leaves a 300-char text untouched —
-      // are enough to push the untrimmed drill-down past the 4,000 cap, so the
-      // whole array disappears while the response still claims
-      // response_truncated:false. The load-bearing claim is qualitative (over the
-      // cap yet reporting no truncation), so no exact byte count is pinned here.
-      // T3: flip site — tool_results stops being dropped with it.
-      assert.ok(!("tool_results" in record));
-      assert.equal(parsed.response_truncated, false);
+      // `detail=tool_results` is bounded by the same cap as `messages`, and this
+      // many pairs overshoot it: one entry per result survives, and the response
+      // overshoots the cap rather than dropping the array.
+      const toolResults = record["tool_results"];
+      assert.ok(Array.isArray(toolResults), "tool_results must stay an array");
+      assert.equal(
+        toolResults.length,
+        pairCount,
+        "no result may be dropped to fit the cap"
+      );
+      assert.deepEqual(
+        toolResults.map(
+          (entry) => (entry as Record<string, unknown>)["tool_use_id"]
+        ),
+        expectedIds
+      );
+      assert.ok(Buffer.byteLength(json) > QUERY_TRACE_RESPONSE_CAP);
+      assertNoResponseTruncationFlag(parsed, "an oversize tool_results drill");
       assert.equal(parsed.records.length, 1);
       assert.equal(record["llm_call_id"], "llm-3");
     });
   });
 
-  describe("response cap serialization", () => {
-    it("trims records off the tail of an over-cap list page and flips response_truncated", async () => {
+  describe("list page serialization", () => {
+    it("narrows an over-cap list page to a leading run of whole records", async () => {
       const traceDir = makeTraceDir();
-      let content = "";
-      for (let i = 0; i < 8; i++) {
-        content += jsonLine(
-          llmCallRow("c4", i, { messages: toolRoundTrips(2, 500) })
-        );
-      }
-      writeSession(traceDir, "c4", content);
+      writeNarrowingPageSession(traceDir, "c4", 8);
 
       const json = await createQueryTraceCore({ traceDir })({
         conversation_id: "c4",
@@ -377,15 +455,18 @@ describe("query_trace traceserver core", () => {
       const parsed = envelope(json);
 
       assert.ok(json.length <= QUERY_TRACE_RESPONSE_CAP);
-      // Fewer records than the caller asked for, cut from the tail; `total`
-      // still reports the untrimmed filtered count.
+      // The page shrank by RECORDS, never by fields: `records.length < limit` is
+      // the honest end-of-data signal, `total` still reports the untrimmed
+      // filtered count, and each surviving record is the same object the
+      // un-narrowed path would have returned.
       assert.ok(parsed.records.length < 8);
-      assert.ok(parsed.records.length >= 1);
+      assert.ok(
+        parsed.records.length > 1,
+        "a narrowed page still holds more than one record, so it is a page and " +
+          "not the zero-fits single-record fallback"
+      );
       assert.equal(parsed.total, 8);
-      // T3: flip site — the records.length < limit signal above stays, but
-      // response_truncated itself leaves the tool face in T3 (it tracks record
-      // count, not fields, and is the false-negative source).
-      assert.equal(parsed.response_truncated, true);
+      assertNoResponseTruncationFlag(parsed, "a narrowed list page");
       const expectedOrder = [7, 6, 5, 4, 3, 2, 1, 0].map((i) => `llm-${i}`);
       assert.deepEqual(
         idsOf(parsed.records),
@@ -410,86 +491,193 @@ describe("query_trace traceserver core", () => {
       );
       const record = parsed.records[0] ?? {};
       const preview = record["first_message_preview"];
-      const marker = "...[truncated]";
 
-      // On the non-compacted path `preview()` (query-trace-core.ts:330-340) is
-      // the only preview owner: cut at QUERY_TRACE_PREVIEW_CAP, append the
-      // marker. No test pinned that pair today, and T3 restores precisely this
-      // shape on the compacted path too (compactRecord stops slicing to 256), so
-      // this is the value T3's change has to land on.
+      // `preview()` (query-trace-core.ts) is the only preview owner: cut at
+      // QUERY_TRACE_PREVIEW_CAP, append the marker. The test below pins that the
+      // over-cap page gives back this same shape, so both paths agree.
       assert.equal(typeof preview, "string");
-      assert.ok((preview as string).endsWith(marker));
+      assert.ok((preview as string).endsWith(MARKER));
       assert.equal(
         (preview as string).length,
-        QUERY_TRACE_PREVIEW_CAP + marker.length
+        QUERY_TRACE_PREVIEW_CAP + MARKER.length
       );
-      // Compaction did not run: the flag is absent, not false.
-      assert.equal(parsed.response_truncated, undefined);
+      assertNoResponseTruncationFlag(parsed, "a list page that fits");
     });
 
-    it("slices compacted string fields to 256 characters, losing the preview truncation marker", async () => {
+    it("keeps every field of a narrowed page's records, previews and arrays included", async () => {
       const traceDir = makeTraceDir();
-      let content = "";
-      for (let i = 0; i < 8; i++) {
-        content += jsonLine(
-          llmCallRow("c5", i, { messages: toolRoundTrips(2, 500) })
-        );
-      }
-      writeSession(traceDir, "c5", content);
+      writeNarrowingPageSession(traceDir, "c5", 8);
 
       const parsed = envelope(
         await createQueryTraceCore({ traceDir })({ conversation_id: "c5" })
       );
-      const record = parsed.records[0] ?? {};
-      const messages = toolRoundTrips(2, 500);
-      const lastMessage = JSON.stringify(messages[messages.length - 1] ?? {});
-      const preview = record["last_message_preview"];
+      const lastMessage = JSON.stringify(
+        NARROWING_PAGE_MESSAGES[NARROWING_PAGE_MESSAGES.length - 1] ?? {}
+      );
 
-      // The uncompressed list projection caps a preview at QUERY_TRACE_PREVIEW_CAP
-      // plus a "...[truncated]" marker (pinned by the test above); compactRecord
-      // slices the string to 256 and so cuts the marker off — the value looks like
-      // a complete string.
-      // No separate "compaction actually ran" guard is needed: `preview()` can only
-      // ever produce a CAP+marker-length string, so length === 256 with the marker
-      // absent is reachable on the compactRecord path alone. These assertions
-      // self-witness.
-      // T3: flip site — compactRecord leaves the tool face, so the preview keeps
-      // its QUERY_TRACE_PREVIEW_CAP cut and its marker instead of being sliced to
-      // 256 here.
-      assert.equal(typeof preview, "string");
-      assert.equal((preview as string).length, 256);
-      assert.ok(!(preview as string).endsWith("...[truncated]"));
-      assert.equal(preview, lastMessage.slice(0, 256));
-      // A string already under 256 chars is left alone by the slice.
-      assert.equal(record["llm_call_id"], "llm-7");
-      // Array fields are neither strings nor scalars, so they are dropped.
-      assert.ok(!("tool_result_previews" in record));
+      // Every surviving record is asserted, not just one: narrowing must not
+      // shorten a string or drop an array field on the way past the cap, or a
+      // truncated value on a narrowed page would look complete.
+      assert.ok(
+        parsed.records.length < 8,
+        "the fixture must still be over cap"
+      );
+      assert.ok(parsed.records.length > 1);
+      for (const record of parsed.records) {
+        const preview = record["last_message_preview"];
+        assert.equal(typeof preview, "string");
+        assert.equal(
+          (preview as string).length,
+          QUERY_TRACE_PREVIEW_CAP + MARKER.length
+        );
+        assert.ok(
+          (preview as string).endsWith(MARKER),
+          "a truncated preview still says so"
+        );
+        assert.equal(
+          preview,
+          lastMessage.slice(0, QUERY_TRACE_PREVIEW_CAP) + MARKER
+        );
+        // Array fields are no longer dropped for being arrays.
+        assert.deepEqual(record["tool_result_previews"], [
+          "y".repeat(200),
+          "y".repeat(200),
+        ]);
+        assert.equal(record["tool_result_count"], 2);
+      }
+      // Order is still the reader's, and the first record is a whole one.
+      assert.equal(parsed.records[0]?.["llm_call_id"], "llm-7");
+      assertNoResponseTruncationFlag(
+        parsed,
+        "a narrowed page of whole records"
+      );
     });
 
-    it("returns zero records when even one compacted record exceeds the cap, with truncated left as the reader reported it", async () => {
+    it("returns the first record whole instead of an empty page when not even one record fits", async () => {
       const traceDir = makeTraceDir();
-      const wide: Record<string, unknown> = llmCallRow("c6", 6);
-      for (let i = 0; i < 40; i++) wide[`field_${i}`] = "q".repeat(400);
-      writeSession(traceDir, "c6", jsonLine(wide));
+      const fieldCount = 40;
+      const wide = writeUnfittableRecordSession(traceDir, "c6", 6, fieldCount);
 
       const json = await createQueryTraceCore({ traceDir })({
         conversation_id: "c6",
       });
       const parsed = envelope(json);
+      const record = parsed.records[0] ?? {};
 
-      // T3: flip site — this whole shape comes from the count-0 branch of the
-      // compaction loop, and that branch is one of the two paths T3 retires (a
-      // page never shrinks to zero records and a single record never loses
-      // fields), so the assertions below are rewritten there.
-      assert.ok(json.length <= QUERY_TRACE_RESPONSE_CAP);
-      assert.deepEqual(parsed.records, []);
+      // A page never shrinks to zero. When not even one record fits the cap, the
+      // first record is returned whole and the response overshoots the cap rather
+      // than emitting an empty `records` array that would read as "no data" —
+      // which is what the old count-0 branch did.
+      assert.equal(parsed.records.length, 1);
+      assert.ok(
+        Buffer.byteLength(json) > QUERY_TRACE_RESPONSE_CAP,
+        `the unfittable record is returned whole, got ${Buffer.byteLength(json)}`
+      );
       assert.equal(parsed.total, 1);
-      assert.equal(parsed.response_truncated, true);
-      // 40 fields × 256 chars stay over the cap, so the loop exits at count 0.
-      // That count-0 iteration is what produces this shape: `truncated` keeps
-      // the reader's value and response_truncated carries the signal. The
-      // `truncated: true` fallback below the loop is therefore unreachable.
+      // `truncated` still belongs to the reader's byte window, not to this
+      // serializer: one line, fully read, so false.
       assert.equal(parsed.truncated, false);
+      assertNoResponseTruncationFlag(parsed, "an unfittable single record");
+      // Whole means whole: every field of the wide record survived the walk.
+      assert.deepEqual(
+        Object.keys(record).sort(),
+        [...Object.keys(wide), "messages_count", "tool_result_count"].sort()
+      );
+      for (let i = 0; i < fieldCount; i++) {
+        assert.equal(record[`field_${i}`], "q".repeat(400));
+      }
+    });
+  });
+
+  describe("truncation metadata", () => {
+    it("carries no response_truncated key on any tool-face shape", async () => {
+      const traceDir = makeTraceDir();
+      writeSession(traceDir, "empty", "");
+      writeSession(traceDir, "fits", jsonLine(llmCallRow("fits", 1)));
+      writeNarrowingPageSession(traceDir, "narrows", 8);
+      writeUnfittableRecordSession(traceDir, "oversize", 6, 40);
+      const core = createQueryTraceCore({ traceDir });
+
+      // One entry per answer shape, each with a `branch` witness that proves the
+      // call really took the cap path its name claims — a fixture that quietly fit
+      // under the cap would otherwise make this loop assert nothing the fitted path
+      // does not already assert. Behaviour itself is pinned by the two blocks
+      // above; only the metadata is read here.
+      const shapes: ReadonlyArray<{
+        readonly shape: string;
+        readonly input: Record<string, unknown>;
+        readonly branch: (parsed: Envelope, json: string) => void;
+      }> = [
+        {
+          shape: "an empty session",
+          input: { conversation_id: "empty" },
+          branch: (parsed) => assert.equal(parsed.records.length, 0),
+        },
+        {
+          shape: "a session with no file",
+          input: { conversation_id: "no-such-session" },
+          branch: (parsed) => assert.equal(parsed.records.length, 0),
+        },
+        {
+          shape: "a page that fits",
+          input: { conversation_id: "fits" },
+          branch: (parsed, json) => {
+            assert.ok(json.length <= QUERY_TRACE_RESPONSE_CAP);
+            assert.equal(parsed.records.length, 1);
+          },
+        },
+        {
+          shape: "a narrowed page",
+          input: { conversation_id: "narrows", limit: 8 },
+          // Fewer records than asked for, yet still under the cap: the whole-record
+          // narrowing ran.
+          branch: (parsed, json) => {
+            assert.ok(json.length <= QUERY_TRACE_RESPONSE_CAP);
+            assert.ok(parsed.records.length < 8);
+            assert.equal(parsed.total, 8);
+          },
+        },
+        {
+          shape: "an unfittable single record",
+          input: { conversation_id: "oversize" },
+          branch: (parsed, json) => {
+            assert.ok(json.length > QUERY_TRACE_RESPONSE_CAP);
+            assert.equal(parsed.records.length, 1);
+          },
+        },
+        {
+          shape: "an oversize drill-down",
+          input: {
+            conversation_id: "oversize",
+            record_id: "llm-6",
+            detail: "messages",
+          },
+          branch: (parsed, json) => {
+            assert.ok(json.length > QUERY_TRACE_RESPONSE_CAP);
+            assert.equal(parsed.records.length, 1);
+          },
+        },
+        {
+          shape: "a drill-down that matched nothing",
+          input: { conversation_id: "narrows", record_id: "nope" },
+          branch: (parsed) => assert.equal(parsed.records.length, 0),
+        },
+      ];
+      for (const { shape, input, branch } of shapes) {
+        const json = await core(input);
+        const parsed = envelope(json);
+        branch(parsed, json);
+        assertNoResponseTruncationFlag(parsed, shape);
+        // The envelope's whole key set, so no replacement metadata sneaks in
+        // either. total / truncated stay for now; T7 takes them off the tool face.
+        assert.deepEqual(Object.keys(parsed).sort(), [
+          "offset",
+          "records",
+          "skipped_lines",
+          "total",
+          "truncated",
+        ]);
+      }
     });
   });
 
@@ -629,7 +817,10 @@ describe("query_trace traceserver core", () => {
       assert.deepEqual(parsed.records, []);
       assert.equal(parsed.total, 0);
       assert.equal(parsed.truncated, false);
-      assert.equal(parsed.response_truncated, undefined);
+      assertNoResponseTruncationFlag(
+        parsed,
+        "a drill-down that matched nothing"
+      );
     });
   });
 

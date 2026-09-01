@@ -19,9 +19,9 @@ import { TraceQueryRecordScanError } from "../../src/traceserver/query-trace-err
  * against <=770 ms for every other file. Exact milliseconds are deliberately not
  * pinned — they do not reproduce across machines. The cost is the cap's, not the
  * fixture's: findRecord walks the scan cap in QUERY_TRACE_MAX_LIMIT pages
- * (query-trace-core.ts:237-257) and the synchronous reader re-reads, re-parses
- * and re-sorts the whole file on every query() call (reader.ts:266-272), so this
- * is 50 full parses of 10,001 rows.
+ * (findRecord's paging loop in query-trace-core.ts) and the synchronous reader
+ * re-reads, re-parses and re-sorts the whole file on every query() call
+ * (reader.ts:266-272), so this is 50 full parses of 10,001 rows.
  */
 
 const traceDirs: string[] = [];
