@@ -200,7 +200,10 @@ describe("query_trace ACI tool", () => {
           detail: "everything",
         }),
       (error: unknown) =>
-        error instanceof QueryTraceValidationError && error.field === "detail"
+        error instanceof QueryTraceValidationError &&
+        error.field === "detail" &&
+        error.message ===
+          "query_trace: detail must be one of: messages, tool_results"
     );
   });
 
@@ -226,7 +229,8 @@ describe("query_trace ACI tool", () => {
         }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
-        error.message.includes("record_id scan exhausted")
+        error.message ===
+          "query_trace: record_id scan exhausted after 10000 records before finding 'past-scan-cap'"
     );
     // scan-exhausted 分支要求写满并扫完 QUERY_TRACE_MAX_RECORD_ID_SCAN+1 行：
     // 单跑实测 3.8 s，多文件并发下实测 5.6 s > vitest 默认 5 s。超时只加在这一条，

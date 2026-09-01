@@ -124,6 +124,13 @@ OVERALL: PASS — hand to writing-plans
    - 唯一核到的一处例外，且与工具枚举直接相关：`tests/tui/deps-tools.test.ts:142`（`EXPECTED_TOOLSET_30` 仍列 10 个已退役的 `lsp_*`、缺 10 个现役 symbol 工具）。**已在主仓干净 `master` 上单独复跑，同签名同 1 fail / 5 pass** ⇒ 与本轮无关，属 #861/#862 那批退役/复原的账。第 1 条把它列进 T5/T6 下游字面量清单是**准确的（会受影响）但当前已经红**，T5b 不得顺手修它（超出 Surface，且修它是改一份早就与装配脱节的名单，需要单独判据）。
    - **T5b 的门因此在 vitest 之外加一条**：`$HOME/.bun/bin/bun test tests/tui/deps-tools.test.ts`，判据 = 仍是这 1 fail / 5 pass，不新增。整目录的 `bun test tests/tui/` 不在每票门内（4 分钟且时序敏感），留到整轮收尾跑一次并如实报数。
 
+10. **T5 拆成 T5a / T5b（本条即定义处——此前「T5b」只在本文件被引用、从未被定义，全仓 `grep -rn "T5a"` 零命中）。** 拆票理由：前缀搬迁与 `list_sessions` 上架是两个 logical task（1 commit = 1 logical task），且 T5 的 AC 末句「本票兼任前缀搬迁」若与加件同批，则任何一侧红都说不清是谁的账。
+    - **T5a（本 commit）＝ 前缀搬迁**：核两条域内 error 去工具名（`query-trace-errors.ts`）、两张皮各自加本工具名前缀、删 `stripQueryTracePrefix`、T2 留的 flip-site 面包屑按新契约改写。ACI 面对 caller **零变化**是构造性推论（旧路径 = 核出 `query_trace: <msg>` → strip 掉 → wrapper 再加回；新路径 = 核出 `<msg>` → wrapper 加一次，两式同值），测钉的是**终态全文**（两处 `===` 精确断言），不是「前后相等」这个命题本身。MCP 面则相反：现状 catch 完全不加前缀、纯靠核，搬迁后该面**必然**多出前缀，故 T5a 对 MCP 面不是零变化，而是一条新契约（`tests/trace-mcp/server.test.ts` 新测即其判据）。
+    - **T5b ＝ `list_sessions` 上两张皮**：T5 AC 的其余全部条款（tools/list 含这件、mtime 倒序、caller `limit`/`offset`、四个字段、无截断元字段、14 处下游字面量、`TraceReadError` 映射）+ **SC16 的后半句因此票才可能成立**。SC16（`specs/trace-mcp-server.md:108`）要求「`list_sessions` 的校验错误在两张皮里都显示为 `list_sessions: …`」——`list_sessions` 不存在时该断言写不出来，故 **SC16 在 T5a 后处于「机制就位、判据未闭合」态，不得据此判 SC16 已交付**。
+    - **两张皮各有两条 caller 可见错误路径，形状不同，别写成一条断言。** MCP 面：(i) 过了 zod、由核拒 → 走薄皮 catch，形状 = `query_trace: <核消息>`（T5a 已钉，`tests/trace-mcp/server.test.ts` 新测用 `conversation_id: "a/b"` 专打这条，因为 `limit: 0` 根本进不来）；(ii) zod 在进入薄皮 catch **之前**拒 → SDK 自己出文案，实测（一次性探针，跑完即删）= `Input validation error: Invalid arguments for tool query_trace: limit: Too small: expected number to be >=1`，`isError: true`。
+      - 结论：路径 (ii) **不违反** SC16——它已经点了正确的工具名，只是形状是 `... for tool <name>: ...` 而非 `<name>: ...`。但 **T5b 若照 SC16 字面写 `^list_sessions: ` 断言，在 (ii) 上必红**，因为那条不经本皮。T5b 的负例测要么显式只打 (i)（夹具避开 zod 已守的界），要么把两条路径分别按各自形状钉死。**不得**为了「一条断言通吃」去放宽 zod schema 或在 SDK 文案上叠前缀。
+      - 由此引出一个 T5b 的真问题（本票不解，记为待决）：`limit`/`offset` 的界在 zod 与核里**各写一遍**，即 plan 第 62 行 negative 行的 `offset<0`/`limit=0` 落在哪条路径上取决于 zod 先拒还是核先拒。单一校验权威若要成立，去处是 zod 只做类型、界交给核——但那与「两张皮参数面逐项一致」（T7 AC）有张力，T5b 开工前须先定。
+
 ## Tasks (ordered by dependency)
 
 1. **Spec 修订：读侧三面 + 契约 X 清理** — tag: `[decision]`

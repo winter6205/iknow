@@ -75,7 +75,7 @@ describe("query_trace core record_id scan cap", () => {
     assert.equal(caught.scanned, QUERY_TRACE_MAX_RECORD_ID_SCAN);
     assert.equal(
       caught.message,
-      `query_trace: record_id scan exhausted after ${QUERY_TRACE_MAX_RECORD_ID_SCAN} records before finding 'llm-missing'`
+      `record_id scan exhausted after ${QUERY_TRACE_MAX_RECORD_ID_SCAN} records before finding 'llm-missing'`
     );
   }, 120_000 /* see the header: the scan cap, not this fixture, sets the cost */);
 });

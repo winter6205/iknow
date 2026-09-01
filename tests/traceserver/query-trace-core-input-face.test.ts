@@ -18,9 +18,9 @@ import {
  * Characterization baseline for the `query_trace` core's input face and session
  * resolution (plan `trace-mcp-read-side-split` T2, spec SC14).
  *
- * Pins what the unmodified core accepts / rejects today, the exact error text
- * (T5 removes the `query_trace: ` prefix and will rewrite those assertions),
- * and the implicit "most recent session" default that T7 replaces with
+ * Pins what the core accepts / rejects today, the exact error text it raises
+ * (no tool name: the core backs several tools, and each thin face prefixes its
+ * own), and the implicit "most recent session" default that T7 replaces with
  * `session_not_found`.
  */
 
@@ -101,11 +101,9 @@ function assertEmptyEnvelope(json: string, message?: string): void {
 }
 
 describe("query_trace core input face", () => {
-  // T5 flip site, file-wide: every expected message below carries the literal
-  // "query_trace: " prefix. That brittleness is deliberate — core owns no tool
-  // name after T5 migrates prefix ownership into the two thin faces — and one
-  // block-level marker is used instead of repeating a comment at each site so
-  // that T5 has a single grep landing point that cannot miss a site.
+  // Contract, file-wide: no expected message below carries a tool-name prefix.
+  // The core is shared by every read-side tool, so naming one would misreport
+  // the others; each thin face adds its own prefix.
   it("rejects limit outside 1..QUERY_TRACE_MAX_LIMIT and accepts both bounds", async () => {
     const core = coreWithSession("c1");
 
@@ -123,7 +121,7 @@ describe("query_trace core input face", () => {
       assert.equal(error.kind, "validation");
       assert.equal(
         error.message,
-        `query_trace: limit must be an integer in 1..${QUERY_TRACE_MAX_LIMIT}`
+        `limit must be an integer in 1..${QUERY_TRACE_MAX_LIMIT}`
       );
     }
 
@@ -150,7 +148,7 @@ describe("query_trace core input face", () => {
       // than a transcribed digit string.
       assert.equal(
         error.message,
-        `query_trace: resume_offset must be an integer in 0..${Number.MAX_SAFE_INTEGER}`
+        `resume_offset must be an integer in 0..${Number.MAX_SAFE_INTEGER}`
       );
     }
 
@@ -173,7 +171,7 @@ describe("query_trace core input face", () => {
       assert.equal(error.field, "conversation_id");
       assert.equal(
         error.message,
-        "query_trace: conversation_id must not contain path separators"
+        "conversation_id must not contain path separators"
       );
     }
   });
@@ -182,17 +180,11 @@ describe("query_trace core input face", () => {
     const core = coreWithSession("c4");
 
     const stringAxes: Array<[string, string]> = [
-      [
-        "conversation_id",
-        "query_trace: conversation_id must be a non-empty string",
-      ],
-      ["record_id", "query_trace: record_id must be a non-empty string"],
-      ["task_id", "query_trace: task_id must be a non-empty string"],
-      ["turn_id", "query_trace: turn_id must be a non-empty string"],
-      [
-        "parent_turn_id",
-        "query_trace: parent_turn_id must be a non-empty string",
-      ],
+      ["conversation_id", "conversation_id must be a non-empty string"],
+      ["record_id", "record_id must be a non-empty string"],
+      ["task_id", "task_id must be a non-empty string"],
+      ["turn_id", "turn_id must be a non-empty string"],
+      ["parent_turn_id", "parent_turn_id must be a non-empty string"],
     ];
     for (const [field, message] of stringAxes) {
       const error = await rejectionOf(core, {
@@ -208,10 +200,7 @@ describe("query_trace core input face", () => {
       status: "failed",
     });
     assert.equal(statusError.field, "status");
-    assert.equal(
-      statusError.message,
-      "query_trace: status must be one of: ok, error"
-    );
+    assert.equal(statusError.message, "status must be one of: ok, error");
 
     const recordTypeError = await rejectionOf(core, {
       conversation_id: "c4",
@@ -220,7 +209,7 @@ describe("query_trace core input face", () => {
     assert.equal(recordTypeError.field, "record_type");
     assert.equal(
       recordTypeError.message,
-      "query_trace: record_type must be one of: llm_call, tool_call, turn, " +
+      "record_type must be one of: llm_call, tool_call, turn, " +
         "violation, session, sandbox_cmd, subagent_spawn, subagent_stop, " +
         "subagent_state_change, subagent_step, verification, goal"
     );
@@ -243,7 +232,7 @@ describe("query_trace core input face", () => {
     assert.equal(error.kind, "validation");
     assert.equal(
       error.message,
-      "query_trace: detail must be one of: messages, tool_results"
+      "detail must be one of: messages, tool_results"
     );
   });
 
@@ -254,16 +243,15 @@ describe("query_trace core input face", () => {
     for (const input of [null, undefined, [], "c1", 42]) {
       const error = await rejectionOf(core, input);
       assert.equal(error.field, "input");
-      assert.equal(error.message, "query_trace: input must be an object");
+      assert.equal(error.message, "input must be an object");
     }
   });
 
-  it("hardcodes the query_trace prefix on both domain error classes", () => {
-    // T5: flip site — the core stops naming the tool (query-trace-errors.ts:9 /
-    // :22 lose the `query_trace: ` prefix) and each thin face adds its own, so
-    // both message assertions below are rewritten there.
+  it("names no tool on either domain error class", () => {
+    // The core backs several tools, so a message that named one would misreport
+    // the others; prefixing is the thin faces' job.
     const validation = new TraceQueryValidationError("limit", "boom");
-    assert.equal(validation.message, "query_trace: boom");
+    assert.equal(validation.message, "boom");
     assert.equal(validation.name, "TraceQueryValidationError");
     assert.equal(validation.kind, "validation");
     assert.equal(validation.field, "limit");
@@ -271,7 +259,7 @@ describe("query_trace core input face", () => {
     const scan = new TraceQueryRecordScanError("abc", 10_000);
     assert.equal(
       scan.message,
-      "query_trace: record_id scan exhausted after 10000 records before finding 'abc'"
+      "record_id scan exhausted after 10000 records before finding 'abc'"
     );
     assert.equal(scan.name, "TraceQueryRecordScanError");
     assert.equal(scan.kind, "record_scan");

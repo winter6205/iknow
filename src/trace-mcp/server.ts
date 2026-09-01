@@ -26,6 +26,11 @@ const queryTraceInputSchema = z
 const QUERY_TRACE_DESCRIPTION =
   "Query local JSONL trace records with filters. Normal llm_call results are projection-only (message count, first/last previews, tool_result projection from llm_call.messages, and error); use record_id to drill into one record. By default drill-down returns tool_results; use detail=messages for messages. If the model ends the turn without a following llm_call, that last round's tool_results are not visible in the projection. Results are capped at 4000 characters.";
 
+// One const per tool, named after that tool (matching QUERY_TRACE_DESCRIPTION):
+// the shared core deliberately names no tool in its messages, so every tool
+// registered here prefixes its own name at this boundary.
+const QUERY_TRACE_TOOL_NAME = "query_trace";
+
 export interface TraceMcpServerOptions {
   readonly traceDir: string;
 }
@@ -40,7 +45,7 @@ export function createTraceMcpServer(
   });
 
   server.registerTool(
-    "query_trace",
+    QUERY_TRACE_TOOL_NAME,
     {
       description: QUERY_TRACE_DESCRIPTION,
       inputSchema: queryTraceInputSchema,
@@ -52,12 +57,10 @@ export function createTraceMcpServer(
           content: [{ type: "text", text: await queryTrace(input) }],
         };
       } catch (error: unknown) {
+        const detail = error instanceof Error ? error.message : String(error);
         return {
           content: [
-            {
-              type: "text",
-              text: error instanceof Error ? error.message : String(error),
-            },
+            { type: "text", text: `${QUERY_TRACE_TOOL_NAME}: ${detail}` },
           ],
           isError: true,
         };

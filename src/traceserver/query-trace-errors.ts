@@ -1,4 +1,9 @@
-/** Domain errors raised by the shared query_trace read-side core. */
+/**
+ * Domain errors raised by the shared query_trace read-side core.
+ *
+ * Messages carry no tool name: this core backs several tools on each thin face,
+ * so naming one would misreport the others. Prefixing belongs to the faces.
+ */
 
 export class TraceQueryValidationError extends Error {
   override readonly name = "TraceQueryValidationError";
@@ -6,7 +11,7 @@ export class TraceQueryValidationError extends Error {
   readonly field: string;
 
   constructor(field: string, message: string) {
-    super(`query_trace: ${message}`);
+    super(message);
     this.field = field;
   }
 }
@@ -19,7 +24,7 @@ export class TraceQueryRecordScanError extends Error {
 
   constructor(recordId: string, scanned: number) {
     super(
-      `query_trace: record_id scan exhausted after ${scanned} records before finding '${recordId}'`
+      `record_id scan exhausted after ${scanned} records before finding '${recordId}'`
     );
     this.recordId = recordId;
     this.scanned = scanned;

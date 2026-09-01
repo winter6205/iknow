@@ -19,7 +19,10 @@ async function connectFixture(): Promise<{
   const fixture = createTraceFixture();
   fixtures.push(fixture);
   const server = createTraceMcpServer({ traceDir: fixture.traceDir });
-  const client = new Client({ name: "trace-mcp-test-client", version: "1.0.0" });
+  const client = new Client({
+    name: "trace-mcp-test-client",
+    version: "1.0.0",
+  });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
   await Promise.all([
@@ -124,6 +127,30 @@ describe("trace MCP server", () => {
 
       expect(invalid.isError).toBe(true);
       expect(valid.isError).not.toBe(true);
+    } finally {
+      await connected.close();
+    }
+  });
+
+  it("names the tool on an error the core rejects past the transport schema", async () => {
+    // The core's own message carries no tool name, so a caller can only tell
+    // which tool rejected the call if this face prefixes it. `a/b` passes the
+    // zod transport schema and is rejected by the core, which is the route
+    // through the face's catch arm rather than transport-level schema rejection.
+    const connected = await connectFixture();
+    try {
+      const rejected = await connected.client.callTool({
+        name: "query_trace",
+        arguments: { conversation_id: "a/b" },
+      });
+
+      expect(rejected.isError).toBe(true);
+      const text = rejected.content[0];
+      assert.equal(text?.type, "text");
+      if (text?.type !== "text") throw new Error("expected text content");
+      expect(text.text).toBe(
+        "query_trace: conversation_id must not contain path separators"
+      );
     } finally {
       await connected.close();
     }
