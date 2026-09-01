@@ -94,6 +94,18 @@ OVERALL: PASS — hand to writing-plans
    **裁定（四选一里唯一同时诚实又有用的）**：在 4000 这条字符线之内，「任意大的单条记录」只有三种结局——静默截断（违反 P0）、抛错（把「读一条大记录」这个下钻存在的唯一理由堵死）、给假建议（自环）。三者皆劣，故 **T3 对单条下钻既不截也不抛：列表页仍按整条记录从尾收窄到 4000 内（诚实信号 = `records.length < limit`），而 `record_id` 下钻命中的那一条记录整条原样返回，`src/traceserver` 侧不新增任何帽**。overshoot 只在 MCP 面成立到 T6 之间，且 T3→T6 是同分支同 PR、中途不 push 不 merge，无交付物会带这个洞；ACI 面由 executor 的 20000 + marker 兜（契约 X 权威所在，正是 ADR-0006:29 要的收敛方向）。T3 的测必须把这条形状**钉死**（单条超大记录返回体字节数 > 4000 且字段完整），使 T6 改动是相对一条已钉期望被审，而非自由发挥。ADR 三轮「本票不碰 transport 侧的帽」的约束**照旧遵守**——本裁定恰恰是不在 core 加帽、也不动 transport。
 
 
+5. **T3 落地后残留四处「4000」声称，其中三处原本无票认领，现全部划归 T6。** T3 按第 4 条裁定让单条下钻故意越帽之后，这几处继续宣称有 4000 帽就成了假话（假话正是本轮要消灭的东西）：
+   - `src/harness/aci/tools/query-trace.ts:65` — description 里的「Results are capped at 4000 characters」。plan 原只在第 42 行把它当作「文案重复」的 SSOT 素材记着，`:138` 却只点名了 MCP 侧那一句，**ACI 侧这一句漏了归属** → 归 T6 随 SSOT 文案一并改真值。
+   - `src/trace-mcp/server.ts:27` — 同一句假称，`:138` 已认领，不变。
+   - `tests/harness/aci/tools/query-trace.test.ts:135` 与 `tests/trace-mcp/server.test.ts:64` — 两处对小夹具断 `length <= 4_000`，且测名叫「caps the response」一类。夹具小 → 今天照绿，但它们**认证的正是核心已不再提供的保证**；T6 必须把断言改成它真正想钉的东西（越帽单条整发返回 / backstop 生效），而不是留着一条恒真的帽断言。
+   - **T3 → T6 之间这几条测是「绿色但不再有意义」**：读到绿不代表 4000 仍然成立，不得据此判 T3 回归。T3 的 commit 正文已声明这一点，T6 复核时以本条为准。
+6. **`npm test` 的基线本身是破的（开工前即存在，与本轮三票无关），故每票验证门不能写成「`npm test` 全绿」。** 实测：主仓 master `b99492f2`（干净工作树）与本分支 HEAD `b71cb9c3`（T3 未落地）跑同 5 文件，**均**为 `Tests 32 failed | 34 passed`、`Test Files 5 failed`，逐条同签名。
+
+   - 抛点 = `src/harness/memory/refresh.ts:64` 的 `findProjectAgents(ctx.projectIdentityRoot)`，报 `TypeError: The "path" argument must be of type string. Received undefined`；夹具 `tests/harness/memory/refresh.test.ts:21` 的 `makeContext()` 只返回 `{cwd, userHome, memoryDir}`，`projectIdentityRoot` 从未被供。即 #861/#862 那段改名（`66469c0b` → `a893bae5` → `b99492f2`）动了 src 侧没动 test 侧。
+   - `npm run typecheck` 在主仓 master 上 exit 0，掩盖了它：`tsconfig.json` 的 `exclude` 含 `"tests"`，`tsc --listFiles` 对该夹具 0 命中——**typecheck 从不看测试文件**，所以「typecheck 绿」不构成测试侧契约的证据。
+   - `grep -rn "traceserver" src/harness/memory/ src/harness/identity/` 无命中，这两个子系统不依赖本轮改的模块，因果上也不可能是 T1–T3 引入。
+   - **门改为**：`npm test` 的失败集与上述基线**逐文件同构**（仍是这 5 文件这 32 例，不增不减），且 `tests/traceserver/`、`tests/harness/aci/tools/query-trace.test.ts`、`tests/trace-mcp/` 全绿。该破损超出本轮 Surface（read side），不并入任何 T 票，单独报给 operator。
+
 ## Tasks (ordered by dependency)
 
 1. **Spec 修订：读侧三面 + 契约 X 清理** — tag: `[decision]`
