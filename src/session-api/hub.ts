@@ -60,6 +60,12 @@ import type {
   SubAgentManager,
   SubagentInfo,
 } from "../harness/subagent/manager.js";
+import {
+  createSubagentManagerRegistry,
+  type SubagentManagerReadView,
+  type SubagentManagerRegistry,
+} from "../harness/subagent/manager-registry.js";
+import type { SubAgentTerminalSubscriber } from "../harness/subagent/mailbox.js";
 import { getVersion } from "../cli/usage.js"; // SC-W 6/7: agentVersion 注入(与 session-api/http.ts 同向 import,无循环)
 import {
   createTaskWorktreeProvisioner,
@@ -707,6 +713,8 @@ export class SessionHub {
   private readonly surface: "chat" | "tui" | "ask" | "serve" | undefined;
   /** #356 T7: subagent manager（host drain 消费面；懒取见 ensureDeps）。 */
   private subagentManager: SubAgentManager | undefined;
+  /** T1: all per-root managers remain in the host read aggregation surface. */
+  private readonly subagentManagers: SubagentManagerRegistry;
   /** T4: serve-only terminal wake subscription; TUI owns its UI-aware wake. */
   private subagentWake: SubagentWake | undefined;
   /** Coarse serve target: the most recently addressed conversation. */
@@ -843,9 +851,11 @@ export class SessionHub {
     this.overrideEnv = opts.overrideEnv;
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
+    this.subagentManagers = createSubagentManagerRegistry();
     this.subagentManager = opts.subagentManager;
-    if (this.surface === "serve" && this.subagentManager !== undefined) {
-      this.attachSubagentWake(this.subagentManager);
+    this.subagentManagers.register(this.subagentManager);
+    if (this.surface === "serve") {
+      this.attachSubagentWake(this.subagentManagers);
     }
     this.autoMemory = opts.autoMemory;
     this.overlayMemoryPrefetch = opts.overlayMemoryPrefetch;
@@ -925,7 +935,20 @@ export class SessionHub {
     conversationId: string
   ): Promise<ReadonlyArray<SubagentInfo>> {
     await this.store.load(conversationId);
-    return this.subagentManager?.listSubagents() ?? [];
+    return this.subagentManagers.listSubagents(conversationId);
+  }
+
+  /** T1: TUI/host read-only terminal subscription scoped to one session. */
+  subscribeSubagentTerminal(
+    subscriber: SubAgentTerminalSubscriber,
+    conversationId?: string
+  ): () => void {
+    return this.subagentManagers.subscribe(subscriber, conversationId);
+  }
+
+  /** T1: TUI/host read-only projection; omit scope only for a global view. */
+  listSubagents(conversationId?: string): ReadonlyArray<SubagentInfo> {
+    return this.subagentManagers.listSubagents(conversationId);
   }
 
   /**
@@ -1390,7 +1413,7 @@ export class SessionHub {
               // completed 子代理结果浓缩成 user message,拼入 priorMessages 末尾。
               // 空 manager / 无 completed → priorMessages 不变 (行为零变化)。
               const drained = await drainPendingSubagents(
-                this.subagentManager,
+                this.subagentManagers,
                 {
                   conversationId,
                 }
@@ -1681,12 +1704,12 @@ export class SessionHub {
     readonly thinking?: ThinkingOverride;
     readonly onStream?: (event: HarnessStreamEvent) => void;
   }): Promise<PostMessageResponse | undefined> {
-    const drained = await drainPendingSubagents(this.subagentManager, {
+    const drained = await drainPendingSubagents(this.subagentManagers, {
       conversationId: opts.conversationId,
     });
     if (drained.length === 0) return undefined;
     const taskIds = queryableSubagentTaskIds(
-      this.subagentManager,
+      this.subagentManagers,
       opts.conversationId
     );
     try {
@@ -2370,10 +2393,11 @@ export class SessionHub {
     });
   }
 
-  private attachSubagentWake(manager: SubAgentManager): void {
+  private attachSubagentWake(manager: SubagentManagerReadView): void {
     if (this.subagentWake !== undefined || this.surface !== "serve") return;
     this.subagentWake = createSubagentWake({
       manager,
+      conversationId: () => this.lastConversationId,
       isIdle: () =>
         this.lastConversationId !== undefined &&
         !this.activeTurnCounts.has(this.lastConversationId),
@@ -2565,6 +2589,7 @@ export class SessionHub {
     if (hit) {
       this.activeEngineRoot = root;
       await this.activateMcpFace(hit);
+      this.activateSubagentManager(hit.subagentManager);
       return hit;
     }
     const built = this.buildEngine
@@ -2586,14 +2611,16 @@ export class SessionHub {
     this.engineByRoot.set(root, entry);
     this.activeEngineRoot = root;
     await this.activateMcpFace(entry);
-    this.subagentManager = this.subagentManager ?? built.subagentManager;
-    if (this.subagentManager !== undefined) {
-      this.attachSubagentWake(this.subagentManager);
-    }
+    this.activateSubagentManager(entry.subagentManager);
     this.autoMemory = this.autoMemory ?? built.autoMemory;
     this.overlayMemoryPrefetch =
       this.overlayMemoryPrefetch ?? built.overlayMemoryPrefetch;
     return entry;
+  }
+
+  private activateSubagentManager(manager: SubAgentManager | undefined): void {
+    this.subagentManager = manager;
+    this.subagentManagers.register(manager);
   }
 
   private async buildProductionEngine(root: string): Promise<{
@@ -2763,8 +2790,9 @@ export class SessionHub {
       ...(built.catalog ? { catalog: built.catalog } : {}),
     });
     // #356 T7: serve 懒取 subagent manager — buildHarnessEngine 在 surface !==
-    // "ask" 时自建;constructor 注入优先 (测试缝),未注入则取 built 的。
-    this.subagentManager = this.subagentManager ?? built.subagentManager;
+    // "ask" 时自建;每次装配的 manager 都进入永久聚合面，active manager
+    // 则只服务 spawn / verify classifier。
+    this.activateSubagentManager(built.subagentManager);
     // auto-memory T4:与 subagentManager 同形态懒取(构造注入优先)。
     this.autoMemory = this.autoMemory ?? built.autoMemory;
     this.overlayMemoryPrefetch =

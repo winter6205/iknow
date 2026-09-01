@@ -29,6 +29,7 @@ import { createWebSearchTool } from "./web-search.js";
 import { createMemoryRecallTool } from "../../memory/tools/recall.js";
 import { createMemorySaveTool } from "../../memory/tools/save.js";
 import { createToolSearchTool } from "./tool-search.js";
+import type { LspCtx } from "../../lsp/types.js";
 import { createLspToolSet } from "./lsp.js";
 import { createSkillTool } from "./skill.js";
 import { createSkillSearchTool } from "./skill-search.js";
@@ -162,6 +163,11 @@ export interface CreateDefaultAciRegistryOptions {
   readonly mcpManager?: McpManager;
   /** #251 onEdit 接缝:edit_file 写盘成功后回调(装配层接 LSP notifier)。 */
   readonly onEdit?: (file: string) => void;
+  /** LSP 客户端上下文(B7 closeout)。build-engine / worker 装配期注入同一份
+   *  LspCtx,10 件 lsp_* 工具共享一份(directory + idleTimeoutMs + ...),
+   *  edit_file onEdit 写盘后通过 lspCtx 让 notifier 失效缓存。缺席时 lsp
+   *  工具集降级为 sandboxRoot-only ctx(no idle sweep / no disabledServers)。 */
+  readonly lspCtx?: LspCtx;
   /** ADR-0019 (T4): per-root state anchor. Threaded into bash + read_file
    *  factories so the fs-policy fence binds `<workspaceRoot>` and the
    *  protected-state pathset covers `<workspaceRoot>/.iknow` at parity

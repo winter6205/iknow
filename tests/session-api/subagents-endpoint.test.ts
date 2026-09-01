@@ -58,8 +58,13 @@ const DEFAULT_RESPONSES: AssistantTurnResult[] = [
 ];
 
 /** 完整成员面 fake: 写方法全 spy, 只读投影由调用方固定。 */
-function makeFakeManager(subagents: SubagentInfo[] = []) {
-  const listSubagents = vi.fn(() => subagents);
+function makeFakeManager(
+  subagents: SubagentInfo[] = [],
+  listProjection: (
+    conversationId?: string
+  ) => ReadonlyArray<SubagentInfo> = () => subagents
+) {
+  const listSubagents = vi.fn(listProjection);
   const spawn = vi.fn(() => ({ taskId: "noop" }));
   const queryBuffer = vi.fn(() => ({ status: "not_found" }) as const);
   const waitFor = vi.fn(
@@ -205,6 +210,42 @@ describe("GET /api/v1/sessions/:id/subagents — 正常路径", () => {
     const { status, body } = await getJson(`/api/v1/sessions/${sid}/subagents`);
     assert.equal(status, 200);
     assert.deepEqual(body, { subagents: [] });
+  });
+
+  it("按目标会话过滤跨 root 聚合的任务投影", async () => {
+    const sessionA = {
+      taskId: "session-a-task",
+      state: "completed" as const,
+      taskPreview: "A preview",
+      startedAt: "2026-08-18T00:00:00.000Z",
+      endedAt: "2026-08-18T00:00:01.000Z",
+      summary: "A summary",
+    };
+    const sessionB = {
+      taskId: "session-b-task",
+      state: "completed" as const,
+      taskPreview: "B preview",
+      startedAt: "2026-08-18T00:00:02.000Z",
+      endedAt: "2026-08-18T00:00:03.000Z",
+      summary: "B summary",
+    };
+    let sessionId: string | undefined;
+    const { manager, listSubagents } = makeFakeManager([], (conversationId) =>
+      conversationId === sessionId ? [sessionA] : [sessionA, sessionB]
+    );
+    await listening!.close();
+    await startServer(DEFAULT_RESPONSES, { subagentManager: manager });
+
+    sessionId = await createSession();
+    const { status, body } = await getJson(
+      `/api/v1/sessions/${sessionId}/subagents`
+    );
+
+    assert.equal(status, 200);
+    assert.deepEqual((body as { subagents: SubagentInfo[] }).subagents, [
+      sessionA,
+    ]);
+    assert.deepEqual(listSubagents.mock.calls, [[sessionId]]);
   });
 
   it("无会话 → typed 404 not_found (失败路径不裸抛)", async () => {

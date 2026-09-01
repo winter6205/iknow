@@ -24,18 +24,29 @@
  */
 
 import assert from "node:assert/strict";
+import { spawn as spawnChild } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "vitest";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import {
   createWorkerDeps,
   type CreateWorkerDepsOptions,
 } from "../../src/harness/subagent/worker.ts";
+import { createSpawnSubAgentTool } from "../../src/harness/subagent/spawn-subagent-tool.ts";
+import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
 import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
 import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { ACI_TOOLSET_NAMES } from "../../src/harness/aci/tools/registry.ts";
+import { assessSubagentIsolation } from "../../src/harness/subagent/capability.ts";
+import {
+  FILE_WRITE_TOOL_NAMES,
+  SYMBOL_MUTATE_TOOL_NAMES,
+} from "../../src/harness/aci/tools/symbol-mutate.ts";
 
 // ---------------------------------------------------------------------------
 // Constants & fixtures
@@ -328,6 +339,106 @@ describe("worker tool surface: 权限 — 判官只读（allow-list 推导）", 
         undefined,
         `判官 catalog.get(${denied}) 应返回 undefined`
       );
+    }
+  });
+});
+
+describe("worker tool surface: 隔离门禁 — symbol 写工具", () => {
+  it("真实 explore worker 工具面不含 symbol 写工具且判为只读", async () => {
+    const deps = await createWorkerDeps(hermeticOpts({ role: "explore" }));
+    const workerToolNames = deps.registry.list().map((tool) => tool.name);
+
+    for (const name of SYMBOL_MUTATE_TOOL_NAMES) {
+      assert.ok(
+        !workerToolNames.includes(name),
+        `真实 worker 工具面不应包含 ${name}`
+      );
+    }
+
+    const decision = assessSubagentIsolation({
+      role: "explore",
+      availableTools: workerToolNames,
+    });
+    assert.equal(decision.conclusion, "readonly");
+    assert.equal(decision.reason, "write_tools_denied_bash_readonly");
+  });
+
+  it("真实 explore worker 工具面不含文件写工具时仍判为只读", async () => {
+    const deps = await createWorkerDeps(
+      hermeticOpts({
+        role: "explore",
+        disallowedTools: [...FILE_WRITE_TOOL_NAMES],
+      })
+    );
+    const workerToolNames = deps.registry.list().map((tool) => tool.name);
+
+    for (const name of FILE_WRITE_TOOL_NAMES) {
+      assert.ok(
+        !workerToolNames.includes(name),
+        `真实 worker 工具面不应包含 ${name}`
+      );
+    }
+
+    const decision = assessSubagentIsolation({
+      role: "explore",
+      availableTools: workerToolNames,
+      disallowedTools: [...FILE_WRITE_TOOL_NAMES],
+    });
+    assert.equal(decision.conclusion, "readonly");
+    assert.equal(decision.reason, "write_tools_denied_bash_readonly");
+  });
+});
+
+describe("worker tool surface: T3 catalog deny contract", () => {
+  it("intentionally narrows an explore worker surface while preserving the role wire bytes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t3-role-worker-"));
+    const payloads: WorkerEnvelope[] = [];
+    const manager = createSubAgentManager({
+      sandboxRoot: root,
+      spawn: (_def, _taskId, payload) => {
+        payloads.push(payload);
+        return spawnChild(
+          process.execPath,
+          ["-e", "setInterval(() => {}, 1000)"],
+          {
+            stdio: ["pipe", "pipe", "pipe"],
+          }
+        );
+      },
+    });
+
+    try {
+      // T3-before measurement: the same role/no-parent-deny input exposed
+      // edit_file and write_file. Current assembly deliberately consumes the
+      // catalog deny because leaving those tools available is a write bypass.
+      const deps = await createWorkerDeps(
+        hermeticOpts({ sandboxRoot: root, role: "explore" })
+      );
+      const workerToolNames = deps.registry.list().map((tool) => tool.name);
+      assert.ok(!workerToolNames.includes("edit_file"));
+      assert.ok(!workerToolNames.includes("write_file"));
+      assert.ok(!workerToolNames.includes("rename_symbol"));
+
+      const tool = createSpawnSubAgentTool({ manager });
+      await tool.handler({
+        task: "explore-only",
+        subagent_type: "explore",
+        wait: false,
+      });
+
+      assert.equal(payloads.length, 1);
+      assert.equal(
+        JSON.stringify(payloads[0]),
+        JSON.stringify({
+          task: "explore-only",
+          sandboxRoot: root,
+          disallowedTools: [...FILE_WRITE_TOOL_NAMES],
+          role: "explore",
+        })
+      );
+    } finally {
+      await manager.shutdown();
+      await rm(root, { recursive: true, force: true });
     }
   });
 });

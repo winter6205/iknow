@@ -24,7 +24,10 @@ import {
   DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
 } from "./settings.js";
 import { LLM_MODEL_MISSING_MESSAGE } from "./messages.js";
-import { WORKSPACE_ROOT_ENV_KEY } from "./workspace-root.js";
+import {
+  PRODUCT_ROOT_ENV_KEY,
+  WORKSPACE_ROOT_ENV_KEY,
+} from "./workspace-root.js";
 
 export interface LlmEnv {
   baseUrl: string;
@@ -128,7 +131,7 @@ export interface ChatEnv {
 }
 
 /**
- * ACI Web 类工具的 env 配置臂（web_search 端点覆写 + 出站代理）。
+ * ACI Web 类工具的 env 配置臂（web_search 端点覆写 + 出站代理 + 可插拔后端）。
  *
  * `IKNOW_WEB_SEARCH_URL`：可选 HTML 搜索端点覆写（私网后端 / 测试用）。
  * 空 → undefined（web_search 落默认 DuckDuckGo html 端点）。
@@ -140,12 +143,102 @@ export interface ChatEnv {
  * 出网，绕开本地 DNS 污染 / egress 阻断）。代理 URL 仍走与目标同套
  * 语法校验（协议 / host / 凭据）。
  *
+ * `IKNOW_WEB_SEARCH_BACKEND` (#826 T1)：web_search 后端选择（闭集
+ * `"bing" | "tavily" | "exa" | "brave"`）。未设 / 空串 → 默认 `"bing"`
+ * （HTML 解析路径不变，与 v0 字节级一致；spec Assumption 2）。非法值 →
+ * 抛 typed `WebEnvConfigError( "invalid_search_backend" )`，**不**静默回退
+ * default（区别于 envThinkingModeOptional 等"非法 → undefined"旧模式 —
+ * 默认后端对配错敏感，配错比 fallback 更显眼）。
+ *
+ * `EXA_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY` (#826 T1, vendor 命名)：
+ * keyed 后端 API key，字面或 `${VAR}` 占位符；空串 / "yes" / 占位符解析失败
+ * → undefined（与 settings.llm.apiKey 同 expandPlaceholders 链路）。
+ *
  * 读取经本模块统一走 process.env > .env.local > .env 优先级（env.ts
  * SSOT，与 LLM key 同一加载链路）；工具自身不直读 process.env。
  */
+
+/** #826 T1: 项目命名 — web_search 后端选择 env var 名。 */
+export const SEARCH_BACKEND_ENV_KEY = "IKNOW_WEB_SEARCH_BACKEND";
+
+/** #826 T1: vendor 命名 — 三个 keyed 后端的 API key env var 名。 */
+export const EXA_API_KEY_ENV_KEY = "EXA_API_KEY";
+export const TAVILY_API_KEY_ENV_KEY = "TAVILY_API_KEY";
+export const BRAVE_API_KEY_ENV_KEY = "BRAVE_API_KEY";
+
+/**
+ * #826 T1 / spec Assumption 5：web_search 后端 id 闭集。
+ * 顺序与 spec 保持一致（bing → tavily → exa → brave）；`envOptionalEnum` 判定
+ * 对顺序不敏感（`Array.includes` 线性扫描），但保持字面形态便于错误消息 / 测试断言。
+ * loader 装配反序列化走 `(typeof VALUES)[number]`。
+ */
+export const SEARCH_BACKEND_VALUES = [
+  "bing",
+  "tavily",
+  "exa",
+  "brave",
+] as const;
+
+/** #826 T1: 后端 id 字面联合（与 envOptionalEnum helper 默认值的强类型对齐）。 */
+export type SearchBackendId = (typeof SEARCH_BACKEND_VALUES)[number];
+
+/**
+ * #826 T1: WebEnv typed-error 判别联合。
+ * 当前仅 `invalid_search_backend` 一 kind —— `IKNOW_WEB_SEARCH_BACKEND` 不在
+ * `SEARCH_BACKEND_VALUES` 闭集。镜像 `WorkspaceRootError` 的 plain-object
+ * `satisfies` 形态（callers 走 `isWebEnvConfigError` 守卫，绝不 `instanceof Error`：
+ * 后者会把 plain object 打成 `[object Object]`，kind/varName 全不可见）。
+ * 保留 `expected`（而非消解为字符串）让 render 端按需重排闭集展示。
+ */
+export type WebEnvConfigError = {
+  kind: "invalid_search_backend";
+  varName: string;
+  value: string;
+  expected: readonly string[];
+};
+
+/**
+ * #826 T1: WebEnv typed-error 判别守卫。
+ * `kind` 必须命中已知闭集 + `varName`/`value` 都是 string + `expected` 是数组。
+ * 与 `WorkspaceRootError` 的「kind + payload field 同款判定」语义对齐，避免与
+ * `SessionStoreError` 的同名 kind 串台。
+ */
+export function isWebEnvConfigError(err: unknown): err is WebEnvConfigError {
+  if (err === null || typeof err !== "object") return false;
+  const maybe = err as Record<string, unknown>;
+  return (
+    maybe.kind === "invalid_search_backend" &&
+    typeof maybe.varName === "string" &&
+    typeof maybe.value === "string" &&
+    Array.isArray(maybe.expected)
+  );
+}
+
 export interface WebEnv {
   searchUrl: string | undefined;
   proxy: string | undefined;
+  /**
+   * #826 T1: 选定的 web_search 后端 id（`"bing" | "tavily" | "exa" | "brave"` 闭集）。
+   * 默认 `"bing"`（env 未设 / 空串时 fallback，与 v0 字节级一致）。
+   * 非法值 env loader 抛 typed `WebEnvConfigError`，**不**静默回退。
+   */
+  searchBackend?: "bing" | "tavily" | "exa" | "brave";
+  /**
+   * #826 T1: Exa API key（env `EXA_API_KEY`，vendor 命名）。
+   * 字面密钥或 `${VAR}` 占位符经 expandPlaceholders 解析；
+   * 未设 / 空串 / "yes" / 占位符解析失败 → undefined。
+   */
+  exaApiKey?: string;
+  /**
+   * #826 T1: Tavily API key（env `TAVILY_API_KEY`，vendor 命名）。
+   * 同 exaApiKey 同款空态语义。
+   */
+  tavilyApiKey?: string;
+  /**
+   * #826 T1: Brave API key（env `BRAVE_API_KEY`，vendor 命名）。
+   * 同 exaApiKey 同款空态语义。
+   */
+  braveApiKey?: string;
 }
 
 /**
@@ -220,6 +313,14 @@ export interface IknowEnv {
    * for relative / missing paths.
    */
   workspaceRoot: string | undefined;
+  /**
+   * T3 (plans/worktree-session-roots.md / ADR-0037 §4): 项目身份根，读
+   * `IKNOW_PRODUCT_ROOT`。父会话 spawn 子代理时注入本变量，让 worker 的
+   * rules / 项目 `AGENTS.md` / 项目 skills 发现落在**主仓**而不是它自己的
+   * cwd（改绑后那是一棵 gitignored 的裸树）。unset → undefined，worker 回落
+   * 到 cwd（未改绑时两者同值，字节不变）。
+   */
+  productRoot: string | undefined;
 }
 
 /** Placeholder values treated as "no real secret set" (case-insensitive). */
@@ -403,6 +504,35 @@ function envStreamMode(opts: EnvFileKeyOpts): "on" | "off" {
   const raw = envGet({ file: opts.file, key: opts.key }).toLowerCase();
   if (raw === "off") return "off";
   return "on";
+}
+
+interface EnvOptionalEnumOpts<T extends string> {
+  readonly file: Record<string, string>;
+  readonly key: string;
+  readonly values: readonly T[];
+  readonly default: T;
+}
+
+/**
+ * #826 T1: 闭集 enum 解析器（IKNOW_WEB_SEARCH_BACKEND 等）。
+ *  - 未设 / 空串 → `default`（默认后端的容错语义）；
+ *  - 命中 `values` 闭集 → 原样返回值（**区分大小写**，与 spec 字面形态对齐）；
+ *  - 非空但不在闭集 → 抛 typed `WebEnvConfigError( "invalid_search_backend", ... )`，
+ *    **不**静默回退 `default`。
+ *
+ * 与 `envThinkingModeOptional` 等"非法 → undefined"旧模式相反 —— 默认后端对配错敏感，
+ * schema reject 比 silent fallback 更显眼。
+ */
+function envOptionalEnum<T extends string>(opts: EnvOptionalEnumOpts<T>): T {
+  const raw = envGet({ file: opts.file, key: opts.key });
+  if (!raw) return opts.default;
+  if ((opts.values as readonly string[]).includes(raw)) return raw as T;
+  throw {
+    kind: "invalid_search_backend",
+    varName: opts.key,
+    value: raw,
+    expected: opts.values,
+  } satisfies WebEnvConfigError;
 }
 
 /**
@@ -650,6 +780,30 @@ export function loadIknowEnv(
       searchUrl: envOptional({ file, key: "IKNOW_WEB_SEARCH_URL" }),
       // 可选出站代理：空 → undefined（network-guard 直连）。显式配置才生效。
       proxy: envOptional({ file, key: "IKNOW_WEB_PROXY" }),
+      // #826 T1: web_search 后端选择（闭集，非法值 → typed error，非 silent fallback）。
+      // 显式标注 T=SearchBackendId：helper 的 T extends string 默认会被
+      // TS 推到 string 宽类型，丢失字面联合。
+      searchBackend: envOptionalEnum<SearchBackendId>({
+        file,
+        key: SEARCH_BACKEND_ENV_KEY,
+        values: SEARCH_BACKEND_VALUES,
+        default: "bing",
+      }),
+      // #826 T1: vendor-keyed 后端 API key —— 字面或 `${VAR}` 占位符经
+      // expandPlaceholders 解析（与 settings.llm.apiKey 同链路）；
+      // 空 / "yes" / 占位符解析失败 → undefined（不 silent 空串）。
+      exaApiKey: expandPlaceholders(
+        envOptional({ file, key: EXA_API_KEY_ENV_KEY }),
+        file
+      ),
+      tavilyApiKey: expandPlaceholders(
+        envOptional({ file, key: TAVILY_API_KEY_ENV_KEY }),
+        file
+      ),
+      braveApiKey: expandPlaceholders(
+        envOptional({ file, key: BRAVE_API_KEY_ENV_KEY }),
+        file
+      ),
     },
     // #119 T1: 自动压缩配置臂(透传至 harness/compress/ via LoopEngineDeps.compress)。
     // thresholdTokens 阈值合理性校验(threshold >= window 拒绝)归 T4 threshold.ts,
@@ -701,6 +855,12 @@ export function loadIknowEnv(
     workspaceRoot: envOptional({
       file,
       key: WORKSPACE_ROOT_ENV_KEY,
+    }),
+    // T3 (ADR-0037 §4): 项目身份根。同 workspaceRoot 的 envOptional 纪律
+    // （empty/unset → undefined）；消费者是 subagent worker 的身份发现。
+    productRoot: envOptional({
+      file,
+      key: PRODUCT_ROOT_ENV_KEY,
     }),
     loop: {
       detectToolLoop:

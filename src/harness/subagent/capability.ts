@@ -1,9 +1,9 @@
 import {
   AgentCatalogLookupError,
   builtinCatalogResolver,
+  FILE_WRITE_TOOL_NAMES,
   type AgentCatalogResolver,
 } from "./catalog.js";
-import { FILE_WRITE_TOOL_NAMES } from "../aci/tools/symbol-mutate.js";
 
 const FILE_WRITE_TOOL_NAME_SET = new Set<string>(FILE_WRITE_TOOL_NAMES);
 

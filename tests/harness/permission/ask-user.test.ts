@@ -104,6 +104,39 @@ describe("createTtyAskUser", () => {
     });
     assert.ok(stdout.data.includes("edit /etc/passwd"));
   });
+
+  it("aborting a TTY ask resolves false without waiting for input", async () => {
+    const stdin = new Readable({ read() {} });
+    const stdout = new MockWritable();
+    const controller = new AbortController();
+    const a = createTtyAskUser({ stdin, stdout });
+    const p = a({
+      tool: "edit_file",
+      input: {},
+      summaryHint: "",
+      signal: controller.signal,
+    } as Parameters<typeof a>[0]);
+
+    controller.abort();
+
+    assert.equal(await p, false);
+    stdin.push("y\n");
+  });
+
+  it("TTY readline errors fail closed instead of rejecting", async () => {
+    const stdin = new Readable({ read() {} });
+    const stdout = new MockWritable();
+    const a = createTtyAskUser({ stdin, stdout });
+    const p = a({
+      tool: "edit_file",
+      input: {},
+      summaryHint: "",
+    });
+
+    stdin.emit("error", new Error("stdin failed"));
+
+    assert.equal(await p, false);
+  });
 });
 
 describe("createServeAskUser (#115 H3: fail-closed)", () => {
@@ -271,5 +304,89 @@ describe("ServeAskUserHandle.pendingAll (commit B: web ask UI)", () => {
     await new Promise((r) => setTimeout(r, 30));
     assert.equal(h.resolveAsk(id, true), false);
     assert.equal(await p, false);
+  });
+
+  it("aborting a pending ask clears it and ignores a late approval", async () => {
+    const h = createServeAskUser({ timeoutMs: 1_000 });
+    const controller = new AbortController();
+    const p = h.ask({
+      tool: "edit_file",
+      input: {},
+      summaryHint: "",
+      signal: controller.signal,
+    } as Parameters<typeof h.ask>[0]);
+    await Promise.resolve();
+    const id = h.pendingAll()[0]!.id;
+
+    controller.abort();
+
+    assert.equal(h.pendingCount(), 0);
+    assert.equal(await p, false);
+    assert.equal(h.resolveAsk(id, true), false);
+  });
+
+  it("an already-aborted signal does not create a pending ask", async () => {
+    const h = createServeAskUser({ timeoutMs: 10 });
+    const controller = new AbortController();
+    controller.abort();
+
+    const p = h.ask({
+      tool: "edit_file",
+      input: {},
+      summaryHint: "",
+      signal: controller.signal,
+    } as Parameters<typeof h.ask>[0]);
+
+    assert.equal(h.pendingCount(), 0);
+    assert.equal(await p, false);
+  });
+
+  it("aborting one signal clears multiple pending asks", async () => {
+    const h = createServeAskUser({ timeoutMs: 1_000 });
+    const controller = new AbortController();
+    const asks = [1, 2, 3].map((n) =>
+      h.ask({
+        tool: `tool-${n}`,
+        input: {},
+        summaryHint: "",
+        signal: controller.signal,
+      } as Parameters<typeof h.ask>[0])
+    );
+    await Promise.resolve();
+    assert.equal(h.pendingCount(), 3);
+
+    controller.abort();
+
+    assert.equal(h.pendingCount(), 0);
+    assert.deepEqual(await Promise.all(asks), [false, false, false]);
+  });
+
+  it("an approval that settles first wins an abort race", async () => {
+    const h = createServeAskUser({ timeoutMs: 1_000 });
+    const controller = new AbortController();
+    const p = h.ask({
+      tool: "edit_file",
+      input: {},
+      summaryHint: "",
+      signal: controller.signal,
+    } as Parameters<typeof h.ask>[0]);
+    await Promise.resolve();
+    const id = h.pendingAll()[0]!.id;
+
+    assert.equal(h.resolveAsk(id, true), true);
+    controller.abort();
+
+    assert.equal(await p, true);
+    assert.equal(h.pendingCount(), 0);
+  });
+
+  it("aborting with no pending asks is a no-op", () => {
+    const h = createServeAskUser({ timeoutMs: 10 });
+    const controller = new AbortController();
+
+    controller.abort();
+
+    assert.equal(h.pendingCount(), 0);
+    assert.deepEqual(h.pendingAll(), []);
   });
 });

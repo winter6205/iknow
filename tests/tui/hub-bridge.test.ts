@@ -32,6 +32,7 @@ import type { LoopEngineDeps } from "../../src/harness/loop-engine.js";
 import type { LoopState } from "../../src/harness/model-adapter/types.js";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.js";
 import type { SubAgentTerminalNotice } from "../../src/harness/subagent/mailbox.js";
+import { createSubAgentMailbox } from "../../src/harness/subagent/mailbox.js";
 import {
   MINIMAL_SDK_MESSAGE,
   makeTestLlmEnv,
@@ -902,6 +903,67 @@ describe("hub-bridge listSubagents 投影（#358 T7）", () => {
     });
     expect(bridge.listSubagents()).toBe(projection);
   });
+
+  test("list 与 terminal subscription 都按 parent conversationId 过滤", () => {
+    const mailbox = createSubAgentMailbox();
+    const sessionATask = {
+      taskId: "session-a-task",
+      state: "completed" as const,
+      taskPreview: "A",
+      startedAt: "2026-08-31T00:00:00.000Z",
+    };
+    const sessionBTask = {
+      taskId: "session-b-task",
+      state: "completed" as const,
+      taskPreview: "B",
+      startedAt: "2026-08-31T00:00:00.000Z",
+    };
+    const manager: SubAgentManager = {
+      spawn: () => ({ taskId: "unused" }),
+      queryBuffer: () => ({ status: "not_found" }),
+      waitFor: async () => {
+        throw new Error("unused");
+      },
+      shutdown: async () => {},
+      drainCompleted: () => [],
+      listActive: () => [],
+      abortTask: () => false,
+      listSubagents: (conversationId) =>
+        conversationId === "session-a"
+          ? [sessionATask]
+          : [sessionATask, sessionBTask],
+      subscribe: mailbox.subscribe,
+    };
+    const bridge = createTuiBridge({
+      deps: makeDeps([]),
+      inflight: createInflightRegistry(),
+      subagentManager: manager,
+    });
+    const notices: string[] = [];
+    const unsubscribe = bridge.subscribeSubagentTerminal(
+      (notice) => notices.push(notice.taskId),
+      "session-a"
+    );
+
+    expect(bridge.listSubagents("session-a")).toEqual([sessionATask]);
+    mailbox.publish({
+      taskId: "session-a-task",
+      conversationId: "session-a",
+      status: "ok",
+      summary: "done",
+      result: "result",
+    });
+    mailbox.publish({
+      taskId: "session-b-task",
+      conversationId: "session-b",
+      status: "ok",
+      summary: "done",
+      result: "result",
+    });
+
+    expect(notices).toEqual(["session-a-task"]);
+    unsubscribe();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -960,5 +1022,78 @@ describe("hub-bridge engineRoot / buildEngine 转发（review High-1）", () => 
       injected
     );
     expect(built).toBe(0);
+  });
+});
+
+describe("hub-bridge subagent manager aggregation across rebind", () => {
+  function makeRebindManager(label: string): {
+    readonly manager: SubAgentManager;
+    readonly publish: () => void;
+  } {
+    const mailbox = createSubAgentMailbox();
+    const manager: SubAgentManager = {
+      spawn: () => ({ taskId: `${label}-spawned` }),
+      queryBuffer: () => ({ status: "not_found" }),
+      waitFor: async () => {
+        throw new Error("unused");
+      },
+      shutdown: async () => {},
+      drainCompleted: () => [],
+      listActive: () => [],
+      abortTask: () => false,
+      listSubagents: () => [
+        {
+          taskId: `${label}-task`,
+          state: "running",
+          taskPreview: label,
+          startedAt: "2026-08-31T00:00:00.000Z",
+        },
+      ],
+      subscribe: mailbox.subscribe,
+    };
+    return {
+      manager,
+      publish: () =>
+        mailbox.publish({
+          taskId: `${label}-task`,
+          status: "ok",
+          summary: "done",
+          result: "result",
+        }),
+    };
+  }
+
+  test("uses the aggregate subscription and list projection after a rebind", async () => {
+    const oldManager = makeRebindManager("before");
+    const newManager = makeRebindManager("after");
+    const bridge = createTuiBridge({
+      deps: makeDeps([]),
+      inflight: createInflightRegistry(),
+      engineRoot: "/main",
+      subagentManager: oldManager.manager,
+      buildEngine: async () => ({
+        deps: makeDeps([]),
+        subagentManager: newManager.manager,
+      }),
+    });
+    const notices: string[] = [];
+    const unsubscribe = bridge.subscribeSubagentTerminal((notice) => {
+      notices.push(notice.taskId);
+    });
+
+    const reboundRoot = "/main/.iknow/worktrees/rebound";
+    await (
+      bridge.hub as unknown as {
+        ensureDeps: (root?: string) => Promise<LoopEngineDeps>;
+      }
+    ).ensureDeps(reboundRoot);
+    newManager.publish();
+
+    expect(notices).toEqual(["after-task"]);
+    expect(bridge.listSubagents().map(({ taskId }) => taskId)).toEqual([
+      "before-task",
+      "after-task",
+    ]);
+    unsubscribe();
   });
 });

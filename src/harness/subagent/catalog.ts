@@ -21,7 +21,22 @@
  * 期 (T2) catch 此 error 走 fallback 路径 (无 persona / 无额外 deny /
  * bashMode="any" = V1 逐字节)。
  */
-import { FILE_WRITE_TOOL_NAMES } from "../aci/tools/symbol-mutate.js";
+/**
+ * 探索 agent 禁用的写类工具集合（SSOT 内联于本文件，与 aci/tools/symbol-mutate.js
+ * 的 FILE_WRITE_TOOL_NAMES 同源；内联是为了让 retire 删除 symbol-mutate.js 后
+ * catalog deny 仍然独立工作）。
+ *
+ * 导出是为了让 capability.ts 复用同一真值，无需回引被废弃的 symbol-mutate.js。
+ */
+export const FILE_WRITE_TOOL_NAMES = Object.freeze([
+  "edit_file",
+  "write_file",
+  "rename_symbol",
+  "replace_symbol_body",
+  "insert_before_symbol",
+  "insert_after_symbol",
+  "safe_delete_symbol",
+] as const);
 
 export interface AgentCatalogEntry {
   readonly id: string;

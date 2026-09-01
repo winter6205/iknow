@@ -132,6 +132,11 @@ export type ToolExecutionResult =
        * 比对契约(loop-engine 仍按 message 判定 stopReason)。
        */
       readonly partial?: { readonly stdout?: string; readonly stderr?: string };
+      /**
+       * caller 已经收到 cancelled，但 handler 未响应 signal，仍在后台运行。
+       * 仅在 ACI detach 该 handler 时出现；真正收尾的取消不带此字段。
+       */
+      readonly background?: true;
     };
 
 /** Executor 接口:接收 014 合法有序 tool-call 投影,返回匹配身份的 ToolExecutionResult。 */

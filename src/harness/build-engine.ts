@@ -40,7 +40,7 @@ import { errorMessage } from "./errors.js";
 import type { AciCatalog, AciToolDef } from "./aci/types.js";
 import { createLspNotifier } from "./lsp/notifier.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
-import type { Registry } from "./tools/types.js";
+import type { Registry, ToolCall } from "./tools/types.js";
 import type { RegistryImpl } from "./tools/registry.js";
 import type { ValidateFunction } from "ajv";
 import { homedir } from "node:os";
@@ -57,6 +57,8 @@ import {
 } from "../config/settings.js";
 import {
   createWorktreeIsolationExecutor,
+  classifyCall,
+  type MutateClass,
   type WorktreeIsolationHostOpts,
 } from "./isolation/worktree-gate.js";
 import type { IknowEnv } from "../config/env.js";
@@ -97,6 +99,8 @@ import {
   createSubAgentManager,
   type SubAgentManager,
 } from "./subagent/manager.js";
+import { assessSubagentIsolation } from "./subagent/capability.js";
+import { buildWorkerToolSurface } from "./subagent/role.js";
 import {
   createDefaultSubAgentSpawn,
   resolveSubagentTraceDir,
@@ -598,6 +602,27 @@ export async function buildHarnessEngine(
       ? { traceDir: opts.subagentDiagnosticsDir }
       : {}),
   });
+  // ADR-0037 T3:mutate 门禁（harness executor 缝）。开关已在启动加载点读一次
+  // （settings 已在上方解析，硬要求 9）；host 缝（provision / initiallyBound）
+  // 由 session-api hub 注入。OFF / host 缺席 → 不包装，行为与今日逐字节一致。
+  const isolationHost = opts.worktreeIsolation;
+  const isolationEnabled =
+    isolationHost !== undefined && resolveWorktreeOnMutate(settings);
+  // ADR-0040: the parent catalog is not the worker surface. Rebuild the
+  // worker registry through the same factory with the worker-only option
+  // shape (no parent managers, state tools, or worktree host seams), then
+  // apply the worker deny-list path in the classifier below. This keeps
+  // host-only write-category tools such as create-task-worktree and bash_stop
+  // out of the isolation decision without maintaining a second exclusion list.
+  const workerBaseTools = isolationEnabled
+    ? createDefaultAciRegistry({
+        env,
+        sandboxRoot,
+        skillCatalog,
+        lspCtx,
+        ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+      }).catalog.all()
+    : [];
   // #337:动态 registry 包装 —— 让 inner executor 能解析 registerExternal
   // 动态注册的 mcp__ 工具。`reg.inner` 是构造期快照（aci-registry.ts:71），
   // 本身的 `get/getValidator/list` 契约不变（T1 已锁 inner.list() 快照）。
@@ -639,12 +664,39 @@ export async function buildHarnessEngine(
     },
   });
 
-  // ADR-0037 T3:mutate 门禁（harness executor 缝）。开关只在启动加载点读一次
+  // T4 / ADR-0040: `spawn_subagent` is read-only only when the child's
+  // effective capability surface passes both dimensions from capability.ts.
+  // The role default mirrors spawn-subagent-tool.ts; malformed role values are
+  // deliberately mapped to an unknown role so the classifier stays fail-closed
+  // before the inner executor performs schema validation.
+  const classifyWithSubagentIsolation = (call: ToolCall): MutateClass => {
+    if (call.name !== "spawn_subagent") return classifyCall(call);
+    const input = (call.input ?? {}) as Record<string, unknown>;
+    const rawRole = input.subagent_type;
+    const role =
+      rawRole === undefined
+        ? "general-purpose"
+        : typeof rawRole === "string"
+          ? rawRole
+          : "__invalid_subagent_type__";
+    const disallowedTools = Array.isArray(input.disallowedTools)
+      ? (input.disallowedTools as ReadonlyArray<string>)
+      : undefined;
+    const effectiveWorkerTools = buildWorkerToolSurface(
+      workerBaseTools,
+      disallowedTools
+    );
+    const decision = assessSubagentIsolation({
+      role,
+      availableTools: effectiveWorkerTools.map((tool) => tool.name),
+      ...(disallowedTools !== undefined ? { disallowedTools } : {}),
+    });
+    return decision.conclusion === "readonly" ? "read" : "mutate";
+  };
+
+  // ADR-0037 T3:mutate 门禁（harness executor 缝）。开关已在启动加载点读一次
   // （settings 已在上方解析，硬要求 9）；host 缝（provision / initiallyBound）
   // 由 session-api hub 注入。OFF / host 缺席 → 不包装，行为与今日逐字节一致。
-  const isolationHost = opts.worktreeIsolation;
-  const isolationEnabled =
-    isolationHost !== undefined && resolveWorktreeOnMutate(settings);
   const loopExecutor = isolationEnabled
     ? createWorktreeIsolationExecutor({
         enabled: true,
@@ -654,6 +706,7 @@ export async function buildHarnessEngine(
         // 同根 no-op;外来根 → typed foreign_worktree）——host 缝不再携带
         // conversation-agnostic 的 initiallyBound（per-root 引擎可服务多个
         // 会话，引擎级 bound 标记会把别会话的 mutate 一并放行）。
+        classify: classifyWithSubagentIsolation,
         inner: executor,
       })
     : executor;
@@ -741,6 +794,7 @@ export async function buildHarnessEngine(
     // 段。
     system: createIknowSystemResolver({
       cwd,
+      projectIdentityRoot: cwd,
       userHome,
       workspaceRoot,
       surface,
@@ -748,7 +802,7 @@ export async function buildHarnessEngine(
       ...(memoryToolsEnabled
         ? {
             memoryResolver: createSystemResolver({
-              cwd,
+              projectIdentityRoot: cwd,
               userHome,
               // ADR-0019 (T2):memoryResolver ctx 也带 workspaceRoot —
               // refresh discover + assemble 的 user-scope 物理根同源。
@@ -840,7 +894,11 @@ export async function buildHarnessEngine(
           dream: dreamOn,
           flags: memoryFlags,
           staticLayer: () =>
-            assembleStaticSystemPrompt({ cwd, userHome, workspaceRoot }),
+            assembleStaticSystemPrompt({
+              projectIdentityRoot: cwd,
+              userHome,
+              workspaceRoot,
+            }),
           onError: (error) => {
             console.warn(
               `[memory/auto] ingest skipped: ${

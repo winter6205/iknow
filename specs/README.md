@@ -57,6 +57,13 @@
 - `468-subagent-judge-tool-surface.md` — 子代理声明工具面=实际工具面（判官只读契约）
 - `449-evidence-checker.md` — 证据优先纯函数规则引擎（三态 verdict + 三防 + D2 探测）
 
+### Verify 证据优先重构（#449/#458，实施顺序 A→B→C→D）
+
+- `468-subagent-judge-tool-surface.md` — 子代理声明工具面=实际工具面（判官只读契约前置 bug fix，A）
+- `458-goal-lifecycle-taskfocus.md` — goal/taskFocus 拆分 + model_proposed 删除 + /goal 三面 + validateGoalText（B）
+- `449-evidence-checker.md` — 证据优先纯函数规则引擎（三态 verdict + 三防 + D2 探测，C）
+- `449-verify-evidence-first-loop.md` — 验证循环重构主体：证据优先编排 + 补跑信封 + 证据感知判官 unverified 四态（D）
+
 ---
 
 ## 已归档（指针）

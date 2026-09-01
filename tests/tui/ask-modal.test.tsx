@@ -419,4 +419,69 @@ describe("createTuiAskUserBridge（queue-based + fail-closed）", () => {
     bridge.resolveAsk(info.id, true);
     await promise;
   });
+
+  test("abort clears a pending ask immediately and ignores a late approval", async () => {
+    const bridge = createTuiAskUserBridge({ timeoutMs: 1_000 });
+    const controller = new AbortController();
+    const promise = bridge.ask({ ...askCtx, signal: controller.signal });
+    const id = bridge.pending()!.id;
+
+    controller.abort();
+
+    expect(bridge.pendingCount()).toBe(0);
+    await expect(promise).resolves.toBe(false);
+    expect(bridge.resolveAsk(id, true)).toBe(false);
+  });
+
+  test("an already-aborted signal does not enqueue a TUI ask", async () => {
+    const bridge = createTuiAskUserBridge({ timeoutMs: 30 });
+    const controller = new AbortController();
+    controller.abort();
+
+    const promise = bridge.ask({ ...askCtx, signal: controller.signal });
+
+    expect(bridge.pendingCount()).toBe(0);
+    await expect(promise).resolves.toBe(false);
+  });
+
+  test("one abort clears multiple pending TUI asks", async () => {
+    const bridge = createTuiAskUserBridge({ timeoutMs: 1_000 });
+    const controller = new AbortController();
+    const promises = [1, 2, 3].map((n) =>
+      bridge.ask({
+        ...askCtx,
+        tool: `tool-${n}`,
+        signal: controller.signal,
+      })
+    );
+
+    expect(bridge.pendingCount()).toBe(3);
+    controller.abort();
+
+    expect(bridge.pendingCount()).toBe(0);
+    await expect(Promise.all(promises)).resolves.toEqual([false, false, false]);
+  });
+
+  test("approval that settles first wins a TUI abort race", async () => {
+    const bridge = createTuiAskUserBridge({ timeoutMs: 1_000 });
+    const controller = new AbortController();
+    const promise = bridge.ask({ ...askCtx, signal: controller.signal });
+    const id = bridge.pending()!.id;
+
+    expect(bridge.resolveAsk(id, true)).toBe(true);
+    controller.abort();
+
+    await expect(promise).resolves.toBe(true);
+    expect(bridge.pendingCount()).toBe(0);
+  });
+
+  test("aborting with no pending TUI asks is a no-op", () => {
+    const bridge = createTuiAskUserBridge();
+    const controller = new AbortController();
+
+    controller.abort();
+
+    expect(bridge.pendingCount()).toBe(0);
+    expect(bridge.pending()).toBeUndefined();
+  });
 });

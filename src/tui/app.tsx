@@ -48,6 +48,10 @@ import {
   useTerminalDimensions,
 } from "@opentui/react";
 import type { HarnessStreamEvent } from "../harness/stream.js";
+import {
+  BACKGROUND_OPERATION_NOTICE,
+  BLOCK_OPERATION_NOTICE,
+} from "../harness/aci/aci-executor.js";
 import type { CompactReason } from "../harness/compress/index.js";
 import type {
   AnthropicNativeMessage,
@@ -426,6 +430,18 @@ const emptySkillCatalog: SkillCatalog = Object.freeze({
   available: () => [],
   getBodyPath: () => undefined,
 });
+
+type CtrlCDisposition =
+  | "preempted"
+  | "can_interrupt_false"
+  | "abort_dispatched"
+  | "controller_missing"
+  | "compacting_cancelled"
+  | "selection_copied";
+
+function logCtrlCDisposition(disposition: CtrlCDisposition): void {
+  process.stderr.write(`${JSON.stringify({ event: "ctrl_c", disposition })}\n`);
+}
 
 export interface TuiAppProps {
   readonly bridge: TuiBridge;
@@ -1349,6 +1365,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     let stopReason: string | undefined;
     let lastUsage: TokenUsage | null = null;
     let interrupted: boolean | undefined;
+    let uncancellableOperationNotice: string | undefined;
     // Predicate / continue ValidationError is not a turn: keep EXIT notice,
     // restore idle, do not reload (reload overwrite → 刷新会话失败).
     let skipTurnRefresh = false;
@@ -1401,6 +1418,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         }));
       }
       if (event.type === "stop_summary") {
+        if (
+          event.text === BACKGROUND_OPERATION_NOTICE ||
+          event.text === BLOCK_OPERATION_NOTICE
+        ) {
+          uncancellableOperationNotice = event.text;
+        }
         setNotice({ lines: [event.text] });
       }
       if (event.type === "agent_status") {
@@ -1583,11 +1606,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         // 未落 checkpoint(delta=0);undefined → 旧链路 / 未知,保留兜底文案。
         setNotice({
           lines:
-            interrupted === true
-              ? ["已打断，checkpoint 已保存"]
-              : interrupted === false
-                ? ["已打断（无新内容，未落 checkpoint）"]
-                : ["已打断当前 turn"],
+            uncancellableOperationNotice !== undefined
+              ? [uncancellableOperationNotice]
+              : interrupted === true
+                ? ["已打断，checkpoint 已保存"]
+                : interrupted === false
+                  ? ["已打断（无新内容，未落 checkpoint）"]
+                  : ["已打断当前 turn"],
         });
       }
     } catch (err) {
@@ -2126,6 +2151,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // ── 全局键位（Ctrl+C / Shift+Tab / Ctrl+O / modal） ────
   useKeyboard((e) => {
     if (e.eventType !== "press") return;
+    const isCtrlC = e.ctrl && e.name === "c";
 
     if (graphViewOpen && graphProgress !== null) {
       applyGraphViewKey(
@@ -2144,7 +2170,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           openDetail: () => setGraphNodeDetail(true),
         }
       );
-      return;
+      if (!isCtrlC) return;
     }
 
     const graphKey = reduceGraphChromeFocus({
@@ -2161,13 +2187,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         setGraphSelectedId(ids[0] ?? null);
         setGraphNodeDetail(false);
         setGraphViewOpen(true);
-        return;
+        if (!isCtrlC) return;
       }
       if (graphKey.focus !== graphChromeFocus) {
         setGraphChromeFocus(graphKey.focus);
-        return;
+        if (!isCtrlC) return;
       }
-      return;
+      if (!isCtrlC) return;
     }
 
     // Shift+Tab 切 agent mode（W2 权限轮 + D-α graph overlay 的三态轮；
@@ -2188,6 +2214,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         },
       })
     ) {
+      if (isCtrlC) logCtrlCDisposition("preempted");
       return;
     }
     // Ctrl+C：打断 running-fg；否则提示。
@@ -2196,6 +2223,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       // canInterrupt 拦不住);return 后不再进 turn/notice 分支。
       if (compactingControllerRef.current !== null) {
         compactingControllerRef.current.abort();
+        logCtrlCDisposition("compacting_cancelled");
         return;
       }
       // #343 v3 follow-up：选区优先复制 —— 用户在拖选后按 Ctrl+C，意图是
@@ -2209,14 +2237,21 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         void doCopy(selectedText).then((result) =>
           setNoticeFromCopyResult(selectedText, result)
         );
+        logCtrlCDisposition("selection_copied");
         return;
       }
       if (canInterrupt(active)) {
         const id = active.conversationId;
-        if (id !== undefined) {
-          aborters.current.get(id)?.abort();
+        const controller =
+          id === undefined ? undefined : aborters.current.get(id);
+        if (controller === undefined) {
+          logCtrlCDisposition("controller_missing");
+        } else {
+          controller.abort();
+          logCtrlCDisposition("abort_dispatched");
         }
       } else {
+        logCtrlCDisposition("can_interrupt_false");
         setNotice({
           lines: ["Ctrl+C：无前台运行中的 turn；/quit 退出。"],
         });

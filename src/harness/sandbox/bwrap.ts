@@ -44,10 +44,11 @@ export interface BwrapFenceOptions {
   readonly network?: boolean;
   // #562 T5: cwdReadonly — absent/false = V1 path (`--bind cwd cwd`, the
   // writable cwd); true = bind cwd as `--ro-bind cwd cwd` so a validator
-  // hole still gets EROFS at the kernel layer. Only the cwd-bind verb
-  // changes; argv order contract (system --ro-bind → user --bind/--ro-bind
-  // → --size/--tmpfs → 可选 cwd 重绑 → --proc/--dev-bind → --chdir → -- → 命令)
-  // and the rebind-after-tmpfs rule (cwd isTmpDescendant) stay intact.
+  // hole still gets EROFS at the kernel layer. The argv order contract
+  // (system --ro-bind → user --bind/--ro-bind → --size/--tmpfs → 可选 cwd
+  // 重绑 → --proc/--dev-bind → --chdir → -- → 命令) and the
+  // rebind-after-tmpfs rule (cwd isTmpDescendant) stay intact. The readonly
+  // path orders overlapping writable parent binds before cwd.
   readonly cwdReadonly?: boolean;
   readonly seccompProfile?: never;
 }
@@ -93,21 +94,17 @@ function bindArgs(
     : [];
   // #562 T5: cwdReadonly switches the cwd-bind verb from --bind to --ro-bind.
   // tmp + home stays writable (tmp is the sandbox /tmp mount, home is the
-  // user-configurable bind target). Verb swap is the only change; argv order
-  // is preserved (see baseArgs caller).
+  // user-configurable bind target). The readonly path also orders those
+  // writable mounts before cwd so an ancestor cannot cover the ro-bind.
   const cwdVerb = cwdReadonly ? "--ro-bind" : "--bind";
-  return [
-    "--bind",
-    tmp,
-    tmp,
-    cwdVerb,
-    cwd,
-    cwd,
-    "--bind",
-    home,
-    home,
-    ...overlays,
-  ];
+  const cwdBind = [cwdVerb, cwd, cwd];
+  const homeBind = ["--bind", home, home];
+  if (cwdReadonly) {
+    // A later bind of an ancestor can cover an earlier read-only child bind.
+    // Put every writable parent/overlay first, then make cwd read-only last.
+    return ["--bind", tmp, tmp, ...homeBind, ...overlays, ...cwdBind];
+  }
+  return ["--bind", tmp, tmp, ...cwdBind, ...homeBind, ...overlays];
 }
 
 function baseArgs(
@@ -122,7 +119,8 @@ function baseArgs(
   // #562 T5: cwdRebind (post-tmpfs --bind cwd cwd when cwd is /tmp descendant)
   // also respects cwdReadonly — readonly fence must stay read-only even after
   // the post-tmpfs rebind, otherwise the rebind silently promotes it back to
-  // writable. Verb swap only; argv position unchanged.
+  // writable. Readonly mode also places an overlapping home rebind before the
+  // cwd rebind so a writable ancestor cannot cover the read-only cwd.
   const cwdRebindVerb = cwdReadonly ? "--ro-bind" : "--bind";
   const cwdRebind = isTmpDescendant(cwd, tmp) ? [cwdRebindVerb, cwd, cwd] : [];
   // `--tmpfs /tmp` (below) mounts an empty tmpfs over /tmp, which hides every
@@ -136,6 +134,9 @@ function baseArgs(
   // byte-for-byte unchanged.
   const home = pathForHome(fsPolicy);
   const homeRebind = isTmpDescendant(home, tmp) ? ["--bind", home, home] : [];
+  const postTmpfsRebinds = cwdReadonly
+    ? [...homeRebind, ...cwdRebind]
+    : [...cwdRebind, ...homeRebind];
   return [
     "--unshare-user-try",
     // network:true is the only axis that drops --unshare-net (ADR-0022 #1);
@@ -163,11 +164,9 @@ function baseArgs(
     String(resources.tmp),
     "--tmpfs",
     "/tmp",
-    // cwd first: cwd must win over home when both are under /tmp and overlap
-    // (cwd+home share the same fs layer here, so order is not strictly
-    // enforced, but keeping cwd first preserves the pre-existing contract).
-    ...cwdRebind,
-    ...homeRebind,
+    // Readonly cwd must be rebound after an overlapping writable home so the
+    // child mount remains read-only when HOME contains the workspace.
+    ...postTmpfsRebinds,
     "--proc",
     "/proc",
     "--dev-bind",

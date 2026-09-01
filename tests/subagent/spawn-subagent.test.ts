@@ -44,6 +44,7 @@ import {
   resolveAgentCatalog,
   getAgentEntry,
 } from "../../src/harness/subagent/catalog.ts";
+import { FILE_WRITE_TOOL_NAMES } from "../../src/harness/subagent/catalog.ts";
 
 /** ajv 实例（与仓库同款 strict + allErrors + formats）— T3 测 inputSchema 编译。 */
 function makeAjv(): Ajv.default {
@@ -410,10 +411,7 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
   it("wait:false → chat/tui/serve rely on terminal wake, not polling, while wait:true wording stays blocking", () => {
     const waitFalseStart = description.indexOf("Pass `wait:false`");
     const capacityStart = description.indexOf("At most", waitFalseStart);
-    const waitFalseGuidance = description.slice(
-      waitFalseStart,
-      capacityStart
-    );
+    const waitFalseGuidance = description.slice(waitFalseStart, capacityStart);
 
     expect(waitFalseGuidance).toMatch(/mailbox/i);
     expect(waitFalseGuidance).toMatch(/subscribe/i);
@@ -598,9 +596,13 @@ describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () =>
         role: "explore",
         systemPrompt: "be focused",
         // #556 T3 + Spec review 收口: parent disallowedTools 与 catalog entry
-        // denied union (Set 去重)。explore 的 catalog 默认 [edit_file, write_file]
-        // 与 parent [spawn_subagent] merge = [spawn_subagent, edit_file, write_file]。
-        disallowedTools: ["spawn_subagent", "edit_file", "write_file"],
+        // denied union (Set 去重)。explore 的 catalog 默认
+        // FILE_WRITE_TOOL_NAMES (edit_file / write_file + symbol mutate 5 项)
+        // 与 parent [spawn_subagent] merge 后长 = 1 + FILE_WRITE_TOOL_NAMES.length。
+        disallowedTools: expect.arrayContaining([
+          "spawn_subagent",
+          ...FILE_WRITE_TOOL_NAMES,
+        ]),
         model: "opus",
         maxTurns: 4,
         timeoutMs: 60000,
@@ -618,8 +620,12 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
   //   union(parent disallowedTools, catalog entry.disallowedTools)
   //   后写入 def.disallowedTools (registry.ts Gate 3 deny-list
   //   把 entry 内的工具名从 toolsetNames 剔除)。
+  //
+  // catalog deny 的 extend 面 (#556 T4 收口) = FILE_WRITE_TOOL_NAMES
+  // (edit_file / write_file + 5 件 symbol mutate)。断言直接引用该 SSOT,
+  // 不再硬编码长度,避免 SSOT 扩项时此处再次 stale。
 
-  it("subagent_type='explore' 无 parent disallowedTools → def.disallowedTools = catalog 默认 [edit_file, write_file]", async () => {
+  it("subagent_type='explore' 无 parent disallowedTools → def.disallowedTools = catalog 默认 FILE_WRITE_TOOL_NAMES", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
@@ -631,9 +637,9 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
     expect(def.role).toBe("explore");
     expect(def.disallowedTools).toBeDefined();
     expect([...def.disallowedTools!]).toEqual(
-      expect.arrayContaining(["edit_file", "write_file"])
+      expect.arrayContaining([...FILE_WRITE_TOOL_NAMES])
     );
-    expect(def.disallowedTools).toHaveLength(2);
+    expect(def.disallowedTools).toHaveLength(FILE_WRITE_TOOL_NAMES.length);
   });
 
   it("subagent_type='explore' + parent disallowedTools → union (parent ADD, 不 subtract catalog)", async () => {
@@ -648,9 +654,9 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
     const def = spawn.mock.calls[0][0] as SubAgentDefinition;
     expect(def.role).toBe("explore");
     expect([...def.disallowedTools!]).toEqual(
-      expect.arrayContaining(["edit_file", "write_file", "some_extra_tool"])
+      expect.arrayContaining([...FILE_WRITE_TOOL_NAMES, "some_extra_tool"])
     );
-    expect(def.disallowedTools).toHaveLength(3);
+    expect(def.disallowedTools).toHaveLength(FILE_WRITE_TOOL_NAMES.length + 1);
   });
 
   it("subagent_type='explore' + parent 重复 deny 同名 → Set 去重", async () => {
@@ -663,9 +669,10 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
       wait: false,
     });
     const def = spawn.mock.calls[0][0] as SubAgentDefinition;
-    expect(def.disallowedTools).toHaveLength(3); // edit_file (1) + write_file + another_tool
+    // edit_file 与 catalog 同名 → 只算一次;another_tool 为新增 1 项。
+    expect(def.disallowedTools).toHaveLength(FILE_WRITE_TOOL_NAMES.length + 1);
     expect([...def.disallowedTools!]).toEqual(
-      expect.arrayContaining(["edit_file", "write_file", "another_tool"])
+      expect.arrayContaining([...FILE_WRITE_TOOL_NAMES, "another_tool"])
     );
   });
 
