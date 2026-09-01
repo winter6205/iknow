@@ -91,21 +91,6 @@ export interface CreateRunClassifierOpts {
  * 返回 undefined 当 manager 为 undefined (ask 形态; 调用方拿 undefined 自然
  * 走 SC7 透明关闭分支, 无需特殊 if)。
  */
-/**
- * #449b B6: 拼接判官任务文本 (G5-3 决议术语, SC6 task 不重绑)。
- *   - evidenceContext 缺席 → task = userText 逐字节 (既有契约);
- *   - evidenceContext 在场 → task = `<userText>\n<JSON.stringify(ctx)>`,
- *     判官从 task 单段升级到 task + 证据体检单二段, 但 task 字段语义
- *     (用户问的是什么) 未变。
- */
-function buildJudgeTask(
-  task: string,
-  evidenceContext?: EvidenceContext
-): string {
-  if (evidenceContext === undefined) return task;
-  return `${task}\n${JSON.stringify(evidenceContext)}`;
-}
-
 export function createRunClassifierFromManager(
   opts: CreateRunClassifierOpts
 ): RunClassifierFn {

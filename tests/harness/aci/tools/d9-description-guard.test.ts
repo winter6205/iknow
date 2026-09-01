@@ -50,6 +50,9 @@ import type { IknowEnv } from "../../../../src/config/env.js";
 import type { SubAgentManager } from "../../../../src/harness/subagent/manager.js";
 import type { McpManager } from "../../../../src/harness/mcp/manager.js";
 import type { BackgroundTaskManager } from "../../../../src/harness/background/manager.js";
+import type { CreateTaskWorktreeProvisionFn } from "../../../../src/harness/aci/tools/create-task-worktree.js";
+import type { WorktreeEnterToolDeps } from "../../../../src/harness/aci/tools/enter-task-worktree.js";
+import type { WorktreeExitToolDeps } from "../../../../src/harness/aci/tools/exit-task-worktree.js";
 
 /** #483 D9: 12-word blocklist — mirrors tests/harness/aci/tools/todo-write.test.ts:533.
  *
@@ -90,9 +93,9 @@ function makeWebEnv(): Pick<IknowEnv, "web"> {
 }
 
 /** Fake SubAgentManager — sufficient for assembly. Mirrors registry.test.ts:51-57. */
-const fakeSubagentManager: SubAgentManager = {
+const fakeSubagentManager = {
   spawn: () => ({ taskId: "fake-id" }),
-  queryBuffer: () => ({ status: "not_found" }),
+  queryBuffer: () => ({ status: "not_found" as const }),
   waitFor: () => Promise.reject(new Error("not used")),
   shutdown: () => Promise.resolve(),
   drainCompleted: () => [],
@@ -100,7 +103,9 @@ const fakeSubagentManager: SubAgentManager = {
   abortTask: () => false,
   // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
   listSubagents: () => [],
-};
+  // master SubAgentManager 接口扩展:subscribe (mailbox 契约 #361)
+  subscribe: () => () => {},
+} as unknown as SubAgentManager;
 
 /** Fake McpManager — sufficient for assembly. Mirrors registry.test.ts:63-70. */
 const fakeMcpManager: McpManager = {
@@ -123,6 +128,21 @@ const fakeBackgroundManager: BackgroundTaskManager = {
   onConversationDeleted: () => undefined,
 } as unknown as BackgroundTaskManager;
 
+/** ADR-0037 worktree isolation 三缝 fake —— sufficient for assembly。
+ *  handler 路径单测在各自工具目录下,本文件只验证 description D9 闸门。 */
+const fakeWorktreeProvision = (async () => ({
+  taskId: "fake-task",
+  worktreePath: "/tmp/fake-worktree",
+  branchName: "fake/branch",
+})) as unknown as CreateTaskWorktreeProvisionFn;
+const fakeWorktreeEnter = (async () => ({
+  worktreePath: "/tmp/fake-worktree",
+  branchName: "fake/branch",
+})) as unknown as WorktreeEnterToolDeps["worktreeEnter"];
+const fakeWorktreeExit = (async () => ({
+  mainRepoRoot: "/tmp/fake-main",
+})) as unknown as WorktreeExitToolDeps["worktreeExit"];
+
 describe("#483 D9 — regression guard: every ACI tool description avoids NEGATIVE_PHRASES", () => {
   // Assemble once for the whole suite. Reusing the same registry across
   // every assertion keeps the test cheap and guarantees a stable tool set.
@@ -137,6 +157,10 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     backgroundManager: fakeBackgroundManager,
     // D-α T3:graph overlay 在场 → run_graph 入注册表（描述同受 D9 闸门约束）。
     graphAssembly: { enabled: () => true },
+    // worktree isolation (ADR-0037):3 件条件化装配,host 缝在场才入注册表。
+    worktreeProvision: fakeWorktreeProvision,
+    worktreeEnter: fakeWorktreeEnter,
+    worktreeExit: fakeWorktreeExit,
   });
 
   // Sanity: registry assembled with the full 31-tool toolset. If this drifts,
@@ -215,10 +239,47 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
 
   // Pre-#483 D9 baseline would have included bash's "Don't have a dedicated
   // tool" and a number of imperative "do not" / "never" fragments. After the
-  // audit, the only thing we pin is that all 31 tools are positive-trigger
+  // audit, the only thing we pin is that all 37 tools are positive-trigger
   // phrased — verified structurally by the blocklist assertions above.
-  it("toolset size after audit: 31 (full conditional-deps assembly)", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(32);
-    expect(reg.catalog.all()).toHaveLength(32);
+  it("toolset size after audit: 37 (full conditional-deps assembly, incl. 5 symbol mutate tools; T5 退役 10 lsp_*)", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(40);
+    expect(reg.catalog.all()).toHaveLength(40);
+  });
+
+  // symbol-primary-aci T2：符号查询工具的 description 必须按**符号身份**
+  // 行文——出现「line N / character M」类必填措辞即回到坐标主路径，spec
+  // 「禁止把第几行第几列当作这些工具的主入参」被破坏。
+  it("symbol query tool descriptions describe symbol identity, not line/character — T2", () => {
+    const symbolTools = [
+      "find_symbol",
+      "find_declaration",
+      "find_referencing_symbols",
+      "find_implementations",
+      "get_symbols_overview",
+      "get_hover",
+      "get_diagnostics_for_file",
+      "prepare_call_hierarchy",
+      "list_incoming_calls",
+      "list_outgoing_calls",
+    ];
+    const offenders = reg.catalog
+      .all()
+      .filter((t) => symbolTools.includes(t.name))
+      .filter((t) =>
+        /\bline\b|\bcharacter\b|0-based|1-based/i.test(t.description)
+      );
+    expect(
+      offenders,
+      `coordinate phrasing leaked into: ${offenders.map((o) => o.name).join(", ")}`
+    ).toEqual([]);
+    // 反向：每件都点名 symbol / symbol_path（identity-first 措辞在场）。
+    const withoutIdentity = reg.catalog
+      .all()
+      .filter((t) => symbolTools.includes(t.name))
+      .filter((t) => !/symbol/i.test(t.description));
+    expect(withoutIdentity.map((t) => t.name)).toEqual([
+      // 诊断按文件提问，无符号身份可谈（spec 列表里它就是文件级工具）。
+      "get_diagnostics_for_file",
+    ]);
   });
 });

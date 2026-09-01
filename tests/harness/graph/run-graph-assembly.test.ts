@@ -46,16 +46,18 @@ function makeWebEnv(): Pick<IknowEnv, "web"> {
 }
 
 /** 装配期够用的 fake manager（handler 路径不在本文件覆盖，见 T4）。 */
-const fakeSubagentManager: SubAgentManager = {
+const fakeSubagentManager = {
   spawn: () => ({ taskId: "fake-id" }),
-  queryBuffer: () => ({ status: "not_found" }),
+  queryBuffer: () => ({ status: "not_found" as const }),
   waitFor: () => Promise.reject(new Error("not used")),
   shutdown: () => Promise.resolve(),
   drainCompleted: () => [],
   listActive: () => [],
   abortTask: () => false,
   listSubagents: () => [],
-};
+  // master SubAgentManager 接口扩展:subscribe (mailbox 契约 #361)
+  subscribe: () => () => {},
+} as unknown as SubAgentManager;
 
 // ── 1. 装配快照 ───────────────────────────────────────────────────────────
 
@@ -97,9 +99,27 @@ describe("createGraphAssembly — per-round 装配快照", () => {
 // ── 2. 条件装配 ───────────────────────────────────────────────────────────
 
 describe("run_graph — ACI 条件装配（Gate 3 镜像过滤）", () => {
-  it("ACI_TOOLSET_NAMES 在 run_graph 之后 append-only 追加 query_trace（不重排既有件）", () => {
-    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 2]).toBe("run_graph");
-    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 1]).toBe("query_trace");
+  it("ACI_TOOLSET_NAMES 在 run_graph / query_trace 之后 append-only 追加 worktree 3 件 + 10 件符号查询 + 5 件符号改（不重排既有件）", () => {
+    // 长度 40;实际 idx（基线实测）:
+    //   idx 20 = run_graph
+    //   idx 21 = query_trace
+    //   idx 22 = create-task-worktree
+    //   idx 23 = enter-task-worktree
+    //   idx 24 = exit-task-worktree
+    //   idx 25 = find_symbol
+    //   ...
+    //   idx 35-39 = 5 件符号改(rename / replace / insert_before /
+    //               insert_after / safe_delete),末位 safe_delete_symbol
+    expect(ACI_TOOLSET_NAMES[20]).toBe("run_graph");
+    expect(ACI_TOOLSET_NAMES[21]).toBe("query_trace");
+    expect(ACI_TOOLSET_NAMES[22]).toBe("create-task-worktree");
+    expect(ACI_TOOLSET_NAMES[23]).toBe("enter-task-worktree");
+    expect(ACI_TOOLSET_NAMES[24]).toBe("exit-task-worktree");
+    expect(ACI_TOOLSET_NAMES[25]).toBe("find_symbol");
+    expect(ACI_TOOLSET_NAMES[35]).toBe("rename_symbol");
+    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 1]).toBe(
+      "safe_delete_symbol"
+    );
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
       "read_file",
@@ -132,7 +152,7 @@ describe("run_graph — ACI 条件装配（Gate 3 镜像过滤）", () => {
     expect(reg.inner.list().map((d) => d.name)).not.toContain("run_graph");
   });
 
-  it("manager + graphAssembly 同时在场 → run_graph 入注册表（query_trace 仍在末位）", () => {
+  it("manager + graphAssembly 同时在场 → run_graph 入注册表（query_trace + 10 件符号查询 + 5 件符号改工具在末位）", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -142,7 +162,7 @@ describe("run_graph — ACI 条件装配（Gate 3 镜像过滤）", () => {
     });
     const names = reg.inner.list().map((d) => d.name);
     expect(names).toContain("run_graph");
-    expect(names[names.length - 1]).toBe("query_trace");
+    expect(names[names.length - 1]).toBe("safe_delete_symbol");
     expect(reg.catalog.get("run_graph")).toBeDefined();
   });
 });

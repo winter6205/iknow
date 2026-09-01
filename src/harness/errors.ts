@@ -155,6 +155,33 @@ export class McpLifecycleError extends ToolExecutionError {
 }
 
 /**
+ * T2 (plans/worktree-session-roots.md / ADR-0037 §4): 会话三根解析失败。
+ *
+ * kind 只分两态,因为角色由 `detail` 里的根名(`productRoot` / `taskRoot` /
+ * `installRoot`)承载,调用方无需为每个角色各配一个 kind。「与已固定的根不一致」
+ * 归 `McpLifecycleError.root_mismatch`(非 ask 面的既有校验点),这里不平行开第
+ * 二套。复用 `McpLifecycleError` 的 detail 脱敏(根路径可能带 env 形状的片段)。
+ */
+export type SessionRootErrorKind = "missing_root" | "invalid_root";
+
+export class SessionRootError extends ToolExecutionError {
+  override readonly name: string = "SessionRootError";
+  readonly kind: SessionRootErrorKind;
+  readonly detail: string;
+
+  constructor(
+    kind: SessionRootErrorKind,
+    detail: string,
+    options?: { readonly cause?: unknown }
+  ) {
+    const safeDetail = sanitizeMcpLifecycleDetail(detail);
+    super(`SessionRootError: ${kind} — ${safeDetail}`, options);
+    this.kind = kind;
+    this.detail = safeDetail;
+  }
+}
+
+/**
  * #620 T3 (spec session-jsonl-resume D4): host 注入的 commit 钩子失败信号。
  *
  * loop-engine 对 commit 失败不重试、不吞咽、不映射 stop reason —— 包成

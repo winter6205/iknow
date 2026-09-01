@@ -111,7 +111,7 @@ describe("resolveSubagentWorkerSpawnArgs", () => {
       process.argv[1] = script;
       let child: ChildProcess;
       try {
-        child = createDefaultSubAgentSpawn(join(root, "trace"))(
+        child = createDefaultSubAgentSpawn({ traceDir: join(root, "trace") })(
           {},
           "task-id",
           {} as never

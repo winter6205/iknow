@@ -38,6 +38,7 @@ import type {
   OverlayPrefetchFn,
 } from "../../src/harness/memory/index.ts";
 import { assistantResult, makeCtx, makeDeps } from "./_fixtures.ts";
+import { captureStderrOf } from "../_helpers/capture-stderr.ts";
 
 const roots: string[] = [];
 
@@ -71,23 +72,8 @@ function afterEachCleanup(): void {
   });
 }
 
-/** stderr 拦截（writeErr SSOT）—— 可见降级 / 静默性断言共用。 */
-async function captureStderr(fn: () => Promise<void>): Promise<string> {
-  const chunks: string[] = [];
-  const origWrite = process.stderr.write.bind(process.stderr);
-  (process as { stderr: { write: unknown } }).stderr.write = (
-    chunk: string | Uint8Array
-  ) => {
-    chunks.push(String(chunk));
-    return true;
-  };
-  try {
-    await fn();
-  } finally {
-    process.stderr.write = origWrite;
-  }
-  return chunks.join("");
-}
+// stderr 拦截走共享 helper captureStderrOf（writeErr SSOT）—— 可见降级 /
+// 静默性断言共用（suppress 语义）。
 
 function makeManagerStub(
   opts: {
@@ -194,7 +180,7 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
     // 会话文件缺席（not_found）→ 静默（typed not_found 是「无 rebind 信号」
     // 的正常形态，不算错误）
     ctx.state.conversationId = "conv-unknown";
-    const stderr = await captureStderr(async () => {
+    const stderr = await captureStderrOf(async () => {
       await processChatLine({ line: "q2", ctx });
     });
     assert.equal(rebuilds, 0);
@@ -229,7 +215,7 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
 
     // refresh 的可见降级走 process.stderr（writeErr SSOT）—— 拦截捕获
     let r;
-    const stderr = await captureStderr(async () => {
+    const stderr = await captureStderrOf(async () => {
       r = await processChatLine({ line: "q", ctx });
     });
     assert.equal(r.ranQuery, true);
@@ -640,7 +626,7 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
     };
 
     let r;
-    const stderr = await captureStderr(async () => {
+    const stderr = await captureStderrOf(async () => {
       r = await processChatLine({ line: "q", ctx });
     });
     assert.equal(r.ranQuery, true);
@@ -738,10 +724,12 @@ describe("T6 — chat stable productRoot threading (worktree-mcp-rebind-lifecycl
       "utf8"
     );
     expect(src).toMatch(/productRoot\?:\s*string/);
-    expect(src).toMatch(
-      /opts\.productRoot\s*\?\s*\{\s*productRoot:\s*opts\.productRoot/
-    );
     // wrapper 不得用 process.cwd() 派生 productRoot
     expect(src).not.toMatch(/productRoot:\s*process\.cwd\(\)/);
+    // 「确实透传到了」由真跑守门：tests/cli/runtime-forwards-roots.test.ts 断言
+    // 每个根都落到 build-engine 的 opts 上。这里不再钉转发的**写法** ——
+    // round 4 起 wrapper 不手写白名单，改为 rest 整体透传（手写白名单只关住
+    // 「宿主写了接口没声明的字段」一个方向，反方向漏接编译全绿）。
+    expect(src).toMatch(/withoutUndefined\(passthrough\)/);
   });
 });

@@ -14,13 +14,11 @@
  *     幂等兜底），非事后修补。
  *
  * worker 装配特征：createWorkerDeps 不传 subagentManager / memoryDir /
- * todoDir / mcpManager / backgroundManager（worker.ts:141-146 + #502 T3
- * 旁注）→ spawn_subagent / subagent_result / memory_recall / memory_save /
- * todo_write / list_mcp_resources / read_mcp_resource / bash_output /
- * bash_stop 九件天然缺席。本测试额外显式传 `skillCatalog:
- * createSkillCatalog([])` 让 skill / skill_search 在场以保持全量 22 件
- * 面可断言（32 - 缺席 10 = 22: memory2 + subagent2 + todo_write + mcp2 + bg2
- * + run_graph；query_trace 为常驻只读件）。
+ * todoDir / mcpManager / backgroundManager / graphAssembly（worker.ts:141-146
+ * + #502 T3 旁注）→ 9 件条件化缺席（具体名单见下方 WORKER_BASE_SURFACE 注释）。
+ * 本测试额外显式传 `skillCatalog: createSkillCatalog([])` 让 skill /
+ * skill_search 在场以保持全量面可断言。具体件数 = WORKER_BASE_SURFACE.length,
+ * 以数组为 source of truth（旧 10 件 lsp_* 已退役，不在 WORKER_BASE_SURFACE 中）。
  */
 
 import assert from "node:assert/strict";
@@ -94,20 +92,21 @@ const TEST_ENV: IknowEnv = {
 };
 
 /**
- * worker 装配后 "全量面" 名集（无 deny-list 时）= 22 件：
- *   - 8 基线（bash / read_file / grep / glob / edit_file / write_file /
- *     web_fetch / web_search）
- *   - tool_search
- *   - 10 LSP（lsp_definition ... lsp_diagnostics，#251）
- *   - skill + skill_search（#337，条件化：skillCatalog 在场时入注册表）
- *   - query_trace（T9 常驻只读，不依赖 manager）
- * 条件化缺席（worker 不装配）：memory_recall / memory_save（memoryDir 缺席），
- * spawn_subagent / subagent_result（subagentManager 缺席），todo_write
- * （todoDir 缺席），list_mcp_resources / read_mcp_resource（mcpManager 缺席），
- * bash_output / bash_stop（backgroundManager 缺席,#502 T3 同门），
- * run_graph（graphAssembly 缺席）。
- * 全量 32 - 缺席 10 = 22，与 ACI_TOOLSET_NAMES 在 worker 装配路径下
- * 实际生效集合一致。
+ * worker 装配后 "全量面" 名集（无 deny-list 时）。具体件数 =
+ * `WORKER_BASE_SURFACE.length`，以数组为 source of truth（注释里不写加法
+ * 叙事 — 加法易漂）。T5 旧 10 lsp_* 已退役；WORKER_BASE_SURFACE 不再含
+ * lsp_* 名。
+ *
+ * 条件化缺席（worker 不装配,详见 #468 + D6 决议）：
+ *   - memory_recall / memory_save（memoryDir 缺席）
+ *   - spawn_subagent / subagent_result（subagentManager 缺席）
+ *   - todo_write（todoDir 缺席）
+ *   - list_mcp_resources / read_mcp_resource（mcpManager 缺席）
+ *   - bash_output / bash_stop（backgroundManager 缺席,#502 T3 同门）
+ *   - run_graph（graphAssembly 缺席,D-α T3）
+ *
+ * 本测试通过显式注 skillCatalog 把 skill / skill_search 计入（条件化：
+ * skillCatalog 在场时入注册表），具体件数以 WORKER_BASE_SURFACE 数组长度为准。
  */
 const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
   "bash",
@@ -119,19 +118,29 @@ const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
   "web_fetch",
   "web_search",
   "tool_search",
-  "lsp_definition",
-  "lsp_references",
-  "lsp_hover",
-  "lsp_document_symbol",
-  "lsp_workspace_symbol",
-  "lsp_go_to_implementation",
-  "lsp_prepare_call_hierarchy",
-  "lsp_incoming_calls",
-  "lsp_outgoing_calls",
-  "lsp_diagnostics",
   "skill",
   "skill_search",
   "query_trace",
+  // symbol-primary-aci T2:符号查询 10 件常驻（不依赖 manager，与 lsp.ts SSOT
+  // 共享 lspCtx；旧 10 件 lsp_* 已在 T5 退役）。
+  "find_symbol",
+  "find_declaration",
+  "find_referencing_symbols",
+  "find_implementations",
+  "get_symbols_overview",
+  "get_hover",
+  "get_diagnostics_for_file",
+  "prepare_call_hierarchy",
+  "list_incoming_calls",
+  "list_outgoing_calls",
+  // symbol-primary-aci T4:符号改 5 件常驻（category=write；与查询同门共享
+  // lspCtx；onEdit 走 worker 装配层的 lspNotifier.invalidate 接缝，
+  // 写盘后 textDocument/didChange 与 edit_file 同链路）。
+  "rename_symbol",
+  "replace_symbol_body",
+  "insert_before_symbol",
+  "insert_after_symbol",
+  "safe_delete_symbol",
 ]);
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@
  * Acceptance (plan T7):
  *   - readonly worker (role=explore, bashMode="readonly") → deps.system
  *     含 "Tool constraints for this run" 段, 位置在 persona 之后, LOCKED
- *     5 段不动 (identity < soul < user_profile < bootstrap < memory_layer);
+ *     6 段不动 (identity < soul < usage < user_profile < bootstrap < memory_layer);
  *   - 非 readonly worker (role=general-purpose / role 缺省 / role 未知) →
  *     无该段 (V1 baseline / V1 fallback, byte-stable);
  *   - 段内容 = 允许命令族 (coreutils 读族 / git 只读子命令 / rg / jq) +
@@ -62,6 +62,21 @@ function hermeticOpts(
 
 const CONSTRAINTS_HEADER = "Tool constraints for this run";
 
+/** 从装配后的 system 文本里切出 "## Tool constraints for this run" 段
+ *  (到下一个 "## " 标题或字符串末尾止)。persona 段 (含 explore 的 "lsp_*"
+ *  提示) 与本段无关,内容级断言必须只针对切出来的段,否则会假阳。
+ *  返回 "" 表示未装配该段。 */
+function sliceConstraintsSegment(out: string): string {
+  const start = out.indexOf(CONSTRAINTS_HEADER);
+  if (start < 0) return "";
+  const afterStart = start + CONSTRAINTS_HEADER.length;
+  const rest = out.slice(afterStart);
+  const nextHeader = rest.search(/\n## /);
+  return nextHeader < 0
+    ? out.slice(start)
+    : out.slice(start, afterStart + nextHeader);
+}
+
 // ─── A. 触发条件 (bashMode 决定是否注入) ───────────────────────────────────────
 
 describe("tool constraints segment (#562 T7): 触发条件", () => {
@@ -94,9 +109,9 @@ describe("tool constraints segment (#562 T7): 触发条件", () => {
   });
 });
 
-// ─── B. 段位置 (LOCKED 5 段不动, persona 之后, addendum 关系可选) ─────────────
+// ─── B. 段位置 (LOCKED 6 段不动, persona 之后, addendum 关系可选) ─────────────
 
-describe("tool constraints segment: 段位置 (LOCKED 5 段不动)", () => {
+describe("tool constraints segment: 段位置 (LOCKED 6 段不动)", () => {
   it("readonly worker → Tool constraints 段位置在 persona (catalog body) 之后", async () => {
     const deps = await createWorkerDeps(hermeticOpts({ role: "explore" }));
     const out = (await deps.system?.()) ?? "";
@@ -180,13 +195,37 @@ describe("tool constraints segment: 段内容契约", () => {
     assert.ok(hasReject, "段含 reject 行为说明");
   });
 
-  it("段内容含替代工具引导 (read_file / grep / glob / lsp_*)", async () => {
+  it("段内容反映符号工具优先 + grep 三类回退（不列 lsp_* 作为同等首选）", async () => {
     const deps = await createWorkerDeps(hermeticOpts({ role: "explore" }));
     const out = (await deps.system?.()) ?? "";
-    assert.ok(out.includes("read_file"), "段含 read_file 引导");
-    assert.ok(out.includes("grep"), "段含 grep 引导");
-    assert.ok(out.includes("glob"), "段含 glob 引导");
-    assert.ok(out.includes("lsp_"), "段含 lsp_* 工具引导");
+    const seg = sliceConstraintsSegment(out);
+    assert.ok(seg.length > 0, "constraints 段已切出");
+    // 符号工具优先:10 件新符号查询工具至少要列 find_symbol 与 find_declaration
+    // (其余 8 件由 SYMBOL_QUERY_TOOL_NAMES 锁名,组装入口与 symbol.ts 同源)
+    assert.ok(seg.includes("find_symbol"), "段含 find_symbol");
+    assert.ok(seg.includes("find_declaration"), "段含 find_declaration");
+    // grep 三类回退:明示 grep 仅限三类场景 (非代码 / 还没找到符号名 / 语言服务器不可用)
+    assert.ok(seg.includes("grep"), "段含 grep");
+    assert.ok(/fallback/i.test(seg), "段含 fallback 措辞");
+    assert.ok(
+      /non-code|comments|string literals|configuration/i.test(seg),
+      "段含非代码回退场景措辞"
+    );
+    assert.ok(
+      /unknown symbol|still prefer/i.test(seg),
+      "段含还没找到符号名回退场景措辞"
+    );
+    assert.ok(
+      /language server (is )?unavailable|retry/i.test(seg),
+      "段含语言服务器不可用回退场景措辞"
+    );
+    // 旧 lsp_* 不再与 grep 并列成同等首选(spec SC8)。注意:切片只看
+    // constraints 段本身 —— 上游 persona 段(explore 提示词)仍含 lsp_*,
+    // 与本约束无关。
+    assert.ok(!seg.includes("lsp_"), "段不再列旧 lsp_* 工具引导");
+    // 非 grep/read_file 路径仍可列:read_file / glob 保留作 helper
+    assert.ok(seg.includes("read_file"), "段含 read_file helper");
+    assert.ok(seg.includes("glob"), "段含 glob helper");
   });
 });
 
@@ -199,7 +238,7 @@ describe("toolConstraintsSegment (#562 T7) 纯函数", () => {
     assert.ok(out.length > 100, "段非空");
   });
 
-  it("mode='readonly' → 文本含允许族 + reject + 替代工具三类关键字", () => {
+  it("mode='readonly' → 文本含允许族 + reject + 符号工具优先三类关键字", () => {
     const out = toolConstraintsSegment("readonly");
     // 允许族
     assert.ok(
@@ -208,8 +247,9 @@ describe("toolConstraintsSegment (#562 T7) 纯函数", () => {
     assert.ok(out.includes("git"));
     // reject
     assert.match(out, /reject|not allowed|forbidden|denied/i);
-    // 替代工具
-    assert.ok(out.includes("read_file"));
-    assert.ok(out.includes("lsp_"));
+    // 符号工具优先 + grep 三类回退(spec SC8)
+    assert.ok(out.includes("find_symbol"), "段含 find_symbol");
+    assert.ok(out.includes("find_declaration"), "段含 find_declaration");
+    assert.ok(!out.includes("lsp_"), "段不再列旧 lsp_* 工具引导");
   });
 });

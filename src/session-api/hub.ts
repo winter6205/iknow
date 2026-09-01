@@ -69,6 +69,7 @@ import type { SubAgentTerminalSubscriber } from "../harness/subagent/mailbox.js"
 import { getVersion } from "../cli/usage.js"; // SC-W 6/7: agentVersion 注入(与 session-api/http.ts 同向 import,无循环)
 import {
   createTaskWorktreeProvisioner,
+  mainCheckoutOf,
   type TaskWorktreeProvisioner,
 } from "./worktree-rebind.js";
 import type { WorktreeProvisionContext } from "../harness/isolation/worktree-gate.js";
@@ -165,7 +166,6 @@ import {
   extractRecentUserTasks,
   isTurnQuery,
   messageText,
-  projectActivity,
   projectThinkingView,
   projectToolCalls,
   TASK_EXCERPT_PREFIX,
@@ -449,8 +449,6 @@ export function projectMessagesToTurns(
     const turnMessages = messages.slice(i, end);
     const finalText = findFinalTextInSlice(turnMessages);
     turnIndex++;
-    const activity = projectActivity(turnMessages, mask);
-    const hasActivityTools = activity.some((item) => item.type === "tool");
     const thinking = projectThinkingView(turnMessages, mask);
     const toolCalls = projectToolCalls(turnMessages, mask);
     turns.push({
@@ -459,7 +457,6 @@ export function projectMessagesToTurns(
         finalText,
         stopReason: "completed",
         turnCount: turnIndex,
-        ...(hasActivityTools ? { activity } : {}),
         ...(thinking !== undefined ? { thinking } : {}),
         ...(toolCalls !== undefined ? { toolCalls } : {}),
       },
@@ -594,6 +591,16 @@ export type SessionHubOptions = {
    */
   readonly productRoot?: string;
   /**
+   * Review round 3 (ADR-0037 §4): 项目身份根 —— 宿主启动时钉一次，跨 rebind
+   * 不变。`buildProductionEngine` 透传给 `buildHarnessEngine`。
+   *
+   * 缺席回退链是 `boundRoot`（picker / `--workspace-root` 绑定的那个路径）再到
+   * `mainCheckoutOf(root)`：`bindWorkspace` 只校验绝对且存在，**不**要求是仓根，
+   * 所以绑到 `/repo/packages/app` 完全合法；改绑后拿 `root` 现算会让身份与记忆
+   * 库命名空间从子目录跳到仓根。
+   */
+  readonly projectIdentityRoot?: string;
+  /**
    * #128 T8:验证闭环配置 (settings.verify 段经 serve.ts 构造传入)。
    * 缺席 = 透明关闭, postMessage 走原 run 路径逐字节不变 (SC7);
    * 配置时每轮 run 被 runVerifyLoop 包裹 (仅 StopReason=completed 触发
@@ -726,6 +733,7 @@ export class SessionHub {
    * `buildProductionEngine` / reload 只消费它派生的 mcpConfigRoot。
    */
   private readonly productRoot: string | undefined;
+  private readonly projectIdentityRoot: string | undefined;
   /** #128 T8: 验证闭环配置（settings.verify 段；缺席 = 透明关闭）。 */
   private readonly verifyConfig: VerifyConfig | undefined;
   /** #356 High#4: built.shutdown 缓存（组合句柄；ensureDeps 懒取，hub.shutdown 触发）。 */
@@ -863,6 +871,7 @@ export class SessionHub {
     this.workspaceRoot = opts.workspaceRoot;
     // T6:稳定 productRoot（缺席 → workspaceRoot，保持单根形态可编译可跑）。
     this.productRoot = opts.productRoot ?? opts.workspaceRoot;
+    this.projectIdentityRoot = opts.projectIdentityRoot;
     // An entry-resolved root is already a valid bind for hosts that assemble
     // the Hub with a root (serve/TUI). Picker-driven hosts can still call
     // bindWorkspace later to change it.
@@ -890,9 +899,23 @@ export class SessionHub {
    * Hub-visible provision seam for harness hosts (including TUI). A
    * successful changed result is recorded for this conversation and is
    * persisted only by the next conditional save.
+   *
+   * T7 adoption anchor: the conversation's PERSISTED workspaceRoot is loaded
+   * here and handed to the provisioner — a session durably anchored at the
+   * engine's (task-worktree-shaped) root has explicitly entered it, so
+   * provision adopts it even on another conversation's tree. An unknown
+   * session contributes no anchor (fail-closed contract unchanged).
    */
   async provisionWorktree(ctx: WorktreeProvisionContext): Promise<string> {
-    const provisionedRoot = await this.worktreeProvisioner.provision(ctx);
+    const anchorSessionRoot = await this.loadSessionWorkspaceRoot(
+      ctx.conversationId
+    );
+    const provisionedRoot = await this.worktreeProvisioner.provision(
+      ctx,
+      anchorSessionRoot === undefined
+        ? undefined
+        : { sessionWorkspaceRoot: anchorSessionRoot }
+    );
     if (ctx.conversationId !== undefined) {
       this.markWorktreeRootDirty({
         conversationId: ctx.conversationId,
@@ -901,6 +924,80 @@ export class SessionHub {
       });
     }
     return provisionedRoot;
+  }
+
+  /** Best-effort persisted workspaceRoot read for the T7 adoption anchor. */
+  private async loadSessionWorkspaceRoot(
+    conversationId: string | undefined
+  ): Promise<string | undefined> {
+    if (conversationId === undefined || conversationId.length === 0) {
+      return undefined;
+    }
+    try {
+      const file = await this.store.load(conversationId);
+      return file.workspaceRoot;
+    } catch {
+      return undefined; // unknown session → no anchor, fail-closed downstream
+    }
+  }
+
+  /**
+   * T7 Hub-visible enter seam (serve/chat harness hosts; TUI wires
+   * provision-only): move this conversation onto an EXISTING task worktree
+   * of this repository (owner = targetConversationId). The provisioner
+   * validates the tree (exists /
+   * linked / same repo) and rebinds in memory; the changed root is recorded
+   * for this conversation and persisted only by the next conditional save —
+   * the same dirty-root protocol the create path uses. The tree itself is
+   * never created, moved, or checked out.
+   */
+  async enterWorktree(ctx: {
+    conversationId?: string;
+    root: string;
+    targetConversationId: string;
+  }): Promise<string> {
+    const enteredRoot = await this.worktreeProvisioner.enter(ctx);
+    if (ctx.conversationId !== undefined) {
+      this.markWorktreeRootDirty({
+        conversationId: ctx.conversationId,
+        currentRoot: ctx.root,
+        provisionedRoot: enteredRoot,
+      });
+    }
+    return enteredRoot;
+  }
+
+  /**
+   * T8 Hub-visible exit seam (serve/chat harness hosts; TUI wires
+   * provision-only): move this conversation back to its main repo root from
+   * the task worktree it is currently on. The provisioner derives the main
+   * root from the tree
+   * (restart-safe) and rebinds in memory; the changed root is recorded for
+   * this conversation and persisted only by the next conditional save. The
+   * task worktree is preserved — no `git worktree remove` anywhere.
+   */
+  async exitWorktree(ctx: {
+    conversationId?: string;
+    root: string;
+  }): Promise<string> {
+    const anchorSessionRoot = await this.loadSessionWorkspaceRoot(
+      ctx.conversationId
+    );
+    const repoRoot = await this.worktreeProvisioner.exit({
+      conversationId: ctx.conversationId,
+      root: ctx.root,
+      ...(anchorSessionRoot !== undefined
+        ? { sessionWorkspaceRoot: anchorSessionRoot }
+        : {}),
+    });
+    if (ctx.conversationId !== undefined) {
+      this.markWorktreeRootDirty({
+        conversationId: ctx.conversationId,
+        currentRoot: ctx.root,
+        provisionedRoot: repoRoot,
+      });
+    }
+    return repoRoot;
   }
 
   private markWorktreeRootDirty(opts: {
@@ -2641,7 +2738,19 @@ export class SessionHub {
     }
     const env = this.envProvider ? this.envProvider() : loadIknowEnv();
     // T6:productRoot 稳定；workspaceRoot/cwd/sandboxRoot 跟随当前 task root。
-    const productRoot = this.productRoot ?? this.workspaceRoot ?? root;
+    // 末档从 `root` 改为 `mainCheckoutOf(root)`（T6 / ADR-0037 §4）：宿主没显式
+    // 传两个根时（serve 默认、TUI 之外的调用方），改绑后 root 就是 task 树，
+    // 直接当 productRoot 会把项目身份与 per-root 状态一起搬到裸树上。树是
+    // `<main>/.iknow/worktrees/<conv>`，主 checkout 由同一命名 SSOT 派生，
+    // 重启后恢复到树上的会话同样得到主仓。
+    const productRoot =
+      this.productRoot ?? this.workspaceRoot ?? mainCheckoutOf(root);
+    // Review round 3:项目身份根与 productRoot 分开 —— 后者服务 mcpConfigRoot /
+    // 状态锚，取自宿主的 workspaceRoot；身份要的是操作员绑定的那个项目。
+    // `bindWorkspace` 不要求绑定路径是仓根（只校验绝对且存在），所以
+    // `boundRoot` 可能是 `/repo/packages/app`；拿 `root` 现算会在改绑后跳到仓根。
+    const projectIdentityRoot =
+      this.projectIdentityRoot ?? this.boundRoot ?? mainCheckoutOf(root);
     const built = await buildHarnessEngine({
       env,
       askUser: this.askUser,
@@ -2649,6 +2758,7 @@ export class SessionHub {
       sandboxRoot: root,
       workspaceRoot: root,
       productRoot,
+      projectIdentityRoot,
       // Review High-2 (hard req 9): reuse the startup settings object — a
       // worktree-rooted loadIknowSettings({cwd}) would silently drop project
       // settings (`.iknow/` is gitignored inside the worktree).
@@ -2661,6 +2771,21 @@ export class SessionHub {
       worktreeIsolation: {
         provision: ({ conversationId, root: sessionRoot }) =>
           this.provisionWorktree({ conversationId, root: sessionRoot }),
+        // T7:enter-task-worktree 工具缝 —— 会话显式进入本仓已存在的 task
+        // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
+        worktreeEnter: ({
+          conversationId,
+          root: sessionRoot,
+          targetConversationId,
+        }) =>
+          this.enterWorktree({
+            conversationId,
+            root: sessionRoot,
+            targetConversationId,
+          }),
+        // T8:exit-task-worktree 工具缝 —— 会话回到主仓根，树保留不删。
+        worktreeExit: ({ conversationId, root: sessionRoot }) =>
+          this.exitWorktree({ conversationId, root: sessionRoot }),
       },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
@@ -2758,6 +2883,21 @@ export class SessionHub {
       worktreeIsolation: {
         provision: ({ conversationId, root: sessionRoot }) =>
           this.provisionWorktree({ conversationId, root: sessionRoot }),
+        // T7:enter-task-worktree 工具缝 —— 会话显式进入本仓已存在的 task
+        // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
+        worktreeEnter: ({
+          conversationId,
+          root: sessionRoot,
+          targetConversationId,
+        }) =>
+          this.enterWorktree({
+            conversationId,
+            root: sessionRoot,
+            targetConversationId,
+          }),
+        // T8:exit-task-worktree 工具缝 —— 会话回到主仓根，树保留不删。
+        worktreeExit: ({ conversationId, root: sessionRoot }) =>
+          this.exitWorktree({ conversationId, root: sessionRoot }),
       },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
@@ -2928,8 +3068,6 @@ export class SessionHub {
     const rawFinalText = result.finalText ?? "";
     const maskedFinalText = mask(rawFinalText);
     const turnMessages = opts.turnMessages ?? result.messages;
-    const activity = projectActivity(turnMessages, mask);
-    const hasActivityTools = activity.some((item) => item.type === "tool");
     const thinking = projectThinkingView(turnMessages, mask);
     const toolCalls = projectToolCalls(turnMessages, mask);
     return {
@@ -2938,7 +3076,6 @@ export class SessionHub {
         finalText: maskedFinalText,
         stopReason: result.stopReason,
         turnCount: result.turnCount,
-        ...(hasActivityTools ? { activity } : {}),
         // T1: optional fields — omitted entirely when undefined (byte-stable
         // for turns without thinking or tool use).
         ...(thinking !== undefined ? { thinking } : {}),

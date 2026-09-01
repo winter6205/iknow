@@ -77,57 +77,93 @@ export type { BuiltEngine } from "../harness/build-engine.js";
  * #162 三入口装配 askUser：`askUser: AskUser` 是必传参数；缺则启动 throw
  * `ask_inlet_missing`（在 `buildHarnessEngine` 内部抛）。
  */
+/**
+ * CLI wrapper 的装配 opts（导出以便宿主 **标注** 自己的 opts 字面量）。
+ *
+ * 为什么必须标注：宿主写了本接口没声明的字段会被静默丢掉，而未标注的 `const`
+ * 不触发 TS 的 excess-property 检查（review round 3 实测：`projectIdentityRoot`
+ * 在 `iknow chat` 上整条失效）。
+ *
+ * 反方向（本接口声明了、转发漏接）编译器管不了，所以转发**不再手写白名单**：
+ * 除三个需要变形的字段外，其余按 rest 整体透传，新字段自动跟上
+ * （review round 4：手写白名单只关住了一个方向）。
+ */
+export interface CliBuildEngineOpts {
+  askUser: AskUser;
+  surface?: "chat" | "tui" | "ask" | "serve";
+  /** #194 T6:memory 层开关透传(ask 显式关,chat 显式开;缺席默认 true)。 */
+  memory?: { readonly enabled: boolean };
+  /** W2: 权限模式上下文。chat REPL 传可变 context(可被 /permissions 翻);
+   *  ask/serve 传静态 context(不可变但类型相同)。缺省 → 引擎内 default。 */
+  permissionMode?: PermissionModeContext;
+  /** D-α T3 / ADR-0030: graph 编排 overlay holder 透传（chat 传可变
+   *  context；ask 不传 → run_graph 与编排段都不装配）。 */
+  graphMode?: GraphModeContext;
+  /** #440 T1-fix:host 注入的 session-scoped todoDir,用于 todo_write 在主
+   *  loop 装配(per-conversationId resolution 是后续 ticket,见 todo-write.ts
+   * resolveSessionTodoDir 注释)。chat/ask CLI 入口由调用方解析后透传。 */
+  todoDir?: string;
+  /** ADR-0019 (T2): per-root state anchor — CLI `--workspace-root` flag 透传
+   *  到 build-engine(priority chain `[explicit, env, cwd]` 在 build-engine
+   *  层执行)。CLI 入口(runChat/runOneShot/runTui/runServe)各自解析后透传。 */
+  workspaceRoot?: string;
+  /**
+   * T6 / worktree-mcp-rebind-lifecycle:稳定主 checkout root。首次装配捕获后
+   * 跨 rebind 原样透传；`resolveMcpRoots` 由此派生 `mcpConfigRoot`。wrapper
+   * 只透传，不从 `process.cwd()` 重算。
+   */
+  productRoot?: string;
+  /**
+   * Review round 2/3 (ADR-0037 §4): 项目身份根 —— 宿主启动时钉一次，跨 rebind
+   * 原样透传。wrapper 只透传，不从 `process.cwd()` 重算；判在场用
+   * `!== undefined` 而非真值 —— 空串必须透下去触 SSOT 的 fail-closed，
+   * 真值判会把它吞掉，装配层继而静默退 `mainCheckoutOf(cwd)`
+   * （review round 4 实测）。
+   */
+  projectIdentityRoot?: string;
+  /** Crash diagnostics / worker trace root for subagent lifecycle evidence. */
+  subagentDiagnosticsDir?: string;
+  /** Trace service for unconditional subagent lifecycle evidence. */
+  subagentTrace?: TraceService;
+  /**
+   * Review High-1 (2026-08-29 / ADR-0037): worktree isolation host 缝 ——
+   * 透传给 build-engine。开关本体由 build-engine 从 `settings` 在启动加载点
+   * 读取（硬要求 9）；ON 时 chat 引擎的 mutate 被门禁拦截，provision 负责
+   * 建 task worktree + 仅本会话根改绑。缺席 → 不包装（行为与今日一致）。
+   */
+  worktreeIsolation?: import("../harness/isolation/worktree-gate.js").WorktreeIsolationHostOpts;
+  /**
+   * Review High-2 (2026-08-29 / 硬要求 9): 启动装配的 settings 对象透传。
+   * rebind 后 per-root 重建（chat rebuildDeps 缝）复用同一对象 —— worktree
+   * 内 `.iknow/` 缺席（gitignore），绝不隐式重载 project settings。缺席 →
+   * build-engine 自行缺省加载。
+   */
+  settings?: import("../config/settings.js").IknowSettings;
+  /**
+   * Review High-1: 引擎根覆盖（per-root 重建时传 task worktree 路径）。
+   * 缺省 = process.cwd()（与 build-engine 缺省一致）。
+   */
+  cwd?: string;
+}
+
+/**
+ * 抹掉值为 `undefined` 的键（`exactOptionalPropertyTypes` 下「键在但值是
+ * undefined」与「键不在」类型不同）。只看 `undefined`，不做真值过滤。
+ *
+ * 返回类型是「每个键可选、且值不含 `undefined`」——不是 `T`：删键后必填字段
+ * 可能已不在，cast 回 `T` 是不成立的（review round 5）。
+ */
+function withoutUndefined<T extends object>(
+  value: T
+): { [K in keyof T]?: Exclude<T[K], undefined> } {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, v]) => v !== undefined)
+  ) as { [K in keyof T]?: Exclude<T[K], undefined> };
+}
+
 export async function buildHarnessEngine(
   bundle: RuntimeBundle,
-  opts: {
-    askUser: AskUser;
-    surface?: "chat" | "tui" | "ask" | "serve";
-    /** #194 T6:memory 层开关透传(ask 显式关,chat 显式开;缺席默认 true)。 */
-    memory?: { readonly enabled: boolean };
-    /** W2: 权限模式上下文。chat REPL 传可变 context(可被 /permissions 翻);
-     *  ask/serve 传静态 context(不可变但类型相同)。缺省 → 引擎内 default。 */
-    permissionMode?: PermissionModeContext;
-    /** D-α T3 / ADR-0030: graph 编排 overlay holder 透传（chat 传可变
-     *  context；ask 不传 → run_graph 与编排段都不装配）。 */
-    graphMode?: GraphModeContext;
-    /** #440 T1-fix:host 注入的 session-scoped todoDir,用于 todo_write 在主
-     *  loop 装配(per-conversationId resolution 是后续 ticket,见 todo-write.ts
-     * resolveSessionTodoDir 注释)。chat/ask CLI 入口由调用方解析后透传。 */
-    todoDir?: string;
-    /** ADR-0019 (T2): per-root state anchor — CLI `--workspace-root` flag 透传
-     *  到 build-engine(priority chain `[explicit, env, cwd]` 在 build-engine
-     *  层执行)。CLI 入口(runChat/runOneShot/runTui/runServe)各自解析后透传。 */
-    workspaceRoot?: string;
-    /**
-     * T6 / worktree-mcp-rebind-lifecycle:稳定主 checkout root。首次装配捕获后
-     * 跨 rebind 原样透传；`resolveMcpRoots` 由此派生 `mcpConfigRoot`。wrapper
-     * 只透传，不从 `process.cwd()` 重算。
-     */
-    productRoot?: string;
-    /** Crash diagnostics / worker trace root for subagent lifecycle evidence. */
-    subagentDiagnosticsDir?: string;
-    /** Trace service for unconditional subagent lifecycle evidence. */
-    subagentTrace?: TraceService;
-    /**
-     * Review High-1 (2026-08-29 / ADR-0037): worktree isolation host 缝 ——
-     * 透传给 build-engine。开关本体由 build-engine 从 `settings` 在启动加载点
-     * 读取（硬要求 9）；ON 时 chat 引擎的 mutate 被门禁拦截，provision 负责
-     * 建 task worktree + 仅本会话根改绑。缺席 → 不包装（行为与今日一致）。
-     */
-    worktreeIsolation?: import("../harness/isolation/worktree-gate.js").WorktreeIsolationHostOpts;
-    /**
-     * Review High-2 (2026-08-29 / 硬要求 9): 启动装配的 settings 对象透传。
-     * rebind 后 per-root 重建（chat rebuildDeps 缝）复用同一对象 —— worktree
-     * 内 `.iknow/` 缺席（gitignore），绝不隐式重载 project settings。缺席 →
-     * build-engine 自行缺省加载。
-     */
-    settings?: import("../config/settings.js").IknowSettings;
-    /**
-     * Review High-1: 引擎根覆盖（per-root 重建时传 task worktree 路径）。
-     * 缺省 = process.cwd()（与 build-engine 缺省一致）。
-     */
-    cwd?: string;
-  }
+  opts: CliBuildEngineOpts
 ): Promise<BuiltEngine> {
   // review-fix (M1 / H1/H2): CLI entry 层条件 resolve workspaceRoot —— 当
   // explicit flag 或 env SSOT 任一存在时,在 entry 集中走 resolver 拿到
@@ -160,28 +196,29 @@ export async function buildHarnessEngine(
   // permissionMode (W2) 透传到 policy.mode,chat REPL 持 context 翻 /permissions;
   // workspaceRoot (ADR-0019 T2) 透传到 per-root identity / memoryDir seam;
   // todoDir (#440 T1-fix) 透传到 registry 让 todo_write 在场(surface !== ask 限定)。
+  // 只有这三个字段需要 wrapper 变形（env 换源 / surface 兜默认 / workspaceRoot
+  // 走 entry 层 resolver），其余一律 rest 整体透传 —— 白名单一手写，接口加了
+  // 新字段而转发漏接就是编译全绿的静默丢弃（review round 4）。
+  const {
+    askUser,
+    surface,
+    workspaceRoot: _resolvedByEntry,
+    ...passthrough
+  } = opts;
   return buildCoreEngine({
+    // 显式给了 `undefined` 的键必须抹掉:`exactOptionalPropertyTypes` 下
+    // `{ cwd: undefined }` 与「没有 cwd」不是一回事。值本身不做真值过滤 ——
+    // 空串要透下去触各根的 fail-closed，不能在这里被吞。
+    ...withoutUndefined(passthrough),
+    // 透传**之后**再写 wrapper 自己负责的字段:rest 里若混进 `env` 等本层
+    // 注入的键（本接口没声明，但类型只在字面量上挡得住），也覆盖不掉注入值
+    // （review round 5）。
     env: bundle.env,
-    askUser: opts.askUser,
-    surface: opts.surface ?? "chat",
-    ...(opts.memory ? { memory: opts.memory } : {}),
-    ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
-    // D-α T3:graph overlay holder 透传 — 在场才装 run_graph + 编排段。
-    ...(opts.graphMode ? { graphMode: opts.graphMode } : {}),
-    ...(opts.todoDir ? { todoDir: opts.todoDir } : {}),
-    ...(resolvedWorkspaceRoot ? { workspaceRoot: resolvedWorkspaceRoot } : {}),
-    ...(opts.productRoot ? { productRoot: opts.productRoot } : {}),
-    ...(opts.subagentDiagnosticsDir
-      ? { subagentDiagnosticsDir: opts.subagentDiagnosticsDir }
+    askUser,
+    surface: surface ?? "chat",
+    ...(resolvedWorkspaceRoot !== undefined
+      ? { workspaceRoot: resolvedWorkspaceRoot }
       : {}),
-    ...(opts.subagentTrace ? { subagentTrace: opts.subagentTrace } : {}),
-    // Review High-2 / High-1 (2026-08-29):启动 settings 对象 + isolation
-    // host 缝 + per-root 重建根透传（开关读取仍在 build-engine 启动加载点）。
-    ...(opts.settings ? { settings: opts.settings } : {}),
-    ...(opts.worktreeIsolation
-      ? { worktreeIsolation: opts.worktreeIsolation }
-      : {}),
-    ...(opts.cwd ? { cwd: opts.cwd } : {}),
   });
 }
 
