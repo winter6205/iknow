@@ -353,14 +353,14 @@ describe("worker tool surface: 权限 — 判官只读（allow-list 推导）", 
 });
 
 describe("worker tool surface: 隔离门禁 — symbol 写工具", () => {
-  it("真实 explore worker 工具面含 symbol 写工具时应判为可写", async () => {
+  it("真实 explore worker 工具面不含 symbol 写工具且判为只读", async () => {
     const deps = await createWorkerDeps(hermeticOpts({ role: "explore" }));
     const workerToolNames = deps.registry.list().map((tool) => tool.name);
 
     for (const name of SYMBOL_MUTATE_TOOL_NAMES) {
       assert.ok(
-        workerToolNames.includes(name),
-        `真实 worker 工具面应包含 ${name}`
+        !workerToolNames.includes(name),
+        `真实 worker 工具面不应包含 ${name}`
       );
     }
 
@@ -368,8 +368,8 @@ describe("worker tool surface: 隔离门禁 — symbol 写工具", () => {
       role: "explore",
       availableTools: workerToolNames,
     });
-    assert.equal(decision.conclusion, "write");
-    assert.equal(decision.reason, "write_tools_available");
+    assert.equal(decision.conclusion, "readonly");
+    assert.equal(decision.reason, "write_tools_denied_bash_readonly");
   });
 
   it("真实 explore worker 工具面不含文件写工具时仍判为只读", async () => {
@@ -426,7 +426,7 @@ describe("worker tool surface: T3 catalog deny contract", () => {
       const workerToolNames = deps.registry.list().map((tool) => tool.name);
       assert.ok(!workerToolNames.includes("edit_file"));
       assert.ok(!workerToolNames.includes("write_file"));
-      assert.ok(workerToolNames.includes("rename_symbol"));
+      assert.ok(!workerToolNames.includes("rename_symbol"));
 
       const tool = createSpawnSubAgentTool({ manager });
       await tool.handler({
@@ -436,14 +436,12 @@ describe("worker tool surface: T3 catalog deny contract", () => {
       });
 
       assert.equal(payloads.length, 1);
-      // The T3-before and current manager payloads are byte-identical:
-      // catalog deny + role remain explicit on the worker wire.
       assert.equal(
         JSON.stringify(payloads[0]),
         JSON.stringify({
           task: "explore-only",
           sandboxRoot: root,
-          disallowedTools: ["edit_file", "write_file"],
+          disallowedTools: [...FILE_WRITE_TOOL_NAMES],
           role: "explore",
         })
       );

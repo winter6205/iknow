@@ -75,9 +75,9 @@ describe("subagent isolation capability", () => {
     assert.deepEqual(decision.effectiveTools, ["bash", "read_file"]);
   });
 
-  it("rejects symbol writers when the parent only denies legacy file tools and bash", () => {
+  it("rejects symbol writers when only legacy file tools and bash are denied", async () => {
     const decision = assessSubagentIsolation({
-      role: "explore",
+      role: "general-purpose",
       availableTools: [
         "bash",
         "edit_file",

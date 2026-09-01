@@ -1285,7 +1285,6 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       const result = await runSpawn(built, {
         task: "inspect the repository",
         subagent_type: "explore",
-        disallowedTools: [...FILE_WRITE_TOOL_NAMES],
         wait: false,
       });
 
@@ -1298,7 +1297,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
     }
   });
 
-  it("blocks explore when the real worker surface retains symbol writers", async () => {
+  it("explore catalog deny includes symbol writers so default spawn stays on the main repo", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-t4-symbol-worker-"));
     const workerDeps = await createWorkerDeps({
       env: makeEnv("sk-test-t4-symbol-worker"),
@@ -1316,11 +1315,11 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
     });
     let provisioned = 0;
     try {
-      expect(workerToolNames).toEqual(
-        expect.arrayContaining([...SYMBOL_MUTATE_TOOL_NAMES])
-      );
-      expect(workerDecision.conclusion).toBe("write");
-      expect(workerDecision.reason).toBe("write_tools_available");
+      for (const name of SYMBOL_MUTATE_TOOL_NAMES) {
+        expect(workerToolNames).not.toContain(name);
+      }
+      expect(workerDecision.conclusion).toBe("readonly");
+      expect(workerDecision.reason).toBe("write_tools_denied_bash_readonly");
 
       const { manager, spawnedTasks } = makeTestSubagentManager();
       const built = await buildHarnessEngine({
@@ -1345,9 +1344,8 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
         wait: false,
       });
 
-      expect(result.kind).toBe("execution_failed");
-      expect(result.message).toContain("create-task-worktree ACI tool");
-      expect(spawnedTasks).toEqual([]);
+      expect(result.kind).toBe("ok");
+      expect(spawnedTasks).toEqual(["inspect the repository"]);
       expect(provisioned).toBe(0);
       await built.shutdown?.();
     } finally {

@@ -102,4 +102,4 @@ OVERALL: yes — 全 5 项通过，可进入 T1 实施；各 bullet 仍受 per-t
      - 仅 deny `write_file` + `edit_file`、bash 仍为 `any` 的派发**被拦**（第二维生效，堵住假只读）。
      - 隔离 OFF 时派发路径字节不变。
    - [blocks: T2, T3]
-   - Status: [x] landed — 门禁 `0517ecb1` + symbol 写工具 `c16ac3a7` + rebound `sandboxRoot` 断言 `af7624e6`（已复跑绿）。`c16ac3a7` 把 `SYMBOL_MUTATE_TOOL_NAMES` 纳入写能力，比本文「两维判据」更严；验收测试覆盖计划四条 + rebound envelope。脏工作树另有 T1/interrupt/TUI，**不进** T4 PR。
+   - Status: [x] landed — 门禁 `0517ecb1` + symbol 写工具 `c16ac3a7` + rebound `sandboxRoot` 断言 `af7624e6`。explore catalog deny 与 `FILE_WRITE_TOOL_NAMES` 对齐，默认 explore 主仓放行（无额外 parent deny）。脏工作树另有 T1/interrupt/TUI，**不进** T4 PR。
