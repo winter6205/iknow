@@ -84,6 +84,12 @@ OVERALL: PASS — hand to writing-plans
    - `tests/subagent/worker-tool-surface.test.ts:111` — `WORKER_BASE_SURFACE` 是子代理 worker 的 **allow-list 基线**（含 `query_trace` 于 `:123`），`:249-250` 用 `assert.deepEqual(innerNames, [...WORKER_BASE_SURFACE])` 断**全等**。→ 这不是机械 +1，是**策略位**：往 registry 加件即扩子代理能力面。**裁定 = 纳入**（两件都是 read-only，与既在名单内的 `query_trace` 同门，排除它们会让 worker 能查 trace 却不能列会话／取全文，是更差的不对称）。该裁定写进 T5 测注释，不得当成一条意外回归「修掉」。注意 `:72` 的 `disallowedTools` 与 judge 侧 deny 都是派生的，不受影响。
    
    确认**安全**（从 `ACI_TOOLSET_NAMES` 派生、自动跟随）：`tests/harness/verify/judge-input.test.ts:106,245`、`tests/harness/verify/three-stage-flow.test.ts:1252`。`tests/harness/graph/run-graph-assembly.test.ts:113-116` 按下标锁定 idx 20/21/22/23 —— append-only 只动尾部，**只要不重排就不破**，T5/T6 保持 append。
+
+   - **上列「8 处」不全：按「尾部追加即红」口径实测是 14 处（8 + 6），另有 2 处只失真不红。** 本清单逐条 `grep` 现核于 HEAD `19248392`，行号以本次为准：
+     - 原 8 处不变（`registry.test.ts:211`、`d9-description-guard.test.ts:245`/`:246`、`ensure-deps-aci-tools.test.ts:40`+`:130`、`build-engine.test.ts:59`、`server.test.ts:45`、`startup.test.ts:90`/`:122`、`deps-tools.test.ts:96`/`:142`、`worker-tool-surface.test.ts:111`+`:249-250`）。
+     - **plan 漏列、且确实会红的 6 处**（都是「取尾部/数尾部」断言，不是下标 pin）：`tests/harness/aci/tools/query-trace.test.ts:267`（`ACI_TOOLSET_NAMES.at(-1) === "safe_delete_symbol"`）、`:271`（`ACI_TOOLSET_NAMES.length - queryTraceIndex - 1 === 18` → 19）、`:277`（`registry.inner.list().at(-1)?.name === "safe_delete_symbol"`）、`tests/harness/graph/run-graph-assembly.test.ts:120-121`（**同一文件**取末元素，上面那句「只要不重排就不破」对它不成立）、`tests/harness/graph/run-graph-assembly.test.ts:165`（`names[names.length - 1]`）、`tests/harness/aci/bash-output-stop.test.ts:459`（`names.length === 40`）。
+     - **只失真不红的 2 处**（改不改不影响绿，但不改就说谎）：`registry.test.ts:120` 与 `bash-output-stop.test.ts:456`/`:202` 的测名/注释里写死的「40 件」；另 `registry.test.ts:273` 的 `slice(35, 40)` 追加后仍只取到旧末 5 项 = 覆盖缺口（不红）。T5b 一并把措辞改真，不新开票。
+     - 两处**无关的 40** 别误伤：`tests/harness/graph/progress.test.ts:89`（graph 节点数）、`tests/tui/rewind.test.ts:633`（label 字符长度）——与 registry 无关，不得顺手改。
 2. **worktree 内 `trace/` 是空的（0 个 `.jsonl`）**，plan 的尺寸实测与复现记录 `2dff031d` 都住在主仓（`/home/winner/projects/iknow/trace/82967186-f249-4d64-ba7a-50286a5012cc.jsonl`）。→ T3 的 AC ⑤「复现记录走 `detail=tool_results` 在 4000 内成功返回」**不得**写成依赖开发者本地 trace 目录的测；改为在 `tests/traceserver/` 内构造同形状夹具（单条 llm_call、原始行 >4000 字节、多 messages + tool_result blob）。主仓那条记录可用于一次性人工核对量级，不进断言。这也顺带满足 CI 可复现。
 3. **`OUTPUT_HARD_CAP`（`src/harness/tools/executor.ts:30`）是未导出的 `const`。** T6 的 MCP backstop「值 = 20000」**不能**靠 `import` 取——那会把 `harness/` 拖进 `src/trace-mcp/`，与假设 5「MCP 模块 transport only」和 SC12 相抵。落法：在 tool face 的序列化 owner 侧（`src/traceserver/`，非 harness）定义具名常量 `= 20_000`，注释指名「值取自 `src/harness/tools/executor.ts:30` 的 `OUTPUT_HARD_CAP`，同值是为不犯 ADR-0006:29 双层截断」，并配一条断言锁该数值 + 一条注释指向来源。两处同值靠断言锁，不靠 import 耦合。**该落法有仓库先例，不是新造**：`src/harness/aci/tools/web-fetch.ts:36`（`/** 与 executor OUTPUT_HARD_CAP / ADR-0006 对齐；本模块复制常量，不反向 import executor。 */ export const FETCH_OUTPUT_BUDGET = 20_000`）、`src/harness/memory/tools/recall.ts:32`（`const OUTPUT_HARD_CAP = 20_000` 作 self-floor）、`src/harness/aci/tools/tool-search.ts:70`（「镜像 `tools/executor.ts` 的 OUTPUT_HARD_CAP」）三处都是「工具侧自带同值常数 + 注释指名来源」，T6 沿用即可。
 4. **T3 的 AC④/⑤ 前提被实测证伪，本票形状按下方裁定改。** 原 AC④ 是「单条记录下钻超容 → 抛既有 `validation` kind，消息指名去处 `detail=tool_results`」，AC⑤ 要求证明该去处真能收。两条都不成立：
@@ -108,33 +114,43 @@ OVERALL: PASS — hand to writing-plans
 
 7. **T4 的「最近会话推导只有一个 owner」判据范围是 `src/`，不含 `web/`。** `web/src/lib/trace-entry.ts:38` 另有一份浏览器端「取最近会话」，与 `src/traceserver/sessions.ts` 的 `newestConversationId` 行为等价（V8 排序稳定 ⇒ 并列 mtime 时胜出者相同），且面板前端不在本票 Surface（`src/traceserver` 含 `http.ts`）内。不改、不并票，记此以免日后把「一个 owner」说成全仓事实。
 
+8. **T5 Inherits 里的「2 条」是单文件巧合数，不是全仓会话根记录数——判据要钉在机制上。** 原句「`trace/` 有 81 个 `.jsonl`，`record_type=session` 只返回 **2** 条」把两个量纲并列，读起来像「81 个文件里只有 2 条有根记录」，实测不是：`/home/winner/projects/iknow/trace/` 现有 **81** 个 `.jsonl`，共 **120** 条 `record_type=session` 行，分布在 **53** 个文件里，**28** 个文件一条都没有。那个「2」的真正来历是 `query-trace-core.ts:79-87` 只读**一个**文件（`conversation_id ?? newestConversationId`），而最新那个文件恰好有 2 条——即 `query_trace` 结构上看不到另外 80 个文件，与根记录稀不稀无关。
+   - 机制断言（这才是 `list_sessions` 存在的依据，且已在源码核到）：`recordSession` 只在 `src/harness/trace/jsonl.ts:267-282` 写，唯一调用点是 `src/harness/loop-engine.ts:2149-2158` 的 run 终态分支，故会话根记录永远是文件**最后一行**；crash / abort 路径不写 ⇒ 那 28 个文件永远没有根记录。`listSessions`（`sessions.ts:108`，readdir+stat、不读正文）两类都能发现：既覆盖 80 个「看不见」的文件，也覆盖 28 个「没有根记录」的文件。
+   - **T5b 的测因此断在机制上**：夹具里放一个**无根记录**的 `.jsonl`（模拟 crash / 进行中），断 `list_sessions` 仍列出它且 `agent_version` 缺席；不要断「2」这个数字，也不要拿真实 `trace/` 目录当夹具。
+   - 另记 `agent_version` 的线上形状：`sessions.ts:48-61/:73-97` 用一次 64KiB 有界 pread 取根记录，取不到时该字段**整个缺席**（不是 `null`、不是 `undefined` 值），`SessionSummary`（`:29-34`）因此是可选键。面板侧线形状是 `{ sessions: SessionSummary[] }`（`http.ts:211-219`），`list_sessions` 的 tool face 输出不要求同形（两张皮各管自己的 wire 形状），但字段名沿用 snake_case 与 `SessionSummary` 的四个键。
+
+9. **第 6 条的门有一个覆盖洞：`npm test` 的第二半从来没跑过，而 `tests/tui/**` 里确有一处工具枚举止。** `package.json:27` 的 `test` = `vitest run && $HOME/.bun/bin/bun test tests/tui/`，`vitest.config.ts:22` 显式 `exclude: ["tests/tui/**"]`（#251 D2 裁决：OpenTUI 原生 FFI 只在 bun 下可跑，故 TUI 由 `bun:test` 驱动）。**`&&` 是短路**：本轮基线 vitest 破着（第 6 条那 32 例），所以 bun 那一半自开工起一次都没执行过，「失败集与基线逐文件同构」这句话此前只覆盖了 vitest 侧。
+   - 实测（本分支 HEAD `19248392`，一次完整跑）：`bun test tests/tui/` = `14 fail | 1132 pass`，70 文件。绝大多数是 TUI 渲染/时序类（`/thinking` picker、`TUI pending NL`、`TuiApp /info`、`bracketed paste`、`createTuiBridge` verify DTO 等），一次跑不能判其稳定与否，本轮**不**据此断言它们是 pre-existing。
+   - 唯一核到的一处例外，且与工具枚举直接相关：`tests/tui/deps-tools.test.ts:142`（`EXPECTED_TOOLSET_30` 仍列 10 个已退役的 `lsp_*`、缺 10 个现役 symbol 工具）。**已在主仓干净 `master` 上单独复跑，同签名同 1 fail / 5 pass** ⇒ 与本轮无关，属 #861/#862 那批退役/复原的账。第 1 条把它列进 T5/T6 下游字面量清单是**准确的（会受影响）但当前已经红**，T5b 不得顺手修它（超出 Surface，且修它是改一份早就与装配脱节的名单，需要单独判据）。
+   - **T5b 的门因此在 vitest 之外加一条**：`$HOME/.bun/bin/bun test tests/tui/deps-tools.test.ts`，判据 = 仍是这 1 fail / 5 pass，不新增。整目录的 `bun test tests/tui/` 不在每票门内（4 分钟且时序敏感），留到整轮收尾跑一次并如实报数。
+
 ## Tasks (ordered by dependency)
 
 1. **Spec 修订：读侧三面 + 契约 X 清理** — tag: `[decision]`
    - **Inherits:** `specs/trace-mcp-server.md` 假设 1「不代理 traceserver HTTP」不变；假设 4「首版只暴露一个 tool」→ v1.1 起三件；假设 5「核禁 import `harness/`、MCP 模块 transport only」不变；假设 8 的「不改 ACI 工具语义」括注仅豁免「共享抽取导致的机械搬移」——本轮 `conversation_id` 必填 + 删参属语义变更，必须先经本票改写；SC6（`tools/list` 含且仅含 `query_trace`）/ SC7（≤4000）/ SC8（`detail` 语义）随文改口径。
    - **Surface:** `specs/`（修订），`docs/adr/`（**不改**，无 reopen）
    - **Acceptance:** 修订后的 spec 明写：工具面输出不含 `truncated`/`total`/`response_truncated`；字符帽不是任何工具的参数；MCP transport 自带与 executor 同值的 20000 backstop；`conversation_id` 在工具面必填。三件工具白名单替换 SC6。可逆：`git revert` 即回原 spec。
-   - Status: [ ] pending
+   - Status: [x] done — `bc560655`（spec v1.1：三面白名单 + read unit 词表 + SC6–SC8 改写 + SC16 前缀归属）
 
 2. **现役核 characterization 测（先钉住，再动手）** — tag: `[implementation]`
    - **Inherits:** ACR 一轮 defensive `no` 的实测依据——`tests/traceserver/query-trace-core.test.ts` 全文只有 1 个 `it()`（`:21`）。假设 5：核无 `harness/` import。
    - **Surface:** `tests/traceserver/`
    - **Acceptance:** 对**未改动**的现役核加测并全绿，逐条钉住今天真实行为——**含 P0 的静默降级与假 `response_truncated`，按「现在确实如此」写成通过态断言**（不是 xfail/红灯，故 `EXIT 0` 与基线不矛盾）；T3 负责把这些断言的方向翻过来。`npx vitest run tests/traceserver/` EXIT 0；不改 `src/`。
-   - Status: [ ] pending
+   - Status: [x] done — `b71cb9c3`（characterization 测，commit 正文自述 30 例，含 T3/T5/T7 的 flip-site 注释）
    - [blocks: T1]
 
 3. **P0：下钻不再静默丢字段（只治「静默」，不治「帽」）** — tag: `[implementation]`
    - **Inherits:** ADR-0004:23 契约 X（工具面不自己填截断元字段）；ACR 三轮裁定——本票**不得**抛 `window_overflow`/`record_not_found`（那两个 kind 归 T6，两票后才落），且本票**不**碰 transport 侧的帽。复现：llm_call `2dff031d`（原始行 35,656 字节 / 31 messages）要 `detail:"messages"` → 返回 10 个标量字段、无 messages、`response_truncated:false`。
    - **Surface:** `src/traceserver`（单面，不含两张皮）
    - **Acceptance:** ① `compactRecord` 的「删字段」与「按记录数从尾砍到 0」两条路径退场（`:366-387`）；② `response_truncated` 从工具面输出删除——它随记录数走、不随字段走，是假负号来源；③ 列表页超容只按记录数收窄，诚实信号 = `records.length < limit`（隐式，不需元字段）；④ **单条记录下钻超容 → 该条整条原样返回，既不截也不抛**（原条款「抛既有 `validation` kind 并指名 `detail=tool_results`」经实测作废，判据与裁定见「执行期前提修正」第 4 条：那个去处走的是同一条 `compactRecord` 整字段删除路径，是假建议；抛错则把「读一条大记录」这个下钻存在的唯一理由堵死）；`src/traceserver` 侧**不新增任何帽**，也不动 transport；⑤ **测须钉死这条新形状**（代替原「证明 `detail=tool_results` 在 4000 内收得下」，该前提已被证伪：`TOOL_RESULT_PREVIEW_CAP=400` 是每条常量、N 无上界，任何固定值都兜不住任意 N，改成随 N 收缩的聚合预算又等于在下一层重新引入静默截断、违反本票 P0）：在 `tests/traceserver/` 内构造合成夹具（单条 llm_call、原始行 >4000 字节、多 messages + tool_result blob），断言下钻返回体**字节数 > 4000 且字段完整**（`tool_results` 数组在、条数不减、无字段消失），使 T6 的改动是相对一条已钉期望被审。⑥ `QUERY_TRACE_RESPONSE_CAP=4000` 原样保留并注释为「T6 窗口落地即退场」的红线——**只管列表页**，单条下钻路径不经它。T2 钉住旧行为的基线断言在本票被**改写为期望行为**（T2 全绿 → T3 后仍全绿，只是断言方向翻转，不允许出现红灯 commit 落在 master 上）。
-   - Status: [ ] pending
+   - Status: [x] done — `b5f75e63`（`serializeListPage` 只按整条记录收窄、`serializeDrillDown` 整条原样返回；`compactRecord` 与 `response_truncated` 退场；4000 红线保留为 T6 退场注释）
    - [blocks: T2]
 
 4. **session-index 与序列化的单一权威收敛** — tag: `[implementation]`
    - **Inherits:** ACR 一轮 complexity `no`：`src/traceserver/sessions.ts:108` 已拥有会话索引，而 `http.ts:257-285` 与 `query-trace-core.ts:63-64/:221-228` **各自**复制了「最近会话默认 + 信封字面量」。ADR-0020 D1.1：面板 `/api/v1/traces` 语义不变（含 SC-R 12 缺省最近会话）。
    - **Surface:** `src/traceserver`（含 `http.ts`）
    - **Acceptance:** 「最近会话」推导只有一个 owner，panel 与 tool 两侧都经它；tool-page 序列化出口只有一个且两张皮共用。**本票不删工具面的隐式默认**（删了会在 T7 之前留下破的中间 commit），只把它改为经该 owner；`http.ts` 侧信封字面量消失。panel 现有测（`tests/traceserver/http.test.ts`）零改动仍绿 = 纯机械搬移的判据。
-   - Status: [ ] pending
+   - Status: [x] done — `19248392`（新增 `src/traceserver/envelope.ts` 一处构造；`sessions.ts` 导出 `newestConversationId` 为唯一 owner，`http.ts` 私有副本与两处信封字面量删除；`tests/traceserver/http.test.ts` 零改动仍绿 = 纯机械搬移判据达成）
    - [blocks: T3]
 
 5. **`list_sessions` 上两张皮** — tag: `[implementation]`
