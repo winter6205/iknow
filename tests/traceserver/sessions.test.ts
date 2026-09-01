@@ -8,6 +8,7 @@
  *   - no directory: readdir ENOENT → empty list, no throw.
  *   - stat ENOENT: session deleted between readdir and stat → skipped.
  *   - bad/missing root record: agent_version absent, list does not fail overall.
+ *   - bounded prefix: a root record past the 64 KiB pread bound → agent_version absent.
  *   - IO error: traceDir pointing at a regular file → TraceReadError (kind io_error).
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
@@ -225,6 +226,45 @@ describe("listSessions — agent_version extraction", () => {
     const b = sessions.find((x) => x.conversation_id === "uuid-b");
     assert.ok(b);
     assert.equal(b.agent_version, "1.0.0");
+  });
+
+  it("agent_version is scanned only within the bounded 64 KiB prefix", () => {
+    // readBounded() preads 65536 bytes and never the whole file, so a session
+    // root pushed past that bound is simply not seen → field absent.
+    const padding = `${JSON.stringify({
+      record_type: "llm_call",
+      conversation_id: "uuid-a",
+      filler: "p".repeat(1000),
+    })}\n`;
+    const padCount = Math.ceil(70_000 / padding.length);
+    writeFileSync(
+      join(tmpDir, "uuid-a.jsonl"),
+      padding.repeat(padCount) + `${sessionLine("9.9.9")}\n`,
+      "utf8"
+    );
+
+    const [beyond] = listSessions(tmpDir);
+    assert.ok(beyond);
+    assert.ok(
+      beyond.size > 65_536,
+      `fixture must exceed the read bound, got ${beyond.size}`
+    );
+    assert.ok(
+      !("agent_version" in beyond),
+      "a root record past the bounded prefix must not be reported"
+    );
+
+    // Same record content, root moved inside the prefix → field present, so the
+    // absence above is the read bound and not a parse failure.
+    writeFileSync(
+      join(tmpDir, "uuid-b.jsonl"),
+      `${sessionLine("9.9.9")}\n${padding}`,
+      "utf8"
+    );
+    const sessions = listSessions(tmpDir);
+    const inside = sessions.find((x) => x.conversation_id === "uuid-b");
+    assert.ok(inside);
+    assert.equal(inside.agent_version, "9.9.9");
   });
 });
 
