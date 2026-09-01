@@ -225,6 +225,230 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
 });
 
 describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => {
+  it("rebind 前已完成的 wait:false 结果在旧 manager shutdown 前 drain 并交付主模型（plan Goal #2）", async () => {
+    const dir = makeStoreDir();
+    const store = new SessionStore(dir);
+    const conversationId = "conv-rebind-closeout";
+    const mainRoot = join(dir, "main");
+    const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, mainRoot),
+    });
+
+    const closeoutEvents: string[] = [];
+    const oldManager = makeManagerStub({
+      drain: [
+        {
+          taskId: "old-task",
+          envelope: {
+            status: "ok",
+            summary: "old wait:false result",
+            result: "old manager completed body",
+          },
+        },
+      ],
+    });
+    oldManager.drainCompleted = () => {
+      closeoutEvents.push("drain");
+      return [
+        {
+          taskId: "old-task",
+          envelope: {
+            status: "ok",
+            summary: "old wait:false result",
+            result: "old manager completed body",
+          },
+        },
+      ];
+    };
+    oldManager.shutdown = async () => {
+      closeoutEvents.push("shutdown");
+    };
+    const rebuiltDeps = makeDeps([assistantResult({ texts: ["rebuilt"] })]);
+    let modelMessages = "";
+    const rebuiltAdapter = rebuiltDeps.adapter;
+    rebuiltDeps.adapter = {
+      ...rebuiltAdapter,
+      step: async (state, request, signal) => {
+        modelMessages = JSON.stringify(state.messages);
+        return rebuiltAdapter.step(state, request, signal);
+      },
+    };
+
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["turn-1"] })],
+      stateOverrides: { conversationId },
+    });
+    ctx.checkpointStore = store;
+    ctx.engineRoot = mainRoot;
+    ctx.subagentManager = oldManager;
+    ctx.engineShutdown = { current: oldManager.shutdown.bind(oldManager) };
+    ctx.rebuildDeps = async () => ({
+      deps: rebuiltDeps,
+      subagentManager: makeManagerStub(),
+    });
+
+    const file = await store.load(conversationId);
+    await store.save({
+      id: conversationId,
+      file: { ...file, workspaceRoot: wtRoot },
+    });
+
+    const result = await processChatLine({ line: "q", ctx });
+
+    assert.equal(result.ranQuery, true);
+    assert.match(
+      modelMessages,
+      /old wait:false result/,
+      "the completed result must reach the next primary-model run"
+    );
+    assert.deepEqual(
+      closeoutEvents,
+      ["drain", "shutdown"],
+      "rebind must drain completed old-manager results before shutdown"
+    );
+  });
+
+  it("rebind 等待旧 manager 的 running wait:false 任务完成后再 shutdown，并交付结果", async () => {
+    const dir = makeStoreDir();
+    const store = new SessionStore(dir);
+    const conversationId = "conv-rebind-running-closeout";
+    const mainRoot = join(dir, "main");
+    const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, mainRoot),
+    });
+
+    const closeoutEvents: string[] = [];
+    let running = true;
+    const oldManager = makeManagerStub();
+    const completed = {
+      taskId: "running-old-task",
+      envelope: {
+        status: "ok" as const,
+        summary: "old running manager completed",
+        result: "old running wait:false result",
+      },
+    };
+    oldManager.listActive = () => (running ? [completed.taskId] : []);
+    oldManager.drainCompleted = () => {
+      closeoutEvents.push("drain");
+      return running ? [] : [completed];
+    };
+    oldManager.waitFor = async (taskId) => {
+      closeoutEvents.push(`wait:${taskId}`);
+      running = false;
+      return completed.envelope;
+    };
+    oldManager.shutdown = async () => {
+      closeoutEvents.push("shutdown");
+    };
+    const rebuiltDeps = makeDeps([assistantResult({ texts: ["rebuilt"] })]);
+    let modelMessages = "";
+    const rebuiltAdapter = rebuiltDeps.adapter;
+    rebuiltDeps.adapter = {
+      ...rebuiltAdapter,
+      step: async (state, request, signal) => {
+        modelMessages = JSON.stringify(state.messages);
+        return rebuiltAdapter.step(state, request, signal);
+      },
+    };
+
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["turn-1"] })],
+      stateOverrides: { conversationId },
+    });
+    ctx.checkpointStore = store;
+    ctx.engineRoot = mainRoot;
+    ctx.subagentManager = oldManager;
+    ctx.engineShutdown = { current: oldManager.shutdown.bind(oldManager) };
+    ctx.rebuildDeps = async () => ({
+      deps: rebuiltDeps,
+      subagentManager: makeManagerStub(),
+    });
+
+    const file = await store.load(conversationId);
+    await store.save({
+      id: conversationId,
+      file: { ...file, workspaceRoot: wtRoot },
+    });
+
+    const stderr = await captureStderrOf(async () => {
+      const result = await processChatLine({ line: "q", ctx });
+      assert.equal(result.ranQuery, true);
+    });
+
+    assert.deepEqual(
+      closeoutEvents,
+      ["wait:running-old-task", "drain", "shutdown"],
+      "rebind must wait for running old-manager work before shutdown"
+    );
+    assert.match(modelMessages, /old running manager completed/);
+    assert.equal(
+      stderr,
+      "",
+      "a task that reaches terminal state before shutdown needs no warning"
+    );
+  });
+
+  it("旧 manager 的 running 任务无法完成时，shutdown 前明确告知结果未交付", async () => {
+    const dir = makeStoreDir();
+    const store = new SessionStore(dir);
+    const conversationId = "conv-rebind-running-failed";
+    const mainRoot = join(dir, "main");
+    const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, mainRoot),
+    });
+
+    const closeoutEvents: string[] = [];
+    const oldManager = makeManagerStub();
+    oldManager.listActive = () => ["undelivered-old-task"];
+    oldManager.drainCompleted = () => {
+      closeoutEvents.push("drain");
+      return [];
+    };
+    oldManager.waitFor = async () => {
+      closeoutEvents.push("wait");
+      throw new Error("old task wait failed");
+    };
+    oldManager.shutdown = async () => {
+      closeoutEvents.push("shutdown");
+    };
+    const rebuiltDeps = makeDeps([assistantResult({ texts: ["rebuilt"] })]);
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["turn-1"] })],
+      stateOverrides: { conversationId },
+    });
+    ctx.checkpointStore = store;
+    ctx.engineRoot = mainRoot;
+    ctx.subagentManager = oldManager;
+    ctx.engineShutdown = { current: oldManager.shutdown.bind(oldManager) };
+    ctx.rebuildDeps = async () => ({
+      deps: rebuiltDeps,
+      subagentManager: makeManagerStub(),
+    });
+
+    const file = await store.load(conversationId);
+    await store.save({
+      id: conversationId,
+      file: { ...file, workspaceRoot: wtRoot },
+    });
+
+    const stderr = await captureStderrOf(async () => {
+      const result = await processChatLine({ line: "q", ctx });
+      assert.equal(result.ranQuery, true);
+    });
+
+    assert.deepEqual(closeoutEvents, ["wait", "drain", "shutdown"]);
+    assert.match(stderr, /old task wait failed/);
+    assert.match(stderr, /结果未交付/);
+    assert.match(stderr, /undelivered-old-task/);
+  });
+
   it("rebind 重建后 ctx 句柄切到重建引擎；旧引擎 shutdown 先收口、新 shutdown 注册进 engineShutdown.current", async () => {
     const dir = makeStoreDir();
     const store = new SessionStore(dir);
@@ -366,8 +590,8 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
     assert.equal(newDrainCalls, 1, "rebind 后当回合 drain 必须消费新 manager");
     assert.equal(
       oldDrainCalls,
-      0,
-      "旧 manager 不再被 drain（活跃引擎 spawn 进新 manager）"
+      1,
+      "plan Goal #2：旧 manager 仅在 shutdown 前收口一次，切换后不再 drain"
     );
   });
 

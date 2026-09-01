@@ -49,7 +49,10 @@ import {
   type OverlayPrefetchFn,
 } from "../harness/memory/index.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
-import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
+import {
+  drainPendingSubagents,
+  drainPendingSubagentsBeforeShutdown,
+} from "../harness/subagent/host-drain.js";
 import {
   createSubagentWake,
   queryableSubagentTaskIds,
@@ -256,6 +259,16 @@ export type ChatLineContext = {
    */
   subagentManager?: SubAgentManager;
   /**
+   * Rebind closeout queue: terminal results drained from the old manager
+   * before it shuts down, awaiting delivery in the next primary-model run.
+   */
+  pendingSubagentDrain?: string;
+  /**
+   * Interactive host hook used to resubscribe wake delivery after a rebind
+   * replaces the manager. Non-interactive callers leave it unset.
+   */
+  onSubagentManagerRebound?: () => void;
+  /**
    * #128 T8:同 ChatSessionOpts.verifyConfig,runChatSession 透传。
    * 缺席(undefined)= 不包裹 run,行为逐字节不变 (仅测试/装配未接线路径)。
    */
@@ -320,9 +333,9 @@ export type ChatLineContext = {
  * 反映旧装配）。shutdown 收口取舍：**旧引擎先收口，再把重建引擎 shutdown
  * 写入 ctx.engineShutdown.current**（组合收口被否 —— registerShutdown 只
  * 挂一次信号钩子，闭包读 current 单值，历史句柄列表会让信号路径重复关
- * 已废弃引擎）。旧引擎在切换点已不再服务任何回合，立即收口其 mcp 连接与
- * subagent 子进程（SC11/SC16）；其 manager 内未 drain 的 completed 结果
- * 一并丢弃 —— 旧根产物不进新根会话（与门禁 fail-closed 同向）。
+ * 已废弃引擎）。旧引擎切换前先等待仍在运行的后台子代理完成并 drain
+ * 其终态结果，交给下一次主模型 run；等待失败的 task id 会在 shutdown
+ * 前以 stderr 明确告知，随后仍按既有生命周期收口旧引擎。
  */
 export async function refreshChatDepsForRebind(
   ctx: ChatLineContext
@@ -369,7 +382,35 @@ export async function refreshChatDepsForRebind(
   // 切换点：旧引擎先收口（await，失败仅警告 —— 收口失败不阻断新引擎接管），
   // 再换血 ctx 句柄 + shutdown 盒。此顺序保证信号路径任意时刻读 current
   // 都指向「已收口旧引擎之后的活跃引擎」，不存在双引擎同时持有句柄窗口。
-  const prevShutdown = ctx.engineShutdown?.current;
+  const previousManager = ctx.subagentManager;
+  if (previousManager !== undefined) {
+    const closeout = await drainPendingSubagentsBeforeShutdown(
+      previousManager,
+      {
+        onError: (error) =>
+          writeErr(
+            `[worktree_isolation] 旧 manager 后台结果收口异常（继续收口并显式检查未交付任务）: ${
+              error instanceof Error ? error.message : String(error)
+            }\n`
+          ),
+      }
+    );
+    if (closeout.text.length > 0) {
+      ctx.pendingSubagentDrain = ctx.pendingSubagentDrain
+        ? `${ctx.pendingSubagentDrain}\n\n${closeout.text}`
+        : closeout.text;
+    }
+    if (closeout.undeliveredTaskIds.length > 0) {
+      writeErr(
+        `[worktree_isolation] 旧 manager 中仍在运行的后台子代理未能在 rebind 前交付，shutdown 将取消它们，结果未交付：${closeout.undeliveredTaskIds.join(", ")}\n`
+      );
+    }
+  }
+  const prevShutdown =
+    ctx.engineShutdown?.current ??
+    (previousManager !== undefined
+      ? previousManager.shutdown.bind(previousManager)
+      : undefined);
   if (prevShutdown !== undefined) {
     try {
       await prevShutdown();
@@ -393,6 +434,43 @@ export async function refreshChatDepsForRebind(
   ctx.graphAssembly = rebuilt.graphAssembly;
   ctx.autoMemory = rebuilt.autoMemory;
   ctx.overlayMemoryPrefetch = rebuilt.overlayMemoryPrefetch;
+  try {
+    ctx.onSubagentManagerRebound?.();
+  } catch (err) {
+    writeErr(
+      `[worktree_isolation] 重建后重新订阅子代理唤醒失败，新 manager 结果仍可在下一查询行 drain：${
+        err instanceof Error ? err.message : String(err)
+      }\n`
+    );
+  }
+}
+
+type ChatSubagentDrain = {
+  readonly text: string;
+  readonly pendingText?: string;
+};
+
+async function collectChatSubagentDrain(
+  ctx: ChatLineContext
+): Promise<ChatSubagentDrain> {
+  const pendingText = ctx.pendingSubagentDrain;
+  const currentText = await drainPendingSubagents(ctx.subagentManager);
+  const text = [pendingText, currentText]
+    .filter((value): value is string => value !== undefined && value.length > 0)
+    .join("\n\n");
+  return {
+    text,
+    ...(pendingText !== undefined ? { pendingText } : {}),
+  };
+}
+
+function acknowledgeChatSubagentDrain(
+  ctx: ChatLineContext,
+  pendingText: string | undefined
+): void {
+  if (pendingText !== undefined && ctx.pendingSubagentDrain === pendingText) {
+    ctx.pendingSubagentDrain = undefined;
+  }
 }
 
 export type ProcessChatLineResult = {
@@ -685,8 +763,8 @@ export async function runChatSubagentWake(opts: {
   readonly onStream?: (event: HarnessStreamEvent) => void;
 }): Promise<ProcessChatLineResult> {
   const { ctx } = opts;
-  const drained = await drainPendingSubagents(ctx.subagentManager);
-  if (drained.length === 0) return { quit: false, output: "" };
+  const pendingDrain = await collectChatSubagentDrain(ctx);
+  if (pendingDrain.text.length === 0) return { quit: false, output: "" };
   const box = busyBox(ctx);
   if (box.value) return { quit: false, output: "" };
   box.value = true;
@@ -696,7 +774,7 @@ export async function runChatSubagentWake(opts: {
     Object.freeze({
       role: "user" as const,
       content: Object.freeze([
-        Object.freeze({ type: "text" as const, text: drained }),
+        Object.freeze({ type: "text" as const, text: pendingDrain.text }),
       ]),
     }),
   ]);
@@ -711,6 +789,7 @@ export async function runChatSubagentWake(opts: {
         ...(opts.onStream !== undefined ? { onStream: opts.onStream } : {}),
       }
     );
+    acknowledgeChatSubagentDrain(ctx, pendingDrain.pendingText);
     if (ctx.checkpointStore && ctx.state.conversationId !== null) {
       await persistChatSessionCheckpoint({
         store: ctx.checkpointStore,
@@ -971,14 +1050,17 @@ async function runChatQueryLine(
         // #356 T7 (SC7):host drain — 把 manager 内 completed 子代理结果浓缩成
         // user message,拼入本次 run 的 priorMessages 末尾。空 manager / 无
         // completed → priorMessages 不变 (行为零变化)。
-        const drained = await drainPendingSubagents(ctx.subagentManager);
-        const priorMessages = drained
+        const pendingDrain = await collectChatSubagentDrain(ctx);
+        const priorMessages = pendingDrain.text
           ? Object.freeze([
               ...ctx.state.messages,
               Object.freeze({
                 role: "user" as const,
                 content: Object.freeze([
-                  Object.freeze({ type: "text" as const, text: drained }),
+                  Object.freeze({
+                    type: "text" as const,
+                    text: pendingDrain.text,
+                  }),
                 ]),
               }),
             ])
@@ -995,13 +1077,19 @@ async function runChatQueryLine(
           verifyDispatch !== undefined && ctx.verifyConfig !== undefined
             ? await runVerifyLoop({
                 runFn: (text, o) =>
-                  attachPrefetch(text).then(
-                    (effective) =>
-                      runHarness(effective, ctx.deps, o?.signal, {
+                  attachPrefetch(text).then(async (effective) => {
+                    const outcome = await runHarness(
+                      effective,
+                      ctx.deps,
+                      o?.signal,
+                      {
                         priorMessages: o?.priorMessages ?? priorMessages,
                         onStream: o?.onStream ?? wrappedOnStream,
-                      })
-                  ),
+                      }
+                    );
+                    acknowledgeChatSubagentDrain(ctx, pendingDrain.pendingText);
+                    return outcome;
+                  }),
                 userText: verifyDispatch.userText,
                 completionMode: verifyDispatch.completionMode,
                 config: ctx.verifyConfig,
@@ -1023,13 +1111,19 @@ async function runChatQueryLine(
                           : {}),
                       }),
               })
-            : await attachPrefetch(query).then(
-                (effective) =>
-                  runHarness(effective, ctx.deps, ctx.abortController?.signal, {
+            : await attachPrefetch(query).then(async (effective) => {
+                const outcome = await runHarness(
+                  effective,
+                  ctx.deps,
+                  ctx.abortController?.signal,
+                  {
                     priorMessages,
                     onStream: wrappedOnStream,
-                  })
-              );
+                  }
+                );
+                acknowledgeChatSubagentDrain(ctx, pendingDrain.pendingText);
+                return outcome;
+              });
         const { result, trace } = runOutcome;
         // B1: Ctrl+C 打断反馈 —— 仅 cancelled 时提示 checkpoint 是否已保存。
         // 与下方 persistChatSessionCheckpoint 同源判定(shouldPersistCheckpoint),
@@ -2243,37 +2337,44 @@ async function runInteractive(opts: {
     }
   };
 
-  wakeController = createSubagentWake({
-    manager: ctx.subagentManager,
-    isIdle: () => !busy && !closed,
-    wake: async () => {
-      busy = true;
-      try {
-        const wakeRun = chain.then(async () => {
-          const result = await runChatSubagentWake({ ctx });
-          if (result.stderr) writeErr(result.stderr);
-          if (result.output) {
-            writeOut(result.output);
-            if (result.ranQuery) writeOut(TTY_ANSWER_SEP);
-          }
-        });
-        chain = wakeRun.catch((error: unknown) => {
-          const wakeError = toSubagentWakeError(error, {
-            reason: "wakeFailed",
-            taskIds: queryableSubagentTaskIds(ctx.subagentManager),
-            queryable: ctx.subagentManager !== undefined,
+  const createWakeController = (): SubagentWake =>
+    createSubagentWake({
+      manager: ctx.subagentManager,
+      isIdle: () => !busy && !closed,
+      wake: async () => {
+        busy = true;
+        try {
+          const wakeRun = chain.then(async () => {
+            const result = await runChatSubagentWake({ ctx });
+            if (result.stderr) writeErr(result.stderr);
+            if (result.output) {
+              writeOut(result.output);
+              if (result.ranQuery) writeOut(TTY_ANSWER_SEP);
+            }
           });
-          writeErr(formatChatError(wakeError));
-          // EXIT: keep the serialized wake chain usable after reporting this
-          // undelivered wake; never turn the failure into a success summary.
-        });
-        await chain;
-      } finally {
-        busy = false;
-      }
-    },
-    onError: (error) => writeErr(formatChatError(error)),
-  });
+          chain = wakeRun.catch((error: unknown) => {
+            const wakeError = toSubagentWakeError(error, {
+              reason: "wakeFailed",
+              taskIds: queryableSubagentTaskIds(ctx.subagentManager),
+              queryable: ctx.subagentManager !== undefined,
+            });
+            writeErr(formatChatError(wakeError));
+            // EXIT: keep the serialized wake chain usable after reporting this
+            // undelivered wake; never turn the failure into a success summary.
+          });
+          await chain;
+        } finally {
+          busy = false;
+        }
+      },
+      onError: (error) => writeErr(formatChatError(error)),
+    });
+
+  ctx.onSubagentManagerRebound = () => {
+    wakeController?.dispose();
+    wakeController = createWakeController();
+  };
+  wakeController = createWakeController();
 
   // W2 扩展：Shift+Tab 切换权限模式（default ↔ full_auto；plan 走
   // /permissions plan 命令不进循环）。REPL 用 readline：terminal:true 时
@@ -2331,7 +2432,7 @@ async function runInteractive(opts: {
         });
     });
     rl.on("close", () => {
-      wakeController.dispose();
+      wakeController?.dispose();
       process.off("SIGINT", onSigint);
       rl.removeListener("SIGINT", onSigint);
       // 卸载 Shift+Tab keypress 监听；与 SIGINT cleanup 同位（不积攒）。
