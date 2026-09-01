@@ -6,6 +6,7 @@
 **Tracker:** GitHub `ready-for-agent` 每 bullet 一票；本文件为切片 SSOT。
 **Map:** https://github.com/winter6205/iknow/issues/829
 **ACR:** PASS（2026-08-31，见下文）。
+**Plan closeout (2026-09-01):** T1–T6 运行时代码已随 #861（`66469c0b`）进 master。T3 按 round-5 缩窄验收收口；三条 follow-up 仍未开工，不回写进 T1–T6。
 **Per-ticket loop (all bullets):** tdd → typecheck+tests → verification-before-completion → one commit on the ticket branch；整轮改动收尾再 code-review（非每票重复）。
 
 > Contradicts ADR-0037 §4 — worth reopening because 原文把「本会话生效根锚」写成 `cwd` / `workspaceRoot` 一并切到 task worktree，导致 ADR-0019 的 per-root 状态锚与写隔离根撞在同一字段上。本计划拆成 `productRoot`（不动）与 `taskRoot`（跟树）；`workspaceRoot` 不再在改绑时兼当记忆/settings/说明书根。
@@ -103,7 +104,7 @@ OVERALL: yes
    - **Surface:** harness memory discovery/assembly、skill scanner、permission 项目源、工具 sandbox 读放行
    - **Acceptance:** 改绑后装配与 general-purpose 注入仍读主仓当前 `.iknow/rules`、项目 `AGENTS.md`、`.iknow/permissions.toml`、项目 skills；sandbox 在**隔离开且已改绑**时允许只读这些 `projectIdentityRoot` 路径（开关 OFF 或未改绑都不放行 —— 硬要求 5，这条放行是本分支新增的，今日为零），写仍不得进主仓；树上不出现新拷的 rules 目录
    - **Acceptance 缩窄（review round 5）：** 只读放行只覆盖 `read_file`。`grep` / `glob` 改绑后仍限在 `taskRoot`，本计划**不**扩它们（见下方 follow-up）—— 上面那句「允许只读这些路径」按工具逐个读，不是整个读工具面。
-   - Status: [x] partial —— rules / `AGENTS.md` / 项目 skills 三项 done（`tests/harness/identity-follows-identity-root.test.ts`），`permissions.toml` 只做到路径解析（无生产消费者，见下条 review note），`grep` / `glob` 的放行不在面内。整条 T3 不算全绿。
+   - Status: [x] accepted-with-follow-up（2026-09-01）—— 计划面内验收按 review round 5：rules / `AGENTS.md` / 项目 skills 已绿（`tests/harness/identity-follows-identity-root.test.ts` 本工作树复跑 9 passed）；`permissions.toml` 路径解析已钉、生产接线与 `grep`/`glob` 主仓只读放行列入下文 follow-up，不挡本计划收口。issue #857 可关。
    - Review note（`permissions.toml` 半边）：路径解析已钉在 `<projectIdentityRoot>/.iknow/permissions.toml` 且缺根 / 相对根 fail-closed（`tests/harness/permission/project-settings.test.ts`「project settings path resolution」组），但**端到端仍是 N/A-with-reason**：`loadProjectSettings` 目前没有生产调用方（全仓只有测试引用），把它接进 `createPermissionPolicy` 会激活一套此前不生效的项目权限规则 —— 那是行为变更，不在本计划面内，已记入下方「本计划留下的 follow-up」（尚未开 issue）。
    - [blocks: T2]
 

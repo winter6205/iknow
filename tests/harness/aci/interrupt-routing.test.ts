@@ -27,7 +27,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "vitest";
 
-import { createAciExecutor } from "../../../src/harness/aci/aci-executor.ts";
+import {
+  BACKGROUND_OPERATION_NOTICE,
+  BLOCK_OPERATION_NOTICE,
+  createAciExecutor,
+} from "../../../src/harness/aci/aci-executor.ts";
 import { createBashTool } from "../../../src/harness/aci/tools/bash.ts";
 import { waitForPidFile } from "./tools/spawn-test-utils.ts";
 import type {
@@ -311,7 +315,281 @@ describe("SC17 — interruptBehavior routing", () => {
     assert.equal(results[0]!.kind, "execution_failed");
     if (results[0]!.kind === "execution_failed") {
       assert.equal(results[0]!.message, "cancelled");
+      assert.equal(
+        results[0]!.background,
+        undefined,
+        "响应 signal 的取消不得标记为后台运行"
+      );
     }
+  });
+
+  it("cancel 工具: caller abort 抢占不响应 signal 的 handler,并保留后台运行事实", async () => {
+    let releaseHandler: (() => void) | undefined;
+    let handlerFinished = false;
+    const backgroundNotices: string[] = [];
+    let resolveHandlerStarted!: () => void;
+    const handlerStarted = new Promise<void>((resolve) => {
+      resolveHandlerStarted = resolve;
+    });
+    let resolveUnderlyingFinished!: () => void;
+    const underlyingFinished = new Promise<void>((resolve) => {
+      resolveUnderlyingFinished = resolve;
+    });
+    const tool: AciToolDef = Object.freeze({
+      name: "uncooperative-cancelie",
+      description: "test uncooperative cancelie",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: async (): Promise<unknown> => {
+        resolveHandlerStarted();
+        await new Promise<void>((resolve) => {
+          releaseHandler = resolve;
+        });
+        handlerFinished = true;
+        resolveUnderlyingFinished();
+        return { done: true };
+      },
+      aci: Object.freeze({
+        category: "read-only" as const,
+        isConcurrencySafe: true,
+        interruptBehavior: "cancel" as const,
+        timeoutTier: "default" as const,
+      }),
+    });
+    (globalThis as { __catalog?: ReturnType<typeof makeCatalog> }).__catalog =
+      makeCatalog([tool]);
+    const inner: Executor = Object.freeze({
+      executeAll: async (
+        calls: ReadonlyArray<ToolCall>,
+        signal?: AbortSignal
+      ): Promise<ReadonlyArray<ToolExecutionResult>> => {
+        const call = calls[0]!;
+        const def = (
+          globalThis as { __catalog?: ReturnType<typeof makeCatalog> }
+        ).__catalog?.get(call.name);
+        if (!def) {
+          return [
+            {
+              kind: "tool_not_found",
+              toolUseId: call.id,
+              toolName: call.name,
+            },
+          ];
+        }
+        const payload = await def.handler(call.input, { signal });
+        return [
+          {
+            kind: "ok",
+            toolUseId: call.id,
+            payload: [{ type: "text", text: JSON.stringify(payload) }],
+          },
+        ];
+      },
+    });
+    const aciExec = createAciExecutor({
+      inner,
+      catalog: (globalThis as { __catalog?: ReturnType<typeof makeCatalog> })
+        .__catalog!,
+      timeoutMsOverride: 1_000,
+    });
+    const caller = new AbortController();
+    const execution = aciExec.executeAll(
+      [{ id: "u1", name: "uncooperative-cancelie", input: {} }],
+      caller.signal,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (event) => {
+        if (event.type === "stop_summary") backgroundNotices.push(event.text);
+      }
+    );
+    await handlerStarted;
+    caller.abort();
+
+    try {
+      const settledBeforeTier = await Promise.race<
+        ReadonlyArray<ToolExecutionResult> | undefined
+      >([
+        execution,
+        new Promise<undefined>((resolve) => setTimeout(resolve, 100)),
+      ]);
+      assert.notEqual(settledBeforeTier, undefined);
+      assert.equal(handlerFinished, false);
+      const result = settledBeforeTier?.[0];
+      assert.equal(result?.kind, "execution_failed");
+      if (result?.kind === "execution_failed") {
+        assert.equal(result.message, "cancelled");
+        assert.equal(
+          result.background,
+          true,
+          "调用方结果必须标记底层 handler 仍在后台运行"
+        );
+      }
+      assert.deepEqual(backgroundNotices, [BACKGROUND_OPERATION_NOTICE]);
+    } finally {
+      releaseHandler?.();
+      await execution;
+      await underlyingFinished;
+    }
+  });
+
+  it("cancel 工具: caller 抢占后的后台 rejection 进入诊断 sink", async () => {
+    let rejectHandler: ((reason: unknown) => void) | undefined;
+    let resolveHandlerStarted!: () => void;
+    const handlerStarted = new Promise<void>((resolve) => {
+      resolveHandlerStarted = resolve;
+    });
+    const diagnostics: unknown[] = [];
+    const tool: AciToolDef = Object.freeze({
+      name: "rejecting-cancelie",
+      description: "test rejecting cancelie",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: async (): Promise<unknown> => {
+        resolveHandlerStarted();
+        await new Promise<never>((_resolve, reject) => {
+          rejectHandler = reject;
+        });
+      },
+      aci: Object.freeze({
+        category: "read-only" as const,
+        isConcurrencySafe: true,
+        interruptBehavior: "cancel" as const,
+        timeoutTier: "default" as const,
+      }),
+    });
+    (globalThis as { __catalog?: ReturnType<typeof makeCatalog> }).__catalog =
+      makeCatalog([tool]);
+    const inner: Executor = Object.freeze({
+      executeAll: async (
+        calls: ReadonlyArray<ToolCall>,
+        signal?: AbortSignal
+      ): Promise<ReadonlyArray<ToolExecutionResult>> => {
+        const call = calls[0]!;
+        const def = (
+          globalThis as { __catalog?: ReturnType<typeof makeCatalog> }
+        ).__catalog?.get(call.name);
+        const payload = await def!.handler(call.input, { signal });
+        return [
+          {
+            kind: "ok",
+            toolUseId: call.id,
+            payload: [{ type: "text", text: JSON.stringify(payload) }],
+          },
+        ];
+      },
+    });
+    const aciExec = createAciExecutor({
+      inner,
+      catalog: (globalThis as { __catalog?: ReturnType<typeof makeCatalog> })
+        .__catalog!,
+      timeoutMsOverride: 1_000,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+    const caller = new AbortController();
+    const execution = aciExec.executeAll(
+      [{ id: "u1", name: "rejecting-cancelie", input: {} }],
+      caller.signal
+    );
+    await handlerStarted;
+    caller.abort();
+
+    const results = await execution;
+    assert.equal(results[0]?.kind, "execution_failed");
+    if (results[0]?.kind === "execution_failed") {
+      assert.equal(results[0].background, true);
+    }
+
+    const rejection = new Error("background handler failed");
+    rejectHandler!(rejection);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(diagnostics.length, 1);
+    assert.deepEqual(diagnostics[0], {
+      kind: "background_handler_rejection",
+      toolUseId: "u1",
+      toolName: "rejecting-cancelie",
+      error: rejection,
+    });
+  });
+
+  it("cancel 工具: settle 窗口内 rejection 仍归一为 cancelled 并进入诊断 sink", async () => {
+    let rejectHandler: ((reason: unknown) => void) | undefined;
+    let resolveHandlerStarted!: () => void;
+    const handlerStarted = new Promise<void>((resolve) => {
+      resolveHandlerStarted = resolve;
+    });
+    const diagnostics: unknown[] = [];
+    const tool: AciToolDef = Object.freeze({
+      name: "settle-rejecting-cancelie",
+      description: "test settle rejecting cancelie",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: async (): Promise<unknown> => {
+        resolveHandlerStarted();
+        await new Promise<never>((_resolve, reject) => {
+          rejectHandler = reject;
+        });
+      },
+      aci: Object.freeze({
+        category: "read-only" as const,
+        isConcurrencySafe: true,
+        interruptBehavior: "cancel" as const,
+        timeoutTier: "default" as const,
+      }),
+    });
+    (globalThis as { __catalog?: ReturnType<typeof makeCatalog> }).__catalog =
+      makeCatalog([tool]);
+    const inner: Executor = Object.freeze({
+      executeAll: async (
+        calls: ReadonlyArray<ToolCall>,
+        signal?: AbortSignal
+      ): Promise<ReadonlyArray<ToolExecutionResult>> => {
+        const call = calls[0]!;
+        const def = (
+          globalThis as { __catalog?: ReturnType<typeof makeCatalog> }
+        ).__catalog?.get(call.name);
+        const payload = await def!.handler(call.input, { signal });
+        return [
+          {
+            kind: "ok",
+            toolUseId: call.id,
+            payload: [{ type: "text", text: JSON.stringify(payload) }],
+          },
+        ];
+      },
+    });
+    const aciExec = createAciExecutor({
+      inner,
+      catalog: (globalThis as { __catalog?: ReturnType<typeof makeCatalog> })
+        .__catalog!,
+      timeoutMsOverride: 1_000,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+    const caller = new AbortController();
+    const execution = aciExec.executeAll(
+      [{ id: "u1", name: "settle-rejecting-cancelie", input: {} }],
+      caller.signal
+    );
+    await handlerStarted;
+    caller.abort();
+    const rejection = new Error("settle-window handler failed");
+    setTimeout(() => rejectHandler!(rejection), 1);
+
+    const results = await execution;
+    assert.equal(results[0]?.kind, "execution_failed");
+    if (results[0]?.kind === "execution_failed") {
+      assert.equal(results[0].message, "cancelled");
+      assert.equal(
+        results[0].background,
+        undefined,
+        "已在 settle 窗口内结束的 handler 不应标记为后台运行"
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(diagnostics[0], {
+      kind: "background_handler_rejection",
+      toolUseId: "u1",
+      toolName: "settle-rejecting-cancelie",
+      error: rejection,
+    });
   });
 
   it("block 工具: caller signal 不透传 → handler 干净完成;caller abort 后转 cancelled(无 partial)", async () => {
@@ -379,6 +657,77 @@ describe("SC17 — interruptBehavior routing", () => {
         "block 工具:cancelled 时不应带 partial(handler 干净完成)"
       );
     }
+  });
+
+  it("block 工具: caller abort 后发送不可中止等待的 host 反馈", async () => {
+    let resolveHandlerStarted!: () => void;
+    const handlerStarted = new Promise<void>((resolve) => {
+      resolveHandlerStarted = resolve;
+    });
+    const tool: AciToolDef = Object.freeze({
+      name: "block-notice",
+      description: "test block notice",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: async (): Promise<unknown> => {
+        resolveHandlerStarted();
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return { done: true };
+      },
+      aci: Object.freeze({
+        category: "read-only" as const,
+        isConcurrencySafe: true,
+        interruptBehavior: "block" as const,
+        timeoutTier: "default" as const,
+      }),
+    });
+    (globalThis as { __catalog?: ReturnType<typeof makeCatalog> }).__catalog =
+      makeCatalog([tool]);
+    const inner: Executor = Object.freeze({
+      executeAll: async (
+        calls: ReadonlyArray<ToolCall>,
+        signal?: AbortSignal
+      ): Promise<ReadonlyArray<ToolExecutionResult>> => {
+        const call = calls[0]!;
+        const def = (
+          globalThis as { __catalog?: ReturnType<typeof makeCatalog> }
+        ).__catalog?.get(call.name);
+        const payload = await def!.handler(call.input, { signal });
+        return [
+          {
+            kind: "ok",
+            toolUseId: call.id,
+            payload: [{ type: "text", text: JSON.stringify(payload) }],
+          },
+        ];
+      },
+    });
+    const notices: string[] = [];
+    const aciExec = createAciExecutor({
+      inner,
+      catalog: (globalThis as { __catalog?: ReturnType<typeof makeCatalog> })
+        .__catalog!,
+    });
+    const caller = new AbortController();
+    const execution = aciExec.executeAll(
+      [{ id: "u1", name: "block-notice", input: {} }],
+      caller.signal,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (event) => {
+        if (event.type === "stop_summary") notices.push(event.text);
+      }
+    );
+    await handlerStarted;
+    caller.abort();
+
+    const results = await execution;
+    assert.equal(results[0]?.kind, "execution_failed");
+    if (results[0]?.kind === "execution_failed") {
+      assert.equal(results[0].message, "cancelled");
+    }
+    assert.deepEqual(notices, [BLOCK_OPERATION_NOTICE]);
   });
 });
 

@@ -10,6 +10,7 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { spawn as spawnChild } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -20,7 +21,21 @@ import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import { createMcpManager } from "../../src/harness/mcp/manager.ts";
 import type { McpClientHandle } from "../../src/harness/mcp/manager.ts";
-import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
+import {
+  createSubAgentManager,
+  type SubAgentManager,
+} from "../../src/harness/subagent/manager.ts";
+import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
+import { createWorkerDeps } from "../../src/harness/subagent/worker.ts";
+import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
+import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
+import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
+import { assessSubagentIsolation } from "../../src/harness/subagent/capability.ts";
+import {
+  FILE_WRITE_TOOL_NAMES,
+  SYMBOL_MUTATE_TOOL_NAMES,
+} from "../../src/harness/aci/tools/symbol-mutate.ts";
+import type { ToolExecutionResult } from "../../src/harness/tools/types.ts";
 
 // Order is load-bearing: it must match the `aciTools` array in
 // `src/harness/build-engine.ts` (policy byName key-space, ADR-0006)。
@@ -127,6 +142,63 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     // #358 T2: subagent 配置臂 (build-engine 读取 taskTimeoutMs 透传给 manager)。
     subagent: { taskTimeoutMs: undefined },
   };
+}
+
+function makeTestSubagentManager(): {
+  readonly manager: SubAgentManager;
+  readonly spawnedTasks: string[];
+} {
+  const spawnedTasks: string[] = [];
+  const manager: SubAgentManager = {
+    spawn: (definition) => {
+      spawnedTasks.push(definition.task ?? "");
+      return { taskId: `task-${spawnedTasks.length}` };
+    },
+    queryBuffer: () => ({ status: "running" }),
+    waitFor: async () => {
+      throw new Error("waitFor should not run in wait:false tests");
+    },
+    shutdown: async () => {},
+    drainCompleted: () => [],
+    listActive: () => [],
+    abortTask: () => false,
+    listSubagents: () => [],
+    subscribe: () => () => {},
+  };
+  return { manager, spawnedTasks };
+}
+
+function makeCapturingSubagentManager(sandboxRoot: string): {
+  readonly manager: SubAgentManager;
+  readonly payloads: WorkerEnvelope[];
+} {
+  const payloads: WorkerEnvelope[] = [];
+  const manager = createSubAgentManager({
+    sandboxRoot,
+    spawn: (_definition, _taskId, payload) => {
+      payloads.push(payload);
+      return spawnChild(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        { stdio: ["pipe", "pipe", "pipe"] }
+      );
+    },
+  });
+  return { manager, payloads };
+}
+
+async function runSpawn(
+  built: BuiltEngine,
+  input: Record<string, unknown>,
+  conversationId = "conv-1"
+): Promise<ToolExecutionResult> {
+  const [result] = await built.deps.executor.executeAll(
+    [{ id: "spawn-1", name: "spawn_subagent", input }],
+    undefined,
+    undefined,
+    conversationId
+  );
+  return result!;
 }
 
 describe("buildHarnessEngine (SSOT assembly)", () => {
@@ -1177,6 +1249,298 @@ describe("buildHarnessEngine — #841 T6 父会话 rules 清单化", () => {
       expect(systemText).not.toContain("Rules index");
       expect(systemText.length).toBeGreaterThan(0);
       if (built.shutdown) await built.shutdown();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T4 / ADR-0040 — subagent dispatch classification at the build-engine gate.
+// The gate must classify the worker's effective capability surface rather than
+// treating every spawn_subagent call as read-only.
+// ---------------------------------------------------------------------------
+describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
+  it("allows explore on the main repo without provisioning and runs it read-only", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-explore-"));
+    const { manager, spawnedTasks } = makeTestSubagentManager();
+    let provisioned = 0;
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-explore"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        subagentManager: manager,
+        worktreeIsolation: {
+          provision: async () => {
+            provisioned += 1;
+            return root;
+          },
+        },
+      });
+
+      const result = await runSpawn(built, {
+        task: "inspect the repository",
+        subagent_type: "explore",
+        wait: false,
+      });
+
+      expect(result.kind).toBe("ok");
+      expect(spawnedTasks).toEqual(["inspect the repository"]);
+      expect(provisioned).toBe(0);
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("explore catalog deny includes symbol writers so default spawn stays on the main repo", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-symbol-worker-"));
+    const workerDeps = await createWorkerDeps({
+      env: makeEnv("sk-test-t4-symbol-worker"),
+      sandboxRoot: root,
+      model: createStubModel({ responses: [] }),
+      skillCatalog: createSkillCatalog([]),
+      trace: createNoopTraceService(),
+      system: () => undefined,
+      role: "explore",
+    });
+    const workerToolNames = workerDeps.registry.list().map((tool) => tool.name);
+    const workerDecision = assessSubagentIsolation({
+      role: "explore",
+      availableTools: workerToolNames,
+    });
+    let provisioned = 0;
+    try {
+      for (const name of SYMBOL_MUTATE_TOOL_NAMES) {
+        expect(workerToolNames).not.toContain(name);
+      }
+      expect(workerDecision.conclusion).toBe("readonly");
+      expect(workerDecision.reason).toBe("write_tools_denied_bash_readonly");
+
+      const { manager, spawnedTasks } = makeTestSubagentManager();
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-symbol-gate"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        subagentManager: manager,
+        worktreeIsolation: {
+          provision: async () => {
+            provisioned += 1;
+            return root;
+          },
+        },
+      });
+
+      const result = await runSpawn(built, {
+        task: "inspect the repository",
+        subagent_type: "explore",
+        wait: false,
+      });
+
+      expect(result.kind).toBe("ok");
+      expect(spawnedTasks).toEqual(["inspect the repository"]);
+      expect(provisioned).toBe(0);
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks the default general-purpose spawn on the main repo and points at worktree creation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-general-"));
+    const { manager, spawnedTasks } = makeTestSubagentManager();
+    let provisioned = 0;
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-general"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        subagentManager: manager,
+        worktreeIsolation: {
+          provision: async () => {
+            provisioned += 1;
+            return root;
+          },
+        },
+      });
+
+      const result = await runSpawn(built, {
+        task: "make the requested change",
+        wait: false,
+      });
+
+      expect(result.kind).toBe("execution_failed");
+      expect(result.message).toContain("create-task-worktree ACI tool");
+      expect(spawnedTasks).toEqual([]);
+      expect(provisioned).toBe(0);
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed for an unknown subagent type before spawning", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-unknown-"));
+    const { manager, spawnedTasks } = makeTestSubagentManager();
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-unknown"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        subagentManager: manager,
+        worktreeIsolation: { provision: async () => root },
+      });
+
+      const result = await runSpawn(built, {
+        task: "use an unsupported role",
+        subagent_type: "not-a-catalog-role",
+        wait: false,
+      });
+
+      expect(result.kind).toBe("execution_failed");
+      expect(result.message).toContain("create-task-worktree ACI tool");
+      expect(spawnedTasks).toEqual([]);
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("still blocks a general-purpose spawn when only write and edit are denied", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-bash-any-"));
+    const { manager, spawnedTasks } = makeTestSubagentManager();
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-bash-any"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        subagentManager: manager,
+        worktreeIsolation: { provision: async () => root },
+      });
+
+      const result = await runSpawn(built, {
+        task: "write through shell if needed",
+        subagent_type: "general-purpose",
+        disallowedTools: ["write_file", "edit_file"],
+        wait: false,
+      });
+
+      expect(result.kind).toBe("execution_failed");
+      expect(result.message).toContain("create-task-worktree ACI tool");
+      expect(spawnedTasks).toEqual([]);
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a general-purpose spawn after the session is rebound to its task worktree", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-rebound-"));
+    const taskRoot = join(root, ".iknow", "worktrees", "conv-1");
+    await mkdir(taskRoot, { recursive: true });
+    const { manager, spawnedTasks } = makeTestSubagentManager();
+    const { manager: reboundManager, payloads: reboundPayloads } =
+      makeCapturingSubagentManager(taskRoot);
+    try {
+      const mainBuilt = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-rebound-main"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        subagentManager: manager,
+        worktreeIsolation: { provision: async () => taskRoot },
+      });
+      const blocked = await runSpawn(mainBuilt, {
+        task: "change the repository",
+        wait: false,
+      });
+      expect(blocked.kind).toBe("execution_failed");
+      await mainBuilt.shutdown?.();
+
+      const reboundBuilt = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-rebound-task"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: taskRoot,
+        sandboxRoot: taskRoot,
+        workspaceRoot: taskRoot,
+        productRoot: root,
+        projectIdentityRoot: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        subagentManager: reboundManager,
+        worktreeIsolation: { provision: async () => taskRoot },
+      });
+      const result = await runSpawn(reboundBuilt, {
+        task: "change the repository",
+        wait: false,
+      });
+
+      expect(result.kind).toBe("ok");
+      expect(spawnedTasks).toEqual([]);
+      expect(reboundPayloads).toHaveLength(1);
+      expect(reboundPayloads[0]?.task).toBe("change the repository");
+      expect(reboundPayloads[0]?.sandboxRoot).toBe(taskRoot);
+      await reboundBuilt.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the spawn result bytes unchanged when isolation is off", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-off-"));
+    try {
+      const offManager = makeTestSubagentManager();
+      const offBuilt = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-off"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: false } },
+        subagentManager: offManager.manager,
+        worktreeIsolation: { provision: async () => root },
+      });
+      const offResult = await runSpawn(offBuilt, {
+        task: "preserve the existing path",
+        wait: false,
+      });
+
+      const baselineManager = makeTestSubagentManager();
+      const baselineBuilt = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-off-baseline"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        subagentManager: baselineManager.manager,
+      });
+      const baselineResult = await runSpawn(baselineBuilt, {
+        task: "preserve the existing path",
+        wait: false,
+      });
+
+      expect(JSON.stringify(offResult)).toBe(JSON.stringify(baselineResult));
+      await offBuilt.shutdown?.();
+      await baselineBuilt.shutdown?.();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -29,45 +29,61 @@ const NO_TOKEN = "n";
 
 /**
  * Prompt the user via readline for y/N approval. Returns true on `y`, false on
- * `n`. EOF on stdin → false (fail-closed). Throws on unexpected I/O failure.
+ * `n`. EOF, input failure, or caller abort → false (fail-closed).
  */
 export function createTtyAskUser(opts?: TtyAskUserOpts): AskUser {
   return async (ctx) => {
+    if (ctx.signal?.aborted === true) return false;
     const stdin = opts?.stdin ?? process.stdin;
     const stdout = opts?.stdout ?? process.stdout;
     const hint = ctx.summaryHint ? ` ${ctx.summaryHint}` : "";
     const promptText = `[ask] ${ctx.tool}? [y/N]:`;
-    return new Promise<boolean>((resolve, reject) => {
-      const rl = readline.createInterface({
-        input: stdin,
-        output: stdout,
-        terminal: false,
-      });
+    return new Promise<boolean>((resolve) => {
       let done = false;
-      const finish = (v: boolean, err?: unknown): void => {
+      let rl: readline.Interface | undefined;
+      const onAbort = (): void => finish(false);
+      const finish = (v: boolean): void => {
         if (done) return;
         done = true;
+        ctx.signal?.removeEventListener("abort", onAbort);
         try {
-          rl.close();
+          rl?.close();
         } catch {
-          // readline may already be closed; ignore
+          // EXIT: readline may already be closed while the ask is settling.
         }
-        if (err) reject(err);
-        else resolve(v);
+        resolve(v);
       };
-      rl.question(`${promptText}${hint} `, (ans) => {
-        const trimmed = ans.trim().toLowerCase();
-        if (trimmed === YES_TOKEN) finish(true);
-        else if (trimmed === NO_TOKEN) finish(false);
-        else if (trimmed === "" && opts?.defaultYes === true) finish(true);
-        else finish(false);
-      });
-      rl.on("close", () => {
-        if (!done) finish(false);
-      });
-      rl.on("error", (err) => {
-        finish(false, err);
-      });
+      if (ctx.signal !== undefined) {
+        ctx.signal.addEventListener("abort", onAbort, { once: true });
+        if (ctx.signal.aborted) {
+          finish(false);
+          return;
+        }
+      }
+      try {
+        rl = readline.createInterface({
+          input: stdin,
+          output: stdout,
+          terminal: false,
+        });
+        rl.question(`${promptText}${hint} `, (ans) => {
+          const trimmed = ans.trim().toLowerCase();
+          if (trimmed === YES_TOKEN) finish(true);
+          else if (trimmed === NO_TOKEN) finish(false);
+          else if (trimmed === "" && opts?.defaultYes === true) finish(true);
+          else finish(false);
+        });
+        rl.on("close", () => {
+          if (!done) finish(false);
+        });
+        rl.on("error", () => {
+          // EXIT: readline I/O failure cannot establish approval; deny.
+          finish(false);
+        });
+      } catch {
+        // EXIT: failure to create or prompt readline must fail closed.
+        finish(false);
+      }
     });
   };
 }
@@ -125,8 +141,8 @@ export interface PendingAskView {
 interface PendingAsk extends PendingAskView {
   readonly ctx: Parameters<AskUser>[0];
   readonly resolve: (v: boolean) => void;
-  readonly reject: (e: unknown) => void;
   readonly timer: NodeJS.Timeout;
+  readonly onAbort: () => void;
 }
 
 export interface ServeAskUserHandle {
@@ -169,6 +185,7 @@ export function createServeAskUser(
     if (!p) return false;
     pending.delete(id);
     clearTimeout(p.timer);
+    p.ctx.signal?.removeEventListener("abort", p.onAbort);
     p.resolve(approved);
     return true;
   }
@@ -187,6 +204,7 @@ export function createServeAskUser(
   }
 
   const askImpl: AskUser = (ctx) => {
+    if (ctx.signal?.aborted === true) return Promise.resolve(false);
     counter += 1;
     const id = `ask-${counter}`;
     return new Promise<boolean>((resolve) => {
@@ -196,15 +214,22 @@ export function createServeAskUser(
         settle(id, false);
       }, timeoutMs);
       if (timer.unref) timer.unref();
+      const onAbort = (): void => {
+        settle(id, false);
+      };
       pending.set(id, {
         id,
         tool: ctx.tool,
         summaryHint: ctx.summaryHint,
         ctx,
         resolve,
-        reject: () => undefined,
         timer,
+        onAbort,
       });
+      if (ctx.signal !== undefined) {
+        ctx.signal.addEventListener("abort", onAbort, { once: true });
+        if (ctx.signal.aborted) settle(id, false);
+      }
     });
   };
 

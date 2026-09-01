@@ -17,6 +17,7 @@
  * 返回值一律 frozen,防下游 (worker 内部 / envelope 序列化路径) 意外修改。
  */
 import { RegistryConstructionError } from "../errors.js";
+import { mergeDisallowedTools } from "./capability.js";
 
 export interface SubAgentDefinition {
   readonly systemPrompt?: string;
@@ -121,12 +122,10 @@ export function buildWorkerToolSurface<T extends { readonly name: string }>(
   available: ReadonlyArray<T>,
   userDisallowed?: ReadonlyArray<string>
 ): ReadonlyArray<T> {
-  const merged = [
-    ...new Set<string>([
-      ...DEFAULT_DISALLOWED_TOOLS,
-      ...(userDisallowed ?? []),
-    ]),
-  ];
+  const merged = mergeDisallowedTools(
+    DEFAULT_DISALLOWED_TOOLS,
+    userDisallowed
+  )!;
   if (merged.length === 0) {
     return Object.freeze([...available]);
   }

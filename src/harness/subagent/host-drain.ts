@@ -20,8 +20,11 @@
  *
  * ask 入口无 manager → 不调本函数 → 不行为变化。
  */
-import type { SubAgentManager } from "./manager.js";
-import { projectParentVisibleEnvelope } from "./envelope.js";
+import type { SubagentManagerDrainView } from "./manager-registry.js";
+import {
+  projectParentVisibleEnvelope,
+  type SubAgentEnvelope,
+} from "./envelope.js";
 
 /**
  * Drain 消息文本前缀（SSOT）。单 task 浓缩格式为
@@ -45,6 +48,41 @@ export interface DrainPendingSubagentsOpts {
   readonly timeoutMs?: number;
 }
 
+export interface SubagentManagerCloseoutView extends SubagentManagerDrainView {
+  readonly listActive: () => ReadonlyArray<string>;
+  readonly waitFor: (
+    taskId: string,
+    timeoutMs?: number,
+    signal?: AbortSignal
+  ) => Promise<SubAgentEnvelope>;
+}
+
+export interface DrainPendingSubagentsBeforeShutdownResult {
+  /** Terminal handoffs that can be delivered to the next parent-model run. */
+  readonly text: string;
+  /** Active tasks that never produced a deliverable terminal envelope. */
+  readonly undeliveredTaskIds: readonly string[];
+}
+
+export interface DrainPendingSubagentsBeforeShutdownOpts {
+  /** Receives wait/drain failures; the helper itself remains non-throwing. */
+  readonly onError?: (error: unknown) => void;
+}
+
+function formatDrainedResults(
+  entries: ReadonlyArray<{
+    readonly taskId: string;
+    readonly envelope: SubAgentEnvelope;
+  }>
+): string {
+  return entries
+    .map(({ taskId, envelope }) => {
+      const visible = projectParentVisibleEnvelope(envelope);
+      return `${SUBAGENT_DRAIN_PREFIX}${taskId} result: ${visible.summary}\n\n${visible.result}`;
+    })
+    .join("\n\n");
+}
+
 /**
  * 浓缩终态子代理结果为一条 user message 字符串。
  *
@@ -56,20 +94,13 @@ export interface DrainPendingSubagentsOpts {
  * `_opts` 仅为兼容既有调用方保留;running worker 不会触发等待。
  */
 export async function drainPendingSubagents(
-  manager: SubAgentManager | undefined,
+  manager: SubagentManagerDrainView | undefined,
   opts?: DrainPendingSubagentsOpts
 ): Promise<string> {
   if (manager === undefined) return "";
 
   try {
-    const list = manager.drainCompleted(opts?.conversationId);
-    if (list.length === 0) return "";
-    return list
-      .map(({ taskId, envelope }) => {
-        const visible = projectParentVisibleEnvelope(envelope);
-        return `${SUBAGENT_DRAIN_PREFIX}${taskId} result: ${visible.summary}\n\n${visible.result}`;
-      })
-      .join("\n\n");
+    return formatDrainedResults(manager.drainCompleted(opts?.conversationId));
   } catch (error) {
     // EXIT: host drain is intentionally non-throwing; "" is the documented
     // no-result/degraded channel, while terminal wake failures are reported
@@ -77,4 +108,71 @@ export async function drainPendingSubagents(
     void error;
     return "";
   }
+}
+
+/**
+ * Close out a manager before a CLI session rebinds to a replacement engine.
+ *
+ * Running wait:false workers are waited on before shutdown so their terminal
+ * envelopes remain deliverable. A failed wait is still followed by shutdown,
+ * but its task id is returned for an explicit host warning; no failure is
+ * silently represented as a successful handoff.
+ */
+export async function drainPendingSubagentsBeforeShutdown(
+  manager: SubagentManagerCloseoutView | undefined,
+  opts: DrainPendingSubagentsBeforeShutdownOpts = {}
+): Promise<DrainPendingSubagentsBeforeShutdownResult> {
+  if (manager === undefined) {
+    return { text: "", undeliveredTaskIds: [] };
+  }
+
+  const reportError = (error: unknown): void => {
+    try {
+      opts.onError?.(error);
+    } catch (reportingError) {
+      // EXIT: closeout diagnostics must not prevent the old manager from
+      // reaching its normal shutdown path.
+      void reportingError;
+    }
+  };
+
+  let activeTaskIds: readonly string[] = [];
+  try {
+    activeTaskIds = [...new Set(manager.listActive())];
+  } catch (error) {
+    reportError(error);
+  }
+
+  for (const taskId of activeTaskIds) {
+    try {
+      await manager.waitFor(taskId);
+    } catch (error) {
+      reportError(error);
+    }
+  }
+
+  let entries: ReadonlyArray<{
+    readonly taskId: string;
+    readonly envelope: SubAgentEnvelope;
+  }> = [];
+  try {
+    entries = manager.drainCompleted();
+  } catch (error) {
+    reportError(error);
+  }
+
+  let text = "";
+  let deliveredTaskIds = new Set<string>();
+  try {
+    text = formatDrainedResults(entries);
+    deliveredTaskIds = new Set(entries.map(({ taskId }) => taskId));
+  } catch (error) {
+    reportError(error);
+  }
+  return {
+    text,
+    undeliveredTaskIds: activeTaskIds.filter(
+      (taskId) => !deliveredTaskIds.has(taskId)
+    ),
+  };
 }

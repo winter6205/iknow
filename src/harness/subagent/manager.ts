@@ -18,10 +18,8 @@ import {
 } from "./envelope.js";
 import type { SubAgentEnvelope, WorkerEnvelope } from "./envelope.js";
 import type { SubAgentDefinition } from "./role.js";
-import {
-  createSubAgentMailbox,
-  type SubAgentMailbox,
-} from "./mailbox.js";
+import { createSubAgentMailbox } from "./mailbox.js";
+import type { SubAgentTerminalSubscriber } from "./mailbox.js";
 import { SubAgentSandboxRootError } from "../errors.js";
 import type {
   TraceService,
@@ -110,12 +108,17 @@ export interface SubAgentManager {
    * envelope(与 queryBuffer/drainCompleted 同真值),不在端点侧做任务寿命
    * 语义决策。taskPreview 截断 ≤120 见 SubagentInfo 注释。
    */
-  readonly listSubagents: () => ReadonlyArray<SubagentInfo>;
+  readonly listSubagents: (
+    conversationId?: string
+  ) => ReadonlyArray<SubagentInfo>;
   /**
    * T3: notify the host when a terminal result is available. The notification
    * contains only immutable handoff facts; the manager buffer remains intact.
    */
-  readonly subscribe: SubAgentMailbox["subscribe"];
+  readonly subscribe: (
+    subscriber: SubAgentTerminalSubscriber,
+    conversationId?: string
+  ) => () => void;
 }
 
 /** spawn DI 工厂签名:由调用方注入(fake 测试 / 生产 defaultSubAgentSpawn)。 */
@@ -471,10 +474,7 @@ export function createSubAgentManager(opts: {
   ): void {
     if (task.stoppedEmitted) return;
     task.stoppedEmitted = true;
-    if (
-      task.envelope !== undefined &&
-      task.def.excludeFromHostDrain !== true
-    ) {
+    if (task.envelope !== undefined && task.def.excludeFromHostDrain !== true) {
       const envelope = task.envelope;
       terminalMailbox.publish({
         taskId: task.id,
@@ -487,9 +487,7 @@ export function createSubAgentManager(opts: {
         ...(envelope.fileRefs !== undefined
           ? { fileRefs: envelope.fileRefs }
           : {}),
-        ...(envelope.reason !== undefined
-          ? { reason: envelope.reason }
-          : {}),
+        ...(envelope.reason !== undefined ? { reason: envelope.reason } : {}),
         ...(envelope.stop_reason !== undefined
           ? { stop_reason: envelope.stop_reason }
           : {}),
@@ -1099,9 +1097,15 @@ export function createSubAgentManager(opts: {
    * 同真值);taskPreview 截断 ≤120,不落 task 全文(spec 权限 row)。
    * Postel: endedAt 仅在终态存续;summary/reason 仅 envelope 有值时上行。
    */
-  function listSubagents(): ReadonlyArray<SubagentInfo> {
+  function listSubagents(conversationId?: string): ReadonlyArray<SubagentInfo> {
     const out: SubagentInfo[] = [];
     for (const task of tasks.values()) {
+      if (
+        conversationId !== undefined &&
+        task.def.conversationId !== conversationId
+      ) {
+        continue;
+      }
       const envelope = task.envelope;
       const item: SubagentInfo = {
         taskId: task.id,
@@ -1125,6 +1129,18 @@ export function createSubAgentManager(opts: {
       out.push(item);
     }
     return out;
+  }
+
+  function subscribe(
+    subscriber: SubAgentTerminalSubscriber,
+    conversationId?: string
+  ): () => void {
+    if (conversationId === undefined) {
+      return terminalMailbox.subscribe(subscriber);
+    }
+    return terminalMailbox.subscribe((notice) => {
+      if (notice.conversationId === conversationId) subscriber(notice);
+    });
   }
 
   async function shutdown(): Promise<void> {
@@ -1242,6 +1258,6 @@ export function createSubAgentManager(opts: {
     listActive,
     abortTask,
     listSubagents,
-    subscribe: terminalMailbox.subscribe,
+    subscribe,
   });
 }

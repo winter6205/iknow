@@ -6,6 +6,7 @@
 **Tracker:** GitHub `ready-for-agent` 每 bullet 一票；本文件为切片 SSOT。地图 #829。
 **Map:** https://github.com/winter6205/iknow/issues/829
 **ACR:** PASS（2026-08-30，见下文）。
+**Plan closeout (2026-09-01):** T1–T8 均已落地（GitHub #836–#841 closed）。本文件勾选与 HEAD 祖先 SHA 对齐；子代理继承根另见本分支 `af7624e6` envelope 断言。
 **Per-ticket loop (all bullets):** tdd → typecheck+tests → verification-before-completion → one commit on the ticket branch；整轮改动收尾再 code-review（非每票重复）。
 
 > Contradicts ADR-0037（ON：首次 mutate 拦截后由 host `git worktree add`）— worth reopening because 建树改为模型调用 ACI 工具；门禁只拦不自动建树。
@@ -68,13 +69,13 @@ OVERALL: yes
    - **Inherits:** 上文合同与硬要求 1–10；地图 #829 Decisions so far
    - **Surface:** `docs/adr/` + `docs/CONTEXT.md`
    - **Acceptance:** ADR-0037 修订为「拦写、ACI 工具建树、改绑后模型自己再写」；CONTEXT 写明说明书读法与缺目录视为空；本 bullet 不含运行时代码
-   - Status: [ ] pending
+   - Status: [x] done — `9b4e4612` ADR-0037 model-provisioned 修订 + CONTEXT；issue #836 closed.
 
 2. **[parallel] Missing rules directory is empty, not fatal** ([T2](https://github.com/winter6205/iknow/issues/837)) — tag: `[implementation]`
    - **Inherits:** 硬要求 8
    - **Surface:** harness memory discovery / subagent worker 启动装配
    - **Acceptance:** 用户级与项目级 `.iknow/rules` 目录不存在时，general-purpose worker 能跑完一次 spawn 并交出信封，stderr 无 `[subagent-worker] fatal` / `scandir` 该类 ENOENT；不要求操作员先 mkdir
-   - Status: [ ] pending
+   - Status: [x] done — `91b756af`；`tests/subagent/rules-missing-dirs.test.ts` 本工作树复跑绿；issue #837 closed.
    - [blocks: T1]
    - [parallel]
 
@@ -82,7 +83,7 @@ OVERALL: yes
    - **Inherits:** 合同「否则拦住（不自动 git worktree add）」；硬要求 1、6
    - **Surface:** harness isolation 门禁
    - **Acceptance:** ON 且尚未改绑时，mutate 被拦且**不**调用 `git worktree add`；错误可见、主仓无新写入；文案指向调用建树工具而非「end the turn and retry」自动建树协议
-   - Status: [ ] pending
+   - Status: [x] done — `ea6ba8d3`；issue #838 closed.
    - [blocks: T1]
    - [parallel]
 
@@ -90,7 +91,7 @@ OVERALL: yes
    - **Inherits:** 硬要求 2–6；工具成功 = 树已在且会话根已切到该路径
    - **Surface:** harness ACI 工具集 + session-api provision/rebind
    - **Acceptance:** 模型可调用该工具；成功后本会话后续 mutate 进入 task worktree；同名树/分支 → typed 错误且不覆盖；失败 → 主仓零写入；被拦的写由下一模型回合再调，Host 不同波重放
-   - Status: [ ] pending
+   - Status: [x] done — `1d05d54f` create-task-worktree + 会话改绑；issue #839 T4 closed.
    - [blocks: T3]
 
 5. **[parallel] ACI tool enters an existing task worktree and rebinds the session** ([T7](https://github.com/winter6205/iknow/issues/839)) — tag: `[implementation]`
@@ -113,13 +114,13 @@ OVERALL: yes
    - **Inherits:** 硬要求 7、9（explore 不注入说明书；general-purpose 开场注入已有文件）
    - **Surface:** harness subagent worker / spawn
    - **Acceptance:** 父会话已改绑后 spawn 的子代理 cwd/sandbox 在同一 task worktree；general-purpose 在说明书文件存在时注入其内容；explore 不注入项目 AGENTS.md 正文
-   - Status: [ ] pending
+   - Status: [x] done — `d030ec67`；本分支补强 `af7624e6` rebound `sandboxRoot` 信封断言 + `tests/harness/build-engine-subagent-spawn-root.test.ts` 复跑绿；分裂根 worker 注入钉在 `tests/subagent/worker.test.ts`「改绑分裂根」；issue #840 closed.
    - [blocks: T2, T4]
 
 8. **Parent does not dump all rules bodies at session start** ([T6](https://github.com/winter6205/iknow/issues/841)) — tag: `[implementation]`
    - **Inherits:** 硬要求 9–10
    - **Surface:** harness identity / memory 静态层装配（chat / tui / serve 父会话）
    - **Acceptance:** 父会话 system 不因存在多份 `.iknow/rules/*.md` 而把全部正文灌进开场上下文；模型仍可用读路径打开其中一份；无 rules 时会话正常开始
-   - Status: [ ] pending
+   - Status: [x] done — `29bf1bb2`；`tests/harness/memory/assembly.test.ts`「does not dump rule bodies…」本工作树复跑绿；issue #841 closed.
    - [blocks: T1]
    - [parallel]

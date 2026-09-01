@@ -317,6 +317,57 @@ describe("createBwrapFence", () => {
     // probe handles it. Here we lock the fence shape only.
   });
 
+  it("cwdReadonly:true keeps an overlapping home bind behind the read-only fence", () => {
+    const home = "/tmp/home";
+    const cwd = `${home}/workspace`;
+    const argv = createBwrapFence({
+      command: "node",
+      args: ["-v"],
+      fsPolicy: createFsPolicy({ cwd, home, tmpDir: "/tmp" }),
+      networkPolicy: createNetworkPolicy(),
+      resourceLimits: createResourceLimits(),
+      env: { PATH: "/bin" },
+      cwd,
+      cwdReadonly: true,
+    }).argv;
+    const homeBindIndices: number[] = [];
+    const cwdReadonlyIndices: number[] = [];
+    for (let i = 0; i < argv.length - 2; i++) {
+      if (
+        argv[i] === "--bind" &&
+        argv[i + 1] === home &&
+        argv[i + 2] === home
+      ) {
+        homeBindIndices.push(i);
+      }
+      if (
+        argv[i] === "--ro-bind" &&
+        argv[i + 1] === cwd &&
+        argv[i + 2] === cwd
+      ) {
+        cwdReadonlyIndices.push(i);
+      }
+    }
+    assert.equal(
+      homeBindIndices.length,
+      2,
+      "expected pre- and post-tmpfs home binds"
+    );
+    assert.equal(
+      cwdReadonlyIndices.length,
+      2,
+      "expected pre- and post-tmpfs read-only cwd binds"
+    );
+    assert.ok(
+      homeBindIndices[0]! < cwdReadonlyIndices[0]!,
+      "the parent home bind must precede the initial read-only cwd bind"
+    );
+    assert.ok(
+      homeBindIndices[1]! < cwdReadonlyIndices[1]!,
+      "the parent home rebind must precede the read-only cwd rebind"
+    );
+  });
+
   it("throws a ToolExecutionError when fsPolicy.allowedPaths() has a single entry (M4 fail-loud)", () => {
     // Even one entry (cwd-only) is treated as misconfiguration: the home bind
     // would be impossible to synthesize without a guess.

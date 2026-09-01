@@ -940,4 +940,33 @@ describe("SubAgentManager listSubagents (#358 T7)", () => {
     assert.equal(byState["failed"]!.taskPreview, "failed-task");
     assert.equal(byState["running"]!.taskPreview, "running-task");
   });
+
+  it("按父 conversationId 过滤列表与终态订阅", () => {
+    const { manager, spawned } = makeHarness();
+    const notices: string[] = [];
+    manager.subscribe((notice) => {
+      notices.push(notice.taskId);
+    }, "session-a");
+    const sessionATask = manager.spawn({
+      task: "session A",
+      conversationId: "session-a",
+    }).taskId;
+    const sessionBTask = manager.spawn({
+      task: "session B",
+      conversationId: "session-b",
+    }).taskId;
+
+    emitEnvelope(spawned[0]!, okEnvelope("A result"));
+    emitEnvelope(spawned[1]!, okEnvelope("B result"));
+
+    assert.deepEqual(
+      manager.listSubagents("session-a").map(({ taskId }) => taskId),
+      [sessionATask]
+    );
+    assert.deepEqual(
+      manager.listSubagents("session-b").map(({ taskId }) => taskId),
+      [sessionBTask]
+    );
+    assert.deepEqual(notices, [sessionATask]);
+  });
 });

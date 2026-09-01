@@ -128,7 +128,8 @@ export interface TuiBridge {
   }) => Promise<TuiPostResult>;
   /** T4: host wake subscription; absent manager is a no-op (ask-safe). */
   readonly subscribeSubagentTerminal: (
-    subscriber: (notice: SubAgentTerminalNotice) => void
+    subscriber: (notice: SubAgentTerminalNotice) => void,
+    conversationId?: string
   ) => () => void;
   /** T4: run a silent turn with the pending terminal drain. */
   readonly wakeFromSubagent: (
@@ -170,7 +171,9 @@ export interface TuiBridge {
   /** T3: 上下文窗口容量（tokens）。仅显示用，不触发压缩。 */
   readonly contextWindow: number;
   /** 子代理状态只读投影（#358 T7 同真值）：无 manager → 空数组。 */
-  readonly listSubagents: () => ReadonlyArray<SubagentInfo>;
+  readonly listSubagents: (
+    conversationId?: string
+  ) => ReadonlyArray<SubagentInfo>;
 }
 
 export interface CreateTuiBridgeOptions {
@@ -338,8 +341,8 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
         opts.inflight.unmark(conversationId);
       }
     },
-    subscribeSubagentTerminal:
-      opts.subagentManager?.subscribe ?? (() => () => {}),
+    subscribeSubagentTerminal: (subscriber, conversationId) =>
+      hub.subscribeSubagentTerminal(subscriber, conversationId),
     wakeFromSubagent: async (conversationId) => {
       opts.inflight.mark(conversationId);
       try {
@@ -399,7 +402,7 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     inflight: opts.inflight,
     contextWindow: opts.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     // #358 T7: 子代理只读投影。无 manager（ask surface / 旧产品路径） → 空。
-    listSubagents: () => opts.subagentManager?.listSubagents() ?? [],
+    listSubagents: (conversationId) => hub.listSubagents(conversationId),
   };
   return Object.freeze(bridge);
 }
