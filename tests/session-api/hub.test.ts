@@ -176,7 +176,6 @@ describe("SessionHub subagent wake", () => {
     for (const subscriber of [...subscribers]) {
       subscriber({
         taskId: "wake-task",
-        conversationId: created.session.conversation_id,
         status: "ok",
         summary: "worker done",
         result: "worker result",

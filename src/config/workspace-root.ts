@@ -20,16 +20,6 @@ import path from "node:path";
 /** Env var name. Exported so env-SSOT loader and CLI share one symbol. */
 export const WORKSPACE_ROOT_ENV_KEY = "IKNOW_WORKSPACE_ROOT";
 
-/**
- * T3 (plans/worktree-session-roots.md / ADR-0037 §4): env var carrying the
- * session's `productRoot` across a process boundary (parent session → subagent
- * worker). Lives beside `WORKSPACE_ROOT_ENV_KEY` because both are root env
- * keys; the roles differ — `workspaceRoot` anchors per-root state, while
- * `productRoot` anchors project identity discovery. A worker's cwd may be a
- * gitignored task worktree, so identity must not be resolved from it.
- */
-export const PRODUCT_ROOT_ENV_KEY = "IKNOW_PRODUCT_ROOT";
-
 /** SessionFile / PUT path cap (serve-workspace T1). Overflow → schema_invalid. */
 export const MAX_WORKSPACE_ROOT_CHARS = 4096;
 

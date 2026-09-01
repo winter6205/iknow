@@ -1,27 +1,26 @@
 /**
  * T2 (plans/worktree-mcp-rebind-lifecycle.md) — MCP 双根解析器。
  *
- * **消费者，不是根策略点**：规范化与 fail-closed 规则的 SSOT 已升格为
- * `harness/session-roots.ts` 的会话三根（T2, plans/worktree-session-roots.md /
- * ADR-0037 §4）。本模块只做 MCP 侧的**投影与错误映射**：
+ * 唯一根策略点:session worktree rebind 前后,MCP 的 stdio cwd / 工具 FS root
+ * 与配置根都由这里派生,调用方(config / manager / build-engine / hub / CLI /
+ * TUI)只消费返回值,不再自行拼路径、读 `process.cwd()` 或判断 task worktree。
  *
- *  - `workspaceRoot`（MCP 说法）= 会话 `taskRoot`——stdio child 的 cwd，也是
- *    工具 FS root；rebind 后指向 `<productRoot>/.iknow/worktrees/<conversationId>`。
- *  - `mcpConfigRoot` = 会话 `productRoot`（首次装配捕获的主 checkout），跨
- *    rebind 不变；项目级配置只读 `<mcpConfigRoot>/.iknow/mcp.json`。
+ *  - `workspaceRoot`:当前 session/task root——stdio child 的 cwd,也是工具 FS root;
+ *    rebind 后指向 `<productRoot>/.iknow/worktrees/<conversationId>`。
+ *  - `mcpConfigRoot`:**只**由稳定的 `productRoot`(首次装配捕获的主 checkout)
+ *    派生,跨 rebind 不变;项目级配置只读 `<mcpConfigRoot>/.iknow/mcp.json`。
  *
- * 纯函数：不读 git、不碰文件系统、不持会话状态。缺根 / 空白 / 相对 /
+ * 纯函数:不读 git、不碰文件系统、不持会话状态。缺根 / 空白 / 相对 /
  * 无法规范化 / 与既有根不一致一律 fail-closed 抛 `McpLifecycleError`
- * (kinds 见 `src/harness/errors.ts`)，**绝不**回退 `process.cwd()`。kind 分工
- * 与消息文本对既有调用方逐字节不变——`installRoot` 不参与 MCP 面。
+ * (kinds 见 `src/harness/errors.ts`),**绝不**回退 `process.cwd()`。
  */
+import path from "node:path";
+
 import { McpLifecycleError } from "../errors.js";
 import type { McpLifecycleErrorKind } from "../errors.js";
-import {
-  MAX_ROOT_DETAIL_CHARS,
-  normalizeRootCandidate,
-  quoteRoot,
-} from "../session-roots.js";
+
+/** 诊断里回显根值的上限:长路径也要保持有限诊断。 */
+const MAX_ROOT_DETAIL_CHARS = 120;
 
 /** resolver 的唯一输出:两个已规范化的绝对根。 */
 export interface McpRoots {
@@ -86,22 +85,46 @@ function normalizeRoot(
   label: string,
   invalidKind: McpLifecycleErrorKind
 ): string {
-  const result = normalizeRootCandidate(value);
-  if (result.ok) return result.root;
-
-  const { rejection } = result;
-  if (rejection.reason === "missing") {
+  if (typeof value !== "string") {
     throw new McpLifecycleError(
       "missing_cwd",
       `${label} is required and was not provided`
     );
   }
-  const requirement =
-    rejection.reason === "not_absolute"
-      ? "must be an absolute path"
-      : "must be a normalizable absolute path";
-  throw new McpLifecycleError(
-    invalidKind,
-    `${label} ${requirement}, got ${quoteRoot(rejection.shown, MAX_ROOT_DETAIL_CHARS)}`
-  );
+
+  const trimmed = value.trim();
+  if (trimmed === "" || trimmed.includes("\0")) {
+    throw new McpLifecycleError(
+      invalidKind,
+      `${label} must be a normalizable absolute path, got ${quoteRoot(trimmed, MAX_ROOT_DETAIL_CHARS)}`
+    );
+  }
+
+  const normalized = stripTrailingSeparators(path.normalize(trimmed));
+  if (!path.isAbsolute(normalized)) {
+    throw new McpLifecycleError(
+      invalidKind,
+      `${label} must be an absolute path, got ${quoteRoot(trimmed, MAX_ROOT_DETAIL_CHARS)}`
+    );
+  }
+  return normalized;
+}
+
+/** 去掉结尾分隔符,但保留文件系统根本身(posix `/`、win32 `C:\`)。 */
+function stripTrailingSeparators(p: string): string {
+  const { root } = path.parse(p);
+  let out = p;
+  while (
+    out.length > root.length &&
+    (out.endsWith(path.sep) || out.endsWith("/"))
+  ) {
+    out = out.slice(0, -1);
+  }
+  return out;
+}
+
+/** 诊断回显:截断到有限长度,避免超长路径撑爆错误消息。 */
+function quoteRoot(value: string, limit: number): string {
+  const shown = value.length > limit ? `${value.slice(0, limit)}…` : value;
+  return `'${shown}'`;
 }

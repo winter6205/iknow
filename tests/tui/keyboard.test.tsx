@@ -29,12 +29,7 @@ import {
 import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
 import { createPermissionModeContext } from "../../src/harness/permission/index.js";
 import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
-import {
-  createDraftSession,
-  type TuiSessionState,
-} from "../../src/tui/session-state.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
-import { captureStderr } from "../_helpers/capture-stderr.ts";
 import { TuiHarness } from "./_fixtures.js";
 
 const COLS = 80;
@@ -47,49 +42,6 @@ async function renderApp() {
     exitOnCtrlC: false,
     consoleMode: "disabled",
   });
-  await setup.waitForVisualIdle();
-  return setup;
-}
-
-async function renderAppWithInitialSession(
-  initialSession: TuiSessionState
-): Promise<Awaited<ReturnType<typeof testRender>>> {
-  const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-kbd-initial-"));
-  const bridge = createTuiBridge({
-    dataDir,
-    workspaceRoot: dataDir,
-    deps: makeDeps([assistantResult({ texts: [] })]),
-    inflight: createInflightRegistry(),
-  });
-  const askBridge = createTuiAskUserBridge();
-  const toolEventSink = createToolEventSink();
-  const permissionMode = createPermissionModeContext("default");
-  const sessionGrants = createSessionGrants();
-  let setupRef: Awaited<ReturnType<typeof testRender>> | undefined;
-  const setup = await testRender(
-    <TuiApp
-      bridge={bridge}
-      askBridge={askBridge}
-      toolEventSink={toolEventSink}
-      cwd="/tmp/proj"
-      dataDir={dataDir}
-      permissionMode={permissionMode}
-      sessionGrants={sessionGrants}
-      initialSession={initialSession}
-      onQuit={() => {
-        if (setupRef && !setupRef.renderer.isDestroyed)
-          setupRef.renderer.destroy();
-      }}
-    />,
-    {
-      width: COLS,
-      height: ROWS,
-      exitOnCtrlC: false,
-      consoleMode: "disabled",
-    }
-  );
-  setupRef = setup;
-  await new Promise((r) => setTimeout(r, 500));
   await setup.waitForVisualIdle();
   return setup;
 }
@@ -275,41 +227,14 @@ test("普通键（pressKey 'a'）：T6 PromptInput 消费，渲染仍稳定不�
 });
 
 test("修饰键 ctrl+c：useKeyboard handler 分流到 Ctrl+C 分支（notice 显示）", async () => {
-  const stderr = captureStderr();
   const setup = await renderApp();
-  try {
-    setup.mockInput.pressCtrlC();
-    await settle(setup);
-    const frame = setup.captureCharFrame();
-    // notice 触发「Ctrl+C：无前台运行中的 turn；/quit 退出。」
-    expect(frame).toContain("Ctrl+C");
-    expect(frame).toContain("/quit");
-    expect(stderr.lines.join("")).toContain(
-      '"event":"ctrl_c","disposition":"can_interrupt_false"'
-    );
-  } finally {
-    await setup.renderer.destroy();
-    stderr.restore();
-  }
-});
-
-test("Ctrl+C：canInterrupt 为真但 controller 缺席时记录 controller_missing", async () => {
-  const stderr = captureStderr();
-  const initialSession = Object.freeze({
-    ...createDraftSession(),
-    runState: "running-fg" as const,
-  });
-  const setup = await renderAppWithInitialSession(initialSession);
-  try {
-    setup.mockInput.pressCtrlC();
-    await settle(setup);
-    expect(stderr.lines.join("")).toContain(
-      '"event":"ctrl_c","disposition":"controller_missing"'
-    );
-  } finally {
-    await setup.renderer.destroy();
-    stderr.restore();
-  }
+  setup.mockInput.pressCtrlC();
+  await settle(setup);
+  const frame = setup.captureCharFrame();
+  // notice 触发「Ctrl+C：无前台运行中的 turn；/quit 退出。」
+  expect(frame).toContain("Ctrl+C");
+  expect(frame).toContain("/quit");
+  await setup.renderer.destroy();
 });
 
 test("其他修饰键（shift+tab、meta+c）：不触发 Ctrl+C/Y 分支，无 notice", async () => {

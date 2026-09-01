@@ -38,7 +38,6 @@ import type {
   OverlayPrefetchFn,
 } from "../../src/harness/memory/index.ts";
 import { assistantResult, makeCtx, makeDeps } from "./_fixtures.ts";
-import { captureStderrOf } from "../_helpers/capture-stderr.ts";
 
 const roots: string[] = [];
 
@@ -72,8 +71,23 @@ function afterEachCleanup(): void {
   });
 }
 
-// stderr 拦截走共享 helper captureStderrOf（writeErr SSOT）—— 可见降级 /
-// 静默性断言共用（suppress 语义）。
+/** stderr 拦截（writeErr SSOT）—— 可见降级 / 静默性断言共用。 */
+async function captureStderr(fn: () => Promise<void>): Promise<string> {
+  const chunks: string[] = [];
+  const origWrite = process.stderr.write.bind(process.stderr);
+  (process as { stderr: { write: unknown } }).stderr.write = (
+    chunk: string | Uint8Array
+  ) => {
+    chunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await fn();
+  } finally {
+    process.stderr.write = origWrite;
+  }
+  return chunks.join("");
+}
 
 function makeManagerStub(
   opts: {
@@ -180,7 +194,7 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
     // 会话文件缺席（not_found）→ 静默（typed not_found 是「无 rebind 信号」
     // 的正常形态，不算错误）
     ctx.state.conversationId = "conv-unknown";
-    const stderr = await captureStderrOf(async () => {
+    const stderr = await captureStderr(async () => {
       await processChatLine({ line: "q2", ctx });
     });
     assert.equal(rebuilds, 0);
@@ -215,7 +229,7 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
 
     // refresh 的可见降级走 process.stderr（writeErr SSOT）—— 拦截捕获
     let r;
-    const stderr = await captureStderrOf(async () => {
+    const stderr = await captureStderr(async () => {
       r = await processChatLine({ line: "q", ctx });
     });
     assert.equal(r.ranQuery, true);
@@ -225,230 +239,6 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
 });
 
 describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => {
-  it("rebind 前已完成的 wait:false 结果在旧 manager shutdown 前 drain 并交付主模型（plan Goal #2）", async () => {
-    const dir = makeStoreDir();
-    const store = new SessionStore(dir);
-    const conversationId = "conv-rebind-closeout";
-    const mainRoot = join(dir, "main");
-    const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
-    await store.save({
-      id: conversationId,
-      file: makeSessionFile(conversationId, mainRoot),
-    });
-
-    const closeoutEvents: string[] = [];
-    const oldManager = makeManagerStub({
-      drain: [
-        {
-          taskId: "old-task",
-          envelope: {
-            status: "ok",
-            summary: "old wait:false result",
-            result: "old manager completed body",
-          },
-        },
-      ],
-    });
-    oldManager.drainCompleted = () => {
-      closeoutEvents.push("drain");
-      return [
-        {
-          taskId: "old-task",
-          envelope: {
-            status: "ok",
-            summary: "old wait:false result",
-            result: "old manager completed body",
-          },
-        },
-      ];
-    };
-    oldManager.shutdown = async () => {
-      closeoutEvents.push("shutdown");
-    };
-    const rebuiltDeps = makeDeps([assistantResult({ texts: ["rebuilt"] })]);
-    let modelMessages = "";
-    const rebuiltAdapter = rebuiltDeps.adapter;
-    rebuiltDeps.adapter = {
-      ...rebuiltAdapter,
-      step: async (state, request, signal) => {
-        modelMessages = JSON.stringify(state.messages);
-        return rebuiltAdapter.step(state, request, signal);
-      },
-    };
-
-    const ctx = makeCtx({
-      responses: [assistantResult({ texts: ["turn-1"] })],
-      stateOverrides: { conversationId },
-    });
-    ctx.checkpointStore = store;
-    ctx.engineRoot = mainRoot;
-    ctx.subagentManager = oldManager;
-    ctx.engineShutdown = { current: oldManager.shutdown.bind(oldManager) };
-    ctx.rebuildDeps = async () => ({
-      deps: rebuiltDeps,
-      subagentManager: makeManagerStub(),
-    });
-
-    const file = await store.load(conversationId);
-    await store.save({
-      id: conversationId,
-      file: { ...file, workspaceRoot: wtRoot },
-    });
-
-    const result = await processChatLine({ line: "q", ctx });
-
-    assert.equal(result.ranQuery, true);
-    assert.match(
-      modelMessages,
-      /old wait:false result/,
-      "the completed result must reach the next primary-model run"
-    );
-    assert.deepEqual(
-      closeoutEvents,
-      ["drain", "shutdown"],
-      "rebind must drain completed old-manager results before shutdown"
-    );
-  });
-
-  it("rebind 等待旧 manager 的 running wait:false 任务完成后再 shutdown，并交付结果", async () => {
-    const dir = makeStoreDir();
-    const store = new SessionStore(dir);
-    const conversationId = "conv-rebind-running-closeout";
-    const mainRoot = join(dir, "main");
-    const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
-    await store.save({
-      id: conversationId,
-      file: makeSessionFile(conversationId, mainRoot),
-    });
-
-    const closeoutEvents: string[] = [];
-    let running = true;
-    const oldManager = makeManagerStub();
-    const completed = {
-      taskId: "running-old-task",
-      envelope: {
-        status: "ok" as const,
-        summary: "old running manager completed",
-        result: "old running wait:false result",
-      },
-    };
-    oldManager.listActive = () => (running ? [completed.taskId] : []);
-    oldManager.drainCompleted = () => {
-      closeoutEvents.push("drain");
-      return running ? [] : [completed];
-    };
-    oldManager.waitFor = async (taskId) => {
-      closeoutEvents.push(`wait:${taskId}`);
-      running = false;
-      return completed.envelope;
-    };
-    oldManager.shutdown = async () => {
-      closeoutEvents.push("shutdown");
-    };
-    const rebuiltDeps = makeDeps([assistantResult({ texts: ["rebuilt"] })]);
-    let modelMessages = "";
-    const rebuiltAdapter = rebuiltDeps.adapter;
-    rebuiltDeps.adapter = {
-      ...rebuiltAdapter,
-      step: async (state, request, signal) => {
-        modelMessages = JSON.stringify(state.messages);
-        return rebuiltAdapter.step(state, request, signal);
-      },
-    };
-
-    const ctx = makeCtx({
-      responses: [assistantResult({ texts: ["turn-1"] })],
-      stateOverrides: { conversationId },
-    });
-    ctx.checkpointStore = store;
-    ctx.engineRoot = mainRoot;
-    ctx.subagentManager = oldManager;
-    ctx.engineShutdown = { current: oldManager.shutdown.bind(oldManager) };
-    ctx.rebuildDeps = async () => ({
-      deps: rebuiltDeps,
-      subagentManager: makeManagerStub(),
-    });
-
-    const file = await store.load(conversationId);
-    await store.save({
-      id: conversationId,
-      file: { ...file, workspaceRoot: wtRoot },
-    });
-
-    const stderr = await captureStderrOf(async () => {
-      const result = await processChatLine({ line: "q", ctx });
-      assert.equal(result.ranQuery, true);
-    });
-
-    assert.deepEqual(
-      closeoutEvents,
-      ["wait:running-old-task", "drain", "shutdown"],
-      "rebind must wait for running old-manager work before shutdown"
-    );
-    assert.match(modelMessages, /old running manager completed/);
-    assert.equal(
-      stderr,
-      "",
-      "a task that reaches terminal state before shutdown needs no warning"
-    );
-  });
-
-  it("旧 manager 的 running 任务无法完成时，shutdown 前明确告知结果未交付", async () => {
-    const dir = makeStoreDir();
-    const store = new SessionStore(dir);
-    const conversationId = "conv-rebind-running-failed";
-    const mainRoot = join(dir, "main");
-    const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
-    await store.save({
-      id: conversationId,
-      file: makeSessionFile(conversationId, mainRoot),
-    });
-
-    const closeoutEvents: string[] = [];
-    const oldManager = makeManagerStub();
-    oldManager.listActive = () => ["undelivered-old-task"];
-    oldManager.drainCompleted = () => {
-      closeoutEvents.push("drain");
-      return [];
-    };
-    oldManager.waitFor = async () => {
-      closeoutEvents.push("wait");
-      throw new Error("old task wait failed");
-    };
-    oldManager.shutdown = async () => {
-      closeoutEvents.push("shutdown");
-    };
-    const rebuiltDeps = makeDeps([assistantResult({ texts: ["rebuilt"] })]);
-    const ctx = makeCtx({
-      responses: [assistantResult({ texts: ["turn-1"] })],
-      stateOverrides: { conversationId },
-    });
-    ctx.checkpointStore = store;
-    ctx.engineRoot = mainRoot;
-    ctx.subagentManager = oldManager;
-    ctx.engineShutdown = { current: oldManager.shutdown.bind(oldManager) };
-    ctx.rebuildDeps = async () => ({
-      deps: rebuiltDeps,
-      subagentManager: makeManagerStub(),
-    });
-
-    const file = await store.load(conversationId);
-    await store.save({
-      id: conversationId,
-      file: { ...file, workspaceRoot: wtRoot },
-    });
-
-    const stderr = await captureStderrOf(async () => {
-      const result = await processChatLine({ line: "q", ctx });
-      assert.equal(result.ranQuery, true);
-    });
-
-    assert.deepEqual(closeoutEvents, ["wait", "drain", "shutdown"]);
-    assert.match(stderr, /old task wait failed/);
-    assert.match(stderr, /结果未交付/);
-    assert.match(stderr, /undelivered-old-task/);
-  });
-
   it("rebind 重建后 ctx 句柄切到重建引擎；旧引擎 shutdown 先收口、新 shutdown 注册进 engineShutdown.current", async () => {
     const dir = makeStoreDir();
     const store = new SessionStore(dir);
@@ -590,8 +380,8 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
     assert.equal(newDrainCalls, 1, "rebind 后当回合 drain 必须消费新 manager");
     assert.equal(
       oldDrainCalls,
-      1,
-      "plan Goal #2：旧 manager 仅在 shutdown 前收口一次，切换后不再 drain"
+      0,
+      "旧 manager 不再被 drain（活跃引擎 spawn 进新 manager）"
     );
   });
 
@@ -626,7 +416,7 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
     };
 
     let r;
-    const stderr = await captureStderrOf(async () => {
+    const stderr = await captureStderr(async () => {
       r = await processChatLine({ line: "q", ctx });
     });
     assert.equal(r.ranQuery, true);
@@ -724,12 +514,10 @@ describe("T6 — chat stable productRoot threading (worktree-mcp-rebind-lifecycl
       "utf8"
     );
     expect(src).toMatch(/productRoot\?:\s*string/);
+    expect(src).toMatch(
+      /opts\.productRoot\s*\?\s*\{\s*productRoot:\s*opts\.productRoot/
+    );
     // wrapper 不得用 process.cwd() 派生 productRoot
     expect(src).not.toMatch(/productRoot:\s*process\.cwd\(\)/);
-    // 「确实透传到了」由真跑守门：tests/cli/runtime-forwards-roots.test.ts 断言
-    // 每个根都落到 build-engine 的 opts 上。这里不再钉转发的**写法** ——
-    // round 4 起 wrapper 不手写白名单，改为 rest 整体透传（手写白名单只关住
-    // 「宿主写了接口没声明的字段」一个方向，反方向漏接编译全绿）。
-    expect(src).toMatch(/withoutUndefined\(passthrough\)/);
   });
 });

@@ -25,7 +25,6 @@ import {
   AgentCatalogLookupError,
   type AgentCatalogEntry,
 } from "../../src/harness/subagent/catalog.ts";
-import { FILE_WRITE_TOOL_NAMES } from "../../src/harness/aci/tools/symbol-mutate.ts";
 import { buildWorkerToolSurface } from "../../src/harness/subagent/role.ts";
 
 /** Sample worker toolset (mirror role.test.ts WORKER_TOOLSET) — 不含 spawn_subagent。 */
@@ -93,7 +92,7 @@ describe("subagent catalog: explore entry (B1 builtin)", () => {
     assert.equal(typeof entry.body, "string");
     assert.ok(entry.body.length > 0, "body (persona 文本) 非空");
     assert.equal(entry.bashMode, "readonly");
-    assert.deepEqual([...entry.disallowedTools!], [...FILE_WRITE_TOOL_NAMES]);
+    assert.deepEqual([...entry.disallowedTools!], ["edit_file", "write_file"]);
   });
 });
 

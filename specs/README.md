@@ -34,12 +34,10 @@
 ### 工具与扩展源
 
 - `224-tool-extension-path.md` — 工具扩展路径（lazy / discover / visibleSchemas + tool_search）
-- `symbol-primary-aci.md` — 符号主路径（查找 + 符号级改；使用规则段；归档坐标 `lsp_*` 模型面）；plan: `plans/symbol-primary-aci.md`
-- `302-lsp-multilang.md` — LSP 多语言泛化（客户端 dispatch；模型面工具名单改由 `symbol-primary-aci` 管辖）
-- `lsp-mcp-server.md` — stdio MCP（SDK 2.0）暴露 LSP 查询面（收口后须与符号查询同构，见 `symbol-primary-aci`）
+- `251-lsp-tool.md` — LSP 工具（自建客户端 + TS 首期）
+- `302-lsp-multilang.md` — LSP 多语言泛化
 - `337-skill-mcp-extension.md` — skill + MCP 扩展源
 - `406-secret-roundtrip-mask.md` — Secret roundtrip mask（supersedes `#126` hook-system）
-- `pluggable-web-search-backends.md` — web_search 可插拔 HTTP 后端（首版仅 Exa 真 HTTP）; plan: `plans/pluggable-web-search-backends.md`
 
 ### 身份与记忆
 
@@ -65,7 +63,6 @@
 
 批量归档：`docs/archive/025-retire-completed-specs-and-plans/specs/`
 
-- `251-lsp-tool.md` — superseded by `symbol-primary-aci.md`（坐标 `lsp_*` 模型面退役；客户端实现仍用）
 - `126-hook-system.md` — superseded by `#406` roundtrip mask
 - `128-verify-classifier.md` — superseded by `verify-goal-gate.md`（无 command 则每轮 completed 必跑判官 / `task` 可回退 query）
 - `458-goal-lifecycle-taskfocus.md` — 数据模型已落地；判定公式 `goal ?? taskFocus ?? query` superseded by `verify-goal-gate.md`

@@ -28,7 +28,7 @@ describe("createSkillScanner", () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-skill-"));
     roots.push(root);
     const home = join(root, "home");
-    const projectRoot = join(root, "project");
+    const cwd = join(root, "project");
     const extra = join(root, "extra");
     await fixture(
       join(home, ".iknow", "skills"),
@@ -36,7 +36,7 @@ describe("createSkillScanner", () => {
       "---\nname: shared\ndescription: user\n---\nuser"
     );
     await fixture(
-      join(projectRoot, ".iknow", "skills"),
+      join(cwd, ".iknow", "skills"),
       "shared",
       "---\nname: shared\ndescription: project\n---\nproject"
     );
@@ -48,7 +48,7 @@ describe("createSkillScanner", () => {
 
     const entries = await createSkillScanner({
       userHome: home,
-      projectIdentityRoot: projectRoot,
+      cwd,
       env: { IKNOW_SKILL_DIRS: extra },
     }).scan();
 
@@ -63,25 +63,21 @@ describe("createSkillScanner", () => {
   it("never scans .claude/skills and only recognizes SKILL.md", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-skill-"));
     roots.push(root);
-    const projectRoot = join(root, "project");
+    const cwd = join(root, "project");
     await fixture(
-      join(projectRoot, ".claude", "skills"),
+      join(cwd, ".claude", "skills"),
       "forbidden",
       "---\nname: forbidden\ndescription: no\n---\nbody"
     );
     await fixture(
-      join(projectRoot, ".iknow", "skills"),
+      join(cwd, ".iknow", "skills"),
       "wrong",
       "---\nname: wrong\ndescription: no\n---\nbody",
       "skill.md"
     );
 
     await expect(
-      createSkillScanner({
-        userHome: join(root, "home"),
-        projectIdentityRoot: projectRoot,
-        env: {},
-      }).scan()
+      createSkillScanner({ userHome: join(root, "home"), cwd, env: {} }).scan()
     ).resolves.toEqual([]);
   });
 
@@ -98,7 +94,7 @@ describe("createSkillScanner", () => {
 
     const entries = await createSkillScanner({
       userHome: join(root, "home"),
-      projectIdentityRoot: root,
+      cwd: root,
       env: { IKNOW_SKILL_DIRS: skills },
       warn,
     }).scan();
@@ -127,7 +123,7 @@ describe("createSkillScanner", () => {
 
     const entries = await createSkillScanner({
       userHome: join(root, "home"),
-      projectIdentityRoot: root,
+      cwd: root,
       env: { IKNOW_SKILL_DIRS: skills },
       warn,
     }).scan();
@@ -153,7 +149,7 @@ describe("createSkillScanner", () => {
 
     const entries = await createSkillScanner({
       userHome: join(root, "home"),
-      projectIdentityRoot: root,
+      cwd: root,
       env: { IKNOW_SKILL_DIRS: skills },
       warn,
     }).scan();
@@ -182,7 +178,7 @@ describe("createSkillScanner", () => {
 
     const entries = await createSkillScanner({
       userHome: join(root, "home"),
-      projectIdentityRoot: root,
+      cwd: root,
       env: { IKNOW_SKILL_DIRS: skills },
       warn,
     }).scan();
@@ -208,7 +204,7 @@ describe("createSkillScanner", () => {
 
     const entries = await createSkillScanner({
       userHome: join(root, "home"),
-      projectIdentityRoot: root,
+      cwd: root,
       env: { IKNOW_SKILL_DIRS: skills },
       warn,
     }).scan();
@@ -231,7 +227,7 @@ describe("createSkillScanner", () => {
 
     const entries = await createSkillScanner({
       userHome: join(root, "home"),
-      projectIdentityRoot: root,
+      cwd: root,
       env: { IKNOW_SKILL_DIRS: skills },
       warn,
     }).scan();
@@ -247,7 +243,7 @@ describe("createSkillScanner", () => {
     await expect(
       createSkillScanner({
         userHome: join(root, "home"),
-        projectIdentityRoot: join(root, "cwd"),
+        cwd: join(root, "cwd"),
         env: {},
       }).scan()
     ).resolves.toEqual([]);

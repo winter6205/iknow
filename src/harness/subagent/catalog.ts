@@ -9,8 +9,8 @@
  *     是 worker 装配期的 additive 字段载体 (envelope.role additive 通道在 T2
  *     接入;bashMode 通道在 T6 接入;disallowedTools 经既有 buildWorkerToolSurface
  *     合并,不新造抽象)。
- *   - explore = 只读探索 agent:disallowedTools 禁 FILE_WRITE_TOOL_NAMES
- *     （edit_file / write_file + symbol mutate），bashMode="readonly"
+ *   - explore = 只读探索 agent:disallowedTools 禁 edit_file / write_file,
+ *     bashMode="readonly" (双层强制:validator + fence ro-bind, 后续 bullet);
  *     body 是 persona 文本 (T2 注入 worker system prompt)。
  *   - general-purpose = 全工具面,不额外 deny (默认 deny spawn_subagent 由
  *     buildWorkerToolSurface 自动叠加,worker toolset 本来就不含,静默)。
@@ -21,8 +21,6 @@
  * 期 (T2) catch 此 error 走 fallback 路径 (无 persona / 无额外 deny /
  * bashMode="any" = V1 逐字节)。
  */
-import { FILE_WRITE_TOOL_NAMES } from "../aci/tools/symbol-mutate.js";
-
 export interface AgentCatalogEntry {
   readonly id: string;
   readonly description: string;
@@ -54,7 +52,7 @@ const EXPLORE_ENTRY: AgentCatalogEntry = Object.freeze({
     "Read-only exploration agent: searches code, reads files, and gathers information without modifying anything.",
   body: "You are an explore agent. Your role is read-only exploration and information gathering: search the codebase, read files, and report findings. Do not modify any files. Use read_file, grep, glob, and lsp_* tools to investigate. When asked to make changes, recommend instead that the caller perform the edits.",
   bashMode: "readonly",
-  disallowedTools: Object.freeze([...FILE_WRITE_TOOL_NAMES]),
+  disallowedTools: Object.freeze(["edit_file", "write_file"]),
 });
 
 /** general-purpose — 全工具面 agent。persona body 注入 worker system prompt (T2)。 */

@@ -85,11 +85,10 @@ describe("coordinator 加性段 — seam 缺席 / 字节级零变化", () => {
     expect(seamEmpty).toBe(baseline);
   });
 
-  it("不触碰 IKNOW_ASSEMBLY_ORDER (LOCKED 顺序保持 6 段)", () => {
+  it("不触碰 IKNOW_ASSEMBLY_ORDER (LOCKED 顺序保持 5 段)", () => {
     expect([...IKNOW_ASSEMBLY_ORDER]).toEqual([
       "identity",
       "soul",
-      "usage",
       "user_profile",
       "bootstrap",
       "memory_layer",

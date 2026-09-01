@@ -26,9 +26,29 @@ import {
   renderWorkspaceRootError,
 } from "../../src/cli.ts";
 import { resolveWorkspaceRoot } from "../../src/config/workspace-root.js";
-// Shared handle-based stderr capture (suppress semantics, restore() returns
-// the recorded lines) — replaces this file's former local copy.
-import { captureStderr } from "../_helpers/capture-stderr.ts";
+
+/** Capture process.stderr writes so we can assert exact text. */
+function captureStderr(): { restore: () => string[]; lines: string[] } {
+  const lines: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  // Cast to the same NodeJS.WriteStream shape; we replace the impl with a
+  // sync recorder and restore on .restore(). Minimal surface used by
+  // session-io's writeErr → process.stderr.write(text).
+  (process.stderr as unknown as { write: (s: string) => boolean }).write = (
+    s: string
+  ): boolean => {
+    lines.push(s);
+    return true;
+  };
+  return {
+    lines,
+    restore: (): string[] => {
+      (process.stderr as unknown as { write: typeof original }).write =
+        original;
+      return lines;
+    },
+  };
+}
 
 describe("isWorkspaceRootError — type guard (review-fix M5)", () => {
   it("accepts the 4 valid kinds (empty_explicit / empty_env / non_absolute / not_found)", () => {

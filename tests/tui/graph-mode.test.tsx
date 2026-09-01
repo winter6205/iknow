@@ -28,7 +28,6 @@ import { createNoAskUser } from "../../src/harness/permission/ask-user.js";
 import { createGraphAssembly } from "../../src/harness/graph/assembly.js";
 import { createPermissionModeContext } from "../../src/harness/permission/index.js";
 import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
-import type { HarnessStreamEvent } from "../../src/harness/stream.js";
 import {
   createGraphModeContext,
   type GraphModeContext,
@@ -143,28 +142,19 @@ interface DrivenApp {
   readonly setup: TestRendererSetup;
   readonly destroy: () => void;
   readonly typeText: (text: string) => Promise<void>;
-  readonly typeQuery: (text: string) => Promise<void>;
   readonly pressEnter: () => Promise<void>;
-  readonly pressTab: () => Promise<void>;
-  readonly pressEscape: () => Promise<void>;
   readonly pressShiftTab: () => Promise<void>;
-  readonly pressCtrlC: () => Promise<void>;
 }
 
 async function mountApp(opts: {
   readonly permissionMode: PermissionModeContext;
   readonly graphMode: GraphModeContext;
-  readonly streamEventsByStep?: ReadonlyArray<
-    ReadonlyArray<HarnessStreamEvent>
-  >;
 }): Promise<DrivenApp> {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-graph-"));
   const bridge = createTuiBridge({
     dataDir,
     workspaceRoot: dataDir,
-    deps: makeDeps([assistantResult({ texts: ["ok"] })], {
-      streamEventsByStep: opts.streamEventsByStep,
-    }),
+    deps: makeDeps([assistantResult({ texts: ["ok"] })]),
     inflight: createInflightRegistry(),
   });
   const setup = await testRender(
@@ -209,36 +199,13 @@ async function mountApp(opts: {
       await new Promise((r) => setTimeout(r, 100));
       await setup.renderOnce();
     },
-    typeQuery: async (text: string) => {
-      for (const ch of text) {
-        setup.mockInput.pressKey(ch);
-        await new Promise((r) => setTimeout(r, 30));
-      }
-      await new Promise((r) => setTimeout(r, 100));
-      await setup.renderOnce();
-    },
     pressEnter: async () => {
       setup.mockInput.pressEnter();
       await new Promise((r) => setTimeout(r, 150));
       await setup.renderOnce();
     },
-    pressTab: async () => {
-      setup.mockInput.pressTab();
-      await new Promise((r) => setTimeout(r, 150));
-      await setup.renderOnce();
-    },
-    pressEscape: async () => {
-      setup.mockInput.pressEscape();
-      await new Promise((r) => setTimeout(r, 150));
-      await setup.renderOnce();
-    },
     pressShiftTab: async () => {
       setup.mockInput.pressTab({ shift: true });
-      await new Promise((r) => setTimeout(r, 150));
-      await setup.renderOnce();
-    },
-    pressCtrlC: async () => {
-      setup.mockInput.pressKey("c", { ctrl: true });
       await new Promise((r) => setTimeout(r, 150));
       await setup.renderOnce();
     },
@@ -259,45 +226,6 @@ describe("TUI `/graph` 与 Shift+Tab 翻同一 holder（SC3）", () => {
       await app.typeText("/graph off");
       await app.pressEnter();
       expect(graphMode.get().enabled).toBe(false);
-    } finally {
-      app.destroy();
-    }
-  }, 30_000);
-
-  test("graph 状态按 Ctrl+C：chrome focus 与 view open 都显示标准空闲提示", async () => {
-    const permissionMode = createPermissionModeContext("default");
-    const graphMode = createGraphModeContext();
-    const snapshot = {
-      waveIndex: 0,
-      nodes: [{ id: "node-a", deps: [], status: "done" as const }],
-    };
-    const app = await mountApp({
-      permissionMode,
-      graphMode,
-      streamEventsByStep: [[{ type: "graph_progress", snapshot }]],
-    });
-    try {
-      await app.typeText("/graph on");
-      await app.pressEnter();
-      await app.typeQuery("go");
-      await app.pressEnter();
-      for (let i = 0; i < 20; i++) {
-        if (app.setup.captureCharFrame().includes("graph 1/1")) break;
-        await new Promise((r) => setTimeout(r, 50));
-        await app.setup.renderOnce();
-      }
-      await new Promise((r) => setTimeout(r, 1000));
-      await app.setup.renderOnce();
-      await app.pressTab();
-      expect(app.setup.captureCharFrame()).toContain("> graph");
-      await app.pressCtrlC();
-      expect(app.setup.captureCharFrame()).toContain("/quit");
-
-      await app.pressEnter();
-      expect(app.setup.captureCharFrame()).toContain("node-a");
-      await app.pressCtrlC();
-      await app.pressEscape();
-      expect(app.setup.captureCharFrame()).toContain("/quit");
     } finally {
       app.destroy();
     }

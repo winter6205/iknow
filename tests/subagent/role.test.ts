@@ -12,10 +12,7 @@ interface NamedTool {
   readonly name: string;
 }
 
-/** ACI 工具集样本 (worker 装配后不含 spawn_subagent) — 用于 deny-list 裁剪测试。
- *  symbol-primary-aci T5：10 件 lsp_* 已从模型面退役（spec symbol-primary-aci.md
- *  §37-53 + SC2 + SC7），worker 装配路径也不含。lsp.ts 实现的 10 件 AciToolDef
- *  仍由 symbol.ts / symbol-resolver.ts / symbol-mutate.ts 作 SSOT 内部消费。 */
+/** ACI 工具集样本 (worker 装配后不含 spawn_subagent) — 用于 deny-list 裁剪测试。 */
 const WORKER_TOOLSET: ReadonlyArray<NamedTool> = Object.freeze([
   { name: "bash" },
   { name: "read_file" },
@@ -28,6 +25,16 @@ const WORKER_TOOLSET: ReadonlyArray<NamedTool> = Object.freeze([
   { name: "memory_recall" },
   { name: "memory_save" },
   { name: "tool_search" },
+  { name: "lsp_definition" },
+  { name: "lsp_references" },
+  { name: "lsp_hover" },
+  { name: "lsp_document_symbol" },
+  { name: "lsp_workspace_symbol" },
+  { name: "lsp_go_to_implementation" },
+  { name: "lsp_prepare_call_hierarchy" },
+  { name: "lsp_incoming_calls" },
+  { name: "lsp_outgoing_calls" },
+  { name: "lsp_diagnostics" },
   { name: "skill" },
   { name: "skill_search" },
 ]);

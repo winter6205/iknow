@@ -7,8 +7,7 @@
   "types": "dist/index.d.ts",
   "bin": {
     "iknow": "dist/cli.js",
-    "iknow-trace-mcp": "scripts/iknow-trace-mcp.cjs",
-    "iknow-lsp-mcp": "scripts/iknow-lsp-mcp.cjs"
+    "iknow-trace-mcp": "scripts/iknow-trace-mcp.cjs"
   },
   "exports": {
     ".": {
@@ -50,7 +49,6 @@
     "probe:settings-bidir": "tsx scripts/i413-bidirectional-settings-smoke.ts",
     "probe:compact-events": "tsx scripts/probe-compact-events-548-550.ts",
     "probe:t8-popover": "tsx scripts/t8-popover-verify.ts",
-    "probe:search-backends": "tsx scripts/probe-search-backends.ts",
     "prepare": "husky"
   },
   "devDependencies": {

@@ -1,8 +1,8 @@
 name: S4 red-test-first
 
 on:
-  push: {branches: [master]}
-  pull_request: {branches: [master]}
+  push: { branches: [master] }
+  pull_request: { branches: [master] }
 
 jobs:
   s4-check:

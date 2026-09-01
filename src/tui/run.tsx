@@ -305,9 +305,6 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // memory / skill seam。
       // T6:启动 workspace 即稳定 productRoot —— rebuild 只换 workspaceRoot。
       ...(workspaceRoot ? { workspaceRoot, productRoot: workspaceRoot } : {}),
-      // Review (round 2/3):项目身份根 = 启动 cwd（rebuild 只覆盖 cwd /
-      // workspaceRoot，本字段不被覆盖 → 身份与命名空间跨改绑不动）。
-      projectIdentityRoot: cwd,
       // Review High-2 / High-1 (2026-08-29):启动 settings 对象 + isolation
       // host 缝透传（build-engine 据此装配 mutate 门禁）。
       settings: startupSettings,
@@ -360,9 +357,6 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       workspaceRoot,
       // T6:稳定 productRoot = 启动 workspace；bridge 单向透传给 hub。
       ...(workspaceRoot ? { productRoot: workspaceRoot } : {}),
-      // Review round 3:身份根与 productRoot 分开透传 —— hub 的 per-root 重建
-      // 也要用启动 cwd 查身份（`--workspace-root <dir>` 档下 <dir> 不是项目）。
-      projectIdentityRoot: cwd,
       deps,
       subagentManager,
       // Review High-1 (2026-08-29):注入 deps 的启动根 + per-root 重建缝。

@@ -77,23 +77,8 @@ _Avoid_: 工具自填 structured metadata 进 model tool_result；把 bash 例�
 **observability side-channel**: (#298) 工具观测旁路——handler 返 envelope `{ output, meta? }`；executor 拆分后仅 `output` 字符串化进 model-facing tool_result，`meta`（典型如 edit_file/write_file 的 `oldContent`/`newContent`）经 `PostToolUseHook.payload` → `TuiToolEvent.payload` → `LiveToolRun` 字段供 TUI diff 预览等观测消费者，永不进模型视野。ADR-0004（supersede Y1）。
 _Avoid_: 把 meta 拼入 model tool_result；让 TUI / Web 直接读 handler 原始返回对象
 
-**web_search backend selection**: `web_search` ACI 工具的后端选择面——按 `WebEnv.searchBackend` 显式选定（默认 `"bing"` / `cn.bing.com/search` HTML）；keyed backend 缺 key / 占位符解析失败 / backend 未设但 keyed key 已设一律 typed ToolExecutionError，无静默降级；零 key 默认路径与既有 Bing HTML 行为字节级一致。`specs/pluggable-web-search-backends.md`。
-_Avoid_: 把 "fallback" 与 "default" 混名（无 fallback）；让 keyed 失败时静默降级到 Bing；把 backend 字段塞进 settings.json（非 LLM 字段走 env 链，不进 settings 单承载，ADR-0015 §5）
-
-**search backend adapter seam**: `web_search` ACI 工具的可插拔 HTTP 后端接缝——同文件 `BACKENDS: Record<SearchBackendId, SearchBackend>` 表 + `selectBackend(id)` 分派；每家 adapter 投影到 Bing-shape `{title, snippet, url}`，T2 字段 cap 一刀切；v1 仅 Exa 真 HTTP，Tavily / Brave schema 占位（`fetchResults` 抛 typed `not_shipped`）；handler envelope `{output, meta?: {adapter, latencyMs, requestId?}}` 走 observability side-channel（v1 因 executor `isEnvelope` 白名单未扩，meta 通道推迟）；非 bing backend 拒 `search_url` 覆写。
-_Avoid_: 给每家 adapter 写自家 field cap；让 keyed key 解析失败改 silent empty；让 TUI/Web 直接读 handler 原始返回对象（破 observability side-channel）；不查 backend 就读 key
-
-**ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；SSOT 工厂 = `src/harness/aci/tools/registry.ts:createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取，工具数永不同步漂移。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。可分析代码的默认发现与符号级修改见 **符号主路径**（ADR-0038）。
-_Avoid_: 在 harness 之外另起 tool 注册表；在 entry point 手写工具数组；让工具返回结构化 metadata；把坐标 `lsp_*` 当代码导航主 API
-
-**符号主路径**: 智能体对可分析代码的默认工作方式——按 **符号身份** 查找并做符号级修改；`grep` / `read_file` / `edit_file` 只用于非代码、未知名字、语言服务器不可用，以及非单一符号的文本补丁。ADR-0038。
-_Avoid_: 先全文搜索再对行列问语言服务器当主路径；坐标工具与符号工具长期双暴露给模型
-
-**符号身份**: 指向源码实体的稳定键：文件内符号树路径（如 `ClassName/methodName`）加上相对项目根的文件路径，而不是行号列号。
-_Avoid_: 把 1-based line / character 当模型主入参；把 grep 命中行当成符号键
-
-**使用规则**: `deps.system` 中独立于 identity 卡片和 soul 的代码锁死段（装配名 `usage`），规定何时用符号工具、何时才 grep；四入口恒在（含 ask）。落点建议 `src/harness/identity/usage.ts`，与 `identity.ts` / `soul.ts` 并列。ADR-0038。
-_Avoid_: 把工具路由写进 soul Vibe；只靠 AGENTS.md 承载这条纪律；把使用规则当成身份 Name/Kind/Signature
+**ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；当前 8 件：`bash` / `read_file` / `grep` / `glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`，SSOT 工厂 = `src/harness/aci/tools/registry.ts:createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取，工具数永不同步漂移（#141 / #191 / a277f68）。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。
+_Avoid_: 在 harness 之外另起 tool 注册表；在 entry point 手写工具数组（#228 决议 D4——`memory_recall` / `memory_save` 入 SSOT 8+2=10）；让工具返回结构化 metadata
 
 **声明工具面 vs 实际工具面**: `SubAgentDefinition.disallowedTools` 写进 `WorkerEnvelope` 的是声明面；worker 进程装配后真正可被模型调用的工具集是实际面，二者必须相等——裁剪发生在 `createAciRegistry(tools)` **之前**的 def-list 期（`createDefaultAciRegistry` 工厂内），由构造期快照保证，不事后修补（`AciRegistry.inner` 是冻结快照）。
 _Avoid_: 给 `AciRegistry` 加 `.tools` 字段在产物上事后裁剪；声明 deny-list 但 worker 不消费（#468 修复对象）
@@ -104,8 +89,8 @@ _Avoid_: 在 adapter 或 host 层直接拼系统；发送空串 `system`（KV ca
 **memory_layer slot**: #196 9 段流水线 slots 5-9（user AGENTS / `PRIORITY_DECLARATION` / project AGENTS / `EXISTENCE_POINTER` / 可选 **memory_catalog** / promote 段）收敛后的单 slot 名，位置仍在 bootstrap 之后；委托 #121 `createSystemResolver`（`memory/refresh.ts`：mtime 缓存 + inflight 去重 + 装配失败不毒化缓存），内部拼接顺序由 ADR-0009 锁定，目录段由 ADR-0034 追加。#228 决议 D2。
 _Avoid_: 逐 slot 独立消费缓存；再拆拼接后的整串；把拼接顺序拆出 slot 边界独立决策
 
-**surface split (identity vs memory)**: 入口面（`chat` / `tui` / `ask` / `serve`）的两层语义——身份认知层（`identity` / `soul` / **使用规则** / `user_profile` + 仅对话入口触发的 `bootstrap`）恒在；记忆层（`AGENTS.md` + rules + 记忆库 + `memory_recall` / `memory_save` 工具）只对 chat / tui / serve 装配，`ask` 全 opt-out（`memory_layer` slot 不挂、memory 工具不入注册表）。#228 决议 D3；usage 段 ADR-0038。
-_Avoid_: `ask` 全 opt-out（破"我是谁"答复路径）；`ask` 全 opt-in（破 #121 "ask 无状态"前提）；按 surface flag 同时决定两层；ask 去掉使用规则
+**surface split (identity vs memory)**: 入口面（`chat` / `tui` / `ask` / `serve`）的两层语义——身份认知层（`identity` / `soul` / `user_profile` + 仅 chat/tui 触发的 `bootstrap`）恒在；记忆层（`AGENTS.md` + rules + 记忆库 + `memory_recall` / `memory_save` 工具）只对 chat / tui / serve 装配，`ask` 全 opt-out（`memory_layer` slot 不挂、memory 工具不入注册表）。#228 决议 D3。
+_Avoid_: `ask` 全 opt-out（破"我是谁"答复路径）；`ask` 全 opt-in（破 #121 "ask 无状态"前提）；按 surface flag 同时决定两层
 
 **auto_extract**（`settings.memory.autoExtract`）: 自动记忆抽取的产品总闸，boolean-only、**默认 OFF**——段缺失或非 `true` 一律关抽取与 **promote** 装配。`true` 时 host 仍按 N≥2 抽，且梦境双闸满足时必跑梦境 LLM（即使 `settings.memory.dream === false`）。仅当 extract 与 dream 均关时 `BuiltEngine.autoMemory` 缺席。ADR-0031 D1/D5；分层 `specs/auto-memory-layering.md`；钩子见 ADR-0033。
 _Avoid_: 把默认改成 ON；开抽取却不要梦境；关抽取仍拼 promote 段；把抽取 prompt 内嵌进 loop-engine；给 `ask` 接线；让 ingest 失败冒泡成用户 turn 失败；开抽取却不注 memory_catalog
@@ -251,17 +236,8 @@ _Avoid_: 把完整 result 当任务产物；把汇报截断当成任务失败
 **子代理并发上限**: 同时处于 starting/running 的 worker 硬顶，可配、默认 15；发几张由模型决定，超限立即失败、不排队。
 _Avoid_: 静默排队；让用户每次填写要派几个
 
-**子代理根归属**: 子代理是**父会话的执行臂**，继承父会话当前生效根；不是独立隔离单元。父会话已 rebind 时与父共享同一棵 task worktree；manager 层用父 `conversationId`，worker/LoopEngine 层用自己的 `conversationId`。父会话尚未 rebind 时，满足只读门禁的子代理可留在主仓，但不创建独立 worktree。ADR-0040。
-_Avoid_: 每个子代理单独建 worktree；把子代理的 worker `conversationId` 当成父会话路由 ID；把主仓只读放行误读成独立根
-
-**派发门禁判据**: 按**有效工具面能力**推导，**不按角色名匹配**。两维同时成立才允许留在主仓只读运行：(1) 有效工具面不含 `write_file` 也不含 `edit_file`；(2) 有效工具面不含 `bash`，或该角色 `bashMode === "readonly"`。任一维不成立即判为会写；未知角色 fail-closed 判为会写。ADR-0040。
-_Avoid_: 用角色名白名单代替能力判定；把父代理 `disallowedTools` 当成 `bashMode` 覆盖；未知角色默认放行
-
 **说明书静态层**: 用户级与项目级 AGENTS.md 及 rules，可注入通用 worker 的 system；与记忆工具、自动抽取、记忆库灌窗分开开关。
 _Avoid_: 用 memoryEnabled 一把关掉说明书；把说明书和 memory_recall 绑死
-
-**说明书读法**: 说明书（rules）的发现与装载纪律——用户级 `~/.iknow/rules/` 与项目级 `.iknow/rules/` 目录缺失或为空**视为空集、不 fatal**（worker 不得因缺目录退出，不要求操作员先 mkdir）；父会话（chat / tui / serve）**不把全部 rules 正文灌入开场上下文**，模型按需用读路径打开具体 rules 文件；干活 general-purpose 子代理开场注入**已存在**的 AGENTS.md 与 `.iknow/rules/*.md`；explore 子代理不注入项目说明书正文；硬约束仍走权限层（`.iknow/permissions.toml`），不搬进说明书正文。ADR-0009 D2 的 amended 读法（2026-08-30）。
-_Avoid_: 缺目录 fatal / `scandir` ENOENT 让 worker 退出；父会话开场整段灌 rules 正文；把硬约束从权限层搬进说明书；explore 注入说明书正文；把「按需读」读成「永不注入」（general-purpose 子代理开场仍注入已存在文件）
 
 **graph mode**: 会话级编排 overlay，不是 PermissionMode。Shift+Tab 三态轮 `Default → Auto → Graph → Default`（`/graph` 为非 TTY 对等物）；进 Graph 后**下一次 `run()` 装配**才注入编排段并露出 `run_graph`，过程中切换不拦、不中途重装配。ADR-0030。
 _Avoid_: 第四种 PermissionMode；把 `src/harness/graph/` 写进 prompt；env gate 才注入；进图改 ask/auto；切模式当下 round 热替换工具面
@@ -335,31 +311,14 @@ _Avoid_: 打开 `resultCaptured` 往 tool_call 抄正文；把投影当会话账
 **crash 取证无条件**: `subagent_spawn`/`subagent_state_change`/`subagent_stop` 生命周期事件与 stderr 指针文件在所有产品入口（含 chat REPL）落盘，与主循环 content trace 的入口开关解耦。ADR-0035（对 ADR-0003 D10 的范围修正）。
 _Avoid_: 把生命周期事件绑回 `--trace-out`；把该扩张理解为 content trace 进 chat REPL
 
-**worktree isolation mode**（`settings.isolation.worktreeOnMutate`，默认 OFF）: 全局隔离开关——OFF 时会话行为与今日完全一致；ON 时会话可只读主仓（相对读路径不改写到主仓绝对路径），首次 mutate（写路径）被拦截——host **不自动** `git worktree add`——模型调用**创建工作树 ACI 工具**完成建 task worktree（含 task 分支）与 **session worktree rebind**，此后本会话 mutate 只进该根；已绑定则放行，不建第二棵树。工具成功后 Host 只保证路径已切：不同波重放被拦的写，由模型在新根上自己再调，不要求操作员 `/continue`。只在启动加载点读取一次；config 层不读 git、不持会话状态；改绑不隐式重载 project settings。建树/绑定失败与主仓非 git 仓库一律 fail-closed：typed 可见错误，不静默放行写主仓。task worktree / 分支名已存在 → typed 错误不覆盖。ADR-0037（amended 2026-08-30：建树由 host 自动改为模型调 ACI 工具；对 ADR-0023「worktree/多根只读推迟」的窄面 reopen；git worktree ≠ product workspace 多根）。
-_Avoid_: 默认 ON；把 git worktree 混成 serve 主根或 `workspaceRoot` 多根；config 层读 git 或持会话状态；改绑后隐式重载 settings；建树失败静默写主仓；只建树不改绑会话；同名树静默覆盖；门禁自动 `git worktree add`；让 Host 同波代执行被拦的写
+**worktree isolation mode**（`settings.isolation.worktreeOnMutate`，默认 OFF）: 全局隔离开关——OFF 时会话行为与今日完全一致；ON 时会话可只读主仓，首次 mutate（写路径）被拦截 → `git worktree add` 建 task worktree（含 task 分支）→ **session worktree rebind** 到该树，此后本会话 mutate 只进该根；已绑定则放行，不建第二棵树。只在启动加载点读取一次；config 层不读 git、不持会话状态；改绑不隐式重载 project settings。建树/绑定失败与主仓非 git 仓库一律 fail-closed：typed 可见错误，不静默放行写主仓。task worktree / 分支名已存在 → 报错不覆盖。ADR-0037（对 ADR-0023「worktree/多根只读推迟」的窄面 reopen；git worktree ≠ product workspace 多根）。
+_Avoid_: 默认 ON；把 git worktree 混成 serve 主根或 `workspaceRoot` 多根；config 层读 git 或持会话状态；改绑后隐式重载 settings；建树失败静默写主仓；只建树不改绑会话；同名树静默覆盖
 
-**创建工作树 ACI 工具**: worktree isolation mode ON 时模型可见的 ACI 工具三件面之一（create / enter / exit，均经 host 缝注入 build-engine 条件装配，worker / hub-less 工具面缺席）——创建本会话 task worktree（含 task 分支）并把当前会话根锚改绑到该树；内部走既有 provision 缝（**Hub-visible provision seam**），不另起建树路径。成功 = 树在且会话根已切到该路径；同名 task worktree / 分支 → typed 错误，不覆盖、不复用归属不明的树；失败 → typed 错误且主仓零写入。ADR-0037（amended 2026-08-30）。
-_Avoid_: 让门禁自动建树；只建树不改绑；绕过 provision 缝另起建树路径；把工具失败当静默成功；对同会话并发建树不幂等
+**session worktree rebind**: worktree isolation mode ON 下首次 mutate 成功后，把**当前会话**生效的根锚（cwd / `workspaceRoot` 取值）切到本会话 task worktree 的动作；只影响本会话——不 checkout 其它会话 / 其它 worktree 的 HEAD，push / 开 PR 不拖动主仓或其它 worktree 当前分支。同会话并发首次 mutate 建树幂等（一棵树、一个 task 分支）。ADR-0037。
+_Avoid_: 改绑波及其它会话；把 rebind 当 serve 主根重绑（ADR-0023 unbound / recents 语义不变）；让 rebind 触发 settings 重载；把改绑后的根错当成 product workspace 多根
 
-**enter-task-worktree（进入工作树工具）**: worktree isolation mode ON 时模型可见的显式进入工具——会话（锚在主仓）经 owner conversationId 进入一棵**本仓已存在**的 task worktree（含他人会话的树），目标路径由 SSOT `taskWorktreePath` 派生，**不收自由路径**。授权 = 持久锚：改绑的持久记录（`session.workspaceRoot` === 引擎 task-worktree 形状根）写明「该会话显式在此树上」，provision 据此 adoption 放行其 mutate——重启安全，无进程内状态依赖。目标不存在 → typed `worktree_not_found`；非本仓 linked worktree / 调用方已在树内 → typed `foreign_worktree`；成功仅改绑本会话，主仓零写入、树内容零污染。ADR-0037（amended 2026-08-30，issue #839）。
-_Avoid_: 收自由路径当输入；无持久锚就放行外来树上的 mutate；把进入树会话的 session 文件改写当成改绑波及他人；让 worker 子代理获得该工具
-
-**exit-task-worktree（退出工作树工具）**: worktree isolation mode ON 时模型可见的对称退出工具——无参数；会话当前 task worktree 保留不删（孤儿树自动删除是明确非目标），会话根回到主仓根（由树经 `git rev-parse --path-format=absolute --git-common-dir` 派生，重启安全）；经 dirty-root conditionalSave 持久化后下一回合门禁在主仓重新武装（拦写 + 指向建树工具）。当前未改绑 → typed `rebind_failed`，非静默 no-op。ADR-0037（amended 2026-08-30，issue #839）。
-_Avoid_: 顺带删除树或分支；把 exit 当成静默 no-op；退出后同回合继续在旧树上写
-
-**session worktree rebind**: worktree isolation mode ON 下模型调用创建工作树 ACI 工具、建树并改绑成功后，把**当前会话**的 `taskRoot` 切到本会话 task worktree 的动作（`productRoot` / `installRoot` 不动，ADR-0037 §4 amended 2026-08-31）；只影响本会话——不 checkout 其它会话 / 其它 worktree 的 HEAD，push / 开 PR 不拖动主仓或其它 worktree 当前分支。同会话并发建树幂等（一棵树、一个 task 分支）；父会话改绑后 spawn 的子代理继承该根，不另建树。ADR-0037。
-_Avoid_: 改绑波及其它会话；把 rebind 当 serve 主根重绑（ADR-0023 unbound / recents 语义不变）；让 rebind 触发 settings 重载；顺带搬走项目身份或 per-root 状态；把改绑后的根错当成 product workspace 多根
-
-**productRoot**: 每个产品入口首次装配确定的稳定主 checkout root；session worktree rebind 后保持不变，不随当前 task worktree 改写。`mcp.json` 只问它。项目身份改问 `projectIdentityRoot`（见该词条）；per-root 状态（记忆库落盘根 / tasks 登记）的锚仍是 `workspaceRoot`，仅当它自身已是 task worktree 时退到 `productRoot`（保住 `--workspace-root` 重定向，同时状态不落进树）。settings 锚在启动时解析的根，改绑不重载（ADR-0037 §4/§5 amended 2026-08-31）。
-
-**projectIdentityRoot**: 用户此刻在做的那个项目根（今日 = 启动 cwd），宿主在启动装配 opts 里钉一次，session worktree rebind 只覆盖 `cwd` / `workspaceRoot`，本值不动。项目身份的唯一来源——rules / 项目 `AGENTS.md` / `permissions.toml` / 项目 skills 发现、子代理继承的身份根、记忆库命名空间名、`read_file` 在**隔离开且已改绑**时的主仓只读放行（开关 OFF 或未改绑都不放行，读沙箱与今日一致）。与 `productRoot` 分开的原因：后者被宿主取自 `workspaceRoot`，`--workspace-root <dir>` 重定向档下 `<dir>` 不是项目。缺席时退 cwd（hub 重建多一级：钉下的值 → `boundRoot` → `root`）；装配层对钉下的值与回退值一律套 `mainCheckoutOf`，身份根不得是 task worktree（在遗留树里启动时钉住空树会让身份整条消失）；它是会话根 SSOT 的第四个角色，空 / 相对值 typed fail-closed（ADR-0037 §4 amended 2026-08-31）。
-_Avoid_: workspaceRoot；task worktree root；product workspace 多根；只当它是 MCP 配置根
-
-**taskRoot**: 本会话当前的 task worktree root（创建 / 进入工作树工具切过去，退出工具切回主仓）；session worktree rebind **只切这一个根**。写与工具 cwd 只问它——写工具 / 会改工作区的 bash / git / LSP 目录 / 子代理工作目录；项目身份与 per-root 状态一概不问它。ADR-0037 §4。
-_Avoid_: workspaceRoot 兼当写隔离根；把它当记忆 / settings / 说明书根；往它上面 seed 一份 `.iknow`
-
-**installRoot**: iknow 运行时自身的安装位置，worker bootstrap 由它解析 tsx 与 iknow 自身依赖（锚在 `import.meta.url`，不随会话根走）。与用户项目的 `node_modules` 无关，故裸 task worktree 上真 worker 仍能起。ADR-0037 §4。
-_Avoid_: 用户项目 node_modules；taskRoot；子进程 cwd 相对解析
+**productRoot**: 每个产品入口首次装配确定的稳定主 checkout root；session worktree rebind 后保持不变，不随当前 task worktree 改写。
+_Avoid_: workspaceRoot；task worktree root；product workspace 多根
 
 **mcpConfigRoot**: 由 productRoot 派生、跨 session worktree rebind 保持稳定的 MCP 配置根；只读取 `<mcpConfigRoot>/.iknow/mcp.json`，不切换到 task worktree。
 _Avoid_: workspaceRoot；task worktree；process.cwd()
@@ -397,9 +356,6 @@ _Avoid_: workspaceRoot；task worktree；process.cwd()
 - **tool_result projection vs tool_call.result**: 投影只读 messages；不把 stdout 抄到 `tool_call` 行
 - **crash 取证无条件 vs ADR-0003 D10**: 生命周期三类事件 ≠ content trace；D10 的 chat REPL 排除只对 content trace 继续成立
 - **worktree isolation mode vs workspaceRoot vs workspace（serve 主根）**: git worktree 是会话级 mutate 物理隔离；`workspaceRoot` 是 per-root 状态锚（ADR-0019）；serve 主根是显式选定锚（ADR-0023）。rebind 只切本会话生效根，不改锚规则本身
-- **创建工作树 ACI 工具 vs worktree isolation mode**: 门禁只拦不建；建树与改绑都由模型经该工具完成，内部走 Hub-visible provision seam；Host 不同波重放被拦的写
-- **enter/exit 对称工具 vs 持久锚**: enter 的授权与 exit 的目标判定都读持久锚（`session.workspaceRoot` 的树形状记录），不依赖进程内 bound 状态；exit 保留树，enter 只改绑本会话
-- **说明书静态层 vs 说明书读法**: 静态层说「哪些文件算说明书」；读法说「缺了怎么办、谁在什么时机拿到正文」——缺目录视为空、不 fatal，父会话按需读不整段灌，general-purpose 子代理开场注入已有文件，explore 不注入
 - **user.md vs user-level AGENTS.md vs 项目 AGENTS.md**: 画像与用户级行为约定同根 `~/.iknow/`、对所有项目生效；项目仓库根 `AGENTS.md` 叠在用户级之上且项目优先；都不是记忆库事实文件
 
 ## Flagged ambiguities

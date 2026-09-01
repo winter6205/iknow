@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it, vi } from "vitest";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
@@ -455,70 +455,6 @@ describe("subagent worker: CreateWorkerDepsOptions seam 字段 (类型契约)", 
       assert.ok(!system.includes(marker));
     } finally {
       await rm(cwd, { recursive: true, force: true });
-    }
-  });
-
-  it("改绑分裂根：general-purpose 注入 projectIdentityRoot 的 AGENTS.md，不读树上诱饵", async () => {
-    const productRoot = await mkdtemp(
-      join(tmpdir(), "iknow-worker-split-identity-")
-    );
-    const taskRoot = join(productRoot, ".iknow", "worktrees", "conv-1");
-    try {
-      await mkdir(taskRoot, { recursive: true });
-      const identityMarker = "IDENTITY_ROOT_AGENTS";
-      const decoyMarker = "TASK_TREE_DECOY_AGENTS";
-      await writeFile(join(productRoot, "AGENTS.md"), identityMarker);
-      await writeFile(join(taskRoot, "AGENTS.md"), decoyMarker);
-
-      const deps = await createWorkerDeps({
-        env: TEST_ENV,
-        sandboxRoot: taskRoot,
-        cwd: taskRoot,
-        userHome: productRoot,
-        projectIdentityRoot: productRoot,
-        role: "general-purpose",
-        model: createStubModel({ responses: [] }),
-        skillCatalog: createSkillCatalog([]),
-        trace: createNoopTraceService(),
-      });
-
-      const system = (await deps.system?.()) ?? "";
-      assert.ok(system.includes(identityMarker));
-      assert.ok(!system.includes(decoyMarker));
-    } finally {
-      await rm(productRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("改绑分裂根：explore 仍不注入身份根或树上的项目 AGENTS.md", async () => {
-    const productRoot = await mkdtemp(
-      join(tmpdir(), "iknow-worker-split-explore-")
-    );
-    const taskRoot = join(productRoot, ".iknow", "worktrees", "conv-1");
-    try {
-      await mkdir(taskRoot, { recursive: true });
-      const identityMarker = "IDENTITY_ROOT_AGENTS_EXPLORE";
-      const decoyMarker = "TASK_TREE_DECOY_EXPLORE";
-      await writeFile(join(productRoot, "AGENTS.md"), identityMarker);
-      await writeFile(join(taskRoot, "AGENTS.md"), decoyMarker);
-
-      const deps = await createWorkerDeps({
-        env: TEST_ENV,
-        sandboxRoot: taskRoot,
-        cwd: taskRoot,
-        userHome: productRoot,
-        projectIdentityRoot: productRoot,
-        role: "explore",
-        model: createStubModel({ responses: [] }),
-        skillCatalog: createSkillCatalog([]),
-        trace: createNoopTraceService(),
-      });
-
-      const system = (await deps.system?.()) ?? "";
-      assert.ok(!system.includes(identityMarker));
-      assert.ok(!system.includes(decoyMarker));
-    } finally {
-      await rm(productRoot, { recursive: true, force: true });
     }
   });
 

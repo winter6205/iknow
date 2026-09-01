@@ -41,31 +41,6 @@ On a TTY, bare `iknow` opens chat. Piped / non-TTY with no args prints usage.
 
 Configure the model in `settings.json` (`llm.model`, `llm.apiKey` as a literal or `${VAR}`). Details: [`docs/llm-config-quickstart.md`](docs/llm-config-quickstart.md).
 
-## Probes
-
-- `npm run probe:search-backends` — opt-in Exa real HTTP smoke for `web_search` (fail-closed if `EXA_API_KEY` is unset; not collected by `npm test`).
-
-## Optional: expose LSP tools to another coding agent
-
-iknow already uses 10 read-only `lsp_*` tools in-process. `iknow-lsp-mcp` is an extra stdio MCP server with the **same** tools, for Cursor / Claude Code / similar hosts. Do not remove the built-in tools; this is a second door, not a move.
-
-Install / build this repo, then add the server in **your MCP client's** config (not required in this repo's `.iknow/mcp.json`):
-
-```json
-{
-  "mcpServers": {
-    "iknow-lsp": {
-      "command": "iknow-lsp-mcp",
-      "args": ["--root", "/absolute/path/to/your/project"]
-    }
-  }
-}
-```
-
-While developing from source you can use `npx tsx src/lsp-mcp/main.ts --root /absolute/path/to/your/project` instead of the `iknow-lsp-mcp` bin.
-
-`--root` wins over `IKNOW_LSP_ROOT`, then `process.cwd()`. The path must be an existing directory. Write operations (rename / format) are not included.
-
 ## Layout
 
 | Path               | Role                                                |

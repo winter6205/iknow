@@ -16,7 +16,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "vitest";
@@ -273,66 +273,6 @@ describe("bash.readonly 双闸 (real spawn)", () => {
         (error: unknown) => error instanceof ReadonlyViolationError
       );
       assert.equal(existsSync(join(cwd, "out.txt")), false);
-    },
-    15_000
-  );
-
-  it.skipIf(!hasBwrap())(
-    "PoC 回归:HOME 下的 cwd 中 find -fprint 不得写入目标文件",
-    async () => {
-      const home = await makeScratch("bash-ro-poc-home-");
-      const cwd = join(home, "workspace");
-      await mkdir(cwd);
-      await writeFile(join(cwd, "visible.txt"), "visible\n");
-      const target = join(cwd, "package.json");
-      const tool = createBashTool(cwd, {
-        bashMode: "readonly",
-        home,
-      });
-
-      let result: unknown;
-      let error: unknown;
-      try {
-        result = await tool.handler({
-          command: "find . -fprint package.json",
-        });
-      } catch (caught) {
-        error = caught;
-      }
-
-      const targetExists = existsSync(target);
-      const targetContent = targetExists
-        ? await readFile(target, "utf8")
-        : undefined;
-      assert.ok(
-        error instanceof ReadonlyViolationError,
-        `find -fprint PoC must be rejected; result=${JSON.stringify(result)}, targetExists=${targetExists}, targetContent=${JSON.stringify(targetContent)}`
-      );
-      assert.equal(targetExists, false);
-    },
-    15_000
-  );
-
-  it.skipIf(!hasBwrap())(
-    "PoC 物理兜底:绕过 readonly validator 后 find -fprint 仍不得写入 cwd",
-    async () => {
-      const home = await makeScratch("bash-ro-fence-poc-home-");
-      const cwd = join(home, "workspace");
-      await mkdir(cwd);
-      await writeFile(join(cwd, "visible.txt"), "visible\n");
-      const target = join(cwd, "package.json");
-      const tool = createBashTool(cwd, {
-        home,
-        cwdReadonly: true,
-      });
-
-      const result = (await tool.handler({
-        command: "find . -fprint package.json",
-      })) as { code: number; stderr: string };
-
-      assert.notEqual(result.code, 0);
-      assert.match(result.stderr, /Read-only file system|Permission denied/);
-      assert.equal(existsSync(target), false);
     },
     15_000
   );

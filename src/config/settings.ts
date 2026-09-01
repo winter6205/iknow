@@ -236,24 +236,6 @@ export function resolveWorktreeOnMutate(
   return settings?.isolation?.worktreeOnMutate === true;
 }
 
-/**
- * lsp-optimization 二期 B7: LSP 配置段。全部字段可选；requestTimeoutMs /
- * diagnosticsWaitMs 为正整数；idleTimeoutMs 为 ≥0 整数（0 = 关闭 sweep）。
- * 消费点：build-engine 装配 LspCtx 注入（tools 层超时/等待 + client idle
- * sweep + disabledServers 过滤）。worker 不读 settings 文件，注入 idle
- * 缺省值（DEFAULT_LSP_IDLE_TIMEOUT_MS）。
- */
-export interface IknowLspSettings {
-  /** per-request LSP 超时上限（毫秒，缺省 20_000）。 */
-  requestTimeoutMs?: number;
-  /** lsp_diagnostics 读前等待 deadline（毫秒，缺省 2_000）。 */
-  diagnosticsWaitMs?: number;
-  /** 空闲 LSP 客户端回收阈值（毫秒，缺省 600_000；0 视为不回收）。 */
-  idleTimeoutMs?: number;
-  /** 禁用的 server id 列表（命中 → 视为未配置）。 */
-  disabledServers?: string[];
-}
-
 export interface IknowSettings {
   llm?: IknowSettingsLlm;
   verify?: IknowSettingsVerify;
@@ -268,8 +250,6 @@ export interface IknowSettings {
   memory?: IknowSettingsMemory;
   /** ADR-0037: 会话级 git worktree 隔离开关（默认 OFF）。 */
   isolation?: IknowSettingsIsolation;
-  /** lsp-optimization 二期 B7: LSP 配置段（全部可选，缺省走消费方默认值）。 */
-  lsp?: IknowLspSettings;
 }
 
 export interface IknowSettingsLoop {
@@ -307,13 +287,6 @@ function isValidMaxTurns(v: unknown): v is number {
 function isValidTimeoutMs(v: unknown): v is number {
   return (
     typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 1
-  );
-}
-
-/** LSP idle sweep：0 = 关闭回收；负数 / 非整数仍丢弃。 */
-function isValidIdleTimeoutMs(v: unknown): v is number {
-  return (
-    typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 0
   );
 }
 
@@ -723,74 +696,6 @@ function mergeIsolation(
   return out;
 }
 
-/**
- * lsp-optimization 二期 B7: 校验 `lsp` 层 —— 非法字段丢弃（镜像 parseIsolation）。
- * 非普通对象 → undefined；requestTimeoutMs / diagnosticsWaitMs 非正整数 → 丢弃；
- * idleTimeoutMs 非 ≥0 整数 → 丢弃（0 合法 = 关闭 sweep）；disabledServers 非
- * 非空字符串数组 → 丢弃该字段；字段全非法 / 缺席 → undefined（消费方走缺省值）。
- */
-function parseLsp(raw: unknown): IknowLspSettings | undefined {
-  if (!isPlainObject(raw)) return undefined;
-  const out: IknowLspSettings = {};
-  if (isValidTimeoutMs(raw.requestTimeoutMs)) {
-    out.requestTimeoutMs = raw.requestTimeoutMs;
-  }
-  if (isValidTimeoutMs(raw.diagnosticsWaitMs)) {
-    out.diagnosticsWaitMs = raw.diagnosticsWaitMs;
-  }
-  if (isValidIdleTimeoutMs(raw.idleTimeoutMs)) {
-    out.idleTimeoutMs = raw.idleTimeoutMs;
-  }
-  if (isNonEmptyStringArray(raw.disabledServers)) {
-    out.disabledServers = raw.disabledServers.map((s) => s.trim());
-  }
-  if (
-    out.requestTimeoutMs === undefined &&
-    out.diagnosticsWaitMs === undefined &&
-    out.idleTimeoutMs === undefined &&
-    out.disabledServers === undefined
-  )
-    return undefined;
-  return out;
-}
-
-/** lsp-optimization 二期 B7: 逐层合并 lsp：project 字段优先，未覆盖的 user 字段保留。 */
-function mergeLsp(
-  user: IknowLspSettings | undefined,
-  project: IknowLspSettings | undefined
-): IknowLspSettings | undefined {
-  if (!user && !project) return undefined;
-  const out: IknowLspSettings = {};
-  if (project?.requestTimeoutMs !== undefined) {
-    out.requestTimeoutMs = project.requestTimeoutMs;
-  } else if (user?.requestTimeoutMs !== undefined) {
-    out.requestTimeoutMs = user.requestTimeoutMs;
-  }
-  if (project?.diagnosticsWaitMs !== undefined) {
-    out.diagnosticsWaitMs = project.diagnosticsWaitMs;
-  } else if (user?.diagnosticsWaitMs !== undefined) {
-    out.diagnosticsWaitMs = user.diagnosticsWaitMs;
-  }
-  if (project?.idleTimeoutMs !== undefined) {
-    out.idleTimeoutMs = project.idleTimeoutMs;
-  } else if (user?.idleTimeoutMs !== undefined) {
-    out.idleTimeoutMs = user.idleTimeoutMs;
-  }
-  if (project?.disabledServers !== undefined) {
-    out.disabledServers = project.disabledServers;
-  } else if (user?.disabledServers !== undefined) {
-    out.disabledServers = user.disabledServers;
-  }
-  if (
-    out.requestTimeoutMs === undefined &&
-    out.diagnosticsWaitMs === undefined &&
-    out.idleTimeoutMs === undefined &&
-    out.disabledServers === undefined
-  )
-    return undefined;
-  return out;
-}
-
 /** 逐层合并 llm：project 字段优先，未覆盖的 user 字段保留。 */
 function mergeLlm(
   user: IknowSettingsLlm | undefined,
@@ -939,8 +844,6 @@ function mergeSettings(
     parseIsolation(userRaw.isolation),
     parseIsolation(projectRaw.isolation)
   );
-  // lsp-optimization 二期 B7: LSP 配置段（全部可选，缺省走消费方默认值）。
-  const lsp = mergeLsp(parseLsp(userRaw.lsp), parseLsp(projectRaw.lsp));
   const out: IknowSettings = {};
   if (llm) out.llm = llm;
   if (verify) out.verify = verify;
@@ -950,7 +853,6 @@ function mergeSettings(
   if (graph) out.graph = graph;
   if (memory) out.memory = memory;
   if (isolation) out.isolation = isolation;
-  if (lsp) out.lsp = lsp;
   return out;
 }
 

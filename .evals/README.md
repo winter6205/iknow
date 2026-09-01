@@ -11,14 +11,14 @@ Regression-test scaffold for project templates. Zero external deps — pure bash
 ## Task YAML schema (7 fields)
 
 ```yaml
-id: <unique-id>                       # required, string
-tier: fast|medium|slow                # optional, default medium
-description: "<what this tests>"      # required, string
-repo: <path>                          # optional, default cwd
-files_to_fix:                         # optional, list
+id: <unique-id> # required, string
+tier: fast|medium|slow # optional, default medium
+description: "<what this tests>" # required, string
+repo: <path> # optional, default cwd
+files_to_fix: # optional, list
   - <relative-path>
-test_command: <shell-command>         # required, string, exit 0 = pass
-prompt: |                             # optional, agent prompt for this task
+test_command: <shell-command> # required, string, exit 0 = pass
+prompt: | # optional, agent prompt for this task
   <multi-line>
 ```
 
@@ -27,11 +27,11 @@ prompt: |                             # optional, agent prompt for this task
 
 ## Tier model
 
-| tier    | use case                                              |
-|---------|-------------------------------------------------------|
-| fast    | boot, structural grep, smoke checks (always safe)      |
-| medium  | pytest collect, lint, mid-cost integration smoke      |
-| slow    | coverage gates, full pytest, e2e                      |
+| tier   | use case                                          |
+| ------ | ------------------------------------------------- |
+| fast   | boot, structural grep, smoke checks (always safe) |
+| medium | pytest collect, lint, mid-cost integration smoke  |
+| slow   | coverage gates, full pytest, e2e                  |
 
 Within a tier, tasks run **in parallel**. Across tiers: fast → medium → slow, sequentially.
 This means a fast-tier failure stops the run before medium/slow consume time.
@@ -74,7 +74,7 @@ bash .evals/run.sh --results-dir ./out   # custom output dir
       "test_duration_sec": 0.123
     }
   ],
-  "summary": {"total": 1, "passed": 1, "failed": 0}
+  "summary": { "total": 1, "passed": 1, "failed": 0 }
 }
 ```
 

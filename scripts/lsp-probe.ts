@@ -39,19 +39,13 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path, { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-  createLspToolSet,
-  isLspFailureSentinel,
-} from "../src/harness/aci/tools/lsp.js";
+import { createLspToolSet } from "../src/harness/aci/tools/lsp.js";
 import type { AciToolDef } from "../src/harness/aci/types.js";
 import { SERVERS } from "../src/harness/lsp/server.js";
 import { PROBE_TARGETS } from "./lsp-probe-targets.js";
 
-/**
- * 无可用 LSP server 时 handler 返回的哨兵纯字符串（探针据此判 FAIL）。
- * 二期 B3 哨兵分层后按 reason 分文案（no-server / no-root / spawn-failed），
- * 探针统一走 `isLspFailureSentinel`（三条前缀都判 FAIL，避免 false-pass）。
- */
+/** 无可用 LSP server 时 handler 返回的哨兵纯字符串（探针据此判 FAIL）。 */
+const NO_SERVER = "(no LSP server available for file)";
 
 /** `--lang` 可选值 → PROBE_TARGETS key。 */
 const LANGS = ["typescript", "python", "yaml", "json", "dockerfile"] as const;
@@ -110,15 +104,14 @@ let total = 0;
 function checkString(name: string, result: unknown, extra?: string): void {
   total++;
   const ok =
-    typeof result === "string" &&
-    result.length > 0 &&
-    !isLspFailureSentinel(result);
+    typeof result === "string" && result.length > 0 && result !== NO_SERVER;
   if (ok) passed++;
-  const detail = isLspFailureSentinel(result)
-    ? "LSP unavailable (no-server / no-root / spawn-failed sentinel)"
-    : typeof result !== "string"
+  const detail =
+    typeof result !== "string"
       ? `type=${typeof result}`
-      : (extra ?? "");
+      : result === NO_SERVER
+        ? "no LSP server available"
+        : (extra ?? "");
   console.log(`${ok ? "✓" : "✗"} ${name}${detail ? ` (${detail})` : ""}`);
 }
 

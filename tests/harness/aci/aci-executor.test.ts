@@ -309,28 +309,7 @@ describe("createAciExecutor — #224 W5 S7b: partial salvage 仅 bash（契约 Y
   });
 
   it("S7b 正例（对照）：bash 工具被 cancel → 保留 partial（stdout 被 salvage）", async () => {
-    let resolveInnerStarted!: () => void;
-    const innerStarted = new Promise<void>((resolve) => {
-      resolveInnerStarted = resolve;
-    });
-    let releaseInner!: () => void;
-    const spy: Executor = Object.freeze({
-      executeAll: async (
-        batch: ReadonlyArray<ToolCall>
-      ): Promise<ReadonlyArray<ToolExecutionResult>> => {
-        resolveInnerStarted();
-        await new Promise<void>((resolve) => {
-          releaseInner = resolve;
-        });
-        return batch.map((c) => ({
-          kind: "ok" as const,
-          toolUseId: c.id,
-          payload: [
-            { type: "text" as const, text: '{"stdout":"partial","stderr":""}' },
-          ],
-        }));
-      },
-    });
+    const { executor: spy } = makePartialSpy();
     const tool: AciToolDef = Object.freeze({
       name: "bash",
       description: "bash 工具",
@@ -347,14 +326,11 @@ describe("createAciExecutor — #224 W5 S7b: partial salvage 仅 bash（契约 Y
     const aciExec = createAciExecutor({ inner: spy, catalog });
 
     const controller = new AbortController();
-    const execution = aciExec.executeAll(
+    controller.abort();
+    const results = await aciExec.executeAll(
       [{ id: "u1", name: "bash", input: {} }],
       controller.signal
     );
-    await innerStarted;
-    controller.abort();
-    releaseInner();
-    const results = await execution;
 
     const r = results[0]!;
     assert.equal(r.kind, "execution_failed");

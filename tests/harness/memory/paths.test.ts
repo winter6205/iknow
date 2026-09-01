@@ -34,7 +34,7 @@ describe("resolveProjectMemoryDir", () => {
     assert.equal(basename(b).startsWith("proj-"), true);
   });
 
-  it("extracts the basename of the namespaceRoot into the directory name", () => {
+  it("extracts the basename of the cwd into the directory name", () => {
     const dir = resolveProjectMemoryDir(
       "/opt/workspaces/my-agent",
       TEST_WORKSPACE_ROOT
@@ -42,7 +42,7 @@ describe("resolveProjectMemoryDir", () => {
     assert.equal(basename(dir).startsWith("my-agent-"), true);
   });
 
-  it("normalizes a relative namespaceRoot to an absolute path", () => {
+  it("normalizes relative cwd to an absolute path", () => {
     const abs = resolveProjectMemoryDir("/tmp/foo/rel", TEST_WORKSPACE_ROOT);
     const rel = resolveProjectMemoryDir(
       "/tmp/foo/rel/../rel",

@@ -64,12 +64,9 @@ const DEFAULT_DISALSET_TOOLS_LENGTH_SNAPSHOT = 1;
 
 describe("M3 worker 默认可见 — buildWorkerToolSurface 宽容裁剪", () => {
   it("用户 deny-list 含 list/read 时仍宽容忽略(available 不含 → 静默跳过,不抛)", () => {
-    // 模拟 worker 装配时的小型可用集（fixture 仅关心 buildWorkerToolSurface
-    // 对 deny-list 的语义,不必镜像 ACI 全量 37 件 — 改用更小的子集覆盖关键
-    // 工具类型:baseline + tool_search + skill 2 + spawn/subagent + mcp 2），
-    // 验证「用户 deny 在 available 中 → 剔除」「不在 → 宽容跳过」两条主语义。
-    // 工具面真实件数以 buildWorkerToolSurface 的 SSOT 行为为准,
-    // 此处只为 deny-list 边界断言提供输入集。
+    // 模拟 worker 装配时的全量工具面（28 件：8 基线 + tool_search + 10 LSP
+    // + skill 2 + spawn_subagent + subagent_result + mcp 2 件。模拟时只关心
+    // 工具名集合,工具 def body 不参与裁剪判定）。
     const available = [
       "bash",
       "read_file",
@@ -80,6 +77,16 @@ describe("M3 worker 默认可见 — buildWorkerToolSurface 宽容裁剪", () =>
       "web_fetch",
       "web_search",
       "tool_search",
+      "lsp_definition",
+      "lsp_references",
+      "lsp_hover",
+      "lsp_document_symbol",
+      "lsp_workspace_symbol",
+      "lsp_go_to_implementation",
+      "lsp_prepare_call_hierarchy",
+      "lsp_incoming_calls",
+      "lsp_outgoing_calls",
+      "lsp_diagnostics",
       "skill",
       "skill_search",
       "spawn_subagent",
@@ -116,6 +123,17 @@ describe("M3 worker 默认可见 — buildWorkerToolSurface 宽容裁剪", () =>
       "web_fetch",
       "web_search",
       "tool_search",
+      "lsp_definition",
+      "lsp_definition", // 重名占位让 set 配合最小集
+      "lsp_references",
+      "lsp_hover",
+      "lsp_document_symbol",
+      "lsp_workspace_symbol",
+      "lsp_go_to_implementation",
+      "lsp_prepare_call_hierarchy",
+      "lsp_incoming_calls",
+      "lsp_outgoing_calls",
+      "lsp_diagnostics",
       "skill",
       "skill_search",
       "spawn_subagent",

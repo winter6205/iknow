@@ -14,37 +14,28 @@
  *     幂等兜底），非事后修补。
  *
  * worker 装配特征：createWorkerDeps 不传 subagentManager / memoryDir /
- * todoDir / mcpManager / backgroundManager / graphAssembly（worker.ts:141-146
- * + #502 T3 旁注）→ 9 件条件化缺席（具体名单见下方 WORKER_BASE_SURFACE 注释）。
- * 本测试额外显式传 `skillCatalog: createSkillCatalog([])` 让 skill /
- * skill_search 在场以保持全量面可断言。具体件数 = WORKER_BASE_SURFACE.length,
- * 以数组为 source of truth（旧 10 件 lsp_* 已退役，不在 WORKER_BASE_SURFACE 中）。
+ * todoDir / mcpManager / backgroundManager（worker.ts:141-146 + #502 T3
+ * 旁注）→ spawn_subagent / subagent_result / memory_recall / memory_save /
+ * todo_write / list_mcp_resources / read_mcp_resource / bash_output /
+ * bash_stop 九件天然缺席。本测试额外显式传 `skillCatalog:
+ * createSkillCatalog([])` 让 skill / skill_search 在场以保持全量 22 件
+ * 面可断言（32 - 缺席 10 = 22: memory2 + subagent2 + todo_write + mcp2 + bg2
+ * + run_graph；query_trace 为常驻只读件）。
  */
 
 import assert from "node:assert/strict";
-import { spawn as spawnChild } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { describe, it } from "vitest";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import {
   createWorkerDeps,
   type CreateWorkerDepsOptions,
 } from "../../src/harness/subagent/worker.ts";
-import { createSpawnSubAgentTool } from "../../src/harness/subagent/spawn-subagent-tool.ts";
-import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
 import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
 import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { ACI_TOOLSET_NAMES } from "../../src/harness/aci/tools/registry.ts";
-import { assessSubagentIsolation } from "../../src/harness/subagent/capability.ts";
-import {
-  FILE_WRITE_TOOL_NAMES,
-  SYMBOL_MUTATE_TOOL_NAMES,
-} from "../../src/harness/aci/tools/symbol-mutate.ts";
 
 // ---------------------------------------------------------------------------
 // Constants & fixtures
@@ -92,21 +83,20 @@ const TEST_ENV: IknowEnv = {
 };
 
 /**
- * worker 装配后 "全量面" 名集（无 deny-list 时）。具体件数 =
- * `WORKER_BASE_SURFACE.length`，以数组为 source of truth（注释里不写加法
- * 叙事 — 加法易漂）。T5 旧 10 lsp_* 已退役；WORKER_BASE_SURFACE 不再含
- * lsp_* 名。
- *
- * 条件化缺席（worker 不装配,详见 #468 + D6 决议）：
- *   - memory_recall / memory_save（memoryDir 缺席）
- *   - spawn_subagent / subagent_result（subagentManager 缺席）
- *   - todo_write（todoDir 缺席）
- *   - list_mcp_resources / read_mcp_resource（mcpManager 缺席）
- *   - bash_output / bash_stop（backgroundManager 缺席,#502 T3 同门）
- *   - run_graph（graphAssembly 缺席,D-α T3）
- *
- * 本测试通过显式注 skillCatalog 把 skill / skill_search 计入（条件化：
- * skillCatalog 在场时入注册表），具体件数以 WORKER_BASE_SURFACE 数组长度为准。
+ * worker 装配后 "全量面" 名集（无 deny-list 时）= 22 件：
+ *   - 8 基线（bash / read_file / grep / glob / edit_file / write_file /
+ *     web_fetch / web_search）
+ *   - tool_search
+ *   - 10 LSP（lsp_definition ... lsp_diagnostics，#251）
+ *   - skill + skill_search（#337，条件化：skillCatalog 在场时入注册表）
+ *   - query_trace（T9 常驻只读，不依赖 manager）
+ * 条件化缺席（worker 不装配）：memory_recall / memory_save（memoryDir 缺席），
+ * spawn_subagent / subagent_result（subagentManager 缺席），todo_write
+ * （todoDir 缺席），list_mcp_resources / read_mcp_resource（mcpManager 缺席），
+ * bash_output / bash_stop（backgroundManager 缺席,#502 T3 同门），
+ * run_graph（graphAssembly 缺席）。
+ * 全量 32 - 缺席 10 = 22，与 ACI_TOOLSET_NAMES 在 worker 装配路径下
+ * 实际生效集合一致。
  */
 const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
   "bash",
@@ -118,29 +108,19 @@ const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
   "web_fetch",
   "web_search",
   "tool_search",
+  "lsp_definition",
+  "lsp_references",
+  "lsp_hover",
+  "lsp_document_symbol",
+  "lsp_workspace_symbol",
+  "lsp_go_to_implementation",
+  "lsp_prepare_call_hierarchy",
+  "lsp_incoming_calls",
+  "lsp_outgoing_calls",
+  "lsp_diagnostics",
   "skill",
   "skill_search",
   "query_trace",
-  // symbol-primary-aci T2:符号查询 10 件常驻（不依赖 manager，与 lsp.ts SSOT
-  // 共享 lspCtx；旧 10 件 lsp_* 已在 T5 退役）。
-  "find_symbol",
-  "find_declaration",
-  "find_referencing_symbols",
-  "find_implementations",
-  "get_symbols_overview",
-  "get_hover",
-  "get_diagnostics_for_file",
-  "prepare_call_hierarchy",
-  "list_incoming_calls",
-  "list_outgoing_calls",
-  // symbol-primary-aci T4:符号改 5 件常驻（category=write；与查询同门共享
-  // lspCtx；onEdit 走 worker 装配层的 lspNotifier.invalidate 接缝，
-  // 写盘后 textDocument/didChange 与 edit_file 同链路）。
-  "rename_symbol",
-  "replace_symbol_body",
-  "insert_before_symbol",
-  "insert_after_symbol",
-  "safe_delete_symbol",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -348,106 +328,6 @@ describe("worker tool surface: 权限 — 判官只读（allow-list 推导）", 
         undefined,
         `判官 catalog.get(${denied}) 应返回 undefined`
       );
-    }
-  });
-});
-
-describe("worker tool surface: 隔离门禁 — symbol 写工具", () => {
-  it("真实 explore worker 工具面不含 symbol 写工具且判为只读", async () => {
-    const deps = await createWorkerDeps(hermeticOpts({ role: "explore" }));
-    const workerToolNames = deps.registry.list().map((tool) => tool.name);
-
-    for (const name of SYMBOL_MUTATE_TOOL_NAMES) {
-      assert.ok(
-        !workerToolNames.includes(name),
-        `真实 worker 工具面不应包含 ${name}`
-      );
-    }
-
-    const decision = assessSubagentIsolation({
-      role: "explore",
-      availableTools: workerToolNames,
-    });
-    assert.equal(decision.conclusion, "readonly");
-    assert.equal(decision.reason, "write_tools_denied_bash_readonly");
-  });
-
-  it("真实 explore worker 工具面不含文件写工具时仍判为只读", async () => {
-    const deps = await createWorkerDeps(
-      hermeticOpts({
-        role: "explore",
-        disallowedTools: [...FILE_WRITE_TOOL_NAMES],
-      })
-    );
-    const workerToolNames = deps.registry.list().map((tool) => tool.name);
-
-    for (const name of FILE_WRITE_TOOL_NAMES) {
-      assert.ok(
-        !workerToolNames.includes(name),
-        `真实 worker 工具面不应包含 ${name}`
-      );
-    }
-
-    const decision = assessSubagentIsolation({
-      role: "explore",
-      availableTools: workerToolNames,
-      disallowedTools: [...FILE_WRITE_TOOL_NAMES],
-    });
-    assert.equal(decision.conclusion, "readonly");
-    assert.equal(decision.reason, "write_tools_denied_bash_readonly");
-  });
-});
-
-describe("worker tool surface: T3 catalog deny contract", () => {
-  it("intentionally narrows an explore worker surface while preserving the role wire bytes", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-t3-role-worker-"));
-    const payloads: WorkerEnvelope[] = [];
-    const manager = createSubAgentManager({
-      sandboxRoot: root,
-      spawn: (_def, _taskId, payload) => {
-        payloads.push(payload);
-        return spawnChild(
-          process.execPath,
-          ["-e", "setInterval(() => {}, 1000)"],
-          {
-            stdio: ["pipe", "pipe", "pipe"],
-          }
-        );
-      },
-    });
-
-    try {
-      // T3-before measurement: the same role/no-parent-deny input exposed
-      // edit_file and write_file. Current assembly deliberately consumes the
-      // catalog deny because leaving those tools available is a write bypass.
-      const deps = await createWorkerDeps(
-        hermeticOpts({ sandboxRoot: root, role: "explore" })
-      );
-      const workerToolNames = deps.registry.list().map((tool) => tool.name);
-      assert.ok(!workerToolNames.includes("edit_file"));
-      assert.ok(!workerToolNames.includes("write_file"));
-      assert.ok(!workerToolNames.includes("rename_symbol"));
-
-      const tool = createSpawnSubAgentTool({ manager });
-      await tool.handler({
-        task: "explore-only",
-        subagent_type: "explore",
-        wait: false,
-      });
-
-      assert.equal(payloads.length, 1);
-      assert.equal(
-        JSON.stringify(payloads[0]),
-        JSON.stringify({
-          task: "explore-only",
-          sandboxRoot: root,
-          disallowedTools: [...FILE_WRITE_TOOL_NAMES],
-          role: "explore",
-        })
-      );
-    } finally {
-      await manager.shutdown();
-      await rm(root, { recursive: true, force: true });
     }
   });
 });

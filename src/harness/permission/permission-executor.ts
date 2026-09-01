@@ -42,7 +42,6 @@ const USER_DENIED_PREFIX = VIOLATION_PREFIXES.userDenied;
 const PERMISSION_DENIED_PREFIX = VIOLATION_PREFIXES.permissionDenied;
 const HOOK_BLOCKED_PREFIX = VIOLATION_PREFIXES.hookBlocked;
 const HOOK_ERROR_PREFIX = VIOLATION_PREFIXES.hookError;
-const CANCELLED_RESULT_MESSAGE = "cancelled";
 
 /**
  * Hook-error 载荷（#126 D3 异常语义的观测侧信道）。phase 区分异常来源：
@@ -125,10 +124,7 @@ export type PermissionGate =
 
 export interface PermissionRuntime {
   readonly executor: Executor;
-  readonly gateOne: (
-    call: ToolCall,
-    signal?: AbortSignal
-  ) => Promise<PermissionGate>;
+  readonly gateOne: (call: ToolCall) => Promise<PermissionGate>;
   readonly runAllowed: (
     call: ToolCall,
     def: AciToolDef | undefined,
@@ -166,10 +162,7 @@ export function createPermissionRuntime(
   const policy = opts.policy;
   const onHookError = opts.onHookError;
 
-  async function gateOne(
-    call: ToolCall,
-    signal?: AbortSignal
-  ): Promise<PermissionGate> {
+  async function gateOne(call: ToolCall): Promise<PermissionGate> {
     const def = catalog.get(call.name);
     if (!def) return { kind: "proceed", def: undefined };
 
@@ -209,55 +202,23 @@ export function createPermissionRuntime(
     });
 
     if (outcome.decision === "ask") {
-      if (isAborted(signal)) {
-        return {
-          kind: "blocked",
-          result: {
-            kind: "execution_failed",
-            toolUseId: call.id,
-            message: CANCELLED_RESULT_MESSAGE,
-          },
-        };
-      }
       const networkRequested = isNetworkBash(def.name, call.input);
       const hint = networkRequested
         ? summarizeNetworkBash(call.input)
         : summarizeInput(call.input);
-      let approved = false;
-      try {
-        approved = await askUser({
-          tool: def.name,
-          input: call.input,
-          summaryHint: hint,
-          ...(signal !== undefined ? { signal } : {}),
-          ...(networkRequested ? { network: true } : {}),
-        });
-      } catch {
-        // EXIT: an unavailable approval inlet must deny the call; never allow
-        // a tool side effect merely because the user prompt failed.
-        approved = false;
-      }
-      if (isAborted(signal)) {
-        // EXIT: caller cancellation wins over a late approval; AskUser cannot
-        // revive a call after the permission wait has been cancelled.
-        return {
-          kind: "blocked",
-          result: {
-            kind: "execution_failed",
-            toolUseId: call.id,
-            message: CANCELLED_RESULT_MESSAGE,
-          },
-        };
-      }
+      const approved = await askUser({
+        tool: def.name,
+        input: call.input,
+        summaryHint: hint,
+        ...(networkRequested ? { network: true } : {}),
+      });
       if (!approved) {
         return {
           kind: "blocked",
           result: {
             kind: "execution_failed",
             toolUseId: call.id,
-            message: isAborted(signal)
-              ? CANCELLED_RESULT_MESSAGE
-              : `${USER_DENIED_PREFIX} user declined tool call: ${def.name}`,
+            message: `${USER_DENIED_PREFIX} user declined tool call: ${def.name}`,
           },
         };
       }
@@ -334,7 +295,7 @@ export function createPermissionRuntime(
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
     for (const [index, call] of calls.entries()) {
-      const gate = await gateOne(call, signal);
+      const gate = await gateOne(call);
       const result =
         gate.kind === "blocked"
           ? gate.result
@@ -384,10 +345,6 @@ function summarizeInput(input: unknown): string {
  */
 function isNetworkBash(tool: string, input: unknown): boolean {
   return isBashNetworkTrue(tool, input);
-}
-
-function isAborted(signal: AbortSignal | undefined): boolean {
-  return signal?.aborted === true;
 }
 
 /** `<<<SECRET_N>>>` 占位符（#406 roundtrip 产物，#503 出站警告触发器）。 */

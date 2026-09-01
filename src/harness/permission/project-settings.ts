@@ -20,15 +20,9 @@
  */
 
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import Ajv from "ajv";
-import { SessionRootError } from "../errors.js";
-import {
-  MAX_ROOT_DETAIL_CHARS,
-  normalizeRootCandidate,
-  quoteRoot,
-} from "../session-roots.js";
 import type { ValidateFunction } from "ajv";
 import type {
   NormalRuleSpec,
@@ -105,18 +99,10 @@ function makeAjv(): Ajv.default {
  * -------------------------------------------------------------------------- */
 
 export interface LoadProjectSettingsOpts {
-  /** Explicit absolute or relative path. Overrides the projectIdentityRoot lookup. */
+  /** Explicit absolute or relative path. Overrides cwd lookup. */
   readonly filePath?: string;
-  /**
-   * Project identity root — the session's `projectIdentityRoot` (T3,
-   * plans/worktree-session-roots.md / ADR-0037 §4): the stable main checkout,
-   * NOT the cwd and NOT the task worktree. Used to resolve
-   * `.iknow/permissions.toml` when `filePath` is absent. Required in that
-   * case: there is deliberately no `process.cwd()` fallback, because a rebound
-   * session's cwd is a gitignored tree where the file is simply absent and a
-   * silent miss would read as "no project rules".
-   */
-  readonly projectIdentityRoot?: string;
+  /** Project cwd; used to resolve `.iknow/permissions.toml` when filePath absent. */
+  readonly cwd?: string;
 }
 
 interface RawProjectSettingsFile {
@@ -239,8 +225,7 @@ function ruleFromRaw(raw: RawRule): NormalRuleSpec {
 /**
  * Load `.iknow/permissions.toml` and return the parsed project policy source.
  *
- *  - filePath absent → resolves to `<projectIdentityRoot>/.iknow/permissions.toml`;
- *    projectIdentityRoot also absent → throws (no cwd fallback, see opts doc).
+ *  - filePath absent → resolves to `<cwd>/.iknow/permissions.toml`.
  *  - File absent → returns undefined (built-in defaults stand).
  *  - Parse error (smol-toml) → throws with toml error message.
  *  - Schema violation (ajv) → throws with descriptive message including the
@@ -249,8 +234,7 @@ function ruleFromRaw(raw: RawRule): NormalRuleSpec {
 export function loadProjectSettings(
   opts: LoadProjectSettingsOpts = {}
 ): ProjectSettingsPolicySource | undefined {
-  const filePath =
-    opts.filePath ?? resolveProjectSettingsPath(opts.projectIdentityRoot);
+  const filePath = opts.filePath ?? resolveProjectSettingsPath(opts.cwd);
   let raw: string;
   try {
     raw = readFileSync(filePath, "utf8");
@@ -296,29 +280,9 @@ export function loadProjectSettings(
   });
 }
 
-/**
- * `<projectIdentityRoot>/.iknow/permissions.toml`（身份路径，ADR-0037 §4）。
- *
- * 走会话根 SSOT 的规范化：缺根 → `missing_root`，相对 / 空白 / 不可规范化 →
- * `invalid_root`。刻意**不**接受相对根——`resolve()` 相对根等于偷偷回退
- * `process.cwd()`，改绑后那正是 task worktree。
- */
-function resolveProjectSettingsPath(
-  projectIdentityRoot: string | undefined
-): string {
-  const normalized = normalizeRootCandidate(projectIdentityRoot);
-  if (!normalized.ok) {
-    const { rejection } = normalized;
-    if (rejection.reason === "missing") {
-      throw new SessionRootError(
-        "missing_root",
-        "projectIdentityRoot is required to resolve .iknow/permissions.toml"
-      );
-    }
-    throw new SessionRootError(
-      "invalid_root",
-      `projectIdentityRoot must be an absolute path to resolve .iknow/permissions.toml, got ${quoteRoot(rejection.shown, MAX_ROOT_DETAIL_CHARS)}`
-    );
-  }
-  return join(normalized.root, ".iknow", "permissions.toml");
+function resolveProjectSettingsPath(cwd: string | undefined): string {
+  const base = cwd ?? process.cwd();
+  return isAbsolute(base)
+    ? `${base}/.iknow/permissions.toml`
+    : resolve(base, ".iknow/permissions.toml");
 }

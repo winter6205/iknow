@@ -16,11 +16,9 @@
  *      窗口 → tool.handler({task_id}) → text 长度 ≤ DEFAULT 且等于原文尾部
  *      （tail 语义，非抛错）。max_bytes 覆盖默认窗口同路径验证。
  *   5. bash_stop 幂等（kill_race 语义，T2 定稿）：对已终态任务二次 stop 不抛。
- *   6. 装配一致性：全条件装配（含 backgroundManager + graph overlay）→ 37 件且
+ *   6. 装配一致性：全条件装配（含 backgroundManager + graph overlay）→ 31 件且
  *      `toEqual(ACI_TOOLSET_NAMES)`；backgroundManager 缺席 → bash_output /
- *      bash_stop 排除（34 件；不含 graphAssembly 时 run_graph 同步缺席 → 34），
- *      bash 保留（T3 常驻透传语义）。
- *      symbol-primary-aci T5 后：旧 10 lsp_* 已退役，47→37 / 44→34。
+ *      bash_stop 排除（28 件），bash 保留（T3 常驻透传语义）。
  *   7. permission shape（checkPermission direct-call，permission.test.ts 先例）：
  *      bash_output read-only → 默认 allow；bash_stop write → ask（#502 票明说
  *      「bash_stop ask」）。
@@ -67,9 +65,6 @@ import { resolveTasksDir } from "../../../src/harness/background/paths.js";
 import { createSkillCatalog } from "../../../src/harness/skill/catalog.js";
 import type { IknowEnv } from "../../../src/config/env.js";
 import type { SubAgentManager } from "../../../src/harness/subagent/manager.js";
-import type { CreateTaskWorktreeProvisionFn } from "../../../src/harness/aci/tools/create-task-worktree.js";
-import type { WorktreeEnterToolDeps } from "../../../src/harness/aci/tools/enter-task-worktree.js";
-import type { WorktreeExitToolDeps } from "../../../src/harness/aci/tools/exit-task-worktree.js";
 import type { McpManager } from "../../../src/harness/mcp/manager.js";
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
@@ -92,17 +87,13 @@ function makeFakeManager(): {
 }
 
 /** fake SubAgentManager —— 装配期断言用（镜像 registry.test.ts fixture）。 */
-const fakeSubagentManager = {
+const fakeSubagentManager: SubAgentManager = {
   spawn: () => ({ taskId: "fake-id" }),
-  queryBuffer: () => ({ status: "not_found" as const }),
+  queryBuffer: () => ({ status: "not_found" }),
   waitFor: () => Promise.reject(new Error("not used")),
   shutdown: () => Promise.resolve(),
   drainCompleted: () => [],
-  listActive: () => [],
-  abortTask: () => false,
-  listSubagents: () => [],
-  subscribe: () => () => {},
-} as unknown as SubAgentManager;
+};
 
 /** fake McpManager —— 装配期断言用（镜像 registry.test.ts fixture）。 */
 const fakeMcpManager: McpManager = {
@@ -180,26 +171,7 @@ function makeWebEnv(): Pick<IknowEnv, "web"> {
   return { web: { searchUrl: undefined, proxy: undefined } };
 }
 
-/** worktree isolation 三缝 fake（仅用于 createDefaultAciRegistry 装配期断言
- * create-task-worktree / enter-task-worktree / exit-task-worktree 在场；
- * handler 路径单测在各自工具目录下，不在本文件）。 */
-const fakeWorktreeProvision = (() =>
-  Promise.resolve({
-    taskId: "fake-task",
-    worktreePath: "/tmp/fake-worktree",
-    branchName: "fake/branch",
-  })) as unknown as CreateTaskWorktreeProvisionFn;
-const fakeWorktreeEnter = (() =>
-  Promise.resolve({
-    worktreePath: "/tmp/fake-worktree",
-    branchName: "fake/branch",
-  })) as unknown as WorktreeEnterToolDeps["worktreeEnter"];
-const fakeWorktreeExit = (() =>
-  Promise.resolve({
-    mainRepoRoot: "/tmp/fake-main",
-  })) as unknown as WorktreeExitToolDeps["worktreeExit"];
-
-/** 全条件装配 opts（五条件键 + backgroundManager + graph overlay + worktree 三缝）→ 40 件全量。 */
+/** 全条件装配 opts（五条件键 + backgroundManager + graph overlay）→ 31 件全量。 */
 function fullAssemblyOpts() {
   return {
     env: makeWebEnv(),
@@ -212,10 +184,6 @@ function fullAssemblyOpts() {
     backgroundManager: fakeBackgroundManager,
     // D-α T3:graph overlay 在场 → run_graph 入注册表（末位第 31 件）。
     graphAssembly: { enabled: () => true },
-    // worktree isolation (ADR-0037):3 件装配路径到场,handler 不触发。
-    worktreeProvision: fakeWorktreeProvision,
-    worktreeEnter: fakeWorktreeEnter,
-    worktreeExit: fakeWorktreeExit,
   };
 }
 
@@ -453,17 +421,16 @@ describe("bash_output 真实物理截断（real manager）", () => {
 // ── 5. 装配一致性（registry + Gate 3 镜像过滤）───────────────────────────────
 
 describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
-  it("全条件装配（含 backgroundManager + graph overlay）→ 40 件，顺序 = ACI_TOOLSET_NAMES", () => {
+  it("全条件装配（含 backgroundManager + graph overlay）→ 31 件，顺序 = ACI_TOOLSET_NAMES", () => {
     const reg = createDefaultAciRegistry(fullAssemblyOpts());
     const names = reg.inner.list().map((d) => d.name);
-    assert.equal(names.length, 40);
+    assert.equal(names.length, 32);
     assert.deepEqual(names, [...ACI_TOOLSET_NAMES]);
     assert.ok(reg.catalog.get("bash_output"));
     assert.ok(reg.catalog.get("bash_stop"));
   });
 
-  it("backgroundManager 缺席 → bash_output / bash_stop 排除（37 件），bash 保留（T3 常驻）", () => {
-    // 不传 graphAssembly → run_graph 同步缺席；40 - 2(bg) - 1(run_graph) = 37。
+  it("backgroundManager 缺席 → bash_output / bash_stop 排除（28 件），bash 保留（T3 常驻）", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -474,7 +441,7 @@ describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
       mcpManager: fakeMcpManager,
     });
     const names = reg.inner.list().map((d) => d.name);
-    assert.equal(names.length, 34);
+    assert.equal(names.length, 29);
     assert.equal(names.includes("bash_output"), false);
     assert.equal(names.includes("bash_stop"), false);
     // bash 常驻：backgroundManager 缺席时参数级能力由 handler 运行时决策。

@@ -15,15 +15,14 @@
  *    false positives — predicates are narrow and total)
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, it, vi } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
 import { loadProjectSettings } from "../../../src/harness/permission/project-settings.js";
-import { SessionRootError } from "../../../src/harness/errors.js";
 import {
   createPermissionPolicy,
   checkPermission,
@@ -76,67 +75,11 @@ decision = "deny"
 reason = "explicit deny: read_file under .ssh"
 `;
 
-/**
- * T3 review — 项目权限来源的**路径**必须落在 productRoot 上（ADR-0037 §4 身份
- * 路径），且缺根 / 相对根 fail-closed，不偷偷回退 `process.cwd()`（改绑后那是
- * task worktree）。这里钉解析结果本身，不只是 option 的名字。
- */
-describe("project settings path resolution", () => {
-  it("reads the productRoot copy, not the task worktree's", () => {
-    const productRoot = scratchDir();
-    try {
-      const taskRoot = join(productRoot, ".iknow", "worktrees", "conv-1");
-      mkdirSync(join(productRoot, ".iknow"), { recursive: true });
-      mkdirSync(join(taskRoot, ".iknow"), { recursive: true });
-      writeFileSync(
-        join(productRoot, ".iknow", "permissions.toml"),
-        VALID_TOML,
-        "utf8"
-      );
-
-      const source = loadProjectSettings({ projectIdentityRoot: productRoot });
-      assert.equal(
-        source?.filePath,
-        join(productRoot, ".iknow", "permissions.toml")
-      );
-      // 树上那份（若存在）不参与解析：路径只由 productRoot 决定。
-      assert.equal(
-        loadProjectSettings({ projectIdentityRoot: taskRoot }),
-        undefined
-      );
-    } finally {
-      rmSync(productRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("throws missing_root when productRoot is absent", () => {
-    assert.throws(
-      () => loadProjectSettings({}),
-      (err: unknown) =>
-        err instanceof SessionRootError && err.kind === "missing_root"
-    );
-  });
-
-  it("throws invalid_root for a relative productRoot instead of falling back to cwd", () => {
-    const cwdSpy = vi.spyOn(process, "cwd");
-    try {
-      assert.throws(
-        () => loadProjectSettings({ projectIdentityRoot: "relative/checkout" }),
-        (err: unknown) =>
-          err instanceof SessionRootError && err.kind === "invalid_root"
-      );
-      assert.equal(cwdSpy.mock.calls.length, 0);
-    } finally {
-      cwdSpy.mockRestore();
-    }
-  });
-});
-
 describe("loadProjectSettings", () => {
   it("returns undefined when the settings file is absent", () => {
     const dir = scratchDir();
     try {
-      const result = loadProjectSettings({ projectIdentityRoot: dir });
+      const result = loadProjectSettings({ cwd: dir });
       assert.equal(result, undefined);
     } finally {
       rmSync(dir, { recursive: true, force: true });

@@ -24,8 +24,6 @@
 
 ### Docs
 
-- **符号主路径 spec/plan（2026-08-30）**: `specs/symbol-primary-aci.md` + `plans/symbol-primary-aci.md` + ADR-0038。代码默认按符号身份查找并改；使用规则为 identity 装配独立段；`251-lsp-tool` 合同归档。实施按计划 T1–T6，本条仅为文档合同。
-
 - **horizon-653 包2 spec/plan（2026-08-24）**: `specs/653-horizon-pkg2-kernel.md` + `plans/653-horizon-pkg2-kernel.md`（沙箱纪律 + `isConcurrencySafe` 调度）；tracker #667–#670。现已落地并归档。
 
 - **horizon-653 包1 后文档对齐（2026-08-24）**: 入库 `docs/coding-agent-capability-gap.md`（状态栏≠环境现势；§6.4 内建 lazy 作废；后台 bash 已 bwrap、包2 对齐纪律）；`docs/STATUS.md` §1/§3/§4 同步可见闭环与 ACI/JSONL 口径。

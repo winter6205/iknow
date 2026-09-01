@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import { resolveMcpRoots } from "../../src/harness/mcp/roots.ts";
 import { loadMcpConfig } from "../../src/harness/mcp/config.ts";
@@ -29,10 +29,6 @@ const fixtureServer = join(
   "mcp-server",
   "server.ts"
 );
-const tsxEsmLoader = pathToFileURL(
-  join(repoRoot, "node_modules", "tsx", "dist", "esm", "index.mjs")
-).href;
-const fixtureArgs = ["--import", tsxEsmLoader, fixtureServer] as const;
 
 const tmpRoots: string[] = [];
 
@@ -86,7 +82,7 @@ describe("smoke — dual-root MCP after rebind", () => {
           rebind_echo: {
             type: "stdio",
             command: process.execPath,
-            args: [...fixtureArgs],
+            args: [fixtureServer],
           },
         },
       }),
@@ -123,7 +119,7 @@ describe("smoke — dual-root MCP after rebind", () => {
     expect(cfg.servers[0]?.source).toBe("project");
     expect(cfg.servers[0]?.kind).toBe("stdio");
     if (cfg.servers[0]?.kind === "stdio") {
-      expect(cfg.servers[0].entry.args).toEqual([...fixtureArgs]);
+      expect(cfg.servers[0].entry.args).toEqual([fixtureServer]);
     }
 
     // 3) Stdio child cwd === worktree (T4 print-cwd relative script pattern).

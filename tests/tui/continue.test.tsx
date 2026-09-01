@@ -5,7 +5,7 @@
  * bun:test。真实 store + conversationId；谓词 SSOT = load，不是 lastStopReason。
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testRender } from "@opentui/react/test-utils";
@@ -27,7 +27,6 @@ import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 import type { LoopEngineDeps } from "../../src/harness/index.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
-import { captureStderr } from "../_helpers/capture-stderr.ts";
 
 async function untilFrame(
   setup: TestRendererSetup,
@@ -102,7 +101,6 @@ async function mountContinueApp(opts: {
   readonly responses: Parameters<typeof makeDeps>[0];
   readonly deps?: LoopEngineDeps;
   readonly wrapBridge?: (inner: TuiBridge) => TuiBridge;
-  readonly traceOut?: string;
   readonly seedPending?: boolean;
   readonly lastStopReason?: TuiSessionState["lastStopReason"];
   readonly seedCleanAssistant?: boolean;
@@ -114,7 +112,6 @@ async function mountContinueApp(opts: {
     workspaceRoot: dataDir,
     deps: opts.deps ?? makeDeps(opts.responses),
     inflight,
-    ...(opts.traceOut ? { traceOut: opts.traceOut } : {}),
   });
   let initialSession: TuiSessionState | undefined;
   if (opts.seedPending === true || opts.seedCleanAssistant === true) {
@@ -596,53 +593,24 @@ describe("TUI /continue busy-guard + Ctrl+C", () => {
   }, 30_000);
 
   test("Ctrl+C 仍打断前台 turn（continue 不是 abort 通道）", async () => {
-    const traceDir = mkdtempSync(join(tmpdir(), "iknow-tui-ctrl-c-trace-"));
-    const traceOut = join(traceDir, "trace.jsonl");
-    const stderr = captureStderr();
     const app = await mountContinueApp({
       responses: [assistantResult({ texts: ["never"] })],
       deps: makeDeps([assistantResult({ texts: ["never"] })], {
         delayMs: 4000,
       }),
-      traceOut,
     });
-    try {
-      await untilFrame(app.setup, (f) => f.includes("Version"));
-      await app.typeText("go");
-      await app.pressEnter();
-      await until(() => app.bridge.inflight.ids().size === 1, 8000, "running");
-      await app.pressCtrlC();
-      await until(() => app.bridge.inflight.ids().size === 0, 8000, "aborted");
-      await untilFrame(
-        app.setup,
-        (f) => f.includes("已打断"),
-        8000,
-        "interrupt-notice"
-      );
-      expect(stderr.lines.join("")).toContain(
-        '"event":"ctrl_c","disposition":"abort_dispatched"'
-      );
-      const traceFiles = readdirSync(traceOut).filter((name) =>
-        name.endsWith(".jsonl")
-      );
-      expect(traceFiles).toHaveLength(1);
-      const records = readFileSync(join(traceOut, traceFiles[0]!), "utf8")
-        .trim()
-        .split("\n")
-        .filter(Boolean)
-        .map(
-          (line) =>
-            JSON.parse(line) as {
-              record_type?: string;
-              decision?: string;
-            }
-        );
-      expect(
-        records.find((record) => record.record_type === "turn")?.decision
-      ).toBe("cancelled");
-    } finally {
-      await app.destroy();
-      stderr.restore();
-    }
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+    await app.typeText("go");
+    await app.pressEnter();
+    await until(() => app.bridge.inflight.ids().size === 1, 8000, "running");
+    await app.pressCtrlC();
+    await until(() => app.bridge.inflight.ids().size === 0, 8000, "aborted");
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("已打断"),
+      8000,
+      "interrupt-notice"
+    );
+    await app.destroy();
   }, 30_000);
 });

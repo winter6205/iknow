@@ -84,13 +84,8 @@ function isInsideOrEqual(child: string, stop: string): boolean {
  */
 async function resolveNpmBin(
   pkgName: string,
-  binName: string,
-  ctx?: LspCtx
+  binName: string
 ): Promise<string | undefined> {
-  if (ctx?.resolveBin) {
-    const override = await ctx.resolveBin(pkgName, binName);
-    if (override !== undefined) return override;
-  }
   // 1) node_modules 同源解析该包 bin 入口。
   try {
     const pkgJson = createRequire(import.meta.url).resolve(
@@ -170,16 +165,7 @@ const TS_LOCKFILES: readonly string[] = [
 const TS_EXCLUDE: readonly string[] = ["deno.json", "deno.jsonc"];
 
 /** 解析 typescript-language-server 可执行文件（未安装 / 解析失败 → undefined）。 */
-async function resolveLanguageServerBin(
-  ctx?: LspCtx
-): Promise<string | undefined> {
-  if (ctx?.resolveBin) {
-    const override = await ctx.resolveBin(
-      "typescript-language-server",
-      "typescript-language-server"
-    );
-    if (override !== undefined) return override;
-  }
+async function resolveLanguageServerBin(): Promise<string | undefined> {
   // 1) node_modules 同源解析 typescript-language-server 的 bin（lib/cli.mjs）。
   try {
     const bin = createRequire(import.meta.url).resolve(
@@ -213,25 +199,22 @@ async function resolveLanguageServerBin(
  */
 export const Typescript: LspServerInfo = {
   id: "typescript",
-  installHint: "npm i -g typescript typescript-language-server",
   root: NearestRoot(TS_LOCKFILES, TS_EXCLUDE),
   extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"],
-  async spawn(root, ctx) {
+  async spawn(root, _ctx) {
+    // tsserver 内核路径：项目依赖 typescript@5.9.3，node_modules 同源解析
+    // typescript/lib/tsserver.js。解析失败 → 该环境无 tsserver，server 不可用。
     let tsserver: string | undefined;
-    if (ctx.resolveBin) {
-      tsserver = await ctx.resolveBin("typescript", "tsserver");
-    }
-    if (!tsserver) {
-      try {
-        tsserver = createRequire(import.meta.url).resolve(
-          "typescript/lib/tsserver.js"
-        );
-      } catch {
-        return undefined;
-      }
+    try {
+      tsserver = createRequire(import.meta.url).resolve(
+        "typescript/lib/tsserver.js"
+      );
+    } catch {
+      return undefined;
     }
 
-    const bin = await resolveLanguageServerBin(ctx);
+    // typescript-language-server 翻译层二进制缺失 → server 不可用（graceful）。
+    const bin = await resolveLanguageServerBin();
     if (!bin) return undefined;
 
     const child = spawnProcess(bin, ["--stdio"], {
@@ -256,7 +239,6 @@ export const Typescript: LspServerInfo = {
  */
 export const Pyright: LspServerInfo = {
   id: "pyright",
-  installHint: "npm i -g pyright",
   root: NearestRoot([
     "pyproject.toml",
     "setup.py",
@@ -266,8 +248,8 @@ export const Pyright: LspServerInfo = {
     "pyrightconfig.json",
   ]),
   extensions: [".py", ".pyi"],
-  async spawn(root, ctx) {
-    const bin = await resolveNpmBin("pyright", "pyright-langserver", ctx);
+  async spawn(root, _ctx) {
+    const bin = await resolveNpmBin("pyright", "pyright-langserver");
     if (!bin) return undefined;
     const pythonPath = await detectVenvPython(root);
     const child = spawnProcess(bin, ["--stdio"], {
@@ -291,14 +273,12 @@ export const Pyright: LspServerInfo = {
  */
 export const YamlLS: LspServerInfo = {
   id: "yaml-language-server",
-  installHint: "npm i -g yaml-language-server",
   root: (_file, ctx) => Promise.resolve(ctx.directory),
   extensions: [".yaml", ".yml"],
-  async spawn(root, ctx) {
+  async spawn(root, _ctx) {
     const bin = await resolveNpmBin(
       "yaml-language-server",
-      "yaml-language-server",
-      ctx
+      "yaml-language-server"
     );
     if (!bin) return undefined;
     const child = spawnProcess(bin, ["--stdio"], {
@@ -319,14 +299,12 @@ export const YamlLS: LspServerInfo = {
  */
 export const JsonLS: LspServerInfo = {
   id: "json-language-server",
-  installHint: "npm i -g vscode-langservers-extracted",
   root: (_file, ctx) => Promise.resolve(ctx.directory),
   extensions: [".json"],
-  async spawn(root, ctx) {
+  async spawn(root, _ctx) {
     const bin = await resolveNpmBin(
       "vscode-json-languageserver",
-      "vscode-json-languageserver",
-      ctx
+      "vscode-json-languageserver"
     );
     if (!bin) return undefined;
     const child = spawnProcess(bin, ["--stdio"], {
@@ -350,14 +328,12 @@ export const JsonLS: LspServerInfo = {
  */
 export const DockerfileLS: LspServerInfo = {
   id: "dockerfile-language-server-nodejs",
-  installHint: "npm i -g dockerfile-language-server-nodejs",
   root: (_file, ctx) => Promise.resolve(ctx.directory),
   extensions: [".dockerfile", "Dockerfile"],
-  async spawn(root, ctx) {
+  async spawn(root, _ctx) {
     const bin = await resolveNpmBin(
       "dockerfile-language-server-nodejs",
-      "docker-langserver",
-      ctx
+      "docker-langserver"
     );
     if (!bin) return undefined;
     const child = spawnProcess(bin, ["--stdio"], {

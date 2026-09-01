@@ -99,17 +99,17 @@ function pickString(
   return typeof v === "string" ? v : fallback;
 }
 
-/** 符号工具：共享「file#symbol_path」模板。所有符号工具（find_/get_/prepare/
- *  list_/rename_/replace_/insert_/safe_delete_）统一以 `symbol <verb>` 形式
- * 呈现，verb 由调用方传入短词（与 SUMMARIZERS 同源），保持 14 件摘要形态一致。
- * 符号工具的入参是文件 + 符号身份（symbol_path / query / code 等），不出现
- * 行列（坐标主路径已在 T5 退役，见 symbol-primary-aci.md §37-53）。 */
-function symbolAt(rec: Record<string, unknown>, verb: string): string {
+/** 字段提取辅助：number 字段（缺失/非有限数 → null）。 */
+function pickNumber(rec: Record<string, unknown>, key: string): number | null {
+  const v = rec[key];
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/** LSP 工具：共享「file[:line]」模板（definition/references/hover/...）。 */
+function lspAt(rec: Record<string, unknown>, name: string): string {
   const file = pickString(rec, "file");
-  const symbol = pickString(rec, "symbol_path");
-  if (file !== "?" && symbol !== "?") return `symbol ${verb} ${file}#${symbol}`;
-  if (file !== "?") return `symbol ${verb} ${file}`;
-  return `symbol ${verb} ${pickString(rec, "query")}`;
+  const line = pickNumber(rec, "line");
+  return `LSP ${name.replace("lsp_", "")} ${file}${line !== null ? `:${line}` : ""}`;
 }
 
 /** 子代理工具专属显示（与普通工具行区分；主流 Agent 惯例：子代理调用有独立
@@ -162,34 +162,17 @@ const SUMMARIZERS: Readonly<
   spawn_subagent: (r) =>
     `派发子代理：${pickString(r, "task", "").slice(0, 60) || "?"}`,
   subagent_result: (r) => `轮询 ${pickString(r, "task_id")}`,
-  // symbol-primary-aci 符号工具集：10 件查询 + 5 件改 = 14 件,全部以
-  // 短 verb 形态统一（与 SUMMARIZERS 同源,详见 symbolAt 注释）。T5 起为
-  // 默认工具面,旧 lsp_*（坐标 + 行）已退役（spec symbol-primary-aci.md
-  // §37-53）。每件 verb 在 file#symbol_path / file / query 三种输入下保持
-  // 一致形态 — 调用方按"动作"读 detail,而不是按"工具名后缀"读。
-  find_symbol: (r) => `symbol find ${pickString(r, "query")}`,
-  find_declaration: (r) => symbolAt(r, "declare"),
-  find_referencing_symbols: (r) => symbolAt(r, "references"),
-  find_implementations: (r) => symbolAt(r, "implements"),
-  get_symbols_overview: (r) => `symbol outline ${pickString(r, "file")}`,
-  get_hover: (r) => symbolAt(r, "hover"),
-  get_diagnostics_for_file: (r) =>
-    `symbol diagnostics ${pickString(r, "file")}`,
-  prepare_call_hierarchy: (r) => symbolAt(r, "hierarchy"),
-  list_incoming_calls: (r) => symbolAt(r, "incoming"),
-  list_outgoing_calls: (r) => symbolAt(r, "outgoing"),
-  // 符号改工具集（write category）：改代码而非提问，detail 形态上让 file#symbol
-  // 先在（与查询面同源），随后是动作字段（new_name / new_body / code）。
-  rename_symbol: (r) =>
-    `symbol rename ${pickString(r, "file")}#${pickString(r, "symbol_path")} → ${pickString(r, "new_name")}`,
-  replace_symbol_body: (r) =>
-    `symbol replace_body ${pickString(r, "file")}#${pickString(r, "symbol_path")}`,
-  insert_before_symbol: (r) =>
-    `symbol insert_before ${pickString(r, "file")}#${pickString(r, "symbol_path")}`,
-  insert_after_symbol: (r) =>
-    `symbol insert_after ${pickString(r, "file")}#${pickString(r, "symbol_path")}`,
-  safe_delete_symbol: (r) =>
-    `symbol safe_delete ${pickString(r, "file")}#${pickString(r, "symbol_path")}`,
+  // LSP 工具集：10 件。8 件共享 file[:line] 模板；documentSymbol / workspaceSymbol 走各自形态。
+  lsp_definition: (r) => lspAt(r, "lsp_definition"),
+  lsp_references: (r) => lspAt(r, "lsp_references"),
+  lsp_hover: (r) => lspAt(r, "lsp_hover"),
+  lsp_go_to_implementation: (r) => lspAt(r, "lsp_go_to_implementation"),
+  lsp_prepare_call_hierarchy: (r) => lspAt(r, "lsp_prepare_call_hierarchy"),
+  lsp_incoming_calls: (r) => lspAt(r, "lsp_incoming_calls"),
+  lsp_outgoing_calls: (r) => lspAt(r, "lsp_outgoing_calls"),
+  lsp_diagnostics: (r) => lspAt(r, "lsp_diagnostics"),
+  lsp_document_symbol: (r) => `LSP documentSymbol ${pickString(r, "file")}`,
+  lsp_workspace_symbol: (r) => `LSP workspaceSymbol ${pickString(r, "query")}`,
 };
 
 /**

@@ -18,14 +18,7 @@ type Warn = (message: string) => void;
 
 export interface SkillScannerOptions {
   userHome: string;
-  /**
-   * T3 (plans/worktree-session-roots.md / ADR-0037 §4): the session's
-   * `projectIdentityRoot` — the project the user is working on, pinned once
-   * at startup and stable across worktree rebinds. Project skills are project
-   * identity, so a worktree rebind must not move the scan onto the
-   * gitignored task worktree (where the directory is simply absent).
-   */
-  projectIdentityRoot: string;
+  cwd: string;
   env: SkillEnv;
   warn?: Warn;
 }
@@ -50,11 +43,7 @@ export async function scanSkillDirs(
   return [...index.values()];
 }
 
-function scanRoots({
-  userHome,
-  projectIdentityRoot,
-  env,
-}: SkillScannerOptions): string[] {
+function scanRoots({ userHome, cwd, env }: SkillScannerOptions): string[] {
   const extras = (env.IKNOW_SKILL_DIRS ?? "")
     .split(delimiter)
     .map((dir) => dir.trim())
@@ -62,7 +51,7 @@ function scanRoots({
     .map((dir) => resolve(dir));
   return [
     join(userHome, ".iknow", "skills"),
-    join(projectIdentityRoot, ".iknow", "skills"),
+    join(cwd, ".iknow", "skills"),
     ...extras,
   ];
 }

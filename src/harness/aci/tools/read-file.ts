@@ -33,20 +33,6 @@ export interface CreateReadFileToolOptions {
    *  legacy shape — to preserve the existing read-file-profile.test.ts
    *  contract when workspaceRoot is not threaded. */
   readonly workspaceRoot?: string;
-  /**
-   *  T3 (plans/worktree-session-roots.md / ADR-0037 §4): the session's
-   *  `projectIdentityRoot` — the extra read-only root granted when the session
-   *  has rebound. After a worktree rebind the primary root is the task
-   *  worktree, so the project's own identity files (`AGENTS.md`,
-   *  `.iknow/rules`, `.iknow/permissions.toml`, project skills) would fall
-   *  outside the sandbox even though ADR-0037 §1 explicitly grants the session
-   *  **read** access to the identity root. Added as a read-only extra root;
-   *  write tools never receive it, so writes still cannot reach it. The grant
-   *  only opens when isolation is enabled **and** the task root is a task
-   *  worktree — that gating lives in build-engine, not here. Absent / equal to
-   *  `root` → no extra root (byte-identical to today).
-   */
-  readonly projectIdentityRoot?: string;
 }
 
 /** `~/.iknow/` — the agent's own profile directory (readUserProfile in the
@@ -75,9 +61,6 @@ export function createReadFileTool(
     iknowProfileRoot(),
     ...(opts?.workspaceRoot && opts.workspaceRoot !== root
       ? [join(opts.workspaceRoot, ".iknow")]
-      : []),
-    ...(opts?.projectIdentityRoot && opts.projectIdentityRoot !== root
-      ? [opts.projectIdentityRoot]
       : []),
   ]);
   return Object.freeze({

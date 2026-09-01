@@ -61,9 +61,9 @@ async function discover(
   // 编辑用户层不触发 refresh(回归风险)。
   const [projectAgents, userAgents, projectRules, userRules] =
     await Promise.all([
-      findProjectAgents(ctx.projectIdentityRoot),
+      findProjectAgents(ctx.cwd),
       findUserAgents(ctx.userHome),
-      listRulesFiles(ctx.projectIdentityRoot, "project"),
+      listRulesFiles(ctx.cwd, "project"),
       listRulesFiles(ctx.userHome, "user"),
     ]);
   return [userAgents, ...userRules, projectAgents, ...projectRules].filter(

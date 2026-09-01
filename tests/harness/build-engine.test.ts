@@ -2,15 +2,12 @@
  * `src/harness/build-engine.ts` — the single harness assembly point shared by
  * the CLI (chat / ask) and the session server (serve → SessionHub.ensureDeps).
  *
- * These tests pin the ACI toolset (via EXPECTED_TOOLS) so a future tool-set
- * change cannot drift between the two entry points silently: if a tool is
- * added/renamed/removed, this test forces an explicit decision at the single
- * assembly point.件数 = `EXPECTED_TOOLS.length` 推导,以数组为 source of truth,
- * 注释里不再写加法叙事（避免与实际长度漂移）。
+ * These tests pin the ACI 11-tool set so a future tool-set change cannot drift
+ * between the two entry points silently: if a tool is added/renamed/removed,
+ * this test forces an explicit decision at the single assembly point.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { spawn as spawnChild } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -21,41 +18,23 @@ import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import { createMcpManager } from "../../src/harness/mcp/manager.ts";
 import type { McpClientHandle } from "../../src/harness/mcp/manager.ts";
-import {
-  createSubAgentManager,
-  type SubAgentManager,
-} from "../../src/harness/subagent/manager.ts";
-import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
-import { createWorkerDeps } from "../../src/harness/subagent/worker.ts";
-import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
-import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
-import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
-import { assessSubagentIsolation } from "../../src/harness/subagent/capability.ts";
-import {
-  FILE_WRITE_TOOL_NAMES,
-  SYMBOL_MUTATE_TOOL_NAMES,
-} from "../../src/harness/aci/tools/symbol-mutate.ts";
-import type { ToolExecutionResult } from "../../src/harness/tools/types.ts";
+import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 
 // Order is load-bearing: it must match the `aciTools` array in
 // `src/harness/build-engine.ts` (policy byName key-space, ADR-0006)。
-// 装配层历史 append-only：8 baseline → + memory_recall/save (#194)
-// → + tool_search (#224) → + skill/skill_search (#337) → + spawn_subagent /
-// subagent_result (#356) → + todo_write / list_mcp_resources / read_mcp_resource
-// (#440 双 Stream) → + bash_output / bash_stop (#502) → + query_trace
-// → + 10 符号查询 (symbol-primary-aci T2) → + 5 符号改 (T4) = 36 件;
-//
-// symbol-primary-aci T5：旧 10 件 lsp_* 已退役（spec symbol-primary-aci.md
-// §37-53 + SC2 + SC7 + ACR complexity-anti-drift）；build-engine 装配路径不再产出
-// lsp_* 工具。其实现 + 内部 export 仍住 lsp.ts 作 symbol.ts 的 SSOT 复用层。
-// 符号面 10 + 改 5 在 build-engine 默认 chat surface 装配。run_graph
-// 不在本数组（条件化：graphAssembly + subagentManager 同时在场才入注册表；
-// build-engine 默认 chat surface 不传 graphAssembly → 不入）。
-//
-// 各条件化 seam 缺席后 = EXPECTED_TOOLS.filter(...) 推导，以 filter 表达式为
-// source of truth:SC8（ask 入口不建 subagentManager / mcpManager / backgroundManager）、
-// SC12（ask 不创建 manager → mcp__* 缺席）、#440（T4 todoDir seam）、#440 T11
-// （MCP resources seam）、#502 T3（background seam）— 缺席集具体见各用例注释。
+// #194 T6 (Layer 4 baseline):扩 memory_recall + memory_save 到 10 件;
+// #224 在 10 件基础上末尾追加 tool_search(11 件,memoryDir 默认存在)。
+// #337 T8 (skill 装配):catalog 装配后末尾追加 skill / skill_search(→ 23 件)。
+// #356 T6 (subagent 装配):surface !== "ask" 时 build-engine 自建 subagentManager,
+// registry 末尾追加 spawn_subagent / subagent_result(→ 25 件)。ask 入口不创建
+// manager → registry 停 23 件(SC8,见 ask 剥离断言)。
+// #440 T11 (MCP resources 装配):surface !== "ask" 时 build-engine 自建
+// mcpManager,registry 末尾追加 list_mcp_resources / read_mcp_resource(→ 28 件)。
+// ask 入口不创建 manager → registry 停 26 件(mcpManager 缺席 → list/read 缺席)。
+// #502 T3 (background 装配):surface !== "ask" 时 build-engine 自建
+// backgroundManager,registry 末尾追加 bash_output / bash_stop(→ 30 件)。
+// ask 入口不创建 manager → registry 停 28 件(backgroundManager 缺席 → bash_output /
+// bash_stop 缺席;bash 仍常驻)。
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -68,52 +47,41 @@ const EXPECTED_TOOLS = [
   "memory_recall",
   "memory_save",
   "tool_search",
-  // #337 T8 skill 工具集 append-only:11→13,2 件在末尾。
+  // #251 LSP 工具集 append-only:11→21,10 件在末尾,不重排既有 11 件。
+  "lsp_definition",
+  "lsp_references",
+  "lsp_hover",
+  "lsp_document_symbol",
+  "lsp_workspace_symbol",
+  "lsp_go_to_implementation",
+  "lsp_prepare_call_hierarchy",
+  "lsp_incoming_calls",
+  "lsp_outgoing_calls",
+  "lsp_diagnostics",
+  // #337 T8 skill 工具集 append-only:21→23,2 件在末尾。
   "skill",
   "skill_search",
-  // #356 T6 subagent 工具集 append-only:13→15,2 件在末尾(全装配 chat surface
-  // 才在场;ask 缺 subagentManager → 13 件)。
+  // #356 T6 subagent 工具集 append-only:23→25,2 件在末尾(全装配 chat surface
+  // 才在场;ask 缺 subagentManager → 23 件)。
   "spawn_subagent",
   "subagent_result",
-  // #440 双 Stream 并集 append-only:15→18。todo_write（T4，全装配 chat surface
+  // #440 双 Stream 并集 append-only:25→28。todo_write（T4，全装配 chat surface
   // + todoDir 在场才入注册表；ask + worker 装配路径不传 todoDir → 不在场）+
   // MCP resources 两件（T11，全装配 chat surface 才在场；ask 缺 mcpManager → 不在场）。
   "todo_write",
   "list_mcp_resources",
   "read_mcp_resource",
-  // #502 T3 bash_output / bash_stop 工具集 append-only:18→20,末位 2 件
+  // #502 T3 bash_output / bash_stop 工具集 append-only:28→30,末位 2 件
   // （全装配 chat/tui/serve surface 在场;ask 缺 backgroundManager → 缺席;
   //  bash 仍常驻,参数级 background:true 能力由 handler 运行时决策）。
   "bash_output",
   "bash_stop",
   "query_trace",
-  // symbol-primary-aci T2 符号查询工具集 append-only:20→30,末位 10 件常驻
-  // （不条件化——与 lsp.ts 内部 SSOT 共享 lspCtx；旧 10 件 lsp_* 已在 T5 退役）。
-  "find_symbol",
-  "find_declaration",
-  "find_referencing_symbols",
-  "find_implementations",
-  "get_symbols_overview",
-  "get_hover",
-  "get_diagnostics_for_file",
-  "prepare_call_hierarchy",
-  "list_incoming_calls",
-  "list_outgoing_calls",
-  // symbol-primary-aci T4 符号改工具集 append-only:30→35,末位 5 件常驻
-  // （category=write；不条件化——与查询面共享 lspCtx + lsp.ts；onEdit
-  //  透传自 build-engine lspNotifier.invalidate，写盘后 textDocument/didChange
-  //  与 edit_file 同链路；edit_file 仍在 —— 留给非单一符号的文本补丁）。
-  "rename_symbol",
-  "replace_symbol_body",
-  "insert_before_symbol",
-  "insert_after_symbol",
-  "safe_delete_symbol",
 ];
 
 /** #440 T4 / #502 T3 条件化缺席视图:todoDir 未透传的 chat surface(默认行为)。
- *  既有 SSOT 断言通过 EXPECTED_TOOLS_NO_TODO 表达"todo_write 不在表";todo_write
- *  在场需显式传 todoDir(主循环生产路径,非测试默认形态)。具体件数 =
- *  EXPECTED_TOOLS_NO_TODO.length = 35,以数组为 source of truth。 */
+ *  既有 SSOT 断言通过 EXPECTED_TOOLS_NO_TODO 表达"28 件不变";todo_write
+ *  在场需显式传 todoDir(主循环生产路径,非测试默认形态)。 */
 const EXPECTED_TOOLS_NO_TODO = EXPECTED_TOOLS.filter((n) => n !== "todo_write");
 
 /** Deterministic env: never read process.env / .env files (env.ts SSOT). */
@@ -144,63 +112,6 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
   };
 }
 
-function makeTestSubagentManager(): {
-  readonly manager: SubAgentManager;
-  readonly spawnedTasks: string[];
-} {
-  const spawnedTasks: string[] = [];
-  const manager: SubAgentManager = {
-    spawn: (definition) => {
-      spawnedTasks.push(definition.task ?? "");
-      return { taskId: `task-${spawnedTasks.length}` };
-    },
-    queryBuffer: () => ({ status: "running" }),
-    waitFor: async () => {
-      throw new Error("waitFor should not run in wait:false tests");
-    },
-    shutdown: async () => {},
-    drainCompleted: () => [],
-    listActive: () => [],
-    abortTask: () => false,
-    listSubagents: () => [],
-    subscribe: () => () => {},
-  };
-  return { manager, spawnedTasks };
-}
-
-function makeCapturingSubagentManager(sandboxRoot: string): {
-  readonly manager: SubAgentManager;
-  readonly payloads: WorkerEnvelope[];
-} {
-  const payloads: WorkerEnvelope[] = [];
-  const manager = createSubAgentManager({
-    sandboxRoot,
-    spawn: (_definition, _taskId, payload) => {
-      payloads.push(payload);
-      return spawnChild(
-        process.execPath,
-        ["-e", "setInterval(() => {}, 1000)"],
-        { stdio: ["pipe", "pipe", "pipe"] }
-      );
-    },
-  });
-  return { manager, payloads };
-}
-
-async function runSpawn(
-  built: BuiltEngine,
-  input: Record<string, unknown>,
-  conversationId = "conv-1"
-): Promise<ToolExecutionResult> {
-  const [result] = await built.deps.executor.executeAll(
-    [{ id: "spawn-1", name: "spawn_subagent", input }],
-    undefined,
-    undefined,
-    conversationId
-  );
-  return result!;
-}
-
 describe("buildHarnessEngine (SSOT assembly)", () => {
   it("registers the full ACI 11-tool set on the returned registry", async () => {
     const { deps } = await buildHarnessEngine({
@@ -209,8 +120,7 @@ describe("buildHarnessEngine (SSOT assembly)", () => {
     });
 
     const names = deps.registry.list().map((def) => def.name);
-    // #440 T4:todo_write 条件化 — todoDir 未透传 → 不在场。具体件数 =
-    // EXPECTED_TOOLS_NO_TODO.length = 35,以数组为 source of truth。
+    // #440 T4:todo_write 条件化 — todoDir 未透传 → 不在场;EXPECTED_TOOLS_NO_TODO = 25 件。
     expect(names).toEqual(EXPECTED_TOOLS_NO_TODO);
     // 显式锁 Web 工具存在(plan-fidelity:SSOT 收敛到 registry.ts 后,
     // build-engine 路径也必须仍带 web_fetch / web_search)。
@@ -250,8 +160,7 @@ describe("buildHarnessEngine (SSOT assembly)", () => {
       .sort();
     expect(promptNames).toEqual([...EXPECTED_TOOLS_NO_TODO].sort());
     // 默认 registry 无 lazy 工具 → visibleSchemas ≡ registry.list()
-    // #440 T4:todoDir 未透传 → todo_write 缺席;具体件数 =
-    // EXPECTED_TOOLS_NO_TODO.length = 35,以数组常量为准。
+    // #440 T4:todoDir 未透传 → todo_write 缺席,EXPECTED_TOOLS_NO_TODO = 25 件。
     expect(deps.promptTools!().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS_NO_TODO
     );
@@ -287,10 +196,9 @@ describe("buildHarnessEngine — memory opt-out (ask path, SC 12)", () => {
     });
 
     const names = deps.registry.list().map((def) => def.name);
-    // ask surface（SC8 + SC12 + #440 T4）→ memory(enabled:false 缺席)+ todoDir
-    // (未透传缺席)+ subagentManager/mcpManager/backgroundManager(ask 不创建,SC12)
-    // 一并缺席。具体件数 = filter 表达式长度,以 EXPECTED_TOOLS_NO_TODO.filter
-    // 为 source of truth;本断言 = 同表达式 + memory 缺席剥除。
+    // #502 T3:ask surface 缺 backgroundManager → bash_output/bash_stop 缺席;
+    // #440 T4:todoDir 未透传 → todo_write 缺席;memory:enabled=false → memory 两件
+    // 缺席;EXPECTED_TOOLS_NO_TODO(29) - memory2 = 27 件。
     expect(names).toEqual(
       EXPECTED_TOOLS_NO_TODO.filter(
         (n) => n !== "memory_recall" && n !== "memory_save"
@@ -503,14 +411,9 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
     const names = built.deps.registry.list().map((d) => d.name);
     expect(names).not.toContain("spawn_subagent");
     expect(names).not.toContain("subagent_result");
-    // ask + memory:{enabled:false} 双重剥离（SC8 + SC12 + #440 T4 + #502 T3）:
-    //   - memory2:memory.enabled=false
-    //   - subagent2:ask 不创建 subagentManager（SC8）
-    //   - mcp2:ask 不创建 mcpManager（SC12）
-    //   - bg2:ask 不创建 backgroundManager（#502 T3）
-    //   - todo_write:todoDir oneshot 剥离（#440 T4）
-    // skill 两件仍装配,SC12 守门。本断言以 EXPECTED_TOOLS_NO_TODO.filter
-    // 表达式为 source of truth(不写加法叙事 — 加法易漂)。
+    // ask + memory:{enabled:false} 双重剥离 → 30 - todo(1) - memory2 - subagent2 -
+    // mcp2 - bg2 = 21 件(todo_write 因 todoDir 未透传缺席,ask 不装配 MCP 两件,
+    // memory 两件禁用,bg 两件 ask 缺席;skill 两件仍装配,SC12 守门)。
     expect(names).toEqual(
       EXPECTED_TOOLS_NO_TODO.filter(
         (n) =>
@@ -953,13 +856,10 @@ describe("buildHarnessEngine — #406 T2 secret registry 装配", () => {
 //
 // 范围：仅断言 buildHarnessEngine 接受 todoDir opt、Gate 3 不抛；todo_write
 // 工厂 + SSOT append 在 T2/T4 才进入，本步不假设工具在注册表中。
-//
-// 各用例的件数 = `EXPECTED_TOOLS.filter(...)` 表达式长度推导,以表达式为
-// source of truth — 注释里不写加法叙事（避免与实际长度漂移）。
 // ---------------------------------------------------------------------------
 
 describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
-  it("chat surface：todoDir 传入 → todo_write 装配 + 36 件（seam 接受 + SSOT append-only;以 EXPECTED_TOOLS.length 为真值源,不写加法叙事）", async () => {
+  it("chat surface：todoDir 传入 → todo_write 装配 + 30 件（seam 接受 + SSOT append-only）", async () => {
     const built = await buildHarnessEngine({
       env: makeEnv("sk-test-t1-chat-tododir"),
       askUser: createNoAskUser(),
@@ -967,10 +867,9 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
       todoDir: "/tmp/some-session/todos",
     });
     // chat surface + todoDir → todoDir 透传给 registry → todo_write 装配。
-    // EXPECTED_TOOLS 含 todo_write + bash_output + bash_stop（36 件;
-    // backgroundManager 由 build-engine 装配期自建 → bash_output/bash_stop
-    // 入注册表;todoDir 由 host 注入 → todo_write 入注册表;本测试不传
-    // graphAssembly → run_graph 缺席 → 实际 36 < ACI_TOOLSET_NAMES 37）。
+    // T4 已 SSOT append,EXPECTED_TOOLS 含 todo_write + bash_output + bash_stop
+    // (30 件;backgroundManager 由 build-engine 装配期自建 → bash_output/bash_stop
+    // 入注册表;todoDir 由 host 注入 → todo_write 入注册表)。
     expect(built.deps.registry.list().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS
     );
@@ -986,10 +885,9 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
       memory: { enabled: false },
       todoDir: "/tmp/some-session/todos",
     });
-    // ask 形态与现有 SC8 守门一致：EXPECTED_TOOLS filter 剥除
-    // memory2 + subagent2 + mcp2 + todo_write + bg2（ask 不创建 subagentManager
-    // / mcpManager / backgroundManager,memory:enabled:false,todoDir oneshot
-    // 剥离 —— SC8 + SC12）。具体件数 = filter 表达式长度，以数组为准。
+    // ask 形态与现有 SC8 守门一致：30 - memory2 - subagent2 - mcp2 - todo_write
+    // - bg2 (ask 不传 todoDir 给 registry,mcpManager + backgroundManager 在 ask
+    // 路径也不装配,SC12) = 21 件。
     expect(built.deps.registry.list().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS.filter(
         (n) =>
@@ -1007,14 +905,13 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
     expect(built.deps.registry.get("todo_write")).toBeUndefined();
   });
 
-  it("默认 chat surface 不传 todoDir → todo_write 不装配，35 件（seam 缺席零变化，向后兼容）", async () => {
+  it("默认 chat surface 不传 todoDir → todo_write 不装配，29 件（seam 缺席零变化，向后兼容）", async () => {
     const built = await buildHarnessEngine({
       env: makeEnv("sk-test-t1-chat-default"),
       askUser: createNoAskUser(),
     });
-    // todoDir undefined → todo_write 缺席;EXPECTED_TOOLS.filter 剥 todo_write
-    // → 35 件;backgroundManager 已装配,bash_output/bash_stop 在场;本测试不传
-    // graphAssembly → run_graph 缺席。
+    // todoDir undefined → todo_write 缺席；EXPECTED_TOOLS(30) 含 todo_write
+    // 故过滤掉 → 29 件;backgroundManager 已装配,bash_output/bash_stop 在场。
     expect(built.deps.registry.list().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS.filter((n) => n !== "todo_write")
     );
@@ -1190,357 +1087,6 @@ describe("buildHarnessEngine — #558 T2 默认不注入 coordinator 段", () =>
       expect(systemText).not.toContain("parallelizable");
 
       if (built.shutdown) await built.shutdown();
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// #841 T6 / ADR-0009 D2 amended: 父会话 (chat / tui / serve) 开场不灌 rules
-// 正文 —— 三条装配路径共用 build-engine deps.system,只注入带路径的 rules
-// 清单 + 读路径指引;无 rules 目录时会话正常开始。
-// ---------------------------------------------------------------------------
-describe("buildHarnessEngine — #841 T6 父会话 rules 清单化", () => {
-  const surfaces = ["chat", "tui", "serve"] as const;
-
-  for (const surface of surfaces) {
-    it(`${surface}: deps.system() lists rule paths, never rule bodies`, async () => {
-      const root = await mkdtemp(join(tmpdir(), "iknow-t6-rules-"));
-      try {
-        const rulesDir = join(root, ".iknow", "rules");
-        await mkdir(rulesDir, { recursive: true });
-        await writeFile(join(rulesDir, "alpha.md"), "ALPHA RULE BODY");
-        await writeFile(join(rulesDir, "beta.md"), "BETA RULE BODY");
-
-        const built = await buildHarnessEngine({
-          env: makeEnv(`sk-test-t6-${surface}`),
-          askUser: createNoAskUser(),
-          surface,
-          userHome: join(root, "home"),
-          cwd: root,
-        });
-
-        const systemText = (await built.deps.system?.()) ?? "";
-        expect(systemText).not.toContain("ALPHA RULE BODY");
-        expect(systemText).not.toContain("BETA RULE BODY");
-        expect(systemText).toContain(join(rulesDir, "alpha.md"));
-        expect(systemText).toContain(join(rulesDir, "beta.md"));
-        expect(systemText).toContain("read_file");
-
-        if (built.shutdown) await built.shutdown();
-      } finally {
-        await rm(root, { recursive: true, force: true });
-      }
-    });
-  }
-
-  it("chat: missing rules directory → session system still resolves (not fatal)", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-t6-norules-"));
-    try {
-      const built = await buildHarnessEngine({
-        env: makeEnv("sk-test-t6-norules"),
-        askUser: createNoAskUser(),
-        surface: "chat",
-        userHome: join(root, "home"),
-        cwd: root,
-      });
-      const systemText = (await built.deps.system?.()) ?? "";
-      expect(systemText).not.toContain("Rules index");
-      expect(systemText.length).toBeGreaterThan(0);
-      if (built.shutdown) await built.shutdown();
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// T4 / ADR-0040 — subagent dispatch classification at the build-engine gate.
-// The gate must classify the worker's effective capability surface rather than
-// treating every spawn_subagent call as read-only.
-// ---------------------------------------------------------------------------
-describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
-  it("allows explore on the main repo without provisioning and runs it read-only", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-t4-explore-"));
-    const { manager, spawnedTasks } = makeTestSubagentManager();
-    let provisioned = 0;
-    try {
-      const built = await buildHarnessEngine({
-        env: makeEnv("sk-test-t4-explore"),
-        askUser: createNoAskUser(),
-        surface: "chat",
-        cwd: root,
-        userHome: join(root, "home"),
-        settings: { isolation: { worktreeOnMutate: true } },
-        subagentManager: manager,
-        worktreeIsolation: {
-          provision: async () => {
-            provisioned += 1;
-            return root;
-          },
-        },
-      });
-
-      const result = await runSpawn(built, {
-        task: "inspect the repository",
-        subagent_type: "explore",
-        wait: false,
-      });
-
-      expect(result.kind).toBe("ok");
-      expect(spawnedTasks).toEqual(["inspect the repository"]);
-      expect(provisioned).toBe(0);
-      await built.shutdown?.();
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("explore catalog deny includes symbol writers so default spawn stays on the main repo", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-t4-symbol-worker-"));
-    const workerDeps = await createWorkerDeps({
-      env: makeEnv("sk-test-t4-symbol-worker"),
-      sandboxRoot: root,
-      model: createStubModel({ responses: [] }),
-      skillCatalog: createSkillCatalog([]),
-      trace: createNoopTraceService(),
-      system: () => undefined,
-      role: "explore",
-    });
-    const workerToolNames = workerDeps.registry.list().map((tool) => tool.name);
-    const workerDecision = assessSubagentIsolation({
-      role: "explore",
-      availableTools: workerToolNames,
-    });
-    let provisioned = 0;
-    try {
-      for (const name of SYMBOL_MUTATE_TOOL_NAMES) {
-        expect(workerToolNames).not.toContain(name);
-      }
-      expect(workerDecision.conclusion).toBe("readonly");
-      expect(workerDecision.reason).toBe("write_tools_denied_bash_readonly");
-
-      const { manager, spawnedTasks } = makeTestSubagentManager();
-      const built = await buildHarnessEngine({
-        env: makeEnv("sk-test-t4-symbol-gate"),
-        askUser: createNoAskUser(),
-        surface: "chat",
-        cwd: root,
-        userHome: join(root, "home"),
-        settings: { isolation: { worktreeOnMutate: true } },
-        subagentManager: manager,
-        worktreeIsolation: {
-          provision: async () => {
-            provisioned += 1;
-            return root;
-          },
-        },
-      });
-
-      const result = await runSpawn(built, {
-        task: "inspect the repository",
-        subagent_type: "explore",
-        wait: false,
-      });
-
-      expect(result.kind).toBe("ok");
-      expect(spawnedTasks).toEqual(["inspect the repository"]);
-      expect(provisioned).toBe(0);
-      await built.shutdown?.();
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("blocks the default general-purpose spawn on the main repo and points at worktree creation", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-t4-general-"));
-    const { manager, spawnedTasks } = makeTestSubagentManager();
-    let provisioned = 0;
-    try {
-      const built = await buildHarnessEngine({
-        env: makeEnv("sk-test-t4-general"),
-        askUser: createNoAskUser(),
-        surface: "chat",
-        cwd: root,
-        userHome: join(root, "home"),
-        settings: { isolation: { worktreeOnMutate: true } },
-        subagentManager: manager,
-        worktreeIsolation: {
-          provision: async () => {
-            provisioned += 1;
-            return root;
-          },
-        },
-      });
-
-      const result = await runSpawn(built, {
-        task: "make the requested change",
-        wait: false,
-      });
-
-      expect(result.kind).toBe("execution_failed");
-      expect(result.message).toContain("create-task-worktree ACI tool");
-      expect(spawnedTasks).toEqual([]);
-      expect(provisioned).toBe(0);
-      await built.shutdown?.();
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("fails closed for an unknown subagent type before spawning", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-t4-unknown-"));
-    const { manager, spawnedTasks } = makeTestSubagentManager();
-    try {
-      const built = await buildHarnessEngine({
-        env: makeEnv("sk-test-t4-unknown"),
-        askUser: createNoAskUser(),
-        surface: "chat",
-        cwd: root,
-        userHome: join(root, "home"),
-        settings: { isolation: { worktreeOnMutate: true } },
-        subagentManager: manager,
-        worktreeIsolation: { provision: async () => root },
-      });
-
-      const result = await runSpawn(built, {
-        task: "use an unsupported role",
-        subagent_type: "not-a-catalog-role",
-        wait: false,
-      });
-
-      expect(result.kind).toBe("execution_failed");
-      expect(result.message).toContain("create-task-worktree ACI tool");
-      expect(spawnedTasks).toEqual([]);
-      await built.shutdown?.();
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("still blocks a general-purpose spawn when only write and edit are denied", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-t4-bash-any-"));
-    const { manager, spawnedTasks } = makeTestSubagentManager();
-    try {
-      const built = await buildHarnessEngine({
-        env: makeEnv("sk-test-t4-bash-any"),
-        askUser: createNoAskUser(),
-        surface: "chat",
-        cwd: root,
-        userHome: join(root, "home"),
-        settings: { isolation: { worktreeOnMutate: true } },
-        subagentManager: manager,
-        worktreeIsolation: { provision: async () => root },
-      });
-
-      const result = await runSpawn(built, {
-        task: "write through shell if needed",
-        subagent_type: "general-purpose",
-        disallowedTools: ["write_file", "edit_file"],
-        wait: false,
-      });
-
-      expect(result.kind).toBe("execution_failed");
-      expect(result.message).toContain("create-task-worktree ACI tool");
-      expect(spawnedTasks).toEqual([]);
-      await built.shutdown?.();
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("allows a general-purpose spawn after the session is rebound to its task worktree", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-t4-rebound-"));
-    const taskRoot = join(root, ".iknow", "worktrees", "conv-1");
-    await mkdir(taskRoot, { recursive: true });
-    const { manager, spawnedTasks } = makeTestSubagentManager();
-    const { manager: reboundManager, payloads: reboundPayloads } =
-      makeCapturingSubagentManager(taskRoot);
-    try {
-      const mainBuilt = await buildHarnessEngine({
-        env: makeEnv("sk-test-t4-rebound-main"),
-        askUser: createNoAskUser(),
-        surface: "chat",
-        cwd: root,
-        userHome: join(root, "home"),
-        settings: { isolation: { worktreeOnMutate: true } },
-        subagentManager: manager,
-        worktreeIsolation: { provision: async () => taskRoot },
-      });
-      const blocked = await runSpawn(mainBuilt, {
-        task: "change the repository",
-        wait: false,
-      });
-      expect(blocked.kind).toBe("execution_failed");
-      await mainBuilt.shutdown?.();
-
-      const reboundBuilt = await buildHarnessEngine({
-        env: makeEnv("sk-test-t4-rebound-task"),
-        askUser: createNoAskUser(),
-        surface: "chat",
-        cwd: taskRoot,
-        sandboxRoot: taskRoot,
-        workspaceRoot: taskRoot,
-        productRoot: root,
-        projectIdentityRoot: root,
-        userHome: join(root, "home"),
-        settings: { isolation: { worktreeOnMutate: true } },
-        subagentManager: reboundManager,
-        worktreeIsolation: { provision: async () => taskRoot },
-      });
-      const result = await runSpawn(reboundBuilt, {
-        task: "change the repository",
-        wait: false,
-      });
-
-      expect(result.kind).toBe("ok");
-      expect(spawnedTasks).toEqual([]);
-      expect(reboundPayloads).toHaveLength(1);
-      expect(reboundPayloads[0]?.task).toBe("change the repository");
-      expect(reboundPayloads[0]?.sandboxRoot).toBe(taskRoot);
-      await reboundBuilt.shutdown?.();
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("keeps the spawn result bytes unchanged when isolation is off", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-t4-off-"));
-    try {
-      const offManager = makeTestSubagentManager();
-      const offBuilt = await buildHarnessEngine({
-        env: makeEnv("sk-test-t4-off"),
-        askUser: createNoAskUser(),
-        surface: "chat",
-        cwd: root,
-        userHome: join(root, "home"),
-        settings: { isolation: { worktreeOnMutate: false } },
-        subagentManager: offManager.manager,
-        worktreeIsolation: { provision: async () => root },
-      });
-      const offResult = await runSpawn(offBuilt, {
-        task: "preserve the existing path",
-        wait: false,
-      });
-
-      const baselineManager = makeTestSubagentManager();
-      const baselineBuilt = await buildHarnessEngine({
-        env: makeEnv("sk-test-t4-off-baseline"),
-        askUser: createNoAskUser(),
-        surface: "chat",
-        cwd: root,
-        userHome: join(root, "home"),
-        subagentManager: baselineManager.manager,
-      });
-      const baselineResult = await runSpawn(baselineBuilt, {
-        task: "preserve the existing path",
-        wait: false,
-      });
-
-      expect(JSON.stringify(offResult)).toBe(JSON.stringify(baselineResult));
-      await offBuilt.shutdown?.();
-      await baselineBuilt.shutdown?.();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

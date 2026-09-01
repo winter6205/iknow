@@ -42,9 +42,6 @@ import {
 import { createDefaultAciRegistry } from "../aci/tools/registry.js";
 import { createAciExecutor } from "../aci/index.js";
 import type { AciCatalog } from "../aci/types.js";
-import { createLspNotifier } from "../lsp/notifier.js";
-import { startLspWarmup } from "../lsp/warmup.js";
-import { DEFAULT_LSP_IDLE_TIMEOUT_MS } from "../lsp/client.js";
 import { deriveFileRefs, writeToolNamesFrom } from "./file-refs.js";
 import { createPermissionPolicy } from "../permission/policy.js";
 import { createNoAskUser } from "../permission/ask-user.js";
@@ -57,7 +54,6 @@ import type { HarnessStreamEvent } from "../stream.js";
 import { MaxTurnsExceeded, ProtocolError } from "../errors.js";
 import type { AnthropicNativeMessage } from "../model-adapter/types.js";
 import { getAgentEntry, AgentCatalogLookupError } from "./catalog.js";
-import { resolveSubagentCapabilities, type BashMode } from "./capability.js";
 import {
   parseWorkerEnvelope,
   truncateEnvelopeResult,
@@ -123,6 +119,36 @@ function resolveConstraintsText(role: string | undefined): string | undefined {
 }
 
 /**
+ * #562 T6: 查 catalog 取 bashMode 派生出 worker 装配期的 bash 模式。
+ *
+ * 继承 plan T6 fallback 链路:
+ *   - role 缺省 → 返回 "any" (V1 baseline 等价; worker 不显式 grep,
+ *     但 deps.bashMode 字段总会显式设置, 让 wiring 显式可见);
+ *   - role 已知 (catalog 命中, e.g. "explore") → 返回 entry.bashMode,
+ *     缺省视为 "any" (catalog 默认 / explore 外其他角色不强制 readonly);
+ *   - role 未知 → 返回 "any" (defense-in-depth, 不静默吞掉 — 装配期
+ *     catch AgentCatalogLookupError 后写一行 log, 装配仍走 "any" 显式
+ *     透传, 与 resolvePersonaBody / resolveConstraintsText 同形态);
+ *
+ * 显式 "any":bash handler 不启用 readonly validator, fence 不收
+ * cwdReadonly —— 字节与 V1 一致。返回类型收窄到 "any" | "readonly",
+ * 编译期保证调用方分支覆盖完整。
+ */
+function resolveBashMode(role: string | undefined): "any" | "readonly" {
+  if (role === undefined) return "any";
+  try {
+    const entry = getAgentEntry(role);
+    return entry.bashMode ?? "any";
+  } catch (err) {
+    if (err instanceof AgentCatalogLookupError) {
+      log(`role '${role}' not in catalog; bashMode fallback to 'any'`);
+      return "any";
+    }
+    throw err;
+  }
+}
+
+/**
  * #556 T2 + #562 T7: 加性段注入 wrapper
  * (base < persona < constraints < addendum)。
  *
@@ -135,8 +161,8 @@ function resolveConstraintsText(role: string | undefined): string | undefined {
  * base 缺席 → 输出只是 extras 三者按序 join;任一缺席 → 该 slot 在
  * extras 数组过滤掉, 顺序保持不变。
  *
- * 加性段追加在 base system 之后, 不重排 IKNOW_ASSEMBLY_ORDER 的 6 段
- * LOCKED 顺序 (identity / soul / usage / user_profile / bootstrap / memory_layer)。
+ * 加性段追加在 base system 之后, 不重排 IKNOW_ASSEMBLY_ORDER 的 5 段
+ * LOCKED 顺序 (identity / soul / user_profile / bootstrap / memory_layer)。
  */
 function withRoleExtras(
   base: () => Promise<string | undefined>,
@@ -189,14 +215,6 @@ export interface CreateWorkerDepsOptions {
    *  缺席 → registry 内部 fallback 到 sandboxRoot(legacy 形态)。 */
   readonly workspaceRoot?: string;
   /**
-   * T3 (plans/worktree-session-roots.md / ADR-0037 §4): 项目身份发现根 =
-   * 父会话钉下的 `projectIdentityRoot`（spawn 时经 `IKNOW_PRODUCT_ROOT` 传入，
-   * env var 名沿用既有 wire）。rules / 项目 `AGENTS.md` / 项目 skills 都读它，
-   * 而不是 worker 自己的 cwd —— 改绑后 cwd 是一棵没有 `.iknow` 的裸树。
-   * 缺席 → 回落 cwd（未改绑时两者同值，字节不变）。
-   */
-  readonly projectIdentityRoot?: string;
-  /**
    * #556 T2: 来自 envelope.role 的 seam 副本 (runSubagentWorker 透传)。
    * worker 装配期查 catalog 取 body 注入 persona 段; 缺省 / 未知 → 走 V1
    * baseline (不入 persona 段, 不注入额外 deny, 详见 plan T2 防御契约)。
@@ -205,7 +223,7 @@ export interface CreateWorkerDepsOptions {
   /**
    * #556 T2: 来自 envelope.systemPrompt 的 seam 副本 — 修复 schema 有 / 透传
    * 有 / 此前未消费的幽灵通道。该字段在 worker 装配期作为 addendum 追加
-   * persona 段之后 (顺序: base < persona < addendum), 与 LOCKED 6 段解耦。
+   * persona 段之后 (顺序: base < persona < addendum), 与 LOCKED 5 段解耦。
    */
   readonly addendum?: string;
   /**
@@ -227,9 +245,8 @@ export interface CreateWorkerDepsOptions {
  *   - trace = createJsonlTraceService (cli.ts 同形态; 测试覆盖 noop);
  *   - compress 透传 env.compress (与 build-engine 同形态)。
  *
- * worker 子进程是任务型 (有界 scope), 不装配 MCP manager / memory layer ——
- * 与 build-engine 的差异注释见各装配点。LSP notifier / warmup 二期 B6 起与
- * build-engine 同构装配（SSOT: LspCtx.directory ≡ sandboxRoot）。
+ * worker 子进程是任务型 (有界 scope), 不装配 MCP manager / memory layer /
+ * LSP notifier —— 与 build-engine 的差异注释见各装配点。
  */
 export async function createWorkerDeps(
   opts: CreateWorkerDepsOptions
@@ -255,8 +272,6 @@ export async function createWorkerRuntime(
   const { env, sandboxRoot } = opts;
   const userHome = opts.userHome ?? homedir();
   const cwd = opts.cwd ?? process.cwd();
-  // T3: 身份发现根。父会话没传（未改绑 / 旧 wire）→ 回落 cwd，与今日同值。
-  const projectIdentityRoot = opts.projectIdentityRoot ?? cwd;
   const defaultTraceDir = resolve(
     opts.workspaceRoot ?? cwd,
     DEFAULT_WORKER_TRACE_DIR
@@ -288,48 +303,22 @@ export async function createWorkerRuntime(
   const skillCatalog =
     opts.skillCatalog ??
     createSkillCatalog(
-      await createSkillScanner({
-        userHome,
-        projectIdentityRoot,
-        env: process.env,
-      }).scan()
+      await createSkillScanner({ userHome, cwd, env: process.env }).scan()
     );
 
   // 独立 registry: 不依赖父注册表 (spec 假设 4)。worker 子进程不含
   // spawn_subagent (SC9) —— registry.ts 不传 subagentManager, 该工具不在
   // factories 里 (T2 才把两件工具 append 进 ACI_TOOLSET_NAMES)。
-  // #562 T6: bashMode 与 catalog deny 均由同一能力解析源派生；显式
-  // opts.bashMode 只保留既有测试/未来注入 seam，不改变 catalog 的 deny。
+  // #562 T6: bashMode 透传到 bash 工具工厂。优先 opts.bashMode 显式覆盖,
+  // 否则 resolveBashMode(role) 派生 (role 缺省 / 未知 → "any" fallback)。
   const isJudge = opts.role === "judge";
-  const capabilities = isJudge
-    ? { bashMode: "any" as const, disallowedTools: opts.disallowedTools }
-    : resolveSubagentCapabilities({
-        role: opts.role,
-        parentDisallowedTools: opts.disallowedTools,
-      });
-  if (capabilities.catalogError !== undefined) {
-    log(`role '${opts.role}' not in catalog; bashMode fallback to 'any'`);
-  }
-  const bashMode: BashMode = opts.bashMode ?? capabilities.bashMode;
-  // lsp-optimization 二期 B6/B7 closeout: worker 同构装配 LSP notifier +
-  // warmup（与 build-engine 同缝）。SSOT: LspCtx.directory ≡ sandboxRoot。
-  // worker 不读 settings 文件，但注入 idleTimeoutMs 缺省（10min），与
-  // plan「走默认值」一致；超时/等待仍走工具层常量。
-  const lspCtx = {
-    directory: sandboxRoot,
-    idleTimeoutMs: DEFAULT_LSP_IDLE_TIMEOUT_MS,
-  };
-  const lspNotifier = createLspNotifier(lspCtx);
-  startLspWarmup(lspCtx);
+  const bashMode: "any" | "readonly" =
+    opts.bashMode ?? (isJudge ? "any" : resolveBashMode(opts.role));
   const reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
     skillCatalog,
-    onEdit: (file) => lspNotifier.invalidate(file),
-    lspCtx,
-    ...(capabilities.disallowedTools !== undefined
-      ? { disallowedTools: capabilities.disallowedTools }
-      : {}),
+    ...(opts.disallowedTools ? { disallowedTools: opts.disallowedTools } : {}),
     // ADR-0019 (review-fix H3): spread-guard 透传 —— 缺席时 registry
     // 内部 fallback sandboxRoot(legacy 字节不变)。
     ...(opts.workspaceRoot !== undefined
@@ -358,7 +347,6 @@ export async function createWorkerRuntime(
     : (opts.system ??
       createIknowSystemResolver({
         cwd,
-        projectIdentityRoot,
         userHome,
         surface: "ask",
         memoryEnabled: false,
@@ -804,13 +792,6 @@ export async function runSubagentWorker(): Promise<void> {
             env: { [WORKSPACE_ROOT_ENV_KEY]: env.workspaceRoot },
           }),
         }
-      : {}),
-    // T3 (ADR-0037 §4): 父会话经 IKNOW_PRODUCT_ROOT 传下来的项目身份根。
-    // `env.productRoot` 是 env var 那侧的名字（wire 不改），进程内的选项面
-    // 叫 `projectIdentityRoot`。缺席（未改绑 / 旧 wire）→ 不传 →
-    // createWorkerRuntime 回落 cwd。
-    ...(env.productRoot !== undefined
-      ? { projectIdentityRoot: env.productRoot }
       : {}),
   });
   // D-α 观测地板: fileRefs 的派生源 = 本 worker 实际装配出的 ACI catalog

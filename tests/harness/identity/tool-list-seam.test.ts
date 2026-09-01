@@ -21,7 +21,6 @@ import {
 } from "../../../src/harness/identity/assemble.ts";
 import { IKNOW_IDENTITY_DEFAULT } from "../../../src/harness/identity/identity.ts";
 import { IKNOW_SOUL_DEFAULT } from "../../../src/harness/identity/soul.ts";
-import { IKNOW_USAGE_DEFAULT } from "../../../src/harness/identity/usage.ts";
 
 let origHome: string | undefined;
 let workDir: string;
@@ -30,7 +29,7 @@ beforeAll(async () => {
   origHome = process.env.HOME;
   workDir = await mkdtemp(join(tmpdir(), "iknow-tool-list-seam-"));
   // 故意 mkdir 但**不** initIknowWorkspace —— user.md 与 state.json 均缺席,
-  // user_profile / bootstrap 自然返回 undefined,基底只有 identity + soul + usage。
+  // user_profile / bootstrap 自然返回 undefined,基底只有 identity + soul。
   await mkdir(join(workDir, ".iknow"), { recursive: true });
   process.env.HOME = workDir;
 });
@@ -44,7 +43,7 @@ function baseCtx(): AssemblyContext {
   return {
     cwd: process.cwd(),
     userHome: workDir,
-    bootstrapActive: false, // 关掉 BOOTSTRAP 段,基底只剩 identity + soul + usage
+    bootstrapActive: false, // 关掉 BOOTSTRAP 段,基底只剩 identity + soul
   };
 }
 
@@ -55,7 +54,6 @@ describe("#224 W4 tool-list injection seam (empty shell)", () => {
     // 基底恒等段必须出现
     expect(out).toContain(IKNOW_IDENTITY_DEFAULT);
     expect(out).toContain(IKNOW_SOUL_DEFAULT);
-    expect(out).toContain(IKNOW_USAGE_DEFAULT);
   });
 
   it("seam absent is byte-identical to seam present returning undefined", async () => {
@@ -85,22 +83,19 @@ describe("#224 W4 tool-list injection seam (empty shell)", () => {
     // 基底恒等段保留
     expect(out).toContain(IKNOW_IDENTITY_DEFAULT);
     expect(out).toContain(IKNOW_SOUL_DEFAULT);
-    expect(out).toContain(IKNOW_USAGE_DEFAULT);
     // 名录段文本存在
     expect(out).toContain("Available tools:");
     expect(out).toContain("bash");
     expect(out).toContain("read_file");
     expect(out).toContain("glob");
-    // 顺序 LOCKED:基底段 < 名录段。基底 identity < soul < usage(6 段),
+    // 顺序 LOCKED:基底段 < 名录段。基底 identity < soul(既有),
     // 名录段 append 在最末。
     const idxIdentity = out!.indexOf(IKNOW_IDENTITY_DEFAULT);
     const idxSoul = out!.indexOf(IKNOW_SOUL_DEFAULT);
-    const idxUsage = out!.indexOf(IKNOW_USAGE_DEFAULT);
     const idxHeader = out!.indexOf("Available tools:");
     expect(idxIdentity).toBeGreaterThanOrEqual(0);
     expect(idxSoul).toBeGreaterThan(idxIdentity);
-    expect(idxUsage).toBeGreaterThan(idxSoul);
-    expect(idxHeader).toBeGreaterThan(idxUsage);
+    expect(idxHeader).toBeGreaterThan(idxSoul);
   });
 
   it("createIknowSystemResolver opts.toolList threads through to assemble output", async () => {

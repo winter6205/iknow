@@ -251,22 +251,13 @@ describe("query_trace ACI tool", () => {
     );
   });
 
-  it("registers query_trace as an append-only SSOT member (followed by 3 worktree isolation per ADR-0037 + 10 symbol-query + 5 symbol-mutate tools per T2+T4)", () => {
-    // ADR-0037 在末位追加 3 件 worktree 隔离工具,symbol-primary-aci T2
-    // 接着追加 10 件符号查询工具 → query_trace 不再是末位。T4 又在末尾
-    // append 5 件符号改工具 → query_trace 之后共 18 件(3 worktree + 10
-    // 查询 + 5 改)。query_trace 自身位置 idx 21。
-    assert.equal(ACI_TOOLSET_NAMES[21], "query_trace");
-    assert.equal(ACI_TOOLSET_NAMES.at(-1), "safe_delete_symbol");
-    const queryTraceIndex = ACI_TOOLSET_NAMES.indexOf("query_trace");
-    assert.ok(queryTraceIndex >= 0, "query_trace 仍在 ACI_TOOLSET_NAMES");
-    // query_trace 之后正好 18 件（3 worktree + 10 查询 + 5 改）
-    assert.equal(ACI_TOOLSET_NAMES.length - queryTraceIndex - 1, 18);
+  it("registers query_trace as the append-only SSOT member", () => {
+    assert.equal(ACI_TOOLSET_NAMES.at(-1), "query_trace");
     const registry = createDefaultAciRegistry({
       env: { web: { searchUrl: undefined, proxy: undefined } },
       sandboxRoot: makeTraceDir(),
     });
     assert.equal(registry.catalog.get("query_trace")?.name, "query_trace");
-    assert.equal(registry.inner.list().at(-1)?.name, "safe_delete_symbol");
+    assert.equal(registry.inner.list().at(-1)?.name, "query_trace");
   });
 });

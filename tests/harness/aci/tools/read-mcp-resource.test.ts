@@ -25,11 +25,7 @@ import { createReadMcpResourceTool } from "../../../../src/harness/aci/tools/rea
 
 function makeFakeManager(
   listImpl?: (opts?: ListResourcesOpts) => Promise<ListResourcesResult>,
-  readImpl?: (
-    server: string,
-    uri: string,
-    opts?: { readonly signal?: AbortSignal }
-  ) => Promise<ReadResourceResult>
+  readImpl?: (server: string, uri: string) => Promise<ReadResourceResult>
 ): McpManager {
   return {
     start: () => Promise.reject(new Error("not used")),
@@ -339,16 +335,17 @@ describe("createReadMcpResourceTool — concurrent / exception", () => {
     expect(JSON.parse(b).contents[0].text).toBe("payload-2");
   });
 
-  it("manager.readResource receives ctx.signal (ADR-0039 reopens the M3 decision)", async () => {
-    let received: AbortSignal | undefined;
-    const mgr = makeFakeManager(undefined, async (_server, _uri, opts) => {
-      received = opts?.signal;
+  it("manager.readResource does not receive ctx.signal (current contract; signal forwarding is a follow-up)", async () => {
+    let received: unknown = undefined;
+    const mgr = makeFakeManager(undefined, async (_server, _uri) => {
+      received = (mgr as unknown as Record<string, unknown>)._lastSignal;
       return { server: "a", uri: "x://u", contents: [] };
     });
     const tool = createReadMcpResourceTool({ getManager: () => mgr });
     const ctrl = new AbortController();
-    // ADR-0039 推翻 M3 的旧决议：manager 已支持 signal，handler 应透传 ctx.signal。
+    // 当前 manager.readResource(server, uri) 不收 signal 入参；
+    // handler 不传 signal，确保调用契约不变（manager 侧 abort 走状态机）。
     await tool.handler({ server: "a", uri: "x://u" }, { signal: ctrl.signal });
-    expect(received).toBe(ctrl.signal);
+    expect(received).toBeUndefined();
   });
 });

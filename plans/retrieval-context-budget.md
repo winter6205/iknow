@@ -1,4 +1,4 @@
-# Plan: retrieval-context-budget（检索进窗：计量 + search/fetch 瘦身）
+!# Plan: retrieval-context-budget（检索进窗：计量 + search/fetch 瘦身）
 
 **Goal:** 多轮 `web_search` / `web_fetch` 不再因估算把 `tool_result` 当成几乎零 token 而错过 proactive compact；单次搜索与抓取进权威历史的体积可控。不换默认搜索后端。
 **Approach:** 严格串行三 commit：先修压缩账本（A），再搜索字段/条边界预算（B），再抓取减噪声与同 URL 内存缓存（C）。禁止 T2 与 T3 并行合入。适配器、阶段 D、默认 Exa/MCP 均不在本计划。

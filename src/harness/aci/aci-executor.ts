@@ -8,13 +8,11 @@
  *
  * 124/T5 增量：包一层 per-tool tier + interruptBehavior 路由:
  *   - 工具 catalog 中声明的 `timeoutTier` 覆盖 Loop Engine 传入的 timeoutMs(#124 决策 3-4)。
- *   - interruptBehavior="cancel" 透传 caller 的 AbortSignal 到 inner;caller abort
- *     立即抢占等待并返 "cancelled";若 handler 未收尾则标记后台运行并通知
- *     host,timeout 命中返 "timeout"。
+ *   - interruptBehavior="cancel" 透传 caller 的 AbortSignal 到 inner;timeout 命中返 "timeout"。
  *   - interruptBehavior="block" 不透传 caller signal(只透传由 tier timeout 控制的
  *     新 AbortController),handler 跑完自然完成;若 caller signal 在等待期内 abort,
  *     收尾时把 ok 结果转换成 execution_failed { message: "cancelled" }(无 partial,
- *     因 handler 是干净的),并通过 host 状态通道说明该等待不可中止。
+ *     因 handler 是干净的)。
  *   - bash handler 在被中断/超时前可能已 flush 部分 stdout/stderr;把这些 partial
  *     内容塞到 execution_failed.partial,以便 Anthropic Adapter 编码为额外的
  *     [partial stdout] / [partial stderr] 文本块(SC13)。
@@ -27,7 +25,6 @@ import type {
   Registry,
 } from "../tools/types.js";
 import type { HarnessStreamEvent } from "../stream.js";
-import { safeEmitStream } from "../stream.js";
 import type { PermissionOutcome } from "../permission/types.js";
 import {
   createPermissionRuntime,
@@ -37,29 +34,8 @@ import {
 import { partitionConcurrencyWaves } from "../tools/concurrency-waves.js";
 import { createAciCatalog } from "../permission/permission-executor.js";
 import { checkPermission } from "../permission/policy.js";
-import { errorMessage } from "../errors.js";
 import { createPermissionPolicy } from "./permission.js";
 import { TIMEOUT_TIER_MS, type AciCatalog, type AciToolDef } from "./types.js";
-
-export interface AciBackgroundRejection {
-  readonly kind: "background_handler_rejection";
-  readonly toolUseId: string;
-  readonly toolName: string;
-  readonly error: unknown;
-}
-
-export type AciDiagnosticSink = (
-  diagnostic: AciBackgroundRejection
-) => void | Promise<void>;
-
-/**
- * Host-visible notice for a caller abort that detached an uncooperative
- * handler. The stream event is the existing status channel available to TUI.
- */
-export const BACKGROUND_OPERATION_NOTICE =
-  "界面已停止等待，但底层操作仍在后台运行";
-export const BLOCK_OPERATION_NOTICE =
-  "界面已停止等待，但 block 操作仍在后台收尾";
 
 export interface AciExecutorOptions {
   readonly inner: Executor;
@@ -76,12 +52,6 @@ export interface AciExecutorOptions {
   };
   /** 观测钩子：每次权限决策回调（demo/测试用，不参与决策）。 */
   readonly onDecision?: (call: ToolCall, outcome: PermissionOutcome) => void;
-  /**
-   * Diagnostic sink for a handler rejection observed after the caller has
-   * already received a cancellation result. Omitted callers still get a
-   * sanitized stderr record.
-   */
-  readonly onDiagnostic?: AciDiagnosticSink;
   /**
    * Test seam:per-tool tier 覆盖为该固定毫秒值(测试 tier timeout 不必等真值)。
    * 默认 undefined = 走真实 TIMEOUT_TIER_MS。生产调用方不传。
@@ -159,7 +129,6 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
           perm,
           policy,
           onDecision: opts.onDecision,
-          onDiagnostic: opts.onDiagnostic,
           signal,
           conversationId,
           turnId,
@@ -239,7 +208,6 @@ async function runWave(opts: {
   readonly perm: PermissionRuntime;
   readonly policy: ReturnType<typeof createPermissionPolicy>;
   readonly onDecision: AciExecutorOptions["onDecision"];
-  readonly onDiagnostic: AciExecutorOptions["onDiagnostic"];
   readonly signal: AbortSignal | undefined;
   readonly conversationId: string | undefined;
   readonly turnId: string | undefined;
@@ -256,7 +224,7 @@ async function runWave(opts: {
   }> = [];
   for (const item of opts.wave) {
     emitOnDecision(item, opts.policy, opts.onDecision);
-    const gate = await opts.perm.gateOne(item.call, opts.signal);
+    const gate = await opts.perm.gateOne(item.call);
     gated.push({
       item,
       blocked: gate.kind === "blocked" ? gate.result : undefined,
@@ -283,8 +251,6 @@ async function runWave(opts: {
               def: g.item.def,
               tierTimeoutMs: g.item.tierTimeoutMs,
               callerSignal: opts.signal,
-              onDiagnostic: opts.onDiagnostic,
-              onStream: opts.onStream,
             });
       return work.then(async (result) => {
         await opts.onSettled?.(result, opts.indexBase + i);
@@ -306,11 +272,6 @@ async function runWave(opts: {
  * 取 3 s:bash 的 kill grace 是 2 s(SIGTERM→SIGKILL),加 1 s 收尾余量。
  */
 const SALVAGE_GRACE_MS = 3_000;
-/**
- * Give non-bash handlers one event-loop turn to honor caller abort before
- * declaring that the operation is still running in the background.
- */
-const CALLER_SETTLE_GRACE_MS = 10;
 
 /**
  * T5:单次调用的 tier + interruptBehavior 路由。返回一个与 call 身份匹配的
@@ -329,18 +290,8 @@ async function routeOneCall(opts: {
   readonly def: AciToolDef | undefined;
   readonly tierTimeoutMs: number | undefined;
   readonly callerSignal: AbortSignal | undefined;
-  readonly onDiagnostic: AciExecutorOptions["onDiagnostic"];
-  readonly onStream: ((event: HarnessStreamEvent) => void) | undefined;
 }): Promise<ToolExecutionResult> {
-  const {
-    runInner,
-    call,
-    def,
-    tierTimeoutMs,
-    callerSignal,
-    onDiagnostic,
-    onStream,
-  } = opts;
+  const { runInner, call, def, tierTimeoutMs, callerSignal } = opts;
   const isBlock = def !== undefined && def.aci.interruptBehavior === "block";
 
   const tierAbort = new AbortController();
@@ -358,31 +309,6 @@ async function routeOneCall(opts: {
       ? AbortSignal.any([callerSignal, tierAbort.signal])
       : tierAbort.signal;
 
-  const notifyBackground = (
-    notice: string = BACKGROUND_OPERATION_NOTICE
-  ): void => {
-    safeEmitStream(onStream, {
-      type: "stop_summary",
-      text: notice,
-    });
-  };
-  let blockNoticeSent = false;
-  const notifyBlock = (): void => {
-    if (blockNoticeSent) return;
-    blockNoticeSent = true;
-    notifyBackground(BLOCK_OPERATION_NOTICE);
-  };
-  let blockAbortListener: (() => void) | undefined;
-  if (isBlock && callerSignal !== undefined) {
-    blockAbortListener = notifyBlock;
-    if (callerSignal.aborted) {
-      notifyBlock();
-    } else {
-      callerSignal.addEventListener("abort", blockAbortListener, {
-        once: true,
-      });
-    }
-  }
   const innerPromise = runInner(effectiveSignal).then(
     (result) => [result] as const
   );
@@ -392,10 +318,7 @@ async function routeOneCall(opts: {
     result = await awaitInnerOrTier({
       innerPromise,
       tierSignal: tierAbort.signal,
-      callerSignal: isBlock ? undefined : callerSignal,
       call,
-      onDiagnostic,
-      onBackground: notifyBackground,
       // partial salvage 只对会产出 partial 的工具(bash)开放;其余工具 tier
       // 命中即返回 timeout,不等 handler 收尾(防 stub/良性 handler 拖慢路径)。
       salvageMs: def?.name === "bash" ? SALVAGE_GRACE_MS : 0,
@@ -420,9 +343,6 @@ async function routeOneCall(opts: {
     }
   } finally {
     if (tierTimer !== undefined) clearTimeout(tierTimer);
-    if (blockAbortListener !== undefined && callerSignal !== undefined) {
-      callerSignal.removeEventListener("abort", blockAbortListener);
-    }
   }
 
   // 归一化(顺序即优先级):
@@ -444,9 +364,7 @@ async function routeOneCall(opts: {
 
   if (callerSignal?.aborted === true) {
     if (isBlock) {
-      // block 工具:caller abort 不打断 handler;收尾后归一 cancelled(无 partial),
-      // 同时经 host 状态通道说明不可中止等待。
-      notifyBlock();
+      // block 工具:caller abort 不打断 handler;收尾后归一 cancelled(无 partial)。
       return {
         kind: "execution_failed",
         toolUseId: call.id,
@@ -455,12 +373,9 @@ async function routeOneCall(opts: {
     }
     const partial =
       result.kind === "ok" ? extractBashPartial(result, def) : undefined;
-    const background =
-      result.kind === "execution_failed" && result.background === true;
     return withPartial(
       { kind: "execution_failed", toolUseId: call.id, message: "cancelled" },
-      partial,
-      background
+      partial
     );
   }
 
@@ -477,97 +392,54 @@ async function routeOneCall(opts: {
 }
 
 /**
- * await inner; tier/caller abort 先到时按需进入有界 salvage 窗口(取回
- * handler 已 flush 的 partial)。返回最终的 ToolExecutionResult:
+ * await inner,但 tier abort 先到时进入有界 salvage 窗口(取回 handler 已
+ * flush 的 partial)。返回最终的 ToolExecutionResult:
  *   - inner 先 settle → 其结果;
- *   - caller 先到 + settle 内 inner settle → 其结果(由调用方归一 cancelled + partial);
- *   - tier 先到 + salvage 内 inner settle → 其结果(由调用方归一 timeout + partial);
- *   - abort 先到 + salvage 超时 inner 未 settle → 对应 execution_failed(无 partial)。
+ *   - tier 先到 + salvage 内 inner settle → 其结果(由调用方按 tierAbort.aborted 归一 timeout + partial);
+ *   - tier 先到 + salvage 超时 inner 未 settle → execution_failed { timeout }(无 partial)。
  */
 async function awaitInnerOrTier(opts: {
   readonly innerPromise: Promise<ReadonlyArray<ToolExecutionResult>>;
   readonly tierSignal: AbortSignal;
-  /** cancel tier 的 caller signal;block tier 刻意不传。 */
-  readonly callerSignal: AbortSignal | undefined;
   readonly call: ToolCall;
-  readonly onDiagnostic: AciExecutorOptions["onDiagnostic"];
-  readonly onBackground: (() => void) | undefined;
-  /** salvage 窗口(ms);caller 的 0 使用短 settle grace, tier 的 0 立即返回。 */
+  /** salvage 窗口(ms);0 = 不 salvage,tier 命中即返回 timeout。 */
   readonly salvageMs: number;
 }): Promise<ToolExecutionResult> {
-  const {
-    innerPromise,
-    tierSignal,
-    callerSignal,
-    call,
-    onDiagnostic,
-    onBackground,
-    salvageMs,
-  } = opts;
+  const { innerPromise, tierSignal, call, salvageMs } = opts;
 
   const tierFired = abortPromise(tierSignal);
-  const callerFired =
-    callerSignal === undefined
-      ? undefined
-      : abortPromise(callerSignal, "caller");
   const winner = await Promise.race<
     | { kind: "inner"; arr: ReadonlyArray<ToolExecutionResult> }
     | { kind: "timer" }
-    | { kind: "caller" }
-  >([
-    innerPromise.then((arr) => ({ kind: "inner" as const, arr })),
-    tierFired,
-    ...(callerFired === undefined ? [] : [callerFired]),
-  ]);
+  >([innerPromise.then((arr) => ({ kind: "inner" as const, arr })), tierFired]);
 
   if (winner.kind === "inner") {
     return winner.arr[0] as ToolExecutionResult;
   }
 
-  if (winner.kind === "caller") {
-    // caller 抢占只结束界面等待。bash 仍给既有 salvage 窗口取回 partial;
-    // 其它工具给一个极短收尾窗口，仍未 settle 才视为后台运行。
-    const settleGraceMs = salvageMs > 0 ? salvageMs : CALLER_SETTLE_GRACE_MS;
-    const salvaged = await awaitDuringSalvage(innerPromise, settleGraceMs);
-    if (salvaged.kind === "inner") return salvaged.result;
-    if (salvaged.kind === "rejected") {
-      void reportDetachedRejection(call, onDiagnostic, salvaged.error);
-      return {
-        kind: "execution_failed",
-        toolUseId: call.id,
-        message: "cancelled",
-      };
-    }
-    observeDetachedRejection(innerPromise, call, onDiagnostic);
-    onBackground?.();
-    return {
-      kind: "execution_failed",
-      toolUseId: call.id,
-      message: "cancelled",
-      background: true,
-    };
-  }
-
   // tier 先到:abort 已透传给 handler。salvageMs>0 时给有界窗口取回 partial。
   if (salvageMs > 0) {
-    const salvaged = await awaitDuringSalvage(innerPromise, salvageMs);
+    const salvageGrace = new Promise<{ kind: "grace" }>((resolveGrace) => {
+      const t = setTimeout(() => resolveGrace({ kind: "grace" }), salvageMs);
+      if (t.unref) t.unref();
+    });
+    const salvaged = await Promise.race<
+      | { kind: "inner"; arr: ReadonlyArray<ToolExecutionResult> }
+      | { kind: "grace" }
+    >([
+      innerPromise.then((arr) => ({ kind: "inner" as const, arr })),
+      salvageGrace,
+    ]);
+
     if (salvaged.kind === "inner") {
       // handler 在 salvage 窗口内收尾了 — 交出它已 flush 的结果,调用方按
       // tierAbort.aborted 归一 timeout 并注入 partial。
-      return salvaged.result;
-    }
-    if (salvaged.kind === "rejected") {
-      void reportDetachedRejection(call, onDiagnostic, salvaged.error);
-      return {
-        kind: "execution_failed",
-        toolUseId: call.id,
-        message: "timeout",
-      };
+      return salvaged.arr[0] as ToolExecutionResult;
     }
   }
 
   // salvage 超时(或未开启 salvage):handler 拒绝收尾。不再等,返回裸 timeout。
-  observeDetachedRejection(innerPromise, call, onDiagnostic);
+  void innerPromise.catch(() => undefined); // 防 unhandled rejection
   return {
     kind: "execution_failed",
     toolUseId: call.id,
@@ -575,50 +447,14 @@ async function awaitInnerOrTier(opts: {
   };
 }
 
-type SalvageOutcome =
-  | { readonly kind: "inner"; readonly result: ToolExecutionResult }
-  | { readonly kind: "rejected"; readonly error: unknown }
-  | { readonly kind: "grace" };
-
-async function awaitDuringSalvage(
-  innerPromise: Promise<ReadonlyArray<ToolExecutionResult>>,
-  salvageMs: number
-): Promise<SalvageOutcome> {
-  const salvageGrace = new Promise<{ kind: "grace" }>((resolveGrace) => {
-    const t = setTimeout(() => resolveGrace({ kind: "grace" }), salvageMs);
-    if (t.unref) t.unref();
-  });
-  const salvaged = await Promise.race<
-    | {
-        kind: "inner";
-        result: ToolExecutionResult;
-      }
-    | { kind: "rejected"; error: unknown }
-    | { kind: "grace" }
-  >([
-    innerPromise.then(
-      (arr) => ({
-        kind: "inner" as const,
-        result: arr[0] as ToolExecutionResult,
-      }),
-      (error: unknown) => ({ kind: "rejected" as const, error })
-    ),
-    salvageGrace,
-  ]);
-  return salvaged;
-}
-
 /** signal abort 时 resolve 的 promise(已 abort 立即 resolve)。 */
-function abortPromise(
-  signal: AbortSignal,
-  kind: "timer" | "caller" = "timer"
-): Promise<{ kind: "timer" } | { kind: "caller" }> {
+function abortPromise(signal: AbortSignal): Promise<{ kind: "timer" }> {
   return new Promise((resolveTimer) => {
     if (signal.aborted) {
-      resolveTimer({ kind });
+      resolveTimer({ kind: "timer" });
       return;
     }
-    signal.addEventListener("abort", () => resolveTimer({ kind }), {
+    signal.addEventListener("abort", () => resolveTimer({ kind: "timer" }), {
       once: true,
     });
   });
@@ -656,52 +492,8 @@ function extractBashPartial(
 
 function withPartial(
   base: { kind: "execution_failed"; toolUseId: string; message: string },
-  partial: { stdout?: string; stderr?: string } | undefined,
-  background: boolean = false
+  partial: { stdout?: string; stderr?: string } | undefined
 ): ToolExecutionResult {
-  if (partial === undefined && !background) return base;
-  return {
-    ...base,
-    ...(partial !== undefined ? { partial } : {}),
-    ...(background ? { background: true } : {}),
-  };
-}
-
-function observeDetachedRejection(
-  innerPromise: Promise<ReadonlyArray<ToolExecutionResult>>,
-  call: ToolCall,
-  onDiagnostic: AciExecutorOptions["onDiagnostic"]
-): void {
-  void innerPromise.catch((error: unknown) =>
-    reportDetachedRejection(call, onDiagnostic, error)
-  );
-}
-
-async function reportDetachedRejection(
-  call: ToolCall,
-  onDiagnostic: AciExecutorOptions["onDiagnostic"],
-  error: unknown
-): Promise<void> {
-  const diagnostic: AciBackgroundRejection = {
-    kind: "background_handler_rejection",
-    toolUseId: call.id,
-    toolName: call.name,
-    error,
-  };
-  try {
-    if (onDiagnostic !== undefined) {
-      await onDiagnostic(diagnostic);
-    } else {
-      console.error(
-        `[aci] ${diagnostic.kind} tool=${call.name} toolUseId=${call.id}: ${errorMessage(error)}`
-      );
-    }
-  } catch (sinkError) {
-    // EXIT: a diagnostic sink must not create a second unhandled rejection.
-    console.error(
-      `[aci] diagnostic sink failed for tool=${call.name} toolUseId=${call.id}: original=${errorMessage(
-        error
-      )}; sink=${errorMessage(sinkError)}`
-    );
-  }
+  if (partial === undefined) return base;
+  return { ...base, partial };
 }

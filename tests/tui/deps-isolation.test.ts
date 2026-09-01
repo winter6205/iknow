@@ -62,7 +62,7 @@ describe("buildTuiDeps — worktree isolation host seam (review High-1)", () => 
     );
   });
 
-  test("开关 ON + 未改绑主仓：首个 mutate 被门禁拦截，provision 缝不被调用（不自动建树），文案指向建树 ACI 工具", async () => {
+  test("开关 ON + provision 缝：首个 mutate 被门禁拦截且 provision 收到会话锚", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-tui-deps-iso-on-"));
     roots.push(root);
     const calls: Array<{ conversationId?: string; root: string }> = [];
@@ -73,11 +73,15 @@ describe("buildTuiDeps — worktree isolation host seam (review High-1)", () => 
       // High-2：启动装配的 settings 对象（isolation ON）注入
       settings: { isolation: { worktreeOnMutate: true } } as IknowSettings,
       worktreeIsolation: {
-        // T3 model-provision 合同：主仓根上的被拦 mutate 绝不触发 provision
-        // （建树改由模型调用 create-task-worktree ACI 工具，T4）
         provision: async ({ conversationId, root: sessionRoot }) => {
           calls.push({ conversationId, root: sessionRoot });
-          return join(sessionRoot, ".iknow", "worktrees", conversationId ?? "x");
+          // 模拟 rebind：返回与引擎根不同的 task worktree 路径 → 拦截
+          return join(
+            sessionRoot,
+            ".iknow",
+            "worktrees",
+            conversationId ?? "x"
+          );
         },
       },
     });
@@ -91,10 +95,8 @@ describe("buildTuiDeps — worktree isolation host seam (review High-1)", () => 
 
     expect(result.kind).toBe("execution_failed");
     expect(result.message).toContain("[worktree_isolation]");
-    expect(result.message).toContain("create-task-worktree ACI tool");
-    expect(result.message).not.toContain("end the turn");
-    // 执行路径上零 provision / 零 git 调用 → 主仓零写入
-    expect(calls).toEqual([]);
+    expect(calls).toEqual([{ conversationId: "conv-1", root }]);
+    // 主仓零写入（门禁拦截在工具执行前）
     expect(await Bun.file(join(root, "hello.txt")).exists()).toBe(false);
   });
 
@@ -123,25 +125,6 @@ describe("buildTuiDeps — worktree isolation host seam (review High-1)", () => 
 
     expect(provisionCalls).toBe(0);
     expect(result.message ?? "").not.toContain("[worktree_isolation]");
-  });
-
-  test("T7/T8：TUI 只接 provision 缝（worktreeEnter / worktreeExit 缺席）→ 两个 enter/exit 工具名不入注册表", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-tui-deps-iso-surface-"));
-    roots.push(root);
-    const deps = await buildTuiDeps(makeBundle(), {
-      askUser: createNoAskUser(),
-      userHome: join(root, "home"),
-      cwd: root,
-      settings: { isolation: { worktreeOnMutate: true } } as IknowSettings,
-      worktreeIsolation: {
-        provision: async ({ conversationId, root: sessionRoot }) =>
-          join(sessionRoot, ".iknow", "worktrees", conversationId ?? "x"),
-      },
-    });
-
-    const names = deps.registry.list().map((d) => d.name);
-    expect(names).not.toContain("enter-task-worktree");
-    expect(names).not.toContain("exit-task-worktree");
   });
 });
 

@@ -1,3 +1,12 @@
+# git 会在钩子环境内自动注入 GIT_DIR / GIT_INDEX_FILE / GIT_WORK_TREE /
+# GIT_COMMON_DIR,子进程(vitest 里那些自建临时 git repo 的测试,例如
+# worktree-gate / hub-worktree-isolation / worktree-rebind / rebind-boundary-matrix)
+# 会继承并污染它们的 init,导致
+#   "invalid object ... for '.claude/settings.json'" / "index file open failed: Not a directory"
+# 在独立运行时 vitest 全绿,只在钩子里稳态 38 fail。在钩子入口先 unset,
+# 让子进程拿到的就是"普通 shell 环境"。
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_COMMON_DIR
+
 npx lint-staged
 npm run typecheck
 # 只跑与本次变更相关的测试（vitest --changed 基于 git HEAD 差异）。

@@ -37,8 +37,8 @@ Open the URL Vite prints (usually `http://127.0.0.1:5173`).
 
 ## Scripts (repo root)
 
-| Script | Action |
-|--------|--------|
-| `npm run web:dev` | Vite HMR dev server |
-| `npm run web:build` | Typecheck + production build → `dist/` |
-| `npm run web:typecheck` | `tsc --noEmit` only |
+| Script                  | Action                                 |
+| ----------------------- | -------------------------------------- |
+| `npm run web:dev`       | Vite HMR dev server                    |
+| `npm run web:build`     | Typecheck + production build → `dist/` |
+| `npm run web:typecheck` | `tsc --noEmit` only                    |

@@ -11,12 +11,9 @@
  * omitted they fall back to `resolveWorkspaceRoot()` (T1 SSOT) which
  * defaults to `process.cwd()`.
  *
- * 两个参数是**两个决策**,调用方分开推(ADR-0037 §4 amended 2026-08-31):
- *  - `namespaceRoot`(第一参)决定**目录名** `<basename>-<sha1>` —— 项目身份,
- *    今日 = 项目 cwd;会话改绑后仍是启动时钉下的那个身份,不跟 task worktree。
- *  - `anchorRoot`(第二参)决定**落哪个根** —— 今日 = workspaceRoot(`--workspace-root`
- *    重定向由此生效);仅当它自身已是 task worktree 时由装配层退到 productRoot。
- * `~` tilde 仍指向 `homedir()`(全局),与 anchorRoot 解耦(ADR-0019 Quiddity)。
+ * T2 在保留 `cwd` 作为 hash 输入的同时把磁盘根切到 workspaceRoot,实现
+ * "per-root memory" 决策(ADR-0019 plan T2 列项)。`~` tilde 仍指向
+ * `homedir()`(全局),与 workspaceRoot 解耦(ADR-0019 Quiddity)。
  */
 import { createHash } from "node:crypto";
 import { basename, join, resolve } from "node:path";
@@ -34,13 +31,13 @@ import { resolveWorkspaceRoot } from "../../config/workspace-root.js";
  * 会被丢掉,与 env SSOT fidelity 契约冲突)。
  */
 export function resolveProjectMemoryDir(
-  namespaceRoot: string,
-  anchorRoot?: string,
+  cwd: string,
+  workspaceRoot?: string,
   env?: Readonly<Record<string, string | undefined>>
 ): string {
-  const normalized = resolve(namespaceRoot);
+  const normalized = resolve(cwd);
   const hash = createHash("sha1").update(normalized).digest("hex").slice(0, 12);
-  const root = anchorRoot ?? resolveWorkspaceRoot({ cwd: normalized, env });
+  const root = workspaceRoot ?? resolveWorkspaceRoot({ cwd: normalized, env });
   return join(root, ".iknow", "memory", `${basename(normalized)}-${hash}`);
 }
 

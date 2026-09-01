@@ -102,28 +102,12 @@ const READONLY_ALLOWED: ReadonlySet<string> = Object.freeze(
 
 /** Class 2: find — denied flags (write/execute side effects). */
 const FIND_DENIED_FLAGS: ReadonlySet<string> = Object.freeze(
-  new Set([
-    "-delete",
-    "-exec",
-    "-execdir",
-    "-ok",
-    "-okdir",
-    "-fprint",
-    "-fprint0",
-    "-fprintf",
-    "-fls",
-  ])
+  new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir"])
 );
 
 /** Class 2: sort — denied flags (write output to file). */
 const SORT_DENIED_FLAGS: ReadonlySet<string> = Object.freeze(
-  new Set([
-    "-o",
-    "--output",
-    "-T",
-    "--temporary-directory",
-    "--compress-program",
-  ])
+  new Set(["-o", "--output"])
 );
 
 /** Class 2: git — read-only subcommand whitelist. */
@@ -159,26 +143,6 @@ const GIT_ALLOWED_SUBCOMMANDS: ReadonlySet<string> = Object.freeze(
  */
 const GIT_GLOBAL_FLAGS_WITH_ARGS: ReadonlySet<string> = Object.freeze(
   new Set(["-C", "--git-dir", "--work-tree", "--namespace", "--super-prefix"])
-);
-
-/** Git nested actions/flags that mutate local repository state. */
-const GIT_REMOTE_MUTATING_SUBCOMMANDS: ReadonlySet<string> = Object.freeze(
-  new Set([
-    "add",
-    "rename",
-    "remove",
-    "set-head",
-    "prune",
-    "update",
-    "set-branches",
-    "set-url",
-  ])
-);
-const GIT_REFLOG_MUTATING_ACTIONS: ReadonlySet<string> = Object.freeze(
-  new Set(["delete", "drop", "expire", "write"])
-);
-const GIT_FSCK_MUTATING_FLAGS: ReadonlySet<string> = Object.freeze(
-  new Set(["--lost-found"])
 );
 
 /* ---------------------------------------------------------------------------
@@ -282,16 +246,10 @@ function validateSortFlags(segment: string, command: string): void {
   const tokens = tokenize(segment);
   for (let i = 1; i < tokens.length; i += 1) {
     const flag = tokens[i]!;
-    if (
-      SORT_DENIED_FLAGS.has(flag) ||
-      flag.startsWith("--output=") ||
-      flag.startsWith("--temporary-directory=") ||
-      flag.startsWith("--compress-program=") ||
-      (flag.startsWith("-T") && flag.length > 2)
-    ) {
+    if (SORT_DENIED_FLAGS.has(flag) || flag.startsWith("--output=")) {
       throw new ReadonlyViolationError({
         command,
-        reason: `sort flag '${flag}' has file-write or execution side effects, not allowed in readonly mode`,
+        reason: `sort flag '${flag}' writes output to a file, not allowed in readonly mode`,
       });
     }
   }
@@ -326,7 +284,6 @@ function validateGitSubcommand(segment: string, command: string): void {
         reason: `git subcommand '${token}' is not in the readonly whitelist`,
       });
     }
-    validateGitMutation(tokens, i, token, command);
     return;
   }
   // No subcommand found (bare `git` or only flags).
@@ -335,53 +292,4 @@ function validateGitSubcommand(segment: string, command: string): void {
     reason:
       "git command has no subcommand; readonly mode requires an explicit read-only subcommand",
   });
-}
-
-function validateGitMutation(
-  tokens: string[],
-  subcommandIndex: number,
-  subcommand: string,
-  command: string
-): void {
-  if (subcommand === "remote") {
-    const nested = firstNonFlagToken(tokens, subcommandIndex + 1);
-    if (nested !== undefined && GIT_REMOTE_MUTATING_SUBCOMMANDS.has(nested)) {
-      throw new ReadonlyViolationError({
-        command,
-        reason: `git remote subcommand '${nested}' mutates repository configuration, not allowed in readonly mode`,
-      });
-    }
-  }
-  if (subcommand === "reflog") {
-    const action = firstNonFlagToken(tokens, subcommandIndex + 1);
-    if (action !== undefined && GIT_REFLOG_MUTATING_ACTIONS.has(action)) {
-      throw new ReadonlyViolationError({
-        command,
-        reason: `git reflog action '${action}' mutates repository state, not allowed in readonly mode`,
-      });
-    }
-  }
-  if (
-    subcommand === "fsck" &&
-    tokens
-      .slice(subcommandIndex + 1)
-      .some((token) => GIT_FSCK_MUTATING_FLAGS.has(token))
-  ) {
-    throw new ReadonlyViolationError({
-      command,
-      reason:
-        "git fsck --lost-found writes recovery files, not allowed in readonly mode",
-    });
-  }
-}
-
-function firstNonFlagToken(
-  tokens: string[],
-  start: number
-): string | undefined {
-  for (let i = start; i < tokens.length; i += 1) {
-    const token = tokens[i]!;
-    if (!token.startsWith("-")) return token;
-  }
-  return undefined;
 }
