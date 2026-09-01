@@ -37,7 +37,7 @@ OVERALL: PASS — hand to writing-plans
 ## 序列化与错误归属（全票共用，ACR 点名要求）
 
 - **数据装配** 归 `src/traceserver/`；**wire 形状** 归各薄皮：
-  - panel face：`src/traceserver/http.ts` 自行组 `{records,total,skipped_lines,truncated,offset}`（现状保持，ADR-0020 面板语义不变）。
+  - panel face：**形状的决定权**归面板（`{records,total,skipped_lines,truncated,offset}`，ADR-0020 面板语义不变）。T4 按本 plan 判据把 `http.ts` 里的两处字面量收进 `src/traceserver/envelope.ts` 的一处构造（`toResponseEnvelope` / `emptyResponseEnvelope`），此后两侧共享的只是「reader 结果 → 该形状」的映射，序列化各归各。→ **T7 约束**：tool face 摘掉 `total`/`truncated` 时形状开始分叉，必须**另立一个构造**，不得给 `toResponseEnvelope` 加「哪张皮」的开关（那等于把面别知识塞回数据装配层）。
   - tool face：`src/traceserver/` 内**唯一**一个 tool-page 序列化出口，ACI 与 MCP 两张皮都调它；输出 = records 数组 + 回显调用方给过的坐标 + 一行人类可读收窄提示（ADR-0004:46 的 marker 形态，不是 JSON 元字段）。
   - 工具 description 文案单一来源（现重复于 `src/harness/aci/tools/query-trace.ts:65` 与 `src/trace-mcp/server.ts:27`，后者还谎称有 4000 帽），受 `tests/harness/aci/tools/d9-description-guard.test.ts` 约束。
 - **域内 typed error**（`src/traceserver/query-trace-errors.ts`，一律**不带**工具名前缀——前缀是薄皮的活；现状 `:9`/`:22` 硬编码 `query_trace: ` 且被 `query-trace.ts:104-107` 剥掉）：
@@ -105,6 +105,8 @@ OVERALL: PASS — hand to writing-plans
    - `npm run typecheck` 在主仓 master 上 exit 0，掩盖了它：`tsconfig.json` 的 `exclude` 含 `"tests"`，`tsc --listFiles` 对该夹具 0 命中——**typecheck 从不看测试文件**，所以「typecheck 绿」不构成测试侧契约的证据。
    - `grep -rn "traceserver" src/harness/memory/ src/harness/identity/` 无命中，这两个子系统不依赖本轮改的模块，因果上也不可能是 T1–T3 引入。
    - **门改为**：`npm test` 的失败集与上述基线**逐文件同构**（仍是这 5 文件这 32 例，不增不减），且 `tests/traceserver/`、`tests/harness/aci/tools/query-trace.test.ts`、`tests/trace-mcp/` 全绿。该破损超出本轮 Surface（read side），不并入任何 T 票，单独报给 operator。
+
+7. **T4 的「最近会话推导只有一个 owner」判据范围是 `src/`，不含 `web/`。** `web/src/lib/trace-entry.ts:38` 另有一份浏览器端「取最近会话」，与 `src/traceserver/sessions.ts` 的 `newestConversationId` 行为等价（V8 排序稳定 ⇒ 并列 mtime 时胜出者相同），且面板前端不在本票 Surface（`src/traceserver` 含 `http.ts`）内。不改、不并票，记此以免日后把「一个 owner」说成全仓事实。
 
 ## Tasks (ordered by dependency)
 

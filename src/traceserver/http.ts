@@ -8,7 +8,7 @@
  *
  * v2 目录语义 (spec SC-R 10-16): traceDir 是「每会话一文件」的目录，
  * `<traceDir>/<convId>.jsonl` 是会话文件。`conversation_id` 参数路由到该
- * 文件；缺省 → 最近活跃会话 (listSessions 按 mtime 取第一个)。`?poll=` +
+ * 文件；缺省 → 最近活跃会话 (sessions.ts 的 newestConversationId)。`?poll=` +
  * 响应 `offset` 组成增量轮询闭环 (SC-R 14)。
  *
  * Dispatch contract: src/session-api/http.ts performs a single prefix check
@@ -25,8 +25,9 @@ import { join } from "node:path";
 import { ValidationError } from "../shared/errors.js";
 import { TRACE_RECORD_TYPES, type TraceQuery } from "./types.js";
 import { TRACE_FIELD_DEFS } from "./fields.js";
+import { emptyResponseEnvelope, toResponseEnvelope } from "./envelope.js";
 import { createJsonlTraceReader } from "./reader.js";
-import { listSessions, type SessionSummary } from "./sessions.js";
+import { listSessions, newestConversationId } from "./sessions.js";
 import type { TraceRecordType } from "./types.js";
 
 export interface TracesRequestOpts {
@@ -199,16 +200,6 @@ function sessionFilePath(traceDir: string, conversationId: string): string {
   return join(traceDir, `${conversationId}.jsonl`);
 }
 
-/** 最近活跃会话 = listSessions 按 mtime 降序的第一个 (SC-R 12)。 */
-function mostRecentSession(
-  sessions: ReadonlyArray<SessionSummary>
-): SessionSummary | undefined {
-  return sessions.reduce<SessionSummary | undefined>((acc, cur) => {
-    if (acc === undefined) return cur;
-    return cur.mtime > acc.mtime ? cur : acc;
-  }, undefined);
-}
-
 // -- handlers ------------------------------------------------------------------
 
 /**
@@ -255,17 +246,9 @@ export function handleTracesRequest(opts: TracesRequestOpts): void {
     let conversationId = query.conversationId;
     if (conversationId === undefined) {
       // 缺省 → 最近活跃会话 (SC-R 12)。目录为空 (尚无会话) → 空结果 200。
-      const sessions = listSessions(traceDir);
-      const recent = mostRecentSession(sessions);
-      conversationId = recent?.conversation_id;
+      conversationId = newestConversationId(traceDir);
       if (conversationId === undefined) {
-        sendJson(res, 200, {
-          records: [],
-          total: 0,
-          skipped_lines: 0,
-          truncated: false,
-          offset: 0,
-        });
+        sendJson(res, 200, emptyResponseEnvelope());
         return;
       }
     }
@@ -275,14 +258,7 @@ export function handleTracesRequest(opts: TracesRequestOpts): void {
       filePath,
       ...(opts.maxBytes !== undefined ? { maxBytes: opts.maxBytes } : {}),
     });
-    const result = reader.query(query);
-    sendJson(res, 200, {
-      records: result.records,
-      total: result.total,
-      skipped_lines: result.skippedLines,
-      truncated: result.truncated,
-      offset: result.offset,
-    });
+    sendJson(res, 200, toResponseEnvelope(reader.query(query)));
     return;
   }
   // Unknown /api/v1/traces* path: fall through to the session-api not_found

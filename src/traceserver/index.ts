@@ -19,7 +19,16 @@ export {
   handleSessionsRequest,
   type TracesRequestOpts,
 } from "./http.js";
-export { listSessions, type SessionSummary } from "./sessions.js";
+export {
+  listSessions,
+  newestConversationId,
+  type SessionSummary,
+} from "./sessions.js";
+export {
+  emptyResponseEnvelope,
+  toResponseEnvelope,
+  type ResponseEnvelope,
+} from "./envelope.js";
 export {
   dereferenceTraceMessages,
   projectToolResults,

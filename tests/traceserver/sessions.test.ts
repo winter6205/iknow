@@ -10,6 +10,8 @@
  *   - bad/missing root record: agent_version absent, list does not fail overall.
  *   - bounded prefix: a root record past the 64 KiB pread bound → agent_version absent.
  *   - IO error: traceDir pointing at a regular file → TraceReadError (kind io_error).
+ *   - newestConversationId: the single owner behind both the panel's and the
+ *     tool's implicit "default to the most recent session" (SC-R 12).
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -19,12 +21,14 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   listSessions,
+  newestConversationId,
   type SessionSummary,
 } from "../../src/traceserver/sessions.ts";
 import { TraceReadError } from "../../src/traceserver/types.ts";
@@ -357,5 +361,88 @@ describe("listSessions — wire shape", () => {
     assert.ok(s);
     assert.ok(!("agent_version" in s));
     assert.equal(s.conversation_id, "uuid-a");
+  });
+});
+
+// -- 最近会话推导（panel 与 tool 共用的唯一 owner） -----------------------------
+
+function sessionFile(conversationId: string): string {
+  return join(tmpDir, `${conversationId}.jsonl`);
+}
+
+function touch(conversationId: string, atEpochSeconds: number): void {
+  const at = new Date(atEpochSeconds * 1000);
+  utimesSync(sessionFile(conversationId), at, at);
+}
+
+describe("newestConversationId — the default both faces share (SC-R 12)", () => {
+  it("empty directory → undefined (no session to default to)", () => {
+    assert.equal(newestConversationId(tmpDir), undefined);
+  });
+
+  it("missing directory → undefined, inheriting listSessions' no-throw semantics", () => {
+    assert.equal(
+      newestConversationId(join(tmpDir, "does-not-exist")),
+      undefined
+    );
+  });
+
+  it("picks the greatest mtime whichever end of the index it sits on", () => {
+    // A positional read of the index would answer one of these two wrongly.
+    writeFileSync(sessionFile("newest-first"), sessionLine() + "\n", "utf8");
+    writeFileSync(sessionFile("older"), sessionLine() + "\n", "utf8");
+    touch("newest-first", 1_600_000_200);
+    touch("older", 1_600_000_100);
+    assert.equal(newestConversationId(tmpDir), "newest-first");
+
+    rmSync(sessionFile("newest-first"));
+    writeFileSync(sessionFile("newest-last"), sessionLine() + "\n", "utf8");
+    touch("newest-last", 1_600_000_300);
+    assert.equal(newestConversationId(tmpDir), "newest-last");
+  });
+
+  it("ignores entries that are not session files", () => {
+    writeFileSync(sessionFile("stale"), sessionLine() + "\n", "utf8");
+    touch("stale", 1_600_000_000);
+    writeFileSync(sessionFile("live"), sessionLine() + "\n", "utf8");
+    touch("live", 1_600_000_600);
+    writeFileSync(join(tmpDir, "notes.txt"), "not a session\n", "utf8");
+    mkdirSync(sessionFile("a-directory"));
+
+    assert.equal(newestConversationId(tmpDir), "live");
+  });
+
+  it("an exact mtime tie is deterministic and only a strictly newer file breaks it", () => {
+    const tiedMtime = 1_600_000_000_000;
+    writeFileSync(sessionFile("a"), sessionLine() + "\n", "utf8");
+    writeFileSync(sessionFile("b"), sessionLine("1.0.0") + "\n", "utf8");
+    touch("a", tiedMtime / 1000);
+    touch("b", tiedMtime / 1000);
+    assert.deepEqual(
+      listSessions(tmpDir).map((s) => s.mtime),
+      [tiedMtime, tiedMtime]
+    );
+
+    // Which name wins is decided by readdir order, which the filesystem owns,
+    // so the tie is pinned as the rule "strictly newer is required" plus
+    // repeatability — not as a particular id.
+    const tied = newestConversationId(tmpDir);
+    assert.ok(tied === "a" || tied === "b");
+    assert.equal(newestConversationId(tmpDir), tied);
+
+    writeFileSync(sessionFile("c"), sessionLine() + "\n", "utf8");
+    touch("c", (tiedMtime + 1000) / 1000);
+    assert.equal(newestConversationId(tmpDir), "c");
+  });
+
+  it("re-reads the index each call, so a session appended mid-stream takes over", () => {
+    // The panel polls this and the tool answers back-to-back calls; a memoized
+    // newest would go stale with no caller able to see it happen.
+    writeFileSync(sessionFile("first"), sessionLine() + "\n", "utf8");
+    assert.equal(newestConversationId(tmpDir), "first");
+
+    writeFileSync(sessionFile("second"), sessionLine() + "\n", "utf8");
+    touch("second", Math.floor(Date.now() / 1000) + 600);
+    assert.equal(newestConversationId(tmpDir), "second");
   });
 });

@@ -29,10 +29,9 @@ const traceDirs: string[] = [];
 
 /**
  * What the core answers when there is nothing to answer with. Compared as a
- * parsed object, never as a whole string: JSON key order comes from the two
- * envelope literals in query-trace-core.ts (the handler's `envelope` object and
- * `emptyResult()`), no contract fixes an order, and T4 consolidates exactly
- * those literals — a string pin would break there for a reason unrelated to
+ * parsed object, never as a whole string: the key order comes from the single
+ * envelope constructor in src/traceserver/envelope.ts, but no contract fixes
+ * that order, so a string pin would still break for a reason unrelated to
  * behaviour.
  */
 const EMPTY_ENVELOPE = {

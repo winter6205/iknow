@@ -27,7 +27,7 @@
 - 三件工具各管一条正交轴，一次调用只返回调用方指定位置的一页：`list_sessions`（目录轴：有哪些会话）、`query_trace`（行轴：一个会话里的哪些记录 + 行分页）、`get_record`（内容轴：一条记录的哪个字节窗）。
 - **tool face**（ACI + MCP 两张皮）输出 = records 数组 + 回显调用方给过的坐标 + 一行人类可读收窄提示（契约 X 的 marker 形态，**不是** JSON 元字段）。**不含** `truncated` / `total`——这两项是 Glossary 契约 X 的 `Avoid` 原文所禁。`response_truncated` 一并禁用是**本 spec 的延伸**（CONTEXT.md 与 ADR-0004:23 未点名它），理由：它随记录数走、不随字段走，是假负号来源。页没收满的诚实信号改由隐式关系给出：`records.length < limit` 即「到底了」。
 - **panel face**（`http.ts` → Web，ADR-0020 语义不变）保留 `{records,total,skipped_lines,truncated,offset}` 信封，因面板需要 `total` 画分页器。契约 X 的措辞是「工具返回」（`docs/adr/0004-tool-layer-six-tool-set.md:23`），面板 JSON 不经 executor，故 `total` 在 panel face 合法——这是**澄清适用面**，不推翻 ADR-0004。
-- 两个 face 直读同一 reader；panel face 从不经过 tool-face 序列化出口，故核侧改动不可能回归面板。
+- 两个 face 直读同一 reader；panel face **从不经过 tool-face 序列化出口**（`serializeListPage` 与字符帽都到不了面板），故收窄与帽的改动不会回归面板。但自 T4 起两侧共用**信封形状与构造**（`src/traceserver/envelope.ts`）——这一层改动会同时触到面板，实测从共享构造里删 `total`/`truncated` 使 `tests/traceserver/http.test.ts` 32 例中 11 例红，即该风险由面板既有测兜住，不另设字节 pin。
 
 ## Assumptions（操作员 + skeptic 修订锁定）
 

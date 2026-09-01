@@ -9,7 +9,12 @@ import {
   type TraceQuery,
   type TraceQueryResult,
 } from "./types.js";
-import { listSessions } from "./sessions.js";
+import { newestConversationId } from "./sessions.js";
+import {
+  emptyResponseEnvelope,
+  toResponseEnvelope,
+  type ResponseEnvelope,
+} from "./envelope.js";
 import {
   TraceQueryRecordScanError,
   TraceQueryValidationError,
@@ -72,9 +77,9 @@ export function createQueryTraceCore(
     const serialize =
       parsed.recordId === undefined ? serializeListPage : serializeDrillDown;
     const conversationId =
-      parsed.conversationId ?? mostRecentConversationId(traceDir);
+      parsed.conversationId ?? newestConversationId(traceDir);
     if (conversationId === undefined) {
-      return serialize(emptyResult());
+      return serialize(emptyResponseEnvelope());
     }
 
     const reader = createJsonlTraceReader({
@@ -94,14 +99,7 @@ export function createQueryTraceCore(
               projectDrillDownRecord(row, parsed.detail, traceDir)
             )
           );
-    const envelope: ResponseEnvelope = {
-      records,
-      total: result.total,
-      skipped_lines: result.skippedLines,
-      truncated: result.truncated,
-      offset: result.offset,
-    };
-    return serialize(envelope);
+    return serialize(toResponseEnvelope(result, records));
   };
 }
 
@@ -226,15 +224,6 @@ function parseInteger(
   return value;
 }
 
-function mostRecentConversationId(traceDir: string): string | undefined {
-  const sessions = listSessions(traceDir);
-  return sessions.reduce<(typeof sessions)[number] | undefined>(
-    (latest, session) =>
-      latest === undefined || session.mtime > latest.mtime ? session : latest,
-    undefined
-  )?.conversation_id;
-}
-
 function findRecord(
   reader: ReturnType<typeof createJsonlTraceReader>,
   query: TraceQuery,
@@ -345,24 +334,6 @@ function preview(value: unknown): string {
   return text.length <= QUERY_TRACE_PREVIEW_CAP
     ? text
     : `${text.slice(0, QUERY_TRACE_PREVIEW_CAP)}...[truncated]`;
-}
-
-interface ResponseEnvelope {
-  readonly records: ReadonlyArray<Record<string, unknown> | TraceRecordRow>;
-  readonly total: number;
-  readonly skipped_lines: number;
-  readonly truncated: boolean;
-  readonly offset: number;
-}
-
-function emptyResult(): ResponseEnvelope {
-  return {
-    records: [],
-    total: 0,
-    skipped_lines: 0,
-    truncated: false,
-    offset: 0,
-  };
 }
 
 /**

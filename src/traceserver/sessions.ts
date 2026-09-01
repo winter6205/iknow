@@ -137,3 +137,27 @@ export function listSessions(traceDir: string): SessionSummary[] {
   }
   return sessions;
 }
+
+// -- 缺省会话（SC-R 12） --------------------------------------------------------
+
+/** 索引里 mtime 最大的一条；相等时保留先入表者（只需要最大值，不需要排序）。 */
+function newestSession(
+  sessions: ReadonlyArray<SessionSummary>
+): SessionSummary | undefined {
+  return sessions.reduce<SessionSummary | undefined>((latest, session) => {
+    if (latest === undefined) return session;
+    return session.mtime > latest.mtime ? session : latest;
+  }, undefined);
+}
+
+/**
+ * 「最近活跃会话」的唯一推导，panel (`http.ts`) 与 tool
+ * (`query-trace-core.ts`) 的隐式缺省都经它 (SC-R 12)。
+ *
+ * 每次调用重读索引，不缓存：面板在轮询、工具在连续调用之间都会有新会话落盘，
+ * 缓存的缺省会静默变陈旧。无会话 / 目录不存在 → undefined，由调用方决定
+ * 自己那面的空结果表达。
+ */
+export function newestConversationId(traceDir: string): string | undefined {
+  return newestSession(listSessions(traceDir))?.conversation_id;
+}
