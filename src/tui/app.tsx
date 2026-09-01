@@ -48,6 +48,10 @@ import {
   useTerminalDimensions,
 } from "@opentui/react";
 import type { HarnessStreamEvent } from "../harness/stream.js";
+import {
+  BACKGROUND_OPERATION_NOTICE,
+  BLOCK_OPERATION_NOTICE,
+} from "../harness/aci/aci-executor.js";
 import type { CompactReason } from "../harness/compress/index.js";
 import type {
   AnthropicNativeMessage,
@@ -1361,6 +1365,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     let stopReason: string | undefined;
     let lastUsage: TokenUsage | null = null;
     let interrupted: boolean | undefined;
+    let uncancellableOperationNotice: string | undefined;
     // Predicate / continue ValidationError is not a turn: keep EXIT notice,
     // restore idle, do not reload (reload overwrite → 刷新会话失败).
     let skipTurnRefresh = false;
@@ -1413,6 +1418,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         }));
       }
       if (event.type === "stop_summary") {
+        if (
+          event.text === BACKGROUND_OPERATION_NOTICE ||
+          event.text === BLOCK_OPERATION_NOTICE
+        ) {
+          uncancellableOperationNotice = event.text;
+        }
         setNotice({ lines: [event.text] });
       }
       if (event.type === "agent_status") {
@@ -1595,11 +1606,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         // 未落 checkpoint(delta=0);undefined → 旧链路 / 未知,保留兜底文案。
         setNotice({
           lines:
-            interrupted === true
-              ? ["已打断，checkpoint 已保存"]
-              : interrupted === false
-                ? ["已打断（无新内容，未落 checkpoint）"]
-                : ["已打断当前 turn"],
+            uncancellableOperationNotice !== undefined
+              ? [uncancellableOperationNotice]
+              : interrupted === true
+                ? ["已打断，checkpoint 已保存"]
+                : interrupted === false
+                  ? ["已打断（无新内容，未落 checkpoint）"]
+                  : ["已打断当前 turn"],
         });
       }
     } catch (err) {

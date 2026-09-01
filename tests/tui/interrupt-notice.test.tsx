@@ -52,9 +52,11 @@ async function untilFrame(
 
 interface FakeBridgeOptions {
   readonly stopReason: "cancelled" | "completed";
-  readonly interrupted: boolean;
+  readonly interrupted?: boolean;
   /** cancelled + delta>0 → 落盘含 checkpoint;delta=0 → 空文件。 */
   readonly persistCheckpoint: boolean;
+  /** 模拟底层 handler 未响应 signal，status notification 应保留到收尾。 */
+  readonly backgroundRunning?: boolean;
 }
 
 function fakeBridge(opts: FakeBridgeOptions): TuiBridge {
@@ -79,7 +81,7 @@ function fakeBridge(opts: FakeBridgeOptions): TuiBridge {
     jsonMode: false,
     lastUsage: null,
     // cancelled 时 hub 一定带 interrupted;completed 走 undefined(字段缺席)。
-    ...(opts.stopReason === "cancelled"
+    ...(opts.stopReason === "cancelled" && opts.interrupted !== undefined
       ? { interrupted: opts.interrupted }
       : {}),
   };
@@ -87,10 +89,16 @@ function fakeBridge(opts: FakeBridgeOptions): TuiBridge {
     hub: undefined as never, // 本测不消费 hub
     store: undefined as never,
     ensureSession: async (id) => id ?? "conv-b1",
-    postMessage: async () => {
+    postMessage: async ({ onStream }) => {
       inflight.mark("conv-b1");
       try {
         await new Promise((r) => setTimeout(r, 20));
+        if (opts.backgroundRunning === true) {
+          onStream?.({
+            type: "stop_summary",
+            text: "界面已停止等待，但底层操作仍在后台运行",
+          });
+        }
         if (opts.persistCheckpoint) {
           const now = new Date().toISOString();
           file = {
@@ -254,6 +262,45 @@ describe("TUI 打断 notice 双分支（B1）", () => {
 
     await new Promise((r) => setTimeout(r, 500));
     expect(rejections).toHaveLength(0);
+
+    await app.destroy();
+  }, 30_000);
+
+  test("cancelled + 后台仍运行 → notice 明确区分于普通 cancelled", async () => {
+    const app = await mount({
+      stopReason: "cancelled",
+      interrupted: false,
+      persistCheckpoint: false,
+      backgroundRunning: true,
+    });
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("go");
+    await app.pressEnter();
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("界面已停止等待，但底层操作仍在后台运行"),
+      8000
+    );
+    expect(app.setup.captureCharFrame()).not.toContain(
+      "已打断（无新内容，未落 checkpoint）"
+    );
+
+    await app.destroy();
+  }, 30_000);
+
+  test("cancelled + interrupted 缺失 → 保留兜底 notice", async () => {
+    const app = await mount({
+      stopReason: "cancelled",
+      persistCheckpoint: false,
+    });
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("go");
+    await app.pressEnter();
+    await untilFrame(app.setup, (f) => f.includes("已打断当前 turn"), 8000);
+    expect(app.setup.captureCharFrame()).not.toContain("checkpoint 已保存");
+    expect(app.setup.captureCharFrame()).not.toContain("未落 checkpoint");
 
     await app.destroy();
   }, 30_000);
