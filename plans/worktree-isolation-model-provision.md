@@ -114,7 +114,7 @@ OVERALL: yes
    - **Inherits:** 硬要求 7、9（explore 不注入说明书；general-purpose 开场注入已有文件）
    - **Surface:** harness subagent worker / spawn
    - **Acceptance:** 父会话已改绑后 spawn 的子代理 cwd/sandbox 在同一 task worktree；general-purpose 在说明书文件存在时注入其内容；explore 不注入项目 AGENTS.md 正文
-   - Status: [x] done — `d030ec67`；本分支补强 `af7624e6` rebound `sandboxRoot` 信封断言 + `tests/harness/build-engine-subagent-spawn-root.test.ts` 复跑绿；issue #840 closed.
+   - Status: [x] done — `d030ec67`；本分支补强 `af7624e6` rebound `sandboxRoot` 信封断言 + `tests/harness/build-engine-subagent-spawn-root.test.ts` 复跑绿；分裂根 worker 注入钉在 `tests/subagent/worker.test.ts`「改绑分裂根」；issue #840 closed.
    - [blocks: T2, T4]
 
 8. **Parent does not dump all rules bodies at session start** ([T6](https://github.com/winter6205/iknow/issues/841)) — tag: `[implementation]`
