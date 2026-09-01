@@ -76,7 +76,7 @@ OVERALL: PASS — hand to writing-plans
 
 ## 执行期前提修正（开工核实，2026-09-02）
 
-写 T1 前逐条核了 plan 的 `file:LINE` 引用，绝大多数准确。三处偏差按实测修正，**不改判据方向、只改判据落点**：
+写 T1 前逐条核了 plan 的 `file:LINE` 引用，绝大多数准确。四处偏差按实测修正，**不改判据方向、只改判据落点**：
 
 1. **T5/T6 的下游字面量是 8 处，不是 5 处。** plan 原列 5 处准确（`registry.test.ts:211` `toHaveLength(40)`、`ensure-deps-aci-tools.test.ts:40`+`:130`、`build-engine.test.ts:59`、`server.test.ts:45`、`startup.test.ts:90,122`）。全仓检索另漏三处硬编码枚举，T5/T6 必须同批改：
    - `tests/harness/aci/tools/d9-description-guard.test.ts:245-246` — **两条** `toHaveLength(40)`（`ACI_TOOLSET_NAMES` 与 `reg.catalog.all()`）；该文件同时是 description 文案单源约束处（`:171` 派生对齐）。
@@ -85,7 +85,14 @@ OVERALL: PASS — hand to writing-plans
    
    确认**安全**（从 `ACI_TOOLSET_NAMES` 派生、自动跟随）：`tests/harness/verify/judge-input.test.ts:106,245`、`tests/harness/verify/three-stage-flow.test.ts:1252`。`tests/harness/graph/run-graph-assembly.test.ts:113-116` 按下标锁定 idx 20/21/22/23 —— append-only 只动尾部，**只要不重排就不破**，T5/T6 保持 append。
 2. **worktree 内 `trace/` 是空的（0 个 `.jsonl`）**，plan 的尺寸实测与复现记录 `2dff031d` 都住在主仓（`/home/winner/projects/iknow/trace/82967186-f249-4d64-ba7a-50286a5012cc.jsonl`）。→ T3 的 AC ⑤「复现记录走 `detail=tool_results` 在 4000 内成功返回」**不得**写成依赖开发者本地 trace 目录的测；改为在 `tests/traceserver/` 内构造同形状夹具（单条 llm_call、原始行 >4000 字节、多 messages + tool_result blob）。主仓那条记录可用于一次性人工核对量级，不进断言。这也顺带满足 CI 可复现。
-3. **`OUTPUT_HARD_CAP`（`src/harness/tools/executor.ts:30`）是未导出的 `const`。** T6 的 MCP backstop「值 = 20000」**不能**靠 `import` 取——那会把 `harness/` 拖进 `src/trace-mcp/`，与假设 5「MCP 模块 transport only」和 SC12 相抵。落法：在 tool face 的序列化 owner 侧（`src/traceserver/`，非 harness）定义具名常量 `= 20_000`，注释指名「值取自 `src/harness/tools/executor.ts:30` 的 `OUTPUT_HARD_CAP`，同值是为不犯 ADR-0006:29 双层截断」，并配一条断言锁该数值 + 一条注释指向来源。两处同值靠断言锁，不靠 import 耦合。
+3. **`OUTPUT_HARD_CAP`（`src/harness/tools/executor.ts:30`）是未导出的 `const`。** T6 的 MCP backstop「值 = 20000」**不能**靠 `import` 取——那会把 `harness/` 拖进 `src/trace-mcp/`，与假设 5「MCP 模块 transport only」和 SC12 相抵。落法：在 tool face 的序列化 owner 侧（`src/traceserver/`，非 harness）定义具名常量 `= 20_000`，注释指名「值取自 `src/harness/tools/executor.ts:30` 的 `OUTPUT_HARD_CAP`，同值是为不犯 ADR-0006:29 双层截断」，并配一条断言锁该数值 + 一条注释指向来源。两处同值靠断言锁，不靠 import 耦合。**该落法有仓库先例，不是新造**：`src/harness/aci/tools/web-fetch.ts:36`（`/** 与 executor OUTPUT_HARD_CAP / ADR-0006 对齐；本模块复制常量，不反向 import executor。 */ export const FETCH_OUTPUT_BUDGET = 20_000`）、`src/harness/memory/tools/recall.ts:32`（`const OUTPUT_HARD_CAP = 20_000` 作 self-floor）、`src/harness/aci/tools/tool-search.ts:70`（「镜像 `tools/executor.ts` 的 OUTPUT_HARD_CAP」）三处都是「工具侧自带同值常数 + 注释指名来源」，T6 沿用即可。
+4. **T3 的 AC④/⑤ 前提被实测证伪，本票形状按下方裁定改。** 原 AC④ 是「单条记录下钻超容 → 抛既有 `validation` kind，消息指名去处 `detail=tool_results`」，AC⑤ 要求证明该去处真能收。两条都不成立：
+
+   - **逃生口本身走的是同一条静默路径。** `detail:"tool_results"` 与列表页共用 `serializeResponse` → `compactRecord`，而 `compactRecord` 的丢法是「`typeof value` 既非 string/number/boolean/null 且 key 非 `error` → **整字段删除**」，`tool_results` 是数组，故它不是被裁短，是**整个消失**。且 `:308` 的早返让 `detail:"messages"` 直接返回**原始行**（连 `messages_count` 都没有）。按条实测：每条预览约 483 B + 固定信封约 218 B，N=7 时装得下（3,599），N=8 时破（4,082）；复现记录有 31 条 messages。故「改 `detail=tool_results` 就收得下」是一句假建议，正是 ACR 四轮担心的 advice 自环。
+   - **plan 预授权的退路会自我否定。** 退路写的是「截断收敛在 preview 那一层（唯一 owner = `project-tool-results.ts`）」。但 `TOOL_RESULT_PREVIEW_CAP=400` 是**每条**常量，N 无上界（可到 `limit`），**没有任何固定值能让任意 N 都落进 4000**；要成立只能把它改成随 N 收缩的聚合预算——那等于在下一层重新引入静默截断，直接违反本票自己的 P0「下钻不再静默丢字段」。故退路不可用。
+
+   **裁定（四选一里唯一同时诚实又有用的）**：在 4000 这条字符线之内，「任意大的单条记录」只有三种结局——静默截断（违反 P0）、抛错（把「读一条大记录」这个下钻存在的唯一理由堵死）、给假建议（自环）。三者皆劣，故 **T3 对单条下钻既不截也不抛：列表页仍按整条记录从尾收窄到 4000 内（诚实信号 = `records.length < limit`），而 `record_id` 下钻命中的那一条记录整条原样返回，`src/traceserver` 侧不新增任何帽**。overshoot 只在 MCP 面成立到 T6 之间，且 T3→T6 是同分支同 PR、中途不 push 不 merge，无交付物会带这个洞；ACI 面由 executor 的 20000 + marker 兜（契约 X 权威所在，正是 ADR-0006:29 要的收敛方向）。T3 的测必须把这条形状**钉死**（单条超大记录返回体字节数 > 4000 且字段完整），使 T6 改动是相对一条已钉期望被审，而非自由发挥。ADR 三轮「本票不碰 transport 侧的帽」的约束**照旧遵守**——本裁定恰恰是不在 core 加帽、也不动 transport。
+
 
 ## Tasks (ordered by dependency)
 
@@ -105,7 +112,7 @@ OVERALL: PASS — hand to writing-plans
 3. **P0：下钻不再静默丢字段（只治「静默」，不治「帽」）** — tag: `[implementation]`
    - **Inherits:** ADR-0004:23 契约 X（工具面不自己填截断元字段）；ACR 三轮裁定——本票**不得**抛 `window_overflow`/`record_not_found`（那两个 kind 归 T6，两票后才落），且本票**不**碰 transport 侧的帽。复现：llm_call `2dff031d`（原始行 35,656 字节 / 31 messages）要 `detail:"messages"` → 返回 10 个标量字段、无 messages、`response_truncated:false`。
    - **Surface:** `src/traceserver`（单面，不含两张皮）
-   - **Acceptance:** ① `compactRecord` 的「删字段」与「按记录数从尾砍到 0」两条路径退场（`:366-387`）；② `response_truncated` 从工具面输出删除——它随记录数走、不随字段走，是假负号来源；③ 列表页超容只按记录数收窄，诚实信号 = `records.length < limit`（隐式，不需元字段）；④ 单条记录下钻超容 → 抛**既有** `validation` kind，消息指名今日就存在的去处（改 `detail=tool_results`）；⑤ **该去处必须被证明真能收**：删 256 slice 后 `tool_results` 预览会长回 `project-tool-results.ts:4` 的 `TOOL_RESULT_PREVIEW_CAP=400`（+56%/条），故本票断言「复现记录 `2dff031d` 走 `detail=tool_results` 在 4000 内成功返回」；若不成立，截断只能收敛在 preview 那一层（唯一 owner = `project-tool-results.ts`），**不得**回到 `compactRecord`，否则 advice 自环直到 T6；⑥ `QUERY_TRACE_RESPONSE_CAP=4000` 原样保留并注释为「T6 窗口落地即退场」的红线。T2 钉住旧行为的基线断言在本票被**改写为期望行为**（T2 全绿 → T3 后仍全绿，只是断言方向翻转，不允许出现红灯 commit 落在 master 上）。
+   - **Acceptance:** ① `compactRecord` 的「删字段」与「按记录数从尾砍到 0」两条路径退场（`:366-387`）；② `response_truncated` 从工具面输出删除——它随记录数走、不随字段走，是假负号来源；③ 列表页超容只按记录数收窄，诚实信号 = `records.length < limit`（隐式，不需元字段）；④ **单条记录下钻超容 → 该条整条原样返回，既不截也不抛**（原条款「抛既有 `validation` kind 并指名 `detail=tool_results`」经实测作废，判据与裁定见「执行期前提修正」第 4 条：那个去处走的是同一条 `compactRecord` 整字段删除路径，是假建议；抛错则把「读一条大记录」这个下钻存在的唯一理由堵死）；`src/traceserver` 侧**不新增任何帽**，也不动 transport；⑤ **测须钉死这条新形状**（代替原「证明 `detail=tool_results` 在 4000 内收得下」，该前提已被证伪：`TOOL_RESULT_PREVIEW_CAP=400` 是每条常量、N 无上界，任何固定值都兜不住任意 N，改成随 N 收缩的聚合预算又等于在下一层重新引入静默截断、违反本票 P0）：在 `tests/traceserver/` 内构造合成夹具（单条 llm_call、原始行 >4000 字节、多 messages + tool_result blob），断言下钻返回体**字节数 > 4000 且字段完整**（`tool_results` 数组在、条数不减、无字段消失），使 T6 的改动是相对一条已钉期望被审。⑥ `QUERY_TRACE_RESPONSE_CAP=4000` 原样保留并注释为「T6 窗口落地即退场」的红线——**只管列表页**，单条下钻路径不经它。T2 钉住旧行为的基线断言在本票被**改写为期望行为**（T2 全绿 → T3 后仍全绿，只是断言方向翻转，不允许出现红灯 commit 落在 master 上）。
    - Status: [ ] pending
    - [blocks: T2]
 
