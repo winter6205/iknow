@@ -74,6 +74,19 @@ OVERALL: PASS — hand to writing-plans
 - 四轮 `BLOCKED 1/5`（bounded-context / defensive / complexity / minimal-change 转 `yes`；error-handling 仍 `no`）：① T3 的 advice 去处 `detail=tool_results` 未被证明收得下——删 256 slice 会让预览长回 400，可能 advice 自环；② T6/T7 新增 3 个 kind 无 ACI catch arm 要求，MCP 兜底 catch 会掩盖泄漏。另点名计划漏列的下游字面量（`tests/trace-mcp/server.test.ts:45`、`startup.test.ts:90,122`）、一处陈旧行号（`findRecord` 实在 `:230`）、以及 T2「红灯基线」与自身 `EXIT 0` 的措辞矛盾。全部已并入本文件。四轮同时独立核到一条好消息：panel face（`http.ts:271-278`）直读 reader、从不进 `serializeResponse`，故 T3 改核不可能回归面板。
 - 五轮 **PASS 5/5**（五维全 `yes`，`OVERALL: PASS — hand to writing-plans`），并独立确认 T4 Inherits 里我此前未自核的那条：`http.ts:257-285` 确实复制了最近会话默认（`:258-260` + 私有 helper `:203`，未从 `sessions.ts` 导出）与 5 键信封字面量两处（`:262-268`、`:279-285`）。它另留一条 plan-file 级 flag：核去前缀后没人义务薄皮补前缀，`stripQueryTracePrefix` 会成无主死代码 → 已并入（前缀搬迁落 T5，见「前缀归属」）。**闸门已过，T1 可开工。**
 
+## 执行期前提修正（开工核实，2026-09-02）
+
+写 T1 前逐条核了 plan 的 `file:LINE` 引用，绝大多数准确。三处偏差按实测修正，**不改判据方向、只改判据落点**：
+
+1. **T5/T6 的下游字面量是 8 处，不是 5 处。** plan 原列 5 处准确（`registry.test.ts:211` `toHaveLength(40)`、`ensure-deps-aci-tools.test.ts:40`+`:130`、`build-engine.test.ts:59`、`server.test.ts:45`、`startup.test.ts:90,122`）。全仓检索另漏三处硬编码枚举，T5/T6 必须同批改：
+   - `tests/harness/aci/tools/d9-description-guard.test.ts:245-246` — **两条** `toHaveLength(40)`（`ACI_TOOLSET_NAMES` 与 `reg.catalog.all()`）；该文件同时是 description 文案单源约束处（`:171` 派生对齐）。
+   - `tests/tui/deps-tools.test.ts:96` — `EXPECTED_TOOLSET_30` 全量硬编码名单（`query_trace` 在 `:112`），`:142` 断 `toEqual([...EXPECTED_TOOLSET_30].sort())`。
+   - `tests/subagent/worker-tool-surface.test.ts:111` — `WORKER_BASE_SURFACE` 是子代理 worker 的 **allow-list 基线**（含 `query_trace` 于 `:123`），`:249-250` 用 `assert.deepEqual(innerNames, [...WORKER_BASE_SURFACE])` 断**全等**。→ 这不是机械 +1，是**策略位**：往 registry 加件即扩子代理能力面。**裁定 = 纳入**（两件都是 read-only，与既在名单内的 `query_trace` 同门，排除它们会让 worker 能查 trace 却不能列会话／取全文，是更差的不对称）。该裁定写进 T5 测注释，不得当成一条意外回归「修掉」。注意 `:72` 的 `disallowedTools` 与 judge 侧 deny 都是派生的，不受影响。
+   
+   确认**安全**（从 `ACI_TOOLSET_NAMES` 派生、自动跟随）：`tests/harness/verify/judge-input.test.ts:106,245`、`tests/harness/verify/three-stage-flow.test.ts:1252`。`tests/harness/graph/run-graph-assembly.test.ts:113-116` 按下标锁定 idx 20/21/22/23 —— append-only 只动尾部，**只要不重排就不破**，T5/T6 保持 append。
+2. **worktree 内 `trace/` 是空的（0 个 `.jsonl`）**，plan 的尺寸实测与复现记录 `2dff031d` 都住在主仓（`/home/winner/projects/iknow/trace/82967186-f249-4d64-ba7a-50286a5012cc.jsonl`）。→ T3 的 AC ⑤「复现记录走 `detail=tool_results` 在 4000 内成功返回」**不得**写成依赖开发者本地 trace 目录的测；改为在 `tests/traceserver/` 内构造同形状夹具（单条 llm_call、原始行 >4000 字节、多 messages + tool_result blob）。主仓那条记录可用于一次性人工核对量级，不进断言。这也顺带满足 CI 可复现。
+3. **`OUTPUT_HARD_CAP`（`src/harness/tools/executor.ts:30`）是未导出的 `const`。** T6 的 MCP backstop「值 = 20000」**不能**靠 `import` 取——那会把 `harness/` 拖进 `src/trace-mcp/`，与假设 5「MCP 模块 transport only」和 SC12 相抵。落法：在 tool face 的序列化 owner 侧（`src/traceserver/`，非 harness）定义具名常量 `= 20_000`，注释指名「值取自 `src/harness/tools/executor.ts:30` 的 `OUTPUT_HARD_CAP`，同值是为不犯 ADR-0006:29 双层截断」，并配一条断言锁该数值 + 一条注释指向来源。两处同值靠断言锁，不靠 import 耦合。
+
 ## Tasks (ordered by dependency)
 
 1. **Spec 修订：读侧三面 + 契约 X 清理** — tag: `[decision]`
