@@ -22,19 +22,23 @@
 
 分支 `worktree-trace-mcp-read-side-split`，基线 `e9409fc2`（其父 = master `b99492f2`）。**master 是本分支祖先**，PR 无冲突面。
 
-| commit                           | 一行效果                                                                                                                                                                          |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bc560655`                       | spec v1.1：三面白名单 + read unit 词表 + SC6–SC8 改写 + SC16 前缀归属                                                                                                             |
-| `7d445e67` `f75ad5a1` `65274cf9` | plan 订正：T3 逃生口被实测证伪后改形、record_id 扫描测给 120s、标注派生量非实测                                                                                                   |
-| `b71cb9c3`                       | 现役核 characterization 测（动手前钉住今天的真实行为，含 P0 静默降级）                                                                                                            |
-| `b5f75e63`                       | **P0**：下钻整条返回，`compactRecord` / `response_truncated` 退场                                                                                                                 |
-| `27edf413`                       | plan 订正：残留 4000 假称全部划归 T6；记录破基线门                                                                                                                                |
-| `19248392`                       | `newestConversationId` 与响应信封各收一个 owner（`envelope.ts`），`http.ts` 零改动仍绿                                                                                            |
-| `2f2b2940`                       | T5a：工具名前缀从共核搬到两张皮各自的 catch arm                                                                                                                                   |
-| `16a6c773`                       | T5b：`list_sessions`（目录轴）上两张皮，registry 40→41                                                                                                                            |
-| `4013ef58`                       | **T6**：`get_record`（内容轴窗）上两张皮 + 4000 字符帽退场（新核 `get-record-core.ts` / `record-lookup.ts` / `output-backstop.ts`，ACI `get-record.ts`，registry 41→42），31 文件 |
+| commit                           | 一行效果                                                                                                                                                                                      |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bc560655`                       | spec v1.1：三面白名单 + read unit 词表 + SC6–SC8 改写 + SC16 前缀归属                                                                                                                         |
+| `7d445e67` `f75ad5a1` `65274cf9` | plan 订正：T3 逃生口被实测证伪后改形、record_id 扫描测给 120s、标注派生量非实测                                                                                                               |
+| `b71cb9c3`                       | 现役核 characterization 测（动手前钉住今天的真实行为，含 P0 静默降级）                                                                                                                        |
+| `b5f75e63`                       | **P0**：下钻整条返回，`compactRecord` / `response_truncated` 退场                                                                                                                             |
+| `27edf413`                       | plan 订正：残留 4000 假称全部划归 T6；记录破基线门                                                                                                                                            |
+| `19248392`                       | `newestConversationId` 与响应信封各收一个 owner（`envelope.ts`），`http.ts` 零改动仍绿                                                                                                        |
+| `2f2b2940`                       | T5a：工具名前缀从共核搬到两张皮各自的 catch arm                                                                                                                                               |
+| `16a6c773`                       | T5b：`list_sessions`（目录轴）上两张皮，registry 40→41                                                                                                                                        |
+| `4013ef58`                       | **T6**：`get_record`（内容轴窗）上两张皮 + 4000 字符帽退场（新核 `get-record-core.ts` / `record-lookup.ts` / `output-backstop.ts`，ACI `get-record.ts`，registry 41→42），31 文件             |
+| `1f232b17`                       | 本交接件（+ plan 第 15 条一处「没点过数」的口径纠正）                                                                                                                                         |
+| `3e1776a7`                       | `.github/workflows/test.yml`：3 个 bwrap 依赖测试补进两个 vitest job 的 `--exclude`（本 PR 的 `list-sessions.test.ts` / `get-record.test.ts` + master 旧账 `build-engine-mcp-roots.test.ts`） |
 
-工作树遗留：无。`docs/handoff/2026-09-02-trace-mcp-read-side-split-t6-done.md` 是交接件本身（单独 docs commit）。
+**给 T7 的硬性提醒**：新增测文件里只要出现 `createDefaultAciRegistry(` 或 `buildHarnessEngine(`，`scripts/ci-check-test-excludes.ts`（#467 守卫）就会让 `test-fast` 在跑 vitest 之前红掉（Actions runner 无 user-namespace ⇒ bwrap 在装配期 throw，不是断言失败）。**同批**加 `--exclude`（两个 job 各一份），别等 PR 开出来才发现。
+
+工作树遗留：无代码遗留。唯二未 commit 的文件 = 本交接件自身 + `plans/trace-mcp-read-side-split.md` 第 15 条的 CI 门订正，二者在同一篇 docs commit 里收尾。
 
 ## 已验证状态
 
@@ -53,6 +57,8 @@ npx prettier --check <所有改动的 .ts/.md（plan 文件除外）> => All mat
 npx vitest run tests/cli/register-shutdown.test.ts   => 7 passed（全量并行下该文件曾红 1 例，判为时序 flaky）
 ```
 
+CI commit `3e1776a7` 前另跑：`npx tsx scripts/ci-check-test-excludes.ts` => **EXIT 0**（41 个 bwrap 依赖测试文件全在两个 job 的 `--exclude` 列）；被排除的三份本地实测全绿 —— `tests/harness/aci/tools/` 27 文件 / 568 例、`tests/trace-mcp/` 2 文件 / 25 例、`build-engine-mcp-roots.test.ts` 4 例。
+
 一次性探针（跑完即删，`/tmp` 下，未进仓）：主仓 81 个真实会话的摘要条目宽度 = entry JSON 本体 **71–124 字符**、页内连写每条再 +1 逗号 ⇒ **72–125**。这个数字对是 `LIST_SESSIONS_MAX_LIMIT = 128` 的依据，也是本轮第三次「单位是字符不是字节」的订正来源。
 
 两轴 review（commit 前，pinned ref `16a6c773` → 工作树）：Standards **0 High / 5 Medium / 5 Low**，Spec **1 High / 1 Medium / 5 Low** → 门 = **GATE: PASS**（High 与两条 Medium 已在 commit 前处置；其余落在 plan 第 15 条，逐条写了去处）。
@@ -63,6 +69,7 @@ npx vitest run tests/cli/register-shutdown.test.ts   => 7 passed（全量并行�
 
 其余 next steps（每条都是具体动作）：
 
+- **回查本 PR 的 CI**：`3e1776a7` 已 push，但 `gh pr checks` 当时对本机 GitHub API 持续超时 ⇒ 「guard 修好后 `test-fast` 是否转绿」属**未验证**。网络可用时跑 `gh pr checks 867`。
 - T7 里同步 `specs/query-trace-tool-results.md`，并**另立**一个 tool face 信封构造（不得给 `toResponseEnvelope` 加「哪张皮」开关，plan §序列化 对 T7 的约束）。两套 parser 不合并。
 - T8：`.iknow/mcp.json` 的 cwd 依赖修复 + `docs/trace-mcp-server.md` 给真实例子 + 一条脚本化 spawn 断言。
 - 整轮收尾（两件都在 plan §待写入，走 `domain-modeling`）：① 四条新词写进 `docs/CONTEXT.md`；② **改名 `TraceQueryValidationError`**（自 T5b 起是读侧共用校验错误，名字里带 `QueryTrace` 是误名）连同 `query-trace-errors.ts` 文件名 —— 单独开票，因为它动判别名与消息字符串面。
