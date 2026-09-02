@@ -65,8 +65,8 @@ export function createEnterTaskWorktreeTool(
       "Use it when worktree isolation is ON and the work you need continues in a task worktree that already " +
       "exists — for example the tree another conversation created: pass that conversation's id as " +
       "conversationId and the target resolves to <repoRoot>/.iknow/worktrees/<conversationId>. " +
-      "On success the session root moves to the entered tree; re-issue pending workspace writes there on " +
-      "your next turn. Calling it again for the same target returns the same path (idempotent). " +
+      "On success the session root moves to the entered tree; re-issue pending workspace writes there in " +
+      "the next wave of tool calls in this run. Calling it again for the same target returns the same path (idempotent). " +
       "Failures exit typed as kind=worktree_not_found | foreign_worktree | rebind_failed | git_unavailable; " +
       "resolve the reported condition (wrong id, tree in another repository, or leftover state), then retry. " +
       "The entered tree stays untouched; exit-task-worktree returns this session to the main repo root.",
@@ -114,7 +114,7 @@ export function createEnterTaskWorktreeTool(
         });
         return (
           `entered task worktree: ${worktreePath} (session root rebound; ` +
-          `re-issue pending writes in the entered tree on your next turn)`
+          `re-issue pending writes in the entered tree in the next wave of tool calls in this run)`
         );
       } catch (err) {
         if (err instanceof WorktreeIsolationError) {

@@ -54,7 +54,7 @@ export function createExitTaskWorktreeTool(
       "Return this session's root to the main repository checkout from the task worktree it is currently bound to. " +
       "Use it when the isolated task is finished and subsequent workspace writes should land in the main repo again. " +
       "Takes no parameters. On success the session root returns to the main repo root and pending writes can be " +
-      "re-issued there on your next turn; the task worktree itself is preserved (work in it again later with the " +
+      "re-issued there in the next wave of tool calls in this run; the task worktree itself is preserved (work in it again later with the " +
       "enter-task-worktree tool). Failures exit typed as kind=rebind_failed | git_unavailable — for example when " +
       "this session is not currently bound to a task worktree. Calling it while already on the main repo root " +
       "returns the typed rebind_failed kind instead of a silent no-op.",
@@ -79,7 +79,7 @@ export function createExitTaskWorktreeTool(
         return (
           `session root returned to main repo: ${repoRoot} (the task worktree ` +
           `${deps.root} is preserved; re-issue pending writes in the main repo ` +
-          `on your next turn)`
+          `in the next wave of tool calls in this run)`
         );
       } catch (err) {
         if (err instanceof WorktreeIsolationError) {

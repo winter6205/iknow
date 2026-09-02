@@ -335,6 +335,141 @@ describe("T10 — D11 invariant (gate adjudication root == consumer handler root
 });
 
 // ============================================================================
+// D11 — root-flip lifecycle tools in a mixed wave (review fix)
+// ============================================================================
+
+/**
+ * The enter/exit lifecycle tools are executed through inner and their
+ * handlers flip the live cell mid-wave (via the withLiveTaskRootWrite-wrapped
+ * host seams). A mutate later in the SAME wave must NOT be adjudicated on the
+ * wave-entry snapshot while its handler would consume the flipped cell —
+ * that is the admit-but-write-other-root window D11 forbids. Fail-closed:
+ * the mutate is blocked and must be re-issued in the next wave.
+ */
+describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutates are blocked", () => {
+  /** Inner executor mirroring production: an enter/exit-task-worktree call
+   * reaches inner (lifecycle tools are not workspace mutates), and its
+   * handler resolves the wrapped host seam, which flips the live cell. */
+  function flippingRootInner(cell: LiveTaskRoot, flipTo: string): {
+    readonly inner: Executor;
+    readonly reached: string[];
+  } {
+    const reached: string[] = [];
+    const inner: Executor = {
+      executeAll: async (batch) => {
+        for (const c of batch) {
+          reached.push(c.id);
+          if (c.name === "exit-task-worktree" || c.name === "enter-task-worktree") {
+            writeLiveTaskRoot(cell, flipTo);
+          }
+        }
+        return batch.map((c) => ({
+          kind: "ok" as const,
+          toolUseId: c.id,
+          payload: { wrote: true },
+        }));
+      },
+    };
+    return { inner, reached };
+  }
+
+  it("[exit-task-worktree, write_file] same wave: write_file is blocked (never written to the flipped main-repo root)", async () => {
+    // Session bound on its task worktree; the wave starts with the cell at
+    // WORKTREE_ROOT (that is the gate's snapshot) and the exit handler flips
+    // it to the main repo mid-wave.
+    const cell = createLiveTaskRoot(WORKTREE_ROOT);
+    const { inner, reached } = flippingRootInner(cell, "/main");
+    const gate = makeGate({
+      liveTaskRoot: cell,
+      provision: async ({ root }) => root,
+      inner,
+    });
+
+    const out = await gate.executeAll([
+      { id: "exit-1", name: "exit-task-worktree", input: {} },
+      writeCall("w1"),
+    ]);
+
+    // exit executed and flipped the cell mid-wave
+    expect(out[0]!.kind).toBe("ok");
+    expect(cell.read()).toBe("/main");
+    // the mutate is fail-closed blocked, never written to the flipped root
+    expect(out[1]!.kind).toBe("execution_failed");
+    expect(out[1]!.message).toContain(WORKTREE_ISOLATION_PREFIX);
+    // the block message points at re-issuing in the next wave of this run
+    expect(out[1]!.message).toContain("next wave of tool calls in this run");
+    // D11 evidence: write_file never reached a handler after the flip
+    expect(reached).toEqual(["exit-1"]);
+  });
+
+  it("[enter-task-worktree, write_file] same wave: write_file is blocked (never written to the entered foreign tree)", async () => {
+    // Session bound on its own tree; enter adopts another conversation's
+    // tree mid-wave (the wrapped enter seam flips the cell to OTHER_TREE).
+    const cell = createLiveTaskRoot(WORKTREE_ROOT);
+    const { inner, reached } = flippingRootInner(cell, "/repo/.iknow/worktrees/conv-2");
+    const gate = makeGate({
+      liveTaskRoot: cell,
+      provision: async ({ root }) => root,
+      inner,
+    });
+
+    const out = await gate.executeAll([
+      {
+        id: "enter-1",
+        name: "enter-task-worktree",
+        input: { conversationId: "conv-2" },
+      },
+      writeCall("w1"),
+    ]);
+
+    expect(out[0]!.kind).toBe("ok");
+    expect(cell.read()).toBe("/repo/.iknow/worktrees/conv-2");
+    expect(out[1]!.kind).toBe("execution_failed");
+    expect(out[1]!.message).toContain(WORKTREE_ISOLATION_PREFIX);
+    expect(reached).toEqual(["enter-1"]);
+  });
+
+  it("a mutate BEFORE the root-flip call in the same wave is still adjudicated on the wave snapshot (ordering preserved)", async () => {
+    // [write_file, exit-task-worktree]: the mutate executes first against the
+    // wave-entry snapshot (== the cell value at its call time), then the exit
+    // flips. No window — the pre-flip adjudication matches the pre-flip write.
+    const cell = createLiveTaskRoot(WORKTREE_ROOT);
+    const { inner, reached } = flippingRootInner(cell, "/main");
+    const gate = makeGate({
+      liveTaskRoot: cell,
+      provision: async ({ root }) => root,
+      inner,
+    });
+
+    const out = await gate.executeAll([writeCall("w1"), { id: "exit-1", name: "exit-task-worktree", input: {} }]);
+
+    expect(out[0]!.kind).toBe("ok");
+    expect(out[1]!.kind).toBe("ok");
+    expect(reached).toEqual(["w1", "exit-1"]);
+  });
+
+  it("a wave with only lifecycle + read calls still bypasses the gate (unchanged behaviour)", async () => {
+    const cell = createLiveTaskRoot(WORKTREE_ROOT);
+    const { inner, reached } = flippingRootInner(cell, "/main");
+    const gate = makeGate({
+      liveTaskRoot: cell,
+      provision: async ({ root }) => root,
+      inner,
+    });
+
+    const out = await gate.executeAll([
+      { id: "exit-1", name: "exit-task-worktree", input: {} },
+      { id: "r1", name: "read_file", input: { path: "a.txt" } },
+    ]);
+
+    expect(out[0]!.kind).toBe("ok");
+    expect(out[1]!.kind).toBe("ok");
+    expect(reached).toEqual(["exit-1", "r1"]);
+    expect(cell.read()).toBe("/main");
+  });
+});
+
+// ============================================================================
 // initiallyBound — pre-rebound engines with liveTaskRoot initialised to the
 // task worktree behave identically to today (D3 stable, byte-equivalent).
 // ============================================================================
