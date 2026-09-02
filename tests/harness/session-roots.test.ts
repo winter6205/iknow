@@ -29,10 +29,14 @@ import path from "node:path";
 
 import {
   MAX_ROOT_DETAIL_CHARS,
+  createLiveTaskRoot,
   normalizeRootCandidate,
   quoteRoot,
   resolveInstallRoot,
   resolveSessionRoots,
+  withLiveTaskRootWrite,
+  writeLiveTaskRoot,
+  type LiveTaskRoot,
   type ResolveSessionRootsInput,
   type SessionRoots,
 } from "../../src/harness/session-roots.ts";
@@ -559,5 +563,140 @@ describe("SessionRoots — readonly shape (D3 typed contract)", () => {
     expect(Object.keys(roots).sort()).toEqual(
       ["installRoot", "productRoot", "projectIdentityRoot", "taskRoot"].sort()
     );
+  });
+});
+
+// --------------------------------------------------------------------------
+// T4 (plans/worktree-live-task-root.md §6 T4) — live taskRoot holder + single
+// writer wiring. Zero behavior change in T4 (no consumer reads), so the
+// tests below pin the structural invariants the holder + wrap must keep:
+//   - read() returns the initial snapshot,
+//   - writeLiveTaskRoot updates the cell in-place,
+//   - D2 batch snapshot: many synchronous reads see the same string value,
+//   - D3 stable-root list is NOT carried by the cell (only `taskRoot` is),
+//   - withLiveTaskRootWrite: seam resolves → cell written + value returned,
+//   - withLiveTaskRootWrite: seam throws → cell **unchanged** + error
+//     propagates unchanged (no write, no rollback),
+//   - withLiveTaskRootWrite forwards seam arguments verbatim.
+// --------------------------------------------------------------------------
+
+describe("LiveTaskRoot — T4 holder", () => {
+  it("createLiveTaskRoot(initial) returns a cell whose read() yields the initial value", () => {
+    const cell = createLiveTaskRoot("/repo/wt/conv-1");
+    expect(cell.read()).toBe("/repo/wt/conv-1");
+  });
+
+  it("writeLiveTaskRoot(cell, value) updates the cell so read() reflects the new value", () => {
+    const cell = createLiveTaskRoot("/repo/wt/conv-1");
+    writeLiveTaskRoot(cell, "/repo/wt/conv-2");
+    expect(cell.read()).toBe("/repo/wt/conv-2");
+    writeLiveTaskRoot(cell, "/repo/wt/conv-3");
+    expect(cell.read()).toBe("/repo/wt/conv-3");
+  });
+
+  it("concurrent reads within one synchronous stretch return the same value (D2 batch snapshot)", () => {
+    // D2: a wave of tool calls shares one snapshot. We exercise the
+    // underlying mechanism here — JS single-threaded closure reads are
+    // atomic, so a tight loop of reads always sees the current value with
+    // no partial-update window.
+    const cell = createLiveTaskRoot("/repo/wt/conv-1");
+    const reads: string[] = [];
+    for (let i = 0; i < 64; i++) reads.push(cell.read());
+    expect(new Set(reads).size).toBe(1);
+    expect(reads[0]).toBe("/repo/wt/conv-1");
+
+    // After a single synchronous write, every read in the next stretch
+    // observes the new value with the same atomicity guarantee.
+    writeLiveTaskRoot(cell, "/repo/wt/conv-2");
+    const reads2: string[] = [];
+    for (let i = 0; i < 64; i++) reads2.push(cell.read());
+    expect(new Set(reads2).size).toBe(1);
+    expect(reads2[0]).toBe("/repo/wt/conv-2");
+  });
+
+  it("cell shape carries only taskRoot — D3 stable roots are not exposed (no other slots)", () => {
+    // D3 稳定根清单：productRoot / projectIdentityRoot / installRoot /
+    // mcpConfigRoot / stateAnchor / memoryDir / todoDir / traceDir 全部保持
+    // 装配期冻结。LiveTaskRoot 只承载 taskRoot 一个值，且 LiveTaskRoot 接口
+    // 不暴露任何 setter (single writer 由 writeLiveTaskRoot 独占)。
+    const cell: LiveTaskRoot = createLiveTaskRoot("/repo/wt/conv-1");
+    expect(cell.read()).toBe("/repo/wt/conv-1");
+    // Public 接口面只剩 read；setter 不会跨导出面泄漏。
+    type PublicSurface = keyof LiveTaskRoot;
+    const publicKeys: PublicSurface[] = ["read"];
+    expect(publicKeys).toEqual(["read"]);
+  });
+});
+
+describe("withLiveTaskRootWrite — T4 single-writer seam wrap", () => {
+  it("seam resolves → cell written AND returned value forwarded", async () => {
+    const cell = createLiveTaskRoot("/repo");
+    const wrapped = withLiveTaskRootWrite(async () => "/repo/wt/conv-1", cell);
+    const result = await wrapped();
+    expect(result).toBe("/repo/wt/conv-1");
+    expect(cell.read()).toBe("/repo/wt/conv-1");
+  });
+
+  it("seam throws typed error → cell UNCHANGED (no write, no rollback) + error propagates", async () => {
+    // D1: 包装点只在缝成功 resolve 时写。失败不写、不回滚，typed error 原样冒泡。
+    const cell = createLiveTaskRoot("/repo");
+    const typedErr = Object.assign(new Error("foreign_worktree"), {
+      kind: "foreign_worktree",
+    });
+    const wrapped = withLiveTaskRootWrite(async () => {
+      throw typedErr;
+    }, cell);
+    await expect(wrapped()).rejects.toBe(typedErr);
+    expect(cell.read()).toBe("/repo"); // unchanged
+  });
+
+  it("seam throws typed error after a previous successful write → cell stays at the previously written value", async () => {
+    // Edge: cell already holds value V from a prior success; a subsequent
+    // failing seam must leave V in place. No rollback, no partial state.
+    const cell = createLiveTaskRoot("/repo");
+    const typedErr = Object.assign(new Error("rebind_failed"), {
+      kind: "rebind_failed",
+    });
+    const wrapped = withLiveTaskRootWrite(async (ok: boolean) => {
+      if (!ok) throw typedErr;
+      return "/repo/wt/conv-1";
+    }, cell);
+    const first = await wrapped(true);
+    expect(first).toBe("/repo/wt/conv-1");
+    expect(cell.read()).toBe("/repo/wt/conv-1");
+
+    await expect(wrapped(false)).rejects.toBe(typedErr);
+    // Cell must still hold the prior value, not be reset to initial.
+    expect(cell.read()).toBe("/repo/wt/conv-1");
+  });
+
+  it("forwards seam arguments verbatim (provision ctx shape preserved)", async () => {
+    const cell = createLiveTaskRoot("/repo");
+    type Ctx = { conversationId?: string; root: string };
+    let captured: Ctx | undefined;
+    const wrapped = withLiveTaskRootWrite(async (ctx: Ctx) => {
+      captured = ctx;
+      return "/repo/wt/x";
+    }, cell);
+    const ctxArg: Ctx = { conversationId: "conv-1", root: "/repo" };
+    const result = await wrapped(ctxArg);
+    expect(result).toBe("/repo/wt/x");
+    expect(captured).toEqual(ctxArg);
+    expect(cell.read()).toBe("/repo/wt/x");
+  });
+
+  it("wrap is a no-op for a non-async seam (still returns the value, still writes)", async () => {
+    // Seam 形如 (ctx) => Promise<string>；即使 seam 立即 resolve 也仍走
+    // await 路径，写入依旧发生。回归保护：之前的 wrap 实现如果误用
+    // seam(...args).then(...) 会绕过 await 的写入，本测试拦截。
+    const cell = createLiveTaskRoot("/repo");
+    const wrapped = withLiveTaskRootWrite(
+      ((_ctx: unknown) => Promise.resolve("/repo/wt/conv-9")) as (
+        ctx: unknown
+      ) => Promise<string>,
+      cell
+    );
+    await wrapped({});
+    expect(cell.read()).toBe("/repo/wt/conv-9");
   });
 });

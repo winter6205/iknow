@@ -198,3 +198,102 @@ export function resolveInstallRoot(): string {
     `installRoot could not be derived: no package.json above ${quoteRoot(start, MAX_ROOT_DETAIL_CHARS)}`
   );
 }
+
+// --------------------------------------------------------------------------
+// T4 (plans/worktree-live-task-root.md §5 D1 / §6 T4) — live `taskRoot`
+// holder + single writer.
+//
+// `resolveSessionRoots` stays a pure function (above). The live holder
+// sits alongside it as a sibling export of the same module — the SSOT
+// for "会话当前生效根". Writes are gated through ONE entry point
+// (`writeLiveTaskRoot`), reached only via the build-engine wrapper around
+// host `provision` / `enter` / `exit` seams (`withLiveTaskRootWrite`).
+//
+// Stable roots (productRoot / projectIdentityRoot / installRoot /
+// mcpConfigRoot / stateAnchor / memoryDir / todoDir / traceDir) are NOT
+// carried here — the cell holds a single `taskRoot` string, nothing else
+// (D3).
+// --------------------------------------------------------------------------
+
+/**
+ * Internal mutable shell — extends the public `LiveTaskRoot` surface with
+ * a closure-captured setter. Module-scoped: only `writeLiveTaskRoot` casts
+ * to this type, so the setter cannot leak through the public `LiveTaskRoot`
+ * interface. Tests can read via `cell.read()`; only the wrapper around
+ * host seams can write.
+ */
+interface LiveTaskRootInternal extends LiveTaskRoot {
+  readonly __write: (value: string) => void;
+}
+
+/**
+ * Live `taskRoot` cell. Reads return the current snapshot value
+ * (synchronously, atomically — JS single-threaded closure reads of a
+ * captured `let` have no partial-update window). Writes go through
+ * `writeLiveTaskRoot`, the single writer entry point — see
+ * `withLiveTaskRootWrite` for the build-engine wrapper.
+ */
+export interface LiveTaskRoot {
+  /** Current snapshot value. */
+  read(): string;
+}
+
+/**
+ * Construct a `LiveTaskRoot` cell from a validated initial value
+ * (typically `sessionRoots.taskRoot` produced by `resolveSessionRoots`).
+ * The initial value is the pre-rebind snapshot; successful resolutions of
+ * the host `provision` / `enter` / `exit` seams update the cell via
+ * `writeLiveTaskRoot` / `withLiveTaskRootWrite`.
+ */
+export function createLiveTaskRoot(initial: string): LiveTaskRoot {
+  let current = initial;
+  const cell: LiveTaskRootInternal = {
+    read: () => current,
+    __write: (value: string): void => {
+      current = value;
+    },
+  };
+  return cell;
+}
+
+/**
+ * T4 single writer — update the live `taskRoot` cell. Called only by the
+ * build-engine wrapper around host seams (via `withLiveTaskRootWrite`); the
+ * public `LiveTaskRoot` interface does not expose a setter, so external
+ * callers cannot bypass the wrapper.
+ *
+ * Does NOT re-validate the input — the seam contract (`WorktreeProvisionFn`
+ * / `WorktreeEnterFn` / `WorktreeExitFn`) already requires the resolver
+ * to return a normalized absolute root. Wrapping this with extra
+ * `normalizeRootCandidate` would surface seam contract violations as
+ * `SessionRootError` instead of letting them propagate as the seam's
+ * typed error, which would mask the original failure mode.
+ */
+export function writeLiveTaskRoot(cell: LiveTaskRoot, value: string): void {
+  (cell as LiveTaskRootInternal).__write(value);
+}
+
+/**
+ * T4 (plans/worktree-live-task-root.md §5 D1) — wrap an async root-resolver
+ * seam so successful resolutions also update the live `taskRoot` cell.
+ *
+ *   - seam resolves → write cell, return the resolved value unchanged;
+ *   - seam throws (any typed error) → cell **unchanged** (no write, no
+ *     rollback — failure means the prior value stays put), error
+ *     propagates verbatim to the caller.
+ *
+ * The wrap is the single writer entry point. build-engine applies this
+ * helper to host `provision` / `enter` / `exit` seams uniformly — every
+ * successful seam resolution reaches `writeLiveTaskRoot` through here.
+ * Stable roots (D3) are not affected; only the seam-resolved value
+ * (== `taskRoot`) is written.
+ */
+export function withLiveTaskRootWrite<
+  F extends (...args: any[]) => Promise<string>,
+>(seam: F, cell: LiveTaskRoot): F {
+  return (async (...args: any[]): Promise<string> => {
+    const resolved = await seam(...args);
+    writeLiveTaskRoot(cell, resolved);
+    return resolved;
+  }) as F;
+}

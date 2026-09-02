@@ -101,8 +101,11 @@ import { loadMcpConfig } from "./mcp/config.js";
 import { createMcpManager, type McpManager } from "./mcp/manager.js";
 import { resolveMcpRoots, type McpRoots } from "./mcp/roots.js";
 import {
+  createLiveTaskRoot,
   resolveInstallRoot,
   resolveSessionRoots,
+  withLiveTaskRootWrite,
+  type LiveTaskRoot,
   type SessionRoots,
 } from "./session-roots.js";
 import {
@@ -452,6 +455,15 @@ export async function buildHarnessEngine(
     // 时反而能回到主仓（review round 4 实测）。
     projectIdentityRoot: mainCheckoutOf(opts.projectIdentityRoot ?? cwd),
   });
+  // T4 (plans/worktree-live-task-root.md §5 D1 / §6 T4) — live `taskRoot`
+  // holder. Wraps `sessionRoots.taskRoot` as the initial snapshot. Writes
+  // are gated through the build-engine wrapper around host seams
+  // (`withLiveTaskRootWrite`); no consumer reads this in T4, so the cell
+  // sits dormant until T5/T7/T8/T9 wire readers. Stable roots
+  // (productRoot / projectIdentityRoot / installRoot / mcpConfigRoot /
+  // stateAnchor / memoryDir / todoDir / traceDir) stay frozen (D3) — the
+  // cell only carries `taskRoot`.
+  const liveTaskRoot: LiveTaskRoot = createLiveTaskRoot(sessionRoots.taskRoot);
   // Review (round 2/3): 项目身份根 —— 身份发现（AGENTS.md / rules / 项目
   // skills / 子代理继承）与记忆库命名空间共用它，**不**用 `productRoot`：后者
   // 取自 `workspaceRoot`，在 `--workspace-root <dir>` 重定向档下不是项目本身。
@@ -632,6 +644,23 @@ export async function buildHarnessEngine(
   const isolationHost = opts.worktreeIsolation;
   const isolationEnabled =
     isolationHost !== undefined && resolveWorktreeOnMutate(settings);
+  // T4 (plans/worktree-live-task-root.md §5 D1 / §6 T4) — single writer
+  // seam wrap. Host `provision` / `enter` / `exit` are wrapped with
+  // `withLiveTaskRootWrite` so successful resolutions update the live
+  // `taskRoot` cell. Failed seams (typed errors) leave the cell unchanged
+  // and the error propagates verbatim — no write, no rollback. T4 has no
+  // consumer reading the cell, so the wrap is dormant; T5/T7/T8/T9 will
+  // wire readers. The wrap is a **pure pass-through** for the resolved
+  // value (registry / gate behavior is byte-identical to today).
+  const wrappedProvision = isolationHost
+    ? withLiveTaskRootWrite(isolationHost.provision, liveTaskRoot)
+    : undefined;
+  const wrappedEnter = isolationHost?.worktreeEnter
+    ? withLiveTaskRootWrite(isolationHost.worktreeEnter, liveTaskRoot)
+    : undefined;
+  const wrappedExit = isolationHost?.worktreeExit
+    ? withLiveTaskRootWrite(isolationHost.worktreeExit, liveTaskRoot)
+    : undefined;
   // #406 T4:secret 处理模式 —— settings.secrets.mode 驱动装配。缺省 = "roundtrip"
   // （识别 + 占位符替换 + bash 还原 + 输出 mask）；"block" = 旧 deny-only
   // preToolUse guard（#126 兼容路径），roundtrip 机制整体关闭。非法值已被
@@ -771,17 +800,13 @@ export async function buildHarnessEngine(
     // hub-less 入口不透传 → 工具不入注册表（Gate 3 镜像过滤）。
     ...(isolationEnabled && isolationHost
       ? {
-          worktreeProvision: isolationHost.provision,
+          worktreeProvision: wrappedProvision!,
           // T7:enter 缝在场时透传（与 provision 同一 isolationEnabled 判定源）；
           // 缺席（TUI 只接 provision）→ enter-task-worktree 不入注册表。
-          ...(isolationHost.worktreeEnter
-            ? { worktreeEnter: isolationHost.worktreeEnter }
-            : {}),
+          ...(wrappedEnter ? { worktreeEnter: wrappedEnter } : {}),
           // T8:exit 缝在场时透传（同一 isolationEnabled 判定源）；缺席 →
           // exit-task-worktree 不入注册表。
-          ...(isolationHost.worktreeExit
-            ? { worktreeExit: isolationHost.worktreeExit }
-            : {}),
+          ...(wrappedExit ? { worktreeExit: wrappedExit } : {}),
         }
       : {}),
   });
@@ -886,7 +911,7 @@ export async function buildHarnessEngine(
     ? createWorktreeIsolationExecutor({
         enabled: true,
         root: sandboxRoot,
-        provision: isolationHost.provision,
+        provision: wrappedProvision!,
         // T4: passthrough 锚定交给 provision 按会话裁决（own task tree →
         // 同根 no-op;外来根 → typed foreign_worktree）——host 缝不再携带
         // conversation-agnostic 的 initiallyBound（per-root 引擎可服务多个

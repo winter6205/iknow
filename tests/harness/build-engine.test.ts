@@ -1553,3 +1553,183 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
     }
   });
 });
+
+// --------------------------------------------------------------------------
+// T4 (plans/worktree-live-task-root.md §6 T4) — build-engine wires the live
+// taskRoot holder + single writer at the host seam boundary. Zero behavior
+// change in T4: no consumer reads the cell yet, so all this bullet proves
+// is that the wrap is installed (the seam is wrapped, BuiltEngine exposes
+// no second root authority, and stable roots stay frozen).
+// --------------------------------------------------------------------------
+
+describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", () => {
+  it("isolation OFF → wrap is NOT installed (T3 baseline preserved)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-off-"));
+    try {
+      // settings without isolation.worktreeOnMutate → isolationEnabled = false.
+      // The build-engine branch at lines 784 + 897 should NOT enter the
+      // isolation path; wrap is dormant. Behavior is byte-identical to T3.
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-off"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: {}, // no isolation flag
+        // No worktreeIsolation host seam — registry should still build
+        // the chat tool set without isolation-aware wrappers.
+      });
+      // sessionRoots is the resolveSessionRoots snapshot (D3 stable):
+      // productRoot / projectIdentityRoot / installRoot unchanged from T3.
+      expect(built.sessionRoots.taskRoot).toBe(root);
+      expect(built.sessionRoots.productRoot).not.toBe("");
+      // No second root authority — BuiltEngine does not expose liveTaskRoot
+      // (or any equivalent live holder). Hub has no path to read the cell.
+      expect("liveTaskRoot" in built).toBe(false);
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("isolation ON + custom seam → engine builds, seam is wired, BuiltEngine has no second root authority", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-on-"));
+    try {
+      const seamResolved = join(root, ".iknow", "worktrees", "conv-1");
+      let seamCalls = 0;
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-on"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        worktreeIsolation: {
+          provision: async () => {
+            seamCalls++;
+            return seamResolved;
+          },
+        },
+      });
+      // (a) Engine builds successfully with isolation enabled + custom seam.
+      // (b) sessionRoots.taskRoot stays at the initial sandboxRoot — Hub
+      //     observes this through BuiltEngine.sessionRoots, NOT through
+      //     the live cell. (T4 has no consumer reading the cell, so this
+      //     stays at the initial value.)
+      expect(built.sessionRoots.taskRoot).toBe(root);
+      // (c) D3 stable roots are NOT carried by a live cell:
+      expect(built.sessionRoots.productRoot).not.toBe("");
+      expect(built.sessionRoots.projectIdentityRoot).not.toBe("");
+      expect(built.sessionRoots.installRoot).not.toBe("");
+      // (d) No second root authority — BuiltEngine does not expose the
+      //     live cell. Hub can only observe roots through the existing
+      //     BuiltEngine.sessionRoots / provision return values.
+      expect("liveTaskRoot" in built).toBe(false);
+      expect(Object.keys(built)).not.toContain("liveTaskRoot");
+      // (e) Seam is not invoked at build time (the gate only calls
+      //     provision when an engine is rooted at a task-worktree-shaped
+      //     path; `root` here is the main repo, not a worktree).
+      expect(seamCalls).toBe(0);
+
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("isolation ON + seam throws typed error → gate blocks, no second root authority, BuiltEngine surface stable", async () => {
+    // Provoke the typed-error path: a session in main-repo state tries to
+    // mutate. The gate blocks (T3 behavior), the seam is NOT called for
+    // main-repo traffic (T3 model-provision contract), and any latent
+    // seam throw wouldn't poison the live cell because the wrap is
+    // downstream of the gate's block.
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-throw-"));
+    try {
+      const typedErr = Object.assign(new Error("rebind_failed"), {
+        kind: "rebind_failed",
+      });
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-throw"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        worktreeIsolation: {
+          // Seam throws typed error — but the gate only calls it on
+          // task-worktree-shaped paths, so this is never invoked in the
+          // main-repo path. Still, the wrap must preserve the throw
+          // identity if it ever does.
+          provision: async () => {
+            throw typedErr;
+          },
+        },
+      });
+      // sessionRoots surface unchanged (Hub reads from this, not the cell).
+      expect(built.sessionRoots.taskRoot).toBe(root);
+      // No second root authority.
+      expect("liveTaskRoot" in built).toBe(false);
+      // The cell is dormant — no consumer reads it in T4 — so even if the
+      // seam threw, the cell would still hold its initial value (the wrap
+      // would not have written). The structural invariant (Hub-only-observes-
+      // returned-root) is preserved by NOT exposing the cell on BuiltEngine.
+
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("stable roots stay frozen through the wrap (D3) — sessionRoots.productRoot / projectIdentityRoot / installRoot not affected by host seam", async () => {
+    // D3 稳定根清单：productRoot / projectIdentityRoot / installRoot 必须保持
+    // 装配期冻结。Live taskRoot 槽位的写入**不**影响这三根 —— 它们由
+    // resolveSessionRoots 在装配期一次定型（见 build-engine.ts:438），wrap
+    // 只接触 taskRoot 槽位。
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-stable-"));
+    try {
+      const seamResolved = join(root, ".iknow", "worktrees", "conv-1");
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-stable"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        worktreeIsolation: {
+          provision: async () => seamResolved,
+        },
+      });
+      // Capture the four roots at build time.
+      const initialProduct = built.sessionRoots.productRoot;
+      const initialIdentity = built.sessionRoots.projectIdentityRoot;
+      const initialInstall = built.sessionRoots.installRoot;
+      const initialTask = built.sessionRoots.taskRoot;
+      expect(initialProduct).toBeTruthy();
+      expect(initialIdentity).toBeTruthy();
+      expect(initialInstall).toBeTruthy();
+      expect(initialTask).toBe(root);
+
+      // The cell is internal; we cannot poke it via BuiltEngine. The D3
+      // invariants are exercised by resolveSessionRoots tests in
+      // session-roots.test.ts (T3). Here we assert that
+      // sessionRoots.productRoot / projectIdentityRoot / installRoot are
+      // stable strings, equal to themselves on every read (frozen), and
+      // never replaced by the wrap's host seam output.
+      expect(built.sessionRoots.productRoot).toBe(initialProduct);
+      expect(built.sessionRoots.projectIdentityRoot).toBe(initialIdentity);
+      expect(built.sessionRoots.installRoot).toBe(initialInstall);
+      // Cross-rebind invariance: even if the cell gets written (which it
+      // doesn't in T4 because no consumer reads), the sessionRoots object
+      // is the immutable resolveSessionRoots output and is NOT aliased to
+      // the cell. `taskRoot` here is the initial sandboxRoot, NOT the
+      // seamResolved value — proving sessionRoots is the assembly-time
+      // snapshot, not a live reference.
+      expect(built.sessionRoots.taskRoot).toBe(initialTask);
+      expect(built.sessionRoots.taskRoot).not.toBe(seamResolved);
+
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
