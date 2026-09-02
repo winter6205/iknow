@@ -33,9 +33,7 @@ import {
   taskWorktreeOwnerOf,
   WORKTREE_ISOLATION_PREFIX,
 } from "../../../src/harness/isolation/worktree-gate.ts";
-import type {
-  GitRunner,
-} from "../../../src/harness/isolation/worktree-gate.ts";
+import type { GitRunner } from "../../../src/harness/isolation/worktree-gate.ts";
 import type {
   Executor,
   ToolCall,
@@ -55,7 +53,17 @@ function makeGitRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "iknow-wt-gate-"));
   roots.push(dir);
   git(dir, "init", "-q");
-  git(dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "init");
+  git(
+    dir,
+    "-c",
+    "user.email=t@t",
+    "-c",
+    "user.name=t",
+    "commit",
+    "--allow-empty",
+    "-qm",
+    "init"
+  );
   return dir;
 }
 
@@ -70,8 +78,19 @@ function fakeInner(result?: Partial<ToolExecutionResult>) {
     args: unknown[];
   }[] = [];
   const inner: Executor = {
-    executeAll: async (batch, signal, timeoutMs, conversationId, onSettled, turnId, onStream) => {
-      invocations.push({ calls: batch, args: [signal, timeoutMs, conversationId, onSettled, turnId, onStream] });
+    executeAll: async (
+      batch,
+      signal,
+      timeoutMs,
+      conversationId,
+      onSettled,
+      turnId,
+      onStream
+    ) => {
+      invocations.push({
+        calls: batch,
+        args: [signal, timeoutMs, conversationId, onSettled, turnId, onStream],
+      });
       const out: ToolExecutionResult[] = batch.map((c) => ({
         kind: "ok",
         toolUseId: c.id,
@@ -113,10 +132,16 @@ describe("createTaskWorktree", () => {
     // worktree registered with the repo
     expect(git(repo, "worktree", "list")).toContain(wtPath);
     // new branch exists and is checked out in the worktree, not the main repo
-    expect(git(repo, "rev-parse", "--verify", "refs/heads/iknow/task-x")).toContain(headBefore);
-    expect(git(wtPath, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe("iknow/task-x");
+    expect(
+      git(repo, "rev-parse", "--verify", "refs/heads/iknow/task-x")
+    ).toContain(headBefore);
+    expect(git(wtPath, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
+      "iknow/task-x"
+    );
     // main repo untouched (hard req ①/③: no HEAD move, no branch drag)
-    expect(git(repo, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(branchBefore);
+    expect(git(repo, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
+      branchBefore
+    );
     expect(git(repo, "rev-parse", "HEAD").trim()).toBe(headBefore);
   });
 
@@ -127,7 +152,11 @@ describe("createTaskWorktree", () => {
     const wtPath = join(plain, "wt");
 
     await expect(
-      createTaskWorktree({ repoRoot: plain, worktreePath: wtPath, branch: "iknow/task-x" })
+      createTaskWorktree({
+        repoRoot: plain,
+        worktreePath: wtPath,
+        branch: "iknow/task-x",
+      })
     ).rejects.toMatchObject({
       name: "WorktreeIsolationError",
       kind: "not_a_git_repo",
@@ -175,7 +204,11 @@ describe("createTaskWorktree", () => {
     const wtPath = join(repo, "wt");
 
     await expect(
-      createTaskWorktree({ repoRoot: repo, worktreePath: wtPath, branch: "iknow/task-x" })
+      createTaskWorktree({
+        repoRoot: repo,
+        worktreePath: wtPath,
+        branch: "iknow/task-x",
+      })
     ).rejects.toMatchObject({ kind: "branch_exists" });
     expect(existsSync(wtPath)).toBe(false);
     // the existing branch is untouched (not repointed, not overwritten)
@@ -187,11 +220,21 @@ describe("createTaskWorktree", () => {
     const wtPath = join(repo, "wt");
     writeFileSync(wtPath, "occupied");
     await expect(
-      createTaskWorktree({ repoRoot: repo, worktreePath: wtPath, branch: "iknow/task-fresh" })
+      createTaskWorktree({
+        repoRoot: repo,
+        worktreePath: wtPath,
+        branch: "iknow/task-fresh",
+      })
     ).rejects.toMatchObject({ kind: "worktree_exists" });
     let branchCreated = true;
     try {
-      git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/iknow/task-fresh");
+      git(
+        repo,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "refs/heads/iknow/task-fresh"
+      );
     } catch {
       branchCreated = false;
     }
@@ -228,23 +271,95 @@ describe("createTaskWorktree", () => {
 
 describe("classifyCall", () => {
   it("classifies write_file / edit_file as mutate", () => {
-    expect(classifyCall({ id: "1", name: "write_file", input: {} })).toBe("mutate");
-    expect(classifyCall({ id: "2", name: "edit_file", input: {} })).toBe("mutate");
+    expect(classifyCall({ id: "1", name: "write_file", input: {} })).toBe(
+      "mutate"
+    );
+    expect(classifyCall({ id: "2", name: "edit_file", input: {} })).toBe(
+      "mutate"
+    );
   });
 
   it("classifies bash by readonly command validation (SSOT validateReadonlyCommand)", () => {
-    expect(classifyCall({ id: "3", name: "bash", input: { command: "ls -la src" } })).toBe("read");
-    expect(classifyCall({ id: "4", name: "bash", input: { command: "cat a.txt" } })).toBe("read");
-    expect(classifyCall({ id: "5", name: "bash", input: { command: "rm -rf build" } })).toBe("mutate");
-    expect(classifyCall({ id: "6", name: "bash", input: { command: "echo x > f.txt" } })).toBe("mutate");
+    expect(
+      classifyCall({ id: "3", name: "bash", input: { command: "ls -la src" } })
+    ).toBe("read");
+    expect(
+      classifyCall({ id: "4", name: "bash", input: { command: "cat a.txt" } })
+    ).toBe("read");
+    expect(
+      classifyCall({
+        id: "5",
+        name: "bash",
+        input: { command: "rm -rf build" },
+      })
+    ).toBe("mutate");
+    expect(
+      classifyCall({
+        id: "6",
+        name: "bash",
+        input: { command: "echo x > f.txt" },
+      })
+    ).toBe("mutate");
     // non-string command → fail-closed mutate
-    expect(classifyCall({ id: "7", name: "bash", input: { command: 42 } })).toBe("mutate");
+    expect(
+      classifyCall({ id: "7", name: "bash", input: { command: 42 } })
+    ).toBe("mutate");
   });
 
   it("classifies other tools (read_file / grep / glob / web_fetch …) as read", () => {
-    for (const name of ["read_file", "grep", "glob", "web_fetch", "memory_recall"]) {
+    for (const name of [
+      "read_file",
+      "grep",
+      "glob",
+      "web_fetch",
+      "memory_recall",
+    ]) {
       expect(classifyCall({ id: "8", name, input: {} })).toBe("read");
     }
+  });
+
+  // T1 (plans/worktree-live-task-root.md §6 T1) — fail-open closure: the
+  // 5 symbol-mutate tools in `aci/tools/symbol-mutate.ts` write to disk via
+  // `writeFile` (lsp/applyWorkspaceEdit, see symbol-mutate.ts:333) but are
+  // NOT in the legacy `ALWAYS_MUTATE_TOOLS` 2-name set, so before T1 they
+  // slipped past the isolation gate and edited the main repo directly.
+  // After T1 the classifier SSOT is `FILE_WRITE_TOOL_NAMES` from
+  // `symbol-mutate.ts` (the single source of truth for "writes the workspace");
+  // the gate routes on that, so each name below must be a mutate.
+  it("T1 fail-open closure — every symbol-mutate tool is classified mutate (each name has its own assert)", () => {
+    const symbolMutateNames = [
+      "rename_symbol",
+      "replace_symbol_body",
+      "insert_before_symbol",
+      "insert_after_symbol",
+      "safe_delete_symbol",
+    ];
+    for (const name of symbolMutateNames) {
+      expect(
+        classifyCall({
+          id: `sym-${name}`,
+          name,
+          input: { file: "a.ts", symbol_path: "Foo" },
+        })
+      ).toBe("mutate");
+    }
+  });
+
+  // T1 fail-closed: the classifier's bash branch already fails closed to
+  // mutate on a non-string command (see the bash test above). The T1
+  // surface also adds `spawn_subagent`'s role metadata — a missing /
+  // unknown role must default to mutate (mirroring
+  // `__invalid_subagent_type__` in build-engine.ts:855-858). The
+  // gate-installed classifier (`classifyWithSubagentIsolation`) is the
+  // seam that owns that decision; here we pin the discipline so a future
+  // refactor that strips the fail-closed default turns red.
+  it("T1 fail-closed — bash with non-string / missing command defaults to mutate (registry-metadata-missing path)", () => {
+    expect(
+      classifyCall({ id: "bash-ns", name: "bash", input: { command: null } })
+    ).toBe("mutate");
+    expect(classifyCall({ id: "bash-undef", name: "bash", input: {} })).toBe(
+      "mutate"
+    );
   });
 });
 
@@ -253,9 +368,9 @@ describe("classifyCall", () => {
 describe("taskWorktreeOwnerOf", () => {
   it("decomposes `<any>/.iknow/worktrees/<conversationId>` into its owner", () => {
     expect(taskWorktreeOwnerOf("/repo/.iknow/worktrees/conv-1")).toBe("conv-1");
-    expect(taskWorktreeOwnerOf("/deep/nest/repo/.iknow/worktrees/abc-123")).toBe(
-      "abc-123"
-    );
+    expect(
+      taskWorktreeOwnerOf("/deep/nest/repo/.iknow/worktrees/abc-123")
+    ).toBe("abc-123");
   });
 
   it("returns undefined for main roots and non-task shapes", () => {
@@ -329,7 +444,9 @@ describe("createWorktreeIsolationExecutor", () => {
       },
       inner,
     });
-    const out = await gate.executeAll([{ id: "r1", name: "read_file", input: { path: "a" } }]);
+    const out = await gate.executeAll([
+      { id: "r1", name: "read_file", input: { path: "a" } },
+    ]);
     expect(calls).toHaveLength(1);
     expect(out[0]!.kind).toBe("ok");
   });
@@ -349,7 +466,9 @@ describe("createWorktreeIsolationExecutor", () => {
 
     const first = await gate.executeAll([writeCall()]);
     expect(first[0]!.kind).toBe("execution_failed");
-    expect(first[0]!.message!.startsWith(`${WORKTREE_ISOLATION_PREFIX} `)).toBe(true);
+    expect(first[0]!.message!.startsWith(`${WORKTREE_ISOLATION_PREFIX} `)).toBe(
+      true
+    );
     // the message points the model at the create-worktree ACI tool, NOT at an
     // auto-provision "end the turn and retry" protocol
     expect(first[0]!.message).toContain(CREATE_TASK_WORKTREE_TOOL_HINT);
@@ -475,7 +594,10 @@ describe("createWorktreeIsolationExecutor", () => {
       root: "/repo/.iknow/worktrees/conv-1",
       provision: async () => {
         attempts += 1;
-        throw new WorktreeIsolationError("not_a_git_repo", "not a git repository: /main");
+        throw new WorktreeIsolationError(
+          "not_a_git_repo",
+          "not a git repository: /main"
+        );
       },
       onError: (e) => observed.push(e),
       inner,
@@ -523,7 +645,15 @@ describe("createWorktreeIsolationExecutor", () => {
     });
     const controller = new AbortController();
     const settled: unknown[] = [];
-    await gate.executeAll([writeCall()], controller.signal, 1234, "conv-7", (r, i) => settled.push([r, i]), "turn-9", () => {});
+    await gate.executeAll(
+      [writeCall()],
+      controller.signal,
+      1234,
+      "conv-7",
+      (r, i) => settled.push([r, i]),
+      "turn-9",
+      () => {}
+    );
     expect(calls[0]!.args[0]).toBe(controller.signal);
     expect(calls[0]!.args[1]).toBe(1234);
     expect(calls[0]!.args[2]).toBe("conv-7");

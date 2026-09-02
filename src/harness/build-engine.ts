@@ -841,11 +841,18 @@ export async function buildHarnessEngine(
     },
   });
 
-  // T4 / ADR-0040: `spawn_subagent` is read-only only when the child's
+  // T1 / plans/worktree-live-task-root.md §6 T1 — fold-in: the workspace-
+  // mutation classifier SSOT lives in `classifyCall` (worktree-gate.ts) and
+  // routes on `FILE_WRITE_TOOL_NAMES` (symbol-mutate.ts). This override only
+  // adds the spawn_subagent-specific role-aware decision (ADR-0040); for
+  // every other tool name it composes with the SSOT, so there is no second
+  // truth source for "does this tool write the workspace".
+  //
+  // ADR-0040 / T4: `spawn_subagent` is read-only only when the child's
   // effective capability surface passes both dimensions from capability.ts.
-  // The role default mirrors spawn-subagent-tool.ts; malformed role values are
-  // deliberately mapped to an unknown role so the classifier stays fail-closed
-  // before the inner executor performs schema validation.
+  // The role default mirrors spawn-subagent-tool.ts; malformed role values
+  // are deliberately mapped to an unknown role so the classifier stays
+  // fail-closed before the inner executor performs schema validation.
   const classifyWithSubagentIsolation = (call: ToolCall): MutateClass => {
     if (call.name !== "spawn_subagent") return classifyCall(call);
     const input = (call.input ?? {}) as Record<string, unknown>;

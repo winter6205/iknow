@@ -36,6 +36,7 @@ import { existsSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { errorMessage } from "../errors.js";
 import { validateReadonlyCommand } from "../aci/tools/bash-readonly.js";
+import { FILE_WRITE_TOOL_NAMES } from "../aci/tools/symbol-mutate.js";
 import type {
   Executor,
   ToolCall,
@@ -246,17 +247,40 @@ export async function createTaskWorktree(
 
 export type MutateClass = "mutate" | "read";
 
-const ALWAYS_MUTATE_TOOLS = new Set(["write_file", "edit_file"]);
-
 /**
- * Deterministic workspace-mutation classifier (SSOT reuse): write_file /
- * edit_file are mutates; bash is a mutate unless its command passes the
- * readonly command validator (the same SSOT the readonly bash mode uses);
- * non-string bash commands fail closed to mutate; everything else is a read
- * path and stays on the main repo (reads may remain per contract).
+ * T1 (plans/worktree-live-task-root.md §6 T1) — workspace-mutation classifier
+ * SSOT. Single source of truth for "does this tool write to the workspace":
+ *
+ *   - the canonical list of workspace-writing tool names comes from
+ *     `FILE_WRITE_TOOL_NAMES` (symbol-mutate.ts), which is the SAME frozen
+ *     list the worker deny-list (catalog.ts) uses and the same set the
+ *     registry's Gate-3 append-only check enforces — one name → one
+ *     classification, no shadow copies;
+ *   - bash is a mutate unless its command passes the readonly command
+ *     validator (the same SSOT the readonly bash mode uses); non-string
+ *     bash commands fail closed to mutate;
+ *   - read-only tools (read_file / grep / glob / web_fetch / memory_recall /
+ *     etc.) and control / lifecycle tools (create-task-worktree /
+ *     spawn_subagent / todo_write / …) do not write workspace files and
+ *     default to `read`.
+ *
+ * Before T1 the gate used a hardcoded 2-name set (`ALWAYS_MUTATE_TOOLS`),
+ * which left the 5 symbol-mutate tools (`rename_symbol` etc.) unclassified
+ * → they passed the gate and edited the main repo directly (fail-open).
+ * T1 closes that hole by routing on `FILE_WRITE_TOOL_NAMES`, the same SSOT
+ * already used by the worker deny-list (catalog.ts) — one name → one
+ * classification, no shadow copies.
+ *
+ * Note on `spawn_subagent`: this default treats it as `read`, but the gate
+ * installed by `build-engine.ts:849-872` (`classifyWithSubagentIsolation`)
+ * overrides that with a role-aware decision (ADR-0040). That override
+ * belongs to the build-engine seam, not the SSOT classifier — it composes
+ * with this function via the `classify` opt.
  */
 export function classifyCall(call: ToolCall): MutateClass {
-  if (ALWAYS_MUTATE_TOOLS.has(call.name)) return "mutate";
+  if ((FILE_WRITE_TOOL_NAMES as ReadonlyArray<string>).includes(call.name)) {
+    return "mutate";
+  }
   if (call.name === "bash") {
     const command = (call.input as { command?: unknown } | null)?.command;
     if (typeof command !== "string") return "mutate";
