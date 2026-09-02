@@ -510,6 +510,12 @@ export async function buildHarnessEngine(
   // disabledServers 空）。
   const lspCtx: LspCtx = {
     directory: sandboxRoot,
+    // T8（D5, plans/worktree-live-task-root.md §6 T8）: LSP `directory` 走
+    // live taskRoot cell —— 装配期冻结的 sandboxRoot 仅为初值;rebind 后
+    // `getClient` 入口从 cell 读 `taskRoot` 作为 effective directory,
+    // NearestRoot 上界 stop 跟活根走。门禁未翻 ⇒ cell 初值 = sandboxRoot,
+    // `resolveDirectorySnapshot` 退回本字段冻结值,行为与今日逐字节一致。
+    directoryCell: liveTaskRoot,
     ...(settings.lsp?.requestTimeoutMs !== undefined
       ? { requestTimeoutMs: settings.lsp.requestTimeoutMs }
       : {}),
@@ -579,17 +585,28 @@ export async function buildHarnessEngine(
             // 子进程 cwd 是裸 task worktree 时那里没有 node_modules，cwd 相对
             // 解析会以 `Cannot find package 'tsx'` 崩掉。
             installRoot: sessionRoots.installRoot,
-            // T5 (hard req 7): 子代理继承父会话改绑后的根 —— 引擎被重建到
+            // T5 (hard req 7) + T8 (D6, plans/worktree-live-task-root.md §6 T8):
+            // 子代理继承父会话改绑后的根 —— 引擎被重建到
             // task worktree（hub buildProductionEngine / CLI rebuildDeps 把
             // cwd/workspaceRoot 切到 `<repo>/.iknow/worktrees/<convId>`）时，
             // worker 子进程以该根为 cwd 启动；未改绑（主仓根，非 task
             // worktree 形状）时不传 → 子进程继承父进程 cwd，行为与今日逐
             // 字节一致。worker 注册表从不携带 isolation 缝 → 子代理不触发
             // 第二棵树 / 二次 provision（worker-tool-surface 测试钉住）。
+            //
+            // T8 (D6) 与 T5 的区别:sessionRoot 不再写死 `workspaceRoot`——
+            // 改用 `() => liveTaskRoot.read()` 的 getter 形态，spawn closure
+            // 执行时再取值。rebind 后第一次 spawn 自动落到新 taskRoot,旧
+            // taskRoot 下不再生成新 worker（配合 manager sandboxRootCell 同
+            // 形态: 旧 root 的 def 校验会拒）。
             ...(taskWorktreeOwnerOf(workspaceRoot) !== undefined
-              ? { sessionRoot: workspaceRoot }
+              ? { sessionRoot: () => liveTaskRoot.read() }
               : {}),
           }),
+          // T8 (D6): manager 的父 sandboxRoot 上界也走活根 —— 同源逻辑,
+          // getter 形态让 buildWorkerPayload 入口读 cell current value,
+          // 旧根里 def.sandboxRoot 的 prefix-of-parent 校验自动拒绝。
+          sandboxRootCell: () => liveTaskRoot.read(),
           sandboxRoot,
           trace: opts.subagentTrace ?? createNoopTraceService(),
           diagnosticsDir:

@@ -135,13 +135,21 @@ export interface DefaultSubAgentSpawnOpts {
    */
   readonly projectIdentityRoot?: string;
   /**
-   * T5 (plans/worktree-isolation-model-provision.md, hard req 7): the worker
-   * child inherits the parent session's REBOUND root as its `cwd`, so writes
-   * and workspace-relative bash land in the same tree as the parent.
+   * T5 / T8 (plans/worktree-isolation-model-provision.md hard req 7 +
+   * plans/worktree-live-task-root.md §6 T8 D6): the worker child inherits
+   * the parent session's REBOUND root as its `cwd`, so writes and
+   * workspace-relative bash land in the same tree as the parent.
+   *
+   * Shape can be either `string` (frozen value) or `() => string` (live
+   * cell getter):
+   *  - string: build-time decision (legacy / un-rebind), byte-stable to today;
+   *  - getter: each spawn closure reads the cell current value, so rebind
+   *    before the next spawn automatically lands the worker in the new tree.
+   *
    * Undefined (unbound session / worker defaults) = no cwd option = the child
    * inherits the parent process cwd byte-identically to today.
    */
-  readonly sessionRoot?: string;
+  readonly sessionRoot?: string | (() => string);
   /**
    * T5 (plans/worktree-session-roots.md / ADR-0037 §4): iknow 自身的安装根 —
    * 子进程的 tsx loader 从它解析。**不是**用户项目的 `node_modules`，所以裸
@@ -157,6 +165,10 @@ export function createDefaultSubAgentSpawn(
   const { workspaceRoot, projectIdentityRoot, sessionRoot, installRoot } = opts;
   const resolvedTraceDir = resolveSubagentTraceDir(opts.traceDir);
   return (_def, _taskId, _stdinPayload) => {
+    // T8 (D6): sessionRoot 在 closure 执行时读 --
+    // string 时返回值不变;getter 时返回 cell 当前值,
+    // 允许 build-engine 把 build-time 决定换成 spawn-time 闭包。
+    const cwd = typeof sessionRoot === "function" ? sessionRoot() : sessionRoot;
     const child = spawn(
       process.execPath,
       resolveSubagentWorkerSpawnArgs({
@@ -176,7 +188,7 @@ export function createDefaultSubAgentSpawn(
             ? { [PRODUCT_ROOT_ENV_KEY]: projectIdentityRoot }
             : {}),
         },
-        ...(sessionRoot !== undefined ? { cwd: sessionRoot } : {}),
+        ...(cwd !== undefined ? { cwd } : {}),
       }
     );
     // manager 负责写 stdin（worker 协议：stdin 一行 envelope → stdout 一行 result）。

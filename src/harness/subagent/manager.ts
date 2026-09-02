@@ -372,6 +372,16 @@ export function createSubAgentManager(opts: {
    */
   readonly sandboxRoot?: string;
   /**
+   * T8（D6, plans/worktree-live-task-root.md §6 T8）: 可选 live cell getter
+   * —— `buildWorkerPayload` 入口读一次活根作为父 sandbox 上界。当 parent
+   * rebinds 时,manager 对 def.sandboxRoot 的 prefix-of-parent 校验随之迁移:
+   * 旧根里的 def 现在是新根之外,被 typed 拒绝,不会被误判为新根的合法子。
+   *
+   * 与 `sandboxRoot` 互斥:在场时优先于 `sandboxRoot`(getter read 在每次
+   * spawn 时都重算)。缺席 → 用 `sandboxRoot` 的冻结值(既有行为,逐字节不变)。
+   */
+  readonly sandboxRootCell?: () => string;
+  /**
    * #358 T4: 可选 TraceService — 子代理生命周期三类事件 (subagent_spawn /
    * subagent_state_change / subagent_stop) 落盘。注入则通过 safeTrace 包裹
    * 发埋点;不注入则零副作用 (与既有行为 byte-stable)。
@@ -889,8 +899,10 @@ export function createSubAgentManager(opts: {
 
   function buildWorkerPayload(def: SubAgentDefinition): WorkerEnvelope {
     // #357 T1: 所有 spawn 路径必经此单点校验。语义:
-    //   1. parentSandboxRoot = realpathSync(opts.sandboxRoot ?? process.cwd())
-    //      —— 父代理的工作域真值(resolve 父目录层可能含 symlink,例如 /var → /private/var
+    //   1. parentSandboxRoot 入口读一次:
+    //      - sandboxRootCell 在场 (T8 D6) → cell.read() (活根)
+    //      - 否则 realpathSync(opts.sandboxRoot ?? process.cwd()) (冻结值,旧路径)
+    //      父代理的工作域真值(resolve 父目录层可能含 symlink,例如 /var → /private/var
     //      on macOS),worker fs 工具沿用同一 resolved 值。
     //   2. def.sandboxRoot 缺席 → 写入 parentSandboxRoot(SC8:继承父根,不是 process.cwd())。
     //      父根 ≠ process.cwd() 的场景(主代理的 sandboxRoot ≠ 启动 cwd)下,这一变更
@@ -904,16 +916,24 @@ export function createSubAgentManager(opts: {
     //      合同,fail-closed 优先,不试图区分 `..foo` vs `..` / `../`)。
     let parentSandboxRoot: string;
     try {
-      parentSandboxRoot = realpathSync(opts.sandboxRoot ?? process.cwd());
+      const candidate =
+        opts.sandboxRootCell !== undefined
+          ? opts.sandboxRootCell()
+          : (opts.sandboxRoot ?? process.cwd());
+      parentSandboxRoot = realpathSync(candidate);
     } catch (err) {
       // opts.sandboxRoot 本身存在但不可 realpath(罕见;主代理装配通常与 cwd 同) →
       // 不可推断父根,直接 typed 拒绝。
+      const candidate =
+        opts.sandboxRootCell !== undefined
+          ? opts.sandboxRootCell()
+          : (opts.sandboxRoot ?? process.cwd());
       if (
         (err as NodeJS.ErrnoException).code === "ENOENT" ||
         (err as NodeJS.ErrnoException).code === "ENOTDIR"
       ) {
         throw new SubAgentSandboxRootError({
-          parentSandboxRoot: opts.sandboxRoot ?? process.cwd(),
+          parentSandboxRoot: candidate,
           requested: def.sandboxRoot ?? "(inherited from parent)",
         });
       }
