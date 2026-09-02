@@ -11,6 +11,37 @@ import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// #861 renamed the discovery root: `cwd` is display-only and must never be
+// where AGENTS.md / rules are discovered (ADR-0037 §4).
+describe("projectIdentityRoot drives static instructions", () => {
+  it("项目说明书取自 projectIdentityRoot 而非展示用 cwd", async () => {
+    const identityRoot = await mkdtemp(join(tmpdir(), "iknow-identity-root-"));
+    const taskRoot = await mkdtemp(join(tmpdir(), "iknow-display-cwd-"));
+    const userHome = await mkdtemp(join(tmpdir(), "iknow-split-home-"));
+    try {
+      await writeFile(join(identityRoot, "AGENTS.md"), "IDENTITY_ROOT_MARKER");
+      await writeFile(join(taskRoot, "AGENTS.md"), "DISPLAY_CWD_MARKER");
+      const resolver = createIknowSystemResolver({
+        cwd: taskRoot,
+        projectIdentityRoot: identityRoot,
+        userHome,
+        surface: "ask",
+        memoryEnabled: false,
+        staticInstructions: true,
+      });
+
+      const out = (await resolver()) ?? "";
+
+      expect(out).toContain("IDENTITY_ROOT_MARKER");
+      expect(out).not.toContain("DISPLAY_CWD_MARKER");
+    } finally {
+      await rm(identityRoot, { recursive: true, force: true });
+      await rm(taskRoot, { recursive: true, force: true });
+      await rm(userHome, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("memory_layer slot — resolver 降级契约", () => {
   afterEach(() => vi.restoreAllMocks());
 

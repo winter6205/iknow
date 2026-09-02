@@ -23,17 +23,20 @@ const mockedAssemble = spiedAssemble as unknown as Mock<typeof spiedAssemble>;
 
 const roots: string[] = [];
 
+// #861: this context has no `cwd` — project AGENTS.md / rules are discovered
+// from the required `projectIdentityRoot`, so fixtures must name that member.
 async function makeContext() {
   const root = await mkdtemp(join(tmpdir(), "iknow-refresh-"));
   roots.push(root);
-  const cwd = join(root, "project");
+  const projectIdentityRoot = join(root, "project");
   const userHome = join(root, "home");
   const memoryDir = join(root, "memory");
-  await Promise.all([mkdir(cwd), mkdir(userHome), mkdir(memoryDir)]);
-  // AssemblyContext requires projectIdentityRoot (#861/#862 baseline debt — see
-  // plan trace-mcp-read-side-split item 6). cwd doubles as the project identity
-  // root here because the fixture has only one project root.
-  return { cwd, projectIdentityRoot: cwd, userHome, memoryDir };
+  await Promise.all([
+    mkdir(projectIdentityRoot),
+    mkdir(userHome),
+    mkdir(memoryDir),
+  ]);
+  return { projectIdentityRoot, userHome, memoryDir };
 }
 
 async function tick(): Promise<void> {
@@ -50,7 +53,7 @@ afterEach(async () => {
 describe("createSystemResolver", () => {
   it("returns the cached system when tracked mtimes are unchanged (zero reassembly)", async () => {
     const ctx = await makeContext();
-    await writeFile(join(ctx.cwd, "AGENTS.md"), "project-v1");
+    await writeFile(join(ctx.projectIdentityRoot, "AGENTS.md"), "project-v1");
     const resolver = createSystemResolver(ctx);
     expect(await resolver()).toContain("project-v1");
     // Second call: no mtime change → schemaREADME cache hit, no disk reassembly.
@@ -60,7 +63,7 @@ describe("createSystemResolver", () => {
 
   it("refreshes when a project AGENTS.md mtime changes", async () => {
     const ctx = await makeContext();
-    const agents = join(ctx.cwd, "AGENTS.md");
+    const agents = join(ctx.projectIdentityRoot, "AGENTS.md");
     await writeFile(agents, "project-v1");
     const resolver = createSystemResolver(ctx);
     await resolver();
@@ -71,7 +74,10 @@ describe("createSystemResolver", () => {
 
   it("keeps system content stable across cache hits", async () => {
     const ctx = await makeContext();
-    await writeFile(join(ctx.cwd, "AGENTS.md"), "stable-project");
+    await writeFile(
+      join(ctx.projectIdentityRoot, "AGENTS.md"),
+      "stable-project"
+    );
     const resolver = createSystemResolver(ctx);
     const first = await resolver();
     expect(await resolver()).toBe(first);
@@ -83,7 +89,7 @@ describe("createSystemResolver", () => {
     // rule's mtime change triggers re-discovery" — assert on the path
     // appearing in the manifest instead of on rule text.
     const ctx = await makeContext();
-    const projectRules = join(ctx.cwd, ".iknow", "rules");
+    const projectRules = join(ctx.projectIdentityRoot, ".iknow", "rules");
     const userRules = join(ctx.userHome, ".iknow", "rules");
     await Promise.all([
       mkdir(projectRules, { recursive: true }),
@@ -96,17 +102,30 @@ describe("createSystemResolver", () => {
       writeFile(userRule, "user-rule-v1"),
     ]);
     const resolver = createSystemResolver(ctx);
-    await resolver();
+    const first = await resolver();
+    // #841 T6: the parent opener carries rules as a manifest, so the listed
+    // paths — not the bodies — are what prove both scopes are tracked.
+    expect(first).toContain(projectRule);
+    expect(first).toContain(userRule);
     await tick();
     await writeFile(userRule, "user-rule-v2");
-    const refreshed = await resolver();
-    expect(refreshed).toContain(userRule);
-    expect(refreshed).toContain(projectRule);
+    const second = await resolver();
+    // 只有 user rule 的 mtime 变了 → 重新装配后两个 scope 的清单条目都必须在。
+    expect(second).toContain(projectRule);
+    expect(second).toContain(userRule);
+    // Only one tracked rule file changed → assembly must still re-run.
+    expect(spiedAssemble).toHaveBeenCalledTimes(2);
+    await tick();
+    // 反向独立：只改 project rule 也必须触发重装配，否则单 scope 的
+    // tracker 也能过这条用例。
+    await writeFile(projectRule, "project-rule-v2");
+    expect(await resolver()).toContain(projectRule);
+    expect(spiedAssemble).toHaveBeenCalledTimes(3);
   });
 
   it("treats a deleted tracked file as absent without throwing", async () => {
     const ctx = await makeContext();
-    const agents = join(ctx.cwd, "AGENTS.md");
+    const agents = join(ctx.projectIdentityRoot, "AGENTS.md");
     await writeFile(agents, "removed-content");
     const resolver = createSystemResolver(ctx);
     await resolver();
@@ -118,7 +137,7 @@ describe("createSystemResolver", () => {
 
   it("tracks userHome AGENTS.md even when workspaceRoot is set", async () => {
     const base = await makeContext();
-    const workspaceRoot = join(base.cwd, "..", "workspace");
+    const workspaceRoot = join(base.projectIdentityRoot, "..", "workspace");
     await mkdir(workspaceRoot, { recursive: true });
     const ctx = { ...base, workspaceRoot };
     const userAgents = join(ctx.userHome, ".iknow", "AGENTS.md");
@@ -134,10 +153,13 @@ describe("createSystemResolver", () => {
 
   it("ignores workspaceRoot/.iknow/AGENTS.md as a user layer", async () => {
     const base = await makeContext();
-    const workspaceRoot = join(base.cwd, "..", "workspace");
+    const workspaceRoot = join(base.projectIdentityRoot, "..", "workspace");
     await mkdir(join(workspaceRoot, ".iknow"), { recursive: true });
     await writeFile(join(workspaceRoot, ".iknow", "AGENTS.md"), "ws-agents");
-    await writeFile(join(base.cwd, "AGENTS.md"), "project-only");
+    await writeFile(
+      join(base.projectIdentityRoot, "AGENTS.md"),
+      "project-only"
+    );
 
     const resolved = await createSystemResolver({ ...base, workspaceRoot })();
     expect(resolved).toContain("project-only");
@@ -146,9 +168,9 @@ describe("createSystemResolver", () => {
 
   it("does not throw when the userHome layer is absent", async () => {
     const base = await makeContext();
-    const workspaceRoot = join(base.cwd, "..", "workspace");
+    const workspaceRoot = join(base.projectIdentityRoot, "..", "workspace");
     await mkdir(workspaceRoot, { recursive: true });
-    await writeFile(join(base.cwd, "AGENTS.md"), "project-v1");
+    await writeFile(join(base.projectIdentityRoot, "AGENTS.md"), "project-v1");
 
     const resolver = createSystemResolver({ ...base, workspaceRoot });
     await expect(resolver()).resolves.toContain("project-v1");
@@ -158,7 +180,10 @@ describe("createSystemResolver", () => {
 
   it("dedupes concurrent first-call assembly (no duplicate discover/assemble)", async () => {
     const ctx = await makeContext();
-    await writeFile(join(ctx.cwd, "AGENTS.md"), "concurrent-v1");
+    await writeFile(
+      join(ctx.projectIdentityRoot, "AGENTS.md"),
+      "concurrent-v1"
+    );
     const resolver = createSystemResolver(ctx);
     // 同一 tick 内派发多个并发调用 —— serve 多会话共享同一 resolver 时会发生。
     const results = await Promise.all([
@@ -174,7 +199,7 @@ describe("createSystemResolver", () => {
 
   it("does not poison the cache when assembleSystemPrompt throws (next call retries)", async () => {
     const ctx = await makeContext();
-    await writeFile(join(ctx.cwd, "AGENTS.md"), "retry-v1");
+    await writeFile(join(ctx.projectIdentityRoot, "AGENTS.md"), "retry-v1");
     // 第一次装配失败 + 第二次成功
     mockedAssemble
       .mockRejectedValueOnce(new Error("transient failure"))

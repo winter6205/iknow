@@ -4,7 +4,7 @@
  *  行为真值 (docs/plans/361-subagent-v1.5-foreground-spawn-contract.md
  *  「引导层（T8）硬约束」节):
  *
- *   - 加性段:置于 IKNOW_ASSEMBLY_ORDER 五段 LOCKED 之后、skills / projectPath
+ *   - 加性段:置于 IKNOW_ASSEMBLY_ORDER 六段 LOCKED 之后、skills / projectPath
  *     加性段之末,不触碰 LOCKED 顺序;复用 projectPathSegment / skillsSegment
  *     加性段模式 (缺席 → 字节级零变化,守 KV 缓存稳定契约)。
  *

@@ -76,16 +76,9 @@ const memoryEntry = (
   updated_at: "2026-01-01T00:00:00.000Z",
 });
 
+/** The module `cwd` temp dir plays the project-identity-root role (#861). */
 function ctx(overrides?: Partial<AssemblyContext>): AssemblyContext {
-  // AssemblyContext requires projectIdentityRoot (#861/#862 baseline debt —
-  // see plan trace-mcp-read-side-split item 6). cwd doubles as the project
-  // identity root because the fixture has only one project root.
-  return {
-    projectIdentityRoot: cwd,
-    userHome,
-    memoryDir,
-    ...overrides,
-  };
+  return { projectIdentityRoot: cwd, userHome, memoryDir, ...overrides };
 }
 
 // -- three-layer assembly order ---------------------------------------------
@@ -149,20 +142,21 @@ describe("assembleSystemPrompt", () => {
   });
 
   it("orders rules by filename asc within each layer", async () => {
-    // #841 T6: parent opener renders the rules index as a manifest (paths
-    // only), so the ordering assertion looks for the file paths themselves,
-    // not for the rule body text. The contract — `aaa.md` before `zzz.md` —
-    // is preserved either way.
-    await mkdirP(join(cwd, ".iknow", "rules"));
-    await write(join(cwd, ".iknow", "rules", "zzz.md"), "LATE");
-    await write(join(cwd, ".iknow", "rules", "aaa.md"), "EARLY");
+    const rulesDir = join(cwd, ".iknow", "rules");
+    await mkdirP(rulesDir);
+    const latePath = join(rulesDir, "zzz.md");
+    const earlyPath = join(rulesDir, "aaa.md");
+    await write(latePath, "LATE");
+    await write(earlyPath, "EARLY");
 
     const out = await assembleSystemPrompt(ctx());
-    const earlyPath = join(cwd, ".iknow", "rules", "aaa.md");
-    const latePath = join(cwd, ".iknow", "rules", "zzz.md");
-    assert.ok(out.includes(earlyPath));
-    assert.ok(out.includes(latePath));
-    assert.ok(out.indexOf(earlyPath) < out.indexOf(latePath));
+    // "manifest" mode lists rule paths, never bodies (#841 T6) — the asc
+    // contract is now pinned on the index entry order.
+    const early = out.indexOf(earlyPath);
+    const late = out.indexOf(latePath);
+    assert.notEqual(early, -1, "aaa.md listed");
+    assert.notEqual(late, -1, "zzz.md listed");
+    assert.ok(early < late, "rules sorted by filename asc");
   });
 
   // -- existence pointer -----------------------------------------------------
@@ -284,32 +278,33 @@ describe("assembleSystemPrompt", () => {
   it("reads the user layer from userHome even when workspaceRoot is set", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "assembly-ws-"));
     written.push(workspaceRoot);
+    const wsRule = join(workspaceRoot, ".iknow", "rules", "ws1.md");
+    const userRule = join(userHome, ".iknow", "rules", "user1.md");
     await mkdirP(join(workspaceRoot, ".iknow", "rules"));
     await write(join(workspaceRoot, ".iknow", "AGENTS.md"), "WS AGENTS");
-    await write(join(workspaceRoot, ".iknow", "rules", "ws1.md"), "WS RULE");
+    await write(wsRule, "WS RULE");
     await mkdirP(join(userHome, ".iknow", "rules"));
     await write(join(userHome, ".iknow", "AGENTS.md"), "USER AGENTS");
-    await write(join(userHome, ".iknow", "rules", "user1.md"), "USER RULE");
+    await write(userRule, "USER RULE");
     await write(join(cwd, "AGENTS.md"), "PROJECT AGENTS");
 
     const out = await assembleSystemPrompt(ctx({ workspaceRoot }));
 
     assert.ok(out.includes("USER AGENTS"), "user AGENTS.md from userHome");
-    // #841 T6: rule bodies are not in the parent opener anymore — assert on
-    // the user-rule path appearing in the manifest instead, then on the WS
-    // rule path staying absent.
+    // #841 T6: rules enter as a manifest, so root provenance is pinned on the
+    // listed path rather than on body text.
+    assert.ok(out.includes(userRule), "user rules discovered from userHome");
     assert.ok(
-      out.includes(join(userHome, ".iknow", "rules", "user1.md")),
-      "user rule path listed under userHome"
+      out.includes("PROJECT AGENTS"),
+      "project layer still from projectIdentityRoot"
     );
-    assert.ok(out.includes("PROJECT AGENTS"), "project layer still from cwd");
     assert.ok(out.includes(PRIORITY_DECLARATION), "priority declaration kept");
     assert.ok(
       !out.includes("WS AGENTS"),
       "workspaceRoot/.iknow/AGENTS.md is not a user layer"
     );
     assert.ok(
-      !out.includes(join(workspaceRoot, ".iknow", "rules", "ws1.md")),
+      !out.includes(wsRule),
       "workspaceRoot/.iknow/rules is not a user layer"
     );
     assert.ok(

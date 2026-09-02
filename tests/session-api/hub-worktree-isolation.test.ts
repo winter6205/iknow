@@ -37,7 +37,10 @@ import { join } from "node:path";
 import { SessionHub } from "../../src/session-api/hub.ts";
 import { SessionStore } from "../../src/session-api/store/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
-import type { LoopEngineDeps, ToolExecutionResult } from "../../src/harness/index.ts";
+import type {
+  LoopEngineDeps,
+  ToolExecutionResult,
+} from "../../src/harness/index.ts";
 import { McpLifecycleError } from "../../src/harness/errors.ts";
 import type {
   McpManager,
@@ -65,7 +68,17 @@ function makeGitRepo(): string {
   // is gitignored, so the nested task checkout never pollutes git status.
   writeFileSync(join(dir, ".gitignore"), ".iknow/\n", "utf8");
   git(dir, "add", ".gitignore");
-  git(dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "init");
+  git(
+    dir,
+    "-c",
+    "user.email=t@t",
+    "-c",
+    "user.name=t",
+    "commit",
+    "--allow-empty",
+    "-qm",
+    "init"
+  );
   return dir;
 }
 
@@ -73,7 +86,10 @@ async function setSettingsIsolation(enabled: boolean): Promise<void> {
   // installTestSettingsSource redirects HOME to a tmp .iknow; merge the
   // isolation switch into the same settings.json the startup load point reads.
   const settingsPath = join(settingsSource.home, ".iknow", "settings.json");
-  const raw = JSON.parse(await readFile(settingsPath, "utf8")) as Record<string, unknown>;
+  const raw = JSON.parse(await readFile(settingsPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
   raw["isolation"] = { worktreeOnMutate: enabled };
   await writeFile(settingsPath, JSON.stringify(raw), "utf8");
 }
@@ -94,7 +110,9 @@ afterAll(async () => {
   for (const r of roots) rmSync(r, { recursive: true, force: true });
 });
 
-async function makeHubWithSession(repo: string): Promise<{ hub: SessionHub; conversationId: string }> {
+async function makeHubWithSession(
+  repo: string
+): Promise<{ hub: SessionHub; conversationId: string }> {
   const hub = new SessionHub({ store, askUser: createNoAskUser() });
   await hub.bindWorkspace(repo);
   const { session } = await hub.createSession();
@@ -119,7 +137,12 @@ async function runMutate(
   deps: LoopEngineDeps,
   conversationId: string
 ): Promise<ToolExecutionResult> {
-  const [result] = await deps.executor.executeAll([writeCall], undefined, undefined, conversationId);
+  const [result] = await deps.executor.executeAll(
+    [writeCall],
+    undefined,
+    undefined,
+    conversationId
+  );
   return result;
 }
 
@@ -152,6 +175,20 @@ async function persistDirtyRoot(
     priorMessages: session.messages,
   });
 }
+
+/**
+ * These suites shell out to real `git` (init / worktree add / status), so their
+ * wall time is a function of who else wants the 4 cores: `maxForks: 3` lets
+ * three files contend, and Vitest's 5s `testTimeout` is a wall-clock budget.
+ * Same code, same cases, two runs — 302–868ms per test when the box is quiet,
+ * but 4152 / 4700 / 5964ms for three adjacent cases in the contended baseline
+ * run, the last of which reported `Test timed out in 5000ms`. So the budget is
+ * contention insurance, not inherent slowness.
+ * setConfig (file-scoped — it cannot leak into other files) rather than
+ * per-describe options: an inserted options argument makes prettier re-indent
+ * every large describe body and buries the change.
+ */
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
 
 // -- switch ON -----------------------------------------------------------------
 
@@ -197,7 +234,10 @@ describe("worktree isolation wiring (switch ON)", () => {
 
     // T4 simulation: the model calls the create-task-worktree ACI tool, which
     // goes through the same host provision seam (create + session rebind)
-    const reboundRoot = await hub.provisionWorktree({ conversationId, root: repo });
+    const reboundRoot = await hub.provisionWorktree({
+      conversationId,
+      root: repo,
+    });
     await persistDirtyRoot(hub, conversationId);
     expect(reboundRoot).toBe(join(repo, ".iknow", "worktrees", conversationId));
     expect(git(repo, "worktree", "list")).toContain(reboundRoot);
@@ -253,7 +293,10 @@ describe("worktree isolation wiring (T4 — passthrough)", () => {
     // T3/T4 flow: gate blocks on the main repo; the model calls the
     // create-task-worktree ACI tool → provision seam creates tree + rebind
     await ensure(hub, repo);
-    const reboundRoot = await hub.provisionWorktree({ conversationId, root: repo });
+    const reboundRoot = await hub.provisionWorktree({
+      conversationId,
+      root: repo,
+    });
     await persistDirtyRoot(hub, conversationId);
     const worktreesBefore = git(repo, "worktree", "list");
 
@@ -312,7 +355,10 @@ describe("worktree isolation wiring (T4 — passthrough)", () => {
     git(repo, "worktree", "add", manualWt, "-b", "manual-hub-x");
     const { hub, conversationId } = await makeHubWithSession(repo);
     const file = await store.load(conversationId);
-    await store.save({ id: conversationId, file: { ...file, workspaceRoot: manualWt } });
+    await store.save({
+      id: conversationId,
+      file: { ...file, workspaceRoot: manualWt },
+    });
     // Engine assembly lazily materializes the per-root state anchor
     // (`<root>/.iknow`, gitignored) via a fire-and-forget async — it races
     // with the readdir compares below. The contract under test is zero
@@ -368,7 +414,10 @@ describe("worktree isolation wiring (switch OFF)", () => {
     git(repo, "worktree", "add", manualWt, "-b", "manual-hub-off");
     const { hub, conversationId } = await makeHubWithSession(repo);
     const file = await store.load(conversationId);
-    await store.save({ id: conversationId, file: { ...file, workspaceRoot: manualWt } });
+    await store.save({
+      id: conversationId,
+      file: { ...file, workspaceRoot: manualWt },
+    });
 
     const deps = await ensure(hub, manualWt);
     const result = await runMutate(deps, conversationId);
@@ -784,9 +833,7 @@ describe("T7 — hub active-root MCP reload transaction", () => {
         inFlight -= 1;
       },
       shutdown: async () => {},
-      status: () => [
-        { name: "s", state: "connected", source: "project" },
-      ],
+      status: () => [{ name: "s", state: "connected", source: "project" }],
       listResources: async () => ({ resources: [], perServer: [] }),
       readResource: async () => ({ contents: [] }),
     };
@@ -838,9 +885,7 @@ describe("T7 — hub active-root MCP reload transaction", () => {
         throw new Error("boom mid reload");
       },
       shutdown: async () => {},
-      status: () => [
-        { name: "only", state: "connected", source: "project" },
-      ],
+      status: () => [{ name: "only", state: "connected", source: "project" }],
       listResources: async () => ({ resources: [], perServer: [] }),
       readResource: async () => ({ contents: [] }),
     };
@@ -1013,9 +1058,7 @@ function privateHub(hub: SessionHub): HubPrivate {
 
 function completedResult(
   messages: ReadonlyArray<AnthropicNativeMessage> = []
-): HubPrivate["conditionalSave"] extends (
-  opts: infer T
-) => Promise<boolean>
+): HubPrivate["conditionalSave"] extends (opts: infer T) => Promise<boolean>
   ? T extends { result: infer R }
     ? R
     : never
@@ -1104,12 +1147,10 @@ describe("workspace-root-required T3 — Hub dirty-root conditional save", () =>
       provisionedRoot: reboundRoot,
     });
     const session = await store.load(conversationId);
-    const failedSave = vi
-      .spyOn(store, "save")
-      .mockRejectedValueOnce({
-        kind: "write_failed",
-        conversation_id: conversationId,
-      });
+    const failedSave = vi.spyOn(store, "save").mockRejectedValueOnce({
+      kind: "write_failed",
+      conversation_id: conversationId,
+    });
 
     await expect(
       privateApi.conditionalSave({
@@ -1268,9 +1309,13 @@ describe("worktree isolation wiring (T4 — create-task-worktree ACI tool)", () 
     expect(result.message).toContain("kind=worktree_exists");
 
     // the leftover tree is untouched, no branch created, no rebind
-    expect(readFileSync(join(leftover, "sentinel.txt"), "utf8")).toBe("leftover");
+    expect(readFileSync(join(leftover, "sentinel.txt"), "utf8")).toBe(
+      "leftover"
+    );
     expect(git(repo, "worktree", "list")).toBe(worktreesBefore);
-    expect(git(repo, "branch", "--list", `iknow/task-${conversationId}`)).toBe("");
+    expect(git(repo, "branch", "--list", `iknow/task-${conversationId}`)).toBe(
+      ""
+    );
     expect((await store.load(conversationId)).workspaceRoot).toBe(repo);
     expect(git(repo, "status", "--porcelain")).toBe("");
   });
