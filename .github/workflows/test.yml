@@ -119,13 +119,7 @@ jobs:
             --exclude tests/harness/mcp/zero-linkage-guard.test.ts \
             --exclude tests/harness/mcp/build-engine-mcp-overview.test.ts \
             --exclude tests/harness/sandbox/runner.test.ts \
-            --exclude tests/subagent/envelope-freeze.test.ts \
-            # tests/mcp/rebind-dual-root-smoke.test.ts — stdio MCP connect flake on
-            # CI runners under load ("server rebind_echo failed before connected:
-            # Connection closed" with --retry 1 still red). Not bwrap-dependent;
-            # pure timing sensitivity around process spawn + 10s waitForConnected
-            # ceiling. Passes locally in ~3s. Excluded from CI, local WSL owns it.
-            --exclude tests/mcp/rebind-dual-root-smoke.test.ts
+            --exclude tests/subagent/envelope-freeze.test.ts
 
   # 全量兜底（nightly cron + manual dispatch）。内容 = 原 test job。
   test-full:
@@ -221,10 +215,4 @@ jobs:
             --exclude tests/harness/mcp/zero-linkage-guard.test.ts \
             --exclude tests/harness/mcp/build-engine-mcp-overview.test.ts \
             --exclude tests/harness/sandbox/runner.test.ts \
-            --exclude tests/subagent/envelope-freeze.test.ts \
-            # tests/mcp/rebind-dual-root-smoke.test.ts — stdio MCP connect flake on
-            # CI runners under load ("server rebind_echo failed before connected:
-            # Connection closed" with --retry 1 still red). Not bwrap-dependent;
-            # pure timing sensitivity around process spawn + 10s waitForConnected
-            # ceiling. Passes locally in ~3s. Excluded from CI, local WSL owns it.
-            --exclude tests/mcp/rebind-dual-root-smoke.test.ts
+            --exclude tests/subagent/envelope-freeze.test.ts

@@ -4,7 +4,7 @@
 
 分支 `worktree-trace-mcp-read-side-split` 已开 PR #867 (`feat(trace): read side along three axes, char cap retired`)，T1–T8 全部交付并合入本分支。
 
-**待解决（CI 上 PR 卡红，不阻塞 merge 但 review 看不到绿色）**：
+**已解决（见下节「已定案」，master `fa62a2c4`）**：
 `tests/mcp/rebind-dual-root-smoke.test.ts` 在 CI runner 上稳定失败，本地全绿，**master CI 也失败同一个 test**（run `33605009955` / `33603404967` / `33594305386` 三连失败，与本 PR 无关）。本分支已尝试 exclude 但 vitest 仍把 test 拉进 runner（详 §未解决的 CI flake）。
 
 ## 本 session 落地
@@ -27,7 +27,22 @@ npx tsx scripts/ci-check-test-excludes.ts            => EXIT 0 (41 bwrap-depende
 
 PR #867 body 已重写，列出 baseline-debt commit 与四个细节。
 
-## 未解决的 CI flake
+## 已定案：不是 flake，是 CI Node 20 跑不了 .ts fixture（master `fa62a2c4` 修掉）
+
+下文「flake / vitest exclude 不生效」两个假设都不对，留档对照：
+
+- **真根因**：`tests/mcp/rebind-dual-root-smoke.test.ts` 用裸 `process.execPath`
+  拉起 `tests/fixtures/mcp-server/server.ts`。本地 Node 22.18+ 默认 type
+  stripping 能直接跑 `.ts`，CI 的 Node 20 不能 → 子进程
+  `ERR_UNKNOWN_FILE_EXTENSION` 秒死 → manager 侧报 connect 失败。与负载/时序无关。
+- **exclude 为何没生效**：commit `1a2cbfb5` 把注释写进了 `\` 续行块里，
+  `--exclude ... \` + 下一行 `# ...` 被 bash 拼成同一逻辑行后整段成注释，
+  最后那行 `--exclude tests/mcp/rebind-dual-root-smoke.test.ts` 反而变成独立命令。
+- **修法**（master `fa62a2c4`）：按 `src/harness/subagent/spawn.ts` 的既有模式，
+  从 repo 根解析 tsx loader 后 `--import` 注入（子进程 cwd 是临时 worktree，
+  裸 `tsx` 说明符解析不到）。本分支同时撤掉 `1a2cbfb5` 的 exclude。
+
+## 原始记录（假设已被推翻）
 
 **Symptom**：`tests/mcp/rebind-dual-root-smoke.test.ts > smoke — dual-root MCP after rebind > config from productRoot + stdio cwd=worktree + real fixture connect` 在 CI runner 上稳定失败，本地全绿（3s）。
 
