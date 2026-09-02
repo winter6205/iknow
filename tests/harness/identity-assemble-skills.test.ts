@@ -37,15 +37,23 @@ afterAll(async () => {
 function baseCtx(): AssemblyContext {
   return {
     cwd: process.cwd(),
+    projectIdentityRoot: process.cwd(),
     userHome: workDir,
     bootstrapActive: false,
+    memoryEnabled: false,
   };
 }
 
 describe("<available_skills> additive segment", () => {
-  it("does not touch IKNOW_ASSEMBLY_ORDER (array reference is preserved)", () => {
-    const snapshot = [...IKNOW_ASSEMBLY_ORDER];
-    expect(IKNOW_ASSEMBLY_ORDER).toEqual(snapshot);
+  it("不触碰 IKNOW_ASSEMBLY_ORDER (LOCKED 顺序保持 6 段)", () => {
+    expect([...IKNOW_ASSEMBLY_ORDER]).toEqual([
+      "identity",
+      "soul",
+      "usage",
+      "user_profile",
+      "bootstrap",
+      "memory_layer",
+    ]);
   });
 
   it("does not render a skills segment when the seam is absent (byte-identical to baseline)", async () => {

@@ -16,6 +16,18 @@ import {
 
 const scratchPaths: string[] = [];
 
+/**
+ * The scan-cap case below writes and then reads a 10,001-row fixture, because
+ * `QUERY_TRACE_MAX_RECORD_ID_SCAN = 10_000` is the contract it pins: the target
+ * id sits one row past the cap, so the scan has to run to exhaustion. That one
+ * case costs 2.5s on an idle core but measured 5158ms inside a full 385-file
+ * `npm test` — over the 5000ms default. The fork pool (`maxForks: 3` on 4
+ * cores) decides whether it lands above or below, which is why #864 saw it fail
+ * in the full run and pass standalone. Not state pollution: the fixtures are
+ * mkdtemp-only, and `pool: "forks"` runs each file in its own process.
+ */
+const SCAN_CAP_TEST_TIMEOUT = 20_000;
+
 function makeTraceDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "iknow-query-trace-"));
   scratchPaths.push(dir);
@@ -204,31 +216,37 @@ describe("query_trace ACI tool", () => {
     );
   });
 
-  it("distinguishes a missing record_id from an exhausted record_id scan", async () => {
-    const missingOutput = (await createQueryTraceTool(makeTraceDir()).handler({
-      conversation_id: "c1",
-      record_id: "not-present",
-    })) as string;
-    const missingBody = JSON.parse(missingOutput) as {
-      records: Array<Record<string, unknown>>;
-      total: number;
-    };
-
-    assert.equal(missingBody.records.length, 0);
-    assert.equal(missingBody.total, 0);
-
-    const tool = createQueryTraceTool(makeTraceDirWithRecordPastScanCap());
-    await assert.rejects(
-      () =>
-        tool.handler({
+  it(
+    "distinguishes a missing record_id from an exhausted record_id scan",
+    { timeout: SCAN_CAP_TEST_TIMEOUT },
+    async () => {
+      const missingOutput = (await createQueryTraceTool(makeTraceDir()).handler(
+        {
           conversation_id: "c1",
-          record_id: "past-scan-cap",
-        }),
-      (error: unknown) =>
-        error instanceof ToolExecutionError &&
-        error.message.includes("record_id scan exhausted")
-    );
-  });
+          record_id: "not-present",
+        }
+      )) as string;
+      const missingBody = JSON.parse(missingOutput) as {
+        records: Array<Record<string, unknown>>;
+        total: number;
+      };
+
+      assert.equal(missingBody.records.length, 0);
+      assert.equal(missingBody.total, 0);
+
+      const tool = createQueryTraceTool(makeTraceDirWithRecordPastScanCap());
+      await assert.rejects(
+        () =>
+          tool.handler({
+            conversation_id: "c1",
+            record_id: "past-scan-cap",
+          }),
+        (error: unknown) =>
+          error instanceof ToolExecutionError &&
+          error.message.includes("record_id scan exhausted")
+      );
+    }
+  );
 
   it("rejects an unknown record_type with a typed validation error", async () => {
     const tool = createQueryTraceTool(makeTraceDir());

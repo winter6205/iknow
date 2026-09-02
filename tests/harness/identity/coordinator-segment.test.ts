@@ -4,7 +4,7 @@
  *  行为真值 (docs/plans/361-subagent-v1.5-foreground-spawn-contract.md
  *  「引导层（T8）硬约束」节):
  *
- *   - 加性段:置于 IKNOW_ASSEMBLY_ORDER 五段 LOCKED 之后、skills / projectPath
+ *   - 加性段:置于 IKNOW_ASSEMBLY_ORDER 六段 LOCKED 之后、skills / projectPath
  *     加性段之末,不触碰 LOCKED 顺序;复用 projectPathSegment / skillsSegment
  *     加性段模式 (缺席 → 字节级零变化,守 KV 缓存稳定契约)。
  *
@@ -51,8 +51,10 @@ afterAll(async () => {
 function baseCtx(): AssemblyContext {
   return {
     cwd: process.cwd(),
+    projectIdentityRoot: process.cwd(),
     userHome: workDir,
     bootstrapActive: false,
+    memoryEnabled: false,
   };
 }
 
@@ -85,10 +87,11 @@ describe("coordinator 加性段 — seam 缺席 / 字节级零变化", () => {
     expect(seamEmpty).toBe(baseline);
   });
 
-  it("不触碰 IKNOW_ASSEMBLY_ORDER (LOCKED 顺序保持 5 段)", () => {
+  it("不触碰 IKNOW_ASSEMBLY_ORDER (LOCKED 顺序保持 6 段)", () => {
     expect([...IKNOW_ASSEMBLY_ORDER]).toEqual([
       "identity",
       "soul",
+      "usage",
       "user_profile",
       "bootstrap",
       "memory_layer",
@@ -158,8 +161,10 @@ describe("coordinator 加性段 — seam 提供时渲染", () => {
     const localText = "resolver seam text for T2 regression";
     const resolver = createIknowSystemResolver({
       cwd: process.cwd(),
+      projectIdentityRoot: process.cwd(),
       userHome: workDir,
       surface: "ask",
+      memoryEnabled: false,
       coordinatorText: localText,
     });
     const out = await resolver();
@@ -171,8 +176,10 @@ describe("coordinator 加性段 — seam 提供时渲染", () => {
   it("createIknowSystemResolver 不传 coordinatorText → 段缺席", async () => {
     const resolver = createIknowSystemResolver({
       cwd: process.cwd(),
+      projectIdentityRoot: process.cwd(),
       userHome: workDir,
       surface: "ask",
+      memoryEnabled: false,
     });
     const out = await resolver();
     expect(out).toBeDefined();
