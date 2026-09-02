@@ -19,6 +19,7 @@ import {
   TraceQueryRecordScanError,
   TraceQueryValidationError,
 } from "./query-trace-errors.js";
+import { parseInteger } from "./parse-integer.js";
 
 export const QUERY_TRACE_DEFAULT_LIMIT = 100;
 export const QUERY_TRACE_MAX_LIMIT = 200;
@@ -198,27 +199,6 @@ function parseStatus(value: unknown): "ok" | "error" | undefined {
     throw new TraceQueryValidationError(
       "status",
       "status must be one of: ok, error"
-    );
-  }
-  return value;
-}
-
-function parseInteger(
-  value: unknown,
-  field: string,
-  minimum: number,
-  maximum = Number.MAX_SAFE_INTEGER
-): number | undefined {
-  if (value === undefined) return undefined;
-  if (
-    typeof value !== "number" ||
-    !Number.isInteger(value) ||
-    value < minimum ||
-    value > maximum
-  ) {
-    throw new TraceQueryValidationError(
-      field,
-      `${field} must be an integer in ${minimum}..${maximum}`
     );
   }
   return value;

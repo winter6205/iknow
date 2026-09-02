@@ -22,6 +22,7 @@ export {
 export {
   listSessions,
   newestConversationId,
+  sessionsByRecency,
   type SessionSummary,
 } from "./sessions.js";
 export {
@@ -49,6 +50,15 @@ export {
   type QueryTraceCoreHandler,
   type QueryTraceCoreOptions,
 } from "./query-trace-core.js";
+export {
+  createListSessionsCore,
+  LIST_SESSIONS_DEFAULT_LIMIT,
+  LIST_SESSIONS_MAX_LIMIT,
+  LIST_SESSIONS_DESCRIPTION,
+  type ListSessionsCoreHandler,
+  type ListSessionsCoreOptions,
+  type ListSessionsPage,
+} from "./list-sessions-core.js";
 export {
   TraceQueryRecordScanError,
   TraceQueryValidationError,

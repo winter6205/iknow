@@ -49,6 +49,7 @@ import { RegistryConstructionError, ToolExecutionError } from "../../errors.js";
 import type { SkillCatalog } from "../../skill/catalog.js";
 import { createTodoWriteTool } from "./todo-write.js";
 import { createQueryTraceTool } from "./query-trace.js";
+import { createListSessionsTool } from "./list-sessions.js";
 import {
   createCreateTaskWorktreeTool,
   type CreateTaskWorktreeProvisionFn,
@@ -178,14 +179,26 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // 改代码，行列译码封在 symbol-resolver.ts。category="write"，写盘后经
   // onEdit → lspNotifier 触发 textDocument/didChange 与 edit_file 同链路。
   // edit_file 仍在 —— 留给不是单一符号的文本补丁（spec §使用规则段）。
-  // spec symbol-primary-aci.md T5: tool surface = 8 基线 + memory_* (2 件) +
-  // tool_search + skill 2 + subagent 2 + todo + mcp 2 + bg 2 + run_graph +
-  // query_trace + 10 符号查询 + 5 符号改 = 37 件名。
+  // spec symbol-primary-aci.md T5 + ADR-0037 + #803 T9 的 tool surface 加法：
+  // 8 基线 + memory_* (2 件) + tool_search + skill 2 + subagent 2 + todo +
+  // mcp 2 + bg 2 + run_graph + query_trace + 10 符号查询 + 5 符号改 +
+  // worktree 3 = 40 件名，T5b 目录轴再 append 1 件 = 41 件名。（旧注释漏算
+  // worktree 三件而写 37，与 tests/harness/aci/tools/registry.test.ts 的长度
+  // 断言不符，按断言更正；本表长度以数组为 source of truth。）
   "rename_symbol", // 全项目按符号改名（textDocument/rename + applyEdit）
   "replace_symbol_body", // 替换定义体（range = node.range，签名 + body）
   "insert_before_symbol", // 在符号定义前插入（range.start 位置）
   "insert_after_symbol", // 在符号定义后插入（range.end 位置）
   "safe_delete_symbol", // 无引用才删；仍有引用返 typed 失败 + 引用列表
+  // plan `trace-mcp-read-side-split` T5b append-only：40→41。trace 读侧的**目录轴**
+  // （有哪些会话），与 query_trace 的行轴正交；常驻装配（与 query_trace 同门，
+  // 无 host 缝可条件化）。
+  //
+  // 位置是契约不是风格：Gate 3 按「长度 + 顺序 + 成员」比对 factories 键与本名单，
+  // 所以对应工厂必须是 `factories` 字面量的**最后一个键**（在 symbolMutateTools
+  // 展开之后）。另有一批下游测按下标锁中段（run-graph-assembly.test.ts 的
+  // idx 20-23），插在它们之前即红 —— 尾部追加才是安全改法。
+  "list_sessions",
 ] as const);
 
 /**
@@ -418,6 +431,15 @@ export function createDefaultAciRegistry(
   // B7 closeout:优先用装配层同一份 lspCtx,缺席回落 sandboxRoot-only。
   const lspCtx: LspCtx = opts.lspCtx ?? { directory: sandboxRoot };
 
+  // 读侧工具（query_trace / list_sessions，T6 再加 get_record）必须解析到同一个
+  // 目录，否则列出来的会话查不到；三态回落因此只在这里出现一次。写成闭包是为了
+  // 不把它提前到模块加载期 —— 读取时机与合并前逐字一致（都在这两个 factory 各自
+  // 被调用的那一刻，也就是 registry 构造期）。
+  const traceReadDir = () =>
+    opts.traceDir ??
+    process.env.IKNOW_TRACE_OUT ??
+    join(workspaceRoot, "trace");
+
   // append-only:顺序与 build-engine.ts 既有策略(policy byName 键空间)一致。
   // memoryDir 缺席 → memory_recall / memory_save 从 factories 剔除
   // (memoryEnabled=false 的 ask 路径;见 build-engine.ts 条件构造)。
@@ -553,12 +575,7 @@ export function createDefaultAciRegistry(
             }),
         }
       : {}),
-    query_trace: () =>
-      createQueryTraceTool(
-        opts.traceDir ??
-          process.env.IKNOW_TRACE_OUT ??
-          join(workspaceRoot, "trace")
-      ),
+    query_trace: () => createQueryTraceTool(traceReadDir()),
     // T4 创建工作树 ACI 工具（条件化装配：worktreeProvision host 缝缺席时
     // 不入注册表）。handler 闭包绑定本引擎的 sandboxRoot = 会话当前根；
     // 建树 + 改绑副作用全部委托 host provision 缝（session-api hub）。
@@ -605,6 +622,10 @@ export function createDefaultAciRegistry(
     // textDocument/didChange 与 edit_file 同链路。键顺序必须与
     // ACI_TOOLSET_NAMES 末尾 5 项逐项一致（Gate 3）。
     ...symbolMutateTools(lspCtx, onEdit),
+    // plan T5b：本键必须是字面量最后一个键 —— Gate 3 比对 factories 键顺序与
+    // ACI_TOOLSET_NAMES 顺序（名单尾部同项）。目录经 traceReadDir() 与
+    // query_trace 同源，列出来的会话才查得到。
+    list_sessions: () => createListSessionsTool(traceReadDir()),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。

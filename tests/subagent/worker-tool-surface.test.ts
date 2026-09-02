@@ -141,6 +141,11 @@ const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
   "insert_before_symbol",
   "insert_after_symbol",
   "safe_delete_symbol",
+  // trace-mcp-read-side-split T5b — operator 裁定：list_sessions 入 worker 基础面。
+  // 理由与 query_trace 同门：worker 拿到的 conversation_id 是否真存在，只有目录轴
+  // 能答；category=read-only、无装配条件（任何 surface 都建 traceDir），故不条件化。
+  // 位置在末位 = registry.list() 跟随 ACI_TOOLSET_NAMES 的 append-only 顺序。
+  "list_sessions",
 ]);
 
 // ---------------------------------------------------------------------------

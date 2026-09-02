@@ -25,7 +25,7 @@
 > 本小节**不是** Glossary 的延伸。下列词名是对 `plans/trace-mcp-read-side-split.md` §待写入 的**引用**，尚未进 `docs/CONTEXT.md`（全票合入后经 `domain-modeling` 落）。定义权威在那份 plan，本处只述语义、不另立定义。
 
 - 三件工具各管一条正交轴，一次调用只返回调用方指定位置的一页：`list_sessions`（目录轴：有哪些会话）、`query_trace`（行轴：一个会话里的哪些记录 + 行分页）、`get_record`（内容轴：一条记录的哪个字节窗）。
-- **tool face**（ACI + MCP 两张皮）输出 = records 数组 + 回显调用方给过的坐标 + 一行人类可读收窄提示（契约 X 的 marker 形态，**不是** JSON 元字段）。**不含** `truncated` / `total`——这两项是 Glossary 契约 X 的 `Avoid` 原文所禁。`response_truncated` 一并禁用是**本 spec 的延伸**（CONTEXT.md 与 ADR-0004:23 未点名它），理由：它随记录数走、不随字段走，是假负号来源。页没收满的诚实信号改由隐式关系给出：`records.length < limit` 即「到底了」。
+- **tool face**（ACI + MCP 两张皮）输出 = records 数组 + 回显调用方给过的坐标。**「一行人类可读收窄提示」不由 tool face 发**：契约 X 的 marker 形态按 ADR-0004:23 是 executor 的职责（「自测序列化字符数、自截断、**自合成标记**」），薄皮若在 JSON 之后追加自由文本，回显就不再可解析，且与 executor 的标记形成两处权威。**不含** `truncated` / `total`——这两项是 Glossary 契约 X 的 `Avoid` 原文所禁。`response_truncated` 一并禁用是**本 spec 的延伸**（CONTEXT.md 与 ADR-0004:23 未点名它），理由：它随记录数走、不随字段走，是假负号来源。页没收满的诚实信号改由隐式关系给出：`records.length < limit` 即「到底了」。
 - **panel face**（`http.ts` → Web，ADR-0020 语义不变）保留 `{records,total,skipped_lines,truncated,offset}` 信封，因面板需要 `total` 画分页器。契约 X 的措辞是「工具返回」（`docs/adr/0004-tool-layer-six-tool-set.md:23`），面板 JSON 不经 executor，故 `total` 在 panel face 合法——这是**澄清适用面**，不推翻 ADR-0004。
 - 两个 face 直读同一 reader；panel face **从不经过 tool-face 序列化出口**（`serializeListPage` 与字符帽都到不了面板），故收窄与帽的改动不会回归面板。但自 T4 起两侧共用**信封形状与构造**（`src/traceserver/envelope.ts`）——这一层改动会同时触到面板，实测从共享构造里删 `total`/`truncated` 使 `tests/traceserver/http.test.ts` 32 例中 11 例红，即该风险由面板既有测兜住，不另设字节 pin。
 
@@ -105,7 +105,7 @@
 
 14. **characterization 基线先行**：在**未改动**的现役核上补齐 `tests/traceserver/` 覆盖，逐条钉住今天真实行为（含 P0 静默降级与假 `response_truncated`，按「现在确实如此」写成通过态断言）。该基线 commit `EXIT 0`，且 T3 之后仍 `EXIT 0`——只是断言方向翻转，master 上不允许出现红灯 commit。
 15. **单一 owner**：「最近会话」推导只有一个 owner，panel 与 tool 两侧都经它；tool-page 序列化出口只有一个且两张皮共用。判据 = `tests/traceserver/http.test.ts` **零改动仍绿**（纯机械搬移）。
-16. **前缀归属**：核 error 消息不含工具名；`list_sessions` 的校验错误在两张皮里都显示为 `list_sessions: …`，全仓不出现 `query_trace:` 顶替（`stripQueryTracePrefix` 随之退场）。
+16. **前缀归属**：核 error 消息不含工具名；**经薄皮 catch arm 出出的错误**（核自己拒的 `validation`、IO 失败）在两张皮里都显示为 `list_sessions: …`，全仓不出现 `query_trace:` 顶替（`stripQueryTracePrefix` 随之退场）。**schema 门前拒不经薄皮，不在本条主张范围内**：ACI 面由 executor 渲染为 `[validation_failed] invalid input at /limit: must be >= 1`——实测 `src/harness/tools/executor.ts:316-321` + `src/harness/tools/tool-result.ts:42`，该文案**不含工具名**，且对全部现役工具同形（改它超出本轮 read-side Surface）；MCP 面由 SDK 渲染为 `Input validation error: Invalid arguments for tool list_sessions: …`（含工具名，形状为 `… for tool <name>: …`）。两条各按自身形状钉，不得为通吃而放宽 schema 或给上层文案叠前缀。
 17. **必填轴诚实报错**：`conversation_id` 在 tool face 必填后，指向不存在会话的调用 → `session_not_found`，不得退化成静默空结果。
 18. **两张皮参数面逐项一致**：一条 diff 断言比对 ACI `inputSchema` 与 MCP Zod 派生 schema 的三件工具参数面，防漂移。
 19. **面板轮询不受影响**：`resume_offset` 在 panel face（`parseResumeOffset` → `TraceQuery`）原样保留，从不经过 tool-face parser；SC-R 14 字节续读与 SC-R 12 缺省最近会话两条面板测零改动仍绿。

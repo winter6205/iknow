@@ -87,7 +87,10 @@ describe("trace MCP startup", () => {
       const result = response.result as {
         tools?: Array<{ name?: string }>;
       };
-      expect(result.tools?.map((tool) => tool.name)).toEqual(["query_trace"]);
+      expect(result.tools?.map((tool) => tool.name)).toEqual([
+        "list_sessions",
+        "query_trace",
+      ]);
     } finally {
       child.kill("SIGTERM");
     }
@@ -119,7 +122,10 @@ describe("trace MCP startup", () => {
       const result = response.result as {
         tools?: Array<{ name?: string }>;
       };
-      expect(result.tools?.map((tool) => tool.name)).toEqual(["query_trace"]);
+      expect(result.tools?.map((tool) => tool.name)).toEqual([
+        "list_sessions",
+        "query_trace",
+      ]);
     } finally {
       child.kill("SIGTERM");
     }

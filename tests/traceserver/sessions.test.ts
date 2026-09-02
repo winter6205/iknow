@@ -12,6 +12,8 @@
  *   - IO error: traceDir pointing at a regular file → TraceReadError (kind io_error).
  *   - newestConversationId: the single owner behind both the panel's and the
  *     tool's implicit "default to the most recent session" (SC-R 12).
+ *   - sessionsByRecency: the same index as a deterministic page order (mtime
+ *     descending, conversation_id ascending) for the `list_sessions` tool face.
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -29,6 +31,7 @@ import { join } from "node:path";
 import {
   listSessions,
   newestConversationId,
+  sessionsByRecency,
   type SessionSummary,
 } from "../../src/traceserver/sessions.ts";
 import { TraceReadError } from "../../src/traceserver/types.ts";
@@ -444,5 +447,141 @@ describe("newestConversationId — the default both faces share (SC-R 12)", () =
     writeFileSync(sessionFile("second"), sessionLine() + "\n", "utf8");
     touch("second", Math.floor(Date.now() / 1000) + 600);
     assert.equal(newestConversationId(tmpDir), "second");
+  });
+});
+
+// -- 分页顺序（list_sessions tool face 的确定性页） -----------------------------
+
+/**
+ * `sessionsByRecency` is `listSessions` turned into a page order. It lives beside
+ * `newestConversationId` because that is where the index's derivations are owned
+ * (plan `trace-mcp-read-side-split` T4/T5b).
+ */
+describe("sessionsByRecency — the deterministic page order", () => {
+  function subDir(label: string): string {
+    const dir = join(tmpDir, label);
+    mkdirSync(dir);
+    return dir;
+  }
+
+  function sessionIn(
+    dir: string,
+    conversationId: string,
+    atEpochSeconds: number,
+    body = sessionLine()
+  ): void {
+    const path = join(dir, `${conversationId}.jsonl`);
+    writeFileSync(path, `${body}\n`, "utf8");
+    const at = new Date(atEpochSeconds * 1000);
+    utimesSync(path, at, at);
+  }
+
+  function idsOf(dir: string): string[] {
+    return sessionsByRecency(dir).map((s) => s.conversation_id);
+  }
+
+  it("empty directory and missing directory both answer with an empty list, no throw", () => {
+    assert.deepEqual(sessionsByRecency(subDir("empty")), []);
+    assert.deepEqual(sessionsByRecency(join(tmpDir, "never-created")), []);
+  });
+
+  it("orders by mtime descending, newest first, whatever order readdir gave", () => {
+    const dir = subDir("staggered");
+    // Created newest-first so the expected answer cannot be readdir creation order.
+    sessionIn(dir, "newest", 1_600_000_300);
+    sessionIn(dir, "middle", 1_600_000_200);
+    sessionIn(dir, "oldest", 1_600_000_100);
+
+    assert.deepEqual(idsOf(dir), ["newest", "middle", "oldest"]);
+  });
+
+  it("breaks an exact mtime tie by conversation_id, not by readdir order", () => {
+    // What this pair can and cannot prove. Measured on this host, readdirSync
+    // answers in codepoint order for both filesystems tried (the tmp dir and
+    // /dev/shm), so with tied mtimes an **absent** tie-break yields the same
+    // page — and an inverted `mtime` comparator does too, because every mtime
+    // here is equal. The only mutation these two dirs can catch is a
+    // name-descending comparator. The mtime direction is pinned by the
+    // "mixes both rules" case below, not here. The tie-break exists for
+    // filesystems whose readdir order is not already sorted, which no fixture
+    // on this host can produce.
+    const tied = 1_600_000_000;
+    const forward = subDir("tie-forward");
+    const backward = subDir("tie-backward");
+    sessionIn(forward, "aaa", tied);
+    sessionIn(forward, "mmm", tied);
+    sessionIn(forward, "zzz", tied);
+    sessionIn(backward, "zzz", tied);
+    sessionIn(backward, "mmm", tied);
+    sessionIn(backward, "aaa", tied);
+
+    assert.deepEqual(idsOf(forward), ["aaa", "mmm", "zzz"]);
+    assert.deepEqual(idsOf(backward), ["aaa", "mmm", "zzz"]);
+    assert.deepEqual(idsOf(forward), idsOf(backward));
+
+    // The one tie assertion above that does not lean on what readdir happens to
+    // return: an ICU collation (`localeCompare`) ranks "a" before "B", while the
+    // codepoint comparison compareByRecency uses keeps "B" (0x42) first whatever
+    // the process locale is. Page order must not move with locale.
+    const codepoint = subDir("tie-codepoint");
+    sessionIn(codepoint, "B", tied);
+    sessionIn(codepoint, "a", tied);
+    assert.deepEqual(idsOf(codepoint), ["B", "a"]);
+  });
+
+  it("mixes both rules: a newer session outranks an earlier name", () => {
+    const dir = subDir("mixed");
+    sessionIn(dir, "aaa-old", 1_600_000_000);
+    sessionIn(dir, "zzz-old", 1_600_000_000);
+    sessionIn(dir, "zzz-new", 1_600_000_900);
+
+    assert.deepEqual(idsOf(dir), ["zzz-new", "aaa-old", "zzz-old"]);
+  });
+
+  it("passes entries through unchanged — agent_version absence survives the sort", () => {
+    const dir = subDir("passthrough");
+    const rooted = sessionLine("1.2.3");
+    const rootless = '{"record_type":"llm_call"}';
+    sessionIn(dir, "rooted", 1_600_000_100, rooted);
+    // No session root record at all: a crash / in-progress session.
+    sessionIn(dir, "rootless", 1_600_000_200, rootless);
+
+    assert.deepEqual(sessionsByRecency(dir), [
+      {
+        conversation_id: "rootless",
+        mtime: 1_600_000_200_000,
+        size: Buffer.byteLength(`${rootless}\n`, "utf8"),
+      },
+      {
+        conversation_id: "rooted",
+        mtime: 1_600_000_100_000,
+        size: Buffer.byteLength(`${rooted}\n`, "utf8"),
+        agent_version: "1.2.3",
+      },
+    ]);
+  });
+
+  it("leaves listSessions' own unsorted readdir return alone", () => {
+    // The panel face keeps calling listSessions directly (http.ts), so the
+    // sorted view must be a separate derivation. The fixture names and mtimes
+    // run opposite ways (names ascend, mtimes descend), so a listSessions that
+    // ever sorted for itself shows up in the snapshot below — and re-asserting
+    // that snapshot after the sorted call is what goes red if the index read
+    // ever becomes shared state that `.sort()` mutates.
+    const dir = subDir("unsorted");
+    sessionIn(dir, "zzz", 1_600_000_300);
+    sessionIn(dir, "aaa", 1_600_000_100);
+
+    const raw = listSessions(dir);
+    assert.deepEqual(
+      sessionsByRecency(dir).map((s) => s.conversation_id),
+      ["zzz", "aaa"]
+    );
+    // Asserted after the sorted call on purpose: this is both "listSessions did
+    // not sort" and "the array the earlier call handed back is still intact".
+    assert.deepEqual(
+      raw.map((s) => s.conversation_id),
+      ["aaa", "zzz"]
+    );
   });
 });

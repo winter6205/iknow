@@ -115,9 +115,9 @@ const fakeBackgroundManager: BackgroundTaskManager = {
 describe("createDefaultAciRegistry — 正常路径", () => {
   // symbol-primary-aci T5 全条件装配：memoryDir + skillCatalog + subagentManager +
   // todoDir + mcpManager + backgroundManager + graphAssembly 同时在场 → list()
-  // 全量 37 件（= ACI_TOOLSET_NAMES 全长），顺序 append-only。10 件 lsp_*
+  // 全量 = ACI_TOOLSET_NAMES 全长（T5b 起 41 件），顺序 append-only。10 件 lsp_*
   // 已退役（坐标面 → 符号面接班），lsp.ts 实现的 SSOT 不变。
-  it("memoryDir + skillCatalog + subagentManager + todoDir + mcpManager + backgroundManager + graphAssembly 同时在场 → list() 全量 40 件,顺序 append-only", () => {
+  it("memoryDir + skillCatalog + subagentManager + todoDir + mcpManager + backgroundManager + graphAssembly 同时在场 → list() 全量 41 件,顺序 append-only", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -207,8 +207,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
   // (T2+T4 末态 32 + 5 件 T4 符号改 - 10 件退役 lsp_*)。
   // append-only 纪律保留 23 件既有 + 末位 14 件符号面 / 改工具。
   // 旧 10 件 lsp_* 已退役（spec symbol-primary-aci.md §37-53 + SC2 + SC7）。
-  it("Gate 3:ACI_TOOLSET_NAMES 长度 40,前 8 原序 + memory_* + tool_search + skill + skill_search + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop + run_graph + query_trace + 10 符号查询 + 5 符号改 + worktree 3 件", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(40);
+  it("Gate 3:ACI_TOOLSET_NAMES 长度 41,前 8 原序 + memory_* + tool_search + skill + skill_search + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop + run_graph + query_trace + 10 符号查询 + 5 符号改 + worktree 3 件 + list_sessions", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(41);
     // 前 8 件原序不变(append-only 纪律)。
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -270,12 +270,15 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     ]);
     // symbol-primary-aci T4 符号改工具集 append-only:35→40,末位 5 件,
     // 不重排既有 35 件（与查询面并列；category=write，与 edit_file 共存）。
-    expect(ACI_TOOLSET_NAMES.slice(35, 40)).toEqual([
+    // trace-mcp-read-side-split T5b list_sessions append-only:40→41,末位再加 1 件
+    // （目录轴读工具，无装配条件 → 常驻；末位是 Gate 3 的顺序契约）。
+    expect(ACI_TOOLSET_NAMES.slice(35, 41)).toEqual([
       "rename_symbol",
       "replace_symbol_body",
       "insert_before_symbol",
       "insert_after_symbol",
       "safe_delete_symbol",
+      "list_sessions",
     ]);
   });
 });
