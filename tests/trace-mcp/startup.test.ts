@@ -149,6 +149,54 @@ describe("trace MCP startup", () => {
     expect(result.stderr).toMatch(/trace.*directory|trace-out/i);
     assert.equal(result.stdout, "");
   });
+
+  it("serves tools/list through the dev wrapper from any cwd (T8)", async () => {
+    // plan `trace-mcp-read-side-split` T8: `.iknow/mcp.json` invokes the MCP
+    // server through `scripts/iknow-trace-mcp-dev.cjs`. That wrapper resolves
+    // both the script directory and the trace directory relative to itself,
+    // so the host's cwd does not enter the equation. This test spawns the
+    // wrapper from a foreign cwd (an empty temp dir) and asserts the same
+    // three-tool tools/list it serves from the repo root — that's the assertion
+    // a checkable `.iknow/mcp.json` cannot make on its own, since the live
+    // invocation only happens inside an MCP host.
+    const wrapperPath = join(repoRoot, "scripts", "iknow-trace-mcp-dev.cjs");
+    // The wrapper runs under process.execPath; the executable bit is not on
+    // the critical path of this assertion (and is a separate git-mode concern,
+    // not a behaviour concern). What matters is the wrapper exists at the
+    // documented path inside the repo.
+
+    const foreignCwd = mkdtempSync(
+      join(tmpdir(), "iknow-trace-mcp-foreign-cwd-")
+    );
+    const traceDirectory = mkdtempSync(
+      join(tmpdir(), "iknow-trace-mcp-trace-")
+    );
+    scratchPaths.push(foreignCwd, traceDirectory);
+
+    const child = spawn(
+      process.execPath,
+      [wrapperPath, "--trace-out", traceDirectory],
+      {
+        cwd: foreignCwd,
+        env: { ...process.env, IKNOW_TRACE_OUT: undefined },
+        stdio: ["pipe", "pipe", "pipe"],
+      }
+    );
+    try {
+      const response = await requestToolsList(child);
+      const result = response.result as {
+        tools?: Array<{ name?: string }>;
+      };
+      // 三轴顺序：目录 → 行 → 内容。
+      expect(result.tools?.map((tool) => tool.name)).toEqual([
+        "list_sessions",
+        "query_trace",
+        "get_record",
+      ]);
+    } finally {
+      child.kill("SIGTERM");
+    }
+  });
 });
 
 function runMain(
