@@ -25,16 +25,14 @@ const listSessionsInputSchema = z
 
 const queryTraceInputSchema = z
   .object({
-    conversation_id: z.string().optional(),
+    conversation_id: z.string(),
     record_type: z.enum(TRACE_RECORD_TYPES).optional(),
     status: z.enum(["ok", "error"]).optional(),
     task_id: z.string().optional(),
     parent_turn_id: z.string().optional(),
     turn_id: z.string().optional(),
     limit: z.number().int().min(1).max(QUERY_TRACE_MAX_LIMIT).optional(),
-    record_id: z.string().optional(),
-    detail: z.enum(["tool_results", "messages"]).optional(),
-    resume_offset: z.number().int().min(0).optional(),
+    offset: z.number().int().min(0).optional(),
   })
   .strict();
 

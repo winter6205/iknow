@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, it } from "vitest";
@@ -10,37 +10,22 @@ import {
   type QueryTraceCoreHandler,
 } from "../../src/traceserver/query-trace-core.ts";
 import {
-  TraceQueryRecordScanError,
   TraceQueryValidationError,
+  TraceSessionNotFoundError,
 } from "../../src/traceserver/query-trace-errors.ts";
 
 /**
- * Characterization baseline for the `query_trace` core's input face and session
- * resolution (plan `trace-mcp-read-side-split` T2, spec SC14).
+ * Contract suite for the `query_trace` core's input face and session
+ * resolution (plan `trace-mcp-read-side-split` T7, spec SC14).
  *
  * Pins what the core accepts / rejects today, the exact error text it raises
  * (no tool name: the core backs several tools, and each thin face prefixes its
- * own), and the implicit "most recent session" default that T7 replaces with
+ * own). The implicit "most recent session" default that lived here in T2 is gone
+ * — `conversation_id` is required on the tool face, and a missing file raises
  * `session_not_found`.
  */
 
-const DAY_MS = 86_400_000;
 const traceDirs: string[] = [];
-
-/**
- * What the core answers when there is nothing to answer with. Compared as a
- * parsed object, never as a whole string: the key order comes from the single
- * envelope constructor in src/traceserver/envelope.ts, but no contract fixes
- * that order, so a string pin would still break for a reason unrelated to
- * behaviour.
- */
-const EMPTY_ENVELOPE = {
-  records: [],
-  total: 0,
-  skipped_lines: 0,
-  truncated: false,
-  offset: 0,
-};
 
 afterEach(() => {
   for (const traceDir of traceDirs.splice(0)) {
@@ -89,21 +74,25 @@ async function rejectionOf(
   assert.fail(`input ${JSON.stringify(input)} was expected to be rejected`);
 }
 
-/** Compare an empty envelope as data, never as a serialized string. */
-function assertEmptyEnvelope(json: string, message?: string): void {
-  const parsed = JSON.parse(json) as Record<string, unknown>;
-  assert.deepEqual(
-    Object.keys(parsed).sort(),
-    Object.keys(EMPTY_ENVELOPE).sort(),
-    message ?? "the empty envelope must carry exactly the five reader keys"
-  );
-  assert.deepEqual(parsed, EMPTY_ENVELOPE);
-}
-
-describe("query_trace core input face", () => {
+describe("query_trace core input face (T7)", () => {
   // Contract, file-wide: no expected message below carries a tool-name prefix.
   // The core is shared by every read-side tool, so naming one would misreport
   // the others; each thin face adds its own prefix.
+  it("requires conversation_id on the tool face", async () => {
+    const core = coreWithSession("c1");
+
+    for (const input of [
+      {},
+      { conversation_id: "" },
+      { conversation_id: 42 },
+    ]) {
+      const error = await rejectionOf(core, input);
+      assert.equal(error.field, "conversation_id");
+      assert.equal(error.kind, "validation");
+      assert.equal(error.message, "conversation_id must be a non-empty string");
+    }
+  });
+
   it("rejects limit outside 1..QUERY_TRACE_MAX_LIMIT and accepts both bounds", async () => {
     const core = coreWithSession("c1");
 
@@ -133,31 +122,33 @@ describe("query_trace core input face", () => {
     }
   });
 
-  it("rejects a negative resume_offset but accepts zero and any larger integer", async () => {
+  it("rejects a negative offset but accepts zero and any larger integer", async () => {
     const core = coreWithSession("c2");
 
-    for (const resumeOffset of [-1, -1000, 0.5, "0"]) {
+    for (const offset of [-1, -1000, 0.5, "0"]) {
       const error = await rejectionOf(core, {
         conversation_id: "c2",
-        resume_offset: resumeOffset,
+        offset,
       });
-      assert.equal(error.field, "resume_offset");
-      // resume_offset has no declared upper bound: parseInteger's default
-      // `maximum` is Number.MAX_SAFE_INTEGER (see parseInteger in
-      // query-trace-core.ts), so the message is built from that constant rather
-      // than a transcribed digit string.
+      assert.equal(error.field, "offset");
+      // offset has no declared upper bound: parseInteger's default `maximum` is
+      // Number.MAX_SAFE_INTEGER (see parse-integer.ts), so the message is built
+      // from that constant rather than a transcribed digit string.
       assert.equal(
         error.message,
-        `resume_offset must be an integer in 0..${Number.MAX_SAFE_INTEGER}`
+        `offset must be an integer in 0..${Number.MAX_SAFE_INTEGER}`
       );
     }
 
-    for (const resumeOffset of [0, 4_096]) {
+    for (const offset of [0, 100]) {
       const parsed = JSON.parse(
-        await core({ conversation_id: "c2", resume_offset: resumeOffset })
-      ) as { records: unknown[]; total: number };
-      assert.equal(parsed.total, 1);
-      assert.equal(parsed.records.length, 1);
+        await core({ conversation_id: "c2", offset })
+      ) as { records: unknown[]; offset: number };
+      assert.equal(parsed.offset, offset);
+      // The fixture only carries one row, so any non-zero offset answers with
+      // an empty page — that's `records.length < limit`, the tool face's
+      // implicit end-of-data signal, NOT an error.
+      assert.equal(parsed.records.length, offset === 0 ? 1 : 0);
     }
   });
 
@@ -180,15 +171,13 @@ describe("query_trace core input face", () => {
     const core = coreWithSession("c4");
 
     const stringAxes: Array<[string, string]> = [
-      ["conversation_id", "conversation_id must be a non-empty string"],
-      ["record_id", "record_id must be a non-empty string"],
       ["task_id", "task_id must be a non-empty string"],
       ["turn_id", "turn_id must be a non-empty string"],
       ["parent_turn_id", "parent_turn_id must be a non-empty string"],
     ];
     for (const [field, message] of stringAxes) {
       const error = await rejectionOf(core, {
-        ...(field === "conversation_id" ? {} : { conversation_id: "c4" }),
+        conversation_id: "c4",
         [field]: "",
       });
       assert.equal(error.field, field);
@@ -215,27 +204,6 @@ describe("query_trace core input face", () => {
     );
   });
 
-  it("rejects an unknown detail value on the detail axis", async () => {
-    const traceDir = makeTraceDir();
-    writeFileSync(join(traceDir, "c5.jsonl"), "");
-    const core = createQueryTraceCore({ traceDir });
-
-    // parseInput validates `detail` before anything touches the filesystem, so
-    // the session file is deliberately empty: this rejection is not an IO
-    // outcome.
-    const error = await rejectionOf(core, {
-      conversation_id: "c5",
-      record_id: "llm-1",
-      detail: "everything",
-    });
-    assert.equal(error.field, "detail");
-    assert.equal(error.kind, "validation");
-    assert.equal(
-      error.message,
-      "detail must be one of: messages, tool_results"
-    );
-  });
-
   it("rejects a non-object input before touching the filesystem", async () => {
     const traceDir = makeTraceDir();
     const core = createQueryTraceCore({ traceDir });
@@ -256,84 +224,62 @@ describe("query_trace core input face", () => {
     assert.equal(validation.kind, "validation");
     assert.equal(validation.field, "limit");
 
-    const scan = new TraceQueryRecordScanError("abc", 10_000);
+    const session = new TraceSessionNotFoundError("missing-id");
     assert.equal(
-      scan.message,
-      "record_id scan exhausted after 10000 records before finding 'abc'"
+      session.message,
+      "no trace session file for conversation_id 'missing-id'"
     );
-    assert.equal(scan.name, "TraceQueryRecordScanError");
-    assert.equal(scan.kind, "record_scan");
-    assert.equal(scan.recordId, "abc");
-    assert.equal(scan.scanned, 10_000);
+    assert.equal(session.name, "TraceSessionNotFoundError");
+    assert.equal(session.kind, "session_not_found");
+    assert.equal(session.conversationId, "missing-id");
   });
 
-  it("defaults to the session with the greatest mtime when conversation_id is omitted", async () => {
-    // T7: flip site — `conversation_id` becomes required on the tool face, so
-    // this omitted-argument default retires there. The panel keeps its default
-    // (ADR-0020 / SC-R 12) and does not reach this path.
-    const traceDir = makeTraceDir();
-    writeFileSync(join(traceDir, "aaa.jsonl"), row("aaa", "llm-aaa"));
-    writeFileSync(join(traceDir, "zzz.jsonl"), row("zzz", "llm-zzz"));
-
-    const now = new Date();
-    const yesterday = new Date(now.getTime() - DAY_MS);
-    const touch = (name: string, when: Date): void => {
-      utimesSync(join(traceDir, name), when, when);
-    };
-
-    // Flip the mtimes twice: whichever file is newest must be the one queried,
-    // which rules out file-name or readdir order as the deciding factor.
-    touch("aaa.jsonl", yesterday);
-    touch("zzz.jsonl", now);
-    const core = createQueryTraceCore({ traceDir });
-    const first = JSON.parse(await core({})) as {
-      records: Array<Record<string, unknown>>;
-    };
-    assert.equal(first.records[0]["llm_call_id"], "llm-zzz");
-
-    touch("aaa.jsonl", now);
-    touch("zzz.jsonl", yesterday);
-    const second = JSON.parse(await core({})) as {
-      records: Array<Record<string, unknown>>;
-    };
-    assert.equal(second.records[0]["llm_call_id"], "llm-aaa");
-  });
-
-  it("returns the empty envelope instead of throwing when the trace dir holds no session", async () => {
-    // T7: flip site — this call passes no `conversation_id`, so once the tool
-    // face makes it required the call fails earlier, as `validation`, and never
-    // reaches the empty-envelope branch. The "given an id that has no file" path
-    // is the one that becomes `session_not_found` (pinned by the next test).
-    const emptyDir = makeTraceDir();
-    const missingDir = join(emptyDir, "not-created");
-
-    for (const [label, dir] of [
-      ["empty dir", emptyDir],
-      ["never-created dir", missingDir],
-    ] as const) {
-      assertEmptyEnvelope(
-        await createQueryTraceCore({ traceDir: dir })({}),
-        `${label} must answer with the empty envelope, not throw`
-      );
-    }
-  });
-
-  it("reports a missing session file with the same empty envelope an empty session would give", async () => {
+  it("raises session_not_found, not the silent empty envelope, when the conversation_id has no file", async () => {
+    // T7: a typo'd conversation_id used to be indistinguishable from a session
+    // that recorded nothing. Plan §执行期前提修正 第 14 条 — this throw is the
+    // reason the read side's `TraceSessionNotFoundError` was given a real kind
+    // (T6) before T7 reused it on the row axis.
     const traceDir = makeTraceDir();
     writeFileSync(join(traceDir, "present.jsonl"), row("present", "llm-1"));
-    writeFileSync(join(traceDir, "empty.jsonl"), "");
     const core = createQueryTraceCore({ traceDir });
 
-    const missing = await core({ conversation_id: "no-such-session" });
-    const empty = await core({ conversation_id: "empty" });
-
-    // T7: flip site — no `session_not_found` signal today: a typo'd
-    // conversation_id is indistinguishable from a session that recorded nothing.
-    // (The comparison is shape-based on purpose: T4 owns the envelope literals.)
-    assertEmptyEnvelope(
-      missing,
-      "a missing session must read as an empty page"
+    let caught: unknown;
+    try {
+      await core({ conversation_id: "no-such-session" });
+    } catch (error) {
+      caught = error;
+    }
+    assert.ok(
+      caught instanceof TraceSessionNotFoundError,
+      `expected a TraceSessionNotFoundError, got ${String(caught)}`
     );
-    assert.equal(missing, empty);
+    assert.equal(caught.kind, "session_not_found");
+    assert.equal(caught.conversationId, "no-such-session");
+    assert.equal(
+      caught.message,
+      "no trace session file for conversation_id 'no-such-session'"
+    );
+  });
+
+  it("does not silently default to the newest session when conversation_id is omitted", async () => {
+    // T7: the tool face rejects a missing conversation_id at the input layer
+    // (rejectionOf path above); this case asserts the rejection is the same one
+    // a misconfigured host would see — never the implicit "most recent" answer
+    // pre-T7 returned.
+    const traceDir = makeTraceDir();
+    writeFileSync(join(traceDir, "only.jsonl"), row("only", "llm-only"));
+    const core = createQueryTraceCore({ traceDir });
+
+    let caught: unknown;
+    try {
+      await core({});
+    } catch (error) {
+      caught = error;
+    }
+    assert.ok(
+      caught instanceof TraceQueryValidationError,
+      `expected a TraceQueryValidationError, got ${String(caught)}`
+    );
+    assert.equal(caught.field, "conversation_id");
   });
 });

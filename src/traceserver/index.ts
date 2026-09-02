@@ -28,7 +28,9 @@ export {
 export {
   emptyResponseEnvelope,
   toResponseEnvelope,
+  toQueryTracePage,
   type ResponseEnvelope,
+  type QueryTracePage,
 } from "./envelope.js";
 export {
   dereferenceTraceMessages,
@@ -58,7 +60,6 @@ export {
   createQueryTraceCore,
   QUERY_TRACE_DEFAULT_LIMIT,
   QUERY_TRACE_MAX_LIMIT,
-  QUERY_TRACE_MAX_RECORD_ID_SCAN,
   QUERY_TRACE_DESCRIPTION,
   QUERY_TRACE_PREVIEW_CAP,
   type QueryTraceCoreHandler,

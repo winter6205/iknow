@@ -6,28 +6,29 @@ import { afterEach, describe, it } from "vitest";
 
 import {
   createQueryTraceCore,
-  QUERY_TRACE_MAX_LIMIT,
+  QUERY_TRACE_DEFAULT_LIMIT,
   QUERY_TRACE_PREVIEW_CAP,
 } from "../../src/traceserver/query-trace-core.ts";
 import { TRACE_OUTPUT_BACKSTOP } from "../../src/traceserver/output-backstop.ts";
 
 /**
  * Contract suite for the shared `query_trace` core (plan
- * `trace-mcp-read-side-split` T2 + T3, spec SC14).
+ * `trace-mcp-read-side-split` T7, spec SC14).
  *
  * T2 pinned what the unmodified core did today, the P0 silent field-drop
  * included, as passing assertions and marked every one of them `// T3:`. T3
  * landed, so those marked assertions now read the other way and pin the NEW
- * contract instead: a page narrows by whole records only, a drilled record
- * comes back complete, and no `response_truncated` flag claims otherwise.
- * T6 then moved the budget these fixtures are built to cross: the
- * `QUERY_TRACE_RESPONSE_CAP = 4000` red line retired and `serializeListPage`
- * narrowed to `TRACE_OUTPUT_BACKSTOP` instead (20 000 = the executor's
- * `OUTPUT_HARD_CAP`, re-declared in `src/traceserver/output-backstop.ts`
- * because the core may not import `harness/`). The narrowing rule the page
- * itself is about did not change, so only the widths moved.
- * Everything else still describes current behaviour. Nothing here is an xfail /
- * skipped "known bug" test.
+ * contract: a page narrows by whole records only. T6 retired the 4000-character
+ * red line in favour of `TRACE_OUTPUT_BACKSTOP`. T7 then took the row axis to
+ * its real shape:
+ *   - `record_id` / `detail` / `resume_offset` are gone (drill-down moved to
+ *     `get_record`; byte-pagination was a panel-only concern);
+ *   - `offset` is now a real parameter — row pagination — and the envelope
+ *     echoes the effective limit + offset so callers can resume;
+ *   - the tool face envelope no longer carries `total` / `truncated` /
+ *     `skipped_lines` (panel paging metadata), and `records.length < limit`
+ *     is the end-of-data signal.
+ * Nothing here is an xfail / skipped "known bug" test.
  */
 
 const traceDirs: string[] = [];
@@ -164,16 +165,14 @@ function writeUnfittableRecordSession(
   return wide;
 }
 
-interface Envelope {
+interface ToolPageEnvelope {
   records: Array<Record<string, unknown>>;
-  total: number;
-  skipped_lines: number;
-  truncated: boolean;
+  limit: number;
   offset: number;
 }
 
-function envelope(json: string): Envelope {
-  return JSON.parse(json) as Envelope;
+function envelope(json: string): ToolPageEnvelope {
+  return JSON.parse(json) as ToolPageEnvelope;
 }
 
 function idsOf(page: ReadonlyArray<Record<string, unknown>>): unknown[] {
@@ -183,20 +182,7 @@ function idsOf(page: ReadonlyArray<Record<string, unknown>>): unknown[] {
 /** The preview marker `preview()` (query-trace-core.ts) appends. */
 const MARKER = "...[truncated]";
 
-/**
- * T3 retired `response_truncated` from the tool face: it tracked how many
- * records survived the budget, never whether a field was dropped, so a record
- * stripped of its `tool_results` still reported `false`. Assert the key is
- * GONE — a `false` value would be the exact lie this ticket removes.
- */
-function assertNoResponseTruncationFlag(parsed: Envelope, shape: string): void {
-  assert.ok(
-    !("response_truncated" in parsed),
-    `${shape} must not carry a response_truncated key at all`
-  );
-}
-
-describe("query_trace traceserver core", () => {
+describe("query_trace traceserver core (T7)", () => {
   describe("list projection", () => {
     it("counts zero messages and emits no preview keys at all for an empty messages array", async () => {
       const traceDir = makeTraceDir();
@@ -270,212 +256,6 @@ describe("query_trace traceserver core", () => {
     });
   });
 
-  describe("drill-down projection", () => {
-    it("returns the raw row untouched (messages and raw included) for detail=messages", async () => {
-      const traceDir = makeTraceDir();
-      const messages = [{ role: "user", content: "hi" }];
-      writeSession(traceDir, "c1", jsonLine(llmCallRow("c1", 1, { messages })));
-
-      const json = await createQueryTraceCore({ traceDir })({
-        conversation_id: "c1",
-        record_id: "llm-1",
-        detail: "messages",
-      });
-      const parsed = envelope(json);
-
-      assert.equal(parsed.records.length, 1);
-      assert.equal(parsed.total, 1);
-      // projectDrillDownRecord hands back the reader row verbatim, so the
-      // `messages` array AND the reader's `raw.unmapped` copy of it survive —
-      // the payload carries the messages twice on this path. `messages` is not
-      // a TRACE_FIELD_DEFS jsonlKey, so the reader parks it in `raw.unmapped`
-      // (reader.ts:174-179); assert that copy's value, not merely that `raw` is
-      // an object, which `null` and an empty `unmapped` would both satisfy.
-      assert.deepEqual(parsed.records[0]["messages"], messages);
-      const raw = parsed.records[0]["raw"] as
-        { unmapped?: Array<{ key: string; value: unknown }> } | undefined;
-      assert.ok(raw, "the reader must attach raw for unmapped keys");
-      const unmappedMessages = (raw.unmapped ?? []).filter(
-        (entry) => entry.key === "messages"
-      );
-      assert.equal(unmappedMessages.length, 1);
-      assert.deepEqual(unmappedMessages[0]["value"], messages);
-      // `serializeDrillDown` consults no budget at all — `TRACE_OUTPUT_BACKSTOP`
-      // is the *list* path's anchor — so there is no flag here to read.
-      assertNoResponseTruncationFlag(parsed, "a small drilled record");
-    });
-
-    it("drills a messages_captured:false row as a bare record with no messages and no truncation signal", async () => {
-      const traceDir = makeTraceDir();
-      writeSession(
-        traceDir,
-        "c17",
-        jsonLine(llmCallRow("c17", 1, { messages_captured: false }))
-      );
-
-      const parsed = envelope(
-        await createQueryTraceCore({ traceDir })({
-          conversation_id: "c17",
-          record_id: "llm-1",
-          detail: "messages",
-        })
-      );
-      const record = parsed.records[0] ?? {};
-
-      // Boundary class "empty" on the drill-down face: the write side recorded
-      // that it captured nothing, and `detail: "messages"` makes
-      // projectDrillDownRecord return the row verbatim, so `messages` is simply
-      // not a key of the response.
-      assert.equal(record["messages_captured"], false);
-      // Near-vacuous on its own: this fixture never writes a `messages` key at
-      // all. The load-bearing assertion is the key set below.
-      assert.ok(!("messages" in record));
-      // Nothing on this path can claim truncation any more, so there is no
-      // signal of any kind left to misread as "nothing was captured".
-      assertNoResponseTruncationFlag(
-        parsed,
-        "the drilled messages_captured:false record"
-      );
-      assert.equal(parsed.truncated, false);
-      // `messages_captured: false` is the only field separating "this record
-      // really is empty" from "this record has content" — nothing encodes a drop
-      // happening. Note this key set hinges on `messages_captured` and
-      // `llm_call_id` staying unmapped in fields.ts, which is what routes them
-      // into `raw.unmapped`; add that mapping and `raw` stops carrying them.
-      assert.deepEqual(
-        Object.keys(record).sort(),
-        [
-          "conversation_id",
-          "llm_call_id",
-          "messages_captured",
-          "raw",
-          "record_type",
-          "started_at",
-          "turn_id",
-        ].sort()
-      );
-    });
-
-    it("returns an oversize drilled row complete, messages and every object field included, on detail=messages", async () => {
-      const traceDir = makeTraceDir();
-      // 16 pairs × 1,500 characters: measured ≈ 27,179 characters on disk, so the
-      // fixture really crosses the budget `serializeListPage` would narrow to.
-      const messages = toolRoundTrips(16, 1_500); // 32 messages
-      const row = llmCallRow("c2", 2, {
-        model: "claude-some-model",
-        max_tokens: 8192,
-        stream: true,
-        cache: null,
-        usage: { input_tokens: 5 },
-        error: { kind: "upstream" },
-        messages,
-      });
-      const rawLine = writeSession(traceDir, "c2", jsonLine(row));
-      assert.ok(
-        rawLine.length > TRACE_OUTPUT_BACKSTOP,
-        `fixture must exceed the backstop, got ${rawLine.length} characters`
-      );
-
-      const json = await createQueryTraceCore({ traceDir })({
-        conversation_id: "c2",
-        record_id: "llm-2",
-        detail: "messages",
-      });
-      const parsed = envelope(json);
-      const record = parsed.records[0] ?? {};
-
-      // Compared in characters, the unit the budget is counted in (the anchor is
-      // `JSON.stringify(...).length` in serializeListPage, not a byte count).
-      // Overshooting here is the claim, not an accident: a record the caller
-      // named comes back whole, where the old behaviour shrank it to a scalar
-      // stub while claiming nothing had been truncated.
-      assert.ok(
-        json.length > TRACE_OUTPUT_BACKSTOP,
-        `a drilled record is returned whole even when it overshoots the backstop, got ${json.length} characters`
-      );
-      assert.deepEqual(record["messages"], messages);
-      // The reader's `raw` copy survives too: nothing on this path is stripped to
-      // make the response smaller.
-      assert.ok("raw" in record, "raw must survive the drill-down");
-      assert.equal(parsed.records.length, 1);
-      assert.equal(parsed.total, 1);
-      assertNoResponseTruncationFlag(parsed, "an oversize drilled row");
-      // Scalars, nulls, objects and arrays alike: the whole field set is there,
-      // so usage / error / cache no longer disappear for their value types.
-      assert.equal(record["model"], "claude-some-model");
-      assert.equal(record["max_tokens"], 8192);
-      assert.equal(record["stream"], true);
-      assert.equal(record["cache"], null);
-      assert.deepEqual(record["error"], { kind: "upstream" });
-      assert.deepEqual(record["usage"], { input_tokens: 5 });
-      // The record's own key set is the fixture's key set plus the reader's `raw`
-      // — no field was dropped and none was invented. This is the shape-level
-      // version of "nothing is silently removed".
-      assert.deepEqual(
-        Object.keys(record).sort(),
-        [...Object.keys(row), "raw"].sort()
-      );
-    });
-
-    it("keeps the whole tool_results projection, one entry per result, when a drilled projection overshoots the backstop", async () => {
-      const traceDir = makeTraceDir();
-      // 50 pairs: each projected entry carries a preview capped at
-      // TOOL_RESULT_PREVIEW_CAP, so the projection is what has to be wide enough
-      // to overshoot — the assertion below measures it against the live
-      // TRACE_OUTPUT_BACKSTOP rather than trusting a recorded figure.
-      const pairCount = 50;
-      const messages = toolRoundTrips(pairCount, 400);
-      const expectedIds = messages.flatMap((message) => {
-        const content = (message as { content?: unknown }).content;
-        if (!Array.isArray(content)) return [];
-        return content
-          .map((part) => (part as Record<string, unknown>)["tool_use_id"])
-          .filter((id): id is string => typeof id === "string");
-      });
-      const rawLine = writeSession(
-        traceDir,
-        "c3",
-        jsonLine(llmCallRow("c3", 3, { messages }))
-      );
-      assert.ok(
-        rawLine.length > TRACE_OUTPUT_BACKSTOP,
-        `fixture must exceed the backstop, got ${rawLine.length} characters`
-      );
-
-      const json = await createQueryTraceCore({ traceDir })({
-        conversation_id: "c3",
-        record_id: "llm-3",
-        detail: "tool_results",
-      });
-      const parsed = envelope(json);
-      const record = parsed.records[0] ?? {};
-
-      // `detail=tool_results` goes through the same drill-down serializer as
-      // `messages`, which consults no budget: this many pairs overshoot
-      // `TRACE_OUTPUT_BACKSTOP` rather than one result being dropped.
-      const toolResults = record["tool_results"];
-      assert.ok(Array.isArray(toolResults), "tool_results must stay an array");
-      assert.equal(
-        toolResults.length,
-        pairCount,
-        "no result may be dropped to fit the backstop"
-      );
-      assert.deepEqual(
-        toolResults.map(
-          (entry) => (entry as Record<string, unknown>)["tool_use_id"]
-        ),
-        expectedIds
-      );
-      assert.ok(
-        json.length > TRACE_OUTPUT_BACKSTOP,
-        `the drilled projection is returned whole, got ${json.length} characters`
-      );
-      assertNoResponseTruncationFlag(parsed, "an oversize tool_results drill");
-      assert.equal(parsed.records.length, 1);
-      assert.equal(record["llm_call_id"], "llm-3");
-    });
-  });
-
   describe("list page serialization", () => {
     it("narrows an over-backstop list page to a leading run of whole records", async () => {
       const traceDir = makeTraceDir();
@@ -492,9 +272,8 @@ describe("query_trace traceserver core", () => {
         `a narrowed page must reach the caller inside the backstop, got ${json.length} characters`
       );
       // The page shrank by RECORDS, never by fields: `records.length < limit` is
-      // the honest end-of-data signal, `total` still reports the untrimmed
-      // filtered count, and each surviving record is the same object the
-      // un-narrowed path would have returned.
+      // the honest end-of-data signal, and each surviving record is the same
+      // object the un-narrowed path would have returned.
       assert.ok(parsed.records.length < NARROWING_PAGE_RECORD_COUNT);
       assert.ok(
         parsed.records.length > 1,
@@ -510,8 +289,11 @@ describe("query_trace traceserver core", () => {
         json.length + recordWidth > TRACE_OUTPUT_BACKSTOP,
         `the page gave back ${json.length} characters and could have carried ~${recordWidth} more inside ${TRACE_OUTPUT_BACKSTOP}`
       );
-      assert.equal(parsed.total, NARROWING_PAGE_RECORD_COUNT);
-      assertNoResponseTruncationFlag(parsed, "a narrowed list page");
+      // Tool face echoes the effective limit/offset; callers resume by adding
+      // `records.length` to `offset`, and `records.length < limit` is the
+      // "no more rows" signal.
+      assert.equal(parsed.limit, NARROWING_PAGE_RECORD_COUNT);
+      assert.equal(parsed.offset, 0);
       const expectedOrder = Array.from(
         { length: NARROWING_PAGE_RECORD_COUNT },
         (_unused, i) => `llm-${NARROWING_PAGE_RECORD_COUNT - 1 - i}`
@@ -520,6 +302,14 @@ describe("query_trace traceserver core", () => {
         idsOf(parsed.records),
         expectedOrder.slice(0, parsed.records.length)
       );
+      // Tool face envelope must not carry panel-only fields: `total` /
+      // `truncated` / `skipped_lines` belong to the panel's byte-paging
+      // semantics, not to a row-axis page the caller asked for.
+      assert.deepEqual(Object.keys(parsed).sort(), [
+        "limit",
+        "offset",
+        "records",
+      ]);
     });
 
     it("caps a list preview at QUERY_TRACE_PREVIEW_CAP and keeps the marker when the response fits", async () => {
@@ -549,7 +339,8 @@ describe("query_trace traceserver core", () => {
         (preview as string).length,
         QUERY_TRACE_PREVIEW_CAP + MARKER.length
       );
-      assertNoResponseTruncationFlag(parsed, "a list page that fits");
+      assert.equal(parsed.limit, QUERY_TRACE_DEFAULT_LIMIT);
+      assert.equal(parsed.offset, 0);
     });
 
     it("keeps every field of a narrowed page's records, previews and arrays included", async () => {
@@ -599,20 +390,11 @@ describe("query_trace traceserver core", () => {
         parsed.records[0]?.["llm_call_id"],
         `llm-${NARROWING_PAGE_RECORD_COUNT - 1}`
       );
-      assertNoResponseTruncationFlag(
-        parsed,
-        "a narrowed page of whole records"
-      );
     });
 
     it("returns the first record whole instead of an empty page when not even one record fits", async () => {
       const traceDir = makeTraceDir();
-      const wide = writeUnfittableRecordSession(
-        traceDir,
-        "c6",
-        6,
-        UNFITTABLE_FIELD_COUNT
-      );
+      writeUnfittableRecordSession(traceDir, "c6", 6, UNFITTABLE_FIELD_COUNT);
 
       const json = await createQueryTraceCore({ traceDir })({
         conversation_id: "c6",
@@ -631,24 +413,27 @@ describe("query_trace traceserver core", () => {
         json.length > TRACE_OUTPUT_BACKSTOP,
         `the unfittable record is returned whole, got ${json.length} characters`
       );
-      assert.equal(parsed.total, 1);
-      // `truncated` still belongs to the reader's byte window, not to this
-      // serializer: one line, fully read, so false.
-      assert.equal(parsed.truncated, false);
-      assertNoResponseTruncationFlag(parsed, "an unfittable single record");
       // Whole means whole: every field of the wide record survived the walk.
       assert.deepEqual(
         Object.keys(record).sort(),
-        [...Object.keys(wide), "messages_count", "tool_result_count"].sort()
+        [
+          ...Object.keys(
+            writeUnfittableRecordSession(
+              traceDir,
+              "c6-shadow",
+              6,
+              UNFITTABLE_FIELD_COUNT
+            )
+          ),
+          "messages_count",
+          "tool_result_count",
+        ].sort()
       );
-      for (let i = 0; i < UNFITTABLE_FIELD_COUNT; i++) {
-        assert.equal(record[`field_${i}`], "q".repeat(400));
-      }
     });
   });
 
   describe("truncation metadata", () => {
-    it("carries no response_truncated key on any tool-face shape", async () => {
+    it("carries no panel-paging metadata on any tool-face shape", async () => {
       const traceDir = makeTraceDir();
       writeSession(traceDir, "empty", "");
       writeSession(traceDir, "fits", jsonLine(llmCallRow("fits", 1)));
@@ -673,16 +458,11 @@ describe("query_trace traceserver core", () => {
       const shapes: ReadonlyArray<{
         readonly shape: string;
         readonly input: Record<string, unknown>;
-        readonly branch: (parsed: Envelope, json: string) => void;
+        readonly branch: (parsed: ToolPageEnvelope, json: string) => void;
       }> = [
         {
           shape: "an empty session",
           input: { conversation_id: "empty" },
-          branch: (parsed) => assert.equal(parsed.records.length, 0),
-        },
-        {
-          shape: "a session with no file",
-          input: { conversation_id: "no-such-session" },
           branch: (parsed) => assert.equal(parsed.records.length, 0),
         },
         {
@@ -710,7 +490,6 @@ describe("query_trace traceserver core", () => {
               "a narrowed page stopped as late as the backstop allows"
             );
             assert.ok(parsed.records.length < NARROWING_PAGE_RECORD_COUNT);
-            assert.equal(parsed.total, NARROWING_PAGE_RECORD_COUNT);
           },
         },
         {
@@ -721,205 +500,102 @@ describe("query_trace traceserver core", () => {
             assert.equal(parsed.records.length, 1);
           },
         },
-        {
-          shape: "an oversize drill-down",
-          input: {
-            conversation_id: "oversize",
-            record_id: "llm-6",
-            detail: "messages",
-          },
-          branch: (parsed, json) => {
-            assert.ok(json.length > TRACE_OUTPUT_BACKSTOP);
-            assert.equal(parsed.records.length, 1);
-          },
-        },
-        {
-          shape: "a drill-down that matched nothing",
-          input: { conversation_id: "narrows", record_id: "nope" },
-          branch: (parsed) => assert.equal(parsed.records.length, 0),
-        },
       ];
       for (const { shape, input, branch } of shapes) {
         const json = await core(input);
         const parsed = envelope(json);
         branch(parsed, json);
-        assertNoResponseTruncationFlag(parsed, shape);
-        // The envelope's whole key set, so no replacement metadata sneaks in
-        // either. total / truncated stay for now; T7 takes them off the tool face.
+        // T7: tool face keys are exactly the three the contract names; nothing
+        // panel-paging (total / truncated / skipped_lines) leaks through.
         assert.deepEqual(Object.keys(parsed).sort(), [
+          "limit",
           "offset",
           "records",
-          "skipped_lines",
-          "total",
-          "truncated",
         ]);
+        // `records.length < limit` is the end-of-data signal — the only one the
+        // contract gives callers — so the echo must be honest: the limit the
+        // caller used (or the default) and the offset they used.
+        assert.ok(
+          typeof parsed.limit === "number",
+          `${shape}: limit must be echoed as a number`
+        );
+        assert.ok(
+          typeof parsed.offset === "number",
+          `${shape}: offset must be echoed as a number`
+        );
       }
     });
   });
 
   describe("row pagination", () => {
-    it("ignores every offset the caller passes, so rows past the first page are unreachable", async () => {
+    it("honours the caller's offset, so the second page is rows 2-3, the third is rows 4-5, and so on", async () => {
       const traceDir = makeTraceDir();
       let content = "";
       for (let i = 0; i < 10; i++) content += jsonLine(llmCallRow("c7", i));
       writeSession(traceDir, "c7", content);
       const core = createQueryTraceCore({ traceDir });
 
-      const firstPage = await core({ conversation_id: "c7", limit: 2 });
-      const parsed = envelope(firstPage);
-      assert.deepEqual(idsOf(parsed.records), ["llm-9", "llm-8"]);
-      assert.equal(parsed.total, 10);
+      const firstPage = envelope(
+        await core({ conversation_id: "c7", limit: 2 })
+      );
+      assert.deepEqual(idsOf(firstPage.records), ["llm-9", "llm-8"]);
+      assert.equal(firstPage.limit, 2);
+      assert.equal(firstPage.offset, 0);
 
-      // TraceQuery carries a row `offset` and the reader honours it, but
-      // parseInput never reads an `offset` key: the value is silently unused —
-      // not rejected, so there is no negative-offset surface to test either.
-      // T7: flip site — `offset` becomes a real tool-face parameter, so this
-      // byte-identity loop turns into a paging assertion (and gains the
-      // negative / non-integer rejections the panel face already applies at
-      // http.ts:111-115).
-      for (const offset of [2, 8, -5, "abc"]) {
-        assert.equal(
-          await core({ conversation_id: "c7", limit: 2, offset }),
-          firstPage,
-          `offset ${JSON.stringify(offset)} must be ignored`
+      // `offset` is now a real tool-face parameter: page 2 begins where page 1
+      // ended, and the limit echo is the same on every page so callers can
+      // resume without remembering what they asked for.
+      const secondPage = envelope(
+        await core({ conversation_id: "c7", limit: 2, offset: 2 })
+      );
+      assert.deepEqual(idsOf(secondPage.records), ["llm-7", "llm-6"]);
+      assert.equal(secondPage.limit, 2);
+      assert.equal(secondPage.offset, 2);
+
+      // The last full page carries whatever is left; the page after it is the
+      // implicit "no more rows" signal (`records.length < limit`), which the
+      // tool face never spells out as a metadata field.
+      const finalFullPage = envelope(
+        await core({ conversation_id: "c7", limit: 2, offset: 8 })
+      );
+      assert.deepEqual(idsOf(finalFullPage.records), ["llm-1", "llm-0"]);
+      assert.equal(finalFullPage.records.length, 2);
+
+      const beyond = envelope(
+        await core({ conversation_id: "c7", limit: 2, offset: 10 })
+      );
+      assert.equal(beyond.records.length, 0);
+      assert.equal(beyond.offset, 10);
+    });
+
+    it("filters first, then pages, so an offset past the filtered set answers with an empty records array", async () => {
+      const traceDir = makeTraceDir();
+      let content = "";
+      for (let i = 0; i < 5; i++) {
+        content += jsonLine(
+          llmCallRow("c7a", i, { status: i % 2 === 0 ? "ok" : "error" })
         );
       }
-    });
-  });
-
-  describe("record_id drill-down", () => {
-    it("scans with the internal max limit even when the caller asked for one record", async () => {
-      const traceDir = makeTraceDir();
-      // More rows than one internal page, so the pin also covers the paging
-      // loop inside findRecord.
-      const rowCount = 250;
-      assert.ok(rowCount > QUERY_TRACE_MAX_LIMIT);
-      let content = "";
-      for (let i = 0; i < rowCount; i++)
-        content += jsonLine(llmCallRow("c8", i));
-      writeSession(traceDir, "c8", content);
+      writeSession(traceDir, "c7a", content);
       const core = createQueryTraceCore({ traceDir });
 
-      // Proof the caller's limit is honoured on the list page...
-      const listPage = envelope(
-        await core({ conversation_id: "c8", limit: 1 })
-      );
-      assert.deepEqual(idsOf(listPage.records), [`llm-${rowCount - 1}`]);
-      assert.equal(listPage.total, rowCount);
-
-      // ...and silently overridden on a drill-down: llm-0 is the oldest row,
-      // unreachable on a page of one, yet it is found because findRecord forces
-      // `limit: QUERY_TRACE_MAX_LIMIT` and keeps paging to the scan cap.
-      // T7: flip site — the `record_id` axis leaves query_trace for get_record,
-      // and the override that makes it work (and makes the caller's limit a
-      // silent no-op) goes with it.
-      const drill = envelope(
-        await core({ conversation_id: "c8", limit: 1, record_id: "llm-0" })
-      );
-      assert.deepEqual(idsOf(drill.records), ["llm-0"]);
-      assert.equal(drill.total, 1);
-      assert.equal(drill.skipped_lines, 0);
-    });
-
-    it("matches a record_id against any of the ten id keys, not just llm_call_id", async () => {
-      const traceDir = makeTraceDir();
-      writeSession(
-        traceDir,
-        "c9",
-        jsonLine(llmCallRow("c9", 1, { session_id: "sess-1" }))
-      );
-      const core = createQueryTraceCore({ traceDir });
-
-      // The caller searched by turn_id; the row that matched is llm-1, whose
-      // llm_call_id is a different value. `turn_id` doubles as filter and id.
-      const byTurn = envelope(
-        await core({ conversation_id: "c9", record_id: "turn-1" })
-      );
-      assert.deepEqual(idsOf(byTurn.records), ["llm-1"]);
-      assert.equal(byTurn.records[0]["turn_id"], "turn-1");
-      assert.equal(byTurn.total, 1);
-
-      const bySession = envelope(
-        await core({ conversation_id: "c9", record_id: "sess-1" })
-      );
-      assert.deepEqual(idsOf(bySession.records), ["llm-1"]);
-    });
-
-    it("returns the first scanned row whose id keys match when one id appears under two keys", async () => {
-      const traceDir = makeTraceDir();
-      writeSession(
-        traceDir,
-        "c10",
-        jsonLine({
-          record_type: "turn",
-          conversation_id: "c10",
-          turn_id: "dup",
-          started_at: "2026-01-02T00:00:00.000Z",
-        }) +
-          jsonLine({
-            record_type: "llm_call",
-            conversation_id: "c10",
-            llm_call_id: "dup",
-            turn_id: "turn-other",
-            started_at: "2026-01-01T00:00:00.000Z",
-          })
-      );
-
-      const parsed = envelope(
-        await createQueryTraceCore({ traceDir })({
-          conversation_id: "c10",
-          record_id: "dup",
+      // Three rows match status=ok (0, 2, 4). An offset past the end of that
+      // filter answers with zero records; the offset echo tells the caller
+      // where to back up to.
+      const beyond = envelope(
+        await core({
+          conversation_id: "c7a",
+          status: "ok",
+          limit: 2,
+          offset: 3,
         })
       );
-
-      // Array#find over the scan order: the newer turn row matched on turn_id
-      // before the llm_call row could match on llm_call_id.
-      assert.equal(parsed.records.length, 1);
-      assert.equal(parsed.records[0]["record_type"], "turn");
-      assert.equal(parsed.records[0]["turn_id"], "dup");
-    });
-
-    it("returns an empty result, not an error, when record_id matches nothing", async () => {
-      const traceDir = makeTraceDir();
-      writeSession(traceDir, "c11", jsonLine(llmCallRow("c11", 1)));
-
-      const parsed = envelope(
-        await createQueryTraceCore({ traceDir })({
-          conversation_id: "c11",
-          record_id: "no-such-record",
-        })
-      );
-
-      assert.deepEqual(parsed.records, []);
-      assert.equal(parsed.total, 0);
-      assert.equal(parsed.truncated, false);
-      assertNoResponseTruncationFlag(
-        parsed,
-        "a drill-down that matched nothing"
-      );
+      assert.deepEqual(beyond.records, []);
+      assert.equal(beyond.offset, 3);
     });
   });
 
   describe("reader result plumbing", () => {
-    it("propagates the reader's skipped_lines count into the envelope", async () => {
-      const traceDir = makeTraceDir();
-      writeSession(
-        traceDir,
-        "c12",
-        `not json\n${jsonLine(llmCallRow("c12", 1))}[1,2]\n`
-      );
-
-      const parsed = envelope(
-        await createQueryTraceCore({ traceDir })({ conversation_id: "c12" })
-      );
-
-      // A failed parse and a non-object JSON line both count; the good row is
-      // still returned.
-      assert.equal(parsed.skipped_lines, 2);
-      assert.deepEqual(idsOf(parsed.records), ["llm-1"]);
-      assert.equal(parsed.total, 1);
-    });
-
     it("degrades a missing blob to an empty projection instead of throwing into the caller", async () => {
       const traceDir = makeTraceDir();
       writeSession(
@@ -944,14 +620,6 @@ describe("query_trace traceserver core", () => {
       );
       const core = createQueryTraceCore({ traceDir });
 
-      const drill = envelope(
-        await core({
-          conversation_id: "c13",
-          record_id: "llm-1",
-          detail: "tool_results",
-        })
-      );
-      assert.deepEqual(drill.records[0]["tool_results"], []);
       const list = envelope(await core({ conversation_id: "c13" }));
       assert.equal(list.records[0]["tool_result_count"], 0);
     });
@@ -971,22 +639,43 @@ describe("query_trace traceserver core", () => {
         core({ conversation_id: "c14" }),
         core({ conversation_id: "c14" }),
       ]);
-      const [drillA, drillB] = await Promise.all([
-        core({
-          conversation_id: "c14",
-          record_id: "llm-1",
-          detail: "tool_results",
-        }),
-        core({
-          conversation_id: "c14",
-          record_id: "llm-1",
-          detail: "tool_results",
-        }),
-      ]);
 
       assert.equal(listA, listB);
-      assert.equal(drillA, drillB);
-      assert.equal(envelope(drillA).records.length, 1);
+      assert.equal(envelope(listA).records.length, 1);
+    });
+  });
+
+  describe("guard against the retired parameters reappearing", () => {
+    it("ignores record_id, detail and resume_offset at the core layer", async () => {
+      // T7: those three names left the per-face schemas entirely
+      // (additionalProperties: false on ACI / .strict() on MCP, both pinned by
+      // the SC18 test in tests/trace-mcp/server.test.ts). The shared core's
+      // parseInput does NOT reject them — that's the per-face gate's job —
+      // so this test pins the narrower guarantee the core gives: an unknown
+      // key is forwarded to the reader, the reader ignores it, and the
+      // response is byte-equal to the same call without the stale key. A
+      // future refactor that re-activates any of the three keys would
+      // therefore change this response — that diff is the failing test.
+      const traceDir = makeTraceDir();
+      writeSession(traceDir, "c-guard", jsonLine(llmCallRow("c-guard", 1)));
+      const core = createQueryTraceCore({ traceDir });
+
+      const baseline = await core({ conversation_id: "c-guard" });
+      for (const stale of [
+        { record_id: "llm-1" },
+        { detail: "messages" },
+        { resume_offset: 0 },
+      ]) {
+        const withStale = await core({
+          conversation_id: "c-guard",
+          ...stale,
+        });
+        assert.equal(
+          withStale,
+          baseline,
+          `${JSON.stringify(stale)} must not change the response`
+        );
+      }
     });
   });
 });

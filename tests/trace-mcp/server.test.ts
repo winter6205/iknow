@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -275,7 +275,8 @@ describe("trace MCP server", () => {
   it("returns one record past the retired 4000 line whole and parseable (SC7)", async () => {
     // SC7 的行为断言半边：「一条超 4000 的记录必须原样可读」。帽不再是任何工具的
     // 参数，所以越线本身不能改变返回 —— 唯一会改变返回的是本面的 backstop，而它
-    // 在 20 000 那条线上，不在这条线上。
+    // 在 20 000 那条线上，不在这条线上。T7 删了 `total`（属面板分页），所以这里
+    // 不再读这个字段。
     const traceDir = writePaddedTraceDir(6_000);
     const connected = await connectFixture(traceDir);
     try {
@@ -285,9 +286,7 @@ describe("trace MCP server", () => {
       expect(text.endsWith(TRACE_BACKSTOP_MARKER)).toBe(false);
       const body = JSON.parse(text) as {
         records: Array<{ pad?: string }>;
-        total: number;
       };
-      expect(body.total).toBe(1);
       // 字段整发回来：既没被删（v1.0 `compactRecord` 的静默降级），也没被裁短。
       expect(body.records[0]?.pad).toEqual("a".repeat(6_000));
     } finally {
@@ -295,36 +294,29 @@ describe("trace MCP server", () => {
     }
   });
 
-  it("uses tool_results for record drill-down unless messages are requested", async () => {
+  it("uses zod .strict() to reject the retired parameters (record_id/detail/resume_offset)", async () => {
+    // T7: drill-down left query_trace for get_record. The MCP face keeps its
+    // tight `.strict()` shape, so a stale name is rejected with a zod-prefixed
+    // message — the same gate the executor provides on the ACI face.
     const connected = await connectFixture();
     try {
-      const toolResults = await connected.client.callTool({
-        name: "query_trace",
-        arguments: {
-          conversation_id: "conversation-1",
-          record_id: "llm-2",
-        },
-      });
-      const messages = await connected.client.callTool({
-        name: "query_trace",
-        arguments: {
-          conversation_id: "conversation-1",
-          record_id: "llm-2",
-          detail: "messages",
-        },
-      });
-
-      const toolResultsText = toolResults.content[0];
-      const messagesText = messages.content[0];
-      assert.equal(toolResultsText?.type, "text");
-      assert.equal(messagesText?.type, "text");
-      if (toolResultsText?.type !== "text" || messagesText?.type !== "text") {
-        throw new Error("expected text content");
+      for (const stale of [
+        { conversation_id: "conversation-1", record_id: "llm-2" },
+        { conversation_id: "conversation-1", detail: "messages" },
+        { conversation_id: "conversation-1", resume_offset: 0 },
+      ]) {
+        const rejected = await connected.client.callTool({
+          name: "query_trace",
+          arguments: stale,
+        });
+        expect(rejected.isError).toBe(true);
+        const text = rejected.content[0];
+        assert.equal(text?.type, "text");
+        if (text?.type !== "text") {
+          throw new Error("expected text content");
+        }
+        expect(text.text).toMatch(/Unrecognized key|too_big|too_small/);
       }
-      expect(toolResultsText.text).toContain("tool_results");
-      expect(toolResultsText.text).not.toContain("private prompt");
-      expect(messagesText.text).toContain("private prompt");
-      expect(messagesText.text).toContain("toolu-1");
     } finally {
       await connected.close();
     }
@@ -772,6 +764,6 @@ describe("the three read-side faces agree on the parameter plane (SC18)", () => 
     // 注册顺序同源。
     expect(
       PARAMETER_PLANE.map((face) => face.aciSchema.required ?? [])
-    ).toEqual([[], [], ["conversation_id", "record_id"]]);
+    ).toEqual([[], ["conversation_id"], ["conversation_id", "record_id"]]);
   });
 });
