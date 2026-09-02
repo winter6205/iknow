@@ -25,6 +25,7 @@ import { realpath } from "node:fs/promises";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
+import type { LiveTaskRoot } from "../../session-roots.js";
 import { resolveWithinRoot, spawnWithStopSignal } from "./helpers.js";
 
 const DEFAULT_LIMIT = 200;
@@ -69,14 +70,35 @@ interface CompiledInput {
 }
 
 /**
+ * Snapshot the live root at handler invocation time. Accepts either a
+ * literal path (legacy / forward-compat shape — tests and other one-shot
+ * callers pass `string`) or a `LiveTaskRoot` cell (T6: registry threads
+ * the cell so that `worktree rebind` in the same run reaches this
+ * handler). The returned `string` is the snapshot value — D2 forbids
+ * reading the cell more than once per handler call.
+ */
+function readRoot(root: string | LiveTaskRoot): string {
+  return typeof root === "string" ? root : root.read();
+}
+
+/**
  * 工厂：createGrepTool(root, deps?) — 内容搜索工具。
  *
  * 返回的 AciToolDef 满足：
  *   - name === "grep"
  *   - inputSchema: { pattern 必填 + path? + ignoreCase?(默认 false) + limit?(默认 200, 上限 2000) }
  *   - aci 元数据：category=read-only / isConcurrencySafe=true / interruptBehavior=cancel
+ *
+ * T6 (plans/worktree-live-task-root.md §6 T6): `root` may be a
+ * `LiveTaskRoot` cell; the handler reads the snapshot at call time, so
+ * `worktree rebind` in the same run lands the next call in the rebound
+ * tree. `string` callers (legacy tests, one-shot consumers) keep
+ * byte-identical behavior.
  */
-export function createGrepTool(root: string, deps?: GrepToolDeps): AciToolDef {
+export function createGrepTool(
+  root: string | LiveTaskRoot,
+  deps?: GrepToolDeps
+): AciToolDef {
   // When the test seam (deps.spawn) is provided we use it directly so
   // ENOENT-style stubs can drive the fallback branch. Production goes
   // through spawnWithStopSignal which handles detached process-group kill.
@@ -86,9 +108,13 @@ export function createGrepTool(root: string, deps?: GrepToolDeps): AciToolDef {
     input: unknown,
     ctx?: ToolExecutionContext
   ): Promise<string> => {
+    // T6 D2: per-handler batch snapshot. root 在入口读一次冻结为 resolvedRoot,
+    // 贯穿整条路径（compileInput → rg / fallback）。handler 内后续 cell 翻转
+    // 不渗透进本次调用。cell 缺席 → 退到工厂捕获 root（legacy parity）。
+    const rootAtCall = readRoot(root);
     // Resolve per call (matches sibling tools) so a missing/unreachable
     // root surfaces at the point of use instead of from a cached promise.
-    const resolvedRoot = await realpath(root);
+    const resolvedRoot = await realpath(rootAtCall);
     const compiled = await compileInput(input, resolvedRoot);
     const matches = await runRipgrepOrFallback(
       testSpawn,
@@ -346,9 +372,7 @@ async function runNodeFallback(compiled: CompiledInput): Promise<string[]> {
       if (regexp.test(line)) {
         const rel = relative(ws, filePath);
         const cleaned = rel.startsWith("./") ? rel.slice(2) : rel;
-        out.push(
-          `${cleaned}:${String(lineNo)}:${truncateMatchContent(line)}`
-        );
+        out.push(`${cleaned}:${String(lineNo)}:${truncateMatchContent(line)}`);
       }
     });
   });

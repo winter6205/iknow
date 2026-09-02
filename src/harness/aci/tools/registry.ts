@@ -483,15 +483,25 @@ export function createDefaultAciRegistry(
           ? { liveTaskRoot: opts.liveTaskRoot }
           : {}),
       }),
+    // T6 (plans/worktree-live-task-root.md §6 T6): read 路径工具工厂参数
+    // 从冻结 sandboxRoot 扩为 `liveTaskRoot ?? sandboxRoot` (cell 缺席 / 未
+    // rebind → 退回 sandboxRoot,byte-identical 于 T5 之前的形态)。factory
+    // handler 内 cell.read() 取一次 snapshot,与 read_file 的 extraReadRoots
+    // 同 vintage(D9)。glob / grep 同样的 per-call 读取。
+    //
+    // D10 处置：**接通** registry.ts:471-473 死缝 → read-file.ts 现在真实
+    // 消费 `projectIdentityRoot`(ADR-0037 §1 身份根只读直通)。registry 这层
+    // 仍以 spread guard 透传,但 read-file.ts 把它纳入 extraReadRoots(D9
+    // 同 vintage,rebind 后身份根文件仍可达)。
     read_file: () =>
-      createReadFileTool(sandboxRoot, {
+      createReadFileTool(opts.liveTaskRoot ?? sandboxRoot, {
         workspaceRoot,
         ...(opts.projectIdentityRoot !== undefined
           ? { projectIdentityRoot: opts.projectIdentityRoot }
           : {}),
       }),
-    grep: () => createGrepTool(sandboxRoot),
-    glob: () => createGlobTool(sandboxRoot),
+    grep: () => createGrepTool(opts.liveTaskRoot ?? sandboxRoot),
+    glob: () => createGlobTool(opts.liveTaskRoot ?? sandboxRoot),
     // T5:write_file / edit_file 读活 taskRoot。门禁未翻 ⇒ cell 初值 =
     // sandboxRoot，逐字节同今日；handler 内 cell.read() 一次取得 snapshot，
     // 同 handler 内 resolve 与写入共用该值（D2）。

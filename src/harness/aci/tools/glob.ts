@@ -22,6 +22,7 @@ import { readdir, realpath } from "node:fs/promises";
 import { relative, sep } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
+import type { LiveTaskRoot } from "../../session-roots.js";
 import { resolveWithinRoot, spawnWithStopSignal } from "./helpers.js";
 import type { AciToolDef } from "../types.js";
 
@@ -51,12 +52,31 @@ export interface GlobToolDeps {
 }
 
 /**
+ * Snapshot the live root at handler invocation time. Accepts either a
+ * literal path (legacy / forward-compat shape — tests and other one-shot
+ * callers pass `string`) or a `LiveTaskRoot` cell (T6: registry threads
+ * the cell so that `worktree rebind` in the same run reaches this
+ * handler). The returned `string` is the snapshot value — D2 forbids
+ * reading the cell more than once per handler call.
+ */
+function readRoot(root: string | LiveTaskRoot): string {
+  return typeof root === "string" ? root : root.read();
+}
+
+/**
  * Factory: create the `glob` tool bound to a workspace root.
  *
- * `root` is the workspace root; `deps` is an optional test seam (production
+ * T6 (plans/worktree-live-task-root.md §6 T6): `root` may be a
+ * `LiveTaskRoot` cell; the handler reads the snapshot at call time, so
+ * `worktree rebind` in the same run lands the next call in the rebound
+ * tree. `string` callers (legacy tests, one-shot consumers) keep
+ * byte-identical behavior. `deps` is an optional test seam (production
  * callers omit it).
  */
-export function createGlobTool(root: string, deps?: GlobToolDeps): AciToolDef {
+export function createGlobTool(
+  root: string | LiveTaskRoot,
+  deps?: GlobToolDeps
+): AciToolDef {
   return {
     name: "glob",
     description:
@@ -82,11 +102,16 @@ export function createGlobTool(root: string, deps?: GlobToolDeps): AciToolDef {
       const subPath = readSubPath(input);
       const limit = clampLimit(readLimit(input));
 
+      // T6 D2: per-handler batch snapshot. root 在入口读一次冻结,贯穿整条
+      // 路径(resolve → realpath → rg/fallback)。handler 内后续 cell 翻转
+      // 不渗透进本次调用。cell 缺席 → 退到工厂捕获 root(legacy parity)。
+      const rootAtCall = readRoot(root);
+
       // 1. Resolve + contain the search root. Throws on escape.
-      const searchRoot = await resolveWithinRoot(root, subPath ?? ".");
+      const searchRoot = await resolveWithinRoot(rootAtCall, subPath ?? ".");
 
       // 2. Resolve real paths so rg-internal symlinks don't desync us.
-      const realRoot = await realpath(root);
+      const realRoot = await realpath(rootAtCall);
       const realSearchRoot = await realpath(searchRoot);
       const searchPrefix = relative(realRoot, realSearchRoot); // "" or "src"
 
