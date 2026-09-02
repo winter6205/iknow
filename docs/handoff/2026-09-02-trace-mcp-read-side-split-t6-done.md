@@ -8,31 +8,31 @@
 
 ## 已固化工件（引用，不复制 inline）
 
-| 类型 | 路径 / URL |
-|------|-----------|
-| 计划（含 15 条开工前/收尾订正，**实现判据以这些订正为准**） | `plans/trace-mcp-read-side-split.md` |
-| 现役 spec | `specs/trace-mcp-server.md`（v1.1，SC6/SC7/SC8/SC15/SC16/SC18/SC20 在本轮生效） |
-| 行轴旧 spec（T7 须同步） | `specs/query-trace-tool-results.md` |
-| 决策记录 | `docs/adr/0004-tool-layer-six-tool-set.md`（契约 X，`:23`）、`docs/adr/0006-*`（`:22` 读单元 vs 兜底帽、`:29` 双层截断）、`docs/adr/0020-*`（面板信封语义） |
-| 领域词（**尚未写入**） | `docs/CONTEXT.md` — read unit / window / tool face / panel face 四条在 plan §待写入，等整轮收尾走 `domain-modeling` |
-| 面板面（SC15 冻结件） | `src/traceserver/http.ts` — 本轮全程 0 字节改动 |
-| PR | 见本分支 `worktree-trace-mcp-read-side-split`（T1–T6，本轮开出） |
+| 类型                                                        | 路径 / URL                                                                                                                                                  |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 计划（含 15 条开工前/收尾订正，**实现判据以这些订正为准**） | `plans/trace-mcp-read-side-split.md`                                                                                                                        |
+| 现役 spec                                                   | `specs/trace-mcp-server.md`（v1.1，SC6/SC7/SC8/SC15/SC16/SC18/SC20 在本轮生效）                                                                             |
+| 行轴旧 spec（T7 须同步）                                    | `specs/query-trace-tool-results.md`                                                                                                                         |
+| 决策记录                                                    | `docs/adr/0004-tool-layer-six-tool-set.md`（契约 X，`:23`）、`docs/adr/0006-*`（`:22` 读单元 vs 兜底帽、`:29` 双层截断）、`docs/adr/0020-*`（面板信封语义） |
+| 领域词（**尚未写入**）                                      | `docs/CONTEXT.md` — read unit / window / tool face / panel face 四条在 plan §待写入，等整轮收尾走 `domain-modeling`                                         |
+| 面板面（SC15 冻结件）                                       | `src/traceserver/http.ts` — 本轮全程 0 字节改动                                                                                                             |
+| PR                                                          | 见本分支 `worktree-trace-mcp-read-side-split`（T1–T6，本轮开出）                                                                                            |
 
 ## 本 session 变更
 
 分支 `worktree-trace-mcp-read-side-split`，基线 `e9409fc2`（其父 = master `b99492f2`）。**master 是本分支祖先**，PR 无冲突面。
 
-| commit | 一行效果 |
-|--------|----------|
-| `bc560655` | spec v1.1：三面白名单 + read unit 词表 + SC6–SC8 改写 + SC16 前缀归属 |
-| `7d445e67` `f75ad5a1` `65274cf9` | plan 订正：T3 逃生口被实测证伪后改形、record_id 扫描测给 120s、标注派生量非实测 |
-| `b71cb9c3` | 现役核 characterization 测（动手前钉住今天的真实行为，含 P0 静默降级） |
-| `b5f75e63` | **P0**：下钻整条返回，`compactRecord` / `response_truncated` 退场 |
-| `27edf413` | plan 订正：残留 4000 假称全部划归 T6；记录破基线门 |
-| `19248392` | `newestConversationId` 与响应信封各收一个 owner（`envelope.ts`），`http.ts` 零改动仍绿 |
-| `2f2b2940` | T5a：工具名前缀从共核搬到两张皮各自的 catch arm |
-| `16a6c773` | T5b：`list_sessions`（目录轴）上两张皮，registry 40→41 |
-| `4013ef58` | **T6**：`get_record`（内容轴窗）上两张皮 + 4000 字符帽退场（新核 `get-record-core.ts` / `record-lookup.ts` / `output-backstop.ts`，ACI `get-record.ts`，registry 41→42），31 文件 |
+| commit                           | 一行效果                                                                                                                                                                          |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bc560655`                       | spec v1.1：三面白名单 + read unit 词表 + SC6–SC8 改写 + SC16 前缀归属                                                                                                             |
+| `7d445e67` `f75ad5a1` `65274cf9` | plan 订正：T3 逃生口被实测证伪后改形、record_id 扫描测给 120s、标注派生量非实测                                                                                                   |
+| `b71cb9c3`                       | 现役核 characterization 测（动手前钉住今天的真实行为，含 P0 静默降级）                                                                                                            |
+| `b5f75e63`                       | **P0**：下钻整条返回，`compactRecord` / `response_truncated` 退场                                                                                                                 |
+| `27edf413`                       | plan 订正：残留 4000 假称全部划归 T6；记录破基线门                                                                                                                                |
+| `19248392`                       | `newestConversationId` 与响应信封各收一个 owner（`envelope.ts`），`http.ts` 零改动仍绿                                                                                            |
+| `2f2b2940`                       | T5a：工具名前缀从共核搬到两张皮各自的 catch arm                                                                                                                                   |
+| `16a6c773`                       | T5b：`list_sessions`（目录轴）上两张皮，registry 40→41                                                                                                                            |
+| `4013ef58`                       | **T6**：`get_record`（内容轴窗）上两张皮 + 4000 字符帽退场（新核 `get-record-core.ts` / `record-lookup.ts` / `output-backstop.ts`，ACI `get-record.ts`，registry 41→42），31 文件 |
 
 工作树遗留：无。`docs/handoff/2026-09-02-trace-mcp-read-side-split-t6-done.md` 是交接件本身（单独 docs commit）。
 
