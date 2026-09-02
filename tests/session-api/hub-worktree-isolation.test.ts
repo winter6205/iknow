@@ -176,6 +176,20 @@ async function persistDirtyRoot(
   });
 }
 
+/**
+ * These suites shell out to real `git` (init / worktree add / status), so their
+ * wall time is a function of who else wants the 4 cores: `maxForks: 3` lets
+ * three files contend, and Vitest's 5s `testTimeout` is a wall-clock budget.
+ * Same code, same cases, two runs — 302–868ms per test when the box is quiet,
+ * but 4152 / 4700 / 5964ms for three adjacent cases in the contended baseline
+ * run, the last of which reported `Test timed out in 5000ms`. So the budget is
+ * contention insurance, not inherent slowness.
+ * setConfig (file-scoped — it cannot leak into other files) rather than
+ * per-describe options: an inserted options argument makes prettier re-indent
+ * every large describe body and buries the change.
+ */
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
+
 // -- switch ON -----------------------------------------------------------------
 
 describe("worktree isolation wiring (switch ON)", () => {
