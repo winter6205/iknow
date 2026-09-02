@@ -103,6 +103,7 @@ jobs:
             --exclude tests/harness/build-engine.test.ts \
             --exclude tests/harness/build-engine-auto-memory.test.ts \
             --exclude tests/harness/build-engine-subagent-trace.test.ts \
+            --exclude tests/harness/build-engine-mcp-roots.test.ts \
             --exclude tests/harness/graph/run-graph-assembly.test.ts \
             --exclude tests/session-api/ensure-deps-aci-tools.test.ts \
             --exclude tests/subagent/worker-tool-surface.test.ts \
@@ -196,6 +197,7 @@ jobs:
             --exclude tests/harness/build-engine.test.ts \
             --exclude tests/harness/build-engine-auto-memory.test.ts \
             --exclude tests/harness/build-engine-subagent-trace.test.ts \
+            --exclude tests/harness/build-engine-mcp-roots.test.ts \
             --exclude tests/harness/graph/run-graph-assembly.test.ts \
             --exclude tests/session-api/ensure-deps-aci-tools.test.ts \
             --exclude tests/subagent/worker-tool-surface.test.ts \
