@@ -3,17 +3,23 @@
  *
  * 只读目录元数据 + 会话根记录的 agent_version，不读其它会话内容：
  *   - readdirSync 列目录 → 每个 `<convId>.jsonl` 文件 = 一个会话（文件名 = conversation_id）。
- *   - statSync 取 mtime / size（最近活跃 + 字节，列表不读内容，行数≈size）。
- *   - 全文件有界扫描找会话根记录（record_type === "session"）提取 agent_version。
+ *   - statSync 取 mtime / size（最近活跃 + 字节；`size` 直接来自 stat，不由正文推算）。
+ *   - 前缀有界扫描（首 64 KiB）找会话根记录（record_type === "session"）提取 agent_version。
  *
  * 根记录位置与写侧的关系（SC-R 18 修正）：
  *   recordSession 在 loop-engine run **末尾**落盘（诚实值红线：endedAt /
  *   durationMs / status 只有 run 结束才能确定，见 loop-engine.ts run()），
  *   所以真实 writer 产出文件里 session 根是**最后一行**，首行通常是
  *   llm_call/turn —— 读首行会让 agent_version 恒 absent。故改为有界扫描
- *   全文件找 `record_type==="session"` 的行取 agent_version；找不到 / 坏行
+ *   文件前缀找 `record_type==="session"` 的行取 agent_version；找不到 / 坏行
  *   → 字段 absent（SC-R 18 语义不变：缺失/坏行 → absent，不因单会话坏行
  *   整体失败）。cap 截断保证对超大文件仍保持有界（不整文件 readFileSync）。
+ *
+ * 有界前缀扫描的已知代价（本票不修）：根记录在**末尾**，文件大于 64 KiB 窗口
+ * 时根就落在窗口之外 → 已正常结束的会话同样报 absent（实测真实 trace 目录 81
+ * 个会话里 17 个如此）。所以 absent 只表示「窗口内没找到根记录」，不能用来推断
+ * 会话是否结束。要消掉这条代价得改读文件尾部，而尾部读取会同时改变 inspect
+ * panel 的输出，panel face 被 spec SC15 冻结（`http.ts` 逐字节不动），故留后续票。
  *
  * 失败路径（SC-R 17/18）：
  *   - readdir ENOENT（无目录）→ 空列表，非 500 / 非 throw。
@@ -41,9 +47,9 @@ const SESSION_FILE_SUFFIX = ".jsonl";
  * Read up to `cap` bytes of a file (bounded pread).
  *
  * 读侧对会话列表的约束是「不读文件内容」，唯一例外是 agent_version 需从
- * 会话根记录读。cap 截断保证对超大文件仍保持有界；文件更大时只扫描前缀
- * （会话根记录在 run 末尾落盘，文件内几乎必然在前缀内；截断边界上未命中
- * 会话根 → 字段 absent，不误报）。
+ * 会话根记录读。cap 截断保证对超大文件仍保持有界；文件更大时只扫描前缀，
+ * 而根记录在 run 末尾落盘 —— 只有整个文件装进窗口时前缀扫描才碰得到它，
+ * 未命中即字段 absent（代价与实测比例见文件头「有界前缀扫描的已知代价」）。
  */
 function readBounded(filePath: string, cap = 65536): string | undefined {
   const buf = Buffer.alloc(cap);
@@ -136,4 +142,57 @@ export function listSessions(traceDir: string): SessionSummary[] {
     });
   }
   return sessions;
+}
+
+// -- 缺省会话（SC-R 12） --------------------------------------------------------
+
+/** 索引里 mtime 最大的一条；相等时保留先入表者（只需要最大值，不需要排序）。 */
+function newestSession(
+  sessions: ReadonlyArray<SessionSummary>
+): SessionSummary | undefined {
+  return sessions.reduce<SessionSummary | undefined>((latest, session) => {
+    if (latest === undefined) return session;
+    return session.mtime > latest.mtime ? session : latest;
+  }, undefined);
+}
+
+/**
+ * 「最近活跃会话」的唯一推导，panel (`http.ts`) 与 tool
+ * (`query-trace-core.ts`) 的隐式缺省都经它 (SC-R 12)。
+ *
+ * 每次调用重读索引，不缓存：面板在轮询、工具在连续调用之间都会有新会话落盘，
+ * 缓存的缺省会静默变陈旧。无会话 / 目录不存在 → undefined，由调用方决定
+ * 自己那面的空结果表达。
+ *
+ * 本函数**不**建立在 `sessionsByRecency` 之上：它的并列规则是「严格更新者胜、
+ * 否则保留先入表者」，那是 SC-R 12 的既有语义（面板缺省会话由它决定；并列这一级
+ * 由 `tests/traceserver/sessions.test.ts:418` 钉，`http.test.ts` 只覆盖 mtime 有别的
+ * 缺省路由），而分页要的是确定性全序。两者不同，各留各的比较式。
+ */
+export function newestConversationId(traceDir: string): string | undefined {
+  return newestSession(listSessions(traceDir))?.conversation_id;
+}
+
+/**
+ * 同一份会话索引的**确定性页序**：`mtime` 降序（最近活跃先出），并列时
+ * `conversation_id` 升序。`list_sessions` tool face（plan
+ * `trace-mcp-read-side-split` T5b）按 caller 给的 `limit` / `offset` 切片时经它。
+ *
+ * 为什么必须有 `conversation_id` 这一级：`listSessions` 返回 readdir 原序，而
+ * readdir 顺序由文件系统决定，同一页在两次调用之间可能换人 —— 并列 mtime 不兜住
+ * 就不是「调用方指定位置的一页」，是随机一页。
+ *
+ * 为什么是新函数而不是把排序塞进 `listSessions`：面板 (`http.ts:212-219`) 直接
+ * 要 readdir 语义的索引，两张皮各管自己的线形状（plan 第 120 行）。
+ */
+export function sessionsByRecency(traceDir: string): SessionSummary[] {
+  return listSessions(traceDir).sort(compareByRecency);
+}
+
+/** `mtime` 降序 → 同值时 `conversation_id` 升序（全序，与 readdir 顺序无关）。 */
+function compareByRecency(a: SessionSummary, b: SessionSummary): number {
+  if (a.mtime !== b.mtime) return b.mtime - a.mtime;
+  if (a.conversation_id === b.conversation_id) return 0;
+  // 纯码点比较，不用 localeCompare：页序不能随 ICU locale 变。
+  return a.conversation_id < b.conversation_id ? -1 : 1;
 }

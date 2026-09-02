@@ -57,6 +57,9 @@ const JUDGE_ROLE: SubAgentDefinitionShape = {
   // 推导公式 = ACI_TOOLSET_NAMES 减 JUDGE_ALLOWED_TOOLS；不在白名单内一律禁。
   // 类型放宽为 ReadonlyArray<string>（与 SubAgentDefinition.disallowedTools 对齐），
   // 便于推导后类型兼容；as const 在 readonly tuple 与推导数组的 union 上不兼容。
+  // 派生面自动跟随 append-only 尾部：trace-mcp-read-side-split T5b 起的
+  // list_sessions 因此进入 deny 集 —— 这是 fail-closed 的预期行为，不是回归
+  // （判官只需 read_file/grep/glob 取证；给它目录轴也须显式加白名单 + 拍板）。
   disallowedTools: (ACI_TOOLSET_NAMES as ReadonlyArray<string>).filter(
     (n) => !JUDGE_ALLOWED_TOOLS.includes(n)
   ),

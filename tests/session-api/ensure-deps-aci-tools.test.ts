@@ -91,6 +91,13 @@ const EXPECTED_TOOLS = [
   "insert_before_symbol",
   "insert_after_symbol",
   "safe_delete_symbol",
+  // trace-mcp-read-side-split T5b list_sessions append-only:35→36,末位 1 件常驻
+  //（读侧目录轴,无装配条件 → serve 全装配必在场;与 build-engine 同形)。
+  "list_sessions",
+  // trace-mcp-read-side-split T6 get_record append-only:36→37,末位再加 1 件常驻
+  //（读侧内容轴,与目录轴同样无装配条件 → serve 全装配必在场;三轴顺序 = append
+  //  顺序,不重排既有件)。
+  "get_record",
 ];
 
 let baseDir: string;

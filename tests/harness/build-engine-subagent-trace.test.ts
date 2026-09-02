@@ -249,7 +249,9 @@ describe("buildHarnessEngine — subagentTrace 注入缝 (Fix 1 SC1)", () => {
       .list()
       .find((entry) => entry.name === "query_trace");
     expect(tool).toBeDefined();
-    const raw = await tool!.handler({});
+    const raw = (await tool!.handler({
+      conversation_id: "c-custom",
+    })) as string;
     const body = JSON.parse(raw) as { records: Array<{ turn_id?: string }> };
     expect(body.records.some((row) => row.turn_id === "turn-custom")).toBe(
       true

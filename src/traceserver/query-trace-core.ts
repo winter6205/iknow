@@ -1,38 +1,50 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { projectToolResultsFromTrace } from "./project-tool-results.js";
+import { projectRecordBase } from "./record-lookup.js";
+import { TRACE_OUTPUT_BACKSTOP } from "./output-backstop.js";
 import { createJsonlTraceReader } from "./reader.js";
 import {
   TRACE_RECORD_TYPES,
   type TraceRecordRow,
   type TraceRecordType,
   type TraceQuery,
-  type TraceQueryResult,
 } from "./types.js";
-import { listSessions } from "./sessions.js";
 import {
-  TraceQueryRecordScanError,
   TraceQueryValidationError,
+  TraceSessionNotFoundError,
 } from "./query-trace-errors.js";
+import { parseInteger } from "./parse-integer.js";
+import { toQueryTracePage } from "./envelope.js";
 
 export const QUERY_TRACE_DEFAULT_LIMIT = 100;
 export const QUERY_TRACE_MAX_LIMIT = 200;
-export const QUERY_TRACE_MAX_RECORD_ID_SCAN = 10_000;
-export const QUERY_TRACE_RESPONSE_CAP = 4_000;
 export const QUERY_TRACE_PREVIEW_CAP = 400;
 
-const RECORD_ID_KEYS = [
-  "llm_call_id",
-  "tool_call_id",
-  "turn_id",
-  "violation_id",
-  "session_id",
-  "sandbox_cmd_id",
-  "verification_id",
-  "goal_id",
-  "subagent_id",
-  "subagent_step_id",
-] as const;
+/**
+ * The one description text for both faces (spec SC7 / SC18: one source, and it
+ * claims no character cap — the 4000-character sentence this replaces described
+ * a budget the read side stopped owning in plan `trace-mcp-read-side-split` T6).
+ * What the row axis really guarantees is stated in its own terms: rows come back
+ * as projections, list pagination is `limit` + `offset`, `records.length <
+ * limit` is the end-of-data signal, and span-level reads on one record live on
+ * `get_record`. Positive-trigger phrasing per #483 D9, enforced by
+ * tests/harness/aci/tools/d9-description-guard.test.ts.
+ */
+export const QUERY_TRACE_DESCRIPTION =
+  "Query local JSONL trace records with filters, returning one page of rows. " +
+  "Rows are projection-only (message count, first/last previews, tool_result " +
+  "summaries with their character sizes, and error); use get_record to read one " +
+  "record's content span by span. The page is filtered and paged by limit (default " +
+  "100, up to " +
+  String(QUERY_TRACE_MAX_LIMIT) +
+  ") and offset; the response echoes the effective limit and offset, so a page " +
+  "shorter than the echoed limit means the filter has no more rows and offset + " +
+  "rows returned continues it. conversation_id is required: discover it with " +
+  "list_sessions, then pair this tool with get_record to reach a record's content. " +
+  "If the model ends the turn without a following llm_call, that last round's " +
+  "tool_results are not visible in the projection.";
 
 interface QueryTraceInput {
   readonly conversation_id?: unknown;
@@ -42,9 +54,7 @@ interface QueryTraceInput {
   readonly parent_turn_id?: unknown;
   readonly turn_id?: unknown;
   readonly limit?: unknown;
-  readonly record_id?: unknown;
-  readonly detail?: unknown;
-  readonly resume_offset?: unknown;
+  readonly offset?: unknown;
 }
 
 export interface QueryTraceCoreOptions {
@@ -60,109 +70,100 @@ export function createQueryTraceCore(
 
   return async (input: unknown): Promise<string> => {
     const parsed = parseInput(input);
-    const conversationId =
-      parsed.conversationId ?? mostRecentConversationId(traceDir);
-    if (conversationId === undefined) {
-      return serializeResponse(emptyResult());
+    // T7: `conversation_id` is required on the tool face (Assumption 4). A
+    // missing file raises `session_not_found`, not the silent empty envelope the
+    // pre-T7 default returned when the implicit "newest session" was also
+    // missing.
+    const filePath = join(traceDir, `${parsed.conversationId}.jsonl`);
+    if (!existsSync(filePath)) {
+      throw new TraceSessionNotFoundError(parsed.conversationId);
     }
-
-    const reader = createJsonlTraceReader({
-      filePath: join(traceDir, `${conversationId}.jsonl`),
-    });
-    const result =
-      parsed.recordId === undefined
-        ? reader.query(parsed.query)
-        : findRecord(reader, parsed.query, parsed.recordId);
-    const records =
-      parsed.recordId === undefined
-        ? await Promise.all(
-            result.records.map((row) => projectRecord(row, traceDir))
-          )
-        : await Promise.all(
-            result.records.map((row) =>
-              projectDrillDownRecord(row, parsed.detail, traceDir)
-            )
-          );
-    return serializeResponse({
-      records,
-      total: result.total,
-      skipped_lines: result.skippedLines,
-      truncated: result.truncated,
-      offset: result.offset,
-    });
+    const reader = createJsonlTraceReader({ filePath });
+    const query: TraceQuery = {
+      ...(parsed.recordType !== undefined
+        ? { recordType: parsed.recordType }
+        : {}),
+      ...(parsed.status !== undefined ? { status: parsed.status } : {}),
+      ...(parsed.taskId !== undefined ? { taskId: parsed.taskId } : {}),
+      ...(parsed.parentTurnId !== undefined
+        ? { parentTurnId: parsed.parentTurnId }
+        : {}),
+      ...(parsed.turnId !== undefined ? { turnId: parsed.turnId } : {}),
+      limit: parsed.limit,
+      offset: parsed.offset,
+    };
+    const result = reader.query(query);
+    const projected = await Promise.all(
+      result.records.map((row) => projectRecord(row, traceDir))
+    );
+    return serializeListPage(
+      toQueryTracePage(projected, {
+        limit: parsed.limit,
+        offset: parsed.offset,
+      }),
+      projected.length
+    );
   };
 }
 
-function parseInput(input: unknown): {
-  readonly query: TraceQuery;
-  readonly conversationId?: string;
-  readonly recordId?: string;
-  readonly detail?: "messages" | "tool_results";
-} {
+interface ParsedQueryTraceInput {
+  readonly conversationId: string;
+  readonly recordType?: TraceRecordType;
+  readonly status?: "ok" | "error";
+  readonly taskId?: string;
+  readonly parentTurnId?: string;
+  readonly turnId?: string;
+  readonly limit: number;
+  readonly offset: number;
+}
+
+function parseInput(input: unknown): ParsedQueryTraceInput {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
-    throw new TraceQueryValidationError(
-      "input",
-      "input must be an object"
-    );
+    throw new TraceQueryValidationError("input", "input must be an object");
   }
   const raw = input as QueryTraceInput;
-  const conversationId = optionalNonEmptyString(
+  // T7: required. Empty string still fails before the path-separator check, so
+  // the path-separator rule continues to run on a non-empty value.
+  const conversationId = requireNonEmptyString(
     raw.conversation_id,
     "conversation_id"
   );
-  if (
-    conversationId !== undefined &&
-    (conversationId.includes("/") || conversationId.includes("\\"))
-  ) {
+  if (conversationId.includes("/") || conversationId.includes("\\")) {
     throw new TraceQueryValidationError(
       "conversation_id",
       "conversation_id must not contain path separators"
     );
   }
-  const recordId = optionalNonEmptyString(raw.record_id, "record_id");
   const recordType = parseRecordType(raw.record_type);
   const status = parseStatus(raw.status);
   const limit =
     parseInteger(raw.limit, "limit", 1, QUERY_TRACE_MAX_LIMIT) ??
     QUERY_TRACE_DEFAULT_LIMIT;
-  const detail = parseDetail(raw.detail);
-  const resumeOffset =
-    parseInteger(raw.resume_offset, "resume_offset", 0) ?? 0;
+  const offset = parseInteger(raw.offset, "offset", 0) ?? 0;
   return {
-    ...(conversationId !== undefined ? { conversationId } : {}),
-    ...(recordId !== undefined ? { recordId } : {}),
-    ...(detail !== undefined ? { detail } : {}),
-    query: {
-      ...(recordType !== undefined ? { recordType } : {}),
-      ...(status !== undefined ? { status } : {}),
-      taskId: optionalNonEmptyString(raw.task_id, "task_id"),
-      parentTurnId: optionalNonEmptyString(
-        raw.parent_turn_id,
-        "parent_turn_id"
-      ),
-      turnId: optionalNonEmptyString(raw.turn_id, "turn_id"),
-      limit,
-      resumeOffset,
-    },
+    conversationId,
+    ...(recordType !== undefined ? { recordType } : {}),
+    ...(status !== undefined ? { status } : {}),
+    ...(raw.task_id !== undefined
+      ? { taskId: requireNonEmptyString(raw.task_id, "task_id") }
+      : {}),
+    ...(raw.parent_turn_id !== undefined
+      ? {
+          parentTurnId: requireNonEmptyString(
+            raw.parent_turn_id,
+            "parent_turn_id"
+          ),
+        }
+      : {}),
+    ...(raw.turn_id !== undefined
+      ? { turnId: requireNonEmptyString(raw.turn_id, "turn_id") }
+      : {}),
+    limit,
+    offset,
   };
 }
 
-function parseDetail(value: unknown): "messages" | "tool_results" | undefined {
-  if (value === undefined) return undefined;
-  if (value !== "messages" && value !== "tool_results") {
-    throw new TraceQueryValidationError(
-      "detail",
-      "detail must be one of: messages, tool_results"
-    );
-  }
-  return value;
-}
-
-function optionalNonEmptyString(
-  value: unknown,
-  field: string
-): string | undefined {
-  if (value === undefined) return undefined;
+function requireNonEmptyString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new TraceQueryValidationError(
       field,
@@ -197,86 +198,6 @@ function parseStatus(value: unknown): "ok" | "error" | undefined {
   return value;
 }
 
-function parseInteger(
-  value: unknown,
-  field: string,
-  minimum: number,
-  maximum = Number.MAX_SAFE_INTEGER
-): number | undefined {
-  if (value === undefined) return undefined;
-  if (
-    typeof value !== "number" ||
-    !Number.isInteger(value) ||
-    value < minimum ||
-    value > maximum
-  ) {
-    throw new TraceQueryValidationError(
-      field,
-      `${field} must be an integer in ${minimum}..${maximum}`
-    );
-  }
-  return value;
-}
-
-function mostRecentConversationId(traceDir: string): string | undefined {
-  const sessions = listSessions(traceDir);
-  return sessions.reduce<(typeof sessions)[number] | undefined>(
-    (latest, session) =>
-      latest === undefined || session.mtime > latest.mtime ? session : latest,
-    undefined
-  )?.conversation_id;
-}
-
-function findRecord(
-  reader: ReturnType<typeof createJsonlTraceReader>,
-  query: TraceQuery,
-  recordId: string
-): TraceQueryResult {
-  const all: TraceRecordRow[] = [];
-  let skippedLines = 0;
-  let result = reader.query({
-    ...query,
-    limit: QUERY_TRACE_MAX_LIMIT,
-    offset: 0,
-  });
-  all.push(...result.records);
-  skippedLines += result.skippedLines;
-  while (
-    all.length < result.total &&
-    all.length < QUERY_TRACE_MAX_RECORD_ID_SCAN
-  ) {
-    const nextOffset = all.length;
-    result = reader.query({
-      ...query,
-      limit: QUERY_TRACE_MAX_LIMIT,
-      offset: nextOffset,
-    });
-    if (result.records.length === 0) break;
-    all.push(...result.records);
-    skippedLines += result.skippedLines;
-  }
-  const match = all.find((row) =>
-    RECORD_ID_KEYS.some((key) => row[key] === recordId)
-  );
-  if (
-    match === undefined &&
-    all.length >= QUERY_TRACE_MAX_RECORD_ID_SCAN &&
-    (all.length < result.total || result.truncated)
-  ) {
-    throw new TraceQueryRecordScanError(
-      recordId,
-      QUERY_TRACE_MAX_RECORD_ID_SCAN
-    );
-  }
-  return {
-    records: match === undefined ? [] : [match],
-    total: match === undefined ? 0 : 1,
-    skippedLines,
-    truncated: result.truncated,
-    offset: result.offset,
-  };
-}
-
 async function projectRecord(
   row: TraceRecordRow,
   traceDir: string
@@ -300,29 +221,6 @@ async function projectRecord(
   return projected;
 }
 
-async function projectDrillDownRecord(
-  row: TraceRecordRow,
-  detail: "messages" | "tool_results" | undefined,
-  traceDir: string
-): Promise<Record<string, unknown> | TraceRecordRow> {
-  if (row["record_type"] !== "llm_call" || detail === "messages") return row;
-
-  const projected = projectRecordBase(row);
-  const messages = Array.isArray(row["messages"]) ? row["messages"] : [];
-  projected.tool_results = await projectToolResultsFromTrace(messages, {
-    traceDir,
-  });
-  return projected;
-}
-
-function projectRecordBase(row: TraceRecordRow): Record<string, unknown> {
-  const projected: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(row)) {
-    if (key !== "messages" && key !== "raw") projected[key] = value;
-  }
-  return projected;
-}
-
 function preview(value: unknown): string {
   let text: string;
   if (typeof value === "string") text = value;
@@ -339,70 +237,42 @@ function preview(value: unknown): string {
     : `${text.slice(0, QUERY_TRACE_PREVIEW_CAP)}...[truncated]`;
 }
 
-function emptyResult(): {
-  readonly records: ReadonlyArray<TraceRecordRow>;
-  readonly total: number;
-  readonly skipped_lines: number;
-  readonly truncated: boolean;
-  readonly offset: number;
-} {
-  return {
-    records: [],
-    total: 0,
-    skipped_lines: 0,
-    truncated: false,
-    offset: 0,
-  };
-}
+/**
+ * List face: an over-backstop page narrows by **whole records only**. Records
+ * are appended one at a time while the serialized envelope still fits, and the
+ * first record that would not fit ends the page. Nothing is ever truncated
+ * inside a record, and a page never shrinks to zero — when not even the first
+ * record fits, that record is returned whole and the response overshoots the
+ * backstop rather than lying about it.
+ *
+ * 锚在 `TRACE_OUTPUT_BACKSTOP` 而不是一个更小的自有数字：本核的目的只是「让一页
+ * 到调用方手里时仍是可解析的 JSON」，而帽的值与 MCP 面那层具名 backstop 同源于
+ * executor 的 `OUTPUT_HARD_CAP`。整条 4000 字符红线随 plan
+ * `trace-mcp-read-side-split` T6 离开代码库——它既不是读单元也不是可声明的合同。
+ *
+ * The end-of-data signal is implicit (`records.length < limit`), so no
+ * metadata field accompanies this. `total` and `truncated` left the tool face
+ * in T7 — they belonged to the panel's byte-paging semantics, not to the
+ * row-axis page the caller asked for.
+ */
+function serializeListPage(
+  payload: ReturnType<typeof toQueryTracePage>,
+  projectedCount: number
+): string {
+  const fullPage = JSON.stringify(payload);
+  if (fullPage.length <= TRACE_OUTPUT_BACKSTOP) return fullPage;
 
-function serializeResponse(payload: {
-  readonly records: ReadonlyArray<Record<string, unknown> | TraceRecordRow>;
-  readonly total: number;
-  readonly skipped_lines: number;
-  readonly truncated: boolean;
-  readonly offset: number;
-}): string {
-  const output = JSON.stringify(payload);
-  if (output.length <= QUERY_TRACE_RESPONSE_CAP) return output;
-
-  const compactRecords = payload.records.map((record) => compactRecord(record));
-  for (let count = compactRecords.length; count >= 0; count--) {
-    const compact = JSON.stringify({
-      ...payload,
-      records: compactRecords.slice(0, count),
-      response_truncated: count !== compactRecords.length,
-    });
-    if (compact.length <= QUERY_TRACE_RESPONSE_CAP) return compact;
+  const envelopeOf = (count: number): string =>
+    JSON.stringify({ ...payload, records: payload.records.slice(0, count) });
+  // Start at 1, not 0: reaching here means there is at least one record (an
+  // empty page serializes far below the backstop), and the floor of one is the
+  // whole point — a query that matched must not report an empty list.
+  let fitted = 1;
+  while (
+    fitted < projectedCount &&
+    envelopeOf(fitted + 1).length <= TRACE_OUTPUT_BACKSTOP
+  ) {
+    fitted += 1;
   }
-  return JSON.stringify({
-    records: [],
-    total: payload.total,
-    skipped_lines: payload.skipped_lines,
-    truncated: true,
-    offset: payload.offset,
-    response_truncated: true,
-  });
-}
-
-function compactRecord(
-  record: Record<string, unknown> | TraceRecordRow
-): Record<string, unknown> {
-  const projected =
-    "messages" in record
-      ? projectRecordBase(record as TraceRecordRow)
-      : (record as Record<string, unknown>);
-  const compact: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(projected)) {
-    if (typeof value === "string") compact[key] = value.slice(0, 256);
-    else if (
-      typeof value === "number" ||
-      typeof value === "boolean" ||
-      value === null
-    ) {
-      compact[key] = value;
-    } else if (key === "error") {
-      compact[key] = value;
-    }
-  }
-  return compact;
+  return envelopeOf(fitted);
 }

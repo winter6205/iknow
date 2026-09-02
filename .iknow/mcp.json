@@ -7,8 +7,8 @@
     },
     "iknow-trace": {
       "type": "stdio",
-      "command": "npx",
-      "args": ["tsx", "src/trace-mcp/main.ts", "--trace-out", "trace"]
+      "command": "node",
+      "args": ["scripts/iknow-trace-mcp-dev.cjs", "--trace-out", "trace"]
     }
   }
 }

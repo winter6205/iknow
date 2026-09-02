@@ -163,10 +163,11 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     worktreeExit: fakeWorktreeExit,
   });
 
-  // Sanity: registry assembled with the full 31-tool toolset. If this drifts,
-  // the gate below would silently cover a smaller set — surface the drift
-  // explicitly so the failure mode is unambiguous.
-  it("registry contains the full 31-tool ACI toolset (assembly sanity)", () => {
+  // Sanity: the registry assembled with every conditional dep present contains
+  // the whole toolset. If this drifts, the gate below would silently cover a
+  // smaller set — surface the drift explicitly so the failure mode is
+  // unambiguous. (The count itself is pinned by the size test at the end.)
+  it("registry contains the full ACI toolset (assembly sanity)", () => {
     const names = reg.catalog.all().map((t) => t.name);
     expect(names).toEqual([...ACI_TOOLSET_NAMES]);
   });
@@ -239,11 +240,12 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
 
   // Pre-#483 D9 baseline would have included bash's "Don't have a dedicated
   // tool" and a number of imperative "do not" / "never" fragments. After the
-  // audit, the only thing we pin is that all 37 tools are positive-trigger
-  // phrased — verified structurally by the blocklist assertions above.
-  it("toolset size after audit: 37 (full conditional-deps assembly, incl. 5 symbol mutate tools; T5 退役 10 lsp_*)", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(40);
-    expect(reg.catalog.all()).toHaveLength(40);
+  // audit, what this file pins is that every tool in the assembled catalog is
+  // positive-trigger phrased (the it.each blocklist assertions higher up) plus
+  // that the assembly sanity check above really covers the whole toolset.
+  it("toolset size after audit: 42 (full conditional-deps assembly, incl. 5 symbol mutate tools + tail-appended list_sessions + get_record; T5 退役 10 lsp_*)", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(42);
+    expect(reg.catalog.all()).toHaveLength(42);
   });
 
   // symbol-primary-aci T2：符号查询工具的 description 必须按**符号身份**

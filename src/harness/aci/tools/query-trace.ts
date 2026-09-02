@@ -4,6 +4,15 @@
  * The adapter owns only ACI metadata and domain-error translation. Query
  * validation, trace reading, projection, and response serialization are shared
  * with the MCP transport through src/traceserver.
+ *
+ * The shared core names no tool in its error messages, so this face prefixes
+ * its own tool name (TOOL_NAME) on the two domain errors it translates. Any
+ * other error is re-raised untouched.
+ *
+ * plan `trace-mcp-read-side-split` T7: the drill-down axis (`record_id` /
+ * `detail`) is gone — `get_record` owns it now. The face therefore drops those
+ * three schema keys, gains `offset`, makes `conversation_id` required, and
+ * maps the read-side `session_not_found` to a typed tool error.
  */
 import { ToolExecutionError } from "../../errors.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
@@ -12,21 +21,36 @@ import {
   createQueryTraceCore,
   QUERY_TRACE_DEFAULT_LIMIT,
   QUERY_TRACE_MAX_LIMIT,
-  QUERY_TRACE_MAX_RECORD_ID_SCAN,
+  QUERY_TRACE_DESCRIPTION,
   TRACE_RECORD_TYPES,
-  TraceQueryRecordScanError,
   TraceQueryValidationError as TraceserverQueryValidationError,
+  TraceSessionNotFoundError,
 } from "../../../traceserver/index.js";
 
-export const MAX_RECORD_ID_SCAN = QUERY_TRACE_MAX_RECORD_ID_SCAN;
+const TOOL_NAME = "query_trace";
 
 export class QueryTraceValidationError extends ToolExecutionError {
   readonly kind = "validation" as const;
   readonly field: string;
 
   constructor(field: string, message: string) {
-    super(`query_trace: ${message}`);
+    super(`${TOOL_NAME}: ${message}`);
     this.field = field;
+  }
+}
+
+/**
+ * 行轴契约（spec SC20）：`session_not_found` 由 `get_record` 引入，T7 复用 ——
+ * 行轴是第二个必填 `conversation_id` 的工具（Assumption 4 关掉了「缺省=最近活跃
+ * 会话」）。消息按本面习惯把工具名前缀拼在最前，调用方沿用 SC16 的形状识别。
+ */
+export class QueryTraceSessionNotFoundError extends ToolExecutionError {
+  readonly kind = "session_not_found" as const;
+  readonly conversationId: string;
+
+  constructor(conversationId: string, message: string) {
+    super(`${TOOL_NAME}: ${message}`);
+    this.conversationId = conversationId;
   }
 }
 
@@ -47,22 +71,21 @@ export function createQueryTraceTool(
       return await core(input);
     } catch (error: unknown) {
       if (error instanceof TraceserverQueryValidationError) {
-        throw new QueryTraceValidationError(
-          error.field,
-          stripQueryTracePrefix(error.message)
-        );
+        throw new QueryTraceValidationError(error.field, error.message);
       }
-      if (error instanceof TraceQueryRecordScanError) {
-        throw new ToolExecutionError(error.message);
+      if (error instanceof TraceSessionNotFoundError) {
+        throw new QueryTraceSessionNotFoundError(
+          error.conversationId,
+          error.message
+        );
       }
       throw error;
     }
   };
 
   return Object.freeze({
-    name: "query_trace",
-    description:
-      "Query local JSONL trace records with filters. Normal llm_call results are projection-only (message count, first/last previews, tool_result projection from llm_call.messages, and error); use record_id to drill into one record. By default drill-down returns tool_results; use detail=messages for messages. If the model ends the turn without a following llm_call, that last round's tool_results are not visible in the projection. Results are capped at 4000 characters.",
+    name: TOOL_NAME,
+    description: QUERY_TRACE_DESCRIPTION,
     inputSchema: {
       type: "object",
       properties: {
@@ -81,14 +104,9 @@ export function createQueryTraceTool(
           maximum: QUERY_TRACE_MAX_LIMIT,
           default: QUERY_TRACE_DEFAULT_LIMIT,
         },
-        record_id: { type: "string" },
-        detail: {
-          type: "string",
-          enum: ["tool_results", "messages"],
-          default: "tool_results",
-        },
-        resume_offset: { type: "integer", minimum: 0 },
+        offset: { type: "integer", minimum: 0 },
       },
+      required: ["conversation_id"],
       additionalProperties: false,
     },
     handler,
@@ -99,9 +117,4 @@ export function createQueryTraceTool(
       timeoutTier: "fast" as const,
     },
   });
-}
-
-function stripQueryTracePrefix(message: string): string {
-  const prefix = "query_trace: ";
-  return message.startsWith(prefix) ? message.slice(prefix.length) : message;
 }

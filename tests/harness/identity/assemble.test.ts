@@ -51,6 +51,10 @@ describe("memory_layer slot — resolver 降级契约", () => {
     try {
       const marker = "PROJECT_STATIC_INSTRUCTIONS";
       await writeFile(join(cwd, "AGENTS.md"), marker);
+      // projectIdentityRoot is required since #861/#862 — the static
+      // instruction path runs assembleStaticSystemPrompt, which reads
+      // AGENTS.md from projectIdentityRoot, not from cwd. The cwd here
+      // doubles as both the displayed project path and the discovery root.
       const resolver = createIknowSystemResolver({
         cwd,
         projectIdentityRoot: cwd,

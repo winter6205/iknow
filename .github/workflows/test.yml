@@ -84,6 +84,8 @@ jobs:
             --exclude tests/harness/aci/tools/bash-readonly.test.ts \
             --exclude tests/harness/aci/tools/grep.test.ts \
             --exclude tests/harness/aci/tools/query-trace.test.ts \
+            --exclude tests/harness/aci/tools/list-sessions.test.ts \
+            --exclude tests/harness/aci/tools/get-record.test.ts \
             --exclude tests/harness/aci/permission.test.ts \
             --exclude tests/harness/aci/registry-workspace-root.test.ts \
             --exclude tests/harness/aci/tools/d9-description-guard.test.ts \
@@ -178,6 +180,8 @@ jobs:
             --exclude tests/harness/aci/tools/bash-readonly.test.ts \
             --exclude tests/harness/aci/tools/grep.test.ts \
             --exclude tests/harness/aci/tools/query-trace.test.ts \
+            --exclude tests/harness/aci/tools/list-sessions.test.ts \
+            --exclude tests/harness/aci/tools/get-record.test.ts \
             --exclude tests/harness/aci/permission.test.ts \
             --exclude tests/harness/aci/registry-workspace-root.test.ts \
             --exclude tests/harness/aci/tools/d9-description-guard.test.ts \

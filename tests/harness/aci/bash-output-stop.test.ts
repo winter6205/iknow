@@ -16,11 +16,11 @@
  *      窗口 → tool.handler({task_id}) → text 长度 ≤ DEFAULT 且等于原文尾部
  *      （tail 语义，非抛错）。max_bytes 覆盖默认窗口同路径验证。
  *   5. bash_stop 幂等（kill_race 语义，T2 定稿）：对已终态任务二次 stop 不抛。
- *   6. 装配一致性：全条件装配（含 backgroundManager + graph overlay）→ 37 件且
- *      `toEqual(ACI_TOOLSET_NAMES)`；backgroundManager 缺席 → bash_output /
- *      bash_stop 排除（34 件；不含 graphAssembly 时 run_graph 同步缺席 → 34），
- *      bash 保留（T3 常驻透传语义）。
- *      symbol-primary-aci T5 后：旧 10 lsp_* 已退役，47→37 / 44→34。
+ *   6. 装配一致性：全条件装配（含 backgroundManager + graph overlay）→ 全长且
+ *      `toEqual(ACI_TOOLSET_NAMES)`（件数以数组为真值，本文件断言处为准）；
+ *      backgroundManager 缺席 → bash_output / bash_stop 排除（不含 graphAssembly
+ *      时 run_graph 同步缺席），bash 保留（T3 常驻透传语义）。
+ *      symbol-primary-aci T5 后：旧 10 lsp_* 已退役（件数因此下调）。
  *   7. permission shape（checkPermission direct-call，permission.test.ts 先例）：
  *      bash_output read-only → 默认 allow；bash_stop write → ask（#502 票明说
  *      「bash_stop ask」）。
@@ -199,7 +199,7 @@ const fakeWorktreeExit = (() =>
     mainRepoRoot: "/tmp/fake-main",
   })) as unknown as WorktreeExitToolDeps["worktreeExit"];
 
-/** 全条件装配 opts（五条件键 + backgroundManager + graph overlay + worktree 三缝）→ 40 件全量。 */
+/** 全条件装配 opts（五条件键 + backgroundManager + graph overlay + worktree 三缝）→ 42 件全量。 */
 function fullAssemblyOpts() {
   return {
     env: makeWebEnv(),
@@ -453,17 +453,19 @@ describe("bash_output 真实物理截断（real manager）", () => {
 // ── 5. 装配一致性（registry + Gate 3 镜像过滤）───────────────────────────────
 
 describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
-  it("全条件装配（含 backgroundManager + graph overlay）→ 40 件，顺序 = ACI_TOOLSET_NAMES", () => {
+  it("全条件装配（含 backgroundManager + graph overlay）→ 42 件，顺序 = ACI_TOOLSET_NAMES", () => {
     const reg = createDefaultAciRegistry(fullAssemblyOpts());
     const names = reg.inner.list().map((d) => d.name);
-    assert.equal(names.length, 40);
+    assert.equal(names.length, 42);
     assert.deepEqual(names, [...ACI_TOOLSET_NAMES]);
     assert.ok(reg.catalog.get("bash_output"));
     assert.ok(reg.catalog.get("bash_stop"));
   });
 
-  it("backgroundManager 缺席 → bash_output / bash_stop 排除（37 件），bash 保留（T3 常驻）", () => {
-    // 不传 graphAssembly → run_graph 同步缺席；40 - 2(bg) - 1(run_graph) = 37。
+  it("backgroundManager 缺席 → bash_output / bash_stop 排除（36 件），bash 保留（T3 常驻）", () => {
+    // 不传 graphAssembly → run_graph 同步缺席；不传 worktree 三缝 → 3 件缺席；
+    // 读侧三轴（query_trace / list_sessions / get_record）无装配条件仍在场。
+    // 42 - 2(bg) - 1(run_graph) - 3(worktree) = 36。
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -474,7 +476,7 @@ describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
       mcpManager: fakeMcpManager,
     });
     const names = reg.inner.list().map((d) => d.name);
-    assert.equal(names.length, 34);
+    assert.equal(names.length, 36);
     assert.equal(names.includes("bash_output"), false);
     assert.equal(names.includes("bash_stop"), false);
     // bash 常驻：backgroundManager 缺席时参数级能力由 handler 运行时决策。
