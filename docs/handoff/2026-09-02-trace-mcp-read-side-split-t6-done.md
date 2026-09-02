@@ -35,10 +35,11 @@
 | `4013ef58`                       | **T6**：`get_record`（内容轴窗）上两张皮 + 4000 字符帽退场（新核 `get-record-core.ts` / `record-lookup.ts` / `output-backstop.ts`，ACI `get-record.ts`，registry 41→42），31 文件             |
 | `1f232b17`                       | 本交接件（+ plan 第 15 条一处「没点过数」的口径纠正）                                                                                                                                         |
 | `3e1776a7`                       | `.github/workflows/test.yml`：3 个 bwrap 依赖测试补进两个 vitest job 的 `--exclude`（本 PR 的 `list-sessions.test.ts` / `get-record.test.ts` + master 旧账 `build-engine-mcp-roots.test.ts`） |
+| `b4295a4e`                       | 把 CI 那一轮收进交接件与 plan 第 15 条（含 `3e1776a7` 正文一处 passed 计数的订正）                                                                                                            |
 
 **给 T7 的硬性提醒**：新增测文件里只要出现 `createDefaultAciRegistry(` 或 `buildHarnessEngine(`，`scripts/ci-check-test-excludes.ts`（#467 守卫）就会让 `test-fast` 在跑 vitest 之前红掉（Actions runner 无 user-namespace ⇒ bwrap 在装配期 throw，不是断言失败）。**同批**加 `--exclude`（两个 job 各一份），别等 PR 开出来才发现。
 
-工作树遗留：无代码遗留。唯二未 commit 的文件 = 本交接件自身 + `plans/trace-mcp-read-side-split.md` 第 15 条的 CI 门订正，二者在同一篇 docs commit 里收尾。
+工作树遗留：无代码遗留。docs 侧 T6 之后共两笔收尾 —— `b4295a4e`（交接件 + plan 第 15 条 CI 门订正）与本 commit（交接件加「回查 CI + 补 PR 正文」一条 next step）。
 
 ## 已验证状态
 
@@ -69,7 +70,7 @@ CI commit `3e1776a7` 前另跑：`npx tsx scripts/ci-check-test-excludes.ts` => 
 
 其余 next steps（每条都是具体动作）：
 
-- **回查本 PR 的 CI**：`3e1776a7` 已 push，但 `gh pr checks` 当时对本机 GitHub API 持续超时 ⇒ 「guard 修好后 `test-fast` 是否转绿」属**未验证**。网络可用时跑 `gh pr checks 867`。
+- **回查本 PR 的 CI + 补 PR 正文**：`3e1776a7`/`b4295a4e` 已 push，但本机 GitHub API 持续 `dial tcp 198.18.0.124:443 i/o timeout` ⇒ 两件事都没做成：① 「guard 修好后 `test-fast` 是否转绿」**未验证**（唯一一次读到的是 `s4-check` / `test-fast` pending、`test-full` skipping，网络可用时跑 `gh pr checks 867`）；② PR #867 正文停在 T6 收尾，**没提** `3e1776a7` 这个 CI exclude commit、没写 guard 本地 EXIT 0 与三份被排除测试的本地实测，也**没订正**两个 commit 正文里的错数（T6 的「14 处下游字面量」= 没点过数的估计，可验证说法是 T6 改 16 个测试文件；`3e1776a7` 的「612 passed」= 旧合计数，真相是 `aci/tools` 27 文件 / 568 例、`trace-mcp` 2 / 25、`mcp-roots` 4 例）。正文按 plan 第 15 条重写，别引用本机的临时文件。
 - T7 里同步 `specs/query-trace-tool-results.md`，并**另立**一个 tool face 信封构造（不得给 `toResponseEnvelope` 加「哪张皮」开关，plan §序列化 对 T7 的约束）。两套 parser 不合并。
 - T8：`.iknow/mcp.json` 的 cwd 依赖修复 + `docs/trace-mcp-server.md` 给真实例子 + 一条脚本化 spawn 断言。
 - 整轮收尾（两件都在 plan §待写入，走 `domain-modeling`）：① 四条新词写进 `docs/CONTEXT.md`；② **改名 `TraceQueryValidationError`**（自 T5b 起是读侧共用校验错误，名字里带 `QueryTrace` 是误名）连同 `query-trace-errors.ts` 文件名 —— 单独开票，因为它动判别名与消息字符串面。
