@@ -56,10 +56,13 @@ export type IdentitySegmentKind = (typeof IKNOW_ASSEMBLY_ORDER)[number];
  *  输出与无此缝完全一致 (KV 缓存字节级稳定契约,字段缺席 → 不写空 system)。 */
 export interface AssemblyContext {
   /**
-   * 本会话生效的工作目录（改绑后 = task worktree）。只用于 "Project path"
-   * 展示段——模型需要知道自己真实在哪写。**不**用于项目身份发现。
+   * 历史兼容字段:T9 起 "Project path" 段刻意不再读取此值(改由稳定
+   * projectIdentityRoot 渲染)。装配层仅在 `projectIdentityRoot` 缺席/空
+   * 时作兜底参考(直接 `assembleIdentityContext` 调用方路径),生产装配
+   * (build-engine) 不再注入。误把活 taskRoot 投到此字段会触发 T9 违规
+   * (KV 缓存抖动)—— 仅填稳定的 projectIdentityRoot。
    */
-  readonly cwd: string;
+  readonly cwd?: string;
   /**
    * T3 (plans/worktree-session-roots.md / ADR-0037 §4)：项目身份根 —— 宿主
    * 启动时钉一次的「用户此刻在做的项目」。项目 `AGENTS.md` / `.iknow/rules`
@@ -152,9 +155,16 @@ export function shouldIncludeBootstrap(
  *  #194 T6:增 `memoryEnabled` + `memoryResolver` 透传到 ctx,驱动 memory_layer
  *  段降级装配(ask surface 默认 memoryEnabled=false)。 */
 export function createIknowSystemResolver(opts: {
-  /** 展示用工作目录（改绑后 = task worktree）；不参与身份发现。 */
-  readonly cwd: string;
-  /** T3：项目身份发现根 = 宿主启动时钉下的项目身份根（ADR-0037 §4）。 */
+  /** 兼容输入:历史上的"展示用工作目录"。T9 起 "Project path" 段刻意不再
+   *  读取此字段(改由稳定 projectIdentityRoot 渲染),装配层**不**消费它。
+   *  该缝保留仅为外部调用方(直接 new resolver 跳过 build-engine)的兼容
+   *  过渡 —— 但 build-engine 与所有生产入口不再注入。 */
+  readonly cwd?: string;
+  /** T3 / ADR-0037 §4 + T9:项目身份发现根 = 宿主启动时钉下的稳定根。
+   *  必填 —— "Project path" 段的唯一权威数据源(rebind 不抖动该段)。
+   *  build-engine 等所有真实调用方都已显式传入,绝不依赖 cwd 兜底。
+   *  警告:若仅传 cwd 不传 projectIdentityRoot,会回退到 cwd,等价于把活
+   *  taskRoot 投到 system,违反 T9 / KV 缓存字节稳定契约 —— 请显式传稳定根。 */
   readonly projectIdentityRoot: string;
   readonly userHome: string;
   readonly surface: "chat" | "tui" | "ask" | "serve";
@@ -184,7 +194,7 @@ export function createIknowSystemResolver(opts: {
   const bootstrapActive = shouldIncludeBootstrap(opts.surface);
   return () =>
     assembleIdentityContext({
-      cwd: opts.cwd,
+      ...(opts.cwd ? { cwd: opts.cwd } : {}),
       projectIdentityRoot: opts.projectIdentityRoot,
       userHome: opts.userHome,
       ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
@@ -221,11 +231,17 @@ export async function assembleIdentityContext(
   }
   if (segments.length === 0) return undefined;
   // Additive (non-LOCKED) — project path awareness. Mirrors the toolList
-  // additive segment: does not touch IKNOW_ASSEMBLY_ORDER. Renders the cwd so
-  // the agent can sense which project it is operating in without running
-  // `pwd` (which is `execute` → ask by default). Cwd is constant per process,
-  // so output stays byte-stable across turns (KV cache contract).
-  segments.push(projectPathSegment(ctx.cwd));
+  // additive segment: does not touch IKNOW_ASSEMBLY_ORDER. Renders the
+  // **stable** `projectIdentityRoot` so the agent can sense which project it
+  // is operating in without running `pwd` (which is `execute` → ask by
+  // default). The live task worktree (rebinds after isolation worktrees are
+  // provisioned) is intentionally NOT projected here — that surface belongs to
+  // the `env_snapshot` stream (T9 / ADR-0037 §4). Because projectIdentityRoot
+  // is constant per process, output stays byte-stable across turns and across
+  // rebinds (KV cache contract).
+  // 直接调用兜底:`projectIdentityRoot` 缺失时沿用 `cwd`(只对绕过 build-
+  // engine 的旧装配代码可见);生产装配必须传稳定根。
+  segments.push(projectPathSegment(ctx.projectIdentityRoot ?? ctx.cwd ?? ""));
   // #337 T6 加性段 `<available_skills>`:append 在 projectPath 之后;随后还有
   // #361 T8 coordinator 段在其后追加(见下),故本段不再是最末。不触碰 LOCKED
   // 顺序。缺席(seam 未注入)→ 跳过(字节级零变化);提供且经 disabled 过滤后
@@ -376,11 +392,13 @@ function toolListSegment(names: ReadonlyArray<string>): string {
   return `Available tools:\n${names.join("\n")}`;
 }
 
-/** 当前项目路径段渲染:小标题 + cwd。加性段,不触碰 LOCKED 顺序。
- *  让 agent 感知当前项目路径(无需 `pwd` → execute→ask)。cwd 在进程内稳定,
- *  字节级稳定契约保留(KV 缓存不抖动)。 */
-function projectPathSegment(cwd: string): string {
-  return `## Project path\n${cwd}`;
+/** Project path 段渲染:小标题 + 稳定 projectIdentityRoot。加性段,
+ *  不触碰 LOCKED 顺序。让 agent 感知项目身份根(无需 `pwd` → execute→ask)
+ *  —— 活 taskRoot 在 rebind 后会变化,刻意不进入此段(改由 env_snapshot 流
+ *  暴露给人读面,T9 / ADR-0037 §4)。projectIdentityRoot 在进程内稳定,
+ *  rebind 不影响本段字节,KV 缓存契约保留。 */
+function projectPathSegment(projectIdentityRoot: string): string {
+  return `## Project path\n${projectIdentityRoot}`;
 }
 
 /** #337 T6 `<available_skills>` 段渲染:XML 风格标签 + 名字序列表 +

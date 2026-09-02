@@ -1008,9 +1008,10 @@ export async function buildHarnessEngine(
     // available skills)。deps.system 内部 disabled 过滤后渲染 <available_skills>
     // 段。
     system: createIknowSystemResolver({
-      // cwd 只喂 "Project path" 展示段（模型要知道自己真实在哪写）；
-      // 项目身份发现走 projectIdentityRoot（T3 / ADR-0037 §4）。
-      cwd,
+      // T9 (ADR-0037 §4):"Project path" 段改读稳定 projectIdentityRoot
+      // —— 装配层不再消费 cwd 缝。活 taskRoot 仅经下方 envSnapshot 段暴露
+      // 给人读面(rebind 后人读面跟随活根,system prompt 字节保持稳定,
+      // KV 缓存契约保留)。cwd 因此不传。
       projectIdentityRoot,
       userHome,
       workspaceRoot,
@@ -1081,13 +1082,15 @@ export async function buildHarnessEngine(
     ...(agentStatusTodoDir
       ? { agentStatus: { todoDir: agentStatusTodoDir } }
       : {}),
-    // #653 G1 T5 / DESIGN-ENVIRONMENT-PRESENT:环境现势事件缝 —— 仅 tui
-    // surface 注入(人读 chrome 的数据源;cwd 来源 = build-engine 已解析的
-    // workspaceRoot 优先,回退 cwd)。ask / chat / serve / worker 缺席 →
-    // 零 IO、零事件(byte-identical)。readEnvSnapshot 永不 throw,事件只给
-    // 宿主 UI,不进 messages / verify / ADR-0028 栏。
+    // #653 G1 T5 / DESIGN-ENVIRONMENT-PRESENT + T9 / ADR-0037 §4:环境现势事件缝
+    // —— 仅 tui surface 注入(人读 chrome 的数据源;cwd 来源 =
+    // liveTaskRoot.read —— 装配层活持有者,每次即将调模型前现读)。rebind
+    // 后下一波 tool calls 的人读面 (TUI cwd / git 摘要) 跟随活根。ask /
+    // chat / serve / worker 缺席 → 零 IO、零事件 (byte-identical)。
+    // readEnvSnapshot 永不 throw,事件只给宿主 UI,不进 messages / verify
+    // / ADR-0028 栏。
     ...(surface === "tui"
-      ? { envSnapshot: { cwd: workspaceRoot ?? cwd } }
+      ? { envSnapshot: { readCwd: liveTaskRoot.read } }
       : {}),
   };
   const engine = createLoopEngine(deps);

@@ -29,6 +29,8 @@ import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { createWorkerDeps } from "../../src/harness/subagent/worker.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
+import { readEnvSnapshot } from "../../src/harness/env-snapshot.ts";
+import type { EnvSnapshotSeam } from "../../src/harness/loop-engine.ts";
 import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
 import { assessSubagentIsolation } from "../../src/harness/subagent/capability.ts";
 import {
@@ -1726,6 +1728,131 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
       // snapshot, not a live reference.
       expect(built.sessionRoots.taskRoot).toBe(initialTask);
       expect(built.sessionRoots.taskRoot).not.toBe(seamResolved);
+
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ===========================================================================
+// T9 (worktree-live-task-root.md §6 / ADR-0037 §4):展示面 —— system prompt
+// 钉稳定 projectIdentityRoot;env_snapshot 接活 taskRoot reader。
+// 验证三件事:
+//   (a) 未 rebind 时,buildHarnessEngine 注入的 envSnapshot 字段形态从
+//       `{cwd:静态}` 变成 `{readCwd:活 reader}`,且 reader 的初始值与今日
+//       直接喂 workspaceRoot 的 readEnvSnapshot 输出**逐字节相同**;
+//   (b) 调用 withLiveTaskRootWrite 缝后,readCwd 立刻反映新根;
+//   (c) system prompt 装配层在 rebind 前后字节级不变 (projectPath 段钉稳定
+//       projectIdentityRoot,不读取 cwd 缝)—— 间接通过 buildHarnessEngine
+//       自身不暴露 system deps 直接验;此处只钉( a )( b )两个 envSnapshot
+//       边界,(c) 由 identity/project-path-segment.test.ts 钉死。
+// ===========================================================================
+
+describe("buildHarnessEngine — T9 display surface", () => {
+  function makeEnv(name: string): IknowEnv {
+    return {
+      anthropicApiKey: `sk-test-${name}`,
+      llm: {
+        provider: "anthropic",
+        baseUrl: "http://127.0.0.1:9999",
+        model: "test-model",
+        fallback: [],
+        apiKey: `sk-test-${name}`,
+        maxOutputTokens: 1024,
+        timeoutMs: 60_000,
+        temperature: 0,
+        thinking: "off",
+        thinkingEffort: "",
+        stream: "on",
+      },
+      chat: { showThinking: false },
+      web: { search: { provider: "none" } },
+      compress: { contextWindow: 200_000, thresholdTokens: undefined },
+      mcp: { connectTimeoutMs: 60_000 },
+      subagent: { taskTimeoutMs: undefined },
+    } as IknowEnv;
+  }
+
+  it("未 rebind 时 envSnapshot 注入 readCwd 活 reader,其初始值与今日 workspaceRoot 静态 cwd 的 readEnvSnapshot 输出逐字节相同", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t9-unrebound-"));
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t9-unrebound"),
+        askUser: createNoAskUser(),
+        surface: "tui",
+        cwd: root,
+        workspaceRoot: root,
+        productRoot: root,
+        projectIdentityRoot: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        worktreeIsolation: {
+          provision: async () => join(root, ".iknow", "worktrees", "conv-1"),
+        },
+      });
+
+      // (a) deps.envSnapshot 形态:readCwd 活 reader,不是静态 cwd。
+      const seam = built.deps.envSnapshot as EnvSnapshotSeam | undefined;
+      expect(seam).toBeDefined();
+      const liveReader = seam!.readCwd;
+      expect(typeof liveReader).toBe("function");
+      expect(liveReader()).toBe(root);
+
+      // 装配期若走旧静态 cwd 缝,readEnvSnapshot 输出与今日基线不一致;
+      // 走活 reader 时,readEnvSnapshot({cwd: root}) 与 readEnvSnapshot({cwd: liveReader()})
+      // 在 root 是 git repo 的前提下应**完全**等价(逐字段 deep equal)。
+      const fromReader = await readEnvSnapshot({ cwd: liveReader() });
+      const baseline = await readEnvSnapshot({ cwd: root });
+      expect(fromReader).toEqual(baseline);
+
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rebind 后 readCwd 立刻反映新 taskRoot(system prompt 段钉稳定根由 identity 测试钉死,此处只钉 envSnapshot 边界)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t9-rebound-"));
+    try {
+      const reboundRoot = join(root, ".iknow", "worktrees", "conv-1");
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t9-rebound"),
+        askUser: createNoAskUser(),
+        surface: "tui",
+        cwd: root,
+        workspaceRoot: root,
+        productRoot: root,
+        projectIdentityRoot: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        worktreeIsolation: {
+          provision: async () => reboundRoot,
+        },
+      });
+
+      const seam = built.deps.envSnapshot as EnvSnapshotSeam | undefined;
+      expect(seam).toBeDefined();
+      const liveReader = seam!.readCwd;
+      expect(liveReader()).toBe(root);
+
+      // 触发 withLiveTaskRootWrite 缝:用真实的 create-task-worktree 工具
+      // 路径(handler 直接走 build-engine 装配层),跑出 rebind 后再读。
+      const provisionTool = built.deps.registry.get("create-task-worktree");
+      expect(provisionTool).toBeDefined();
+      const toolResult = await provisionTool!.handler(
+        {},
+        { conversationId: "conv-1" }
+      );
+      expect(toolResult).toBe(
+        `task worktree ready: ${reboundRoot} ` +
+          `(session root rebound; re-issue the blocked write in the new root on your next turn)`
+      );
+
+      // rebind 后活 reader 立刻翻到新 taskRoot(envSnapshot 的人读面跟随
+      // 活根)。
+      expect(liveReader()).toBe(reboundRoot);
 
       await built.shutdown?.();
     } finally {

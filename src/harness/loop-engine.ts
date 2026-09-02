@@ -302,13 +302,24 @@ export interface LoopEngineDeps {
   /**
    * #653 G1 T5 / DESIGN-ENVIRONMENT-PRESENT:环境现势事件缝(可选)。字段
    * 在场 = stepWithTrace 每次即将调用模型前,在 appendAgentStatusBar 之后的
-   * 同一回合边界计算点,把 readEnvSnapshot({cwd}) 的产物经 safeEmitStream
-   * 发 `env_snapshot` 流事件(与 agent_status 平行的独立流;只给宿主 UI,
-   * 绝不进 messages / verify / ADR-0028 栏)。字段缺席 → 零 IO、零事件
-   * (ask / worker / 既有 stub 装配 byte-identical)。readEnvSnapshot 永不
-   * throw(T4 契约),观察者异常由 safeEmitStream 吞咽,模型回合不受影响。
+   * 同一回合边界计算点,调用 `readCwd()` 现读活 taskRoot 并把
+   * readEnvSnapshot 的产物经 safeEmitStream 发 `env_snapshot` 流事件
+   * (与 agent_status 平行的独立流;只给宿主 UI,绝不进 messages / verify /
+   * ADR-0028 栏)。字段缺席 → 零 IO、零事件 (ask / worker / 既有 stub 装配
+   * byte-identical)。readEnvSnapshot 永不 throw(T4 契约),观察者异常由
+   * safeEmitStream 吞咽,模型回合不受影响。
+   *
+   * T9 (ADR-0037 §4):env_snapshot 必须读到活 taskRoot 才能让 rebind 后的人
+   * 读面 (TUI cwd / git 摘要) 跟随新的 worktree。`readCwd` 是装配层注入的
+   * 活 reader (LiveTaskRoot.read),每次 env_snapshot 计算时现读 —— 而不是
+   * 在装配期把 cwd 钉死,否则 KV cache 之外的展示面会停在 rebind 前的根。
+   *
+   * 命名说明:字段叫 `readCwd` 而非 `readTaskRoot` 是为沿用 env_snapshot 数
+   * 据流约定的 cwd 语义(readEnvSnapshot 收 cwd),但其值在 T9 起实际上来自
+   * 活 LiveTaskRoot —— 阅读 readEnvSnapshot 内部读法时不要误以为是装配期
+   * 钉死的 cwd。
    */
-  readonly envSnapshot?: { readonly cwd: string };
+  readonly envSnapshot?: EnvSnapshotSeam;
   /**
    * #672 T3:工具环检测。缺省 / true = 开；false = 关。
    */
@@ -405,7 +416,10 @@ async function appendEnvSnapshot(
   onStream?: (event: HarnessStreamEvent) => void
 ): Promise<LoopState> {
   if (deps.envSnapshot === undefined) return state;
-  const snapshot = await readEnvSnapshot({ cwd: deps.envSnapshot.cwd });
+  // T9:每次即将调模型前现读活 taskRoot,而不是用装配期快照 —— 这样 rebind
+  // 后下一波 tool calls 的人读面 (TUI cwd / git 摘要) 跟随活根,而 system
+  // prompt 仍钉在稳定根,KV 缓存前缀字节不变。
+  const snapshot = await readEnvSnapshot({ cwd: deps.envSnapshot.readCwd() });
   safeEmitStream(onStream, { type: "env_snapshot", snapshot });
   return state;
 }
@@ -2169,6 +2183,10 @@ export async function run(
 // Re-export spec types for downstream consumers.
 export type { Executor, Registry } from "./tools/types.js";
 export type { LoopTrace, TurnTrace, Totals, CancelKind } from "./loop-trace.js";
+
+/** T9 / #653:envSnapshot 缝形态别名 —— 让测试 / 外部装配代码可以引用同一类型,
+ *  而不是穿透 `unknown` 强转 `LoopEngineDeps.envSnapshot`。 */
+export type EnvSnapshotSeam = { readonly readCwd: () => string };
 
 /**
  * 工厂:把 dep 闭包成 runner / stepper 对象(016 T12 spec 出口)。

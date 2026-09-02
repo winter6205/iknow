@@ -31,6 +31,10 @@ import { createExecutor } from "../../src/harness/tools/executor.ts";
 import { assistantResult } from "../cli/_fixtures.ts";
 import type { HarnessStreamEvent } from "../../src/harness/stream.ts";
 import { makeSpyAdapter, okEchoTool } from "./_agent-status-fixtures.ts";
+import {
+  createLiveTaskRoot,
+  writeLiveTaskRoot,
+} from "../../src/harness/session-roots.ts";
 
 // ---------------------------------------------------------------------------
 // 本文件私有 fixtures
@@ -94,6 +98,16 @@ function allText(messages: ReadonlyArray<AnthropicNativeMessage>): string {
     .join("\n");
 }
 
+/** T9:live reader seam —— 把当前 process cwd 暴露为活 readCwd。 */
+function envSnapshotLiveCwd(): { readCwd: () => string } {
+  return { readCwd: () => process.cwd() };
+}
+
+/** T9:直接喂一个非 git 目录的 live reader(degraded 形态测试专用)。 */
+function envSnapshotLiveNonGit(nonGitDir: string): { readCwd: () => string } {
+  return { readCwd: () => nonGitDir };
+}
+
 // ---------------------------------------------------------------------------
 // AC ① 事件形状:EnvSnapshot 字段齐全,与 agent_status 物理隔离
 // ---------------------------------------------------------------------------
@@ -118,7 +132,7 @@ describe("HarnessStreamEvent env_snapshot variant", () => {
         executor: exec,
         registry: reg,
         maxTurns: 5,
-        envSnapshot: { cwd: process.cwd() },
+        envSnapshot: envSnapshotLiveCwd(),
       },
       undefined,
       { onStream: probe.onStream }
@@ -169,7 +183,7 @@ describe("HarnessStreamEvent env_snapshot variant", () => {
         registry: reg,
         maxTurns: 5,
         agentStatus: { todoDir },
-        envSnapshot: { cwd: process.cwd() },
+        envSnapshot: envSnapshotLiveCwd(),
       },
       undefined,
       { onStream: probe.onStream }
@@ -206,7 +220,7 @@ describe("HarnessStreamEvent env_snapshot variant", () => {
         executor: exec,
         registry: reg,
         maxTurns: 5,
-        envSnapshot: { cwd: nonGitDir },
+        envSnapshot: envSnapshotLiveNonGit(nonGitDir),
       },
       undefined,
       { onStream: probe.onStream }
@@ -270,7 +284,7 @@ describe("HarnessStreamEvent env_snapshot variant", () => {
         executor: exec,
         registry: reg,
         maxTurns: 5,
-        envSnapshot: { cwd: process.cwd() },
+        envSnapshot: envSnapshotLiveCwd(),
       },
       undefined,
       { onStream: hostile }
@@ -300,7 +314,7 @@ describe("HarnessStreamEvent env_snapshot variant", () => {
         executor: exec,
         registry: reg,
         maxTurns: 5,
-        envSnapshot: { cwd: process.cwd() },
+        envSnapshot: envSnapshotLiveCwd(),
       },
       undefined,
       { onStream: probe.onStream }
@@ -311,5 +325,45 @@ describe("HarnessStreamEvent env_snapshot variant", () => {
     assert.ok(!text.includes("<env_snapshot>"), "never a user-message bar");
     assert.ok(!text.includes(process.cwd()), "cwd never enters messages");
     assert.ok(!text.includes("gitBranch"), "git fields never enter messages");
+  });
+
+  it("⑦ appendEnvSnapshot 现读 live taskRoot —— rebind 后下一波 envSnapshot 反映新根 (T9)", async () => {
+    // T9 (ADR-0037 §4):env_snapshot 必须读到活 taskRoot,而不是装配期
+    // 钉死的静态 cwd。装配层缝入的 readCwd 是个闭包,每次即将调模型前
+    // 现读 LiveTaskRoot.read() —— 这样 rebind 后下一波 tool calls 的人读
+    // 面 (TUI cwd / git 摘要) 跟随活根,而 system prompt 仍钉在稳定根,
+    // KV 缓存前缀字节不变。
+    const initialRoot = "/repo/main";
+    const reboundRoot = "/repo/.iknow/worktrees/conv-1";
+    const liveTaskRoot = createLiveTaskRoot(initialRoot);
+    const echo = okEchoTool();
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+    const probe = makeEnvProbe();
+    const { adapter } = makeSpyAdapter([
+      {
+        kind: "reply",
+        result: assistantResult({ texts: ["done"], toolCalls: [] }),
+      },
+    ]);
+
+    // rebind 发生在装配之后、本回合即将调模型前 —— 用缝入的 readCwd 现读。
+    writeLiveTaskRoot(liveTaskRoot, reboundRoot);
+    await run(
+      "go",
+      {
+        adapter,
+        executor: exec,
+        registry: reg,
+        maxTurns: 5,
+        // 装配期不再持有静态 cwd;readCwd 是本测试刻意验证的调用时 live reader。
+        envSnapshot: { readCwd: liveTaskRoot.read },
+      },
+      undefined,
+      { onStream: probe.onStream }
+    );
+
+    assert.equal(probe.envSnapshots.length, 1);
+    assert.equal(probe.envSnapshots[0]!.snapshot.cwd, reboundRoot);
   });
 });
