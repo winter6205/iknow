@@ -929,10 +929,17 @@ export async function buildHarnessEngine(
   // isolationEnabled 同时驱动 T4 create-task-worktree 工具的条件化装配，
   // 见上方 registry 调用）；host 缝（provision / initiallyBound）由
   // session-api hub 注入。OFF / host 缺席 → 不包装，行为与今日逐字节一致。
+  //
+  // T10 (plans/worktree-live-task-root.md §6 T10 / D1/D2): 门禁读活根 —
+  // 把 `root: sandboxRoot`（装配期冻结）换成活 `liveTaskRoot` cell（也是
+  // T4 装配出来的同一持有者，由 `withLiveTaskRootWrite` 单点写入）。门禁
+  // 在 executeAll 入口 snapshot 一次活根 — D2 一波一个根，D11 门禁裁决
+  // 根等于消费者写根。未 rebind 时 cell 初值 = sandboxRoot，行为逐字节
+  // 等于原 T3 装配期冻结字段。
   const loopExecutor = isolationEnabled
     ? createWorktreeIsolationExecutor({
         enabled: true,
-        root: sandboxRoot,
+        liveTaskRoot,
         provision: wrappedProvision!,
         // T4: passthrough 锚定交给 provision 按会话裁决（own task tree →
         // 同根 no-op;外来根 → typed foreign_worktree）——host 缝不再携带

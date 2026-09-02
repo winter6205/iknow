@@ -37,6 +37,7 @@ import { basename, dirname } from "node:path";
 import { errorMessage } from "../errors.js";
 import { validateReadonlyCommand } from "../aci/tools/bash-readonly.js";
 import { FILE_WRITE_TOOL_NAMES } from "../aci/tools/symbol-mutate.js";
+import type { LiveTaskRoot } from "../session-roots.js";
 import type {
   Executor,
   ToolCall,
@@ -444,8 +445,24 @@ export interface WorktreeIsolationHostOpts {
 export interface WorktreeIsolationGateOpts {
   /** Startup read (hard req 9): assembly passes `resolveWorktreeOnMutate(settings)`. */
   readonly enabled: boolean;
-  /** This engine's root — the bound-tree comparison anchor. */
-  readonly root: string;
+  /**
+   * T10 (plans/worktree-live-task-root.md §6 T10 / D1/D2) — live `taskRoot`
+   * cell (T4 SSOT). The gate snapshots `cell.read()` ONCE at `executeAll`
+   * entry; the whole wave shares that snapshot. Why snapshot, not per-call:
+   *
+   *   - D2 (batch 快照): 一波 tool calls 只能有一个根 — 否则 create-task-worktree
+   *     在同波翻转时把一次逻辑改动劈进两棵树,违 least astonishment。rebind
+   *     因此对**下一波** tool calls 生效,不是同波。
+   *   - D11 (排序不变量): 门禁裁决用的根必须等于消费者用的根 — gate 在快照上
+   *     裁决,handler 也在该快照内读 cell(`write-file.ts:readRoot` 是按
+   *     handler 调用时机读 cell;单波内 cell 不会被 gate 自身翻转,所以
+   *     handler 读到的就是同一快照值)。即:一条 mutate 若被门禁放行,它的
+   *     写盘一定落在门禁裁决过的根上,不出现 admit-but-write-old-root 窗口。
+   *
+   * 写仍然由 `withLiveTaskRootWrite` 缝包裹 host `provision` / `enter` /
+   * `exit` 单点写入(T4 SSOT) — 本字段是**读取面**入口。
+   */
+  readonly liveTaskRoot: LiveTaskRoot;
   /**
    * Host seam (session-api). T3 model-provision contract: the gate calls this
    * ONLY for engines rooted at a task-worktree-shaped path (post-rebind), as
@@ -466,6 +483,10 @@ export interface WorktreeIsolationGateOpts {
    * hosts (session-api hub) must NOT set it — per-conversation passthrough is
    * adjudicated by `provision` (T4: own task tree → same-root no-op; foreign
    * root → typed `foreign_worktree`).
+   *
+   * The bound-root is initialised to the wave-entry snapshot of
+   * `liveTaskRoot`, so a pre-rebound CLI engine whose cell starts at the
+   * task worktree path goes straight to passthrough.
    */
   readonly initiallyBound?: boolean;
   readonly classify?: (call: ToolCall) => MutateClass;
@@ -503,16 +524,19 @@ interface GateSessionState {
 export function createWorktreeIsolationExecutor(
   opts: WorktreeIsolationGateOpts & { readonly inner: Executor }
 ): Executor {
-  const { enabled, root, provision, initiallyBound, inner } = opts;
+  const { enabled, liveTaskRoot, provision, initiallyBound, inner } = opts;
   const classify = opts.classify ?? classifyCall;
   const states = new Map<string, GateSessionState>();
 
-  const stateFor = (conversationId: string | undefined): GateSessionState => {
+  const stateFor = (
+    conversationId: string | undefined,
+    snapshotRoot: string
+  ): GateSessionState => {
     const key = conversationId ?? "";
     const hit = states.get(key);
     if (hit) return hit;
     const fresh: GateSessionState = initiallyBound
-      ? { status: "bound", boundRoot: root }
+      ? { status: "bound", boundRoot: snapshotRoot }
       : { status: "open" };
     states.set(key, fresh);
     return fresh;
@@ -532,25 +556,35 @@ export function createWorktreeIsolationExecutor(
   });
 
   const reboundMessage = (boundRoot: string): string =>
-    `${WORKTREE_ISOLATION_PREFIX} session workspace rebound to task worktree ${boundRoot}; this call was not executed and the previous root stays read-only — end the turn and retry the write in the new root.`;
+    `${WORKTREE_ISOLATION_PREFIX} session workspace rebound to task worktree ${boundRoot}; ` +
+    `this call was not executed — the previous root stays read-only. The next wave of tool calls ` +
+    `in this run will land in the new root, re-issue the write then.`;
 
   async function gateMutate(
     call: ToolCall,
-    conversationId: string | undefined
+    conversationId: string | undefined,
+    snapshotRoot: string
   ): Promise<ToolExecutionResult | undefined> {
-    let state = stateFor(conversationId);
-    if (state.status === "bound" && state.boundRoot === root) {
+    let state = stateFor(conversationId, snapshotRoot);
+    if (state.status === "bound" && state.boundRoot === snapshotRoot) {
       return undefined; // passthrough
     }
     // T3 model-provision contract: a session on a non-task-worktree root
     // (main repo) can never be bound — block with the ACI-tool notice and
     // NEVER provision (no `git worktree add` on the execution path). The
     // block is side-effect free; state stays open so later mutates re-block.
-    if (state.status === "open" && taskWorktreeOwnerOf(root) === undefined) {
+    //
+    // T10: `root` here is the **wave snapshot** of `liveTaskRoot` taken at
+    // executeAll entry (D2). mid-wave flips (create-task-worktree) do not
+    // change this snapshot — rebind takes effect on the NEXT wave.
+    if (
+      state.status === "open" &&
+      taskWorktreeOwnerOf(snapshotRoot) === undefined
+    ) {
       return block(call.id, unboundMutateNotice());
     }
     if (state.status === "open") {
-      const pending = provision({ conversationId, root });
+      const pending = provision({ conversationId, root: snapshotRoot });
       setState(conversationId, { status: "pending", pending });
       state = { status: "pending", pending };
     }
@@ -571,11 +605,11 @@ export function createWorktreeIsolationExecutor(
         );
       }
       setState(conversationId, { status: "bound", boundRoot });
-      if (boundRoot === root) return undefined; // already home
+      if (boundRoot === snapshotRoot) return undefined; // already home
       return block(call.id, reboundMessage(boundRoot));
     }
     // bound elsewhere (defensive: host rebound the session away from this root)
-    return block(call.id, reboundMessage(state.boundRoot ?? root));
+    return block(call.id, reboundMessage(state.boundRoot ?? snapshotRoot));
   }
 
   const runAll = async (
@@ -601,6 +635,17 @@ export function createWorktreeIsolationExecutor(
         onStream
       );
     }
+    // T10 D2: snapshot live taskRoot ONCE at executeAll entry. The whole wave
+    // shares this value so:
+    //   (a) mid-wave flips (create-task-worktree) cannot split the wave
+    //     between two roots — one wave = one root (least astonishment);
+    //   (b) gate adjudication root == consumer handler root (D11 invariant:
+    //     gate admits → consumer writes to the same root). Within a single
+    //     wave the cell is not flipped by the gate itself; the only writer
+    //     is create-task-worktree which is classified as "read" by the gate
+    //     and goes through inner directly. The handler's `cell.read()` at
+    //     call time observes the same snapshot the gate used.
+    const snapshotRoot = liveTaskRoot.read();
     let anyMutate = false;
     for (const call of calls) {
       if (classify(call) === "mutate") {
@@ -635,7 +680,7 @@ export function createWorktreeIsolationExecutor(
           onStream
         );
       } else {
-        const blocked = await gateMutate(call, conversationId);
+        const blocked = await gateMutate(call, conversationId, snapshotRoot);
         result =
           blocked ??
           (

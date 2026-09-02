@@ -1847,7 +1847,7 @@ describe("buildHarnessEngine — T9 display surface", () => {
       );
       expect(toolResult).toBe(
         `task worktree ready: ${reboundRoot} ` +
-          `(session root rebound; re-issue the blocked write in the new root on your next turn)`
+          `(session root rebound; the next wave of tool calls in this run will land in the new root, re-issue the blocked write then)`
       );
 
       // rebind 后活 reader 立刻翻到新 taskRoot(envSnapshot 的人读面跟随

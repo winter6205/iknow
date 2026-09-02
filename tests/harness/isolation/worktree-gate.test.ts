@@ -34,6 +34,7 @@ import {
   WORKTREE_ISOLATION_PREFIX,
 } from "../../../src/harness/isolation/worktree-gate.ts";
 import type { GitRunner } from "../../../src/harness/isolation/worktree-gate.ts";
+import { createLiveTaskRoot } from "../../../src/harness/session-roots.ts";
 import type {
   Executor,
   ToolCall,
@@ -420,7 +421,7 @@ describe("createWorktreeIsolationExecutor", () => {
     let provisioned = 0;
     const gate = createWorktreeIsolationExecutor({
       enabled: false,
-      root: "/main",
+      liveTaskRoot: createLiveTaskRoot("/main"),
       provision: async () => {
         provisioned += 1;
         return "/wt";
@@ -438,7 +439,7 @@ describe("createWorktreeIsolationExecutor", () => {
     const { inner, calls } = fakeInner();
     const gate = createWorktreeIsolationExecutor({
       enabled: true,
-      root: "/main",
+      liveTaskRoot: createLiveTaskRoot("/main"),
       provision: async () => {
         throw new Error("must not provision");
       },
@@ -456,7 +457,7 @@ describe("createWorktreeIsolationExecutor", () => {
     let provisioned = 0;
     const gate = createWorktreeIsolationExecutor({
       enabled: true,
-      root: "/main",
+      liveTaskRoot: createLiveTaskRoot("/main"),
       provision: async () => {
         provisioned += 1;
         return "/wt";
@@ -494,7 +495,7 @@ describe("createWorktreeIsolationExecutor", () => {
     const ownTreeRoot = "/repo/.iknow/worktrees/conv-1";
     const gate = createWorktreeIsolationExecutor({
       enabled: true,
-      root: ownTreeRoot,
+      liveTaskRoot: createLiveTaskRoot(ownTreeRoot),
       provision: async () => {
         provisioned += 1;
         return ownTreeRoot; // host: session already rebound to this very root
@@ -508,7 +509,7 @@ describe("createWorktreeIsolationExecutor", () => {
 
     const gate2 = createWorktreeIsolationExecutor({
       enabled: true,
-      root: "/wt",
+      liveTaskRoot: createLiveTaskRoot("/wt"),
       initiallyBound: true,
       provision: async () => {
         throw new Error("must not provision");
@@ -523,7 +524,7 @@ describe("createWorktreeIsolationExecutor", () => {
     const { inner, calls } = fakeInner();
     const gate = createWorktreeIsolationExecutor({
       enabled: true,
-      root: "/repo/.iknow/worktrees/conv-1",
+      liveTaskRoot: createLiveTaskRoot("/repo/.iknow/worktrees/conv-1"),
       provision: async () => "/other-wt",
       inner,
     });
@@ -539,7 +540,7 @@ describe("createWorktreeIsolationExecutor", () => {
     let resolveProvision!: (root: string) => void;
     const gate = createWorktreeIsolationExecutor({
       enabled: true,
-      root: "/repo/.iknow/worktrees/conv-1",
+      liveTaskRoot: createLiveTaskRoot("/repo/.iknow/worktrees/conv-1"),
       provision: async () => {
         provisioned += 1;
         await new Promise<void>((r) => (resolveProvision = r));
@@ -567,7 +568,7 @@ describe("createWorktreeIsolationExecutor", () => {
     const provisionedFor: (string | undefined)[] = [];
     const gate = createWorktreeIsolationExecutor({
       enabled: true,
-      root: "/repo/.iknow/worktrees/conv-1",
+      liveTaskRoot: createLiveTaskRoot("/repo/.iknow/worktrees/conv-1"),
       provision: async ({ conversationId }) => {
         provisionedFor.push(conversationId);
         return `/wt-${conversationId}`;
@@ -591,7 +592,7 @@ describe("createWorktreeIsolationExecutor", () => {
     const observed: WorktreeIsolationError[] = [];
     const gate = createWorktreeIsolationExecutor({
       enabled: true,
-      root: "/repo/.iknow/worktrees/conv-1",
+      liveTaskRoot: createLiveTaskRoot("/repo/.iknow/worktrees/conv-1"),
       provision: async () => {
         attempts += 1;
         throw new WorktreeIsolationError(
@@ -623,7 +624,7 @@ describe("createWorktreeIsolationExecutor", () => {
     const { inner } = fakeInner();
     const gate = createWorktreeIsolationExecutor({
       enabled: true,
-      root: "/repo/.iknow/worktrees/conv-1",
+      liveTaskRoot: createLiveTaskRoot("/repo/.iknow/worktrees/conv-1"),
       provision: async () => {
         throw "boom"; // eslint-disable-line no-throw-literal
       },
@@ -638,7 +639,7 @@ describe("createWorktreeIsolationExecutor", () => {
     const { inner, calls } = fakeInner();
     const gate = createWorktreeIsolationExecutor({
       enabled: true,
-      root: "/wt",
+      liveTaskRoot: createLiveTaskRoot("/wt"),
       initiallyBound: true,
       provision: async () => "/wt",
       inner,
