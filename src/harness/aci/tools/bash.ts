@@ -23,6 +23,7 @@ import {
 } from "../../sandbox/runner.js";
 import { restore, type SecretRegistry } from "../../secret-roundtrip/index.js";
 import type { BackgroundTaskManager } from "../../background/manager.js";
+import type { LiveTaskRoot } from "../../session-roots.js";
 
 interface BashInput {
   readonly command?: unknown;
@@ -64,6 +65,13 @@ export interface CreateBashToolOptions {
    * index）。缺省 / false = V1 路径逐字节不变。bashMode→cwdReadonly 映射由 T6
    * 在 registry 装配处完成；本字段是 additive 透传缝。 */
   readonly cwdReadonly?: boolean;
+  /** T7 (plans/worktree-live-task-root.md §6): per-call live root cell. 在场
+   * 时 handler 入口读一次冻结为 waveRoot（D2 batch snapshot），前台 /
+   * background 共用同一份；fsPolicy 与 bwrap fence 围绕 waveRoot 重建，argv
+   * 形状与顺序逐字节不变（home / tmpDir / workspaceRoot 等非 cwd 维度由
+   * 工厂期捕获 ⇒ 多次 rebuild 间的差异仅落在 cwd token）。缺省时退回工厂
+   * 捕获 cwd —— 与 V1 路径字节一致（legacy test parity）。 */
+  readonly liveTaskRoot?: LiveTaskRoot;
 }
 
 export function createBashTool(
@@ -71,12 +79,14 @@ export function createBashTool(
   opts?: CreateBashToolOptions
 ): AciToolDef {
   requireBwrap();
-  const fsPolicy = createFsPolicy({
-    cwd,
-    home: opts?.home ?? homedir(),
-    tmpDir: tmpdir(),
-    ...(opts?.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
-  });
+  // T7 (D3): 工厂期只捕获 fsPolicy 的非 cwd 维度。home / tmpDir / workspaceRoot
+  // 都是 process-stable ⇒ 多次 rebuild 间 argv SHAPE 锁定。cwd 由 handler 入口
+  // 的 waveRoot 注入（见下方 handler）。把 fsPolicy 构造从工厂期移进 handler
+  // —— 这是 D4 的核心：bash handler 必须 per-call rebuild fsPolicy + bwrap
+  // fence,不能闭包到工厂捕获 cwd。
+  const home = opts?.home ?? homedir();
+  const tmpDir = tmpdir();
+  const workspaceRoot = opts?.workspaceRoot;
   const networkPolicy = createNetworkPolicy();
   const resourceLimits = createResourceLimits();
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
@@ -102,6 +112,13 @@ export function createBashTool(
       throw new ToolExecutionError(
         `bash: command targets a sensitive path: ${command}`
       );
+    // T7 (D2): per-handler batch snapshot. cell 在入口读一次冻结为 waveRoot,
+    // 贯穿整条路径（前台 fence / background spawn 拿同一份）—— handler 内
+    // 后续 cell 翻转不渗透进本次调用。liveTaskRoot 缺席 → 退到工厂捕获 cwd
+    // （legacy parity:无 cell 时 byte-identical 于 V1）。
+    const waveRoot: string = opts?.liveTaskRoot
+      ? opts.liveTaskRoot.read()
+      : cwd;
     // #502 T3:校验链通过后才决定前台 / 后台 —— 危险命令 / 敏感路径在两侧
     // 都先执行同一闸门（background 不豁免安全检查）。
     if ((input as BashInput | null)?.background === true) {
@@ -115,10 +132,13 @@ export function createBashTool(
         ? restore(command, opts.secretRegistry)
         : command;
       const wantsHostNetwork = (input as BashInput | null)?.network === true;
+      // T7 (D2): background path 与 foreground path 共用同一份 waveRoot。
+      // handleBackground 把 waveRoot 转给 manager.spawn → defaultBackgroundSpawn
+      // 内的 createFsPolicy / createBwrapFence 也围绕 waveRoot 构造 fence。
       return await handleBackground(
         command,
         bgCommand,
-        cwd,
+        waveRoot,
         opts ?? {},
         ctx,
         wantsHostNetwork
@@ -145,6 +165,15 @@ export function createBashTool(
     // 权限层（policy.ts code-ask-bash-network）已强制 ask full_auto 不豁免,
     // 此处只判严格 === true;非布尔 / 缺省 / false → 走既有隔离路径。
     const wantsHostNetwork = (input as BashInput | null)?.network === true;
+    // T7 (D4): fsPolicy per-call rebuild —— home/tmpDir/workspaceRoot 是
+    // 工厂期冻结的,只有 cwd 维度跟 waveRoot 联动。argv SHAPE+ORDER 因此
+    // 与 V1 字节等价,差异只落在 --bind / --chdir 的 cwd token 上。
+    const fsPolicy = createFsPolicy({
+      cwd: waveRoot,
+      home,
+      tmpDir,
+      ...(workspaceRoot ? { workspaceRoot } : {}),
+    });
     const fence = createBwrapFence({
       command: "bash",
       args: ["-c", finalCommand],
@@ -152,13 +181,13 @@ export function createBashTool(
       networkPolicy,
       resourceLimits,
       env: fenceEnv,
-      cwd,
+      cwd: waveRoot,
       ...(wantsHostNetwork ? { network: true } : {}),
       ...(fenceIsReadonly ? { cwdReadonly: true } : {}),
     });
     const result = await runInSandbox({
       fence,
-      cwd,
+      cwd: waveRoot,
       signal: ctx?.signal,
       env: fenceEnv,
       maxOutputCodePoints: DEFAULT_MAX_OUTPUT_CODE_POINTS,

@@ -475,6 +475,13 @@ export function createDefaultAciRegistry(
         ...(backgroundManager ? { backgroundManager } : {}),
         // #562 T6: bashMode 透传 — readonly 模式触发 validator + fence cwdReadonly。
         ...(bashMode !== undefined ? { bashMode } : {}),
+        // T7: 透传 live taskRoot cell。门禁未翻 ⇒ cell 初值 = sandboxRoot,
+        // handler 内 cell.read() 一次取得 waveRoot,前台 fence + background
+        // spawn 共用该值（D2）。liveTaskRoot 缺席 → 退回 sandboxRoot
+        // （legacy parity,与 V1 字节一致）。
+        ...(opts.liveTaskRoot !== undefined
+          ? { liveTaskRoot: opts.liveTaskRoot }
+          : {}),
       }),
     read_file: () =>
       createReadFileTool(sandboxRoot, {
