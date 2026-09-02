@@ -8,8 +8,8 @@ import {
   createQueryTraceCore,
   QUERY_TRACE_MAX_LIMIT,
   QUERY_TRACE_PREVIEW_CAP,
-  QUERY_TRACE_RESPONSE_CAP,
 } from "../../src/traceserver/query-trace-core.ts";
+import { TRACE_OUTPUT_BACKSTOP } from "../../src/traceserver/output-backstop.ts";
 
 /**
  * Contract suite for the shared `query_trace` core (plan
@@ -20,6 +20,12 @@ import {
  * landed, so those marked assertions now read the other way and pin the NEW
  * contract instead: a page narrows by whole records only, a drilled record
  * comes back complete, and no `response_truncated` flag claims otherwise.
+ * T6 then moved the budget these fixtures are built to cross: the
+ * `QUERY_TRACE_RESPONSE_CAP = 4000` red line retired and `serializeListPage`
+ * narrowed to `TRACE_OUTPUT_BACKSTOP` instead (20 000 = the executor's
+ * `OUTPUT_HARD_CAP`, re-declared in `src/traceserver/output-backstop.ts`
+ * because the core may not import `harness/`). The narrowing rule the page
+ * itself is about did not change, so only the widths moved.
  * Everything else still describes current behaviour. Nothing here is an xfail /
  * skipped "known bug" test.
  */
@@ -108,9 +114,22 @@ function toolRoundTrips(pairCount: number, chars: number): unknown[] {
 const NARROWING_PAGE_MESSAGES = toolRoundTrips(2, 500);
 
 /**
- * A session whose list page overshoots `QUERY_TRACE_RESPONSE_CAP` by a wide
- * margin, so the serializer must narrow it by whole records. Records are
- * written oldest-first and the reader emits them newest-first.
+ * 一页要多少条记录才真越过 `TRACE_OUTPUT_BACKSTOP`（实测本夹具：一条投影记录
+ * ≈ 1,200 字符 ⇒ 24 条 ≈ 28.8 KB，收窄后 16 条 ≈ 19.3 KB）。宽度是夹具的属性，
+ * 预算是核与 MCP 面共用的那一个值，所以这里只引用常量，不再抄一份数字。
+ */
+const NARROWING_PAGE_RECORD_COUNT = 24;
+
+/**
+ * 一条记录要多少个 400 字符字段才单独装不进预算（实测 ≈ 416 字符/字段 ⇒ 60 个
+ * ≈ 25.1 KB > `TRACE_OUTPUT_BACKSTOP`）。收不窄到零的判据要吃这个宽度。
+ */
+const UNFITTABLE_FIELD_COUNT = 60;
+
+/**
+ * A session whose list page overshoots `TRACE_OUTPUT_BACKSTOP`, so the
+ * serializer must narrow it by whole records. Records are written oldest-first
+ * and the reader emits them newest-first.
  */
 function writeNarrowingPageSession(
   traceDir: string,
@@ -127,9 +146,9 @@ function writeNarrowingPageSession(
 }
 
 /**
- * A session holding one record too wide to fit the response cap on its own, so
- * no narrowing can produce a non-empty page. Returns the written row, letting
- * the caller assert the key set it expected to survive.
+ * A session holding one record too wide to fit `TRACE_OUTPUT_BACKSTOP` on its
+ * own, so no narrowing can produce a non-empty page. Returns the written row,
+ * letting the caller assert the key set it expected to survive.
  */
 function writeUnfittableRecordSession(
   traceDir: string,
@@ -166,7 +185,7 @@ const MARKER = "...[truncated]";
 
 /**
  * T3 retired `response_truncated` from the tool face: it tracked how many
- * records survived the cap, never whether a field was dropped, so a record
+ * records survived the budget, never whether a field was dropped, so a record
  * stripped of its `tool_results` still reported `false`. Assert the key is
  * GONE — a `false` value would be the exact lie this ticket removes.
  */
@@ -252,7 +271,7 @@ describe("query_trace traceserver core", () => {
   });
 
   describe("drill-down projection", () => {
-    it("returns the raw row untouched (messages and raw included) for detail=messages under the response cap", async () => {
+    it("returns the raw row untouched (messages and raw included) for detail=messages", async () => {
       const traceDir = makeTraceDir();
       const messages = [{ role: "user", content: "hi" }];
       writeSession(traceDir, "c1", jsonLine(llmCallRow("c1", 1, { messages })));
@@ -281,9 +300,9 @@ describe("query_trace traceserver core", () => {
       );
       assert.equal(unmappedMessages.length, 1);
       assert.deepEqual(unmappedMessages[0]["value"], messages);
-      // A drill-down has no cap stage to pass at all, so there is no flag here
-      // to read.
-      assertNoResponseTruncationFlag(parsed, "the under-cap drilled record");
+      // `serializeDrillDown` consults no budget at all — `TRACE_OUTPUT_BACKSTOP`
+      // is the *list* path's anchor — so there is no flag here to read.
+      assertNoResponseTruncationFlag(parsed, "a small drilled record");
     });
 
     it("drills a messages_captured:false row as a bare record with no messages and no truncation signal", async () => {
@@ -339,7 +358,9 @@ describe("query_trace traceserver core", () => {
 
     it("returns an oversize drilled row complete, messages and every object field included, on detail=messages", async () => {
       const traceDir = makeTraceDir();
-      const messages = toolRoundTrips(16, 300); // 32 messages
+      // 16 pairs × 1,500 characters: measured ≈ 27,179 characters on disk, so the
+      // fixture really crosses the budget `serializeListPage` would narrow to.
+      const messages = toolRoundTrips(16, 1_500); // 32 messages
       const row = llmCallRow("c2", 2, {
         model: "claude-some-model",
         max_tokens: 8192,
@@ -351,8 +372,8 @@ describe("query_trace traceserver core", () => {
       });
       const rawLine = writeSession(traceDir, "c2", jsonLine(row));
       assert.ok(
-        Buffer.byteLength(rawLine) > QUERY_TRACE_RESPONSE_CAP,
-        `fixture must exceed the response cap, got ${Buffer.byteLength(rawLine)}`
+        rawLine.length > TRACE_OUTPUT_BACKSTOP,
+        `fixture must exceed the backstop, got ${rawLine.length} characters`
       );
 
       const json = await createQueryTraceCore({ traceDir })({
@@ -363,12 +384,14 @@ describe("query_trace traceserver core", () => {
       const parsed = envelope(json);
       const record = parsed.records[0] ?? {};
 
-      // Asserting the response overshoots the cap is deliberate: a record the
-      // caller named comes back whole, where the old behaviour shrank it to a
-      // scalar stub while claiming nothing had been truncated.
+      // Compared in characters, the unit the budget is counted in (the anchor is
+      // `JSON.stringify(...).length` in serializeListPage, not a byte count).
+      // Overshooting here is the claim, not an accident: a record the caller
+      // named comes back whole, where the old behaviour shrank it to a scalar
+      // stub while claiming nothing had been truncated.
       assert.ok(
-        Buffer.byteLength(json) > QUERY_TRACE_RESPONSE_CAP,
-        `a drilled record is returned whole even when it overshoots the cap, got ${Buffer.byteLength(json)}`
+        json.length > TRACE_OUTPUT_BACKSTOP,
+        `a drilled record is returned whole even when it overshoots the backstop, got ${json.length} characters`
       );
       assert.deepEqual(record["messages"], messages);
       // The reader's `raw` copy survives too: nothing on this path is stripped to
@@ -394,10 +417,14 @@ describe("query_trace traceserver core", () => {
       );
     });
 
-    it("keeps the whole tool_results projection, one entry per result, when a drilled projection overshoots the response cap", async () => {
+    it("keeps the whole tool_results projection, one entry per result, when a drilled projection overshoots the backstop", async () => {
       const traceDir = makeTraceDir();
-      const pairCount = 16;
-      const messages = toolRoundTrips(pairCount, 300);
+      // 50 pairs: each projected entry carries a preview capped at
+      // TOOL_RESULT_PREVIEW_CAP, so the projection is what has to be wide enough
+      // to overshoot — the assertion below measures it against the live
+      // TRACE_OUTPUT_BACKSTOP rather than trusting a recorded figure.
+      const pairCount = 50;
+      const messages = toolRoundTrips(pairCount, 400);
       const expectedIds = messages.flatMap((message) => {
         const content = (message as { content?: unknown }).content;
         if (!Array.isArray(content)) return [];
@@ -410,7 +437,10 @@ describe("query_trace traceserver core", () => {
         "c3",
         jsonLine(llmCallRow("c3", 3, { messages }))
       );
-      assert.ok(Buffer.byteLength(rawLine) > QUERY_TRACE_RESPONSE_CAP);
+      assert.ok(
+        rawLine.length > TRACE_OUTPUT_BACKSTOP,
+        `fixture must exceed the backstop, got ${rawLine.length} characters`
+      );
 
       const json = await createQueryTraceCore({ traceDir })({
         conversation_id: "c3",
@@ -420,15 +450,15 @@ describe("query_trace traceserver core", () => {
       const parsed = envelope(json);
       const record = parsed.records[0] ?? {};
 
-      // `detail=tool_results` is bounded by the same cap as `messages`, and this
-      // many pairs overshoot it: one entry per result survives, and the response
-      // overshoots the cap rather than dropping the array.
+      // `detail=tool_results` goes through the same drill-down serializer as
+      // `messages`, which consults no budget: this many pairs overshoot
+      // `TRACE_OUTPUT_BACKSTOP` rather than one result being dropped.
       const toolResults = record["tool_results"];
       assert.ok(Array.isArray(toolResults), "tool_results must stay an array");
       assert.equal(
         toolResults.length,
         pairCount,
-        "no result may be dropped to fit the cap"
+        "no result may be dropped to fit the backstop"
       );
       assert.deepEqual(
         toolResults.map(
@@ -436,7 +466,10 @@ describe("query_trace traceserver core", () => {
         ),
         expectedIds
       );
-      assert.ok(Buffer.byteLength(json) > QUERY_TRACE_RESPONSE_CAP);
+      assert.ok(
+        json.length > TRACE_OUTPUT_BACKSTOP,
+        `the drilled projection is returned whole, got ${json.length} characters`
+      );
       assertNoResponseTruncationFlag(parsed, "an oversize tool_results drill");
       assert.equal(parsed.records.length, 1);
       assert.equal(record["llm_call_id"], "llm-3");
@@ -444,30 +477,45 @@ describe("query_trace traceserver core", () => {
   });
 
   describe("list page serialization", () => {
-    it("narrows an over-cap list page to a leading run of whole records", async () => {
+    it("narrows an over-backstop list page to a leading run of whole records", async () => {
       const traceDir = makeTraceDir();
-      writeNarrowingPageSession(traceDir, "c4", 8);
+      writeNarrowingPageSession(traceDir, "c4", NARROWING_PAGE_RECORD_COUNT);
 
       const json = await createQueryTraceCore({ traceDir })({
         conversation_id: "c4",
-        limit: 8,
+        limit: NARROWING_PAGE_RECORD_COUNT,
       });
       const parsed = envelope(json);
 
-      assert.ok(json.length <= QUERY_TRACE_RESPONSE_CAP);
+      assert.ok(
+        json.length <= TRACE_OUTPUT_BACKSTOP,
+        `a narrowed page must reach the caller inside the backstop, got ${json.length} characters`
+      );
       // The page shrank by RECORDS, never by fields: `records.length < limit` is
       // the honest end-of-data signal, `total` still reports the untrimmed
       // filtered count, and each surviving record is the same object the
       // un-narrowed path would have returned.
-      assert.ok(parsed.records.length < 8);
+      assert.ok(parsed.records.length < NARROWING_PAGE_RECORD_COUNT);
       assert.ok(
         parsed.records.length > 1,
         "a narrowed page still holds more than one record, so it is a page and " +
           "not the zero-fits single-record fallback"
       );
-      assert.equal(parsed.total, 8);
+      // Narrowed, but only as far as it had to: one more record of the width this
+      // page already carries would cross the budget. Without this arm a serializer
+      // that stopped at an arbitrary smaller anchor — the retired 4000, say — would
+      // still satisfy the two bounds above.
+      const recordWidth = JSON.stringify(parsed.records[0] ?? {}).length + 1;
+      assert.ok(
+        json.length + recordWidth > TRACE_OUTPUT_BACKSTOP,
+        `the page gave back ${json.length} characters and could have carried ~${recordWidth} more inside ${TRACE_OUTPUT_BACKSTOP}`
+      );
+      assert.equal(parsed.total, NARROWING_PAGE_RECORD_COUNT);
       assertNoResponseTruncationFlag(parsed, "a narrowed list page");
-      const expectedOrder = [7, 6, 5, 4, 3, 2, 1, 0].map((i) => `llm-${i}`);
+      const expectedOrder = Array.from(
+        { length: NARROWING_PAGE_RECORD_COUNT },
+        (_unused, i) => `llm-${NARROWING_PAGE_RECORD_COUNT - 1 - i}`
+      );
       assert.deepEqual(
         idsOf(parsed.records),
         expectedOrder.slice(0, parsed.records.length)
@@ -506,7 +554,7 @@ describe("query_trace traceserver core", () => {
 
     it("keeps every field of a narrowed page's records, previews and arrays included", async () => {
       const traceDir = makeTraceDir();
-      writeNarrowingPageSession(traceDir, "c5", 8);
+      writeNarrowingPageSession(traceDir, "c5", NARROWING_PAGE_RECORD_COUNT);
 
       const parsed = envelope(
         await createQueryTraceCore({ traceDir })({ conversation_id: "c5" })
@@ -516,11 +564,12 @@ describe("query_trace traceserver core", () => {
       );
 
       // Every surviving record is asserted, not just one: narrowing must not
-      // shorten a string or drop an array field on the way past the cap, or a
-      // truncated value on a narrowed page would look complete.
+      // shorten a string or drop an array field on the way past
+      // `TRACE_OUTPUT_BACKSTOP`, or a truncated value on a narrowed page would
+      // look complete.
       assert.ok(
-        parsed.records.length < 8,
-        "the fixture must still be over cap"
+        parsed.records.length < NARROWING_PAGE_RECORD_COUNT,
+        "the fixture must still be over the backstop"
       );
       assert.ok(parsed.records.length > 1);
       for (const record of parsed.records) {
@@ -546,7 +595,10 @@ describe("query_trace traceserver core", () => {
         assert.equal(record["tool_result_count"], 2);
       }
       // Order is still the reader's, and the first record is a whole one.
-      assert.equal(parsed.records[0]?.["llm_call_id"], "llm-7");
+      assert.equal(
+        parsed.records[0]?.["llm_call_id"],
+        `llm-${NARROWING_PAGE_RECORD_COUNT - 1}`
+      );
       assertNoResponseTruncationFlag(
         parsed,
         "a narrowed page of whole records"
@@ -555,8 +607,12 @@ describe("query_trace traceserver core", () => {
 
     it("returns the first record whole instead of an empty page when not even one record fits", async () => {
       const traceDir = makeTraceDir();
-      const fieldCount = 40;
-      const wide = writeUnfittableRecordSession(traceDir, "c6", 6, fieldCount);
+      const wide = writeUnfittableRecordSession(
+        traceDir,
+        "c6",
+        6,
+        UNFITTABLE_FIELD_COUNT
+      );
 
       const json = await createQueryTraceCore({ traceDir })({
         conversation_id: "c6",
@@ -564,14 +620,16 @@ describe("query_trace traceserver core", () => {
       const parsed = envelope(json);
       const record = parsed.records[0] ?? {};
 
-      // A page never shrinks to zero. When not even one record fits the cap, the
-      // first record is returned whole and the response overshoots the cap rather
-      // than emitting an empty `records` array that would read as "no data" —
-      // which is what the old count-0 branch did.
+      // A page never shrinks to zero. When not even one record fits
+      // `TRACE_OUTPUT_BACKSTOP`, the first record is returned whole and the
+      // response overshoots the budget rather than emitting an empty `records`
+      // array that would read as "no data" — which is what the old count-0
+      // branch did. The overshoot is the honest half of the deal: the caller
+      // reads a whole record it can parse, not a lie about there being nothing.
       assert.equal(parsed.records.length, 1);
       assert.ok(
-        Buffer.byteLength(json) > QUERY_TRACE_RESPONSE_CAP,
-        `the unfittable record is returned whole, got ${Buffer.byteLength(json)}`
+        json.length > TRACE_OUTPUT_BACKSTOP,
+        `the unfittable record is returned whole, got ${json.length} characters`
       );
       assert.equal(parsed.total, 1);
       // `truncated` still belongs to the reader's byte window, not to this
@@ -583,7 +641,7 @@ describe("query_trace traceserver core", () => {
         Object.keys(record).sort(),
         [...Object.keys(wide), "messages_count", "tool_result_count"].sort()
       );
-      for (let i = 0; i < fieldCount; i++) {
+      for (let i = 0; i < UNFITTABLE_FIELD_COUNT; i++) {
         assert.equal(record[`field_${i}`], "q".repeat(400));
       }
     });
@@ -594,15 +652,24 @@ describe("query_trace traceserver core", () => {
       const traceDir = makeTraceDir();
       writeSession(traceDir, "empty", "");
       writeSession(traceDir, "fits", jsonLine(llmCallRow("fits", 1)));
-      writeNarrowingPageSession(traceDir, "narrows", 8);
-      writeUnfittableRecordSession(traceDir, "oversize", 6, 40);
+      writeNarrowingPageSession(
+        traceDir,
+        "narrows",
+        NARROWING_PAGE_RECORD_COUNT
+      );
+      writeUnfittableRecordSession(
+        traceDir,
+        "oversize",
+        6,
+        UNFITTABLE_FIELD_COUNT
+      );
       const core = createQueryTraceCore({ traceDir });
 
       // One entry per answer shape, each with a `branch` witness that proves the
-      // call really took the cap path its name claims — a fixture that quietly fit
-      // under the cap would otherwise make this loop assert nothing the fitted path
-      // does not already assert. Behaviour itself is pinned by the two blocks
-      // above; only the metadata is read here.
+      // call really took the budget path its name claims — a fixture that quietly
+      // fit under `TRACE_OUTPUT_BACKSTOP` would otherwise make this loop assert
+      // nothing the fitted path does not already assert. Behaviour itself is
+      // pinned by the two blocks above; only the metadata is read here.
       const shapes: ReadonlyArray<{
         readonly shape: string;
         readonly input: Record<string, unknown>;
@@ -622,26 +689,35 @@ describe("query_trace traceserver core", () => {
           shape: "a page that fits",
           input: { conversation_id: "fits" },
           branch: (parsed, json) => {
-            assert.ok(json.length <= QUERY_TRACE_RESPONSE_CAP);
+            assert.ok(json.length <= TRACE_OUTPUT_BACKSTOP);
             assert.equal(parsed.records.length, 1);
           },
         },
         {
           shape: "a narrowed page",
-          input: { conversation_id: "narrows", limit: 8 },
-          // Fewer records than asked for, yet still under the cap: the whole-record
-          // narrowing ran.
+          input: {
+            conversation_id: "narrows",
+            limit: NARROWING_PAGE_RECORD_COUNT,
+          },
+          // Fewer records than asked for, yet inside the budget and filled as far
+          // as the budget allows: the whole-record narrowing ran, at the anchor
+          // this ticket moved to.
           branch: (parsed, json) => {
-            assert.ok(json.length <= QUERY_TRACE_RESPONSE_CAP);
-            assert.ok(parsed.records.length < 8);
-            assert.equal(parsed.total, 8);
+            assert.ok(json.length <= TRACE_OUTPUT_BACKSTOP);
+            assert.ok(
+              json.length + JSON.stringify(parsed.records[0] ?? {}).length + 1 >
+                TRACE_OUTPUT_BACKSTOP,
+              "a narrowed page stopped as late as the backstop allows"
+            );
+            assert.ok(parsed.records.length < NARROWING_PAGE_RECORD_COUNT);
+            assert.equal(parsed.total, NARROWING_PAGE_RECORD_COUNT);
           },
         },
         {
           shape: "an unfittable single record",
           input: { conversation_id: "oversize" },
           branch: (parsed, json) => {
-            assert.ok(json.length > QUERY_TRACE_RESPONSE_CAP);
+            assert.ok(json.length > TRACE_OUTPUT_BACKSTOP);
             assert.equal(parsed.records.length, 1);
           },
         },
@@ -653,7 +729,7 @@ describe("query_trace traceserver core", () => {
             detail: "messages",
           },
           branch: (parsed, json) => {
-            assert.ok(json.length > QUERY_TRACE_RESPONSE_CAP);
+            assert.ok(json.length > TRACE_OUTPUT_BACKSTOP);
             assert.equal(parsed.records.length, 1);
           },
         },

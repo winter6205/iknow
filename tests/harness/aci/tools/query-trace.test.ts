@@ -13,6 +13,7 @@ import {
   ACI_TOOLSET_NAMES,
   createDefaultAciRegistry,
 } from "../../../../src/harness/aci/tools/registry.ts";
+import { TRACE_BACKSTOP_MARKER } from "../../../../src/traceserver/output-backstop.ts";
 
 const scratchPaths: string[] = [];
 
@@ -122,7 +123,7 @@ describe("query_trace ACI tool", () => {
     }
   });
 
-  it("projects llm_call messages for status=error and caps the response", async () => {
+  it("projects llm_call messages for status=error and returns the page whole", async () => {
     const tool = createQueryTraceTool(makeTraceDir());
     const output = (await tool.handler({
       conversation_id: "c1",
@@ -130,9 +131,16 @@ describe("query_trace ACI tool", () => {
     })) as string;
     const body = JSON.parse(output) as {
       records: Array<Record<string, unknown>>;
+      truncated: boolean;
     };
 
-    assert.ok(output.length <= 4_000);
+    // T6 退役了工具面自己的字符帽（plan item 5 点名的四处 4000 残值之一）。
+    // 原来这句 `output.length <= 4_000` 钉的是「响应被压进帽内」，而这个主张
+    // 现在没有任何一方再持有：截断与 marker 归 executor 独有（契约 X，
+    // ADR-0004:23），行轴自身的分页元字段留到 T7。所以改钉这条页真正要保证
+    // 的事——整页原样回来，不带任何截断告知。
+    assert.equal(body.truncated, false);
+    assert.ok(!output.includes(TRACE_BACKSTOP_MARKER));
     assert.equal(body.records.length, 1);
     assert.equal(body.records[0]?.llm_call_id, "llm-error");
     assert.equal(body.records[0]?.messages_count, 3);
@@ -258,24 +266,25 @@ describe("query_trace ACI tool", () => {
     );
   });
 
-  it("registers query_trace as an append-only SSOT member (followed by 3 worktree isolation per ADR-0037 + 10 symbol-query + 5 symbol-mutate tools per T2+T4 + 1 list_sessions)", () => {
+  it("registers query_trace as an append-only SSOT member (followed by 3 worktree isolation per ADR-0037 + 10 symbol-query + 5 symbol-mutate tools per T2+T4 + 1 list_sessions + 1 get_record)", () => {
     // ADR-0037 在末位追加 3 件 worktree 隔离工具,symbol-primary-aci T2
     // 接着追加 10 件符号查询工具 → query_trace 不再是末位。T4 又在末尾
     // append 5 件符号改工具,trace-mcp-read-side-split T5b 再 append 1 件
-    // 目录轴读工具 list_sessions → query_trace 之后共 19 件(3 worktree +
-    // 10 查询 + 5 改 + 1 读)。query_trace 自身位置 idx 21。
+    // 目录轴读工具 list_sessions,T6 最后 append 1 件内容轴读工具
+    // get_record → query_trace 之后共 20 件(3 worktree + 10 查询 + 5 改
+    // + 2 读)。append-only:query_trace 自身位置仍是 idx 21。
     assert.equal(ACI_TOOLSET_NAMES[21], "query_trace");
-    assert.equal(ACI_TOOLSET_NAMES.at(-1), "list_sessions");
+    assert.equal(ACI_TOOLSET_NAMES.at(-1), "get_record");
     const queryTraceIndex = ACI_TOOLSET_NAMES.indexOf("query_trace");
     assert.ok(queryTraceIndex >= 0, "query_trace 仍在 ACI_TOOLSET_NAMES");
-    // query_trace 之后正好 19 件（3 worktree + 10 查询 + 5 改 + 1 目录轴读）
-    assert.equal(ACI_TOOLSET_NAMES.length - queryTraceIndex - 1, 19);
+    // query_trace 之后正好 20 件（3 worktree + 10 查询 + 5 改 + 2 读轴）
+    assert.equal(ACI_TOOLSET_NAMES.length - queryTraceIndex - 1, 20);
     const registry = createDefaultAciRegistry({
       env: { web: { searchUrl: undefined, proxy: undefined } },
       sandboxRoot: makeTraceDir(),
     });
     assert.equal(registry.catalog.get("query_trace")?.name, "query_trace");
-    // list_sessions 无装配条件 → 常驻末位；query_trace 仍在场。
-    assert.equal(registry.inner.list().at(-1)?.name, "list_sessions");
+    // 两件读轴工具都无装配条件 → 常驻;末位是 T6 追加的 get_record。
+    assert.equal(registry.inner.list().at(-1)?.name, "get_record");
   });
 });

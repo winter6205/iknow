@@ -17,6 +17,7 @@ import {
   QUERY_TRACE_DEFAULT_LIMIT,
   QUERY_TRACE_MAX_LIMIT,
   QUERY_TRACE_MAX_RECORD_ID_SCAN,
+  QUERY_TRACE_DESCRIPTION,
   TRACE_RECORD_TYPES,
   TraceQueryRecordScanError,
   TraceQueryValidationError as TraceserverQueryValidationError,
@@ -64,8 +65,7 @@ export function createQueryTraceTool(
 
   return Object.freeze({
     name: TOOL_NAME,
-    description:
-      "Query local JSONL trace records with filters. Normal llm_call results are projection-only (message count, first/last previews, tool_result projection from llm_call.messages, and error); use record_id to drill into one record. By default drill-down returns tool_results; use detail=messages for messages. If the model ends the turn without a following llm_call, that last round's tool_results are not visible in the projection. Results are capped at 4000 characters.",
+    description: QUERY_TRACE_DESCRIPTION,
     inputSchema: {
       type: "object",
       properties: {

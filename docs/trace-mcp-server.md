@@ -1,9 +1,10 @@
 # Trace MCP server
 
-`iknow-trace-mcp` exposes iknow's read-only trace tools over stdio: `list_sessions`
-(which sessions exist in a trace directory) and `query_trace` (which records are
-inside one session). Install the package first, then add this entry to the MCP
-client's `mcp.json`:
+`iknow-trace-mcp` exposes iknow's read-only trace tools over stdio, one per read
+axis: `list_sessions` (which sessions exist in a trace directory), `query_trace`
+(which records are inside one session, filtered, one page per `limit`), and
+`get_record` (the content of one record, read as a character window you address).
+Install the package first, then add this entry to the MCP client's `mcp.json`:
 
 ```json
 {

@@ -22,19 +22,24 @@ import { parseInteger } from "./parse-integer.js";
 import { TraceQueryValidationError } from "./query-trace-errors.js";
 
 /**
- * 本轴的读单元 = 一页会话摘要。数字与 `query_trace` 的 limit 界相同，名字**故意
- * 分开**：两条轴的单位不同（一条摘要 vs 一行记录），plan T7 只会重新校准
- * `query_trace` 那一组，不该顺带改掉这一组。
+ * 本轴的读单元 = 一页会话摘要。缺省 100 与 `query_trace` 同量级，名字**故意分开**：
+ * 两条轴的单位不同（一条摘要 vs 一行记录），plan T7 只会重新校准 `query_trace`
+ * 那一组。
  *
- * 一满页有多大（实测，一次性夹具：UUID `conversation_id` + `agent_version` 都在）：
- * 单条约 141 B ⇒ 默认 100 条 ≈ 14.1 KB，上限 200 条 ≈ 28.3 KB。后者已越过 executor
- * 的 `OUTPUT_HARD_CAP`（20000 字符，契约 X 的唯一截断权威），到那时截断标记会落在
- * JSON 中间——不是本核静默丢字段，但调用方拿到的不是一页可解析的 JSON。缺省页量
- * 留在帽内，所以默认路径不受影响；把帽与本轴的界一次对齐是 T6 的活（同票落 MCP 面
- * 具名 backstop），本票不动参数面。
+ * 上限 128 由 `TRACE_OUTPUT_BACKSTOP` 反推，不是取整偏好。一满页必须序列化成帽内
+ * 可解析的 JSON，否则截断标记会落在数组中间，调用方拿到的不是一页索引而是一段残文
+ * ——而 backstop / executor 帽都按 `text.length` 计，所以这里的预算单位是**字符**不是
+ * 字节。实测（主仓 81 个真实会话，一次性探针）：单条摘要的 JSON 本体 71–124 字符
+ * （UUID `conversation_id` + `agent_version` 都在 = 124；无 `agent_version` = 71），
+ * 页面内连写还要 +1 个条目间逗号 ⇒ 72–125（测试注释用的是后一个口径）。按页内口径：
+ * 128 × 125 = 16 000 < 20 000，200 × 125 = 25 000 已越帽；四字段的可打印上限约 126
+ * （订正：plan 第 13 条记作「单条约 141 B」，本轮在同一份真实目录上复现不出来——最宽
+ * 124 字符且 `agent_version` 全为 `0.1.0`——以本处复测为准）。
+ * 「一满页在帽内」由 tests/traceserver/list-sessions-core.test.ts 的实测断言钉住
+ * （摘要尺寸会随 `agent_version` 之类字段漂移，光看这个数字不够）。
  */
 export const LIST_SESSIONS_DEFAULT_LIMIT = 100;
-export const LIST_SESSIONS_MAX_LIMIT = 200;
+export const LIST_SESSIONS_MAX_LIMIT = 128;
 
 /**
  * The one description text for both faces (spec SC7 / SC18: one source, and it
@@ -52,7 +57,7 @@ export const LIST_SESSIONS_DESCRIPTION =
   "the file is larger than that read window and the root record sits past it. " +
   "Absence therefore reports that no root record was found in the window, and " +
   "says nothing about whether the session finished. Page the index with limit " +
-  "(default 100, up to 200) and offset; the response echoes the effective limit " +
+  "(default 100, up to 128) and offset; the response echoes the effective limit " +
   "and offset, so a page shorter than the echoed limit means the index is " +
   "exhausted and offset + entries returned continues it. Pair a returned " +
   "conversation_id with query_trace to read that session's records.";

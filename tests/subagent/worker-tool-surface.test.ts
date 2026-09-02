@@ -146,6 +146,13 @@ const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
   // 能答；category=read-only、无装配条件（任何 surface 都建 traceDir），故不条件化。
   // 位置在末位 = registry.list() 跟随 ACI_TOOLSET_NAMES 的 append-only 顺序。
   "list_sessions",
+  // trace-mcp-read-side-split T6 — get_record 沿用 T5b 为 list_sessions 立的那条
+  // operator 裁定，同门进 worker 基础面：worker 手里已有 conversation_id /
+  // record_id 时，「这条记录到底长什么样、要不要继续下钻」只有内容轴能答，
+  // 缺了它 worker 只能靠 query_trace 的行投影猜。category=read-only、无装配条件
+  // （任何 surface 都建 traceDir），故不条件化。位置在末位 = registry.list()
+  // 跟随 ACI_TOOLSET_NAMES 的 append-only 顺序。
+  "get_record",
 ]);
 
 // ---------------------------------------------------------------------------

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import {
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  truncateSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -18,6 +20,7 @@ import {
   LIST_SESSIONS_DESCRIPTION,
   type ListSessionsCoreHandler,
 } from "../../src/traceserver/list-sessions-core.ts";
+import { TRACE_OUTPUT_BACKSTOP } from "../../src/traceserver/output-backstop.ts";
 import { TraceQueryValidationError } from "../../src/traceserver/query-trace-errors.ts";
 import { TraceReadError } from "../../src/traceserver/types.ts";
 
@@ -119,6 +122,56 @@ function writeSession(
   );
   const at = new Date((BASE_EPOCH - ageSeconds) * SECOND_MS);
   utimesSync(path, at, at);
+}
+
+/**
+ * A finished session shaped like the real ones, for the page-width measurement.
+ * Measured once by running the core over this repo's own 81-session trace dir
+ * (a one-off probe, not an assertion): a real entry is 72-125 characters as it
+ * sits in the page (71-124 for the entry JSON itself, +1 for the separating
+ * comma — `list-sessions-core.ts` quotes that second convention), averaging
+ * 109.4 — below the ceiling because sessions with no root record omit
+ * `agent_version` entirely. The four `SessionSummary` fields cannot print more
+ * than ~126 characters, and this fixture is built at that ceiling: a
+ * UUID-length `conversation_id`, the repo's real `agent_version` value, a
+ * 9-digit `size` (largest real file: 127,903,724 B) and a 4-decimal `mtime`
+ * fraction (`stats.mtimeMs` verbatim; ext4 hands the digits back and real
+ * values reach `.9272`). Worst-page arithmetic is what the budget claim needs.
+ *
+ * `size` is set by extending the file rather than by writing megabytes of
+ * padding: `sessions.ts` takes `size` straight from `stat` and reads only the
+ * first 64 KiB for the root record, so the tail cannot change what the core
+ * sees — only how wide its `size` field prints.
+ */
+function realisticSessionFile(traceDir: string, index: number): string {
+  const conversationId = randomUUID();
+  const path = join(traceDir, `${conversationId}.jsonl`);
+  writeFileSync(
+    path,
+    [
+      {
+        record_type: "llm_call",
+        conversation_id: conversationId,
+        llm_call_id: "llm-1",
+        padding: "x".repeat(1_000),
+      },
+      {
+        record_type: "session",
+        conversation_id: conversationId,
+        agent_version: "0.1.0",
+      },
+    ]
+      .map((row) => JSON.stringify(row))
+      .join("\n") + "\n",
+    "utf8"
+  );
+  truncateSync(path, 127_903_724 + index);
+  // Fractional seconds (not a Date) so the stored mtime keeps the sub-ms digits
+  // a real ext4 stamp carries, and a different fraction per session so the page
+  // is not one lucky value multiplied.
+  const at = 1_788_176_903.7689272 + index;
+  utimesSync(path, at, at);
+  return conversationId;
 }
 
 interface Page {
@@ -332,6 +385,60 @@ describe("list_sessions core — paging", () => {
     assert.equal(
       (await pageOf(core, { limit: LIST_SESSIONS_MAX_LIMIT })).sessions.length,
       2
+    );
+  });
+
+  it("keeps a full page of realistic entries inside the transport backstop", async () => {
+    // plan item 13 handed this alignment to T6, where LIST_SESSIONS_MAX_LIMIT
+    // moved 200 → 128. The claim is about the wire, not about the fixture: a page
+    // at the declared ceiling has to reach the caller as parseable JSON, because
+    // the cut on both faces is by character count and a marker landing inside an
+    // array leaves a caller a broken index instead of a page. `pageOf` below is
+    // the parse step, so a too-wide page throws rather than passing.
+    //
+    // Why the fixture holds 200 sessions: that is the pre-T6 ceiling, so the page
+    // is a real full page for any limit up to it and this test goes red the day
+    // the ceiling drifts back. The widths come from the probe recorded on
+    // `realisticSessionFile`: the fixture sits at the ~126 character ceiling of
+    // the four summary fields, and at that width 128 entries ≈ 16.1 KB fit
+    // under the 20 000 backstop while 200 ≈ 25.3 KB do not — which is the whole
+    // 128.
+    const traceDir = makeTraceDir();
+    for (let i = 0; i < 200; i++) realisticSessionFile(traceDir, i);
+    const core = createListSessionsCore({ traceDir });
+
+    const text = await core({ limit: LIST_SESSIONS_MAX_LIMIT });
+    const page = JSON.parse(text) as Page;
+
+    // A genuinely full page: fewer entries would let a shrunken fixture pass a
+    // budget claim it never tested.
+    assert.equal(page.sessions.length, LIST_SESSIONS_MAX_LIMIT);
+    assert.ok(
+      text.length <= TRACE_OUTPUT_BACKSTOP,
+      `a full ${LIST_SESSIONS_MAX_LIMIT}-entry page serialized to ${text.length} characters, past the ${TRACE_OUTPUT_BACKSTOP} the faces cut at`
+    );
+    // Realism floor, so the assertion above stays a claim about real pages: the
+    // measured real band is 72-125 characters and this fixture is pinned at
+    // that top. An entry that drops below 120 means a wide field went missing
+    // (`agent_version`, a 9-digit `size`, the mtime fraction) and the budget arm
+    // above would then be proving nothing.
+    const widestEntry = Math.max(
+      ...page.sessions.map((entry) => JSON.stringify(entry).length + 1)
+    );
+    assert.ok(
+      widestEntry >= 120,
+      `fixture entries are ${widestEntry} characters, narrower than a real page's 125 top, so the budget arm above is vacuous`
+    );
+    assert.ok(
+      page.sessions.every((entry) => typeof entry["agent_version"] === "string")
+    );
+    assert.equal(new Set(conversationIds(page)).size, page.sessions.length);
+    // The ceiling is also user-visible text; a drifted constant must drag it.
+    assert.ok(
+      LIST_SESSIONS_DESCRIPTION.includes(
+        `default ${LIST_SESSIONS_DEFAULT_LIMIT}, up to ${LIST_SESSIONS_MAX_LIMIT}`
+      ),
+      "the description no longer states the page-size bounds this test measures"
     );
   });
 

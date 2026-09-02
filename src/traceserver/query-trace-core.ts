@@ -1,6 +1,13 @@
 import { join } from "node:path";
 
 import { projectToolResultsFromTrace } from "./project-tool-results.js";
+import {
+  TRACE_RECORD_ID_SCAN_LIMIT,
+  lookupRecordById,
+  projectRecordBase,
+  type RecordLookupResult,
+} from "./record-lookup.js";
+import { TRACE_OUTPUT_BACKSTOP } from "./output-backstop.js";
 import { createJsonlTraceReader } from "./reader.js";
 import {
   TRACE_RECORD_TYPES,
@@ -15,39 +22,43 @@ import {
   toResponseEnvelope,
   type ResponseEnvelope,
 } from "./envelope.js";
-import {
-  TraceQueryRecordScanError,
-  TraceQueryValidationError,
-} from "./query-trace-errors.js";
+import { TraceQueryValidationError } from "./query-trace-errors.js";
 import { parseInteger } from "./parse-integer.js";
 
 export const QUERY_TRACE_DEFAULT_LIMIT = 100;
 export const QUERY_TRACE_MAX_LIMIT = 200;
-export const QUERY_TRACE_MAX_RECORD_ID_SCAN = 10_000;
 /**
- * Bounds **how many whole records fit on a list page** — never how much of a
- * single record survives. A `record_id` drill-down does not pass through this
- * cap: the caller named that record, so it comes back verbatim, overshooting
- * the cap on purpose.
- *
- * Retires when the read side gains an explicit size axis; see plan
- * `trace-mcp-read-side-split` T6.
+ * 别名，不是第二份定义：`record_id` 扫描上限现在归
+ * `record-lookup.ts`（两条内容轴共用）。保留本名是因为它已被
+ * `src/harness/aci/tools/query-trace.ts` 与 `index.ts` 当公开面导出，
+ * plan `trace-mcp-read-side-split` T7 把行轴瘦成行筛选 + 行分页时一并退役。
  */
-export const QUERY_TRACE_RESPONSE_CAP = 4_000;
+export const QUERY_TRACE_MAX_RECORD_ID_SCAN = TRACE_RECORD_ID_SCAN_LIMIT;
 export const QUERY_TRACE_PREVIEW_CAP = 400;
 
-const RECORD_ID_KEYS = [
-  "llm_call_id",
-  "tool_call_id",
-  "turn_id",
-  "violation_id",
-  "session_id",
-  "sandbox_cmd_id",
-  "verification_id",
-  "goal_id",
-  "subagent_id",
-  "subagent_step_id",
-] as const;
+/**
+ * The one description text for both faces (spec SC7 / SC18: one source, and it
+ * claims no character cap — the 4000-character sentence this replaces described
+ * a budget the read side stopped owning in plan `trace-mcp-read-side-split` T6).
+ * What the row axis really guarantees is stated in its own terms: rows come back
+ * as projections, `record_id` reads one record whole, a list page that would be
+ * too wide keeps fewer **whole** records, and spans inside a record are
+ * `get_record`'s axis. Positive-trigger phrasing per #483 D9, enforced by
+ * tests/harness/aci/tools/d9-description-guard.test.ts.
+ */
+export const QUERY_TRACE_DESCRIPTION =
+  "Query local JSONL trace records with filters, returning one page of rows. " +
+  "Rows are projection-only (message count, first/last previews, tool_result " +
+  "summaries with their character sizes, and error); use record_id to read one " +
+  "record whole. By default a drill-down returns tool_results; use " +
+  "detail=messages for messages. A list page keeps whole records only, so a page " +
+  "answered with fewer rows than your limit left the widest trailing rows out by " +
+  "that rule: narrow your filters to bring a smaller set back whole, and read one " +
+  "record's content span by span with get_record, whose inventory reports each " +
+  "part's size first. Name conversation_id from list_sessions, then pair this " +
+  "tool with get_record to reach a record's content. If the model ends the turn " +
+  "without a following llm_call, that last round's tool_results are not visible " +
+  "in the projection.";
 
 interface QueryTraceInput {
   readonly conversation_id?: unknown;
@@ -89,7 +100,9 @@ export function createQueryTraceCore(
     const result =
       parsed.recordId === undefined
         ? reader.query(parsed.query)
-        : findRecord(reader, parsed.query, parsed.recordId);
+        : toDrillDownResult(
+            lookupRecordById(reader, parsed.query, parsed.recordId)
+          );
     const records =
       parsed.recordId === undefined
         ? await Promise.all(
@@ -204,53 +217,18 @@ function parseStatus(value: unknown): "ok" | "error" | undefined {
   return value;
 }
 
-function findRecord(
-  reader: ReturnType<typeof createJsonlTraceReader>,
-  query: TraceQuery,
-  recordId: string
-): TraceQueryResult {
-  const all: TraceRecordRow[] = [];
-  let skippedLines = 0;
-  let result = reader.query({
-    ...query,
-    limit: QUERY_TRACE_MAX_LIMIT,
-    offset: 0,
-  });
-  all.push(...result.records);
-  skippedLines += result.skippedLines;
-  while (
-    all.length < result.total &&
-    all.length < QUERY_TRACE_MAX_RECORD_ID_SCAN
-  ) {
-    const nextOffset = all.length;
-    result = reader.query({
-      ...query,
-      limit: QUERY_TRACE_MAX_LIMIT,
-      offset: nextOffset,
-    });
-    if (result.records.length === 0) break;
-    all.push(...result.records);
-    skippedLines += result.skippedLines;
-  }
-  const match = all.find((row) =>
-    RECORD_ID_KEYS.some((key) => row[key] === recordId)
-  );
-  if (
-    match === undefined &&
-    all.length >= QUERY_TRACE_MAX_RECORD_ID_SCAN &&
-    (all.length < result.total || result.truncated)
-  ) {
-    throw new TraceQueryRecordScanError(
-      recordId,
-      QUERY_TRACE_MAX_RECORD_ID_SCAN
-    );
-  }
+/**
+ * 下钻是行轴的「一条记录的页」：命中即 1 条，未命中即现状的 `records: []`（T7 决
+ * 定它是否换成 `record_not_found`，与内容轴不同的判据留在行轴里）。扫描本身在
+ * `record-lookup.ts`，这里只做线形状的转换。
+ */
+function toDrillDownResult(found: RecordLookupResult): TraceQueryResult {
   return {
-    records: match === undefined ? [] : [match],
-    total: match === undefined ? 0 : 1,
-    skippedLines,
-    truncated: result.truncated,
-    offset: result.offset,
+    records: found.match === undefined ? [] : [found.match.row],
+    total: found.match === undefined ? 0 : 1,
+    skippedLines: found.skippedLines,
+    truncated: found.truncated,
+    offset: found.offset,
   };
 }
 
@@ -292,14 +270,6 @@ async function projectDrillDownRecord(
   return projected;
 }
 
-function projectRecordBase(row: TraceRecordRow): Record<string, unknown> {
-  const projected: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(row)) {
-    if (key !== "messages" && key !== "raw") projected[key] = value;
-  }
-  return projected;
-}
-
 function preview(value: unknown): string {
   let text: string;
   if (typeof value === "string") text = value;
@@ -318,26 +288,27 @@ function preview(value: unknown): string {
 
 /**
  * Drill-down face: the caller named one record, so that record is the answer.
- * No cap applies here (see QUERY_TRACE_RESPONSE_CAP); nothing is dropped,
- * shortened, or flagged. `record_id` matched nothing → the empty envelope.
- *
- * `findRecord` returns at most one row, so today both faces emit the same bytes
- * for a drill-down — the list face's floor of one record already gets there. The
- * split is kept on purpose: the cap must not sit on this path at all, and plan
- * `trace-mcp-read-side-split` T6 replaces this body with the window contract
- * without touching the list face.
+ * The core drops, shortens, or flags nothing here — the executor is the only
+ * truncation authority on the tool face (契约 X), and a caller that wants a span
+ * of a long record now has `get_record` for that. `record_id` matched nothing →
+ * the empty envelope (row-axis status quo until T7).
  */
 function serializeDrillDown(payload: ResponseEnvelope): string {
   return JSON.stringify(payload);
 }
 
 /**
- * List face: an over-cap page narrows by **whole records only**. Records are
- * appended one at a time while the serialized envelope still fits, and the
+ * List face: an over-backstop page narrows by **whole records only**. Records
+ * are appended one at a time while the serialized envelope still fits, and the
  * first record that would not fit ends the page. Nothing is ever truncated
  * inside a record, and a page never shrinks to zero — when not even the first
  * record fits, that record is returned whole and the response overshoots the
- * cap rather than lying about it.
+ * backstop rather than lying about it.
+ *
+ * 锚在 `TRACE_OUTPUT_BACKSTOP` 而不是一个更小的自有数字：本核的目的只是「让一页
+ * 到调用方手里时仍是可解析的 JSON」，而帽的值与 MCP 面那层具名 backstop 同源于
+ * executor 的 `OUTPUT_HARD_CAP`。整条 4000 字符红线随 plan
+ * `trace-mcp-read-side-split` T6 离开代码库——它既不是读单元也不是可声明的合同。
  *
  * The end-of-data signal is implicit (`records.length < limit`), so no
  * metadata field accompanies this. `total` and `truncated` keep reporting what
@@ -346,17 +317,17 @@ function serializeDrillDown(payload: ResponseEnvelope): string {
  */
 function serializeListPage(payload: ResponseEnvelope): string {
   const fullPage = JSON.stringify(payload);
-  if (fullPage.length <= QUERY_TRACE_RESPONSE_CAP) return fullPage;
+  if (fullPage.length <= TRACE_OUTPUT_BACKSTOP) return fullPage;
 
   const envelopeOf = (count: number): string =>
     JSON.stringify({ ...payload, records: payload.records.slice(0, count) });
   // Start at 1, not 0: reaching here means there is at least one record (an
-  // empty page serializes far below the cap), and the floor of one is the
+  // empty page serializes far below the backstop), and the floor of one is the
   // whole point — a query that matched must not report an empty list.
   let fitted = 1;
   while (
     fitted < payload.records.length &&
-    envelopeOf(fitted + 1).length <= QUERY_TRACE_RESPONSE_CAP
+    envelopeOf(fitted + 1).length <= TRACE_OUTPUT_BACKSTOP
   ) {
     fitted += 1;
   }

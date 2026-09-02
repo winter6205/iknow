@@ -93,7 +93,7 @@
 8. **下钻轴归 `get_record`**（取代 v1.0 的「`record_id` 下钻 + `detail:messages` 才走 messages」）：
    - `query_trace` 参数面**不含** `record_id` / `detail` / `resume_offset`（去处已在 SC6 的另两件里）；
    - `get_record(conversation_id, record_id, detail, message_index, part_index, from_char, count)` 的窗坐标全由调用方给且**原样回显**；
-   - 装不下 → `window_overflow` 且**零部分字节泄漏**；无命中 → `record_not_found`（不再是静默 `records: []`）；
+   - **窗必须整个落在 part 内**：`from_char + count <= part_chars` 才成功，且成功的调用**恰好返回 `count` 个字符**（`count` 是 read unit = **正文**字符数，不是响应大小；响应仍可能因 `record` 标量与 `text` 的 JSON 转义越过后述 backstop——越帽时截断只发生一层、在 face 上，核自己永不裁，且窗响应必须把 `text` 排在最后一个键，使被切的只有正文、回显坐标原位可读）。越出 part 末尾 → `window_overflow`，错误消息带 `part_chars` 与剩余量而**零部分字节回传**；无命中 → `record_not_found`（不再是静默 `records: []`）；会话文件不存在 → `session_not_found`。窗坐标单位 = UTF-16 code unit，与读侧其余字符数（`preview`、executor 的 `OUTPUT_HARD_CAP`）同一单位系，**不是字节**——本轴在文档里的旧称「字节窗」即指此字符窗。不参与寻址的坐标必须被拒（`detail=tool_results` 传 `message_index` → `validation`），不得静默忽略。
    - 下钻**永不**删字段：v1.0 的 `compactRecord` 静默降级（要 `detail:messages` 却只回标量、还标 `response_truncated:false`）是本轮要消灭的 P0。
 9. 非法 tool 参数 → tool 结果 `isError: true`（或 SDK 校验错误形态），进程不崩（vitest）。
 10. 启动时 `traceDir` 解析为空/非法 → stderr 有可读信息且 exit ≠ 0（vitest 或可脚本化断言）。

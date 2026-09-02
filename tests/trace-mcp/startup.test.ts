@@ -87,9 +87,12 @@ describe("trace MCP startup", () => {
       const result = response.result as {
         tools?: Array<{ name?: string }>;
       };
+      // 建好的 stdio 进程真的把三件都端出来（in-process 那两条面测碰不到 dist）。
+      // 顺序即三轴顺序：目录 → 行 → 内容。
       expect(result.tools?.map((tool) => tool.name)).toEqual([
         "list_sessions",
         "query_trace",
+        "get_record",
       ]);
     } finally {
       child.kill("SIGTERM");
@@ -125,6 +128,7 @@ describe("trace MCP startup", () => {
       expect(result.tools?.map((tool) => tool.name)).toEqual([
         "list_sessions",
         "query_trace",
+        "get_record",
       ]);
     } finally {
       child.kill("SIGTERM");

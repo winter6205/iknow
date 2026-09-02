@@ -31,7 +31,8 @@ OVERALL: PASS — hand to writing-plans
 - 新词条 **window（窗口）**：`get_record` 中由调用方给的 `{message_index, part_index, from_char, count}` 坐标组；窗内数据是事实，不是截断声明。
 - 新词条 **tool face / panel face**：同一 traceserver 数据的两种序列化归属——tool face（ACI + MCP）不带 `truncated`/`total`；panel face（`http.ts` → Web）保留 `total` 供分页显示。_Avoid_: 「MCP 版 / HTTP 版」这种按 transport 命名的说法。
 - 澄清（非推翻）ADR-0004 契约 X 适用面：`docs/adr/0004-tool-layer-six-tool-set.md:23` 的措辞是「工具返回」，面板 JSON 不经 executor，故 `total` 在 panel face 合法。ACR 三轮裁定：`Resolution 3 is correct`。
-- 陈旧注释纠正：`src/harness/aci/tools/registry.ts:183` 写「= 37 件名」，而 `tests/harness/aci/tools/registry.test.ts:211` 断言 **40**。以断言为准，注释随手更正。
+- 陈旧注释纠正：`src/harness/aci/tools/registry.ts:183` 写「= 37 件名」，而 `tests/harness/aci/tools/registry.test.ts:211` 断言 **40**。以断言为准，注释随手更正。**（已随 T5b 落地：现 `registry.ts:186-187` 按 append-only 逐项算数，T6 后该测断言 42。）**
+- 后续票（T6 实测根因，非本轮 Surface）：`tsconfig.json` 的 `exclude` 含 `tests`，`npm run typecheck` 因此**看不见测试**。后果不只是"测试无类型"——**src 删掉一个具名常量后，测试里那条 import 静默求值为 `undefined`，所有基于它的比较恒假**，测还是绿的。本票 6 红的真根因就是这个（`QUERY_TRACE_RESPONSE_CAP` 已删、`tests/traceserver/query-trace-core.test.ts` 仍 import 它），而不是断言值漂移。处置建议：加一条 `tsconfig.tests.json` + `npm run typecheck:tests`（只跑在 CI/pre-push，不进 pre-commit 以免拖慢），并先量一遍现存红量再决定收不收门。
 - 类名纠正：`TraceQueryValidationError`（`src/traceserver/query-trace-errors.ts`）自 T5b 起是**读侧共用**的校验错误——`query_trace` 与 `list_sessions` 两条轴都抛它，ACI 薄皮的 catch arm 按 `instanceof` 认它、SC20 按 `kind` 计数。类名里的 `QueryTrace` 因此是误名，改名（含 `query-trace-errors.ts` 文件名）单独开票：T5b 只做加注释，不中途动判别名与其消息字符串面。
 - 无 ADR reopen。`QUERY_TRACE_RESPONSE_CAP=4000` 退场是向 ADR-0006:22 收敛，不与任何已接受 ADR 冲突。
 
@@ -48,8 +49,8 @@ OVERALL: PASS — hand to writing-plans
 | `TraceQueryValidationError` | `validation` | 参数非法（既有 kind，T3 使用；去前缀在 T5） | T3 / T5 |
 | `TraceQueryRecordScanError` | `record_scan` | 扫描帽耗尽（既有，随下钻轴迁至 `get_record`） | T6 |
 | `TraceRecordNotFoundError` | `record_not_found` | `record_id` 无命中（现为静默 `records:[]`） | T6 |
-| `TraceWindowOverflowError` | `window_overflow` | caller 的 `count` 装不下该 part | T6 |
-| `TraceSessionNotFoundError` | `session_not_found` | 必填 `conversation_id` 在 `traceDir` 无对应文件 | T7 |
+| `TraceWindowOverflowError` | `window_overflow` | 调用方给的窗越出该 part 末尾（`from_char + count > part_chars`；判据见第 14 条） | T6 |
+| `TraceSessionNotFoundError` | `session_not_found` | 必填 `conversation_id` 在 `traceDir` 无对应文件 | T6（第 14 条：`get_record` 是第一个必填面）／T7 复用 |
 
 - **前缀归属（ACR 五轮补）：** 核 error 消息**不带**工具名，前缀由每张薄皮自己加。现状 `query-trace-errors.ts:9`/`:22` 硬编码 `query_trace: `，而 ACI 包装类 `QueryTraceValidationError` 自己又加一次（故有 `stripQueryTracePrefix`，`query-trace.ts:104-107`）。**去前缀的动作落在 T5**（那张票是第一个往两张皮上加工具的票，Surface 已含两张皮），不落 T3——否则 T5/T6 期间 `list_sessions` 的报错会顶着 `query_trace:` 这个错名字。核去前缀后 `stripQueryTracePrefix` 即死代码，同票删除；MCP 薄皮（`server.ts:52-60` 现直接吐 `error.message`）必须自行前缀本工具名。
 - `// EXIT:` 只标**真降级点**（blob 解引用失败、`query-trace-core.ts:333` 循环引用 fallback）。raise-site 不是 EXIT，别贴。
@@ -61,7 +62,7 @@ OVERALL: PASS — hand to writing-plans
 |---|---|---|---|---|
 | empty | 空目录 / 无 `.jsonl` → `[]` 不抛（`sessions.ts:113` 既有语义） | 0 行会话、空文件 | 空 `messages`、`messages_captured:false` | T2 现状基线 |
 | negative | `offset<0`、`limit=0` | 同（`parseInteger:200-219` 已守，扩到 `offset`） | `message_index=-1`、`from_char<0`、`count=0` | T3 |
-| overflow | 会话数 > 一页 → 只丢尾 + 续取坐标 | 单行超帽不得删字段（`compactRecord:387` 退场） | 单 part > `count` → `window_overflow`，**断言零部分字节泄漏** | T3 / T6 |
+| overflow | 会话数 > 一页 → 只丢尾 + 续取坐标 | 单行超帽不得删字段（`compactRecord:387` 退场） | 窗越出 part 末尾 → `window_overflow`，**断言零部分字节泄漏**（第 14 条） | T3 / T6 |
 | concurrent | 写侧 append 期间取索引 | `isConcurrencySafe:true`（`query-trace.ts:97`）下并发查同一文件 | 同记录两窗并发 | T4 |
 | exception | 非法目录 → 启动 exit≠0 | 非法参数 → `isError` 不崩；`session_not_found` 不崩 | blob `// EXIT:` 保留（假设 5） | T2 / T8 |
 
@@ -150,11 +151,38 @@ OVERALL: PASS — hand to writing-plans
 
     - **ACI 面的 schema 门前拒文案根本不含工具名**（实测 `src/harness/tools/executor.ts:316-321` 的 `formatAjvError` + `src/harness/tools/tool-result.ts:42` 的 `[validation_failed] ${message}` ⇒ caller 看到 `[validation_failed] invalid input at /limit: must be >= 1`）。这纠正了「第 10/11 条路径 (ii) 已经点了正确的工具名」的可推广读法——那句只对 **MCP/zod** 成立。该形状对全部现役工具同形，改它超出本轮 read-side Surface 且 blast radius = 41 件工具，因此**不收进本轮**；处置 = 把 SC16 的前缀主张**收窄到「经薄皮 catch arm 出出的错误」**（已改 `specs/trace-mcp-server.md` SC16），ACI 那条 `(SC16)` 测的注释同时写明它钉的是哪条路。是否给 executor 的 validation 文案加工具名，报 operator 另判。
     - **§序列化里「一行人类可读收窄提示」这项正面要求被撤**（同一处 spec §划界 同步）：契约 X 的 marker 按 ADR-0004:23 是 **executor** 自合成的，薄皮在 JSON 之后追加自由文本会让回显不再可解析、并与 executor 标记并成两处权威。tool face 因此只发「数组 + 回显坐标」，到底信号仍是隐式的 `length < limit`。spec:28 与 plan:42 此前互斥（一个要求、一个不提供），现两处一致。
-    - **满页与帽的实测**：摘要条目 ≈141 B（UUID id + `agent_version` 都在的夹具，一次性探针，跑完即删）⇒ 默认 100 条 ≈14.1 KB、上限 200 条 ≈28.3 KB > 20000。缺省页在帽内，故默认路径不受影响；帽与本轴的界一次对齐归 **T6**（同票落 MCP 面具名 backstop），数字已写进 `list-sessions-core.ts` 常量 doc。
+    - **满页与帽的实测**：摘要条目 ≈141 B（UUID id + `agent_version` 都在的夹具，一次性探针，跑完即删）⇒ 默认 100 条 ≈14.1 KB、上限 200 条 ≈28.3 KB > 20000。缺省页在帽内，故默认路径不受影响；帽与本轴的界一次对齐归 **T6**（同票落 MCP 面具名 backstop），数字已写进 `list-sessions-core.ts` 常量 doc。**订正（T6）：这个 ≈141 B/条在同一份真实目录上复现不出来（实测最宽 124 字符），单位也记错了——帽按 `text.length` 计，是字符不是字节。以第 14 条的复测值为准。**
     - **残留不实注释按同一标准一并改真**（都不改行为）：`listSessions` 「不读正文」/ 测头 "never reads file bodies"（它对每个文件做首 64 KiB pread）、`statSync` bullet 的「列表不读内容」、`parseInput` 的「界值都取自本文件的常量」（下界是三处字面量）、`registry.ts` 的「env 读取时机留在 factory 调用时，**不是** registry 构造时」（factory 就在构造期被调用，闭包只排除模块加载期）、`newestConversationId` doc 把并列规则指向 `http.test.ts`（真正 pin 在 `sessions.test.ts:418`）。`docs/trace-mcp-server.md:3` 的单工具声称（本轮变两件）本票顺手改真——它此前无票认领，T8 的 AC 也不覆盖这句。
     - **测力三处**：description 守卫加两条**短语级**正面锁（`/absent in two cases/`、`/says nothing about whether the session finished/`）与一条只禁 `absent … means … crash|running` 这一种句式的反向断言（改写文案须连测一起改，是有意的摩擦；它兜不住所有暗示法，注释已写明）；tie-break 用例的注释按实况收窄（本机 readdir 升序 ⇒ 缺 tie-break 与 mtime 反向都不可伪，唯一可伪的是名字降序比较式），并补一条**不依赖 readdir** 的码点 vs ICU 断言（并列 mtime 的 `B`/`a` 必须给 `["B","a"]`，`localeCompare` 会翻）；「不改动 `listSessions` 原序」用例原先 `raw.map(...).sort()` 把顺序信息抹掉、对所称意图不可伪，改为在排序调用**之后**断 `raw` 仍是 readdir 原序。两条新测都过了 mutation 探针：把比较式换成 `localeCompare` → 只有 tie 用例红；让 `listSessions` 自己排序 → 只有改写后的那条红。
     - **一条被反证的 finding（记此以免重复报）**：reviewer 称 SC18 只在 ACI 声明 `maximum` 时比对、下界漂移无人钉。实测 `minimum` 是**无条件**比对的（`tests/trace-mcp/server.test.ts:346`），且把 zod 的 `offset.min(0)` 改成 `min(1)` 后该测确实红 —— 一次性 mutation 探针，跑完 md5 复原。`if ("maximum" in aciField)` 那个守卫只管上界，是 zod 给 `.int()` 附送隐式 `Number.MAX_SAFE_INTEGER` 的合法 delta。
     - **本轮不做的两项，各有具名去处**：跨面 wire 断言（契约 X 禁用子串 + 键集合）目前只重复两处，按 rule of three 等 **T6/T7** 出现第三处再抽 helper；spec 里 tool face 「records 数组」应按轴实名、以及「回显调用方**给过**的坐标」实为**生效值**（缺省也物化），连同 SC15「只有一个 owner」在并列规则上已是两份比较式（合并即改面板缺省）这三处措辞，一并留给轮末 spec 同步。
+
+14. **T6 开工前把 `get_record` 的窗口契约钉成文本——原计划有三处按字面不可实现或单位不实，实现期本条自己写的一处尺寸声称又被实测反证，两类订正都在此，实现以本条为准。**
+
+    - **`window_overflow` 的触发（订正边界类表 overflow 格「单 part > `count`」那句）。** 照字面实现会让分页死掉：`count` 小于 part 即报错 ⇒ 任何大于默认窗的 part 永远读不到，`from_char` 续取形同虚设，part 超过 `GET_RECORD_MAX_COUNT` 时更是无解。生效契约 = **窗必须整个落在 part 内**：`from_char + count <= part_chars` 才成功，且**成功调用必恰好返回 `count` 个字符**（`count` 因此是真正的 read unit：要读多少**正文**可事前预算，响应大小不可，见下面 `count` 那条）。越界 ⇒ `TraceWindowOverflowError`，消息带 `part_chars` 与剩余量、**不回传任何 part 字节**——「零部分字节泄漏」针对的正是「顺手 `slice` 一页给你」这个自然错法。代价是末页须按 `part_chars - from_char` 收窄 `count`、多一次往返；换来的是**核这一层**永不产 JSON 之外的半截文本（要么恰好 `count` 字符，要么 `window_overflow`）。至于「这样本轴就永不越过后述 backstop」——该推论不成立，见下面 `count` 那条的尺寸订正。
+    - **单位是字符不是字节（订正「字节窗」这一轴名措辞）。** 读侧所有字符数都按 UTF-16 code unit 计（`.length` / `.slice`：`preview`、`TOOL_RESULT_PREVIEW_CAP`、executor 的 `OUTPUT_HARD_CAP` 全是），本轴沿用同一单位、不另立第二套权威。后果须写进 doc 并有一条夹具测钉住：窗边界可落在代理对中间，`JSON.stringify` 会转义出孤立代理码元。
+    - **`session_not_found` 的归属从 T7 前移到 T6（订正 typed-error 表该行）。** `get_record` 是第一个 `conversation_id` 必填的工具（假设 4 不许新面再引入「缺省 = 最近会话」），而「会话文件不存在」若复用 `record_not_found`，就把「会话查无」误标成「记录查无」——那条记录可能存在，只是根本没去看。故 T6 落 `TraceSessionNotFoundError`，T7 在 `query_trace` 复用。SC20 的五条 ACI 映射测里 T6 交 4 条（`validation` 已有，补 `record_scan` / `record_not_found` / `window_overflow` / `session_not_found`）。
+    - **一次调用只给一种东西：清单臂或窗臂，由 `part_index` 的有无区分。** 清单臂 = record 标量 + 每个可寻址 part 的 `{part_index, chars}`（`detail=tool_results` 另带 `tool_use_id`/`name`/`is_error`），无正文；窗臂 = record 标量 + **具名命中的 id 轴** + 回显生效坐标 `{detail, message_index, part_index, from_char, count}` + `part_chars` + `text`。不给信封加「哪种臂」的开关参数（与 §序列化 对 `toResponseEnvelope` 的 T7 裁定同形）。`detail=messages` 的窗臂必须同时给 `message_index`（缺 ⇒ `validation`，不静默当 0）；`detail=tool_results` 的 `part_index` 数的是投影后的结果序，`message_index` 传入即 `validation` 拒——**参与寻址的坐标必须被回答，不被使用的坐标必须被拒**，不允许静默忽略。
+    - **`count` 的界取自本 plan 的尺寸基准；「本轴永不触 backstop」被实测反证，撤。** `GET_RECORD_DEFAULT_COUNT = 400`（message p50=393）；`GET_RECORD_MAX_COUNT = 16_000` 的理由只剩 part 分布那一条（part p99=13,848 一窗装得下，part max=43,174 需 3 窗）。原先并置的第二句「16,000 + 回显与标量开销 < 20,000」在主仓 `trace/` 上量了两个独立的尺寸来源，两条都把它推翻：
+
+        - `record` 标量投影（`projectRecordBase`，已丢 `messages` / `raw`）序列化后 **p50=414 / p99=739 / p99.9=1143 / max=6025**（5,546 条记录；唯一越 4,000 的是 1 条 `subagent_stop`，其余 record_type 的 max 都 ≤813）。16,000 + 6,025 已 > 20,000。
+        - `text` 经 `JSON.stringify` 的转义膨胀比（27,148 条 ≥1,000 字符的真实正文）：**p50=1.052 / p99=1.206 / max=1.295** ⇒ 16,000 字符的窗光正文就能序列化到 20,720，与标量无关地越帽。
+
+      于是生效表述改成：**`count` 约束 read unit（正文字符数），不约束响应大小**，且**没有任何 `count` 上界能证明响应不越帽**（比率可任意接近 2：全引号正文）。越帽时截断仍只发生一层，在 face 上（MCP `applyTraceOutputBackstop` / ACI executor 帽，同值 20,000），核自己永不裁。`GET_RECORD_DESCRIPTION` 里「A window returns exactly count characters」是**核**的主张，SC7 不许文案出现字符帽表述，故不在文案里给这句加免责——越帽时的可见信号是 face 的 `...[truncated]` marker。
+    - **越帽时的可恢复性依赖响应键序，本票须有测（新增判据）。** `windowOf` 的返回对象把 `text` 放在**最后一个键**，face 的尾部切片因此只切正文，`record` / `matched_on` / `part_chars` / `from_char` / `count` 留在原位——调用方看到 marker 就能直接把 `count` 改小重发，不必重新寻址。这是顺序依赖，重排键序即失效 ⇒ 钉一条测（越帽夹具断 `Object.keys` 末位是 `text`，且经 backstop 后的字符串里坐标字段仍完整可见）。真实数据侧的量测（主仓最大 6 个会话全扫）：最大可寻址 part = 20,000 字符（会话 `8840c126…` / record `c745229a…` / `part_index=10`，标量投影 429 字符），取 `count=16000` 的窗序列化后 **17,372** 字符（该窗转义比率 1.05 ⇒ 未越帽），`Object.keys(...).at(-1) === "text"` 同批确认。所以越帽不是「满窗必然发生」而是**取决于窗内正文的转义密度**（1.05 不越、1.30 越），这既解释了为什么默认路径不受影响，也解释了为什么键序仍必须有测钉住。
+    - **backstop 与本轴一次对齐（第 13 条派给 T6 的活）。** 新文件 `src/traceserver/output-backstop.ts` 定义具名常量 `TRACE_OUTPUT_BACKSTOP = 20_000`，注释指名来源 `src/harness/tools/executor.ts:30`，**不** import `harness/`（假设 5）；配一条锁值断言（测里可比对 executor 侧字面值）。MCP 三件工具共用一个 backstop：`text.length > 20000` ⇒ 切片后加 marker，marker 计入预算、总长严格 ≤ 20000；**不**照搬 executor 的 8 轮收敛循环（clone-rate 成本，本面只需不变式）。`LIST_SESSIONS_MAX_LIMIT` 200 → 128（主仓 81 个真实会话复测：单条摘要 JSON 本体 71–124 字符，页面内连写每条再 +1 个条目间逗号 ⇒ 72–125，四字段可打印上限 ≈126；按页内口径 128 × 125 = 16 000 < 20000，200 × 125 = 25 000 越帽；第 13 条记的「≈141 B/条」在同一份目录上复现不出来，单位也应是字符不是字节，已按本处订正），description 与 SC18 diff 测同步改。
+    - **「删除 4000 红线」的落法（订正 T6「同票交付」那句）。** 退场的是 4000 这个数与由它引出的假称：两张皮 description 的「Results are capped at 4000 characters」、`tests/harness/aci/tools/query-trace.test.ts:135` 与 `tests/trace-mcp/server.test.ts:64` 两条小夹具上的恒真 `<= 4_000`（后者须改钉它真正想认证的东西）。但**行轴的整条记录收窄机制本票保留**，只把预算从 4000 改锚 `TRACE_OUTPUT_BACKSTOP`：单条投影行是 KB 级以下、上限 200 行的页却可能远超 20000，本票直接拆机制会把行轴变成无界，默认路径就会在两张皮上被 20000 从 JSON 中间切断。等 T7 重做行投影时再拆。
+    - **`findRecord` 的扫描归属**：`get_record` 与（T7 之前的）`query_trace` 都要按 `record_id` 找行 ⇒ 抽 `src/traceserver/record-lookup.ts` 一处实现，`record_scan` 也从这里抛，T7 删 `query_trace` 的调用面。命中的 id 轴在结果里具名（`matched_on`），10 字段 OR 与「`turn_id` 既是筛选又是 id」这层含糊就不再要调用方猜。
+
+15. **T6 收尾两轴 review = Standards 0 High / 5 Medium / 5 Low、Spec 1 High / 1 Medium / 5 Low；High + 两条 Medium 在本 commit 前处置完，其余记账。** 逐条：
+    - **High（已改）**：`tests/session-api/ensure-deps-aci-tools.test.ts` 的 `EXPECTED_TOOLS` 没跟上 append —— 第 1 条列的 8 处下游字面量真的一处都不能省。全量因此从 5 文件 / 32 例涨到 7 / 34；补 `get_record` 后回到 5 / 32 且逐文件同构。
+    - **另 1 例红不记在本票账上**：`tests/cli/register-shutdown.test.ts` 真实 SIGTERM 二次强杀在全量并行下红，单跑 7/7 绿（`EXIT 0`）⇒ 判为负载时序 flaky；本票未触 `src/cli`。
+    - **Medium（已改，docs 假称）**：`docs/trace-mcp-server.md:5` 新写那句把 `query_trace` 说成 "paged by row"，而工具面今日没有行 `offset`（那是 T7 AC）。改成本票真交付的形状「filtered, one page per `limit`」。
+    - **Low（已改，单位口径）**：主仓 81 会话复测 = entry JSON 本体 **71–124 字符**、页内连写每条再 +1 逗号 ⇒ **72–125**。src 文档与测试注释此前各写一个数又不写口径，看着像互相反证（reviewer 据此报了一条）。三处现都写明口径，预算算术改按页内口径（128 × 125 = 16 000 < 20 000，200 × 125 = 25 000 越帽）。
+    - **Low（已改，死数字）**：`tests/traceserver/query-trace-core.test.ts` 注释写「measured ≈ 24,411 characters」，实测 24,362。该行下方本就有动态断言比对 `TRACE_OUTPUT_BACKSTOP`，注释里的二手数字只会在漂移时变假话 ⇒ 删数留断言。
+    - **未处置的 Standards Medium（去处 = T7 或单独 refactor 票，本票不顺手做）**：① `applyTraceOutputBackstop` 与 `truncatePreview` 同形重复、`"...[truncated]"` 三份；② `get-record-core` 重复 `query-trace-core` 的输入守卫（去处 `src/traceserver/input-guards.ts`，T7 一并折 `http.ts`）；③ 核直接挖 `row["messages"]`，而「哪些键是 payload」已归 `record-lookup.ts`；④ `(match, parsed, addressable)` 三参数团；⑤ `manifestOf` 不给 part 总数 ⇒ 清单臂若被尾切，调用方无从知道掉了条目，与 `GET_RECORD_DESCRIPTION` 的「learn a part's length first」相抵（窗臂不受影响，本票按 Medium 记账）。
+    - **未处置的 Low**：`src/traceserver/index.ts` 两个暂无消费者的 barrel 导出、`src/harness/aci/tools/get-record.ts:13-15` 注释把只剩一条的 `io_error` 写成「两种」、`tests/trace-mcp/server.test.ts:256-261` 两条在该夹具上永不生效的断言、`tests/traceserver/get-record-core.test.ts` 一处注释声称上下界都测而实只测下界。删/改断言按 `.qoder/rules/test.md` 要单独判据，不进收尾 commit。
+    - **SC18 提前交付**：`server.test.ts` 的 `PARAMETER_PLANE` 三件表本属 T7 判据（第 12 条），T6 已落地 ⇒ 保留，T7 不得重复领功。
 
 ## Tasks (ordered by dependency)
 
@@ -199,11 +227,11 @@ OVERALL: PASS — hand to writing-plans
 6. **`get_record` 窗口轴上两张皮（并在此票终结字符帽）** — tag: `[implementation]`
    - **Inherits:** ADR-0004:34（无状态分页优于闭包游标，因 `isConcurrencySafe:true`）；ADR-0036 blob 解引用在投影前；`project-tool-results.ts` 的 `// EXIT:` 降级语义不变；ADR-0006 D6 `:22`「工具级管读多少（语义单位：行/条/字符），executor 管输出不超多少（字符兜底）」；ADR-0006:29（低于 executor 又静默裁的帽 = 双层截断，已正式推翻）。窗单位下移到 part + 字符切片的依据：单 message p99=16,815 > 任何中等帽。
    - **Surface:** `src/traceserver` + `src/harness/aci`（41→42）+ `src/trace-mcp`
-   - **Acceptance:** `get_record(conversation_id, record_id, detail, message_index, part_index, from_char, count)`：窗坐标全由调用方给且原样回显；装不下抛 `TraceWindowOverflowError`（断言零部分字节泄漏）；无命中抛 `TraceRecordNotFoundError`（取代现状静默 `records:[]`）；`count` 默认量级取 message p50 附近且可续取 `from_char`；命中的 id 轴在结果里具名（现状 `RECORD_ID_KEYS:24-35` 是 10 字段 OR，`turn_id` 既是筛选又是 id）。
-   - **同票交付：** T3 保留的 4000 红线在此删除（去处已在，不是抛进真空）；MCP 薄皮新增**具名** backstop，值 = `src/harness/tools/executor.ts:30` 的 `OUTPUT_HARD_CAP` 20000（同值 → 不犯 ADR-0006:29）；ACI 面不设工具级帽，由 executor 兜；`server.ts:27` 那句「capped at 4000 characters」随 SSOT 文案改为真值。
+   - **Acceptance:** `get_record(conversation_id, record_id, detail, message_index, part_index, from_char, count)`：窗坐标全由调用方给且原样回显；装不下抛 `TraceWindowOverflowError`（断言零部分字节泄漏）；无命中抛 `TraceRecordNotFoundError`（取代现状静默 `records:[]`）；`count` 默认量级取 message p50 附近且可续取 `from_char`；命中的 id 轴在结果里具名（现状 `RECORD_ID_KEYS:24-35` 是 10 字段 OR，`turn_id` 既是筛选又是 id）。**窗口触发、单位、两臂形状、`count` 的界以第 14 条为准。**
+   - **同票交付：** T3 保留的 4000 红线在此删除（去处已在，不是抛进真空；**删除的落法见第 14 条**——退场的是数字与假称，行轴的整条记录收窄机制改锚 backstop 后留到 T7）；MCP 薄皮新增**具名** backstop，值 = `src/harness/tools/executor.ts:30` 的 `OUTPUT_HARD_CAP` 20000（同值 → 不犯 ADR-0006:29）；ACI 面不设工具级帽，由 executor 兜；`server.ts:27` 那句「capped at 4000 characters」随 SSOT 文案改为真值。
    - **必须补 ACI catch arm：** `src/harness/aci/tools/query-trace.ts:47-60` 今天只映射 2 个 kind、其余 `throw error` 原样抛；而 MCP 薄皮的兜底 catch（`src/trace-mcp/server.ts:52`）会把它伪装成已妥善处理。新增 `record_scan`/`record_not_found`/`window_overflow` 三 kind 各须一条 ACI 映射测（→ `ToolExecutionError` 或既有类型），否则 ACI 面泄漏裸 Error。
    - registry 后果同 T5 的字面量清单（现为**五处**）。
-   - Status: [ ] pending
+   - Status: [x] done — 本 commit。`get_record` 上两张皮：新核 `src/traceserver/get-record-core.ts`（清单臂 / 窗臂由 `part_index` 有无区分，`text` 排最后一个键）、`record-lookup.ts`（`findRecord` 归属，`record_scan` 由此抛，`matched_on` 具名命中轴）、`output-backstop.ts`（`TRACE_OUTPUT_BACKSTOP = 20_000`，不 import `harness/`）；ACI 皮 `src/harness/aci/tools/get-record.ts`（五种 `ToolExecutionError` 各带 `get_record: ` 前缀 + `io_error`）与 registry 41→42 尾部追加；MCP 皮第三件 `registerTool`，两臂都过 backstop。字符帽在本票退场：`QUERY_TRACE_RESPONSE_CAP` 删除、行轴收窄改锚 `TRACE_OUTPUT_BACKSTOP`、两张皮 description 单源且不含字符帽表述。`LIST_SESSIONS_MAX_LIMIT` 200→128 一并校准。收尾两轴 review 的处置与遗留见第 15 条。
    - [blocks: T5]
 
 7. **`query_trace` 瘦身为行筛选 + 行分页** — tag: `[implementation]`

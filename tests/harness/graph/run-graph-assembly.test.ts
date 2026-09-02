@@ -99,8 +99,8 @@ describe("createGraphAssembly — per-round 装配快照", () => {
 // ── 2. 条件装配 ───────────────────────────────────────────────────────────
 
 describe("run_graph — ACI 条件装配（Gate 3 镜像过滤）", () => {
-  it("ACI_TOOLSET_NAMES 在 run_graph / query_trace 之后 append-only 追加 worktree 3 件 + 10 件符号查询 + 5 件符号改 + 1 件目录轴读（不重排既有件）", () => {
-    // 长度 41;实际 idx（基线实测）:
+  it("ACI_TOOLSET_NAMES 在 run_graph / query_trace 之后 append-only 追加 worktree 3 件 + 10 件符号查询 + 5 件符号改 + 1 件目录轴读 + 1 件内容轴读（不重排既有件）", () => {
+    // 长度 42;实际 idx（基线实测）:
     //   idx 20 = run_graph
     //   idx 21 = query_trace
     //   idx 22 = create-task-worktree
@@ -110,7 +110,8 @@ describe("run_graph — ACI 条件装配（Gate 3 镜像过滤）", () => {
     //   ...
     //   idx 35-39 = 5 件符号改(rename / replace / insert_before /
     //               insert_after / safe_delete)
-    //   idx 40 = list_sessions（T5b 目录轴读工具，末位）
+    //   idx 40 = list_sessions（T5b 目录轴读工具）
+    //   idx 41 = get_record（T6 内容轴读工具，末位）
     expect(ACI_TOOLSET_NAMES[20]).toBe("run_graph");
     expect(ACI_TOOLSET_NAMES[21]).toBe("query_trace");
     expect(ACI_TOOLSET_NAMES[22]).toBe("create-task-worktree");
@@ -118,9 +119,8 @@ describe("run_graph — ACI 条件装配（Gate 3 镜像过滤）", () => {
     expect(ACI_TOOLSET_NAMES[24]).toBe("exit-task-worktree");
     expect(ACI_TOOLSET_NAMES[25]).toBe("find_symbol");
     expect(ACI_TOOLSET_NAMES[35]).toBe("rename_symbol");
-    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 1]).toBe(
-      "list_sessions"
-    );
+    expect(ACI_TOOLSET_NAMES.at(-2)).toBe("list_sessions");
+    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 1]).toBe("get_record");
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
       "read_file",
@@ -153,7 +153,7 @@ describe("run_graph — ACI 条件装配（Gate 3 镜像过滤）", () => {
     expect(reg.inner.list().map((d) => d.name)).not.toContain("run_graph");
   });
 
-  it("manager + graphAssembly 同时在场 → run_graph 入注册表（query_trace + 10 件符号查询 + 5 件符号改 + list_sessions 在末位）", () => {
+  it("manager + graphAssembly 同时在场 → run_graph 入注册表（query_trace + 10 件符号查询 + 5 件符号改 + 读侧目录轴 / 内容轴在末两位）", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -163,8 +163,10 @@ describe("run_graph — ACI 条件装配（Gate 3 镜像过滤）", () => {
     });
     const names = reg.inner.list().map((d) => d.name);
     expect(names).toContain("run_graph");
-    // 末位 = 常驻读侧目录轴工具（T5b append-only）；run_graph 位置不受影响。
-    expect(names[names.length - 1]).toBe("list_sessions");
+    // 末两位 = 常驻读侧工具（T5b 目录轴、T6 内容轴，按 append 顺序）；
+    // run_graph 位置不受影响。
+    expect(names.at(-2)).toBe("list_sessions");
+    expect(names[names.length - 1]).toBe("get_record");
     expect(reg.catalog.get("run_graph")).toBeDefined();
   });
 });

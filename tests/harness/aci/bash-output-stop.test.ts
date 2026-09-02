@@ -199,7 +199,7 @@ const fakeWorktreeExit = (() =>
     mainRepoRoot: "/tmp/fake-main",
   })) as unknown as WorktreeExitToolDeps["worktreeExit"];
 
-/** 全条件装配 opts（五条件键 + backgroundManager + graph overlay + worktree 三缝）→ 41 件全量。 */
+/** 全条件装配 opts（五条件键 + backgroundManager + graph overlay + worktree 三缝）→ 42 件全量。 */
 function fullAssemblyOpts() {
   return {
     env: makeWebEnv(),
@@ -453,18 +453,19 @@ describe("bash_output 真实物理截断（real manager）", () => {
 // ── 5. 装配一致性（registry + Gate 3 镜像过滤）───────────────────────────────
 
 describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
-  it("全条件装配（含 backgroundManager + graph overlay）→ 41 件，顺序 = ACI_TOOLSET_NAMES", () => {
+  it("全条件装配（含 backgroundManager + graph overlay）→ 42 件，顺序 = ACI_TOOLSET_NAMES", () => {
     const reg = createDefaultAciRegistry(fullAssemblyOpts());
     const names = reg.inner.list().map((d) => d.name);
-    assert.equal(names.length, 41);
+    assert.equal(names.length, 42);
     assert.deepEqual(names, [...ACI_TOOLSET_NAMES]);
     assert.ok(reg.catalog.get("bash_output"));
     assert.ok(reg.catalog.get("bash_stop"));
   });
 
-  it("backgroundManager 缺席 → bash_output / bash_stop 排除（35 件），bash 保留（T3 常驻）", () => {
+  it("backgroundManager 缺席 → bash_output / bash_stop 排除（36 件），bash 保留（T3 常驻）", () => {
     // 不传 graphAssembly → run_graph 同步缺席；不传 worktree 三缝 → 3 件缺席；
-    // list_sessions 无装配条件仍在场。41 - 2(bg) - 1(run_graph) - 3(worktree) = 35。
+    // 读侧三轴（query_trace / list_sessions / get_record）无装配条件仍在场。
+    // 42 - 2(bg) - 1(run_graph) - 3(worktree) = 36。
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -475,7 +476,7 @@ describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
       mcpManager: fakeMcpManager,
     });
     const names = reg.inner.list().map((d) => d.name);
-    assert.equal(names.length, 35);
+    assert.equal(names.length, 36);
     assert.equal(names.includes("bash_output"), false);
     assert.equal(names.includes("bash_stop"), false);
     // bash 常驻：backgroundManager 缺席时参数级能力由 handler 运行时决策。

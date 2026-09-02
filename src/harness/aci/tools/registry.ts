@@ -50,6 +50,7 @@ import type { SkillCatalog } from "../../skill/catalog.js";
 import { createTodoWriteTool } from "./todo-write.js";
 import { createQueryTraceTool } from "./query-trace.js";
 import { createListSessionsTool } from "./list-sessions.js";
+import { createGetRecordTool } from "./get-record.js";
 import {
   createCreateTaskWorktreeTool,
   type CreateTaskWorktreeProvisionFn,
@@ -182,7 +183,8 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // spec symbol-primary-aci.md T5 + ADR-0037 + #803 T9 的 tool surface 加法：
   // 8 基线 + memory_* (2 件) + tool_search + skill 2 + subagent 2 + todo +
   // mcp 2 + bg 2 + run_graph + query_trace + 10 符号查询 + 5 符号改 +
-  // worktree 3 = 40 件名，T5b 目录轴再 append 1 件 = 41 件名。（旧注释漏算
+  // worktree 3 = 40 件名，T5b 目录轴再 append 1 件 = 41 件名，T6 内容轴再
+  // append 1 件 = 42 件名。（旧注释漏算
   // worktree 三件而写 37，与 tests/harness/aci/tools/registry.test.ts 的长度
   // 断言不符，按断言更正；本表长度以数组为 source of truth。）
   "rename_symbol", // 全项目按符号改名（textDocument/rename + applyEdit）
@@ -199,6 +201,13 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // 展开之后）。另有一批下游测按下标锁中段（run-graph-assembly.test.ts 的
   // idx 20-23），插在它们之前即红 —— 尾部追加才是安全改法。
   "list_sessions",
+  // plan `trace-mcp-read-side-split` T6 append-only：41→42。trace 读侧的**内容轴**
+  // （一条记录里的一段字符窗），与目录轴、行轴正交；常驻装配（与 query_trace /
+  // list_sessions 同门，无 host 缝可条件化）。
+  //
+  // 仍然只能追加在尾部：中段插入会撞上下游按下标锁定的断言（
+  // run-graph-assembly.test.ts 的 idx 20-23 等），尾部才是 append-only 契约。
+  "get_record",
 ] as const);
 
 /**
@@ -622,10 +631,13 @@ export function createDefaultAciRegistry(
     // textDocument/didChange 与 edit_file 同链路。键顺序必须与
     // ACI_TOOLSET_NAMES 末尾 5 项逐项一致（Gate 3）。
     ...symbolMutateTools(lspCtx, onEdit),
-    // plan T5b：本键必须是字面量最后一个键 —— Gate 3 比对 factories 键顺序与
+    // plan T5b：本键曾是字面量最后一个键 —— Gate 3 比对 factories 键顺序与
     // ACI_TOOLSET_NAMES 顺序（名单尾部同项）。目录经 traceReadDir() 与
     // query_trace 同源，列出来的会话才查得到。
     list_sessions: () => createListSessionsTool(traceReadDir()),
+    // plan T6：现在本键是字面量最后一个键（同上 Gate 3）。三轴共用 traceReadDir()
+    // 解析出的目录，get_record 点名的 conversation_id 才是 list_sessions 给过的那个。
+    get_record: () => createGetRecordTool(traceReadDir()),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。

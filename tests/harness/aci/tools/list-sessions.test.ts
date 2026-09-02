@@ -211,15 +211,22 @@ describe("list_sessions ACI tool", () => {
     );
   });
 
-  it("is assembled last in the registry, and its schema bounds are enforced", () => {
+  it("is assembled unconditionally right before the content axis, and its schema bounds are enforced", () => {
     const reg = createDefaultAciRegistry({
       env: { web: { searchUrl: undefined, proxy: undefined } },
       sandboxRoot: makeTraceDir(),
     });
     const validator = reg.inner.getValidator("list_sessions");
 
-    assert.equal(ACI_TOOLSET_NAMES.at(-1), "list_sessions");
-    assert.equal(reg.inner.list().at(-1)?.name, "list_sessions");
+    // T5b 追加 list_sessions 时它是 SSOT 末位；T6 又往末尾 append 了内容轴读
+    // 工具 get_record（append-only，不重排已有成员）。所以「末位」这句话不再
+    // 是这条测想认证的东西——改钉仍然成立且更强的半句：目录轴读工具无装配条件
+    // 因此常驻，并且紧邻内容轴之前。三轴顺序（目录 → 行 → 内容）在 SSOT 里
+    // 全靠 append 顺序体现，后来者不能悄悄把它打乱。
+    assert.equal(ACI_TOOLSET_NAMES.at(-2), "list_sessions");
+    assert.equal(ACI_TOOLSET_NAMES.at(-1), "get_record");
+    assert.equal(reg.inner.list().at(-2)?.name, "list_sessions");
+    assert.equal(reg.inner.list().at(-1)?.name, "get_record");
     assert.equal(reg.catalog.get("list_sessions")?.name, "list_sessions");
     assert.ok(validator, "the registry must compile a validator for the tool");
     // 界真的由 ajv 执行，不只是写在 schema 里：这是 ACI 面拒 `limit: 0` 的那道门。
