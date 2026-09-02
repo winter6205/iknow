@@ -9,6 +9,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +30,12 @@ const fixtureServer = join(
   "mcp-server",
   "server.ts"
 );
+
+// Node < 22.18 has no TypeScript stripping, so the fixture entry needs an
+// explicit tsx loader. Resolve it from the repo (not the child's cwd): the
+// stdio child runs with cwd = temp worktree, where bare "tsx" is unresolvable.
+const tsxLoader = createRequire(join(repoRoot, "package.json")).resolve("tsx");
+const fixtureArgs = ["--import", tsxLoader, fixtureServer];
 
 const tmpRoots: string[] = [];
 
@@ -82,7 +89,7 @@ describe("smoke — dual-root MCP after rebind", () => {
           rebind_echo: {
             type: "stdio",
             command: process.execPath,
-            args: [fixtureServer],
+            args: fixtureArgs,
           },
         },
       }),
@@ -119,7 +126,7 @@ describe("smoke — dual-root MCP after rebind", () => {
     expect(cfg.servers[0]?.source).toBe("project");
     expect(cfg.servers[0]?.kind).toBe("stdio");
     if (cfg.servers[0]?.kind === "stdio") {
-      expect(cfg.servers[0].entry.args).toEqual([fixtureServer]);
+      expect(cfg.servers[0].entry.args).toEqual(fixtureArgs);
     }
 
     // 3) Stdio child cwd === worktree (T4 print-cwd relative script pattern).
