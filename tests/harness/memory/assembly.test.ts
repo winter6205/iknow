@@ -77,7 +77,15 @@ const memoryEntry = (
 });
 
 function ctx(overrides?: Partial<AssemblyContext>): AssemblyContext {
-  return { cwd, userHome, memoryDir, ...overrides };
+  // AssemblyContext requires projectIdentityRoot (#861/#862 baseline debt —
+  // see plan trace-mcp-read-side-split item 6). cwd doubles as the project
+  // identity root because the fixture has only one project root.
+  return {
+    projectIdentityRoot: cwd,
+    userHome,
+    memoryDir,
+    ...overrides,
+  };
 }
 
 // -- three-layer assembly order ---------------------------------------------
@@ -141,14 +149,20 @@ describe("assembleSystemPrompt", () => {
   });
 
   it("orders rules by filename asc within each layer", async () => {
+    // #841 T6: parent opener renders the rules index as a manifest (paths
+    // only), so the ordering assertion looks for the file paths themselves,
+    // not for the rule body text. The contract — `aaa.md` before `zzz.md` —
+    // is preserved either way.
     await mkdirP(join(cwd, ".iknow", "rules"));
     await write(join(cwd, ".iknow", "rules", "zzz.md"), "LATE");
     await write(join(cwd, ".iknow", "rules", "aaa.md"), "EARLY");
 
     const out = await assembleSystemPrompt(ctx());
-    assert.ok(out.indexOf("EARLY") !== -1);
-    assert.ok(out.indexOf("LATE") !== -1);
-    assert.ok(out.indexOf("EARLY") < out.indexOf("LATE"));
+    const earlyPath = join(cwd, ".iknow", "rules", "aaa.md");
+    const latePath = join(cwd, ".iknow", "rules", "zzz.md");
+    assert.ok(out.includes(earlyPath));
+    assert.ok(out.includes(latePath));
+    assert.ok(out.indexOf(earlyPath) < out.indexOf(latePath));
   });
 
   // -- existence pointer -----------------------------------------------------
@@ -281,7 +295,13 @@ describe("assembleSystemPrompt", () => {
     const out = await assembleSystemPrompt(ctx({ workspaceRoot }));
 
     assert.ok(out.includes("USER AGENTS"), "user AGENTS.md from userHome");
-    assert.ok(out.includes("USER RULE"), "user rules from userHome");
+    // #841 T6: rule bodies are not in the parent opener anymore — assert on
+    // the user-rule path appearing in the manifest instead, then on the WS
+    // rule path staying absent.
+    assert.ok(
+      out.includes(join(userHome, ".iknow", "rules", "user1.md")),
+      "user rule path listed under userHome"
+    );
     assert.ok(out.includes("PROJECT AGENTS"), "project layer still from cwd");
     assert.ok(out.includes(PRIORITY_DECLARATION), "priority declaration kept");
     assert.ok(
@@ -289,7 +309,7 @@ describe("assembleSystemPrompt", () => {
       "workspaceRoot/.iknow/AGENTS.md is not a user layer"
     );
     assert.ok(
-      !out.includes("WS RULE"),
+      !out.includes(join(workspaceRoot, ".iknow", "rules", "ws1.md")),
       "workspaceRoot/.iknow/rules is not a user layer"
     );
     assert.ok(

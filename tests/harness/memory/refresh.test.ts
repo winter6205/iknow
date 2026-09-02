@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +16,11 @@ vi.mock("../../../src/harness/memory/assembly.ts", async (importOriginal) => {
 });
 import { assembleSystemPrompt as spiedAssemble } from "../../../src/harness/memory/assembly.ts";
 
+// vi.mock above wraps `assembleSystemPrompt` in `vi.fn(actual...)`; the static
+// import below still sees the un-wrapped signature, so cast the spy to a Mock
+// for `mockRejectedValueOnce` / `mockResolvedValueOnce` to typecheck.
+const mockedAssemble = spiedAssemble as unknown as Mock<typeof spiedAssemble>;
+
 const roots: string[] = [];
 
 async function makeContext() {
@@ -25,7 +30,10 @@ async function makeContext() {
   const userHome = join(root, "home");
   const memoryDir = join(root, "memory");
   await Promise.all([mkdir(cwd), mkdir(userHome), mkdir(memoryDir)]);
-  return { cwd, userHome, memoryDir };
+  // AssemblyContext requires projectIdentityRoot (#861/#862 baseline debt — see
+  // plan trace-mcp-read-side-split item 6). cwd doubles as the project identity
+  // root here because the fixture has only one project root.
+  return { cwd, projectIdentityRoot: cwd, userHome, memoryDir };
 }
 
 async function tick(): Promise<void> {
@@ -70,6 +78,10 @@ describe("createSystemResolver", () => {
   });
 
   it("tracks rule files independently", async () => {
+    // #841 T6: parent session opener renders the rules index as a manifest
+    // (paths only), not bodies. The refresh contract we still own is "a
+    // rule's mtime change triggers re-discovery" — assert on the path
+    // appearing in the manifest instead of on rule text.
     const ctx = await makeContext();
     const projectRules = join(ctx.cwd, ".iknow", "rules");
     const userRules = join(ctx.userHome, ".iknow", "rules");
@@ -88,8 +100,8 @@ describe("createSystemResolver", () => {
     await tick();
     await writeFile(userRule, "user-rule-v2");
     const refreshed = await resolver();
-    expect(refreshed).toContain("user-rule-v2");
-    expect(refreshed).toContain("project-rule-v1");
+    expect(refreshed).toContain(userRule);
+    expect(refreshed).toContain(projectRule);
   });
 
   it("treats a deleted tracked file as absent without throwing", async () => {
@@ -164,7 +176,7 @@ describe("createSystemResolver", () => {
     const ctx = await makeContext();
     await writeFile(join(ctx.cwd, "AGENTS.md"), "retry-v1");
     // 第一次装配失败 + 第二次成功
-    spiedAssemble
+    mockedAssemble
       .mockRejectedValueOnce(new Error("transient failure"))
       .mockResolvedValueOnce("retry-success-content");
     const resolver = createSystemResolver(ctx);

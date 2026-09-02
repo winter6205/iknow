@@ -38,6 +38,7 @@ async function makeWorkDir(): Promise<string> {
 function baseCtx(): AssemblyContext {
   return {
     cwd: process.cwd(),
+    projectIdentityRoot: process.cwd(),
     userHome: workDir,
     bootstrapActive: false,
     memoryEnabled: false,
@@ -163,9 +164,11 @@ describe("mcpOverviewSegment 渲染（装配层纯函数）", () => {
 
 describe("assembleIdentityContext MCP 概览段注入", () => {
   it("不触碰 IKNOW_ASSEMBLY_ORDER（LOCKED 顺序数组内容不变）", () => {
+    // IKNOW-symbol-primary T1: "usage" 段在 soul 与 user_profile 之间。
     expect([...IKNOW_ASSEMBLY_ORDER]).toEqual([
       "identity",
       "soul",
+      "usage",
       "user_profile",
       "bootstrap",
       "memory_layer",
@@ -252,6 +255,7 @@ describe("createIknowSystemResolver opts.mcp 透传", () => {
     workDir = await makeWorkDir();
     const withMcp = createIknowSystemResolver({
       cwd: process.cwd(),
+      projectIdentityRoot: process.cwd(),
       userHome: workDir,
       surface: "chat",
       memoryEnabled: false,
@@ -267,6 +271,7 @@ describe("createIknowSystemResolver opts.mcp 透传", () => {
 
     const withoutMcp = createIknowSystemResolver({
       cwd: process.cwd(),
+      projectIdentityRoot: process.cwd(),
       userHome: workDir,
       surface: "chat",
       memoryEnabled: false,
