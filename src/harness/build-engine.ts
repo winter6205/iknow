@@ -743,6 +743,11 @@ export async function buildHarnessEngine(
   reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
+    // T5 (plans/worktree-live-task-root.md §6): 把活 taskRoot cell 透传给
+    // write_file / edit_file 工厂。门禁未翻 ⇒ cell 初值 = sandboxRoot,
+    // 行为逐字节同今日；handler 内 cell.read() 取 snapshot。stable 根（D3）
+    // 不走这条缝，仍由各工厂按 opts 接各自的稳定根。
+    liveTaskRoot,
     // T3:只读放行项目身份文件所在的主仓（ADR-0037 §1 允许只读主仓）。registry
     // 只把它透给 read_file —— bash / write / edit 拿不到，写不进主仓。
     //

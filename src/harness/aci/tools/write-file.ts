@@ -14,6 +14,7 @@ import { dirname, relative, resolve } from "node:path";
 import { ToolExecutionError } from "../../errors.js";
 import type { AciToolDef } from "../types.js";
 import { asToolExecutionError, resolveWithinRoot } from "./helpers.js";
+import type { LiveTaskRoot } from "../../session-roots.js";
 
 const TOOL_NAME = "write_file";
 const ALLOWED_KEYS = new Set(["path", "content", "create_directories"]);
@@ -67,18 +68,38 @@ function displayPath(root: string, target: string): string {
 }
 
 /**
+ * Snapshot the live root at handler invocation time. Accepts either a literal
+ * path (legacy / forward-compat shape — tests and other one-shot callers pass
+ * `string`) or a `LiveTaskRoot` cell (T5: registry threads the cell so that
+ * `worktree rebind` in the same run reaches this handler). The returned
+ * `string` is the snapshot value — D2 forbids reading the cell more than once
+ * per handler call, so callers must reuse the snapshot for both resolve and
+ * write.
+ */
+function readRoot(root: string | LiveTaskRoot): string {
+  return typeof root === "string" ? root : root.read();
+}
+
+/**
  * Create or wholly overwrite a file below `root`.
  *
  * `create_directories` defaults to true and only controls parent-directory
  * creation; it never changes the whole-file replacement semantics.
+ *
+ * T5 (plans/worktree-live-task-root.md §6): `root` may be a `LiveTaskRoot`
+ * cell; the handler reads the snapshot at call time, so `worktree rebind`
+ * in the same run lands new writes in the rebound tree. `string` callers
+ * (legacy tests, one-shot consumers) keep byte-identical behavior.
  */
-export function createWriteFileTool(root: string): AciToolDef {
+export function createWriteFileTool(root: string | LiveTaskRoot): AciToolDef {
   const handler = async (input: unknown): Promise<unknown> => {
     const params = parseInput(input);
+    // T5 D2: per-call snapshot. resolve 与写入必须共用同一个根值。
+    const rootAtCall = readRoot(root);
 
     let target: string;
     try {
-      target = await resolveWithinRoot(root, params.path);
+      target = await resolveWithinRoot(rootAtCall, params.path);
     } catch (error) {
       throw asToolExecutionError("[write_file] cannot resolve path", error);
     }
@@ -132,7 +153,7 @@ export function createWriteFileTool(root: string): AciToolDef {
       throw asToolExecutionError(`[write_file] cannot write ${target}`, error);
     }
 
-    const pathForMessage = displayPath(root, target);
+    const pathForMessage = displayPath(rootAtCall, target);
     return {
       output: `[write_file] wrote ${Buffer.byteLength(params.content, "utf8")} bytes to ${pathForMessage}`,
       meta: { oldContent, newContent: params.content },

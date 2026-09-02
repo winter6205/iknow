@@ -51,6 +51,7 @@ import { createTodoWriteTool } from "./todo-write.js";
 import { createQueryTraceTool } from "./query-trace.js";
 import { createListSessionsTool } from "./list-sessions.js";
 import { createGetRecordTool } from "./get-record.js";
+import type { LiveTaskRoot } from "../../session-roots.js";
 import {
   createCreateTaskWorktreeTool,
   type CreateTaskWorktreeProvisionFn,
@@ -311,6 +312,16 @@ export interface CreateDefaultAciRegistryOptions {
    * the Gate 3 mirror filter.
    */
   readonly worktreeExit?: WorktreeExitToolDeps["worktreeExit"];
+  /**
+   * T5 (plans/worktree-live-task-root.md §6): live `taskRoot` cell. When
+   * provided, `write_file` / `edit_file` factories receive the cell and the
+   * handler reads the snapshot at call time — `worktree rebind` in the same
+   * run reaches them. When absent (legacy / one-shot callers), factories
+   * receive `sandboxRoot` as a string — existing tests and behavior stay
+   * byte-identical. The cell only carries the live `taskRoot` (D3: stable
+   * roots stay frozen), so this field is intentionally narrow.
+   */
+  readonly liveTaskRoot?: LiveTaskRoot;
 }
 
 /**
@@ -474,8 +485,12 @@ export function createDefaultAciRegistry(
       }),
     grep: () => createGrepTool(sandboxRoot),
     glob: () => createGlobTool(sandboxRoot),
-    edit_file: () => createEditFileTool(sandboxRoot, { onEdit }),
-    write_file: () => createWriteFileTool(sandboxRoot),
+    // T5:write_file / edit_file 读活 taskRoot。门禁未翻 ⇒ cell 初值 =
+    // sandboxRoot，逐字节同今日；handler 内 cell.read() 一次取得 snapshot，
+    // 同 handler 内 resolve 与写入共用该值（D2）。
+    edit_file: () =>
+      createEditFileTool(opts.liveTaskRoot ?? sandboxRoot, { onEdit }),
+    write_file: () => createWriteFileTool(opts.liveTaskRoot ?? sandboxRoot),
     web_fetch: () => createWebFetchTool({ proxyUrl }),
     // #826 T4: 把 searchBackend + 三个 vendor key 透传给 web_search。
     // env loader 已把 EXA_API_KEY / TAVILY_API_KEY / BRAVE_API_KEY 经

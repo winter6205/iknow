@@ -13,6 +13,11 @@ import { join } from "node:path";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import { createEditFileTool } from "../../../../src/harness/aci/tools/edit-file.ts";
+import {
+  createLiveTaskRoot,
+  writeLiveTaskRoot,
+} from "../../../../src/harness/session-roots.ts";
+import type { LiveTaskRoot } from "../../../../src/harness/session-roots.ts";
 
 let scratch: string;
 let scratchPaths: string[];
@@ -422,5 +427,120 @@ describe("createEditFileTool — onEdit seam", () => {
       (err: unknown) =>
         err instanceof ToolExecutionError || err instanceof Error
     );
+  });
+});
+
+describe("createEditFileTool — live taskRoot (T5)", () => {
+  // T5 (plans/worktree-live-task-root.md §6) — edit_file 在 **handler 调用时**
+  // 取根（不再闭包冻结装配期根）。门禁未翻 ⇒ 装配期根未翻转时行为与今日逐字节
+  // 一致；本组用例覆盖以下三件：
+  //   (a) LiveTaskRoot 参数 + 翻转 cell → 第二次调用落到新根；
+  //   (b) 一次 handler 内 resolve 与写入用同一个根值（D2 per-call 单读）；
+  //   (c) 字符串参数 + LiveTaskRoot 参数在初值相同的情况下行为逐字节一致。
+  it("(a) handler reads root at call time — rebind mid-lifecycle edits in new root", async () => {
+    const initialRoot = await mkdtemp(
+      join(tmpdir(), "edit-file-live-initial-")
+    );
+    scratchPaths.push(initialRoot);
+    const reboundRoot = await mkdtemp(
+      join(tmpdir(), "edit-file-live-rebound-")
+    );
+    scratchPaths.push(reboundRoot);
+
+    // 在两棵树各预置一份待改文件
+    const initFile = join(initialRoot, "f.ts");
+    const rebFile = join(reboundRoot, "f.ts");
+    await writeFile(initFile, "before\n", "utf8");
+    await writeFile(rebFile, "before\n", "utf8");
+
+    const cell: LiveTaskRoot = createLiveTaskRoot(initialRoot);
+    const tool = createEditFileTool(cell);
+
+    // 第一次：改 initialRoot
+    await tool.handler({
+      path: join(initialRoot, "f.ts"),
+      old_str: "before",
+      new_str: "after-initial",
+    });
+    assert.equal(await readFile(initFile, "utf8"), "after-initial\n");
+    assert.equal(await readFile(rebFile, "utf8"), "before\n");
+
+    // rebind —— 模拟 host seam 成功 resolve 后 cell 被翻转
+    writeLiveTaskRoot(cell, reboundRoot);
+
+    // 第二次：改 reboundRoot
+    await tool.handler({
+      path: join(reboundRoot, "f.ts"),
+      old_str: "before",
+      new_str: "after-rebound",
+    });
+    assert.equal(await readFile(rebFile, "utf8"), "after-rebound\n");
+    // 老树里第一次的改写保留
+    assert.equal(await readFile(initFile, "utf8"), "after-initial\n");
+  });
+
+  it("(b) within one handler call, resolve and write use the same root snapshot (D2)", async () => {
+    const initialRoot = await mkdtemp(join(tmpdir(), "edit-file-d2-initial-"));
+    scratchPaths.push(initialRoot);
+    const reboundRoot = await mkdtemp(join(tmpdir(), "edit-file-d2-rebound-"));
+    scratchPaths.push(reboundRoot);
+
+    const initFile = join(initialRoot, "g.ts");
+    const rebFile = join(reboundRoot, "g.ts");
+    await writeFile(initFile, "snapshotted\n", "utf8");
+    await writeFile(rebFile, "snapshotted\n", "utf8");
+
+    const cell: LiveTaskRoot = createLiveTaskRoot(initialRoot);
+    const tool = createEditFileTool(cell);
+
+    // 钩 cell.read：第一次 read 之后立即翻 cell；handler 必须只读一次并
+    // 把结果钉在局部变量上复用（D2 per-call 快照）。
+    const origRead = cell.read;
+    let reads = 0;
+    cell.read = () => {
+      reads += 1;
+      const v = origRead.call(cell);
+      if (reads === 1) {
+        writeLiveTaskRoot(cell, reboundRoot);
+      }
+      return v;
+    };
+
+    await tool.handler({
+      path: join(initialRoot, "g.ts"),
+      old_str: "snapshotted",
+      new_str: "rewritten",
+    });
+
+    // handler 必须只读 cell 一次（D2 per-call 快照）
+    assert.equal(reads, 1, "handler must snapshot cell.read() exactly once");
+    // 改写必须落在 initialRoot（snapshot 时的值），不是 reboundRoot
+    assert.equal(await readFile(initFile, "utf8"), "rewritten\n");
+    assert.equal(await readFile(rebFile, "utf8"), "snapshotted\n");
+  });
+
+  it("(c) factory accepts LiveTaskRoot and a string is byte-identical to today", async () => {
+    const root = scratch;
+    const stringTool = createEditFileTool(root);
+    const cellTool = createEditFileTool(createLiveTaskRoot(root));
+
+    // 同一棵树内同一个文件 —— 两条路径同文件，output 文案应逐字节一致。
+    const file = join(scratch, "byte.ts");
+    await writeFile(file, "X", "utf8");
+
+    const r1 = (await stringTool.handler({
+      path: file,
+      old_str: "X",
+      new_str: "Y",
+    })) as { output: string };
+    await writeFile(file, "X", "utf8"); // reset for cell tool
+    const r2 = (await cellTool.handler({
+      path: file,
+      old_str: "X",
+      new_str: "Y",
+    })) as { output: string };
+
+    assert.equal(r1.output, r2.output);
+    assert.ok(r1.output.startsWith("[edit_file] replaced 1 occurrence(s) in "));
   });
 });
