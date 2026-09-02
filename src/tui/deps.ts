@@ -21,21 +21,18 @@
  * 纯 TS 模块,无 ink / OpenTUI 依赖。
  */
 import type { LoopEngineDeps } from "../harness/index.js";
-import { buildHarnessEngine } from "../harness/build-engine.js";
+import {
+  buildHarnessEngine,
+  type EngineBundle,
+} from "../harness/build-engine.js";
 import { resolveSessionTodoDir } from "../harness/aci/tools/todo-write.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import type { PostToolUseHook } from "../harness/permission/types.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
 import type { GraphModeContext } from "../harness/graph/mode.js";
-import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
-import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { createJsonlTraceService } from "../harness/trace/index.js";
-import type {
-  AutoMemoryHook,
-  MemoryLiveFlags,
-  OverlayPrefetchFn,
-} from "../harness/memory/index.js";
+import type { MemoryLiveFlags } from "../harness/memory/index.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import type { AskUser } from "../harness/permission/types.js";
 import type { WorktreeIsolationHostOpts } from "../harness/isolation/worktree-gate.js";
@@ -224,15 +221,16 @@ export async function buildTuiDeps(
   bundle: RuntimeBundle,
   opts: BuildTuiDepsOptions
 ): Promise<
-  LoopEngineDeps & {
-    subagentManager?: SubAgentManager;
-    shutdown?: () => Promise<void>;
-    /** D-α T5:graph 装配快照句柄（仅注入 graphMode 时透出，交给 hub 拍 round）。 */
-    graphAssembly?: GraphAssembly;
-    autoMemory?: AutoMemoryHook;
-    overlayMemoryPrefetch?: OverlayPrefetchFn;
-    memoryFlags?: MemoryLiveFlags;
-  }
+  /**
+   * T11:deps 字段平铺与 `EngineBundle` 同源 —— 用 `Omit<EngineBundle,"deps">`
+   * 锁定 `EngineBundle` SSOT;`memoryFlags?` 是 TUI 独有扩展(Esc 翻 box)。
+   * 之所以不直接 `EngineBundle`:`buildTuiDeps` 返回 shape 把 `deps` 字段
+   * 平铺进 `LoopEngineDeps`,host 调用解构时不必再走 `result.deps.x`。
+   */
+  LoopEngineDeps &
+    Omit<EngineBundle, "deps"> & {
+      readonly memoryFlags?: MemoryLiveFlags;
+    }
 > {
   if (!bundle.env.llm.apiKey) {
     // settings-model-extension：key 来源 = settings.llm.apiKey（字面或 ${VAR}）。

@@ -11,6 +11,7 @@ import {
   type LoopTrace,
   type RunResult,
 } from "../harness/index.js";
+import type { EngineBundle } from "../harness/build-engine.js";
 import { runVerifyLoop, type VerifyConfig } from "../harness/verify/index.js";
 import { createRunClassifierFromManager } from "../harness/verify/run-classifier-adapter.js";
 import {
@@ -207,23 +208,11 @@ export type ChatSessionOpts = {
 
 /**
  * 收敛修复（2026-08-29）：rebuildDeps 缝的返回 bundle —— deps 之外还带
- * 重建引擎的 host 句柄，形状对齐 TUI `buildEngine` 缝 / hub per-root 路径
- * （`{ deps, shutdown?, subagentManager?, graphAssembly?, autoMemory?,
- * overlayMemoryPrefetch? }`）。refresh 成功切换后把句柄 rewire 进 ctx。
+ * 重建引擎的 host 句柄，形状对齐 TUI `buildEngine` 缝 / hub per-root 路径。
+ * T11 收敛：原 6 字段私有同形拷贝改为 `EngineBundle` SSOT 别名，三个 host
+ * 共用同一类型,语义漂移消失。
  */
-export type RebuiltChatEngine = {
-  readonly deps: LoopEngineDeps;
-  /** 重建引擎的组合 shutdown（mcpManager first → subagentManager second）。 */
-  readonly shutdown?: () => Promise<void>;
-  /** 重建引擎的 subagent manager —— rebind 后 spawn 落这里，drain 也消费它。 */
-  readonly subagentManager?: SubAgentManager;
-  /** 重建引擎的 graph 装配快照 —— `/graph` 与 Shift+Tab 快照随活跃引擎走。 */
-  readonly graphAssembly?: GraphAssembly;
-  /** 重建引擎的 auto-memory 钩子。 */
-  readonly autoMemory?: AutoMemoryHook;
-  /** 重建引擎的 overlay memory prefetch。 */
-  readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
-};
+export type RebuiltChatEngine = EngineBundle;
 
 export type ChatLineContext = {
   deps: LoopEngineDeps;

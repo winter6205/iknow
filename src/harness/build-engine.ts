@@ -281,15 +281,47 @@ export function createAdapterFromEnv(env: IknowEnv): {
   return { client, adapter };
 }
 
-export type BuiltEngine = {
+/**
+ * #562 T11 / ADR-0037 §6 收敛:engine-bundle SSOT —— 一台重建出来的 engine
+ * 必须交回给 host 的最小句柄集合。`BuiltEngine` 是该工厂装配的**全量**视图
+ * (`EngineBundle` + 装配期句柄 + 会话三根 + 装配快照等),本类型是 host
+ * per-root 重建缝(`chat rebuildDeps` / TUI `buildEngine` / hub `getOrBuildEngine`)
+ * 共享的**最小**子集。
+ *
+ * 为什么 deps 是必填,其它可选:`deps` 是 loop-engine 契约必需;其余 5 个
+ * 句柄仅在装配层实际创建时在场(ask surface 没有 subagent / MCP / memory,
+ * graphAssembly 仅 graphMode 在场时透出),缺席即宿主不调,行为零变化。
+ *
+ * 为什么三条缝用同一形状:worktree rebind 后宿主要把句柄 rewire 进 ctx
+ * (split-brain 修复,见 Review High-1 / 2026-08-29)。形状不漂移 = 三个
+ * host 在同一行类型上对齐;不再在 5 个文件比对内联字面量。
+ *
+ * hub 路径在此基础上扩展 `mcpRoots?` / `mcpManager?` / `catalog?`(per-root
+ * MCP face 切换所需);TUI deps 在此基础上扩展 `memoryFlags?`(TUI 独有)。
+ */
+export type EngineBundle = {
   readonly deps: LoopEngineDeps;
-  readonly engine: ReturnType<typeof createLoopEngine>;
-  /** #356 T6:subagent manager 句柄(ask surface 不创建时缺席;T7 host-drain 消费)。 */
-  readonly subagentManager?: SubAgentManager;
-  /** #337 T8 / #356 T6:MCP + subagent 组合 shutdown 句柄(ask surface 两者皆缺席时
-   * 无句柄)。顺序:mcpManager first → subagentManager second(两者无共享可变状态,
-   * Promise.all 并发;顺序仅语义标注)。 */
+  /** 装配期组合 shutdown(MCP first → subagentManager second),表面 ask 时缺席。 */
   readonly shutdown?: () => Promise<void>;
+  /** 子代理 manager 句柄 —— rebind 后 spawn 落这里,host drain 也消费它。 */
+  readonly subagentManager?: SubAgentManager;
+  /** graph 装配快照 —— `/graph` 与 Shift+Tab 快照随活跃引擎走(graphMode 在场)。 */
+  readonly graphAssembly?: GraphAssembly;
+  /** auto-memory 钩子(autoExtract 或 dream 在场时透出)。 */
+  readonly autoMemory?: AutoMemoryHook;
+  /** auto-memory 低信任读:每轮 user 文本 overlay 预取(autoExtract 在场时透出)。 */
+  readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
+};
+
+/**
+ * `buildHarnessEngine` 的全量返回 —— `EngineBundle` 的超集,装配面额外透出
+ * engine / skillCatalog / mcpManager / mcpRoots / sessionRoots / catalog /
+ * memoryFlags。host 装配面字段(engine / sessionRoots)在本类型上保持原位,
+ * 6 个 `EngineBundle` 字段保留原顺序以免读者差异;`EngineBundle` 已是这些
+ * 字段的命名 SSOT,新增 builder 请优先扩展 `EngineBundle` 而不是本类型。
+ */
+export type BuiltEngine = EngineBundle & {
+  readonly engine: ReturnType<typeof createLoopEngine>;
   /**
    * #337 T8:skill catalog(全 surface 装配;ask 也装配——SC12 skill 两件在场)。
    * TUI deps 消费其 available()/get() 派生 slash 候选 + 加载正文(deps.ts
@@ -320,26 +352,6 @@ export type BuiltEngine = {
    * `{ server, tool }[]`(listMcpTools);server 名反解在 deps.ts。
    */
   readonly catalog?: AciCatalog;
-  /**
-   * D-α T3 / ADR-0030:graph 装配快照句柄（仅 `opts.graphMode` 在场时透出）。
-   * host 在每次 `run()` 之前调 `beginRound()` —— 这是「下一次 run() 才生效」
-   * 落地的那一下：翻键立刻改 holder，装配面等下一 round。
-   */
-  readonly graphAssembly?: GraphAssembly;
-  /**
-   * auto-memory T4 / ADR-0031 D1+D5:自动记忆 host 钩子。**默认缺席** ——
-   * 只有 `settings.memory.autoExtract === true || dream === true`、memory 层
-   * 在场、且 surface 不是 `ask`(ADR-0010 D3 opt-out)三者同时成立才装配。
-   * 缺席时宿主什么都不调,行为与现网逐字节一致。
-   */
-  readonly autoMemory?: AutoMemoryHook;
-  /**
-   * auto-memory low-trust read: per-turn prefetch overlay builder. Gated on
-   * `autoExtract === true` (not dream-only). Hosts prepend the string onto
-   * the user payload; it must never be written to `deps.system`. T1: hosts
-   * pass `excludeIds` (session-level dedup) through the second argument.
-   */
-  readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
   /**
    * TUI live flags for /memory. Present when surface is `tui` and the memory
    * layer is on. The TUI mutates this box on Esc; the hook reads it per turn.
