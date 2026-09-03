@@ -31,6 +31,7 @@ import { promises as fs } from "node:fs";
 
 import { IKNOW_IDENTITY_DEFAULT } from "./identity.js";
 import { IKNOW_SOUL_DEFAULT } from "./soul.js";
+import { IKNOW_USAGE_DEFAULT } from "./usage.js";
 import { bootstrapFilePath } from "./workspace.js";
 import { assembleStaticSystemPrompt } from "../memory/assembly.js";
 
@@ -308,6 +309,11 @@ async function resolveSegment(
       return IKNOW_IDENTITY_DEFAULT;
     case "soul":
       return IKNOW_SOUL_DEFAULT;
+    case "usage":
+      // IKNOW-symbol-primary T1: 使用规则段 — 代码主路径走符号工具 + grep
+      // 三类回退 + edit_file 让位。SC1 全 surface (chat / tui / serve / ask)
+      // 注入;条件缺席清单见 tests/harness/identity/usage-segment.test.ts。
+      return IKNOW_USAGE_DEFAULT;
     case "user_profile":
       return readUserProfile(ctx);
     case "bootstrap":
