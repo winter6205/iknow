@@ -40,12 +40,12 @@
  *    与历史 content 块顺序一致（不再整 turn 合并成一份草稿）。
  *
  * 工具输出展开位置的区分（T3，plans/tui-render-optimization.md）：
- *  - **历史消息里的 preview**：`MessageBlocks.ToolPreviewRows` 已改为内嵌
- *    固定高度 `<ScrollableOutputRegion>`（主消息流只显摘要行，diff 收进
- *    固定高度区内部滚动）；
+ *  - **历史消息里的 preview**：`MessageBlocks.ToolPreviewRows` → 内嵌
+ *    `CompletedToolPreviewView`（同源 `completedToolPreview` + 行截断，
+ *    主消息流只显截断预览行）；
  *  - **live tail**：`liveToolRuns.map(liveToolPreviewBox)` 保持展开（运行中
- *    工具逐条展开预览行，与「固定高度历史 preview」是两件事——live 行是
- *    尾部临时面板，不占用历史消息流；T6 输出增量上线前维持现状）。
+ *    工具逐条展开预览行，与「截断历史 preview」是两件事——live 行是尾部
+ *    临时面板，不占用历史消息流）。
  *
  * 流式并发防御（spec SC8）：`draftSegments` 与 `thinkingDraftMasked` 经
  * useDeferredValue — 高频更新降级低优先级，与 app 层 startTransition 构成
