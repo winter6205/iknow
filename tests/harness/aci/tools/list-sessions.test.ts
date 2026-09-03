@@ -219,14 +219,29 @@ describe("list_sessions ACI tool", () => {
     const validator = reg.inner.getValidator("list_sessions");
 
     // T5b 追加 list_sessions 时它是 SSOT 末位；T6 又往末尾 append 了内容轴读
-    // 工具 get_record（append-only，不重排已有成员）。所以「末位」这句话不再
-    // 是这条测想认证的东西——改钉仍然成立且更强的半句：目录轴读工具无装配条件
-    // 因此常驻，并且紧邻内容轴之前。三轴顺序（目录 → 行 → 内容）在 SSOT 里
-    // 全靠 append 顺序体现，后来者不能悄悄把它打乱。
-    assert.equal(ACI_TOOLSET_NAMES.at(-2), "list_sessions");
-    assert.equal(ACI_TOOLSET_NAMES.at(-1), "get_record");
-    assert.equal(reg.inner.list().at(-2)?.name, "list_sessions");
+    // 工具 get_record（append-only，不重排已有成员）；PR #879 task-worktree-
+    // lifecycle 又在 trace 三件之后 append 两件 worktail（list-task-worktrees +
+    // remove-task-worktree）。所以「末位」这句话始终不是这条测想认证的东西——
+    // 这条测想钉的是更强且仍成立的半句：目录轴读工具无装配条件因此常驻，并且
+    // 紧邻内容轴之前。三轴顺序（目录 → 行 → 内容）在 SSOT 里全靠 append 顺序
+    // 体现，后来者不能悄悄把它打乱。PR #879 append 的尾巴钉在下方 SSOT 断言上。
+    const listSessionsIdx = ACI_TOOLSET_NAMES.indexOf("list_sessions");
+    const getRecordIdx = ACI_TOOLSET_NAMES.indexOf("get_record");
+    assert.ok(listSessionsIdx >= 0, "list_sessions 仍在 ACI_TOOLSET_NAMES");
+    assert.ok(getRecordIdx >= 0, "get_record 仍在 ACI_TOOLSET_NAMES");
+    // 三轴：目录轴 (list_sessions) 紧邻 内容轴 (get_record) 之前 —— append-only
+    // 不重排既有 42 件的相对顺序（spec symbol-primary-aci T5 + ADR-0037 §6 +
+    // plan trace-mcp-read-side-split T5b/T6 + task-worktree-lifecycle 共同约束）。
+    assert.equal(getRecordIdx - listSessionsIdx, 1, "list_sessions 紧邻 get_record 之前");
+    // PR #879 尾部尾巴（SSOT 端）：两件 worktree lifecycle 工具 append 在 trace 三件之后。
+    assert.equal(ACI_TOOLSET_NAMES.at(-1), "remove-task-worktree");
+    assert.equal(ACI_TOOLSET_NAMES.at(-2), "list-task-worktrees");
+    // registry inner list：本测试不传 worktreeList / worktreeRemove → 两件 conditional
+    // 工具不入注册表，所以 inner list 末位仍然是常驻的 get_record（与 SSOT 尾部四件
+    // 对齐在顺序上，但 registry 只装无条件件）。两件无条件 list_sessions / get_record
+    // 仍在 inner list 尾部相邻位置。
     assert.equal(reg.inner.list().at(-1)?.name, "get_record");
+    assert.equal(reg.inner.list().at(-2)?.name, "list_sessions");
     assert.equal(reg.catalog.get("list_sessions")?.name, "list_sessions");
     assert.ok(validator, "the registry must compile a validator for the tool");
     // 界真的由 ajv 执行，不只是写在 schema 里：这是 ACI 面拒 `limit: 0` 的那道门。

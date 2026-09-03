@@ -216,9 +216,16 @@ describe("get_record ACI tool", () => {
     });
     const validator = reg.inner.getValidator("get_record");
 
-    // T6 append-only：内容轴是新的末位（`list_sessions` 仍在尾部区间，见
-    // list-sessions.test.ts 对同一件事的断言）。
-    assert.equal(ACI_TOOLSET_NAMES.at(-1), "get_record");
+    // T6 append-only：内容轴是 SSOT 末位；PR #879 task-worktree-lifecycle 又
+    // 在 trace 三件之后 append list-task-worktrees + remove-task-worktree 两件,
+    // 所以 get_record 不再位于 .at(-1)（移到 .at(-3)）。本测试不传 worktreeList /
+    // worktreeRemove → registry 实际 inner list 末位仍然是常驻的 get_record（与
+    // SSOT 端尾部四件顺序对齐，但 registry 只装无条件件）。测试用例标题里的
+    // 「last in the registry」指实际注册表，不是 SSOT 字面量（SSOT 末位已是
+    // PR #879 追加的 remove-task-worktree）。
+    assert.equal(ACI_TOOLSET_NAMES.at(-1), "remove-task-worktree");
+    assert.equal(ACI_TOOLSET_NAMES.at(-2), "list-task-worktrees");
+    assert.equal(ACI_TOOLSET_NAMES.at(-3), "get_record");
     assert.equal(reg.inner.list().at(-1)?.name, "get_record");
     assert.equal(reg.catalog.get("get_record")?.name, "get_record");
     assert.ok(validator, "the registry must compile a validator for the tool");

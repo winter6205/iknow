@@ -265,25 +265,40 @@ describe("query_trace ACI tool (T7)", () => {
     }
   });
 
-  it("registers query_trace as an append-only SSOT member (followed by 3 worktree isolation per ADR-0037 + 10 symbol-query + 5 symbol-mutate tools per T2+T4 + 1 list_sessions + 1 get_record)", () => {
+  it("registers query_trace as an append-only SSOT member (followed by 3 worktree isolation per ADR-0037 + 10 symbol-query + 5 symbol-mutate per T2+T4 + 1 list_sessions + 1 get_record + 2 worktree-lifecycle per PR #879)", () => {
     // ADR-0037 在末位追加 3 件 worktree 隔离工具,symbol-primary-aci T2
     // 接着追加 10 件符号查询工具 → query_trace 不再是末位。T4 又在末尾
     // append 5 件符号改工具,trace-mcp-read-side-split T5b 再 append 1 件
     // 目录轴读工具 list_sessions,T6 最后 append 1 件内容轴读工具
     // get_record → query_trace 之后共 20 件(3 worktree + 10 查询 + 5 改
-    // + 2 读)。append-only:query_trace 自身位置仍是 idx 21。
+    // + 2 读)。PR #879 task-worktree-lifecycle 再 append 2 件
+    // (list-task-worktrees + remove-task-worktree) → 22 件。append-only:
+    // query_trace 自身位置仍是 idx 21。
     assert.equal(ACI_TOOLSET_NAMES[21], "query_trace");
-    assert.equal(ACI_TOOLSET_NAMES.at(-1), "get_record");
+    // PR #879 之后 SSOT 末位是 remove-task-worktree,get_record 移到 .at(-3)。
+    assert.equal(ACI_TOOLSET_NAMES.at(-1), "remove-task-worktree");
+    assert.equal(ACI_TOOLSET_NAMES.at(-2), "list-task-worktrees");
+    assert.equal(ACI_TOOLSET_NAMES.at(-3), "get_record");
     const queryTraceIndex = ACI_TOOLSET_NAMES.indexOf("query_trace");
     assert.ok(queryTraceIndex >= 0, "query_trace 仍在 ACI_TOOLSET_NAMES");
-    // query_trace 之后正好 20 件（3 worktree + 10 查询 + 5 改 + 2 读轴）
-    assert.equal(ACI_TOOLSET_NAMES.length - queryTraceIndex - 1, 20);
+    // query_trace 之后正好 22 件（3 worktree + 10 查询 + 5 改 + 2 读轴 + 2 worktree-lifecycle）。
+    assert.equal(ACI_TOOLSET_NAMES.length - queryTraceIndex - 1, 22);
+    // trace 三轴相邻顺序（钉 append-only 不重排既有 42 件的相对顺序）：
+    // 目录轴 (list_sessions) 紧邻 内容轴 (get_record) 之前（中间隔着
+    // 18 件 symbol-primary-aci 与 ADR-0037 追加工具,与「行轴紧邻目录轴」
+    // 不是一回事 —— 行轴是 query_trace,append-only 语义要求它仍是 idx 21,
+    // 而不是被拽到目录轴之前)。
+    const listSessionsIdx = ACI_TOOLSET_NAMES.indexOf("list_sessions");
+    const getRecordIdx = ACI_TOOLSET_NAMES.indexOf("get_record");
+    assert.equal(getRecordIdx - listSessionsIdx, 1, "list_sessions 紧邻 get_record 之前");
     const registry = createDefaultAciRegistry({
       env: { web: { searchUrl: undefined, proxy: undefined } },
       sandboxRoot: makeTraceDir(),
     });
     assert.equal(registry.catalog.get("query_trace")?.name, "query_trace");
-    // 两件读轴工具都无装配条件 → 常驻;末位是 T6 追加的 get_record。
+    // 两件读轴工具都无装配条件 → 常驻;PR #879 之后 SSOT 末位是
+    // remove-task-worktree,但本测试不传 worktreeList / worktreeRemove →
+    // registry inner list 末位仍然是常驻的 get_record。
     assert.equal(registry.inner.list().at(-1)?.name, "get_record");
   });
 });
