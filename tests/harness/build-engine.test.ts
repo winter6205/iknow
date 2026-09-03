@@ -29,6 +29,8 @@ import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { createWorkerDeps } from "../../src/harness/subagent/worker.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
+import { readEnvSnapshot } from "../../src/harness/env-snapshot.ts";
+import type { EnvSnapshotSeam } from "../../src/harness/loop-engine.ts";
 import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
 import { assessSubagentIsolation } from "../../src/harness/subagent/capability.ts";
 import {
@@ -1548,6 +1550,311 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       expect(JSON.stringify(offResult)).toBe(JSON.stringify(baselineResult));
       await offBuilt.shutdown?.();
       await baselineBuilt.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// --------------------------------------------------------------------------
+// T4 (plans/worktree-live-task-root.md §6 T4) — build-engine wires the live
+// taskRoot holder + single writer at the host seam boundary. Zero behavior
+// change in T4: no consumer reads the cell yet, so all this bullet proves
+// is that the wrap is installed (the seam is wrapped, BuiltEngine exposes
+// no second root authority, and stable roots stay frozen).
+// --------------------------------------------------------------------------
+
+describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", () => {
+  it("isolation OFF → wrap is NOT installed (T3 baseline preserved)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-off-"));
+    try {
+      // settings without isolation.worktreeOnMutate → isolationEnabled = false.
+      // The build-engine branch at lines 784 + 897 should NOT enter the
+      // isolation path; wrap is dormant. Behavior is byte-identical to T3.
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-off"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: {}, // no isolation flag
+        // No worktreeIsolation host seam — registry should still build
+        // the chat tool set without isolation-aware wrappers.
+      });
+      // sessionRoots is the resolveSessionRoots snapshot (D3 stable):
+      // productRoot / projectIdentityRoot / installRoot unchanged from T3.
+      expect(built.sessionRoots.taskRoot).toBe(root);
+      expect(built.sessionRoots.productRoot).not.toBe("");
+      // No second root authority — BuiltEngine does not expose liveTaskRoot
+      // (or any equivalent live holder). Hub has no path to read the cell.
+      expect("liveTaskRoot" in built).toBe(false);
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("isolation ON + custom seam → engine builds, seam is wired, BuiltEngine has no second root authority", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-on-"));
+    try {
+      const seamResolved = join(root, ".iknow", "worktrees", "conv-1");
+      let seamCalls = 0;
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-on"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        worktreeIsolation: {
+          provision: async () => {
+            seamCalls++;
+            return seamResolved;
+          },
+        },
+      });
+      // (a) Engine builds successfully with isolation enabled + custom seam.
+      // (b) sessionRoots.taskRoot stays at the initial sandboxRoot — Hub
+      //     observes this through BuiltEngine.sessionRoots, NOT through
+      //     the live cell. (T4 has no consumer reading the cell, so this
+      //     stays at the initial value.)
+      expect(built.sessionRoots.taskRoot).toBe(root);
+      // (c) D3 stable roots are NOT carried by a live cell:
+      expect(built.sessionRoots.productRoot).not.toBe("");
+      expect(built.sessionRoots.projectIdentityRoot).not.toBe("");
+      expect(built.sessionRoots.installRoot).not.toBe("");
+      // (d) No second root authority — BuiltEngine does not expose the
+      //     live cell. Hub can only observe roots through the existing
+      //     BuiltEngine.sessionRoots / provision return values.
+      expect("liveTaskRoot" in built).toBe(false);
+      expect(Object.keys(built)).not.toContain("liveTaskRoot");
+      // (e) Seam is not invoked at build time (the gate only calls
+      //     provision when an engine is rooted at a task-worktree-shaped
+      //     path; `root` here is the main repo, not a worktree).
+      expect(seamCalls).toBe(0);
+
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("isolation ON + seam throws typed error → gate blocks, no second root authority, BuiltEngine surface stable", async () => {
+    // Provoke the typed-error path: a session in main-repo state tries to
+    // mutate. The gate blocks (T3 behavior), the seam is NOT called for
+    // main-repo traffic (T3 model-provision contract), and any latent
+    // seam throw wouldn't poison the live cell because the wrap is
+    // downstream of the gate's block.
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-throw-"));
+    try {
+      const typedErr = Object.assign(new Error("rebind_failed"), {
+        kind: "rebind_failed",
+      });
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-throw"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        worktreeIsolation: {
+          // Seam throws typed error — but the gate only calls it on
+          // task-worktree-shaped paths, so this is never invoked in the
+          // main-repo path. Still, the wrap must preserve the throw
+          // identity if it ever does.
+          provision: async () => {
+            throw typedErr;
+          },
+        },
+      });
+      // sessionRoots surface unchanged (Hub reads from this, not the cell).
+      expect(built.sessionRoots.taskRoot).toBe(root);
+      // No second root authority.
+      expect("liveTaskRoot" in built).toBe(false);
+      // The cell is dormant — no consumer reads it in T4 — so even if the
+      // seam threw, the cell would still hold its initial value (the wrap
+      // would not have written). The structural invariant (Hub-only-observes-
+      // returned-root) is preserved by NOT exposing the cell on BuiltEngine.
+
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("stable roots stay frozen through the wrap (D3) — sessionRoots.productRoot / projectIdentityRoot / installRoot not affected by host seam", async () => {
+    // D3 稳定根清单：productRoot / projectIdentityRoot / installRoot 必须保持
+    // 装配期冻结。Live taskRoot 槽位的写入**不**影响这三根 —— 它们由
+    // resolveSessionRoots 在装配期一次定型（见 build-engine.ts:438），wrap
+    // 只接触 taskRoot 槽位。
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-stable-"));
+    try {
+      const seamResolved = join(root, ".iknow", "worktrees", "conv-1");
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t4-stable"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        worktreeIsolation: {
+          provision: async () => seamResolved,
+        },
+      });
+      // Capture the four roots at build time.
+      const initialProduct = built.sessionRoots.productRoot;
+      const initialIdentity = built.sessionRoots.projectIdentityRoot;
+      const initialInstall = built.sessionRoots.installRoot;
+      const initialTask = built.sessionRoots.taskRoot;
+      expect(initialProduct).toBeTruthy();
+      expect(initialIdentity).toBeTruthy();
+      expect(initialInstall).toBeTruthy();
+      expect(initialTask).toBe(root);
+
+      // The cell is internal; we cannot poke it via BuiltEngine. The D3
+      // invariants are exercised by resolveSessionRoots tests in
+      // session-roots.test.ts (T3). Here we assert that
+      // sessionRoots.productRoot / projectIdentityRoot / installRoot are
+      // stable strings, equal to themselves on every read (frozen), and
+      // never replaced by the wrap's host seam output.
+      expect(built.sessionRoots.productRoot).toBe(initialProduct);
+      expect(built.sessionRoots.projectIdentityRoot).toBe(initialIdentity);
+      expect(built.sessionRoots.installRoot).toBe(initialInstall);
+      // Cross-rebind invariance: even if the cell gets written (which it
+      // doesn't in T4 because no consumer reads), the sessionRoots object
+      // is the immutable resolveSessionRoots output and is NOT aliased to
+      // the cell. `taskRoot` here is the initial sandboxRoot, NOT the
+      // seamResolved value — proving sessionRoots is the assembly-time
+      // snapshot, not a live reference.
+      expect(built.sessionRoots.taskRoot).toBe(initialTask);
+      expect(built.sessionRoots.taskRoot).not.toBe(seamResolved);
+
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ===========================================================================
+// T9 (worktree-live-task-root.md §6 / ADR-0037 §4):展示面 —— system prompt
+// 钉稳定 projectIdentityRoot;env_snapshot 接活 taskRoot reader。
+// 验证三件事:
+//   (a) 未 rebind 时,buildHarnessEngine 注入的 envSnapshot 字段形态从
+//       `{cwd:静态}` 变成 `{readCwd:活 reader}`,且 reader 的初始值与今日
+//       直接喂 workspaceRoot 的 readEnvSnapshot 输出**逐字节相同**;
+//   (b) 调用 withLiveTaskRootWrite 缝后,readCwd 立刻反映新根;
+//   (c) system prompt 装配层在 rebind 前后字节级不变 (projectPath 段钉稳定
+//       projectIdentityRoot,不读取 cwd 缝)—— 间接通过 buildHarnessEngine
+//       自身不暴露 system deps 直接验;此处只钉( a )( b )两个 envSnapshot
+//       边界,(c) 由 identity/project-path-segment.test.ts 钉死。
+// ===========================================================================
+
+describe("buildHarnessEngine — T9 display surface", () => {
+  function makeEnv(name: string): IknowEnv {
+    return {
+      anthropicApiKey: `sk-test-${name}`,
+      llm: {
+        provider: "anthropic",
+        baseUrl: "http://127.0.0.1:9999",
+        model: "test-model",
+        fallback: [],
+        apiKey: `sk-test-${name}`,
+        maxOutputTokens: 1024,
+        timeoutMs: 60_000,
+        temperature: 0,
+        thinking: "off",
+        thinkingEffort: "",
+        stream: "on",
+      },
+      chat: { showThinking: false },
+      web: { search: { provider: "none" } },
+      compress: { contextWindow: 200_000, thresholdTokens: undefined },
+      mcp: { connectTimeoutMs: 60_000 },
+      subagent: { taskTimeoutMs: undefined },
+    } as IknowEnv;
+  }
+
+  it("未 rebind 时 envSnapshot 注入 readCwd 活 reader,其初始值与今日 workspaceRoot 静态 cwd 的 readEnvSnapshot 输出逐字节相同", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t9-unrebound-"));
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t9-unrebound"),
+        askUser: createNoAskUser(),
+        surface: "tui",
+        cwd: root,
+        workspaceRoot: root,
+        productRoot: root,
+        projectIdentityRoot: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        worktreeIsolation: {
+          provision: async () => join(root, ".iknow", "worktrees", "conv-1"),
+        },
+      });
+
+      // (a) deps.envSnapshot 形态:readCwd 活 reader,不是静态 cwd。
+      const seam = built.deps.envSnapshot as EnvSnapshotSeam | undefined;
+      expect(seam).toBeDefined();
+      const liveReader = seam!.readCwd;
+      expect(typeof liveReader).toBe("function");
+      expect(liveReader()).toBe(root);
+
+      // 装配期若走旧静态 cwd 缝,readEnvSnapshot 输出与今日基线不一致;
+      // 走活 reader 时,readEnvSnapshot({cwd: root}) 与 readEnvSnapshot({cwd: liveReader()})
+      // 在 root 是 git repo 的前提下应**完全**等价(逐字段 deep equal)。
+      const fromReader = await readEnvSnapshot({ cwd: liveReader() });
+      const baseline = await readEnvSnapshot({ cwd: root });
+      expect(fromReader).toEqual(baseline);
+
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rebind 后 readCwd 立刻反映新 taskRoot(system prompt 段钉稳定根由 identity 测试钉死,此处只钉 envSnapshot 边界)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t9-rebound-"));
+    try {
+      const reboundRoot = join(root, ".iknow", "worktrees", "conv-1");
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t9-rebound"),
+        askUser: createNoAskUser(),
+        surface: "tui",
+        cwd: root,
+        workspaceRoot: root,
+        productRoot: root,
+        projectIdentityRoot: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        worktreeIsolation: {
+          provision: async () => reboundRoot,
+        },
+      });
+
+      const seam = built.deps.envSnapshot as EnvSnapshotSeam | undefined;
+      expect(seam).toBeDefined();
+      const liveReader = seam!.readCwd;
+      expect(liveReader()).toBe(root);
+
+      // 触发 withLiveTaskRootWrite 缝:用真实的 create-task-worktree 工具
+      // 路径(handler 直接走 build-engine 装配层),跑出 rebind 后再读。
+      const provisionTool = built.deps.registry.get("create-task-worktree");
+      expect(provisionTool).toBeDefined();
+      const toolResult = await provisionTool!.handler(
+        {},
+        { conversationId: "conv-1" }
+      );
+      expect(toolResult).toBe(
+        `task worktree ready: ${reboundRoot} ` +
+          `(session root rebound; the next wave of tool calls in this run will land in the new root, re-issue the blocked write then)`
+      );
+
+      // rebind 后活 reader 立刻翻到新 taskRoot(envSnapshot 的人读面跟随
+      // 活根)。
+      expect(liveReader()).toBe(reboundRoot);
+
+      await built.shutdown?.();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

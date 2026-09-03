@@ -20,10 +20,23 @@
  * 持有 directory 作为 NearestRoot 的上界 stop（spec #247 Q6）。
  *
  * 当前 iknow 是单用户单项目本机产品,directory ≡ process.cwd()。
+ *
+ * **T8（D5, plans/worktree-live-task-root.md §6 T8）**：`directory` 仍然
+ * 必填（满足装配期冻结的旧 ctx 形态），但当 `directoryCell` 在场时 —
+ * `getClient` 入口以 `directoryCell.read()` 为真值，`directory` 仅作缺省
+ * 与未翻 cell 的旧路径回退。rebind 后 `NearestRoot` 上界 stop 与 pool key
+ * 都跟活根走，旧根 client 由 `getClient` 入口前的 lazy sweep 显式
+ * `dispose()`。
  */
 export interface LspCtx {
-  /** LSP 服务根目录搜索的上界(NearestRoot 不允许跨出)。 */
+  /** LSP 服务根目录搜索的上界（NearestRoot 不允许跨出）。 */
   readonly directory: string;
+  /**
+   * T8（D5）: live `taskRoot` cell — 在场时由 `getClient` 在入口读一次作
+   * 为 effective `directory`（覆盖本字段）。缺席 → 退回本字段的冻结值
+   * （un-rebind 路径行为逐字节不变）。
+   */
+  readonly directoryCell?: import("../session-roots.js").LiveTaskRoot;
   /**
    * per-request LSP 超时上限（毫秒，lsp-optimization 二期 B7）。缺省由工具层
    * DEFAULT_LSP_REQUEST_TIMEOUT_MS（20_000）兜底。来源：settings.lsp.requestTimeoutMs。

@@ -129,6 +129,14 @@ export class LspClientPool {
   readonly broken = new Map<string, "spawn-failed">();
   readonly inflight = new Map<string, Promise<LspClient | undefined>>();
   readonly lastUsedAt = new Map<string, number>();
+  /**
+   * T8（D5）: 上次见到的 `directoryCell` 读值。`getClient` 入口若 cell
+   * 当前值 ≠ 该值，视为发生过 rebind —— 把所有 root 等于旧 taskRoot 的
+   * 同 server entry 视为 stale，显式 `dispose()` 并逐出。
+   *
+   * `undefined` ≡ 首调（未跟踪），不做 sweep —— 与「未发生过 flip」等价。
+   */
+  lastSeenTaskRoot: string | undefined = undefined;
 
   evictCachedClient(key: string, expected?: LspClient): void {
     if (expected !== undefined && this.clients.get(key) !== expected) return;
@@ -174,6 +182,63 @@ function poolOf(ctx: LspCtx): LspClientPool {
 }
 
 /**
+ * T8（D5, plans/worktree-live-task-root.md §6 T8）: 取本次调用的 effective
+ * directory —— `ctx.directoryCell` 在场时以 cell 当前值为真值；缺席时退
+ * 回 `ctx.directory` 冻结值（un-rebind 路径行为逐字节不变）。
+ *
+ * 入口一次性读取（D2 batch snapshot）：一次 `getClient` 调用贯穿整条路径
+ * 都用同一个值，避免同调用内 cell 被外部翻动造成读漂移。
+ */
+export function resolveDirectorySnapshot(ctx: LspCtx): string {
+  return ctx.directoryCell ? ctx.directoryCell.read() : ctx.directory;
+}
+
+/**
+ * T8（D5）: rebind 检测 —— 当 `directoryCell` 在场且本次读到的值与 pool
+ * 上次记录的 `lastSeenTaskRoot` 不一致时，视为 taskRoot 翻动。把所有 root
+ * 等于**旧** taskRoot 的同 server entry 显式 `dispose()` 并逐出；同步更新
+ * `lastSeenTaskRoot` 为当前值。
+ *
+ * 选择 lazy sweep（vs flip event handler）原因（plan §6 T8 收口时机决议）：
+ *  - 不需要订阅基础设施，单点 `getClient` 内处理；
+ *  - 无活动调用 → 无 sweep 开销（un-rebind 路径零副作用，与 byte-identical
+ *    守门对齐 —— `lastSeenTaskRoot === currentValue` 早返）；
+ *  - rebind 后第一次跨根调用就触发收口，旧根 client 在调用栈内被 dispose，
+ *    与「不写旧根」合约自然耦合（写路径必先过 `getClient`）。
+ *
+ * 注意：sweep 比对的是**旧 taskRoot**，不是 `ctx.directory` 上界 —— `server.root()`
+ * 返回的最近项目根 marker（`/root`）天然可以与 taskRoot（`/work`）不同，错误地
+ * 以 snapshot 上界 sweep 会清掉同 tree 下不同 LSP server root 的合法 client。
+ */
+function sweepStaleClientsForRebind(
+  pool: LspClientPool,
+  serverId: string,
+  currentTaskRoot: string
+): void {
+  const previous = pool.lastSeenTaskRoot;
+  if (previous === undefined) {
+    pool.lastSeenTaskRoot = currentTaskRoot;
+    return;
+  }
+  if (previous === currentTaskRoot) return;
+  for (const [key, client] of [...pool.clients]) {
+    const sep = key.lastIndexOf(":");
+    if (sep === -1) continue;
+    const entryRoot = key.slice(0, sep);
+    const entryServerId = key.slice(sep + 1);
+    if (entryServerId !== serverId) continue;
+    if (entryRoot !== previous) continue;
+    // Stale: server process belongs to an older rebind root. dispose() 释放
+    // connection（不杀进程 — 与 lsp-optimization 二期 B7 注释同源；后续若有
+    // 需要可加 child.kill，但本批次不引入）。
+    client.dispose();
+    pool.evictCachedClient(key, client);
+    pool.broken.delete(key);
+  }
+  pool.lastSeenTaskRoot = currentTaskRoot;
+}
+
+/**
  * 按 (file, ctx) 取得（或建立）对应 LSP 客户端，并给出失败原因
  * （lsp-optimization 二期 B3 哨兵分层）。
  *
@@ -206,7 +271,21 @@ export async function getClientDetailed(
   if (ctx.disabledServers?.includes(server.id)) {
     return { failure: { reason: "no-server", serverId: server.id } };
   }
-  const root = await server.root(file, ctx);
+  // T8（D5）: per-call directory snapshot — 入口读一次活根 cell,
+  // 之后整条路径（NearestRoot stop / pool key）都用同一值。Wave 内一致
+  // 与 D2 batch snapshot 同源 —— cell 在本次调用内被外部翻动不会污染。
+  // 注意 sweep 用 cell 值的**翻转**触发，不是与 server.root 上界比较:
+  // 同一 server 不同 file 的 server.root 可能天然不同(同 tree 下不同 marker),
+  // 但都属于同一 taskRoot,不应被 sweep。
+  const directorySnapshot = resolveDirectorySnapshot(ctx);
+  const ctxForRoot: LspCtx =
+    ctx.directoryCell !== undefined
+      ? { ...ctx, directory: directorySnapshot }
+      : ctx;
+  if (ctx.directoryCell !== undefined) {
+    sweepStaleClientsForRebind(pool, server.id, directorySnapshot);
+  }
+  const root = await server.root(file, ctxForRoot);
   if (!root) return { failure: { reason: "no-root", serverId: server.id } };
 
   const key = `${root}:${server.id}`;
@@ -225,7 +304,7 @@ export async function getClientDetailed(
     return client ? { client } : spawnFailed();
   }
 
-  const task = spawnClient(pool, server, root, ctx)
+  const task = spawnClient(pool, server, root, ctxForRoot)
     .then((client) => {
       if (client) {
         pool.clients.set(key, client);

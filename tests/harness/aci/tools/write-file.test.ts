@@ -13,6 +13,11 @@ import { afterEach, describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import { createWriteFileTool } from "../../../../src/harness/aci/tools/write-file.ts";
+import {
+  createLiveTaskRoot,
+  writeLiveTaskRoot,
+} from "../../../../src/harness/session-roots.ts";
+import type { LiveTaskRoot } from "../../../../src/harness/session-roots.ts";
 
 const scratchPaths: string[] = [];
 
@@ -251,5 +256,103 @@ describe("write_file — handler input validation", () => {
         }),
       ToolExecutionError
     );
+  });
+});
+
+describe("createWriteFileTool — live taskRoot (T5)", () => {
+  // T5 (plans/worktree-live-task-root.md §6) — write_file 与 edit_file 在
+  // **handler 调用时**取根（不再闭包冻结装配期根）。门禁未翻 ⇒ 装配期根未翻转
+  // 时行为与今日逐字节一致；本组用例覆盖以下三件：
+  //   (a) LiveTaskRoot 参数 + 翻转 cell → 第二次调用落到新根；
+  //   (b) 一次 handler 内 resolve 与写入用同一个根值（D2 batch 快照的
+  //       per-call 单读；cell.read() 在 handler 入口被调一次）；
+  //   (c) 字符串参数的行为与今日逐字节一致（已由既有测试覆盖；这里钉
+  //       出工厂与 handler 共存的两条 cell 字面量）。
+  it("(a) handler reads root at call time — rebind mid-lifecycle writes to new root", async () => {
+    const initialRoot = await makeScratch("write-file-live-initial-");
+    const reboundRoot = await makeScratch("write-file-live-rebound-");
+    const cell: LiveTaskRoot = createLiveTaskRoot(initialRoot);
+    const tool = createWriteFileTool(cell);
+
+    // 第一次调用：写在 initialRoot
+    await tool.handler({ path: "first.ts", content: "first\n" });
+    assert.equal(
+      await readFile(join(initialRoot, "first.ts"), "utf8"),
+      "first\n"
+    );
+    assert.equal(await doesNotExist(join(reboundRoot, "first.ts")), true);
+
+    // rebind —— 模拟 host seam 成功 resolve 后 cell 被翻转
+    writeLiveTaskRoot(cell, reboundRoot);
+
+    // 第二次调用：写在 reboundRoot
+    await tool.handler({ path: "second.ts", content: "second\n" });
+    assert.equal(
+      await readFile(join(reboundRoot, "second.ts"), "utf8"),
+      "second\n"
+    );
+    assert.equal(await doesNotExist(join(initialRoot, "second.ts")), true);
+    // 第一次写仍在那棵老树，没被搬走
+    assert.equal(
+      await readFile(join(initialRoot, "first.ts"), "utf8"),
+      "first\n"
+    );
+  });
+
+  it("(b) within one handler call, resolve and write use the same root snapshot (D2)", async () => {
+    // D2:一次 handler 调用 resolve 与写入用同一个根值（不得 resolve 用新根、
+    // 写入用旧根）。这里用一个会被翻转的 cell —— handler 必须先把根快照下来
+    // 再用快照值 resolve；handler 进行中翻 cell，handler 内的写入必须仍落
+    // 入先 resolve 的同一根。
+    const initialRoot = await makeScratch("write-file-d2-initial-");
+    const reboundRoot = await makeScratch("write-file-d2-rebound-");
+    const cell: LiveTaskRoot = createLiveTaskRoot(initialRoot);
+    const tool = createWriteFileTool(cell);
+
+    // 钩 cell.read：在第一次 read 之后立即翻 cell；handler 内部任何后续 read
+    // 都会看到 reboundRoot —— 所以 handler 必须把第一次 read 的结果钉在局部
+    // 变量上复用。
+    const origRead = cell.read;
+    let reads = 0;
+    cell.read = () => {
+      reads += 1;
+      const v = origRead.call(cell);
+      if (reads === 1) {
+        writeLiveTaskRoot(cell, reboundRoot);
+      }
+      return v;
+    };
+
+    await tool.handler({ path: "d2.ts", content: "snapshotted\n" });
+
+    // handler 必须只读 cell 一次（D2 per-call 快照）
+    assert.equal(reads, 1, "handler must snapshot cell.read() exactly once");
+    // 写入必须落在 initialRoot（snapshot 时的值），不是 reboundRoot
+    assert.equal(
+      await readFile(join(initialRoot, "d2.ts"), "utf8"),
+      "snapshotted\n"
+    );
+    assert.equal(await doesNotExist(join(reboundRoot, "d2.ts")), true);
+  });
+
+  it("(c) factory accepts LiveTaskRoot and a string is byte-identical to today", async () => {
+    // 门禁未翻（T10 才翻）⇒ 装配期根 = `sandboxRoot` 是 cell 初值；用 string
+    // 直接传与 LiveTaskRoot 包同一字面量行为逐字节一致。
+    const root = await makeScratch("write-file-byte-");
+    const stringTool = createWriteFileTool(root);
+    const cellTool = createWriteFileTool(createLiveTaskRoot(root));
+
+    const r1 = (await stringTool.handler({
+      path: "a.ts",
+      content: "X",
+    })) as { output: string };
+    const r2 = (await cellTool.handler({
+      path: "a.ts",
+      content: "X",
+    })) as { output: string };
+
+    assert.equal(r1.output, r2.output);
+    // byte-for-byte：路径呈现、字节数都一致
+    assert.ok(r1.output.startsWith("[write_file] wrote 1 bytes to "));
   });
 });

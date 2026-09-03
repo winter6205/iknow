@@ -317,17 +317,29 @@ _Avoid_: 打开 `resultCaptured` 往 tool_call 抄正文；把投影当会话账
 **crash 取证无条件**: `subagent_spawn`/`subagent_state_change`/`subagent_stop` 生命周期事件与 stderr 指针文件在所有产品入口（含 chat REPL）落盘，与主循环 content trace 的入口开关解耦。ADR-0035（对 ADR-0003 D10 的范围修正）。
 _Avoid_: 把生命周期事件绑回 `--trace-out`；把该扩张理解为 content trace 进 chat REPL
 
-**worktree isolation mode**（`settings.isolation.worktreeOnMutate`，默认 OFF）: 全局隔离开关——OFF 时会话行为与今日完全一致；ON 时会话可只读主仓，首次 mutate（写路径）被拦截 → `git worktree add` 建 task worktree（含 task 分支）→ **session worktree rebind** 到该树，此后本会话 mutate 只进该根；已绑定则放行，不建第二棵树。只在启动加载点读取一次；config 层不读 git、不持会话状态；改绑不隐式重载 project settings。建树/绑定失败与主仓非 git 仓库一律 fail-closed：typed 可见错误，不静默放行写主仓。task worktree / 分支名已存在 → 报错不覆盖。ADR-0037（对 ADR-0023「worktree/多根只读推迟」的窄面 reopen；git worktree ≠ product workspace 多根）。
-_Avoid_: 默认 ON；把 git worktree 混成 serve 主根或 `workspaceRoot` 多根；config 层读 git 或持会话状态；改绑后隐式重载 settings；建树失败静默写主仓；只建树不改绑会话；同名树静默覆盖
+**worktree isolation mode**（`settings.isolation.worktreeOnMutate`，默认 OFF）: 全局隔离开关——OFF 时会话行为与今日完全一致；ON 时会话可只读主仓，写路径 mutate 被门禁拦下（门禁**从不**自动建树），由模型调 `create-task-worktree` ACI 工具建 task worktree（含 task 分支）并 **session worktree rebind** 到该树，此后本会话 mutate 只进该根；已绑定则放行，不建第二棵树。只在启动加载点读取一次；config 层不读 git、不持会话状态；改绑不隐式重载 project settings。建树/绑定失败与主仓非 git 仓库一律 fail-closed：typed 可见错误，不静默放行写主仓。task worktree / 分支名已存在 → 报错不覆盖。ADR-0037（对 ADR-0023「worktree/多根只读推迟」的窄面 reopen；git worktree ≠ product workspace 多根）。
+_Avoid_: 默认 ON；门禁自动建树（auto-provision）；把建树当 host 职责而非模型调工具；把 git worktree 混成 serve 主根或 `workspaceRoot` 多根；config 层读 git 或持会话状态；改绑后隐式重载 settings；建树失败静默写主仓；只建树不改绑会话；同名树静默覆盖
 
-**session worktree rebind**: worktree isolation mode ON 下首次 mutate 成功后，把**当前会话**生效的根锚（cwd / `workspaceRoot` 取值）切到本会话 task worktree 的动作；只影响本会话——不 checkout 其它会话 / 其它 worktree 的 HEAD，push / 开 PR 不拖动主仓或其它 worktree 当前分支。同会话并发首次 mutate 建树幂等（一棵树、一个 task 分支）。ADR-0037。
-_Avoid_: 改绑波及其它会话；把 rebind 当 serve 主根重绑（ADR-0023 unbound / recents 语义不变）；让 rebind 触发 settings 重载；把改绑后的根错当成 product workspace 多根
+**session worktree rebind**: worktree isolation mode ON 下 `create-task-worktree`（或 enter / exit）ACI 工具成功后，把**当前会话**生效的根锚（cwd / `workspaceRoot` 取值）切到本会话 task worktree 的动作；只影响本会话——不 checkout 其它会话 / 其它 worktree 的 HEAD，push / 开 PR 不拖动主仓或其它 worktree 当前分支。同会话重复调工具幂等（一棵树、一个 task 分支，不跑第二次 `git worktree add`）。**生效边界：同一轮（run）内对下一波 tool calls 生效**——建树成功的当波 mutate 仍按波快照旧根裁决，下一波起写与工具 cwd 落进新树；不需要操作员再发消息或 `/continue`。ADR-0037。
+_Avoid_: 改绑波及其它会话；把 rebind 当 serve 主根重绑（ADR-0023 unbound / recents 语义不变）；让 rebind 触发 settings 重载；把改绑后的根错当成 product workspace 多根；把 rebind 说成 mutate 门禁的自动副作用；要求操作员再发一条消息才生效（same-turn 生效语义已随活 taskRoot 落地）
+
+**taskRoot**（活值）: 会话当前生效的 task worktree 根——**写与工具 cwd 只问它**（写工具 / 会改工作区的 bash / git / LSP 目录 / 子代理工作目录）。活性语义（`src/harness/session-roots.ts` 的 `LiveTaskRoot` cell）：**调用时读取**——所有消费点（门禁 shape 判定、写工具 resolve、bash 围栏、LSP directory、子代理 spawn 取根、环境现势）在 handler 调用时机读 cell 快照，不再闭包冻结装配期根；**唯一 writer = 装配层对 host `provision` / `enter` / `exit` 缝的包装点**（`withLiveTaskRootWrite`，缝成功 resolve 才写，失败不写不回滚、typed error 原样冒泡）；**batch 快照（一波一根）**——一次 `executeAll`（= 一波 tool calls）只在入口读一次，整波共用该快照，波内建树不把一次逻辑改动劈进两棵树。装配初值 = `SessionRoots.taskRoot`（未改绑时等于主仓）；`productRoot` / `projectIdentityRoot` / `installRoot` / mcpConfigRoot / stateAnchor 等稳定根**不**随它走。
+_Avoid_: 闭包冻结装配期根（rebind 只在 run 边界重解析的旧实现）；第二写入口；一波内逐 call 重读（中途翻转劈两树）；把活 taskRoot 当 `productRoot` / 身份根 / per-root 状态锚（D3 稳定根清单不活化）；把「下一波生效」误述为「下一 turn」或要求 `/continue`
 
 **productRoot**: 每个产品入口首次装配确定的稳定主 checkout root；session worktree rebind 后保持不变，不随当前 task worktree 改写。
 _Avoid_: workspaceRoot；task worktree root；product workspace 多根
 
 **mcpConfigRoot**: 由 productRoot 派生、跨 session worktree rebind 保持稳定的 MCP 配置根；只读取 `<mcpConfigRoot>/.iknow/mcp.json`，不切换到 task worktree。
 _Avoid_: workspaceRoot；task worktree；process.cwd()
+
+**SessionRoots**: 会话四角色根 SSOT（`src/harness/session-roots.ts`）——`productRoot` / `projectIdentityRoot` / `taskRoot` / `installRoot` 一次按角色归位，消费者只消费返回值，不再自行拼 `join(cwd, '.iknow', …)`、读 `process.cwd()` 或自行判断 task worktree。`resolveSessionRoots` 是纯函数：不读 git、不碰文件系统、不持会话状态，缺根 / 空白 / 相对 / 不可规范化一律 typed fail-closed（`SessionRootError`），**绝不**回退 `process.cwd()`。
+_Avoid_: 「三根」（实为四角色）；把 `resolveSessionRoots` 当有 IO 的解析器；让消费者自行拼 `.iknow` 路径；用 `workspaceRoot` 顶替角色分工
+
+**projectIdentityRoot**: 用户此刻在做的那个项目的身份根，宿主启动时钉一次、跨 session worktree rebind 不变——**项目身份只问它**：rules / 项目 `AGENTS.md` / `permissions.toml` / 项目 skills 发现 / 子代理继承的身份根 / 记忆库命名空间名。与 `productRoot` 分开是因为宿主按 ADR-0019 从 `workspaceRoot` 取 `productRoot`，而 `--workspace-root <dir>` 重定向档下 `dir ≠ cwd`；取值由装配层决定（宿主钉的值优先，缺席时 `mainCheckoutOf(cwd)`），校验在 SessionRoots。
+_Avoid_: productRoot；workspaceRoot；cwd；task worktree（身份根不可以是 task worktree，钉与不钉两条路径都过 `mainCheckoutOf`）
+
+**installRoot**: iknow 运行时自身的安装位置（子代理 worker bootstrap 解析 tsx 与自身依赖），锚 `import.meta.url` 向上找最近 `package.json`，**不**锚任何会话根或 `process.cwd()`；进程级缓存、刻意不给 reset 缝（测试换安装根走 `opts.installRoot` 注入）。≠ 用户项目的 `node_modules`，故裸 task worktree 上 worker 仍能起。
+_Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()` 相对解析
 
 ## Relationships
 
@@ -362,6 +374,7 @@ _Avoid_: workspaceRoot；task worktree；process.cwd()
 - **tool_result projection vs tool_call.result**: 投影只读 messages；不把 stdout 抄到 `tool_call` 行
 - **crash 取证无条件 vs ADR-0003 D10**: 生命周期三类事件 ≠ content trace；D10 的 chat REPL 排除只对 content trace 继续成立
 - **worktree isolation mode vs workspaceRoot vs workspace（serve 主根）**: git worktree 是会话级 mutate 物理隔离；`workspaceRoot` 是 per-root 状态锚（ADR-0019）；serve 主根是显式选定锚（ADR-0023）。rebind 只切本会话生效根，不改锚规则本身
+- **session worktree rebind vs taskRoot（活值）**: rebind 是动作（缝成功 resolve 的那一刻），taskRoot 是该动作写入的活 cell；动作对下一波 tool calls 生效（波快照边界），cell 读取面始终回答「当前生效根」
 - **user.md vs user-level AGENTS.md vs 项目 AGENTS.md**: 画像与用户级行为约定同根 `~/.iknow/`、对所有项目生效；项目仓库根 `AGENTS.md` 叠在用户级之上且项目优先；都不是记忆库事实文件
 
 ## Flagged ambiguities

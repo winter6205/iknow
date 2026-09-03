@@ -101,8 +101,11 @@ import { loadMcpConfig } from "./mcp/config.js";
 import { createMcpManager, type McpManager } from "./mcp/manager.js";
 import { resolveMcpRoots, type McpRoots } from "./mcp/roots.js";
 import {
+  createLiveTaskRoot,
   resolveInstallRoot,
   resolveSessionRoots,
+  withLiveTaskRootWrite,
+  type LiveTaskRoot,
   type SessionRoots,
 } from "./session-roots.js";
 import {
@@ -278,15 +281,47 @@ export function createAdapterFromEnv(env: IknowEnv): {
   return { client, adapter };
 }
 
-export type BuiltEngine = {
+/**
+ * #562 T11 / ADR-0037 §6 收敛:engine-bundle SSOT —— 一台重建出来的 engine
+ * 必须交回给 host 的最小句柄集合。`BuiltEngine` 是该工厂装配的**全量**视图
+ * (`EngineBundle` + 装配期句柄 + 会话三根 + 装配快照等),本类型是 host
+ * per-root 重建缝(`chat rebuildDeps` / TUI `buildEngine` / hub `getOrBuildEngine`)
+ * 共享的**最小**子集。
+ *
+ * 为什么 deps 是必填,其它可选:`deps` 是 loop-engine 契约必需;其余 5 个
+ * 句柄仅在装配层实际创建时在场(ask surface 没有 subagent / MCP / memory,
+ * graphAssembly 仅 graphMode 在场时透出),缺席即宿主不调,行为零变化。
+ *
+ * 为什么三条缝用同一形状:worktree rebind 后宿主要把句柄 rewire 进 ctx
+ * (split-brain 修复,见 Review High-1 / 2026-08-29)。形状不漂移 = 三个
+ * host 在同一行类型上对齐;不再在 5 个文件比对内联字面量。
+ *
+ * hub 路径在此基础上扩展 `mcpRoots?` / `mcpManager?` / `catalog?`(per-root
+ * MCP face 切换所需);TUI deps 在此基础上扩展 `memoryFlags?`(TUI 独有)。
+ */
+export type EngineBundle = {
   readonly deps: LoopEngineDeps;
-  readonly engine: ReturnType<typeof createLoopEngine>;
-  /** #356 T6:subagent manager 句柄(ask surface 不创建时缺席;T7 host-drain 消费)。 */
-  readonly subagentManager?: SubAgentManager;
-  /** #337 T8 / #356 T6:MCP + subagent 组合 shutdown 句柄(ask surface 两者皆缺席时
-   * 无句柄)。顺序:mcpManager first → subagentManager second(两者无共享可变状态,
-   * Promise.all 并发;顺序仅语义标注)。 */
+  /** 装配期组合 shutdown(MCP first → subagentManager second),表面 ask 时缺席。 */
   readonly shutdown?: () => Promise<void>;
+  /** 子代理 manager 句柄 —— rebind 后 spawn 落这里,host drain 也消费它。 */
+  readonly subagentManager?: SubAgentManager;
+  /** graph 装配快照 —— `/graph` 与 Shift+Tab 快照随活跃引擎走(graphMode 在场)。 */
+  readonly graphAssembly?: GraphAssembly;
+  /** auto-memory 钩子(autoExtract 或 dream 在场时透出)。 */
+  readonly autoMemory?: AutoMemoryHook;
+  /** auto-memory 低信任读:每轮 user 文本 overlay 预取(autoExtract 在场时透出)。 */
+  readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
+};
+
+/**
+ * `buildHarnessEngine` 的全量返回 —— `EngineBundle` 的超集,装配面额外透出
+ * engine / skillCatalog / mcpManager / mcpRoots / sessionRoots / catalog /
+ * memoryFlags。host 装配面字段(engine / sessionRoots)在本类型上保持原位,
+ * 6 个 `EngineBundle` 字段保留原顺序以免读者差异;`EngineBundle` 已是这些
+ * 字段的命名 SSOT,新增 builder 请优先扩展 `EngineBundle` 而不是本类型。
+ */
+export type BuiltEngine = EngineBundle & {
+  readonly engine: ReturnType<typeof createLoopEngine>;
   /**
    * #337 T8:skill catalog(全 surface 装配;ask 也装配——SC12 skill 两件在场)。
    * TUI deps 消费其 available()/get() 派生 slash 候选 + 加载正文(deps.ts
@@ -317,26 +352,6 @@ export type BuiltEngine = {
    * `{ server, tool }[]`(listMcpTools);server 名反解在 deps.ts。
    */
   readonly catalog?: AciCatalog;
-  /**
-   * D-α T3 / ADR-0030:graph 装配快照句柄（仅 `opts.graphMode` 在场时透出）。
-   * host 在每次 `run()` 之前调 `beginRound()` —— 这是「下一次 run() 才生效」
-   * 落地的那一下：翻键立刻改 holder，装配面等下一 round。
-   */
-  readonly graphAssembly?: GraphAssembly;
-  /**
-   * auto-memory T4 / ADR-0031 D1+D5:自动记忆 host 钩子。**默认缺席** ——
-   * 只有 `settings.memory.autoExtract === true || dream === true`、memory 层
-   * 在场、且 surface 不是 `ask`(ADR-0010 D3 opt-out)三者同时成立才装配。
-   * 缺席时宿主什么都不调,行为与现网逐字节一致。
-   */
-  readonly autoMemory?: AutoMemoryHook;
-  /**
-   * auto-memory low-trust read: per-turn prefetch overlay builder. Gated on
-   * `autoExtract === true` (not dream-only). Hosts prepend the string onto
-   * the user payload; it must never be written to `deps.system`. T1: hosts
-   * pass `excludeIds` (session-level dedup) through the second argument.
-   */
-  readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
   /**
    * TUI live flags for /memory. Present when surface is `tui` and the memory
    * layer is on. The TUI mutates this box on Esc; the hook reads it per turn.
@@ -452,6 +467,15 @@ export async function buildHarnessEngine(
     // 时反而能回到主仓（review round 4 实测）。
     projectIdentityRoot: mainCheckoutOf(opts.projectIdentityRoot ?? cwd),
   });
+  // T4 (plans/worktree-live-task-root.md §5 D1 / §6 T4) — live `taskRoot`
+  // holder. Wraps `sessionRoots.taskRoot` as the initial snapshot. Writes
+  // are gated through the build-engine wrapper around host seams
+  // (`withLiveTaskRootWrite`); no consumer reads this in T4, so the cell
+  // sits dormant until T5/T7/T8/T9 wire readers. Stable roots
+  // (productRoot / projectIdentityRoot / installRoot / mcpConfigRoot /
+  // stateAnchor / memoryDir / todoDir / traceDir) stay frozen (D3) — the
+  // cell only carries `taskRoot`.
+  const liveTaskRoot: LiveTaskRoot = createLiveTaskRoot(sessionRoots.taskRoot);
   // Review (round 2/3): 项目身份根 —— 身份发现（AGENTS.md / rules / 项目
   // skills / 子代理继承）与记忆库命名空间共用它，**不**用 `productRoot`：后者
   // 取自 `workspaceRoot`，在 `--workspace-root <dir>` 重定向档下不是项目本身。
@@ -498,6 +522,12 @@ export async function buildHarnessEngine(
   // disabledServers 空）。
   const lspCtx: LspCtx = {
     directory: sandboxRoot,
+    // T8（D5, plans/worktree-live-task-root.md §6 T8）: LSP `directory` 走
+    // live taskRoot cell —— 装配期冻结的 sandboxRoot 仅为初值;rebind 后
+    // `getClient` 入口从 cell 读 `taskRoot` 作为 effective directory,
+    // NearestRoot 上界 stop 跟活根走。门禁未翻 ⇒ cell 初值 = sandboxRoot,
+    // `resolveDirectorySnapshot` 退回本字段冻结值,行为与今日逐字节一致。
+    directoryCell: liveTaskRoot,
     ...(settings.lsp?.requestTimeoutMs !== undefined
       ? { requestTimeoutMs: settings.lsp.requestTimeoutMs }
       : {}),
@@ -567,17 +597,28 @@ export async function buildHarnessEngine(
             // 子进程 cwd 是裸 task worktree 时那里没有 node_modules，cwd 相对
             // 解析会以 `Cannot find package 'tsx'` 崩掉。
             installRoot: sessionRoots.installRoot,
-            // T5 (hard req 7): 子代理继承父会话改绑后的根 —— 引擎被重建到
+            // T5 (hard req 7) + T8 (D6, plans/worktree-live-task-root.md §6 T8):
+            // 子代理继承父会话改绑后的根 —— 引擎被重建到
             // task worktree（hub buildProductionEngine / CLI rebuildDeps 把
             // cwd/workspaceRoot 切到 `<repo>/.iknow/worktrees/<convId>`）时，
             // worker 子进程以该根为 cwd 启动；未改绑（主仓根，非 task
             // worktree 形状）时不传 → 子进程继承父进程 cwd，行为与今日逐
             // 字节一致。worker 注册表从不携带 isolation 缝 → 子代理不触发
             // 第二棵树 / 二次 provision（worker-tool-surface 测试钉住）。
+            //
+            // T8 (D6) 与 T5 的区别:sessionRoot 不再写死 `workspaceRoot`——
+            // 改用 `() => liveTaskRoot.read()` 的 getter 形态，spawn closure
+            // 执行时再取值。rebind 后第一次 spawn 自动落到新 taskRoot,旧
+            // taskRoot 下不再生成新 worker（配合 manager sandboxRootCell 同
+            // 形态: 旧 root 的 def 校验会拒）。
             ...(taskWorktreeOwnerOf(workspaceRoot) !== undefined
-              ? { sessionRoot: workspaceRoot }
+              ? { sessionRoot: () => liveTaskRoot.read() }
               : {}),
           }),
+          // T8 (D6): manager 的父 sandboxRoot 上界也走活根 —— 同源逻辑,
+          // getter 形态让 buildWorkerPayload 入口读 cell current value,
+          // 旧根里 def.sandboxRoot 的 prefix-of-parent 校验自动拒绝。
+          sandboxRootCell: () => liveTaskRoot.read(),
           sandboxRoot,
           trace: opts.subagentTrace ?? createNoopTraceService(),
           diagnosticsDir:
@@ -632,6 +673,23 @@ export async function buildHarnessEngine(
   const isolationHost = opts.worktreeIsolation;
   const isolationEnabled =
     isolationHost !== undefined && resolveWorktreeOnMutate(settings);
+  // T4 (plans/worktree-live-task-root.md §5 D1 / §6 T4) — single writer
+  // seam wrap. Host `provision` / `enter` / `exit` are wrapped with
+  // `withLiveTaskRootWrite` so successful resolutions update the live
+  // `taskRoot` cell. Failed seams (typed errors) leave the cell unchanged
+  // and the error propagates verbatim — no write, no rollback. T4 has no
+  // consumer reading the cell, so the wrap is dormant; T5/T7/T8/T9 will
+  // wire readers. The wrap is a **pure pass-through** for the resolved
+  // value (registry / gate behavior is byte-identical to today).
+  const wrappedProvision = isolationHost
+    ? withLiveTaskRootWrite(isolationHost.provision, liveTaskRoot)
+    : undefined;
+  const wrappedEnter = isolationHost?.worktreeEnter
+    ? withLiveTaskRootWrite(isolationHost.worktreeEnter, liveTaskRoot)
+    : undefined;
+  const wrappedExit = isolationHost?.worktreeExit
+    ? withLiveTaskRootWrite(isolationHost.worktreeExit, liveTaskRoot)
+    : undefined;
   // #406 T4:secret 处理模式 —— settings.secrets.mode 驱动装配。缺省 = "roundtrip"
   // （识别 + 占位符替换 + bash 还原 + 输出 mask）；"block" = 旧 deny-only
   // preToolUse guard（#126 兼容路径），roundtrip 机制整体关闭。非法值已被
@@ -714,6 +772,11 @@ export async function buildHarnessEngine(
   reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
+    // T5 (plans/worktree-live-task-root.md §6): 把活 taskRoot cell 透传给
+    // write_file / edit_file 工厂。门禁未翻 ⇒ cell 初值 = sandboxRoot,
+    // 行为逐字节同今日；handler 内 cell.read() 取 snapshot。stable 根（D3）
+    // 不走这条缝，仍由各工厂按 opts 接各自的稳定根。
+    liveTaskRoot,
     // T3:只读放行项目身份文件所在的主仓（ADR-0037 §1 允许只读主仓）。registry
     // 只把它透给 read_file —— bash / write / edit 拿不到，写不进主仓。
     //
@@ -771,17 +834,13 @@ export async function buildHarnessEngine(
     // hub-less 入口不透传 → 工具不入注册表（Gate 3 镜像过滤）。
     ...(isolationEnabled && isolationHost
       ? {
-          worktreeProvision: isolationHost.provision,
+          worktreeProvision: wrappedProvision!,
           // T7:enter 缝在场时透传（与 provision 同一 isolationEnabled 判定源）；
           // 缺席（TUI 只接 provision）→ enter-task-worktree 不入注册表。
-          ...(isolationHost.worktreeEnter
-            ? { worktreeEnter: isolationHost.worktreeEnter }
-            : {}),
+          ...(wrappedEnter ? { worktreeEnter: wrappedEnter } : {}),
           // T8:exit 缝在场时透传（同一 isolationEnabled 判定源）；缺席 →
           // exit-task-worktree 不入注册表。
-          ...(isolationHost.worktreeExit
-            ? { worktreeExit: isolationHost.worktreeExit }
-            : {}),
+          ...(wrappedExit ? { worktreeExit: wrappedExit } : {}),
         }
       : {}),
   });
@@ -841,11 +900,18 @@ export async function buildHarnessEngine(
     },
   });
 
-  // T4 / ADR-0040: `spawn_subagent` is read-only only when the child's
+  // T1 / plans/worktree-live-task-root.md §6 T1 — fold-in: the workspace-
+  // mutation classifier SSOT lives in `classifyCall` (worktree-gate.ts) and
+  // routes on `FILE_WRITE_TOOL_NAMES` (symbol-mutate.ts). This override only
+  // adds the spawn_subagent-specific role-aware decision (ADR-0040); for
+  // every other tool name it composes with the SSOT, so there is no second
+  // truth source for "does this tool write the workspace".
+  //
+  // ADR-0040 / T4: `spawn_subagent` is read-only only when the child's
   // effective capability surface passes both dimensions from capability.ts.
-  // The role default mirrors spawn-subagent-tool.ts; malformed role values are
-  // deliberately mapped to an unknown role so the classifier stays fail-closed
-  // before the inner executor performs schema validation.
+  // The role default mirrors spawn-subagent-tool.ts; malformed role values
+  // are deliberately mapped to an unknown role so the classifier stays
+  // fail-closed before the inner executor performs schema validation.
   const classifyWithSubagentIsolation = (call: ToolCall): MutateClass => {
     if (call.name !== "spawn_subagent") return classifyCall(call);
     const input = (call.input ?? {}) as Record<string, unknown>;
@@ -875,11 +941,18 @@ export async function buildHarnessEngine(
   // isolationEnabled 同时驱动 T4 create-task-worktree 工具的条件化装配，
   // 见上方 registry 调用）；host 缝（provision / initiallyBound）由
   // session-api hub 注入。OFF / host 缺席 → 不包装，行为与今日逐字节一致。
+  //
+  // T10 (plans/worktree-live-task-root.md §6 T10 / D1/D2): 门禁读活根 —
+  // 把 `root: sandboxRoot`（装配期冻结）换成活 `liveTaskRoot` cell（也是
+  // T4 装配出来的同一持有者，由 `withLiveTaskRootWrite` 单点写入）。门禁
+  // 在 executeAll 入口 snapshot 一次活根 — D2 一波一个根，D11 门禁裁决
+  // 根等于消费者写根。未 rebind 时 cell 初值 = sandboxRoot，行为逐字节
+  // 等于原 T3 装配期冻结字段。
   const loopExecutor = isolationEnabled
     ? createWorktreeIsolationExecutor({
         enabled: true,
-        root: sandboxRoot,
-        provision: isolationHost.provision,
+        liveTaskRoot,
+        provision: wrappedProvision!,
         // T4: passthrough 锚定交给 provision 按会话裁决（own task tree →
         // 同根 no-op;外来根 → typed foreign_worktree）——host 缝不再携带
         // conversation-agnostic 的 initiallyBound（per-root 引擎可服务多个
@@ -971,9 +1044,10 @@ export async function buildHarnessEngine(
     // available skills)。deps.system 内部 disabled 过滤后渲染 <available_skills>
     // 段。
     system: createIknowSystemResolver({
-      // cwd 只喂 "Project path" 展示段（模型要知道自己真实在哪写）；
-      // 项目身份发现走 projectIdentityRoot（T3 / ADR-0037 §4）。
-      cwd,
+      // T9 (ADR-0037 §4):"Project path" 段改读稳定 projectIdentityRoot
+      // —— 装配层不再消费 cwd 缝。活 taskRoot 仅经下方 envSnapshot 段暴露
+      // 给人读面(rebind 后人读面跟随活根,system prompt 字节保持稳定,
+      // KV 缓存契约保留)。cwd 因此不传。
       projectIdentityRoot,
       userHome,
       workspaceRoot,
@@ -1044,13 +1118,15 @@ export async function buildHarnessEngine(
     ...(agentStatusTodoDir
       ? { agentStatus: { todoDir: agentStatusTodoDir } }
       : {}),
-    // #653 G1 T5 / DESIGN-ENVIRONMENT-PRESENT:环境现势事件缝 —— 仅 tui
-    // surface 注入(人读 chrome 的数据源;cwd 来源 = build-engine 已解析的
-    // workspaceRoot 优先,回退 cwd)。ask / chat / serve / worker 缺席 →
-    // 零 IO、零事件(byte-identical)。readEnvSnapshot 永不 throw,事件只给
-    // 宿主 UI,不进 messages / verify / ADR-0028 栏。
+    // #653 G1 T5 / DESIGN-ENVIRONMENT-PRESENT + T9 / ADR-0037 §4:环境现势事件缝
+    // —— 仅 tui surface 注入(人读 chrome 的数据源;cwd 来源 =
+    // liveTaskRoot.read —— 装配层活持有者,每次即将调模型前现读)。rebind
+    // 后下一波 tool calls 的人读面 (TUI cwd / git 摘要) 跟随活根。ask /
+    // chat / serve / worker 缺席 → 零 IO、零事件 (byte-identical)。
+    // readEnvSnapshot 永不 throw,事件只给宿主 UI,不进 messages / verify
+    // / ADR-0028 栏。
     ...(surface === "tui"
-      ? { envSnapshot: { cwd: workspaceRoot ?? cwd } }
+      ? { envSnapshot: { readCwd: liveTaskRoot.read } }
       : {}),
   };
   const engine = createLoopEngine(deps);

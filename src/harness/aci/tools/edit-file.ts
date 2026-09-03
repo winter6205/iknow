@@ -22,6 +22,7 @@ import {
   lintPatch,
   resolveWithinRoot,
 } from "./helpers.js";
+import type { LiveTaskRoot } from "../../session-roots.js";
 
 const TOOL_NAME = "edit_file";
 
@@ -99,6 +100,19 @@ function replaceOnce(haystack: string, oldStr: string, newStr: string): string {
 }
 
 /**
+ * Snapshot the live root at handler invocation time. Accepts either a literal
+ * path (legacy / forward-compat shape — tests and other one-shot callers pass
+ * `string`) or a `LiveTaskRoot` cell (T5: registry threads the cell so that
+ * `worktree rebind` in the same run reaches this handler). The returned
+ * `string` is the snapshot value — D2 forbids reading the cell more than once
+ * per handler call, so callers must reuse the snapshot for both resolve and
+ * write.
+ */
+function readRoot(root: string | LiveTaskRoot): string {
+  return typeof root === "string" ? root : root.read();
+}
+
+/**
  * 工厂:createEditFileTool(root) — 写入工具,带 poka-yoke linter。
  * 行为:
  *   1. resolveWithinRoot(root, path)(symlink 逃逸拒绝);
@@ -107,14 +121,21 @@ function replaceOnce(haystack: string, oldStr: string, newStr: string): string {
  *   4. old_str 出现 0 次 → 失败文案`[edit_file] old_str not found: <path>`;
  *   5. replace_all=false 且 >1 次 → 失败文案`[edit_file] old_str matched N times, provide more context or set replace_all`;
  *   6. 替换(split-join / split+slice)→ 写回 → 返回确认纯字符串。
+ *
+ * T5 (plans/worktree-live-task-root.md §6): `root` may be a `LiveTaskRoot`
+ * cell; the handler reads the snapshot at call time, so `worktree rebind`
+ * in the same run lands new edits in the rebound tree. `string` callers
+ * (legacy tests, one-shot consumers) keep byte-identical behavior.
  */
 export function createEditFileTool(
-  root: string,
+  root: string | LiveTaskRoot,
   opts?: EditFileOpts
 ): AciToolDef {
   const handler = async (input: unknown): Promise<unknown> => {
     const validated = asEditFileInput(input);
-    const absPath = await resolveWithinRoot(root, validated.path);
+    // T5 D2: per-call snapshot. resolve 与写入必须共用同一个根值。
+    const rootAtCall = readRoot(root);
+    const absPath = await resolveWithinRoot(rootAtCall, validated.path);
 
     let content: string;
     try {

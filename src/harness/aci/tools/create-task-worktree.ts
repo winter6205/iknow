@@ -67,11 +67,11 @@ export function createCreateTaskWorktreeTool(
       "Use it when worktree isolation is ON and a workspace mutation came back blocked with the " +
       "[worktree_isolation] notice. Takes no parameters. On success the tree exists at " +
       "<repoRoot>/.iknow/worktrees/<conversationId> on branch iknow/task-<conversationId> and the " +
-      "session root has moved there; re-issue the blocked write in the new root on your next turn. " +
-      "Calling it again for the same conversation is idempotent (returns the same root). " +
-      "Failures exit typed as kind=branch_exists | worktree_exists | worktree_add_failed | " +
-      "rebind_failed | foreign_worktree | not_a_git_repo | git_unavailable; resolve the reported " +
-      "leftover tree or branch manually, then retry.",
+      "session root has moved there; the next wave of tool calls in this run will land in the new " +
+      "root, re-issue the blocked write then. Calling it again for the same conversation is " +
+      "idempotent (returns the same root). Failures exit typed as kind=branch_exists | " +
+      "worktree_exists | worktree_add_failed | rebind_failed | foreign_worktree | not_a_git_repo | " +
+      "git_unavailable; resolve the reported leftover tree or branch manually, then retry.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -92,7 +92,8 @@ export function createCreateTaskWorktreeTool(
         });
         return (
           `task worktree ready: ${worktreePath} (session root rebound; ` +
-          `re-issue the blocked write in the new root on your next turn)`
+          `the next wave of tool calls in this run will land in the new root, ` +
+          `re-issue the blocked write then)`
         );
       } catch (err) {
         if (err instanceof WorktreeIsolationError) {

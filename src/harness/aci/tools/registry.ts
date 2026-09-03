@@ -51,6 +51,7 @@ import { createTodoWriteTool } from "./todo-write.js";
 import { createQueryTraceTool } from "./query-trace.js";
 import { createListSessionsTool } from "./list-sessions.js";
 import { createGetRecordTool } from "./get-record.js";
+import type { LiveTaskRoot } from "../../session-roots.js";
 import {
   createCreateTaskWorktreeTool,
   type CreateTaskWorktreeProvisionFn,
@@ -311,6 +312,16 @@ export interface CreateDefaultAciRegistryOptions {
    * the Gate 3 mirror filter.
    */
   readonly worktreeExit?: WorktreeExitToolDeps["worktreeExit"];
+  /**
+   * T5 (plans/worktree-live-task-root.md §6): live `taskRoot` cell. When
+   * provided, `write_file` / `edit_file` factories receive the cell and the
+   * handler reads the snapshot at call time — `worktree rebind` in the same
+   * run reaches them. When absent (legacy / one-shot callers), factories
+   * receive `sandboxRoot` as a string — existing tests and behavior stay
+   * byte-identical. The cell only carries the live `taskRoot` (D3: stable
+   * roots stay frozen), so this field is intentionally narrow.
+   */
+  readonly liveTaskRoot?: LiveTaskRoot;
 }
 
 /**
@@ -464,18 +475,39 @@ export function createDefaultAciRegistry(
         ...(backgroundManager ? { backgroundManager } : {}),
         // #562 T6: bashMode 透传 — readonly 模式触发 validator + fence cwdReadonly。
         ...(bashMode !== undefined ? { bashMode } : {}),
+        // T7: 透传 live taskRoot cell。门禁未翻 ⇒ cell 初值 = sandboxRoot,
+        // handler 内 cell.read() 一次取得 waveRoot,前台 fence + background
+        // spawn 共用该值（D2）。liveTaskRoot 缺席 → 退回 sandboxRoot
+        // （legacy parity,与 V1 字节一致）。
+        ...(opts.liveTaskRoot !== undefined
+          ? { liveTaskRoot: opts.liveTaskRoot }
+          : {}),
       }),
+    // T6 (plans/worktree-live-task-root.md §6 T6): read 路径工具工厂参数
+    // 从冻结 sandboxRoot 扩为 `liveTaskRoot ?? sandboxRoot` (cell 缺席 / 未
+    // rebind → 退回 sandboxRoot,byte-identical 于 T5 之前的形态)。factory
+    // handler 内 cell.read() 取一次 snapshot,与 read_file 的 extraReadRoots
+    // 同 vintage(D9)。glob / grep 同样的 per-call 读取。
+    //
+    // D10 处置：**接通** registry.ts:471-473 死缝 → read-file.ts 现在真实
+    // 消费 `projectIdentityRoot`(ADR-0037 §1 身份根只读直通)。registry 这层
+    // 仍以 spread guard 透传,但 read-file.ts 把它纳入 extraReadRoots(D9
+    // 同 vintage,rebind 后身份根文件仍可达)。
     read_file: () =>
-      createReadFileTool(sandboxRoot, {
+      createReadFileTool(opts.liveTaskRoot ?? sandboxRoot, {
         workspaceRoot,
         ...(opts.projectIdentityRoot !== undefined
           ? { projectIdentityRoot: opts.projectIdentityRoot }
           : {}),
       }),
-    grep: () => createGrepTool(sandboxRoot),
-    glob: () => createGlobTool(sandboxRoot),
-    edit_file: () => createEditFileTool(sandboxRoot, { onEdit }),
-    write_file: () => createWriteFileTool(sandboxRoot),
+    grep: () => createGrepTool(opts.liveTaskRoot ?? sandboxRoot),
+    glob: () => createGlobTool(opts.liveTaskRoot ?? sandboxRoot),
+    // T5:write_file / edit_file 读活 taskRoot。门禁未翻 ⇒ cell 初值 =
+    // sandboxRoot，逐字节同今日；handler 内 cell.read() 一次取得 snapshot，
+    // 同 handler 内 resolve 与写入共用该值（D2）。
+    edit_file: () =>
+      createEditFileTool(opts.liveTaskRoot ?? sandboxRoot, { onEdit }),
+    write_file: () => createWriteFileTool(opts.liveTaskRoot ?? sandboxRoot),
     web_fetch: () => createWebFetchTool({ proxyUrl }),
     // #826 T4: 把 searchBackend + 三个 vendor key 透传给 web_search。
     // env loader 已把 EXA_API_KEY / TAVILY_API_KEY / BRAVE_API_KEY 经

@@ -45,6 +45,7 @@ import { SessionStore } from "../../src/session-api/store/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { LoopEngineDeps } from "../../src/harness/index.ts";
 import { createWorktreeIsolationExecutor } from "../../src/harness/isolation/worktree-gate.ts";
+import { createLiveTaskRoot } from "../../src/harness/session-roots.ts";
 import type {
   Executor,
   ToolCall,
@@ -173,9 +174,11 @@ let warnSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   warnCalls = [];
-  warnSpy = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
-    warnCalls.push(args.map(String).join(" "));
-  });
+  warnSpy = vi
+    .spyOn(console, "warn")
+    .mockImplementation((...args: unknown[]) => {
+      warnCalls.push(args.map(String).join(" "));
+    });
 });
 
 afterEach(() => {
@@ -448,9 +451,7 @@ describe("T8 matrix — overflow", () => {
 
     // Old shutdown must terminate; timeout path on new → failed (not hang).
     await expect(shutdownP).resolves.toBeUndefined();
-    expect(oldMgr.status().find((s) => s.name === "old")?.state).toBe(
-      "failed"
-    );
+    expect(oldMgr.status().find((s) => s.name === "old")?.state).toBe("failed");
     await waitForStatus(newMgr, "new", "failed", 2000);
     expect(newMgr.status().find((s) => s.name === "new")?.error).toContain(
       "connect timeout"
@@ -460,9 +461,7 @@ describe("T8 matrix — overflow", () => {
     connectResolve();
     await new Promise((r) => setTimeout(r, 80));
     expect(registered).toEqual([]);
-    expect(oldMgr.status().find((s) => s.name === "old")?.state).toBe(
-      "failed"
-    );
+    expect(oldMgr.status().find((s) => s.name === "old")?.state).toBe("failed");
 
     await newMgr.shutdown();
   });
@@ -517,9 +516,7 @@ describe("T8 matrix — concurrent", () => {
     await new Promise((r) => setTimeout(r, 80));
 
     expect(oldRegistered).toEqual([]);
-    expect(oldMgr.status().find((s) => s.name === "old")?.state).toBe(
-      "failed"
-    );
+    expect(oldMgr.status().find((s) => s.name === "old")?.state).toBe("failed");
     expect(newRegistered).toEqual(["mcp__new__fresh"]);
     expect(newMgr.status().map((s) => s.name)).toEqual(["new"]);
 
@@ -533,20 +530,21 @@ describe("T8 matrix — concurrent", () => {
     const inner: Executor = {
       executeAll: async (batch) => {
         invocations.push([...batch]);
-        return batch.map(
-          (c): ToolExecutionResult => ({
-            kind: "ok",
-            toolUseId: c.id,
-            payload: { wrote: true },
-          })
-        );
+        return batch.map((c): ToolExecutionResult => ({
+          kind: "ok",
+          toolUseId: c.id,
+          payload: { wrote: true },
+        }));
       },
     };
     const gate = createWorktreeIsolationExecutor({
       enabled: true,
       // T3 model-provision 合同：provision 裁决只在 task-worktree 形状的根上
       // 触发（改绑后 per-root 重建引擎的形态）；主仓根一律拦下不建树。
-      root: TASK_WORKTREE,
+      // T10：门禁读活根（cell 由装配层通过 createLiveTaskRoot 持有）—— 此处
+      // 直接以 task-worktree 形状的初值构造，行为与原 `root: TASK_WORKTREE`
+      // 逐字节等价（cell 初值 = 装配期 sandboxRoot）。
+      liveTaskRoot: createLiveTaskRoot(TASK_WORKTREE),
       provision: async () => {
         provisioned += 1;
         await new Promise<void>((r) => {
@@ -594,9 +592,13 @@ describe("T8 matrix — concurrent", () => {
     await waitForStatus(mgr, "svc", "connected", 2000);
     registered.length = 0;
 
-    const handle = (mgr as unknown as { _handles: Array<
-      McpClientHandle & { _triggerListChanged: (t: McpTool[]) => void }
-    > })._handles[0]!;
+    const handle = (
+      mgr as unknown as {
+        _handles: Array<
+          McpClientHandle & { _triggerListChanged: (t: McpTool[]) => void }
+        >;
+      }
+    )._handles[0]!;
 
     const shutdownP = mgr.shutdown();
     handle._triggerListChanged([sampleTool("alpha"), sampleTool("beta")]);
@@ -725,9 +727,7 @@ describe("T8 matrix — hub reload seams (negative + exception)", () => {
       shutdown: async () => {
         throw new Error("shutdown must not run on bad-root reject");
       },
-      status: () => [
-        { name: "keep", state: "connected", source: "project" },
-      ],
+      status: () => [{ name: "keep", state: "connected", source: "project" }],
       listResources: async () => ({ resources: [], perServer: [] }),
       readResource: async () => ({ contents: [] }),
     };
@@ -789,9 +789,7 @@ describe("T8 matrix — hub reload seams (negative + exception)", () => {
         throw new Error("boom mid reload");
       },
       shutdown: async () => {},
-      status: () => [
-        { name: "only", state: "connected", source: "project" },
-      ],
+      status: () => [{ name: "only", state: "connected", source: "project" }],
       listResources: async () => ({ resources: [], perServer: [] }),
       readResource: async () => ({ contents: [] }),
     };
@@ -829,9 +827,7 @@ describe("T8 matrix — hub reload seams (negative + exception)", () => {
       }
       expectLifecycleKind(caught, "reload_failed");
       expect(priv.mcpManager).toBe(mgr);
-      expect((await hub.listMcpServers()).map((s) => s.name)).toEqual([
-        "only",
-      ]);
+      expect((await hub.listMcpServers()).map((s) => s.name)).toEqual(["only"]);
     } finally {
       await priv.shutdown();
     }

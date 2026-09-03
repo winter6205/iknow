@@ -36,6 +36,7 @@ import { createRunClassifierFromManager } from "../harness/verify/run-classifier
 import {
   buildHarnessEngine,
   createAdapterFromEnv,
+  type EngineBundle,
 } from "../harness/build-engine.js";
 import {
   renderTranscript,
@@ -637,22 +638,21 @@ export type SessionHubOptions = {
   /**
    * serve-workspace T2 测试缝：按根装配 engine，避免单测走真实 LLM。
    * 生产省略 → `buildHarnessEngine` 且 cwd/workspaceRoot/sandboxRoot 三等。
+   *
+   * T11: 返回 bundle 在 `EngineBundle` 之上扩展 `mcpRoots?` / `mcpManager?` /
+   * `catalog?` —— hub 的 per-root MCP face 切换需要这三字段;其余字段由
+   * `EngineBundle` SSOT 锁定。
    */
-  readonly buildEngine?: (root: string) => Promise<{
-    deps: LoopEngineDeps;
-    shutdown?: () => Promise<void>;
-    subagentManager?: SubAgentManager;
-    /** D-α T3: graph 装配快照（生产由 buildHarnessEngine 透出）。 */
-    graphAssembly?: GraphAssembly;
-    autoMemory?: AutoMemoryHook;
-    overlayMemoryPrefetch?: OverlayPrefetchFn;
-    /** T6/T7：生产装配透出的双根；reload 事务只消费 active engine 的这份。 */
-    mcpRoots?: McpRoots;
-    /** T7：per-engine MCP manager；激活时收口旧 face 再公开。 */
-    mcpManager?: McpManager;
-    /** T7：与 mcpManager 同源的 ACI catalog（listMcpTools 可见面）。 */
-    catalog?: AciCatalog;
-  }>;
+  readonly buildEngine?: (root: string) => Promise<
+    EngineBundle & {
+      /** T6/T7：生产装配透出的双根；reload 事务只消费 active engine 的这份。 */
+      mcpRoots?: McpRoots;
+      /** T7：per-engine MCP manager；激活时收口旧 face 再公开。 */
+      mcpManager?: McpManager;
+      /** T7：与 mcpManager 同源的 ACI catalog（listMcpTools 可见面）。 */
+      catalog?: AciCatalog;
+    }
+  >;
   /**
    * serve-workspace T3: recents/trust 名单的 home 根（落
    * `<recentsHome>/.iknow/workspaces.json`）。生产 serve.ts 传 `homedir()`；
@@ -661,14 +661,11 @@ export type SessionHubOptions = {
   readonly recentsHome?: string;
 };
 
-/** Per-root BuiltEngine cache entry (Map value + activateMcpFace 输入). */
-type HubEngineEntry = {
-  deps: LoopEngineDeps;
-  shutdown?: () => Promise<void>;
-  subagentManager?: SubAgentManager;
-  graphAssembly?: GraphAssembly;
-  autoMemory?: AutoMemoryHook;
-  overlayMemoryPrefetch?: OverlayPrefetchFn;
+/**
+ * Per-root BuiltEngine cache entry (Map value + activateMcpFace 输入).
+ * T11: 在 `EngineBundle` SSOT 之上扩展 `mcpRoots?` / `mcpManager?` / `catalog?`。
+ */
+type HubEngineEntry = EngineBundle & {
   mcpRoots?: McpRoots;
   mcpManager?: McpManager;
   catalog?: AciCatalog;
@@ -787,19 +784,17 @@ export class SessionHub {
    * (tests / hosts that never rebind are unchanged).
    */
   private readonly startupSettings: IknowSettings | undefined;
-  /** serve-workspace T2: test seam; production omits → buildHarnessEngine. */
+  /** serve-workspace T2: test seam; production omits → buildHarnessEngine.
+   * T11: 返回 bundle 形状由 `EngineBundle` SSOT 锁定,在其上扩展
+   * `mcpRoots?` / `mcpManager?` / `catalog?`(hub per-root MCP face 切换)。 */
   private readonly buildEngine:
-    | ((root: string) => Promise<{
-        autoMemory?: AutoMemoryHook;
-        overlayMemoryPrefetch?: OverlayPrefetchFn;
-        deps: LoopEngineDeps;
-        shutdown?: () => Promise<void>;
-        subagentManager?: SubAgentManager;
-        graphAssembly?: GraphAssembly;
-        mcpRoots?: McpRoots;
-        mcpManager?: McpManager;
-        catalog?: AciCatalog;
-      }>)
+    | ((root: string) => Promise<
+        EngineBundle & {
+          mcpRoots?: McpRoots;
+          mcpManager?: McpManager;
+          catalog?: AciCatalog;
+        }
+      >)
     | undefined;
   /** serve picker bind (T2); session file workspaceRoot is the engine Map key. */
   private boundRoot: string | undefined;
@@ -2720,17 +2715,13 @@ export class SessionHub {
     this.subagentManagers.register(manager);
   }
 
-  private async buildProductionEngine(root: string): Promise<{
-    deps: LoopEngineDeps;
-    shutdown?: () => Promise<void>;
-    subagentManager?: SubAgentManager;
-    graphAssembly?: GraphAssembly;
-    autoMemory?: AutoMemoryHook;
-    overlayMemoryPrefetch?: OverlayPrefetchFn;
-    mcpRoots?: McpRoots;
-    mcpManager?: McpManager;
-    catalog?: AciCatalog;
-  }> {
+  private async buildProductionEngine(root: string): Promise<
+    EngineBundle & {
+      mcpRoots?: McpRoots;
+      mcpManager?: McpManager;
+      catalog?: AciCatalog;
+    }
+  > {
     if (!this.askUser) {
       throw new Error(
         "ask_inlet_missing: SessionHub lazy deps require AskUser (#162)"

@@ -18,6 +18,7 @@
  */
 import { SessionStore } from "../session-api/store/session-store.js";
 import { SessionHub } from "../session-api/hub.js";
+import type { EngineBundle } from "../harness/build-engine.js";
 import type {
   PostMessageResponse,
   WireThinkingOverride,
@@ -235,15 +236,11 @@ export interface CreateTuiBridgeOptions {
    * Review High-1: per-root 引擎重建缝（TUI 由 run.tsx 提供 —— 用同一
    * depsOpts + 新根重跑 buildTuiDeps，rebind 后的回合跑在 worktree 根引擎上，
    * 且复用同一启动 settings 对象，硬要求 9）。缺席 = 无重建能力（行为不变）。
+   *
+   * T11: 返回 bundle 形状对齐 `EngineBundle` —— 与 chat `rebuildDeps` / hub
+   * `getOrBuildEngine` 共享同一类型。
    */
-  readonly buildEngine?: (root: string) => Promise<{
-    deps: LoopEngineDeps;
-    shutdown?: () => Promise<void>;
-    subagentManager?: SubAgentManager;
-    graphAssembly?: GraphAssembly;
-    autoMemory?: AutoMemoryHook;
-    overlayMemoryPrefetch?: OverlayPrefetchFn;
-  }>;
+  readonly buildEngine?: (root: string) => Promise<EngineBundle>;
 }
 
 export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {

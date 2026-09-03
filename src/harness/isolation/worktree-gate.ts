@@ -36,6 +36,8 @@ import { existsSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { errorMessage } from "../errors.js";
 import { validateReadonlyCommand } from "../aci/tools/bash-readonly.js";
+import { FILE_WRITE_TOOL_NAMES } from "../aci/tools/symbol-mutate.js";
+import type { LiveTaskRoot } from "../session-roots.js";
 import type {
   Executor,
   ToolCall,
@@ -51,6 +53,23 @@ export const WORKTREE_ISOLATION_PREFIX = "[worktree_isolation]";
  * auto-creates. T4's tool name/registration must align with this wording.
  */
 export const CREATE_TASK_WORKTREE_TOOL_HINT = "create-task-worktree ACI tool";
+
+/**
+ * Root-flip lifecycle block notice (D11 / review fix): a mutate arriving
+ * after an enter/exit-task-worktree call in the SAME wave would be adjudicated
+ * on the wave-entry snapshot while its handler would consume the flipped
+ * cell — the admit-but-write-other-root window D11 forbids. Fail-closed: the
+ * call is not executed; the model re-issues it in the next wave.
+ */
+export function rootFlipMutateNotice(toolName: string): string {
+  return (
+    `${WORKTREE_ISOLATION_PREFIX} workspace mutation blocked: ${toolName} in this ` +
+    `wave of tool calls changed the session's active root, and this call was ` +
+    `adjudicated against the root from before that change. The call was not ` +
+    `executed — re-issue it in the next wave of tool calls in this run, which ` +
+    `will adjudicate against the new root.`
+  );
+}
 
 /**
  * Unbound-mutate block notice: visible, actionable, and free of the old
@@ -244,19 +263,64 @@ export async function createTaskWorktree(
 
 // -- mutate classification -------------------------------------------------------
 
-export type MutateClass = "mutate" | "read";
-
-const ALWAYS_MUTATE_TOOLS = new Set(["write_file", "edit_file"]);
+export type MutateClass = "mutate" | "read" | "root_flip";
 
 /**
- * Deterministic workspace-mutation classifier (SSOT reuse): write_file /
- * edit_file are mutates; bash is a mutate unless its command passes the
- * readonly command validator (the same SSOT the readonly bash mode uses);
- * non-string bash commands fail closed to mutate; everything else is a read
- * path and stays on the main repo (reads may remain per contract).
+ * Root-flip lifecycle tools (T7 enter / T8 exit). They do not write workspace
+ * files, but their handlers resolve the withLiveTaskRootWrite-wrapped host
+ * enter/exit seams, which FLIP the live `taskRoot` cell mid-wave. A mutate
+ * later in the same wave would otherwise be adjudicated on the wave-entry
+ * snapshot (D2) while its handler consumes the flipped cell — the
+ * admit-but-write-other-root window D11 forbids. The gate therefore tracks
+ * these calls and fail-closes every subsequent mutate in the wave.
+ */
+const ROOT_FLIP_TOOLS: ReadonlySet<string> = new Set([
+  "enter-task-worktree",
+  "exit-task-worktree",
+]);
+
+/**
+ * T1 (plans/worktree-live-task-root.md §6 T1) — workspace-mutation classifier
+ * SSOT. Single source of truth for "does this tool write to the workspace":
+ *
+ *   - the canonical list of workspace-writing tool names comes from
+ *     `FILE_WRITE_TOOL_NAMES` (symbol-mutate.ts), which is the SAME frozen
+ *     list the worker deny-list (catalog.ts) uses and the same set the
+ *     registry's Gate-3 append-only check enforces — one name → one
+ *     classification, no shadow copies;
+ *   - bash is a mutate unless its command passes the readonly command
+ *     validator (the same SSOT the readonly bash mode uses); non-string
+ *     bash commands fail closed to mutate;
+ *   - read-only tools (read_file / grep / glob / web_fetch / memory_recall /
+ *     etc.) and control / lifecycle tools (create-task-worktree /
+ *     spawn_subagent / todo_write / …) do not write workspace files and
+ *     default to `read`;
+ *   - the enter/exit lifecycle tools (enter-task-worktree / exit-task-worktree)
+ *     are classified `root_flip`: they do not write workspace files, but their
+ *     handlers flip the live `taskRoot` cell mid-wave (via the wrapped host
+ *     seams), so the gate latches the flip and fail-closes later mutates in
+ *     the same wave (D11). create-task-worktree is NOT in that set: its
+ *     wrapped-provision flip only happens on a wave that started at the main
+ *     repo, where every mutate is already blocked by the unbound branch.
+ *
+ * Before T1 the gate used a hardcoded 2-name set (`ALWAYS_MUTATE_TOOLS`),
+ * which left the 5 symbol-mutate tools (`rename_symbol` etc.) unclassified
+ * → they passed the gate and edited the main repo directly (fail-open).
+ * T1 closes that hole by routing on `FILE_WRITE_TOOL_NAMES`, the same SSOT
+ * already used by the worker deny-list (catalog.ts) — one name → one
+ * classification, no shadow copies.
+ *
+ * Note on `spawn_subagent`: this default treats it as `read`, but the gate
+ * installed by `build-engine.ts:849-872` (`classifyWithSubagentIsolation`)
+ * overrides that with a role-aware decision (ADR-0040). That override
+ * belongs to the build-engine seam, not the SSOT classifier — it composes
+ * with this function via the `classify` opt.
  */
 export function classifyCall(call: ToolCall): MutateClass {
-  if (ALWAYS_MUTATE_TOOLS.has(call.name)) return "mutate";
+  if (ROOT_FLIP_TOOLS.has(call.name)) return "root_flip";
+  if ((FILE_WRITE_TOOL_NAMES as ReadonlyArray<string>).includes(call.name)) {
+    return "mutate";
+  }
   if (call.name === "bash") {
     const command = (call.input as { command?: unknown } | null)?.command;
     if (typeof command !== "string") return "mutate";
@@ -420,8 +484,27 @@ export interface WorktreeIsolationHostOpts {
 export interface WorktreeIsolationGateOpts {
   /** Startup read (hard req 9): assembly passes `resolveWorktreeOnMutate(settings)`. */
   readonly enabled: boolean;
-  /** This engine's root — the bound-tree comparison anchor. */
-  readonly root: string;
+  /**
+   * T10 (plans/worktree-live-task-root.md §6 T10 / D1/D2) — live `taskRoot`
+   * cell (T4 SSOT). The gate snapshots `cell.read()` ONCE at `executeAll`
+   * entry; the whole wave shares that snapshot. Why snapshot, not per-call:
+   *
+   *   - D2 (batch 快照): 一波 tool calls 只能有一个根 — 否则 create-task-worktree
+   *     在同波翻转时把一次逻辑改动劈进两棵树,违 least astonishment。rebind
+   *     因此对**下一波** tool calls 生效,不是同波。
+   *   - D11 (排序不变量): 门禁裁决用的根必须等于消费者用的根。单波内 cell
+   *     会被生命周期工具翻转 — create-task-worktree 在 gate 之前的 unbound
+   *     分支就被拦（main-repo 波内后续 mutate 本来就 block），而 enter/exit
+   *     以 `root_flip` 分类直达 inner 并经 `withLiveTaskRootWrite` 缝翻
+   *     cell；对这两者之后的 mutate，gate 以 `rootFlipped` latch fail-closed
+   *     拦下（`rootFlipMutateNotice`），保证被放行的每条 mutate 的
+   *     handler 读到的 cell 值就是门禁裁决用的快照值 — 不出现
+   *     admit-but-write-other-root 窗口。
+   *
+   * 写仍然由 `withLiveTaskRootWrite` 缝包裹 host `provision` / `enter` /
+   * `exit` 单点写入(T4 SSOT) — 本字段是**读取面**入口。
+   */
+  readonly liveTaskRoot: LiveTaskRoot;
   /**
    * Host seam (session-api). T3 model-provision contract: the gate calls this
    * ONLY for engines rooted at a task-worktree-shaped path (post-rebind), as
@@ -442,6 +525,10 @@ export interface WorktreeIsolationGateOpts {
    * hosts (session-api hub) must NOT set it — per-conversation passthrough is
    * adjudicated by `provision` (T4: own task tree → same-root no-op; foreign
    * root → typed `foreign_worktree`).
+   *
+   * The bound-root is initialised to the wave-entry snapshot of
+   * `liveTaskRoot`, so a pre-rebound CLI engine whose cell starts at the
+   * task worktree path goes straight to passthrough.
    */
   readonly initiallyBound?: boolean;
   readonly classify?: (call: ToolCall) => MutateClass;
@@ -479,16 +566,19 @@ interface GateSessionState {
 export function createWorktreeIsolationExecutor(
   opts: WorktreeIsolationGateOpts & { readonly inner: Executor }
 ): Executor {
-  const { enabled, root, provision, initiallyBound, inner } = opts;
+  const { enabled, liveTaskRoot, provision, initiallyBound, inner } = opts;
   const classify = opts.classify ?? classifyCall;
   const states = new Map<string, GateSessionState>();
 
-  const stateFor = (conversationId: string | undefined): GateSessionState => {
+  const stateFor = (
+    conversationId: string | undefined,
+    snapshotRoot: string
+  ): GateSessionState => {
     const key = conversationId ?? "";
     const hit = states.get(key);
     if (hit) return hit;
     const fresh: GateSessionState = initiallyBound
-      ? { status: "bound", boundRoot: root }
+      ? { status: "bound", boundRoot: snapshotRoot }
       : { status: "open" };
     states.set(key, fresh);
     return fresh;
@@ -508,25 +598,35 @@ export function createWorktreeIsolationExecutor(
   });
 
   const reboundMessage = (boundRoot: string): string =>
-    `${WORKTREE_ISOLATION_PREFIX} session workspace rebound to task worktree ${boundRoot}; this call was not executed and the previous root stays read-only — end the turn and retry the write in the new root.`;
+    `${WORKTREE_ISOLATION_PREFIX} session workspace rebound to task worktree ${boundRoot}; ` +
+    `this call was not executed — the previous root stays read-only. The next wave of tool calls ` +
+    `in this run will land in the new root, re-issue the write then.`;
 
   async function gateMutate(
     call: ToolCall,
-    conversationId: string | undefined
+    conversationId: string | undefined,
+    snapshotRoot: string
   ): Promise<ToolExecutionResult | undefined> {
-    let state = stateFor(conversationId);
-    if (state.status === "bound" && state.boundRoot === root) {
+    let state = stateFor(conversationId, snapshotRoot);
+    if (state.status === "bound" && state.boundRoot === snapshotRoot) {
       return undefined; // passthrough
     }
     // T3 model-provision contract: a session on a non-task-worktree root
     // (main repo) can never be bound — block with the ACI-tool notice and
     // NEVER provision (no `git worktree add` on the execution path). The
     // block is side-effect free; state stays open so later mutates re-block.
-    if (state.status === "open" && taskWorktreeOwnerOf(root) === undefined) {
+    //
+    // T10: `root` here is the **wave snapshot** of `liveTaskRoot` taken at
+    // executeAll entry (D2). mid-wave flips (create-task-worktree) do not
+    // change this snapshot — rebind takes effect on the NEXT wave.
+    if (
+      state.status === "open" &&
+      taskWorktreeOwnerOf(snapshotRoot) === undefined
+    ) {
       return block(call.id, unboundMutateNotice());
     }
     if (state.status === "open") {
-      const pending = provision({ conversationId, root });
+      const pending = provision({ conversationId, root: snapshotRoot });
       setState(conversationId, { status: "pending", pending });
       state = { status: "pending", pending };
     }
@@ -547,11 +647,11 @@ export function createWorktreeIsolationExecutor(
         );
       }
       setState(conversationId, { status: "bound", boundRoot });
-      if (boundRoot === root) return undefined; // already home
+      if (boundRoot === snapshotRoot) return undefined; // already home
       return block(call.id, reboundMessage(boundRoot));
     }
     // bound elsewhere (defensive: host rebound the session away from this root)
-    return block(call.id, reboundMessage(state.boundRoot ?? root));
+    return block(call.id, reboundMessage(state.boundRoot ?? snapshotRoot));
   }
 
   const runAll = async (
@@ -577,6 +677,20 @@ export function createWorktreeIsolationExecutor(
         onStream
       );
     }
+    // T10 D2: snapshot live taskRoot ONCE at executeAll entry. The whole wave
+    // shares this value so:
+    //   (a) mid-wave flips (create-task-worktree) cannot split the wave
+    //     between two roots — one wave = one root (least astonishment);
+    //   (b) gate adjudication root == consumer handler root (D11 invariant:
+    //     gate admits → consumer writes to the same root). Within a single
+    //     wave the cell can be flipped by the lifecycle tools (create- /
+    //     enter- / exit-task-worktree) whose handlers resolve the wrapped
+    //     host seams. Those calls go through inner directly (classified
+    //     "read" / "root_flip", not "mutate"), and mutates AFTER a
+    //     enter/exit flip are fail-closed blocked below (rootFlipped latch),
+    //     so a handler's `cell.read()` at call time observes the same root
+    //     the gate adjudicated for that call.
+    const snapshotRoot = liveTaskRoot.read();
     let anyMutate = false;
     for (const call of calls) {
       if (classify(call) === "mutate") {
@@ -598,9 +712,19 @@ export function createWorktreeIsolationExecutor(
     // mixed / mutating batch: per-call gating (read calls still batched one
     // by one so onSettled keeps the input index alignment)
     const out: ToolExecutionResult[] = [];
+    // D11 (review fix): enter/exit-task-worktree are classified `root_flip`
+    // — they pass through to inner but their handlers flip the live cell
+    // mid-wave via the withLiveTaskRootWrite-wrapped host seams. A mutate
+    // AFTER such a call would be adjudicated on the wave-entry snapshot
+    // while its handler consumes the flipped cell (admit-but-write-other-
+    // root window). Fail-closed: the mutate is blocked and re-issued in the
+    // next wave. Mutates BEFORE the flip keep the snapshot==cell match.
+    let rootFlipped = false;
+    let rootFlipTool: string | undefined;
     for (const [index, call] of calls.entries()) {
       let result: ToolExecutionResult;
-      if (classify(call) === "read") {
+      const cls = classify(call);
+      if (cls === "root_flip") {
         [result] = await inner.executeAll(
           [call],
           signal,
@@ -610,8 +734,22 @@ export function createWorktreeIsolationExecutor(
           turnId,
           onStream
         );
+        rootFlipped = true;
+        rootFlipTool = call.name;
+      } else if (cls === "read") {
+        [result] = await inner.executeAll(
+          [call],
+          signal,
+          timeoutMs,
+          conversationId,
+          undefined,
+          turnId,
+          onStream
+        );
+      } else if (rootFlipped) {
+        result = block(call.id, rootFlipMutateNotice(rootFlipTool ?? "a root-flip lifecycle tool"));
       } else {
-        const blocked = await gateMutate(call, conversationId);
+        const blocked = await gateMutate(call, conversationId, snapshotRoot);
         result =
           blocked ??
           (

@@ -106,7 +106,6 @@ export interface TodoWriteToolDeps {
  * step that can promote tmp to the final path.
  */
 export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
-  const filePath = join(deps.todoDir, TODOS_FILE);
   const random = deps.randomBytes ?? ((n: number) => randomBytes(n));
 
   return Object.freeze({
@@ -130,6 +129,9 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
       timeoutTier: "default",
     } as const,
     handler: async (input: unknown) => {
+      // T11 收敛:filePath 不再工厂期预拼死路径 —— todoDir 本身按 D3 仍冻结,
+      // 但 `join` 从装配期挪到调用期,语义逐字节一致(`join` 是纯函数)。
+      const filePath = join(deps.todoDir, TODOS_FILE);
       const params = parseInput(input);
       switch (params.mode) {
         case "list":

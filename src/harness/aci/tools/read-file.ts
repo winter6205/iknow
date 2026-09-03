@@ -16,12 +16,26 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
+import type { LiveTaskRoot } from "../../session-roots.js";
 import type { AciToolDef } from "../types.js";
 import { resolveWithinRoot } from "./helpers.js";
 
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 2000;
 const MAX_FILE_BYTES = 1_048_576; // 1 MiB
+
+/**
+ * Snapshot the live root at handler invocation time. Accepts either a
+ * literal path (legacy / forward-compat shape — tests and other one-shot
+ * callers pass `string`) or a `LiveTaskRoot` cell (T6: registry threads
+ * the cell so that `worktree rebind` in the same run reaches this
+ * handler). The returned `string` is the snapshot value — D2 forbids
+ * reading the cell more than once per handler call, so callers must
+ * reuse the snapshot for both resolve and any other root-relative work.
+ */
+function readRoot(root: string | LiveTaskRoot): string {
+  return typeof root === "string" ? root : root.read();
+}
 
 export interface CreateReadFileToolOptions {
   /** ADR-0019 (T4): per-root state anchor. When provided, `<workspaceRoot>/.iknow`
@@ -33,6 +47,16 @@ export interface CreateReadFileToolOptions {
    *  legacy shape — to preserve the existing read-file-profile.test.ts
    *  contract when workspaceRoot is not threaded. */
   readonly workspaceRoot?: string;
+  /** ADR-0037 §1 (T6 D10 wired): identity-root read passthrough. After a
+   *  worktree rebind the live `taskRoot` is the new task worktree (which
+   *  does NOT contain the project's `AGENTS.md` / `permissions.toml` /
+   *  project rules). The stable `projectIdentityRoot` is threaded here so
+   *  read_file can still reach those identity files at read-only depth —
+   *  this is the **read** half of the identity-root passthrough
+   *  (write/edit/bash intentionally do NOT receive this; their fence is
+   *  the live root). Absent or equal to the live root → no extra entry
+   *  (the root itself already covers it). */
+  readonly projectIdentityRoot?: string;
 }
 
 /** `~/.iknow/` — the agent's own profile directory (readUserProfile in the
@@ -41,13 +65,49 @@ function iknowProfileRoot(): string {
   return join(homedir(), ".iknow");
 }
 
+/**
+ * Compute the per-call extraReadRoots anchored to the same wave snapshot as
+ * `rootAtCall`. Both inputs are passed by the caller so the conditional
+ * check uses the LIVE root (D9) — not a factory-time closure.
+ *
+ * Read-only reachability surface:
+ *   - `~/.iknow/` (home profile — always)
+ *   - `<workspaceRoot>/.iknow` (per-root persona state) when threaded and
+ *     distinct from the live root
+ *   - `<projectIdentityRoot>` (ADR-0037 §1 identity-root passthrough) when
+ *     threaded and distinct from the live root
+ *
+ * Containment remains the read_file contract: escape is rejected by
+ * `resolveWithinRoot` regardless of which extra root admitted the path.
+ */
+function computeExtraReadRoots(
+  rootAtCall: string,
+  workspaceRoot: string | undefined,
+  projectIdentityRoot: string | undefined
+): readonly string[] {
+  const extras: string[] = [iknowProfileRoot()];
+  if (workspaceRoot && workspaceRoot !== rootAtCall) {
+    extras.push(join(workspaceRoot, ".iknow"));
+  }
+  if (projectIdentityRoot && projectIdentityRoot !== rootAtCall) {
+    extras.push(projectIdentityRoot);
+  }
+  return Object.freeze(extras);
+}
+
 export function createReadFileTool(
-  root: string,
+  root: string | LiveTaskRoot,
   opts?: CreateReadFileToolOptions
 ): AciToolDef {
   // read_file is a read-only tool. Beyond the primary sandbox root (cwd) it
   // may also read the agent's own profile at `~/.iknow/` — the user asked for
   // this to be allowed by default. Write tools stay cwd-scoped.
+  //
+  // T6 (plans/worktree-live-task-root.md §6 T6): `root` may be a
+  // `LiveTaskRoot` cell. The handler snapshots the cell at call time and
+  // rebuilds `extraReadRoots` against that snapshot, so root + extras share
+  // a single wave vintage (D9) — no "root is new, extras are old"
+  // mid-stream mix. Legacy `string` callers keep byte-identical behavior.
   //
   // ADR-0019 (T4): when workspaceRoot is threaded, `<workspaceRoot>/.iknow`
   // is added as a second read root so the agent's per-root persona state
@@ -57,12 +117,10 @@ export function createReadFileTool(
   // `isSensitive` set) is the separate fence that turns `.iknow` state
   // files into `execution_failed` when touched from the bash channel. Read
   // and protection are independent and intentionally so — see plan T4.
-  const extraReadRoots = Object.freeze([
-    iknowProfileRoot(),
-    ...(opts?.workspaceRoot && opts.workspaceRoot !== root
-      ? [join(opts.workspaceRoot, ".iknow")]
-      : []),
-  ]);
+  //
+  // ADR-0037 §1 (T6 D10 wired): projectIdentityRoot threads the read-only
+  // identity-root passthrough so rebind doesn't strand AGENTS.md /
+  // permissions.toml / project rules.
   return Object.freeze({
     name: "read_file",
     description:
@@ -90,8 +148,15 @@ export function createReadFileTool(
     },
     handler: async (input: unknown) => {
       const params = parseInput(input);
+      // T6 D9: same wave snapshot — root and extras share the snapshot.
+      const rootAtCall = readRoot(root);
+      const extraReadRoots = computeExtraReadRoots(
+        rootAtCall,
+        opts?.workspaceRoot,
+        opts?.projectIdentityRoot
+      );
       const resolved = await resolveWithinRoot(
-        root,
+        rootAtCall,
         params.path,
         extraReadRoots
       );

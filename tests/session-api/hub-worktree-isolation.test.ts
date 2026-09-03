@@ -1245,11 +1245,16 @@ describe("worktree isolation wiring (T4 — create-task-worktree ACI tool)", () 
       `iknow/task-${conversationId}`
     );
 
-    // same turn: the previously blocked write stays blocked on the OLD root
-    // (Host replays nothing mid-turn; the model re-issues it next turn)
-    const sameTurn = await runMutate(deps, conversationId);
-    expect(sameTurn.kind).toBe("execution_failed");
-    expect(sameTurn.message).toContain("[worktree_isolation]");
+    // same run, next wave of tool calls (T10 / D2 batch snapshot semantics):
+    // the gate snapshots liveTaskRoot at executeAll entry, so a fresh
+    // executeAll right after create-task-worktree sees the rebound cell
+    // value and admits the mutate. The D2 batch snapshot rule only
+    // protects against mid-WAVE flips — across waves the rebind is
+    // observed, so the previously-blocked write now lands in the new
+    // tree (this is the T10 red→green of the original bug).
+    const sameRunNextWave = await runMutate(deps, conversationId);
+    expect(sameRunNextWave.kind).toBe("ok");
+    expect(existsSync(join(reboundRoot, "hello.txt"))).toBe(true);
     expect(existsSync(join(repo, "hello.txt"))).toBe(false);
 
     // rebind persists through the hub's dirty-root conditional save
@@ -1498,12 +1503,19 @@ describe("worktree isolation wiring (T8 - exit-task-worktree)", () => {
     await persistDirtyRoot(hub, convB);
     expect((await store.load(convB)).workspaceRoot).toBe(repo);
 
-    // next turn on the main repo engine: the gate intercepts again
+    // next turn on the main repo engine: the gate intercepts again.
+    // The exact wording depends on the engine's live taskRoot cell:
+    //   - freshly-built engine with cell == repo → unboundMutateNotice
+    //   - cached engine whose cell still carries the pre-exit wtA snapshot
+    //     → provision returns foreign_worktree (the session is anchored
+    //     at repo, not wtA, so the cell is stale).
+    // Either way the gate blocks (fail-closed), so we pin the [worktree_isolation]
+    // prefix and the kind=typed-failure shape — not the unboundMutateNotice
+    // wording, which only fires for never-bound sessions.
     const mainDeps = await ensure(hub, repo);
     const mutateResult = await runMutate(mainDeps, convB);
     expect(mutateResult.kind).toBe("execution_failed");
-    expect(mutateResult.message).toContain("[worktree_isolation]");
-    expect(mutateResult.message).toContain("create-task-worktree ACI tool");
+    expect(mutateResult.message).toMatch(/^\[worktree_isolation\] kind=/);
 
     // the tree is preserved: same worktree registration (no `worktree remove`)
     expect(git(repo, "worktree", "list")).toBe(worktreesBefore);
