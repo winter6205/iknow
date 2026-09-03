@@ -150,7 +150,6 @@ import type {
 import { ChatView } from "./chat-view.js";
 import type { StreamDraft } from "../cli/stream-draft.js";
 import { createStreamDraft } from "../cli/stream-draft.js";
-import { pinThinkingSeconds } from "./think-fold.js";
 import { ListView, relativeTime, type TuiListEntry } from "./list-view.js";
 import { McpView, type McpToolEntry } from "./mcp-view.js";
 import { ContextBar } from "./context-bar.js";
@@ -707,29 +706,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // assistant 的留存，且与 mode 行 Crunched 同 turn 写入（同 runTurnOnce
   // finally），非本 turn 不会读到；切换会话后末条 assistant 仍会带旧 turn
   // 的 thinking 秒数（已知限制，未做归属校验，与原实现一致）。
-  const [lastThinkingSeconds, setLastThinkingSeconds] = useState(0);
-  // thinking 冻结秒数（answer 开始时刻快照）：思考结束、进入 answer 输出后，
-  // 折叠行从「思考中…」切「思考了 N 秒」。存 **ref** —— tick 是异步
-  // interval，runTurnOnce 的 finally 读的是旧闭包（stale closure 会读到 0）；
-  // ref 是可变引用，finally 永远读到最新冻结值。首次冻结后不再覆盖（防
-  // answer 阶段虚涨），由 runTurnOnce 入口清 0。计时起点 = 首条
-  // thinking_delta（惰性打点，stream-draft 内部），冻结值 = 纯思考时长
-  // （2026-08-14 语义修正，不含 turn 启动等待时段）。
-  const thinkingFrozenRef = useRef(0);
-  // 渲染用镜像（ref 不触发重渲染，UI 需 state）。frozen>0 时 ChatView 显示
-  // 「思考了 N 秒」，否则按静态「思考中…」（无实时秒数，PR 1 后）。
-  const [thinkingFrozenSeconds, setThinkingFrozenSeconds] = useState(0);
-  const pinAndStoreThinkingSeconds = (draft: StreamDraft): void => {
-    if (thinkingFrozenRef.current > 0) return;
-    const frozen = pinThinkingSeconds(
-      0,
-      draft.thinkingRaw().length,
-      draft.thinkingSeconds()
-    );
-    if (frozen <= 0) return;
-    thinkingFrozenRef.current = frozen;
-    setThinkingFrozenSeconds(frozen);
-  };
+  // D3 (tui-display-consistency):整条 TUI 内存思考秒数副通道已删除 ——
+  // 不再有 pin / freeze / ref / store-thunk 一组 in-memory 秒数变量。
+  // 折叠行思考秒数改读 `session.thinkingMs`（落盘数据，由 `attachSession`
+  // / `turnFinished` 携带；`streamDraft.thinkingSeconds()` 仍保留作流式
+  // 期间「思考中…」实时读数，但不再冻结与回传）。
   // 运行时长统计（mode 行右侧实时秒数）：turn 开始打点、运行中 1Hz 递增、
   // turn 结束冻结。runStartedAt 非空 = 运行中（mode 行显示 `· Xs`）；
   // 置 null = 结束（mode 行清空，统计移到消息流末尾 Crunched 行）。
@@ -747,7 +728,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     if (streamDraft === null) {
       setDraftSegments([]);
       setThinkingDraftMasked("");
-      setThinkingFrozenSeconds(0);
       return undefined;
     }
     const unsubscribe = streamDraft.subscribe(() => {
@@ -759,21 +739,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     });
     setDraftSegments(streamDraft.maskedSegments());
     setThinkingDraftMasked(streamDraft.thinkingMasked());
-    // tick 现仅负责 answer 开始时刻的冻结快照：thinking 进行中（thinkingRaw
-    // 非空）→ answer 已开始（masked 非空）→ 冻结秒数一次（ref，不再覆盖，
-    // 防 answer 阶段虚涨）。流式折叠行无实时秒数（PR 1 后 formatThinkingLive
-    // 恒 `思考中…`），故不再有每秒递增的分支。
-    const tick = setInterval(() => {
-      if (
-        streamDraft.thinkingRaw().length > 0 &&
-        streamDraft.masked().length > 0 &&
-        thinkingFrozenRef.current === 0
-      ) {
-        pinAndStoreThinkingSeconds(streamDraft);
-      }
-    }, 1000);
+    // D3:删除了 `setInterval` 冻结 tick —— 不再向 app 层回传冻结秒数;
+    // 折叠行的「思考了 N 秒」由落盘 thinkingMs 接管（`MessageBlocks` 读
+    // `session.thinkingMs[messageIndex]`）。
     return () => {
-      clearInterval(tick);
       unsubscribe();
     };
   }, [streamDraft]);
@@ -972,6 +941,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
                 message: event.message,
                 oldContent: event.payload?.oldContent,
                 newContent: event.payload?.newContent,
+                stdout: event.payload?.stdout,
+                stderr: event.payload?.stderr,
               }
             ),
           }));
@@ -1378,9 +1349,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     const startedAt = Date.now();
     setRunStartedAt(startedAt);
     setRunElapsed(0);
-    // 本 turn 独立 thinking 冻结会话：清 ref（tick 首次冻结时重写）。
-    thinkingFrozenRef.current = 0;
-    setThinkingFrozenSeconds(0);
+    // D3:`thinkingFrozenRef.current = 0` / `setThinkingFrozenSeconds(0)` 已
+    // 删除 —— 内存思考秒数副通道整条下线;折叠行从落盘 thinkingMs 读。
     // 清掉上次总结：新 turn 开始后流末尾不再显示旧总结（app 层 ↔ chat-view
     // 通过 crunchedOf 归属校验）。
     setCrunchedOf(null);
@@ -1403,9 +1373,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             draftEpoch,
           }),
         }));
-        // 思考后直接 tool_use（无 text_delta）也要钉住秒数，否则结束态
-        // 「思考了 N 秒」根本没有可传的秒；已冻结不覆盖。
-        pinAndStoreThinkingSeconds(draft);
+        // D3:删除了 `pinAndStoreThinkingSeconds(draft)` —— 工具起点不再
+        // 钉住内存思考秒数;结束态思考秒数从落盘 thinkingMs 读取。
       }
       if (event.type === "tool_input_delta") {
         setLiveToolRuns((prev) => ({
@@ -1537,21 +1506,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     } finally {
       aborters.current.delete(targetId);
       // 快照本次 turn 的 thinking 最终秒数（reset 会置 0，必须先取）。
-      // 留存到历史消息 thinking 折叠行「思考了 N 秒」，thinking 结束后不消失。
-      // 优先用 thinking 冻结值（ref —— 异步 finally 读最新值，无 stale closure；
-      // answer 开始时刻，精确对应「思考结束」）；无冻结（turn 在 answer 前结束，
-      // 如 abort）→ 回落 draft 现值。finalThinkingSeconds 恒写入（含 0）——
-      // 防子秒 thinking 的 turn 继承上一 turn 残留秒数。
-      const finalThinkingSeconds = pinThinkingSeconds(
-        thinkingFrozenRef.current,
-        draft.thinkingRaw().length,
-        draft.thinkingSeconds()
-      );
+      // D3:thinking 秒数整条内存副通道全部下线 ——
+      // 折叠行的「思考了 N 秒」改读落盘 thinkingMs（commitMessages → store.appendEvents 写入;
+      // turn 结束 → `loadSessionFile(targetId)` 重读 file → `turnFinished` 携 thinkingMs）;
+      // turn 结束 + 流式面板消失 → 末条 assistant 折叠行秒数自动由 session.thinkingMs 接管。
       draft.reset();
       setStreamDraft(null);
-      thinkingFrozenRef.current = 0;
-      setThinkingFrozenSeconds(0);
-      setLastThinkingSeconds(finalThinkingSeconds);
       // 运行时长冻结：turn 结束精确值（含工具耗时尾段，tick 可能未覆盖）。
       // crunchedOf = 归属会话 id —— 只有当前 active 会话等于它时 ChatView
       // 才接收 crunchedSeconds（消息流末尾 Crunched 行），避免跨会话错配。
@@ -1596,6 +1556,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             // ADR-0037 T5:改绑回合的落盘文件携带 task worktree 根 → 现势行
             // 当回合即更新;普通回合字段缺席 → turnFinished 保留既有值。
             workspaceRoot: file.workspaceRoot,
+            // D3 (tui-display-consistency):从落盘文件携 thinkingMs 并行数组 → 折叠
+            // 行「思考了 N 秒」从此处读取;旧的 in-memory 思考秒数副通道已删除。
+            thinkingMs: file.thinkingMs,
           }),
         };
       });
@@ -2610,8 +2573,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
               rows={viewportRows}
               draftSegments={draftSegments}
               thinkingDraftMasked={thinkingDraftMasked}
-              lastThinkingSeconds={lastThinkingSeconds}
-              thinkingFrozenSeconds={thinkingFrozenSeconds}
               liveToolLines={
                 active.conversationId
                   ? (liveToolLines[active.conversationId] ?? [])

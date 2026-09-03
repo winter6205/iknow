@@ -14,9 +14,11 @@ import {
   lastTurnQueryIndex,
   mergeToolUseCounts,
   orderedTurnActivitySegments,
-  sliceTurnFrom,
   shouldCollapseTurnToolRows,
   shouldShowTurnActivityFold,
+  sliceTurnFrom,
+  sumThinkingMsInRange,
+  thinkingMsToSeconds,
   toolUseIdsOf,
 } from "../../src/tui/turn-activity.js";
 
@@ -345,35 +347,117 @@ describe("toolUseIdsOf / countNamedCalls / mergeToolUseCounts", () => {
 });
 
 describe("shouldShowTurnActivityFold / shouldCollapseTurnToolRows", () => {
-  test("running → 不画折叠行、不藏工具", () => {
+  // D3 (tui-display-consistency):`thinkingSeconds > 0 || turnToolTotal > 1`
+  // 旧闸门已删除 —— idle + 任意已完成工具都折叠;running 保持逐条可见。
+  test("running → 不画折叠行、不藏工具（running 闸保持）", () => {
     expect(
       shouldShowTurnActivityFold({
         running: true,
-        thinkingSeconds: 6,
         turnToolTotal: 3,
       })
     ).toBe(false);
     expect(shouldCollapseTurnToolRows(true, 2, 3)).toBe(false);
   });
 
-  test("idle + 思考秒数 + 多工具 → 折叠", () => {
+  test("idle + 多工具 → 折叠（无思考秒数也折叠）", () => {
     expect(
       shouldShowTurnActivityFold({
         running: false,
-        thinkingSeconds: 6,
         turnToolTotal: 3,
       })
     ).toBe(true);
     expect(shouldCollapseTurnToolRows(false, 2, 3)).toBe(true);
   });
 
-  test("idle + 单次工具无思考 → 不折叠", () => {
+  test("idle + 单工具无思考 → 也折叠（spec D3：旧「单工具永不折叠」闸已删除）", () => {
     expect(
       shouldShowTurnActivityFold({
         running: false,
-        thinkingSeconds: 0,
         turnToolTotal: 1,
       })
+    ).toBe(true);
+    expect(shouldCollapseTurnToolRows(false, 1, 1)).toBe(true);
+  });
+
+  test("idle + 零工具 → 不折叠", () => {
+    expect(
+      shouldShowTurnActivityFold({
+        running: false,
+        turnToolTotal: 0,
+      })
     ).toBe(false);
+  });
+});
+
+describe("sumThinkingMsInRange（折叠簇内 thinkingMs 求和纯函数）", () => {
+  test("empty：thinkingMs undefined → 全 0（旧会话/无落盘数据）", () => {
+    expect(sumThinkingMsInRange(undefined, [0, 1, 2])).toBe(0);
+    expect(sumThinkingMsInRange(undefined, [])).toBe(0);
+  });
+
+  test("empty：indices 空数组 → 全 0（无簇）", () => {
+    expect(sumThinkingMsInRange([1500, 2000], [])).toBe(0);
+  });
+
+  test("null 元素按 0 计入（非流式回合 / 该事件无 thinkingMs）", () => {
+    expect(sumThinkingMsInRange([null, null, null], [0, 1, 2])).toBe(0);
+    expect(sumThinkingMsInRange([1500, null, 2000], [0, 1, 2])).toBe(
+      1500 + 2000
+    );
+  });
+
+  test("混合：合法 number + null + 缺席按 0 计入", () => {
+    expect(sumThinkingMsInRange([1500, null, 2000], [0, 1, 2, 3])).toBe(
+      1500 + 2000
+    );
+    expect(sumThinkingMsInRange([1500, null, 2000], [1])).toBe(0);
+  });
+
+  test("全 null：合法求和 → 0（折叠行只显示工具计数，不显示 0 秒）", () => {
+    expect(sumThinkingMsInRange([null, null], [0, 1])).toBe(0);
+  });
+
+  test("全 number 求和", () => {
+    expect(sumThinkingMsInRange([1000, 2000, 3000], [0, 1, 2])).toBe(6000);
+    expect(sumThinkingMsInRange([250, 750, 1500], [2])).toBe(1500);
+  });
+
+  test("越界索引按 0 计入（数组长度 < max(indices)+1）", () => {
+    expect(sumThinkingMsInRange([1500], [0, 5])).toBe(1500);
+    expect(sumThinkingMsInRange([], [0, 1])).toBe(0);
+  });
+
+  test("exception：非有限 / <= 0 数字按 0 计入（appendEvents 已过滤，consumer 再防御）", () => {
+    expect(
+      sumThinkingMsInRange([1500, Number.NaN, 2000, 0, -1], [0, 1, 2, 3, 4])
+    ).toBe(3500);
+    expect(sumThinkingMsInRange([Number.POSITIVE_INFINITY, 1500], [0, 1])).toBe(
+      1500
+    );
+  });
+
+  test("exception：非整数 / 负索引跳过", () => {
+    expect(sumThinkingMsInRange([1500, 2000], [0.5, -1, 0])).toBe(1500);
+  });
+});
+
+describe("thinkingMsToSeconds（ms → 秒）", () => {
+  test("empty / negative：<= 0 / undefined / NaN / Infinity → 0", () => {
+    expect(thinkingMsToSeconds(0)).toBe(0);
+    expect(thinkingMsToSeconds(-1)).toBe(0);
+    expect(thinkingMsToSeconds(Number.NaN)).toBe(0);
+    expect(thinkingMsToSeconds(Number.POSITIVE_INFINITY)).toBe(0);
+  });
+
+  test("overflow：1ms 也算 1 秒（向上取整，避免显示 0 秒伪精度）", () => {
+    expect(thinkingMsToSeconds(1)).toBe(1);
+    expect(thinkingMsToSeconds(999)).toBe(1);
+    expect(thinkingMsToSeconds(1000)).toBe(1);
+    expect(thinkingMsToSeconds(1500)).toBe(2);
+    expect(thinkingMsToSeconds(29_999)).toBe(30);
+  });
+
+  test("concurrent：纯函数稳定", () => {
+    expect(thinkingMsToSeconds(7500)).toBe(thinkingMsToSeconds(7500));
   });
 });

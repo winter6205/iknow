@@ -96,7 +96,14 @@ export function AgentCard({
       style={staggerStyle(staggerIndex)}
     >
       {/* thinking 折叠展开（默认收起，aria-expanded + 键盘可达）。 */}
-      {thinking ? <ThinkingBlock thinking={thinking} /> : null}
+      {thinking ? (
+        <ThinkingBlock
+          thinking={thinking}
+          {...(answer?.thinkingMs !== undefined
+            ? { thinkingMs: answer.thinkingMs }
+            : {})}
+        />
+      ) : null}
 
       {/* Ordered activity replaces the legacy body/tools pair only when non-empty. */}
       {hasActivity ? (

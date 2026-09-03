@@ -28,6 +28,7 @@ import { run } from "../../src/harness/loop-engine.ts";
 import { MessageCommitError } from "../../src/harness/errors.ts";
 import type {
   AnthropicNativeMessage,
+  AssistantTurnResult,
   LoopEngineDeps,
 } from "../../src/harness/index.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
@@ -45,6 +46,15 @@ import {
 } from "../../src/session-api/store/index.ts";
 
 // -- fixtures ----------------------------------------------------------------
+
+// D2 boundary fixture: shape-compatible with AnthropicNativeMessage without
+// pulling a deep import graph (mirror of session-store.test.ts shape helpers).
+function assistantMsgShape(text: string): AnthropicNativeMessage {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+  };
+}
 
 const tempDirs: string[] = [];
 async function storeFor(): Promise<{
@@ -201,9 +211,25 @@ describe("T3 ordering: commit 序列与内容", () => {
   it("[assistant] → [user(tr_a)] → [user(tr_b)] → [assistant final];内存仍单条 user message", async () => {
     const commits: AnthropicNativeMessage[][] = [];
     const commitMessages = async (
-      messages: ReadonlyArray<AnthropicNativeMessage>
+      messages: ReadonlyArray<AnthropicNativeMessage>,
+      thinkingMs?: number
     ): Promise<void> => {
       commits.push([...messages]);
+      // D2:thinkingMs 仅在 assistant commit 批次携带;tool_result 批次
+      // thinkingMs === undefined(committed[1] / [2])。
+      if (messages[0]?.role === "assistant") {
+        assert.equal(
+          thinkingMs,
+          undefined,
+          "stub 流式回合无 thinkingMs → assistant commit 也应传 undefined"
+        );
+      } else {
+        assert.equal(
+          thinkingMs,
+          undefined,
+          "tool_result commit 永远传 undefined(thinkingMs 仅 assistant 携带)"
+        );
+      }
     };
     const { result } = await run("go", twoToolDeps({ commitMessages }));
     assert.equal(result.stopReason, "completed");
@@ -262,6 +288,165 @@ describe("T3 failure policy: commit 失败", () => {
     const { result } = await run("go", twoToolDeps({}));
     assert.equal(result.stopReason, "completed");
     assert.equal(result.messages.length, 4);
+  });
+});
+
+// -- 4. D2 (tui-display-consistency): thinkingMs commit seam -------------------
+
+describe("D2 acceptance: thinkingMs flows from adapter to JSONL event record", () => {
+  // D2 stub harness: stub 流式臂在 step 返回前手工注入 thinkingMs(adapter
+  // 内部测量是真实 SDK 流式路径,stub 模型不模拟;此处直接给 stub-model 的
+  // AssistantTurnResult 写值,模拟"adapter 已测量"的形态,验证 commit 缝 +
+  // hub 接线的端到端形态)。
+  function stubWithThinkingMs(
+    thinkingMsByStep: ReadonlyArray<number | undefined>
+  ): AssistantTurnResult[] {
+    return thinkingMsByStep.map((ms, i) => ({
+      ...assistantResult({
+        texts: i === thinkingMsByStep.length - 1 ? [`done-${i}`] : [""],
+        toolCalls:
+          i < thinkingMsByStep.length - 1
+            ? [{ id: `tc-${i}`, name: "alpha", input: {} }]
+            : [],
+      }),
+      ...(ms !== undefined ? { thinkingMs: ms } : {}),
+    }));
+  }
+
+  it("stub 流式回合带 thinkingMs → 盘上 JSONL assistant 事件挂值", async () => {
+    const { store, sessionDir } = await storeFor();
+    const id = "d2-thinking";
+    await store.save({ id, file: emptySessionFile(id) });
+
+    const responses = stubWithThinkingMs([1500, 2300]);
+    const adapter = createStubModel({ responses });
+    const alpha = createStubTool({ name: "alpha", next: () => "ok" });
+    const registry = createRegistry([alpha]);
+    const executor = createExecutor(registry);
+    const committedThinking: (number | undefined)[] = [];
+    const commitMessages = async (
+      messages: ReadonlyArray<AnthropicNativeMessage>,
+      thinkingMs?: number
+    ): Promise<void> => {
+      committedThinking.push(thinkingMs);
+      await store.appendEvents({
+        id,
+        events: messages,
+        ...(thinkingMs !== undefined ? { thinkingMs } : {}),
+      });
+    };
+    const deps: LoopEngineDeps = {
+      adapter,
+      executor,
+      registry,
+      maxTurns: 5,
+      commitMessages,
+    };
+    await run("go", deps);
+
+    // 3 个 commit:assistant(1500) → tool_result user → assistant final(2300)。
+    assert.deepEqual(committedThinking, [1500, undefined, 2300]);
+    const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+    const log = parseSessionJsonl(raw);
+    assert.equal(log.events.length, 3);
+    // e0 assistant — thinkingMs = 1500
+    assert.equal(log.events[0]!.message.role, "assistant");
+    assert.equal(log.events[0]!.thinkingMs, 1500);
+    // e1 user (tool_result) — no thinkingMs key
+    assert.equal(log.events[1]!.message.role, "user");
+    assert.equal(
+      "thinkingMs" in log.events[1]!,
+      false,
+      "user event must NOT carry thinkingMs"
+    );
+    // e2 assistant final — thinkingMs = 2300
+    assert.equal(log.events[2]!.message.role, "assistant");
+    assert.equal(log.events[2]!.thinkingMs, 2300);
+  });
+
+  it("无思考(thinkingMs 缺席) → 助手事件不挂 key(load projection 也不挂 array)", async () => {
+    const { store, sessionDir } = await storeFor();
+    const id = "d2-no-thinking";
+    await store.save({ id, file: emptySessionFile(id) });
+
+    const responses = stubWithThinkingMs([undefined, undefined]);
+    const adapter = createStubModel({ responses });
+    const alpha = createStubTool({ name: "alpha", next: () => "ok" });
+    const registry = createRegistry([alpha]);
+    const executor = createExecutor(registry);
+    const committedThinking: (number | undefined)[] = [];
+    const commitMessages = async (
+      messages: ReadonlyArray<AnthropicNativeMessage>,
+      thinkingMs?: number
+    ): Promise<void> => {
+      committedThinking.push(thinkingMs);
+      await store.appendEvents({
+        id,
+        events: messages,
+        ...(thinkingMs !== undefined ? { thinkingMs } : {}),
+      });
+    };
+    const deps: LoopEngineDeps = {
+      adapter,
+      executor,
+      registry,
+      maxTurns: 5,
+      commitMessages,
+    };
+    await run("go", deps);
+
+    // 全部 undefined → 全部 缺席。
+    assert.deepEqual(committedThinking, [undefined, undefined, undefined]);
+    const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+    const log = parseSessionJsonl(raw);
+    for (const event of log.events) {
+      assert.equal(
+        "thinkingMs" in event,
+        false,
+        `event ${event.id} must NOT carry thinkingMs when adapter measures undefined`
+      );
+    }
+    // Load projection 走 spread-discipline:全链均无 → 不挂 key。
+    const projected = projectSessionLog(log);
+    assert.equal(
+      "thinkingMs" in projected,
+      false,
+      "load must not grow thinkingMs key when no event carries it"
+    );
+  });
+
+  it("边界非法(thinkingMs <= 0 / 非有限数) → appendEvents 过滤不挂 key", async () => {
+    // 通过 store 层(commit 缝不引入校验,store 入口过滤)验证边界形态:
+    // 直接调 store.appendEvents,传入非法值 → 不挂 key。
+    const { store, sessionDir } = await storeFor();
+    const id = "d2-boundary";
+    await store.save({ id, file: emptySessionFile(id) });
+    const illegal: unknown[] = [0, -1, NaN, Infinity, -Infinity];
+    for (let i = 0; i < illegal.length; i++) {
+      const seqId = `${id}-${i}`;
+      await store.save({ id: seqId, file: emptySessionFile(seqId) });
+      // ts-expect-error -- probe defensive behavior on illegal values
+      await store.appendEvents({
+        id: seqId,
+        events: [assistantMsgShape(`a-${i}`)],
+        thinkingMs: illegal[i] as number,
+      });
+      const lines = (await readFile(join(sessionDir, `${seqId}.jsonl`), "utf8"))
+        .split("\n")
+        .filter((l) => l.trim().length > 0)
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      // 找 appended message record(type:"message") —— save() 写过 0 events
+      // 但留旧 head:null,appendEvents 追加 message + 新 head,所以 message
+      // 不一定在 lines[1],用 filter 定位。
+      const messageRecord = lines.find((l) => l?.["type"] === "message") as
+        Record<string, unknown> | undefined;
+      assert.ok(messageRecord, "appended message record must exist in JSONL");
+      assert.equal(
+        "thinkingMs" in messageRecord,
+        false,
+        `illegal value ${String(illegal[i])} must not stamp thinkingMs`
+      );
+    }
   });
 });
 

@@ -169,6 +169,15 @@ export interface SessionFileV1 {
    *  (rewind-picker.tsx anchoredAtFor) 用 ?? "" 兜底，undefined / 缺席
    *  同语义。 */
   readonly messageCreatedAt?: ReadonlyArray<string | null>;
+  /** D2 (tui-display-consistency): 与 messages 一一对应的 assistant 回合思考
+   *  时长(ms)。element = `number | null`,null = 该位置事件无 thinkingMs(非
+   *  assistant / 流式回合无思考 / legacy 文件)。整个 key 缺席 = 整链均无
+   *  thinkingMs(条件输出，与 messageCreatedAt 同 spread-discipline 纪律)。
+   *  测量点:anthropic-adapter 流式臂 stepStreamArm 首条 thinking_delta 至
+   * 首个非思考增量的时长;非流式 / 边界形态(thinkingMs <= 0 或非有限数)
+   *  → 字段缺席，appendEvents 不挂 key。schema additive(CURRENT 保持 5)。
+   *  数组长度不强制(消费侧 ?? undefined 兜底,与 messageCreatedAt 现状一致)。 */
+  readonly thinkingMs?: ReadonlyArray<number | null>;
 }
 
 export const CURRENT_SCHEMA_VERSION = 5 as const;
@@ -237,6 +246,19 @@ export function validateSessionFile(value: unknown): string | null {
     !isValidMessageCreatedAt(obj["messageCreatedAt"])
   ) {
     return "messageCreatedAt";
+  }
+  // D2 (tui-display-consistency):optional parallel array over messages for
+  // assistant 回合思考时长(ms)。element 必须是 number 或 null(运行时
+  // `undefined` 在 JSON 序列化为 null,只接受 null 不接受 undefined —— 与
+  // messageCreatedAt 同 posture)。值不再做边界判断(appendEvents 入口已
+  // 过滤 thinkingMs <= 0 / 非有限数,不会把 0/NaN/Infinity 落盘)。
+  // 数组长度不强制,缺齐以消费侧 ?? undefined 兜底(与 messageCreatedAt
+  // 现状一致)。
+  if (
+    obj["thinkingMs"] !== undefined &&
+    !isValidThinkingMs(obj["thinkingMs"])
+  ) {
+    return "thinkingMs";
   }
   return null;
 }
@@ -628,6 +650,22 @@ function isValidMessageCreatedAt(value: unknown): boolean {
   for (const el of value) {
     if (el === null) continue;
     if (typeof el !== "string") return false;
+  }
+  return true;
+}
+
+/** D2 (tui-display-consistency):Optional `thinkingMs` parallel array over
+ *  messages. elements are `number | null`(appendEvents 入口已过滤
+ *  `thinkingMs <= 0` / 非有限数,不会把 0/NaN/Infinity 落盘;此 validator
+ *  不重复边界判定 —— 它只检查元素类型,允许任意正 number,接受 null 孔洞)。
+ *  数组长度不强制,与 messageCreatedAt 现状一致。运行时 `undefined` 经
+ *  JSON.stringify 序列化为 null,因此 validator 接受 null 而不接受 undefined
+ *  —— 与 messageCreatedAt 同 posture。 */
+function isValidThinkingMs(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  for (const el of value) {
+    if (el === null) continue;
+    if (typeof el !== "number") return false;
   }
   return true;
 }

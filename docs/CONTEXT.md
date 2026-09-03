@@ -56,6 +56,12 @@ _Avoid_: 固定条数尾窗；行账 / 行窗口；把 LLM `/compact` 当 UI 树
 **fence display cap**: TUI markdown 围栏在 OpenTUI 树上只挂前 32 行，溢出用 `还有 N 行`；会话正文仍是全文。与 write/edit 完成态 6 行预览窗分开。
 _Avoid_: 用只挂最近 N 条消息代替围栏截行；把围栏窗改成 6；为省树而删 session 里的代码
 
+**result preview（结果预览）**: 工具调用标题行下方的截断输出块——`⎿` 风格 dim 前缀、上限 5 行、bash 取尾部、ANSI 透传、失败照显标红。数据走 handler envelope 的 `meta` 观测旁路（plain-string tool output / #298），永不进模型视野；与 `fence display cap`（32 行）、write/edit 6 行预览并列三类显示窗。
+_Avoid_: 把 meta 字段经 encodeToolResults 带进 model tool_result；把 5 行窗与围栏 32 行或 write/edit 6 行混用；渲染空预览块（空/全空白/ANSI strip 后为空 → 不渲染）
+
+**thinking duration（思考时长）**: assistant 消息的落盘属性——adapter 流式路径测量（首条 `thinking_delta` 至首个非思考增量），`thinkingMs` 经 commit 钩子随事件链落盘，`SessionFileV1` 上照 `messageCreatedAt` 模式重建并行数组（additive，schema 版本不升）；折叠簇时长 = 簇内消息求和。非 UI 测量值。
+_Avoid_: TUI 墙上时钟副产物（只活当前轮/重启即失/跨会话串味）；挂在 thinking 内容块上（污染 provider replay）；旧会话回填；`thinkingMs <= 0` 或非有限数落盘（字段缺席）
+
 **streaming block freeze**: 会变长的那串 markdown 里，除最后一个顶层块外钉住，后续增量不再 lexer、不再重建前缀子树；边界只前进。
 _Avoid_: 把历史消息 memo 当成同一件事；每个新字整篇重解析；冻结时放开围栏 32 行窗
 

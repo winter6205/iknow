@@ -182,9 +182,23 @@ interface BashResult {
   readonly stderr: string;
 }
 
+/** #693 T4 D4:bash handler 自 T4 起返回 envelope `{ output, meta? }`,模型视野
+ *  仅见 `output` 字段里 JSON 化的 code/stdout/stderr（形状不变）。本测试文件
+ *  保持「接口 = BashResult 旧形」契约,在 helper 层多走一次 parse —— 业务
+ *  断言不被 envelope 包装影响。 */
+interface BashEnvelope {
+  readonly output: string;
+  readonly meta?: { readonly stdout?: string; readonly stderr?: string };
+}
+
+function parseBashEnvelope(envelope: BashEnvelope): BashResult {
+  return JSON.parse(envelope.output) as BashResult;
+}
+
 async function runBash(cwd: string, command: string): Promise<BashResult> {
   const tool = createBashTool(cwd);
-  return (await tool.handler({ command })) as BashResult;
+  const envelope = (await tool.handler({ command })) as BashEnvelope;
+  return parseBashEnvelope(envelope);
 }
 
 // ---------------------------------------------------------------------------
@@ -201,9 +215,11 @@ describe("#406 T3 — bash 占位符还原层", () => {
     registry.register("sk-aaaaaaaaaaaaaaaaaaaa");
     const tool = createBashTool(cwd, { secretRegistry: registry });
 
-    const result = (await tool.handler({
-      command: 'echo "<<<SECRET_1>>>"',
-    })) as BashResult;
+    const result = parseBashEnvelope(
+      (await tool.handler({
+        command: 'echo "<<<SECRET_1>>>"',
+      })) as BashEnvelope
+    );
 
     // 注：M1 输出遮罩在 restore 后跑，stdout 此时已是 ***（掩盖真值）。
     // 本用例 assert restore 命中（占位符消失 + 真值被 mask 替代），不
@@ -229,9 +245,11 @@ describe("#406 T3 — bash 占位符还原层", () => {
     registry.register("AKIA1234567890ABCDEF");
     const tool = createBashTool(cwd, { secretRegistry: registry });
 
-    const result = (await tool.handler({
-      command: 'echo "<<<SECRET_1>>> <<<SECRET_2>>>"',
-    })) as BashResult;
+    const result = parseBashEnvelope(
+      (await tool.handler({
+        command: 'echo "<<<SECRET_1>>> <<<SECRET_2>>>"',
+      })) as BashEnvelope
+    );
 
     // 同上：restore 命中后被 mask 遮成 *** ***；本用例仅 assert 两个
     // 占位符都已被还原（stdout 不含占位符字面）。
@@ -254,9 +272,11 @@ describe("#406 T3 — bash 占位符还原层", () => {
 
     // 引号内占位符保证 bash 不把它当 here-string 重定向；restore 只还原已注册
     // 占位符，未注册的 <<<SECRET_MISSING>>> 原样进入 bash 并输出到 stdout。
-    const result = (await tool.handler({
-      command: 'echo "<<<SECRET_MISSING>>>"',
-    })) as BashResult;
+    const result = parseBashEnvelope(
+      (await tool.handler({
+        command: 'echo "<<<SECRET_MISSING>>>"',
+      })) as BashEnvelope
+    );
 
     assert.equal(result.code, 0);
     assert.equal(
@@ -272,9 +292,11 @@ describe("#406 T3 — bash 占位符还原层", () => {
       secretRegistry: createSecretRegistry(),
     });
 
-    const result = (await tool.handler({
-      command: "echo keep",
-    })) as BashResult;
+    const result = parseBashEnvelope(
+      (await tool.handler({
+        command: "echo keep",
+      })) as BashEnvelope
+    );
 
     assert.equal(result.code, 0);
     assert.equal(result.stdout, "keep\n");
@@ -287,7 +309,9 @@ describe("#406 T3 — bash 占位符还原层", () => {
 // 约束：
 //   - mask 构造在 handler 内每次现取（registry 值可跨 turn 变化；不模块级缓存）
 //   - 缺席 secretRegistry → 不 mask、不 crash
-//   - 形状不变：恰 {code, stdout, stderr} 三字段
+//   - envelope 形态：顶层恰 { output: string, meta?: { stdout?, stderr? } },
+//     output 字段里 JSON 化 code/stdout/stderr（模型视野字节不变），
+//     meta 是观测旁路（TUI 5 行尾窗用，不进模型 tool_result）
 //   - registry 在场但空 → mask identity，输出原样
 describe("#406 T3 — bash 输出遮罩（output-mask on stdout/stderr）", () => {
   it("M1：registry 在场 + 命令经占位符还原路径 → stdout 真值被遮罩为 ***", async () => {
@@ -297,9 +321,11 @@ describe("#406 T3 — bash 输出遮罩（output-mask on stdout/stderr）", () =
     registry.register(secret);
     const tool = createBashTool(cwd, { secretRegistry: registry });
 
-    const result = (await tool.handler({
-      command: 'echo "<<<SECRET_1>>>"',
-    })) as BashResult;
+    const result = parseBashEnvelope(
+      (await tool.handler({
+        command: 'echo "<<<SECRET_1>>>"',
+      })) as BashEnvelope
+    );
 
     assert.equal(result.code, 0);
     assert.equal(
@@ -321,9 +347,11 @@ describe("#406 T3 — bash 输出遮罩（output-mask on stdout/stderr）", () =
     registry.register(secret);
     const tool = createBashTool(cwd, { secretRegistry: registry });
 
-    const result = (await tool.handler({
-      command: `printf '%s' "<<<SECRET_1>>>" >&2; exit 0`,
-    })) as BashResult;
+    const result = parseBashEnvelope(
+      (await tool.handler({
+        command: `printf '%s' "<<<SECRET_1>>>" >&2; exit 0`,
+      })) as BashEnvelope
+    );
 
     assert.equal(result.code, 0);
     assert.equal(result.stdout, "");
@@ -344,9 +372,11 @@ describe("#406 T3 — bash 输出遮罩（output-mask on stdout/stderr）", () =
     const tool = createBashTool(cwd); // 不传 secretRegistry
     const secret = "sk-live-超密值-no-mask";
 
-    const result = (await tool.handler({
-      command: `echo "${secret}"`,
-    })) as BashResult;
+    const result = parseBashEnvelope(
+      (await tool.handler({
+        command: `echo "${secret}"`,
+      })) as BashEnvelope
+    );
 
     assert.equal(result.code, 0);
     assert.equal(
@@ -357,26 +387,35 @@ describe("#406 T3 — bash 输出遮罩（output-mask on stdout/stderr）", () =
     assert.equal(result.stdout.includes("***"), false);
   });
 
-  it("M3：返回形状不变 —— 恰 {code, stdout, stderr} 三字段", async () => {
+  it("M3：返回形状是 envelope —— 顶层恰 { output: string, meta?: { stdout?, stderr? } }", async () => {
     const cwd = await makeScratch("bash-mask-shape-");
     const registry = createSecretRegistry();
     registry.register("sk-shape-probe-aaaaaaaaaa");
     const tool = createBashTool(cwd, { secretRegistry: registry });
 
-    const result = await tool.handler({
+    const result = (await tool.handler({
       command: 'echo "<<<SECRET_1>>>"',
-    });
+    })) as BashEnvelope;
 
-    assert.deepEqual(Object.keys(result as object).sort(), [
-      "code",
-      "stderr",
-      "stdout",
-    ]);
-    assert.deepEqual(result, {
+    // 顶层：必含 `output`(模型视野字符串);`meta` 是观测旁路(stdout/stderr
+    // 走此处,不进模型 tool_result);顶层不再有 code/stdout/stderr 字段。
+    assert.deepEqual(Object.keys(result).sort(), ["meta", "output"]);
+    assert.equal(typeof result.output, "string");
+    assert.equal(typeof result.meta, "object");
+
+    // 解析 envelope 内嵌的 code/stdout/stderr 仍维持原 M3 语义(形状不变,
+    // 断言 strength 不降): code=0,stdout="***\n",stderr="",且 envelope
+    // 内的 stdout/stderr 同步被遮罩(不绕过 output mask)。
+    const parsed = parseBashEnvelope(result);
+    assert.deepEqual(parsed, {
       code: 0,
       stdout: "***\n",
       stderr: "",
     });
+    // meta.stdout / meta.stderr 是输出旁路,与 envelope.output 内的字段
+    // 字节一致(mask 同步覆盖两侧,避免 model/tool/UI 三视角漂移)。
+    assert.equal(result.meta?.stdout, parsed.stdout);
+    assert.equal(result.meta?.stderr, parsed.stderr);
   });
 
   it("M4：registry 在场但值为空（边界） → mask identity，输出原样不 crash", async () => {
@@ -385,9 +424,11 @@ describe("#406 T3 — bash 输出遮罩（output-mask on stdout/stderr）", () =
       secretRegistry: createSecretRegistry(), // 空 registry
     });
 
-    const result = (await tool.handler({
-      command: "echo keep",
-    })) as BashResult;
+    const result = parseBashEnvelope(
+      (await tool.handler({
+        command: "echo keep",
+      })) as BashEnvelope
+    );
 
     assert.equal(result.code, 0);
     assert.equal(result.stdout, "keep\n");
@@ -400,9 +441,11 @@ describe("#406 T3 — bash 输出遮罩（output-mask on stdout/stderr）", () =
     registry.register(""); // 空串注册
     const tool = createBashTool(cwd, { secretRegistry: registry });
 
-    const result = (await tool.handler({
-      command: "echo keep",
-    })) as BashResult;
+    const result = parseBashEnvelope(
+      (await tool.handler({
+        command: "echo keep",
+      })) as BashEnvelope
+    );
 
     assert.equal(result.code, 0);
     assert.equal(result.stdout, "keep\n");

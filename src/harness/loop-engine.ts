@@ -285,9 +285,17 @@ export interface LoopEngineDeps {
    * 字段缺席 → 零 commit,行为与此前完全一致(byte-identical)。
    * 失败语义:钩子抛错 → 包 MessageCommitError 重抛,run 中止;不重试、
    * 不吞咽、不改 stop 语义(见 errors.ts MessageCommitError)。
+   *
+   * D2 (tui-display-consistency):第二参 `thinkingMs?: number` 是 assistant
+   * 回合的落盘思考时长(ms)。仅 assistant commit 调用点传入
+   * `turnResult.thinkingMs`(adapter 流式臂首条 thinking_delta → 首个非思考
+   * 增量的时长);tool_result commit 调用点传入 undefined。`thinkingMs <= 0`
+   * 或非有限数 → 字段缺席,store 落盘不挂 key(spec 钉死边界形态)。
+   * number 非 session-api 类型,不破 Gate B。
    */
   readonly commitMessages?: (
-    messages: ReadonlyArray<AnthropicNativeMessage>
+    messages: ReadonlyArray<AnthropicNativeMessage>,
+    thinkingMs?: number
   ) => Promise<void>;
   /**
    * #645 T1 / ADR-0028:状态栏注入缝。字段在场 = stepWithTrace 每次即将
@@ -341,14 +349,20 @@ function freezeMessage(msg: AnthropicNativeMessage): AnthropicNativeMessage {
 /**
  * #620 T3:调 host 注入的 commit 钩子;钩子缺席 = 零 IO 早退(行为不变)。
  * 钩子失败统一包 MessageCommitError 上抛(命名失败,不静默吞咽)。
+ *
+ * D2 (tui-display-consistency):第二参 `thinkingMs` 透传到 host 钩子;
+ * 缺席 (undefined) → host 钩子不挂 key,与既有 byte-identical 行为一致。
+ * tool_result commit 点传 undefined;assistant commit 点传
+ * `turnResult.thinkingMs`(可能是 undefined:non-stream / 无思考 / 边界非法)。
  */
 async function commitMessagesOrThrow(
   deps: LoopEngineDeps,
-  messages: ReadonlyArray<AnthropicNativeMessage>
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  thinkingMs?: number
 ): Promise<void> {
   if (deps.commitMessages === undefined) return;
   try {
-    await deps.commitMessages(messages);
+    await deps.commitMessages(messages, thinkingMs);
   } catch (err) {
     throw new MessageCommitError(err);
   }
@@ -1743,7 +1757,13 @@ async function stepWithTrace(opts: {
   };
   // #620 T3 (spec D4):assistant 一进权威历史立刻经 host 钩子上盘(边跑边写);
   // 纯文本收尾与工具回合共用此 commit 点。
-  await commitMessagesOrThrow(opts.deps, [turnResult.nativeMessage]);
+  // D2 (tui-display-consistency):assistant commit 顺带传 turnResult.thinkingMs
+  // (流式臂 stepStreamArm 测得;非流式 / 边界形态 → undefined)。
+  await commitMessagesOrThrow(
+    opts.deps,
+    [turnResult.nativeMessage],
+    turnResult.thinkingMs
+  );
 
   if (turnResult.projection.toolCalls.length === 0) {
     const durationMs = performance.now() - started;

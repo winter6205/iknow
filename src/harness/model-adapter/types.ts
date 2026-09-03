@@ -114,6 +114,16 @@ export interface AssistantTurnResult {
    * stub 路径没有 usage,字段缺席是设计语义。
    */
   readonly usage?: TokenUsage;
+  /**
+   * D2 (tui-display-consistency):本 assistant 回合的思考时长(ms)。
+   * 测量点 anthropic-adapter 流式臂 stepStreamArm —— 首条 thinking_delta 至
+   * 首个非思考增量(text_delta / tool_call_start / tool_input_delta)的墙上
+   * 时钟差。边界形态钉死:`thinkingMs <= 0` 或非有限数 → undefined
+   * (store 落盘入口再过滤一次,绝不落 0 / NaN / Infinity)。非流式臂不产
+   * 出(字段缺席 = 旧会话兼容 + 无思考回合)。Postel 纪律:`thinkingMs` 缺
+   * 席 = 测不到,字段不存在(不写 null)。
+   */
+  readonly thinkingMs?: number;
 }
 
 /** 对齐 Anthropic SDK Usage 的 token 四字段(ADR-0008 Decision 2)。 */

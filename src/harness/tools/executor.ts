@@ -53,9 +53,10 @@ function safeContent(payload: unknown): AnthropicContentBlock[] {
 
 /**
  * T4 #298 + review-Low:envelope 单一判别 — 必须是纯对象、带 string `output`，
- * 且可选 `meta` 必须为纯对象（字段仅限 string oldContent / newContent）。
- * 形状以 `ToolOutputEnvelope`（types.ts SSOT）为准，杜绝 3 处独立 shape-check
- * 各自漂移；reject-fast：meta 形状非法 → 整体不算 envelope（meta 被丢弃）。
+ * 且可选 `meta` 必须为纯对象（字段仅限 string oldContent / newContent /
+ * stdout / stderr）。形状以 `ToolOutputEnvelope`（types.ts SSOT）为准，杜绝
+ * 3 处独立 shape-check 各自漂移；reject-fast：meta 形状非法 → 整体不算
+ * envelope（meta 被丢弃）。
  */
 function isEnvelope(v: unknown): v is ToolOutputEnvelope {
   if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
@@ -67,7 +68,9 @@ function isEnvelope(v: unknown): v is ToolOutputEnvelope {
   const meta = m as Record<string, unknown>;
   return (
     (meta.oldContent === undefined || typeof meta.oldContent === "string") &&
-    (meta.newContent === undefined || typeof meta.newContent === "string")
+    (meta.newContent === undefined || typeof meta.newContent === "string") &&
+    (meta.stdout === undefined || typeof meta.stdout === "string") &&
+    (meta.stderr === undefined || typeof meta.stderr === "string")
   );
 }
 

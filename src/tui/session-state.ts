@@ -53,6 +53,14 @@ export interface TuiSessionState {
    * 只读投影:TUI 不做任何 git 操作,展示值唯一来源是会话文件。
    */
   readonly workspaceRoot: string | undefined;
+  /**
+   * D3 (tui-display-consistency): 落盘思考时长并行数组（与 messages 一一对应）。
+   * 与 `SessionFileV1.thinkingMs` 同 spread-discipline：undefined 元素 = 该位置事件无
+   * thinkingMs（非流式回合 / legacy 文件 / 非 assistant），整个 key 缺席 = 整链均无
+   * thinkingMs（旧会话）。消费侧（turn-activity sumThinkingMsInRange）按 0 计入；
+   * 折叠行仅在总秒数 > 0 时显示「思考了 N 秒」，否则只显示工具计数。
+   */
+  readonly thinkingMs?: ReadonlyArray<number | null>;
 }
 
 /** 新建 draft 会话（启动直达新会话聊天界面，Q2=C；不触盘）。 */
@@ -67,6 +75,8 @@ export function createDraftSession(): TuiSessionState {
     lastStopReason: undefined,
     lastUsage: null,
     workspaceRoot: undefined,
+    // D3:draft 没有 thinkingMs；折叠簇求和按 0 计入。
+    thinkingMs: undefined,
   });
 }
 
@@ -84,6 +94,9 @@ export function attachSession(file: SessionFileV1): TuiSessionState {
     lastUsage: null,
     // ADR-0037 T5:改绑后的 task worktree 根随会话文件恢复（重启后现势仍在）。
     workspaceRoot: file.workspaceRoot,
+    // D3:把落盘的并行数组带到会话状态 —— 折叠行从此读取（取代 in-memory
+    // 思考秒数副通道，已整条删除）。
+    thinkingMs: file.thinkingMs,
   });
 }
 
@@ -124,6 +137,11 @@ export interface TurnFinishedInput {
    * 缺省 = 本回合未发生改绑（或文件刷新失败）→ 保留既有值，不误清。
    */
   readonly workspaceRoot?: string;
+  /**
+   * D3:turn 结束时落盘文件里的 thinkingMs 并行数组。缺省 = 本回合未拿到
+   * 刷新视图（文件 IO 失败）→ 保留既有值，不误清。
+   */
+  readonly thinkingMs?: ReadonlyArray<number | null>;
 }
 
 /** turn 结束（自然完成 / cancelled / timeout 均走此）：落回 idle + 整体冻结替换。 */
@@ -143,6 +161,8 @@ export function turnFinished(
     lastUsage: input.lastUsage ?? null,
     // ADR-0037 T5:改绑回合携带新根;普通回合缺省 → 保留既有绑定值。
     workspaceRoot: input.workspaceRoot ?? session.workspaceRoot,
+    // D3:从落盘文件刷新 thinkingMs;缺省 → 保留既有数组(部分恢复场景)。
+    thinkingMs: input.thinkingMs ?? session.thinkingMs,
   });
 }
 

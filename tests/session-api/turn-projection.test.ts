@@ -27,6 +27,7 @@ import {
   projectThinkingView,
   projectToolCalls,
   shouldSeedTaskFocus,
+  sumAssistantThinkingMsInRange,
   TASK_EXCERPT_PREFIX,
 } from "../../src/session-api/turn-projection.ts";
 
@@ -719,5 +720,177 @@ describe("shouldSeedTaskFocus — greeting filter (#605 T2 relocation)", () => {
     assert.equal(shouldSeedTaskFocus("Build a C compiler"), true);
     assert.equal(shouldSeedTaskFocus("你好，帮我写一个类型检查器"), true);
     assert.equal(shouldSeedTaskFocus("Refactor the loop engine"), true);
+  });
+});
+
+// -- D2 (tui-display-consistency) wire surface: per-turn thinkingMs sum -----
+//
+// 镜像 src/tui/turn-activity.ts sumThinkingMsInRange 语义,但落点是
+// session-api / web wire —— 与 TUI 折叠簇求和不 import 跨模块。本组用例
+// 钉死 sumAssistantThinkingMsInRange 的 8 类输入形态 + projectMessagesToTurns
+// 透传到 TurnDto.answer.thinkingMs 的两条路径(getSession 与 byte-stable
+// 缺席)。
+
+describe("D2 wire surface — sumAssistantThinkingMsInRange", () => {
+  // helper: 构造 messages + thinkingMs 并行数组,索引一一对应
+  const userMsg = assistant("user", [{ type: "text", text: "q" }]);
+  const asstMsg = assistant("assistant", [{ type: "text", text: "a" }]);
+
+  it("thinkingMs undefined → 0 (旧会话 / 整链缺席)", () => {
+    assert.equal(
+      sumAssistantThinkingMsInRange({
+        messages: [asstMsg],
+        thinkingMs: undefined,
+      }),
+      0
+    );
+  });
+
+  it("空 messages → 0", () => {
+    assert.equal(
+      sumAssistantThinkingMsInRange({
+        messages: [],
+        thinkingMs: [1200, 800],
+      }),
+      0
+    );
+  });
+
+  it("非 assistant 消息对应位置按 0 计入", () => {
+    assert.equal(
+      sumAssistantThinkingMsInRange({
+        messages: [userMsg],
+        thinkingMs: [1200],
+      }),
+      0
+    );
+  });
+
+  it("assistant 消息求和其位置 thinkingMs 值 (单 assistant)", () => {
+    assert.equal(
+      sumAssistantThinkingMsInRange({
+        messages: [asstMsg],
+        thinkingMs: [1500],
+      }),
+      1500
+    );
+  });
+
+  it("多 assistant 求和 (loop 多回合)", () => {
+    assert.equal(
+      sumAssistantThinkingMsInRange({
+        messages: [asstMsg, asstMsg, asstMsg],
+        thinkingMs: [800, 1200, 600],
+      }),
+      2600
+    );
+  });
+
+  it("null 元素按 0 计入 (非流式回合 / 该事件无 thinkingMs)", () => {
+    assert.equal(
+      sumAssistantThinkingMsInRange({
+        messages: [asstMsg, asstMsg, asstMsg],
+        thinkingMs: [800, null, 1200],
+      }),
+      2000
+    );
+  });
+
+  it("startIndex 偏移: 用 messages 切片起点对齐全局并行数组", () => {
+    // messages 切片 = messages.slice(2, 5),thinkingMs 是 file 级别并行数组
+    assert.equal(
+      sumAssistantThinkingMsInRange({
+        messages: [asstMsg, asstMsg, asstMsg],
+        thinkingMs: [100, 200, 800, 1200, 600, 5000],
+        startIndex: 2,
+      }),
+      2600
+    );
+  });
+
+  it("越界索引按 0 计入 (thinkingMs 数组短于 startIndex + messages.length)", () => {
+    assert.equal(
+      sumAssistantThinkingMsInRange({
+        messages: [asstMsg, asstMsg],
+        thinkingMs: [1200],
+        startIndex: 1,
+      }),
+      0
+    );
+  });
+
+  it("非有限数 / <= 0 → 0 (防御, appendEvents 入口已过滤)", () => {
+    assert.equal(
+      sumAssistantThinkingMsInRange({
+        messages: [asstMsg, asstMsg, asstMsg],
+        thinkingMs: [800, NaN, 0],
+      }),
+      800
+    );
+    assert.equal(
+      sumAssistantThinkingMsInRange({
+        messages: [asstMsg],
+        thinkingMs: [Number.POSITIVE_INFINITY],
+      }),
+      0
+    );
+  });
+});
+
+describe("D2 wire surface — projectMessagesToTurns thinkingMs 透传", () => {
+  // T2 (TUI 折叠) + T5 (web wire) 共享同一磁盘 SSOT。
+  // 本组钉死 TurnAnswerDto.thinkingMs (ms) 字段的两条接线:
+  //   1. file.thinkingMs 求和后挂到 answer (sum > 0 才挂, byte-stable)
+  //   2. thinkingMs 缺席 (旧会话) → 字段不挂 key
+
+  it("file.thinkingMs 求和到 answer.thinkingMs (多 assistant 求和)", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "q1" }]),
+      assistant("assistant", [{ type: "text", text: "a1" }]),
+      assistant("user", [{ type: "text", text: "q2" }]),
+      assistant("assistant", [{ type: "text", text: "a2" }]),
+      assistant("assistant", [{ type: "text", text: "a3" }]),
+    ];
+    // 与 messages 一一对应: turn1 末条 assistant[1]=1500;
+    // turn2 末两条 assistant[3]=800 + assistant[4]=1200 = 2000.
+    const thinkingMs = [null, 1500, null, 800, 1200];
+    const turns = projectMessagesToTurns(messages, thinkingMs);
+    assert.equal(turns.length, 2);
+    assert.equal(turns[0]?.answer.thinkingMs, 1500);
+    assert.equal(turns[1]?.answer.thinkingMs, 2000);
+  });
+
+  it("old session — thinkingMs undefined → answer.thinkingMs 字段缺席 (Postel)", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "q" }]),
+      assistant("assistant", [{ type: "text", text: "a" }]),
+    ];
+    const turns = projectMessagesToTurns(messages, undefined);
+    assert.equal("thinkingMs" in (turns[0]?.answer ?? {}), false);
+    assert.deepEqual(Object.keys(turns[0]?.answer ?? {}).sort(), [
+      "finalText",
+      "stopReason",
+      "turnCount",
+    ]);
+  });
+
+  it("file.thinkingMs 越界 (并行数组短于 messages) → 按 0 计入,字段缺席", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "q" }]),
+      assistant("assistant", [{ type: "text", text: "a" }]),
+    ];
+    const turns = projectMessagesToTurns(messages, []); // 空并行数组
+    assert.equal("thinkingMs" in (turns[0]?.answer ?? {}), false);
+  });
+
+  it("thinkingMs=0 (该 turn slice 无 assistant) → 字段缺席, byte-stable", () => {
+    // 单 user message 无后续 assistant → turn slice 内无 assistant → sum=0
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "q" }]),
+    ];
+    const turns = projectMessagesToTurns(messages, [1200]);
+    // user 单条也是一个 turn (没有 assistant 收尾,但仍是一段 turn query)
+    assert.equal(turns.length, 1);
+    assert.equal("thinkingMs" in (turns[0]?.answer ?? {}), false);
   });
 });

@@ -26,6 +26,8 @@ import {
 } from "./live-tool-state.js";
 import {
   completedToolPreview,
+  formatToolStatusLine,
+  resultToolPreview,
   summarizePartialInput,
   summarizeToolCall,
   clipOneLineVisual,
@@ -34,6 +36,7 @@ import {
 import {
   CompletedToolPreviewView,
   completedToolPreviewTextLines,
+  resultPreviewTextLines,
 } from "./completed-tool-preview-view.js";
 import { tuiPalette } from "./theme.js";
 
@@ -60,11 +63,17 @@ function writeEditRunningLine(run: LiveToolRun, cols: number): string {
         ? summarizeToolCall("write_file", parsed, cols).detail
         : clipOneLineVisual(
             `编辑 ${path}`,
-            Math.min(80, Math.max(4, cols - visualWidth(run.name) - 21))
+            Math.min(80, Math.max(4, cols - visualWidth(run.name) - 12))
           );
     return summary.length === 0
       ? formatRunningToolLine(run)
-      : `[运行中] ${run.name} · ${summary}`;
+      : formatToolStatusLine({
+          toolName: run.name,
+          input: parsed,
+          status: "running",
+          detail: summary,
+          cols,
+        });
   } catch {
     // EXIT: incomplete write/edit JSON → keep the running summary line;
     // do not stream content or dump raw partial JSON.
@@ -76,6 +85,8 @@ function writeEditRunningLine(run: LiveToolRun, cols: number): string {
  * running 状态行：有 partialInput 增量 → `[运行中] name · <partial 摘要>`；
  * 空 / 无增量 → 基础 `[运行中] name`（formatRunningToolLine）。摘要单源 =
  * summarizePartialInput，行账 1 行。write/edit 不把 content 流进该行。
+ * #693 T1 D7：含 partial 的形态拼装委托 formatToolStatusLine（tool-summary SSOT），
+ * 与历史 ToolSummaryRow 同源 —— 字节一致，无重复模板。
  */
 function runningLine(run: LiveToolRun, cols: number): string {
   if (isWriteEditTool(run.name)) return writeEditRunningLine(run, cols);
@@ -84,9 +95,14 @@ function runningLine(run: LiveToolRun, cols: number): string {
     return formatRunningToolLine(run);
   }
   const summary = summarizePartialInput(run.name, partial, cols);
-  return summary.length === 0
-    ? formatRunningToolLine(run)
-    : `[运行中] ${run.name} · ${summary}`;
+  if (summary.length === 0) return formatRunningToolLine(run);
+  return formatToolStatusLine({
+    toolName: run.name,
+    input: run.input,
+    status: "running",
+    detail: summary,
+    cols,
+  });
 }
 
 function completedPreviewOf(run: LiveToolRun) {
@@ -96,9 +112,23 @@ function completedPreviewOf(run: LiveToolRun) {
   });
 }
 
+/** live 路径：完成态工具结果预览（bash / skill）。走 run.stdout / run.stderr
+ *  旁路（不依赖历史 tool_result 反序列化）。preview 声明缺席 / 字段缺席
+ *  → empty。 */
+function resultPreviewOf(run: LiveToolRun) {
+  if (run.status === "running") {
+    return { kind: "empty" as const };
+  }
+  return resultToolPreview(run.name, run.input, {
+    stdout: run.stdout,
+    stderr: run.stderr,
+  });
+}
+
 /**
  * live 工具 box 的纯文本行（[状态行, ...预览行]），供行账 + flat 投影共用。
- * 完成态预览与 `completedToolPreview` 同源（代码或截断 diff）。
+ * 完成态预览与 `completedToolPreview` 同源（代码或截断 diff）；结果预览
+ * 走 `resultToolPreview`（bash stdout/stderr 尾部 tail）。
  */
 export function liveToolPreviewTextLines(
   run: LiveToolRun,
@@ -112,6 +142,9 @@ export function liveToolPreviewTextLines(
     completedPreviewOf(run),
     cols
   )) {
+    out.push(l);
+  }
+  for (const l of resultPreviewTextLines(resultPreviewOf(run))) {
     out.push(l);
   }
   return out;
@@ -131,13 +164,19 @@ export function liveToolPreviewBox(run: LiveToolRun, cols: number): ReactNode {
       ? runningLine(run, cols)
       : formatCompletedToolLine(run, cols);
   const preview = run.status === "running" ? null : completedPreviewOf(run);
+  const resultPreview =
+    run.status === "running" ? undefined : resultPreviewOf(run);
   return (
     <box key={run.id} flexDirection="column">
       <text fg={tuiPalette.dim} wrapMode="none">
         {status}
       </text>
       {preview !== null && (
-        <CompletedToolPreviewView preview={preview} cols={cols} />
+        <CompletedToolPreviewView
+          preview={preview}
+          cols={cols}
+          resultPreview={resultPreview}
+        />
       )}
     </box>
   );

@@ -51,17 +51,17 @@ import type {
 } from "../harness/model-adapter/types.js";
 import { tuiPalette } from "./theme.js";
 import {
-  summarizeToolCall,
+  formatToolStatusLine,
   completedToolPreview,
+  resultToolPreview,
   formatRanSuffix,
   countBashCalls,
-  isSubagentTool,
-  subagentDisplayMark,
-  SUBAGENT_TOOL_LABEL,
   type CompletedToolPreview,
+  type ResultPreview,
 } from "./tool-summary.js";
 import { clipOneLineVisual } from "./tool-summary.js";
 import { CompletedToolPreviewView } from "./completed-tool-preview-view.js";
+import { MessageShell } from "./message-shell.js";
 import { Markdown } from "./markdown.js";
 import {
   REDACTED_PLACEHOLDER,
@@ -73,10 +73,11 @@ import { stripPrefetchOverlay } from "../harness/memory/prefetch.js";
 
 type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
 
-/** tool_use 摘要行：`[运行中]|[完成]|[失败] name · detail`。
- *  子代理工具（spawn_subagent / subagent_result）走独立视觉
- *  `${mark} 子代理 · ${detail}`，glyph（▣/✓/✗）已表状态，
- *  不与普通工具共用 `[运行中]/[完成]/[失败] name` 形态。
+/** tool_use 摘要行：`[运行中]|[完成]|[失败] name · detail`（普通工具），
+ *  子代理工具走独立形态 `${mark} 子代理 · ${detail}`（glyph 已表状态）。
+ *  文案拼装统一委托 `formatToolStatusLine`（tool-summary SSOT，#693 T1 D7），
+ *  历史 + live 两侧字节一致 —— spec D1 列出要消除的「live `bash · pwd · ok`
+ *  vs 历史 `[完成] bash · pwd`」不一致。
  *  2026-08-14：不再拼 `，ran N command(s)` 后缀 —— 工具计数只由
  *  ThinkingSummary（有秒数时）统一汇总一次（`思考了 N 秒 · ran M …`），
  *  避免「思考折叠行 + 工具行」双处重复计数造成结束状态混乱观感。
@@ -86,46 +87,47 @@ function ToolSummaryRow(props: {
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly cols: number;
 }): ReactNode {
-  const { detail } = summarizeToolCall(
-    props.tu.name,
-    props.tu.input,
-    props.cols
-  );
   const hasResult = props.statusMap.has(props.tu.id);
   const failed = props.statusMap.get(props.tu.id) === true;
-  // 子代理工具专属形态：glyph + 子代理标签 + detail。
-  if (isSubagentTool(props.tu.name)) {
-    const mark = !hasResult
-      ? subagentDisplayMark("running")
-      : failed
-        ? subagentDisplayMark("failed")
-        : subagentDisplayMark("ok");
-    return (
-      <text fg={failed ? tuiPalette.error : tuiPalette.dim} wrapMode="none">
-        {mark} {SUBAGENT_TOOL_LABEL} · {detail}
-      </text>
-    );
-  }
-  const mark = !hasResult ? "[运行中]" : failed ? "[失败]" : "[完成]";
-  const fg = failed ? tuiPalette.error : tuiPalette.dim;
+  const status: "running" | "ok" | "failed" = !hasResult
+    ? "running"
+    : failed
+      ? "failed"
+      : "ok";
+  const line = formatToolStatusLine({
+    toolName: props.tu.name,
+    input: props.tu.input,
+    status,
+    cols: props.cols,
+  });
+  const fg = status === "failed" ? tuiPalette.error : tuiPalette.dim;
   return (
     <text fg={fg} wrapMode="none">
-      {mark} {props.tu.name} · {detail}
+      {line}
     </text>
   );
 }
 
-/** 工具内容预览（write_file / edit_file）：调用方先经 `completedToolPreview`
- *  判定非空再挂载（空预览 / 未配对不产节点 —— 折叠态下空壳 box 会让
- *  消息无法收敛为 null，残留幻影间距）。与 live 完成态同一
- *  `completedToolPreview` + `TOOL_PREVIEW_WINDOW`。截断即折叠。 */
+/** 工具内容预览（write_file / edit_file + bash / skill 结果预览）：
+ *  调用方先经 `completedToolPreview` / `resultToolPreview` 判定非空再挂载
+ *  （空预览 / 未配对不产节点 —— 折叠态下空壳 box 会让消息无法收敛为 null，
+ *  残留幻影间距）。与 live 完成态同一 `completedToolPreview` +
+ *  `resultToolPreview` + TOOL_PREVIEW_WINDOW/RESULT_PREVIEW_WINDOW。截断即折叠。 */
 function ToolPreviewRows(props: {
   readonly preview: CompletedToolPreview;
+  readonly resultPreview: ResultPreview;
   readonly cols: number;
 }): ReactNode {
+  if (props.preview.kind === "empty" && props.resultPreview.kind === "empty") {
+    return null;
+  }
   return (
     <box flexDirection="column">
-      <CompletedToolPreviewView preview={props.preview} cols={props.cols} />
+      <CompletedToolPreviewView
+        preview={props.preview}
+        cols={props.cols}
+        resultPreview={props.resultPreview}
+      />
     </box>
   );
 }
@@ -188,6 +190,9 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
   readonly message: AnthropicNativeMessage;
   readonly cols: number;
   readonly statusMap: ReadonlyMap<string, boolean>;
+  /** #693 T4 D4:tool_use_id → tool_result 文本映射（历史结果预览数据源）。
+   *  缺省 / 无匹配 → 该 tool_use 不画结果预览（与 spec D4「未配对不渲染」对齐）。 */
+  readonly resultTextMap?: ReadonlyMap<string, string>;
   readonly thinkingExpanded?: boolean;
   /** 折叠态 thinking 行附带「思考了 N 秒」。仅末条 / 流式面板传入；
    *  缺省或非正 → 不画思考摘要行（不回落 `[思考]`）。 */
@@ -294,7 +299,13 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
       const preview: CompletedToolPreview = statusMap.has(block.id)
         ? completedToolPreview(block.name, block.input)
         : { kind: "empty" };
-      const showPreview = preview.kind !== "empty";
+      const resultPreview: ResultPreview = statusMap.has(block.id)
+        ? resultToolPreview(block.name, block.input, {
+            resultText: props.resultTextMap?.get(block.id),
+          })
+        : { kind: "empty" };
+      const showPreview =
+        preview.kind !== "empty" || resultPreview.kind !== "empty";
       // 摘要隐藏且无预览 → 不产节点：空壳 box 会撑住 nodes.length，让
       // 整条消息无法收敛为 null，折叠后残留幻影间距。
       if (!showSummary && !showPreview) return;
@@ -304,7 +315,11 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
             <ToolSummaryRow tu={block} statusMap={statusMap} cols={innerCols} />
           )}
           {showPreview && (
-            <ToolPreviewRows preview={preview} cols={innerCols} />
+            <ToolPreviewRows
+              preview={preview}
+              resultPreview={resultPreview}
+              cols={innerCols}
+            />
           )}
         </box>
       );
@@ -313,16 +328,11 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
   if (nodes.length === 0) return null;
   // T7：assistant 底色块（pal.assistantBg + paddingX=1 水平缩进，无 paddingY
   // 贴内容）；消息间 1 行节奏由根节点 marginTop prop 提供（随消息存亡）。
+  // #693 T1 D1：assistant 外壳收敛到 MessageShell（memo 包裹，浅比较稳定），
+  // 与 chat-view 流式草稿 / 折叠行共用同一组件 —— 消除「外壳跳变」不一致。
   return (
-    <box flexDirection="column" marginTop={props.marginTop ?? 0}>
-      <box
-        flexDirection="column"
-        backgroundColor={pal.assistantBg}
-        paddingX={1}
-        paddingY={0}
-      >
-        {nodes}
-      </box>
-    </box>
+    <MessageShell cols={cols} marginTop={props.marginTop ?? 0}>
+      {nodes}
+    </MessageShell>
   );
 });

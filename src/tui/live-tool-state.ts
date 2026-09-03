@@ -26,6 +26,7 @@
  */
 import {
   formatLiveToolEvent,
+  formatToolStatusLine,
   isSubagentTool,
   subagentDisplayMark,
 } from "./tool-summary.js";
@@ -52,6 +53,10 @@ export interface LiveToolRun {
   readonly oldContent?: string;
   /** 观测 side-channel — 写盘后新内容；运行中无。 */
   readonly newContent?: string;
+  /** #693 T4 D4:bash 输出 stdout 旁路(ToolResultMeta.stdout),5 行预览数据源。 */
+  readonly stdout?: string;
+  /** #693 T4 D4:bash 输出 stderr 旁路(ToolResultMeta.stderr),5 行预览数据源。 */
+  readonly stderr?: string;
 }
 
 /** #589：成功完成即离开 live 尾巴的只读探测族。 */
@@ -90,6 +95,10 @@ export type LiveToolEvent =
       readonly oldContent?: string;
       /** 观测 side-channel — 写盘后新内容。 */
       readonly newContent?: string;
+      /** #693 T4 D4:bash stdout 旁路,完成事件携带,5 行预览数据源。 */
+      readonly stdout?: string;
+      /** #693 T4 D4:bash stderr 旁路,完成事件携带,5 行预览数据源。 */
+      readonly stderr?: string;
     };
 
 /** reducer：append running / set completed → 新冻结 array。 */
@@ -158,6 +167,8 @@ export function liveToolReduce(
               message: event.message,
               oldContent: event.oldContent,
               newContent: event.newContent,
+              stdout: event.stdout,
+              stderr: event.stderr,
             })
           : r
       )
@@ -226,21 +237,25 @@ export function shortenMcpToolName(name: string): string {
   return `${server}/${tool}`;
 }
 
-/** 运行中条目格式化 —— `[运行中] name`。子代理工具走独立视觉（字形走
- *  `subagentDisplayMark` SSOT，禁硬编码）：
+/** 运行中条目格式化 —— 委托 `formatToolStatusLine`（tool-summary.ts SSOT，
+ *  #693 T1 D7）。普通工具 → `[运行中] name`；子代理工具（spawn_subagent /
+ *  subagent_result）走独立视觉（字形走 `subagentDisplayMark` SSOT）：
  *  spawn_subagent → `▣ 派发子代理中…`，subagent_result → `▣ 轮询子代理中…`。 */
 export function formatRunningToolLine(run: LiveToolRun): string {
   if (isSubagentTool(run.name)) {
     const mark = subagentDisplayMark("running");
-    return run.name === "spawn_subagent"
-      ? `${mark} 派发子代理中…`
-      : `${mark} 轮询子代理中…`;
+    if (run.name === "spawn_subagent") return `${mark} 派发子代理中…`;
+    if (run.name === "subagent_result") return `${mark} 轮询子代理中…`;
   }
-  return `[运行中] ${run.name}`;
+  return formatToolStatusLine({
+    toolName: run.name,
+    input: run.input,
+    status: "running",
+  });
 }
 
-/** 完成条目格式化 —— 委托 formatLiveToolEvent（tool-summary.ts）单源。
- *  模板文本统一在 formatLiveToolEvent 内。这里必须用 LiveToolRun 的
+/** 完成条目格式化 —— 委托 `formatLiveToolEvent` → `formatToolStatusLine`
+ *  （tool-summary.ts SSOT 单源，#693 T1 D7）。这里必须用 LiveToolRun 的
  *  precomputed detail（run.detail ?? ""），不要传 run.input 重算 — 重算结果
  *  可能与 postToolUse 落入 reducer 的 detail 字节不一致。`cols` 透传给
  *  formatLiveToolEvent；detail 已由 reducer 用同 cols 预算裁过（除非

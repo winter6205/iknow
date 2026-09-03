@@ -131,16 +131,37 @@ describe("bash.ts: bashMode 双闸 (#562 T6)", () => {
 
   it("bashMode 缺省 + 'env' → 不抛 ROE, fence 不收 cwdReadonly (V1)", async () => {
     const tool = createBashTool("/tmp/sb");
-    const out = await tool.handler({ command: "env" });
-    assert.deepEqual(out, { code: 0, stdout: "OK\n", stderr: "" });
+    const out = (await tool.handler({ command: "env" })) as {
+      output: string;
+      meta: { stdout: string; stderr: string };
+    };
+    // #693 T4 D4:handler 返回 envelope `{ output, meta }`(走 fake fence + runInSandbox,
+    // 顶层保持 envelope 形态);output 字段里 JSON 化的 code/stdout/stderr 仍守原
+    // 契约(模型视野不变)。
+    const parsed = JSON.parse(out.output) as {
+      code: number;
+      stdout: string;
+      stderr: string;
+    };
+    assert.deepEqual(parsed, { code: 0, stdout: "OK\n", stderr: "" });
+    assert.deepEqual(out.meta, { stdout: "OK\n", stderr: "" });
     assert.equal(capturedFenceOpts[0]!.cwdReadonly, undefined);
   });
 
   it("bashMode='readonly' + 'ls' → 穿 validator, fence 收 cwdReadonly:true (双闸 1+2)", async () => {
     // ls 在 READONLY_ALLOWED → 通过 validator; fence 收 cwdReadonly:true。
     const tool = createBashTool("/tmp/sb", { bashMode: "readonly" });
-    const out = await tool.handler({ command: "ls" });
-    assert.deepEqual(out, { code: 0, stdout: "OK\n", stderr: "" });
+    const out = (await tool.handler({ command: "ls" })) as {
+      output: string;
+      meta: { stdout: string; stderr: string };
+    };
+    const parsed = JSON.parse(out.output) as {
+      code: number;
+      stdout: string;
+      stderr: string;
+    };
+    assert.deepEqual(parsed, { code: 0, stdout: "OK\n", stderr: "" });
+    assert.deepEqual(out.meta, { stdout: "OK\n", stderr: "" });
     assert.equal(capturedFenceOpts[0]!.cwdReadonly, true);
   });
 
@@ -176,8 +197,17 @@ describe("registry.ts: createDefaultAciRegistry bashMode 透传 (#562 T6)", () =
     });
     const bash = reg.inner.get("bash");
     assert.ok(bash);
-    const out = await bash!.handler({ command: "env" });
-    assert.deepEqual(out, { code: 0, stdout: "OK\n", stderr: "" });
+    const out = (await bash!.handler({ command: "env" })) as {
+      output: string;
+      meta: { stdout: string; stderr: string };
+    };
+    const parsed = JSON.parse(out.output) as {
+      code: number;
+      stdout: string;
+      stderr: string;
+    };
+    assert.deepEqual(parsed, { code: 0, stdout: "OK\n", stderr: "" });
+    assert.deepEqual(out.meta, { stdout: "OK\n", stderr: "" });
     assert.equal(capturedFenceOpts[0]!.cwdReadonly, undefined);
   });
 });
@@ -200,9 +230,11 @@ describe("worker.ts: createWorkerDeps bashMode from role (#562 T6)", () => {
     const deps = await createWorkerDeps(hermeticOpts({ role: "explore" }));
     const bash = deps.registry.get("bash");
     assert.ok(bash);
-    const out = (await bash!.handler({ command: "echo hi" })) as {
-      code: number;
+    // #693 T4 D4:handler 返回 envelope;output 字段里 JSON 化 code/stdout/stderr。
+    const envelope = (await bash!.handler({ command: "echo hi" })) as {
+      output: string;
     };
+    const out = JSON.parse(envelope.output) as { code: number };
     // (1) readonly validator 已通过 (echo 在 READONLY_ALLOWED);
     // (2) fence 形态断言: cwdReadonly=true 已传导。
     assert.equal(out.code, 0);
@@ -224,8 +256,19 @@ describe("worker.ts: createWorkerDeps bashMode from role (#562 T6)", () => {
       const deps = await createWorkerDeps(hermeticOpts(opt));
       const bash = deps.registry.get("bash");
       assert.ok(bash);
-      const out = await bash!.handler({ command: "env" });
-      assert.deepEqual(out, { code: 0, stdout: "OK\n", stderr: "" });
+      const out = (await bash!.handler({ command: "env" })) as {
+        output: string;
+        meta: { stdout: string; stderr: string };
+      };
+      // #693 T4 D4:handler 返回 envelope;output 字段里 JSON 化 code/stdout/stderr,
+      // 解析后与 V1 byte-stable。
+      const parsed = JSON.parse(out.output) as {
+        code: number;
+        stdout: string;
+        stderr: string;
+      };
+      assert.deepEqual(parsed, { code: 0, stdout: "OK\n", stderr: "" });
+      assert.deepEqual(out.meta, { stdout: "OK\n", stderr: "" });
       assert.equal(capturedFenceOpts[0]!.cwdReadonly, undefined);
     });
   }

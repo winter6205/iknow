@@ -59,18 +59,24 @@ export interface SessionHeaderRecord {
   readonly goal?: GoalState;
   readonly workspaceRoot?: string;
   readonly messageCreatedAt?: ReadonlyArray<string | null>;
+  /** D2 (tui-display-consistency):assistant 回合思考时长(ms)的并行数组。
+   *  与 SessionFileV1.thinkingMs 同 spread-discipline: 缺席合法。 */
+  readonly thinkingMs?: ReadonlyArray<number | null>;
 }
 
 /** 一条 message 事件:唯一 id + parent 链 + 原生消息原文。`createdAt` 是
  *  appendEvents 写盘时的入账时刻(ISO);optional for 兼容旧 JSONL——
  *  parseSessionJsonl 不做严格校验(spread 纪律),缺席不 fail validation,
- *  投影时落成 messageCreatedAt[i] = null。 */
+ *  投影时落成 messageCreatedAt[i] = null。`thinkingMs` 是 D2 落盘的
+ *  assistant 回合思考时长(ms),仅在 assistant 事件上由 appendEvents
+ *  conditional spread 挂上;非 assistant / 流式回合无思考 → 字段缺席。 */
 export interface SessionEventRecord {
   readonly type: "message";
   readonly id: string;
   readonly parent: string | null;
   readonly message: AnthropicNativeMessage;
   readonly createdAt?: string;
+  readonly thinkingMs?: number;
 }
 
 /** 落盘的 rewind 头指针;id 为 null 表示空 transcript(空会话)。 */
@@ -113,16 +119,22 @@ export interface ParsedSessionLog {
  * Pure. 未知顶层字段经 spread 进 header 透传;`messages` 不进 header。
  */
 export function sessionFileToJsonl(file: SessionFileV1): string {
-  const { messages, messageCreatedAt, ...meta } = file;
+  const { messages, messageCreatedAt, thinkingMs, ...meta } = file;
   const lines: string[] = [JSON.stringify({ type: "session", ...meta })];
   messages.forEach((message, index) => {
     const stamp = messageCreatedAt?.[index];
+    const think = thinkingMs?.[index];
     const record: SessionEventRecord = {
       type: "message",
       id: messageEventId(index),
       parent: index === 0 ? null : messageEventId(index - 1),
       message,
       ...(typeof stamp === "string" ? { createdAt: stamp } : {}),
+      // D2: thinkingMs 仅在 assistant 事件上挂值(消费者侧 ?? undefined 兜底
+      // 已经为非 assistant 元素填 null,但为避免噪声,只在有值时挂 key)。
+      ...(typeof think === "number" && Number.isFinite(think) && think > 0
+        ? { thinkingMs: think }
+        : {}),
     };
     lines.push(JSON.stringify(record));
   });
@@ -227,6 +239,9 @@ export function projectSessionLog(log: ParsedSessionLog): SessionFileV1 {
   const byId = new Map(log.events.map((e) => [e.id, e]));
   const messages: AnthropicNativeMessage[] = [];
   const createdAtList: Array<string | null> = [];
+  // D2 (tui-display-consistency):并行重建 thinkingMs 数组 —— 与
+  // createdAtList 同 spread-discipline 纪律(全链无 thinkingMs → 不挂 key)。
+  const thinkingMsList: Array<number | null> = [];
   const seen = new Set<string>();
   let cur = log.head;
   while (cur !== null) {
@@ -251,10 +266,18 @@ export function projectSessionLog(log: ParsedSessionLog): SessionFileV1 {
     // would serialize to null via JSON.stringify anyway). Validator accepts
     // only `null` holes — never `undefined`.
     createdAtList.push(event.createdAt ?? null);
+    // D2: `event.thinkingMs` 是 `number | undefined` in-memory(appendEvents
+    // 仅在 assistant + thinkingMs 有效时挂上)。事件无 thinkingMs → 填 null
+    // (与 JSON round-trip 形态对齐);number → 原样透传(appendEvents 入口已
+    // 过滤 ≤ 0 / 非有限数,此处不再校验)。
+    thinkingMsList.push(
+      typeof event.thinkingMs === "number" ? event.thinkingMs : null
+    );
     cur = event.parent;
   }
   messages.reverse();
   createdAtList.reverse();
+  thinkingMsList.reverse();
   const { type: _type, ...meta } = log.header;
   // spread-discipline: 全链都无 createdAt(纯旧文件 / 未经过 appendEvents
   // stamping 的 fork 旧分支)时省略 key,与 sanitize.ts 的 conditional-goal-
@@ -276,10 +299,20 @@ export function projectSessionLog(log: ParsedSessionLog): SessionFileV1 {
   if (!hasAny) {
     delete meta.messageCreatedAt;
   }
+  // D2 (tui-display-consistency):thinkingMs 与 messageCreatedAt 完全镜像的
+  // spread-discipline —— 全链均无 thinkingMs 时不挂 key,任一事件带值则发
+  // key,数组内 null 元素 = 该位置事件无 thinkingMs(非 assistant / 流式回合
+  // 无思考 / legacy 文件)。同 stale-header guard:全链无 thinkingMs 时显式
+  // 从 meta 删除,避免 picker 读到错位数组。
+  const hasAnyThinking = thinkingMsList.some((c) => c !== null);
+  if (!hasAnyThinking) {
+    delete meta.thinkingMs;
+  }
   return sanitizeSessionFile({
     ...meta,
     messages,
     ...(hasAny ? { messageCreatedAt: createdAtList } : {}),
+    ...(hasAnyThinking ? { thinkingMs: thinkingMsList } : {}),
   });
 }
 

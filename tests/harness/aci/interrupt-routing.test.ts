@@ -760,11 +760,7 @@ describe("SC13 — bash real spawn partial output preserved", () => {
       );
       await waitForPidFile(join(cwd, "started"));
       controller.abort();
-      const result = (await execution) as {
-        code: number;
-        stdout: string;
-        stderr: string;
-      };
+      const result = parseBashEnvelope((await execution) as BashEnvelope);
       assert.ok(
         result.stdout.length > 0,
         `expected partial stdout, got: ${JSON.stringify(result.stdout)}`
@@ -799,8 +795,15 @@ describe("SC13 — bash real spawn partial output preserved", () => {
         ): Promise<ReadonlyArray<ToolExecutionResult>> => {
           const call = calls[0]!;
           const payload = await bashTool.handler(call.input, { signal });
+          // 模拟真实 Executor.safeContent envelope 判别(#693 T4 D4):bash
+          // handler 返回 `{ output, meta? }` → 只取 output 字符串进 model
+          // tool_result,meta 不入模型可见 payload。
           const text =
-            typeof payload === "string" ? payload : JSON.stringify(payload);
+            typeof payload === "string"
+              ? payload
+              : typeof (payload as { output?: unknown })?.output === "string"
+                ? (payload as { output: string }).output
+                : JSON.stringify(payload);
           return [
             {
               kind: "ok",
@@ -1045,6 +1048,22 @@ function hasBwrap(): boolean {
   return spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
 }
 
+/** #693 T4 D4:bash handler 返回 envelope `{ output, meta? }`,本测试断言
+ *  handler 直接返回的 partial stdout(SC13)。helper 在 envelope 与既有
+ *  { code, stdout, stderr } 契约之间转译,断言 strength 不降。 */
+interface BashResult {
+  readonly code: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+interface BashEnvelope {
+  readonly output: string;
+  readonly meta?: { readonly stdout?: string; readonly stderr?: string };
+}
+function parseBashEnvelope(envelope: BashEnvelope): BashResult {
+  return JSON.parse(envelope.output) as BashResult;
+}
+
 describe("SC13 — bash tier timeout (via timeoutMsOverride seam)", () => {
   it.skipIf(!hasBwrap())(
     "tier timeout fires at the override deadline and preserves partial stdout",
@@ -1068,8 +1087,15 @@ describe("SC13 — bash tier timeout (via timeoutMsOverride seam)", () => {
         ): Promise<ReadonlyArray<ToolExecutionResult>> => {
           const call = calls[0]!;
           const payload = await bashTool.handler(call.input, { signal });
+          // 模拟真实 Executor.safeContent envelope 判别(#693 T4 D4):bash
+          // handler 返回 `{ output, meta? }` → 只取 output 字符串进 model
+          // tool_result,meta 不入模型可见 payload。
           const text =
-            typeof payload === "string" ? payload : JSON.stringify(payload);
+            typeof payload === "string"
+              ? payload
+              : typeof (payload as { output?: unknown })?.output === "string"
+                ? (payload as { output: string }).output
+                : JSON.stringify(payload);
           return [
             {
               kind: "ok",

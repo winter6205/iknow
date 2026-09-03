@@ -267,6 +267,11 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
           thinkingBlocks: [
             { type: "thinking", thinking: "链上推理…", signature: "sig-1" },
           ],
+          // D3 (tui-display-consistency):stub adapter 注入 thinkingMs,
+          // 由 hub → store.appendEvents → projectSessionLog 写入落盘并行
+          // 数组;ChatView 末条 assistant 折叠行从 session.thinkingMs 读秒数
+          // 留存(取代已删除的 in-memory pinThinkingSeconds 副通道)。
+          thinkingMs: 3000,
         });
       },
       encodeUserText(t: string): AnthropicNativeMessage {
@@ -338,6 +343,10 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
           thinkingBlocks: [
             { type: "thinking", thinking: "等待后思考…", signature: "sig-2" },
           ],
+          // D3:stub adapter 注入纯思考时长 1500ms(等待 2.6s 不计入,因
+          // thinkingMs 由 anthropic-adapter 流式臂首 thinking_delta 惰性
+          // 打点起算 —— 见 spec D2 测量点)。
+          thinkingMs: 1500,
         });
       },
       encodeUserText(t: string): AnthropicNativeMessage {

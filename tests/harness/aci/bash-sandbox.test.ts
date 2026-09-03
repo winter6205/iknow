@@ -50,6 +50,22 @@ function hasBwrap(): boolean {
   return probe.status === 0;
 }
 
+/** #693 T4 D4:bash handler 返回 envelope `{ output, meta? }`,本测试套件按
+ *  既有 BashResult 契约断言业务语义(SC13 partial / readonly 双闸 etc.)。
+ *  helper 在 envelope 与 BashResult 之间转译,断言 strength 不降。 */
+interface BashResult {
+  readonly code: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+interface BashEnvelope {
+  readonly output: string;
+  readonly meta?: { readonly stdout?: string; readonly stderr?: string };
+}
+function parseBashEnvelope(envelope: BashEnvelope): BashResult {
+  return JSON.parse(envelope.output) as BashResult;
+}
+
 describe("bash.bwrap.argvHasUnshareNet", () => {
   it("argv contains the canonical fence flags (no spawn)", () => {
     const cwd = "/workspace";
@@ -181,11 +197,7 @@ describe("bash.timeout.partialOutput", () => {
       );
       await waitForPidFile(join(cwd, "started"));
       controller.abort();
-      const result = (await execution) as {
-        code: number;
-        stdout: string;
-        stderr: string;
-      };
+      const result = parseBashEnvelope((await execution) as BashEnvelope);
       assert.ok(
         typeof result.stdout === "string",
         `expected stdout string, got: ${String(result.stdout)}`
@@ -223,11 +235,7 @@ describe("bash.timeout.partialOutput", () => {
       );
       await waitForPidFile(pidFile);
       controller.abort();
-      const result = (await execution) as {
-        code: number;
-        stdout: string;
-        stderr: string;
-      };
+      const result = parseBashEnvelope((await execution) as BashEnvelope);
       assert.equal(result.stdout, "");
     },
     5_000
@@ -240,10 +248,12 @@ describe("bash.bwrap.hostPrefixes (real spawn)", () => {
     async () => {
       const cwd = await makeScratch("bash-host-prefix-");
       const tool = createBashTool(cwd);
-      const result = (await tool.handler({
-        command:
-          "if [ -d /opt ]; then test -r /opt && echo visible; else echo absent; fi",
-      })) as { code: number; stdout: string; stderr: string };
+      const result = parseBashEnvelope(
+        (await tool.handler({
+          command:
+            "if [ -d /opt ]; then test -r /opt && echo visible; else echo absent; fi",
+        })) as BashEnvelope
+      );
       assert.equal(result.code, 0, result.stderr);
       if (existsSync("/opt")) {
         assert.match(result.stdout, /visible/);
@@ -326,9 +336,11 @@ describe("bash.readonly 双闸 (real spawn)", () => {
         cwdReadonly: true,
       });
 
-      const result = (await tool.handler({
-        command: "find . -fprint package.json",
-      })) as { code: number; stderr: string };
+      const result = parseBashEnvelope(
+        (await tool.handler({
+          command: "find . -fprint package.json",
+        })) as BashEnvelope
+      );
 
       assert.notEqual(result.code, 0);
       assert.match(result.stderr, /Read-only file system|Permission denied/);
@@ -345,10 +357,9 @@ describe("bash.readonly 双闸 (real spawn)", () => {
       // 模拟"validator 漏了"的形态,验证物理闸独立成立。
       const tool = createBashTool(cwd, { cwdReadonly: true });
       for (const command of ["echo hi > out2.txt", "touch out3.txt"]) {
-        const result = (await tool.handler({ command })) as {
-          code: number;
-          stderr: string;
-        };
+        const result = parseBashEnvelope(
+          (await tool.handler({ command })) as BashEnvelope
+        );
         assert.notEqual(result.code, 0, `expected non-zero for: ${command}`);
         assert.match(result.stderr, /Read-only file system/);
       }
@@ -363,11 +374,11 @@ describe("bash.readonly 双闸 (real spawn)", () => {
     async () => {
       const cwd = await makeScratch("bash-ro-baseline-");
       const tool = createBashTool(cwd);
-      const result = (await tool.handler({
-        command: "touch baseline.txt",
-      })) as {
-        code: number;
-      };
+      const result = parseBashEnvelope(
+        (await tool.handler({
+          command: "touch baseline.txt",
+        })) as BashEnvelope
+      );
       assert.equal(result.code, 0);
       assert.equal(existsSync(join(cwd, "baseline.txt")), true);
     },

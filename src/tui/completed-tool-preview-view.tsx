@@ -5,15 +5,38 @@
  * 完成态 write/edit 预览的共用渲染（代码行 / 截断 DiffView / 溢出文案）。
  * live box 与历史 `ToolPreviewRows` 都走这里，避免两处复制 JSX。
  * 数据 SSOT 仍是 `completedToolPreview`；本文件只渲染。
+ *
+ * #693 T4 D4:扩 resultPreview —— 标题行下方的 `⎿` 风格 dim 5 行尾部预览
+ * （bash / skill 等子进程输出）。live + 历史共用同一渲染面（spec D4 同规则）。
+ * 失败由 caller 在外层包 error 色 token 体现；preview 文本本身不变。
  */
 import type { ReactNode } from "react";
 import {
   previewOverflowLabel,
+  resultPreviewOverflowLabel,
   type CompletedToolPreview,
+  type ResultPreview,
 } from "./tool-summary.js";
 import { DiffView, diffRowTexts } from "./diff-view.js";
 import { CodeBlock } from "./markdown.js";
 import { tuiPalette } from "./theme.js";
+
+/** 工具结果预览的前缀（spec D4 ⎿ 风格 dim）。TUI 一致性：与 `[运行中]` /
+ *  `[完成]` / `[失败]` / `▣|✓|✗` 几何字形同一族，避 emoji 噪声。 */
+const RESULT_PREVIEW_PREFIX = "⎿";
+
+/** 结果预览行（带前缀），供行账（liveToolPreviewRows）与渲染同源。 */
+export function resultPreviewTextLines(preview: ResultPreview): string[] {
+  if (preview.kind === "empty") return [];
+  const out: string[] = [];
+  if (preview.hiddenLineCount > 0) {
+    out.push(resultPreviewOverflowLabel(preview.hiddenLineCount));
+  }
+  for (const line of preview.lines) {
+    out.push(`${RESULT_PREVIEW_PREFIX} ${line}`);
+  }
+  return out;
+}
 
 /** 完成态预览的纯文本行（行账 / live text lines 与 JSX 同源）。 */
 export function completedToolPreviewTextLines(
@@ -35,24 +58,52 @@ export function completedToolPreviewTextLines(
 export function CompletedToolPreviewView(props: {
   readonly preview: CompletedToolPreview;
   readonly cols: number;
+  /** #693 T4 D4:结果预览（bash / skill 输出,5 行尾部 tail）。缺省 / empty 不渲染。 */
+  readonly resultPreview?: ResultPreview;
 }): ReactNode {
-  const { preview, cols } = props;
-  if (preview.kind === "empty") return null;
+  const { preview, cols, resultPreview } = props;
+  if (
+    preview.kind === "empty" &&
+    (resultPreview === undefined || resultPreview.kind === "empty")
+  ) {
+    return null;
+  }
   const overflow =
-    preview.hiddenLineCount > 0
+    preview.kind !== "empty" && preview.hiddenLineCount > 0
       ? previewOverflowLabel(preview.hiddenLineCount)
+      : null;
+  const resultOverflow =
+    resultPreview !== undefined &&
+    resultPreview.kind === "result" &&
+    resultPreview.hiddenLineCount > 0
+      ? resultPreviewOverflowLabel(resultPreview.hiddenLineCount)
       : null;
   return (
     <>
       {preview.kind === "code" ? (
         <CodeBlock lang="" lines={preview.lines} />
       ) : (
+        preview.kind === "diff" &&
         preview.rows.length > 0 && <DiffView rows={preview.rows} cols={cols} />
       )}
       {overflow !== null && (
         <text fg={tuiPalette.dim} wrapMode="none">
           {overflow}
         </text>
+      )}
+      {resultPreview !== undefined && resultPreview.kind === "result" && (
+        <>
+          {resultOverflow !== null && (
+            <text fg={tuiPalette.dim} wrapMode="none">
+              {`${RESULT_PREVIEW_PREFIX} ${resultOverflow}`}
+            </text>
+          )}
+          {resultPreview.lines.map((line, i) => (
+            <text key={`rp-${i}`} fg={tuiPalette.dim} wrapMode="none">
+              {`${RESULT_PREVIEW_PREFIX} ${line}`}
+            </text>
+          ))}
+        </>
       )}
     </>
   );

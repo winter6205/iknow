@@ -424,6 +424,258 @@ describe("createdAt / messageCreatedAt (prompt timestamps)", () => {
   });
 });
 
+// -- D2 (tui-display-consistency): thinkingMs parallel array (assistant duration) --
+
+describe("thinkingMs / thinkingMs parallel array (assistant duration)", () => {
+  function buildJsonl(
+    header: Record<string, unknown>,
+    events: ReadonlyArray<Record<string, unknown>>,
+    head: string | null
+  ): string {
+    const lines: string[] = [JSON.stringify({ type: "session", ...header })];
+    for (const e of events) {
+      lines.push(JSON.stringify({ type: "message", ...e }));
+    }
+    lines.push(JSON.stringify({ type: "head", id: head }));
+    return `${lines.join("\n")}\n`;
+  }
+
+  const baseHeader = {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    conversation_id: "tm-proj",
+    title: "",
+    cwd: "/tmp/test",
+    sanitized_at: "2026-08-20T00:00:00.000Z",
+    jsonMode: false,
+    turnCount: 1,
+    updatedAt: "2026-08-20T00:00:00.000Z",
+    checkpoints: [],
+  };
+
+  it("parseSessionJsonl tolerates legacy events without thinkingMs", () => {
+    // Legacy JSONL written before D2: no `thinkingMs` on any event record.
+    const raw = buildJsonl(
+      baseHeader,
+      [
+        { id: "e0", parent: null, message: userMsg("q") },
+        { id: "e1", parent: "e0", message: assistantMsg("a") },
+      ],
+      "e1"
+    );
+    const log = parseSessionJsonl(raw);
+    assert.equal(log.events.length, 2);
+    assert.equal(log.events[0]!.thinkingMs, undefined);
+    assert.equal(log.events[1]!.thinkingMs, undefined);
+  });
+
+  it("projectSessionLog projects thinkingMs absent for fully legacy chains (spread-discipline)", () => {
+    // All-chain without thinkingMs → no `thinkingMs` key in projection,
+    // mirroring the messageCreatedAt spread-discipline.
+    const raw = buildJsonl(
+      baseHeader,
+      [
+        { id: "e0", parent: null, message: userMsg("q") },
+        { id: "e1", parent: "e0", message: assistantMsg("a") },
+      ],
+      "e1"
+    );
+    const projected = projectSessionLog(parseSessionJsonl(raw));
+    assert.equal(
+      "thinkingMs" in projected,
+      false,
+      "fully legacy chain must not grow the thinkingMs key"
+    );
+    assert.equal(projected.thinkingMs?.[0], undefined);
+    assert.equal(projected.thinkingMs?.[1], undefined);
+  });
+
+  it("projectSessionLog collects thinkingMs aligned with messages, root → head order", () => {
+    // Mixed chain: e0 user (no thinkingMs), e1 assistant with thinkingMs,
+    // e2 user (no thinkingMs). Conditional emit fires; the user holes
+    // surface as null in the array (consumer ?? undefined 兜底).
+    const raw = buildJsonl(
+      baseHeader,
+      [
+        { id: "e0", parent: null, message: userMsg("q") },
+        {
+          id: "e1",
+          parent: "e0",
+          message: assistantMsg("a"),
+          thinkingMs: 1234,
+        },
+        { id: "e2", parent: "e1", message: userMsg("q2") },
+      ],
+      "e2"
+    );
+    const projected = projectSessionLog(parseSessionJsonl(raw));
+    assert.equal(projected.messages.length, 3);
+    assert.deepEqual(projected.thinkingMs, [null, 1234, null]);
+  });
+
+  it("projectSessionLog preserves thinkingMs ordering when head chain is non-trivial (forked parent walk)", () => {
+    // Hand-built head chain with a missing middle event (e1 is a fork
+    // branch not on head; head = e2 → e0). Head chain root→head = [e0, e2];
+    // e1 (orphan assistant with thinkingMs) must NOT surface.
+    const raw = buildJsonl(
+      baseHeader,
+      [
+        {
+          id: "e0",
+          parent: null,
+          message: userMsg("q"),
+          thinkingMs: 100,
+        },
+        {
+          id: "e1",
+          parent: "e0",
+          message: assistantMsg("orphan"),
+          thinkingMs: 200,
+        },
+        {
+          id: "e2",
+          parent: "e0",
+          message: assistantMsg("on-head"),
+          thinkingMs: 300,
+        },
+      ],
+      "e2"
+    );
+    const projected = projectSessionLog(parseSessionJsonl(raw));
+    assert.equal(projected.messages.length, 2);
+    const texts = projected.messages.map(
+      (m) =>
+        (
+          m.content.find(
+            (b): b is Extract<typeof b, { type: "text" }> => b.type === "text"
+          ) as { text: string } | undefined
+        )?.text ?? ""
+    );
+    assert.deepEqual(texts, ["q", "on-head"]);
+    assert.deepEqual(projected.thinkingMs, [100, 300]);
+  });
+
+  it("projectSessionLog strips a stale header thinkingMs when the head chain has no thinkingMs (stale-header guard)", () => {
+    // Mirror messageCreatedAt stale-header guard: a stamped save leaves
+    // thinkingMs in the session header line; a later rewind back into a
+    // pre-D2 fork branch walks a chain whose events carry no thinkingMs.
+    // The projection must DROP the stale header array — picker joins
+    // index-by-index on a misaligned array and would read wrong durations.
+    const raw = buildJsonl(
+      {
+        ...baseHeader,
+        thinkingMs: [10, 20, 30],
+      },
+      [
+        { id: "e0", parent: null, message: userMsg("q") },
+        { id: "e1", parent: "e0", message: assistantMsg("a") },
+      ],
+      "e1"
+    );
+    const projected = projectSessionLog(parseSessionJsonl(raw));
+    assert.equal(
+      "thinkingMs" in projected,
+      false,
+      "stale header thinkingMs must be dropped when no chain event carries it"
+    );
+    assert.equal(projected.thinkingMs?.[0], undefined);
+  });
+
+  it("codec round-trip preserves per-event thinkingMs → projected thinkingMs (verbatim deep-equal)", () => {
+    // Pin the D2 invariant at the pure-codec layer: parse → project must NOT
+    // mutate event records' thinkingMs — the numbers on disk equal the
+    // numbers the projection exposes via thinkingMs. Build a JSONL with
+    // assistant events stamped; user events carry no thinkingMs (hole, not
+    // stored). Projection's array deep-equals the per-event durations,
+    // aligned root→head with messages (nulls for user positions).
+    const assistantDurations = [100, 250];
+    const raw = buildJsonl(
+      baseHeader,
+      [
+        {
+          id: "e0",
+          parent: null,
+          message: userMsg("q"),
+        },
+        {
+          id: "e1",
+          parent: "e0",
+          message: assistantMsg("a1"),
+          thinkingMs: assistantDurations[0],
+        },
+        {
+          id: "e2",
+          parent: "e1",
+          message: assistantMsg("a2"),
+          thinkingMs: assistantDurations[1],
+        },
+        {
+          id: "e3",
+          parent: "e2",
+          message: userMsg("q2"),
+        },
+      ],
+      "e3"
+    );
+    const log = parseSessionJsonl(raw);
+    // Event records carry the same numbers the JSONL bytes declared on
+    // assistant positions; user positions are holes (undefined).
+    assert.deepEqual(
+      log.events.map((e) => e.thinkingMs),
+      [undefined, ...assistantDurations, undefined]
+    );
+    const projected = projectSessionLog(log);
+    // Projection's thinkingMs deep-equals assistant durations at assistant
+    // positions, null at user positions, aligned root→head with messages.
+    assert.deepEqual(projected.thinkingMs, [null, ...assistantDurations, null]);
+    assert.equal(projected.messages.length, 4);
+  });
+
+  it("sessionFileToJsonl round-trips SessionFileV1 with thinkingMs parallel array (deep-equal)", () => {
+    // Mirror the messageCreatedAt round-trip pin: a file with thinkingMs
+    // array → sessionFileToJsonl → parseSessionJsonl → projectSessionLog
+    // must produce a byte-equal projection.
+    const file = sampleFile({
+      id: "tm-rt",
+      overrides: {
+        messages: [
+          userMsg("q"),
+          assistantMsg("a"),
+          userMsg("q2"),
+          assistantMsg("a2"),
+        ],
+        thinkingMs: [null, 1500, null, 2300],
+      },
+    });
+    const projected = projectSessionLog(
+      parseSessionJsonl(sessionFileToJsonl(file))
+    );
+    assert.deepEqual(projected, file);
+  });
+
+  it("sessionFileToJsonl omits thinkingMs key on per-event when value is null or invalid", () => {
+    // Boundary filter at sessionFileToJsonl level: events with thinkingMs =
+    // null (user / no-think) must NOT carry the key on the event record; same
+    // for invalid boundary values (0 / negative / NaN / Infinity).
+    const file = sampleFile({
+      id: "tm-filter",
+      overrides: {
+        messages: [userMsg("q"), assistantMsg("a")],
+        thinkingMs: [null, NaN],
+      },
+    });
+    const lines = sessionFileToJsonl(file)
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const e1 = lines[1];
+    assert.equal(
+      "thinkingMs" in (e1 ?? {}),
+      false,
+      "per-event thinkingMs key must be omitted when null or invalid"
+    );
+  });
+});
+
 // -- save: JSONL authority only ----------------------------------------------
 
 describe("SessionStore.save → JSONL 形态", () => {

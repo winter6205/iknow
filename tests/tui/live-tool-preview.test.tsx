@@ -79,7 +79,7 @@ describe("liveToolPreviewBox（live 工具 tail 渲染）", () => {
   test("cols=80 完成态：摘要行 + hunk 头 + 双列行号", async () => {
     const setup = await renderBox(editRun, 80);
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("edit_file · 编辑 a.ts：old → new · ok");
+    expect(frame).toContain("[完成] edit_file · 编辑 a.ts：old → new");
     expect(frame).toContain("@@ -1,5 +1,5 @@");
     expect(frame).toMatch(/3\s+│\s+-old/);
     expect(frame).toMatch(/3\s+│\s+\+new/);
@@ -169,7 +169,7 @@ describe("liveToolPreviewTextLines（flat 行）", () => {
       newContent: "hello\n",
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    expect(rows[0]).toBe("write_file · 写入 a.ts（1 行） · ok");
+    expect(rows[0]).toBe("[完成] write_file · 写入 a.ts（1 行）");
     expect(rows).toContain("hello");
     expect(rows.some((r) => r.includes("+hello"))).toBe(false);
     expect(rows.length).toBe(liveToolPreviewRows(run, 80));
@@ -269,7 +269,7 @@ describe("运行态 → 完成态切换（reducer 驱动）", () => {
     expect(setup.captureCharFrame()).toContain("[运行中] write_file");
     setup.mockInput.pressEnter();
     const frame = await untilFrame(setup, (f) =>
-      f.includes("write_file · 写入 a.ts（1 行） · ok")
+      f.includes("[完成] write_file · 写入 a.ts（1 行）")
     );
     expect(frame).not.toContain("[运行中]");
     expect(frame).toContain("hello");
@@ -604,5 +604,119 @@ describe("liveToolPreviewTextLines (#589 贴底尾巴不含成功只读完成行
     expect(text).toContain("GREP_FAIL_MARKER");
     expect(text).not.toContain("MARKER_READ_OK_");
     expect(text).not.toMatch(/read_file · .* · ok/);
+  });
+});
+
+// -- #693 T4 D4:live 路径 bash / skill 结果预览 ---------------------------
+
+describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览", () => {
+  test("完成态 bash + stdout 旁路：尾部 5 行 dim 预览 + 溢出", () => {
+    const stdout = Array.from({ length: 8 }, (_, i) => `out-${i}`).join("\n");
+    const run: LiveToolRun = {
+      id: "tu-bash-live",
+      name: "bash",
+      status: "ok",
+      input: { command: "ls" },
+      detail: "ls",
+      stdout,
+    };
+    const rows = liveToolPreviewTextLines(run, 80);
+    // 首行：完成态摘要
+    expect(rows[0]).toBe("[完成] bash · ls");
+    // 尾 5 行带 ⎿ 前缀
+    expect(rows).toContain("⎿ out-3");
+    expect(rows).toContain("⎿ out-7");
+    // 早于尾窗的不出现
+    expect(rows.some((r) => r.includes("⎿ out-0"))).toBe(false);
+    // 溢出 +N 行
+    expect(rows.some((r) => r.includes("… +") && r.includes("行"))).toBe(true);
+  });
+
+  test("完成态 bash 失败（status=failed）:stderr 旁路进入预览", () => {
+    const run: LiveToolRun = {
+      id: "tu-bash-fail-live",
+      name: "bash",
+      status: "failed",
+      input: { command: "false" },
+      detail: "false",
+      stderr: "boom-1\nboom-2",
+    };
+    const rows = liveToolPreviewTextLines(run, 80);
+    expect(rows[0]).toBe("[失败] bash · false");
+    expect(rows).toContain("⎿ boom-1");
+    expect(rows).toContain("⎿ boom-2");
+  });
+
+  test("完成态 bash 空 stdout/全空白：仅状态行,无 ⎿", () => {
+    const run: LiveToolRun = {
+      id: "tu-bash-empty",
+      name: "bash",
+      status: "ok",
+      input: { command: "x" },
+      detail: "x",
+      stdout: "   \n\t\n  ",
+    };
+    const rows = liveToolPreviewTextLines(run, 80);
+    expect(rows[0]).toBe("[完成] bash · x");
+    expect(rows).toHaveLength(1);
+    expect(rows.some((r) => r.includes("⎿"))).toBe(false);
+  });
+
+  test("完成态 bash ANSI 透传:SGR 序列在 ⎿ 行内原样保留", () => {
+    const run: LiveToolRun = {
+      id: "tu-bash-ansi-live",
+      name: "bash",
+      status: "ok",
+      input: { command: "git status" },
+      detail: "git status",
+      stdout: "\x1b[31mERROR\x1b[0m line",
+    };
+    const rows = liveToolPreviewTextLines(run, 80);
+    expect(rows.some((r) => r.includes("ERROR") && r.includes("⎿"))).toBe(true);
+  });
+
+  test("live box 帧：bash 尾部预览 ⎿ 行出现", async () => {
+    const run: LiveToolRun = {
+      id: "tu-bash-box",
+      name: "bash",
+      status: "ok",
+      input: { command: "ls" },
+      detail: "ls",
+      stdout: "file-a\nfile-b\nfile-c",
+    };
+    const setup = await renderBox(run, 80);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("[完成] bash · ls");
+    expect(frame).toContain("⎿ file-a");
+    expect(frame).toContain("⎿ file-c");
+    await setup.renderer.destroy();
+  });
+
+  test("running 态 bash:不画 ⎿ 预览（结果预览与状态行都不在 running 时挂）", () => {
+    const run: LiveToolRun = {
+      id: "tu-bash-runn",
+      name: "bash",
+      status: "running",
+      input: { command: "ls" },
+    };
+    const rows = liveToolPreviewTextLines(run, 80);
+    expect(rows[0]).toBe("[运行中] bash · ls");
+    expect(rows.some((r) => r.includes("⎿"))).toBe(false);
+    expect(liveToolPreviewRows(run, 80)).toBe(1);
+  });
+
+  test("完成态 skill：单行 resultText 显示 1 行", () => {
+    const run: LiveToolRun = {
+      id: "tu-skill-live",
+      name: "skill",
+      status: "ok",
+      input: { name: "demo" },
+      detail: "skill demo",
+      // live 路径：skill 无旁路 → resultText 也缺 → 实际为 empty
+      // （live previewer 走 resultText，未挂旁路）。
+    };
+    const rows = liveToolPreviewTextLines(run, 80);
+    // 缺 resultText → 不画 ⎿
+    expect(rows.some((r) => r.includes("⎿"))).toBe(false);
   });
 });

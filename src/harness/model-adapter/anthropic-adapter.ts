@@ -525,11 +525,31 @@ async function stepStreamArm(deps: {
   const stream = deps.client.messages.stream(deps.params, {
     signal: deps.signal,
   });
-  wireStreamEvents(stream, deps.onStream);
+  // D2 (tui-display-consistency):thinkingMs 测量闭包 —— 在 wireStreamEvents
+  // 装配时挂 listener,首条 thinking_delta 打起点,首个非思考增量
+  // (text_delta / input_json_delta / tool_call_start) 收点。`onStream` 缺席
+  // 也挂(只为测时长,零 emit),measurement 与 emit 完全解耦 —— 不污染
+  // host 观察者契约。`end` 已记 → 后续不再覆盖(只记首个非思考点)。
+  const measurement: { start?: number; end?: number } = {};
+  wireStreamEvents(stream, deps.onStream, measurement);
   // D8:断流 / abort → finalMessage() reject → 不构造 AssistantTurnResult。
   try {
     const final = await stream.finalMessage();
-    return interpretMessage(final);
+    const result = interpretMessage(final);
+    // D2: 派生 thinkingMs。`start` 缺席(无 thinking_delta)→ 不产。
+    // `end` 缺席(仅思考,无后续非思考)→ 不产(spec: 测量必须两端都打)。
+    // 边界形态钉死:差 <= 0 或非有限数 → 字段缺席(store 落盘入口再过滤
+    // 一次,绝不落 0 / NaN / Infinity)。
+    if (
+      typeof measurement.start === "number" &&
+      typeof measurement.end === "number"
+    ) {
+      const elapsed = measurement.end - measurement.start;
+      if (Number.isFinite(elapsed) && elapsed > 0) {
+        return { ...result, thinkingMs: elapsed };
+      }
+    }
+    return result;
   } catch (e) {
     // wireStreamEvents 已 emit 的部分不受影响 — D8 整回合不提交语义由 step
     // reject 不构造 AssistantTurnResult 保证,翻译只是改变异常类。
@@ -555,16 +575,41 @@ async function stepStreamArm(deps: {
  */
 function wireStreamEvents(
   stream: AnthropicMessageStream,
-  onStream: ((event: HarnessStreamEvent) => void) | undefined
+  onStream: ((event: HarnessStreamEvent) => void) | undefined,
+  /** D2 (tui-display-consistency):thinkingMs 测量闭包。`onStream` 缺席时
+   *  也挂(只为测时长,零 emit)—— measurement 与 emit 完全解耦。
+   *  - 首条 thinking_delta → `start` 记 `performance.now()`
+   *  - 首条非思考增量(text_delta / input_json_delta / tool_call_start)
+   *    → `end` 记 `performance.now()`
+   *  仅记首个端点,后续不覆盖;两端都有 → stepStreamArm 计算 elapsed,
+   *  边界形态合法(> 0 且有限数)→ 挂 `thinkingMs`,否则字段缺席。 */
+  measurement?: { start?: number; end?: number }
 ): void {
-  if (onStream === undefined) return;
+  // D2:测量是否在场决定 listener 是否挂。`onStream` 与 measurement 是
+  // 独立维度 —— measurement 在场 + onStream 缺席 = 静默测量(只测不 emit),
+  // host 零观察者场景仍能产出 thinkingMs。
+  if (onStream === undefined && measurement === undefined) return;
   const safeEmit = (event: HarnessStreamEvent): void =>
     safeEmitStream(onStream, event);
+  // D2:打点辅助 —— 仅在 measurement 在场 + 端点尚未记时调用 performance.now()。
+  // 不在 text-delta 的 empty-skip 路径上打点,避免空文本被误当作首条非思考增量
+  // 触发 end(空字符串语义:无信息,不视为阶段切换)。
+  const markStart = (): void => {
+    if (measurement !== undefined && measurement.start === undefined) {
+      measurement.start = performance.now();
+    }
+  };
+  const markEnd = (): void => {
+    if (measurement !== undefined && measurement.end === undefined) {
+      measurement.end = performance.now();
+    }
+  };
   // T1:content_block_start 登记 index → block.id,供 content_block_delta
   // (input_json_delta) 配对;函数返回即自然清理(每回合一次装配)。
   const indexToBlockId = new Map<number, string>();
   stream.on("text", (textDelta) => {
     if (textDelta === "") return; // empty delta:不 emit(见上方 empty-class 决策注释)
+    markEnd(); // D2 — text_delta 视为首个非思考增量 → 收点
     safeEmit({ type: "text_delta", text: textDelta });
   });
   stream.on("streamEvent", (event: MessageStreamEvent) => {
@@ -581,6 +626,7 @@ function wireStreamEvents(
       if (delta?.type === "thinking_delta") {
         const text = delta.thinking ?? "";
         if (text === "") return; // empty delta 不 emit — 对齐 text_delta 纪律
+        markStart(); // D2 — 首条 thinking_delta 打起点
         safeEmit({ type: "thinking_delta", text });
         return;
       }
@@ -589,6 +635,7 @@ function wireStreamEvents(
       if (delta?.type === "input_json_delta") {
         const partialJson = delta.partial_json ?? "";
         if (partialJson === "") return; // empty delta 不 emit — 对齐 text_delta 纪律
+        markEnd(); // D2 — input_json_delta 视为首个非思考增量 → 收点
         const id = indexToBlockId.get(event.index);
         // 未登记 / 空串 id 均无 id 可配对 → 不 emit(空串 = tool_use block.id
         // 缺失的 legacy 回退,无法与 tool_call_start / postToolUse 配对)。
@@ -603,6 +650,9 @@ function wireStreamEvents(
     // D1 最小集:只 tool_use 翻译为 tool_call_start;server_tool_use 等其它
     // 内容块不在 v1 范围内(interpretMessage 也会因不支持类型 ProtocolError)。
     if (block.type !== "tool_use") return;
+    // D2:tool_call_start 也视为首个非思考增量 → 收点(在 thinking 后立刻
+    // 接 tool_use,input_json_delta 之前 content_block_start 先到)。
+    markEnd();
     // T1:登记 index → block.id,供 input_json_delta 增量配对。
     const id = typeof block.id === "string" ? block.id : "";
     indexToBlockId.set(event.index, id);

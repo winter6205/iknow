@@ -348,7 +348,12 @@ describe("bash handler — readonly mode wiring", () => {
   it("bashMode='readonly' allows a read command (ls executes successfully)", async () => {
     const cwd = await makeScratch("bash-ro-allow-");
     const tool = createBashTool(cwd, { bashMode: "readonly" });
-    const result = (await tool.handler({ command: "ls" })) as {
+    // #693 T4 D4:handler 返回 envelope `{ output, meta? }`,parse output 取原
+    // { code, stdout, stderr } 契约（assertion strength 不降）。
+    const envelope = (await tool.handler({ command: "ls" })) as {
+      output: string;
+    };
+    const result = JSON.parse(envelope.output) as {
       code: number;
       stdout: string;
       stderr: string;

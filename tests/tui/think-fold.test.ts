@@ -11,15 +11,16 @@
  * 本模块把两处收敛到同一纯函数，从源头统一：`思考了 N 秒` 本身即带语义，
  * 不再叠加 `[思考]` 前缀；子秒 / 无秒数 / 非有限 → 空串（不换括号标签，
  * 也不造「思考了 0 秒」）。
- * 流式行不再叠加实时秒数（恒 `思考中…`）—— 思考时长由事后 frozen 摘要
- * `思考了 N 秒` 承担，避免与 mode 行运行时长视觉重复 + 语义混淆。
+ * 流式行不再叠加实时秒数（恒 `思考中…`）—— 思考时长由事后落盘 thinkingMs
+ * 摘要 `思考了 N 秒` 承担（spec D3：D2 落盘数据接管，app 层内存 pin/freeze
+ * 副通道整条删除）。`pinThinkingSeconds` 已删除 —— 单元测试随函数删除而删除
+ * （spec D3 授权，折叠行思考秒数来源语义变更）。
  */
 import { describe, expect, test } from "bun:test";
 import {
   THINKING_PEEK_MAX_LINES,
   formatThinkingFold,
   formatThinkingLive,
-  pinThinkingSeconds,
   thinkingPeekLines,
 } from "../../src/tui/think-fold.js";
 
@@ -54,28 +55,14 @@ describe("formatThinkingFold（历史折叠行文案）", () => {
   });
 });
 
-describe("pinThinkingSeconds（思考结束钉秒，供结束态唯一文案）", () => {
-  test("empty：无 thinking 正文 → 0（本来没思考，不造秒数）", () => {
-    expect(pinThinkingSeconds(0, 0, 9)).toBe(0);
-  });
-
-  test("negative：已冻结不覆盖；负 elapsed 且有正文 → 至少 1", () => {
-    expect(pinThinkingSeconds(4, 10, 9)).toBe(4);
-    expect(pinThinkingSeconds(0, 3, -2)).toBe(1);
-  });
-
-  test("overflow：有正文 → floor 秒数", () => {
-    expect(pinThinkingSeconds(0, 3, 6.9)).toBe(6);
-  });
-
-  test("concurrent：同一输入重复钉秒结果稳定", () => {
-    expect(pinThinkingSeconds(0, 8, 2)).toBe(pinThinkingSeconds(0, 8, 2));
-  });
-
-  test("exception：有正文但不足 1 秒 / 非有限 elapsed → 1（思考发生了就要有结束态）", () => {
-    expect(pinThinkingSeconds(0, 12, 0.4)).toBe(1);
-    expect(pinThinkingSeconds(0, 12, Number.NaN)).toBe(1);
-    expect(pinThinkingSeconds(0, 12, Number.POSITIVE_INFINITY)).toBe(1);
+describe("pinThinkingSeconds（已删除 — spec D3）", () => {
+  // D3 (tui-display-consistency):`pinThinkingSeconds` 已删除 —— 折叠行思考
+  // 秒数改读落盘 `thinkingMs`（`turn-activity.sumThinkingMsInRange`），
+  // TUI 内存不再钉秒。原有单测随函数删除而删除（语义变更：旧入参边界
+  // 全部不再相关），由 `turn-activity.test.ts` 的
+  // `sumThinkingMsInRange` / `thinkingMsToSeconds` 单测覆盖新数据通路。
+  test("placeholder: removed-by-spec-D3", () => {
+    expect(typeof formatThinkingLive()).toBe("string");
   });
 });
 
