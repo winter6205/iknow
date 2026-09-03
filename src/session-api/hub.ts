@@ -169,6 +169,7 @@ import {
   messageText,
   projectThinkingView,
   projectToolCalls,
+  sumAssistantThinkingMsInRange,
   TASK_EXCERPT_PREFIX,
 } from "./turn-projection.js";
 import type { WorkspaceResponse } from "./contract.js";
@@ -432,9 +433,16 @@ const OUTCOME_TO_STATUS: Record<VerifyLoopOutcome, GoalStatus | undefined> = {
  * T1: also projects thinking/toolCalls per turn (messages between this user
  * query and the next real query message, per `isTurnQuery`). Mask = SC20
  * boundary.
+ *
+ * D2 (tui-display-consistency) wire surface: `thinkingMs` 是与 `messages`
+ * 一一对应的并行数组 (SessionFileV1.thinkingMs). 求和每个 turn slice 内
+ * 所有 assistant 消息对应的 thinkingMs 值; sum > 0 时挂到 TurnAnswerDto
+ * `thinkingMs` (ms) 字段. 缺席 = 旧会话 / 非 assistant turn / sum = 0,
+ * 与 thinking/toolCalls/lastUsage 同 byte-stable 模式.
  */
 export function projectMessagesToTurns(
-  messages: ReadonlyArray<AnthropicNativeMessage>
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  thinkingMs?: ReadonlyArray<number | null>
 ): TurnDto[] {
   const mask = createOutputMask(currentSecretValues()).mask;
   const turns: TurnDto[] = [];
@@ -452,6 +460,11 @@ export function projectMessagesToTurns(
     turnIndex++;
     const thinking = projectThinkingView(turnMessages, mask);
     const toolCalls = projectToolCalls(turnMessages, mask);
+    const turnThinkingMs = sumAssistantThinkingMsInRange({
+      messages: turnMessages,
+      thinkingMs,
+      startIndex: i,
+    });
     turns.push({
       query,
       answer: {
@@ -460,6 +473,7 @@ export function projectMessagesToTurns(
         turnCount: turnIndex,
         ...(thinking !== undefined ? { thinking } : {}),
         ...(toolCalls !== undefined ? { toolCalls } : {}),
+        ...(turnThinkingMs > 0 ? { thinkingMs: turnThinkingMs } : {}),
       },
     });
   }
@@ -1261,7 +1275,9 @@ export class SessionHub {
     const file = await this.store.load(conversationId);
     return {
       session: this.summarize({ file }),
-      turns: projectMessagesToTurns(file.messages),
+      // D2 (tui-display-consistency): pass file.thinkingMs parallel array so
+      // projectMessagesToTurns can sum per-turn assistant thinkingMs.
+      turns: projectMessagesToTurns(file.messages, file.thinkingMs),
     };
   }
 
@@ -1725,26 +1741,41 @@ export class SessionHub {
                       : {}),
                     records: s.verifyRecords,
                   }),
-            buildStop: async (s) => ({
-              session: this.summarize({
-                file: await this.store.load(conversationId),
-              }),
-              turn: this.toTurnDto({
-                query,
-                result: s.finalResult,
-                turnMessages: s.finalResult.messages.slice(s.priorCount),
-                // B1: rendered interrupted is decided against the SAME priorMessages
-                // as conditionalSave — byte-identical shouldPersistCheckpoint verdict
-                // (saved 只在 cancelled 时消费;completed 等 stopReason 不读它)。
-                priorMessages: session.messages,
-                ...(capturedStopSummary !== undefined &&
-                capturedStopSummary.length > 0
-                  ? { stopSummary: capturedStopSummary }
-                  : {}),
-                // #128 M3: 验证最终判定 (failed/unstable/escalated) surface 到 DTO。
-                ...(s.verifyView !== undefined ? { verify: s.verifyView } : {}),
-              }),
-            }),
+            buildStop: async (s) => {
+              // D2 (tui-display-consistency): load once, reuse for session
+              // summary + per-turn thinkingMs sum. 同一 `loadedFile.thinkingMs`
+              // 是 store 落盘后与 loadedFile.messages 对齐的并行数组,起点
+              // s.priorCount (= session.messages.length) 即本轮新增起点。
+              const loadedFile = await this.store.load(conversationId);
+              const turnMs = s.finalResult.messages.slice(s.priorCount);
+              const turnThinkingMs = sumAssistantThinkingMsInRange({
+                messages: turnMs,
+                thinkingMs: loadedFile.thinkingMs,
+                startIndex: s.priorCount,
+              });
+              return {
+                session: this.summarize({ file: loadedFile }),
+                turn: this.toTurnDto({
+                  query,
+                  result: s.finalResult,
+                  turnMessages: turnMs,
+                  // B1: rendered interrupted is decided against the SAME priorMessages
+                  // as conditionalSave — byte-identical shouldPersistCheckpoint verdict
+                  // (saved 只在 cancelled 时消费;completed 等 stopReason 不读它)。
+                  priorMessages: session.messages,
+                  ...(capturedStopSummary !== undefined &&
+                  capturedStopSummary.length > 0
+                    ? { stopSummary: capturedStopSummary }
+                    : {}),
+                  // #128 M3: 验证最终判定 (failed/unstable/escalated) surface 到 DTO。
+                  ...(s.verifyView !== undefined
+                    ? { verify: s.verifyView }
+                    : {}),
+                  // D2 wire surface: 本回合 assistant 思考时长 (ms)。
+                  ...(turnThinkingMs > 0 ? { thinkingMs: turnThinkingMs } : {}),
+                }),
+              };
+            },
             reloadSession: async () => {
               // Hub refreshes session state between auto-loop iterations.
               // (Chat passes a no-op since its session lives in `ctx.state`.)
@@ -2118,17 +2149,27 @@ export class SessionHub {
         priorMessages: session.messages,
       });
       const loaded = await this.store.load(conversationId);
+      const turnMs = result.messages.slice(session.messages.length);
+      // D2 (tui-display-consistency): per-turn thinkingMs from disk-SSOT
+      // parallel array. continue_pending 路径直接读到 loadedFile.thinkingMs
+      // (本轮新增 = session.messages.length 起点);与 buildStop 路径同模式。
+      const turnThinkingMs = sumAssistantThinkingMsInRange({
+        messages: turnMs,
+        thinkingMs: loaded.thinkingMs,
+        startIndex: session.messages.length,
+      });
       return {
         session: this.summarize({ file: loaded }),
         turn: this.toTurnDto({
           query: "",
           result,
-          turnMessages: result.messages.slice(session.messages.length),
+          turnMessages: turnMs,
           priorMessages: session.messages,
           ...(capturedStopSummary !== undefined &&
           capturedStopSummary.length > 0
             ? { stopSummary: capturedStopSummary }
             : {}),
+          ...(turnThinkingMs > 0 ? { thinkingMs: turnThinkingMs } : {}),
         }),
       };
     } catch (err) {
@@ -3061,6 +3102,12 @@ export class SessionHub {
     /** #128 M3: verify 最终判定视图 (failed/unstable/escalated)。缺席 = 无 verify
      * 或判定为 passed/disabled/aborted (byte-stable)。 */
     readonly verify?: VerifyAnswerView;
+    /** D2 (tui-display-consistency) wire surface: 本回合 assistant 思考时长
+     * (ms)。postMessage / continuePending 路径在 commitMessages 拿到
+     * turnResult.thinkingMs 后写入; > 0 时挂到 TurnAnswerDto `thinkingMs`
+     * 字段。缺席 = 旧会话 / 无思考 / 边界非法 (byte-stable, 与
+     // thinking/toolCalls/lastUsage 同模式)。 */
+    readonly thinkingMs?: number;
   }): TurnDto {
     const { query, result } = opts;
     // SC20: serve SPA output boundary — mask known secret values in the
@@ -3106,6 +3153,11 @@ export class SessionHub {
         // #128 M3: verify 最终判定 (failed/unstable/escalated) surface。
         // 仅 verify 配置且判定非 passed/disabled/aborted 时存在 (byte-stable)。
         ...(opts.verify !== undefined ? { verify: opts.verify } : {}),
+        // D2 (tui-display-consistency): thinkingMs (ms) 透传。> 0 才挂,
+        // 缺席 = 旧会话 / 无思考回合 / 边界非法 (byte-stable)。
+        ...(opts.thinkingMs !== undefined && opts.thinkingMs > 0
+          ? { thinkingMs: opts.thinkingMs }
+          : {}),
       },
     };
   }

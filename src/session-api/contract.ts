@@ -47,6 +47,15 @@ export interface TurnAnswerDto {
    * （byte-stable，与 stopSummary / interrupted 同模式）。
    */
   readonly verify?: VerifyAnswerView;
+  /**
+   * D2 (tui-display-consistency) wire surface: 单回合 assistant 思考时长
+   * (ms)。hub `projectMessagesToTurns` / `toTurnDto` 求和本 turn slice 内
+   * 所有 assistant 消息对应的落盘 thinkingMs (per-message index → 并行数组);
+   * sum > 0 时挂上本字段 (byte-stable, 与 thinking/toolCalls/lastUsage 同模式)。
+   * 旧会话无 thinkingMs / 非 assistant turn / sum = 0 → 字段缺席。
+   * UI 消费: web AgentCard thinking 块显示「思考了 N 秒」(spec SC8 / D6)。
+   */
+  readonly thinkingMs?: number;
 }
 
 /** #128：验证闭环最终判定的 wire 视图（rounds + outcome，供 UI surface）。

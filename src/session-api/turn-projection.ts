@@ -20,6 +20,49 @@ import { isSubagentDrainText } from "../harness/subagent/host-drain.js";
 import type { ActivityItem, ThinkingView, ToolCallView } from "./contract.js";
 
 /**
+ * D2 (tui-display-consistency) wire surface: sum assistant 消息的 thinkingMs
+ * (ms) over a message slice. 给定 `messages` 切片 + 与 messages 一一对应的
+ * `thinkingMs` 并行数组 + 切片起点 `startIndex` (默认 0), 求和区间内
+ * `role === "assistant"` 消息对应的 thinkingMs 值。
+ *
+ * 边界形态 (spec D2 / schema validate钉死):
+ *  - `thinkingMs` undefined (整链无数据 / 旧会话) → 0;
+ *  - 索引越界 (thinkingMs[index] === undefined) → 该位置按 0 计入;
+ *  - `null` 元素 (该位置无 thinkingMs) → 0;
+ *  - 非有限数 / `<= 0` (appendEvents 入口已过滤, 此处防御) → 0;
+ *  - 非整数 / 负索引 → 0.
+ *
+ * 输出: ms 累加值. 字节/秒换算由调用方决定 (Math.ceil(ms / 1000)).
+ *
+ * 不 import 跨模块: 语义镜像 src/tui/turn-activity.ts sumThinkingMsInRange,
+ * 但 hub 侧 web wire 不依赖 TUI, 因此这里独立一份 (D6 与 D3 共享语义但
+ * 不同落点).
+ */
+export function sumAssistantThinkingMsInRange(opts: {
+  readonly messages: ReadonlyArray<AnthropicNativeMessage>;
+  readonly thinkingMs: ReadonlyArray<number | null> | undefined;
+  readonly startIndex?: number;
+}): number {
+  const { messages, thinkingMs } = opts;
+  const start = opts.startIndex ?? 0;
+  if (thinkingMs === undefined) return 0;
+  if (messages.length === 0) return 0;
+  let total = 0;
+  for (let offset = 0; offset < messages.length; offset++) {
+    const msg = messages[offset];
+    if (msg === undefined) continue;
+    if (msg.role !== "assistant") continue;
+    const index = start + offset;
+    if (!Number.isInteger(index) || index < 0) continue;
+    const value = thinkingMs[index];
+    if (value === null || value === undefined) continue;
+    if (!Number.isFinite(value) || value <= 0) continue;
+    total += value;
+  }
+  return total;
+}
+
+/**
  * Joined text of a message's text blocks (" "-separated; "" when none).
  * Single shared implementation — previously duplicated verbatim as hub.ts
  * `textOf` and store/checkpoint.ts `joinedText`; keep every consumer on this

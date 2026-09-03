@@ -58,6 +58,11 @@ export type TurnAnswerDto = {
   readonly activity?: readonly ActivityItem[];
   /** 可选：camelCase token usage；仅在后端值非 null 时存在。 */
   readonly lastUsage?: TokenUsage;
+  /** D2 (tui-display-consistency) wire surface: 单回合 assistant 思考时长
+   * (ms)。仅在 hub 算得 sum > 0 时存在;旧会话 / 非 assistant turn / sum = 0
+   * → 字段缺席 (byte-stable, 与 thinking/toolCalls/lastUsage 同模式)。
+   * UI 消费: AgentCard → ThinkingBlock 折叠块显示「思考了 N 秒」 (SC8)。 */
+  readonly thinkingMs?: number;
 };
 
 /** Mirrors ThinkingOverride in PostMessageRequest (src/session-api/contract.ts). */
