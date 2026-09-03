@@ -22,6 +22,7 @@ import { join } from "node:path";
 import {
   collectToolResults,
   dereferenceTraceMessages,
+  isRecord,
   messageContentBlocks,
   type ProjectedToolResult,
 } from "./project-tool-results.js";
@@ -67,20 +68,21 @@ export const GET_RECORD_DESCRIPTION =
   "Read one record's content with get_record, addressed as a character window " +
   "inside one record named by record_id in a required conversation_id. Two arms: " +
   "pass part_index to read a window, omit part_index to get an inventory of the " +
-  "record's addressable parts — each part's coordinates and its size in " +
-  "characters, with no content, which is how you learn a part's length before " +
-  "spending output on it. A window returns exactly count characters starting at " +
-  "from_char, reports the part's length as part_chars, and echoes the effective " +
-  "coordinates, so count is the read unit you budget with. To page through a " +
-  "part, read the first window, then raise from_char by count until " +
+  "record's addressable parts — each part's coordinates, its message's role " +
+  "(present under detail=messages; absent under detail=tool_results), and its " +
+  "size in characters, with no content, which is how you learn a part's length " +
+  "before spending output on it. A window returns exactly count characters " +
+  "starting at from_char, reports the part's length as part_chars, and echoes " +
+  "the effective coordinates, so count is the read unit you budget with. To page " +
+  "through a part, read the first window, then raise from_char by count until " +
   "from_char + count would pass part_chars; a window past the part end answers " +
   "with that size and the remaining characters. Use detail=messages to address " +
-  "an LLM call's message content blocks, which also requires message_index; " +
-  "leave detail at its default tool_results to address that call's projected " +
-  "tool results by part_index, in projection order and in full. Positions count " +
-  "UTF-16 code units, so a boundary may fall between the halves of a surrogate " +
-  "pair. Discover conversation_id with list_sessions and record_id with " +
-  "query_trace.";
+  "an LLM call's message content blocks (each inventory part carries the role " +
+  "of its message), which also requires message_index; leave detail at its " +
+  "default tool_results to address that call's projected tool results by " +
+  "part_index, in projection order and in full. Positions count UTF-16 code " +
+  "units, so a boundary may fall between the halves of a surrogate pair. " +
+  "Discover conversation_id with list_sessions and record_id with query_trace.";
 
 type Detail = "messages" | "tool_results";
 
@@ -221,6 +223,12 @@ interface AddressablePart {
   readonly partIndex: number;
   readonly text: string;
   readonly identity?: Record<string, unknown>;
+  // v1.2 判据 (a): detail=messages 清单臂的 part 携带所属 message 的 role
+  // (ADR-0003 messages[].role 值域: user / assistant / tool / system). 投影层
+  // 字段, 仅清单臂使用, 不进窗臂, 也不进 detail=tool_results parts (tool_result
+  // 按定义在 user 侧, 加 role 是冗余且易混淆 user-message 与其中嵌套的
+  // tool_result — 参 CONTEXT.md tool_result projection 词条).
+  readonly role?: string;
 }
 
 /**
@@ -259,8 +267,21 @@ async function addressParts(
   }
   const parts: AddressablePart[] = [];
   dereferenced.forEach((message, messageIndex) => {
+    // v1.2 判据 (a): 解引用后的 message 上读 role (string 时). 不可读时
+    // (例如解引用降级到空数组已由 dereferenceTraceMessages 处理, 正常路径
+    // 上不会出现) 不带 role -- 与 detail=tool_results parts 行为一致:
+    // 字段缺席而非 null/undefined.
+    const role =
+      isRecord(message) && typeof message.role === "string"
+        ? message.role
+        : undefined;
     messageContentBlocks(message).forEach((block, partIndex) => {
-      parts.push({ messageIndex, partIndex, text: renderPart(block) });
+      parts.push({
+        messageIndex,
+        partIndex,
+        text: renderPart(block),
+        ...(role === undefined ? {} : { role }),
+      });
     });
   });
   return { parts, messageCount: dereferenced.length };
@@ -299,6 +320,11 @@ function manifestOf(
       part_index: part.partIndex,
       chars: part.text.length,
       ...(part.identity ?? {}),
+      // v1.2 判据 (a): detail=messages 的 part 携带所属 message 的 role;
+      // tool_results parts 上无 role (AddressablePart.role 不带, 见
+      // addressParts 的 detail === "tool_results" 分支). 字段缺席 = 不
+      // 渲染空键, 与本文件其他 part 字段保持一致.
+      ...(part.role === undefined ? {} : { role: part.role }),
     })),
   };
 }

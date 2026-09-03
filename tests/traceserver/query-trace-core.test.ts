@@ -183,6 +183,174 @@ function idsOf(page: ReadonlyArray<Record<string, unknown>>): unknown[] {
 const MARKER = "...[truncated]";
 
 describe("query_trace traceserver core (T7)", () => {
+  describe("assistant projection (v1.2)", () => {
+    // spec v1.2 判据 (b): llm_call 投影新增 `last_assistant_preview` = 最后一条
+    // role==="assistant" 消息的预览，截断帽沿复用既有 `preview()` 的
+    // QUERY_TRACE_PREVIEW_CAP=400。无 assistant 消息的 llm_call -> 字段**缺席**
+    // （合法态，非错误）。
+    it("carries last_assistant_preview taken from the LAST assistant message, not the first", async () => {
+      // Two distinct assistant messages, each with text content that names itself
+      // -- a sliding window over the assistant tail has to land on the second
+      // one, not the first. Surrounding user messages are kept so the projection
+      // is forced to walk past non-assistant messages.
+      const traceDir = makeTraceDir();
+      writeSession(
+        traceDir,
+        "c-role-last",
+        jsonLine(
+          llmCallRow("c-role-last", 1, {
+            messages: [
+              { role: "user", content: "ignore me" },
+              { role: "assistant", content: "first assistant answer" },
+              { role: "user", content: "ignore me again" },
+              { role: "assistant", content: "final assistant answer" },
+            ],
+          })
+        )
+      );
+
+      const parsed = envelope(
+        await createQueryTraceCore({ traceDir })({
+          conversation_id: "c-role-last",
+        })
+      );
+      const record = parsed.records[0] ?? {};
+
+      // The last-assistant preview must be the LAST assistant's message,
+      // not the first's and not the trailing user message -- that is the
+      // whole point of the field's name. preview() JSON-stringifies
+      // non-string values (the message object); the assistant content
+      // travels inside that JSON, which is the same shape the existing
+      // last_message_preview keys give.
+      const expectedLast = JSON.stringify({
+        role: "assistant",
+        content: "final assistant answer",
+      });
+      assert.equal(
+        record["last_assistant_preview"],
+        expectedLast,
+        "last_assistant_preview must read the LAST assistant message, not the first"
+      );
+      // The existing last_message_preview must stay unchanged: it answers a
+      // different question (last message of any role), and the spec pins its
+      // semantics in v1.2. Reading both together is the contract.
+      assert.equal(
+        record["last_message_preview"],
+        expectedLast,
+        "last_message_preview still answers the last message of any role"
+      );
+    });
+
+    it("omits last_assistant_preview when no assistant message is present", async () => {
+      // Empty case for the new field (defensive-contract boundary class
+      // "empty"): the call answered, just nothing matched. Field absence is the
+      // contract -- a `last_assistant_preview: ""` would silently confuse a
+      // caller that uses `in` / `Object.keys` to gate its next step.
+      const traceDir = makeTraceDir();
+      writeSession(
+        traceDir,
+        "c-no-assistant",
+        jsonLine(
+          llmCallRow("c-no-assistant", 1, {
+            messages: [{ role: "user", content: "only user" }],
+          })
+        )
+      );
+
+      const parsed = envelope(
+        await createQueryTraceCore({ traceDir })({
+          conversation_id: "c-no-assistant",
+        })
+      );
+      const record = parsed.records[0] ?? {};
+
+      // The field must be absent, not empty-string -- the same shape the
+      // first/last_message_preview guard gives for messages.length === 0.
+      assert.ok(
+        !("last_assistant_preview" in record),
+        `last_assistant_preview must be absent for a non-assistant-only trace, got: ${JSON.stringify(record)}`
+      );
+      // The two existing preview keys are still gated by messages.length > 0,
+      // so this single-user case keeps emitting them. preview() JSON-
+      // stringifies the message object, so the preview is the serialized
+      // message, not the raw content.
+      const expectedPreview = JSON.stringify({
+        role: "user",
+        content: "only user",
+      });
+      assert.equal(record["first_message_preview"], expectedPreview);
+      assert.equal(record["last_message_preview"], expectedPreview);
+    });
+
+    it("omits last_assistant_preview when messages is empty", async () => {
+      // Same boundary as the first/last_message_preview empty guard: no
+      // messages means no previews at all.
+      const traceDir = makeTraceDir();
+      writeSession(
+        traceDir,
+        "c-empty-messages",
+        jsonLine(llmCallRow("c-empty-messages", 1, { messages: [] }))
+      );
+
+      const parsed = envelope(
+        await createQueryTraceCore({ traceDir })({
+          conversation_id: "c-empty-messages",
+        })
+      );
+      const record = parsed.records[0] ?? {};
+
+      assert.ok(!("last_assistant_preview" in record));
+      assert.ok(!("first_message_preview" in record));
+      assert.ok(!("last_message_preview" in record));
+      assert.equal(record["messages_count"], 0);
+    });
+
+    it("caps last_assistant_preview at QUERY_TRACE_PREVIEW_CAP with the same marker", async () => {
+      // v1.2 判据 (b): 帽沿与 last_message_preview 同款 -- preview() 的同一段
+      // 截断语义, 同一 cap, 同一 marker. assistant 文本 500 字符, 截到 400 + 标记.
+      const traceDir = makeTraceDir();
+      const assistantText = "a".repeat(500);
+      writeSession(
+        traceDir,
+        "c-cap",
+        jsonLine(
+          llmCallRow("c-cap", 1, {
+            messages: [
+              { role: "user", content: "q" },
+              { role: "assistant", content: assistantText },
+            ],
+          })
+        )
+      );
+
+      const parsed = envelope(
+        await createQueryTraceCore({ traceDir })({
+          conversation_id: "c-cap",
+        })
+      );
+      const record = parsed.records[0] ?? {};
+      const preview = record["last_assistant_preview"];
+
+      // preview() JSON-stringifies the message object, so the truncated text
+      // is the serialized form cut at QUERY_TRACE_PREVIEW_CAP, not the raw
+      // content string. Same shape as the last_message_preview cap test.
+      const expected = JSON.stringify({
+        role: "assistant",
+        content: assistantText,
+      });
+      assert.equal(typeof preview, "string");
+      assert.ok((preview as string).endsWith(MARKER));
+      assert.equal(
+        (preview as string).length,
+        QUERY_TRACE_PREVIEW_CAP + MARKER.length
+      );
+      assert.equal(
+        preview,
+        expected.slice(0, QUERY_TRACE_PREVIEW_CAP) + MARKER
+      );
+    });
+  });
+
   describe("list projection", () => {
     it("counts zero messages and emits no preview keys at all for an empty messages array", async () => {
       const traceDir = makeTraceDir();

@@ -604,6 +604,143 @@ describe("trace MCP server — get_record", () => {
   });
 });
 
+
+describe("trace MCP server — role projection (v1.2)", () => {
+  // spec v1.2 判据落地后, 经 stdio MCP 调用路径验证两张皮共用的投影:
+  // query_trace 行轴投影携带 last_assistant_preview;
+  // get_record(detail=messages) 清单臂 parts 携带 role.
+  // 两张皮经共享核自动继承, 这里钉住 MCP 这层也能看到这些字段.
+
+  it("query_trace llm_call projection carries last_assistant_preview", async () => {
+    const fixture = createTraceFixture();
+    fixtures.push(fixture);
+    const connected = await connectFixture();
+    try {
+      const result = await connected.client.callTool({
+        name: "query_trace",
+        arguments: { conversation_id: "conversation-1" },
+      });
+      const text = result.content[0];
+      assert.equal(text?.type, "text");
+      if (text?.type !== "text") throw new Error("expected text content");
+
+      const body = JSON.parse(text.text) as {
+        records: Array<Record<string, unknown>>;
+      };
+      // fixture 在 conversation-1 第二条记录 llm-2 上有一条 assistant 消息,
+      // 内容是一个 tool_use block. last_assistant_preview 应该是其 JSON 字符串.
+      const llm2 = body.records.find(
+        (record) => record.llm_call_id === "llm-2"
+      );
+      assert.ok(llm2, "fixture must contain llm-2");
+      assert.ok(
+        "last_assistant_preview" in llm2!,
+        `last_assistant_preview must appear in llm_call projection, got: ${JSON.stringify(llm2)}`
+      );
+      // preview() JSON-stringifies the message object. The fixture's
+      // llm-2 messages are [user prompt, assistant tool_use, user
+      // tool_result] -- the LAST assistant is the second message; the
+      // last_message_preview answers a different question (last message
+      // of any role) and lands on the tool_result.
+      assert.equal(
+        llm2!.last_assistant_preview,
+        JSON.stringify({
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu-1",
+              name: "lookup",
+              input: { query: "private input" },
+            },
+          ],
+        })
+      );
+      // last_message_preview semantics preserved: still the last message
+      // of any role (the user tool_result, here).
+      assert.equal(
+        llm2!.last_message_preview,
+        JSON.stringify({
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu-1",
+              content: "private tool output",
+            },
+          ],
+        })
+      );
+    } finally {
+      await connected.close();
+    }
+  });
+
+  it("get_record(detail=messages) manifest parts carry role", async () => {
+    const fixture = createTraceFixture();
+    fixtures.push(fixture);
+    const connected = await connectFixture();
+    try {
+      const result = await connected.client.callTool({
+        name: "get_record",
+        arguments: {
+          conversation_id: "conversation-1",
+          record_id: "llm-2",
+          detail: "messages",
+        },
+      });
+      const text = result.content[0];
+      assert.equal(text?.type, "text");
+      if (text?.type !== "text") throw new Error("expected text content");
+
+      const body = JSON.parse(text.text) as {
+        parts: Array<{ role?: string; message_index?: number }>;
+      };
+
+      // llm-2 fixture: 3 条消息 [user, assistant, user], 每条单 part.
+      // role 跟随 message: [user, assistant, user].
+      assert.equal(body.parts.length, 3);
+      assert.equal(body.parts[0]?.role, "user");
+      assert.equal(body.parts[1]?.role, "assistant");
+      assert.equal(body.parts[2]?.role, "user");
+    } finally {
+      await connected.close();
+    }
+  });
+
+  it("get_record default detail=tool_results manifest parts carry no role", async () => {
+    // v1.2 判据 (a) 收尾: detail=tool_results 的 part 上**不加** role.
+    // 通过 MCP 路径钉住「缺席」而非 null/undefined.
+    const fixture = createTraceFixture();
+    fixtures.push(fixture);
+    const connected = await connectFixture();
+    try {
+      const result = await connected.client.callTool({
+        name: "get_record",
+        arguments: {
+          conversation_id: "conversation-1",
+          record_id: "llm-2",
+        },
+      });
+      const text = result.content[0];
+      assert.equal(text?.type, "text");
+      if (text?.type !== "text") throw new Error("expected text content");
+
+      const body = JSON.parse(text.text) as {
+        parts: Array<Record<string, unknown>>;
+      };
+      // llm-2 有 1 个 projected tool_result.
+      assert.equal(body.parts.length, 1);
+      assert.ok(
+        !("role" in body.parts[0]!),
+        `tool_results part must not carry role, got: ${JSON.stringify(body.parts[0])}`
+      );
+    } finally {
+      await connected.close();
+    }
+  });
+});
+
 describe("trace MCP server — output backstop", () => {
   // 帽只在**这条**皮上必须有：进程内那条路后面还有 executor 的 `OUTPUT_HARD_CAP`
   // （契约 X 的唯一截断权威），stdio 这条路没有任何东西在它之后再看一眼文本。

@@ -287,3 +287,92 @@ describe("query_trace ACI tool (T7)", () => {
     assert.equal(registry.inner.list().at(-1)?.name, "get_record");
   });
 });
+  it("projects last_assistant_preview for an llm_call (v1.2 判据 b)", async () => {
+    // Two distinct assistant messages with the second being the LAST in the
+    // array. The first/user line is included so the projection has to walk
+    // past a non-assistant message to find the assistant tail.
+    const dir = mkdtempSync(join(tmpdir(), "iknow-query-trace-v12-"));
+    scratchPaths.push(dir);
+    writeFileSync(
+      join(dir, "c-v12.jsonl"),
+      [
+        {
+          conversation_id: "c-v12",
+          record_type: "llm_call",
+          llm_call_id: "llm-v12",
+          turn_id: "turn-v12",
+          started_at: "2026-08-28T00:00:01.000Z",
+          status: "ok",
+          messages: [
+            { role: "user", content: "ask" },
+            { role: "assistant", content: "first answer" },
+            { role: "user", content: "follow-up" },
+            { role: "assistant", content: "final answer" },
+          ],
+        },
+      ]
+        .map((row) => JSON.stringify(row))
+        .join("\n") + "\n",
+      "utf8"
+    );
+
+    const tool = createQueryTraceTool(dir);
+    const output = (await tool.handler({
+      conversation_id: "c-v12",
+    })) as string;
+    const body = JSON.parse(output) as {
+      records: Array<Record<string, unknown>>;
+    };
+
+    // v1.2 判据 (b): last_assistant_preview 是最后一条 assistant 消息的预览.
+    // preview() JSON-stringifies the message object, hence the form.
+    const record = body.records[0]!;
+    assert.equal(
+      record.last_assistant_preview,
+      JSON.stringify({ role: "assistant", content: "final answer" })
+    );
+    // last_message_preview 语义不变 (仍是最后一条任意角色消息).
+    assert.equal(
+      record.last_message_preview,
+      JSON.stringify({ role: "assistant", content: "final answer" })
+    );
+  });
+
+  it("omits last_assistant_preview when no assistant message exists (v1.2 合法态)", async () => {
+    // v1.2 判据 (b): 「无 assistant 消息的 llm_call → 字段缺席为合法态」.
+    // 钉住「缺席」语义, 不退化为 empty string.
+    const dir = mkdtempSync(join(tmpdir(), "iknow-query-trace-v12-no-"));
+    scratchPaths.push(dir);
+    writeFileSync(
+      join(dir, "c-v12.jsonl"),
+      [
+        {
+          conversation_id: "c-v12",
+          record_type: "llm_call",
+          llm_call_id: "llm-v12-no",
+          turn_id: "turn-v12-no",
+          started_at: "2026-08-28T00:00:01.000Z",
+          status: "ok",
+          messages: [{ role: "user", content: "user only" }],
+        },
+      ]
+        .map((row) => JSON.stringify(row))
+        .join("\n") + "\n",
+      "utf8"
+    );
+
+    const tool = createQueryTraceTool(dir);
+    const output = (await tool.handler({
+      conversation_id: "c-v12",
+    })) as string;
+    const body = JSON.parse(output) as {
+      records: Array<Record<string, unknown>>;
+    };
+
+    const record = body.records[0]!;
+    assert.ok(
+      !("last_assistant_preview" in record),
+      `last_assistant_preview must be absent for a no-assistant trace, got: ${JSON.stringify(record)}`
+    );
+  });
+
