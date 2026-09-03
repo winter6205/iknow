@@ -1,6 +1,10 @@
 import { useId, useState } from "react";
 import type { ToolCallView } from "../api/types";
 import { FOCUS_RING } from "../lib/ui";
+import {
+  resultPreviewOverflowLabel,
+  resultToolPreview,
+} from "./result-tool-preview";
 
 export type ToolCallListProps = {
   toolCalls: readonly ToolCallView[];
@@ -86,11 +90,7 @@ function ToolCallItem({ call, isExpanded, onToggle }: ToolCallItemProps) {
           className="flex flex-col gap-[9px] border-t border-line/70 px-3 py-[10px]"
         >
           <PreviewBlock label="输入" text={call.inputPreview} />
-          <PreviewBlock
-            label="输出"
-            text={call.outputPreview}
-            truncated={call.truncated}
-          />
+          <OutputBlock call={call} />
         </div>
       ) : null}
     </div>
@@ -114,6 +114,39 @@ function PreviewBlock({
       <pre className="m-0 max-h-[180px] overflow-auto whitespace-pre-wrap break-all rounded-[8px] border border-line/70 bg-surface px-[10px] py-[8px] font-mono text-[11.5px] leading-[1.6] text-ink-2">
         {text || "—"}
         {truncated ? "…（已截断）" : ""}
+      </pre>
+    </div>
+  );
+}
+
+/**
+ * 输出预览（D4 / D6 同规则）：`⎿` 风格 dim 前缀，5 行尾部窗口，超出首行
+ * `… +N 行` 标记，空 / 全空白 / ANSI-only 不渲染。失败由 call.isError 决定
+ * 是否给 pre 套 danger 颜色（border / text-danger），preview 文本不变。
+ */
+function OutputBlock({ call }: { call: ToolCallView }) {
+  const preview = resultToolPreview(call.name, call.outputPreview);
+  if (preview.kind === "empty") return null;
+  const isError = call.isError;
+  return (
+    <div>
+      <div className="mb-[3px] flex items-center gap-[6px] font-mono text-[10px] tracking-[0.03em] text-ink-3">
+        <span aria-hidden="true">{isError ? "⎿" : "⎿"}</span>
+        <span>输出</span>
+      </div>
+      {preview.hiddenLineCount > 0 ? (
+        <div className="mb-[3px] font-mono text-[10px] text-ink-3">
+          {resultPreviewOverflowLabel(preview.hiddenLineCount)}
+        </div>
+      ) : null}
+      <pre
+        className={`m-0 max-h-[180px] overflow-auto whitespace-pre-wrap break-all rounded-[8px] border px-[10px] py-[8px] font-mono text-[11.5px] leading-[1.6] ${
+          isError
+            ? "border-danger/40 bg-danger-soft/40 text-danger"
+            : "border-line/70 bg-surface text-ink-2"
+        }`}
+      >
+        {preview.lines.join("\n")}
       </pre>
     </div>
   );
