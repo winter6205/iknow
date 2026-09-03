@@ -153,9 +153,12 @@ function makeMessages(n: number, offset = 0): AnthropicNativeMessage[] {
   });
 }
 
-/** 构造带 messages 的 TuiSessionState（用于 T6-B harness）。 */
+/** 构造带 messages 的 TuiSessionState（用于 T6-B harness）。D3:thinkingMs
+ *  可显式传入(否则 SessionFileV1.thinkingMs undefined → session.thinkingMs
+ *  undefined,折叠行只显示工具计数)。 */
 function sessionWith(
-  msgs: ReadonlyArray<AnthropicNativeMessage>
+  msgs: ReadonlyArray<AnthropicNativeMessage>,
+  thinkingMs?: ReadonlyArray<number | null>
 ): TuiSessionState {
   const file: SessionFileV1 = {
     schemaVersion: 1,
@@ -164,6 +167,7 @@ function sessionWith(
     turnCount: msgs.filter((m) => m.role === "assistant").length,
     updatedAt: "2026-08-10T00:00:00.000Z",
     jsonMode: false,
+    ...(thinkingMs !== undefined ? { thinkingMs } : {}),
   };
   return attachSession(file);
 }
@@ -340,6 +344,9 @@ test("长会话（100 条）滚动文档全量：顶见最早、底见最末、�
 });
 
 test("session 状态渲染：tool_use 摘要行 + statusMap 状态染色", async () => {
+  // D3:已折叠的 turn 不再铺 [完成] / [失败] 行 —— 单工具也折叠(spec D3 删
+  // 除 `turnToolTotal > 1` 闸)。折叠行直接显示工具计数;tool_result 状态由
+  // 折叠行上下文 + diff 预览承担,不再显式染色到 `[完成]/[失败]` 字面量。
   const initial = sessionWith([
     msg("m-1", "user", "帮我写一个文件"),
     {
@@ -368,8 +375,8 @@ test("session 状态渲染：tool_use 摘要行 + statusMap 状态染色", async
   const { setup, api } = await renderChat(initial);
   const frame = setup.captureCharFrame();
   expect(frame).toContain("❯ 帮我写一个文件");
-  expect(frame).toContain("[完成]");
   expect(frame).toContain("write_file");
+  expect(frame.includes("[完成]")).toBe(false);
   expect(api.handle?.scrollbox).not.toBeNull();
   await setup.renderer.destroy();
 });
@@ -417,19 +424,23 @@ test("thinking 折叠态：无秒数不画 [思考]，展开时显示全文", as
   await setup1.renderer.destroy();
 });
 
-test("thinking 留存：lastThinkingSeconds 传给末条 assistant 折叠行 → 「思考了 N 秒」", async () => {
-  // 场景：turn 结束后流式面板消失，但秒数由历史消息末条 assistant 的折叠行
-  // 接棒（app 层在 runTurnOnce finally 快照 → ChatView.lastThinkingSeconds）。
-  const initial = sessionWith([
-    msg("m-1", "user", "复杂问题"),
-    {
-      role: "assistant",
-      content: [
-        { type: "thinking", thinking: "链上推理", signature: "sig-1" },
-        { type: "text", text: "正式回答" },
-      ],
-    },
-  ]);
+test("thinking 留存：session.thinkingMs 末位索引传给末条 assistant 折叠行 → 「思考了 N 秒」", async () => {
+  // 场景：turn 结束后流式面板消失，秒数由历史消息末条 assistant 的折叠行
+  // 接棒。D3:折叠行思考秒数改读 session.thinkingMs(落盘数据,attachSession
+  // 透传 SessionFileV1.thinkingMs);末条 assistant(index 1)thinkingMs = 4000ms。
+  const initial = sessionWith(
+    [
+      msg("m-1", "user", "复杂问题"),
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "链上推理", signature: "sig-1" },
+          { type: "text", text: "正式回答" },
+        ],
+      },
+    ],
+    [null, 4000]
+  );
   const setup1 = await testRender(
     <ChatView
       session={initial}
@@ -437,7 +448,6 @@ test("thinking 留存：lastThinkingSeconds 传给末条 assistant 折叠行 →
       rows={ROWS}
       liveToolLines={[]}
       thinkingExpanded={false}
-      lastThinkingSeconds={4}
     />,
     { width: COLS, height: ROWS, exitOnCtrlC: false }
   );
@@ -446,33 +456,6 @@ test("thinking 留存：lastThinkingSeconds 传给末条 assistant 折叠行 →
   // 末条 assistant 折叠行显示「思考了 4 秒」留存（非纯 [思考] 标记）。
   expect(frame).toContain("思考了 4 秒");
   expect(frame.split("思考了 4 秒").length - 1).toBe(1);
-  await setup1.renderer.destroy();
-});
-
-test("流式 thinking 冻结：answer 开始后折叠行显示「思考了 N 秒」而非「思考中…」", async () => {
-  // 场景：turn 运行中，thinking 阶段已结束（answer 开始）→ app 层冻结秒数
-  // （thinkingFrozenSeconds）→ 折叠行从静态「思考中…」切「思考了 N 秒」，
-  // 秒数留存（不再递增）。
-  const initial = sessionWith(makeMessages(1));
-  const setup1 = await testRender(
-    <ChatView
-      session={{ ...initial, runState: "running-fg" }}
-      cols={COLS}
-      rows={ROWS}
-      liveToolLines={[]}
-      thinkingExpanded={false}
-      thinkingDraftMasked="链上推理…"
-      thinkingFrozenSeconds={6}
-    />,
-    { width: COLS, height: ROWS, exitOnCtrlC: false }
-  );
-  await setup1.waitForVisualIdle();
-  const frame = setup1.captureCharFrame();
-  // 统一文案：`思考了 N 秒` 即带语义，不叠加 `[思考]` 前缀（chat-view 与
-  // message-blocks 同源收敛，2026-08-14）。
-  expect(frame).toContain("思考了 6 秒");
-  expect(frame.includes("思考中")).toBe(false);
-  expect(frame.includes("[思考]")).toBe(false);
   await setup1.renderer.destroy();
 });
 
@@ -523,26 +506,33 @@ test("流式 thinking 子秒未冻结：折叠行显示「思考中…」不显 
   await setup1.renderer.destroy();
 });
 
-test("thinking 留存：lastThinkingSeconds 不作用于非末条 assistant 消息", async () => {
-  // 前一条（非末条）无秒数 → 不画思考摘要；秒数只属于刚结束的 turn（末条）。
-  const initial = sessionWith([
-    msg("m-1", "user", "旧问题"),
-    {
-      role: "assistant",
-      content: [
-        { type: "thinking", thinking: "旧推理", signature: "sig-old" },
-        { type: "text", text: "旧回答" },
-      ],
-    },
-    msg("m-2", "user", "新问题"),
-    {
-      role: "assistant",
-      content: [
-        { type: "thinking", thinking: "新推理", signature: "sig-new" },
-        { type: "text", text: "新回答" },
-      ],
-    },
-  ]);
+test("thinking 留存：session.thinkingMs 只在末位索引有值时渲染", async () => {
+  // D3 (tui-display-consistency):折叠行思考秒数改读 session.thinkingMs —
+  // — 每条 assistant message 按其索引读对应 thinkingMs。旧 assistant
+  // (index 1) thinkingMs = null → 不画思考摘要;新 assistant (index 3)
+  // thinkingMs = 7000ms → 画「思考了 7 秒」;秒数只属于该 message 自身
+  // (不再像旧 lastThinkingSeconds 那样只传给末条)。
+  const initial = sessionWith(
+    [
+      msg("m-1", "user", "旧问题"),
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "旧推理", signature: "sig-old" },
+          { type: "text", text: "旧回答" },
+        ],
+      },
+      msg("m-2", "user", "新问题"),
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "新推理", signature: "sig-new" },
+          { type: "text", text: "新回答" },
+        ],
+      },
+    ],
+    [null, null, null, 7000]
+  );
   const setup1 = await testRender(
     <ChatView
       session={initial}
@@ -550,7 +540,6 @@ test("thinking 留存：lastThinkingSeconds 不作用于非末条 assistant 消�
       rows={ROWS}
       liveToolLines={[]}
       thinkingExpanded={false}
-      lastThinkingSeconds={7}
     />,
     { width: COLS, height: ROWS, exitOnCtrlC: false }
   );
@@ -786,13 +775,20 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
     });
     return (
       <ChatView
-        session={session}
+        session={{
+          ...session,
+          // D3 (tui-display-consistency):折叠行思考秒数改读 session.thinkingMs。
+          // finalMessages 6 条 messages(0..5);末条 assistant(index 5)
+          // thinkingMs = 12000ms → 「思考了 12 秒」;两段 web_search 在同一 turn
+          // (index 1 / 3)合并成 "web_search × 2" 折叠行,工具簇 anchor 思考
+          // 落空 → 折叠行只显工具计数。
+          thinkingMs: [null, null, null, null, null, 12000],
+        }}
         cols={COLS}
         rows={24}
         liveToolLines={[]}
         liveToolRuns={runs}
         draftsMasked={draft}
-        lastThinkingSeconds={12}
       />
     );
   }
@@ -821,9 +817,12 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
   const iText = lines.findIndex((l) => l.includes("以下是今天的 AI 新闻摘要"));
   expect(iFold).toBeGreaterThanOrEqual(0);
   expect(iText).toBeGreaterThanOrEqual(0);
-  // 折叠行 →（1 行消息间距）→ 最终文本：行距 ≤ 2；被折叠的纯工具 /
+  // 折叠行 →（1 行消息间距）→ 最终文本:行距 ≤ 3;被折叠的纯工具 /
   // 纯 tool_result 消息不得各留 1 行幻影 margin 连成空位。
-  expect(iText - iFold).toBeLessThanOrEqual(2);
+  // D3 后末条 assistant 多 1 行 ThinkingSummary「思考了 N 秒」,故 ≤ 3
+  // (legacy ≤ 2 是 lastThinkingSeconds 全局 + 折叠态压住末条 thinking 的旧
+  // 形态;D3 改 per-message ThinkingSummary 后行距自然多 1)。
+  expect(iText - iFold).toBeLessThanOrEqual(3);
   await setup.renderer.destroy();
 });
 
@@ -965,59 +964,62 @@ test("running：第二段草稿画在后续工具之下（tool→text→tool→t
 });
 
 test("idle：当前 turn 工具折叠成计数行，不再铺 [完成] bash", async () => {
-  const session = sessionWith([
-    msg("m-1", "user", "写个页面"),
-    {
-      role: "assistant",
-      content: [
-        { type: "thinking", thinking: "先扫目录", signature: "s1" },
-        {
-          type: "tool_use",
-          id: "tu-b1",
-          name: "bash",
-          input: { command: "ls archive" },
-        },
-      ],
-    },
-    {
-      role: "assistant",
-      content: [
-        { type: "thinking", thinking: "再列一次", signature: "s1b" },
-        {
-          type: "tool_use",
-          id: "tu-b2",
-          name: "bash",
-          input: { command: "ls -la" },
-        },
-      ],
-    },
-    {
-      role: "user",
-      content: [
-        {
-          type: "tool_result",
-          tool_use_id: "tu-b2",
-          content: "ok",
-          is_error: false,
-        },
-      ],
-    },
-    {
-      role: "assistant",
-      content: [
-        { type: "thinking", thinking: "收尾", signature: "s2" },
-        { type: "text", text: "完成。" },
-      ],
-    },
-  ]);
+  // D3 (tui-display-consistency):折叠作用于每一轮历史。同 turn 内多段
+  // tool_use (中间无 turn query) 合并到单簇 —— anchor = 末段 asst tool
+  // (index 2) → thinkingMs[2] = 29000ms → "思考了 29 秒";折叠行只显示
+  // 工具计数 "bash × 2",思考摘要与计数拆行(f6238c09 split-fold)。"完成。"
+  // 文本独立行,不回摊 `[完成] bash`。
+  const session = sessionWith(
+    [
+      msg("m-1", "user", "写个页面"),
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先扫目录", signature: "s1" },
+          {
+            type: "tool_use",
+            id: "tu-b1",
+            name: "bash",
+            input: { command: "ls archive" },
+          },
+        ],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "再列一次", signature: "s1b" },
+          {
+            type: "tool_use",
+            id: "tu-b2",
+            name: "bash",
+            input: { command: "ls -la" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tu-b2",
+            content: "ok",
+            is_error: false,
+          },
+        ],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "收尾", signature: "s2" },
+          { type: "text", text: "完成。" },
+        ],
+      },
+    ],
+    // messages 长度 5:asst-1 index 1、asst-2 index 2、asst-3 index 4。
+    [null, 29000, 29000, null, null]
+  );
   const setup = await testRender(
-    <ChatView
-      session={session}
-      cols={COLS}
-      rows={24}
-      liveToolLines={[]}
-      lastThinkingSeconds={29}
-    />,
+    <ChatView session={session} cols={COLS} rows={24} liveToolLines={[]} />,
     { width: COLS, height: 24, exitOnCtrlC: false }
   );
   await setup.waitForVisualIdle();

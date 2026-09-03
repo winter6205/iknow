@@ -72,7 +72,15 @@ export function orderedTurnActivitySegments(
 
     for (let i = Math.trunc(start); i < messages.length; i++) {
       const message = messages[i];
-      if (message === undefined || message.role !== "assistant") continue;
+      if (message === undefined) continue;
+      // D3 (tui-display-consistency):turn 边界 = user query (isTurnQuery);
+      // 切到下一条 user query 时立即 flush 当前 tool 簇 —— 跨轮 tool_use
+      // 不再合到同簇(每轮各自折叠),但同一 turn 内的多段 tool_use 仍合并。
+      if (message.role === "user" && isTurnQuery(message)) {
+        flushTools();
+        continue;
+      }
+      if (message.role !== "assistant") continue;
       if (!Array.isArray(message.content)) {
         // EXIT: 非数组 content 无法安全参与有序活动投影。
         continue;
@@ -236,16 +244,54 @@ export function formatTurnActivityFold(
 }
 
 /**
- * 运行中不收成 turn 摘要：工具还在出，应逐条可见；turn 结束后再折叠。
- * idle 且（有思考秒数或工具多于 1 次）才画折叠行。
+ * D3 (tui-display-consistency):折叠簇内 assistant 消息的 thinkingMs 求和（ms）。
+ *
+ * 输入：落盘的 thinkingMs 并行数组 + 折叠簇要计入的 messageIndex 列表
+ * （有序、可重复 —— 与 `orderedTurnActivitySegments` 的 anchor messageIndex
+ * 配套使用）。
+ *
+ * 边界形态（spec D2/D3 钉死）：
+ *  - `null` 元素按 0 计入（非流式回合 / 该事件无 thinkingMs）；
+ *  - `thinkingMs` undefined（整个 key 缺席 = 整链无 thinkingMs / 旧会话）→ 全 0；
+ *  - 索引越界（数组长度 < max(indices)+1）→ 该位置按 0 计入；
+ *  - 非有限数 / `<= 0`（理论上 appendEvents 已过滤，但 consumer 再做防御）→ 0。
+ *
+ * 输出：簇内 assistant 消息的 thinkingMs 累加值（毫秒）。调用方除以 1000 取秒。
+ */
+export function sumThinkingMsInRange(
+  thinkingMs: ReadonlyArray<number | null> | undefined,
+  messageIndices: ReadonlyArray<number>
+): number {
+  if (thinkingMs === undefined) return 0;
+  if (messageIndices.length === 0) return 0;
+  let total = 0;
+  for (const index of messageIndices) {
+    if (!Number.isInteger(index) || index < 0) continue;
+    const value = thinkingMs[index];
+    if (value === null || value === undefined) continue;
+    if (!Number.isFinite(value) || value <= 0) continue;
+    total += value;
+  }
+  return total;
+}
+
+/** ms → 秒（向上取整，确保 250ms 显示成 1 秒）。 */
+export function thinkingMsToSeconds(ms: number): number {
+  if (!Number.isFinite(ms) || ms <= 0) return 0;
+  return Math.ceil(ms / 1000);
+}
+
+/**
+ * D3 (tui-display-consistency):折叠作用于每一轮历史。running 态保持逐条可见；
+ * idle 且该簇已有已完成工具 → 折叠。`thinkingSeconds > 0 || turnToolTotal > 1`
+ * 旧闸门已删除 —— 单工具、无秒数轮次也折叠。
  */
 export function shouldShowTurnActivityFold(opts: {
   readonly running: boolean;
-  readonly thinkingSeconds: number;
   readonly turnToolTotal: number;
 }): boolean {
   if (opts.running) return false;
-  return opts.thinkingSeconds > 0 || opts.turnToolTotal > 1;
+  return opts.turnToolTotal > 0;
 }
 
 /** 折叠行在场且 idle 才藏逐条工具行；running 始终展开。 */

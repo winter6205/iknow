@@ -3,17 +3,21 @@
  * tests/tui/thinking-peek.test.tsx
  *
  * plans/model-idle-thinking-peek.md T2：TUI 未展开折叠态在思考**进行中**
- * 露出正文末 ≤3 行，思考结束（frozen）/ turn 结束后折回仅摘要行。
+ * 露出正文末 ≤3 行，turn 结束后流式 thinking 面板整体消失。
  *
  * 合同（计划 T2 Acceptance）：
  *  - 未展开 + 思考进行中：可见 `思考中…` 摘要行 **且** 可见正文末行
  *    （≤ THINKING_PEEK_MAX_LINES = 3，取末尾）；更早的正文行不出现；
- *  - 同一次流式面板在 thinking 冻结（answer 已开始）后不再显示那段正文，
- *    只显示 think-fold SSOT 的 `思考了 N 秒`；
  *  - turn 结束（runState 非 running-fg）→ 整个流式 thinking 面板消失；
  *  - Ctrl+O / `thinkingExpanded` 全开路径不变（Markdown 全文）；
  *  - 折叠态面板高度与思考全文长度无关 —— 预览是 ≤3 行的窗口，不是全文
  *    （行高不把预览当全文高度）。
+ *
+ * D3 (tui-display-consistency)：原「思考冻结（answer 已开始）→ 折回仅
+ * 摘要行 `思考了 N 秒`」用例随 `thinkingFrozenSeconds` 副通道一同下线
+ * —— running 期间不再有冻结分支，折叠态恒 `思考中…`；turn 结束后由
+ * 末条 assistant 消息的落盘 thinkingMs 接手（见
+ * `chat-view-thinking-tool-fold.test.tsx`）。本文件不再持有该用例。
  *
  * 文案断言只对 think-fold.ts 的输出，不在测试里另抄模板字符串。
  */
@@ -27,7 +31,6 @@ import {
 } from "../../src/tui/session-state.js";
 import {
   THINKING_PEEK_MAX_LINES,
-  formatThinkingFold,
   formatThinkingLive,
 } from "../../src/tui/think-fold.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
@@ -86,28 +89,6 @@ test("思考进行中 + 未展开：摘要行 `思考中…` + 正文末 3 行�
   expect(frame).toContain("末行戊-应出现");
   expect(frame.includes("早行甲-不应出现")).toBe(false);
   expect(frame.includes("早行乙-不应出现")).toBe(false);
-  await setup.renderer.destroy();
-});
-
-test("思考冻结（answer 已开始）：折回仅摘要行「思考了 N 秒」，正文预览消失", async () => {
-  const setup = await testRender(
-    <ChatView
-      session={runningSession()}
-      cols={COLS}
-      rows={ROWS}
-      liveToolLines={[]}
-      thinkingExpanded={false}
-      thinkingDraftMasked={THINKING_FIVE_LINES}
-      thinkingFrozenSeconds={6}
-    />,
-    { width: COLS, height: ROWS, exitOnCtrlC: false }
-  );
-  await setup.waitForVisualIdle();
-  const frame = setup.captureCharFrame();
-  expect(frame).toContain(formatThinkingFold(6));
-  expect(frame.includes("末行戊-应出现")).toBe(false);
-  expect(frame.includes("末行丁-应出现")).toBe(false);
-  expect(frame.includes(formatThinkingLive())).toBe(false);
   await setup.renderer.destroy();
 });
 

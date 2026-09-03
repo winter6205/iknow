@@ -44,6 +44,11 @@ export interface AssistantResultOpts {
     readonly data?: string;
   }>;
   /**
+   * D2 (tui-display-consistency):本 assistant 回合的思考时长(ms)。stub
+   * 路径默认字段缺席(模拟"测不到"的真实情况);传入则附带。
+   */
+  readonly thinkingMs?: number;
+  /**
    * #160 T4: optional token usage(传入时附带于返回对象;不传则字段缺席,
    * 保持 stub 路径无 usage 的设计语义)。
    */
@@ -88,6 +93,9 @@ export function assistantResult(
       supplierStop === "success" &&
       texts.length === 0 &&
       toolCalls.length === 0,
+    // D2 (tui-display-consistency):thinkingMs 字段缺省语义(stub 默认不传);
+    // 传入则原样附带。
+    ...(opts.thinkingMs !== undefined && { thinkingMs: opts.thinkingMs }),
     // 不传 usage 则字段缺席(stub 路径默认语义);传入时原样附带。
     ...(opts.usage !== undefined && { usage: opts.usage }),
   };

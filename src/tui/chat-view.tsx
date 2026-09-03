@@ -87,11 +87,7 @@ import { Spinner } from "./components.js";
 import { tuiPalette } from "./theme.js";
 import { toolResultStatusMap, toolResultTextMap } from "./tool-summary.js";
 import { formatCrunched } from "./run-stats.js";
-import {
-  formatThinkingFold,
-  formatThinkingLive,
-  thinkingPeekLines,
-} from "./think-fold.js";
+import { formatThinkingLive, thinkingPeekLines } from "./think-fold.js";
 import {
   listenScrollBoxTop,
   selectViewportMountWindow,
@@ -106,6 +102,8 @@ import {
   shouldShowTurnActivityFold,
   mergeToolUseCounts,
   sliceTurnFrom,
+  sumThinkingMsInRange,
+  thinkingMsToSeconds,
   toolUseIdsOf,
 } from "./turn-activity.js";
 
@@ -147,15 +145,6 @@ export interface ChatViewProps {
   readonly draftSegments?: ReadonlyArray<string>;
   /** 流式 thinking 草稿 masked 文本。thinkingExpanded 决定折叠 / 展开。 */
   readonly thinkingDraftMasked?: string;
-  /** 最近一次 turn 的 thinking 最终秒数（app 层 turn 结束快照）。传给末条
-   *  assistant 消息的 thinking 折叠行 → 显示「思考了 N 秒」留存，turn 结束后
-   *  秒数不随流式草稿清空而消失。缺省 0 → 不画思考摘要（不回落 `[思考]`）。 */
-  readonly lastThinkingSeconds?: number;
-  /** thinking 阶段冻结秒数（answer 开始时刻快照）：>0 且流式 thinking 草稿
-   *  仍在 → 思考已结束、折叠行显示「思考了 N 秒」（不再「思考中…」递增），
-   *  秒数留存到 turn 结束历史消息接棒。缺省 0 → 仍按静态 `思考中…`
-   *  （无实时秒数，2026-08-14）。 */
-  readonly thinkingFrozenSeconds?: number;
   /** 最近一次完成 turn 的运行秒数快照（app 层 runTurnOnce finally 写入
    *  crunchedOf === activeKey 时传）。在消息流末尾渲染 `Crunched for X`，
    *  会话结束后显示，运行中清空（app 层管理 crunchedOf 归属，ChatView 仅做
@@ -282,6 +271,11 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       itemHeights,
     ]);
     const lastQueryVisible = lastTurnQueryIndex(visibleMessages);
+    // D3 (tui-display-consistency):折叠作用于每一轮历史 —— 不再切片到
+    // lastTurnSlice;`activitySegments` 从 0 起构建(0 = 首条 user query 之前的
+    // assistant 起步;lastQueryVisible < 0 → 全历史)。
+    const activitySegments = orderedTurnActivitySegments(visibleMessages, 0);
+    // last-turn live 计数(工具运行中状态接棒 / 合并最后一段折叠用)。
     const lastTurnSlice = sliceTurnFrom(visibleMessages, lastQueryVisible);
     const historyToolCounts = countToolUsesByName(lastTurnSlice);
     const liveCompletedCounts = countNamedCalls(
@@ -295,50 +289,54 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       liveCompletedCounts
     );
     const turnToolTotal = turnToolCounts.reduce((n, e) => n + e.count, 0);
-    const thinkingSeconds = running
-      ? (props.thinkingFrozenSeconds ?? 0)
-      : (props.lastThinkingSeconds ?? 0);
-    const activitySegments = orderedTurnActivitySegments(
-      visibleMessages,
-      lastQueryVisible
-    );
-    // idle 才收成两行：`思考了 N 秒` + `bash × N`；running 保持逐条工具可见。
     const showTurnFold = shouldShowTurnActivityFold({
       running,
-      thinkingSeconds,
       turnToolTotal,
     });
+    // 每簇独立的折叠行（思考秒数 = thinkingMs[anchorMsgs] 求和 → 秒）。
+    // 全轮生效（activitySegments 已覆盖全历史），running 态直接空（running 态）。
     const foldLinesBySegmentIndex = new Map<number, ReadonlyArray<string>>();
     if (showTurnFold) {
-      let thinkingPlaced = false;
       const toolSegments = activitySegments.flatMap((segment, segmentIndex) =>
         segment.kind === "tools" ? [{ segment, segmentIndex }] : []
       );
-      for (const [
-        toolIndex,
-        { segment, segmentIndex },
-      ] of toolSegments.entries()) {
+      const lastSegmentIndex =
+        toolSegments[toolSegments.length - 1]?.segmentIndex ?? -1;
+      for (const [, { segment, segmentIndex }] of toolSegments.entries()) {
+        // 最后一段折叠合并 live 已完成工具;其余段用纯历史计数。
         const entries =
-          toolIndex === toolSegments.length - 1
+          segmentIndex === lastSegmentIndex
             ? mergeToolUseCounts(segment.entries, liveCompletedCounts)
             : segment.entries;
-        const lines = formatTurnActivityFold(
-          thinkingPlaced ? 0 : thinkingSeconds,
-          entries
-        );
+        // 折叠簇思考秒数：thinkingMs[anchorMsgs] 求和 → 秒。
+        // anchorMsgs = 该簇的 assistant messageIndex 序列(单消息簇 = 单元素)。
+        const clusterMs = sumThinkingMsInRange(props.session.thinkingMs, [
+          segment.messageIndex,
+        ]);
+        const clusterSeconds = thinkingMsToSeconds(clusterMs);
+        const lines = formatTurnActivityFold(clusterSeconds, entries);
         if (lines.length > 0) {
           foldLinesBySegmentIndex.set(segmentIndex, lines);
-          thinkingPlaced = true;
         }
       }
-      if (!thinkingPlaced) {
+      // 无工具段但有已完成的 live 工具 → 把折叠行挂到最近的 text 段尾。
+      if (
+        foldLinesBySegmentIndex.size === 0 &&
+        liveCompletedCounts.length > 0
+      ) {
         const lastText = activitySegments
           .map((segment, segmentIndex) => ({ segment, segmentIndex }))
           .reverse()
           .find(({ segment }) => segment.kind === "text");
         if (lastText !== undefined) {
+          // live 簇思考秒数 = last assistant message 落盘的 thinkingMs(若有);
+          // running 态已 short-circuit,此处只走 idle。
+          const clusterMs = sumThinkingMsInRange(props.session.thinkingMs, [
+            lastText.segment.messageIndex,
+          ]);
+          const clusterSeconds = thinkingMsToSeconds(clusterMs);
           const lines = formatTurnActivityFold(
-            thinkingSeconds,
+            clusterSeconds,
             liveCompletedCounts
           );
           if (lines.length > 0) {
@@ -347,14 +345,15 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         }
       }
     }
-    const foldLineCount = [...foldLinesBySegmentIndex.values()].reduce(
-      (total, lines) => total + lines.length,
-      0
-    );
     // Keep the tail-collapse decision based on the fold that would be shown,
     // not on whether an historical message supplied an insertion point.
     const foldDisplayLines = showTurnFold
-      ? formatTurnActivityFold(thinkingSeconds, turnToolCounts)
+      ? formatTurnActivityFold(
+          thinkingMsToSeconds(
+            sumThinkingMsInRange(props.session.thinkingMs, [lastQueryVisible])
+          ),
+          turnToolCounts
+        )
       : [];
     const collapseToolRows = shouldCollapseTurnToolRows(
       running,
@@ -467,11 +466,14 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         )}
         {mountWindow.mounted.map((message, i) => {
           const visibleIndex = mountWindow.startIndex + i;
-          const isLastAssistant =
-            visibleIndex === visibleMessages.length - 1 &&
-            message.role === "assistant";
-          const inLastTurn =
-            lastQueryVisible >= 0 && visibleIndex > lastQueryVisible;
+          // D3 (tui-display-consistency):`thinkingMs` 来自落盘数据(挂在
+          // session.thinkingMs 上,与 messages 一一对应);无 thinkingMs →
+          // undefined → `MessageBlocks` 不显示「思考了 N 秒」折叠行。
+          const messageThinkingMs = sumThinkingMsInRange(
+            props.session.thinkingMs,
+            [visibleIndex]
+          );
+          const messageThinkingSeconds = thinkingMsToSeconds(messageThinkingMs);
           const messageSegments = activitySegments
             .map((segment, segmentIndex) => ({ segment, segmentIndex }))
             .filter(({ segment }) => segment.messageIndex === visibleIndex);
@@ -481,6 +483,14 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             messageSegments.some(({ segmentIndex }) =>
               foldLinesBySegmentIndex.has(segmentIndex)
             );
+          // D3:`inLastTurn` 闸已删除。任何已完成工具轮次都折叠（包含历史轮次）。
+          // hideThinking 改为 per-message 决策：本消息若有 tool 簇且对应
+          // 折叠行存在 → 折叠行已在 MessageShell 内替代「思考了 N 秒」
+          // 摘要，MessageBlocks 不再画 ThinkingSummary；否则（纯文本 asst
+          // 或折叠行为空）保持 per-message thinkingMs 摘要可见。
+          const thisMessageHasFoldLine = messageSegments.some(
+            ({ segmentIndex }) => foldLinesBySegmentIndex.has(segmentIndex)
+          );
           return (
             <box
               id={`tmsg-${visibleIndex}`}
@@ -516,6 +526,10 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                     ...message,
                     content: [...thinkingBlocks, ...activityBlocks],
                   };
+                  // 该簇是否已有折叠行 → 决定本段是否隐藏 thinking 与
+                  // tool_use 摘要（折叠行已在 MessageShell 内替代二者）。
+                  const segmentHasFold =
+                    foldLinesBySegmentIndex.has(segmentIndex);
                   return (
                     <box
                       key={`turn-segment-${visibleIndex}-${segmentIndex}`}
@@ -528,19 +542,10 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                         resultTextMap={resultTextMap}
                         thinkingExpanded={thinkingExpanded}
                         thinkingSeconds={
-                          partIndex === 0 &&
-                          isLastAssistant &&
-                          (props.lastThinkingSeconds ?? 0) > 0
-                            ? props.lastThinkingSeconds
-                            : undefined
+                          partIndex === 0 ? messageThinkingSeconds : undefined
                         }
-                        hideThinking={
-                          inLastTurn &&
-                          !thinkingExpanded &&
-                          (foldLineCount > 0 ||
-                            (running && thinkingSeconds > 0))
-                        }
-                        hideToolSummaries={inLastTurn && collapseToolRows}
+                        hideThinking={segmentHasFold && !thinkingExpanded}
+                        hideToolSummaries={segmentHasFold && collapseToolRows}
                         marginTop={
                           partIndex === 0 && visibleIndex !== 0 ? 1 : 0
                         }
@@ -557,17 +562,9 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                     statusMap={statusMap}
                     resultTextMap={resultTextMap}
                     thinkingExpanded={thinkingExpanded}
-                    thinkingSeconds={
-                      isLastAssistant && (props.lastThinkingSeconds ?? 0) > 0
-                        ? props.lastThinkingSeconds
-                        : undefined
-                    }
-                    hideThinking={
-                      inLastTurn &&
-                      !thinkingExpanded &&
-                      (foldLineCount > 0 || (running && thinkingSeconds > 0))
-                    }
-                    hideToolSummaries={inLastTurn && collapseToolRows}
+                    thinkingSeconds={messageThinkingSeconds}
+                    hideThinking={thisMessageHasFoldLine && !thinkingExpanded}
+                    hideToolSummaries={collapseToolRows}
                     marginTop={visibleIndex === 0 ? 0 : 1}
                   />
                   {messageSegments.flatMap(({ segmentIndex }) =>
@@ -595,17 +592,16 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             {formatCrunched(props.crunchedSeconds ?? 0)}
           </text>
         )}
-        {/* 流式 thinking 面板：折叠态 = 静态 `思考中…` 摘要行 + 正文末 ≤3 行
-            预览 / 思考已结束 → 折回单行「思考了 N 秒」冻结留存；展开态走
-            Markdown 全文。frozen 非空 = answer 已开始、thinking 阶段结束 →
-            秒数不再递增，显示「思考了 N 秒」，直到 turn 结束历史消息接棒
-            （留存不消失）。
-            文案统一（2026-08-14）：两分支都走 think-fold.ts SSOT ——
-            折叠行恒 `思考中…`（无实时秒数，PR 1）/ `思考了 N 秒` 即带语义，
-            不再叠加 `[思考]` 前缀（与 message-blocks 历史折叠行同源收敛）。
+        {/* 流式 thinking 面板：折叠态 = 静态 `思考中…` 摘要行 + 正文末 ≤3 行预览；
+            展开态走 Markdown 全文。D3 (tui-display-consistency):TUI 内存思考
+            秒数副通道已整条删除 —— running 期间不再有冻结「思考了 N 秒」
+            分支；turn 结束后由末条 assistant 消息的落盘 thinkingMs 接手
+            （`MessageBlocks.thinkingSeconds = session.thinkingMs[last]`）。
+            文案统一（2026-08-14）：折叠行恒 `思考中…`，无实时秒数 —— 思考时长
+            只由事后落盘的「思考了 N 秒」承担（避免与 mode 行运行时长视觉重复）。
             预览窗口（plans/model-idle-thinking-peek.md T2）：思考**进行中**
             才取，`thinkingPeekLines` 硬顶 3 行、`wrapMode="none"` 每行恒占
-            1 行 —— 折叠态高度与思考全文长度无关（不把预览当全文高度）。 */}
+            1 行 —— 折叠态高度与思考全文长度无关。 */}
         {running && deferredThinkingDrafts.length > 0 && !showTurnFold && (
           <box flexDirection="column" width={contentWidth}>
             {thinkingExpanded ? (
@@ -616,10 +612,6 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                   streaming
                 />
               </box>
-            ) : (props.thinkingFrozenSeconds ?? 0) > 0 ? (
-              <text fg={pal.dim} wrapMode="none">
-                {formatThinkingFold(props.thinkingFrozenSeconds)}
-              </text>
             ) : (
               <>
                 <text fg={pal.dim} wrapMode="none">
