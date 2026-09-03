@@ -540,6 +540,69 @@ describe("validateSessionFile — messageCreatedAt field (rewind prompt timestam
   });
 });
 
+// -- D2 (tui-display-consistency): thinkingMs field validation ---------------
+
+describe("validateSessionFile — thinkingMs field (assistant thinking duration)", () => {
+  it("accepts a file with thinkingMs absent", () => {
+    assert.equal(validateSessionFile(valid), null);
+    assert.equal("thinkingMs" in valid, false);
+  });
+
+  it("accepts an array of positive numbers (length-mismatched length tolerated at validate time)", () => {
+    assert.equal(
+      validateSessionFile({
+        ...valid,
+        thinkingMs: [1234],
+      }),
+      null
+    );
+  });
+
+  it("accepts an array mixing positive numbers and null (JSON round-trip holes)", () => {
+    // appendEvents 仅在 assistant + 合法边界时挂 thinkingMs;非 assistant /
+    // 流式回合无思考 → null 孔洞。Validator 必须接受 number | null 混合。
+    assert.equal(
+      validateSessionFile({
+        ...valid,
+        thinkingMs: [1234, null, 5678],
+      }),
+      null
+    );
+  });
+
+  it("returns 'thinkingMs' for illegal present values", () => {
+    const illegal: unknown[] = [
+      42, // not an array
+      "not-an-array",
+      null, // null is the element-level sentinel; the whole field cannot be null
+      {}, // object instead of array
+      [{ x: 1 }], // object elements
+      [1234, "nope"], // non-number element
+      [undefined, 1234], // undefined is not accepted at the element level (round-trip → null)
+    ];
+    for (const thinkingMs of illegal) {
+      assert.equal(
+        validateSessionFile({ ...valid, thinkingMs }),
+        "thinkingMs",
+        `must reject ${JSON.stringify(thinkingMs)}`
+      );
+    }
+  });
+
+  it("validator does NOT enforce positivity (boundary filter lives in appendEvents entry)", () => {
+    // appendEvents 入口过滤掉 <= 0 / NaN / Infinity —— schema validator 只
+    // 验证 element 类型,任何 number(包括 0 / 负数 / NaN / Infinity 文字)
+    // 都接受。理由:Validator 是"是否合法字段"检查,不重复边界过滤职责。
+    assert.equal(
+      validateSessionFile({
+        ...valid,
+        thinkingMs: [0, -1, NaN, Infinity],
+      }),
+      null
+    );
+  });
+});
+
 // -- #458 T2: goal source union shrunk (SC1) --------------------------------
 
 describe("validateSessionFile / sanitizeSessionFile — goal source union shrunk (#458)", () => {

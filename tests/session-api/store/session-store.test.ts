@@ -829,6 +829,189 @@ describe("SessionStore.appendEvents createdAt stamping", () => {
   });
 });
 
+// -- D2 (tui-display-consistency): thinkingMs appendEvents stamping ---------
+
+describe("SessionStore.appendEvents thinkingMs stamping", () => {
+  it("stamps thinkingMs on assistant events when provided in the batch", async () => {
+    const id = "tm-append-stamp";
+    // Bootstrap with a user message via save() so e0 exists; appendEvents
+    // then writes e1 (assistant) which carries thinkingMs.
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: { messages: [userMsgShape("q")] },
+      }),
+    });
+    await store.appendEvents({
+      id,
+      events: [assistantMsgShape("a")],
+      thinkingMs: 1500,
+    });
+    const lines = await readJsonlLinesById(id);
+    const eventRecords = lines.filter(
+      (l): l is Record<string, unknown> =>
+        (l as { type?: string }).type === "message"
+    );
+    // e0 written by save() (no thinkingMs), e1 written by appendEvents
+    // (with thinkingMs).
+    const e1 = eventRecords[1] as {
+      thinkingMs?: unknown;
+      id: string;
+      message: { role: string };
+    };
+    assert.equal(e1.id, "e1");
+    assert.equal(e1.message.role, "assistant");
+    assert.equal(e1.thinkingMs, 1500);
+  });
+
+  it("does NOT stamp thinkingMs on user / tool_result events in the batch", async () => {
+    const id = "tm-append-skip-user";
+    // Bootstrap with a user message via save() so e0 exists; appendEvents
+    // writes e1 which is also a user event (must skip thinkingMs).
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: { messages: [userMsgShape("q")] },
+      }),
+    });
+    await store.appendEvents({
+      id,
+      events: [userMsgShape("q2")],
+      // Even if caller passes thinkingMs by mistake, user events skip it.
+      thinkingMs: 9999,
+    });
+    const lines = await readJsonlLinesById(id);
+    const e1 = lines[1] as Record<string, unknown>;
+    assert.equal(
+      "thinkingMs" in e1,
+      false,
+      "user events must not carry thinkingMs even when caller provides it"
+    );
+  });
+
+  it("does NOT stamp thinkingMs when value is non-positive / non-finite (defensive boundary)", async () => {
+    const id = "tm-append-boundary";
+    await store.save({ id, file: sampleFile({ id }) });
+    const boundaries: unknown[] = [0, -1, NaN, Infinity, -Infinity];
+    for (let i = 0; i < boundaries.length; i++) {
+      const value = boundaries[i];
+      const seqId = `${id}-${i}`;
+      await store.save({ id: seqId, file: sampleFile({ id: seqId }) });
+      await store.appendEvents({
+        id: seqId,
+        events: [assistantMsgShape(`a-${i}`)],
+        // ts-expect-error -- probe defensive behavior on illegal values
+        thinkingMs: value as number,
+      });
+      const lines = await readJsonlLinesById(seqId);
+      const e1 = lines[1] as Record<string, unknown>;
+      assert.equal(
+        "thinkingMs" in e1,
+        false,
+        `illegal thinkingMs ${String(value)} must not be stamped on event record`
+      );
+    }
+  });
+
+  it("omits thinkingMs when not provided in batch (back-compat with existing callers)", async () => {
+    const id = "tm-append-undefined";
+    // Bootstrap with a user message so e0 exists; appendEvents writes e1
+    // (assistant) without thinkingMs in the batch.
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: { messages: [userMsgShape("q")] },
+      }),
+    });
+    await store.appendEvents({
+      id,
+      events: [assistantMsgShape("a")],
+      // thinkingMs explicitly undefined — mirrors legacy callers' zero-touch
+    });
+    const lines = await readJsonlLinesById(id);
+    const e1 = lines[1] as Record<string, unknown>;
+    assert.equal(
+      "thinkingMs" in e1,
+      false,
+      "absent thinkingMs must not introduce the key on event record"
+    );
+  });
+
+  it("load projects thinkingMs aligned with messages on a mixed chain", async () => {
+    // save() writes via sessionFileToJsonl which doesn't stamp thinkingMs
+    // (legacy / bootstrap path); appendEvents stamps each event it writes.
+    // Mixed chain: e0/e1 unstamped (no thinkingMs), e2 assistant with
+    // thinkingMs. Projection yields parallel array aligned root→head.
+    const id = "tm-load-mixed";
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: {
+          messages: [userMsgShape("q"), assistantMsgShape("a")],
+        },
+      }),
+    });
+    await store.appendEvents({
+      id,
+      events: [assistantMsgShape("a2")],
+      thinkingMs: 2300,
+    });
+    const loaded = await store.load(id);
+    assert.equal(loaded.messages.length, 3);
+    // e0 user (null), e1 assistant bootstrap (null), e2 assistant stamped.
+    assert.deepEqual(loaded.thinkingMs, [null, null, 2300]);
+  });
+
+  it("legacy JSONL (handwritten without thinkingMs) loads with no thinkingMs key", async () => {
+    // Hand-craft a JSONL where no event carries thinkingMs — mirrors a file
+    // written before the D2 change. Load must succeed and the projection
+    // must omit the thinkingMs key (spread-discipline, conditional emit).
+    await mkdir(sessionDir, { recursive: true });
+    const id = "tm-load-legacy";
+    const raw = [
+      JSON.stringify({
+        type: "session",
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversation_id: id,
+        title: "legacy",
+        cwd: "/tmp/test",
+        sanitized_at: "2026-08-20T00:00:00.000Z",
+        jsonMode: false,
+        turnCount: 1,
+        updatedAt: "2026-08-20T00:00:00.000Z",
+        checkpoints: [],
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "e0",
+        parent: null,
+        message: userMsgShape("q"),
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "e1",
+        parent: "e0",
+        message: assistantMsgShape("a"),
+      }),
+      JSON.stringify({ type: "head", id: "e1" }),
+    ].join("\n");
+    const path = join(sessionDir, `${id}.jsonl`);
+    await writeFile(path, `${raw}\n`, "utf8");
+    const loaded = await store.load(id);
+    assert.equal(loaded.messages.length, 2);
+    assert.equal(
+      "thinkingMs" in loaded,
+      false,
+      "legacy chain must not grow thinkingMs key (spread-discipline)"
+    );
+    assert.equal(loaded.thinkingMs?.[0], undefined);
+  });
+});
+
 // -- shared helpers for the describe above (locally scoped to avoid polluting
 // -- the file's top-level imports / sampleFile closure) -----------------------
 

@@ -1432,7 +1432,7 @@ export class SessionHub {
           // 的 serialize work 槽位内同步触发,已在同会话串行队列里 —— 绝不
           // 能再经 this.serialize 包裹（内层槽位排队等外层释放,外层正等
           // run() 返回 → 自等死锁）。不绕开,也不重入。
-          commitMessages: (messages) => {
+          commitMessages: (messages, thinkingMs) => {
             // T5: 首次 commit 带上 query 前缀（含 host drain 的子代理浓缩
             // 消息，若本轮有）；之后逐次 commit 原样透传。
             const events = queryCommitPending
@@ -1443,6 +1443,7 @@ export class SessionHub {
               conversationId,
               session,
               events,
+              ...(thinkingMs !== undefined ? { thinkingMs } : {}),
             });
           },
           ...(trace !== undefined ? { trace } : {}),
@@ -2088,11 +2089,12 @@ export class SessionHub {
       ...deps,
       agentVersion: getVersion(),
       conversationId,
-      commitMessages: (messages) =>
+      commitMessages: (messages, thinkingMs) =>
         this.appendSessionEvents({
           conversationId,
           session,
           events: messages,
+          ...(thinkingMs !== undefined ? { thinkingMs } : {}),
         }),
       ...(trace !== undefined ? { trace } : {}),
     };
@@ -2550,11 +2552,17 @@ export class SessionHub {
     readonly conversationId: string;
     readonly session: SessionFileV1;
     readonly events: ReadonlyArray<AnthropicNativeMessage>;
+    /** D2 (tui-display-consistency):assistant commit 携带的思考时长(ms)。
+     *  tool_result / 其它批次 = undefined,appendEvents 不挂 key。 */
+    readonly thinkingMs?: number;
   }): Promise<void> {
     try {
       await this.store.appendEvents({
         id: opts.conversationId,
         events: opts.events,
+        ...(opts.thinkingMs !== undefined
+          ? { thinkingMs: opts.thinkingMs }
+          : {}),
       });
     } catch (err) {
       if (!isSessionStoreError(err)) throw err;
@@ -2562,6 +2570,9 @@ export class SessionHub {
       await this.store.appendEvents({
         id: opts.conversationId,
         events: opts.events,
+        ...(opts.thinkingMs !== undefined
+          ? { thinkingMs: opts.thinkingMs }
+          : {}),
       });
     }
   }

@@ -249,17 +249,35 @@ export class SessionStore {
    * JSONL-only: a legacy `.json`-only session must be save()d once first
    * (T2 migration-on-save). Empty `events` is a no-op.
    * Throws: not_found | write_failed | parse_failed | schema_invalid | io_error
+   *
+   * D2 (tui-display-consistency):`thinkingMs` 是 assistant 回合落盘的思考
+   * 时长(ms)。仅当 (a) 入参 `opts.thinkingMs` 提供 + (b) 事件 role 为
+   * assistant 时挂到 event record 上;`thinkingMs <= 0` 或非有限数视为无效,
+   * 字段缺席(spec 钉死边界形态)。tool_result / user / system 事件一律不挂
+   * `thinkingMs` key(commit 缝是按 batch 传单值,只在 assistant commit 处
+   * 携带;tool_result commit 时入参 undefined,即使 message.role 偶然是
+   * assistant 也不挂,因为 hub 的 commit 闭包只在 stepWithTrace 主路径
+   * 1746 处传 turnResult.thinkingMs)。
    */
   async appendEvents(opts: {
     readonly id: string;
     readonly events: ReadonlyArray<AnthropicNativeMessage>;
+    /** D2: assistant commit 携带的思考时长(ms);tool_result / 其它批次 = undefined。 */
+    readonly thinkingMs?: number;
   }): Promise<void> {
-    const { id, events } = opts;
+    const { id, events, thinkingMs } = opts;
     if (events.length === 0) return;
     const path = this.jsonlPath(id);
     const log = await this.readJsonlLog(id, path, {
       legacyIsWriteFailed: true,
     });
+    // D2: 仅在 thinkingMs 边界形态合法时才落盘(> 0 且有限数)。
+    const stampableThinkingMs =
+      typeof thinkingMs === "number" &&
+      Number.isFinite(thinkingMs) &&
+      thinkingMs > 0
+        ? thinkingMs
+        : undefined;
     let next = log.maxEventIndex + 1;
     let parent = log.head;
     const lines: string[] = [];
@@ -273,6 +291,13 @@ export class SessionStore {
         parent,
         message,
         createdAt: new Date().toISOString(),
+        // D2: 仅 assistant 事件 + stampableThinkingMs 有效时挂 key。
+        // batch 内 assistant 数量 = 1(loop-engine 一次 commit 恰好一
+        // 条 assistant 消息),所以 conditional spread 不在 batch 内多
+        // 事件场景下分叉 —— 所有事件同 key 表现。
+        ...(message.role === "assistant" && stampableThinkingMs !== undefined
+          ? { thinkingMs: stampableThinkingMs }
+          : {}),
       };
       lines.push(JSON.stringify(record));
       parent = eventId;
