@@ -22,8 +22,8 @@ import { join } from "node:path";
 import {
   collectToolResults,
   dereferenceTraceMessages,
-  isRecord,
   messageContentBlocks,
+  messageRole,
   type ProjectedToolResult,
 } from "./project-tool-results.js";
 import { createJsonlTraceReader } from "./reader.js";
@@ -271,10 +271,7 @@ async function addressParts(
     // (例如解引用降级到空数组已由 dereferenceTraceMessages 处理, 正常路径
     // 上不会出现) 不带 role -- 与 detail=tool_results parts 行为一致:
     // 字段缺席而非 null/undefined.
-    const role =
-      isRecord(message) && typeof message.role === "string"
-        ? message.role
-        : undefined;
+    const role = messageRole(message);
     messageContentBlocks(message).forEach((block, partIndex) => {
       parts.push({
         messageIndex,

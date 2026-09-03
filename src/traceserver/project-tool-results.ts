@@ -32,6 +32,24 @@ export interface BlobReference {
   readonly bytes: number;
 }
 
+/**
+ * Per ADR-0003, LLM-call `messages[].role` lives in the four-value domain
+ * `user | assistant | tool | system`. This module exposes the union as
+ * documentation; the runtime narrowing stays as loose as `typeof string` so
+ * any future or cross-vendor role string passes through unchanged. Returning
+ * `string | undefined` (not the narrower union) preserves the pre-helper
+ * behavior at every call site: a non-record or a record whose `role` is not a
+ * string maps to `undefined`, and any other string -- including ones outside
+ * the four-value domain -- is returned verbatim so a future legal role does
+ * not silently turn into "no role".
+ */
+export type MessageRole = "user" | "assistant" | "tool" | "system";
+
+export function messageRole(message: unknown): string | undefined {
+  if (!isRecord(message)) return undefined;
+  return typeof message.role === "string" ? message.role : undefined;
+}
+
 export type ReadBlob = (
   sha: string
 ) => string | Uint8Array | Promise<string | Uint8Array>;
@@ -159,7 +177,7 @@ function collectToolNames(
 ): ReadonlyMap<string, string> {
   const namesById = new Map<string, string>();
   for (const message of messages) {
-    if (!isRecord(message) || message.role !== "assistant") continue;
+    if (messageRole(message) !== "assistant") continue;
     for (const block of messageContentBlocks(message)) {
       if (
         isRecord(block) &&

@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { isRecord, projectToolResultsFromTrace } from "./project-tool-results.js";
+import { messageRole, projectToolResultsFromTrace } from "./project-tool-results.js";
 import { projectRecordBase } from "./record-lookup.js";
 import { TRACE_OUTPUT_BACKSTOP } from "./output-backstop.js";
 import { createJsonlTraceReader } from "./reader.js";
@@ -221,11 +221,7 @@ async function projectRecord(
     // assistant 消息), 不是 empty string.
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const message = messages[i];
-      if (
-        isRecord(message) &&
-        typeof message["role"] === "string" &&
-        message["role"] === "assistant"
-      ) {
+      if (messageRole(message) === "assistant") {
         projected.last_assistant_preview = preview(message);
         break;
       }

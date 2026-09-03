@@ -604,7 +604,6 @@ describe("trace MCP server — get_record", () => {
   });
 });
 
-
 describe("trace MCP server — role projection (v1.2)", () => {
   // spec v1.2 判据落地后, 经 stdio MCP 调用路径验证两张皮共用的投影:
   // query_trace 行轴投影携带 last_assistant_preview;

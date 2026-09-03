@@ -302,6 +302,8 @@ describe("query_trace ACI tool (T7)", () => {
     assert.equal(registry.inner.list().at(-1)?.name, "get_record");
   });
 });
+
+describe("query_trace ACI tool -- role projection (v1.2)", () => {
   it("projects last_assistant_preview for an llm_call (v1.2 判据 b)", async () => {
     // Two distinct assistant messages with the second being the LAST in the
     // array. The first/user line is included so the projection has to walk
@@ -390,4 +392,4 @@ describe("query_trace ACI tool (T7)", () => {
       `last_assistant_preview must be absent for a no-assistant trace, got: ${JSON.stringify(record)}`
     );
   });
-
+});

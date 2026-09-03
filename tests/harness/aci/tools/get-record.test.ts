@@ -487,6 +487,8 @@ describe("get_record ACI tool", () => {
     assert.ok(!output.endsWith("...[truncated]"));
   });
 });
+
+describe("get_record ACI tool -- role projection (v1.2)", () => {
   it("carries role on detail=messages manifest parts through the ACI face (v1.2 判据 a)", async () => {
     // v1.2 判据 (a): detail=messages 清单臂每个 part 携带所属 message 的 role.
     // 通过 ACI 工具调用路径验证投影的 part 列表中每条都带 role.
@@ -564,4 +566,4 @@ describe("get_record ACI tool", () => {
       `window response must not carry role, got: ${JSON.stringify(body)}`
     );
   });
-
+});
