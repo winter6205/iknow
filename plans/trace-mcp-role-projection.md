@@ -22,7 +22,7 @@
    - **Inherits:** spec Assumption 8 原文：「`conversation_id` 必填、…加参都是**语义变更**，必须先经本 spec（即本 Assumption 4 + SC6–SC8）改写才允许落地——『代码先动、spec 后补』不算拿到豁免」；Assumption 4 四条锁定全部不变（`conversation_id` 必填、字符帽非参数、backstop 20000、两张皮 schema 逐项一致）。
    - **Surface:** `specs/trace-mcp-server.md`（沿 v1.1 的「版本头导航 + 修订清单 + 可逆声明」体例加 v1.2 段）。
    - **Acceptance:** spec 载明两条投影扩展判据——(a) `get_record` 清单臂 `detail=messages` 每个 part 携带其所属 message 的 `role`（`detail=tool_results` 不加：tool_result 按定义在 user 侧）；(b) `query_trace` llm_call 投影新增 `last_assistant_preview`（最后一条 `role==="assistant"` 消息的预览，帽沿用 `QUERY_TRACE_PREVIEW_CAP=400`，无 assistant 消息时字段缺席），`last_message_preview` 原样保留不改语义；并载明否决记录（不加第四件工具、不改 `last_message_preview` 语义）。参数面无任何变化（两张皮 schema 逐项一致判据 SC18 不受扰动）。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T2]
 
 2. **共享核 role 投影落地（两皮自动继承）** — tag: `[implementation]`
