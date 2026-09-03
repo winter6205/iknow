@@ -204,9 +204,18 @@ export function createBashTool(
           )
         : undefined;
     return {
-      code: result.exitCode,
-      stdout: mask ? mask.mask(result.stdout) : result.stdout,
-      stderr: mask ? mask.mask(result.stderr) : result.stderr,
+      output: JSON.stringify({
+        code: result.exitCode,
+        stdout: mask ? mask.mask(result.stdout) : result.stdout,
+        stderr: mask ? mask.mask(result.stderr) : result.stderr,
+      }),
+      // #693 T4 D4:bash stdout/stderr 走观测旁路(meta),TUI 从旁路取数显示
+      // 5 行尾部预览（不经 encodeToolResults 进模型 tool_result，模型视野
+      // 仅见 output 字段里 JSON 化的 code/stdout/stderr —— 形状不变）。
+      meta: {
+        stdout: mask ? mask.mask(result.stdout) : result.stdout,
+        stderr: mask ? mask.mask(result.stderr) : result.stderr,
+      },
     };
   };
   return Object.freeze({

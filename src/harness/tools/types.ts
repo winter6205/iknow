@@ -82,10 +82,16 @@ export interface ToolCall {
  * ToolExecutionResult `ok` 变体的可选 side-channel (#298):不改模型可见
  * payload 的前提下,为宿主携带 diff 类的 old/new 内容。仅在有内容时存在;
  * additive，不破坏既有 `payload` 契约。
+ *
+ * T4 (#693) D4:扩 bash 输出承载字段 `stdout` / `stderr`（显示层投影）——
+ * 走观测旁路，永不进模型 tool_result。`executor.ts` 形状守卫仅校验字段
+ * 类型（string），其它 host 用途字段如需加入按 SSOT 走同套纪律。
  */
 export interface ToolResultMeta {
   readonly oldContent?: string;
   readonly newContent?: string;
+  readonly stdout?: string;
+  readonly stderr?: string;
 }
 
 /**

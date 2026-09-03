@@ -58,6 +58,17 @@ export function clipOneLineVisual(s: string, maxWidth: number): string {
   return `${acc}…`;
 }
 
+/** ANSI CSI / OSC escape 序列（多见 CSI SGR `\x1b[...m` / OSC `\x1b]...BEL/ST`）。
+ *  strip 时一并吞掉终止符（m / K / H / J / BEL / ST = ESC \），保证不会把
+ *  转义序列截到一半（spec D4 边界：截断不得切断转义序列中间）。 */
+const ANSI_ESCAPE_RE =
+  /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
+/** 剥 ANSI 转义序列（按字符数返回，保留原字符位置不可见）。 */
+export function stripAnsi(s: string): string {
+  return s.replace(ANSI_ESCAPE_RE, "");
+}
+
 export interface ToolSummaryLine {
   readonly toolName: string;
   readonly detail: string;
@@ -177,6 +188,152 @@ const SUMMARIZERS: Readonly<
   lsp_workspace_symbol: (r) => `LSP workspaceSymbol ${pickString(r, "query")}`,
 };
 
+/** #693 T4 D4:工具显示注册表 — 「摘要 + 结果预览」一体声明。
+ *
+ *  D7 把「工具状态行文案」与「结果预览函数」同置一处，让「新增一种工具
+ *  的显示」只需在 TOOL_DISPLAYS 加一条声明，而不是散改三处（live +
+ *  历史 + 结果预览）。每个 tool 一行：summary 函数 + preview 函数（无
+ *  预览需求 → 字段缺席；read_file 等明确「不显示预览」的工具亦按字段
+ *  缺席处理，见 spec D4 边界）。
+ *
+ *  preview 函数签名：`(rec, resultText?) => ResultPreview`。
+ *  `rec` = tool_use input 投影；`resultText` = tool_result 文本（live 路径
+ *  缺省，因 live 走 run.stdout / run.stderr 旁路；历史路径必传 —
+ *  来源 = `toolResultTextMap(session.messages)`）。
+ */
+interface ToolDisplay {
+  readonly summary: (rec: Record<string, unknown>) => string;
+  readonly preview?: (
+    rec: Record<string, unknown>,
+    resultText?: string,
+    stdout?: string,
+    stderr?: string
+  ) => ResultPreview;
+}
+
+function bashPreview(
+  _rec: Record<string, unknown>,
+  resultText?: string,
+  stdout?: string,
+  stderr?: string
+): ResultPreview {
+  // live 路径：stdout/stderr 旁路优先（未走模型 tool_result 编码；
+  // 也不依赖历史 tool_result 文本反序列化 JSON）。缺省回退到 resultText
+  // 的 JSON envelope（历史路径）。
+  let bashStdout = stdout;
+  let bashStderr = stderr;
+  if (
+    bashStdout === undefined &&
+    bashStderr === undefined &&
+    resultText !== undefined
+  ) {
+    try {
+      const parsed = JSON.parse(resultText) as Record<string, unknown>;
+      if (typeof parsed.stdout === "string") bashStdout = parsed.stdout;
+      if (typeof parsed.stderr === "string") bashStderr = parsed.stderr;
+    } catch {
+      // 非 JSON 形态（理论上 bash 不会产出，但保留防御）：
+      // 把 resultText 当作 stdout 显示。
+      bashStdout = resultText;
+    }
+  }
+  const streams: string[] = [];
+  if (typeof bashStdout === "string" && bashStdout.length > 0)
+    streams.push(bashStdout);
+  if (typeof bashStderr === "string" && bashStderr.length > 0)
+    streams.push(bashStderr);
+  if (streams.length === 0) return EMPTY_RESULT_PREVIEW;
+  const merged = streams.join("\n");
+  if (!isRenderableOutput(merged)) return EMPTY_RESULT_PREVIEW;
+  const lines = splitOutputLines(merged);
+  if (lines.length === 0) return EMPTY_RESULT_PREVIEW;
+  const { visible, hiddenLineCount } = takeTailWindow(lines);
+  if (visible.length === 0) return EMPTY_RESULT_PREVIEW;
+  return { kind: "result", lines: visible, hiddenLineCount };
+}
+
+function skillPreview(
+  _rec: Record<string, unknown>,
+  resultText?: string
+): ResultPreview {
+  if (resultText === undefined) return EMPTY_RESULT_PREVIEW;
+  if (!isRenderableOutput(resultText)) return EMPTY_RESULT_PREVIEW;
+  const lines = splitOutputLines(resultText);
+  if (lines.length === 0) return EMPTY_RESULT_PREVIEW;
+  const { visible, hiddenLineCount } = takeTailWindow(lines);
+  if (visible.length === 0) return EMPTY_RESULT_PREVIEW;
+  return { kind: "result", lines: visible, hiddenLineCount };
+}
+
+const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
+  write_file: { summary: SUMMARIZERS.write_file! },
+  edit_file: { summary: SUMMARIZERS.edit_file! },
+  bash: { summary: SUMMARIZERS.bash!, preview: bashPreview },
+  read_file: { summary: SUMMARIZERS.read_file! },
+  grep: { summary: SUMMARIZERS.grep! },
+  glob: { summary: SUMMARIZERS.glob! },
+  web_search: { summary: SUMMARIZERS.web_search! },
+  web_fetch: { summary: SUMMARIZERS.web_fetch! },
+  memory_recall: { summary: SUMMARIZERS.memory_recall! },
+  memory_save: { summary: SUMMARIZERS.memory_save! },
+  tool_search: { summary: SUMMARIZERS.tool_search! },
+  skill: { summary: SUMMARIZERS.skill!, preview: skillPreview },
+  skill_search: { summary: SUMMARIZERS.skill_search! },
+  spawn_subagent: { summary: SUMMARIZERS.spawn_subagent! },
+  subagent_result: { summary: SUMMARIZERS.subagent_result! },
+  lsp_definition: { summary: SUMMARIZERS.lsp_definition! },
+  lsp_references: { summary: SUMMARIZERS.lsp_references! },
+  lsp_hover: { summary: SUMMARIZERS.lsp_hover! },
+  lsp_go_to_implementation: { summary: SUMMARIZERS.lsp_go_to_implementation! },
+  lsp_prepare_call_hierarchy: {
+    summary: SUMMARIZERS.lsp_prepare_call_hierarchy!,
+  },
+  lsp_incoming_calls: { summary: SUMMARIZERS.lsp_incoming_calls! },
+  lsp_outgoing_calls: { summary: SUMMARIZERS.lsp_outgoing_calls! },
+  lsp_diagnostics: { summary: SUMMARIZERS.lsp_diagnostics! },
+  lsp_document_symbol: { summary: SUMMARIZERS.lsp_document_symbol! },
+  lsp_workspace_symbol: { summary: SUMMARIZERS.lsp_workspace_symbol! },
+  // bash_output / bash_stop / todo_write / list_mcp_resources / read_mcp_resource /
+  // query_trace:host 工具 / 无内容可预览 —— 仅 summary 声明,无 preview
+  // (期望 TUI 显示与 SUMMARIZERS 同字节,模型视野与现状一致)。
+  bash_output: {
+    summary: (r) => `读取后台日志 ${pickString(r, "task_id", "?")}`,
+  },
+  bash_stop: {
+    summary: (r) => `停止后台任务 ${pickString(r, "task_id", "?")}`,
+  },
+  todo_write: { summary: (r) => `待办 ${pickString(r, "id", "?")}` },
+  list_mcp_resources: { summary: () => "MCP 资源列表" },
+  read_mcp_resource: {
+    summary: (r) => `MCP 资源 ${pickString(r, "uri", "?")}`,
+  },
+  query_trace: { summary: () => "trace 查询" },
+};
+
+/** 单源：根据工具名 + input + resultText 产结果预览（行级尾部 tail + ANSI 透传）。
+ *  无 preview 声明 / 无 resultText / 空输出 → `{ kind: "empty" }`。 */
+export function resultToolPreview(
+  name: string,
+  input: unknown,
+  opts?: {
+    readonly resultText?: string;
+    readonly stdout?: string;
+    readonly stderr?: string;
+  }
+): ResultPreview {
+  const display = TOOL_DISPLAYS[name];
+  if (display === undefined || display.preview === undefined) {
+    return EMPTY_RESULT_PREVIEW;
+  }
+  const rec = inputRecord(input);
+  return display.preview(rec, opts?.resultText, opts?.stdout, opts?.stderr);
+}
+
+/** 注册表覆盖性：列出当前 TOOL_DISPLAYS 注册的所有工具名（供测试用）。 */
+export function registeredToolDisplayNames(): ReadonlyArray<string> {
+  return Object.keys(TOOL_DISPLAYS);
+}
+
 /**
  * 单个工具调用的参数摘要。`cols` = 终端列宽：提供时 detail 按视觉宽度
  * 收口到「装饰 + 工具名 + detail」单行放得下（窄终端不折行，行账不漂移）。
@@ -257,6 +414,78 @@ export function formatRanSuffix(count: number): string {
 
 /** 完成态 write/edit 预览可见窗（live 完成态与历史共用；截断即折叠）。 */
 export const TOOL_PREVIEW_WINDOW = 6;
+
+/** #693 T4 D4:结果预览（bash / skill）可见窗（尾部 tail，截断即折叠）。 */
+export const RESULT_PREVIEW_WINDOW = 5;
+
+/** #693 T4 D4:结果预览溢出文案。`… +N 行`（N = 被截去的行数）—— 与
+ *  write/edit `还有 N 行` 对齐意图（藏尾部行数），但 spec D4 钉死为
+ *  `… +N 行` 形态（首行前置），把测试摘要/git 结果通常在末尾这一信号
+ *  显式给到读者。 */
+export function resultPreviewOverflowLabel(hiddenLineCount: number): string {
+  return `… +${hiddenLineCount} 行`;
+}
+
+/** #693 T4 D4:工具结果预览（bash / skill 等子进程输出）。live 路径走
+ *  `run.stdout / run.stderr` 旁路；历史路径走 `toolResultTextMap` 投影到
+ *  bash JSON envelope 的 `output` 字段。ANSI 透传：保留转义序列，只在
+ *  「可见性判定（是否空）」与「溢出行数计算」上按 ANSI 剥离后宽度计数，
+ *  实际行内容原样透传。
+ *
+ *  边界（spec D4 钉死）：
+ *   - 输出为空 / 全空白 / ANSI strip 后为空 → `{ kind: "empty" }`；
+ *   - 截取文本「尾部」RESULT_PREVIEW_WINDOW 行（5 行封顶），首行 +N
+ *     标记溢出；
+ *   - 单行直接显示 1 行（不强制 5 行格式）；
+ *   - ANSI 序列按剥离后宽度计数（`string-width` 内建 ANSI 处理），
+ *     截断不得切断转义序列中间 —— 因行内不再二次裁剪（行级截断只按
+ *     行数，不按视觉宽度），该约束天然成立；
+ *   - 失败由渲染层在 ToolSummaryRow 外层包 error 色 token 体现；
+ *     preview 文本本身不变（spec：「失败时内容照常显示但整体标红」）。 */
+export type ResultPreview =
+  | { readonly kind: "empty" }
+  | {
+      readonly kind: "result";
+      readonly lines: readonly string[];
+      readonly hiddenLineCount: number;
+    };
+
+const EMPTY_RESULT_PREVIEW: ResultPreview = { kind: "empty" };
+
+/** 按行切分（保留 ANSI；与 toolPreviewRows 共用语义）。尾部空行去掉
+ *  （bash 输出常见 trailing \n）。 */
+function splitOutputLines(s: string): readonly string[] {
+  if (s.length === 0) return [];
+  const lines = s.split("\n");
+  return lines[lines.length - 1] === "" ? lines.slice(0, -1) : lines;
+}
+
+/** 尾部取 N 行 + 溢出计数。lines.length <= N → 整段透传。 */
+function takeTailWindow(lines: readonly string[]): {
+  readonly visible: readonly string[];
+  readonly hiddenLineCount: number;
+} {
+  if (lines.length <= RESULT_PREVIEW_WINDOW) {
+    return { visible: lines, hiddenLineCount: 0 };
+  }
+  const tail = lines.slice(lines.length - RESULT_PREVIEW_WINDOW);
+  return {
+    visible: tail,
+    hiddenLineCount: lines.length - RESULT_PREVIEW_WINDOW,
+  };
+}
+
+/** 单源：从「可能含 ANSI 的输出」判定是否应渲染预览块。空 / 全空白 /
+ *  ANSI strip 后为空 → 视为空（不渲染空块）。 */
+function isRenderableOutput(s: string): boolean {
+  if (s.length === 0) return false;
+  // 整段全空白：visible 仅空白 / 换行 / ANSI 序列。
+  const stripped = stripAnsi(s);
+  if (stripped.trim().length === 0) return false;
+  // ANSI strip 后空（理论上上述已覆盖；保留以防 ANSI 序列独占整段）。
+  if (stripped.length === 0) return false;
+  return true;
+}
 
 export type CompletedToolPreview =
   | { readonly kind: "empty" }
@@ -395,6 +624,49 @@ export function toolResultStatusMap(
     for (const block of msg.content) {
       if (block.type === "tool_result") {
         map.set(block.tool_use_id, block.is_error === true);
+      }
+    }
+  }
+  return map;
+}
+
+/** #693 T4 D4:tool_use_id → tool_result 文本映射（历史结果预览数据源 SSOT）。
+ *  - content 是 string → 原样透传（最常见形态：bash JSON envelope / skill 正文）；
+ *  - content 是 AnthropicContentBlock[] → 拼所有 text block（按出现顺序,空块跳过）。
+ *    block 形态出现于 ACI 链路：handler 复杂返回（如 structured object）的
+ *    AnthropicContentBlock[] 编码走 blocks。bash / skill 走 string,故文本分支
+ *    实际命中。
+ *  - 未配对 tool_result / 既非 string 也非 array → 缺席（consumer 走 empty 预览）。
+ */
+export function toolResultTextMap(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const msg of messages) {
+    for (const block of msg.content) {
+      if (block.type !== "tool_result") continue;
+      const content = block.content;
+      if (typeof content === "string") {
+        if (content.length > 0) map.set(block.tool_use_id, content);
+        continue;
+      }
+      if (Array.isArray(content)) {
+        const parts: string[] = [];
+        for (const part of content) {
+          if (
+            part !== null &&
+            typeof part === "object" &&
+            "type" in part &&
+            (part as { type?: unknown }).type === "text" &&
+            "text" in part &&
+            typeof (part as { text?: unknown }).text === "string"
+          ) {
+            const t = (part as { text: string }).text;
+            if (t.length > 0) parts.push(t);
+          }
+        }
+        const joined = parts.join("");
+        if (joined.length > 0) map.set(block.tool_use_id, joined);
       }
     }
   }

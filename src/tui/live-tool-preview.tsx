@@ -27,6 +27,7 @@ import {
 import {
   completedToolPreview,
   formatToolStatusLine,
+  resultToolPreview,
   summarizePartialInput,
   summarizeToolCall,
   clipOneLineVisual,
@@ -35,6 +36,7 @@ import {
 import {
   CompletedToolPreviewView,
   completedToolPreviewTextLines,
+  resultPreviewTextLines,
 } from "./completed-tool-preview-view.js";
 import { tuiPalette } from "./theme.js";
 
@@ -110,9 +112,23 @@ function completedPreviewOf(run: LiveToolRun) {
   });
 }
 
+/** live 路径：完成态工具结果预览（bash / skill）。走 run.stdout / run.stderr
+ *  旁路（不依赖历史 tool_result 反序列化）。preview 声明缺席 / 字段缺席
+ *  → empty。 */
+function resultPreviewOf(run: LiveToolRun) {
+  if (run.status === "running") {
+    return { kind: "empty" as const };
+  }
+  return resultToolPreview(run.name, run.input, {
+    stdout: run.stdout,
+    stderr: run.stderr,
+  });
+}
+
 /**
  * live 工具 box 的纯文本行（[状态行, ...预览行]），供行账 + flat 投影共用。
- * 完成态预览与 `completedToolPreview` 同源（代码或截断 diff）。
+ * 完成态预览与 `completedToolPreview` 同源（代码或截断 diff）；结果预览
+ * 走 `resultToolPreview`（bash stdout/stderr 尾部 tail）。
  */
 export function liveToolPreviewTextLines(
   run: LiveToolRun,
@@ -126,6 +142,9 @@ export function liveToolPreviewTextLines(
     completedPreviewOf(run),
     cols
   )) {
+    out.push(l);
+  }
+  for (const l of resultPreviewTextLines(resultPreviewOf(run))) {
     out.push(l);
   }
   return out;
@@ -145,13 +164,19 @@ export function liveToolPreviewBox(run: LiveToolRun, cols: number): ReactNode {
       ? runningLine(run, cols)
       : formatCompletedToolLine(run, cols);
   const preview = run.status === "running" ? null : completedPreviewOf(run);
+  const resultPreview =
+    run.status === "running" ? undefined : resultPreviewOf(run);
   return (
     <box key={run.id} flexDirection="column">
       <text fg={tuiPalette.dim} wrapMode="none">
         {status}
       </text>
       {preview !== null && (
-        <CompletedToolPreviewView preview={preview} cols={cols} />
+        <CompletedToolPreviewView
+          preview={preview}
+          cols={cols}
+          resultPreview={resultPreview}
+        />
       )}
     </box>
   );

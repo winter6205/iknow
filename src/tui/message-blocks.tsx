@@ -53,9 +53,11 @@ import { tuiPalette } from "./theme.js";
 import {
   formatToolStatusLine,
   completedToolPreview,
+  resultToolPreview,
   formatRanSuffix,
   countBashCalls,
   type CompletedToolPreview,
+  type ResultPreview,
 } from "./tool-summary.js";
 import { clipOneLineVisual } from "./tool-summary.js";
 import { CompletedToolPreviewView } from "./completed-tool-preview-view.js";
@@ -106,17 +108,26 @@ function ToolSummaryRow(props: {
   );
 }
 
-/** 工具内容预览（write_file / edit_file）：调用方先经 `completedToolPreview`
- *  判定非空再挂载（空预览 / 未配对不产节点 —— 折叠态下空壳 box 会让
- *  消息无法收敛为 null，残留幻影间距）。与 live 完成态同一
- *  `completedToolPreview` + `TOOL_PREVIEW_WINDOW`。截断即折叠。 */
+/** 工具内容预览（write_file / edit_file + bash / skill 结果预览）：
+ *  调用方先经 `completedToolPreview` / `resultToolPreview` 判定非空再挂载
+ *  （空预览 / 未配对不产节点 —— 折叠态下空壳 box 会让消息无法收敛为 null，
+ *  残留幻影间距）。与 live 完成态同一 `completedToolPreview` +
+ *  `resultToolPreview` + TOOL_PREVIEW_WINDOW/RESULT_PREVIEW_WINDOW。截断即折叠。 */
 function ToolPreviewRows(props: {
   readonly preview: CompletedToolPreview;
+  readonly resultPreview: ResultPreview;
   readonly cols: number;
 }): ReactNode {
+  if (props.preview.kind === "empty" && props.resultPreview.kind === "empty") {
+    return null;
+  }
   return (
     <box flexDirection="column">
-      <CompletedToolPreviewView preview={props.preview} cols={props.cols} />
+      <CompletedToolPreviewView
+        preview={props.preview}
+        cols={props.cols}
+        resultPreview={props.resultPreview}
+      />
     </box>
   );
 }
@@ -179,6 +190,9 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
   readonly message: AnthropicNativeMessage;
   readonly cols: number;
   readonly statusMap: ReadonlyMap<string, boolean>;
+  /** #693 T4 D4:tool_use_id → tool_result 文本映射（历史结果预览数据源）。
+   *  缺省 / 无匹配 → 该 tool_use 不画结果预览（与 spec D4「未配对不渲染」对齐）。 */
+  readonly resultTextMap?: ReadonlyMap<string, string>;
   readonly thinkingExpanded?: boolean;
   /** 折叠态 thinking 行附带「思考了 N 秒」。仅末条 / 流式面板传入；
    *  缺省或非正 → 不画思考摘要行（不回落 `[思考]`）。 */
@@ -285,7 +299,13 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
       const preview: CompletedToolPreview = statusMap.has(block.id)
         ? completedToolPreview(block.name, block.input)
         : { kind: "empty" };
-      const showPreview = preview.kind !== "empty";
+      const resultPreview: ResultPreview = statusMap.has(block.id)
+        ? resultToolPreview(block.name, block.input, {
+            resultText: props.resultTextMap?.get(block.id),
+          })
+        : { kind: "empty" };
+      const showPreview =
+        preview.kind !== "empty" || resultPreview.kind !== "empty";
       // 摘要隐藏且无预览 → 不产节点：空壳 box 会撑住 nodes.length，让
       // 整条消息无法收敛为 null，折叠后残留幻影间距。
       if (!showSummary && !showPreview) return;
@@ -295,7 +315,11 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
             <ToolSummaryRow tu={block} statusMap={statusMap} cols={innerCols} />
           )}
           {showPreview && (
-            <ToolPreviewRows preview={preview} cols={innerCols} />
+            <ToolPreviewRows
+              preview={preview}
+              resultPreview={resultPreview}
+              cols={innerCols}
+            />
           )}
         </box>
       );

@@ -957,3 +957,330 @@ test("hideToolSummaries：不画 [完成] 行，write 预览仍在", async () =>
   expect(frame).toContain("export const x = 1;");
   await setup.renderer.destroy();
 });
+
+// -- #693 T4 D4:历史 bash / skill 结果预览（结果预览块） -----------------
+
+/** 构造一个 bash 工具 + 配对 tool_result 的最小 messages 集。 */
+function bashCallMessages(
+  toolUseId: string,
+  resultText: string
+): AnthropicNativeMessage[] {
+  return [
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          id: toolUseId,
+          name: "bash",
+          input: { command: "ls" },
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: toolUseId,
+          content: resultText,
+          is_error: false,
+        },
+      ],
+    },
+  ];
+}
+
+test("D4 bash 历史：尾部 5 行 dim 预览 + … +N 行 溢出标记", async () => {
+  const stdout = Array.from({ length: 10 }, (_, i) => `out-${i}`).join("\n");
+  const [assistant, user] = bashCallMessages(
+    "tu-bash-r",
+    JSON.stringify({ code: 0, stdout, stderr: "" })
+  );
+  const setup = await testRender(
+    <MessageBlocks
+      message={assistant}
+      cols={COLS}
+      statusMap={new Map([["tu-bash-r", false]])}
+      resultTextMap={
+        new Map([
+          ["tu-bash-r", JSON.stringify({ code: 0, stdout, stderr: "" })],
+        ])
+      }
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // ⎿ 风格 dim 前缀出现
+  expect(frame).toContain("⎿ out-5");
+  expect(frame).toContain("⎿ out-9");
+  // 早于尾窗 5 行的不应出现
+  expect(frame).not.toContain("⎿ out-0");
+  expect(frame).not.toContain("⎿ out-4");
+  // 溢出 +N 行 标记
+  expect(frame).toContain("… +5 行");
+  // user 消息不画（user 不在 assistant message 块里,但 testRender 也没传 user 块）
+  void user;
+  await setup.renderer.destroy();
+});
+
+test("D4 bash 失败场景：内容照常显示且失败染色（statusMap=failed）", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-bash-fail",
+            name: "bash",
+            input: { command: "false" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-bash-fail", true]])}
+      resultTextMap={
+        new Map([
+          [
+            "tu-bash-fail",
+            JSON.stringify({ code: 1, stdout: "boom", stderr: "err-out" }),
+          ],
+        ])
+      }
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 失败染色（error 色 token）出现在摘要行 [失败]；预览仍带 ⎿
+  expect(frame).toContain("[失败]");
+  expect(frame).toContain("⎿ boom");
+  expect(frame).toContain("⎿ err-out");
+  await setup.renderer.destroy();
+});
+
+test("D4 read_file 无预览块（spec D4 边界）", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-rf",
+            name: "read_file",
+            input: { path: "a.ts" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-rf", false]])}
+      resultTextMap={new Map([["tu-rf", "x".repeat(200)]])}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("[完成] read_file · 读取 a.ts");
+  // 预览块不出现（read_file 不带 ⎿ 预览）
+  expect(frame).not.toContain("⎿");
+  // 也不应泄露模型面 tool_result 文本
+  expect(frame.includes("x".repeat(50))).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("D4 bash 空输出 / 全空白 → 不渲染预览块", async () => {
+  const cases: ReadonlyArray<{
+    readonly label: string;
+    readonly resultText: string;
+  }> = [
+    {
+      label: "空 stdout",
+      resultText: JSON.stringify({ code: 0, stdout: "", stderr: "" }),
+    },
+    {
+      label: "全空白",
+      resultText: JSON.stringify({ code: 0, stdout: "   \n\t\n", stderr: "" }),
+    },
+    {
+      label: "ANSI-only",
+      resultText: JSON.stringify({
+        code: 0,
+        stdout: "\x1b[31m\x1b[0m",
+        stderr: "",
+      }),
+    },
+  ];
+  for (const c of cases) {
+    const setup = await testRender(
+      <MessageBlocks
+        message={{
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tu-bash-empty",
+              name: "bash",
+              input: { command: "x" },
+            },
+          ],
+        }}
+        cols={COLS}
+        statusMap={new Map([["tu-bash-empty", false]])}
+        resultTextMap={new Map([["tu-bash-empty", c.resultText]])}
+      />,
+      { width: COLS, height: 40, exitOnCtrlC: false }
+    );
+    await setup.waitForVisualIdle();
+    const frame = setup.captureCharFrame();
+    expect(frame, `case=${c.label}`).toContain("[完成] bash");
+    expect(frame, `case=${c.label}`).not.toContain("⎿");
+    await setup.renderer.destroy();
+  }
+});
+
+test("D4 bash ANSI 透传：转义序列在 ⎿ 预览行内保留", async () => {
+  const stdout = "\x1b[31mERROR\x1b[0m line\n\x1b[32mOK\x1b[0m line";
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-bash-ansi",
+            name: "bash",
+            input: { command: "x" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-bash-ansi", false]])}
+      resultTextMap={
+        new Map([
+          ["tu-bash-ansi", JSON.stringify({ code: 0, stdout, stderr: "" })],
+        ])
+      }
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // ANSI 序列在 ⎿ 预览行内原样保留
+  expect(frame).toContain("⎿");
+  expect(frame).toContain("ERROR");
+  expect(frame).toContain("OK");
+  await setup.renderer.destroy();
+});
+
+test("D4 bash 单行输出：直接显示 1 行（不强制 5 行格式）", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-bash-1line",
+            name: "bash",
+            input: { command: "echo hi" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-bash-1line", false]])}
+      resultTextMap={
+        new Map([
+          [
+            "tu-bash-1line",
+            JSON.stringify({ code: 0, stdout: "hi", stderr: "" }),
+          ],
+        ])
+      }
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("⎿ hi");
+  // 不出现溢出标记
+  expect(frame).not.toContain("… +");
+  await setup.renderer.destroy();
+});
+
+test("D4 未配对 tool_use（statusMap 缺位）→ 不画结果预览", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-bash-runn",
+            name: "bash",
+            input: { command: "ls" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map()}
+      resultTextMap={
+        new Map([
+          [
+            "tu-bash-runn",
+            JSON.stringify({ code: 0, stdout: "x", stderr: "" }),
+          ],
+        ])
+      }
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // statusMap 缺位 → 等同 running 态：不画结果预览（spec D4 未配对不渲染）。
+  expect(frame).toContain("[运行中] bash");
+  expect(frame).not.toContain("⎿");
+  await setup.renderer.destroy();
+});
+
+test("D4 hideToolSummaries=true 折叠后：bash 预览块仍留", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先跑 ls", signature: "s" },
+          {
+            type: "tool_use",
+            id: "tu-bash-fold",
+            name: "bash",
+            input: { command: "ls" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-bash-fold", false]])}
+      resultTextMap={
+        new Map([
+          [
+            "tu-bash-fold",
+            JSON.stringify({ code: 0, stdout: "a.ts\nb.ts", stderr: "" }),
+          ],
+        ])
+      }
+      hideThinking={true}
+      hideToolSummaries={true}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 摘要行折叠（[完成] 不出现）
+  expect(frame).not.toContain("[完成]");
+  // bash 结果预览块（⎿）仍留
+  expect(frame).toContain("⎿ a.ts");
+  expect(frame).toContain("⎿ b.ts");
+  await setup.renderer.destroy();
+});

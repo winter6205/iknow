@@ -85,7 +85,7 @@ import { liveTailSlots, type LiveToolRun } from "./live-tool-state.js";
 import { EYE_LINES, eyeGradientCells } from "./banner.js";
 import { Spinner } from "./components.js";
 import { tuiPalette } from "./theme.js";
-import { toolResultStatusMap } from "./tool-summary.js";
+import { toolResultStatusMap, toolResultTextMap } from "./tool-summary.js";
 import { formatCrunched } from "./run-stats.js";
 import {
   formatThinkingFold,
@@ -222,6 +222,12 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     // Map 导致 MessageBlocks 引用 props 变化触发下游重渲染（解决间距抖动）。
     const statusMap = useMemo(
       () => toolResultStatusMap(props.session.messages),
+      [props.session.messages]
+    );
+    // #693 T4 D4:resultTextMap = tool_use_id → tool_result 文本（历史结果预览
+    // 数据源）。同源 useMemo 稳定（与 statusMap 同纪律）。
+    const resultTextMap = useMemo(
+      () => toolResultTextMap(props.session.messages),
       [props.session.messages]
     );
     const running = props.session.runState === "running-fg";
@@ -519,6 +525,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                         message={segmentMessage}
                         cols={contentWidth}
                         statusMap={statusMap}
+                        resultTextMap={resultTextMap}
                         thinkingExpanded={thinkingExpanded}
                         thinkingSeconds={
                           partIndex === 0 &&
@@ -548,6 +555,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                     message={message}
                     cols={contentWidth}
                     statusMap={statusMap}
+                    resultTextMap={resultTextMap}
                     thinkingExpanded={thinkingExpanded}
                     thinkingSeconds={
                       isLastAssistant && (props.lastThinkingSeconds ?? 0) > 0

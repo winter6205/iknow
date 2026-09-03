@@ -102,3 +102,94 @@ describe("CompletedToolPreviewView write_file code c4", () => {
     await setup.renderer.destroy();
   });
 });
+
+// -- #693 T4 D4:CompletedToolPreviewView resultPreview 通道 ----------------
+
+import { type ResultPreview } from "../../src/tui/tool-summary.js";
+
+describe("CompletedToolPreviewView resultPreview: ⎿ dim 5 行尾部 + 溢出", () => {
+  test("kind=empty 时不挂载（不渲染空块）", async () => {
+    const setup = await testRender(
+      <CompletedToolPreviewView
+        preview={{ kind: "empty" }}
+        cols={80}
+        resultPreview={{ kind: "empty" }}
+      />,
+      { width: 80, height: 10 }
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain("⎿");
+    await setup.renderer.destroy();
+  });
+
+  test("仅 resultPreview 有内容时：⏵ 风格 dim 行渲染", async () => {
+    const preview: ResultPreview = {
+      kind: "result",
+      lines: ["out-1", "out-2"],
+      hiddenLineCount: 0,
+    };
+    const setup = await testRender(
+      <CompletedToolPreviewView
+        preview={{ kind: "empty" }}
+        cols={80}
+        resultPreview={preview}
+      />,
+      { width: 80, height: 10 }
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("⎿ out-1");
+    expect(frame).toContain("⎿ out-2");
+    await setup.renderer.destroy();
+  });
+
+  test("hiddenLineCount>0 时：`… +N 行` 首行 + N 行尾部", async () => {
+    const preview: ResultPreview = {
+      kind: "result",
+      lines: ["l7", "l8", "l9", "l10", "l11"],
+      hiddenLineCount: 7,
+    };
+    const setup = await testRender(
+      <CompletedToolPreviewView
+        preview={{ kind: "empty" }}
+        cols={80}
+        resultPreview={preview}
+      />,
+      { width: 80, height: 12 }
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("… +7 行");
+    expect(frame).toContain("⎿ l7");
+    expect(frame).toContain("⎿ l11");
+    await setup.renderer.destroy();
+  });
+
+  test("preview + resultPreview 同时存在：write/edit 预览与结果预览共存", async () => {
+    const writePreview = completedToolPreview(
+      "write_file",
+      { path: "a.ts", content: "export const x = 1;\n" },
+      { oldContent: "", newContent: "export const x = 1;\n" }
+    );
+    // 模拟一个奇怪的工具既写文件又产出 stdout（实际不发生，验渲染）。
+    const resultPreview: ResultPreview = {
+      kind: "result",
+      lines: ["side-effect-output"],
+      hiddenLineCount: 0,
+    };
+    const setup = await testRender(
+      <CompletedToolPreviewView
+        preview={writePreview}
+        cols={80}
+        resultPreview={resultPreview}
+      />,
+      { width: 80, height: 12 }
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("export");
+    expect(frame).toContain("⎿ side-effect-output");
+    await setup.renderer.destroy();
+  });
+});

@@ -972,6 +972,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
                 message: event.message,
                 oldContent: event.payload?.oldContent,
                 newContent: event.payload?.newContent,
+                stdout: event.payload?.stdout,
+                stderr: event.payload?.stderr,
               }
             ),
           }));

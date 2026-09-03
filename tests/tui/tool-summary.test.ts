@@ -17,8 +17,13 @@ import {
   formatRanSuffix,
   isSubagentTool,
   projectToolLines,
+  registeredToolDisplayNames,
+  resultPreviewOverflowLabel,
+  resultToolPreview,
+  stripAnsi,
   subagentDisplayMark,
   summarizeToolCall,
+  RESULT_PREVIEW_WINDOW,
   TOOL_PREVIEW_WINDOW,
   completedToolPreview,
   toolPreviewRows,
@@ -680,5 +685,277 @@ describe("formatLiveToolEvent(cols) 透传：detail 空时按视觉宽度收口"
     // 80 字符截断 + `[完成] bash · ` 前缀总长不超过 100
     expect(line.length).toBeLessThanOrEqual(100);
     expect(line.startsWith("[完成] bash · x")).toBe(true);
+  });
+});
+
+// ── #693 T4 D4:结果预览（resultToolPreview / stripAnsi / 注册表） ──────────
+
+describe("stripAnsi: 剥 CSI / OSC 转义序列", () => {
+  test("CSI SGR 颜色序列（git/npm 输出）全部吞掉", () => {
+    expect(stripAnsi("\x1b[31mERROR\x1b[0m")).toBe("ERROR");
+    expect(stripAnsi("\x1b[1;32mok\x1b[0m")).toBe("ok");
+    expect(stripAnsi("\x1b[38;5;208mwarn\x1b[39m")).toBe("warn");
+  });
+  test("OSC 序列（含 BEL 终止）一并吞掉", () => {
+    expect(stripAnsi("\x1b]0;title\x07body")).toBe("body");
+    expect(stripAnsi("\x1b]8;;https://x\x07link\x1b]8;;\x07")).toBe("link");
+  });
+  test("无 ANSI 字符串原样", () => {
+    expect(stripAnsi("plain text")).toBe("plain text");
+    expect(stripAnsi("")).toBe("");
+    expect(stripAnsi("测".repeat(5))).toBe("测".repeat(5));
+  });
+});
+
+describe("resultPreviewOverflowLabel: `… +N 行` 文案", () => {
+  test("N=0 → `… +0 行`（调用方负责仅在 hidden>0 时挂上）", () => {
+    expect(resultPreviewOverflowLabel(0)).toBe("… +0 行");
+  });
+  test("N>0 → `… +N 行`", () => {
+    expect(resultPreviewOverflowLabel(3)).toBe("… +3 行");
+    expect(resultPreviewOverflowLabel(100)).toBe("… +100 行");
+  });
+});
+
+describe("resultToolPreview: bash / skill / 兜底", () => {
+  test("bash 单行 stdout → 1 行 result（无 overflow）", () => {
+    const p = resultToolPreview(
+      "bash",
+      { command: "ls" },
+      { resultText: JSON.stringify({ code: 0, stdout: "ok", stderr: "" }) }
+    );
+    expect(p.kind).toBe("result");
+    if (p.kind !== "result") return;
+    expect(p.lines).toEqual(["ok"]);
+    expect(p.hiddenLineCount).toBe(0);
+  });
+
+  test("bash 多行 stdout → 取尾部 RESULT_PREVIEW_WINDOW 行 + 溢出 +N", () => {
+    const stdout = Array.from({ length: 12 }, (_, i) => `line-${i}`).join("\n");
+    const p = resultToolPreview(
+      "bash",
+      { command: "test" },
+      {
+        resultText: JSON.stringify({ code: 0, stdout, stderr: "" }),
+      }
+    );
+    expect(p.kind).toBe("result");
+    if (p.kind !== "result") return;
+    expect(p.lines).toHaveLength(RESULT_PREVIEW_WINDOW);
+    // 尾部 5 行：line-7..line-11
+    expect(p.lines[0]).toBe("line-7");
+    expect(p.lines[4]).toBe("line-11");
+    expect(p.hiddenLineCount).toBe(7);
+  });
+
+  test("bash stderr 旁路（live 路径）→ 取尾部 + 溢出", () => {
+    const stderr = "err-1\nerr-2\nerr-3\nerr-4\nerr-5\nerr-6\nerr-7";
+    const p = resultToolPreview("bash", { command: "x" }, { stderr });
+    expect(p.kind).toBe("result");
+    if (p.kind !== "result") return;
+    expect(p.lines).toEqual(["err-3", "err-4", "err-5", "err-6", "err-7"]);
+    expect(p.hiddenLineCount).toBe(2);
+  });
+
+  test("bash stdout+stderr 合并（live 路径）→ 头尾拼接", () => {
+    const p = resultToolPreview(
+      "bash",
+      { command: "x" },
+      { stdout: "out-1\nout-2", stderr: "err-1" }
+    );
+    expect(p.kind).toBe("result");
+    if (p.kind !== "result") return;
+    expect(p.lines).toEqual(["out-1", "out-2", "err-1"]);
+  });
+
+  test("bash 全空白 stdout → empty（不渲染空块）", () => {
+    const p = resultToolPreview(
+      "bash",
+      { command: "x" },
+      {
+        resultText: JSON.stringify({
+          code: 0,
+          stdout: "   \n\t\n  ",
+          stderr: "",
+        }),
+      }
+    );
+    expect(p.kind).toBe("empty");
+  });
+
+  test("bash ANSI-only stdout（仅转义序列）→ empty", () => {
+    const p = resultToolPreview(
+      "bash",
+      { command: "x" },
+      {
+        resultText: JSON.stringify({
+          code: 0,
+          stdout: "\x1b[31m\x1b[0m",
+          stderr: "",
+        }),
+      }
+    );
+    expect(p.kind).toBe("empty");
+  });
+
+  test("bash 空 resultText / 缺字段 → empty", () => {
+    expect(resultToolPreview("bash", { command: "x" }).kind).toBe("empty");
+    expect(
+      resultToolPreview("bash", { command: "x" }, { resultText: "" }).kind
+    ).toBe("empty");
+  });
+
+  test("bash ANSI 透传：SGR 序列保留在行内容里（仅在「可见性判定」剥离）", () => {
+    const stdout = "\x1b[31mERROR\x1b[0m line\n\x1b[32mOK\x1b[0m line";
+    const p = resultToolPreview(
+      "bash",
+      { command: "x" },
+      { resultText: JSON.stringify({ code: 0, stdout, stderr: "" }) }
+    );
+    expect(p.kind).toBe("result");
+    if (p.kind !== "result") return;
+    // 颜色码不重新染色 → 原样透传,行内仍含 ESC 序列。
+    expect(p.lines[0]).toBe("\x1b[31mERROR\x1b[0m line");
+    expect(p.lines[1]).toBe("\x1b[32mOK\x1b[0m line");
+  });
+
+  test("bash stdout 截断按 stripped 长度计数（ANSI 不计列）", () => {
+    // 8 行：line-0..line-7 → 取尾部 5 → line-3..line-7
+    const stdout = Array.from({ length: 8 }, (_, i) =>
+      i % 2 === 0 ? `\x1b[31mline-${i}\x1b[0m` : `line-${i}`
+    ).join("\n");
+    const p = resultToolPreview(
+      "bash",
+      { command: "x" },
+      { resultText: JSON.stringify({ code: 0, stdout, stderr: "" }) }
+    );
+    expect(p.kind).toBe("result");
+    if (p.kind !== "result") return;
+    expect(p.lines).toHaveLength(5);
+    expect(p.lines[0]).toContain("line-3");
+    expect(p.lines[4]).toContain("line-7");
+    expect(p.hiddenLineCount).toBe(3);
+  });
+
+  test("bash ANSI 序列不被切断（行级截断不切字符，仅按行数）", () => {
+    // 单行含多个 SGR：行内整体保留
+    const stdout = "\x1b[31m\x1b[1m\x1b[4mUNDERLINE_RED_BOLD\x1b[0m";
+    const p = resultToolPreview(
+      "bash",
+      { command: "x" },
+      { resultText: JSON.stringify({ code: 0, stdout, stderr: "" }) }
+    );
+    expect(p.kind).toBe("result");
+    if (p.kind !== "result") return;
+    // 序列从 \x1b[31m 起，\x1b[0m 收尾 → 整段在 result 里
+    expect(p.lines[0]?.startsWith("\x1b[31m")).toBe(true);
+    expect(p.lines[0]?.endsWith("\x1b[0m")).toBe(true);
+  });
+
+  test("skill 多行 resultText → 5 行尾部 + 溢出", () => {
+    const body = Array.from({ length: 10 }, (_, i) => `body-${i}`).join("\n");
+    const p = resultToolPreview(
+      "skill",
+      { name: "demo" },
+      { resultText: body }
+    );
+    expect(p.kind).toBe("result");
+    if (p.kind !== "result") return;
+    expect(p.lines).toEqual(["body-5", "body-6", "body-7", "body-8", "body-9"]);
+    expect(p.hiddenLineCount).toBe(5);
+  });
+
+  test("skill 单行 resultText → 1 行", () => {
+    const p = resultToolPreview(
+      "skill",
+      { name: "demo" },
+      {
+        resultText: "Loaded skill body",
+      }
+    );
+    expect(p.kind).toBe("result");
+    if (p.kind !== "result") return;
+    expect(p.lines).toEqual(["Loaded skill body"]);
+  });
+
+  test("skill 缺 resultText → empty（live 路径无旁路）", () => {
+    expect(resultToolPreview("skill", { name: "demo" }).kind).toBe("empty");
+  });
+
+  test("read_file 不显示内容预览（spec D4 边界）", () => {
+    const p = resultToolPreview(
+      "read_file",
+      { path: "a.ts" },
+      { resultText: "x".repeat(200) }
+    );
+    expect(p.kind).toBe("empty");
+  });
+
+  test("write_file / edit_file 维持原 6 行预览（结果预览为空，走 write/edit 通道）", () => {
+    const wf = resultToolPreview(
+      "write_file",
+      { path: "a.ts", content: "x" },
+      { resultText: "ok" }
+    );
+    expect(wf.kind).toBe("empty");
+    const ef = resultToolPreview(
+      "edit_file",
+      { path: "a.ts", old_str: "a", new_str: "b" },
+      { resultText: "ok" }
+    );
+    expect(ef.kind).toBe("empty");
+  });
+
+  test("未知工具 / 无 preview 声明 → empty（兜底）", () => {
+    expect(resultToolPreview("mystery", {}).kind).toBe("empty");
+    expect(resultToolPreview("grep", {}, { resultText: "x" }).kind).toBe(
+      "empty"
+    );
+  });
+});
+
+describe("registeredToolDisplayNames: 注册表覆盖 EXPECTED_TOOLSET_30", () => {
+  test("注册表至少覆盖 EXPECTED_TOOLSET_30 的所有工具名（声明密度单点）", () => {
+    // spec D7：新增一种工具的显示只需在 TOOL_DISPLAYS 加一条声明。
+    // 该测试保证 buildTuiDeps 装配的 30 件工具，每件都有显示声明（哪怕仅
+    // summary、无 preview）。这与 deps-tools.test.ts 的 EXPECTED_TOOLSET_30
+    // 闸（装配完整 30 件）正交但同源：装配闸校验"在不在"，本闸校验"是否声明了
+    // 显示规则"，二者形成 spec D7「注册表完备性」双轨。
+    const EXPECTED_TOOLSET_30 = [
+      "bash",
+      "read_file",
+      "grep",
+      "glob",
+      "edit_file",
+      "write_file",
+      "web_fetch",
+      "web_search",
+      "memory_recall",
+      "memory_save",
+      "tool_search",
+      "lsp_definition",
+      "lsp_references",
+      "lsp_hover",
+      "lsp_document_symbol",
+      "lsp_workspace_symbol",
+      "lsp_go_to_implementation",
+      "lsp_prepare_call_hierarchy",
+      "lsp_incoming_calls",
+      "lsp_outgoing_calls",
+      "lsp_diagnostics",
+      "skill",
+      "skill_search",
+      "spawn_subagent",
+      "subagent_result",
+      "todo_write",
+      "list_mcp_resources",
+      "read_mcp_resource",
+      "bash_output",
+      "bash_stop",
+    ];
+    const names = new Set(registeredToolDisplayNames());
+    for (const name of EXPECTED_TOOLSET_30) {
+      expect(names.has(name)).toBe(true);
+    }
   });
 });

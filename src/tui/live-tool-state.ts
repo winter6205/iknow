@@ -53,6 +53,10 @@ export interface LiveToolRun {
   readonly oldContent?: string;
   /** 观测 side-channel — 写盘后新内容；运行中无。 */
   readonly newContent?: string;
+  /** #693 T4 D4:bash 输出 stdout 旁路(ToolResultMeta.stdout),5 行预览数据源。 */
+  readonly stdout?: string;
+  /** #693 T4 D4:bash 输出 stderr 旁路(ToolResultMeta.stderr),5 行预览数据源。 */
+  readonly stderr?: string;
 }
 
 /** #589：成功完成即离开 live 尾巴的只读探测族。 */
@@ -91,6 +95,10 @@ export type LiveToolEvent =
       readonly oldContent?: string;
       /** 观测 side-channel — 写盘后新内容。 */
       readonly newContent?: string;
+      /** #693 T4 D4:bash stdout 旁路,完成事件携带,5 行预览数据源。 */
+      readonly stdout?: string;
+      /** #693 T4 D4:bash stderr 旁路,完成事件携带,5 行预览数据源。 */
+      readonly stderr?: string;
     };
 
 /** reducer：append running / set completed → 新冻结 array。 */
@@ -159,6 +167,8 @@ export function liveToolReduce(
               message: event.message,
               oldContent: event.oldContent,
               newContent: event.newContent,
+              stdout: event.stdout,
+              stderr: event.stderr,
             })
           : r
       )
