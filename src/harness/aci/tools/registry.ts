@@ -641,14 +641,18 @@ export function createDefaultAciRegistry(
           bash_stop: () => createBashStopTool({ backgroundManager }),
         }
       : {}),
-    // D-α T3 run_graph（条件化装配：graphAssembly + subagentManager 同时在场
-    // 才入注册表——编排底座缺一不可；Gate 3 镜像过滤，见下）。
-    ...(graphAssembly && subagentManager
+    // ADR-0041 / plans/model-prefix-layering.md B3:`run_graph` 常驻注册
+    // —— graph 模式开/关只由 handler 层 isEnabled gate 决定（拒绝时
+    // ToolExecutionError,SC5 实测）。`subagentManager` 缺席时同条件
+    // 化装配跳过（编排底座缺一不可,与 spawn_subagent 同形态）。
+    ...(subagentManager
       ? {
           run_graph: () =>
             createRunGraphTool({
               manager: subagentManager,
-              isEnabled: () => graphAssembly.enabled(),
+              isEnabled: graphAssembly
+                ? () => graphAssembly.enabled()
+                : undefined,
             }),
         }
       : {}),
@@ -743,7 +747,9 @@ export function createDefaultAciRegistry(
     ...(todoDir ? [] : ["todo_write"]),
     ...(mcpManager ? [] : ["list_mcp_resources", "read_mcp_resource"]),
     ...(backgroundManager ? [] : ["bash_output", "bash_stop"]),
-    ...(graphAssembly && subagentManager ? [] : ["run_graph"]),
+    // ADR-0041:run_graph 常驻后只剩 subagentManager 同门条件(graphAssembly
+    // 缺席不再触发缺席 —— handler isEnabled 缺省恒关,run_graph 仍在注册表)。
+    ...(subagentManager ? [] : ["run_graph"]),
     // T4：host 缝缺席（开关 OFF / worker / hub-less 入口）→ 建树工具不入注册表。
     // T7：enter 缝缺席（TUI provision-only / worker / hub-less 入口）→
     // enter 工具不入注册表。

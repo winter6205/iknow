@@ -90,7 +90,7 @@ function graphEvents(
 describe("run_graph handler 推 graph_progress", () => {
   it("有图：onWave 后 host 读到 running 快照；onNode 后变 done；结束发 null", async () => {
     const { manager, children } = makeManager();
-    const tool = createRunGraphTool({ manager });
+    const tool = createRunGraphTool({ manager, isEnabled: () => true });
     const events: HarnessStreamEvent[] = [];
     const pending = tool.handler(
       {
@@ -109,12 +109,12 @@ describe("run_graph handler 推 graph_progress", () => {
     await waitForChildren(children, 1);
     const firstLive = graphEvents(events).find((e) => e.snapshot !== null);
     expect(firstLive).toBeDefined();
-    expect(firstLive!.snapshot!.nodes.find((n) => n.id === "research")!.status).toBe(
-      "running"
-    );
-    expect(firstLive!.snapshot!.nodes.find((n) => n.id === "write")!.status).toBe(
-      "pending"
-    );
+    expect(
+      firstLive!.snapshot!.nodes.find((n) => n.id === "research")!.status
+    ).toBe("running");
+    expect(
+      firstLive!.snapshot!.nodes.find((n) => n.id === "write")!.status
+    ).toBe("pending");
 
     settle(children[0]!, { status: "ok", summary: "done", result: "FACT" });
     await waitForChildren(children, 2);
@@ -133,15 +133,15 @@ describe("run_graph handler 推 graph_progress", () => {
       "done",
       "done",
     ]);
-    expect(lastLive.snapshot!.nodes.find((n) => n.id === "write")!.deps).toEqual([
-      "research",
-    ]);
+    expect(
+      lastLive.snapshot!.nodes.find((n) => n.id === "write")!.deps
+    ).toEqual(["research"]);
     await manager.shutdown();
   });
 
   it("非法拓扑：零 spawn、不发 graph_progress", async () => {
     const { manager, children } = makeManager();
-    const tool = createRunGraphTool({ manager });
+    const tool = createRunGraphTool({ manager, isEnabled: () => true });
     const events: HarnessStreamEvent[] = [];
     await expect(
       tool.handler(
@@ -161,7 +161,7 @@ describe("run_graph handler 推 graph_progress", () => {
 
   it("观察者 throw 不反流：handler 仍跑完", async () => {
     const { manager, children } = makeManager();
-    const tool = createRunGraphTool({ manager });
+    const tool = createRunGraphTool({ manager, isEnabled: () => true });
     const pending = tool.handler(
       { nodes: [{ id: "solo", task: "just" }] },
       {
@@ -178,7 +178,7 @@ describe("run_graph handler 推 graph_progress", () => {
 
   it("ctx.signal abort → typed 取消，末事件 snapshot 为 null", async () => {
     const { manager, children } = makeManager();
-    const tool = createRunGraphTool({ manager });
+    const tool = createRunGraphTool({ manager, isEnabled: () => true });
     const events: HarnessStreamEvent[] = [];
     const controller = new AbortController();
     const pending = tool.handler(

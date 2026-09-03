@@ -73,7 +73,16 @@ export type HarnessStreamEvent =
   | { type: "env_snapshot"; snapshot: EnvSnapshot }
   // TUI run_graph 执行视图：scheduler onWave/onNode 累加快照。snapshot
   // null = 本次 run_graph 结束或取消，宿主应撤掉 graph chrome。
-  | { type: "graph_progress"; snapshot: GraphProgressSnapshot | null };
+  | { type: "graph_progress"; snapshot: GraphProgressSnapshot | null }
+  // ADR-0041 / plans/model-prefix-layering.md B3:graph 模式切换流事件
+  // —— 仅当 loop-engine 在两次相邻 step 边界检测到 graphAssembly
+  // 翻转(开→关 / 关→开)时发出,与消息尾部追加的 `<graph_mode>` 单行
+  // 文本同源(SSOT 在 graph/notification.ts)。宿主层据此更新人读
+  // chrome(标题栏 / status bar);模型面的切换提示只走 messages 尾部
+  // 追加(appendGraphModeChange 走 appendMessage),不走 stream event。
+  // 字段仅保留 `enabled` —— 翻转方向与文本方向 1:1 对应,文本本身由
+  // messages 序列承载。
+  | { type: "graph_mode_changed"; enabled: boolean };
 
 /**
  * 观察者错误不得反流回 emit 路径(对齐 ADR-0003 `safeTrace` MUST NOT throw

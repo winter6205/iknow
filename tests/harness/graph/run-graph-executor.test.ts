@@ -114,7 +114,7 @@ function parse(raw: unknown): Condensed {
 describe("run_graph handler — 带 dep 边的图", () => {
   it("按波次跑完；上游产出进下游 task；返回浓缩结果", async () => {
     const { manager, children } = makeManager();
-    const tool = createRunGraphTool({ manager });
+    const tool = createRunGraphTool({ manager, isEnabled: () => true });
 
     const pending = tool.handler({
       nodes: [
@@ -147,7 +147,7 @@ describe("run_graph handler — 带 dep 边的图", () => {
 
   it("无 dep 的两个节点同波并发（图不是串行队列）", async () => {
     const { manager, children } = makeManager();
-    const tool = createRunGraphTool({ manager });
+    const tool = createRunGraphTool({ manager, isEnabled: () => true });
     const pending = tool.handler({
       nodes: [
         { id: "a", task: "task-a" },
@@ -166,7 +166,7 @@ describe("run_graph handler — 带 dep 边的图", () => {
 
   it("根节点 task 不被改写（与单次 spawn_subagent 同字节）", async () => {
     const { manager, children } = makeManager();
-    const tool = createRunGraphTool({ manager });
+    const tool = createRunGraphTool({ manager, isEnabled: () => true });
     const pending = tool.handler({
       nodes: [{ id: "solo", task: "just do it" }],
     });
@@ -205,7 +205,7 @@ describe("run_graph handler — 拓扑非法零 spawn（SC4）", () => {
     ],
   ])("%s → typed 拒绝，spawn 次数为 0", async (_label, nodes, pattern) => {
     const { manager, children } = makeManager();
-    const tool = createRunGraphTool({ manager });
+    const tool = createRunGraphTool({ manager, isEnabled: () => true });
     await expect(tool.handler({ nodes })).rejects.toThrow(ToolExecutionError);
     await expect(tool.handler({ nodes })).rejects.toThrow(pattern);
     expect(children).toHaveLength(0);
@@ -214,7 +214,7 @@ describe("run_graph handler — 拓扑非法零 spawn（SC4）", () => {
 
   it("空 nodes → typed 拒绝，零 spawn", async () => {
     const { manager, children } = makeManager();
-    const tool = createRunGraphTool({ manager });
+    const tool = createRunGraphTool({ manager, isEnabled: () => true });
     await expect(tool.handler({ nodes: [] })).rejects.toThrow(
       /non-empty array/
     );
@@ -224,7 +224,7 @@ describe("run_graph handler — 拓扑非法零 spawn（SC4）", () => {
 
   it("节点缺 task → typed 拒绝，零 spawn", async () => {
     const { manager, children } = makeManager();
-    const tool = createRunGraphTool({ manager });
+    const tool = createRunGraphTool({ manager, isEnabled: () => true });
     await expect(tool.handler({ nodes: [{ id: "a" }] })).rejects.toThrow(
       /no valid `task`/
     );
@@ -236,7 +236,7 @@ describe("run_graph handler — 拓扑非法零 spawn（SC4）", () => {
 describe("run_graph handler — 节点失败沿 deps fail-fast", () => {
   it("失败节点的下游 skipped，独立分支继续", async () => {
     const { manager, children } = makeManager();
-    const tool = createRunGraphTool({ manager });
+    const tool = createRunGraphTool({ manager, isEnabled: () => true });
     const pending = tool.handler({
       nodes: [
         { id: "boom", task: "will fail" },
@@ -269,7 +269,7 @@ describe("run_graph handler — 节点失败沿 deps fail-fast", () => {
 describe("run_graph handler — 调用侧取消", () => {
   it("ctx.signal abort → typed 拒绝（归因调用侧），不再起新节点", async () => {
     const { manager, children } = makeManager();
-    const tool = createRunGraphTool({ manager });
+    const tool = createRunGraphTool({ manager, isEnabled: () => true });
     const controller = new AbortController();
     const pending = tool.handler(
       {
@@ -294,7 +294,7 @@ describe("run_graph handler — 调用侧取消", () => {
 describe("run_graph handler — 共用全局 cap（不另起 per-graph budget）", () => {
   it("同波超过 cap 的节点 → 超额走既有 SubAgentCapacityError，cap 内照常", async () => {
     const { manager, children } = makeManager({ maxConcurrentWorkers: 4 });
-    const tool = createRunGraphTool({ manager });
+    const tool = createRunGraphTool({ manager, isEnabled: () => true });
     const pending = tool.handler({
       nodes: ["n1", "n2", "n3", "n4", "n5"].map((id) => ({
         id,

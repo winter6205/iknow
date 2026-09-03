@@ -99,6 +99,11 @@ import {
   computeAgentStatusSnapshot,
 } from "./agent-status.js";
 import { readEnvSnapshot } from "./env-snapshot.js";
+import type { GraphAssembly } from "./graph/assembly.js";
+import {
+  type GraphModeChange,
+  renderGraphModeChangeNotification,
+} from "./graph/notification.js";
 
 /**
  * 把任意 reason 字符串安全映射为 TraceErrorType (消除 as 强转)。
@@ -329,6 +334,21 @@ export interface LoopEngineDeps {
    */
   readonly envSnapshot?: EnvSnapshotSeam;
   /**
+   * ADR-0041 / plans/model-prefix-layering.md B3:graph 模式切换注入缝。
+   * 字段在场 = stepWithTrace 每次即将调用模型前在 appendAgentStatusBar
+   * 之前调用,比较本次 graphAssembly.enabled() 与 `lastSeenEnabled`
+   * 持有的「上一次的值」:翻转时以 user 消息 immutable 追加一条单行
+   * 静态文本(开图含编排指引、关图关闭提示),同值零追加。字段缺席 =
+   * 零追加(ask / worker / 未接 overlay 的入口零行为变化,byte-identical)。
+   * `lastSeenEnabled` 是 deps 寿命内的可变引用;宿主在 rebuild 引擎时
+   * 自然新建一份,跨会话零泄漏。
+   */
+  readonly graphModeChange?: {
+    readonly assembly: GraphAssembly;
+    /** 上一次本 deps 看到的 graph 状态(宿主/loop-engine 写入,自身仅读 + 写入)。 */
+    readonly lastSeenEnabled: { value: boolean | undefined };
+  };
+  /**
    * #672 T3:工具环检测。缺省 / true = 开；false = 关。
    */
   readonly detectToolLoop?: boolean;
@@ -436,6 +456,54 @@ async function appendEnvSnapshot(
   const snapshot = await readEnvSnapshot({ cwd: deps.envSnapshot.readCwd() });
   safeEmitStream(onStream, { type: "env_snapshot", snapshot });
   return state;
+}
+
+/**
+ * ADR-0041 / plans/model-prefix-layering.md B3:graph 模式切换追加缝。
+ * 比较本次 graphAssembly.enabled() 与 `lastSeenEnabled.value` 持有的
+ * 「上一次值」:翻转 → encodeUserText + appendMessage + safeEmitStream
+ * 发 `graph_mode_changed` 流事件;同值 → 零追加,state 原样返回。
+ *
+ * 形态镜像 appendAgentStatusBar(seam 缺席 → 零注入,行为 byte-identical):
+ *   - deps.graphModeChange 缺席 → return state(ask / worker / 未接
+ *     overlay 的入口零行为变化);
+ *   - seam 在场 → 每步调用,同 round 内连续多步翻转检测无误;
+ *   - 写入更新由本函数完成,`lastSeenEnabled` 与 deps 同步生命周期
+ *     (rebuild 引擎时宿主自然新建一份,跨会话零泄漏);
+ *   - 切换文本 = SSOT(renderGraphModeChangeNotification),开图含
+ *     编排指引,关图含关闭提示 —— 内容并入 IKNOW_GRAPH_ORCHESTRATION_TEXT。
+ *
+ * 判定次序:appendAgentStatusBar 之前调用,确保 status bar 在
+ * graph 切换提示之后(后注入的 message 排在末尾,模型面看到的次序
+ * 与写入次序一致)。
+ */
+async function appendGraphModeChange(
+  state: LoopState,
+  deps: LoopEngineDeps,
+  onStream?: (event: HarnessStreamEvent) => void
+): Promise<LoopState> {
+  const seam = deps.graphModeChange;
+  if (seam === undefined) return state;
+  const next = seam.assembly.enabled();
+  const last = seam.lastSeenEnabled.value;
+  // 初次观察(last = undefined):只记初值,不追加 —— 新会话/新 deps
+  // 的第一轮没有「翻转」可言,关图开局更不能灌一条 off 提示。
+  if (last === undefined) {
+    seam.lastSeenEnabled.value = next;
+    return state;
+  }
+  if (last === next) return state;
+  const change: GraphModeChange = next ? "on" : "off";
+  const text = renderGraphModeChangeNotification(change);
+  seam.lastSeenEnabled.value = next;
+  safeEmitStream(onStream, {
+    type: "graph_mode_changed",
+    enabled: next,
+  });
+  return appendMessage({
+    state,
+    msg: deps.adapter.encodeUserText(text),
+  });
 }
 
 /** Ctrl+C / signal abort 触发的中断 system 消息固定文案（#392 T4 / G3 #388）。
@@ -1543,8 +1611,18 @@ async function stepWithTrace(opts: {
   type OkOrStop =
     | { kind: "ok"; result: AssistantTurnResult }
     | { kind: "stop"; transition: Transition; turn: TurnTrace };
-  const barState = await appendAgentStatusBar(
+  // ADR-0041 / plans/model-prefix-layering.md B3:graph 模式切换追加缝
+  // —— 比 appendAgentStatusBar 先调,保证 messages 序列里「graph 切换
+  // 提示」永远早于 status bar(状态栏是更接近调模型的当前态,模型读
+  // 到时序是「graph 翻转 → status bar」)。seam 缺席 → 零追加(ask /
+  // worker / 未接 overlay 的入口零行为变化)。
+  const graphModeState = await appendGraphModeChange(
     opts.state,
+    opts.deps,
+    opts.onStream
+  );
+  const barState = await appendAgentStatusBar(
+    graphModeState,
     opts.deps,
     opts.lastToolRef.lastTool,
     opts.onStream
@@ -1570,9 +1648,17 @@ async function stepWithTrace(opts: {
   const modelPhase: OkOrStop =
     firstPhase.kind === "reactive_compact_pending"
       ? await (async (): Promise<OkOrStop> => {
+          // ADR-0041:reactive compact 重试前同样检测 graph 翻转(同 round
+          // 两次模型调用之间 host 可能翻键);与首次调用路径同形态 —— 翻
+          // 转则追加,否则 state 原样传入下一 helper。
+          const compactedWithGraph = await appendGraphModeChange(
+            firstPhase.state,
+            opts.deps,
+            opts.onStream
+          );
           // 栏追加在 compact 之后(压缩产物尾部),重试请求的末尾即最新一条栏。
           const compactedWithBar = await appendAgentStatusBar(
-            firstPhase.state,
+            compactedWithGraph,
             opts.deps,
             opts.lastToolRef.lastTool,
             opts.onStream

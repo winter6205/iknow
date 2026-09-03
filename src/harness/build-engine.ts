@@ -783,8 +783,9 @@ export async function buildHarnessEngine(
     // handler 调用时的 live taskRoot 再判定 task-worktree 形状，因此同一 run
     // 的下一波也能看到 rebind，而 OFF 档完全不传这条根。
     ...(isolationEnabled ? { projectIdentityRoot } : {}),
-    // D-α T3:run_graph 条件化装配 —— 需要 overlay(graphAssembly)与编排
-    // 底座(subagentManager)同时在场;registry 内部同门再判一次。
+    // ADR-0041 / plans/model-prefix-layering.md B3:graphAssembly 只承载
+    // handler isEnabled gate 与 loop-engine 切换判定(常驻注册后 registry
+    // 不再按它过滤工具面)。overlay 缺席 → 不传,handler 缺省恒关。
     ...(graphAssembly ? { graphAssembly } : {}),
     ...(memoryToolsEnabled ? { memoryDir } : undefined),
     skillCatalog,
@@ -1024,18 +1025,11 @@ export async function buildHarnessEngine(
     // #224 注入装配 — 把 reg.visibleSchemas（含 discovered lazy 工具）注入到
     // promptTools；fallback 路径（缺省回退 deps.registry.list()）由 loop-engine
     // 处理；本期 visibleSchemas ≡ 全量（无 lazy 工具），字节级零变化。
-    // D-α T3 / spec SC2:overlay 在场时 promptTools 按本 round 的 graph
-    // 快照过滤 —— 关图那次 run() 的可见工具名不含 run_graph,同 round 内
-    // 翻键也不改本 round(快照只在 beginRound 更新)。overlay 缺席 → 原样
-    // 透传 reg.visibleSchemas(引用相同,字节级零变化)。
-    promptTools: graphAssembly
-      ? (): ReadonlyArray<import("./tools/types.js").ToolDef> => {
-          const visible = reg!.visibleSchemas();
-          return graphAssembly.enabled()
-            ? visible
-            : visible.filter((t) => t.name !== "run_graph");
-        }
-      : reg.visibleSchemas,
+    // ADR-0041 / plans/model-prefix-layering.md B3:`run_graph` 常驻,promptTools
+    // 不再按 graph 快照过滤 —— 关图那次 run() 工具面仍含 run_graph(handler
+    // isEnabled gate 拒调,SC5 实测)。邻轮 promptTools 字节稳定,前缀
+    // 不再被翻图行为打断。
+    promptTools: reg.visibleSchemas,
     // #196 IKNOW T4:每 turn 装配 identity/soul/user_profile/bootstrap + memory_layer。
     // deps.system 注入缝装配点(loop-engine 每 turn 调 deps.system?.() 透传
     // adapter.step request.system)。#194 T6:双层系统缝 — deps.system 始终挂
@@ -1096,11 +1090,10 @@ export async function buildHarnessEngine(
       // #646 T2: agent-status 读规则段 gate —— 与下方 deps.agentStatus 同一
       // agentStatusTodoDir 表达式派生 (栏在场的表面才装配读规则句)。
       ...(agentStatusTodoDir ? { agentStatusReadRule: true } : {}),
-      // D-α T3:编排段与 run_graph 的可见性读同一个 round 快照 —— 段与
-      // 工具永远同进同出,不会出现「讲了 run_graph 但工具没露」。
-      ...(graphAssembly
-        ? { orchestration: (): boolean => graphAssembly.enabled() }
-        : {}),
+      // ADR-0041 / plans/model-prefix-layering.md B3:`orchestration` system
+      // 段撤出 —— 内容并入 graph 模式切换提示(loop-engine 消息尾追加,
+      // 见下方 graphModeChange 缝)。graph 装配快照改为单点供 loop-engine
+      // 判定开/关:不读 system,经 loop-engine 内部持有的上一次快照比较。
     }),
     // #119 T7:env.compress 透传 → deps.compress(LoopEngineDeps.compress 可选缝)。
     // IknowCompressEnv 必填(contextWindow / thresholdTokens),缺失即压缩关闭由
@@ -1129,6 +1122,23 @@ export async function buildHarnessEngine(
     // / ADR-0028 栏。
     ...(surface === "tui"
       ? { envSnapshot: { readCwd: liveTaskRoot.read } }
+      : {}),
+    // ADR-0041 / plans/model-prefix-layering.md B3:graph 模式切换注入缝
+    // —— `graphAssembly` 在场时透给 loop-engine,step 边界比较本次快照
+    // 与上一次的值,翻转时把单行 user 提示(开图含编排指引 / 关图
+    // 关闭提示)immutable 追加到 messages 尾部;同值零追加。缺席(ask /
+    // worker / 未接 overlay 的入口)= 零追加。形态镜像 agentStatus:
+    // `promptTools` 同形态的「未接 → 原样透传」是 byte-identical 契约。
+    // `lastSeenEnabled.value = undefined` 表示「尚未在本 deps 寿命里看过
+    // 一次」 —— loop-engine 首步只记初值不追加(新会话没有「翻转」可言,
+    // 关图开局不灌 off 提示),之后每次相邻 step 比较翻转。
+    ...(graphAssembly
+      ? {
+          graphModeChange: {
+            assembly: graphAssembly,
+            lastSeenEnabled: { value: undefined as boolean | undefined },
+          },
+        }
       : {}),
   };
   const engine = createLoopEngine(deps);
