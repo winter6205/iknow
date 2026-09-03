@@ -218,13 +218,21 @@ describe("list_sessions ACI tool", () => {
     });
     const validator = reg.inner.getValidator("list_sessions");
 
-    // T5b 追加 list_sessions 时它是 SSOT 末位；T6 又往末尾 append 了内容轴读
-    // 工具 get_record（append-only，不重排已有成员）。所以「末位」这句话不再
-    // 是这条测想认证的东西——改钉仍然成立且更强的半句：目录轴读工具无装配条件
-    // 因此常驻，并且紧邻内容轴之前。三轴顺序（目录 → 行 → 内容）在 SSOT 里
-    // 全靠 append 顺序体现，后来者不能悄悄把它打乱。
-    assert.equal(ACI_TOOLSET_NAMES.at(-2), "list_sessions");
-    assert.equal(ACI_TOOLSET_NAMES.at(-1), "get_record");
+    // append-only 仍生效：list_sessions 是目录轴读工具（无 host 缝条件），
+    // get_record 是内容轴读工具（同形态常驻）。断言改用 SSOT 派生的索引对：
+    // list_sessions 与 get_record 在 ACI_TOOLSET_NAMES 中相邻且前后顺序固定,
+    // 位置由 indexOf 推导（不写死 at(-N) 之类的硬编码下标;task-worktree-lifecycle
+    // #869 在末尾再 append 2 件 host 缝条件化装配的 list/remove,使硬编码下标
+    // 立刻过期）。
+    const listSessionsIdx = ACI_TOOLSET_NAMES.indexOf("list_sessions");
+    const getRecordIdx = ACI_TOOLSET_NAMES.indexOf("get_record");
+    assert.ok(listSessionsIdx >= 0, "list_sessions 仍在 SSOT");
+    assert.ok(getRecordIdx >= 0, "get_record 仍在 SSOT");
+    assert.equal(
+      getRecordIdx - listSessionsIdx,
+      1,
+      "list_sessions 必须紧邻 get_record 之前（append-only 不重排）"
+    );
     assert.equal(reg.inner.list().at(-2)?.name, "list_sessions");
     assert.equal(reg.inner.list().at(-1)?.name, "get_record");
     assert.equal(reg.catalog.get("list_sessions")?.name, "list_sessions");
@@ -234,5 +242,11 @@ describe("list_sessions ACI tool", () => {
     assert.equal(validator!({ limit: LIST_SESSIONS_MAX_LIMIT }), true);
     assert.equal(validator!({ offset: -1 }), false);
     assert.equal(validator!({ unknown_axis: 1 }), false);
+    // append-only SSOT 纪律：行轴 query_trace 必须排在 list_sessions 之前；
+    // 这是「后来者不能悄悄把它打乱」的可测不变式。
+    assert.ok(
+      ACI_TOOLSET_NAMES.indexOf("query_trace") < listSessionsIdx,
+      "query_trace (行轴) 必须在 list_sessions (目录轴) 之前"
+    );
   });
 });
