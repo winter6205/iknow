@@ -36,7 +36,8 @@
    - **Inherits:** spec SC6 原文：`tools/list` 含且仅含三件白名单 `list_sessions` / `query_trace` / `get_record`。
    - **Surface:** 构建（`npm run build` 产物 `dist/trace-mcp/`）+ 生产 bin `scripts/iknow-trace-mcp.cjs`；不改任何源码。若重建后白名单仍不齐，该 bullet 升级为排查 dist 构建接线（tsconfig include / 产物路径），按排查结论扩票。
    - **Acceptance:** stdio 驱动生产 bin `node scripts/iknow-trace-mcp.cjs`：`tools/list` 含且仅含三件白名单，且 `query_trace` 投影含 `last_assistant_preview`（即 dist 内是含 T2 的构建）。
-   - Status: [ ] pending
+   - **Verification (2026-09-04):** `npm run build` EXIT 0 重建 dist/；stdio 直驱生产 bin `node scripts/iknow-trace-mcp.cjs`（spawn + JSON-RPC 行进 stdin），`tools/list` 返回三件白名单 `list_sessions` / `query_trace` / `get_record`（按序，无第四件）；对临时 trace dir 跑 `query_trace(record_type:"llm_call", limit:1)`，返回含 `last_assistant_preview="{\"role\":\"assistant\",\"content\":\"The answer is 4. This is the final assistant conclusion for the test session.\"}"`——证明 dist 含 T2 角色投影。无源码改动，dist/ 在 .gitignore 内不入 commit。
+   - Status: [x] done
    - [blocks: T2]
 
 ## 待写入
