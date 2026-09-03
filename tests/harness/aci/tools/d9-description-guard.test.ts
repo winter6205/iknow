@@ -53,6 +53,8 @@ import type { BackgroundTaskManager } from "../../../../src/harness/background/m
 import type { CreateTaskWorktreeProvisionFn } from "../../../../src/harness/aci/tools/create-task-worktree.js";
 import type { WorktreeEnterToolDeps } from "../../../../src/harness/aci/tools/enter-task-worktree.js";
 import type { WorktreeExitToolDeps } from "../../../../src/harness/aci/tools/exit-task-worktree.js";
+import type { ListTaskWorktreesToolDeps } from "../../../../src/harness/aci/tools/list-task-worktrees.js";
+import type { RemoveTaskWorktreeToolDeps } from "../../../../src/harness/aci/tools/remove-task-worktree.js";
 
 /** #483 D9: 12-word blocklist — mirrors tests/harness/aci/tools/todo-write.test.ts:533.
  *
@@ -80,10 +82,10 @@ const NEGATIVE_PHRASES: ReadonlyArray<string> = [
 /** #502 T7 d9 扩面：正面引导构造（trigger verb）白名单。description 必须
  *  命中至少一个 — 锁写作形态是「何时用 / 与什么配对」而非负面祈使。与
  *  todo-write.test.ts:554-562 的 positive-keys 同思路但放工具集级别。
- *  选词原则：覆盖现有 30 件工具的动词光谱（use / pair / read / run / fetch
+ *  选词原则：覆盖现有 ACI 工具的动词光谱（use / pair / read / run / fetch
  *  / search / discover / load / list / poll / maintain / capture / delegate
  *  / resolve / apply / create / terminate / return）— 任何 description 命中
- *  之一即过，全部 30 件当前文案均命中（手算已确认，vitest 兜底）。 */
+ *  之一即过，当前文案均命中（手算已确认，vitest 兜底）。 */
 const POSITIVE_TRIGGER_PATTERN =
   /\b(use|pair|read|run|fetch|search|discover|load|list|poll|maintain|capture|delegate|resolve|apply|create|terminate|return)\b/i;
 
@@ -128,20 +130,25 @@ const fakeBackgroundManager: BackgroundTaskManager = {
   onConversationDeleted: () => undefined,
 } as unknown as BackgroundTaskManager;
 
-/** ADR-0037 worktree isolation 三缝 fake —— sufficient for assembly。
- *  handler 路径单测在各自工具目录下,本文件只验证 description D9 闸门。 */
-const fakeWorktreeProvision = (async () => ({
-  taskId: "fake-task",
-  worktreePath: "/tmp/fake-worktree",
-  branchName: "fake/branch",
-})) as unknown as CreateTaskWorktreeProvisionFn;
-const fakeWorktreeEnter = (async () => ({
-  worktreePath: "/tmp/fake-worktree",
-  branchName: "fake/branch",
-})) as unknown as WorktreeEnterToolDeps["worktreeEnter"];
-const fakeWorktreeExit = (async () => ({
-  mainRepoRoot: "/tmp/fake-main",
-})) as unknown as WorktreeExitToolDeps["worktreeExit"];
+/** ADR-0037 worktree isolation host fakes —— sufficient for assembly。
+ * handler 路径单测在各自工具目录下,本文件只验证 description D9 闸门。 */
+const fakeWorktreeProvision: CreateTaskWorktreeProvisionFn = async () =>
+  "/tmp/fake-worktree";
+const fakeWorktreeEnter: WorktreeEnterToolDeps["worktreeEnter"] = async () =>
+  "/tmp/fake-worktree";
+const fakeWorktreeExit: WorktreeExitToolDeps["worktreeExit"] = async () =>
+  "/tmp/fake-main";
+const fakeWorktreeList: ListTaskWorktreesToolDeps["worktreeList"] =
+  async () => [];
+const fakeWorktreeRemove: RemoveTaskWorktreeToolDeps["worktreeRemove"] =
+  async () => ({
+    label: undefined,
+    conversationId: "fake-conversation",
+    path: "/tmp/fake-worktree",
+    branch: "iknow/task-fake-conversation",
+    head: "fake-head",
+    branchDeleted: false,
+  });
 
 describe("#483 D9 — regression guard: every ACI tool description avoids NEGATIVE_PHRASES", () => {
   // Assemble once for the whole suite. Reusing the same registry across
@@ -161,6 +168,8 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     worktreeProvision: fakeWorktreeProvision,
     worktreeEnter: fakeWorktreeEnter,
     worktreeExit: fakeWorktreeExit,
+    worktreeList: fakeWorktreeList,
+    worktreeRemove: fakeWorktreeRemove,
   });
 
   // Sanity: the registry assembled with every conditional dep present contains
@@ -199,7 +208,7 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
   });
 
   // ── #502 T7 d9 扩面（扩张不削弱） ─────────────────────────────────────
-  // 既有 blocklist / 30 件装配 / toHaveLength(30) 断言全部保留。
+  // 既有 blocklist / 全条件装配断言全部保留。
 
   it("every tool description carries positive-guidance substance (> 30 chars) — d9 扩面", () => {
     const tooShort = reg.catalog
@@ -243,9 +252,9 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
   // audit, what this file pins is that every tool in the assembled catalog is
   // positive-trigger phrased (the it.each blocklist assertions higher up) plus
   // that the assembly sanity check above really covers the whole toolset.
-  it("toolset size after audit: 42 (full conditional-deps assembly, incl. 5 symbol mutate tools + tail-appended list_sessions + get_record; T5 退役 10 lsp_*)", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(42);
-    expect(reg.catalog.all()).toHaveLength(42);
+  it("toolset size after audit: 44 (full conditional-deps assembly, incl. task worktree discovery/removal; T5 退役 10 lsp_*)", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(44);
+    expect(reg.catalog.all()).toHaveLength(44);
   });
 
   // symbol-primary-aci T2：符号查询工具的 description 必须按**符号身份**

@@ -70,6 +70,8 @@ import type { SubAgentManager } from "../../../src/harness/subagent/manager.js";
 import type { CreateTaskWorktreeProvisionFn } from "../../../src/harness/aci/tools/create-task-worktree.js";
 import type { WorktreeEnterToolDeps } from "../../../src/harness/aci/tools/enter-task-worktree.js";
 import type { WorktreeExitToolDeps } from "../../../src/harness/aci/tools/exit-task-worktree.js";
+import type { ListTaskWorktreesToolDeps } from "../../../src/harness/aci/tools/list-task-worktrees.js";
+import type { RemoveTaskWorktreeToolDeps } from "../../../src/harness/aci/tools/remove-task-worktree.js";
 import type { McpManager } from "../../../src/harness/mcp/manager.js";
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
@@ -180,26 +182,27 @@ function makeWebEnv(): Pick<IknowEnv, "web"> {
   return { web: { searchUrl: undefined, proxy: undefined } };
 }
 
-/** worktree isolation 三缝 fake（仅用于 createDefaultAciRegistry 装配期断言
- * create-task-worktree / enter-task-worktree / exit-task-worktree 在场；
- * handler 路径单测在各自工具目录下，不在本文件）。 */
-const fakeWorktreeProvision = (() =>
-  Promise.resolve({
-    taskId: "fake-task",
-    worktreePath: "/tmp/fake-worktree",
-    branchName: "fake/branch",
-  })) as unknown as CreateTaskWorktreeProvisionFn;
-const fakeWorktreeEnter = (() =>
-  Promise.resolve({
-    worktreePath: "/tmp/fake-worktree",
-    branchName: "fake/branch",
-  })) as unknown as WorktreeEnterToolDeps["worktreeEnter"];
-const fakeWorktreeExit = (() =>
-  Promise.resolve({
-    mainRepoRoot: "/tmp/fake-main",
-  })) as unknown as WorktreeExitToolDeps["worktreeExit"];
+/** worktree isolation host fakes（仅用于 createDefaultAciRegistry 装配期
+ * 断言；handler 路径单测在各自工具目录下，不在本文件）。 */
+const fakeWorktreeProvision: CreateTaskWorktreeProvisionFn = async () =>
+  "/tmp/fake-worktree";
+const fakeWorktreeEnter: WorktreeEnterToolDeps["worktreeEnter"] = async () =>
+  "/tmp/fake-worktree";
+const fakeWorktreeExit: WorktreeExitToolDeps["worktreeExit"] = async () =>
+  "/tmp/fake-main";
+const fakeWorktreeList: ListTaskWorktreesToolDeps["worktreeList"] =
+  async () => [];
+const fakeWorktreeRemove: RemoveTaskWorktreeToolDeps["worktreeRemove"] =
+  async () => ({
+    label: undefined,
+    conversationId: "fake-conversation",
+    path: "/tmp/fake-worktree",
+    branch: "iknow/task-fake-conversation",
+    head: "fake-head",
+    branchDeleted: false,
+  });
 
-/** 全条件装配 opts（五条件键 + backgroundManager + graph overlay + worktree 三缝）→ 42 件全量。 */
+/** 全条件装配 opts（五条件键 + backgroundManager + graph overlay + worktree host seams）→ 44 件全量。 */
 function fullAssemblyOpts() {
   return {
     env: makeWebEnv(),
@@ -216,6 +219,8 @@ function fullAssemblyOpts() {
     worktreeProvision: fakeWorktreeProvision,
     worktreeEnter: fakeWorktreeEnter,
     worktreeExit: fakeWorktreeExit,
+    worktreeList: fakeWorktreeList,
+    worktreeRemove: fakeWorktreeRemove,
   };
 }
 
@@ -453,19 +458,19 @@ describe("bash_output 真实物理截断（real manager）", () => {
 // ── 5. 装配一致性（registry + Gate 3 镜像过滤）───────────────────────────────
 
 describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
-  it("全条件装配（含 backgroundManager + graph overlay）→ 42 件，顺序 = ACI_TOOLSET_NAMES", () => {
+  it("全条件装配（含 backgroundManager + graph overlay）→ 44 件，顺序 = ACI_TOOLSET_NAMES", () => {
     const reg = createDefaultAciRegistry(fullAssemblyOpts());
     const names = reg.inner.list().map((d) => d.name);
-    assert.equal(names.length, 42);
+    assert.equal(names.length, 44);
     assert.deepEqual(names, [...ACI_TOOLSET_NAMES]);
     assert.ok(reg.catalog.get("bash_output"));
     assert.ok(reg.catalog.get("bash_stop"));
   });
 
   it("backgroundManager 缺席 → bash_output / bash_stop 排除（36 件），bash 保留（T3 常驻）", () => {
-    // 不传 graphAssembly → run_graph 同步缺席；不传 worktree 三缝 → 3 件缺席；
+    // 不传 graphAssembly → run_graph 同步缺席；不传 worktree host seams → 5 件缺席；
     // 读侧三轴（query_trace / list_sessions / get_record）无装配条件仍在场。
-    // 42 - 2(bg) - 1(run_graph) - 3(worktree) = 36。
+    // 44 - 2(bg) - 1(run_graph) - 5(worktree) = 36。
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",

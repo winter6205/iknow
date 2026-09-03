@@ -1274,6 +1274,51 @@ describe("worktree isolation wiring (T4 — create-task-worktree ACI tool)", () 
     );
   });
 
+  it("model calls the tool WITH a label: labeled leaf + labeled branch, rebind persists to the store, next wave mutate lands in the labeled tree, main repo zero-write", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+
+    const deps = await ensure(hub, repo);
+    const blocked = await runMutate(deps, conversationId);
+    expect(blocked.kind).toBe("execution_failed");
+
+    const [result] = await deps.executor.executeAll(
+      [
+        {
+          id: "aci-labeled-1",
+          name: "create-task-worktree",
+          input: { name: "fix-648" },
+        },
+      ],
+      undefined,
+      undefined,
+      conversationId
+    );
+    expect(result.kind).toBe("ok");
+    const reboundRoot = join(
+      repo,
+      ".iknow",
+      "worktrees",
+      `fix-648--${conversationId}`
+    );
+    expect(resultText(result)).toContain(reboundRoot);
+    expect(git(repo, "worktree", "list")).toContain(reboundRoot);
+    expect(git(reboundRoot, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
+      `iknow/task/fix-648-${conversationId.slice(0, 8)}`
+    );
+
+    const sameRunNextWave = await runMutate(deps, conversationId);
+    expect(sameRunNextWave.kind).toBe("ok");
+    expect(existsSync(join(reboundRoot, "hello.txt"))).toBe(true);
+    expect(existsSync(join(repo, "hello.txt"))).toBe(false);
+
+    await persistDirtyRoot(hub, conversationId);
+    expect((await store.load(conversationId)).workspaceRoot).toBe(reboundRoot);
+
+    expect(git(repo, "status", "--porcelain")).toBe("");
+  });
+
   it("same-name task branch already exists → typed branch_exists, no overwrite, no rebind, main repo zero-write", async () => {
     await setSettingsIsolation(true);
     const repo = makeGitRepo();
@@ -1418,6 +1463,43 @@ describe("worktree isolation wiring (T7 - enter-task-worktree)", () => {
     expect(result.message).toContain("kind=foreign_worktree");
     // foreign tree untouched
     expect(existsSync(join(wtA, "hello.txt"))).toBe(false);
+  });
+
+  it("fail-closed on a LABELED tree: a session without the durable anchor mutates on another conversation's labeled task worktree -> typed foreign_worktree (label never participates in ownership)", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId: convA } = await makeHubWithSession(repo);
+    const { conversationId: convB } = await makeHubWithSession(repo);
+
+    const aDeps = await ensure(hub, repo);
+    const [created] = await aDeps.executor.executeAll(
+      [
+        {
+          id: "create-a-labeled",
+          name: "create-task-worktree",
+          input: { name: "fix-648" },
+        },
+      ],
+      undefined,
+      undefined,
+      convA
+    );
+    expect(created.kind).toBe("ok");
+    const wtA = join(repo, ".iknow", "worktrees", `fix-648--${convA}`);
+    expect(git(repo, "worktree", "list")).toContain(wtA);
+    await persistDirtyRoot(hub, convA);
+
+    const hub2 = new SessionHub({ store, askUser: createNoAskUser() });
+    await hub2.bindWorkspace(repo);
+    const foreignDeps = await ensure(hub2, wtA);
+    const result = await runMutate(foreignDeps, convB);
+
+    expect(result.kind).toBe("execution_failed");
+    expect(result.message).toContain("[worktree_isolation]");
+    expect(result.message).toContain("kind=foreign_worktree");
+    expect(result.message).toContain(convA);
+    expect(existsSync(join(wtA, "hello.txt"))).toBe(false);
+    expect(git(repo, "status", "--porcelain")).toBe("");
   });
 
   it("tool boundary: entering a conversation that owns no tree -> kind=worktree_not_found, no rebind", async () => {

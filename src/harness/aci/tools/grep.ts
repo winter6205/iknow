@@ -19,12 +19,13 @@
 
 import { readdir, readFile, stat } from "node:fs/promises";
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
-import { join, relative } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { realpath } from "node:fs/promises";
 
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
+import { taskWorktreeOwnerOf } from "../../isolation/worktree-gate.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import { resolveWithinRoot, spawnWithStopSignal } from "./helpers.js";
 
@@ -51,6 +52,17 @@ export type SpawnFn = (
  */
 export interface GrepToolDeps {
   readonly spawn?: SpawnFn;
+  /**
+   * Stable project identity root. When present, absolute paths (and relative
+   * paths missing from the live task root) may be searched read-only there.
+   */
+  readonly projectIdentityRoot?: string;
+  /**
+   * Registry seam for the isolation switch. Direct tool callers default to
+   * deriving the main checkout from a task-worktree-shaped root; production
+   * OFF assembly sets this false to preserve the historical read boundary.
+   */
+  readonly allowProjectIdentityRoot?: boolean;
 }
 
 interface HandlerInput {
@@ -112,10 +124,15 @@ export function createGrepTool(
     // 贯穿整条路径（compileInput → rg / fallback）。handler 内后续 cell 翻转
     // 不渗透进本次调用。cell 缺席 → 退到工厂捕获 root（legacy parity）。
     const rootAtCall = readRoot(root);
+    const projectIdentityRoot = resolveProjectIdentityRoot(rootAtCall, deps);
     // Resolve per call (matches sibling tools) so a missing/unreachable
     // root surfaces at the point of use instead of from a cached promise.
     const resolvedRoot = await realpath(rootAtCall);
-    const compiled = await compileInput(input, resolvedRoot);
+    const compiled = await compileInput(
+      input,
+      resolvedRoot,
+      projectIdentityRoot
+    );
     const matches = await runRipgrepOrFallback(
       testSpawn,
       compiled,
@@ -156,14 +173,19 @@ export function createGrepTool(
 
 async function compileInput(
   input: unknown,
-  workspaceRoot: string
+  workspaceRoot: string,
+  projectIdentityRoot?: string
 ): Promise<CompiledInput> {
   const obj = (input ?? {}) as HandlerInput;
   if (typeof obj.pattern !== "string" || obj.pattern.length === 0) {
     throw new ToolExecutionError("grep: pattern must be a non-empty string");
   }
   const rawSub = typeof obj.path === "string" ? obj.path : ".";
-  const searchRoot = await resolveWithinRoot(workspaceRoot, rawSub);
+  const searchRoot = await resolveSearchRoot(
+    workspaceRoot,
+    rawSub,
+    projectIdentityRoot
+  );
   const ignoreCase = obj.ignoreCase === true;
   const limit = clampLimit(obj.limit);
   return {
@@ -173,6 +195,69 @@ async function compileInput(
     limit,
     workspaceRoot,
   };
+}
+
+/**
+ * Identity-root read passthrough, gated to mirror `read-file.ts` so the
+ * three read-only tools widen by the same trigger.
+ *
+ * - Explicit `projectIdentityRoot` threaded: returns it iff
+ *   `allowProjectIdentityRoot` is `true` AND the live root is already a
+ *   task worktree (post-rebind); `allowProjectIdentityRoot === false` is
+ *   a hard deny. Threading an explicit root without a rebind is the
+ *   "OFF assembly / pre-rebind main checkout" surface and returns
+ *   `undefined` so the live-root fence stays intact.
+ * - No explicit `projectIdentityRoot`: returns `undefined`. There is no
+ *   shape-based fallback to a derived main checkout — OFF assembly must get
+ *   no extra read root (spec SC4: byte-identical to the historical read
+ *   boundary) and worker assembly must not widen its tool surface (spec
+ *   clause 14) merely because the root path looks task-worktree-shaped.
+ */
+function resolveProjectIdentityRoot(
+  root: string,
+  deps: GrepToolDeps | undefined
+): string | undefined {
+  const projectIdentityRoot = deps?.projectIdentityRoot;
+  if (projectIdentityRoot === undefined) return undefined;
+  if (
+    deps?.allowProjectIdentityRoot === true &&
+    taskWorktreeOwnerOf(root) === undefined
+  ) {
+    return undefined;
+  }
+  if (deps?.allowProjectIdentityRoot === false) return undefined;
+  return projectIdentityRoot;
+}
+
+/**
+ * Keep the normal task-root interpretation first, while making the stable
+ * identity root convenient for a relative project file name such as
+ * `AGENTS.md` after a rebind.
+ */
+async function resolveSearchRoot(
+  workspaceRoot: string,
+  target: string,
+  projectIdentityRoot: string | undefined
+): Promise<string> {
+  const extraRoots =
+    projectIdentityRoot === undefined ? undefined : [projectIdentityRoot];
+  const primary = await resolveWithinRoot(workspaceRoot, target, extraRoots);
+  if (projectIdentityRoot === undefined || isAbsolute(target)) return primary;
+  try {
+    await stat(primary);
+    return primary;
+  } catch {
+    const identityCandidate = await resolveWithinRoot(
+      projectIdentityRoot,
+      target
+    );
+    try {
+      await stat(identityCandidate);
+      return identityCandidate;
+    } catch {
+      return primary;
+    }
+  }
 }
 
 function clampLimit(raw: unknown): number {

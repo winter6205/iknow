@@ -14,10 +14,12 @@
  *     `harness/isolation/worktree-gate.ts` (single git-layer SSOT).
  *
  * Deterministic naming (ADR-0037 §3):
- *   - worktree path `<repoRoot>/.iknow/worktrees/<conversationId>` (`.iknow`
- *     is the per-root state anchor and gitignored, so the nested checkout
- *     never pollutes the main repo's status);
- *   - branch `iknow/task-<conversationId>`.
+ *   - worktree path `<repoRoot>/.iknow/worktrees/<label>--<conversationId>` or
+ *     the historical `<conversationId>` leaf (`.iknow` is the per-root state
+ *     anchor and gitignored, so the nested checkout never pollutes the main
+ *     repo's status);
+ *   - branch `iknow/task/<label>-<uuid8>` when labeled, otherwise
+ *     `iknow/task-<conversationId>`.
  *   The naming makes ownership unambiguous, but a pre-existing branch /
  *   worktree path is still fail-closed (`branch_exists` / `worktree_exists`
  *   from the git layer) — no silent overwrite, no reuse of unknown trees,
@@ -33,20 +35,30 @@
  * belonging to another conversation or an unrelated linked worktree fails
  * closed with `foreign_worktree`.
  */
-import { dirname, join } from "node:path";
+import { copyFile, lstat, mkdir, readFile } from "node:fs/promises";
+import { dirname, join, relative, resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
 
 import {
   createTaskWorktree,
   mainCheckoutOf,
+  resolveTaskWorktreeLabel,
   taskWorktreeOwnerOf,
+  taskWorktreePath,
+  taskWorktreeBranch,
+  taskWorktreeLabelOf,
   WorktreeIsolationError,
   defaultGitRunner,
   SAFE_CONVERSATION_ID_RE,
+  SAFE_WORKTREE_SLUG_RE,
 } from "../harness/isolation/worktree-gate.js";
 import type {
   GitRunner,
   GitResult,
+  TaskWorktreeInfo,
+  WorktreeListContext,
+  WorktreeRemoval,
+  WorktreeRemoveContext,
   WorktreeProvisionContext,
   WorktreeEnterContext,
   WorktreeExitContext,
@@ -69,6 +81,11 @@ export interface TaskWorktreeProvisionerOpts {
   readonly store?: WorktreeRebindStore;
   readonly runGit?: GitRunner;
   readonly now?: () => string;
+  /**
+   * Stable project identity root used by `.iknow/worktreeinclude`.
+   * When omitted, the main checkout derived from the request root is used.
+   */
+  readonly projectIdentityRoot?: string;
 }
 
 export interface TaskWorktreeProvisioner {
@@ -99,8 +116,8 @@ export interface TaskWorktreeProvisioner {
   ): Promise<string>;
   /**
    * T7 explicit enter: move a session anchored at the MAIN repo onto an
-   * EXISTING task worktree of THIS repository (deterministic path SSOT,
-   * owner = `targetConversationId`). Creates no tree and touches no foreign
+   * EXISTING task worktree of THIS repository (listing/path SSOT, selector =
+   * `targetConversationId`). Creates no tree and touches no foreign
    * HEAD — the only effect is the caller's own rebind (store-mode persists
    * workspaceRoot; hub-mode returns the root for the dirty-root
    * conditional-save protocol). Idempotent per conversation.
@@ -126,6 +143,10 @@ export interface TaskWorktreeProvisioner {
    * anything else fails closed with typed `rebind_failed`.
    */
   exit(req: WorktreeExitRequest): Promise<string>;
+  /** List active task worktrees, optionally including orphaned task branches. */
+  list(ctx: WorktreeListContext): Promise<ReadonlyArray<TaskWorktreeInfo>>;
+  /** Remove a clean, safe task worktree and optionally its task branch. */
+  remove(ctx: WorktreeRemoveContext): Promise<WorktreeRemoval>;
   /**
    * True when `root` is a task worktree this provisioner created (or
    * recognized as a conversation's own tree — T4 passthrough registration).
@@ -162,21 +183,10 @@ export interface WorktreeExitRequest extends WorktreeExitContext {
   readonly sessionWorkspaceRoot?: string;
 }
 
-export function taskWorktreePath(repoRoot: string, conversationId: string): string {
-  return join(repoRoot, ".iknow", "worktrees", conversationId);
-}
-
-export function taskWorktreeBranch(conversationId: string): string {
-  return `iknow/task-${conversationId}`;
-}
-
 /**
  * T4 ownership anchor: decompose a root against the deterministic naming.
- * Returns the owning conversationId when `root` IS a task worktree path
- * (`<any>/.iknow/worktrees/<conversationId>`), undefined otherwise. Because
- * the leaf name is the conversation id, "the path decomposes to X" is
- * equivalent to "the tree belongs to conversation X" — no registry needed,
- * works across server restarts.
+ * The implementation is kept in the harness isolation module so the gate,
+ * provisioner, and read-only display consumers cannot disagree.
  *
  * Single SSOT lives in `harness/isolation/worktree-gate.ts` (the mutate gate
  * routes on the same predicate — T3 model-provision contract); re-exported
@@ -186,7 +196,14 @@ export function taskWorktreeBranch(conversationId: string): string {
  * `bindWorkspace` legitimately persists the MAIN root as workspaceRoot, and
  * that must never render as a worktree binding.
  */
-export { taskWorktreeOwnerOf, mainCheckoutOf };
+export {
+  mainCheckoutOf,
+  resolveTaskWorktreeLabel,
+  taskWorktreeBranch,
+  taskWorktreeLabelOf,
+  taskWorktreeOwnerOf,
+  taskWorktreePath,
+};
 
 /**
  * Review Medium-1 (2026-08-29): the conversationId is concatenated verbatim
@@ -217,13 +234,424 @@ function isLinkedWorktreeRoot(root: string): boolean {
   }
 }
 
+interface WorktreePorcelainRecord {
+  readonly path: string;
+  readonly head?: string;
+  readonly branch?: string;
+}
+
+function parseWorktreePorcelain(raw: string): WorktreePorcelainRecord[] {
+  const records: WorktreePorcelainRecord[] = [];
+  let current: { path?: string; head?: string; branch?: string } = {};
+  const flush = (): void => {
+    if (current.path !== undefined) {
+      records.push({
+        path: current.path,
+        ...(current.head !== undefined ? { head: current.head } : {}),
+        ...(current.branch !== undefined ? { branch: current.branch } : {}),
+      });
+    }
+    current = {};
+  };
+
+  for (const line of raw.split(/\r?\n/)) {
+    if (line.length === 0) {
+      flush();
+    } else if (line.startsWith("worktree ")) {
+      if (current.path !== undefined) flush();
+      current.path = line.slice("worktree ".length);
+    } else if (line.startsWith("HEAD ")) {
+      current.head = line.slice("HEAD ".length);
+    } else if (line.startsWith("branch ")) {
+      const ref = line.slice("branch ".length);
+      current.branch = ref.startsWith("refs/heads/")
+        ? ref.slice("refs/heads/".length)
+        : ref;
+    }
+  }
+  flush();
+  return records;
+}
+
+function splitGitLines(raw: string): string[] {
+  return raw.split(/\r?\n/).filter((line) => line.length > 0);
+}
+
+function splitGitNul(raw: string): string[] {
+  return raw.split("\0").filter((line) => line.length > 0);
+}
+
+interface ParsedTaskBranch {
+  readonly label: string | undefined;
+  readonly conversationId: string;
+}
+
+function parseTaskBranch(branch: string): ParsedTaskBranch | undefined {
+  const legacyPrefix = "iknow/task-";
+  if (branch.startsWith(legacyPrefix)) {
+    const conversationId = branch.slice(legacyPrefix.length);
+    return conversationId.length > 0
+      ? { label: undefined, conversationId }
+      : undefined;
+  }
+
+  const labeledPrefix = "iknow/task/";
+  if (!branch.startsWith(labeledPrefix)) return undefined;
+  const body = branch.slice(labeledPrefix.length);
+  const separator = body.lastIndexOf("-");
+  if (separator <= 0) return undefined;
+  const label = body.slice(0, separator);
+  const conversationId = body.slice(separator + 1);
+  if (
+    !SAFE_WORKTREE_SLUG_RE.test(label) ||
+    conversationId.length < 1 ||
+    conversationId.length > 8 ||
+    !SAFE_CONVERSATION_ID_RE.test(conversationId)
+  ) {
+    return undefined;
+  }
+  // A labeled branch stores only the id prefix by design. It is still useful
+  // in the stale report, while active trees recover the complete id from the
+  // path leaf.
+  return { label, conversationId };
+}
+
+function selectTaskWorktree(
+  entries: ReadonlyArray<TaskWorktreeInfo>,
+  selector: string
+): TaskWorktreeInfo | undefined {
+  const active = entries.filter((entry) => entry.path.length > 0);
+  const byConversation = active.filter(
+    (entry) => entry.conversationId === selector
+  );
+  if (byConversation.length === 1) return byConversation[0];
+  if (byConversation.length > 1) {
+    throw new WorktreeIsolationError(
+      "ambiguous_worktree",
+      `worktree isolation: conversation selector '${selector}' matches multiple task worktrees: ${byConversation
+        .map((entry) => entry.conversationId)
+        .join(", ")}`
+    );
+  }
+
+  const byLabel = active.filter((entry) => entry.label === selector);
+  if (byLabel.length === 1) return byLabel[0];
+  if (byLabel.length > 1) {
+    throw new WorktreeIsolationError(
+      "ambiguous_worktree",
+      `worktree isolation: label '${selector}' is ambiguous; matching conversation ids: ${byLabel
+        .map((entry) => entry.conversationId)
+        .join(", ")}`
+    );
+  }
+  return undefined;
+}
+
+async function runGitForLifecycle(
+  runGit: GitRunner,
+  args: readonly string[],
+  cwd: string,
+  failureKind:
+    | "worktree_list_failed"
+    | "worktree_status_failed"
+    | "worktree_remove_failed"
+    | "branch_delete_failed",
+  action: string
+): Promise<GitResult> {
+  let result: GitResult;
+  try {
+    result = await runGit(args, cwd);
+  } catch (err) {
+    throw gitUnavailable(action, err);
+  }
+  if (result.code !== 0) {
+    throw new WorktreeIsolationError(
+      failureKind,
+      `worktree isolation: ${action}: ${
+        result.stderr.trim().length > 0
+          ? result.stderr.trim()
+          : `git exited with code ${result.code}`
+      }`
+    );
+  }
+  return result;
+}
+
+function gitUnavailable(action: string, err: unknown): WorktreeIsolationError {
+  return new WorktreeIsolationError(
+    "git_unavailable",
+    `worktree isolation: ${action}: git is not available (spawn failed): ${errorMessage(err)}`
+  );
+}
+
+async function readWorktreeDirty(
+  runGit: GitRunner,
+  worktreePath: string
+): Promise<boolean> {
+  const result = await runGitForLifecycle(
+    runGit,
+    ["status", "--porcelain", "--untracked-files=all"],
+    worktreePath,
+    "worktree_status_failed",
+    `cannot inspect task worktree ${worktreePath}`
+  );
+  return result.stdout.trim().length > 0;
+}
+
+async function exclusiveUnpushedCommitCount(
+  runGit: GitRunner,
+  repoRoot: string,
+  branch: string
+): Promise<number> {
+  if (branch.length === 0) return 0;
+  const mainHead = await runGitForLifecycle(
+    runGit,
+    ["rev-parse", "HEAD"],
+    repoRoot,
+    "worktree_status_failed",
+    "cannot inspect the main checkout HEAD"
+  );
+  const unique = await runGitForLifecycle(
+    runGit,
+    ["rev-list", "--count", `${mainHead.stdout.trim()}..${branch}`],
+    repoRoot,
+    "worktree_status_failed",
+    `cannot inspect exclusive commits on ${branch}`
+  );
+  const uniqueCount = parseGitCount(unique.stdout, branch);
+  if (uniqueCount === 0) return 0;
+
+  let upstream: GitResult;
+  try {
+    upstream = await runGit(
+      [
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        `${branch}@{upstream}`,
+      ],
+      repoRoot
+    );
+  } catch (err) {
+    throw gitUnavailable(`cannot inspect upstream for ${branch}`, err);
+  }
+  if (upstream.code !== 0 || upstream.stdout.trim().length === 0) {
+    // EXIT: no configured upstream means every commit unique to this branch
+    // remains unconfirmed as pushed.
+    return uniqueCount;
+  }
+
+  let ahead: GitResult;
+  try {
+    ahead = await runGit(
+      ["rev-list", "--count", `${upstream.stdout.trim()}..${branch}`],
+      repoRoot
+    );
+  } catch (err) {
+    throw gitUnavailable(`cannot inspect upstream commits for ${branch}`, err);
+  }
+  if (ahead.code !== 0) {
+    // EXIT: an unreadable upstream comparison is conservatively treated as
+    // unpublished rather than allowing removal.
+    return uniqueCount;
+  }
+  return parseGitCount(ahead.stdout, branch);
+}
+
+function parseGitCount(raw: string, branch: string): number {
+  const normalized = raw.trim();
+  const value = Number(normalized);
+  if (!/^\d+$/.test(normalized) || !Number.isSafeInteger(value) || value < 0) {
+    throw new WorktreeIsolationError(
+      "worktree_status_failed",
+      `worktree isolation: git returned an invalid commit count for ${branch}`
+    );
+  }
+  return value;
+}
+
+interface CopyWorktreeIncludeOpts {
+  readonly repoRoot: string;
+  readonly worktreePath: string;
+  readonly projectIdentityRoot: string;
+  readonly runGit: GitRunner;
+}
+
+/**
+ * Best-effort mirror for ignored local configuration selected by the identity
+ * root's `.iknow/worktreeinclude`. The candidate set comes from Git's own
+ * ignore engine first, then the include file acts as an allowlist. This keeps
+ * tracked files and ordinary untracked files out of the new checkout.
+ */
+async function copyWorktreeInclude(
+  opts: CopyWorktreeIncludeOpts
+): Promise<void> {
+  const includePath = join(
+    opts.projectIdentityRoot,
+    ".iknow",
+    "worktreeinclude"
+  );
+  let includeText: string;
+  try {
+    includeText = await readFile(includePath, "utf8");
+  } catch {
+    return;
+  }
+  const patterns = parseIncludePatterns(includeText);
+  if (patterns.length === 0) return;
+
+  let ignored: GitResult;
+  try {
+    ignored = await opts.runGit(
+      ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+      opts.repoRoot
+    );
+  } catch {
+    return;
+  }
+  if (ignored.code !== 0) return;
+
+  for (const repoRelative of splitGitNul(ignored.stdout)) {
+    const source = resolve(opts.repoRoot, repoRelative);
+    const identityRelative = relative(
+      resolve(opts.projectIdentityRoot),
+      source
+    );
+    if (
+      identityRelative === "" ||
+      identityRelative.startsWith("..") ||
+      resolve(opts.projectIdentityRoot, identityRelative) !== source ||
+      !matchesInclude(identityRelative, patterns)
+    ) {
+      continue;
+    }
+
+    let sourceInfo: Awaited<ReturnType<typeof lstat>>;
+    try {
+      sourceInfo = await lstat(source);
+    } catch {
+      continue;
+    }
+    if (!sourceInfo.isFile()) continue;
+
+    const destinationRelative = relative(resolve(opts.repoRoot), source);
+    const destination = resolve(opts.worktreePath, destinationRelative);
+    if (
+      destinationRelative === "" ||
+      destinationRelative.startsWith("..") ||
+      resolve(opts.worktreePath, destinationRelative) !== destination
+    ) {
+      continue;
+    }
+    try {
+      await mkdir(dirname(destination), { recursive: true });
+      await copyFile(source, destination);
+    } catch {
+      // Include mirrors are optional. A permission race or a disappearing
+      // ignored file must not turn a successfully-created worktree into a
+      // failed provision.
+    }
+  }
+}
+
+interface IncludePattern {
+  readonly pattern: string;
+  readonly negated: boolean;
+}
+
+function parseIncludePatterns(text: string): IncludePattern[] {
+  const patterns: IncludePattern[] = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("#")) continue;
+    const negated = line.startsWith("!");
+    const pattern = (negated ? line.slice(1) : line).replace(/^\\#/, "#");
+    if (pattern.length > 0) {
+      patterns.push({ pattern, negated });
+    }
+  }
+  return patterns;
+}
+
+function matchesInclude(
+  candidate: string,
+  patterns: ReadonlyArray<IncludePattern>
+): boolean {
+  const normalized = candidate.split("\\").join("/");
+  let included = false;
+  for (const entry of patterns) {
+    if (matchesGitignorePattern(normalized, entry.pattern)) {
+      included = !entry.negated;
+    }
+  }
+  return included;
+}
+
+function matchesGitignorePattern(candidate: string, source: string): boolean {
+  let pattern = source.replace(/\\/g, "/");
+  const directoryPattern = pattern.endsWith("/");
+  pattern = pattern.replace(/\/+$/, "");
+  // A leading `/` anchors the pattern to the include root (gitignore
+  // semantics): the candidate must match from its first path segment.
+  // Stripping it instead would degrade `/.env` to "any `.env` segment",
+  // pulling nested files into the mirrored tree.
+  const anchored = pattern.startsWith("/");
+  if (anchored) pattern = pattern.slice(1);
+  if (pattern.length === 0) return false;
+  const regex = globPatternRegex(pattern, directoryPattern, anchored);
+  if (!pattern.includes("/") && !anchored) {
+    return candidate.split("/").some((segment) => regex.test(segment));
+  }
+  return regex.test(candidate);
+}
+
+function globPatternRegex(
+  pattern: string,
+  directoryPattern: boolean,
+  anchored: boolean
+): RegExp {
+  let body = "";
+  for (let i = 0; i < pattern.length; i += 1) {
+    const ch = pattern[i]!;
+    if (ch === "*") {
+      if (pattern[i + 1] === "*") {
+        while (pattern[i + 1] === "*") i += 1;
+        if (pattern[i + 1] === "/") {
+          body += "(?:.*/)?";
+          i += 1;
+        } else {
+          body += ".*";
+        }
+      } else {
+        body += "[^/]*";
+      }
+    } else if (ch === "?") {
+      body += "[^/]";
+    } else {
+      body += escapeRegExpChar(ch);
+    }
+  }
+  const suffix = directoryPattern ? "(?:/.*)?" : "";
+  // Anchored patterns match from the include root; unanchored ones keep the
+  // historical any-segment / any-depth semantics via the `(?:.*/)?` prefix.
+  const prefix = anchored ? "" : "(?:.*/)?";
+  return new RegExp(`^${prefix}${body}${suffix}$`);
+}
+
+function escapeRegExpChar(ch: string): string {
+  return /[\\^$.*+?()[\]{}|]/.test(ch) ? `\\${ch}` : ch;
+}
+
 export function createTaskWorktreeProvisioner(
   opts: TaskWorktreeProvisionerOpts
 ): TaskWorktreeProvisioner {
   const runGit = opts.runGit ?? defaultGitRunner;
   const now = opts.now ?? (() => new Date().toISOString());
+  const projectIdentityRoot = opts.projectIdentityRoot;
   /** conversationId → worktree path (provisioned / entered set). */
   const bound = new Map<string, string>();
+  /** Coalesce concurrent first provisions for the same conversation. */
+  const pending = new Map<string, Promise<string>>();
   /** All task worktree roots created or entered here (per-root engine flag source). */
   const taskRoots = new Set<string>();
 
@@ -303,6 +731,33 @@ export function createTaskWorktreeProvisioner(
     anchor?: WorktreeProvisionAnchor
   ): Promise<string> {
     const conversationId = ctx.conversationId;
+    if (
+      conversationId !== undefined &&
+      conversationId.length > 0 &&
+      SAFE_CONVERSATION_ID_RE.test(conversationId)
+    ) {
+      const existing = bound.get(conversationId);
+      if (existing !== undefined) return existing;
+      const inFlight = pending.get(conversationId);
+      if (inFlight !== undefined) return inFlight;
+      const operation = provisionOnce(ctx, anchor);
+      pending.set(conversationId, operation);
+      try {
+        return await operation;
+      } finally {
+        if (pending.get(conversationId) === operation) {
+          pending.delete(conversationId);
+        }
+      }
+    }
+    return provisionOnce(ctx, anchor);
+  }
+
+  async function provisionOnce(
+    ctx: WorktreeProvisionContext,
+    anchor?: WorktreeProvisionAnchor
+  ): Promise<string> {
+    const conversationId = ctx.conversationId;
     if (conversationId === undefined || conversationId.length === 0) {
       throw new WorktreeIsolationError(
         "rebind_failed",
@@ -369,8 +824,13 @@ export function createTaskWorktreeProvisioner(
 
     // 1. create the tree (typed fail-closed: not_a_git_repo / git_unavailable /
     //    branch_exists / worktree_exists / worktree_add_failed)
-    const worktreePath = taskWorktreePath(ctx.root, conversationId);
-    const branch = taskWorktreeBranch(conversationId);
+    const label = resolveTaskWorktreeLabel(ctx.name);
+    const worktreePath = taskWorktreePath(
+      ctx.root,
+      conversationId,
+      label.label
+    );
+    const branch = taskWorktreeBranch(conversationId, label.label);
     try {
       await createTaskWorktree({
         repoRoot: ctx.root,
@@ -385,6 +845,17 @@ export function createTaskWorktreeProvisioner(
         errorMessage(err)
       );
     }
+
+    // Optional local mirrors are copied only after the linked checkout exists.
+    // Their contents are deliberately best-effort: an include file is a
+    // convenience for ignored local configuration, never a prerequisite for
+    // isolation itself.
+    await copyWorktreeInclude({
+      repoRoot: mainCheckoutOf(ctx.root),
+      worktreePath,
+      projectIdentityRoot: projectIdentityRoot ?? mainCheckoutOf(ctx.root),
+      runGit,
+    });
 
     // 2. Preserve the historical standalone persistence hook when supplied.
     // SessionHub omits it so the host can observe this returned root and
@@ -429,9 +900,15 @@ export function createTaskWorktreeProvisioner(
       );
     }
 
-    // Path SSOT: the tool takes the owner's conversation id, never a
-    // free-form path — the target is always `<root>/.iknow/worktrees/<id>`.
-    const target = taskWorktreePath(req.root, req.targetConversationId);
+    // Resolve an exact conversation id first, then a unique decorative label.
+    // The list is the source of truth for labeled leaves; the legacy
+    // UUID-only path fallback keeps old trees enterable even when a host uses
+    // a minimal git runner.
+    const listed = await list({ root: req.root });
+    const selected = selectTaskWorktree(listed, req.targetConversationId);
+    const target =
+      selected?.path ??
+      taskWorktreePath(req.root, req.targetConversationId, undefined);
     const current = bound.get(conversationId);
     if (current === target) {
       return target; // idempotent re-enter (zero writes)
@@ -445,7 +922,7 @@ export function createTaskWorktreeProvisioner(
     if (!existsSync(target)) {
       throw new WorktreeIsolationError(
         "worktree_not_found",
-        `worktree isolation: no task worktree at ${target} (conversation '${req.targetConversationId}' owns no tree here); check the conversation id, or create the tree first with the create-task-worktree tool`
+        `worktree isolation: no task worktree matches '${req.targetConversationId}' at ${target}; check the conversation id or label, or create the tree first with the create-task-worktree tool`
       );
     }
     if (!isLinkedWorktreeRoot(target)) {
@@ -498,7 +975,11 @@ export function createTaskWorktreeProvisioner(
       taskWorktreeOwnerOf(req.sessionWorkspaceRoot) !== undefined
         ? req.sessionWorkspaceRoot
         : undefined;
-    if (boundRoot === undefined && shapedCurrent === undefined && shapedAnchor === undefined) {
+    if (
+      boundRoot === undefined &&
+      shapedCurrent === undefined &&
+      shapedAnchor === undefined
+    ) {
       throw new WorktreeIsolationError(
         "rebind_failed",
         `worktree isolation: session ${conversationId} is not currently rebound to a task worktree; there is nothing to exit`
@@ -520,10 +1001,148 @@ export function createTaskWorktreeProvisioner(
     return repoRoot;
   }
 
+  async function list(
+    ctx: WorktreeListContext
+  ): Promise<ReadonlyArray<TaskWorktreeInfo>> {
+    const repoRoot = mainCheckoutOf(ctx.root);
+    const porcelain = await runGitForLifecycle(
+      runGit,
+      ["worktree", "list", "--porcelain"],
+      repoRoot,
+      "worktree_list_failed",
+      "cannot list git worktrees"
+    );
+    const records = parseWorktreePorcelain(porcelain.stdout);
+    const activeBranches = new Set<string>();
+    const entries: TaskWorktreeInfo[] = [];
+
+    for (const record of records) {
+      const owner = taskWorktreeOwnerOf(record.path);
+      if (owner === undefined) continue;
+      const dirty = await readWorktreeDirty(runGit, record.path);
+      const branch = record.branch ?? "";
+      if (branch.length > 0) activeBranches.add(branch);
+      entries.push({
+        label: taskWorktreeLabelOf(record.path),
+        conversationId: owner,
+        path: record.path,
+        branch,
+        head: record.head ?? "",
+        dirty,
+      });
+    }
+
+    if (ctx.includeStale !== true) {
+      return Object.freeze(entries);
+    }
+
+    const branches = await runGitForLifecycle(
+      runGit,
+      ["for-each-ref", "--format=%(refname:short)", "refs/heads/iknow/task*"],
+      repoRoot,
+      "worktree_list_failed",
+      "cannot list task branches"
+    );
+    for (const branch of splitGitLines(branches.stdout)) {
+      if (activeBranches.has(branch)) continue;
+      const parsed = parseTaskBranch(branch);
+      if (parsed === undefined) continue;
+      const head = await runGitForLifecycle(
+        runGit,
+        ["rev-parse", branch],
+        repoRoot,
+        "worktree_list_failed",
+        `cannot inspect task branch ${branch}`
+      );
+      entries.push({
+        label: parsed.label,
+        conversationId: parsed.conversationId,
+        path: "",
+        branch,
+        head: head.stdout.trim(),
+        dirty: false,
+        stale: true,
+      });
+    }
+    return Object.freeze(entries);
+  }
+
+  async function remove(ctx: WorktreeRemoveContext): Promise<WorktreeRemoval> {
+    const entries = await list({ root: ctx.root });
+    const selected = selectTaskWorktree(entries, ctx.targetConversationId);
+    if (selected === undefined || selected.path.length === 0) {
+      throw new WorktreeIsolationError(
+        "worktree_not_found",
+        `worktree isolation: no active task worktree matches '${ctx.targetConversationId}'`
+      );
+    }
+
+    if (resolve(ctx.root) === resolve(selected.path)) {
+      throw new WorktreeIsolationError(
+        "current_worktree",
+        `worktree isolation: cannot remove the caller's current task worktree ${selected.path}; exit-task-worktree first`
+      );
+    }
+    if (selected.dirty) {
+      throw new WorktreeIsolationError(
+        "worktree_dirty",
+        `worktree isolation: task worktree ${selected.path} has uncommitted changes; clean or commit it before removal`
+      );
+    }
+
+    const repoRoot = mainCheckoutOf(ctx.root);
+    const unpublished = await exclusiveUnpushedCommitCount(
+      runGit,
+      repoRoot,
+      selected.branch
+    );
+    if (unpublished > 0) {
+      throw new WorktreeIsolationError(
+        "unpublished_commits",
+        `worktree isolation: task branch ${selected.branch} has ${unpublished} exclusive commit(s) not confirmed pushed; push or merge them before removal`
+      );
+    }
+
+    await runGitForLifecycle(
+      runGit,
+      ["worktree", "remove", selected.path],
+      repoRoot,
+      "worktree_remove_failed",
+      `cannot remove task worktree ${selected.path}`
+    );
+
+    let branchDeleted = false;
+    if (ctx.deleteBranch === true && selected.branch.length > 0) {
+      await runGitForLifecycle(
+        runGit,
+        ["branch", "-D", selected.branch],
+        repoRoot,
+        "branch_delete_failed",
+        `cannot delete task branch ${selected.branch}`
+      );
+      branchDeleted = true;
+    }
+
+    if (bound.get(selected.conversationId) === selected.path) {
+      bound.delete(selected.conversationId);
+    }
+    taskRoots.delete(selected.path);
+    return {
+      label: selected.label,
+      conversationId: selected.conversationId,
+      path: selected.path,
+      branch: selected.branch,
+      head: selected.head,
+      branchDeleted,
+    };
+  }
+
   return Object.freeze({
     provision,
     enter,
     exit,
+    list,
+    remove,
     isTaskWorktreeRoot: (root: string) => taskRoots.has(root),
   });
 }

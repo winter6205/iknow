@@ -100,7 +100,7 @@ describe("createGraphAssembly — per-round 装配快照", () => {
 
 describe("run_graph — ACI 条件装配（Gate 3 镜像过滤）", () => {
   it("ACI_TOOLSET_NAMES 在 run_graph / query_trace 之后 append-only 追加 worktree 3 件 + 10 件符号查询 + 5 件符号改 + 1 件目录轴读 + 1 件内容轴读（不重排既有件）", () => {
-    // 长度 42;实际 idx（基线实测）:
+    // 长度 44;实际 idx（基线实测）:
     //   idx 20 = run_graph
     //   idx 21 = query_trace
     //   idx 22 = create-task-worktree
@@ -111,7 +111,8 @@ describe("run_graph — ACI 条件装配（Gate 3 镜像过滤）", () => {
     //   idx 35-39 = 5 件符号改(rename / replace / insert_before /
     //               insert_after / safe_delete)
     //   idx 40 = list_sessions（T5b 目录轴读工具）
-    //   idx 41 = get_record（T6 内容轴读工具，末位）
+    //   idx 41 = get_record（T6 内容轴读工具）
+    //   idx 42 = list-task-worktrees，idx 43 = remove-task-worktree
     expect(ACI_TOOLSET_NAMES[20]).toBe("run_graph");
     expect(ACI_TOOLSET_NAMES[21]).toBe("query_trace");
     expect(ACI_TOOLSET_NAMES[22]).toBe("create-task-worktree");
@@ -119,8 +120,12 @@ describe("run_graph — ACI 条件装配（Gate 3 镜像过滤）", () => {
     expect(ACI_TOOLSET_NAMES[24]).toBe("exit-task-worktree");
     expect(ACI_TOOLSET_NAMES[25]).toBe("find_symbol");
     expect(ACI_TOOLSET_NAMES[35]).toBe("rename_symbol");
-    expect(ACI_TOOLSET_NAMES.at(-2)).toBe("list_sessions");
-    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 1]).toBe("get_record");
+    expect(ACI_TOOLSET_NAMES.at(-4)).toBe("list_sessions");
+    expect(ACI_TOOLSET_NAMES.at(-3)).toBe("get_record");
+    expect(ACI_TOOLSET_NAMES.at(-2)).toBe("list-task-worktrees");
+    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 1]).toBe(
+      "remove-task-worktree"
+    );
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
       "read_file",

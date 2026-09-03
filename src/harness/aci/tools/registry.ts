@@ -64,6 +64,14 @@ import {
   createExitTaskWorktreeTool,
   type WorktreeExitToolDeps,
 } from "./exit-task-worktree.js";
+import {
+  createListTaskWorktreesTool,
+  type ListTaskWorktreesToolDeps,
+} from "./list-task-worktrees.js";
+import {
+  createRemoveTaskWorktreeTool,
+  type RemoveTaskWorktreeToolDeps,
+} from "./remove-task-worktree.js";
 import { join } from "node:path";
 
 /**
@@ -185,9 +193,8 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // 8 基线 + memory_* (2 件) + tool_search + skill 2 + subagent 2 + todo +
   // mcp 2 + bg 2 + run_graph + query_trace + 10 符号查询 + 5 符号改 +
   // worktree 3 = 40 件名，T5b 目录轴再 append 1 件 = 41 件名，T6 内容轴再
-  // append 1 件 = 42 件名。（旧注释漏算
-  // worktree 三件而写 37，与 tests/harness/aci/tools/registry.test.ts 的长度
-  // 断言不符，按断言更正；本表长度以数组为 source of truth。）
+  // append 1 件 = 42 件名，task-worktree-lifecycle 再 append list/remove = 44
+  // 件名。本表长度以数组为 source of truth。
   "rename_symbol", // 全项目按符号改名（textDocument/rename + applyEdit）
   "replace_symbol_body", // 替换定义体（range = node.range，签名 + body）
   "insert_before_symbol", // 在符号定义前插入（range.start 位置）
@@ -209,6 +216,10 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // 仍然只能追加在尾部：中段插入会撞上下游按下标锁定的断言（
   // run-graph-assembly.test.ts 的 idx 20-23 等），尾部才是 append-only 契约。
   "get_record",
+  // task-worktree-lifecycle: discovery and explicit cleanup are appended after
+  // the existing ACI surface. Both host seams are independently conditional.
+  "list-task-worktrees",
+  "remove-task-worktree",
 ] as const);
 
 /**
@@ -251,12 +262,10 @@ export interface CreateDefaultAciRegistryOptions {
    *  per-root state. */
   readonly workspaceRoot?: string;
   /** T3 (plans/worktree-session-roots.md / ADR-0037 §4): 项目身份根 —— 会话
-   *  **已改绑**时额外放行的只读根。只透给 `read_file`(只读放行身份根上的项目
-   *  身份文件——改绑后 sandboxRoot 是 task worktree，身份根路径本会越界，而
-   *  ADR-0037 §1 明确允许只读它)。**不**透给 bash / write / edit —— 写不得
-   *  出沙箱。这条放行的门(隔离开关打开 **且** taskRoot 是 task worktree)在
-   *  build-engine 装配层；本层只消费已开门的透传值。缺席 / 等于 sandboxRoot
-   *  → 无额外读根(与今日逐字节一致)。 */
+   *  隔离开关 ON 时交给 `read_file` / `grep` / `glob` 的稳定只读根。工具在
+   *  handler 调用时再要求 live `taskRoot` 是 task worktree，因此同一 run 的
+   *  rebind 可生效而 OFF 档仍不获得额外读根。**不**透给 bash / write / edit
+   *  —— 写不得出沙箱。缺席 / 等于 sandboxRoot → 无额外读根。 */
   readonly projectIdentityRoot?: string;
   /** #406 T3:per-engine secret registry。透传给 bash 工具工厂——handler
    *  执行前把占位符还原为真值（见 bash.ts restore 段）。缺席时 bash 命令
@@ -312,6 +321,16 @@ export interface CreateDefaultAciRegistryOptions {
    * the Gate 3 mirror filter.
    */
   readonly worktreeExit?: WorktreeExitToolDeps["worktreeExit"];
+  /**
+   * Task-worktree discovery seam. Present → list-task-worktrees enters the
+   * registry; absent → the worker / OFF / hub-less surfaces omit it.
+   */
+  readonly worktreeList?: ListTaskWorktreesToolDeps["worktreeList"];
+  /**
+   * Explicit task-worktree removal seam. Present → remove-task-worktree enters
+   * the registry; absent → the tool is excluded by the Gate 3 mirror.
+   */
+  readonly worktreeRemove?: RemoveTaskWorktreeToolDeps["worktreeRemove"];
   /**
    * T5 (plans/worktree-live-task-root.md §6): live `taskRoot` cell. When
    * provided, `write_file` / `edit_file` factories receive the cell and the
@@ -441,6 +460,8 @@ export function createDefaultAciRegistry(
   // T8:exit-task-worktree 的条件化装配开关（host exit 缝）。同 worktreeEnter
   // 形态：TUI（只接 provision）/ worker / hub-less 入口不传 → 不入注册表。
   const worktreeExit = opts.worktreeExit;
+  const worktreeList = opts.worktreeList;
+  const worktreeRemove = opts.worktreeRemove;
 
   // holder:tool_search 自引用的惰性解引用点(装配完成前闭包返回 undefined,
   // tool-search.ts:resolveRegistry 触发 ToolExecutionError 兜底)。
@@ -499,9 +520,24 @@ export function createDefaultAciRegistry(
         ...(opts.projectIdentityRoot !== undefined
           ? { projectIdentityRoot: opts.projectIdentityRoot }
           : {}),
+        ...(opts.projectIdentityRoot !== undefined
+          ? { allowProjectIdentityRoot: true }
+          : {}),
       }),
-    grep: () => createGrepTool(opts.liveTaskRoot ?? sandboxRoot),
-    glob: () => createGlobTool(opts.liveTaskRoot ?? sandboxRoot),
+    grep: () =>
+      createGrepTool(opts.liveTaskRoot ?? sandboxRoot, {
+        ...(opts.projectIdentityRoot !== undefined
+          ? { projectIdentityRoot: opts.projectIdentityRoot }
+          : {}),
+        allowProjectIdentityRoot: opts.projectIdentityRoot !== undefined,
+      }),
+    glob: () =>
+      createGlobTool(opts.liveTaskRoot ?? sandboxRoot, {
+        ...(opts.projectIdentityRoot !== undefined
+          ? { projectIdentityRoot: opts.projectIdentityRoot }
+          : {}),
+        allowProjectIdentityRoot: opts.projectIdentityRoot !== undefined,
+      }),
     // T5:write_file / edit_file 读活 taskRoot。门禁未翻 ⇒ cell 初值 =
     // sandboxRoot，逐字节同今日；handler 内 cell.read() 一次取得 snapshot，
     // 同 handler 内 resolve 与写入共用该值（D2）。
@@ -625,7 +661,7 @@ export function createDefaultAciRegistry(
           "create-task-worktree": () =>
             createCreateTaskWorktreeTool({
               provision: worktreeProvision,
-              root: sandboxRoot,
+              root: opts.liveTaskRoot ?? sandboxRoot,
             }),
         }
       : {}),
@@ -637,7 +673,7 @@ export function createDefaultAciRegistry(
           "enter-task-worktree": () =>
             createEnterTaskWorktreeTool({
               worktreeEnter,
-              root: sandboxRoot,
+              root: opts.liveTaskRoot ?? sandboxRoot,
             }),
         }
       : {}),
@@ -649,7 +685,7 @@ export function createDefaultAciRegistry(
           "exit-task-worktree": () =>
             createExitTaskWorktreeTool({
               worktreeExit,
-              root: sandboxRoot,
+              root: opts.liveTaskRoot ?? sandboxRoot,
             }),
         }
       : {}),
@@ -670,6 +706,26 @@ export function createDefaultAciRegistry(
     // plan T6：现在本键是字面量最后一个键（同上 Gate 3）。三轴共用 traceReadDir()
     // 解析出的目录，get_record 点名的 conversation_id 才是 list_sessions 给过的那个。
     get_record: () => createGetRecordTool(traceReadDir()),
+    // task-worktree-lifecycle: host-only discovery/cleanup tools remain at the
+    // append-only tail so existing tool positions stay stable.
+    ...(worktreeList
+      ? {
+          "list-task-worktrees": () =>
+            createListTaskWorktreesTool({
+              worktreeList,
+              root: opts.liveTaskRoot ?? sandboxRoot,
+            }),
+        }
+      : {}),
+    ...(worktreeRemove
+      ? {
+          "remove-task-worktree": () =>
+            createRemoveTaskWorktreeTool({
+              worktreeRemove,
+              root: opts.liveTaskRoot ?? sandboxRoot,
+            }),
+        }
+      : {}),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。
@@ -694,6 +750,8 @@ export function createDefaultAciRegistry(
     ...(worktreeProvision ? [] : ["create-task-worktree"]),
     ...(worktreeEnter ? [] : ["enter-task-worktree"]),
     ...(worktreeExit ? [] : ["exit-task-worktree"]),
+    ...(worktreeList ? [] : ["list-task-worktrees"]),
+    ...(worktreeRemove ? [] : ["remove-task-worktree"]),
     ...(disallowedTools ?? []),
   ];
   const toolsetNames = (ACI_TOOLSET_NAMES as ReadonlyArray<string>).filter(

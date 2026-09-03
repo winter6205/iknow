@@ -30,6 +30,10 @@ import {
   createTaskWorktree,
   createWorktreeIsolationExecutor,
   mainCheckoutOf,
+  resolveTaskWorktreeLabel,
+  taskWorktreeBranch,
+  taskWorktreeLabelOf,
+  taskWorktreePath,
   taskWorktreeOwnerOf,
   WORKTREE_ISOLATION_PREFIX,
 } from "../../../src/harness/isolation/worktree-gate.ts";
@@ -198,6 +202,25 @@ describe("createTaskWorktree", () => {
     ).rejects.toMatchObject({ kind: "git_unavailable" });
   });
 
+  it("maps a branch-probe spawn failure to typed git_unavailable", async () => {
+    const repo = makeGitRepo();
+    let calls = 0;
+    const runner: GitRunner = async () => {
+      calls += 1;
+      if (calls === 1) return { code: 0, stdout: "true\n", stderr: "" };
+      throw new Error("spawn git ENOENT during branch probe");
+    };
+
+    await expect(
+      createTaskWorktree({
+        repoRoot: repo,
+        worktreePath: join(repo, "wt"),
+        branch: "iknow/task-x",
+        runGit: runner,
+      })
+    ).rejects.toMatchObject({ kind: "git_unavailable" });
+  });
+
   it("fails typed branch_exists when the task branch already exists (no silent overwrite)", async () => {
     const repo = makeGitRepo();
     git(repo, "branch", "iknow/task-x");
@@ -265,6 +288,28 @@ describe("createTaskWorktree", () => {
       kind: "worktree_add_failed",
       message: expect.stringContaining("fake add failure"),
     });
+  });
+
+  it("maps a worktree-add spawn failure to typed git_unavailable", async () => {
+    const repo = makeGitRepo();
+    const runner: GitRunner = async (args) => {
+      if (args[1] === "--is-inside-work-tree") {
+        return { code: 0, stdout: "true\n", stderr: "" };
+      }
+      if (args[0] === "worktree") {
+        throw new Error("spawn git ENOENT during worktree add");
+      }
+      return { code: 1, stdout: "", stderr: "" };
+    };
+
+    await expect(
+      createTaskWorktree({
+        repoRoot: repo,
+        worktreePath: join(repo, "wt"),
+        branch: "iknow/task-x",
+        runGit: runner,
+      })
+    ).rejects.toMatchObject({ kind: "git_unavailable" });
   });
 });
 
@@ -380,6 +425,44 @@ describe("taskWorktreeOwnerOf", () => {
     expect(taskWorktreeOwnerOf("/repo/.iknow/worktrees")).toBeUndefined();
     expect(taskWorktreeOwnerOf("/repo/.iknow/other/conv-1")).toBeUndefined();
     expect(taskWorktreeOwnerOf("")).toBeUndefined();
+  });
+});
+
+describe("task worktree naming", () => {
+  it("round-trips a valid label through path, owner, and label inversion", () => {
+    const root = taskWorktreePath(
+      "/repo",
+      "d52e0f28-703c-439a-bce4-3a3ae1017139",
+      "fix-648"
+    );
+
+    expect(root).toBe(
+      "/repo/.iknow/worktrees/fix-648--d52e0f28-703c-439a-bce4-3a3ae1017139"
+    );
+    expect(taskWorktreeOwnerOf(root)).toBe(
+      "d52e0f28-703c-439a-bce4-3a3ae1017139"
+    );
+    expect(taskWorktreeLabelOf(root)).toBe("fix-648");
+    expect(
+      taskWorktreeBranch("d52e0f28-703c-439a-bce4-3a3ae1017139", "fix-648")
+    ).toBe("iknow/task/fix-648-d52e0f28");
+  });
+
+  it("falls back to the historical UUID-only leaf for invalid labels", () => {
+    for (const name of [
+      undefined,
+      "",
+      "a",
+      "Bad-name",
+      "bad--name",
+      "x".repeat(41),
+    ]) {
+      expect(resolveTaskWorktreeLabel(name).label).toBeUndefined();
+      const root = taskWorktreePath("/repo", "conv-1", name);
+      expect(root).toBe("/repo/.iknow/worktrees/conv-1");
+      expect(taskWorktreeOwnerOf(root)).toBe("conv-1");
+      expect(taskWorktreeLabelOf(root)).toBeUndefined();
+    }
   });
 });
 

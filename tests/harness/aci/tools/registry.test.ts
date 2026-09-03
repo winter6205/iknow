@@ -2,7 +2,7 @@
  * tests/harness/aci/tools/registry.test.ts
  *
  * `createDefaultAciRegistry` — SSOT 工具注册层单元测试。装配形态与
- * ACI_TOOLSET_NAMES 同源；具体件数 = 全条件在场 37、缺席子集后 filter
+ * ACI_TOOLSET_NAMES 同源；具体件数 = 全条件在场 44、缺席子集后 filter
  * 推导。本测试不在注释里枚举加法（count 易漂），每条用例以 `.filter(...)`
  * 表达式为 source of truth，对照 `ACI_TOOLSET_NAMES.length` 与 Gate 3 镜像。
  *
@@ -14,7 +14,7 @@
  * 单一装配函数返回注册表,所有入口共享。本测试锁 5 边界类:
  *
  *   - 正常路径:返回 AciRegistry,list() 工具名 = `ACI_TOOLSET_NAMES` 全集
- *     （全条件在场 + graphAssembly → 37），顺序 append-only
+ *     （全条件在场 + graphAssembly + worktree host seams → 44），顺序 append-only
  *   - 空输入:env.web 全空(undefined)→ 直连不抛;sandboxRoot:"" → 不抛
  *   - 非法输入:proxy 非 http/https / 含凭据 → 装配期同步抛 ToolExecutionError
  *   - 溢出/边界:sandboxRoot 指向不存在路径 → 装配期不抛(执行期由 fs 工具越界逻辑拒绝)
@@ -28,7 +28,7 @@
  * skillCatalog / subagentManager / mcpManager 镜像过滤)。
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -43,6 +43,8 @@ import type { BackgroundTaskManager } from "../../../../src/harness/background/m
 import type { CreateTaskWorktreeProvisionFn } from "../../../../src/harness/aci/tools/create-task-worktree.js";
 import type { WorktreeEnterToolDeps } from "../../../../src/harness/aci/tools/enter-task-worktree.js";
 import type { WorktreeExitToolDeps } from "../../../../src/harness/aci/tools/exit-task-worktree.js";
+import type { ListTaskWorktreesToolDeps } from "../../../../src/harness/aci/tools/list-task-worktrees.js";
+import type { RemoveTaskWorktreeToolDeps } from "../../../../src/harness/aci/tools/remove-task-worktree.js";
 
 /** 合法最小 env(仅 web 字段;LLM 字段工厂不消费)。 */
 function makeWebEnv(
@@ -71,20 +73,25 @@ const fakeSubagentManager: SubAgentManager = {
   subscribe: () => () => {},
 };
 
-/** worktree isolation 三缝 fake —— 装配期断言 create-task-worktree /
- * enter-task-worktree / exit-task-worktree 在场。handler 路径不在本文件。 */
-const fakeWorktreeProvision = (async () => ({
-  taskId: "fake-task",
-  worktreePath: "/tmp/fake-worktree",
-  branchName: "fake/branch",
-})) as unknown as CreateTaskWorktreeProvisionFn;
-const fakeWorktreeEnter = (async () => ({
-  worktreePath: "/tmp/fake-worktree",
-  branchName: "fake/branch",
-})) as unknown as WorktreeEnterToolDeps["worktreeEnter"];
-const fakeWorktreeExit = (async () => ({
-  mainRepoRoot: "/tmp/fake-main",
-})) as unknown as WorktreeExitToolDeps["worktreeExit"];
+/** worktree isolation host fakes —— 仅断言条件化装配，handler 路径在
+ * tests/harness/aci/tools/worktree-lifecycle.test.ts。 */
+const fakeWorktreeProvision: CreateTaskWorktreeProvisionFn = async () =>
+  "/tmp/fake-worktree";
+const fakeWorktreeEnter: WorktreeEnterToolDeps["worktreeEnter"] = async () =>
+  "/tmp/fake-worktree";
+const fakeWorktreeExit: WorktreeExitToolDeps["worktreeExit"] = async () =>
+  "/tmp/fake-main";
+const fakeWorktreeList: ListTaskWorktreesToolDeps["worktreeList"] =
+  async () => [];
+const fakeWorktreeRemove: RemoveTaskWorktreeToolDeps["worktreeRemove"] =
+  async () => ({
+    label: undefined,
+    conversationId: "fake-conversation",
+    path: "/tmp/fake-worktree",
+    branch: "iknow/task-fake-conversation",
+    head: "fake-head",
+    branchDeleted: false,
+  });
 
 /** #440 T11 fake mcpManager（仅用于 createDefaultAciRegistry 装配期断言
  * list_mcp_resources / read_mcp_resource 在场；handler 路径单测在
@@ -115,9 +122,9 @@ const fakeBackgroundManager: BackgroundTaskManager = {
 describe("createDefaultAciRegistry — 正常路径", () => {
   // symbol-primary-aci T5 全条件装配：memoryDir + skillCatalog + subagentManager +
   // todoDir + mcpManager + backgroundManager + graphAssembly 同时在场 → list()
-  // 全量 = ACI_TOOLSET_NAMES 全长（T6 起 42 件），顺序 append-only。10 件 lsp_*
+  // 全量 = ACI_TOOLSET_NAMES 全长（task worktree lifecycle 后 44 件），顺序 append-only。10 件 lsp_*
   // 已退役（坐标面 → 符号面接班），lsp.ts 实现的 SSOT 不变。
-  it("memoryDir + skillCatalog + subagentManager + todoDir + mcpManager + backgroundManager + graphAssembly 同时在场 → list() 全量 42 件,顺序 append-only", () => {
+  it("memoryDir + skillCatalog + subagentManager + todoDir + mcpManager + backgroundManager + graphAssembly 同时在场 → list() 全量 44 件,顺序 append-only", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -135,6 +142,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
       worktreeProvision: fakeWorktreeProvision,
       worktreeEnter: fakeWorktreeEnter,
       worktreeExit: fakeWorktreeExit,
+      worktreeList: fakeWorktreeList,
+      worktreeRemove: fakeWorktreeRemove,
     });
     const names = reg.inner.list().map((def) => def.name);
     expect(names).toEqual([...EXPECTED_TOOLS]);
@@ -183,7 +192,9 @@ describe("createDefaultAciRegistry — 正常路径", () => {
           // worktreeExit host 缝皆缺席 → 3 件 worktree 工具缺席。
           n !== "create-task-worktree" &&
           n !== "enter-task-worktree" &&
-          n !== "exit-task-worktree"
+          n !== "exit-task-worktree" &&
+          n !== "list-task-worktrees" &&
+          n !== "remove-task-worktree"
       )
     );
     expect(reg.catalog.get("tool_search")).toBeDefined();
@@ -203,12 +214,12 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("bash_stop")).toBeUndefined();
   });
 
-  // symbol-primary-aci T5:ACI_TOOLSET_NAMES 长度 37
+  // task-worktree-lifecycle 后 ACI_TOOLSET_NAMES 长度 44
   // (T2+T4 末态 32 + 5 件 T4 符号改 - 10 件退役 lsp_*)。
   // append-only 纪律保留 23 件既有 + 末位 14 件符号面 / 改工具。
   // 旧 10 件 lsp_* 已退役（spec symbol-primary-aci.md §37-53 + SC2 + SC7）。
-  it("Gate 3:ACI_TOOLSET_NAMES 长度 42,前 8 原序 + memory_* + tool_search + skill + skill_search + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop + run_graph + query_trace + 10 符号查询 + 5 符号改 + worktree 3 件 + list_sessions + get_record", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(42);
+  it("Gate 3:ACI_TOOLSET_NAMES 长度 44,前 8 原序 + memory_* + tool_search + skill + skill_search + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop + run_graph + query_trace + 10 符号查询 + 5 符号改 + worktree 3 件 + list_sessions + get_record + list/remove worktree", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(44);
     // 前 8 件原序不变(append-only 纪律)。
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -283,6 +294,10 @@ describe("createDefaultAciRegistry — 正常路径", () => {
       "safe_delete_symbol",
       "list_sessions",
       "get_record",
+    ]);
+    expect(ACI_TOOLSET_NAMES.slice(42, 44)).toEqual([
+      "list-task-worktrees",
+      "remove-task-worktree",
     ]);
   });
 });
@@ -413,6 +428,8 @@ function expectedSurface(
     bg?: boolean;
     graph?: boolean;
     worktree?: boolean;
+    worktreeList?: boolean;
+    worktreeRemove?: boolean;
   } = {}
 ): readonly string[] {
   const conditionallyAbsent = [
@@ -429,6 +446,8 @@ function expectedSurface(
     ...(opts.worktree
       ? []
       : ["create-task-worktree", "enter-task-worktree", "exit-task-worktree"]),
+    ...(opts.worktreeList ? [] : ["list-task-worktrees"]),
+    ...(opts.worktreeRemove ? [] : ["remove-task-worktree"]),
   ];
   return [...ACI_TOOLSET_NAMES].filter(
     (n) => !conditionallyAbsent.includes(n) && !deny.includes(n)
@@ -543,6 +562,8 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       worktreeProvision: fakeWorktreeProvision,
       worktreeEnter: fakeWorktreeEnter,
       worktreeExit: fakeWorktreeExit,
+      worktreeList: fakeWorktreeList,
+      worktreeRemove: fakeWorktreeRemove,
     });
     const b = createDefaultAciRegistry({
       env: makeWebEnv(),
@@ -558,6 +579,8 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       worktreeProvision: fakeWorktreeProvision,
       worktreeEnter: fakeWorktreeEnter,
       worktreeExit: fakeWorktreeExit,
+      worktreeList: fakeWorktreeList,
+      worktreeRemove: fakeWorktreeRemove,
     });
     expect(a).not.toBe(b);
     expect(a.catalog).not.toBe(b.catalog);
@@ -565,6 +588,51 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
     // (通过 catalog 拿工具定义,不触发真实执行,仅验证 registry 节点独立)
     expect(a.catalog.all()).toHaveLength(EXPECTED_TOOLS.length);
     expect(b.catalog.all()).toHaveLength(EXPECTED_TOOLS.length);
+  });
+});
+
+describe("createDefaultAciRegistry — task worktree lifecycle seams", () => {
+  it("registers list and remove independently when only their host seams exist", () => {
+    const listOnly = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: "/tmp/root",
+      worktreeList: fakeWorktreeList,
+    });
+    const removeOnly = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: "/tmp/root",
+      worktreeRemove: fakeWorktreeRemove,
+    });
+
+    expect(listOnly.inner.list().map((tool) => tool.name)).toEqual(
+      expectedSurface([], { worktreeList: true })
+    );
+    expect(listOnly.catalog.get("list-task-worktrees")?.aci.category).toBe(
+      "read-only"
+    );
+    expect(listOnly.catalog.get("remove-task-worktree")).toBeUndefined();
+    expect(removeOnly.inner.list().map((tool) => tool.name)).toEqual(
+      expectedSurface([], { worktreeRemove: true })
+    );
+    expect(removeOnly.catalog.get("remove-task-worktree")?.aci.category).toBe(
+      "write"
+    );
+    expect(removeOnly.catalog.get("list-task-worktrees")).toBeUndefined();
+  });
+
+  it("does not register list/remove when only the legacy provision/enter/exit seams exist (OFF-adjacent host shape)", () => {
+    const reg = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: "/tmp/root",
+      worktreeProvision: fakeWorktreeProvision,
+      worktreeEnter: fakeWorktreeEnter,
+      worktreeExit: fakeWorktreeExit,
+    });
+    const names = reg.inner.list().map((tool) => tool.name);
+    expect(names).toEqual(expectedSurface([], { worktree: true }));
+    expect(reg.catalog.get("create-task-worktree")).toBeDefined();
+    expect(reg.catalog.get("list-task-worktrees")).toBeUndefined();
+    expect(reg.catalog.get("remove-task-worktree")).toBeUndefined();
   });
 });
 
@@ -620,10 +688,73 @@ describe("createDefaultAciRegistry — #440 T1 todoDir seam", () => {
       worktreeProvision: fakeWorktreeProvision,
       worktreeEnter: fakeWorktreeEnter,
       worktreeExit: fakeWorktreeExit,
+      worktreeList: fakeWorktreeList,
+      worktreeRemove: fakeWorktreeRemove,
     });
     // symbol-primary-aci T5 + #502 T4 全条件装配:6 个条件化 seam 全在场
     // → 25 件全装配(22 基线 + bash_output + bash_stop + run_graph)。
     // 旧 lsp_* 10 件已退役,符号面 10 + 5 + 5 符号改 = 15 件接班。
     expect(reg.inner.list().map((d) => d.name)).toEqual([...EXPECTED_TOOLS]);
+  });
+});
+
+describe("createDefaultAciRegistry — projectIdentityRoot wiring (grep / glob)", () => {
+  let scratch: string;
+
+  beforeEach(async () => {
+    scratch = await mkdtemp(join(tmpdir(), "aci-reg-identity-"));
+  });
+
+  afterEach(async () => {
+    await rm(scratch, { recursive: true, force: true });
+  });
+
+  it("ON wiring: with opts.projectIdentityRoot set and the engine root rebound to a task worktree, registry-assembled grep and glob reach the identity root", async () => {
+    const repo = join(scratch, "repo");
+    const task = join(repo, ".iknow", "worktrees", "fix-648--conv-1");
+    await mkdir(task, { recursive: true });
+    await writeFile(join(repo, "AGENTS.md"), "identity guidance\n", "utf8");
+
+    const reg = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: task,
+      projectIdentityRoot: repo,
+    });
+
+    const grep = reg.catalog.get("grep");
+    expect(grep).toBeDefined();
+    const grepOut = String(
+      await grep!.handler({ pattern: "identity guidance", path: repo })
+    );
+    expect(grepOut).toMatch(/AGENTS\.md:1:identity guidance/);
+
+    const glob = reg.catalog.get("glob");
+    expect(glob).toBeDefined();
+    const globOut = String(
+      await glob!.handler({ pattern: "AGENTS.md", path: repo })
+    );
+    expect(globOut).toMatch(/AGENTS\.md/);
+  });
+
+  it("OFF wiring: without opts.projectIdentityRoot the registry-assembled grep and glob stay fenced to the engine root and cannot escape to an identity root", async () => {
+    const repo = join(scratch, "repo");
+    const identity = join(scratch, "identity");
+    await mkdir(repo, { recursive: true });
+    await mkdir(identity, { recursive: true });
+    await writeFile(join(identity, "AGENTS.md"), "identity guidance\n", "utf8");
+
+    const reg = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: repo,
+    });
+
+    const grep = reg.catalog.get("grep");
+    const glob = reg.catalog.get("glob");
+    await expect(
+      grep!.handler({ pattern: "identity guidance", path: identity })
+    ).rejects.toThrow(/path outside workspace/);
+    await expect(
+      glob!.handler({ pattern: "AGENTS.md", path: identity })
+    ).rejects.toThrow(/path outside workspace/);
   });
 });

@@ -778,17 +778,11 @@ export async function buildHarnessEngine(
     // 不走这条缝，仍由各工厂按 opts 接各自的稳定根。
     liveTaskRoot,
     // T3:只读放行项目身份文件所在的主仓（ADR-0037 §1 允许只读主仓）。registry
-    // 只把它透给 read_file —— bash / write / edit 拿不到，写不进主仓。
-    //
-    // 只在**隔离开且已改绑**时放行（review round 3/4）：这条放行是本分支新增
-    // 的，"今日"是**不放行**，所以开关 OFF 必须一条都不给（硬要求 5）。门必须
-    // 同时看 `isolationEnabled` —— `taskWorktreeOwnerOf` 只是路径形状判断，
-    // 单靠它会让一个恰好长得像 `<X>/.iknow/worktrees/<name>` 的 cwd 在隔离
-    // 关闭时就拿到沙箱外的读放行。与 T7/T8 缝同一个判定源。
-    ...(isolationEnabled &&
-    taskWorktreeOwnerOf(sessionRoots.taskRoot) !== undefined
-      ? { projectIdentityRoot }
-      : {}),
+    // 只把它透给 read_file / grep / glob —— bash / write / edit 拿不到，写不进
+    // 主仓。ON 档即便初始根仍是主仓也要把稳定身份根交给这些工厂；它们按
+    // handler 调用时的 live taskRoot 再判定 task-worktree 形状，因此同一 run
+    // 的下一波也能看到 rebind，而 OFF 档完全不传这条根。
+    ...(isolationEnabled ? { projectIdentityRoot } : {}),
     // D-α T3:run_graph 条件化装配 —— 需要 overlay(graphAssembly)与编排
     // 底座(subagentManager)同时在场;registry 内部同门再判一次。
     ...(graphAssembly ? { graphAssembly } : {}),
@@ -841,6 +835,14 @@ export async function buildHarnessEngine(
           // T8:exit 缝在场时透传（同一 isolationEnabled 判定源）；缺席 →
           // exit-task-worktree 不入注册表。
           ...(wrappedExit ? { worktreeExit: wrappedExit } : {}),
+          // task-worktree-lifecycle: discovery and explicit removal are
+          // host-only seams; they do not change the live root themselves.
+          ...(isolationHost.worktreeList
+            ? { worktreeList: isolationHost.worktreeList }
+            : {}),
+          ...(isolationHost.worktreeRemove
+            ? { worktreeRemove: isolationHost.worktreeRemove }
+            : {}),
         }
       : {}),
   });
