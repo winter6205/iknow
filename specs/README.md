@@ -38,6 +38,7 @@
 - `302-lsp-multilang.md` — LSP 多语言泛化
 - `337-skill-mcp-extension.md` — skill + MCP 扩展源
 - `406-secret-roundtrip-mask.md` — Secret roundtrip mask（supersedes `#126` hook-system）
+- `task-worktree-lifecycle.md` — 隔离 ON 后进树/命名/list/remove 与身份根 grep·glob；plan: `plans/task-worktree-lifecycle.md`（amend ADR-0037 §3，不改门禁）
 
 ### 身份与记忆
 

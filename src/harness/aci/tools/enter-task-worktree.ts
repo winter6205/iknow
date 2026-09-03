@@ -6,9 +6,9 @@
  * tool-surface extension): when worktree isolation is ON, a session anchored
  * at the MAIN repo can adopt an EXISTING task worktree of THIS repository —
  * including the tree another conversation owns — by passing the owner's
- * conversationId. The target path is SSOT-derived
- * (`<repoRoot>/.iknow/worktrees/<conversationId>`); the tool NEVER takes a
- * free-form path.
+ * conversationId or a unique label returned by list-task-worktrees. The target
+ * path is SSOT-derived (`<repoRoot>/.iknow/worktrees/<label>--<conversationId>`
+ * or the historical UUID-only leaf); the tool NEVER takes a free-form path.
  *
  * Module boundary (ACR bounded-context-guardian):
  *   - the tool owns NOTHING but the model-facing shape: input validation
@@ -25,8 +25,8 @@
  * anchor (worktree-rebind.ts T7 branch).
  *
  * Failure semantics (fail-closed, hard req 6): the host seam exits typed
- * (`worktree_not_found` / `foreign_worktree` / `rebind_failed` /
- * `git_unavailable`); the tool rethrows as a `ToolExecutionError` carrying
+ * (`worktree_not_found` / `ambiguous_worktree` / `foreign_worktree` /
+ * `rebind_failed` / `git_unavailable`); the tool rethrows as a `ToolExecutionError` carrying
  * `kind=<kind>` — visible, typed, model-actionable, zero tool-side writes.
  *
  * Idempotency: re-entering the same target returns the same path (host
@@ -35,6 +35,7 @@
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError, errorMessage } from "../../errors.js";
+import type { LiveTaskRoot } from "../../session-roots.js";
 import type { WorktreeEnterFn } from "../../isolation/worktree-gate.js";
 import {
   SAFE_CONVERSATION_ID_RE,
@@ -45,7 +46,7 @@ export interface WorktreeEnterToolDeps {
   /** Host enter seam (session-api hub, threaded through build-engine). */
   readonly worktreeEnter: WorktreeEnterFn;
   /** This engine's root — the caller's current (main-repo) root. */
-  readonly root: string;
+  readonly root: string | LiveTaskRoot;
 }
 
 /**
@@ -63,11 +64,12 @@ export function createEnterTaskWorktreeTool(
     description:
       "Enter an existing git task worktree of this repository and rebind this session's root to it. " +
       "Use it when worktree isolation is ON and the work you need continues in a task worktree that already " +
-      "exists — for example the tree another conversation created: pass that conversation's id as " +
-      "conversationId and the target resolves to <repoRoot>/.iknow/worktrees/<conversationId>. " +
+      "exists — for example the tree another conversation created: pass that conversation's id or the unique " +
+      "label returned by list-task-worktrees; target resolution uses the repository's task-worktree naming " +
+      "SSOT instead of a free-form path. " +
       "On success the session root moves to the entered tree; re-issue pending workspace writes there in " +
       "the next wave of tool calls in this run. Calling it again for the same target returns the same path (idempotent). " +
-      "Failures exit typed as kind=worktree_not_found | foreign_worktree | rebind_failed | git_unavailable; " +
+      "Failures exit typed as kind=worktree_not_found | ambiguous_worktree | foreign_worktree | rebind_failed | git_unavailable; " +
       "resolve the reported condition (wrong id, tree in another repository, or leftover state), then retry. " +
       "The entered tree stays untouched; exit-task-worktree returns this session to the main repo root.",
     inputSchema: {
@@ -76,8 +78,7 @@ export function createEnterTaskWorktreeTool(
         conversationId: {
           type: "string",
           description:
-            "Conversation id that owns the task worktree to enter (the tree lives at " +
-            "<repoRoot>/.iknow/worktrees/<conversationId>).",
+            "Conversation id or the unique task-worktree label returned by list-task-worktrees.",
           minLength: 1,
         },
       },
@@ -107,9 +108,11 @@ export function createEnterTaskWorktreeTool(
         );
       }
       try {
+        const root =
+          typeof deps.root === "string" ? deps.root : deps.root.read();
         const worktreePath = await deps.worktreeEnter({
           conversationId,
-          root: deps.root,
+          root,
           targetConversationId: target,
         });
         return (

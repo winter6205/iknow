@@ -15,7 +15,7 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { readdir, mkdir } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -25,7 +25,12 @@ import {
 } from "../../src/session-api/store/index.ts";
 import type { SessionFileV1 } from "../../src/session-api/store/index.ts";
 import { createTaskWorktreeProvisioner } from "../../src/session-api/worktree-rebind.ts";
-import { WorktreeIsolationError } from "../../src/harness/isolation/worktree-gate.ts";
+import {
+  mainCheckoutOf,
+  taskWorktreeBranch,
+  taskWorktreeOwnerOf,
+  WorktreeIsolationError,
+} from "../../src/harness/isolation/worktree-gate.ts";
 
 // -- helpers -----------------------------------------------------------------
 
@@ -388,5 +393,364 @@ describe("createTaskWorktreeProvisioner", () => {
     });
     const file = await store.load("conv-a");
     expect(file.workspaceRoot).toBe(repo);
+  });
+
+  it("creates a labeled worktree and keeps the conversation id as the ownership suffix", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, ["conv-a"]);
+    const prov = createTaskWorktreeProvisioner({ store });
+
+    const root = await prov.provision({
+      conversationId: "conv-a",
+      root: repo,
+      name: "fix-648",
+    });
+
+    expect(root).toBe(join(repo, ".iknow", "worktrees", "fix-648--conv-a"));
+    expect(taskWorktreeOwnerOf(root)).toBe("conv-a");
+    expect(mainCheckoutOf(root)).toBe(repo);
+    expect(git(root, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
+      taskWorktreeBranch("conv-a", "fix-648")
+    );
+  });
+
+  it("discards empty, unsafe, and overlong labels without rejecting the provision", async () => {
+    const repo = makeGitRepo();
+    const names = ["", "a/b", "Bad-name", "bad--name", "x".repeat(41)];
+    const ids = names.map((_, index) => `invalid-${index}`);
+    const { store } = await makeStoreWithSessions(repo, ids);
+    const prov = createTaskWorktreeProvisioner({ store });
+
+    for (const [index, name] of names.entries()) {
+      const id = ids[index]!;
+      const root = await prov.provision({
+        conversationId: id,
+        root: repo,
+        name,
+      });
+      expect(root).toBe(join(repo, ".iknow", "worktrees", id));
+      expect(taskWorktreeOwnerOf(root)).toBe(id);
+      expect(root).not.toContain("--");
+    }
+  });
+
+  it("coalesces concurrent first provisions and runs git worktree add once", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, ["conv-a"]);
+    const baseRunner = (
+      await import("../../src/harness/isolation/worktree-gate.ts")
+    ).defaultGitRunner;
+    let addRuns = 0;
+    const runGit = async (args: readonly string[], cwd: string) => {
+      if (args[0] === "worktree" && args[1] === "add") {
+        addRuns += 1;
+        await Promise.resolve();
+      }
+      return baseRunner(args, cwd);
+    };
+    const prov = createTaskWorktreeProvisioner({ store, runGit });
+
+    const [first, second] = await Promise.all([
+      prov.provision({
+        conversationId: "conv-a",
+        root: repo,
+        name: "fix-648",
+      }),
+      prov.provision({
+        conversationId: "conv-a",
+        root: repo,
+        name: "fix-648",
+      }),
+    ]);
+
+    expect(first).toBe(second);
+    expect(addRuns).toBe(1);
+  });
+
+  it("reports active labeled trees and stale task branches without changing git", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, ["conv-a"]);
+    const prov = createTaskWorktreeProvisioner({ store });
+    const active = await prov.provision({
+      conversationId: "conv-a",
+      root: repo,
+      name: "fix-648",
+    });
+    git(repo, "branch", "iknow/task-stale");
+
+    const activeEntries = await prov.list({ root: repo });
+    expect(activeEntries).toEqual([
+      {
+        label: "fix-648",
+        conversationId: "conv-a",
+        path: active,
+        branch: "iknow/task/fix-648-conv-a",
+        head: git(active, "rev-parse", "HEAD").trim(),
+        dirty: false,
+      },
+    ]);
+
+    const withStale = await prov.list({ root: repo, includeStale: true });
+    expect(withStale).toHaveLength(2);
+    expect(withStale.find((entry) => entry.stale)).toMatchObject({
+      conversationId: "stale",
+      path: "",
+      branch: "iknow/task-stale",
+      stale: true,
+    });
+  });
+
+  it("enters a unique label and rejects an ambiguous label with both owners", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, [
+      "conv-a",
+      "conv-b",
+      "conv-c",
+    ]);
+    const prov = createTaskWorktreeProvisioner({ store });
+    const first = await prov.provision({
+      conversationId: "conv-a",
+      root: repo,
+      name: "fix-648",
+    });
+    const second = await prov.provision({
+      conversationId: "conv-b",
+      root: repo,
+      name: "review",
+    });
+
+    const entered = await prov.enter({
+      conversationId: "conv-c",
+      root: repo,
+      targetConversationId: "fix-648",
+    });
+    expect(entered).toBe(first);
+    expect((await store.load("conv-c")).workspaceRoot).toBe(first);
+
+    const ambiguousRepo = makeGitRepo();
+    const { store: ambiguousStore } = await makeStoreWithSessions(
+      ambiguousRepo,
+      ["conv-a", "conv-b", "conv-c"]
+    );
+    const ambiguous = createTaskWorktreeProvisioner({
+      store: ambiguousStore,
+    });
+    await ambiguous.provision({
+      conversationId: "conv-a",
+      root: ambiguousRepo,
+      name: "same",
+    });
+    await ambiguous.provision({
+      conversationId: "conv-b",
+      root: ambiguousRepo,
+      name: "same",
+    });
+
+    await expect(
+      ambiguous.enter({
+        conversationId: "conv-c",
+        root: ambiguousRepo,
+        targetConversationId: "same",
+      })
+    ).rejects.toMatchObject({
+      kind: "ambiguous_worktree",
+      message: expect.stringContaining("conv-a"),
+    });
+    await expect(
+      ambiguous.enter({
+        conversationId: "conv-c",
+        root: ambiguousRepo,
+        targetConversationId: "same",
+      })
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("conv-b"),
+    });
+    expect(second).toContain("review--conv-b");
+  });
+
+  it("rejects unsafe label branch collisions instead of extending the branch name", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, [
+      "12345678-a",
+      "12345678-b",
+    ]);
+    const prov = createTaskWorktreeProvisioner({ store });
+    await prov.provision({
+      conversationId: "12345678-a",
+      root: repo,
+      name: "fix-648",
+    });
+
+    await expect(
+      prov.provision({
+        conversationId: "12345678-b",
+        root: repo,
+        name: "fix-648",
+      })
+    ).rejects.toMatchObject({ kind: "branch_exists" });
+    expect(
+      existsSync(join(repo, ".iknow", "worktrees", "fix-648--12345678-b"))
+    ).toBe(false);
+  });
+
+  it("removes only safe clean trees, preserves branches by default, and blocks dirty or unpublished trees", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, [
+      "conv-clean",
+      "conv-dirty",
+      "conv-unpublished",
+      "conv-default",
+    ]);
+    const prov = createTaskWorktreeProvisioner({ store });
+    const clean = await prov.provision({
+      conversationId: "conv-clean",
+      root: repo,
+      name: "fix-648",
+    });
+    const dirty = await prov.provision({
+      conversationId: "conv-dirty",
+      root: repo,
+    });
+    const unpublished = await prov.provision({
+      conversationId: "conv-unpublished",
+      root: repo,
+    });
+    const defaultRemoval = await prov.provision({
+      conversationId: "conv-default",
+      root: repo,
+    });
+    await writeFile(join(dirty, "dirty.txt"), "uncommitted\n", "utf8");
+    await writeFile(join(unpublished, "committed.txt"), "committed\n", "utf8");
+    git(unpublished, "add", "committed.txt");
+    git(
+      unpublished,
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "-qm",
+      "task work"
+    );
+
+    await expect(
+      prov.remove({
+        root: clean,
+        targetConversationId: "fix-648",
+      })
+    ).rejects.toMatchObject({ kind: "current_worktree" });
+    await expect(
+      prov.remove({
+        root: repo,
+        targetConversationId: "conv-dirty",
+      })
+    ).rejects.toMatchObject({ kind: "worktree_dirty" });
+    await expect(
+      prov.remove({
+        root: repo,
+        targetConversationId: "conv-unpublished",
+      })
+    ).rejects.toMatchObject({ kind: "unpublished_commits" });
+
+    const receipt = await prov.remove({
+      root: repo,
+      targetConversationId: "fix-648",
+      deleteBranch: true,
+    });
+    expect(receipt).toMatchObject({
+      label: "fix-648",
+      conversationId: "conv-clean",
+      path: clean,
+      branchDeleted: true,
+    });
+    expect(existsSync(clean)).toBe(false);
+    expect(git(repo, "branch", "--list", receipt.branch)).toBe("");
+
+    const defaultReceipt = await prov.remove({
+      root: repo,
+      targetConversationId: "conv-default",
+    });
+    expect(defaultReceipt.branchDeleted).toBe(false);
+    expect(git(repo, "branch", "--list", defaultReceipt.branch)).toContain(
+      defaultReceipt.branch
+    );
+  });
+
+  it("copies only matching ignored files from worktreeinclude after creating the tree", async () => {
+    const repo = makeGitRepo();
+    await writeFile(join(repo, ".gitignore"), ".env\n", "utf8");
+    git(repo, "add", ".gitignore");
+    git(
+      repo,
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "-qm",
+      "ignore env"
+    );
+    await writeFile(join(repo, ".env"), "TOKEN=secret\n", "utf8");
+    await mkdir(join(repo, ".iknow"), { recursive: true });
+    await writeFile(
+      join(repo, ".iknow", "worktreeinclude"),
+      ".env\nnot-ignored.txt\n",
+      "utf8"
+    );
+    await writeFile(join(repo, "not-ignored.txt"), "do not copy\n", "utf8");
+
+    const { store } = await makeStoreWithSessions(repo, ["conv-a"]);
+    const prov = createTaskWorktreeProvisioner({
+      store,
+      projectIdentityRoot: repo,
+    });
+    const worktree = await prov.provision({
+      conversationId: "conv-a",
+      root: repo,
+    });
+
+    expect(await readFile(join(worktree, ".env"), "utf8")).toBe(
+      "TOKEN=secret\n"
+    );
+    expect(existsSync(join(worktree, "not-ignored.txt"))).toBe(false);
+  });
+
+  // Review Medium: a leading `/` anchors the pattern to the include root.
+  // Before the fix, `/.env` was stripped to `env`-anywhere matching, so a
+  // nested `sub/.env` was mirrored into the new tree as well.
+  it("anchors a leading-/ include pattern to the include root (sub/.env not copied)", async () => {
+    const repo = makeGitRepo();
+    await writeFile(join(repo, ".gitignore"), ".env\n", "utf8");
+    git(repo, "add", ".gitignore");
+    git(
+      repo,
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "-qm",
+      "ignore env"
+    );
+    await writeFile(join(repo, ".env"), "ROOT_TOKEN=secret\n", "utf8");
+    await mkdir(join(repo, "sub"), { recursive: true });
+    await writeFile(join(repo, "sub", ".env"), "SUB_TOKEN=leak\n", "utf8");
+    await mkdir(join(repo, ".iknow"), { recursive: true });
+    await writeFile(join(repo, ".iknow", "worktreeinclude"), "/.env\n", "utf8");
+
+    const { store } = await makeStoreWithSessions(repo, ["conv-anchor"]);
+    const prov = createTaskWorktreeProvisioner({
+      store,
+      projectIdentityRoot: repo,
+    });
+    const worktree = await prov.provision({
+      conversationId: "conv-anchor",
+      root: repo,
+    });
+
+    expect(await readFile(join(worktree, ".env"), "utf8")).toBe(
+      "ROOT_TOKEN=secret\n"
+    );
+    expect(existsSync(join(worktree, "sub", ".env"))).toBe(false);
   });
 });

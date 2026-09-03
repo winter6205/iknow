@@ -73,7 +73,12 @@ import {
   mainCheckoutOf,
   type TaskWorktreeProvisioner,
 } from "./worktree-rebind.js";
-import type { WorktreeProvisionContext } from "../harness/isolation/worktree-gate.js";
+import type {
+  TaskWorktreeInfo,
+  WorktreeProvisionContext,
+  WorktreeRemoval,
+  WorktreeRemoveContext,
+} from "../harness/isolation/worktree-gate.js";
 import type { AskUser } from "../harness/permission/types.js";
 import type {
   ServeAskUserHandle,
@@ -899,7 +904,11 @@ export class SessionHub {
     // 都由 provision 按会话锚定，hub 不传 conversation-agnostic 标记。
     // Root persistence belongs to this Hub's dirty-root conditional-save
     // protocol. The provisioner only creates/returns the task worktree here.
-    this.worktreeProvisioner = createTaskWorktreeProvisioner({});
+    this.worktreeProvisioner = createTaskWorktreeProvisioner({
+      ...(this.projectIdentityRoot !== undefined
+        ? { projectIdentityRoot: this.projectIdentityRoot }
+        : {}),
+    });
   }
 
   // -- public API --------------------------------------------------------------
@@ -1007,6 +1016,21 @@ export class SessionHub {
       });
     }
     return repoRoot;
+  }
+
+  /** Hub-visible read seam for listing this repository's task worktrees. */
+  async listTaskWorktrees(ctx: {
+    root: string;
+    includeStale?: boolean;
+  }): Promise<ReadonlyArray<TaskWorktreeInfo>> {
+    return this.worktreeProvisioner.list(ctx);
+  }
+
+  /** Hub-visible write seam for explicit task-worktree removal. */
+  async removeTaskWorktree(
+    ctx: WorktreeRemoveContext
+  ): Promise<WorktreeRemoval> {
+    return this.worktreeProvisioner.remove(ctx);
   }
 
   private markWorktreeRootDirty(opts: {
@@ -2812,8 +2836,8 @@ export class SessionHub {
       // worktree 时由 provision 幂等放行（返回同根），别会话的树 / 无关
       // worktree 由 provision fail-closed（typed foreign_worktree）。
       worktreeIsolation: {
-        provision: ({ conversationId, root: sessionRoot }) =>
-          this.provisionWorktree({ conversationId, root: sessionRoot }),
+        provision: ({ conversationId, root: sessionRoot, name }) =>
+          this.provisionWorktree({ conversationId, root: sessionRoot, name }),
         // T7:enter-task-worktree 工具缝 —— 会话显式进入本仓已存在的 task
         // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
         worktreeEnter: ({
@@ -2829,6 +2853,14 @@ export class SessionHub {
         // T8:exit-task-worktree 工具缝 —— 会话回到主仓根，树保留不删。
         worktreeExit: ({ conversationId, root: sessionRoot }) =>
           this.exitWorktree({ conversationId, root: sessionRoot }),
+        // task-worktree-lifecycle: read-only discovery and explicit cleanup
+        // use the same host/provisioner SSOT and remain outside ROOT_FLIP.
+        worktreeList: ({ root: sessionRoot, includeStale }) =>
+          this.listTaskWorktrees({
+            root: sessionRoot,
+            ...(includeStale === true ? { includeStale: true } : {}),
+          }),
+        worktreeRemove: (request) => this.removeTaskWorktree(request),
       },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
@@ -2924,8 +2956,8 @@ export class SessionHub {
       // 的会话在 rebind 后下一回合走 per-root 引擎路径）。T4:同上——
       // passthrough 由 provision 按会话锚定，不设 initiallyBound。
       worktreeIsolation: {
-        provision: ({ conversationId, root: sessionRoot }) =>
-          this.provisionWorktree({ conversationId, root: sessionRoot }),
+        provision: ({ conversationId, root: sessionRoot, name }) =>
+          this.provisionWorktree({ conversationId, root: sessionRoot, name }),
         // T7:enter-task-worktree 工具缝 —— 会话显式进入本仓已存在的 task
         // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
         worktreeEnter: ({
@@ -2941,6 +2973,13 @@ export class SessionHub {
         // T8:exit-task-worktree 工具缝 —— 会话回到主仓根，树保留不删。
         worktreeExit: ({ conversationId, root: sessionRoot }) =>
           this.exitWorktree({ conversationId, root: sessionRoot }),
+        // task-worktree-lifecycle: read-only discovery and explicit cleanup.
+        worktreeList: ({ root: sessionRoot, includeStale }) =>
+          this.listTaskWorktrees({
+            root: sessionRoot,
+            ...(includeStale === true ? { includeStale: true } : {}),
+          }),
+        worktreeRemove: (request) => this.removeTaskWorktree(request),
       },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),

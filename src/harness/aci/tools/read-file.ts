@@ -13,9 +13,10 @@
 
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
+import { taskWorktreeOwnerOf } from "../../isolation/worktree-gate.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import type { AciToolDef } from "../types.js";
 import { resolveWithinRoot } from "./helpers.js";
@@ -57,6 +58,13 @@ export interface CreateReadFileToolOptions {
    *  the live root). Absent or equal to the live root → no extra entry
    *  (the root itself already covers it). */
   readonly projectIdentityRoot?: string;
+  /**
+   * Dynamic authorization for the identity-root passthrough. Production sets
+   * this when isolation is ON; the handler then requires the live root to be a
+   * task worktree, so a same-run rebind can open the read path without
+   * widening the OFF/main-root surface.
+   */
+  readonly allowProjectIdentityRoot?: boolean;
 }
 
 /** `~/.iknow/` — the agent's own profile directory (readUserProfile in the
@@ -150,15 +158,17 @@ export function createReadFileTool(
       const params = parseInput(input);
       // T6 D9: same wave snapshot — root and extras share the snapshot.
       const rootAtCall = readRoot(root);
+      const projectIdentityRoot = resolveProjectIdentityRoot(rootAtCall, opts);
       const extraReadRoots = computeExtraReadRoots(
         rootAtCall,
         opts?.workspaceRoot,
-        opts?.projectIdentityRoot
+        projectIdentityRoot
       );
-      const resolved = await resolveWithinRoot(
+      const resolved = await resolveReadTarget(
         rootAtCall,
         params.path,
-        extraReadRoots
+        extraReadRoots,
+        projectIdentityRoot
       );
       let info;
       try {
@@ -191,6 +201,57 @@ export function createReadFileTool(
       return sliceLines(text, params.offset, params.limit);
     },
   });
+}
+
+function resolveProjectIdentityRoot(
+  root: string,
+  opts: CreateReadFileToolOptions | undefined
+): string | undefined {
+  const projectIdentityRoot = opts?.projectIdentityRoot;
+  if (projectIdentityRoot === undefined) return undefined;
+  if (
+    opts?.allowProjectIdentityRoot === true &&
+    taskWorktreeOwnerOf(root) === undefined
+  ) {
+    return undefined;
+  }
+  if (opts?.allowProjectIdentityRoot === false) return undefined;
+  return projectIdentityRoot;
+}
+
+/**
+ * Relative paths normally resolve against the live task root. If that root is
+ * a freshly-created bare worktree and the requested project identity file is
+ * absent there, try the explicitly supplied extra read roots as a
+ * convenience. Absolute paths continue to use the shared containment helper
+ * directly.
+ */
+async function resolveReadTarget(
+  root: string,
+  target: string,
+  extraReadRoots: readonly string[],
+  projectIdentityRoot: string | undefined
+): Promise<string> {
+  const primary = await resolveWithinRoot(root, target, extraReadRoots);
+  if (
+    projectIdentityRoot === undefined ||
+    extraReadRoots.length === 0 ||
+    isAbsolute(target)
+  ) {
+    return primary;
+  }
+  try {
+    await stat(primary);
+    return primary;
+  } catch {
+    const candidate = await resolveWithinRoot(projectIdentityRoot, target);
+    try {
+      await stat(candidate);
+      return candidate;
+    } catch {
+      return primary;
+    }
+  }
 }
 
 interface ParsedInput {

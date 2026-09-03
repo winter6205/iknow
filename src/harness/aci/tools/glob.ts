@@ -18,10 +18,11 @@
  * substring" which `*` / `**` / `?` covers.
  */
 
-import { readdir, realpath } from "node:fs/promises";
-import { relative, sep } from "node:path";
+import { readdir, realpath, stat } from "node:fs/promises";
+import { isAbsolute, relative, sep } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
+import { taskWorktreeOwnerOf } from "../../isolation/worktree-gate.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import { resolveWithinRoot, spawnWithStopSignal } from "./helpers.js";
 import type { AciToolDef } from "../types.js";
@@ -49,6 +50,17 @@ export interface GlobToolDeps {
     args: readonly string[],
     cwd: string
   ) => Promise<{ stdout: string; stderr: string }>;
+  /**
+   * Stable project identity root. When present, absolute paths (and relative
+   * paths missing from the live task root) may be searched read-only there.
+   */
+  readonly projectIdentityRoot?: string;
+  /**
+   * Registry seam for the isolation switch. Direct tool callers default to
+   * deriving the main checkout from a task-worktree-shaped root; production
+   * OFF assembly sets this false to preserve the historical read boundary.
+   */
+  readonly allowProjectIdentityRoot?: boolean;
 }
 
 /**
@@ -106,9 +118,14 @@ export function createGlobTool(
       // 路径(resolve → realpath → rg/fallback)。handler 内后续 cell 翻转
       // 不渗透进本次调用。cell 缺席 → 退到工厂捕获 root(legacy parity)。
       const rootAtCall = readRoot(root);
+      const projectIdentityRoot = resolveProjectIdentityRoot(rootAtCall, deps);
 
       // 1. Resolve + contain the search root. Throws on escape.
-      const searchRoot = await resolveWithinRoot(rootAtCall, subPath ?? ".");
+      const searchRoot = await resolveSearchRoot(
+        rootAtCall,
+        subPath ?? ".",
+        projectIdentityRoot
+      );
 
       // 2. Resolve real paths so rg-internal symlinks don't desync us.
       const realRoot = await realpath(rootAtCall);
@@ -144,6 +161,68 @@ export function createGlobTool(
       return trimmed.length === 0 ? EMPTY_RESULT : trimmed.join("\n");
     },
   };
+}
+
+/**
+ * Identity-root read passthrough, gated to mirror `read-file.ts` so the
+ * three read-only tools widen by the same trigger.
+ *
+ * - Explicit `projectIdentityRoot` threaded: returns it iff
+ *   `allowProjectIdentityRoot` is `true` AND the live root is already a
+ *   task worktree (post-rebind); `allowProjectIdentityRoot === false` is
+ *   a hard deny. Threading an explicit root without a rebind is the
+ *   "OFF assembly / pre-rebind main checkout" surface and returns
+ *   `undefined` so the live-root fence stays intact.
+ * - No explicit `projectIdentityRoot`: returns `undefined`. There is no
+ *   shape-based fallback to a derived main checkout — OFF assembly must get
+ *   no extra read root (spec SC4: byte-identical to the historical read
+ *   boundary) and worker assembly must not widen its tool surface (spec
+ *   clause 14) merely because the root path looks task-worktree-shaped.
+ */
+function resolveProjectIdentityRoot(
+  root: string,
+  deps: GlobToolDeps | undefined
+): string | undefined {
+  const projectIdentityRoot = deps?.projectIdentityRoot;
+  if (projectIdentityRoot === undefined) return undefined;
+  if (
+    deps?.allowProjectIdentityRoot === true &&
+    taskWorktreeOwnerOf(root) === undefined
+  ) {
+    return undefined;
+  }
+  if (deps?.allowProjectIdentityRoot === false) return undefined;
+  return projectIdentityRoot;
+}
+
+/**
+ * Keep the normal task-root interpretation first, while making the stable
+ * identity root convenient for a relative project directory after a rebind.
+ */
+async function resolveSearchRoot(
+  workspaceRoot: string,
+  target: string,
+  projectIdentityRoot: string | undefined
+): Promise<string> {
+  const extraRoots =
+    projectIdentityRoot === undefined ? undefined : [projectIdentityRoot];
+  const primary = await resolveWithinRoot(workspaceRoot, target, extraRoots);
+  if (projectIdentityRoot === undefined || isAbsolute(target)) return primary;
+  try {
+    await stat(primary);
+    return primary;
+  } catch {
+    const identityCandidate = await resolveWithinRoot(
+      projectIdentityRoot,
+      target
+    );
+    try {
+      await stat(identityCandidate);
+      return identityCandidate;
+    } catch {
+      return primary;
+    }
+  }
 }
 
 /* -------------------------------------------------------------------------- */

@@ -33,7 +33,7 @@
  */
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { errorMessage } from "../errors.js";
 import { validateReadonlyCommand } from "../aci/tools/bash-readonly.js";
 import { FILE_WRITE_TOOL_NAMES } from "../aci/tools/symbol-mutate.js";
@@ -105,7 +105,15 @@ export type WorktreeIsolationErrorKind =
    * Distinct from `foreign_worktree` so the model can tell "wrong id / tree
    * never created" apart from "tree exists but belongs elsewhere".
    */
-  | "worktree_not_found";
+  | "worktree_not_found"
+  | "ambiguous_worktree"
+  | "worktree_list_failed"
+  | "worktree_status_failed"
+  | "worktree_dirty"
+  | "unpublished_commits"
+  | "current_worktree"
+  | "worktree_remove_failed"
+  | "branch_delete_failed";
 
 /**
  * Typed, non-empty, visible error for every gate failure. Mirrors the
@@ -228,10 +236,18 @@ export async function createTaskWorktree(
     );
   }
 
-  const branchProbe = await runGit(
-    ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`],
-    repoRoot
-  );
+  let branchProbe: GitResult;
+  try {
+    branchProbe = await runGit(
+      ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`],
+      repoRoot
+    );
+  } catch (err) {
+    throw new WorktreeIsolationError(
+      "git_unavailable",
+      `git is not available (spawn failed): ${errorMessage(err)}`
+    );
+  }
   if (branchProbe.code === 0) {
     throw new WorktreeIsolationError(
       "branch_exists",
@@ -246,10 +262,18 @@ export async function createTaskWorktree(
     );
   }
 
-  const add = await runGit(
-    ["worktree", "add", "-b", branch, worktreePath],
-    repoRoot
-  );
+  let add: GitResult;
+  try {
+    add = await runGit(
+      ["worktree", "add", "-b", branch, worktreePath],
+      repoRoot
+    );
+  } catch (err) {
+    throw new WorktreeIsolationError(
+      "git_unavailable",
+      `git is not available (spawn failed): ${errorMessage(err)}`
+    );
+  }
   if (add.code !== 0) {
     throw new WorktreeIsolationError(
       "worktree_add_failed",
@@ -334,27 +358,111 @@ export function classifyCall(call: ToolCall): MutateClass {
   return "read";
 }
 
-// -- task worktree path shape -----------------------------------------------------
+// -- task worktree naming and path shape -----------------------------------------
 
 /**
- * Ownership anchor for the deterministic task-worktree naming
- * (`<any>/.iknow/worktrees/<conversationId>`, session-api provisioner SSOT):
- * returns the owning conversationId when `root` IS a task-worktree path,
- * undefined otherwise.
+ * Human-facing task-worktree labels are deliberately narrower than
+ * conversation ids. The `--` separator is reserved for the identity suffix,
+ * so a valid label can be inverted from a leaf without a registry.
+ */
+export const SAFE_WORKTREE_SLUG_RE =
+  /^(?=.{2,40}$)(?!.*--)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+
+export interface TaskWorktreeLabelResolution {
+  readonly label: string | undefined;
+  readonly reason?: string;
+}
+
+/**
+ * Resolve a model-supplied label once for all path/branch consumers.
+ * Invalid values intentionally fall back to the historical UUID-only shape.
+ */
+export function resolveTaskWorktreeLabel(
+  name: unknown
+): TaskWorktreeLabelResolution {
+  if (name === undefined) return { label: undefined };
+  if (typeof name !== "string") {
+    return {
+      label: undefined,
+      reason: "name must be a string",
+    };
+  }
+  if (name.length > 40) {
+    return {
+      label: undefined,
+      reason: "name exceeds the maximum length of 40 characters",
+    };
+  }
+  if (!SAFE_WORKTREE_SLUG_RE.test(name)) {
+    return {
+      label: undefined,
+      reason:
+        "name must be lowercase kebab-case, 2-40 characters, with alphanumeric edges and no consecutive hyphens",
+    };
+  }
+  return { label: name };
+}
+
+/**
+ * Build the task-worktree path. This is the naming SSOT shared by the
+ * provisioner, enter/list/remove consumers, and the isolation gate's
+ * ownership inversion.
+ */
+export function taskWorktreePath(
+  repoRoot: string,
+  conversationId: string,
+  label?: string
+): string {
+  const resolved = resolveTaskWorktreeLabel(label);
+  const leaf =
+    resolved.label === undefined
+      ? conversationId
+      : `${resolved.label}--${conversationId}`;
+  return join(repoRoot, ".iknow", "worktrees", leaf);
+}
+
+/** Build the task branch name from the same validated label decision. */
+export function taskWorktreeBranch(
+  conversationId: string,
+  label?: string
+): string {
+  const resolved = resolveTaskWorktreeLabel(label);
+  return resolved.label === undefined
+    ? `iknow/task-${conversationId}`
+    : `iknow/task/${resolved.label}-${conversationId.slice(0, 8)}`;
+}
+
+/** Return the decorative label from a task-worktree leaf, if present. */
+export function taskWorktreeLabelOf(root: string): string | undefined {
+  const leaf = basename(root);
+  const separator = leaf.lastIndexOf("--");
+  if (separator <= 0) return undefined;
+  const label = leaf.slice(0, separator);
+  const owner = leaf.slice(separator + 2);
+  return SAFE_CONVERSATION_ID_RE.test(owner) &&
+    resolveTaskWorktreeLabel(label).label === label
+    ? label
+    : undefined;
+}
+
+/**
+ * Ownership anchor for task-worktree naming
+ * (`<any>/.iknow/worktrees/<label>--<conversationId>` or the historical
+ * `<any>/.iknow/worktrees/<conversationId>` form): returns the conversation
+ * identity encoded in the leaf, undefined for non-task paths.
  *
- * The GATE routes on this predicate (T3 model-provision contract): a mutate
- * arriving at an engine whose root is NOT task-worktree-shaped can never be a
- * bound session (bound roots are always shaped), so it is blocked with the
- * ACI-tool notice and `provision` is never invoked — structurally impossible
- * for the gate to auto-run `git worktree add`. A shaped root goes through the
- * per-conversation `provision` adjudication (own tree → same-root no-op
- * passthrough; foreign → typed `foreign_worktree`). session-api re-exports
- * this function for its provisioner and read-only display consumers.
+ * The gate routes on this predicate. Labels are decorative and never
+ * participate in the ownership decision; the final `--` suffix is the only
+ * identity source for labeled leaves. session-api re-exports this function for
+ * its provisioner and read-only display consumers.
  */
 export function taskWorktreeOwnerOf(root: string): string | undefined {
   if (basename(dirname(root)) !== "worktrees") return undefined;
   if (basename(dirname(dirname(root))) !== ".iknow") return undefined;
-  return basename(root);
+  const leaf = basename(root);
+  const separator = leaf.lastIndexOf("--");
+  const owner = separator === -1 ? leaf : leaf.slice(separator + 2);
+  return SAFE_CONVERSATION_ID_RE.test(owner) ? owner : undefined;
 }
 
 /**
@@ -392,6 +500,12 @@ export interface WorktreeProvisionContext {
   readonly conversationId?: string;
   /** This engine's root (the session's current root when the turn started). */
   readonly root: string;
+  /**
+   * Optional model-supplied task label. The provisioner validates it against
+   * `SAFE_WORKTREE_SLUG_RE`; invalid labels are deliberately discarded rather
+   * than turning a recoverable tool call into a protocol failure.
+   */
+  readonly name?: unknown;
 }
 
 /**
@@ -407,9 +521,9 @@ export type WorktreeProvisionFn = (
 /**
  * T7 explicit-enter seam context: a session (conversationId) anchored at the
  * main repo (root) adopts the EXISTING task worktree owned by
- * `targetConversationId`. The target path is SSOT-derived
- * (`taskWorktreePath(root, targetConversationId)`) — the tool takes the
- * owner's id, never a free-form path.
+ * `targetConversationId`. The target path is resolved from the repository's
+ * task-worktree listing, using either the owner's id or a unique label; the
+ * tool takes a selector, never a free-form path.
  */
 export interface WorktreeEnterContext {
   /** Calling conversation (the session that moves onto the target tree). */
@@ -451,6 +565,59 @@ export interface WorktreeExitContext {
  */
 export type WorktreeExitFn = (ctx: WorktreeExitContext) => Promise<string>;
 
+/** A read-only projection of one task worktree or stale task branch. */
+export interface TaskWorktreeInfo {
+  /** Human-facing label; absent for legacy UUID-only leaves. */
+  readonly label: string | undefined;
+  /** Conversation identity recovered from the leaf or branch name. */
+  readonly conversationId: string;
+  /** Linked checkout path; empty for a branch with no active worktree. */
+  readonly path: string;
+  /** Local task branch name. */
+  readonly branch: string;
+  /** HEAD commit at inspection time. */
+  readonly head: string;
+  /** Whether the linked checkout has visible working-tree changes. */
+  readonly dirty: boolean;
+  /** Present only when the entry came from an orphaned task branch. */
+  readonly stale?: true;
+}
+
+export interface WorktreeListContext {
+  /** Current engine root; task roots are mapped back to their main checkout. */
+  readonly root: string;
+  readonly includeStale?: boolean;
+}
+
+/** Host seam for the read-only task-worktree listing tool. */
+export type WorktreeListFn = (
+  ctx: WorktreeListContext
+) => Promise<ReadonlyArray<TaskWorktreeInfo>>;
+
+export interface WorktreeRemoval {
+  readonly label: string | undefined;
+  readonly conversationId: string;
+  readonly path: string;
+  readonly branch: string;
+  readonly head: string;
+  readonly branchDeleted: boolean;
+}
+
+export interface WorktreeRemoveContext {
+  /** Current session root, used to reject removing the caller's active tree. */
+  readonly root: string;
+  /** Caller conversation id, for audit/context only. */
+  readonly conversationId?: string;
+  /** A conversation id or a task-worktree label. */
+  readonly targetConversationId: string;
+  readonly deleteBranch?: boolean;
+}
+
+/** Host seam for explicit task-worktree removal. */
+export type WorktreeRemoveFn = (
+  ctx: WorktreeRemoveContext
+) => Promise<WorktreeRemoval>;
+
 /**
  * Host-facing options the assembly (build-engine) threads through: the
  * switch itself is read once at the startup load point
@@ -479,6 +646,16 @@ export interface WorktreeIsolationHostOpts {
    * repo.
    */
   readonly worktreeExit?: WorktreeExitFn;
+  /**
+   * Read-only task-tree discovery. It is intentionally independent from the
+   * mutate gate and is registered only when this host supplies the seam.
+   */
+  readonly worktreeList?: WorktreeListFn;
+  /**
+   * Explicit task-tree removal. The host performs dirty/unpublished/current
+   * root checks before invoking git worktree remove.
+   */
+  readonly worktreeRemove?: WorktreeRemoveFn;
 }
 
 export interface WorktreeIsolationGateOpts {
@@ -747,7 +924,10 @@ export function createWorktreeIsolationExecutor(
           onStream
         );
       } else if (rootFlipped) {
-        result = block(call.id, rootFlipMutateNotice(rootFlipTool ?? "a root-flip lifecycle tool"));
+        result = block(
+          call.id,
+          rootFlipMutateNotice(rootFlipTool ?? "a root-flip lifecycle tool")
+        );
       } else {
         const blocked = await gateMutate(call, conversationId, snapshotRoot);
         result =

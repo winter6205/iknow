@@ -28,6 +28,7 @@
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError, errorMessage } from "../../errors.js";
+import type { LiveTaskRoot } from "../../session-roots.js";
 import type { WorktreeExitFn } from "../../isolation/worktree-gate.js";
 import { WorktreeIsolationError } from "../../isolation/worktree-gate.js";
 
@@ -35,7 +36,7 @@ export interface WorktreeExitToolDeps {
   /** Host exit seam (session-api hub, threaded through build-engine). */
   readonly worktreeExit: WorktreeExitFn;
   /** This engine's root — the task worktree the session is currently on. */
-  readonly root: string;
+  readonly root: string | LiveTaskRoot;
 }
 
 /**
@@ -72,13 +73,15 @@ export function createExitTaskWorktreeTool(
     handler: async (_input: unknown, ctx?: ToolExecutionContext) => {
       const conversationId = ctx?.conversationId;
       try {
+        const root =
+          typeof deps.root === "string" ? deps.root : deps.root.read();
         const repoRoot = await deps.worktreeExit({
           conversationId,
-          root: deps.root,
+          root,
         });
         return (
           `session root returned to main repo: ${repoRoot} (the task worktree ` +
-          `${deps.root} is preserved; re-issue pending writes in the main repo ` +
+          `${root} is preserved; re-issue pending writes in the main repo ` +
           `in the next wave of tool calls in this run)`
         );
       } catch (err) {

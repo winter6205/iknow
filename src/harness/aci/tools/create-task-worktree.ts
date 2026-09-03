@@ -6,8 +6,8 @@
  * worktree isolation is ON and a workspace mutate was blocked by the
  * `[worktree_isolation]` gate, the model calls THIS tool to create the
  * conversation's task worktree and rebind the session root to it. Tool
- * success = the tree exists at `<repoRoot>/.iknow/worktrees/<conversationId>`
- * AND the session root has moved there.
+ * success = the tree exists at `<repoRoot>/.iknow/worktrees/<label>--<conversationId>`
+ * (or the historical UUID-only leaf) AND the session root has moved there.
  *
  * Module boundary (ACR bounded-context-guardian):
  *   - the tool owns NOTHING but the model-facing shape: it takes no
@@ -35,8 +35,12 @@
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError, errorMessage } from "../../errors.js";
+import type { LiveTaskRoot } from "../../session-roots.js";
 import type { WorktreeProvisionFn } from "../../isolation/worktree-gate.js";
-import { WorktreeIsolationError } from "../../isolation/worktree-gate.js";
+import {
+  resolveTaskWorktreeLabel,
+  WorktreeIsolationError,
+} from "../../isolation/worktree-gate.js";
 
 /**
  * Back-compat alias for the gate's `WorktreeProvisionFn` SSOT (registry.ts
@@ -48,7 +52,7 @@ export interface CreateTaskWorktreeToolDeps {
   /** Host provision seam (session-api hub, threaded through build-engine). */
   readonly provision: WorktreeProvisionFn;
   /** This engine's root — the session's current root at assembly time. */
-  readonly root: string;
+  readonly root: string | LiveTaskRoot;
 }
 
 /**
@@ -65,16 +69,26 @@ export function createCreateTaskWorktreeTool(
     description:
       "Create this conversation's isolated git task worktree and rebind the session root to it. " +
       "Use it when worktree isolation is ON and a workspace mutation came back blocked with the " +
-      "[worktree_isolation] notice. Takes no parameters. On success the tree exists at " +
-      "<repoRoot>/.iknow/worktrees/<conversationId> on branch iknow/task-<conversationId> and the " +
-      "session root has moved there; the next wave of tool calls in this run will land in the new " +
-      "root, re-issue the blocked write then. Calling it again for the same conversation is " +
-      "idempotent (returns the same root). Failures exit typed as kind=branch_exists | " +
+      "[worktree_isolation] notice. An optional lowercase kebab-case name (2-40 characters) " +
+      "adds a human-facing label while the conversation id remains the identity suffix. On " +
+      "success the tree exists at <repoRoot>/.iknow/worktrees/<label>--<conversationId> " +
+      "(or the historical UUID-only leaf) on its task branch and the session root has moved " +
+      "there; the next wave of tool calls in this run will land in the new root, re-issue the " +
+      "blocked write then. Calling it again for the same conversation is idempotent (returns " +
+      "the same root). Failures exit typed as kind=branch_exists | " +
       "worktree_exists | worktree_add_failed | rebind_failed | foreign_worktree | not_a_git_repo | " +
       "git_unavailable; resolve the reported leftover tree or branch manually, then retry.",
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: {
+        // Deliberately omit maxLength here: overlong names are a recoverable
+        // invalid-label fallback, not an executor validation failure. The
+        // handler/provisioner enforce the 40-character contract.
+        name: {
+          type: "string",
+          description: "Optional lowercase kebab-case label, 2-40 characters.",
+        },
+      },
       additionalProperties: false,
     },
     aci: {
@@ -83,15 +97,23 @@ export function createCreateTaskWorktreeTool(
       interruptBehavior: "block",
       timeoutTier: "default",
     } as const,
-    handler: async (_input: unknown, ctx?: ToolExecutionContext) => {
+    handler: async (input: unknown, ctx?: ToolExecutionContext) => {
       const conversationId = ctx?.conversationId;
+      const name = (input as { name?: unknown } | null)?.name;
+      const label = resolveTaskWorktreeLabel(name);
+      const root = typeof deps.root === "string" ? deps.root : deps.root.read();
       try {
         const worktreePath = await deps.provision({
           conversationId,
-          root: deps.root,
+          root,
+          ...(name !== undefined ? { name } : {}),
         });
+        const labelNotice =
+          label.reason === undefined
+            ? ""
+            : ` name discarded: ${label.reason}; actual path: ${worktreePath};`;
         return (
-          `task worktree ready: ${worktreePath} (session root rebound; ` +
+          `task worktree ready:${labelNotice} ${worktreePath} (session root rebound; ` +
           `the next wave of tool calls in this run will land in the new root, ` +
           `re-issue the blocked write then)`
         );
