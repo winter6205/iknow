@@ -57,8 +57,7 @@ const PREVIEWABLE_TOOLS: ReadonlySet<string> = new Set(["bash", "skill"]);
 /** bash tool_result 文本 → 拼接后的输出（与 TUI `bashPreview` 同语义）。
  *  若 JSON.parse 成功且含 `stdout` / `stderr` 字段 → 按 stdout + "\n" + stderr 拼；
  *  JSON 解析成功但缺字段 → 返回空串（让外层 isRenderableOutput 直接判 empty，
- *  与 TUI 行为一致 —— TUI 中 streams.length === 0 时整 preview 返回 empty）；
- *  parse 失败 → 退到把整段 resultText 当 stdout 处理。 */
+ *  与 TUI 行为一致 —— TUI 中 streams.length === 0 时整 preview 返回 empty）。 */
 function extractBashOutput(resultText: string): string {
   try {
     const parsed = JSON.parse(resultText) as Record<string, unknown>;
@@ -71,9 +70,11 @@ function extractBashOutput(resultText: string): string {
     }
     return streams.join("\n");
   } catch {
-    // 非 JSON 形态:整段当 stdout 处理(TUI 退路)。
+    // EXIT: parse 失败（非 JSON 形态,与 TUI bashPreview 退路同语义）→ 整段
+    // resultText 视为 stdout 显示。fallback 收拢在 catch 体内 —— 不与
+    // happy-path return 混在同一层,展示层降级到全文而非空预览。
+    return resultText;
   }
-  return resultText;
 }
 
 /** 单源:从「可能含 ANSI 的输出」判定是否应渲染预览块。

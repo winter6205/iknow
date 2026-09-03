@@ -208,11 +208,18 @@ describe("secret-roundtrip e2e — roundtrip 全流（识别 → bash 还原 →
     // (2) 还原层 + 输出 mask（#357 T3）：bash 工具拿到同一 registry → spawn 前
     // restore（命令拿真值）→ echo 回来后 stdout 经 output-mask 洗涤：真值不外泄到
     // tool_result。restore 命中证据 = 占位符缺席；mask 命中证据 = 真值缺席 + *** 在场。
+    // #693 T4 D4:handler 自 T4 起返回 envelope `{ output, meta? }`,output 字段里
+    // 仍是 JSON 化的 code/stdout/stderr,parse 一下拿到原 BashResult 形态。
     const { root } = await makeFixture();
     const bashTool = createBashTool(root, { secretRegistry });
-    const bashResult = (await bashTool.handler({
+    const bashEnvelope = (await bashTool.handler({
       command: 'echo "<<<SECRET_1>>>"',
-    })) as { code: number; stdout: string; stderr: string };
+    })) as { output: string };
+    const bashResult = JSON.parse(bashEnvelope.output) as {
+      code: number;
+      stdout: string;
+      stderr: string;
+    };
     assert.equal(bashResult.code, 0);
     assert.ok(
       !bashResult.stdout.includes("<<<SECRET_1>>>"),

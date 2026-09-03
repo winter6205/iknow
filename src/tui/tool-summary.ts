@@ -232,8 +232,9 @@ function bashPreview(
       if (typeof parsed.stdout === "string") bashStdout = parsed.stdout;
       if (typeof parsed.stderr === "string") bashStderr = parsed.stderr;
     } catch {
-      // 非 JSON 形态（理论上 bash 不会产出，但保留防御）：
-      // 把 resultText 当作 stdout 显示。
+      // EXIT: 非 JSON 形态(理论上 bash 不会产出,保留防御)→ 整段 resultText
+      // 视为 stdout 显示的退路。不抛、不再尝试其它形态 —— 历史路径的
+      // tool_result 文本就是可展示的最真实料,展示层降级到全文而非空预览。
       bashStdout = resultText;
     }
   }

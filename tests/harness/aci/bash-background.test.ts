@@ -121,6 +121,17 @@ interface BashResult {
   readonly stderr: string;
 }
 
+/** #693 T4 D4:bash handler 返回 envelope `{ output, meta? }`;前台路径
+ *  走既有 BashResult 契约,在 helper 多走一次 parse;background 路径返回
+ *  `{ task_id, log_path }`,与 envelope 不冲突,保留原断言。 */
+interface BashEnvelope {
+  readonly output: string;
+  readonly meta?: { readonly stdout?: string; readonly stderr?: string };
+}
+function parseBashEnvelope(envelope: BashEnvelope): BashResult {
+  return JSON.parse(envelope.output) as BashResult;
+}
+
 // ── 1.schema ──────────────────────────────────────────────────────────────────
 
 describe("bash background schema", () => {
@@ -361,16 +372,20 @@ describe("bash background handler（fake manager）", () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createBashTool(cwd, { backgroundManager: manager });
 
-    const result = (await tool.handler({
-      command: "echo foreground",
-    })) as BashResult;
+    const result = parseBashEnvelope(
+      (await tool.handler({
+        command: "echo foreground",
+      })) as BashEnvelope
+    );
     assert.equal(result.code, 0);
     assert.equal(result.stdout, "foreground\n");
 
-    const result2 = (await tool.handler({
-      command: "echo foreground-false",
-      background: false,
-    })) as BashResult;
+    const result2 = parseBashEnvelope(
+      (await tool.handler({
+        command: "echo foreground-false",
+        background: false,
+      })) as BashEnvelope
+    );
     assert.equal(result2.code, 0);
     assert.equal(result2.stdout, "foreground-false\n");
 
