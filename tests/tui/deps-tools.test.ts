@@ -5,9 +5,9 @@
  * 改写为 bun:test（D2 裁决：tests/tui/ 由 bun:test 驱动）。
  *
  * #365 T2：buildTuiDeps 委托 buildHarnessEngine({surface:"tui"}) → 装配 SSOT 化。
- * Tracer bullet 升级:锁定 TUI 入口工具面 = buildHarnessEngine 全装配 25 件
- * (与 tests/harness/build-engine.test.ts 的 EXPECTED_TOOLS 对齐),且 onToolEvent
- * 钩子经 deps.executor 在 executor 层真实触发(T1 观测缝验收)。
+ * Tracer bullet 升级:锁定 TUI 入口工具面 = buildHarnessEngine 全装配,期望
+ * 集从 `ACI_TOOLSET_NAMES` SSOT 派生(本场景下剥 6 件 host 缝条件化工具),
+ * 且 onToolEvent 钩子经 deps.executor 在 executor 层真实触发(T1 观测缝验收)。
  * 任何入口漏注册的工具都让此测试立即报警。
  *
  * #337 Phase B：buildTuiDeps 装配 skill catalog → 21→23 件（追加 skill /
@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildTuiDeps, type TuiToolEvent } from "../../src/tui/deps.js";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.js";
+import { ACI_TOOLSET_NAMES } from "../../src/harness/aci/tools/registry.js";
 import type { RuntimeBundle } from "../../src/cli/runtime.js";
 import type { IknowEnv } from "../../src/config/env.js";
 
@@ -60,65 +61,32 @@ function makeBundle(
   return { env } as unknown as RuntimeBundle;
 }
 
-// #365 T2：surface="tui" → build-engine 全装配 30 件(skillCatalog +
-// subagentManager + mcpManager + backgroundManager 均装配)。数组与
-// tests/harness/build-engine.test.ts 的 EXPECTED_TOOLS 对齐(SSOT)。
-// 拆分:base 11 件(#194 + #224)→ +10 LSP(#251)= 21 件 → + skill/skill_search
-// (#337 T8)= 23 件 → + spawn_subagent/subagent_result (#356 T6)= 25 件
-// → + todo_write (#440 T4,T1-fix 后 TUI 透传 todoDir)= 26 件
-// → + list_mcp_resources/read_mcp_resource (#440 T11)= 28 件
-// → + bash_output/bash_stop (#502 T3,build-engine 自建 backgroundManager)= 30 件。
-const EXPECTED_BASE_11 = [
-  "bash",
-  "read_file",
-  "grep",
-  "glob",
-  "edit_file",
-  "write_file",
-  "web_fetch",
-  "web_search",
-  "memory_recall",
-  "memory_save",
-  "tool_search",
+// #365 T2：surface="tui" → build-engine 全装配(skillCatalog +
+// subagentManager + mcpManager + backgroundManager 均装配)。期望集
+// 从 `ACI_TOOLSET_NAMES` SSOT 派生,本测试场景下被排除的条件化工具:
+//   - run_graph: graphMode 缝缺(tests/tui/* 装配 opts 不透传 graphMode)
+//   - create-task-worktree / enter-task-worktree / exit-task-worktree:
+//     worktreeIsolation host 缝缺(测试 opts 不透传 worktreeIsolation)
+//   - list-task-worktrees / remove-task-worktree: 同上(同一 isolationHost
+//     缝分支下的 worktreeList / worktreeRemove)
+// 任何新增件自动继承;append-only 仍由 registry Gate 3 镜像校验。
+const EXCLUDED_FOR_TUI_NO_HOST_SEAM: ReadonlyArray<string> = [
+  "run_graph",
+  "create-task-worktree",
+  "enter-task-worktree",
+  "exit-task-worktree",
+  "list-task-worktrees",
+  "remove-task-worktree",
 ];
-const EXPECTED_LSP_10 = [
-  "lsp_definition",
-  "lsp_references",
-  "lsp_hover",
-  "lsp_document_symbol",
-  "lsp_workspace_symbol",
-  "lsp_go_to_implementation",
-  "lsp_prepare_call_hierarchy",
-  "lsp_incoming_calls",
-  "lsp_outgoing_calls",
-  "lsp_diagnostics",
-];
-const EXPECTED_TOOLSET_30 = [
-  ...EXPECTED_BASE_11,
-  ...EXPECTED_LSP_10,
-  "skill",
-  "skill_search",
-  "spawn_subagent",
-  "subagent_result",
-  // #440 T1-fix:todo_write 在 TUI surface 装配(todoDir 由 deps.ts 注入)。
-  "todo_write",
-  "list_mcp_resources",
-  "read_mcp_resource",
-  // #502 T3:bash_output / bash_stop 在 TUI surface 装配(backgroundManager 由
-  // build-engine 装配期自建 → bash_output/bash_stop 入注册表;bash 仍常驻,
-  // 参数级 background:true 能力由 handler 运行时决策)。
-  "bash_output",
-  "bash_stop",
-  "query_trace",
-];
+const EXPECTED_TUI_TOOLSET = ACI_TOOLSET_NAMES.filter(
+  (n) => !EXCLUDED_FOR_TUI_NO_HOST_SEAM.includes(n)
+);
 
-describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(30 件)", () => {
+describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(SSOT 派生)", () => {
   // #337 Phase B:tmp fixture 隔离真实 ~/.iknow / cwd(避免 worktree 已提交
   // 的 .iknow/mcp.json 触发真实 stdio subprocess 启动,以及 .iknow/skills
   // 污染 skill scanner 降级行为)。skill/skill_search 静态装配(Gate 3 锁:
-  // skillCatalog 提供即装两件),tmp 即使无 skills/mcp.json 仍产 30 件
-  // (surface="tui" 全装配含 subagent 2 件 + todo_write 1 件 + MCP resources 2 件
-  //  + bash_output/bash_stop 2 件)。
+  // skillCatalog 提供即装两件)。
   const roots: string[] = [];
 
   afterEach(async () => {
@@ -127,7 +95,7 @@ describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(30 件)"
     );
   });
 
-  test("装配出完整 30 件工具(surface=tui 全装配:11 base + 10 LSP + skill 2 + subagent 2 + todo 1 + MCP 2 + bash_output/bash_stop 2)", async () => {
+  test(`装配出 ACI_TOOLSET_NAMES 派生集(surface=tui,SSOT=${EXPECTED_TUI_TOOLSET.length} 件;剥 6 件 host 缝条件化)`, async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-tui-deps-toolset-"));
     roots.push(root);
     const deps = await buildTuiDeps(makeBundle(), {
@@ -139,12 +107,17 @@ describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(30 件)"
       .list()
       .map((def) => def.name)
       .sort();
-    expect(names).toEqual([...EXPECTED_TOOLSET_30].sort());
+    expect(names).toEqual([...EXPECTED_TUI_TOOLSET].sort());
+    // 关键件显式断言:即使 SSOT 重排也确保这些常驻工具在 TUI surface 装配。
     expect(names).toContain("todo_write");
     expect(names).toContain("list_mcp_resources");
     expect(names).toContain("read_mcp_resource");
     expect(names).toContain("bash_output");
     expect(names).toContain("bash_stop");
+    expect(names).toContain("query_trace");
+    // 旧 lsp_* 工具自 symbol-primary-aci T5 起退役,TUI 表面已不含它们。
+    expect(names).not.toContain("lsp_definition");
+    expect(names).not.toContain("lsp_diagnostics");
   });
 
   test("显式断言 web_fetch / web_search / skill / skill_search 都在注册表里", async () => {

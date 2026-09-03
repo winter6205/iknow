@@ -64,6 +64,7 @@ import { SessionStore } from "./session-api/store/index.js";
 import { resolveServeDataDir } from "./session-api/serve.js";
 import { createTaskWorktreeProvisioner } from "./session-api/worktree-rebind.js";
 import type { WorktreeIsolationHostOpts } from "./harness/isolation/worktree-gate.js";
+import { createWorktreeIsolationHost } from "./cli/worktree-host.js";
 // 共享装配 (cli / serve / tui 三入口共用, SSOT): settings.verify → VerifyConfig。
 import { resolveVerifyConfig } from "./config/verify-config.js";
 
@@ -315,10 +316,9 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   const worktreeProvisioner = createTaskWorktreeProvisioner({
     store: new SessionStore(resolveServeDataDir()),
   });
-  const worktreeIsolation: WorktreeIsolationHostOpts = {
-    provision: ({ conversationId, root: sessionRoot }) =>
-      worktreeProvisioner.provision({ conversationId, root: sessionRoot }),
-  };
+  // worktree-host.ts 工厂装配（PR #869 name 透传修复点；可单测）。
+  const worktreeIsolation: WorktreeIsolationHostOpts =
+    createWorktreeIsolationHost({ worktreeProvisioner });
   // T6:启动 workspace 即稳定 productRoot —— rebind 只换 workspaceRoot，
   // MCP 项目配置根跨 rebuild 保持本值。
   const productRoot = workspaceRoot;

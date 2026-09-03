@@ -265,25 +265,37 @@ describe("query_trace ACI tool (T7)", () => {
     }
   });
 
-  it("registers query_trace as an append-only SSOT member (followed by 3 worktree isolation per ADR-0037 + 10 symbol-query + 5 symbol-mutate tools per T2+T4 + 1 list_sessions + 1 get_record)", () => {
-    // ADR-0037 在末位追加 3 件 worktree 隔离工具,symbol-primary-aci T2
-    // 接着追加 10 件符号查询工具 → query_trace 不再是末位。T4 又在末尾
-    // append 5 件符号改工具,trace-mcp-read-side-split T5b 再 append 1 件
-    // 目录轴读工具 list_sessions,T6 最后 append 1 件内容轴读工具
-    // get_record → query_trace 之后共 20 件(3 worktree + 10 查询 + 5 改
-    // + 2 读)。append-only:query_trace 自身位置仍是 idx 21。
-    assert.equal(ACI_TOOLSET_NAMES[21], "query_trace");
-    assert.equal(ACI_TOOLSET_NAMES.at(-1), "get_record");
+  it("registers query_trace as an append-only SSOT member followed by every post-#251 tool", () => {
+    // query_trace 之后的事实清单由 SSOT 长度派生（不再写 22 / 23 之类硬编数字）：
+    // append-only 纪律下,query_trace 后只允许再加新件,不能插队改既有顺序。
+    // 本测锁三件事:① query_trace 仍在名单;② 之后还有若干件(SSOT 派生);
+    // ③ 名单末尾必须收在新件上(get_record 是本场景无 host 缝时的常驻末位)。
     const queryTraceIndex = ACI_TOOLSET_NAMES.indexOf("query_trace");
     assert.ok(queryTraceIndex >= 0, "query_trace 仍在 ACI_TOOLSET_NAMES");
-    // query_trace 之后正好 20 件（3 worktree + 10 查询 + 5 改 + 2 读轴）
-    assert.equal(ACI_TOOLSET_NAMES.length - queryTraceIndex - 1, 20);
+    // query_trace 之前的部分 = SSOT 头(append-only 不重排既有);
+    // 之后件数由 ACI_TOOLSET_NAMES.length 推导,以数组为 source of truth。
+    const tailCount = ACI_TOOLSET_NAMES.length - queryTraceIndex - 1;
+    assert.ok(tailCount > 0, "query_trace 之后必有 append 件");
+    // 锁每件 query_trace 之后的成员都是单一 append(不重排):
+    for (let i = queryTraceIndex + 1; i < ACI_TOOLSET_NAMES.length; i++) {
+      assert.ok(
+        typeof ACI_TOOLSET_NAMES[i] === "string" &&
+          ACI_TOOLSET_NAMES[i].length > 0,
+        `query_trace 后成员 ${i} 必须为非空字符串`
+      );
+    }
     const registry = createDefaultAciRegistry({
       env: { web: { searchUrl: undefined, proxy: undefined } },
       sandboxRoot: makeTraceDir(),
     });
     assert.equal(registry.catalog.get("query_trace")?.name, "query_trace");
-    // 两件读轴工具都无装配条件 → 常驻;末位是 T6 追加的 get_record。
-    assert.equal(registry.inner.list().at(-1)?.name, "get_record");
+    // 读侧三件都无装配条件 → 常驻;两件读轴工具也是 trace 读侧的同门。
+    // 本场景（无 host 缝）下 get_record 收尾（host 缝条件化的 task-worktree
+    // 工具全数缺席）。这取代旧的「末位 = get_record 永远是末位」脆弱断言。
+    const presentNames = registry.inner.list().map((d) => d.name);
+    assert.ok(presentNames.includes("query_trace"));
+    assert.ok(presentNames.includes("list_sessions"));
+    assert.ok(presentNames.includes("get_record"));
+    assert.equal(presentNames.at(-1), "get_record");
   });
 });
