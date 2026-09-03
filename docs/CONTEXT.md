@@ -308,8 +308,26 @@ _Avoid_: Pre 失败 fail-open 静默放行；Post 异常推翻已成功的调用
 **secrets guard**: (#126 决议 D6) Pre 缝第一个真实产品消费者——密钥模式拦截钩子，拦「工具调用参数内容夹带密钥/凭据」，与 hard-wall（命令形态 + 敏感路径）互补不重叠；模式来源双层：代码内置默认集 + 项目 settings 覆盖/追加，接入 `createAciExecutor` 产品路径。
 _Avoid_: 与 hard-wall 职责混同；Pre 缝保持零产品消费者；把它当密钥防护唯一道防线
 
-**渐进式披露 (progressive disclosure)**: (#631) 便宜索引常驻 + 重载荷按需的两级披露——索引档（skill 清单 / `<mcp_tools_overview>` MCP 概览）每轮随 system prompt 在场，重载荷（SKILL.md 全文 / 工具完整 schema）经 `skill` / `tool_search` 按需拉取。iknow 机制 = lazy 注册 + `discover()` 命中 + `visibleSchemas` 组合（非 lazy 注册序前缀字节级不变 + discovered 按发现序尾部追加，保 KV cache 前缀）。
+**渐进式披露 (progressive disclosure)**: (#631) 便宜索引常驻 + 重载荷按需的两级披露——索引档（skill 清单 / 工具名字目录）每轮随 system prompt 在场，重载荷（SKILL.md 全文 / 工具完整 schema）经 `skill` / `tool_search` 按需拉取。iknow 机制 = lazy 注册 + `discover()` 命中 + `visibleSchemas` 组合（非 lazy 注册序前缀字节级不变 + discovered 按发现序尾部追加，保 KV cache 前缀）。MCP 工具披露形态经 ADR-0043 收敛为名字目录 + 按需加载，`<mcp_tools_overview>` 概览段已撤出 system。
 _Avoid_: 把发现的工具插回注册序中部（破 KV cache 前缀）；只延迟载荷不给索引线索；概览段发空串占位
+
+**前缀资格线 (prefix eligibility line)**: (D9/ADR-0043) 一段内容要有资格留在模型面前缀区（`tools` + `system`），判据是其输入来源**构造上**不可能在会话内变——「实测没变」不算数，代码上不可能变才算数。会话内可变的闸门只许落位 messages 尾部或 handler 层（ADR-0041）。执法 = 两条断言：`IKNOW_ASSEMBLY_ORDER` 声明↔产物一致性、相邻两轮装配 tools+system deep-equal。
+_Avoid_: 以实测抖动频率辩护前缀区易变段；用 chars/4 估算参与溢出判定；中途改写已发出的前缀字节
+
+**名字目录 (tool name catalog)**: (ADR-0043) MCP 工具与退场内建件在 system 中的仅名字索引段——首轮装配定稿、会话内恒定；完整 schema 经 `tool_search` 按需加载（发现 = 结果消息追加 + schema 尾部追加进 tools 双写，此后常驻）。未加载即调用 → 报错并提示先 `tool_search`。
+_Avoid_: 把 MCP schema 全量 upfront 进 tools；目录随连接状态会话中改写；调用报错文案不指路 `tool_search`
+
+**开局等待 (startup connection wait)**: (ADR-0043) 首轮模型请求前等待 MCP server 连接完成（超时 30s，超时者停止自动重试、本会话缺席）——首个请求发出前前缀即定稿，窗口内连上零破坏。手动重连成功只往 messages 尾部追加一条通知；会话中断开则调用报错、tools 与历史一字不动。
+_Avoid_: 会话中自动重连后改写 tools；超时后继续阻塞启动；把手动重连通知写进 system
+
+**溢出治理 (tool-surface overflow governance)**: (ADR-0043) 可延迟工具（MCP 名单 + 标记 deferrable 的内建低频件）schema 总量（countTokens 实测）超过端点模型 context window 的 10%（配置读）时，超出部分退到名字目录——仅在首轮装配判定一次，会话内不重算；退场次序与永不退场核心件由 ADR-0043 §3 定死。
+_Avoid_: 会话中重算触发；硬编码窗口值；以估算 token 数触发退场
+
+**会话级快照段 (session-snapshot segment)**: (ADR-0042) 装配时取一次快照、会话内冻结的 system 段（当前住户：`memory_layer` catalog + promote 段、git 块）——语义是「快照」而非「缓存」：不再比对源变更，下个会话才重取。新落盘内容对当前会话不可见是已接受代价。
+_Avoid_: 与 mtime 门控缓存混同；会话中因源文件落盘而刷新；把快照段写进 messages
+
+**git 块 (git status block)**: (D1/ADR-0037 §4) 模型侧 git 感知的 system 段——当前分支 / 主分支（注明 PR 基线）/ status（截断上限 + 截断标记）/ 最近 5 条 commit，附「开局快照，会话期间不更新」免责句；读稳定 `projectIdentityRoot`（rebind 不抖）；退化态（非 git 仓库 / git 不可用）= 段整体缺席。属会话级快照段。
+_Avoid_: 块内放 diff；每回合刷新 status；rebind 时重建该段；缺席时渲染空占位
 
 **stderr 指针**: worker crash 取证三件套的落盘形态——`subagent_stop.error` 结构化字段 + `stderr_path`/`stderr_bytes` 指针字段 + `<traceDir>/stderr/<taskId>.log` mask 后全量文件；父可见 summary 只留尾部 ≤2000 字符预览。specs/trace-agent-readability.md。
 _Avoid_: 把完整 stderr 内联进 JSONL 行；stderr 落盘绕过 SC20 mask；把 summary 截断当成诊断丢失
