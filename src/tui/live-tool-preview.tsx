@@ -26,6 +26,7 @@ import {
 } from "./live-tool-state.js";
 import {
   completedToolPreview,
+  formatToolStatusLine,
   summarizePartialInput,
   summarizeToolCall,
   clipOneLineVisual,
@@ -60,11 +61,17 @@ function writeEditRunningLine(run: LiveToolRun, cols: number): string {
         ? summarizeToolCall("write_file", parsed, cols).detail
         : clipOneLineVisual(
             `编辑 ${path}`,
-            Math.min(80, Math.max(4, cols - visualWidth(run.name) - 21))
+            Math.min(80, Math.max(4, cols - visualWidth(run.name) - 12))
           );
     return summary.length === 0
       ? formatRunningToolLine(run)
-      : `[运行中] ${run.name} · ${summary}`;
+      : formatToolStatusLine({
+          toolName: run.name,
+          input: parsed,
+          status: "running",
+          detail: summary,
+          cols,
+        });
   } catch {
     // EXIT: incomplete write/edit JSON → keep the running summary line;
     // do not stream content or dump raw partial JSON.
@@ -76,6 +83,8 @@ function writeEditRunningLine(run: LiveToolRun, cols: number): string {
  * running 状态行：有 partialInput 增量 → `[运行中] name · <partial 摘要>`；
  * 空 / 无增量 → 基础 `[运行中] name`（formatRunningToolLine）。摘要单源 =
  * summarizePartialInput，行账 1 行。write/edit 不把 content 流进该行。
+ * #693 T1 D7：含 partial 的形态拼装委托 formatToolStatusLine（tool-summary SSOT），
+ * 与历史 ToolSummaryRow 同源 —— 字节一致，无重复模板。
  */
 function runningLine(run: LiveToolRun, cols: number): string {
   if (isWriteEditTool(run.name)) return writeEditRunningLine(run, cols);
@@ -84,9 +93,14 @@ function runningLine(run: LiveToolRun, cols: number): string {
     return formatRunningToolLine(run);
   }
   const summary = summarizePartialInput(run.name, partial, cols);
-  return summary.length === 0
-    ? formatRunningToolLine(run)
-    : `[运行中] ${run.name} · ${summary}`;
+  if (summary.length === 0) return formatRunningToolLine(run);
+  return formatToolStatusLine({
+    toolName: run.name,
+    input: run.input,
+    status: "running",
+    detail: summary,
+    cols,
+  });
 }
 
 function completedPreviewOf(run: LiveToolRun) {

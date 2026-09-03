@@ -66,10 +66,12 @@ export interface ToolSummaryLine {
 }
 
 const MAX_DETAIL = 80;
-/** 装饰预留（两种形态取并集）：终稿行 `[运行中] `（9 列）+ 分隔 ` · `（3 列）
- *  + live 完成行状态后缀 ` · failed`（9 列）= 21。单形态最多用 12，按并集
- *  收口保证任何渲染形态都单行不折。 */
-const CHROME_RESERVE = 21;
+/** 装饰预留（统一形态 `#693 T1 D7`，live 完成态去尾缀）：终稿行
+ *  `[运行中] `（9 列）+ 分隔 ` · `（3 列）= 12。历史 + live 共用同一形态
+ *  后，再无「live 完成行 ` · failed`」的尾缀差异；按形态最大值收口保证
+ *  单行不折。子代理分支走 `▣|✓|✗ 子代理 · detail`（≈ 12 列），同样落在
+ *  预算内。 */
+const CHROME_RESERVE = 12;
 
 function inputRecord(input: unknown): Record<string, unknown> {
   return typeof input === "object" && input !== null
@@ -425,25 +427,72 @@ export function projectToolLines(
   return lines;
 }
 
-/** 运行时 postToolUse 事件的摘要行文案（turn 进行中逐条出现）。
- *  SSOT — 完整运行（postToolUse 已完成 + legacy 字符串行）共用单源，
- *  文本拼接全部落在此处，禁止复制 `${name} · ${detail} · ${status}` 模板。
+/** 工具状态行文案 SSOT（#693 T1 D1/D7）。
  *
- *  字节规则:
- *   - 普通工具：detail 非空 → `${toolName} · ${detail} · ${status}`；
- *     detail 空 → `${toolName} · ${status}`（省去中间分隔符，避免残留）。
+ * 历史与 live 两侧的「工具状态行」拼装收敛到本函数：
+ *  - 普通工具：`[运行中]|[完成]|[失败] name · detail`；
+ *  - 子代理工具（spawn_subagent / subagent_result）独立形态：
+ *    `▣|✓|✗ 子代理 · detail`（glyph 已表状态，不再拼 [运行中]/[完成]/[失败]）。
+ *
+ * live 完成态去尾缀 ` · ok/failed` —— 这是 spec D1 列出的不一致
+ * （`bash · pwd · ok` vs `[完成] bash · pwd`）。
+ *
+ * cols 透传（与 `summarizeToolCall(cols)` 同纪律）：给定时 detail 按
+ * 视觉宽度收口到单行放得下；缺省 → legacy 80 字符截断（既有调用方
+ * 字节兼容）。`detail` 可选 override：装配层已完成事件携带 precomputed
+ * detail（liveToolReducer 落地）时，通过显式 detail 跳过
+ * `summarizeToolCall` 重算，保证 reducer state.detail 字节一致。 */
+export function formatToolStatusLine(opts: {
+  readonly toolName: string;
+  readonly input: unknown;
+  readonly status: "running" | "ok" | "failed";
+  readonly detail?: string;
+  readonly cols?: number;
+}): string {
+  const detail =
+    opts.detail ??
+    summarizeToolCall(opts.toolName, opts.input, opts.cols).detail;
+  // 子代理工具分支（独立视觉，glyph + 子代理标签 + detail，不拼 [xxx] 前缀）。
+  if (isSubagentTool(opts.toolName)) {
+    const kind =
+      opts.status === "ok"
+        ? "ok"
+        : opts.status === "failed"
+          ? "failed"
+          : "running";
+    const mark = subagentDisplayMark(kind);
+    if (detail.length === 0) return `${mark} ${SUBAGENT_TOOL_LABEL}`;
+    return `${mark} ${SUBAGENT_TOOL_LABEL} · ${detail}`;
+  }
+  const mark =
+    opts.status === "ok"
+      ? "[完成]"
+      : opts.status === "failed"
+        ? "[失败]"
+        : "[运行中]";
+  if (detail.length === 0) return `${mark} ${opts.toolName}`;
+  return `${mark} ${opts.toolName} · ${detail}`;
+}
+
+/** 运行时 postToolUse 事件的摘要行文案（turn 进行中逐条出现）。
+ *  委托 `formatToolStatusLine`（#693 T1 D7 SSOT）—— live 完成行 / 历史
+ *  完成行 / running 行共用同一文案契约，避免复制粘贴模板。
+ *
+ *  字节规则（spec D7）：
+ *   - 普通工具：detail 非空 → `[完成] name · detail` /
+ *     `[失败] name · detail`；detail 空 → `[完成] name` / `[失败] name`。
  *   - 子代理工具（spawn_subagent / subagent_result）独立形态：
- *     detail 非空 → `${mark} ${SUBAGENT_TOOL_LABEL} · ${detail}`；
- *     detail 空 → `${mark} ${SUBAGENT_TOOL_LABEL}`（glyph 已表状态，不拼
- *     尾部 ` · ok/failed`）。
+ *     `✓|✗ 子代理 · detail` / `✓|✗ 子代理`（glyph 已表状态，不拼 [xxx] 前缀）。
+ *
+ *  kind 入参兼容 history 用例：仅识别 `"ok"`（→ ok），其它任意值按
+ *  failed 处理。
  *
  *  `detail` 可选 override：装配层已完成事件携带 precomputed detail
  *  （如 liveToolReducer 落地）时，通过显式 detail 跳过 summarizeToolCall
  *  重算，保证完成事件渲染与 reducer state.detail 字节一致。
  *
- *  `cols` 透传：提供时 detail 按视觉宽度收口（与 summarizeToolCall 同纪律，
- *  「装饰 + 工具名 + detail」单行放得下，窄终端不折行）；缺省 → legacy 80
- *  字符截断（与既有调用方字节兼容）。 */
+ *  `cols` 透传：提供时 detail 按视觉宽度收口（与 summarizeToolCall 同纪律）；
+ *  缺省 → legacy 80 字符截断（与既有调用方字节兼容）。 */
 export function formatLiveToolEvent(opts: {
   readonly toolName: string;
   readonly input: unknown;
@@ -453,16 +502,12 @@ export function formatLiveToolEvent(opts: {
   /** 终端列宽（可选）：提供时 detail 按视觉宽度收口；缺省 legacy 80 截断。 */
   readonly cols?: number;
 }): string {
-  const detail =
-    opts.detail ??
-    summarizeToolCall(opts.toolName, opts.input, opts.cols).detail;
-  const status = opts.kind === "ok" ? "ok" : "failed";
-  // 子代理工具分支（独立视觉，glyph + 子代理标签 + detail，不再拼尾部状态）。
-  if (isSubagentTool(opts.toolName)) {
-    const mark = subagentDisplayMark(status);
-    if (detail.length === 0) return `${mark} ${SUBAGENT_TOOL_LABEL}`;
-    return `${mark} ${SUBAGENT_TOOL_LABEL} · ${detail}`;
-  }
-  if (detail.length === 0) return `${opts.toolName} · ${status}`;
-  return `${opts.toolName} · ${detail} · ${status}`;
+  const status: "ok" | "failed" = opts.kind === "ok" ? "ok" : "failed";
+  return formatToolStatusLine({
+    toolName: opts.toolName,
+    input: opts.input,
+    status,
+    detail: opts.detail,
+    cols: opts.cols,
+  });
 }

@@ -79,7 +79,7 @@ describe("liveToolPreviewBox（live 工具 tail 渲染）", () => {
   test("cols=80 完成态：摘要行 + hunk 头 + 双列行号", async () => {
     const setup = await renderBox(editRun, 80);
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("edit_file · 编辑 a.ts：old → new · ok");
+    expect(frame).toContain("[完成] edit_file · 编辑 a.ts：old → new");
     expect(frame).toContain("@@ -1,5 +1,5 @@");
     expect(frame).toMatch(/3\s+│\s+-old/);
     expect(frame).toMatch(/3\s+│\s+\+new/);
@@ -169,7 +169,7 @@ describe("liveToolPreviewTextLines（flat 行）", () => {
       newContent: "hello\n",
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    expect(rows[0]).toBe("write_file · 写入 a.ts（1 行） · ok");
+    expect(rows[0]).toBe("[完成] write_file · 写入 a.ts（1 行）");
     expect(rows).toContain("hello");
     expect(rows.some((r) => r.includes("+hello"))).toBe(false);
     expect(rows.length).toBe(liveToolPreviewRows(run, 80));
@@ -269,7 +269,7 @@ describe("运行态 → 完成态切换（reducer 驱动）", () => {
     expect(setup.captureCharFrame()).toContain("[运行中] write_file");
     setup.mockInput.pressEnter();
     const frame = await untilFrame(setup, (f) =>
-      f.includes("write_file · 写入 a.ts（1 行） · ok")
+      f.includes("[完成] write_file · 写入 a.ts（1 行）")
     );
     expect(frame).not.toContain("[运行中]");
     expect(frame).toContain("hello");

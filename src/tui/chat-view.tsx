@@ -75,6 +75,7 @@ import type { ScrollBoxRenderable } from "@opentui/core";
 import { chatWheelScrollAccel } from "./wheel-scroll.js";
 import { Markdown } from "./markdown.js";
 import { MessageBlocks } from "./message-blocks.js";
+import { MessageShell } from "./message-shell.js";
 import { liveToolPreviewBox } from "./live-tool-preview.js";
 import {
   isTuiHiddenUserMessage,
@@ -360,16 +361,30 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         : liveToolRuns,
       deferredSegments
     );
-    const renderFoldLines = (segmentIndex: number, keyPrefix: string) =>
-      (foldLinesBySegmentIndex.get(segmentIndex) ?? []).map((line, foldIdx) => (
-        <text
-          key={`${keyPrefix}-${segmentIndex}-${foldIdx}`}
-          fg={pal.dim}
-          wrapMode="none"
+    // #693 T1 D1：折叠行（思考了 N 秒 / bash × N）统一套壳，与
+    // assistant 外壳共用 MessageShell —— 消除「折叠行裸挂左移一列」的
+    // 不一致（spec D1）。壳内文本 wrapMode="none" 强制单行不折。
+    const renderFoldLines = (segmentIndex: number, keyPrefix: string) => {
+      const lines = foldLinesBySegmentIndex.get(segmentIndex) ?? [];
+      if (lines.length === 0) return null;
+      return (
+        <MessageShell
+          key={`${keyPrefix}-shell-${segmentIndex}`}
+          cols={contentWidth}
         >
-          {line}
-        </text>
-      ));
+          {lines.map((line, foldIdx) => (
+            <text
+              key={`${keyPrefix}-${segmentIndex}-${foldIdx}`}
+              fg={pal.dim}
+              wrapMode="none"
+              width={Math.max(1, contentWidth - 2)}
+            >
+              {line}
+            </text>
+          ))}
+        </MessageShell>
+      );
+    };
     // e2 黄昏魔法石渐变（与 scripts/banner-gradient-preview/exotic-e2.ts 一致）：
     // 13×32 逐 cell 上色，对角线 t = cWeight·(c/31) + rWeight·(r/12)。
     const eyeGradient = eyeGradientCells({
@@ -624,9 +639,13 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             </box>
           ) : (
             running && (
-              <box key={`live-draft-${i}`} width={contentWidth}>
-                <Markdown text={slot.text} width={contentWidth} streaming />
-              </box>
+              <MessageShell key={`live-draft-${i}`} cols={contentWidth}>
+                <Markdown
+                  text={slot.text}
+                  width={Math.max(1, contentWidth - 2)}
+                  streaming
+                />
+              </MessageShell>
             )
           )
         )}

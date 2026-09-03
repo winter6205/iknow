@@ -233,22 +233,25 @@ describe("projectToolLines: tool_use_id 配对状态", () => {
 });
 
 describe("formatLiveToolEvent", () => {
-  test("运行时事件文案：工具名 · 参数摘要 · 状态", () => {
+  // #693 T1 D7：live 完成行文案收敛为历史形态（`[完成] name · detail`），
+  // 不再保留尾缀 ` · ok/failed`。这是 spec D1 列出要消除的不一致。
+  test("运行时事件文案 ok → `[完成] name · detail`（与历史 ToolSummaryRow 同源）", () => {
     const line = formatLiveToolEvent({
       toolName: "read_file",
       input: { path: "a.ts" },
       kind: "ok",
     });
-    expect(line).toBe("read_file · 读取 a.ts · ok");
+    expect(line).toBe("[完成] read_file · 读取 a.ts");
   });
 
-  test("非 ok kind → failed", () => {
+  test("非 ok kind → `[失败] name · detail`", () => {
     const line = formatLiveToolEvent({
       toolName: "bash",
       input: { command: "x" },
       kind: "execution_failed",
     });
-    expect(line.endsWith("· failed")).toBe(true);
+    expect(line).toBe("[失败] bash · x");
+    expect(line.includes("· failed")).toBe(false);
   });
 
   test("显式 detail override 跳过重算（与 reducer state.detail 字节一致）", () => {
@@ -258,17 +261,18 @@ describe("formatLiveToolEvent", () => {
       kind: "ok",
       detail: "编辑 a.ts：old → new",
     });
-    expect(line).toBe("edit_file · 编辑 a.ts：old → new · ok");
+    expect(line).toBe("[完成] edit_file · 编辑 a.ts：old → new");
   });
 
-  test("detail 空 → 省去中间分隔符（无 ` ·  · ` 残留）", () => {
+  test("detail 空 → `[完成] name`（无 ` · ` 残留）", () => {
     const line = formatLiveToolEvent({
       toolName: "mystery",
       input: {},
       kind: "ok",
       detail: "",
     });
-    expect(line).toBe("mystery · ok");
+    expect(line).toBe("[完成] mystery");
+    expect(line.includes(" · ")).toBe(false);
   });
 });
 
@@ -492,16 +496,18 @@ describe("子代理工具专属显示（isSubagentTool / subagentDisplayMark / S
     expect(line.includes("·")).toBe(false);
   });
 
-  test("formatLiveToolEvent bash ok 回归 → `bash · <detail> · ok` 字节不变（普通分支不受影响）", () => {
+  test("formatLiveToolEvent bash ok 回归 → `[完成] bash · <detail>`（#693 T1 D7 统一形态）", () => {
     const line = formatLiveToolEvent({
       toolName: "bash",
       input: { command: "npm test" },
       kind: "ok",
     });
-    expect(line).toBe("bash · npm test · ok");
+    expect(line).toBe("[完成] bash · npm test");
+    // 不再有尾缀 ` · ok`（spec D7 消除的不一致）。
+    expect(line.endsWith(" · ok")).toBe(false);
   });
 
-  test("formatLiveToolEvent tool_search detail 空（普通分支）→ 普通空形态字节不变", () => {
+  test("formatLiveToolEvent tool_search detail 空（普通分支）→ `[完成] tool_search`（无 `· ` 残留）", () => {
     // 工具 search / 神秘工具在 detail 空时仍走普通分支；子代理分支不被波及。
     const line = formatLiveToolEvent({
       toolName: "tool_search",
@@ -509,7 +515,7 @@ describe("子代理工具专属显示（isSubagentTool / subagentDisplayMark / S
       kind: "ok",
       detail: "",
     });
-    expect(line).toBe("tool_search · ok");
+    expect(line).toBe("[完成] tool_search");
     expect(line).not.toContain("子代理");
   });
 });
@@ -648,6 +654,7 @@ describe("completedToolPreview: 完成态分类 + 截断窗", () => {
 
 // M5 fixup：formatLiveToolEvent opts.cols 透传 —— detail override 缺省时
 // 走 summarizeToolCall(name, input, cols) 视觉宽度收口（窄终端 CJK 不溢出）。
+// #693 T1 D7：文案形态统一为 `[完成] name · detail`，尾缀 `· ok` 已下线。
 describe("formatLiveToolEvent(cols) 透传：detail 空时按视觉宽度收口", () => {
   test("窄 cols + CJK 长 command → 单行 ≤ cols（不在中间换行）", () => {
     // detail 空走 summarizeToolCall；提供 cols 时 detail 按视觉宽度收口。
@@ -661,7 +668,7 @@ describe("formatLiveToolEvent(cols) 透传：detail 空时按视觉宽度收口"
       cols,
     });
     expect(visualWidth(line)).toBeLessThanOrEqual(cols);
-    expect(line.endsWith("· ok")).toBe(true);
+    expect(line.startsWith("[完成] bash ·")).toBe(true);
   });
 
   test("cols 缺省 → legacy 80 字符截断（与既有调用方字节兼容）", () => {
@@ -670,8 +677,8 @@ describe("formatLiveToolEvent(cols) 透传：detail 空时按视觉宽度收口"
       input: { command: "x".repeat(200) },
       kind: "ok",
     });
-    // 80 字符截断 + `· ok` 后缀总长不超过 100
+    // 80 字符截断 + `[完成] bash · ` 前缀总长不超过 100
     expect(line.length).toBeLessThanOrEqual(100);
-    expect(line.startsWith("bash · x")).toBe(true);
+    expect(line.startsWith("[完成] bash · x")).toBe(true);
   });
 });

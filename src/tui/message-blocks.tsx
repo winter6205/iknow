@@ -51,17 +51,15 @@ import type {
 } from "../harness/model-adapter/types.js";
 import { tuiPalette } from "./theme.js";
 import {
-  summarizeToolCall,
+  formatToolStatusLine,
   completedToolPreview,
   formatRanSuffix,
   countBashCalls,
-  isSubagentTool,
-  subagentDisplayMark,
-  SUBAGENT_TOOL_LABEL,
   type CompletedToolPreview,
 } from "./tool-summary.js";
 import { clipOneLineVisual } from "./tool-summary.js";
 import { CompletedToolPreviewView } from "./completed-tool-preview-view.js";
+import { MessageShell } from "./message-shell.js";
 import { Markdown } from "./markdown.js";
 import {
   REDACTED_PLACEHOLDER,
@@ -73,10 +71,11 @@ import { stripPrefetchOverlay } from "../harness/memory/prefetch.js";
 
 type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
 
-/** tool_use 摘要行：`[运行中]|[完成]|[失败] name · detail`。
- *  子代理工具（spawn_subagent / subagent_result）走独立视觉
- *  `${mark} 子代理 · ${detail}`，glyph（▣/✓/✗）已表状态，
- *  不与普通工具共用 `[运行中]/[完成]/[失败] name` 形态。
+/** tool_use 摘要行：`[运行中]|[完成]|[失败] name · detail`（普通工具），
+ *  子代理工具走独立形态 `${mark} 子代理 · ${detail}`（glyph 已表状态）。
+ *  文案拼装统一委托 `formatToolStatusLine`（tool-summary SSOT，#693 T1 D7），
+ *  历史 + live 两侧字节一致 —— spec D1 列出要消除的「live `bash · pwd · ok`
+ *  vs 历史 `[完成] bash · pwd`」不一致。
  *  2026-08-14：不再拼 `，ran N command(s)` 后缀 —— 工具计数只由
  *  ThinkingSummary（有秒数时）统一汇总一次（`思考了 N 秒 · ran M …`），
  *  避免「思考折叠行 + 工具行」双处重复计数造成结束状态混乱观感。
@@ -86,31 +85,23 @@ function ToolSummaryRow(props: {
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly cols: number;
 }): ReactNode {
-  const { detail } = summarizeToolCall(
-    props.tu.name,
-    props.tu.input,
-    props.cols
-  );
   const hasResult = props.statusMap.has(props.tu.id);
   const failed = props.statusMap.get(props.tu.id) === true;
-  // 子代理工具专属形态：glyph + 子代理标签 + detail。
-  if (isSubagentTool(props.tu.name)) {
-    const mark = !hasResult
-      ? subagentDisplayMark("running")
-      : failed
-        ? subagentDisplayMark("failed")
-        : subagentDisplayMark("ok");
-    return (
-      <text fg={failed ? tuiPalette.error : tuiPalette.dim} wrapMode="none">
-        {mark} {SUBAGENT_TOOL_LABEL} · {detail}
-      </text>
-    );
-  }
-  const mark = !hasResult ? "[运行中]" : failed ? "[失败]" : "[完成]";
-  const fg = failed ? tuiPalette.error : tuiPalette.dim;
+  const status: "running" | "ok" | "failed" = !hasResult
+    ? "running"
+    : failed
+      ? "failed"
+      : "ok";
+  const line = formatToolStatusLine({
+    toolName: props.tu.name,
+    input: props.tu.input,
+    status,
+    cols: props.cols,
+  });
+  const fg = status === "failed" ? tuiPalette.error : tuiPalette.dim;
   return (
     <text fg={fg} wrapMode="none">
-      {mark} {props.tu.name} · {detail}
+      {line}
     </text>
   );
 }
@@ -313,16 +304,11 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
   if (nodes.length === 0) return null;
   // T7：assistant 底色块（pal.assistantBg + paddingX=1 水平缩进，无 paddingY
   // 贴内容）；消息间 1 行节奏由根节点 marginTop prop 提供（随消息存亡）。
+  // #693 T1 D1：assistant 外壳收敛到 MessageShell（memo 包裹，浅比较稳定），
+  // 与 chat-view 流式草稿 / 折叠行共用同一组件 —— 消除「外壳跳变」不一致。
   return (
-    <box flexDirection="column" marginTop={props.marginTop ?? 0}>
-      <box
-        flexDirection="column"
-        backgroundColor={pal.assistantBg}
-        paddingX={1}
-        paddingY={0}
-      >
-        {nodes}
-      </box>
-    </box>
+    <MessageShell cols={cols} marginTop={props.marginTop ?? 0}>
+      {nodes}
+    </MessageShell>
   );
 });
