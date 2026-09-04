@@ -93,6 +93,14 @@ export interface AssemblyContext {
    *  段缺席 (KV 缓存字节级稳定);调用抛错 → console.warn + 跳过 (降级契约
    *  对齐 memory_layer)。schema 不进本段(名字目录只承载服务名 + 工具名)。 */
   readonly mcp?: () => ReadonlyArray<McpServiceSummary> | undefined;
+  /** B6 / ADR-0043 §3:溢出治理退场内建件名单段(可选,渐进式披露第二档)。
+   *  返回**会话级冻结**的退场名单(闭包在 build-engine 装配期首轮判定一次
+   *  后冻结,会话内恒定)。缺席 / 空数组 → 段缺席(字节级零变化);模型用
+   *  `tool_search` 拉回退场件 schema,经 `discover()` 进 discovered 集 +
+   *  visibleSchemas 走 discoveredTail 把 schema 带回 tools 尾部。
+   *  顺序契约:与 mcp 名字目录同形态,裸名字 + tool_search 引导;核心件永
+   *  不在此名单(由 tool-overflow.ts CORE_TOOL_NAMES 守门)。 */
+  readonly deferredInternalTools?: () => ReadonlyArray<string> | undefined;
   /** #558 T2 coordinator 段注入缝 (可选):默认路径(build-engine 在
    *  chat/tui/serve 自建 manager)不再注入 —— 引导落点已迁到 spawn_subagent
    *  工具 description (#557 T1 SSOT)。调用方显式传入非空字符串仍渲染
@@ -165,6 +173,28 @@ export function mcpNameDirectorySegment(
   return `<mcp_name_directory>\n${lines.join("\n")}\n</mcp_name_directory>`;
 }
 
+/**
+ * B6 / ADR-0043 §3 `<deferred_internal_tools>` 段渲染 —— 溢出治理退场
+ * 的内建件名单(裸名,无 schema)。退场件 = 标 `aci.deferrable: true` 的
+ * 内建件中,首轮 `countTokens` 实测超出 context window 10% 阈值后被 stamp
+ * `aci.lazy: true` 的部分(schema 从 promptTools 抽出,模型经 tool_search
+ * 拉回)。
+ *
+ * 与 mcp 名字目录同形态,但不分组(内建件无 server 维度),按字母序输出
+ * 以保证字节稳定。空数组 → 返回 undefined(段缺席,字节级零变化)。
+ * 引导句与 mcp 名字目录一致(用户能直接拼出"调 tool_search")。
+ */
+export function deferredInternalToolsSegment(
+  names: ReadonlyArray<string>
+): string | undefined {
+  if (names.length === 0) return undefined;
+  const sorted = [...names].sort((a, b) => a.localeCompare(b));
+  return (
+    `<deferred_internal_tools>\n${sorted.join("\n")}\n` +
+    `</deferred_internal_tools>`
+  );
+}
+
 /** IKNOW-196 入口范围判定。对话型入口(chat / tui / serve)激活 BOOTSTRAP;
  *  仅脚本型(ask)跳过。serve 是同一主体的浏览器交互面(iknow serve + SPA),
  *  与 chat/tui 共享同一 identity 状态机,不再单独降级(用户 2026-08-08 裁定)。 */
@@ -205,6 +235,10 @@ export function createIknowSystemResolver(opts: {
   readonly skills?: () => ReadonlyArray<SkillSummary> | undefined;
   /** #631 T2 → B4 (ADR-0043 §3) MCP 名字目录段注入缝 (可选):见 AssemblyContext.mcp 注释。 */
   readonly mcp?: () => ReadonlyArray<McpServiceSummary> | undefined;
+  /** B6 / ADR-0043 §3:溢出治理退场内建件名单段注入缝 (可选):见
+   *  AssemblyContext.deferredInternalTools 注释。**会话级冻结**(闭包
+   *  取一次后不再变),首轮判定的退场名单 = 整会话的退场名单。 */
+  readonly deferredInternalTools?: () => ReadonlyArray<string> | undefined;
   /** #558 T2 coordinator 段注入缝 (可选):默认路径(build-engine 在
    *  chat/tui/serve 自建 manager)不再注入 —— 引导落点已迁到 spawn_subagent
    *  工具 description (#557 T1 SSOT)。调用方显式传入非空字符串仍渲染
@@ -232,6 +266,9 @@ export function createIknowSystemResolver(opts: {
       ...(opts.toolList ? { toolList: opts.toolList } : {}),
       ...(opts.skills ? { skills: opts.skills } : {}),
       ...(opts.mcp ? { mcp: opts.mcp } : {}),
+      ...(opts.deferredInternalTools
+        ? { deferredInternalTools: opts.deferredInternalTools }
+        : {}),
       ...(opts.coordinatorText
         ? { coordinatorText: opts.coordinatorText }
         : {}),
@@ -297,6 +334,25 @@ export async function assembleIdentityContext(
     if (summaries) {
       const directory = mcpNameDirectorySegment(summaries);
       if (directory !== undefined) segments.push(directory);
+    }
+  }
+  // B6 / ADR-0043 §3 加性段 `<deferred_internal_tools>`:append 在 mcp
+  // 名字目录之后、git 块之前;不触碰 LOCKED 顺序。降级契约对齐 mcp 段:
+  // 缝缺席 / 返回空 / 解析抛错 → 段缺席(字节级零变化)。会话级冻结:
+  // 闭包在 build-engine 装配期首轮判定后冻结,相邻轮 deep-equal。
+  if (ctx.deferredInternalTools) {
+    let deferredNames: ReadonlyArray<string> | undefined;
+    try {
+      deferredNames = ctx.deferredInternalTools();
+    } catch (err) {
+      console.warn(
+        `[identity/assemble] deferred internal tools resolver failed: ${String(err)}`
+      );
+      deferredNames = undefined;
+    }
+    if (deferredNames) {
+      const segment = deferredInternalToolsSegment(deferredNames);
+      if (segment !== undefined) segments.push(segment);
     }
   }
   // plans/model-prefix-layering.md B5 / spec §9:加性段 `## Git`(会话级常量层,

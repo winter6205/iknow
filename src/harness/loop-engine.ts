@@ -52,6 +52,8 @@ import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
   AssistantTurnResult,
+  CountTokensInput,
+  CountTokensResult,
   LoopState,
   RunResult,
   TokenUsage,
@@ -161,6 +163,21 @@ export interface LoopAdapter {
     },
     signal?: AbortSignal // 017 T1 决策:LoopAdapter 是 Loop Engine 直接消费接口,必须能接收 signal
   ) => Promise<AssistantTurnResult>;
+  /**
+   * B6 / ADR-0043 §3:可选 countTokens 钩子(溢出治理专用)。
+   *
+   * 真实 Anthropic adapter(`createRealAnthropicAdapter`)实现本方法 ——
+   * 透传 SDK `client.messages.countTokens` 实测 token 数;Stub / 离线
+   * adapter **不实现**(字段缺席 → 装配层跳过本会话,`console.warn` 一行
+   * 记录,首轮不抛错、不重试,见 `aci/tool-overflow.ts` skip 语义)。
+   *
+   * **不入 loop-engine 消费面**:countTokens 仅装配期调用一次,会话内
+   * 恒定,后续每轮 `step` 不调用本方法(避免与目标端点被动缓存兼容的
+   * 抖动风险)。loop-engine 不读取本字段,接口就位仅为类型安全。
+   */
+  readonly countTokens?: (
+    input: CountTokensInput
+  ) => Promise<CountTokensResult>;
   /**
    * #178 T5 (#147 D6):实际调用模式申报 —— true = 该 adapter 走流式臂
    * (SDK `.stream()`),false/undefined = 非流式臂 / 离线替身。loop-engine

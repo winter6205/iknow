@@ -758,8 +758,54 @@ export function createRealAnthropicAdapter(
       onStream: request.onStream,
     });
   }
+  /**
+   * B6 / ADR-0043 §3:实测 token 数 —— 透传 SDK `client.messages.
+   * countTokens({ messages, model, system?, tools? })`,只取
+   * `input_tokens` 一字段(SDK 响应 `MessageTokensCount` 仅此字段)。
+   *
+   * 契约(与 types.ts CountTokensInput 对齐):
+   *   - `input.tools` = 当前 visibleSchemas()(与 step request.tools 同源)
+   *   - `input.system` = 装配期 system 文本(与 step request.system 同源)
+   *   - `input.messages` = 当前消息历史(空 messages 也合法,SDK 支持)
+   *   - `messages` 字段须做 system-role 过滤(`buildMessageParams` 同款
+   *     invariant #383 B2 T2 / R1 #385:system 消息绝不上 wire)
+   *
+   * 失败路径:SDK 抛错(APIError / AbortError / 任何非 200)→ 原样 rethrow,
+   * 由装配层 catch → 跳过本会话(详见 `tool-overflow.ts` skip 语义)。
+   */
+  async function countTokens(input: {
+    tools?: ReadonlyArray<unknown>;
+    system?: string;
+    messages?: ReadonlyArray<AnthropicNativeMessage>;
+  }): Promise<{ inputTokens: number }> {
+    // system 消息绝不上 wire(同 `buildMessageParams` 装配期 invariant
+    // #383 B2 T2 / R1 #385);首轮典型场景 messages 缺席 → undefined → 字段
+    // 省略,SDK 接受空 messages。
+    const messagesParam: MessageParam[] = input.messages
+      ? (input.messages.filter(
+          (m) => m.role !== "system"
+        ) as unknown as MessageParam[])
+      : [];
+    const toolsParam = toSdkTools(input.tools);
+    // SDK 0.115 `MessageCountTokensParams` 字段:model + messages 必填;
+    // system / tools 条件附加,空值/缺席不发。
+    const resp = await opts.client.messages.countTokens({
+      model: opts.model,
+      messages: messagesParam,
+      ...(toolsParam !== undefined ? { tools: toolsParam } : {}),
+      ...(input.system !== undefined && input.system !== ""
+        ? { system: input.system }
+        : {}),
+    });
+    // SDK 响应 `MessageTokensCount`:仅 `input_tokens: number`。空 / 缺
+    // 失视为 0 —— 装配层 `runOverflowJudge` 二次守门(非有限数 / 负数 →
+    // skip 语义)。
+    const n = (resp as { input_tokens?: unknown }).input_tokens;
+    return { inputTokens: typeof n === "number" ? n : 0 };
+  }
   return Object.freeze({
     step,
+    countTokens,
     encodeUserText,
     encodeToolResults,
     // #178 T5 (D6):adapter 级模式申报(stream 是构造时静态决策,实例内不切换)。

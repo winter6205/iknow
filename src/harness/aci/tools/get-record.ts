@@ -178,6 +178,9 @@ export function createGetRecordTool(
       isConcurrencySafe: true,
       interruptBehavior: "cancel" as const,
       timeoutTier: "fast" as const,
+      // B6 / ADR-0043 §3:trace 读侧内容轴(schema 面积通常最小),退场
+      // 次序第三位。
+      deferrable: true,
     },
   });
 }

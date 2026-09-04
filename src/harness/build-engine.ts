@@ -36,6 +36,7 @@ import type { GraphModeContext } from "./graph/mode.js";
 import { createGraphAssembly, type GraphAssembly } from "./graph/assembly.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
 import type { AciRegistry } from "./aci/aci-registry.js";
+import { runOverflowJudge } from "./aci/tool-overflow.js";
 import { errorMessage } from "./errors.js";
 import type { AciCatalog } from "./aci/types.js";
 import { createLspNotifier } from "./lsp/notifier.js";
@@ -247,6 +248,21 @@ export type BuildEngineOpts = {
    *  唯一的 per-session 目录；测试可传 mkdtemp 路径隔离。surface === "ask"
    *  路径不传(SC8 oneshot 剥离,与 memory / subagent / skill 编排同形态)。 */
   readonly todoDir?: string;
+  /**
+   * B6 / ADR-0043 §3:溢出治理 countTokens 注入缝(测试用)。生产默认 =
+   * undefined → 装配层取 `adapter.countTokens`(由 `createRealAnthropicAdapter`
+   * 实现,透传 SDK `client.messages.countTokens`)。测试用 stub 覆盖:
+   * 直接返 `{ inputTokens: <n> }` 控制阈值判定结果,绕开真实网络/SC7
+   * 必依赖。
+   *
+   * 装配期一次性 await —— `buildHarnessEngine` 在 `await mcpManager.start()`
+   * 之后调一次(首轮判定,会话内恒定),后续每轮 `promptTools` 不重测
+   * (B4 §2 + B6 plan §8 钉死 "会话中不重算")。
+   */
+  readonly countTokens?: (input: {
+    readonly tools?: ReadonlyArray<unknown>;
+    readonly system?: string;
+  }) => Promise<{ readonly inputTokens: number }>;
 };
 
 /**
@@ -938,6 +954,118 @@ export async function buildHarnessEngine(
     });
   }
 
+  // B6 / ADR-0043 §3:溢出治理(装配期首轮判定,session 内冻结,后续每轮
+  // promptTools 不重测)。判定点 = `await mcpManager.start()` 之后(若 mcp
+  // 装配)或 reg 构造完即跑(ask 路径):MCP tools 此时已 registerExternal
+  // 到 reg.catalog,MCP schema 计入 countTokens 实测量,但 MCP 件本身已
+  // 是 lazy(不进 visibleSchemas)—— 仅内建 deferrable 5 件参与退场。
+  //
+  // 判定函数 `runOverflowJudge`(纯逻辑,本文件不内嵌判定循环,见
+  // aci/tool-overflow.ts)只负责:1) 收集 deferrable 池(内建 + MCP);
+  // 2) 调 countTokens;3) 按 DEFERRABLE_BUILTIN_RETIRE_ORDER 逐件退;
+  // 4) 返回 retire 名单 + reason。本文件负责 wire:取系统文本、调
+  // countTokens、把 retire 名单 stamp 到 reg。
+  //
+  // countTokens 来源优先级:opts.countTokens(测试缝) > adapter.countTokens
+  // (createRealAnthropicAdapter 实现,真 SDK 调)。后者缺席(undefined)→
+  // 跳过本会话(skip 语义,见下方 catch + reason 分支)。
+  //
+  // system 文本 = assembleStaticSystemPrompt 装配的 6 段 LOCKED + 已知
+  // 加性段(项目路径 / 技能 / mcp 名字目录 / git 块)。countTokens 接收
+  // 与 model turn 装配期同一份 resolver(为简化,装配期一次性取一次
+  // 冻结快照—— B6 plan §8 "countTokens 实测的对象" 实际装配的 system
+  // 文本;系统 prompt 在不同 turn 间会变,但首轮判定只用首轮的)。
+  // 为避免把"装配件 vs 装配件之外的 resolver"再次拼装,本实现用
+  // `assembleStaticSystemPrompt` 简化版拿静态段(无 IKNOW 装配件外部
+  // 副作用的),加上 IKNOW_IDENTITY/SOUL/USAGE 常量拼成 system 文本
+  // —— 真实测的是工具面面积(占绝对主体),不是 system 文本细微差异。
+  const overflowSystemText = await assembleStaticSystemPrompt({
+    projectIdentityRoot,
+    userHome,
+    workspaceRoot,
+  });
+  const overflowInput = {
+    // 装配期实测的"模拟首轮请求完整面"—— visibleSchemas() 取注册表
+    // (内建 + 已 register 的 MCP)。retire 字段在循环内部维护(每退 1
+    // 件重测 1 次,新表面 = retire 后 visibleSchemas())。
+    // 闭包捕获 reg —— 后续 reg.retireBuiltin 后 reg.visibleSchemas()
+    // 反映最新可见集(已退的不再返)。
+    tools: reg.visibleSchemas(),
+    // 简化 system 文本(常量段 + 静态说明书);full resolver 在 loop
+    // turn 边界才拼(system / mcp / git 块都需装配件现读)。溢出治理
+    // 关心工具面面积(占 95%+)—— 此简化不破坏判定。
+    system:
+      "## Identity\n" +
+      // IKNOW 常量拼一段(不必走 import 链,简化;运行时量小不影响判定)
+      "iknow harness identity.\n\n" +
+      overflowSystemText,
+  };
+  const countTokensFn =
+    opts.countTokens ??
+    (adapter.countTokens !== undefined
+      ? async (input: {
+          readonly tools?: ReadonlyArray<unknown>;
+          readonly system?: string;
+        }) => {
+          // 真实 adapter:仅传 tools + system(messages 缺席 = SDK 接受空
+          // 消息;首轮判定场景下 messages 必空)。
+          return adapter.countTokens!({
+            tools: input.tools as ReadonlyArray<unknown> | undefined,
+            system: input.system,
+          });
+        }
+      : undefined);
+  // 装配期首轮判定:只跑一次(session 内恒定,后续每轮 promptTools
+  // 不重测)。失败/缺席 = 跳过本会话 + warn(全部 deferrable 内建件
+  // 保持常驻);超阈值 = 退场次序内 stamp lazy:true。
+  let deferredRetireNames: ReadonlyArray<string> = [];
+  if (countTokensFn !== undefined) {
+    // 我们传给 runOverflowJudge 的 countTokens 闭包要"在 retire 后重测"
+    // —— 闭包内部重读 reg.visibleSchemas()(反映最新可见集)。
+    const sampleTools = (): ReadonlyArray<unknown> => reg.visibleSchemas();
+    let measureIdx = 0;
+    const measureTrace: number[] = [];
+    try {
+      const result = await runOverflowJudge({
+        tools: reg.catalog.all(),
+        // 阈值 = contextWindow * 0.1(env.compress.contextWindow SSOT)。
+        threshold: env.compress.contextWindow * 0.1,
+        countTokens: async () => {
+          const v = await countTokensFn({
+            tools: sampleTools(),
+            system: overflowInput.system,
+          });
+          measureTrace.push(v.inputTokens);
+          measureIdx += 1;
+          return v.inputTokens;
+        },
+      });
+      if (result.reason === "retired") {
+        deferredRetireNames = result.retire;
+        reg.retireBuiltin([...result.retire]);
+      } else if (result.reason === "countTokens_failed") {
+        // 失败/缺席 → 跳过本会话;全部 deferrable 内建件保持常驻。
+        // spec §5 钉死:首轮不抛错、不重试,console.warn 一行。
+        console.warn(
+          `[build-engine] overflow judge skipped: countTokens failed: ${errorMessage(
+            result.cause
+          )}`
+        );
+      }
+      // reason === "no_overflow" → 零动作(全部保持常驻)
+      // measureTrace 在 SC7 测试层验证(超阈值时多次重测;未超时
+      // 仅 1 次;失败为 0)
+    } catch (err) {
+      // runOverflowJudge 自身不抛(吞 SDK 错到 countTokens_failed 分支);
+      // 此 catch 为未来防御:任何 throw 不阻塞装配,只 warn。
+      console.warn(
+        `[build-engine] overflow judge unexpected error: ${errorMessage(err)}`
+      );
+    }
+  }
+  // session 内恒定的退场名单(holder;系统 resolver 每轮调同一闭包)。
+  const deferredInternalToolsList = deferredRetireNames;
+
   // D-α T3 / ADR-0030:overlay 接了才有 graph 装配面。快照对象是本次
   // 装配的单点 —— registry(工具在不在)、promptTools(露不露)、deps.system
   // (编排段进不进)三处读的都是它，不各读各的 holder。
@@ -1195,6 +1323,14 @@ export async function buildHarnessEngine(
               }),
           }
         : {}),
+      // B6 / ADR-0043 §3:溢出治理退场名单段(可选)—— 首轮判定后冻结,
+      // 会话内恒定(deferredInternalToolsList holder 上方定义)。空
+      // 名单(无超限 / 失败)→ 闭包返空数组 → 段缺席;非空 → 渲染
+      // <deferred_internal_tools> 段(每行一名 + 工具名,字母序稳
+      // 定)。与 mcp 名字目录同形态,加性段不触碰 IKNOW_ASSEMBLY_ORDER。
+      // ask surface 无 manager / 同样走此缝(无 MCP 但可能有内建退
+      // 场);失败跳过 → list 必空 → 段缺席。
+      deferredInternalTools: () => deferredInternalToolsList,
       // #558 T2: 默认路径停止注入 coordinator 段 — 引导落点收敛到
       // spawn_subagent 工具 description (T1 SSOT)。装配缝保留:
       // 调用方可显式传入 coordinatorText 让 createIknowSystemResolver 渲染该段

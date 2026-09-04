@@ -115,6 +115,10 @@ export function createQueryTraceTool(
       isConcurrencySafe: true,
       interruptBehavior: "cancel" as const,
       timeoutTier: "fast" as const,
+      // B6 / ADR-0043 §3:trace 读侧 row-axis(schema 面积最大)→ 退场次序
+      // 首位;超阈值时首退。stamp 仅此一处;`tool-overflow.ts` 是判定层
+      // SSOT,本字段是数据来源。
+      deferrable: true,
     },
   });
 }

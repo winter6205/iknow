@@ -29,6 +29,21 @@ export interface AciRegistry {
    */
   readonly unregisterExternal: (names: ReadonlyArray<string>) => void;
   /**
+   * B6 / ADR-0043 §3:溢出治理退场 seam —— 把内建 deferrable 件 stamp
+   * `aci.lazy: true`(进 lazy 尾部纪律:`visibleSchemas` 过滤 / 名字目录
+   * 段可发现 / `tool_search` 可拉回)。**仅操作构造期 `tools` 数组 + 对应
+   * `byName` 槽**;`inner` 冻结快照不动(executor 仍能解析,name 解析走
+   * byName fallback)。仅限 `byName` 内的名字(内建 + 已 register 的
+   * 都不影响 —— 后者已被 B4 的 `lazy: true` 标记)。未注册的名字静默忽略
+   * (幂等,与 `unregisterExternal` 同形态)。
+   *
+   * 这是 B6 溢出治理的**唯一**写 seam:`build-engine` 装配期
+   * `await mcpManager.start()` 之后调一次(首轮判定,会话内恒定);不退
+   * 的内建件 = 不调。核心七件永不退场(由 `tool-overflow.ts` 上游保证,
+   * 本 seam 二次守门,见 stampRetireLazy)。
+   */
+  readonly retireBuiltin: (names: ReadonlyArray<string>) => void;
+  /**
    * 进 prompt 的集合：非 lazy 全量（注册序）+ 已发现 lazy（discovery 序
    * 尾部追加，保前缀稳定）。
    */
@@ -158,6 +173,33 @@ export function createAciRegistry(
     }
   };
 
+  // B6 / ADR-0043 §3:退场 seam —— 把构造期 `tools` 数组中指定名的元素
+  // 替换为带 `aci.lazy: true` 的新 def;同时 byName 也指向新 def(catalog
+  // 与 visibleSchemas 都从 byName / tools 读,实现一次替换两处一致)。
+  // 已 lazy 的不动(幂等);未在 byName 的名字静默忽略(与 unregisterExternal
+  // 同形态 —— 溢出治理调用方本就该保证 retire 名单 = 内建 deferrable
+  // 池,无未知名)。
+  const retireBuiltin = (names: ReadonlyArray<string>): void => {
+    for (const name of names) {
+      const existing = byName.get(name);
+      if (existing === undefined) continue;
+      if (existing.aci.lazy === true) continue;
+      const retired = Object.freeze({
+        ...existing,
+        aci: Object.freeze({ ...existing.aci, lazy: true }),
+      }) as AciToolDef;
+      byName.set(name, retired);
+      // 同步替换 `tools` 数组槽位(visibleSchemas 用 `[...tools, ...]`,
+      // 闭包读 this 数组 = 当前内容)
+      for (let i = 0; i < tools.length; i += 1) {
+        if (tools[i]?.name === name) {
+          (tools as AciToolDef[])[i] = retired;
+          break;
+        }
+      }
+    }
+  };
+
   const visibleSchemas = (): ReadonlyArray<ToolDef> => {
     const all = [...tools, ...externalByExt.values()];
     // #224 不变式：非 lazy 注册序前缀逐位稳定——即使某非 lazy 工具被
@@ -184,6 +226,7 @@ export function createAciRegistry(
     catalog,
     registerExternal,
     unregisterExternal,
+    retireBuiltin,
     visibleSchemas,
     discover,
     isDiscovered,
