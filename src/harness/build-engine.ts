@@ -749,6 +749,13 @@ export async function buildHarnessEngine(
    */
   let mcpReconnectPending:
     { events: Array<{ server: string; tools: string[] }> } | undefined;
+  /**
+   * B4 / ADR-0043 §4 + spec model-prefix-layering §4:MCP 名字目录会话级
+   * 快照 holder。firstTurnReady 窗口 resolve 后冻结一次(chat/tui/serve);
+   * deps.system 的 mcp 缝只读此快照(会话内恒定,断言②)。ask surface
+   * (无 manager)恒 undefined → 缝缺席,段缺席。
+   */
+  let mcpNameDirectorySnapshot: ReadonlyArray<McpServiceSummary> | undefined;
   // D-α T3 / ADR-0030:overlay 接了才有 graph 装配面。快照对象是本次
   // 装配的单点 —— registry(工具在是不是在)、promptTools(露不露)、deps.system
   // (编排段进不进)三处读的都是它，不各读各的 holder。ask surface 没有
@@ -916,6 +923,28 @@ export async function buildHarnessEngine(
         `[build-engine] MCP manager start window error: ${errorMessage(err)}`
       );
     }
+    // B4 / ADR-0043 §4 + spec model-prefix-layering §4:名字目录首轮定稿、
+    // 会话内恒定 —— 在 firstTurnReady 窗口 resolve 后把 connected 服务 +
+    // 工具名冻结为一份会话级快照,deps.system 的 mcp 缝只读快照。窗口内
+    // 未连上的 server 迟到连上(#378 flip-back)不再渗回目录;否则相邻轮
+    // system 字节漂移,破断言②(实测:迟到连接曾使目录中途出现新 server)。
+    // 手动重连成功的目录更新走 onManualReconnect → messages 尾追加通知
+    // (不回写目录)。
+    mcpNameDirectorySnapshot = mcpManager
+      .status()
+      .map((server) => {
+        const prefix = `mcp__${server.name}__`;
+        const toolNames: string[] = [];
+        for (const def of reg!.catalog.all()) {
+          if (def.name.startsWith(prefix)) toolNames.push(def.name);
+        }
+        return {
+          name: server.name,
+          state: server.state,
+          tools: toolNames,
+        } satisfies McpServiceSummary;
+      })
+      .filter((s) => s.state === "connected");
   } else {
     // ask 路径:无 mcpManager,reg 一次构造,无 manager 工具,无 start。
     reg = createDefaultAciRegistry({
@@ -1303,24 +1332,13 @@ export async function buildHarnessEngine(
       // #631 T2 → B4 (ADR-0043 §3):MCP 名字目录段注入缝(渐进式披露
       // "索引常驻档")—— 仅 mcpManager 在场(chat/tui/serve)时注入;ask
       // 无 manager → 缝缺席 → 段缺席(字节级零变化,守 KV 缓存稳定契约)。
-      // 每 turn 装配期快照:connected 服务 + 其工具名(裸名,无 schema/
-      // description);schema 由 tool_search 按需拉取。装配期已 await
-      // firstTurnReady,首轮即含窗口内连上的服务。
-      ...(mcpManager
+      // 名字目录 = 会话级快照(见上方 mcpNameDirectorySnapshot 冻结点):
+      // firstTurnReady 窗口 resolve 后定稿,相邻轮 deep-equal(断言②)。
+      // 窗口内未连上的 server 迟到连上不渗回;手动重连成功的目录增量走
+      // messages 尾追加通知(不回写目录)。
+      ...(mcpNameDirectorySnapshot
         ? {
-            mcp: () =>
-              mcpManager.status().map((server) => {
-                const prefix = `mcp__${server.name}__`;
-                const toolNames: string[] = [];
-                for (const def of reg!.catalog.all()) {
-                  if (def.name.startsWith(prefix)) toolNames.push(def.name);
-                }
-                return {
-                  name: server.name,
-                  state: server.state,
-                  tools: toolNames,
-                } satisfies McpServiceSummary;
-              }),
+            mcp: () => mcpNameDirectorySnapshot,
           }
         : {}),
       // B6 / ADR-0043 §3:溢出治理退场名单段(可选)—— 首轮判定后冻结,
