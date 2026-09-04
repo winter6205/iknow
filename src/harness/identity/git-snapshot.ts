@@ -8,10 +8,9 @@
  *     时取一次快照、会话内冻结（build-engine / worker 装配期同步执行）。
  *     装配层每 turn 调同一闭包 → 相邻两轮文本 byte-identical
  *     （D9 / spec §2 断言 ② / KV 缓存契约）。
- *   - 退化态三态分型（与 `env-snapshot.ts` 同词汇表，复用
- *     `EnvDegradeReason`）：cwd_unavailable | not_a_git_repo |
- *     git_unavailable；任何退化态 → 快照 = undefined → 装配段整体
- *     缺席（spec §9：「接受缺席即字节变化」）。
+ *   - 退化态（cwd 不可用 / 非 git 仓库 / git 不可用）→ 快照 = undefined →
+ *     装配段整体缺席（spec §9：「接受缺席即字节变化」）。分型词汇表在
+ *     `env-snapshot.ts`,本模块只做「退化即 undefined」收敛。
  *   - status 输出经 `truncateByCodepoints` 截断（`GIT_STATUS_MAX_CHARS`
  *     上限，2000 codepoints，与 `MAX_ENV_DIFF_CHARS` 同档）；四要素 + D1
  *     免责句全部走 SSOT 常量。
@@ -29,10 +28,7 @@
  * 本模块是 `git` 命令在本仓的唯一 spawn 出口（assemble.ts 测试套验证）。
  */
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import {
-  truncateByCodepoints,
-  type EnvDegradeReason,
-} from "../env-snapshot.js";
+import { truncateByCodepoints } from "../env-snapshot.js";
 
 // ---------------------------------------------------------------------------
 // SSOT 常量（装配层 / 测试只引用，不复制不切片）
@@ -63,7 +59,8 @@ const DEFAULT_GIT_TIMEOUT_SECONDS = 5;
 // 公共类型
 // ---------------------------------------------------------------------------
 
-/** 一次冻结的 git 快照；`degradeReason` 非 null 表示退化态（其余字段可空）。 */
+/** 一次冻结的 git 快照。退化态不产出本对象（provider 返回 undefined →
+ *  装配段整体缺席），因此没有 degradeReason 字段。 */
 export interface GitSnapshot {
   /** 当前分支名；detached HEAD 时为 "HEAD"；退化态 → null。 */
   readonly branch: string | null;
@@ -74,8 +71,6 @@ export interface GitSnapshot {
   readonly status: string | null;
   /** 最近 5 条 commit（`git log --oneline -5` 拆行）；退化 → []。 */
   readonly recentCommits: ReadonlyArray<string>;
-  /** 与 `env-snapshot.ts` 同分型；正常 = null。 */
-  readonly degradeReason: EnvDegradeReason | null;
 }
 
 /** spawn 注入缝（测试可替换；默认走 node:child_process.spawnSync）。 */
@@ -114,23 +109,9 @@ function defaultExec(
 }
 
 // ---------------------------------------------------------------------------
-// 退化分类（与 env-snapshot.ts classifyGitStatusError 同形态）
+// 退化判定（与 env-snapshot.ts 同词汇表,退化即 undefined —— 本模块不再
+// 透出 EnvDegradeReason 分型,分型细节由 env-snapshot.ts 自身负责）
 // ---------------------------------------------------------------------------
-
-const NOT_A_GIT_REPO_MARKER = "fatal: not a git repository";
-
-function classifyGitError(result: SpawnSyncReturns<string>): EnvDegradeReason {
-  if (result.error !== null && result.error !== undefined) {
-    // spawn 同步失败（ENOENT / EACCES 等）→ git_unavailable。
-    return "git_unavailable";
-  }
-  if (result.signal !== null) {
-    return "git_unavailable";
-  }
-  const msg = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-  if (msg.includes(NOT_A_GIT_REPO_MARKER)) return "not_a_git_repo";
-  return "git_unavailable";
-}
 
 // ---------------------------------------------------------------------------
 // 纯计算（无 IO）
@@ -168,9 +149,9 @@ function cleanStatusBlock(porcelain: string): string {
  * （D9 / spec §2 断言 ②）。
  *
  * 退化路径：
- *   - cwd 空串 → 立即退化 cwd_unavailable，**不 spawn** git。
- *   - spawn 同步失败（ENOENT / EACCES）/ 超时 / 退码非 0 → classifyGitError
- *     分型 → git_unavailable 或 not_a_git_repo → 闭包返回 undefined。
+ *   - cwd 空串 → 立即退化，**不 spawn** git。
+ *   - spawn 同步失败（ENOENT / EACCES）/ 超时 / 退码非 0 → 闭包返回
+ *     undefined（退化即 undefined，分型不透出）。
  *
  * 一旦冻结（无论成功 / 退化），闭包永远返回同一值；不重试、不 IO。
  */
@@ -196,14 +177,14 @@ function captureSnapshot(args: {
   const { cwd, exec, timeoutSeconds } = args;
   if (cwd.trim() === "") return undefined;
 
-  // 1) status（含 branch 注解行）—— 任一 spawn 失败 → 整体退化。
+  // 1) status（含 branch 注解行）—— 任一 spawn 失败 → 整体退化
+  // （退化即 undefined,分型不透出）。
   const statusResult = exec(
     ["--no-pager", "status", "--porcelain=v1", "-b"],
     cwd,
     timeoutSeconds
   );
   if (statusResult.status !== 0) {
-    void classifyGitError(statusResult);
     return undefined;
   }
   const porcelain = statusResult.stdout ?? "";
@@ -245,7 +226,6 @@ function captureSnapshot(args: {
         ? null
         : truncateByCodepoints(statusBody, GIT_STATUS_MAX_CHARS),
     recentCommits,
-    degradeReason: null,
   });
 }
 
@@ -256,8 +236,8 @@ function captureSnapshot(args: {
 /**
  * 渲染 `## Git` 段：四要素 + D1 免责句。
  *
- * - snapshot === undefined → undefined（装配层不追加段，字节级零变化）。
- * - snapshot.degradeReason !== null → undefined（同上）。
+ * - snapshot === undefined → undefined（装配层不追加段，字节级零变化；
+ *   退化态在 provider 侧已收敛为 undefined,本函数不再二次判退化）。
  * - 否则：标题 + 四要素 + 免责句。
  *
  * 字段缺席（branch / mainBranch === null）渲染占位 "—"；clean status
@@ -268,7 +248,6 @@ export function gitSnapshotSegment(
   snapshot: GitSnapshot | undefined
 ): string | undefined {
   if (snapshot === undefined) return undefined;
-  if (snapshot.degradeReason !== null) return undefined;
 
   const branch = snapshot.branch ?? "—";
   const mainBranch = snapshot.mainBranch ?? "—";

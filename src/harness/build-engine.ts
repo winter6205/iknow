@@ -1014,12 +1014,6 @@ export async function buildHarnessEngine(
     workspaceRoot,
   });
   const overflowInput = {
-    // 装配期实测的"模拟首轮请求完整面"—— visibleSchemas() 取注册表
-    // (内建 + 已 register 的 MCP)。retire 字段在循环内部维护(每退 1
-    // 件重测 1 次,新表面 = retire 后 visibleSchemas())。
-    // 闭包捕获 reg —— 后续 reg.retireBuiltin 后 reg.visibleSchemas()
-    // 反映最新可见集(已退的不再返)。
-    tools: reg.visibleSchemas(),
     // 简化 system 文本(常量段 + 静态说明书);full resolver 在 loop
     // turn 边界才拼(system / mcp / git 块都需装配件现读)。溢出治理
     // 关心工具面面积(占 95%+)—— 此简化不破坏判定。
@@ -1052,8 +1046,6 @@ export async function buildHarnessEngine(
     // 我们传给 runOverflowJudge 的 countTokens 闭包要"在 retire 后重测"
     // —— 闭包内部重读 reg.visibleSchemas()(反映最新可见集)。
     const sampleTools = (): ReadonlyArray<unknown> => reg.visibleSchemas();
-    let measureIdx = 0;
-    const measureTrace: number[] = [];
     try {
       const result = await runOverflowJudge({
         tools: reg.catalog.all(),
@@ -1064,8 +1056,6 @@ export async function buildHarnessEngine(
             tools: sampleTools(),
             system: overflowInput.system,
           });
-          measureTrace.push(v.inputTokens);
-          measureIdx += 1;
           return v.inputTokens;
         },
       });
@@ -1082,8 +1072,6 @@ export async function buildHarnessEngine(
         );
       }
       // reason === "no_overflow" → 零动作(全部保持常驻)
-      // measureTrace 在 SC7 测试层验证(超阈值时多次重测;未超时
-      // 仅 1 次;失败为 0)
     } catch (err) {
       // runOverflowJudge 自身不抛(吞 SDK 错到 countTokens_failed 分支);
       // 此 catch 为未来防御:任何 throw 不阻塞装配,只 warn。
@@ -1100,14 +1088,6 @@ export async function buildHarnessEngine(
   // (编排段进不进)三处读的都是它，不各读各的 holder。
   // (B4: `reg` 与 `graphAssembly` 已在 mcp 装配块内先于
   //  `await mcpManager.start()` 构造，见上方上移注释。)
-  // ADR-0040: the parent catalog is not the worker surface. Rebuild the
-  // worker registry through the same factory with the worker-only option
-  // shape (no parent managers, state tools, or worktree host seams), then
-  // apply the worker deny-list path in the classifier below. This keeps
-  // host-only write-category tools such as create-task-worktree and bash_stop
-  // out of the isolation decision without maintaining a second exclusion list.
-  // (note: full reg / graphAssembly / graphMode block — see comment above;
-  //  previously duplicated here, now removed in B4 reorder.)
   // ADR-0040: the parent catalog is not the worker surface. Rebuild the
   // worker registry through the same factory with the worker-only option
   // shape (no parent managers, state tools, or worktree host seams), then

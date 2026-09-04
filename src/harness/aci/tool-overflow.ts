@@ -144,8 +144,9 @@ export async function runOverflowJudge(
     try {
       next = await opts.countTokens();
     } catch (cause) {
-      // 中途失败 = 之前已退的件保留(已 latch),不再追加;返回
-      // countTokens_failed + 当前 retire,调用方 warn 但不退已退件
+      // 中途 countTokens 失败 = retire 名单仅供参考 —— 调用方 skip 语义下
+      // 不应用(全量 deferrable 保持常驻);之前已退的件保留(已 latch),
+      // 不再追加。返回 countTokens_failed + 当前 retire,调用方 warn。
       return { reason: "countTokens_failed", retire: retired, cause };
     }
     if (next <= opts.threshold) {
@@ -174,8 +175,9 @@ function deriveCandidateOrder(
   const defSet = new Set<string>();
   for (const t of tools) {
     // 核心七件(即使标 deferrable)永不参与 —— hard ceiling(ADR-0043 §3
-    // 钉死 + B6 plan §3 确认)。本过滤在候选 derivation 层一次性完成,
-    // 后续 retire 写入 stampRetireLazy 二次守门。
+    // 钉死 + B6 plan §3 确认)。本过滤在候选 derivation 层一次性完成;
+    // 后续 retire 写入由 retireBuiltin 同步守门(核心件不在预置次序 +
+    // deriveCandidateOrder 已剔除)。
     if (CORE_TOOL_NAMES.has(t.name)) continue;
     if (t.aci.deferrable === true) defSet.add(t.name);
   }
@@ -195,42 +197,4 @@ function deriveCandidateOrder(
     }
   }
   return ordered;
-}
-
-/**
- * 装配层工具:把 retire 名单 stamp 到 def(在 registry 构造前对 factories
- * 工厂内 def 写入 `aci.lazy: true`)。
- *
- * 契约:输入的 defs 数组里,出现在 retire 名单的名字 → 写入
- * `aci.lazy: true`(B4 §2 既有 lazy 纪律:不参与 visibleSchemas 前缀;
- * 名字经 `mcp_name_directory` 或 `deferred_internal_tools` 段可发现;
- * 模型用 `tool_search` 按需拉回)。**核心件永不写入**(runOverflowJudge
- * 已保证 retire 名单不含核心件;本函数仍二次守门,核心件是 hard
- * ceiling —— 任何路径都不能退)。
- *
- * 返回新数组(defs 自身不可变,Object.freeze 不动);调用方传 freeze 后的
- * 工厂 array 进来照样能拿到新 def(B4 路径:createBashTool 等工厂是
- * closure,本函数仅对 stamp 后的 def 替换 array slot,工厂下次调用返
- * 新 def;实际装配件可能在闭包内已冻结 —— 这种情况调用方需先做 deep
- * copy 再传入,本函数文档化,装配层见 `applyDeferRetire` 用法)。
- */
-export function stampRetireLazy(
-  defs: ReadonlyArray<AciToolDef>,
-  retire: ReadonlyArray<string>
-): ReadonlyArray<AciToolDef> {
-  if (retire.length === 0) return defs;
-  const retireSet = new Set(retire);
-  return defs.map((d) => {
-    if (!retireSet.has(d.name)) return d;
-    if (CORE_TOOL_NAMES.has(d.name)) {
-      // 二次守门 —— 永不写入核心件
-      return d;
-    }
-    // 已 lazy 的不动(幂等)
-    if (d.aci.lazy === true) return d;
-    return Object.freeze({
-      ...d,
-      aci: Object.freeze({ ...d.aci, lazy: true }),
-    });
-  });
 }

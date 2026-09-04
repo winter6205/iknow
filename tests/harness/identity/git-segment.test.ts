@@ -96,7 +96,6 @@ describe("gitSnapshotSegment — pure renderer", () => {
       mainBranch: "origin/main",
       status: " M foo.ts\n?? bar.ts",
       recentCommits: ["abc1234 first commit"],
-      degradeReason: null,
     });
     expect(seg).toBeDefined();
     const text = seg as string;
@@ -108,20 +107,8 @@ describe("gitSnapshotSegment — pure renderer", () => {
     expect(text.startsWith(GIT_SEGMENT_TITLE)).toBe(true);
   });
 
-  it("returns undefined when snapshot is undefined (caller owns the absent-segment rule)", () => {
+  it("returns undefined when snapshot is undefined (caller owns the absent-segment rule; degraded env collapses to undefined at the provider, so the segment is absent)", () => {
     expect(gitSnapshotSegment(undefined)).toBeUndefined();
-  });
-
-  it("returns undefined when degradeReason is non-null (degraded env → segment absent)", () => {
-    expect(
-      gitSnapshotSegment({
-        branch: null,
-        mainBranch: null,
-        status: null,
-        recentCommits: [],
-        degradeReason: "not_a_git_repo",
-      })
-    ).toBeUndefined();
   });
 });
 

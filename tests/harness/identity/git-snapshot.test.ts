@@ -79,7 +79,6 @@ describe("createGitSnapshotProvider — provider shape", () => {
     expect(snap).toBeDefined();
     expect(snap!.branch).toBe("master"); // default branch on this git version
     expect(snap.recentCommits.length).toBeGreaterThan(0);
-    expect(snap.degradeReason).toBeNull();
   });
 
   it("degrades (undefined) when cwd is not a git repository", () => {
@@ -99,7 +98,7 @@ describe("createGitSnapshotProvider — provider shape", () => {
     const provider = createGitSnapshotProvider({
       cwd: "/does-not-matter",
       // Sync exec returning SpawnSyncReturns-shape with a non-zero status →
-      // classifyGitError 分型 → 整体退化。
+      // 整体退化（退化即 undefined）。
       exec: () => ({
         pid: 0,
         output: [null, "", "fatal: not a git repository"],

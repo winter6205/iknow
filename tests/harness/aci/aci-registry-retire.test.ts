@@ -122,4 +122,26 @@ describe("AciRegistry.retireBuiltin — B6 退场 seam", () => {
     const names = reg.visibleSchemas().map((t) => t.name);
     assert.deepEqual(names, ["bash"]);
   });
+
+  it("retireBuiltin 后 catalog.all() 与 catalog.get() 同源(不残留 stale def)", () => {
+    const reg = createAciRegistry([
+      makeTool("bash"),
+      makeTool("query_trace", { deferrable: true }),
+    ]);
+    reg.retireBuiltin(["query_trace"]);
+    // catalog.all() live 读 byName —— retireBuiltin 更新 byName 槽位后,
+    // all() 返回的必须是与 get() 一致的 lazy 版 def,而非构造期冻结的旧 def。
+    const inAll = reg.catalog.all().find((t) => t.name === "query_trace");
+    assert.ok(inAll !== undefined);
+    assert.equal(inAll.aci.lazy, true);
+    assert.equal(reg.catalog.get("query_trace")?.aci.lazy, true);
+    // 名称集合一致:all() 与 byName 覆盖同一批内建名。
+    assert.deepEqual(
+      reg.catalog
+        .all()
+        .map((t) => t.name)
+        .sort(),
+      ["bash", "query_trace"]
+    );
+  });
 });

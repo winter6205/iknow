@@ -39,8 +39,8 @@ export interface AciRegistry {
    *
    * 这是 B6 溢出治理的**唯一**写 seam:`build-engine` 装配期
    * `await mcpManager.start()` 之后调一次(首轮判定,会话内恒定);不退
-   * 的内建件 = 不调。核心七件永不退场(由 `tool-overflow.ts` 上游保证,
-   * 本 seam 二次守门,见 stampRetireLazy)。
+   * 的内建件 = 不调。核心七件永不退场(由 `tool-overflow.ts` 的
+   * `deriveCandidateOrder` 上游保证,候选 derivation 层已剔除)。
    */
   readonly retireBuiltin: (names: ReadonlyArray<string>) => void;
   /**
@@ -109,7 +109,6 @@ export function createAciRegistry(
   for (const t of tools) {
     byName.set(t.name, t);
   }
-  const allList = Object.freeze([...tools]) as ReadonlyArray<AciToolDef>;
   const externalByExt = new Map<string, AciToolDef>();
 
   // #224 discovered set：本 run 内被检索过的工具名（闭包状态，不跨 session
@@ -124,9 +123,12 @@ export function createAciRegistry(
 
   const catalog: AciCatalog = Object.freeze({
     get: (name: string) => byName.get(name) ?? externalByExt.get(name),
+    // 从 byName live 读(注册序 = 构造期 tools 顺序,byName 与 tools 同源
+    // 填充):retireBuiltin 只更新 byName 槽位,live 读让 catalog.all() 与
+    // catalog.get() 永不分叉(构造期冻结快照曾在 retire 后残留 stale def)。
     all: () =>
       Object.freeze([
-        ...allList,
+        ...byName.values(),
         ...externalByExt.values(),
       ]) as ReadonlyArray<AciToolDef>,
     // B4 / ADR-0043 §2:暴露 discovered 检查给闸门侧 —— permission-executor

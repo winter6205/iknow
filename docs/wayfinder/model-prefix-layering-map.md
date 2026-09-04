@@ -40,7 +40,7 @@
 4. 装配顺序中静态段与易变段**交错**：最易变的 `memory_layer`（第 6）排在静态的 `## Project path`（第 8）**之前**。
 5. 缓存规则（已核实）：前缀顺序 `tools` → `system` → `messages`；最多 4 个断点；断点前一个字节变则该断点及其后全废；前缀有按模型不同的最低长度门槛（512~4096 token），不够长静默不缓存。
 6. `env-snapshot.ts` 已在真跑 `git status` / `git diff`，但产物只经 `env_snapshot` 流事件给 TUI 人读面，**不进 messages**（`loop-engine.ts` `appendEnvSnapshot`）。
-7. **前缀构成实测（R2 / R3，2026-09-03）**：生产工具面 42 件 = 41,706 chars ≈ **10.4K tok**；装配后的 system ≈ 2,740 chars ≈ **0.7K tok**。**tools 占整个前缀的 ~94%。** 详见 D3。
+7. **前缀构成实测（R2 / R3，2026-09-03 初测；2026-09-04 T0 修复后重测）**：生产工具面 42 件 = 42,178 chars ≈ **10.5K tok**；装配后的 system ≈ 5,170 chars ≈ **1.3K tok**（T0 修复后 usage 段已实际注入，+607 tok）。**tools 占整个前缀的 ~89%。** 详见 D3。
 8. **目标供应商 = MiniMax + 火山方舟 Coding Plan 的 Anthropic 兼容端点**（用户 2026-09-03 裁定）。两家都是**被动缓存**（自动识别重复前缀，不需要 `cache_control`）。详见 D4 —— 这条把「断点放哪」整类问题移出了本图。
 9. **`usage` 段从未注入（charting 期发现的 bug，见 T0）**：`usage` 是 `IKNOW_ASSEMBLY_ORDER` 的第 3 段、注释写明「恒在段，chat / tui / serve / ask 全部注入（SC1）」，但 `resolveSegment` 没有 `case "usage"` 分支，落到 `default: return undefined`。`IKNOW_USAGE_DEFAULT`（2,428 chars ≈ 607 tok，内容是「代码主路径走符号工具 / grep 三类回退 / edit_file 让位」）**在全仓库无任何 import**。即 `specs/symbol-primary-aci.md` T1/SC1 的交付物今天对模型不可见。
 
@@ -57,7 +57,7 @@
   - **火山方舟 Coding Plan**（订阅制）：Anthropic 协议端点 `https://ark.cn-beijing.volces.com/api/coding`；额度按**模型请求次数**计（Lite ≈ 1.8 万次/月，Pro 5×，按 5 小时 / 周 / 月三周期刷新），**不按 token 计**。? **前缀命中在这里只省延迟，不省额度。** 其显式 `Context API`（session / common_prefix + `context_id`）文档已标**待下线**，不作为路径。
   - **两条推论**：① `cache_control` 相关的一切（断点数量 / 位置 / TTL 选择）**不在本图范围**；本图的唯一杠杆是**让前缀的字节不要变**。② 本图的价值随端点分叉：MiniMax 侧是真金白银（输入降到 20%），火山侧是首包延迟 + 上下文窗口面积。两者都指向同一个动作，所以不影响 destination。
   - **证据强度提示**：MiniMax 的结论来自其官方 API 文档（`platform.minimaxi.com/docs/api-reference/text-prompt-caching` 与 `anthropic-api-compatible-cache`），可信。火山侧「代码缓存 / 推理缓存自动生效、不消耗额度」等表述来自 `volcengine.com/article/*` 的营销体文章，措辞含糊（且描述的像是**响应级**缓存而非 KV 前缀缓存），**未经官方 API 文档确认**；订阅制 + 按请求计次 + Anthropic base URL 这三条是可信的。若火山侧的省延迟收益要作为决策依据，需另开一张实测票（发两次同前缀请求量首包时间）。
-- **D3 · 前缀构成实测 → 本图优先级重排**（R2 + R3 结论，assets: `scripts/wayfinder-measure-prefix.ts`）— 每回合无缓存重发的前缀里，**tools ≈ 10.4K tok（42 件，94%）**，system ≈ 0.7K tok（6%）。**推论：断点必须先解决 tools 这一块；六段重排（G2）与易变段搬家（G3）争的是 700 token 的池子，只有在 tools 侧稳定之后才有边际收益。** 因此 R5 → G4 → G1（tools 尾断点）是本图的主干，G2 / G3 降为次要。单件最肥：`spawn_subagent` 836 tok、`bash` 489 tok、`get_record` 455 tok、`query_trace` 371 tok（trace 读侧三件合计 ≈ 1.15K tok）。
+- **D3 · 前缀构成实测 → 本图优先级重排**（R2 + R3 结论，assets: `scripts/wayfinder-measure-prefix.ts`）— 每回合无缓存重发的前缀里，**tools ≈ 10.5K tok（42 件，~89%）**，system ≈ 1.3K tok（~11%，T0 修复后 usage 段实际在场；初测为 0.7K / 6%）。**推论：断点必须先解决 tools 这一块；六段重排（G2）与易变段搬家（G3）争的是千余 token 的池子，只有在 tools 侧稳定之后才有边际收益。** 因此 R5 → G4 → G1（tools 尾断点）是本图的主干，G2 / G3 降为次要。单件最肥：`spawn_subagent` 836 tok、`bash` 489 tok、`get_record` 459 tok、`query_trace` 376 tok（trace 读侧三件合计 ≈ 1.2K tok）。
 - **D7 · graph 切换的模型面表达 = A1：常驻注册 + handler gate + messages 尾部切换提示 + 编排段撤出 system**（G4 结论）— ADR-0030 的表达方式被 ADR-0041 修订，产品语义不变。翻图从此对模型面前缀零字节影响（tools 恒定、system 无模式段、messages 只尾部追加）。本图主干抖动表里「tools 中段变（翻图）」一行**消除**；剩余抖动源只有 MCP 连上（尾部追加）与 system 侧记忆落盘 / MCP 概览（见 D6 表）。附带产出 G1 的 tools 侧纪律形式：条件装配只许以会话级常量为闸门，可执行断言 = 相邻两轮 `tools` deep-equal。
 - **D8 · memory_layer catalog 会话级快照**（G1 盘问中段裁决，ADR-0042）— operator 与 agent 合裁：`memory_layer` 的 catalog 段（+ promote 段同层）在会话首次装配取一次快照、会话内冻结，语义从「mtime 缓存」改为「快照」；bodies / prefetch 通道维持 ADR-0034 D2 不动。R4 抖动表「system 任一段变（记忆落盘）→ 全部 messages 作废，每会话 1~3 次」整行消除。悬置雾「auto-memory 写入时机与缓存边界对齐」随之消解（清出 Not yet specified）。
 - **D9 · 前缀资格线 = 构造上会话内恒定；两条断言执法**（G1 结论，ADR-0043 §8）— 一段内容要有资格留在前缀区（tools + system），判据**不是实测变几次，而是输入来源构造上有没有会话内变化通道**：「实测没变」不算数（被动缓存无断点隔离，「碰巧稳定」与「保证稳定」同罚）。按线盘点 system 侧不合格仅 `memory_layer` catalog（→ D8 快照化）与 `<mcp_tools_overview>`（→ D10 撤出）。执法 = 两条断言：① `IKNOW_ASSEMBLY_ORDER` 声明↔产物一致性（补 T0 洞）；② 相邻两轮 tools + system deep-equal（D7 tools 侧 + 此处 system 侧合流）。
@@ -91,7 +91,7 @@
 
 **## Resolution**
 
-`tools`：生产装配（tui/serve，全 host 缝在场）**42 件 = 41,706 chars ≈ 10.4K tok**；最小装配（ask 类，27 件）= 24,818 chars ≈ 6.2K tok。`system`：≈ 2,740 chars ≈ 0.7K tok（见 R3）。**tools ≈ 前缀的 94%。** `messages` 未测（每会话不同，且它在断点之后，对本图的断点决策不构成输入）。token 数为 chars/4 粗估，仅用于判量级；精确值需读回包 usage 或 `countTokens`。结论进 D3，并因此重排本图优先级。
+`tools`：生产装配（tui/serve，全 host 缝在场）**42 件 = 42,178 chars ≈ 10.5K tok**（初测 41,706 chars；T0 修复后 tool_search 入常驻集 + schema 微调）；最小装配（ask 类，27 件）= 24,908 chars ≈ 6.2K tok。`system`：≈ 5,170 chars ≈ 1.3K tok（初测 2,740 chars ≈ 0.7K tok；T0 修复后 usage 段 607 tok 实际注入，见 R3）。**tools ≈ 前缀的 ~89%。** `messages` 未测（每会话不同，且它在断点之后，对本图的断点决策不构成输入）。token 数为 chars/4 粗估，仅用于判量级；精确值需读回包 usage 或 `countTokens`。结论进 D3，并因此重排本图优先级。
 
 ### R3 · 实测 system 各段的字节占比
 
@@ -104,14 +104,14 @@
 
 **## Resolution**
 
-单段（chars / ~tok）：`identity` 75/19 · `soul` 1811/453 · `usage` 2428/607（**但从未注入，见 T0**）· `agent_status` 读规则 275/69 · `coordinator` 1344/336（默认不注入）· `orchestration` 883/221（仅开图）· readonly worker 的 tool constraints 2517/629。真实项目上 `assembleIdentityContext`（tui / bootstrapActive / memoryEnabled=false）产出 **2,740 chars ≈ 685 tok**。
+单段（chars / ~tok）：`identity` 75/19 · `soul` 1811/453 · `usage` 2428/607（T0 修复后**实际注入**）· `agent_status` 读规则 275/69 · `coordinator` 1344/336（默认不注入）· graph_mode on 切换提示（messages 尾追加形态）805/201 · readonly worker 的 tool constraints 2517/629。真实项目上 `assembleIdentityContext`（tui / bootstrapActive / memoryEnabled=false）在 T0 修复后产出 **5,170 chars ≈ 1,293 tok**（初测 2,740 chars ≈ 685 tok）。
 
 **未测的三项**（本次装配缝缺席，留给 G2/G3 需要时再补，不阻塞主干）：`memory_layer`（需 build-engine 的 resolver）、`<available_skills>`、`<mcp_tools_overview>`。它们都在易变侧，而 D3 已证明整个 system 侧只占 6% —— 补测的边际价值低。
 
 ### T0 · 修复 `usage` 段从未注入
 
-- type: `task`（AFK） · state: `open` · blocked-by: —
-- **独立于本 destination 也值得修**；但它会让静态层 +607 tok，是 G2 的输入之一。
+- type: `task`（AFK） · state: **`done`（2026-09-04）** · blocked-by: —
+- **独立于本 destination 也值得修**；但它会让静态层 +607 tok，是 G2 的输入之一。已修复并重测：usage 段现实际注入，静态层 +607 tok，D3 / R2 / R3 数字已更新（R3b tui 装配 5,170 chars ≈ 1,293 tok）。
 
 **## Question**
 

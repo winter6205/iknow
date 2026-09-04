@@ -151,7 +151,7 @@ describe("usage 段 — 装配产物 (T0 修复)", () => {
 
 describe("断言 ① — IKNOW_ASSEMBLY_ORDER 声明↔产物一致性", () => {
   /** 条件段清单 (初版):segment 名 → 缺席条件。SSOT 集中在 describe 顶部,
-   *  后续 bullet (git 块 / MCP 名字目录) 在此追加 + 注明引用。 */
+   *  后续 bullet 在此追加 + 注明引用。 */
   const CONDITIONAL_SEGMENTS: Record<string, string> = {
     bootstrap:
       "bootstrapActive=false → 段缺席 (ask surface);或 BOOTSTRAP.md 文件缺失/空 → 段缺席 (chat/tui/serve)",
@@ -159,8 +159,15 @@ describe("断言 ① — IKNOW_ASSEMBLY_ORDER 声明↔产物一致性", () => {
       "userHome/.iknow/user.md 缺失/空 → 段缺席 (assemble.ts:346-361 readUserProfile 行为契约)",
     memory_layer:
       "memoryEnabled=false → 段缺席 (或 memoryResolver 缺席/抛错 → warn + skip)",
-    // B5 引入 → 当前未在场:不参与本测试断言,仅为后续 bullet 预留声明位。
-    // B4 引入 MCP 名字目录 → 同上。
+    // B5 (plans/model-prefix-layering.md §9) 引入 git 块:加性段 (ctx.git 缝),
+    // 缝缺席 / provider 退化 (非 git 仓库 / git 不可用) → 段缺席。
+    // 见 src/harness/identity/git-snapshot.ts GIT_SEGMENT_TITLE = "## Git"。
+    git: "ctx.git 缝缺席 → 段缺席;或 git 快照退化 (cwd 不可用 / 非 git 仓库 / git 不可用) → provider 返 undefined → 段缺席",
+    // B4 (ADR-0043 §3) 引入 MCP 名字目录:加性段 (ctx.mcp 缝),
+    // 缝缺席 / 过滤后无 connected 服务 → 段缺席。
+    // 见 src/harness/identity/assemble.ts mcpNameDirectorySegment。
+    mcp_name_directory:
+      "ctx.mcp 缝缺席 (ask / 无 manager) → 段缺席;或快照过滤后无 state=connected 服务 → 段缺席",
   };
 
   /** SSOT 派生锚点:从 IKNOW_ASSEMBLY_ORDER 各段的 SSOT 常量 / 渲染特征派生
@@ -177,9 +184,17 @@ describe("断言 ① — IKNOW_ASSEMBLY_ORDER 声明↔产物一致性", () => {
 
   it("condition-segment manifest covers all expected conditional kinds", () => {
     // 清单覆盖 IKNOW_ASSEMBLY_ORDER 中本测试预期为条件段的所有成员,
-    // 防止新增 LOCKED 段默默归入条件段集合而漏登记。
+    // 防止新增 LOCKED 段默默归入条件段集合而漏登记。git / mcp_name_directory
+    // 是加性段(不在 IKNOW_ASSEMBLY_ORDER 内),登记在此消除断言①与 spec
+    // 清单的偏差(缝缺席 → 段缺席,缺席条件如上)。
     expect(Object.keys(CONDITIONAL_SEGMENTS).sort()).toEqual(
-      ["bootstrap", "memory_layer", "user_profile"].sort()
+      [
+        "bootstrap",
+        "memory_layer",
+        "user_profile",
+        "git",
+        "mcp_name_directory",
+      ].sort()
     );
   });
 
