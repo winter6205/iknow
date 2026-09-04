@@ -56,6 +56,7 @@ import {
   resultToolPreview,
   formatRanSuffix,
   countBashCalls,
+  clipErrorLine,
   type CompletedToolPreview,
   type ResultPreview,
 } from "./tool-summary.js";
@@ -101,12 +102,43 @@ function ToolSummaryRow(props: {
     status,
     cols: props.cols,
   });
-  const fg = status === "failed" ? tuiPalette.error : tuiPalette.dim;
+  // 颜色由 deriveSlot 的 color token 派生（spec D5/D6）：failed → error、
+  // accent 类成功 → accent；dim 只属成功 bash 尾巴，不染标题。
+  const slot = hasResult
+    ? deriveSlot(props.tu.name, { running: false, failed })
+    : deriveSlot(props.tu.name, { running: true, failed: false });
+  const fg =
+    slot.color === "error"
+      ? tuiPalette.error
+      : slot.color === "accent"
+        ? tuiPalette.accent
+        : tuiPalette.dim;
   return (
     <text fg={fg} wrapMode="none">
       {line}
     </text>
   );
+}
+
+/**
+ * D5 一行短错误的数据源：bash 失败的 resultText 是 JSON envelope
+ * （`{code, stdout, stderr}`）——错误内容取 stderr 优先、stdout 兜底，
+ * 与 bashPreview 的字段语义一致；非 JSON 文本（mutate 门禁回执等）原样
+ * 透传。空文本 / 解析后两字段皆空 → 空串（渲染层不画空错误行）。
+ */
+function failureTextOf(name: string, resultText: string | undefined): string {
+  if (resultText === undefined || resultText.length === 0) return "";
+  if (name !== "bash") return resultText;
+  try {
+    const parsed = JSON.parse(resultText) as Record<string, unknown>;
+    const stderr = parsed.stderr;
+    const stdout = parsed.stdout;
+    if (typeof stderr === "string" && stderr.trim().length > 0) return stderr;
+    if (typeof stdout === "string" && stdout.trim().length > 0) return stdout;
+    return "";
+  } catch {
+    return resultText;
+  }
 }
 
 /** 工具内容预览（write_file / edit_file + bash / skill 结果预览）：
@@ -314,13 +346,25 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
         preview.kind !== "empty" || resultPreview.kind !== "empty";
       const showTitle = slot.showTitle;
       const showPreview = slot.showPreview && hasPreviewContent;
-      // 标题与预览都不可见 → 不产节点：空壳 box 会撑住 nodes.length，让
-      // 整条消息无法收敛为 null，折叠后残留幻影间距。
+      // D5：失败一行短错误 —— 长回执（如 `[worktree_isolation]`）截成单行，
+      // 不以 dim ⎿ 五行走块堆长文（showPreview 由核置假）。
+      const errorLine =
+        failed && showTitle
+          ? clipErrorLine(
+              failureTextOf(block.name, props.resultTextMap?.get(block.id)),
+              innerCols
+            )
+          : "";
       if (!showTitle && !showPreview) return;
       nodes.push(
         <box key={`u${i}`} flexDirection="column">
           {showTitle && (
             <ToolSummaryRow tu={block} statusMap={statusMap} cols={innerCols} />
+          )}
+          {errorLine !== "" && (
+            <text fg={pal.error} wrapMode="none">
+              {errorLine}
+            </text>
           )}
           {showPreview && (
             <ToolPreviewRows

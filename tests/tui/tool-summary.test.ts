@@ -853,30 +853,21 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
     expect(p.lines[0]?.endsWith("\x1b[0m")).toBe(true);
   });
 
-  test("skill 多行 resultText → 5 行尾部 + 溢出", () => {
+  test("skill 无预览声明（D6 accent 点名着色）：多行正文不摊五行走", () => {
+    // spec specs/tui-tool-settled-appearance.md D6：skill 是 accent 类 ——
+    // 只点名着色（`skill <name>`），不把 skill 正文摊成五行走浅色预览；
+    // 注册表不声明 preview，任何 resultText 一律 empty。
     const body = Array.from({ length: 10 }, (_, i) => `body-${i}`).join("\n");
-    const p = resultToolPreview(
-      "skill",
-      { name: "demo" },
-      { resultText: body }
-    );
-    expect(p.kind).toBe("result");
-    if (p.kind !== "result") return;
-    expect(p.lines).toEqual(["body-5", "body-6", "body-7", "body-8", "body-9"]);
-    expect(p.hiddenLineCount).toBe(5);
-  });
-
-  test("skill 单行 resultText → 1 行", () => {
-    const p = resultToolPreview(
-      "skill",
-      { name: "demo" },
-      {
-        resultText: "Loaded skill body",
-      }
-    );
-    expect(p.kind).toBe("result");
-    if (p.kind !== "result") return;
-    expect(p.lines).toEqual(["Loaded skill body"]);
+    expect(
+      resultToolPreview("skill", { name: "demo" }, { resultText: body }).kind
+    ).toBe("empty");
+    expect(
+      resultToolPreview(
+        "skill",
+        { name: "demo" },
+        { resultText: "Loaded skill body" }
+      ).kind
+    ).toBe("empty");
   });
 
   test("skill 缺 resultText → empty（live 路径无旁路）", () => {

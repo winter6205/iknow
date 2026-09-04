@@ -605,6 +605,34 @@ describe("liveToolPreviewTextLines (#589 贴底尾巴不含成功只读完成行
     expect(text).not.toContain("MARKER_READ_OK_");
     expect(text).not.toMatch(/read_file · .* · ok/);
   });
+
+  test("SC4 live 失败件：一行短错误截断长回执，不堆 dim ⎿ 多行", () => {
+    // D5（spec specs/tui-tool-settled-appearance.md）：live 失败件同样走
+    // 一行短错误 —— message 长回执被 clipErrorLine 截成单行，且不再画
+    // dim ⎿ stderr 预览（失败件 resultPreviewOf 恒 empty）。
+    const run: LiveToolRun = {
+      id: "tu-bash-fail-live2",
+      name: "bash",
+      status: "failed",
+      input: { command: "false" },
+      detail: "false",
+      message:
+        "[worktree_isolation] workspace mutation blocked: bash in this session. " +
+        "workspace mutation blocked: worktree isolation is ON and this session " +
+        "is not yet bound to a task worktree. Call the create-task-worktree ACI",
+      stderr: "boom-1\nboom-2\nboom-3",
+    };
+    const rows = liveToolPreviewTextLines(run, 80);
+    // 标题行 + 恰 1 行错误 = 2 行账。
+    expect(rows.length).toBe(2);
+    expect(rows[0]).toBe("[失败] bash · false");
+    // 一行短错误：以 … 截断（长回执收进单行）。
+    expect(rows[1]!.startsWith("[worktree_isolation]")).toBe(true);
+    expect(rows[1]!.endsWith("…")).toBe(true);
+    // 不堆 stderr 长文。
+    expect(rows.some((r) => r.includes("⎿"))).toBe(false);
+    expect(rows.some((r) => r.includes("boom-"))).toBe(false);
+  });
 });
 
 // -- #693 T4 D4:live 路径 bash / skill 结果预览 ---------------------------
@@ -632,7 +660,10 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     expect(rows.some((r) => r.includes("… +") && r.includes("行"))).toBe(true);
   });
 
-  test("完成态 bash 失败（status=failed）:stderr 旁路进入预览", () => {
+  test("完成态 bash 失败（status=failed）:不画 stderr 预览（D5 一行短错误）", () => {
+    // D5（spec specs/tui-tool-settled-appearance.md）：失败件核置
+    // showPreview 假 —— 失败不画 dim ⎿ stderr 块，错误信息只走一行短错误
+    // （原断言「stderr 旁路进入预览」认证的失败态展示不变式已被 D5 取代）。
     const run: LiveToolRun = {
       id: "tu-bash-fail-live",
       name: "bash",
@@ -643,8 +674,8 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     };
     const rows = liveToolPreviewTextLines(run, 80);
     expect(rows[0]).toBe("[失败] bash · false");
-    expect(rows).toContain("⎿ boom-1");
-    expect(rows).toContain("⎿ boom-2");
+    expect(rows.some((r) => r.includes("⎿"))).toBe(false);
+    expect(rows.some((r) => r.includes("boom-"))).toBe(false);
   });
 
   test("完成态 bash 空 stdout/全空白：仅状态行,无 ⎿", () => {
@@ -718,5 +749,48 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     const rows = liveToolPreviewTextLines(run, 80);
     // 缺 resultText → 不画 ⎿
     expect(rows.some((r) => r.includes("⎿"))).toBe(false);
+  });
+
+  test("SC5 live accent 成功：skill 完成行走 accent 色（非 dim）", async () => {
+    const run: LiveToolRun = {
+      id: "tu-skill-accent",
+      name: "skill",
+      status: "ok",
+      input: { name: "demo" },
+      detail: "skill demo",
+    };
+    const setup = await renderBox(run, 80);
+    const expectedAccent = RGBA.fromHex(tuiPalette.accent);
+    const { lines } = setup.captureSpans();
+    let sawAccent = false;
+    for (const line of lines) {
+      for (const span of line.spans) {
+        if (span.text.includes("skill demo") && rgbaEq(span.fg, expectedAccent))
+          sawAccent = true;
+      }
+    }
+    expect(sawAccent).toBe(true);
+    await setup.renderer.destroy();
+  });
+
+  test("SC5 live accent 成功：dim 不染 accent 完成行", async () => {
+    const run: LiveToolRun = {
+      id: "tu-ctw-accent",
+      name: "create-task-worktree",
+      status: "ok",
+      input: {},
+      detail: "创建任务工作树",
+    };
+    const setup = await renderBox(run, 80);
+    const expectedDim = RGBA.fromHex(tuiPalette.dim);
+    const { lines } = setup.captureSpans();
+    for (const line of lines) {
+      for (const span of line.spans) {
+        if (span.text.includes("创建任务工作树")) {
+          expect(rgbaEq(span.fg, expectedDim)).toBe(false);
+        }
+      }
+    }
+    await setup.renderer.destroy();
   });
 });

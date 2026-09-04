@@ -20,7 +20,9 @@
 import { expect, test } from "bun:test";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 import { testRender } from "@opentui/react/test-utils";
+import { RGBA } from "@opentui/core";
 import { MessageBlocks } from "../../src/tui/message-blocks.js";
+import { tuiPalette } from "../../src/tui/theme.js";
 
 const COLS = 60;
 
@@ -889,6 +891,240 @@ test("D7 slot：成功 retract（bash 无此态）—— bash 完成 → 标题 
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("[完成] bash · ls");
+  await setup.renderer.destroy();
+});
+
+function rgbaEq(a: RGBA, b: RGBA): boolean {
+  return a.r === b.r && a.g === b.g && a.b === b.b;
+}
+
+/** 抓含 needle 文本的 span 的 fg（无匹配 → undefined）。 */
+function fgOfSpanWith(
+  setup: Awaited<ReturnType<typeof testRender>>,
+  needle: string
+): RGBA | undefined {
+  const { lines } = setup.captureSpans();
+  for (const line of lines) {
+    for (const span of line.spans) {
+      if (span.text.includes(needle)) return span.fg;
+    }
+  }
+  return undefined;
+}
+
+// -- SC4（spec D5）：失败横切 —— 红标题 + 一行短错误，不 dim 堆长文 -------
+
+const LONG_FAILURE_RECEIPT = [
+  "[worktree_isolation] workspace mutation blocked: bash in this session",
+  "workspace mutation blocked: worktree isolation is ON and this session",
+  "is not yet bound to a task worktree. Call the create-task-worktree ACI",
+  "tool first, then retry inside the bound worktree.",
+  "at gate.check (worktree-gate.ts:66)",
+  "at runLoop (loop.ts:120)",
+].join("\n");
+
+test("SC4 失败 mutate：红标题 + 一行短错误（截断长回执）", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-wt-fail",
+            name: "bash",
+            input: { command: "rm -rf /" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-wt-fail", true]])}
+      resultTextMap={new Map([["tu-wt-fail", LONG_FAILURE_RECEIPT]])}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 标题行保留（[失败] 形态）。
+  expect(frame).toContain("[失败]");
+  // 一行短错误：错误内容以单行截断形态出现（首行文本在场）。
+  expect(frame).toContain("[worktree_isolation]");
+  // 整个失败块只占 1 行标题 + 1 行错误（不摊开长回执多行）。
+  const failLines = frame
+    .split("\n")
+    .filter(
+      (l) =>
+        l.includes("worktree_isolation") || l.includes("workspace mutation")
+    );
+  expect(failLines.length).toBe(1);
+  await setup.renderer.destroy();
+});
+
+test("SC4 失败件：无 dim 五行走 ⎿ 块堆长文", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-bash-longfail",
+            name: "bash",
+            input: { command: "false" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-bash-longfail", true]])}
+      resultTextMap={
+        new Map([
+          [
+            "tu-bash-longfail",
+            JSON.stringify({
+              code: 1,
+              stdout: "line-1\nline-2\nline-3",
+              stderr: LONG_FAILURE_RECEIPT,
+            }),
+          ],
+        ])
+      }
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 失败件不画 dim ⎿ 结果预览（D5：不堆长文；长 stderr 只进一行短错误）。
+  expect(frame.includes("⎿")).toBe(false);
+  expect(frame.includes("line-2")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("SC4 失败标题 error 色 token（ToolSummaryRow fg = palette.error）", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-wt-fail2",
+            name: "bash",
+            input: { command: "false" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-wt-fail2", true]])}
+      resultTextMap={new Map([["tu-wt-fail2", "boom"]])}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const expectedErr = RGBA.fromHex(tuiPalette.error);
+  const fg = fgOfSpanWith(setup, "[失败]");
+  expect(fg).toBeDefined();
+  expect(rgbaEq(fg!, expectedErr)).toBe(true);
+  // 失败不落 dim（dim 只属成功 bash 尾巴）。
+  const dimFg = RGBA.fromHex(tuiPalette.dim);
+  expect(rgbaEq(fg!, dimFg)).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("SC5 accent 成功：skill 落定行走 accent 色，无 skill 正文五行走预览", async () => {
+  const body = Array.from({ length: 10 }, (_, i) => `body-${i}`).join("\n");
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-skill",
+            name: "skill",
+            input: { name: "playwright-cli" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-skill", false]])}
+      resultTextMap={new Map([["tu-skill", body]])}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 人读表述：`skill <name>`（D6）。
+  expect(frame).toContain("skill playwright-cli");
+  // 不摊 skill 正文（无 ⎿ 五行走预览）。
+  expect(frame.includes("⎿")).toBe(false);
+  expect(frame.includes("body-5")).toBe(false);
+  // accent 色 token 落到标题行（非 dim）。
+  const expectedAccent = RGBA.fromHex(tuiPalette.accent);
+  const fg = fgOfSpanWith(setup, "skill playwright-cli");
+  expect(fg).toBeDefined();
+  expect(rgbaEq(fg!, expectedAccent)).toBe(true);
+  const dimFg = RGBA.fromHex(tuiPalette.dim);
+  expect(rgbaEq(fg!, dimFg)).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("SC5 accent 成功：建树工具人读表述（label / 路径叶子）走 accent", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-ctw",
+            name: "enter-task-worktree",
+            input: { conversationId: "abc-leaf-123" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-ctw", false]])}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("进入任务工作树");
+  const expectedAccent = RGBA.fromHex(tuiPalette.accent);
+  const fg = fgOfSpanWith(setup, "进入任务工作树");
+  expect(fg).toBeDefined();
+  expect(rgbaEq(fg!, expectedAccent)).toBe(true);
+  await setup.renderer.destroy();
+});
+
+test("SC4/D6 error 优先于 accent：accent 工具失败走 error 色（渲染层）", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-skill-fail",
+            name: "skill",
+            input: { name: "nope" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-skill-fail", true]])}
+      resultTextMap={new Map([["tu-skill-fail", "skill not found"]])}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const expectedErr = RGBA.fromHex(tuiPalette.error);
+  const fg = fgOfSpanWith(setup, "[失败]");
+  expect(fg).toBeDefined();
+  expect(rgbaEq(fg!, expectedErr)).toBe(true);
+  // accent 失败不得落 accent 色。
+  const expectedAccent = RGBA.fromHex(tuiPalette.accent);
+  expect(rgbaEq(fg!, expectedAccent)).toBe(false);
   await setup.renderer.destroy();
 });
 

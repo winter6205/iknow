@@ -256,19 +256,6 @@ function bashPreview(
   return { kind: "result", lines: visible, hiddenLineCount };
 }
 
-function skillPreview(
-  _rec: Record<string, unknown>,
-  resultText?: string
-): ResultPreview {
-  if (resultText === undefined) return EMPTY_RESULT_PREVIEW;
-  if (!isRenderableOutput(resultText)) return EMPTY_RESULT_PREVIEW;
-  const lines = splitOutputLines(resultText);
-  if (lines.length === 0) return EMPTY_RESULT_PREVIEW;
-  const { visible, hiddenLineCount } = takeTailWindow(lines);
-  if (visible.length === 0) return EMPTY_RESULT_PREVIEW;
-  return { kind: "result", lines: visible, hiddenLineCount };
-}
-
 const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
   // settledClass 值取自 tool-settled.ts 的 D8 分类表（单一来源，注册表只复用
   // 不复制；summary + preview? + settledClass 同置一行，spec D7）。
@@ -311,9 +298,11 @@ const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
     summary: SUMMARIZERS.tool_search!,
     settledClass: TOOL_SETTLED_CLASS.tool_search!,
   },
+  // D6（spec specs/tui-tool-settled-appearance.md）：skill 是 accent 类 ——
+  // 只点名着色（`skill <name>`），不把 skill 正文摊成五行走浅色预览；
+  // 声明无 preview 字段（resultToolPreview 走 empty）。
   skill: {
     summary: SUMMARIZERS.skill!,
-    preview: skillPreview,
     settledClass: TOOL_SETTLED_CLASS.skill!,
   },
   skill_search: {
@@ -468,8 +457,24 @@ export function summarizeToolCall(
   const clip = (s: string): string => clipDetail(s, name, cols);
   // 真未知工具：仅显示工具名占位，避免 JSON 全文外露
   // （2026-08-13 用户反馈 tool fold 不该把 input args 全 JSON stringify）。
+  // D6：摘要单源 = TOOL_DISPLAYS.summary（建树四件等人读 label 在注册表
+  // 声明而不在 SUMMARIZERS）—— 标题行走注册表声明，SUMMARIZERS 仅兜底
+  // 未知工具占位。
+  const declared = TOOL_DISPLAYS[name];
+  if (declared !== undefined) return { detail: clip(declared.summary(rec)) };
   if (!(name in SUMMARIZERS)) return { detail: clip(`(${name})`) };
   return { detail: clip(SUMMARIZERS[name]!(rec)) };
+}
+
+/**
+ * D5（spec specs/tui-tool-settled-appearance.md）：失败一行短错误。
+ * 单源截断：折叠空白 → `clipOneLineVisual` 按视觉宽度收口（窄终端单行
+ * 不折），带 `…` 省略号 —— 不把长回执（如 `[worktree_isolation]`）摊成
+ * 多行。空文本 → 空串（渲染层不画空错误行）。
+ */
+export function clipErrorLine(text: string, cols: number): string {
+  if (text.length === 0) return "";
+  return clipOneLineVisual(text, Math.max(1, cols - 2));
 }
 
 /**
