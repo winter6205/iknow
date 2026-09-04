@@ -26,6 +26,7 @@
 import stringWidth from "string-width";
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
 import { computeDiff, type DiffLine } from "./diff-unified.js";
+import { TOOL_SETTLED_CLASS, type SettledClass } from "./tool-settled.js";
 
 /** 视觉列宽（CJK / 全角按 2 列，string-width 口径）。 */
 export function visualWidth(s: string): number {
@@ -203,6 +204,8 @@ const SUMMARIZERS: Readonly<
  */
 interface ToolDisplay {
   readonly summary: (rec: Record<string, unknown>) => string;
+  /** 落定态三分类（spec D2：缺声明非法 —— 接口必填 + 测试拒绝）。 */
+  readonly settledClass: SettledClass;
   readonly preview?: (
     rec: Record<string, unknown>,
     resultText?: string,
@@ -267,48 +270,155 @@ function skillPreview(
 }
 
 const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
-  write_file: { summary: SUMMARIZERS.write_file! },
-  edit_file: { summary: SUMMARIZERS.edit_file! },
-  bash: { summary: SUMMARIZERS.bash!, preview: bashPreview },
-  read_file: { summary: SUMMARIZERS.read_file! },
-  grep: { summary: SUMMARIZERS.grep! },
-  glob: { summary: SUMMARIZERS.glob! },
-  web_search: { summary: SUMMARIZERS.web_search! },
-  web_fetch: { summary: SUMMARIZERS.web_fetch! },
-  memory_recall: { summary: SUMMARIZERS.memory_recall! },
-  memory_save: { summary: SUMMARIZERS.memory_save! },
-  tool_search: { summary: SUMMARIZERS.tool_search! },
-  skill: { summary: SUMMARIZERS.skill!, preview: skillPreview },
-  skill_search: { summary: SUMMARIZERS.skill_search! },
-  spawn_subagent: { summary: SUMMARIZERS.spawn_subagent! },
-  subagent_result: { summary: SUMMARIZERS.subagent_result! },
-  lsp_definition: { summary: SUMMARIZERS.lsp_definition! },
-  lsp_references: { summary: SUMMARIZERS.lsp_references! },
-  lsp_hover: { summary: SUMMARIZERS.lsp_hover! },
-  lsp_go_to_implementation: { summary: SUMMARIZERS.lsp_go_to_implementation! },
+  // settledClass 值取自 tool-settled.ts 的 D8 分类表（单一来源，注册表只复用
+  // 不复制；summary + preview? + settledClass 同置一行，spec D7）。
+  write_file: {
+    summary: SUMMARIZERS.write_file!,
+    settledClass: TOOL_SETTLED_CLASS.write_file!,
+  },
+  edit_file: {
+    summary: SUMMARIZERS.edit_file!,
+    settledClass: TOOL_SETTLED_CLASS.edit_file!,
+  },
+  bash: {
+    summary: SUMMARIZERS.bash!,
+    preview: bashPreview,
+    settledClass: TOOL_SETTLED_CLASS.bash!,
+  },
+  read_file: {
+    summary: SUMMARIZERS.read_file!,
+    settledClass: TOOL_SETTLED_CLASS.read_file!,
+  },
+  grep: { summary: SUMMARIZERS.grep!, settledClass: TOOL_SETTLED_CLASS.grep! },
+  glob: { summary: SUMMARIZERS.glob!, settledClass: TOOL_SETTLED_CLASS.glob! },
+  web_search: {
+    summary: SUMMARIZERS.web_search!,
+    settledClass: TOOL_SETTLED_CLASS.web_search!,
+  },
+  web_fetch: {
+    summary: SUMMARIZERS.web_fetch!,
+    settledClass: TOOL_SETTLED_CLASS.web_fetch!,
+  },
+  memory_recall: {
+    summary: SUMMARIZERS.memory_recall!,
+    settledClass: TOOL_SETTLED_CLASS.memory_recall!,
+  },
+  memory_save: {
+    summary: SUMMARIZERS.memory_save!,
+    settledClass: TOOL_SETTLED_CLASS.memory_save!,
+  },
+  tool_search: {
+    summary: SUMMARIZERS.tool_search!,
+    settledClass: TOOL_SETTLED_CLASS.tool_search!,
+  },
+  skill: {
+    summary: SUMMARIZERS.skill!,
+    preview: skillPreview,
+    settledClass: TOOL_SETTLED_CLASS.skill!,
+  },
+  skill_search: {
+    summary: SUMMARIZERS.skill_search!,
+    settledClass: TOOL_SETTLED_CLASS.skill_search!,
+  },
+  spawn_subagent: {
+    summary: SUMMARIZERS.spawn_subagent!,
+    settledClass: TOOL_SETTLED_CLASS.spawn_subagent!,
+  },
+  subagent_result: {
+    summary: SUMMARIZERS.subagent_result!,
+    settledClass: TOOL_SETTLED_CLASS.subagent_result!,
+  },
+  lsp_definition: {
+    summary: SUMMARIZERS.lsp_definition!,
+    settledClass: TOOL_SETTLED_CLASS.lsp_definition!,
+  },
+  lsp_references: {
+    summary: SUMMARIZERS.lsp_references!,
+    settledClass: TOOL_SETTLED_CLASS.lsp_references!,
+  },
+  lsp_hover: {
+    summary: SUMMARIZERS.lsp_hover!,
+    settledClass: TOOL_SETTLED_CLASS.lsp_hover!,
+  },
+  lsp_go_to_implementation: {
+    summary: SUMMARIZERS.lsp_go_to_implementation!,
+    settledClass: TOOL_SETTLED_CLASS.lsp_go_to_implementation!,
+  },
   lsp_prepare_call_hierarchy: {
     summary: SUMMARIZERS.lsp_prepare_call_hierarchy!,
+    settledClass: TOOL_SETTLED_CLASS.lsp_prepare_call_hierarchy!,
   },
-  lsp_incoming_calls: { summary: SUMMARIZERS.lsp_incoming_calls! },
-  lsp_outgoing_calls: { summary: SUMMARIZERS.lsp_outgoing_calls! },
-  lsp_diagnostics: { summary: SUMMARIZERS.lsp_diagnostics! },
-  lsp_document_symbol: { summary: SUMMARIZERS.lsp_document_symbol! },
-  lsp_workspace_symbol: { summary: SUMMARIZERS.lsp_workspace_symbol! },
+  lsp_incoming_calls: {
+    summary: SUMMARIZERS.lsp_incoming_calls!,
+    settledClass: TOOL_SETTLED_CLASS.lsp_incoming_calls!,
+  },
+  lsp_outgoing_calls: {
+    summary: SUMMARIZERS.lsp_outgoing_calls!,
+    settledClass: TOOL_SETTLED_CLASS.lsp_outgoing_calls!,
+  },
+  lsp_diagnostics: {
+    summary: SUMMARIZERS.lsp_diagnostics!,
+    settledClass: TOOL_SETTLED_CLASS.lsp_diagnostics!,
+  },
+  lsp_document_symbol: {
+    summary: SUMMARIZERS.lsp_document_symbol!,
+    settledClass: TOOL_SETTLED_CLASS.lsp_document_symbol!,
+  },
+  lsp_workspace_symbol: {
+    summary: SUMMARIZERS.lsp_workspace_symbol!,
+    settledClass: TOOL_SETTLED_CLASS.lsp_workspace_symbol!,
+  },
   // bash_output / bash_stop / todo_write / list_mcp_resources / read_mcp_resource /
   // query_trace:host 工具 / 无内容可预览 —— 仅 summary 声明,无 preview
   // (期望 TUI 显示与 SUMMARIZERS 同字节,模型视野与现状一致)。
   bash_output: {
     summary: (r) => `读取后台日志 ${pickString(r, "task_id", "?")}`,
+    settledClass: TOOL_SETTLED_CLASS.bash_output!,
   },
   bash_stop: {
     summary: (r) => `停止后台任务 ${pickString(r, "task_id", "?")}`,
+    settledClass: TOOL_SETTLED_CLASS.bash_stop!,
   },
-  todo_write: { summary: (r) => `待办 ${pickString(r, "id", "?")}` },
-  list_mcp_resources: { summary: () => "MCP 资源列表" },
+  todo_write: {
+    summary: (r) => `待办 ${pickString(r, "id", "?")}`,
+    settledClass: TOOL_SETTLED_CLASS.todo_write!,
+  },
+  list_mcp_resources: {
+    summary: () => "MCP 资源列表",
+    settledClass: TOOL_SETTLED_CLASS.list_mcp_resources!,
+  },
   read_mcp_resource: {
     summary: (r) => `MCP 资源 ${pickString(r, "uri", "?")}`,
+    settledClass: TOOL_SETTLED_CLASS.read_mcp_resource!,
   },
-  query_trace: { summary: () => "trace 查询" },
+  query_trace: {
+    summary: () => "trace 查询",
+    settledClass: TOOL_SETTLED_CLASS.query_trace!,
+  },
+  // task worktree 生命周期五件（spec D8）：enter/exit/create/remove 点名
+  // 着色（accent，人读表述带 label 或路径叶子），list 是查询类（retract）。
+  // 这五件在 TUI surface 属 host 缝条件化装配（deps-tools 期望集剥除），
+  // 显示声明仍常驻 —— 渲染注册表完备性与装配条件化解耦。
+  "create-task-worktree": {
+    summary: () => "创建任务工作树",
+    settledClass: TOOL_SETTLED_CLASS["create-task-worktree"]!,
+  },
+  "enter-task-worktree": {
+    summary: (r) => `进入任务工作树 ${pickString(r, "conversationId", "?")}`,
+    settledClass: TOOL_SETTLED_CLASS["enter-task-worktree"]!,
+  },
+  "exit-task-worktree": {
+    summary: () => "退出任务工作树",
+    settledClass: TOOL_SETTLED_CLASS["exit-task-worktree"]!,
+  },
+  "remove-task-worktree": {
+    summary: (r) => `删除任务工作树 ${pickString(r, "conversationId", "?")}`,
+    settledClass: TOOL_SETTLED_CLASS["remove-task-worktree"]!,
+  },
+  "list-task-worktrees": {
+    summary: () => "任务工作树列表",
+    settledClass: TOOL_SETTLED_CLASS["list-task-worktrees"]!,
+  },
 };
 
 /** 单源：根据工具名 + input + resultText 产结果预览（行级尾部 tail + ANSI 透传）。
@@ -333,6 +443,12 @@ export function resultToolPreview(
 /** 注册表覆盖性：列出当前 TOOL_DISPLAYS 注册的所有工具名（供测试用）。 */
 export function registeredToolDisplayNames(): ReadonlyArray<string> {
   return Object.keys(TOOL_DISPLAYS);
+}
+
+/** 显示注册表的 settledClass 查询（供测试闸用）：未注册名缺省 retract，
+ *  与 TOOL_SETTLED_CLASS 兜底一致。 */
+export function settledClassOfDisplay(name: string): SettledClass {
+  return TOOL_DISPLAYS[name]?.settledClass ?? "retract";
 }
 
 /**

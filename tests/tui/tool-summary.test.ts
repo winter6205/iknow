@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   SUBAGENT_TOOL_LABEL,
+  settledClassOfDisplay,
   clipOneLine,
   clipOneLineVisual,
   countBashCalls,
@@ -952,9 +953,63 @@ describe("registeredToolDisplayNames: 注册表覆盖 EXPECTED_TOOLSET_30", () =
       "read_mcp_resource",
       "bash_output",
       "bash_stop",
+      // spec D2：建树四件 + list-task-worktrees 进入显示注册表。TUI 装配面
+      // 仍按 host 缝条件化装配（deps-tools EXPECTED_TUI_TOOLSET 剥除不动），
+      // 显示注册表完备性与装配条件化解耦 —— 覆盖闸从 30 件扩为 35 件，
+      // 不变量（注册表每件都有显示声明）等于或强于原断言。
+      "create-task-worktree",
+      "enter-task-worktree",
+      "exit-task-worktree",
+      "remove-task-worktree",
+      "list-task-worktrees",
     ];
     const names = new Set(registeredToolDisplayNames());
     for (const name of EXPECTED_TOOLSET_30) {
+      expect(names.has(name)).toBe(true);
+    }
+  });
+});
+
+describe("settledClass: 落定态三分类（spec D2/D8）", () => {
+  // spec D2：缺 settledClass 的声明非法。ToolDisplay 接口把字段钉成必填
+  // （编译期闸），本测试在运行时再兜一层：注册表每件必须带合法 class 值。
+  test("TOOL_DISPLAYS 每件都有合法 settledClass（缺声明即非法）", () => {
+    const LEGAL: ReadonlyArray<string> = ["keep", "retract", "accent"];
+    for (const name of registeredToolDisplayNames()) {
+      const cls = settledClassOfDisplay(name);
+      expect(LEGAL).toContain(cls);
+    }
+  });
+
+  test("D8 分类表 sentinel：keep / retract / accent 各类代表名对号", () => {
+    // keep：写路径与会话动作；retract：查询 / 读取 / 未注册兜底；
+    // accent：skill 与建树四件。
+    expect(settledClassOfDisplay("bash")).toBe("keep");
+    expect(settledClassOfDisplay("write_file")).toBe("keep");
+    expect(settledClassOfDisplay("todo_write")).toBe("keep");
+    expect(settledClassOfDisplay("read_file")).toBe("retract");
+    expect(settledClassOfDisplay("grep")).toBe("retract");
+    expect(settledClassOfDisplay("list-task-worktrees")).toBe("retract");
+    expect(settledClassOfDisplay("skill")).toBe("accent");
+    for (const name of [
+      "create-task-worktree",
+      "enter-task-worktree",
+      "exit-task-worktree",
+      "remove-task-worktree",
+    ]) {
+      expect(settledClassOfDisplay(name)).toBe("accent");
+    }
+  });
+
+  test("建树四件 + list-task-worktrees 进显示注册表（spec D2 建树四件必须入表）", () => {
+    const names = new Set(registeredToolDisplayNames());
+    for (const name of [
+      "create-task-worktree",
+      "enter-task-worktree",
+      "exit-task-worktree",
+      "remove-task-worktree",
+      "list-task-worktrees",
+    ]) {
       expect(names.has(name)).toBe(true);
     }
   });
