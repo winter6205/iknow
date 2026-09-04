@@ -19,7 +19,7 @@
  *    prop 提供（ChatView 传 `visibleIndex===0?0:1`，首条无顶部 margin，避免
  *    进入会话时第一行无谓下推造成的间距抖动）。2026-08-22 起 margin 挂在
  *    本组件根节点、随消息存亡：此前由 ChatView wrapper 提供，折叠
- *    （hideToolSummaries）后渲染为 null 的消息仍残留 wrapper margin，
+ *    （工具标题行收掉）后渲染为 null 的消息仍残留 wrapper margin，
  *    每条空消息留 1 行幻影空白、连成大空位。
  *    OpenTUI 无 lineHeight API，行距 = 消息块间 margin + 块内段落 margin，不自
  *    造真 leading。2026-08-13 用户反馈 paddingY=1 让消息块上下各 1 行空白叠加
@@ -61,6 +61,7 @@ import {
 } from "./tool-summary.js";
 import { clipOneLineVisual } from "./tool-summary.js";
 import { CompletedToolPreviewView } from "./completed-tool-preview-view.js";
+import { deriveSlot } from "./tool-settled.js";
 import { MessageShell } from "./message-shell.js";
 import { Markdown } from "./markdown.js";
 import {
@@ -199,8 +200,6 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
   readonly thinkingSeconds?: number;
   /** idle 时当前 turn 已由 ChatView 画 turn 级折叠行：本块不再画思考摘要。 */
   readonly hideThinking?: boolean;
-  /** idle 时当前 turn 折叠：不画 `[完成] name · detail` 行；write/edit 预览仍留。 */
-  readonly hideToolSummaries?: boolean;
   /** 消息间 1 行节奏（ChatView 传 `visibleIndex===0?0:1`）。挂在根节点上
    *  随消息存亡 —— 渲染为 null 的消息（折叠后的纯工具 assistant、纯
    *  tool_result user）不留幻影间距。缺省无间距。 */
@@ -295,7 +294,14 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
         </box>
       );
     } else if (block.type === "tool_use") {
-      const showSummary = props.hideToolSummaries !== true;
+      // D7（spec specs/tui-tool-settled-appearance.md）：渲染只消费 slot。
+      // 落定态（statusMap 已配对 = idle 历史）：标题 iff showTitle、预览 iff
+      // showPreview —— retract 标题与预览同假（核保证，渲染不再复活）；
+      // 未配对（running 态 / cancelled）沿用 live 行为：标题行可见。
+      const failed = statusMap.get(block.id) === true;
+      const slot = statusMap.has(block.id)
+        ? deriveSlot(block.name, { running: false, failed })
+        : deriveSlot(block.name, { running: true, failed: false });
       const preview: CompletedToolPreview = statusMap.has(block.id)
         ? completedToolPreview(block.name, block.input)
         : { kind: "empty" };
@@ -304,14 +310,16 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
             resultText: props.resultTextMap?.get(block.id),
           })
         : { kind: "empty" };
-      const showPreview =
+      const hasPreviewContent =
         preview.kind !== "empty" || resultPreview.kind !== "empty";
-      // 摘要隐藏且无预览 → 不产节点：空壳 box 会撑住 nodes.length，让
+      const showTitle = slot.showTitle;
+      const showPreview = slot.showPreview && hasPreviewContent;
+      // 标题与预览都不可见 → 不产节点：空壳 box 会撑住 nodes.length，让
       // 整条消息无法收敛为 null，折叠后残留幻影间距。
-      if (!showSummary && !showPreview) return;
+      if (!showTitle && !showPreview) return;
       nodes.push(
         <box key={`u${i}`} flexDirection="column">
-          {showSummary && (
+          {showTitle && (
             <ToolSummaryRow tu={block} statusMap={statusMap} cols={innerCols} />
           )}
           {showPreview && (

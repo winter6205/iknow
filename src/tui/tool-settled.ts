@@ -3,7 +3,7 @@
  *
  * 落定态策略核（spec specs/tui-tool-settled-appearance.md D1/D4/D5/D6/D8）。
  * 纯 TS、无 React / Ink 依赖；渲染层只消费 `deriveSlot` 输出的 slot，不再
- * 自行组合 hideToolSummaries 与预览（D7）。
+ * 自行组合标题隐藏开关与预览（D7）。
  *
  * 派生顺序（D1）：running 全部逐条可见 → 成功按 class 分派 → 失败横切在核
  * 最后一步覆盖一切（error 色优先于 accent，D5）。

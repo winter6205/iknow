@@ -344,9 +344,8 @@ test("长会话（100 条）滚动文档全量：顶见最早、底见最末、�
 });
 
 test("session 状态渲染：tool_use 摘要行 + statusMap 状态染色", async () => {
-  // D3:已折叠的 turn 不再铺 [完成] / [失败] 行 —— 单工具也折叠(spec D3 删
-  // 除 `turnToolTotal > 1` 闸)。折叠行直接显示工具计数;tool_result 状态由
-  // 折叠行上下文 + diff 预览承担,不再显式染色到 `[完成]/[失败]` 字面量。
+  // D3（spec specs/tui-tool-settled-appearance.md）：write_file 是 keep 类 ——
+  // 落定后标题行留在屏幕上（渲染只消费 slot，D7），不进折叠计数。
   const initial = sessionWith([
     msg("m-1", "user", "帮我写一个文件"),
     {
@@ -376,7 +375,8 @@ test("session 状态渲染：tool_use 摘要行 + statusMap 状态染色", async
   const frame = setup.captureCharFrame();
   expect(frame).toContain("❯ 帮我写一个文件");
   expect(frame).toContain("write_file");
-  expect(frame.includes("[完成]")).toBe(false);
+  expect(frame).toContain("[完成] write_file · 写入 hello.ts（1 行）");
+  expect(frame.includes("× ")).toBe(false);
   expect(api.handle?.scrollbox).not.toBeNull();
   await setup.renderer.destroy();
 });
@@ -963,12 +963,10 @@ test("running：第二段草稿画在后续工具之下（tool→text→tool→t
   await setup.renderer.destroy();
 });
 
-test("idle：当前 turn 工具折叠成计数行，不再铺 [完成] bash", async () => {
-  // D3 (tui-display-consistency):折叠作用于每一轮历史。同 turn 内多段
-  // tool_use (中间无 turn query) 合并到单簇 —— anchor = 末段 asst tool
-  // (index 2) → thinkingMs[2] = 29000ms → "思考了 29 秒";折叠行只显示
-  // 工具计数 "bash × 2",思考摘要与计数拆行(f6238c09 split-fold)。"完成。"
-  // 文本独立行,不回摊 `[完成] bash`。
+test("idle：当前 turn bash keep 标题逐条留，零条收无计数行", async () => {
+  // D3（spec specs/tui-tool-settled-appearance.md）：bash 是 keep 类 ——
+  // 落定后标题逐条留（含既有 thinking 摘要「思考了 N 秒」随消息渲染），
+  // 零 retract 条目 → 无工具计数行。"完成。"文本独立行。
   const session = sessionWith(
     [
       msg("m-1", "user", "写个页面"),
@@ -1025,9 +1023,12 @@ test("idle：当前 turn 工具折叠成计数行，不再铺 [完成] bash", as
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("思考了 29 秒");
-  expect(frame).toContain("bash × 2");
-  expect(frame).not.toContain("思考了 29 秒 · bash × 2");
+  // keep 标题按 slot 渲染：tu-b2 落定成功 → [完成]；tu-b1 未配对 →
+  // [运行中]（running slot 标题可见，D7）。两条标题都在屏幕上。
+  expect(frame).toContain("[完成] bash · ls -la");
+  expect(frame).toContain("[运行中] bash · ls archive");
   expect(frame).toContain("完成。");
-  expect(frame.includes("[完成] bash")).toBe(false);
+  // 零条收 → 无工具计数行。
+  expect(frame.includes("× ")).toBe(false);
   await setup.renderer.destroy();
 });

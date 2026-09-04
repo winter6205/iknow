@@ -31,19 +31,37 @@ export type TurnActivitySegment =
       readonly entries: ReadonlyArray<ToolUseCount>;
     };
 
+export interface TurnActivityOptions {
+  /**
+   * D3（spec specs/tui-tool-settled-appearance.md）：折叠计数行只聚合本判定
+   * 为 true 的 tool_use（成功且 retract）。resolver 缺省 = 全部计入（纯函数
+   * 兜底与计数助手一致）；生产调用方传 `deriveSlot(name, {running, failed})`
+   * 派生的判定，failed 数据源 = `toolResultStatusMap`。
+   */
+  readonly inFoldCountOf?: (
+    call: Readonly<{ readonly id: string; readonly name: string }>
+  ) => boolean;
+}
+
 /**
  * assistant 活动的消息级顺序：文本段与连续 tool_use 集群按原始消息顺序
  * 返回。thinking / tool_result / user query 不占活动段；tool_result 不打断
  * 连续工具集群，因而一轮工具调用仍只画一个原位折叠。
+ *
+ * D3：entries 只聚合 `opts.inFoldCountOf` 判定为 true 的 tool_use（成功且
+ * retract）；留 / 点名 / 失败件不进计数（它们由渲染层画独立标题行）。
+ * resolver 缺省 = 全部计入。
  */
 export function orderedTurnActivitySegments(
   messages: ReadonlyArray<AnthropicNativeMessage>,
-  start: number
+  start: number,
+  opts?: TurnActivityOptions
 ): ReadonlyArray<TurnActivitySegment> {
   if (!Number.isFinite(start) || start < 0 || start >= messages.length) {
     // EXIT: 无效或越界的 turn 起点不应把历史消息误当作当前活动。
     return [];
   }
+  const inFoldCountOf = opts?.inFoldCountOf;
 
   try {
     const segments: TurnActivitySegment[] = [];
@@ -103,6 +121,7 @@ export function orderedTurnActivitySegments(
             toolMessageIndex = i;
             toolContentBlockIndex = contentBlockIndex;
           }
+          if (inFoldCountOf !== undefined && !inFoldCountOf(block)) continue;
           if (!toolCounts.has(block.name)) toolOrder.push(block.name);
           toolCounts.set(block.name, (toolCounts.get(block.name) ?? 0) + 1);
         }
@@ -140,16 +159,21 @@ export function sliceTurnFrom(
 /**
  * assistant `tool_use` 按首次出现顺序计数。非 assistant / 非 tool_use 忽略。
  * count 钳到 ≥0（名字空串仍计一次，避免丢调用）。
+ * D3：`opts.inFoldCountOf` 提供时只计数判定为 true 的件（成功且 retract），
+ * 与 `orderedTurnActivitySegments` 同一 resolver 契约；缺省 = 全部计入。
  */
 export function countToolUsesByName(
-  messages: ReadonlyArray<AnthropicNativeMessage>
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  opts?: TurnActivityOptions
 ): ReadonlyArray<ToolUseCount> {
   const order: string[] = [];
   const map = new Map<string, number>();
+  const inFoldCountOf = opts?.inFoldCountOf;
   for (const message of messages) {
     if (message.role !== "assistant") continue;
     for (const block of message.content) {
       if (block.type !== "tool_use") continue;
+      if (inFoldCountOf !== undefined && !inFoldCountOf(block)) continue;
       const name = block.name;
       if (!map.has(name)) order.push(name);
       map.set(name, (map.get(name) ?? 0) + 1);

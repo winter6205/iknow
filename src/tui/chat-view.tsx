@@ -106,6 +106,7 @@ import {
   thinkingMsToSeconds,
   toolUseIdsOf,
 } from "./turn-activity.js";
+import { deriveSlot } from "./tool-settled.js";
 
 export interface ChatViewHandle {
   /**
@@ -271,16 +272,40 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       itemHeights,
     ]);
     const lastQueryVisible = lastTurnQueryIndex(visibleMessages);
+    // D3（spec specs/tui-tool-settled-appearance.md）：折叠计数只聚合成功且
+    // retract 的件 —— resolver 从 statusMap（tool_use_id → 是否失败）派生每件
+    // 的 slot；未配对（live running / cancelled）不进计数。
+    const inFoldCountOf = (
+      call: Readonly<{ readonly id: string; readonly name: string }>
+    ): boolean =>
+      statusMap.has(call.id) &&
+      deriveSlot(call.name, {
+        running: false,
+        failed: statusMap.get(call.id) === true,
+      }).inFoldCount;
     // D3 (tui-display-consistency):折叠作用于每一轮历史 —— 不再切片到
     // lastTurnSlice;`activitySegments` 从 0 起构建(0 = 首条 user query 之前的
     // assistant 起步;lastQueryVisible < 0 → 全历史)。
-    const activitySegments = orderedTurnActivitySegments(visibleMessages, 0);
+    const activitySegments = orderedTurnActivitySegments(visibleMessages, 0, {
+      inFoldCountOf,
+    });
     // last-turn live 计数(工具运行中状态接棒 / 合并最后一段折叠用)。
+    // live 已完成件同样只聚合 slot.inFoldCount（retract 收）；keep / accent /
+    // failed 件留在 tail 画独立标题行，不进计数。
     const lastTurnSlice = sliceTurnFrom(visibleMessages, lastQueryVisible);
-    const historyToolCounts = countToolUsesByName(lastTurnSlice);
+    const historyToolCounts = countToolUsesByName(lastTurnSlice, {
+      inFoldCountOf,
+    });
     const liveCompletedCounts = countNamedCalls(
       liveToolRuns
         .filter((run) => run.status !== "running")
+        .filter(
+          (run) =>
+            deriveSlot(run.name, {
+              running: false,
+              failed: run.status === "failed",
+            }).inFoldCount
+        )
         .map((run) => ({ id: run.id, name: run.name })),
       toolUseIdsOf(lastTurnSlice)
     );
@@ -355,6 +380,9 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           turnToolCounts
         )
       : [];
+    // 折叠生效（idle 且计数行在场）→ tail 里已完成的 retract 件（已进折叠
+    // 计数）离开尾巴；keep / accent / failed 件保留独立标题行（D3/D7：渲染
+    // 只消费 slot，成功 retract 的标题与预览同假）。running 件始终在尾巴。
     const collapseToolRows = shouldCollapseTurnToolRows(
       running,
       foldDisplayLines.length,
@@ -362,7 +390,14 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     );
     const tailSlots = liveTailSlots(
       collapseToolRows
-        ? liveToolRuns.filter((run) => run.status === "running")
+        ? liveToolRuns.filter(
+            (run) =>
+              run.status === "running" ||
+              !deriveSlot(run.name, {
+                running: false,
+                failed: run.status === "failed",
+              }).inFoldCount
+          )
         : liveToolRuns,
       deferredSegments
     );
@@ -545,7 +580,6 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                           partIndex === 0 ? messageThinkingSeconds : undefined
                         }
                         hideThinking={segmentHasFold && !thinkingExpanded}
-                        hideToolSummaries={segmentHasFold && collapseToolRows}
                         marginTop={
                           partIndex === 0 && visibleIndex !== 0 ? 1 : 0
                         }
@@ -564,7 +598,6 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                     thinkingExpanded={thinkingExpanded}
                     thinkingSeconds={messageThinkingSeconds}
                     hideThinking={thisMessageHasFoldLine && !thinkingExpanded}
-                    hideToolSummaries={collapseToolRows}
                     marginTop={visibleIndex === 0 ? 0 : 1}
                   />
                   {messageSegments.flatMap(({ segmentIndex }) =>

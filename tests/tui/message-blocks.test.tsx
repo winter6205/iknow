@@ -626,7 +626,7 @@ test("tool_use preview 截断窗：edit_file 显示截断 diff", async () => {
 //
 // 间距归属（2026-08-22 变更）：消息间 1 行节奏由 MessageBlocks 根节点的
 // `marginTop` prop 提供（ChatView 传 `visibleIndex===0?0:1`）。此前由
-// ChatView wrapper `<box marginTop>` 提供，但折叠（hideToolSummaries）后
+// ChatView wrapper `<box marginTop>` 提供，但折叠（工具标题行收掉）后
 // 渲染为 null 的消息仍残留 wrapper margin，连成幻影空位 —— margin 改随
 // MessageBlocks 根节点存亡。缺省无 margin：单条渲染首行前无空白行（T9
 // 抖动修复后的 SSOT 边界不变）。
@@ -860,10 +860,10 @@ test("bash 回归：`[运行中] bash` / 完成态字节不变", async () => {
   await setupDone.renderer.destroy();
 });
 
-test("hideToolSummaries + hideThinking：无预览的纯工具消息整体返回 null（不留空壳）", async () => {
-  // turn 结束折叠后，只含 thinking + 无预览工具（bash / 搜索类）的
-  // assistant 消息不再有任何可见内容 —— 必须返回 null，让 ChatView 的
-  // 消息间距（marginTop prop）随之消失，否则每条空消息残留 1 行幻影空白。
+test("D7 slot：成功 retract（bash 无此态）—— bash 完成 → 标题 + 结果预览均保留", async () => {
+  // D4：bash 是 keep 类 —— 落定后标题行与 5 行尾窗预览都留在屏幕上
+  // （slot.showTitle / showPreview 均真），预览是否存在取决于 resultTextMap
+  // 是否有配对文本。空 resultTextMap → 无预览内容 → 只有标题行。
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -882,14 +882,13 @@ test("hideToolSummaries + hideThinking：无预览的纯工具消息整体返回
       cols={COLS}
       statusMap={new Map([["tu-b", false]])}
       hideThinking={true}
-      hideToolSummaries={true}
       marginTop={1}
     />,
     { width: COLS, height: 10, exitOnCtrlC: false }
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame.trim()).toBe("");
+  expect(frame).toContain("[完成] bash · ls");
   await setup.renderer.destroy();
 });
 
@@ -915,7 +914,9 @@ test("marginTop prop：根节点产顶部间距（缺省无间距，首条消息
   await setup.renderer.destroy();
 });
 
-test("hideToolSummaries：不画 [完成] 行，write 预览仍在", async () => {
+test("D7 slot：retract 落定 → 标题与预览同假（read_file 不再出 [完成] 行）；keep 预览仍在", async () => {
+  // D3/D7：渲染只消费 deriveSlot。成功 retract（read_file）标题与预览都
+  // 从屏幕拿掉（只进折叠计数）；keep（write_file）标题 + 既有 6 行预览保留。
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -928,9 +929,9 @@ test("hideToolSummaries：不画 [完成] 行，write 预览仍在", async () =>
       },
       {
         type: "tool_use",
-        id: "tu-b",
-        name: "bash",
-        input: { command: "ls" },
+        id: "tu-r",
+        name: "read_file",
+        input: { path: "b.ts" },
       },
     ],
   };
@@ -941,19 +942,20 @@ test("hideToolSummaries：不画 [完成] 行，write 预览仍在", async () =>
       statusMap={
         new Map([
           ["tu-w", false],
-          ["tu-b", false],
+          ["tu-r", false],
         ])
       }
       hideThinking={true}
-      hideToolSummaries={true}
     />,
     { width: COLS, height: 40, exitOnCtrlC: false }
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   expect(frame.includes("[思考]")).toBe(false);
-  expect(frame.includes("[完成]")).toBe(false);
-  expect(frame.includes("bash · ls")).toBe(false);
+  // retract 件：无标题行、无预览。
+  expect(frame.includes("read_file")).toBe(false);
+  // keep 件：标题 + 预览内容都在。
+  expect(frame).toContain("write_file");
   expect(frame).toContain("export const x = 1;");
   await setup.renderer.destroy();
 });
@@ -1025,7 +1027,9 @@ test("D4 bash 历史：尾部 5 行 dim 预览 + … +N 行 溢出标记", async
   await setup.renderer.destroy();
 });
 
-test("D4 bash 失败场景：内容照常显示且失败染色（statusMap=failed）", async () => {
+test("D7 失败横切：失败 bash 标题行保留、不画 dim ⎿ 结果预览（slot.showPreview 假）", async () => {
+  // D5/D7：失败横切在核内最后一步 → showTitle 真（一行短错误的完整实现是
+  // 后续 bullet）、showPreview 假 —— 不用 dim ⎿ 堆长回执。
   const setup = await testRender(
     <MessageBlocks
       message={{
@@ -1054,14 +1058,14 @@ test("D4 bash 失败场景：内容照常显示且失败染色（statusMap=faile
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 失败染色（error 色 token）出现在摘要行 [失败]；预览仍带 ⎿
+  // 标题行保留（失败染色的 error 色 token 由 ToolSummaryRow 承担）。
   expect(frame).toContain("[失败]");
-  expect(frame).toContain("⎿ boom");
-  expect(frame).toContain("⎿ err-out");
+  // 不画 dim ⎿ 结果预览（D5：不堆长文）。
+  expect(frame.includes("⎿")).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("D4 read_file 无预览块（spec D4 边界）", async () => {
+test("D7 成功 retract：read_file 落定后标题与预览同假（内容不残留）", async () => {
   const setup = await testRender(
     <MessageBlocks
       message={{
@@ -1083,9 +1087,9 @@ test("D4 read_file 无预览块（spec D4 边界）", async () => {
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("[完成] read_file · 读取 a.ts");
-  // 预览块不出现（read_file 不带 ⎿ 预览）
-  expect(frame).not.toContain("⎿");
+  // retract 落定：标题与预览同假（核保证，渲染不复活）—— 整块不出节点。
+  expect(frame.includes("read_file")).toBe(false);
+  expect(frame.includes("⎿")).toBe(false);
   // 也不应泄露模型面 tool_result 文本
   expect(frame.includes("x".repeat(50))).toBe(false);
   await setup.renderer.destroy();
@@ -1245,7 +1249,7 @@ test("D4 未配对 tool_use（statusMap 缺位）→ 不画结果预览", async 
   await setup.renderer.destroy();
 });
 
-test("D4 hideToolSummaries=true 折叠后：bash 预览块仍留", async () => {
+test("D4 keep 足迹：bash 落定后标题 + ⎿ 结果预览都留（不随折叠消失）", async () => {
   const setup = await testRender(
     <MessageBlocks
       message={{
@@ -1271,15 +1275,14 @@ test("D4 hideToolSummaries=true 折叠后：bash 预览块仍留", async () => {
         ])
       }
       hideThinking={true}
-      hideToolSummaries={true}
     />,
     { width: COLS, height: 40, exitOnCtrlC: false }
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 摘要行折叠（[完成] 不出现）
-  expect(frame).not.toContain("[完成]");
-  // bash 结果预览块（⎿）仍留
+  // keep 标题行留
+  expect(frame).toContain("[完成] bash · ls");
+  // bash 结果预览块（⎿）留
   expect(frame).toContain("⎿ a.ts");
   expect(frame).toContain("⎿ b.ts");
   await setup.renderer.destroy();
