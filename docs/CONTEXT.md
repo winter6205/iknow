@@ -338,6 +338,9 @@ _Avoid_: 默认开启；当成对 ADR-0014「模型实际所见」不变量的�
 **tool_result projection**: 从已解引用的 `llm_call.messages` 抽出的工具结果摘要（`tool_use_id` / name / is_error / chars / preview）。供 `query_trace` 列表与下钻；**不是** `tool_call` 行上的 stdout 副本。`specs/query-trace-tool-results.md`。
 _Avoid_: 打开 `resultCaptured` 往 tool_call 抄正文；把投影当会话账本；默认下钻倒 messages 全文
 
+**role projection**: trace 读侧（`src/traceserver/` 共享核，ACI + MCP 两张皮共用）对 `llm_call.messages` 中 message role 的可见性投影——`query_trace` llm_call 行投影的 `last_assistant_preview`（最后一条 role=assistant 消息的预览，无则字段缺席）与 `get_record(detail=messages)` 清单臂每 part 的 `role` 字段；外部 agent 定位最终 assistant 结论不需盲翻 parts。plans/trace-mcp-role-projection.md。
+_Avoid_: 改 `last_message_preview` 语义（它仍是逐字最后一条消息的预览）；把它当新增读侧工具（SC6 三件白名单不变）；在 `detail=tool_results` parts 上加 role（tool_result 按定义在 user 侧）；窗臂响应添 role（窗寻址已有 message_index）
+
 **crash 取证无条件**: `subagent_spawn`/`subagent_state_change`/`subagent_stop` 生命周期事件与 stderr 指针文件在所有产品入口（含 chat REPL）落盘，与主循环 content trace 的入口开关解耦。ADR-0035（对 ADR-0003 D10 的范围修正）。
 _Avoid_: 把生命周期事件绑回 `--trace-out`；把该扩张理解为 content trace 进 chat REPL
 

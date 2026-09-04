@@ -1,7 +1,8 @@
 # Spec: trace-mcp-server — stdio MCP server 暴露 trace 读侧三面（第三条读侧动线）
 
-> **版本**：v1.0 = 单工具 `query_trace`（#803）。**v1.1**（`plans/trace-mcp-read-side-split.md`）把读侧按轴拆成 `list_sessions` / `query_trace` / `get_record` 三件 read-unit 化工具，并让字符帽退出工具面。
+> **版本**：v1.0 = 单工具 `query_trace`（#803）。**v1.1**（`plans/trace-mcp-read-side-split.md`）把读侧按轴拆成 `list_sessions` / `query_trace` / `get_record` 三件 read-unit 化工具，并让字符帽退出工具面。**v1.2**（`plans/trace-mcp-role-projection.md`）在 v1.1 三件白名单之上扩展两条读侧投影判据：`get_record(detail=messages)` 清单臂每个 part 携带所属 message 的 `role`，`query_trace` llm_call 投影新增 `last_assistant_preview`（最后一条 `role==="assistant"` 消息的预览），让外部 agent 经 `list_sessions(limit:1) → query_trace(limit:1)` 两次调用直达一个会话的最终 assistant 结论。
 > **v1.1 改到的一切（此清单即「哪份文本生效」的导航）**：新增「v1.1 划界」小节；Assumption 4（三件白名单 + 四条锁定）/ 5（补前缀归属）/ 8（收窄括注豁免 + panel face 明示不动）/ 9（测试覆盖面）/ 11（补票③ 粒度）；Out of scope 的「不扩展参数面」被票③ 取代、只留时间窗轴；SC6 / SC7 / SC8 判据改写（**达成于票③、非票②**，见该组标注）；新增 SC14–SC20（票③）；Inherits / Changes / ACR 各加票③ 段。未列处即未改。**可逆**：`git revert` 本票 commit 即回 v1.0 原文。
+> **v1.2 改到的一切（此清单即「哪份文本生效」的导航）**：新增「v1.2 划界」小节——载明 (a) `get_record(detail=messages)` 清单臂每个 part 携带所属 message 的 `role`，`detail=tool_results` 明确**不加** role（tool_result 按定义在 user 侧）；(b) `query_trace` llm_call 投影新增 `last_assistant_preview`（最后一条 `role==="assistant"` 消息的预览，帽沿复用既有 `preview()` 的 `QUERY_TRACE_PREVIEW_CAP=400`，无 assistant 消息时字段**缺席**为合法态），`last_message_preview` 原样保留、语义不变。**否决记录**：不加第四件工具（「读最新会话最终结论」便捷工具否决：收益撑不起 Assumption 4 + SC6 白名单 + 两张皮 schema 的变更面，判据 (a)+(b) 落地后两次调用已达目的）；不改 `last_message_preview` 语义。**参数面声明**：参数面无任何变化（两张皮 schema 逐项一致判据 SC18 不受扰动），Assumption 4 四条锁定（`conversation_id` 在 tool face 必填 / 字符帽不是任何工具的参数 / MCP transport backstop = 20000 / 两张皮 inputSchema 逐项一致）全部不变。**可逆**：`git revert` 本票 commit 即回 v1.1 原文（输出投影字段扩展，删除字段即回退，无数据迁移、无 schema 版本号、无客户端硬依赖——外部 agent 即使已读到新字段，回退后忽略未知字段即可）。
 
 > 来源：GitHub #803 提案 + 2026-08-30 wayfinder/LogicSync 对齐（外部编码 agent 当 MCP client；本仓交付 stdio MCP server）+ skeptic 子代理对假设清单 `PASS_WITH_REVISIONS`。
 > 假设闸门：操作员授权「推荐方向 Confirm」+ 子代理必改修订并入 Assumptions；开放纠正。v1.1 修订经 `architecture-change-reviewer` 五轮 PASS 5/5。
@@ -28,6 +29,17 @@
 - **tool face**（ACI + MCP 两张皮）输出 = records 数组 + 回显调用方给过的坐标。**「一行人类可读收窄提示」不由 tool face 发**：契约 X 的 marker 形态按 ADR-0004:23 是 executor 的职责（「自测序列化字符数、自截断、**自合成标记**」），薄皮若在 JSON 之后追加自由文本，回显就不再可解析，且与 executor 的标记形成两处权威。**不含** `truncated` / `total`——这两项是 Glossary 契约 X 的 `Avoid` 原文所禁。`response_truncated` 一并禁用是**本 spec 的延伸**（CONTEXT.md 与 ADR-0004:23 未点名它），理由：它随记录数走、不随字段走，是假负号来源。页没收满的诚实信号改由隐式关系给出：`records.length < limit` 即「到底了」。
 - **panel face**（`http.ts` → Web，ADR-0020 语义不变）保留 `{records,total,skipped_lines,truncated,offset}` 信封，因面板需要 `total` 画分页器。契约 X 的措辞是「工具返回」（`docs/adr/0004-tool-layer-six-tool-set.md:23`），面板 JSON 不经 executor，故 `total` 在 panel face 合法——这是**澄清适用面**，不推翻 ADR-0004。
 - 两个 face 直读同一 reader；panel face **从不经过 tool-face 序列化出口**（`serializeListPage` 与字符帽都到不了面板），故收窄与帽的改动不会回归面板。但自 T4 起两侧共用**信封形状与构造**（`src/traceserver/envelope.ts`）——这一层改动会同时触到面板，实测从共享构造里删 `total`/`truncated` 使 `tests/traceserver/http.test.ts` 32 例中 11 例红，即该风险由面板既有测兜住，不另设字节 pin。
+
+## v1.2 划界 — 读侧 role 投影（让外部 agent 两次调用直达最终 assistant 结论）
+
+> 本小节继承 v1.1 的「tool face 输出 = records 数组 + 回显调用方给过的坐标」（不含 `truncated` / `total` / `response_truncated`）与 panel face 不动两条前置；本轮只扩展两条读侧投影判据，不动参数面、不动字符帽、不动 envelope、不动 panel JSON。
+
+- **判据 (a) `get_record(detail=messages)` 清单臂每个 part 携带所属 message 的 `role`**。清单臂 parts 原只回 `{message_index, part_index, chars}`；本轮每条 part 多带一个 `role`（其所属 message 的 `role`，值域与 ADR-0003 LLM call `messages[].role` 同：`user` / `assistant` / `tool` / `system`）。**`detail=tool_results` 不加 `role`**：tool_result 按定义在 user 侧（与 `query-trace-tool-results` 投影的 `tool_use_id` / `name` / `is_error` / `chars` / `preview` 同一归属），加 role 是冗余且易混淆 user-message 与其中嵌套的 tool_result；窗臂契约 SC8 维持不变（窗响应仍不添 role——窗正文寻址已有 `message_index`，role 在清单臂给出）。
+- **判据 (b) `query_trace` llm_call 投影新增 `last_assistant_preview`**。`last_message_preview` 原样保留、语义不变（仍是「最后一条消息的预览」）；`last_assistant_preview` = 最后一条 `role==="assistant"` 消息的预览，截断帽沿复用既有 `preview()` 的 `QUERY_TRACE_PREVIEW_CAP=400`（同一 cap、同 UTF-16 code unit 单位、同截断语义）。**无 assistant 消息的 llm_call → `last_assistant_preview` 字段缺席**（合法态，非错误——对应 defensive-contract-validator 的 empty 类：「读 assistant 结论」这条查询在该记录上无命中，是预期形态，不退化为 `last_assistant_preview: ""` 也不抛错）。
+- **否决记录**：(i) **不加第四件工具**（「读最新会话最终结论」便捷工具否决——收益撑不起 Assumption 4 + SC6 白名单 + 两张皮 schema 的变更面；判据 (a)+(b) 落地后，外部 agent 取「最新会话最终结论」的动线 = `list_sessions(limit:1) → query_trace(record_type:"llm_call", limit:1)` 两次调用，已是两次可达，不值一枚独立工具）。(ii) **不改 `last_message_preview` 语义**（它仍是「最后一条消息」，对找 assistant 结论是死预览——loop-engine 每轮尾部追加 `<agent_status>` user 注入消息的场景下，`last_message_preview` 仍如实呈现那一条；不动它是尊重其既有语义，不为本轮需求改写）。
+- **参数面声明**：参数面零变化。`list_sessions` / `query_trace` / `get_record` 三件的 inputSchema 在 ACI 与 MCP 两张皮上**逐项一致**判据 SC18 不受扰动；Assumption 4 四条锁定（`conversation_id` 在 tool face 必填 / 字符帽不是任何工具的参数 / MCP transport backstop = 20000 / 两张皮 inputSchema 逐项一致）全部不变。
+- **可逆声明**：本修订仅扩展输出投影字段（清单臂 part 多带 `role`；llm_call 行多带 `last_assistant_preview`），不动输入、不动 envelope、不动 panel face、不动字符帽。`git revert` 本票 commit 即回 v1.1 原文（投影字段是「加项」，删除字段即回退，无数据迁移、无 schema 版本号、无客户端硬依赖——外部 agent 即使已读到新字段，回退后忽略未知字段即可）。
+- **spec Assumption 8 依从声明**：本次是「tool face 输出形状的语义变更」（给外部 agent 的可见形状新增 `role` 与 `last_assistant_preview` 两个判据），属 Assumption 8 括注豁免边界所称的「加参是**语义变更**，必须先经本 spec 改写才允许落地」适用面。本轮由本 spec v1.2 修订**先行**落地（票④ commit 在 T2 代码落地之前），「代码先动、spec 后补」条款由此满足；票④ T2 实施期在共享核（`src/traceserver/`）单点落地，ACI 与 MCP 两薄皮经共享核自动继承、各只补行为测试与 description 单源更新。
 
 ## Assumptions（操作员 + skeptic 修订锁定）
 
