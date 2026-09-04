@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   SUBAGENT_TOOL_LABEL,
+  settledClassOfDisplay,
   clipOneLine,
   clipOneLineVisual,
   countBashCalls,
@@ -852,30 +853,21 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
     expect(p.lines[0]?.endsWith("\x1b[0m")).toBe(true);
   });
 
-  test("skill 多行 resultText → 5 行尾部 + 溢出", () => {
+  test("skill 无预览声明（D6 accent 点名着色）：多行正文不摊五行走", () => {
+    // spec specs/tui-tool-settled-appearance.md D6：skill 是 accent 类 ——
+    // 只点名着色（`skill <name>`），不把 skill 正文摊成五行走浅色预览；
+    // 注册表不声明 preview，任何 resultText 一律 empty。
     const body = Array.from({ length: 10 }, (_, i) => `body-${i}`).join("\n");
-    const p = resultToolPreview(
-      "skill",
-      { name: "demo" },
-      { resultText: body }
-    );
-    expect(p.kind).toBe("result");
-    if (p.kind !== "result") return;
-    expect(p.lines).toEqual(["body-5", "body-6", "body-7", "body-8", "body-9"]);
-    expect(p.hiddenLineCount).toBe(5);
-  });
-
-  test("skill 单行 resultText → 1 行", () => {
-    const p = resultToolPreview(
-      "skill",
-      { name: "demo" },
-      {
-        resultText: "Loaded skill body",
-      }
-    );
-    expect(p.kind).toBe("result");
-    if (p.kind !== "result") return;
-    expect(p.lines).toEqual(["Loaded skill body"]);
+    expect(
+      resultToolPreview("skill", { name: "demo" }, { resultText: body }).kind
+    ).toBe("empty");
+    expect(
+      resultToolPreview(
+        "skill",
+        { name: "demo" },
+        { resultText: "Loaded skill body" }
+      ).kind
+    ).toBe("empty");
   });
 
   test("skill 缺 resultText → empty（live 路径无旁路）", () => {
@@ -952,9 +944,81 @@ describe("registeredToolDisplayNames: 注册表覆盖 EXPECTED_TOOLSET_30", () =
       "read_mcp_resource",
       "bash_output",
       "bash_stop",
+      // spec D2：建树四件 + list-task-worktrees 进入显示注册表。TUI 装配面
+      // 仍按 host 缝条件化装配（deps-tools EXPECTED_TUI_TOOLSET 剥除不动），
+      // 显示注册表完备性与装配条件化解耦 —— 覆盖闸从 30 件扩为 35 件，
+      // 不变量（注册表每件都有显示声明）等于或强于原断言。
+      "create-task-worktree",
+      "enter-task-worktree",
+      "exit-task-worktree",
+      "remove-task-worktree",
+      "list-task-worktrees",
     ];
     const names = new Set(registeredToolDisplayNames());
     for (const name of EXPECTED_TOOLSET_30) {
+      expect(names.has(name)).toBe(true);
+    }
+  });
+});
+
+describe("settledClass: 落定态三分类（spec D2/D8）", () => {
+  // spec D2：缺 settledClass 的声明非法。ToolDisplay 接口把字段钉成必填
+  // （编译期闸），本测试在运行时再兜一层：注册表每件必须带合法 class 值。
+  test("TOOL_DISPLAYS 每件都有合法 settledClass（缺声明即非法）", () => {
+    const LEGAL: ReadonlyArray<string> = [
+      "keep",
+      "retract",
+      "accent",
+      "subagent",
+    ];
+    for (const name of registeredToolDisplayNames()) {
+      const cls = settledClassOfDisplay(name);
+      expect(LEGAL).toContain(cls);
+      // 非 "subagent" 值必须来自 D8 三分类真值；"subagent" 只允许出现在
+      // 核内 isSubagentSettledName 覆盖的两个名字上（跨核闸在 tool-settled.test）。
+      if (cls === "subagent") {
+        expect(["spawn_subagent", "subagent_result"]).toContain(name);
+      }
+    }
+  });
+
+  test("D8 分类表 sentinel：keep / retract / accent 各类代表名对号", () => {
+    // keep：写路径与会话动作；retract：查询 / 读取 / 未注册兜底；
+    // accent：skill 与建树四件。
+    expect(settledClassOfDisplay("bash")).toBe("keep");
+    expect(settledClassOfDisplay("write_file")).toBe("keep");
+    expect(settledClassOfDisplay("todo_write")).toBe("keep");
+    expect(settledClassOfDisplay("read_file")).toBe("retract");
+    expect(settledClassOfDisplay("grep")).toBe("retract");
+    expect(settledClassOfDisplay("list-task-worktrees")).toBe("retract");
+    expect(settledClassOfDisplay("skill")).toBe("accent");
+    for (const name of [
+      "create-task-worktree",
+      "enter-task-worktree",
+      "exit-task-worktree",
+      "remove-task-worktree",
+    ]) {
+      expect(settledClassOfDisplay(name)).toBe("accent");
+    }
+  });
+
+  test('子代理两件显式声明 "subagent" class（D8 三类之外，无 ! 断言兜底）', () => {
+    // spec D8：spawn_subagent / subagent_result 不进 keep/retract/accent 三类，
+    // 核在 class 分派之前按 keep-title-only 特判。注册表声明必须诚实 ——
+    // 若靠 undefined + 兜底「碰巧」解析成 retract，本测试拒绝。
+    expect(settledClassOfDisplay("spawn_subagent")).toBe("subagent");
+    expect(settledClassOfDisplay("subagent_result")).toBe("subagent");
+  });
+
+  test("建树四件 + list-task-worktrees 进显示注册表（spec D2 建树四件必须入表）", () => {
+    const names = new Set(registeredToolDisplayNames());
+    for (const name of [
+      "create-task-worktree",
+      "enter-task-worktree",
+      "exit-task-worktree",
+      "remove-task-worktree",
+      "list-task-worktrees",
+    ]) {
       expect(names.has(name)).toBe(true);
     }
   });

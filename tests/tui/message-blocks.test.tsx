@@ -20,7 +20,9 @@
 import { expect, test } from "bun:test";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 import { testRender } from "@opentui/react/test-utils";
+import { RGBA } from "@opentui/core";
 import { MessageBlocks } from "../../src/tui/message-blocks.js";
+import { tuiPalette } from "../../src/tui/theme.js";
 
 const COLS = 60;
 
@@ -626,7 +628,7 @@ test("tool_use preview 截断窗：edit_file 显示截断 diff", async () => {
 //
 // 间距归属（2026-08-22 变更）：消息间 1 行节奏由 MessageBlocks 根节点的
 // `marginTop` prop 提供（ChatView 传 `visibleIndex===0?0:1`）。此前由
-// ChatView wrapper `<box marginTop>` 提供，但折叠（hideToolSummaries）后
+// ChatView wrapper `<box marginTop>` 提供，但折叠（工具标题行收掉）后
 // 渲染为 null 的消息仍残留 wrapper margin，连成幻影空位 —— margin 改随
 // MessageBlocks 根节点存亡。缺省无 margin：单条渲染首行前无空白行（T9
 // 抖动修复后的 SSOT 边界不变）。
@@ -718,6 +720,40 @@ test("history write_file 未配对（空 statusMap）：仅 [运行中] 摘要�
   expect(frame).toContain("[运行中]");
   expect(frame).not.toContain(bodyLine);
   expect(frame).not.toContain("second-body-line");
+  await setup.renderer.destroy();
+});
+
+test("纯 retract 工具落定消息：全部收起 → 渲染为 null（无幻影空壳）", async () => {
+  // D3/D7（spec specs/tui-tool-settled-appearance.md）：纯 read_file 消息
+  // 落定后标题与预览同假（retract）→ MessageBlocks 返回 null，不留空壳
+  // box（空壳会让消息间距残留幻影空白）。
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-rd-null",
+        name: "read_file",
+        input: { path: "a.ts" },
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg, {
+    statusMap: new Map([["tu-rd-null", false]]),
+  });
+  const frame = setup.captureCharFrame();
+  // 帧内不得出现任何工具痕迹（null 契约在帧上的投影 = 空白帧；
+  // captureCharFrame 恒返回铺满空白的画布，故以「无内容字符」判定）。
+  expect(frame.includes("read_file")).toBe(false);
+  expect(frame.includes("[完成]")).toBe(false);
+  expect(frame.includes("[失败]")).toBe(false);
+  expect(frame.trim().length).toBe(0);
+  // 结构层：spans 无非空 span —— 空白帧 + 零内容 span 共同钉住 null 契约。
+  const { lines } = setup.captureSpans();
+  const contentSpans = lines.flatMap((line) =>
+    line.spans.filter((span) => span.text.trim().length > 0)
+  );
+  expect(contentSpans).toHaveLength(0);
   await setup.renderer.destroy();
 });
 
@@ -860,10 +896,10 @@ test("bash 回归：`[运行中] bash` / 完成态字节不变", async () => {
   await setupDone.renderer.destroy();
 });
 
-test("hideToolSummaries + hideThinking：无预览的纯工具消息整体返回 null（不留空壳）", async () => {
-  // turn 结束折叠后，只含 thinking + 无预览工具（bash / 搜索类）的
-  // assistant 消息不再有任何可见内容 —— 必须返回 null，让 ChatView 的
-  // 消息间距（marginTop prop）随之消失，否则每条空消息残留 1 行幻影空白。
+test("D7 slot：成功 retract（bash 无此态）—— bash 完成 → 标题 + 结果预览均保留", async () => {
+  // D4：bash 是 keep 类 —— 落定后标题行与 5 行尾窗预览都留在屏幕上
+  // （slot.showTitle / showPreview 均真），预览是否存在取决于 resultTextMap
+  // 是否有配对文本。空 resultTextMap → 无预览内容 → 只有标题行。
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -882,14 +918,247 @@ test("hideToolSummaries + hideThinking：无预览的纯工具消息整体返回
       cols={COLS}
       statusMap={new Map([["tu-b", false]])}
       hideThinking={true}
-      hideToolSummaries={true}
       marginTop={1}
     />,
     { width: COLS, height: 10, exitOnCtrlC: false }
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame.trim()).toBe("");
+  expect(frame).toContain("[完成] bash · ls");
+  await setup.renderer.destroy();
+});
+
+function rgbaEq(a: RGBA, b: RGBA): boolean {
+  return a.r === b.r && a.g === b.g && a.b === b.b;
+}
+
+/** 抓含 needle 文本的 span 的 fg（无匹配 → undefined）。 */
+function fgOfSpanWith(
+  setup: Awaited<ReturnType<typeof testRender>>,
+  needle: string
+): RGBA | undefined {
+  const { lines } = setup.captureSpans();
+  for (const line of lines) {
+    for (const span of line.spans) {
+      if (span.text.includes(needle)) return span.fg;
+    }
+  }
+  return undefined;
+}
+
+// -- SC4（spec D5）：失败横切 —— 红标题 + 一行短错误，不 dim 堆长文 -------
+
+const LONG_FAILURE_RECEIPT = [
+  "[worktree_isolation] workspace mutation blocked: bash in this session",
+  "workspace mutation blocked: worktree isolation is ON and this session",
+  "is not yet bound to a task worktree. Call the create-task-worktree ACI",
+  "tool first, then retry inside the bound worktree.",
+  "at gate.check (worktree-gate.ts:66)",
+  "at runLoop (loop.ts:120)",
+].join("\n");
+
+test("SC4 失败 mutate：红标题 + 一行短错误（截断长回执）", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-wt-fail",
+            name: "bash",
+            input: { command: "rm -rf /" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-wt-fail", true]])}
+      resultTextMap={new Map([["tu-wt-fail", LONG_FAILURE_RECEIPT]])}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 标题行保留（[失败] 形态）。
+  expect(frame).toContain("[失败]");
+  // 一行短错误：错误内容以单行截断形态出现（首行文本在场）。
+  expect(frame).toContain("[worktree_isolation]");
+  // 整个失败块只占 1 行标题 + 1 行错误（不摊开长回执多行）。
+  const failLines = frame
+    .split("\n")
+    .filter(
+      (l) =>
+        l.includes("worktree_isolation") || l.includes("workspace mutation")
+    );
+  expect(failLines.length).toBe(1);
+  await setup.renderer.destroy();
+});
+
+test("SC4 失败件：无 dim 五行走 ⎿ 块堆长文", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-bash-longfail",
+            name: "bash",
+            input: { command: "false" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-bash-longfail", true]])}
+      resultTextMap={
+        new Map([
+          [
+            "tu-bash-longfail",
+            JSON.stringify({
+              code: 1,
+              stdout: "line-1\nline-2\nline-3",
+              stderr: LONG_FAILURE_RECEIPT,
+            }),
+          ],
+        ])
+      }
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 失败件不画 dim ⎿ 结果预览（D5：不堆长文；长 stderr 只进一行短错误）。
+  expect(frame.includes("⎿")).toBe(false);
+  expect(frame.includes("line-2")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("SC4 失败标题 error 色 token（ToolSummaryRow fg = palette.error）", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-wt-fail2",
+            name: "bash",
+            input: { command: "false" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-wt-fail2", true]])}
+      resultTextMap={new Map([["tu-wt-fail2", "boom"]])}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const expectedErr = RGBA.fromHex(tuiPalette.error);
+  const fg = fgOfSpanWith(setup, "[失败]");
+  expect(fg).toBeDefined();
+  expect(rgbaEq(fg!, expectedErr)).toBe(true);
+  // 失败不落 dim（dim 只属成功 bash 尾巴）。
+  const dimFg = RGBA.fromHex(tuiPalette.dim);
+  expect(rgbaEq(fg!, dimFg)).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("SC5 accent 成功：skill 落定行走 accent 色，无 skill 正文五行走预览", async () => {
+  const body = Array.from({ length: 10 }, (_, i) => `body-${i}`).join("\n");
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-skill",
+            name: "skill",
+            input: { name: "playwright-cli" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-skill", false]])}
+      resultTextMap={new Map([["tu-skill", body]])}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 人读表述：`skill <name>`（D6）。
+  expect(frame).toContain("skill playwright-cli");
+  // 不摊 skill 正文（无 ⎿ 五行走预览）。
+  expect(frame.includes("⎿")).toBe(false);
+  expect(frame.includes("body-5")).toBe(false);
+  // accent 色 token 落到标题行（非 dim）。
+  const expectedAccent = RGBA.fromHex(tuiPalette.accent);
+  const fg = fgOfSpanWith(setup, "skill playwright-cli");
+  expect(fg).toBeDefined();
+  expect(rgbaEq(fg!, expectedAccent)).toBe(true);
+  const dimFg = RGBA.fromHex(tuiPalette.dim);
+  expect(rgbaEq(fg!, dimFg)).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("SC5 accent 成功：建树工具人读表述（label / 路径叶子）走 accent", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-ctw",
+            name: "enter-task-worktree",
+            input: { conversationId: "abc-leaf-123" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-ctw", false]])}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("进入任务工作树");
+  const expectedAccent = RGBA.fromHex(tuiPalette.accent);
+  const fg = fgOfSpanWith(setup, "进入任务工作树");
+  expect(fg).toBeDefined();
+  expect(rgbaEq(fg!, expectedAccent)).toBe(true);
+  await setup.renderer.destroy();
+});
+
+test("SC4/D6 error 优先于 accent：accent 工具失败走 error 色（渲染层）", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-skill-fail",
+            name: "skill",
+            input: { name: "nope" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-skill-fail", true]])}
+      resultTextMap={new Map([["tu-skill-fail", "skill not found"]])}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const expectedErr = RGBA.fromHex(tuiPalette.error);
+  const fg = fgOfSpanWith(setup, "[失败]");
+  expect(fg).toBeDefined();
+  expect(rgbaEq(fg!, expectedErr)).toBe(true);
+  // accent 失败不得落 accent 色。
+  const expectedAccent = RGBA.fromHex(tuiPalette.accent);
+  expect(rgbaEq(fg!, expectedAccent)).toBe(false);
   await setup.renderer.destroy();
 });
 
@@ -915,7 +1184,9 @@ test("marginTop prop：根节点产顶部间距（缺省无间距，首条消息
   await setup.renderer.destroy();
 });
 
-test("hideToolSummaries：不画 [完成] 行，write 预览仍在", async () => {
+test("D7 slot：retract 落定 → 标题与预览同假（read_file 不再出 [完成] 行）；keep 预览仍在", async () => {
+  // D3/D7：渲染只消费 deriveSlot。成功 retract（read_file）标题与预览都
+  // 从屏幕拿掉（只进折叠计数）；keep（write_file）标题 + 既有 6 行预览保留。
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -928,9 +1199,9 @@ test("hideToolSummaries：不画 [完成] 行，write 预览仍在", async () =>
       },
       {
         type: "tool_use",
-        id: "tu-b",
-        name: "bash",
-        input: { command: "ls" },
+        id: "tu-r",
+        name: "read_file",
+        input: { path: "b.ts" },
       },
     ],
   };
@@ -941,19 +1212,20 @@ test("hideToolSummaries：不画 [完成] 行，write 预览仍在", async () =>
       statusMap={
         new Map([
           ["tu-w", false],
-          ["tu-b", false],
+          ["tu-r", false],
         ])
       }
       hideThinking={true}
-      hideToolSummaries={true}
     />,
     { width: COLS, height: 40, exitOnCtrlC: false }
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   expect(frame.includes("[思考]")).toBe(false);
-  expect(frame.includes("[完成]")).toBe(false);
-  expect(frame.includes("bash · ls")).toBe(false);
+  // retract 件：无标题行、无预览。
+  expect(frame.includes("read_file")).toBe(false);
+  // keep 件：标题 + 预览内容都在。
+  expect(frame).toContain("write_file");
   expect(frame).toContain("export const x = 1;");
   await setup.renderer.destroy();
 });
@@ -1025,7 +1297,9 @@ test("D4 bash 历史：尾部 5 行 dim 预览 + … +N 行 溢出标记", async
   await setup.renderer.destroy();
 });
 
-test("D4 bash 失败场景：内容照常显示且失败染色（statusMap=failed）", async () => {
+test("D7 失败横切：失败 bash 标题行保留、不画 dim ⎿ 结果预览（slot.showPreview 假）", async () => {
+  // D5/D7：失败横切在核内最后一步 → showTitle 真（一行短错误的完整实现是
+  // 后续 bullet）、showPreview 假 —— 不用 dim ⎿ 堆长回执。
   const setup = await testRender(
     <MessageBlocks
       message={{
@@ -1054,14 +1328,14 @@ test("D4 bash 失败场景：内容照常显示且失败染色（statusMap=faile
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 失败染色（error 色 token）出现在摘要行 [失败]；预览仍带 ⎿
+  // 标题行保留（失败染色的 error 色 token 由 ToolSummaryRow 承担）。
   expect(frame).toContain("[失败]");
-  expect(frame).toContain("⎿ boom");
-  expect(frame).toContain("⎿ err-out");
+  // 不画 dim ⎿ 结果预览（D5：不堆长文）。
+  expect(frame.includes("⎿")).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("D4 read_file 无预览块（spec D4 边界）", async () => {
+test("D7 成功 retract：read_file 落定后标题与预览同假（内容不残留）", async () => {
   const setup = await testRender(
     <MessageBlocks
       message={{
@@ -1083,9 +1357,9 @@ test("D4 read_file 无预览块（spec D4 边界）", async () => {
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("[完成] read_file · 读取 a.ts");
-  // 预览块不出现（read_file 不带 ⎿ 预览）
-  expect(frame).not.toContain("⎿");
+  // retract 落定：标题与预览同假（核保证，渲染不复活）—— 整块不出节点。
+  expect(frame.includes("read_file")).toBe(false);
+  expect(frame.includes("⎿")).toBe(false);
   // 也不应泄露模型面 tool_result 文本
   expect(frame.includes("x".repeat(50))).toBe(false);
   await setup.renderer.destroy();
@@ -1245,7 +1519,7 @@ test("D4 未配对 tool_use（statusMap 缺位）→ 不画结果预览", async 
   await setup.renderer.destroy();
 });
 
-test("D4 hideToolSummaries=true 折叠后：bash 预览块仍留", async () => {
+test("D4 keep 足迹：bash 落定后标题 + ⎿ 结果预览都留（不随折叠消失）", async () => {
   const setup = await testRender(
     <MessageBlocks
       message={{
@@ -1271,15 +1545,14 @@ test("D4 hideToolSummaries=true 折叠后：bash 预览块仍留", async () => {
         ])
       }
       hideThinking={true}
-      hideToolSummaries={true}
     />,
     { width: COLS, height: 40, exitOnCtrlC: false }
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 摘要行折叠（[完成] 不出现）
-  expect(frame).not.toContain("[完成]");
-  // bash 结果预览块（⎿）仍留
+  // keep 标题行留
+  expect(frame).toContain("[完成] bash · ls");
+  // bash 结果预览块（⎿）留
   expect(frame).toContain("⎿ a.ts");
   expect(frame).toContain("⎿ b.ts");
   await setup.renderer.destroy();

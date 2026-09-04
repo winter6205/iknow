@@ -31,8 +31,10 @@ import {
   summarizePartialInput,
   summarizeToolCall,
   clipOneLineVisual,
+  clipErrorLine,
   visualWidth,
 } from "./tool-summary.js";
+import { deriveSlot, settledColorToFg } from "./tool-settled.js";
 import {
   CompletedToolPreviewView,
   completedToolPreviewTextLines,
@@ -112,11 +114,15 @@ function completedPreviewOf(run: LiveToolRun) {
   });
 }
 
-/** live 路径：完成态工具结果预览（bash / skill）。走 run.stdout / run.stderr
+/** live 路径：完成态工具结果预览（bash）。走 run.stdout / run.stderr
  *  旁路（不依赖历史 tool_result 反序列化）。preview 声明缺席 / 字段缺席
- *  → empty。 */
+ *  → empty。D5：失败件核置 showPreview 假 —— 不用 dim ⎿ 堆 stderr 长文
+ *  （失败只走一行短错误）。 */
 function resultPreviewOf(run: LiveToolRun) {
   if (run.status === "running") {
+    return { kind: "empty" as const };
+  }
+  if (run.status === "failed") {
     return { kind: "empty" as const };
   }
   return resultToolPreview(run.name, run.input, {
@@ -138,6 +144,16 @@ export function liveToolPreviewTextLines(
     return [runningLine(run, cols)];
   }
   const out: string[] = [formatCompletedToolLine(run, cols)];
+  if (run.status === "failed") {
+    // D5：失败一行短错误（截断），不画 dim 预览。数据源 = run.message ??
+    // run.detail（live 旁路字段）—— 与历史路径 message-blocks.failureTextOf
+    // 的 JSON envelope 解析**有意分叉**：live 事件尚未经 tool_result 编码，
+    // 没有 envelope 可解析；历史只有落盘文本，无旁路字段。两侧错误文本不
+    // 承诺字节一致（同源截断纪律 = clipErrorLine）。
+    const err = clipErrorLine(run.message ?? run.detail ?? "", cols);
+    if (err.length > 0) out.push(err);
+    return out;
+  }
   for (const l of completedToolPreviewTextLines(
     completedPreviewOf(run),
     cols
@@ -157,18 +173,27 @@ export function liveToolPreviewRows(run: LiveToolRun, cols: number): number {
 
 /** live 工具 tail box：状态行 + 完成态截断预览。
  *  运行态仅状态行（T5：有 partialInput 增量时含 `· <partial 摘要>`）；
- *  write/edit 运行中不画 content。 */
+ *  write/edit 运行中不画 content。D5/D6：颜色消费 deriveSlot 的 color
+ *  token —— 失败 error、accent 类成功 accent，dim 不再染所有完成行。 */
 export function liveToolPreviewBox(run: LiveToolRun, cols: number): ReactNode {
-  const status =
-    run.status === "running"
-      ? runningLine(run, cols)
-      : formatCompletedToolLine(run, cols);
-  const preview = run.status === "running" ? null : completedPreviewOf(run);
-  const resultPreview =
-    run.status === "running" ? undefined : resultPreviewOf(run);
+  const running = run.status === "running";
+  const status = running
+    ? runningLine(run, cols)
+    : formatCompletedToolLine(run, cols);
+  const preview = running ? null : completedPreviewOf(run);
+  const resultPreview = running ? undefined : resultPreviewOf(run);
+  const slot = deriveSlot(run.name, {
+    running,
+    failed: run.status === "failed",
+  });
+  const fg = settledColorToFg(slot.color, {
+    default: tuiPalette.dim,
+    accent: tuiPalette.accent,
+    error: tuiPalette.error,
+  });
   return (
     <box key={run.id} flexDirection="column">
-      <text fg={tuiPalette.dim} wrapMode="none">
+      <text fg={fg} wrapMode="none">
         {status}
       </text>
       {preview !== null && (

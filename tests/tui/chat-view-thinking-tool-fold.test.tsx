@@ -1,16 +1,14 @@
 /** @jsxImportSource @opentui/react */
 /**
- * D3 (tui-display-consistency) 折叠简化：
- *  - `inLastTurn` 门已删除 —— 折叠作用于每一轮历史;
- *  - `thinkingSeconds > 0 || turnToolTotal > 1` 闸已删除 —— 任何已完成工具
- *    轮次都折叠;running 态保持逐条可见(行为不变);
- *  - 折叠输入改用 D2 落盘的 `thinkingMs`(纯函数 sumThinkingMsInRange),
- *    由 `attachSession(file)` → `TuiSessionState.thinkingMs` 携带。
+ * D3（spec specs/tui-tool-settled-appearance.md）落定态折叠：
+ *  - 折叠计数行只聚合成功且 retract 的件（inFoldCount === true）；
+ *  - keep（bash / write / edit）标题 + 预览留；accent / 失败出独立标题行；
+ *  - 零条收 → 无工具计数行（思考秒数行可单独在）；
+ *  - running 态逐条可见（行为不变）；
+ *  - 折叠簇思考秒数 = 落盘 thinkingMs（纯函数 sumThinkingMsInRange）。
  *
- * 旧合同:有完成工具后只留一行 turn 摘要;不再铺 `[思考]` / `[完成] bash`
- * 交错 —— 仍成立。新增合同:两轮会话各自出现折叠行且旧轮 `[完成]` 行不回摊;
- * 单工具无思考秒数轮次也折叠(落盘 thinkingMs 缺席 → 折叠行只显示工具计数);
- * running 态逐条工具可见。
+ * 渲染只消费 deriveSlot 的 slot（D7）——message-blocks 按标题/预览/收三类
+ * 自治，ChatView 不再传组合开关。
  */
 import { expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -106,34 +104,6 @@ function interleavedThinkingToolMessages(): AnthropicNativeMessage[] {
   ];
 }
 
-type Marker = "think" | "tool";
-
-function markerSequence(frame: string): Marker[] {
-  const out: Marker[] = [];
-  for (const raw of frame.split("\n")) {
-    const line = raw.trim();
-    if (line.length === 0) continue;
-    if (
-      line.includes("[思考]") ||
-      line.startsWith("思考了 ") ||
-      line.startsWith("思考中")
-    ) {
-      out.push("think");
-      continue;
-    }
-    if (line.includes("[完成]") && line.includes("bash")) {
-      out.push("tool");
-    }
-  }
-  return out;
-}
-
-function thinkingAfterFirstTool(seq: ReadonlyArray<Marker>): boolean {
-  const firstTool = seq.indexOf("tool");
-  if (firstTool < 0) return false;
-  return seq.slice(firstTool + 1).includes("think");
-}
-
 /** thinkingMs 与 messages 一一对应。null = 该位置无 thinkingMs;
  *  number(ms) = 该 assistant 回合的思考时长。三个 bashTurn 的 thinkingMs 落在
  *  index 1, 3, 5(final assistant 的思考在 index 7)。 */
@@ -164,9 +134,9 @@ function thinkingMsForInterleaved(
   return out;
 }
 
-test("idle：思考秒数 + 多轮 bash → 思考了 N 秒 下一行 bash × N，不铺 [完成]", async () => {
-  // thinkingMs 落盘:每个 bashTurn 思考 9s,末条 final 思考 2s。`s = 30 → 30 秒 / 9 秒 × 3 = 27 秒`
-  // 该用例只对末段折叠感兴趣 —— 末段 anchor = final assistant (index 7) → 2000ms → 2 秒。
+test("idle：思考秒数 + 多轮 bash keep → 标题留、零条收无计数行", async () => {
+  // bash 是 keep 类：落定后标题行逐条留（D4 足迹）；本 turn 零 retract
+  // 条目 → 无工具计数行（D3）。思考秒数行仍按簇落盘 thinkingMs 画。
   const setup = await testRender(
     <ChatView
       session={sessionWith(
@@ -182,22 +152,20 @@ test("idle：思考秒数 + 多轮 bash → 思考了 N 秒 下一行 bash × N�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 三个 bash 折叠行（每段一个 thinkingMs = 9000ms → 9 秒）+ 末段折叠 = final
-  // assistant 2000ms → 2 秒,bash × 3。
-  expect(frame).toContain("思考了 9 秒");
+  // keep 标题行逐条可见（bash 成功）。
+  expect(frame).toContain("[完成] bash");
+  // 零条收 → 无工具计数行。
+  expect(frame.includes("× ")).toBe(false);
+  // 思考秒数行仍在（簇 thinkingMs 求和，思考行可单独在）。
   expect(frame).toContain("思考了 2 秒");
-  expect(frame).toContain("bash × 3");
-  expect(frame).not.toContain("思考了 2 秒 · bash × 3");
-  expect(frame.includes("[完成]")).toBe(false);
   expect(frame.includes("[思考]")).toBe(false);
-  expect(thinkingAfterFirstTool(markerSequence(frame))).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("idle：两轮会话各自折叠（spec D3 全轮生效）", async () => {
+test("idle：两轮 bash keep → 两轮各自标题留，零条收无计数行（spec D3 全轮生效）", async () => {
   // 两轮:每轮一条 user query + assistant(thinking + bash)+ tool_result user。
   // thinkingMs = [null, 4000, null, 6000, null] (assistant 思考 4s / 6s)。
-  // 旧轮 `[完成] bash` 不回摊 —— 两轮各自出现折叠行。
+  // bash keep 标题在两轮各留一条；零 retract → 无计数行。
   const messages: AnthropicNativeMessage[] = [
     {
       role: "user",
@@ -248,19 +216,19 @@ test("idle：两轮会话各自折叠（spec D3 全轮生效）", async () => {
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 两轮各自出现折叠行:各带独立 thinkingMs。
+  // 两轮各自出思考秒数行:各带独立 thinkingMs。
   expect(frame).toContain("思考了 4 秒");
   expect(frame).toContain("思考了 6 秒");
-  // 旧轮 `[完成] bash` 不回摊(全文不应出现 `[完成]`)。
-  expect(frame.includes("[完成]")).toBe(false);
-  // 折叠计数行两次各显示 `bash × 1`。
-  expect(frame.split("bash × 1").length - 1).toBe(2);
+  // keep 标题两轮各留（全轮生效，旧轮标题不消失）。
+  expect(frame.split("[完成] bash").length - 1).toBe(2);
+  // 零条收 → 无工具计数行。
+  expect(frame.includes("× ")).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("idle：单工具无 thinkingMs（落盘缺席） → 也折叠（只显示 bash × 1）", async () => {
-  // spec D3:旧 `thinkingSeconds > 0 || turnToolTotal > 1` 闸已删除 —— 单工具、
-  // 无秒数轮次也折叠。折叠行只显示工具计数,不显示秒数行。
+test("idle：单工具无 thinkingMs（落盘缺席） → bash keep 标题留、无计数行", async () => {
+  // bash 是 keep 类：无秒数轮次思考行不画（无落盘 thinkingMs），标题行
+  // 独立留 —— 折叠计数行只数 retract，bash 不进。
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -285,17 +253,17 @@ test("idle：单工具无 thinkingMs（落盘缺席） → 也折叠（只显示
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("bash × 1");
-  expect(frame.includes("[完成]")).toBe(false);
+  expect(frame).toContain("[完成] bash");
+  expect(frame.includes("× ")).toBe(false);
   // 无秒数 → 不显示 `思考了` 行。
   expect(frame.includes("思考了 ")).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("idle：旧会话无 thinkingMs（整链缺席） → 折叠行只显示工具计数", async () => {
+test("idle：旧会话无 thinkingMs（整链缺席） → bash keep 标题留、无秒数行", async () => {
   // 旧会话:文件不携带 thinkingMs(SessionFileV1.thinkingMs undefined)。
   // attachSession 透传 undefined → session.thinkingMs = undefined →
-  // sumThinkingMsInRange 按 0 计入 → 折叠行只显示 bash × N,不显示秒数。
+  // sumThinkingMsInRange 按 0 计入 → 无秒数行；keep 标题行留。
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -324,13 +292,14 @@ test("idle：旧会话无 thinkingMs（整链缺席） → 折叠行只显示工
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("bash × 1");
+  expect(frame).toContain("[完成] bash");
+  expect(frame.includes("× ")).toBe(false);
   expect(frame.includes("思考了 ")).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("idle：文本→工具时，工具折叠出现在前置文本之后", async () => {
-  // anchor = asst-with-tool (index 2) → thinkingMs[2] = 29000ms → 29 秒。
+test("idle：文本→工具时，keep 标题出现在前置文本之后", async () => {
+  // bash keep 标题按 content 顺序渲染在文本之后（slot 消费，无计数行）。
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     { role: "assistant", content: [{ type: "text", text: "先说明" }] },
@@ -350,15 +319,15 @@ test("idle：文本→工具时，工具折叠出现在前置文本之后", asyn
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
   const textIdx = lines.findIndex((line) => line.includes("先说明"));
-  const foldIdx = lines.findIndex((line) => line.includes("bash × 1"));
+  const titleIdx = lines.findIndex((line) => line.includes("[完成] bash"));
   expect(textIdx).toBeGreaterThanOrEqual(0);
-  expect(foldIdx).toBeGreaterThan(textIdx);
-  expect(frame).not.toContain("[完成]");
+  expect(titleIdx).toBeGreaterThan(textIdx);
+  expect(frame.includes("× ")).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("idle：工具→文本时，工具折叠出现在后续文本之前", async () => {
-  // anchor = asst-with-tool (index 2) → thinkingMs[2] = 29000ms → 29 秒。
+test("idle：工具→文本时，keep 标题出现在后续文本之前", async () => {
+  // bash keep 标题按 content 顺序渲染在文本之前。
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     ...bashTurn("tu-before-text", "先调用工具", "pwd"),
@@ -380,16 +349,16 @@ test("idle：工具→文本时，工具折叠出现在后续文本之前", asyn
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
-  const foldIdx = lines.findIndex((line) => line.includes("bash × 1"));
+  const titleIdx = lines.findIndex((line) => line.includes("[完成] bash"));
   const textIdx = lines.findIndex((line) => line.includes("后续总结"));
-  expect(foldIdx).toBeGreaterThanOrEqual(0);
+  expect(titleIdx).toBeGreaterThanOrEqual(0);
   expect(textIdx).toBeGreaterThanOrEqual(0);
-  expect(foldIdx).toBeLessThan(textIdx);
-  expect(frame).not.toContain("[完成]");
+  expect(titleIdx).toBeLessThan(textIdx);
+  expect(frame.includes("× ")).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("idle：同一 assistant 消息内按 tool/text 位置渲染折叠", async () => {
+test("idle：同一 assistant 消息内按 tool/text 位置渲染 keep 标题", async () => {
   const renderCase = async (
     content: AnthropicNativeMessage["content"],
     thinkingMsValue: number,
@@ -423,16 +392,14 @@ test("idle：同一 assistant 消息内按 tool/text 位置渲染折叠", async 
     await setup.waitForVisualIdle();
     const lines = setup.captureCharFrame().split("\n");
     const textIdx = lines.findIndex((line) => line.includes(text));
-    const foldIndices = lines.flatMap((line, index) =>
-      line.includes("bash × 1") ? [index] : []
+    const titleIndices = lines.flatMap((line, index) =>
+      line.includes("[完成] bash") ? [index] : []
     );
-    return { setup, textIdx, foldIndices };
+    return { setup, textIdx, titleIndices };
   };
 
-  // tool_then_text:同一 assistant 内先 tool 后 text → 折叠行在 text 前。
-  // spec D3 + cross-tool 簇 anchor 在 first/last tool。orderedTurnActivitySegments
-  // 对同消息内 tool/text/tool 的处理:每个 tool 簇 anchor 到第一个 tool;text 段
-  // 不单独折叠。tool-text-tool → 2 个折叠行;tool-text → 1 个折叠行。
+  // tool_then_text:同一 assistant 内先 tool 后 text → keep 标题在 text 前。
+  // D7:渲染按 content 块顺序消费 slot —— 标题位置即 tool_use 块位置。
   const toolThenText = await renderCase(
     [
       { type: "tool_use", id: "tu-same-1", name: "bash", input: {} },
@@ -441,8 +408,8 @@ test("idle：同一 assistant 消息内按 tool/text 位置渲染折叠", async 
     29000,
     "tool-text 总结"
   );
-  expect(toolThenText.foldIndices).toHaveLength(1);
-  expect(toolThenText.foldIndices[0]).toBeLessThan(toolThenText.textIdx);
+  expect(toolThenText.titleIndices).toHaveLength(1);
+  expect(toolThenText.titleIndices[0]).toBeLessThan(toolThenText.textIdx);
   await toolThenText.setup.renderer.destroy();
 
   const toolTextTool = await renderCase(
@@ -454,13 +421,16 @@ test("idle：同一 assistant 消息内按 tool/text 位置渲染折叠", async 
     29000,
     "tool-text-tool 总结"
   );
-  expect(toolTextTool.foldIndices).toHaveLength(2);
-  expect(toolTextTool.foldIndices[0]).toBeLessThan(toolTextTool.textIdx);
-  expect(toolTextTool.foldIndices[1]).toBeGreaterThan(toolTextTool.textIdx);
+  expect(toolTextTool.titleIndices).toHaveLength(2);
+  expect(toolTextTool.titleIndices[0]).toBeLessThan(toolTextTool.textIdx);
+  expect(toolTextTool.titleIndices[1]).toBeGreaterThan(toolTextTool.textIdx);
   await toolTextTool.setup.renderer.destroy();
 });
 
-test("idle：无历史 activity 时已完成 live 工具仍被折叠出 tail", async () => {
+test("idle：无历史 activity 时已完成 live retract 工具收出 tail（keep 留标题）", async () => {
+  // D3:已完成 retract（read_file）进折叠计数、离开尾巴；keep（bash）
+  // 标题独立留 —— tail 里不出现 live 完成形态 `· ok` 尾缀。
+  // 计数行锚在最近 text 段（草稿段）之后。
   const setup = await testRender(
     <ChatView
       session={sessionWith([
@@ -475,18 +445,145 @@ test("idle：无历史 activity 时已完成 live 工具仍被折叠出 tail", a
       liveToolRuns={[
         {
           id: "tu-live-completed",
+          name: "read_file",
+          status: "ok",
+          input: { path: "a.ts" },
+          detail: "读取 a.ts",
+        },
+        {
+          id: "tu-live-bash",
           name: "bash",
           status: "ok",
           input: { command: "pwd" },
           detail: "pwd",
         },
       ]}
+      draftsMasked="回答草稿"
     />,
     { width: COLS, height: ROWS, exitOnCtrlC: false }
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).not.toContain("bash · pwd · ok");
+  // retract 件收起：不出现 live 完成形态（计数行锚点在历史 text 段，
+  // 无历史 activity 时无可锚段 —— 计数行缺席属既有边界，SC3 历史路径覆盖）。
+  expect(frame).not.toContain("读取 a.ts · ok");
+  // keep 件标题留（live 完成行同 SSOT 形态）。
+  expect(frame).toContain("[完成] bash · pwd");
+  await setup.renderer.destroy();
+});
+
+test("idle：SC3 一轮成功 read_file + 成功 bash → bash 标题留、read 收进计数", async () => {
+  // spec SC3：成功 read_file（retract）→ 无标题、无 ⎿ 预览、进折叠计数
+  // `read_file × 1`；成功 bash（keep）→ 标题（及预览）留，不进计数。
+  const messages: AnthropicNativeMessage[] = [
+    { role: "user", content: [{ type: "text", text: "q" }] },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "先读再跑", signature: "s" },
+        {
+          type: "tool_use",
+          id: "tu-rd",
+          name: "read_file",
+          input: { path: "a.ts" },
+        },
+        {
+          type: "tool_use",
+          id: "tu-sh",
+          name: "bash",
+          input: { command: "pwd" },
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "tu-rd", content: "file body" },
+        {
+          type: "tool_result",
+          tool_use_id: "tu-sh",
+          content: JSON.stringify({ code: 0, stdout: "/tmp\n", stderr: "" }),
+        },
+      ],
+    },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "完成。" }],
+    },
+  ];
+  const setup = await testRender(
+    <ChatView
+      session={sessionWith(messages)}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // bash keep：标题留、成功预览（⎿）留。
+  expect(frame).toContain("[完成] bash · pwd");
+  expect(frame).toContain("⎿ /tmp");
+  // read_file retract：无标题、无预览。
+  expect(frame.includes("read_file ·")).toBe(false);
+  expect(frame).toContain("read_file × 1");
+  // bash 不进折叠计数。
+  expect(frame.includes("bash × ")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("idle：SC4 失败 retract 工具 → 标题 + 一行短错误可见，不进折叠计数", async () => {
+  // spec SC4 / D5：失败横切覆盖成功分类 —— 失败 read_file 出独立标题行
+  // （[失败]）+ 一行短错误；折叠计数行不得把失败件计入（`read_file ×` 缺席）。
+  const messages: AnthropicNativeMessage[] = [
+    { role: "user", content: [{ type: "text", text: "q" }] },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "先读配置", signature: "s" },
+        {
+          type: "tool_use",
+          id: "tu-rd-fail",
+          name: "read_file",
+          input: { path: "missing.ts" },
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "tu-rd-fail",
+          content: "ENOENT: no such file or directory",
+          is_error: true,
+        },
+      ],
+    },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "读不到，换路子。" }],
+    },
+  ];
+  const setup = await testRender(
+    <ChatView
+      session={sessionWith(messages)}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 失败件：红标题留 + 一行短错误在场。
+  expect(frame).toContain("[失败] read_file");
+  expect(frame).toContain("ENOENT");
+  // 失败不进折叠计数行（计数行不含该失败件）。
+  expect(frame.includes("read_file ×")).toBe(false);
   await setup.renderer.destroy();
 });
 

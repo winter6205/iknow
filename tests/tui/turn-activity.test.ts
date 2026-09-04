@@ -62,6 +62,97 @@ describe("lastTurnQueryIndex / sliceTurnFrom（empty）", () => {
 });
 
 describe("orderedTurnActivitySegments", () => {
+  // D3（spec specs/tui-tool-settled-appearance.md）：折叠计数只聚合 resolver
+  // 判定为 true 的件（成功且 retract）。resolver 缺省 = 全部计入（兜底）。
+  describe("inFoldCountOf resolver（D3 只数成功的收）", () => {
+    const neverCount = () => false;
+    const all = () => true;
+
+    test("resolver 拒绝的件不进 entries（bash keep → 只留 read_file 计数）", () => {
+      const inFoldCountOf = (call: { readonly name: string }): boolean =>
+        call.name === "read_file";
+      expect(
+        orderedTurnActivitySegments(
+          [
+            user("q"),
+            assistantTools(["bash", "read_file"]),
+            toolResult("tu-bash-0"),
+            toolResult("tu-read_file-1"),
+          ],
+          0,
+          { inFoldCountOf }
+        )
+      ).toEqual([
+        {
+          kind: "tools",
+          messageIndex: 1,
+          contentBlockIndex: 0,
+          entries: [{ name: "read_file", count: 1 }],
+        },
+      ]);
+    });
+
+    test("全部被拒 → tools 段 entries 为空（零条收 → 计数行无内容）", () => {
+      expect(
+        orderedTurnActivitySegments(
+          [user("q"), assistantTools(["bash"]), toolResult("tu-bash-0")],
+          0,
+          { inFoldCountOf: neverCount }
+        )
+      ).toEqual([
+        {
+          kind: "tools",
+          messageIndex: 1,
+          contentBlockIndex: 0,
+          entries: [],
+        },
+      ]);
+    });
+
+    test("resolver 缺省 = 全部计入（与 countToolUsesByName 兜底一致）", () => {
+      expect(
+        orderedTurnActivitySegments(
+          [user("q"), assistantTools(["bash", "bash"])],
+          0
+        )
+      ).toEqual([
+        {
+          kind: "tools",
+          messageIndex: 1,
+          contentBlockIndex: 0,
+          entries: [{ name: "bash", count: 2 }],
+        },
+      ]);
+    });
+
+    test("全收 resolver 与全计 resolver 同输入计数一致偏移（overflow：多条同名）", () => {
+      const msgs = [
+        user("q"),
+        assistantTools(["read_file", "read_file", "read_file"]),
+      ];
+      expect(
+        orderedTurnActivitySegments(msgs, 0, { inFoldCountOf: all })
+      ).toEqual([
+        {
+          kind: "tools",
+          messageIndex: 1,
+          contentBlockIndex: 0,
+          entries: [{ name: "read_file", count: 3 }],
+        },
+      ]);
+      expect(
+        orderedTurnActivitySegments(msgs, 0, { inFoldCountOf: neverCount })
+      ).toEqual([
+        {
+          kind: "tools",
+          messageIndex: 1,
+          contentBlockIndex: 0,
+          entries: [],
+        },
+      ]);
+    });
+  });
+
   test("文本→工具保留顺序，并把工具按连续活动聚成一段", () => {
     expect(
       orderedTurnActivitySegments(
@@ -175,6 +266,18 @@ describe("countToolUsesByName（negative：末条无 tool_use）", () => {
       { name: "bash", count: 1 },
       { name: "read_file", count: 1 },
     ]);
+  });
+
+  test("D3 resolver：retract 计入、keep 拒收（与 orderedTurnActivitySegments 同契约）", () => {
+    const msgs = [user("q"), assistantTools(["bash", "read_file"])];
+    const retractOnly = (call: { readonly name: string }): boolean =>
+      call.name === "read_file";
+    expect(countToolUsesByName(msgs, { inFoldCountOf: retractOnly })).toEqual([
+      { name: "read_file", count: 1 },
+    ]);
+    expect(countToolUsesByName(msgs, { inFoldCountOf: () => false })).toEqual(
+      []
+    );
   });
 
   test("上一 turn 的工具不计入本 turn", () => {
