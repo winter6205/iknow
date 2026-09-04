@@ -8,6 +8,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   MEMORY_ADVISORY_PREFIX,
+  MEMORY_PREFETCH_DISCIPLINE,
   MEMORY_PREFETCH_CHAR_CAP,
   MEMORY_PREFETCH_END,
   MEMORY_PREFETCH_MAX_HITS,
@@ -136,6 +137,21 @@ describe("formatPrefetchOverlay", () => {
     assert.ok(text.includes("Calling bar() is the supported path."));
   });
 
+  it("carries the no-procedure discipline line: injected bodies are records, not this turn's instructions", () => {
+    // 不变式（SSOT: specs/casual-ask-context-hygiene.md 纪律句语义 + 本票
+    // spec 修订把 MEMORY_PREFETCH_DISCIPLINE 纳入锁定）：overlay 正文是
+    // 过去工作的记录而非本轮指令——convention 条目描述的流程不得因词面
+    // 撞上问句就被执行。锁定文本按全文匹配，与 catalog 纪律句同强度。
+    const hits = selectPrefetchHits("bar", [entry()]);
+    const text = formatPrefetchOverlay(hits);
+    assert.ok(text.includes(MEMORY_PREFETCH_DISCIPLINE));
+    assert.ok(
+      text.startsWith(
+        `${MEMORY_ADVISORY_PREFIX}\n\n${MEMORY_PREFETCH_DISCIPLINE}\n\n### `
+      )
+    );
+  });
+
   it("returns an empty string when there are no hits", () => {
     assert.equal(formatPrefetchOverlay([]), "");
   });
@@ -256,20 +272,20 @@ describe("extractInjectedMemoryIds", () => {
       `${MEMORY_PREFETCH_END}first query` +
       `${MEMORY_ADVISORY_PREFIX}\n\n${blockFor("mem-b")}` +
       `${MEMORY_PREFETCH_END}second query`;
-    assert.deepEqual(
-      [...extractInjectedMemoryIds(text)].sort(),
-      ["mem-a", "mem-b"]
-    );
+    assert.deepEqual([...extractInjectedMemoryIds(text)].sort(), [
+      "mem-a",
+      "mem-b",
+    ]);
   });
 
   it("scans a block to the next advisory prefix when the end marker is missing", () => {
     const text =
       `${MEMORY_ADVISORY_PREFIX}\n\n${blockFor("mem-a")}\n\n` +
       `${MEMORY_ADVISORY_PREFIX}\n\n${blockFor("mem-b")}`;
-    assert.deepEqual(
-      [...extractInjectedMemoryIds(text)].sort(),
-      ["mem-a", "mem-b"]
-    );
+    assert.deepEqual([...extractInjectedMemoryIds(text)].sort(), [
+      "mem-a",
+      "mem-b",
+    ]);
   });
 
   it("returns an empty set when a block carries no id lines", () => {
@@ -307,7 +323,9 @@ describe("recoverInjectedMemoryIds (resume recovery)", () => {
       },
       {
         role: "assistant",
-        content: [{ type: "text", text: `${overlay}assistant must be ignored` }],
+        content: [
+          { type: "text", text: `${overlay}assistant must be ignored` },
+        ],
       },
       { role: "user", content: [{ type: "text", text: "no overlay here" }] },
       { role: "user", content: [{ type: "tool_result", content: "x" }] },
@@ -340,7 +358,10 @@ describe("recordInjectedMemoryIds (post-attach bookkeeping)", () => {
     assert.deepEqual([...injected], ["mem-a"]);
     // Legacy shape without the end marker still counts via the prefix line.
     const legacy = new Set<string>();
-    recordInjectedMemoryIds(legacy, `${MEMORY_ADVISORY_PREFIX}\n\n### T\nid: legacy\n`);
+    recordInjectedMemoryIds(
+      legacy,
+      `${MEMORY_ADVISORY_PREFIX}\n\n### T\nid: legacy\n`
+    );
     assert.ok(legacy.has("legacy"));
   });
 

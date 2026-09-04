@@ -112,6 +112,7 @@ export { scoreMemoryEntries } from "./bm25.js";
 export type { ScoredEntry, ScoreOpts } from "./bm25.js";
 export {
   MEMORY_ADVISORY_PREFIX,
+  MEMORY_PREFETCH_DISCIPLINE,
   MEMORY_PREFETCH_CHAR_CAP,
   MEMORY_PREFETCH_END,
   MEMORY_PREFETCH_MAX_HITS,
