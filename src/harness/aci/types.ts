@@ -41,13 +41,24 @@ export const TIMEOUT_TIER_MS: Readonly<Record<TimeoutTier, number>> =
     unbounded: 0,
   });
 
-/** ACI 安全/调度元数据（延迟加载 / 并发安全 / 中断行为 / 超时分级）。 */
+/** ACI 安全/调度元数据（延迟加载 / 并发安全 / 中断行为 / 超时分级 / 溢出候选）。 */
 export interface AciMeta {
   readonly category: AciCategory;
   readonly isConcurrencySafe: boolean;
   readonly interruptBehavior: "cancel" | "block";
   /** true = 延迟加载：默认不进 prompt schema，需 discover() 检索注入。默认 false（核心常驻）。 */
   readonly lazy?: boolean;
+  /**
+   * B6 / ADR-0043 §3:溢出候选标记 —— true = 进入可延迟池(首轮装配
+   * countTokens 实测超过 context window 的 10% 时可退到名字目录)。与
+   * `lazy` 区分:`lazy` = 已加载即常驻(schema 仍可能在可见前缀),`deferrable`
+   * = 溢出时可退到名字目录。**核心七件永不退场**(bash / read_file /
+   * edit_file / write_file / grep / glob / spawn_subagent),即使标
+   * deferrable 也被判定层忽略 —— 见 `tool-overflow.ts` `CORE_TOOL_NAMES`。
+   * 默认 false(常驻)。MCP 工具天然 deferrable(B4 §2);内建低频件按调用
+   * 频次数据定(本 plan B6 §3 预置:trace 读侧三件 + web_search / web_fetch)。
+   */
+  readonly deferrable?: boolean;
   /** 静态超时分级；createAciExecutor 据此生成 per-call 超时（覆盖 engine 传入 timeoutMs）。 */
   readonly timeoutTier: TimeoutTier;
 }
@@ -61,6 +72,12 @@ export interface AciToolDef extends ToolDef {
 export interface AciCatalog {
   readonly get: (name: string) => AciToolDef | undefined;
   readonly all: () => ReadonlyArray<AciToolDef>;
+  /**
+   * B4 / ADR-0043 §2:检某名字是否已被 `discover()` 标记为「模型已检索」。
+   * 缺席(`undefined`)→ 闸门放过(非 ACI registry 装配的路径,如 hub runDeps
+   * 用 build-engine 之外的 registry,行为与 B4 之前一致)。
+   */
+  readonly isDiscovered?: (name: string) => boolean;
 }
 
 /**

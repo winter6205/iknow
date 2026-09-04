@@ -22,7 +22,12 @@ export default defineConfig({
     // #556 T8:t8-live-subagent-routing 走 settings 单承载 + 走 HAS_KEY 守卫,
     // 与 settings-model-extension 收敛兼容,纳入 include。
     // 其他 archive/tests-real-llm/ 文件仍按 M5 不收。
-    include: ["archive/tests-real-llm/t8-live-subagent-routing.test.ts"],
+    // model-prefix-layering B8 (SC9):本轮 LLM-touching 改动(B3/B4/B6)的
+    // 真实模型 e2e,同走 settings 单承载 + HAS_KEY 守卫。
+    include: [
+      "archive/tests-real-llm/t8-live-subagent-routing.test.ts",
+      "archive/tests-real-llm/model-prefix-layering-e2e.test.ts",
+    ],
     exclude: ["**/node_modules/**"],
     pool: "forks",
     poolOptions: {

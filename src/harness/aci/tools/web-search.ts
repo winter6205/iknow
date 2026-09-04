@@ -273,6 +273,8 @@ export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
       isConcurrencySafe: true,
       interruptBehavior: "cancel" as const,
       timeoutTier: "default" as const,
+      // B6 / ADR-0043 §3:web 出口低频件,退场次序第四位(trace 三件之后)。
+      deferrable: true,
     },
   });
 }

@@ -84,6 +84,9 @@ export function createListSessionsTool(
       isConcurrencySafe: true,
       interruptBehavior: "cancel" as const,
       timeoutTier: "fast" as const,
+      // B6 / ADR-0043 §3:trace 读侧目录轴(行轴 query_trace 之后),退场
+      // 次序第二位。
+      deferrable: true,
     },
   });
 }

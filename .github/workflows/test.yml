@@ -120,6 +120,9 @@ jobs:
             --exclude 'tests/harness/secret-roundtrip/**' \
             --exclude tests/harness/mcp/zero-linkage-guard.test.ts \
             --exclude tests/harness/mcp/build-engine-mcp-overview.test.ts \
+            --exclude tests/harness/mcp/build-engine-mcp-startwire.test.ts \
+            --exclude tests/harness/build-engine-tool-overflow.test.ts \
+            --exclude tests/harness/prefix-stability/assertion2-matrix.test.ts \
             --exclude tests/harness/sandbox/runner.test.ts \
             --exclude tests/subagent/envelope-freeze.test.ts
 
@@ -218,5 +221,8 @@ jobs:
             --exclude tests/harness/secret-roundtrip/e2e.test.ts \
             --exclude tests/harness/mcp/zero-linkage-guard.test.ts \
             --exclude tests/harness/mcp/build-engine-mcp-overview.test.ts \
+            --exclude tests/harness/mcp/build-engine-mcp-startwire.test.ts \
+            --exclude tests/harness/build-engine-tool-overflow.test.ts \
+            --exclude tests/harness/prefix-stability/assertion2-matrix.test.ts \
             --exclude tests/harness/sandbox/runner.test.ts \
             --exclude tests/subagent/envelope-freeze.test.ts

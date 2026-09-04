@@ -37,8 +37,12 @@ import type {
 export interface RunGraphToolDeps {
   readonly manager: SubAgentManager;
   /**
-   * 本 round 的 graph 装配快照（`GraphAssembly.enabled`）。缺席 = 恒开，
-   * 仅供直接构造工具的测试用；生产装配总是把快照传进来。
+   * 本 round 的 graph 装配快照（`GraphAssembly.enabled`）。
+   *
+   * ADR-0041 / plans/model-prefix-layering.md B3:工具面已常驻，调用侧是否
+   * 可用由本 gate 单点决定。**缺省 = 恒关**(handler typed 拒绝,零 spawn),
+   * 这是 fail-closed 安全姿态 —— 直接构造工具的测试必须显式传 isEnabled
+   * 才能跑通;生产装配由 build-engine 按 graphAssembly.enabled 注入。
    */
   readonly isEnabled?: () => boolean;
 }
@@ -59,7 +63,8 @@ const DESCRIPTION =
   "skipped and unrelated branches keep running. The call blocks until the " +
   "whole graph settles and returns one condensed report of every node. Use " +
   "`spawn_subagent` instead when there is a single task, or several tasks " +
-  "with no ordering between them.";
+  "with no ordering between them. Only available when graph mode is on; " +
+  "calling it while graph mode is off returns a tool execution error.";
 
 function describeValidationError(err: GraphValidationError): string {
   switch (err.kind) {
@@ -157,7 +162,9 @@ function emitGraphProgress(
 }
 
 export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
-  const isEnabled = deps.isEnabled ?? ((): boolean => true);
+  // ADR-0041:isEnabled 缺省 = 恒关 —— 工具面常驻后,handler 是唯一守门。
+  // 直接构造工具的测试必须显式传 isEnabled 才能调通 handler。
+  const isEnabled = deps.isEnabled ?? ((): boolean => false);
   return Object.freeze({
     name: "run_graph",
     description: DESCRIPTION,

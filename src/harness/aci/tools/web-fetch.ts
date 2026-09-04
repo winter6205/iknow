@@ -179,6 +179,8 @@ export function createWebFetchTool(deps?: WebFetchToolDeps): AciToolDef {
       isConcurrencySafe: true,
       interruptBehavior: "cancel" as const,
       timeoutTier: "default" as const,
+      // B6 / ADR-0043 §3:web 出口低频件,退场次序第五位(预置次序末位)。
+      deferrable: true,
     },
   });
 }

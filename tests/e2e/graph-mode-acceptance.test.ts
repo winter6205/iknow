@@ -4,14 +4,16 @@
  * 走完整装配链（`buildHarnessEngine` + 真 `SubAgentManager` + JSONL trace），
  * 模型侧是 stub：第一回合发 `run_graph`（两个节点、一条 dep 边），第二回合
  * 收浓缩结果收尾。刻意**不**由 host 直接调执行层 —— 要证的正是「用户进了
- * graph mode 之后，模型手上真的多了这件工具，并且它驱动了子代理编排」。
+ * graph mode 之后，模型手上确实有这件工具 + handler isEnabled gate 在
+ * graph 关时正确守门」。
  *
- * 断言四件：
- *   1. graph 关着那次 `run()` 的可见工具面没有 `run_graph`；开了 overlay 后
- *      下一次装配才有，且 system 文本带编排段（SC2 的 e2e 复核）；
- *   2. 一次 `run_graph` 起了 **2 个** worker —— 不是一次 spawn；
- *   3. 上游产出真的进了下游节点的 task 文本（dep 边有数据在流）；
- *   4. JSONL 里 spawn / state_change / stop 三事件齐全（SC5 观测地板）。
+ * ADR-0041 / plans/model-prefix-layering.md B3 后的断言四件：
+ *   1. graph 关着时 promptTools 仍含 run_graph(常驻)，system 文本永远不含
+ *      `run_graph` —— 编排指引文已撤出 system,改走 loop-engine 消息尾追加
+ *      `<graph_mode>` 单行文本(KV cache 前缀稳定 + 模型面看图状态唯一通道);
+ *   2. 一次 `run_graph` 起了 **2 个** worker —— 不是一次 spawn;
+ *   3. 上游产出真的进了下游节点的 task 文本(dep 边有数据在流);
+ *   4. JSONL 里 spawn / state_change / stop 三事件齐全(SC5 观测地板)。
  *
  * 不依赖真 LLM key —— 缺 key 的 live 路径是另一回事，本条 stub 路径必须绿。
  */
@@ -136,29 +138,39 @@ describe("D-α V1 graph mode e2e — 图不是单次 spawn（SC5）", () => {
     const graphAssembly = built.graphAssembly;
     assert.ok(graphAssembly, "graphMode 在场时必须透出装配快照");
 
-    // ① 关着的那次 run():工具面无 run_graph,system 无编排段。
+    // ① 关着的那次 run():工具面仍含 run_graph(常驻,handler isEnabled 缺省
+    // 恒关守门);system 文本永远不含 `run_graph`(编排段已撤出,B3 关键边界)。
     graphAssembly.beginRound();
     const toolsOff = (built.deps.promptTools?.() ?? []).map((t) => t.name);
     assert.ok(
-      !toolsOff.includes("run_graph"),
-      `graph 关着不该露出 run_graph:${toolsOff.join(",")}`
+      toolsOff.includes("run_graph"),
+      `run_graph 必须常驻注册表,handler isEnabled gate 单独守门:${toolsOff.join(",")}`
     );
+    const systemOff = (await built.deps.system?.()) ?? "";
     assert.ok(
-      !((await built.deps.system?.()) ?? "").includes("run_graph"),
-      "graph 关着 system 不该有编排段"
+      !systemOff.includes("run_graph"),
+      `graph 关着 system 不该有编排段(B3 关键边界,内容已撤出):${systemOff}`
     );
 
-    // 用户 Shift+Tab / `/graph on` —— 下一次装配才生效。
+    // 用户 Shift+Tab / `/graph on` —— 下一次装配生效(同 round 工具面不变,
+    // 翻键只影响 handler isEnabled 闭包透传)。
     graphMode.setEnabled(true);
     graphAssembly.beginRound();
     const toolsOn = (built.deps.promptTools?.() ?? []).map((t) => t.name);
     assert.ok(
       toolsOn.includes("run_graph"),
-      `graph 开着必须露出 run_graph:${toolsOn.join(",")}`
+      `graph 开着仍露 run_graph(handler 接受调通):${toolsOn.join(",")}`
     );
+    // ADR-0041 SC5:翻图 system 字节保持 —— 内容(开图编排指引)走 messages
+    // 尾部追加的 `<graph_mode>` 单行文本(loop-engine appendGraphModeChange),
+    // 不再进 system 段。
     const systemOn = (await built.deps.system?.()) ?? "";
-    assert.match(systemOn, /run_graph/);
-    // 编排段不得把模块路径写进模型 prompt（spec Boundaries）。
+    assert.equal(systemOn, systemOff, "graph 翻转不破坏 system 字节");
+    assert.ok(
+      !systemOn.includes("run_graph"),
+      `graph 开着 system 仍不该含 run_graph:${systemOn}`
+    );
+    // 编排段不得把模块路径写进模型 prompt(spec Boundaries)。
     assert.ok(!systemOn.includes("src/harness/graph"));
 
     // ② 模型这一回合发 run_graph：两节点、一条 dep 边。

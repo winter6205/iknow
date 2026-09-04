@@ -135,16 +135,17 @@ describe("buildHarnessEngine — #631 T2 MCP 概览段接线", () => {
 
     const systemText = await built.deps.system?.();
     expect(systemText).toBeDefined();
-    expect(systemText).toContain("<mcp_tools_overview>");
+    expect(systemText).toContain("<mcp_name_directory>");
     expect(systemText).toContain("stubsvc");
-    expect(systemText).toContain(
-      "mcp__stubsvc__alpha: Alpha tool does many useful things"
-    );
-    // 缺 description 的工具 → 只渲染名字
-    expect(systemText).toContain("mcp__stubsvc__beta");
-    expect(systemText).not.toContain("mcp__stubsvc__beta:");
-    // 末行引导
+    expect(systemText).toContain("- mcp__stubsvc__alpha");
+    expect(systemText).toContain("- mcp__stubsvc__beta");
+    // schema / description 不进名字目录（B4 披露分层：schema 须 tool_search）
+    expect(systemText).not.toContain("inputSchema");
+    expect(systemText).not.toContain("Alpha tool does");
+    // 末行引导 tool_search 精查
     expect(systemText).toContain("tool_search");
+    // 旧概览段已撤除
+    expect(systemText).not.toContain("<mcp_tools_overview>");
   }, 30_000);
 
   it("服务名含 '-'（注册侧不 sanitize 服务段）→ 工具仍归属并渲染", async () => {
@@ -177,7 +178,9 @@ describe("buildHarnessEngine — #631 T2 MCP 概览段接线", () => {
     expect(systemText).toContain("stub-svc");
     // 注册形态 = mcp__<原始服务名>__<sanitize(工具名)>；若投影侧
     // sanitize 服务段，此行会静默缺席。
-    expect(systemText).toContain("mcp__stub-svc__alpha: Dashed server tool");
+    expect(systemText).toContain("- mcp__stub-svc__alpha");
+    // description 不进名字目录（schema/description 经 tool_search 按需）
+    expect(systemText).not.toContain("Dashed server tool");
   }, 30_000);
 
   it("无 mcp 配置（零连接服务）→ 段整体缺席，<available_skills> 不受影响", async () => {
@@ -198,6 +201,7 @@ describe("buildHarnessEngine — #631 T2 MCP 概览段接线", () => {
 
     const systemText = await built.deps.system?.();
     expect(systemText).toBeDefined();
+    expect(systemText).not.toContain("<mcp_name_directory>");
     expect(systemText).not.toContain("<mcp_tools_overview>");
     // skills 段装配不受影响（无 fixture skill → 空清单显式语句仍在）
     expect(systemText).toContain("<available_skills>");

@@ -1,8 +1,19 @@
+/**
+ * `createSystemResolver` contract: session-level snapshot (ADR-0042).
+ *
+ * The resolver assembles once per session — on its first *successful* call —
+ * and serves that exact string forever after: no stat, no mtime compare, no
+ * reassembly. A resolver's lifetime is a session's, so "next session sees the
+ * new content" is asserted by building a second resolver over the same ctx.
+ */
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createSystemResolver } from "../../../src/harness/memory/refresh.ts";
+import { serializeMemoryEntry } from "../../../src/harness/memory/frontmatter.ts";
+import { MEMORY_CATALOG_DISCIPLINE } from "../../../src/harness/memory/catalog.ts";
+import { defaultMemoryEntry } from "../../../src/harness/memory/schema.ts";
 
 vi.mock("../../../src/harness/memory/assembly.ts", async (importOriginal) => {
   const actual =
@@ -43,6 +54,26 @@ async function tick(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 
+/** Write one parseable store entry so the catalog segment has a live row. */
+async function seedMemoryEntry(
+  memoryDir: string,
+  slug: string,
+  title: string
+): Promise<void> {
+  await writeFile(
+    join(memoryDir, `${slug}.md`),
+    serializeMemoryEntry({
+      ...defaultMemoryEntry(),
+      id: slug,
+      title,
+      body: `body of ${title}`,
+      importance: 3,
+      updated_at: "2026-09-04T00:00:00.000Z",
+    }),
+    "utf8"
+  );
+}
+
 afterEach(async () => {
   vi.clearAllMocks();
   await Promise.all(
@@ -51,28 +82,44 @@ afterEach(async () => {
 });
 
 describe("createSystemResolver", () => {
-  it("returns the cached system when tracked mtimes are unchanged (zero reassembly)", async () => {
+  it("assembles once per session and serves that snapshot on every later call", async () => {
     const ctx = await makeContext();
     await writeFile(join(ctx.projectIdentityRoot, "AGENTS.md"), "project-v1");
     const resolver = createSystemResolver(ctx);
     expect(await resolver()).toContain("project-v1");
-    // Second call: no mtime change → schemaREADME cache hit, no disk reassembly.
+    // Second call serves the frozen snapshot — no reassembly, no stat.
     expect(await resolver()).toContain("project-v1");
     expect(spiedAssemble).toHaveBeenCalledTimes(1);
   });
 
-  it("refreshes when a project AGENTS.md mtime changes", async () => {
+  it("freezes the snapshot when a project AGENTS.md changes mid-session", async () => {
     const ctx = await makeContext();
     const agents = join(ctx.projectIdentityRoot, "AGENTS.md");
     await writeFile(agents, "project-v1");
     const resolver = createSystemResolver(ctx);
-    await resolver();
+    const first = await resolver();
     await tick();
     await writeFile(agents, "project-v2");
-    expect(await resolver()).toContain("project-v2");
+    // ADR-0042: the session-level snapshot never re-reads the layer.
+    expect(await resolver()).toBe(first);
+    expect(await resolver()).not.toContain("project-v2");
+    expect(spiedAssemble).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps system content stable across cache hits", async () => {
+  it("re-reads the layer for the next session (a fresh resolver)", async () => {
+    const ctx = await makeContext();
+    const agents = join(ctx.projectIdentityRoot, "AGENTS.md");
+    await writeFile(agents, "project-v1");
+    await createSystemResolver(ctx)();
+    await tick();
+    await writeFile(agents, "project-v2");
+    // A new resolver == a new session: the snapshot is taken afresh.
+    const next = await createSystemResolver(ctx)();
+    expect(next).toContain("project-v2");
+    expect(next).not.toContain("project-v1");
+  });
+
+  it("returns the identical string on repeated calls (byte-stable prefix)", async () => {
     const ctx = await makeContext();
     await writeFile(
       join(ctx.projectIdentityRoot, "AGENTS.md"),
@@ -83,11 +130,10 @@ describe("createSystemResolver", () => {
     expect(await resolver()).toBe(first);
   });
 
-  it("tracks rule files independently", async () => {
-    // #841 T6: parent session opener renders the rules index as a manifest
-    // (paths only), not bodies. The refresh contract we still own is "a
-    // rule's mtime change triggers re-discovery" — assert on the path
-    // appearing in the manifest instead of on rule text.
+  it("snapshots both rule scopes and freezes them against mid-session edits", async () => {
+    // #841 T6: the parent opener renders the rules index as a manifest (paths
+    // only), never bodies — so the listed paths are what prove both the user
+    // and the project scope participated in the snapshot.
     const ctx = await makeContext();
     const projectRules = join(ctx.projectIdentityRoot, ".iknow", "rules");
     const userRules = join(ctx.userHome, ".iknow", "rules");
@@ -103,39 +149,73 @@ describe("createSystemResolver", () => {
     ]);
     const resolver = createSystemResolver(ctx);
     const first = await resolver();
-    // #841 T6: the parent opener carries rules as a manifest, so the listed
-    // paths — not the bodies — are what prove both scopes are tracked.
     expect(first).toContain(projectRule);
     expect(first).toContain(userRule);
     await tick();
+    // Both scopes edited mid-session → the snapshot must not move for either.
     await writeFile(userRule, "user-rule-v2");
-    const second = await resolver();
-    // 只有 user rule 的 mtime 变了 → 重新装配后两个 scope 的清单条目都必须在。
-    expect(second).toContain(projectRule);
-    expect(second).toContain(userRule);
-    // Only one tracked rule file changed → assembly must still re-run.
-    expect(spiedAssemble).toHaveBeenCalledTimes(2);
-    await tick();
-    // 反向独立：只改 project rule 也必须触发重装配，否则单 scope 的
-    // tracker 也能过这条用例。
     await writeFile(projectRule, "project-rule-v2");
-    expect(await resolver()).toContain(projectRule);
-    expect(spiedAssemble).toHaveBeenCalledTimes(3);
+    expect(await resolver()).toBe(first);
+    expect(spiedAssemble).toHaveBeenCalledTimes(1);
+    // A rule file added mid-session is likewise invisible to this session…
+    await writeFile(join(projectRules, "added.md"), "added-rule");
+    expect(await resolver()).toBe(first);
+    expect(spiedAssemble).toHaveBeenCalledTimes(1);
+    // …and visible to the next session, proving both scopes are re-discovered.
+    const next = await createSystemResolver(ctx)();
+    expect(next).toContain(join(projectRules, "added.md"));
+    expect(next).toContain(userRule);
   });
 
-  it("treats a deleted tracked file as absent without throwing", async () => {
+  it("keeps a mid-session deletion out of the snapshot and out of the next session", async () => {
     const ctx = await makeContext();
     const agents = join(ctx.projectIdentityRoot, "AGENTS.md");
     await writeFile(agents, "removed-content");
     const resolver = createSystemResolver(ctx);
-    await resolver();
+    const first = await resolver();
+    expect(first).toContain("removed-content");
     await rm(agents);
-    expect(await resolver()).not.toContain("removed-content");
+    // Deleting a snapshotted file must neither throw nor move the snapshot.
+    expect(await resolver()).toBe(first);
+    // The next session re-discovers and simply finds the file absent.
+    const next = await createSystemResolver(ctx)();
+    expect(next).not.toContain("removed-content");
+  });
+
+  // -- ADR-0042 SC6: catalog + promote 段随快照冻结 ---------------------------
+
+  it("freezes the catalog segment against a memory file landing mid-session (SC6)", async () => {
+    const base = await makeContext();
+    const ctx = { ...base, autoExtract: true };
+    const agents = join(ctx.projectIdentityRoot, "AGENTS.md");
+    await writeFile(agents, "catalog-proj");
+    await seedMemoryEntry(ctx.memoryDir, "aaaaaaaaaaaa", "Snapshotted entry");
+
+    const resolver = createSystemResolver(ctx);
+    const first = await resolver();
+    expect(first).toContain(MEMORY_CATALOG_DISCIPLINE);
+    expect(first).toContain("Snapshotted entry");
+
+    await tick();
+    // auto-memory 落盘 mid-session (ADR-0031): catalog must stay byte-identical.
+    await seedMemoryEntry(ctx.memoryDir, "bbbbbbbbbbbb", "Late entry");
+    // A concurrent static-layer touch is the mechanism that used to drag the
+    // fresh catalog into the prefix (ADR-0042 Context / R4); under the
+    // snapshot it must not re-open the assembly either.
+    await writeFile(agents, "catalog-proj-edited");
+    expect(await resolver()).toBe(first);
+    expect(await resolver()).not.toContain("Late entry");
+    expect(spiedAssemble).toHaveBeenCalledTimes(1);
+
+    // Next session indexes it.
+    const next = await createSystemResolver(ctx)();
+    expect(next).toContain("Late entry");
+    expect(next).toContain("Snapshotted entry");
   });
 
   // -- user static layer root (#732) -----------------------------------------
 
-  it("tracks userHome AGENTS.md even when workspaceRoot is set", async () => {
+  it("snapshots userHome AGENTS.md even when workspaceRoot is set", async () => {
     const base = await makeContext();
     const workspaceRoot = join(base.projectIdentityRoot, "..", "workspace");
     await mkdir(workspaceRoot, { recursive: true });
@@ -145,10 +225,15 @@ describe("createSystemResolver", () => {
     await writeFile(userAgents, "user-agents-v1");
 
     const resolver = createSystemResolver(ctx);
-    expect(await resolver()).toContain("user-agents-v1");
+    const first = await resolver();
+    expect(first).toContain("user-agents-v1");
     await tick();
     await writeFile(userAgents, "user-agents-v2");
-    expect(await resolver()).toContain("user-agents-v2");
+    // Frozen for this session…
+    expect(await resolver()).toBe(first);
+    // …and re-read by the next one, which proves the user scope (not just the
+    // project scope) participates in the per-session snapshot.
+    expect(await createSystemResolver(ctx)()).toContain("user-agents-v2");
   });
 
   it("ignores workspaceRoot/.iknow/AGENTS.md as a user layer", async () => {
@@ -197,7 +282,7 @@ describe("createSystemResolver", () => {
     expect(spiedAssemble).toHaveBeenCalledTimes(1);
   });
 
-  it("does not poison the cache when assembleSystemPrompt throws (next call retries)", async () => {
+  it("does not freeze a failed assembly (next call retries, then freezes)", async () => {
     const ctx = await makeContext();
     await writeFile(join(ctx.projectIdentityRoot, "AGENTS.md"), "retry-v1");
     // 第一次装配失败 + 第二次成功
@@ -206,7 +291,10 @@ describe("createSystemResolver", () => {
       .mockResolvedValueOnce("retry-success-content");
     const resolver = createSystemResolver(ctx);
     await expect(resolver()).rejects.toThrow("transient failure");
-    // tracked/lastMtime 已被丢弃 → 下次调用重新 discovery + assemble
+    // 快照只在成功取值后建立 → 失败调用不毒化,下次调用重新 discovery + assemble
     expect(await resolver()).toBe("retry-success-content");
+    // 成功那次才是冻结点：此后不再装配。
+    expect(await resolver()).toBe("retry-success-content");
+    expect(spiedAssemble).toHaveBeenCalledTimes(2);
   });
 });

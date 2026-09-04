@@ -622,7 +622,11 @@ describe("T6 — hub productRoot stable across per-root rebuild", () => {
     } finally {
       await priv.shutdown();
     }
-  });
+  }, 90_000); // B4 / ADR-0043 §4:每个 buildHarnessEngine 装配期 await
+  // firstTurnReadyTimeoutMs=30s,两次 getOrBuildEngine 串行执行 → 上限
+  // 60s,加 shutdown 留 30s 余量。test 用真实 stdio ("node") 进 MCP 连接
+  // 试探,在 default 30s 窗口内不会 ready,但装配照常返回(缺席 server 按
+  // session 缺席处理),断言只看 mcpRoots 形状与 status 名集。
 
   it("serve.ts / hub.ts：productRoot 字段贯通，reload 不读 process.cwd() 作 config root", () => {
     const serveSrc = readFileSync(

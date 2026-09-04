@@ -35,7 +35,9 @@ import { installTestSettingsSource } from "../_helpers/install-test-settings-sou
 // 15→18(serve 走 build-engine 全装配,todoDir + mcpManager 均自建 → 三件在场)。
 // #502 T3:serve surface !== "ask" → build-engine 自建 backgroundManager →
 // registry 末尾追加 bash_output / bash_stop(→ 20 件,与 build-engine 全装配同形)。
-// symbol-primary-aci T5:10 件 lsp_* 已退役,总数由 30 → 25。
+// ADR-0041 / plans/model-prefix-layering.md B3:run_graph 常驻 append-only:
+// 20→21,末位 1 件(serve 全装配含 subagentManager → run_graph 入注册表)。
+// symbol-primary-aci T5:10 件 lsp_* 已退役,总数由 30 → 26。
 // 13..18 与 build-engine.test.ts 的 EXPECTED_TOOLS 同位 —— ssot 真值一致。
 const EXPECTED_TOOLS = [
   "bash",
@@ -69,8 +71,13 @@ const EXPECTED_TOOLS = [
   // 入注册表;bash 仍常驻,参数级 background:true 能力由 handler 运行时决策)。
   "bash_output",
   "bash_stop",
+  // ADR-0041 / plans/model-prefix-layering.md B3:run_graph 常驻 ——
+  // 仅 subagentManager 缺席才不在注册表(graphAssembly 缺席由 handler
+  // isEnabled 缺省恒关守门,工具面成员不变)。serve 全装配含 subagentManager
+  // → run_graph 入注册表,与 promptTools 邻轮 byte-identical。
+  "run_graph",
   "query_trace",
-  // symbol-primary-aci T2 符号查询工具集 append-only:20→30,末位 10 件常驻
+  // symbol-primary-aci T2 符号查询工具集 append-only:21→31,末位 10 件常驻
   //（与 lsp.ts SSOT 共享 lspCtx；旧 10 件 lsp_* 已在 T5 退役）。
   "find_symbol",
   "find_declaration",
@@ -82,7 +89,7 @@ const EXPECTED_TOOLS = [
   "prepare_call_hierarchy",
   "list_incoming_calls",
   "list_outgoing_calls",
-  // symbol-primary-aci T4 符号改工具集 append-only:30→35,末位 5 件常驻
+  // symbol-primary-aci T4 符号改工具集 append-only:31→36,末位 5 件常驻
   //（category=write；不条件化——与查询面共享 lspCtx；onEdit
   //  透传自 build-engine lspNotifier.invalidate，写盘后 textDocument/didChange
   //  与 edit_file 同链路）。
@@ -91,10 +98,10 @@ const EXPECTED_TOOLS = [
   "insert_before_symbol",
   "insert_after_symbol",
   "safe_delete_symbol",
-  // trace-mcp-read-side-split T5b list_sessions append-only:35→36,末位 1 件常驻
+  // trace-mcp-read-side-split T5b list_sessions append-only:36→37,末位 1 件常驻
   //（读侧目录轴,无装配条件 → serve 全装配必在场;与 build-engine 同形)。
   "list_sessions",
-  // trace-mcp-read-side-split T6 get_record append-only:36→37,末位再加 1 件常驻
+  // trace-mcp-read-side-split T6 get_record append-only:37→38,末位再加 1 件常驻
   //（读侧内容轴,与目录轴同样无装配条件 → serve 全装配必在场;三轴顺序 = append
   //  顺序,不重排既有件)。
   "get_record",
@@ -118,7 +125,7 @@ afterAll(async () => {
 });
 
 describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
-  it("returns the ACI 25-tool registry (incl. todo_write) when serve constructs without deps", async () => {
+  it("returns the ACI 26-tool registry (incl. todo_write + run_graph) when serve constructs without deps", async () => {
     const hub = new SessionHub({
       store,
       askUser: createNoAskUser(),
@@ -129,12 +136,13 @@ describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
 
     const deps = await ensure();
     const names = deps.registry.list().map((def) => def.name);
-    // #440 T1-fix:serve 入口注入 todoDir → todo_write 装配,SSOT 25 件全在场
-    // （T5 退役 10 lsp_* 后从 30 → 25）。
+    // #440 T1-fix:serve 入口注入 todoDir → todo_write 装配,SSOT 26 件全在场
+    // （T5 退役 10 lsp_* 后从 30 → 25;ADR-0041 B3 再 +1 run_graph 常驻 → 26）。
     for (const expected of EXPECTED_TOOLS) {
       expect(names).toContain(expected);
     }
     expect(names).toHaveLength(EXPECTED_TOOLS.length);
     expect(names).toContain("todo_write");
+    expect(names).toContain("run_graph");
   });
 });

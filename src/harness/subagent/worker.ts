@@ -49,6 +49,7 @@ import { deriveFileRefs, writeToolNamesFrom } from "./file-refs.js";
 import { createPermissionPolicy } from "../permission/policy.js";
 import { createNoAskUser } from "../permission/ask-user.js";
 import { createIknowSystemResolver } from "../identity/index.js";
+import { createGitSnapshotProvider } from "../identity/git-snapshot.js";
 import { createSkillScanner } from "../skill/scanner.js";
 import { createSkillCatalog } from "../skill/catalog.js";
 import { createJsonlTraceService, type TraceService } from "../trace/index.js";
@@ -353,6 +354,12 @@ export async function createWorkerRuntime(
   // Judge workers must not inherit the full iknow soul / assistant voice
   // (verify-goal-gate T2). Catalog lookup is skipped so "unknown role"
   // fallback does not re-attach the iknow base.
+  // plans/model-prefix-layering.md B5 / spec §9:worker 给父代理同款 git 快照。
+  // worker 装配期同步取一次 createGitSnapshotProvider(以稳定
+  // projectIdentityRoot 为 cwd),结果冻结在闭包 → worker 进程内字节级恒定,
+  // 注入 resolver 的 `git` 缝 → 与父代理 share the same git block text。
+  // 退化态(非 git 仓库 / git 不可用 / cwd 不可解析)→ undefined → 段缺席,
+  // 装配不报错。
   const baseSystem = isJudge
     ? async () => undefined
     : (opts.system ??
@@ -369,6 +376,7 @@ export async function createWorkerRuntime(
             description: entry.description ?? "",
             ...(entry.disabled ? { disabled: true } : {}),
           })),
+        git: createGitSnapshotProvider({ cwd: projectIdentityRoot }),
       }));
 
   // #556 T2 + #562 T7: persona + constraints + addendum 注入 (加性段,

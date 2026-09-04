@@ -1338,11 +1338,10 @@ describe("MCP manager — workspaceRoot transport cwd (T4)", () => {
           listChangedHandlers: [],
           closeHandlers: [],
         });
-        (handle as unknown as { connect: () => Promise<void> }).connect =
-          () =>
-            new Promise<void>((res) => {
-              connectResolve = res;
-            }).then(() => undefined);
+        (handle as unknown as { connect: () => Promise<void> }).connect = () =>
+          new Promise<void>((res) => {
+            connectResolve = res;
+          }).then(() => undefined);
         return handle;
       },
     });
@@ -1390,5 +1389,106 @@ describe("MCP manager — workspaceRoot transport cwd (T4)", () => {
     triggers._triggerListChanged([sampleTool("alpha"), sampleTool("beta")]);
     await new Promise((r) => setTimeout(r, 30));
     expect(registered).toEqual([]);
+  });
+});
+
+// =========================================================================
+// manual reconnect — B4 / ADR-0043 §4（H1 review fix）
+// =========================================================================
+
+describe("MCP manager — manual reconnect notification", () => {
+  it("reload 后重连成功的 server → listener 收到 serverName + toolNames(首次 start 不派发)", async () => {
+    const events: Array<{ server: string; tools: string[] }> = [];
+    const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
+      config: [makeStdio("svc")],
+      registerExternal: () => {},
+      createClient: () =>
+        makeStubClient({
+          initialTools: [sampleTool("echo"), sampleTool("ping")],
+          listChangedHandlers: [],
+          closeHandlers: [],
+        }),
+    });
+
+    mgr.onManualReconnect((serverName, toolNames) => {
+      events.push({ server: serverName, tools: [...toolNames] });
+    });
+
+    // 首次 start 连接成功 = 初连,不是重连 → 零派发。
+    await mgr.start();
+    await waitForStatus(mgr, "svc", "connected", 2000);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(events).toEqual([]);
+
+    // 手动重连路径:reload(同 config 模拟 UI 重连)后再次连上 → 派发一次,
+    // 工具名 = mcp__<server>__<tool>(与 registerExternal 命名一致)。
+    await mgr.reload([makeStdio("svc")]);
+    await waitForStatus(mgr, "svc", "connected", 2000);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(events).toEqual([
+      {
+        server: "svc",
+        tools: ["mcp__svc__echo", "mcp__svc__ping"],
+      },
+    ]);
+
+    // fire-once:list_changed 增量重注册不重复播报。
+    const handle = (mgr as unknown as { _handles: McpClientHandle[] })
+      ._handles[0]!;
+    const triggers = handle as unknown as {
+      _triggerListChanged: (ts: McpTool[]) => void;
+    };
+    triggers._triggerListChanged([
+      sampleTool("echo"),
+      sampleTool("ping"),
+      sampleTool("extra"),
+    ]);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(events).toHaveLength(1);
+
+    await mgr.shutdown();
+  });
+
+  it("reload 后连接失败的 server 不派发;成功者单独派发(缺席者第二次机会命中也播报)", async () => {
+    const events: Array<{ server: string; tools: string[] }> = [];
+    let rejectBad = true;
+    const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
+      config: [makeStdio("good"), makeStdio("bad")],
+      registerExternal: () => {},
+      createClient: (server) =>
+        makeStubClient({
+          ...(rejectBad && server.name === "bad"
+            ? { rejectConnect: true }
+            : {}),
+          initialTools: [sampleTool("t")],
+          listChangedHandlers: [],
+          closeHandlers: [],
+        }),
+    });
+
+    mgr.onManualReconnect((serverName, toolNames) => {
+      events.push({ server: serverName, tools: [...toolNames] });
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "good", "connected", 2000);
+    await waitForStatus(mgr, "bad", "failed", 2000);
+
+    rejectBad = false;
+    await mgr.reload([makeStdio("good"), makeStdio("bad")]);
+    await waitForStatus(mgr, "good", "connected", 2000);
+    await waitForStatus(mgr, "bad", "connected", 2000);
+    await new Promise((r) => setTimeout(r, 30));
+
+    // reload 后「新连上」的两个 server 各派发一次(已 connected 的 good 在
+    // reload 内也经历 shutdown → pending → connected,同属重连成功)。
+    expect(events.map((e) => e.server).sort()).toEqual(["bad", "good"]);
+    for (const e of events) {
+      expect(e.tools).toEqual([`mcp__${e.server}__t`]);
+    }
+
+    await mgr.shutdown();
   });
 });

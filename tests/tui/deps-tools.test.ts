@@ -64,14 +64,16 @@ function makeBundle(
 // #365 T2：surface="tui" → build-engine 全装配(skillCatalog +
 // subagentManager + mcpManager + backgroundManager 均装配)。期望集
 // 从 `ACI_TOOLSET_NAMES` SSOT 派生,本测试场景下被排除的条件化工具:
-//   - run_graph: graphMode 缝缺(tests/tui/* 装配 opts 不透传 graphMode)
 //   - create-task-worktree / enter-task-worktree / exit-task-worktree:
 //     worktreeIsolation host 缝缺(测试 opts 不透传 worktreeIsolation)
 //   - list-task-worktrees / remove-task-worktree: 同上(同一 isolationHost
 //     缝分支下的 worktreeList / worktreeRemove)
+// ADR-0041 / plans/model-prefix-layering.md B3:`run_graph` 已常驻注册
+// (subagentManager 在场即入注册表,与 graphMode / graphAssembly 是否在场
+// 无关) —— handler isEnabled gate 缺席由缺省恒关守门,TUI 不透传 graphMode
+// 不影响工具面成员。
 // 任何新增件自动继承;append-only 仍由 registry Gate 3 镜像校验。
 const EXCLUDED_FOR_TUI_NO_HOST_SEAM: ReadonlyArray<string> = [
-  "run_graph",
   "create-task-worktree",
   "enter-task-worktree",
   "exit-task-worktree",

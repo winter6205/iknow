@@ -31,8 +31,10 @@ import { promises as fs } from "node:fs";
 
 import { IKNOW_IDENTITY_DEFAULT } from "./identity.js";
 import { IKNOW_SOUL_DEFAULT } from "./soul.js";
+import { IKNOW_USAGE_DEFAULT } from "./usage.js";
 import { bootstrapFilePath } from "./workspace.js";
 import { assembleStaticSystemPrompt } from "../memory/assembly.js";
+import { gitSnapshotSegment, type GitSnapshot } from "./git-snapshot.js";
 
 /** IKNOW-196 + #194 T6 + IKNOW-symbol-primary T1 装配顺序 (6 段 LOCKED)。 */
 export const IKNOW_ASSEMBLY_ORDER = [
@@ -85,11 +87,20 @@ export interface AssemblyContext {
   readonly memoryResolver?: () => Promise<string | undefined>;
   readonly toolList?: () => ReadonlyArray<string> | undefined;
   readonly skills?: () => ReadonlyArray<SkillSummary> | undefined;
-  /** #631 T2 MCP 概览段注入缝 (可选,渐进式披露"索引常驻档"):每 turn 装配期
-   *  现读快照 —— 异步连接的服务连上后下一装配周期自然出现,不阻塞不空等。
-   *  缺席 / 返回空 / 过滤后无 connected 服务 → 段缺席 (KV 缓存字节级稳定);
-   *  调用抛错 → console.warn + 跳过 (降级契约对齐 memory_layer)。 */
+  /** #631 T2 → B4 (ADR-0043 §3) MCP 名字目录段注入缝 (可选,渐进式披露
+   *  "索引常驻档"):每 turn 装配期现读快照 —— 异步连接的服务连上后下一装配
+   *  周期自然出现,不阻塞不空等。缺席 / 返回空 / 过滤后无 connected 服务 →
+   *  段缺席 (KV 缓存字节级稳定);调用抛错 → console.warn + 跳过 (降级契约
+   *  对齐 memory_layer)。schema 不进本段(名字目录只承载服务名 + 工具名)。 */
   readonly mcp?: () => ReadonlyArray<McpServiceSummary> | undefined;
+  /** B6 / ADR-0043 §3:溢出治理退场内建件名单段(可选,渐进式披露第二档)。
+   *  返回**会话级冻结**的退场名单(闭包在 build-engine 装配期首轮判定一次
+   *  后冻结,会话内恒定)。缺席 / 空数组 → 段缺席(字节级零变化);模型用
+   *  `tool_search` 拉回退场件 schema,经 `discover()` 进 discovered 集 +
+   *  visibleSchemas 走 discoveredTail 把 schema 带回 tools 尾部。
+   *  顺序契约:与 mcp 名字目录同形态,裸名字 + tool_search 引导;核心件永
+   *  不在此名单(由 tool-overflow.ts CORE_TOOL_NAMES 守门)。 */
+  readonly deferredInternalTools?: () => ReadonlyArray<string> | undefined;
   /** #558 T2 coordinator 段注入缝 (可选):默认路径(build-engine 在
    *  chat/tui/serve 自建 manager)不再注入 —— 引导落点已迁到 spawn_subagent
    *  工具 description (#557 T1 SSOT)。调用方显式传入非空字符串仍渲染
@@ -102,11 +113,13 @@ export interface AssemblyContext {
    *  守 KV 缓存稳定契约)。build-engine 从驱动 deps.agentStatus (T1 注入缝)
    *  的同一 gate 派生 —— 栏会注入的表面才有读规则;ask / worker 永不注入。 */
   readonly agentStatusReadRule?: boolean;
-  /** D-α T3 / ADR-0030 graph 编排段注入缝 (可选,布尔 gate):返回 true →
-   *  装配 "## Graph orchestration" 段;缺席 / 返回 false → 段缺席 (字节级
-   *  零变化,守 KV 缓存稳定契约)。gate 是**函数**而非布尔:overlay 会在会话
-   *  中途被翻,装配层每 turn 现读该次 run() 的快照 (GraphAssembly.enabled)。 */
-  readonly orchestration?: () => boolean;
+  /** plans/model-prefix-layering.md B5 / spec §9:git 块注入缝 (可选)。
+   *  返回一个**会话级冻结**的快照(闭包取一次,build-engine / worker 装配
+   *  期同步取一次)。装配层每 turn 调同一闭包 → 相邻两轮 byte-identical
+   *  (D9 / KV 缓存契约)。缺席 / 返回 undefined → 段缺席(字节级零变化);
+   *  退化态(cwd_unavailable / not_a_git_repo / git_unavailable)→ 段缺席
+   *  不报错(spec §9:「接受缺席即字节变化」)。 */
+  readonly git?: () => GitSnapshot | undefined;
 }
 
 /** #337 T6 `<available_skills>` 段元素形态(最小投影:name + description + disabled)。
@@ -117,28 +130,70 @@ export interface SkillSummary {
   readonly disabled?: boolean;
 }
 
-/** #631 T2 MCP 概览段工具元素形态(最小投影)。description 缺席/空 →
- *  只渲染工具名。 */
-export interface McpToolSummary {
-  readonly name: string;
-  readonly description?: string;
-}
-
-/** #631 T2 MCP 概览段服务元素形态(最小投影,与 mcp/manager McpServerState
- *  同词汇表但不跨模块导入——装配层只依赖字面量联合)。仅 "connected" 服务
- *  入段:pending(还在连) / failed / disabled 整体不渲染。
- *  豁免记录(对齐 #635 "每服务名+一句话描述"):mcp 只读元数据面
- *  (manager.status / config)当前无服务级描述来源,description 为预留
- *  字段,服务行暂只渲染名字;待 config 承载描述后启用。 */
+/** #631 T2 / B4 (ADR-0043 §3) MCP 名字目录段服务元素形态(最小投影):
+ *  仅渲染 name + tool 名单;schema 与长 description 一律不进 system。
+ *  `state` 词汇表与 mcp/manager McpServerState 同形但不跨模块导入;
+ *  仅 "connected" 服务入段:pending(还在连) / failed / disabled 不渲染。 */
 export interface McpServiceSummary {
   readonly name: string;
   readonly state: "pending" | "connected" | "failed" | "disabled";
-  readonly description?: string;
-  readonly tools: ReadonlyArray<McpToolSummary>;
+  readonly tools: ReadonlyArray<string>;
 }
 
-/** #631 T2 工具短描述限值:取 description 首行,超过此长度截断 + 省略号。 */
-export const MCP_TOOL_SHORT_DESCRIPTION_MAX = 120;
+/**
+ * B4 / ADR-0043 §3 `<mcp_name_directory>` 段渲染(替代旧 #631 T2
+ * `<mcp_tools_overview>`):每 connected 服务一行(名字),其下每工具一行
+ * (裸名字,无 schema、无 description),末行引导 tool_search 精查。
+ *
+ * 加性段,不触碰 IKNOW_ASSEMBLY_ORDER;仅渲染 state === "connected" 的
+ * 服务;过滤后为空 → 返回 undefined(装配层不追加,绝不写空串)。
+ * 字节稳定契约:connected 服务集 + 工具名单会话内恒定 → 相邻轮 deep-equal;
+ * lazy 工具名先于 schema 进目录正是 B4 的披露分层(名字在 system,
+ * schema 在 tool_search result / tools 尾部追加)。
+ */
+export function mcpNameDirectorySegment(
+  services: ReadonlyArray<McpServiceSummary>
+): string | undefined {
+  const connected = services
+    .filter((s) => s.state === "connected")
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (connected.length === 0) return undefined;
+  const lines: string[] = [];
+  for (const service of connected) {
+    lines.push(service.name);
+    const toolNames = [...service.tools].sort((a, b) => a.localeCompare(b));
+    for (const tool of toolNames) {
+      lines.push(`- ${tool}`);
+    }
+  }
+  lines.push(
+    "Use tool_search to load the full schema of any tool listed above before calling it."
+  );
+  return `<mcp_name_directory>\n${lines.join("\n")}\n</mcp_name_directory>`;
+}
+
+/**
+ * B6 / ADR-0043 §3 `<deferred_internal_tools>` 段渲染 —— 溢出治理退场
+ * 的内建件名单(裸名,无 schema)。退场件 = 标 `aci.deferrable: true` 的
+ * 内建件中,首轮 `countTokens` 实测超出 context window 10% 阈值后被 stamp
+ * `aci.lazy: true` 的部分(schema 从 promptTools 抽出,模型经 tool_search
+ * 拉回)。
+ *
+ * 与 mcp 名字目录同形态,但不分组(内建件无 server 维度),按字母序输出
+ * 以保证字节稳定。空数组 → 返回 undefined(段缺席,字节级零变化)。
+ * 引导句与 mcp 名字目录一致(用户能直接拼出"调 tool_search")。
+ */
+export function deferredInternalToolsSegment(
+  names: ReadonlyArray<string>
+): string | undefined {
+  if (names.length === 0) return undefined;
+  const sorted = [...names].sort((a, b) => a.localeCompare(b));
+  return (
+    `<deferred_internal_tools>\n${sorted.join("\n")}\n` +
+    `</deferred_internal_tools>`
+  );
+}
 
 /** IKNOW-196 入口范围判定。对话型入口(chat / tui / serve)激活 BOOTSTRAP;
  *  仅脚本型(ask)跳过。serve 是同一主体的浏览器交互面(iknow serve + SPA),
@@ -178,8 +233,12 @@ export function createIknowSystemResolver(opts: {
   readonly toolList?: () => ReadonlyArray<string> | undefined;
   /** #337 T6 skills 注入缝 (可选):见 AssemblyContext.skills 注释。 */
   readonly skills?: () => ReadonlyArray<SkillSummary> | undefined;
-  /** #631 T2 MCP 概览段注入缝 (可选):见 AssemblyContext.mcp 注释。 */
+  /** #631 T2 → B4 (ADR-0043 §3) MCP 名字目录段注入缝 (可选):见 AssemblyContext.mcp 注释。 */
   readonly mcp?: () => ReadonlyArray<McpServiceSummary> | undefined;
+  /** B6 / ADR-0043 §3:溢出治理退场内建件名单段注入缝 (可选):见
+   *  AssemblyContext.deferredInternalTools 注释。**会话级冻结**(闭包
+   *  取一次后不再变),首轮判定的退场名单 = 整会话的退场名单。 */
+  readonly deferredInternalTools?: () => ReadonlyArray<string> | undefined;
   /** #558 T2 coordinator 段注入缝 (可选):默认路径(build-engine 在
    *  chat/tui/serve 自建 manager)不再注入 —— 引导落点已迁到 spawn_subagent
    *  工具 description (#557 T1 SSOT)。调用方显式传入非空字符串仍渲染
@@ -188,8 +247,10 @@ export function createIknowSystemResolver(opts: {
   readonly coordinatorText?: string;
   /** #646 T2:见 AssemblyContext.agentStatusReadRule 注释(布尔 gate,同门驱动)。 */
   readonly agentStatusReadRule?: boolean;
-  /** D-α T3:见 AssemblyContext.orchestration 注释(每 turn 现读 run() 快照)。 */
-  readonly orchestration?: () => boolean;
+  /** plans/model-prefix-layering.md B5 / spec §9:git 块注入缝 (可选)。
+   *  闭包在工厂调用时同步取一次快照,会话内冻结。详见
+   *  AssemblyContext.git 注释。 */
+  readonly git?: () => GitSnapshot | undefined;
 }): () => Promise<string | undefined> {
   const bootstrapActive = shouldIncludeBootstrap(opts.surface);
   return () =>
@@ -205,11 +266,14 @@ export function createIknowSystemResolver(opts: {
       ...(opts.toolList ? { toolList: opts.toolList } : {}),
       ...(opts.skills ? { skills: opts.skills } : {}),
       ...(opts.mcp ? { mcp: opts.mcp } : {}),
+      ...(opts.deferredInternalTools
+        ? { deferredInternalTools: opts.deferredInternalTools }
+        : {}),
       ...(opts.coordinatorText
         ? { coordinatorText: opts.coordinatorText }
         : {}),
       ...(opts.agentStatusReadRule ? { agentStatusReadRule: true } : {}),
-      ...(opts.orchestration ? { orchestration: opts.orchestration } : {}),
+      ...(opts.git ? { git: opts.git } : {}),
     });
 }
 
@@ -250,25 +314,65 @@ export async function assembleIdentityContext(
   if (skills !== undefined) {
     segments.push(skillsSegment(skills));
   }
-  // #631 T2 加性段 `<mcp_tools_overview>`(渐进式披露"索引常驻档"):append 在
-  // skills 之后、coordinator 之前,不触碰 LOCKED 顺序。装配期现读快照 ——
-  // 异步连接的服务下一周期自然出现。降级契约对齐 memory_layer:缝缺席 /
-  // 返回空 / 过滤后无 connected 服务 → 段缺席(字节级零变化);调用抛错 →
-  // console.warn + 跳过,不污染其余段。
+  // #631 T2 → B4 (ADR-0043 §3) 加性段 `<mcp_name_directory>`(渐进式披露
+  // "索引常驻档",替代旧 `<mcp_tools_overview>`):append 在 skills 之后、
+  // coordinator 之前,不触碰 LOCKED 顺序。装配期现读快照 —— 异步连接的服务
+  // 下一周期自然出现。降级契约对齐 memory_layer:缝缺席 / 返回空 / 过滤后
+  // 无 connected 服务 → 段缺席(字节级零变化);调用抛错 → console.warn +
+  // 跳过,不污染其余段。schema 不进本段(名字目录只承载服务名 + 工具名,
+  // schema 由 tool_search 按需拉取)。
   if (ctx.mcp) {
     let summaries: ReadonlyArray<McpServiceSummary> | undefined;
     try {
       summaries = ctx.mcp();
     } catch (err) {
       console.warn(
-        `[identity/assemble] mcp overview resolver failed: ${String(err)}`
+        `[identity/assemble] mcp name directory resolver failed: ${String(err)}`
       );
       summaries = undefined;
     }
     if (summaries) {
-      const overview = mcpOverviewSegment(summaries);
-      if (overview !== undefined) segments.push(overview);
+      const directory = mcpNameDirectorySegment(summaries);
+      if (directory !== undefined) segments.push(directory);
     }
+  }
+  // B6 / ADR-0043 §3 加性段 `<deferred_internal_tools>`:append 在 mcp
+  // 名字目录之后、git 块之前;不触碰 LOCKED 顺序。降级契约对齐 mcp 段:
+  // 缝缺席 / 返回空 / 解析抛错 → 段缺席(字节级零变化)。会话级冻结:
+  // 闭包在 build-engine 装配期首轮判定后冻结,相邻轮 deep-equal。
+  if (ctx.deferredInternalTools) {
+    let deferredNames: ReadonlyArray<string> | undefined;
+    try {
+      deferredNames = ctx.deferredInternalTools();
+    } catch (err) {
+      console.warn(
+        `[identity/assemble] deferred internal tools resolver failed: ${String(err)}`
+      );
+      deferredNames = undefined;
+    }
+    if (deferredNames) {
+      const segment = deferredInternalToolsSegment(deferredNames);
+      if (segment !== undefined) segments.push(segment);
+    }
+  }
+  // plans/model-prefix-layering.md B5 / spec §9:加性段 `## Git`(会话级常量层,
+  // 与 `## Project path` 同形态——内容字节稳定)。append 在 mcp 名字目录之后、
+  // agent-status 读规则之前;不触碰 LOCKED 6 段顺序,也不与 agentStatusReadRule
+  // 共门。数据源 = `git-snapshot.ts` 创建的闭包,会话期同步取一次后冻结;
+  // 退化态(cwd_unavailable / not_a_git_repo / git_unavailable)→ 段缺席
+  // (字节级零变化,spec §9)。build-engine / worker 装配期均同步取一次。
+  if (ctx.git) {
+    let snapshot: GitSnapshot | undefined;
+    try {
+      snapshot = ctx.git();
+    } catch (err) {
+      console.warn(
+        `[identity/assemble] git snapshot resolver failed: ${String(err)}`
+      );
+      snapshot = undefined;
+    }
+    const segment = gitSnapshotSegment(snapshot);
+    if (segment !== undefined) segments.push(segment);
   }
   // #646 T2 / ADR-0028 加性段 agent-status 读规则:读规则进 system 一次,
   // 不写进每条栏(栏本身永不进 deps.system)。仅栏会注入的表面(build-engine
@@ -289,12 +393,11 @@ export async function assembleIdentityContext(
     segments.push(coordinatorSegment(ctx.coordinatorText));
   }
   // D-α T3 / ADR-0030 加性段 graph 编排:append 在最末,不触碰 LOCKED 顺序。
-  // gate 每 turn 现读该次 run() 的装配快照 —— 关图时段整体缺席,默认模式
-  // 的 system 文本与本刀之前字节一致 (KV 缓存契约);开图时只在尾部追加,
-  // 前缀仍逐字节稳定。
-  if (ctx.orchestration?.() === true) {
-    segments.push(orchestrationSegment(IKNOW_GRAPH_ORCHESTRATION_TEXT));
-  }
+  // ADR-0041 / plans/model-prefix-layering.md B3:graph orchestration 段撤出
+  // system —— 内容并入模式切换时的 messages 尾部追加(见 loop-engine
+  // appendGraphModeChange + graph/notification.ts)。前缀稳定契约保留:
+  // 关图前后 system 字节相同,翻图时仅 messages 尾追加一条 `<graph_mode>`
+  // 单行文本(KV 缓存前缀 = tools/system 同序,消息尾追加不破坏缓存命中)。
   return segments.join("\n\n");
 }
 
@@ -308,6 +411,11 @@ async function resolveSegment(
       return IKNOW_IDENTITY_DEFAULT;
     case "soul":
       return IKNOW_SOUL_DEFAULT;
+    case "usage":
+      // IKNOW-symbol-primary T1: 使用规则段 — 代码主路径走符号工具 + grep
+      // 三类回退 + edit_file 让位。SC1 全 surface (chat / tui / serve / ask)
+      // 注入;条件缺席清单见 tests/harness/identity/usage-segment.test.ts。
+      return IKNOW_USAGE_DEFAULT;
     case "user_profile":
       return readUserProfile(ctx);
     case "bootstrap":
@@ -416,55 +524,6 @@ export function skillsSegment(skills: ReadonlyArray<SkillSummary>): string {
   return `<available_skills>\n${body}\n</available_skills>`;
 }
 
-/** #631 T2 工具短描述:取首行 + 限值截断(~120 字符);缺席/空/空行 →
- *  undefined(调用方只渲染工具名)。 */
-function shortToolDescription(
-  description: string | undefined
-): string | undefined {
-  if (description === undefined || description.length === 0) return undefined;
-  const firstLine = description.split("\n", 1)[0].trim();
-  if (firstLine.length === 0) return undefined;
-  if (firstLine.length <= MCP_TOOL_SHORT_DESCRIPTION_MAX) return firstLine;
-  return `${firstLine.slice(0, MCP_TOOL_SHORT_DESCRIPTION_MAX)}…`;
-}
-
-/** #631 T2 `<mcp_tools_overview>` 段渲染(渐进式披露"索引常驻档"):
- *  每 connected 服务一行(名字 [+ description]),其下每工具一行
- *  (名字 [+ 短描述]),末行引导 tool_search 精查。
- *  加性段,不触碰 IKNOW_ASSEMBLY_ORDER;仅渲染 state === "connected" 的服务
- *  (pending 还在连 / failed / disabled 整体不渲染);过滤后为空 →
- *  返回 undefined(装配层不追加,绝不写空串)。 */
-export function mcpOverviewSegment(
-  services: ReadonlyArray<McpServiceSummary>
-): string | undefined {
-  const connected = services
-    .filter((s) => s.state === "connected")
-    .slice()
-    .sort((a, b) => a.name.localeCompare(b.name));
-  if (connected.length === 0) return undefined;
-  const lines: string[] = [];
-  for (const service of connected) {
-    lines.push(
-      service.description && service.description.trim().length > 0
-        ? `${service.name}: ${service.description}`
-        : service.name
-    );
-    const tools = service.tools
-      .slice()
-      .sort((a, b) => a.name.localeCompare(b.name));
-    for (const tool of tools) {
-      const short = shortToolDescription(tool.description);
-      lines.push(
-        short === undefined ? `- ${tool.name}` : `- ${tool.name}: ${short}`
-      );
-    }
-  }
-  lines.push(
-    "Use tool_search to look up the full schema and details of any tool listed above before calling it."
-  );
-  return `<mcp_tools_overview>\n${lines.join("\n")}\n</mcp_tools_overview>`;
-}
-
 /** #646 T2 / ADR-0028 / CONTEXT「状态栏」:状态栏读规则 —— 装配进
  *  deps.system 的单句静态文本 (SSOT,装配/测试只引用,绝不复制/切片)。
  *
@@ -520,32 +579,6 @@ Parallelize by issuing multiple spawn_subagent calls in one turn: each spawns an
  *  顺序;缺席 → 跳过,字节级零变化)。 */
 export function coordinatorSegment(text: string): string {
   return `## Sub-agent coordination\n${text}`;
-}
-
-/** D-α T3 / ADR-0030 graph 编排段正文 (SSOT,不含段标题——标题由
- *  orchestrationSegment 加 "## Graph orchestration" 渲染,与
- *  coordinatorSegment 同形态)。
- *
- *  只在该次 run() 的 graph 快照为开时装配 —— 关图时段缺席,默认模式的
- *  system 文本字节级不变 (KV cache 契约)。
- *
- *  内容边界:讲的是「什么形状的活该进图」和「进图之后的语义」,不写模块
- *  路径 (spec Out of scope:不把 src/harness/graph 写进模型 prompt),也不
- *  锁节点数 N (spec 假设 8:N 不是产品策略)。 */
-export const IKNOW_GRAPH_ORCHESTRATION_TEXT = `
-Graph mode is on for this run, so run_graph is available alongside spawn_subagent.
-
-Reach for run_graph when the work splits into pieces that depend on each other — one piece needs another's result before it can start. Declare the whole shape in a single call: every node gets an \`id\`, a self-contained \`task\`, and the \`deps\` it waits for. Nodes whose deps are all satisfied run in parallel; a node starts only once every node it depends on has finished, and its task arrives with those results appended.
-
-Failure is data: if a node fails, the nodes downstream of it come back skipped while unrelated branches keep running, and the call still returns one report covering every node. Read that report and decide what to do next.
-
-Keep using spawn_subagent for a single task, or for several tasks with no ordering between them — a graph with no edges buys nothing over parallel spawns.
-`.trim();
-
-/** D-α T3 graph 编排段渲染:段标题 + 正文 (加性段,append 在最末,不触碰
- *  LOCKED 顺序;缺席 → 跳过,字节级零变化)。 */
-export function orchestrationSegment(text: string): string {
-  return `## Graph orchestration\n${text}`;
 }
 
 /**

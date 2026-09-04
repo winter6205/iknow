@@ -44,16 +44,20 @@ import type { ToolExecutionResult } from "../../src/harness/tools/types.ts";
 // 装配层历史 append-only：8 baseline → + memory_recall/save (#194)
 // → + tool_search (#224) → + skill/skill_search (#337) → + spawn_subagent /
 // subagent_result (#356) → + todo_write / list_mcp_resources / read_mcp_resource
-// (#440 双 Stream) → + bash_output / bash_stop (#502) → + query_trace
+// (#440 双 Stream) → + bash_output / bash_stop (#502) → + run_graph
+// (ADR-0041 / plans/model-prefix-layering.md B3 常驻) → + query_trace
 // → + 10 符号查询 (symbol-primary-aci T2) → + 5 符号改 (T4) → + list_sessions
-// (trace-mcp-read-side-split T5b) → + get_record (同 plan T6) = 38 件;
+// (trace-mcp-read-side-split T5b) → + get_record (同 plan T6) = 39 件;
 //
 // symbol-primary-aci T5：旧 10 件 lsp_* 已退役（spec symbol-primary-aci.md
 // §37-53 + SC2 + SC7 + ACR complexity-anti-drift）；build-engine 装配路径不再产出
 // lsp_* 工具。其实现 + 内部 export 仍住 lsp.ts 作 symbol.ts 的 SSOT 复用层。
-// 符号面 10 + 改 5 在 build-engine 默认 chat surface 装配。run_graph
-// 不在本数组（条件化：graphAssembly + subagentManager 同时在场才入注册表；
-// build-engine 默认 chat surface 不传 graphAssembly → 不入）。
+// 符号面 10 + 改 5 在 build-engine 默认 chat surface 装配。run_graph 在
+// 本数组(ADR-0041 / plans/model-prefix-layering.md B3:`run_graph` 常驻
+// 注册 — build-engine 默认 chat surface 装配 subagentManager,handler
+// isEnabled 缺省恒关守门,promptTools 与 system 字节不随 graph 开关
+// 抖动)。graphAssembly 缺席仅让 handler 闭包不解 graph 装配件,
+// 工具本身仍在注册表(参见 promptTools 数组长度 = EXPECTED_TOOLS.length)。
 //
 // 各条件化 seam 缺席后 = EXPECTED_TOOLS.filter(...) 推导，以 filter 表达式为
 // source of truth:SC8（ask 入口不建 subagentManager / mcpManager / backgroundManager）、
@@ -89,6 +93,10 @@ const EXPECTED_TOOLS = [
   //  bash 仍常驻,参数级 background:true 能力由 handler 运行时决策）。
   "bash_output",
   "bash_stop",
+  // ADR-0041 / plans/model-prefix-layering.md B3 run_graph 常驻 append-only:
+  // 20→21,与 bash_output/bash_stop 同形态 —— 仅 subagentManager 缺席才不
+  // 入注册表(graphAssembly 缺席由 handler isEnabled 缺省恒关守门)。
+  "run_graph",
   "query_trace",
   // symbol-primary-aci T2 符号查询工具集 append-only:20→30,末位 10 件常驻
   // （不条件化——与 lsp.ts 内部 SSOT 共享 lspCtx；旧 10 件 lsp_* 已在 T5 退役）。
@@ -122,7 +130,7 @@ const EXPECTED_TOOLS = [
 /** #440 T4 / #502 T3 条件化缺席视图:todoDir 未透传的 chat surface(默认行为)。
  *  既有 SSOT 断言通过 EXPECTED_TOOLS_NO_TODO 表达"todo_write 不在表";todo_write
  *  在场需显式传 todoDir(主循环生产路径,非测试默认形态)。具体件数 =
- *  EXPECTED_TOOLS_NO_TODO.length = 37,以数组为 source of truth。 */
+ *  EXPECTED_TOOLS_NO_TODO.length = 38,以数组为 source of truth。 */
 const EXPECTED_TOOLS_NO_TODO = EXPECTED_TOOLS.filter((n) => n !== "todo_write");
 
 /** Deterministic env: never read process.env / .env files (env.ts SSOT). */
@@ -219,7 +227,7 @@ describe("buildHarnessEngine (SSOT assembly)", () => {
 
     const names = deps.registry.list().map((def) => def.name);
     // #440 T4:todo_write 条件化 — todoDir 未透传 → 不在场。具体件数 =
-    // EXPECTED_TOOLS_NO_TODO.length = 37,以数组为 source of truth。
+    // EXPECTED_TOOLS_NO_TODO.length = 38,以数组为 source of truth。
     expect(names).toEqual(EXPECTED_TOOLS_NO_TODO);
     // 显式锁 Web 工具存在(plan-fidelity:SSOT 收敛到 registry.ts 后,
     // build-engine 路径也必须仍带 web_fetch / web_search)。
@@ -260,7 +268,7 @@ describe("buildHarnessEngine (SSOT assembly)", () => {
     expect(promptNames).toEqual([...EXPECTED_TOOLS_NO_TODO].sort());
     // 默认 registry 无 lazy 工具 → visibleSchemas ≡ registry.list()
     // #440 T4:todoDir 未透传 → todo_write 缺席;具体件数 =
-    // EXPECTED_TOOLS_NO_TODO.length = 35,以数组常量为准。
+    // EXPECTED_TOOLS_NO_TODO.length = 38,以数组常量为准。
     expect(deps.promptTools!().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS_NO_TODO
     );
@@ -518,6 +526,9 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
     //   - mcp2:ask 不创建 mcpManager（SC12）
     //   - bg2:ask 不创建 backgroundManager（#502 T3）
     //   - todo_write:todoDir oneshot 剥离（#440 T4）
+    //   - run_graph:ADR-0041 同 subagentManager 同门 —— ask 无 subagentManager
+    //     → run_graph 缺席（handler isEnabled 与 graphAssembly 都无依赖,工具
+    //     本身缺席即等价）
     // skill 两件仍装配,SC12 守门。本断言以 EXPECTED_TOOLS_NO_TODO.filter
     // 表达式为 source of truth(不写加法叙事 — 加法易漂)。
     expect(names).toEqual(
@@ -530,7 +541,8 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
           n !== "list_mcp_resources" &&
           n !== "read_mcp_resource" &&
           n !== "bash_output" &&
-          n !== "bash_stop"
+          n !== "bash_stop" &&
+          n !== "run_graph"
       )
     );
 
@@ -968,7 +980,7 @@ describe("buildHarnessEngine — #406 T2 secret registry 装配", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
-  it("chat surface：todoDir 传入 → todo_write 装配 + 37 件（seam 接受 + SSOT append-only;以 EXPECTED_TOOLS.length 为真值源,不写加法叙事）", async () => {
+  it("chat surface：todoDir 传入 → todo_write 装配 + 39 件（seam 接受 + SSOT append-only;以 EXPECTED_TOOLS.length 为真值源,不写加法叙事）", async () => {
     const built = await buildHarnessEngine({
       env: makeEnv("sk-test-t1-chat-tododir"),
       askUser: createNoAskUser(),
@@ -976,10 +988,10 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
       todoDir: "/tmp/some-session/todos",
     });
     // chat surface + todoDir → todoDir 透传给 registry → todo_write 装配。
-    // EXPECTED_TOOLS 含 todo_write + bash_output + bash_stop（38 件;
-    // backgroundManager 由 build-engine 装配期自建 → bash_output/bash_stop
-    // 入注册表;todoDir 由 host 注入 → todo_write 入注册表;本测试不传
-    // graphAssembly → run_graph 缺席 → 实际 38 < ACI_TOOLSET_NAMES 42）。
+    // EXPECTED_TOOLS 含 todo_write + bash_output + bash_stop + run_graph
+    // （ADR-0041 run_graph 常驻 —— chat surface 含 subagentManager →
+    // run_graph 入注册表;graphAssembly 不传,handler isEnabled 缺省恒关
+    // 守门,工具本身仍在表里）。具体件数以 EXPECTED_TOOLS.length 为真值源。
     expect(built.deps.registry.list().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS
     );
@@ -996,9 +1008,10 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
       todoDir: "/tmp/some-session/todos",
     });
     // ask 形态与现有 SC8 守门一致：EXPECTED_TOOLS filter 剥除
-    // memory2 + subagent2 + mcp2 + todo_write + bg2（ask 不创建 subagentManager
-    // / mcpManager / backgroundManager,memory:enabled:false,todoDir oneshot
-    // 剥离 —— SC8 + SC12）。具体件数 = filter 表达式长度，以数组为准。
+    // memory2 + subagent2 + mcp2 + todo_write + bg2 + run_graph（ask 不创建
+    // subagentManager / mcpManager / backgroundManager → run_graph 因
+    // subagentManager 缺席而缺席;memory:enabled:false;todoDir oneshot 剥离
+    // —— SC8 + SC12）。具体件数 = filter 表达式长度，以数组为准。
     expect(built.deps.registry.list().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS.filter(
         (n) =>
@@ -1010,20 +1023,22 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
           n !== "read_mcp_resource" &&
           n !== "todo_write" &&
           n !== "bash_output" &&
-          n !== "bash_stop"
+          n !== "bash_stop" &&
+          // ADR-0041:ask 无 subagentManager → run_graph 缺席。
+          n !== "run_graph"
       )
     );
     expect(built.deps.registry.get("todo_write")).toBeUndefined();
   });
 
-  it("默认 chat surface 不传 todoDir → todo_write 不装配，37 件（seam 缺席零变化，向后兼容）", async () => {
+  it("默认 chat surface 不传 todoDir → todo_write 不装配，38 件（seam 缺席零变化，向后兼容）", async () => {
     const built = await buildHarnessEngine({
       env: makeEnv("sk-test-t1-chat-default"),
       askUser: createNoAskUser(),
     });
     // todoDir undefined → todo_write 缺席;EXPECTED_TOOLS.filter 剥 todo_write
-    // → 37 件;backgroundManager 已装配,bash_output/bash_stop 在场;本测试不传
-    // graphAssembly → run_graph 缺席。
+    // → 38 件;backgroundManager 已装配,bash_output/bash_stop 在场;ADR-0041
+    // run_graph 常驻 → 仍入注册表(handler isEnabled 缺省恒关)。
     expect(built.deps.registry.list().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS.filter((n) => n !== "todo_write")
     );

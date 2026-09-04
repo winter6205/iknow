@@ -14,7 +14,9 @@
  * 单一装配函数返回注册表,所有入口共享。本测试锁 5 边界类:
  *
  *   - 正常路径:返回 AciRegistry,list() 工具名 = `ACI_TOOLSET_NAMES` 全集
- *     （全条件在场 + graphAssembly + worktree host seams → 44），顺序 append-only
+ *     （全条件在场 + subagentManager + worktree host seams → 44），顺序 append-only
+ *     注:ADR-0041 起 run_graph 常驻(仅 subagentManager 同门),graphAssembly
+ *     缺席不影响注册表成员(handler isEnabled 缺省恒关守门)
  *   - 空输入:env.web 全空(undefined)→ 直连不抛;sandboxRoot:"" → 不抛
  *   - 非法输入:proxy 非 http/https / 含凭据 → 装配期同步抛 ToolExecutionError
  *   - 溢出/边界:sandboxRoot 指向不存在路径 → 装配期不抛(执行期由 fs 工具越界逻辑拒绝)
@@ -186,7 +188,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
           n !== "read_mcp_resource" &&
           n !== "bash_output" &&
           n !== "bash_stop" &&
-          // D-α T3:graphAssembly + subagentManager 皆缺席 → run_graph 缺席。
+          // ADR-0041:run_graph 常驻 —— 仅 subagentManager 缺席才不在
+          // 注册表(graphAssembly 缺席由 handler isEnabled 缺省恒关守门)。
           n !== "run_graph" &&
           // worktree isolation (ADR-0037):worktreeProvision / worktreeEnter /
           // worktreeExit host 缝皆缺席 → 3 件 worktree 工具缺席。
@@ -439,8 +442,9 @@ function expectedSurface(
     ...(opts.todo ? [] : ["todo_write"]),
     ...(opts.mcp ? [] : ["list_mcp_resources", "read_mcp_resource"]),
     ...(opts.bg ? [] : ["bash_output", "bash_stop"]),
-    // D-α T3:graphAssembly + subagentManager 同门,任一缺席 → run_graph 缺席。
-    ...(opts.graph && opts.subagent ? [] : ["run_graph"]),
+    // ADR-0041:run_graph 常驻 —— 仅 subagentManager 缺席 → run_graph 缺席。
+    // graphAssembly 缺席由 handler isEnabled 缺省恒关守门,工具仍在注册表。
+    ...(opts.subagent ? [] : ["run_graph"]),
     // worktree isolation (ADR-0037):worktreeProvision / worktreeEnter /
     // worktreeExit host 缝皆在场时才入注册表。
     ...(opts.worktree
@@ -557,7 +561,8 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       todoDir: "/tmp/root-a/session-a/todos",
       mcpManager: fakeMcpManager,
       backgroundManager: fakeBackgroundManager,
-      // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 31 件)。
+      // ADR-0041:run_graph 常驻(全量 31 件)—— graphAssembly 在场仅决定
+      // handler isEnabled 透传的值,不影响注册表成员。
       graphAssembly: { enabled: () => true },
       worktreeProvision: fakeWorktreeProvision,
       worktreeEnter: fakeWorktreeEnter,
@@ -574,7 +579,7 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       todoDir: "/tmp/root-b/session-b/todos",
       mcpManager: fakeMcpManager,
       backgroundManager: fakeBackgroundManager,
-      // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 31 件)。
+      // ADR-0041:run_graph 常驻(全量 31 件)。
       graphAssembly: { enabled: () => true },
       worktreeProvision: fakeWorktreeProvision,
       worktreeEnter: fakeWorktreeEnter,
@@ -683,7 +688,8 @@ describe("createDefaultAciRegistry — #440 T1 todoDir seam", () => {
       todoDir: "/tmp/root/session-1/todos",
       mcpManager: fakeMcpManager,
       backgroundManager: fakeBackgroundManager,
-      // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 25 件)。
+      // ADR-0041:run_graph 常驻(全量 25 件)—— graphAssembly 透传给 handler
+      // isEnabled 闭包,与注册表成员无关。
       graphAssembly: { enabled: () => true },
       worktreeProvision: fakeWorktreeProvision,
       worktreeEnter: fakeWorktreeEnter,

@@ -467,10 +467,13 @@ describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
     assert.ok(reg.catalog.get("bash_stop"));
   });
 
-  it("backgroundManager 缺席 → bash_output / bash_stop 排除（36 件），bash 保留（T3 常驻）", () => {
-    // 不传 graphAssembly → run_graph 同步缺席；不传 worktree host seams → 5 件缺席；
-    // 读侧三轴（query_trace / list_sessions / get_record）无装配条件仍在场。
-    // 44 - 2(bg) - 1(run_graph) - 5(worktree) = 36。
+  it("backgroundManager 缺席 → bash_output / bash_stop 排除（37 件），bash 保留（T3 常驻）", () => {
+    // ADR-0041 / plans/model-prefix-layering.md B3:`run_graph` 常驻 —
+    // 仅 subagentManager 缺席才不在注册表(graphAssembly 缺席由 handler
+    // isEnabled 缺省恒关守门,工具面成员不变)。本测试传 subagentManager →
+    // run_graph 在场;不传 worktree host seams → 5 件缺席;读侧三轴
+    // (query_trace / list_sessions / get_record) 无装配条件仍在场。
+    // 44 - 2(bg) - 5(worktree) = 37。
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -481,11 +484,14 @@ describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
       mcpManager: fakeMcpManager,
     });
     const names = reg.inner.list().map((d) => d.name);
-    assert.equal(names.length, 36);
+    assert.equal(names.length, 37);
     assert.equal(names.includes("bash_output"), false);
     assert.equal(names.includes("bash_stop"), false);
     // bash 常驻：backgroundManager 缺席时参数级能力由 handler 运行时决策。
     assert.equal(names.includes("bash"), true);
+    // ADR-0041:run_graph 常驻(subagentManager 在场)→ 工具面成员在场,
+    // handler isEnabled 缺省恒关守门。
+    assert.equal(names.includes("run_graph"), true);
   });
 });
 

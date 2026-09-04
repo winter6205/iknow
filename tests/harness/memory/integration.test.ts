@@ -8,8 +8,9 @@
  *   a. Dual-entry assembly consistency (chat vs serve over the same projectIdentityRoot → byte-
  *      identical system strings; different projectIdentityRoot → no cross-pollution because
  *      project namespaces resolve to different memory dirs).
- *   b. per-turn mtime refresh (after T7 wiring): mid-session AGENTS.md edits
- *      are reflected in the next turn's resolved system string.
+ *   b. session-level snapshot (ADR-0042): the resolver assembles once per
+ *      session and freezes — mid-session AGENTS.md / rules / memory writes do
+ *      not move a byte; a fresh resolver (next session) re-reads them.
  *   c. save → recall → recordRecall → eligibleForPromote → promote-in-system
  *      full chain across two distinct session_ids (spec SC 6/8/10).
  *   d. memory_recall output travels through the tool_result channel: a tool
@@ -40,6 +41,7 @@ import {
   createSystemResolver,
   type AssemblyContext,
 } from "../../../src/harness/memory/index.ts";
+import { MEMORY_CATALOG_DISCIPLINE } from "../../../src/harness/memory/catalog.ts";
 import { createMemorySaveTool } from "../../../src/harness/memory/tools/save.ts";
 import { createMemoryRecallTool } from "../../../src/harness/memory/tools/recall.ts";
 import { run } from "../../../src/harness/loop-engine.ts";
@@ -226,11 +228,11 @@ describe("dual-entry assembly consistency (chat vs serve)", () => {
 });
 
 // =============================================================================
-// b. per-turn mtime refresh (T7 wiring E2E)
+// b. session-level snapshot (ADR-0042) — the resolver freezes on first assembly
 // =============================================================================
 
-describe("per-turn mtime refresh", () => {
-  it("editing AGENTS.md mid-session is reflected in the next turn's system", async () => {
+describe("session-level snapshot", () => {
+  it("editing AGENTS.md mid-session does not move the snapshot; the next session sees it", async () => {
     const p = await setupProject({ agentsBody: "PROJECT-V1" });
     const resolver = createSystemResolver(ctxOf(p));
 
@@ -247,17 +249,29 @@ describe("per-turn mtime refresh", () => {
       "utf8"
     );
     const second = await resolver();
-    assert.ok(
-      second !== undefined && second.includes("PROJECT-V2"),
-      "second turn must include the post-edit AGENTS.md content"
+    assert.equal(
+      second,
+      first,
+      "ADR-0042: the session snapshot is frozen — a mid-session edit must not change a single byte"
     );
     assert.ok(
-      !second.includes("PROJECT-V1"),
-      "stale AGENTS.md content must not leak after the mtime refresh"
+      !second!.includes("PROJECT-V2"),
+      "post-edit content must not enter the current session's system string"
+    );
+
+    // A fresh resolver is a fresh session: the edit lands there.
+    const nextSession = await createSystemResolver(ctxOf(p))();
+    assert.ok(
+      nextSession !== undefined && nextSession.includes("PROJECT-V2"),
+      "the next session must re-read the layer"
+    );
+    assert.ok(
+      !nextSession.includes("PROJECT-V1"),
+      "stale AGENTS.md content must not survive into the next session"
     );
   });
 
-  it("does not re-read static layer files when mtimes are unchanged (cached system stable)", async () => {
+  it("repeated calls return the identical string (byte-stable system prefix)", async () => {
     const p = await setupProject({ agentsBody: "STABLE" });
     const resolver = createSystemResolver(ctxOf(p));
     const a = await resolver();
@@ -265,11 +279,11 @@ describe("per-turn mtime refresh", () => {
     const c = await resolver();
     assert.equal(a, b);
     assert.equal(b, c);
-    // Same string identity across three cache hits, no observable drift.
+    // Same string identity across three calls, no observable drift.
     assert.ok(a !== undefined && a.includes("STABLE"));
   });
 
-  it("refresh propagates across project AGENTS.md and project rules (#841 T6: rules stay manifest-only)", async () => {
+  it("freezes AGENTS.md and the rules manifest together (#841 T6: rules stay manifest-only)", async () => {
     const p = await setupProject({
       agentsBody: "PROJ-A",
       projectRuleBody: "PROJ-RULE-A",
@@ -278,34 +292,118 @@ describe("per-turn mtime refresh", () => {
     const initial = await resolver();
     assert.ok(initial !== undefined);
     assert.ok(initial.includes("PROJ-A"));
-    // #841 T6: the parent opener lists the rule path, never the body.
-    assert.ok(
-      initial.includes(
-        join(p.projectIdentityRoot, ".iknow", "rules", "proj-rule.md")
-      ),
-      "rule path listed in the manifest"
-    );
-    assert.ok(!initial.includes("PROJ-RULE-A"), "rule body absent");
-
-    await tick();
-    await writeFile(join(p.projectIdentityRoot, "AGENTS.md"), "PROJ-B", "utf8");
     const rulePath = join(
       p.projectIdentityRoot,
       ".iknow",
       "rules",
       "proj-rule.md"
     );
+    // #841 T6: the parent opener lists the rule path, never the body.
+    assert.ok(initial.includes(rulePath), "rule path listed in the manifest");
+    assert.ok(!initial.includes("PROJ-RULE-A"), "rule body absent");
+
+    await tick();
+    await writeFile(join(p.projectIdentityRoot, "AGENTS.md"), "PROJ-B", "utf8");
     await writeFile(rulePath, "PROJ-RULE-B", "utf8");
-    const refreshed = await resolver();
-    assert.ok(refreshed !== undefined);
-    assert.ok(refreshed.includes("PROJ-B"), "AGENTS.md refresh propagates");
+    const frozen = await resolver();
+    assert.equal(
+      frozen,
+      initial,
+      "both the AGENTS.md body and the rules manifest stay frozen within the session"
+    );
+
+    // Next session: the AGENTS.md edit lands, the manifest is re-discovered,
+    // and rule bodies still never enter the prompt.
+    const nextSession = await createSystemResolver(ctxOf(p))();
+    assert.ok(nextSession !== undefined);
     assert.ok(
-      refreshed.includes(rulePath),
-      "rule path still listed after refresh"
+      nextSession.includes("PROJ-B"),
+      "AGENTS.md edit lands in the next session"
     );
     assert.ok(
-      !refreshed.includes("PROJ-RULE-A") && !refreshed.includes("PROJ-RULE-B"),
-      "no rule body leaks before or after the refresh"
+      nextSession.includes(rulePath),
+      "rule path still listed after re-discovery"
+    );
+    assert.ok(
+      !nextSession.includes("PROJ-RULE-A") &&
+        !nextSession.includes("PROJ-RULE-B"),
+      "no rule body leaks in either session"
+    );
+  });
+
+  it("freezes the catalog + promote segments against a memory landing mid-session (SC6)", async () => {
+    const p = await setupProject({ agentsBody: "PROJ" });
+    const ctx: AssemblyContext = { ...ctxOf(p), autoExtract: true };
+    const save = createMemorySaveTool({
+      memoryDir: p.memoryDir,
+      now: () => FIXED_TS,
+      randomBytes: () => FIXED_SLUG_BYTES,
+    });
+    await save.handler({
+      title: "Snapshotted entry",
+      body: "Present before the session opened.",
+      type: "note",
+      importance: 4,
+    });
+    // Promote gate: ≥2 distinct sessions → the promote segment renders too.
+    await recordRecall(p.memoryDir, "abababababab", "session-A");
+    await recordRecall(p.memoryDir, "abababababab", "session-B");
+
+    const resolver = createSystemResolver(ctx);
+    const first = await resolver();
+    assert.ok(first !== undefined);
+    assert.ok(
+      first.includes(MEMORY_CATALOG_DISCIPLINE),
+      "catalog segment present (autoExtract gate)"
+    );
+    assert.ok(
+      first.includes("### Snapshotted entry"),
+      "promote segment present"
+    );
+
+    await tick();
+    // auto-memory 落盘 mid-session (ADR-0031) — the prefix must not budge.
+    const lateSave = createMemorySaveTool({
+      memoryDir: p.memoryDir,
+      now: () => FIXED_TS,
+      randomBytes: () => Buffer.alloc(6, 0xcd),
+    });
+    await lateSave.handler({
+      title: "Late entry",
+      body: "Landed after the session opened.",
+      type: "note",
+      importance: 5,
+    });
+    // Static-layer touch alongside it: this used to drag the fresh catalog
+    // into the prefix (ADR-0042 Context / R4). Under the snapshot it changes
+    // nothing either.
+    await writeFile(
+      join(p.projectIdentityRoot, "AGENTS.md"),
+      "PROJ-EDITED",
+      "utf8"
+    );
+
+    const second = await resolver();
+    assert.equal(
+      second,
+      first,
+      "SC6: catalog + promote segments deep-equal the first assembly after a mid-session write"
+    );
+    assert.ok(
+      !second!.includes("Late entry"),
+      "a memory written mid-session must not enter the current session's catalog"
+    );
+
+    // Next session indexes the late entry.
+    const nextSession = await createSystemResolver(ctx)();
+    assert.ok(nextSession !== undefined);
+    assert.ok(
+      nextSession.includes("Late entry"),
+      "the next session's catalog includes the newly landed memory"
+    );
+    assert.ok(
+      nextSession.includes("Snapshotted entry"),
+      "the pre-existing entry survives into the next session"
     );
   });
 });

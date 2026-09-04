@@ -134,6 +134,35 @@ export interface TokenUsage {
   readonly cacheReadInputTokens: number | null;
 }
 
+/**
+ * B6 / ADR-0043 §3:countTokens 入参面 —— SDK 0.115 `client.messages.
+ * countTokens` 投影到 harness 域。**只读 token 计数**(无流式臂、无 tool_call
+ * 校验),装配层首轮溢出治理专用。
+ *
+ * 字段最小投影:
+ *   - `tools` = 当前 visibleSchemas()(非 lazy + 已发现的 lazy;B4 §2 已有)
+ *   - `system` = 当前 system 文本(可选;与 step request.system 同源)
+ *   - `messages` = 当前消息历史(可选;首轮 = 空 messages,典型 0 消息)
+ *
+ * 真实 adapter 实现此方法;stub / 离线 adapter / 不可用端点 → 字段缺席
+ * (undefined),装配层判定 → 跳过本会话(skip 语义,见 `tool-overflow.ts`)。
+ */
+export interface CountTokensInput {
+  readonly tools?: ReadonlyArray<unknown>;
+  readonly system?: string;
+  readonly messages?: ReadonlyArray<AnthropicNativeMessage>;
+}
+
+/**
+ * B6 / ADR-0043 §3:countTokens 响应最小投影 —— 实测 token 数。装配层
+ * 与 `contextWindow * 0.1` 比较判定溢出。**不**返回 SDK 完整 Usage
+ * (本接口面向溢出治理,不需要 cache_creation 等其他字段)。
+ */
+export interface CountTokensResult {
+  /** SDK `MessageTokensCount.input_tokens`(countTokens 仅这一字段)。 */
+  readonly inputTokens: number;
+}
+
 /** Model Adapter 接口(014 拥有)。 */
 export interface ModelAdapter {
   /** 014 原子校验 + 投影:返回 AssistantTurnResult 或抛 ProtocolError。 */
@@ -147,4 +176,22 @@ export interface ModelAdapter {
     },
     signal?: AbortSignal // 017: run 第三参原样透传,离线实现可忽略(type-only;runtime deferred to T5)
   ) => Promise<AssistantTurnResult>;
+  /**
+   * B6 / ADR-0043 §3:**可选** countTokens 钩子(溢出治理专用)。
+   *
+   * 真实 Anthropic adapter (`createRealAnthropicAdapter`) 实现本方法 —
+   * 透传 SDK `client.messages.countTokens({ messages, model, system?,
+   * tools? })` 实测 token 数。**Stub / 离线 adapter 不实现**;字段缺席
+   * (`undefined`) → 装配层跳过本会话(全部 deferrable 内建件保持常驻)+
+   * `console.warn` 记录,首轮不抛错、不重试(ADR-0043 §3 钉死语义)。
+   *
+   * 契约:
+   *   - `tools` 数组 = harness `ToolDef[]`(与 `step` request.tools 同源,
+   *     离线/真实 adapter 各自翻译为 SDK `Tool[]` / `MessageCountTokensTool[]`)。
+   *   - 返回 `inputTokens` 必须为有限正数;否则视为失败(与 catch 同语义)。
+   *   - SDK 错误(APIError / 4xx/5xx)→ throw;装配层 catch 后 skip 本会话。
+   */
+  readonly countTokens?: (
+    input: CountTokensInput
+  ) => Promise<CountTokensResult>;
 }
