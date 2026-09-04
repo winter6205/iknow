@@ -397,7 +397,7 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **`memory_save`（显式写） vs auto_extract（自动写）**: 两条写路径共用同一套肯定句门禁与 tmp+rename 原子写；显式写是模型当场决定的一次工具调用，自动写是 host 在 turn 完成后异步跑的一趟 ingest。差别只在触发方式与 `source: auto` 标记，不在信任通道——两者都只经 tool_result / prefetch 回到模型
 - **memory_catalog vs memory_prefetch**: 目录进 system（抽取开、库非空、短、稳）；预取进用户消息（每轮重算、最多 5 条正文、零词命中不贴）
 - **memory_catalog vs promote**: 目录不是指令；promote 才是跨 session 核实后的 system 正文
-- **memory_prefetch vs memory_recall**: 同一 `scoreMemoryEntries`；预取宿主先贴最多 5 条；recall 模型主动搜、默认最多 10 条原文
+- **memory_prefetch vs memory_recall**: 同一 `scoreMemoryEntries`；预取宿主先贴最多 5 条；recall 模型主动搜、默认最多 3 条原文（读通道不下令召回，spec casual-ask-context-hygiene）
 - **dream vs auto_extract**: 字段仍是两个 boolean、默认皆 OFF。产品上 `autoExtract === true` 蕴含梦境（闸仍 24h ∧ 5）；仅 `dream === true` 且关抽取仍允许。钩子在 `autoExtract || dream` 时装配。都关则缺席。同一轮仍先抽取再梦境再 GC。
 - **dream vs memory_gc**: GC 仍是零 LLM 的机械软禁；dream 是第二条 LLM 写路径，禁止进入 `gc.ts`。dream 落盘仍可被随后的 GC 按 TTL/cap/supersede 软禁
 - **memory_gc vs promote**: GC 是机械减法（TTL / supersede / 超 cap → 软禁）；promote 是机械加法（≥2 个不同 session recall → 进 `system` 段）。GC 不看 promote 状态，promote 不复活 `disabled` 条目；自动条目两边都不享受豁免
