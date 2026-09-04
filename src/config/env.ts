@@ -219,7 +219,7 @@ export interface WebEnv {
   proxy: string | undefined;
   /**
    * #826 T1: 选定的 web_search 后端 id（`"bing" | "tavily" | "exa" | "brave"` 闭集）。
-   * 默认 `"bing"`（env 未设 / 空串时 fallback，与 v0 字节级一致）。
+   * 回退链 env > settings.web.searchBackend > 默认 `"bing"`（settings-web-backend）。
    * 非法值 env loader 抛 typed `WebEnvConfigError`，**不**静默回退。
    */
   searchBackend?: "bing" | "tavily" | "exa" | "brave";
@@ -510,12 +510,14 @@ interface EnvOptionalEnumOpts<T extends string> {
   readonly file: Record<string, string>;
   readonly key: string;
   readonly values: readonly T[];
-  readonly default: T;
+  /** 缺省时未设返回 undefined（调用方走 settings / 默认值回退链）。 */
+  readonly default?: T;
 }
 
 /**
  * #826 T1: 闭集 enum 解析器（IKNOW_WEB_SEARCH_BACKEND 等）。
- *  - 未设 / 空串 → `default`（默认后端的容错语义）；
+ *  - 未设 / 空串 → `default`（给了 default 时）否则 undefined（settings-web-backend:
+ *    未设与显式值需区分，调用方接 env > settings > 默认回退链）；
  *  - 命中 `values` 闭集 → 原样返回值（**区分大小写**，与 spec 字面形态对齐）；
  *  - 非空但不在闭集 → 抛 typed `WebEnvConfigError( "invalid_search_backend", ... )`，
  *    **不**静默回退 `default`。
@@ -523,7 +525,9 @@ interface EnvOptionalEnumOpts<T extends string> {
  * 与 `envThinkingModeOptional` 等"非法 → undefined"旧模式相反 —— 默认后端对配错敏感，
  * schema reject 比 silent fallback 更显眼。
  */
-function envOptionalEnum<T extends string>(opts: EnvOptionalEnumOpts<T>): T {
+function envOptionalEnum<T extends string>(
+  opts: EnvOptionalEnumOpts<T>
+): T | undefined {
   const raw = envGet({ file: opts.file, key: opts.key });
   if (!raw) return opts.default;
   if ((opts.values as readonly string[]).includes(raw)) return raw as T;
@@ -780,15 +784,24 @@ export function loadIknowEnv(
       searchUrl: envOptional({ file, key: "IKNOW_WEB_SEARCH_URL" }),
       // 可选出站代理：空 → undefined（network-guard 直连）。显式配置才生效。
       proxy: envOptional({ file, key: "IKNOW_WEB_PROXY" }),
-      // #826 T1: web_search 后端选择（闭集，非法值 → typed error，非 silent fallback）。
+      // #826 T1 + settings-web-backend: web_search 后端选择，回退链
+      // env > settings.web.searchBackend > 默认 bing（对齐 #353 maxTurns 先例）。
+      // env 未设返回 undefined（不与显式 "bing" 折叠），settings 侧非法值已在
+      // parseWeb 丢弃；env 侧非法值仍抛 typed error（更显眼的配错面）。
       // 显式标注 T=SearchBackendId：helper 的 T extends string 默认会被
       // TS 推到 string 宽类型，丢失字面联合。
-      searchBackend: envOptionalEnum<SearchBackendId>({
-        file,
-        key: SEARCH_BACKEND_ENV_KEY,
-        values: SEARCH_BACKEND_VALUES,
-        default: "bing",
-      }),
+      // 注意：`?? "bing"` 使 IknowEnv.searchBackend 永不 undefined —— 三态
+      // 「未设 ≠ 显式 bing」只在 helper 返回层保留，到 WebSearchToolDeps.backend
+      // 时已折叠（backend_unset_with_key fail-closed 防线因此仅测试路径可达；
+      // 放开需 IknowEnv 层承载 undefined，另行任务）。
+      searchBackend:
+        envOptionalEnum<SearchBackendId>({
+          file,
+          key: SEARCH_BACKEND_ENV_KEY,
+          values: SEARCH_BACKEND_VALUES,
+        }) ??
+        mergedSettings.web?.searchBackend ??
+        "bing",
       // #826 T1: vendor-keyed 后端 API key —— 字面或 `${VAR}` 占位符经
       // expandPlaceholders 解析（与 settings.llm.apiKey 同链路）；
       // 空 / "yes" / 占位符解析失败 → undefined（不 silent 空串）。
