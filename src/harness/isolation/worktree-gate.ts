@@ -73,14 +73,19 @@ export function rootFlipMutateNotice(toolName: string): string {
 }
 
 /**
- * Unbound-mutate block notice: visible, actionable, and free of the old
- * auto-provision protocol wording ("end the turn and retry").
+ * Unbound-mutate block notice: states facts only — isolation is ON and the
+ * session is unbound, this call would write the main repo, it was NOT
+ * executed, and the tool for a writable root exists (the gate never
+ * auto-provisions). Deliberately no imperative "create this conversation's
+ * task worktree" framing (spec casual-ask-context-hygiene SC7): the notice
+ * must not steer the model's next move into building a tree.
  */
 export function unboundMutateNotice(): string {
   return (
-    `${WORKTREE_ISOLATION_PREFIX} workspace mutation blocked: worktree isolation is ON and this session is not yet bound to a task worktree. ` +
-    `Call the ${CREATE_TASK_WORKTREE_TOOL_HINT} to create this conversation's task worktree and rebind the session root, ` +
-    `then re-issue this write in the new root. The main repo stays read-only until the rebind lands (no auto-provisioning).`
+    `${WORKTREE_ISOLATION_PREFIX} This call would write the workspace, and it was not executed: ` +
+    `worktree isolation is ON and this session is not yet bound to a task worktree. ` +
+    `The main repo stays read-only. The ${CREATE_TASK_WORKTREE_TOOL_HINT} exists for ` +
+    `sessions that need a writable root (no auto-provisioning).`
   );
 }
 

@@ -35,6 +35,7 @@ import {
   taskWorktreeLabelOf,
   taskWorktreePath,
   taskWorktreeOwnerOf,
+  unboundMutateNotice,
   WORKTREE_ISOLATION_PREFIX,
 } from "../../../src/harness/isolation/worktree-gate.ts";
 import type { GitRunner } from "../../../src/harness/isolation/worktree-gate.ts";
@@ -595,6 +596,32 @@ describe("createWorktreeIsolationExecutor", () => {
     expect(second[0]!.message).toContain(CREATE_TASK_WORKTREE_TOOL_HINT);
     expect(provisioned).toBe(0);
     expect(calls).toHaveLength(0);
+  });
+
+  it("unboundMutateNotice is a factual block: names the tool, no imperative 'create this conversation's worktree' framing (spec casual-ask-context-hygiene SC7)", () => {
+    const message = unboundMutateNotice();
+    // visible gate prefix invariant (same as the executor-level assertions)
+    expect(message.startsWith(`${WORKTREE_ISOLATION_PREFIX} `)).toBe(true);
+    // genuine mutations still get pointed at the tool (literal name, not
+    // only via the hint constant)
+    expect(message).toContain("create-task-worktree");
+    expect(message).toContain(CREATE_TASK_WORKTREE_TOOL_HINT);
+    // no imperative framing that turns the next model move into "go build a
+    // tree" — the notice states facts, the tool's existence, and the
+    // read-only main repo; it does not prescribe building a per-conversation
+    // worktree
+    expect(message).not.toContain("this conversation's task worktree");
+    expect(message).not.toContain("end the turn");
+    // factual semantics locked: the call WOULD write, and was NOT executed
+    expect(message).toContain("This call would write");
+    // full-text pin (spec 「vitest 全文锁定」): wording changes must be
+    // deliberate test changes, not drift
+    expect(message).toBe(
+      `${WORKTREE_ISOLATION_PREFIX} This call would write the workspace, and it was not executed: ` +
+        `worktree isolation is ON and this session is not yet bound to a task worktree. ` +
+        `The main repo stays read-only. The ${CREATE_TASK_WORKTREE_TOOL_HINT} exists for ` +
+        `sessions that need a writable root (no auto-provisioning).`
+    );
   });
 
   it("passthrough adjudication survives on a task-worktree-rooted engine: own tree → same-root no-op, provision runs once", async () => {
