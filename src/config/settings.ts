@@ -239,11 +239,13 @@ export interface IknowSettingsWeb {
 
 /**
  * web.searchBackend 闭集（settings 层本地常量）：与 env.ts `SEARCH_BACKEND_VALUES`
- * 同值域。settings.ts 不能反向 import env.ts（env.ts → settings.ts 已有依赖，
- * 反向即环），故从字段联合派生，漂移由类型系统兜住。
+ * 同值域（顺序对齐 env SSOT bing → tavily → exa → brave）。settings.ts 不能反向
+ * import env.ts（env.ts → settings.ts 已有依赖，反向即环），故从字段联合派生；
+ * 类型面只保证元素 ⊆ 联合，值域 parity 由 tests/config/web-settings.test.ts 的
+ * sort-deepEqual 守卫兜住（测试期显红，非静默漂移）。
  */
-const WEB_SEARCH_BACKEND_VALUES: readonly IknowSettingsWeb["searchBackend"][] =
-  ["bing", "exa", "tavily", "brave"];
+export const WEB_SEARCH_BACKEND_VALUES: readonly IknowSettingsWeb["searchBackend"][] =
+  ["bing", "tavily", "exa", "brave"];
 
 /**
  * ADR-0037: `isolation.worktreeOnMutate` 的唯一 fail-closed 读取点。

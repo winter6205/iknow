@@ -11,7 +11,14 @@
  *  - env 非法值仍抛 typed `WebEnvConfigError("invalid_search_backend")`
  *    （schema reject 比 silent fallback 更显眼，#826 T1 纪律不变）。
  */
-import { afterAll, beforeAll, describe, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  it,
+} from "vitest";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -23,9 +30,11 @@ import {
 } from "../../src/config/settings.ts";
 import {
   loadIknowEnv,
+  isWebEnvConfigError,
   SEARCH_BACKEND_ENV_KEY,
   SEARCH_BACKEND_VALUES,
 } from "../../src/config/env.ts";
+import { WEB_SEARCH_BACKEND_VALUES } from "../../src/config/settings.ts";
 
 let workDir: string;
 
@@ -35,6 +44,26 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await rm(workDir, { recursive: true, force: true });
+});
+
+// 闭集双份（env.ts SSOT / settings.ts 环避免）的 parity 守卫：漂移在此显红，
+// 而非静默 drop / accept（code-review finding：注释"类型系统兜住"只覆盖一半）。
+describe("web.searchBackend 闭集 parity", () => {
+  it("settings 闭集与 env SSOT 同值域（sort 后 deepEqual）", () => {
+    assert.deepEqual(
+      [...WEB_SEARCH_BACKEND_VALUES].sort(),
+      [...SEARCH_BACKEND_VALUES].sort()
+    );
+  });
+});
+
+// 防 ambient 污染：镜像 env.test.ts 的 ENV_KEYS 清理纪律，未设断言才确定。
+const ENV_KEYS = [SEARCH_BACKEND_ENV_KEY] as const;
+beforeEach(() => {
+  for (const key of ENV_KEYS) delete process.env[key];
+});
+afterEach(() => {
+  for (const key of ENV_KEYS) delete process.env[key];
 });
 
 async function makeSettings(
@@ -208,11 +237,18 @@ describe("loadIknowEnv — web.searchBackend 回退链", () => {
     );
     process.env[SEARCH_BACKEND_ENV_KEY] = "google";
     try {
-      assert.throws(
-        () => loadEnvAt(cwd, home),
-        (err: unknown) =>
-          (err as { kind?: string })?.kind === "invalid_search_backend"
-      );
+      assert.throws(() => loadEnvAt(cwd, home), isWebEnvConfigError);
+      try {
+        loadEnvAt(cwd, home);
+        assert.fail("expected loadIknowEnv to throw");
+      } catch (err) {
+        assert.ok(isWebEnvConfigError(err));
+        // typed-error payload 契约：varName / value / expected 必须齐备，
+        // 否则渲染侧拿不到 kind 的承重字段（code-quality.md typed-error 纪律）。
+        assert.equal(err.varName, SEARCH_BACKEND_ENV_KEY);
+        assert.equal(err.value, "google");
+        assert.deepEqual(err.expected, [...SEARCH_BACKEND_VALUES]);
+      }
     } finally {
       delete process.env[SEARCH_BACKEND_ENV_KEY];
     }

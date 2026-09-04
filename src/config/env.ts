@@ -219,7 +219,7 @@ export interface WebEnv {
   proxy: string | undefined;
   /**
    * #826 T1: 选定的 web_search 后端 id（`"bing" | "tavily" | "exa" | "brave"` 闭集）。
-   * 默认 `"bing"`（env 未设 / 空串时 fallback，与 v0 字节级一致）。
+   * 回退链 env > settings.web.searchBackend > 默认 `"bing"`（settings-web-backend）。
    * 非法值 env loader 抛 typed `WebEnvConfigError`，**不**静默回退。
    */
   searchBackend?: "bing" | "tavily" | "exa" | "brave";
@@ -790,6 +790,10 @@ export function loadIknowEnv(
       // parseWeb 丢弃；env 侧非法值仍抛 typed error（更显眼的配错面）。
       // 显式标注 T=SearchBackendId：helper 的 T extends string 默认会被
       // TS 推到 string 宽类型，丢失字面联合。
+      // 注意：`?? "bing"` 使 IknowEnv.searchBackend 永不 undefined —— 三态
+      // 「未设 ≠ 显式 bing」只在 helper 返回层保留，到 WebSearchToolDeps.backend
+      // 时已折叠（backend_unset_with_key fail-closed 防线因此仅测试路径可达；
+      // 放开需 IknowEnv 层承载 undefined，另行任务）。
       searchBackend:
         envOptionalEnum<SearchBackendId>({
           file,

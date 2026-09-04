@@ -82,12 +82,12 @@ IKNOW_LLM_STREAM=on            # 流式臂开关 on|off，默认 on
 
 **带默认值的字段都是可选**：不写 `thinking` / `thinkingEffort` 时，thinking 默认 `off`、effort 默认不发 —— 这不是「没读到」，而是「你用了默认」。
 
-**注意**：以下字段 **不在 settings.json 承载范围**，仍走 env（`process.env > .env.local > .env > 代码默认`），写进 settings.json 会被 `parseLlm` 忽略：
+**注意**：以下字段 **不在 settings.json 承载范围**，仍走 env（`process.env > .env.local > .env > 代码默认`），写进 settings.json 会被 `parseLlm` / `parseWeb` 忽略：
 
 - `baseUrl`（`IKNOW_LLM_BASE_URL`）、`maxOutputTokens`（`IKNOW_LLM_MAX_OUTPUT_TOKENS`）、`timeoutMs`（`IKNOW_LLM_TIMEOUT_MS`）、`temperature`（`IKNOW_LLM_TEMPERATURE`）、`stream`（`IKNOW_LLM_STREAM`）
 - `chat.showThinking`（`IKNOW_CHAT_SHOW_THINKING`）、`web.searchUrl` / `web.proxy`（`IKNOW_WEB_SEARCH_URL` / `IKNOW_WEB_PROXY`）、`mcp.connectTimeoutMs`（`IKNOW_MCP_CONNECT_TIMEOUT_MS`）
 
-**例外**：`web.searchBackend`（web_search 后端选择）**已在 settings.json 承载**——`"bing" | "exa" | "tavily" | "brave"` 闭集，回退链 `IKNOW_WEB_SEARCH_BACKEND` env > `web.searchBackend` settings > 默认 `"bing"`。env 侧非法值抛 typed error；settings 侧非法值丢弃该字段（回落默认）。keyed 后端（exa / tavily / brave）还需对应 API key（`EXA_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY`，env / .env.local 承载）。装配期字段：改完需重启进程生效（不在热更新白名单）。
+**例外**：`web.searchBackend`（web_search 后端选择）**已在 settings.json 承载**——`"bing" | "tavily" | "exa" | "brave"` 闭集，回退链 `IKNOW_WEB_SEARCH_BACKEND` env > `web.searchBackend` settings > 默认 `"bing"`。env 侧非法值抛 typed error；settings 侧非法值由 `src/config/settings.ts` 的 `parseWeb` 丢弃该字段（drop-not-throw，回落默认）。keyed 后端（exa / tavily / brave）还需对应 API key（`EXA_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY`，env / .env.local 承载）。装配期字段：改完需重启进程生效（不在热更新白名单，见下文「热更新」）。
 
 #### 完整示例（含思考默认档）
 
