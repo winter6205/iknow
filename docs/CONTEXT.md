@@ -113,8 +113,8 @@ _Avoid_: 自由字符串当 type；自动与手动两套词表；非法 type 整
 **source: auto**: 自动写入条目的 provenance 标记，落在 frontmatter（`sanitizeMemoryFile` / `serializeMemoryEntry` 已 round-trip 未知字段，无需 schema 升版）。自动条目**只经 `memory_recall` 的 tool_result 与 memory_prefetch 用户侧块**到达模型（低信、常过时），永不把未 promote 的 body 盲注 `system`（ADR-0009 D3 / ADR-0034）；也不豁免 promote 门槛，仍需 ≥2 个不同 session 的 recall，没有 auto-promote 路径。该标记同时是批量回退的抓手。ADR-0031 D3。
 _Avoid_: 给高 importance 的自动条目开 auto-promote；把 `source: auto` 当成信任等级之外的纯装饰；用别的字段区分人写 / 机写；把自动条包装成必须遵守的规则
 
-**memory_catalog**: 现行条短目录（title + 一句钩子），在 `autoExtract === true` 且库非空时进入 `system`（EXISTENCE_POINTER 之后），带固定英文纪律句。不是条目 body，不是 promote 段。上限 200 行 / 25KB。ADR-0034。
-_Avoid_: 把目录当全文记忆；抽取关闭时仍灌目录；用中文写纪律句
+**memory_catalog**: 现行条短目录（title + 一句钩子），在 `autoExtract === true` 且库非空时进入 `system`（EXISTENCE_POINTER 之后），带固定英文纪律句（索引不是待办；标题撞词不构成必须召回）。不是条目 body，不是 promote 段。上限 200 行 / 25KB。ADR-0034。
+_Avoid_: 把目录当全文记忆；抽取关闭时仍灌目录；用中文写纪律句；把目录当必须 recall 的清单
 
 **memory_prefetch**: 每轮按本轮用户原文、用 `scoreMemoryEntries` 选出最多 5 条现行条正文，叠在用户消息侧；零词命中不得入选；包装句英文、标明 advisory；禁止写入 system。会话级按 id 去重：一条记忆一个 conversation 只注入一次，首轮块随 user turn 留在历史（append-only，不 strip，保 KV cache 前缀），resume 扫历史 `id:` 行恢复去重集合，失败容忍一次重复、不 fail turn。ADR-0034；去重契约 `plans/auto-memory-prefetch-dedup.md`。
 _Avoid_: 把预取写进 system；每轮硬塞满 5 条无关条；预取另起一套打分；会话内每轮重复注入同一条；strip / 改写历史里的旧 overlay（破 KV cache 前缀）；给 `ask` 接线

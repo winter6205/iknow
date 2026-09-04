@@ -3,6 +3,8 @@
 > 第三次改进。底是已落地的自动记忆完整升级（CJK 近邻 · dream 写路径 · per-root 钩子 · 共用 notify）以及梦境触发与抽取解绑（24h ∧ 5 session，#774）。本契约只改 **读路径**：让开了抽取的模型看得见目录、每轮可预取少量正文，且全程不当成系统约束。
 >
 > 操作员 2026-08-28 确认本讨论结论，授权跳过剩余 grilling、直接成文。纪律句与包装句 **只许英文**。
+>
+> **Amended 2026-09-04** by `specs/casual-ask-context-hygiene.md`：指针停下令；纪律句追加「索引不是待办」；`memory_recall` 默认 limit 3、工具说明删除 at the start of a task。本文件其余读路径（catalog 进 system、prefetch 进用户消息、低信任包装、零词命中剔除）仍有效。锁定英文以 hygiene spec 为准。
 
 ## Objective
 

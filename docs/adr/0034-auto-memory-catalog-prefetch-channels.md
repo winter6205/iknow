@@ -3,6 +3,8 @@
 Date: 2026-08-28
 Status: accepted
 
+> **Amendment 2026-09-04**（`specs/casual-ask-context-hygiene.md`）：existence pointer 只声明库在，**不得**下令 `Use memory_recall`。catalog 纪律句须写明目录是索引不是待办、标题与用户句撞词不构成必须召回。prefetch 通道不变。`memory_recall` 默认命中条数改为 3；工具说明不得写 “at the start of a task”。D1–D4 通道形状（目录进 system、正文不进 system、预取进用户消息、召回返回原文）不变。
+
 ## Context
 
 ADR-0009 D3 put un-promoted auto memory on `memory_recall` / `tool_result` only, with a one-line existence pointer in `system`. After extract (ADR-0031) the store can fill while the model still never sees a directory, so it rarely calls recall. Putting changing per-turn bodies in `system` would break the KV-cache prefix (ADR-0009 D6). Treating extracted notes as instructions would let stale text steer the agent.
@@ -13,7 +15,7 @@ ADR-0009 D3 put un-promoted auto memory on `memory_recall` / `tool_result` only,
 
 2. **Prefetch rides the user turn.** Each turn may attach at most five scored live bodies to the **user** payload (not `deps.system`). Scoring is `scoreMemoryEntries`; zero lexical hits are ineligible. The block is labeled advisory and time-sensitive.
 
-3. **Recall still returns full hits.** Default ten hits remain title + frontmatter + body, not catalog lines. Same advisory label. Auto-memory must not auto-promote and must not outrank the user turn, the repository, or project instructions.
+3. **Recall still returns full hits.** Default **three** hits (was ten; amended 2026-09-04) remain title + frontmatter + body, not catalog lines. Same advisory label. Auto-memory must not auto-promote and must not outrank the user turn, the repository, or project instructions. The existence pointer must not command the model to call `memory_recall`.
 
 4. **Promote assembly shares the catalog gate.** Eligible promoted bodies may enter `system` only when `autoExtract === true` (same as catalog). `AGENTS.md` / existence pointer / `memory_recall` / `memory_save` do not follow this gate. `MEMORY.md` is never injected. Amendment 2026-08-29; `specs/auto-memory-layering.md`.
 
