@@ -79,8 +79,14 @@ describe("B4 / ADR-0043 §2 — 未加载 mcp__ 工具闸门", () => {
     );
     assert.equal(gate.kind, "blocked");
     if (gate.kind === "blocked") {
-      // 模板钉死 = MCP_TOOL_NOT_LOADED_MESSAGE 字面。
-      assert.equal(gate.result.message, MCP_TOOL_NOT_LOADED_MESSAGE);
+      // 模板钉死 = MCP_TOOL_NOT_LOADED_MESSAGE,`<name>` 插值为实际工具名。
+      assert.equal(
+        gate.result.message,
+        MCP_TOOL_NOT_LOADED_MESSAGE.replace("<name>", "mcp__svc__ping")
+      );
+      // 插值契约:字面 `<name>` 占位符不得残留在 message 中。
+      assert.ok(!gate.result.message.includes("<name>"));
+      assert.ok(gate.result.message.includes("mcp__svc__ping"));
       assert.equal(gate.result.kind, "execution_failed");
       assert.equal(gate.result.toolUseId, "u1");
     }

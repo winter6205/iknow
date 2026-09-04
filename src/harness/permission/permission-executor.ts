@@ -209,10 +209,13 @@ export function createPermissionRuntime(
         result: {
           kind: "execution_failed",
           toolUseId: call.id,
-          // 用 typed ToolExecutionError 的 message 渲染(message 字面值 = 模板),
-          // 让 ToolResultAdapter 路径(loader-envelopes.ts)的渲染与 typed-error
-          // catch 契约(code-quality.md)对齐:plain object 不会打成 [object Object]。
-          message: new ToolExecutionError(MCP_TOOL_NOT_LOADED_MESSAGE).message,
+          // 用 typed ToolExecutionError 的 message 渲染(`<name>` 插值为实际
+          // 工具名),让 ToolResultAdapter 路径(loader-envelopes.ts)的渲染与
+          // typed-error catch 契约(code-quality.md)对齐:plain object 不会
+          // 打成 [object Object]。
+          message: new ToolExecutionError(
+            MCP_TOOL_NOT_LOADED_MESSAGE.replace("<name>", def.name)
+          ).message,
         },
       };
     }
