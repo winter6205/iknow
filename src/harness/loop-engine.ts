@@ -349,6 +349,28 @@ export interface LoopEngineDeps {
     readonly lastSeenEnabled: { value: boolean | undefined };
   };
   /**
+   * B4 / ADR-0043 §4:MCP 手动重连追加缝。字段在场 = stepWithTrace 每次
+   * 即将调用模型前消费 `takePending()` 拿到「回调已记录但尚未进 transcript」
+   * 的重连事件,每个事件以 user 消息 immutable 追加一条单行静态文本
+   * (模板钉死 MCP_RECONNECT_NOTIFICATION_TEMPLATE);无 pending → 零追加。
+   * 字段缺席 = 零追加(ask / worker / 未接 manager 的入口零行为变化,
+   * byte-identical)。
+   *
+   * 数据流:build-engine 装配期 `manager.onManualReconnect(cb)` 把事件
+   * push 进 `pending`(回调在 TUI / CLI 重连动作的成功路径上触发);
+   * loop-engine 在下一 step 边界 take 走并追加,追加后事件不再重复出现
+   * (take = 取走 + 清空,一次性消费)。schema 变更本身由 manager 经
+   * registerExternal 进 tools(下一轮 promptTools 自然含),本缝只负责
+   * 告知模型「新 server 工具已可用」。
+   */
+  readonly mcpReconnect?: {
+    /** 取走全部 pending 事件(一次性消费;返回后内部清空)。 */
+    readonly takePending: () => ReadonlyArray<{
+      readonly server: string;
+      readonly tools: ReadonlyArray<string>;
+    }>;
+  };
+  /**
    * #672 T3:工具环检测。缺省 / true = 开；false = 关。
    */
   readonly detectToolLoop?: boolean;
@@ -504,6 +526,51 @@ async function appendGraphModeChange(
     state,
     msg: deps.adapter.encodeUserText(text),
   });
+}
+
+/**
+ * B4 / ADR-0043 §4:MCP 手动重连通知模板(SSOT)。
+ *
+ * 单行静态文本:`<server>` + 工具名清单由 appendMcpReconnect 现拼;
+ * 本常量钉住文案骨架,测试引用常量不走字面。与 graph_mode_change 同形:
+ * user 消息 immutable 追加,transcript 一等公民,KV 缓存只受 messages
+ * 尾部追加影响(前缀 tools/system 不动)。
+ */
+export const MCP_RECONNECT_NOTIFICATION_TEMPLATE =
+  "MCP server '<server>' reconnected manually — its tools are now available: <tools>. Schemas were not loaded; call tool_search before invoking any of them.";
+
+/**
+ * B4 / ADR-0043 §4:MCP 手动重连追加缝。消费 `deps.mcpReconnect.takePending()`
+ * 的 pending 事件,每个事件以 user 消息 immutable 追加一条单行文本
+ * (MCP_RECONNECT_NOTIFICATION_TEMPLATE,`<server>` / `<tools>` 现拼)。
+ *
+ * 形态镜像 appendGraphModeChange(seam 缺席 → 零注入,行为 byte-identical):
+ *   - deps.mcpReconnect 缺席 → return state(ask / worker / 未接 manager);
+ *   - takePending() 返回空 → 零追加,state 原样返回;
+ *   - 多个 pending 事件按记录顺序逐条追加(一次重连一个事件);
+ *   - 消息次序:在 graph 切换提示之后、status bar 之前 —— 与 graphModeChange
+ *     同一判定段(环境级事件先于回合现势栏)。
+ *
+ * 判定次序:与 appendGraphModeChange 并列,appendAgentStatusBar 之前调用,
+ * 保证 status bar 在重连提示之后(模型读到时序 = 重连告知 → 现势栏)。
+ */
+function appendMcpReconnect(state: LoopState, deps: LoopEngineDeps): LoopState {
+  const seam = deps.mcpReconnect;
+  if (seam === undefined) return state;
+  const pending = seam.takePending();
+  if (pending.length === 0) return state;
+  let next = state;
+  for (const event of pending) {
+    const text = MCP_RECONNECT_NOTIFICATION_TEMPLATE.replace(
+      "<server>",
+      event.server
+    ).replace("<tools>", event.tools.join(", "));
+    next = appendMessage({
+      state: next,
+      msg: deps.adapter.encodeUserText(text),
+    });
+  }
+  return next;
 }
 
 /** Ctrl+C / signal abort 触发的中断 system 消息固定文案（#392 T4 / G3 #388）。
@@ -1621,8 +1688,11 @@ async function stepWithTrace(opts: {
     opts.deps,
     opts.onStream
   );
+  // B4 / ADR-0043 §4:MCP 手动重连追加缝 —— 与 graphModeChange 同段
+  // (环境级事件),在 status bar 之前消费 pending。seam 缺席 → 零追加。
+  const mcpReconnectState = appendMcpReconnect(graphModeState, opts.deps);
   const barState = await appendAgentStatusBar(
-    graphModeState,
+    mcpReconnectState,
     opts.deps,
     opts.lastToolRef.lastTool,
     opts.onStream
@@ -1656,9 +1726,15 @@ async function stepWithTrace(opts: {
             opts.deps,
             opts.onStream
           );
+          // B4 / ADR-0043 §4:reactive compact 重试前同样消费重连 pending
+          // (同 round 两次模型调用之间手动重连可能完成)。
+          const compactedWithReconnect = appendMcpReconnect(
+            compactedWithGraph,
+            opts.deps
+          );
           // 栏追加在 compact 之后(压缩产物尾部),重试请求的末尾即最新一条栏。
           const compactedWithBar = await appendAgentStatusBar(
-            compactedWithGraph,
+            compactedWithReconnect,
             opts.deps,
             opts.lastToolRef.lastTool,
             opts.onStream

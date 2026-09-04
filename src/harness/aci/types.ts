@@ -61,6 +61,12 @@ export interface AciToolDef extends ToolDef {
 export interface AciCatalog {
   readonly get: (name: string) => AciToolDef | undefined;
   readonly all: () => ReadonlyArray<AciToolDef>;
+  /**
+   * B4 / ADR-0043 §2:检某名字是否已被 `discover()` 标记为「模型已检索」。
+   * 缺席(`undefined`)→ 闸门放过(非 ACI registry 装配的路径,如 hub runDeps
+   * 用 build-engine 之外的 registry,行为与 B4 之前一致)。
+   */
+  readonly isDiscovered?: (name: string) => boolean;
 }
 
 /**

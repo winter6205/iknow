@@ -37,7 +37,7 @@ import { createGraphAssembly, type GraphAssembly } from "./graph/assembly.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
 import type { AciRegistry } from "./aci/aci-registry.js";
 import { errorMessage } from "./errors.js";
-import type { AciCatalog, AciToolDef } from "./aci/types.js";
+import type { AciCatalog } from "./aci/types.js";
 import { createLspNotifier } from "./lsp/notifier.js";
 import { startLspWarmup } from "./lsp/warmup.js";
 import { DEFAULT_LSP_IDLE_TIMEOUT_MS } from "./lsp/client.js";
@@ -76,7 +76,6 @@ import {
   createIknowSystemResolver,
   initIknowWorkspaceSafe,
   type McpServiceSummary,
-  type McpToolSummary,
 } from "./identity/index.js";
 import {
   resolveProjectMemoryDir,
@@ -725,6 +724,37 @@ export async function buildHarnessEngine(
   //      holder,handler 实际调用时拿到 mcpManager）
   let reg: AciRegistry | undefined;
   let mcpManager: McpManager | undefined;
+  /**
+   * B4 / ADR-0043 §4:手动重连 pending 事件 holder(loop-engine
+   * `deps.mcpReconnect.takePending` 的消费源)。manager.onManualReconnect
+   * 回调 push;loop-engine 在 step 边界 take + 清空(一次性消费)。
+   * ask surface(无 manager)恒 undefined → 缝缺席,零追加。
+   */
+  let mcpReconnectPending:
+    { events: Array<{ server: string; tools: string[] }> } | undefined;
+  // D-α T3 / ADR-0030:overlay 接了才有 graph 装配面。快照对象是本次
+  // 装配的单点 —— registry(工具在是不是在)、promptTools(露不露)、deps.system
+  // (编排段进不进)三处读的都是它，不各读各的 holder。ask surface 没有
+  // graphAssembly(graphMode 装配仅在 chat/tui/serve 触发),保持 undefined。
+  const graphAssembly: GraphAssembly | undefined = opts.graphMode
+    ? createGraphAssembly(opts.graphMode)
+    : undefined;
+  // B4 / ADR-0043 §4 顺序关键:`reg` 必须先于下方 `if (surface !== "ask")`
+  // 块内的 `await mcpManager.start()` 构造 —— mcpManager 内部的
+  // registerExternal 闭包依赖 reg 已就位,否则 bootSlot 在
+  // listTools → registerTools → registerExternal 路径上拿到
+  // `reg === undefined` 抛错,标 slot 为 failed(不再翻回,见 #378
+  // flip-back 守卫仅放过 timedOut 的迟到成功)。旧依赖顺序(reg 在
+  // await start 之后)在此 B4 引入 firstTurnReady 阻塞等待时被打破
+  // —— 必须显式上移到此处(早于所有可能触发 registerExternal 的路径)。
+  //
+  // 关键:此处的 reg 暂以 mcpManager === undefined 占位装配。真实
+  // mcpManager 在 if 块内同步构造完成后,if 块结尾的"rebuild reg with
+  // mcpManager"会重新构造一次 reg(因为 registry 的工具集构造期已固
+  // 定 mcpManager,无 cell 透传),把 list_mcp_resources /
+  // read_mcp_resource 等条件化工具补齐。两次构造 = mcpManager 装配
+  // 的唯一稳定方案,reg 实例在 rebuild 后被替换为最终值,外部消费者
+  // 始终看到含 mcpManager 的最终 reg。
   if (surface !== "ask") {
     // T5:config / manager 只消费上方一次 resolve 的 mcpRoots —— 禁止再读 cwd。
     const config = await loadMcpConfig({
@@ -754,99 +784,172 @@ export async function buildHarnessEngine(
       timeoutMsOverride: env.mcp.connectTimeoutMs,
       ...(opts.createMcpClient ? { createClient: opts.createMcpClient } : {}),
     });
-    // start() 返回的 promise 仅作错误兜底(start 内部 void allSettled,
-    // 但保留 promise 引用便于未来加 await + timeout 收尾)。fire-and-forget。
-    void mcpManager.start().catch((err) => {
+    // B4 / ADR-0043 §4:手动重连事件 holder —— manager.onManualReconnect
+    // 回调在 TUI / CLI 重连动作的成功路径上触发,事件 push 到这里;
+    // loop-engine 在下一步边界 take 走 + 追加 user 消息(transcript) +
+    // 清空。reload 路径(manager 内部 reload 完成后由 host 决定)目前
+    // 不主动触发本 holder —— 重连 UI 在 reload 成功后由 host 显式调
+    // 一次 manualReconnectListeners(详见 plan B4 / 实现 B5 reload 路径)。
+    mcpReconnectPending = {
+      events: [],
+    };
+    mcpManager.onManualReconnect((serverName, toolNames) => {
+      mcpReconnectPending!.events.push({
+        server: serverName,
+        tools: [...toolNames],
+      });
+    });
+    // 第一次 reg 构造(占位,等真实 mcpManager 就位后 rebuild 一次)
+    reg = createDefaultAciRegistry({
+      env,
+      sandboxRoot,
+      // T5 (plans/worktree-live-task-root.md §6): 把活 taskRoot cell 透传给
+      // write_file / edit_file 工厂。门禁未翻 ⇒ cell 初值 = sandboxRoot,
+      // 行为逐字节同今日；handler 内 cell.read() 取 snapshot。stable 根（D3）
+      // 不走这条缝，仍由各工厂按 opts 接各自的稳定根。
+      liveTaskRoot,
+      // T3:只读放行项目身份文件所在的主仓（ADR-0037 §1 允许只读主仓）。registry
+      // 只把它透给 read_file / grep / glob —— bash / write / edit 拿不到，写不进
+      // 主仓。ON 档即便初始根仍是主仓也要把稳定身份根交给这些工厂；它们按
+      // handler 调用时的 live taskRoot 再判定 task-worktree 形状，因此同一 run
+      // 的下一波也能看到 rebind，而 OFF 档完全不传这条根。
+      ...(isolationEnabled ? { projectIdentityRoot } : {}),
+      // ADR-0041 / plans/model-prefix-layering.md B3:graphAssembly 只承载
+      // handler isEnabled gate 与 loop-engine 切换判定(常驻注册后 registry
+      // 不再按它过滤工具面)。overlay 缺席 → 不传,handler 缺省恒关。
+      ...(graphAssembly ? { graphAssembly } : {}),
+      ...(memoryToolsEnabled ? { memoryDir } : undefined),
+      skillCatalog,
+      ...(subagentManager ? { subagentManager } : undefined),
+      // #502 T3:bash background 任务管理器透传（同门条件装配）——bash 工具
+      // `background: true` 分支可用（立即返 task_id，不占 tier timer）。
+      ...(backgroundManager ? { backgroundManager } : {}),
+      // #440 T11 mcpManager 条件化装配:首次构造时已就位 —— 见上方 mcpManager
+      // = createMcpManager(...) 调用,故此处传入真实 manager,list_mcp_resources /
+      // read_mcp_resource 在场。
+      ...(mcpManager ? { mcpManager } : {}),
+      onEdit: (file) => lspNotifier.invalidate(file),
+      lspCtx,
+      // #406 T3:secret registry 透传 → bash 工具 handler 在 spawn 前还原占位符。
+      // secretRegistry 已在上方构造（T2 段），registry 工厂只在 handler 调用时
+      // 解引用 opts.secretRegistry（惰性），无循环依赖。
+      ...(secretRegistry ? { secretRegistry } : {}),
+      // #440 D2/D6 seam：surface !== "ask" 时把 host-injected todoDir 透传
+      // 给 registry（todo_write 条件化装配的开关）。ask 不传 → tool 不入注册表
+      // （与 memoryEnabled / subagentManager / skillCatalog 同形态）。worker
+      // 装配路径 (createWorkerDeps → createDefaultAciRegistry) 不传 todoDir
+      // → 所有权边界隔在主 loop 内。
+      // (#646 T2: 本 gate 表达式与下方 agentStatusTodoDir 处是同语义的两处
+      //  内联 —— 改动任一处需同步另一处。)
+      ...(opts.todoDir ? { todoDir: opts.todoDir } : {}),
+      // ADR-0019 (T4 / review-fix H3): per-root state anchor threaded into
+      // bash + read_file factories so the fs-policy fence protects
+      // `<workspaceRoot>/.iknow` at parity with `<home>/.iknow`. Always
+      // resolved (opts.workspaceRoot wins; env SSOT `IKNOW_WORKSPACE_ROOT`
+      // is read from `env.workspaceRoot`, not raw `process.env`, so
+      // `.env` / `.env.local` overrides ride the same surface). Spread-guard
+      // keeps the legacy callers (no opts.workspaceRoot, no env var) on their
+      // `sandboxRoot` fallback inside registry.ts.
+      ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+      ...(opts.subagentDiagnosticsDir
+        ? { traceDir: opts.subagentDiagnosticsDir }
+        : {}),
+      // ADR-0037 T4:创建工作树 ACI 工具的条件化装配 —— 与 mutate 门禁同一
+      // 判定源（isolationEnabled，见上方上移注释）；host provision 缝透传给
+      // registry，handler 闭包绑定 sandboxRoot = 会话当前根。OFF / worker /
+      // hub-less 入口不透传 → 工具不入注册表（Gate 3 镜像过滤）。
+      ...(isolationEnabled && isolationHost
+        ? {
+            worktreeProvision: wrappedProvision!,
+            // T7:enter 缝在场时透传（与 provision 同一 isolationEnabled 判定源）；
+            // 缺席（TUI 只接 provision）→ enter-task-worktree 不入注册表。
+            ...(wrappedEnter ? { worktreeEnter: wrappedEnter } : {}),
+            // T8:exit 缝在场时透传（同一 isolationEnabled 判定源）；缺席 →
+            // exit-task-worktree 不入注册表。
+            ...(wrappedExit ? { worktreeExit: wrappedExit } : {}),
+            // task-worktree-lifecycle: discovery and explicit removal are
+            // host-only seams; they do not change the live root themselves.
+            ...(isolationHost.worktreeList
+              ? { worktreeList: isolationHost.worktreeList }
+              : {}),
+            ...(isolationHost.worktreeRemove
+              ? { worktreeRemove: isolationHost.worktreeRemove }
+              : {}),
+          }
+        : {}),
+    });
+    // B4 / ADR-0043 §4:build-engine 装配期 `await manager.start({firstTurnReadyTimeoutMs})`。
+    // 30s 是 hard-req 装配期窗口 —— 窗口内连上的 server 进首轮装配(注册到
+    // ACI registry,session 在册);窗口内未连上的 server = session 缺席
+    // (不进名字目录,不进 tools),缺席者本会话不再有自动重试。装配照常发首轮
+    // —— 仅缺席者退到下一轮由用户手动重连(`onManualReconnect` 缝)。start
+    // 内部 bootSlot 仍是 fire-and-forget,但本调用方在装配期 await 至窗口到点。
+    //
+    // 顺序关键:`reg` 必须在 `await mcpManager.start()` 之前构造完毕(见
+    // 上面 `reg = createDefaultAciRegistry({...})` 调用)。mcpManager
+    // 内部的 `registerExternal` 闭包依赖 reg 已就位,否则 bootSlot 在
+    // listTools → registerTools → registerExternal 路径上会拿到
+    // `reg === undefined` 抛错,标 slot 为 failed(不再翻回)。
+    try {
+      await mcpManager.start({ firstTurnReadyTimeoutMs: 30_000 });
+    } catch (err) {
+      // start 内部 void allSettled 不会 reject;此 catch 留作未来加 timeout
+      // 收尾时的兜底,目前仅 warn。装配照常发首轮,缺席者按 session 缺席处理。
       console.warn(
-        `[build-engine] MCP manager start failed: ${errorMessage(err)}`
+        `[build-engine] MCP manager start window error: ${errorMessage(err)}`
       );
+    }
+  } else {
+    // ask 路径:无 mcpManager,reg 一次构造,无 manager 工具,无 start。
+    reg = createDefaultAciRegistry({
+      env,
+      sandboxRoot,
+      liveTaskRoot,
+      ...(isolationEnabled ? { projectIdentityRoot } : {}),
+      ...(graphAssembly ? { graphAssembly } : {}),
+      ...(memoryToolsEnabled ? { memoryDir } : undefined),
+      skillCatalog,
+      ...(subagentManager ? { subagentManager } : undefined),
+      ...(backgroundManager ? { backgroundManager } : {}),
+      // 无 mcpManager,不传 → list_mcp_resources / read_mcp_resource 不入表。
+      onEdit: (file) => lspNotifier.invalidate(file),
+      lspCtx,
+      ...(secretRegistry ? { secretRegistry } : {}),
+      // ask 不传 todoDir → todo_write 不装配。
+      ...(surface !== "ask" && opts.todoDir ? { todoDir: opts.todoDir } : {}),
+      ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+      ...(opts.subagentDiagnosticsDir
+        ? { traceDir: opts.subagentDiagnosticsDir }
+        : {}),
+      ...(isolationEnabled && isolationHost
+        ? {
+            worktreeProvision: wrappedProvision!,
+            ...(wrappedEnter ? { worktreeEnter: wrappedEnter } : {}),
+            ...(wrappedExit ? { worktreeExit: wrappedExit } : {}),
+            ...(isolationHost.worktreeList
+              ? { worktreeList: isolationHost.worktreeList }
+              : {}),
+            ...(isolationHost.worktreeRemove
+              ? { worktreeRemove: isolationHost.worktreeRemove }
+              : {}),
+          }
+        : {}),
     });
   }
 
   // D-α T3 / ADR-0030:overlay 接了才有 graph 装配面。快照对象是本次
   // 装配的单点 —— registry(工具在不在)、promptTools(露不露)、deps.system
   // (编排段进不进)三处读的都是它，不各读各的 holder。
-  const graphAssembly: GraphAssembly | undefined = opts.graphMode
-    ? createGraphAssembly(opts.graphMode)
-    : undefined;
-  reg = createDefaultAciRegistry({
-    env,
-    sandboxRoot,
-    // T5 (plans/worktree-live-task-root.md §6): 把活 taskRoot cell 透传给
-    // write_file / edit_file 工厂。门禁未翻 ⇒ cell 初值 = sandboxRoot,
-    // 行为逐字节同今日；handler 内 cell.read() 取 snapshot。stable 根（D3）
-    // 不走这条缝，仍由各工厂按 opts 接各自的稳定根。
-    liveTaskRoot,
-    // T3:只读放行项目身份文件所在的主仓（ADR-0037 §1 允许只读主仓）。registry
-    // 只把它透给 read_file / grep / glob —— bash / write / edit 拿不到，写不进
-    // 主仓。ON 档即便初始根仍是主仓也要把稳定身份根交给这些工厂；它们按
-    // handler 调用时的 live taskRoot 再判定 task-worktree 形状，因此同一 run
-    // 的下一波也能看到 rebind，而 OFF 档完全不传这条根。
-    ...(isolationEnabled ? { projectIdentityRoot } : {}),
-    // ADR-0041 / plans/model-prefix-layering.md B3:graphAssembly 只承载
-    // handler isEnabled gate 与 loop-engine 切换判定(常驻注册后 registry
-    // 不再按它过滤工具面)。overlay 缺席 → 不传,handler 缺省恒关。
-    ...(graphAssembly ? { graphAssembly } : {}),
-    ...(memoryToolsEnabled ? { memoryDir } : undefined),
-    skillCatalog,
-    ...(subagentManager ? { subagentManager } : undefined),
-    // #502 T3:bash background 任务管理器透传（同门条件装配）——bash 工具
-    // `background: true` 分支可用（立即返 task_id，不占 tier timer）。
-    ...(backgroundManager ? { backgroundManager } : {}),
-    // #440 T11 mcpManager 条件化装配:在场时 list_mcp_resources /
-    // read_mcp_resource 入注册表(handler 闭包捕获外部 mcpManager holder,
-    // 实际调用时取当前值)。
-    ...(mcpManager ? { mcpManager } : {}),
-    onEdit: (file) => lspNotifier.invalidate(file),
-    lspCtx,
-    // #406 T3:secret registry 透传 → bash 工具 handler 在 spawn 前还原占位符。
-    // secretRegistry 已在上方构造（T2 段），registry 工厂只在 handler 调用时
-    // 解引用 opts.secretRegistry（惰性），无循环依赖。
-    ...(secretRegistry ? { secretRegistry } : {}),
-    // #440 D2/D6 seam：surface !== "ask" 时把 host-injected todoDir 透传
-    // 给 registry（todo_write 条件化装配的开关）。ask 不传 → tool 不入注册表
-    // （与 memoryEnabled / subagentManager / skillCatalog 同形态）。worker
-    // 装配路径 (createWorkerDeps → createDefaultAciRegistry) 不传 todoDir
-    // → 所有权边界隔在主 loop 内。
-    // (#646 T2: 本 gate 表达式与下方 agentStatusTodoDir 处是同语义的两处
-    //  内联 —— 改动任一处需同步另一处。)
-    ...(surface !== "ask" && opts.todoDir ? { todoDir: opts.todoDir } : {}),
-    // ADR-0019 (T4 / review-fix H3): per-root state anchor threaded into
-    // bash + read_file factories so the fs-policy fence protects
-    // `<workspaceRoot>/.iknow` at parity with `<home>/.iknow`. Always
-    // resolved (opts.workspaceRoot wins; env SSOT `IKNOW_WORKSPACE_ROOT`
-    // is read from `env.workspaceRoot`, not raw `process.env`, so
-    // `.env` / `.env.local` overrides ride the same surface). Spread-guard
-    // keeps the legacy callers (no opts.workspaceRoot, no env var) on
-    // their `sandboxRoot` fallback inside registry.ts.
-    ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
-    ...(opts.subagentDiagnosticsDir
-      ? { traceDir: opts.subagentDiagnosticsDir }
-      : {}),
-    // ADR-0037 T4:创建工作树 ACI 工具的条件化装配 —— 与 mutate 门禁同一
-    // 判定源（isolationEnabled，见上方上移注释）；host provision 缝透传给
-    // registry，handler 闭包绑定 sandboxRoot = 会话当前根。OFF / worker /
-    // hub-less 入口不透传 → 工具不入注册表（Gate 3 镜像过滤）。
-    ...(isolationEnabled && isolationHost
-      ? {
-          worktreeProvision: wrappedProvision!,
-          // T7:enter 缝在场时透传（与 provision 同一 isolationEnabled 判定源）；
-          // 缺席（TUI 只接 provision）→ enter-task-worktree 不入注册表。
-          ...(wrappedEnter ? { worktreeEnter: wrappedEnter } : {}),
-          // T8:exit 缝在场时透传（同一 isolationEnabled 判定源）；缺席 →
-          // exit-task-worktree 不入注册表。
-          ...(wrappedExit ? { worktreeExit: wrappedExit } : {}),
-          // task-worktree-lifecycle: discovery and explicit removal are
-          // host-only seams; they do not change the live root themselves.
-          ...(isolationHost.worktreeList
-            ? { worktreeList: isolationHost.worktreeList }
-            : {}),
-          ...(isolationHost.worktreeRemove
-            ? { worktreeRemove: isolationHost.worktreeRemove }
-            : {}),
-        }
-      : {}),
-  });
+  // (B4: `reg` 与 `graphAssembly` 已在 mcp 装配块内先于
+  //  `await mcpManager.start()` 构造，见上方上移注释。)
+  // ADR-0040: the parent catalog is not the worker surface. Rebuild the
+  // worker registry through the same factory with the worker-only option
+  // shape (no parent managers, state tools, or worktree host seams), then
+  // apply the worker deny-list path in the classifier below. This keeps
+  // host-only write-category tools such as create-task-worktree and bash_stop
+  // out of the isolation decision without maintaining a second exclusion list.
+  // (note: full reg / graphAssembly / graphMode block — see comment above;
+  //  previously duplicated here, now removed in B4 reorder.)
   // ADR-0040: the parent catalog is not the worker surface. Rebuild the
   // worker registry through the same factory with the worker-only option
   // shape (no parent managers, state tools, or worktree host seams), then
@@ -986,11 +1089,9 @@ export async function buildHarnessEngine(
   //   shutdown 句柄透出 BuiltEngine.shutdown,RuntimeBundle 生命周期钩子
   //   (cli.ts SIGINT/SIGTERM 接线)在进程退出前调它,manager 关闭所有 client +
   //   取消 in-flight + SIGTERM stdio 子孙(SC11)。
-  // #631 T2:MCP 概览段快照源 —— deps.system 每 turn 装配期现读
-  // (manager.status() × catalog mcp__* 工具),不阻塞异步连接。
-  // const 别名:闭包内保留 narrowing(let 绑定进闭包会被 TS 重新加宽)。
-  const mcpSnapshotSource = mcpManager;
-  const mcpSnapshotCatalog = reg.catalog;
+  // B4 / ADR-0043 §4:MCP 名字目录段快照源由 deps.system resolver 现读
+  // (manager.status() × reg.catalog mcp__* 工具名);手动重连 pending 由
+  // mcpReconnectPending holder 承载(见上方 manager 装配段)。
   // #645 T1 / #646 T2 单一 gate 表达式:同一条件 (surface !== "ask" 且 host
   // 注入 todoDir) 同时驱动 loop 注入缝 (deps.agentStatus,栏以 user 消息追加)
   // 与 system 读规则段 (resolver opts.agentStatusReadRule,ADR-0028 的那句
@@ -1070,17 +1171,27 @@ export async function buildHarnessEngine(
           description: entry.description ?? "",
           ...(entry.disabled ? { disabled: true } : {}),
         })),
-      // #631 T2:MCP 概览段注入缝(渐进式披露"索引常驻档")—— 仅 mcpManager
-      // 在场(chat/tui/serve)时注入;ask 无 manager → 缝缺席 → 段缺席
-      // (字节级零变化,守 KV 缓存稳定契约)。每 turn 装配期快照:异步连接
-      // 的服务连上后下一 turn 自然出现。
-      ...(mcpSnapshotSource
+      // #631 T2 → B4 (ADR-0043 §3):MCP 名字目录段注入缝(渐进式披露
+      // "索引常驻档")—— 仅 mcpManager 在场(chat/tui/serve)时注入;ask
+      // 无 manager → 缝缺席 → 段缺席(字节级零变化,守 KV 缓存稳定契约)。
+      // 每 turn 装配期快照:connected 服务 + 其工具名(裸名,无 schema/
+      // description);schema 由 tool_search 按需拉取。装配期已 await
+      // firstTurnReady,首轮即含窗口内连上的服务。
+      ...(mcpManager
         ? {
             mcp: () =>
-              projectMcpServiceSummaries(
-                mcpSnapshotSource,
-                mcpSnapshotCatalog.all()
-              ),
+              mcpManager.status().map((server) => {
+                const prefix = `mcp__${server.name}__`;
+                const toolNames: string[] = [];
+                for (const def of reg!.catalog.all()) {
+                  if (def.name.startsWith(prefix)) toolNames.push(def.name);
+                }
+                return {
+                  name: server.name,
+                  state: server.state,
+                  tools: toolNames,
+                } satisfies McpServiceSummary;
+              }),
           }
         : {}),
       // #558 T2: 默认路径停止注入 coordinator 段 — 引导落点收敛到
@@ -1137,6 +1248,23 @@ export async function buildHarnessEngine(
           graphModeChange: {
             assembly: graphAssembly,
             lastSeenEnabled: { value: undefined as boolean | undefined },
+          },
+        }
+      : {}),
+    // B4 / ADR-0043 §4:MCP 手动重连追加缝 —— mcpReconnectPending holder
+    // 在场(manager 装配成功,chat/tui/serve)时透给 loop-engine;takePending
+    // 取走 + 清空(一次性消费)。ask(无 manager)→ 缝缺席 → 零追加。
+    ...(mcpReconnectPending
+      ? {
+          mcpReconnect: {
+            takePending: (): ReadonlyArray<{
+              server: string;
+              tools: ReadonlyArray<string>;
+            }> => {
+              const taken = [...mcpReconnectPending!.events];
+              mcpReconnectPending!.events.length = 0;
+              return taken;
+            },
           },
         }
       : {}),
@@ -1290,38 +1418,5 @@ function createDynamicExecutorRegistry(
       }
       return v;
     },
-  });
-}
-
-/**
- * #631 T2 — MCP 概览段投影（deps.system 注入缝的装配侧,纯只读快照）。
- *
- * 数据源（均为既有导出面,不改 manager 行为）：
- *   - `manager.status()` → 服务名 + 状态机快照（装配层只渲染 connected）；
- *   - `catalogTools`（reg.catalog.all(),含 registerExternal 注入的
- *     `mcp__<service>__<tool>` 动态工具）→ 工具名 + description。
- *
- * 工具按 `mcp__<server.name>__` 前缀归属服务 —— 与注册侧形态一致：
- * mcp/manager.ts registerTools 用原始服务名 + 仅工具段被 `sanitize`
- * （`mcp__${slot.config.name}__${sanitize(t.name)}`），故此处不得
- * sanitize 服务名，否则含特殊字符的服务其工具会静默漏出概览。
- * 每装配周期调一次,不 await 任何连接。
- */
-function projectMcpServiceSummaries(
-  manager: McpManager,
-  catalogTools: ReadonlyArray<AciToolDef>
-): ReadonlyArray<McpServiceSummary> {
-  return manager.status().map((server) => {
-    const prefix = `mcp__${server.name}__`;
-    const tools: McpToolSummary[] = [];
-    for (const def of catalogTools) {
-      if (!def.name.startsWith(prefix)) continue;
-      tools.push(
-        def.description.length > 0
-          ? { name: def.name, description: def.description }
-          : { name: def.name }
-      );
-    }
-    return { name: server.name, state: server.state, tools };
   });
 }

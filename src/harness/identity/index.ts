@@ -43,5 +43,4 @@ export type {
   AssemblyContext,
   SkillSummary,
   McpServiceSummary,
-  McpToolSummary,
 } from "./assemble.js";

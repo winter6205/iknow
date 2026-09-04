@@ -35,6 +35,13 @@ export interface AciRegistry {
   readonly visibleSchemas: () => ReadonlyArray<ToolDef>;
   /** 延迟加载：按需检索某工具 schema（含 lazy 的），未注册返回 undefined。 */
   readonly discover: (name: string) => ToolDef | undefined;
+  /**
+   * B4 / ADR-0043 §2:检某名字是否已被 `discover()` 标记为「模型已检索」。
+   * 装配层 / 闸门用:未 discover 的 `mcp__` 工具调用 = 未加载,应抛
+   * ToolExecutionError(模板钉死)而非真跑 handler。def 可能不在注册表
+   * (返回 false),已注册但未检索的也返回 false。
+   */
+  readonly isDiscovered: (name: string) => boolean;
 }
 
 /**
@@ -90,6 +97,16 @@ export function createAciRegistry(
   const allList = Object.freeze([...tools]) as ReadonlyArray<AciToolDef>;
   const externalByExt = new Map<string, AciToolDef>();
 
+  // #224 discovered set：本 run 内被检索过的工具名（闭包状态，不跨 session
+  // 持久化）。discover() 命中时 add；visibleSchemas() = 非 lazy 全量（注册
+  // 序，逐位稳定）+ 已发现的 lazy 按 discovery 顺序尾部追加。尾部追加而非
+  // 插回注册序：相邻轮无新 discovery 时可见前缀逐位不变，保 KV cache 前缀
+  // 命中（#631）。B4 / ADR-0043 §2:`isDiscovered` 是 catalog / 闸门侧的
+  // 「已加载」检查入口（permission-executor 据此拒绝未 discover 即调的
+  // mcp__ 工具调用）。
+  const discovered = new Set<string>();
+  const isDiscovered = (name: string): boolean => discovered.has(name);
+
   const catalog: AciCatalog = Object.freeze({
     get: (name: string) => byName.get(name) ?? externalByExt.get(name),
     all: () =>
@@ -97,6 +114,9 @@ export function createAciRegistry(
         ...allList,
         ...externalByExt.values(),
       ]) as ReadonlyArray<AciToolDef>,
+    // B4 / ADR-0043 §2:暴露 discovered 检查给闸门侧 —— permission-executor
+    // 据此拒绝「未 discover 即调」的 mcp__ 工具调用。
+    isDiscovered,
   });
 
   const registerExternal = (defs: ReadonlyArray<AciToolDef>): void => {
@@ -138,13 +158,6 @@ export function createAciRegistry(
     }
   };
 
-  // #224 discovered set：本 run 内被检索过的工具名（闭包状态，不跨 session
-  // 持久化）。discover() 命中时 add；visibleSchemas() = 非 lazy 全量（注册
-  // 序，逐位稳定）+ 已发现的 lazy 按 discovery 顺序尾部追加。尾部追加而非
-  // 插回注册序：相邻轮无新 discovery 时可见前缀逐位不变，保 KV cache 前缀
-  // 命中（#631）。
-  const discovered = new Set<string>();
-
   const visibleSchemas = (): ReadonlyArray<ToolDef> => {
     const all = [...tools, ...externalByExt.values()];
     // #224 不变式：非 lazy 注册序前缀逐位稳定——即使某非 lazy 工具被
@@ -173,5 +186,6 @@ export function createAciRegistry(
     unregisterExternal,
     visibleSchemas,
     discover,
+    isDiscovered,
   });
 }

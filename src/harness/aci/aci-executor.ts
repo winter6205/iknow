@@ -120,6 +120,11 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
     );
   }
   const askUser = opts.askUser ?? (async () => true); // prototype default: no-ask approve
+  // B4 / ADR-0043 §2:把 catalog 上的 isDiscovered 注入 permission-runtime,
+  // 让 gateOne 拒绝未 discover() 的 mcp__ 工具调用(opts.catalog 在场时
+  // 直接读;缺席则从 registry 构一次,后者保留 byte-stable 行为 —— 不传
+  // isDiscovered,gate 不会拒任何 mcp__ 调用)。
+  const catalogForT5: AciCatalog = opts.catalog ?? createAciCatalog(registry);
   const perm = createPermissionRuntime({
     inner: opts.inner,
     registry,
@@ -129,8 +134,10 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
       return opts.hooks?.preToolUse?.(ctx);
     },
     postToolUse: opts.hooks?.postToolUse,
+    ...(catalogForT5.isDiscovered
+      ? { isDiscovered: catalogForT5.isDiscovered }
+      : {}),
   });
-  const catalogForT5: AciCatalog = opts.catalog ?? createAciCatalog(registry);
   return Object.freeze({
     executeAll: async (
       calls: ReadonlyArray<ToolCall>,

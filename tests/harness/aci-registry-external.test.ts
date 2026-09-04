@@ -133,4 +133,25 @@ describe("ACI registry external registration", () => {
       registry.registerExternal([makeTool("mcp__a__x")])
     );
   });
+
+  it("B4 isDiscovered:未 discover 的名字返 false,discover 后返 true", () => {
+    // B4 / ADR-0043 §2:permission-executor 据此拒绝未 discover 即调的
+    // mcp__ 工具调用。catalog 上同形暴露 isDiscovered,供闸门读取。
+    const registry = createAciRegistry([makeTool("read_file")]);
+    const external = makeTool("mcp__server__check");
+
+    registry.registerExternal([external]);
+
+    // 未 discover：catalog.isDiscovered 返 false（gate 拒调）
+    assert.equal(registry.catalog.isDiscovered?.(external.name), false);
+    assert.equal(registry.isDiscovered(external.name), false);
+
+    // discover 标记后：返 true（gate 放行）
+    registry.discover(external.name);
+    assert.equal(registry.catalog.isDiscovered?.(external.name), true);
+    assert.equal(registry.isDiscovered(external.name), true);
+
+    // 未注册的名字也返 false（不抛）
+    assert.equal(registry.isDiscovered("mcp__ghost__unknown"), false);
+  });
 });

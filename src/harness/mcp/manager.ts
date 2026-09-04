@@ -33,7 +33,11 @@ import {
   type Tool as SdkTool,
 } from "@modelcontextprotocol/client";
 import { StdioClientTransport as SdkStdioTransport } from "@modelcontextprotocol/client/stdio";
-import { McpLifecycleError, ToolExecutionError, errorMessage } from "../errors.js";
+import {
+  McpLifecycleError,
+  ToolExecutionError,
+  errorMessage,
+} from "../errors.js";
 import type { AciToolDef } from "../aci/types.js";
 import { toAciToolDef } from "./adapter.js";
 import type { McpServerConfig, McpStdioServer } from "./config.js";
@@ -205,9 +209,65 @@ export interface McpManagerOptions {
   ) => McpClientHandle;
 }
 
+/**
+ * #631 T2 / #124 / ADR-0043 §4:首轮就绪等待选项。
+ *
+ * `firstTurnReadyTimeoutMs` (ms) — build-engine 装配期等待 MCP 连接
+ * 全部 ready（connected 或 failed）的窗口。B4 钉死：
+ *   - 窗口内连上的 server 进首轮装配（注册到 ACI registry,session 在册）；
+ *   - 窗口内未连上的 server = session 缺席（不进目录,不进 tools）；
+ *   - 窗口到点整体 resolve,装配照常发首轮 —— 缺席者本会话不再有自动重试。
+ *
+ * 缺席 (undefined) = 改前行为,fire-and-forget,build-engine 不等。
+ */
+export interface McpStartOptions {
+  readonly firstTurnReadyTimeoutMs?: number;
+}
+
+/**
+ * #658 / ADR-0043 §4:手动重连通知 seam — 用户手动重连成功后,
+ * 告知 loop-engine 追加一条 user 消息 (与 graphModeChange 同形态)。
+ *
+ * cb 形参:
+ *   - `serverName`:刚连上的 server 配置名;
+ *   - `toolNames`:该 server 暴露的 mcp__${server}__${tool} 完整名字清单。
+ *
+ * 回调仅被"成功的重连"驱动一次;多次注册 = 多个 cb 同源触发。本期 B4 仅
+ * 立 seam,触发由 TUI / CLI 的「重连」动作完成（user story:用户决定
+ * 给超时缺席的 server 第二次机会 → 通过 UI 触发 reload → 成功回调）。
+ */
+export type McpManualReconnectListener = (
+  serverName: string,
+  toolNames: ReadonlyArray<string>
+) => void;
+
+/**
+ * B4 钉死模板:未 discover 的 mcp__ 工具调用 → ToolExecutionError(本常量值)。
+ *
+ * SSOT — aci-executor 与 permission-executor 在 mcp__ 工具调用入口(registry miss +
+ * catalog hit 但 discover 遗漏)处抛同形错误,测试只引用常量不走字面。
+ * ADR-0043 §2:与 run_graph 关图 EXIT 同形态(typed + 模板钉死)。
+ */
+export const MCP_TOOL_NOT_LOADED_MESSAGE =
+  "tool <name> not loaded — call tool_search first";
+
 export interface McpManager {
-  /** 后台化启动连接；早于 connect 完成返回。 */
-  readonly start: () => Promise<void>;
+  /**
+   * 启动连接。两种语义:
+   *   - `opts` 缺席 = 改前路径,后台化启动,立即 resolve（不阻塞 build 主路径）。
+   *   - `opts.firstTurnReadyTimeoutMs` 在场 = 阻塞至全 server
+   *     connected/failed 或超时。B4 装配期使用,缺席 server 本会话不进目录。
+   *
+   * 同一 manager 多次调用 = 让既有后台任务继续跑(无副作用)。rebuild 引擎
+   * 时请走 `shutdown` + 新建 manager,manager 不维护跨 start 的串行约束。
+   */
+  readonly start: (opts?: McpStartOptions) => Promise<void>;
+  /**
+   * B4 / ADR-0043 §4:手动重连成功回调(可多次注册)。调用发生在重连
+   * 完成、tool 已 registerExternal 入 ACI registry 之后。本 seam 是
+   * loop-engine 消息追加缝的消费源(由 build-engine 装配期 wire)。
+   */
+  readonly onManualReconnect: (cb: McpManualReconnectListener) => void;
   /**
    * 重载 server 集：收集旧 slots 已注册工具名 → unregisterExternal 撤回 →
    * shutdown 现有全部 → 清 slots → 用新 config 重建 → start()。
@@ -474,8 +534,77 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     void Promise.allSettled(tasks);
   }
 
-  async function start(): Promise<void> {
+  /**
+   * B4 / ADR-0043 §4:阻塞等待全部非 disabled slot 进入终态(connected/failed)
+   * 或超时至 `timeoutMs`。终态判定由 polling 完成 — bootSlot 是 fire-and-forget,
+   * 内部用 timeoutMs(单 server)与 connect/listTools 异常决定 slot 终结;
+   * 本 helper 在外部套一层 race 来给 first-turn-ready 一个固定的窗口。
+   *
+   * 缺席者不重试,本会话不进名字目录。
+   *
+   * `disabled` slot 全程跳过(polling 门),不影响终态判定。
+   */
+  function awaitFirstTurnReady(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    const isPending = (slot: Slot): boolean => slot.state === "pending";
+
+    return new Promise<void>((resolve) => {
+      const tick = (): void => {
+        let anyPending = false;
+        for (const slot of slots.values()) {
+          if (slot.state === "disabled") continue;
+          if (isPending(slot)) {
+            anyPending = true;
+            break;
+          }
+        }
+        if (!anyPending || Date.now() >= deadline) {
+          resolve();
+          return;
+        }
+        setTimeout(tick, 5);
+      };
+      tick();
+    });
+  }
+
+  /**
+   * 手动重连通知 seam：单/多 cb 注册,内部保存,fire-once 语义由 caller 决定
+   * (reload / 手动重连 UI 路径最终会调 `notifyManualReconnect(serverName,
+   * toolNames)` —— B4 仅装配接线,不消费派发;派发入口放在 manager 内部以
+   * 留好单一注入点)。
+   */
+  const manualReconnectListeners = new Set<McpManualReconnectListener>();
+  function onManualReconnect(cb: McpManualReconnectListener): void {
+    manualReconnectListeners.add(cb);
+  }
+  /**
+   * 内部派发入口:由 reload / 未来手动重连路径触发。best-effort 调用所有 cb,
+   * cb 抛错不破坏其他 cb(observer only,不应反向影响 manager 状态)。
+   * B4 不消费此派发(reload 路径属后续 work item);函数保留以稳定 seam 形
+   * 状,具体触发点交给 B5/reload 接线。
+   */
+  function notifyManualReconnect(
+    serverName: string,
+    toolNames: ReadonlyArray<string>
+  ): void {
+    for (const cb of manualReconnectListeners) {
+      try {
+        cb(serverName, toolNames);
+      } catch {
+        // cb 抛错吞咽 — observer only。
+      }
+    }
+  }
+  // B4:派发入口未在当前路径消费,显式 void 标记避免 ts6133,同时保留
+  // 函数体以便 B5/reload 接线直接复用。
+  void notifyManualReconnect;
+
+  async function start(opts?: McpStartOptions): Promise<void> {
     bootstrapAll();
+    if (opts?.firstTurnReadyTimeoutMs !== undefined) {
+      await awaitFirstTurnReady(opts.firstTurnReadyTimeoutMs);
+    }
   }
 
   async function reload(config: readonly McpServerConfig[]): Promise<void> {
@@ -688,6 +817,7 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
 
   const manager: McpManager = {
     start,
+    onManualReconnect,
     reload,
     shutdown,
     status,

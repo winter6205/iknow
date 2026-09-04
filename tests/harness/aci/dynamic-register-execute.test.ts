@@ -146,6 +146,11 @@ describe("MCP 动态注册工具经 executor 可执行（回归 #337）", () => 
     const dyn = makeDynamicMcpTool("mcp__server__dyn", DYNAMIC_MARKER);
     reg.registerExternal([dyn]);
 
+    // B4 / ADR-0043 §2:permission-executor 在 mcp__ 工具调用前要求
+    // `discover()` 已标记该名。这里测试显式调一次,模拟工具面 tool_search
+    // 已把该工具检索出来的真实装配路径。
+    reg.discover(dyn.name);
+
     // 注册后 catalog.get 应命中动态 def（这是修复后的契约）
     const hit = reg.catalog.get("mcp__server__dyn");
     assert.ok(hit, "registerExternal 后 catalog.get 必须命中动态 def");

@@ -28,6 +28,8 @@ import {
   isBashNetworkTrue,
   type PermissionPolicy,
 } from "./policy.js";
+import { MCP_TOOL_NOT_LOADED_MESSAGE } from "../mcp/manager.js";
+import { ToolExecutionError } from "../errors.js";
 import { VIOLATION_PREFIXES } from "./prefixes.js";
 import type {
   AskUser,
@@ -64,8 +66,17 @@ export interface HookErrorEvent {
  * `get` 动态委托 registry.get — 兼容构造后通过 `reg.registerExternal`
  * 动态注册的 mcp__ 工具（#337）。`all()` 仍返回构造期快照，供权限层
  * 遍历 enumerate 用。
+ *
+ * B4 / ADR-0043 §2:第二参 `isDiscovered`(可选)是「未加载即调用 = 抛
+ * ToolExecutionError」闸门的数据源 —— 装配层把 AciRegistry.isDiscovered
+ * 注入到这,gateOne 据此阻止 model 直接调未 discover() 的 mcp__ 工具。
+ * 缺席(`undefined`)→ 闸门放过(非 ACI registry 装配的路径,如 worker
+ * 子代理或 stub 测试,行为与 B4 之前一致,byte-stable)。
  */
-export function createAciCatalog(registry: Registry): AciCatalog {
+export function createAciCatalog(
+  registry: Registry,
+  isDiscovered?: (name: string) => boolean
+): AciCatalog {
   const list = registry.list();
   const byName = new Map<string, AciToolDef>();
   for (const def of list) {
@@ -85,6 +96,7 @@ export function createAciCatalog(registry: Registry): AciCatalog {
       return project(dynamic);
     },
     all: () => Object.freeze([...byName.values()]) as ReadonlyArray<AciToolDef>,
+    ...(isDiscovered ? { isDiscovered } : {}),
   });
 }
 
@@ -117,6 +129,13 @@ export interface PermissionExecutorOptions {
   /** 钩子异常观测回调（#126 D3）。默认不传 = 静默吞（post）/
    *  无告警渠道（pre 仍 fail-closed，仅缺观测）。 */
   readonly onHookError?: (e: HookErrorEvent) => void;
+  /**
+   * B4 / ADR-0043 §2:「已加载」检查入口 —— permission-executor 据此拒绝
+   * 未 discover 即调的 mcp__ 工具调用。装配层 (build-engine) 把
+   * `AciRegistry.isDiscovered` 注入;缺席 = 闸门放过(非 ACI registry 装
+   * 配的路径或 stub 测试,行为与 B4 之前 byte-stable)。
+   */
+  readonly isDiscovered?: (name: string) => boolean;
 }
 
 export type PermissionGate =
@@ -159,7 +178,7 @@ export function createPermissionRuntime(
       "permission executor: ask_inlet_missing (AskUser implementation is required at construction)"
     );
   }
-  const catalog = createAciCatalog(opts.registry);
+  const catalog = createAciCatalog(opts.registry, opts.isDiscovered);
   const pre: PreToolUseHook = opts.preToolUse ?? (() => undefined);
   const post: PostToolUseHook = opts.postToolUse ?? (() => undefined);
   const askUser = opts.askUser;
@@ -172,6 +191,31 @@ export function createPermissionRuntime(
   ): Promise<PermissionGate> {
     const def = catalog.get(call.name);
     if (!def) return { kind: "proceed", def: undefined };
+
+    // B4 / ADR-0043 §2:未 discover 的 mcp__ 工具调用 = ToolExecutionError。
+    //   - 闸门顺序在 pre-hook 之前:这条规则是契约错误（不是用户权限问题）,
+    //     pre-hook 不该拦;在 pre 之前 fail-fast 让 hookError 观测面干净。
+    //   - 模板钉死(MCP_TOOL_NOT_LOADED_MESSAGE),aci-executor 与 permission-executor
+    //     共用同一字面量,测试只引用常量不走字面。
+    //   - `catalog.isDiscovered` 缺席 → 闸门放过(非 ACI registry 装配的路径
+    //     或 stub 测试,行为与 B4 之前一致 —— 不破坏 worker / hub runDeps)。
+    if (
+      def.name.startsWith("mcp__") &&
+      catalog.isDiscovered !== undefined &&
+      !catalog.isDiscovered(def.name)
+    ) {
+      return {
+        kind: "blocked",
+        result: {
+          kind: "execution_failed",
+          toolUseId: call.id,
+          // 用 typed ToolExecutionError 的 message 渲染(message 字面值 = 模板),
+          // 让 ToolResultAdapter 路径(loader-envelopes.ts)的渲染与 typed-error
+          // catch 契约(code-quality.md)对齐:plain object 不会打成 [object Object]。
+          message: new ToolExecutionError(MCP_TOOL_NOT_LOADED_MESSAGE).message,
+        },
+      };
+    }
 
     let hookDecision: PreHookBlock | undefined;
     try {
