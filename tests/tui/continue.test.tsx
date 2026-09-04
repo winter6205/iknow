@@ -73,13 +73,17 @@ function pendingMessages(): AnthropicNativeMessage[] {
 
 function sessionFile(
   id: string,
-  messages: ReadonlyArray<AnthropicNativeMessage>
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  workspaceRoot: string
 ): SessionFileV1 {
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     conversation_id: id,
     title: "do",
-    cwd: "/tmp/proj",
+    cwd: workspaceRoot,
+    // de87ff07 起 unbound session 拒绝执行（requireBoundRoot）：种子 session
+    // 必须带 workspaceRoot，否则 /continue 与 pending NL 在执行前置即被拒。
+    workspaceRoot,
     sanitized_at: new Date().toISOString(),
     messages: [...messages],
     jsonMode: false,
@@ -125,7 +129,10 @@ async function mountContinueApp(opts: {
           { role: "assistant", content: [{ type: "text", text: "done" }] },
         ] as AnthropicNativeMessage[])
       : pendingMessages();
-    await inner.store.save({ id, file: sessionFile(id, messages) });
+    await inner.store.save({
+      id,
+      file: sessionFile(id, messages, dataDir),
+    });
     const file = await inner.loadSessionFile(id);
     initialSession = {
       ...attachSession(file),

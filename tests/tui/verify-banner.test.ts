@@ -392,8 +392,11 @@ describe("端到端:createTuiBridge.postMessage 透传 verify DTO", () => {
   beforeAll(() => {
     dataDir = mkdtempSync(join(tmpdir(), "iknow-verify-bridge-data-"));
     workDir = mkdtempSync(join(tmpdir(), "iknow-verify-bridge-work-"));
-    marker = join(workDir, "verify-ran.marker");
-    passScript = join(workDir, "verify-pass.sh");
+    // 脚本 + marker 必须落在 dataDir（= bridge workspaceRoot = verify 沙箱
+    // cwd）内：fence `--tmpfs /tmp` 后只重绑 cwd/home，兄弟 tmp 目录在沙箱
+    // 内不可见，脚本放 workDir 会被 ENOENT 收敛成 exit 127 → failed。
+    marker = join(dataDir, "verify-ran.marker");
+    passScript = join(dataDir, "verify-pass.sh");
     writeFileSync(passScript, `#!/bin/sh\ntouch "${marker}"\nexit 0\n`, {
       mode: 0o755,
     });

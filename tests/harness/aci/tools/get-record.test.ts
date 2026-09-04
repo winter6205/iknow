@@ -209,26 +209,33 @@ describe("get_record ACI tool", () => {
     );
   });
 
-  it("is assembled last in the registry and its bounds are enforced by ajv", () => {
+  it("is assembled unconditionally at the trace read-side content axis tail and its bounds are enforced by ajv", () => {
     const reg = createDefaultAciRegistry({
       env: { web: { searchUrl: undefined, proxy: undefined } },
       sandboxRoot: makeRecordDir(),
     });
     const validator = reg.inner.getValidator("get_record");
 
-    // T6 append-only：内容轴是 SSOT 末位；PR #879 task-worktree-lifecycle 又
-    // 在 trace 三件之后 append list-task-worktrees + remove-task-worktree 两件,
-    // 所以 get_record 不再位于 .at(-1)（移到 .at(-3)）。本测试不传 worktreeList /
-    // worktreeRemove → registry 实际 inner list 末位仍然是常驻的 get_record（与
-    // SSOT 端尾部四件顺序对齐，但 registry 只装无条件件）。测试用例标题里的
-    // 「last in the registry」指实际注册表，不是 SSOT 字面量（SSOT 末位已是
-    // PR #879 追加的 remove-task-worktree）。
-    assert.equal(ACI_TOOLSET_NAMES.at(-1), "remove-task-worktree");
-    assert.equal(ACI_TOOLSET_NAMES.at(-2), "list-task-worktrees");
-    assert.equal(ACI_TOOLSET_NAMES.at(-3), "get_record");
-    assert.equal(reg.inner.list().at(-1)?.name, "get_record");
+    // append-only 仍生效：get_record 之后的工具仅限 host 缝条件化装配的
+    // 4 件（task-worktree-lifecycle #869 的 list/remove + ADR-0037 的
+    // create/enter/exit 的可见性变体；本 registry 未供任何 host 缝 → 实际
+    // 入注册表的仅 get_record 自己）。三轴顺序（目录 → 行 → 内容）由 append
+    // 顺序体现，后来者不能悄悄把它打乱。断言用索引而非硬编码下标，从 SSOT
+    // 派生「内容轴之后还有多少条件化工具」。
+    const getRecordIdx = ACI_TOOLSET_NAMES.indexOf("get_record");
+    const afterContentAxis = ACI_TOOLSET_NAMES.slice(getRecordIdx + 1);
+    // 本场景（无 host 缝）下：所有排在 get_record 之后的工具都是 host 缝
+    // 条件化装配的（task-worktree-lifecycle 2 件 + ADR-0037 三件里的可见
+    // 变体不进本 registry），所以尾段在实例里应收敛为空。
+    assert.ok(getRecordIdx > 0, "get_record 必须在 list_sessions 之后");
+    assert.equal(
+      reg.inner.list().at(-1)?.name,
+      "get_record",
+      "未供 host 缝时 get_record 收尾（条件化件全数缺席）"
+    );
     assert.equal(reg.catalog.get("get_record")?.name, "get_record");
     assert.ok(validator, "the registry must compile a validator for the tool");
+    // 界真的由 ajv 执行：每条测都钉住一条具体边界,不只是写在 schema 里。
     assert.equal(validator!({ conversation_id: "c1" }), false); // record_id 必填
     assert.equal(validator!({ record_id: "r" }), false); // conversation_id 必填
     assert.equal(validator!({ conversation_id: "c1", record_id: "r" }), true);
@@ -256,6 +263,14 @@ describe("get_record ACI tool", () => {
       validator!({ conversation_id: "c1", record_id: "r", byte_window: 1 }),
       false
     );
+    // append-only SSOT 纪律:内容轴之后还能 append,但只能是 host 缝条件化件。
+    // 此断言让「之后还能 append 但不得插队」成为可测不变式。
+    for (const name of afterContentAxis) {
+      assert.ok(
+        name === "list-task-worktrees" || name === "remove-task-worktree",
+        `get_record 后只能 append host 缝条件化件,unexpected "${name}"`
+      );
+    }
   });
 
   // ── SC20：本面可抛的每个 kind 一条映射测 ───────────────────────────────
