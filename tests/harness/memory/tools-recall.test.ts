@@ -128,7 +128,7 @@ describe("memory_recall — scoring and output", () => {
     );
   });
 
-  it("respects the limit option (default 10, cap 50)", async () => {
+  it("respects the limit option (cap 50)", async () => {
     const many: MemoryEntryV1[] = Array.from({ length: 12 }, (_, i) =>
       entry({ id: `m${i}`, title: `Match item ${i}`, body: "shared token" })
     );
@@ -141,7 +141,7 @@ describe("memory_recall — scoring and output", () => {
     assert.equal(hits.length, 3);
   });
 
-  it("defaults to at most 10 full bodies and starts with the advisory prefix", async () => {
+  it("defaults to at most 3 full bodies and starts with the advisory prefix", async () => {
     const many: MemoryEntryV1[] = Array.from({ length: 12 }, (_, i) =>
       entry({
         id: `m${i}`,
@@ -157,8 +157,34 @@ describe("memory_recall — scoring and output", () => {
       )
     );
     const hits = [...out.matchAll(/^### /gm)];
-    assert.equal(hits.length, 10);
+    assert.equal(hits.length, 3);
     assert.ok(out.includes("shared token body text"));
+  });
+
+  // specs/casual-ask-context-hygiene.md SC3: the description must not command
+  // recall "at the start of a task" — it is an index, consulted when a specific
+  // stored fact is needed this turn, not a checklist.
+  it("describes recall as a needed-fact lookup, not a start-of-task ritual", () => {
+    const tool = createMemoryRecallTool({ memoryDir });
+    assert.ok(
+      !tool.description.includes("at the start of a task"),
+      "description must not contain 'at the start of a task'"
+    );
+    assert.ok(
+      tool.description.includes("specific stored fact"),
+      "description must state the needed-specific-fact semantics"
+    );
+    assert.ok(
+      tool.description.includes("pair with memory_save"),
+      "description keeps the memory_save pairing"
+    );
+    assert.ok(
+      tool.description.includes("default 3"),
+      "description must state default 3"
+    );
+    const schema = tool.inputSchema as Record<string, unknown>;
+    const props = schema.properties as Record<string, Record<string, unknown>>;
+    assert.equal(props.limit?.default, 3);
   });
 
   it("does not return a zero-lexical-hit entry even when importance is high", async () => {
@@ -210,7 +236,7 @@ describe("memory_recall — output cap and boundary classes", () => {
   it("rejects a non-string query with a typed ToolExecutionError", async () => {
     const tool = createMemoryRecallTool({ memoryDir });
     await assert.rejects(
-      () => tool.handler({ query: 123 }),
+      async () => tool.handler({ query: 123 }),
       (err: unknown) => {
         const e = err as ToolExecutionError;
         return e.name === "ToolExecutionError" && /query/.test(e.message);
@@ -220,8 +246,8 @@ describe("memory_recall — output cap and boundary classes", () => {
 
   it("rejects a limit outside the 1..50 range", async () => {
     const tool = createMemoryRecallTool({ memoryDir });
-    await assert.rejects(() => tool.handler({ query: "x", limit: 0 }));
-    await assert.rejects(() => tool.handler({ query: "x", limit: 51 }));
+    await assert.rejects(async () => tool.handler({ query: "x", limit: 0 }));
+    await assert.rejects(async () => tool.handler({ query: "x", limit: 51 }));
   });
 
   it("does not leak negative-form indicators into output (spec SC 9 discipline)", async () => {

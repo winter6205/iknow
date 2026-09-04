@@ -1,6 +1,8 @@
 # Spec: task worktree 生命周期（命名 · 进树 · 发现 · 回收 · 进树后可读）
 
 > 门禁语义沿用 ADR-0037：隔离开则主仓只读，写被拦，host 不自动建树；模型调 ACI 建树并 **session worktree rebind**。本 spec 只补闸后面的产品面：可读标签、一把可执行的进树动作、列出与显式删除、以及改绑后仍能读项目身份根。
+>
+> **Amended 2026-09-04** by `specs/casual-ask-context-hygiene.md`：门禁「什么算写」不再复用 `validateReadonlyCommand`；unbound 说明书改成事实阻断。条款 6 仍点名 `create-task-worktree`；条款 8 文案以 hygiene spec 为准。本文件仍管命名 / 进树 / list / remove，不改 ACI 工具形态。
 
 ## Objective
 

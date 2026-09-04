@@ -225,7 +225,19 @@ function validateSegment(segment: string, command: string): void {
       reason: "output redirection is not allowed in readonly mode",
     });
   }
-  // Strictening 3: firstToken policy lookup.
+  validateSegmentPolicy(segment, command);
+}
+
+/**
+ * Strictening 3 (firstToken policy lookup) as a standalone predicate-style
+ * export: throws `ReadonlyViolationError` when the segment's command is not
+ * in the readonly policy, returns silently when it is. Unlike
+ * `validateSegment` it does NOT own the `>` / bare-`&` strictenings — those
+ * are readonly-MODE rules; the worktree gate reuses only this policy lookup
+ * (READONLY_ALLOWED + find/sort/git flag tables) for its workspace-write
+ * classifier, so the two consumers whitelist from one table and cannot drift.
+ */
+export function validateSegmentPolicy(segment: string, command: string): void {
   const token = firstToken(segment);
   if (FORBIDDEN_COMMANDS.has(token)) {
     throw new ReadonlyViolationError({

@@ -35,9 +35,12 @@ import {
   taskWorktreeLabelOf,
   taskWorktreePath,
   taskWorktreeOwnerOf,
+  unboundMutateNotice,
   WORKTREE_ISOLATION_PREFIX,
 } from "../../../src/harness/isolation/worktree-gate.ts";
 import type { GitRunner } from "../../../src/harness/isolation/worktree-gate.ts";
+// SC6 guard: the readonly-mode SSOT must stay untouched by the gate split.
+import { validateReadonlyCommand } from "../../../src/harness/aci/tools/bash-readonly.ts";
 import { createLiveTaskRoot } from "../../../src/harness/session-roots.ts";
 import type {
   Executor,
@@ -325,31 +328,64 @@ describe("classifyCall", () => {
     );
   });
 
-  it("classifies bash by readonly command validation (SSOT validateReadonlyCommand)", () => {
+  // Invariant (spec casual-ask-context-hygiene Does/classifyCall): the gate
+  // adjudicates "will this bash call write the workspace", NOT the readonly
+  // bash-mode table. Read-only allowlisted segments compose freely through
+  // pipes, `&&`, and stderr merges (`2>&1`); only workspace writes (file
+  // redirects, mutating commands) or unknown commands fail closed to mutate.
+  it("classifies bash by whether it writes the workspace", () => {
+    const read = (command: string) =>
+      classifyCall({ id: "r", name: "bash", input: { command } });
+    const mutate = (command: string) =>
+      classifyCall({ id: "m", name: "bash", input: { command } });
+
+    // SC5 exact case: pipes + && + 2>&1 over read-only commands stay read.
+    expect(read("date '+%Y-%m-%d' && ls -la /tmp 2>&1 | head -30")).toBe(
+      "read"
+    );
+    expect(read("ls 2>&1")).toBe("read");
+    expect(read("ls 2>/dev/null")).toBe("read");
+    expect(read("ls &> /dev/null")).toBe("read");
+    expect(read("cat a.txt | grep x")).toBe("read");
+    expect(read("git status")).toBe("read");
+    expect(read("git diff")).toBe("read");
+    expect(read("ls -la src")).toBe("read");
+    expect(read("cat a.txt")).toBe("read");
+    expect(read("ls && cat b.txt; echo done")).toBe("read");
+
+    // workspace writes → mutate
+    expect(mutate("echo x > f.txt")).toBe("mutate");
+    expect(mutate("echo x >> f.txt")).toBe("mutate");
+    expect(mutate("ls >> f.txt")).toBe("mutate");
+    expect(mutate("cat a.txt > b.txt")).toBe("mutate");
+    expect(mutate("rm -rf build")).toBe("mutate");
+    expect(mutate("mv a b")).toBe("mutate");
+    expect(mutate("touch new.txt")).toBe("mutate");
+    expect(mutate("mkdir d")).toBe("mutate");
+    expect(mutate("npm install")).toBe("mutate");
+    expect(mutate("git commit -m x")).toBe("mutate");
+    // bare `&` background compound → mutate: splitShellSegments does NOT
+    // split on bare `&`, so the second command would otherwise ride inside a
+    // policy-passing first segment and dodge both checks (review High fix).
+    expect(mutate("ls & touch new.txt")).toBe("mutate");
+    expect(mutate("ls & git push")).toBe("mutate");
+    expect(mutate("ls & npm install")).toBe("mutate");
+    // unknown command → fail-closed mutate
+    expect(mutate("somecustomtool --flag")).toBe("mutate");
+    // empty / non-string command → fail-closed mutate
     expect(
-      classifyCall({ id: "3", name: "bash", input: { command: "ls -la src" } })
-    ).toBe("read");
-    expect(
-      classifyCall({ id: "4", name: "bash", input: { command: "cat a.txt" } })
-    ).toBe("read");
-    expect(
-      classifyCall({
-        id: "5",
-        name: "bash",
-        input: { command: "rm -rf build" },
-      })
+      classifyCall({ id: "e", name: "bash", input: { command: "" } })
     ).toBe("mutate");
-    expect(
-      classifyCall({
-        id: "6",
-        name: "bash",
-        input: { command: "echo x > f.txt" },
-      })
-    ).toBe("mutate");
-    // non-string command → fail-closed mutate
     expect(
       classifyCall({ id: "7", name: "bash", input: { command: 42 } })
     ).toBe("mutate");
+  });
+
+  // SC6 guard: the readonly bash-mode SSOT is a separate consumer with
+  // deliberately stricter semantics (no `>` at all, no background `&`). The
+  // gate's workspace-write classifier must not relax that table.
+  it("validateReadonlyCommand still rejects 'ls 2>&1' (bash readonly mode unchanged)", () => {
+    expect(() => validateReadonlyCommand("ls 2>&1")).toThrow();
   });
 
   it("classifies other tools (read_file / grep / glob / web_fetch …) as read", () => {
@@ -570,6 +606,32 @@ describe("createWorktreeIsolationExecutor", () => {
     expect(second[0]!.message).toContain(CREATE_TASK_WORKTREE_TOOL_HINT);
     expect(provisioned).toBe(0);
     expect(calls).toHaveLength(0);
+  });
+
+  it("unboundMutateNotice is a factual block: names the tool, no imperative 'create this conversation's worktree' framing (spec casual-ask-context-hygiene SC7)", () => {
+    const message = unboundMutateNotice();
+    // visible gate prefix invariant (same as the executor-level assertions)
+    expect(message.startsWith(`${WORKTREE_ISOLATION_PREFIX} `)).toBe(true);
+    // genuine mutations still get pointed at the tool (literal name, not
+    // only via the hint constant)
+    expect(message).toContain("create-task-worktree");
+    expect(message).toContain(CREATE_TASK_WORKTREE_TOOL_HINT);
+    // no imperative framing that turns the next model move into "go build a
+    // tree" — the notice states facts, the tool's existence, and the
+    // read-only main repo; it does not prescribe building a per-conversation
+    // worktree
+    expect(message).not.toContain("this conversation's task worktree");
+    expect(message).not.toContain("end the turn");
+    // factual semantics locked: the call WOULD write, and was NOT executed
+    expect(message).toContain("This call would write");
+    // full-text pin (spec 「vitest 全文锁定」): wording changes must be
+    // deliberate test changes, not drift
+    expect(message).toBe(
+      `${WORKTREE_ISOLATION_PREFIX} This call would write the workspace, and it was not executed: ` +
+        `worktree isolation is ON and this session is not yet bound to a task worktree. ` +
+        `The main repo stays read-only. The ${CREATE_TASK_WORKTREE_TOOL_HINT} exists for ` +
+        `sessions that need a writable root (no auto-provisioning).`
+    );
   });
 
   it("passthrough adjudication survives on a task-worktree-rooted engine: own tree → same-root no-op, provision runs once", async () => {
