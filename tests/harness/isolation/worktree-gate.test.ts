@@ -345,6 +345,7 @@ describe("classifyCall", () => {
     );
     expect(read("ls 2>&1")).toBe("read");
     expect(read("ls 2>/dev/null")).toBe("read");
+    expect(read("ls &> /dev/null")).toBe("read");
     expect(read("cat a.txt | grep x")).toBe("read");
     expect(read("git status")).toBe("read");
     expect(read("git diff")).toBe("read");
@@ -363,9 +364,18 @@ describe("classifyCall", () => {
     expect(mutate("mkdir d")).toBe("mutate");
     expect(mutate("npm install")).toBe("mutate");
     expect(mutate("git commit -m x")).toBe("mutate");
+    // bare `&` background compound → mutate: splitShellSegments does NOT
+    // split on bare `&`, so the second command would otherwise ride inside a
+    // policy-passing first segment and dodge both checks (review High fix).
+    expect(mutate("ls & touch new.txt")).toBe("mutate");
+    expect(mutate("ls & git push")).toBe("mutate");
+    expect(mutate("ls & npm install")).toBe("mutate");
     // unknown command → fail-closed mutate
     expect(mutate("somecustomtool --flag")).toBe("mutate");
-    // non-string command → fail-closed mutate
+    // empty / non-string command → fail-closed mutate
+    expect(
+      classifyCall({ id: "e", name: "bash", input: { command: "" } })
+    ).toBe("mutate");
     expect(
       classifyCall({ id: "7", name: "bash", input: { command: 42 } })
     ).toBe("mutate");

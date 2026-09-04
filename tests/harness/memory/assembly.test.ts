@@ -13,8 +13,14 @@
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { execSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -402,6 +408,9 @@ describe("assembleSystemPrompt — memory_catalog", () => {
 
   // specs/casual-ask-context-hygiene.md SC1: the existence pointer states that
   // a library exists; it must not command the model to call memory_recall.
+  const RECALL_COMMAND_SENTENCE =
+    "Use memory_recall(query) to retrieve past experience.";
+
   it("locks EXISTENCE_POINTER to the bare existence sentence (no recall command)", () => {
     assert.equal(EXISTENCE_POINTER, "A memory library is available.");
   });
@@ -413,15 +422,35 @@ describe("assembleSystemPrompt — memory_catalog", () => {
     );
   });
 
-  it("keeps the commanded recall sentence out of the memory source tree (SC1)", () => {
-    const hits = execSync(
-      "grep -rn 'Use memory_recall(query) to retrieve past experience.' src/ || true",
-      { cwd: join(import.meta.dirname, "../../.."), encoding: "utf8" }
-    ).trim();
-    assert.equal(
+  it("keeps the commanded recall sentence out of the memory source tree (SC1)", async () => {
+    // Pure-node recursive scan over src/ — no shell dependency, so a missing
+    // binary or wrong cwd cannot silently produce a vacuous pass: the scan
+    // MUST read at least one .ts file or the test fails.
+    const srcRoot = join(import.meta.dirname, "../../..", "src");
+    const needle = RECALL_COMMAND_SENTENCE;
+    let filesRead = 0;
+    const hits: string[] = [];
+    async function walk(dir: string): Promise<void> {
+      for (const e of await readdir(dir, { withFileTypes: true })) {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) {
+          await walk(full);
+        } else if (e.isFile() && e.name.endsWith(".ts")) {
+          const text = await readFile(full, "utf8");
+          filesRead += 1;
+          if (text.includes(needle)) hits.push(full);
+        }
+      }
+    }
+    await walk(srcRoot);
+    assert.ok(
+      filesRead > 0,
+      "scanner must read at least one src .ts file (guard against vacuous pass)"
+    );
+    assert.deepEqual(
       hits,
-      "",
-      `commanded recall sentence must not appear in src/: ${hits}`
+      [],
+      `commanded recall sentence must not appear in src/`
     );
   });
 

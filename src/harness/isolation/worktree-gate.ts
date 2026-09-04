@@ -313,14 +313,20 @@ const ROOT_FLIP_TOOLS: ReadonlySet<string> = new Set([
  * Classify one bash command by whether it writes the workspace. A command is
  * `read` only if EVERY top-level segment (split on `;`, `&&`, `||`, `|` by
  * `splitShellSegments`) passes the readonly command policy AND its redirects
- * write nothing to the filesystem. Fail-closed: unknown commands, mutating
- * commands, and any `>` / `>>` redirect to a real file classify `mutate`.
+ * write nothing to the filesystem AND it spawns no bare-`&` background job.
+ * Fail-closed: unknown commands, mutating commands, any `>` / `>>` redirect
+ * to a real file, and any bare `&` classify `mutate`.
  *
  * Redirect rules (the delta vs the readonly bash-mode table, which rejects
  * ALL `>`): stderr→stdout merges and /dev/null sinks are pure stream plumbing
  * — `2>&1`, `2>/dev/null`, `1>&2`, `> /dev/null`, `&> /dev/null` keep the
  * segment `read`; any other `>` / `>>` target means the command's output
  * lands in a workspace file → `mutate` (e.g. `echo x > f.txt`).
+ *
+ * Bare-`&` rule: `splitShellSegments` splits only on `;` `&&` `||` `|`, so in
+ * `ls & touch new.txt` the mutating second command rides inside one segment
+ * that the policy check would pass on its first token alone. Any `&` that is
+ * not part of a redirect token is therefore a background compound → mutate.
  *
  * Deliberately NOT `validateReadonlyCommand`: that validator is the SSOT for
  * `bashMode === "readonly"` (bash.ts) and fail-closes against `2>&1` / pipes
@@ -335,7 +341,9 @@ export function classifyBashWorkspaceWrite(command: string): "read" | "mutate" {
   if (segments.length === 0) return "mutate";
   return segments.every(
     (segment) =>
-      segmentIsPolicyReadonly(segment) && segmentRedirectsNowhere(segment)
+      segmentIsPolicyReadonly(segment) &&
+      segmentRedirectsNowhere(segment) &&
+      segmentHasNoBareBackground(segment)
   )
     ? "read"
     : "mutate";
@@ -377,6 +385,20 @@ function segmentRedirectsNowhere(segment: string): boolean {
     // no workspace file is created or appended
     return /^\d*>&\d+$/.test(redirect) || target === "/dev/null";
   });
+}
+
+/**
+ * Bare-`&` background detection for one segment: false when the segment
+ * contains an `&` that is NOT part of a redirect token (`2>&1`, `>&2`,
+ * `&>`, `&>>`). `splitShellSegments` consumes `&&` but passes bare `&`
+ * through, so a background compound (`ls & touch new.txt`) would otherwise
+ * hide its second command inside one policy-passing segment — fail-closed
+ * to mutate instead (mirror of the readonly table's Strictening 1, minus
+ * the redirect forms the gate legitimately allows).
+ */
+function segmentHasNoBareBackground(segment: string): boolean {
+  const withoutRedirects = segment.replace(/&>>?|\d?>&/g, "");
+  return !withoutRedirects.includes("&");
 }
 
 /**
