@@ -56,8 +56,23 @@ _Avoid_: 固定条数尾窗；行账 / 行窗口；把 LLM `/compact` 当 UI 树
 **fence display cap**: TUI markdown 围栏在 OpenTUI 树上只挂前 32 行，溢出用 `还有 N 行`；会话正文仍是全文。与 write/edit 完成态 6 行预览窗分开。
 _Avoid_: 用只挂最近 N 条消息代替围栏截行；把围栏窗改成 6；为省树而删 session 里的代码
 
-**result preview（结果预览）**: 工具调用标题行下方的截断输出块——`⎿` 风格 dim 前缀、上限 5 行、bash 取尾部、ANSI 透传、失败照显标红。数据走 handler envelope 的 `meta` 观测旁路（plain-string tool output / #298），永不进模型视野；与 `fence display cap`（32 行）、write/edit 6 行预览并列三类显示窗。
-_Avoid_: 把 meta 字段经 encodeToolResults 带进 model tool_result；把 5 行窗与围栏 32 行或 write/edit 6 行混用；渲染空预览块（空/全空白/ANSI strip 后为空 → 不渲染）
+**result preview（结果预览）**: 工具调用标题行下方的截断输出块——`⎿` 风格前缀、上限 5 行、bash 取尾部、ANSI 透传。只画在 **keep class** 的成功 bash 上；dim 只用于这种成功尾巴，不用来藏失败或点名着色。数据走 handler envelope 的 `meta` 观测旁路（plain-string tool output / #298），永不进模型视野；与 `fence display cap`（32 行）、write/edit 6 行预览并列三类显示窗。
+_Avoid_: 把 meta 字段经 encodeToolResults 带进 model tool_result；把 5 行窗与围栏 32 行或 write/edit 6 行混用；渲染空预览块；失败或 retract class 仍画 dim `⎿`
+
+**settled appearance（落定态）**: TUI 里工具从 live 转为 idle 之后的可见性策略——按类留下足迹、收回去、或点名着色。不是「有已完成工具就整轮折成计数行」。
+_Avoid_: 一律折叠；把 live 过程叫落定态；D3 整轮藏标题
+
+**keep class（留）**: 落定后仍画出标题行的工具类（bash / write / edit / 会话动作）。bash 成功时标题带命令，并可带结果预览五行走；其它留类默认只留标题。
+_Avoid_: 只留 dim `⎿`、把标题藏进折叠计数
+
+**retract class（收）**: 落定后标题和预览都从屏幕拿掉、只进折叠计数的工具类（读取 / 搜索 / 查询）。未知未注册工具缺省也是收。
+_Avoid_: 藏标题留预览；给 `read_file` 加内容预览；把失败的收类折进计数
+
+**accent class（点名着色）**: 落定后以非 dim 的 `accent` 色 + 人读表述留在屏幕上的特定能力（skill、task worktree 生命周期工具）。必须进显示注册表。
+_Avoid_: 浅色隐藏；只进计数；用 error 红当点名色
+
+**failure overlay（失败横切）**: 任意落定类在失败时覆盖成功态分类——留标题、一行短错误、error 色、不进折叠计数、不用 dim `⎿` 堆长文。error 色优先于 accent。
+_Avoid_: 失败跟成功走同一收；把失败当成第四类工具表；失败五行走 dim 预览
 
 **thinking duration（思考时长）**: assistant 消息的落盘属性——adapter 流式路径测量（首条 `thinking_delta` 至首个非思考增量），`thinkingMs` 经 commit 钩子随事件链落盘，`SessionFileV1` 上照 `messageCreatedAt` 模式重建并行数组（additive，schema 版本不升）；折叠簇时长 = 簇内消息求和。非 UI 测量值。
 _Avoid_: TUI 墙上时钟副产物（只活当前轮/重启即失/跨会话串味）；挂在 thinking 内容块上（污染 provider replay）；旧会话回填；`thinkingMs <= 0` 或非有限数落盘（字段缺席）
@@ -409,6 +424,9 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **worktree isolation mode vs workspaceRoot vs workspace（serve 主根）**: git worktree 是会话级 mutate 物理隔离；`workspaceRoot` 是 per-root 状态锚（ADR-0019）；serve 主根是显式选定锚（ADR-0023）。rebind 只切本会话生效根，不改锚规则本身
 - **session worktree rebind vs taskRoot（活值）**: rebind 是动作（缝成功 resolve 的那一刻），taskRoot 是该动作写入的活 cell；动作对下一波 tool calls 生效（波快照边界），cell 读取面始终回答「当前生效根」
 - **task worktree label vs conversationId**: label 只展示与 enter 定位；conversationId 才是叶子身份与归属裁决
+- **settled appearance vs result preview**: 落定三类决定谁还上屏；五行走 ANSI 预览只作用于 keep class 的成功 bash
+- **failure overlay vs retract class**: 失败覆盖「收」，失败工具出独立行，不折进计数
+- **accent class vs failure overlay**: 成功点名走 accent；失败时 error 色优先，不用品牌色表示出错
 - **user.md vs user-level AGENTS.md vs 项目 AGENTS.md**: 画像与用户级行为约定同根 `~/.iknow/`、对所有项目生效；项目仓库根 `AGENTS.md` 叠在用户级之上且项目优先；都不是记忆库事实文件
 
 ## Flagged ambiguities

@@ -30,6 +30,8 @@
 - `tui-transcript-viewport.md` — ChatView 视口挂载（取代 PR #592 固定条数尾窗；滚动文档全量，树上只挂视口+overscan）
 - `tui-markdown-stream-display.md` — markdown 围栏显示窗（32 行）+ 流式顶层块冻结；不改 session、不是消息条数尾窗
 - `tui-run-graph-view.md` — `run_graph` 执行中 chrome 一行 + 语义分组视图（map #749；原型 #751）；plan: `plans/tui-run-graph-view.md`
+- `tui-tool-settled-appearance.md` — 工具落定态（留 / 收 / 点名着色 + 失败横切 + `deriveSlot`）；**supersedes** `tui-display-consistency` D3；plan: `plans/tui-tool-settled-appearance.md`
+- `tui-display-consistency.md` — 外壳统一 / thinkingMs / 结果预览窗（D4 ANSI·五行走·read 无内容预览）；**D3 折叠合同已让位** 给 `tui-tool-settled-appearance.md`
 
 ### 工具与扩展源
 
@@ -84,6 +86,7 @@
 - `trace-lifecycle-panel-v2.md` / `iknow-trace-standalone-service.md` / `traceserver-inspection-panel.md` — trace 三迭代 spec；独立 `iknow trace` 进程（`#183`）+ web trace.html 面板已取代；**superseded by ADR-0020（读侧融合回 `iknow serve` 同进程同端口；`iknow trace` 默认探测 + `--separate` escape hatch）**
 - `653-horizon-pkg1-perception.md` — 落地完成（PR #666）；TUI Verify 终态 + 环境现势
 - `653-horizon-pkg2-kernel.md` — 落地完成（PR #671）；前台/后台 bash 沙箱纪律对齐 + `isConcurrencySafe` 调度
+- `tui-display-consistency.md` D3 折叠合同 — superseded by `tui-tool-settled-appearance.md`（spec 仍活跃，仅 D3 让位；plan T3 cancelled）
 
 ---
 

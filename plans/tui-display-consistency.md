@@ -1,5 +1,7 @@
 # Plan: TUI 显示一致性
 
+> **T3 已 superseded（2026-09-04）。** 不要按旧 D3「整轮折叠」实施 T3。活合同与后续实施见 `specs/tui-tool-settled-appearance.md` / `plans/tui-tool-settled-appearance.md`。T1 外壳、T2 thinkingMs、T4 五行走预览若已在主干落地则保持；本文件不再当折叠语义的 SSOT。
+
 **Goal:** 流式与历史外观零跳变、思考时长随消息落盘、折叠作用于每一轮、工具结果以 5 行预览上屏、TUI/web 消费同一份数据。
 
 **Approach:** 六条 tracer bullet 按依赖排序：先统一壳与文案（T1）并铺落盘轨道（T2，两者平行）；然后折叠简化（T3，消费 T1 的壳与 T2 的数据）、结果预览（T4，消费 T1 的注册表）；web 端（T5）最后接入；清理（T6）随时可做。每条 bullet 一 commit，垂直贯穿它涉及的每一层（schema / harness / TUI / web / tests）并端到端可演示。
@@ -38,14 +40,14 @@ minimal-change-verifier: yes — D1-D7 各自独立 logical task；SC1-SC9 每�
    - [parallel]（与 T1 无共享文件，可并行）
 
 3. **折叠简化：全轮生效 + 删 TUI 内存副通道** — tag: `[implementation]`
-   - **Inherits:** spec D3——「删除 inLastTurn 门；删除 shouldShowTurnActivityFold 的 thinkingSeconds > 0 || turnToolTotal > 1 闸门，任何已完成工具轮次都折叠；running 态保持逐条可见（现行测试钉住的行为不变）」；「折叠输入改用 D2 落盘数据（纯函数：簇 messageIndex 范围 + 并行数组 → 求和）」；「删除整条内存副通道：lastThinkingSeconds / thinkingFrozenSeconds / thinkingFrozenRef / pinAndStoreThinkingSeconds / pinThinkingSeconds / thinkingPlaced / ChatViewProps 两 prop」；「流式期间『思考中…』临时指示保留；旧会话无 thinkingMs 时折叠行只显示工具计数」。
-   - **Surface:** `src/tui`（chat-view / turn-activity / app / stream-draft / think-fold）。
-   - **Acceptance:** `rg -n "lastThinkingSeconds|thinkingFrozenSeconds|pinThinkingSeconds|thinkingPlaced" src/` 零命中（spec SC3）；两轮会话渲染各自出现折叠行且旧轮 `[完成]` 行不回摊、单工具无秒数轮次也折叠、running 态逐条可见（spec SC4）；`tests/tui/chat-view-thinking-tool-fold.test.tsx` / `turn-activity.test.ts` 按新语义重写后全绿。
-   - Status: [ ] pending
+   - **Inherits:** ~~spec D3 整轮折叠~~ **SUPERSEDED** — 见 `specs/tui-tool-settled-appearance.md`。本 bullet 不要实施。
+   - **Surface:** `src/tui`
+   - **Acceptance:** n/a — 已取消
+   - Status: [x] cancelled（2026-09-04，D3 superseded）
    - [blocks: T1, T2]
 
 4. **结果预览：5 行 dim 输出块 + 注册表一体声明** — tag: `[implementation]`
-   - **Inherits:** spec D4/D7——「标题行下方 ⎿ 风格 dim 前缀结果块，上限 5 行；bash 显示 stdout/stderr 尾部 5 行，超出首行 `… +N 行`；失败内容照显标红；子进程 ANSI 透传不重新染色」；「ToolResultMeta 扩 stdout/stderr 承载字段（显示层投影，不经 encodeToolResults 进模型 tool_result）」；「空/全空白/ANSI strip 后为空 → 不渲染预览块；单行直接显示；ANSI 按剥离后宽度计数、截断不切断转义序列」；「read_file 不显示预览；write/edit 维持 6 行不变；skill 显示一行结果；无输出工具一行摘要或省略；live 与历史同规则」；「工具状态行文案纯函数与结果预览函数同置一处，新增一种工具的显示只需在一个注册表加声明；EXPECTED_TOOLSET_* 闸沿用」。
+   - **Inherits:** spec D4/D7——五行走 / ANSI / `read_file` 无内容预览 / write·edit 六行仍有效。**失败「照显标红 + dim ⎿」与 skill 五行走正文预览已被 `tui-tool-settled-appearance` D5/D6 覆盖**，落定态不要再按旧句实施。
    - **Surface:** `src/tui`（tool-summary 注册表 / message-blocks / live-tool-preview / completed-tool-preview-view）+ `harness`（tools types 的 ToolResultMeta）。
    - **Acceptance:** stub bash 返回多行输出时标题行下方渲染尾部 5 行 dim 预览、超出带 `… +N 行`，失败标红，read_file 无预览块（spec SC5）；`tests/tui/deps-tools.test.ts` EXPECTED_TOOLSET_* 闸通过且新声明点唯一（spec SC6）。
    - Status: [ ] pending
