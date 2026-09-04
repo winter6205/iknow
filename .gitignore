@@ -158,3 +158,6 @@ node_modules
 !.cursor/vendor/**
 archive
 docs/demos
+# TUI deps-tools 测试残留（tests/tui/deps-tools.test.ts 用 mkdtemp(process.cwd()) 落目录，
+# 时序 flake 时残留 .iknow-tui-hooks-* / .iknow-tui-nohooks-*；根因修复见 tests/tui/deps-tools.test.ts）
+.iknow-tui-*
