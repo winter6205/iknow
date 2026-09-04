@@ -30,7 +30,7 @@ import { parseMemoryEntry } from "../frontmatter.js";
 import type { MemoryEntryV1 } from "../schema.js";
 
 const OUTPUT_HARD_CAP = 20_000;
-const DEFAULT_LIMIT = 10;
+const DEFAULT_LIMIT = 3;
 const MAX_LIMIT = 50;
 
 export interface MemoryRecallToolDeps {
@@ -43,7 +43,7 @@ export function createMemoryRecallTool(deps: MemoryRecallToolDeps): AciToolDef {
   return Object.freeze({
     name: "memory_recall",
     description:
-      "Look up prior knowledge (conventions, contracts, project notes) at the start of a task or when a recurring question comes up; pair with memory_save to capture a new fact worth keeping. Returns one block per hit: a `### title` line, metadata lines, a blank line, then the body (limit 1..50, default 10), self-capped at 20000 chars; pure read-only over the per-conversation memory library.",
+      "Look up a specific stored fact (convention, contract, project note) when that fact is needed this turn; pair with memory_save to capture a new fact worth keeping. This is an index, not a checklist — most turns need no recall. Returns one block per hit: a `### title` line, metadata lines, a blank line, then the body (limit 1..50, default 3), self-capped at 20000 chars; pure read-only over the per-conversation memory library.",
     inputSchema: {
       type: "object",
       properties: {

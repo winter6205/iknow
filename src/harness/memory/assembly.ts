@@ -38,9 +38,12 @@ import { listStoreEntries } from "./store.js";
 export const PRIORITY_DECLARATION =
   "Project-level instructions take precedence over user-level instructions.";
 
-/** Locked by spec SC 5 (only when the memory library holds ≥1 entry). */
-export const EXISTENCE_POINTER =
-  "A memory library is available. Use memory_recall(query) to retrieve past experience.";
+/**
+ * Locked by spec SC 5 (only when the memory library holds ≥1 entry) and
+ * specs/casual-ask-context-hygiene.md SC1 (states existence only — never
+ * commands the model to call memory_recall).
+ */
+export const EXISTENCE_POINTER = "A memory library is available.";
 
 /**
  * How `.iknow/rules/*.md` files enter the static layer
