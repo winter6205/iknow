@@ -34,6 +34,7 @@ import { IKNOW_SOUL_DEFAULT } from "./soul.js";
 import { IKNOW_USAGE_DEFAULT } from "./usage.js";
 import { bootstrapFilePath } from "./workspace.js";
 import { assembleStaticSystemPrompt } from "../memory/assembly.js";
+import { gitSnapshotSegment, type GitSnapshot } from "./git-snapshot.js";
 
 /** IKNOW-196 + #194 T6 + IKNOW-symbol-primary T1 装配顺序 (6 段 LOCKED)。 */
 export const IKNOW_ASSEMBLY_ORDER = [
@@ -104,6 +105,13 @@ export interface AssemblyContext {
    *  守 KV 缓存稳定契约)。build-engine 从驱动 deps.agentStatus (T1 注入缝)
    *  的同一 gate 派生 —— 栏会注入的表面才有读规则;ask / worker 永不注入。 */
   readonly agentStatusReadRule?: boolean;
+  /** plans/model-prefix-layering.md B5 / spec §9:git 块注入缝 (可选)。
+   *  返回一个**会话级冻结**的快照(闭包取一次,build-engine / worker 装配
+   *  期同步取一次)。装配层每 turn 调同一闭包 → 相邻两轮 byte-identical
+   *  (D9 / KV 缓存契约)。缺席 / 返回 undefined → 段缺席(字节级零变化);
+   *  退化态(cwd_unavailable / not_a_git_repo / git_unavailable)→ 段缺席
+   *  不报错(spec §9:「接受缺席即字节变化」)。 */
+  readonly git?: () => GitSnapshot | undefined;
 }
 
 /** #337 T6 `<available_skills>` 段元素形态(最小投影:name + description + disabled)。
@@ -205,6 +213,10 @@ export function createIknowSystemResolver(opts: {
   readonly coordinatorText?: string;
   /** #646 T2:见 AssemblyContext.agentStatusReadRule 注释(布尔 gate,同门驱动)。 */
   readonly agentStatusReadRule?: boolean;
+  /** plans/model-prefix-layering.md B5 / spec §9:git 块注入缝 (可选)。
+   *  闭包在工厂调用时同步取一次快照,会话内冻结。详见
+   *  AssemblyContext.git 注释。 */
+  readonly git?: () => GitSnapshot | undefined;
 }): () => Promise<string | undefined> {
   const bootstrapActive = shouldIncludeBootstrap(opts.surface);
   return () =>
@@ -224,6 +236,7 @@ export function createIknowSystemResolver(opts: {
         ? { coordinatorText: opts.coordinatorText }
         : {}),
       ...(opts.agentStatusReadRule ? { agentStatusReadRule: true } : {}),
+      ...(opts.git ? { git: opts.git } : {}),
     });
 }
 
@@ -285,6 +298,25 @@ export async function assembleIdentityContext(
       const directory = mcpNameDirectorySegment(summaries);
       if (directory !== undefined) segments.push(directory);
     }
+  }
+  // plans/model-prefix-layering.md B5 / spec §9:加性段 `## Git`(会话级常量层,
+  // 与 `## Project path` 同形态——内容字节稳定)。append 在 mcp 名字目录之后、
+  // agent-status 读规则之前;不触碰 LOCKED 6 段顺序,也不与 agentStatusReadRule
+  // 共门。数据源 = `git-snapshot.ts` 创建的闭包,会话期同步取一次后冻结;
+  // 退化态(cwd_unavailable / not_a_git_repo / git_unavailable)→ 段缺席
+  // (字节级零变化,spec §9)。build-engine / worker 装配期均同步取一次。
+  if (ctx.git) {
+    let snapshot: GitSnapshot | undefined;
+    try {
+      snapshot = ctx.git();
+    } catch (err) {
+      console.warn(
+        `[identity/assemble] git snapshot resolver failed: ${String(err)}`
+      );
+      snapshot = undefined;
+    }
+    const segment = gitSnapshotSegment(snapshot);
+    if (segment !== undefined) segments.push(segment);
   }
   // #646 T2 / ADR-0028 加性段 agent-status 读规则:读规则进 system 一次,
   // 不写进每条栏(栏本身永不进 deps.system)。仅栏会注入的表面(build-engine

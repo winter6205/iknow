@@ -44,3 +44,14 @@ export type {
   SkillSummary,
   McpServiceSummary,
 } from "./assemble.js";
+export {
+  createGitSnapshotProvider,
+  gitSnapshotSegment,
+  GIT_SEGMENT_TITLE,
+  GIT_SEGMENT_DISCLAIMER,
+  GIT_STATUS_MAX_CHARS,
+} from "./git-snapshot.js";
+export type {
+  GitSnapshot,
+  CreateGitSnapshotProviderOpts,
+} from "./git-snapshot.js";

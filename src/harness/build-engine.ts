@@ -75,6 +75,7 @@ import { ValidationError } from "../shared/errors.js";
 import {
   createIknowSystemResolver,
   initIknowWorkspaceSafe,
+  createGitSnapshotProvider,
   type McpServiceSummary,
 } from "./identity/index.js";
 import {
@@ -1201,6 +1202,11 @@ export async function buildHarnessEngine(
       // #646 T2: agent-status 读规则段 gate —— 与下方 deps.agentStatus 同一
       // agentStatusTodoDir 表达式派生 (栏在场的表面才装配读规则句)。
       ...(agentStatusTodoDir ? { agentStatusReadRule: true } : {}),
+      // plans/model-prefix-layering.md B5 / spec §9:git 块注入缝 —— 取
+      // `projectIdentityRoot` 为 cwd (稳定根,与会话 rebind 解耦),装配期
+      // 同步取一次快照、会话内冻结。退化态(非 git 仓库 / git 不可用 /
+      // cwd 不可解析)→ provider 返回 undefined → 装配段缺席,不报错。
+      git: createGitSnapshotProvider({ cwd: projectIdentityRoot }),
       // ADR-0041 / plans/model-prefix-layering.md B3:`orchestration` system
       // 段撤出 —— 内容并入 graph 模式切换提示(loop-engine 消息尾追加,
       // 见下方 graphModeChange 缝)。graph 装配快照改为单点供 loop-engine
