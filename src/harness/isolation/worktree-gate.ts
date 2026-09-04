@@ -35,7 +35,8 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { errorMessage } from "../errors.js";
-import { validateReadonlyCommand } from "../aci/tools/bash-readonly.js";
+import { validateSegmentPolicy } from "../aci/tools/bash-readonly.js";
+import { splitShellSegments } from "../permission/hard-walls.js";
 import { FILE_WRITE_TOOL_NAMES } from "../aci/tools/symbol-mutate.js";
 import type { LiveTaskRoot } from "../session-roots.js";
 import type {
@@ -304,6 +305,76 @@ const ROOT_FLIP_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Classify one bash command by whether it writes the workspace. A command is
+ * `read` only if EVERY top-level segment (split on `;`, `&&`, `||`, `|` by
+ * `splitShellSegments`) passes the readonly command policy AND its redirects
+ * write nothing to the filesystem. Fail-closed: unknown commands, mutating
+ * commands, and any `>` / `>>` redirect to a real file classify `mutate`.
+ *
+ * Redirect rules (the delta vs the readonly bash-mode table, which rejects
+ * ALL `>`): stderr→stdout merges and /dev/null sinks are pure stream plumbing
+ * — `2>&1`, `2>/dev/null`, `1>&2`, `> /dev/null`, `&> /dev/null` keep the
+ * segment `read`; any other `>` / `>>` target means the command's output
+ * lands in a workspace file → `mutate` (e.g. `echo x > f.txt`).
+ *
+ * Deliberately NOT `validateReadonlyCommand`: that validator is the SSOT for
+ * `bashMode === "readonly"` (bash.ts) and fail-closes against `2>&1` / pipes
+ * composition — a much stricter question ("is this provably side-effect-free
+ * in readonly mode") than the gate's ("does this call write the workspace").
+ * Complexity guard (ACR): the two semantics stay in separate functions; the
+ * gate only borrows the segment splitter and the readonly command policy via
+ * `validateSegmentPolicy` so the command whitelist cannot drift.
+ */
+export function classifyBashWorkspaceWrite(command: string): "read" | "mutate" {
+  const segments = splitShellSegments(command);
+  if (segments.length === 0) return "mutate";
+  return segments.every(
+    (segment) =>
+      segmentIsPolicyReadonly(segment) && segmentRedirectsNowhere(segment)
+  )
+    ? "read"
+    : "mutate";
+}
+
+/**
+ * Reuse the readonly-mode command policy (allowlist + find/sort/git flag
+ * tables) for a single segment: true when the segment's command would be
+ * accepted by `validateSegmentPolicy`, false when it throws (execution
+ * agents, non-allowlisted commands, mutating git subcommands / flags).
+ * Unknown commands → false → fail-closed mutate upstream.
+ */
+function segmentIsPolicyReadonly(segment: string): boolean {
+  try {
+    validateSegmentPolicy(segment, segment);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Redirect analysis for one policy-passing segment: false when the segment
+ * redirects output into a workspace file. `/dev/null` targets and fd merges
+ * (`2>&1`, `1>&2`) write nothing to the workspace and stay true. Quoted `>`
+ * characters inside the command text are treated as redirects (rare
+ * false-positive cost; deny-by-default direction).
+ */
+function segmentRedirectsNowhere(segment: string): boolean {
+  const matches = [...segment.matchAll(/&>>?|\d?>>&?|\d?>&?\d?/g)];
+  if (matches.length === 0) return true;
+  return matches.every((match) => {
+    const redirect = match[0];
+    const target = segment
+      .slice((match.index ?? 0) + redirect.length)
+      .trim()
+      .split(/\s+/)[0]!;
+    // fd merge (`2>&1`, `1>&2`) or /dev/null sink — pure stream plumbing,
+    // no workspace file is created or appended
+    return /^\d*>&\d+$/.test(redirect) || target === "/dev/null";
+  });
+}
+
+/**
  * T1 (plans/worktree-live-task-root.md §6 T1) — workspace-mutation classifier
  * SSOT. Single source of truth for "does this tool write to the workspace":
  *
@@ -312,9 +383,11 @@ const ROOT_FLIP_TOOLS: ReadonlySet<string> = new Set([
  *     list the worker deny-list (catalog.ts) uses and the same set the
  *     registry's Gate-3 append-only check enforces — one name → one
  *     classification, no shadow copies;
- *   - bash is a mutate unless its command passes the readonly command
- *     validator (the same SSOT the readonly bash mode uses); non-string
- *     bash commands fail closed to mutate;
+ *   - bash is adjudicated by `classifyBashWorkspaceWrite` — the gate's own
+ *     workspace-write question ("will any segment or redirect write the
+ *     workspace"), NOT the readonly bash-mode table: `validateReadonlyCommand`
+ *     remains the SSOT only for `bashMode === "readonly"` (bash.ts). Non-
+ *     string bash commands fail closed to mutate;
  *   - read-only tools (read_file / grep / glob / web_fetch / memory_recall /
  *     etc.) and control / lifecycle tools (create-task-worktree /
  *     spawn_subagent / todo_write / …) do not write workspace files and
@@ -348,12 +421,7 @@ export function classifyCall(call: ToolCall): MutateClass {
   if (call.name === "bash") {
     const command = (call.input as { command?: unknown } | null)?.command;
     if (typeof command !== "string") return "mutate";
-    try {
-      validateReadonlyCommand(command);
-      return "read";
-    } catch {
-      return "mutate";
-    }
+    return classifyBashWorkspaceWrite(command);
   }
   return "read";
 }

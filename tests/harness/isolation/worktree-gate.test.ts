@@ -38,6 +38,8 @@ import {
   WORKTREE_ISOLATION_PREFIX,
 } from "../../../src/harness/isolation/worktree-gate.ts";
 import type { GitRunner } from "../../../src/harness/isolation/worktree-gate.ts";
+// SC6 guard: the readonly-mode SSOT must stay untouched by the gate split.
+import { validateReadonlyCommand } from "../../../src/harness/aci/tools/bash-readonly.ts";
 import { createLiveTaskRoot } from "../../../src/harness/session-roots.ts";
 import type {
   Executor,
@@ -325,31 +327,54 @@ describe("classifyCall", () => {
     );
   });
 
-  it("classifies bash by readonly command validation (SSOT validateReadonlyCommand)", () => {
-    expect(
-      classifyCall({ id: "3", name: "bash", input: { command: "ls -la src" } })
-    ).toBe("read");
-    expect(
-      classifyCall({ id: "4", name: "bash", input: { command: "cat a.txt" } })
-    ).toBe("read");
-    expect(
-      classifyCall({
-        id: "5",
-        name: "bash",
-        input: { command: "rm -rf build" },
-      })
-    ).toBe("mutate");
-    expect(
-      classifyCall({
-        id: "6",
-        name: "bash",
-        input: { command: "echo x > f.txt" },
-      })
-    ).toBe("mutate");
+  // Invariant (spec casual-ask-context-hygiene Does/classifyCall): the gate
+  // adjudicates "will this bash call write the workspace", NOT the readonly
+  // bash-mode table. Read-only allowlisted segments compose freely through
+  // pipes, `&&`, and stderr merges (`2>&1`); only workspace writes (file
+  // redirects, mutating commands) or unknown commands fail closed to mutate.
+  it("classifies bash by whether it writes the workspace", () => {
+    const read = (command: string) =>
+      classifyCall({ id: "r", name: "bash", input: { command } });
+    const mutate = (command: string) =>
+      classifyCall({ id: "m", name: "bash", input: { command } });
+
+    // SC5 exact case: pipes + && + 2>&1 over read-only commands stay read.
+    expect(read("date '+%Y-%m-%d' && ls -la /tmp 2>&1 | head -30")).toBe(
+      "read"
+    );
+    expect(read("ls 2>&1")).toBe("read");
+    expect(read("ls 2>/dev/null")).toBe("read");
+    expect(read("cat a.txt | grep x")).toBe("read");
+    expect(read("git status")).toBe("read");
+    expect(read("git diff")).toBe("read");
+    expect(read("ls -la src")).toBe("read");
+    expect(read("cat a.txt")).toBe("read");
+    expect(read("ls && cat b.txt; echo done")).toBe("read");
+
+    // workspace writes → mutate
+    expect(mutate("echo x > f.txt")).toBe("mutate");
+    expect(mutate("echo x >> f.txt")).toBe("mutate");
+    expect(mutate("ls >> f.txt")).toBe("mutate");
+    expect(mutate("cat a.txt > b.txt")).toBe("mutate");
+    expect(mutate("rm -rf build")).toBe("mutate");
+    expect(mutate("mv a b")).toBe("mutate");
+    expect(mutate("touch new.txt")).toBe("mutate");
+    expect(mutate("mkdir d")).toBe("mutate");
+    expect(mutate("npm install")).toBe("mutate");
+    expect(mutate("git commit -m x")).toBe("mutate");
+    // unknown command → fail-closed mutate
+    expect(mutate("somecustomtool --flag")).toBe("mutate");
     // non-string command → fail-closed mutate
     expect(
       classifyCall({ id: "7", name: "bash", input: { command: 42 } })
     ).toBe("mutate");
+  });
+
+  // SC6 guard: the readonly bash-mode SSOT is a separate consumer with
+  // deliberately stricter semantics (no `>` at all, no background `&`). The
+  // gate's workspace-write classifier must not relax that table.
+  it("validateReadonlyCommand still rejects 'ls 2>&1' (bash readonly mode unchanged)", () => {
+    expect(() => validateReadonlyCommand("ls 2>&1")).toThrow();
   });
 
   it("classifies other tools (read_file / grep / glob / web_fetch …) as read", () => {
