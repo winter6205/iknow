@@ -9,8 +9,8 @@
  *    摊平计数由调用方聚合）/ concurrent（running 全部逐条可见；纯函数
  *    无共享可变状态）/ exception（三类失败统一 error 形态）。
  *
- * 该核是单一派生 SSOT：渲染层只消费 slot，不再自行组合 hideToolSummaries
- * 与预览（spec D7）。本测试钉住核的输出契约，生产接线在后续 bullet。
+ * 该核是单一派生 SSOT：渲染层只消费 slot（spec D7）—— 标题 / 预览 /
+ * 折叠计数 / 颜色均由核派生，渲染层不自组合隐藏开关与预览。
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -18,6 +18,10 @@ import {
   settledClassOf,
   type SettledSlot,
 } from "../../src/tui/tool-settled.js";
+import {
+  isSubagentTool,
+  registeredToolDisplayNames,
+} from "../../src/tui/tool-summary.js";
 
 const RETRACT_SHAPE: SettledSlot = {
   showTitle: false,
@@ -87,6 +91,24 @@ describe("deriveSlot: keep class（留的足迹，spec D4）", () => {
         inFoldCount: false,
         color: "default",
       });
+    }
+  });
+
+  test("子代理集合单源：核内 class 表与 isSubagentTool 对注册表全集一致", () => {
+    // 策略核保持依赖无关（不 import 注册表），「谁是子代理」在核内以 class 表
+    // 条目（"subagent" class）表达、在 tool-summary 以 isSubagentTool 表达
+    // —— 两个独立名单必须对同一全集给出一致答案：任一侧单方面新增/删除一个
+    // 子代理名即失败（漂移闸）。
+    const universe = new Set<string>([
+      ...registeredToolDisplayNames(),
+      "spawn_subagent",
+      "subagent_result",
+    ]);
+    for (const name of universe) {
+      expect([name, settledClassOf(name) === "subagent"]).toEqual([
+        name,
+        isSubagentTool(name),
+      ]);
     }
   });
 });

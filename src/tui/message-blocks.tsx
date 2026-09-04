@@ -62,7 +62,7 @@ import {
 } from "./tool-summary.js";
 import { clipOneLineVisual } from "./tool-summary.js";
 import { CompletedToolPreviewView } from "./completed-tool-preview-view.js";
-import { deriveSlot } from "./tool-settled.js";
+import { deriveSlot, settledColorToFg } from "./tool-settled.js";
 import { MessageShell } from "./message-shell.js";
 import { Markdown } from "./markdown.js";
 import {
@@ -107,12 +107,11 @@ function ToolSummaryRow(props: {
   const slot = hasResult
     ? deriveSlot(props.tu.name, { running: false, failed })
     : deriveSlot(props.tu.name, { running: true, failed: false });
-  const fg =
-    slot.color === "error"
-      ? tuiPalette.error
-      : slot.color === "accent"
-        ? tuiPalette.accent
-        : tuiPalette.dim;
+  const fg = settledColorToFg(slot.color, {
+    default: tuiPalette.dim,
+    accent: tuiPalette.accent,
+    error: tuiPalette.error,
+  });
   return (
     <text fg={fg} wrapMode="none">
       {line}
@@ -125,6 +124,10 @@ function ToolSummaryRow(props: {
  * （`{code, stdout, stderr}`）——错误内容取 stderr 优先、stdout 兜底，
  * 与 bashPreview 的字段语义一致；非 JSON 文本（mutate 门禁回执等）原样
  * 透传。空文本 / 解析后两字段皆空 → 空串（渲染层不画空错误行）。
+ *
+ * 与 live 路径（live-tool-preview 的 `run.message ?? run.detail`）**有意
+ * 分叉**：历史只有落盘 tool_result 文本可解析，无 live 旁路字段；两侧
+ * 共享的契约 = clipErrorLine 单行截断纪律，不承诺错误文本字节一致。
  */
 function failureTextOf(name: string, resultText: string | undefined): string {
   if (resultText === undefined || resultText.length === 0) return "";

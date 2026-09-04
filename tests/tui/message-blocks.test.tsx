@@ -723,6 +723,40 @@ test("history write_file 未配对（空 statusMap）：仅 [运行中] 摘要�
   await setup.renderer.destroy();
 });
 
+test("纯 retract 工具落定消息：全部收起 → 渲染为 null（无幻影空壳）", async () => {
+  // D3/D7（spec specs/tui-tool-settled-appearance.md）：纯 read_file 消息
+  // 落定后标题与预览同假（retract）→ MessageBlocks 返回 null，不留空壳
+  // box（空壳会让消息间距残留幻影空白）。
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-rd-null",
+        name: "read_file",
+        input: { path: "a.ts" },
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg, {
+    statusMap: new Map([["tu-rd-null", false]]),
+  });
+  const frame = setup.captureCharFrame();
+  // 帧内不得出现任何工具痕迹（null 契约在帧上的投影 = 空白帧；
+  // captureCharFrame 恒返回铺满空白的画布，故以「无内容字符」判定）。
+  expect(frame.includes("read_file")).toBe(false);
+  expect(frame.includes("[完成]")).toBe(false);
+  expect(frame.includes("[失败]")).toBe(false);
+  expect(frame.trim().length).toBe(0);
+  // 结构层：spans 无非空 span —— 空白帧 + 零内容 span 共同钉住 null 契约。
+  const { lines } = setup.captureSpans();
+  const contentSpans = lines.flatMap((line) =>
+    line.spans.filter((span) => span.text.trim().length > 0)
+  );
+  expect(contentSpans).toHaveLength(0);
+  await setup.renderer.destroy();
+});
+
 test("T7 纯 tool_use 消息：底色 box 包裹后渲染不崩，摘要行可见", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",

@@ -309,13 +309,15 @@ const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
     summary: SUMMARIZERS.skill_search!,
     settledClass: TOOL_SETTLED_CLASS.skill_search!,
   },
+  // 子代理两件（spec D8 三类之外）：settledClass 取核内显式声明的 "subagent"
+  // —— 不用 `!` 兜底，声明缺失/谎报在编译期或跨核闸失败。
   spawn_subagent: {
     summary: SUMMARIZERS.spawn_subagent!,
-    settledClass: TOOL_SETTLED_CLASS.spawn_subagent!,
+    settledClass: TOOL_SETTLED_CLASS.spawn_subagent,
   },
   subagent_result: {
     summary: SUMMARIZERS.subagent_result!,
-    settledClass: TOOL_SETTLED_CLASS.subagent_result!,
+    settledClass: TOOL_SETTLED_CLASS.subagent_result,
   },
   lsp_definition: {
     summary: SUMMARIZERS.lsp_definition!,

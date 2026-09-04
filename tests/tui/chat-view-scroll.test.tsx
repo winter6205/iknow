@@ -678,8 +678,8 @@ test("running：流式草稿排在 live write 预览之前（代码块不得插�
 });
 
 test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位", async () => {
-  // 场景：turn 进行中尾部铺 2 个已完成搜索工具 + 草稿；turn 结束后历史
-  // 消息折叠（hideToolSummaries），原先被折叠的工具区域不得留下大段空白 ——
+  // 场景：turn 进行中尾部铺 2 个已完成搜索工具 + 草稿；turn 结束后 retract
+  // 件收进折叠计数（D3），原先逐条显示的工具区域不得留下大段空白 ——
   // 折叠行与最终文本之间最多 1 行消息间距。
   const finalMessages: AnthropicNativeMessage[] = [
     msg("m-1", "user", "搜索今天的AI新闻"),

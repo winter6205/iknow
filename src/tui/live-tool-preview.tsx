@@ -34,7 +34,7 @@ import {
   clipErrorLine,
   visualWidth,
 } from "./tool-summary.js";
-import { deriveSlot } from "./tool-settled.js";
+import { deriveSlot, settledColorToFg } from "./tool-settled.js";
 import {
   CompletedToolPreviewView,
   completedToolPreviewTextLines,
@@ -145,7 +145,11 @@ export function liveToolPreviewTextLines(
   }
   const out: string[] = [formatCompletedToolLine(run, cols)];
   if (run.status === "failed") {
-    // D5：失败一行短错误（截断），不画 dim 预览。
+    // D5：失败一行短错误（截断），不画 dim 预览。数据源 = run.message ??
+    // run.detail（live 旁路字段）—— 与历史路径 message-blocks.failureTextOf
+    // 的 JSON envelope 解析**有意分叉**：live 事件尚未经 tool_result 编码，
+    // 没有 envelope 可解析；历史只有落盘文本，无旁路字段。两侧错误文本不
+    // 承诺字节一致（同源截断纪律 = clipErrorLine）。
     const err = clipErrorLine(run.message ?? run.detail ?? "", cols);
     if (err.length > 0) out.push(err);
     return out;
@@ -182,12 +186,11 @@ export function liveToolPreviewBox(run: LiveToolRun, cols: number): ReactNode {
     running,
     failed: run.status === "failed",
   });
-  const fg =
-    slot.color === "error"
-      ? tuiPalette.error
-      : slot.color === "accent"
-        ? tuiPalette.accent
-        : tuiPalette.dim;
+  const fg = settledColorToFg(slot.color, {
+    default: tuiPalette.dim,
+    accent: tuiPalette.accent,
+    error: tuiPalette.error,
+  });
   return (
     <box key={run.id} flexDirection="column">
       <text fg={fg} wrapMode="none">

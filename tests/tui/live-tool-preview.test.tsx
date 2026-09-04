@@ -662,8 +662,7 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
 
   test("完成态 bash 失败（status=failed）:不画 stderr 预览（D5 一行短错误）", () => {
     // D5（spec specs/tui-tool-settled-appearance.md）：失败件核置
-    // showPreview 假 —— 失败不画 dim ⎿ stderr 块，错误信息只走一行短错误
-    // （原断言「stderr 旁路进入预览」认证的失败态展示不变式已被 D5 取代）。
+    // showPreview 假 —— 失败只有一行截断短错误，无 dim ⎿ 预览块。
     const run: LiveToolRun = {
       id: "tu-bash-fail-live",
       name: "bash",

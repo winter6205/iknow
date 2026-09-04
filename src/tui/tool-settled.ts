@@ -13,11 +13,41 @@
  * 避免两处硬编码漂移（Single Source of Truth）。未注册名缺省 retract ——
  * 策略核必须依赖无关（不 import 注册表），否则反向拉入 React 链。
  */
-/** 落定态工具三分类（spec D8 成功态分类表）。 */
-export type SettledClass = "keep" | "retract" | "accent";
+/**
+ * 落定态分类（spec D8：keep / retract / accent 三类成功态分类表）。
+ * "subagent" 不在 D8 三类内 —— 仅 spawn_subagent / subagent_result 使用，
+ * 核在 class 分派之前特判为 keep-title-only（标题留、无预览、不进计数、
+ * default 色），glyph 差异留给渲染层。设为显式字面量而非缺项 + `!` 断言：
+ * 让「声明缺失 / 谎报」在编译期或跨核闸（tool-settled.test 子代理集合单源）
+ * 处失败，而不是运行时静默解析成 retract。
+ */
+export type SettledClass = "keep" | "retract" | "accent" | "subagent";
 
 /** slot 颜色 token（映射 tuiPalette；dim 不由核决定 —— dim 只属成功 bash 尾巴）。 */
 export type SettledColor = "default" | "accent" | "error";
+
+/** slot 颜色 token → 调色板前景色（D7 渲染映射单源）。
+ *  default 落 dim（工具标题行的既有次级形态）；dim 本身不由核决定，映射
+ *  归渲染层，但两处渲染（message-blocks / live-tool-preview）共用本函数，
+ *  避免 color→palette 对照表漂移。theme.ts 纯 TS、无 React 依赖，核可安全
+ *  引用类型。 */
+export function settledColorToFg(
+  color: SettledColor,
+  palette: {
+    readonly default: string;
+    readonly accent: string;
+    readonly error: string;
+  }
+): string {
+  switch (color) {
+    case "error":
+      return palette.error;
+    case "accent":
+      return palette.accent;
+    case "default":
+      return palette.default;
+  }
+}
 
 /** 渲染层唯一消费形态：标题 / 预览 / 折叠计数 / 颜色。 */
 export interface SettledSlot {
@@ -35,9 +65,9 @@ export interface SettledState {
 
 /**
  * D8 分类表（成功态）。SSOT：tool-summary.ts 注册表逐名复用本表；
- * spawn_subagent / subagent_result 不进三类（spec D8「沿用独立 glyph」）——
- * 核内按 keep-with-title-only 给 slot（标题留、无预览、不进计数、default 色），
- * glyph 差异留给渲染层。
+ * spawn_subagent / subagent_result 以 "subagent" class 显式在表（D8 三类
+ * 之外，核按 keep-title-only 给 slot —— 标题留、无预览、不进计数、default
+ * 色），glyph 差异留给渲染层。
  */
 export const TOOL_SETTLED_CLASS: Readonly<Record<string, SettledClass>> = {
   // keep（留的足迹，D4）
@@ -77,6 +107,10 @@ export const TOOL_SETTLED_CLASS: Readonly<Record<string, SettledClass>> = {
   "enter-task-worktree": "accent",
   "exit-task-worktree": "accent",
   "remove-task-worktree": "accent",
+  // 三类之外（D8「沿用独立 glyph」）：显式声明，核在 class 分派前特判
+  // keep-title-only —— 注册表与核共享同一子代理名单，跨核闸钉住一致性。
+  spawn_subagent: "subagent",
+  subagent_result: "subagent",
 };
 
 /** class 查询：未注册名缺省 retract（spec D1「未知工具缺省 retract、无预览」）。 */
@@ -112,6 +146,9 @@ function slotForClass(cls: SettledClass): SettledSlot {
         inFoldCount: false,
         color: "accent",
       };
+    case "subagent":
+      // D8 三类之外：keep-title-only（glyph 差异留给渲染层）。
+      return KEEP_TITLE_ONLY_SLOT;
   }
 }
 
@@ -147,12 +184,6 @@ const KEEP_WITH_PREVIEW: ReadonlySet<string> = new Set([
   "edit_file",
 ]);
 
-/** 三类之外的子代理工具（spec D8：spawn_subagent / subagent_result 沿用
- *  独立 glyph，核内不按 retract 兜底折叠）。 */
-function isSubagentSettledName(name: string): boolean {
-  return name === "spawn_subagent" || name === "subagent_result";
-}
-
 /**
  * 落定态单一派生（spec D1）。输入工具名与 { running, failed }，输出渲染 slot。
  * 失败横切在最后一步：任何 class 失败 → 标题留、error 色、不进计数、无预览。
@@ -162,10 +193,10 @@ export function deriveSlot(name: string, state: SettledState): SettledSlot {
   // 失败横切最后一步（D5）：error 优先于 accent / keep。
   if (state.failed) return FAILED_SLOT;
   if (state.running) return RUNNING_SLOT;
-  // 子代理工具不进三类（spec D8「沿用独立 glyph」）：按 keep-with-title-only
-  // 给 slot，glyph 差异留给渲染层；须在未注册缺省 retract 之前判定。
-  if (isSubagentSettledName(name)) return KEEP_TITLE_ONLY_SLOT;
   const cls = settledClassOf(name);
+  // 子代理不进三类（spec D8「沿用独立 glyph」）—— class 表显式声明
+  // "subagent"，与未注册名缺省 retract 分流（不按 retract 兜底折叠）。
+  if (cls === "subagent") return KEEP_TITLE_ONLY_SLOT;
   if (cls === "retract") return RETRACT_SLOT;
   if (cls === "accent") return ACCENT_SLOT;
   // keep 内部再分：bash / write / edit 带预览足迹，其余只留标题（D4）。

@@ -534,6 +534,59 @@ test("idle：SC3 一轮成功 read_file + 成功 bash → bash 标题留、read 
   await setup.renderer.destroy();
 });
 
+test("idle：SC4 失败 retract 工具 → 标题 + 一行短错误可见，不进折叠计数", async () => {
+  // spec SC4 / D5：失败横切覆盖成功分类 —— 失败 read_file 出独立标题行
+  // （[失败]）+ 一行短错误；折叠计数行不得把失败件计入（`read_file ×` 缺席）。
+  const messages: AnthropicNativeMessage[] = [
+    { role: "user", content: [{ type: "text", text: "q" }] },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "先读配置", signature: "s" },
+        {
+          type: "tool_use",
+          id: "tu-rd-fail",
+          name: "read_file",
+          input: { path: "missing.ts" },
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "tu-rd-fail",
+          content: "ENOENT: no such file or directory",
+          is_error: true,
+        },
+      ],
+    },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "读不到，换路子。" }],
+    },
+  ];
+  const setup = await testRender(
+    <ChatView
+      session={sessionWith(messages)}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 失败件：红标题留 + 一行短错误在场。
+  expect(frame).toContain("[失败] read_file");
+  expect(frame).toContain("ENOENT");
+  // 失败不进折叠计数行（计数行不含该失败件）。
+  expect(frame.includes("read_file ×")).toBe(false);
+  await setup.renderer.destroy();
+});
+
 test("running-fg：不提前收成 turn 摘要,历史 [完成] 仍可见", async () => {
   // D3:running 态仍逐条工具可见(行为不变);折叠行不出现。
   // spec D3 删除了 `thinkingFrozenSeconds` 副通道 —— running 期间不再有
