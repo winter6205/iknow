@@ -226,6 +226,26 @@ export interface IknowSettingsIsolation {
 }
 
 /**
+ * Web 工具配置段。回退链 env > settings > 默认（对齐 #353 maxTurns 先例），
+ * 装配期字段（不在 settings 热更新白名单，改后需重启进程）。
+ */
+export interface IknowSettingsWeb {
+  /**
+   * web_search 后端选择。值域与 env.ts `SEARCH_BACKEND_VALUES` 闭集一致；
+   * 非法值 → 丢弃该字段（drop-not-throw，loader 侧非法 env 值仍抛 typed error）。
+   */
+  searchBackend?: "bing" | "exa" | "tavily" | "brave";
+}
+
+/**
+ * web.searchBackend 闭集（settings 层本地常量）：与 env.ts `SEARCH_BACKEND_VALUES`
+ * 同值域。settings.ts 不能反向 import env.ts（env.ts → settings.ts 已有依赖，
+ * 反向即环），故从字段联合派生，漂移由类型系统兜住。
+ */
+const WEB_SEARCH_BACKEND_VALUES: readonly IknowSettingsWeb["searchBackend"][] =
+  ["bing", "exa", "tavily", "brave"];
+
+/**
  * ADR-0037: `isolation.worktreeOnMutate` 的唯一 fail-closed 读取点。
  * 缺失 / 非 boolean / 非 `true` → false（回落至今日行为）；config 层不做
  * 任何 git / 会话状态查询（硬要求 9）。
@@ -270,6 +290,8 @@ export interface IknowSettings {
   isolation?: IknowSettingsIsolation;
   /** lsp-optimization 二期 B7: LSP 配置段（全部可选，缺省走消费方默认值）。 */
   lsp?: IknowLspSettings;
+  /** Web 工具配置段（web_search 后端选择等）。 */
+  web?: IknowSettingsWeb;
 }
 
 export interface IknowSettingsLoop {
@@ -791,6 +813,41 @@ function mergeLsp(
   return out;
 }
 
+/**
+ * Web 工具配置段：校验 `web` 层 —— 非法字段丢弃（镜像 parseIsolation）。
+ * 非普通对象 → undefined；searchBackend 不在闭集 → 丢弃该字段（drop-not-throw，
+ * 与 settings 层其它字段纪律一致；env 侧非法值仍走 typed error 更显眼）；
+ * 字段全非法 / 缺席 → undefined（env / 默认 bing 兜底）。
+ */
+function parseWeb(raw: unknown): IknowSettingsWeb | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const out: IknowSettingsWeb = {};
+  if (
+    typeof raw.searchBackend === "string" &&
+    (WEB_SEARCH_BACKEND_VALUES as readonly string[]).includes(raw.searchBackend)
+  ) {
+    out.searchBackend = raw.searchBackend as IknowSettingsWeb["searchBackend"];
+  }
+  if (out.searchBackend === undefined) return undefined;
+  return out;
+}
+
+/** Web 工具配置段：逐层合并 web —— project 字段优先，未覆盖的 user 字段保留。 */
+function mergeWeb(
+  user: IknowSettingsWeb | undefined,
+  project: IknowSettingsWeb | undefined
+): IknowSettingsWeb | undefined {
+  if (!user && !project) return undefined;
+  const out: IknowSettingsWeb = {};
+  if (project?.searchBackend !== undefined) {
+    out.searchBackend = project.searchBackend;
+  } else if (user?.searchBackend !== undefined) {
+    out.searchBackend = user.searchBackend;
+  }
+  if (out.searchBackend === undefined) return undefined;
+  return out;
+}
+
 /** 逐层合并 llm：project 字段优先，未覆盖的 user 字段保留。 */
 function mergeLlm(
   user: IknowSettingsLlm | undefined,
@@ -941,6 +998,8 @@ function mergeSettings(
   );
   // lsp-optimization 二期 B7: LSP 配置段（全部可选，缺省走消费方默认值）。
   const lsp = mergeLsp(parseLsp(userRaw.lsp), parseLsp(projectRaw.lsp));
+  // Web 工具配置段（web_search 后端选择；env > settings 回退链在 env.ts）。
+  const web = mergeWeb(parseWeb(userRaw.web), parseWeb(projectRaw.web));
   const out: IknowSettings = {};
   if (llm) out.llm = llm;
   if (verify) out.verify = verify;
@@ -951,6 +1010,7 @@ function mergeSettings(
   if (memory) out.memory = memory;
   if (isolation) out.isolation = isolation;
   if (lsp) out.lsp = lsp;
+  if (web) out.web = web;
   return out;
 }
 
