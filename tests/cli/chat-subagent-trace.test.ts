@@ -99,7 +99,18 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
     );
 
     let requestCount = 0;
-    server = createServer((_req, res) => {
+    server = createServer((req, res) => {
+      // B6 overflow governance (ADR-0043 §3) makes the real CLI assembly call
+      // POST /v1/messages/count_tokens before the first turn. The stub must
+      // route by path: count_tokens returns a token count, and only /messages
+      // requests consume the toolUseResponse/finalResponse rotation — a naive
+      // request-count rotation would hand the first turn the final text
+      // response and the model would never call spawn_subagent.
+      if (req.url?.includes("count_tokens")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ input_tokens: 1 }));
+        return;
+      }
       requestCount += 1;
       const body = requestCount === 1 ? toolUseResponse : finalResponse;
       res.writeHead(200, { "content-type": "application/json" });
