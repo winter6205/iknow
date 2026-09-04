@@ -391,6 +391,9 @@ describe("get_record core — arm selection", () => {
           message_index: messageIndex,
           part_index: partIndex,
           chars: partText(part).length,
+          // v1.2 判据 (a): 清单臂 parts 携带所属 message 的 role. user
+          // 消息的 part 携带 "user", assistant 消息的 part 携带 "assistant".
+          role: message.role,
         }))
       )
     );
@@ -1031,7 +1034,7 @@ describe("get_record core — the window arm", () => {
       detail: "messages",
     });
     assert.deepEqual(manifest.parts, [
-      { message_index: 0, part_index: 0, chars: 5 },
+      { message_index: 0, part_index: 0, chars: 5, role: "user" },
     ]);
 
     const window = await windowOf(core, {
@@ -1248,6 +1251,8 @@ describe("get_record core — blobs, output shape, and description", () => {
         message_index: 0,
         part_index: 0,
         chars: partText(stored.content[0]).length,
+        // v1.2 判据 (a): blob 模式下解引用后的 role 必须出现在清单臂 part 上.
+        role: stored.role,
       },
     ]);
 
@@ -1486,3 +1491,125 @@ describe("get_record core — shared scan with the row axis", () => {
     );
   });
 });
+describe("get_record core — role projection (v1.2)", () => {
+  // spec v1.2 判据 (a): detail=messages 清单臂每个 part 携带所属 message 的 role。
+  // detail=tool_results 不加 role（tool_result 按定义在 user 侧）。
+  // 窗臂不加 role（窗正文寻址已有 message_index，role 在清单臂给出）。
+  // ADR-0003 LLM call messages[].role 值域：user / assistant / tool / system。
+  it("carries role on every detail=messages manifest part (v1.2 判据 a)", async () => {
+    const traceDir = makeTraceDir();
+    // Two distinct roles in two messages, plus an intra-message block. The
+    // manifest must walk through them and stamp each part with its message's
+    // role, not collapse them.
+    const messages = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "u1a" },
+          { type: "text", text: "u1b" },
+        ],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "a0" },
+        ],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "u2" }],
+      },
+    ];
+    const core = coreFor(traceDir, [llmCallRow("c1", 1, { messages })]);
+
+    const manifest = await manifestOf(core, {
+      record_id: "llm-1",
+      detail: "messages",
+    });
+
+    assert.deepEqual(
+      manifest.parts.map((p) => ({
+        message_index: p["message_index"],
+        part_index: p["part_index"],
+        role: p["role"],
+      })),
+      [
+        { message_index: 0, part_index: 0, role: "user" },
+        { message_index: 0, part_index: 1, role: "user" },
+        { message_index: 1, part_index: 0, role: "assistant" },
+        { message_index: 2, part_index: 0, role: "user" },
+      ]
+    );
+  });
+
+  it("omits role on detail=tool_results manifest parts (tool_result 按定义在 user 侧)", async () => {
+    const traceDir = makeTraceDir();
+    const core = coreFor(traceDir, [
+      llmCallRow("c1", 1, { messages: toolRoundTrips(2, 40) }),
+    ]);
+
+    const manifest = await manifestOf(core, { record_id: "llm-1" });
+    assert.equal(manifest.detail, "tool_results");
+
+    for (const part of manifest.parts) {
+      assert.ok(
+        !("role" in part),
+        `tool_results part must not carry role, got: ${JSON.stringify(part)}`
+      );
+    }
+  });
+
+  it("dereferences blob messages and still exposes role on the manifest parts", async () => {
+    // ADR-0036 blob 解引用必须发生在投影之前。blob 里存的是 user 角色, 解
+    // 引用后清单臂的 part 仍应读到 user。message_index=0/part_index=0 之上
+    // 的 role 字段即解引用后的角色; 缺失则意味着 blob 路径漏了字段。
+    const traceDir = makeTraceDir();
+    const stored = {
+      role: "user",
+      content: [{ type: "text", text: "from-blob" }],
+    };
+    const sha = "a".repeat(64);
+    mkdirSync(join(traceDir, "blobs"), { recursive: true });
+    writeFileSync(
+      join(traceDir, "blobs", sha),
+      JSON.stringify(stored),
+      "utf8"
+    );
+    const core = coreFor(traceDir, [
+      llmCallRow("c1", 1, { messages: [{ sha, bytes: 10 }] }),
+    ]);
+
+    const manifest = await manifestOf(core, {
+      record_id: "llm-1",
+      detail: "messages",
+    });
+    assert.equal(manifest.parts.length, 1);
+    assert.equal(manifest.parts[0]["role"], "user");
+    assert.equal(manifest.parts[0]["message_index"], 0);
+    assert.equal(manifest.parts[0]["part_index"], 0);
+  });
+
+  it("window arm response carries no role key (四禁: 窗正文寻址已有 message_index)", async () => {
+    // 窗臂的判据是 SC8 维持不变: 窗响应仍不添 role. role 在清单臂给出,
+    // 窗臂只回答窗的事实. 这里钉住「未引入」, 免得有人顺手补上.
+    const traceDir = makeTraceDir();
+    const core = coreFor(traceDir, [
+      llmCallRow("c1", 1, {
+        messages: [textMessage(0, 2, 100)],
+      }),
+    ]);
+
+    const window = await windowOf(core, {
+      record_id: "llm-1",
+      detail: "messages",
+      message_index: 0,
+      part_index: 0,
+      count: 10,
+    });
+    assert.ok(
+      !("role" in window),
+      `window response must not carry role, got: ${JSON.stringify(window)}`
+    );
+  });
+});
+

@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { projectToolResultsFromTrace } from "./project-tool-results.js";
+import { messageRole, projectToolResultsFromTrace } from "./project-tool-results.js";
 import { projectRecordBase } from "./record-lookup.js";
 import { TRACE_OUTPUT_BACKSTOP } from "./output-backstop.js";
 import { createJsonlTraceReader } from "./reader.js";
@@ -34,10 +34,12 @@ export const QUERY_TRACE_PREVIEW_CAP = 400;
  */
 export const QUERY_TRACE_DESCRIPTION =
   "Query local JSONL trace records with filters, returning one page of rows. " +
-  "Rows are projection-only (message count, first/last previews, tool_result " +
-  "summaries with their character sizes, and error); use get_record to read one " +
-  "record's content span by span. The page is filtered and paged by limit (default " +
-  "100, up to " +
+  "Rows are projection-only (message count, first/last previews of any role, " +
+  "the last_assistant_preview taken from the last role=\"assistant\" message " +
+  "(absent when no assistant message is on the record), tool_result summaries " +
+  "with their character sizes, and error); use get_record to read one " +
+  "record's content span by span. The page is filtered and paged by limit " +
+  "(default 100, up to " +
   String(QUERY_TRACE_MAX_LIMIT) +
   ") and offset; the response echoes the effective limit and offset, so a page " +
   "shorter than the echoed limit means the filter has no more rows and offset + " +
@@ -210,6 +212,20 @@ async function projectRecord(
   if (messages.length > 0) {
     projected.first_message_preview = preview(messages[0]);
     projected.last_message_preview = preview(messages[messages.length - 1]);
+    // v1.2 判据 (b): 外部 agent 取最终 assistant 结论的动线
+    // (list_sessions(limit:1) -> query_trace(record_type:"llm_call", limit:1))
+    // 需要**最后一条** role==="assistant" 消息的预览. last_message_preview
+    // 对 loop-engine 尾部追加的 <agent_status> user 注入消息是死预览,
+    // 故本字段专答「结论」一问. 与 first_message_preview / last_message_preview
+    // 同源 (复用 preview(), 同一 cap, 同一截断语义). 字段缺席 = 合法态 (无
+    // assistant 消息), 不是 empty string.
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (messageRole(message) === "assistant") {
+        projected.last_assistant_preview = preview(message);
+        break;
+      }
+    }
   }
   const toolResults = await projectToolResultsFromTrace(messages, { traceDir });
   projected.tool_result_count = toolResults.length;

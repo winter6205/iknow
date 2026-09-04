@@ -502,3 +502,83 @@ describe("get_record ACI tool", () => {
     assert.ok(!output.endsWith("...[truncated]"));
   });
 });
+
+describe("get_record ACI tool -- role projection (v1.2)", () => {
+  it("carries role on detail=messages manifest parts through the ACI face (v1.2 判据 a)", async () => {
+    // v1.2 判据 (a): detail=messages 清单臂每个 part 携带所属 message 的 role.
+    // 通过 ACI 工具调用路径验证投影的 part 列表中每条都带 role.
+    const dir = makeTraceDir("iknow-get-record-aci-role-");
+    writeSession(dir, "c-role", [
+      {
+        conversation_id: "c-role",
+        record_type: "llm_call",
+        llm_call_id: "llm-role",
+        status: "ok",
+        messages: [
+          { role: "user", content: "ask" },
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "toolu-1", name: "lookup", input: {} },
+            ],
+          },
+          { role: "user", content: "follow-up" },
+        ],
+      },
+    ]);
+
+    const tool = createGetRecordTool(dir);
+    const output = (await tool.handler({
+      conversation_id: "c-role",
+      record_id: "llm-role",
+      detail: "messages",
+    })) as string;
+    const body = JSON.parse(output) as {
+      parts: Array<{ role?: string; message_index?: number }>;
+    };
+
+    // 3 parts, roles 跟随所属 message: [user, assistant, user]
+    assert.equal(body.parts.length, 3);
+    assert.equal(body.parts[0]?.role, "user");
+    assert.equal(body.parts[1]?.role, "assistant");
+    assert.equal(body.parts[2]?.role, "user");
+  });
+
+  it("omits role on detail=tool_results manifest parts (tool_result 按定义在 user 侧)", async () => {
+    // v1.2 判据 (a) 收尾: tool_results parts 上**不加** role (与 messages
+    // 臂对照, 钉住「缺席」而非 null/undefined).
+    const tool = createGetRecordTool(makeRecordDir());
+
+    const output = (await tool.handler({
+      conversation_id: "c1",
+      record_id: "llm-target",
+    })) as string;
+    const body = JSON.parse(output) as {
+      parts: Array<Record<string, unknown>>;
+    };
+
+    assert.equal(body.parts.length, 1);
+    assert.ok(
+      !("role" in body.parts[0]!),
+      `tool_results part must not carry role, got: ${JSON.stringify(body.parts[0])}`
+    );
+  });
+
+  it("window arm response carries no role key on the ACI face (四禁)", async () => {
+    // 窗正文寻址已有 message_index, role 在清单臂给出. 窗臂不添 role.
+    const tool = createGetRecordTool(makeRecordDir());
+
+    const output = (await tool.handler({
+      conversation_id: "c1",
+      record_id: "llm-target",
+      part_index: 0,
+      count: 5,
+    })) as string;
+    const body = JSON.parse(output) as Record<string, unknown>;
+
+    assert.ok(
+      !("role" in body),
+      `window response must not carry role, got: ${JSON.stringify(body)}`
+    );
+  });
+});
