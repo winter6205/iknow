@@ -59,6 +59,7 @@ import { MaxTurnsExceeded, ProtocolError } from "../errors.js";
 import type { AnthropicNativeMessage } from "../model-adapter/types.js";
 import { getAgentEntry, AgentCatalogLookupError } from "./catalog.js";
 import { resolveSubagentCapabilities, type BashMode } from "./capability.js";
+import { resolveInstallRoot } from "../session-roots.js";
 import {
   parseWorkerEnvelope,
   truncateEnvelopeResult,
@@ -198,6 +199,16 @@ export interface CreateWorkerDepsOptions {
    */
   readonly projectIdentityRoot?: string;
   /**
+   * T5 (ADR-0037 §9.2 #4, plans/closed-world-bash-fence.md): iknow 运行时
+   * 安装根 —— worker registry 是 bash 的**真实执行面**（handler 经
+   * createFsPolicy / createBwrapFence 构造闭世界围栏），缺席时读白名单缺
+   * §9.2 #4 合同读根（项目自身工具链 `node_modules/.bin` 的读通道断链）。
+   * 缺省回退 `resolveInstallRoot()` 进程级 SSOT（worker 进程没有
+   * sessionRoots，但该解析锚 `import.meta.url`，在 worker 进程内同样成立；
+   * verify sandbox-run 同款）。测试可注入覆盖。
+   */
+  readonly installRoot?: string;
+  /**
    * #556 T2: 来自 envelope.role 的 seam 副本 (runSubagentWorker 透传)。
    * worker 装配期查 catalog 取 body 注入 persona 段; 缺省 / 未知 → 走 V1
    * baseline (不入 persona 段, 不注入额外 deny, 详见 plan T2 防御契约)。
@@ -258,6 +269,10 @@ export async function createWorkerRuntime(
   const cwd = opts.cwd ?? process.cwd();
   // T3: 身份发现根。父会话没传（未改绑 / 旧 wire）→ 回落 cwd，与今日同值。
   const projectIdentityRoot = opts.projectIdentityRoot ?? cwd;
+  // T5 (ADR-0037 §9.2 #4): worker bash 围栏的 installRoot 合同读根。worker
+  // 进程没有 sessionRoots,但 resolveInstallRoot() 锚 import.meta.url,在本
+  // 进程内解析到同一安装根(build-engine / verify 同一 SSOT)。
+  const installRoot = opts.installRoot ?? resolveInstallRoot();
   const defaultTraceDir = resolve(
     opts.workspaceRoot ?? cwd,
     DEFAULT_WORKER_TRACE_DIR
@@ -336,6 +351,10 @@ export async function createWorkerRuntime(
     ...(opts.workspaceRoot !== undefined
       ? { workspaceRoot: opts.workspaceRoot }
       : {}),
+    // T5 (ADR-0037 §9.2 #4): worker bash 是真实执行面 → 闭世界读白名单的
+    // installRoot 合同读根经 registry 透传给 bash 工厂(缺省 SSOT 回退,
+    // 见 CreateWorkerDepsOptions.installRoot)。
+    installRoot,
     ...(bashMode !== undefined ? { bashMode } : {}),
   });
 

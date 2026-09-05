@@ -9,8 +9,8 @@
  *   - #7 git 全局配置(~/.gitconfig + ~/.config/git/config):可选读成员,
  *     单一 source helper(defaultOptionalReadRoots)生成,存在性跳过。
  *
- * 前台链路经 runInSandbox → spawn,与 bash-identity-overlay.test.ts 同款
- * spawn-mock 策略;后台直驱 defaultBackgroundSpawn(同一 mock 拦截)。
+ * 前台链路经 runInSandbox → spawn,与 bash-identity-read-whitelist.test.ts
+ * 同款 spawn-mock 策略;后台直驱 defaultBackgroundSpawn(同一 mock 拦截)。
  */
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";

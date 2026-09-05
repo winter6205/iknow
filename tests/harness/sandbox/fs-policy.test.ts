@@ -189,6 +189,14 @@ describe("createFsPolicy — read/write dual axis (closed world, ADR-0037 §9.2)
       (err: unknown) =>
         err instanceof ToolExecutionError && /installRoot/.test(err.message)
     );
+    // T5:bwrap 层 identity 选项删除后,identity 根的 fail-loud 合同单一
+    // 归属 policy(§9.4 配置故障型)——空白与盘上缺席都在这里锁死。
+    assert.throws(
+      () => policyFor({ projectIdentityRoot: "" }),
+      (err: unknown) =>
+        err instanceof ToolExecutionError &&
+        /projectIdentityRoot/.test(err.message)
+    );
     assert.throws(
       () => policyFor({ projectIdentityRoot: "/nonexistent-t3-identity" }),
       (err: unknown) =>

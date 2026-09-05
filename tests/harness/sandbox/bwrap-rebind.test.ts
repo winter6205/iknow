@@ -32,6 +32,8 @@ interface RebindSpec {
   readonly home: string;
   readonly tmpDir?: string;
   readonly installRoot?: string;
+  /** T5:identity 根经 policy 读白名单进围栏(bwrap 层选项已删)。 */
+  readonly identityRoot?: string;
   readonly cwdReadonly?: boolean;
 }
 
@@ -45,6 +47,9 @@ function fenceArgs(spec: RebindSpec): readonly string[] {
       ...(spec.tmpDir !== undefined ? { tmpDir: spec.tmpDir } : {}),
       ...(spec.installRoot !== undefined
         ? { installRoot: spec.installRoot }
+        : {}),
+      ...(spec.identityRoot !== undefined
+        ? { projectIdentityRoot: spec.identityRoot }
         : {}),
     }),
     networkPolicy: createNetworkPolicy(),
@@ -119,6 +124,34 @@ describe("bwrap post-tmpfs rebinds (closed world)", () => {
       assert.ok(
         installRebindIdx < cwdRebindIdx,
         "read rebinds precede the cwd write reclaim"
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("identity root under /tmp (main repo inside the tmp home) ⇒ identity ro rebind precedes the cwd rebind", () => {
+    // T5 合并的 #891 泄漏形状用例(主仓 = /tmp home 的子目录,taskRoot 在
+    // 主仓内)。机制对读白名单统一 —— identity 根作为 policy 读成员,与
+    // installRoot 走同一条 post-tmpfs ro 重绑路径;cwd 重绑最后夺回可写。
+    const home = mkdtempSync(join(tmpdir(), "bwrap-rebind-identity-"));
+    const repo = join(home, "projects", "iknow");
+    const cwd = join(repo, ".iknow", "worktrees", "conv-891");
+    mkdirSync(cwd, { recursive: true });
+    try {
+      const argv = fenceArgs({ cwd, home, identityRoot: repo });
+      const post = postTmpfs(argv);
+      const identityRebindIdx = tripleIdx(post, "--ro-bind", repo);
+      const cwdRebindIdx = tripleIdx(post, "--bind", cwd);
+      assert.notEqual(
+        identityRebindIdx,
+        -1,
+        "identity read member shadowed by the tmpfs must be re-asserted read-only"
+      );
+      assert.notEqual(cwdRebindIdx, -1, "cwd rebind reclaims writability");
+      assert.ok(
+        identityRebindIdx < cwdRebindIdx,
+        "identity ro rebind precedes the cwd write reclaim"
       );
     } finally {
       rmSync(home, { recursive: true, force: true });

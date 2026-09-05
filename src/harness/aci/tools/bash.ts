@@ -80,11 +80,12 @@ export interface CreateBashToolOptions {
    *  不新增状态源)。缺席时 policy 不含该读根(fs-policy 里可选,不 fail-loud;
    *  合同输入一旦提供空白/盘上不存在则由 policy fail-loud,§9.4)。 */
   readonly installRoot?: string;
-  /** #891 T2 (ADR-0037 §9.2 #6,T4 闭世界改写): 主仓身份根 —— **恒进**读
-   *  白名单的合同读根。waveRoot ≠ identityRoot 的条件分支已删除(闭世界下
-   *  没有「writable 祖先罩住主仓」的病灶,overlay 形态 superseded);选项
-   *  提供了就无条件进 policy 读白名单,前台 fence 与 background spawn 消费
-   *  同一份 token。仅 isolationEnabled 时由装配层提供(与既有传递条件一致)。 */
+  /** #891 T2 → T5 (ADR-0037 §9.2 #6): 主仓身份根 —— **恒进**读白名单的
+   *  合同读根。选项提供了就无条件进 policy 读白名单(闭世界下没有
+   *  「writable 祖先罩住主仓」的病灶,overlay 形态已随 §9.3 superseded 并在
+   *  T5 删除;identity 根单一入口 = policy,bwrap 层选项已不存在),前台
+   *  fence 与 background spawn 消费同一份 token。仅 isolationEnabled 时由
+   *  装配层提供(与既有传递条件一致)。 */
   readonly projectIdentityRoot?: string;
 }
 
@@ -138,9 +139,9 @@ export function createBashTool(
       ? opts.liveTaskRoot.read()
       : cwd;
     // T4 闭世界(ADR-0037 §9.2 #6):身份根是**无条件**读白名单成员 ——
-    // waveRoot ≠ identityRoot 的条件分支已删除(overlay 形态 superseded,
-    // §9.3);工厂期捕获的 projectIdentityRoot 直接进 policy 读白名单,
-    // 前台 fence 与 background spawn 消费同一 token(D2 同波同一份)。
+    // 工厂期捕获的 projectIdentityRoot 直接进 policy 读白名单(T5 后 identity
+    // 根单一入口 = policy),前台 fence 与 background spawn 消费同一 token
+    // (D2 同波同一份)。
     // #502 T3:校验链通过后才决定前台 / 后台 —— 危险命令 / 敏感路径在两侧
     // 都先执行同一闸门（background 不豁免安全检查）。
     if ((input as BashInput | null)?.background === true) {

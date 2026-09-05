@@ -13,7 +13,6 @@ import {
   createResourceLimits,
   TMP_BYTES,
 } from "../../../src/harness/sandbox/resource-limits.js";
-import { ToolExecutionError } from "../../../src/harness/errors.js";
 
 /**
  * T3 (plans/closed-world-bash-fence.md) — bwrap argv 闭世界反转。
@@ -80,7 +79,9 @@ function assertTriple(
 
 interface FenceSpec {
   readonly installRoot?: string;
-  readonly projectIdentityRoot?: string;
+  /** T5:identity 根经 policy 读白名单进 argv(单一入口);bwrap 层不再有
+   *  独立选项。undefined = 装配层未提供,argv 不得出现该读根。 */
+  readonly identityRoot?: string;
   readonly nodeToolchainRoot?: string;
   readonly cwdReadonly?: boolean;
   readonly network?: boolean;
@@ -97,6 +98,9 @@ function fenceArgv(spec: FenceSpec = {}): readonly string[] {
       ...(spec.installRoot !== undefined
         ? { installRoot: spec.installRoot }
         : {}),
+      ...(spec.identityRoot !== undefined
+        ? { projectIdentityRoot: spec.identityRoot }
+        : {}),
       ...(spec.nodeToolchainRoot !== undefined
         ? { nodeToolchainRoot: spec.nodeToolchainRoot }
         : {}),
@@ -105,9 +109,6 @@ function fenceArgv(spec: FenceSpec = {}): readonly string[] {
     resourceLimits: createResourceLimits(),
     env: { PATH: "/bin" },
     cwd: TASK,
-    ...(spec.projectIdentityRoot !== undefined
-      ? { projectIdentityRoot: spec.projectIdentityRoot }
-      : {}),
     ...(spec.cwdReadonly ? { cwdReadonly: true } : {}),
     ...(spec.network ? { network: true } : {}),
   }).argv;
@@ -242,17 +243,20 @@ describe("createBwrapFence — closed-world argv shape (T3)", () => {
     assert.ok(tripleIndices(argv, "--bind", TASK).length > 0);
   });
 
-  it("identity root option is a read-whitelist member ordered before the writable cwd bind", () => {
-    // #891 的 overlay 排序合同(writable home → identity ro-bind → cwd)
-    // 随 writable home 打底一起消亡;闭世界合同 = 读块 ro-bind → 写块 cwd
+  it("identity root (policy read-whitelist member) is ro-bound after the system block and before the writable cwd bind", () => {
+    // T5:#891 的 overlay 排序合同(writable home → identity ro-bind → cwd)
+    // 已随 writable home 打底消亡;identity 根是 policy 读白名单的普通成员
+    // (ADR-0037 §9.2 #6,单一入口)。闭世界合同 = 读块 ro-bind → 写块 cwd
     // bind(taskRoot 在身份树内时由后挂 cwd bind 夺回可写)。
-    const argv = fenceArgv({ projectIdentityRoot: IDENTITY });
+    const argv = fenceArgv({ identityRoot: IDENTITY });
     const identityIdx = assertTriple(
       argv,
       "--ro-bind",
       IDENTITY,
       "identity root is a read member"
     );
+    const etcIdx = assertTriple(argv, "--ro-bind", "/etc", "system /etc");
+    assert.ok(identityIdx > etcIdx, "read whitelist follows the system block");
     const cwdBindIdx = assertTriple(argv, "--bind", TASK, "cwd write bind");
     assert.ok(
       identityIdx < cwdBindIdx,
@@ -261,44 +265,15 @@ describe("createBwrapFence — closed-world argv shape (T3)", () => {
     assert.equal(tripleIndices(argv, "--bind", "/home/user").length, 0);
   });
 
-  it("exception: blank identity root → typed fail-loud, no argv", () => {
-    assert.throws(
-      () => fenceArgv({ projectIdentityRoot: "" }),
-      (err: unknown) =>
-        err instanceof ToolExecutionError &&
-        /projectIdentityRoot/.test(err.message)
+  it("identity root absent from the policy → no identity ro-bind token (assembly layer gates by isolationEnabled)", () => {
+    // T5 合并的 negative 用例(#891 T5 清理):policy 读白名单不含 identity
+    // 根时,argv 不得出现该 token。
+    const argv = fenceArgv();
+    assert.equal(
+      tripleIndices(argv, "--ro-bind", IDENTITY).length,
+      0,
+      "no projectIdentityRoot in the policy → no identity ro-bind"
     );
-  });
-
-  it("exception: identity root missing on disk → typed fail-loud, no argv", () => {
-    assert.throws(
-      () => fenceArgv({ projectIdentityRoot: "/nonexistent-t3-identity" }),
-      (err: unknown) =>
-        err instanceof ToolExecutionError &&
-        /projectIdentityRoot/.test(err.message)
-    );
-  });
-
-  it("off/unbound: argv byte-identical with and without an undefined identity option", () => {
-    const base = {
-      command: "bash",
-      args: ["-c", "true"],
-      fsPolicy: createFsPolicy({
-        cwd: TASK,
-        home: "/home/user",
-        tmpDir: TMP,
-      }),
-      networkPolicy: createNetworkPolicy(),
-      resourceLimits: createResourceLimits(),
-      env: { PATH: "/bin" },
-      cwd: TASK,
-    };
-    const without = createBwrapFence(base).argv;
-    const withUndefined = createBwrapFence({
-      ...base,
-      projectIdentityRoot: undefined,
-    }).argv;
-    assert.deepEqual(withUndefined, without);
   });
 });
 

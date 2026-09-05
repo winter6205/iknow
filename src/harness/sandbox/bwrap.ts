@@ -1,6 +1,5 @@
 import { existsSync } from "node:fs";
 import { relative } from "node:path";
-import { ToolExecutionError } from "../errors.js";
 import type { FsPolicy } from "./fs-policy.js";
 import {
   OPTIONAL_HOST_RO_PREFIXES,
@@ -45,13 +44,6 @@ export interface BwrapFenceOptions {
   // rebinds → --proc/--dev-bind) and the rebind-after-tmpfs rule (cwd
   // isTmpDescendant) stay intact.
   readonly cwdReadonly?: boolean;
-  // ADR-0037 §9.2 #6 (closed world, supersedes the 2026-09-05 overlay form):
-  // the project identity root (main checkout) is unconditionally a
-  // read-whitelist member. Absent = the caller has not threaded it (T4 wires
-  // the closed-world whitelist). Blank / missing on disk → typed fail-loud,
-  // no spawn — a contract input, not an optional host prefix (different axis
-  // from OPTIONAL_HOST_RO_PREFIXES existence-skipping).
-  readonly projectIdentityRoot?: string;
   readonly seccompProfile?: never;
 }
 
@@ -66,18 +58,12 @@ function isTmpDescendant(path: string, tmp: string): boolean {
 }
 
 /** Effective read whitelist for argv: the policy's contract read roots and
- *  on-disk optional members, plus the bwrap-level identity option (T4/T5
- *  consolidate the two entry points; dedupe keeps the first occurrence). */
-function readWhitelist(
-  fsPolicy: FsPolicy,
-  identityRoot: string | undefined
-): readonly string[] {
+ *  on-disk optional members. Single source is the fs-policy read axis — the
+ *  bwrap layer adds no roots of its own (the T2 identity option died in T5;
+ *  identity enters through `FsPolicyOptions.projectIdentityRoot`). */
+function readWhitelist(fsPolicy: FsPolicy): readonly string[] {
   return [
-    ...new Set([
-      ...fsPolicy.readRoots(),
-      ...fsPolicy.optionalReadRoots(),
-      ...(identityRoot !== undefined ? [identityRoot] : []),
-    ]),
+    ...new Set([...fsPolicy.readRoots(), ...fsPolicy.optionalReadRoots()]),
   ];
 }
 
@@ -100,11 +86,10 @@ function baseArgs(
   fsPolicy: FsPolicy,
   resources: ResourceLimits,
   network: boolean,
-  cwdReadonly: boolean,
-  identityRoot: string | undefined
+  cwdReadonly: boolean
 ): string[] {
   const tmp = fsPolicy.tmpRoot();
-  const readRoots = readWhitelist(fsPolicy, identityRoot);
+  const readRoots = readWhitelist(fsPolicy);
   const readBinds = readRoots.flatMap((root) => ["--ro-bind", root, root]);
   // #562 T5: cwdReadonly switches the cwd-bind verb; the tmp write channel
   // stays writable (it is the sandbox /tmp mount) and orders before cwd.
@@ -114,8 +99,9 @@ function baseArgs(
   // post-tmpfs rebinds re-assert them: read roots read-only first, the cwd
   // last so it reclaims writability (or stays read-only under cwdReadonly).
   // The old home rebind (#196 T12b) died with the writable-home base — home
-  // is no longer a bind root. The identity-specific conditional layer is
-  // cleaned up in T5; here the mechanism is uniform over the read whitelist.
+  // is no longer a bind root. The mechanism is uniform over the read
+  // whitelist: every read root (identity included, as a policy member) gets
+  // the same treatment, with no identity-specific conditional layer.
   const readRebinds = readRoots
     .filter((root) => isTmpDescendant(root, tmp))
     .flatMap((root) => ["--ro-bind", root, root]);
@@ -131,8 +117,8 @@ function baseArgs(
     // + optional host prefixes existence-skipped.
     ...READ_ONLY_SYSTEM_PATHS.flatMap((path) => ["--ro-bind", path, path]),
     ...optionalHostRoBindArgs(),
-    // Read whitelist (§9.2 #4–#7): contract roots + on-disk optional members
-    // (+ the identity option), all read-only.
+    // Read whitelist (§9.2 #4–#7): contract roots + on-disk optional members,
+    // all read-only.
     ...readBinds,
     // Write whitelist (§9.2 #2–#3): tmp by role + cwd/taskRoot, last.
     "--bind",
@@ -155,25 +141,6 @@ function baseArgs(
 }
 
 export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
-  // ADR-0037 §9.2 #6 / §9.4: identity root is a contract read root — blank
-  // or missing-on-disk is a caller misconfiguration. Fail loud (typed, no
-  // spawn) instead of existsSync-skipping like OPTIONAL_HOST_RO_PREFIXES,
-  // which is a different axis (host capability detection vs fence contract).
-  let identityRoot: string | undefined;
-  if (opts.projectIdentityRoot !== undefined) {
-    const identity = opts.projectIdentityRoot;
-    if (identity.trim().length === 0) {
-      throw new ToolExecutionError(
-        "bwrap: projectIdentityRoot is blank; refusing to build a closed-world fence without a contract read root (ADR-0037 §9.2 #6 / §9.4)"
-      );
-    }
-    if (!existsSync(identity)) {
-      throw new ToolExecutionError(
-        `bwrap: projectIdentityRoot does not exist on disk: ${identity}; refusing to build a closed-world fence with a missing contract read root (ADR-0037 §9.2 #6 / §9.4)`
-      );
-    }
-    identityRoot = identity;
-  }
   const envArgs = Object.entries(opts.env).flatMap(([name, value]) =>
     value === undefined ? [] : ["--setenv", name, value]
   );
@@ -184,8 +151,7 @@ export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
       opts.fsPolicy,
       opts.resourceLimits,
       opts.network === true,
-      opts.cwdReadonly === true,
-      identityRoot
+      opts.cwdReadonly === true
     ),
     // --clearenv must precede every --setenv so the sandbox inherits only the
     // whitelisted entries, never the host env (bwrap otherwise copies the whole

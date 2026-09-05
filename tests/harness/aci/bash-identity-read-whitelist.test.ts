@@ -1,7 +1,8 @@
 /**
- * #891 T2 → T4 闭世界改写(ADR-0037 §9.2 #6 / §9.3 overlay 条款 superseded)。
+ * #891 T2 → T4/T5:身份根读白名单接线(ADR-0037 §9.2 #6;§9.3 overlay 条款
+ * superseded,T5 删除旧形态)。
  *
- * 合同(闭世界形态,T4 接线后):
+ * 合同(闭世界形态):
  * 1. 前台(foreground fence)与后台(handleBackground → manager.spawn →
  *    defaultBackgroundSpawn)消费**同一**身份根 token(D2 同波同一份;
  *    CONTEXT 沙箱纪律:前后台共用围栏)。
@@ -10,7 +11,8 @@
  *    同根,可写 bind 在读 bind 之后回收写权,读通道不受影响)。
  * 3. argv 含 `--ro-bind <identity> <identity>`(读白名单成员),位于可写
  *    cwd bind 之前;writable home 打底 token 消失——不存在可写祖先可被
- *    覆盖,身份根不再是 overlay 而是读成员。
+ *    覆盖,身份根是普通读成员(T5:bwrap 层 identity 选项已删,单一入口
+ *    = policy 读白名单)。
  *
  * 后台链路沿用 bash-live-task-root.test.ts 的 handler+spawn-mock 策略
  * （生产热路径 end-to-end）；前台链路用真实 tmpdir 直驱 handler，读
@@ -96,7 +98,7 @@ afterEach(() => {
   spawnMock.mockReset();
 });
 
-describe("bash #891 T2: identity-root read-whitelist wiring (closed world, T4)", () => {
+describe("bash #891 T2: identity-root read-whitelist wiring (closed world, T4/T5)", () => {
   it("unbound wave (taskRoot == identity) → identity root STILL enters the read whitelist (unconditional, T4 b)", async () => {
     const dirs = makeLeakShape();
     try {
@@ -187,7 +189,7 @@ describe("bash #891 T2: identity-root read-whitelist wiring (closed world, T4)",
     }
   });
 
-  it("background path consumes the SAME overlay token as foreground (D2)", async () => {
+  it("background path consumes the SAME read-whitelist token as foreground (D2)", async () => {
     const dirs = makeLeakShape();
     try {
       const tool = createBashTool(dirs.taskRoot, {
