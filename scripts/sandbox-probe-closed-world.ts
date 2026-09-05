@@ -10,7 +10,8 @@
  * 假设围栏形态（对照 src/harness/sandbox/bwrap.ts baseArgs，外层参数与
  * 生产 fence 一致；本文件只 import、不修改 src/）：
  *   --unshare-user-try --unshare-net --die-with-parent
- *   系统 ro-bind（/usr /bin /lib /lib64 /etc + 可选主机前缀按存在性）
+ *   系统 ro-bind（READ_ONLY_SYSTEM_PATHS 单源 = /usr /bin /lib /lib64 /etc
+ *   + 可选主机前缀按存在性）
  *   --bind <cwd> <cwd>（taskRoot 可写）
  *   --size <resources.tmp> --tmpfs /tmp（可写）
  *   （cwd 在 /tmp 下时按生产 isTmpDescendant 语义后置重绑）
@@ -37,6 +38,7 @@ import {
   createEnvIsolation,
   createResourceLimits,
   OPTIONAL_HOST_RO_PREFIXES,
+  READ_ONLY_SYSTEM_PATHS,
   requireBwrap,
   type ResourceLimits,
 } from "../src/harness/sandbox/index.js";
@@ -159,21 +161,10 @@ export function buildClosedWorldBaseArgs(opts: {
     "--unshare-user-try",
     "--unshare-net",
     "--die-with-parent",
-    "--ro-bind",
-    "/usr",
-    "/usr",
-    "--ro-bind",
-    "/bin",
-    "/bin",
-    "--ro-bind",
-    "/lib",
-    "/lib",
-    "--ro-bind",
-    "/lib64",
-    "/lib64",
-    "--ro-bind",
-    "/etc",
-    "/etc",
+    // 系统 ro-bind 单源:直接消费生产的 READ_ONLY_SYSTEM_PATHS
+    // (/usr /bin /lib /lib64 /etc),不再手抄——消除与生产集合的静默漂移面
+    // (code-review L2)。顺序与生产 bwrap baseArgs 一致。
+    ...READ_ONLY_SYSTEM_PATHS.flatMap((p) => ["--ro-bind", p, p]),
     ...existingOptionalPrefixes.flatMap((p) => ["--ro-bind", p, p]),
     "--bind",
     cwd,
@@ -520,7 +511,7 @@ async function main(): Promise<void> {
     `sandbox-probe closed-world inventory (bwrap ${version.stdout?.trim() ?? "unknown"})`
   );
   console.log(
-    `围栏形态: 系统 ro-bind(/usr /bin /lib /lib64 /etc + 可选前缀[${
+    `围栏形态: 系统 ro-bind(${READ_ONLY_SYSTEM_PATHS.join(" ")} + 可选前缀[${
       existingOptionalPrefixes.join(",") || "无"
     }]) + cwd 可写 bind + --tmpfs /tmp + --proc + --dev-bind`
   );

@@ -11,11 +11,10 @@ import type { SandboxRunResult } from "../sandbox/index.js";
 import {
   BASE_ENV_WHITELIST,
   createBwrapFence,
+  createClosedWorldFsPolicy,
   createEnvIsolation,
-  createFsPolicy,
   createNetworkPolicy,
   createResourceLimits,
-  defaultOptionalReadRoots,
   runInSandbox,
 } from "../sandbox/index.js";
 import { resolveInstallRoot } from "../session-roots.js";
@@ -35,9 +34,9 @@ export type RunVerifyFn = (
  * 与 bash.ts 一致。
  *
  * T4 闭世界双轴 (ADR-0037 §9.2): 读白名单 = installRoot(合同根,#4) +
- * node 工具链根(缺省推导,#5) + git 全局配置(可选成员,#7,与 bash 前台/
- * 后台同一 helper);写白名单 = cwd(taskRoot) + tmp。verify 不传
- * projectIdentityRoot(维持现状,#6 由装配层条件决定)。
+ * node 工具链根(缺省推导,#5) + git 全局配置(可选成员,#7,createClosedWorldFsPolicy
+ * 内折叠,与 bash 前台/后台同一装配 helper);写白名单 = cwd(taskRoot) + tmp。
+ * verify 不传 projectIdentityRoot(维持现状,#6 由装配层条件决定)。
  */
 export function makeDefaultRunVerify(opts: {
   readonly cwd: string;
@@ -49,12 +48,11 @@ export function makeDefaultRunVerify(opts: {
   readonly installRoot?: string;
 }): RunVerifyFn {
   const installRoot = opts.installRoot ?? resolveInstallRoot();
-  const fsPolicy = createFsPolicy({
+  const fsPolicy = createClosedWorldFsPolicy({
     cwd: opts.cwd,
     home: opts.home,
     tmpDir: tmpdir(),
     installRoot,
-    optionalReadRoots: defaultOptionalReadRoots({ home: opts.home }),
   });
   const networkPolicy = createNetworkPolicy();
   const resourceLimits = createResourceLimits();

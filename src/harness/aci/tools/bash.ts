@@ -9,13 +9,12 @@ import {
   BASE_ENV_WHITELIST,
   applyCwdReadonlyFenceEnv,
   createBwrapFence,
+  createClosedWorldFsPolicy,
   createEnvIsolation,
-  createFsPolicy,
   createNetworkPolicy,
   createOutputMask,
   createResourceLimits,
   currentSecretValues,
-  defaultOptionalReadRoots,
 } from "../../sandbox/index.js";
 import {
   DEFAULT_MAX_OUTPUT_CODE_POINTS,
@@ -193,16 +192,17 @@ export function createBashTool(
     // 与 V1 字节等价,差异只落在 --bind / --chdir 的 cwd token 上。
     // T4 闭世界双轴(ADR-0037 §9.2):读白名单 = installRoot(合同根,#4) +
     // projectIdentityRoot(合同根,#6,恒进) + node 工具链根(缺省推导,#5)
-    // + git 全局配置(可选成员,#7,单一 source helper,存在性跳过);
-    // 写白名单 = taskRoot + tmp(policy 内定)。
-    const fsPolicy = createFsPolicy({
+    // + git 全局配置(可选成员,#7,createClosedWorldFsPolicy 内折叠,存在性
+    // 跳过);写白名单 = taskRoot + tmp(policy 内定)。per-call rebuild 语义
+    // 不变 —— 每波仍现建 policy,只是装配表达式与后台 spawn / verify 同源
+    // (code-review M2 装配单源化)。
+    const fsPolicy = createClosedWorldFsPolicy({
       cwd: waveRoot,
       home,
       tmpDir,
       ...(workspaceRoot ? { workspaceRoot } : {}),
       ...(installRoot !== undefined ? { installRoot } : {}),
       ...(projectIdentityRoot !== undefined ? { projectIdentityRoot } : {}),
-      optionalReadRoots: defaultOptionalReadRoots({ home }),
     });
     const fence = createBwrapFence({
       command: "bash",

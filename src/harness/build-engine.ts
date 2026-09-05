@@ -837,8 +837,10 @@ export async function buildHarnessEngine(
       // 不走这条缝，仍由各工厂按 opts 接各自的稳定根。
       liveTaskRoot,
       // T3:只读放行项目身份文件所在的主仓（ADR-0037 §1 允许只读主仓）。registry
-      // 只把它透给 read_file / grep / glob —— bash / write / edit 拿不到，写不进
-      // 主仓。ON 档即便初始根仍是主仓也要把稳定身份根交给这些工厂；它们按
+      // 把它透给 read_file / grep / glob，也传入 bash 工厂作闭世界读白名单成员
+      // （ADR-0037 §9.2 #6：registry.ts 的 bash 工厂装配把它接进 createBashTool
+      // → fs-policy，fence 以 --ro-bind 只读挂载，写不进主仓）；write / edit 仍
+      // 不获得该根。ON 档即便初始根仍是主仓也要把稳定身份根交给这些工厂；它们按
       // handler 调用时的 live taskRoot 再判定 task-worktree 形状，因此同一 run
       // 的下一波也能看到 rebind，而 OFF 档完全不传这条根。
       ...(isolationEnabled ? { projectIdentityRoot } : {}),

@@ -28,8 +28,9 @@ let tsxEsmPath;
 try {
   tsxEsmPath = require.resolve("tsx/esm", { paths: [repoRoot] });
 } catch {
-  // tsx not installed anywhere up the chain: keep the legacy pinned path so
-  // node reports the same ERR_MODULE_NOT_FOUND as before.
+  // EXIT: tsx-resolve-fallback — require.resolve failed (tsx absent at the
+  // repo root and every ancestor): keep the legacy pinned path so node
+  // reports the same ERR_MODULE_NOT_FOUND as before.
   tsxEsmPath = resolve(
     repoRoot,
     "node_modules",

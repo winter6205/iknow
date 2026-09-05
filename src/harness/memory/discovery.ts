@@ -32,9 +32,16 @@ async function* safeDir(path: string): AsyncIterable<string> {
     // "scandir") on first iteration, not at the opendir call (Node throws
     // eagerly). The guard must cover the iteration too: missing dir = empty
     // listing, never a throw into callers (e.g. buildTuiDeps rules discovery).
+    // Guard is narrow (ENOENT only): EACCES / EMFILE and other iteration
+    // faults are NOT swallowed as an empty listing — they rethrow typed,
+    // same shape as tryReadEntry below (a host fault must not masquerade
+    // as "no rules found").
     for await (const e of dir) yield e.name;
-  } catch {
-    return;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new MemoryIOError(`discovery: opendir failed for ${path}`, {
+      cause: e,
+    });
   }
 }
 

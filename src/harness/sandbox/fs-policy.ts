@@ -157,6 +157,27 @@ export function defaultOptionalReadRoots(opts: {
 }
 
 /**
+ * Shared closed-world assembly for the three production spawn sites
+ * (foreground bash handler / background manager / verify runner): folds the
+ * default git optional-member pair (§9.2 #7) into `createFsPolicy`. Single
+ * source — the three sites previously hand-copied
+ * `optionalReadRoots: defaultOptionalReadRoots({ home })` and could drift
+ * without structural protection (code-review M2, Fowler #2). Purely an
+ * assembly-layer convenience: options are forwarded verbatim, so contract
+ * fail-loud (§9.4) and existence-skip semantics stay in `createFsPolicy`
+ * untouched. Does not change the bash handler's per-call rebuild — each wave
+ * still constructs a fresh policy; only the assembly expression is shared.
+ */
+export function createClosedWorldFsPolicy(
+  opts: Omit<FsPolicyOptions, "optionalReadRoots">
+): FsPolicy {
+  return createFsPolicy({
+    ...opts,
+    optionalReadRoots: defaultOptionalReadRoots({ home: opts.home }),
+  });
+}
+
+/**
  * Per-root state anchor directories that must NOT be touchable by the agent
  * through the fs-policy fence, even though `.iknow` is physically inside
  * the workspace root (or home). The whole `<root>/.iknow` subtree is covered

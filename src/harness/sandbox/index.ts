@@ -1,6 +1,7 @@
 export {
   SENSITIVE_PATHS,
   READ_ONLY_SYSTEM_PATHS,
+  createClosedWorldFsPolicy,
   createFsPolicy,
   defaultOptionalReadRoots,
 } from "./fs-policy.js";

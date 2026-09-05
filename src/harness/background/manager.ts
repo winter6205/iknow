@@ -29,11 +29,10 @@ import {
   BASE_ENV_WHITELIST,
   applyCwdReadonlyFenceEnv,
   createBwrapFence,
+  createClosedWorldFsPolicy,
   createEnvIsolation,
-  createFsPolicy,
   createNetworkPolicy,
   createResourceLimits,
-  defaultOptionalReadRoots,
 } from "../sandbox/index.js";
 import type { BackgroundTaskRecord, BackgroundTaskStatus } from "./registry.js";
 import { createBackgroundRegistry } from "./registry.js";
@@ -244,10 +243,11 @@ export async function defaultBackgroundSpawn(
   const home = req.home ?? homedir();
   // T4 闭世界双轴 policy(ADR-0037 §9.2)—— 与前台 bash.ts 同款装配:
   // 读白名单 = installRoot + projectIdentityRoot(合同根,可选缺席)+ node
-  // 工具链根(缺省推导)+ git 全局配置(单一 source helper,存在性跳过);
-  // 写白名单 = taskRoot + tmp(policy 内定)。身份根经 policy 进读白名单,
-  // 不再走 bwrap 层条件 overlay(§9.3 superseded)。
-  const fsPolicy = createFsPolicy({
+  // 工具链根(缺省推导)+ git 全局配置(createClosedWorldFsPolicy 内折叠,
+  // 存在性跳过);写白名单 = taskRoot + tmp(policy 内定)。身份根经 policy
+  // 进读白名单,不再走 bwrap 层条件 overlay(§9.3 superseded)。装配表达式
+  // 与前台 / verify 同源(code-review M2 装配单源化)。
+  const fsPolicy = createClosedWorldFsPolicy({
     cwd,
     home,
     tmpDir: tmpdir(),
@@ -256,7 +256,6 @@ export async function defaultBackgroundSpawn(
     ...(req.projectIdentityRoot !== undefined
       ? { projectIdentityRoot: req.projectIdentityRoot }
       : {}),
-    optionalReadRoots: defaultOptionalReadRoots({ home }),
   });
   const resources = createResourceLimits();
   const network = createNetworkPolicy();

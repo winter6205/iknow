@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import {
   READ_ONLY_SYSTEM_PATHS,
   SENSITIVE_PATHS,
+  createClosedWorldFsPolicy,
   createFsPolicy,
   defaultOptionalReadRoots,
 } from "../../../src/harness/sandbox/fs-policy.js";
@@ -314,5 +315,105 @@ describe("defaultOptionalReadRoots — §9.2 #7 git global config pair (single s
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe("createClosedWorldFsPolicy — 三处生产装配单源 helper (code-review M2)", () => {
+  let fixtureRoot: string;
+  let taskRoot: string;
+  let tmp: string;
+  let installRoot: string;
+  let identityRoot: string;
+  let workspaceRoot: string;
+
+  beforeAll(() => {
+    fixtureRoot = mkdtempSync(join(tmpdir(), "fs-policy-cw-"));
+    taskRoot = join(fixtureRoot, "task");
+    installRoot = join(fixtureRoot, "install");
+    identityRoot = join(fixtureRoot, "repo");
+    workspaceRoot = join(fixtureRoot, "workspace");
+    for (const dir of [taskRoot, installRoot, identityRoot, workspaceRoot]) {
+      mkdirSync(dir, { recursive: true });
+    }
+    tmp = mkdtempSync(join(tmpdir(), "fs-policy-cw-tmp-"));
+  });
+
+  afterAll(() => {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("folds defaultOptionalReadRoots({ home }) into the policy (on-disk git pair survives, absent is skipped)", () => {
+    const home = mkdtempSync(join(tmpdir(), "fs-policy-cw-home-"));
+    try {
+      // home 无 git 配置 → 可选成员全被存在性跳过,不炸也不进白名单。
+      const bare = createClosedWorldFsPolicy({
+        cwd: taskRoot,
+        home,
+        tmpDir: tmp,
+      });
+      assert.deepEqual([...bare.optionalReadRoots()], []);
+      // home 带上 git 全局配置对 → 折叠结果与手抄形态一致。
+      mkdirSync(join(home, ".config", "git"), { recursive: true });
+      writeFileSync(join(home, ".gitconfig"), "[user]\n");
+      writeFileSync(join(home, ".config", "git", "config"), "[user]\n");
+      const dressed = createClosedWorldFsPolicy({
+        cwd: taskRoot,
+        home,
+        tmpDir: tmp,
+      });
+      assert.deepEqual(
+        [...dressed.optionalReadRoots()],
+        defaultOptionalReadRoots({ home }),
+        "folded optional members = defaultOptionalReadRoots({ home }) with existence-skip"
+      );
+      assert.doesNotThrow(() => dressed.assertWithin(join(home, ".gitconfig")));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("forwards optional fields verbatim (tmpDir/workspaceRoot/installRoot/projectIdentityRoot) and omits absent contract roots", () => {
+    const full = createClosedWorldFsPolicy({
+      cwd: taskRoot,
+      home: "/home/user",
+      tmpDir: tmp,
+      workspaceRoot,
+      installRoot,
+      projectIdentityRoot: identityRoot,
+    });
+    assert.equal(full.tmpRoot(), tmp, "tmpDir passes through");
+    assert.ok(full.readRoots().includes(installRoot));
+    assert.ok(full.readRoots().includes(identityRoot));
+    // workspaceRoot 仍只是状态锚,不进任何 bind 轴(与 createFsPolicy 同合同)。
+    assert.equal(
+      [...full.writeRoots(), ...full.readRoots()].includes(workspaceRoot),
+      false,
+      "workspaceRoot must not appear on either axis"
+    );
+    assert.equal(full.isSensitive(`${workspaceRoot}/.iknow/state.json`), true);
+    // verify 现状:不传 projectIdentityRoot → 读白名单不含身份根(条件缺席)。
+    const minimal = createClosedWorldFsPolicy({
+      cwd: taskRoot,
+      home: "/home/user",
+      tmpDir: tmp,
+    });
+    assert.equal(
+      minimal.readRoots().includes(identityRoot),
+      false,
+      "absent projectIdentityRoot must not enter the read whitelist"
+    );
+  });
+
+  it("keeps createFsPolicy's contract-input fail-loud (options forwarded verbatim, not re-interpreted)", () => {
+    assert.throws(
+      () =>
+        createClosedWorldFsPolicy({
+          cwd: "/nonexistent-cw-taskroot",
+          home: "/home/user",
+        }),
+      (err: unknown) =>
+        err instanceof ToolExecutionError && /taskRoot/.test(err.message)
+    );
   });
 });
