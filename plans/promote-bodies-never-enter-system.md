@@ -26,13 +26,13 @@ minimal-change-verifier: yes — 一个 destination（ADR-0044）；落地按本
    - **Inherits:** spec Does：装配不输出 `formatPromote` 块；prefetch 不按 `eligibleForPromote` 排除；`disabled` 仍丢；`memory_recall` 不调用 `recordRecall`；不新增 AGENTS.md 作者句。SC1–SC7。
    - **Surface:** harness memory assembly / prefetch
    - **Acceptance:** SC1–SC7 为真；`npx vitest run tests/harness/memory/` EXIT 0
-   - Status: [ ] pending
+   - Status: [x] done — commit c6f688ee（memory 测试面 356/356 EXIT 0、typecheck EXIT 0、code review GATE: PASS）
 
 2. **Downstream specs stop promising promote-in-system** — tag: `[implementation]`
    - **Inherits:** spec Changes：`auto-memory-layering` 不再要求 autoExtract 同闸拼 promote 段；`auto-memory-low-trust-read` 不再写「已在 promote 段的条不再预取」；`casual-ask-context-hygiene` 不再把 promote 列进「不改」；`specs/README.md` 列出本 spec。
    - **Surface:** specs 索引与上述三份读路径 spec
    - **Acceptance:** 上述文件与 ADR-0044 不再互相矛盾；本 spec 已出现在 `specs/README.md` 身份与记忆组
-   - Status: [ ] pending
+   - Status: [x] done — commit 10994650（grep 复查无残留矛盾；README 已列新 spec）
    - [blocks: T1]
 
 ## 待写入
