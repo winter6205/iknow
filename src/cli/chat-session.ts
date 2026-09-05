@@ -1681,6 +1681,14 @@ function formatChatError(err: unknown): string {
 export async function seedResumeMessages(opts: {
   readonly store: SessionStore | undefined;
   readonly id: string | undefined;
+  /**
+   * per-root 池兜底（TUI 退出 resume 提示接线）。TUI 会话落
+   * `<workspaceRoot>/.iknow`（ADR-0019 per-root 锚点），而 chat checkpoint
+   * 池 = `~/.iknow`；default 池 not_found 时以本池重试，让 /quit 打印的
+   * `iknow --resume <id>` 能命中 TUI 建的会话。legacy 会话仍由 default 池
+   * 命中，行为不变。
+   */
+  readonly fallbackStore?: SessionStore;
 }): Promise<{
   messages: ReadonlyArray<AnthropicNativeMessage>;
   /** 缺省 = 无失败需要通知(undefined 即不调用);存在时调用方应执行以落 stderr。 */
@@ -1699,13 +1707,21 @@ export async function seedResumeMessages(opts: {
     }
     const kind = (err as SessionStoreError).kind;
     const id = opts.id;
-    return {
-      messages: [],
-      warn: () =>
-        writeErr(
-          `恢复会话 ${id} 失败: [${kind}]，从空开始（仍锚定 ${id} 续写）`
-        ),
-    };
+    const warnFor = (k: SessionStoreError["kind"]) => (): void =>
+      writeErr(`恢复会话 ${id} 失败: [${k}]，从空开始（仍锚定 ${id} 续写）`);
+    if (kind === "not_found" && opts.fallbackStore) {
+      try {
+        const file = await opts.fallbackStore.load(id);
+        return { messages: file.messages };
+      } catch (fallbackErr) {
+        if (!isSessionStoreErrorKind(fallbackErr)) throw fallbackErr;
+        return {
+          messages: [],
+          warn: warnFor((fallbackErr as SessionStoreError).kind),
+        };
+      }
+    }
+    return { messages: [], warn: warnFor(kind) };
   }
 }
 
@@ -2014,9 +2030,21 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   //   - load 失败(typed)→ messages 空 + 一行 stderr 警告;**仍保留
   //     conversationId 锚点** —— 后续 turn 的 checkpoint 写回同一 `<id>.jsonl`,
   //     不会碎片化成新 id。未知异常(防御性)→ 原样重抛。
+  //   - per-root 兜底:TUI 会话落 <workspaceRoot>/.iknow(ADR-0019),default
+  //     池 not_found 时以同 workspaceRoot 的 per-root 池重试(TUI /quit 打印
+  //     的 `iknow --resume <id>` 由此命中)。workspaceRoot 缺席 → 与既有行为
+  //     逐字节一致。
   const { messages: seeded, warn: resumeWarn } = await seedResumeMessages({
     store: opts.resumeId !== undefined ? checkpointStore : undefined,
     id: opts.resumeId,
+    ...(opts.resumeId !== undefined &&
+    opts.workspaceRoot !== undefined && opts.workspaceRoot !== ""
+      ? {
+          fallbackStore: new SessionStore(
+            resolveServeDataDir(undefined, opts.workspaceRoot)
+          ),
+        }
+      : {}),
   });
   resumeWarn?.();
 

@@ -124,7 +124,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   }
   const factory = options.createRenderer ?? createCliRenderer;
   let renderer: CliRenderer | undefined;
-  let onQuitBridge: { destroy: () => void } | undefined;
+  let onQuitBridge: { destroy: (conversationId?: string) => void } | undefined;
+  // /quit 时活跃会话的 conversationId（app.tsx quit() 经 onQuit 传入）。
+  // whenDestroyed + shutdownExtensions 收口后（终端已恢复到主屏）打印
+  // resume 提示；draft 未建档（undefined）则不打印。
+  let quitResumeConversationId: string | undefined;
   // #337 Phase B:TUI 扩展面透出(skillCatalog / mcp.status / mcp.reload / shutdown),
   // 由 buildTuiDeps 的 onExtensions 回调同步注入。退出路径调用 shutdownExtensions()
   // 关闭 MCP manager(避免 stdio 子进程泄漏);幂等封装保证 onQuit 与 whenDestroyed
@@ -450,11 +454,12 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     }
 
     onQuitBridge = {
-      destroy: (): void => {
+      destroy: (conversationId?: string): void => {
         // #337 Phase B:/quit 二次确认 → 等 in-flight 落盘 → onQuit 触发。
         // shutdown 收口 MCP(关闭 client + 取消 in-flight + SIGTERM stdio),
         // 完成后 destroy 渲染器。fire-and-forget:app 接着自己 destroy(见
         // app.tsx quit() 末尾),不会挂起;whenDestroyed 兜底 await 同一 shutdown。
+        quitResumeConversationId = conversationId;
         void shutdownExtensions().finally(() => {
           if (!renderer!.isDestroyed) renderer!.destroy();
         });
@@ -521,6 +526,12 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // shutdownExtensions 已启动则 no-op,未启动则确保 MCP 关闭在 runTui 返回
     // 前完成,避免 stdio 子孙泄漏。
     await shutdownExtensions();
+    // /quit 建档会话 → 终端恢复后打印 resume 提示（draft 无 id 不打印）。
+    if (quitResumeConversationId) {
+      process.stdout.write(
+        `Resume this session with:\niknow --resume ${quitResumeConversationId}\n`
+      );
+    }
     return 0;
   } catch (err) {
     // 唯一 catch 点（E1/E2）：类型化消息写 stderr，destroy 收口于此。

@@ -462,8 +462,10 @@ export interface TuiAppProps {
   readonly sessionGrants?: SessionGrants;
   /** 测试注入口：可选初始视图（缺省 chat）。 */
   readonly initialView?: TuiView;
-  /** 测试 / mock 注入口：触发 renderer.destroy 的回调；缺省 = no-op。 */
-  readonly onQuit?: () => void;
+  /** 测试 / mock 注入口：触发 renderer.destroy 的回调；缺省 = no-op。
+   *  参数 = 退出时活跃会话的 conversationId（draft 未建档时 undefined），
+   *  供宿主在终端恢复后打印 resume 提示。 */
+  readonly onQuit?: (conversationId?: string) => void;
   /** #337 Phase C：skill 清单（slash 候选混显 + /skill-name 加载发送）。
    *  可选：缺省 = 空清单（兼容 fixture / 测试；产品路径由 run.tsx 经
    *  TuiExtensions.skillCatalog 注入）。 */
@@ -1668,7 +1670,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       return;
     }
     await Promise.allSettled([...inflightPromises.current]);
-    props.onQuit?.();
+    props.onQuit?.(active.conversationId);
     if (!renderer.isDestroyed) renderer.destroy();
   }
 
