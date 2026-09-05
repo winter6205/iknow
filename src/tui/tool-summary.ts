@@ -823,10 +823,11 @@ export function projectToolLines(
   return lines;
 }
 
-/** 工具状态行文案 SSOT（#693 T1 D1/D7）。
+/** 工具状态行文案 SSOT（#693 T1 D1/D7 + #tui-render-overhaul T3）。
  *
  * 历史与 live 两侧的「工具状态行」拼装收敛到本函数：
- *  - 普通工具：`[运行中]|[完成]|[失败] name · detail`；
+ *  - 普通工具：成功 `name · detail`（去 `[完成]` 前缀，状态由颜色/glyph
+ *    表达）；运行中 `[运行中] name · detail`；失败 `[失败] name · detail`。
  *  - 子代理工具（spawn_subagent / subagent_result）独立形态：
  *    `▣|✓|✗ 子代理 · detail`（glyph 已表状态，不再拼 [运行中]/[完成]/[失败]）。
  *
@@ -860,12 +861,18 @@ export function formatToolStatusLine(opts: {
     if (detail.length === 0) return `${mark} ${SUBAGENT_TOOL_LABEL}`;
     return `${mark} ${SUBAGENT_TOOL_LABEL} · ${detail}`;
   }
+  // #tui-render-overhaul T3:成功态去掉 `[完成]` 前缀 —— 状态由颜色/glyph
+  // 表达,行首不残留多余空格。失败/运行中保留明示前缀（不变式）。
   const mark =
     opts.status === "ok"
-      ? "[完成]"
+      ? ""
       : opts.status === "failed"
         ? "[失败]"
         : "[运行中]";
+  if (mark.length === 0) {
+    if (detail.length === 0) return opts.toolName;
+    return `${opts.toolName} · ${detail}`;
+  }
   if (detail.length === 0) return `${mark} ${opts.toolName}`;
   return `${mark} ${opts.toolName} · ${detail}`;
 }
@@ -874,9 +881,10 @@ export function formatToolStatusLine(opts: {
  *  委托 `formatToolStatusLine`（#693 T1 D7 SSOT）—— live 完成行 / 历史
  *  完成行 / running 行共用同一文案契约，避免复制粘贴模板。
  *
- *  字节规则（spec D7）：
- *   - 普通工具：detail 非空 → `[完成] name · detail` /
- *     `[失败] name · detail`；detail 空 → `[完成] name` / `[失败] name`。
+ *  字节规则（spec D7 + #tui-render-overhaul T3）：
+ *   - 普通工具成功：detail 非空 → `name · detail`；detail 空 → `name`。
+ *     完成前缀已去掉（状态由颜色/glyph 表达），行首不残留多余空格。
+ *   - 普通工具失败：`[失败] name · detail` / `[失败] name`（保留明示前缀）。
  *   - 子代理工具（spawn_subagent / subagent_result）独立形态：
  *     `✓|✗ 子代理 · detail` / `✓|✗ 子代理`（glyph 已表状态，不拼 [xxx] 前缀）。
  *

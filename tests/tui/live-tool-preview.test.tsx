@@ -79,7 +79,9 @@ describe("liveToolPreviewBox（live 工具 tail 渲染）", () => {
   test("cols=80 完成态：摘要行 + hunk 头 + 双列行号", async () => {
     const setup = await renderBox(editRun, 80);
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("[完成] edit_file · 编辑 a.ts：old → new");
+    // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+    expect(frame).toContain("edit_file · 编辑 a.ts：old → new");
+    expect(frame.includes("[完成]")).toBe(false);
     expect(frame).toContain("@@ -1,5 +1,5 @@");
     expect(frame).toMatch(/3\s+│\s+-old/);
     expect(frame).toMatch(/3\s+│\s+\+new/);
@@ -169,7 +171,9 @@ describe("liveToolPreviewTextLines（flat 行）", () => {
       newContent: "hello\n",
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    expect(rows[0]).toBe("[完成] write_file · 写入 a.ts（1 行）");
+    // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+    expect(rows[0]).toBe("write_file · 写入 a.ts（1 行）");
+    expect(rows[0]?.includes("[完成]")).toBe(false);
     expect(rows).toContain("hello");
     expect(rows.some((r) => r.includes("+hello"))).toBe(false);
     expect(rows.length).toBe(liveToolPreviewRows(run, 80));
@@ -268,8 +272,11 @@ describe("运行态 → 完成态切换（reducer 驱动）", () => {
     await setup.renderOnce();
     expect(setup.captureCharFrame()).toContain("[运行中] write_file");
     setup.mockInput.pressEnter();
-    const frame = await untilFrame(setup, (f) =>
-      f.includes("[完成] write_file · 写入 a.ts（1 行）")
+    // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+    const frame = await untilFrame(
+      setup,
+      (f) =>
+        f.includes("write_file · 写入 a.ts（1 行）") && !f.includes("[完成]")
     );
     expect(frame).not.toContain("[运行中]");
     expect(frame).toContain("hello");
@@ -649,8 +656,9 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
       stdout,
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    // 首行：完成态摘要
-    expect(rows[0]).toBe("[完成] bash · ls");
+    // 首行：完成态摘要（#tui-render-overhaul T3:无 [完成] 前缀）
+    expect(rows[0]).toBe("bash · ls");
+    expect(rows[0]?.includes("[完成]")).toBe(false);
     // 尾 5 行带 ⎿ 前缀
     expect(rows).toContain("⎿ out-3");
     expect(rows).toContain("⎿ out-7");
@@ -687,7 +695,9 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
       stdout: "   \n\t\n  ",
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    expect(rows[0]).toBe("[完成] bash · x");
+    // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+    expect(rows[0]).toBe("bash · x");
+    expect(rows[0]?.includes("[完成]")).toBe(false);
     expect(rows).toHaveLength(1);
     expect(rows.some((r) => r.includes("⎿"))).toBe(false);
   });
@@ -716,7 +726,9 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     };
     const setup = await renderBox(run, 80);
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("[完成] bash · ls");
+    // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+    expect(frame).toContain("bash · ls");
+    expect(frame.includes("[完成]")).toBe(false);
     expect(frame).toContain("⎿ file-a");
     expect(frame).toContain("⎿ file-c");
     await setup.renderer.destroy();

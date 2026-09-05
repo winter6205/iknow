@@ -294,7 +294,7 @@ test("thinking 展开态：渲染 thinking 全文 + redacted 占位", async () =
   await setup.renderer.destroy();
 });
 
-test("tool_use 完成态折叠摘要：bash 完成 → [完成] bash · npm test（无 ran 后缀）", async () => {
+test("tool_use 完成态折叠摘要：bash 完成 → bash · npm test（无 [完成] 前缀，无 ran 后缀）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -310,8 +310,9 @@ test("tool_use 完成态折叠摘要：bash 完成 → [完成] bash · npm test
     statusMap: new Map([["tu-bash-1", false]]),
   });
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("[完成]");
+  // #tui-render-overhaul T3:成功态去掉 [完成] 前缀,状态由颜色表达。
   expect(frame).toContain("bash · npm test");
+  expect(frame.includes("[完成]")).toBe(false);
   // 2026-08-14：工具行不再拼 ran-N 后缀（计数统一由 ThinkingSummary 汇总）。
   expect(frame.includes("ran")).toBe(false);
   await setup.renderer.destroy();
@@ -343,14 +344,15 @@ test("tool_use 完成态折叠摘要：同消息多 bash → 各摘要行均无 
     ]),
   });
   const frame = setup.captureCharFrame();
-  // 同消息 2 个 bash block：摘要行只显 `[完成] name · detail`，计数不再逐行追加。
+  // 同消息 2 个 bash block：摘要行只显 `bash · detail`，去 [完成] 前缀。
   expect(frame).toContain("bash · npm test");
   expect(frame).toContain("bash · git status");
   expect(frame.includes("ran")).toBe(false);
+  expect(frame.includes("[完成]")).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("tool_use 非 bash 工具（write_file）：无 ran 计数", async () => {
+test("tool_use 非 bash 工具（write_file）：无 ran 计数，无 [完成] 前缀", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -366,9 +368,10 @@ test("tool_use 非 bash 工具（write_file）：无 ran 计数", async () => {
     statusMap: new Map([["tu-wf", false]]),
   });
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("[完成]");
   expect(frame).toContain("write_file · 写入 a.ts（1 行）");
   expect(frame.includes("ran")).toBe(false);
+  // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+  expect(frame.includes("[完成]")).toBe(false);
   await setup.renderer.destroy();
 });
 
@@ -494,7 +497,9 @@ test("thinking 折叠态 + thinkingSeconds + bash：思考一行、ran 下一行
   await setup.renderer.destroy();
 });
 
-test("tool_use 状态染色：statusMap 缺位 = [运行中]，failed = [失败]，成功 = [完成]", async () => {
+test("tool_use 状态染色：statusMap 缺位 = [运行中]，failed = [失败]，成功 = 无状态前缀", async () => {
+  // #tui-render-overhaul T3:成功态去掉 [完成] 前缀，状态由颜色/glyph 表达。
+  // 运行中 / 失败保留明示前缀。不变式：失败 / 运行中分支不动。
   const okStatus = new Map<string, boolean>([["tu-ok", false]]);
   const failedStatus = new Map<string, boolean>([["tu-fail", true]]);
   const cases: ReadonlyArray<{
@@ -502,8 +507,16 @@ test("tool_use 状态染色：statusMap 缺位 = [运行中]，failed = [失败]
     readonly id: string;
     readonly map: ReadonlyMap<string, boolean>;
     readonly mark: string;
+    /** 成功态的额外字节校验:成功态无 [完成]。 */
+    readonly expectNoCompleteMark?: boolean;
   }> = [
-    { name: "写入 ok", id: "tu-ok", map: okStatus, mark: "[完成]" },
+    {
+      name: "写入 ok",
+      id: "tu-ok",
+      map: okStatus,
+      mark: "write_file ·",
+      expectNoCompleteMark: true,
+    },
     { name: "失败染色", id: "tu-fail", map: failedStatus, mark: "[失败]" },
     { name: "未配对", id: "tu-runn", map: emptyStatusMap(), mark: "[运行中]" },
   ];
@@ -523,6 +536,10 @@ test("tool_use 状态染色：statusMap 缺位 = [运行中]，failed = [失败]
     const setup = await renderBlocks(msg, { statusMap: c.map });
     const frame = setup.captureCharFrame();
     expect(frame).toContain(c.mark);
+    if (c.expectNoCompleteMark === true) {
+      // #tui-render-overhaul T3:成功态无 [完成] 前缀(由颜色表达)。
+      expect(frame.includes("[完成]")).toBe(false);
+    }
     await setup.renderer.destroy();
   }
 });
@@ -586,12 +603,14 @@ test("tool_use preview 截断窗：新文件代码首窗可见，溢出标记，
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  const sumLines = frame.split("\n").filter((l) => l.includes("[完成]"));
-  expect(sumLines.length).toBeGreaterThan(0);
+  // #tui-render-overhaul T3:成功态无 [完成] 前缀 → 改用 write_file 行内
+  // 内容断言「write_file」标题与「line-00」预览共存。
+  expect(frame).toContain("write_file");
   expect(frame).toContain("line-00");
   expect(frame).not.toContain("line-19");
   expect(frame).toContain("还有");
   expect(frame).not.toContain("+line-00");
+  expect(frame.includes("[完成]")).toBe(false);
   await setup.renderer.destroy();
 });
 
@@ -616,9 +635,11 @@ test("tool_use preview 截断窗：edit_file 显示截断 diff", async () => {
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("[完成]");
+  // #tui-render-overhaul T3:成功态无 [完成] 前缀 → 改用内容断言。
+  expect(frame).toContain("edit_file");
   expect(frame).toContain("-old");
   expect(frame).toContain("+new");
+  expect(frame.includes("[完成]")).toBe(false);
   await setup.renderer.destroy();
 });
 
@@ -892,7 +913,9 @@ test("bash 回归：`[运行中] bash` / 完成态字节不变", async () => {
     statusMap: new Map([["tu-bash-3", false]]),
   });
   const doneFrame = setupDone.captureCharFrame();
-  expect(doneFrame).toContain("[完成] bash · npm test");
+  // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+  expect(doneFrame).toContain("bash · npm test");
+  expect(doneFrame.includes("[完成]")).toBe(false);
   await setupDone.renderer.destroy();
 });
 
@@ -924,7 +947,9 @@ test("D7 slot：成功 retract（bash 无此态）—— bash 完成 → 标题 
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("[完成] bash · ls");
+  // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+  expect(frame).toContain("bash · ls");
+  expect(frame.includes("[完成]")).toBe(false);
   await setup.renderer.destroy();
 });
 
@@ -1521,8 +1546,10 @@ test("D4 bash 空输出 / 全空白 → 不渲染预览块", async () => {
     );
     await setup.waitForVisualIdle();
     const frame = setup.captureCharFrame();
-    expect(frame, `case=${c.label}`).toContain("[完成] bash");
+    // #tui-render-overhaul T3:成功态无 [完成] 前缀 → 改用 bash 标题内容断言。
+    expect(frame, `case=${c.label}`).toContain("bash");
     expect(frame, `case=${c.label}`).not.toContain("⎿");
+    expect(frame, `case=${c.label}`).not.toContain("[完成]");
     await setup.renderer.destroy();
   }
 });
@@ -1662,10 +1689,11 @@ test("D4 keep 足迹：bash 落定后标题 + ⎿ 结果预览都留（不随折
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // keep 标题行留
-  expect(frame).toContain("[完成] bash · ls");
+  // keep 标题行留（#tui-render-overhaul T3:成功态无 [完成] 前缀）。
+  expect(frame).toContain("bash · ls");
   // bash 结果预览块（⎿）留
   expect(frame).toContain("⎿ a.ts");
   expect(frame).toContain("⎿ b.ts");
+  expect(frame.includes("[完成]")).toBe(false);
   await setup.renderer.destroy();
 });

@@ -375,7 +375,9 @@ test("session 状态渲染：tool_use 摘要行 + statusMap 状态染色", async
   const frame = setup.captureCharFrame();
   expect(frame).toContain("❯ 帮我写一个文件");
   expect(frame).toContain("write_file");
-  expect(frame).toContain("[完成] write_file · 写入 hello.ts（1 行）");
+  // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+  expect(frame).toContain("write_file · 写入 hello.ts（1 行）");
+  expect(frame.includes("[完成]")).toBe(false);
   expect(frame.includes("× ")).toBe(false);
   expect(api.handle?.scrollbox).not.toBeNull();
   await setup.renderer.destroy();
@@ -1023,11 +1025,13 @@ test("idle：当前 turn bash keep 标题逐条留，零条收无计数行", asy
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("思考了 29 秒");
-  // keep 标题按 slot 渲染：tu-b2 落定成功 → [完成]；tu-b1 未配对 →
-  // [运行中]（running slot 标题可见，D7）。两条标题都在屏幕上。
-  expect(frame).toContain("[完成] bash · ls -la");
+  // keep 标题按 slot 渲染：tu-b2 落定成功 → 成功态无 [完成] 前缀
+  // (#tui-render-overhaul T3);tu-b1 未配对 → [运行中](running slot
+  // 标题可见,D7)。两条标题都在屏幕上。
+  expect(frame).toContain("bash · ls -la");
   expect(frame).toContain("[运行中] bash · ls archive");
   expect(frame).toContain("完成。");
+  expect(frame.includes("[完成]")).toBe(false);
   // 零条收 → 无工具计数行。
   expect(frame.includes("× ")).toBe(false);
   await setup.renderer.destroy();

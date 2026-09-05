@@ -28,7 +28,7 @@ import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/typ
 const COLS = 80;
 
 describe("SC1 流式/历史 工具状态行字面量一致（spec T1 D7）", () => {
-  test("bash ok：liveToolPreviewBox 完成行 与 MessageBlocks 历史 [完成] 行 字面量相同", async () => {
+  test("bash ok：liveToolPreviewBox 完成行 与 MessageBlocks 历史 行 字面量相同", async () => {
     const liveRun: LiveToolRun = {
       id: "tu-1",
       name: "bash",
@@ -71,10 +71,11 @@ describe("SC1 流式/历史 工具状态行字面量一致（spec T1 D7）", () 
     const histFrame = histSetup.captureCharFrame();
     await histSetup.renderer.destroy();
 
-    // 工具状态行字面量：两侧都产 `[完成] bash · pwd`（live 完成行通过新 SSOT
-    // 收敛为历史形态，去除尾部 ` · ok`）。
-    expect(histFrame).toContain("[完成] bash · pwd");
-    expect(liveFrame).toContain("[完成] bash · pwd");
+    // #tui-render-overhaul T3:成功态无 [完成] 前缀,两侧都产 `bash · pwd`。
+    expect(histFrame).toContain("bash · pwd");
+    expect(liveFrame).toContain("bash · pwd");
+    expect(histFrame.includes("[完成]")).toBe(false);
+    expect(liveFrame.includes("[完成]")).toBe(false);
     // live 完成行不再有尾缀 ` · ok`（这是 D7 消除的不一致）。
     expect(liveFrame.includes("pwd · ok")).toBe(false);
   });

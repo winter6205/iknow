@@ -152,10 +152,12 @@ test("idle：思考秒数 + 多轮 bash keep → 标题留、零条收无计数�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // keep 标题行逐条可见（bash 成功）。
-  expect(frame).toContain("[完成] bash");
+  // keep 标题行逐条可见（bash 成功）—— #tui-render-overhaul T3:无 [完成] 前缀。
+  expect(frame).toContain("bash · ");
   // 零条收 → 无工具计数行。
   expect(frame.includes("× ")).toBe(false);
+  // 不变式:成功态无 [完成] 前缀。
+  expect(frame.includes("[完成]")).toBe(false);
   // 思考秒数行仍在（簇 thinkingMs 求和，思考行可单独在）。
   expect(frame).toContain("思考了 2 秒");
   expect(frame.includes("[思考]")).toBe(false);
@@ -219,8 +221,17 @@ test("idle：两轮 bash keep → 两轮各自标题留，零条收无计数行�
   // 两轮各自出思考秒数行:各带独立 thinkingMs。
   expect(frame).toContain("思考了 4 秒");
   expect(frame).toContain("思考了 6 秒");
-  // keep 标题两轮各留（全轮生效，旧轮标题不消失）。
-  expect(frame.split("[完成] bash").length - 1).toBe(2);
+  // keep 标题两轮各留（全轮生效，旧轮标题不消失）—— #tui-render-overhaul T3
+  // 成功态无 [完成] 前缀;bash 标题行以 `bash` 起头（detail 空时只有 `bash`,
+  // detail 非空时为 `bash · ...`）。数裸 `bash` 标题行（剥离 `× ` 计数行
+  // 与秒数行）。
+  const bashLines = frame
+    .split("\n")
+    .filter(
+      (l) =>
+        /^\s*bash(\s|$)/.test(l) && !l.includes("× ") && !l.includes("思考")
+    );
+  expect(bashLines.length).toBe(2);
   // 零条收 → 无工具计数行。
   expect(frame.includes("× ")).toBe(false);
   await setup.renderer.destroy();
@@ -253,8 +264,11 @@ test("idle：单工具无 thinkingMs（落盘缺席） → bash keep 标题留�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("[完成] bash");
+  // #tui-render-overhaul T3:成功态无 [完成] 前缀;bash 标题行以 `bash` 起头
+  // （detail 空时只有 `bash`,detail 非空时为 `bash · ...`）。
+  expect(frame).toContain("bash");
   expect(frame.includes("× ")).toBe(false);
+  expect(frame.includes("[完成]")).toBe(false);
   // 无秒数 → 不显示 `思考了` 行。
   expect(frame.includes("思考了 ")).toBe(false);
   await setup.renderer.destroy();
@@ -292,8 +306,10 @@ test("idle：旧会话无 thinkingMs（整链缺席） → bash keep 标题留�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("[完成] bash");
+  // #tui-render-overhaul T3:成功态无 [完成] 前缀;bash 标题行以 `bash` 起头。
+  expect(frame).toContain("bash");
   expect(frame.includes("× ")).toBe(false);
+  expect(frame.includes("[完成]")).toBe(false);
   expect(frame.includes("思考了 ")).toBe(false);
   await setup.renderer.destroy();
 });
@@ -319,7 +335,8 @@ test("idle：文本→工具时，keep 标题出现在前置文本之后", async
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
   const textIdx = lines.findIndex((line) => line.includes("先说明"));
-  const titleIdx = lines.findIndex((line) => line.includes("[完成] bash"));
+  // #tui-render-overhaul T3:成功态无 [完成] 前缀 → 找 bash 标题行。
+  const titleIdx = lines.findIndex((line) => /^\s*bash\b/.test(line));
   expect(textIdx).toBeGreaterThanOrEqual(0);
   expect(titleIdx).toBeGreaterThan(textIdx);
   expect(frame.includes("× ")).toBe(false);
@@ -349,7 +366,8 @@ test("idle：工具→文本时，keep 标题出现在后续文本之前", async
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
-  const titleIdx = lines.findIndex((line) => line.includes("[完成] bash"));
+  // #tui-render-overhaul T3:成功态无 [完成] 前缀 → 找 bash 标题行。
+  const titleIdx = lines.findIndex((line) => /^\s*bash\b/.test(line));
   const textIdx = lines.findIndex((line) => line.includes("后续总结"));
   expect(titleIdx).toBeGreaterThanOrEqual(0);
   expect(textIdx).toBeGreaterThanOrEqual(0);
@@ -392,8 +410,9 @@ test("idle：同一 assistant 消息内按 tool/text 位置渲染 keep 标题", 
     await setup.waitForVisualIdle();
     const lines = setup.captureCharFrame().split("\n");
     const textIdx = lines.findIndex((line) => line.includes(text));
+    // #tui-render-overhaul T3:成功态无 [完成] 前缀 → 找 bash 标题行。
     const titleIndices = lines.flatMap((line, index) =>
-      line.includes("[完成] bash") ? [index] : []
+      /^\s*bash\b/.test(line) ? [index] : []
     );
     return { setup, textIdx, titleIndices };
   };
@@ -467,8 +486,10 @@ test("idle：无历史 activity 时已完成 live retract 工具收出 tail（ke
   // retract 件收起：不出现 live 完成形态（计数行锚点在历史 text 段，
   // 无历史 activity 时无可锚段 —— 计数行缺席属既有边界，SC3 历史路径覆盖）。
   expect(frame).not.toContain("读取 a.ts · ok");
-  // keep 件标题留（live 完成行同 SSOT 形态）。
-  expect(frame).toContain("[完成] bash · pwd");
+  // keep 件标题留（live 完成行同 SSOT 形态）—— #tui-render-overhaul T3
+  // 成功态无 [完成] 前缀。
+  expect(frame).toContain("bash · pwd");
+  expect(frame.includes("[完成]")).toBe(false);
   await setup.renderer.destroy();
 });
 
@@ -523,9 +544,10 @@ test("idle：SC3 一轮成功 read_file + 成功 bash → bash 标题留、read 
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // bash keep：标题留、成功预览（⎿）留。
-  expect(frame).toContain("[完成] bash · pwd");
+  // bash keep：标题留、成功预览（⎿）留。#tui-render-overhaul T3:无 [完成] 前缀。
+  expect(frame).toContain("bash · pwd");
   expect(frame).toContain("⎿ /tmp");
+  expect(frame.includes("[完成]")).toBe(false);
   // read_file retract：无标题、无预览。
   expect(frame.includes("read_file ·")).toBe(false);
   expect(frame).toContain("read_file × 1");
@@ -587,7 +609,7 @@ test("idle：SC4 失败 retract 工具 → 标题 + 一行短错误可见，不�
   await setup.renderer.destroy();
 });
 
-test("running-fg：不提前收成 turn 摘要,历史 [完成] 仍可见", async () => {
+test("running-fg：不提前收成 turn 摘要,历史成功 bash 标题仍可见", async () => {
   // D3:running 态仍逐条工具可见(行为不变);折叠行不出现。
   // spec D3 删除了 `thinkingFrozenSeconds` 副通道 —— running 期间不再有
   // 冻结「思考了 N 秒」分支,流式面板恒 `思考中…`(测试 `thinking-peek.test.tsx`)。
@@ -619,7 +641,8 @@ test("running-fg：不提前收成 turn 摘要,历史 [完成] 仍可见", async
   const frame = setup.captureCharFrame();
   // running 态:折叠行不出现(running 闸)。
   expect(frame.includes("bash ×")).toBe(false);
-  // 历史消息的 `[完成]` 行仍可见(running 态逐条)。
-  expect(frame.includes("[完成]")).toBe(true);
+  // 历史消息的成功 bash 标题仍可见(running 态逐条)。
+  // #tui-render-overhaul T3:成功态无 [完成] 前缀 → 改找 bash · 行。
+  expect(frame.split("\n").some((l) => l.includes("bash ·"))).toBe(true);
   await setup.renderer.destroy();
 });
