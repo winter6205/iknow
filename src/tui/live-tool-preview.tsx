@@ -187,15 +187,24 @@ export function liveToolPreviewBox(run: LiveToolRun, cols: number): ReactNode {
     failed: run.status === "failed",
   });
   const fg = settledColorToFg(slot.color, {
-    default: tuiPalette.dim,
+    default: tuiPalette.text,
     accent: tuiPalette.accent,
     error: tuiPalette.error,
   });
+  // #tui-render-overhaul T2:accent 类（skill / worktree 生命周期）标题加
+  // bold —— 与 message-blocks.ToolSummaryRow 同源（live + 历史字节一致）。
+  const isAccentTitle = slot.color === "accent";
   return (
     <box key={run.id} flexDirection="column">
-      <text fg={fg} wrapMode="none">
-        {status}
-      </text>
+      {isAccentTitle ? (
+        <text fg={fg} wrapMode="none">
+          <b>{status}</b>
+        </text>
+      ) : (
+        <text fg={fg} wrapMode="none">
+          {status}
+        </text>
+      )}
       {preview !== null && (
         <CompletedToolPreviewView
           preview={preview}

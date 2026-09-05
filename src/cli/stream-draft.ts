@@ -133,6 +133,21 @@ export function createStreamDraft(): StreamDraft {
         if (thinkingStartedAt === null) thinkingStartedAt = Date.now();
         thinkingBuffer += event.text;
         appendText(event.text);
+      } else if (event.type === "tool_call_start") {
+        // streaming-thinking-close-on-tool-call:工具调用起点 = 思考阶段
+        // 结束。thinkingBuffer 必须立即清空,让 ChatView 的流式 thinking
+        // 面板条件 `deferredThinkingDrafts.length > 0` 失效 → 面板收起,
+        // 不必等整轮 turn 完成才消失(用户反馈「顶部思考面板一直堆积」)。
+        // 不重置 thinkingStartedAt —— 折叠行「思考了 N 秒」反映整个 turn
+        // 的思考时长,跨多个 thinking 段累加;后续若有新 thinking_delta,append
+        // 会自然进入 thinkingBuffer 重新累积(同助手回合内多段思考常见)。
+        // 同时取消节流 timer 并同步 flush,让 listener 立刻收到通知,
+        // 跳过 50ms 节流窗口(思考阶段切换是状态切换,延迟可见属 bug)。
+        if (thinkingBuffer.length > 0) {
+          thinkingBuffer = "";
+          cancelPending();
+          flush();
+        }
       }
     },
     raw(): string {

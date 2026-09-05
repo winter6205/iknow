@@ -67,7 +67,7 @@ TUI 在工具从 live 转为 idle 之后，按类决定可见性：人要核验�
 - **retract class（收）**: 落定后标题和预览都从屏幕拿掉、只进折叠计数的工具类（读取 / 搜索 / 查询）。未知未注册工具缺省也是收。
 - **accent class（点名着色）**: 落定后以非 dim 的 `accent` 色 + 人读表述留在屏幕上的特定能力（skill、task worktree 生命周期工具）。必须进显示注册表。
 - **failure overlay（失败横切）**: 任意落定类在失败时覆盖成功态分类——留标题、一行短错误、error 色、不进折叠计数、不用 dim `⎿` 堆长文。error 色优先于 accent。
-- **result preview（结果预览）**: 工具调用标题行下方的截断输出块——`⎿` 风格前缀、上限 5 行、bash 取尾部、ANSI 透传。只画在 **keep class** 的成功 bash 上；dim 只用于这种成功尾巴，不用来藏失败或点名着色。
+- **result preview（结果预览）**: 工具调用标题行下方的截断输出块——`⎿` 风格前缀、上限 5 行、bash 取尾部、ANSI 透传。只画在 **keep class** 的成功 bash 上；dim 仅用于装饰元素（`⎿` 前缀、`… +N 行` 溢出），正文行（stdout/stderr）走正文色 token，不藏失败或点名着色。
 - **thinking duration（思考时长）**: assistant 消息的落盘属性——adapter 流式路径测量（首条 `thinking_delta` 至首个非思考增量），`thinkingMs` 经 commit 钩子随事件链落盘；折叠簇时长 = 簇内消息求和。非 UI 测量值。
 
 **Inherits：**

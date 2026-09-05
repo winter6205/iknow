@@ -103,16 +103,27 @@ function ToolSummaryRow(props: {
     cols: props.cols,
   });
   // 颜色由 deriveSlot 的 color token 派生（spec D5/D6）：failed → error、
-  // accent 类成功 → accent；dim 只属成功 bash 尾巴，不染标题。
+  // accent 类成功 → accent；default 落正文色（#tui-render-overhaul T2）：
+  // 工具标题行不再走 dim —— dim 只属装饰（结果预览前缀/溢出、折叠行）。
+  // running 态也是 default 色 → 副作用是 running 标题也从 dim 升 text，
+  // 更醒目（用户诉求：running 是用户在等的动作，该清楚）。
   const slot = hasResult
     ? deriveSlot(props.tu.name, { running: false, failed })
     : deriveSlot(props.tu.name, { running: true, failed: false });
   const fg = settledColorToFg(slot.color, {
-    default: tuiPalette.dim,
+    default: tuiPalette.text,
     accent: tuiPalette.accent,
     error: tuiPalette.error,
   });
-  return (
+  // accent 类标题行加 bold（#tui-render-overhaul T2）：theme.ts 的 accent
+  // #e8e4d8 与正文 #e6e4dc 几乎同色（视觉区分 < 1 步），不改色值 → 加 bold
+  // 让「点名的稀有能力（skill / worktree 生命周期）」在终端里看得出来。
+  const isAccentTitle = slot.color === "accent";
+  return isAccentTitle ? (
+    <text fg={fg} wrapMode="none">
+      <b>{line}</b>
+    </text>
+  ) : (
     <text fg={fg} wrapMode="none">
       {line}
     </text>
@@ -292,15 +303,32 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
   // T7：底色块 paddingX=1 两侧 → 内部内容宽度收窄 2 列。
   const innerCols = Math.max(1, cols - 2);
   const nodes: ReactNode[] = [];
+  // #tui-render-overhaul T4:assistant 内部块间 1 行节奏 —— 相邻节点（折叠行 /
+  // thinking 明文 / 文本 / 工具行 / 错误行）之间补 1 行空白,首块不补顶 margin。
+  // OpenTUI `marginTop` 在父 column 容器里换行实现（父级为 MessageShell 内
+  // 的 `<box flexDirection="column">`）。不变式：MessageShell 内部 column
+  // 容器现统一为单个根 box（见 MessageShell 组件），marginTop 即在父 column
+  // 中起换行作用;不会与外壳 paddingX=1 的左右缩进重叠。
+  const withBlockSpacing = (key: string, node: ReactNode): ReactNode =>
+    nodes.length === 0 ? (
+      node
+    ) : (
+      <box key={`${key}-gap`} flexDirection="column" marginTop={1}>
+        {node}
+      </box>
+    );
   if (summary !== "" && props.hideThinking !== true) {
     if (formatThinkingFold(props.thinkingSeconds).length > 0) {
       nodes.push(
-        <ThinkingSummary
-          key="tk-sum"
-          message={message}
-          cols={innerCols}
-          thinkingSeconds={props.thinkingSeconds}
-        />
+        withBlockSpacing(
+          "tk-sum",
+          <ThinkingSummary
+            key="tk-sum-inner"
+            message={message}
+            cols={innerCols}
+            thinkingSeconds={props.thinkingSeconds}
+          />
+        )
       );
     }
   }
@@ -308,15 +336,26 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
     message.content.forEach((block, i) => {
       if (block.type === "thinking") {
         nodes.push(
-          <text key={`tk-b${i}`} wrapMode="word" width={innerCols}>
-            {block.thinking}
-          </text>
+          withBlockSpacing(
+            `tk-b${i}`,
+            <text key={`tk-b${i}-inner`} wrapMode="word" width={innerCols}>
+              {block.thinking}
+            </text>
+          )
         );
       } else if (block.type === "redacted_thinking") {
         nodes.push(
-          <text key={`tk-r${i}`} fg={pal.dim} wrapMode="word" width={innerCols}>
-            {REDACTED_PLACEHOLDER}
-          </text>
+          withBlockSpacing(
+            `tk-r${i}`,
+            <text
+              key={`tk-r${i}-inner`}
+              fg={pal.dim}
+              wrapMode="word"
+              width={innerCols}
+            >
+              {REDACTED_PLACEHOLDER}
+            </text>
+          )
         );
       }
     });
@@ -324,9 +363,12 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
   message.content.forEach((block, i) => {
     if (block.type === "text" && block.text.trim().length > 0) {
       nodes.push(
-        <box key={`t${i}`}>
-          <Markdown text={block.text} width={innerCols} />
-        </box>
+        withBlockSpacing(
+          `t${i}`,
+          <box key={`t${i}-inner`}>
+            <Markdown text={block.text} width={innerCols} />
+          </box>
+        )
       );
     } else if (block.type === "tool_use") {
       // D7（spec specs/tui-tool-settled-appearance.md）：渲染只消费 slot。
@@ -349,7 +391,7 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
         preview.kind !== "empty" || resultPreview.kind !== "empty";
       const showTitle = slot.showTitle;
       const showPreview = slot.showPreview && hasPreviewContent;
-      // D5：失败一行短错误 —— 长回执（如 `[worktree_isolation]`）截成单行，
+      // D5：失败一行短错误 —— 长回执（如 `[worktree_isolation]`）截成单行,
       // 不以 dim ⎿ 五行走块堆长文（showPreview 由核置假）。
       const errorLine =
         failed && showTitle
@@ -360,23 +402,30 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
           : "";
       if (!showTitle && !showPreview) return;
       nodes.push(
-        <box key={`u${i}`} flexDirection="column">
-          {showTitle && (
-            <ToolSummaryRow tu={block} statusMap={statusMap} cols={innerCols} />
-          )}
-          {errorLine !== "" && (
-            <text fg={pal.error} wrapMode="none">
-              {errorLine}
-            </text>
-          )}
-          {showPreview && (
-            <ToolPreviewRows
-              preview={preview}
-              resultPreview={resultPreview}
-              cols={innerCols}
-            />
-          )}
-        </box>
+        withBlockSpacing(
+          `u${i}`,
+          <box key={`u${i}-inner`} flexDirection="column">
+            {showTitle && (
+              <ToolSummaryRow
+                tu={block}
+                statusMap={statusMap}
+                cols={innerCols}
+              />
+            )}
+            {errorLine !== "" && (
+              <text fg={pal.error} wrapMode="none">
+                {errorLine}
+              </text>
+            )}
+            {showPreview && (
+              <ToolPreviewRows
+                preview={preview}
+                resultPreview={resultPreview}
+                cols={innerCols}
+              />
+            )}
+          </box>
+        )
       );
     }
   });

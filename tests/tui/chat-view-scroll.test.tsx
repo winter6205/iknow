@@ -375,7 +375,9 @@ test("session 状态渲染：tool_use 摘要行 + statusMap 状态染色", async
   const frame = setup.captureCharFrame();
   expect(frame).toContain("❯ 帮我写一个文件");
   expect(frame).toContain("write_file");
-  expect(frame).toContain("[完成] write_file · 写入 hello.ts（1 行）");
+  // #tui-render-overhaul T3:成功态无 [完成] 前缀。
+  expect(frame).toContain("write_file · 写入 hello.ts（1 行）");
+  expect(frame.includes("[完成]")).toBe(false);
   expect(frame.includes("× ")).toBe(false);
   expect(api.handle?.scrollbox).not.toBeNull();
   await setup.renderer.destroy();
@@ -817,12 +819,14 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
   const iText = lines.findIndex((l) => l.includes("以下是今天的 AI 新闻摘要"));
   expect(iFold).toBeGreaterThanOrEqual(0);
   expect(iText).toBeGreaterThanOrEqual(0);
-  // 折叠行 →（1 行消息间距）→ 最终文本:行距 ≤ 3;被折叠的纯工具 /
+  // 折叠行 →（1 行消息间距）→ 最终文本:行距 ≤ 4;被折叠的纯工具 /
   // 纯 tool_result 消息不得各留 1 行幻影 margin 连成空位。
-  // D3 后末条 assistant 多 1 行 ThinkingSummary「思考了 N 秒」,故 ≤ 3
-  // (legacy ≤ 2 是 lastThinkingSeconds 全局 + 折叠态压住末条 thinking 的旧
-  // 形态;D3 改 per-message ThinkingSummary 后行距自然多 1)。
-  expect(iText - iFold).toBeLessThanOrEqual(3);
+  // D3 后末条 assistant 多 1 行 ThinkingSummary「思考了 N 秒」（legacy ≤ 2
+  // 是 lastThinkingSeconds 全局 + 折叠态压住末条 thinking 的旧形态;D3 改
+  // per-message ThinkingSummary 后行距自然多 1 → ≤ 3）。
+  // #tui-render-overhaul T4:assistant 内部块间补 1 行节奏（ThinkingSummary
+  // → 文本 markdown 节点间多 1 行空白)→ ≤ 4。
+  expect(iText - iFold).toBeLessThanOrEqual(4);
   await setup.renderer.destroy();
 });
 
@@ -1023,11 +1027,13 @@ test("idle：当前 turn bash keep 标题逐条留，零条收无计数行", asy
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("思考了 29 秒");
-  // keep 标题按 slot 渲染：tu-b2 落定成功 → [完成]；tu-b1 未配对 →
-  // [运行中]（running slot 标题可见，D7）。两条标题都在屏幕上。
-  expect(frame).toContain("[完成] bash · ls -la");
+  // keep 标题按 slot 渲染：tu-b2 落定成功 → 成功态无 [完成] 前缀
+  // (#tui-render-overhaul T3);tu-b1 未配对 → [运行中](running slot
+  // 标题可见,D7)。两条标题都在屏幕上。
+  expect(frame).toContain("bash · ls -la");
   expect(frame).toContain("[运行中] bash · ls archive");
   expect(frame).toContain("完成。");
+  expect(frame.includes("[完成]")).toBe(false);
   // 零条收 → 无工具计数行。
   expect(frame.includes("× ")).toBe(false);
   await setup.renderer.destroy();
