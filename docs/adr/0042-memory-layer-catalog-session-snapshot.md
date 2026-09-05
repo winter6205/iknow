@@ -3,6 +3,8 @@
 Date: 2026-09-04
 Status: accepted
 
+> **Amendment 2026-09-05**（ADR-0044）：promote 段不再装配进 `system`，因此不再是本 ADR 的快照住户。catalog（若仍装）与 git 块仍按本票快照。
+
 ## Context
 
 wayfinder 图「模型面前缀分层与缓存兑现」G1 票（前缀稳定边界）盘问中段裁决。G1 采用从严资格线：一段内容要有资格留在前缀区（`tools` + `system`），其输入来源必须**构造上**不可能在会话内变——「实测没变」不算数。按线盘点，`memory_layer` 中不合格的只有 catalog 段（[ADR-0034](0034-auto-memory-catalog-prefetch-channels.md) D1 允许进 system 的 live titles/hooks + 纪律句）：它经 `memory/refresh.ts` 的 mtime 门控读取，auto-memory 落盘（ADR-0031，completed 闸后异步、成簇写入）当下一次装配就变——R4 实测每会话抖 1~3 次，每次废掉 system 之后**整条 messages history** 的被动缓存。ADR-0034 D2 已把重载荷（bodies / prefetch）放在 user 消息侧、不碰前缀，本票只处理 catalog。

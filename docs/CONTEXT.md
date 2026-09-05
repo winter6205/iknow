@@ -107,14 +107,14 @@ _Avoid_: 给 `AciRegistry` 加 `.tools` 字段在产物上事后裁剪；声明 
 **deps.system injection seam**: Each-turn 系统文本装配的唯一权威缝——loop-engine 调 `deps.system?.()`（`loop-engine.ts:358`），结果透传 `adapter.step request.system`；`undefined` 时不发送 `system` 字段（`anthropic-adapter.ts:577-580` 条件 spread），KV cache 前缀字节级稳定。装配主体是 `identity/assemble.ts` 的 `IKNOW_ASSEMBLY_ORDER` 流水线（#196）。
 _Avoid_: 在 adapter 或 host 层直接拼系统；发送空串 `system`（KV cache jitter）；绕开 `deps.system` 在 adapter 内部二次组装
 
-**memory_layer slot**: #196 9 段流水线 slots 5-9（user AGENTS / `PRIORITY_DECLARATION` / project AGENTS / `EXISTENCE_POINTER` / 可选 **memory_catalog** / promote 段）收敛后的单 slot 名，位置仍在 bootstrap 之后；委托 #121 `createSystemResolver`（`memory/refresh.ts`：mtime 缓存 + inflight 去重 + 装配失败不毒化缓存），内部拼接顺序由 ADR-0009 锁定，目录段由 ADR-0034 追加。#228 决议 D2。
+**memory_layer slot**: #196 9 段流水线 slots 5-9（user AGENTS / `PRIORITY_DECLARATION` / project AGENTS / `EXISTENCE_POINTER` / 可选 **memory_catalog**）收敛后的单 slot 名，位置仍在 bootstrap 之后；委托 #121 `createSystemResolver`（`memory/refresh.ts`：mtime 缓存 + inflight 去重 + 装配失败不毒化缓存），内部拼接顺序由 ADR-0009 锁定，目录段由 ADR-0034 追加，promote 段由 ADR-0044 撤出 system。#228 决议 D2。
 _Avoid_: 逐 slot 独立消费缓存；再拆拼接后的整串；把拼接顺序拆出 slot 边界独立决策
 
 **surface split (identity vs memory)**: 入口面（`chat` / `tui` / `ask` / `serve`）的两层语义——身份认知层（`identity` / `soul` / `user_profile` + 仅 chat/tui 触发的 `bootstrap`）恒在；记忆层（`AGENTS.md` + rules + 记忆库 + `memory_recall` / `memory_save` 工具）只对 chat / tui / serve 装配，`ask` 全 opt-out（`memory_layer` slot 不挂、memory 工具不入注册表）。#228 决议 D3。
 _Avoid_: `ask` 全 opt-out（破"我是谁"答复路径）；`ask` 全 opt-in（破 #121 "ask 无状态"前提）；按 surface flag 同时决定两层
 
-**auto_extract**（`settings.memory.autoExtract`）: 自动记忆抽取的产品总闸，boolean-only、**默认 OFF**——段缺失或非 `true` 一律关抽取与 **promote** 装配。`true` 时 host 仍按 N≥2 抽，且梦境双闸满足时必跑梦境 LLM（即使 `settings.memory.dream === false`）。仅当 extract 与 dream 均关时 `BuiltEngine.autoMemory` 缺席。ADR-0031 D1/D5；分层 `specs/auto-memory-layering.md`；钩子见 ADR-0033。
-_Avoid_: 把默认改成 ON；开抽取却不要梦境；关抽取仍拼 promote 段；把抽取 prompt 内嵌进 loop-engine；给 `ask` 接线；让 ingest 失败冒泡成用户 turn 失败；开抽取却不注 memory_catalog
+**auto_extract**（`settings.memory.autoExtract`）: 自动记忆抽取的产品总闸，boolean-only、**默认 OFF**——段缺失或非 `true` 一律关抽取与 **memory_catalog** 装配。`true` 时 host 仍按 N≥2 抽，且梦境双闸满足时必跑梦境 LLM（即使 `settings.memory.dream === false`）。仅当 extract 与 dream 均关时 `BuiltEngine.autoMemory` 缺席。ADR-0031 D1/D5；分层 `specs/auto-memory-layering.md`；钩子见 ADR-0033。记忆 body 不进 `system`（ADR-0044）。
+_Avoid_: 把默认改成 ON；开抽取却不要梦境；把记忆正文装进 system；把抽取 prompt 内嵌进 loop-engine；给 `ask` 接线；让 ingest 失败冒泡成用户 turn 失败；开抽取却不注 memory_catalog
 
 **memory_op**（`ADD` | `UPDATE` | `SUPERSEDE` | `NOOP`）: persist 仍认四态；**抽取** `decide ops` 只用 ADD / 保守 UPDATE / NOOP（无 CONTRADICTION_FLOOR SUPERSEDE）。`SUPERSEDE` 由梦境 `replaces` 点名后 persist 写出 `supersedes`，旧条仍经 **memory_gc** 软禁。三段函数分离不变。ADR-0031 D2 修订；`specs/auto-memory-layering.md`。
 _Avoid_: 抽取再用低词重叠当矛盾作废；把四态压成 upsert；绕开 `memory_save` 写纪律；把三段合成一个函数
@@ -122,22 +122,25 @@ _Avoid_: 抽取再用低词重叠当矛盾作废；把四态压成 upsert；绕�
 **memory_gc**: 可重复、幂等的机械清理，三条规则、**零 LLM**——`ttl_days > 0` 且已过期 → `disabled: true`；被别的条目 `supersedes` 指名 → `disabled: true`；活跃条目超 store cap → 按效用分 `importance × recency × (1 + recall_count)`（recall 次数取自既有 `usage.json` sidecar）从低到高软禁。GC **只软禁不删文件**，误驱逐改一行 frontmatter 就能收回。ADR-0031 D4。
 _Avoid_: 硬删文件；把 LLM 离线合并 / 摘要塞进 GC（合并走 **dream**，ADR-0033）；让 GC 依赖 frontmatter + usage sidecar 之外的运行时状态
 
+**promote**: `usage.json` 里一条记忆被 ≥2 个不同 session 召回后的资格。资格只进入 **memory_gc** 效用，**不再**把正文装进 `system`；常驻说明书只在 `AGENTS.md`。ADR-0044。
+_Avoid_: 用召回次数买 system 席位；auto-promote；把晋升当记忆进说明书的通道
+
 **memory_type**: 事实条目 frontmatter `type` 的封闭枚举：`convention` | `decision` | `gotcha` | `constraint` | `note`。手动 `memory_save` 与自动 ingest 同一套；空或非法值收成 `note`，不 fail 写入。`specs/memory-layer-follow-ups.md`。
 _Avoid_: 自由字符串当 type；自动与手动两套词表；非法 type 整次写入失败
 
-**source: auto**: 自动写入条目的 provenance 标记，落在 frontmatter（`sanitizeMemoryFile` / `serializeMemoryEntry` 已 round-trip 未知字段，无需 schema 升版）。自动条目**只经 `memory_recall` 的 tool_result 与 memory_prefetch 用户侧块**到达模型（低信、常过时），永不把未 promote 的 body 盲注 `system`（ADR-0009 D3 / ADR-0034）；也不豁免 promote 门槛，仍需 ≥2 个不同 session 的 recall，没有 auto-promote 路径。该标记同时是批量回退的抓手。ADR-0031 D3。
+**source: auto**: 自动写入条目的 provenance 标记，落在 frontmatter（`sanitizeMemoryFile` / `serializeMemoryEntry` 已 round-trip 未知字段，无需 schema 升版）。自动条目**只经 `memory_recall` 的 tool_result 与 memory_prefetch 用户侧块**到达模型（低信、常过时），**body 永不进 `system`**（ADR-0044）。没有 auto-promote。该标记同时是批量回退的抓手。ADR-0031 D3。
 _Avoid_: 给高 importance 的自动条目开 auto-promote；把 `source: auto` 当成信任等级之外的纯装饰；用别的字段区分人写 / 机写；把自动条包装成必须遵守的规则
 
-**memory_catalog**: 现行条短目录（title + 一句钩子），在 `autoExtract === true` 且库非空时进入 `system`（EXISTENCE_POINTER 之后），带固定英文纪律句（索引不是待办；标题撞词不构成必须召回）。不是条目 body，不是 promote 段。上限 200 行 / 25KB。ADR-0034。
+**memory_catalog**: 现行条短目录（title + 一句钩子），在 `autoExtract === true` 且库非空时进入 `system`（EXISTENCE_POINTER 之后），带固定英文纪律句（索引不是待办；标题撞词不构成必须召回）。不是条目 body；promote 段已撤出 system（ADR-0044）。上限 200 行 / 25KB。ADR-0034。
 _Avoid_: 把目录当全文记忆；抽取关闭时仍灌目录；用中文写纪律句；把目录当必须 recall 的清单
 
-**memory_prefetch**: 每轮按本轮用户原文、用 `scoreMemoryEntries` 选出最多 5 条现行条正文，叠在用户消息侧；零词命中不得入选；包装句英文、标明 advisory；禁止写入 system。会话级按 id 去重：一条记忆一个 conversation 只注入一次，首轮块随 user turn 留在历史（append-only，不 strip，保 KV cache 前缀），resume 扫历史 `id:` 行恢复去重集合，失败容忍一次重复、不 fail turn。ADR-0034；去重契约 `plans/auto-memory-prefetch-dedup.md`。
-_Avoid_: 把预取写进 system；每轮硬塞满 5 条无关条；预取另起一套打分；会话内每轮重复注入同一条；strip / 改写历史里的旧 overlay（破 KV cache 前缀）；给 `ask` 接线
+**memory_prefetch**: 每轮按本轮用户原文、用 `scoreMemoryEntries` 选出最多 5 条现行条正文，叠在用户消息侧；零词命中不得入选；包装句英文、标明 advisory；禁止写入 system。不得因 promote 资格排除（system 已无对应段）。会话级按 id 去重：一条记忆一个 conversation 只注入一次，首轮块随 user turn 留在历史（append-only，不 strip，保 KV cache 前缀），resume 扫历史 `id:` 行恢复去重集合，失败容忍一次重复、不 fail turn。ADR-0034 / ADR-0044；去重契约 `plans/auto-memory-prefetch-dedup.md`。
+_Avoid_: 把预取写进 system；按 promote 资格从预取里丢掉条目；每轮硬塞满 5 条无关条；预取另起一套打分；会话内每轮重复注入同一条；strip / 改写历史里的旧 overlay（破 KV cache 前缀）；给 `ask` 接线
 
 **dream**（`settings.memory.dream`）: LLM 离线合并开关，boolean-only、**默认 OFF**。闸仍 24h ∧ 5 session。`autoExtract === true` 时闸到后仍跑梦境（不必 `dream === true`）；输出可带 `replaces`，persist SUPERSEDE，不经 CONTRADICTION_FLOOR。闸文件 **dream.json**。其余（skip 推进时间闸、`source: dream`、不进 `gc.ts`）仍见 ADR-0033。
 _Avoid_: 把合并塞进 GC；每 turn 强制 dream；与抽取共用 N≥2；默认 ON；dream 条 auto-promote；用 CONTRADICTION 代替 `replaces`；闸文件名含 cursor
 
-**source: dream**: dream 合并写入条目的 provenance 标记，落在 frontmatter（未知字段 round-trip，无需 schema 升版）。与 **source: auto** 同通道：只经 `memory_recall` 的 tool_result，永不盲注 `system`，不豁免 promote。批量回退按 `source: dream` 抓。ADR-0033。
+**source: dream**: dream 合并写入条目的 provenance 标记，落在 frontmatter（未知字段 round-trip，无需 schema 升版）。与 **source: auto** 同通道：只经 `memory_recall` 的 tool_result 与 prefetch，**body 永不进 `system`**（ADR-0044）。批量回退按 `source: dream` 抓。ADR-0033。
 _Avoid_: 与 `source: auto` 混用导致无法区分抽取与合并；dream 条 auto-promote
 
 **dream.json**: 每个 `memoryDir` 下梦境双闸状态（上次成功或 skip 时间 + session 集合）。实施读写此文件名；不读、不迁 `dream-cursor.json`。
@@ -338,7 +341,7 @@ _Avoid_: 会话中自动重连后改写 tools；超时后继续阻塞启动；�
 **溢出治理 (tool-surface overflow governance)**: (ADR-0043) 可延迟工具（MCP 名单 + 标记 deferrable 的内建低频件）schema 总量（countTokens 实测）超过端点模型 context window 的 10%（配置读）时，超出部分退到名字目录——仅在首轮装配判定一次，会话内不重算；退场次序与永不退场核心件由 ADR-0043 §3 定死。
 _Avoid_: 会话中重算触发；硬编码窗口值；以估算 token 数触发退场
 
-**会话级快照段 (session-snapshot segment)**: (ADR-0042) 装配时取一次快照、会话内冻结的 system 段（当前住户：`memory_layer` catalog + promote 段、git 块）——语义是「快照」而非「缓存」：不再比对源变更，下个会话才重取。新落盘内容对当前会话不可见是已接受代价。
+**会话级快照段 (session-snapshot segment)**: (ADR-0042) 装配时取一次快照、会话内冻结的 system 段（当前住户：`memory_layer` catalog、git 块；promote 段已撤出，ADR-0044）——语义是「快照」而非「缓存」：不再比对源变更，下个会话才重取。新落盘内容对当前会话不可见是已接受代价。
 _Avoid_: 与 mtime 门控缓存混同；会话中因源文件落盘而刷新；把快照段写进 messages
 
 **git 块 (git status block)**: (D1/ADR-0037 §4) 模型侧 git 感知的 system 段——当前分支 / 主分支（注明 PR 基线）/ status（截断上限 + 截断标记）/ 最近 5 条 commit，附「开局快照，会话期间不更新」免责句；读稳定 `projectIdentityRoot`（rebind 不抖）；退化态（非 git 仓库 / git 不可用）= 段整体缺席。属会话级快照段。
@@ -411,11 +414,11 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **状态栏 vs append-only messages**: 栏走同一条追加纪律；纠错靠新栏，不靠从历史上抠掉旧栏
 - **`memory_save`（显式写） vs auto_extract（自动写）**: 两条写路径共用同一套肯定句门禁与 tmp+rename 原子写；显式写是模型当场决定的一次工具调用，自动写是 host 在 turn 完成后异步跑的一趟 ingest。差别只在触发方式与 `source: auto` 标记，不在信任通道——两者都只经 tool_result / prefetch 回到模型
 - **memory_catalog vs memory_prefetch**: 目录进 system（抽取开、库非空、短、稳）；预取进用户消息（每轮重算、最多 5 条正文、零词命中不贴）
-- **memory_catalog vs promote**: 目录不是指令；promote 才是跨 session 核实后的 system 正文
+- **memory_catalog vs promote**: 目录是短索引（通道是否仍进 system 见 ADR-0034 D1）；promote 是 GC 用的跨会话召回资格，不再提供 system 正文（ADR-0044）
 - **memory_prefetch vs memory_recall**: 同一 `scoreMemoryEntries`；预取宿主先贴最多 5 条；recall 模型主动搜、默认最多 3 条原文（读通道不下令召回，spec casual-ask-context-hygiene）
 - **dream vs auto_extract**: 字段仍是两个 boolean、默认皆 OFF。产品上 `autoExtract === true` 蕴含梦境（闸仍 24h ∧ 5）；仅 `dream === true` 且关抽取仍允许。钩子在 `autoExtract || dream` 时装配。都关则缺席。同一轮仍先抽取再梦境再 GC。
 - **dream vs memory_gc**: GC 仍是零 LLM 的机械软禁；dream 是第二条 LLM 写路径，禁止进入 `gc.ts`。dream 落盘仍可被随后的 GC 按 TTL/cap/supersede 软禁
-- **memory_gc vs promote**: GC 是机械减法（TTL / supersede / 超 cap → 软禁）；promote 是机械加法（≥2 个不同 session recall → 进 `system` 段）。GC 不看 promote 状态，promote 不复活 `disabled` 条目；自动条目两边都不享受豁免
+- **memory_gc vs promote**: GC 是机械减法（TTL / supersede / 超 cap → 软禁）；promote 资格只进入效用所用的 `usage.json`，不把条目装进 `system`（ADR-0044）。GC 不复活 `disabled` 条目
 - **memory_gc vs memory_recall**: 软禁只改 `disabled`；`memory_recall` 必须在打分前丢掉 disabled 条，否则模型仍看到废条（`specs/memory-layer-follow-ups.md`）
 - **stderr 指针 vs 父可见信封**: 信封 summary 只留尾部预览进模型视野；全量诊断在 stderr .log，经指针引用，不进模型
 - **blob 引用模式 vs append-only messages**: blob 是 trace 存储层去重；messages 权威历史不受影响，TraceService 仍记录「模型实际所见」

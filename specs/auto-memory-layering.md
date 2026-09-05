@@ -1,11 +1,13 @@
-# Spec: auto-memory-layering — 抽取收窄 · 梦境点名落盘 · promote 同闸 · `dream.json`
+# Spec: auto-memory-layering — 抽取收窄 · 梦境点名落盘 · `dream.json`
 
-> 2026-08-29 LogicSync：整理归梦境、抽取为第一层；`autoExtract` 开则梦境一起开；promote 进 `system` 与抽取同闸；闸文件 SSOT 为 `dream.json`（无旧名兼容）。操作员授权本讨论结论直接成文。
+> 2026-08-29 LogicSync：整理归梦境、抽取为第一层；`autoExtract` 开则梦境一起开；闸文件 SSOT 为 `dream.json`（无旧名兼容）。操作员授权本讨论结论直接成文。
+>
+> **Amended 2026-09-05** by `specs/promote-bodies-never-enter-system.md`：promote 资格只给 `memory_gc` 效用、`system` 不再拼 promote 正文；本 spec 的 promote 装配闸段、SC7/SC8、auto_extract 的 promote 装配提法、Assumption 4 的 promote 段描述、Objective 的 promote-in-system 提法、Changes 的 promote 装配条目让位给彼 spec。本 spec 余下范围（抽取收窄、梦境 `replaces` 落盘、`dream.json`、热目录归档）仍有效。
 
 ## Glossary（exact copy from docs/CONTEXT.md）
 
-- **auto_extract**（`settings.memory.autoExtract`）: 自动记忆抽取的产品总闸，boolean-only、**默认 OFF**——段缺失或非 `true` 一律关抽取与 **promote** 装配。`true` 时 host 仍按 N≥2 抽，且梦境双闸满足时必跑梦境 LLM（即使 `settings.memory.dream === false`）。仅当 extract 与 dream 均关时 `BuiltEngine.autoMemory` 缺席。ADR-0031 D1/D5；分层 `specs/auto-memory-layering.md`；钩子见 ADR-0033。
-  _Avoid_: 把默认改成 ON；开抽取却不要梦境；关抽取仍拼 promote 段；把抽取 prompt 内嵌进 loop-engine；给 `ask` 接线；让 ingest 失败冒泡成用户 turn 失败；开抽取却不注 memory_catalog
+- **auto_extract**（`settings.memory.autoExtract`）: 自动记忆抽取的产品总闸，boolean-only、**默认 OFF**——段缺失或非 `true` 一律关抽取与 **memory_catalog** 装配。`true` 时 host 仍按 N≥2 抽，且梦境双闸满足时必跑梦境 LLM（即使 `settings.memory.dream === false`）。仅当 extract 与 dream 均关时 `BuiltEngine.autoMemory` 缺席。ADR-0031 D1/D5；分层 `specs/auto-memory-layering.md`；钩子见 ADR-0033。
+  _Avoid_: 把默认改成 ON；开抽取却不要梦境；把抽取 prompt 内嵌进 loop-engine；给 `ask` 接线；让 ingest 失败冒泡成用户 turn 失败；开抽取却不注 memory_catalog
 - **memory_op**（`ADD` | `UPDATE` | `SUPERSEDE` | `NOOP`）: persist 仍认四态；**抽取** `decide ops` 只用 ADD / 保守 UPDATE / NOOP（无 CONTRADICTION_FLOOR SUPERSEDE）。`SUPERSEDE` 由梦境 `replaces` 点名后 persist 写出 `supersedes`，旧条仍经 **memory_gc** 软禁。三段函数分离不变。ADR-0031 D2 修订；`specs/auto-memory-layering.md`。
   _Avoid_: 抽取再用低词重叠当矛盾作废；把四态压成 upsert；绕开 `memory_save` 写纪律；把三段合成一个函数
 - **memory_gc**: 可重复、幂等的机械清理，三条规则、**零 LLM**——`ttl_days > 0` 且已过期 → `disabled: true`；被别的条目 `supersedes` 指名 → `disabled: true`；活跃条目超 store cap → 按效用分 `importance × recency × (1 + recall_count)`（recall 次数取自既有 `usage.json` sidecar）从低到高软禁。GC **只软禁不删文件**，误驱逐改一行 frontmatter 就能收回。ADR-0031 D4。
@@ -17,7 +19,7 @@
 - **memory archive**: 热目录外的软禁归档（`memoryDir/archive/<slug>.md`）。召回 / 预取 / 抽取近邻 / 梦境输入 / cap **不扫** archive；不是硬删。
   _Avoid_: 把归档当硬删；热扫描仍遍历 archive
 - **source: auto** / **source: dream**: 定义以 CONTEXT 为准（本 spec 不改 provenance 字段名）。
-- **memory_catalog** / **memory_prefetch**: 定义以 CONTEXT 为准；本 spec 不改目录/预取契约，只改 promote 装配闸。
+- **memory_catalog** / **memory_prefetch**: 定义以 CONTEXT 为准；本 spec 不改目录/预取契约。promote 资格只给 `memory_gc` 效用、`system` 不再拼 promote 正文，见 `specs/promote-bodies-never-enter-system.md` / ADR-0044。
 - **surface split (identity vs memory)**: 定义以 CONTEXT 为准。`ask` 仍全 opt-out。
 
 ## Assumptions（2026-08-29 操作员讨论锁定）
@@ -25,7 +27,7 @@
 1. 抽取不做 CONTRADICTION_FLOOR SUPERSEDE；作废只来自梦境点名的 slug。
 2. `autoExtract === true` 时钩子跑梦境（闸仍 24h ∧ 5 session），即使 `settings.memory.dream === false`。仅梦境、关抽取仍允许（`dream === true` 且 `autoExtract !== true`）。
 3. 无 `dream: false` 逃生口去「只要抽取不要梦境」。
-4. promote 段与 catalog 一样：仅 `autoExtract === true` 才拼进 `system`。AGENTS / EXISTENCE_POINTER / `recall`/`save` 不跟抽取关。
+4. catalog 段：仅 `autoExtract === true` 且库非空时拼进 `system`（沿用 `auto-memory-low-trust-read.md`）。AGENTS / EXISTENCE_POINTER / `recall`/`save` 不跟抽取关。`system` 拼 promote 正文按 `specs/promote-bodies-never-enter-system.md` / ADR-0044 全部废止。
 5. `MEMORY.md` 永不注入。`usage.json` 在 recall 时仍更新（与抽取开关无关）。
 6. 梦境提案当场 persist + 同一趟 GC；不是排队等稍后执行。不硬删。
 7. 废条热目录膨胀：本 spec **包含**归档（见 Does）。MCP 冷库 / 外置记忆 server **不在**本 spec。
@@ -37,7 +39,7 @@
 
 ## Objective
 
-chat / tui / serve 上自动记忆分成两层：**抽取**只从本段对话往库里添或轻改；**梦境**看有界整库，点名替换并落盘，再机械 **memory_gc** 软禁旧 `<slug>.md`。`autoExtract` 是产品总闸（带梦境 + promote 进 system）。默认仍 OFF。成功 = Success Criteria 全绿。
+chat / tui / serve 上自动记忆分成两层：**抽取**只从本段对话往库里添或轻改；**梦境**看有界整库，点名替换并落盘，再机械 **memory_gc** 软禁旧 `<slug>.md`。`autoExtract` 是产品总闸（带梦境 + 触发 catalog 装配；promote 资格只给 GC，详见 `specs/promote-bodies-never-enter-system.md` / ADR-0044）。默认仍 OFF。成功 = Success Criteria 全绿。
 
 ## Boundaries
 
@@ -46,7 +48,7 @@ chat / tui / serve 上自动记忆分成两层：**抽取**只从本段对话往
   - **梦境落盘**：LLM 一次输出 JSON 数组，元素为 `{ title, body, type, importance, replaces?: string[] }`。`replaces` 缺席或空 → 不得用包含比作废邻居；可走抽取同款保守 ADD/UPDATE/NOOP。`replaces` 为已存在 slug 时 persist **SUPERSEDE**（新条 `supersedes` 指向它们，每条最多 8 个 id；未知 slug 跳过该 id 并 `// EXIT: log-and-continue`）。**禁止**把梦境输出再送进 CONTRADICTION_FLOOR。
   - **顺序**：抽取与梦境同一轮时仍先抽取（`gc: false`）再梦境再 GC（现行 auto-hook 形态）。
   - **闸文件**：读写 `dream.json`；删/停用 `dream-cursor.json` 代码路径。
-  - **promote 装配**：`assembleSystemPrompt` 仅当 `ctx.autoExtract === true` 且有资格条时 `formatPromote`。关抽取 → 无 promote 段（与 `specs/auto-memory-low-trust-read.md` SC1「关抽取时 promote 行为不变」冲突，以本 spec 为准）。
+  - **promote 装配**：本 spec 原「`assembleSystemPrompt` 仅当 `ctx.autoExtract === true` 且有资格条时 `formatPromote`」条款已让位给 `specs/promote-bodies-never-enter-system.md` / ADR-0044：任何 provenance、任何 `autoExtract` 值下都不输出 `formatPromote` 形态正文。本 spec 不再单列 promote 装配口径。
   - **归档**：`disabled === true` 且（`updated_at` 距今 ≥ 30 天 **或** 热目录内 disabled 条数 > store cap）→ 将该 `<slug>.md` 移到 `memoryDir/archive/`。`listStoreEntries` / recall / prefetch / 梦境 prompt 输入不打开 `archive/`。不硬删。`MEMORY.md` 对应行删除或忽略失效链（实施钉一种，测例锁）。
 - **Confirms with human:** （无。2026-08-29 操作员确认分层、同闸、A 落盘、归档进本张、`dream.json`、不做兼容。）
 - **Out of this spec:** 默认 ON；向量/图；记忆 MCP / 冷库；硬删归档后的文件；任务中 `memory_update` / `memory_save` 按 id；ES；改 BM25 公式；改抽取 N≥2 或梦境 24h∧5；改 catalog/prefetch 数值；STATUS §2.5 Low（drain / 错误类型）除非挡住本契约；`ask` 接线。
@@ -59,8 +61,8 @@ chat / tui / serve 上自动记忆分成两层：**抽取**只从本段对话往
 4. 梦境 FakeLLM 返回无 `replaces`、正文与邻居词重叠很低 → **不** SUPERSEDE 该邻居（vitest）。
 5. `autoExtract === true` 且 `settings.memory.dream === false`：钩子在闸满足时仍调用梦境 LLM（vitest，计 complete 次数）。
 6. `autoExtract !== true` 且 `dream !== true`：零梦境 LLM、零抽取 LLM（既有关闸测绿）。
-7. `autoExtract !== true`：`assembleSystemPrompt` **不含** promote 段正文；可含 AGENTS 与 EXISTENCE_POINTER（库非空时）（vitest）。
-8. `autoExtract === true` 且有 promote 资格条：装配含该条 title（或 body 片段）（vitest）。
+7. `autoExtract !== true`：`assembleSystemPrompt` **不含** catalog 段与目录行；可含 AGENTS 与 EXISTENCE_POINTER（库非空时）（vitest）。promote 装配口径让位给 `specs/promote-bodies-never-enter-system.md` SC1—SC3。
+8. `autoExtract === true` 且有现行条：装配含 catalog 纪律句全文与该条 title；不含该条 body 全文（vitest）。promote 资格条不进入装配（让位给 `specs/promote-bodies-never-enter-system.md`）。
 9. 实施后闸状态文件名为 `dream.json`；测试夹具与生产路径均不创建 `dream-cursor.json`（vitest / grep 或路径断言）。
 10. 夹具：一条 disabled 且 `updated_at` 为 31 天前 → `runMemoryGc` 或本 spec 归档函数后热目录无该 slug、`archive/<slug>.md` 存在；随后 `listStoreEntries` 不含该条（vitest）。
 11. 梦境 `replaces` 含未知 slug 与一个已知 slug → 未知 id 跳过（`// EXIT: log-and-continue`）、已知 id 仍 SUPERSEDE；turn 不失败（vitest）。
@@ -79,7 +81,7 @@ chat / tui / serve 上自动记忆分成两层：**抽取**只从本段对话往
 
 - Inherits：ADR-0009 D3 双通道（未 promote body 不得当指令）；ADR-0010 `ask` opt-out；ADR-0031 D1 抽取闸 N≥2、D4 GC 软禁、D5 默认 OFF；ADR-0033 tokenize + 梦境 24h∧5 + per-root 钩子；ADR-0034 catalog/prefetch。
 - Inherits：`persistMemoryOps` 仍只在新条上写 `supersedes`，旧条由 **memory_gc** 改 `disabled`。
-- Changes：抽取 `memory_op` 判决去掉矛盾 SUPERSEDE；梦境以 `replaces` 驱动 SUPERSEDE；`autoExtract` 蕴含梦境；promote 装配跟 `autoExtract`；闸文件 `dream.json`；热目录归档。
+- Changes：抽取 `memory_op` 判决去掉矛盾 SUPERSEDE；梦境以 `replaces` 驱动 SUPERSEDE；`autoExtract` 蕴含梦境；闸文件 `dream.json`；热目录归档。promote 装配口径（与 SC7/SC8、auto_extract 提法、Assumption 4、Objective 中相关条目）已让位给 `specs/promote-bodies-never-enter-system.md` / ADR-0044。
 - Test command: `npx vitest run tests/harness/memory/`
 - Surfaces: chat / tui / serve；`ask` 除外。
 

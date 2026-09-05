@@ -3,7 +3,8 @@
 Date: 2026-08-28
 Status: accepted
 
-> **Amendment 2026-09-04**（`specs/casual-ask-context-hygiene.md`）：existence pointer 只声明库在，**不得**下令 `Use memory_recall`。catalog 纪律句须写明目录是索引不是待办、标题与用户句撞词不构成必须召回。prefetch 通道不变。`memory_recall` 默认命中条数改为 3；工具说明不得写 “at the start of a task”。D1–D4 通道形状（目录进 system、正文不进 system、预取进用户消息、召回返回原文）不变。
+> **Amendment 2026-09-04**（`specs/casual-ask-context-hygiene.md`）：existence pointer 只声明库在，**不得**下令 `Use memory_recall`。catalog 纪律句须写明目录是索引不是待办、标题与用户句撞词不构成必须召回。prefetch 通道不变。`memory_recall` 默认命中条数改为 3；工具说明不得写 “at the start of a task”。D1–D3 通道形状（目录进 system、正文不进 system、预取进用户消息、召回返回原文）当时不变。
+> **Amendment 2026-09-05**（ADR-0044）：D4 废止。合格 promote 正文不再进入 `system`。D1 catalog 通道本票不动。
 
 ## Context
 
@@ -17,12 +18,12 @@ ADR-0009 D3 put un-promoted auto memory on `memory_recall` / `tool_result` only,
 
 3. **Recall still returns full hits.** Default **three** hits (was ten; amended 2026-09-04) remain title + frontmatter + body, not catalog lines. Same advisory label. Auto-memory must not auto-promote and must not outrank the user turn, the repository, or project instructions. The existence pointer must not command the model to call `memory_recall`.
 
-4. **Promote assembly shares the catalog gate.** Eligible promoted bodies may enter `system` only when `autoExtract === true` (same as catalog). `AGENTS.md` / existence pointer / `memory_recall` / `memory_save` do not follow this gate. `MEMORY.md` is never injected. Amendment 2026-08-29; `specs/auto-memory-layering.md`.
+4. **Promote assembly shares the catalog gate.** ~~Eligible promoted bodies may enter `system` only when `autoExtract === true` (same as catalog).~~ **Superseded by ADR-0044:** promoted bodies never enter `system`. `AGENTS.md` / existence pointer / `memory_recall` / `memory_save` do not follow the catalog gate. `MEMORY.md` is never injected. Amendment 2026-08-29; `specs/auto-memory-layering.md`.
 
 ## Consequences
 
 - (+) The model can see that a library exists without reloading bodies every turn; prefetch can change without busting the system prefix.
-- (−) A stale catalog line can still hint the model to recall a bad note. Accepted: channel and English disclaimer keep it non-authoritative; promote stays the only body-in-system path.
+- (−) A stale catalog line can still hint the model to recall a bad note. Accepted: channel and English disclaimer keep it non-authoritative. Body-in-system via promote is withdrawn (ADR-0044).
 
 ## Why not
 
