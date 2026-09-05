@@ -282,14 +282,13 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // 可单测）。手工解构在 WorktreeProvisionContext 新增字段时会静默丢
     // 字段且编译仍绿——TUI 缝 2026-09-05 trace 实测复现了 CLI 缝同款退化
     // （name=ai-news-archive-2026-09-05 被丢，建出 UUID-only 叶子）。
+    // hub 缺席的 fail-closed 属于本文件桥接逻辑（bridgeRef 只有这里知道）。
     const worktreeIsolation = createTuiWorktreeIsolationHost({
       provisionWorktree: (ctx) =>
         bridgeRef.hub?.provisionWorktree(ctx) ??
         Promise.reject(
           new Error("TUI Hub is not ready for worktree provision")
         ),
-      notReadyError: () =>
-        new Error("TUI Hub is not ready for worktree provision"),
     });
 
     const depsOpts: BuildTuiDepsOptions = {

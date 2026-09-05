@@ -79,6 +79,7 @@ import type {
   WorktreeRemoval,
   WorktreeRemoveContext,
 } from "../harness/isolation/worktree-gate.js";
+import { createWorktreeHostProvision } from "../harness/isolation/worktree-host.js";
 import type { AskUser } from "../harness/permission/types.js";
 import type {
   ServeAskUserHandle,
@@ -2836,8 +2837,12 @@ export class SessionHub {
       // worktree 时由 provision 幂等放行（返回同根），别会话的树 / 无关
       // worktree 由 provision fail-closed（typed foreign_worktree）。
       worktreeIsolation: {
-        provision: ({ conversationId, root: sessionRoot, name }) =>
-          this.provisionWorktree({ conversationId, root: sessionRoot, name }),
+        // 纯透传走共享 SSOT worktree-host.ts（PR #869/#881 与 2026-09-05
+        // TUI 缝两次手工解构丢 name 之后的一致性收敛：入口禁止手写
+        // 逐字段解构 wrapper）。
+        ...createWorktreeHostProvision({
+          provisionWorktree: (ctx) => this.provisionWorktree(ctx),
+        }),
         // T7:enter-task-worktree 工具缝 —— 会话显式进入本仓已存在的 task
         // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
         worktreeEnter: ({
@@ -2956,8 +2961,12 @@ export class SessionHub {
       // 的会话在 rebind 后下一回合走 per-root 引擎路径）。T4:同上——
       // passthrough 由 provision 按会话锚定，不设 initiallyBound。
       worktreeIsolation: {
-        provision: ({ conversationId, root: sessionRoot, name }) =>
-          this.provisionWorktree({ conversationId, root: sessionRoot, name }),
+        // 纯透传走共享 SSOT worktree-host.ts（PR #869/#881 与 2026-09-05
+        // TUI 缝两次手工解构丢 name 之后的一致性收敛：入口禁止手写
+        // 逐字段解构 wrapper）。
+        ...createWorktreeHostProvision({
+          provisionWorktree: (ctx) => this.provisionWorktree(ctx),
+        }),
         // T7:enter-task-worktree 工具缝 —— 会话显式进入本仓已存在的 task
         // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
         worktreeEnter: ({

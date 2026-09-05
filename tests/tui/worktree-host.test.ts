@@ -60,12 +60,15 @@ describe("createTuiWorktreeIsolationHost (TUI provision seam)", () => {
     );
   });
 
-  it("fails closed with the not-ready error when the hub is absent", async () => {
+  it("propagates the bridge's fail-closed rejection when the hub is absent", async () => {
+    // run.tsx 桥接委托语义：bridgeRef.hub 缺席 → `?? Promise.reject`。
+    // 壳本身只做纯透传（fail-closed 归属桥接层），本用例钉住：委托
+    // 产生的 rejection 原样穿过壳到达 executor 侧，不被吞不改写。
     const host = createTuiWorktreeIsolationHost({
-      provisionWorktree: async () => {
-        throw new Error("hub must not be called");
-      },
-      notReadyError: () => new Error("TUI Hub is not ready"),
+      provisionWorktree: () =>
+        Promise.reject(
+          new Error("TUI Hub is not ready for worktree provision")
+        ),
     });
 
     await expect(
