@@ -161,7 +161,7 @@ ADR-0019 D1.1 的默认解析（`workspaceRoot` 默认 `process.cwd()`）与 ser
 - **shell rc 文件**（`~/.bashrc` / `~/.profile`）：login bash 已可用（盘点：`bash -lc 'echo ok'` exit 0，rc 不可见对 login bash 非致命）；rc 不可见消除持久副作用面，是接受项甚至有利面。
 - **`~/.iknow`**：读放行 = 可执行面（`init.sh` 是被执行的持久文件，#896 关闭的正是这个面）；memory 写不经 bash 围栏，不需要读通道（盘点：`ls ~/.iknow` exit 2；`init.sh` 主机即不存在 = skip）。
 - **`~/.ssh`**：by-design（盘点同条，不可见即设计意图）。
-- **PATH 重建**（不是路径放行，是 env 装配规则）：剔除 home 下不可达条目，按围栏内可见 bin 目录重组；重建失败 = 运行时可观察错误（§9.4）。盘点：主机 56 条 PATH 中 home 下条目全部不可达。
+- **PATH 透传（裁决：不做重建 / env 剔除）**——PATH 经 `BASE_ENV_WHITELIST` **原样透传**入围栏，无 env 装配层的剔除/重组；home 下不可达条目在 mount 面「自然失联」（目录不可见 → 命令解析失败），env 本身不被改写。盘点：主机 56 条 PATH 中 home 下条目全部不可达；断链 = 运行时可观察型（§9.4），不自动扩白名单。
 
 #### 9.3 Amendment 2026-09-05 identity overlay 条款 superseded（c）
 
@@ -173,7 +173,7 @@ ADR-0019 D1.1 的默认解析（`workspaceRoot` 默认 `process.cwd()`）与 ser
 #### 9.4 白名单 miss 的 typed fail-loud 分型与 EXIT 条款（d）
 
 - **配置故障型（合同输入，spawn 前 fail-loud）**：白名单合同根**空白或盘上不存在**——`installRoot` / `projectIdentityRoot` / `taskRoot` / tmp / node 工具链根（§9.2 第 2、4、5、6 条与写根）。抛 typed error（`ToolExecutionError` 系，对齐 Amendment 2026-09-05 (c) 纪律），**不 spawn**、不 `existsSync` 静默跳过。错误面：工具执行直接抛错并冒泡到调用方。**EXIT = 该 tool call 失败**，会话不静默降级。
-- **运行时可观察型（工具链断链）**：未放行二进制不可达（如 `~/.nvm` 形态的 node 链）、PATH 重建后命令仍找不到、git 身份缺失、可选 git 全局配置缺席（§9.2 第 7 条）。命令以非零退出码 + stderr 经 tool result 正常冒泡，**不静默降级、不自动扩白名单**。错误面：模型在 tool result 层观察失败。**EXIT = 单命令失败**，由模型在 tool result 层观察并处理（换命令 / 改道 / 上报）。
+- **运行时可观察型（工具链断链）**：未放行二进制不可达（如 `~/.nvm` 形态的 node 链）、PATH 原样透传下 home 条目失联导致命令找不到（§9.2「PATH 透传」——无 env 装配层剔除/重组）、git 身份缺失、可选 git 全局配置缺席（§9.2 第 7 条）。命令以非零退出码 + stderr 经 tool result 正常冒泡，**不静默降级、不自动扩白名单**。错误面：模型在 tool result 层观察失败。**EXIT = 单命令失败**，由模型在 tool result 层观察并处理（换命令 / 改道 / 上报）。
 
 ## Consequences
 
