@@ -6,7 +6,7 @@ Status: accepted
 
 > **Amendment 2026-09-04**（`specs/casual-ask-context-hygiene.md`）：§1「读放行、写才拦」不变。bash 是否 mutate **不得**复用 `validateReadonlyCommand`（那是 bash readonly **模式**的 deny-by-default 表，`2>&1` 也拒）。门禁自备「会不会写工作区」判定；`2>&1` / 管道 / 只读命令串为读。`validateReadonlyCommand` 不为本门禁放宽。`unboundMutateNotice` 仍点名 `create-task-worktree`、仍不 auto-provision；文案改为事实阻断（这次调用会写主仓、未执行；若要写则调工具再重试这一次），不得把模型下一拍收成「去建树」。不按用户问句分型。不改 `create-task-worktree` ACI 形状。
 
-> Amendments: 2026-08-30 建树职责由 host 自动建树改为模型调用「创建工作树 ACI 工具」；2026-08-31 改绑只切 `taskRoot`（§4 重写）；2026-09-02 reopen——model-provision 契约 + 活 `taskRoot`（§7 新增）+ 撤销「same-turn mutator 列为非目标」（§8 显式撤销）。
+> Amendments: 2026-08-30 建树职责由 host 自动建树改为模型调用「创建工作树 ACI 工具」；2026-08-31 改绑只切 `taskRoot`（§4 重写）；2026-09-02 reopen——model-provision 契约 + 活 `taskRoot`（§7 新增）+ 撤销「same-turn mutator 列为非目标」（§8 显式撤销）；2026-09-05 bash 围栏身份根 ro-bind overlay + 模型可见写根（issue #891）。
 
 > **Amendment 2026-08-30**（issue #836 / 地图 #829）：ON 时门禁**只拦写、不自动 `git worktree add`**——建 task worktree 与会话根改绑由**模型调用「创建工作树 ACI 工具」**完成（成功 = 树在且会话根已切到该路径）；Host 不同波重放被拦的写，被拦的写由模型在新根上自己再调。原文 Decision 1 中「首次 mutate 被拦截 → host `git worktree add` 建树改绑」的读法 **superseded**。同批修订：说明书（rules）改为按需读——父会话不整段灌 rules、缺目录视为空，见 ADR-0009 D2 的 amended 说明与 `docs/CONTEXT.md` 术语「说明书读法」。
 >
@@ -17,6 +17,14 @@ Status: accepted
 > **Reopen 2026-09-02**（issue / 地图未定，`plans/worktree-live-task-root.md`）：原文 §1 描述的「首次 mutate 自动 `git worktree add` 建树改绑」（auto-provision）与已 shipped 的 model-provision 实现不符——`src/harness/isolation/worktree-gate.ts` 注释明写「NEVER provisions（no `git worktree add` on the execution path）」，建树职责完全落在「创建工作树 ACI 工具」上；门禁在「会写但还没建过树」这一中间态下只是一句「未绑定 → 请模型调工具」的可观察阻拦。同时，旧裁决隐含的「同 run 内 mutate 在工具成功后必须由操作员 `/continue` 触发」与 trace 实测直接冲突：拒绝会让用户放弃。本 reopen 三件事：(a) 在 §1 写齐 model-provision 契约；(b) 在 §7 新增活 `taskRoot` 决定（唯一 writer / batch 快照 / 稳定根清单 / rebind 生效边界）；(c) 在 §8 显式撤销「same-turn mutator 列为非目标」并写明撤销理由 = §1 的 trace 证据 + spec 原文「也不要求操作员 `/continue`」（被 `4b4fa6fe` 撤销的修订版原文）。
 
 > **Accepted amendment 2026-09-03**（issue #869 / `specs/task-worktree-lifecycle.md`）：§3 的任务树叶子现在允许可选的合法 kebab label，形状为 `<label>--<conversationId>`；省略或非法 label 继续使用历史 `<conversationId>` 叶子，历史树不迁移。`taskWorktreeOwnerOf` 始终从最后一个 `--` 后的 conversationId 反演，label 只用于展示与按 label 定位，绝不参与归属裁决；任务分支在带 label 时采用 `iknow/task/<label>-<uuid8>`，碰撞仍 fail-closed。新增条件化、append-only 的 `list-task-worktrees`（只读）与 `remove-task-worktree`（显式回收）工具面，host 缝缺席时不注册；回收默认不删分支，脏树、未确认推送的独占提交和当前根均拒绝。建树后的可选 `.iknow/worktreeinclude` 只镜像匹配且已被 gitignore 的文件，且身份根只读通道扩展到 `grep` / `glob`；门禁、活 taskRoot、生效批边界、exit 保留树和 worker 所有权约束均不变。补记本次 reopen §3 的理由与取舍：叶子名兼职身份与展示的旧形状让人与模型都无法认树，label 因此只承接展示与定位，身份仍是 conversationId 后缀，`taskWorktreeOwnerOf` 的归属裁决逐字不变。代价是叶子反演从「整段叶子 = id」变为「取最后一个 `--` 之后的后缀」；选择纯路径反演而非登记表，因为零登记表 = 零新增状态，历史无 `--` 叶子天然兼容、无需迁移。依据见 `specs/task-worktree-lifecycle.md`（命名合同条款 1–5 与 SC1/SC6/SC9）。
+
+> **Amendment 2026-09-05**（issue #891 / `plans/891-taskroot-remaining-consumers.md`）：§4「写仍不得进主仓」落到 bash 物理围栏。实测（2026-09-05 复现脚本）：改绑后 bash 围栏的 `--bind $HOME $HOME` **后挂**于 cwd bind（`bindArgs` 非 `cwdReadonly` 分支），主仓在 home 下时被这个可写祖先罩住，`mkdir -p <主仓>/…` 穿透成功（exit 0）。修复不是新增第五根——写根仍是 `SessionRoots.taskRoot`，围栏只把 `projectIdentityRoot` 整棵树以 `--ro-bind` **后挂**在 writable home bind 之后（同一覆盖祖先纪律，`cwdReadonly` 已证明）：
+>
+> (a) **overlay 条件** = 隔离开关 ON 且活 `taskRoot` 已改绑（`taskWorktreeOwnerOf(taskRoot)` 有主）。未改绑时 cwd 就是主仓，mutate 由门禁拦，围栏 argv 不变。
+> (b) **argv 顺序** = 身份根 `--ro-bind` 必须出现在 writable home `--bind` **之后**（bwrap 后挂子挂载覆盖祖先）；其它 token 逐字节不变。
+> (c) **fail-loud** = 身份根空白 / 盘上不存在时抛 typed 可见错误、**不 spawn**；禁止 `existsSync` 静默跳过（与 `optionalHostRoBindArgs` 的存在性跳过不同轴：身份根是合同输入，缺席是配置故障，不是可选主机前缀）。
+> (d) **OFF / 未改绑** = 不传 overlay 选项，`createBwrapFence` argv 与今日逐字节一致（`verify/sandbox-run.ts` 本轮不传）。
+> (e) **模型可见面** = 改绑后模型（含子代理）经 worker prior messages / path-outside 回执看见当前写根 = 活 `taskRoot`；system `## Project path` 仍钉 `projectIdentityRoot`（`projectPathSegment` 字节不动），不静默改写 spawn `task` 正文。前台（`bash.ts`）与后台（`defaultBackgroundSpawn`）必须消费**同一** overlay token（CONTEXT 沙箱纪律：前后台共用围栏）。
 
 ## Context
 

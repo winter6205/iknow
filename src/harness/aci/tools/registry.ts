@@ -503,6 +503,15 @@ export function createDefaultAciRegistry(
         ...(opts.liveTaskRoot !== undefined
           ? { liveTaskRoot: opts.liveTaskRoot }
           : {}),
+        // #891 T2 (ADR-0037 §4 amendment): bash 对称接入身份根只读 overlay
+        // —— read_file / grep / glob 已拿到该根（读放行），bash 在改绑波次
+        // 把它作为 --ro-bind 后挂进 fence（写仍不得进主仓）。build-engine
+        // 只在 isolation ON 时传该根（与 read_file 同一 spread guard），故
+        // 此处只需判在场。handler 内按活 taskRoot == 身份根判定，未改绑波次
+        // 不传 overlay，argv 与 V1 字节一致。
+        ...(opts.projectIdentityRoot !== undefined
+          ? { projectIdentityRoot: opts.projectIdentityRoot }
+          : {}),
       }),
     // T6 (plans/worktree-live-task-root.md §6 T6): read 路径工具工厂参数
     // 从冻结 sandboxRoot 扩为 `liveTaskRoot ?? sandboxRoot` (cell 缺席 / 未

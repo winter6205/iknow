@@ -85,6 +85,10 @@ describe("bwrap baseArgs home rebind under tmpfs (#196 T12b regression)", () => 
   });
 
   it("cwd and home both under /tmp => both rebinds present, cwd first", () => {
+    // V1 baseline（#891 review 后恢复）：identity overlay 缺席时 post-tmpfs
+    // 重绑顺序保持 [cwd, home]（可写路径），argv 与 pre-#891 逐字节一致。
+    // identity 在场时才切换为 [home, identity, cwd]（覆盖-夺回顺序），见
+    // tests/harness/sandbox/bwrap-identity-overlay.test.ts。
     const cwd = "/tmp/cwd";
     const home = "/tmp/home";
     const argv = fenceArgs({ cwd, home });
@@ -97,6 +101,9 @@ describe("bwrap baseArgs home rebind under tmpfs (#196 T12b regression)", () => 
     const homeIdx = postTmpfs.findIndex(
       (arg, i) => arg === "--bind" && postTmpfs[i + 1] === home
     );
-    assert.ok(cwdIdx < homeIdx, "cwd rebind must precede home rebind");
+    assert.ok(
+      cwdIdx < homeIdx,
+      "cwd rebind must precede home rebind (V1 order)"
+    );
   });
 });

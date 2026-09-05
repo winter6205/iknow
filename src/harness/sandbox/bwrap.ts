@@ -50,6 +50,15 @@ export interface BwrapFenceOptions {
   // rebind-after-tmpfs rule (cwd isTmpDescendant) stay intact. The readonly
   // path orders overlapping writable parent binds before cwd.
   readonly cwdReadonly?: boolean;
+  // #891 T2 (ADR-0037 §4 amendment 2026-09-05): identity-root readonly
+  // overlay — worktree isolation ON + rebind 后把主仓（projectIdentityRoot）
+  // 整棵树 `--ro-bind` 进围栏，堵住 writable `--bind $HOME` 后挂罩住主仓的
+  // 写穿透。排序合同：writable home → identity ro-bind → writable cwd bind
+  // （taskRoot 本身在身份根树内，必须最后以可写子挂载夺回）。缺席 = OFF /
+  // 未改绑，argv 与今日逐字节一致。身份根空白 / 盘上不存在 → typed
+  // fail-loud，不 spawn（合同输入缺席是配置故障，不走
+  // optionalHostRoBindArgs 的存在性跳过轴）。
+  readonly projectIdentityRoot?: string;
   readonly seccompProfile?: never;
 }
 
@@ -81,7 +90,8 @@ function bindArgs(
   fsPolicy: FsPolicy,
   cwd: string,
   overlaySensitivePaths: boolean,
-  cwdReadonly: boolean
+  cwdReadonly: boolean,
+  identityRoot: string | undefined
 ): string[] {
   const paths = fsPolicy.allowedPaths();
   const home = pathForHome(fsPolicy);
@@ -92,6 +102,11 @@ function bindArgs(
         return existsSync(target) ? ["--tmpfs", target] : [];
       })
     : [];
+  // #891 T2: identity-root overlay. Fail-loud validation happens once in
+  // createBwrapFence (typed, no spawn); here identityRoot is already a
+  // checked-on-disk absolute path.
+  const identityBind =
+    identityRoot !== undefined ? ["--ro-bind", identityRoot, identityRoot] : [];
   // #562 T5: cwdReadonly switches the cwd-bind verb from --bind to --ro-bind.
   // tmp + home stays writable (tmp is the sandbox /tmp mount, home is the
   // user-configurable bind target). The readonly path also orders those
@@ -99,12 +114,21 @@ function bindArgs(
   const cwdVerb = cwdReadonly ? "--ro-bind" : "--bind";
   const cwdBind = [cwdVerb, cwd, cwd];
   const homeBind = ["--bind", home, home];
-  if (cwdReadonly) {
-    // A later bind of an ancestor can cover an earlier read-only child bind.
-    // Put every writable parent/overlay first, then make cwd read-only last.
-    return ["--bind", tmp, tmp, ...homeBind, ...overlays, ...cwdBind];
-  }
-  return ["--bind", tmp, tmp, ...cwdBind, ...homeBind, ...overlays];
+  // Ordering (both cwdReadonly branches — a later bind covers an earlier
+  // one): writable parents/overlays first (home, sensitive overlays,
+  // identity ro-bind), cwd last. The identity ro-bind must come after home
+  // so it covers the writable ancestor (the #891 leak shape: main repo
+  // under $HOME); the cwd (taskRoot under rebind) sits inside the identity
+  // tree, so it must come after the ro-bind to reclaim its writability.
+  return [
+    "--bind",
+    tmp,
+    tmp,
+    ...homeBind,
+    ...overlays,
+    ...identityBind,
+    ...cwdBind,
+  ];
 }
 
 function baseArgs(
@@ -113,7 +137,8 @@ function baseArgs(
   resources: ResourceLimits,
   overlaySensitivePaths: boolean,
   network: boolean,
-  cwdReadonly: boolean
+  cwdReadonly: boolean,
+  identityRoot: string | undefined
 ): string[] {
   const tmp = fsPolicy.allowedPaths()[2] ?? "/tmp";
   // #562 T5: cwdRebind (post-tmpfs --bind cwd cwd when cwd is /tmp descendant)
@@ -134,9 +159,25 @@ function baseArgs(
   // byte-for-byte unchanged.
   const home = pathForHome(fsPolicy);
   const homeRebind = isTmpDescendant(home, tmp) ? ["--bind", home, home] : [];
-  const postTmpfsRebinds = cwdReadonly
-    ? [...homeRebind, ...cwdRebind]
-    : [...cwdRebind, ...homeRebind];
+  // #891 T2: identity rebind mirrors the home rebind — a post-tmpfs writable
+  // home rebind would cover the pre-tmpfs identity ro-bind, so when home is
+  // under /tmp the identity tree must be re-asserted read-only after the
+  // tmpfs (still before cwd, which reclaims writability).
+  const identityRebind =
+    identityRoot !== undefined && isTmpDescendant(identityRoot, tmp)
+      ? ["--ro-bind", identityRoot, identityRoot]
+      : [];
+  // Absent identity → the V1 rebind order ([cwd, home] writable / [home, cwd]
+  // readonly) so the OFF/unbound argv stays byte-identical to pre-#891
+  // (amendment (d)). Identity present → the cover-then-reclaim order
+  // [home, identity, cwd]: home must not cover the identity ro-bind, and cwd
+  // must reclaim writability over both.
+  const postTmpfsRebinds =
+    identityRoot !== undefined
+      ? [...homeRebind, ...identityRebind, ...cwdRebind]
+      : cwdReadonly
+        ? [...homeRebind, ...cwdRebind]
+        : [...cwdRebind, ...homeRebind];
   return [
     "--unshare-user-try",
     // network:true is the only axis that drops --unshare-net (ADR-0022 #1);
@@ -159,13 +200,21 @@ function baseArgs(
     "/etc",
     "/etc",
     ...optionalHostRoBindArgs(),
-    ...bindArgs(fsPolicy, cwd, overlaySensitivePaths, cwdReadonly),
+    ...bindArgs(
+      fsPolicy,
+      cwd,
+      overlaySensitivePaths,
+      cwdReadonly,
+      identityRoot
+    ),
     "--size",
     String(resources.tmp),
     "--tmpfs",
     "/tmp",
     // Readonly cwd must be rebound after an overlapping writable home so the
-    // child mount remains read-only when HOME contains the workspace.
+    // child mount remains read-only when HOME contains the workspace. With
+    // #891 the identity ro-bind sits between home and cwd for the same
+    // cover-then-reclaim reason.
     ...postTmpfsRebinds,
     "--proc",
     "/proc",
@@ -176,6 +225,26 @@ function baseArgs(
 }
 
 export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
+  // #891 T2: identity-root overlay validation — contract input, so blank or
+  // missing-on-disk is a caller misconfiguration, not an optional prefix.
+  // Fail loud (typed, no spawn) instead of existsSync-skipping like
+  // OPTIONAL_HOST_RO_PREFIXES, which is a different axis (host capability
+  // detection vs fence contract).
+  let identityRoot: string | undefined;
+  if (opts.projectIdentityRoot !== undefined) {
+    const identity = opts.projectIdentityRoot;
+    if (identity.trim().length === 0) {
+      throw new ToolExecutionError(
+        "bwrap: projectIdentityRoot is blank; refusing to build a fence without a writable-root cover (worktree isolation contract, ADR-0037 §4)"
+      );
+    }
+    if (!existsSync(identity)) {
+      throw new ToolExecutionError(
+        `bwrap: projectIdentityRoot does not exist on disk: ${identity}; refusing to build a fence that cannot bind the main repo read-only (worktree isolation contract, ADR-0037 §4)`
+      );
+    }
+    identityRoot = identity;
+  }
   const envArgs = Object.entries(opts.env).flatMap(([name, value]) =>
     value === undefined ? [] : ["--setenv", name, value]
   );
@@ -187,7 +256,8 @@ export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
       opts.resourceLimits,
       opts.overlaySensitivePaths ?? true,
       opts.network === true,
-      opts.cwdReadonly === true
+      opts.cwdReadonly === true,
+      identityRoot
     ),
     // --clearenv must precede every --setenv so the sandbox inherits only the
     // whitelisted entries, never the host env (bwrap otherwise copies the whole

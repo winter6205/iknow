@@ -72,6 +72,12 @@ export interface CreateBashToolOptions {
    * 工厂期捕获 ⇒ 多次 rebuild 间的差异仅落在 cwd token）。缺省时退回工厂
    * 捕获 cwd —— 与 V1 路径字节一致（legacy test parity）。 */
   readonly liveTaskRoot?: LiveTaskRoot;
+  /** #891 T2 (ADR-0037 §4 amendment): 改绑后的主仓只读 overlay 根。在场时
+   *  handler 在活 taskRoot ≠ 身份根的波次把它透传给 bwrap fence
+   *  （`--ro-bind` 后挂覆盖 writable home），前台 fence 与 background spawn
+   *  消费同一 token；活 taskRoot == 身份根（未改绑 / OFF）→ 不传，argv 与
+   *  V1 逐字节一致。 */
+  readonly projectIdentityRoot?: string;
 }
 
 export function createBashTool(
@@ -119,6 +125,15 @@ export function createBashTool(
     const waveRoot: string = opts?.liveTaskRoot
       ? opts.liveTaskRoot.read()
       : cwd;
+    // #891 T2: overlay token = 改绑波次专用。活 taskRoot 就是身份根（未改绑
+    // / OFF）时主仓本来就是 cwd，无需 overlay —— 不传选项，argv 与 V1 字节
+    // 一致；改绑后 cwd 在身份树内，身份根 ro-bind 后挂覆盖 writable home。
+    // 前台 fence 与 background spawn 消费同一 token（D2 同波同一份）。
+    const identityOverlay =
+      opts?.projectIdentityRoot !== undefined &&
+      waveRoot !== opts.projectIdentityRoot
+        ? opts.projectIdentityRoot
+        : undefined;
     // #502 T3:校验链通过后才决定前台 / 后台 —— 危险命令 / 敏感路径在两侧
     // 都先执行同一闸门（background 不豁免安全检查）。
     if ((input as BashInput | null)?.background === true) {
@@ -141,7 +156,8 @@ export function createBashTool(
         waveRoot,
         opts ?? {},
         ctx,
-        wantsHostNetwork
+        wantsHostNetwork,
+        identityOverlay
       );
     }
     // #562 T6: bashMode="readonly" 派生 cwdReadonly:true 传给 fence + env。
@@ -184,6 +200,9 @@ export function createBashTool(
       cwd: waveRoot,
       ...(wantsHostNetwork ? { network: true } : {}),
       ...(fenceIsReadonly ? { cwdReadonly: true } : {}),
+      ...(identityOverlay !== undefined
+        ? { projectIdentityRoot: identityOverlay }
+        : {}),
     });
     const result = await runInSandbox({
       fence,
@@ -272,7 +291,8 @@ async function handleBackground(
   cwd: string,
   opts: CreateBashToolOptions,
   ctx?: ToolExecutionContext,
-  wantsHostNetwork = false
+  wantsHostNetwork = false,
+  identityOverlay?: string
 ): Promise<{ task_id: string; log_path: string }> {
   const manager = opts.backgroundManager;
   if (!manager) {
@@ -300,6 +320,11 @@ async function handleBackground(
     // (freeze-safe);此处只透传旗标,不改 env(whitelist 会剥掉该键)。
     ...(opts.bashMode === "readonly" || opts.cwdReadonly === true
       ? { cwdReadonly: true }
+      : {}),
+    // #891 T2: 前台与后台共用同一 overlay token（D2 同波同一份）——
+    // defaultBackgroundSpawn 据此把身份根 --ro-bind 后挂进 background fence。
+    ...(identityOverlay !== undefined
+      ? { projectIdentityRoot: identityOverlay }
       : {}),
   });
   if (result.status === "spawn_error") {

@@ -166,6 +166,123 @@ describe("resolveWithinRoot", () => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// T3 (plans/891-taskroot-remaining-consumers.md Task 3 / ADR-0037 §4 (e)):
+// path-outside 错误文案必须含当前写根，使模型能用相对路径重试。改绑后
+// `root` 即活 `taskRoot` (= 写根)，文案必须明示「current write root」以让
+// 模型用相对路径重试（现有文字只列「not under <root>」，不带 remap 引导）。
+//
+// 五类边界自检（empty / negative / overflow / concurrent / exception）：
+//   - empty: 文案仍含 root 字符串（不丢信息）；
+//   - negative: 相对路径越界（如 `../escape`）同样含 root 字符串；
+//   - overflow: 极长 root 完整出现（不被截断）；
+//   - concurrent: 多次串行调用，每次文案互不污染；
+//   - exception: extraWriteRoots 救不回的越界文案仍含 root 字符串。
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("resolveWithinRoot — T3 path-outside 文案含当前写根 (ADR-0037 §4 (e))", () => {
+  it("absolute path outside: 文案含 'current write root: <root>' 引导", async () => {
+    const root = await makeScratch("aci-helper-wr-abs-");
+    const outside = await makeScratch("aci-helper-wr-out-");
+    await assert.rejects(
+      resolveWithinRoot(root, join(outside, "file.ts")),
+      (error: unknown) => {
+        if (!(error instanceof ToolExecutionError)) return false;
+        // 文案必须含写根路径本身 + "current write root" 标识
+        // (模型据此用相对路径重试)
+        return (
+          error.message.includes("current write root") &&
+          error.message.includes(root)
+        );
+      }
+    );
+  });
+
+  it("relative traversal outside: 文案仍含 'current write root: <root>'", async () => {
+    const parent = await makeScratch("aci-helper-wr-rel-");
+    const root = join(parent, "root");
+    await mkdir(root);
+    await assert.rejects(
+      resolveWithinRoot(root, "../escape.ts"),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("current write root") &&
+        error.message.includes(root)
+    );
+  });
+
+  it("symlink escape: 文案仍含 'current write root: <root>'", async () => {
+    const root = await makeScratch("aci-helper-wr-sym-");
+    const outside = await makeScratch("aci-helper-wr-sym-out-");
+    await symlink(outside, join(root, "escape"), "dir");
+    await assert.rejects(
+      resolveWithinRoot(root, "escape/file.ts"),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("current write root")
+    );
+  });
+
+  it("overflow: 极长 root 完整出现在文案中（不被 truncate 截断到无意义）", async () => {
+    // overflow 验证目标：文案里 root 字符串完整出现（不被截断到无意义）。
+    // 将 root 控制在 OS PATH_MAX 之内,但构造一条足够长的真实目录链
+    // （30 层 * 8 字符 = 240 字符的有效路径长度，足以验证"不被截断"语义）。
+    const realRoot = await makeScratch("aci-helper-wr-overflow-");
+    const longTail = Array.from({ length: 30 }, () => "abcdefgh").join("/");
+    const longRoot = join(realRoot, longTail);
+    await mkdir(longRoot, { recursive: true });
+    const outside = await makeScratch("aci-helper-wr-overflow-out-");
+    let captured = "";
+    await assert.rejects(
+      resolveWithinRoot(longRoot, join(outside, "file.ts")),
+      (error: unknown) => {
+        if (!(error instanceof ToolExecutionError)) return false;
+        captured = error.message;
+        return true;
+      }
+    );
+    // 文案必须显式含 'current write root' 标识 + 含 longTail 的尾部（证明
+    // 极长 root 没被截断）。
+    assert.ok(
+      captured.includes("current write root"),
+      "极长 root 路径必须含 'current write root' 标识"
+    );
+    assert.ok(
+      captured.includes(longTail),
+      "极长 root 路径必须含完整 longTail（不被截断）"
+    );
+  });
+
+  it("concurrent / 重复调用: 每次文案独立且含 root 字符串", async () => {
+    const root = await makeScratch("aci-helper-wr-conc-");
+    const outside1 = await makeScratch("aci-helper-wr-conc-1-");
+    const outside2 = await makeScratch("aci-helper-wr-conc-2-");
+    // 串行两次,各自文案必须含同一 root。
+    for (const outside of [outside1, outside2]) {
+      await assert.rejects(
+        resolveWithinRoot(root, join(outside, "file.ts")),
+        (error: unknown) =>
+          error instanceof ToolExecutionError &&
+          error.message.includes("current write root") &&
+          error.message.includes(root)
+      );
+    }
+  });
+
+  it("exception / extraWriteRoots 救不回: 文案仍含 'current write root: <root>'", async () => {
+    const root = await makeScratch("aci-helper-wr-exw-");
+    const extra = await makeScratch("aci-helper-wr-exw-extra-");
+    const outside = await makeScratch("aci-helper-wr-exw-out-");
+    await assert.rejects(
+      resolveWithinRoot(root, join(outside, "file.ts"), undefined, [extra]),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("current write root") &&
+        error.message.includes(root)
+    );
+  });
+});
+
 describe("truncateByCodePoint", () => {
   it("truncates ASCII by character count", () => {
     assert.equal(truncateByCodePoint("abcdef", 3), "abc");

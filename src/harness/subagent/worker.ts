@@ -557,8 +557,27 @@ export function applyEnvelopeOverrides(
  * Judge (and other workers) keep envelope.task as the exam-question identity.
  * Truncated host dialogue and evidenceContext arrive as independent fields and
  * are injected as prior user messages — prompt, not concatenated into task.
+ *
+ * T3 (plans/891-taskroot-remaining-consumers.md Task 3 / ADR-0037 §4
+ * amendment 2026-09-05 (e)): worker 看见当前写根。
+ *
+ *   - envelope.sandboxRoot 即活 `taskRoot` 的 spawn-time 快照
+ *     （manager.buildWorkerPayload 经 sandboxRootCell getter 读出），
+ *     改绑后父代理的 `taskRoot` 翻到新根时，新 spawn 的 worker envelope 也带
+ *     新根。worker 装配期直接读 envelope 字段即可，不另接 LiveTaskRoot cell
+ *     —— 这是计划里"envelope 值 = 活根快照"的最小改动路径（ADR-0040：
+ *     子代理 = 父会话执行臂，写根继承父生效根）。
+ *   - 写根段永远追加在 finalText / evidenceContext 之后，顺序契约：
+ *     [host dialogue?, evidence?, write root]。三段全缺省 → 返回 undefined
+ *     （与旧语义一致，loop-engine 短路到无 prior 形态）。
+ *   - sandboxRoot 是 envelope 必填字段（WORKER_SCHEMA.required），字符串长
+ *     度大于 0 才注入；空白 / 不在场 → 退化到原 V1 形态（不崩，不漏）。
+ *   - 不动 system `## Project path`（projectPathSegment 字节不变），也不静
+ *     默改写 spawn `task` 正文（与原函数同形态）。
+ *   - 导出：T3 测试 seam（tests/subagent/worker-write-root-prior.test.ts），
+ *     直接验证 prior 段形态。
  */
-function priorMessagesFromEnvelope(
+export function priorMessagesFromEnvelope(
   env: WorkerEnvelope,
   encodeUserText: (text: string) => AnthropicNativeMessage
 ): ReadonlyArray<AnthropicNativeMessage> | undefined {
@@ -571,6 +590,15 @@ function priorMessagesFromEnvelope(
       encodeUserText(
         "Evidence context (prompt, not the exam question):\n" +
           JSON.stringify(env.evidenceContext)
+      )
+    );
+  }
+  // T3: 当前写根段。envelope.sandboxRoot 是必填,空串即视为缺席。
+  if (typeof env.sandboxRoot === "string" && env.sandboxRoot.length > 0) {
+    prior.push(
+      encodeUserText(
+        `current write root (for write_file / edit_file / bash cwd): ${env.sandboxRoot}\n` +
+          `System ## Project path is still the project identity root and is read-only; the write root above is where file mutations should land. Use relative paths from this root.`
       )
     );
   }

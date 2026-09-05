@@ -69,8 +69,18 @@ export async function resolveWithinRoot(
     isWithinRoot(resolve(r), resolvedTarget)
   );
   if (!withinPrimary && !withinReadExtras && !withinWriteExtras) {
+    // T3 (plans/891-taskroot-remaining-consumers.md Task 3 / ADR-0037 §4 (e)):
+    // 改绑后 `root` 即活 `taskRoot` (= 写根)。模型看见的 system ## Project
+    // path 仍是 `projectIdentityRoot`,但写工具失败时如果只回 `<target> not
+    // under <root>`,模型很难把这两根区分开去重试一个相对路径。文案必须显式
+    // 标 "current write root: <root>" 的引导,让模型能用相对路径重试。
+    // 写根缺席 → 退回原文案 (不崩,文案退化到 base 形态)。
+    const writeRootHint =
+      realRoot.length > 0
+        ? ` (current write root: ${realRoot}; retry with a path relative to it)`
+        : "";
     throw new ToolExecutionError(
-      `path outside workspace: ${resolvedTarget} not under ${realRoot}`
+      `path outside workspace: ${resolvedTarget} not under ${realRoot}${writeRootHint}`
     );
   }
   return resolvedTarget;

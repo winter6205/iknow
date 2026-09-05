@@ -139,6 +139,12 @@ export interface BackgroundSpawnRequest {
    *  由 bash.ts handleBackground 派生 opts.bashMode==="readonly" ||
    *  opts.cwdReadonly===true 后传入。 */
   readonly cwdReadonly?: boolean;
+  /** #891 T2 (ADR-0037 §4 amendment): 改绑波次的主仓只读 overlay 根。
+   *  透传 defaultBackgroundSpawn 把 `projectIdentityRoot` --ro-bind 后挂进
+   *  fence（覆盖 writable home）。前台与后台共用同一 token（bash.ts 传入
+   *  同一份 identityOverlay）；缺席 = 未改绑 / OFF，fence argv 与 V1 逐字节
+   *  一致。 */
+  readonly projectIdentityRoot?: string;
 }
 
 export type BackgroundSpawnResult =
@@ -261,6 +267,11 @@ export async function defaultBackgroundSpawn(
     // bwrap argv 隔离轴集合相等(network / cwdReadonly 开与关)。其余 fence
     // 逐字节不变,只动 cwd-bind verb。
     ...(req.cwdReadonly ? { cwdReadonly: true } : {}),
+    // #891 T2:身份根只读 overlay —— 与前台 fence 同一 token（ADR-0037 §4
+    // amendment (e):前后台共用围栏）。缺席 = 未改绑,argv 不变。
+    ...(req.projectIdentityRoot
+      ? { projectIdentityRoot: req.projectIdentityRoot }
+      : {}),
   });
   return nodeSpawn(fence.argv[0], fence.argv.slice(1), {
     cwd,
