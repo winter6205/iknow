@@ -16,8 +16,12 @@
  * InstanceContext：ctx 由调用方（handler 层）持有 `{ directory }`。
  *
  * **取消语义（Q2/A9）**：中断走 JSON-RPC `$/cancelRequest`，**绝不终止
- * tsserver 子进程**。本模块不存在任何进程终止调用（唯一终止操作是
- * `connection.dispose()`，仅释放连接，不涉子进程信号）。
+ * tsserver 子进程**。工具路径不存在任何进程终止调用；唯一终止点是
+ * `LspClientPool.shutdownAll()`，且只允许在**宿主进程退出缝**调用
+ * （run.tsx shutdownExtensions / combinedShutdown、cli.ts chatProcessShutdown
+ * —— 引擎 shutdown 不在其列：chat rebind 收口旧引擎发生在进程中途，一旦
+ * latch 共享池，重建引擎的 LSP 将永久 spawn-failed）。常规工具操作只做
+ * `connection.dispose()`（释放连接，不涉子进程信号）。
  *
  * **编辑同步 + 自愈（lsp-optimization plan T1）**：`notifyChange(file)` 把
  * edit_file 写盘后的最新文本经标准 `textDocument/didChange`（full sync）同步
@@ -52,7 +56,7 @@ export const DEFAULT_LSP_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 export interface LspClient {
   /** 底层 vscode-jsonrpc `MessageConnection`（cancel 等进阶用法可直达）。 */
   readonly connection: MessageConnection;
-  /** tsserver 子进程句柄（仅诊断/生命周期观测用；不得终止进程）。 */
+  /** tsserver 子进程句柄（仅诊断/生命周期观测用；终止走 pool.shutdownAll）。 */
   readonly process: ChildProcess;
   /**
    * JSON-RPC request：透传 method/params，返回未知 payload。
@@ -101,7 +105,7 @@ export interface LspClient {
    * pushVersion 追平 openVersion。
    */
   getOpenVersion(uri: string): number | undefined;
-  /** 释放连接（不杀进程；进程随宿主进程同生同灭，spec S14）。 */
+  /** 释放连接（不杀进程；进程生命周期由 pool.shutdownAll 收口）。 */
   dispose(): void;
 }
 
@@ -120,8 +124,13 @@ export type LspClientFailure = {
 };
 
 /**
- * 可实例化的 LSP 连接池（MCP 与 iknow 进程隔离；disposeAll 供 SIGTERM）。
- * 缺省仍有一份模块级池，保持 getClient 既有调用方行为。
+ * 可实例化的 LSP 连接池。生产引擎共享进程级缺省池（`getClient` 的 ctx 不注
+ * 入 pool → `poolOf` 落 defaultPool；warmup spawn 缓存同源，进程内一份 ——
+ * per-engine 池会让多引擎/测试场景每次装配重新 spawn language server）；
+ * `ctx.pool` 注入位供测试隔离（createLspClientPool）。
+ * 终止语义：`shutdownAll()` 会单向 latch（此后 getClient 一律 spawn-failed），
+ * **只允许宿主进程退出缝调用**（shutdownDefaultLspPool 消费方，见文件头
+ * 取消语义注）——引擎 shutdown / 池重建路径不得调用。
  */
 export class LspClientPool {
   /** key = `${root}:${server.id}` → 已建立并复用的客户端。 */
@@ -169,12 +178,45 @@ export class LspClientPool {
     this.broken.clear();
     this.inflight.clear();
   }
+
+  /**
+   * 生命周期终态（引擎 shutdown / 退出路径专用）：dispose 连接 + SIGTERM
+   * 全部已 spawn 子进程 + 清空池。此后本池 getClientDetailed 一律
+   * spawn-failed，不再重建子进程（防退出路径 re-spawn 泄漏）。
+   *
+   * 与 disposeAll 的差别：disposeAll 只关连接（idle sweep / rebind 收口用），
+   * 子进程存活 —— 而 stdio 管道句柄不随连接关闭释放，宿主事件循环排不空，
+   * 进程（如 TUI /quit 后）永远退不出去。必须显式 SIGTERM 终结子进程。
+   */
+  shutDown = false;
+
+  async shutdownAll(): Promise<void> {
+    this.shutDown = true;
+    for (const client of [...this.clients.values()]) {
+      client.dispose();
+      // 进程已死时 kill 返回 false，无害。
+      client.process.kill("SIGTERM");
+    }
+    this.clients.clear();
+    this.lastUsedAt.clear();
+    this.broken.clear();
+    this.inflight.clear();
+  }
 }
 
 const defaultPool = new LspClientPool();
 
 export function createLspClientPool(): LspClientPool {
   return new LspClientPool();
+}
+
+/**
+ * 终结进程级缺省池的全部 LSP 子进程（引擎 shutdown / 退出路径消费）。
+ * 缺省池跨引擎共享（warmup spawn 缓存同源），进程内只此一份 —— 收口即
+ * 全部终结，故只在宿主进程退出路径调用，不得在单引擎重建中途调用。
+ */
+export function shutdownDefaultLspPool(): Promise<void> {
+  return defaultPool.shutdownAll();
 }
 
 function poolOf(ctx: LspCtx): LspClientPool {
@@ -265,6 +307,8 @@ export async function getClientDetailed(
   opts?: { readonly server?: LspServerInfo }
 ): Promise<{ client?: LspClient; failure?: LspClientFailure }> {
   const pool = poolOf(ctx);
+  // 生命周期终态后不再 spawn（防退出路径 re-spawn 泄漏）—— 见 shutdownAll。
+  if (pool.shutDown) return { failure: { reason: "spawn-failed" } };
   pool.sweepIdleClients(ctx.idleTimeoutMs);
   const server = opts?.server ?? resolveServer(file);
   if (!server) return { failure: { reason: "no-server" } };

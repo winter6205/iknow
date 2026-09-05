@@ -41,7 +41,9 @@ import { errorMessage } from "./errors.js";
 import type { AciCatalog } from "./aci/types.js";
 import { createLspNotifier } from "./lsp/notifier.js";
 import { startLspWarmup } from "./lsp/warmup.js";
-import { DEFAULT_LSP_IDLE_TIMEOUT_MS } from "./lsp/client.js";
+import {
+  DEFAULT_LSP_IDLE_TIMEOUT_MS,
+} from "./lsp/client.js";
 import type { LspCtx } from "./lsp/types.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import type { Registry, ToolCall } from "./tools/types.js";
@@ -536,6 +538,12 @@ export async function buildHarnessEngine(
   // 二期 B7:settings.lsp 四字段注入 LspCtx（全部可选；缺席走工具层/client
   // 缺省 —— requestTimeoutMs 20s / diagnosticsWaitMs 2s / idleTimeoutMs 10min /
   // disabledServers 空）。
+  // LSP 子进程生命周期:warmup / lsp_* spawn 的 language server 子进程 stdio
+  // 管道不释放,宿主事件循环排不空,进程（如 TUI /quit 后）永不退出。池是
+  // 进程级共享（client.ts defaultPool,warmup spawn 缓存同源 —— per-engine
+  // 池会让测试/多引擎场景每次装配重新 spawn）;终止收口在宿主进程退出缝
+  // （run.tsx shutdownExtensions / cli.ts chat 退出缝,经
+  // shutdownDefaultLspPool）,不在本引擎 shutdown —— rebind 中途会调用它。
   const lspCtx: LspCtx = {
     directory: sandboxRoot,
     // T8（D5, plans/worktree-live-task-root.md §6 T8）: LSP `directory` 走
@@ -1491,6 +1499,11 @@ export async function buildHarnessEngine(
     // 并发触发;顺序仅语义标注,非严格串行 — ask 入口三者都缺席时 shutdown 也
     // 缺席)。#502 T6:backgroundManager.shutdown() 加入 —— 杀遗留后台进程组,
     // 与 MCP/subagent 无共享可变状态,可安全并入 Promise.all。
+    // 注意:LSP 子进程终止**不在此处** —— 引擎 shutdown 会在进程中途被调用
+    // （chat rebind 收口旧引擎）,而 LSP 池是进程级共享（per-engine 池会让
+    // 测试/多引擎场景每次装配重新 spawn language server）;终止+latch 必须
+    // 只发生在宿主进程退出缝（TUI shutdownExtensions / chat 退出缝）,见
+    // client.ts shutdownDefaultLspPool。
     ...(mcpManager || subagentManager || backgroundManager
       ? {
           shutdown: async (): Promise<void> => {

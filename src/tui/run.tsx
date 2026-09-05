@@ -66,6 +66,7 @@ import {
   resolveThinkingSettingsPath,
 } from "../config/persist-settings.js";
 import { homedir } from "node:os";
+import { shutdownDefaultLspPool } from "../harness/lsp/client.js";
 
 /** E1/E2 类型化错误前缀（specs/321 SC 11：错误消息常量化，禁 magic string）。 */
 export const TUI_RENDERER_ERROR_PREFIX = "TUI 渲染后端初始化失败";
@@ -145,6 +146,12 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       shutdownPromise = (async () => {
         // watcher 先释放（不再有 reload 事件），再关 MCP/subagent。
         envLoader?.stop();
+        // 进程级 LSP 池终止（/quit 挂死根因收口）：warmup / lsp_* spawn 的
+        // language server 子进程 stdio 管道不释放,事件循环排不空。放在任何
+        // early-return 之前 —— 装配早期失败（onExtensions 注入前）路径下
+        // warmup 子进程也必须收口;幂等 + latch,未 spawn 时为 no-op。引擎
+        // shutdown 不负责此项（rebind 中途会调用,不得 latch 共享池）。
+        await shutdownDefaultLspPool();
         const ext = tuiExtensions;
         if (!ext) return;
         try {
@@ -347,6 +354,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // Review High-1:per-root 重建引擎（rebind 后经 buildEngine 缝新建）
       // 的组合 shutdown 由 hub 收口（初始引擎不在 engineByRoot，不重复关）。
       if (bridgeRef.hub) await bridgeRef.hub.shutdown();
+      // 信号路径与 /quit 同根因：LSP 子进程 stdio 管道不释放事件循环排不空。
+      await shutdownDefaultLspPool();
     };
     registerShutdown({ shutdown: combinedShutdown });
     const bridge = createTuiBridge({
