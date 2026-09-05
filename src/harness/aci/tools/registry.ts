@@ -267,6 +267,12 @@ export interface CreateDefaultAciRegistryOptions {
    *  rebind 可生效而 OFF 档仍不获得额外读根。**不**透给 bash / write / edit
    *  —— 写不得出沙箱。缺席 / 等于 sandboxRoot → 无额外读根。 */
   readonly projectIdentityRoot?: string;
+  /** T4 (ADR-0037 §9.2 #4, plans/closed-world-bash-fence.md): iknow 运行时
+   *  安装根 —— 闭世界读白名单的合同读根(项目自身工具链 `node_modules/.bin`
+   *  的读通道)。透传给 bash 工厂喂进 fs-policy;build-engine 两处
+   *  createDefaultAciRegistry 都传 `sessionRoots.installRoot`(既有第四角色,
+   *  不新增状态源)。缺席时 bash 围栏不含该读根(fs-policy 里可选)。 */
+  readonly installRoot?: string;
   /** #406 T3:per-engine secret registry。透传给 bash 工具工厂——handler
    *  执行前把占位符还原为真值（见 bash.ts restore 段）。缺席时 bash 命令
    *  原样透传（行为 byte-identical，向后兼容）。 */
@@ -493,6 +499,11 @@ export function createDefaultAciRegistry(
       createBashTool(sandboxRoot, {
         secretRegistry,
         workspaceRoot,
+        // T4 (ADR-0037 §9.2 #4): installRoot verbatim 透传 —— 闭世界读白
+        // 名单的合同读根,build-engine 按 sessionRoots.installRoot 喂入。
+        ...(opts.installRoot !== undefined
+          ? { installRoot: opts.installRoot }
+          : {}),
         ...(backgroundManager ? { backgroundManager } : {}),
         // #562 T6: bashMode 透传 — readonly 模式触发 validator + fence cwdReadonly。
         ...(bashMode !== undefined ? { bashMode } : {}),
@@ -503,12 +514,10 @@ export function createDefaultAciRegistry(
         ...(opts.liveTaskRoot !== undefined
           ? { liveTaskRoot: opts.liveTaskRoot }
           : {}),
-        // #891 T2 (ADR-0037 §4 amendment): bash 对称接入身份根只读 overlay
-        // —— read_file / grep / glob 已拿到该根（读放行），bash 在改绑波次
-        // 把它作为 --ro-bind 后挂进 fence（写仍不得进主仓）。build-engine
-        // 只在 isolation ON 时传该根（与 read_file 同一 spread guard），故
-        // 此处只需判在场。handler 内按活 taskRoot == 身份根判定，未改绑波次
-        // 不传 overlay，argv 与 V1 字节一致。
+        // T4 闭世界改写(ADR-0037 §9.2 #6 / §9.3): 身份根不再是条件 overlay
+        // —— bash.ts 内 waveRoot ≠ identityRoot 分支已删,选项提供了就恒进
+        // policy 读白名单(前台/后台同一份 token)。装配层(isolationEnabled)
+        // 仍按既有条件决定是否提供该根。
         ...(opts.projectIdentityRoot !== undefined
           ? { projectIdentityRoot: opts.projectIdentityRoot }
           : {}),

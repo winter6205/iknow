@@ -1,15 +1,16 @@
 /**
- * #891 T2 → T3 闭世界改写(ADR-0037 §9.3 将 overlay 条款 superseded)。
+ * #891 T2 → T4 闭世界改写(ADR-0037 §9.2 #6 / §9.3 overlay 条款 superseded)。
  *
- * 合同(闭世界形态):
+ * 合同(闭世界形态,T4 接线后):
  * 1. 前台(foreground fence)与后台(handleBackground → manager.spawn →
  *    defaultBackgroundSpawn)消费**同一**身份根 token(D2 同波同一份;
  *    CONTEXT 沙箱纪律:前后台共用围栏)。
- * 2. 未改绑波次(活 taskRoot == 身份根)不传身份根,argv 不含身份
- *    `--ro-bind` token。
- * 3. 改绑波次 argv 含 `--ro-bind <identity> <identity>`(读白名单成员),
- *    位于可写 cwd bind 之前;writable home 打底 token 消失——不存在可写
- *    祖先可被覆盖,身份根不再是 overlay 而是读成员。
+ * 2. 身份根**恒进**读白名单——waveRoot ≠ identityRoot 的条件分支已删除
+ *    (T4 验收 b);选项提供了就在未改绑波次同样 ro-bind(未改绑时它与 cwd
+ *    同根,可写 bind 在读 bind 之后回收写权,读通道不受影响)。
+ * 3. argv 含 `--ro-bind <identity> <identity>`(读白名单成员),位于可写
+ *    cwd bind 之前;writable home 打底 token 消失——不存在可写祖先可被
+ *    覆盖,身份根不再是 overlay 而是读成员。
  *
  * 后台链路沿用 bash-live-task-root.test.ts 的 handler+spawn-mock 策略
  * （生产热路径 end-to-end）；前台链路用真实 tmpdir 直驱 handler，读
@@ -95,12 +96,13 @@ afterEach(() => {
   spawnMock.mockReset();
 });
 
-describe("bash #891 T2: identity-root overlay wiring", () => {
-  it("unbound wave (taskRoot == identity) → no identity ro-bind token (V1 parity)", async () => {
+describe("bash #891 T2: identity-root read-whitelist wiring (closed world, T4)", () => {
+  it("unbound wave (taskRoot == identity) → identity root STILL enters the read whitelist (unconditional, T4 b)", async () => {
     const dirs = makeLeakShape();
     try {
-      // 未改绑：活 taskRoot = sandboxRoot = 身份根本身（cwd 即主仓），此时
-      // 无需 overlay —— handler 按 waveRoot === identity 判定不传。
+      // 未改绑:活 taskRoot = sandboxRoot = 身份根本身。T4 删除了
+      // waveRoot ≠ identityRoot 条件分支 → 选项提供了就恒进读白名单
+      // (可写 cwd bind 在读 bind 之后回收写权,读通道不受影响)。
       const tool = createBashTool(dirs.repo, {
         backgroundManager: makeManager(),
         home: dirs.home,
@@ -108,10 +110,40 @@ describe("bash #891 T2: identity-root overlay wiring", () => {
         projectIdentityRoot: dirs.repo,
       });
       const argv = await driveForeground(tool, "echo unbound");
+      assert.notEqual(
+        identityBindIndex(argv, dirs.repo),
+        -1,
+        `unbound wave must still carry the identity ro-bind (unconditional read member); argv=${JSON.stringify(argv)}`
+      );
+      // 写轴不受影响:身份根即 taskRoot,可写 cwd bind 仍在。
+      const cwdBindIdx = argv.findIndex(
+        (arg, i) => arg === "--bind" && argv[i + 1] === dirs.repo
+      );
+      assert.notEqual(cwdBindIdx, -1, "write axis: cwd bind stays present");
+      assert.ok(
+        identityBindIndex(argv, dirs.repo) < cwdBindIdx,
+        "read member precedes the writable cwd bind reclaim"
+      );
+    } finally {
+      rmSync(dirs.root, { recursive: true, force: true });
+    }
+  });
+
+  it("identity root absent → no identity ro-bind token (assembly layer gates by isolationEnabled)", async () => {
+    const dirs = makeLeakShape();
+    try {
+      // 装配层只在 isolation ON 时提供身份根(§9.2 #6)——缺席 = 选项不传,
+      // 围栏不获得该读成员(合同输入缺省,不是可选主机前缀)。
+      const tool = createBashTool(dirs.repo, {
+        backgroundManager: makeManager(),
+        home: dirs.home,
+        liveTaskRoot: createLiveTaskRoot(dirs.repo),
+      });
+      const argv = await driveForeground(tool, "echo absent");
       assert.equal(
         identityBindIndex(argv, dirs.repo),
         -1,
-        `unbound wave must not carry the identity ro-bind; argv=${JSON.stringify(argv)}`
+        `no projectIdentityRoot option → no identity ro-bind; argv=${JSON.stringify(argv)}`
       );
     } finally {
       rmSync(dirs.root, { recursive: true, force: true });

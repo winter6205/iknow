@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { dirname, resolve, relative, sep } from "node:path";
+import { dirname, join, resolve, relative, sep } from "node:path";
 import { ToolExecutionError } from "../errors.js";
 import { VIOLATION_PREFIXES } from "../permission/prefixes.js";
 
@@ -139,6 +139,21 @@ function systemPrefixesInEffect(): readonly string[] {
     ...READ_ONLY_SYSTEM_PATHS,
     ...OPTIONAL_HOST_RO_PREFIXES.filter((prefix) => existsSync(prefix)),
   ];
+}
+
+/**
+ * Optional read members (§9.2 #7) shared by every closed-world caller: the
+ * git global config pair. Single source — bash foreground / background spawn /
+ * verify must all derive the pair through this helper (hand copies drift).
+ * Entries are existence-skipped by `createFsPolicy`, so an absent file is a
+ * runtime-observable gap (§9.4 runtime-observable class), never a
+ * construction error.
+ */
+export function defaultOptionalReadRoots(opts: {
+  readonly home: string;
+}): readonly string[] {
+  const home = resolve(opts.home);
+  return [join(home, ".gitconfig"), join(home, ".config", "git", "config")];
 }
 
 /**

@@ -106,6 +106,40 @@ describe("createDefaultAciRegistry — workspaceRoot threaded to bash factory (r
     assert.equal(opts?.workspaceRoot, SANDBOX);
   });
 
+  it("bash factory receives installRoot verbatim when caller passes it (T4 §9.2 #4)", () => {
+    // 闭世界读白名单:项目自身工具链根由装配层(registry ← build-engine
+    // sessionRoots.installRoot)喂给 bash 工厂,verbatim 透传不改动。
+    const INSTALL = "/tmp/registry-install-root-t4";
+    createDefaultAciRegistry({
+      env: { web: { proxy: undefined, searchUrl: undefined } },
+      sandboxRoot: SANDBOX,
+      installRoot: INSTALL,
+    });
+    const bashCall = vi.mocked(createBashTool).mock.calls[0];
+    assert.ok(bashCall);
+    const opts = bashCall[1] as { installRoot?: string } | undefined;
+    assert.equal(
+      opts?.installRoot,
+      INSTALL,
+      "installRoot must be threaded verbatim to the bash factory"
+    );
+  });
+
+  it("bash factory receives no installRoot when caller omits it (optional at the policy)", () => {
+    createDefaultAciRegistry({
+      env: { web: { proxy: undefined, searchUrl: undefined } },
+      sandboxRoot: SANDBOX,
+    });
+    const bashCall = vi.mocked(createBashTool).mock.calls[0];
+    assert.ok(bashCall);
+    const opts = bashCall[1] as { installRoot?: string } | undefined;
+    assert.equal(
+      opts?.installRoot,
+      undefined,
+      "absent installRoot must stay absent (fs-policy treats it as optional)"
+    );
+  });
+
   it("fs-policy protects <workspaceRoot>/.iknow at parity with <home>/.iknow", () => {
     // Mirrors what `createBashTool(sandboxRoot, { workspaceRoot })` does
     // internally: createFsPolicy({ cwd: sandboxRoot, home, tmpDir,

@@ -2,6 +2,7 @@ export {
   SENSITIVE_PATHS,
   READ_ONLY_SYSTEM_PATHS,
   createFsPolicy,
+  defaultOptionalReadRoots,
 } from "./fs-policy.js";
 export type { FsPolicy, FsPolicyOptions } from "./fs-policy.js";
 

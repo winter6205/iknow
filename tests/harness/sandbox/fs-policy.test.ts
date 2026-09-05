@@ -13,6 +13,7 @@ import {
   READ_ONLY_SYSTEM_PATHS,
   SENSITIVE_PATHS,
   createFsPolicy,
+  defaultOptionalReadRoots,
 } from "../../../src/harness/sandbox/fs-policy.js";
 import { ToolExecutionError } from "../../../src/harness/errors.js";
 
@@ -265,5 +266,45 @@ describe("createFsPolicy — read/write dual axis (closed world, ADR-0037 §9.2)
       true,
       "workspaceRoot stays a protected-state anchor"
     );
+  });
+});
+
+describe("defaultOptionalReadRoots — §9.2 #7 git global config pair (single source)", () => {
+  it("derives ~/.gitconfig + ~/.config/git/config under the given home, in order", () => {
+    const roots = defaultOptionalReadRoots({ home: "/home/user" });
+    assert.deepEqual(roots, [
+      "/home/user/.gitconfig",
+      "/home/user/.config/git/config",
+    ]);
+  });
+
+  it("feeds createFsPolicy as existence-skipped optional members (on-disk file survives)", () => {
+    const home = mkdtempSync(join(tmpdir(), "fs-policy-t4-git-"));
+    try {
+      mkdirSync(join(home, ".config", "git"), { recursive: true });
+      writeFileSync(join(home, ".gitconfig"), "[user]\n");
+      writeFileSync(join(home, ".config", "git", "config"), "[user]\n");
+      const taskRoot = mkdtempSync(join(tmpdir(), "fs-policy-t4-git-task-"));
+      try {
+        const policy = createFsPolicy({
+          cwd: taskRoot,
+          home,
+          tmpDir: taskRoot,
+          optionalReadRoots: defaultOptionalReadRoots({ home }),
+        });
+        assert.deepEqual(
+          [...policy.optionalReadRoots()],
+          [join(home, ".gitconfig"), join(home, ".config", "git", "config")]
+        );
+        // 可选成员在闭世界可见集内(assertWithin 放行)。
+        assert.doesNotThrow(() =>
+          policy.assertWithin(join(home, ".gitconfig"))
+        );
+      } finally {
+        rmSync(taskRoot, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

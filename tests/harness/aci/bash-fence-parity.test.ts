@@ -22,7 +22,7 @@
 
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -44,6 +44,7 @@ import {
   createFsPolicy,
   createNetworkPolicy,
   createResourceLimits,
+  defaultOptionalReadRoots,
 } from "../../../src/harness/sandbox/index.ts";
 
 // 必须先于 manager 导入:模块级 vi.mock 会被 vitest hoist,但写在这里
@@ -85,16 +86,21 @@ function makeFakeChild(pid = 99001) {
 }
 
 /**
- * 镜像 bash.ts foreground fence 装配(bash.ts:126-162)。
+ * 镜像 bash.ts foreground fence 装配(T4 闭世界双轴形态)。
  * - env:envIsolation.filter(...) 后,cwdReadonly 时注入 GIT_OPTIONAL_LOCKS=0
- *   (产品缝 bash.ts:132-134,post-filter additive)
+ *   (产品缝 bash.ts,post-filter additive)
  * - fence 选项:network + cwdReadonly 由 opts 透传
+ * - fsPolicy:双轴 policy,optionalReadRoots 走单一 source helper(git 全局
+ *   配置对),installRoot/projectIdentityRoot 由调用方透传(T4 读白名单)
  */
 function foregroundFenceArgv(opts: {
   readonly cwd: string;
   readonly network: boolean;
   readonly cwdReadonly: boolean;
+  readonly home?: string;
+  readonly installRoot?: string;
 }): readonly string[] {
+  const home = opts.home ?? "/home/user";
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   const fenceEnv = applyCwdReadonlyFenceEnv(
     envIsolation.filter({ PATH: "/bin" }),
@@ -105,8 +111,12 @@ function foregroundFenceArgv(opts: {
     args: ["-c", "echo hi"],
     fsPolicy: createFsPolicy({
       cwd: opts.cwd,
-      home: "/home/user",
+      home,
       tmpDir: tmpdir(),
+      ...(opts.installRoot !== undefined
+        ? { installRoot: opts.installRoot }
+        : {}),
+      optionalReadRoots: defaultOptionalReadRoots({ home }),
     }),
     networkPolicy: createNetworkPolicy(),
     resourceLimits: createResourceLimits(),
@@ -171,13 +181,18 @@ async function backgroundFenceArgv(opts: {
   readonly cwd: string;
   readonly network: boolean;
   readonly cwdReadonly: boolean;
+  readonly home?: string;
+  readonly installRoot?: string;
 }): Promise<readonly string[]> {
   spawnMock.mockImplementation(() => makeFakeChild());
   await defaultBackgroundSpawn({
     command: "echo hi",
     cwd: opts.cwd,
     env: { PATH: "/bin" },
-    home: "/home/user",
+    home: opts.home ?? "/home/user",
+    ...(opts.installRoot !== undefined
+      ? { installRoot: opts.installRoot }
+      : {}),
     ...(opts.network ? { network: true } : {}),
     ...(opts.cwdReadonly ? { cwdReadonly: true } : {}),
   });
@@ -345,6 +360,89 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
       injected,
       false,
       "bg must not inject GIT_OPTIONAL_LOCKS when cwdReadonly is false"
+    );
+  });
+});
+
+// ── T4 闭世界读白名单:installRoot + git 全局配置的前后台 parity ────────────
+
+describe("bash fence parity — T4 read-whitelist members (installRoot / git config)", () => {
+  /** 真实 home fixture:~/.gitconfig 在盘(可选成员存在性跳过的正例)。 */
+  function makeHomeWithGitConfig(): string {
+    const home = mkdtempSync(join(tmpdir(), "bash-parity-home-"));
+    writeFileSync(join(home, ".gitconfig"), "[user]\n");
+    mkdirSync(join(home, ".config", "git"), { recursive: true });
+    writeFileSync(join(home, ".config", "git", "config"), "[user]\n");
+    GIT_HOMES.push(home);
+    return home;
+  }
+
+  const GIT_HOMES: string[] = [];
+  const INSTALL_ROOT = mkdtempSync(join(tmpdir(), "bash-parity-install-"));
+
+  afterAll(() => {
+    for (const home of GIT_HOMES) {
+      rmSync(home, { recursive: true, force: true });
+    }
+    rmSync(INSTALL_ROOT, { recursive: true, force: true });
+  });
+
+  function roBindIndex(argv: readonly string[], root: string): number {
+    return argv.findIndex(
+      (arg, i) =>
+        arg === "--ro-bind" && argv[i + 1] === root && argv[i + 2] === root
+    );
+  }
+
+  it("installRoot ro-bind present on BOTH sides (same token)", async () => {
+    const fg = foregroundFenceArgv({
+      cwd: CWD,
+      network: false,
+      cwdReadonly: false,
+      installRoot: INSTALL_ROOT,
+    });
+    const bg = await backgroundFenceArgv({
+      cwd: CWD,
+      network: false,
+      cwdReadonly: false,
+      installRoot: INSTALL_ROOT,
+    });
+    assert.notEqual(
+      roBindIndex(fg, INSTALL_ROOT),
+      -1,
+      "fg must ro-bind installRoot"
+    );
+    assert.notEqual(
+      roBindIndex(bg, INSTALL_ROOT),
+      -1,
+      "bg must ro-bind installRoot"
+    );
+  });
+
+  it("git global config ro-bind present on BOTH sides when on disk (same home, same helper)", async () => {
+    const home = makeHomeWithGitConfig();
+    const gitconfig = join(home, ".gitconfig");
+    const fg = foregroundFenceArgv({
+      cwd: CWD,
+      network: false,
+      cwdReadonly: false,
+      home,
+    });
+    const bg = await backgroundFenceArgv({
+      cwd: CWD,
+      network: false,
+      cwdReadonly: false,
+      home,
+    });
+    assert.notEqual(
+      roBindIndex(fg, gitconfig),
+      -1,
+      "fg must ro-bind ~/.gitconfig"
+    );
+    assert.notEqual(
+      roBindIndex(bg, gitconfig),
+      -1,
+      "bg must ro-bind ~/.gitconfig"
     );
   });
 });
