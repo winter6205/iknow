@@ -1184,6 +1184,118 @@ test("marginTop prop：根节点产顶部间距（缺省无间距，首条消息
   await setup.renderer.destroy();
 });
 
+// -- #tui-render-overhaul T2:keep / accent 标题不再 dim,accent 加 bold ---------
+//
+// 不变式：
+//  - keep 标题（bash / write_file 等成功落定）走正文色 token,不再走 dim ——
+//    dim 只属装饰（结果预览前缀/溢出、折叠行、思考摘要）；
+//  - accent 标题（skill / create-task-worktree 等）保持 accent 色 + 加 bold,
+//    让「点名的稀有能力」在终端里看得出来（theme.ts 的 accent 与正文几乎
+//    同色,光改色值不够,故加 bold 区分）；
+//  - 副作用：RUNNING_SLOT 也是 default → 改后 running 态标题从 dim 变 text,
+//    让 running 态更醒目（用户诉求：running 是用户在等的动作,该清楚）。
+//
+// 不动 theme.ts 色值；只在 message-blocks / live-tool-preview 的渲染映射
+// 处把 default 改 tuiPalette.text,并给 accent 加 <b>。
+
+test("T2 keep 标题：write_file 成功 fg = palette.text（非 dim）", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-wf",
+        name: "write_file",
+        input: { path: "a.ts", content: "x" },
+      },
+    ],
+  };
+  const setup = await testRender(
+    <MessageBlocks
+      message={msg}
+      cols={COLS}
+      statusMap={new Map([["tu-wf", false]])}
+      marginTop={1}
+    />,
+    { width: COLS, height: 10, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const expectedText = RGBA.fromHex(tuiPalette.text);
+  const expectedDim = RGBA.fromHex(tuiPalette.dim);
+  const fg = fgOfSpanWith(setup, "write_file · 写入 a.ts");
+  expect(fg).toBeDefined();
+  expect(rgbaEq(fg!, expectedText)).toBe(true);
+  // 钉死不变式:不得是 dim。
+  expect(rgbaEq(fg!, expectedDim)).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("T2 running 态标题：write_file 未配对 fg = palette.text（默认色从 dim 升 text 的可接受副作用）", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-r",
+        name: "write_file",
+        input: { path: "a.ts", content: "x" },
+      },
+    ],
+  };
+  const setup = await testRender(
+    <MessageBlocks
+      message={msg}
+      cols={COLS}
+      statusMap={emptyStatusMap()}
+      marginTop={1}
+    />,
+    { width: COLS, height: 10, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const expectedText = RGBA.fromHex(tuiPalette.text);
+  const fg = fgOfSpanWith(setup, "write_file");
+  expect(fg).toBeDefined();
+  expect(rgbaEq(fg!, expectedText)).toBe(true);
+  await setup.renderer.destroy();
+});
+
+test("T2 accent 标题：skill 成功 fg = palette.accent + span 含 BOLD attribute", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-sk",
+        name: "skill",
+        input: { name: "playwright-cli" },
+      },
+    ],
+  };
+  const setup = await testRender(
+    <MessageBlocks
+      message={msg}
+      cols={COLS}
+      statusMap={new Map([["tu-sk", false]])}
+      marginTop={1}
+    />,
+    { width: COLS, height: 10, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const expectedAccent = RGBA.fromHex(tuiPalette.accent);
+  // OpenTUI TextAttributes.BOLD = 1 << 0 = 1。
+  const { lines } = setup.captureSpans();
+  const skillSpans = lines
+    .flatMap((l) => l.spans)
+    .filter((s) => s.text.includes("skill playwright-cli"));
+  expect(skillSpans.length).toBeGreaterThan(0);
+  for (const span of skillSpans) {
+    expect(rgbaEq(span.fg, expectedAccent)).toBe(true);
+    // BOLD 位掩码 1;其它位不强制,只断言 BOLD 已设。
+    expect(span.attributes & 1).toBe(1);
+  }
+  await setup.renderer.destroy();
+});
+
 test("D7 slot：retract 落定 → 标题与预览同假（read_file 不再出 [完成] 行）；keep 预览仍在", async () => {
   // D3/D7：渲染只消费 deriveSlot。成功 retract（read_file）标题与预览都
   // 从屏幕拿掉（只进折叠计数）；keep（write_file）标题 + 既有 6 行预览保留。

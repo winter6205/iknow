@@ -103,16 +103,27 @@ function ToolSummaryRow(props: {
     cols: props.cols,
   });
   // 颜色由 deriveSlot 的 color token 派生（spec D5/D6）：failed → error、
-  // accent 类成功 → accent；dim 只属成功 bash 尾巴，不染标题。
+  // accent 类成功 → accent；default 落正文色（#tui-render-overhaul T2）：
+  // 工具标题行不再走 dim —— dim 只属装饰（结果预览前缀/溢出、折叠行）。
+  // running 态也是 default 色 → 副作用是 running 标题也从 dim 升 text，
+  // 更醒目（用户诉求：running 是用户在等的动作，该清楚）。
   const slot = hasResult
     ? deriveSlot(props.tu.name, { running: false, failed })
     : deriveSlot(props.tu.name, { running: true, failed: false });
   const fg = settledColorToFg(slot.color, {
-    default: tuiPalette.dim,
+    default: tuiPalette.text,
     accent: tuiPalette.accent,
     error: tuiPalette.error,
   });
-  return (
+  // accent 类标题行加 bold（#tui-render-overhaul T2）：theme.ts 的 accent
+  // #e8e4d8 与正文 #e6e4dc 几乎同色（视觉区分 < 1 步），不改色值 → 加 bold
+  // 让「点名的稀有能力（skill / worktree 生命周期）」在终端里看得出来。
+  const isAccentTitle = slot.color === "accent";
+  return isAccentTitle ? (
+    <text fg={fg} wrapMode="none">
+      <b>{line}</b>
+    </text>
+  ) : (
     <text fg={fg} wrapMode="none">
       {line}
     </text>
