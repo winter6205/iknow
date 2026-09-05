@@ -213,6 +213,45 @@ describe("createSystemResolver", () => {
     expect(next).toContain("Snapshotted entry");
   });
 
+  // ADR-0044: even after an entry crosses the promote-eligibility threshold
+  // mid-session, the snapshot must not include a promote body block. The
+  // session-level snapshot already freezes on first assembly; this test pins
+  // that the promote exclusion survives the usage.json update path too.
+  it("does not add promote bodies to the snapshot when an entry becomes eligible mid-session (ADR-0044)", async () => {
+    const base = await makeContext();
+    const ctx = { ...base, autoExtract: true };
+    await writeFile(
+      join(base.projectIdentityRoot, "AGENTS.md"),
+      "snapshot-proj"
+    );
+    await seedMemoryEntry(base.memoryDir, "cccccccccccc", "Pre-existing entry");
+
+    const resolver = createSystemResolver(ctx);
+    const first = await resolver();
+    expect(first).toBeDefined();
+    expect(first).not.toContain("### Pre-existing entry");
+    expect(first).not.toContain("body of Pre-existing entry");
+
+    await tick();
+    // Mid-session: write usage.json that proves eligibility for the existing
+    // entry. ADR-0044: this must not budge the snapshot into rendering a
+    // promote body block.
+    await writeFile(
+      join(base.memoryDir, "usage.json"),
+      JSON.stringify({
+        entries: {
+          cccccccccccccc: { recall_count: 4, sessions: ["s1", "s2"] },
+        },
+      }),
+      "utf8"
+    );
+    const frozen = await resolver();
+    expect(frozen).toBe(first);
+    expect(frozen).not.toContain("### Pre-existing entry");
+    expect(frozen).not.toContain("body of Pre-existing entry");
+    expect(spiedAssemble).toHaveBeenCalledTimes(1);
+  });
+
   // -- user static layer root (#732) -----------------------------------------
 
   it("snapshots userHome AGENTS.md even when workspaceRoot is set", async () => {

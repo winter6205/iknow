@@ -331,7 +331,7 @@ describe("session-level snapshot", () => {
     );
   });
 
-  it("freezes the catalog + promote segments against a memory landing mid-session (SC6)", async () => {
+  it("freezes the catalog segment against a memory landing mid-session (SC6, ADR-0044)", async () => {
     const p = await setupProject({ agentsBody: "PROJ" });
     const ctx: AssemblyContext = { ...ctxOf(p), autoExtract: true };
     const save = createMemorySaveTool({
@@ -345,7 +345,8 @@ describe("session-level snapshot", () => {
       type: "note",
       importance: 4,
     });
-    // Promote gate: ≥2 distinct sessions → the promote segment renders too.
+    // Promote gate: ≥2 distinct sessions → eligible by usage, but ADR-0044
+    // keeps the body out of the system string. The catalog still surfaces it.
     await recordRecall(p.memoryDir, "abababababab", "session-A");
     await recordRecall(p.memoryDir, "abababababab", "session-B");
 
@@ -357,8 +358,19 @@ describe("session-level snapshot", () => {
       "catalog segment present (autoExtract gate)"
     );
     assert.ok(
-      first.includes("### Snapshotted entry"),
-      "promote segment present"
+      first.includes("Snapshotted entry"),
+      "catalog lists the existing entry"
+    );
+    // ADR-0044: even an entry whose usage proves promote eligibility must
+    // not enter the system string as a promote body block.
+    assert.ok(
+      !first.includes("Present before the session opened."),
+      "ADR-0044: eligible entry body must not appear as promote"
+    );
+    assert.equal(
+      first!.indexOf("### Snapshotted entry"),
+      -1,
+      "ADR-0044: eligible entry title must not render as promote block"
     );
 
     await tick();
@@ -387,7 +399,7 @@ describe("session-level snapshot", () => {
     assert.equal(
       second,
       first,
-      "SC6: catalog + promote segments deep-equal the first assembly after a mid-session write"
+      "SC6: catalog segment deep-equal the first assembly after a mid-session write"
     );
     assert.ok(
       !second!.includes("Late entry"),
@@ -405,16 +417,20 @@ describe("session-level snapshot", () => {
       nextSession.includes("Snapshotted entry"),
       "the pre-existing entry survives into the next session"
     );
+    assert.ok(
+      !nextSession!.includes("Present before the session opened."),
+      "ADR-0044: even in the next session, the eligible body is not promoted"
+    );
   });
 });
 
 // =============================================================================
-// c. save → recall → recordRecall → eligibleForPromote → promote-in-system
-//    cross two distinct session_ids
+// c. save → recall → recordRecall → eligibleForPromote → assembly
+//    cross two distinct session_ids (ADR-0044: body must NOT enter system)
 // =============================================================================
 
-describe("save → recall → recordRecall → promote full chain", () => {
-  it("promotes an entry after ≥2 distinct sessions and exposes it in the next system assembly", async () => {
+describe("save → recall → recordRecall → eligibleForPromote (ADR-0044)", () => {
+  it("marks an entry eligible after ≥2 distinct sessions but keeps its body out of the system string", async () => {
     const p = await setupProject({ agentsBody: "P" });
 
     // (1) Save via the memory_save tool — writes slug file + MEMORY.md index.
@@ -464,15 +480,21 @@ describe("save → recall → recordRecall → promote full chain", () => {
     assert.equal(promotables[0]!.title, "Use bar()");
     assert.equal(promotables[0]!.importance, 4);
 
-    // (5) Next assembled system must include the promote segment.
-    // promote follows the catalog gate: only assembled when autoExtract === true
-    // (specs/auto-memory-layering.md).
+    // (5) ADR-0044: even with a promotable entry on disk, the next assembled
+    // system string must NOT include the promote body block. Catalog may
+    // surface the title (autoExtract-gated) but the body / `### <title>`
+    // promote shape is forbidden.
     const ctx: AssemblyContext = { ...ctxOf(p), autoExtract: true };
     const system = await assembleSystemPrompt(ctx);
     assert.ok(system.includes(EXISTENCE_POINTER), "existence pointer present");
     assert.ok(
-      system.includes("### Use bar()"),
-      "promote segment must surface the title in the system string"
+      !system.includes("Calling bar() is the supported rendering path."),
+      "ADR-0044: eligible entry body must not enter the system string"
+    );
+    assert.equal(
+      system.indexOf("### Use bar()"),
+      -1,
+      "ADR-0044: eligible entry title must not render as promote block"
     );
   });
 
@@ -502,6 +524,14 @@ describe("save → recall → recordRecall → promote full chain", () => {
       promotables.length,
       0,
       "promote gate is distinct-session, not recall_count"
+    );
+
+    // ADR-0044: still no promote body in the system string.
+    const ctx: AssemblyContext = { ...ctxOf(p), autoExtract: true };
+    const system = await assembleSystemPrompt(ctx);
+    assert.ok(
+      !system.includes("Calling qux() is the supported audit path."),
+      "ADR-0044: body must not enter system even when recall is high in one session"
     );
   });
 });

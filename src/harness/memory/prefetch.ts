@@ -4,13 +4,12 @@
  * Spec: specs/auto-memory-low-trust-read.md. Scoring is scoreMemoryEntries;
  * zero title+body token hits are ineligible even when importance/recency
  * would still produce a positive score. Output rides the user turn, never
- * system. Promoted entries are skipped so they are not duplicated.
+ * system. ADR-0044: promote eligibility no longer excludes entries — the
+ * system no longer renders a promote segment, so dropping here would silently
+ * remove eligible entries from the user-side overlay.
  */
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { scoreMemoryEntries, type ScoredEntry } from "./bm25.js";
 import type { MemoryEntryV1 } from "./schema.js";
-import { eligibleForPromote, type UsageSidecar } from "./promote.js";
 import { listStoreEntries } from "./store.js";
 
 export const MEMORY_ADVISORY_PREFIX =
@@ -34,7 +33,6 @@ export const MEMORY_PREFETCH_MAX_HITS = 5;
 export const MEMORY_PREFETCH_CHAR_CAP = 8000;
 
 export interface SelectPrefetchOpts {
-  readonly promotedIds?: ReadonlySet<string>;
   /** T1 session-level dedup: ids already injected in this conversation. */
   readonly excludeIds?: ReadonlySet<string>;
   readonly charCap?: number;
@@ -73,12 +71,10 @@ export function selectPrefetchHits(
       !entry.disabled && !(excludeIds !== undefined && excludeIds.has(entry.id))
   );
   const scored = scoreMemoryEntries(query, live, { nowMs: opts?.nowMs });
-  const promoted = opts?.promotedIds;
-  const lexical = scored.filter((row) => {
-    if (row.titleHits + row.bodyHits <= 0) return false;
-    if (promoted?.has(row.entry.id)) return false;
-    return true;
-  });
+  // ADR-0044: zero-overlap hits are still ineligible; promote eligibility is
+  // no longer an exclusion (system no longer renders a promote block, so
+  // dropping here would silently lose eligible entries from the overlay).
+  const lexical = scored.filter((row) => row.titleHits + row.bodyHits > 0);
   const capped = lexical.slice(0, MEMORY_PREFETCH_MAX_HITS);
   return fillToCharCap(capped, opts?.charCap ?? MEMORY_PREFETCH_CHAR_CAP);
 }
@@ -196,6 +192,10 @@ export interface BuildPrefetchOverlayOpts {
 /**
  * Disk-backed overlay builder. Callers swallow failures with
  * `// EXIT: log-and-continue`. Empty query / empty store → "".
+ *
+ * ADR-0044: usage.json is no longer consulted here — promote eligibility
+ * no longer excludes entries. `listPromotableEntries` / `eligibleForPromote`
+ * remain available to `memory_gc` and any future per-entry GC seam.
  */
 export async function buildMemoryPrefetchOverlay(
   opts: BuildPrefetchOverlayOpts
@@ -203,14 +203,7 @@ export async function buildMemoryPrefetchOverlay(
   const resolved =
     opts.entries ??
     (await listStoreEntries(opts.memoryDir)).entries.map((row) => row.entry);
-  const sidecar = await readUsageSidecarReadonly(opts.memoryDir);
-  const promotedIds = new Set(
-    resolved
-      .filter((entry) => eligibleForPromote(sidecar, entry.id))
-      .map((entry) => entry.id)
-  );
   const hits = selectPrefetchHits(opts.query, resolved, {
-    promotedIds,
     excludeIds: opts.excludeIds,
     nowMs: opts.nowMs,
   });
@@ -341,38 +334,4 @@ function formatHit(e: MemoryEntryV1): string {
     `updated_at: ${e.updated_at}`,
   ].join("\n");
   return `### ${e.title}\n${meta}\n\n${e.body}`;
-}
-
-/**
- * Read usage.json without creating it. Missing / unreadable → empty
- * (prefetch must not mkdir or write as a side effect of a user turn).
- */
-async function readUsageSidecarReadonly(
-  memoryDir: string
-): Promise<UsageSidecar> {
-  try {
-    const parsed: unknown = JSON.parse(
-      await readFile(join(memoryDir, "usage.json"), "utf8")
-    );
-    if (
-      parsed === null ||
-      typeof parsed !== "object" ||
-      Array.isArray(parsed) ||
-      !("entries" in parsed)
-    ) {
-      return { entries: {} };
-    }
-    const entries = (parsed as { entries: unknown }).entries;
-    if (
-      entries === null ||
-      typeof entries !== "object" ||
-      Array.isArray(entries)
-    ) {
-      return { entries: {} };
-    }
-    return { entries: entries as UsageSidecar["entries"] };
-  } catch {
-    // EXIT: missing sidecar means nothing is promoted yet.
-    return { entries: {} };
-  }
 }

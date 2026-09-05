@@ -330,3 +330,19 @@ describe("memory_save — concurrent writes do not corrupt the filesystem", () =
     );
   });
 });
+
+// -- ADR-0044 SC5: memory_save description stays cross-session fact capture ----
+
+describe("memory_save — description contract (ADR-0044 SC5)", () => {
+  it("does not command the model to write AGENTS.md or author long-term rules", () => {
+    const tool = createMemorySaveTool({ memoryDir });
+    assert.ok(
+      !/write.*AGENTS\.md/i.test(tool.description),
+      "description must not command writing AGENTS.md"
+    );
+    assert.ok(
+      !/long.?term.*rule/i.test(tool.description),
+      "description must not promote authoring long-term rules"
+    );
+  });
+});
