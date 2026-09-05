@@ -193,3 +193,71 @@ describe("CompletedToolPreviewView resultPreview: ⎿ dim 5 行尾部 + 溢出",
     await setup.renderer.destroy();
   });
 });
+
+// -- #tui-render-overhaul T1:resultPreview 内容行不再 dim ----------------------
+//
+// 不变式：装饰元素（`⎿` 前缀、`… +N 行` 溢出）保留 dim，让读者一眼识别
+// 为辅助形态；正文内容（bash stdout/stderr 实际产出）走正文色，与终端其
+// 余渲染一致——避免「结果预览一坨灰、读者看不到内容」。spec D4 词条由
+// 「dim 只属成功 bash 尾巴」改为「dim 只属装饰（前缀/溢出）」。
+
+describe("CompletedToolPreviewView resultPreview: 内容行不再 dim（仅装饰 dim）", () => {
+  test("内容行 fg = palette.text（不再是 dim）；⎿ 前缀保持 dim", async () => {
+    const preview: ResultPreview = {
+      kind: "result",
+      lines: ["RESULT_CONTENT_LINE"],
+      hiddenLineCount: 0,
+    };
+    const setup = await testRender(
+      <CompletedToolPreviewView
+        preview={{ kind: "empty" }}
+        cols={80}
+        resultPreview={preview}
+      />,
+      { width: 80, height: 10 }
+    );
+    await setup.renderOnce();
+    const expectedText = RGBA.fromHex(tuiPalette.text);
+    const expectedDim = RGBA.fromHex(tuiPalette.dim);
+    const { lines } = setup.captureSpans();
+    // 正文 span: 含 "RESULT_CONTENT_LINE" 字符的 span 必须走 text 色。
+    const contentSpan = lines
+      .flatMap((l) => l.spans)
+      .find((s) => s.text.includes("RESULT_CONTENT_LINE"));
+    expect(contentSpan).toBeDefined();
+    expect(rgbaEq(contentSpan!.fg, expectedText)).toBe(true);
+    expect(rgbaEq(contentSpan!.fg, expectedDim)).toBe(false);
+    // 前缀 span: 含 "⎿" 字符的 span 必须保留 dim 色。
+    const prefixSpan = lines
+      .flatMap((l) => l.spans)
+      .find((s) => s.text.includes("⎿"));
+    expect(prefixSpan).toBeDefined();
+    expect(rgbaEq(prefixSpan!.fg, expectedDim)).toBe(true);
+    await setup.renderer.destroy();
+  });
+
+  test("溢出行 `… +N 行` 仍 dim（装饰，前缀同一族）", async () => {
+    const preview: ResultPreview = {
+      kind: "result",
+      lines: ["l7"],
+      hiddenLineCount: 3,
+    };
+    const setup = await testRender(
+      <CompletedToolPreviewView
+        preview={{ kind: "empty" }}
+        cols={80}
+        resultPreview={preview}
+      />,
+      { width: 80, height: 10 }
+    );
+    await setup.renderOnce();
+    const expectedDim = RGBA.fromHex(tuiPalette.dim);
+    const { lines } = setup.captureSpans();
+    const overflowSpan = lines
+      .flatMap((l) => l.spans)
+      .find((s) => s.text.includes("… +3 行"));
+    expect(overflowSpan).toBeDefined();
+    expect(rgbaEq(overflowSpan!.fg, expectedDim)).toBe(true);
+    await setup.renderer.destroy();
+  });
+});

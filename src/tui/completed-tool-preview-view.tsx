@@ -99,8 +99,12 @@ export function CompletedToolPreviewView(props: {
             </text>
           )}
           {resultPreview.lines.map((line, i) => (
-            <text key={`rp-${i}`} fg={tuiPalette.dim} wrapMode="none">
-              {`${RESULT_PREVIEW_PREFIX} ${line}`}
+            // #tui-render-overhaul T1:dim 只属装饰（前缀 / 溢出）—— 内容行
+            // 走正文色，避免「结果预览一坨灰」。前缀与内容分段渲染，分属
+            // 不同 fg token 互不污染。
+            <text key={`rp-${i}`} wrapMode="none">
+              <span fg={tuiPalette.dim}>{`${RESULT_PREVIEW_PREFIX} `}</span>
+              <span fg={tuiPalette.text}>{line}</span>
             </text>
           ))}
         </>
