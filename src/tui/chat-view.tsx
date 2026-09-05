@@ -318,6 +318,25 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       running,
       turnToolTotal,
     });
+    // D3 (thinking-fold-placement):整 turn 折叠秒数归属 —— loop-engine 单
+    // commit 点(loop-engine.ts:2016-2020)只把 thinkingMs 挂在 final assistant
+    // 索引;非 final assistant 的 thinkingMs 全为 null。当折叠簇 anchor ≠
+    // final 时,按 anchor 求和得 0,导致 final 的思考秒数漂到 per-message
+    // ThinkingSummary 处与簇折叠行错位/重复。
+    // 不变式:整 turn 的思考秒数在折叠行只出现一次、挂在与思考实际发生的
+    // assistant 消息最近的簇 fold 行 —— 实现 = 末位 tool 簇在 anchor 自身
+    // thinkingMs 为 0 时,fall back 到 final 的 thinkingMs(独占,不重复;
+    // 前序簇继续走纯 anchor 求和,避免重复计数)。
+    const lastAssistantMessageIndex = (() => {
+      for (let i = visibleMessages.length - 1; i >= 0; i--) {
+        const m = visibleMessages[i];
+        if (m !== undefined && m.role === "assistant") return i;
+      }
+      return -1;
+    })();
+    const finalThinkingMs = sumThinkingMsInRange(props.session.thinkingMs, [
+      lastAssistantMessageIndex,
+    ]);
     // 每簇独立的折叠行（思考秒数 = thinkingMs[anchorMsgs] 求和 → 秒）。
     // 全轮生效（activitySegments 已覆盖全历史），running 态直接空（running 态）。
     const foldLinesBySegmentIndex = new Map<number, ReadonlyArray<string>>();
@@ -335,20 +354,34 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             : segment.entries;
         // 折叠簇思考秒数：thinkingMs[anchorMsgs] 求和 → 秒。
         // anchorMsgs = 该簇的 assistant messageIndex 序列(单消息簇 = 单元素)。
-        const clusterMs = sumThinkingMsInRange(props.session.thinkingMs, [
+        // thinking-fold-placement:末位 tool 簇 anchor ≠ final 且 anchor 自身
+        // thinkingMs 为 0 时,归入 final 的 thinkingMs(独占展示位置,避免
+        // 漂到 per-message ThinkingSummary);前序簇继续按 anchor 求和(若有
+        // 多个独立 thinkingMs 已在测试 2 验证「严格归属到 anchor」不变式)。
+        let clusterMs = sumThinkingMsInRange(props.session.thinkingMs, [
           segment.messageIndex,
         ]);
+        if (
+          clusterMs === 0 &&
+          segmentIndex === lastSegmentIndex &&
+          segment.messageIndex !== lastAssistantMessageIndex &&
+          finalThinkingMs > 0
+        ) {
+          clusterMs = finalThinkingMs;
+        }
         const clusterSeconds = thinkingMsToSeconds(clusterMs);
         const lines = formatTurnActivityFold(clusterSeconds, entries);
         if (lines.length > 0) {
           foldLinesBySegmentIndex.set(segmentIndex, lines);
         }
       }
-      // 无工具段但有已完成的 live 工具 → 把折叠行挂到最近的 text 段尾。
-      if (
-        foldLinesBySegmentIndex.size === 0 &&
-        liveCompletedCounts.length > 0
-      ) {
+      // 无工具段但有已完成的 live 工具 / final thinkingMs > 0 → 把折叠行
+      // 挂到最近的 text 段尾。thinking-fold-placement:扩展触发条件 —
+      // final assistant 思考秒数(落盘 thinkingMs[final])在场时,即使无
+      // live 已完成工具,也要把折叠行挂出,避免 final 的思考秒数丢失。
+      const fallbackTrigger =
+        liveCompletedCounts.length > 0 || finalThinkingMs > 0;
+      if (foldLinesBySegmentIndex.size === 0 && fallbackTrigger) {
         const lastText = activitySegments
           .map((segment, segmentIndex) => ({ segment, segmentIndex }))
           .reverse()
@@ -366,6 +399,24 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           );
           if (lines.length > 0) {
             foldLinesBySegmentIndex.set(lastText.segmentIndex, lines);
+          }
+        }
+      }
+    }
+    // thinking-fold-placement:折叠行已展示的 thinkingMs 值集合（ms）—— 按
+    // 折叠行文案 `思考了 N 秒` 反推;per-message ThinkingSummary 仅在该值
+    // 未被任何 fold 行覆盖时显示,避免重复 / 串位（fold 行 0-多次）。
+    const shownThinkingMsValues = new Set<number>();
+    {
+      const re = /思考了\s+(\d+)\s+秒/;
+      for (const lines of foldLinesBySegmentIndex.values()) {
+        for (const line of lines) {
+          const m = re.exec(line);
+          if (m !== null) {
+            const seconds = Number(m[1]);
+            if (Number.isFinite(seconds) && seconds > 0) {
+              shownThinkingMsValues.add(seconds * 1000);
+            }
           }
         }
       }
@@ -519,13 +570,19 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
               foldLinesBySegmentIndex.has(segmentIndex)
             );
           // D3:`inLastTurn` 闸已删除。任何已完成工具轮次都折叠（包含历史轮次）。
-          // hideThinking 改为 per-message 决策：本消息若有 tool 簇且对应
-          // 折叠行存在 → 折叠行已在 MessageShell 内替代「思考了 N 秒」
-          // 摘要，MessageBlocks 不再画 ThinkingSummary；否则（纯文本 asst
-          // 或折叠行为空）保持 per-message thinkingMs 摘要可见。
+          // hideThinking 改为按 thinkingMs 是否已被 fold 行吸收：
+          // thinking-fold-placement —— 折叠行已替代「思考了 N 秒」摘要时
+          // 才隐藏 per-message ThinkingSummary,避免重复;若本消息的
+          // thinkingMs 值未被任何 fold 行覆盖,仍保留 per-message 摘要
+          // (测试 2:asst-1 的 12s 与 final 的 25s 各自唯一展示)。
           const thisMessageHasFoldLine = messageSegments.some(
             ({ segmentIndex }) => foldLinesBySegmentIndex.has(segmentIndex)
           );
+          const hideThinkingForThisMessage =
+            (thisMessageHasFoldLine ||
+              (messageThinkingMs > 0 &&
+                shownThinkingMsValues.has(messageThinkingMs))) &&
+            !thinkingExpanded;
           return (
             <box
               id={`tmsg-${visibleIndex}`}
@@ -562,9 +619,16 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                     content: [...thinkingBlocks, ...activityBlocks],
                   };
                   // 该簇是否已有折叠行 → 决定本段是否隐藏 thinking 与
-                  // tool_use 摘要（折叠行已在 MessageShell 内替代二者）。
+                  // tool_use 摘要(折叠行已在 MessageShell 内替代二者)。
+                  // 按 shownThinkingMsValues 反推:fold 行已展示的 ms 值,
+                  // per-message 不再画 ThinkingSummary,避免重复。
                   const segmentHasFold =
                     foldLinesBySegmentIndex.has(segmentIndex);
+                  const hideSegmentThinking =
+                    (segmentHasFold ||
+                      (messageThinkingMs > 0 &&
+                        shownThinkingMsValues.has(messageThinkingMs))) &&
+                    !thinkingExpanded;
                   return (
                     <box
                       key={`turn-segment-${visibleIndex}-${segmentIndex}`}
@@ -579,7 +643,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                         thinkingSeconds={
                           partIndex === 0 ? messageThinkingSeconds : undefined
                         }
-                        hideThinking={segmentHasFold && !thinkingExpanded}
+                        hideThinking={hideSegmentThinking}
                         marginTop={
                           partIndex === 0 && visibleIndex !== 0 ? 1 : 0
                         }
@@ -597,7 +661,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                     resultTextMap={resultTextMap}
                     thinkingExpanded={thinkingExpanded}
                     thinkingSeconds={messageThinkingSeconds}
-                    hideThinking={thisMessageHasFoldLine && !thinkingExpanded}
+                    hideThinking={hideThinkingForThisMessage}
                     marginTop={visibleIndex === 0 ? 0 : 1}
                   />
                   {messageSegments.flatMap(({ segmentIndex }) =>
