@@ -660,19 +660,28 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           </box>
         )}
         {/* 流式尾部：工具组与草稿段按 draftEpoch 交错（主流 agent 顺序：
-            工具 → 文本 → 工具 → 文本）。liveToolLines 仍挂在末尾（legacy）。 */}
-        {tailSlots.map((slot, i) =>
-          slot.kind === "tools" ? (
+            工具 → 文本 → 工具 → 文本）。liveToolLines 仍挂在末尾（legacy）。
+            #tui-render-overhaul T4:多块时相邻 slot 间补 1 行节奏（与
+            MessageBlocks 内部块间距同步），首块不补顶 margin —— 锚在历史
+            折叠行 / 草稿段末尾的尾巴接续位置自然衔接。 */}
+        {tailSlots.map((slot, i) => {
+          const slotGap = i === 0 ? 0 : 1;
+          return slot.kind === "tools" ? (
             <box
               key={`live-tools-${i}`}
               flexDirection="column"
               width={contentWidth}
+              marginTop={slotGap}
             >
               {renderLiveRuns(slot.runs)}
             </box>
           ) : (
             running && (
-              <MessageShell key={`live-draft-${i}`} cols={contentWidth}>
+              <MessageShell
+                key={`live-draft-${i}`}
+                cols={contentWidth}
+                marginTop={slotGap}
+              >
                 <Markdown
                   text={slot.text}
                   width={Math.max(1, contentWidth - 2)}
@@ -680,8 +689,8 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                 />
               </MessageShell>
             )
-          )
-        )}
+          );
+        })}
         {props.liveToolLines.length > 0 && (
           <box flexDirection="column" width={contentWidth}>
             {props.liveToolLines.map((line, i) => (

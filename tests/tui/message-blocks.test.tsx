@@ -1697,3 +1697,108 @@ test("D4 keep 足迹：bash 落定后标题 + ⎿ 结果预览都留（不随折
   expect(frame.includes("[完成]")).toBe(false);
   await setup.renderer.destroy();
 });
+
+// -- T4：assistant 内部块间 1 行间距（#tui-render-overhaul T4）--------------
+// assistant 内多个节点（thinking 折叠 / thinking 明文 / 文本 / 工具行 /
+// 错误行）顺序渲染时，相邻节点之间补 1 行空白；首块不补顶 margin。跨
+// MessageShell 内容宽度内做行差判定（captureCharFrame 返回整帧字符串）。
+
+test("T4 assistant 内部块：thinking 折叠 + 工具行 + 文本，节点间 1 行空白", async () => {
+  // 三个不同类型的节点顺序：thinking 折叠（带秒数）→ bash 工具行 → 文本。
+  // 折叠行 / 工具行 / 文本行各占 1 行；节点间应有 1 行空白。
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "先想", signature: "s" },
+      {
+        type: "tool_use",
+        id: "tu-t4-1",
+        name: "bash",
+        input: { command: "ls" },
+      },
+      { type: "text", text: "跑完了，结果在下面。" },
+    ],
+  };
+  const setup = await testRender(
+    <MessageBlocks
+      message={msg}
+      cols={COLS}
+      statusMap={new Map([["tu-t4-1", false]])}
+      thinkingExpanded={false}
+      thinkingSeconds={3}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  const lines = frame.split("\n");
+  // 锚点行号。
+  const thinkIdx = lines.findIndex((l) => l.includes("思考了 3 秒"));
+  const bashIdx = lines.findIndex((l) => l.includes("bash ·"));
+  const textIdx = lines.findIndex((l) => l.includes("跑完了"));
+  expect(thinkIdx).toBeGreaterThanOrEqual(0);
+  expect(bashIdx).toBeGreaterThanOrEqual(0);
+  expect(textIdx).toBeGreaterThanOrEqual(0);
+  // #tui-render-overhaul T4:节点间 1 行空白（≥ 2 行差 = 1 行间距）。
+  expect(bashIdx - thinkIdx).toBeGreaterThanOrEqual(2);
+  expect(textIdx - bashIdx).toBeGreaterThanOrEqual(2);
+  // 首块（思考折叠行）位于第 0 行,无顶部 margin。
+  expect(thinkIdx).toBe(0);
+  await setup.renderer.destroy();
+});
+
+test("T4 assistant 单块无内部空白：仅 1 个文本块时,文本独占首行", async () => {
+  // 仅 1 个节点时不应有空白行（首块不补顶 margin,且无后续节点可比）。
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [{ type: "text", text: "唯一文本块" }],
+  };
+  const setup = await renderBlocks(msg);
+  const frame = setup.captureCharFrame();
+  const lines = frame.split("\n");
+  const textIdx = lines.findIndex((l) => l.includes("唯一文本块"));
+  expect(textIdx).toBe(0);
+  await setup.renderer.destroy();
+});
+
+test("T4 assistant 思考行 + ran 后缀：两个相邻 dim 行同块（无间距）", async () => {
+  // ThinkingSummary 内部的 `思考了 N 秒` 与 `ran M commands` 是同一个 box
+  // 内的两条 sibling 行 —— 节点级别 = 1 个块,不补 margin。块间间距只在
+  // 块与块之间。
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "链上推理…", signature: "sig-1" },
+      {
+        type: "tool_use",
+        id: "tu-t4-2",
+        name: "bash",
+        input: { command: "ls" },
+      },
+    ],
+  };
+  const setup = await testRender(
+    <MessageBlocks
+      message={msg}
+      cols={COLS}
+      statusMap={new Map([["tu-t4-2", false]])}
+      thinkingExpanded={false}
+      thinkingSeconds={3}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  const lines = frame.split("\n");
+  const thinkIdx = lines.findIndex((l) => l.includes("思考了 3 秒"));
+  const ranIdx = lines.findIndex((l) => l.includes("ran 1 command"));
+  const bashIdx = lines.findIndex((l) => l.includes("bash ·"));
+  expect(thinkIdx).toBeGreaterThanOrEqual(0);
+  expect(ranIdx).toBeGreaterThanOrEqual(0);
+  expect(bashIdx).toBeGreaterThanOrEqual(0);
+  // 思考行与 ran 后缀是同一 ThinkingSummary box 内的两行 → 相邻 1 行（无间距）。
+  expect(ranIdx - thinkIdx).toBe(1);
+  // ran 后缀与下一块 bash 之间补 1 行空白（≥ 2 行差）。
+  expect(bashIdx - ranIdx).toBeGreaterThanOrEqual(2);
+  await setup.renderer.destroy();
+});

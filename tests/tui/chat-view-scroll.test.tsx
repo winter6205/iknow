@@ -819,12 +819,14 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
   const iText = lines.findIndex((l) => l.includes("以下是今天的 AI 新闻摘要"));
   expect(iFold).toBeGreaterThanOrEqual(0);
   expect(iText).toBeGreaterThanOrEqual(0);
-  // 折叠行 →（1 行消息间距）→ 最终文本:行距 ≤ 3;被折叠的纯工具 /
+  // 折叠行 →（1 行消息间距）→ 最终文本:行距 ≤ 4;被折叠的纯工具 /
   // 纯 tool_result 消息不得各留 1 行幻影 margin 连成空位。
-  // D3 后末条 assistant 多 1 行 ThinkingSummary「思考了 N 秒」,故 ≤ 3
-  // (legacy ≤ 2 是 lastThinkingSeconds 全局 + 折叠态压住末条 thinking 的旧
-  // 形态;D3 改 per-message ThinkingSummary 后行距自然多 1)。
-  expect(iText - iFold).toBeLessThanOrEqual(3);
+  // D3 后末条 assistant 多 1 行 ThinkingSummary「思考了 N 秒」（legacy ≤ 2
+  // 是 lastThinkingSeconds 全局 + 折叠态压住末条 thinking 的旧形态;D3 改
+  // per-message ThinkingSummary 后行距自然多 1 → ≤ 3）。
+  // #tui-render-overhaul T4:assistant 内部块间补 1 行节奏（ThinkingSummary
+  // → 文本 markdown 节点间多 1 行空白)→ ≤ 4。
+  expect(iText - iFold).toBeLessThanOrEqual(4);
   await setup.renderer.destroy();
 });
 
