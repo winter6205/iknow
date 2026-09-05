@@ -53,6 +53,7 @@ import {
   resolveGraphMode,
 } from "../harness/graph/mode.js";
 import { loadIknowSettings } from "../config/settings.js";
+import { createTuiWorktreeIsolationHost } from "./worktree-host.js";
 import { resolveVerifyConfig } from "../session-api/serve.js";
 import { createEnvLoader, type EnvLoader } from "../config/env-loader.js";
 import type { IknowEnv } from "../config/env.js";
@@ -277,22 +278,19 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // host seam late to the Hub that owns dirty-root persistence. Mutates
     // cannot reach the seam until the bridge has been created below.
     const bridgeRef: { hub?: ReturnType<typeof createTuiBridge>["hub"] } = {};
-    const worktreeIsolation = {
-      provision: ({
-        conversationId,
-        root: sessionRoot,
-      }: {
-        conversationId?: string;
-        root: string;
-      }) =>
-        bridgeRef.hub?.provisionWorktree({
-          conversationId,
-          root: sessionRoot,
-        }) ??
+    // worktree-host.ts 工厂装配（PR #869 name 透传修复点的 TUI 缝版本；
+    // 可单测）。手工解构在 WorktreeProvisionContext 新增字段时会静默丢
+    // 字段且编译仍绿——TUI 缝 2026-09-05 trace 实测复现了 CLI 缝同款退化
+    // （name=ai-news-archive-2026-09-05 被丢，建出 UUID-only 叶子）。
+    const worktreeIsolation = createTuiWorktreeIsolationHost({
+      provisionWorktree: (ctx) =>
+        bridgeRef.hub?.provisionWorktree(ctx) ??
         Promise.reject(
           new Error("TUI Hub is not ready for worktree provision")
         ),
-    };
+      notReadyError: () =>
+        new Error("TUI Hub is not ready for worktree provision"),
+    });
 
     const depsOpts: BuildTuiDepsOptions = {
       askUser: askBridge.ask,
