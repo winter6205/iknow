@@ -200,6 +200,7 @@ import {
   inputVisibleLineCount,
   inputWrapLineCount,
   PromptInput,
+  type PromptInputHandle,
 } from "./prompt-input.js";
 // T8 — chromeReserveRows 行账封顶由 INPUT_MAX_LINES（prompt-input SSOT）
 // 统一收口，避免 app.tsx 与 prompt-input.tsx 各自持有 "8" 常量导致飘移。
@@ -696,6 +697,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // PasteEvent 时若在 arm 窗口内 → event.preventDefault() 吞掉，不进
   // setInputValue。窗口外（用户主动 Cmd+V）保持原行为不变。
   const pasteArmedUntilRef = useRef<number>(0);
+  // paste buffer-first 单真相源：app 层 usePaste 经此句柄直接写原生 textarea
+  // buffer（与 keypress 同源），不再走 React state 排队（竞态见
+  // tests/tui/input-interleave-race.test.tsx 头注）。
+  const promptInputRef = useRef<PromptInputHandle | null>(null);
 
   // ── 流式草稿（单会话 in-flight 时挂，bg 由落盘刷新获得终稿）─────
   const [streamDraft, setStreamDraft] = useState<StreamDraft | null>(null);
@@ -898,7 +903,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       pasteArmedUntilRef.current = 0;
       return;
     }
-    // B01 fix：单源化 paste 路径。preventDefault 阻断 textarea native
+    // B01 fix + buffer-first 单真相源。preventDefault 阻断 textarea native
     // handlePaste（InternalKeyHandler.emitWithPriority 在 defaultPrevented
     // 时跳过 renderable listener）。同一 paste 事件若 path A 与 path B
     // 双驱动改 inputValue（外置语音输入一次吐多段时）：
@@ -906,13 +911,18 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     //    (ta.plainText) 跨 React 18 commit 周期错位 → 中间段被吞；
     //  - useEffect[props.value] 反复 setText 重置 buffer（prompt-input.tsx:151）
     //    → 跨 commit 的 buffer 中途状态被 overwrite → 错位覆盖。
-    // 现在 path A 单源 → setInputValue(prev+text) 顺序稳定 → render → effect
-    // → ta.setText(props.value) 走程序写入路径，与 history/tab/rewind/submit
-    // 同一口径，由 navValueRef 守卫拦截 textarea 回放不产生回环。
+    // B01 原修复走 path A 单源（setInputValue(prev+text) 排队 commit）；
+    // 但 keypress 路径是 buffer-first（原生 buffer 同步改 + 绝对值
+    // onChange(ta.plainText)），paste 的 functional update 未 commit 时紧接的
+    // keypress 绝对值 setState 仍会覆盖排队中的 paste 段 —— 语音输入
+    // paste 与手动 keypress 交错时中间段被吞（input-interleave-race 测试）。
+    // 现在改调 PromptInput.insertText：与 keypress 同为 buffer-first 单真相源
+    // （写原生 buffer → content-changed 同步 emit → handleContentChange 绝对值
+    // 回报），两条路径不再交错竞态。
     event.preventDefault();
     const text = decodePasteBytes(event.bytes) ?? "";
     if (text.length > 0) {
-      setInputValue((prev) => prev + text);
+      promptInputRef.current?.insertText(text);
     }
   });
 
@@ -2674,6 +2684,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       )}
       {view === "chat" && (
         <PromptInput
+          ref={promptInputRef}
           value={inputValue}
           cols={cols}
           maxLines={MAX_INPUT_LINES}
