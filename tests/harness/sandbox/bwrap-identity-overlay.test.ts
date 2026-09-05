@@ -10,16 +10,23 @@ import { createResourceLimits } from "../../../src/harness/sandbox/resource-limi
 import { ToolExecutionError } from "../../../src/harness/errors.js";
 
 /**
- * #891 T2: 改绑后（isolation ON + rebind）bash 围栏的身份根只读 overlay。
+ * #891 T2 → T3 闭世界改写（plans/closed-world-bash-fence.md）。
  *
- * 病灶（2026-09-05 复现，ADR-0037 §4 amendment (a)–(d)）：围栏 `--bind
- * $HOME $HOME` 后挂于 cwd bind，主仓在 home 下时被可写祖先罩住，bash 写
- * 主仓穿透（exit 0）。修复 = 把 `projectIdentityRoot` 整棵树以 `--ro-bind`
- * 后挂于 writable home bind 之后、writable cwd bind 之前（taskRoot 在身份
- * 树内，cwd 最后夺回可写；cwdReadonly 已证明的覆盖祖先纪律）。
+ * 旧形态（ADR-0037 amendment 2026-09-05）= writable home 打底 + 身份根
+ * `--ro-bind` 后挂补罩；ADR-0037 §9.3 已将该 overlay 条款 superseded——闭
+ * 世界下 home 不可写，「writable 祖先罩住主仓」的病灶消失，身份根降级为
+ * §9.2 第 6 条读白名单成员。本文件改写为认证闭世界不变式：
  *
- * 身份根是合同输入：空白 / 盘上不存在 → typed fail-loud，不 spawn——所以
- * 排序用例必须落真实 tmpdir 目录，不能造假路径。
+ * 1. 身份根以 `--ro-bind` 进读白名单块，位于可写 cwd bind **之前**
+ *    （taskRoot 在身份树内时由后挂 cwd bind 夺回可写——等价于旧「cwd 最后
+ *    夺回」不变式，且更强：不再存在可写 home 祖先可供穿透）。
+ * 2. argv 不含任何 `--bind <home> <home>` token（writable home 打底消失）。
+ * 3. 身份根 ∈ /tmp 子树时 post-tmpfs ro 重绑仍在 cwd 重绑之前（机制保留）。
+ * 4. 合同输入 fail-loud：空白 / 盘上不存在 → typed error 不 spawn（存续
+ *    条款，§9.4 继承）。
+ *
+ * 身份根 / cwd 是合同输入：空白 / 盘上不存在 → typed fail-loud——所以排序
+ * 用例必须落真实 tmpdir 目录，不能造假路径。
  */
 
 interface FenceSpec {
@@ -73,8 +80,8 @@ function makeLeakShape(): {
   return { root, home, repo, taskRoot };
 }
 
-describe("bwrap identity-root overlay (#891 T2)", () => {
-  it("positive: overlay token ordered after writable home bind, before cwd bind", () => {
+describe("bwrap identity-root read whitelist (closed world, supersedes #891 T2 overlay)", () => {
+  it("positive: identity ro-bind is a read member ordered before the writable cwd bind; no home bind exists", () => {
     const dirs = makeLeakShape();
     try {
       const argv = fenceArgs({
@@ -82,23 +89,27 @@ describe("bwrap identity-root overlay (#891 T2)", () => {
         home: dirs.home,
         projectIdentityRoot: dirs.repo,
       });
-      const homeBindIdx = bindIndex(argv, "--bind", dirs.home);
       const identityIdx = bindIndex(argv, "--ro-bind", dirs.repo);
       const cwdBindIdx = bindIndex(argv, "--bind", dirs.taskRoot);
       assert.ok(
-        identityIdx > homeBindIdx,
-        "identity ro-bind must cover the writable home ancestor"
-      );
-      assert.ok(
-        cwdBindIdx > identityIdx,
+        identityIdx < cwdBindIdx,
         "cwd (taskRoot) must come after the identity ro-bind to reclaim writability"
+      );
+      // 闭世界核心不变式：可写 home 打底 token 彻底消失——没有可写祖先可
+      // 被身份根覆盖，也不存在可写 home 穿透面。
+      assert.equal(
+        argv.findIndex(
+          (arg, i) => arg === "--bind" && argv[i + 1] === dirs.home
+        ),
+        -1,
+        "writable home bind must be gone (closed world)"
       );
     } finally {
       rmSync(dirs.root, { recursive: true, force: true });
     }
   });
 
-  it("negative: identity ro-bind absent when the option is not passed (OFF / unbound)", () => {
+  it("negative: identity ro-bind absent when the option is not passed (caller has not threaded the whitelist)", () => {
     const dirs = makeLeakShape();
     try {
       const argv = fenceArgs({ cwd: dirs.taskRoot, home: dirs.home });
@@ -108,7 +119,7 @@ describe("bwrap identity-root overlay (#891 T2)", () => {
           (arg, i) => arg === "--ro-bind" && argv[i + 1] === dirs.repo
         ),
         -1,
-        "identity root must not be bound without the overlay option"
+        "identity root must not be bound without the option"
       );
     } finally {
       rmSync(dirs.root, { recursive: true, force: true });
@@ -116,31 +127,41 @@ describe("bwrap identity-root overlay (#891 T2)", () => {
   });
 
   it("exception: blank identity root → typed fail-loud, no argv", () => {
-    assert.throws(
-      () =>
-        fenceArgs({
-          cwd: "/repo",
-          home: "/home/user",
-          projectIdentityRoot: "",
-        }),
-      (err: unknown) =>
-        err instanceof ToolExecutionError &&
-        /projectIdentityRoot/.test(err.message)
-    );
+    const dirs = makeLeakShape();
+    try {
+      assert.throws(
+        () =>
+          fenceArgs({
+            cwd: dirs.taskRoot,
+            home: dirs.home,
+            projectIdentityRoot: "",
+          }),
+        (err: unknown) =>
+          err instanceof ToolExecutionError &&
+          /projectIdentityRoot/.test(err.message)
+      );
+    } finally {
+      rmSync(dirs.root, { recursive: true, force: true });
+    }
   });
 
   it("exception: identity root missing on disk → typed fail-loud, no argv", () => {
-    assert.throws(
-      () =>
-        fenceArgs({
-          cwd: "/repo/.iknow/worktrees/conv-1",
-          home: "/home/user",
-          projectIdentityRoot: "/nonexistent/identity-root-891",
-        }),
-      (err: unknown) =>
-        err instanceof ToolExecutionError &&
-        /projectIdentityRoot/.test(err.message)
-    );
+    const dirs = makeLeakShape();
+    try {
+      assert.throws(
+        () =>
+          fenceArgs({
+            cwd: dirs.taskRoot,
+            home: dirs.home,
+            projectIdentityRoot: "/nonexistent/identity-root-891",
+          }),
+        (err: unknown) =>
+          err instanceof ToolExecutionError &&
+          /projectIdentityRoot/.test(err.message)
+      );
+    } finally {
+      rmSync(dirs.root, { recursive: true, force: true });
+    }
   });
 
   it("off/unbound: argv byte-identical with and without undefined overlay", () => {
@@ -164,9 +185,11 @@ describe("bwrap identity-root overlay (#891 T2)", () => {
     }
   });
 
-  it("overflow: identity under home (leak shape) — overlay covers writable ancestor", () => {
-    // 复现 2026-09-05 泄漏形状：主仓（身份根）是 $HOME 的子目录，taskRoot
-    // 在主仓内。相对 mkdir -p <repo>/archive/.tmp 在旧 argv 下会落主仓。
+  it("leak shape (identity under home under /tmp) — identity rebind precedes the cwd rebind after tmpfs", () => {
+    // 复现 2026-09-05 泄漏形状的目录布局：主仓（身份根）是 $HOME 的子目录，
+    // taskRoot 在主仓内。闭世界下身份根 ∈ /tmp 子树 → --tmpfs /tmp 会遮蔽
+    // pre-tmpfs 的身份根 ro-bind → post-tmpfs ro 重绑夺回读通道；cwd 重绑
+    // 最后夺回可写（机制保留，T5 清理 identity 专属条件层）。
     const dirs = makeLeakShape();
     try {
       const argv = fenceArgs({
@@ -174,26 +197,24 @@ describe("bwrap identity-root overlay (#891 T2)", () => {
         home: dirs.home,
         projectIdentityRoot: dirs.repo,
       });
-      const homeBindIdx = bindIndex(argv, "--bind", dirs.home);
-      const identityIdx = bindIndex(argv, "--ro-bind", dirs.repo);
-      assert.ok(identityIdx > homeBindIdx);
-      // tmpfs 重绑纪律：home 落在 tmpDir 之下时（本测试即如此），post-tmpfs
-      // 的 home rebind 会再盖身份根 —— 身份根 rebind 必须跟在其后。
       const tmpfsIdx = argv.findIndex(
         (arg, i) => arg === "--tmpfs" && argv[i + 1] === "/tmp"
       );
       assert.notEqual(tmpfsIdx, -1);
       const postTmpfs = argv.slice(tmpfsIdx + 2);
-      const homeRebindIdx = bindIndex(postTmpfs, "--bind", dirs.home);
       const identityRebindIdx = bindIndex(postTmpfs, "--ro-bind", dirs.repo);
       const cwdRebindIdx = bindIndex(postTmpfs, "--bind", dirs.taskRoot);
       assert.ok(
-        identityRebindIdx > homeRebindIdx,
-        "identity ro-bind must be re-asserted after the post-tmpfs home rebind"
+        identityRebindIdx < cwdRebindIdx,
+        "identity ro rebind must be re-asserted after the tmpfs and before the cwd reclaim"
       );
-      assert.ok(
-        cwdRebindIdx > identityRebindIdx,
-        "cwd rebind must come last to reclaim writability"
+      // home 无任何 bind/rebind token。
+      assert.equal(
+        argv.findIndex(
+          (arg, i) => arg === "--bind" && argv[i + 1] === dirs.home
+        ),
+        -1,
+        "no home bind in the closed world"
       );
     } finally {
       rmSync(dirs.root, { recursive: true, force: true });

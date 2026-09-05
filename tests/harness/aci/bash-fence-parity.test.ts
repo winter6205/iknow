@@ -22,8 +22,19 @@
 
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import {
   BASE_ENV_WHITELIST,
@@ -95,7 +106,7 @@ function foregroundFenceArgv(opts: {
     fsPolicy: createFsPolicy({
       cwd: opts.cwd,
       home: "/home/user",
-      tmpDir: "/tmp/job",
+      tmpDir: tmpdir(),
     }),
     networkPolicy: createNetworkPolicy(),
     resourceLimits: createResourceLimits(),
@@ -125,10 +136,10 @@ function isolationAxisFlags(argv: readonly string[]): Set<string> {
   if (argv.includes("--tmpfs")) flags.add("tmpfs");
   // cwd 绑定 verb --bind vs --ro-bind
   const hasCwdRoBind = argv.some(
-    (arg, idx) => arg === "--ro-bind" && argv[idx + 1] === "/workspace"
+    (arg, idx) => arg === "--ro-bind" && argv[idx + 1] === CWD
   );
   const hasCwdBind = argv.some(
-    (arg, idx) => arg === "--bind" && argv[idx + 1] === "/workspace"
+    (arg, idx) => arg === "--bind" && argv[idx + 1] === CWD
   );
   if (hasCwdRoBind) flags.add("cwd-ro-bind");
   if (hasCwdBind) flags.add("cwd-bind");
@@ -189,7 +200,13 @@ afterEach(() => {
 
 // ── SC line 44:argv 隔离轴集合相等 ─────────────────────────────────────────
 
-const CWD = "/workspace";
+// T3 闭世界适配:合同根(taskRoot)盘上校验 → fixture 用真实目录,
+// 不再用不存在的 "/workspace" 假路径。tmp 写通道由 manager/tmpdir() 提供。
+const CWD = mkdtempSync(join(tmpdir(), "bash-fence-parity-"));
+
+afterAll(() => {
+  rmSync(CWD, { recursive: true, force: true });
+});
 
 describe("bash fence parity (foreground vs background argv isolation axis SETS)", () => {
   // 4 个 fixture:network × cwdReadonly 全笛卡尔积

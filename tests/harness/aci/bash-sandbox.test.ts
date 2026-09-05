@@ -15,11 +15,11 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, it } from "vitest";
+import { afterAll, afterEach, describe, it } from "vitest";
 
 import { createBashTool } from "../../../src/harness/aci/tools/bash.ts";
 import { ReadonlyViolationError } from "../../../src/harness/aci/tools/bash-readonly.ts";
@@ -36,6 +36,15 @@ async function makeScratch(prefix: string): Promise<string> {
   scratchPaths.push(path);
   return path;
 }
+
+// T3 闭世界适配:合同根(taskRoot/tmp)盘上校验 → argv 纯逻辑测试的 fixture
+// 用真实目录(模块级一次,afterAll 清理),不再用不存在的 "/workspace" +
+// "/tmp/job" 假路径。
+const ARGV_FIXTURE_CWD = mkdtempSync(join(tmpdir(), "bash-sandbox-argv-"));
+
+afterAll(() => {
+  rmSync(ARGV_FIXTURE_CWD, { recursive: true, force: true });
+});
 
 afterEach(async () => {
   await Promise.all(
@@ -68,14 +77,14 @@ function parseBashEnvelope(envelope: BashEnvelope): BashResult {
 
 describe("bash.bwrap.argvHasUnshareNet", () => {
   it("argv contains the canonical fence flags (no spawn)", () => {
-    const cwd = "/workspace";
+    const cwd = ARGV_FIXTURE_CWD;
     const argv = createBwrapFence({
       command: "bash",
       args: ["-c", "echo hi"],
       fsPolicy: createFsPolicy({
         cwd,
         home: homedir(),
-        tmpDir: "/tmp/job",
+        tmpDir: tmpdir(),
       }),
       networkPolicy: createNetworkPolicy(),
       resourceLimits: createResourceLimits(),
@@ -100,13 +109,10 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
     assert.notEqual(bindCwdIdx, -1, "expected --bind <cwd> <cwd> in argv");
     assert.equal(argv[bindCwdIdx + 2], cwd);
     // --size <N> --tmpfs /tmp（连续三项）。
-    // 注意：sensitive-path overlay 会先插入若干 --tmpfs <HOME>/.xxx，
-    // 所以从 bindCwdIdx 之后找第一个 --tmpfs,前面两项必是 --size <N>。
+    // 闭世界(T3):sensitive-path overlay 已删除 —— home 不再 bind,罩失效为
+    // 无操作,argv 里只有一处 --tmpfs(即 /tmp)。
     const tmpfsIdx = argv.indexOf("--tmpfs", bindCwdIdx);
     assert.notEqual(tmpfsIdx, -1);
-    // 注意：sensitive-path overlay 会先插入若干 --tmpfs <HOME>/.xxx，
-    // 所以要从 argv 后段再确认是 /tmp（而非 .ssh / .aws / ...）。
-    // 在 --tmpfs 后移找到第一个 --tmpfs 后跟 /tmp 的位置。
     let realTmpfsIdx = -1;
     for (let i = tmpfsIdx; i < argv.length; i++) {
       if (argv[i] === "--tmpfs" && argv[i + 1] === "/tmp") {
@@ -117,13 +123,13 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
     assert.notEqual(realTmpfsIdx, -1, "expected --tmpfs /tmp in argv");
     assert.equal(argv[realTmpfsIdx - 2], "--size");
     assert.equal(argv[realTmpfsIdx + 1], "/tmp");
-    // --tmpfs <HOME>/.ssh（敏感路径 overlay）
-    assert.ok(
+    // 闭世界反转:敏感路径 tmpfs 罩发射删除(home 下路径不可见 = 罩自动失效
+    // 为无操作);isSensitive/protected-state 谓词保留在 fs-policy 层。
+    assert.equal(
       argv.includes(`${homedir()}/.ssh`),
-      "expected --tmpfs <HOME>/.ssh in argv"
+      false,
+      "closed world must not emit the sensitive-path tmpfs overlay"
     );
-    const sshIdx = argv.indexOf(`${homedir()}/.ssh`);
-    assert.equal(argv[sshIdx - 1], "--tmpfs");
     // --clearenv precedes every --setenv so the fence inherits only the
     // whitelisted entries, never the host env (#225).
     const clearenvIdx = argv.indexOf("--clearenv");
@@ -392,7 +398,7 @@ describe("bash.fence.networkOptIn (argv shape, no spawn)", () => {
   // because the bash tool's inputSchema network param lands in T10 — this
   // ticket owns only the bwrap argv branch, not the bash.ts schema.
   function fenceArgv(network?: boolean): string[] {
-    const cwd = "/workspace";
+    const cwd = ARGV_FIXTURE_CWD;
     const opts: {
       command: string;
       args: string[];
@@ -405,7 +411,7 @@ describe("bash.fence.networkOptIn (argv shape, no spawn)", () => {
     } = {
       command: "bash",
       args: ["-c", "echo hi"],
-      fsPolicy: createFsPolicy({ cwd, home: homedir(), tmpDir: "/tmp/job" }),
+      fsPolicy: createFsPolicy({ cwd, home: homedir(), tmpDir: tmpdir() }),
       networkPolicy: createNetworkPolicy(),
       resourceLimits: createResourceLimits(),
       env: { PATH: "/bin" },
@@ -418,7 +424,7 @@ describe("bash.fence.networkOptIn (argv shape, no spawn)", () => {
   }
 
   it("network:true removes --unshare-net but keeps every canonical fence flag", () => {
-    const cwd = "/workspace";
+    const cwd = ARGV_FIXTURE_CWD;
     const argv = fenceArgv(true);
     assert.equal(argv.includes("--unshare-net"), false);
     // canonical fence flags spot-check (mirrors argvHasUnshareNet style)

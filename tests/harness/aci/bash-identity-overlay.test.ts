@@ -1,15 +1,15 @@
 /**
- * #891 T2 (ADR-0037 §4 amendment 2026-09-05) — 改绑波次 bash 围栏的身份根
- * 只读 overlay 接线测试。
+ * #891 T2 → T3 闭世界改写(ADR-0037 §9.3 将 overlay 条款 superseded)。
  *
- * 合同（plan T2 Acceptance 点名行为）：
- * 1. 前台（foreground fence）与后台（handleBackground → manager.spawn →
- *    defaultBackgroundSpawn）消费**同一** overlay token（D2 同波同一份；
- *    CONTEXT 沙箱纪律：前后台共用围栏）。
- * 2. 未改绑波次（活 taskRoot == 身份根）不传 overlay，argv 与 V1 逐字节
- *    一致（无身份 `--ro-bind` token）。
- * 3. 改绑波次 argv 含 `--ro-bind <identity> <identity>`，且位于 writable
- *    home bind 之后（覆盖祖先）。
+ * 合同(闭世界形态):
+ * 1. 前台(foreground fence)与后台(handleBackground → manager.spawn →
+ *    defaultBackgroundSpawn)消费**同一**身份根 token(D2 同波同一份;
+ *    CONTEXT 沙箱纪律:前后台共用围栏)。
+ * 2. 未改绑波次(活 taskRoot == 身份根)不传身份根,argv 不含身份
+ *    `--ro-bind` token。
+ * 3. 改绑波次 argv 含 `--ro-bind <identity> <identity>`(读白名单成员),
+ *    位于可写 cwd bind 之前;writable home 打底 token 消失——不存在可写
+ *    祖先可被覆盖,身份根不再是 overlay 而是读成员。
  *
  * 后台链路沿用 bash-live-task-root.test.ts 的 handler+spawn-mock 策略
  * （生产热路径 end-to-end）；前台链路用真实 tmpdir 直驱 handler，读
@@ -118,7 +118,7 @@ describe("bash #891 T2: identity-root overlay wiring", () => {
     }
   });
 
-  it("rebound wave → foreground fence carries identity ro-bind after writable home bind", async () => {
+  it("rebound wave → foreground fence carries identity ro-bind before the writable cwd bind (closed world)", async () => {
     const dirs = makeLeakShape();
     try {
       const tool = createBashTool(dirs.taskRoot, {
@@ -134,13 +134,21 @@ describe("bash #891 T2: identity-root overlay wiring", () => {
         -1,
         "rebound wave must carry identity ro-bind"
       );
-      const homeBindIdx = argv.findIndex(
-        (arg, i) => arg === "--bind" && argv[i + 1] === dirs.home
+      // 闭世界:writable home bind 消失,身份根降级为读白名单成员。
+      assert.equal(
+        argv.findIndex(
+          (arg, i) => arg === "--bind" && argv[i + 1] === dirs.home
+        ),
+        -1,
+        "writable home bind must be gone (closed world)"
       );
-      assert.notEqual(homeBindIdx, -1);
+      const cwdBindIdx = argv.findIndex(
+        (arg, i) => arg === "--bind" && argv[i + 1] === dirs.taskRoot
+      );
+      assert.notEqual(cwdBindIdx, -1);
       assert.ok(
-        identityIdx > homeBindIdx,
-        "identity ro-bind must cover writable home"
+        identityIdx < cwdBindIdx,
+        "identity ro-bind (read member) must precede the writable cwd bind reclaim"
       );
     } finally {
       rmSync(dirs.root, { recursive: true, force: true });
@@ -166,11 +174,18 @@ describe("bash #891 T2: identity-root overlay wiring", () => {
         -1,
         `background fence must carry identity ro-bind; argv=${JSON.stringify(argv)}`
       );
-      const homeBindIdx = argv.findIndex(
-        (arg, i) => arg === "--bind" && argv[i + 1] === dirs.home
+      assert.equal(
+        argv.findIndex(
+          (arg, i) => arg === "--bind" && argv[i + 1] === dirs.home
+        ),
+        -1,
+        "background fence must not carry a writable home bind (closed world)"
       );
-      assert.notEqual(homeBindIdx, -1);
-      assert.ok(identityIdx > homeBindIdx);
+      const cwdBindIdx = argv.findIndex(
+        (arg, i) => arg === "--bind" && argv[i + 1] === dirs.taskRoot
+      );
+      assert.notEqual(cwdBindIdx, -1);
+      assert.ok(identityIdx < cwdBindIdx);
     } finally {
       rmSync(dirs.root, { recursive: true, force: true });
     }

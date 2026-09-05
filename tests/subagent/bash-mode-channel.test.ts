@@ -6,7 +6,15 @@
  * V1 byte-stable: role 缺省 / 未知 → bashMode 显式 "any"/缺省 → bash 字节与 V1 一致。
  */
 import assert from "node:assert/strict";
+import { mkdirSync } from "node:fs";
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
+
+// T3 闭世界适配:bash handler 内的 createFsPolicy(真实)对 taskRoot 做盘上
+// 校验 → sandboxRoot fixtures 必须存在。本文件 mock 了 createBwrapFence /
+// runInSandbox(不真起 bwrap),只补目录,不动断言面。
+for (const dir of ["/tmp/sb", "/tmp/sb-bash-mode"]) {
+  mkdirSync(dir, { recursive: true });
+}
 
 // vi.mock 提至模块图顶端 — 后续 import 命中 mock (bash.ts 通过
 // '../../sandbox/index.js' 引到 createBwrapFence)。

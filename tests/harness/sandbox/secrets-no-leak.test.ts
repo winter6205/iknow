@@ -1,7 +1,7 @@
-import { describe, it } from "vitest";
+import { afterAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.js";
@@ -31,8 +31,16 @@ describe("sandbox secret literal guard", () => {
 // 逐字节一致 —— host 侧 secret 命中的环境变量在任何分支下都不进入 fence argv。
 // 这是 sandbox 层在 T11 闭环新增的纵深防御:即使共享宿主 netns,secret env
 // 仍由 createEnvIsolation.filter 截断后才进 createBwrapFence。
+//
+// T3 闭世界适配:合同根(taskRoot/tmp)盘上校验 → fixtures 用真实目录
+// (mkdtemp),不再用不存在的 "/workspace" + "/tmp/job" 假路径。
+const FIXTURE_CWD = mkdtempSync(join(tmpdir(), "secrets-no-leak-cwd-"));
+
+afterAll(() => {
+  rmSync(FIXTURE_CWD, { recursive: true, force: true });
+});
+
 describe("sandbox network:true secret env half", () => {
-  const cwd = "/workspace";
   function buildArgv(network: boolean): readonly string[] {
     // 模拟 bash.ts 装配期的环境:bwrap fence 接收的 env 是经 envIsolation.filter
     // 截断过的 process.env。注入一个 SECRET_PATTERN 形态的环境变量,断言它
@@ -53,11 +61,15 @@ describe("sandbox network:true secret env half", () => {
     return createBwrapFence({
       command: "bash",
       args: ["-c", "echo hi"],
-      fsPolicy: createFsPolicy({ cwd, home: homedir(), tmpDir: "/tmp/job" }),
+      fsPolicy: createFsPolicy({
+        cwd: FIXTURE_CWD,
+        home: homedir(),
+        tmpDir: tmpdir(),
+      }),
       networkPolicy: createNetworkPolicy(),
       resourceLimits: createResourceLimits(),
       env: filtered,
-      cwd,
+      cwd: FIXTURE_CWD,
       network,
     }).argv;
   }

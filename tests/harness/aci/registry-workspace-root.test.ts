@@ -31,6 +31,9 @@
  * proving the threading + the protective semantics together. The two halves
  * fail independently if either piece regresses.
  */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import assert from "node:assert/strict";
 
@@ -111,24 +114,43 @@ describe("createDefaultAciRegistry — workspaceRoot threaded to bash factory (r
     // state set must include the per-root anchor. (No real bwrap needed;
     // the policy surface is the same one exercised by
     // tests/harness/sandbox/fs-policy.test.ts.)
-    const policy = createFsPolicy({
-      cwd: SANDBOX,
-      home: "/home/user",
-      tmpDir: "/tmp/job",
-      workspaceRoot: FAKE,
-    });
-    assert.throws(
-      () => policy.assertWithin(`${FAKE}/.iknow/state.json`),
-      (err: unknown) =>
-        err instanceof Error &&
-        err.message ===
-          "[fs_denied] path outside fence: /fake-root/.iknow/state.json"
-    );
-    assert.throws(
-      () => policy.assertWithin(`${FAKE}/.iknow/user.md`),
-      /\[fs_denied\]/
-    );
-    assert.doesNotThrow(() => policy.assertWithin(`${FAKE}/AGENTS.md`));
-    assert.doesNotThrow(() => policy.assertWithin(`${FAKE}/README.md`));
+    //
+    // T3 闭世界适配:合同根盘上校验 → cwd/tmpDir fixture 用真实目录;且
+    // workspaceRoot 只是状态锚(protected-state 面),退出 bind roots——
+    // 旧断言「workspaceRoot 下非 .iknow 路径放行」随 writable bind 面一起
+    // 反转为拒绝(更强:不可见),保护面(.iknow 拒绝)不变。
+    const cwd = mkdtempSync(join(tmpdir(), "registry-ws-root-"));
+    const tmp = mkdtempSync(join(tmpdir(), "registry-ws-root-tmp-"));
+    try {
+      const policy = createFsPolicy({
+        cwd,
+        home: "/home/user",
+        tmpDir: tmp,
+        workspaceRoot: FAKE,
+      });
+      assert.throws(
+        () => policy.assertWithin(`${FAKE}/.iknow/state.json`),
+        (err: unknown) =>
+          err instanceof Error &&
+          err.message ===
+            "[fs_denied] path outside fence: /fake-root/.iknow/state.json"
+      );
+      assert.throws(
+        () => policy.assertWithin(`${FAKE}/.iknow/user.md`),
+        /\[fs_denied\]/
+      );
+      // 闭世界反转:workspaceRoot 不再是 bind root → 其下非 .iknow 路径在
+      // 围栏内不可见(旧世界放行,更强)。
+      assert.throws(
+        () => policy.assertWithin(`${FAKE}/AGENTS.md`),
+        /\[fs_denied\]/,
+        "workspaceRoot is a state anchor only — not a bind root in the closed world"
+      );
+      // positive control:cwd(taskRoot)子树仍放行。
+      assert.doesNotThrow(() => policy.assertWithin(join(cwd, "README.md")));
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

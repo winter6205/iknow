@@ -28,8 +28,19 @@
 
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -111,12 +122,28 @@ afterEach(() => {
   spawnMock.mockReset();
 });
 
+// T3 闭世界适配:合同根(taskRoot)盘上校验 → 全部根 fixture 用真实目录
+// (mkdtemp),不再用不存在的 "/workspace/*" 假路径。rebind 不变式只依赖
+// 「argv 形状不变、cwd token 随活根走」,与根的具体值无关。
+const REAL_ROOTS: string[] = [];
+function makeRealRoot(name: string): string {
+  const dir = mkdtempSync(join(tmpdir(), `bash-lt-${name}-`));
+  REAL_ROOTS.push(dir);
+  return dir;
+}
+
+afterAll(() => {
+  for (const dir of REAL_ROOTS) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── 1. per-call rebuild ─────────────────────────────────────────────────────
 
 describe("bash T7: live taskRoot cell drives fence per call", () => {
   it("liveTaskRoot flips → next bash background call's argv binds new cwd", async () => {
-    const initialRoot = "/workspace/original";
-    const reboundRoot = "/workspace/rebound";
+    const initialRoot = makeRealRoot("original");
+    const reboundRoot = makeRealRoot("rebound");
     const cell: LiveTaskRoot = createLiveTaskRoot(initialRoot);
     const tool = makeTool({ cwd: initialRoot, liveTaskRoot: cell });
 
@@ -153,7 +180,7 @@ describe("bash T7: live taskRoot cell drives fence per call", () => {
   });
 
   it("absence of liveTaskRoot → handler falls back to factory-captured sandboxRoot (legacy parity)", async () => {
-    const cwd = "/workspace/main";
+    const cwd = makeRealRoot("main");
     const tool = makeTool({ cwd });
     const argv = await bashBgOnce(tool, {
       command: "echo hi",
@@ -172,9 +199,9 @@ describe("bash T7: live taskRoot cell drives fence per call", () => {
     // is not contaminated by command text — the invariant is about the
     // fence tokens, not the user command.
     const sameCommand = "echo stable";
-    const rootA = "/workspace/A";
-    const rootB = "/workspace/B";
-    const rootC = "/workspace/C";
+    const rootA = makeRealRoot("A");
+    const rootB = makeRealRoot("B");
+    const rootC = makeRealRoot("C");
     const cell: LiveTaskRoot = createLiveTaskRoot(rootA);
     const tool = makeTool({ cwd: rootA, liveTaskRoot: cell });
 
@@ -220,8 +247,8 @@ describe("bash T7: argv SHAPE+ORDER invariant under root rebind", () => {
     // Pin a single command across both calls so the byte-equal comparison
     // is not contaminated by command text.
     const sameCommand = "echo stable";
-    const originalRoot = "/workspace/original";
-    const reboundRoot = "/workspace/rebound";
+    const originalRoot = makeRealRoot("original2");
+    const reboundRoot = makeRealRoot("rebound2");
     const cell: LiveTaskRoot = createLiveTaskRoot(originalRoot);
     const tool = makeTool({ cwd: originalRoot, liveTaskRoot: cell });
 
@@ -268,7 +295,7 @@ describe("bash T7: argv SHAPE+ORDER invariant under root rebind", () => {
   it("cwd under /tmp ⇒ cwd rebind after --tmpfs /tmp is preserved (regression #196 T12b)", async () => {
     // Regression: pre-tmpfs `--bind cwd cwd` + post-tmpfs `--bind cwd cwd`
     // both reflect the live root, in the same order as the pre-rebuild fence.
-    const cwd = "/tmp/cwd-jt-7";
+    const cwd = makeRealRoot("tmp-cwd");
     const cell: LiveTaskRoot = createLiveTaskRoot(cwd);
     const tool = makeTool({ cwd, liveTaskRoot: cell });
     const argv = await bashBgOnce(tool, {
@@ -291,7 +318,7 @@ describe("bash T7: argv SHAPE+ORDER invariant under root rebind", () => {
   });
 
   it("argv shape contains the canonical fence markers", async () => {
-    const cwd = "/workspace/live";
+    const cwd = makeRealRoot("live");
     const cell: LiveTaskRoot = createLiveTaskRoot(cwd);
     const tool = makeTool({ cwd, liveTaskRoot: cell });
     const argv = await bashBgOnce(tool, {
@@ -306,7 +333,7 @@ describe("bash T7: argv SHAPE+ORDER invariant under root rebind", () => {
     assert.ok(argv.includes("--die-with-parent"));
     assert.ok(argv.includes("--clearenv"));
     assert.ok(argv.includes("--chdir"));
-    assert.ok(argv.includes("/workspace/live"));
+    assert.ok(argv.includes(cwd));
   });
 });
 
@@ -316,8 +343,8 @@ describe("bash T7: wave snapshot (D2) — one read per handler invocation", () =
   it("handler reads liveTaskRoot: mid-call flip does NOT leak into this call's fence", async () => {
     // D2 一次入口读一次。同 handler 内反复改 cell 不应影响本次 fence——
     // handler 在入口读一次冻结局部 waveRoot,贯穿整条路径。
-    const initialRoot = "/workspace/original";
-    const flickeredRoot = "/workspace/flickered";
+    const initialRoot = makeRealRoot("wave-original");
+    const flickeredRoot = makeRealRoot("wave-flickered");
     const cell: LiveTaskRoot = createLiveTaskRoot(initialRoot);
     const reads: string[] = [];
     const instrumented: LiveTaskRoot = {

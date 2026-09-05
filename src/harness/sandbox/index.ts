@@ -3,7 +3,7 @@ export {
   READ_ONLY_SYSTEM_PATHS,
   createFsPolicy,
 } from "./fs-policy.js";
-export type { FsPolicy } from "./fs-policy.js";
+export type { FsPolicy, FsPolicyOptions } from "./fs-policy.js";
 
 export {
   STATIC_NETWORK_WHITELIST,
