@@ -62,3 +62,49 @@ npx vitest run tests/harness/loop-engine-injected-commit.test.ts
 
 - 无 API key / token / password / credential 值出现
 - 无凭据涉及
+
+---
+
+## 修复落地记录（2026-09-05 第二个 session，worktree issue-888-save-fork-fix）
+
+- **修复已实施**：`src/harness/loop-engine.ts` 加 `createPendingInjected` run 作用域缓冲。
+  三个注入 helper（bar / graph / mcpReconnect）注入时 `record`；三个 commit 点
+  （tool_result flushPrefix / assistant / loop envelope）批头 `take()` flush；
+  run() cancelled 收尾 flush `[...pending.take(), system interrupt]`；
+  proactive compact 重建历史后 `take()` 清空（压缩产物与旧链本就不可 LCP 对齐）；
+  protocolError / emptyFinalResponse 维持 #120 裁决丢弃 pending。
+- **e2e 用例伪绿已修正**：根因是 setTimeout(50ms) abort 赛跑在首次 commit（~200ms）前，
+  链为空、无 fork 可言。改为 `interruptAfterFirstCommitDeps`：首次 commit 落地后
+  同步 abort，确定性落在「assistant/tool_result 已 commit、下一次模型调用前」。
+  修正后 e2e 真红（链 7 事件、投影 5 条、孤儿 e0/e1），修复后转绿。
+- **e2e hook 已镜像 hub 懒提交 query 纪律**（hub.ts:1413–1434）：首次 commit 批头
+  拼 `encodeUserText("x")`，与 `queryCommitPrefix` 字节对齐契约一致。修复后引擎
+  首批 = `[bar, assistant]`，hub 拼 `[query, bar, assistant]` 与内存投影逐字节一致。
+- **次生根因 (b) 实证结论**：多工具波次（N≥2）「逐条 commit 单块 user 消息 vs 内存
+  聚合 user 消息」的形态差在 store save 时确实走 fork-copy，但 fork 分支以内存投影
+  为准整链重建（buildEventRecords(messages.slice(prefixLen))），head 正确、投影完整、
+  下一个 run 读到正确历史 —— 用户可见语义无损，仅盘上累积孤儿事件。与主根因的
+  「孤儿化真实历史导致重放」不同，属既有形态，超出本票最小修复范围，留待后续票。
+- **验证**：#888 套件 3/3 绿；harness 全量 3105 绿（原 T3 static guard 因注释出现
+  "checkpoint" 词汇失败，已改写注释措辞——守门意图防 store IO 耦合，非禁注释）；
+  session-api + chat-session 799 绿；npm test 全量 6027 绿（2 例 build-engine 5s
+  超时为并行负载抖动，单独重跑 54/54 绿）；typecheck / prettier 干净。
+- **未验证**：aiterm MCP 真实 TUI 交互（npx 缓存二进制 exec 位丢失 + 本 session
+  沙箱拒绝 chmod，MCP 连接失败），以 store 级 e2e（真实 SessionStore + 真实 JSONL
+  parent 链断言）替代；恢复 exec 位后 `claude mcp list` 应能 reconnect。
+- **code review 结论**（Standards 1H/2M/1L + Spec 0H/0M/3L，High 已修、余为 advisory）：
+  - 已修：测试 teardown 空 catch（S3）；删除无调用方的 `peek()`；
+    补 protocolError 丢弃 pending 用例（钉住批序 [2,1] + 既有 #120 内存保留语义）。
+  - advisory（不阻塞）：三个注入 helper 的 record 结构重复（3 行×3 处）与
+    pendingInjected 穿参同 lastToolRef/toolLoopRef 先例同形态，留待自然演进。
+  - follow-up（本票外，与次生根因 (b) 同级）：chat surface
+    `createChatSessionCommitHook`（src/cli/chat-session.ts:1829–1881）不带
+    query 懒提交前缀，修前修后 chat 的收尾 save 都走 fork-copy（投影完整、
+    下一个 run 语义正确，仅盘上累积孤儿事件）。如需消除，镜像 hub
+    queryCommitPending latch（hub.ts:1423–1481）即可，单独开票。
+- **实现与 spec 措辞差异说明**：handoff 原「cancelled 停止路径在
+  appendSystemInterrupt 前 flush」——实现为 appendSystemInterrupt 之后
+  flush（`[...pending.take(), system interrupt]`），state.messages 与链
+  逐字节一致（bar 本就经 record+appendMessage 在内存，system interrupt
+  由 appendSystemInterrupt 与 flush 批同内容同序写入），功能等价，以
+  实现为准。
