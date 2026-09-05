@@ -31,6 +31,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { AciToolDef } from "../types.js";
+import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
 
 /** Allowed top-level keys — mirrors inputSchema. */
@@ -128,10 +129,16 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
       interruptBehavior: "block",
       timeoutTier: "default",
     } as const,
-    handler: async (input: unknown) => {
+    handler: async (input: unknown, ctx?: ToolExecutionContext) => {
       // T11 收敛:filePath 不再工厂期预拼死路径 —— todoDir 本身按 D3 仍冻结,
       // 但 `join` 从装配期挪到调用期,语义逐字节一致(`join` 是纯函数)。
-      const filePath = join(deps.todoDir, TODOS_FILE);
+      // Per-conversation isolation: ledger resolves at CALL time from
+      // ctx.conversationId (plumbed by the executor since #017) — one
+      // conversation, one ledger. Absent ctx → legacy shared-root layout.
+      const filePath = resolveConversationTodoDir({
+        todoDir: deps.todoDir,
+        conversationId: ctx?.conversationId,
+      });
       const params = parseInput(input);
       switch (params.mode) {
         case "list":
@@ -359,4 +366,40 @@ export function resolveSessionTodoDir(opts: {
 }): string {
   const userHome = opts.userHome ?? homedir();
   return join(userHome, ".iknow", "todos", opts.surface);
+}
+
+/**
+ * Path-hostile segment sanitizer for conversationId → directory segment.
+ * Strictly `[A-Za-z0-9_-]` → everything else (including `.` and `/`) becomes
+ * `_` — a `..`-style or separator-bearing id can never escape `todoDir`, not
+ * even as a lookalike. conversationIds are UUIDs in practice, so dropping `.`
+ * loses nothing.
+ */
+function sanitizeConversationSegment(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
+/**
+ * SSOT: where a conversation's `todos.md` lives, relative to the host-injected
+ * per-surface `todoDir` root (D3 stays frozen).
+ *
+ *  - `conversationId` present and non-empty → `<todoDir>/<sanitized id>/todos.md`
+ *    (per-conversation ledger; the original #440 D2 intent, un-deferred).
+ *  - absent / empty → `<todoDir>/todos.md` (pre-isolation layout; hosts that
+ *    never inject conversationId keep byte-identical behavior).
+ *
+ * Pure (no IO). Both the writer (todo_write handler, via
+ * `ctx.conversationId`) and the projection (agent-status bar, via loop-engine
+ * `deps.conversationId`) resolve through this one function — the two can
+ * never disagree about the ledger location.
+ */
+export function resolveConversationTodoDir(opts: {
+  readonly todoDir: string;
+  readonly conversationId?: string;
+}): string {
+  if (opts.conversationId === undefined || opts.conversationId.length === 0) {
+    return join(opts.todoDir, TODOS_FILE);
+  }
+  const segment = sanitizeConversationSegment(opts.conversationId);
+  return join(opts.todoDir, segment, TODOS_FILE);
 }
