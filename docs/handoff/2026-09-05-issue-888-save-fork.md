@@ -92,6 +92,13 @@ npx vitest run tests/harness/loop-engine-injected-commit.test.ts
 - **未验证**：aiterm MCP 真实 TUI 交互（npx 缓存二进制 exec 位丢失 + 本 session
   沙箱拒绝 chmod，MCP 连接失败），以 store 级 e2e（真实 SessionStore + 真实 JSONL
   parent 链断言）替代；恢复 exec 位后 `claude mcp list` 应能 reconnect。
+- **MCP 真实 TUI 复验（后续已补，exec 位恢复后）**：aiterm MCP reconnect 成功，
+  真实 TUI（bun run src/cli.ts tui，MiniMax-M3，worktree `.iknow` 池）跑两轮交互——
+  第 1 轮带 todo_write 工具调用（触发 agent_status 注入 + tool_result commit），
+  第 2 轮纯文本追问。两轮收尾 save 后解析 session JSONL：head 链 e0→e5 / e0→e8
+  全在链上、孤儿 0，三条 `<agent_status>` 注入栏（e1/e4/e7）全部随批落链；第 2 轮
+  模型正确引用第 1 轮新增的 todo（历史未丢失、未从 query 重放）。#888 故障面
+  （fork + 孤儿化前缀）在真实产品路径上未复现。
 - **code review 结论**（Standards 1H/2M/1L + Spec 0H/0M/3L，High 已修、余为 advisory）：
   - 已修：测试 teardown 空 catch（S3）；删除无调用方的 `peek()`；
     补 protocolError 丢弃 pending 用例（钉住批序 [2,1] + 既有 #120 内存保留语义）。
