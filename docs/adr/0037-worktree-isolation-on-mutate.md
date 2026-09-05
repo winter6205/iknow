@@ -6,7 +6,7 @@ Status: accepted
 
 > **Amendment 2026-09-04**（`specs/casual-ask-context-hygiene.md`）：§1「读放行、写才拦」不变。bash 是否 mutate **不得**复用 `validateReadonlyCommand`（那是 bash readonly **模式**的 deny-by-default 表，`2>&1` 也拒）。门禁自备「会不会写工作区」判定；`2>&1` / 管道 / 只读命令串为读。`validateReadonlyCommand` 不为本门禁放宽。`unboundMutateNotice` 仍点名 `create-task-worktree`、仍不 auto-provision；文案改为事实阻断（这次调用会写主仓、未执行；若要写则调工具再重试这一次），不得把模型下一拍收成「去建树」。不按用户问句分型。不改 `create-task-worktree` ACI 形状。
 
-> Amendments: 2026-08-30 建树职责由 host 自动建树改为模型调用「创建工作树 ACI 工具」；2026-08-31 改绑只切 `taskRoot`（§4 重写）；2026-09-02 reopen——model-provision 契约 + 活 `taskRoot`（§7 新增）+ 撤销「same-turn mutator 列为非目标」（§8 显式撤销）；2026-09-05 bash 围栏身份根 ro-bind overlay + 模型可见写根（issue #891）。
+> Amendments: 2026-08-30 建树职责由 host 自动建树改为模型调用「创建工作树 ACI 工具」；2026-08-31 改绑只切 `taskRoot`（§4 重写）；2026-09-02 reopen——model-provision 契约 + 活 `taskRoot`（§7 新增）+ 撤销「same-turn mutator 列为非目标」（§8 显式撤销）；2026-09-05 bash 围栏身份根 ro-bind overlay + 模型可见写根（issue #891）；2026-09-06 reopen——bash 围栏闭世界化：全档位 deny-by-default 反转 + 读/写白名单裁决 + identity overlay 条款 superseded（§9 新增，issue #896）。
 
 > **Amendment 2026-08-30**（issue #836 / 地图 #829）：ON 时门禁**只拦写、不自动 `git worktree add`**——建 task worktree 与会话根改绑由**模型调用「创建工作树 ACI 工具」**完成（成功 = 树在且会话根已切到该路径）；Host 不同波重放被拦的写，被拦的写由模型在新根上自己再调。原文 Decision 1 中「首次 mutate 被拦截 → host `git worktree add` 建树改绑」的读法 **superseded**。同批修订：说明书（rules）改为按需读——父会话不整段灌 rules、缺目录视为空，见 ADR-0009 D2 的 amended 说明与 `docs/CONTEXT.md` 术语「说明书读法」。
 >
@@ -20,11 +20,15 @@ Status: accepted
 
 > **Amendment 2026-09-05**（issue #891 / `plans/891-taskroot-remaining-consumers.md`）：§4「写仍不得进主仓」落到 bash 物理围栏。实测（2026-09-05 复现脚本）：改绑后 bash 围栏的 `--bind $HOME $HOME` **后挂**于 cwd bind（`bindArgs` 非 `cwdReadonly` 分支），主仓在 home 下时被这个可写祖先罩住，`mkdir -p <主仓>/…` 穿透成功（exit 0）。修复不是新增第五根——写根仍是 `SessionRoots.taskRoot`，围栏只把 `projectIdentityRoot` 整棵树以 `--ro-bind` **后挂**在 writable home bind 之后（同一覆盖祖先纪律，`cwdReadonly` 已证明）：
 >
+> **Reopen 2026-09-06 注**：本 amendment 的 (a)(b)(d) 与 (e) 的 overlay 专属表述已被 §9 闭世界裁决 **superseded**（闭世界下无 writable 祖先可堵，identity 根降级为读白名单成员）；(c) fail-loud 存续，由 §9.4 继承扩展；(e) 的前后台同一 policy token 要求与 §7.2 batch 快照语义不受影响。见 §9.3。
+>
 > (a) **overlay 条件** = 隔离开关 ON 且活 `taskRoot` 已改绑（`taskWorktreeOwnerOf(taskRoot)` 有主）。未改绑时 cwd 就是主仓，mutate 由门禁拦，围栏 argv 不变。
 > (b) **argv 顺序** = 身份根 `--ro-bind` 必须出现在 writable home `--bind` **之后**（bwrap 后挂子挂载覆盖祖先）；其它 token 逐字节不变。
 > (c) **fail-loud** = 身份根空白 / 盘上不存在时抛 typed 可见错误、**不 spawn**；禁止 `existsSync` 静默跳过（与 `optionalHostRoBindArgs` 的存在性跳过不同轴：身份根是合同输入，缺席是配置故障，不是可选主机前缀）。
 > (d) **OFF / 未改绑** = 不传 overlay 选项，`createBwrapFence` argv 与今日逐字节一致（`verify/sandbox-run.ts` 本轮不传）。
 > (e) **模型可见面** = 改绑后模型（含子代理）经 worker prior messages / path-outside 回执看见当前写根 = 活 `taskRoot`；system `## Project path` 仍钉 `projectIdentityRoot`（`projectPathSegment` 字节不动），不静默改写 spawn `task` 正文。前台（`bash.ts`）与后台（`defaultBackgroundSpawn`）必须消费**同一** overlay token（CONTEXT 沙箱纪律：前后台共用围栏）。
+>
+> **Reopen 2026-09-06**（issue #896 / `plans/closed-world-bash-fence.md` T2）：bash 围栏物理形态从「writable home 打底 + 黑名单补罩」反转为**闭世界围栏（closed-world fence）**——home 下非白名单路径**不可见**（不是「可见但只读」），可写集 = `taskRoot` + `/tmp`，其余读通道 deny-by-default、按需 ro-bind。反转是**全档位**语义变更：OFF 档围栏同样闭世界（否则其它 project 在 OFF 档仍可写，病灶 1 不闭合）；§1 OFF 的围栏字节承诺、Amendment 2026-09-05 的 identity overlay 专属条款、Positive「默认 OFF 保证零回归」条目相应 **superseded**。白名单集合逐条裁决与 fail-loud 分型见 §9；Amendment 2026-09-05 的条款存废清单见 §9.3。证据源 = `scripts/sandbox-probe-closed-world.ts` 盘点（commit `d777c050`）实测 16 条 BREAK。
 
 ## Context
 
@@ -40,7 +44,7 @@ ADR-0023 裁决 4 曾锁定「v1 = 单根 + recents + 三锚合一；worktree/�
 
 ### 1. 开关两态（硬要求 1）
 
-- **OFF（默认）**：会话行为与今日完全一致——读、写、permission、目录全部现状，不新增任何拦截点。
+- **OFF（默认）**：会话行为与今日完全一致——读、写、permission、目录全部现状，不新增任何拦截点。（**2026-09-06 reopen 标 superseded，仅就 bash 围栏物理面**：OFF 档围栏同样闭世界化，见 §9.1；门禁、根改绑、permission 语义不变。）
 - **ON**：会话可**只读**主仓（read / grep / glob / 只读 bash 等读路径放行，可留在主仓）；一旦出现**写路径**（write_file / edit_file / 会改工作区的 bash 等 mutate），门禁把该写**拦住**——host **不自动** `git worktree add`，而是由**模型调用「创建工作树 ACI 工具」**完成建 task worktree（含 task 分支）与**当前会话**根锚改绑；工具成功 = 树已在且会话根已切到该路径，此后本会话 mutate 只进该根。已绑定本会话 task worktree 时写路径直接放行，不建第二棵树。
 
 ### 2. 改绑只影响本会话（硬要求 2–5）
@@ -123,12 +127,60 @@ ADR-0019 D1.1 的默认解析（`workspaceRoot` 默认 `process.cwd()`）与 ser
 
 新裁决：**同一 run 内，从 `create-task-worktree` 成功后下一波 tool calls 起，mutate 在新根落地；中间不需要操作员再发消息，不需要 `/continue`**。具体生效边界见 §7.4。
 
+### 9. bash 围栏闭世界化：全档位 deny-by-default 反转与白名单裁决（2026-09-06 reopen）
+
+本节由 `plans/closed-world-bash-fence.md` T2 落盘，承接该计划「背景与病灶」三件：writable home 打底下其它 project / home 下任意路径在围栏内可写（黑名单永远枚举不完）、持久执行配置只有 `overlaySensitivePaths` 一层 tmpfs 罩、`~/.iknow/init.sh` 是被执行的持久文件（#896 的核心疑虑）。证据源：`scripts/sandbox-probe-closed-world.ts` 盘点（commit `d777c050`）——在「系统 ro-bind + cwd 可写 + /tmp、无 writable home bind」的假设围栏下逐条实测合法场景，产出 16 条 BREAK（node/npm/npx/bun exit 127 command not found、git 全局 config 读取与 worktree 操作 exit 128、`~/.iknow` / `~/.claude` 不可见 exit 2、login shell rc 不可读、主机 PATH 的 home 条目全部不可达等）。
+
+**闭世界围栏（closed-world fence）**：home 下非白名单路径**不可见**——不是「可见但只读」，是 mount 面上不存在；可写集 = `taskRoot` + `/tmp`；白名单之外的读通道一律 deny-by-default，按需以 ro-bind 显式放行。
+
+#### 9.1 全档位语义反转（a）
+
+- 反转适用于**全部档位**（OFF / ON / 改绑后）：OFF 档的 bash 围栏同样闭世界。理由：若 OFF 档保留 writable home，其它 project 在默认档仍可写，病灶 1 不闭合，反转对默认使用面无意义。
+- 因此 **superseded**（仅就 bash 围栏物理面）：§1 OFF「会话行为与今日完全一致」中围栏 argv 与 home 可见性的承诺；Amendment 2026-09-05 (d)「OFF / 未改绑 = argv 与今日逐字节一致」；Positive「默认 OFF 保证零回归路径」。§1 OFF 其余语义（门禁不拦、根不改绑、permission 现状）不变。
+- harness 层写（memory_save / settings 写回 / trust / recents / state.json）不经 bash 围栏，闭世界不触及；#896 的「memory_save 兼容面」因此不构成白名单项。
+
+#### 9.2 读/写白名单裁决（b）
+
+读白名单逐条列名 + 在场理由（每条可溯源到盘点证据）：
+
+1. **系统前缀** `/usr` `/bin` `/lib` `/lib64` `/etc`（现状保留）+ 可选主机前缀 `/opt` `/snap`（存在性跳过，现状保留）——工具链与基础命令的宿主；反转不拆除这组既有 ro-bind。
+2. **`taskRoot`（cwd）**——可写 bind，工作树本体。「写与工具 cwd 只问它」（§4）在物理面落为这条可写 bind。
+3. **`/tmp`**——可写 tmpfs。进程临时面，也是 npm / pip 等被拒缓存写的落点。
+4. **`installRoot`**——`resolveSessionRoots` 既有第四角色（§4），项目自身工具链（`node_modules/.bin`、tsc 等）的读通道；合同输入，fail-loud 见 §9.4 配置故障型。
+5. **node 工具链根** = `dirname(process.execPath)`（运行 harness 的 node 所在目录），npm / npx 随 node 根可达。盘点实测：围栏内 node / npm / npx 全部 exit 127 command not found、`which node` exit 1（本机 node 链 = `~/node/bin`，非 `~/.nvm` 形态）。若 node 本就在系统前缀下，该根与第 1 条去重塌缩，不新增 bind；合同输入。
+6. **`projectIdentityRoot`（主仓 checkout）**——闭世界下**恒进**读白名单，不再是条件 overlay / 条件只读放行（§4「父会话引擎的工具 sandbox…放只读行」配套约束由本条接管）。主仓 `.git` gitdir 随之可达，修复盘点实测的 worktree repo 发现断链：`git -C <taskRoot> status` / `git var GIT_COMMITTER_IDENT` exit 128 `fatal: not a git repository`——worktree 的 `.git` file 指向主仓 gitdir，主仓不可达时 repo 发现先死。仅 `isolationEnabled` 时由装配层提供（与今日传递条件一致；未改绑时 `.git` 就在 cwd 内，本不缺读通道），不再以「已改绑」为条件；合同输入，fail-loud 见 §9.4 配置故障型。
+7. **git 全局配置** `~/.gitconfig` 与 `~/.config/git/config`——**可选读成员，存在性跳过**（缺席不炸，不同于合同根）。修复盘点实测的 `Committer identity unknown`（`cd /tmp && git var GIT_COMMITTER_IDENT`，纯身份轴钉在 @/tmp 隔离条上）。缺席时 git 身份解析失败 = 运行时可观察错误（§9.4 运行时可观察型）；单文件只读，风险面低。
+
+**写白名单：`taskRoot` + `/tmp`，无第三者。**
+
+明确不进白名单（拒绝理由在案，防止日后重提）：
+
+- **`~/.bun`**：bun 仅 host 测试工作流使用，围栏内断链可观察、可接受（盘点：`bun -v` exit 127，证据在案）。
+- **npm / pip 缓存**：可重建，围栏内的缓存写应落 `/tmp`（盘点：缓存目录可达性 test exit 1，连带不可达）。
+- **`~/.claude`**：凭证与会话数据面，读也不放行（盘点：`ls` exit 2 不可见，维持）。
+- **shell rc 文件**（`~/.bashrc` / `~/.profile`）：login bash 已可用（盘点：`bash -lc 'echo ok'` exit 0，rc 不可见对 login bash 非致命）；rc 不可见消除持久副作用面，是接受项甚至有利面。
+- **`~/.iknow`**：读放行 = 可执行面（`init.sh` 是被执行的持久文件，#896 关闭的正是这个面）；memory 写不经 bash 围栏，不需要读通道（盘点：`ls ~/.iknow` exit 2；`init.sh` 主机即不存在 = skip）。
+- **`~/.ssh`**：by-design（盘点同条，不可见即设计意图）。
+- **PATH 重建**（不是路径放行，是 env 装配规则）：剔除 home 下不可达条目，按围栏内可见 bin 目录重组；重建失败 = 运行时可观察错误（§9.4）。盘点：主机 56 条 PATH 中 home 下条目全部不可达。
+
+#### 9.3 Amendment 2026-09-05 identity overlay 条款 superseded（c）
+
+理由：闭世界下 home 不可写，「writable 祖先罩住主仓」的病灶消失；overlay 是对 writable-home 形态的补罩，母形态消失后即无操作，identity 根降级为 §9.2 第 6 条读白名单成员。
+
+- **superseded**：(a) overlay 条件（ON 且已改绑才挂 overlay）；(b) argv 顺序合同（身份根 `--ro-bind` 后挂于 writable home `--bind` 之后的覆盖排序）；(d) OFF / 未改绑 = argv byte-identical；(e) 中「同一 overlay token」的 overlay 表述。
+- **存续**：(c) fail-loud 条款（身份根空白 / 盘上不存在 = typed 错误不 spawn、禁止 `existsSync` 静默跳过）不 superseded，由 §9.4 配置故障型继承并扩展到全部合同输入根；(e) 的模型可见写根语义与 §7.2 batch 快照语义（D2）不 superseded——前台（`bash.ts`）与后台（`defaultBackgroundSpawn`）同一波必须消费**同一份围栏 policy** 的要求换表述保留（CONTEXT「沙箱纪律」不变）。
+
+#### 9.4 白名单 miss 的 typed fail-loud 分型与 EXIT 条款（d）
+
+- **配置故障型（合同输入，spawn 前 fail-loud）**：白名单合同根**空白或盘上不存在**——`installRoot` / `projectIdentityRoot` / `taskRoot` / tmp / node 工具链根（§9.2 第 2、4、5、6 条与写根）。抛 typed error（`ToolExecutionError` 系，对齐 Amendment 2026-09-05 (c) 纪律），**不 spawn**、不 `existsSync` 静默跳过。错误面：工具执行直接抛错并冒泡到调用方。**EXIT = 该 tool call 失败**，会话不静默降级。
+- **运行时可观察型（工具链断链）**：未放行二进制不可达（如 `~/.nvm` 形态的 node 链）、PATH 重建后命令仍找不到、git 身份缺失、可选 git 全局配置缺席（§9.2 第 7 条）。命令以非零退出码 + stderr 经 tool result 正常冒泡，**不静默降级、不自动扩白名单**。错误面：模型在 tool result 层观察失败。**EXIT = 单命令失败**，由模型在 tool result 层观察并处理（换命令 / 改道 / 上报）。
+
 ## Consequences
 
 ### Positive
 
 - 多会话并行不再互踩：ON 时首个 mutate 后会话获得物理隔离的写目录，主仓保持只读。
-- 默认 OFF 保证零回归路径；操作员显式 opt-in 才改变行为。
+- 默认 OFF 保证零回归路径；操作员显式 opt-in 才改变行为。（**2026-09-06 reopen 标 superseded**：围栏反转是全档位语义变更，OFF 档 bash 围栏同样闭世界，见 §9.1。）
 - git worktree ≠ workspace 多根的边界写死，避免把本开关与 serve 主根 / `workspaceRoot` 语义搅在一起。
 - model-provision 契约与「活 `taskRoot`」补齐后，「拦下 → 工具建树 → 同 run 内 mutate 落地」整条链路零操作员介入，且 fail-closed 不降级。
 
@@ -150,3 +202,4 @@ ADR-0019 D1.1 的默认解析（`workspaceRoot` 默认 `process.cwd()`）与 ser
 - `plans/worktree-isolation-model-provision.md` ACR 5/5 PASS（2026-08-30）——auto-provision → model-provision amendment 来源（issue #836，地图 #829）。
 - 2026-08-31 amendment（commit `f6137d61`）：rebind 切 `taskRoot` 单字段，ADR-0019 per-root 状态锚不被搬走。
 - 2026-09-02 reopen：实测证据见 `plans/worktree-live-task-root.md` §1（trace MCP 读 `conversation_id = d52e0f28-…`，run `9b69b055`，三条 mutate 被同源门禁拦死）；架构改造 ACR 5/5 **BLOCKED no** 落于 `plans/worktree-live-task-root.md` §4，五条 no 的 discharge 映射见同 plan §5 D1–D11；T2（本文 ADR 改写）为 reopen 的 decision record，无运行时代码。
+- 2026-09-06 reopen：闭世界断链实测见 `scripts/sandbox-probe-closed-world.ts` 盘点（commit `d777c050`）——16 条 BREAK（node/npm/npx/bun exit 127、git 全局 config 读取与 worktree repo 发现 exit 128、`~/.iknow` / `~/.claude` 不可见 exit 2、login shell rc 不可读、PATH home 条目不可达等）；白名单集合裁决与 fail-loud 分型见 §9（`plans/closed-world-bash-fence.md` T2）。
