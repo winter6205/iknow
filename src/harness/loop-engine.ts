@@ -427,6 +427,52 @@ async function commitMessagesOrThrow(
   }
 }
 
+/**
+ * #888 save-fork 修复:run 作用域的注入消息 pending 缓冲。
+ *
+ * appendGraphModeChange / appendMcpReconnect / appendAgentStatusBar 把 user
+ * 注入消息 immutable 追加进内存权威历史,但从不经过 commitMessagesOrThrow
+ * 落 JSONL 链。run 结束后宿主收尾 save(hub / chat)把含注入消息的内存
+ * 投影与纯 commit 链做 LCP
+ * 对齐,在第一条注入消息处 jsonDeepEqual 失配 → planSessionSave 判 fork,
+ * parent 回落、真实前缀孤儿化,下一个 run 从 query 重放整轮(#888 现象)。
+ *
+ * 本缓冲让注入消息在下一次 assistant / tool_result commit 时随批 flush
+ * (loop-detected envelope 的既有先例同形态),恢复不变式:
+ *   「内存权威历史 − seed query」==「盘上 commit 链 − 宿主懒提交的 query 前缀」。
+ * 停止路径处置:
+ *   - cancelled:run() 收尾在 appendSystemInterrupt 后把 pending + system
+ *     interrupt 一起 flush(收尾 save 的投影与链对齐,不 fork);
+ *   - protocolError / emptyFinalResponse:pending 丢弃(#120 裁决:turn 不进
+ *     历史,save 判 prefix/extension,零新增 fork 面);
+ *   - timeout / fused / nonSuccessStop:pending 已随最后一个 tool_result /
+ *     assistant commit flush,无残留。
+ *   - compact(reactive / proactive)重建历史后 pending 清空:压缩产物与
+ *     旧链本就不可 LCP 对齐(既有 fork-copy 语义),flush 旧 pending 只会
+ *     把可能已不在内存的消息写上盘。
+ * 钩子缺席(commitMessages undefined)时缓冲仍照常累积/清空——flush 是
+ * no-op,零 IO 语义不变。
+ */
+function createPendingInjected() {
+  let pending: AnthropicNativeMessage[] = [];
+  return {
+    /** 注入点调用:入缓冲,返回该消息供 appendMessage 追加进权威历史。 */
+    record(msg: AnthropicNativeMessage): AnthropicNativeMessage {
+      pending.push(msg);
+      return msg;
+    },
+    /** commit 点调用:返回全部 pending 并清空(flush 即清,顺序保持)。 */
+    take(): AnthropicNativeMessage[] {
+      if (pending.length === 0) return [];
+      const flushed = pending;
+      pending = [];
+      return flushed;
+    },
+  };
+}
+
+type PendingInjected = ReturnType<typeof createPendingInjected>;
+
 function appendMessage(opts: {
   readonly state: LoopState;
   readonly msg: AnthropicNativeMessage;
@@ -448,11 +494,15 @@ function appendMessage(opts: {
  * `agent_status` 流事件 —— TUI 只读最新现势的读口;事件字段即栏的数据字段,
  * 两处不可能分叉(单一真源)。观察者异常被 safeEmitStream 吞咽,不反流进
  * 模型回合。deps.agentStatus 缺席 → 无栏也无事件(ask / worker 路径)。
+ *
+ * #888:注入消息同时 record 进 pending 缓冲 —— 下一次 assistant / tool_result
+ * commit 时随批 flush 上盘,消除 save-fork。
  */
 async function appendAgentStatusBar(
   state: LoopState,
   deps: LoopEngineDeps,
   lastTool: string,
+  pendingInjected: PendingInjected,
   onStream?: (event: HarnessStreamEvent) => void
 ): Promise<LoopState> {
   if (deps.agentStatus === undefined) return state;
@@ -465,10 +515,9 @@ async function appendAgentStatusBar(
     lastTool: snapshot.lastTool,
     openTodoLines: snapshot.openTodoLines,
   });
-  return appendMessage({
-    state,
-    msg: deps.adapter.encodeUserText(snapshot.text),
-  });
+  const msg = deps.adapter.encodeUserText(snapshot.text);
+  pendingInjected.record(msg);
+  return appendMessage({ state, msg });
 }
 
 /**
@@ -515,10 +564,13 @@ async function appendEnvSnapshot(
  * 判定次序:appendAgentStatusBar 之前调用,确保 status bar 在
  * graph 切换提示之后(后注入的 message 排在末尾,模型面看到的次序
  * 与写入次序一致)。
+ *
+ * #888:切换提示同样 record 进 pending 缓冲,随下一批 commit flush。
  */
 async function appendGraphModeChange(
   state: LoopState,
   deps: LoopEngineDeps,
+  pendingInjected: PendingInjected,
   onStream?: (event: HarnessStreamEvent) => void
 ): Promise<LoopState> {
   const seam = deps.graphModeChange;
@@ -539,10 +591,9 @@ async function appendGraphModeChange(
     type: "graph_mode_changed",
     enabled: next,
   });
-  return appendMessage({
-    state,
-    msg: deps.adapter.encodeUserText(text),
-  });
+  const msg = deps.adapter.encodeUserText(text);
+  pendingInjected.record(msg);
+  return appendMessage({ state, msg });
 }
 
 /**
@@ -570,8 +621,14 @@ export const MCP_RECONNECT_NOTIFICATION_TEMPLATE =
  *
  * 判定次序:与 appendGraphModeChange 并列,appendAgentStatusBar 之前调用,
  * 保证 status bar 在重连提示之后(模型读到时序 = 重连告知 → 现势栏)。
+ *
+ * #888:重连提示同样 record 进 pending 缓冲,随下一批 commit flush。
  */
-function appendMcpReconnect(state: LoopState, deps: LoopEngineDeps): LoopState {
+function appendMcpReconnect(
+  state: LoopState,
+  deps: LoopEngineDeps,
+  pendingInjected: PendingInjected
+): LoopState {
   const seam = deps.mcpReconnect;
   if (seam === undefined) return state;
   const pending = seam.takePending();
@@ -582,10 +639,9 @@ function appendMcpReconnect(state: LoopState, deps: LoopEngineDeps): LoopState {
       "<server>",
       event.server
     ).replace("<tools>", event.tools.join(", "));
-    next = appendMessage({
-      state: next,
-      msg: deps.adapter.encodeUserText(text),
-    });
+    const msg = deps.adapter.encodeUserText(text);
+    pendingInjected.record(msg);
+    next = appendMessage({ state: next, msg });
   }
   return next;
 }
@@ -1476,6 +1532,8 @@ async function executeWaveAndCommit(opts: {
   readonly blocks: AnthropicContentBlock[];
   /** F-4:本回合 trace turn id,透传到 ctx.turnId(spawn_subagent 的归属回合)。 */
   readonly turnId: string;
+  /** #888:注入消息随第一个 tool_result commit 随批 flush。 */
+  readonly pendingInjected: PendingInjected;
   readonly onStream?: (event: HarnessStreamEvent) => void;
 }): Promise<void> {
   const slots: Array<ToolExecutionResult | undefined> = Array.from(
@@ -1491,6 +1549,7 @@ async function executeWaveAndCommit(opts: {
       const encoded = opts.deps.adapter.encodeToolResults([result]);
       opts.blocks.push(...encoded);
       await commitMessagesOrThrow(opts.deps, [
+        ...opts.pendingInjected.take(),
         { role: "user", content: encoded },
       ]);
     }
@@ -1523,6 +1582,8 @@ async function runToolPhase(opts: {
   readonly started: number;
   /** F-4:本回合 trace turn id(见 executeWaveAndCommit)。 */
   readonly turnId: string;
+  /** #888:注入消息随第一个 tool_result commit 随批 flush。 */
+  readonly pendingInjected: PendingInjected;
   readonly onStream?: (event: HarnessStreamEvent) => void;
 }): Promise<{
   transition: Transition;
@@ -1555,6 +1616,7 @@ async function runToolPhase(opts: {
       results,
       blocks,
       turnId: opts.turnId,
+      pendingInjected: opts.pendingInjected,
       onStream: opts.onStream,
     });
   }
@@ -1640,6 +1702,8 @@ async function stepWithTrace(opts: {
   readonly lastToolRef: { lastTool: string };
   /** #672 T3:本 run 工具环事件（跨 step 累积；public step 每次新建）。 */
   readonly toolLoopRef: { events: ToolLoopEvent[]; nextPhase: number };
+  /** #888:run 作用域注入消息 pending 缓冲(public step 每次新建)。 */
+  readonly pendingInjected: PendingInjected;
 }): Promise<{
   transition: Transition;
   turn: TurnTrace | null;
@@ -1703,15 +1767,21 @@ async function stepWithTrace(opts: {
   const graphModeState = await appendGraphModeChange(
     opts.state,
     opts.deps,
+    opts.pendingInjected,
     opts.onStream
   );
   // B4 / ADR-0043 §4:MCP 手动重连追加缝 —— 与 graphModeChange 同段
   // (环境级事件),在 status bar 之前消费 pending。seam 缺席 → 零追加。
-  const mcpReconnectState = appendMcpReconnect(graphModeState, opts.deps);
+  const mcpReconnectState = appendMcpReconnect(
+    graphModeState,
+    opts.deps,
+    opts.pendingInjected
+  );
   const barState = await appendAgentStatusBar(
     mcpReconnectState,
     opts.deps,
     opts.lastToolRef.lastTool,
+    opts.pendingInjected,
     opts.onStream
   );
   // #653 G1 T5:环境现势快照 —— 与 agent_status 同一回合边界(栏先、
@@ -1741,19 +1811,22 @@ async function stepWithTrace(opts: {
           const compactedWithGraph = await appendGraphModeChange(
             firstPhase.state,
             opts.deps,
+            opts.pendingInjected,
             opts.onStream
           );
           // B4 / ADR-0043 §4:reactive compact 重试前同样消费重连 pending
           // (同 round 两次模型调用之间手动重连可能完成)。
           const compactedWithReconnect = appendMcpReconnect(
             compactedWithGraph,
-            opts.deps
+            opts.deps,
+            opts.pendingInjected
           );
           // 栏追加在 compact 之后(压缩产物尾部),重试请求的末尾即最新一条栏。
           const compactedWithBar = await appendAgentStatusBar(
             compactedWithReconnect,
             opts.deps,
             opts.lastToolRef.lastTool,
+            opts.pendingInjected,
             opts.onStream
           );
           // #653 G1 T5:reactive compact 重试的同一回合边界同样发环境现势。
@@ -1938,9 +2011,11 @@ async function stepWithTrace(opts: {
   // 纯文本收尾与工具回合共用此 commit 点。
   // D2 (tui-display-consistency):assistant commit 顺带传 turnResult.thinkingMs
   // (流式臂 stepStreamArm 测得;非流式 / 边界形态 → undefined)。
+  // #888:批头拼上 pending 注入消息(bar / graph / mcp),flush 即清空 ——
+  // 盘上 commit 链与内存权威历史恢复逐条 LCP 对齐,save 不再 fork。
   await commitMessagesOrThrow(
     opts.deps,
-    [turnResult.nativeMessage],
+    [...opts.pendingInjected.take(), turnResult.nativeMessage],
     turnResult.thinkingMs
   );
 
@@ -1991,6 +2066,7 @@ async function stepWithTrace(opts: {
     signal: opts.signal,
     started,
     turnId,
+    pendingInjected: opts.pendingInjected,
     onStream: opts.onStream,
   });
 
@@ -2091,7 +2167,12 @@ async function stepWithTrace(opts: {
       const envelope = freezeMessage(
         opts.deps.adapter.encodeUserText(LOOP_DETECTED_TEXT)
       );
-      await commitMessagesOrThrow(opts.deps, [envelope]);
+      // #888:envelope 自身入盘的批同样先 flush pending 注入(bar 等),
+      // 顺序与内存权威历史一致。
+      await commitMessagesOrThrow(opts.deps, [
+        ...opts.pendingInjected.take(),
+        envelope,
+      ]);
       const fusedState = appendMessage({
         state: toolPhase.transition.nextState,
         msg: envelope,
@@ -2136,7 +2217,8 @@ export async function step(
   signal?: AbortSignal
 ): Promise<Transition> {
   // #645 T1:单步语义 —— 每次调用新建 lastToolRef(初值 idle,单步内工具批
-  // 后更新,与 run 的回合作用域状态互不共享)。
+  // 后更新,与 run 的回合作用域状态互不共享)。#888:pendingInjected 同理
+  // 每次新建(单步的注入随本步 commit flush,跨 step 不残留)。
   const { transition } = await stepWithTrace({
     state,
     deps,
@@ -2144,6 +2226,7 @@ export async function step(
     reactiveAttemptedRef: { attempted: false },
     lastToolRef: { lastTool: AGENT_STATUS_IDLE_TOOL },
     toolLoopRef: { events: [], nextPhase: 0 },
+    pendingInjected: createPendingInjected(),
   });
   return transition;
 }
@@ -2224,6 +2307,8 @@ export async function run(
   // 一个成功工具名;跨 step 共享,run 结束即弃。
   const lastToolRef = { lastTool: AGENT_STATUS_IDLE_TOOL };
   const toolLoopRef = { events: [] as ToolLoopEvent[], nextPhase: 0 };
+  // #888:run 作用域注入消息 pending 缓冲(见 createPendingInjected)。
+  const pendingInjected = createPendingInjected();
   while (true) {
     // #119 T7:compress 缝缺省(字段缺席)→ 跳过检查,行为零变化(byte-identical)。
     // 仅 turnCount 自增(>lastCompactTurn)后扫一次,避免每轮重复 estimate。
@@ -2270,6 +2355,10 @@ export async function run(
           // 否则可变普通对象进入权威历史,违反 append-only immutable 不变式。
           state = compactedState;
           lastCompactTurn = state.turnCount;
+          // #888:压缩产物与旧链本就不可 LCP 对齐(既有 fork-copy 语义),
+          // 旧 pending 注入只可能指向已不存在的消息位置 —— 丢弃缓冲,
+          // 让压缩后的新注入随新 commit flush。
+          pendingInjected.take();
         }
       }
     }
@@ -2287,6 +2376,7 @@ export async function run(
         reactiveAttemptedRef,
         lastToolRef,
         toolLoopRef,
+        pendingInjected,
       });
     } catch (err) {
       if (err instanceof MaxTurnsExceeded) {
@@ -2326,6 +2416,22 @@ export async function run(
         reason === "cancelled"
           ? appendSystemInterrupt(finalState).messages
           : finalState.messages;
+      // #888:cancelled 收尾把 system interrupt(以及任何残留 pending 注入)
+      // 一起 flush —— system interrupt 与状态栏同属「进内存不进 commit 流」
+      // 的注入类消息,不 flush 则宿主收尾 save 在此处 LCP 失配 fork。
+      // 无 commitMessages 钩子时 no-op(零 IO 语义不变)。其余停因
+      // (protocolError / emptyFinalResponse = #120 裁决 turn 不进历史;
+      // completed / timeout / fused / nonSuccessStop 的 pending 已随最后
+      // commit flush)均无残留或按裁决丢弃。
+      if (reason === "cancelled") {
+        await commitMessagesOrThrow(deps, [
+          ...pendingInjected.take(),
+          {
+            role: "system",
+            content: [{ type: "text", text: SYSTEM_INTERRUPT_TEXT }],
+          },
+        ]);
+      }
       const finalText =
         reason === "completed" ? deriveFinalText(finalMessages) : null;
       const result: RunResult = {
