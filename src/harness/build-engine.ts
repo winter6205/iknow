@@ -78,6 +78,7 @@ import {
   initIknowWorkspaceSafe,
   createGitSnapshotProvider,
   type McpServiceSummary,
+  type McpToolSummary,
 } from "./identity/index.js";
 import {
   resolveProjectMemoryDir,
@@ -519,8 +520,9 @@ export async function buildHarnessEngine(
   // `memoryEnabled ? ... : undefined` 形态)。
   // #337 T8:skill catalog 装配 — scanSkillDirs 读三级目录
   // (~/.iknow/skills → <cwd>/.iknow/skills → IKNOW_SKILL_DIRS),createSkillCatalog
-  // 装好后注入 reg 的 skillCatalog opt → registry 含 skill / skill_search 两件
-  // (全 surface,ask 也装配 — SC12 守门)。
+  // 装好后注入 reg 的 skillCatalog opt → registry 含 skill 一件
+  // (全 surface,ask 也装配 — SC12 守门)。disclosure-index-align T2:skill_search
+  // 已删(spec ADR-0046 / SC5),只剩 skill 一件。
   // **降级契约**:scanner 自身 try/catch + warn(目录缺失跳过),scan 抛错被
   // createSkillScanner 的 warn 吞掉,build 不阻塞装配。
   // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）。
@@ -945,14 +947,24 @@ export async function buildHarnessEngine(
       .status()
       .map((server) => {
         const prefix = `mcp__${server.name}__`;
-        const toolNames: string[] = [];
+        const tools: McpToolSummary[] = [];
         for (const def of reg!.catalog.all()) {
-          if (def.name.startsWith(prefix)) toolNames.push(def.name);
+          if (!def.name.startsWith(prefix)) continue;
+          // description 缺席/空 → tool 行不带描述（契约允许态,见
+          // mcpNameDirectorySegment 注释）。toAciToolDef 已经把
+          // tool.description ?? "" 落进 ToolDef.description,所以这里读
+          // 出空字符串一律视为"无描述"。
+          tools.push({
+            name: def.name,
+            ...(def.description.length > 0
+              ? { description: def.description }
+              : {}),
+          });
         }
         return {
           name: server.name,
           state: server.state,
-          tools: toolNames,
+          tools,
         } satisfies McpServiceSummary;
       })
       .filter((s) => s.state === "connected");

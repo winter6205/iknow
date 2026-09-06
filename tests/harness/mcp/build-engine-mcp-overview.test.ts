@@ -1,13 +1,15 @@
-// #631 T2 — build-engine deps.system 接线测试：MCP 概览段经唯一授权缝
-// (createIknowSystemResolver opts.mcp) 注入。
+// disclosure-index-align T1 — build-engine deps.system 接线测试：MCP 名字目录段经
+// 唯一授权缝（createIknowSystemResolver opts.mcp）注入。
 //
 // 链路：project 级 mcp.json → createMcpManager（真）+ stub client（即时连接，
 // 两工具）→ registerExternal 入 catalog → deps.system() 装配期快照
-// (manager.status() + reg.catalog.all()) → 概览段渲染。
+// (manager.status() + reg.catalog.all()) → 名字目录段渲染。
 //
-// 覆盖：
-//  - connected 服务在场 → 段含 service 行 + 工具行 + tool_search 引导；
-//  - 无 mcp 配置（空服务列表）→ 段整体缺席，既有 <available_skills> 不受影响。
+// T1 contract（specs/disclosure-index-align.md Does #1 / SC1 + SC2）：
+//  - 每工具行：`- <name>` 或 `- <name>: <short desc>`（首行 + 限 120 字 + …）；
+//  - 描述缺席 → 只渲染工具名（契约允许态）；
+//  - 末行引导 = "Call a listed tool directly to load its schema and use it."；
+//  - 无 mcp 配置（零连接服务）→ 段整体缺席，<available_skills> 不受影响。
 
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -102,14 +104,14 @@ afterEach(async () => {
   );
 });
 
-describe("buildHarnessEngine — #631 T2 MCP 概览段接线", () => {
-  it("connected 服务在场 → deps.system() 含概览段（服务行 + 工具行 + tool_search 引导）", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-t2-mcp-overview-"));
+describe("buildHarnessEngine — disclosure-index-align T1 MCP 名字目录段接线", () => {
+  it("connected 服务在场 → deps.system() 含名字目录段（服务行 + 工具行 + 末行直呼引导）", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t1-mcp-overview-"));
     roots.push(root);
     await plantMcpConfig(root, ["stubsvc"]);
 
     const built = await buildHarnessEngine({
-      env: makeEnv("sk-test-t2-overview-1"),
+      env: makeEnv("sk-test-t1-overview-1"),
       askUser: createNoAskUser(),
       surface: "chat",
       userHome: join(root, "home"),
@@ -137,24 +139,32 @@ describe("buildHarnessEngine — #631 T2 MCP 概览段接线", () => {
     expect(systemText).toBeDefined();
     expect(systemText).toContain("<mcp_name_directory>");
     expect(systemText).toContain("stubsvc");
-    expect(systemText).toContain("- mcp__stubsvc__alpha");
-    expect(systemText).toContain("- mcp__stubsvc__beta");
-    // schema / description 不进名字目录（B4 披露分层：schema 须 tool_search）
+    // alpha 有描述 → '- <name>: <short desc>'，首行原样
+    expect(systemText).toContain(
+      "- mcp__stubsvc__alpha: Alpha tool does many useful things"
+    );
+    // beta 无描述 → 裸名（无 ": ..."）
+    expect(systemText).toMatch(/^- mcp__stubsvc__beta$/m);
+    expect(systemText).not.toMatch(/^- mcp__stubsvc__beta:/m);
+    // schema 不进名字目录（披露分层：schema 须 tool_search 按需）
     expect(systemText).not.toContain("inputSchema");
-    expect(systemText).not.toContain("Alpha tool does");
-    // 末行引导 tool_search 精查
-    expect(systemText).toContain("tool_search");
+    // 末行引导改为 "Call a listed tool directly..."
+    expect(systemText).toContain(
+      "Call a listed tool directly to load its schema and use it."
+    );
+    // 旧 tool_search 强制引导已撤
+    expect(systemText).not.toContain("Use tool_search");
     // 旧概览段已撤除
     expect(systemText).not.toContain("<mcp_tools_overview>");
   }, 30_000);
 
   it("服务名含 '-'（注册侧不 sanitize 服务段）→ 工具仍归属并渲染", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-t2-mcp-dashed-"));
+    const root = await mkdtemp(join(tmpdir(), "iknow-t1-mcp-dashed-"));
     roots.push(root);
     await plantMcpConfig(root, ["stub-svc"]);
 
     const built = await buildHarnessEngine({
-      env: makeEnv("sk-test-t2-overview-3"),
+      env: makeEnv("sk-test-t1-overview-3"),
       askUser: createNoAskUser(),
       surface: "chat",
       userHome: join(root, "home"),
@@ -178,17 +188,15 @@ describe("buildHarnessEngine — #631 T2 MCP 概览段接线", () => {
     expect(systemText).toContain("stub-svc");
     // 注册形态 = mcp__<原始服务名>__<sanitize(工具名)>；若投影侧
     // sanitize 服务段，此行会静默缺席。
-    expect(systemText).toContain("- mcp__stub-svc__alpha");
-    // description 不进名字目录（schema/description 经 tool_search 按需）
-    expect(systemText).not.toContain("Dashed server tool");
+    expect(systemText).toContain("- mcp__stub-svc__alpha: Dashed server tool");
   }, 30_000);
 
   it("无 mcp 配置（零连接服务）→ 段整体缺席，<available_skills> 不受影响", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-t2-mcp-empty-"));
+    const root = await mkdtemp(join(tmpdir(), "iknow-t1-mcp-empty-"));
     roots.push(root);
 
     const built = await buildHarnessEngine({
-      env: makeEnv("sk-test-t2-overview-2"),
+      env: makeEnv("sk-test-t1-overview-2"),
       askUser: createNoAskUser(),
       surface: "chat",
       userHome: join(root, "home"),

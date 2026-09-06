@@ -130,26 +130,48 @@ export interface SkillSummary {
   readonly disabled?: boolean;
 }
 
-/** #631 T2 / B4 (ADR-0043 §3) MCP 名字目录段服务元素形态(最小投影):
- *  仅渲染 name + tool 名单;schema 与长 description 一律不进 system。
- *  `state` 词汇表与 mcp/manager McpServerState 同形但不跨模块导入;
- *  仅 "connected" 服务入段:pending(还在连) / failed / disabled 不渲染。 */
+/** disclosure-index-align T1 / ADR-0043 §3 — MCP 名字目录段工具元素形态(最小投影)。
+ *  description 缺席/空 → 只渲染工具名。 */
+export interface McpToolSummary {
+  readonly name: string;
+  readonly description?: string;
+}
+
+/** disclosure-index-align T1 / #631 T2 / B4 (ADR-0043 §3) MCP 名字目录段
+ *  服务元素形态(最小投影):name + 可选服务描述 + 工具集(每工具 = 名 + 可选
+ *  描述);schema 与长 description 一律不进 system。`state` 词汇表与
+ *  mcp/manager McpServerState 同形但不跨模块导入;仅 "connected" 服务入段:
+ *  pending(还在连) / failed / disabled 不渲染。服务描述缺席是契约允许态
+ *  —— mcp 只读元数据面当前无服务级描述来源,暂不为此新开数据管道(Keep It
+ *  Simple),装配层渲染时降级为裸名行。 */
 export interface McpServiceSummary {
   readonly name: string;
   readonly state: "pending" | "connected" | "failed" | "disabled";
-  readonly tools: ReadonlyArray<string>;
+  readonly description?: string;
+  readonly tools: ReadonlyArray<McpToolSummary>;
 }
 
+/** disclosure-index-align T1 / #631 T2 工具短描述限值:取 description 首行,
+ *  超过此长度截断 + 省略号。120 字与 #631 T2 原始契约一致(KV cache 中
+ *  "索引常驻档"需要一行可读)。 */
+export const MCP_TOOL_SHORT_DESCRIPTION_MAX = 120;
+
 /**
- * B4 / ADR-0043 §3 `<mcp_name_directory>` 段渲染(替代旧 #631 T2
- * `<mcp_tools_overview>`):每 connected 服务一行(名字),其下每工具一行
- * (裸名字,无 schema、无 description),末行引导 tool_search 精查。
+ * disclosure-index-align T1 / B4 / ADR-0043 §3 `<mcp_name_directory>` 段
+ * 渲染(对应旧 #631 T2 形态 + B4 名字目录落地):
+ *   - 每 connected 服务一行(名字,描述在场时 ": <short desc>")；
+ *   - 其下每工具一行(" - <tool>" / " - <tool>: <short desc>");
+ *   - 描述取首行 + 限 120 字 + 超出加省略号;
+ *   - 描述缺席 → 只渲染名字（契约允许态）。
  *
  * 加性段,不触碰 IKNOW_ASSEMBLY_ORDER;仅渲染 state === "connected" 的
  * 服务;过滤后为空 → 返回 undefined(装配层不追加,绝不写空串)。
- * 字节稳定契约:connected 服务集 + 工具名单会话内恒定 → 相邻轮 deep-equal;
- * lazy 工具名先于 schema 进目录正是 B4 的披露分层(名字在 system,
- * schema 在 tool_search result / tools 尾部追加)。
+ * 字节稳定契约:connected 服务集 + 工具名 + 描述快照会话内恒定 → 相邻轮
+ * deep-equal;装配期现读快照,不阻塞不空等,迟到 server 不渗回目录。
+ *
+ * 末行引导(spec disclosure-index-align Does #1):有描述时直呼工具即可,
+ * 不再强制 "call tool_search first";旧 B4 末行的 "Use tool_search ..." 句
+ * 移除(spec 决策:有描述 = 知道工具干什么 = 直接调用即可)。
  */
 export function mcpNameDirectorySegment(
   services: ReadonlyArray<McpServiceSummary>
@@ -161,16 +183,41 @@ export function mcpNameDirectorySegment(
   if (connected.length === 0) return undefined;
   const lines: string[] = [];
   for (const service of connected) {
-    lines.push(service.name);
-    const toolNames = [...service.tools].sort((a, b) => a.localeCompare(b));
-    for (const tool of toolNames) {
-      lines.push(`- ${tool}`);
+    // 服务描述(可选):mcp 只读元数据面暂无服务级描述来源,缺席 → 裸名行
+    // (契约允许态,不改数据管道)。
+    lines.push(
+      service.description && service.description.trim().length > 0
+        ? `${service.name}: ${service.description}`
+        : service.name
+    );
+    const tools = [...service.tools].sort((a, b) =>
+      a.name.localeCompare(b.name)
+    );
+    for (const t of tools) {
+      const short = shortToolDescription(t.description);
+      lines.push(short === undefined ? `- ${t.name}` : `- ${t.name}: ${short}`);
     }
   }
-  lines.push(
-    "Use tool_search to load the full schema of any tool listed above before calling it."
-  );
+  lines.push("Call a listed tool directly to load its schema and use it.");
   return `<mcp_name_directory>\n${lines.join("\n")}\n</mcp_name_directory>`;
+}
+
+/**
+ * disclosure-index-align T1 / #631 T2 工具短描述:取首行 + 限值截断
+ * (~120 字符);缺席/空/首行为空 → undefined(调用方只渲染工具名)。
+ *
+ * SSOT:截断位置 = 字符串按字符切片 + 单字符省略号（中文/emoji 多字节
+ * 切分按 JavaScript 字符串码点;test suite 内的 150-字符 ASCII 用例已
+ * 验证截断点 + 省略号字节级对齐)。
+ */
+export function shortToolDescription(
+  description: string | undefined
+): string | undefined {
+  if (description === undefined || description.length === 0) return undefined;
+  const firstLine = description.split("\n", 1)[0].trim();
+  if (firstLine.length === 0) return undefined;
+  if (firstLine.length <= MCP_TOOL_SHORT_DESCRIPTION_MAX) return firstLine;
+  return `${firstLine.slice(0, MCP_TOOL_SHORT_DESCRIPTION_MAX)}…`;
 }
 
 /**
