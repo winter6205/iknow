@@ -1,6 +1,6 @@
 # worktree 命名映射与工具面优化
 
-Status: draft（调研 + 方案，未开 issue）
+Status: superseded for naming — labeled leaf is `<slug>` (PR #901); identity is gitdir sidecar. SSOT: `specs/task-worktree-lifecycle.md` / CONTEXT `task worktree label`. This file remains research for list/remove/tool surface (already landed separately).
 Date: 2026-09-03
 Basis: ADR-0037（§3 命名合同 / §4 会话根角色 / §7 活 taskRoot）、`plans/worktree-isolation-model-provision.md`（T4/T7/T8）、`plans/worktree-live-task-root.md`、`docs/wayfinder/research-831-gate-tool-surface.md`
 
