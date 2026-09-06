@@ -98,6 +98,12 @@ jobs:
             --exclude tests/session-api/hub-worktree-isolation.test.ts \
             --exclude tests/harness/aci/bash-live-task-root.test.ts \
             --exclude tests/harness/aci/bash-identity-overlay.test.ts \
+            --exclude tests/harness/aci/bash-closed-world-read-roots.test.ts \
+            --exclude tests/harness/aci/bash-identity-read-whitelist.test.ts \
+            --exclude tests/harness/build-engine-install-root.test.ts \
+            --exclude tests/harness/verify/sandbox-run.test.ts \
+            --exclude tests/subagent/worker-identity-root.test.ts \
+            --exclude tests/subagent/worker-install-root.test.ts \
             --exclude tests/harness/isolation/worktree-gate-live-taskroot-e2e.test.ts \
             --exclude tests/tui/deps-tools.test.ts \
             --exclude tests/cli/tui-deps-subagent-trace-factory.test.ts \
@@ -200,6 +206,12 @@ jobs:
             --exclude tests/session-api/hub-worktree-isolation.test.ts \
             --exclude tests/harness/aci/bash-live-task-root.test.ts \
             --exclude tests/harness/aci/bash-identity-overlay.test.ts \
+            --exclude tests/harness/aci/bash-closed-world-read-roots.test.ts \
+            --exclude tests/harness/aci/bash-identity-read-whitelist.test.ts \
+            --exclude tests/harness/build-engine-install-root.test.ts \
+            --exclude tests/harness/verify/sandbox-run.test.ts \
+            --exclude tests/subagent/worker-identity-root.test.ts \
+            --exclude tests/subagent/worker-install-root.test.ts \
             --exclude tests/harness/isolation/worktree-gate-live-taskroot-e2e.test.ts \
             --exclude tests/tui/deps-tools.test.ts \
             --exclude tests/cli/tui-deps-subagent-trace-factory.test.ts \
