@@ -39,6 +39,7 @@
 - `251-lsp-tool.md` — LSP 工具（自建客户端 + TS 首期）
 - `302-lsp-multilang.md` — LSP 多语言泛化
 - `337-skill-mcp-extension.md` — skill + MCP 扩展源
+- `disclosure-index-align.md` — 索引档对齐（#631 短描述收回、直呼加载、超限降档、删 `skill_search`）；amends ADR-0043 必经 `tool_search` 读法；plan: `plans/disclosure-index-align.md`
 - `406-secret-roundtrip-mask.md` — Secret roundtrip mask（supersedes `#126` hook-system）
 - `task-worktree-lifecycle.md` — 隔离 ON 后进树/命名/list/remove 与身份根 grep·glob；plan: `plans/task-worktree-lifecycle.md`（amend ADR-0037 §3）；门禁分类与 unbound 文案 **amended by** `casual-ask-context-hygiene.md`
 
