@@ -16,12 +16,15 @@
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { chmodSync } from "node:fs";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   rm,
   readdir,
   readFile,
+  stat,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -47,6 +50,12 @@ beforeEach(async () => {
 afterEach(async () => {
   await rm(todoDir, { recursive: true, force: true });
 });
+
+/** 某目录下形如 `todos.<unixMs>.<hex>.md` 的快照文件名(SSOT — 与 replace 路径产出的命名形态对齐)。 */
+async function listSnapshotNames(dir: string): Promise<string[]> {
+  const entries = await readdir(dir);
+  return entries.filter((n) => /^todos\.\d+\.[0-9a-f]{12}\.md$/.test(n));
+}
 
 // -- tool shape / metadata ---------------------------------------------------
 
@@ -232,11 +241,7 @@ describe("createTodoWriteTool — mode=replace", () => {
       conversationId: ctx.conversationId,
     });
     const dir = join(todoDir, ctx.conversationId);
-    const { readdir } = await import("node:fs/promises");
-    const allEntries = await readdir(dir);
-    const snapshotNames = allEntries.filter(
-      (n) => n.startsWith("todos.") && n.endsWith(".md") && n !== "todos.md"
-    );
+    const snapshotNames = await listSnapshotNames(dir);
     assert.equal(snapshotNames.length, 1, "exactly one snapshot file");
     const snapshotPath = join(dir, snapshotNames[0]);
     const snapshotContent = await readFile(snapshotPath, "utf8");
@@ -246,8 +251,6 @@ describe("createTodoWriteTool — mode=replace", () => {
       currentContent,
       `${formatOpenLine("new-1")}${formatOpenLine("new-2")}`
     );
-    // 快照文件名形态:`todos.<unixMs>.<hex>.md`(hex 长度=12)
-    assert.match(snapshotNames[0], /^todos\.\d+\.[0-9a-f]{12}\.md$/);
   });
 
   it("replace 后 `list` 只返回新现行,不含快照正文", async () => {
@@ -279,11 +282,7 @@ describe("createTodoWriteTool — mode=replace", () => {
     await tool.handler({ mode: "replace", items: ["x"] }, ctx);
 
     const dir = join(todoDir, ctx.conversationId);
-    const { readdir } = await import("node:fs/promises");
-    const allEntries = await readdir(dir);
-    const snapshotNames = allEntries.filter(
-      (n) => n.startsWith("todos.") && n.endsWith(".md") && n !== "todos.md"
-    );
+    const snapshotNames = await listSnapshotNames(dir);
     assert.equal(snapshotNames.length, 0, "no snapshot for empty current");
     const content = await readFile(currentPath, "utf8");
     assert.equal(content, formatOpenLine("x"));
@@ -301,11 +300,7 @@ describe("createTodoWriteTool — mode=replace", () => {
     await tool.handler({ mode: "replace", items: ["only"] }, ctx);
 
     const dir = join(todoDir, ctx.conversationId);
-    const { readdir } = await import("node:fs/promises");
-    const allEntries = await readdir(dir);
-    const snapshotNames = allEntries.filter(
-      (n) => n.startsWith("todos.") && n.endsWith(".md") && n !== "todos.md"
-    );
+    const snapshotNames = await listSnapshotNames(dir);
     assert.equal(snapshotNames.length, 0, "no snapshot when current missing");
     const content = await readFile(currentPath, "utf8");
     assert.equal(content, formatOpenLine("only"));
@@ -326,11 +321,7 @@ describe("createTodoWriteTool — mode=replace", () => {
     assert.equal(out, "Updated todos.md");
 
     const dir = join(todoDir, ctx.conversationId);
-    const { readdir } = await import("node:fs/promises");
-    const allEntries = await readdir(dir);
-    const snapshotNames = allEntries.filter(
-      (n) => n.startsWith("todos.") && n.endsWith(".md") && n !== "todos.md"
-    );
+    const snapshotNames = await listSnapshotNames(dir);
     assert.equal(snapshotNames.length, 1);
     const snapshotContent = await readFile(join(dir, snapshotNames[0]), "utf8");
     assert.equal(snapshotContent, formatOpenLine("keep-me"));
@@ -395,18 +386,17 @@ describe("createTodoWriteTool — mode=replace", () => {
       tool.handler({ mode: "replace", items: ["ok", big] }, ctx),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
-        assert.match((err as Error).message, /exceeds 500 codepoints/);
+        assert.match(
+          (err as Error).message,
+          /item must be a non-empty string ≤ 500 codepoints/
+        );
         return true;
       }
     );
     const postContent = await readFile(currentPath, "utf8");
     assert.equal(postContent, initialContent);
     const dir = join(todoDir, ctx.conversationId);
-    const { readdir } = await import("node:fs/promises");
-    const allEntries = await readdir(dir);
-    const snapshotNames = allEntries.filter(
-      (n) => n.startsWith("todos.") && n.endsWith(".md") && n !== "todos.md"
-    );
+    const snapshotNames = await listSnapshotNames(dir);
     assert.equal(snapshotNames.length, 0, "no snapshot when items invalid");
   });
 
@@ -440,11 +430,7 @@ describe("createTodoWriteTool — mode=replace", () => {
     const postContent = await readFile(currentPath, "utf8");
     assert.equal(postContent, initialContent);
     const dir = join(todoDir, ctx.conversationId);
-    const { readdir } = await import("node:fs/promises");
-    const allEntries = await readdir(dir);
-    const snapshotNames = allEntries.filter(
-      (n) => n.startsWith("todos.") && n.endsWith(".md") && n !== "todos.md"
-    );
+    const snapshotNames = await listSnapshotNames(dir);
     assert.equal(snapshotNames.length, 0, "no snapshot on limit failure");
   });
 
@@ -487,13 +473,82 @@ describe("createTodoWriteTool — mode=replace", () => {
     await tool.handler({ mode: "replace", items: ["v3-a"] }, ctx);
 
     const dir = join(todoDir, ctx.conversationId);
-    const { readdir } = await import("node:fs/promises");
-    const allEntries = await readdir(dir);
-    const snapshotNames = allEntries.filter((n) =>
-      /^todos\.\d+\.[0-9a-f]{12}\.md$/.test(n)
-    );
+    const snapshotNames = await listSnapshotNames(dir);
     assert.equal(snapshotNames.length, 2);
     assert.notEqual(snapshotNames[0], snapshotNames[1]);
+  });
+
+  // #903 T2 exception 半写不变量:replace 路径下 snapshot rename 成功(snapshot
+  // 已落盘旧全文),但 writeTodosAtomic 内部 writeFile/rename 失败时的
+  // 不变量:typed-error 抛出,快照仍为旧全文,现行 todos.md 不应是半截——
+  // 原子写半截路径由 writeTodosAtomic 的 tmp + rename 保证不存在。
+  // 注入点:走 `randomBytes` 测试 seam —— writeTodosAtomic 的执行顺序是
+  //   mkdir(parent) → random(6) → writeFile(tmp) → rename(tmp→filePath)
+  // 自定义 randomBytes 在第二次调用时(snapshot 用了 1 次,atomic write 用
+  // 第 2 次)把 dir chmod 0o555,使随后的 writeFile / rename 抛 EACCES,
+  // snapshot 已经成功,现行不会被部分写入。
+
+  it("snapshot rename 成功 → atomic write 写错 → typed-error,快照保留旧全文,现行不动", async () => {
+    const ctx = { conversationId: "conv-replace-snap-ok-write-fail" };
+    const dir = join(todoDir, ctx.conversationId);
+    await mkdir(dir, { recursive: true });
+    const currentPath = resolveConversationTodoDir({
+      todoDir,
+      conversationId: ctx.conversationId,
+    });
+    const initialContent = formatOpenLine("preserved-by-atomic-fail");
+    await fsWriteFile(currentPath, initialContent, "utf8");
+
+    let randomCalls = 0;
+    const deterministicRandom: (n: number) => Buffer = (n: number) => {
+      randomCalls += 1;
+      // 第二次调用 = writeTodosAtomic 的 random(6)。此时 snapshot 已完成,
+      // mkdir(parent) 已递归 no-op。chmod 让随后的 writeFile / rename 抛
+      // EACCES,落入 catch 路径(typed-error,unlink tmp 失败也吞掉)。
+      if (randomCalls === 2) {
+        // 同步 chmod:EACCES 直接生效;restore 在 finally 里做。
+        chmodSync(dir, 0o555);
+      }
+      // 全 0xAA buffer → hex "aaaaaaaaaaaaaaaaaaaaaa"。
+      return Buffer.alloc(n, 0xaa);
+    };
+
+    try {
+      const tool = createTodoWriteTool({
+        todoDir,
+        randomBytes: deterministicRandom,
+      });
+      await assert.rejects(
+        tool.handler({ mode: "replace", items: ["new-1", "new-2"] }, ctx),
+        (err: unknown) => {
+          assert.ok(err instanceof ToolExecutionError);
+          assert.match((err as Error).message, /atomic write failed/);
+          return true;
+        }
+      );
+    } finally {
+      chmodSync(dir, 0o755);
+    }
+    assert.equal(randomCalls, 2, "snapshot random + atomic-write random");
+
+    // 不变量 ①:快照已落盘且内容 = 旧全文。
+    const snapshotNames = await listSnapshotNames(dir);
+    assert.equal(snapshotNames.length, 1, "exactly one snapshot present");
+    const snapshotContent = await readFile(join(dir, snapshotNames[0]), "utf8");
+    assert.equal(snapshotContent, initialContent);
+
+    // 不变量 ②:现行 todos.md 不存在(原文件已被 snapshot rename 移走,
+    // atomic write 失败 → 现行未创建)。这是"无半截"的实证:现行不是部分
+    // 新内容,而是根本不存在。
+    assert.equal(await fileExists(currentPath), false);
+
+    // 不变量 ③:无 .tmp 残留(atomic write 的 catch 路径 unlink tmpPath)。
+    const postEntries = await readdir(dir);
+    assert.equal(
+      postEntries.filter((e) => e.endsWith(".tmp")).length,
+      0,
+      "no `.tmp` leftovers after atomic-write failure"
+    );
   });
 
   // #903 T2 exception 半写不变量:replace 路径的 snapshotCurrentTodos rename
@@ -501,7 +556,6 @@ describe("createTodoWriteTool — mode=replace", () => {
   // 同目录没有快照文件落地,无 .tmp 残留。注入点:子目录只读。
 
   it("snapshot rename 失败 → typed-error,现行保持旧内容,无快照无 tmp", async () => {
-    const { chmod, readdir } = await import("node:fs/promises");
     const ctx = { conversationId: "conv-replace-snapshot-fail" };
     const dir = join(todoDir, ctx.conversationId);
     await mkdir(dir, { recursive: true });
@@ -538,11 +592,9 @@ describe("createTodoWriteTool — mode=replace", () => {
     // 不变量:现行仍是旧内容 + 无快照 + 无 .tmp。
     const postCurrent = await readFile(currentPath, "utf8");
     assert.equal(postCurrent, initialContent);
-    const postEntries = await readdir(dir);
-    const snapshotNames = postEntries.filter((n) =>
-      /^todos\.\d+\.[0-9a-f]{12}\.md$/.test(n)
-    );
+    const snapshotNames = await listSnapshotNames(dir);
     assert.equal(snapshotNames.length, 0, "no snapshot when rename fails");
+    const postEntries = await readdir(dir);
     assert.equal(
       postEntries.filter((e) => e.endsWith(".tmp")).length,
       0,
@@ -577,9 +629,7 @@ describe("createTodoWriteTool — mode=replace", () => {
     );
 
     const postEntries = await readdir(dir);
-    const snapshotNames = postEntries.filter((n) =>
-      /^todos\.\d+\.[0-9a-f]{12}\.md$/.test(n)
-    );
+    const snapshotNames = await listSnapshotNames(dir);
     assert.equal(snapshotNames.length, 0, "no snapshot when read fails");
     assert.equal(
       postEntries.filter((e) => e.endsWith(".tmp")).length,
@@ -608,7 +658,10 @@ describe("createTodoWriteTool — typed-error catch", () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(tool.handler({ mode: "add" }), (err: unknown) => {
       assert.ok(err instanceof ToolExecutionError);
-      assert.match((err as Error).message, /non-empty string for mode add/);
+      assert.match(
+        (err as Error).message,
+        /item must be a non-empty string ≤ 500 codepoints/
+      );
       return true;
     });
   });
@@ -619,7 +672,10 @@ describe("createTodoWriteTool — typed-error catch", () => {
       tool.handler({ mode: "add", item: "" }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
-        assert.match((err as Error).message, /non-empty string for mode add/);
+        assert.match(
+          (err as Error).message,
+          /item must be a non-empty string ≤ 500 codepoints/
+        );
         return true;
       }
     );
@@ -629,7 +685,10 @@ describe("createTodoWriteTool — typed-error catch", () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(tool.handler({ mode: "check" }), (err: unknown) => {
       assert.ok(err instanceof ToolExecutionError);
-      assert.match((err as Error).message, /non-empty string for mode check/);
+      assert.match(
+        (err as Error).message,
+        /item must be a non-empty string ≤ 500 codepoints/
+      );
       return true;
     });
   });
@@ -691,7 +750,10 @@ describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
       tool.handler({ mode: "add", item: big }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
-        assert.match((err as Error).message, /exceeds 500 codepoints/);
+        assert.match(
+          (err as Error).message,
+          /item must be a non-empty string ≤ 500 codepoints/
+        );
         return true;
       }
     );
@@ -717,7 +779,10 @@ describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
       tool.handler({ mode: "add", item: tooMany }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
-        assert.match((err as Error).message, /exceeds 500 codepoints/);
+        assert.match(
+          (err as Error).message,
+          /item must be a non-empty string ≤ 500 codepoints/
+        );
         return true;
       }
     );
@@ -797,7 +862,6 @@ describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
     // Make the directory read-only so the write/rename step fails (mkdir
     // recursive into a read-only directory throws EACCES). Restore perms in
     // finally so the afterEach rm works.
-    const { chmod, readdir } = await import("node:fs/promises");
     await chmod(todoDir, 0o555);
     let threw = false;
     try {
@@ -838,7 +902,6 @@ describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
 
 async function fileExists(path: string): Promise<boolean> {
   try {
-    const { stat } = await import("node:fs/promises");
     const s = await stat(path);
     return s.isFile();
   } catch (error) {
