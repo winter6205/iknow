@@ -77,8 +77,10 @@ import {
   createIknowSystemResolver,
   initIknowWorkspaceSafe,
   createGitSnapshotProvider,
+  runIndexDemotion,
   type McpServiceSummary,
   type McpToolSummary,
+  type SkillSummary,
   type DeferredInternalToolSummary,
 } from "./identity/index.js";
 import {
@@ -1121,6 +1123,63 @@ export async function buildHarnessEngine(
         : { name };
     });
 
+  // T5 / ADR-0046 Decision 2 + spec Does #6:索引降档(MCP 目录 +
+  // `<available_skills>` 合计超端点窗口 10% → 从大到小剥描述只留名)。
+  //
+  // 时点 = 与内建 schema 退场同一装配期首轮判定(先退内建 schema,再看索引),
+  // 会话内不重算 —— 判定结果落进下面两个 holder,`deps.system` 的两条缝只读
+  // holder,故相邻轮 system deep-equal(SC2)。
+  //
+  // 为什么不与 `runOverflowJudge` 共用同一次 countTokens:退场梯子测的是
+  // **整个首轮请求面**(tools schema + system),而本闸门按 operator 终锁测的
+  // 是**索引两段合计**。同一次实测拿不出后者这个量,合并会把闸门语义偷换成
+  // 「整个 prompt 超阈」。故复用同一 countTokens 来源与同一时点,各测各的量。
+  //
+  // `<deferred_internal_tools>` 不进本判定的入参 —— 退场内建描述保留
+  // (ADR-0046 Decision 2),不存在误剥路径。
+  //
+  // 失败(countTokens 抛错 / 非有限数)/ 缺席 → 跳过本会话 + console.warn 一行,
+  // 两段保持带描述形态(与 B6 退场 skip 合同同形)。
+  let skillIndexList: ReadonlyArray<SkillSummary> = skillCatalog
+    .available()
+    .map((entry) => ({
+      name: entry.name,
+      description: entry.description ?? "",
+      ...(entry.disabled ? { disabled: true } : {}),
+    }));
+  if (countTokensFn !== undefined) {
+    try {
+      const demotion = await runIndexDemotion({
+        mcp: mcpNameDirectorySnapshot ?? [],
+        skills: skillIndexList,
+        threshold: env.compress.contextWindow * 0.1,
+        countTokens: async (indexText) => {
+          // 实测面 = 模型真正看到的这两段文本(禁 chars/4 估算)。tools 不传:
+          // 本闸门只治理索引面积,schema 面由退场梯子上一步已判定。
+          const v = await countTokensFn({ system: indexText });
+          return v.inputTokens;
+        },
+      });
+      if (demotion.reason === "demoted") {
+        mcpNameDirectorySnapshot = demotion.mcp;
+        skillIndexList = demotion.skills;
+      } else if (demotion.reason === "countTokens_failed") {
+        console.warn(
+          `[build-engine] index demotion skipped: countTokens failed: ${errorMessage(
+            demotion.cause
+          )}`
+        );
+      }
+      // no_index / no_overflow → 零动作(两段保持带描述形态)
+    } catch (err) {
+      // runIndexDemotion 自身不抛(吞错到 countTokens_failed 分支);此 catch
+      // 为未来防御:任何 throw 不阻塞装配,只 warn。
+      console.warn(
+        `[build-engine] index demotion unexpected error: ${errorMessage(err)}`
+      );
+    }
+  }
+
   // D-α T3 / ADR-0030:overlay 接了才有 graph 装配面。快照对象是本次
   // 装配的单点 —— registry(工具在不在)、promptTools(露不露)、deps.system
   // (编排段进不进)三处读的都是它，不各读各的 holder。
@@ -1341,12 +1400,12 @@ export async function buildHarnessEngine(
             }),
           }
         : {}),
-      skills: () =>
-        skillCatalog.available().map((entry) => ({
-          name: entry.name,
-          description: entry.description ?? "",
-          ...(entry.disabled ? { disabled: true } : {}),
-        })),
+      // T5 / spec Does #6:skills 索引 = 装配期首轮判定后冻结的 holder
+      // (`skillIndexList`)—— 降档把超阈条目的 description 剥掉只留名,渲染层
+      // 按数据形态输出裸名行(单一 SSOT,不在段函数里做第二套判定)。未超阈
+      // 则 holder 就是 `catalog.available()` 的原样投影。会话内恒定 → 相邻轮
+      // system deep-equal(SC2)。
+      skills: () => skillIndexList,
       // #631 T2 → B4 (ADR-0043 §3):MCP 名字目录段注入缝(渐进式披露
       // "索引常驻档")—— 仅 mcpManager 在场(chat/tui/serve)时注入;ask
       // 无 manager → 缝缺席 → 段缺席(字节级零变化,守 KV 缓存稳定契约)。

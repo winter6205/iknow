@@ -124,10 +124,14 @@ export interface AssemblyContext {
 }
 
 /** #337 T6 `<available_skills>` 段元素形态(最小投影:name + description + disabled)。
- *  disabled=true → 装配层跳过(SC3),与 catalog.available() 语义一致。 */
+ *  disabled=true → 装配层跳过(SC3),与 catalog.available() 语义一致。
+ *
+ *  T5 / ADR-0046 Decision 2:`description` 转为可选 —— 索引降档把超阈条目剥成
+ *  **仅名字**(名字永不删)。缺席/空/纯空白 → 渲染裸名行,与 `McpToolSummary`
+ *  同规则(降档只改喂进来的数据,渲染层不做第二套判定)。 */
 export interface SkillSummary {
   readonly name: string;
-  readonly description: string;
+  readonly description?: string;
   readonly disabled?: boolean;
 }
 
@@ -588,7 +592,11 @@ function projectPathSegment(projectIdentityRoot: string): string {
 
 /** #337 T6 `<available_skills>` 段渲染:XML 风格标签 + 名字序列表 +
  *  description 同行 + 空清单显式 "No skills installed"。
- *  加性段,不触碰 IKNOW_ASSEMBLY_ORDER;disabled 在调用前已被装配层过滤。 */
+ *  加性段,不触碰 IKNOW_ASSEMBLY_ORDER;disabled 在调用前已被装配层过滤。
+ *
+ *  T5 / ADR-0046 Decision 2:description 缺席/空/纯空白 → 渲染**裸名行**
+ *  (索引降档把超阈条目剥成仅名字;名字永不删、段永不缺席)。降档判定不在
+ *  本函数里 —— 渲染层只按数据形态输出(单一 SSOT,见 identity/index-demotion.ts)。 */
 export function skillsSegment(skills: ReadonlyArray<SkillSummary>): string {
   const visible = skills
     .filter((s) => !s.disabled)
@@ -597,7 +605,14 @@ export function skillsSegment(skills: ReadonlyArray<SkillSummary>): string {
   if (visible.length === 0) {
     return "<available_skills>\nNo skills installed\n</available_skills>";
   }
-  const body = visible.map((s) => `${s.name}: ${s.description}`).join("\n");
+  const body = visible
+    .map((s) => {
+      const description = s.description?.trim();
+      return description === undefined || description.length === 0
+        ? s.name
+        : `${s.name}: ${s.description}`;
+    })
+    .join("\n");
   return `<available_skills>\n${body}\n</available_skills>`;
 }
 

@@ -151,7 +151,12 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
     // 阈值 2_000;模拟"全部 deferrable = 8_000 → 退 1 件 6_500 → 退 2 件
     // 5_000 → 退 3 件 3_500 → 退 4 件 2_500 → 退 5 件 500 ≤ 阈值"。5 件全
     // 退(退场次序 5 件全到位)。
-    const measurements = [8_000, 6_500, 5_000, 3_500, 2_500, 500];
+    //
+    // T5:装配期是**两道闸门**共用同一 countTokens 来源 —— 先跑内建 schema
+    // 退场梯子(前 6 次实测),再跑 MCP/skill 索引降档闸门(第 7 次)。本文件
+    // 只钉退场梯子,故给索引闸门喂一个未超阈值(500 ≤ 2_000)让它零动作,
+    // 索引降档本身在 disclosure-index-align/sc7-index-demotion.test.ts 覆盖。
+    const measurements = [8_000, 6_500, 5_000, 3_500, 2_500, 500, 500];
     let callIdx = 0;
     const built = await buildHarnessEngine({
       env: makeEnv("sk-test-b6-overflow"),
@@ -178,8 +183,8 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
       if (built.shutdown) await built.shutdown();
     });
 
-    // 5 件全退(退到 ≤ 阈值)
-    expect(callIdx).toBe(6); // 1 首测 + 5 重测
+    // 5 件全退(退到 ≤ 阈值);第 7 次 = T5 索引降档闸门首测(未超阈 → 零动作)。
+    expect(callIdx).toBe(7); // 1 首测 + 5 重测 + 1 索引闸门首测
     const visibleNames = built.deps.promptTools().map((t) => t.name);
     // 5 件 deferrable 内建件全部不在 visible
     for (const retired of [

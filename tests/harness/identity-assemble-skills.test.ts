@@ -95,6 +95,29 @@ describe("<available_skills> additive segment", () => {
     expect(idxZulu).toBeGreaterThan(idxWriter);
   });
 
+  it("T5 / SC7: description 缺席或空 → 渲染裸名行（索引降档剥描述后的形态）", async () => {
+    const out = await assembleIdentityContext({
+      ...baseCtx(),
+      skills: () => [
+        // 降档后的形态：description 字段整体缺席。
+        { name: "demoted" },
+        // 空串 / 纯空白 同规则（与 McpToolSummary / 退场内建段一致）。
+        { name: "blank", description: "" },
+        { name: "spaces", description: "   " },
+        { name: "kept", description: "still described" },
+      ],
+    });
+
+    expect(out).toBeDefined();
+    // 名字永不删 → 三条降档条目的名字都在，且都是裸名行（无 ": ..."）。
+    for (const name of ["demoted", "blank", "spaces"]) {
+      expect(out).toMatch(new RegExp(`^${name}$`, "m"));
+      expect(out).not.toMatch(new RegExp(`^${name}:`, "m"));
+    }
+    // 未降档条目仍带描述。
+    expect(out).toContain("kept: still described");
+  });
+
   it("does not include disabled skills in the available_skills segment (SC3)", async () => {
     const out = await assembleIdentityContext({
       ...baseCtx(),
