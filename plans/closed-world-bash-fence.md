@@ -91,16 +91,28 @@ OVERALL: BLOCKED。Discharge 映射（本轮 plan 修订）：
 7. **T7 [decision] sandbox server 化合同** — tag: `[decision]`
    - **Inherits:** ADR-0022 的 fence/网络合同边界（server 化只挪执行面位置，不改 fence 物理语义）；本计划「背景与病灶」——现状为 in-process `runInSandbox` 库，被 bash tool / background manager / verify 直接消费。
    - **Surface:** 决策落点 = ADR（新开或并入 ADR-0037 amendment，由实施者依 T2 amendment 体积裁决）；消费方 = `aci/tools/bash.ts`、`background/manager.ts`、`verify/`。
-   - **Acceptance:** 决策记录明确：(a) server 形态选型（同进程 Unix socket 单例 / 独立 daemon / MCP 面——三种里裁决一种并写理由）；(b) 运行时合同 = fence 请求/回执的消息形状、超时/中断（signal）语义、输出截断合同沿用 `DEFAULT_MAX_OUTPUT_CODE_POINTS`；(c) 现有消费方迁移路径与兼容期策略；(d) `violation-handling`（应用层观察者）在 server 形态下的归属。
-   - Status: [ ] pending
+   - **Acceptance:** 决策记录明确：(a) server 形态选型（同进程 Unix socket 单例 / 独立 daemon / MCP 面——三种里裁决一种并写理由）；(b) 运行时合同 = fence 请求/回执的消息形状、超时/中断（signal）语义、输出截断合同沿用 `DEFAULT_MAX_OUTPUT_CODE_POINTS`；(c) 现有消费方迁移路径与兼容期策略；(d) `violation-handling`（应用层观察者）在 server 形态下的归属；(e)【Round 2 ACR discharge】fence 请求协议分两型——**短生命周期 request/response**（前台 + verify，进程结束即关闭句柄）+ **长生命周期 task-handle**（后台，spawn → log-stream channel → stop control message，pid 所有权随 task-handle 从 host 转移到 server，`bash_stop` 经 server 转发 `kill(-pgid)`，host 不再持 pid）；(f)【Round 2 ACR discharge】IPC 边界 5 类故障路径——empty（空消息帧 / 无 command）→ typed fail-loud 不 spawn；negative（`maxOutputCodePoints <= 0`、`killGraceMs < 0`）→ `RangeError` 沿 `runner.ts` `truncateByCodePoint` 契约不丢失；overflow（输出未截断送回 client）→ 沿 `DEFAULT_MAX_OUTPUT_CODE_POINTS`；concurrent（server 多请求并行 vs 串行）→ fence 无共享 mutable state 故并行允许，决策显式记录；exception（server-down mid-spawn / accept 后子进程退出未回执）→ typed fail-loud + orphan 进程组 reap 纪律；(g)【Round 2 ACR discharge】失败合同——server 不可达 = typed fail-loud，**不静默降级**到 in-process spawn（否则违反 ADR-0037 §9 围栏物理合同统一）；`ctx.signal` abort = 走 server 端 control message 取消（不只丢 client promise，避免 orphan 进程）。
+   - Status: [x] done（T7 `c077a782`） — ADR-0045 落定同进程 router + 两型协议 + 5 类故障分型 + fail-loud 不降级；T7 acceptance (a)–(g) 逐条自查清单写入 ADR 尾部 Evidence 段
    - [parallel]（与 T3–T6 无共享 mutable state，可并行起草）
 
 8. **T8 sandbox server 实施** — tag: `[implementation]`
-   - **Inherits:** T7 决策（形态/消息形状/超时/截断合同）。
+   - **Inherits:** T7 决策（形态/消息形状/超时/截断合同，含 (e)–(g) discharge 条款）。
    - **Surface:** `src/harness/sandbox/`（runner/bwrap 消费面）；消费方迁移 = `aci/tools/bash.ts`、`background/manager.ts`、`verify/`。
-   - **Acceptance:** (a) fence 构造 + spawn 执行面经 server 边界表达，bash tool / background / verify 全部经 server 请求 fence 执行，`runInSandbox` in-process 直调路径删除或降级为 server 内部实现；(b) 超时/中断/截断行为与今日 observable 等价（现有 runner 测试语义保留或等价改写）；(c) violation 观察面按 T7 裁决落位；(d) npm test 全量绿 + probe:sandbox 全绿（server 形态下探针复跑）。
+   - **Acceptance:** (a) fence 构造 + spawn 执行面经 server 边界表达，bash tool / background / verify 全部经 server 请求 fence 执行，`runInSandbox` in-process 直调路径删除或降级为 server 内部实现；(b) 超时/中断/截断行为与今日 observable 等价（现有 runner 测试语义保留或等价改写）；(c) violation 观察面按 T7 裁决落位；(d) npm test 全量绿 + probe:sandbox 全绿（server 形态下探针复跑）；(e)【Round 2 ACR discharge】T7 (e)–(g) 的合同条款各有对应测试：两型协议各自的 happy path + 5 类故障路径 + fail-loud（server 不可达不降级）+ signal abort 经 control message 的 server 端取消。
    - Status: [ ] pending
    - [blocks: T5, T7]
+
+### Round 2 ACR verdict（2026-09-06，开轨评审）
+
+```
+bounded-context-guardian: yes — sandbox/ 单向依赖保持，server 边界留在 sandbox/ 内；后台 fire-and-forget 生命周期缺口经 T7 (e) task-handle 协议分型 discharge
+defensive-contract-validator: yes — 5 类边界缺口经 T7 (f) IPC 故障分型 + T8 (e) 配套测试 discharge
+error-handling-enforcer: yes — 失败合同缺口经 T7 (g) fail-loud / control-message 取消 / pid 所有权转移条款 discharge
+complexity-anti-drift: yes — 分层保持；若 daemon 分支胜出须拆 server/supervisor/protocol，不进单文件
+minimal-change-verifier: yes — T7、T8 各 1 逻辑任务各 1 commit，独立于 Round 1
+```
+
+OVERALL: PASS（discharge 已落 T7 (e)–(g) / T8 (e)，ACR BLOCKED→PASS）。
 
 ## 验收（Round 1 整轮）
 
