@@ -11,6 +11,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { ToolExecutionError } from "../errors.js";
 import type { BwrapFence } from "./bwrap.js";
+import { createSandboxServer } from "./server/index.js";
 
 /** runInSandbox 默认输出截断上限，对齐 bash.ts 既有 MAX_OUTPUT_CODE_POINTS。 */
 export const DEFAULT_MAX_OUTPUT_CODE_POINTS = 12_000;
@@ -184,24 +185,23 @@ export interface SandboxRunOptions {
 export async function runInSandbox(
   opts: SandboxRunOptions
 ): Promise<SandboxRunResult> {
-  const maxOutputCodePoints =
-    opts.maxOutputCodePoints ?? DEFAULT_MAX_OUTPUT_CODE_POINTS;
-  const { done } = spawnWithStopSignal(
-    opts.fence.argv[0],
-    opts.fence.argv.slice(1),
-    {
-      cwd: opts.cwd,
-      signal: opts.signal,
-      env: opts.env,
-      killGraceMs: opts.killGraceMs,
-    }
-  );
-  const result = await done;
-  return {
-    exitCode: result.code ?? signalExitCode(result.signal),
-    stdout: truncateByCodePoint(result.stdout, maxOutputCodePoints),
-    stderr: truncateByCodePoint(result.stderr, maxOutputCodePoints),
-  };
+  // ADR-0045 T8(a): in-process 直调路径降级为 server handler 薄包装 —— 保留
+  // 此函数签名(SandboxRunResult)以兼容既有 30+ fixture,内部走 server.exec
+  // 短生命周期协议。同进程 router 形态下 = 函数调用,无 IPC 成本。
+  const server = createSandboxServer();
+  return server.exec({
+    kind: "exec",
+    fence: opts.fence,
+    cwd: opts.cwd,
+    env: opts.env,
+    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+    ...(opts.maxOutputCodePoints !== undefined
+      ? { maxOutputCodePoints: opts.maxOutputCodePoints }
+      : {}),
+    ...(opts.killGraceMs !== undefined
+      ? { killGraceMs: opts.killGraceMs }
+      : {}),
+  });
 }
 
 function killProcessGroup(pid: number, signal: NodeJS.Signals): void {

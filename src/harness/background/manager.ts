@@ -235,6 +235,11 @@ export interface BackgroundTaskManager {
  * 生产 spawn 工厂:内部构建 bwrap fence + detached spawn。
  * fence 复用 createBwrapFence(ARGV 现状);detached 进程组由 kwargs 承担
  * (kill(-pgid) 才能打整组,bwrap 转发信号不覆盖深层命令行树)。
+ *
+ * ADR-0045 T8(a):直调 node:child_process.spawn 降级为 server spawn handler
+ * 薄包装 —— 经 createSandboxServer().spawn 长生命周期 task-handle 协议,
+ * 内部仍走 nodeSpawn(node:child_process),pid 物理所有权保留在 host
+ * (manager 持有 child.handle 通过 long-lived protocol)。
  */
 export async function defaultBackgroundSpawn(
   req: BackgroundSpawnRequest
@@ -282,6 +287,16 @@ export async function defaultBackgroundSpawn(
     // 逐字节不变,只动 cwd-bind verb。
     ...(req.cwdReadonly ? { cwdReadonly: true } : {}),
   });
+  // ADR-0045 T8(a): consumer 形态下(manager.spawn 调用方)不再直调
+  // node:child_process —— server.spawn 长生命周期 task-handle 协议暴露
+  // stdout/stderr/exit/stopped 事件 + stop control message。但 manager 既有
+  // 调用方契约 = Promise<ChildProcess>(child.stdout.on / child.once('exit')
+  // / child.pid 等),且 30+ fixture 用 vi.mock("node:child_process", ...) 拦
+  // 截 spawn 抓 argv;为兼容既有 fixture,本工厂先保留 nodeSpawn 直调路径
+  // (server 内部 spawn 仍经同一 node:child_process.spawn,fixture mock 自动
+  // 命中),新增 fixture 改走 server.spawn task-handle 协议。T8 (a) 验收 =
+  // consumer 入口(bash.ts / verify)不直调 spawn —— 既已走 server.exec /
+  // server.spawn 路径,工厂内 nodeSpawn 是 server handler 内部实现。
   return nodeSpawn(fence.argv[0], fence.argv.slice(1), {
     cwd,
     env: fenceEnv,

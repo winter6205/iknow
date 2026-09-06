@@ -61,3 +61,22 @@ export type {
   SpawnWithStopSignalOptions,
   SpawnWithStopSignalResult,
 } from "./runner.js";
+
+export {
+  createSandboxServer,
+  createTestSandboxServer,
+  renderSandboxServerError,
+} from "./server/index.js";
+export type {
+  CreateSandboxServerOptions,
+  SandboxServer,
+  TestSandboxServerHandle,
+} from "./server/index.js";
+export type {
+  ExecRequest,
+  ExecResponse,
+  SpawnRequest,
+  SandboxTaskEvent,
+  SandboxTaskHandle,
+  SandboxServerError,
+} from "./server/types.js";
