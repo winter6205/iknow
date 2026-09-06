@@ -689,40 +689,6 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             {formatCrunched(props.crunchedSeconds ?? 0)}
           </text>
         )}
-        {/* 流式 thinking 面板：折叠态 = 静态 `思考中…` 摘要行 + 正文末 ≤3 行预览；
-            展开态走 Markdown 全文。D3 (tui-display-consistency):TUI 内存思考
-            秒数副通道已整条删除 —— running 期间不再有冻结「思考了 N 秒」
-            分支；turn 结束后由末条 assistant 消息的落盘 thinkingMs 接手
-            （`MessageBlocks.thinkingSeconds = session.thinkingMs[last]`）。
-            文案统一（2026-08-14）：折叠行恒 `思考中…`，无实时秒数 —— 思考时长
-            只由事后落盘的「思考了 N 秒」承担（避免与 mode 行运行时长视觉重复）。
-            预览窗口（plans/model-idle-thinking-peek.md T2）：思考**进行中**
-            才取，`thinkingPeekLines` 硬顶 3 行、`wrapMode="none"` 每行恒占
-            1 行 —— 折叠态高度与思考全文长度无关。 */}
-        {running && deferredThinkingDrafts.length > 0 && !showTurnFold && (
-          <box flexDirection="column" width={contentWidth}>
-            {thinkingExpanded ? (
-              <box width={contentWidth}>
-                <Markdown
-                  text={deferredThinkingDrafts}
-                  width={contentWidth}
-                  streaming
-                />
-              </box>
-            ) : (
-              <>
-                <text fg={pal.dim} wrapMode="none">
-                  {formatThinkingLive()}
-                </text>
-                {thinkingPeekLines(deferredThinkingDrafts).map((line, i) => (
-                  <text key={`think-peek-${i}`} fg={pal.dim} wrapMode="none">
-                    {line}
-                  </text>
-                ))}
-              </>
-            )}
-          </box>
-        )}
         {/* 流式尾部：工具组与草稿段按 draftEpoch 交错（主流 agent 顺序：
             工具 → 文本 → 工具 → 文本）。liveToolLines 仍挂在末尾（legacy）。
             #tui-render-overhaul T4:多块时相邻 slot 间补 1 行节奏（与
@@ -755,6 +721,34 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             )
           );
         })}
+        {/* 流式 thinking 面板：跟在已返回的 live 正文 / 工具后面，而不是
+            钉在 live 区顶部。思考 → 正文 时 stream-draft 会清 buffer 收起
+            本面板；下一轮 thinking_delta 再出现在这段正文下面。
+            折叠态 = 静态 `思考中…` + 正文末 ≤3 行预览；展开态走 Markdown。 */}
+        {running && deferredThinkingDrafts.length > 0 && !showTurnFold && (
+          <box flexDirection="column" width={contentWidth}>
+            {thinkingExpanded ? (
+              <box width={contentWidth}>
+                <Markdown
+                  text={deferredThinkingDrafts}
+                  width={contentWidth}
+                  streaming
+                />
+              </box>
+            ) : (
+              <>
+                <text fg={pal.dim} wrapMode="none">
+                  {formatThinkingLive()}
+                </text>
+                {thinkingPeekLines(deferredThinkingDrafts).map((line, i) => (
+                  <text key={`think-peek-${i}`} fg={pal.dim} wrapMode="none">
+                    {line}
+                  </text>
+                ))}
+              </>
+            )}
+          </box>
+        )}
         {props.liveToolLines.length > 0 && (
           <box flexDirection="column" width={contentWidth}>
             {props.liveToolLines.map((line, i) => (

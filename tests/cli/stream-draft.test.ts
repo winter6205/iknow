@@ -99,7 +99,8 @@ describe("createStreamDraft", () => {
     draft.append({ type: "text_delta", text: "案" });
     draft.append({ type: "thinking_delta", text: "继续" });
     assert.equal(draft.raw(), "答 案");
-    assert.equal(draft.thinkingRaw(), "思考 继续");
+    // text_delta 收起上一段思考；后一段 thinking_delta 是新缓冲。
+    assert.equal(draft.thinkingRaw(), "继续");
   });
 
   it("thinkingSeconds:无 thinking_delta 返回 0", () => {

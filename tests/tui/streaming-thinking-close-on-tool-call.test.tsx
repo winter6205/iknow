@@ -4,20 +4,7 @@
  *
  * 不变式：流式 thinking 面板在 turn 内思考阶段结束（模型从 thinking 进入
  * tool_call_start 或 text_delta）时必须收起，不再继续累积 / 渲染——
- * 不应等整轮 turn 结束才消失。
- *
- * 现状（bug）：`src/cli/stream-draft.ts:append()` 只处理 `text_delta` /
- * `thinking_delta`，遇到 `tool_call_start` 时 thinkingBuffer 不清空 →
- * `thinkingMasked()` 继续返回累积的思考正文 → ChatView 流式 thinking
- * 面板条件 `running && deferredThinkingDrafts.length > 0 && !showTurnFold`
- * 仍成立 → 面板一直渲染到整轮 turn 完成才消失（用户反馈「顶部思考面板
- * 一直堆积」）。
- *
- * 修复方向：`createStreamDraft.append()` 在收到 `tool_call_start` 时清空
- * thinkingBuffer（思考阶段已结束，进入工具调用），并立即通知 listener
- * 让 ChatView 重渲染。`showTurnFold` 在 running 态下恒 false（条件
- * running 时 showTurnFold 由 `shouldShowTurnActivityFold` 短路），
- * 所以仅靠 thinkingMasked 清空就足以让面板条件失效。
+ * 不应等整轮 turn 结束才消失。后续 thinking_delta 重新累积为新一段。
  *
  * 本测试通过 stub streamDraft 事件序列（thinking_delta 若干 →
  * tool_call_start → 断言 `thinkingMasked()` 返回空串 + 已通知
@@ -79,4 +66,22 @@ test("tool_call_start 后续 text_delta 不重新启用流式 thinking 面板", 
   // thinking 仍为空(text_delta 不写 thinkingBuffer;若实现错把 text_delta
   // 写进 thinking 就会在这里把 thinkingMasked 重新非空,锁住不变式)。
   expect(draft.thinkingMasked()).toBe("");
+});
+
+test("text_delta 收起思考面板：思考阶段在正文起点结束", () => {
+  const draft = createStreamDraft();
+  draft.append({ type: "thinking_delta", text: "这一段想完了" });
+  expect(draft.thinkingMasked()).toContain("想完了");
+  draft.append({ type: "text_delta", text: "返回给用户的一段话" });
+  expect(draft.thinkingMasked()).toBe("");
+  expect(draft.masked()).toContain("返回给用户的一段话");
+});
+
+test("正文之后的新 thinking_delta 重新累积：下一段思考可以再出现", () => {
+  const draft = createStreamDraft();
+  draft.append({ type: "thinking_delta", text: "先想" });
+  draft.append({ type: "text_delta", text: "先返回" });
+  expect(draft.thinkingMasked()).toBe("");
+  draft.append({ type: "thinking_delta", text: "再想下一段" });
+  expect(draft.thinkingMasked()).toContain("再想下一段");
 });

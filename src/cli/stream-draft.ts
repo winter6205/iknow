@@ -124,9 +124,20 @@ export function createStreamDraft(): StreamDraft {
     scheduleNotify();
   };
 
+  const closeThinkingPhase = (): void => {
+    if (thinkingBuffer.length === 0) return;
+    thinkingBuffer = "";
+    cancelPending();
+    flush();
+  };
+
   return {
     append(event: HarnessStreamEvent): void {
       if (event.type === "text_delta") {
+        // 思考阶段结束于正文起点：清空 thinkingBuffer，让 ChatView 收起
+        // 流式思考面板。下一轮 thinking_delta 会重新累积，并渲染在已
+        // 返回正文（live tail drafts）之下，而不是顶层一直挂着。
+        closeThinkingPhase();
         rawBuffer += event.text;
         appendText(event.text);
       } else if (event.type === "thinking_delta") {
@@ -143,11 +154,7 @@ export function createStreamDraft(): StreamDraft {
         // 会自然进入 thinkingBuffer 重新累积(同助手回合内多段思考常见)。
         // 同时取消节流 timer 并同步 flush,让 listener 立刻收到通知,
         // 跳过 50ms 节流窗口(思考阶段切换是状态切换,延迟可见属 bug)。
-        if (thinkingBuffer.length > 0) {
-          thinkingBuffer = "";
-          cancelPending();
-          flush();
-        }
+        closeThinkingPhase();
       }
     },
     raw(): string {
