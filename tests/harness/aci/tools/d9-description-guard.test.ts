@@ -252,9 +252,9 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
   // audit, what this file pins is that every tool in the assembled catalog is
   // positive-trigger phrased (the it.each blocklist assertions higher up) plus
   // that the assembly sanity check above really covers the whole toolset.
-  it("toolset size after audit: 44 (full conditional-deps assembly, incl. task worktree discovery/removal; T5 退役 10 lsp_*)", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(44);
-    expect(reg.catalog.all()).toHaveLength(44);
+  it("toolset size after audit: 43 (full conditional-deps assembly, incl. task worktree discovery/removal; T5 退役 10 lsp_*; disclosure-index-align T2 退役 skill_search)", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(43);
+    expect(reg.catalog.all()).toHaveLength(43);
   });
 
   // symbol-primary-aci T2：符号查询工具的 description 必须按**符号身份**

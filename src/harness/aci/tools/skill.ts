@@ -1,8 +1,12 @@
-// `skill` 工具（第 22 件 ACI，#337 T5/T6）— 按名取已安装 skill 的正文。
+// `skill` 工具（第 22 件 ACI，#337 T5/T6 + #disclosure-index-align T2）—
+// 按名取已安装 skill 的正文。
 //
-// 行为真值（spec 337-skill-mcp-extension.md § Code Style + T6 acceptance）：
+// 行为真值（spec 337-skill-mcp-extension.md § Code Style + T6 acceptance +
+// spec disclosure-index-align.md SC5/SC6）：
 //   - input `{ name: string required }` —— 直呼命中已索引 skill 名；
-//     叫错名返回引导文本（"Use skill_search to find available skills."）。
+//     叫错名返回引导文本，引导回 `<available_skills>` 清单
+//     （system 段）或（操作员指路径时）`read_file`；**禁止**再提到
+//     已删除的 `skill_search`（spec ADR-0046 / disclosure-index-align T2）。
 //   - output：装配正文（T6 起，frontmatter 剥离 + `Base directory` 行 +
 //     `<skill_files>` 段（采样 ≤10 / 绝对路径 / sampled 提示；references/ 不递归））。
 //     T5 阶段返回 SKILL.md 原文；T6 改走 `src/harness/skill/body.ts` 的
@@ -31,13 +35,15 @@ export interface SkillToolDeps {
  *
  * 命中：createSkillBody({ entry, dir }) → 返回 frontmatter 剥离 + Base
  * directory 行 + `<skill_files>` 采样的装配正文。
- * 未命中：返回引导回检索的文本（不抛，向模型传达"用 skill_search 找"）。
+ * 未命中：返回引导文本（不抛，向模型传达"看 `<available_skills>` 清单
+ * 或（操作员指路径时）用 `read_file`"）—— spec ADR-0046 删 `skill_search`
+ * 后唯一的回退入口。
  */
 export function createSkillTool(deps: SkillToolDeps): AciToolDef {
   return Object.freeze({
     name: "skill",
     description:
-      "Load the full body of a skill you've already chosen via skill_search; pair with skill_search first to pick the right name. Returns the assembled skill body (frontmatter stripped, `Base directory` line, sampled `<skill_files>`), or a hint pointing back to skill_search when the name is unknown.",
+      "Load the full body of a skill by its exact name from the `<available_skills>` catalog. Returns the assembled skill body (frontmatter stripped, `Base directory` line, sampled `<skill_files>`). When the name is unknown, points back to the `<available_skills>` list in the system prompt or, for paths outside the assembly scan root, to `read_file`.",
     inputSchema: {
       type: "object",
       properties: { name: { type: "string" } },
@@ -51,7 +57,7 @@ export function createSkillTool(deps: SkillToolDeps): AciToolDef {
       const name = parseName(input);
       const entry = deps.catalog.get(name);
       if (!entry) {
-        return `skill '${name}' not found. Use skill_search to find available skills.`;
+        return `skill '${name}' not found. Pick the name from the \`<available_skills>\` list in the system prompt, or — if the operator pointed at a file path outside the scan root — use \`read_file\`.`;
       }
       // T6: 装配正文 (frontmatter 剥离 + Base directory 行 + skill_files 段)。
       // entry.dir 即 SKILL.md 所在目录（catalog.getBodyPath 内部 join(dir, "SKILL.md")）。

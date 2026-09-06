@@ -33,7 +33,6 @@ import { createSymbolQueryToolSet } from "./symbol.js";
 import { createSymbolMutateToolSet } from "./symbol-mutate.js";
 import type { LspCtx } from "../../lsp/types.js";
 import { createSkillTool } from "./skill.js";
-import { createSkillSearchTool } from "./skill-search.js";
 import { createSpawnSubAgentTool } from "../../subagent/spawn-subagent-tool.js";
 import { createSubAgentResultTool } from "../../subagent/subagent-result-tool.js";
 import { createRunGraphTool } from "../../graph/run-graph-tool.js";
@@ -108,20 +107,22 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   "memory_recall", // #228 layer 3（条件化:memoryDir 缺席时不装配）
   "memory_save", // #228 layer 3（同上）
   "tool_search", // #224 扩展路径
-  // #337 T5 skill 工具集 append-only：21→23。
-  // 两件工具都条件化装配（skillCatalog 缺席时不入注册表,与 memoryDir
+  // #337 T5 skill 工具集 append-only：21→22。
+  // 一件工具,条件化装配（skillCatalog 缺席时不入注册表,与 memoryDir
   // 同形态：Gate 3 在 toolsetNames 端镜像过滤,见工厂尾部注释）。
+  // disclosure-index-align T2:#337 T5 的 `skill_search` 已删（spec ADR-0046
+  // / SC5：未描述的 skill 靠 `skill({name})` 带回正文,索引文件
+  // `<available_skills>` 已给名+描述,直呼路径不依赖二次检索）。
   "skill", // #337 T5 直呼取 skill 正文
-  "skill_search", // #337 T5 大小写不敏感子串检索
-  // #356 T4 spawn_subagent append-only：23→24。条件化装配（subagentManager
+  // #356 T4 spawn_subagent append-only：22→23。条件化装配（subagentManager
   // 缺席时不入注册表，与 skillCatalog / memoryDir 同形态：Gate 3 在
   // toolsetNames 端镜像过滤，见工厂尾部注释）。
   "spawn_subagent", // #356 T4 主代理派发子代理（异步返 task_id）
-  // #356 T5 subagent_result append-only：24→25。条件化装配（subagentManager
+  // #356 T5 subagent_result append-only：23→24。条件化装配（subagentManager
   // 缺席时不入注册表，与 spawn_subagent / skillCatalog / memoryDir 同形态：
   // Gate 3 在 toolsetNames 端镜像过滤，见工厂尾部注释）。
   "subagent_result", // #356 T5 主代理轮询子代理四态（not_found/running/completed/failed）
-  // #440 双 Stream 工具集 append-only：25→28（并集，#480 Stream B 先合 +
+  // #440 双 Stream 工具集 append-only：24→27（并集，#480 Stream B 先合 +
   // #481 Stream A 后合）。三件都条件化装配（Gate 3 在 toolsetNames 端
   // 镜像过滤，见工厂尾部注释）：
   //   - todo_write: todoDir 缺席时不入注册表 — worker 装配路径 + ask 表面
@@ -136,13 +137,13 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   "todo_write", // #440 D1/D2 session 作用域 ledger（host 注入 todoDir）
   "list_mcp_resources", // #440 T11 list MCP server 暴露的 resources（聚合 / 可选 server + cursor）
   "read_mcp_resource", // #440 T11 读单个 resource 内容（必填 server + uri）
-  // #502 T4 bash_output / bash_stop append-only：28→30（Track A 模型操作面，
+  // #502 T4 bash_output / bash_stop append-only：27→29（Track A 模型操作面，
   // 与 T3 bash background:true 成对）。两件都条件化装配（backgroundManager
   // 缺席时不入注册表——ask 入口零件；bash 常驻不在此列，参数级能力由 handler
   // 运行时决策——Gate 3 在 toolsetNames 端镜像过滤，见工厂尾部注释）。
   "bash_output", // #502 T4 读后台任务日志尾部 + 状态/exit_code（read-only 默认 allow）
   "bash_stop", // #502 T4 终止后台任务进程组（SIGTERM→2s→SIGKILL；write 默认 ask）
-  // D-α T3 run_graph append-only：30→31。条件化装配（graphAssembly +
+  // D-α T3 run_graph append-only：29→30。条件化装配（graphAssembly +
   // subagentManager 同时在场才入注册表——ask / worker / 未接 overlay 的入口
   // 三者皆缺席；Gate 3 在 toolsetNames 端镜像过滤，见工厂尾部注释）。
   // 注册 ≠ 可见：本 round 的 graph 快照关着时装配层把它滤出 promptTools,
@@ -151,29 +152,29 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   "run_graph", // D-α T3 父代理声明 DAG，host 走 waves + 前景 spawn 编排
   "query_trace", // trace read-side projection and record drill-down
   // T4 (plans/worktree-isolation-model-provision.md) 创建工作树 ACI 工具
-  // append-only：31→32。条件化装配（worktreeProvision host 缝缺席时不入
+  // append-only：30→31。条件化装配（worktreeProvision host 缝缺席时不入
   // 注册表 —— 开关 OFF / worker 装配路径 / 无 hub 的入口；Gate 3 在
   // toolsetNames 端镜像过滤，见工厂尾部注释）。名字与 T3 门禁 hint 常量
   // `CREATE_TASK_WORKTREE_TOOL_HINT`（"create-task-worktree ACI tool"）
   // 逐字对齐 —— 被拦 mutate 的 block 文案指向的工具名必须真实存在。
   "create-task-worktree",
   // T7 (plans/worktree-isolation-model-provision.md) enter-task-worktree
-  // append-only：33→34。条件化装配（worktreeEnter host 缝缺席时不入注册表
+  // append-only：32→33。条件化装配（worktreeEnter host 缝缺席时不入注册表
   // —— TUI 只接 provision / worker 装配路径 / 无 hub 的入口；Gate 3 在
   // toolsetNames 端镜像过滤，见工厂尾部注释）。工具只收 owner conversationId，
   // 目标路径由 SSOT `taskWorktreePath` 派生，不收自由路径。
   "enter-task-worktree",
   // T8 (plans/worktree-isolation-model-provision.md) exit-task-worktree
-  // append-only：34→35。条件化装配（worktreeExit host 缝缺席时不入注册表
+  // append-only：33→34。条件化装配（worktreeExit host 缝缺席时不入注册表
   // —— TUI 只接 provision / worker 装配路径 / 无 hub 的入口；Gate 3 在
   // toolsetNames 端镜像过滤，见工厂尾部注释）。工具无参数；主仓根由 host
   // 从树本身派生（git common dir），树保留不删。
   "exit-task-worktree",
-  // symbol-primary-aci T2 符号查询工具集 append-only：35→45。
+  // symbol-primary-aci T2 符号查询工具集 append-only：34→44。
   // 与 #251 的 10 件 `lsp_*` **并存**（T5 才把坐标面从模型面移除）：本批以
   // 符号身份（`{ file, symbol_path }`）提问，行列译码封在 symbol-resolver.ts。
   // append 在末尾而非插在 lsp_* 之后 —— 本文件的 append-only 纪律（policy
-  // byName 键空间与 ADR-0006 稳定）要求不重排既有 35 件。
+  // byName 键空间与 ADR-0006 稳定）要求不重排既有 34 件。
   "find_symbol", // 工作区按名字/模式找符号（空 query 由 schema 拒绝）
   "find_declaration", // 声明/定义
   "find_referencing_symbols", // 引用（含声明）
@@ -184,37 +185,38 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   "prepare_call_hierarchy", // 调用图 item
   "list_incoming_calls", // 调用者
   "list_outgoing_calls", // 被调用者
-  // symbol-primary-aci T4 符号改工具集 append-only:33→37（去掉旧 lsp_* 后
+  // symbol-primary-aci T4 符号改工具集 append-only:32→36（去掉旧 lsp_* 后
   // 的末位 5 件,常驻,category=write）。以符号身份（`{ file, symbol_path }`）
   // 改代码，行列译码封在 symbol-resolver.ts。category="write"，写盘后经
   // onEdit → lspNotifier 触发 textDocument/didChange 与 edit_file 同链路。
   // edit_file 仍在 —— 留给不是单一符号的文本补丁（spec §使用规则段）。
   // spec symbol-primary-aci.md T5 + ADR-0037 + #803 T9 的 tool surface 加法：
-  // 8 基线 + memory_* (2 件) + tool_search + skill 2 + subagent 2 + todo +
-  // mcp 2 + bg 2 + run_graph + query_trace + 10 符号查询 + 5 符号改 +
-  // worktree 3 = 40 件名，T5b 目录轴再 append 1 件 = 41 件名，T6 内容轴再
-  // append 1 件 = 42 件名，task-worktree-lifecycle 再 append list/remove = 44
-  // 件名。本表长度以数组为 source of truth。
+  // 8 基线 + memory_* (2 件) + tool_search + skill 1（disclosure-index-align
+  // T2 删 skill_search，#337 原 2 件 → 1 件）+ subagent 2 + todo + mcp 2 +
+  // bg 2 + run_graph + query_trace + 10 符号查询 + 5 符号改 + worktree 3 =
+  // 39 件名，T5b 目录轴再 append 1 件 = 40 件名，T6 内容轴再 append 1 件
+  // = 41 件名，task-worktree-lifecycle 再 append list/remove = 43 件名。本表
+  // 长度以数组为 source of truth。
   "rename_symbol", // 全项目按符号改名（textDocument/rename + applyEdit）
   "replace_symbol_body", // 替换定义体（range = node.range，签名 + body）
   "insert_before_symbol", // 在符号定义前插入（range.start 位置）
   "insert_after_symbol", // 在符号定义后插入（range.end 位置）
   "safe_delete_symbol", // 无引用才删；仍有引用返 typed 失败 + 引用列表
-  // plan `trace-mcp-read-side-split` T5b append-only：40→41。trace 读侧的**目录轴**
+  // plan `trace-mcp-read-side-split` T5b append-only：39→40。trace 读侧的**目录轴**
   // （有哪些会话），与 query_trace 的行轴正交；常驻装配（与 query_trace 同门，
   // 无 host 缝可条件化）。
   //
   // 位置是契约不是风格：Gate 3 按「长度 + 顺序 + 成员」比对 factories 键与本名单，
   // 所以对应工厂必须是 `factories` 字面量的**最后一个键**（在 symbolMutateTools
   // 展开之后）。另有一批下游测按下标锁中段（run-graph-assembly.test.ts 的
-  // idx 20-23），插在它们之前即红 —— 尾部追加才是安全改法。
+  // idx 19-22），插在它们之前即红 —— 尾部追加才是安全改法。
   "list_sessions",
-  // plan `trace-mcp-read-side-split` T6 append-only：41→42。trace 读侧的**内容轴**
+  // plan `trace-mcp-read-side-split` T6 append-only：40→41。trace 读侧的**内容轴**
   // （一条记录里的一段字符窗），与目录轴、行轴正交；常驻装配（与 query_trace /
   // list_sessions 同门，无 host 缝可条件化）。
   //
   // 仍然只能追加在尾部：中段插入会撞上下游按下标锁定的断言（
-  // run-graph-assembly.test.ts 的 idx 20-23 等），尾部才是 append-only 契约。
+  // run-graph-assembly.test.ts 的 idx 19-22 等），尾部才是 append-only 契约。
   "get_record",
   // task-worktree-lifecycle: discovery and explicit cleanup are appended after
   // the existing ACI surface. Both host seams are independently conditional.
@@ -232,7 +234,8 @@ export interface CreateDefaultAciRegistryOptions {
   readonly sandboxRoot: string;
   /** 记忆库根目录(#228 layer 3)。缺席时 memory_recall / memory_save 不入注册表。 */
   readonly memoryDir?: string;
-  /** #337 T5 skill 索引层(catalog)。缺席时 skill / skill_search 不入注册表。 */
+  /** #337 T5 skill 索引层(catalog)。缺席时 skill 不入注册表
+   *  （disclosure-index-align T2 删 skill_search 后只剩 skill 一件）。 */
   readonly skillCatalog?: SkillCatalog;
   /** #356 T4 主代理本地子代理生命周期管理器。缺席时 spawn_subagent 不入注册表
    * （ask 入口零件场景；chat/tui/serve 由 build-engine 按 surface 条件构造传入）。 */
@@ -490,10 +493,10 @@ export function createDefaultAciRegistry(
   // append-only:顺序与 build-engine.ts 既有策略(policy byName 键空间)一致。
   // memoryDir 缺席 → memory_recall / memory_save 从 factories 剔除
   // (memoryEnabled=false 的 ask 路径;见 build-engine.ts 条件构造)。
-  // skillCatalog 缺席 → skill / skill_search 从 factories 剔除
-  // (#337 T5 T8 装配时才真接;装配未启用 skill 源时与 memory 同形态)。
+  // skillCatalog 缺席 → skill 从 factories 剔除（disclosure-index-align T2
+  // 删 skill_search 后只剩一件;见 spec ADR-0046 / SC5）。
   // 键顺序必须与 ACI_TOOLSET_NAMES 逐项一致(Gate 3):memory_* 在
-  // tool_search 之前,skill / skill_search 在末尾。
+  // tool_search 之前,skill 在末尾。
   const factories: Record<string, () => AciToolDef> = {
     bash: () =>
       createBashTool(sandboxRoot, {
@@ -602,11 +605,13 @@ export function createDefaultAciRegistry(
     // 消费，model surface 由符号工具（find_* / get_* / *_calls + 5 件改工具）
     // 接班。nearestRoot 边界、settings.lsp / idle / disabledServers 等 B7 语义
     // 落 lspCtx 一份 → 符号工具共享。
-    // #337 T5 skill 工具集（条件化装配：skillCatalog 缺席时不入注册表）。
+    // #337 T5 skill 工具（条件化装配：skillCatalog 缺席时不入注册表）。
+    // disclosure-index-align T2:skill_search 已删（spec ADR-0046 / SC5：索引
+    // 段 `<available_skills>` 已给名+描述,直呼 `skill({name})` 不依赖二次
+    // 检索）。
     ...(skillCatalog
       ? {
           skill: () => createSkillTool({ catalog: skillCatalog }),
-          skill_search: () => createSkillSearchTool({ catalog: skillCatalog }),
         }
       : {}),
     // #356 T4 spawn_subagent 工具集（条件化装配：subagentManager 缺席时
@@ -752,7 +757,7 @@ export function createDefaultAciRegistry(
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。
   // memoryDir 缺席时 memory_recall/memory_save 不装配,skillCatalog 缺席时
-  // skill/skill_search 不装配,故对照名单需先剔除这两个条件键。任何不一致
+  // skill 不装配,故对照名单需先剔除这些条件键。任何不一致
   // 均装配期失败,不留到运行期。
   // #468 deny-list：deny 名并入 excluded（toolsetNames 端剔除），factories 键
   // 端同源过滤 → Gate 3 双侧镜像一致（与 memoryDir 条件化同款机制）。
@@ -760,7 +765,7 @@ export function createDefaultAciRegistry(
   const factoryNames = Object.keys(factories).filter((n) => !denySet.has(n));
   const excluded: ReadonlyArray<string> = [
     ...(memoryDir ? [] : ["memory_recall", "memory_save"]),
-    ...(skillCatalog ? [] : ["skill", "skill_search"]),
+    ...(skillCatalog ? [] : ["skill"]),
     ...(subagentManager ? [] : ["spawn_subagent", "subagent_result"]),
     ...(todoDir ? [] : ["todo_write"]),
     ...(mcpManager ? [] : ["list_mcp_resources", "read_mcp_resource"]),

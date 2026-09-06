@@ -55,12 +55,13 @@ import type { ToolExecutionResult } from "../../src/harness/tools/types.ts";
 // Order is load-bearing: it must match the `aciTools` array in
 // `src/harness/build-engine.ts` (policy byName key-space, ADR-0006)。
 // 装配层历史 append-only：8 baseline → + memory_recall/save (#194)
-// → + tool_search (#224) → + skill/skill_search (#337) → + spawn_subagent /
+// → + tool_search (#224) → + skill (#337 T5) → - skill_search
+// (disclosure-index-align T2 / SC5) → + spawn_subagent /
 // subagent_result (#356) → + todo_write / list_mcp_resources / read_mcp_resource
 // (#440 双 Stream) → + bash_output / bash_stop (#502) → + run_graph
 // (ADR-0041 / plans/model-prefix-layering.md B3 常驻) → + query_trace
 // → + 10 符号查询 (symbol-primary-aci T2) → + 5 符号改 (T4) → + list_sessions
-// (trace-mcp-read-side-split T5b) → + get_record (同 plan T6) = 39 件;
+// (trace-mcp-read-side-split T5b) → + get_record (同 plan T6) = 38 件;
 //
 // symbol-primary-aci T5：旧 10 件 lsp_* 已退役（spec symbol-primary-aci.md
 // §37-53 + SC2 + SC7 + ACR complexity-anti-drift）；build-engine 装配路径不再产出
@@ -88,26 +89,26 @@ const EXPECTED_TOOLS = [
   "memory_recall",
   "memory_save",
   "tool_search",
-  // #337 T8 skill 工具集 append-only:11→13,2 件在末尾。
+  // #337 T8 skill 工具集 append-only:11→12,1 件在末尾(disclosure-index-align
+  // T2 删 skill_search 后只剩 1 件)。
   "skill",
-  "skill_search",
-  // #356 T6 subagent 工具集 append-only:13→15,2 件在末尾(全装配 chat surface
-  // 才在场;ask 缺 subagentManager → 13 件)。
+  // #356 T6 subagent 工具集 append-only:12→14,2 件在末尾(全装配 chat surface
+  // 才在场;ask 缺 subagentManager → 12 件)。
   "spawn_subagent",
   "subagent_result",
-  // #440 双 Stream 并集 append-only:15→18。todo_write（T4，全装配 chat surface
+  // #440 双 Stream 并集 append-only:14→17。todo_write（T4，全装配 chat surface
   // + todoDir 在场才入注册表；ask + worker 装配路径不传 todoDir → 不在场）+
   // MCP resources 两件（T11，全装配 chat surface 才在场；ask 缺 mcpManager → 不在场）。
   "todo_write",
   "list_mcp_resources",
   "read_mcp_resource",
-  // #502 T3 bash_output / bash_stop 工具集 append-only:18→20,末位 2 件
+  // #502 T3 bash_output / bash_stop 工具集 append-only:17→19,末位 2 件
   // （全装配 chat/tui/serve surface 在场;ask 缺 backgroundManager → 缺席;
   //  bash 仍常驻,参数级 background:true 能力由 handler 运行时决策）。
   "bash_output",
   "bash_stop",
   // ADR-0041 / plans/model-prefix-layering.md B3 run_graph 常驻 append-only:
-  // 20→21,与 bash_output/bash_stop 同形态 —— 仅 subagentManager 缺席才不
+  // 19→20,与 bash_output/bash_stop 同形态 —— 仅 subagentManager 缺席才不
   // 入注册表(graphAssembly 缺席由 handler isEnabled 缺省恒关守门)。
   "run_graph",
   "query_trace",
@@ -132,10 +133,10 @@ const EXPECTED_TOOLS = [
   "insert_before_symbol",
   "insert_after_symbol",
   "safe_delete_symbol",
-  // trace-mcp-read-side-split T5b list_sessions append-only:36→37,末位 1 件常驻
+  // trace-mcp-read-side-split T5b list_sessions append-only:35→36,末位 1 件常驻
   //（读侧目录轴,不条件化——任何 surface 都建 traceDir）。
   "list_sessions",
-  // trace-mcp-read-side-split T6 get_record append-only:37→38,末位再加 1 件常驻
+  // trace-mcp-read-side-split T6 get_record append-only:36→37,末位再加 1 件常驻
   //（读侧内容轴,与目录轴同样不条件化;三轴顺序 = append 顺序,不重排既有件）。
   "get_record",
 ];
@@ -480,7 +481,7 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
     );
   });
 
-  it("chat surface：skill catalog 装配后 skill / skill_search 两件工具在场", async () => {
+  it("chat surface：skill catalog 装配后 skill 一件工具在场（SC5 删 skill_search）", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-t8-chat-skill-"));
     roots.push(root);
     await plantSkill(root, "echo", "echoes your message");
@@ -494,16 +495,17 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
     });
 
     expect(built.deps.registry.get("skill")).toBeDefined();
-    expect(built.deps.registry.get("skill_search")).toBeDefined();
+    // disclosure-index-align T2 / SC5:skill_search 已删。
+    expect(built.deps.registry.get("skill_search")).toBeUndefined();
     const names = built.deps.registry.list().map((d) => d.name);
     expect(names).toContain("skill");
-    expect(names).toContain("skill_search");
+    expect(names).not.toContain("skill_search");
 
     // cleanup:manager 在场则调用 shutdown 不抛（即使无 MCP server）
     if (built.shutdown) await built.shutdown();
   });
 
-  it("ask surface：skill 两件在场 + 无 shutdown 句柄（manager 未创建，SC12）", async () => {
+  it("ask surface：skill 一件在场 + 无 shutdown 句柄（manager 未创建，SC12）", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-t8-ask-skill-"));
     roots.push(root);
     await plantSkill(root, "ask-skill", "ask-only skill");
@@ -517,9 +519,10 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
       cwd: root,
     });
 
-    // skill 两件仍装配（ask 也含 skill 工具）
+    // skill 一件仍装配（ask 也含 skill 工具）。
     expect(built.deps.registry.get("skill")).toBeDefined();
-    expect(built.deps.registry.get("skill_search")).toBeDefined();
+    // disclosure-index-align T2 / SC5:skill_search 已删。
+    expect(built.deps.registry.get("skill_search")).toBeUndefined();
 
     // ask 不创建 MCP manager → shutdown 句柄缺席;subagent manager 同门缺席
     // （T6:surface !== "ask" 才创建）。

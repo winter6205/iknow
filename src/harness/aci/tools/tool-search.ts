@@ -56,8 +56,9 @@ interface ToolSearchInput {
 
 /**
  * 无匹配 / 空参的合法返回：缺参 = 无结果。
- * T3：沿用 `skill.ts` "Use skill_search to find available skills." 先例 ——
- * 返回不是裸标记,而是带换词引导（换词重搜 / `names` 精确取名）。
+ * T3：沿用 `skill.ts` 引导文本先例（disclosure-index-align T2 删 skill_search
+ * 之后,`skill` 引导回 `<available_skills>` 清单或 `read_file`,此处 NO_MATCHES
+ * 不依赖已删检索件）。返回不是裸标记,而是带换词引导（换词重搜 / `names` 精确取名）。
  */
 export const NO_MATCHES =
   "(no matches) Rephrase `query` with a different keyword, or pass exact tool names via `names`.";
@@ -128,7 +129,7 @@ export function createToolSearchTool(deps: ToolSearchDeps): AciToolDef {
   return Object.freeze({
     name: "tool_search",
     description:
-      "Discover tools beyond the current prompt — search scope covers all registered tools, including `mcp__`-prefixed MCP tools. Search first, then use: pass `query` (case-insensitive substring on tool name / description) or `names` (exact list) to pull ToolDef JSON. Returns one JSON object per line `(name, description, inputSchema)`, at most `limit` hits (default 20, max 100) plus a trailing plain-text line when hits are left out; empty or whitespace-only input, or no match → `(no matches)` with guidance to rephrase `query` or pass exact `names`. Side effect: marks returned tools as discovered so they surface in the next prompt.",
+      "Use only when a tool's directory entry has no description (full schema unavailable). Search scope covers all registered tools, including `mcp__`-prefixed MCP tools. Pass `query` (case-insensitive substring on tool name / description) or `names` (exact list) to pull ToolDef JSON. Returns one JSON object per line `(name, description, inputSchema)`, at most `limit` hits (default 20, max 100) plus a trailing plain-text line when hits are left out; empty or whitespace-only input, or no match → `(no matches)` with guidance to rephrase `query` or pass exact `names`. Side effect: marks returned tools as discovered so they surface in the next prompt.",
     inputSchema: {
       type: "object",
       properties: {

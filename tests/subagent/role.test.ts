@@ -36,7 +36,6 @@ const WORKER_TOOLSET: ReadonlyArray<NamedTool> = Object.freeze([
   { name: "lsp_outgoing_calls" },
   { name: "lsp_diagnostics" },
   { name: "skill" },
-  { name: "skill_search" },
 ]);
 
 describe("subagent role: SubAgentDefinition 类型形态", () => {

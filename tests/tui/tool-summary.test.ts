@@ -91,7 +91,7 @@ describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
     expect(detail).toBe("抓取 https://example.com/a");
   });
 
-  test("memory_recall / memory_save / tool_search / skill / skill_search 摘要", () => {
+  test("memory_recall / memory_save / tool_search / skill 摘要（SC5 删 skill_search）", () => {
     expect(
       summarizeToolCall("memory_recall", { query: "TUI", limit: 5 }).detail
     ).toBe("记忆 召回 TUI");
@@ -110,10 +110,15 @@ describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
     expect(summarizeToolCall("skill", { name: "playwright-cli" }).detail).toBe(
       "skill playwright-cli"
     );
-    expect(summarizeToolCall("skill_search", { query: "tui" }).detail).toBe(
-      "检索技能 tui"
-    );
-    expect(summarizeToolCall("skill_search", {}).detail).toBe("检索技能 ?");
+  });
+
+  test("unknown name → 走默认 placeholder,不抛(SC5 删 skill_search 后默认 fallback)", () => {
+    // 历史 tool_result 仍可能含 skill_search(消息写入在 deletion 之前)。
+    // summary 函数对未注册名走默认 placeholder:工具名小括号包住,
+    // 不抛、不替未注册名造专属显示。SC5 删 skill_search 后,本测试锁的是
+    // 「未知工具 = 默认 placeholder」路径存在且稳定。
+    const { detail } = summarizeToolCall("skill_search", { query: "tui" });
+    expect(detail).toBe("(skill_search)");
   });
 
   test("spawn_subagent / subagent_result 摘要（task / task_id）", () => {
@@ -921,10 +926,11 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
 describe("registeredToolDisplayNames: 注册表覆盖 EXPECTED_TOOLSET_30", () => {
   test("注册表至少覆盖 EXPECTED_TOOLSET_30 的所有工具名（声明密度单点）", () => {
     // spec D7：新增一种工具的显示只需在 TOOL_DISPLAYS 加一条声明。
-    // 该测试保证 buildTuiDeps 装配的 30 件工具，每件都有显示声明（哪怕仅
-    // summary、无 preview）。这与 deps-tools.test.ts 的 EXPECTED_TOOLSET_30
-    // 闸（装配完整 30 件）正交但同源：装配闸校验"在不在"，本闸校验"是否声明了
-    // 显示规则"，二者形成 spec D7「注册表完备性」双轨。
+    // 该测试保证 buildTuiDeps 装配的工具,每件都有显示声明（哪怕仅
+    // summary、无 preview）。disclosure-index-align T2 删 skill_search 后
+    // 总件数由 35 → 34。本闸与 deps-tools.test.ts 的 EXPECTED_TUI_TOOLSET
+    // 正交但同源：装配闸校验"在不在"，本闸校验"是否声明了显示规则"，
+    // 二者形成 spec D7「注册表完备性」双轨。
     const EXPECTED_TOOLSET_30 = [
       "bash",
       "read_file",
@@ -948,7 +954,6 @@ describe("registeredToolDisplayNames: 注册表覆盖 EXPECTED_TOOLSET_30", () =
       "lsp_outgoing_calls",
       "lsp_diagnostics",
       "skill",
-      "skill_search",
       "spawn_subagent",
       "subagent_result",
       "todo_write",

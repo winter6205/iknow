@@ -172,7 +172,6 @@ const SUMMARIZERS: Readonly<
     return "检索工具 ?";
   },
   skill: (r) => `skill ${pickString(r, "name")}`,
-  skill_search: (r) => `检索技能 ${pickString(r, "query")}`,
   spawn_subagent: (r) =>
     `派发子代理：${pickString(r, "task", "").slice(0, 60) || "?"}`,
   subagent_result: (r) => `轮询 ${pickString(r, "task_id")}`,
@@ -305,10 +304,9 @@ const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
     summary: SUMMARIZERS.skill!,
     settledClass: TOOL_SETTLED_CLASS.skill!,
   },
-  skill_search: {
-    summary: SUMMARIZERS.skill_search!,
-    settledClass: TOOL_SETTLED_CLASS.skill_search!,
-  },
+  // disclosure-index-align T2: skill_search 已删（spec ADR-0046 / SC5）。
+  // 历史 tool_result 可能仍含该名 → 走默认 placeholder（已不在 SUMMARIZERS），
+  // 行为与未注册工具一致（无显示声明即 retract 兜底）。
   // 子代理两件（spec D8 三类之外）：settledClass 取核内显式声明的 "subagent"
   // —— 不用 `!` 兜底，声明缺失/谎报在编译期或跨核闸失败。
   spawn_subagent: {

@@ -64,9 +64,10 @@ const DEFAULT_DISALSET_TOOLS_LENGTH_SNAPSHOT = 1;
 
 describe("M3 worker 默认可见 — buildWorkerToolSurface 宽容裁剪", () => {
   it("用户 deny-list 含 list/read 时仍宽容忽略(available 不含 → 静默跳过,不抛)", () => {
-    // 模拟 worker 装配时的全量工具面（28 件：8 基线 + tool_search + 10 LSP
-    // + skill 2 + spawn_subagent + subagent_result + mcp 2 件。模拟时只关心
-    // 工具名集合,工具 def body 不参与裁剪判定）。
+    // 模拟 worker 装配时的全量工具面（27 件：8 基线 + tool_search + 10 LSP
+    // + skill 1（disclosure-index-align T2 删 skill_search）+ spawn_subagent
+    // + subagent_result + mcp 2 件。模拟时只关心工具名集合,工具 def body
+    // 不参与裁剪判定）。
     const available = [
       "bash",
       "read_file",
@@ -88,7 +89,6 @@ describe("M3 worker 默认可见 — buildWorkerToolSurface 宽容裁剪", () =>
       "lsp_outgoing_calls",
       "lsp_diagnostics",
       "skill",
-      "skill_search",
       "spawn_subagent",
       "subagent_result",
       "list_mcp_resources",
@@ -135,7 +135,6 @@ describe("M3 worker 默认可见 — buildWorkerToolSurface 宽容裁剪", () =>
       "lsp_outgoing_calls",
       "lsp_diagnostics",
       "skill",
-      "skill_search",
       "spawn_subagent",
       "subagent_result",
       "list_mcp_resources",
