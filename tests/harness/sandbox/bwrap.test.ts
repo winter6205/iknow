@@ -139,11 +139,32 @@ describe("createBwrapFence — closed-world argv shape (T3)", () => {
     );
     assert.ok(installIdx > cursor, "read whitelist follows the system block");
     const nodeRoot = dirname(process.execPath);
+    // §9.2 #5:node 工具链根落入系统前缀时塌缩(不冗余 ro-bind,靠系统块
+    // 覆盖);否则必须单独 ro-bind。塌缩分支与 host 相关(CI runner 的
+    // node 在 /opt 下,本地 WSL 在 home 下),断言两分支各自钉住不变式。
+    const nodeCollapsed = [
+      "/usr",
+      "/bin",
+      "/lib",
+      "/lib64",
+      "/etc",
+      ...OPTIONAL_HOST_RO_PREFIXES,
+    ]
+      .filter((prefix) => existsSync(prefix))
+      .some((prefix) => (nodeRoot + "/").startsWith(prefix + "/"));
     const nodeIdx = tripleIndices(argv, "--ro-bind", nodeRoot);
-    assert.ok(
-      nodeIdx.length > 0,
-      `default node toolchain root must be ro-bound; argv=${JSON.stringify(argv)}`
-    );
+    if (nodeCollapsed) {
+      assert.equal(
+        nodeIdx.length,
+        0,
+        `collapsed node toolchain root must not be redundantly ro-bound; argv=${JSON.stringify(argv)}`
+      );
+    } else {
+      assert.ok(
+        nodeIdx.length > 0,
+        `default node toolchain root must be ro-bound; argv=${JSON.stringify(argv)}`
+      );
+    }
     // 3. 写白名单块:tmp bind + cwd bind,均在读块之后(bwrap 后挂覆盖先挂:
     //    taskRoot 可能位于某读根树内,写 bind 必须最后夺回)。
     const tmpBindIdx = assertTriple(argv, "--bind", TMP, "tmp write bind");
