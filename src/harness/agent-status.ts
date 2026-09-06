@@ -14,9 +14,11 @@
  * 本模块不改 todo_write 的 add/check/list 语义,只读文件。
  */
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { AnthropicNativeMessage } from "./model-adapter/types.js";
-import { OPEN_PREFIX, TODOS_FILE } from "./aci/tools/todo-write.js";
+import {
+  OPEN_PREFIX,
+  resolveConversationTodoDir,
+} from "./aci/tools/todo-write.js";
 
 // 未勾行锚点:直接复用账本写入方 todo-write.ts 导出的 OPEN_PREFIX —— 写入
 // 与投影共享同一真源(含尾随空格,只匹配写入方产出的行形态,不误匹配裸
@@ -109,16 +111,20 @@ export function agentStatusFromMessages(
 }
 
 /**
- * IO 读取器:读 `<todoDir>/todos.md`,只投影 `- [ ]` 开头的未勾行(逐字,
- * 保序)。文件缺席 / 空文件 / 全勾 / 任何读取失败 → 空列表;绝不 throw
+ * IO 读取器:读 `<todoDir>/[<conversationId>/]todos.md`,只投影 `- [ ]`
+ * 开头的未勾行(逐字,保序)。conversationId 在场 → 读该会话自己的账本
+ * (与 todo_write 写入侧同一 SSOT 解析);缺席 → 根 todos.md(向后兼容)。
+ * 文件缺席 / 空文件 / 全勾 / 任何读取失败 → 空列表;绝不 throw
  * (调用侧是即将进行的模型回合,读失败按"无 todo 段"处理,无 fallback
  * 噪音)。
  */
 export async function readOpenTodoLines(
-  todoDir: string
+  todoDir: string,
+  conversationId?: string
 ): Promise<ReadonlyArray<string>> {
+  const filePath = resolveConversationTodoDir({ todoDir, conversationId });
   try {
-    const content = await readFile(join(todoDir, TODOS_FILE), "utf8");
+    const content = await readFile(filePath, "utf8");
     return content.split("\n").filter((line) => line.startsWith(OPEN_PREFIX));
   } catch {
     // EXIT: 任何读失败(含 ENOENT / EACCES / ENOTDIR)→ 空列表
@@ -135,10 +141,12 @@ export async function readOpenTodoLines(
 export async function computeAgentStatusSnapshot(opts: {
   readonly lastTool: string;
   readonly todoDir: string;
+  /** 在场 → 投影该会话自己的账本(SSOT 与 todo_write 写入侧同源)。 */
+  readonly conversationId?: string;
 }): Promise<AgentStatusSnapshot & { readonly text: string }> {
   const snapshot: AgentStatusSnapshot = {
     lastTool: opts.lastTool,
-    openTodoLines: await readOpenTodoLines(opts.todoDir),
+    openTodoLines: await readOpenTodoLines(opts.todoDir, opts.conversationId),
   };
   return { ...snapshot, text: buildAgentStatusText(snapshot) };
 }

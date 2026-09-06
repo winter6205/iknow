@@ -8,7 +8,20 @@
  * assembly point.件数 = `EXPECTED_TOOLS.length` 推导,以数组为 source of truth,
  * 注释里不再写加法叙事（避免与实际长度漂移）。
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+
+// 装配类用例（真实 MCP manager / bwrap 探测 / skill scanner）在并发负载下
+// 可超 vitest 默认 5s —— 与 hub-worktree-isolation.test.ts 同款放宽。
+// 这些用例同属 CI 实证排除集（.github/workflows/test.yml），本地仍需可过。
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { spawn as spawnChild } from "node:child_process";
 import { tmpdir } from "node:os";

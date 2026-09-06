@@ -509,6 +509,11 @@ async function appendAgentStatusBar(
   const snapshot = await computeAgentStatusSnapshot({
     lastTool,
     todoDir: deps.agentStatus.todoDir,
+    // Per-conversation projection: read THIS session's ledger (same SSOT the
+    // todo_write writer resolves through). deps.conversationId is injected
+    // per-session by the surface layer (#502 T5); absent (ask / worker) →
+    // legacy shared-root read.
+    conversationId: deps.conversationId,
   });
   safeEmitStream(onStream, {
     type: "agent_status",
