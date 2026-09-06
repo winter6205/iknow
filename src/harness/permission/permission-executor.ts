@@ -243,6 +243,10 @@ export function createPermissionRuntime(
       }
       // input 不通过 schema → 非 error 文本投影(model-facing OK,把
       // schema 显式送回,引导模型补 input;is_error = false 因为 kind 是 ok)。
+      // 形态 = gateOne 既有二值契约(blocked = 裁决完成、inner 不执行,
+      // result 原样透传为 tool result)内携带 ok result:消费面
+      // (aci-executor)对 blocked.result.kind 无假设,加第三 arm 只为
+      // 类型可读性会迫使全部闸门调用点适配,收益不成比例。
       return {
         kind: "blocked",
         result: {

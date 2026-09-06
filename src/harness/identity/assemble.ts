@@ -596,7 +596,12 @@ function projectPathSegment(projectIdentityRoot: string): string {
  *
  *  T5 / ADR-0046 Decision 2:description 缺席/空/纯空白 → 渲染**裸名行**
  *  (索引降档把超阈条目剥成仅名字;名字永不删、段永不缺席)。降档判定不在
- *  本函数里 —— 渲染层只按数据形态输出(单一 SSOT,见 identity/index-demotion.ts)。 */
+ *  本函数里 —— 渲染层只按数据形态输出(单一 SSOT,见 identity/index-demotion.ts)。
+ *
+ *  描述不截 120 字(MCP/退场内建段走 shortToolDescription,本段不走):
+ *  #337 T6 起该段即渲染完整 description,长度由 skill frontmatter 作者控制;
+ *  索引降档(countTokens 实测)会把超阈条目整条剥成裸名,与靠固定 cap
+ *  压体积是两条不同治理路径,不在渲染层混用。 */
 export function skillsSegment(skills: ReadonlyArray<SkillSummary>): string {
   const visible = skills
     .filter((s) => !s.disabled)
