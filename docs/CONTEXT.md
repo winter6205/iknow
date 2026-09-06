@@ -371,8 +371,8 @@ _Avoid_: 默认 ON；门禁自动建树（auto-provision）；把建树当 host 
 **session worktree rebind**: worktree isolation mode ON 下 `create-task-worktree`（或 enter / exit）ACI 工具成功后，把**当前会话**生效的根锚（cwd / `workspaceRoot` 取值）切到本会话 task worktree 的动作；只影响本会话——不 checkout 其它会话 / 其它 worktree 的 HEAD，push / 开 PR 不拖动主仓或其它 worktree 当前分支。同会话重复调工具幂等（一棵树、一个 task 分支，不跑第二次 `git worktree add`）。**生效边界：同一轮（run）内对下一波 tool calls 生效**——建树成功的当波 mutate 仍按波快照旧根裁决，下一波起写与工具 cwd 落进新树；不需要操作员再发消息或 `/continue`。发现与回收走同族条件工具 `list-task-worktrees` / `remove-task-worktree`（ADR-0037；`specs/task-worktree-lifecycle.md`）。
 _Avoid_: 改绑波及其它会话；把 rebind 当 serve 主根重绑（ADR-0023 unbound / recents 语义不变）；让 rebind 触发 settings 重载；把改绑后的根错当成 product workspace 多根；把 rebind 说成 mutate 门禁的自动副作用；要求操作员再发一条消息才生效（same-turn 生效语义已随活 taskRoot 落地）
 
-**task worktree label**: 装饰在 task worktree 路径叶子上的可选 kebab 前缀（`<slug>--<conversationId>`）；不是身份。归属与门禁只解析 conversationId 后缀。非法或缺席则叶子仍是纯 conversationId。
-_Avoid_: 把 label 当 conversationId；用 session `title` / `goal` 当 slug；在归属裁决里解析前缀
+**task worktree label**: 给人/模型认树的 kebab 目录名。有合法 label 时叶子就是 `<slug>`，conversationId 不进文件夹（写在 gitdir sidecar；历史 `<slug>--<conversationId>` 仍可反演）。非法或缺席则叶子仍是纯 conversationId。同名已存在 → 建树失败不覆盖。
+_Avoid_: 把 label 当 conversationId；用 session `title` / `goal` 当 slug；把 uuid 写进文件夹名当展示面
 
 **worktreeinclude**: 位于 **projectIdentityRoot** 的 `.iknow/worktreeinclude`（gitignore 语法）。`create-task-worktree` 成功后只把「匹配且已被 gitignore」的文件拷进新树；文件缺席不失败建树。
 _Avoid_: 拷 tracked 文件；把 include 当第二份身份根；include 失败阻断 provision
@@ -429,7 +429,7 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **crash 取证无条件 vs ADR-0003 D10**: 生命周期三类事件 ≠ content trace；D10 的 chat REPL 排除只对 content trace 继续成立
 - **worktree isolation mode vs workspaceRoot vs workspace（serve 主根）**: git worktree 是会话级 mutate 物理隔离；`workspaceRoot` 是 per-root 状态锚（ADR-0019）；serve 主根是显式选定锚（ADR-0023）。rebind 只切本会话生效根，不改锚规则本身
 - **session worktree rebind vs taskRoot（活值）**: rebind 是动作（缝成功 resolve 的那一刻），taskRoot 是该动作写入的活 cell；动作对下一波 tool calls 生效（波快照边界），cell 读取面始终回答「当前生效根」
-- **task worktree label vs conversationId**: label 只展示与 enter 定位；conversationId 才是叶子身份与归属裁决
+- **task worktree label vs conversationId**: label 是文件夹名与 enter 定位；conversationId 是归属身份，不写进目录名
 - **settled appearance vs result preview**: 落定三类决定谁还上屏；五行走 ANSI 预览只作用于 keep class 的成功 bash
 - **failure overlay vs retract class**: 失败覆盖「收」，失败工具出独立行，不折进计数
 - **accent class vs failure overlay**: 成功点名走 accent；失败时 error 色优先，不用品牌色表示出错

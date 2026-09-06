@@ -1300,12 +1300,7 @@ describe("worktree isolation wiring (T4 — create-task-worktree ACI tool)", () 
       conversationId
     );
     expect(result.kind).toBe("ok");
-    const reboundRoot = join(
-      repo,
-      ".iknow",
-      "worktrees",
-      `fix-648--${conversationId}`
-    );
+    const reboundRoot = join(repo, ".iknow", "worktrees", `fix-648`);
     expect(resultText(result)).toContain(reboundRoot);
     expect(git(repo, "worktree", "list")).toContain(reboundRoot);
     expect(git(reboundRoot, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
@@ -1489,7 +1484,7 @@ describe("worktree isolation wiring (T7 - enter-task-worktree)", () => {
       convA
     );
     expect(created.kind).toBe("ok");
-    const wtA = join(repo, ".iknow", "worktrees", `fix-648--${convA}`);
+    const wtA = join(repo, ".iknow", "worktrees", "fix-648");
     expect(git(repo, "worktree", "list")).toContain(wtA);
     await persistDirtyRoot(hub, convA);
 

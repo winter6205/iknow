@@ -14,7 +14,7 @@
  */
 import { afterAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +26,7 @@ import {
 import type { SessionFileV1 } from "../../src/session-api/store/index.ts";
 import { createTaskWorktreeProvisioner } from "../../src/session-api/worktree-rebind.ts";
 import {
+  createTaskWorktree,
   mainCheckoutOf,
   taskWorktreeBranch,
   taskWorktreeOwnerOf,
@@ -395,7 +396,7 @@ describe("createTaskWorktreeProvisioner", () => {
     expect(file.workspaceRoot).toBe(repo);
   });
 
-  it("creates a labeled worktree and keeps the conversation id as the ownership suffix", async () => {
+  it("creates a labeled worktree as a name-only leaf and keeps conversation id as ownership", async () => {
     const repo = makeGitRepo();
     const { store } = await makeStoreWithSessions(repo, ["conv-a"]);
     const prov = createTaskWorktreeProvisioner({ store });
@@ -406,7 +407,7 @@ describe("createTaskWorktreeProvisioner", () => {
       name: "fix-648",
     });
 
-    expect(root).toBe(join(repo, ".iknow", "worktrees", "fix-648--conv-a"));
+    expect(root).toBe(join(repo, ".iknow", "worktrees", "fix-648"));
     expect(taskWorktreeOwnerOf(root)).toBe("conv-a");
     expect(mainCheckoutOf(root)).toBe(repo);
     expect(git(root, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
@@ -526,6 +527,7 @@ describe("createTaskWorktreeProvisioner", () => {
     });
     expect(entered).toBe(first);
     expect((await store.load("conv-c")).workspaceRoot).toBe(first);
+    expect(second).toBe(join(repo, ".iknow", "worktrees", "review"));
 
     const ambiguousRepo = makeGitRepo();
     const { store: ambiguousStore } = await makeStoreWithSessions(
@@ -535,15 +537,18 @@ describe("createTaskWorktreeProvisioner", () => {
     const ambiguous = createTaskWorktreeProvisioner({
       store: ambiguousStore,
     });
-    await ambiguous.provision({
+    mkdirSync(join(ambiguousRepo, ".iknow", "worktrees"), { recursive: true });
+    await createTaskWorktree({
+      repoRoot: ambiguousRepo,
+      worktreePath: join(ambiguousRepo, ".iknow", "worktrees", "same--conv-a"),
+      branch: "iknow/task/same-conv-a",
       conversationId: "conv-a",
-      root: ambiguousRepo,
-      name: "same",
     });
-    await ambiguous.provision({
+    await createTaskWorktree({
+      repoRoot: ambiguousRepo,
+      worktreePath: join(ambiguousRepo, ".iknow", "worktrees", "same--conv-b"),
+      branch: "iknow/task/same-conv-b",
       conversationId: "conv-b",
-      root: ambiguousRepo,
-      name: "same",
     });
 
     await expect(
@@ -565,7 +570,6 @@ describe("createTaskWorktreeProvisioner", () => {
     ).rejects.toMatchObject({
       message: expect.stringContaining("conv-b"),
     });
-    expect(second).toContain("review--conv-b");
   });
 
   it("rejects unsafe label branch collisions instead of extending the branch name", async () => {
@@ -591,6 +595,25 @@ describe("createTaskWorktreeProvisioner", () => {
     expect(
       existsSync(join(repo, ".iknow", "worktrees", "fix-648--12345678-b"))
     ).toBe(false);
+    expect(existsSync(join(repo, ".iknow", "worktrees", "fix-648"))).toBe(true);
+  });
+
+  it("rejects a second conversation that reuses the same label", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, ["conv-a", "conv-b"]);
+    const prov = createTaskWorktreeProvisioner({ store });
+    await prov.provision({
+      conversationId: "conv-a",
+      root: repo,
+      name: "fix-648",
+    });
+    await expect(
+      prov.provision({
+        conversationId: "conv-b",
+        root: repo,
+        name: "fix-648",
+      })
+    ).rejects.toMatchObject({ kind: "worktree_exists" });
   });
 
   it("removes only safe clean trees, preserves branches by default, and blocks dirty or unpublished trees", async () => {

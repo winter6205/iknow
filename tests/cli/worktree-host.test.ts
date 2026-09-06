@@ -7,6 +7,7 @@
  * + fresh conversationId，钉死 CLI 装配层必须整 ctx 透传（含 `name`）。
  *
  * 背景（iknow trace 0cee57d3-39cc-45b3 自查发现，2026-09-04 修复）。
+ * 2026-09-06：labeled leaf 改为纯 `fix-648`（uuid 不进文件夹名）。
  */
 import { afterAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -92,7 +93,7 @@ describe("createWorktreeIsolationHost (CLI provision seam)", () => {
       name: "fix-648",
     });
 
-    expect(root).toBe(join(repo, ".iknow", "worktrees", "fix-648--conv-cli-a"));
+    expect(root).toBe(join(repo, ".iknow", "worktrees", "fix-648"));
     expect(taskWorktreeOwnerOf(root)).toBe(conversationId);
   });
 

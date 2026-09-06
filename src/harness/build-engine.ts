@@ -41,9 +41,7 @@ import { errorMessage } from "./errors.js";
 import type { AciCatalog } from "./aci/types.js";
 import { createLspNotifier } from "./lsp/notifier.js";
 import { startLspWarmup } from "./lsp/warmup.js";
-import {
-  DEFAULT_LSP_IDLE_TIMEOUT_MS,
-} from "./lsp/client.js";
+import { DEFAULT_LSP_IDLE_TIMEOUT_MS } from "./lsp/client.js";
 import type { LspCtx } from "./lsp/types.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import type { Registry, ToolCall } from "./tools/types.js";
@@ -65,7 +63,7 @@ import {
   createWorktreeIsolationExecutor,
   classifyCall,
   mainCheckoutOf,
-  taskWorktreeOwnerOf,
+  isTaskWorktreePath,
   type MutateClass,
   type WorktreeIsolationHostOpts,
 } from "./isolation/worktree-gate.js";
@@ -509,10 +507,9 @@ export async function buildHarnessEngine(
   //               逐字节等于今日的 `resolveProjectMemoryDir(cwd, workspaceRoot)`。
   // 反例（回归来源）：两者都取 productRoot 时，`--workspace-root $HOME` 档下
   // productRoot 缺省 = $HOME，同锚下多个项目会塌进同一个命名空间。
-  const stateAnchor =
-    taskWorktreeOwnerOf(workspaceRoot) === undefined
-      ? workspaceRoot
-      : sessionRoots.productRoot;
+  const stateAnchor = isTaskWorktreePath(workspaceRoot)
+    ? sessionRoots.productRoot
+    : workspaceRoot;
   const memoryDir = resolveProjectMemoryDir(projectIdentityRoot, stateAnchor);
   // 10 件工具集 SSOT 工厂(append-only 顺序;env.web 透传 IKNOW_WEB_PROXY /
   // IKNOW_WEB_SEARCH_URL)。proxyUrl 非法 → 装配期同步抛(见 registry.ts)。
@@ -635,7 +632,7 @@ export async function buildHarnessEngine(
             // 执行时再取值。rebind 后第一次 spawn 自动落到新 taskRoot,旧
             // taskRoot 下不再生成新 worker（配合 manager sandboxRootCell 同
             // 形态: 旧 root 的 def 校验会拒）。
-            ...(taskWorktreeOwnerOf(workspaceRoot) !== undefined
+            ...(isTaskWorktreePath(workspaceRoot)
               ? { sessionRoot: () => liveTaskRoot.read() }
               : {}),
           }),
