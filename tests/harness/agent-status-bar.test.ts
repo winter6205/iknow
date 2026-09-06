@@ -24,6 +24,7 @@ import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
 import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
 import { createWorkerDeps } from "../../src/harness/subagent/worker.ts";
 import { createTodoWriteTool } from "../../src/harness/aci/tools/todo-write.ts";
+import { readOpenTodoLines } from "../../src/harness/agent-status.ts";
 import { assistantResult } from "../cli/_fixtures.ts";
 import {
   barTexts,
@@ -557,5 +558,125 @@ describe("agent status bar T1: gating (ask / worker do not inject)", () => {
     assert.deepEqual(chat.deps.agentStatus, { todoDir });
 
     await chat.shutdown?.();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC ⑨ #903 SC4 / ADR-0028 / ADR-0046:状态栏只投影现行 todo 账本(`todos.md`)
+// 的未勾行;todo_write replace 把旧现行改名为同目录快照
+// (`todos.<unixMs>.<hex>.md`)时,快照里仍开着的旧项**绝不**出现在栏文本里。
+// 实现天然满足(`readOpenTodoLines` 只 readFile 现行 `todos.md`,无 glob /
+// 无 readdir / 不读快照),但本条 invariant 由真实 replace 写出的快照钉死
+// —— 防实现漂移成「读根目录拼历史」。
+// ---------------------------------------------------------------------------
+
+describe("agent status bar T1: replace does not leak snapshot lines into the bar", () => {
+  it("⑨ replace 后 readOpenTodoLines 只含新未勾项;快照里仍开着的旧项不出现", async () => {
+    // T3 / SC4:真实 todo_write 路径,真实 conversationId(per-conversation
+    // ledger)。先 add 两条旧项 → 现行非空;再 replace 两条新项 → 旧现行
+    // 改名为同目录快照;断言 readOpenTodoLines 只含新项。
+    const todoDir = await makeTodoDir();
+    const todoWrite = createTodoWriteTool({ todoDir });
+    const ctx = { conversationId: "conv-bar-snapshot-leak" };
+
+    await todoWrite.handler({ mode: "add", item: "old-keep-open-1" }, ctx);
+    await todoWrite.handler({ mode: "add", item: "old-keep-open-2" }, ctx);
+    await todoWrite.handler(
+      { mode: "replace", items: ["new-1", "new-2"] },
+      ctx
+    );
+
+    // 1. 快照真的存在 —— 否则该测试会因「replace 失败没建快照」而
+    //    假阳;真实 replace 应已把旧现行改名为同目录快照。
+    const dir = join(todoDir, ctx.conversationId);
+    const { readdir } = await import("node:fs/promises");
+    const snapshotNames = (await readdir(dir)).filter((n) =>
+      /^todos\.\d+\.[0-9a-f]{12}\.md$/.test(n)
+    );
+    assert.equal(
+      snapshotNames.length,
+      1,
+      "exactly one snapshot file expected after replace on non-empty current"
+    );
+
+    // 2. 快照里仍开着的旧项不进 readOpenTodoLines。
+    const openLines = await readOpenTodoLines(todoDir, ctx.conversationId);
+    assert.deepEqual(
+      [...openLines],
+      ["- [ ] new-1", "- [ ] new-2"],
+      `bar must only project current ledger, got: ${[...openLines].join(" | ")}`
+    );
+    // 防御:旧项的字面字符串不在返回里(快照留在磁盘上,栏读现行)。
+    assert.ok(
+      !openLines.some((l) => l.includes("old-keep-open")),
+      `snapshot open lines must not surface in bar, got: ${[...openLines].join(" | ")}`
+    );
+  });
+
+  it("⑨ 同目录手工塞快照文件(模拟脏目录)→ readOpenTodoLines 仍只读现行", async () => {
+    // 更强一档:不依赖 todo_write replace 真的产出快照(避免与该工具实现
+    // 偶合),手工在 per-conversation 目录里塞一份快照形态的文件,断言栏
+    // 不被污染。直接钉 readOpenTodoLines 的「只 readFile 现行 todos.md」
+    // 不变式。
+    const todoDir = await makeTodoDir();
+    const conversationId = "conv-bar-dirty-snapshots";
+    const dir = join(todoDir, conversationId);
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(dir, { recursive: true });
+    // 现行:两条新未勾项。
+    await writeFile(
+      join(dir, "todos.md"),
+      "- [ ] live-1\n- [ ] live-2\n",
+      "utf8"
+    );
+    // 快照(手工塞):含「旧-未勾」与「旧-已勾」—— 两条形态都不该出现。
+    await writeFile(
+      join(dir, "todos.1700000000000.deadbeefcafe.md"),
+      "- [ ] ghost-still-open\n- [x] ghost-already-checked\n",
+      "utf8"
+    );
+    await writeFile(
+      join(dir, "todos.1700000000001.0123456789ab.md"),
+      "- [ ] ghost-second-snapshot\n",
+      "utf8"
+    );
+
+    const openLines = await readOpenTodoLines(todoDir, conversationId);
+    assert.deepEqual(
+      [...openLines],
+      ["- [ ] live-1", "- [ ] live-2"],
+      `dirty snapshot dir must not leak into bar projection, got: ${[...openLines].join(" | ")}`
+    );
+    // 关键词兜底:快照字面不进栏(快照形态文件名 + 行内 ghost 字面都
+    // 不应在结果里)。
+    assert.ok(
+      !openLines.some((l) => l.includes("ghost")),
+      `snapshot text must not surface, got: ${[...openLines].join(" | ")}`
+    );
+  });
+
+  it("⑨ 无 conversationId(legacy shared-root 形态)→ 同样只读现行 todos.md,不读同目录快照", async () => {
+    // 向后兼容面:不传 conversationId 时解析的是 `<todoDir>/todos.md`
+    // (与 todo_write handler 在 ctx.conversationId 缺席时落同一条路径);
+    // 不变式同样成立 —— 栏不读快照。
+    const todoDir = await makeTodoDir();
+    await writeFile(
+      join(todoDir, "todos.md"),
+      "- [ ] live-shared-root\n",
+      "utf8"
+    );
+    // 手工塞同目录快照。
+    await writeFile(
+      join(todoDir, "todos.1700000000000.aaaabbbbcccc.md"),
+      "- [ ] ghost-shared-root\n",
+      "utf8"
+    );
+
+    const openLines = await readOpenTodoLines(todoDir);
+    assert.deepEqual(
+      [...openLines],
+      ["- [ ] live-shared-root"],
+      `shared-root read must ignore same-dir snapshots, got: ${[...openLines].join(" | ")}`
+    );
   });
 });
