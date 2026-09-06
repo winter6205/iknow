@@ -15,6 +15,10 @@
  *     code-level permission rule in policy.ts:codeBuiltInRules allows
  *     `mode === "list"` to bypass ask (read-only sub-mode).
  *
+ * #903: `mode = "replace"` 扩展 — 整张列表换成新现行,旧 `todos.md` 改名为
+ * 同目录快照 `todos.<unixMs>.<hex>.md` 保留历史(ADR-0046);空 / 缺席现行
+ * 不建快照。replace 仍是 write(默认 ask),与 add / check 同形态。
+ *
  * Ownership boundary (D6): the worker assembly path does not inject todoDir
  * → todo_write is excluded from the worker tool surface at registry
  * construction time. Concurrency among add/check calls inside the same main
@@ -28,17 +32,17 @@
 import { mkdir, readFile, rename, writeFile, unlink } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
 
 /** Allowed top-level keys — mirrors inputSchema. */
-const ALLOWED_KEYS = new Set(["mode", "item"]);
+const ALLOWED_KEYS = new Set(["mode", "item", "items"]);
 
 /** Mode enumeration — single source of truth (compile-time + runtime check). */
-export const TODO_WRITE_MODES = ["list", "add", "check"] as const;
+export const TODO_WRITE_MODES = ["list", "add", "check", "replace"] as const;
 export type TodoWriteMode = (typeof TODO_WRITE_MODES)[number];
 
 /**
@@ -112,13 +116,16 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
   return Object.freeze({
     name: "todo_write",
     description:
-      "Maintain a session-scoped todo ledger at <session>/todos.md for tracking progress on multi-step, multi-turn complex tasks. Use mode=list to read all current items, mode=add to append an open `- [ ] <item>` line, mode=check to flip the first exact-match `- [ ] <item>` line to `- [x] <item>`. Designed for tasks across multiple turns where progress needs to persist between rounds. " +
+      "Maintain a session-scoped todo ledger at <session>/todos.md for tracking progress on multi-step, multi-turn complex tasks. Use mode=list to read all current items, mode=add to append an open `- [ ] <item>` line, mode=check to flip the first exact-match `- [ ] <item>` line to `- [x] <item>`, mode=replace to swap the current list for a new one (old ledger is renamed to a same-directory snapshot). Designed for tasks across multiple turns where progress needs to persist between rounds. " +
       TODO_WRITE_SKIP_CLAUSE,
     inputSchema: {
       type: "object",
       properties: {
         mode: { type: "string", enum: [...TODO_WRITE_MODES] },
         item: { type: "string" },
+        // #903: replace 模式携带 items (array of string)。add / check 仍只
+        // 认 item;per-mode 字段互斥在 parseInput / handler 阶段报错。
+        items: { type: "array", items: { type: "string" } },
       },
       required: ["mode"],
       additionalProperties: false,
@@ -162,6 +169,22 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
           await writeTodosAtomic(filePath, flipped, random);
           return "Updated todos.md";
         }
+        case "replace": {
+          // #903 SC2/SC3:把现行 todos.md 换成新列表,旧文件留同目录快照
+          // (`todos.<unixMs>.<hex>.md`)。空 / 缺席现行不建快照。失败纪律:
+          // limit 校验在前(rename 之前),rename 失败 typed-error 不毁
+          // 现行,rename 成功但后续原子写失败 → 快照已写好,现行要么旧内
+          // 容要么完整新内容(原子写半截由 writeTodosAtomic 保证不
+          // 存在)。
+          const newContent = formatReplaceContent(params.items);
+          assertWithinFileLimit(newContent);
+          const current = await readTodos(filePath);
+          if (current.length > 0) {
+            await snapshotCurrentTodos(filePath, random);
+          }
+          await writeTodosAtomic(filePath, newContent, random);
+          return "Updated todos.md";
+        }
       }
     },
   });
@@ -174,6 +197,7 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
 interface ParsedInput {
   readonly mode: TodoWriteMode;
   readonly item: string;
+  readonly items: ReadonlyArray<string>;
 }
 
 function parseInput(input: unknown): ParsedInput {
@@ -187,6 +211,35 @@ function parseInput(input: unknown): ParsedInput {
     }
   }
   const mode = requireMode(raw.mode);
+  // Per-mode 字段互斥:replace 只认 items,add/check 只认 item,list 都不强求。
+  if (mode === "replace") {
+    if (raw.item !== undefined) {
+      throw new ToolExecutionError(
+        "[todo_write] mode replace does not accept item (use items)"
+      );
+    }
+    const items = requireItemsForReplace(raw.items);
+    for (const it of items) {
+      if (it.length === 0) {
+        throw new ToolExecutionError(
+          "[todo_write] items entries must be non-empty strings for mode replace"
+        );
+      }
+      if (codepointLength(it) > MAX_ITEM_CODEPOINTS) {
+        throw new ToolExecutionError(
+          `[todo_write] item exceeds ${MAX_ITEM_CODEPOINTS} codepoints (got ${codepointLength(it)})`
+        );
+      }
+    }
+    return { mode, item: "", items };
+  }
+  if (mode === "add" || mode === "check") {
+    if (raw.items !== undefined) {
+      throw new ToolExecutionError(
+        `[todo_write] mode ${mode} does not accept items (use item)`
+      );
+    }
+  }
   const item =
     typeof raw.item === "string" ? raw.item : requireItemFor(mode, raw.item);
   if ((mode === "add" || mode === "check") && item.length === 0) {
@@ -204,7 +257,7 @@ function parseInput(input: unknown): ParsedInput {
       `[todo_write] item exceeds ${MAX_ITEM_CODEPOINTS} codepoints (got ${codepointLength(item)})`
     );
   }
-  return { mode, item };
+  return { mode, item, items: [] };
 }
 
 function requireMode(value: unknown): TodoWriteMode {
@@ -230,6 +283,22 @@ function requireItemFor(mode: TodoWriteMode, value: unknown): string {
   // list: item is optional; default empty.
   if (typeof value !== "string") return "";
   return value;
+}
+
+function requireItemsForReplace(value: unknown): ReadonlyArray<string> {
+  if (!Array.isArray(value)) {
+    throw new ToolExecutionError(
+      "[todo_write] items must be an array of strings for mode replace"
+    );
+  }
+  for (const entry of value) {
+    if (typeof entry !== "string") {
+      throw new ToolExecutionError(
+        "[todo_write] items entries must be strings for mode replace"
+      );
+    }
+  }
+  return value as ReadonlyArray<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +354,27 @@ async function writeTodosAtomic(
   }
 }
 
+/**
+ * #903 SC3:快照旧现行 `todos.md` → 同目录 `todos.<unixMs>.<hex>.md`。
+ * 纯 rename(原子)—— 文件内容不变,只是改路径;rename 失败抛 typed-error
+ * 且不修改现行(因为 rename 在跨设备 / 权限缺失时不会半改)。
+ */
+async function snapshotCurrentTodos(
+  filePath: string,
+  random: (n: number) => Buffer
+): Promise<void> {
+  const unixMs = Date.now();
+  const hex = random(6).toString("hex"); // 12 hex chars
+  const snapshotPath = join(dirname(filePath), `todos.${unixMs}.${hex}.md`);
+  try {
+    await rename(filePath, snapshotPath);
+  } catch (error) {
+    throw new ToolExecutionError(
+      `[todo_write] snapshot rename failed: ${(error as Error).message}`
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // limits + line formatting (pure)
 // ---------------------------------------------------------------------------
@@ -313,6 +403,18 @@ export function appendLine(existing: string, line: string): string {
 /** Build an open `- [ ] <item>` line ending with newline. */
 export function formatOpenLine(item: string): string {
   return `${OPEN_PREFIX}${item}\n`;
+}
+
+/**
+ * #903: build the replacement `todos.md` body from a list of items. Empty
+ * `items` → empty string (合法的"清空"操作,spec 决议)。非空:每条走
+ * `formatOpenLine`,直接拼接(已经含尾换行)。
+ */
+export function formatReplaceContent(items: ReadonlyArray<string>): string {
+  if (items.length === 0) return "";
+  let out = "";
+  for (const it of items) out += formatOpenLine(it);
+  return out;
 }
 
 /**

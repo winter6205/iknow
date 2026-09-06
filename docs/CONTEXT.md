@@ -215,8 +215,11 @@ _Avoid_: 按 token 或字数切窗；拆开一对 `tool_use`/`tool_result`
 **任务摘录**: 仅 compact 发生时从当时 `messages` 现抽现贴的最近至多 3 句合格用户任务原话；不进会话字段；goal 功能续跑时不贴。
 _Avoid_: taskFocus；当前任务卡；每回合或压缩时让 LLM 填卡；把摘录自己再抽成用户任务句
 
-**状态栏**: 每次即将调模型前由 harness 算出的现势，以 **user** 消息追加在 `messages` 末尾（含同一用户回合内 tool loop）；旧栏留在历史上，不替换、不写 `deps.system`；UI 只读同一份，in-flight 只给 TUI。字段仅 `last_tool`（本回合尚未跑过工具则为 idle）以及有未勾项时才出现的 todo 段（只投影 `- [ ]` 行；文件缺席 / 空 / 全勾则整段缺席）。ADR-0028。
-_Avoid_: 每轮替换/删除旧栏；写进 system；把 TUI 当主物；与 context usage (display) 混名；让 LLM 维护栏；把栏接入 verify；每跳塞任务摘录/cwd/技能清单；把调模型时的 in-flight 写进栏；taskFocus / 当前任务卡；空清单仍印 todo 段；全勾后栏里带 `- [x]`；用「本跳是否调用过 todo_write」当在场条件；政策散文进栏；把 **环境现势**（cwd/git/diff）塞进本栏
+**状态栏**: 每次即将调模型前由 harness 算出的现势，以 **user** 消息追加在 `messages` 末尾（含同一用户回合内 tool loop）；旧栏留在历史上，不替换、不写 `deps.system`；UI 只读同一份，in-flight 只给 TUI。字段仅 `last_tool`（本回合尚未跑过工具则为 idle）以及有未勾项时才出现的 todo 段（只投影现行 todo 账本的 `- [ ]` 行；文件缺席 / 空 / 全勾则整段缺席）。ADR-0028；todo 账本见 ADR-0046。
+_Avoid_: 每轮替换/删除旧栏；写进 system；把 TUI 当主物；与 context usage (display) 混名；让 LLM 维护栏；把栏接入 verify；每跳塞任务摘录/cwd/技能清单；把调模型时的 in-flight 写进栏；taskFocus / 当前任务卡；空清单仍印 todo 段；全勾后栏里带 `- [x]`；用「本跳是否调用过 todo_write」当在场条件；政策散文进栏；把 **环境现势**（cwd/git/diff）塞进本栏；replace 当跳把新列表再灌进 messages
+
+**todo 账本**: 主会话可修订的任务清单（`todo_write`）；允许开跑前写一版全局步骤，执行中用 replace 换成新的现行列表。现行文件是会话目录里的 `todos.md`；replace 时旧文件改名留在同目录当快照，不当待办。不是图、不是 Plan Mode、不是 Dynamic Pipeline。ADR-0046。
+_Avoid_: 把清单并进 `run_graph`；进 plan 相位写计划再执行；同一文件里两套未勾项并存；换表当跳把全文追加进 messages；删掉旧账本文件
 
 **环境现势**: 给人看的工作区快照（至少 cwd / git 摘要 / diff 要点），投放在 TUI（或等价）人读面；**不**写入 ADR-0028 状态栏 user 消息，也**不**充当 verify 输入。#655（G1）验收画像锁定。
 _Avoid_: 状态栏；agent-status；把 cwd/git/diff 每跳追加进 `messages`；与 context usage (display) 混名
@@ -407,6 +410,8 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **continue_pending vs in-flight closeout**: continue 只消费 `store.load` 的 closeout 投影补悬空 `tool_use`；不另写 sanitize 去删改 tool 对，也不把 closeout 本身当续跑口令
 - **状态栏 vs context usage (display)**: 状态栏是给模型的现势快照；context usage (display) 是给人看的 token 用量条
 - **状态栏 vs 环境现势**: 状态栏给模型（`last_tool` + open todos）；环境现势给人（cwd/git/diff），不进状态栏 user 消息（#655）
+- **todo 账本 vs 状态栏**: 账本是磁盘现行 `todos.md`；栏只投影其未勾行。replace 当跳不另灌列表；后续回合靠栏，不靠把快照拼进 messages（ADR-0046）
+- **todo 账本 vs run_graph**: 轻规划/清单在主 loop 的 todo；DAG 与日后 Dynamic Pipeline / replan 在图上，不把 todo 当管线
 - **沙箱纪律 vs 前景/后景 spawn**: 沙箱纪律约束 `bash` 前台/后台围栏；前景/后景 spawn 是 `spawn_subagent` 的等待契约（ADR-0014）
 - **graph mode vs PermissionMode**: graph mode 是编排 overlay；PermissionMode 是 mutating 问/拒/放行。进 Graph 冻结当时 permission，不把 Graph 写入 `PERMISSION_MODES`
 - **run_graph vs spawn_subagent**: 有依赖的多节点走 `run_graph`；单次派活仍 `spawn_subagent`。图节点内部仍是前景 spawn，不经父代理再调 spawn 工具

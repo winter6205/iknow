@@ -17,6 +17,7 @@
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
+  mkdir,
   mkdtemp,
   rm,
   readFile,
@@ -31,6 +32,7 @@ import {
   MAX_FILE_BYTES,
   MAX_ITEM_CODEPOINTS,
   codepointLength,
+  resolveConversationTodoDir,
   TODO_WRITE_SKIP_CLAUSE,
 } from "../../../../src/harness/aci/tools/todo-write.ts";
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
@@ -48,7 +50,7 @@ afterEach(async () => {
 // -- tool shape / metadata ---------------------------------------------------
 
 describe("createTodoWriteTool — tool shape", () => {
-  it("exposes the todo_write schema with mode required (list|add|check) and item optional", () => {
+  it("exposes the todo_write schema with mode required (list|add|check|replace) and item/items optional", () => {
     const tool = createTodoWriteTool({ todoDir });
     const schema = tool.inputSchema as Record<string, unknown>;
     const props = schema.properties as Record<string, Record<string, unknown>>;
@@ -58,8 +60,11 @@ describe("createTodoWriteTool — tool shape", () => {
     assert.deepEqual(schema.required, ["mode"]);
     assert.equal(schema.additionalProperties, false);
     assert.equal(props.mode.type, "string");
-    assert.deepEqual(props.mode.enum, ["list", "add", "check"]);
+    assert.deepEqual(props.mode.enum, ["list", "add", "check", "replace"]);
     assert.equal(props.item.type, "string");
+    // #903 SC1: replace 模式携带 items (array of string)
+    assert.equal(props.items.type, "array");
+    assert.deepEqual(props.items.items, { type: "string" });
   });
 
   it("uses write, non-concurrency-safe, block, default aci metadata (D7)", () => {
@@ -175,6 +180,319 @@ describe("createTodoWriteTool — mode=check", () => {
     );
     const content = await readFile(file, "utf8");
     assert.equal(content, `- [ ] task A\n`);
+  });
+});
+
+// -- mode = replace ----------------------------------------------------------
+// #903 SC2/SC3: replace 主路径 — 把现行 todos.md 换成新列表,旧文件留同目录
+// 快照(`todos.<unixMs>.<hex>.md`),`list` 仍只读现行。
+// ---------------------------------------------------------------------------
+
+describe("createTodoWriteTool — mode=replace", () => {
+  it("fresh conversationId + items=[A,B] → 现行恰好两行 `- [ ] A`/`- [ ] B`;回执短字符串", async () => {
+    // T1 SC2:真实 per-conversation 路径 + fresh conversationId(不预存文件)。
+    const tool = createTodoWriteTool({ todoDir });
+    const out = await tool.handler(
+      { mode: "replace", items: ["A", "B"] },
+      { conversationId: "conv-replace-fresh-1" }
+    );
+    assert.equal(out, "Updated todos.md");
+    const content = await readFile(
+      resolveConversationTodoDir({
+        todoDir,
+        conversationId: "conv-replace-fresh-1",
+      }),
+      "utf8"
+    );
+    assert.equal(content, `${formatOpenLine("A")}${formatOpenLine("B")}`);
+  });
+
+  it("replace 前现行非空 → 同目录出现快照文件,内容=旧全文;现行=新列表", async () => {
+    // T1 SC3:真实 per-conversation 路径。先 add 三条 → 现行非空,再 replace
+    // → 快照保留旧全文,现行换新。
+    const tool = createTodoWriteTool({ todoDir });
+    const ctx = { conversationId: "conv-replace-snapshot" };
+    await tool.handler({ mode: "add", item: "old-1" }, ctx);
+    await tool.handler({ mode: "add", item: "old-2" }, ctx);
+    await tool.handler({ mode: "add", item: "old-3" }, ctx);
+    const beforeContent = await readFile(
+      resolveConversationTodoDir({
+        todoDir,
+        conversationId: ctx.conversationId,
+      }),
+      "utf8"
+    );
+    const expectedSnapshotContent = beforeContent;
+
+    await tool.handler({ mode: "replace", items: ["new-1", "new-2"] }, ctx);
+
+    const currentPath = resolveConversationTodoDir({
+      todoDir,
+      conversationId: ctx.conversationId,
+    });
+    const dir = join(todoDir, ctx.conversationId);
+    const { readdir } = await import("node:fs/promises");
+    const allEntries = await readdir(dir);
+    const snapshotNames = allEntries.filter(
+      (n) => n.startsWith("todos.") && n.endsWith(".md") && n !== "todos.md"
+    );
+    assert.equal(snapshotNames.length, 1, "exactly one snapshot file");
+    const snapshotPath = join(dir, snapshotNames[0]);
+    const snapshotContent = await readFile(snapshotPath, "utf8");
+    assert.equal(snapshotContent, expectedSnapshotContent);
+    const currentContent = await readFile(currentPath, "utf8");
+    assert.equal(
+      currentContent,
+      `${formatOpenLine("new-1")}${formatOpenLine("new-2")}`
+    );
+    // 快照文件名形态:`todos.<unixMs>.<hex>.md`(hex 长度=12)
+    assert.match(snapshotNames[0], /^todos\.\d+\.[0-9a-f]{12}\.md$/);
+  });
+
+  it("replace 后 `list` 只返回新现行,不含快照正文", async () => {
+    // T1 SC3 第二段:`list` 不读快照。
+    const tool = createTodoWriteTool({ todoDir });
+    const ctx = { conversationId: "conv-replace-list" };
+    await tool.handler({ mode: "add", item: "still-here-in-snapshot" }, ctx);
+    await tool.handler({ mode: "replace", items: ["only-new-1"] }, ctx);
+
+    const listed = (await tool.handler({ mode: "list" }, ctx)) as string;
+    assert.match(listed, /- \[ \] only-new-1/);
+    assert.ok(
+      !listed.includes("still-here-in-snapshot"),
+      `list 不应包含快照里的旧项,got: ${listed}`
+    );
+  });
+
+  it("replace 前现行空(0 字节文件)→ 不建快照,只写新列表", async () => {
+    // 现行为空 → spec 决议:不建快照。
+    const ctx = { conversationId: "conv-replace-empty-current" };
+    const currentPath = resolveConversationTodoDir({
+      todoDir,
+      conversationId: ctx.conversationId,
+    });
+    await mkdir(join(todoDir, ctx.conversationId), { recursive: true });
+    await fsWriteFile(currentPath, "", "utf8");
+
+    const tool = createTodoWriteTool({ todoDir });
+    await tool.handler({ mode: "replace", items: ["x"] }, ctx);
+
+    const dir = join(todoDir, ctx.conversationId);
+    const { readdir } = await import("node:fs/promises");
+    const allEntries = await readdir(dir);
+    const snapshotNames = allEntries.filter(
+      (n) => n.startsWith("todos.") && n.endsWith(".md") && n !== "todos.md"
+    );
+    assert.equal(snapshotNames.length, 0, "no snapshot for empty current");
+    const content = await readFile(currentPath, "utf8");
+    assert.equal(content, formatOpenLine("x"));
+  });
+
+  it("replace 前现行缺席(无 todos.md)→ 不建快照,只写新列表", async () => {
+    const ctx = { conversationId: "conv-replace-missing-current" };
+    const currentPath = resolveConversationTodoDir({
+      todoDir,
+      conversationId: ctx.conversationId,
+    });
+    assert.equal(await fileExists(currentPath), false);
+
+    const tool = createTodoWriteTool({ todoDir });
+    await tool.handler({ mode: "replace", items: ["only"] }, ctx);
+
+    const dir = join(todoDir, ctx.conversationId);
+    const { readdir } = await import("node:fs/promises");
+    const allEntries = await readdir(dir);
+    const snapshotNames = allEntries.filter(
+      (n) => n.startsWith("todos.") && n.endsWith(".md") && n !== "todos.md"
+    );
+    assert.equal(snapshotNames.length, 0, "no snapshot when current missing");
+    const content = await readFile(currentPath, "utf8");
+    assert.equal(content, formatOpenLine("only"));
+  });
+
+  it("items=[] → 现行变为空文件,合法态;旧内容进快照", async () => {
+    // 空 items 是合法操作:把整张列表清空。spec:不灌 messages,回执短字符串。
+    const ctx = { conversationId: "conv-replace-clear" };
+    const currentPath = resolveConversationTodoDir({
+      todoDir,
+      conversationId: ctx.conversationId,
+    });
+    await mkdir(join(todoDir, ctx.conversationId), { recursive: true });
+    await fsWriteFile(currentPath, `${formatOpenLine("keep-me")}`, "utf8");
+
+    const tool = createTodoWriteTool({ todoDir });
+    const out = await tool.handler({ mode: "replace", items: [] }, ctx);
+    assert.equal(out, "Updated todos.md");
+
+    const dir = join(todoDir, ctx.conversationId);
+    const { readdir } = await import("node:fs/promises");
+    const allEntries = await readdir(dir);
+    const snapshotNames = allEntries.filter(
+      (n) => n.startsWith("todos.") && n.endsWith(".md") && n !== "todos.md"
+    );
+    assert.equal(snapshotNames.length, 1);
+    const snapshotContent = await readFile(join(dir, snapshotNames[0]), "utf8");
+    assert.equal(snapshotContent, formatOpenLine("keep-me"));
+    const currentContent = await readFile(currentPath, "utf8");
+    assert.equal(currentContent, "");
+  });
+
+  it("replace 带 `item` 字段 → typed error(per-mode 字段互斥)", async () => {
+    const tool = createTodoWriteTool({ todoDir });
+    await assert.rejects(
+      tool.handler({ mode: "replace", items: ["x"], item: "y" } as never, {
+        conversationId: "conv-replace-mixed",
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        return true;
+      }
+    );
+  });
+
+  it("replace 不带 items → typed error", async () => {
+    const tool = createTodoWriteTool({ todoDir });
+    await assert.rejects(
+      tool.handler(
+        { mode: "replace" },
+        { conversationId: "conv-replace-no-items" }
+      ),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        return true;
+      }
+    );
+  });
+
+  it("replace items 含空字符串 → typed error(per-item 非空)", async () => {
+    const tool = createTodoWriteTool({ todoDir });
+    await assert.rejects(
+      tool.handler(
+        { mode: "replace", items: ["ok", ""] },
+        { conversationId: "conv-replace-empty-item" }
+      ),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        return true;
+      }
+    );
+  });
+
+  it("replace items 含超过 500 codepoints 的元素 → typed error,文件不被动", async () => {
+    const ctx = { conversationId: "conv-replace-overlong" };
+    const currentPath = resolveConversationTodoDir({
+      todoDir,
+      conversationId: ctx.conversationId,
+    });
+    await mkdir(join(todoDir, ctx.conversationId), { recursive: true });
+    const initialContent = formatOpenLine("original");
+    await fsWriteFile(currentPath, initialContent, "utf8");
+
+    const tool = createTodoWriteTool({ todoDir });
+    const big = "z".repeat(MAX_ITEM_CODEPOINTS + 1);
+    await assert.rejects(
+      tool.handler({ mode: "replace", items: ["ok", big] }, ctx),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match((err as Error).message, /exceeds 500 codepoints/);
+        return true;
+      }
+    );
+    const postContent = await readFile(currentPath, "utf8");
+    assert.equal(postContent, initialContent);
+    const dir = join(todoDir, ctx.conversationId);
+    const { readdir } = await import("node:fs/promises");
+    const allEntries = await readdir(dir);
+    const snapshotNames = allEntries.filter(
+      (n) => n.startsWith("todos.") && n.endsWith(".md") && n !== "todos.md"
+    );
+    assert.equal(snapshotNames.length, 0, "no snapshot when items invalid");
+  });
+
+  it("replace items 整文件超 64 KB → typed error,旧文件保留", async () => {
+    // 整文件 64 KB 上限对 replace 同样适用。limit 校验应在 rename 之前,
+    // 失败时现行与目录都不动。
+    const ctx = { conversationId: "conv-replace-huge" };
+    const currentPath = resolveConversationTodoDir({
+      todoDir,
+      conversationId: ctx.conversationId,
+    });
+    await mkdir(join(todoDir, ctx.conversationId), { recursive: true });
+    const initialContent = formatOpenLine("keep");
+    await fsWriteFile(currentPath, initialContent, "utf8");
+
+    // 构造一组会让最终文件超 64 KB 的 items:每条 ≤ 500 codepoints(通过
+    // per-item 校验),但累计 bytes > 64 KB。每条 500 个 ASCII = 500 字节 +
+    // "- [ ] \n" = 507 字节。130 条 × 507 = 65910 字节 > 64 KB。
+    const items: string[] = [];
+    for (let i = 0; i < 130; i++) items.push("y".repeat(500));
+
+    const tool = createTodoWriteTool({ todoDir });
+    await assert.rejects(
+      tool.handler({ mode: "replace", items }, ctx),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match((err as Error).message, /file would exceed 65536 bytes/);
+        return true;
+      }
+    );
+    const postContent = await readFile(currentPath, "utf8");
+    assert.equal(postContent, initialContent);
+    const dir = join(todoDir, ctx.conversationId);
+    const { readdir } = await import("node:fs/promises");
+    const allEntries = await readdir(dir);
+    const snapshotNames = allEntries.filter(
+      (n) => n.startsWith("todos.") && n.endsWith(".md") && n !== "todos.md"
+    );
+    assert.equal(snapshotNames.length, 0, "no snapshot on limit failure");
+  });
+
+  it("add 带 `items` 字段 → typed error(add 仍只认 item)", async () => {
+    const tool = createTodoWriteTool({ todoDir });
+    await assert.rejects(
+      tool.handler({ mode: "add", items: ["x"] } as never, {
+        conversationId: "conv-add-items",
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        return true;
+      }
+    );
+  });
+
+  it("check 带 `items` 字段 → typed error(check 仍只认 item)", async () => {
+    const tool = createTodoWriteTool({ todoDir });
+    await assert.rejects(
+      tool.handler({ mode: "check", items: ["x"] } as never, {
+        conversationId: "conv-check-items",
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        return true;
+      }
+    );
+  });
+
+  it("两次连续 replace(同 conversationId,non-empty current)→ 产生两个快照,文件名不撞", async () => {
+    // 快照名 unixMs + 随机 hex 保证不撞;两次串行 replace 后应有两个快照。
+    const tool = createTodoWriteTool({ todoDir });
+    const ctx = { conversationId: "conv-replace-twice" };
+    await tool.handler({ mode: "add", item: "v1-a" }, ctx);
+    await tool.handler({ mode: "add", item: "v1-b" }, ctx);
+    await tool.handler({ mode: "replace", items: ["v2-a"] }, ctx);
+    // 注入一点时间偏移确保 unixMs 不撞(在极快机器上仍可命中 hex 兜底)。
+    await new Promise((r) => setTimeout(r, 5));
+    await tool.handler({ mode: "add", item: "v2-b" }, ctx);
+    await tool.handler({ mode: "replace", items: ["v3-a"] }, ctx);
+
+    const dir = join(todoDir, ctx.conversationId);
+    const { readdir } = await import("node:fs/promises");
+    const allEntries = await readdir(dir);
+    const snapshotNames = allEntries.filter((n) =>
+      /^todos\.\d+\.[0-9a-f]{12}\.md$/.test(n)
+    );
+    assert.equal(snapshotNames.length, 2);
+    assert.notEqual(snapshotNames[0], snapshotNames[1]);
   });
 });
 
@@ -572,11 +890,13 @@ describe("createTodoWriteTool — #440 T6 D9 正面引导式 description (无负
     }
   });
 
-  it("description 明确告知三个 mode 的形态(list/add/check),无歧义", () => {
+  it("description 明确告知三个 mode 的形态(list/add/check/replace),无歧义", () => {
     const desc = readDescription();
     assert.ok(desc.includes("list"));
     assert.ok(desc.includes("add"));
     assert.ok(desc.includes("check"));
+    // #903: replace 模式也在正面描述里
+    assert.ok(desc.includes("replace"));
   });
 
   it("registry catalog 暴露的 description 与 factory 直接读一致（系统 prompt grep 锚点）", () => {
