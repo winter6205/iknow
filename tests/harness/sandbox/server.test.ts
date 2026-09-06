@@ -1,15 +1,17 @@
 /**
  * ADR-0045 — sandbox 执行面 server 化(T8 实施)合同测试。
  *
- * 覆盖 ADR-0045 §4 五类故障路径 + §5 失败合同 + 两型协议 happy path:
+ * 覆盖 ADR-0045 §4 四类故障路径(overflow 已合并进 truncateByCodePoint
+ * 契约,不抛 typed error)+ §5 失败合同 + 两型协议 happy path:
  *   - §2.1 短生命周期 exec happy path(等子进程退出、stdout/stderr/exitCode)
  *   - §2.2 长生命周期 spawn happy path(同步 task_id、AsyncIterable 事件流、
  *     stop control message 触发 SIGTERM → SIGKILL 升级)
- *   - §4 empty fence / empty task_id → typed fail-loud,不 spawn
+ *   - §4 empty fence / cwd → typed fail-loud,不 spawn(empty_task_id 已
+ *     删除 —— task_id 由 server randomBytes 生成,caller 无法传空)
  *   - §4 negative maxOutputCodePoints / killGraceMs → RangeError 沿 truncateByCodePoint 契约
- *   - §4 overflow(stdout/stderr > maxOutputCodePoints)→ server 端截断后下发
  *   - §4 concurrent fence 构造无共享 mutable state(并行允许,显式记录决策)
- *   - §4 exception:child 进程退出未回执 / spawn 失败 → typed server_unreachable fail-loud
+ *   - §4 exception:child 进程退出未回执 → typed orphan_process_group fail-loud
+ *     + pgid reap;spawn 失败 → typed server_unreachable fail-loud
  *   - §5 ctx.signal abort:exec 协议透传到 spawnWithStopSignal;spawn 协议经 stop
  *     control message 取消,不只丢 client promise(orphan 进程组 reap 纪律)
  *
@@ -32,7 +34,11 @@ import {
   renderSandboxServerError,
 } from "../../../src/harness/sandbox/server/index.js";
 import { runInSandbox } from "../../../src/harness/sandbox/runner.js";
-import type { SandboxServerError } from "../../../src/harness/sandbox/server/types.js";
+import type {
+  SandboxServerError,
+  SandboxTaskEvent,
+  SandboxTaskHandle,
+} from "../../../src/harness/sandbox/server/types.js";
 import type { BwrapFence } from "../../../src/harness/sandbox/bwrap.js";
 
 const SCRATCH: string[] = [];
@@ -54,7 +60,7 @@ function shFence(command: string): BwrapFence {
   });
 }
 
-/** typed-error kind 枚举 —— 5 类故障路径分支。 */
+/** typed-error kind 枚举 —— 4 类故障路径分支。 */
 function expectTypedFail(
   err: unknown,
   kind: SandboxServerError["kind"]
@@ -148,12 +154,14 @@ describe("sandbox server spawn — long-lived task-handle (ADR-0045 §2.2)", () 
     });
     assert.match(handle.task_id, /^bg-[0-9a-f]{12}$/);
     assert.ok(handle.log_path.length > 0);
-    const events: string[] = [];
-    for await (const ev of handle.events()) {
-      if (ev.kind === "stdout") events.push(ev.chunk);
-      if (ev.kind === "exit") break;
-    }
-    assert.equal(events.join(""), "hellobye");
+    const events = await drainUntilExit(handle);
+    const stdout = events
+      .filter(
+        (e): e is { kind: "stdout"; chunk: string } => e.kind === "stdout"
+      )
+      .map((e) => e.chunk)
+      .join("");
+    assert.equal(stdout, "hellobye");
   }, 5_000);
 
   it("stop control message triggers SIGTERM → SIGKILL escalation", async () => {
@@ -168,14 +176,12 @@ describe("sandbox server spawn — long-lived task-handle (ADR-0045 §2.2)", () 
     // 等子进程真正起来 —— 否则 stop 可能在 SIGTERM 之前就看到 close。
     await new Promise((r) => setTimeout(r, 100));
     await handle.stop(50);
-    let exited = false;
-    for await (const ev of handle.events()) {
-      if (ev.kind === "exit") {
-        exited = true;
-        break;
-      }
-    }
-    assert.equal(exited, true, "stop() must lead to exit event");
+    const events = await drainUntilExit(handle);
+    assert.equal(
+      events.some((e) => e.kind === "exit"),
+      true,
+      "stop() must lead to exit event"
+    );
   }, 10_000);
 
   it("idempotent stop — second stop does not throw", async () => {
@@ -193,9 +199,9 @@ describe("sandbox server spawn — long-lived task-handle (ADR-0045 §2.2)", () 
   }, 10_000);
 });
 
-// ─── §4 五类故障路径 ──────────────────────────────────────────────────────
+// ─── §4 四类故障路径(overflow 已合并进 truncateByCodePoint)──────────────────────
 
-describe("sandbox server — IPC boundary 5 fault classes (ADR-0045 §4)", () => {
+describe("sandbox server — IPC boundary 4 fault classes (ADR-0045 §4)", () => {
   it("empty: missing fence in exec request → empty_request, no spawn", async () => {
     const server = createSandboxServer();
     try {
@@ -340,6 +346,41 @@ describe("sandbox server — IPC boundary 5 fault classes (ADR-0045 §4)", () =>
       expectTypedFail(err, "server_unreachable");
     }
   });
+
+  it("exception: spawn accept 后子进程退出未回执 → typed orphan_process_group fail-loud + pgid reap", async () => {
+    const server = createSandboxServer();
+    const cwd = makeScratch("server-orphan-");
+    // spawn argv[0] 指向不存在的命令 —— Node 在 spawn syscall 失败时
+    // 触发 child.once("error"),路径 = "accept 后子进程异常退出未回执"。
+    // 修复前:server 只 reap + close,handle.events() 自然 drain 出空
+    // stream,client 拿不到 typed fail-loud → 静默降级到「exit event
+    // 已落,push(exit,null,null)」,client 看不到 typed error。
+    // 修复后:rejectHandle typed orphan_process_group + context 含
+    // 「accept 后子进程异常退出未回执」 + task_id 锚定。
+    const task = server.spawn({
+      kind: "spawn",
+      fence: Object.freeze({
+        argv: Object.freeze([
+          "/nonexistent-iknow-sandbox-fence-xyzzy-orphan",
+          "--nope",
+        ]),
+        sealed: true as const,
+      }),
+      cwd,
+      env: process.env,
+    });
+    try {
+      await task;
+      assert.fail("expected typed orphan_process_group reject");
+    } catch (err) {
+      expectTypedFail(err, "orphan_process_group");
+      assert.match(
+        (err as { context: string }).context,
+        /spawn bg-[0-9a-f]{12}: accept 后子进程异常退出未回执/,
+        "context must include task_id and 'accept 后子进程异常退出未回执'"
+      );
+    }
+  });
 });
 
 // ─── §5 失败合同:signal abort 经 control message 取消 ──────────────────────
@@ -378,15 +419,9 @@ describe("sandbox server — fail-loud contracts (ADR-0045 §5)", () => {
     // 等子进程起来再 abort。
     await new Promise((r) => setTimeout(r, 100));
     controller.abort();
-    let exitSeen = false;
-    for await (const ev of handle.events()) {
-      if (ev.kind === "exit") {
-        exitSeen = true;
-        break;
-      }
-    }
+    const events = await drainUntilExit(handle);
     assert.equal(
-      exitSeen,
+      events.some((e) => e.kind === "exit"),
       true,
       "abort must trigger exit via stop() control message"
     );
@@ -413,12 +448,14 @@ describe("sandbox server — fail-loud contracts (ADR-0045 §5)", () => {
       "each concurrent spawn must yield a unique task_id"
     );
     for (const h of handles) {
-      let out = "";
-      for await (const ev of h.events()) {
-        if (ev.kind === "stdout") out += ev.chunk;
-        if (ev.kind === "exit") break;
-      }
-      assert.equal(out, "hi");
+      const events = await drainUntilExit(h);
+      const stdout = events
+        .filter(
+          (e): e is { kind: "stdout"; chunk: string } => e.kind === "stdout"
+        )
+        .map((e) => e.chunk)
+        .join("");
+      assert.equal(stdout, "hi");
     }
   }, 10_000);
 });
@@ -472,4 +509,20 @@ function existsSyncSafe(p: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * 抽离 4 处重复:`for await ... break on exit`。返回 exit 事件之前的所有
+ * 事件(包括 exit 自己)。注意 events() 单 consumer 契约 —— 同一 handle
+ * 上多次调用会抢事件,故 drainUntilExit 只能调一次。
+ */
+async function drainUntilExit(
+  handle: SandboxTaskHandle
+): Promise<SandboxTaskEvent[]> {
+  const events: SandboxTaskEvent[] = [];
+  for await (const ev of handle.events()) {
+    events.push(ev);
+    if (ev.kind === "exit") break;
+  }
+  return events;
 }

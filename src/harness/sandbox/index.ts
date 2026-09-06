@@ -48,6 +48,7 @@ export type { BwrapFence, BwrapFenceOptions, SeccompProfile } from "./bwrap.js";
 export {
   DEFAULT_MAX_OUTPUT_CODE_POINTS,
   SIGNAL_EXIT_CODES,
+  killProcessGroup,
   requireBwrap,
   runInSandbox,
   signalExitCode,
@@ -64,13 +65,11 @@ export type {
 
 export {
   createSandboxServer,
-  createTestSandboxServer,
   renderSandboxServerError,
 } from "./server/index.js";
 export type {
   CreateSandboxServerOptions,
   SandboxServer,
-  TestSandboxServerHandle,
 } from "./server/index.js";
 export type {
   ExecRequest,
@@ -79,4 +78,5 @@ export type {
   SandboxTaskEvent,
   SandboxTaskHandle,
   SandboxServerError,
+  QueuedTaskEvent,
 } from "./server/types.js";

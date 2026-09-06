@@ -122,9 +122,9 @@ export function spawnWithStopSignal(
   const stopTree = (): void => {
     const pid = child.pid;
     if (settled || pid === undefined) return;
-    killProcessGroup(pid, "SIGTERM");
+    killProcessGroupLocal(pid, "SIGTERM");
     killTimer = setTimeout(() => {
-      if (!settled) killProcessGroup(pid, "SIGKILL");
+      if (!settled) killProcessGroupLocal(pid, "SIGKILL");
     }, options.killGraceMs ?? DEFAULT_KILL_GRACE_MS);
     killTimer.unref();
   };
@@ -204,10 +204,35 @@ export async function runInSandbox(
   });
 }
 
-function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
+function killProcessGroupLocal(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pid, signal);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+/**
+ * 给 server 复用:发送信号到 detached 进程组,ESRCH(组已消失)吞掉,
+ * 其他错误经 `log` 上报(不抛 — kill 升级是 best-effort,失败 = reap
+ * 不彻底,不阻断主流程)。
+ *
+ * Why a shared helper:server/index.ts 内联版本与 runner 本地版本吞错
+ * 行为不一致(runner 抛,server log);server 形态要求 never-throw(若
+ * kill 抛错会触发 typed `server_unreachable`,而 reap 本属内部清理,
+ * 不该升级为可观察故障面)。统一对外只暴露 `killProcessGroup` 这条
+ * best-effort 路径,runner 内部用本地严格版本。
+ */
+export function killProcessGroup(
+  pid: number,
+  signal: NodeJS.Signals,
+  log?: (msg: string) => void
+): void {
+  try {
+    process.kill(-pid, signal);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return;
+    log?.(`killProcessGroup: kill -${pid} ${signal} failed: ${String(error)}`);
   }
 }

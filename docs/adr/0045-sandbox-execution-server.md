@@ -113,15 +113,15 @@ stop control message:
 
 后置 hook 在 server 化后**消费面不变**：client 拿到 `response` 或 `task event` 后仍走 `wrapWithViolationHook`，按既有 prefix 匹配分型。
 
-### 4. IPC 边界 5 类故障路径（合同分型）
+### 4. IPC 边界 4 类故障路径（合同分型）
 
-server 形态下，IPC 边界（router 调用本身——同进程下为函数调用，跨进程下为 IPC message）须覆盖 5 类故障。
+server 形态下，IPC 边界（router 调用本身——同进程下为函数调用，跨进程下为 IPC message）须覆盖 4 类故障(overflow 已并入 §2.1 truncateByCodePoint 契约)。
 
 | 边界类         | 触发条件                                                                    | 合同                                                                                                                                                                                 | 测试面                             |
 | -------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
 | **empty**      | request 帧缺失 `command`（spawn）/ `fence`（exec）字段 / `task_id` 字段     | typed fail-loud（`ToolExecutionError` 系），**不 spawn**、不返回 fake response                                                                                                       | T8 (e) 配套测试                    |
 | **negative**   | `maxOutputCodePoints <= 0` / `killGraceMs < 0`                              | `RangeError`，沿 `runner.ts:84-86` `truncateByCodePoint` 契约不丢失                                                                                                                  | T8 (e)                             |
-| **overflow**   | 子进程 stdout/stderr > `maxOutputCodePoints`                                | router handler 按 `truncateByCodePoint` 截断后再下发，**不**把未截断字节送回 client                                                                                                  | T8 (e)                             |
+| **overflow**   | 子进程 stdout/stderr > `maxOutputCodePoints`                                | router handler 按 `truncateByCodePoint` 截断后再下发，**不**抛 typed error(`SandboxServerError` 联合不含 overflow kind,§2.1 语义已如此)                                              | T8 (e)                             |
 | **concurrent** | 多个 request 并行（同一 router 实例）                                       | fence 无共享 mutable state（fence argv 冻结、fsPolicy 工厂期 / per-call rebuild 各自独立、`createBwrapFence` 返回 frozen token），并行允许，决策**显式记录**                         | T8 (e) 配套测试覆盖并发 fence 构造 |
 | **exception**  | server 不可达（未来跨进程场景）/ accept 后子进程退出未回执（orphan 进程组） | typed fail-loud + **orphan 进程组 reap 纪律**——router 必须在子进程退出但 frame 解析失败时显式 `process.kill(-pgid, SIGKILL)`，参考 `background/stale-reap.ts:184`（pgid-reuse 加固） | T8 (e)                             |
 
