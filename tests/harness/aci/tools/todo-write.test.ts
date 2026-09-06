@@ -20,6 +20,7 @@ import {
   mkdir,
   mkdtemp,
   rm,
+  readdir,
   readFile,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
@@ -493,6 +494,98 @@ describe("createTodoWriteTool — mode=replace", () => {
     );
     assert.equal(snapshotNames.length, 2);
     assert.notEqual(snapshotNames[0], snapshotNames[1]);
+  });
+
+  // #903 T2 exception 半写不变量:replace 路径的 snapshotCurrentTodos rename
+  // 抛错时,现行 todos.md 保持旧内容(原子 rename 失败 → 源路径不动),
+  // 同目录没有快照文件落地,无 .tmp 残留。注入点:子目录只读。
+
+  it("snapshot rename 失败 → typed-error,现行保持旧内容,无快照无 tmp", async () => {
+    const { chmod, readdir } = await import("node:fs/promises");
+    const ctx = { conversationId: "conv-replace-snapshot-fail" };
+    const dir = join(todoDir, ctx.conversationId);
+    await mkdir(dir, { recursive: true });
+    const currentPath = resolveConversationTodoDir({
+      todoDir,
+      conversationId: ctx.conversationId,
+    });
+    const initialContent = formatOpenLine("preserved-by-snapshot-fail");
+    await fsWriteFile(currentPath, initialContent, "utf8");
+
+    // 子目录去掉 w 权限 → snapshot rename 写不进 todos.<…>.md 报 EACCES。
+    // mkdir(join(filePath, "..")) 在已存在子目录上 recursive no-op,不会先抛。
+    await chmod(dir, 0o555);
+    let threw = false;
+    try {
+      const tool = createTodoWriteTool({ todoDir });
+      await assert.rejects(
+        tool.handler({ mode: "replace", items: ["new"] }, ctx),
+        (err: unknown) => {
+          assert.ok(err instanceof ToolExecutionError);
+          assert.match(
+            (err as Error).message,
+            /snapshot rename failed|atomic write failed/
+          );
+          return true;
+        }
+      );
+      threw = true;
+    } finally {
+      await chmod(dir, 0o755);
+    }
+    assert.ok(threw, "replace rejected (snapshot rename EACCES)");
+
+    // 不变量:现行仍是旧内容 + 无快照 + 无 .tmp。
+    const postCurrent = await readFile(currentPath, "utf8");
+    assert.equal(postCurrent, initialContent);
+    const postEntries = await readdir(dir);
+    const snapshotNames = postEntries.filter((n) =>
+      /^todos\.\d+\.[0-9a-f]{12}\.md$/.test(n)
+    );
+    assert.equal(snapshotNames.length, 0, "no snapshot when rename fails");
+    assert.equal(
+      postEntries.filter((e) => e.endsWith(".tmp")).length,
+      0,
+      "no `.tmp` leftovers"
+    );
+  });
+
+  // #903 T2 exception 半写不变量:replace 路径下 readTodos 抛错(非 ENOENT)
+  // 时,无 snapshot、无新 todos.md、无 .tmp 残留。注入点:把 filePath
+  // 预置为目录而不是文件 → readFile 抛 EISDIR,落入 readTodos catch 包装
+  // 成 "[todo_write] read failed: ..." typed-error,先于 snapshot 抛错。
+
+  it("readTodos 在 replace 抛错 → typed-error,无 snapshot、无 tmp、无新文件", async () => {
+    const ctx = { conversationId: "conv-replace-read-fail" };
+    const dir = join(todoDir, ctx.conversationId);
+    await mkdir(dir, { recursive: true });
+    const currentPath = resolveConversationTodoDir({
+      todoDir,
+      conversationId: ctx.conversationId,
+    });
+    // 把 filePath 预置为目录(覆盖现有 file)→ readFile 抛 EISDIR。
+    await mkdir(currentPath, { recursive: true });
+
+    const tool = createTodoWriteTool({ todoDir });
+    await assert.rejects(
+      tool.handler({ mode: "replace", items: ["new"] }, ctx),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match((err as Error).message, /read failed/);
+        return true;
+      }
+    );
+
+    const postEntries = await readdir(dir);
+    const snapshotNames = postEntries.filter((n) =>
+      /^todos\.\d+\.[0-9a-f]{12}\.md$/.test(n)
+    );
+    assert.equal(snapshotNames.length, 0, "no snapshot when read fails");
+    assert.equal(
+      postEntries.filter((e) => e.endsWith(".tmp")).length,
+      0,
+      "no `.tmp` leftovers"
+    );
   });
 });
 
