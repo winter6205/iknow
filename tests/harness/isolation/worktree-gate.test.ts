@@ -21,7 +21,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 
 import {
   CREATE_TASK_WORKTREE_TOOL_HINT,
@@ -29,6 +29,7 @@ import {
   classifyCall,
   createTaskWorktree,
   createWorktreeIsolationExecutor,
+  isTaskWorktreePath,
   mainCheckoutOf,
   resolveTaskWorktreeLabel,
   taskWorktreeBranch,
@@ -465,23 +466,44 @@ describe("taskWorktreeOwnerOf", () => {
 });
 
 describe("task worktree naming", () => {
-  it("round-trips a valid label through path, owner, and label inversion", () => {
+  it("uses the label as the leaf and keeps conversation id off the folder name", () => {
     const root = taskWorktreePath(
       "/repo",
       "d52e0f28-703c-439a-bce4-3a3ae1017139",
       "fix-648"
     );
 
-    expect(root).toBe(
-      "/repo/.iknow/worktrees/fix-648--d52e0f28-703c-439a-bce4-3a3ae1017139"
-    );
-    expect(taskWorktreeOwnerOf(root)).toBe(
-      "d52e0f28-703c-439a-bce4-3a3ae1017139"
-    );
-    expect(taskWorktreeLabelOf(root)).toBe("fix-648");
+    expect(root).toBe("/repo/.iknow/worktrees/fix-648");
+    expect(isTaskWorktreePath(root)).toBe(true);
+    expect(mainCheckoutOf(root)).toBe("/repo");
+    expect(
+      taskWorktreeOwnerOf(
+        "/repo/.iknow/worktrees/fix-648--d52e0f28-703c-439a-bce4-3a3ae1017139"
+      )
+    ).toBe("d52e0f28-703c-439a-bce4-3a3ae1017139");
+    expect(
+      taskWorktreeLabelOf(
+        "/repo/.iknow/worktrees/fix-648--d52e0f28-703c-439a-bce4-3a3ae1017139"
+      )
+    ).toBe("fix-648");
     expect(
       taskWorktreeBranch("d52e0f28-703c-439a-bce4-3a3ae1017139", "fix-648")
     ).toBe("iknow/task/fix-648-d52e0f28");
+  });
+
+  it("inverts owner from the gitdir sidecar on a real labeled worktree", async () => {
+    const repo = makeGitRepo();
+    const conversationId = "d52e0f28-703c-439a-bce4-3a3ae1017139";
+    const worktreePath = taskWorktreePath(repo, conversationId, "fix-648");
+    await createTaskWorktree({
+      repoRoot: repo,
+      worktreePath,
+      branch: taskWorktreeBranch(conversationId, "fix-648"),
+      conversationId,
+    });
+    expect(basename(worktreePath)).toBe("fix-648");
+    expect(taskWorktreeOwnerOf(worktreePath)).toBe(conversationId);
+    expect(taskWorktreeLabelOf(worktreePath)).toBe("fix-648");
   });
 
   it("falls back to the historical UUID-only leaf for invalid labels", () => {
@@ -510,6 +532,7 @@ describe("mainCheckoutOf", () => {
     expect(mainCheckoutOf("/deep/nest/repo/.iknow/worktrees/abc-123")).toBe(
       "/deep/nest/repo"
     );
+    expect(mainCheckoutOf("/repo/.iknow/worktrees/fix-648")).toBe("/repo");
   });
 
   it("is identity on roots that are not task-worktree-shaped", () => {

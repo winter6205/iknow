@@ -41,6 +41,7 @@ import { existsSync, statSync } from "node:fs";
 
 import {
   createTaskWorktree,
+  isTaskWorktreePath,
   mainCheckoutOf,
   resolveTaskWorktreeLabel,
   taskWorktreeOwnerOf,
@@ -197,6 +198,7 @@ export interface WorktreeExitRequest extends WorktreeExitContext {
  * that must never render as a worktree binding.
  */
 export {
+  isTaskWorktreePath,
   mainCheckoutOf,
   resolveTaskWorktreeLabel,
   taskWorktreeBranch,
@@ -788,7 +790,7 @@ export function createTaskWorktreeProvisioner(
     // workspaceRoot is never adopted and stays fail-closed foreign_worktree.
     if (
       anchor?.sessionWorkspaceRoot === ctx.root &&
-      taskWorktreeOwnerOf(ctx.root) !== undefined
+      isTaskWorktreePath(ctx.root)
     ) {
       bound.set(conversationId, ctx.root);
       taskRoots.add(ctx.root);
@@ -836,6 +838,7 @@ export function createTaskWorktreeProvisioner(
         repoRoot: ctx.root,
         worktreePath,
         branch,
+        conversationId,
         runGit,
       });
     } catch (err) {
@@ -968,11 +971,10 @@ export function createTaskWorktreeProvisioner(
     // Rebound detection (fail-closed): a session that never rebound has no
     // in-process entry, no durable anchor, and no shaped engine root.
     const boundRoot = bound.get(conversationId);
-    const shapedCurrent =
-      taskWorktreeOwnerOf(req.root) !== undefined ? req.root : undefined;
+    const shapedCurrent = isTaskWorktreePath(req.root) ? req.root : undefined;
     const shapedAnchor =
       req.sessionWorkspaceRoot !== undefined &&
-      taskWorktreeOwnerOf(req.sessionWorkspaceRoot) !== undefined
+      isTaskWorktreePath(req.sessionWorkspaceRoot)
         ? req.sessionWorkspaceRoot
         : undefined;
     if (
@@ -1017,6 +1019,7 @@ export function createTaskWorktreeProvisioner(
     const entries: TaskWorktreeInfo[] = [];
 
     for (const record of records) {
+      if (!isTaskWorktreePath(record.path)) continue;
       const owner = taskWorktreeOwnerOf(record.path);
       if (owner === undefined) continue;
       const dirty = await readWorktreeDirty(runGit, record.path);

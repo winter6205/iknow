@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
-import { taskWorktreeOwnerOf } from "../../isolation/worktree-gate.js";
+import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import type { AciToolDef } from "../types.js";
 import { resolveWithinRoot } from "./helpers.js";
@@ -209,10 +209,7 @@ function resolveProjectIdentityRoot(
 ): string | undefined {
   const projectIdentityRoot = opts?.projectIdentityRoot;
   if (projectIdentityRoot === undefined) return undefined;
-  if (
-    opts?.allowProjectIdentityRoot === true &&
-    taskWorktreeOwnerOf(root) === undefined
-  ) {
+  if (opts?.allowProjectIdentityRoot === true && !isTaskWorktreePath(root)) {
     return undefined;
   }
   if (opts?.allowProjectIdentityRoot === false) return undefined;

@@ -8,11 +8,11 @@
 
 隔离 ON 时，模型被拦一次写之后，用 **一次** `create-task-worktree`（可选短名）建树并改绑，下一波把同一写打进该树。之后能列出本仓 task 树、按标签或 conversationId 进入已有树、显式删掉不再需要的树。新树不是空壳到无法读说明书：`grep` / `glob` 与 `read_file` 一样能读 `projectIdentityRoot`。叶子名兼职身份与展示的现状结束。
 
-成功 = 带合法 `name` 建树后路径为 `<repoRoot>/.iknow/worktrees/<slug>--<conversationId>`；非法 `name` 回落 UUID 叶子且 tool_result 写明实际路径；`list-task-worktrees` 给出 label + conversationId；`remove-task-worktree` 可审计删除；历史无 `--` 的叶子行为不变。
+成功 = 带合法 `name` 建树后路径为 `<repoRoot>/.iknow/worktrees/<slug>`；非法 `name` 回落 UUID 叶子且 tool_result 写明实际路径；同名已存在 → typed `worktree_exists` 不覆盖；`list-task-worktrees` 给出 label + conversationId；`remove-task-worktree` 可审计删除；历史 `<slug>--<conversationId>` 与无 `--` 叶子仍可反演。
 
 ## Glossary
 
-- **task worktree label**：装饰性 kebab 前缀，只给人/模型认树。身份永远是 conversationId 后缀。非法或缺席则没有前缀。
+- **task worktree label**：给人/模型认树的 kebab 叶子名。有合法 label 时文件夹就是 `<slug>`，conversationId 不进目录名（gitdir sidecar + 历史 `--` 叶子仍反演身份）。非法或缺席则叶子仍是纯 conversationId。同名已存在则建树失败，不覆盖。
 - **worktreeinclude**：项目身份根上的 `.iknow/worktreeinclude`，gitignore 语法；建树成功后只拷「匹配且已被 gitignore」的文件进新树。
 - **worktree isolation mode** / **session worktree rebind** / **taskRoot** / **projectIdentityRoot**：沿用 CONTEXT。
 
@@ -20,7 +20,7 @@ _Avoid_: 用 session `title` / `goal` 推导 label；把 label 当 conversationI
 
 ## Architectural Constraints
 
-- **ADR-0037** 门禁、fail-closed、不自动 provision、改绑只切 `taskRoot`、batch 快照、exit 不自动删树、自动孤儿清理仍非目标：**不改**。§3 命名合同本 spec **reopen**：叶子从「整段 = conversationId」改为「可选 label + `--` + conversationId」；反演仍是纯路径、零登记表。
+- **ADR-0037** 门禁、fail-closed、不自动 provision、改绑只切 `taskRoot`、batch 快照、exit 不自动删树、自动孤儿清理仍非目标：**不改**。§3 命名合同本 spec **reopen**：有合法 label 时叶子是 `<slug>`（conversationId 不进文件夹名）；反演优先 gitdir sidecar，并兼容历史 `--` 叶子与 UUID-only 叶子。同名 label 全仓唯一，撞名 fail-closed。
 - **ADR-0004**：8 件基线不动。本能力全部落在既有 worktree 条件 ACI 家族（与 create / enter / exit 同一 host 缝、同一开关、不进 worker）。
 - **ADR-0019 / 0023**：per-root 状态锚与 serve 单根不动。
 - **ACI 名单**：只允许 `ACI_TOOLSET_NAMES` 末尾 append；Gate 3 与 factories 同步。
@@ -29,11 +29,11 @@ _Avoid_: 用 session `title` / `goal` 推导 label；把 label 当 conversationI
 
 ### 命名
 
-1. `taskWorktreePath(repoRoot, conversationId, label?)`：有合法 label 时叶子 `<slug>--<conversationId>`，否则 `<conversationId>`（与今日逐字相同）。
-2. `taskWorktreeOwnerOf(root)`：叶子含 `--` 则取最后一段 `--` 之后为 conversationId；否则整段叶子为 id。历史树无迁移。
+1. `taskWorktreePath(repoRoot, conversationId, label?)`：有合法 label 时叶子 `<slug>`，否则 `<conversationId>`。
+2. `taskWorktreeOwnerOf(root)`：优先读 gitdir sidecar `iknow-conversation-id`；否则叶子含 `--` 则取最后一段 `--` 之后为 conversationId；否则整段叶子为 id。历史 `<slug>--<id>` 树无迁移。
 3. 分支无反演器。有 label 时 `iknow/task/<slug>-<uuid8>`（uuid8 = id 前 8 位）；无 label 时保持 `iknow/task-<conversationId>`。uuid8 与已有分支撞名 → typed 可见错误，不覆盖、不加长。
 4. 合法 slug：`SAFE_WORKTREE_SLUG_RE` = 全小写 kebab、首尾字母数字、禁止连续 `-`（从而禁止 `--`）、长度 2–40。不匹配则 **丢弃 label、走无前缀形状、不抛错**；tool_result 必须写出丢弃原因与实际 path。
-5. 不变量：身份是后缀；label 除展示与 enter 定位外不得参与归属裁决；同一 conversationId 仍至多一棵树（幂等）。
+5. 不变量：身份是 sidecar / 历史后缀 / UUID 叶子；label 除展示、enter 定位与目录名外不得冒充 conversationId 做归属裁决；同一 conversationId 仍至多一棵树（幂等）；同一 label 全仓至多一棵树（撞名 → `worktree_exists`）。
 
 ### 进树（闸的那一次）
 
@@ -72,12 +72,13 @@ _Avoid_: 用 session `title` / `goal` 推导 label；把 label 当 conversationI
 npx vitest run tests/harness/isolation tests/harness/aci/tools/registry.test.ts tests/session-api/hub-worktree-isolation.test.ts
 ```
 
-1. ON + `create-task-worktree` `{"name":"fix-648"}` → 叶子 `fix-648--<uuid>`，分支 `iknow/task/fix-648-<uuid8>`，会话改绑，下一波 mutate 进该树，主仓该写未落。
+1. ON + `create-task-worktree` `{"name":"fix-648"}` → 叶子 `fix-648`，分支 `iknow/task/fix-648-<uuid8>`，会话改绑，下一波 mutate 进该树，主仓该写未落。
 2. 同会话再 create → 同一棵树，无第二次 `worktree add`。
 3. `name` 含 `--` / 大写 / 超长 → 不抛错，叶子为纯 uuid，tool_result 含实际 path。
-4. 现存 `.iknow/worktrees/<uuid>` 的 provision / enter / exit / 沙箱放行与今日逐字一致。
+4. 现存 `.iknow/worktrees/<uuid>` 与 `.iknow/worktrees/<slug>--<uuid>` 的 provision / enter / exit / 沙箱放行与今日逐字一致。
 5. `list-task-worktrees` 在缝在场时列出全部本仓 task 树；OFF / worker 名单中无此名。
 6. 带 label 的树上 `foreign_worktree` 仍 fail-closed（owner 反演往返）。
-7. `enter` 用 list 返回的 label 进入唯一匹配树。
-8. `remove` 拒绝当前根与脏树；干净树可删；gc 脚本无 `--apply` 时磁盘与分支不变。
-9. 改绑后 `grep` / `glob` 能命中 `projectIdentityRoot` 上的项目文件；对该根的 write 仍拦。
+7. 另一会话再用同一 `name` → `worktree_exists`，不覆盖。
+8. `enter` 用 list 返回的 label 进入唯一匹配树。
+9. `remove` 拒绝当前根与脏树；干净树可删；gc 脚本无 `--apply` 时磁盘与分支不变。
+10. 改绑后 `grep` / `glob` 能命中 `projectIdentityRoot` 上的项目文件；对该根的 write 仍拦。

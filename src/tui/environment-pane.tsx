@@ -36,7 +36,7 @@ import {
 import type { HarnessStreamEvent } from "../harness/stream.js";
 // Review Medium-2 (2026-08-29):显示条件锚定 task worktree 语义 —— 复用
 // session-api 的路径判定纯函数(同源 SSOT,判定与 T3/T4 所有权锚一致)。
-import { taskWorktreeOwnerOf } from "../session-api/worktree-rebind.js";
+import { isTaskWorktreePath } from "../session-api/worktree-rebind.js";
 import { clipOneLineVisual, visualWidth } from "./tool-summary.js";
 import { tuiPalette } from "./theme.js";
 
@@ -164,8 +164,8 @@ export function envSnapshotLines(
  *     worktree-rebind)。本投影纯函数、零 git import、零 git 操作 —— TUI 只
  *     做展示(ACR bounded-context-guardian 边界)。
  *   - 显示条件锚定 task worktree 语义(review Medium-2, 2026-08-29):仅当
- *     root 命中 task worktree 确定性命名(`<x>/.iknow/worktrees/<conversationId>`
- *     —— 复用 session-api taskWorktreeOwnerOf 路径判定)才显示。任意非空
+ *     root 命中 task worktree 确定性命名(`<x>/.iknow/worktrees/<leaf>`
+ *     —— 复用 session-api isTaskWorktreePath 路径判定)才显示。任意非空
  *     workspaceRoot 不等于 worktree —— serve `bindWorkspace` 在 createSession
  *     时就把 workspaceRoot 写成主根,主根 / serve 绑定根 / 任意目录一律
  *     不渲染成 worktree 绑定。
@@ -182,9 +182,9 @@ export function worktreeIsolationLines(
     return [];
   }
   // Review Medium-2: only a root that decomposes to the task worktree naming
-  // (`<x>/.iknow/worktrees/<conversationId>`) is a binding — anything else
+  // (`<x>/.iknow/worktrees/<leaf>`) is a binding — anything else
   // (main repo root, serve-bound root, arbitrary dir) stays at 0 lines.
-  if (taskWorktreeOwnerOf(root) === undefined) {
+  if (!isTaskWorktreePath(root)) {
     return [];
   }
   const text = clipOneLineVisual(

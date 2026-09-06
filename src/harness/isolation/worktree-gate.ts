@@ -17,8 +17,9 @@
  *     beyond the per-conversation adjudication latch, reads no settings and
  *     imports no session-api code. The host (session-api) supplies the
  *     `provision` callback; the deterministic task-worktree path shape
- *     (`taskWorktreeOwnerOf`) lives here because the gate routes on it —
- *     session-api re-exports it as the single SSOT.
+ *     (`isTaskWorktreePath`) and identity (`taskWorktreeOwnerOf`) live here
+ *     because the gate routes on them — session-api re-exports them as the
+ *     single SSOT.
  *
  * Failure semantics (ADR-0037 §6, fail-closed):
  *   - every failure exits as a typed `WorktreeIsolationError` (non-empty,
@@ -32,7 +33,7 @@
  * assembly (build-engine), i.e. byte-identical to today's behavior.
  */
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { errorMessage } from "../errors.js";
 import { validateSegmentPolicy } from "../aci/tools/bash-readonly.js";
@@ -195,6 +196,12 @@ export interface CreateTaskWorktreeOpts {
   readonly worktreePath: string;
   /** New branch name; must not exist (fail-closed, ADR-0037 §3). */
   readonly branch: string;
+  /**
+   * Owning conversation. When set, written to the linked worktree gitdir
+   * sidecar so labeled name-only leaves can invert identity without encoding
+   * the id in the folder name.
+   */
+  readonly conversationId?: string;
   readonly runGit?: GitRunner;
 }
 
@@ -287,6 +294,10 @@ export async function createTaskWorktree(
         add.stderr.trim().length > 0 ? add.stderr.trim() : `exit ${add.code}`
       }`
     );
+  }
+  const conversationId = opts.conversationId;
+  if (conversationId !== undefined && conversationId.length > 0) {
+    writeOwnerSidecar(worktreePath, conversationId);
   }
   return { worktreePath, branch };
 }
@@ -457,8 +468,9 @@ export function classifyCall(call: ToolCall): MutateClass {
 
 /**
  * Human-facing task-worktree labels are deliberately narrower than
- * conversation ids. The `--` separator is reserved for the identity suffix,
- * so a valid label can be inverted from a leaf without a registry.
+ * conversation ids. The `--` separator is banned in new labels so it can
+ * still invert historical `<slug>--<conversationId>` leaves; new labeled
+ * leaves do not encode identity in the folder name.
  */
 export const SAFE_WORKTREE_SLUG_RE =
   /^(?=.{2,40}$)(?!.*--)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
@@ -502,6 +514,11 @@ export function resolveTaskWorktreeLabel(
  * Build the task-worktree path. This is the naming SSOT shared by the
  * provisioner, enter/list/remove consumers, and the isolation gate's
  * ownership inversion.
+ *
+ * A valid label is the leaf (`<slug>`). conversationId is not encoded in
+ * the folder name; identity is the gitdir sidecar (and the historical
+ * `<slug>--<conversationId>` / UUID-only leaves still invert from the path).
+ * Duplicate labels collide on this path and fail closed at `worktree_exists`.
  */
 export function taskWorktreePath(
   repoRoot: string,
@@ -509,10 +526,7 @@ export function taskWorktreePath(
   label?: string
 ): string {
   const resolved = resolveTaskWorktreeLabel(label);
-  const leaf =
-    resolved.label === undefined
-      ? conversationId
-      : `${resolved.label}--${conversationId}`;
+  const leaf = resolved.label === undefined ? conversationId : resolved.label;
   return join(repoRoot, ".iknow", "worktrees", leaf);
 }
 
@@ -527,33 +541,115 @@ export function taskWorktreeBranch(
     : `iknow/task/${resolved.label}-${conversationId.slice(0, 8)}`;
 }
 
+const OWNER_SIDECAR_NAME = "iknow-conversation-id";
+
+/**
+ * True when `root` is shaped as `<any>/.iknow/worktrees/<leaf>`.
+ * Shape only — not identity. Labeled name-only leaves still match.
+ */
+export function isTaskWorktreePath(root: string): boolean {
+  if (root.length === 0) return false;
+  return (
+    basename(dirname(root)) === "worktrees" &&
+    basename(dirname(dirname(root))) === ".iknow"
+  );
+}
+
+function parseGitdirPointer(gitMeta: string): string | undefined {
+  const match = /^gitdir:\s*(.+)$/m.exec(gitMeta);
+  const gitdir = match?.[1]?.trim();
+  return gitdir !== undefined && gitdir.length > 0 ? gitdir : undefined;
+}
+
+function writeOwnerSidecar(worktreePath: string, conversationId: string): void {
+  const gitFile = join(worktreePath, ".git");
+  let gitMeta: string;
+  try {
+    gitMeta = readFileSync(gitFile, "utf8");
+  } catch (err) {
+    throw new WorktreeIsolationError(
+      "worktree_add_failed",
+      `task worktree ${worktreePath} has no readable .git pointer after add: ${errorMessage(err)}`
+    );
+  }
+  const gitdir = parseGitdirPointer(gitMeta);
+  if (gitdir === undefined) {
+    throw new WorktreeIsolationError(
+      "worktree_add_failed",
+      `task worktree ${worktreePath} .git pointer is not a gitdir file; cannot record conversation ownership`
+    );
+  }
+  try {
+    writeFileSync(join(gitdir, OWNER_SIDECAR_NAME), `${conversationId}\n`, {
+      encoding: "utf8",
+    });
+  } catch (err) {
+    throw new WorktreeIsolationError(
+      "worktree_add_failed",
+      `cannot write ownership sidecar for ${worktreePath}: ${errorMessage(err)}`
+    );
+  }
+}
+
+function ownerFromGitdirSidecar(root: string): string | undefined {
+  const gitFile = join(root, ".git");
+  if (!existsSync(gitFile)) return undefined;
+  let gitMeta: string;
+  try {
+    gitMeta = readFileSync(gitFile, "utf8");
+  } catch {
+    // EXIT: .git pointer unreadable — fall through to path inversion
+    return undefined;
+  }
+  const gitdir = parseGitdirPointer(gitMeta);
+  if (gitdir === undefined) return undefined;
+  const sidecar = join(gitdir, OWNER_SIDECAR_NAME);
+  if (!existsSync(sidecar)) return undefined;
+  try {
+    const id = readFileSync(sidecar, "utf8").trim();
+    return SAFE_CONVERSATION_ID_RE.test(id) ? id : undefined;
+  } catch {
+    // EXIT: sidecar unreadable — fall through to path inversion
+    return undefined;
+  }
+}
+
 /** Return the decorative label from a task-worktree leaf, if present. */
 export function taskWorktreeLabelOf(root: string): string | undefined {
+  if (!isTaskWorktreePath(root)) return undefined;
   const leaf = basename(root);
   const separator = leaf.lastIndexOf("--");
-  if (separator <= 0) return undefined;
-  const label = leaf.slice(0, separator);
-  const owner = leaf.slice(separator + 2);
-  return SAFE_CONVERSATION_ID_RE.test(owner) &&
-    resolveTaskWorktreeLabel(label).label === label
-    ? label
-    : undefined;
+  if (separator > 0) {
+    const label = leaf.slice(0, separator);
+    const owner = leaf.slice(separator + 2);
+    return SAFE_CONVERSATION_ID_RE.test(owner) &&
+      resolveTaskWorktreeLabel(label).label === label
+      ? label
+      : undefined;
+  }
+  const sidecarOwner = ownerFromGitdirSidecar(root);
+  if (
+    sidecarOwner !== undefined &&
+    sidecarOwner !== leaf &&
+    resolveTaskWorktreeLabel(leaf).label === leaf
+  ) {
+    return leaf;
+  }
+  return undefined;
 }
 
 /**
- * Ownership anchor for task-worktree naming
- * (`<any>/.iknow/worktrees/<label>--<conversationId>` or the historical
- * `<any>/.iknow/worktrees/<conversationId>` form): returns the conversation
- * identity encoded in the leaf, undefined for non-task paths.
+ * Ownership anchor for task-worktree naming.
  *
- * The gate routes on this predicate. Labels are decorative and never
- * participate in the ownership decision; the final `--` suffix is the only
- * identity source for labeled leaves. session-api re-exports this function for
- * its provisioner and read-only display consumers.
+ * Identity sources, first match wins:
+ *   1. gitdir sidecar `iknow-conversation-id` (name-only labeled leaves);
+ *   2. historical `<slug>--<conversationId>` suffix;
+ *   3. UUID-only / unlabeled leaf (the whole basename).
  */
 export function taskWorktreeOwnerOf(root: string): string | undefined {
-  if (basename(dirname(root)) !== "worktrees") return undefined;
-  if (basename(dirname(dirname(root))) !== ".iknow") return undefined;
+  if (!isTaskWorktreePath(root)) return undefined;
+  const sidecar = ownerFromGitdirSidecar(root);
+  if (sidecar !== undefined) return sidecar;
   const leaf = basename(root);
   const separator = leaf.lastIndexOf("--");
   const owner = separator === -1 ? leaf : leaf.slice(separator + 2);
@@ -563,19 +659,17 @@ export function taskWorktreeOwnerOf(root: string): string | undefined {
 /**
  * T6 (plans/worktree-session-roots.md / ADR-0037 §4): the stable main checkout
  * that owns `root` — `root` itself when it is not task-worktree-shaped,
- * otherwise the repo three levels up (`<main>/.iknow/worktrees/<conv>`).
+ * otherwise the repo three levels up (`<main>/.iknow/worktrees/<leaf>`).
  *
  * This is the `productRoot` derivation hosts need when they hold **only** a
  * session root: after a rebind (and after a restart that resumes a session
  * already anchored on a tree) the session root is the tree, and identity /
  * per-root state must still resolve to the main checkout. Same naming SSOT as
- * `taskWorktreeOwnerOf`, so it is a pure path derivation — no git call, no
+ * `isTaskWorktreePath`, so it is a pure path derivation — no git call, no
  * `process.cwd()` fallback.
  */
 export function mainCheckoutOf(root: string): string {
-  return taskWorktreeOwnerOf(root) === undefined
-    ? root
-    : dirname(dirname(dirname(root)));
+  return isTaskWorktreePath(root) ? dirname(dirname(dirname(root))) : root;
 }
 
 // -- gate executor ----------------------------------------------------------------
@@ -891,10 +985,7 @@ export function createWorktreeIsolationExecutor(
     // T10: `root` here is the **wave snapshot** of `liveTaskRoot` taken at
     // executeAll entry (D2). mid-wave flips (create-task-worktree) do not
     // change this snapshot — rebind takes effect on the NEXT wave.
-    if (
-      state.status === "open" &&
-      taskWorktreeOwnerOf(snapshotRoot) === undefined
-    ) {
+    if (state.status === "open" && !isTaskWorktreePath(snapshotRoot)) {
       return block(call.id, unboundMutateNotice());
     }
     if (state.status === "open") {

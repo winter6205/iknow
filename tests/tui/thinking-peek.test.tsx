@@ -175,3 +175,26 @@ test("折叠态面板高度与思考全文长度无关：预览 ≤3 行，不�
     THINKING_PEEK_MAX_LINES + 1
   );
 });
+
+test("running：已返回正文草稿时，流式思考出现在该正文之下", async () => {
+  const returned = "RETURNED-SEGMENT-UNIQUE";
+  const setup = await testRender(
+    <ChatView
+      session={runningSession()}
+      cols={COLS}
+      rows={24}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+      draftSegments={[returned]}
+      thinkingDraftMasked="NEXT-THINK-UNIQUE"
+    />,
+    { width: COLS, height: 24, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  const returnedAt = frame.indexOf(returned);
+  const thinkAt = frame.indexOf(formatThinkingLive());
+  expect(returnedAt).toBeGreaterThanOrEqual(0);
+  expect(thinkAt).toBeGreaterThan(returnedAt);
+  await setup.renderer.destroy();
+});

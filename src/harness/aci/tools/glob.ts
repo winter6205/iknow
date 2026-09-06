@@ -22,7 +22,7 @@ import { readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, sep } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
-import { taskWorktreeOwnerOf } from "../../isolation/worktree-gate.js";
+import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import { resolveWithinRoot, spawnWithStopSignal } from "./helpers.js";
 import type { AciToolDef } from "../types.js";
@@ -185,10 +185,7 @@ function resolveProjectIdentityRoot(
 ): string | undefined {
   const projectIdentityRoot = deps?.projectIdentityRoot;
   if (projectIdentityRoot === undefined) return undefined;
-  if (
-    deps?.allowProjectIdentityRoot === true &&
-    taskWorktreeOwnerOf(root) === undefined
-  ) {
+  if (deps?.allowProjectIdentityRoot === true && !isTaskWorktreePath(root)) {
     return undefined;
   }
   if (deps?.allowProjectIdentityRoot === false) return undefined;

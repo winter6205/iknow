@@ -61,8 +61,8 @@ import { getAgentEntry, AgentCatalogLookupError } from "./catalog.js";
 import { resolveSubagentCapabilities, type BashMode } from "./capability.js";
 import { resolveInstallRoot } from "../session-roots.js";
 import {
+  isTaskWorktreePath,
   mainCheckoutOf,
-  taskWorktreeOwnerOf,
 } from "../isolation/worktree-gate.js";
 import {
   parseWorkerEnvelope,
@@ -298,10 +298,9 @@ export async function createWorkerRuntime(
   // 值回落 mainCheckoutOf(sandboxRoot):与 build-engine sessionRoots 派生
   // (mainCheckoutOf(opts.projectIdentityRoot ?? cwd))同一 SSOT 纯路径推导,
   // 不新造状态源;回落值盘上缺席时由 policy 合同根 fail-loud(§9.4)。
-  const identityFenceRoot =
-    taskWorktreeOwnerOf(sandboxRoot) !== undefined
-      ? (opts.projectIdentityRoot ?? mainCheckoutOf(sandboxRoot))
-      : undefined;
+  const identityFenceRoot = isTaskWorktreePath(sandboxRoot)
+    ? (opts.projectIdentityRoot ?? mainCheckoutOf(sandboxRoot))
+    : undefined;
   const defaultTraceDir = resolve(
     opts.workspaceRoot ?? cwd,
     DEFAULT_WORKER_TRACE_DIR
