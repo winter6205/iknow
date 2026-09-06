@@ -32,33 +32,33 @@ minimal-change-verifier: yes — 单一产品契约「有描述则加载、无�
    - **Inherits:** spec Does #1；#631 `MCP_TOOL_SHORT_DESCRIPTION_MAX = 120`；firstTurnReady 后字节稳定
    - **Surface:** identity 加性段 + build-engine 目录快照
    - **Acceptance:** SC1 + SC2：connected 工具行有短描述（有则截 120）；无 connected 段缺席；相邻轮 system 含该段 deep-equal
-   - Status: [ ] pending
+   - Status: [x] done
 
 2. **删除 skill_search 并改 skill 直呼文案** — tag: `[implementation]` `[parallel]`
    - **Inherits:** spec Does #4；ADR-0046 Decision 1
    - **Surface:** ACI 工具集 + TUI 摘要/settled
    - **Acceptance:** SC5 + SC6 + SC8：名单与 visibleSchemas 无 `skill_search`；未知 skill 引导无该名；E2E/`skill({name})` 直呼成功
-   - Status: [ ] pending
+   - Status: [x] done
 
 3. **有描述则直呼 discover（废除先 tool_search 报错）** — tag: `[implementation]`
    - **Inherits:** spec Does #2/#3；ADR-0046 Decision 1
    - **Surface:** ACI registry / 执行链 + `tool_search` 描述
    - **Acceptance:** SC3：未 discover 的 `mcp__*` 合法 input 执行成功；缺参非 error 且含 schema；文案不再要求先 search；`tool_search` 描述声明仅无描述时用
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T1]
 
 4. **内建 schema 退场索引为名+描述** — tag: `[implementation]`
    - **Inherits:** spec Does #5；ADR-0046 Decision 2（退场件不剥描述）
    - **Surface:** 溢出判定 + 名字目录渲染
    - **Acceptance:** SC4：退场件在索引中带 description；直呼不强制 `tool_search`；核心七件仍在首轮 `tools[]`
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T1, T3]
 
 5. **MCP/skill 索引降档仅剥描述** — tag: `[implementation]`
    - **Inherits:** spec Does #6；ASSUMPTIONS #10 剥光后仍超阈则接受、不删名
    - **Surface:** 溢出/索引判定 + skill 段与 MCP 目录渲染
    - **Acceptance:** SC7：超 10% 后被降档条目仅名仍在；退场内建若在场仍带 description；失败跳过 + warn
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T1, T4]
 
 ## Code review phase
