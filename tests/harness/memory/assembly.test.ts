@@ -2,14 +2,19 @@
  * #121 T4: assembly.ts tests (assembleSystemPrompt).
  *
  * Spec: specs/121-memory-injection.md (Testing Strategy assembly half — 三层拼接
- * 顺序 / 优先级声明位置精确 / 存在性指针条件出现 / promote 段位置 / 文件截断 /
- * promote 段截断 / 三层全缺 → 仅存在性指针; SC 3/4/5/10). Project Structure
- * assembly.ts (装配顺序固定, append-only 纪律).
+ * 顺序 / 优先级声明位置精确 / 存在性指针条件出现 / 文件截断 / 三层全缺 → 仅存在性指针;
+ * SC 3/4/5). Project Structure assembly.ts (装配顺序固定, append-only 纪律).
+ *
+ * ADR-0044 / specs/promote-bodies-never-enter-system.md: the promote segment is
+ * no longer rendered. Assemble must NOT include `formatPromote` body blocks
+ * (`### <title>` followed by `updated_at:` / `importance:` plus body) for any
+ * provenance, any `autoExtract` value, or any `promoteEntries` injection.
  *
  * assembleSystemPrompt is the thin composer over the T2/T3 read-side layer:
  * it reads static-layer files (AGENTS.md + rules) with readFile fallback, emits
- * the locked priority declaration + existence pointer, and appends the promote
- * segment. It never mutates messages and never writes to disk.
+ * the locked priority declaration + existence pointer, and — when the gate is
+ * open — the catalog segment. Promote bodies are intentionally excluded (ADR-0044).
+ * It never mutates messages and never writes to disk.
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -91,7 +96,7 @@ function ctx(overrides?: Partial<AssemblyContext>): AssemblyContext {
 // -- three-layer assembly order ---------------------------------------------
 
 describe("assembleSystemPrompt", () => {
-  it("assembles user → priority → project → existence pointer → promote", async () => {
+  it("assembles user → priority → project → existence pointer (promote bodies never enter system, ADR-0044)", async () => {
     await mkdirP(join(userHome, ".iknow", "rules"));
     await write(join(userHome, ".iknow", "AGENTS.md"), "USER AGENTS");
     await write(join(userHome, ".iknow", "rules", "user1.md"), "USER RULE");
@@ -102,7 +107,8 @@ describe("assembleSystemPrompt", () => {
     await write(join(memoryDir, "mem-1.md"), "# mem");
     const promoteEntries = [memoryEntry("mem-1", "Memory one", "body one")];
 
-    // specs/auto-memory-layering.md: promote segment is gated on autoExtract.
+    // ADR-0044: any provenance / any autoExtract / any promoteEntries injection
+    // must NOT render the promote segment into the system string.
     const out = await assembleSystemPrompt(
       ctx({ promoteEntries, autoExtract: true })
     );
@@ -111,22 +117,29 @@ describe("assembleSystemPrompt", () => {
     const iPriority = out.indexOf(PRIORITY_DECLARATION);
     const iProject = out.indexOf("PROJECT AGENTS");
     const iPointer = out.indexOf(EXISTENCE_POINTER);
-    const iPromote = out.indexOf("### Memory one");
     assert.ok(iUser !== -1, "user layer present");
     assert.ok(iPriority !== -1, "priority declaration present");
     assert.ok(iProject !== -1, "project layer present");
     assert.ok(iPointer !== -1, "existence pointer present");
-    assert.ok(iPromote !== -1, "promote segment present");
     assert.ok(iUser < iPriority, "user layer precedes priority declaration");
     assert.ok(
       iPriority < iProject,
       "priority declaration precedes project layer"
     );
     assert.ok(iProject < iPointer, "project layer precedes existence pointer");
-    assert.ok(
-      iPointer < iPromote,
-      "existence pointer precedes promote segment"
+    // ADR-0044: promote is no longer a part of the locked order — assert the
+    // body block (`### <title>` + `updated_at:` meta line + body) never reaches
+    // the system string.
+    assert.equal(
+      out.indexOf("### Memory one"),
+      -1,
+      "promote title must not enter the system string"
     );
+    assert.ok(
+      !out.includes("updated_at:") || out.indexOf("updated_at:") === -1,
+      "promote meta line must not enter the system string"
+    );
+    assert.ok(!out.includes("body one"), "promote body must not enter system");
   });
 
   it("emits the priority declaration exactly once, between user and project", async () => {
@@ -207,8 +220,11 @@ describe("assembleSystemPrompt", () => {
   });
 
   // -- promote segment -------------------------------------------------------
+  // ADR-0044: promote bodies never enter the system string. These tests pin
+  // that invariant at three different surfaces (injected entries, eligibility
+  // via usage.json on disk, and the autoExtract-true case).
 
-  it("fills the promote segment by importance desc and stays ≤ 4000 chars", async () => {
+  it("never renders a promote body block even when entries are injected (ADR-0044)", async () => {
     const lowBody = "low".repeat(300); // ~900 chars
     const highBody = "high".repeat(300);
     const promoteEntries = [
@@ -219,24 +235,28 @@ describe("assembleSystemPrompt", () => {
       ctx({ promoteEntries, autoExtract: true })
     );
 
-    const iHigh = out.indexOf("### High priority");
-    const iLow = out.indexOf("### Low priority");
-    assert.ok(iHigh !== -1 && iLow !== -1, "both promotable entries present");
-    assert.ok(iHigh < iLow, "higher importance filled first");
-
-    const promoteHead = out.substring(out.indexOf("### High priority"));
+    assert.equal(
+      out.indexOf("### High priority"),
+      -1,
+      "promote title must not enter the system string"
+    );
+    assert.equal(
+      out.indexOf("### Low priority"),
+      -1,
+      "promote title must not enter the system string"
+    );
     assert.ok(
-      promoteHead.length <= 4000,
-      `promote segment must stay ≤ 4000 chars, got ${promoteHead.length}`
+      !out.includes("updated_at: 2026-01-01"),
+      "promote meta line must not enter the system string"
     );
   });
 
-  it("omits the promote segment when there are no promotable entries", async () => {
+  it("omits any promote block when there are no promotable entries", async () => {
     const out = await assembleSystemPrompt(ctx());
     assert.ok(!out.includes("### "), "no promote segment expected");
   });
 
-  // -- promote gating (specs/auto-memory-layering.md SC7/SC8) -----------------
+  // -- promote gating (specs/auto-memory-layering.md SC7/SC8 + ADR-0044) -----
 
   it("omits the promote segment when autoExtract is not true, even with eligible entries on disk (SC7)", async () => {
     await write(
@@ -267,17 +287,61 @@ describe("assembleSystemPrompt", () => {
     );
   });
 
-  it("includes the promote segment when autoExtract is true with a promotable entry (SC8)", async () => {
+  it("does not render the promote segment even when autoExtract is true with a promotable entry (ADR-0044)", async () => {
+    // Seed a memory file so the library reads as non-empty (EXISTENCE_POINTER
+    // contract is independent of the promote gate; both must still hold).
+    await write(join(memoryDir, "note-1.md"), "# note-1");
     const promoteEntries = [
       memoryEntry("note-1", "Promoted title", "promoted body"),
     ];
     const out = await assembleSystemPrompt(
       ctx({ promoteEntries, autoExtract: true })
     );
-    assert.ok(
-      out.includes("### Promoted title"),
-      "autoExtract on + eligible entry → title present"
+    assert.equal(
+      out.indexOf("### Promoted title"),
+      -1,
+      "ADR-0044: autoExtract on + eligible entry → title still must not enter system"
     );
+    assert.ok(
+      !out.includes("promoted body"),
+      "ADR-0044: promote body must not enter system"
+    );
+    assert.ok(
+      out.includes(EXISTENCE_POINTER),
+      "existence pointer still present when library non-empty"
+    );
+  });
+
+  it("does not render the promote segment when autoExtract is true and usage.json proves eligibility (ADR-0044 + on-disk path)", async () => {
+    // No `promoteEntries` injection — the production path resolves through
+    // `listPromotableEntries(memoryDir)`. ADR-0044 must hold on the disk path
+    // too: the eligible entry's title / body must never enter the system string.
+    await write(
+      join(memoryDir, "note-1.md"),
+      serializeMemoryEntry(
+        memoryEntry("note-1", "On-disk promoted", "DISK_PROMOTE_BODY", 7)
+      )
+    );
+    await write(
+      join(memoryDir, "usage.json"),
+      JSON.stringify({
+        entries: { "note-1": { recall_count: 4, sessions: ["s1", "s2"] } },
+      })
+    );
+    await write(join(cwd, "AGENTS.md"), "PROJECT AGENTS");
+
+    const out = await assembleSystemPrompt(ctx({ autoExtract: true }));
+
+    assert.equal(
+      out.indexOf("### On-disk promoted"),
+      -1,
+      "disk-eligible entry title must not enter the system string"
+    );
+    assert.ok(
+      !out.includes("DISK_PROMOTE_BODY"),
+      "disk-eligible entry body must not enter the system string"
+    );
+    assert.ok(out.includes("PROJECT AGENTS"), "AGENTS section unaffected");
   });
 
   // -- user static layer root (#732) -----------------------------------------
@@ -378,10 +442,16 @@ describe("assembleSystemPrompt — memory_catalog", () => {
     assert.ok(!out.includes("UNIQUE_BODY_TOKEN_xyz"));
     const iPointer = out.indexOf(EXISTENCE_POINTER);
     const iDiscipline = out.indexOf(MEMORY_CATALOG_DISCIPLINE);
+    // ADR-0044: catalog lines never begin with `### `, and the promote block
+    // no longer renders at all — both forbid `### ` from appearing in system.
     const iPromote = out.indexOf("### ");
     assert.ok(iPointer !== -1 && iDiscipline !== -1);
     assert.ok(iPointer < iDiscipline, "catalog follows existence pointer");
-    assert.equal(iPromote, -1, "catalog is not a promote body segment");
+    assert.equal(
+      iPromote,
+      -1,
+      "catalog is not a promote body segment (ADR-0044: promote never renders)"
+    );
   });
 
   it("keeps the existence pointer but skips catalog when every entry is disabled", async () => {
@@ -403,7 +473,10 @@ describe("assembleSystemPrompt — memory_catalog", () => {
     assert.ok(out.includes(MEMORY_CATALOG_DISCIPLINE));
     const catalog = out.slice(out.indexOf(MEMORY_CATALOG_DISCIPLINE));
     assert.ok(catalog.length <= MEMORY_CATALOG_MAX_CHARS);
-    assert.ok(!catalog.includes("\n### "), "truncated catalog is not promote");
+    assert.ok(
+      !catalog.includes("\n### "),
+      "truncated catalog is not promote (ADR-0044: promote never renders)"
+    );
   });
 
   // specs/casual-ask-context-hygiene.md SC1: the existence pointer states that

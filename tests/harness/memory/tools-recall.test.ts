@@ -349,3 +349,39 @@ describe("memory_recall — concurrent reads", () => {
     assert.ok((b as string).includes("Use bar()"));
   });
 });
+
+// -- ADR-0044 SC4: recall production path must NOT call recordRecall ---------
+//
+// The spec pins a runtime contract: memory_recall stays pure-read; the
+// usage.json / eligibleForPromote counter is left to other call sites so that
+// the promote gate cannot accidentally fire from the recall path. Pin the
+// invariant by reading the source as a guard.
+describe("memory_recall — read-only contract (ADR-0044 SC4)", () => {
+  it("does not call recordRecall from the production handler", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const src = await readFile(
+      new URL("../../../src/harness/memory/tools/recall.ts", import.meta.url),
+      "utf8"
+    );
+    assert.ok(
+      !src.includes("recordRecall"),
+      "tools/recall.ts must not import or call recordRecall (ADR-0044 SC4)"
+    );
+    assert.ok(
+      !src.includes("usage.json"),
+      "tools/recall.ts must not read or write usage.json (ADR-0044 SC4)"
+    );
+  });
+
+  it("does not command the model to write AGENTS.md (ADR-0044 / spec SC4)", () => {
+    const tool = createMemoryRecallTool({ memoryDir });
+    assert.ok(
+      !/write.*AGENTS\.md/i.test(tool.description),
+      "description must not command writing AGENTS.md"
+    );
+    assert.ok(
+      !/long.?term.*rule/i.test(tool.description),
+      "description must not promote long-term rules"
+    );
+  });
+});

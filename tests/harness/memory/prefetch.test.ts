@@ -3,9 +3,17 @@
  *
  * Same scorer as memory_recall; zero lexical hits never join; max 5; char cap
  * drops trailing hits rather than overflowing.
+ *
+ * ADR-0044 / specs/promote-bodies-never-enter-system.md: the prefetch must
+ * NOT exclude entries by promote eligibility (`eligibleForPromote` /
+ * `promotedIds`). The system no longer renders a promote block, so excluding
+ * here would silently drop eligible entries from the user-side overlay.
  */
-import { describe, it } from "vitest";
+import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   MEMORY_ADVISORY_PREFIX,
   MEMORY_PREFETCH_DISCIPLINE,
@@ -20,9 +28,17 @@ import {
   recoverInjectedMemoryIds,
   recordInjectedMemoryIds,
   selectPrefetchHits,
+  serializeMemoryEntry,
   stripPrefetchOverlay,
 } from "../../../src/harness/memory/index.ts";
 import type { MemoryEntryV1 } from "../../../src/harness/memory/index.ts";
+
+const written: string[] = [];
+afterEach(async () => {
+  await Promise.all(
+    written.splice(0).map((p) => rm(p, { recursive: true, force: true }))
+  );
+});
 
 const entry = (overrides?: Partial<MemoryEntryV1>): MemoryEntryV1 => ({
   id: "mem-1",
@@ -89,7 +105,7 @@ describe("selectPrefetchHits", () => {
     assert.equal(hits.length, MEMORY_PREFETCH_MAX_HITS);
   });
 
-  it("drops disabled entries and already-promoted ids", () => {
+  it("drops disabled entries only — promote eligibility is no longer an exclusion (ADR-0044)", () => {
     const live = entry({ id: "live", title: "deploy", body: "deploy" });
     const dead = entry({
       id: "dead",
@@ -97,13 +113,16 @@ describe("selectPrefetchHits", () => {
       title: "deploy",
       body: "deploy",
     });
-    const promoted = entry({ id: "promoted", title: "deploy", body: "deploy" });
-    const hits = selectPrefetchHits("deploy", [live, dead, promoted], {
-      promotedIds: new Set(["promoted"]),
+    const promotable = entry({
+      id: "promotable",
+      title: "deploy",
+      body: "deploy",
     });
+    const hits = selectPrefetchHits("deploy", [live, dead, promotable]);
     assert.deepEqual(
-      hits.map((h) => h.entry.id),
-      ["live"]
+      hits.map((h) => h.entry.id).sort(),
+      ["live", "promotable"],
+      "disabled entries are still excluded; eligible entries are not"
     );
   });
 
@@ -154,6 +173,57 @@ describe("formatPrefetchOverlay", () => {
 
   it("returns an empty string when there are no hits", () => {
     assert.equal(formatPrefetchOverlay([]), "");
+  });
+});
+
+// ADR-0044 SC3: a query overlapping an entry whose usage.json proves promote
+// eligibility must surface that entry in the overlay (the old code dropped it).
+describe("buildMemoryPrefetchOverlay — promote eligibility is not an exclusion (ADR-0044)", () => {
+  it("surfaces an eligible-by-usage entry on lexical overlap, even with disabled peers", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "prefetch-promote-"));
+    written.push(tmp);
+    await writeFile(
+      join(tmp, "promotable.md"),
+      serializeMemoryEntry(
+        entry({
+          id: "promotable",
+          title: "Deploy pipeline",
+          body: "ship the deploy pipeline on Fridays",
+        })
+      )
+    );
+    await writeFile(
+      join(tmp, "disabled.md"),
+      serializeMemoryEntry(
+        entry({
+          id: "disabled",
+          disabled: true,
+          title: "Deploy pipeline",
+          body: "ship the deploy pipeline on Fridays",
+        })
+      )
+    );
+    // ≥2 distinct sessions → eligible by ADR-0009 D3 (before ADR-0044, the
+    // prefetch would have dropped this exact entry from the overlay).
+    await writeFile(
+      join(tmp, "usage.json"),
+      JSON.stringify({
+        entries: {
+          promotable: { recall_count: 4, sessions: ["s1", "s2"] },
+        },
+      })
+    );
+    const overlay = await buildMemoryPrefetchOverlay({
+      memoryDir: tmp,
+      query: "deploy pipeline",
+    });
+    assert.ok(
+      overlay.includes("### Deploy pipeline"),
+      "eligible entry must appear in the overlay"
+    );
+    // disabled still does not surface.
+    const hits = [...overlay.matchAll(/^### /gm)];
+    assert.equal(hits.length, 1, "disabled entry must remain excluded");
   });
 });
 

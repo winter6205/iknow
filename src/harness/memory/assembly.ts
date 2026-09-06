@@ -2,25 +2,35 @@
  * #121 T4: assembly.ts (assembleSystemPrompt — thin layer composer).
  *
  * Spec: specs/121-memory-injection.md (Project Structure assembly.ts, Testing
- * Strategy assembly half, SC 1/3/4/5/10, Boundaries Always — append-only 纪律,
+ * Strategy assembly half, SC 1/3/4/5, Boundaries Always — append-only 纪律,
  * 文件截断不丢字符).
  *
- * Order locked (ADR-0009 Decision 1+3+4; D2 amended 2026-08-30, #841 T6):
- *   user AGENTS (+ user rules bodies in "bodies" mode)
- *   ↓ [PRIORITY_DECLARATION] — exactly once, between user and project
- *   project AGENTS (+ project rules bodies in "bodies" mode)
- *   ↓ [RULES_MANIFEST segment] — "manifest" mode only (parent opener):
- *     paths + read_file guidance, never bodies
- *   ↓ [EXISTENCE_POINTER] — only when the memory library is non-empty
- *   ↓ [memory_catalog + English discipline] — autoExtract === true and ≥1 live
- *   ↓ [promote 段 (if any)] — autoExtract === true (specs/auto-memory-layering.md),
- *     <= 4000 chars, importance desc
+ * ## Assembly order (locked)
+ *   ADR-0009 Decision 1+3+4; D2 amended 2026-08-30 (#841 T6).
+ *     user AGENTS (+ user rules bodies in "bodies" mode)
+ *     ↓ [PRIORITY_DECLARATION] — exactly once, between user and project
+ *     project AGENTS (+ project rules bodies in "bodies" mode)
+ *     ↓ [RULES_MANIFEST segment] — "manifest" mode only (parent opener):
+ *       paths + read_file guidance, never bodies
+ *     ↓ [EXISTENCE_POINTER] — only when the memory library is non-empty
+ *     ↓ [memory_catalog + English discipline] — autoExtract === true and ≥1 live
  *
- * The function is a pure thin composer (≤30 lines, append-only on messages via
- * out-params — here simply returns a string): it reads static-layer files with
- * readFile fallback (discovery is metadata-only), reads promote entries from
- * disk when no cache is provided and autoExtract is on, and NEVER mutates ctx
- * or writes to disk.
+ * ## ADR-0044 — promote bodies NEVER enter the system string
+ *   See `docs/adr/0044-promote-bodies-never-enter-system.md` and
+ *   `specs/promote-bodies-never-enter-system.md` Boundaries.
+ *   Invariant: any provenance (manual / `source: auto` / `source: dream`), any
+ *   `autoExtract` value, and any value of `AssemblyContext.promoteEntries` must
+ *   NOT cause a memory body to be appended. `usage.json` /
+ *   `eligibleForPromote` are still produced (memory_gc reads them), the
+ *   `promoteEntries` field is retained on `AssemblyContext` for back-compat
+ *   but is intentionally ignored here, and the assemble seam therefore never
+ *   calls `listPromotableEntries`.
+ *
+ * ## Thin composer discipline
+ *   Pure, ≤30 lines of composition, append-only on messages (here simply
+ *   returns a string). Reads static-layer files with readFile fallback
+ *   (discovery is metadata-only), reads catalog entries from disk when the
+ *   gate is open, and NEVER mutates ctx or writes to disk.
  */
 import { readFile, opendir } from "node:fs/promises";
 import {
@@ -30,7 +40,6 @@ import {
   type MemoryLayerEntry,
 } from "./discovery.js";
 import { formatMemoryCatalog } from "./catalog.js";
-import { listPromotableEntries, PROMOTE_SEGMENT_CAP } from "./promote.js";
 import type { MemoryEntryV1 } from "./schema.js";
 import { listStoreEntries } from "./store.js";
 
@@ -85,11 +94,13 @@ const FILE_CAP = 12000;
  *     (a project-local `.iknow/AGENTS.md` must not become user-level).
  *   memoryDir: project-namespaced memory root (<workspaceRoot>/.iknow/memory/
  *     <base>-<hash>, per-root memory decision).
- *   autoExtract: when true, append memory_catalog after EXISTENCE_POINTER,
- *     then the promote segment (if any). Absent / non-true → no catalog and
- *     no promote segment; AGENTS layers + EXISTENCE_POINTER are unaffected
- *     (specs/auto-memory-layering.md — promote 与抽取同闸).
- *   promoteEntries: optional injection — used by tests + per-turn refresh hook.
+ *   autoExtract: when true, append memory_catalog after EXISTENCE_POINTER.
+ *     Absent / non-true → no catalog; AGENTS layers + EXISTENCE_POINTER are
+ *     unaffected (specs/auto-memory-layering.md).
+ *   promoteEntries: Accepted by the contract for back-compat with existing
+ *     callers, but the assembly step intentionally ignores it (ADR-0044 — see
+ *     file header). Do NOT wire it up here: doing so would re-introduce
+ *     memory bodies into the system string.
  */
 export interface AssemblyContext {
   readonly projectIdentityRoot: string;
@@ -97,6 +108,7 @@ export interface AssemblyContext {
   readonly workspaceRoot?: string;
   readonly memoryDir: string;
   readonly autoExtract?: boolean;
+  /** Accepted but ignored — see file header (ADR-0044). */
   readonly promoteEntries?: ReadonlyArray<MemoryEntryV1>;
 }
 
@@ -137,8 +149,9 @@ export async function assembleStaticSystemPrompt(
 }
 
 /** Compose the layered system prompt per the locked order (see file header).
- *  Parent session opener (chat / tui / serve via refresh.createSystemResolver):
- *  rules enter as a manifest, not bodies (#841 T6 / ADR-0009 D2 amended). */
+ *  Parent session opener (chat / tui / serve via refresh.createSystemResolver).
+ *  Note: rules enter as a manifest here, not bodies (#841 T6 / ADR-0009 D2
+ *  amended); the ADR-0044 invariant itself lives in the file header. */
 export async function assembleSystemPrompt(
   ctx: AssemblyContext
 ): Promise<string> {
@@ -151,12 +164,6 @@ export async function assembleSystemPrompt(
   if (ctx.autoExtract === true) {
     const catalog = await loadCatalogSegment(ctx.memoryDir);
     if (catalog) parts.push(catalog);
-    // specs/auto-memory-layering.md: promote 段与 catalog 同闸 — only when
-    // autoExtract === true; lazy-scan disk only inside the gate so the gated-off
-    // path never touches promote state.
-    const promote =
-      ctx.promoteEntries ?? (await listPromotableEntries(ctx.memoryDir));
-    if (promote.length > 0) parts.push(formatPromote(promote));
   }
   return parts.join("\n\n");
 }
@@ -231,20 +238,6 @@ async function memoryLibraryNonEmpty(memoryDir: string): Promise<boolean> {
     if (e.name.endsWith(".md") && e.name !== "MEMORY.md") return true;
   }
   return false;
-}
-
-/** Format sorted-by-importance entries as a promote segment, capped to 4000. */
-function formatPromote(entries: ReadonlyArray<MemoryEntryV1>): string {
-  const sorted = [...entries].sort(
-    (a, b) => b.importance - a.importance || a.id.localeCompare(b.id)
-  );
-  const text = sorted
-    .map(
-      (e) =>
-        `### ${e.title}\nupdated_at: ${e.updated_at}\nimportance: ${e.importance}\n${e.body}`
-    )
-    .join("\n\n");
-  return truncate(text, PROMOTE_SEGMENT_CAP);
 }
 
 /** Read a UTF-8 file; return "" on ENOENT/read failure (Boundaries Always 跳过). */
