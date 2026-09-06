@@ -11,6 +11,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { ToolExecutionError } from "../errors.js";
 import type { BwrapFence } from "./bwrap.js";
+import { createSandboxServer } from "./server/index.js";
 
 /** runInSandbox 默认输出截断上限，对齐 bash.ts 既有 MAX_OUTPUT_CODE_POINTS。 */
 export const DEFAULT_MAX_OUTPUT_CODE_POINTS = 12_000;
@@ -121,9 +122,9 @@ export function spawnWithStopSignal(
   const stopTree = (): void => {
     const pid = child.pid;
     if (settled || pid === undefined) return;
-    killProcessGroup(pid, "SIGTERM");
+    killProcessGroupLocal(pid, "SIGTERM");
     killTimer = setTimeout(() => {
-      if (!settled) killProcessGroup(pid, "SIGKILL");
+      if (!settled) killProcessGroupLocal(pid, "SIGKILL");
     }, options.killGraceMs ?? DEFAULT_KILL_GRACE_MS);
     killTimer.unref();
   };
@@ -184,30 +185,54 @@ export interface SandboxRunOptions {
 export async function runInSandbox(
   opts: SandboxRunOptions
 ): Promise<SandboxRunResult> {
-  const maxOutputCodePoints =
-    opts.maxOutputCodePoints ?? DEFAULT_MAX_OUTPUT_CODE_POINTS;
-  const { done } = spawnWithStopSignal(
-    opts.fence.argv[0],
-    opts.fence.argv.slice(1),
-    {
-      cwd: opts.cwd,
-      signal: opts.signal,
-      env: opts.env,
-      killGraceMs: opts.killGraceMs,
-    }
-  );
-  const result = await done;
-  return {
-    exitCode: result.code ?? signalExitCode(result.signal),
-    stdout: truncateByCodePoint(result.stdout, maxOutputCodePoints),
-    stderr: truncateByCodePoint(result.stderr, maxOutputCodePoints),
-  };
+  // ADR-0045 T8(a): in-process 直调路径降级为 server handler 薄包装 —— 保留
+  // 此函数签名(SandboxRunResult)以兼容既有 30+ fixture,内部走 server.exec
+  // 短生命周期协议。同进程 router 形态下 = 函数调用,无 IPC 成本。
+  const server = createSandboxServer();
+  return server.exec({
+    kind: "exec",
+    fence: opts.fence,
+    cwd: opts.cwd,
+    env: opts.env,
+    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+    ...(opts.maxOutputCodePoints !== undefined
+      ? { maxOutputCodePoints: opts.maxOutputCodePoints }
+      : {}),
+    ...(opts.killGraceMs !== undefined
+      ? { killGraceMs: opts.killGraceMs }
+      : {}),
+  });
 }
 
-function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
+function killProcessGroupLocal(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pid, signal);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+/**
+ * 给 server 复用:发送信号到 detached 进程组,ESRCH(组已消失)吞掉,
+ * 其他错误经 `log` 上报(不抛 — kill 升级是 best-effort,失败 = reap
+ * 不彻底,不阻断主流程)。
+ *
+ * Why a shared helper:server/index.ts 内联版本与 runner 本地版本吞错
+ * 行为不一致(runner 抛,server log);server 形态要求 never-throw(若
+ * kill 抛错会触发 typed `server_unreachable`,而 reap 本属内部清理,
+ * 不该升级为可观察故障面)。统一对外只暴露 `killProcessGroup` 这条
+ * best-effort 路径,runner 内部用本地严格版本。
+ */
+export function killProcessGroup(
+  pid: number,
+  signal: NodeJS.Signals,
+  log?: (msg: string) => void
+): void {
+  try {
+    process.kill(-pid, signal);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return;
+    log?.(`killProcessGroup: kill -${pid} ${signal} failed: ${String(error)}`);
   }
 }
