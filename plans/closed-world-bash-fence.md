@@ -51,41 +51,41 @@ OVERALL: BLOCKED。Discharge 映射（本轮 plan 修订）：
    - **Inherits:** none — 开放给实施者；本 bullet 产出是 T2 的读白名单证据源。
    - **Surface:** `scripts/sandbox-probe.ts`（新分支/新脚本形态由实施者定；现有 11 类探针框架复用）。
    - **Acceptance:** 存在一个可复跑的探针脚本/模式，在「无 writable home bind」的围栏形态下逐条列出哪些合法场景断链（预期断链候选：`~/.nvm`/node 二进制链、git 全局 config 读取、npm/pip 缓存、`~/.iknow` 读取、`~/.claude` 等），每条断链有名字、命令、退出码证据；输出可被人工裁决进读/写白名单。现有 11 类探针在**当前** argv 下保持全绿（本 bullet 不改围栏）。
-   - Status: [ ] pending
+   - Status: [x] done（T1 d777c050,PR #899）
 
 2. **T2 [decision] 白名单集合裁决 + ADR-0037 reopen amendment** — tag: `[decision]`
    - **Inherits:** ADR-0037 §1「OFF=byte-identical」与本改动冲突——worth reopening because 反转是全档位语义变更，闭世界对 OFF 档同样生效（否则其它 project 在 OFF 档仍可写，病灶 1 未闭合）。§4 amendment 2026-09-05 的 identity ro-bind 条款同步失效。
    - **Surface:** `docs/adr/0037-worktree-isolation-on-mutate.md`（amendment）；白名单集合裁决写进 amendment，不另立文件。
    - **Acceptance:** amendment 明确四件事：(a) 全档位 deny-by-default 反转 + 闭世界读面语义；(b) 读/写白名单集合（依据 T1 证据逐条列名 + 为何在场）；(c) #891 T2 identity overlay 条款标 superseded 并写明理由（闭世界下无 writable 祖先可堵）；(d) 白名单 miss 的 typed fail-loud 分型 + EXIT 条款——白名单根空白/盘上不存在 = 配置故障（对齐 #891 T2 (c) fail-loud 纪律），工具链断链（如 installRoot 在 home 外、`~/.nvm` 二进制不可达、PATH 重建失败）= 运行时可观察错误（spawn 失败冒泡，不静默降级），amendment 写明每型的错误面与退出行为。amendment 独立 commit，不与代码混合。
-   - Status: [ ] pending
+   - Status: [x] done（T2 dd9447a7 + 687ed48e 措辞订正,PR #899）
    - [blocks: T1]
 
 3. **T3 fs-policy 双轴 + bwrap argv 反转** — tag: `[implementation]`
    - **Inherits:** 本计划「背景与病灶」节的白名单原则（deny-by-default、可写集 = taskRoot+tmp、闭世界）；ADR-0037 amendment（T2）的白名单集合。
    - **Surface:** `src/harness/sandbox/fs-policy.ts`、`src/harness/sandbox/bwrap.ts`。
    - **Acceptance:** (a) fs-policy 呈读写双轴（writeRoots/readRoots），home 退出 bind roots；**位置合同 4 处消费点全部显式改造**（ACR bounded-context-guardian 点名）：`pathForHome`（bwrap.ts:71）、`bindArgs` 内 home/tmp 索引（bwrap.ts:96-97）、`baseArgs` tmp 索引（bwrap.ts:143）、homeRebind 推导（bwrap.ts:160）——按 index 取根改为按角色取根，installRoot 经 `resolveSessionRoots` 既有根角色接线（复用第四角色，不新增状态源），工具链路径线程路径（fsPolicy opts → bwrap 选项）写进实施，不借位置巧合；(b) argv 形态 = 系统 ro-bind → 读白名单 ro-bind → 写白名单 bind → tmpfs → cwd 重绑 → proc/dev，writable home 打底 token 消失；(c) fail-loud 纪律保持：白名单根空白/盘上不存在（合同输入）→ typed error 不 spawn；可选主机前缀（如 /opt）继续存在性跳过；(d) SENSITIVE_PATHS tmpfs 罩在闭世界下自动失效为无操作（不可见即无操作），保留或删除由实施者依测试最小化裁决。
-   - Status: [ ] pending
+   - Status: [x] done（T3 7f5fd61c,PR #899）
    - [blocks: T2]
 
 4. **T4 消费方迁移（bash 前台/后台 + verify）** — tag: `[implementation]`
    - **Inherits:** ADR-0037 §7.2 batch 快照语义（waveRoot 波次冻结）；#891 T2 (e)「前台与后台消费同一 fence token」。
    - **Surface:** `src/harness/aci/tools/bash.ts`（前台 + defaultBackgroundSpawn 后台路径）、`verify/sandbox-run.ts`。
    - **Acceptance:** (a) 三处调用面改喂新双轴 policy，前台/后台同一波仍消费同一份 token；(b) `projectIdentityRoot` 选项在闭世界下退化为读白名单成员——waveRoot≠identityRoot 的条件分支删除，identity 根恒进读白名单；(c) 既有 fsPolicy 测试点（约 39 处，含 `tests/harness/sandbox/bwrap.test.ts:320-368` 的位置断言）按 test.md 过时测试规则改写——认证的不变式仍在则更新断言（等价或更强），不机械保留位置断言；(d) npm test 全量绿。
-   - Status: [ ] pending
+   - Status: [x] done（T4 0e6c1cba,PR #899）
    - [blocks: T3]
 
 5. **T5 #891 T2 旧形态清理** — tag: `[implementation]`
    - **Inherits:** 本计划「背景与病灶」第 4 条（overlay 失效为无操作）。
    - **Surface:** `src/harness/sandbox/bwrap.ts`（identityOverlay/postTmpfsRebinds 的 cover-then-reclaim 排序合同）、`src/harness/aci/tools/bash.ts`（identityOverlay token 透传）。
    - **Acceptance:** identity ro-bind 的「后挂覆盖 writable home」排序合同与 identityOverlay 条件透传代码删除；读白名单成员形态保留；相关测试改写认证「identity 根进读白名单」而非「ro-bind 覆盖 writable 祖先」，断言不变式等价或更强。
-   - Status: [ ] pending
+   - Status: [x] done（T5 7d3425c2 + T5b 4d123f51,PR #899）
    - [blocks: T4]
 
 6. **T6 探针扩类别验收** — tag: `[implementation]`
    - **Inherits:** ADR-0037 amendment（T2）的白名单集合（探针断言与之对齐）。
    - **Surface:** `scripts/sandbox-probe.ts`。
    - **Acceptance:** 新增类别全绿：home 拒写、home 非白名单不可见、其它 project 不可写、`~/.iknow` 不可写（#896 闭合探针）、installRoot 可读可执行、taskRoot 可写；T1 裁决进白名单的每条读路径有对应探针；OFF 档与改绑档各跑一遍全绿；对白名单 miss 路径补 5 类边界覆盖（empty=空白名单根 / negative=路径越界 / overflow=超长路径 / concurrent=并发 fence 构造 / exception=typed fail-loud 冒泡），走 `arthurpower:defensive-contract-validator` 出报告。
-   - Status: [ ] pending
+   - Status: [x] done（T6 fa8b9071,PR #899;合并前补真实 TUI 走查,见 docs/handoff/2026-09-06-closed-world-fence-tui-walkthrough.md）
    - [blocks: T2]（与 T3–T5 可 [parallel]，但验收须在 T5 后重跑）
 
 7. **T7 [decision] sandbox server 化合同** — tag: `[decision]`
