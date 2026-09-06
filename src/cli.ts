@@ -12,6 +12,7 @@ import { parseArgs, type ParsedCli } from "./cli/parse-args.js";
 import { runChatSession } from "./cli/chat-session.js";
 // #356 subagent worker headless 重入: 子代理进程 main dispatch 早返回。
 import { runSubagentWorker } from "./harness/subagent/worker.js";
+import { shutdownDefaultLspPool } from "./harness/lsp/client.js";
 import {
   buildHarnessEngine,
   prepareRuntime,
@@ -379,11 +380,16 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   const activeEngineShutdown: { current?: () => Promise<void> } = {
     current: built.shutdown,
   };
-  registerShutdown({
-    shutdown: async (): Promise<void> => {
-      await activeEngineShutdown.current?.();
-    },
-  });
+  // chat 进程退出缝（信号 + REPL 自然退出共用）：引擎收口之外,还必须终结
+  // 共享 LSP 池 —— warmup / lsp_* spawn 的 language server 子进程 stdio 管道
+  // 不释放,事件循环排不空,进程（EOF 后）永不退出。引擎 shutdown 不负责此项
+  // （rebind 中途会调用,不得 latch 进程级共享池,见 client.ts
+  // shutdownDefaultLspPool 注释）。
+  const chatProcessShutdown = async (): Promise<void> => {
+    await activeEngineShutdown.current?.();
+    await shutdownDefaultLspPool();
+  };
+  registerShutdown({ shutdown: chatProcessShutdown });
   await runChatSession({
     deps: chatDeps,
     session: bundle.session,
@@ -449,6 +455,9 @@ async function runChat(parsed: ParsedCli): Promise<void> {
       };
     },
   });
+  // REPL 终点（EOF / 管道耗尽）走同一退出缝：引擎收口 + LSP 池终止（TUI
+  // /quit 挂死同根因,自然退出路径原来无人收口）。
+  await chatProcessShutdown();
 }
 
 async function main(): Promise<void> {
