@@ -25,14 +25,24 @@ export interface MemoryLayerEntry {
 
 /** Read dir entries synchronously and return them in deterministic order. */
 async function* safeDir(path: string): AsyncIterable<string> {
-  let dir;
   try {
-    dir = await opendir(path);
-  } catch {
-    return;
+    const dir = await opendir(path);
+    // for await over a Dir auto-closes the handle on completion.
+    // bun: opendir is lazy — a missing directory surfaces ENOENT (syscall
+    // "scandir") on first iteration, not at the opendir call (Node throws
+    // eagerly). The guard must cover the iteration too: missing dir = empty
+    // listing, never a throw into callers (e.g. buildTuiDeps rules discovery).
+    // Guard is narrow (ENOENT only): EACCES / EMFILE and other iteration
+    // faults are NOT swallowed as an empty listing — they rethrow typed,
+    // same shape as tryReadEntry below (a host fault must not masquerade
+    // as "no rules found").
+    for await (const e of dir) yield e.name;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new MemoryIOError(`discovery: opendir failed for ${path}`, {
+      cause: e,
+    });
   }
-  // for await over a Dir auto-closes the handle on completion.
-  for await (const e of dir) yield e.name;
 }
 
 /** Build a MemoryLayerEntry for a path if it exists; null otherwise. */

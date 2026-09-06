@@ -9,8 +9,8 @@ import {
   BASE_ENV_WHITELIST,
   applyCwdReadonlyFenceEnv,
   createBwrapFence,
+  createClosedWorldFsPolicy,
   createEnvIsolation,
-  createFsPolicy,
   createNetworkPolicy,
   createOutputMask,
   createResourceLimits,
@@ -72,11 +72,19 @@ export interface CreateBashToolOptions {
    * 工厂期捕获 ⇒ 多次 rebuild 间的差异仅落在 cwd token）。缺省时退回工厂
    * 捕获 cwd —— 与 V1 路径字节一致（legacy test parity）。 */
   readonly liveTaskRoot?: LiveTaskRoot;
-  /** #891 T2 (ADR-0037 §4 amendment): 改绑后的主仓只读 overlay 根。在场时
-   *  handler 在活 taskRoot ≠ 身份根的波次把它透传给 bwrap fence
-   *  （`--ro-bind` 后挂覆盖 writable home），前台 fence 与 background spawn
-   *  消费同一 token；活 taskRoot == 身份根（未改绑 / OFF）→ 不传，argv 与
-   *  V1 逐字节一致。 */
+  /** T4 (ADR-0037 §9.2 #4, plans/closed-world-bash-fence.md): iknow 运行时
+   *  安装根 —— 闭世界读白名单的合同读根(项目自身工具链 `node_modules/.bin`
+   *  的读通道)。装配链接线:registry ← build-engine 两处 createDefaultAciRegistry
+   *  传 `sessionRoots.installRoot`(复用 resolveSessionRoots 既有第四角色,
+   *  不新增状态源)。缺席时 policy 不含该读根(fs-policy 里可选,不 fail-loud;
+   *  合同输入一旦提供空白/盘上不存在则由 policy fail-loud,§9.4)。 */
+  readonly installRoot?: string;
+  /** #891 T2 → T5 (ADR-0037 §9.2 #6): 主仓身份根 —— **恒进**读白名单的
+   *  合同读根。选项提供了就无条件进 policy 读白名单(闭世界下没有
+   *  「writable 祖先罩住主仓」的病灶,overlay 形态已随 §9.3 superseded 并在
+   *  T5 删除;identity 根单一入口 = policy,bwrap 层选项已不存在),前台
+   *  fence 与 background spawn 消费同一份 token。仅 isolationEnabled 时由
+   *  装配层提供(与既有传递条件一致)。 */
   readonly projectIdentityRoot?: string;
 }
 
@@ -93,6 +101,10 @@ export function createBashTool(
   const home = opts?.home ?? homedir();
   const tmpDir = tmpdir();
   const workspaceRoot = opts?.workspaceRoot;
+  // T4 闭世界:合同读根在工厂期捕获(installRoot / projectIdentityRoot 都是
+  // process-stable,D3 稳定根),handler per-call rebuild 时喂进 policy。
+  const installRoot = opts?.installRoot;
+  const projectIdentityRoot = opts?.projectIdentityRoot;
   const networkPolicy = createNetworkPolicy();
   const resourceLimits = createResourceLimits();
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
@@ -125,15 +137,10 @@ export function createBashTool(
     const waveRoot: string = opts?.liveTaskRoot
       ? opts.liveTaskRoot.read()
       : cwd;
-    // #891 T2: overlay token = 改绑波次专用。活 taskRoot 就是身份根（未改绑
-    // / OFF）时主仓本来就是 cwd，无需 overlay —— 不传选项，argv 与 V1 字节
-    // 一致；改绑后 cwd 在身份树内，身份根 ro-bind 后挂覆盖 writable home。
-    // 前台 fence 与 background spawn 消费同一 token（D2 同波同一份）。
-    const identityOverlay =
-      opts?.projectIdentityRoot !== undefined &&
-      waveRoot !== opts.projectIdentityRoot
-        ? opts.projectIdentityRoot
-        : undefined;
+    // T4 闭世界(ADR-0037 §9.2 #6):身份根是**无条件**读白名单成员 ——
+    // 工厂期捕获的 projectIdentityRoot 直接进 policy 读白名单(T5 后 identity
+    // 根单一入口 = policy),前台 fence 与 background spawn 消费同一 token
+    // (D2 同波同一份)。
     // #502 T3:校验链通过后才决定前台 / 后台 —— 危险命令 / 敏感路径在两侧
     // 都先执行同一闸门（background 不豁免安全检查）。
     if ((input as BashInput | null)?.background === true) {
@@ -156,8 +163,7 @@ export function createBashTool(
         waveRoot,
         opts ?? {},
         ctx,
-        wantsHostNetwork,
-        identityOverlay
+        wantsHostNetwork
       );
     }
     // #562 T6: bashMode="readonly" 派生 cwdReadonly:true 传给 fence + env。
@@ -184,11 +190,19 @@ export function createBashTool(
     // T7 (D4): fsPolicy per-call rebuild —— home/tmpDir/workspaceRoot 是
     // 工厂期冻结的,只有 cwd 维度跟 waveRoot 联动。argv SHAPE+ORDER 因此
     // 与 V1 字节等价,差异只落在 --bind / --chdir 的 cwd token 上。
-    const fsPolicy = createFsPolicy({
+    // T4 闭世界双轴(ADR-0037 §9.2):读白名单 = installRoot(合同根,#4) +
+    // projectIdentityRoot(合同根,#6,恒进) + node 工具链根(缺省推导,#5)
+    // + git 全局配置(可选成员,#7,createClosedWorldFsPolicy 内折叠,存在性
+    // 跳过);写白名单 = taskRoot + tmp(policy 内定)。per-call rebuild 语义
+    // 不变 —— 每波仍现建 policy,只是装配表达式与后台 spawn / verify 同源
+    // (code-review M2 装配单源化)。
+    const fsPolicy = createClosedWorldFsPolicy({
       cwd: waveRoot,
       home,
       tmpDir,
       ...(workspaceRoot ? { workspaceRoot } : {}),
+      ...(installRoot !== undefined ? { installRoot } : {}),
+      ...(projectIdentityRoot !== undefined ? { projectIdentityRoot } : {}),
     });
     const fence = createBwrapFence({
       command: "bash",
@@ -200,9 +214,6 @@ export function createBashTool(
       cwd: waveRoot,
       ...(wantsHostNetwork ? { network: true } : {}),
       ...(fenceIsReadonly ? { cwdReadonly: true } : {}),
-      ...(identityOverlay !== undefined
-        ? { projectIdentityRoot: identityOverlay }
-        : {}),
     });
     const result = await runInSandbox({
       fence,
@@ -291,8 +302,7 @@ async function handleBackground(
   cwd: string,
   opts: CreateBashToolOptions,
   ctx?: ToolExecutionContext,
-  wantsHostNetwork = false,
-  identityOverlay?: string
+  wantsHostNetwork = false
 ): Promise<{ task_id: string; log_path: string }> {
   const manager = opts.backgroundManager;
   if (!manager) {
@@ -307,6 +317,16 @@ async function handleBackground(
     workspaceRoot: opts.workspaceRoot,
     env: process.env,
     home: opts.home,
+    // T4 闭世界:后台与前台消费同一份读白名单 token(D2 同波同一份)——
+    // installRoot(§9.2 #4)与 projectIdentityRoot(§9.2 #6,恒进读白名单)
+    // 都从工厂期捕获的同一选项出发,defaultBackgroundSpawn 据此构造同款
+    // 双轴 policy。
+    ...(opts.installRoot !== undefined
+      ? { installRoot: opts.installRoot }
+      : {}),
+    ...(opts.projectIdentityRoot !== undefined
+      ? { projectIdentityRoot: opts.projectIdentityRoot }
+      : {}),
     ...(ctx?.conversationId !== undefined
       ? { conversationId: ctx.conversationId }
       : {}),
@@ -320,11 +340,6 @@ async function handleBackground(
     // (freeze-safe);此处只透传旗标,不改 env(whitelist 会剥掉该键)。
     ...(opts.bashMode === "readonly" || opts.cwdReadonly === true
       ? { cwdReadonly: true }
-      : {}),
-    // #891 T2: 前台与后台共用同一 overlay token（D2 同波同一份）——
-    // defaultBackgroundSpawn 据此把身份根 --ro-bind 后挂进 background fence。
-    ...(identityOverlay !== undefined
-      ? { projectIdentityRoot: identityOverlay }
       : {}),
   });
   if (result.status === "spawn_error") {

@@ -59,6 +59,11 @@ import { MaxTurnsExceeded, ProtocolError } from "../errors.js";
 import type { AnthropicNativeMessage } from "../model-adapter/types.js";
 import { getAgentEntry, AgentCatalogLookupError } from "./catalog.js";
 import { resolveSubagentCapabilities, type BashMode } from "./capability.js";
+import { resolveInstallRoot } from "../session-roots.js";
+import {
+  mainCheckoutOf,
+  taskWorktreeOwnerOf,
+} from "../isolation/worktree-gate.js";
 import {
   parseWorkerEnvelope,
   truncateEnvelopeResult,
@@ -190,13 +195,29 @@ export interface CreateWorkerDepsOptions {
    *  缺席 → registry 内部 fallback 到 sandboxRoot(legacy 形态)。 */
   readonly workspaceRoot?: string;
   /**
-   * T3 (plans/worktree-session-roots.md / ADR-0037 §4): 项目身份发现根 =
-   * 父会话钉下的 `projectIdentityRoot`（spawn 时经 `IKNOW_PRODUCT_ROOT` 传入，
-   * env var 名沿用既有 wire）。rules / 项目 `AGENTS.md` / 项目 skills 都读它，
-   * 而不是 worker 自己的 cwd —— 改绑后 cwd 是一棵没有 `.iknow` 的裸树。
-   * 缺席 → 回落 cwd（未改绑时两者同值，字节不变）。
+   * T3 (ADR-0037 §4) + T5b (ADR-0037 §9.2 #6): 项目身份根,双消费面。
+   *   - T3 身份发现（不变）：rules / 项目 `AGENTS.md` / 项目 skills 读它，
+   *     而不是 worker 自己的 cwd —— 改绑后 cwd 是一棵没有 `.iknow` 的裸树；
+   *     缺席回落 cwd（未改绑时两者同值，字节不变）。
+   *   - T5b bash 围栏读白名单：createWorkerRuntime 在围栏 taskRoot
+   *     （sandboxRoot）是 task-worktree 形状时把它（缺席回落
+   *     `mainCheckoutOf(sandboxRoot)`）透传给 registry → bash 工厂 →
+   *     per-call createFsPolicy 合同读根（提供即恒进，fail-loud 由
+   *     policy 层承担）。生产路径 build-engine spawn 处已无条件注入
+   *     `sessionRoots.projectIdentityRoot`（IKNOW_PRODUCT_ROOT，T3 wire），
+   *     值与主链 registry（build-engine isolationEnabled 档）同一份。
    */
   readonly projectIdentityRoot?: string;
+  /**
+   * T5 (ADR-0037 §9.2 #4, plans/closed-world-bash-fence.md): iknow 运行时
+   * 安装根 —— worker registry 是 bash 的**真实执行面**（handler 经
+   * createFsPolicy / createBwrapFence 构造闭世界围栏），缺席时读白名单缺
+   * §9.2 #4 合同读根（项目自身工具链 `node_modules/.bin` 的读通道断链）。
+   * 缺省回退 `resolveInstallRoot()` 进程级 SSOT（worker 进程没有
+   * sessionRoots，但该解析锚 `import.meta.url`，在 worker 进程内同样成立；
+   * verify sandbox-run 同款）。测试可注入覆盖。
+   */
+  readonly installRoot?: string;
   /**
    * #556 T2: 来自 envelope.role 的 seam 副本 (runSubagentWorker 透传)。
    * worker 装配期查 catalog 取 body 注入 persona 段; 缺省 / 未知 → 走 V1
@@ -258,6 +279,29 @@ export async function createWorkerRuntime(
   const cwd = opts.cwd ?? process.cwd();
   // T3: 身份发现根。父会话没传（未改绑 / 旧 wire）→ 回落 cwd，与今日同值。
   const projectIdentityRoot = opts.projectIdentityRoot ?? cwd;
+  // T5 (ADR-0037 §9.2 #4): worker bash 围栏的 installRoot 合同读根。worker
+  // 进程没有 sessionRoots,但 resolveInstallRoot() 锚 import.meta.url,在本
+  // 进程内解析到同一安装根(build-engine / verify 同一 SSOT)。
+  const installRoot = opts.installRoot ?? resolveInstallRoot();
+  // T5b (ADR-0037 §9.2 #6): worker bash 围栏的 identity 合同读根。worker
+  // 进程没有 isolationEnabled 信号(settings / isolationHost 都不在场),但其
+  // 围栏 taskRoot = sandboxRoot(spawn 期冻结,registry 无 liveTaskRoot),主链
+  // 「rebind 后 identity 根才装载」的谓词在 worker 侧的等价形式 = sandboxRoot
+  // 是 task-worktree 形状 —— 与 build-engine spawn 处给 sessionRoot 的判定
+  // (taskWorktreeOwnerOf,build-engine.ts 同一函数)同源:
+  //   - OFF / 未改绑(sandboxRoot = 主仓):不传 —— .git 就在 cwd 内,本不缺
+  //     读通道(ADR §9.2 #6 括号理由),字节同今日,不比主链更宽;
+  //   - ON + 已改绑(sandboxRoot = task worktree):传父会话 verbatim 的
+  //     sessionRoots.projectIdentityRoot(T3 IKNOW_PRODUCT_ROOT wire 已送达,
+  //     与主链 ON 档 registry 同一份值),修 worktree repo 发现断链(git
+  //     status exit 128,T1 盘点实测)。
+  // 值回落 mainCheckoutOf(sandboxRoot):与 build-engine sessionRoots 派生
+  // (mainCheckoutOf(opts.projectIdentityRoot ?? cwd))同一 SSOT 纯路径推导,
+  // 不新造状态源;回落值盘上缺席时由 policy 合同根 fail-loud(§9.4)。
+  const identityFenceRoot =
+    taskWorktreeOwnerOf(sandboxRoot) !== undefined
+      ? (opts.projectIdentityRoot ?? mainCheckoutOf(sandboxRoot))
+      : undefined;
   const defaultTraceDir = resolve(
     opts.workspaceRoot ?? cwd,
     DEFAULT_WORKER_TRACE_DIR
@@ -335,6 +379,18 @@ export async function createWorkerRuntime(
     // 内部 fallback sandboxRoot(legacy 字节不变)。
     ...(opts.workspaceRoot !== undefined
       ? { workspaceRoot: opts.workspaceRoot }
+      : {}),
+    // T5 (ADR-0037 §9.2 #4): worker bash 是真实执行面 → 闭世界读白名单的
+    // installRoot 合同读根经 registry 透传给 bash 工厂(缺省 SSOT 回退,
+    // 见 CreateWorkerDepsOptions.installRoot)。
+    installRoot,
+    // T5b (ADR-0037 §9.2 #6): identity 合同读根条件化透传(谓词见
+    // identityFenceRoot)—— registry spread-guard 把它送进 bash 工厂 →
+    // per-call createFsPolicy 读白名单;read_file / grep / glob 同得只读
+    // 直通,与主链 isolationEnabled ON 档的 registry 面一致。缺席不传,
+    // 与主链 OFF 档字节一致。
+    ...(identityFenceRoot !== undefined
+      ? { projectIdentityRoot: identityFenceRoot }
       : {}),
     ...(bashMode !== undefined ? { bashMode } : {}),
   });
