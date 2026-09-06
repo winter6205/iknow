@@ -78,6 +78,13 @@ export interface AciCatalog {
    * 用 build-engine 之外的 registry,行为与 B4 之前一致)。
    */
   readonly isDiscovered?: (name: string) => boolean;
+  /**
+   * T3 / ADR-0046 §3:hydrate 副作用入口 —— gateOne 对未 discover 的 mcp__
+   * 工具调此函数把名字纳入 discovered set(下一轮 visibleSchemas 尾部
+   * 追加 schema)。缺席(`undefined`)→ 闸门视作「非 ACI registry 装配
+   * 的路径」,行为与 T3 之前一致(直接交给 inner)。
+   */
+  readonly discover?: (name: string) => void;
 }
 
 /**

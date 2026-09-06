@@ -120,10 +120,10 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
     );
   }
   const askUser = opts.askUser ?? (async () => true); // prototype default: no-ask approve
-  // B4 / ADR-0043 §2:把 catalog 上的 isDiscovered 注入 permission-runtime,
-  // 让 gateOne 拒绝未 discover() 的 mcp__ 工具调用(opts.catalog 在场时
-  // 直接读;缺席则从 registry 构一次,后者保留 byte-stable 行为 —— 不传
-  // isDiscovered,gate 不会拒任何 mcp__ 调用)。
+  // B4 / ADR-0043 §2 + T3 / ADR-0046 §3:把 catalog 上的 isDiscovered /
+  // discover 注入 permission-runtime,让 gateOne 走 hydrate-then-execute
+  // 路径(opts.catalog 在场时直接读;缺席则从 registry 构一次,后者保留
+  // byte-stable 行为 —— 不传 isDiscovered/discover,gate 不会触发 hydrate)。
   const catalogForT5: AciCatalog = opts.catalog ?? createAciCatalog(registry);
   const perm = createPermissionRuntime({
     inner: opts.inner,
@@ -137,6 +137,7 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
     ...(catalogForT5.isDiscovered
       ? { isDiscovered: catalogForT5.isDiscovered }
       : {}),
+    ...(catalogForT5.discover ? { discover: catalogForT5.discover } : {}),
   });
   return Object.freeze({
     executeAll: async (

@@ -28,8 +28,6 @@ import {
   isBashNetworkTrue,
   type PermissionPolicy,
 } from "./policy.js";
-import { MCP_TOOL_NOT_LOADED_MESSAGE } from "../mcp/manager.js";
-import { ToolExecutionError } from "../errors.js";
 import { VIOLATION_PREFIXES } from "./prefixes.js";
 import type {
   AskUser,
@@ -67,15 +65,21 @@ export interface HookErrorEvent {
  * 动态注册的 mcp__ 工具（#337）。`all()` 仍返回构造期快照，供权限层
  * 遍历 enumerate 用。
  *
- * B4 / ADR-0043 §2:第二参 `isDiscovered`(可选)是「未加载即调用 = 抛
- * ToolExecutionError」闸门的数据源 —— 装配层把 AciRegistry.isDiscovered
- * 注入到这,gateOne 据此阻止 model 直接调未 discover() 的 mcp__ 工具。
+ * B4 / ADR-0043 §2 + T3 / ADR-0046 §3:第二参 `isDiscovered`(可选)是
+ * 「未加载即调用」闸门的数据源 —— 装配层把 AciRegistry.isDiscovered
+ * 注入到这,gateOne 据此对未 discover() 的 mcp__ 工具调用走 hydrate
+ * 路径(本轮 discover + input 校验 → 执行或投影,详见 gateOne)。第三
+ * 参 `discover`(可选)是 hydrate 副作用入口 —— 闸门对未 discover 的
+ * mcp__ 工具调用此函数把名字纳入 discovered set(下一轮 visibleSchemas
+ * 尾部追加 schema)。
+ *
  * 缺席(`undefined`)→ 闸门放过(非 ACI registry 装配的路径,如 worker
- * 子代理或 stub 测试,行为与 B4 之前一致,byte-stable)。
+ * 子代理或 stub 测试,行为与 T3 之前一致,byte-stable)。
  */
 export function createAciCatalog(
   registry: Registry,
-  isDiscovered?: (name: string) => boolean
+  isDiscovered?: (name: string) => boolean,
+  discover?: (name: string) => void
 ): AciCatalog {
   const list = registry.list();
   const byName = new Map<string, AciToolDef>();
@@ -97,6 +101,7 @@ export function createAciCatalog(
     },
     all: () => Object.freeze([...byName.values()]) as ReadonlyArray<AciToolDef>,
     ...(isDiscovered ? { isDiscovered } : {}),
+    ...(discover ? { discover } : {}),
   });
 }
 
@@ -136,6 +141,13 @@ export interface PermissionExecutorOptions {
    * 配的路径或 stub 测试,行为与 B4 之前 byte-stable)。
    */
   readonly isDiscovered?: (name: string) => boolean;
+  /**
+   * T3 / ADR-0046 §3:hydrate 副作用入口 —— 闸门对未 discover 的 mcp__
+   * 工具调用此函数把名字纳入 discovered set(下一轮 visibleSchemas 尾部
+   * 追加 schema,自动复制 ACI 纪律)。缺席(`undefined`)→ 闸门视作「非
+   * ACI registry 装配的路径」,行为与 T3 之前一致(直接交给 inner)。
+   */
+  readonly discover?: (name: string) => void;
 }
 
 export type PermissionGate =
@@ -178,7 +190,11 @@ export function createPermissionRuntime(
       "permission executor: ask_inlet_missing (AskUser implementation is required at construction)"
     );
   }
-  const catalog = createAciCatalog(opts.registry, opts.isDiscovered);
+  const catalog = createAciCatalog(
+    opts.registry,
+    opts.isDiscovered,
+    opts.discover
+  );
   const pre: PreToolUseHook = opts.preToolUse ?? (() => undefined);
   const post: PostToolUseHook = opts.postToolUse ?? (() => undefined);
   const askUser = opts.askUser;
@@ -192,30 +208,46 @@ export function createPermissionRuntime(
     const def = catalog.get(call.name);
     if (!def) return { kind: "proceed", def: undefined };
 
-    // B4 / ADR-0043 §2:未 discover 的 mcp__ 工具调用 = ToolExecutionError。
-    //   - 闸门顺序在 pre-hook 之前:这条规则是契约错误（不是用户权限问题）,
-    //     pre-hook 不该拦;在 pre 之前 fail-fast 让 hookError 观测面干净。
-    //   - 模板钉死(MCP_TOOL_NOT_LOADED_MESSAGE),aci-executor 与 permission-executor
-    //     共用同一字面量,测试只引用常量不走字面。
-    //   - `catalog.isDiscovered` 缺席 → 闸门放过(非 ACI registry 装配的路径
-    //     或 stub 测试,行为与 B4 之前一致 —— 不破坏 worker / hub runDeps)。
+    // T3 / ADR-0046 §3:未 discover 的 mcp__ 工具被直呼 → hydrate(本轮
+    // discover(name) → 下一轮 visibleSchemas 尾部追加 schema);input 通过
+    // 该工具 inputSchema → 直接执行;否则返非 error 文本投影
+    // {name, description, inputSchema},引导模型补齐 input。
+    //   - 闸门顺序在 pre-hook 之前:hydrate 不是用户权限问题,pre-hook 不该
+    //     拦;input 校验就地做(ajv 编译用 def.inputSchema 一次性编 + WeakMap
+    //     缓存,后续直呼复用)。
+    //   - `catalog.discover` / `catalog.isDiscovered` 缺席 → 闸门放过
+    //     (非 ACI registry 装配的路径或 stub 测试,行为与 T3 之前一致
+    //     —— 不破坏 worker / hub runDeps)。
     if (
       def.name.startsWith("mcp__") &&
       catalog.isDiscovered !== undefined &&
       !catalog.isDiscovered(def.name)
     ) {
+      // hydrate 副作用(在 input 校验前):即使 input 不合法,discover 也照发
+      // —— spec:discover 必须发生在执行前;下一轮 tools 尾部可见该 schema,
+      // 模型有 schema 后才能正确补 input。
+      catalog.discover?.(def.name);
+      const validator = getOrCompileValidator(def);
+      if (validator(call.input)) {
+        return { kind: "proceed", def };
+      }
+      // input 不通过 schema → 非 error 文本投影(model-facing OK,把
+      // schema 显式送回,引导模型补 input;is_error = false 因为 kind 是 ok)。
       return {
         kind: "blocked",
         result: {
-          kind: "execution_failed",
+          kind: "ok",
           toolUseId: call.id,
-          // 用 typed ToolExecutionError 的 message 渲染(`<name>` 插值为实际
-          // 工具名),让 ToolResultAdapter 路径(loader-envelopes.ts)的渲染与
-          // typed-error catch 契约(code-quality.md)对齐:plain object 不会
-          // 打成 [object Object]。
-          message: new ToolExecutionError(
-            MCP_TOOL_NOT_LOADED_MESSAGE.replace("<name>", def.name)
-          ).message,
+          payload: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                name: def.name,
+                description: def.description,
+                inputSchema: def.inputSchema,
+              }),
+            },
+          ],
         },
       };
     }
@@ -510,4 +542,39 @@ function errMsg(err: unknown, input?: unknown): string {
   const prefixOverhead = HOOK_ERROR_PREFIX.length + " pre-hook threw: ".length;
   const max = 200 - prefixOverhead;
   return raw.length <= max ? raw : raw.slice(0, max - 1) + "…";
+}
+
+// ---------------------------------------------------------------------------
+// T3 / ADR-0046 §3 — 直呼加载 ajv 校验
+// ---------------------------------------------------------------------------
+
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
+import type { ValidateFunction } from "ajv";
+
+/**
+ * T3 直呼加载的 input 校验:为 def.inputSchema 编一份 ajv validator,
+ * 按 def 实例缓存(WeakMap)。与 inner executor 持有的 validator 是两份
+ * 独立 ajv 实例 —— T3 这条路径走闸门同步校验,inner 仍按既有路径异步
+ * 校验一次(success 路径 ajv 双跑可接受:单 tool call per turn,mcp__ 默认
+ * lazy 不进 prompt schema,本路径极少触发)。
+ *
+ * `strict: true` 沿用 aci-registry 同源配置(spawn_subagent / read_file
+ * 等已有 schema 已通过该 strict 校验,本路径不应引入新错误)。
+ *
+ * `addFormats` 同步注册 `date-time` / `uri` 等格式 —— 与 registry 一致。
+ */
+const HYDRATE_AJV = new Ajv.default({ strict: true, allErrors: true });
+addFormats.default(HYDRATE_AJV);
+const HYDRATE_VALIDATOR_CACHE = new WeakMap<AciToolDef, ValidateFunction>();
+
+function getOrCompileValidator(def: AciToolDef): ValidateFunction {
+  let v = HYDRATE_VALIDATOR_CACHE.get(def);
+  if (v !== undefined) return v;
+  // 编译失败(inputSchema 非法):走 typed-error 路径与 aci-registry 一致;
+  // 当前只会在构造期未校验过的动态 def 出现 —— 已知 mcp__ 经
+  // `registerExternal` 已 ajv 编译过,本路径仅复用,不重新发现错误。
+  v = HYDRATE_AJV.compile(def.inputSchema);
+  HYDRATE_VALIDATOR_CACHE.set(def, v);
+  return v;
 }
