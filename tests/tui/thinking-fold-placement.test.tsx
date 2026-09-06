@@ -330,3 +330,135 @@ test("thinkingMs 在 final assistant 且 final 仅有 text 时:折叠行「思�
   expect(Math.abs(readCountIdx - thinkIdx)).toBeLessThanOrEqual(1);
   await setup.renderer.destroy();
 });
+
+test("hidden agent_status 插在 tool_result 与 final 之间：thinkingMs 按盘上消息下标取值，折叠行仍要有「思考了 N 秒」+ retract 计数", async () => {
+  // 复现：session.thinkingMs 与 messages 一一对应；ChatView 却用过滤后的
+  // visibleIndex 去取。agent_status 对 TUI 隐藏，visible 下标比盘上下标短
+  // 一格 → final 的 30s 读到 status 槽的 null → 「思考了 N 秒」消失。
+  // hideThinking 仍因 retract 折叠行把 per-message 摘要掐掉，retract 工具
+  // 也从消息框收走，结果只剩 keep/正文。
+  const messages: AnthropicNativeMessage[] = [
+    { role: "user", content: [{ type: "text", text: "q" }] },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "先读文件", signature: "s1" },
+        {
+          type: "tool_use",
+          id: "tu-1",
+          name: "read_file",
+          input: { path: "a.ts" },
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "tu-1", content: "ok" }],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: "<agent_status>\nlast_tool: read_file\n</agent_status>",
+        },
+      ],
+    },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "最终总结思考", signature: "s2" },
+        { type: "text", text: "完成总结" },
+      ],
+    },
+  ];
+  const thinkingMs: ReadonlyArray<number | null> = [
+    null,
+    null,
+    null,
+    null,
+    30000,
+  ];
+  const setup = await testRender(
+    <ChatView
+      session={sessionWith(messages, thinkingMs)}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("完成总结");
+  expect(frame).toContain("思考了 30 秒");
+  expect(frame).toContain("read_file × 1");
+  expect(frame.includes("先读文件")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("hidden agent_status + 仅 keep 工具：无 retract 计数行时，仍要画出「思考了 N 秒」", async () => {
+  // bash 是 keep：不进折叠计数，showTurnFold=false。思考秒数只能走
+  // per-message ThinkingSummary，下标一旦错位就整行消失，屏幕上只剩
+  // 消息框里的 bash 标题。
+  const messages: AnthropicNativeMessage[] = [
+    { role: "user", content: [{ type: "text", text: "q" }] },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "跑一下", signature: "s1" },
+        {
+          type: "tool_use",
+          id: "tu-bash",
+          name: "bash",
+          input: { command: "pwd" },
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "tu-bash", content: "ok" }],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: "<agent_status>\nlast_tool: bash\n</agent_status>",
+        },
+      ],
+    },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "收尾", signature: "s2" },
+        { type: "text", text: "目录如下" },
+      ],
+    },
+  ];
+  const thinkingMs: ReadonlyArray<number | null> = [
+    null,
+    null,
+    null,
+    null,
+    12000,
+  ];
+  const setup = await testRender(
+    <ChatView
+      session={sessionWith(messages, thinkingMs)}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("目录如下");
+  expect(frame).toContain("bash");
+  expect(frame).toContain("思考了 12 秒");
+  expect(frame.includes("× ")).toBe(false);
+  await setup.renderer.destroy();
+});

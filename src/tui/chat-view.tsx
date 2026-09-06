@@ -229,13 +229,29 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       runs.map((run) => liveToolPreviewBox(run, contentWidth));
     const bannerLines = props.bannerLines ?? [];
     const pal = tuiPalette;
-    const visibleMessages = useMemo(
+    // thinkingMs 与 session.messages 一一对应。visible 列表会丢掉
+    // agent_status / drain 等隐藏 user 消息，下标比盘上短。所有
+    // thinkingMs 查找必须映射回 sourceIndex，否则「思考了 N 秒」读到
+    // null 槽，折叠行消失，hideThinking 又把消息框里的摘要掐掉。
+    const visibleEntries = useMemo(
       () =>
-        props.session.messages.filter(
-          (message) => !isTuiHiddenUserMessage(message)
-        ),
+        props.session.messages
+          .map((message, sourceIndex) => ({ message, sourceIndex }))
+          .filter(({ message }) => !isTuiHiddenUserMessage(message)),
       [props.session.messages]
     );
+    const visibleMessages = useMemo(
+      () => visibleEntries.map((entry) => entry.message),
+      [visibleEntries]
+    );
+    const sourceIndexOfVisible = useMemo(
+      () => visibleEntries.map((entry) => entry.sourceIndex),
+      [visibleEntries]
+    );
+    const thinkingMsAtVisible = (visibleIndex: number): number =>
+      sumThinkingMsInRange(props.session.thinkingMs, [
+        sourceIndexOfVisible[visibleIndex] ?? visibleIndex,
+      ]);
     const measuredViewport = sbRef.current?.viewport.height ?? 0;
     const viewportHeight = measuredViewport > 0 ? measuredViewport : props.rows;
     const mountWindow = useMemo(
@@ -334,9 +350,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       }
       return -1;
     })();
-    const finalThinkingMs = sumThinkingMsInRange(props.session.thinkingMs, [
-      lastAssistantMessageIndex,
-    ]);
+    const finalThinkingMs = thinkingMsAtVisible(lastAssistantMessageIndex);
     // 每簇独立的折叠行（思考秒数 = thinkingMs[anchorMsgs] 求和 → 秒）。
     // 全轮生效（activitySegments 已覆盖全历史），running 态直接空（running 态）。
     const foldLinesBySegmentIndex = new Map<number, ReadonlyArray<string>>();
@@ -358,9 +372,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         // thinkingMs 为 0 时,归入 final 的 thinkingMs(独占展示位置,避免
         // 漂到 per-message ThinkingSummary);前序簇继续按 anchor 求和(若有
         // 多个独立 thinkingMs 已在测试 2 验证「严格归属到 anchor」不变式)。
-        let clusterMs = sumThinkingMsInRange(props.session.thinkingMs, [
-          segment.messageIndex,
-        ]);
+        let clusterMs = thinkingMsAtVisible(segment.messageIndex);
         if (
           clusterMs === 0 &&
           segmentIndex === lastSegmentIndex &&
@@ -389,9 +401,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         if (lastText !== undefined) {
           // live 簇思考秒数 = last assistant message 落盘的 thinkingMs(若有);
           // running 态已 short-circuit,此处只走 idle。
-          const clusterMs = sumThinkingMsInRange(props.session.thinkingMs, [
-            lastText.segment.messageIndex,
-          ]);
+          const clusterMs = thinkingMsAtVisible(lastText.segment.messageIndex);
           const clusterSeconds = thinkingMsToSeconds(clusterMs);
           const lines = formatTurnActivityFold(
             clusterSeconds,
@@ -425,9 +435,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     // not on whether an historical message supplied an insertion point.
     const foldDisplayLines = showTurnFold
       ? formatTurnActivityFold(
-          thinkingMsToSeconds(
-            sumThinkingMsInRange(props.session.thinkingMs, [lastQueryVisible])
-          ),
+          thinkingMsToSeconds(thinkingMsAtVisible(lastQueryVisible)),
           turnToolCounts
         )
       : [];
@@ -555,10 +563,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           // D3 (tui-display-consistency):`thinkingMs` 来自落盘数据(挂在
           // session.thinkingMs 上,与 messages 一一对应);无 thinkingMs →
           // undefined → `MessageBlocks` 不显示「思考了 N 秒」折叠行。
-          const messageThinkingMs = sumThinkingMsInRange(
-            props.session.thinkingMs,
-            [visibleIndex]
-          );
+          const messageThinkingMs = thinkingMsAtVisible(visibleIndex);
           const messageThinkingSeconds = thinkingMsToSeconds(messageThinkingMs);
           const messageSegments = activitySegments
             .map((segment, segmentIndex) => ({ segment, segmentIndex }))
