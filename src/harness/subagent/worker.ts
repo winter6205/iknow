@@ -60,7 +60,11 @@ import { run, epilogueSummary } from "../loop-engine.js";
 import type { HarnessStreamEvent } from "../stream.js";
 import { MaxTurnsExceeded, ProtocolError } from "../errors.js";
 import type { AnthropicNativeMessage } from "../model-adapter/types.js";
-import { getAgentEntry, AgentCatalogLookupError } from "./catalog.js";
+import {
+  AgentCatalogLookupError,
+  type AgentCatalogResolver,
+} from "./catalog.js";
+import { createMergedCatalogResolver } from "./user-catalog.js";
 import { resolveSubagentCapabilities, type BashMode } from "./capability.js";
 import { resolveInstallRoot } from "../session-roots.js";
 import {
@@ -92,11 +96,17 @@ const DEFAULT_WORKER_TRACE_DIR = "trace";
  * 未知 id 走 catch 路径 (defense-in-depth): spawn 侧 ajv 已挡一轮, 此处为
  * wire-mismatch 兜底, 单测 envelope-role.test.ts 显式锁定 fallback 内容
  * (不静默吞掉 — 装配层发一行 log, 输出仍无 persona)。
+ *
+ * catalog 由调用方传入（worker 装配期按 userHome 构建 merged resolver,
+ * 含 ~/.iknow/agents/ 用户角色）。
  */
-function resolvePersonaBody(role: string | undefined): string | undefined {
+function resolvePersonaBody(
+  role: string | undefined,
+  catalog: AgentCatalogResolver
+): string | undefined {
   const id = role ?? "general-purpose";
   try {
-    return getAgentEntry(id).body;
+    return catalog.get(id).body;
   } catch (err) {
     if (err instanceof AgentCatalogLookupError) {
       log(`role '${id}' not in catalog; falling back to V1 baseline`);
@@ -115,10 +125,13 @@ function resolvePersonaBody(role: string | undefined): string | undefined {
  * 防御契约与 resolvePersonaBody 同形态:role 缺省 / 未知 → 不抛, 装配
  * 期 catch 后走 fallback;catalog 是只读数据, 无副作用。
  */
-function resolveConstraintsText(role: string | undefined): string | undefined {
+function resolveConstraintsText(
+  role: string | undefined,
+  catalog: AgentCatalogResolver
+): string | undefined {
   if (role === undefined) return undefined;
   try {
-    const entry = getAgentEntry(role);
+    const entry = catalog.get(role);
     if (entry.bashMode === "readonly") {
       return toolConstraintsSegment("readonly");
     }
@@ -295,6 +308,9 @@ export async function createWorkerRuntime(
 }> {
   const { env, sandboxRoot } = opts;
   const userHome = opts.userHome ?? homedir();
+  // user agents 目录按 worker 自身 userHome 扫描（测试缝 userHome 同时
+  // 隔离 ~/.iknow/agents）。记忆化在 user-catalog 内, 每进程最多扫一次。
+  const agentCatalog = createMergedCatalogResolver({ home: userHome });
   const cwd = opts.cwd ?? process.cwd();
   // T3: 身份发现根。父会话没传（未改绑 / 旧 wire）→ 回落 cwd，与今日同值。
   const projectIdentityRoot = opts.projectIdentityRoot ?? cwd;
@@ -369,6 +385,8 @@ export async function createWorkerRuntime(
     : resolveSubagentCapabilities({
         role: opts.role,
         parentDisallowedTools: opts.disallowedTools,
+        // 与 persona/constraints 同源: builtin + user agents merged catalog。
+        catalog: agentCatalog,
       });
   if (capabilities.catalogError !== undefined) {
     log(`role '${opts.role}' not in catalog; bashMode fallback to 'any'`);
@@ -479,10 +497,12 @@ export async function createWorkerRuntime(
   // role 缺省 → general-purpose persona; 未知 id → 不注入 persona
   // (defense-in-depth): worker 装配期 catch AgentCatalogLookupError 显式走
   // fallback, 单测 envelope-role 与 tool-constraints 锁定该路径。
-  const personaText = isJudge ? undefined : resolvePersonaBody(opts.role);
+  const personaText = isJudge
+    ? undefined
+    : resolvePersonaBody(opts.role, agentCatalog);
   const constraintsText = isJudge
     ? undefined
-    : resolveConstraintsText(opts.role);
+    : resolveConstraintsText(opts.role, agentCatalog);
   const addendumText = opts.addendum;
   const system =
     personaText !== undefined ||

@@ -1,9 +1,9 @@
 import {
   AgentCatalogLookupError,
-  builtinCatalogResolver,
   FILE_WRITE_TOOL_NAMES,
   type AgentCatalogResolver,
 } from "./catalog.js";
+import { createMergedCatalogResolver } from "./user-catalog.js";
 
 const FILE_WRITE_TOOL_NAME_SET = new Set<string>(FILE_WRITE_TOOL_NAMES);
 
@@ -71,7 +71,9 @@ export function resolveSubagentCapabilities(
     };
   }
 
-  const catalog = opts.catalog ?? builtinCatalogResolver;
+  // 默认 = builtin + `~/.iknow/agents/` 用户角色合并 catalog（记忆化，
+  // 进程内只扫一次）。测试仍可注入显式 catalog 隔离。
+  const catalog = opts.catalog ?? createMergedCatalogResolver();
   try {
     const entry = catalog.get(opts.role);
     return {
@@ -102,7 +104,7 @@ export function resolveSubagentCapabilities(
  */
 export function resolveBashMode(
   role: string | undefined,
-  catalog: AgentCatalogResolver = builtinCatalogResolver
+  catalog: AgentCatalogResolver = createMergedCatalogResolver()
 ): BashMode {
   return resolveSubagentCapabilities({ role, catalog }).bashMode;
 }
