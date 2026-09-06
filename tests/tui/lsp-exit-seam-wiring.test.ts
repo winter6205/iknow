@@ -22,7 +22,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const read = (...parts: string[]): string =>
-  readFileSync(join(import.meta.dir, "..", "..", "..", ...parts), "utf8");
+  readFileSync(join(import.meta.dir, "..", "..", ...parts), "utf8");
 
 describe("LSP 池终止只挂在进程退出缝", () => {
   const runTui = read("src", "tui", "run.tsx");
@@ -34,17 +34,15 @@ describe("LSP 池终止只挂在进程退出缝", () => {
   });
 
   it("run.tsx:combinedShutdown（信号路径）调用 shutdownDefaultLspPool", () => {
-    expect(
-      runTui.includes("await shutdownDefaultLspPool();")
-    ).toBe(true);
+    expect(runTui.includes("await shutdownDefaultLspPool();")).toBe(true);
   });
 
   it("cli.ts:chatProcessShutdown 调用 shutdownDefaultLspPool 且两缝共用", () => {
     expect(cli.includes("shutdownDefaultLspPool()")).toBe(true);
     // 同一 chatProcessShutdown 同时接 registerShutdown（信号）与 REPL 自然退出
-    expect(cli.includes("registerShutdown({ shutdown: chatProcessShutdown })")).toBe(
-      true
-    );
+    expect(
+      cli.includes("registerShutdown({ shutdown: chatProcessShutdown })")
+    ).toBe(true);
     expect(cli.includes("await chatProcessShutdown();")).toBe(true);
   });
 
