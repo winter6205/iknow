@@ -108,6 +108,10 @@ export function createAciCatalog(
 /**
  * ToolDef → AciToolDef 投影(SSOT)。构造期快照路径与动态 get 兜底共用,
  * 避免投影字段漂移(注释、name/description/inputSchema/handler + aci 三元组)。
+ *
+ * T4 / ADR-0046 §3:`lazy` 必须穿过投影 —— gateOne 的 hydrate 判定读
+ * `def.aci.lazy`(schema 退场的内建件靠这个字段被识别,名字上没有 `mcp__`
+ * 前缀可认)。仅 `true` 时写入,让常驻件的投影形状字节级不变。
  */
 function project(def: ToolDef): AciToolDef {
   const aci = (def as { aci?: AciToolDef["aci"] }).aci!;
@@ -120,6 +124,7 @@ function project(def: ToolDef): AciToolDef {
       category: aci.category,
       isConcurrencySafe: aci.isConcurrencySafe,
       interruptBehavior: aci.interruptBehavior,
+      ...(aci.lazy === true ? { lazy: true as const } : {}),
     }),
   }) as AciToolDef;
 }
@@ -208,10 +213,15 @@ export function createPermissionRuntime(
     const def = catalog.get(call.name);
     if (!def) return { kind: "proceed", def: undefined };
 
-    // T3 / ADR-0046 §3:未 discover 的 mcp__ 工具被直呼 → hydrate(本轮
+    // T3 / T4 / ADR-0046 §3:未 discover 的 lazy 工具被直呼 → hydrate(本轮
     // discover(name) → 下一轮 visibleSchemas 尾部追加 schema);input 通过
     // 该工具 inputSchema → 直接执行;否则返非 error 文本投影
     // {name, description, inputSchema},引导模型补齐 input。
+    //   - 判定 = 「`mcp__` 前缀(MCP 工具天然 lazy,即使 catalog 未带 aci.lazy
+    //     也按 T3 原样识别)**或** `def.aci.lazy === true`(T4:schema 溢出
+    //     退场的内建件被 `retireBuiltin` stamp lazy,名字上无前缀可认)」且
+    //     `isDiscovered` 在场且返 false。核心七件永不 lazy(退场候选
+    //     derivation 层剔除 CORE_TOOL_NAMES),故常驻件永不进本分支。
     //   - 闸门顺序在 pre-hook 之前:hydrate 不是用户权限问题,pre-hook 不该
     //     拦;input 校验就地做(ajv 编译用 def.inputSchema 一次性编 + WeakMap
     //     缓存,后续直呼复用)。
@@ -219,7 +229,7 @@ export function createPermissionRuntime(
     //     (非 ACI registry 装配的路径或 stub 测试,行为与 T3 之前一致
     //     —— 不破坏 worker / hub runDeps)。
     if (
-      def.name.startsWith("mcp__") &&
+      (def.name.startsWith("mcp__") || def.aci.lazy === true) &&
       catalog.isDiscovered !== undefined &&
       !catalog.isDiscovered(def.name)
     ) {

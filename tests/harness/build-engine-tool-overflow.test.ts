@@ -18,6 +18,7 @@ import {
   buildHarnessEngine,
   type BuiltEngine,
 } from "../../src/harness/build-engine.ts";
+import { MCP_TOOL_SHORT_DESCRIPTION_MAX } from "../../src/harness/identity/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import type { McpClientHandle } from "../../src/harness/mcp/manager.js";
@@ -212,6 +213,35 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
     ]) {
       expect(systemText).toContain(retired);
     }
+
+    // SC4 / spec ASSUMPTIONS #5:退场内建件的索引段是 **名+描述**(不剥描述、
+    // 不走 search)。描述来自该工具 ToolDef.description(首行短描述),SSOT =
+    // registry;此处从 catalog 现取真描述,不硬编码文案。
+    const segment = systemText!.slice(
+      systemText!.indexOf("<deferred_internal_tools>"),
+      systemText!.indexOf("</deferred_internal_tools>")
+    );
+    const catalog = built.catalog;
+    expect(catalog).toBeDefined();
+    for (const retired of [
+      "query_trace",
+      "list_sessions",
+      "get_record",
+      "web_search",
+      "web_fetch",
+    ]) {
+      const def = catalog!.get(retired);
+      expect(def, `${retired} 应仍在 catalog(退场 ≠ 删名)`).toBeDefined();
+      const firstLine = def!.description.split("\n", 1)[0]!.trim();
+      const short =
+        firstLine.length <= MCP_TOOL_SHORT_DESCRIPTION_MAX
+          ? firstLine
+          : `${firstLine.slice(0, MCP_TOOL_SHORT_DESCRIPTION_MAX)}…`;
+      expect(short.length).toBeGreaterThan(0);
+      expect(segment).toContain(`- ${retired}: ${short}`);
+    }
+    // 索引段不再要求先 tool_search(ADR-0046 修订 ADR-0043 §2/§5/§7)。
+    expect(segment).not.toContain("tool_search");
   });
 
   it("countTokens 失败 → 跳过本会话,deferrable 全部保持常驻,warn 一行", async () => {

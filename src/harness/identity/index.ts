@@ -44,8 +44,12 @@ export type {
   SkillSummary,
   McpServiceSummary,
   McpToolSummary,
+  DeferredInternalToolSummary,
 } from "./assemble.js";
-export { MCP_TOOL_SHORT_DESCRIPTION_MAX } from "./assemble.js";
+export {
+  MCP_TOOL_SHORT_DESCRIPTION_MAX,
+  DIRECT_CALL_GUIDANCE,
+} from "./assemble.js";
 export {
   createGitSnapshotProvider,
   gitSnapshotSegment,

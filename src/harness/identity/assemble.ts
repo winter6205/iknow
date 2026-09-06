@@ -93,14 +93,15 @@ export interface AssemblyContext {
    *  段缺席 (KV 缓存字节级稳定);调用抛错 → console.warn + 跳过 (降级契约
    *  对齐 memory_layer)。schema 不进本段(名字目录只承载服务名 + 工具名)。 */
   readonly mcp?: () => ReadonlyArray<McpServiceSummary> | undefined;
-  /** B6 / ADR-0043 §3:溢出治理退场内建件名单段(可选,渐进式披露第二档)。
-   *  返回**会话级冻结**的退场名单(闭包在 build-engine 装配期首轮判定一次
-   *  后冻结,会话内恒定)。缺席 / 空数组 → 段缺席(字节级零变化);模型用
-   *  `tool_search` 拉回退场件 schema,经 `discover()` 进 discovered 集 +
-   *  visibleSchemas 走 discoveredTail 把 schema 带回 tools 尾部。
-   *  顺序契约:与 mcp 名字目录同形态,裸名字 + tool_search 引导;核心件永
-   *  不在此名单(由 tool-overflow.ts CORE_TOOL_NAMES 守门)。 */
-  readonly deferredInternalTools?: () => ReadonlyArray<string> | undefined;
+  /** B6 / ADR-0043 §3 + T4:溢出治理退场内建件索引段(可选,渐进式披露第二档)。
+   *  返回**会话级冻结**的退场件投影(闭包在 build-engine 装配期首轮判定一次
+   *  后冻结,会话内恒定)。缺席 / 空数组 → 段缺席(字节级零变化)。
+   *  T4 / spec ASSUMPTIONS #5:元素是 **名 + 描述**,模型直呼该件即 hydrate
+   *  (permission-executor gateOne 对 `aci.lazy && !isDiscovered` 走
+   *  `discover()`,schema 从下一轮 visibleSchemas 尾部回来),不必先
+   *  `tool_search`。核心件永不在此名单(tool-overflow.ts CORE_TOOL_NAMES 守门)。 */
+  readonly deferredInternalTools?: () =>
+    ReadonlyArray<DeferredInternalToolSummary> | undefined;
   /** #558 T2 coordinator 段注入缝 (可选):默认路径(build-engine 在
    *  chat/tui/serve 自建 manager)不再注入 —— 引导落点已迁到 spawn_subagent
    *  工具 description (#557 T1 SSOT)。调用方显式传入非空字符串仍渲染
@@ -137,6 +138,17 @@ export interface McpToolSummary {
   readonly description?: string;
 }
 
+/** disclosure-index-align T4 / spec ASSUMPTIONS #5 — schema 退场内建件的索引
+ *  元素形态(最小投影:名 + 描述)。描述来自该工具 `ToolDef.description`
+ *  (build-engine 装配期从 registry 现取);缺席/空 → 只渲染工具名(与
+ *  `McpToolSummary` 同规则)。**同形不同名**:MCP 条目在索引降档时会被剥成
+ *  仅名字,退场内建件不参与该降档 —— 两个数据源的降档纪律不同,故不共用
+ *  一个类型名以免读者误以为同一治理面。 */
+export interface DeferredInternalToolSummary {
+  readonly name: string;
+  readonly description?: string;
+}
+
 /** disclosure-index-align T1 / #631 T2 / B4 (ADR-0043 §3) MCP 名字目录段
  *  服务元素形态(最小投影):name + 可选服务描述 + 工具集(每工具 = 名 + 可选
  *  描述);schema 与长 description 一律不进 system。`state` 词汇表与
@@ -155,6 +167,12 @@ export interface McpServiceSummary {
  *  超过此长度截断 + 省略号。120 字与 #631 T2 原始契约一致(KV cache 中
  *  "索引常驻档"需要一行可读)。 */
 export const MCP_TOOL_SHORT_DESCRIPTION_MAX = 120;
+
+/** disclosure-index-align T1 / T4 索引段末行引导(SSOT):有描述 = 知道工具
+ *  干什么 = 直接调用即可。ADR-0046 修订 ADR-0043「必经 tool_search」——
+ *  MCP 目录与退场内建段共用同一句,两段不各写一份文案。 */
+export const DIRECT_CALL_GUIDANCE =
+  "Call a listed tool directly to load its schema and use it.";
 
 /**
  * disclosure-index-align T1 / B4 / ADR-0043 §3 `<mcp_name_directory>` 段
@@ -198,7 +216,7 @@ export function mcpNameDirectorySegment(
       lines.push(short === undefined ? `- ${t.name}` : `- ${t.name}: ${short}`);
     }
   }
-  lines.push("Call a listed tool directly to load its schema and use it.");
+  lines.push(DIRECT_CALL_GUIDANCE);
   return `<mcp_name_directory>\n${lines.join("\n")}\n</mcp_name_directory>`;
 }
 
@@ -222,22 +240,33 @@ export function shortToolDescription(
 
 /**
  * B6 / ADR-0043 §3 `<deferred_internal_tools>` 段渲染 —— 溢出治理退场
- * 的内建件名单(裸名,无 schema)。退场件 = 标 `aci.deferrable: true` 的
- * 内建件中,首轮 `countTokens` 实测超出 context window 10% 阈值后被 stamp
- * `aci.lazy: true` 的部分(schema 从 promptTools 抽出,模型经 tool_search
- * 拉回)。
+ * 的内建件索引。退场件 = 标 `aci.deferrable: true` 的内建件中,首轮
+ * `countTokens` 实测超出 context window 10% 阈值后被 stamp `aci.lazy: true`
+ * 的部分(schema 从 promptTools 抽出)。
  *
- * 与 mcp 名字目录同形态,但不分组(内建件无 server 维度),按字母序输出
- * 以保证字节稳定。空数组 → 返回 undefined(段缺席,字节级零变化)。
- * 引导句与 mcp 名字目录一致(用户能直接拼出"调 tool_search")。
+ * disclosure-index-align T4 / spec ASSUMPTIONS #5:本段渲染 **名 + 描述**
+ * —— 退场只降一档「schema → 名+描述」,不再降到裸名、不参与索引降档剥描述
+ * (那一档只作用于 MCP / skill 条目)。有描述 = 模型知道工具干什么 = 直呼
+ * 即可(`DIRECT_CALL_GUIDANCE`),不必先 `tool_search`。
+ *
+ * 与 mcp 名字目录同形态(`- <name>: <short desc>`,复用
+ * `shortToolDescription` 的首行 + 120 字截断 SSOT),但不分组(内建件无
+ * server 维度),按字母序输出以保证字节稳定。描述缺席/空/纯空白 → 裸名行
+ * (契约允许态,与 MCP 目录同规则)。空数组 → 返回 undefined(段缺席,
+ * 字节级零变化)。
  */
 export function deferredInternalToolsSegment(
-  names: ReadonlyArray<string>
+  tools: ReadonlyArray<DeferredInternalToolSummary>
 ): string | undefined {
-  if (names.length === 0) return undefined;
-  const sorted = [...names].sort((a, b) => a.localeCompare(b));
+  if (tools.length === 0) return undefined;
+  const sorted = [...tools].sort((a, b) => a.name.localeCompare(b.name));
+  const lines = sorted.map((t) => {
+    const short = shortToolDescription(t.description);
+    return short === undefined ? `- ${t.name}` : `- ${t.name}: ${short}`;
+  });
+  lines.push(DIRECT_CALL_GUIDANCE);
   return (
-    `<deferred_internal_tools>\n${sorted.join("\n")}\n` +
+    `<deferred_internal_tools>\n${lines.join("\n")}\n` +
     `</deferred_internal_tools>`
   );
 }
@@ -282,10 +311,11 @@ export function createIknowSystemResolver(opts: {
   readonly skills?: () => ReadonlyArray<SkillSummary> | undefined;
   /** #631 T2 → B4 (ADR-0043 §3) MCP 名字目录段注入缝 (可选):见 AssemblyContext.mcp 注释。 */
   readonly mcp?: () => ReadonlyArray<McpServiceSummary> | undefined;
-  /** B6 / ADR-0043 §3:溢出治理退场内建件名单段注入缝 (可选):见
+  /** B6 / ADR-0043 §3 + T4:溢出治理退场内建件索引段注入缝 (可选):见
    *  AssemblyContext.deferredInternalTools 注释。**会话级冻结**(闭包
    *  取一次后不再变),首轮判定的退场名单 = 整会话的退场名单。 */
-  readonly deferredInternalTools?: () => ReadonlyArray<string> | undefined;
+  readonly deferredInternalTools?: () =>
+    ReadonlyArray<DeferredInternalToolSummary> | undefined;
   /** #558 T2 coordinator 段注入缝 (可选):默认路径(build-engine 在
    *  chat/tui/serve 自建 manager)不再注入 —— 引导落点已迁到 spawn_subagent
    *  工具 description (#557 T1 SSOT)。调用方显式传入非空字符串仍渲染
@@ -388,17 +418,17 @@ export async function assembleIdentityContext(
   // 缝缺席 / 返回空 / 解析抛错 → 段缺席(字节级零变化)。会话级冻结:
   // 闭包在 build-engine 装配期首轮判定后冻结,相邻轮 deep-equal。
   if (ctx.deferredInternalTools) {
-    let deferredNames: ReadonlyArray<string> | undefined;
+    let deferred: ReadonlyArray<DeferredInternalToolSummary> | undefined;
     try {
-      deferredNames = ctx.deferredInternalTools();
+      deferred = ctx.deferredInternalTools();
     } catch (err) {
       console.warn(
         `[identity/assemble] deferred internal tools resolver failed: ${String(err)}`
       );
-      deferredNames = undefined;
+      deferred = undefined;
     }
-    if (deferredNames) {
-      const segment = deferredInternalToolsSegment(deferredNames);
+    if (deferred) {
+      const segment = deferredInternalToolsSegment(deferred);
       if (segment !== undefined) segments.push(segment);
     }
   }

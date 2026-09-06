@@ -79,6 +79,7 @@ import {
   createGitSnapshotProvider,
   type McpServiceSummary,
   type McpToolSummary,
+  type DeferredInternalToolSummary,
 } from "./identity/index.js";
 import {
   resolveProjectMemoryDir,
@@ -1107,7 +1108,18 @@ export async function buildHarnessEngine(
     }
   }
   // session 内恒定的退场名单(holder;系统 resolver 每轮调同一闭包)。
-  const deferredInternalToolsList = deferredRetireNames;
+  // T4 / spec ASSUMPTIONS #5:索引段渲染 **名 + 描述**,故 holder 携带描述
+  // 而非裸名 —— 描述取 retire 当刻 registry 里该件的 `ToolDef.description`
+  // (SSOT = registry;`retireBuiltin` 只翻 `aci.lazy`,不动 description)。
+  // 名字在 catalog 里查不到(理论不该发生:retire 名单由 catalog 派生)→
+  // 只带名字进段,渲染层降级为裸名行。
+  const deferredInternalToolsList: ReadonlyArray<DeferredInternalToolSummary> =
+    deferredRetireNames.map((name) => {
+      const def = reg.catalog.get(name);
+      return def?.description
+        ? { name, description: def.description }
+        : { name };
+    });
 
   // D-α T3 / ADR-0030:overlay 接了才有 graph 装配面。快照对象是本次
   // 装配的单点 —— registry(工具在不在)、promptTools(露不露)、deps.system
@@ -1347,13 +1359,13 @@ export async function buildHarnessEngine(
             mcp: () => mcpNameDirectorySnapshot,
           }
         : {}),
-      // B6 / ADR-0043 §3:溢出治理退场名单段(可选)—— 首轮判定后冻结,
-      // 会话内恒定(deferredInternalToolsList holder 上方定义)。空
+      // B6 / ADR-0043 §3 + T4:溢出治理退场件索引段(可选)—— 首轮判定后
+      // 冻结,会话内恒定(deferredInternalToolsList holder 上方定义)。空
       // 名单(无超限 / 失败)→ 闭包返空数组 → 段缺席;非空 → 渲染
-      // <deferred_internal_tools> 段(每行一名 + 工具名,字母序稳
-      // 定)。与 mcp 名字目录同形态,加性段不触碰 IKNOW_ASSEMBLY_ORDER。
-      // ask surface 无 manager / 同样走此缝(无 MCP 但可能有内建退
-      // 场);失败跳过 → list 必空 → 段缺席。
+      // <deferred_internal_tools> 段(每行 `- 名: 描述`,字母序稳定;
+      // 描述缺席降级裸名)。与 mcp 名字目录同形态,加性段不触碰
+      // IKNOW_ASSEMBLY_ORDER。ask surface 无 manager / 同样走此缝(无 MCP
+      // 但可能有内建退场);失败跳过 → list 必空 → 段缺席。
       deferredInternalTools: () => deferredInternalToolsList,
       // #558 T2: 默认路径停止注入 coordinator 段 — 引导落点收敛到
       // spawn_subagent 工具 description (T1 SSOT)。装配缝保留:
