@@ -83,19 +83,37 @@ interface DrivenApp {
   readonly pressArrow: (dir: "left" | "right") => Promise<void>;
 }
 
+/**
+ * Per-conversation todo ledger (#304601e3): loop-engine reads
+ * `<todoDir>/<conversationId>/todos.md`, not the legacy `<todoDir>/todos.md`.
+ * Callers that pre-seed a session must also pre-create the conversation file
+ * via the bridge BEFORE handing it to mountAppAsync — the test then attaches
+ * the pre-created session via `initialSession` so the first user submit
+ * reuses that conversationId (lazy create would mint a fresh id and miss
+ * the seeded todos file).
+ */
+interface PreBuiltBridge {
+  readonly bridge: TuiBridge;
+  readonly dataDir: string;
+}
+
 async function mountAppAsync(
   responses: Parameters<typeof makeDeps>[0],
   depsOverride?: LoopEngineDeps,
   onPersistThinking?: TuiAppProps["onPersistThinking"],
-  initialSession?: TuiSessionState
+  initialSession?: TuiSessionState,
+  prebuilt?: PreBuiltBridge
 ): Promise<DrivenApp> {
-  const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-app-"));
-  const bridge = createTuiBridge({
-    dataDir,
-    workspaceRoot: dataDir,
-    deps: depsOverride ?? makeDeps(responses),
-    inflight: createInflightRegistry(),
-  });
+  const dataDir =
+    prebuilt?.dataDir ?? mkdtempSync(join(tmpdir(), "iknow-tui-app-"));
+  const bridge =
+    prebuilt?.bridge ??
+    createTuiBridge({
+      dataDir,
+      workspaceRoot: dataDir,
+      deps: depsOverride ?? makeDeps(responses),
+      inflight: createInflightRegistry(),
+    });
   const askBridge = createTuiAskUserBridge();
   const toolEventSink = createToolEventSink();
   const permissionMode = createPermissionModeContext("default");
@@ -609,21 +627,43 @@ describe("#647 T3: agent 现势按会话隔离（multi-session staleness 回归�
   test("A 收到 agent_status → /new 切新草稿无残留 → /sessions 切回 A 快照仍在", async () => {
     // deps 带 agentStatus(todoDir 有未勾项)→ turn 内 harness 在注入栏的
     // 同一计算点发 agent_status 事件(产品路径,与 e2e bridge 用例同形)。
+    // #304601e3:loop-engine 现按 conversationId 读 `<todoDir>/<conv>/todos.md`
+    // (与 todo_write 写入侧同一 SSOT),不再是根路径。先用 bridge.ensureSession
+    // 预建档拿到 conversationId,再把 todos 写到该会话自己的子目录,最后把
+    // 这个会话作为 initialSession 挂进 app —— 首条 user 提交走 lazy create
+    // 拿到同一 id,读到本测试的种子账本。
     const baseDir = mkdtempSync(join(tmpdir(), "iknow-tui-agent-status-key-"));
     const todoDir = join(baseDir, "todos-dir");
-    mkdirSync(todoDir, { recursive: true });
-    writeFileSync(
-      join(todoDir, "todos.md"),
-      "- [ ] regression item A\n",
-      "utf8"
-    );
+    const responses = [assistantResult({ texts: ["A 答复"] })];
+    const depsOverride: LoopEngineDeps = {
+      ...makeDeps(responses),
+      agentStatus: { todoDir },
+    };
+    const prebuilt = (() => {
+      const bridge = createTuiBridge({
+        dataDir: baseDir,
+        workspaceRoot: baseDir,
+        deps: depsOverride,
+        inflight: createInflightRegistry(),
+      });
+      return { bridge, dataDir: baseDir } as const;
+    })();
+    let conversationId = "";
     try {
+      conversationId = await prebuilt.bridge.ensureSession(undefined);
+      mkdirSync(join(todoDir, conversationId), { recursive: true });
+      writeFileSync(
+        join(todoDir, conversationId, "todos.md"),
+        "- [ ] regression item A\n",
+        "utf8"
+      );
+      const file = await prebuilt.bridge.loadSessionFile(conversationId);
       const app = await mountAppAsync(
-        [assistantResult({ texts: ["A 答复"] })],
-        {
-          ...makeDeps([assistantResult({ texts: ["A 答复"] })]),
-          agentStatus: { todoDir },
-        }
+        responses,
+        depsOverride,
+        undefined,
+        attachSession(file),
+        prebuilt
       );
       await untilFrame(app.setup, (f) => f.includes("Version"));
 

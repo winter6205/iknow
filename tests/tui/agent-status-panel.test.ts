@@ -300,11 +300,6 @@ describe("端到端:bridge postMessage 透传 agent_status 事件", () => {
     try {
       const todoDir = join(baseDir, "todos-dir");
       await mkdir(todoDir, { recursive: true });
-      await writeFile(
-        join(todoDir, "todos.md"),
-        "- [ ] e2e open task\n- [x] e2e done task\n",
-        "utf8"
-      );
       const bridge = createTuiBridge({
         dataDir: baseDir,
         workspaceRoot: baseDir,
@@ -317,6 +312,16 @@ describe("端到端:bridge postMessage 透传 agent_status 事件", () => {
         inflight: createInflightRegistry(),
       });
       const id = await bridge.ensureSession(undefined);
+      // #304601e3:loop-engine 现按 conversationId 读
+      // `<todoDir>/<conversationId>/todos.md`(与 todo_write 写入侧同一 SSOT,
+      // 见 resolveConversationTodoDir)。先 ensureSession 拿到 conversationId,
+      // 再把种子账本写到该会话自己的子目录。
+      await mkdir(join(todoDir, id), { recursive: true });
+      await writeFile(
+        join(todoDir, id, "todos.md"),
+        "- [ ] e2e open task\n- [x] e2e done task\n",
+        "utf8"
+      );
       const events: HarnessStreamEvent[] = [];
       await bridge.postMessage({
         conversationId: id,
