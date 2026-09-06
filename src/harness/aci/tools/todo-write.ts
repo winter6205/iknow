@@ -211,78 +211,63 @@ function parseInput(input: unknown): ParsedInput {
     }
   }
   const mode = requireMode(raw.mode);
-  // Per-mode 字段互斥:replace 只认 items,add/check 只认 item,list 都不强求。
+  assertModeFieldsExclusive(raw, mode);
+  if (mode === "replace") {
+    const items = requireItemsForReplace(raw.items);
+    for (const it of items) validateItemText("item", it);
+    return { mode, item: "", items };
+  }
+  // 非 replace 模式:list 允许 item 缺省(默认空串);add/check 走 validateItemText
+  // 触发"非空"提示(错误文案统一)。
+  const item = typeof raw.item === "string" ? raw.item : "";
+  if (mode === "add" || mode === "check") validateItemText("item", item);
+  return { mode, item, items: [] };
+}
+
+/**
+ * Per-mode 字段互斥:replace 只认 items,add/check 只认 item,list 都不强求。
+ */
+function assertModeFieldsExclusive(
+  raw: Record<string, unknown>,
+  mode: TodoWriteMode
+): void {
   if (mode === "replace") {
     if (raw.item !== undefined) {
       throw new ToolExecutionError(
         "[todo_write] mode replace does not accept item (use items)"
       );
     }
-    const items = requireItemsForReplace(raw.items);
-    for (const it of items) {
-      if (it.length === 0) {
-        throw new ToolExecutionError(
-          "[todo_write] items entries must be non-empty strings for mode replace"
-        );
-      }
-      if (codepointLength(it) > MAX_ITEM_CODEPOINTS) {
-        throw new ToolExecutionError(
-          `[todo_write] item exceeds ${MAX_ITEM_CODEPOINTS} codepoints (got ${codepointLength(it)})`
-        );
-      }
-    }
-    return { mode, item: "", items };
+    return;
   }
-  if (mode === "add" || mode === "check") {
-    if (raw.items !== undefined) {
-      throw new ToolExecutionError(
-        `[todo_write] mode ${mode} does not accept items (use item)`
-      );
-    }
-  }
-  const item =
-    typeof raw.item === "string" ? raw.item : requireItemFor(mode, raw.item);
-  if ((mode === "add" || mode === "check") && item.length === 0) {
+  if ((mode === "add" || mode === "check") && raw.items !== undefined) {
     throw new ToolExecutionError(
-      `[todo_write] item must be a non-empty string for mode ${mode}`
+      `[todo_write] mode ${mode} does not accept items (use item)`
     );
   }
-  // Per-item limit (D4): 500 codepoints. Measured on `[...item].length` so
-  // emoji / CJK characters count by Unicode code points (not UTF-16 units).
-  if (
-    (mode === "add" || mode === "check") &&
-    codepointLength(item) > MAX_ITEM_CODEPOINTS
-  ) {
+}
+
+/**
+ * 单一非空 + 500 codepoint 校验(dup-validate:replace items 与 add/check item
+ * 共用)。D4:emoji / CJK 按 Unicode code point 计数(`[...s].length`)。
+ */
+function validateItemText(label: "item", value: string): void {
+  if (value.length === 0 || codepointLength(value) > MAX_ITEM_CODEPOINTS) {
     throw new ToolExecutionError(
-      `[todo_write] item exceeds ${MAX_ITEM_CODEPOINTS} codepoints (got ${codepointLength(item)})`
+      `[todo_write] ${label} must be a non-empty string ≤ ${MAX_ITEM_CODEPOINTS} codepoints`
     );
   }
-  return { mode, item, items: [] };
 }
 
 function requireMode(value: unknown): TodoWriteMode {
-  if (typeof value !== "string") {
-    throw new ToolExecutionError(
-      `[todo_write] mode must be one of ${TODO_WRITE_MODES.join(" | ")}`
-    );
-  }
-  if (!(TODO_WRITE_MODES as ReadonlyArray<string>).includes(value)) {
+  if (
+    typeof value !== "string" ||
+    !(TODO_WRITE_MODES as ReadonlyArray<string>).includes(value)
+  ) {
     throw new ToolExecutionError(
       `[todo_write] mode must be one of ${TODO_WRITE_MODES.join(" | ")}`
     );
   }
   return value as TodoWriteMode;
-}
-
-function requireItemFor(mode: TodoWriteMode, value: unknown): string {
-  if (mode === "add" || mode === "check") {
-    throw new ToolExecutionError(
-      `[todo_write] item must be a non-empty string for mode ${mode}`
-    );
-  }
-  // list: item is optional; default empty.
-  if (typeof value !== "string") return "";
-  return value;
 }
 
 function requireItemsForReplace(value: unknown): ReadonlyArray<string> {
