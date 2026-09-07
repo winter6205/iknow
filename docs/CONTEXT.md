@@ -77,6 +77,15 @@ _Avoid_: 失败跟成功走同一收；把失败当成第四类工具表；失�
 **thinking duration（思考时长）**: assistant 消息的落盘属性——adapter 流式路径测量（首条 `thinking_delta` 至首个非思考增量），`thinkingMs` 经 commit 钩子随事件链落盘，`SessionFileV1` 上照 `messageCreatedAt` 模式重建并行数组（additive，schema 版本不升）；折叠簇时长 = 簇内消息求和。非 UI 测量值。
 _Avoid_: TUI 墙上时钟副产物（只活当前轮/重启即失/跨会话串味）；挂在 thinking 内容块上（污染 provider replay）；旧会话回填；`thinkingMs <= 0` 或非有限数落盘（字段缺席）
 
+**unit fold**: TUI 把思考段和 retract-class 工具按**已完成单元**收成折叠行，包括 turn 仍在 `running-fg` 的时候；历史 retract 折叠不随当前 turn 的 retract 计数开关。
+_Avoid_: 只在 idle 才折叠；inLastTurn；用末轮 `turnToolTotal` 关掉全 transcript 折叠
+
+**skill-load display projection**: 给人看的 skill-load 是 `loading skill <name>` 芯片，外加用户 remainder（若有）；SKILL 正文只留在进模型的 skill-load 信封里，不画成 user 气泡。
+_Avoid_: 把 `[skill-load name=]` 正文当作用户键入；加载技能；turn 结束后用落盘信封替换显示占位
+
+**chrome focus**: TUI 底栏焦点环 `input` | 子代理行 | `graph` 的单一 reducer；有子代理行时 Down 先入该列，再 graph；Up 反向回到输入框。
+_Avoid_: 只有 graph 抢 Down；焦点落在 ContextBar；子代理面板不可聚焦
+
 **streaming block freeze**: 会变长的那串 markdown 里，除最后一个顶层块外钉住，后续增量不再 lexer、不再重建前缀子树；边界只前进。
 _Avoid_: 把历史消息 memo 当成同一件事；每个新字整篇重解析；冻结时放开围栏 32 行窗
 
