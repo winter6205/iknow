@@ -64,17 +64,40 @@ interface RunGraphNodeInput {
   readonly deps?: ReadonlyArray<string>;
 }
 
+/**
+ * live-graph-phase1 T4（spec SC5–SC12 / ADR-0050 / 0065 / 0067）：
+ * 工具说明要让模型掌握活图账本的剩余子图语义：
+ *   (a) 只交还要跑的节点（residual subgraph）—— 已终态 id 不要重交；
+ *   (b) 已 done / failed 的 id 会冻结，再次提交会被 typed 拒绝；
+ *   (c) deps 指向已 done 的上游可以省略该上游节点 —— host 合并账本、
+ *       把上游产出写进下游 task（不写也得不出"重演已 done 的节点"）；
+ *   (d) 调用侧取消（abort）后，已 done 的 id 留在账本继续冻结，
+ *       未完成的 id 可在下一段剩余子图里再交。
+ * 阶段 1 拒失败边标记（onFailure 等）、不识别 wait —— 这些由 schema 与
+ * handler 一起守门；说明文字保持正面引导（D9 paradigm），仅描述
+ * 能力与边界。
+ */
 const DESCRIPTION =
   "Run several sub-agent tasks as one dependency graph in a single call. " +
-  "Declare every node with an `id`, a self-contained `task`, and the `deps` " +
-  "it must wait for. Nodes whose dependencies are all satisfied run in " +
-  "parallel; a node starts only after every node it depends on finished, and " +
-  "sees those results. If a node fails, the nodes downstream of it are " +
-  "skipped and unrelated branches keep running. The call blocks until the " +
-  "whole graph settles and returns one condensed report of every node. Use " +
-  "`spawn_subagent` instead when there is a single task, or several tasks " +
-  "with no ordering between them. Only available when graph mode is on; " +
-  "calling it while graph mode is off returns a tool execution error.";
+  "Use it when a single turn needs ordered or parallel sub-agent work with " +
+  "results flowing between tasks; pair with `spawn_subagent` for one-shot " +
+  "tasks and use `graph mode on` so the call is admitted. Declare each " +
+  "node with an `id`, a self-contained `task`, and the `deps` it must wait " +
+  "for. Nodes whose dependencies are all satisfied run in parallel; a node " +
+  "starts only after every node it depends on finished, and sees those " +
+  "results. If a node fails, the nodes downstream of it are skipped and " +
+  "unrelated branches keep running. The call blocks until the whole graph " +
+  "settles and returns one condensed report of every node. The harness " +
+  "maintains a live-graph ledger across calls: submit only the nodes that " +
+  "still need to run as a residual subgraph — ids already frozen as done " +
+  "or failed are rejected on resubmission; deps pointing at already-done " +
+  "ids from earlier calls may omit those nodes and the host merges the " +
+  "ledger to thread their outputs into downstream tasks. After a cancel, " +
+  "only the done ids stay frozen, and unfinished ids can be re-submitted " +
+  "in the next residual subgraph. Failure-edge markers such as `onFailure` " +
+  "are reserved for a later phase and return a tool execution error here. " +
+  "Only available when graph mode is on; calling it while graph mode is " +
+  "off returns a tool execution error.";
 
 function describeValidationError(err: GraphValidationError): string {
   switch (err.kind) {
@@ -89,9 +112,31 @@ function describeValidationError(err: GraphValidationError): string {
   }
 }
 
-/** 防御式读参：ajv strict 已守过形状，这里挡直调 handler 的路径。 */
+/** 防御式读参：ajv strict 已守过形状，这里挡直调 handler 的路径。
+ *
+ * 两道闸门与 inputSchema 严格对齐（live-graph-phase1 T4 / spec SC10–SC11 /
+ * ADR-0065 / ADR-0067）：
+ *   - 根：除了 `nodes` 之外的任何键（包括 `wait` / `onFailure` /
+ *     任何阶段 2 字段）→ typed 拒、零 spawn。
+ *   - 节点：除了 `id` / `task` / `deps` 之外的任何键（包括
+ *     `onFailure` 等阶段 2 失败边字段）→ typed 拒、零 spawn。schema
+ *     是主合同，本函数是直调 handler 路径上的兜底；两边同拒才能
+ *     在没有 ajv 编译（直调 / 单测）的路径上守住阶段 1 不认识
+ *     `onFailure` 的合同。
+ */
+const ROOT_KEYS: ReadonlySet<string> = new Set(["nodes"]);
+const NODE_KEYS: ReadonlySet<string> = new Set(["id", "task", "deps"]);
+
 function readNodes(input: unknown): ReadonlyArray<RunGraphNodeInput> {
   const obj = (input ?? {}) as Record<string, unknown>;
+  // 根：拒未声明键（含 wait —— ADR-0065：图上无 wait:false）。
+  for (const key of Object.keys(obj)) {
+    if (!ROOT_KEYS.has(key)) {
+      throw new ToolExecutionError(
+        `run_graph: unknown root property \`${key}\` (only \`nodes\` is accepted)`
+      );
+    }
+  }
   const raw = obj.nodes;
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new ToolExecutionError(
@@ -100,6 +145,14 @@ function readNodes(input: unknown): ReadonlyArray<RunGraphNodeInput> {
   }
   return raw.map((entry, i) => {
     const node = (entry ?? {}) as Record<string, unknown>;
+    // 节点：拒未声明键（含 onFailure —— ADR-0067：阶段 1 拒失败标记）。
+    for (const key of Object.keys(node)) {
+      if (!NODE_KEYS.has(key)) {
+        throw new ToolExecutionError(
+          `run_graph: node[${i}] has unknown property \`${key}\` (only \`id\`, \`task\`, \`deps\` are accepted)`
+        );
+      }
+    }
     const id = node.id;
     const task = node.task;
     if (typeof id !== "string" || id.length === 0) {
