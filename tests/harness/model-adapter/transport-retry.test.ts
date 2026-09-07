@@ -154,4 +154,41 @@ describe("withTransportRetry", () => {
     assert.equal(a.calls, 2);
     assert.equal(b.calls, 2);
   });
+
+  // Bug（2026-09-07）:重试此前完全静默,429/网络故障期间宿主无法显示
+  // 「连接重试 1/3」类进度。每次退避重试前必须向 request.onStream 发
+  // transport_retry 事件(attempt 从 1 计,成功路径不发)。
+  it("429 then success → onStream emits transport_retry 1/3 before backoff", async () => {
+    const inner = stub([new Error("http:429"), okResult]);
+    const wrapped = withTransportRetry(inner, {
+      translate,
+      sleep: async () => undefined,
+    });
+    const events: unknown[] = [];
+    await wrapped.step({} as never, {
+      onStream: (e) => events.push(e),
+    });
+    assert.equal(inner.calls, 2);
+    assert.deepEqual(events, [
+      {
+        type: "transport_retry",
+        attempt: 1,
+        maxAttempts: 3,
+        detail: "llm_http: 429",
+      },
+    ]);
+  });
+
+  it("first-attempt success → no transport_retry event", async () => {
+    const inner = stub([okResult]);
+    const wrapped = withTransportRetry(inner, {
+      translate,
+      sleep: async () => undefined,
+    });
+    const events: unknown[] = [];
+    await wrapped.step({} as never, {
+      onStream: (e) => events.push(e),
+    });
+    assert.deepEqual(events, []);
+  });
 });

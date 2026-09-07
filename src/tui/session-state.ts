@@ -338,10 +338,14 @@ export interface SkillLoadProjection {
 export function projectSkillLoadUserText(
   text: string
 ): SkillLoadProjection | null {
-  if (!text.startsWith(SKILL_LOAD_PREFIX_SHORT)) return null;
+  // session-api 落盘的 user turn 可能带 memory prefetch overlay 前缀
+  // （attachPrefetchOverlay：overlay + MEMORY_PREFETCH_END + envelope）。
+  // 先剥离再匹配，否则 reload 后投影失败 → body 全文溢出渲染。
+  const stripped = stripPrefetchOverlay(text);
+  if (!stripped.startsWith(SKILL_LOAD_PREFIX_SHORT)) return null;
   // 闭合形态：`[skill-load name="..."]` 要求短前缀之后紧接 `name="`。
-  if (!text.startsWith(SKILL_LOAD_PREFIX)) return null;
-  const afterPrefix = text.slice(SKILL_LOAD_PREFIX.length);
+  if (!stripped.startsWith(SKILL_LOAD_PREFIX)) return null;
+  const afterPrefix = stripped.slice(SKILL_LOAD_PREFIX.length);
   const closingQuote = afterPrefix.indexOf('"');
   if (closingQuote === -1) return null;
   const name = afterPrefix.slice(0, closingQuote);

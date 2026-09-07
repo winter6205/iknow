@@ -82,7 +82,17 @@ export type HarnessStreamEvent =
   // 追加(appendGraphModeChange 走 appendMessage),不走 stream event。
   // 字段仅保留 `enabled` —— 翻转方向与文本方向 1:1 对应,文本本身由
   // messages 序列承载。
-  | { type: "graph_mode_changed"; enabled: boolean };
+  | { type: "graph_mode_changed"; enabled: boolean }
+  // Bug（2026-09-07）:传输重试进度 —— withTransportRetry 每次退避重试前
+  // 发出,宿主渲染「连接重试 attempt/max」类指示。此前重试完全静默,429/
+  // 网络故障期间用户看不到任何活动。`detail` 为 fault 的短描述(状态码/
+  // 错误类),仅给人看,不进模型面。
+  | {
+      type: "transport_retry";
+      attempt: number;
+      maxAttempts: number;
+      detail: string;
+    };
 
 /**
  * 观察者错误不得反流回 emit 路径(对齐 ADR-0003 `safeTrace` MUST NOT throw
