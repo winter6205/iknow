@@ -42,6 +42,18 @@ export interface SkillBodyOptions {
   readonly fs?: SkillBodyFs;
 }
 
+/**
+ * 判定 `text` 是否为机器装配的 skill-load 消息（即 TUI `app.tsx:1780`、
+ * Web `use-slash-commands.ts:251` 与 hub/chat-session 长度校验三处共用的
+ * 同一拼接格式：`[skill-load name="<id>"]\n<body>`）。
+ *
+ * 单一权威格式来源 —— 三处必须同步，任何放宽都会让超长 skill-load 撞
+ * `MAX_MESSAGE_CHARS = 8000`（78KB 的 SKILL.md 加载会立即触发）。
+ */
+export function isSkillLoadText(text: string): boolean {
+  return text.trim().startsWith('[skill-load name="');
+}
+
 /** 剥离 frontmatter：返回去掉 `---\n...\n---\n` 块之后剩余正文。 */
 export function stripFrontmatter(raw: string): string {
   const match = FRONTMATTER.exec(raw);

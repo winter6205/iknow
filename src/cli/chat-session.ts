@@ -106,6 +106,7 @@ import {
   shouldTriggerContinueFromNl,
 } from "../session-api/continue-pending.js";
 import { MAX_MESSAGE_CHARS } from "../session-api/contract.js";
+import { isSkillLoadText } from "../harness/skill/body.js";
 import { randomUUID } from "node:crypto";
 
 /** Visual separator after a completed answer on TTY only. */
@@ -940,7 +941,10 @@ export async function processChatLine(
   });
   if (fromNl !== undefined) return fromNl;
 
-  if (query.length > MAX_MESSAGE_CHARS) {
+  // 机器装配的 skill-load 消息跳过用户输入长度上限（与 hub.ts validateText
+  // 同根因：78KB 的 SKILL.md 一次性加载会撞 8000 上限；与模型侧 tool result
+  // 通道无字符上限对称 —— 都是机器装配而非手打用户文本）。
+  if (!isSkillLoadText(query) && query.length > MAX_MESSAGE_CHARS) {
     return {
       quit: false,
       output: "",
@@ -2038,7 +2042,8 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     store: opts.resumeId !== undefined ? checkpointStore : undefined,
     id: opts.resumeId,
     ...(opts.resumeId !== undefined &&
-    opts.workspaceRoot !== undefined && opts.workspaceRoot !== ""
+    opts.workspaceRoot !== undefined &&
+    opts.workspaceRoot !== ""
       ? {
           fallbackStore: new SessionStore(
             resolveServeDataDir(undefined, opts.workspaceRoot)

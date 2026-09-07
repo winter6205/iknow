@@ -119,7 +119,7 @@ import { homedir } from "node:os";
 import { resolveSessionTodoDir } from "../harness/aci/tools/todo-write.js";
 import type { AciCatalog } from "../harness/aci/types.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
-import { createSkillBody } from "../harness/skill/body.js";
+import { createSkillBody, isSkillLoadText } from "../harness/skill/body.js";
 import type { McpManager } from "../harness/mcp/manager.js";
 import { loadMcpConfig } from "../harness/mcp/config.js";
 import { resolveMcpRoots, type McpRoots } from "../harness/mcp/roots.js";
@@ -2436,7 +2436,13 @@ export class SessionHub {
         field: "text",
       });
     }
-    if (query.length > MAX_MESSAGE_CHARS) {
+    // 机器装配的 skill-load 消息（`[skill-load name="..."]\n<body>`，TUI
+    // `app.tsx:1780` 与 Web `use-slash-commands.ts:251` 唯一拼接形态）：
+    // 跳过用户输入长度上限。这与模型侧 tool result 通道对称 —— 后者由模型
+    // 自主装配也无字符上限。78KB 的 SKILL.md 一次性加载会立即撞 8000 上限，
+    // 不豁免则 skill-load slash 路径不可用。谓词判定走 `query`（trim 后），
+    // 与上面非空校验共用同一字符串。
+    if (!isSkillLoadText(query) && query.length > MAX_MESSAGE_CHARS) {
       throw new ValidationError(
         `message text exceeds max length ${MAX_MESSAGE_CHARS}`,
         { field: "text", max: MAX_MESSAGE_CHARS, length: query.length }

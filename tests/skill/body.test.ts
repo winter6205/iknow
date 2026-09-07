@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   createSkillBody,
+  isSkillLoadText,
   stripFrontmatter,
 } from "../../src/harness/skill/body.js";
 import type { SkillEntry } from "../../src/harness/skill/catalog.js";
@@ -46,6 +47,44 @@ afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
   );
+});
+
+describe("isSkillLoadText", () => {
+  it("matches the canonical skill-load prefix used by TUI and Web senders", () => {
+    // 与 src/tui/app.tsx:1780、web/src/hooks/use-slash-commands.ts:251 拼接形态一致。
+    const text = `[skill-load name="foo"]\n${"x".repeat(500)}`;
+    expect(isSkillLoadText(text)).toBe(true);
+  });
+
+  it("matches when wrapped in surrounding whitespace (predicate trims)", () => {
+    // 真实路径里 hub.ts validateText 已在内部 trim 一次；本谓词再做 trim
+    // 是为对称 chat-session.ts 的非 trim 调用点。
+    expect(isSkillLoadText(`   [skill-load name="foo"]\nbody`)).toBe(true);
+    expect(isSkillLoadText(`\n[skill-load name="foo"]`)).toBe(true);
+  });
+
+  it("does not match plain user text or empty input", () => {
+    expect(isSkillLoadText("hello world")).toBe(false);
+    expect(isSkillLoadText("")).toBe(false);
+    expect(isSkillLoadText("   ")).toBe(false);
+    expect(isSkillLoadText('skill-load name="foo"')).toBe(false);
+  });
+
+  it("does not match a prefix that is missing the opening quote", () => {
+    // 防御性：无引号的 `[skill-load name=foo]` 会被误判为合法，但与 TUI/Web
+    // 拼接形态不一致 —— 形态变更时应让两侧显式失败，而不是静默通过。
+    expect(isSkillLoadText("[skill-load name=foo]\nbody")).toBe(false);
+  });
+
+  it("does not match a literal prefix with a space (literal-only match)", () => {
+    // 谓词内部 trim 是为对称 chat-session.ts 未 trim 的调用点；
+    // 故首字符前的空格会被吃掉，但「前缀内容变形」仍应被拒。
+    // 这里验证的不是 trim 行为（见同行 case），而是 trim 后是否仍含
+    // 严格 `[skill-load name="` 前缀。
+    expect(isSkillLoadText(' [skill-load name="foo"]\nbody')).toBe(true);
+    expect(isSkillLoadText('[skill-loadname="foo"]\nbody')).toBe(false);
+    expect(isSkillLoadText('[Skill-load name="foo"]\nbody')).toBe(false);
+  });
 });
 
 describe("stripFrontmatter", () => {

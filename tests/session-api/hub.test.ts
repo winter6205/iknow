@@ -1199,6 +1199,23 @@ describe("postMessage validation", () => {
       }
     );
   });
+
+  // 修复方向：机器装配的 skill-load 消息（`[skill-load name="<id>"]\n<body>`，
+  // TUI `app.tsx:1780` 与 Web `use-slash-commands.ts:251` 唯一拼接形态）跳过
+  // 用户输入长度上限，与模型侧 tool result 通道无字符上限对称。78KB 的
+  // SKILL.md 一次性加载会立即撞 8000 上限 —— 不豁免则 skill-load slash
+  // 路径不可用。允许它真的走到 stub 模型返回（不再抛 ValidationError）。
+  it("accepts machine-assembled skill-load message exceeding MAX_MESSAGE_CHARS", async () => {
+    const deps = makeDeps([assistantResult({ texts: ["ok"] })]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    const longText = `[skill-load name="foo"]\n${"x".repeat(50_000)}`;
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: longText,
+    });
+    assert.equal(res.turn.answer.finalText, "ok");
+  });
 });
 
 // -- T1: wire projection of thinking / toolCalls ------------------------------

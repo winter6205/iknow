@@ -314,6 +314,32 @@ describe("T3 overflow: overlong non-exact NL still MAX_MESSAGE_CHARS", () => {
     assert.equal(spy.stepCalls.n, 0);
     assert.equal(ctx.state.messages.length, pending.length);
   });
+
+  // 对称于 hub.ts 处的豁免：机器装配的 skill-load 消息跳过 8000 上限。
+  // 78KB SKILL.md 一次性加载会撞 8000；不豁免则 skill-load slash 路径
+  // 不可用。该消息由 TUI/Web 装配拼出，本测试断言它真的走到了 run 并落
+  // 历史（不再被 `message text exceeds max length` 拦截）。
+  it("machine-assembled skill-load message exceeding MAX_MESSAGE_CHARS is NOT refused", async () => {
+    const line = `[skill-load name="foo"]\n${"x".repeat(MAX_MESSAGE_CHARS + 100)}`;
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["loaded"] })],
+    });
+    const spy = spyAdapter(ctx);
+    const r = await processChatLine({ line, ctx });
+    // 不再返回 max-length stderr
+    assert.equal(
+      /max length/i.test(r.stderr ?? ""),
+      false,
+      `unexpected max-length stderr: ${r.stderr ?? ""}`
+    );
+    // run 实际跑到模型 stub
+    assert.equal(r.ranQuery, true);
+    assert.equal(spy.encodeCount.n, 1);
+    assert.equal(spy.stepCalls.n, 1);
+    // skill-load 文本原样进入历史
+    assert.equal(lastUserText(ctx.state.messages), line);
+    assert.match(r.output, /loaded/);
+  });
 });
 
 describe("T3 concurrent: busy_stop_first does not abort in-flight turn", () => {
