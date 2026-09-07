@@ -267,12 +267,14 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
   });
 
   test("无前缀命中的 skill 不出现", () => {
+    // Task 4：typed `/echo` 精确命中唯一 skill → 消歧列表为空（zzz 既不
+    // 命中前缀也不该出现；不再返回 echo 自身——已无歧义可消）。
     expect(
       slashSuggestions("/echo", [
         { name: "echo", description: "回声" },
         { name: "zzz", description: "不匹配" },
       ])
-    ).toEqual([{ kind: "skill", name: "echo", description: "回声" }]);
+    ).toEqual([]);
   });
 });
 
@@ -368,19 +370,22 @@ describe("slashComplete: 三态语义（唯一 → 尾随空格；多匹配 → 
     ).toBe("/Echo");
   });
 
-  test("等长但大小写不同 → 规范化为候选大小写：'/Echo' → '/Echo'（非 null）", () => {
+  test("等长但大小写不同 → 规范化为候选大小写 + 尾随空格：'/Echo' → '/Echo '（非 null）", () => {
+    // Task 4 守卫：typed 是某候选的精确命中（仅大小写不同）+ 存在更长兄弟
+    // → slashComplete 必须返回尾随空格形式（与 unique 精确命中同契约），便
+    // 于用户追加 remainder。
     expect(
       slashComplete("/Echo", [
         { name: "Echo", description: "回声" },
         { name: "Echo-extra", description: "x" },
       ])
-    ).toBe("/Echo");
+    ).toBe("/Echo ");
     expect(
       slashComplete("/ECHO", [
         { name: "Echo", description: "回声" },
         { name: "Echo-extra", description: "x" },
       ])
-    ).toBe("/Echo");
+    ).toBe("/Echo ");
   });
 
   test("大小写不敏感输入仍走长度进展：'/EC'（typed '/ec' < LCP '/Echo'）→ '/Echo'", () => {
@@ -919,5 +924,252 @@ describe("/memory 词表", () => {
 
   test("/help 含 /memory 行", () => {
     expect(helpLines().join("\n")).toContain("/memory");
+  });
+});
+
+/**
+ * Task 4（plans/tui-chrome-interaction.md）：slash hint 仅作**消歧**。
+ *  - 唯一精确命中（skill 或静态命令）→ 空列表（即便没有更长兄弟）。
+ *  - 精确命中 + 空格/remainder → 空列表（即便有更长兄弟）。
+ *  - 前缀歧义（`/way` → 两个 skill）→ 列表保留。
+ *  - 精确命中无空格但有更长兄弟 → 只显示更长兄弟，不显示已完整的名字。
+ *  - mixed-case 精确命中仍隐藏（大小写不敏感匹配契约）。
+ *  Tab/Enter 路径（slashComplete）保持不变 —— 见下方 slashComplete 测试。
+ */
+describe("Task 4：slashSuggestions 仅显示未消歧的兄弟（disambig-only）", () => {
+  test("unique `/skillname`（skill 唯一精确命中，无 remainder）→ 0 hint rows", () => {
+    expect(
+      slashSuggestions("/echo", [{ name: "echo", description: "回声" }])
+    ).toEqual([]);
+  });
+
+  test("`/skillname remainder`（skill 精确命中 + 空格）→ 0 hint rows（即便有更长兄弟）", () => {
+    expect(
+      slashSuggestions("/echo 你好", [
+        { name: "echo", description: "回声" },
+        { name: "echo-extra", description: "x" },
+      ])
+    ).toEqual([]);
+  });
+
+  test("`/skillname remainder`（仅 tab 分隔的多段）→ 0 hint rows", () => {
+    expect(
+      slashSuggestions("/echo   帮我做 X", [
+        { name: "echo", description: "回声" },
+      ])
+    ).toEqual([]);
+  });
+
+  test("unique `/static-cmd`（静态命令唯一精确命中）→ 0 hint rows", () => {
+    // /quit 在 prefix=/q 时唯一 → 完整命中 /quit 后必须隐藏。
+    expect(slashSuggestions("/quit")).toEqual([]);
+  });
+
+  test("`/quit remainder` → 0 hint rows（精确命中 + 空格）", () => {
+    expect(slashSuggestions("/quit 现在")).toEqual([]);
+  });
+
+  test("mixed-case 精确命中 `/ECHO`（大小写不敏感）→ 0 hint rows", () => {
+    expect(
+      slashSuggestions("/ECHO", [{ name: "echo", description: "回声" }])
+    ).toEqual([]);
+    expect(
+      slashSuggestions("/Echo", [{ name: "echo", description: "回声" }])
+    ).toEqual([]);
+  });
+
+  test("mixed-case 精确命中 + remainder `/ECHO foo` → 0 hint rows", () => {
+    expect(
+      slashSuggestions("/ECHO foo", [{ name: "echo", description: "回声" }])
+    ).toEqual([]);
+  });
+
+  test("前缀歧义 `/way`（两个 skill 共享前缀）→ 列表保留两个", () => {
+    expect(
+      slashSuggestions("/way", [
+        { name: "way-foo", description: "foo" },
+        { name: "way-bar", description: "bar" },
+      ])
+    ).toEqual([
+      { kind: "skill", name: "way-foo", description: "foo" },
+      { kind: "skill", name: "way-bar", description: "bar" },
+    ]);
+  });
+
+  test("前缀歧义 `/e`（exit + effort 两个静态命令）→ 列表保留", () => {
+    // 回归守卫：保留 /e 的二义性行为（不与 Task 4 冲突）。
+    expect(slashSuggestions("/e")).toEqual([
+      { kind: "command", command: "exit" },
+      { kind: "command", command: "effort" },
+    ]);
+  });
+
+  test("精确命中 + 更长兄弟（skill：echo + echo-extra，typed `/echo`）→ 只显示 echo-extra", () => {
+    expect(
+      slashSuggestions("/echo", [
+        { name: "echo", description: "回声" },
+        { name: "echo-extra", description: "x" },
+      ])
+    ).toEqual([{ kind: "skill", name: "echo-extra", description: "x" }]);
+  });
+
+  test("精确命中 + 更长兄弟（skill：mixed-case Echo + Echo-extra，typed `/Echo`）→ 只显示 Echo-extra", () => {
+    expect(
+      slashSuggestions("/Echo", [
+        { name: "Echo", description: "回声" },
+        { name: "Echo-extra", description: "x" },
+      ])
+    ).toEqual([{ kind: "skill", name: "Echo-extra", description: "x" }]);
+  });
+
+  test("精确命中 + 更长兄弟（静态命令：/comp 不会精确命中任何命令 → 保留 prefix 行为）", () => {
+    // /comp 是 compact 的前缀（不是精确），slashSuggestions 必须保留。
+    expect(slashSuggestions("/comp")).toEqual([
+      { kind: "command", command: "compact" },
+    ]);
+  });
+
+  test("精确命中静态命令 + 同前缀 skill 兄弟 → 只显示 skill 兄弟", () => {
+    // typed `/compact`：精确命中静态 compact（已完整），但 skill compact-wizard
+    // 仍以 compact 为前缀（更长兄弟）→ 只保留它。
+    expect(
+      slashSuggestions("/compact", [
+        { name: "code-review", description: "代码审查" },
+        { name: "compact-wizard", description: "x" },
+      ])
+    ).toEqual([{ kind: "skill", name: "compact-wizard", description: "x" }]);
+  });
+
+  test("未知 `/zzzz` → 0 hint rows（与原契约一致：unknown 路径）", () => {
+    expect(slashSuggestions("/zzzz")).toEqual([]);
+  });
+
+  test("空 / 非 `/` 开头 → 0 hint rows（边界，与原契约一致）", () => {
+    expect(slashSuggestions("")).toEqual([]);
+    expect(slashSuggestions("hello")).toEqual([]);
+    expect(slashSuggestions("  你好  ")).toEqual([]);
+  });
+
+  test("两次 slashSuggestions 调用相互隔离（无状态泄漏）", () => {
+    const skills = [
+      { name: "echo", description: "回声" },
+      { name: "echo-extra", description: "x" },
+    ];
+    const a = slashSuggestions("/echo", skills);
+    const b = slashSuggestions("/way", [
+      { name: "way-foo", description: "foo" },
+      { name: "way-bar", description: "bar" },
+    ]);
+    expect(a).toEqual([
+      { kind: "skill", name: "echo-extra", description: "x" },
+    ]);
+    expect(b).toEqual([
+      { kind: "skill", name: "way-foo", description: "foo" },
+      { kind: "skill", name: "way-bar", description: "bar" },
+    ]);
+    // 再次调用 a 应返回相同结果（无状态）。
+    expect(slashSuggestions("/echo", skills)).toEqual(a);
+  });
+
+  test("`/` 空前缀 → 全部 14 条静态命令（Task 4 不影响空前缀契约）", () => {
+    expect(slashSuggestions("/")).toHaveLength(14);
+  });
+
+  test("裸 `/` + skills → 静态命令全在、skill 不入场（#377 E 不变）", () => {
+    expect(
+      slashSuggestions("/", [
+        { name: "echo", description: "回声" },
+        { name: "code-review", description: "代码审查" },
+      ])
+    ).toEqual(
+      expect.arrayContaining([
+        { kind: "command", command: "quit" },
+        { kind: "command", command: "graph" },
+      ])
+    );
+    expect(
+      slashSuggestions("/", [{ name: "echo", description: "回声" }])
+    ).not.toContainEqual({
+      kind: "skill",
+      name: "echo",
+      description: "回声",
+    });
+  });
+});
+
+/**
+ * Task 4 守卫：Tab/Enter 路径（slashComplete + slashCompleteFromCandidates）
+ * 保持不变 —— 即使 slashSummary 返回空，slashComplete 也必须按原契约
+ * 工作（`/echo` 唯一精确命中 → `/echo `）。这意味着 slashComplete 必须
+ * 使用独立于 slashSummary 的全量候选枚举，Tab 行为不被显示过滤影响。
+ */
+describe("Task 4 守卫：slashComplete 不受显示过滤影响", () => {
+  test("unique `/echo` → `/echo `（精确命中 + 尾随空格）", () => {
+    expect(
+      slashComplete("/echo", [{ name: "echo", description: "回声" }])
+    ).toBe("/echo ");
+  });
+
+  test("`/echo` + 更长兄弟 echo-extra → `/echo `（唯一精确匹配补全）", () => {
+    expect(
+      slashComplete("/echo", [
+        { name: "echo", description: "回声" },
+        { name: "echo-extra", description: "x" },
+      ])
+    ).toBe("/echo ");
+  });
+
+  test("`/echo 你好`（精确 + remainder）→ null（已提交，Tab 不动）", () => {
+    expect(
+      slashComplete("/echo 你好", [{ name: "echo", description: "回声" }])
+    ).toBeNull();
+  });
+
+  test("mixed-case `/ECHO` → `/echo `（大小写规范化）", () => {
+    expect(
+      slashComplete("/ECHO", [{ name: "echo", description: "回声" }])
+    ).toBe("/echo ");
+  });
+
+  test("`/q` → /quit （唯一匹配 + 尾随空格）", () => {
+    expect(slashComplete("/q")).toBe("/quit ");
+  });
+
+  test("`/quit remainder` → null（已提交，Tab 不动）", () => {
+    expect(slashComplete("/quit 现在")).toBeNull();
+  });
+
+  test("前缀歧义 `/e` → null（exit + effort，无进展）", () => {
+    expect(slashComplete("/e")).toBeNull();
+  });
+
+  test("`/foo` + skills foo-one/foo-two → `/foo-`（LCP 部分补全）", () => {
+    expect(
+      slashComplete("/foo", [
+        { name: "foo-one", description: "x" },
+        { name: "foo-two", description: "y" },
+      ])
+    ).toBe("/foo-");
+  });
+
+  test("`/zzz` → null（0 匹配）", () => {
+    expect(slashComplete("/zzz")).toBeNull();
+  });
+});
+
+/**
+ * Task 4 守卫：slashCompleteFromCandidates 的 cursor 行为。
+ * 这是 hint UI 按选中项补全路径 —— 消费方（app.tsx）传入过滤后的
+ * slashSummary 列表，所以 cursor 越界处理必须保持。
+ */
+describe("Task 4 守卫：slashCompleteFromCandidates 保持原契约", () => {
+  test("空列表 + cursor=0 → null", () => {
+    expect(slashCompleteFromCandidates([], 0)).toBeNull();
+  });
+
+  test("cursor 越界 → null", () => {
+    const list = [{ kind: "command", command: "quit" }];
+    expect(slashCompleteFromCandidates(list, -1)).toBeNull();
+    expect(slashCompleteFromCandidates(list, 1)).toBeNull();
   });
 });

@@ -166,15 +166,19 @@ export function slashPrefix(text: string): string {
 }
 
 /**
- * 给定当前输入，返回所有匹配前缀的候选（静态命令在前、skill 在后，确定性
- * 顺序）。skill 名匹配为大小写不敏感前缀过滤。空 / 非 "/" 开头 / 未命中
- * → 空数组。静态命令仍按词表原顺序（slashHintLines 等既有契约不变）。
+ * 给定当前输入，枚举所有前缀命中的候选（静态命令在前、skill 在后，确定性
+ * 顺序）。skill 名匹配为大小写不敏感前缀过滤。空 / 非 "/" 开头 → 空数组。
+ * 静态命令仍按词表原顺序（slashHintLines 等既有契约不变）。
  *
  * #377 E（提示过载修复）：空前缀（输入恰为 "/"）只返回静态命令，skill 必须
  * 用户至少打 1 字符前缀（/c /ar …）才进列表 —— 防止 bare `/` 弹出 N 条 skill
- * 长描述撑爆屏外。Tab 补全 `slashComplete` 同契约（"/" 永远 null —— 多匹配）。
+ * 长描述撑爆屏外。
+ *
+ * Task 4 备注：此函数为底层「全量候选枚举」——既服务 slashSuggestions（消歧
+ * 过滤），也服务 slashComplete（Tab 补全需要全量 LCP）。两个调用方各自承担
+ * 各自的过滤职责（disambig 显示 vs. Tab 行为），不在此函数内分歧。
  */
-export function slashSuggestions(
+function enumerateSlashCandidates(
   input: string,
   skills?: ReadonlyArray<SkillEntryLike>
 ): ReadonlyArray<SlashCandidate> {
@@ -182,14 +186,13 @@ export function slashSuggestions(
   if (!text.startsWith("/")) return [];
   const prefix = slashPrefix(text);
   const out: SlashCandidate[] = [];
+  // 空前缀（输入恰为 "/"）→ 全部命令（cmd.startsWith("") 恒真）。
   for (const cmd of VOCABULARY) {
-    // 空前缀（输入恰为 "/"）→ 全部命令（cmd.startsWith("") 恒真）。
     if (cmd.startsWith(prefix)) {
       out.push({ kind: "command", command: cmd as TuiSlashCommand });
     }
   }
-  // 空前缀 → skill 不入场；用户至少打 1 字符前缀才混入（避免 popup 一次性
-  // 弹出全部 skill 长描述）。
+  // 空前缀 → skill 不入场；用户至少打 1 字符前缀才混入。
   if (skills !== undefined && prefix.length > 0) {
     for (const skill of skills) {
       if (skill.name.toLowerCase().startsWith(prefix)) {
@@ -200,6 +203,57 @@ export function slashSuggestions(
         });
       }
     }
+  }
+  return out;
+}
+
+/** Task 4：从 SlashCandidate 求其规范化的「首 token 小写名」（统一判定接口）。 */
+function candidateHeadLower(c: SlashCandidate): string {
+  return c.kind === "command" ? c.command : c.name.toLowerCase();
+}
+
+/**
+ * 给定当前输入，返回**用于消歧显示**的候选（静态命令在前、skill 在后，
+ * 确定性顺序）。
+ *
+ * Task 4（plans/tui-chrome-interaction.md）：候选列表仅作**消歧**用。
+ *  - **唯一精确命中**（typed 首 token === 某候选名）→ 空列表（即便没有更长
+ *    兄弟）。
+ *  - **精确命中 + remainder**（typed 首 token === 某候选名 + 空格/剩余段）
+ *    → 空列表（即便有更长兄弟）。
+ *  - **前缀歧义**（typed 前缀没有精确候选；如 `/way` → way-foo + way-bar）
+ *    → 列表保留全部。
+ *  - **精确命中无空格但有更长兄弟**（typed 首 token === 某候选名 + 存在其他
+ *    匹配项）→ 只显示更长兄弟，**不**显示已完整的名字。
+ *  - 大小写不敏感（mixed-case `/ECHO` 仍识别为 echo）。
+ *
+ * Tab 补全（slashComplete）不走此过滤 —— 那是独立路径，必须按全量候选计算
+ * LCP。详见 slashComplete 内部对 enumerateSlashCandidates 的直接调用。
+ *
+ * #377 E 保留：空前缀（输入恰为 "/"）只返回静态命令，skill 不入场；slashComplete
+ * 同契约（"/" 永远 null —— 多匹配）。
+ */
+export function slashSuggestions(
+  input: string,
+  skills?: ReadonlyArray<SkillEntryLike>
+): ReadonlyArray<SlashCandidate> {
+  const text = input.trim();
+  if (!text.startsWith("/")) return [];
+  const remainder = slashRemainder(text);
+  const matches = enumerateSlashCandidates(text, skills);
+  if (matches.length === 0) return [];
+  const prefixLower = slashPrefix(text);
+  // 1) 精确命中 + remainder → 用户已「提交」（typed `/skillname` 后追加更多
+  //    内容）；候选不再有消歧意义，全部隐藏。
+  if (remainder !== "") return [];
+  // 2) 候选中是否包含 typed 前缀的精确命中（大小写不敏感）。
+  const hasExact = matches.some((m) => candidateHeadLower(m) === prefixLower);
+  if (!hasExact) return matches;
+  // 3) 存在精确命中 → 过滤掉该精确候选，保留仅「更长兄弟」（仍可消歧）。
+  const out: SlashCandidate[] = [];
+  for (const m of matches) {
+    if (candidateHeadLower(m) === prefixLower) continue;
+    out.push(m);
   }
   return out;
 }
@@ -236,19 +290,34 @@ function longestCommonPrefix(forms: ReadonlyArray<string>): string {
  *     大小写规则确定性说明：skill 前缀匹配大小写不敏感，LCP 用候选原始
  *     大小写逐字符比较 —— 混合大小写候选的 LCP 可能比忽略大小写的理论
  *     公共前缀短，这是可接受的保守行为（宁可少补，不错补）。
+ *
+ * Task 4 守卫：使用全量候选枚举（enumerateSlashCandidates），**不**走
+ * slashSuggestions 的消歧过滤 —— 即使 typed 是精确命中（如 `/echo`），
+ * Tab 仍需补全到 `/{name} `（带尾随空格）。remainder 已提交 → null。
  */
 export function slashComplete(
   input: string,
   skills?: ReadonlyArray<SkillEntryLike>
 ): string | null {
-  const matches = slashSuggestions(input, skills);
+  const text = input.trim();
+  if (!text.startsWith("/")) return null;
+  const remainder = slashRemainder(text);
+  if (remainder !== "") return null;
+  const matches = enumerateSlashCandidates(text, skills);
   if (matches.length === 0) return null;
   const forms = matches.map((m) =>
     m.kind === "command" ? `/${m.command}` : `/${m.name}`
   );
   if (matches.length === 1) return `${forms[0]!} `;
+  // Task 4：typed 首 token 是某候选的**精确命中**（大小写不敏感）+ 还存在
+  // 更长兄弟（matches.length >= 2）→ Tab 补全该精确候选（带尾随空格），
+  // 而非 LCP（LCP === typedForm 无进展）。
+  const typedForm = `/${slashPrefix(text)}`;
+  const exactIndex = forms.findIndex(
+    (f) => f.toLowerCase() === typedForm.toLowerCase()
+  );
+  if (exactIndex !== -1) return `${forms[exactIndex]!} `;
   const lcp = longestCommonPrefix(forms);
-  const typedForm = `/${slashPrefix(input.trim())}`;
   if (
     lcp.length > typedForm.length ||
     (lcp.toLowerCase() === typedForm.toLowerCase() && lcp !== typedForm)
