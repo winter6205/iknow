@@ -59,10 +59,12 @@ function writeEditRunningLine(run: LiveToolRun, cols: number): string {
     const rec = parsed as Record<string, unknown>;
     const path =
       typeof rec.path === "string" && rec.path.length > 0 ? rec.path : "?";
-    // Running write/edit: name + path (+ write line count). Never old/new/content.
+    // Running write/edit: name + path (+ write line count when the streamed
+    // `content` is already a non-empty string). Never old/new/content body.
     const summary =
       run.name === "write_file"
-        ? summarizeToolCall("write_file", parsed, cols).detail
+        ? summarizeToolCall("write_file", parsed, cols, { running: true })
+            .detail
         : clipOneLineVisual(
             `编辑 ${path}`,
             Math.min(80, Math.max(4, cols - visualWidth(run.name) - 12))
