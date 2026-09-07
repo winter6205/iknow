@@ -68,5 +68,6 @@ export type {
 export {
   createSecretsGuardHook,
   DEFAULT_SECRET_PATTERNS,
+  MAX_SCAN_LENGTH,
 } from "./secrets-guard.js";
 export type { SecretsGuardHookOpts } from "./secrets-guard.js";

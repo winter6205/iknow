@@ -303,6 +303,12 @@ describe("createUserHookRouter — SC4: PreCommit git commit 形态判定", () =
       label: "多段命令中含 commit 段",
       command: "git status && git commit -m x",
     },
+    {
+      // 位置语义回归钉子：--help 豁免仅限紧随子命令的参数位，不能因
+      // commit message 正文里恰好含 "--help" 字样而漏拦真提交。
+      label: "message 含 --help 字样的真提交",
+      command: 'git commit -m "fix --help rendering"',
+    },
   ];
   for (const c of blocked) {
     it(`拦：${c.label}`, () => {

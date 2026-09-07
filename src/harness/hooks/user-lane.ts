@@ -50,27 +50,21 @@ import type {
   IknowSettingsHookRule,
 } from "../../config/settings.js";
 import { splitShellSegments } from "../permission/hard-walls.js";
-
-/** pattern 匹配扫描串截断上界（沿 secrets-guard MAX_SCAN_LENGTH 同值）。 */
-const MAX_SCAN_LENGTH = 20_000;
+import { MAX_SCAN_LENGTH } from "../permission/secrets-guard.js";
 
 /** PreCommit 检测的 shell 工具名闭集（V1：bash）。 */
 const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set(["bash"]);
 
-/** 防御性缺省分类器：装配层必须注入真 classifyCall；缺省按保守 read 处理（PreWrite 不拦，比错误拦截安全）。 */
-function defaultClassify(_call: ToolCall): MutateClass {
-  return "read";
-}
-
 /** 构造期选项。 */
 export interface CreateUserHookRouterOpts {
   /**
-   * mutate 分类器（PreWrite 消费）。产品装配（build-engine T5）注入
-   * isolation/worktree-gate.ts 的 `classifyCall`（mutate SSOT，ADR-0037）；
-   * 缺省为保守 read（见 defaultClassify）。
+   * mutate 分类器（PreWrite 消费）。产品装配（build-engine / worker）注入
+   * isolation/worktree-gate.ts 的 `classifyCall`（mutate SSOT，ADR-0037）。
+   * 必填：缺省「保守 read」会让忘注入的调用方 PreWrite 规则静默全不拦
+   * （fail-open 掩盖接线错误），编译期要求显式传入。
    */
-  readonly classify?: (call: ToolCall) => MutateClass;
-  /** 构造期告警观测（非法 pattern 剔除时调用）。 */
+  readonly classify: (call: ToolCall) => MutateClass;
+  /** 构造期告警观测（非法 pattern 剔除时调用）。缺席 = 静默剔除。 */
   readonly onHookError?: (e: HookErrorEvent) => void;
 }
 
@@ -200,9 +194,7 @@ function unquote(token: string): string {
 function segmentIsGitCommit(segment: string): boolean {
   const tokens = segment.trim().split(/\s+/);
   if (unquote(tokens[0] ?? "") !== "git") return false;
-  // `--help` 无论出现在段内哪个位置（子命令位 / 参数位）都是帮助查询
-  // 形态（`git commit --help` 是手册页，不是提交动作，SC4 显式要求不拦）。
-  if (tokens.includes("--help")) return false;
+  let subcommand: string | undefined;
   for (let i = 1; i < tokens.length; i += 1) {
     const token = unquote(tokens[i]!);
     if (GIT_VALUE_OPTIONS.has(token)) {
@@ -210,9 +202,24 @@ function segmentIsGitCommit(segment: string): boolean {
       continue;
     }
     if (token.startsWith("-")) continue; // boolean 全局 option（--bare 等）
-    return token === "commit";
+    subcommand = token;
+    break;
   }
-  return false; // `git` 后无子命令 token（如 `git --version`）→ 不拦
+  if (subcommand !== "commit") return false;
+  // `git commit --help` 是手册页查询，不是提交动作（SC4 显式要求不拦）。
+  // 位置语义：仅当 --help 紧随子命令（第一个参数位）才豁免该段 —— 段内
+  // 任意位置豁免会误放 `git commit -m "fix --help rendering"` 这类真提交。
+  const commitIdx = tokens.findIndex(
+    (t, i) => i > 0 && unquote(t) === "commit"
+  );
+  if (
+    commitIdx !== -1 &&
+    commitIdx + 1 < tokens.length &&
+    unquote(tokens[commitIdx + 1]!) === "--help"
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -225,47 +232,35 @@ function segmentIsGitCommit(segment: string): boolean {
  */
 export function createUserHookRouter(
   hooks: IknowSettingsHooks | undefined,
-  opts?: CreateUserHookRouterOpts
+  opts: CreateUserHookRouterOpts
 ): PreToolUseHook {
   // SC1：enabled 缺席 / 非 true → 透明 hook，不编译任何 pattern。
   if (hooks?.enabled !== true || !Array.isArray(hooks.rules)) {
     return Object.freeze(() => undefined);
   }
 
-  const classify = opts?.classify ?? defaultClassify;
-  const compiled = compileRules(hooks.rules, opts?.onHookError);
+  const classify = opts.classify;
+  const compiled = compileRules(hooks.rules, opts.onHookError);
 
   const hook: PreToolUseHook = Object.freeze(({ tool, input }) => {
     for (const { rule, pattern } of compiled) {
-      // 事件语义分流（SC2 / SC3 / SC4）
-      if (rule.event === "PreToolUse") {
-        if (!toolMatcherMatches(rule, tool)) continue;
-        if (pattern !== undefined && !patternMatches(pattern, input)) {
-          continue;
-        }
-        // SC5：先拦先赢 —— 命中第一条 deny 后立即返回
-        return { reason: rule.reason };
-      }
-      if (rule.event === "PreWrite") {
-        if (!toolMatcherMatches(rule, tool)) continue;
-        // SC3：read / root_flip 即使规则极宽也不拦
-        const cls = classify({ id: "user-hook", name: tool, input });
-        if (cls !== "mutate") continue;
-        if (pattern !== undefined && !patternMatches(pattern, input)) {
-          continue;
-        }
-        return { reason: rule.reason };
-      }
-      if (rule.event === "PreCommit") {
-        if (!toolMatcherMatches(rule, tool)) continue;
-        if (!isGitCommitCall(tool, input)) continue;
-        if (pattern !== undefined && !patternMatches(pattern, input)) {
-          continue;
-        }
-        return { reason: rule.reason };
-      }
-      // settings 层闭集（HOOK_EVENT_VALUES）之外的事件值不应到达这里
-      // （parseHooks 已剔除）；保守放行。
+      // 公共闸门：tool matcher（SC2）→ 事件专属判定（SC3/SC4 或通配）→
+      // pattern matcher。任一闸门未过 → 评估下一条；全过 → 先拦先赢（SC5）。
+      if (!toolMatcherMatches(rule, tool)) continue;
+      const eventHit =
+        rule.event === "PreToolUse"
+          ? true
+          : rule.event === "PreWrite"
+            ? // SC3：read / root_flip 即使规则极宽也不拦
+              classify({ id: "user-hook", name: tool, input }) === "mutate"
+            : rule.event === "PreCommit"
+              ? isGitCommitCall(tool, input)
+              : // settings 层闭集（HOOK_EVENT_VALUES）之外的事件值不应到达
+                // 这里（parseHooks 已剔除）；保守放行。
+                false;
+      if (!eventHit) continue;
+      if (pattern !== undefined && !patternMatches(pattern, input)) continue;
+      return { reason: rule.reason };
     }
     return undefined;
   });
