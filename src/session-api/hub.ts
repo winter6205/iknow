@@ -119,7 +119,7 @@ import { homedir } from "node:os";
 import { resolveSessionTodoDir } from "../harness/aci/tools/todo-write.js";
 import type { AciCatalog } from "../harness/aci/types.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
-import { createSkillBody } from "../harness/skill/body.js";
+import { createSkillBody, exceedsUserInputCap } from "../harness/skill/body.js";
 import type { McpManager } from "../harness/mcp/manager.js";
 import { loadMcpConfig } from "../harness/mcp/config.js";
 import { resolveMcpRoots, type McpRoots } from "../harness/mcp/roots.js";
@@ -2436,7 +2436,12 @@ export class SessionHub {
         field: "text",
       });
     }
-    if (query.length > MAX_MESSAGE_CHARS) {
+    // 机器装配的 skill-load 消息跳过用户输入长度上限（与模型侧 tool result
+    // 通道无字符上限对称 —— 都是机器装配而非手打用户文本）。78KB SKILL.md
+    // 一次性加载会撞 8000 上限；不豁免则 skill-load slash 路径不可用。
+    // 三处共用组合守卫 `exceedsUserInputCap`：hub.validateText / chat-session
+    // processChatLine / 同侧谓词单测。
+    if (exceedsUserInputCap(text, MAX_MESSAGE_CHARS)) {
       throw new ValidationError(
         `message text exceeds max length ${MAX_MESSAGE_CHARS}`,
         { field: "text", max: MAX_MESSAGE_CHARS, length: query.length }

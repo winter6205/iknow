@@ -25,6 +25,7 @@ import { isAgentStatusText } from "../harness/agent-status.js";
 import { isSubagentDrainText } from "../harness/subagent/host-drain.js";
 import { isVerifyInjectedText } from "../harness/verify/inject.js";
 import { stripPrefetchOverlay } from "../harness/memory/prefetch.js";
+import { SKILL_LOAD_PREFIX_SHORT } from "../harness/skill/body.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
 
 export type SessionRunState = "idle" | "running-fg" | "running-bg";
@@ -316,7 +317,7 @@ export function seedInputHistory(
     }
     const text = stripPrefetchOverlay(joinedUserText(message)).trim();
     if (text.length === 0) continue;
-    if (text.startsWith("[skill-load ")) continue;
+    if (text.startsWith(SKILL_LOAD_PREFIX_SHORT)) continue;
     if (isTuiHiddenUserMessage(message)) continue;
     if (history[history.length - 1] === text) continue;
     history.push(text);
