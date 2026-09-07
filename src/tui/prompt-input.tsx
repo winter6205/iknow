@@ -439,6 +439,11 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
       // 并通过 onContentChange 全量回报。
     }
 
+    // T2 (plans/tui-chrome-interaction.md T2)：输入框 share user 填充家族
+    // —— 之前 border-only 是缺口,加 userBg 底色让 ❯ 气泡与输入框在视觉上
+    // 是一家人。健壮性:userBg 缺/空串时跳过 backgroundColor,回归终端默认,
+    // 不许把 transcript 刷白。
+    const fillBg = pal.userBg.length > 0 ? pal.userBg : undefined;
     const borderColor = props.active ? pal.running : pal.border;
     // T9 高度自适应：按 wrap-aware 视觉折行行数封顶 maxLines（达上限后 textarea
     // 内部滚动）。长文本无 `\n` 但超宽时也会拉伸（2026-08-14 用户反馈「输入多少
@@ -456,6 +461,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
           flexDirection="row"
           borderStyle="rounded"
           borderColor={borderColor}
+          backgroundColor={fillBg}
           paddingX={1}
         >
           <text>
