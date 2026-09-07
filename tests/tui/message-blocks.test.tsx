@@ -925,10 +925,10 @@ test("bash 回归：`[运行中] bash` / 完成态字节不变", async () => {
   await setupDone.renderer.destroy();
 });
 
-test("D7 slot：成功 retract（bash 无此态）—— bash 完成 → 标题 + 结果预览均保留", async () => {
-  // D4：bash 是 keep 类 —— 落定后标题行与 5 行尾窗预览都留在屏幕上
-  // （slot.showTitle / showPreview 均真），预览是否存在取决于 resultTextMap
-  // 是否有配对文本。空 resultTextMap → 无预览内容 → 只有标题行。
+test("D7 slot：bash 完成 → 标题留、结果预览不留（CONTEXT keep class）", async () => {
+  // docs/CONTEXT.md keep class：bash 成功只留带命令的标题，不带结果预览
+  // —— result preview 只属于 live running，成功落定后不画（slot.showTitle
+  // 真、showPreview 假）。
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -1406,7 +1406,7 @@ function bashCallMessages(
   ];
 }
 
-test("D4 bash 历史：尾部 5 行 dim 预览 + … +N 行 溢出标记", async () => {
+test("D4 bash 历史：落定只留标题，stdout 不上屏（无 ⎿ / 无溢出标记）", async () => {
   const stdout = Array.from({ length: 10 }, (_, i) => `out-${i}`).join("\n");
   const [assistant, user] = bashCallMessages(
     "tu-bash-r",
@@ -1427,14 +1427,15 @@ test("D4 bash 历史：尾部 5 行 dim 预览 + … +N 行 溢出标记", async
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // ⎿ 风格 dim 前缀出现
-  expect(frame).toContain("⎿ out-5");
-  expect(frame).toContain("⎿ out-9");
-  // 早于尾窗 5 行的不应出现
-  expect(frame).not.toContain("⎿ out-0");
-  expect(frame).not.toContain("⎿ out-4");
-  // 溢出 +N 行 标记
-  expect(frame).toContain("… +5 行");
+  // CONTEXT keep class：成功 bash 落定后只留标题，stdout/⎿ 尾巴整块不画
+  //（result preview 只属于 live running）。长 stdout 一行都不上屏。
+  expect(frame).toContain("bash · ls");
+  expect(frame.includes("⎿")).toBe(false);
+  expect(frame).not.toContain("out-0");
+  expect(frame).not.toContain("out-5");
+  expect(frame).not.toContain("out-9");
+  // 溢出标记也不出现（无预览块即无溢出行）。
+  expect(frame).not.toContain("… +5 行");
   // user 消息不画（user 不在 assistant message 块里,但 testRender 也没传 user 块）
   void user;
   await setup.renderer.destroy();
@@ -1560,7 +1561,7 @@ test("D4 bash 空输出 / 全空白 → 不渲染预览块", async () => {
   }
 });
 
-test("D4 bash ANSI 透传：转义序列在 ⎿ 预览行内保留", async () => {
+test("D4 bash ANSI 透传：落定 bash 无 ⎿ 预览行，stdout 不上屏", async () => {
   const stdout = "\x1b[31mERROR\x1b[0m line\n\x1b[32mOK\x1b[0m line";
   const setup = await testRender(
     <MessageBlocks
@@ -1587,14 +1588,16 @@ test("D4 bash ANSI 透传：转义序列在 ⎿ 预览行内保留", async () =>
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // ANSI 序列在 ⎿ 预览行内原样保留
-  expect(frame).toContain("⎿");
-  expect(frame).toContain("ERROR");
-  expect(frame).toContain("OK");
+  // CONTEXT keep class：成功 bash 落定只留标题；stdout（含 ANSI）整块不上
+  // 屏 —— result preview 只属于 live running。
+  expect(frame).toContain("bash · x");
+  expect(frame.includes("⎿")).toBe(false);
+  expect(frame.includes("ERROR")).toBe(false);
+  expect(frame.includes("OK")).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("D4 bash 单行输出：直接显示 1 行（不强制 5 行格式）", async () => {
+test("D4 bash 单行输出：落定后 stdout 不上屏（仅标题）", async () => {
   const setup = await testRender(
     <MessageBlocks
       message={{
@@ -1623,9 +1626,11 @@ test("D4 bash 单行输出：直接显示 1 行（不强制 5 行格式）", asy
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("⎿ hi");
-  // 不出现溢出标记
-  expect(frame).not.toContain("… +");
+  // CONTEXT keep class：bash 成功只留标题，stdout（即使单行）不上屏 ——
+  // 断言用 `⎿ hi`（标题 `bash · echo hi` 本身含 "hi"，不能拿裸 "hi" 判）。
+  expect(frame).toContain("bash · echo hi");
+  expect(frame.includes("⎿")).toBe(false);
+  expect(frame.includes("⎿ hi")).toBe(false);
   await setup.renderer.destroy();
 });
 
@@ -1664,7 +1669,7 @@ test("D4 未配对 tool_use（statusMap 缺位）→ 不画结果预览", async 
   await setup.renderer.destroy();
 });
 
-test("D4 keep 足迹：bash 落定后标题 + ⎿ 结果预览都留（不随折叠消失）", async () => {
+test("D4 keep 足迹：bash 落定只留标题（stdout 不上屏）", async () => {
   const setup = await testRender(
     <MessageBlocks
       message={{
@@ -1697,9 +1702,12 @@ test("D4 keep 足迹：bash 落定后标题 + ⎿ 结果预览都留（不随折
   const frame = setup.captureCharFrame();
   // keep 标题行留（#tui-render-overhaul T3:成功态无 [完成] 前缀）。
   expect(frame).toContain("bash · ls");
-  // bash 结果预览块（⎿）留
-  expect(frame).toContain("⎿ a.ts");
-  expect(frame).toContain("⎿ b.ts");
+  // CONTEXT keep class：bash 成功只留标题（带命令），stdout/⎿ 尾巴整块
+  // 不上屏 —— 与 write/edit 不同（write/edit 仍走 6 行预览窗）。
+  expect(frame).toContain("bash · ls");
+  expect(frame.includes("⎿")).toBe(false);
+  expect(frame).not.toContain("a.ts");
+  expect(frame).not.toContain("b.ts");
   expect(frame.includes("[完成]")).toBe(false);
   await setup.renderer.destroy();
 });
