@@ -27,7 +27,6 @@ import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 import type { LoopEngineDeps } from "../../src/harness/index.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
-import { captureStderr } from "../_helpers/capture-stderr.ts";
 
 async function untilFrame(
   setup: TestRendererSetup,
@@ -605,7 +604,6 @@ describe("TUI /continue busy-guard + Ctrl+C", () => {
   test("Ctrl+C 仍打断前台 turn（continue 不是 abort 通道）", async () => {
     const traceDir = mkdtempSync(join(tmpdir(), "iknow-tui-ctrl-c-trace-"));
     const traceOut = join(traceDir, "trace.jsonl");
-    const stderr = captureStderr();
     const app = await mountContinueApp({
       responses: [assistantResult({ texts: ["never"] })],
       deps: makeDeps([assistantResult({ texts: ["never"] })], {
@@ -625,9 +623,6 @@ describe("TUI /continue busy-guard + Ctrl+C", () => {
         (f) => f.includes("已打断"),
         8000,
         "interrupt-notice"
-      );
-      expect(stderr.lines.join("")).toContain(
-        '"event":"ctrl_c","disposition":"abort_dispatched"'
       );
       const traceFiles = readdirSync(traceOut).filter((name) =>
         name.endsWith(".jsonl")
@@ -649,7 +644,6 @@ describe("TUI /continue busy-guard + Ctrl+C", () => {
       ).toBe("cancelled");
     } finally {
       await app.destroy();
-      stderr.restore();
     }
   }, 30_000);
 });

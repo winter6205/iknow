@@ -431,18 +431,6 @@ const emptySkillCatalog: SkillCatalog = Object.freeze({
   getBodyPath: () => undefined,
 });
 
-type CtrlCDisposition =
-  | "preempted"
-  | "can_interrupt_false"
-  | "abort_dispatched"
-  | "controller_missing"
-  | "compacting_cancelled"
-  | "selection_copied";
-
-function logCtrlCDisposition(disposition: CtrlCDisposition): void {
-  process.stderr.write(`${JSON.stringify({ event: "ctrl_c", disposition })}\n`);
-}
-
 export interface TuiAppProps {
   readonly bridge: TuiBridge;
   readonly askBridge: TuiAskUserBridge;
@@ -2189,7 +2177,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         },
       })
     ) {
-      if (isCtrlC) logCtrlCDisposition("preempted");
       return;
     }
     // Ctrl+C：打断 running-fg；否则提示。
@@ -2198,7 +2185,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       // canInterrupt 拦不住);return 后不再进 turn/notice 分支。
       if (compactingControllerRef.current !== null) {
         compactingControllerRef.current.abort();
-        logCtrlCDisposition("compacting_cancelled");
         return;
       }
       // #343 v3 follow-up：选区优先复制 —— 用户在拖选后按 Ctrl+C，意图是
@@ -2212,21 +2198,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         void doCopy(selectedText).then((result) =>
           setNoticeFromCopyResult(selectedText, result)
         );
-        logCtrlCDisposition("selection_copied");
         return;
       }
       if (canInterrupt(active)) {
         const id = active.conversationId;
         const controller =
           id === undefined ? undefined : aborters.current.get(id);
-        if (controller === undefined) {
-          logCtrlCDisposition("controller_missing");
-        } else {
+        if (controller !== undefined) {
           controller.abort();
-          logCtrlCDisposition("abort_dispatched");
         }
       } else {
-        logCtrlCDisposition("can_interrupt_false");
         setNotice({
           lines: ["Ctrl+C：无前台运行中的 turn；/quit 退出。"],
         });
