@@ -638,6 +638,38 @@ describe("SC7: #440 T5 todo_write list 子模式 bypass ask (read-only), add/che
     assert.ok(out.reason.includes("write"));
   });
 
+  // #903 SC5:replace 是 write 默认 ask;list 子模式豁免不适用(仅 list bypass)。
+  it("todo_write replace mode → ask (write category 默认;list 子模式豁免不适用)", () => {
+    const out = checkPermission({
+      def: makeTool({ name: "todo_write", category: "write" }),
+      input: { mode: "replace", items: ["A", "B"] },
+      sources: policy.sources,
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    });
+    assert.equal(out.decision, "ask");
+    assert.ok(out.reason.includes("write"));
+    // 不应命中 list bypass(decision=allow / reason 含 list)
+    assert.ok(!out.reason.includes("todo_write list mode"));
+  });
+
+  it("todo_write replace mode 在 full_auto mode → ask(layered rule 先于 mode, write ask 路径仍生效)", () => {
+    // 验证 code-layer 没有给 replace 写专属 ask rule,所以 full_auto 仍
+    // 走 mode 路径放行。spec 决议:replace 默认 ask;full_auto 下 model 显式
+    // 同意可执行。
+    const fullAuto = createPermissionPolicy({ mode: "full_auto" });
+    const out = checkPermission({
+      def: makeTool({ name: "todo_write", category: "write" }),
+      input: { mode: "replace", items: ["A"] },
+      sources: fullAuto.sources,
+      hardWalls: fullAuto.hardWalls,
+      defaultByCategory: fullAuto.defaultByCategory,
+      mode: fullAuto.mode,
+    });
+    assert.equal(out.decision, "allow");
+    assert.ok(out.reason.includes("full_auto"));
+  });
+
   it("todo_write 缺 mode → ask (defense in depth, list 子模式豁免不适用)", () => {
     const out = checkPermission({
       def: makeTool({ name: "todo_write", category: "write" }),
