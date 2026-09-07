@@ -55,6 +55,10 @@ function clampRow(row: number, count: number): number {
  *
  * 设计要点：
  *  - only `down` / `up` move the cursor；其他键原样返回当前焦点（不抢键）。
+ *  - **no-op 语义**：焦点不变的分支返回 `input.focus` 原引用（而非新建
+ *    对象）—— 调用方用 `next.focus !== chromeFocus` 身份比较探测变化，
+ *    引用相等 → 无 setState / 无多余 re-render；onLeaveToChrome 契约
+ *    （无可达环 → 返回 false，PromptInput 保留状态）也依赖这一点。
  *  - subagent 环行数由 caller 投影（projectSubagentLines 同源）；reducer
  *    只看 count，不知道具体 row 是哪个 subagent —— T7 在 app.tsx 拼装。
  *  - graph 环单一节点（无 row 选择 —— graph chrome 一行）。
@@ -71,9 +75,9 @@ export function reduceChromeFocus(
     if (key === "down") {
       if (count > 0) return { focus: { kind: "subagent", row: 0 } };
       if (input.hasSnapshot) return { focus: { kind: "graph" } };
-      return { focus: { kind: "input" } };
+      return { focus: input.focus };
     }
-    return { focus: { kind: "input" } };
+    return { focus: input.focus };
   }
 
   if (input.focus.kind === "subagent") {
@@ -83,13 +87,13 @@ export function reduceChromeFocus(
     if (key === "down") {
       if (row + 1 < count) return { focus: { kind: "subagent", row: row + 1 } };
       if (input.hasSnapshot) return { focus: { kind: "graph" } };
-      return { focus: { kind: "subagent", row } };
+      return { focus: input.focus };
     }
     if (key === "up") {
       if (row === 0) return { focus: { kind: "input" } };
       return { focus: { kind: "subagent", row: row - 1 } };
     }
-    return { focus: { kind: "subagent", row } };
+    return { focus: input.focus };
   }
 
   // graph
@@ -98,5 +102,5 @@ export function reduceChromeFocus(
     if (count > 0) return { focus: { kind: "subagent", row: count - 1 } };
     return { focus: { kind: "input" } };
   }
-  return { focus: { kind: "graph" } };
+  return { focus: input.focus };
 }

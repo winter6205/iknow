@@ -298,6 +298,26 @@ describe("reduceChromeFocus — negative 边界（非 down/up 不抢键）", () 
 });
 
 describe("reduceChromeFocus — concurrent / purity 隔离", () => {
+  test("no-op 返回入参 focus 原引用（调用方 !== 身份比较探测真实变化；契约见 T7 onLeaveToChrome）", () => {
+    const focus: ChromeFocus = { kind: "graph" };
+    const noOp = reduceChromeFocus({
+      focus,
+      key: "down",
+      subagentCount: 3,
+      hasSnapshot: true,
+    });
+    expect(noOp.focus).toBe(focus);
+    const inputStays: ChromeFocus = { kind: "input" };
+    expect(
+      reduceChromeFocus({
+        focus: inputStays,
+        key: "up",
+        subagentCount: 0,
+        hasSnapshot: false,
+      }).focus
+    ).toBe(inputStays);
+  });
+
   test("两次连续 reduce 互不污染（同一 input → 同样 output）", () => {
     const input = {
       focus: { kind: "input" } as ChromeFocus,

@@ -1018,6 +1018,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // running-bg 时若仍有活跃 / 未过期终态子代理（watch=true）也启表——
   // chat 视图下面板需要最新 subagents 投影（runElapsed/ageSec 每秒跳变），
   // list/mcp 视图下面板不渲染但轮询开销 1Hz 且仅 watch=true 时承担。
+  // 挂载时先同步拉一次：idle 会话若已有 live 子代理（如上一 turn 遗留 /
+  // 外部 spawn），初始帧就能渲染 identity strip / panel，而不是等下一个
+  // tick 且 watch=false 永不启动。
+  useEffect(() => {
+    setSubagents(props.bridge.listSubagents());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.bridge]);
   useEffect(() => {
     if (active.runState !== "running-fg" && !subagentWatch) return;
     const tick = setInterval(() => {
@@ -2775,6 +2782,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       {view === "chat" && (
         <VerifyBannerStrip slot={verifySlot} mode={verifyMode} cols={cols} />
       )}
+      {/* plans/tui-chrome-interaction.md T7 —— 子代理身份条（immediately
+          above the prompt）。live 子代理 catalog id 用 `· ` 连接，无 task 文本。
+          不入 chrome 行账（永远单行，按 cols 视觉宽度截断；live === 0 → 不渲染）。
+          activeToolLabel 已剥除 `▣ 子代理`（dual render 移除）；identity strip
+          + SubagentPanel 双轨表达 live 子代理状态。JSX 顺序 = 视觉顺序：
+          本条必须在 <PromptInput> 之前。 */}
+      {view === "chat" && (
+        <SubagentIdentityStrip subagents={subagents} cols={cols} />
+      )}
       {view === "chat" && (
         <PromptInput
           ref={promptInputRef}
@@ -2874,14 +2890,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             return next.focus !== chromeFocus;
           }}
         />
-      )}
-      {/* plans/tui-chrome-interaction.md T7 —— 子代理身份条（immediately
-          above the prompt）。live 子代理 catalog id 用 `· ` 连接，无 task 文本。
-          不入 chrome 行账（永远单行，按 cols 视觉宽度截断；live === 0 → 不渲染）。
-          activeToolLabel 已剥除 `▣ 子代理`（dual render 移除）；identity strip
-          + SubagentPanel 双轨表达 live 子代理状态。 */}
-      {view === "chat" && (
-        <SubagentIdentityStrip subagents={subagents} cols={cols} />
       )}
       {/* plans T7 验收钉死的 footer 顺序（prompt 之下）：
             subagent task list → ContextBar → worktree isolation line → graph。

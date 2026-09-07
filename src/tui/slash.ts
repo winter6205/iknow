@@ -222,7 +222,8 @@ function candidateHeadLower(c: SlashCandidate): string {
  *  - **精确命中 + remainder**（typed 首 token === 某候选名 + 空格/剩余段）
  *    → 空列表（即便有更长兄弟）。
  *  - **前缀歧义**（typed 前缀没有精确候选；如 `/way` → way-foo + way-bar）
- *    → 列表保留全部。
+ *    → 列表保留全部，**含 remainder 非空时**（`/way now` 仍显示 way-foo /
+ *    way-bar —— 消歧职责未完成）。
  *  - **精确命中无空格但有更长兄弟**（typed 首 token === 某候选名 + 存在其他
  *    匹配项）→ 只显示更长兄弟，**不**显示已完整的名字。
  *  - 大小写不敏感（mixed-case `/ECHO` 仍识别为 echo）。
@@ -243,11 +244,13 @@ export function slashSuggestions(
   const matches = enumerateSlashCandidates(text, skills);
   if (matches.length === 0) return [];
   const prefixLower = slashPrefix(text);
-  // 1) 精确命中 + remainder → 用户已「提交」（typed `/skillname` 后追加更多
-  //    内容）；候选不再有消歧意义，全部隐藏。
-  if (remainder !== "") return [];
-  // 2) 候选中是否包含 typed 前缀的精确命中（大小写不敏感）。
+  // 候选中是否包含 typed 前缀的精确命中（大小写不敏感）。
   const hasExact = matches.some((m) => candidateHeadLower(m) === prefixLower);
+  // 1) 精确命中 + remainder → 用户已「提交」（typed `/skillname` 后追加更多
+  //    内容）；候选不再有消歧意义，全部隐藏。非 exact 前缀 + remainder 不受
+  //    此条影响（前缀歧义仍是消歧场景，列表保留 —— plan T4 只授权 exact
+  //    命中清空）。
+  if (remainder !== "" && hasExact) return [];
   if (!hasExact) return matches;
   // 3) 存在精确命中 → 过滤掉该精确候选，保留仅「更长兄弟」（仍可消歧）。
   const out: SlashCandidate[] = [];

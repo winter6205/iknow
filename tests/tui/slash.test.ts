@@ -1044,6 +1044,17 @@ describe("Task 4：slashSuggestions 仅显示未消歧的兄弟（disambig-only�
     expect(slashSuggestions("/zzzz")).toEqual([]);
   });
 
+  test("非 exact 前缀歧义 + remainder → 列表保留（plan T4 只授权 exact 命中清空）", () => {
+    const skills = [
+      { name: "way-foo", description: "foo" },
+      { name: "way-bar", description: "bar" },
+    ];
+    expect(slashSuggestions("/way now", skills)).toEqual([
+      { kind: "skill", name: "way-foo", description: "foo" },
+      { kind: "skill", name: "way-bar", description: "bar" },
+    ]);
+  });
+
   test("空 / 非 `/` 开头 → 0 hint rows（边界，与原契约一致）", () => {
     expect(slashSuggestions("")).toEqual([]);
     expect(slashSuggestions("hello")).toEqual([]);
