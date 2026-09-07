@@ -71,6 +71,7 @@ import {
   type WorkerEnvelope,
 } from "./envelope.js";
 import { toolConstraintsSegment } from "../identity/assemble.js";
+import { writeRootSegment } from "../skill/body.js";
 
 /** stderr 日志前缀 (spec Code Style: warn 一行不泄露 env 值)。 */
 const LOG_PREFIX = "[subagent-worker]";
@@ -649,13 +650,13 @@ export function priorMessagesFromEnvelope(
     );
   }
   // T3: 当前写根段。envelope.sandboxRoot 是必填,空串即视为缺席。
+  // 写根文案 SSOT = writeRootSegment（specs/skill-load-write-root.md）:
+  // 与 skill 正文 trailer（createSkillBody）共用同一函数,源内不留第二份长句。
   if (typeof env.sandboxRoot === "string" && env.sandboxRoot.length > 0) {
-    prior.push(
-      encodeUserText(
-        `current write root (for write_file / edit_file / bash cwd): ${env.sandboxRoot}\n` +
-          `System ## Project path is still the project identity root and is read-only; the write root above is where file mutations should land. Use relative paths from this root.`
-      )
-    );
+    const segment = writeRootSegment(env.sandboxRoot);
+    if (segment !== null) {
+      prior.push(encodeUserText(segment));
+    }
   }
   return prior.length > 0 ? prior : undefined;
 }
