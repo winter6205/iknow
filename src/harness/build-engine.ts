@@ -373,6 +373,13 @@ export type BuiltEngine = EngineBundle & {
    */
   readonly catalog?: AciCatalog;
   /**
+   * 活 taskRoot cell（specs/skill-load-write-root.md）：host 装配期句柄透出，
+   * hub `loadSkillBody` 在调用时机读快照传给 `createSkillBody`——skill 正文
+   * trailer 与 write_file / bash 工厂、worker spawn 同 vintage。缺席（旧
+   * host 注入 deps 形态）→ 调用方退化为无 trailer。
+   */
+  readonly liveTaskRoot?: LiveTaskRoot;
+  /**
    * TUI live flags for /memory. Present when surface is `tui` and the memory
    * layer is on. The TUI mutates this box on Esc; the hook reads it per turn.
    */
@@ -1580,6 +1587,9 @@ export async function buildHarnessEngine(
     ...(mcpRoots ? { mcpRoots } : {}),
     sessionRoots,
     catalog: reg.catalog,
+    // specs/skill-load-write-root.md：活 taskRoot cell 透出，hub loadSkillBody
+    // 调用时机读快照 —— 与 registry 工厂消费同一 cell 实例。
+    liveTaskRoot,
     // D-α T3:host 每次 run() 前调 beginRound() 拍快照(chat / hub 两处 run
     // 入口)。缺席 = 本入口没接 overlay。
     ...(graphAssembly ? { graphAssembly } : {}),

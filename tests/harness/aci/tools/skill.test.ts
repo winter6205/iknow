@@ -25,6 +25,10 @@ import {
 } from "../../../../src/harness/skill/catalog.js";
 import { createSkillTool } from "../../../../src/harness/aci/tools/skill.js";
 import type { AciToolDef } from "../../../../src/harness/aci/types.js";
+import {
+  createLiveTaskRoot,
+  writeLiveTaskRoot,
+} from "../../../../src/harness/session-roots.js";
 
 function entry(
   overrides: Partial<SkillEntry> & Pick<SkillEntry, "name" | "dir">
@@ -202,5 +206,87 @@ describe("skill — 叫错名返回引导回 <available_skills> / read_file 的�
     const tool = createSkillTool({ catalog });
     const out = await invokeSkill(tool, { name: "secret" });
     expect(out).toContain("hidden body");
+  });
+});
+
+// 写根 trailer（specs/skill-load-write-root.md）：skill() 工具 handler 调用
+// 时机读活 taskRoot cell 快照传给 createSkillBody —— 与 TUI slash / hub
+// loadSkillBody 同一装配口，正文末尾带当前写根；cell 缺席 → 无 trailer
+// （legacy parity）；未知 skill 名仍是引导句、无 trailer。
+describe("skill — 写根 trailer（specs/skill-load-write-root.md T3）", () => {
+  let scratch: string;
+
+  beforeEach(async () => {
+    scratch = await mkdtemp(join(tmpdir(), "aci-skill-wrt-"));
+  });
+
+  afterEach(async () => {
+    await rm(scratch, { recursive: true, force: true });
+  });
+
+  function echoCatalog(dir: string) {
+    return createSkillCatalog([
+      entry({ name: "echo", dir, description: "Echo a value" }),
+    ]);
+  }
+
+  async function writeEcho(dir: string): Promise<void> {
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "SKILL.md"),
+      "---\nname: echo\ndescription: Echo a value\n---\n# echo body\n",
+      "utf8"
+    );
+  }
+
+  it("liveTaskRoot 在场 → handler 调用时读 cell 快照，正文末尾含当前写根", async () => {
+    const dir = join(scratch, "echo");
+    await writeEcho(dir);
+    const tool = createSkillTool({
+      catalog: echoCatalog(dir),
+      liveTaskRoot: createLiveTaskRoot("/tmp/task-wt-a"),
+    });
+    const out = await invokeSkill(tool, { name: "echo" });
+    expect(out).toContain(
+      "current write root (for write_file / edit_file / bash cwd): /tmp/task-wt-a"
+    );
+  });
+
+  it("改绑后翻 cell → 同一工具下一次调用读到新根（活性：调用时读取）", async () => {
+    const dir = join(scratch, "echo");
+    await writeEcho(dir);
+    const cell = createLiveTaskRoot("/tmp/task-wt-a");
+    const tool = createSkillTool({
+      catalog: echoCatalog(dir),
+      liveTaskRoot: cell,
+    });
+    const before = await invokeSkill(tool, { name: "echo" });
+    expect(before).toContain("/tmp/task-wt-a");
+    // 模拟改绑：翻 cell（唯一 writer = writeLiveTaskRoot，装配层缝包装面）
+    writeLiveTaskRoot(cell, "/tmp/task-wt-b");
+    const after = await invokeSkill(tool, { name: "echo" });
+    expect(after).toContain("/tmp/task-wt-b");
+    expect(after).not.toContain("task-wt-a");
+  });
+
+  it("liveTaskRoot 缺席 → 无 trailer（与今日字节一致）", async () => {
+    const dir = join(scratch, "echo");
+    await writeEcho(dir);
+    const tool = createSkillTool({ catalog: echoCatalog(dir) });
+    const out = await invokeSkill(tool, { name: "echo" });
+    expect(out).not.toContain("current write root");
+    expect(out.trimEnd().endsWith("</skill_files>")).toBe(true);
+  });
+
+  it("未知 skill 名 → 仍是引导句，无 trailer（即使 cell 在场且非空）", async () => {
+    const dir = join(scratch, "echo");
+    await writeEcho(dir);
+    const tool = createSkillTool({
+      catalog: echoCatalog(dir),
+      liveTaskRoot: createLiveTaskRoot("/tmp/task-wt-a"),
+    });
+    const out = await invokeSkill(tool, { name: "nope" });
+    expect(out).toMatch(/available_skills|read_file/);
+    expect(out).not.toContain("current write root");
   });
 });

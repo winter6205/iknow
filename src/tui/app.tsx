@@ -239,6 +239,7 @@ import {
 } from "../harness/graph/mode.js";
 import { buildSkillLoadText, createSkillBody } from "../harness/skill/body.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
+import type { LiveTaskRoot } from "../harness/session-roots.js";
 import {
   createSubagentWake,
   toSubagentWakeError,
@@ -465,6 +466,10 @@ export interface TuiAppProps {
    *  可选：缺省 = 空清单（兼容 fixture / 测试；产品路径由 run.tsx 经
    *  TuiExtensions.skillCatalog 注入）。 */
   readonly skillCatalog?: SkillCatalog;
+  /** 活 taskRoot cell（specs/skill-load-write-root.md）：slash 装配 skill
+   *  正文时调用时机读快照 —— 与 ACI skill() / hub loadSkillBody 同一装配口。
+   *  缺省 = undefined → 无 trailer（兼容 fixture / 测试）。 */
+  readonly liveTaskRoot?: LiveTaskRoot;
   /** #361 Phase D：MCP 看板扩展面（TuiMcpViewExt 最小依赖）。缺省 =
    *  undefined → /mcp 切 view 时提示「MCP 未装配」。产品路径由 run.tsx 经
    *  TuiExtensions 注入；fixture / 测试可选 stub。 */
@@ -1042,6 +1047,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // + 有 description、名字序。slash 候选混显「静态命令 + skill」。
   const skillCatalog = props.skillCatalog ?? emptySkillCatalog;
   const skillList = useMemo(() => skillCatalog.available(), [skillCatalog]);
+  // 活 taskRoot cell（specs/skill-load-write-root.md）：slash 装配读快照用。
+  const liveTaskRoot = props.liveTaskRoot;
   const inputHintSuggestions = useMemo<ReadonlyArray<SlashCandidate>>(() => {
     if (!inputValue.trim().startsWith("/")) return [];
     return slashSuggestions(inputValue, skillList);
@@ -1849,7 +1856,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           return;
         }
         try {
-          const body = await createSkillBody({ entry, dir: entry.dir });
+          // 写根 trailer（specs/skill-load-write-root.md）：调用时机读活
+          // cell 快照；cell 缺席（fixture / 测试）→ 无 trailer。
+          const body = await createSkillBody({
+            entry,
+            dir: entry.dir,
+            ...(liveTaskRoot !== undefined
+              ? { taskRoot: liveTaskRoot.read() }
+              : {}),
+          });
           const sendText = buildSkillLoadText(
             skillLoad.name,
             body,

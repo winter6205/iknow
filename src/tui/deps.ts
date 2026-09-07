@@ -37,6 +37,7 @@ import type { RuntimeBundle } from "../cli/runtime.js";
 import type { AskUser } from "../harness/permission/types.js";
 import type { WorktreeIsolationHostOpts } from "../harness/isolation/worktree-gate.js";
 import type { IknowSettings } from "../config/settings.js";
+import type { LiveTaskRoot } from "../harness/session-roots.js";
 import { homedir } from "node:os";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import type { McpServerStatus } from "../harness/mcp/manager.js";
@@ -162,6 +163,12 @@ export interface BuildTuiDepsOptions {
  */
 export interface TuiExtensions {
   readonly skillCatalog: SkillCatalog;
+  /**
+   * 活 taskRoot cell（specs/skill-load-write-root.md）：TUI slash 装配
+   * skill 正文时调用时机读快照 —— 与 ACI skill() / hub loadSkillBody 同一
+   * 装配口。缺席（旧装配形态防御缺省）→ slash 不传写根（无 trailer）。
+   */
+  readonly liveTaskRoot?: LiveTaskRoot;
   readonly mcp: {
     readonly status: () => readonly McpServerStatus[];
     readonly reload: () => Promise<void>;
@@ -343,6 +350,11 @@ export async function buildTuiDeps(
   // 收窄类型;极端防御缺省(空 catalog / no-op shutdown)保证回调不抛。
   opts.onExtensions?.({
     skillCatalog: skillCatalog!,
+    // specs/skill-load-write-root.md：活 taskRoot cell 透出，slash 装配
+    // skill 正文时调用时机读快照 —— 与 build-engine 传给 registry 的同一实例。
+    ...(built.liveTaskRoot !== undefined
+      ? { liveTaskRoot: built.liveTaskRoot }
+      : {}),
     mcp: {
       status: () => mcpManager?.status() ?? [],
       reload,

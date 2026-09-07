@@ -20,14 +20,19 @@
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import type { SkillCatalog } from "../../skill/catalog.js";
+import type { LiveTaskRoot } from "../../session-roots.js";
 import { createSkillBody } from "../../skill/body.js";
 
 /**
  * 依赖注入：`catalog` 索引层（T2 提供），本工具经其
  * `get(name)` 拿 SkillEntry（body 装配模块吃 entry + dir）。
+ * `liveTaskRoot`（可选）：活 taskRoot cell —— handler 调用时机读快照传给
+ * `createSkillBody`（specs/skill-load-write-root.md：skill() 与 slash /
+ * hub 同一装配口，正文末尾带当前写根）。缺席 → 无 trailer（legacy parity）。
  */
 export interface SkillToolDeps {
   readonly catalog: SkillCatalog;
+  readonly liveTaskRoot?: LiveTaskRoot;
 }
 
 /**
@@ -61,7 +66,14 @@ export function createSkillTool(deps: SkillToolDeps): AciToolDef {
       }
       // T6: 装配正文 (frontmatter 剥离 + Base directory 行 + skill_files 段)。
       // entry.dir 即 SKILL.md 所在目录（catalog.getBodyPath 内部 join(dir, "SKILL.md")）。
-      return await createSkillBody({ entry, dir: entry.dir });
+      // 写根 trailer：handler 调用时机读活 cell 快照（specs/skill-load-write-root.md）。
+      return await createSkillBody({
+        entry,
+        dir: entry.dir,
+        ...(deps.liveTaskRoot !== undefined
+          ? { taskRoot: deps.liveTaskRoot.read() }
+          : {}),
+      });
     },
     aci: {
       category: "read-only",
