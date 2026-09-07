@@ -123,7 +123,7 @@
    - 包1 感知：**已合入** PR #666（TUI Verify 终态 + 环境现势）。
    - 包2 内核：**已合入** PR #671（沙箱纪律 + `isConcurrencySafe` 调度）。
 2. **可靠性 / 工作流**
-   - 故障恢复：**已在工作树落地**（T1 FaultClass → T2 传输重试 → T3 环检测+`fused`；PR #683/#684/#685）。澄清轮 / 设计审批仍 defer。手动 `/compact` 不走 token 门挂 #270，不在 672 spec。
+   - 故障恢复：**已在工作树落地**（T1 FaultClass → T2 传输重试 → T3 环检测+`fused`；PR #683/#684/#685）。澄清轮 / 设计审批仍 defer。手动 `/compact` 不走 auto-compact token 门已由 manual-compact-trigger 本 PR 落地（效果 = auto 开火后同路径；词条见 docs/CONTEXT.md「manual compact」「auto-compact token gate」「compact reason」）。
 3. **观测最小集**
    - 结构化日志：conversation_id、turn、tool 耗时、是否 llm。
 

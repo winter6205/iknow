@@ -2723,6 +2723,77 @@ describe("loop engine T3 compress-trigger-gate: proactive full-summary fallback"
 });
 
 // ---------------------------------------------------------------------------
+// plan manual-compact-trigger T1: 手动 /compact 绕开 auto token 门 — 反向断言
+// 锁住「loop-engine proactive 路径不受影响」:估算低于缺省阈值时仍不主动压缩。
+// ---------------------------------------------------------------------------
+describe("loop engine manual-compact-trigger T1: 短历史 + 缺省阈值下 proactive 不开火", () => {
+  it("3 条 prior + 缺省阈值(167k)+ 短 step 文本 → messages 不含任何 compact 痕迹", async () => {
+    // 反向断言:proactive 仍走 evaluateCompactTrigger,缺省阈值 ≈ 167k 时短
+    // 历史远低于阈值 → noop,既不调 runFullCompact 也不调 compactMessages
+    // (即:无 preamble 摘要、无 boundary placeholder、adapter step 次数 = 期望 1)。
+    const prior = Array.from({ length: 3 }, (_, i) =>
+      makeNative({ role: "user", text: `prior-${i} short` })
+    );
+    const adapter = makeFullSummaryAdapter({
+      stepScripts: [
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+      compactOutcomes: [], // proactive 不应触发,空队列(若被调会 throw)
+    });
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+
+    const { result } = await run(
+      "Q",
+      {
+        adapter,
+        executor: exec,
+        registry: reg,
+        maxTurns: 3,
+        // thresholdTokens 故意缺席 → getAutoCompactThreshold 走
+        // 200000 - 20000 - 13000 = 167000,远高于 3 条 prior + 1 user 的估算。
+        compress: { contextWindow: 200_000 },
+      },
+      undefined,
+      { priorMessages: prior }
+    );
+    assert.equal(result.stopReason, "completed");
+    // 关键断言 1:makeFullSummaryAdapter 的 compactOutcomes 队列为空 —
+    // 任何 compact 步骤都会 shift 一次并最终 throw "exhausted"。若 step 1
+    // 之前没有调用,说明 proactive gate 走 noop,完全没碰 full-compact 路径。
+    assert.equal(
+      adapter.compactCalls.value,
+      0,
+      "短历史 + 缺省阈值下 proactive 不应触发任何 compact 步骤"
+    );
+    // 关键断言 2:messages 文本不含任何 compact 产物 — 不含 preamble / placeholder。
+    const allText = result.messages
+      .map((m) =>
+        m.content
+          .filter((b): b is { type: "text"; text: string } => b.type === "text")
+          .map((b) => b.text)
+          .join("")
+      )
+      .join("\n");
+    assert.ok(
+      !allText.includes("This session is being continued"),
+      "messages 中不得含 compact preamble(未走 full summary)"
+    );
+    assert.ok(
+      !allText.includes("[compaction boundary"),
+      "messages 中不得含 boundary placeholder(未走 windowed)"
+    );
+    // 历史应 = 3 prior + 1 user + 1 assistant text(无任何 compact 注入)。
+    assert.equal(result.messages.length, 5);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // plan T4 / ADR-0011: 收尾摘要 epilogue (stop_summary 事件)
 // ---------------------------------------------------------------------------
 describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {

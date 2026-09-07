@@ -19,17 +19,20 @@ export function useChatCompact(chat: ChatApi): {
     setCompacting(true);
     try {
       const didCompact = await chat.compact();
-      // plan T4:web 端 useSessionChat.compact() 仍只返 boolean(避免扩
-      // SessionChatApi 公开 surface + 打破 tests/web 既有断言),hook 走
-      // 简化二分支文案。TUI 4 分支精度由 src/tui/app.tsx 承担。didCompact
-      // 涵盖 windowed / full_summary 两条压缩成功路径;false 涵盖
-      // below_token_threshold / messages_too_few / cancelled 三态,后者已
-      // 走 try/catch 抛错分支(cancelled 路径 runFullCompact 抛错)。
+      // plan manual-compact-trigger T2:web 端 useSessionChat.compact() 仍只
+      // 返 boolean(避免扩 SessionChatApi 公开 surface),hook 走简化二分支
+      // 文案。TUI reason 精度由 src/tui/app.tsx compactNoticeFor 承担。
+      // didCompact=true 涵盖 windowed / full_summary 两条压缩成功路径;false
+      // 文案语义是「没有可压缩的上下文」,禁止引用 auto 阈值。web 端
+      // api.compactSession 不传 signal(无取消入口);hub 对 abort 返
+      // 200 + {compacted:false, cancelled:true}、不抛错,该响应同样以
+      // compacted:false 落到本分支与 messages_too_few 合并(web 接受两态
+      // 合并的现状决策),catch 只接网络/服务端真实故障。
       chat.pushNotice(
         didCompact
           ? "已压缩上下文"
           : chat.session
-            ? "上下文未达压缩阈值"
+            ? "没有可压缩的上下文，会话保持原样。"
             : "当前无会话可压缩"
       );
     } catch (e) {
