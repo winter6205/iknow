@@ -27,6 +27,7 @@ import { createGraphProgressTracker } from "./progress.js";
 import { validateGraph, type GraphValidationError } from "./topo.js";
 import { runGraph } from "./scheduler.js";
 import { createSubAgentNodeExecutor } from "./node-executor.js";
+import type { LiveGraphLedgerHost } from "./ledger.js";
 import type {
   GraphNodeResult,
   GraphSpec,
@@ -45,6 +46,14 @@ export interface RunGraphToolDeps {
    * 才能跑通;生产装配由 build-engine 按 graphAssembly.enabled 注入。
    */
   readonly isEnabled?: () => boolean;
+  /**
+   * 活图账本 host（live-graph-phase1 T1 / ADR-0047 / ADR-0051）。按
+   * `ctx.conversationId` 解析会话账本：第一次校验通过的调用 `ensure()`
+   * 建账；settle 后按终态冻结 done/failed（skipped 不冻）；已冻结 id
+   * 再交 → typed 拒绝、零 spawn。**缺省 = 无账本** —— 行为与 V1 字节
+   * 一致（ask / 直调测试 / 未接活图的调用方零变化）。
+   */
+  readonly ledger?: LiveGraphLedgerHost;
 }
 
 /** 模型声明的单节点（schema 与本形状一一对应）。 */
@@ -232,6 +241,22 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
           `run_graph: invalid graph — ${errors.map(describeValidationError).join("; ")}`
         );
       }
+      // live-graph-phase1 T1:活图账本生命周期 —— 拓扑非法路径绝不建账本
+      // (SC1 + ASSUMPTIONS #4),所以本块紧跟 validateGraph 之后。
+      const ledger = deps.ledger?.ledgerFor(ctx?.conversationId);
+      if (ledger !== undefined) {
+        ledger.ensure();
+        // EXIT:重交已冻结 id(SC2 关 overlay 不毁 / T2 合并已落定语义)。
+        // 与拓扑非法同层——零 spawn、typed 拒绝,handler 不容忍"重演"。
+        const alreadyFrozen = nodes
+          .map((n) => n.id)
+          .filter((id) => ledger.isFrozen(id));
+        if (alreadyFrozen.length > 0) {
+          throw new ToolExecutionError(
+            `run_graph: frozen id(s) cannot be re-run on the same live graph: ${alreadyFrozen.join(", ")}`
+          );
+        }
+      }
       const byId = new Map(nodes.map((n) => [n.id, n]));
       const signal = ctx?.signal;
       const parentTurnId = ctx?.turnId;
@@ -265,6 +290,16 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
             emitGraphProgress(ctx, tracker.onNode(result));
           },
         });
+        // live-graph-phase1 T1:按结算终态冻结已落定 id。skipped 不冻
+        // (spec Glossary);账本单点强制,handler 直传 GraphNodeResult.status。
+        // T2 退路:中止节点记 failed("cancelled by caller abort") 也会被冻结
+        // —— T3 取消保留已 done 任务会重审这点(scroll SC8);T1 暂按统一规则
+        // 落定。
+        if (ledger !== undefined) {
+          for (const result of Object.values(execution.results)) {
+            ledger.freeze(result.id, result.status);
+          }
+        }
         // EXIT:归因调用侧取消 —— 与 spawn_subagent 一致(executor 因
         // signal.aborted 归一 execution_failed:cancelled)。半张图的部分结果
         // 不当成功数据返回:调用方已经不要这轮了。

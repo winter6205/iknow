@@ -35,6 +35,7 @@ import {
   createGraphModeContext,
   resolveGraphMode,
 } from "../harness/graph/mode.js";
+import { createLiveGraphLedgerHost } from "../harness/graph/ledger.js";
 
 export type ServeOptions = {
   host?: string;
@@ -150,6 +151,9 @@ export async function startSessionServe(
   // createTaskWorktreeProvisioner（闭包冻结，rebind 不重读；ADR-0037 §5
   // 硬要求 9）。OFF 默认 = 严格走今日 enter 路径（SC2 零回归钉死）。
   const worktreeExclusive = resolveWorktreeExclusive(startupSettings);
+  // live-graph-phase1 T1 / ADR-0051:活图账本 host —— serve 进程级单例,
+  // 按 conversationId 解析会话账本;resetSession / hub.shutdown 销毁。
+  const liveGraphLedger = createLiveGraphLedgerHost();
 
   const hub = new SessionHub({
     store,
@@ -176,6 +180,8 @@ export async function startSessionServe(
     // 时 `opts.worktreeExclusive === true` 判定为 false → 占用检查完全跳过，
     // 行为与今日逐字节一致，spec SC2）。
     ...(worktreeExclusive ? { worktreeExclusive: true } : {}),
+    // live-graph-phase1 T1:账本 host 注入 hub。
+    liveGraphLedger,
     ...opts?.hubOptions,
     // review-fix (M1 / H1) + T6:启动 bind root 透传 —— bash fence / identity
     // 与稳定 productRoot（MCP config）同源；rebind 不改 productRoot。

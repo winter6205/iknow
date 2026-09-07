@@ -29,6 +29,7 @@ import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import type { PostToolUseHook } from "../harness/permission/types.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
 import type { GraphModeContext } from "../harness/graph/mode.js";
+import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
 import { randomUUID } from "node:crypto";
 import type { MemoryLiveFlags } from "../harness/memory/index.js";
@@ -103,6 +104,12 @@ export interface BuildTuiDepsOptions {
    * `graphAssembly` 每 round 快照 gate。缺席 = 本入口未接 overlay。
    */
   readonly graphMode?: GraphModeContext;
+  /**
+   * live-graph-phase1 T1 / ADR-0051:活图账本 host（run.tsx 自建单例）。
+   * 透传给 build-engine —— `run_graph` handler 按 ctx.conversationId 解析
+   * 会话账本。缺席 = 工具不建账（V1 零行为变化）。
+   */
+  readonly liveGraphLedger?: LiveGraphLedgerHost;
   /** #337 Phase B 测试缝：userHome 覆盖（默认 homedir()）。 */
   readonly userHome?: string;
   /** #337 Phase B 测试缝：cwd 覆盖（默认 process.cwd()）。 */
@@ -325,6 +332,9 @@ export async function buildTuiDeps(
     projectDir: todoProjectDir,
     conversationId: subagentsConversationId,
   });
+  // live-graph-phase1 T1 / ADR-0051:活图账本 host —— TUI 装配点自建,与
+  // graphMode 平行挂在会话 runtime 上。
+  const liveGraphLedger = opts.liveGraphLedger;
   const built = await buildHarnessEngine({
     env: bundle.env,
     askUser: opts.askUser,
@@ -338,6 +348,8 @@ export async function buildTuiDeps(
     ...(opts.sessionGrants ? { session: opts.sessionGrants } : {}),
     // D-α T5:overlay holder 透传 —— run_graph / 编排段的条件装配缝。
     ...(opts.graphMode ? { graphMode: opts.graphMode } : {}),
+    // live-graph-phase1 T1:活图账本 host 透传（TUI 装配点自建）。
+    ...(liveGraphLedger ? { liveGraphLedger } : {}),
     // T1 观测缝:#175 T4 工具摘要行 — postToolUse 投影为 TuiToolEvent。
     ...(opts.onToolEvent ? { hooks: wrapTuiHook(opts) } : {}),
     // #337 Phase B 测试缝:userHome / cwd 覆盖(与 build-engine 同款)。

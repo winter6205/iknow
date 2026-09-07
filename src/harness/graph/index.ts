@@ -28,6 +28,14 @@ export type { RunGraphOptions } from "./scheduler.js";
 export { runGraph } from "./scheduler.js";
 
 export type {
+  FrozenTerminal,
+  SettleStatus,
+  LiveGraphLedger,
+  LiveGraphLedgerHost,
+} from "./ledger.js";
+export { createLiveGraphLedger, createLiveGraphLedgerHost } from "./ledger.js";
+
+export type {
   GraphNodeProgress,
   GraphNodeSeed,
   GraphProgressSnapshot,

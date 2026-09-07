@@ -52,6 +52,7 @@ import {
   createGraphModeContext,
   resolveGraphMode,
 } from "../harness/graph/mode.js";
+import { createLiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import {
   loadIknowSettings,
   resolveWorktreeExclusive,
@@ -287,6 +288,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     const graphMode = createGraphModeContext(
       resolveGraphMode({ settings: startupSettings.graph })
     );
+    // live-graph-phase1 T1 / ADR-0051:活图账本 host —— TUI 单例,跨多会话
+    // (web 多面板 / 切换会话)按 conversationId 解析;resetSession /
+    // hub.shutdown 销毁。
+    const liveGraphLedger = createLiveGraphLedgerHost();
 
     // The initial TUI engine is built before createTuiBridge, so bind this
     // host seam late to the Hub that owns dirty-root persistence. Mutates
@@ -311,6 +316,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       soleInflightId: () => inflight.soleId(),
       permissionMode,
       graphMode,
+      liveGraphLedger,
       sessionGrants,
       // ADR-0019 (T2): workspaceRoot 透传到 build-engine identity /
       // memory / skill seam。
@@ -376,6 +382,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       ...(workspaceRoot ? { productRoot: workspaceRoot } : {}),
       deps,
       subagentManager,
+      // live-graph-phase1 T1:账本 host 注入 bridge —— hub 按 conversationId 解析。
+      liveGraphLedger,
       // Review High-1 (2026-08-29):注入 deps 的启动根 + per-root 重建缝。
       // rebind 后会话根离开启动根 → ensureDeps 经此缝以同一 depsOpts（同一
       // 启动 settings + 稳定 productRoot,硬要求 9 / T6）在新根重跑

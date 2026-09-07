@@ -312,6 +312,12 @@ export interface CreateDefaultAciRegistryOptions {
    *  （ask / worker / 未接 overlay 的入口）。工具**可见性**由快照决定,
    *  装配层据此过滤 promptTools —— 见 build-engine。 */
   readonly graphAssembly?: { readonly enabled: () => boolean };
+  /**
+   * live-graph-phase1 T1:活图账本 host（ADR-0047 / ADR-0051）。与会话
+   * runtime 同寿 —— host 持有 / 销毁，账本权威在 harness/graph。缺席时
+   * `run_graph` handler 不建账（V1 零行为变化）。
+   */
+  readonly liveGraphLedger?: import("../../graph/ledger.js").LiveGraphLedgerHost;
   /** Trace directory for the read-only query_trace tool. */
   readonly traceDir?: string;
   /**
@@ -459,6 +465,7 @@ export function createDefaultAciRegistry(
   const disallowedTools = opts.disallowedTools;
   const backgroundManager = opts.backgroundManager;
   const graphAssembly = opts.graphAssembly;
+  const liveGraphLedger = opts.liveGraphLedger;
   // #562 T6: bashMode 显式透传到 createBashTool。registry 不读 catalog —
   // spawn-subagent-tool 工厂是 catalog 路由的真正 owner。
   const bashMode = opts.bashMode;
@@ -719,6 +726,9 @@ export function createDefaultAciRegistry(
     // —— graph 模式开/关只由 handler 层 isEnabled gate 决定（拒绝时
     // ToolExecutionError,SC5 实测）。`subagentManager` 缺席时同条件
     // 化装配跳过（编排底座缺一不可,与 spawn_subagent 同形态）。
+    //
+    // live-graph-phase1 T1:活图账本（ADR-0047 / ADR-0051）随 host 缝透传;
+    // 缺席 → 工具 handler 不建账（V1 零行为变化）。
     ...(subagentManager
       ? {
           run_graph: () =>
@@ -727,6 +737,7 @@ export function createDefaultAciRegistry(
               isEnabled: graphAssembly
                 ? () => graphAssembly.enabled()
                 : undefined,
+              ...(liveGraphLedger ? { ledger: liveGraphLedger } : {}),
             }),
         }
       : {}),

@@ -84,6 +84,7 @@ import type { SessionGrants } from "../harness/permission/session-grants.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
 import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { GraphModeContext } from "../harness/graph/mode.js";
+import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import { createViolationCounter } from "../harness/sandbox/violation-handling.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
 import {
@@ -568,6 +569,13 @@ export type SessionHubOptions = {
    * hub 自己不 build，拿不到快照句柄。缺席 = 未接 overlay（行为零变化）。
    */
   graphAssembly?: GraphAssembly;
+  /**
+   * live-graph-phase1 T1 / ADR-0047 / ADR-0051:活图账本 host。hub 跨多
+   * 会话持有同一份账本 host,按 `ctx.conversationId` 解析。`resetSession`
+   * 销毁单会话账本；`shutdown` 销毁全部。缺省 = `run_graph` handler 不
+   * 建账（与 graphAssembly 缺省同形态）。
+   */
+  liveGraphLedger?: LiveGraphLedgerHost;
   /** T2: env source for per-turn thinking override (test seam; production
    * omits it → withThinkingOverride falls back to loadIknowEnv()). */
   overrideEnv?: { readonly llm: LlmEnv };
@@ -863,6 +871,13 @@ export class SessionHub {
    *  紧接 ensureDeps 调 beginRound() —— 两者在同一串行槽位里，per-root
    *  多引擎时也不会拍错那一台。缺席 = 该 engine 未接 overlay。 */
   private activeGraphAssembly: GraphAssembly | undefined;
+  /**
+   * live-graph-phase1 T1 / ADR-0047 / ADR-0051:活图账本 host —— 多会话
+   * 共享同一 host，按 `ctx.conversationId` 解析。`resetSession` 销毁单会
+   * 话账本；`shutdown` 销毁全部。缺席 → `run_graph` handler 不建账
+   * （与 graphAssembly 缺席同形态）。
+   */
+  private readonly liveGraphLedger: LiveGraphLedgerHost | undefined;
   /** serve-workspace T3: recents/trust roster home (absent → T2 behavior). */
   private readonly recentsHome: string | undefined;
   /** Per-root BuiltEngine cache (same root shared across sessions). */
@@ -902,6 +917,7 @@ export class SessionHub {
     this.permissionMode = opts.permissionMode;
     this.graphMode = opts.graphMode;
     this.injectedGraphAssembly = opts.graphAssembly;
+    this.liveGraphLedger = opts.liveGraphLedger;
     this.overrideEnv = opts.overrideEnv;
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
@@ -1137,6 +1153,9 @@ export class SessionHub {
    */
   async shutdown(): Promise<void> {
     this.subagentWake?.dispose();
+    // live-graph-phase1 T1 / ADR-0051:会话结束（hub 释放）销毁全部活图账本
+    // —— 无账本泄漏到后续新会话（SC3 后半句）。
+    this.liveGraphLedger?.destroyAll();
     await this.cachedShutdown?.();
     for (const entry of this.engineByRoot.values()) {
       await entry.shutdown?.();
@@ -1930,6 +1949,9 @@ export class SessionHub {
     return this.serialize({
       conversationId,
       work: async () => {
+        // live-graph-phase1 T1 / ADR-0051:reset 销毁活图账本 —— 之后同一
+        // 会话再 run_graph 可重用旧 id 并真正 spawn（SC3）。账本缺席 → no-op。
+        this.liveGraphLedger?.destroy(conversationId);
         const session = await this.store.load(conversationId);
         const reset: SessionFileV1 = {
           ...session,
@@ -2950,6 +2972,11 @@ export class SessionHub {
       // (`resolveSubagentTraceDirShared`)已退役。
       // `createTrace("subagent")` (conversationId 聚合单文件) 已退役。
       projectDir: this.store.getProjectDir(),
+      // live-graph-phase1 T1:账本 host 透传 —— 按 ctx.conversationId 解析会话
+      // 账本；resetSession / shutdown 销毁。
+      ...(this.liveGraphLedger
+        ? { liveGraphLedger: this.liveGraphLedger }
+        : {}),
       ...(this.traceOut !== undefined
         ? { subagentDiagnosticsDir: this.traceOut }
         : {}),
@@ -3073,6 +3100,10 @@ export class SessionHub {
       // D-α T3 / ADR-0030:overlay holder 透传 —— serve / TUI 的 `/graph` 与
       // Shift+Tab 翻的是同一个它（SC3 三入口同 holder）。
       ...(this.graphMode ? { graphMode: this.graphMode } : {}),
+      // live-graph-phase1 T1:账本 host 透传 —— 同 production 路径形态。
+      ...(this.liveGraphLedger
+        ? { liveGraphLedger: this.liveGraphLedger }
+        : {}),
       // review-fix (M1 / H1): serve entry 已解析的 workspaceRoot 透传 —
       // 让 build-engine 的 bash fence 对齐 serve 的 identity seed / dataDir
       // (同一 per-root 锚点,不落回 sandboxRoot|cwd)。
