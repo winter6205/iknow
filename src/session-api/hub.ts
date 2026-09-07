@@ -21,10 +21,7 @@ import {
   type RunResult,
 } from "../harness/index.js";
 import type { TraceServiceWithHealth } from "../harness/trace/jsonl.js";
-import {
-  type CompactReason,
-  type CompactTriggerDecision,
-} from "../harness/compress/index.js";
+import { type CompactReason } from "../harness/compress/index.js";
 import {
   runVerifyLoop,
   type VerifyConfig,
@@ -319,7 +316,6 @@ const REASON_NO_COMPRESS: CompactReason = "messages_too_few";
  */
 function compactReasonFor(args: {
   readonly useCompactMessages: boolean;
-  readonly compactAction: CompactTriggerDecision["action"] | undefined;
 }): CompactReason {
   if (!args.useCompactMessages) return "full_summary";
   return "windowed";
@@ -1959,7 +1955,6 @@ export class SessionHub {
           readonly dropped: ReadonlyArray<AnthropicNativeMessage>;
           readonly kept: ReadonlyArray<AnthropicNativeMessage>;
         };
-        let compactAction: CompactTriggerDecision["action"];
         if (before.length === 0) {
           // 空会话:幂等 noop,reason 字面沿用 messages_too_few
           // (plan Harvest Open 折进本票:below_token_threshold 仅保留给 auto 路径)。
@@ -1976,10 +1971,8 @@ export class SessionHub {
         if (windowSplit === undefined) {
           // 非空但消息数 ≤ keepRecent,无 dropped 前缀 → full_summary 支
           // (与 auto 路径 evaluateCompactTrigger 返 compact_via_full_summary 同效)。
-          compactAction = "compact_via_full_summary";
           split = { dropped: before, kept: [] };
         } else {
-          compactAction = "compact_via_window";
           split = windowSplit;
         }
 
@@ -2076,7 +2069,6 @@ export class SessionHub {
         // SSOT:helper 把 4 取值决策收敛到一处,避免 3 处 inline 字面量 drift。
         const reason: CompactReason = compactReasonFor({
           useCompactMessages,
-          compactAction,
         });
         return {
           session: this.summarize({ file: updated }),

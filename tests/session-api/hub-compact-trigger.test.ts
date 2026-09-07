@@ -139,13 +139,14 @@ async function seedSession(
 }
 
 describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token 门", () => {
-  // 注:本组用例覆盖「手动 /compact = 视作已过 token 门」。`below_token_threshold`
-  // 仍保留作为 `evaluateCompactTrigger` 的判据字面量,但仅服务于 loop-engine
-  // proactive 路径;hub 手动入口不再返回该 reason(空会话走 messages_too_few)。
+  // 本组用例钉住的不变式:manual /compact 视作已过 token 门 — 短会话(消息
+  // 数 > keepRecent)必须压缩并落盘;proactive gate 仍走 evaluateCompactTrigger
+  // (SSOT: src/harness/compress/index.ts),`below_token_threshold` 仅是那条
+  // 路径的判据字面量。hub 手动入口空会话走 messages_too_few 幂等 noop。
 
   it("缺省阈值(thresholdTokens 缺席) + 8 短消息(> keepRecent=6)→ compacted:true + 落盘 + updatedAt bump", async () => {
-    // 验收 T1 acceptance 第一条:生产缺省阈值 ≈ 167k 下,短会话且消息数超过
-    // 保留尾窗,manual /compact 必须压缩并落盘(旧行为是 below_token_threshold noop)。
+    // 验收 T1 acceptance 第一条:manual /compact 视作已过 token 门 — 短会话
+    // (消息数 > keepRecent)必须压缩并落盘,即便 token 估算远低于缺省阈值。
     // 注:此处 reason 取决于 LLM 摘要成败 — 走 windowed 路径但 makeOkAdapter
     // 返回 "ok" → summarized,所以 reason 走 "full_summary";windowed 路径
     // 的纯截断场景见 makeThrowingAdapter 那条(messages_too_few)与下面那条
@@ -160,9 +161,9 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
 
     const hub = new SessionHub({
       store,
-      // thresholdTokens 故意缺席 → getAutoCompactThreshold 走 contextWindow - 20000 - 13000
-      // = 200000 - 33000 = 167000。8 条短消息 token 估 ≪ 167000,旧路径会被 token 门挡;
-      // 新路径不再调 evaluateCompactTrigger,直接走 splitForCompaction → windowed 支
+      // thresholdTokens 故意缺席 → getAutoCompactThreshold 缺省 =
+      // contextWindow - 20000 - 13000 = 167000。manual /compact 视作已过门,
+      // 不调 evaluateCompactTrigger,直接走 splitForCompaction → windowed 支
       // (8 > 6 keepRecent → dropped=2, kept=6)。
       deps: {
         ...makeCompactDeps({ adapter: makeOkAdapter("ok") }),
@@ -221,9 +222,9 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
   });
 
   it("缺省阈值 + 3 短消息(≤ keepRecent)→ compacted:true + reason:full_summary(非 below_token_threshold noop)", async () => {
-    // 验收 T1 acceptance 第三条:消息不超过尾窗但非空时,manual /compact 走
-    // full_summary 支,而不是 below_token_threshold noop。LLM 摘要成功 →
-    // 1 条 preamble+summary user 消息;与 auto 路径同效。
+    // 验收 T1 acceptance 第三条:manual /compact 视作已过 token 门 — 消息不
+    // 超过尾窗但非空时仍必须压缩(full_summary 支,与 auto 开火后同效),
+    // 不是 noop。LLM 摘要成功 → 1 条 preamble+summary user 消息。
     const { store } = await storeFor();
     const id = "manual-full-summary-short";
     const messages = Array.from({ length: 3 }, (_, i) => ({
