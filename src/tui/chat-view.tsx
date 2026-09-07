@@ -357,6 +357,10 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       return -1;
     })();
     const finalThinkingMs = thinkingMsAtVisible(lastAssistantMessageIndex);
+    // 已被折叠行吸收过 thinkingMs 的 assistant messageIndex 集合 —— 同
+    // messageIndex 上的后续 tools 簇(tool → text → tool)按 0 计,保证
+    // 「思考了 N 秒」同一回合至多画一次(CONTEXT.md unit fold 收口)。
+    const consumedThinkingMessageIndices = new Set<number>();
     // 每簇独立的折叠行（思考秒数 = thinkingMs[anchorMsgs] 求和 → 秒）。
     // plans T1:`if (showTurnFold)` 包裹删除 —— per-segment 闸门
     // `shouldShowRetractFold` / `shouldShowThinkingFold` 与 running 解耦,
@@ -382,6 +386,9 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         // thinkingMs 为 0 时,归入 final 的 thinkingMs(独占展示位置,避免
         // 漂到 per-message ThinkingSummary);前序簇继续按 anchor 求和(若有
         // 多个独立 thinkingMs 已在测试 2 验证「严格归属到 anchor」不变式)。
+        // unit-fold 收口(CONTEXT.md):「思考了 N 秒」同一 assistant 回合
+        // 至多一次 —— 同一 messageIndex 已被先前簇消耗过秒数时,本簇按 0
+        // 计(折叠行只剩工具计数),秒数不重复画。
         let clusterMs = thinkingMsAtVisible(segment.messageIndex);
         if (
           clusterMs === 0 &&
@@ -390,6 +397,16 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           finalThinkingMs > 0
         ) {
           clusterMs = finalThinkingMs;
+        }
+        // unit-fold 收口:同一 assistant messageIndex 在多 tools 簇(tool
+        // → text → tool)共享 thinkingMs,「思考了 N 秒」同一回合至多画
+        // 一次。已被前面任一簇吸收过的 messageIndex 在本簇按 0 计,本簇
+        // 只画工具计数。
+        if (
+          clusterMs > 0 &&
+          consumedThinkingMessageIndices.has(segment.messageIndex)
+        ) {
+          clusterMs = 0;
         }
         const clusterSeconds = thinkingMsToSeconds(clusterMs);
         const segmentRetractTotal = entries.reduce((n, e) => n + e.count, 0);
@@ -411,6 +428,11 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         const lines = formatTurnActivityFold(clusterSeconds, entries);
         if (lines.length > 0) {
           foldLinesBySegmentIndex.set(segmentIndex, lines);
+          // 簇实际用上秒数（>0）才登记消耗 —— 0 秒簇不会画「思考了 N 秒」,
+          // 不抢后续簇的秒数位。
+          if (clusterSeconds > 0) {
+            consumedThinkingMessageIndices.add(segment.messageIndex);
+          }
         }
       }
       // 无工具段但有已完成的 live 工具 / final thinkingMs > 0 → 把折叠行
