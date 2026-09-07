@@ -260,7 +260,8 @@ export type ChatLineContext = {
    * 一次性写根段（specs/skill-load-write-root.md T5）：rebind 重建成功后由
    * refreshChatDepsForRebind 置入（writeRootSegment 文案），下一次查询行 /
    * subagent wake 组 priorMessages 时拼到末尾并清空。仅改绑后一次，非每条
-   * 用户消息；不进 system / env_snapshot。
+   * 用户消息；不进 system / env_snapshot。run 失败 / cancelled 时该通知
+   * **即弃不重投**（刻意选择：写根是幂等引导，下一次 rebind 才重新给）。
    */
   pendingWriteRootNotice?: string;
   /**
@@ -773,13 +774,24 @@ export async function runChatSubagentWake(opts: {
   if (box.value) return { quit: false, output: "" };
   box.value = true;
   ctx.graphAssembly?.beginRound();
+  // 写根段（specs/skill-load-write-root.md T5）：wake 是 rebind 后可能先于
+  // 用户查询到达的主模型 run —— 与查询行同型消费一次性槽位，消费即清空。
+  const wakeWriteRootNotice = ctx.pendingWriteRootNotice;
+  if (wakeWriteRootNotice !== undefined) {
+    ctx.pendingWriteRootNotice = undefined;
+  }
+  const wakeTailTexts = [pendingDrain.text, wakeWriteRootNotice].filter(
+    (value): value is string => value !== undefined && value.length > 0
+  );
   const priorMessages = Object.freeze([
     ...ctx.state.messages,
     Object.freeze({
       role: "user" as const,
-      content: Object.freeze([
-        Object.freeze({ type: "text" as const, text: pendingDrain.text }),
-      ]),
+      content: Object.freeze(
+        wakeTailTexts.map((text) =>
+          Object.freeze({ type: "text" as const, text })
+        )
+      ),
     }),
   ]);
   try {
