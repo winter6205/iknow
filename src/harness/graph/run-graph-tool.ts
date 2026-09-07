@@ -28,6 +28,7 @@ import { validateGraph, type GraphValidationError } from "./topo.js";
 import { runGraph } from "./scheduler.js";
 import { createSubAgentNodeExecutor } from "./node-executor.js";
 import type { LiveGraphLedgerHost } from "./ledger.js";
+import { resolveResidualSubgraph } from "./residual.js";
 import type {
   GraphNodeResult,
   GraphSpec,
@@ -231,9 +232,33 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
         );
       }
       const nodes = readNodes(input);
-      const spec: GraphSpec = {
-        nodes: nodes.map((n) => ({ id: n.id, deps: n.deps ?? [] })),
-      };
+      const ledger = deps.ledger?.ledgerFor(ctx?.conversationId);
+      // live-graph-phase1 T2:剩余子图合并(spec SC5–SC7 / ADR-0050)。
+      // 在 validateGraph 之前先折叠账本:frozen-done dep → 满足,从 deps
+      // 剔除(产出单独带回,并入 nodeCtx.outputs 供 renderTask 写入
+      // 下游 task);frozen-failed dep → typed 拒(spec ASSUMPTIONS #3);
+      // 重交已冻结 id → typed 拒(SC5 末句 / SC6 整段拒绝)。merge
+      // 之外的所有拓扑 / 重复 / 环 / 自依赖仍由 validateGraph 单一
+      // 权威(complexity-anti-drift 不让 freeze 进 Kahn)。
+      let specNodes: ReadonlyArray<{
+        readonly id: string;
+        readonly deps: ReadonlyArray<string>;
+      }> = nodes.map((n) => ({ id: n.id, deps: n.deps ?? [] }));
+      let ledgerOutputs: Readonly<Record<string, string>> = {};
+      if (ledger !== undefined) {
+        const merged = resolveResidualSubgraph(
+          nodes.map((n) => ({ id: n.id, task: n.task, deps: n.deps ?? [] })),
+          ledger
+        );
+        if (merged.rejections.length > 0) {
+          throw new ToolExecutionError(
+            `run_graph: ${merged.rejections.join("; ")}`
+          );
+        }
+        specNodes = merged.nodes;
+        ledgerOutputs = merged.ledgerOutputs;
+      }
+      const spec: GraphSpec = { nodes: specNodes };
       // EXIT:拓扑非法 —— 在任何 spawn 之前 fail-fast(spec SC4 零 spawn)。
       const errors = validateGraph(spec);
       if (errors.length > 0) {
@@ -243,26 +268,17 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
       }
       // live-graph-phase1 T1:活图账本生命周期 —— 拓扑非法路径绝不建账本
       // (SC1 + ASSUMPTIONS #4),所以本块紧跟 validateGraph 之后。
-      const ledger = deps.ledger?.ledgerFor(ctx?.conversationId);
       if (ledger !== undefined) {
         ledger.ensure();
-        // EXIT:重交已冻结 id(SC2 关 overlay 不毁 / T2 合并已落定语义)。
-        // 与拓扑非法同层——零 spawn、typed 拒绝,handler 不容忍"重演"。
-        const alreadyFrozen = nodes
-          .map((n) => n.id)
-          .filter((id) => ledger.isFrozen(id));
-        if (alreadyFrozen.length > 0) {
-          throw new ToolExecutionError(
-            `run_graph: frozen id(s) cannot be re-run on the same live graph: ${alreadyFrozen.join(", ")}`
-          );
-        }
       }
       const byId = new Map(nodes.map((n) => [n.id, n]));
       const signal = ctx?.signal;
       const parentTurnId = ctx?.turnId;
       // 每节点现装一次 executor:task 文本要带上该节点 deps 的产出,而
       // NodePlan 是静态的 —— 现装是让「数据沿边流动」落在既有 executor
-      // 上而不改它的最小做法。
+      // 上而不改它的最小做法。T2:ledgerOutputs(本段合并出来的 frozen-done
+      // 产出)合并进 nodeCtx.outputs,使 renderTask 字节不变地写进
+      // 下游 task(spec SC5「B 能读到 A 的产出」)。
       const exec: NodeExecutor = (id, nodeCtx) => {
         // 调用侧已取消 → 本节点不再 spawn。scheduler 把它记成 failed,
         // 下游随之 skipped;整张图收敛后由下面的 EXIT 统一归因。
@@ -273,12 +289,15 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
           });
         }
         const node = byId.get(id)!;
+        const augmentedCtx: NodeContext = Object.freeze({
+          outputs: Object.freeze({ ...ledgerOutputs, ...nodeCtx.outputs }),
+        });
         return createSubAgentNodeExecutor({
           manager: deps.manager,
-          plans: { [id]: { task: renderTask(node, nodeCtx) } },
+          plans: { [id]: { task: renderTask(node, augmentedCtx) } },
           ...(signal ? { signal } : {}),
           ...(parentTurnId !== undefined ? { parentTurnId } : {}),
-        })(id, nodeCtx);
+        })(id, augmentedCtx);
       };
       const tracker = createGraphProgressTracker(spec.nodes);
       try {
@@ -292,12 +311,17 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
         });
         // live-graph-phase1 T1:按结算终态冻结已落定 id。skipped 不冻
         // (spec Glossary);账本单点强制,handler 直传 GraphNodeResult.status。
-        // T2 退路:中止节点记 failed("cancelled by caller abort") 也会被冻结
-        // —— T3 取消保留已 done 任务会重审这点(scroll SC8);T1 暂按统一规则
+        // T2:done 节点的产出也写进账本(SC5「B 能读到 A 的产出」数据源)。
+        // T3 退路:中止节点记 failed("cancelled by caller abort") 也会被冻结
+        // —— T3 取消保留已 done 任务会重审这点(scroll SC8);T2 暂按统一规则
         // 落定。
         if (ledger !== undefined) {
           for (const result of Object.values(execution.results)) {
-            ledger.freeze(result.id, result.status);
+            ledger.freeze(
+              result.id,
+              result.status,
+              result.status === "done" ? String(result.output ?? "") : undefined
+            );
           }
         }
         // EXIT:归因调用侧取消 —— 与 spawn_subagent 一致(executor 因

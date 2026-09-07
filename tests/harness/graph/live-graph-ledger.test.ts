@@ -98,6 +98,62 @@ describe("LiveGraphLedger: freeze 收/拒（spec Glossary：done/failed 冻，sk
   });
 });
 
+describe("LiveGraphLedger: 产出记录（T2 / spec SC5「B 能读到 A 的产出」）", () => {
+  it("freeze done + output → outputOf 可读、statusOf 回 done", () => {
+    const ledger = createLiveGraphLedger();
+    ledger.ensure();
+    ledger.freeze("a", "done", "A-OUTPUT");
+    expect(ledger.outputOf("a")).toBe("A-OUTPUT");
+    expect(ledger.statusOf("a")).toBe("done");
+  });
+
+  it("freeze 未传 output 的 done → outputOf undefined（不虚构产出）", () => {
+    const ledger = createLiveGraphLedger();
+    ledger.ensure();
+    ledger.freeze("a", "done");
+    expect(ledger.statusOf("a")).toBe("done");
+    expect(ledger.outputOf("a")).toBe(undefined);
+  });
+
+  it("failed / skipped 不写产出；末次 freeze 覆盖旧产出（与状态一致）", () => {
+    const ledger = createLiveGraphLedger();
+    ledger.ensure();
+    ledger.freeze("a", "done", "V1");
+    ledger.freeze("a", "failed");
+    expect(ledger.statusOf("a")).toBe("failed");
+    expect(ledger.outputOf("a")).toBe(undefined);
+    // failed → 再 done 带新产出：末次为准
+    ledger.freeze("a", "done", "V2");
+    expect(ledger.statusOf("a")).toBe("done");
+    expect(ledger.outputOf("a")).toBe("V2");
+  });
+
+  it("skipped 从未进产出表（Glossary：未冻）", () => {
+    const ledger = createLiveGraphLedger();
+    ledger.ensure();
+    ledger.freeze("sk", "skipped", "should-not-store");
+    expect(ledger.isFrozen("sk")).toBe(false);
+    expect(ledger.outputOf("sk")).toBe(undefined);
+  });
+
+  it("destroy 清空产出表", () => {
+    const ledger = createLiveGraphLedger();
+    ledger.ensure();
+    ledger.freeze("a", "done", "A-OUTPUT");
+    ledger.destroy();
+    ledger.ensure();
+    expect(ledger.outputOf("a")).toBe(undefined);
+    expect(ledger.statusOf("a")).toBe(undefined);
+  });
+
+  it("未冻结 id 的 outputOf / statusOf 返回 undefined", () => {
+    const ledger = createLiveGraphLedger();
+    ledger.ensure();
+    expect(ledger.outputOf("never")).toBe(undefined);
+    expect(ledger.statusOf("never")).toBe(undefined);
+  });
+});
+
 describe("LiveGraphLedger: destroy / reset 语义（SC3）", () => {
   it("destroy 清空存在标志 + 冻结集合；之后旧 id 不再冻结", () => {
     const ledger = createLiveGraphLedger();

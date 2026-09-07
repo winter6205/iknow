@@ -64,15 +64,28 @@ export interface LiveGraphLedger {
    * 值）静默忽略（spec Glossary：skipped 不冻）。同 id 多次 freeze 后写以
    * 末次状态为准（fallback 收敛，便于后续 `back-edge` 等回写场景）。
    *
+   * `output` 是 T2 剩余子图合并的数据流：status 为 done 且传入 string 时
+   * 记进产出表（`outputOf` 可读）；failed / skipped / 未传 → 清掉旧产出，
+   * 保证产出与末次状态一致。
+   *
    * 接受完整结算状态集而非仅终态：handler 拿到 `GraphNodeResult.status`
    * 直传即可，"skipped 不冻" 由账本单点强制，不靠调用方各自过滤。
    */
   readonly freeze: (
     id: string,
-    status: FrozenTerminal | "skipped" | "running" | "pending"
+    status: FrozenTerminal | "skipped" | "running" | "pending",
+    output?: string
   ) => void;
   /** 该 id 是否因 done/failed 终态被冻结 —— handler 用它做 typed 拒绝。 */
   readonly isFrozen: (id: string) => boolean;
+  /** 该 id 的冻结状态；未冻结返回 undefined。剩余子图合并用它区分 done / failed。 */
+  readonly statusOf: (id: string) => FrozenTerminal | undefined;
+  /**
+   * 该 id 冻结为 done 时记录的产出；未冻结或非 done 返回 undefined。
+   * T2 剩余子图合并的数据源：第二段提交省略已 done 的上游时，host 用它
+   * 把上游产出写进下游节点 task（spec SC5「B 能读到 A 的产出」）。
+   */
+  readonly outputOf: (id: string) => string | undefined;
   /** 快照：当前冻结的全部 id（顺序按首次 freeze 的顺序，稳定测试断言）。 */
   readonly frozenIds: () => ReadonlyArray<string>;
   /** 销毁：清空冻结集合与会话存在标志。会话结束 / reset 调它。 */
@@ -85,22 +98,33 @@ export function createLiveGraphLedger(): LiveGraphLedger {
   // —— 末次 status 由"是否在 map 里"即可推断，status 字段留给 T2 失败回写
   // 等场景扩展。
   const frozen = new Map<string, FrozenTerminal>();
+  // T2:已冻结 done 节点的产出快照(spec SC5「B 能读到 A 的产出」)。
+  // 只在 freeze 调用方传入 output 且 status === "done" 时写。
+  const outputs = new Map<string, string>();
   const ledger: LiveGraphLedger = {
     exists: () => created,
     ensure: () => {
       if (created) return;
       created = true;
     },
-    freeze: (id, status) => {
+    freeze: (id, status, output) => {
       if (!created) return;
       if (!TERMINAL_STATUSES.has(status)) return;
       frozen.set(id, status as FrozenTerminal);
+      if (status === "done" && typeof output === "string") {
+        outputs.set(id, output);
+      } else {
+        outputs.delete(id);
+      }
     },
     isFrozen: (id) => frozen.has(id),
+    statusOf: (id) => frozen.get(id),
+    outputOf: (id) => outputs.get(id),
     frozenIds: () => [...frozen.keys()],
     destroy: () => {
       created = false;
       frozen.clear();
+      outputs.clear();
     },
   };
   return Object.freeze(ledger);

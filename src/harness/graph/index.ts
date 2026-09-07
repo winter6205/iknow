@@ -33,6 +33,7 @@ export type {
   LiveGraphLedger,
   LiveGraphLedgerHost,
 } from "./ledger.js";
+export { resolveResidualSubgraph } from "./residual.js";
 export { createLiveGraphLedger, createLiveGraphLedgerHost } from "./ledger.js";
 
 export type {
