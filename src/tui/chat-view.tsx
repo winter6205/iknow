@@ -526,17 +526,30 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       foldDisplayLines.length,
       turnToolTotal
     );
+    // T3（plans/tui-display-single-pipeline.md）：同一条工具调用只画一次。
+    // 历史 transcript 已含该 tool_use 块时,MessageBlocks 会按 slot 渲染
+    // 同一件（running 或落定态），tail 不得再叠一份完成标题。reference
+    // 去重与 T2 consumedThinkingMessageIndices 同思路：以 tool_use id 为
+    // 锚,全历史 id 集合一次派生(useMemo 稳定引用)。实际 race 窗口：
+    // turnFinished 已 commit messages 而 liveToolRuns 尚未清空(skipTurn-
+    // Refresh / 刷新失败路径会残留);正常流中 commit 与清空被 React 批处
+    // 理合并,过滤为幂等 no-op。
+    const historyToolUseIds = useMemo(
+      () => toolUseIdsOf(visibleMessages),
+      [visibleMessages]
+    );
     const tailSlots = liveTailSlots(
-      collapseToolRows
-        ? liveToolRuns.filter(
-            (run) =>
-              run.status === "running" ||
+      liveToolRuns
+        .filter((run) => !historyToolUseIds.has(run.id))
+        .filter((run) =>
+          collapseToolRows
+            ? run.status === "running" ||
               !deriveSlot(run.name, {
                 running: false,
                 failed: run.status === "failed",
               }).inFoldCount
-          )
-        : liveToolRuns,
+            : true
+        ),
       deferredSegments
     );
     // #693 T1 D1：折叠行（思考了 N 秒 / bash × N）统一套壳，与
