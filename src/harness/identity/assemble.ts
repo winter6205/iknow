@@ -93,14 +93,15 @@ export interface AssemblyContext {
    *  段缺席 (KV 缓存字节级稳定);调用抛错 → console.warn + 跳过 (降级契约
    *  对齐 memory_layer)。schema 不进本段(名字目录只承载服务名 + 工具名)。 */
   readonly mcp?: () => ReadonlyArray<McpServiceSummary> | undefined;
-  /** B6 / ADR-0043 §3:溢出治理退场内建件名单段(可选,渐进式披露第二档)。
-   *  返回**会话级冻结**的退场名单(闭包在 build-engine 装配期首轮判定一次
-   *  后冻结,会话内恒定)。缺席 / 空数组 → 段缺席(字节级零变化);模型用
-   *  `tool_search` 拉回退场件 schema,经 `discover()` 进 discovered 集 +
-   *  visibleSchemas 走 discoveredTail 把 schema 带回 tools 尾部。
-   *  顺序契约:与 mcp 名字目录同形态,裸名字 + tool_search 引导;核心件永
-   *  不在此名单(由 tool-overflow.ts CORE_TOOL_NAMES 守门)。 */
-  readonly deferredInternalTools?: () => ReadonlyArray<string> | undefined;
+  /** B6 / ADR-0043 §3 + T4:溢出治理退场内建件索引段(可选,渐进式披露第二档)。
+   *  返回**会话级冻结**的退场件投影(闭包在 build-engine 装配期首轮判定一次
+   *  后冻结,会话内恒定)。缺席 / 空数组 → 段缺席(字节级零变化)。
+   *  T4 / spec ASSUMPTIONS #5:元素是 **名 + 描述**,模型直呼该件即 hydrate
+   *  (permission-executor gateOne 对 `aci.lazy && !isDiscovered` 走
+   *  `discover()`,schema 从下一轮 visibleSchemas 尾部回来),不必先
+   *  `tool_search`。核心件永不在此名单(tool-overflow.ts CORE_TOOL_NAMES 守门)。 */
+  readonly deferredInternalTools?: () =>
+    ReadonlyArray<DeferredInternalToolSummary> | undefined;
   /** #558 T2 coordinator 段注入缝 (可选):默认路径(build-engine 在
    *  chat/tui/serve 自建 manager)不再注入 —— 引导落点已迁到 spawn_subagent
    *  工具 description (#557 T1 SSOT)。调用方显式传入非空字符串仍渲染
@@ -123,33 +124,76 @@ export interface AssemblyContext {
 }
 
 /** #337 T6 `<available_skills>` 段元素形态(最小投影:name + description + disabled)。
- *  disabled=true → 装配层跳过(SC3),与 catalog.available() 语义一致。 */
+ *  disabled=true → 装配层跳过(SC3),与 catalog.available() 语义一致。
+ *
+ *  T5 / ADR-0046 Decision 2:`description` 转为可选 —— 索引降档把超阈条目剥成
+ *  **仅名字**(名字永不删)。缺席/空/纯空白 → 渲染裸名行,与 `McpToolSummary`
+ *  同规则(降档只改喂进来的数据,渲染层不做第二套判定)。 */
 export interface SkillSummary {
   readonly name: string;
-  readonly description: string;
+  readonly description?: string;
   readonly disabled?: boolean;
 }
 
-/** #631 T2 / B4 (ADR-0043 §3) MCP 名字目录段服务元素形态(最小投影):
- *  仅渲染 name + tool 名单;schema 与长 description 一律不进 system。
- *  `state` 词汇表与 mcp/manager McpServerState 同形但不跨模块导入;
- *  仅 "connected" 服务入段:pending(还在连) / failed / disabled 不渲染。 */
+/** disclosure-index-align T1 / ADR-0043 §3 — MCP 名字目录段工具元素形态(最小投影)。
+ *  description 缺席/空 → 只渲染工具名。 */
+export interface McpToolSummary {
+  readonly name: string;
+  readonly description?: string;
+}
+
+/** disclosure-index-align T4 / spec ASSUMPTIONS #5 — schema 退场内建件的索引
+ *  元素形态(最小投影:名 + 描述)。描述来自该工具 `ToolDef.description`
+ *  (build-engine 装配期从 registry 现取);缺席/空 → 只渲染工具名(与
+ *  `McpToolSummary` 同规则)。**同形不同名**:MCP 条目在索引降档时会被剥成
+ *  仅名字,退场内建件不参与该降档 —— 两个数据源的降档纪律不同,故不共用
+ *  一个类型名以免读者误以为同一治理面。 */
+export interface DeferredInternalToolSummary {
+  readonly name: string;
+  readonly description?: string;
+}
+
+/** disclosure-index-align T1 / #631 T2 / B4 (ADR-0043 §3) MCP 名字目录段
+ *  服务元素形态(最小投影):name + 可选服务描述 + 工具集(每工具 = 名 + 可选
+ *  描述);schema 与长 description 一律不进 system。`state` 词汇表与
+ *  mcp/manager McpServerState 同形但不跨模块导入;仅 "connected" 服务入段:
+ *  pending(还在连) / failed / disabled 不渲染。服务描述缺席是契约允许态
+ *  —— mcp 只读元数据面当前无服务级描述来源,暂不为此新开数据管道(Keep It
+ *  Simple),装配层渲染时降级为裸名行。 */
 export interface McpServiceSummary {
   readonly name: string;
   readonly state: "pending" | "connected" | "failed" | "disabled";
-  readonly tools: ReadonlyArray<string>;
+  readonly description?: string;
+  readonly tools: ReadonlyArray<McpToolSummary>;
 }
 
+/** disclosure-index-align T1 / #631 T2 工具短描述限值:取 description 首行,
+ *  超过此长度截断 + 省略号。120 字与 #631 T2 原始契约一致(KV cache 中
+ *  "索引常驻档"需要一行可读)。 */
+export const MCP_TOOL_SHORT_DESCRIPTION_MAX = 120;
+
+/** disclosure-index-align T1 / T4 索引段末行引导(SSOT):有描述 = 知道工具
+ *  干什么 = 直接调用即可。ADR-0046 修订 ADR-0043「必经 tool_search」——
+ *  MCP 目录与退场内建段共用同一句,两段不各写一份文案。 */
+export const DIRECT_CALL_GUIDANCE =
+  "Call a listed tool directly to load its schema and use it.";
+
 /**
- * B4 / ADR-0043 §3 `<mcp_name_directory>` 段渲染(替代旧 #631 T2
- * `<mcp_tools_overview>`):每 connected 服务一行(名字),其下每工具一行
- * (裸名字,无 schema、无 description),末行引导 tool_search 精查。
+ * disclosure-index-align T1 / B4 / ADR-0043 §3 `<mcp_name_directory>` 段
+ * 渲染(对应旧 #631 T2 形态 + B4 名字目录落地):
+ *   - 每 connected 服务一行(名字,描述在场时 ": <short desc>")；
+ *   - 其下每工具一行(" - <tool>" / " - <tool>: <short desc>");
+ *   - 描述取首行 + 限 120 字 + 超出加省略号;
+ *   - 描述缺席 → 只渲染名字（契约允许态）。
  *
  * 加性段,不触碰 IKNOW_ASSEMBLY_ORDER;仅渲染 state === "connected" 的
  * 服务;过滤后为空 → 返回 undefined(装配层不追加,绝不写空串)。
- * 字节稳定契约:connected 服务集 + 工具名单会话内恒定 → 相邻轮 deep-equal;
- * lazy 工具名先于 schema 进目录正是 B4 的披露分层(名字在 system,
- * schema 在 tool_search result / tools 尾部追加)。
+ * 字节稳定契约:connected 服务集 + 工具名 + 描述快照会话内恒定 → 相邻轮
+ * deep-equal;装配期现读快照,不阻塞不空等,迟到 server 不渗回目录。
+ *
+ * 末行引导(spec disclosure-index-align Does #1):有描述时直呼工具即可,
+ * 不再强制 "call tool_search first";旧 B4 末行的 "Use tool_search ..." 句
+ * 移除(spec 决策:有描述 = 知道工具干什么 = 直接调用即可)。
  */
 export function mcpNameDirectorySegment(
   services: ReadonlyArray<McpServiceSummary>
@@ -161,36 +205,72 @@ export function mcpNameDirectorySegment(
   if (connected.length === 0) return undefined;
   const lines: string[] = [];
   for (const service of connected) {
-    lines.push(service.name);
-    const toolNames = [...service.tools].sort((a, b) => a.localeCompare(b));
-    for (const tool of toolNames) {
-      lines.push(`- ${tool}`);
+    // 服务描述(可选):mcp 只读元数据面暂无服务级描述来源,缺席 → 裸名行
+    // (契约允许态,不改数据管道)。
+    lines.push(
+      service.description && service.description.trim().length > 0
+        ? `${service.name}: ${service.description}`
+        : service.name
+    );
+    const tools = [...service.tools].sort((a, b) =>
+      a.name.localeCompare(b.name)
+    );
+    for (const t of tools) {
+      const short = shortToolDescription(t.description);
+      lines.push(short === undefined ? `- ${t.name}` : `- ${t.name}: ${short}`);
     }
   }
-  lines.push(
-    "Use tool_search to load the full schema of any tool listed above before calling it."
-  );
+  lines.push(DIRECT_CALL_GUIDANCE);
   return `<mcp_name_directory>\n${lines.join("\n")}\n</mcp_name_directory>`;
 }
 
 /**
- * B6 / ADR-0043 §3 `<deferred_internal_tools>` 段渲染 —— 溢出治理退场
- * 的内建件名单(裸名,无 schema)。退场件 = 标 `aci.deferrable: true` 的
- * 内建件中,首轮 `countTokens` 实测超出 context window 10% 阈值后被 stamp
- * `aci.lazy: true` 的部分(schema 从 promptTools 抽出,模型经 tool_search
- * 拉回)。
+ * disclosure-index-align T1 / #631 T2 工具短描述:取首行 + 限值截断
+ * (~120 字符);缺席/空/首行为空 → undefined(调用方只渲染工具名)。
  *
- * 与 mcp 名字目录同形态,但不分组(内建件无 server 维度),按字母序输出
- * 以保证字节稳定。空数组 → 返回 undefined(段缺席,字节级零变化)。
- * 引导句与 mcp 名字目录一致(用户能直接拼出"调 tool_search")。
+ * SSOT:截断位置 = 字符串按字符切片 + 单字符省略号（中文/emoji 多字节
+ * 切分按 JavaScript 字符串码点;test suite 内的 150-字符 ASCII 用例已
+ * 验证截断点 + 省略号字节级对齐)。
+ */
+export function shortToolDescription(
+  description: string | undefined
+): string | undefined {
+  if (description === undefined || description.length === 0) return undefined;
+  const firstLine = description.split("\n", 1)[0].trim();
+  if (firstLine.length === 0) return undefined;
+  if (firstLine.length <= MCP_TOOL_SHORT_DESCRIPTION_MAX) return firstLine;
+  return `${firstLine.slice(0, MCP_TOOL_SHORT_DESCRIPTION_MAX)}…`;
+}
+
+/**
+ * B6 / ADR-0043 §3 `<deferred_internal_tools>` 段渲染 —— 溢出治理退场
+ * 的内建件索引。退场件 = 标 `aci.deferrable: true` 的内建件中,首轮
+ * `countTokens` 实测超出 context window 10% 阈值后被 stamp `aci.lazy: true`
+ * 的部分(schema 从 promptTools 抽出)。
+ *
+ * disclosure-index-align T4 / spec ASSUMPTIONS #5:本段渲染 **名 + 描述**
+ * —— 退场只降一档「schema → 名+描述」,不再降到裸名、不参与索引降档剥描述
+ * (那一档只作用于 MCP / skill 条目)。有描述 = 模型知道工具干什么 = 直呼
+ * 即可(`DIRECT_CALL_GUIDANCE`),不必先 `tool_search`。
+ *
+ * 与 mcp 名字目录同形态(`- <name>: <short desc>`,复用
+ * `shortToolDescription` 的首行 + 120 字截断 SSOT),但不分组(内建件无
+ * server 维度),按字母序输出以保证字节稳定。描述缺席/空/纯空白 → 裸名行
+ * (契约允许态,与 MCP 目录同规则)。空数组 → 返回 undefined(段缺席,
+ * 字节级零变化)。
  */
 export function deferredInternalToolsSegment(
-  names: ReadonlyArray<string>
+  tools: ReadonlyArray<DeferredInternalToolSummary>
 ): string | undefined {
-  if (names.length === 0) return undefined;
-  const sorted = [...names].sort((a, b) => a.localeCompare(b));
+  if (tools.length === 0) return undefined;
+  const sorted = [...tools].sort((a, b) => a.name.localeCompare(b.name));
+  const lines = sorted.map((t) => {
+    const short = shortToolDescription(t.description);
+    return short === undefined ? `- ${t.name}` : `- ${t.name}: ${short}`;
+  });
+  lines.push(DIRECT_CALL_GUIDANCE);
   return (
-    `<deferred_internal_tools>\n${sorted.join("\n")}\n` +
+    `<deferred_internal_tools>\n${lines.join("\n")}\n` +
     `</deferred_internal_tools>`
   );
 }
@@ -235,10 +315,11 @@ export function createIknowSystemResolver(opts: {
   readonly skills?: () => ReadonlyArray<SkillSummary> | undefined;
   /** #631 T2 → B4 (ADR-0043 §3) MCP 名字目录段注入缝 (可选):见 AssemblyContext.mcp 注释。 */
   readonly mcp?: () => ReadonlyArray<McpServiceSummary> | undefined;
-  /** B6 / ADR-0043 §3:溢出治理退场内建件名单段注入缝 (可选):见
+  /** B6 / ADR-0043 §3 + T4:溢出治理退场内建件索引段注入缝 (可选):见
    *  AssemblyContext.deferredInternalTools 注释。**会话级冻结**(闭包
    *  取一次后不再变),首轮判定的退场名单 = 整会话的退场名单。 */
-  readonly deferredInternalTools?: () => ReadonlyArray<string> | undefined;
+  readonly deferredInternalTools?: () =>
+    ReadonlyArray<DeferredInternalToolSummary> | undefined;
   /** #558 T2 coordinator 段注入缝 (可选):默认路径(build-engine 在
    *  chat/tui/serve 自建 manager)不再注入 —— 引导落点已迁到 spawn_subagent
    *  工具 description (#557 T1 SSOT)。调用方显式传入非空字符串仍渲染
@@ -341,17 +422,17 @@ export async function assembleIdentityContext(
   // 缝缺席 / 返回空 / 解析抛错 → 段缺席(字节级零变化)。会话级冻结:
   // 闭包在 build-engine 装配期首轮判定后冻结,相邻轮 deep-equal。
   if (ctx.deferredInternalTools) {
-    let deferredNames: ReadonlyArray<string> | undefined;
+    let deferred: ReadonlyArray<DeferredInternalToolSummary> | undefined;
     try {
-      deferredNames = ctx.deferredInternalTools();
+      deferred = ctx.deferredInternalTools();
     } catch (err) {
       console.warn(
         `[identity/assemble] deferred internal tools resolver failed: ${String(err)}`
       );
-      deferredNames = undefined;
+      deferred = undefined;
     }
-    if (deferredNames) {
-      const segment = deferredInternalToolsSegment(deferredNames);
+    if (deferred) {
+      const segment = deferredInternalToolsSegment(deferred);
       if (segment !== undefined) segments.push(segment);
     }
   }
@@ -511,7 +592,16 @@ function projectPathSegment(projectIdentityRoot: string): string {
 
 /** #337 T6 `<available_skills>` 段渲染:XML 风格标签 + 名字序列表 +
  *  description 同行 + 空清单显式 "No skills installed"。
- *  加性段,不触碰 IKNOW_ASSEMBLY_ORDER;disabled 在调用前已被装配层过滤。 */
+ *  加性段,不触碰 IKNOW_ASSEMBLY_ORDER;disabled 在调用前已被装配层过滤。
+ *
+ *  T5 / ADR-0046 Decision 2:description 缺席/空/纯空白 → 渲染**裸名行**
+ *  (索引降档把超阈条目剥成仅名字;名字永不删、段永不缺席)。降档判定不在
+ *  本函数里 —— 渲染层只按数据形态输出(单一 SSOT,见 identity/index-demotion.ts)。
+ *
+ *  描述不截 120 字(MCP/退场内建段走 shortToolDescription,本段不走):
+ *  #337 T6 起该段即渲染完整 description,长度由 skill frontmatter 作者控制;
+ *  索引降档(countTokens 实测)会把超阈条目整条剥成裸名,与靠固定 cap
+ *  压体积是两条不同治理路径,不在渲染层混用。 */
 export function skillsSegment(skills: ReadonlyArray<SkillSummary>): string {
   const visible = skills
     .filter((s) => !s.disabled)
@@ -520,7 +610,14 @@ export function skillsSegment(skills: ReadonlyArray<SkillSummary>): string {
   if (visible.length === 0) {
     return "<available_skills>\nNo skills installed\n</available_skills>";
   }
-  const body = visible.map((s) => `${s.name}: ${s.description}`).join("\n");
+  const body = visible
+    .map((s) => {
+      const description = s.description?.trim();
+      return description === undefined || description.length === 0
+        ? s.name
+        : `${s.name}: ${s.description}`;
+    })
+    .join("\n");
   return `<available_skills>\n${body}\n</available_skills>`;
 }
 

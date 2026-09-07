@@ -77,7 +77,11 @@ import {
   createIknowSystemResolver,
   initIknowWorkspaceSafe,
   createGitSnapshotProvider,
+  runIndexDemotion,
   type McpServiceSummary,
+  type McpToolSummary,
+  type SkillSummary,
+  type DeferredInternalToolSummary,
 } from "./identity/index.js";
 import {
   resolveProjectMemoryDir,
@@ -519,8 +523,9 @@ export async function buildHarnessEngine(
   // `memoryEnabled ? ... : undefined` 形态)。
   // #337 T8:skill catalog 装配 — scanSkillDirs 读三级目录
   // (~/.iknow/skills → <cwd>/.iknow/skills → IKNOW_SKILL_DIRS),createSkillCatalog
-  // 装好后注入 reg 的 skillCatalog opt → registry 含 skill / skill_search 两件
-  // (全 surface,ask 也装配 — SC12 守门)。
+  // 装好后注入 reg 的 skillCatalog opt → registry 含 skill 一件
+  // (全 surface,ask 也装配 — SC12 守门)。disclosure-index-align T2:skill_search
+  // 已删(spec ADR-0046 / SC5),只剩 skill 一件。
   // **降级契约**:scanner 自身 try/catch + warn(目录缺失跳过),scan 抛错被
   // createSkillScanner 的 warn 吞掉,build 不阻塞装配。
   // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）。
@@ -945,14 +950,24 @@ export async function buildHarnessEngine(
       .status()
       .map((server) => {
         const prefix = `mcp__${server.name}__`;
-        const toolNames: string[] = [];
+        const tools: McpToolSummary[] = [];
         for (const def of reg!.catalog.all()) {
-          if (def.name.startsWith(prefix)) toolNames.push(def.name);
+          if (!def.name.startsWith(prefix)) continue;
+          // description 缺席/空 → tool 行不带描述（契约允许态,见
+          // mcpNameDirectorySegment 注释）。toAciToolDef 已经把
+          // tool.description ?? "" 落进 ToolDef.description,所以这里读
+          // 出空字符串一律视为"无描述"。
+          tools.push({
+            name: def.name,
+            ...(def.description.length > 0
+              ? { description: def.description }
+              : {}),
+          });
         }
         return {
           name: server.name,
           state: server.state,
-          tools: toolNames,
+          tools,
         } satisfies McpServiceSummary;
       })
       .filter((s) => s.state === "connected");
@@ -1095,7 +1110,75 @@ export async function buildHarnessEngine(
     }
   }
   // session 内恒定的退场名单(holder;系统 resolver 每轮调同一闭包)。
-  const deferredInternalToolsList = deferredRetireNames;
+  // T4 / spec ASSUMPTIONS #5:索引段渲染 **名 + 描述**,故 holder 携带描述
+  // 而非裸名 —— 描述取 retire 当刻 registry 里该件的 `ToolDef.description`
+  // (SSOT = registry;`retireBuiltin` 只翻 `aci.lazy`,不动 description)。
+  // 名字在 catalog 里查不到(理论不该发生:retire 名单由 catalog 派生)→
+  // 只带名字进段,渲染层降级为裸名行。
+  const deferredInternalToolsList: ReadonlyArray<DeferredInternalToolSummary> =
+    deferredRetireNames.map((name) => {
+      const def = reg.catalog.get(name);
+      return def?.description
+        ? { name, description: def.description }
+        : { name };
+    });
+
+  // T5 / ADR-0046 Decision 2 + spec Does #6:索引降档(MCP 目录 +
+  // `<available_skills>` 合计超端点窗口 10% → 从大到小剥描述只留名)。
+  //
+  // 时点 = 与内建 schema 退场同一装配期首轮判定(先退内建 schema,再看索引),
+  // 会话内不重算 —— 判定结果落进下面两个 holder,`deps.system` 的两条缝只读
+  // holder,故相邻轮 system deep-equal(SC2)。
+  //
+  // 为什么不与 `runOverflowJudge` 共用同一次 countTokens:退场梯子测的是
+  // **整个首轮请求面**(tools schema + system),而本闸门按 operator 终锁测的
+  // 是**索引两段合计**。同一次实测拿不出后者这个量,合并会把闸门语义偷换成
+  // 「整个 prompt 超阈」。故复用同一 countTokens 来源与同一时点,各测各的量。
+  //
+  // `<deferred_internal_tools>` 不进本判定的入参 —— 退场内建描述保留
+  // (ADR-0046 Decision 2),不存在误剥路径。
+  //
+  // 失败(countTokens 抛错 / 非有限数)/ 缺席 → 跳过本会话 + console.warn 一行,
+  // 两段保持带描述形态(与 B6 退场 skip 合同同形)。
+  let skillIndexList: ReadonlyArray<SkillSummary> = skillCatalog
+    .available()
+    .map((entry) => ({
+      name: entry.name,
+      description: entry.description ?? "",
+      ...(entry.disabled ? { disabled: true } : {}),
+    }));
+  if (countTokensFn !== undefined) {
+    try {
+      const demotion = await runIndexDemotion({
+        mcp: mcpNameDirectorySnapshot ?? [],
+        skills: skillIndexList,
+        threshold: env.compress.contextWindow * 0.1,
+        countTokens: async (indexText) => {
+          // 实测面 = 模型真正看到的这两段文本(禁 chars/4 估算)。tools 不传:
+          // 本闸门只治理索引面积,schema 面由退场梯子上一步已判定。
+          const v = await countTokensFn({ system: indexText });
+          return v.inputTokens;
+        },
+      });
+      if (demotion.reason === "demoted") {
+        mcpNameDirectorySnapshot = demotion.mcp;
+        skillIndexList = demotion.skills;
+      } else if (demotion.reason === "countTokens_failed") {
+        console.warn(
+          `[build-engine] index demotion skipped: countTokens failed: ${errorMessage(
+            demotion.cause
+          )}`
+        );
+      }
+      // no_index / no_overflow → 零动作(两段保持带描述形态)
+    } catch (err) {
+      // runIndexDemotion 自身不抛(吞错到 countTokens_failed 分支);此 catch
+      // 为未来防御:任何 throw 不阻塞装配,只 warn。
+      console.warn(
+        `[build-engine] index demotion unexpected error: ${errorMessage(err)}`
+      );
+    }
+  }
 
   // D-α T3 / ADR-0030:overlay 接了才有 graph 装配面。快照对象是本次
   // 装配的单点 —— registry(工具在不在)、promptTools(露不露)、deps.system
@@ -1317,12 +1400,12 @@ export async function buildHarnessEngine(
             }),
           }
         : {}),
-      skills: () =>
-        skillCatalog.available().map((entry) => ({
-          name: entry.name,
-          description: entry.description ?? "",
-          ...(entry.disabled ? { disabled: true } : {}),
-        })),
+      // T5 / spec Does #6:skills 索引 = 装配期首轮判定后冻结的 holder
+      // (`skillIndexList`)—— 降档把超阈条目的 description 剥掉只留名,渲染层
+      // 按数据形态输出裸名行(单一 SSOT,不在段函数里做第二套判定)。未超阈
+      // 则 holder 就是 `catalog.available()` 的原样投影。会话内恒定 → 相邻轮
+      // system deep-equal(SC2)。
+      skills: () => skillIndexList,
       // #631 T2 → B4 (ADR-0043 §3):MCP 名字目录段注入缝(渐进式披露
       // "索引常驻档")—— 仅 mcpManager 在场(chat/tui/serve)时注入;ask
       // 无 manager → 缝缺席 → 段缺席(字节级零变化,守 KV 缓存稳定契约)。
@@ -1335,13 +1418,13 @@ export async function buildHarnessEngine(
             mcp: () => mcpNameDirectorySnapshot,
           }
         : {}),
-      // B6 / ADR-0043 §3:溢出治理退场名单段(可选)—— 首轮判定后冻结,
-      // 会话内恒定(deferredInternalToolsList holder 上方定义)。空
+      // B6 / ADR-0043 §3 + T4:溢出治理退场件索引段(可选)—— 首轮判定后
+      // 冻结,会话内恒定(deferredInternalToolsList holder 上方定义)。空
       // 名单(无超限 / 失败)→ 闭包返空数组 → 段缺席;非空 → 渲染
-      // <deferred_internal_tools> 段(每行一名 + 工具名,字母序稳
-      // 定)。与 mcp 名字目录同形态,加性段不触碰 IKNOW_ASSEMBLY_ORDER。
-      // ask surface 无 manager / 同样走此缝(无 MCP 但可能有内建退
-      // 场);失败跳过 → list 必空 → 段缺席。
+      // <deferred_internal_tools> 段(每行 `- 名: 描述`,字母序稳定;
+      // 描述缺席降级裸名)。与 mcp 名字目录同形态,加性段不触碰
+      // IKNOW_ASSEMBLY_ORDER。ask surface 无 manager / 同样走此缝(无 MCP
+      // 但可能有内建退场);失败跳过 → list 必空 → 段缺席。
       deferredInternalTools: () => deferredInternalToolsList,
       // #558 T2: 默认路径停止注入 coordinator 段 — 引导落点收敛到
       // spawn_subagent 工具 description (T1 SSOT)。装配缝保留:

@@ -43,7 +43,20 @@ export type {
   AssemblyContext,
   SkillSummary,
   McpServiceSummary,
+  McpToolSummary,
+  DeferredInternalToolSummary,
 } from "./assemble.js";
+export {
+  MCP_TOOL_SHORT_DESCRIPTION_MAX,
+  DIRECT_CALL_GUIDANCE,
+} from "./assemble.js";
+export { runIndexDemotion, renderIndexText } from "./index-demotion.js";
+export type {
+  IndexDemotionInput,
+  IndexDemotionResult,
+  IndexDemotionReason,
+  CountIndexTokensFn,
+} from "./index-demotion.js";
 export {
   createGitSnapshotProvider,
   gitSnapshotSegment,

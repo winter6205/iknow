@@ -151,6 +151,8 @@ describe("deriveSlot: SC2 五类边界", () => {
       "web_fetch",
       "memory_recall",
       "tool_search",
+      // disclosure-index-align T2 / SC5:skill_search 已删,缺省走 retract 兜底
+      // （settledClassOf 未注册名缺省 retract）—— 不在声明表但历史回放可触发。
       "skill_search",
       "bash_output",
       "list_mcp_resources",

@@ -302,17 +302,19 @@ describe("tool_search — ajv input 校验 (S4 / D9)", () => {
     expect(validate({ query: "x", limit: "5" })).toBe(false);
   });
 
-  it("schema 字段描述包含 spec 要求的两个英文短语 + T3 检索范围/时机提示", () => {
-    // #483 D9: description must contain "pull ToolDef JSON" +
-    // "Discover tools beyond the current prompt" (replaces D7 "returns
-    // ToolDef JSON" / "use to find tools beyond the current prompt").
-    // #631 T3: 检索范围须声明覆盖 `mcp__` 前缀工具,并提示时机(先搜后用)。
+  it("schema 字段描述包含 spec 要求的英文短语 + T3 检索范围/触发时机", () => {
+    // #483 D9: description must contain "pull ToolDef JSON"(D7 原文案)。
+    // T3 触发时机:tool_search 仅在工具的目录条目没有 description(全 schema
+    // 不可见)时使用 —— 不再"先搜后用",因为直呼加载路径已自动 hydrate。
+    // "Discover tools beyond the current prompt" 这条 D9 原文案被 T3 替
+    // 换 —— 提示信息改为 "Use only when a tool's directory entry has no
+    // description"(由 T3 触发条件决定调用时机)。
     const { toolSearch } = buildToolSearchOverFixture([makeTool("x")]);
     const desc = toolSearch.description;
     expect(desc).toContain("pull ToolDef JSON");
-    expect(desc).toContain("Discover tools beyond the current prompt");
     expect(desc).toContain("mcp__");
-    expect(desc).toContain("Search first, then use");
+    // T3 新触发条件描述:目录条目没有 description → 调 tool_search
+    expect(desc).toContain("no description");
   });
 });
 

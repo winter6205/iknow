@@ -329,20 +329,26 @@ _Avoid_: Pre 失败 fail-open 静默放行；Post 异常推翻已成功的调用
 **secrets guard**: (#126 决议 D6) Pre 缝第一个真实产品消费者——密钥模式拦截钩子，拦「工具调用参数内容夹带密钥/凭据」，与 hard-wall（命令形态 + 敏感路径）互补不重叠；模式来源双层：代码内置默认集 + 项目 settings 覆盖/追加，接入 `createAciExecutor` 产品路径。
 _Avoid_: 与 hard-wall 职责混同；Pre 缝保持零产品消费者；把它当密钥防护唯一道防线
 
-**渐进式披露 (progressive disclosure)**: (#631) 便宜索引常驻 + 重载荷按需的两级披露——索引档（skill 清单 / 工具名字目录）每轮随 system prompt 在场，重载荷（SKILL.md 全文 / 工具完整 schema）经 `skill` / `tool_search` 按需拉取。iknow 机制 = lazy 注册 + `discover()` 命中 + `visibleSchemas` 组合（非 lazy 注册序前缀字节级不变 + discovered 按发现序尾部追加，保 KV cache 前缀）。MCP 工具披露形态经 ADR-0043 收敛为名字目录 + 按需加载，`<mcp_tools_overview>` 概览段已撤出 system。
-_Avoid_: 把发现的工具插回注册序中部（破 KV cache 前缀）；只延迟载荷不给索引线索；概览段发空串占位
+**渐进式披露 (progressive disclosure)**: (#631 / ADR-0046) 便宜索引常驻 + 重载荷按需：索引有描述则按精确名加载（`skill({name})` / 直呼 `discover`）；索引没有描述才 `tool_search`。机制仍是 lazy + `discover()` 尾部追加以保 KV 前缀；`<mcp_tools_overview>` 已撤。
+_Avoid_: 有描述仍强制先 search；把发现的工具插回注册序中部；概览段发空串占位
 
 **前缀资格线 (prefix eligibility line)**: (D9/ADR-0043) 一段内容要有资格留在模型面前缀区（`tools` + `system`），判据是其输入来源**构造上**不可能在会话内变——「实测没变」不算数，代码上不可能变才算数。会话内可变的闸门只许落位 messages 尾部或 handler 层（ADR-0041）。执法 = 两条断言：`IKNOW_ASSEMBLY_ORDER` 声明↔产物一致性、相邻两轮装配 tools+system deep-equal。
 _Avoid_: 以实测抖动频率辩护前缀区易变段；用 chars/4 估算参与溢出判定；中途改写已发出的前缀字节
 
-**名字目录 (tool name catalog)**: (ADR-0043) MCP 工具与退场内建件在 system 中的仅名字索引段——首轮装配定稿、会话内恒定；完整 schema 经 `tool_search` 按需加载（发现 = 结果消息追加 + schema 尾部追加进 tools 双写，此后常驻）。未加载即调用 → 报错并提示先 `tool_search`。
-_Avoid_: 把 MCP schema 全量 upfront 进 tools；目录随连接状态会话中改写；调用报错文案不指路 `tool_search`
+**名字目录 (tool name catalog)**: (ADR-0043 / ADR-0046) MCP 与退场内建件在 system 的会话冻结索引——默认名+短描述；schema 不 upfront，有描述则直呼 `discover` 双写进 `tools` 尾部。
+_Avoid_: MCP schema 全量 upfront；目录随连接改写；有描述仍报错逼 `tool_search`
+
+**直呼加载 (exact-name load)**: (ADR-0046) 前缀已有名字时按该名灌贵载荷——`skill({name})` 取 SKILL.md；未 discover 的工具或 MCP 调其名即 `discover`（参数齐则执行）。
+_Avoid_: 有描述仍先 `tool_search`；用已删除的 `skill_search`
+
+**索引降档 (index demotion)**: (ADR-0046) MCP 与 skill 索引合计超窗口 10% 时，超限条目剥描述只留名；退场内建不参与剥描述。
+_Avoid_: 从目录删除条目；把 schema 退场内建件也剥成裸名
 
 **开局等待 (startup connection wait)**: (ADR-0043) 首轮模型请求前等待 MCP server 连接完成（超时 30s，超时者停止自动重试、本会话缺席）——首个请求发出前前缀即定稿，窗口内连上零破坏。手动重连成功只往 messages 尾部追加一条通知；会话中断开则调用报错、tools 与历史一字不动。
 _Avoid_: 会话中自动重连后改写 tools；超时后继续阻塞启动；把手动重连通知写进 system
 
-**溢出治理 (tool-surface overflow governance)**: (ADR-0043) 可延迟工具（MCP 名单 + 标记 deferrable 的内建低频件）schema 总量（countTokens 实测）超过端点模型 context window 的 10%（配置读）时，超出部分退到名字目录——仅在首轮装配判定一次，会话内不重算；退场次序与永不退场核心件由 ADR-0043 §3 定死。
-_Avoid_: 会话中重算触发；硬编码窗口值；以估算 token 数触发退场
+**溢出治理 (tool-surface overflow governance)**: (ADR-0043 / ADR-0046) schema 超窗口 10% 时内建退场件进目录为名+描述；MCP/skill 索引超 10% 时只剥这两类描述、不删名。皆 countTokens 实测、仅首轮一次。
+_Avoid_: 会话中重算；chars/4 估阈；退场内建剥成仅名字；从目录删名
 
 **会话级快照段 (session-snapshot segment)**: (ADR-0042) 装配时取一次快照、会话内冻结的 system 段（当前住户：`memory_layer` catalog、git 块；promote 段已撤出，ADR-0044）——语义是「快照」而非「缓存」：不再比对源变更，下个会话才重取。新落盘内容对当前会话不可见是已接受代价。
 _Avoid_: 与 mtime 门控缓存混同；会话中因源文件落盘而刷新；把快照段写进 messages
@@ -434,6 +440,9 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **failure overlay vs retract class**: 失败覆盖「收」，失败工具出独立行，不折进计数
 - **accent class vs failure overlay**: 成功点名走 accent；失败时 error 色优先，不用品牌色表示出错
 - **user.md vs user-level AGENTS.md vs 项目 AGENTS.md**: 画像与用户级行为约定同根 `~/.iknow/`、对所有项目生效；项目仓库根 `AGENTS.md` 叠在用户级之上且项目优先；都不是记忆库事实文件
+- **直呼加载 vs tool_search**: 前缀有描述则按名加载；无描述才 search。退场内建保持名+描述故不走 search
+- **索引降档 vs 溢出治理（schema 退场）**: schema 退场把内建变成名+描述；索引降档只剥 MCP/skill 描述
+- **skill vs tool_search**: skill 按名取正文；工具/MCP 定义走直呼 `discover` 或无描述时的 `tool_search`；无 `skill_search`
 
 ## Flagged ambiguities
 

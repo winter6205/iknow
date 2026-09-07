@@ -18,6 +18,7 @@ import {
   buildHarnessEngine,
   type BuiltEngine,
 } from "../../src/harness/build-engine.ts";
+import { MCP_TOOL_SHORT_DESCRIPTION_MAX } from "../../src/harness/identity/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import type { McpClientHandle } from "../../src/harness/mcp/manager.js";
@@ -150,7 +151,12 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
     // 阈值 2_000;模拟"全部 deferrable = 8_000 → 退 1 件 6_500 → 退 2 件
     // 5_000 → 退 3 件 3_500 → 退 4 件 2_500 → 退 5 件 500 ≤ 阈值"。5 件全
     // 退(退场次序 5 件全到位)。
-    const measurements = [8_000, 6_500, 5_000, 3_500, 2_500, 500];
+    //
+    // T5:装配期是**两道闸门**共用同一 countTokens 来源 —— 先跑内建 schema
+    // 退场梯子(前 6 次实测),再跑 MCP/skill 索引降档闸门(第 7 次)。本文件
+    // 只钉退场梯子,故给索引闸门喂一个未超阈值(500 ≤ 2_000)让它零动作,
+    // 索引降档本身在 disclosure-index-align/sc7-index-demotion.test.ts 覆盖。
+    const measurements = [8_000, 6_500, 5_000, 3_500, 2_500, 500, 500];
     let callIdx = 0;
     const built = await buildHarnessEngine({
       env: makeEnv("sk-test-b6-overflow"),
@@ -177,8 +183,8 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
       if (built.shutdown) await built.shutdown();
     });
 
-    // 5 件全退(退到 ≤ 阈值)
-    expect(callIdx).toBe(6); // 1 首测 + 5 重测
+    // 5 件全退(退到 ≤ 阈值);第 7 次 = T5 索引降档闸门首测(未超阈 → 零动作)。
+    expect(callIdx).toBe(7); // 1 首测 + 5 重测 + 1 索引闸门首测
     const visibleNames = built.deps.promptTools().map((t) => t.name);
     // 5 件 deferrable 内建件全部不在 visible
     for (const retired of [
@@ -212,6 +218,35 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
     ]) {
       expect(systemText).toContain(retired);
     }
+
+    // SC4 / spec ASSUMPTIONS #5:退场内建件的索引段是 **名+描述**(不剥描述、
+    // 不走 search)。描述来自该工具 ToolDef.description(首行短描述),SSOT =
+    // registry;此处从 catalog 现取真描述,不硬编码文案。
+    const segment = systemText!.slice(
+      systemText!.indexOf("<deferred_internal_tools>"),
+      systemText!.indexOf("</deferred_internal_tools>")
+    );
+    const catalog = built.catalog;
+    expect(catalog).toBeDefined();
+    for (const retired of [
+      "query_trace",
+      "list_sessions",
+      "get_record",
+      "web_search",
+      "web_fetch",
+    ]) {
+      const def = catalog!.get(retired);
+      expect(def, `${retired} 应仍在 catalog(退场 ≠ 删名)`).toBeDefined();
+      const firstLine = def!.description.split("\n", 1)[0]!.trim();
+      const short =
+        firstLine.length <= MCP_TOOL_SHORT_DESCRIPTION_MAX
+          ? firstLine
+          : `${firstLine.slice(0, MCP_TOOL_SHORT_DESCRIPTION_MAX)}…`;
+      expect(short.length).toBeGreaterThan(0);
+      expect(segment).toContain(`- ${retired}: ${short}`);
+    }
+    // 索引段不再要求先 tool_search(ADR-0046 修订 ADR-0043 §2/§5/§7)。
+    expect(segment).not.toContain("tool_search");
   });
 
   it("countTokens 失败 → 跳过本会话,deferrable 全部保持常驻,warn 一行", async () => {

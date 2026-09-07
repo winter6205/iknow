@@ -2,9 +2,11 @@
  * tests/harness/aci/tools/skill.test.ts
  *
  * `skill` 工具（第 22 件 ACI，#337 T5）单元测试 — 对齐 spec
- * 337-skill-mcp-extension.md § Code Style + T5 acceptance：
+ * 337-skill-mcp-extension.md § Code Style + T5 acceptance +
+ * spec disclosure-index-align.md SC6（未知名引导文本不含 skill_search）：
  *   - inputSchema `{name: string required}`
- *   - 直呼名返回正文（cat SKILL.md 内容）；叫错名返回引导文本
+ *   - 直呼名返回正文（cat SKILL.md 内容）；叫错名返回引导文本,引导回
+ *     `<available_skills>` 清单或 `read_file`(spec ADR-0046 / SC6)
  *   - aci 元数据：read-only / lazy:false / timeoutTier:fast
  *   - handler 同步返回 string（与 catalog.getBodyPath() → readFile 同步读）
  *
@@ -70,6 +72,17 @@ describe("skill — 元数据 (G1 Q1 / T5 acceptance 3)", () => {
       additionalProperties: false,
     });
   });
+
+  it("description: 直呼 `<available_skills>` 精确名,不再 pair skill_search(SC5)", () => {
+    // SC5:`skill` 文案 = 从 `<available_skills>` 精确名直呼,不再 pair
+    // skill_search(spec ADR-0046)。文案同时显式引导回 `<available_skills>`
+    // 清单或（操作员指路径时）`read_file`。
+    const tool = createSkillTool({
+      catalog: createSkillCatalog([]),
+    });
+    expect(tool.description).toContain("available_skills");
+    expect(tool.description).not.toContain("skill_search");
+  });
 });
 
 describe("skill — 直呼名返回 SKILL.md 正文(T5 acceptance 3)", () => {
@@ -126,7 +139,7 @@ describe("skill — 直呼名返回 SKILL.md 正文(T5 acceptance 3)", () => {
   });
 });
 
-describe("skill — 叫错名返回引导回检索的文本(T5 acceptance 3)", () => {
+describe("skill — 叫错名返回引导回 <available_skills> / read_file 的文本(T5 acceptance 3 + SC6)", () => {
   let scratch: string;
 
   beforeEach(async () => {
@@ -137,7 +150,7 @@ describe("skill — 叫错名返回引导回检索的文本(T5 acceptance 3)", (
     await rm(scratch, { recursive: true, force: true });
   });
 
-  it("unknown name → 引导回 skill_search,不返回正文", async () => {
+  it("unknown name → 引导回 <available_skills> / read_file,绝不提 skill_search", async () => {
     const dir = join(scratch, "echo");
     await mkdir(dir, { recursive: true });
     await writeFile(
@@ -151,15 +164,19 @@ describe("skill — 叫错名返回引导回检索的文本(T5 acceptance 3)", (
     const tool = createSkillTool({ catalog });
     const out = await invokeSkill(tool, { name: "nope" });
     expect(out.toLowerCase()).toContain("nope");
-    expect(out).toContain("skill_search");
+    // SC6 契约:引导文本绝不出现已删的 skill_search 字样。
+    expect(out).not.toContain("skill_search");
     expect(out).not.toContain("body");
+    // 引导落到 available_skills / read_file 任一(operator 在对话里指路径时)。
+    expect(out).toMatch(/available_skills|read_file/);
   });
 
-  it("空 catalog 直呼 → 仍返回引导文本(不抛)", async () => {
+  it("空 catalog 直呼 → 仍返回引导文本(不抛),且不含 skill_search", async () => {
     const catalog = createSkillCatalog([]);
     const tool = createSkillTool({ catalog });
     const out = await invokeSkill(tool, { name: "anything" });
-    expect(out).toContain("skill_search");
+    expect(out).not.toContain("skill_search");
+    expect(out).toMatch(/available_skills|read_file/);
   });
 
   it("disabled skill 直呼 → 同样按未注册处理(索引层过滤;get 不返回)", async () => {

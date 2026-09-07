@@ -1,18 +1,17 @@
 /**
- * #337 T11 — E2E A 验收：stub-model 脚本化全链路（spec SC13）。
+ * #337 T11 + #disclosure-index-align T2 — E2E A 验收：stub-model 脚本化全链路（spec SC13 + SC8）。
  *
- * 链路：`skill_search({query})` → `skill({name})` → `tool_search` → `mcp__*`。
- * 每步断言真实结果；codebase-memory-mcp 缺席 → 显式 skip + Not run 记录
- * （spec 假设 14 格式），其余子断言照跑。
+ * 链路：spec ADR-0046 删 `skill_search` 后,直呼 `skill({name:"echo"})` →
+ * `tool_search` → `mcp__*`。每步断言真实结果;codebase-memory-mcp 缺席
+ * → 显式 skip + Not run 记录（spec 假设 14 格式），其余子断言照跑。
  *
  * 装配：buildHarnessEngine 真实装配（skill catalog 扫 tmp fixture 目录，
  * MCP manager 按 surface 条件化）。fixture skill 放在 tmp 的
  * `<cwd>/.iknow/skills/echo/`（T8 测试同法，不污染真实 ~/.iknow）。
  *
- * stub-model 脚本（SC13）：模型回合依次
- *   turn1: tool_use(skill_search, { query: "echo" })
- *   turn2: tool_use(skill, { name: "echo" })
- *   turn3: 最终 text → stopReason completed
+ * stub-model 脚本（SC13 + SC8）：模型回合依次
+ *   turn1: tool_use(skill, { name: "echo" })
+ *   turn2: 最终 text → stopReason completed
  */
 import { afterAll, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -98,8 +97,8 @@ afterAll(async () => {
   if (root) await rm(root, { recursive: true, force: true });
 });
 
-describe("#337 T11 E2E A：skill 链 stub-model 脚本化（SC13）", () => {
-  it("skill_search 找到 fixture skill → skill 返回装配正文 → 回合正常完成", async () => {
+describe("#337 T11 E2E A：skill 链 stub-model 脚本化（SC13 + SC8）", () => {
+  it('skill({name:"echo"}) 直呼 → skill 返回装配正文 → 回合正常完成（SC8 无 skill_search）', async () => {
     root = await mkdtemp(join(tmpdir(), "iknow-t11-e2e-"));
     await plantSkill(
       root,
@@ -119,16 +118,16 @@ describe("#337 T11 E2E A：skill 链 stub-model 脚本化（SC13）", () => {
       if (built.shutdown) await built.shutdown();
     });
 
-    // fixture skill 在场 → catalog 含 skill 两件工具
-    expect(built.deps.registry.get("skill_search")).toBeDefined();
+    // fixture skill 在场 → catalog 含 skill 一件（disclosure-index-align T2
+    // / SC5 删 skill_search 后只剩 1 件）。
     expect(built.deps.registry.get("skill")).toBeDefined();
+    // SC5：skill_search 不在注册表（连 fixture 也无此工具）。
+    expect(built.deps.registry.get("skill_search")).toBeUndefined();
 
-    // stub-model 脚本：skill_search({query:"echo"}) → skill({name:"echo"})
+    // stub-model 脚本:disclosure-index-align T2 删 skill_search 后,模型直接
+    // 调 skill({name:"echo"})（SC8 直呼路径不依赖二次检索）。
     const stub = createStubModel({
-      responses: scriptedTurns([
-        { name: "skill_search", input: { query: "echo" } },
-        { name: "skill", input: { name: "echo" } },
-      ]),
+      responses: scriptedTurns([{ name: "skill", input: { name: "echo" } }]),
     });
 
     // build-engine 的 adapter 是真实 Anthropic；stub-model 脚本化时覆写。
@@ -142,8 +141,7 @@ describe("#337 T11 E2E A：skill 链 stub-model 脚本化（SC13）", () => {
     const { result } = await run("test e2e", deps);
 
     expect(result.stopReason).toBe("completed");
-    // 断言 skill_search 真实返回流转：工具结果进历史（user 侧 tool_result）。
-    // 简化断言：skill_search 命中 → skill 工具调用未被拒（回合完成即证明）。
+    // 简化断言:skill 直呼未拒（回合完成即证明）。
     expect(result.finalText).toBe("E2E chain complete");
     void state;
   }, 30_000);
@@ -254,8 +252,9 @@ Validation:
 
     // manager 在场（chat surface）→ shutdown 句柄存在
     expect(typeof built.shutdown).toBe("function");
-    // skill_search 仍在场（skill 链不受 MCP 影响）
-    expect(built.deps.registry.get("skill_search")).toBeDefined();
+    // disclosure-index-align T2 / SC5:skill_search 已删;skill 仍在场。
+    expect(built.deps.registry.get("skill")).toBeDefined();
+    expect(built.deps.registry.get("skill_search")).toBeUndefined();
     // MCP 工具经 registerExternal 动态注册 → catalog 中 mcp__* 名字
     // 等待后台连接完成（30s 注册超时内）
     const names = built.deps.registry.list().map((d) => d.name);

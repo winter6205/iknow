@@ -46,13 +46,15 @@ export interface AciMeta {
   readonly category: AciCategory;
   readonly isConcurrencySafe: boolean;
   readonly interruptBehavior: "cancel" | "block";
-  /** true = 延迟加载：默认不进 prompt schema，需 discover() 检索注入。默认 false（核心常驻）。 */
+  /** true = 延迟加载：默认不进 prompt schema，需 discover() 检索注入
+   *  (T4:直呼未 discover 的 lazy 件也触发 hydrate —— gateOne 读本字段,
+   *  故 permission-executor 的 catalog 投影必须保留它)。默认 false（核心常驻）。 */
   readonly lazy?: boolean;
   /**
    * B6 / ADR-0043 §3:溢出候选标记 —— true = 进入可延迟池(首轮装配
-   * countTokens 实测超过 context window 的 10% 时可退到名字目录)。与
+   * countTokens 实测超过 context window 的 10% 时可退到索引档:名+描述)。与
    * `lazy` 区分:`lazy` = 已加载即常驻(schema 仍可能在可见前缀),`deferrable`
-   * = 溢出时可退到名字目录。**核心七件永不退场**(bash / read_file /
+   * = 溢出时可退到索引档。**核心七件永不退场**(bash / read_file /
    * edit_file / write_file / grep / glob / spawn_subagent),即使标
    * deferrable 也被判定层忽略 —— 见 `tool-overflow.ts` `CORE_TOOL_NAMES`。
    * 默认 false(常驻)。MCP 工具天然 deferrable(B4 §2);内建低频件按调用
@@ -78,6 +80,14 @@ export interface AciCatalog {
    * 用 build-engine 之外的 registry,行为与 B4 之前一致)。
    */
   readonly isDiscovered?: (name: string) => boolean;
+  /**
+   * T3 / T4 / ADR-0046 §3:hydrate 副作用入口 —— gateOne 对未 discover 的
+   * lazy 工具(`mcp__` 前缀件与 schema 退场的内建件)调此函数把名字纳入
+   * discovered set(下一轮 visibleSchemas 尾部追加 schema)。缺席
+   * (`undefined`)→ 闸门视作「非 ACI registry 装配的路径」,行为与 T3 之前
+   * 一致(直接交给 inner)。
+   */
+  readonly discover?: (name: string) => void;
 }
 
 /**

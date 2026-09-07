@@ -3,6 +3,8 @@
 Date: 2026-09-04
 Status: accepted
 
+> **Amendment 2026-09-06**（ADR-0046 / `specs/disclosure-index-align.md`）：§2「完整定义经 tool_search」「未加载即调用 → 报错并提示先 tool_search」、§5「要用即走 tool_search」、§7「信息由名字目录 + tool_search 结果消息承载」中**必经 tool_search** 的读法 **superseded**。名字目录默认名+短描述（#631 T2）；有描述则直呼 `discover`；`tool_search` 仅当前缀无描述。schema 不 upfront、开局等待、前缀冻结、§3 schema 退场次序与 10% 闸仍有效。
+
 ## Context
 
 wayfinder 图「模型面前缀分层与缓存兑现」G1 票（前缀稳定边界）与 MCP 披露形态合并裁决。前缀序 `tools → system → messages`，目标端点走被动前缀缓存：前缀任何字节变动即其后全部作废。现状三处违约：`<mcp_tools_overview>` 每轮现读连接状态（连上即变）；MCP 工具连上即全量 schema 进 tools（每会话早期抖 1~2 次）；连接事件无模型侧告知。既有 lazy / `tool_search` 机制（渐进式披露，发现序尾部追加）建而未用（`lazy: true` 零命中）。

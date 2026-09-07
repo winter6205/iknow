@@ -105,8 +105,9 @@ const TEST_ENV: IknowEnv = {
  *   - bash_output / bash_stop（backgroundManager 缺席,#502 T3 同门）
  *   - run_graph（graphAssembly 缺席,D-α T3）
  *
- * 本测试通过显式注 skillCatalog 把 skill / skill_search 计入（条件化：
- * skillCatalog 在场时入注册表），具体件数以 WORKER_BASE_SURFACE 数组长度为准。
+ * 本测试通过显式注 skillCatalog 把 skill 计入（条件化：skillCatalog 在场
+ * 时入注册表;disclosure-index-align T2 / SC5 删 skill_search 后只剩 1 件）,
+ * 具体件数以 WORKER_BASE_SURFACE 数组长度为准。
  */
 const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
   "bash",
@@ -119,7 +120,6 @@ const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
   "web_search",
   "tool_search",
   "skill",
-  "skill_search",
   "query_trace",
   // symbol-primary-aci T2:符号查询 10 件常驻（不依赖 manager，与 lsp.ts SSOT
   // 共享 lspCtx；旧 10 件 lsp_* 已在 T5 退役）。
@@ -561,9 +561,10 @@ describe("worker tool surface: #440 T5 D6 ownership — todo_write 缺席", () =
 
 /**
  * 走真实 createWorkerDeps 装配：注入 stub-model + 空 skill catalog 让
- * skill/skill_search 静态在场（Gate 3 锁），不加 subagentManager 与
- * memoryDir（worker 装配特征），不传 todoDir（D6 ownership）。返回值
- * 含 deps.registry（executor 真实可见）+ deps.promptTools（模型可见）。
+ * skill 静态在场（Gate 3 锁,disclosure-index-align T2 删 skill_search 后只剩
+ * 1 件），不加 subagentManager 与 memoryDir（worker 装配特征），不传
+ * todoDir（D6 ownership）。返回值含 deps.registry（executor 真实可见）+
+ * deps.promptTools（模型可见）。
  */
 async function buildWorkerWithFullSkillCatalog(): Promise<LoopEngineDeps> {
   const env: IknowEnv = {

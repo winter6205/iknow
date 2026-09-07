@@ -14,9 +14,11 @@
  * 单一装配函数返回注册表,所有入口共享。本测试锁 5 边界类:
  *
  *   - 正常路径:返回 AciRegistry,list() 工具名 = `ACI_TOOLSET_NAMES` 全集
- *     （全条件在场 + subagentManager + worktree host seams → 44），顺序 append-only
+ *     （全条件在场 + subagentManager + worktree host seams → 43），顺序 append-only
  *     注:ADR-0041 起 run_graph 常驻(仅 subagentManager 同门),graphAssembly
  *     缺席不影响注册表成员(handler isEnabled 缺省恒关守门)
+ *     注:disclosure-index-align T2 删 skill_search,#337 原 2 件 → 1 件,
+ *     长度由 44 → 43
  *   - 空输入:env.web 全空(undefined)→ 直连不抛;sandboxRoot:"" → 不抛
  *   - 非法输入:proxy 非 http/https / 含凭据 → 装配期同步抛 ToolExecutionError
  *   - 溢出/边界:sandboxRoot 指向不存在路径 → 装配期不抛(执行期由 fs 工具越界逻辑拒绝)
@@ -124,9 +126,9 @@ const fakeBackgroundManager: BackgroundTaskManager = {
 describe("createDefaultAciRegistry — 正常路径", () => {
   // symbol-primary-aci T5 全条件装配：memoryDir + skillCatalog + subagentManager +
   // todoDir + mcpManager + backgroundManager + graphAssembly 同时在场 → list()
-  // 全量 = ACI_TOOLSET_NAMES 全长（task worktree lifecycle 后 44 件），顺序 append-only。10 件 lsp_*
+  // 全量 = ACI_TOOLSET_NAMES 全长（task worktree lifecycle 后 43 件），顺序 append-only。10 件 lsp_*
   // 已退役（坐标面 → 符号面接班），lsp.ts 实现的 SSOT 不变。
-  it("memoryDir + skillCatalog + subagentManager + todoDir + mcpManager + backgroundManager + graphAssembly 同时在场 → list() 全量 44 件,顺序 append-only", () => {
+  it("memoryDir + skillCatalog + subagentManager + todoDir + mcpManager + backgroundManager + graphAssembly 同时在场 → list() 全量 43 件,顺序 append-only", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -138,7 +140,7 @@ describe("createDefaultAciRegistry — 正常路径", () => {
       mcpManager: fakeMcpManager,
       // #502 T4:bash_output / bash_stop 条件化装配,backgroundManager 在场才入注册表。
       backgroundManager: fakeBackgroundManager,
-      // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 31 件)。
+      // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 30 件)。
       graphAssembly: { enabled: () => true },
       // worktree isolation (ADR-0037):3 件条件化装配,host 缝在场才入注册表。
       worktreeProvision: fakeWorktreeProvision,
@@ -155,7 +157,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("memory_save")).toBeDefined();
     expect(reg.catalog.get("tool_search")).toBeDefined();
     expect(reg.catalog.get("skill")).toBeDefined();
-    expect(reg.catalog.get("skill_search")).toBeDefined();
+    // disclosure-index-align T2 / SC5:`skill_search` 已删,不在 ACI_TOOLSET_NAMES。
+    expect(reg.catalog.get("skill_search")).toBeUndefined();
     expect(reg.catalog.get("spawn_subagent")).toBeDefined();
     expect(reg.catalog.get("subagent_result")).toBeDefined();
     // #440 T4:todo_write 在 todoDir 在场时进入注册表。
@@ -168,7 +171,7 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("bash_stop")).toBeDefined();
   });
 
-  it("memoryDir + skillCatalog + subagentManager 都缺席 → list() 27 件(8 基线 + tool_search + query_trace + 10 符号查询 + 5 符号改 + list_sessions + get_record,无 memory/skill/spawn/todo/mcp/bg/run_graph/worktree)", () => {
+  it("memoryDir + skillCatalog + subagentManager 都缺席 → list() 26 件(8 基线 + tool_search + query_trace + 10 符号查询 + 5 符号改 + list_sessions + get_record,无 memory/skill/spawn/todo/mcp/bg/run_graph/worktree)", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -180,7 +183,6 @@ describe("createDefaultAciRegistry — 正常路径", () => {
           n !== "memory_recall" &&
           n !== "memory_save" &&
           n !== "skill" &&
-          n !== "skill_search" &&
           n !== "spawn_subagent" &&
           n !== "subagent_result" &&
           n !== "todo_write" &&
@@ -204,6 +206,7 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("memory_recall")).toBeUndefined();
     expect(reg.catalog.get("memory_save")).toBeUndefined();
     expect(reg.catalog.get("skill")).toBeUndefined();
+    // disclosure-index-align T2 / SC5:已删。
     expect(reg.catalog.get("skill_search")).toBeUndefined();
     expect(reg.catalog.get("spawn_subagent")).toBeUndefined();
     expect(reg.catalog.get("subagent_result")).toBeUndefined();
@@ -217,12 +220,13 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("bash_stop")).toBeUndefined();
   });
 
-  // task-worktree-lifecycle 后 ACI_TOOLSET_NAMES 长度 44
-  // (T2+T4 末态 32 + 5 件 T4 符号改 - 10 件退役 lsp_*)。
-  // append-only 纪律保留 23 件既有 + 末位 14 件符号面 / 改工具。
+  // task-worktree-lifecycle 后 ACI_TOOLSET_NAMES 长度 43
+  // (T2+T4 末态 31 + 5 件 T4 符号改 - 10 件退役 lsp_* + 1 件 disclosure-index-align
+  //  T2 删 skill_search -1)。
+  // append-only 纪律保留 22 件既有 + 末位 14 件符号面 / 改工具。
   // 旧 10 件 lsp_* 已退役（spec symbol-primary-aci.md §37-53 + SC2 + SC7）。
-  it("Gate 3:ACI_TOOLSET_NAMES 长度 44,前 8 原序 + memory_* + tool_search + skill + skill_search + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop + run_graph + query_trace + 10 符号查询 + 5 符号改 + worktree 3 件 + list_sessions + get_record + list/remove worktree", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(44);
+  it("Gate 3:ACI_TOOLSET_NAMES 长度 43,前 8 原序 + memory_* + tool_search + skill + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop + run_graph + query_trace + 10 符号查询 + 5 符号改 + worktree 3 件 + list_sessions + get_record + list/remove worktree", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(43);
     // 前 8 件原序不变(append-only 纪律)。
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -237,40 +241,43 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(ACI_TOOLSET_NAMES[8]).toBe("memory_recall");
     expect(ACI_TOOLSET_NAMES[9]).toBe("memory_save");
     expect(ACI_TOOLSET_NAMES[10]).toBe("tool_search");
-    // T5:LSP 工具集已退役；本表 11..21 段改为 skill 2 (T5 末态保持 11=skill / 12=skill_search)。
-    // skill 工具集 append-only:11→13,2 件在末尾,不重排既有 11 件。
-    expect(ACI_TOOLSET_NAMES.slice(11, 13)).toEqual(["skill", "skill_search"]);
-    // #356 T4 spawn_subagent append-only:13→14,末位 1 件,不重排既有 13 件。
-    expect(ACI_TOOLSET_NAMES.slice(13, 14)).toEqual(["spawn_subagent"]);
-    // #356 T5 subagent_result append-only:14→15,末位 1 件,不重排既有 14 件。
-    expect(ACI_TOOLSET_NAMES.slice(14, 15)).toEqual(["subagent_result"]);
+    // T5:LSP 工具集已退役；本表 11 段改为 skill 1
+    // (disclosure-index-align T2 / SC5:删 skill_search,11 段只剩 skill)。
+    // skill 工具集 append-only:11→12,1 件在末尾,不重排既有 11 件。
+    expect(ACI_TOOLSET_NAMES.slice(11, 12)).toEqual(["skill"]);
+    // SC5:skill_search 不在 ACI_TOOLSET_NAMES / visibleSchemas / list。
+    expect(ACI_TOOLSET_NAMES).not.toContain("skill_search");
+    // #356 T4 spawn_subagent append-only:12→13,末位 1 件,不重排既有 12 件。
+    expect(ACI_TOOLSET_NAMES.slice(12, 13)).toEqual(["spawn_subagent"]);
+    // #356 T5 subagent_result append-only:13→14,末位 1 件,不重排既有 13 件。
+    expect(ACI_TOOLSET_NAMES.slice(13, 14)).toEqual(["subagent_result"]);
     // #440 双 Stream 并集:todo_write (T4) + MCP resources (T11) 三件
-    // 末尾 append-only,不重排既有 15 件。append-only 段 15..18。
-    expect(ACI_TOOLSET_NAMES.slice(15, 18)).toEqual([
+    // 末尾 append-only,不重排既有 14 件。append-only 段 14..17。
+    expect(ACI_TOOLSET_NAMES.slice(14, 17)).toEqual([
       "todo_write",
       "list_mcp_resources",
       "read_mcp_resource",
     ]);
-    // #502 T4 bash_output / bash_stop 工具集 append-only:18→20,末位 2 件,
-    // 不重排既有 18 件。
-    expect(ACI_TOOLSET_NAMES.slice(18, 20)).toEqual([
+    // #502 T4 bash_output / bash_stop 工具集 append-only:17→19,末位 2 件,
+    // 不重排既有 17 件。
+    expect(ACI_TOOLSET_NAMES.slice(17, 19)).toEqual([
       "bash_output",
       "bash_stop",
     ]);
-    // D-α T3 run_graph append-only:20→21,末位 1 件,不重排既有 20 件。
-    expect(ACI_TOOLSET_NAMES.slice(20, 21)).toEqual(["run_graph"]);
-    // T9 query_trace append-only:21→22,末位 1 件,不重排既有 21 件。
-    expect(ACI_TOOLSET_NAMES.slice(21, 22)).toEqual(["query_trace"]);
-    // worktree isolation (master ADR-0037):三件 append-only:22→25,末位 3 件,
-    // 不重排既有 22 件。create/enter/exit 三件顺序与工作流先后一致。
-    expect(ACI_TOOLSET_NAMES.slice(22, 25)).toEqual([
+    // D-α T3 run_graph append-only:19→20,末位 1 件,不重排既有 19 件。
+    expect(ACI_TOOLSET_NAMES.slice(19, 20)).toEqual(["run_graph"]);
+    // T9 query_trace append-only:20→21,末位 1 件,不重排既有 20 件。
+    expect(ACI_TOOLSET_NAMES.slice(20, 21)).toEqual(["query_trace"]);
+    // worktree isolation (master ADR-0037):三件 append-only:21→24,末位 3 件,
+    // 不重排既有 21 件。create/enter/exit 三件顺序与工作流先后一致。
+    expect(ACI_TOOLSET_NAMES.slice(21, 24)).toEqual([
       "create-task-worktree",
       "enter-task-worktree",
       "exit-task-worktree",
     ]);
-    // symbol-primary-aci T2 符号查询工具集 append-only:25→35,末位 10 件,
-    // 不重排既有 25 件。
-    expect(ACI_TOOLSET_NAMES.slice(25, 35)).toEqual([
+    // symbol-primary-aci T2 符号查询工具集 append-only:24→34,末位 10 件,
+    // 不重排既有 24 件。
+    expect(ACI_TOOLSET_NAMES.slice(24, 34)).toEqual([
       "find_symbol",
       "find_declaration",
       "find_referencing_symbols",
@@ -282,14 +289,14 @@ describe("createDefaultAciRegistry — 正常路径", () => {
       "list_incoming_calls",
       "list_outgoing_calls",
     ]);
-    // symbol-primary-aci T4 符号改工具集 append-only:35→40,末位 5 件,
-    // 不重排既有 35 件（与查询面并列；category=write，与 edit_file 共存）。
-    // trace-mcp-read-side-split T5b list_sessions append-only:40→41,末位再加 1 件
+    // symbol-primary-aci T4 符号改工具集 append-only:34→39,末位 5 件,
+    // 不重排既有 34 件（与查询面并列；category=write，与 edit_file 共存）。
+    // trace-mcp-read-side-split T5b list_sessions append-only:39→40,末位再加 1 件
     // （目录轴读工具，无装配条件 → 常驻；末位是 Gate 3 的顺序契约）。
-    // trace-mcp-read-side-split T6 get_record append-only:41→42,末位再加 1 件
+    // trace-mcp-read-side-split T6 get_record append-only:40→41,末位再加 1 件
     // （内容轴读工具，同样无装配条件 → 常驻）。两件的相对顺序就是三轴的阅读顺序
     // （目录 → 行 → 内容），与 MCP 面的 tools/list 顺序同一判据。
-    expect(ACI_TOOLSET_NAMES.slice(35, 42)).toEqual([
+    expect(ACI_TOOLSET_NAMES.slice(34, 41)).toEqual([
       "rename_symbol",
       "replace_symbol_body",
       "insert_before_symbol",
@@ -298,7 +305,7 @@ describe("createDefaultAciRegistry — 正常路径", () => {
       "list_sessions",
       "get_record",
     ]);
-    expect(ACI_TOOLSET_NAMES.slice(42, 44)).toEqual([
+    expect(ACI_TOOLSET_NAMES.slice(41, 43)).toEqual([
       "list-task-worktrees",
       "remove-task-worktree",
     ]);
@@ -437,7 +444,7 @@ function expectedSurface(
 ): readonly string[] {
   const conditionallyAbsent = [
     ...(opts.memory ? [] : ["memory_recall", "memory_save"]),
-    ...(opts.skill ? [] : ["skill", "skill_search"]),
+    ...(opts.skill ? [] : ["skill"]),
     ...(opts.subagent ? [] : ["spawn_subagent", "subagent_result"]),
     ...(opts.todo ? [] : ["todo_write"]),
     ...(opts.mcp ? [] : ["list_mcp_resources", "read_mcp_resource"]),

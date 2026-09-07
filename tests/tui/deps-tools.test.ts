@@ -10,9 +10,8 @@
  * 且 onToolEvent 钩子经 deps.executor 在 executor 层真实触发(T1 观测缝验收)。
  * 任何入口漏注册的工具都让此测试立即报警。
  *
- * #337 Phase B：buildTuiDeps 装配 skill catalog → 21→23 件（追加 skill /
- * skill_search，静态装配经 reg.inner.list() 透出）。skill catalog 即便为空
- * 也会通过 createDefaultAciRegistry 注入 skill / skill_search 两件
+ * #337 Phase B：buildTuiDeps 装配 skill catalog → 21→23 件（追加 skill（disclosure-index-align T2 删 skill_search 后只剩 1 件），静态装配经 reg.inner.list() 透出）。skill catalog 即便为空
+ * 也会通过 createDefaultAciRegistry 注入 skill 一件
  * （ACI_TOOLSET_NAMES Gate 3 锁）。本测试注入 tmp userHome/cwd（mkdtemp）
  * 隔离真实 ~/.iknow / cwd——worktree 已提交的 .iknow/mcp.json 含真实
  * stdio server，不隔离会触发 subprocess 启动、拖慢且污染测试环境。
@@ -87,7 +86,7 @@ const EXPECTED_TUI_TOOLSET = ACI_TOOLSET_NAMES.filter(
 describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(SSOT 派生)", () => {
   // #337 Phase B:tmp fixture 隔离真实 ~/.iknow / cwd(避免 worktree 已提交
   // 的 .iknow/mcp.json 触发真实 stdio subprocess 启动,以及 .iknow/skills
-  // 污染 skill scanner 降级行为)。skill/skill_search 静态装配(Gate 3 锁:
+  // 污染 skill scanner 降级行为)。skill 静态装配(Gate 3 锁,disclosure-index-align T2 删 skill_search 后只剩 1 件):
   // skillCatalog 提供即装两件)。
   const roots: string[] = [];
 
@@ -122,7 +121,7 @@ describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(SSOT 派
     expect(names).not.toContain("lsp_diagnostics");
   });
 
-  test("显式断言 web_fetch / web_search / skill / skill_search 都在注册表里", async () => {
+  test("显式断言 web_fetch / web_search / skill 在注册表里,skill_search 不在(SC5)", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-tui-deps-explicit-"));
     roots.push(root);
     const deps = await buildTuiDeps(makeBundle(), {
@@ -134,7 +133,8 @@ describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(SSOT 派
     expect(names.has("web_fetch")).toBe(true);
     expect(names.has("web_search")).toBe(true);
     expect(names.has("skill")).toBe(true);
-    expect(names.has("skill_search")).toBe(true);
+    // disclosure-index-align T2 / SC5:skill_search 已删,不在注册表。
+    expect(names.has("skill_search")).toBe(false);
   });
 
   test("IKNOW_WEB_PROXY 非空时,web 工具装配抛错(fail-fast 在装配时)", async () => {

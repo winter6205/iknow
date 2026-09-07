@@ -3,12 +3,12 @@
  *
  * 装配期(`buildHarnessEngine` 在 `await mcpManager.start()` 之后)一次性判定:
  * 可延迟工具池(MCP 工具天然 deferrable + 标记 deferrable 的内建低频件)
- * schema 总量超过端点模型 context window 的 10% 时,按退场次序逐件退到名字
- * 目录,直至总量 ≤ 阈值或池空。**只首轮一次**,会话内不重算。
+ * schema 总量超过端点模型 context window 的 10% 时,按退场次序逐件退到索引
+ * 档(名+描述),直至总量 ≤ 阈值或池空。**只首轮一次**,会话内不重算。
  *
  * 退场机制 = stamp `aci.lazy: true`(B4 §2 已立:lazy 工具 schema 不进
- * visibleSchemas,名字进 mcp_name_directory 段;模型可经 tool_search 按需
- * 拉回)。
+ * visibleSchemas;T4:退场件进 `<deferred_internal_tools>` 段为**名+描述**,
+ * 模型直呼即 hydrate —— 不必先 `tool_search`,见 permission-executor gateOne)。
  *
  * 退场次序(SSOT,ADR-0043 §3 钉死):trace 读侧三件
  * (query_trace / list_sessions / get_record) → web_search / web_fetch → 其

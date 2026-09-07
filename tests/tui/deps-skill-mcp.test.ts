@@ -1,7 +1,7 @@
 /**
  * tests/tui/deps-skill-mcp.test.ts
  *
- * #337 Phase B：TUI 装配 skill catalog + MCP manager 的单测覆盖。
+ * #337 Phase B + #disclosure-index-align T2：TUI 装配 skill catalog + MCP manager 的单测覆盖。
  *
  * 与 tests/tui/deps-tools.test.ts 共享同一 #343 装配断言取向，但本文件
  * 隔离真实 ~/.iknow / cwd —— 用 mkdtemp 造 tmp fixture，userHome 注入
@@ -10,7 +10,8 @@
  * 装配）与 :317-378（#337 T8 MCP 装配）的形态。
  *
  * 三个断言（与 task brief 一致）：
- *   1. buildTuiDeps 装配后 deps.registry.list() 含 skill + skill_search；
+ *   1. buildTuiDeps 装配后 deps.registry.list() 含 skill,不含 skill_search
+ *      （disclosure-index-align T2 / SC5:skill_search 已删,只剩 1 件）；
  *   2. onExtensions 回调收到 skillCatalog（available() 含 planted skill）
  *      + mcp.status() 返回数组（可调用）；
  *   3. mcp reload 不抛（tmp 无 mcp.json → servers 空 → reload 空集幂等）。
@@ -88,7 +89,7 @@ describe("buildTuiDeps — #337 Phase B skill + MCP 装配", () => {
     );
   });
 
-  test("skill 工具静态装配（deps.registry.list() 含 skill + skill_search）", async () => {
+  test("skill 工具静态装配（deps.registry.list() 含 skill,不含 skill_search）", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-tui-skill-"));
     roots.push(root);
     await plantSkill(root, "echo", "echoes your message");
@@ -102,7 +103,8 @@ describe("buildTuiDeps — #337 Phase B skill + MCP 装配", () => {
 
     const names = new Set(deps.registry.list().map((d) => d.name));
     expect(names.has("skill")).toBe(true);
-    expect(names.has("skill_search")).toBe(true);
+    // disclosure-index-align T2 / SC5:skill_search 已删,不在注册表。
+    expect(names.has("skill_search")).toBe(false);
   });
 
   test("onExtensions 回调收到 skillCatalog（available() 含 planted skill）+ mcp.status() 可调用", async () => {

@@ -111,22 +111,23 @@ describe("createGraphAssembly — per-round 装配快照", () => {
 
 describe("run_graph — ACI 常驻注册(ADR-0041 关键边界)", () => {
   it("ACI_TOOLSET_NAMES 在 run_graph 之后 append-only(worktree 3 件 + 10 件符号查询 + 5 件符号改 + 目录轴读 + 内容轴读 + 任务树 lifecycle 2 件,不重排既有件)", () => {
-    // 长度 44;实际 idx(基线实测):
-    //   idx 20 = run_graph(ADR-0041 起常驻)
-    //   idx 21 = query_trace
-    //   idx 22..24 = worktree 3 件
-    //   idx 25..34 = 10 件符号查询
-    //   idx 35..39 = 5 件符号改
-    //   idx 40 = list_sessions(T5b 目录轴读)
-    //   idx 41 = get_record(T6 内容轴读)
-    //   idx 42 = list-task-worktrees,idx 43 = remove-task-worktree
-    expect(ACI_TOOLSET_NAMES[20]).toBe("run_graph");
-    expect(ACI_TOOLSET_NAMES[21]).toBe("query_trace");
-    expect(ACI_TOOLSET_NAMES[22]).toBe("create-task-worktree");
-    expect(ACI_TOOLSET_NAMES[23]).toBe("enter-task-worktree");
-    expect(ACI_TOOLSET_NAMES[24]).toBe("exit-task-worktree");
-    expect(ACI_TOOLSET_NAMES[25]).toBe("find_symbol");
-    expect(ACI_TOOLSET_NAMES[35]).toBe("rename_symbol");
+    // 长度 43（disclosure-index-align T2 删 skill_search,前移一位）;
+    // 实际 idx(基线实测):
+    //   idx 19 = run_graph(ADR-0041 起常驻)
+    //   idx 20 = query_trace
+    //   idx 21..23 = worktree 3 件
+    //   idx 24..33 = 10 件符号查询
+    //   idx 34..38 = 5 件符号改
+    //   idx 39 = list_sessions(T5b 目录轴读)
+    //   idx 40 = get_record(T6 内容轴读)
+    //   idx 41 = list-task-worktrees,idx 42 = remove-task-worktree
+    expect(ACI_TOOLSET_NAMES[19]).toBe("run_graph");
+    expect(ACI_TOOLSET_NAMES[20]).toBe("query_trace");
+    expect(ACI_TOOLSET_NAMES[21]).toBe("create-task-worktree");
+    expect(ACI_TOOLSET_NAMES[22]).toBe("enter-task-worktree");
+    expect(ACI_TOOLSET_NAMES[23]).toBe("exit-task-worktree");
+    expect(ACI_TOOLSET_NAMES[24]).toBe("find_symbol");
+    expect(ACI_TOOLSET_NAMES[34]).toBe("rename_symbol");
     expect(ACI_TOOLSET_NAMES.at(-4)).toBe("list_sessions");
     expect(ACI_TOOLSET_NAMES.at(-3)).toBe("get_record");
     expect(ACI_TOOLSET_NAMES.at(-2)).toBe("list-task-worktrees");

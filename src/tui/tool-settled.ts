@@ -85,7 +85,9 @@ export const TOOL_SETTLED_CLASS: Readonly<Record<string, SettledClass>> = {
   web_fetch: "retract",
   memory_recall: "retract",
   tool_search: "retract",
-  skill_search: "retract",
+  // disclosure-index-align T2: skill_search 已删（spec ADR-0046 / SC5）。
+  // 历史回放记录里仍有该名（tool_result 已写入 message），按缺省 retract
+  // 兜底（settledClassOf 未注册名缺省 retract）—— 无需显式声明。
   bash_output: "retract",
   list_mcp_resources: "retract",
   read_mcp_resource: "retract",
