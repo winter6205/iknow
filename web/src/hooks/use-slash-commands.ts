@@ -14,6 +14,13 @@ import {
   slashHelpText,
   type SlashCommandName,
 } from "../lib/slash";
+
+// SSOT 镜像（web ↔ src 跨 workspace 边界）。`web/` 是独立 Vite workspace
+// （见 `web/tsconfig.json` 仅 include `web/src`，无路径映射到 `../src/`），
+// 无法 import `src/harness/skill/body.ts` 的 `SKILL_LOAD_PREFIX` /
+// `buildSkillLoadText`。保持 byte 级形态与 `src/tui/app.tsx` /
+// `src/session-api/hub.ts` 一致；任何字面量变更必须三处同步。
+const SKILL_LOAD_PREFIX_WEB = '[skill-load name="';
 import { formatSessionInfo } from "../lib/session-info";
 import type { WebRewindTarget } from "../lib/rewind-targets";
 import {
@@ -248,9 +255,8 @@ export function useSlashCommands(
     async (name: string, remainder: string) => {
       try {
         const { body } = await api.getSkillBody(name);
-        const sendText = `[skill-load name="${name}"]\n${body}${
-          remainder.length > 0 ? `\n\n${remainder}` : ""
-        }`;
+        const tail = remainder.length > 0 ? `\n\n${remainder}` : "";
+        const sendText = `${SKILL_LOAD_PREFIX_WEB}${name}"]\n${body}${tail}`;
         const displayText = `[加载技能 ${name}]${
           remainder.length > 0 ? ` ${remainder}` : ""
         }`;

@@ -231,7 +231,7 @@ import {
   splitGraphArgs,
   type GraphModeContext,
 } from "../harness/graph/mode.js";
-import { createSkillBody } from "../harness/skill/body.js";
+import { buildSkillLoadText, createSkillBody } from "../harness/skill/body.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import {
   createSubagentWake,
@@ -1777,9 +1777,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         }
         try {
           const body = await createSkillBody({ entry, dir: entry.dir });
-          const sendText = `[skill-load name="${skillLoad.name}"]\n${body}${
-            skillLoad.remainder.length > 0 ? `\n\n${skillLoad.remainder}` : ""
-          }`;
+          const sendText = buildSkillLoadText(
+            skillLoad.name,
+            body,
+            skillLoad.remainder
+          );
           // #377 项 D：发送文本含技能正文（进模型历史确定性生效），显示形态
           // 用精简占位 —— 用户会话中只见「[加载技能 X] [remainder]」，正文不
           // 泄漏。turn 完成后落盘权威消息原子替换（正文可见于会话文件）。

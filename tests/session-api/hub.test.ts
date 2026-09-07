@@ -1216,6 +1216,27 @@ describe("postMessage validation", () => {
     });
     assert.equal(res.turn.answer.finalText, "ok");
   });
+
+  // Review Medium 3 守卫：半截前缀（无闭合双引号）即使超长也必须被拒，
+  // 否则手打恶意文本可绕过 8000 上限豁免。
+  it("rejects a half-prefixed long text (no closing quote) (review Medium 3)", async () => {
+    const deps = makeDeps([]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    const halfPrefixed = `[skill-load name="${"x".repeat(50_000)}`;
+    await assert.rejects(
+      () =>
+        hub.postMessage({
+          conversationId: session.conversation_id,
+          text: halfPrefixed,
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.ok((err as Error).message.includes("max length"));
+        return true;
+      }
+    );
+  });
 });
 
 // -- T1: wire projection of thinking / toolCalls ------------------------------

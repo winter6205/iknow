@@ -340,6 +340,19 @@ describe("T3 overflow: overlong non-exact NL still MAX_MESSAGE_CHARS", () => {
     assert.equal(lastUserText(ctx.state.messages), line);
     assert.match(r.output, /loaded/);
   });
+
+  // Review Medium 3 守卫：半截前缀（无闭合双引号）即使超长也必须被拒。
+  it("half-prefixed long text (no closing quote) IS refused (review Medium 3)", async () => {
+    const line = `[skill-load name="${"x".repeat(MAX_MESSAGE_CHARS + 100)}`;
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["should-not-run"] })],
+    });
+    const spy = spyAdapter(ctx);
+    const r = await processChatLine({ line, ctx });
+    assert.match(r.stderr ?? "", /max length/i);
+    assert.equal(spy.encodeCount.n, 0);
+    assert.equal(spy.stepCalls.n, 0);
+  });
 });
 
 describe("T3 concurrent: busy_stop_first does not abort in-flight turn", () => {

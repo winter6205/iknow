@@ -12,10 +12,14 @@ import { join, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  SKILL_LOAD_PREFIX,
+  buildSkillLoadText,
   createSkillBody,
+  exceedsUserInputCap,
   isSkillLoadText,
   stripFrontmatter,
 } from "../../src/harness/skill/body.js";
+import { MAX_MESSAGE_CHARS } from "../../src/session-api/contract.ts";
 import type { SkillEntry } from "../../src/harness/skill/catalog.js";
 
 const roots: string[] = [];
@@ -84,6 +88,87 @@ describe("isSkillLoadText", () => {
     expect(isSkillLoadText(' [skill-load name="foo"]\nbody')).toBe(true);
     expect(isSkillLoadText('[skill-loadname="foo"]\nbody')).toBe(false);
     expect(isSkillLoadText('[Skill-load name="foo"]\nbody')).toBe(false);
+  });
+
+  // Review Medium 3：闭合形态断言。半截前缀（仅 `[skill-load name="` 后无闭合
+  // 双引号）必须被拒，避免手打恶意文本绕过豁免。
+  it("rejects a half-prefix with no closing quote (review Medium 3)", () => {
+    expect(isSkillLoadText('[skill-load name="' + "x".repeat(50_000))).toBe(
+      false
+    );
+    expect(isSkillLoadText('[skill-load name="]')).toBe(false);
+    expect(isSkillLoadText(`[skill-load name="${"a".repeat(10)}`)).toBe(false);
+  });
+
+  it("accepts a closed prefix regardless of the body size", () => {
+    expect(
+      isSkillLoadText(`[skill-load name="foo"]\n${"x".repeat(50_000)}`)
+    ).toBe(true);
+  });
+});
+
+describe("buildSkillLoadText (SSOT)", () => {
+  it("matches byte-level the inline assembly in TUI app.tsx:1780-1782", () => {
+    // 与 src/tui/app.tsx:1780 拼接形态 byte 级一致 —— 同一字符串的两次构造
+    // 应完全相等（KV 缓存契约）。
+    const name = "echo";
+    const body = "skill body content";
+    const remainder = "user follow-up";
+    const expected = `[skill-load name="${name}"]\n${body}\n\n${remainder}`;
+    expect(buildSkillLoadText(name, body, remainder)).toBe(expected);
+  });
+
+  it("omits the trailing separator when remainder is undefined or empty", () => {
+    expect(buildSkillLoadText("echo", "body")).toBe(
+      `[skill-load name="echo"]\nbody`
+    );
+    expect(buildSkillLoadText("echo", "body", "")).toBe(
+      `[skill-load name="echo"]\nbody`
+    );
+  });
+
+  it("uses SKILL_LOAD_PREFIX as the prefix constant (single source of truth)", () => {
+    expect(buildSkillLoadText("x", "y").startsWith(SKILL_LOAD_PREFIX)).toBe(
+      true
+    );
+  });
+});
+
+describe("exceedsUserInputCap (shared guard)", () => {
+  it("returns false for empty / whitespace input (non-empty check is upstream)", () => {
+    expect(exceedsUserInputCap("", MAX_MESSAGE_CHARS)).toBe(false);
+    expect(exceedsUserInputCap("   ", MAX_MESSAGE_CHARS)).toBe(false);
+  });
+
+  it("returns true for plain text exceeding MAX_MESSAGE_CHARS", () => {
+    expect(
+      exceedsUserInputCap("x".repeat(MAX_MESSAGE_CHARS + 1), MAX_MESSAGE_CHARS)
+    ).toBe(true);
+    expect(
+      exceedsUserInputCap(
+        `normal text ${"x".repeat(MAX_MESSAGE_CHARS - "normal text ".length + 1)}`,
+        MAX_MESSAGE_CHARS
+      )
+    ).toBe(true);
+  });
+
+  it("returns false for plain text at or below MAX_MESSAGE_CHARS", () => {
+    expect(
+      exceedsUserInputCap("x".repeat(MAX_MESSAGE_CHARS), MAX_MESSAGE_CHARS)
+    ).toBe(false);
+    expect(exceedsUserInputCap("hi", MAX_MESSAGE_CHARS)).toBe(false);
+  });
+
+  it("returns false for skill-load messages even when extremely long (exempt)", () => {
+    // 78KB SKILL.md 一次性加载必须豁免；这里用 50KB 模拟典型大 skill。
+    const text = `[skill-load name="big"]\n${"x".repeat(50_000)}`;
+    expect(exceedsUserInputCap(text, MAX_MESSAGE_CHARS)).toBe(false);
+  });
+
+  it("uses cap parameter (caller passes the SSOT MAX_MESSAGE_CHARS)", () => {
+    // 直接传更小的 cap 验证函数尊重参数；不依赖隐式默认 8000。
+    expect(exceedsUserInputCap("x".repeat(11), 10)).toBe(true);
+    expect(exceedsUserInputCap("x".repeat(10), 10)).toBe(false);
   });
 });
 

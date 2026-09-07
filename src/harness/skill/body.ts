@@ -43,15 +43,76 @@ export interface SkillBodyOptions {
 }
 
 /**
- * 判定 `text` 是否为机器装配的 skill-load 消息（即 TUI `app.tsx:1780`、
- * Web `use-slash-commands.ts:251` 与 hub/chat-session 长度校验三处共用的
- * 同一拼接格式：`[skill-load name="<id>"]\n<body>`）。
+ * 单一权威格式来源（SSOT）—— skill-load 消息前缀必须经此常量。三处共
+ * 用同一字面量：
+ *   - TUI 装配（`src/tui/app.tsx:1780`，经 `buildSkillLoadText`）
+ *   - Web 装配（`web/src/hooks/use-slash-commands.ts:251`，跨 workspace
+ *     边界所以本侧无法 import 留本地常量 + SSOT 注释）
+ *   - hub/chat-session 长度校验（经 `isSkillLoadText` / `exceedsUserInputCap`）
  *
- * 单一权威格式来源 —— 三处必须同步，任何放宽都会让超长 skill-load 撞
- * `MAX_MESSAGE_CHARS = 8000`（78KB 的 SKILL.md 加载会立即触发）。
+ * 任何放宽都会让超长 skill-load 撞 `MAX_MESSAGE_CHARS = 8000`（78KB 的
+ * SKILL.md 加载会立即触发）。
+ */
+export const SKILL_LOAD_PREFIX = '[skill-load name="';
+
+/**
+ * TUI `session-state.ts:319` 显示跳过谓词用的短前缀 —— 语义略宽于
+ * `SKILL_LOAD_PREFIX`：识别任何 `[skill-load ...]` 形态以从用户可见历史中
+ * 屏蔽（含潜在的 `[skill-load reload=...]` 等未来变体）。与具体闭合形态
+ * 的判定（`SKILL_LOAD_PREFIX`）保持两套，避免混淆两套语义。
+ */
+export const SKILL_LOAD_PREFIX_SHORT = "[skill-load ";
+
+/**
+ * 装配一条标准 skill-load 消息。返回形态：
+ *   `[skill-load name="<name>"]\n<body>[+"\n\n<remainder>" if non-empty]`
+ * 与 `src/tui/app.tsx:1780-1782` 与 `web/src/hooks/use-slash-commands.ts:251-253`
+ * 现有 byte 级行为完全一致（web 因跨 workspace 边界无法共用，保留其本地拼
+ * 接但 SSOT 注释指向本函数）。
+ */
+export function buildSkillLoadText(
+  name: string,
+  body: string,
+  remainder?: string
+): string {
+  const tail =
+    remainder !== undefined && remainder.length > 0 ? `\n\n${remainder}` : "";
+  return `[skill-load name="${name}"]\n${body}${tail}`;
+}
+
+/**
+ * 判定 `text` 是否为闭合形态的机器装配 skill-load 消息。前缀匹配
+ * `SKILL_LOAD_PREFIX`，且 `name="..."` 必须用双引号闭合（拒绝半截前缀）。
+ * 用于 hub/chat-session 的用户输入长度上限豁免判定。
  */
 export function isSkillLoadText(text: string): boolean {
-  return text.trim().startsWith('[skill-load name="');
+  const trimmed = text.trim();
+  if (!trimmed.startsWith(SKILL_LOAD_PREFIX)) return false;
+  // SKILL_LOAD_PREFIX 长度 = "[skill-load name=\"".length。
+  // 闭合形态：`name="..."` 至少要有引号闭合（暂不约束 name 内容字符集，
+  // 与 TUI/Web 装配形态一致即可 —— 装配路径已固定 `${name}` 是 catalog 条目名）。
+  const after = trimmed.slice(SKILL_LOAD_PREFIX.length);
+  return after.includes('"');
+}
+
+/**
+ * 组合守卫：`text` 是否应触发「长度超限」拒绝判定。封装 trim 策略 +
+ * skill-load 豁免 + 上限比较三处共用逻辑，避免 hub 与 chat-session 两侧
+ * 重复同一表达式。返回值语义：
+ *   - 非空 skill-load 消息 → 永不拒绝（即使超长）
+ *   - 其余超长 → 拒绝
+ *   - 空 → 由调用方另行判空；本函数对空文本返回 false（不拒绝，因空已
+ *     在 validateText 的非空校验里被拦截）。
+ *
+ * 上限值由调用方传入（默认 8000，对齐 session-api `MAX_MESSAGE_CHARS`）。
+ * 本函数刻意不 import 该常量以遵守 Gate B：`src/harness/` 是底层能力
+ * 模块，不可反向依赖 `src/session-api/`。
+ */
+export function exceedsUserInputCap(text: string, cap: number = 8000): boolean {
+  const query = text.trim();
+  if (query.length === 0) return false;
+  if (isSkillLoadText(query)) return false;
+  return query.length > cap;
 }
 
 /** 剥离 frontmatter：返回去掉 `---\n...\n---\n` 块之后剩余正文。 */
