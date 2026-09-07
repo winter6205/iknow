@@ -230,11 +230,14 @@ _Avoid_: 把后台当成逃出 bwrap；与 #440 bash 产品面混名；与 spawn
 **闭世界围栏（closed-world fence）**: bash 围栏的默认姿态——deny-by-default:home 下非白名单不可见，可写集 = taskRoot + /tmp，其余按 ADR-0037 §9.2 读白名单按需 ro-bind；白名单 miss 分配置故障（spawn 前 typed fail-loud）与工具链断链（运行时可观察）两型。OFF 档同样生效（全档位反转）。
 _Avoid_: writable home 打底 + 黑名单补罩（已反转的旧形态）；identity 只读 overlay（§9 已 superseded，身份根改为读白名单恒进成员）
 
-**compact reason**: 触发判据返回的分类标识，取值 `below_token_threshold` | `messages_too_few` | `windowed` | `full_summary`，单源 `src/harness/compress/index.ts:evaluateCompactTrigger()`；手动 `/compact`（hub.compactSession）与 loop-engine proactive 两条路径共用同一函数返回值，决定 UI 文案分支与 wire 字段（`CompactSessionResponse.reason`）。
-_Avoid_: 「未达阈值」「压缩成功」等 UI 字面字符串直接出现在业务代码；reason 字面量在 hub/loop-engine 多处内联（应经 `compactReasonFor` SSOT helper）；把 reason 错放成 `LoopTrace` / `LlmCallRecord` 字段
+**compact reason**: 压缩路径分类，闭集 `below_token_threshold` | `messages_too_few` | `windowed` | `full_summary`，写入 `CompactSessionResponse.reason` 并驱动 UI 文案。`below_token_threshold` 只表示 proactive 未过 auto-compact token gate。
+_Avoid_: 把手动 `/compact` 的 noop 写成「未达自动阈值」；UI 字面当业务码；reason 当 `LoopTrace` / `LlmCallRecord` 字段
 
-**auto-compact token gate**: proactive compact 在每轮 step 前的 token 阈值判据，公式 `contextWindow − MAX_OUTPUT_TOKENS_FOR_SUMMARY − AUTOCOMPACT_BUFFER_TOKENS`（值见 `src/harness/compress/threshold.ts`），显式 `IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` 可覆盖；与手动 `/compact` 共享同一函数 `evaluateCompactTrigger`，token 估算仅参与判据决策，**不**进 trace / `RunResult.lastUsage`（ADR-0008 D6）。
-_Avoid_: 把字符估算（`estimateMessagesTokens`）当作真实 token 用；gate 决策绕开 `evaluateCompactTrigger` 直接调 `shouldAutoCompact` 旧接口；把 threshold 当成「每机配置」（应是项目栈决策）
+**auto-compact token gate**: loop-engine 每轮 step 前是否 **proactive** 压缩的阈值，公式 `contextWindow − MAX_OUTPUT_TOKENS_FOR_SUMMARY − AUTOCOMPACT_BUFFER_TOKENS`（`src/harness/compress/threshold.ts`），`IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` 可覆盖。不约束手动 `/compact`。估算只做自动路径判据，不进 trace / `RunResult.lastUsage`（ADR-0008 D6）。
+_Avoid_: 把该门当 `/compact` 许可；把字符估算当真实 token；gate 决策绕开 `evaluateCompactTrigger` 直接调 `shouldAutoCompact`
+
+**manual compact**: TUI `/compact` 与 web 压缩按钮触发的一次压缩；执行体与 proactive auto-compact **已开火之后**相同（窗口或 full_summary）。空会话幂等 no-op。
+_Avoid_: 等到自动阈值才允许手动压；为手动另写一套压缩器
 
 **task 取值公式**: 无统一 `??` 链。goal 功能判官 `task = goal.text`（无 fallback）；正常模式不设完成向 `task`。
 _Avoid_: `goal ?? taskFocus ?? query`；`goal.text ?? query`；把 evidenceContext 拼进 task
