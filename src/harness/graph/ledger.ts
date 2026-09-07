@@ -9,8 +9,9 @@
  * ## 生命周期（spec SC1–SC4 / ADR-0051）
  *
  *   1. **创建**：第一次 `run_graph` 的 `nodes` 通过 `validateGraph` 之后
- *      调 `ensure()`；之前 `exists()` 为 false。验证失败不创建 —— 拓扑非法
- *      不留任何账本痕迹。
+ *      调 `ensure()`；之前 `exists()` 为 false。验证失败不留任何冻结痕迹
+ *      —— host 的 `ledgerFor` 会懒创建账本对象，但 `exists()` 仍为 false、
+ *      冻结集合为空（spec SC1 + ASSUMPTIONS #4）。
  *   2. **overlay 关不毁**：关掉 graph mode 后再开，同一会话仍是同一张账本
  *      —— `LiveGraphLedger` 与 `GraphModeContext` 平行挂在 session runtime
  *      上，不是 `GraphAssembly` 的快照。
@@ -45,8 +46,12 @@
 /** 终态 —— 冻结依据（spec Glossary）。 */
 export type FrozenTerminal = "done" | "failed";
 
-/** 结算可传的全部状态；非终态一律不冻。对齐 `NodeStatus` 的运行态子集。 */
-export type SettleStatus = FrozenTerminal | "skipped" | "running" | "pending";
+/**
+ * 结算可传的全部状态。生产者只有 `GraphNodeResult.status` 的落定值
+ * （done / failed / skipped）—— "running" / "pending" 是调度中的中间态，
+ * 没有任何生产者会把它们送进 freeze，故不进本联合。
+ */
+export type SettleStatus = FrozenTerminal | "skipped";
 
 /** 账本单点强制：只有终态进冻结集合（spec Glossary，调用方不各自过滤）。 */
 const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["done", "failed"]);
@@ -60,22 +65,20 @@ export interface LiveGraphLedger {
    */
   readonly ensure: () => void;
   /**
-   * 记录一次结算的终态。`done` / `failed` 冻结；`skipped`（含其它非终态
-   * 值）静默忽略（spec Glossary：skipped 不冻）。同 id 多次 freeze 后写以
-   * 末次状态为准（fallback 收敛，便于后续 `back-edge` 等回写场景）。
+   * 记录一次结算的终态。`done` / `failed` 冻结；`skipped` 静默忽略
+   * （spec Glossary：skipped 不冻）。同 id 多次 freeze 后写以末次状态为
+   * 准（fallback 收敛，便于后续 `back-edge` 等回写场景）。
    *
    * `output` 是 T2 剩余子图合并的数据流：status 为 done 且传入 string 时
    * 记进产出表（`outputOf` 可读）；failed / skipped / 未传 → 清掉旧产出，
    * 保证产出与末次状态一致。
    *
-   * 接受完整结算状态集而非仅终态：handler 拿到 `GraphNodeResult.status`
-   * 直传即可，"skipped 不冻" 由账本单点强制，不靠调用方各自过滤。
+   * 接受 `SettleStatus`（done / failed / skipped）而非仅终态：handler 拿到
+   * `GraphNodeResult.status` 直传即可，"skipped 不冻" 由账本单点强制，
+   * 不靠调用方各自过滤。状态集与生产者对齐 —— 结算落定值只有这三态，
+   * 调度中间态（running / pending）没有生产者，不在签名里。
    */
-  readonly freeze: (
-    id: string,
-    status: FrozenTerminal | "skipped" | "running" | "pending",
-    output?: string
-  ) => void;
+  readonly freeze: (id: string, status: SettleStatus, output?: string) => void;
   /** 该 id 是否因 done/failed 终态被冻结 —— handler 用它做 typed 拒绝。 */
   readonly isFrozen: (id: string) => boolean;
   /** 该 id 的冻结状态；未冻结返回 undefined。剩余子图合并用它区分 done / failed。 */

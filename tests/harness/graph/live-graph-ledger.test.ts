@@ -69,10 +69,14 @@ describe("LiveGraphLedger: freeze 收/拒（spec Glossary：done/failed 冻，sk
     expect(ledger.frozenIds()).toEqual([]);
   });
 
-  it("非终态值（running / pending / 非法值）不冻结（防御性运行时容错）", () => {
+  it("非终态值 / 非法值不冻结（防御性运行时容错）", () => {
     const ledger = createLiveGraphLedger();
     ledger.ensure();
+    // SettleStatus 已 narrow 到 done | failed | skipped —— "running"/"pending"
+    // 既不在签名里，也没有生产者；测的是绕过类型时的兜底（账本不应冻）。
+    // @ts-expect-error running 不在 SettleStatus 内
     ledger.freeze("r", "running");
+    // @ts-expect-error pending 不在 SettleStatus 内
     ledger.freeze("p", "pending");
     // @ts-expect-error 非法值：即便绕过类型，账本也不冻结。
     ledger.freeze("x", "bogus" as "done");

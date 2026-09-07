@@ -27,7 +27,7 @@ import { createGraphProgressTracker } from "./progress.js";
 import { validateGraph, type GraphValidationError } from "./topo.js";
 import { runGraph } from "./scheduler.js";
 import { createSubAgentNodeExecutor } from "./node-executor.js";
-import type { LiveGraphLedgerHost } from "./ledger.js";
+import type { LiveGraphLedger, LiveGraphLedgerHost } from "./ledger.js";
 import { resolveResidualSubgraph } from "./residual.js";
 import type {
   GraphNodeResult,
@@ -224,6 +224,80 @@ function emitGraphProgress(
   safeEmitStream(ctx?.onStream, { type: "graph_progress", snapshot });
 }
 
+/**
+ * live-graph-phase1 T2:剩余子图合并(spec SC5–SC7 / ADR-0050)。
+ * 在 validateGraph 之前先折叠账本:frozen-done dep → 满足,从 deps
+ * 剔除(产出单独带回,并入 nodeCtx.outputs 供 renderTask 写入
+ * 下游 task);frozen-failed dep → typed 拒(spec ASSUMPTIONS #3);
+ * 重交已冻结 id → typed 拒(SC5 末句 / SC6 整段拒绝)。merge
+ * 之外的所有拓扑 / 重复 / 环 / 自依赖仍由 validateGraph 单一
+ * 权威(complexity-anti-drift 不让 freeze 进 Kahn)。
+ *
+ * 账本缺席 → 零行为变化:原 nodes 透传、无账本产出。
+ */
+function mergeResidual(
+  nodes: ReadonlyArray<RunGraphNodeInput>,
+  ledger: LiveGraphLedger | undefined
+): {
+  readonly specNodes: ReadonlyArray<{
+    readonly id: string;
+    readonly deps: ReadonlyArray<string>;
+  }>;
+  readonly ledgerOutputs: Readonly<Record<string, string>>;
+} {
+  if (ledger === undefined) {
+    return {
+      specNodes: nodes.map((n) => ({ id: n.id, deps: n.deps ?? [] })),
+      ledgerOutputs: {},
+    };
+  }
+  const merged = resolveResidualSubgraph(
+    nodes.map((n) => ({ id: n.id, task: n.task, deps: n.deps ?? [] })),
+    ledger
+  );
+  if (merged.rejections.length > 0) {
+    throw new ToolExecutionError(`run_graph: ${merged.rejections.join("; ")}`);
+  }
+  return { specNodes: merged.nodes, ledgerOutputs: merged.ledgerOutputs };
+}
+
+/**
+ * live-graph-phase1 T1:按结算终态冻结已落定 id。skipped 不冻
+ * (spec Glossary);账本单点强制,handler 直传 GraphNodeResult.status。
+ * T2:done 节点的产出也写进账本(SC5「B 能读到 A 的产出」数据源)。
+ * T3(spec SC8):调用侧取消时,只冻结「真 done」的节点。abort 路
+ * 径上失败的节点(executor 的 signal.aborted 预检查返回
+ * failed、waitFor 被 abort 拒绝回 failed)是取消的症状而非真
+ * 终结,把它们冻成 failed 等于「取消失败 = 失败冻结」,会让
+ * 剩余子图合并层把这些 id 拒为 frozen-failed,父代理就再也
+ * 救不回未跑的子节点了(spec SC8 末段)。阶段 1 单跑一次
+ * 没有「失败的子节点重跑」语义,放弃冻结就是放弃「失败」的
+ * 终态 —— 而失败的真相要等下一段剩余子图提交再说。正常
+ * settle(无 abort)路径下 failed 仍按 SC6 冻结,SC6 语义不变。
+ *
+ * 只有 string 产出进账本:非 string 的 `output` 在浓缩层有 `String(...)`
+ * 兜底渲染,但账本是跨调用的持久权威 —— 把对象 `String()` 化的
+ * "[object Object]" 冻进账本,会在后续剩余子图里被当真产出写进下游 task。
+ */
+function freezeResults(
+  ledger: LiveGraphLedger,
+  results: Readonly<Record<string, GraphNodeResult>>,
+  cancelled: boolean
+): void {
+  for (const result of Object.values(results)) {
+    // 取消路径:仅 done 进账本;failed / skipped 留给后续剩余
+    // 子图。正常路径:账本单点强制 done / failed。
+    if (cancelled && result.status !== "done") continue;
+    ledger.freeze(
+      result.id,
+      result.status,
+      result.status === "done" && typeof result.output === "string"
+        ? result.output
+        : undefined
+    );
+  }
+}
+
 export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
   // ADR-0041:isEnabled 缺省 = 恒关 —— 工具面常驻后,handler 是唯一守门。
   // 直接构造工具的测试必须显式传 isEnabled 才能调通 handler。
@@ -286,31 +360,8 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
       }
       const nodes = readNodes(input);
       const ledger = deps.ledger?.ledgerFor(ctx?.conversationId);
-      // live-graph-phase1 T2:剩余子图合并(spec SC5–SC7 / ADR-0050)。
-      // 在 validateGraph 之前先折叠账本:frozen-done dep → 满足,从 deps
-      // 剔除(产出单独带回,并入 nodeCtx.outputs 供 renderTask 写入
-      // 下游 task);frozen-failed dep → typed 拒(spec ASSUMPTIONS #3);
-      // 重交已冻结 id → typed 拒(SC5 末句 / SC6 整段拒绝)。merge
-      // 之外的所有拓扑 / 重复 / 环 / 自依赖仍由 validateGraph 单一
-      // 权威(complexity-anti-drift 不让 freeze 进 Kahn)。
-      let specNodes: ReadonlyArray<{
-        readonly id: string;
-        readonly deps: ReadonlyArray<string>;
-      }> = nodes.map((n) => ({ id: n.id, deps: n.deps ?? [] }));
-      let ledgerOutputs: Readonly<Record<string, string>> = {};
-      if (ledger !== undefined) {
-        const merged = resolveResidualSubgraph(
-          nodes.map((n) => ({ id: n.id, task: n.task, deps: n.deps ?? [] })),
-          ledger
-        );
-        if (merged.rejections.length > 0) {
-          throw new ToolExecutionError(
-            `run_graph: ${merged.rejections.join("; ")}`
-          );
-        }
-        specNodes = merged.nodes;
-        ledgerOutputs = merged.ledgerOutputs;
-      }
+      // T2:剩余子图合并走 mergeResidual;账本缺席 → 零行为变化。
+      const { specNodes, ledgerOutputs } = mergeResidual(nodes, ledger);
       const spec: GraphSpec = { nodes: specNodes };
       // EXIT:拓扑非法 —— 在任何 spawn 之前 fail-fast(spec SC4 零 spawn)。
       const errors = validateGraph(spec);
@@ -362,30 +413,9 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
             emitGraphProgress(ctx, tracker.onNode(result));
           },
         });
-        // live-graph-phase1 T1:按结算终态冻结已落定 id。skipped 不冻
-        // (spec Glossary);账本单点强制,handler 直传 GraphNodeResult.status。
-        // T2:done 节点的产出也写进账本(SC5「B 能读到 A 的产出」数据源)。
-        // T3(spec SC8):调用侧取消时,只冻结「真 done」的节点。abort 路
-        // 径上失败的节点(executor 的 signal.aborted 预检查返回
-        // failed、waitFor 被 abort 拒绝回 failed)是取消的症状而非真
-        // 终结,把它们冻成 failed 等于「取消失败 = 失败冻结」,会让
-        // 剩余子图合并层把这些 id 拒为 frozen-failed,父代理就再也
-        // 救不回未跑的子节点了(spec SC8 末段)。阶段 1 单跑一次
-        // 没有「失败的子节点重跑」语义,放弃冻结就是放弃「失败」的
-        // 终态 —— 而失败的真相要等下一段剩余子图提交再说。正常
-        // settle(无 abort)路径下 failed 仍按 SC6 冻结,SC6 语义不变。
+        // T1/T2/T3 冻结语义集中在 freezeResults;详情见该函数。
         if (ledger !== undefined) {
-          const cancelled = signal?.aborted === true;
-          for (const result of Object.values(execution.results)) {
-            // 取消路径:仅 done 进账本;failed / skipped 留给后续剩余
-            // 子图。正常路径:账本单点强制 done / failed。
-            if (cancelled && result.status !== "done") continue;
-            ledger.freeze(
-              result.id,
-              result.status,
-              result.status === "done" ? String(result.output ?? "") : undefined
-            );
-          }
+          freezeResults(ledger, execution.results, signal?.aborted === true);
         }
         // EXIT:归因调用侧取消 —— 与 spawn_subagent 一致(executor 因
         // signal.aborted 归一 execution_failed:cancelled)。半张图的部分结果

@@ -19,118 +19,19 @@
  *     第二段 run_graph 由 ACI executor 的单例波次保证等第一段 settle。
  */
 
-import { describe, expect, it, vi } from "vitest";
-import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
-import type { ChildProcess } from "node:child_process";
+import { describe, expect, it } from "vitest";
 
-import {
-  createSubAgentManager,
-  type SubAgentManager,
-} from "../../../src/harness/subagent/manager.ts";
-import type { SubAgentEnvelope } from "../../../src/harness/subagent/envelope.ts";
 import { createRunGraphTool } from "../../../src/harness/graph/run-graph-tool.ts";
 import { createLiveGraphLedgerHost } from "../../../src/harness/graph/ledger.ts";
 import { ToolExecutionError } from "../../../src/harness/errors.ts";
-
-// ── fake manager（与 run-graph-ledger.test.ts 同模式） ────────────────
-
-interface FakeChild {
-  readonly stdin: PassThrough;
-  readonly stdout: PassThrough;
-  readonly stderr: PassThrough;
-  readonly pid: number;
-  readonly kill: ReturnType<typeof vi.fn>;
-  readonly exitCode: number | null;
-  readonly signalCode: NodeJS.Signals | null;
-  emit: (event: string | symbol, ...args: unknown[]) => boolean;
-  once: (event: string | symbol, ...args: unknown[]) => unknown;
-  readonly written: string[];
-}
-
-function makeFakeChild(): FakeChild {
-  const stdin = new PassThrough();
-  const written: string[] = [];
-  stdin.on("data", (chunk: Buffer) => written.push(chunk.toString("utf8")));
-  return Object.assign(new EventEmitter(), {
-    stdin,
-    stdout: new PassThrough(),
-    stderr: new PassThrough(),
-    pid: 4242,
-    kill: vi.fn(() => true),
-    exitCode: null as number | null,
-    signalCode: null as NodeJS.Signals | null,
-    written,
-  }) as unknown as FakeChild;
-}
-
-function makeManager(opts: { readonly maxConcurrentWorkers?: number } = {}): {
-  manager: SubAgentManager;
-  children: FakeChild[];
-} {
-  const children: FakeChild[] = [];
-  const manager = createSubAgentManager({
-    spawn: () => {
-      const c = makeFakeChild();
-      children.push(c);
-      return c as unknown as ChildProcess;
-    },
-    ...(opts.maxConcurrentWorkers !== undefined
-      ? { maxConcurrentWorkers: opts.maxConcurrentWorkers }
-      : {}),
-  });
-  return { manager, children };
-}
-
-function settle(child: FakeChild, envelope: SubAgentEnvelope): void {
-  child.stdout.write(JSON.stringify(envelope) + "\n");
-  child.emit("exit", 0, null);
-}
-
-function ok(result: string): SubAgentEnvelope {
-  return { status: "ok", summary: "done", result };
-}
-
-function fail(error: string): SubAgentEnvelope {
-  return {
-    status: "failed",
-    summary: "boom",
-    reason: error,
-    result: "",
-  };
-}
-
-async function waitForChildren(
-  children: FakeChild[],
-  target: number
-): Promise<void> {
-  if (children.length >= target) return;
-  await new Promise<void>((resolve) => {
-    const timer = setInterval(() => {
-      if (children.length >= target) {
-        clearInterval(timer);
-        resolve();
-      }
-    }, 1);
-  });
-}
-
-interface CondensedNode {
-  readonly id: string;
-  readonly status: string;
-  readonly output?: string;
-  readonly error?: string;
-  readonly reason?: string;
-}
-interface Condensed {
-  readonly waveCount: number;
-  readonly nodes: ReadonlyArray<CondensedNode>;
-}
-
-function parse(raw: unknown): Condensed {
-  expect(typeof raw).toBe("string");
-  return JSON.parse(raw as string) as Condensed;
-}
+import {
+  makeManager,
+  settle,
+  ok,
+  fail,
+  waitForChildren,
+  parseCondensed as parse,
+} from "./_fake-manager.ts";
 
 const CONV = "conv-t2";
 

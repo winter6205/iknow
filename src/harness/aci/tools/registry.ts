@@ -36,6 +36,7 @@ import { createSkillTool } from "./skill.js";
 import { createSpawnSubAgentTool } from "../../subagent/spawn-subagent-tool.js";
 import { createSubAgentResultTool } from "../../subagent/subagent-result-tool.js";
 import { createRunGraphTool } from "../../graph/run-graph-tool.js";
+import type { LiveGraphLedgerHost } from "../../graph/ledger.js";
 import type { SubAgentManager } from "../../subagent/manager.js";
 import type { BackgroundTaskManager } from "../../background/manager.js";
 import type { McpManager } from "../../mcp/manager.js";
@@ -317,7 +318,7 @@ export interface CreateDefaultAciRegistryOptions {
    * runtime 同寿 —— host 持有 / 销毁，账本权威在 harness/graph。缺席时
    * `run_graph` handler 不建账（V1 零行为变化）。
    */
-  readonly liveGraphLedger?: import("../../graph/ledger.js").LiveGraphLedgerHost;
+  readonly liveGraphLedger?: LiveGraphLedgerHost;
   /** Trace directory for the read-only query_trace tool. */
   readonly traceDir?: string;
   /**
