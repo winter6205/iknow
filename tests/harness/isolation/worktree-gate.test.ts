@@ -76,6 +76,20 @@ function makeGitRepo(): string {
   return dir;
 }
 
+/**
+ * git runner that tolerates non-zero exits (an empty bare repo has no HEAD,
+ * so `rev-parse HEAD` legitimately fails there) — returns stdout/stderr text
+ * instead of throwing like the strict `git` helper.
+ */
+function gitAllowFail(cwd: string, ...args: string[]): string {
+  try {
+    return execFileSync("git", args, { cwd, encoding: "utf8" });
+  } catch (err) {
+    const e = err as { stdout?: unknown; stderr?: unknown };
+    return `${String(e.stdout ?? "")}${String(e.stderr ?? "")}`;
+  }
+}
+
 afterAll(() => {
   for (const r of roots) rmSync(r, { recursive: true, force: true });
 });
@@ -176,17 +190,152 @@ describe("createTaskWorktree", () => {
     expect(await readdir(plain)).toEqual(before);
   });
 
-  it("fails typed not_a_git_repo on a bare repo", async () => {
-    const bare = mkdtempSync(join(tmpdir(), "iknow-wt-bare-"));
-    roots.push(bare);
-    git(bare, "init", "-q", "--bare", join(bare, "repo.git"));
+  // ADR-0037 §6 amendment 2026-09-07 (plans/bare-repo-create-task-worktree.md):
+  // a bare gitdir is a USABLE git repo — the probe is `rev-parse
+  // --git-common-dir`, not `--is-inside-work-tree`, so `git worktree add` runs
+  // and succeeds. The old "bare → not_a_git_repo" classification was narrower
+  // than the ADR (a gitdir with at least one commit CAN branch and host a
+  // linked worktree).
+  it("creates a worktree from a bare gitdir with at least one commit, leaving the bare repo untouched", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "iknow-wt-bare-"));
+    roots.push(parent);
+    const bare = join(parent, "repo.git");
+    git(parent, "init", "-q", "--bare", bare);
+    // seed one commit (bare repos have no worktree to commit in)
+    const seed = mkdtempSync(join(tmpdir(), "iknow-wt-seed-"));
+    roots.push(seed);
+    git(seed, "init", "-q");
+    git(seed, "remote", "add", "origin", bare);
+    git(
+      seed,
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "--allow-empty",
+      "-qm",
+      "init"
+    );
+    git(seed, "push", "-q", "origin", "HEAD");
+    const bareHead = git(bare, "rev-parse", "HEAD").trim();
+    const wtPath = join(parent, "wt");
+
+    const res = await createTaskWorktree({
+      repoRoot: bare,
+      worktreePath: wtPath,
+      branch: "iknow/task-x",
+    });
+
+    expect(res.worktreePath).toBe(wtPath);
+    expect(existsSync(wtPath)).toBe(true);
+    expect(git(wtPath, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
+      "iknow/task-x"
+    );
+    // the bare repo itself is untouched: HEAD unmoved, still core.bare
+    expect(git(bare, "rev-parse", "HEAD").trim()).toBe(bareHead);
+    expect(git(bare, "config", "--get", "core.bare").trim()).toBe("true");
+  });
+
+  // Same amendment: the operator layout where the gitdir and working files
+  // share one root with `core.bare=true` (is-inside-work-tree = false) is a
+  // usable repo — `git worktree add -b` works from it.
+  it("creates a worktree from a core.bare=true checkout whose root also holds the working files", async () => {
+    const repo = makeGitRepo();
+    git(repo, "config", "core.bare", "true");
+    expect(git(repo, "rev-parse", "--is-inside-work-tree").trim()).toBe(
+      "false"
+    );
+    const headBefore = git(repo, "rev-parse", "HEAD").trim();
+    const branchBefore = git(repo, "rev-parse", "--abbrev-ref", "HEAD").trim();
+    const wtPath = join(repo, ".iknow", "worktrees", "conv-bare");
+
+    const res = await createTaskWorktree({
+      repoRoot: repo,
+      worktreePath: wtPath,
+      branch: "iknow/task-y",
+    });
+
+    expect(res.worktreePath).toBe(wtPath);
+    expect(existsSync(join(wtPath, ".git"))).toBe(true);
+    expect(git(wtPath, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
+      "iknow/task-y"
+    );
+    // source repo HEAD / branch untouched (hard req ①/③)
+    expect(git(repo, "rev-parse", "HEAD").trim()).toBe(headBefore);
+    expect(git(repo, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
+      branchBefore
+    );
+    // the operator's core.bare is never changed by the probe or the add
+    expect(git(repo, "config", "--get", "core.bare").trim()).toBe("true");
+  });
+
+  // A gitdir with NO commit is still a gitdir: never not_a_git_repo. The
+  // outcome belongs to `git worktree add` itself and is version-dependent —
+  // older git fails (no HEAD to branch from → worktree_add_failed), git ≥2.53
+  // infers `--orphan` and succeeds. This test pins only the version-stable
+  // invariant: the probe never misclassifies an empty bare repo, and whatever
+  // the add decides, the bare repo layout is not silently rewritten.
+  it("never classifies an empty bare repo as not_a_git_repo; the add decides the outcome", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "iknow-wt-bare-empty-"));
+    roots.push(parent);
+    const bare = join(parent, "repo.git");
+    git(parent, "init", "-q", "--bare", bare);
+    const wtPath = join(parent, "wt");
+    const bareHeadBefore = gitAllowFail(bare, "rev-parse", "HEAD").trim();
+
+    let err: unknown;
+    try {
+      await createTaskWorktree({
+        repoRoot: bare,
+        worktreePath: wtPath,
+        branch: "iknow/task-x",
+      });
+    } catch (e) {
+      err = e;
+    }
+
+    // version-dependent exit, but never the "no gitdir" kind (evidence:
+    // git 2.53 infers --orphan and succeeds; older git fails the add)
+    if (existsSync(wtPath)) {
+      // orphan path: the branch exists but is UNBORN (no commit), so HEAD
+      // resolves only via symbolic-ref — the bare HEAD is still unmoved
+      expect(err).toBeUndefined();
+      expect(git(wtPath, "symbolic-ref", "--short", "HEAD").trim()).toBe(
+        "iknow/task-x"
+      );
+      expect(gitAllowFail(bare, "rev-parse", "HEAD").trim()).toBe(
+        bareHeadBefore
+      );
+    } else {
+      expect(err).toMatchObject({
+        name: "WorktreeIsolationError",
+        kind: "worktree_add_failed",
+        message: expect.stringContaining("worktree add failed"),
+      });
+    }
+  });
+
+  it("fails typed not_a_git_repo on a plain directory and writes nothing", async () => {
+    const plain = await mkdtemp(join(tmpdir(), "iknow-wt-plain-"));
+    roots.push(plain);
+    const before = await readdir(plain);
+    const wtPath = join(plain, "wt");
+
     await expect(
       createTaskWorktree({
-        repoRoot: join(bare, "repo.git"),
-        worktreePath: join(bare, "wt"),
+        repoRoot: plain,
+        worktreePath: wtPath,
         branch: "iknow/task-x",
       })
-    ).rejects.toMatchObject({ kind: "not_a_git_repo" });
+    ).rejects.toMatchObject({
+      name: "WorktreeIsolationError",
+      kind: "not_a_git_repo",
+      message: expect.stringMatching(/^WorktreeIsolationError: /),
+    });
+    // fail-closed: nothing appeared in the main root, no worktree dir
+    expect(existsSync(wtPath)).toBe(false);
+    expect(await readdir(plain)).toEqual(before);
   });
 
   it("fails typed git_unavailable when the git binary cannot be spawned", async () => {
@@ -275,8 +424,8 @@ describe("createTaskWorktree", () => {
       if (args[0] === "worktree") {
         return { code: 128, stdout: "", stderr: "fatal: fake add failure" };
       }
-      if (args[1] === "--is-inside-work-tree") {
-        return { code: 0, stdout: "true\n", stderr: "" };
+      if (args[1] === "--git-common-dir") {
+        return { code: 0, stdout: ".git\n", stderr: "" };
       }
       // branch verify probe: branch does not exist
       return { code: 1, stdout: "", stderr: "" };
@@ -297,8 +446,8 @@ describe("createTaskWorktree", () => {
   it("maps a worktree-add spawn failure to typed git_unavailable", async () => {
     const repo = makeGitRepo();
     const runner: GitRunner = async (args) => {
-      if (args[1] === "--is-inside-work-tree") {
-        return { code: 0, stdout: "true\n", stderr: "" };
+      if (args[1] === "--git-common-dir") {
+        return { code: 0, stdout: ".git\n", stderr: "" };
       }
       if (args[0] === "worktree") {
         throw new Error("spawn git ENOENT during worktree add");

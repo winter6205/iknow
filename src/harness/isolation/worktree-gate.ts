@@ -213,15 +213,20 @@ export interface TaskWorktree {
 /**
  * Create a task worktree on a NEW branch, deterministically and fail-closed:
  *
- *   1. `rev-parse --is-inside-work-tree` — not a repo (or bare) →
- *      `not_a_git_repo`; git binary missing → `git_unavailable`.
+ *   1. `rev-parse --git-common-dir` (usable-gitdir probe, ADR-0037 §6
+ *      amendment 2026-09-07) — no usable gitdir → `not_a_git_repo`; git
+ *      binary missing → `git_unavailable`. A bare gitdir or a
+ *      `core.bare=true` checkout with working files IS a usable repo (the
+ *      criterion is the ability to `worktree add`, not working files on the
+ *      root); only directories without a gitdir fail here.
  *   2. branch already exists → `branch_exists` (never repointed/overwritten;
  *      never checked out into another worktree's place — hard req ①/②).
  *   3. worktree path exists → `worktree_exists`.
  *   4. `worktree add -b <branch> <path>` — failure → `worktree_add_failed`
- *      with git's stderr in the message.
+ *      with git's stderr in the message (e.g. a bare gitdir with no commits
+ *      has no HEAD to branch from).
  *
- * The main repo's HEAD and current branch are never moved: `-b` creates the
+ * The source repo's HEAD and current branch are never moved: `-b` creates the
  * branch at HEAD and checks it out only in the new worktree. Every failure
  * happens before any path is created (zero side effects on the main root).
  */
@@ -233,17 +238,17 @@ export async function createTaskWorktree(
 
   let probe: GitResult;
   try {
-    probe = await runGit(["rev-parse", "--is-inside-work-tree"], repoRoot);
+    probe = await runGit(["rev-parse", "--git-common-dir"], repoRoot);
   } catch (err) {
     throw new WorktreeIsolationError(
       "git_unavailable",
       `git is not available (spawn failed): ${errorMessage(err)}`
     );
   }
-  if (probe.code !== 0 || probe.stdout.trim() !== "true") {
+  if (probe.code !== 0 || probe.stdout.trim().length === 0) {
     throw new WorktreeIsolationError(
       "not_a_git_repo",
-      `not a git repository (worktree isolation requires one): ${repoRoot}${
+      `not a usable git repository (no gitdir found; worktree isolation requires one): ${repoRoot}${
         probe.stderr.trim().length > 0 ? ` — ${probe.stderr.trim()}` : ""
       }`
     );

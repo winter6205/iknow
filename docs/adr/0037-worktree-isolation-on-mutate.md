@@ -6,7 +6,9 @@ Status: accepted
 
 > **Amendment 2026-09-04**（`specs/casual-ask-context-hygiene.md`）：§1「读放行、写才拦」不变。bash 是否 mutate **不得**复用 `validateReadonlyCommand`（那是 bash readonly **模式**的 deny-by-default 表，`2>&1` 也拒）。门禁自备「会不会写工作区」判定；`2>&1` / 管道 / 只读命令串为读。`validateReadonlyCommand` 不为本门禁放宽。`unboundMutateNotice` 仍点名 `create-task-worktree`、仍不 auto-provision；文案改为事实阻断（这次调用会写主仓、未执行；若要写则调工具再重试这一次），不得把模型下一拍收成「去建树」。不按用户问句分型。不改 `create-task-worktree` ACI 形状。
 
-> Amendments: 2026-08-30 建树职责由 host 自动建树改为模型调用「创建工作树 ACI 工具」；2026-08-31 改绑只切 `taskRoot`（§4 重写）；2026-09-02 reopen——model-provision 契约 + 活 `taskRoot`（§7 新增）+ 撤销「same-turn mutator 列为非目标」（§8 显式撤销）；2026-09-05 bash 围栏身份根 ro-bind overlay + 模型可见写根（issue #891）；2026-09-06 reopen——bash 围栏闭世界化：全档位 deny-by-default 反转 + 读/写白名单裁决 + identity overlay 条款 superseded（§9 新增，issue #896）。
+> **Amendment 2026-09-07**（`plans/bare-repo-create-task-worktree.md`）：§6 的「主仓不是 git 仓库」收窄为**可用 gitdir（usable gitdir）**判定——`not_a_git_repo` 仅当该会话根上**没有可用 gitdir**（`git rev-parse --git-common-dir` 或等价探测失败）时抛出；bare gitdir（`git init --bare`，无工作文件）与 `core.bare=true` 但仍带工作文件的检出，只要 `git worktree add -b` 能成功，都是**可用 git 仓**，建树照常进行。判据是「能不能从该根上建 linked worktree」，不是「根下有没有工作文件」——本仓自身的布局（gitdir + 工作文件同根、`core.bare=true`）即是合法输入。空目录 / 非 git 根仍 `not_a_git_repo`，且保持零写入；git 二进制 spawn 失败仍 `git_unavailable`；无 commit 的空 bare 仍是有 gitdir 的根、**不**收成 `not_a_git_repo`，`worktree add` 的成败由 git 自身裁决（实测随版本而异：旧版失败 → `worktree_add_failed`，git ≥2.53 自动 `--orphan` 成功）。门禁与 fail-closed 语义不变：建树失败后主仓零写入仍是验收项。
+
+> Amendments: 2026-08-30 建树职责由 host 自动建树改为模型调用「创建工作树 ACI 工具」；2026-08-31 改绑只切 `taskRoot`（§4 重写）；2026-09-02 reopen——model-provision 契约 + 活 `taskRoot`（§7 新增）+ 撤销「same-turn mutator 列为非目标」（§8 显式撤销）；2026-09-05 bash 围栏身份根 ro-bind overlay + 模型可见写根（issue #891）；2026-09-06 reopen——bash 围栏闭世界化：全档位 deny-by-default 反转 + 读/写白名单裁决 + identity overlay 条款 superseded（§9 新增，issue #896）；2026-09-07 —— §6「主仓不是 git 仓库」收窄为可用 gitdir 判定（bare / `core.bare=true` 且能 `worktree add` 的根是可用仓，见 `plans/bare-repo-create-task-worktree.md`）。
 
 > **Amendment 2026-08-30**（issue #836 / 地图 #829）：ON 时门禁**只拦写、不自动 `git worktree add`**——建 task worktree 与会话根改绑由**模型调用「创建工作树 ACI 工具」**完成（成功 = 树在且会话根已切到该路径）；Host 不同波重放被拦的写，被拦的写由模型在新根上自己再调。原文 Decision 1 中「首次 mutate 被拦截 → host `git worktree add` 建树改绑」的读法 **superseded**。同批修订：说明书（rules）改为按需读——父会话不整段灌 rules、缺目录视为空，见 ADR-0009 D2 的 amended 说明与 `docs/CONTEXT.md` 术语「说明书读法」。
 >
@@ -81,6 +83,8 @@ ADR-0019 D1.1 的默认解析（`workspaceRoot` 默认 `process.cwd()`）与 ser
 ### 6. 失败语义 fail-closed（硬要求 6）
 
 主仓不是 git 仓库 / git 不可用 / 创建工作树 ACI 工具失败（`git worktree add` 或改绑失败）：mutate 一律被拦下并给出**typed、非空、可见**的错误（对齐 harness fault-class 与 session-api `WorkspaceRootError` 的类型化错误惯例），**不静默放行写主仓**——建树/绑定失败后的主仓零写入是验收项，不是隐含假设。开关本身缺失或非法回落 OFF，即回落至今日行为，同一 fail-closed 来源。
+
+「主仓不是 git 仓库」的判定边界（2026-09-07 amendment）：`not_a_git_repo` 的**唯一**触发条件是该会话根上没有可用 gitdir（`git rev-parse --git-common-dir` 或等价探测失败）。bare gitdir 与 `core.bare=true` 但能 `git worktree add` 的检出都是可用 git 仓，不因「根下没有 / 不只是工作文件」被误判成非 git——判据是建树能力，不是工作文件存在性。git spawn 失败 → `git_unavailable`。无 commit 的空 bare **仍是可用 gitdir，永不收成 `not_a_git_repo`**：`git worktree add` 的结果由 git 自身裁决且随版本而异（旧版因无 HEAD 可分支而失败 → `worktree_add_failed`；git ≥2.53 实测自动推断 `--orphan` 成功建树），建树函数不替 git 预判。
 
 ### 7. 活 `taskRoot`（2026-09-02 reopen 新增）
 
