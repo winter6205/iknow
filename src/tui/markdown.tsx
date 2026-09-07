@@ -455,13 +455,22 @@ function renderToken(tok: Token, key: number, width: number): ReactNode {
     case "html": {
       const body = t.text.replace(/\n+$/, "");
       if (body === "") return null;
+      // html 块同样走 fence-display-cap 的 32 行帽 + `还有 N 行` 溢出——
+      // <style> / <script> 这类无界正文不整块挂树（与围栏代码块同源）。
+      const lines = body.split("\n");
+      const clip = clipFenceDisplayLines(lines);
       return (
         <box key={key} flexDirection="column">
-          {body.split("\n").map((l, li) => (
+          {clip.visible.map((l, li) => (
             <text key={li} attributes={TextAttributes.DIM} wrapMode="word">
               {l === "" ? " " : l}
             </text>
           ))}
+          {clip.hiddenLineCount > 0 ? (
+            <text fg={tuiPalette.dim} wrapMode="none">
+              {previewOverflowLabel(clip.hiddenLineCount)}
+            </text>
+          ) : null}
         </box>
       );
     }
