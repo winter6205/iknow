@@ -22,8 +22,6 @@ import {
 } from "../harness/index.js";
 import type { TraceServiceWithHealth } from "../harness/trace/jsonl.js";
 import {
-  evaluateCompactTrigger,
-  getAutoCompactThreshold,
   type CompactReason,
   type CompactTriggerDecision,
 } from "../harness/compress/index.js";
@@ -1946,58 +1944,42 @@ export class SessionHub {
         const session = await this.store.load(conversationId);
         const before = session.messages;
 
-        // plan compress-trigger-gate T2: 走 `evaluateCompactTrigger` 统一判据。
-        // `cachedDeps.compress` 缺席(ask / oneshot 等无 harness 装配)→ 跳过
-        // 判据层,fallback 到既有 splitForCompaction 行为(向后兼容)。
-        const compressCfg = this.cachedDeps?.compress;
-        let compactAction: CompactTriggerDecision["action"] | undefined;
-        if (compressCfg !== undefined) {
-          const threshold = getAutoCompactThreshold(
-            compressCfg.contextWindow,
-            compressCfg.thresholdTokens
-          );
-          compactAction = evaluateCompactTrigger(before, {
-            contextWindow: compressCfg.contextWindow,
-            threshold,
-          }).action;
-        }
-
-        // 1) token 未达阈值 → 直接 noop 返回(reason 来自判据),不调 splitForCompaction。
-        if (compactAction === "noop") {
-          return {
-            session: this.summarize({ file: session }),
-            turns: projectMessagesToTurns(before),
-            compacted: false,
-            reason: "below_token_threshold",
-            beforeCount: before.length,
-            afterCount: before.length,
-          };
-        }
-
-        // 2) 决定 dropped / kept:
-        //    - compact_via_window → splitForCompaction 的窗口守门结果;
-        //    - compact_via_full_summary → 整段视为 dropped,kept = [];
-        //    - compressCfg 缺席 → 走既有 splitForCompaction(无判据)。
+        // plan manual-compact-trigger T1: 手动 /compact 视作已过
+        // `evaluateCompactTrigger` 的 token 门(spec 672 Boundaries Out)。
+        // 执行体仍复用既有 runFullCompact / compactMessages 回退,与 proactive
+        // auto-compact 已开火之后共用同一对 dropped/kept 决策:
+        //   - empty → 幂等 noop(reason=messages_too_few),不落盘、不 bump updatedAt;
+        //   - 不可压缩(消息数 ≤ keepRecent,无 dropped 前缀)→ full_summary 支
+        //     (整段视为 dropped,kept=[]),与 auto 开火后行为相同;
+        //   - 有 dropped 前缀 → windowed 支。
+        // proactive 阈值公式 / getAutoCompactThreshold / IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS
+        // / estimateMessagesTokens / DEFAULT_KEEP_RECENT 全部不动 — 仅 hub 手动
+        // 入口跳过 token 判据;loop-engine 仍走 evaluateCompactTrigger。
         let split: {
           readonly dropped: ReadonlyArray<AnthropicNativeMessage>;
           readonly kept: ReadonlyArray<AnthropicNativeMessage>;
         };
-        if (compactAction === "compact_via_full_summary") {
+        let compactAction: CompactTriggerDecision["action"];
+        if (before.length === 0) {
+          // 空会话:幂等 noop,reason 字面沿用 messages_too_few
+          // (plan Harvest Open 折进本票:below_token_threshold 仅保留给 auto 路径)。
+          return {
+            session: this.summarize({ file: session }),
+            turns: projectMessagesToTurns(before),
+            compacted: false,
+            reason: REASON_NO_COMPRESS,
+            beforeCount: 0,
+            afterCount: 0,
+          };
+        }
+        const windowSplit = splitForCompaction(before);
+        if (windowSplit === undefined) {
+          // 非空但消息数 ≤ keepRecent,无 dropped 前缀 → full_summary 支
+          // (与 auto 路径 evaluateCompactTrigger 返 compact_via_full_summary 同效)。
+          compactAction = "compact_via_full_summary";
           split = { dropped: before, kept: [] };
         } else {
-          const windowSplit = splitForCompaction(before);
-          if (windowSplit === undefined) {
-            // 判据与 splitForCompaction 一致:此分支不可达(windowed 必 kept>0)。
-            // 防御兜底:无 dropped 前缀 → 视为消息条数过少,no-op 返回。
-            return {
-              session: this.summarize({ file: session }),
-              turns: projectMessagesToTurns(before),
-              compacted: false,
-              reason: REASON_NO_COMPRESS,
-              beforeCount: before.length,
-              afterCount: before.length,
-            };
-          }
+          compactAction = "compact_via_window";
           split = windowSplit;
         }
 
