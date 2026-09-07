@@ -71,6 +71,7 @@ import {
 } from "../cli/format.js";
 import { formatThinkingFold } from "./think-fold.js";
 import { isTuiHiddenUserMessage } from "./session-state.js";
+import { projectSkillLoadUserText } from "./session-state.js";
 import { stripPrefetchOverlay } from "../harness/memory/prefetch.js";
 
 type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
@@ -280,14 +281,52 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
       .join("\n");
     if (texts.trim() === "") return null; // 纯 tool_result：摘要行已覆盖。
     if (isTuiHiddenUserMessage(message)) return null;
+    // plans/tui-chrome-interaction.md Task 5：skill-load chip 投影 ——
+    // 命中闭合形态的 `[skill-load name="X"]\n<body>[+\n\n<remainder>]`
+    // 信封时，正文永进 ❯ 气泡。可见形态：`loading skill <name>` 芯片 +
+    // remainder（若有）。模型历史仍收 `buildSkillLoadText` 信封（session-api
+    // 侧不动），TUI 在 render 层剥 body；reload 后落盘全文同样投影为 chip。
+    // 拒绝形态（短前缀命中但 name 没闭合 / 不以 `[skill-load ` 开头）→
+    // 走现有 user 文本路径（视为普通 user 输入）。
+    const projection = projectSkillLoadUserText(texts);
+    if (projection !== null) {
+      const { name, remainder } = projection;
+      return (
+        <box flexDirection="column" marginTop={props.marginTop ?? 0}>
+          <text fg={pal.dim} wrapMode="none">
+            {`loading skill ${name}`}
+          </text>
+          {remainder.length > 0 && (
+            <box
+              flexDirection="column"
+              backgroundColor={pal.userBg}
+              paddingX={1}
+              paddingY={0}
+            >
+              <text
+                fg={pal.accent}
+                wrapMode="word"
+                width={Math.max(1, cols - 2)}
+              >
+                {`❯ ${remainder}`}
+              </text>
+            </box>
+          )}
+        </box>
+      );
+    }
     const visible = stripPrefetchOverlay(texts);
-    // T7：user 底色块（pal.userBg + paddingX=1 水平缩进，无 paddingY 贴内容）。
-    // 内部宽度 = cols-2（paddingX=1 两侧），text width 同步收窄避免溢出。
+    // T7 + Task 2：user 底色块（pal.userBg + paddingX=1 水平缩进，无
+    // paddingY 贴内容）。内部宽度 = cols-2（paddingX=1 两侧），text
+    // width 同步收窄避免溢出。
+    // Task 2 acceptance 6:缺 palette token 不许把 transcript 刷白 ——
+    // userBg 缺/空串时跳过 backgroundColor，回归终端默认。
+    const userFill = pal.userBg.length > 0 ? pal.userBg : undefined;
     return (
       <box flexDirection="column" marginTop={props.marginTop ?? 0}>
         <box
           flexDirection="column"
-          backgroundColor={pal.userBg}
+          backgroundColor={userFill}
           paddingX={1}
           paddingY={0}
         >
@@ -300,15 +339,16 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
   }
   // assistant
   const summary = summarizeThinkingContent(message.content);
-  // T7：底色块 paddingX=1 两侧 → 内部内容宽度收窄 2 列。
-  const innerCols = Math.max(1, cols - 2);
+  // Task 2 (plans/tui-chrome-interaction.md T2)：MessageShell 透传,不再
+  // 加 paddingX → 内部内容宽度 = cols（不再 -2）。Markdown / 工具行 /
+  // 思考摘要全部按 cols 满宽排版,与 chat-view 透传的 contentWidth 对齐。
+  const innerCols = Math.max(1, cols);
   const nodes: ReactNode[] = [];
   // #tui-render-overhaul T4:assistant 内部块间 1 行节奏 —— 相邻节点（折叠行 /
   // thinking 明文 / 文本 / 工具行 / 错误行）之间补 1 行空白,首块不补顶 margin。
   // OpenTUI `marginTop` 在父 column 容器里换行实现（父级为 MessageShell 内
-  // 的 `<box flexDirection="column">`）。不变式：MessageShell 内部 column
-  // 容器现统一为单个根 box（见 MessageShell 组件），marginTop 即在父 column
-  // 中起换行作用;不会与外壳 paddingX=1 的左右缩进重叠。
+  // 的 `<box flexDirection="column">`）。Task 2：MessageShell 透传（无
+  // paddingX、无 backgroundColor），marginTop 即在父 column 中起换行作用。
   const withBlockSpacing = (key: string, node: ReactNode): ReactNode =>
     nodes.length === 0 ? (
       node
@@ -430,8 +470,9 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
     }
   });
   if (nodes.length === 0) return null;
-  // T7：assistant 底色块（pal.assistantBg + paddingX=1 水平缩进，无 paddingY
-  // 贴内容）；消息间 1 行节奏由根节点 marginTop prop 提供（随消息存亡）。
+  // Task 2 (plans/tui-chrome-interaction.md T2)：assistant 不再带 panel
+  // 填充 —— MessageShell 透传（无 backgroundColor、无 paddingX），仅
+  // `marginTop` 节奏容器。Markdown 格式化保留（子树自带 width / wrap）。
   // #693 T1 D1：assistant 外壳收敛到 MessageShell（memo 包裹，浅比较稳定），
   // 与 chat-view 流式草稿 / 折叠行共用同一组件 —— 消除「外壳跳变」不一致。
   return (

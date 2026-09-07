@@ -397,9 +397,9 @@ describe("Tab 补全接线：hint 选中项 + 三态 slashComplete（app.tsx onT
       (f) => f.includes("/sessions") && f.includes("/quit")
     );
 
-    // ↓ hint 游标 → index 1（new）；Tab → 补全选中项 "/new "，hint 收缩唯一。
-    // 修复前（cursor>0 恒不可达）：slashComplete("/") → LCP 无进展 → null
-    // → no-op，全词表 hint 不消失（帧内 /quit 恒在）→ untilFrame 超时。
+    // ↓ hint 游标 → index 1（new）；Tab → 按选中项补全输入框 "/new "。
+    // plans T4：补全后的 "/new " 是 exact + remainder（空格）→ hint 全隐
+    // （消歧职责已尽），帧内只有输入框 1 份 /new。
     await app.pressArrow("down");
     await app.pressTab();
     const frame = await untilFrame(
@@ -407,9 +407,9 @@ describe("Tab 补全接线：hint 选中项 + 三态 slashComplete（app.tsx onT
       (f) => f.includes("/new") && !f.includes("/quit"),
       8000
     );
-    // 输入框非空（占位消失），输入框 + hint 两份 /new。
+    // 输入框非空（占位消失），hint 已隐藏 → 全帧恰 1 份 /new。
     expect(frame).not.toContain("输入消息");
-    expect(countOccurrences(frame, "/new")).toBeGreaterThanOrEqual(2);
+    expect(countOccurrences(frame, "/new")).toBe(1);
 
     await app.destroy();
   }, 30_000);
@@ -423,10 +423,11 @@ describe("Tab 补全接线：hint 选中项 + 三态 slashComplete（app.tsx onT
     await untilFrame(app.setup, (f) => countOccurrences(f, "/quit") === 1);
 
     await app.pressTab();
-    // 补全 "/quit "：输入框多 1 份 → 共 2 份。
+    // 补全 "/quit "：plans T4 —— exact + 尾随空格 = 已提交 remainder →
+    // hint 全隐，帧内只剩输入框 1 份 /quit。
     await untilFrame(
       app.setup,
-      (f) => countOccurrences(f, "/quit") === 2,
+      (f) => f.includes("/quit ") && countOccurrences(f, "/quit") === 1,
       8000
     );
     await app.destroy();

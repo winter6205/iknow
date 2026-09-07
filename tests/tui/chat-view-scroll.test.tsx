@@ -831,10 +831,13 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
 });
 
 test("running：先于草稿的工具（无 draftEpoch 标记）显示在流式草稿之上（按事件顺序插入）", async () => {
-  // 场景：模型先调搜索工具、后流式输出回答 —— 工具显示应在上、草稿在下
+  // 场景：模型先调工具、后流式输出回答 —— 工具显示应在上、草稿在下
   // （与历史 MessageBlocks 按 content 顺序的终态一致，避免结束时跳变）。
   // 拆分依据 = 条目追加时由 app 层打入的 draftEpoch（缺省 0 = 先于
   // 第一段草稿）。
+  // plans/tui-chrome-interaction.md T1:retract 类（web_search）一旦完成
+  // 即进折叠计数,不再占 tail —— 本测试改用 keep 类（bash）验证草稿前后
+  // 工具的插入顺序。
   const session: TuiSessionState = {
     ...sessionWith([msg("m-1", "user", "搜索今天的AI新闻")]),
     runState: "running-fg",
@@ -842,10 +845,10 @@ test("running：先于草稿的工具（无 draftEpoch 标记）显示在流式�
   const liveToolRuns: ReadonlyArray<LiveToolRun> = [
     {
       id: "tu-s",
-      name: "web_search",
+      name: "bash",
       status: "ok",
-      input: { query: "今天的AI新闻" },
-      detail: "搜索 今天的AI新闻",
+      input: { command: "ls" },
+      detail: "bash · ls",
     },
   ];
   const draft = "以下是今天的AI新闻摘要";
@@ -862,7 +865,7 @@ test("running：先于草稿的工具（无 draftEpoch 标记）显示在流式�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  const iTool = frame.indexOf("web_search");
+  const iTool = frame.indexOf("bash");
   // 草稿经 Markdown 渲染 + 盘古之白：今天的AI → 今天的 AI。
   const iDraft = frame.indexOf("以下是今天的 AI 新闻");
   expect(iTool).toBeGreaterThanOrEqual(0);
@@ -872,9 +875,11 @@ test("running：先于草稿的工具（无 draftEpoch 标记）显示在流式�
 });
 
 test("running：draftEpoch 混排 —— 草稿前工具在上、草稿后工具在下", async () => {
-  // 场景：搜索工具（epoch 0）→ 流式回答 → write 工具（epoch 1）。
+  // 场景：keep 工具（epoch 0）→ 流式回答 → write 工具（epoch 1）。
   // 拆分按 draftEpoch（位置无关 filter）。#589 只读工具中途移除不错位
   // 由结构保证（filter 不依赖下标）。
+  // plans T1:web_search(已完成)属 retract → 进折叠,不再占 tail;本
+  // 测试改用 bash(keep)以验证 draftEpoch 位置与插入顺序。
   const session: TuiSessionState = {
     ...sessionWith([msg("m-1", "user", "搜索并写入")]),
     runState: "running-fg",
@@ -882,10 +887,10 @@ test("running：draftEpoch 混排 —— 草稿前工具在上、草稿后工具
   const liveToolRuns: ReadonlyArray<LiveToolRun> = [
     {
       id: "tu-s",
-      name: "web_search",
+      name: "bash",
       status: "ok",
-      input: { query: "q" },
-      detail: "搜索 q",
+      input: { command: "ls" },
+      detail: "bash · ls",
     },
     {
       id: "tu-w",
@@ -908,7 +913,7 @@ test("running：draftEpoch 混排 —— 草稿前工具在上、草稿后工具
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  const iSearch = frame.indexOf("web_search");
+  const iSearch = frame.indexOf("bash");
   const iDraft = frame.indexOf("正在整理结果");
   const iWrite = frame.indexOf("write_file");
   expect(iSearch).toBeGreaterThanOrEqual(0);
@@ -920,6 +925,8 @@ test("running：draftEpoch 混排 —— 草稿前工具在上、草稿后工具
 });
 
 test("running：第二段草稿画在后续工具之下（tool→text→tool→text 不把新工具顶下去）", async () => {
+  // plans T1:web_search(已完成 retract)进折叠,不再占 tail —— 改用
+  // bash(keep)以验证 draftEpoch 与两段草稿的插入顺序。
   const session: TuiSessionState = {
     ...sessionWith([msg("m-1", "user", "搜完再写")]),
     runState: "running-fg",
@@ -927,10 +934,10 @@ test("running：第二段草稿画在后续工具之下（tool→text→tool→t
   const liveToolRuns: ReadonlyArray<LiveToolRun> = [
     {
       id: "tu-s",
-      name: "web_search",
+      name: "bash",
       status: "ok",
-      input: { query: "q" },
-      detail: "搜索 q",
+      input: { command: "ls" },
+      detail: "bash · ls",
     },
     {
       id: "tu-b",
@@ -953,17 +960,28 @@ test("running：第二段草稿画在后续工具之下（tool→text→tool→t
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  const iSearch = frame.indexOf("web_search");
-  const iFirst = frame.indexOf("第一段回答");
-  const iBash = frame.indexOf("bash");
-  const iSecond = frame.indexOf("第二段回答");
-  expect(iSearch).toBeGreaterThanOrEqual(0);
-  expect(iFirst).toBeGreaterThanOrEqual(0);
-  expect(iBash).toBeGreaterThanOrEqual(0);
-  expect(iSecond).toBeGreaterThanOrEqual(0);
-  expect(iSearch).toBeLessThan(iFirst);
-  expect(iFirst).toBeLessThan(iBash);
-  expect(iBash).toBeLessThan(iSecond);
+  // plans T1:web_search(已完成 retract)进折叠 → 不再占 tail。本测试
+  // 用 bash(keep)替代;两条 bash 共存,首条出现在第一段草稿之前(epoch 0),
+  // 第二条在两段草稿之间(epoch 1) → 第一段草稿之前 + 第二段草稿之后。
+  // 第一段草稿之前的位置 = epoch 0 bash;epoch 1 bash 在第一段之后、
+  // 第二段之前。但 epoch 1 的 bash 是 status="running",仍占 tail;epoch 0
+  // 的 bash 是 status="ok"(已完成 keep)→ 仍占 tail(keep 不进折叠)。
+  // 因此 epoch 0 bash 在第一段前,epoch 1 bash 在第二段前:
+  // bash(epoch 0) < 第一段 < bash(epoch 1) < 第二段。
+  const iFirstBash = frame.indexOf("bash");
+  const iFirstDraft = frame.indexOf("第一段回答");
+  // epoch 1 bash 是 status="running" → 渲染为 `[运行中] bash`(带前缀),
+  // 不能用第二个 "bash" 找。改为查 "运行中" 标记,它只会出现在 epoch 1
+  // bash 的位置。
+  const iSecondBash = frame.indexOf("运行中");
+  const iSecondDraft = frame.indexOf("第二段回答");
+  expect(iFirstBash).toBeGreaterThanOrEqual(0);
+  expect(iFirstDraft).toBeGreaterThanOrEqual(0);
+  expect(iSecondBash).toBeGreaterThanOrEqual(0);
+  expect(iSecondDraft).toBeGreaterThanOrEqual(0);
+  expect(iFirstBash).toBeLessThan(iFirstDraft);
+  expect(iFirstDraft).toBeLessThan(iSecondBash);
+  expect(iSecondBash).toBeLessThan(iSecondDraft);
   await setup.renderer.destroy();
 });
 

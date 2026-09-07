@@ -188,6 +188,20 @@ const SUMMARIZERS: Readonly<
   lsp_workspace_symbol: (r) => `LSP workspaceSymbol ${pickString(r, "query")}`,
 };
 
+/** write_file 运行中摘要：路径与行数都只在**已知**时出现。运行中的 input 是
+ *  流式半成品 —— `content` 缺失 / 非 string / 空串都只说明「还没到」，不是
+ *  「文件有 0 行」，此时只画路径；连 `path` 都还没到 → 空串（调用方落到裸
+ *  `[运行中] write_file`，不画 `写入 ?`）。落定态（summary）的空 content 才
+ *  是真实的空文件，仍显示 `（0 行）`。 */
+function writeFileRunningSummary(r: Record<string, unknown>): string {
+  const path = r.path;
+  if (typeof path !== "string" || path.length === 0) return "";
+  const content = r.content;
+  if (typeof content !== "string" || content.length === 0)
+    return `写入 ${path}`;
+  return `写入 ${path}（${countLines(content)} 行）`;
+}
+
 /** #693 T4 D4:工具显示注册表 — 「摘要 + 结果预览」一体声明。
  *
  *  D7 把「工具状态行文案」与「结果预览函数」同置一处，让「新增一种工具
@@ -203,6 +217,10 @@ const SUMMARIZERS: Readonly<
  */
 interface ToolDisplay {
   readonly summary: (rec: Record<string, unknown>) => string;
+  /** 运行中摘要（可选）。字段缺席 = 运行态与落定态同文案；声明它的工具，
+   *  其落定摘要含「只有 input 齐了才可信的量」（write_file 的行数）——
+   *  运行中 input 是流式半成品，该量必须省略而不是显示成 0。 */
+  readonly runningSummary?: (rec: Record<string, unknown>) => string;
   /** 落定态三分类（spec D2：缺声明非法 —— 接口必填 + 测试拒绝）。 */
   readonly settledClass: SettledClass;
   readonly preview?: (
@@ -260,6 +278,7 @@ const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
   // 不复制；summary + preview? + settledClass 同置一行，spec D7）。
   write_file: {
     summary: SUMMARIZERS.write_file!,
+    runningSummary: writeFileRunningSummary,
     settledClass: TOOL_SETTLED_CLASS.write_file!,
   },
   edit_file: {
@@ -444,6 +463,10 @@ export function settledClassOfDisplay(name: string): SettledClass {
  * 单个工具调用的参数摘要。`cols` = 终端列宽：提供时 detail 按视觉宽度
  * 收口到「装饰 + 工具名 + detail」单行放得下（窄终端不折行，行账不漂移）。
  *
+ * `opts.running` = 该调用的 input 还是流式半成品（运行中）：注册表声明了
+ * `runningSummary` 的工具走运行态摘要，省略「只有 input 齐了才可信的量」
+ * （write_file 行数）。未声明 → 与落定态同文案，行为不变。
+ *
  * lookup table（SUMMARIZERS）dispatch：每个工具独立摘要器，函数体保持
  * ≤10 行 / 圈复杂度 ≤10（complexity-anti-drift）；未知工具走 `(name)`
  * 占位符（2026-08-13 用户反馈 tool fold 不该 JSON 全文外露）。
@@ -451,7 +474,8 @@ export function settledClassOfDisplay(name: string): SettledClass {
 export function summarizeToolCall(
   name: string,
   input: unknown,
-  cols?: number
+  cols?: number,
+  opts?: { readonly running?: boolean }
 ): { detail: string } {
   const rec = inputRecord(input);
   const clip = (s: string): string => clipDetail(s, name, cols);
@@ -461,7 +485,13 @@ export function summarizeToolCall(
   // 声明而不在 SUMMARIZERS）—— 标题行走注册表声明，SUMMARIZERS 仅兜底
   // 未知工具占位。
   const declared = TOOL_DISPLAYS[name];
-  if (declared !== undefined) return { detail: clip(declared.summary(rec)) };
+  if (declared !== undefined) {
+    const summarize =
+      opts?.running === true && declared.runningSummary !== undefined
+        ? declared.runningSummary
+        : declared.summary;
+    return { detail: clip(summarize(rec)) };
+  }
   if (!(name in SUMMARIZERS)) return { detail: clip(`(${name})`) };
   return { detail: clip(SUMMARIZERS[name]!(rec)) };
 }
@@ -480,7 +510,9 @@ export function clipErrorLine(text: string, cols: number): string {
 /**
  * T5:运行中 partial JSON 文本的摘要。对逐段累积的 `partialJson` 尽力
  * `JSON.parse`：
- *  - parse 成功 → 走 `summarizeToolCall`（与完成态摘要同源，字节一致）；
+ *  - parse 成功 → 走 `summarizeToolCall`（运行语义：注册表声明了
+ *    `runningSummary` 的工具省略未知量 —— partial 里的 `content` 可能只是
+ *    「还没到」，不能显示成 `（0 行）`）；
  *  - parse 失败（partial 不完整 JSON，如 `{"command":"l`）或 primitive 形态
  *    （null / 数字 / 布尔）→ `clipDetail` 原样截断显示（单源，视觉宽度纪律）；
  *  - 空串 → 空串。
@@ -510,7 +542,7 @@ export function summarizePartialInput(
   ) {
     return clipDetail(partialJson, name, cols);
   }
-  return summarizeToolCall(name, parsed, cols).detail;
+  return summarizeToolCall(name, parsed, cols, { running: true }).detail;
 }
 
 /** 一条 assistant 消息内 `name === "bash"` 的 `tool_use` block 计数（T4）。
@@ -846,18 +878,17 @@ export function formatToolStatusLine(opts: {
 }): string {
   const detail =
     opts.detail ??
-    summarizeToolCall(opts.toolName, opts.input, opts.cols).detail;
-  // 子代理工具分支（独立视觉，glyph + 子代理标签 + detail，不拼 [xxx] 前缀）。
+    summarizeToolCall(opts.toolName, opts.input, opts.cols, {
+      running: opts.status === "running",
+    }).detail;
+  // plans/tui-chrome-interaction.md T7：子代理工具（spawn_subagent /
+  // subagent_result）不再以 `▣ 子代理 · detail` 形态作为 live / history 工具
+  // 卡 —— 子代理状态由 identity strip（prompt 正上方 `{role} running...`）
+  // + SubagentPanel（输入框下方 task list）单独表达，避免 dual render。
+  // 工具卡仅保留 `detail`（已由 summarizeToolCall 派生，含子代理任务的
+  // 真实文本，例如「派发子代理：<task>」/「轮询 <task_id>」）。
   if (isSubagentTool(opts.toolName)) {
-    const kind =
-      opts.status === "ok"
-        ? "ok"
-        : opts.status === "failed"
-          ? "failed"
-          : "running";
-    const mark = subagentDisplayMark(kind);
-    if (detail.length === 0) return `${mark} ${SUBAGENT_TOOL_LABEL}`;
-    return `${mark} ${SUBAGENT_TOOL_LABEL} · ${detail}`;
+    return detail;
   }
   // #tui-render-overhaul T3:成功态去掉 `[完成]` 前缀 —— 状态由颜色/glyph
   // 表达,行首不残留多余空格。失败/运行中保留明示前缀（不变式）。

@@ -24,12 +24,7 @@
  *    展示层事件不应破坏权威状态）。
  *  - 纯函数 + Object.freeze 纪律，与 session-state.ts 同源。
  */
-import {
-  formatLiveToolEvent,
-  formatToolStatusLine,
-  isSubagentTool,
-  subagentDisplayMark,
-} from "./tool-summary.js";
+import { formatLiveToolEvent, formatToolStatusLine } from "./tool-summary.js";
 
 export type LiveToolStatus = "running" | "ok" | "failed";
 
@@ -239,14 +234,11 @@ export function shortenMcpToolName(name: string): string {
 
 /** 运行中条目格式化 —— 委托 `formatToolStatusLine`（tool-summary.ts SSOT，
  *  #693 T1 D7）。普通工具 → `[运行中] name`；子代理工具（spawn_subagent /
- *  subagent_result）走独立视觉（字形走 `subagentDisplayMark` SSOT）：
- *  spawn_subagent → `▣ 派发子代理中…`，subagent_result → `▣ 轮询子代理中…`。 */
+ *  subagent_result，plans/tui-chrome-interaction.md T7）不再以 `▣ 子代理`
+ *  形态出现 —— 子代理状态由 identity strip + SubagentPanel 单独表达，
+ *  formatToolStatusLine 内只返 `detail`（如 `派发子代理：<task>`），避免
+ *  dual render。 */
 export function formatRunningToolLine(run: LiveToolRun): string {
-  if (isSubagentTool(run.name)) {
-    const mark = subagentDisplayMark("running");
-    if (run.name === "spawn_subagent") return `${mark} 派发子代理中…`;
-    if (run.name === "subagent_result") return `${mark} 轮询子代理中…`;
-  }
   return formatToolStatusLine({
     toolName: run.name,
     input: run.input,

@@ -17,7 +17,7 @@
  *
  * 渲染形态 OpenTUI 元素树（禁 ink Box/Text 原语）。captureCharFrame 文本断言。
  */
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 import { testRender } from "@opentui/react/test-utils";
 import { RGBA } from "@opentui/core";
@@ -797,9 +797,12 @@ test("T7 纯 tool_use 消息：底色 box 包裹后渲染不崩，摘要行可�
   await setup.renderer.destroy();
 });
 
-// -- 子代理工具专属显示（spec #146） --------------------------------------
+// -- 子代理工具专属显示（plans/tui-chrome-interaction.md T7） ---------------
+// 不变式：子代理工具不再以 `▣ 子代理` 形态作为 live/history 工具卡（dual
+// render 移除）——状态由 identity strip（prompt 上方）+ SubagentPanel 表达，
+// 工具卡仅显示 detail。
 
-test("spawn_subagent 运行中（statusMap 无该 id）→ `▣ 子代理 · 派发子代理：…`，不含 `[运行中] spawn_subagent`", async () => {
+test("spawn_subagent 运行中 → 仅 detail（无 `▣` glyph，无 `[运行中] spawn_subagent` 残留）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -813,13 +816,13 @@ test("spawn_subagent 运行中（statusMap 无该 id）→ `▣ 子代理 · 派
   };
   const setup = await renderBlocks(msg);
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("▣ 子代理 · 派发子代理：调查渲染层");
-  // 不残留普通工具形态 `[运行中] spawn_subagent`。
+  expect(frame).toContain("派发子代理：调查渲染层");
+  expect(frame.includes("▣")).toBe(false);
   expect(frame).not.toContain("[运行中] spawn_subagent");
   await setup.renderer.destroy();
 });
 
-test("spawn_subagent 完成 ok → `✓ 子代理 · …`", async () => {
+test("spawn_subagent 完成 ok → 仅 detail（无 `✓` glyph、无 `[完成]` 前缀）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -835,12 +838,13 @@ test("spawn_subagent 完成 ok → `✓ 子代理 · …`", async () => {
     statusMap: new Map([["tu-spawn", false]]),
   });
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("✓ 子代理 · 派发子代理：调查渲染层");
+  expect(frame).toContain("派发子代理：调查渲染层");
+  expect(frame.includes("✓")).toBe(false);
   expect(frame).not.toContain("[完成]");
   await setup.renderer.destroy();
 });
 
-test("spawn_subagent 完成 failed → `✗ 子代理 · …`", async () => {
+test("spawn_subagent 完成 failed → 仅 detail（无 `✗` glyph、无 `[失败]` 前缀）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -856,12 +860,13 @@ test("spawn_subagent 完成 failed → `✗ 子代理 · …`", async () => {
     statusMap: new Map([["tu-spawn", true]]),
   });
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("✗ 子代理 · 派发子代理：调查渲染层");
+  expect(frame).toContain("派发子代理：调查渲染层");
+  expect(frame.includes("✗")).toBe(false);
   expect(frame).not.toContain("[失败]");
   await setup.renderer.destroy();
 });
 
-test("subagent_result 完成 ok → `✓ 子代理 · 轮询 t-1`", async () => {
+test("subagent_result 完成 ok → 仅 detail（无 `✓` glyph）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -877,7 +882,8 @@ test("subagent_result 完成 ok → `✓ 子代理 · 轮询 t-1`", async () => 
     statusMap: new Map([["tu-poll", false]]),
   });
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("✓ 子代理 · 轮询 t-1");
+  expect(frame).toContain("轮询 t-1");
+  expect(frame.includes("✓")).toBe(false);
   await setup.renderer.destroy();
 });
 
@@ -1801,4 +1807,122 @@ test("T4 assistant 思考行 + ran 后缀：两个相邻 dim 行同块（无间�
   // ran 后缀与下一块 bash 之间补 1 行空白（≥ 2 行差）。
   expect(bashIdx - ranIdx).toBeGreaterThanOrEqual(2);
   await setup.renderer.destroy();
+});
+
+/**
+ * plans/tui-chrome-interaction.md Task 5：skill-load 投影在 user 分支渲染。
+ *  - 命中形态 → chip-only（remainder 空）/ chip+remainder（remainder 非空），
+ *    正文（SKILL body）绝不进 ❯ 气泡；
+ *  - 拒绝形态（短前缀命中但 name 没闭合 / 不以 [skill-load 开头）→ 走
+ *    现有 user 文本路径（视为普通 user 输入）；
+ *  - 中文 `[加载技能 echo]` 历史 displayText（非 skill-load 闭合形态）→
+ *    仍按普通 user 文本显示（不误投影为 chip）。
+ */
+describe("user: skill-load chip projection（plans T5）", () => {
+  test("chip-only：remainder 空 → 只画 `loading skill <name>`，正文不渲染", async () => {
+    const msg: AnthropicNativeMessage = {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: '[skill-load name="echo"]\n# 回声技能\n\nBase directory: /tmp\n\n<skill_files>\n/skill.md\n</skill_files>',
+        },
+      ],
+    };
+    const setup = await renderBlocks(msg);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("loading skill echo");
+    // SKILL body 不进 ❯ 气泡（也不进任何文本节点）：
+    expect(frame.includes("# 回声技能")).toBe(false);
+    expect(frame.includes("Base directory")).toBe(false);
+    expect(frame.includes("<skill_files>")).toBe(false);
+    expect(frame.includes("❯")).toBe(false);
+    await setup.renderer.destroy();
+  });
+
+  test("chip + remainder：remainder 非空 → chip + `❯ <remainder>`", async () => {
+    const msg: AnthropicNativeMessage = {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: '[skill-load name="echo"]\n# 回声技能\n\nBase directory: /tmp\n\n<skill_files>\n/skill.md\n</skill_files>\n\n帮我做 X',
+        },
+      ],
+    };
+    const setup = await renderBlocks(msg);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("loading skill echo");
+    expect(frame).toContain("❯ 帮我做 X");
+    // body 不进任何文本节点：
+    expect(frame.includes("# 回声技能")).toBe(false);
+    expect(frame.includes("Base directory")).toBe(false);
+    expect(frame.includes("<skill_files>")).toBe(false);
+    await setup.renderer.destroy();
+  });
+
+  test("chip + remainder：body 巨大（10KB）→ 仍只画 chip + remainder，正文不渲染", async () => {
+    const huge = "x".repeat(10_000);
+    const msg: AnthropicNativeMessage = {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: `[skill-load name="echo"]\n${huge}\n\n帮我做 X`,
+        },
+      ],
+    };
+    const setup = await renderBlocks(msg);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("loading skill echo");
+    expect(frame).toContain("❯ 帮我做 X");
+    // 巨大 body 不应泄漏（也不应触发 wrap 之后的整篇渲染）。
+    expect(frame.includes("xxxxxx")).toBe(false);
+    await setup.renderer.destroy();
+  });
+
+  test("malformed `[skill-load name=...]`（短前缀命中但 name 没闭合）→ 走普通 user 文本", async () => {
+    const msg: AnthropicNativeMessage = {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          // 形态破坏：name=echo] 后缺 `\n` 引导 → projection 拒绝。
+          text: "[skill-load name=echo]\nbody\n\n帮我做 X",
+        },
+      ],
+    };
+    const setup = await renderBlocks(msg);
+    const frame = setup.captureCharFrame();
+    // 不投影为 chip，整段原样进 ❯ 气泡：
+    expect(frame.includes("loading skill")).toBe(false);
+    expect(frame).toContain("❯");
+    expect(frame).toContain("[skill-load name=echo]");
+    await setup.renderer.destroy();
+  });
+
+  test("malformed `[skill-load` 单独短前缀 → 走普通 user 文本", async () => {
+    const msg: AnthropicNativeMessage = {
+      role: "user",
+      content: [{ type: "text", text: "[skill-load 没闭合 name 内容]" }],
+    };
+    const setup = await renderBlocks(msg);
+    const frame = setup.captureCharFrame();
+    expect(frame.includes("loading skill")).toBe(false);
+    expect(frame).toContain("❯");
+    expect(frame).toContain("[skill-load 没闭合 name 内容]");
+    await setup.renderer.destroy();
+  });
+
+  test("非 skill-load user 文本 → 行为不变（regression）", async () => {
+    const msg: AnthropicNativeMessage = {
+      role: "user",
+      content: [{ type: "text", text: "你好 iknow" }],
+    };
+    const setup = await renderBlocks(msg);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("❯ 你好 iknow");
+    expect(frame.includes("loading skill")).toBe(false);
+    await setup.renderer.destroy();
+  });
 });

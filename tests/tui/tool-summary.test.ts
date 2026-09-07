@@ -469,48 +469,50 @@ describe("子代理工具专属显示（isSubagentTool / subagentDisplayMark / S
     expect(SUBAGENT_TOOL_LABEL).toBe("子代理");
   });
 
-  test("formatLiveToolEvent spawn_subagent ok（input 含 task）→ `✓ 子代理 · 派发子代理：…`（无尾部 ` · ok`）", () => {
+  test("formatLiveToolEvent spawn_subagent ok → 仅返 detail（plans T7 钉死不再以 `▣ 子代理 · …` 形态作为 live/history 工具卡）", () => {
     const line = formatLiveToolEvent({
       toolName: "spawn_subagent",
       input: { task: "调查渲染层" },
       kind: "ok",
     });
-    expect(line).toBe("✓ 子代理 · 派发子代理：调查渲染层");
-    // 子代理分支：glyph 已表状态，不再拼尾部 ` · ok/failed`。
-    expect(line.endsWith(" · ok")).toBe(false);
-    expect(line.endsWith(" · failed")).toBe(false);
+    // plans/tui-chrome-interaction.md T7：子代理工具不再以 `▣ 子代理` 形态
+    // 渲染 live / history 工具卡 —— 子代理状态由 identity strip + SubagentPanel
+    // 单独表达，避免 dual render。formatToolStatusLine 内仅返 detail。
+    expect(line).toBe("派发子代理：调查渲染层");
+    // 钉死无 `▣` glyph、无 `✓` 状态前缀（detail 内容可含「子代理」字面值）
+    expect(line.includes("▣")).toBe(false);
+    expect(line.includes("✓")).toBe(false);
   });
 
-  test("formatLiveToolEvent spawn_subagent failed → `✗ 子代理 · …`", () => {
+  test("formatLiveToolEvent spawn_subagent failed → 仅返 detail（无 glyph 前缀）", () => {
     const line = formatLiveToolEvent({
       toolName: "spawn_subagent",
       input: { task: "调查渲染层" },
       kind: "execution_failed",
     });
-    expect(line).toBe("✗ 子代理 · 派发子代理：调查渲染层");
-    expect(line.includes("· failed")).toBe(false);
+    expect(line).toBe("派发子代理：调查渲染层");
+    expect(line.includes("✗")).toBe(false);
   });
 
-  test("formatLiveToolEvent subagent_result ok → `✓ 子代理 · 轮询 …`", () => {
+  test("formatLiveToolEvent subagent_result ok → 仅返 detail", () => {
     const line = formatLiveToolEvent({
       toolName: "subagent_result",
       input: { task_id: "t-1" },
       kind: "ok",
     });
-    expect(line).toBe("✓ 子代理 · 轮询 t-1");
+    expect(line).toBe("轮询 t-1");
   });
 
-  test("formatLiveToolEvent 子代理 detail 空（显式 override）→ `${mark} 子代理`（无 `· ` 残留）", () => {
-    // 子代理 summary 器兜底值非空，构造 detail 空走显式 override 路径，
-    // 验证子代理分支 detail 空形态（不拼 `· `，也不拼尾部状态）。
+  test("formatLiveToolEvent 子代理 detail 空（显式 override）→ 空串（无 glyph / `· ` 残留）", () => {
+    // 子代理 detail 空（detail 显式 override 路径）→ formatToolStatusLine
+    // 仅返 detail，故空 detail → 空串。组件渲染层负责决定是否隐藏空行。
     const line = formatLiveToolEvent({
       toolName: "subagent_result",
       input: { task_id: "t-1" },
       kind: "ok",
       detail: "",
     });
-    expect(line).toBe("✓ 子代理");
-    expect(line.includes("·")).toBe(false);
+    expect(line).toBe("");
   });
 
   test("formatLiveToolEvent bash ok 回归 → `bash · <detail>`（#693 T1 D7 统一形态 + #tui-render-overhaul T3 去完成前缀）", () => {

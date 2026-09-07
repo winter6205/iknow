@@ -502,3 +502,159 @@ describe("SubagentPanel 渲染（OpenTUI）", () => {
     await setup.renderer.destroy();
   });
 });
+
+// ============================================================================
+// T7：聚焦行展开 taskPreview（chrome-focus reducer 接线验证）
+// ============================================================================
+
+describe("projectSubagentLines focusedRow — T7 子代理行聚焦展开", () => {
+  test("空 focusedRow → 全部行原截断（前缀不变）", () => {
+    const sa = makeSubagent({
+      taskId: "t-f1",
+      state: "running",
+      taskPreview: "abcdefghijklmnopqrstuvwxyz".repeat(5),
+    });
+    const lines = projectSubagentLines([sa], T0, 60, undefined);
+    expect(lines.length).toBe(1);
+    expect(lines[0]!.text.startsWith("> ")).toBe(false);
+    expect(lines[0]!.text.startsWith("● ")).toBe(true);
+  });
+
+  test("聚焦 row=0 → 该行 taskPreview 不截断 + `> ` 前缀", () => {
+    const longPreview = "这是完整任务描述：" + "完整内容".repeat(40);
+    const sa = makeSubagent({
+      taskId: "t-f2",
+      state: "running",
+      taskPreview: longPreview,
+    });
+    const lines = projectSubagentLines([sa], T0, 80, 0);
+    expect(lines.length).toBe(1);
+    expect(lines[0]!.text.startsWith("> ")).toBe(true);
+    // 展开：原文 taskPreview 完整在场（受 cols 视觉宽度兜底，但长 preview
+    // 应远超 cols；本断言钉住「展开」行为 —— 单测 cols=80 时展开行含原 preview）。
+    expect(lines[0]!.text).toContain("完整内容");
+  });
+
+  test("聚焦 row=1 → 仅第二行展开，第一行仍截断", () => {
+    const longPreview = "x".repeat(50);
+    const sa0 = makeSubagent({
+      taskId: "t-f3a",
+      state: "running",
+      taskPreview: longPreview,
+    });
+    const sa1 = makeSubagent({
+      taskId: "t-f3b",
+      state: "starting",
+      taskPreview: longPreview,
+    });
+    const lines = projectSubagentLines([sa0, sa1], T0, 40, 1);
+    expect(lines.length).toBe(2);
+    expect(lines[0]!.text.startsWith("> ")).toBe(false);
+    expect(lines[1]!.text.startsWith("> ")).toBe(true);
+  });
+
+  test("focusedRow 越界 → 等价未聚焦（无前缀，全部原截断）", () => {
+    const longPreview = "abcdefghij".repeat(20);
+    const subs = [
+      makeSubagent({
+        taskId: "t-f4a",
+        state: "running",
+        taskPreview: longPreview,
+      }),
+      makeSubagent({
+        taskId: "t-f4b",
+        state: "running",
+        taskPreview: longPreview,
+      }),
+    ];
+    const lines = projectSubagentLines(subs, T0, 40, 99);
+    expect(lines.length).toBe(2);
+    for (const line of lines) {
+      expect(line.text.startsWith("> ")).toBe(false);
+    }
+  });
+
+  test("focusedRow 指向 failed 行 → failed 行不展开（仅 live 行参与）", () => {
+    const sa0 = makeSubagent({
+      taskId: "t-f5a",
+      state: "running",
+      taskPreview: "running task",
+    });
+    const sa1 = makeSubagent({
+      taskId: "t-f5b",
+      state: "failed",
+      endedAt: iso(-1000),
+      taskPreview: "failed task",
+    });
+    // focusedRow=1 指向 failed 行；按 plan 仅 live 行参与 focus → 不展开。
+    const lines = projectSubagentLines([sa0, sa1], T0, 80, 1);
+    expect(lines.length).toBe(2);
+    // 第 0 行 (live running) 不应被聚焦
+    expect(lines[0]!.text.startsWith("> ")).toBe(false);
+    // 第 1 行 (failed) 不参与 focus
+    expect(lines[1]!.text.startsWith("> ")).toBe(false);
+  });
+
+  test("钉死约束：focusedRow 展开不破坏单行布局（不换行）", () => {
+    const sa = makeSubagent({
+      taskId: "t-f6",
+      state: "running",
+      taskPreview: "z".repeat(200),
+    });
+    const lines = projectSubagentLines([sa], T0, 30, 0);
+    expect(lines.length).toBe(1);
+    expect(lines[0]!.text.includes("\n")).toBe(false);
+  });
+});
+
+describe("SubagentPanel focusedRow 渲染（OpenTUI）", () => {
+  test("聚焦行加 `> ` 前缀；非聚焦行不加", async () => {
+    const sa0 = makeSubagent({
+      taskId: "t-r1a",
+      state: "running",
+      taskPreview: "第一个子代理任务预览内容完整在场很长很长很长很长",
+    });
+    const sa1 = makeSubagent({
+      taskId: "t-r1b",
+      state: "starting",
+      taskPreview: "第二个",
+    });
+    const setup = await testRender(
+      <SubagentPanel
+        subagents={[sa0, sa1]}
+        cols={80}
+        nowMs={T0}
+        focusedRow={1}
+      />,
+      { width: 80, height: 8 }
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    // 第二行带 `> `
+    expect(frame).toContain("> ○");
+    // 找两行：第一行无 `> ` 前缀
+    const lines = frame
+      .split("\n")
+      .filter((l) => l.includes("子代理") || l.includes("> "));
+    expect(lines.length).toBeGreaterThanOrEqual(2);
+    // 至少一行无 `> `（focusedRow=1 的情况下，row=0 不带前缀）
+    expect(lines.some((l) => !l.trimStart().startsWith(">"))).toBe(true);
+    await setup.renderer.destroy();
+  });
+
+  test("无 focusedRow → 帧内无 `> ` 前缀", async () => {
+    const sa = makeSubagent({
+      taskId: "t-r2",
+      state: "running",
+      taskPreview: "task preview",
+    });
+    const setup = await testRender(
+      <SubagentPanel subagents={[sa]} cols={80} nowMs={T0} />,
+      { width: 80, height: 6 }
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain("> ");
+    await setup.renderer.destroy();
+  });
+});
