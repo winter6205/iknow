@@ -37,6 +37,7 @@ import {
   writeOut,
 } from "./session-io.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
+import { mainCheckoutOf } from "../harness/isolation/worktree-gate.js";
 import {
   renderTranscript,
   hasSuccessfulMemorySave,
@@ -444,10 +445,17 @@ export async function refreshChatDepsForRebind(
       }\n`
     );
   }
-  // 写根段（specs/skill-load-write-root.md T5）：改绑成功 → 下一次主模型
-  // run 再给一次当前写根（与 worker prior / skill trailer 同一 helper 文案）。
-  // 仅在重建成功走到这里时置入 —— 重建失败 / 根未变化的提前 return 不经过。
-  ctx.pendingWriteRootNotice = writeRootSegment(newRoot) ?? undefined;
+  // 写根段（specs/skill-load-write-root.md T5 合同 7）：改绑成功且**活写根
+  // ≠ 身份根**时，下一次主模型 run 再给一次当前写根（与 worker prior /
+  // skill trailer 同一 helper 文案）。身份根判定 = mainCheckoutOf(newRoot)
+  //（纯路径派生，与装配期 projectIdentityRoot 同源）：exit-task-worktree
+  // 回主仓时两根相同，注入的「写根在上 / Project path 只读」文案会自相
+  // 矛盾 → 不置入。仅在重建成功走到这里；重建失败 / 根未变化的提前
+  // return 不经过。
+  ctx.pendingWriteRootNotice =
+    newRoot !== mainCheckoutOf(newRoot)
+      ? (writeRootSegment(newRoot) ?? undefined)
+      : undefined;
 }
 
 type ChatSubagentDrain = {

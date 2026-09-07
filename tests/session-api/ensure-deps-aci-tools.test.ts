@@ -150,7 +150,11 @@ describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
 
 // 写根 trailer（specs/skill-load-write-root.md T3）：serve lazy 装配路径下
 // hub 捕获 BuiltEngine.liveTaskRoot，loadSkillBody 调用时机读快照 ——
-// Web getSkillBody 后端与 ACI skill() / TUI slash 同一装配口。
+// Web getSkillBody 后端与 ACI skill() / TUI slash 同一装配口。TUI slash
+// 路径（app.tsx createSkillBody 调用点）无独立装配测试：三条生产路径共用
+// createSkillBody + writeRootSegment 字节契约（tests/skill/body.test.ts）
+// + 同一 cell 读取形态，本文件与 tests/harness/aci/tools/skill.test.ts
+// 已分别覆盖 hub / skill() 两面的活性与字节，slash 面按同一契约推导。
 describe("SessionHub.loadSkillBody — 写根 trailer（lazy 装配路径）", () => {
   it("build-engine 装配后 loadSkillBody 正文末尾带当前写根", async () => {
     const { mkdir, writeFile } = await import("node:fs/promises");

@@ -870,4 +870,46 @@ describe("rebind 后主会话写根段（specs/skill-load-write-root.md T5）", 
     );
     assert.equal(segments.length, 0, "重建失败不得注入写根段");
   });
+
+  it("exit-task-worktree 回主仓（活写根 = 身份根）→ 不注入写根段（spec 合同 7：仅当写根 ≠ 身份根）", async () => {
+    // 会话已在 task worktree（engineRoot = wtRoot），上一回合 /exit 把
+    // workspaceRoot 改绑回主仓 → 重建触发。此时 newRoot = mainRoot =
+    // mainCheckoutOf(newRoot)，注入的写根文案会与「Project path 只读」
+    // 自相矛盾 → 必须不置入。
+    const dir = makeStoreDir();
+    const store = new SessionStore(dir);
+    const conversationId = "conv-wrt-exit";
+    const mainRoot = join(dir, "main");
+    const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, wtRoot),
+    });
+    const file = await store.load(conversationId);
+    await store.save({
+      id: conversationId,
+      file: { ...file, workspaceRoot: mainRoot },
+    });
+
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["turn-1"] })],
+      stateOverrides: { conversationId },
+    });
+    ctx.checkpointStore = store;
+    ctx.engineRoot = wtRoot;
+    ctx.rebuildDeps = async () => ({
+      deps: makeDeps([assistantResult({ texts: ["rebuilt"] })]),
+    });
+
+    await processChatLine({ line: "q", ctx });
+    assert.equal(ctx.engineRoot, mainRoot, "重建确实发生");
+    const segments = (await userTextsOf(ctx.state.messages)).filter((t) =>
+      t.includes("current write root")
+    );
+    assert.equal(
+      segments.length,
+      0,
+      "exit 回身份根不得注入写根段（文案会自相矛盾）"
+    );
+  });
 });
