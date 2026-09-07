@@ -99,6 +99,8 @@ import {
   lastTurnQueryIndex,
   orderedTurnActivitySegments,
   shouldCollapseTurnToolRows,
+  shouldShowRetractFold,
+  shouldShowThinkingFold,
   shouldShowTurnActivityFold,
   mergeToolUseCounts,
   sliceTurnFrom,
@@ -330,6 +332,10 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       liveCompletedCounts
     );
     const turnToolTotal = turnToolCounts.reduce((n, e) => n + e.count, 0);
+    // plans/tui-chrome-interaction.md T1:折叠按**已完成单元**判定,running
+    // 不再一刀切压制整轮折叠;具体行渲染由 per-segment 闸门承担。本变量
+    // 保留作为「当前 turn 折叠行是否启用」的 helper（只控 `foldDisplayLines`
+    // 与 tail 折叠判定,不再卡整轮 foldLinesBySegmentIndex 的计算入口）。
     const showTurnFold = shouldShowTurnActivityFold({
       running,
       turnToolTotal,
@@ -352,9 +358,13 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     })();
     const finalThinkingMs = thinkingMsAtVisible(lastAssistantMessageIndex);
     // 每簇独立的折叠行（思考秒数 = thinkingMs[anchorMsgs] 求和 → 秒）。
-    // 全轮生效（activitySegments 已覆盖全历史），running 态直接空（running 态）。
+    // plans T1:`if (showTurnFold)` 包裹删除 —— per-segment 闸门
+    // `shouldShowRetractFold` / `shouldShowThinkingFold` 与 running 解耦,
+    // 历史 retract folds 在 running turn 期间仍要渲染;整 turn 一律按
+    // 已完成单元判定。空 entries + 0 秒数 → `formatTurnActivityFold` 返
+    // 空数组,segMap 跳过写入,渲染层 fold 行天然不出。
     const foldLinesBySegmentIndex = new Map<number, ReadonlyArray<string>>();
-    if (showTurnFold) {
+    {
       const toolSegments = activitySegments.flatMap((segment, segmentIndex) =>
         segment.kind === "tools" ? [{ segment, segmentIndex }] : []
       );
@@ -382,6 +392,22 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           clusterMs = finalThinkingMs;
         }
         const clusterSeconds = thinkingMsToSeconds(clusterMs);
+        const segmentRetractTotal = entries.reduce((n, e) => n + e.count, 0);
+        // plans T1:per-segment 闸门与 running 解耦 —— retract 完成即入
+        // 折叠;thinkingMs 冻结即显示秒数。running 仅在 foldDisplayLines /
+        // tail 折叠判定等整-turn 决策点参与,不在此处压制。
+        if (
+          !shouldShowRetractFold({
+            running,
+            segmentRetractTotal,
+          }) &&
+          !shouldShowThinkingFold({
+            running,
+            hasThinkingMs: clusterSeconds > 0,
+          })
+        ) {
+          continue;
+        }
         const lines = formatTurnActivityFold(clusterSeconds, entries);
         if (lines.length > 0) {
           foldLinesBySegmentIndex.set(segmentIndex, lines);
@@ -391,6 +417,8 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       // 挂到最近的 text 段尾。thinking-fold-placement:扩展触发条件 —
       // final assistant 思考秒数(落盘 thinkingMs[final])在场时,即使无
       // live 已完成工具,也要把折叠行挂出,避免 final 的思考秒数丢失。
+      // plans T1:fallback 路径同样与 running 解耦 —— final 的 thinkingMs
+      // 冻结后,即便 turn 仍在 running,「思考了 N 秒」也要立刻可见。
       const fallbackTrigger =
         liveCompletedCounts.length > 0 || finalThinkingMs > 0;
       if (foldLinesBySegmentIndex.size === 0 && fallbackTrigger) {
@@ -399,20 +427,49 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           .reverse()
           .find(({ segment }) => segment.kind === "text");
         if (lastText !== undefined) {
-          // live 簇思考秒数 = last assistant message 落盘的 thinkingMs(若有);
-          // running 态已 short-circuit,此处只走 idle。
           const clusterMs = thinkingMsAtVisible(lastText.segment.messageIndex);
           const clusterSeconds = thinkingMsToSeconds(clusterMs);
-          const lines = formatTurnActivityFold(
-            clusterSeconds,
-            liveCompletedCounts
+          const fallbackRetractTotal = liveCompletedCounts.reduce(
+            (n, e) => n + e.count,
+            0
           );
-          if (lines.length > 0) {
-            foldLinesBySegmentIndex.set(lastText.segmentIndex, lines);
+          if (
+            !shouldShowRetractFold({
+              running,
+              segmentRetractTotal: fallbackRetractTotal,
+            }) &&
+            !shouldShowThinkingFold({
+              running,
+              hasThinkingMs: clusterSeconds > 0,
+            })
+          ) {
+            // 闸门拒绝 → 不写 fallback 行,保留空 foldLinesBySegmentIndex。
+          } else {
+            const lines = formatTurnActivityFold(
+              clusterSeconds,
+              liveCompletedCounts
+            );
+            if (lines.length > 0) {
+              foldLinesBySegmentIndex.set(lastText.segmentIndex, lines);
+            }
           }
         }
       }
     }
+    // plans T1:当前 turn 折叠行是否在场 —— 决定流式 thinking 面板是否
+    // 让位给折叠行。任一折叠行 anchor 落在 current turn slice 内(消息
+    // 下标 >= lastQueryVisible)即视为当前 turn 已有 fold 行,live 面板
+    // 隐藏；否则面板保留（让用户继续看思考过程）。
+    const currentTurnHasFold =
+      lastQueryVisible >= 0 &&
+      Array.from(foldLinesBySegmentIndex.keys()).some((segmentIndex) => {
+        const seg = activitySegments[segmentIndex];
+        return (
+          seg !== undefined &&
+          seg.kind === "tools" &&
+          seg.messageIndex >= lastQueryVisible
+        );
+      });
     // thinking-fold-placement:折叠行已展示的 thinkingMs 值集合（ms）—— 按
     // 折叠行文案 `思考了 N 秒` 反推;per-message ThinkingSummary 仅在该值
     // 未被任何 fold 行覆盖时显示,避免重复 / 串位（fold 行 0-多次）。
@@ -729,31 +786,41 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         {/* 流式 thinking 面板：跟在已返回的 live 正文 / 工具后面，而不是
             钉在 live 区顶部。思考 → 正文 时 stream-draft 会清 buffer 收起
             本面板；下一轮 thinking_delta 再出现在这段正文下面。
-            折叠态 = 静态 `思考中…` + 正文末 ≤3 行预览；展开态走 Markdown。 */}
-        {running && deferredThinkingDrafts.length > 0 && !showTurnFold && (
-          <box flexDirection="column" width={contentWidth}>
-            {thinkingExpanded ? (
-              <box width={contentWidth}>
-                <Markdown
-                  text={deferredThinkingDrafts}
-                  width={contentWidth}
-                  streaming
-                />
-              </box>
-            ) : (
-              <>
-                <text fg={pal.dim} wrapMode="none">
-                  {formatThinkingLive()}
-                </text>
-                {thinkingPeekLines(deferredThinkingDrafts).map((line, i) => (
-                  <text key={`think-peek-${i}`} fg={pal.dim} wrapMode="none">
-                    {line}
+            折叠态 = 静态 `思考中…` + 正文末 ≤3 行预览；展开态走 Markdown。
+            plans T1:`showTurnFold` 不再作为隐藏闸门 —— 历史 folds 在 running
+            期也会在场。改为「当前 turn 折叠行是否在场」(`currentTurnHasFold`)
+            才隐藏 live 面板：fold 行不存在 + draft 仍在流 → 面板保留;
+            current turn 已有折叠行 → 面板让位给折叠行。 */}
+        {running &&
+          deferredThinkingDrafts.length > 0 &&
+          !currentTurnHasFold &&
+          !shouldShowThinkingFold({
+            running,
+            hasThinkingMs: finalThinkingMs > 0,
+          }) && (
+            <box flexDirection="column" width={contentWidth}>
+              {thinkingExpanded ? (
+                <box width={contentWidth}>
+                  <Markdown
+                    text={deferredThinkingDrafts}
+                    width={contentWidth}
+                    streaming
+                  />
+                </box>
+              ) : (
+                <>
+                  <text fg={pal.dim} wrapMode="none">
+                    {formatThinkingLive()}
                   </text>
-                ))}
-              </>
-            )}
-          </box>
-        )}
+                  {thinkingPeekLines(deferredThinkingDrafts).map((line, i) => (
+                    <text key={`think-peek-${i}`} fg={pal.dim} wrapMode="none">
+                      {line}
+                    </text>
+                  ))}
+                </>
+              )}
+            </box>
+          )}
         {props.liveToolLines.length > 0 && (
           <box flexDirection="column" width={contentWidth}>
             {props.liveToolLines.map((line, i) => (

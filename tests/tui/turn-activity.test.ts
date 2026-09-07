@@ -450,16 +450,20 @@ describe("toolUseIdsOf / countNamedCalls / mergeToolUseCounts", () => {
 });
 
 describe("shouldShowTurnActivityFold / shouldCollapseTurnToolRows", () => {
-  // D3 (tui-display-consistency):`thinkingSeconds > 0 || turnToolTotal > 1`
-  // 旧闸门已删除 —— idle + 任意已完成工具都折叠;running 保持逐条可见。
-  test("running → 不画折叠行、不藏工具（running 闸保持）", () => {
+  // plans/tui-chrome-interaction.md T1:折叠按**已完成单元**判定。running
+  // 不再是整轮闸门 —— `shouldShowTurnActivityFold` 只决定当前 turn 折叠
+  // 行是否启用(`foldDisplayLines` / tail 折叠判定),不再压制整轮 fold
+  // 计算;per-segment 闸门 `shouldShowRetractFold` / `shouldShowThinkingFold`
+  // 各自与 running 解耦。`shouldCollapseTurnToolRows` 同样与 running
+  // 解耦:折叠行在场 + 有 retract → 藏 tail。
+  test("running + 有 retract → 当前 turn 折叠行启用(tail 也折叠)", () => {
     expect(
       shouldShowTurnActivityFold({
         running: true,
         turnToolTotal: 3,
       })
-    ).toBe(false);
-    expect(shouldCollapseTurnToolRows(true, 2, 3)).toBe(false);
+    ).toBe(true);
+    expect(shouldCollapseTurnToolRows(true, 2, 3)).toBe(true);
   });
 
   test("idle + 多工具 → 折叠（无思考秒数也折叠）", () => {
@@ -482,10 +486,19 @@ describe("shouldShowTurnActivityFold / shouldCollapseTurnToolRows", () => {
     expect(shouldCollapseTurnToolRows(false, 1, 1)).toBe(true);
   });
 
-  test("idle + 零工具 → 不折叠", () => {
+  test("idle + 零工具 → 不折叠（无 retract 不启用折叠行）", () => {
     expect(
       shouldShowTurnActivityFold({
         running: false,
+        turnToolTotal: 0,
+      })
+    ).toBe(false);
+  });
+
+  test("running + 零工具 → 折叠行不启用（plan T1:历史 folds 由 per-segment 闸门负责,本闸门只控当前 turn）", () => {
+    expect(
+      shouldShowTurnActivityFold({
+        running: true,
         turnToolTotal: 0,
       })
     ).toBe(false);

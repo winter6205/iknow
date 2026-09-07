@@ -306,23 +306,67 @@ export function thinkingMsToSeconds(ms: number): number {
 }
 
 /**
- * D3 (tui-display-consistency):折叠作用于每一轮历史。running 态保持逐条可见；
- * idle 且该簇已有已完成工具 → 折叠。`thinkingSeconds > 0 || turnToolTotal > 1`
- * 旧闸门已删除 —— 单工具、无秒数轮次也折叠。
+ * 思考秒数折叠行（`思考了 N 秒`）显示判定 —— plans/tui-chrome-interaction.md T1：
+ * running 态不阻止冻结的思考秒数渲染。fold by **completed unit**，不等整
+ * turn idle：live thinking 一旦结束（final commit 写入落盘 thinkingMs），
+ * 「思考了 N 秒」立刻可见，即便 tools 仍在 running。
+ *
+ * 不变式 = 决策只看 frozen thinkingMs（hasThinkingMs 派生自
+ * session.thinkingMs[anchor] > 0），与 running 解耦 —— running 只用于
+ * 渲染层决定是否同时显示 live thinking 面板，**不**用于压住已冻结行。
  */
-export function shouldShowTurnActivityFold(opts: {
+export function shouldShowThinkingFold(opts: {
   readonly running: boolean;
-  readonly turnToolTotal: number;
+  readonly hasThinkingMs: boolean;
 }): boolean {
-  if (opts.running) return false;
-  return opts.turnToolTotal > 0;
+  return opts.hasThinkingMs;
 }
 
-/** 折叠行在场且 idle 才藏逐条工具行；running 始终展开。 */
+/**
+ * retract 计数行（`read_file × N` 等）显示判定 —— 同 T1：retract 一旦
+ * 落定（live 已完成 或历史 tool_result 已配对），立刻进入折叠行，不等
+ * 整 turn idle；turn 仍在 running 也不阻止渲染。
+ */
+export function shouldShowRetractFold(opts: {
+  readonly running: boolean;
+  readonly segmentRetractTotal: number;
+}): boolean {
+  return opts.segmentRetractTotal > 0;
+}
+
+/**
+ * tail 折叠判定：折叠行在场 + 当前 turn 有 retract → 藏掉 tail 里已完成
+ * retract 行（避免 double-render）。running 不再是「保持展开」的硬理由：
+ * 一旦 retract 收成计数行,即便 turn 仍在 running,完成态 retract 不应
+ * 同时出现在 tail 与折叠行。
+ */
 export function shouldCollapseTurnToolRows(
   running: boolean,
   foldLineCount: number,
   turnToolTotal: number
 ): boolean {
-  return !running && foldLineCount > 0 && turnToolTotal > 0;
+  // running 参数保留以备未来扩展；当前折叠条件与 running 解耦（T1）。
+  void running;
+  return foldLineCount > 0 && turnToolTotal > 0;
+}
+
+/**
+ * 旧整-turn 闸门 —— plans/tui-chrome-interaction.md T1 删除：
+ *  - 不再一刀切按 running 压制整轮折叠（隐藏历史 retract folds）；
+ *  - 不再按 `turnToolTotal === 0` 一刀切（折叠按已完成单元判定）。
+ *
+ * 保留作为 helper：当前 turn 的 retract 行数 = 0 时整轮不渲染任何
+ * 当前-turn 折叠行（既无思考行又无计数行）。多簇历史折叠仍按 per-segment
+ * `shouldShowRetractFold` / `shouldShowThinkingFold` 各自判定，不受
+ * 本函数结果影响。
+ */
+export function shouldShowTurnActivityFold(opts: {
+  readonly running: boolean;
+  readonly turnToolTotal: number;
+}): boolean {
+  // 与 running 解耦：只要当前 turn 有 retract,折叠行就参与判定（具体
+  // 行渲染由 per-segment 闸门承担,本函数只决定「当前 turn 折叠行
+  // 是否启用」,即 `foldDisplayLines` 是否参与 tail 折叠判定）。
+  void opts.running;
+  return opts.turnToolTotal > 0;
 }
