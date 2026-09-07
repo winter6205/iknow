@@ -1031,12 +1031,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 状态：focus 越界 → 回 input（reducer 同款语义：subagent 环不可达）。
   // graph 焦点在 snapshot 消失时由上方 graphProgresses 的 nextGraph === null
   // 分支 setGraphChromeFocus("input") 兜底（T3 既有），此处不重复。
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (chromeFocus.kind !== "subagent") return;
-    if (chromeFocus.row < liveSubagentCount) return;
-    setChromeFocus({ kind: "input" });
-  }, [liveSubagentCount]);
   // #337 Phase C：skillCatalog 可选（缺省 = 空清单）；available() = 非 disabled
   // + 有 description、名字序。slash 候选混显「静态命令 + skill」。
   const skillCatalog = props.skillCatalog ?? emptySkillCatalog;
@@ -1086,6 +1080,18 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const liveSubagentCount = subagents.filter(
     (s) => s.state === "starting" || s.state === "running"
   ).length;
+  // plans T7：chrome-focus 焦点 clamp —— subagent 行数变化（live 子代理退出
+  // / 新增 / 完成窗口过期）时，chromeFocus.kind === "subagent" 的 row 可能
+  // 越界。Reducer 在 key press 时做 clamp，但本 effect 兜底无键位下的 stale
+  // 状态：focus 越界 → 回 input（reducer 同款语义：subagent 环不可达）。
+  // graph 焦点在 snapshot 消失时由上方 graphProgresses 的 nextGraph === null
+  // 分支 setGraphChromeFocus("input") 兜底（T3 既有），此处不重复。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (chromeFocus.kind !== "subagent") return;
+    if (chromeFocus.row < liveSubagentCount) return;
+    setChromeFocus({ kind: "input" });
+  }, [liveSubagentCount]);
 
   // ── 权限 modal 应答落点 ──────────────────────────────────────────
   function resolvePermissionAsk(
@@ -2190,6 +2196,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     // 三态 chromeFocus 取代的是 chrome 环间的 Down/Up 切换（input ↔
     // subagent(row) ↔ graph），由 reduceChromeFocus + PromptInput
     // onLeaveToChrome 接管（见下方）。
+    // 双 reducer 同步：三环 chromeFocus 进 graph 时，二态
+    // graphChromeFocus 必须跟着置 "graph"，否则 Enter 的 openView 判定
+    // 读到旧值（Tab 进 graph 环 → Enter 全屏打不开）。
+    if (chromeFocus.kind === "graph" && graphChromeFocus !== "graph") {
+      setGraphChromeFocus("graph");
+    }
     if (chromeFocus.kind === "graph") {
       if (graphKey.openView === true) {
         const ids =
