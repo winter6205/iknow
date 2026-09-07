@@ -198,10 +198,10 @@ describe("Task 2 — assistant fill off; user fill on", () => {
     await setup.renderer.destroy();
   });
 
-  test("PromptInput 输入框：share user 填充家族（border + userBg 底色）", async () => {
-    // T2：输入框 share user 填充家族（之前 border-only 是缺口）。直接渲染
-    // PromptInput（需 focused 启 keypress），断言内部 textarea 文本 span
-    // 背景 = userBg。
+  test("PromptInput 输入框：border-only，无底色（T2 修订：填充留给已提交消息）", async () => {
+    // T2 修订（operator 反馈 2026-09-07）：输入框不涂底色 —— 与 transcript
+    // 的视觉分层靠 border 已足够；填充家族只属于已提交消息气泡。断言内部
+    // textarea 文本 span 背景为终端默认（transparent）。
     const ref = createRef<{ insertText: (t: string) => void }>();
     const setup = await testRender(
       <PromptInput
@@ -218,14 +218,10 @@ describe("Task 2 — assistant fill off; user fill on", () => {
     const frame = setup.captureCharFrame();
     // 文本可见
     expect(frame).toContain("输入一些字");
-    // textarea 渲染的 span 背景 = userBg（输入框 share user 填充家族）
+    // textarea 渲染的 span 背景 = 终端默认（transparent，无填充）
     const bg = bgOfSpanWith(setup, "输入一些字");
     expect(bg).toBeDefined();
-    expect(isTransparent(bg!)).toBe(false);
-    const expected = RGBA.fromHex(tuiPalette.userBg);
-    expect(bg!.r).toBe(expected.r);
-    expect(bg!.g).toBe(expected.g);
-    expect(bg!.b).toBe(expected.b);
+    expect(isTransparent(bg!)).toBe(true);
     await setup.renderer.destroy();
   });
 
