@@ -39,6 +39,14 @@ const defaultFs: SkillBodyFs = {
 export interface SkillBodyOptions {
   readonly entry: SkillEntry;
   readonly dir: string;
+  /**
+   * 活 `taskRoot`（写根）快照。非空 → 正文末尾（`</skill_files>` 之后）追加
+   * 与子代理 prior 同一 helper 的写根段（specs/skill-load-write-root.md）；
+   * 缺席 / 空白 → 无 trailer（与 337 SC6 现形态逐字节一致）。生产调用方
+   * （TUI slash / hub loadSkillBody / ACI skill 工具）必须在调用时机读活
+   * cell 传入，不得传装配期冻结值。
+   */
+  readonly taskRoot?: string;
   readonly fs?: SkillBodyFs;
 }
 
@@ -123,8 +131,23 @@ export function stripFrontmatter(raw: string): string {
 }
 
 /**
- * 装配 skill 正文（frontmatter 剥离 + Base directory 行 + `<skill_files>` 段）。
- * 同输入两次调用字符串相等（KV 缓存契约）。
+ * 「当前写根」段文案 SSOT —— skill 正文 trailer 与子代理 worker prior
+ * （`priorMessagesFromEnvelope`）共用同一份字节。spec
+ * skill-load-write-root.md：两处各写一套长句会漂移，故文案只有本函数。
+ * 传入根为空 / 空白 → 返回 null（调用方不注入任何段）。
+ */
+export function writeRootSegment(taskRoot: string): string | null {
+  const root = taskRoot.trim();
+  if (root.length === 0) return null;
+  return (
+    `current write root (for write_file / edit_file / bash cwd): ${root}\n` +
+    `System ## Project path is still the project identity root and is read-only; the write root above is where file mutations should land. Use relative paths from this root.`
+  );
+}
+
+/**
+ * 装配 skill 正文（frontmatter 剥离 + Base directory 行 + `<skill_files>` 段
+ * + 可选写根 trailer）。同输入两次调用字符串相等（KV 缓存契约）。
  */
 export async function createSkillBody(
   options: SkillBodyOptions
@@ -140,6 +163,9 @@ export async function createSkillBody(
   if (body.length > 0) segments.push(body);
   segments.push(`Base directory: ${dir}`);
   segments.push(skillsSegment);
+  const writeRoot =
+    options.taskRoot !== undefined ? writeRootSegment(options.taskRoot) : null;
+  if (writeRoot !== null) segments.push(writeRoot);
   return segments.join("\n\n");
 }
 

@@ -39,6 +39,7 @@ import type {
 } from "../../src/harness/memory/index.ts";
 import { assistantResult, makeCtx, makeDeps } from "./_fixtures.ts";
 import { captureStderrOf } from "../_helpers/capture-stderr.ts";
+import { writeRootSegment } from "../../src/harness/skill/body.ts";
 
 const roots: string[] = [];
 
@@ -731,5 +732,184 @@ describe("T6 — chat stable productRoot threading (worktree-mcp-rebind-lifecycl
     // round 4 起 wrapper 不手写白名单，改为 rest 整体透传（手写白名单只关住
     // 「宿主写了接口没声明的字段」一个方向，反方向漏接编译全绿）。
     expect(src).toMatch(/withoutUndefined\(passthrough\)/);
+  });
+});
+
+// 写根 trailer（specs/skill-load-write-root.md T5）：改绑成功后主会话在
+// 下一次查询行给模型再给一次写根段（writeRootSegment 同一文案），仅一次；
+// 未改绑不多段；重建失败不注入。文案不进 system / env_snapshot。
+describe("rebind 后主会话写根段（specs/skill-load-write-root.md T5）", () => {
+  async function userTextsOf(
+    messages: ReadonlyArray<{
+      role: string;
+      content: ReadonlyArray<{ type: string; text?: string }>;
+    }>
+  ): Promise<string[]> {
+    return messages.flatMap((m) =>
+      m.role === "user"
+        ? m.content
+            .filter(
+              (b): b is { type: "text"; text: string } =>
+                b.type === "text" && typeof b.text === "string"
+            )
+            .map((b) => b.text)
+        : []
+    );
+  }
+
+  const WRT_MARK =
+    "current write root (for write_file / edit_file / bash cwd):";
+
+  it("改绑成功 → 下一次查询行 messages 出现一次 writeRootSegment 文案；再下一行不再有", async () => {
+    const dir = makeStoreDir();
+    const store = new SessionStore(dir);
+    const conversationId = "conv-wrt";
+    const mainRoot = join(dir, "main");
+    const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, mainRoot),
+    });
+    const file = await store.load(conversationId);
+    await store.save({
+      id: conversationId,
+      file: { ...file, workspaceRoot: wtRoot },
+    });
+
+    const ctx = makeCtx({
+      responses: [
+        assistantResult({ texts: ["turn-1"] }),
+        assistantResult({ texts: ["turn-2"] }),
+      ],
+      stateOverrides: { conversationId },
+    });
+    ctx.checkpointStore = store;
+    ctx.engineRoot = mainRoot;
+    ctx.rebuildDeps = async () => ({
+      deps: makeDeps([assistantResult({ texts: ["rebuilt"] })]),
+    });
+
+    await processChatLine({ line: "q1", ctx });
+    // turn-1 后 result.messages 进 ctx.state.messages —— 模型看见的面上
+    // 必须出现一次写根段（文案与 writeRootSegment helper 字节一致）。
+    const segments1 = (await userTextsOf(ctx.state.messages)).filter((t) =>
+      t.includes(WRT_MARK)
+    );
+    assert.equal(segments1.length, 1, "改绑后第一次查询行恰好注入一次");
+    assert.equal(
+      segments1[0],
+      writeRootSegment(wtRoot),
+      "文案必须与 writeRootSegment helper 字节一致"
+    );
+
+    // 第二行不再注入（非每条用户消息）。
+    await processChatLine({ line: "q2", ctx });
+    const segments2 = (await userTextsOf(ctx.state.messages)).filter((t) =>
+      t.includes(WRT_MARK)
+    );
+    assert.equal(segments2.length, 1, "仍只有 rebind 后那一次");
+  });
+
+  it("根未变化 → 不注入写根段（未改绑不多段）", async () => {
+    const dir = makeStoreDir();
+    const store = new SessionStore(dir);
+    const conversationId = "conv-wrt-norebind";
+    const mainRoot = join(dir, "main");
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, mainRoot),
+    });
+
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["turn-1"] })],
+      stateOverrides: { conversationId },
+    });
+    ctx.checkpointStore = store;
+    ctx.engineRoot = mainRoot;
+    ctx.rebuildDeps = async () => ({ deps: makeDeps([]) });
+
+    await processChatLine({ line: "q", ctx });
+    const segments = (await userTextsOf(ctx.state.messages)).filter((t) =>
+      t.includes("current write root")
+    );
+    assert.equal(segments.length, 0, "未改绑不得出现写根段");
+  });
+
+  it("重建失败 → 可见降级且不注入写根段（改绑失败不插入）", async () => {
+    const dir = makeStoreDir();
+    const store = new SessionStore(dir);
+    const conversationId = "conv-wrt-fail";
+    const mainRoot = join(dir, "main");
+    const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, mainRoot),
+    });
+    const file = await store.load(conversationId);
+    await store.save({
+      id: conversationId,
+      file: { ...file, workspaceRoot: wtRoot },
+    });
+
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["turn-1"] })],
+      stateOverrides: { conversationId },
+    });
+    ctx.checkpointStore = store;
+    ctx.engineRoot = mainRoot;
+    ctx.rebuildDeps = async () => {
+      throw new Error("boom");
+    };
+
+    const { captureStderrOf } = await import("../_helpers/capture-stderr.ts");
+    await captureStderrOf(async () => {
+      await processChatLine({ line: "q", ctx });
+    });
+    const segments = (await userTextsOf(ctx.state.messages)).filter((t) =>
+      t.includes("current write root")
+    );
+    assert.equal(segments.length, 0, "重建失败不得注入写根段");
+  });
+
+  it("exit-task-worktree 回主仓（活写根 = 身份根）→ 不注入写根段（spec 合同 7：仅当写根 ≠ 身份根）", async () => {
+    // 会话已在 task worktree（engineRoot = wtRoot），上一回合 /exit 把
+    // workspaceRoot 改绑回主仓 → 重建触发。此时 newRoot = mainRoot =
+    // mainCheckoutOf(newRoot)，注入的写根文案会与「Project path 只读」
+    // 自相矛盾 → 必须不置入。
+    const dir = makeStoreDir();
+    const store = new SessionStore(dir);
+    const conversationId = "conv-wrt-exit";
+    const mainRoot = join(dir, "main");
+    const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, wtRoot),
+    });
+    const file = await store.load(conversationId);
+    await store.save({
+      id: conversationId,
+      file: { ...file, workspaceRoot: mainRoot },
+    });
+
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["turn-1"] })],
+      stateOverrides: { conversationId },
+    });
+    ctx.checkpointStore = store;
+    ctx.engineRoot = wtRoot;
+    ctx.rebuildDeps = async () => ({
+      deps: makeDeps([assistantResult({ texts: ["rebuilt"] })]),
+    });
+
+    await processChatLine({ line: "q", ctx });
+    assert.equal(ctx.engineRoot, mainRoot, "重建确实发生");
+    const segments = (await userTextsOf(ctx.state.messages)).filter((t) =>
+      t.includes("current write root")
+    );
+    assert.equal(
+      segments.length,
+      0,
+      "exit 回身份根不得注入写根段（文案会自相矛盾）"
+    );
   });
 });

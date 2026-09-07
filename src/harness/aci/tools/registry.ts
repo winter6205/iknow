@@ -611,7 +611,16 @@ export function createDefaultAciRegistry(
     // 检索）。
     ...(skillCatalog
       ? {
-          skill: () => createSkillTool({ catalog: skillCatalog }),
+          skill: () =>
+            createSkillTool({
+              catalog: skillCatalog,
+              // 写根 trailer（specs/skill-load-write-root.md）：透传活
+              // taskRoot cell，handler 调用时机读快照 —— 与 bash/read_file
+              // 的 liveTaskRoot 透传同形态；缺席 → 无 trailer。
+              ...(opts.liveTaskRoot !== undefined
+                ? { liveTaskRoot: opts.liveTaskRoot }
+                : {}),
+            }),
         }
       : {}),
     // #356 T4 spawn_subagent 工具集（条件化装配：subagentManager 缺席时

@@ -114,6 +114,7 @@ import { homedir } from "node:os";
 import { resolveSessionTodoDir } from "../harness/aci/tools/todo-write.js";
 import type { AciCatalog } from "../harness/aci/types.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
+import type { LiveTaskRoot } from "../harness/session-roots.js";
 import { createSkillBody, exceedsUserInputCap } from "../harness/skill/body.js";
 import type { McpManager } from "../harness/mcp/manager.js";
 import { loadMcpConfig } from "../harness/mcp/config.js";
@@ -751,6 +752,8 @@ export class SessionHub {
   private cachedShutdown: (() => Promise<void>) | undefined;
   /** TUI TuiExtensions 同源：lazy ensureDeps 后才有；deps 注入测试路径保持缺席。 */
   private skillCatalog: SkillCatalog | undefined;
+  /** 活 taskRoot cell（specs/skill-load-write-root.md）：loadSkillBody 调用时机读快照。 */
+  private liveTaskRoot: LiveTaskRoot | undefined;
   private mcpManager: McpManager | undefined;
   private aciCatalog: AciCatalog | undefined;
   private mcpHome: string | undefined;
@@ -2261,7 +2264,16 @@ export class SessionHub {
     if (entry === undefined || entry.disabled) {
       throw new NotFoundError(`skill not found: ${name}`);
     }
-    const body = await createSkillBody({ entry, dir: entry.dir });
+    // 写根 trailer（specs/skill-load-write-root.md）：调用时机读活 cell 快照
+    // —— 与 ACI skill() 工具 / TUI slash 同一装配口。cell 缺席（注入 deps
+    // 形态）→ 无 trailer（legacy parity）。
+    const body = await createSkillBody({
+      entry,
+      dir: entry.dir,
+      ...(this.liveTaskRoot !== undefined
+        ? { taskRoot: this.liveTaskRoot.read() }
+        : {}),
+    });
     return { name: entry.name, body };
   }
 
@@ -2861,6 +2873,7 @@ export class SessionHub {
         : {}),
     });
     this.skillCatalog = built.skillCatalog;
+    this.liveTaskRoot = built.liveTaskRoot;
     this.mcpHome = homedir();
     // T7:mcpManager / catalog / mcpRoots 由 getOrBuildEngine → activateMcpFace
     // 统一切换，避免此处抢先覆盖导致旧 manager 未收口。
@@ -2993,6 +3006,7 @@ export class SessionHub {
     // D-α T3:单引擎（未 bind 根）路径的活跃快照。
     this.activeGraphAssembly = built.graphAssembly;
     this.skillCatalog = built.skillCatalog;
+    this.liveTaskRoot = built.liveTaskRoot;
     this.mcpHome = homedir();
     await this.activateMcpFace({
       ...(built.mcpManager ? { mcpManager: built.mcpManager } : {}),

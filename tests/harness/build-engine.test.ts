@@ -1589,10 +1589,10 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
 
 // --------------------------------------------------------------------------
 // T4 (plans/worktree-live-task-root.md §6 T4) — build-engine wires the live
-// taskRoot holder + single writer at the host seam boundary. Zero behavior
-// change in T4: no consumer reads the cell yet, so all this bullet proves
-// is that the wrap is installed (the seam is wrapped, BuiltEngine exposes
-// no second root authority, and stable roots stay frozen).
+// taskRoot holder + single writer at the host seam boundary. T4 初期无消费
+// 方；specs/skill-load-write-root.md 起 BuiltEngine 透出该 cell（skill 正文
+// trailer 消费），单一根权威不变式随之演进为「透出的就是 registry / hub
+// 消费的同一 cell 实例」——不存在第二份根持有者，stable roots 仍冻结。
 // --------------------------------------------------------------------------
 
 describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", () => {
@@ -1616,9 +1616,11 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
       // productRoot / projectIdentityRoot / installRoot unchanged from T3.
       expect(built.sessionRoots.taskRoot).toBe(root);
       expect(built.sessionRoots.productRoot).not.toBe("");
-      // No second root authority — BuiltEngine does not expose liveTaskRoot
-      // (or any equivalent live holder). Hub has no path to read the cell.
-      expect("liveTaskRoot" in built).toBe(false);
+      // 单一根权威（specs/skill-load-write-root.md）：BuiltEngine 透出的
+      // liveTaskRoot 就是 registry / hub 消费的那个 cell——不存在第二份
+      // 根持有者。OFF 档 cell 初值 = taskRoot，同样在场。
+      expect("liveTaskRoot" in built).toBe(true);
+      expect(built.liveTaskRoot?.read()).toBe(root);
       await built.shutdown?.();
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -1654,11 +1656,10 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
       expect(built.sessionRoots.productRoot).not.toBe("");
       expect(built.sessionRoots.projectIdentityRoot).not.toBe("");
       expect(built.sessionRoots.installRoot).not.toBe("");
-      // (d) No second root authority — BuiltEngine does not expose the
-      //     live cell. Hub can only observe roots through the existing
-      //     BuiltEngine.sessionRoots / provision return values.
-      expect("liveTaskRoot" in built).toBe(false);
-      expect(Object.keys(built)).not.toContain("liveTaskRoot");
+      // (d) 单一根权威（specs/skill-load-write-root.md）：透出的 liveTaskRoot
+      //     是唯一 cell 实例（registry 工厂 / hub 读同一份），不是第二根权威；
+      //     此时 cell 初值仍 = 初始 taskRoot（seam 未被调用）。
+      expect(built.liveTaskRoot?.read()).toBe(root);
       // (e) Seam is not invoked at build time (the gate only calls
       //     provision when an engine is rooted at a task-worktree-shaped
       //     path; `root` here is the main repo, not a worktree).
@@ -1700,12 +1701,9 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
       });
       // sessionRoots surface unchanged (Hub reads from this, not the cell).
       expect(built.sessionRoots.taskRoot).toBe(root);
-      // No second root authority.
-      expect("liveTaskRoot" in built).toBe(false);
-      // The cell is dormant — no consumer reads it in T4 — so even if the
-      // seam threw, the cell would still hold its initial value (the wrap
-      // would not have written). The structural invariant (Hub-only-observes-
-      // returned-root) is preserved by NOT exposing the cell on BuiltEngine.
+      // 单一根权威（specs/skill-load-write-root.md）：cell 透出但 seam 从未被
+      // 调用 → 仍持初值；typed throw 不写 cell（withLiveTaskRootWrite 契约）。
+      expect(built.liveTaskRoot?.read()).toBe(root);
 
       await built.shutdown?.();
     } finally {
