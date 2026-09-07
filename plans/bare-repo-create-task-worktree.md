@@ -31,20 +31,20 @@ minimal-change-verifier: yes — 一件逻辑事（bare/usable gitdir 可建树�
    - **Inherits:** ADR-0037 §6：「主仓不是 git 仓库 / git 不可用 / 创建工作树 ACI 工具失败：mutate 一律被拦下并给出 typed、非空、可见的错误，不静默放行写主仓。」CONTEXT `worktree isolation mode`：建树失败与主仓非 git 仓库 fail-closed。
    - **Surface:** `docs/adr/` 既有 ADR-0037（amendment，不新开编号）
    - **Acceptance:** amendment 写清：`not_a_git_repo` 仅当该根没有可用 gitdir（`rev-parse --git-common-dir` 或等价探测失败）；bare gitdir 与 `core.bare=true` 但仍能 `git worktree add` 的检出是可用仓；空目录 / 非 git 仍 `not_a_git_repo`；git 二进制 spawn 失败仍 `git_unavailable`。本 commit 不改运行时代码。
-   - Status: [ ] pending
+   - Status: [x] done
 
 2. **建树前探针与门禁单测对齐合同** — tag: `[implementation]`
    - **Inherits:** T1 的可用 gitdir 合同；`createTaskWorktree` 既有后续 EXIT（`branch_exists` / `worktree_exists` / `worktree_add_failed`）；主仓 HEAD 与当前分支不被 `-b` 拖动（既有硬要求）。
    - **Surface:** harness isolation（建树函数与其测试）
    - **Acceptance:** 无 git 的普通目录仍 `not_a_git_repo` 且零写入；有至少一次 commit 的 bare gitdir，以及 `core.bare=true` 且工作文件在该根的检出，`createTaskWorktree` 成功、新树可检出文件、来源仓 HEAD 不变；无 commit 的空 bare 为 `worktree_add_failed` 而非 `not_a_git_repo`。守卫命令：`npx vitest run tests/harness/isolation/worktree-gate.test.ts`。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T1]
 
 3. **hub provision 在同一布局下能改绑** — tag: `[implementation]`
    - **Inherits:** T1；ADR-0037 §1 / spec 条款 6–8：工具成功 = 树在且本会话已 rebind；当波被拦的写不执行；失败不改会话根。`specs/task-worktree-lifecycle.md` Success 所用命令包含 `tests/session-api/hub-worktree-isolation.test.ts`。
    - **Surface:** session-api hub 的 worktree provision 缝（不改 ACI 工具形状）
    - **Acceptance:** isolation ON 时，在 T2 那两类可用仓上 `provisionWorktree` 成功、会话根改到本会话 task worktree；对普通非 git 目录仍 `not_a_git_repo` 且会话 `workspaceRoot` 不变。守卫命令：`npx vitest run tests/session-api/hub-worktree-isolation.test.ts`。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T2]
 
 ## Out of scope
