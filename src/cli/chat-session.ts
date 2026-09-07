@@ -106,7 +106,10 @@ import {
   shouldTriggerContinueFromNl,
 } from "../session-api/continue-pending.js";
 import { MAX_MESSAGE_CHARS } from "../session-api/contract.js";
-import { exceedsUserInputCap } from "../harness/skill/body.js";
+import {
+  exceedsUserInputCap,
+  writeRootSegment,
+} from "../harness/skill/body.js";
 import { randomUUID } from "node:crypto";
 
 /** Visual separator after a completed answer on TTY only. */
@@ -253,6 +256,13 @@ export type ChatLineContext = {
    * before it shuts down, awaiting delivery in the next primary-model run.
    */
   pendingSubagentDrain?: string;
+  /**
+   * 一次性写根段（specs/skill-load-write-root.md T5）：rebind 重建成功后由
+   * refreshChatDepsForRebind 置入（writeRootSegment 文案），下一次查询行 /
+   * subagent wake 组 priorMessages 时拼到末尾并清空。仅改绑后一次，非每条
+   * 用户消息；不进 system / env_snapshot。
+   */
+  pendingWriteRootNotice?: string;
   /**
    * Interactive host hook used to resubscribe wake delivery after a rebind
    * replaces the manager. Non-interactive callers leave it unset.
@@ -433,6 +443,10 @@ export async function refreshChatDepsForRebind(
       }\n`
     );
   }
+  // 写根段（specs/skill-load-write-root.md T5）：改绑成功 → 下一次主模型
+  // run 再给一次当前写根（与 worker prior / skill trailer 同一 helper 文案）。
+  // 仅在重建成功走到这里时置入 —— 重建失败 / 根未变化的提前 return 不经过。
+  ctx.pendingWriteRootNotice = writeRootSegment(newRoot) ?? undefined;
 }
 
 type ChatSubagentDrain = {
@@ -1044,20 +1058,29 @@ async function runChatQueryLine(
         // user message,拼入本次 run 的 priorMessages 末尾。空 manager / 无
         // completed → priorMessages 不变 (行为零变化)。
         const pendingDrain = await collectChatSubagentDrain(ctx);
-        const priorMessages = pendingDrain.text
-          ? Object.freeze([
-              ...ctx.state.messages,
-              Object.freeze({
-                role: "user" as const,
-                content: Object.freeze([
-                  Object.freeze({
-                    type: "text" as const,
-                    text: pendingDrain.text,
-                  }),
-                ]),
-              }),
-            ])
-          : ctx.state.messages;
+        // 写根段（specs/skill-load-write-root.md T5）：rebind 后一次性
+        // 注入，拼在 drain 之后（若有），消费即清空。
+        const writeRootNotice = ctx.pendingWriteRootNotice;
+        if (writeRootNotice !== undefined) {
+          ctx.pendingWriteRootNotice = undefined;
+        }
+        const tailTexts = [pendingDrain.text, writeRootNotice].filter(
+          (value): value is string => value !== undefined && value.length > 0
+        );
+        const priorMessages =
+          tailTexts.length > 0
+            ? Object.freeze([
+                ...ctx.state.messages,
+                Object.freeze({
+                  role: "user" as const,
+                  content: Object.freeze(
+                    tailTexts.map((text) =>
+                      Object.freeze({ type: "text" as const, text })
+                    )
+                  ),
+                }),
+              ])
+            : ctx.state.messages;
         // #128 T8:verifyConfig 非 undefined (含 command 空串) 时 run 被
         // runVerifyLoop 包裹 (advisor 形态, 引擎零改动);缺席 → 原 runHarness
         // 调用逐字节不变 (仅未接线路径)。runVerifyLoop 的 runFn 透传 onStream →
