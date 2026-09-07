@@ -22,7 +22,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { gitIn } from "../_helpers/git-env.ts";
 
 import {
   McpLifecycleError,
@@ -675,7 +675,9 @@ describe("T8 matrix — hub reload seams (negative + exception)", () => {
   let store: SessionStore;
 
   function git(cwd: string, ...args: string[]): string {
-    return execFileSync("git", args, { cwd, encoding: "utf8" });
+    // gitTestEnv 免疫：push hook 注入的 GIT_DIR 等会让临时 repo 的 commit 钉到
+    // 父仓库（幽灵失败，见 tests/_helpers/git-env.ts 头注）。
+    return gitIn(cwd, args);
   }
 
   function makeGitRepo(): string {
