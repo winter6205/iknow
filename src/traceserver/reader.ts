@@ -82,13 +82,9 @@ function readLinesFrom(
   startOffset: number,
   contains?: string
 ): RawLines {
-  let size: number;
-  try {
-    size = statSync(filePath).size;
-  } catch (err) {
-    if (isEnoent(err)) return { lines: [], nextOffset: 0, truncated: false };
-    throw wrapIoError(err);
-  }
+  // ENOENT 判定收敛在 statSize: 不存在的文件 → size=0，走下方空段分支
+  // (轮询静默，与本函数既有的静默降级语义一致)。
+  const size = statSize(filePath);
   if (startOffset > size) {
     // 文件被替换 (resumeOffset 落在新文件之外) → 召回，从文件头重读。
     // startOffset > 0 且 > size 才能判定替换；若 startOffset === 0 则本就在
@@ -113,7 +109,9 @@ function readLinesFrom(
     throw wrapIoError(err);
   }
   const raw = splitLines(buf.toString("utf8"), startOffset, truncated);
-  if (contains === undefined) return raw;
+  // 空串 contains 视为未提供 (includes("") 恒真等于无过滤，却会错误绕过
+  // 现状帽) — 「空串 = 未提供」在此层与 query-trace-core 的校验层同义。
+  if (!contains) return raw;
   return { ...raw, lines: raw.lines.filter((line) => line.includes(contains)) };
 }
 
@@ -295,6 +293,9 @@ export function createJsonlTraceReader(
       // 搜索结果 (与本参数要解决的问题同形)。未提供时行为完全不变 (走
       // `maxBytes`, 即 8 MiB 默认)。
       if (query.contains !== undefined) {
+        // 预检与读窗用同一上限 (containsMaxBytes): 读窗若取 max(contains, max)
+        // 反而制造两个上限互相矛盾 — containsMaxBytes < maxBytes 时读窗更大
+        // 却仍按 containsMaxBytes 拒查。
         const size = statSize(filePath);
         if (size > containsMaxBytes) {
           throw new TraceReadError(
@@ -304,7 +305,7 @@ export function createJsonlTraceReader(
         }
         const raw = readLinesFrom(
           filePath,
-          Math.max(containsMaxBytes, maxBytes),
+          containsMaxBytes,
           startOffset,
           query.contains
         );
