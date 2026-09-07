@@ -1181,6 +1181,110 @@ describe("workspace-root-required T3 — Hub dirty-root conditional save", () =>
     });
     expect((await store.load(conversationId)).workspaceRoot).toBe(reboundRoot);
   });
+
+  // ADR-0037 §6 amendment 2026-09-07 (plans/bare-repo-create-task-worktree.md):
+  // the two usable-repo layouts — a bare gitdir with commits, and a
+  // core.bare=true checkout holding the working files — must provision +
+  // rebind through the hub exactly like a normal repo. The not_a_git_repo
+  // kind is reserved for roots with NO gitdir (plain directory, asserted
+  // above) and must never fire on a bare layout.
+  it("provisions and rebinds on a bare gitdir with at least one commit (usable gitdir, not not_a_git_repo)", async () => {
+    await setSettingsIsolation(true);
+    const parent = mkdtempSync(join(tmpdir(), "iknow-wt-hub-bare-"));
+    roots.push(parent);
+    const bare = join(parent, "repo.git");
+    git(parent, "init", "-q", "--bare", bare);
+    // seed one commit so `worktree add -b` has a HEAD to branch from
+    const seed = mkdtempSync(join(tmpdir(), "iknow-wt-hub-seed-"));
+    roots.push(seed);
+    git(seed, "init", "-q");
+    git(seed, "remote", "add", "origin", bare);
+    git(
+      seed,
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "--allow-empty",
+      "-qm",
+      "init"
+    );
+    git(seed, "push", "-q", "origin", "HEAD");
+
+    const { hub, conversationId } = await makeHubWithSession(bare);
+    const reboundRoot = await privateHub(hub).provisionWorktree({
+      conversationId,
+      root: bare,
+    });
+
+    expect(reboundRoot).toBe(join(bare, ".iknow", "worktrees", conversationId));
+    expect(existsSync(reboundRoot)).toBe(true);
+    expect(git(reboundRoot, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
+      `iknow/task-${conversationId}`
+    );
+    // the bare repo itself is untouched: HEAD unmoved, still core.bare
+    expect(git(bare, "config", "--get", "core.bare").trim()).toBe("true");
+
+    // the rebind persists through the hub's dirty-root conditional save
+    const session = await store.load(conversationId);
+    await privateHub(hub).conditionalSave({
+      conversationId,
+      session,
+      result: completedResult(session.messages),
+      priorMessages: session.messages,
+    });
+    expect((await store.load(conversationId)).workspaceRoot).toBe(reboundRoot);
+
+    // next turn's mutate lands in the new tree; the bare repo stays zero-write
+    // (zero-write here = the worktree registration + the task branch; a bare
+    // gitdir has no work tree, so `status --porcelain` is not applicable)
+    const nextDeps = await ensure(hub, reboundRoot);
+    const result = await runMutate(nextDeps, conversationId);
+    expect(result.kind).toBe("ok");
+    expect(existsSync(join(reboundRoot, "hello.txt"))).toBe(true);
+    expect(git(bare, "worktree", "list").trim().split("\n").length).toBe(2); // bare + one task tree
+    // the task branch is the only ADDED ref (the seed's master also exists)
+    expect(
+      git(bare, "for-each-ref", `refs/heads/iknow/task-${conversationId}`)
+    ).toContain(`refs/heads/iknow/task-${conversationId}`);
+  });
+
+  it("provisions and rebinds on a core.bare=true checkout whose root also holds the working files", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    git(repo, "config", "core.bare", "true");
+    expect(git(repo, "rev-parse", "--is-inside-work-tree").trim()).toBe(
+      "false"
+    );
+    const headBefore = git(repo, "rev-parse", "HEAD").trim();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+
+    const reboundRoot = await privateHub(hub).provisionWorktree({
+      conversationId,
+      root: repo,
+    });
+
+    expect(reboundRoot).toBe(join(repo, ".iknow", "worktrees", conversationId));
+    expect(git(reboundRoot, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
+      `iknow/task-${conversationId}`
+    );
+    // the operator's core.bare is never flipped by provisioning
+    expect(git(repo, "config", "--get", "core.bare").trim()).toBe("true");
+
+    await persistDirtyRoot(hub, conversationId);
+    expect((await store.load(conversationId)).workspaceRoot).toBe(reboundRoot);
+
+    // next turn's mutate lands in the new tree; the main root stays zero-write.
+    // core.bare=true ⇒ `status --porcelain` refuses to run in this checkout,
+    // so zero-write is asserted by HEAD invariance + the absence of hello.txt.
+    const nextDeps = await ensure(hub, reboundRoot);
+    const result = await runMutate(nextDeps, conversationId);
+    expect(result.kind).toBe("ok");
+    expect(existsSync(join(reboundRoot, "hello.txt"))).toBe(true);
+    expect(existsSync(join(repo, "hello.txt"))).toBe(false);
+    expect(git(repo, "rev-parse", "HEAD").trim()).toBe(headBefore);
+  });
 });
 
 // -- T4: create-task-worktree ACI tool (model-facing provision entry) ---------

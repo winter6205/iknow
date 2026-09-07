@@ -379,8 +379,8 @@ describe("createTaskWorktreeProvisioner", () => {
         if (args[0] === "worktree") {
           return { code: 128, stdout: "", stderr: "fatal: disk full" };
         }
-        if (args[1] === "--is-inside-work-tree") {
-          return { code: 0, stdout: "true\n", stderr: "" };
+        if (args[1] === "--git-common-dir") {
+          return { code: 0, stdout: ".git\n", stderr: "" };
         }
         // branch verify probe: branch does not exist
         return { code: 1, stdout: "", stderr: "" };
