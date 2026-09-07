@@ -12,6 +12,9 @@
  *     零 spawn。装配层已按快照把工具从 promptTools 里滤掉，这里是第二道闸。
  *   - 拓扑非法（环 / 自依赖 / 未知依赖 / 重复 id）→ `ToolExecutionError`，
  *     同样零 spawn —— 校验在任何 `manager.spawn` 之前跑完。
+ *   - live-graph-phase2 T3：带失败边的图里同一 id 第 9 次 executor 进入 →
+ *     effort 熔断（`effort-fuse.ts`，spec SC7 / ADR-0057 / 0064），已 done
+ *     先冻结，整次调用 typed 拒 —— 与 mid-run violation 同一通道。
  *
  * 节点级失败不是异常而是数据：失败节点的下游被 `runGraph` 标 skipped，独立
  * 分支照跑，最终以浓缩结果整体返回，让父代理自己决定怎么收尾。
@@ -31,6 +34,8 @@ import { createSubAgentNodeExecutor } from "./node-executor.js";
 import type { LiveGraphLedger, LiveGraphLedgerHost } from "./ledger.js";
 import { resolveResidualSubgraph } from "./residual.js";
 import { validateOnFailureEdges } from "./on-failure.js";
+import { createEffortFuse } from "./effort-fuse.js";
+import { EFFORT_FUSE_THRESHOLD } from "./effort-threshold.js";
 import type {
   GraphExecution,
   GraphNodeResult,
@@ -451,6 +456,9 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
       const byId = new Map(nodes.map((n) => [n.id, n]));
       const signal = ctx?.signal;
       const parentTurnId = ctx?.turnId;
+      // T3:effort 熔断只在失败边调度线装(spec SC7 / ADR-0057 / 0064)。
+      // plain Kahn 路径(阶段 1)每 id 至多进入一次,无需计数(SC9)。
+      const fuse = hasFailureEdges ? createEffortFuse() : undefined;
       // 每节点现装一次 executor:task 文本要带上该节点 deps 的产出,而
       // NodePlan 是静态的 —— 现装是让「数据沿边流动」落在既有 executor
       // 上而不改它的最小做法。T2:ledgerOutputs(本段合并出来的 frozen-done
@@ -463,6 +471,17 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
           return Promise.resolve({
             status: "failed" as const,
             error: "run_graph: cancelled by caller abort",
+          });
+        }
+        // T3:executor 入口计数(spec SC7 / ADR-0057 / 0064 —— 计数点在
+        // 进入,不在校验/调度层)。第 9 次进入同一 id → 熔断:本进入零
+        // spawn,fuse.signal 让调度器停止一切新进入(in-flight 照实落定,
+        // 所以 fuse.signal 不喂给节点 executor),整次调用收敛后由下方
+        // EXIT typed 拒。
+        if (fuse !== undefined && !fuse.enter(id)) {
+          return Promise.resolve({
+            status: "failed" as const,
+            error: `run_graph: effort fuse tripped — node "${id}" was entered more than ${EFFORT_FUSE_THRESHOLD} times in one call`,
           });
         }
         const node = byId.get(id)!;
@@ -492,9 +511,17 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
         let violation: { from: string; target: string } | undefined;
         let execution: GraphExecution;
         if (hasFailureEdges) {
+          // T3:fuse.signal 只喂给调度器 —— 停的是「新进入的启动」,
+          // in-flight 节点照实落定(不喂节点 executor 的 signal,否则
+          // 会被误判成调用侧取消)。AbortSignal.any 同时兼容无 signal
+          // 与无 fuse 两种缺省。
           const r = await runGraphWithFailureEdges(spec, exec, {
             ...progressHooks,
-            ...(signal ? { signal } : {}),
+            signal: AbortSignal.any(
+              [signal, fuse?.signal].filter(
+                (s): s is AbortSignal => s !== undefined
+              )
+            ),
           });
           execution = r.execution;
           violation = r.violation;
@@ -505,8 +532,18 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
         // 与 abort 走同一通道:done 部分保留进账本(SC8 + ADR-0060),不
         // 当成功数据返回。
         const cancelled = signal?.aborted === true;
+        // T3:fuse tripped 走与 violation / abort 同一 partial-results 通
+        // 道 —— done 部分先冻结(ADR-0057「熔断后已完成留下」),再 typed
+        // 拒。cancel 语义:仅冻结真 done,失败的 in-flight 不当终结冻结
+        // (SC8 + freezeResults 注释)。
+        const fuseTripped = fuse?.signal.aborted === true;
         if (ledger !== undefined) {
-          freezeResults(ledger, execution.results, cancelled);
+          freezeResults(ledger, execution.results, cancelled || fuseTripped);
+        }
+        if (fuseTripped) {
+          throw new ToolExecutionError(
+            `run_graph: effort fuse tripped — node "${fuse!.trippedBy}" was entered more than ${EFFORT_FUSE_THRESHOLD} times in one call; done ids remain frozen, submit a new node id in the next call to continue`
+          );
         }
         if (violation !== undefined) {
           throw new ToolExecutionError(

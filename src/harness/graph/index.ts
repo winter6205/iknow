@@ -46,6 +46,10 @@ export { createLiveGraphLedger, createLiveGraphLedgerHost } from "./ledger.js";
 export type { OnFailureNode } from "./on-failure.js";
 export { validateOnFailureEdges } from "./on-failure.js";
 
+export type { EffortFuse } from "./effort-fuse.js";
+export { createEffortFuse } from "./effort-fuse.js";
+export { EFFORT_FUSE_THRESHOLD } from "./effort-threshold.js";
+
 export type {
   GraphNodeProgress,
   GraphNodeSeed,
