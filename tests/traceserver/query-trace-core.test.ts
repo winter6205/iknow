@@ -10,6 +10,7 @@ import {
   QUERY_TRACE_PREVIEW_CAP,
 } from "../../src/traceserver/query-trace-core.ts";
 import { TRACE_OUTPUT_BACKSTOP } from "../../src/traceserver/output-backstop.ts";
+import { TraceQueryValidationError } from "../../src/traceserver/query-trace-errors.ts";
 
 /**
  * Contract suite for the shared `query_trace` core (plan
@@ -844,6 +845,192 @@ describe("query_trace traceserver core (T7)", () => {
           `${JSON.stringify(stale)} must not change the response`
         );
       }
+    });
+  });
+
+  describe("contains filter (trace-mcp-args-search task)", () => {
+    it("hits llm_call rows whose serialized messages carry the substring", async () => {
+      const traceDir = makeTraceDir();
+      writeSession(
+        traceDir,
+        "c-contains",
+        [
+          jsonLine(
+            llmCallRow("c-contains", 1, {
+              messages: [{ role: "user", content: "review .iknow/skills/x" }],
+            })
+          ),
+          jsonLine(llmCallRow("c-contains", 2, { messages: [] })),
+        ].join("")
+      );
+      const core = createQueryTraceCore({ traceDir });
+
+      const parsed = envelope(
+        await core({ conversation_id: "c-contains", contains: ".iknow/skills" })
+      );
+      assert.equal(parsed.records.length, 1);
+      assert.equal(parsed.records[0]?.["llm_call_id"], "llm-1");
+    });
+
+    it("answers an empty page when the substring matches nothing", async () => {
+      const traceDir = makeTraceDir();
+      writeSession(
+        traceDir,
+        "c-contains-miss",
+        jsonLine(llmCallRow("c-contains-miss", 1))
+      );
+      const core = createQueryTraceCore({ traceDir });
+
+      const parsed = envelope(
+        await core({
+          conversation_id: "c-contains-miss",
+          contains: "no-such-substring",
+        })
+      );
+      assert.deepEqual(parsed.records, []);
+      assert.equal(parsed.limit, QUERY_TRACE_DEFAULT_LIMIT);
+      assert.equal(parsed.offset, 0);
+    });
+
+    it("narrows contains hits further with record_type (AND semantics)", async () => {
+      const traceDir = makeTraceDir();
+      writeSession(
+        traceDir,
+        "c-contains-and",
+        [
+          jsonLine({
+            record_type: "tool_call",
+            conversation_id: "c-contains-and",
+            tool_call_id: "tool-1",
+            started_at: "2026-01-01T00:00:00.000Z",
+            status: "ok",
+            arguments: { path: ".iknow/skills" },
+          }),
+          jsonLine(
+            llmCallRow("c-contains-and", 2, {
+              messages: [{ role: "user", content: "open .iknow/skills" }],
+            })
+          ),
+        ].join("")
+      );
+      const core = createQueryTraceCore({ traceDir });
+
+      const both = envelope(
+        await core({
+          conversation_id: "c-contains-and",
+          contains: ".iknow/skills",
+        })
+      );
+      assert.equal(both.records.length, 2);
+
+      const narrowed = envelope(
+        await core({
+          conversation_id: "c-contains-and",
+          contains: ".iknow/skills",
+          record_type: "tool_call",
+        })
+      );
+      assert.equal(narrowed.records.length, 1);
+      assert.equal(narrowed.records[0]?.["tool_call_id"], "tool-1");
+    });
+
+    it("keeps contains orthogonal to limit/offset paging", async () => {
+      const traceDir = makeTraceDir();
+      let content = "";
+      for (let i = 0; i < 4; i++) {
+        content += jsonLine(
+          llmCallRow("c-contains-paging", i, {
+            messages: [{ role: "user", content: `needle-${i}` }],
+          })
+        );
+      }
+      writeSession(traceDir, "c-contains-paging", content);
+      const core = createQueryTraceCore({ traceDir });
+
+      const page = envelope(
+        await core({
+          conversation_id: "c-contains-paging",
+          contains: "needle-",
+          limit: 2,
+          offset: 1,
+        })
+      );
+      // Descending time: llm-3, llm-2, llm-1, llm-0; offset 1 skips llm-3.
+      assert.deepEqual(idsOf(page.records), ["llm-2", "llm-1"]);
+      assert.equal(page.limit, 2);
+      assert.equal(page.offset, 1);
+    });
+
+    it("rejects an empty contains as invalid_input, in line with the other string axes", async () => {
+      const traceDir = makeTraceDir();
+      writeSession(
+        traceDir,
+        "c-contains-empty",
+        jsonLine(llmCallRow("c-contains-empty", 1))
+      );
+      const core = createQueryTraceCore({ traceDir });
+
+      await assert.rejects(
+        core({ conversation_id: "c-contains-empty", contains: "" }),
+        (error: unknown) => {
+          assert.ok(
+            error instanceof TraceQueryValidationError,
+            `expected TraceQueryValidationError, got ${String(error)}`
+          );
+          assert.equal(error.field, "contains");
+          assert.equal(error.kind, "validation");
+          assert.equal(error.message, "contains must be a non-empty string");
+          return true;
+        }
+      );
+    });
+
+    it("rejects a non-string contains", async () => {
+      const traceDir = makeTraceDir();
+      writeSession(
+        traceDir,
+        "c-contains-type",
+        jsonLine(llmCallRow("c-contains-type", 1))
+      );
+      const core = createQueryTraceCore({ traceDir });
+
+      for (const bad of [42, null, true, { key: "v" }]) {
+        await assert.rejects(
+          core({ conversation_id: "c-contains-type", contains: bad }),
+          (error: unknown) =>
+            error instanceof TraceQueryValidationError &&
+            error.field === "contains"
+        );
+      }
+    });
+
+    it("is case-sensitive end to end", async () => {
+      const traceDir = makeTraceDir();
+      writeSession(
+        traceDir,
+        "c-contains-case",
+        jsonLine(
+          llmCallRow("c-contains-case", 1, {
+            messages: [{ role: "user", content: "MixedCase Token" }],
+          })
+        )
+      );
+      const core = createQueryTraceCore({ traceDir });
+
+      const lower = envelope(
+        await core({
+          conversation_id: "c-contains-case",
+          contains: "mixedcase",
+        })
+      );
+      assert.deepEqual(lower.records, []);
+      const exact = envelope(
+        await core({
+          conversation_id: "c-contains-case",
+          contains: "MixedCase",
+        })
+      );
+      assert.equal(exact.records.length, 1);
     });
   });
 });

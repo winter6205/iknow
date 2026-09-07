@@ -20,6 +20,7 @@ import { join } from "node:path";
 import {
   createJsonlTraceReader,
   MAX_TRACE_BYTES,
+  MAX_TRACE_BYTES_FOR_CONTAINS,
   TraceReadError,
 } from "../../src/traceserver/index.ts";
 import type { TraceRecordType } from "../../src/traceserver/types.ts";
@@ -466,5 +467,213 @@ describe("createJsonlTraceReader — sort stability for time-less rows", () => {
     assert.equal(out.records[0]?.["record_type"], "violation");
     assert.equal(out.records[1]?.["turn_index"], 1);
     assert.equal(out.records[2]?.["turn_index"], 2);
+  });
+});
+
+// -- contains (trace-mcp-args-search task) -------------------------------------
+
+describe("createJsonlTraceReader — contains filter", () => {
+  it("matches llm_call rows by a substring of their serialized messages", () => {
+    const hit = JSON.stringify({
+      record_type: "llm_call",
+      llm_call_id: "llm-1",
+      started_at: "2026-08-01T01:00:00.000Z",
+      status: "ok",
+      messages: [{ role: "user", content: "read .iknow/skills/design-taste" }],
+    });
+    const miss = makeLine({
+      recordType: "turn",
+      startedAt: "2026-08-01T02:00:00.000Z",
+      turnIndex: 0,
+      decision: "completed",
+      status: "ok",
+    });
+    writeFileSync(tracePath, [hit, miss].join("\n") + "\n", "utf8");
+    const reader = createJsonlTraceReader({ filePath: tracePath });
+    const out = reader.query({ contains: ".iknow/skills" });
+    assert.equal(out.total, 1);
+    assert.equal(out.records.length, 1);
+    assert.equal(out.records[0]?.["llm_call_id"], "llm-1");
+  });
+
+  it("is case-sensitive", () => {
+    const hit = JSON.stringify({
+      record_type: "tool_call",
+      tool_call_id: "tool-1",
+      started_at: "2026-08-01T01:00:00.000Z",
+      status: "ok",
+      arguments: { path: ".IKNOW/skills" },
+    });
+    writeFileSync(tracePath, hit + "\n", "utf8");
+    const reader = createJsonlTraceReader({ filePath: tracePath });
+    assert.equal(reader.query({ contains: ".iknow/skills" }).total, 0);
+    assert.equal(reader.query({ contains: ".IKNOW/skills" }).total, 1);
+  });
+
+  it("returns empty rows when nothing matches", () => {
+    const line = makeLine({
+      recordType: "turn",
+      startedAt: "2026-08-01T01:00:00.000Z",
+      turnIndex: 0,
+      decision: "completed",
+      status: "ok",
+    });
+    writeFileSync(tracePath, line + "\n", "utf8");
+    const reader = createJsonlTraceReader({ filePath: tracePath });
+    const out = reader.query({ contains: "no-such-substring-anywhere" });
+    assert.equal(out.total, 0);
+    assert.deepEqual(out.records, []);
+  });
+
+  it("combines with record_type as AND", () => {
+    // Both lines carry the substring; only the tool_call survives the AND.
+    const tool = JSON.stringify({
+      record_type: "tool_call",
+      tool_call_id: "tool-1",
+      started_at: "2026-08-01T01:00:00.000Z",
+      status: "ok",
+      arguments: { path: ".iknow/skills" },
+    });
+    const llm = JSON.stringify({
+      record_type: "llm_call",
+      llm_call_id: "llm-1",
+      started_at: "2026-08-01T02:00:00.000Z",
+      status: "ok",
+      messages: [{ role: "user", content: "list .iknow/skills" }],
+    });
+    writeFileSync(tracePath, [llm, tool].join("\n") + "\n", "utf8");
+    const reader = createJsonlTraceReader({ filePath: tracePath });
+    const out = reader.query({
+      contains: ".iknow/skills",
+      recordType: "tool_call",
+    });
+    assert.equal(out.total, 1);
+    assert.equal(out.records[0]?.["tool_call_id"], "tool-1");
+  });
+
+  it("composes with limit/offset pagination (contains is orthogonal to paging)", () => {
+    const lines: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      lines.push(
+        JSON.stringify({
+          record_type: "tool_call",
+          tool_call_id: `tool-${i}`,
+          started_at: `2026-08-01T00:00:0${i}.000Z`,
+          status: "ok",
+          arguments: { path: `.iknow/skills/item-${i}` },
+        })
+      );
+    }
+    writeFileSync(tracePath, lines.join("\n") + "\n", "utf8");
+    const reader = createJsonlTraceReader({ filePath: tracePath });
+    const page = reader.query({
+      contains: ".iknow/skills",
+      limit: 2,
+      offset: 1,
+    });
+    // Descending time: tool-4, tool-3, tool-2, tool-1, tool-0; offset 1 skips tool-4.
+    assert.equal(page.total, 5);
+    assert.deepEqual(
+      page.records.map((r) => r["tool_call_id"]),
+      ["tool-3", "tool-2"]
+    );
+  });
+
+  it("hits records past the 8 MiB cap when contains is given (regression: whole-file scan)", () => {
+    // The direct regression for the 39MB-trace pain point: a hit beyond the
+    // 8 MiB default cap must be reachable via contains. Filler lines pad past
+    // MAX_TRACE_BYTES; the target row sits at the file tail.
+    const filler = JSON.stringify({
+      record_type: "turn",
+      turn_id: "pad",
+      started_at: "2026-08-01T00:00:00.000Z",
+      status: "ok",
+      note: "p",
+    }).replace('"p"', `"${"p".repeat(4000)}"`);
+    const tail = JSON.stringify({
+      record_type: "tool_call",
+      tool_call_id: "tool-tail",
+      started_at: "2026-08-01T09:00:00.000Z",
+      status: "ok",
+      arguments: { path: ".iknow/skills/tail" },
+    });
+    const fillerBytes = Buffer.byteLength(filler) + 1;
+    const fillCount = Math.ceil((MAX_TRACE_BYTES + 1) / fillerBytes);
+    const content =
+      new Array<string>(fillCount).fill(filler).join("\n") + "\n" + tail + "\n";
+    writeFileSync(tracePath, content, "utf8");
+    assert.ok(
+      Buffer.byteLength(content) > MAX_TRACE_BYTES,
+      "fixture must exceed the 8 MiB cap"
+    );
+
+    const reader = createJsonlTraceReader({ filePath: tracePath });
+    const out = reader.query({ contains: ".iknow/skills/tail" });
+    assert.equal(out.total, 1);
+    assert.equal(out.records[0]?.["tool_call_id"], "tool-tail");
+    // 不带 contains 的现状查询仍受 8 MiB 帽约束 — 同一 reader 上两臂对照。
+    const plain = reader.query({ recordType: "tool_call" });
+    assert.equal(plain.total, 0);
+    assert.equal(plain.truncated, true);
+  });
+
+  it("refuses files above the contains scan cap with a typed error instead of silently truncating", () => {
+    const filler = JSON.stringify({
+      record_type: "turn",
+      turn_id: "pad",
+      started_at: "2026-08-01T00:00:00.000Z",
+      status: "ok",
+      note: "p",
+    }).replace('"p"', `"${"p".repeat(2000)}"`);
+    const fillerBytes = Buffer.byteLength(filler) + 1;
+    const fillCount = Math.ceil((64 * 1024 + 1) / fillerBytes);
+    const content = new Array<string>(fillCount).fill(filler).join("\n") + "\n";
+    writeFileSync(tracePath, content, "utf8");
+    const reader = createJsonlTraceReader({
+      filePath: tracePath,
+      containsMaxBytes: 64 * 1024,
+    });
+    assert.throws(
+      () => reader.query({ contains: "anything" }),
+      (err: unknown) =>
+        err instanceof TraceReadError &&
+        (err as { kind?: string }).kind === "io_error" &&
+        err.message.includes("contains query refused")
+    );
+  });
+
+  it("documents the contains scan cap constant (256 MiB)", () => {
+    assert.equal(MAX_TRACE_BYTES_FOR_CONTAINS, 256 * 1024 * 1024);
+  });
+
+  it("leaves byte-level semantics (offset, truncated) untouched when contains filters lines", () => {
+    // contains 过滤发生在行边界切分之后, 所以 nextOffset 仍指向最后一条
+    // **完整行**的结尾 (含未命中行), truncated 仍由字节帽决定 — 轮询续读
+    // 不会因过滤而丢行。
+    const filler = JSON.stringify({
+      record_type: "turn",
+      turn_id: "pad",
+      started_at: "2026-08-01T00:00:00.000Z",
+      status: "ok",
+      note: "p",
+    }).replace('"p"', `"${"p".repeat(4000)}"`);
+    const tail = JSON.stringify({
+      record_type: "tool_call",
+      tool_call_id: "tool-tail",
+      started_at: "2026-08-01T09:00:00.000Z",
+      status: "ok",
+      arguments: { path: ".iknow/skills/tail" },
+    });
+    const fillerBytes = Buffer.byteLength(filler) + 1;
+    const fillCount = Math.ceil((MAX_TRACE_BYTES + 1) / fillerBytes);
+    const content =
+      new Array<string>(fillCount).fill(filler).join("\n") + "\n" + tail + "\n";
+    writeFileSync(tracePath, content, "utf8");
+    const reader = createJsonlTraceReader({ filePath: tracePath });
+    const out = reader.query({ contains: ".iknow/skills/tail" });
+    // contains 走 containsMaxBytes (256 MiB) > 文件大小, 故不截断; offset
+    // 指向文件结尾 (tail + "\n" 之后), 即全文件的完整行边界。
+    assert.equal(out.truncated, false);
+    assert.equal(out.offset, Buffer.byteLength(content));
   });
 });

@@ -11,6 +11,7 @@ export { TRACE_FIELD_DEFS, type TraceFieldDef } from "./fields.js";
 export {
   createJsonlTraceReader,
   MAX_TRACE_BYTES,
+  MAX_TRACE_BYTES_FOR_CONTAINS,
   type JsonlTraceReader,
   type JsonlTraceReaderOptions,
 } from "./reader.js";

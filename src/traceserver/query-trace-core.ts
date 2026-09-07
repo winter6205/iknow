@@ -1,7 +1,10 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { messageRole, projectToolResultsFromTrace } from "./project-tool-results.js";
+import {
+  messageRole,
+  projectToolResultsFromTrace,
+} from "./project-tool-results.js";
 import { projectRecordBase } from "./record-lookup.js";
 import { TRACE_OUTPUT_BACKSTOP } from "./output-backstop.js";
 import { createJsonlTraceReader } from "./reader.js";
@@ -35,7 +38,7 @@ export const QUERY_TRACE_PREVIEW_CAP = 400;
 export const QUERY_TRACE_DESCRIPTION =
   "Query local JSONL trace records with filters, returning one page of rows. " +
   "Rows are projection-only (message count, first/last previews of any role, " +
-  "the last_assistant_preview taken from the last role=\"assistant\" message " +
+  'the last_assistant_preview taken from the last role="assistant" message ' +
   "(absent when no assistant message is on the record), tool_result summaries " +
   "with their character sizes, and error); use get_record to read one " +
   "record's content span by span. The page is filtered and paged by limit " +
@@ -43,10 +46,13 @@ export const QUERY_TRACE_DESCRIPTION =
   String(QUERY_TRACE_MAX_LIMIT) +
   ") and offset; the response echoes the effective limit and offset, so a page " +
   "shorter than the echoed limit means the filter has no more rows and offset + " +
-  "rows returned continues it. conversation_id is required: discover it with " +
-  "list_sessions, then pair this tool with get_record to reach a record's content. " +
-  "If the model ends the turn without a following llm_call, that last round's " +
-  "tool_results are not visible in the projection.";
+  "rows returned continues it. Use contains (case-sensitive substring match " +
+  "on the raw record line, covering llm_call messages and tool_call " +
+  "arguments) to search record content, optionally combined with " +
+  "record_type to narrow the hit type. conversation_id is required: discover " +
+  "it with list_sessions, then pair this tool with get_record to reach a " +
+  "record's content. If the model ends the turn without a following " +
+  "llm_call, that last round's tool_results are not visible in the projection.";
 
 interface QueryTraceInput {
   readonly conversation_id?: unknown;
@@ -55,6 +61,7 @@ interface QueryTraceInput {
   readonly task_id?: unknown;
   readonly parent_turn_id?: unknown;
   readonly turn_id?: unknown;
+  readonly contains?: unknown;
   readonly limit?: unknown;
   readonly offset?: unknown;
 }
@@ -91,6 +98,7 @@ export function createQueryTraceCore(
         ? { parentTurnId: parsed.parentTurnId }
         : {}),
       ...(parsed.turnId !== undefined ? { turnId: parsed.turnId } : {}),
+      ...(parsed.contains !== undefined ? { contains: parsed.contains } : {}),
       limit: parsed.limit,
       offset: parsed.offset,
     };
@@ -115,6 +123,7 @@ interface ParsedQueryTraceInput {
   readonly taskId?: string;
   readonly parentTurnId?: string;
   readonly turnId?: string;
+  readonly contains?: string;
   readonly limit: number;
   readonly offset: number;
 }
@@ -159,6 +168,12 @@ function parseInput(input: unknown): ParsedQueryTraceInput {
       : {}),
     ...(raw.turn_id !== undefined
       ? { turnId: requireNonEmptyString(raw.turn_id, "turn_id") }
+      : {}),
+    // contains: 大小写敏感的原始行子串。空串视为非法输入 (与 task_id 等
+    // 字符串轴的 requireNonEmptyString 校验风格一致) — 「匹配所有行」由
+    // 不传 contains 表达, 不给空串第二种歧义语义。
+    ...(raw.contains !== undefined
+      ? { contains: requireNonEmptyString(raw.contains, "contains") }
       : {}),
     limit,
     offset,

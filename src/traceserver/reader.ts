@@ -7,7 +7,8 @@
  *
  * Overflow 护栏: 文件超过 maxBytes 时只读前 maxBytes 字节，按行边界截断
  * (丢弃最后一个不完整行)，并置 truncated=true — 不抛错。上限可经工厂
- * opts 注入覆盖 (测试用小值，避免写 8MB)。
+ * opts 注入覆盖 (测试用小值，避免写 8MB)。contains 查询例外：改走
+ * MAX_TRACE_BYTES_FOR_CONTAINS (256MB) 上限，见 readLinesFrom。
  *
  * 增量读取 (SC-R 14): `?poll=<ms>` 轮询场景下前端把上一轮响应里的 `offset`
  * 作为 `resumeOffset` 传回 — reader 只读该字节偏移之后的追加行，避免重复
@@ -16,6 +17,7 @@
  */
 import { openSync, readSync, closeSync, statSync } from "node:fs";
 import {
+  TraceReadError,
   type TraceQuery,
   type TraceQueryResult,
   type TraceRecordRow,
@@ -26,9 +28,20 @@ import { isEnoent, wrapIoError } from "./io.js";
 /** Default byte cap for a single read (8 MiB). Overridable via factory opts. */
 export const MAX_TRACE_BYTES = 8 * 1024 * 1024;
 
+/**
+ * contains 查询的读窗上限 (256 MiB)。contains 提供时绕过 8 MiB 现状帽全文件
+ * 扫描 — 39 MB 级 trace 找「哪条记录提到 X」正是本参数的存在理由；帽只防
+ * 失控 (误把 GB 级文件喂进来)，超限时**抛 TraceReadError** 而不是静默截断
+ * (静默截断会让 contains 在大 trace 上悄悄变成「只扫前半段」的盲查询 —
+ * 与本参数要解决的问题同形)。可经工厂 opts.containsMaxBytes 注入覆盖 (测试用)。
+ */
+export const MAX_TRACE_BYTES_FOR_CONTAINS = 256 * 1024 * 1024;
+
 export interface JsonlTraceReaderOptions {
   readonly filePath: string;
   readonly maxBytes?: number;
+  /** contains 查询的读窗上限; 缺省 MAX_TRACE_BYTES_FOR_CONTAINS (测试注入小值)。 */
+  readonly containsMaxBytes?: number;
 }
 
 export interface JsonlTraceReader {
@@ -57,11 +70,17 @@ interface RawLines {
  * nextOffset 计算: 当前段若以完整换行结尾 → 直接取绝对结尾；否则去掉末尾
  * 未终结行 (半行，可能是截断或写入进行中) — 下轮续读时重新读该行，保证
  * 每条 JSONL 只被消费一次。
+ *
+ * contains (trace-mcp-args-search task): 提供时对**原始行文本**做大小写敏感
+ * 子串预过滤 — raw 不命中的行直接丢弃，不进 parseLines (省 JSON.parse CPU)。
+ * 过滤发生在行边界切分之后、解析之前，所以 nextOffset / truncated 等字节级
+ * 语义不受影响。
  */
 function readLinesFrom(
   filePath: string,
   maxBytes: number,
-  startOffset: number
+  startOffset: number,
+  contains?: string
 ): RawLines {
   let size: number;
   try {
@@ -74,7 +93,7 @@ function readLinesFrom(
     // 文件被替换 (resumeOffset 落在新文件之外) → 召回，从文件头重读。
     // startOffset > 0 且 > size 才能判定替换；若 startOffset === 0 则本就在
     // 文件头，没有替换语义。
-    if (startOffset > 0) return readLinesFrom(filePath, maxBytes, 0);
+    if (startOffset > 0) return readLinesFrom(filePath, maxBytes, 0, contains);
     return { lines: [], nextOffset: 0, truncated: false };
   }
 
@@ -93,7 +112,9 @@ function readLinesFrom(
       return { lines: [], nextOffset: startOffset, truncated: false };
     throw wrapIoError(err);
   }
-  return splitLines(buf.toString("utf8"), startOffset, truncated);
+  const raw = splitLines(buf.toString("utf8"), startOffset, truncated);
+  if (contains === undefined) return raw;
+  return { ...raw, lines: raw.lines.filter((line) => line.includes(contains)) };
 }
 
 function splitLines(
@@ -261,22 +282,63 @@ export function createJsonlTraceReader(
 ): JsonlTraceReader {
   const { filePath } = options;
   const maxBytes = options.maxBytes ?? MAX_TRACE_BYTES;
+  const containsMaxBytes =
+    options.containsMaxBytes ?? MAX_TRACE_BYTES_FOR_CONTAINS;
 
   return {
     query(query: TraceQuery = {}): TraceQueryResult {
       const startOffset = Math.max(0, query.resumeOffset ?? 0);
+      // contains 提供时绕过 8 MiB 现状帽, 改走 containsMaxBytes (缺省 256 MiB)
+      // 上限 — 这就是为什么 39 MB 级 trace 上找「哪条记录提到 X」需要这一档
+      // 帽: 8 MiB 帽会把整个 trace 的后半段挡在门外。文件超过该上限 → 抛
+      // TraceReadError 而不是静默截断, 因为截断后的 contains 是一个不诚实的
+      // 搜索结果 (与本参数要解决的问题同形)。未提供时行为完全不变 (走
+      // `maxBytes`, 即 8 MiB 默认)。
+      if (query.contains !== undefined) {
+        const size = statSize(filePath);
+        if (size > containsMaxBytes) {
+          throw new TraceReadError(
+            `contains query refused: trace file exceeds the ${containsMaxBytes}-byte ` +
+              `scan cap (size=${size}); narrow the query or raise containsMaxBytes`
+          );
+        }
+        const raw = readLinesFrom(
+          filePath,
+          Math.max(containsMaxBytes, maxBytes),
+          startOffset,
+          query.contains
+        );
+        return finishQuery(raw, query);
+      }
       const raw = readLinesFrom(filePath, maxBytes, startOffset);
-      const { rows, skippedLines } = parseLines(raw.lines);
-      const sorted = sortByTimeDesc(rows);
-      const filtered = applyFilter(sorted, query);
-      const records = applyPagination(filtered, query);
-      return {
-        records,
-        total: filtered.length,
-        skippedLines,
-        truncated: raw.truncated,
-        offset: raw.nextOffset,
-      };
+      return finishQuery(raw, query);
     },
   };
+
+  function finishQuery(raw: RawLines, query: TraceQuery): TraceQueryResult {
+    const { rows, skippedLines } = parseLines(raw.lines);
+    const sorted = sortByTimeDesc(rows);
+    const filtered = applyFilter(sorted, query);
+    const records = applyPagination(filtered, query);
+    return {
+      records,
+      total: filtered.length,
+      skippedLines,
+      truncated: raw.truncated,
+      offset: raw.nextOffset,
+    };
+  }
+}
+
+/**
+ * stat size helper for the contains cap check. ENOENT → 0 (不存在的文件由
+ * readLinesFrom 的既有静默降级处理, 不在这里抛)。
+ */
+function statSize(filePath: string): number {
+  try {
+    return statSync(filePath).size;
+  } catch (err) {
+    if (isEnoent(err)) return 0;
+    throw wrapIoError(err);
+  }
 }
