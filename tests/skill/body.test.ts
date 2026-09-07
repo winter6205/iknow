@@ -18,6 +18,7 @@ import {
   exceedsUserInputCap,
   isSkillLoadText,
   stripFrontmatter,
+  writeRootSegment,
 } from "../../src/harness/skill/body.js";
 import { MAX_MESSAGE_CHARS } from "../../src/session-api/contract.ts";
 import type { SkillEntry } from "../../src/harness/skill/catalog.js";
@@ -286,6 +287,138 @@ describe("createSkillBody", () => {
     const a = await createSkillBody({ entry: entry(dir, "echo"), dir });
     const b = await createSkillBody({ entry: entry(dir, "echo"), dir });
     expect(b).toBe(a);
+  });
+
+  it("is byte-stable across repeat calls with the same non-empty taskRoot", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-body-stable-tr-"));
+    roots.push(root);
+    const dir = await fixtureDir(root, "echo");
+    await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\nbody`);
+
+    const a = await createSkillBody({
+      entry: entry(dir, "echo"),
+      dir,
+      taskRoot: "/tmp/task-wt",
+    });
+    const b = await createSkillBody({
+      entry: entry(dir, "echo"),
+      dir,
+      taskRoot: "/tmp/task-wt",
+    });
+    expect(b).toBe(a);
+  });
+});
+
+// 写根 trailer（specs/skill-load-write-root.md）：文案 SSOT =
+// writeRootSegment（与 worker prior 同一 helper）；追加位置 =
+// </skill_files> 之后；空/缺 taskRoot → 与 337 SC6 现形态逐字节一致。
+describe("createSkillBody write-root trailer", () => {
+  it("omits the trailer entirely when taskRoot is undefined (byte-compat with pre-trailer SC6 shape)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-body-wrt-miss-"));
+    roots.push(root);
+    const dir = await fixtureDir(root, "echo");
+    await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\nbody`);
+
+    const text = await createSkillBody({ entry: entry(dir, "echo"), dir });
+
+    expect(text).not.toContain("current write root");
+    expect(text.trimEnd().endsWith("</skill_files>")).toBe(true);
+  });
+
+  it("omits the trailer for empty / whitespace taskRoot", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-body-wrt-blank-"));
+    roots.push(root);
+    const dir = await fixtureDir(root, "echo");
+    await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\nbody`);
+
+    for (const taskRoot of ["", "   ", "\n"]) {
+      const text = await createSkillBody({
+        entry: entry(dir, "echo"),
+        dir,
+        taskRoot,
+      });
+      expect(text).not.toContain("current write root");
+      expect(text.trimEnd().endsWith("</skill_files>")).toBe(true);
+    }
+  });
+
+  it("appends the write-root segment after </skill_files> with the helper copy when taskRoot is non-empty", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-body-wrt-nonempty-"));
+    roots.push(root);
+    const dir = await fixtureDir(root, "echo");
+    await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\nbody`);
+    await fixtureFile(dir, "helper.md", "x");
+
+    const taskRoot = "/tmp/task-wt";
+    const text = await createSkillBody({
+      entry: entry(dir, "echo"),
+      dir,
+      taskRoot,
+    });
+
+    const closing = text.lastIndexOf("</skill_files>");
+    const tail = text.slice(closing + "</skill_files>".length);
+    expect(tail).toContain("current write root");
+    const segment = writeRootSegment(taskRoot)!;
+    expect(tail).toContain(
+      segment.slice(
+        0,
+        `current write root (for write_file / edit_file / bash cwd): ${taskRoot}`
+          .length
+      )
+    );
+    // trailer 永远是正文末段
+    expect(text.trimEnd().endsWith(writeRootSegment(taskRoot)!.trimEnd())).toBe(
+      true
+    );
+  });
+
+  it("uses the same segment copy as the subagent worker prior (shared helper)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-body-wrt-helper-"));
+    roots.push(root);
+    const dir = await fixtureDir(root, "echo");
+    await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\nbody`);
+
+    const taskRoot = "/tmp/task-wt";
+    const text = await createSkillBody({
+      entry: entry(dir, "echo"),
+      dir,
+      taskRoot,
+    });
+
+    // 同一 helper 的字节契约：trailer 内必须含与 worker prior 完全一致的
+    // 两句（写根句 + 身份根只读句），顺序一致。
+    expect(text).toContain(
+      `current write root (for write_file / edit_file / bash cwd): ${taskRoot}\n`
+    );
+    expect(text).toContain(
+      `System ## Project path is still the project identity root and is read-only; the write root above is where file mutations should land. Use relative paths from this root.`
+    );
+  });
+
+  it("keeps the trailer at the end when SKILL.md is huge (skill-load length-cap exemption semantics unchanged)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-body-wrt-overflow-"));
+    roots.push(root);
+    const dir = await fixtureDir(root, "echo");
+    const huge = "x".repeat(90_000);
+    await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\n${huge}`);
+    await fixtureFile(dir, "helper.md", "x");
+
+    const taskRoot = "/tmp/task-wt";
+    const text = await createSkillBody({
+      entry: entry(dir, "echo"),
+      dir,
+      taskRoot,
+    });
+
+    expect(text.length).toBeGreaterThan(90_000);
+    expect(text.trimEnd().endsWith(writeRootSegment(taskRoot)!.trimEnd())).toBe(
+      true
+    );
+    // 装配出的完整 skill-load 消息仍享受长度豁免
+    const loadText = buildSkillLoadText("echo", text);
+    expect(isSkillLoadText(loadText)).toBe(true);
+    expect(exceedsUserInputCap(loadText, MAX_MESSAGE_CHARS)).toBe(false);
   });
 });
 
