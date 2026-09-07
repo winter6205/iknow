@@ -312,11 +312,21 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
         // live-graph-phase1 T1:按结算终态冻结已落定 id。skipped 不冻
         // (spec Glossary);账本单点强制,handler 直传 GraphNodeResult.status。
         // T2:done 节点的产出也写进账本(SC5「B 能读到 A 的产出」数据源)。
-        // T3 退路:中止节点记 failed("cancelled by caller abort") 也会被冻结
-        // —— T3 取消保留已 done 任务会重审这点(scroll SC8);T2 暂按统一规则
-        // 落定。
+        // T3(spec SC8):调用侧取消时,只冻结「真 done」的节点。abort 路
+        // 径上失败的节点(executor 的 signal.aborted 预检查返回
+        // failed、waitFor 被 abort 拒绝回 failed)是取消的症状而非真
+        // 终结,把它们冻成 failed 等于「取消失败 = 失败冻结」,会让
+        // 剩余子图合并层把这些 id 拒为 frozen-failed,父代理就再也
+        // 救不回未跑的子节点了(spec SC8 末段)。阶段 1 单跑一次
+        // 没有「失败的子节点重跑」语义,放弃冻结就是放弃「失败」的
+        // 终态 —— 而失败的真相要等下一段剩余子图提交再说。正常
+        // settle(无 abort)路径下 failed 仍按 SC6 冻结,SC6 语义不变。
         if (ledger !== undefined) {
+          const cancelled = signal?.aborted === true;
           for (const result of Object.values(execution.results)) {
+            // 取消路径:仅 done 进账本;failed / skipped 留给后续剩余
+            // 子图。正常路径:账本单点强制 done / failed。
+            if (cancelled && result.status !== "done") continue;
             ledger.freeze(
               result.id,
               result.status,
