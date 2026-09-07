@@ -443,6 +443,39 @@ describe("createTaskWorktree", () => {
     });
   });
 
+  // Version-independent determinism for the empty-bare failure path: real git
+  // only reaches this exit on older versions (git >= 2.53 infers --orphan),
+  // so the stub pins what the live-git case cannot — a gitdir that probes
+  // clean but whose `worktree add` fails maps to worktree_add_failed, never
+  // not_a_git_repo (plans/bare-repo-create-task-worktree.md T2 acceptance).
+  it("empty bare whose worktree add fails maps to worktree_add_failed (stubbed, version-independent)", async () => {
+    const runner: GitRunner = async (args) => {
+      if (args[0] === "worktree") {
+        return {
+          code: 129,
+          stdout: "",
+          stderr:
+            "fatal: not a valid object name: 'HEAD' (no commits to branch from)",
+        };
+      }
+      if (args[1] === "--git-common-dir") {
+        return { code: 0, stdout: "repo.git\n", stderr: "" };
+      }
+      return { code: 1, stdout: "", stderr: "" };
+    };
+    await expect(
+      createTaskWorktree({
+        repoRoot: "/bare/repo.git",
+        worktreePath: "/bare/wt",
+        branch: "iknow/task-x",
+        runGit: runner,
+      })
+    ).rejects.toMatchObject({
+      kind: "worktree_add_failed",
+      message: expect.stringContaining("no commits to branch from"),
+    });
+  });
+
   it("maps a worktree-add spawn failure to typed git_unavailable", async () => {
     const repo = makeGitRepo();
     const runner: GitRunner = async (args) => {
