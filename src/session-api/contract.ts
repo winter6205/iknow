@@ -160,8 +160,9 @@ export type ResetSessionResponse = {
 /**
  * 手动压缩会话响应（web 按钮 / TUI /compact 共用 wire 形状）。
  * 压缩后 session 保持同一 conversation_id；turns 为压缩后消息投影。
- * `compacted`：true 表示实际发生了裁剪（消息数减少）；false 表示消息已
- * 低于压缩阈值、无变化（幂等 no-op，客户端据此提示「无需压缩」）。
+ * `compacted`：true 表示实际发生了裁剪（消息数减少）；false 表示无可压缩
+ * 上下文（空会话幂等或压缩整体失败；manual-compact-trigger T1 后手动路径
+ * 不再有 token 门 no-op）。
  * `cancelled`：#548 — 仅在 opts.signal 中途 abort、压缩未完成时为 true；
  * 会话保持原样（messages/turnCount/updatedAt 均不动），与
  * compacted=false 的”未达阈值”语义区分(web/TUI 渲染区分)。

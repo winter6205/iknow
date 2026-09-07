@@ -1930,8 +1930,8 @@ export class SessionHub {
    * cancelled + compaction_text_delta)并支持中途取消。**取消语义对齐
    * Claude Code**:opts.signal abort → `signal_aborted` outcome → 不走
    * fallback 截断、会话保持原样、不 bump updatedAt,返回
-   * `{ compacted: false, cancelled: true }`(additive 字段,与"未达阈值"
-   * 的 compacted=false 区分)。host observer 与 adapter 错误均经
+   * `{ compacted: false, cancelled: true }`(additive 字段,与"无可压缩
+   * 上下文"的 compacted=false 区分)。host observer 与 adapter 错误均经
    * runFullCompact safeEmitStream 吞咽,本函数不另行暴露。
    */
   async compactSession(
@@ -2017,7 +2017,7 @@ export class SessionHub {
               ];
             } else if (outcome.kind === "signal_aborted") {
               // Claude Code 取消语义:会话保持原样,不 fallback 截断、不
-              // bump updatedAt;cancelled:true 区分"未达压缩阈值"的
+              // bump updatedAt;cancelled:true 区分"无可压缩上下文"的
               // compacted=false(web/TUI 渲染区分)。
               cancelled = true;
             }

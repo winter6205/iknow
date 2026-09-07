@@ -139,7 +139,8 @@ export interface TuiBridge {
   readonly listSessions: () => ReturnType<SessionHub["listSessions"]>;
   readonly loadSessionFile: (conversationId: string) => Promise<SessionFileV1>;
   /** 手动压缩会话（/compact）。返回 `{ compacted, cancelled? }`,`compacted`
-   *  true = 实际发生裁剪;false = 未达压缩阈值或 #548 中途取消 — 后者
+   *  true = 实际发生裁剪;false = 无可压缩上下文(manual-compact-trigger T1:
+   *  空会话幂等 / 压缩整体失败,T1 后不再有 auto token 门 no-op)或 #548 中途取消 — 后者
    *  `cancelled:true`,app 层据此区分。signal/onStream 透传到
    *  SessionHub.compactSession → runFullCompact,让 /compact 支持 progress
    *  事件 + 中途取消(Claude Code 体感)。observer 已带 compaction_cancelled
@@ -357,7 +358,7 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
             }
           : undefined
       );
-      // cancelled 透传 — TUI app 据此区分"未达阈值"与"用户中途取消" (Low #1 兜底)。
+      // cancelled 透传 — TUI app 据此区分"无可压缩上下文"与"用户中途取消" (Low #1 兜底)。
       // reason 透传 — plan T2 触发判据分类标识,T4 据此分文案(详见 plans/
       // compress-trigger-gate.md T4 acceptance 的「TUI 文案」分支)。
       return {

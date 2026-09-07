@@ -282,18 +282,18 @@ export function compactNoticeFor(
       }
     }
   }
-  // compacted=false 路径:below_token_threshold / messages_too_few;windowed /
-  // full_summary 逻辑不可达但列全满足 exhaustiveness。
+  // compacted=false 路径:plan manual-compact-trigger T1/T2 — 手动
+  // compactSession 不再返回 below_token_threshold(auto token 门仅属
+  // proactive 路径),空会话幂等与压缩整体失败共用 messages_too_few,
+  // 语义是「没有可压缩的上下文」而非「消息条数过少」。below_token_threshold
+  // / 压缩成功 reason 在此分支出现均属契约破坏,抛错而非呈现 auto 阈值文案。
   switch (reason) {
-    case "below_token_threshold":
-      return ["当前 token 未达压缩阈值，无需压缩。"];
     case "messages_too_few":
-      return ["消息条数过少，无法做窗口压缩，且摘要失败 — 上下文保持原样。"];
+      return ["没有可压缩的上下文，会话保持原样。"];
+    case "below_token_threshold":
     case "windowed":
     case "full_summary":
-      throw new Error(
-        `unexpected compressed-state reason in noop branch: ${reason}`
-      );
+      throw new Error(`unexpected reason in manual noop branch: ${reason}`);
     default: {
       const _exhaustive: never = reason;
       throw new Error(`unknown compact reason: ${String(_exhaustive)}`);
@@ -1941,7 +1941,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         compactingControllerRef.current = compactController;
         setNotice({ lines: ["正在压缩上下文…(按 Esc 取消)"] });
         // #548:onStream 内的 compaction_cancelled 事件标记"中途取消"(bridge
-        // 返回 compacted=false,与"未达阈值"同形),promise resolve 后据此
+        // 返回 compacted=false,与"无可压缩上下文"同形),promise resolve 后据此
         // 选择不同 notice 文案。闭包变量,无需 React state。
         // 注:pre-aborted signal(early-return at full-compact.ts:262)observer
         // 不触发 — response.cancelled 字段兜底(Low #1 修复)。
@@ -1999,8 +1999,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
                 }),
               };
             });
-            // plan T4 + review-fix:文案决策抽成 compactNoticeFor 纯函数,
-            // inline 调用即可。inline 文案逻辑移至 src/tui/app.tsx:184 附近。
+            // 文案决策 SSOT:compactNoticeFor 纯函数(manual-compact-trigger
+            // T2:no-op 支语义为「没有可压缩的上下文」,below_token_threshold
+            // 在手动路径抛错)。
             setNotice({
               lines: compactNoticeFor(compactResult.reason, true),
             });
