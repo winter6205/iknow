@@ -12,10 +12,12 @@
  *     `wait`；直调 handler 带 `wait` → typed 拒、零 spawn（readNodes
  *     直调防御层）。阻塞语义由既有 executor 测试（handler await runGraph
  *     后才 condense）+ `aci.isConcurrencySafe === false` 钉住。
- *   - **SC11 阶段 1 拒失败标记（ADR-0067）**：节点带 `onFailure`（或任何
- *     未声明属性）、根带 `onFailure` → typed 拒、零 spawn —— 两道防御
- *     层都要拒：schema 路径（与 executor 同源的 ajv validator）+
- *     readNodes 直调路径。带标记的合法 DAG 绝不当普通 DAG 跑。
+ *   - **SC11 onFailure 两道防御层（live-graph-phase2 T1）**：阶段 1 的
+ *     「看见失败标记就拒」（ADR-0067，phase-1 scoped）由 phase-2 spec
+ *     Changes 取代 —— `onFailure` 是已声明属性，合法形（目标在本次
+ *     nodes 里）两道防御层都放行；非法形（值非 string、目标未知或
+ *     已冻结）typed 拒、零 spawn。根属性面不变：根带 `onFailure` 仍拒。
+ *     校验细则见 run-graph-onfailure-validate.test.ts。
  *   - **工具说明（spec Inherits/Changes 末条）**：DESCRIPTION 必须让模型
  *     知道剩余子图语义（只交还要跑的节点、已终态 id 冻结、跨调用 deps
  *     可省略已完成节点、取消后未完成 id 可再交）。
@@ -172,7 +174,7 @@ describe("run_graph 合同锁：SC10 schema 形状 + 无 wait", () => {
     expect(schema.required).toEqual(["nodes"]);
   });
 
-  it("节点属性恰为 {id, task, deps}，节点级 additionalProperties === false", () => {
+  it("节点属性恰为 {id, task, deps, onFailure}，节点级 additionalProperties === false", () => {
     const nodes = schema.properties.nodes as {
       items: {
         properties: Record<string, unknown>;
@@ -180,7 +182,12 @@ describe("run_graph 合同锁：SC10 schema 形状 + 无 wait", () => {
         additionalProperties: boolean;
       };
     };
-    expect(Object.keys(nodes.items.properties)).toEqual(["id", "task", "deps"]);
+    expect(Object.keys(nodes.items.properties)).toEqual([
+      "id",
+      "task",
+      "deps",
+      "onFailure",
+    ]);
     expect(nodes.items.required).toEqual(["id", "task"]);
     expect(nodes.items.additionalProperties).toBe(false);
   });
@@ -217,9 +224,9 @@ describe("run_graph 合同锁：SC10 schema 形状 + 无 wait", () => {
   });
 });
 
-// ── SC11：阶段 1 拒失败标记（ADR-0067） ───────────────────────────────
+// ── SC11：onFailure 两道防御层（live-graph-phase2 T1 / ADR-0067 取代） ─
 
-describe("run_graph 合同锁：SC11 拒失败边标记（两道防御层）", () => {
+describe("run_graph 合同锁：SC11 onFailure schema + 直调兜底（两道防御层）", () => {
   /** 与 executor 同源的 schema 路径：registry 构造期编译同一份 inputSchema。 */
   function schemaValidator() {
     const tool = createRunGraphTool({
@@ -232,14 +239,36 @@ describe("run_graph 合同锁：SC11 拒失败边标记（两道防御层）", (
     return validate!;
   }
 
-  it("schema 路径：节点带 onFailure → ajv 拒（additionalProperties）", () => {
+  it("schema 路径：节点合法 onFailure（string + 目标在本批 ids）→ ajv 过", () => {
     const validate = schemaValidator();
-    expect(validate({ nodes: [{ id: "a", task: "ta", onFailure: "b" }] })).toBe(
+    expect(
+      validate({
+        nodes: [
+          { id: "a", task: "ta", onFailure: "b" },
+          { id: "b", task: "tb", deps: ["a"] },
+        ],
+      })
+    ).toBe(true);
+  });
+
+  it("schema 路径：节点合法 self-onFailure → ajv 过（Changes：自己合法）", () => {
+    const validate = schemaValidator();
+    expect(validate({ nodes: [{ id: "a", task: "ta", onFailure: "a" }] })).toBe(
+      true
+    );
+  });
+
+  it("schema 路径：节点 onFailure 非 string（数组 / 数字）→ ajv 拒", () => {
+    const validate = schemaValidator();
+    expect(
+      validate({ nodes: [{ id: "a", task: "ta", onFailure: ["b"] }] })
+    ).toBe(false);
+    expect(validate({ nodes: [{ id: "a", task: "ta", onFailure: 42 }] })).toBe(
       false
     );
   });
 
-  it("schema 路径：根带 onFailure → ajv 拒", () => {
+  it("schema 路径：根带 onFailure → ajv 拒（根面 still closed）", () => {
     const validate = schemaValidator();
     expect(
       validate({ nodes: [{ id: "a", task: "ta" }], onFailure: "retry" })
@@ -258,7 +287,7 @@ describe("run_graph 合同锁：SC11 拒失败边标记（两道防御层）", (
     ).toBe(true);
   });
 
-  it("直调路径：节点带 onFailure 的合法 DAG → typed 拒、零 spawn（绝不当普通 DAG 跑）", async () => {
+  it("直调路径：合法 onFailure DAG → 通过 readNodes + 校验，跑 deps-DAG", async () => {
     const { manager, children } = makeManager();
     const t = createRunGraphTool({ manager, isEnabled: () => true });
     const input = {
@@ -267,17 +296,21 @@ describe("run_graph 合同锁：SC11 拒失败边标记（两道防御层）", (
         { id: "b", task: "tb", deps: ["a"] },
       ],
     };
-    await expect(t.handler(input, { conversationId: CONV })).rejects.toThrow(
-      ToolExecutionError
-    );
-    await expect(t.handler(input, { conversationId: CONV })).rejects.toThrow(
-      /onFailure/
-    );
-    expect(children).toHaveLength(0);
+    const pending = t.handler(input, { conversationId: CONV });
+    // b 要等 a settle 后才 spawn，顺序 settle
+    await waitForChildren(children, 1);
+    settle(children[0]!, ok("A-OUT"));
+    await waitForChildren(children, 2);
+    settle(children[1]!, ok("B-OUT"));
+    const out = parse(await pending);
+    expect(out.nodes).toEqual([
+      { id: "a", status: "done", output: "A-OUT" },
+      { id: "b", status: "done", output: "B-OUT" },
+    ]);
     await manager.shutdown();
   });
 
-  it("直调路径：根带 onFailure → typed 拒、零 spawn", async () => {
+  it("直调路径：根带 onFailure → typed 拒、零 spawn（根面仍闭合）", async () => {
     const { manager, children } = makeManager();
     const t = createRunGraphTool({ manager, isEnabled: () => true });
     const input = { nodes: [{ id: "a", task: "ta" }], onFailure: "retry" };

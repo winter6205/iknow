@@ -29,6 +29,7 @@ import { runGraph } from "./scheduler.js";
 import { createSubAgentNodeExecutor } from "./node-executor.js";
 import type { LiveGraphLedger, LiveGraphLedgerHost } from "./ledger.js";
 import { resolveResidualSubgraph } from "./residual.js";
+import { validateOnFailureEdges } from "./on-failure.js";
 import type {
   GraphNodeResult,
   GraphSpec,
@@ -62,20 +63,32 @@ interface RunGraphNodeInput {
   readonly id: string;
   readonly task: string;
   readonly deps?: ReadonlyArray<string>;
+  /**
+   * live-graph-phase2 T1：标明的失败边（单终点）。目标必须是本次
+   * `nodes` 的某个 id；指向自己 = 标明的单格再进入，合法（spec Changes
+   * / ADR-0053）。目标语义（failed 才走、done 不走）由 T2 调度执行。
+   */
+  readonly onFailure?: string;
 }
 
 /**
- * live-graph-phase1 T4（spec SC5–SC12 / ADR-0050 / 0065 / 0067）：
- * 工具说明要让模型掌握活图账本的剩余子图语义：
+ * live-graph-phase2 T1（spec SC4–SC5 / ADR-0067 取代）：`onFailure`
+ * 由"阶段 1 拒失败标记"升级为已声明属性 —— 合法形（目标在本批 ids）
+ * 通过 readNodes + 校验层；非法形（值非 string、目标未知或已冻结）
+ * typed 拒、零 spawn。T2 才把 `onFailure` 接到调度按 NodeOutcome 走边。
+ *
+ * 工具说明要让模型掌握活图账本的剩余子图语义（live-graph-phase1 T4 /
+ * spec SC5–SC12 / ADR-0050 / 0065）：
  *   (a) 只交还要跑的节点（residual subgraph）—— 已终态 id 不要重交；
  *   (b) 已 done / failed 的 id 会冻结，再次提交会被 typed 拒绝；
  *   (c) deps 指向已 done 的上游可以省略该上游节点 —— host 合并账本、
- *       把上游产出写进下游 task（不写也得不出"重演已 done 的节点"）；
+ *       把上游产出写进下游 task；
  *   (d) 调用侧取消（abort）后，已 done 的 id 留在账本继续冻结，
  *       未完成的 id 可在下一段剩余子图里再交。
- * 阶段 1 拒失败边标记（onFailure 等）、不识别 wait —— 这些由 schema 与
- * handler 一起守门；说明文字保持正面引导（D9 paradigm），仅描述
- * 能力与边界。
+ *
+ * 阶段 2 起，`onFailure` 由 schema 接受；`wait:false` 仍不识别，
+ * 由 schema 与 handler 守门；说明文字正面引导（D9 paradigm），
+ * 仅描述能力与边界。
  */
 const DESCRIPTION =
   "Run several sub-agent tasks as one dependency graph in a single call. " +
@@ -94,8 +107,14 @@ const DESCRIPTION =
   "ids from earlier calls may omit those nodes and the host merges the " +
   "ledger to thread their outputs into downstream tasks. After a cancel, " +
   "only the done ids stay frozen, and unfinished ids can be re-submitted " +
-  "in the next residual subgraph. Failure-edge markers such as `onFailure` " +
-  "are reserved for a later phase and return a tool execution error here. " +
+  "in the next residual subgraph. Each node may also declare a marked " +
+  "failure edge with `onFailure`: the id of the single node to start once " +
+  "when this node finishes with status `failed`; the host traverses the " +
+  "failure edge only from `failed` nodes — a node that finishes as `done` " +
+  "or `skipped` leaves its failure edge unused. Failure-edge targets must " +
+  "be ids in the same submission (pointing at the same id is allowed as a " +
+  "marked single-cell re-entry); targets that are missing from the " +
+  "submission or already frozen on the ledger are rejected. " +
   "Only available when graph mode is on; calling it while graph mode is " +
   "off returns a tool execution error.";
 
@@ -114,18 +133,23 @@ function describeValidationError(err: GraphValidationError): string {
 
 /** 防御式读参：ajv strict 已守过形状，这里挡直调 handler 的路径。
  *
- * 两道闸门与 inputSchema 严格对齐（live-graph-phase1 T4 / spec SC10–SC11 /
- * ADR-0065 / ADR-0067）：
- *   - 根：除了 `nodes` 之外的任何键（包括 `wait` / `onFailure` /
- *     任何阶段 2 字段）→ typed 拒、零 spawn。
- *   - 节点：除了 `id` / `task` / `deps` 之外的任何键（包括
- *     `onFailure` 等阶段 2 失败边字段）→ typed 拒、零 spawn。schema
- *     是主合同，本函数是直调 handler 路径上的兜底；两边同拒才能
- *     在没有 ajv 编译（直调 / 单测）的路径上守住阶段 1 不认识
- *     `onFailure` 的合同。
+ * 两道闸门与 inputSchema 严格对齐（live-graph-phase1 T4 /
+ * live-graph-phase2 T1 / spec SC10–SC11 / ADR-0065）：
+ *   - 根：除了 `nodes` 之外的任何键（包括 `wait` 等未声明字段）→
+ *     typed 拒、零 spawn。`onFailure` 只允许出现在节点层。
+ *   - 节点：除了 `id` / `task` / `deps` / `onFailure` 之外的任何键
+ *     → typed 拒、零 spawn。`onFailure` 是已声明字段（live-graph-
+ *     phase2 T1；阶段 1 的 ADR-0067「拒失败标记」由此被取代）；目标
+ *     校验（未知 / 已冻）由 handler 在 schema/readNodes 通过后单独
+ *     做（不与形状闸混淆）。
  */
 const ROOT_KEYS: ReadonlySet<string> = new Set(["nodes"]);
-const NODE_KEYS: ReadonlySet<string> = new Set(["id", "task", "deps"]);
+const NODE_KEYS: ReadonlySet<string> = new Set([
+  "id",
+  "task",
+  "deps",
+  "onFailure",
+]);
 
 function readNodes(input: unknown): ReadonlyArray<RunGraphNodeInput> {
   const obj = (input ?? {}) as Record<string, unknown>;
@@ -145,11 +169,11 @@ function readNodes(input: unknown): ReadonlyArray<RunGraphNodeInput> {
   }
   return raw.map((entry, i) => {
     const node = (entry ?? {}) as Record<string, unknown>;
-    // 节点：拒未声明键（含 onFailure —— ADR-0067：阶段 1 拒失败标记）。
+    // 节点：拒未声明键（`onFailure` 已是声明字段 —— phase2 T1）。
     for (const key of Object.keys(node)) {
       if (!NODE_KEYS.has(key)) {
         throw new ToolExecutionError(
-          `run_graph: node[${i}] has unknown property \`${key}\` (only \`id\`, \`task\`, \`deps\` are accepted)`
+          `run_graph: node[${i}] has unknown property \`${key}\` (only \`id\`, \`task\`, \`deps\`, \`onFailure\` are accepted)`
         );
       }
     }
@@ -169,10 +193,21 @@ function readNodes(input: unknown): ReadonlyArray<RunGraphNodeInput> {
         `run_graph: node "${id}" has a non-array \`deps\``
       );
     }
+    const onFailure = node.onFailure;
+    if (onFailure !== undefined && typeof onFailure !== "string") {
+      // spec SC5 / Changes：onFailure 必须是 string；数组 / 数字 / 其它
+      // 非 string 值 → 两条失败边 / 形状错误的兜底（JSON 对象上"两条
+      // 失败边"只能以非法值形态出现，schema 是主合同 type:"string"，
+      // 直调路径此处拒）。零 spawn。
+      throw new ToolExecutionError(
+        `run_graph: node "${id}" has a non-string \`onFailure\` (only a string target id is accepted)`
+      );
+    }
     return {
       id,
       task,
       deps: (deps as ReadonlyArray<string> | undefined) ?? [],
+      ...(onFailure !== undefined ? { onFailure } : {}),
     };
   });
 }
@@ -330,6 +365,11 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
                 description:
                   "Ids this node waits for. Omit or leave empty for a root node.",
               },
+              onFailure: {
+                type: "string",
+                description:
+                  "Marked failure edge: the id of the single node to start if this one finishes with status `failed`. Target must be the id of another node in this submission (pointing at the same id is allowed — a marked single-cell re-entry). The host ignores `onFailure` from any node that finishes as `done`.",
+              },
             },
             required: ["id", "task"],
             additionalProperties: false,
@@ -370,8 +410,19 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
           `run_graph: invalid graph — ${errors.map(describeValidationError).join("; ")}`
         );
       }
-      // live-graph-phase1 T1:活图账本生命周期 —— 拓扑非法路径绝不建账本
-      // (SC1 + ASSUMPTIONS #4),所以本块紧跟 validateGraph 之后。
+      // live-graph-phase2 T1:失败边校验(SC5)——目标未知 / 已冻 → typed 拒、
+      // 零 spawn。放在 validateGraph 之后:仅因 deps 成环仍由 topo 单点拒
+      // (ADR-0059);onFailure 目标检查是独立一层(complexity-anti-drift
+      // 不把失败边塞进 Kahn)。self-onFailure 在 validateOnFailureEdges
+      // 里合法(spec Changes)。
+      const onFailureRejections = validateOnFailureEdges(nodes, ledger);
+      if (onFailureRejections.length > 0) {
+        throw new ToolExecutionError(
+          `run_graph: invalid failure edge(s) — ${onFailureRejections.join("; ")}`
+        );
+      }
+      // live-graph-phase1 T1:活图账本生命周期 —— 拓扑 / 失败边非法路径
+      // 绝不建账本(SC1 + ASSUMPTIONS #4),所以本块紧跟两道校验之后。
       if (ledger !== undefined) {
         ledger.ensure();
       }

@@ -36,6 +36,9 @@ export type {
 export { resolveResidualSubgraph } from "./residual.js";
 export { createLiveGraphLedger, createLiveGraphLedgerHost } from "./ledger.js";
 
+export type { OnFailureNode } from "./on-failure.js";
+export { validateOnFailureEdges } from "./on-failure.js";
+
 export type {
   GraphNodeProgress,
   GraphNodeSeed,
