@@ -1,6 +1,6 @@
 # Plan: TUI 显示单管线
 
-**Goal:** live 与历史只消费同一套落定 slot；成功 bash 只留命令标题；思考只画一行秒数；同一条工具不得双画。
+**Goal:** live 与历史只消费同一套落定 slot；成功 bash 只留命令标题；每一段已完成思考原位折成自己的秒数行；同一条工具不得双画。
 **Approach:** 不重开留/收/点名三类。先把 CONTEXT 已收口的 keep / 思考表面落到策略核与折叠行，再收掉 live/历史/legacy 叠画，最后给 Markdown `html` 加行帽并把预览前缀换成终端稳的 ASCII。Web 不做。
 **Spec link:** `specs/tui-tool-settled-appearance.md`（D4「成功 bash 五行走」被本轮 CONTEXT keep class 改写，见 T1 Inherits）
 **ACR:** all-yes（见下方）
@@ -30,10 +30,11 @@ minimal-change-verifier: yes — 一逻辑任务一 commit，按下方 tracer bu
    - **Acceptance:** idle 成功 bash 有标题、无 stdout/`⎿` 尾巴；同帧 write/edit 预览仍在；失败 bash 仍是红标题 + 一行短错误。`bun test tests/tui/` 中落定/预览相关套件绿。
    - Status: [ ] pending
 
-2. **[parallel] 思考只一条表面** — tag: `[implementation]`
-   - **Inherits:** CONTEXT unit fold：落定只画一行 `思考了 N 秒`（有 thinking duration）；无秒数不画该行、不回落 `[思考]`；正文默认收，Ctrl+O 展开。进行中 `思考中…` + 末 ≤3 行 peek。
+2. **[parallel] 思考按段原位折叠** — tag: `[implementation]`
+   - **Inherits:** CONTEXT unit fold（2026-09-08 操作员纠正）：一段思考完成 → 一行 `思考了 N 秒` → 随后正文或工具；同一用户任务里下一段思考再折一行。live 思考跟在当前段后面，禁止钉在 transcript 顶层摊全文。无秒数不画该行、不回落 `[思考]`；正文默认收，Ctrl+O 展开。
+   - **Inherits (测试冲突):** > Contradicts `tests/tui/thinking-fold-placement.test.tsx`「整轮只出现一次秒数、且只在 final 簇」— 那是后来为消重复写的闸，把分段秒数和工具折叠一起掐掉了。本 bullet 改合同，测例跟着改，不以那条为验收。
    - **Surface:** TUI
-   - **Acceptance:** 同一 assistant 回合 idle 帧里 `思考了 N 秒` 至多出现一次；无秒数时既无该行也无全文思考；Ctrl+O 后思考正文可见。现有 `tests/tui/` 思考折叠套件按此合同绿。
+   - **Acceptance:** 两轮「思考 → 工具/正文」的任务里，两段各有自己的 `思考了 N 秒`（秒数来自对应 assistant 的 thinkingMs，不把 final 秒数贴到前段）；进行中的思考不在顶层摊全文；前段已落定的工具折叠在后段思考开始后仍在。`bun test tests/tui/` 思考折叠套件按此合同绿。
    - Status: [ ] pending
    - [parallel]
 

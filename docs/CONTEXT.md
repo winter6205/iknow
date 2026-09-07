@@ -77,8 +77,8 @@ _Avoid_: 失败跟成功走同一收；把失败当成第四类工具表；失�
 **thinking duration（思考时长）**: assistant 消息的落盘属性——adapter 流式路径测量（首条 `thinking_delta` 至首个非思考增量），`thinkingMs` 经 commit 钩子随事件链落盘，`SessionFileV1` 上照 `messageCreatedAt` 模式重建并行数组（additive，schema 版本不升）；折叠簇时长 = 簇内消息求和。非 UI 测量值。
 _Avoid_: TUI 墙上时钟副产物（只活当前轮/重启即失/跨会话串味）；挂在 thinking 内容块上（污染 provider replay）；旧会话回填；`thinkingMs <= 0` 或非有限数落盘（字段缺席）
 
-**unit fold**: TUI 把思考段和 retract-class 工具按**已完成单元**收成折叠行，包括 turn 仍在 `running-fg` 的时候；历史 retract 折叠不随当前 turn 的 retract 计数开关。思考落定只画一行 `思考了 N 秒`（有 **thinking duration**）；无秒数不画该行；正文默认收，Ctrl+O 展开。
-_Avoid_: 只在 idle 才折叠；inLastTurn；用末轮 `turnToolTotal` 关掉全 transcript 折叠；per-message 再画一份思考摘要；无秒数回落 `[思考]`
+**unit fold**: TUI 把每一段已完成的思考、以及成功的 retract-class 工具，按**出现顺序原位**收成折叠行（一段思考 → 一行 `思考了 N 秒` → 随后正文或工具；下一轮模型再思考则再折一行）。turn 仍在 `running-fg` 时已完成单元也要折；历史段不随当前 live 思考开关。无秒数不画该行、不回落 `[思考]`；思考正文默认收，Ctrl+O 展开。
+_Avoid_: 整轮只留一行秒数；把秒数只挂在 final assistant / 末位工具簇；流式思考钉在 transcript 顶层摊全文；只在 idle 才折叠；inLastTurn；用末轮 `turnToolTotal` 关掉全 transcript 折叠；同一段思考再画一份 per-message 摘要
 
 **skill-load display projection**: 给人看的 skill-load 是 `loading skill <name>` 芯片，外加用户 remainder（若有）；SKILL 正文只留在进模型的 skill-load 信封里，不画成 user 气泡。
 _Avoid_: 把 `[skill-load name=]` 正文当作用户键入；加载技能；turn 结束后用落盘信封替换显示占位

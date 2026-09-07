@@ -446,11 +446,12 @@ test("idle：同一 assistant 消息内按 tool/text 位置渲染 keep 标题", 
   await toolTextTool.setup.renderer.destroy();
 });
 
-test("idle：单 assistant 回合多 tools 簇 → 「思考了 N 秒」至多出现一次（unit fold 收口）", async () => {
-  // CONTEXT.md unit fold _Avoid_:per-message / per-簇再画一份思考摘要。
-  // 同一条 assistant 消息内 tool → text → tool 切出两个 tools 簇,两簇
-  // anchor 是同一 messageIndex → 簇秒数相同 → 折叠行重复画「思考了 N 秒」。
-  // 收口语义:同一 assistant 回合 idle 帧里该行至多一次。
+test("idle：同一 assistant 消息拆成两个 tools 簇 → 「思考了 N 秒」不重复画（同消息去重）", async () => {
+  // CONTEXT.md unit fold(2026-09-08 操作员纠正):一段思考一行秒数;
+  // 去重单位 = 同一消息内的重复展示。同一条 assistant 消息内
+  // tool → text → tool 切出两个 tools 簇,两簇 anchor 是同一
+  // messageIndex → 簇秒数相同 → 不去重会重复画同一秒数。不同 assistant
+  // 消息之间不互相吞(见 thinking-fold-placement.test.tsx 分段各自画)。
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
