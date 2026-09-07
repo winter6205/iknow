@@ -153,6 +153,14 @@ import { createStreamDraft } from "../cli/stream-draft.js";
 import { ListView, relativeTime, type TuiListEntry } from "./list-view.js";
 import { McpView, type McpToolEntry } from "./mcp-view.js";
 import { ContextBar } from "./context-bar.js";
+// plans/tui-chrome-interaction.md T7：chrome-focus reducer 接线 ——
+// `reduceChromeFocus` 拥有 input/subagent(row)/graph 三环焦点（src/tui/
+// chrome-focus.ts），reducer 是纯函数，本文件只做组合（T7 验收：wiring
+// 只做组合，不长成 god-handler）。`graphChromeFocus`（graph-chrome.ts 旧
+// 二态 reducer）只保留 openView 视图层（full-screen GraphGroupView 的
+// Open/Close 仍是它的职责；不与三环焦点切换混）。
+import { type ChromeFocus, reduceChromeFocus } from "./chrome-focus.js";
+import { SubagentIdentityStrip } from "./subagent-identity-strip.js";
 // #647 T3 / ADR-0028:agent 现势显示(与 ContextBar 的 context usage 显示是
 // 两回事,命名刻意区分)—— 只读 agent_status 流事件的最新一份快照。
 import {
@@ -210,8 +218,6 @@ import { renderBannerLines, VERSION } from "./banner.js";
 import { copyToClipboard, type CopyResult } from "./clipboard.js";
 import {
   isSubagentTool,
-  SUBAGENT_TOOL_LABEL,
-  subagentDisplayMark,
   summarizeToolCall,
   formatLiveToolEvent,
 } from "./tool-summary.js";
@@ -575,6 +581,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [graphProgresses, setGraphProgresses] = useState<
     Record<string, GraphProgressSnapshot>
   >({});
+  // plans/tui-chrome-interaction.md T7：chrome-focus 三态焦点（input /
+  // subagent(row) / graph），reducer SSOT = reduceChromeFocus。`graphViewOpen`
+  // 仍是独立状态（full-screen GraphGroupView 的 open/close，由 graph-chrome
+  // 旧 reducer 的 openView 触发；与三环焦点切换正交）。
+  const [chromeFocus, setChromeFocus] = useState<ChromeFocus>({
+    kind: "input",
+  });
+  // 旧二态 `graphChromeFocus` 保留：仅用于 graph 全屏视图的 openView 决策
+  // （graph chrome 自身的 onTabComplete 旧路径仍存在，详见下方 onLeaveToChrome
+  // 改为 reduceChromeFocus）；后续清理时移除。
   const [graphChromeFocus, setGraphChromeFocus] =
     useState<GraphChromeFocus>("input");
   const [graphViewOpen, setGraphViewOpen] = useState(false);
@@ -1009,6 +1025,18 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }, 1000);
     return () => clearInterval(tick);
   }, [active.runState, subagentWatch, props.bridge]);
+  // plans T7：chrome-focus 焦点 clamp —— subagent 行数变化（live 子代理退出
+  // / 新增 / 完成窗口过期）时，chromeFocus.kind === "subagent" 的 row 可能
+  // 越界。Reducer 在 key press 时做 clamp，但本 effect 兜底无键位下的 stale
+  // 状态：focus 越界 → 回 input（reducer 同款语义：subagent 环不可达）。
+  // graph 焦点在 snapshot 消失时由上方 graphProgresses 的 nextGraph === null
+  // 分支 setGraphChromeFocus("input") 兜底（T3 既有），此处不重复。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (chromeFocus.kind !== "subagent") return;
+    if (chromeFocus.row < liveSubagentCount) return;
+    setChromeFocus({ kind: "input" });
+  }, [liveSubagentCount]);
   // #337 Phase C：skillCatalog 可选（缺省 = 空清单）；available() = 非 disabled
   // + 有 description、名字序。slash 候选混显「静态命令 + skill」。
   const skillCatalog = props.skillCatalog ?? emptySkillCatalog;
@@ -1042,13 +1070,22 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     ? (graphProgresses[active.conversationId] ?? null)
     : null;
   // #358 T7: 子代理工具对称 —— activeToolName 若是子代理工具（spawn_subagent /
-  // subagent_result，activeToolNameOf 派生）→ ContextBar 尾缀显示
-  // `▣ 子代理`（subagentDisplayMark/SUBAGENT_TOOL_LABEL 与 tool-summary 同源，
-  // 与 live-tool-preview 子代理形态一致）。
+  // plans/tui-chrome-interaction.md T7：ContextBar 不得有 `▣ 子代理` 后缀
+  // （acceptance 钉死）。子代理工具（spawn_subagent / subagent_result）
+  // activeToolName → undefined；子代理状态由 identity strip（prompt 正上方
+  // `{role} running...`）+ SubagentPanel（输入框下方 task list）单独表达。
+  // 普通工具 activeToolName 不变；缺 activeToolName 仍为 undefined。
   const activeToolLabel =
-    activeToolName !== undefined && isSubagentTool(activeToolName)
-      ? `${subagentDisplayMark("running")} ${SUBAGENT_TOOL_LABEL}`
-      : activeToolName;
+    activeToolName !== undefined && !isSubagentTool(activeToolName)
+      ? activeToolName
+      : undefined;
+  // T7: chrome-focus reducer 输入 —— `liveSubagentCount` 是「当前 live
+  // 子代理行数」（starting + running；与 projectSubagentLines 投影同源口径）。
+  // 用于 reduceChromeFocus 的 subagentCount 与 SubagentPanel 的 focusedRow
+  // 越界 clamp。
+  const liveSubagentCount = subagents.filter(
+    (s) => s.state === "starting" || s.state === "running"
+  ).length;
 
   // ── 权限 modal 应答落点 ──────────────────────────────────────────
   function resolvePermissionAsk(
@@ -1770,12 +1807,17 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             body,
             skillLoad.remainder
           );
-          // #377 项 D：发送文本含技能正文（进模型历史确定性生效），显示形态
-          // 用精简占位 —— 用户会话中只见「[加载技能 X] [remainder]」，正文不
-          // 泄漏。turn 完成后落盘权威消息原子替换（正文可见于会话文件）。
-          const displayText = `[加载技能 ${skillLoad.name}]${
-            skillLoad.remainder.length > 0 ? ` ${skillLoad.remainder}` : ""
-          }`;
+          // plans/tui-chrome-interaction.md Task 5：displayText 也走闭合
+          // 信封形态（empty body + 同样 remainder），让 render 层
+          // `projectSkillLoadUserText` 抽到同样的 `{name, remainder}` —— 运行
+          // 中的 echo 与落盘后的 transcript 显示一致（chip-only 或 chip+
+          // remainder），不再用中文「[加载技能 X]」占位。turn 完成后落盘权威
+          // 消息原子替换（render 同样路径投影，正文永进 ❯ 气泡）。
+          const displayText = buildSkillLoadText(
+            skillLoad.name,
+            "",
+            skillLoad.remainder.length > 0 ? skillLoad.remainder : undefined
+          );
           setNotice(undefined);
           await sendTurn(sendText, displayText);
         } catch (err) {
@@ -2143,7 +2185,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       hasSnapshot: graphProgress !== null,
       key: e.name,
     });
-    if (graphChromeFocus === "graph") {
+    // plans/tui-chrome-interaction.md T7：graph 全屏 open/close 仍由
+    // 旧 graphChromeFocus（input|graph 二态 reducer）的 openView 触发。
+    // 三态 chromeFocus 取代的是 chrome 环间的 Down/Up 切换（input ↔
+    // subagent(row) ↔ graph），由 reduceChromeFocus + PromptInput
+    // onLeaveToChrome 接管（见下方）。
+    if (chromeFocus.kind === "graph") {
       if (graphKey.openView === true) {
         const ids =
           graphProgress === null
@@ -2159,6 +2206,39 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         if (!isCtrlC) return;
       }
       if (!isCtrlC) return;
+    }
+
+    // plans/tui-chrome-interaction.md T7：chrome-focus 三态 reducer 全局
+    // Down/Up 键位 —— 当焦点不在 input（subagent 或 graph 环）时，Down/Up
+    // 由 reducer 全局消费（PromptInput 此时 disabled，不接键）。输入框路径
+    // 由 PromptInput 内部 onLeaveToChrome 接管（multiline 视觉末行 / 单行无
+    // 历史时让出键位）—— 与本分支正交，不重复触发。
+    //   - chromeFocus = input → PromptInput 自己处理 Down/Up（含 hint /
+    //     multiline / history / onLeaveToChrome 路径）；本分支不进。
+    //   - chromeFocus = subagent(row) → Down/Up 在 subagent 行间移动；Down
+    //     越出 last 行 → graph（若有快照）；Up 在 row=0 → 回 input。
+    //   - chromeFocus = graph → Up → 最后一个 subagent（若有）/input；Down
+    //     在最末环 → 原地。
+    // reducer 是纯函数，相同 input → 同样 output；用 !== identity 比对探测
+    // 焦点变化。
+    if (
+      chromeFocus.kind !== "input" &&
+      (e.name === "down" || e.name === "up") &&
+      view === "chat"
+    ) {
+      const next = reduceChromeFocus({
+        focus: chromeFocus,
+        key: e.name,
+        subagentCount: liveSubagentCount,
+        hasSnapshot: graphProgress !== null,
+      });
+      if (next.focus !== chromeFocus) {
+        setChromeFocus(next.focus);
+      }
+      // graph 全屏打开时不在此分支（已被上方 graphViewOpen 短路）；不打开
+      // 时全屏不会响应 Down/Up，本分支 preventDefault 等价 no-op（事件已被
+      // useKeyboard 消费，键不冒泡到其他 reducer）。
+      return;
     }
 
     // Shift+Tab 切 agent mode（W2 权限轮 + D-α graph overlay 的三态轮；
@@ -2694,7 +2774,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             rewindTargets !== undefined ||
             thinkingPickerOpen !== null ||
             memoryPickerOpen ||
-            graphChromeFocus === "graph" ||
+            // plans T7：input 失活条件由 chrome-focus 三态 reducer 接管
+            // —— focus 在 subagent 或 graph 时禁用输入框。
+            chromeFocus.kind !== "input" ||
             graphViewOpen
           }
           onChange={setInputValue}
@@ -2741,27 +2823,59 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           hintSuggestions={inputHintSuggestions}
           history={inputHistory}
           onLeaveToChrome={() => {
-            const next = reduceGraphChromeFocus({
-              focus: graphChromeFocus,
-              hasSnapshot: graphProgress !== null,
+            // plans/tui-chrome-interaction.md T7：使用三态 chrome-focus
+            // reducer（input/subagent(row)/graph）替换旧二态 graphChromeFocus
+            // —— reducer 由 PromptInput Down/Up 触发（「视觉末/首行 + onLeaveToChrome
+            // 让出」），key 在 prompt-input 内部已被消费，因此 reducer 在此
+            // 只按"离开 input"语义走：input → 第一个可达环（subagent 或 graph）。
+            const next = reduceChromeFocus({
+              focus: chromeFocus,
               key: "down",
+              subagentCount: liveSubagentCount,
+              hasSnapshot: graphProgress !== null,
             });
-            if (next.focus === "graph") {
-              setGraphChromeFocus("graph");
-              return true;
+            // reducer 是纯函数，相同 input → 同样 output；用 !== 比较 identity
+            // 即可探测焦点变化。
+            if (next.focus !== chromeFocus) {
+              setChromeFocus(next.focus);
             }
-            return false;
+            // onLeaveToChrome 返回 true 表示 PromptInput 已让出键位（消费
+            // 了 preventDefault），app 层不再二次处理。focus 不变（input 上
+            // 无可达环）→ 返回 false，让 PromptInput 保留状态（与 T6 reducer
+            // 同契约）。
+            return next.focus !== chromeFocus;
           }}
         />
       )}
-      {/* ADR-0037 T5: 会话 worktree 隔离现势行（ContextBar 上方,envPaneRows
-          槽位入账）。未绑定 → worktreeIsolationLines 返回空 → 不渲染。 */}
-      {view === "chat" &&
-        worktreeIsolationLines(active.workspaceRoot, cols).map((line, idx) => (
-          <text key={idx} fg={line.fg} wrapMode="none">
-            {line.text}
-          </text>
-        ))}
+      {/* plans/tui-chrome-interaction.md T7 —— 子代理身份条（immediately
+          above the prompt）。live 子代理 catalog id 用 `· ` 连接，无 task 文本。
+          不入 chrome 行账（永远单行，按 cols 视觉宽度截断；live === 0 → 不渲染）。
+          activeToolLabel 已剥除 `▣ 子代理`（dual render 移除）；identity strip
+          + SubagentPanel 双轨表达 live 子代理状态。 */}
+      {view === "chat" && (
+        <SubagentIdentityStrip subagents={subagents} cols={cols} />
+      )}
+      {/* plans T7 验收钉死的 footer 顺序（prompt 之下）：
+            subagent task list → ContextBar → worktree isolation line → graph。
+          历史顺序为 worktree → ContextBar → graph → subagent（误读 envPaneRows
+          槽位 + 无依据 graph 夹层）。T7 重排后：
+          - SubagentPanel（chrome-focus subagent 环的可见段，prompt 之下第一站）；
+          - ContextBar（model + ctx）；
+          - worktree isolation line（worktreeIsolationLines，未绑定 → 0 行）；
+          - GraphChromePanel（graph 环，chrome-focus 最末站）。 */}
+      {/* 子代理状态：输入框之下第一站。不计入 chrome 行账（panelRows=0）。
+          T7：传 focusedRow —— chrome-focus subagent(row) 焦点时该行展开 taskPreview
+          （不再截断）+ 加 `> ` 前缀；其余行保持原截断。focusedRow 仅作用于 live 行
+          （reducer 圈定的子集），SubagentPanel 内部按 liveIndex 投影。 */}
+      {view === "chat" && (
+        <SubagentPanel
+          subagents={subagents}
+          cols={cols}
+          focusedRow={
+            chromeFocus.kind === "subagent" ? chromeFocus.row : undefined
+          }
+        />
+      )}
       {view === "chat" && (
         <box flexDirection="row" justifyContent="flex-start">
           <ContextBar
@@ -2777,15 +2891,22 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           />
         </box>
       )}
+      {/* ADR-0037 T5: 会话 worktree 隔离现势行（T7 重排：现在位于 ContextBar
+          之下、graph 之上；envPaneRows 槽位入账不变）。未绑定 → worktreeIsolationLines
+          返回空 → 不渲染。 */}
+      {view === "chat" &&
+        worktreeIsolationLines(active.workspaceRoot, cols).map((line, idx) => (
+          <text key={idx} fg={line.fg} wrapMode="none">
+            {line.text}
+          </text>
+        ))}
       {view === "chat" && (
         <GraphChromePanel
           snapshot={graphProgress}
           cols={cols}
-          focused={graphChromeFocus === "graph"}
+          focused={chromeFocus.kind === "graph"}
         />
       )}
-      {/* 子代理状态：输入框 / ContextBar 下方。不计入 chrome 行账。 */}
-      {view === "chat" && <SubagentPanel subagents={subagents} cols={cols} />}
       {bgSession !== undefined && (
         <box>
           <text fg={pal.dim}>{bgStatusLine(bgSession.messages)}</text>

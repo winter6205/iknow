@@ -305,11 +305,14 @@ describe("session-state: userMessageEchoed (T2 即时回显)", () => {
     });
   });
 
-  test("#377 D：displayText 与 sent 分离 —— echo 仅追加 displayText，不含 sent 正文", () => {
-    // skill-load 场景：sent 含技能正文，displayText 是精简占位。
+  test("plans T5：displayText 与 sent 分离 —— echo 仅追加 displayText，不含 sent 正文", () => {
+    // skill-load 场景：sent 含技能正文（进模型历史确定性生效），displayText
+    // 是 buildSkillLoadText 形态的精简版（empty body + 同样 remainder），
+    // 让 render 层 projectSkillLoadUserText 抽到同样的 {name, remainder} —
+    // 运行中 echo 与落盘后的 transcript 显示一致。
     const draft = createDraftSession();
     const sent = '[skill-load name="echo"]\n# 回声技能\nfull body\n\n帮我做 X';
-    const displayText = "[加载技能 echo] 帮我做 X";
+    const displayText = '[skill-load name="echo"]\n\n帮我做 X';
     const echoed = userMessageEchoed(draft, displayText);
     expect(echoed.messages).toHaveLength(1);
     const only = echoed.messages[0]!;

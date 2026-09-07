@@ -523,25 +523,29 @@ describe("T5: running 态 partial 摘要渲染", () => {
   });
 });
 
-describe("formatRunningToolLine: 子代理工具专属运行行", () => {
-  test("spawn_subagent run → `▣ 派发子代理中…`", () => {
+describe("formatRunningToolLine: 子代理工具运行行（plans T7 钉死不再 `▣ 派发子代理中…`）", () => {
+  test("spawn_subagent run → 仅返 detail（无 `▣` glyph）", () => {
     const run: LiveToolRun = {
       id: "tu-spawn",
       name: "spawn_subagent",
       status: "running",
       input: undefined,
     };
-    expect(formatRunningToolLine(run)).toBe("▣ 派发子代理中…");
+    const line = formatRunningToolLine(run);
+    expect(line).toBe("派发子代理：?");
+    expect(line.includes("▣")).toBe(false);
   });
 
-  test("subagent_result run → `▣ 轮询子代理中…`", () => {
+  test("subagent_result run → 仅返 detail（无 `▣` glyph）", () => {
     const run: LiveToolRun = {
       id: "tu-poll",
       name: "subagent_result",
       status: "running",
       input: undefined,
     };
-    expect(formatRunningToolLine(run)).toBe("▣ 轮询子代理中…");
+    const line = formatRunningToolLine(run);
+    expect(line).toBe("轮询 ?");
+    expect(line.includes("▣")).toBe(false);
   });
 
   test("bash run 回归 → `[运行中] bash`（普通工具形态不受影响）", () => {

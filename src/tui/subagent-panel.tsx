@@ -39,6 +39,13 @@ export interface SubagentPanelProps {
   readonly cols: number;
   /** 测试注入用；缺省 Date.now()。 */
   readonly nowMs?: number;
+  /**
+   * T7：当前聚焦的 live 子代理行下标（chrome-focus reducer 的
+   * `{ kind: "subagent", row }` 派生）。仅作用于 live 行 —— 聚焦行
+   * taskPreview 不截断 + 加 `> ` 前缀；其余行保持原截断行为。
+   * 越界或 undefined → 无聚焦（等价原行为）。
+   */
+  readonly focusedRow?: number;
 }
 
 export interface SubagentLine {
@@ -83,15 +90,23 @@ function subagentDisplayName(info: SubagentInfo): string {
  *   - 失败行：`✗ {name} {preview} · {reason}`；
  *   - 完成淡出行：`✓ {N} 完成`；
  *   - 全量列出，不折叠 footer；不计入 chrome 行账。
+ *
+ * `focusedRow`（可选，T7 接线）：当 `live[i]` 的下标 `i === focusedRow` 时，
+ * taskPreview 不再截断（仍按 cols 视觉宽度兜底），并加 `> ` 前缀标记聚焦；
+ * 其余 `live` 行保持原截断。failed 行不参与 focus（focusedRow 仅作用于
+ * live 行 —— 子代理 chrome 的 focus 仅在 live 环移动）。`undefined` 或
+ * 越界 → 不聚焦（所有行按原行为渲染）。
  */
 export function projectSubagentLines(
   subagents: ReadonlyArray<SubagentInfo>,
   nowMs: number,
-  cols: number
+  cols: number,
+  focusedRow?: number
 ): ReadonlyArray<SubagentLine> {
   if (subagents.length === 0) return [];
   const narrow = cols < 40;
   const live: SubagentLine[] = [];
+  let liveIndex = -1;
   let doneCount = 0;
   for (const s of subagents) {
     const name = clipOneLineVisual(subagentDisplayName(s), NAME_BUDGET);
@@ -99,16 +114,37 @@ export function projectSubagentLines(
     const previewBudget = Math.max(4, cols - DECOR_RESERVE - nameWidth);
     const narrowReasonBudget = Math.max(4, cols - (2 + nameWidth + 3));
     if (s.state === "starting" || s.state === "running") {
+      liveIndex += 1;
       const icon = s.state === "starting" ? "○" : "●";
       const fg = s.state === "starting" ? tuiPalette.dim : tuiPalette.running;
       const elapsed = formatRunDuration(elapsedSec(s.startedAt, nowMs));
+      // 聚焦判定：仅 live 行参与；聚焦行 → 不截断 preview（仍按 cols 兜底）+
+      // `> ` 前缀；其余行保持原截断行为。`focusedRow` 越界（≥ live.length）→
+      // 等价于未聚焦（不做前缀）。
+      const isFocused = focusedRow !== undefined && focusedRow === liveIndex;
+      const focusedPrefix = isFocused ? "> " : "";
+      const previewRendered = isFocused
+        ? clipOneLineVisual(
+            s.taskPreview,
+            Math.max(
+              4,
+              cols -
+                visualWidth(focusedPrefix + icon + " " + name + " ") -
+                visualWidth(" · " + elapsed)
+            )
+          )
+        : clipOneLineVisual(s.taskPreview, previewBudget);
       live.push(
         narrow
-          ? { icon, fg, text: `${icon} ${name} · ${elapsed}` }
+          ? {
+              icon,
+              fg,
+              text: `${focusedPrefix}${icon} ${name} · ${elapsed}`,
+            }
           : {
               icon,
               fg,
-              text: `${icon} ${name} ${clipOneLineVisual(s.taskPreview, previewBudget)} · ${elapsed}`,
+              text: `${focusedPrefix}${icon} ${name} ${previewRendered} · ${elapsed}`,
             }
       );
     } else if (s.state === "failed") {
@@ -160,7 +196,8 @@ export function SubagentPanel(props: SubagentPanelProps): ReactNode {
   const lines = projectSubagentLines(
     props.subagents,
     props.nowMs ?? Date.now(),
-    props.cols
+    props.cols,
+    props.focusedRow
   );
   if (lines.length === 0) return null;
   return (

@@ -25,7 +25,10 @@ import { isAgentStatusText } from "../harness/agent-status.js";
 import { isSubagentDrainText } from "../harness/subagent/host-drain.js";
 import { isVerifyInjectedText } from "../harness/verify/inject.js";
 import { stripPrefetchOverlay } from "../harness/memory/prefetch.js";
-import { SKILL_LOAD_PREFIX_SHORT } from "../harness/skill/body.js";
+import {
+  SKILL_LOAD_PREFIX,
+  SKILL_LOAD_PREFIX_SHORT,
+} from "../harness/skill/body.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
 
 export type SessionRunState = "idle" | "running-fg" | "running-bg";
@@ -302,6 +305,78 @@ export function isTuiHiddenUserMessage(
     isSubagentDrainText(text) ||
     isVerifyInjectedText(text)
   );
+}
+
+/**
+ * plans/tui-chrome-interaction.md Task 5：skill-load chip 投影（render-side SSOT）。
+ *
+ * 从 user message 文本里抽出 `{name, remainder}`，给 TUI user 分支渲染用；
+ * SKILL body 永远不进 ❯ 气泡。模型历史仍收 `buildSkillLoadText` 信封（session-api
+ * 侧不动），TUI 不画正文。
+ *
+ * 命中形态（与 `buildSkillLoadText` 装配一致）：
+ *   `[skill-load name="<name>"]\n<body>[ + \n\n<remainder>]`
+ *
+ * 拒绝形态（返回 null → 落回普通 user 文本渲染）：
+ *   - 完全不以 `[skill-load ` 开头；
+ *   - `[skill-load name="` 之后没有闭合的 `"`（前缀短命中但 name 没闭合）；
+ *   - `]` 之后没有 `\n`（不是 buildSkillLoadText 形态）。
+ *
+ * 边界：
+ *   - body 巨大：lastIndexOf `\n\n` 仍能定位 buildSkillLoadText 唯一添加的
+ *     分隔符（约定 `createSkillBody` 末尾是 `</skill_files>` 不带末尾 `\n\n`，
+ *     body 自身不会撞上分隔符）；
+ *   - remainder 非空 → 抽出；
+ *   - remainder 空 → 仍然命中（chip-only 路径）；
+ *   - body 内 `\n\n` 段：最后一个才是 buildSkillLoadText 的 separator。
+ */
+export interface SkillLoadProjection {
+  readonly name: string;
+  readonly remainder: string;
+}
+
+export function projectSkillLoadUserText(
+  text: string
+): SkillLoadProjection | null {
+  if (!text.startsWith(SKILL_LOAD_PREFIX_SHORT)) return null;
+  // 闭合形态：`[skill-load name="..."]` 要求短前缀之后紧接 `name="`。
+  if (!text.startsWith(SKILL_LOAD_PREFIX)) return null;
+  const afterPrefix = text.slice(SKILL_LOAD_PREFIX.length);
+  const closingQuote = afterPrefix.indexOf('"');
+  if (closingQuote === -1) return null;
+  const name = afterPrefix.slice(0, closingQuote);
+  // 闭合 ] 与正文之间必须是 `\n`（buildSkillLoadText 装配约定），
+  // 否则不是合法形态 → 落回普通文本。
+  const afterName = afterPrefix.slice(closingQuote + 1);
+  if (!afterName.startsWith("]\n")) return null;
+  const tail = afterName.slice("]\n".length);
+  // buildSkillLoadText 仅在 remainder 非空时追加 `\n\n<remainder>`，且唯一
+  // 一次。但 body 自身（createSkillBody 产物）含多段 `\n\n` 分隔，末段以
+  // `</skill_files>` 结尾 —— 仅靠 lastIndexOf `\n\n` 会把 body 末段误判为
+  // remainder。借 body 末尾固定 `</skill_files>` 锚定位 separator：
+  //   `</skill_files>\n\n<remainder>` 命中 → split；否则 remainder 空。
+  // body 为空（罕见）时退化为 tail 开头 `\n\n<remainder>` 形态（empty body
+  // + 非空 remainder 仍带 `\n\n` 前缀）。
+  const marker = "</skill_files>";
+  const markerIdx = tail.lastIndexOf(marker);
+  if (markerIdx !== -1) {
+    const after = tail.slice(markerIdx + marker.length);
+    if (after.startsWith("\n\n")) {
+      return { name, remainder: after.slice("\n\n".length) };
+    }
+    return { name, remainder: "" };
+  }
+  if (tail.startsWith("\n\n") && tail.length > "\n\n".length) {
+    return { name, remainder: tail.slice("\n\n".length) };
+  }
+  // 无 marker、无空 body 分隔 → 退化为 lastIndexOf `\n\n`（兼容合成测试文本
+  // 与历史 envelope 形态，body 自身不带 `</skill_files>`）。约定 body 不以
+  // `\n\n` 结尾；命中 `\n\n` 即 buildSkillLoadText 的 separator（罕见路径）。
+  const fallbackSep = tail.lastIndexOf("\n\n");
+  if (fallbackSep !== -1) {
+    return { name, remainder: tail.slice(fallbackSep + "\n\n".length) };
+  }
+  return { name, remainder: "" };
 }
 
 export function seedInputHistory(

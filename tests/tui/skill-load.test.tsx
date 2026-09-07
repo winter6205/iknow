@@ -239,16 +239,21 @@ describe("Phase C: /skill-name 加载发送", () => {
     expect(userText).toContain("<skill_files>");
     expect(userText.endsWith("帮我做 X")).toBe(true);
 
-    // echo 与发送文本一致：对话区用户消息显示完整 skill-load 头（turnFinished
-    // 权威刷新后显示的就是落盘全文）。
+    // plans/tui-chrome-interaction.md T5：屏幕永远只显示 `loading skill <name>`
+    // 芯片 + remainder（若有），SKILL 正文不进 ❯ 气泡 —— 与 echo 共享同
+    // 一投影（render 层剥 body）。
     await untilFrame(
       app.setup,
-      (f) => f.includes('[skill-load name="echo"]'),
+      (f) => f.includes("loading skill echo"),
       8000,
-      "echo-full"
+      "chip"
     );
-    expect(app.setup.captureCharFrame()).toContain("帮我做 X");
+    expect(app.setup.captureCharFrame()).toContain("❯ 帮我做 X");
     expect(app.setup.captureCharFrame()).toContain("回声完成");
+    // 落盘 envelope 仍含正文（模型历史字节级稳定，session-api 侧不动），
+    // 但屏上不画 —— 锁 `screen 不含 SKILL body`。
+    expect(app.setup.captureCharFrame().includes("# 回声技能")).toBe(false);
+    expect(app.setup.captureCharFrame().includes("<skill_files>")).toBe(false);
 
     await app.destroy();
     await fx.cleanup();
@@ -269,11 +274,20 @@ describe("Phase C: /skill-name 加载发送", () => {
     await app.typeText("/echo 帮我做 X");
     await app.pressEnter();
 
-    // 运行中（未完成）：echo 是精简占位，不含技能正文。
+    // 运行中（未完成）：echo 与 turnFinished 后共享同一 chip 投影（render
+    // 层剥 body）。plans T5：displayText 与落盘 envelope 共用 buildSkillLoadText
+    // 形态，render 路径一致 → 屏上始终是 chip-only / chip+remainder。
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("loading skill echo"),
+      8000,
+      "chip-running"
+    );
     const runFrame = app.setup.captureCharFrame();
-    expect(runFrame).toContain("[加载技能 echo]");
-    expect(runFrame).not.toContain("回声技能"); // 正文 frontmatter description 不泄漏
-    expect(runFrame).not.toContain("<skill_files>");
+    expect(runFrame).toContain("loading skill echo");
+    expect(runFrame).toContain("❯ 帮我做 X");
+    expect(runFrame.includes("回声技能")).toBe(false); // 正文 frontmatter description 不泄漏
+    expect(runFrame.includes("<skill_files>")).toBe(false);
 
     // 等 turn 完成 → inflight 清空。
     await until(
@@ -282,14 +296,19 @@ describe("Phase C: /skill-name 加载发送", () => {
       "skill-turn-done"
     );
 
-    // 完成态：echo 被落盘权威消息替换 → 全量正文可见（与 #1 一致）。
+    // 完成态：落盘 envelope 替换 echo；render 同一投影 → 屏上仍只 chip +
+    // remainder，正文永进 ❯ 气泡。
     await untilFrame(
       app.setup,
-      (f) => f.includes('[skill-load name="echo"]'),
+      (f) => f.includes("loading skill echo"),
       8000,
-      "echo-full"
+      "chip-after"
     );
-    expect(app.setup.captureCharFrame()).toContain("帮我做 X");
+    const finalFrame = app.setup.captureCharFrame();
+    expect(finalFrame).toContain("loading skill echo");
+    expect(finalFrame).toContain("❯ 帮我做 X");
+    expect(finalFrame.includes("回声技能")).toBe(false);
+    expect(finalFrame.includes("<skill_files>")).toBe(false);
 
     await app.destroy();
     await fx.cleanup();
