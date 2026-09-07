@@ -15,6 +15,13 @@ export type NodeStatus = "pending" | "running" | "done" | "failed" | "skipped";
 export interface GraphNodeSpec {
   readonly id: string;
   readonly deps: ReadonlyArray<string>; // 本节点依赖的节点 id
+  /**
+   * live-graph-phase2 T1/T2：标明的失败边（单终点）。仅当本节点
+   * `NodeOutcome` 为 `failed` 时启动终点一次（ADR-0055）；指向自己 =
+   * 单格再进入（ADR-0053）。T2 起被 outcome 调度器消费；T1 阶段该
+   * 字段被 `validateOnFailureEdges` 静态校验、调度器忽略。
+   */
+  readonly onFailure?: string;
 }
 export interface GraphSpec {
   readonly nodes: ReadonlyArray<GraphNodeSpec>;

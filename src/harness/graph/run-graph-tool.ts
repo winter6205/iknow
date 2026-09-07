@@ -26,11 +26,13 @@ import type { GraphProgressSnapshot } from "./progress.js";
 import { createGraphProgressTracker } from "./progress.js";
 import { validateGraph, type GraphValidationError } from "./topo.js";
 import { runGraph } from "./scheduler.js";
+import { runGraphWithFailureEdges } from "./outcome-scheduler.js";
 import { createSubAgentNodeExecutor } from "./node-executor.js";
 import type { LiveGraphLedger, LiveGraphLedgerHost } from "./ledger.js";
 import { resolveResidualSubgraph } from "./residual.js";
 import { validateOnFailureEdges } from "./on-failure.js";
 import type {
+  GraphExecution,
   GraphNodeResult,
   GraphSpec,
   NodeContext,
@@ -277,12 +279,17 @@ function mergeResidual(
   readonly specNodes: ReadonlyArray<{
     readonly id: string;
     readonly deps: ReadonlyArray<string>;
+    readonly onFailure?: string;
   }>;
   readonly ledgerOutputs: Readonly<Record<string, string>>;
 } {
   if (ledger === undefined) {
     return {
-      specNodes: nodes.map((n) => ({ id: n.id, deps: n.deps ?? [] })),
+      specNodes: nodes.map((n) => ({
+        id: n.id,
+        deps: n.deps ?? [],
+        ...(n.onFailure !== undefined ? { onFailure: n.onFailure } : {}),
+      })),
       ledgerOutputs: {},
     };
   }
@@ -293,7 +300,18 @@ function mergeResidual(
   if (merged.rejections.length > 0) {
     throw new ToolExecutionError(`run_graph: ${merged.rejections.join("; ")}`);
   }
-  return { specNodes: merged.nodes, ledgerOutputs: merged.ledgerOutputs };
+  // T2:把 `onFailure` 重新挂到合并后的 specNodes 上 —— residual 层只
+  // 处理 dep / id(账本冻结语义),失败边由 handler 在此贴回去给调度器。
+  const onFailureById = new Map(nodes.map((n) => [n.id, n.onFailure] as const));
+  const specNodes = merged.nodes.map((n) => {
+    const of = onFailureById.get(n.id);
+    return {
+      id: n.id,
+      deps: n.deps,
+      ...(of !== undefined ? { onFailure: of } : {}),
+    };
+  });
+  return { specNodes, ledgerOutputs: merged.ledgerOutputs };
 }
 
 /**
@@ -403,6 +421,10 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
       // T2:剩余子图合并走 mergeResidual;账本缺席 → 零行为变化。
       const { specNodes, ledgerOutputs } = mergeResidual(nodes, ledger);
       const spec: GraphSpec = { nodes: specNodes };
+      // T2:本段是否带失败边 —— 决定走哪条调度线(见下方 runGraph 分流)。
+      const hasFailureEdges = specNodes.some(
+        (n) => (n as { onFailure?: string }).onFailure !== undefined
+      );
       // EXIT:拓扑非法 —— 在任何 spawn 之前 fail-fast(spec SC4 零 spawn)。
       const errors = validateGraph(spec);
       if (errors.length > 0) {
@@ -456,22 +478,45 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
       };
       const tracker = createGraphProgressTracker(spec.nodes);
       try {
-        const execution = await runGraph(spec, exec, {
-          onWave: (wave, ids) => {
+        // T2:分流 —— 无失败边的图仍走 plain `runGraph`(阶段 1 Kahn,
+        // 字节级一致,SC9);带失败边则走 outcome 调度器,按 NodeOutcome
+        // 启动唯一 onFailure 终点一次,允许同 id 再进入(SC1/SC2/SC6)。
+        const progressHooks = {
+          onWave: (wave: number, ids: ReadonlyArray<string>): void => {
             emitGraphProgress(ctx, tracker.onWave(wave, ids));
           },
-          onNode: (result) => {
+          onNode: (result: GraphNodeResult): void => {
             emitGraphProgress(ctx, tracker.onNode(result));
           },
-        });
-        // T1/T2/T3 冻结语义集中在 freezeResults;详情见该函数。
+        };
+        let violation: { from: string; target: string } | undefined;
+        let execution: GraphExecution;
+        if (hasFailureEdges) {
+          const r = await runGraphWithFailureEdges(spec, exec, {
+            ...progressHooks,
+            ...(signal ? { signal } : {}),
+          });
+          execution = r.execution;
+          violation = r.violation;
+        } else {
+          execution = await runGraph(spec, exec, progressHooks);
+        }
+        // T1/T2/T3 冻结语义集中在 freezeResults;详情见该函数。violation
+        // 与 abort 走同一通道:done 部分保留进账本(SC8 + ADR-0060),不
+        // 当成功数据返回。
+        const cancelled = signal?.aborted === true;
         if (ledger !== undefined) {
-          freezeResults(ledger, execution.results, signal?.aborted === true);
+          freezeResults(ledger, execution.results, cancelled);
+        }
+        if (violation !== undefined) {
+          throw new ToolExecutionError(
+            `run_graph: failure edge from "${violation.from}" targets "${violation.target}" which is already done — frozen node cannot be re-run; submit a new node id instead`
+          );
         }
         // EXIT:归因调用侧取消 —— 与 spawn_subagent 一致(executor 因
         // signal.aborted 归一 execution_failed:cancelled)。半张图的部分结果
         // 不当成功数据返回:调用方已经不要这轮了。
-        if (signal?.aborted) {
+        if (cancelled) {
           throw new ToolExecutionError(
             "run_graph: cancelled by caller abort while the graph was running"
           );

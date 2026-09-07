@@ -28,6 +28,13 @@ export type { RunGraphOptions } from "./scheduler.js";
 export { runGraph } from "./scheduler.js";
 
 export type {
+  FailureEdgeViolation,
+  FailureEdgeExecutionResult,
+  RunGraphWithFailureEdgesOptions,
+} from "./outcome-scheduler.js";
+export { runGraphWithFailureEdges } from "./outcome-scheduler.js";
+
+export type {
   FrozenTerminal,
   SettleStatus,
   LiveGraphLedger,
