@@ -2203,6 +2203,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       setGraphChromeFocus("graph");
     }
     if (chromeFocus.kind === "graph") {
+      // 旧 reducer 在 graph 环内只剩两个职责：Enter → openView（全屏视图）、
+      // Escape → 退出环。Down/Up **不**在此处理（旧 reducer 会把
+      // graphChromeFocus 拉回 input 后 unconditional return，三环 reducer
+      // 的 graph→Up→subagent/input 转移变成死代码 + 焦点陷阱）——落到底部
+      // 三环分支消费，离开 graph 时同步 graphChromeFocus。
       if (graphKey.openView === true) {
         const ids =
           graphProgress === null
@@ -2213,11 +2218,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         setGraphViewOpen(true);
         if (!isCtrlC) return;
       }
-      if (graphKey.focus !== graphChromeFocus) {
-        setGraphChromeFocus(graphKey.focus);
+      if (e.name === "escape") {
+        setChromeFocus({ kind: "input" });
+        setGraphChromeFocus("input");
         if (!isCtrlC) return;
       }
-      if (!isCtrlC) return;
+      if (e.name !== "down" && e.name !== "up" && !isCtrlC) return;
     }
 
     // plans/tui-chrome-interaction.md T7：chrome-focus 三态 reducer 全局
@@ -2246,6 +2252,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       });
       if (next.focus !== chromeFocus) {
         setChromeFocus(next.focus);
+        // 双 reducer 同步（离开方向）：三环焦点从 graph 退出时，旧二态
+        // reducer 的 focus 也要回 input，否则下一次 Enter 的 openView 判定
+        // 读到 stale "graph" 意外开全屏。
+        if (
+          chromeFocus.kind === "graph" &&
+          next.focus.kind !== "graph" &&
+          graphChromeFocus !== "input"
+        ) {
+          setGraphChromeFocus("input");
+        }
       }
       // graph 全屏打开时不在此分支（已被上方 graphViewOpen 短路）；不打开
       // 时全屏不会响应 Down/Up，本分支 preventDefault 等价 no-op（事件已被
