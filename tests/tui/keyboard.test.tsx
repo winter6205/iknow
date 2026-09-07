@@ -274,7 +274,9 @@ test("普通键（pressKey 'a'）：T6 PromptInput 消费，渲染仍稳定不�
   await setup.renderer.destroy();
 });
 
-test("修饰键 ctrl+c：useKeyboard handler 分流到 Ctrl+C 分支（notice 显示）", async () => {
+test("修饰键 ctrl+c：useKeyboard handler 分流到 Ctrl+C 分支（notice 显示，stderr 零输出）", async () => {
+  // stderr 零输出是防回归核心：处置日志曾是裸 process.stderr.write，会以
+  // 裸字节画进 alternate-screen 的输入框区域，看起来像「打断词注入输入框」。
   const stderr = captureStderr();
   const setup = await renderApp();
   try {
@@ -284,16 +286,17 @@ test("修饰键 ctrl+c：useKeyboard handler 分流到 Ctrl+C 分支（notice �
     // notice 触发「Ctrl+C：无前台运行中的 turn；/quit 退出。」
     expect(frame).toContain("Ctrl+C");
     expect(frame).toContain("/quit");
-    expect(stderr.lines.join("")).toContain(
-      '"event":"ctrl_c","disposition":"can_interrupt_false"'
-    );
+    // 空闲打断 = 无副作用：不向 stderr 写任何东西（含 OpenTUI 的诊断流）。
+    expect(stderr.lines.join("")).toBe("");
   } finally {
     await setup.renderer.destroy();
     stderr.restore();
   }
 });
 
-test("Ctrl+C：canInterrupt 为真但 controller 缺席时记录 controller_missing", async () => {
+test("Ctrl+C：canInterrupt 为真但 controller 缺席时静默无副作用", async () => {
+  // 不变式：running-fg 但 aborter 已摘（turn finally 收尾竞态）→ 不崩、
+  // 不误伤、无输出。观测面 = 帧 + stderr（controller_missing 处置日志已删）。
   const stderr = captureStderr();
   const initialSession = Object.freeze({
     ...createDraftSession(),
@@ -303,9 +306,8 @@ test("Ctrl+C：canInterrupt 为真但 controller 缺席时记录 controller_miss
   try {
     setup.mockInput.pressCtrlC();
     await settle(setup);
-    expect(stderr.lines.join("")).toContain(
-      '"event":"ctrl_c","disposition":"controller_missing"'
-    );
+    expect(() => setup.captureCharFrame()).not.toThrow();
+    expect(stderr.lines.join("")).toBe("");
   } finally {
     await setup.renderer.destroy();
     stderr.restore();
