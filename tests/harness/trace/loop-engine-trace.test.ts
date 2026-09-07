@@ -2,7 +2,7 @@
  * T4 LoopEngine instrumentation tests (GH #64).
  */
 
-import { describe, it } from "vitest";
+import { describe, it, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -15,6 +15,10 @@ import { createStubModel } from "../../../src/harness/stubs/stub-model.ts";
 import { createStubTool } from "../../../src/harness/stubs/stub-tool.ts";
 import { createNoopTraceService } from "../../../src/harness/trace/noop.ts";
 import { createJsonlTraceService } from "../../../src/harness/trace/jsonl.ts";
+import {
+  setActiveExtraSecrets,
+  clearActiveExtraSecrets,
+} from "../../../src/harness/sandbox/env-isolation.ts";
 import type {
   TraceService,
   LlmCallRecord,
@@ -170,7 +174,10 @@ describe("T4 criterion 8/11: JsonlTraceService integration", () => {
     const turn0ToolId = turn0Tool["tool_call_id"] as string;
     const turn1LlmId = turn1Llm["llm_call_id"] as string;
     assert.equal(turn0Tool["parent_llm_call_id"], turn0LlmId);
-    assert.equal(turn0Tool["arguments_captured"], false);
+    // 不变式: tool_call 落盘必带 arguments(trace 观测侧需要查"哪个工具写了什么"),
+    // argumentsCaptured 必须为 true 且 arguments 内容与模型发出的 input 一致。
+    assert.equal(turn0Tool["arguments_captured"], true);
+    assert.deepEqual(turn0Tool["arguments"], { value: "ping" });
     assert.equal(turn0Tool["result_captured"], false);
     assert.deepEqual(turn0Turn["llm_call_ids"], [turn0LlmId]);
     assert.deepEqual(turn0Turn["tool_call_ids"], [turn0ToolId]);
@@ -723,6 +730,231 @@ describe("T3 (v2): session L1 root record (recordSession instrumentation)", () =
     assert.equal(lines.length, 2);
     assert.equal(lines[0]!["record_type"], "llm_call");
     assert.equal(lines[1]!["record_type"], "turn");
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+// ---------------------------------------------------------------------------
+// arguments 落盘形态 — tool_call 写侧必须带 arguments(view.input 全量落盘,
+// 与 messages 同走 mask 管线)
+// ---------------------------------------------------------------------------
+describe("tool_call arguments 落盘形态", () => {
+  // #406 A4: 输出 mask 兜底链路在本 describe 内共享同一个 secret 槽位,需
+  // 在每个用例前后清理避免污染。#406 先例:jsonl.test.ts:719-720 beforeEach/afterEach。
+  beforeEach(() => clearActiveExtraSecrets());
+  afterEach(() => clearActiveExtraSecrets());
+
+  it("object arguments 含中文与嵌套字段:arguments_captured=true 且深等一致", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "trace-args-cn-"));
+    const write = createStubTool({
+      name: "write",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          path: { type: "string" },
+          body: { type: "string" },
+        },
+        required: ["path", "body"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([write]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            {
+              id: "t1",
+              name: "write",
+              input: { path: "/tmp/笔记.md", body: "你好，世界\n第二行" },
+            },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const trace = createJsonlTraceService({
+      filePath: tmpDir,
+      conversationId: "args-cn",
+    });
+    await run("go", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+      trace,
+    });
+    const lines = parseJsonl(join(tmpDir, "args-cn.jsonl"));
+    const toolCall = lines.find((l) => l["record_type"] === "tool_call")!;
+    assert.equal(toolCall["arguments_captured"], true);
+    assert.deepEqual(toolCall["arguments"], {
+      path: "/tmp/笔记.md",
+      body: "你好，世界\n第二行",
+    });
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("较大 arguments 对象(~10KB):arguments 完整落盘无截断", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "trace-args-big-"));
+    const big = "x".repeat(10_000);
+    const write = createStubTool({
+      name: "write",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { payload: { type: "string" } },
+        required: ["payload"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([write]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "write", input: { payload: big } }],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const trace = createJsonlTraceService({
+      filePath: tmpDir,
+      conversationId: "args-big",
+    });
+    await run("go", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+      trace,
+    });
+    const lines = parseJsonl(join(tmpDir, "args-big.jsonl"));
+    const toolCall = lines.find((l) => l["record_type"] === "tool_call")!;
+    assert.equal(toolCall["arguments_captured"], true);
+    const args = toolCall["arguments"] as { payload: string };
+    assert.equal(args.payload.length, 10_000);
+    assert.equal(args.payload, big);
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("secret mask:出现在 arguments 中的密钥值在落盘行被遮蔽", async () => {
+    // 不变式: tool_call arguments 与 llm_call messages 走同一 writeLine mask 链路
+    // (jsonl.ts:185 对整行 JSON.stringify 调用 currentOutputMask().mask);若
+    // arguments 含 registry 密钥值, 落盘文件应包含 *** 且不含真值。
+    setActiveExtraSecrets(["sk-tool-arg-secret"]);
+    const tmpDir = mkdtempSync(join(tmpdir(), "trace-args-mask-"));
+    const write = createStubTool({
+      name: "write",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { token: { type: "string" } },
+        required: ["token"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([write]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "t1", name: "write", input: { token: "sk-tool-arg-secret" } },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const trace = createJsonlTraceService({
+      filePath: tmpDir,
+      conversationId: "args-mask",
+    });
+    await run("go", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+      trace,
+    });
+    const filePath = join(tmpDir, "args-mask.jsonl");
+    const raw = readFileSync(filePath, "utf8");
+    assert.ok(raw.includes("***"), `落盘行应含 mask 结果（实际=${raw}）`);
+    assert.ok(
+      !raw.includes("sk-tool-arg-secret"),
+      `落盘行不应含 registry 真值（实际=${raw}）`
+    );
+    // arguments key 仍在(真值仅被 mask, key 结构未变)。
+    const lines = parseJsonl(filePath);
+    const toolCall = lines.find((l) => l["record_type"] === "tool_call")!;
+    assert.equal(toolCall["arguments_captured"], true);
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("tool 无 input(undefined):arguments key 缺席而非 null", async () => {
+    // 不变式: Postel(ADR-0003 D9) — 可选字段仅存在时落盘;view.input 为 undefined
+    // 时 JSON.stringify 丢弃 undefined → arguments key 应在 JSONL 行中缺席,
+    // 不是 null, 也不是 arguments_captured=false。
+    const tmpDir = mkdtempSync(join(tmpdir(), "trace-args-empty-"));
+    const noInput = createStubTool({
+      name: "noInput",
+      next: (_input: unknown) => ({}),
+    });
+    const reg = createRegistry([noInput]);
+    const exec = createExecutor(reg);
+    // 模型声明 tool_call 但 input 缺省(由 stub-model 透传 undefined)。
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "t1", name: "noInput", input: undefined as unknown },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const trace = createJsonlTraceService({
+      filePath: tmpDir,
+      conversationId: "args-empty",
+    });
+    await run("go", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+      trace,
+    });
+    const lines = parseJsonl(join(tmpDir, "args-empty.jsonl"));
+    const toolCall = lines.find((l) => l["record_type"] === "tool_call")!;
+    // arguments_captured=true 表明执行侧已尝试捕获(忠实于 Postel),但因
+    // view.input===undefined → toSnakeCaseRecord 透传 → JSON.stringify 丢弃 →
+    // 行中 arguments key 缺席("arguments" not in keys),不是 null。
+    assert.equal(toolCall["arguments_captured"], true);
+    const keys = Object.keys(toolCall);
+    assert.ok(
+      !keys.includes("arguments"),
+      `view.input 为 undefined 时 arguments key 应缺席(keys=${keys.join(",")})`
+    );
     rmSync(tmpDir, { recursive: true, force: true });
   });
 });
