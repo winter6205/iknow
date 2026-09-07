@@ -797,9 +797,12 @@ test("T7 纯 tool_use 消息：底色 box 包裹后渲染不崩，摘要行可�
   await setup.renderer.destroy();
 });
 
-// -- 子代理工具专属显示（spec #146） --------------------------------------
+// -- 子代理工具专属显示（plans/tui-chrome-interaction.md T7） ---------------
+// 不变式：子代理工具不再以 `▣ 子代理` 形态作为 live/history 工具卡（dual
+// render 移除）——状态由 identity strip（prompt 上方）+ SubagentPanel 表达，
+// 工具卡仅显示 detail。
 
-test("spawn_subagent 运行中（statusMap 无该 id）→ `▣ 子代理 · 派发子代理：…`，不含 `[运行中] spawn_subagent`", async () => {
+test("spawn_subagent 运行中 → 仅 detail（无 `▣` glyph，无 `[运行中] spawn_subagent` 残留）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -813,13 +816,13 @@ test("spawn_subagent 运行中（statusMap 无该 id）→ `▣ 子代理 · 派
   };
   const setup = await renderBlocks(msg);
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("▣ 子代理 · 派发子代理：调查渲染层");
-  // 不残留普通工具形态 `[运行中] spawn_subagent`。
+  expect(frame).toContain("派发子代理：调查渲染层");
+  expect(frame.includes("▣")).toBe(false);
   expect(frame).not.toContain("[运行中] spawn_subagent");
   await setup.renderer.destroy();
 });
 
-test("spawn_subagent 完成 ok → `✓ 子代理 · …`", async () => {
+test("spawn_subagent 完成 ok → 仅 detail（无 `✓` glyph、无 `[完成]` 前缀）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -835,12 +838,13 @@ test("spawn_subagent 完成 ok → `✓ 子代理 · …`", async () => {
     statusMap: new Map([["tu-spawn", false]]),
   });
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("✓ 子代理 · 派发子代理：调查渲染层");
+  expect(frame).toContain("派发子代理：调查渲染层");
+  expect(frame.includes("✓")).toBe(false);
   expect(frame).not.toContain("[完成]");
   await setup.renderer.destroy();
 });
 
-test("spawn_subagent 完成 failed → `✗ 子代理 · …`", async () => {
+test("spawn_subagent 完成 failed → 仅 detail（无 `✗` glyph、无 `[失败]` 前缀）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -856,12 +860,13 @@ test("spawn_subagent 完成 failed → `✗ 子代理 · …`", async () => {
     statusMap: new Map([["tu-spawn", true]]),
   });
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("✗ 子代理 · 派发子代理：调查渲染层");
+  expect(frame).toContain("派发子代理：调查渲染层");
+  expect(frame.includes("✗")).toBe(false);
   expect(frame).not.toContain("[失败]");
   await setup.renderer.destroy();
 });
 
-test("subagent_result 完成 ok → `✓ 子代理 · 轮询 t-1`", async () => {
+test("subagent_result 完成 ok → 仅 detail（无 `✓` glyph）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -877,7 +882,8 @@ test("subagent_result 完成 ok → `✓ 子代理 · 轮询 t-1`", async () => 
     statusMap: new Map([["tu-poll", false]]),
   });
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("✓ 子代理 · 轮询 t-1");
+  expect(frame).toContain("轮询 t-1");
+  expect(frame.includes("✓")).toBe(false);
   await setup.renderer.destroy();
 });
 
