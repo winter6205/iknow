@@ -1387,6 +1387,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     let lastUsage: TokenUsage | null = null;
     let interrupted: boolean | undefined;
     let uncancellableOperationNotice: string | undefined;
+    // transport_retry 过程性 notice 追踪 —— completed/maxTurns 收尾时只清
+    // 本轮 retry 落下的 notice,不碰 stop_summary 等其他 notice 来源。
+    let retryNoticeShown = false;
     // Predicate / continue ValidationError is not a turn: keep EXIT notice,
     // restore idle, do not reload (reload overwrite → 刷新会话失败).
     let skipTurnRefresh = false;
@@ -1444,6 +1447,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           uncancellableOperationNotice = event.text;
         }
         setNotice({ lines: [event.text] });
+      }
+      if (event.type === "transport_retry") {
+        // Bug（2026-09-07）:429/网络故障的重试进度可见化。落到 notice 同一
+        // 渲染面;turn 结束后被异常 stopReason notice / cancel notice 覆盖。
+        retryNoticeShown = true;
+        setNotice({
+          lines: [
+            `⠿ 连接重试 ${event.attempt}/${event.maxAttempts}（${event.detail}），退避中…`,
+          ],
+        });
       }
       if (event.type === "agent_status") {
         // #647 T3 / ADR-0028:按本回合 conversationId(targetId —— 事件到达
@@ -1627,6 +1640,28 @@ export function TuiApp(props: TuiAppProps): ReactNode {
                   ? ["已打断（无新内容，未落 checkpoint）"]
                   : ["已打断当前 turn"],
         });
+      } else if (
+        stopReason === "protocolError" ||
+        stopReason === "timeout" ||
+        stopReason === "nonSuccessStop" ||
+        stopReason === "emptyFinalResponse" ||
+        stopReason === "fused"
+      ) {
+        // Bug（2026-09-07）：429/网络类故障在 loop-engine 被压平成正常返回
+        // （TransportRetryExhaustedError → protocolError，finalText 为空），
+        // 此前只有 throw 路径与 cancelled 出 notice → 一轮静默结束。异常
+        // stopReason 落同一 notice 渲染面，用户至少能看到 turn 未成功。
+        // maxTurns 不并入：已有专属完成反馈（验证行）。
+        setNotice({
+          lines: [
+            `⚠ turn 未成功结束（${stopReason}）：可能是连接或模型故障，请重试`,
+          ],
+        });
+      } else if (retryNoticeShown) {
+        // completed / maxTurns 收尾:只清本轮 transport_retry 落下的过程性
+        // notice,避免成功回合残留「退避中…」;stop_summary 等 notice 不动
+        // (它们在 maxTurns 收尾后仍需呈现,见 max-turns/stream-draft 测试)。
+        setNotice(undefined);
       }
     } catch (err) {
       // 刷新失败也要落回 idle，否则会话卡在 running-fg。

@@ -8,6 +8,7 @@
 import { classifyFault, type FaultEvent } from "../fault-class.js";
 import { TransportRetryExhaustedError } from "../errors.js";
 import type { ModelAdapter } from "./types.js";
+import { safeEmitStream } from "../stream.js";
 
 export { TransportRetryExhaustedError };
 
@@ -51,6 +52,11 @@ export async function sleepWithAbort(
   });
 }
 
+/** 人读 fault 短码（`llm_http: 429` / `llm_network`）——仅 transport_retry 事件文案用。 */
+function statusOf(fault: FaultEvent): string {
+  return fault.kind === "llm_http" ? `llm_http: ${fault.status}` : fault.kind;
+}
+
 export function withTransportRetry<T extends Pick<ModelAdapter, "step">>(
   adapter: T,
   options: TransportRetryOptions
@@ -69,7 +75,8 @@ export function withTransportRetry<T extends Pick<ModelAdapter, "step">>(
       } catch (err) {
         lastErr = err;
         if (isAbort(err, signal)) throw err;
-        const fault = classifyFault(translate(err));
+        const rawFault = translate(err);
+        const fault = classifyFault(rawFault);
         const canRetry = fault === "retry" && attempt < maxAttempts;
         if (!canRetry) {
           if (fault === "retry") {
@@ -77,6 +84,15 @@ export function withTransportRetry<T extends Pick<ModelAdapter, "step">>(
           }
           throw err;
         }
+        // Bug（2026-09-07）:重试进度不再静默 —— 退避前向宿主流事件通道发
+        // transport_retry（detail 供「连接重试」类指示文案）。观察者错误被
+        // safeEmitStream 吞掉,绝不反流回重试路径。
+        safeEmitStream(request.onStream, {
+          type: "transport_retry",
+          attempt,
+          maxAttempts,
+          detail: statusOf(rawFault),
+        });
         const delay =
           backoffMs[attempt - 1] ?? backoffMs[backoffMs.length - 1] ?? 0;
         await sleep(delay, signal);

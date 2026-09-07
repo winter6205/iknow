@@ -26,6 +26,11 @@
 import { describe, expect, test } from "bun:test";
 import { projectSkillLoadUserText } from "../../src/tui/session-state.js";
 import { buildSkillLoadText } from "../../src/harness/skill/body.js";
+import {
+  MEMORY_ADVISORY_PREFIX,
+  MEMORY_PREFETCH_DISCIPLINE,
+  MEMORY_PREFETCH_END,
+} from "../../src/harness/memory/prefetch.js";
 
 describe("projectSkillLoadUserText: 闭合形态命中", () => {
   test("[skill-load name=...] 仅 body，无 remainder → chip-only", () => {
@@ -80,6 +85,30 @@ describe("projectSkillLoadUserText: 闭合形态命中", () => {
   test("buildSkillLoadText 空 body + 空 remainder → chip-only", () => {
     const text = buildSkillLoadText("echo", "");
     expect(projectSkillLoadUserText(text)).toEqual({
+      name: "echo",
+      remainder: "",
+    });
+  });
+
+  // Bug 复现（2026-09-07）：session-api 落盘的 user turn 是
+  // attachPrefetchOverlay(overlay + MEMORY_PREFETCH_END + envelope)，
+  // 带 memory advisory 前缀的磁盘文本必须仍命中 chip，否则 reload 后
+  // 投影失败 → 78KB body 全文溢出渲染（Ctrl+C 强制重排才「弹回」）。
+  test("memory prefetch overlay 前缀 + envelope → 剥离 overlay 后命中 chip", () => {
+    const envelope = buildSkillLoadText("echo", "body text", "帮我做 X");
+    const overlay = `${MEMORY_ADVISORY_PREFIX}\n\n${MEMORY_PREFETCH_DISCIPLINE}\n\n### 过去的工作\nid: m1\n\n一些正文`;
+    const diskText = `${overlay}${MEMORY_PREFETCH_END}${envelope}`;
+    expect(projectSkillLoadUserText(diskText)).toEqual({
+      name: "echo",
+      remainder: "帮我做 X",
+    });
+  });
+
+  test("memory prefetch overlay 前缀 + chip-only envelope → chip-only", () => {
+    const envelope = buildSkillLoadText("echo", "body text");
+    const overlay = `${MEMORY_ADVISORY_PREFIX}\n\n${MEMORY_PREFETCH_DISCIPLINE}`;
+    const diskText = `${overlay}${MEMORY_PREFETCH_END}${envelope}`;
+    expect(projectSkillLoadUserText(diskText)).toEqual({
       name: "echo",
       remainder: "",
     });
