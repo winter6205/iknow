@@ -2090,6 +2090,15 @@ async function stepWithTrace(opts: {
   const toolDurationMs = performance.now() - toolStartMono;
   const toolCallIds: string[] = [];
   if (opts.deps.trace) {
+    // tool_call 落盘需要 arguments(trace 观测痛点: 39MB trace 中查"哪个 tool_call
+    // 写了某文件"只能 grep 原始 jsonl 的 llm_call messages)。与 #645 loop-detector
+    // 同源 toolCallViews 解析 input, 保证 trace 落盘的 input 与运行时使用的 input
+    // 是同一份;result 不落盘避免 trace 体积翻倍(已在 llm_call tool_result 全量
+    // 落盘)。mask 管线由 jsonl.ts 的 writeLine 对整行 JSON 统一处理(同 messages),
+    // 写入侧无需裁剪或开关,符合 types.ts:55-62 「不在写入侧裁剪」决策。
+    const inputById = new Map(
+      toolPhase.toolCallViews.map((v) => [v.id, v.input] as const)
+    );
     for (const result of toolPhase.toolResults) {
       const toolName =
         nameById.get(result.toolUseId) ??
@@ -2102,7 +2111,8 @@ async function stepWithTrace(opts: {
           startedAt: toolStartedAt,
           endedAt: toolEndedAt,
           durationMs: toolDurationMs,
-          argumentsCaptured: false,
+          argumentsCaptured: true,
+          arguments: inputById.get(result.toolUseId),
           resultCaptured: false,
           status: result.kind === "ok" ? "ok" : "error",
           error:

@@ -48,6 +48,7 @@ import type {
 } from "../../src/harness/mcp/manager.ts";
 import type { IknowSettings } from "../../src/config/settings.ts";
 import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
+import { gitIn } from "../_helpers/git-env.ts";
 import { readFile, writeFile } from "node:fs/promises";
 import type { AnthropicNativeMessage } from "../../src/harness/index.ts";
 import type { SessionFileV1 } from "../../src/session-api/store/index.ts";
@@ -57,7 +58,9 @@ import type { SessionFileV1 } from "../../src/session-api/store/index.ts";
 const roots: string[] = [];
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8" });
+  // gitTestEnv 免疫：push hook 注入的 GIT_DIR 等会让临时 repo 的 commit 钉到
+  // 父仓库（幽灵失败，见 tests/_helpers/git-env.ts 头注）。
+  return gitIn(cwd, args);
 }
 
 function makeGitRepo(): string {
@@ -350,7 +353,9 @@ describe("worktree isolation wiring (T4 — passthrough)", () => {
   it("session on an unrelated (manual) git worktree: gate blocks without provisioning; the create-worktree tool fail-closed foreign_worktree", async () => {
     await setSettingsIsolation(true);
     const repo = makeGitRepo();
-    const manualWt = join(repo, "..", "iknow-wt-hub-manual");
+    // 唯一路径而非固定名：上一轮被强杀时 afterAll 不执行，固定名残留会让
+    // `git worktree add` 报 already exists（非幂等幽灵失败）。
+    const manualWt = mkdtempSync(join(tmpdir(), "iknow-wt-hub-manual-"));
     roots.push(manualWt);
     git(repo, "worktree", "add", manualWt, "-b", "manual-hub-x");
     const { hub, conversationId } = await makeHubWithSession(repo);
@@ -409,7 +414,9 @@ describe("worktree isolation wiring (switch OFF)", () => {
   it("T4 boundary — switch OFF: a session on a foreign/unrelated worktree mutates exactly like today (no gate, no block)", async () => {
     await setSettingsIsolation(false);
     const repo = makeGitRepo();
-    const manualWt = join(repo, "..", "iknow-wt-hub-off");
+    // 唯一路径而非固定名：上一轮被强杀时 afterAll 不执行，固定名残留会让
+    // `git worktree add` 报 already exists（非幂等幽灵失败）。
+    const manualWt = mkdtempSync(join(tmpdir(), "iknow-wt-hub-off-"));
     roots.push(manualWt);
     git(repo, "worktree", "add", manualWt, "-b", "manual-hub-off");
     const { hub, conversationId } = await makeHubWithSession(repo);

@@ -159,13 +159,33 @@ export type GitRunner = (
   cwd: string
 ) => Promise<GitResult>;
 
-/** Production runner: `git <args>` in `cwd`. Spawn errors propagate as throws. */
+/**
+ * Production runner: `git <args>` in `cwd`. Spawn errors propagate as throws.
+ *
+ * cwd 语义的 runner 必须剥离父 git 进程注入的 GIT_DIR / GIT_WORK_TREE 等 env
+ * （如 hook 子进程里启动 iknow 时）：这些变量会把 `rev-parse` 等按 cwd 探测
+ * 的调用钉到父仓库上，探测的不再是 opts.cwd 指向的 repo。
+ */
 export const defaultGitRunner: GitRunner = (args, cwd) =>
   new Promise((resolve, reject) => {
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    for (const key of [
+      "GIT_DIR",
+      "GIT_WORK_TREE",
+      "GIT_INDEX_FILE",
+      "GIT_OBJECT_DIRECTORY",
+      "GIT_COMMON_DIR",
+      "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+      "GIT_PREFIX",
+      "GIT_SUPER_PREFIX",
+      "GIT_CEILING_DIRECTORIES",
+    ]) {
+      delete env[key];
+    }
     execFile(
       "git",
       [...args],
-      { cwd, encoding: "utf8" },
+      { cwd, encoding: "utf8", env },
       (err, stdout, stderr) => {
         if (
           err &&

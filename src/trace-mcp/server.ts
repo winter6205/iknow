@@ -31,6 +31,7 @@ const queryTraceInputSchema = z
     task_id: z.string().optional(),
     parent_turn_id: z.string().optional(),
     turn_id: z.string().optional(),
+    contains: z.string().optional(),
     limit: z.number().int().min(1).max(QUERY_TRACE_MAX_LIMIT).optional(),
     offset: z.number().int().min(0).optional(),
   })

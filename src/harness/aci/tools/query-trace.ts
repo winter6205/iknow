@@ -98,6 +98,7 @@ export function createQueryTraceTool(
         task_id: { type: "string" },
         parent_turn_id: { type: "string" },
         turn_id: { type: "string" },
+        contains: { type: "string" },
         limit: {
           type: "integer",
           minimum: 1,

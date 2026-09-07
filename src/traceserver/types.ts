@@ -75,6 +75,17 @@ export interface TraceQuery {
    * 缺省 0 = 从文件头全读。由前端把上一轮响应里的 `offset` 原样传回。
    */
   readonly resumeOffset?: number;
+  /**
+   * 大小写敏感的原始行子串匹配 (trace-mcp-args-search task): 命中
+   * JSONL 行级全文 — llm_call 命中其 messages 序列化字段、tool_call 命中其
+   * arguments (待写侧 tool_call 落盘 arguments 后)。与 record_type/status 等
+   * 精确 filter AND 组合, 与 limit/offset 分页正交。
+   *
+   * 提供 contains 时绕过 8 MiB 现状查询截断, 改走 `MAX_TRACE_BYTES_FOR_CONTAINS`
+   * 上限, 避免 39 MB 级别 trace 上的「只扫前 8 MB」盲区。`undefined` / 缺省
+   * = 行为完全不变 (现状查询走 8 MiB 帽, 不接 raw line 过滤)。
+   */
+  readonly contains?: string;
 }
 
 export interface TraceQueryResult {

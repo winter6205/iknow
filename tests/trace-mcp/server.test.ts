@@ -903,3 +903,58 @@ describe("the three read-side faces agree on the parameter plane (SC18)", () => 
     ).toEqual([[], ["conversation_id"], ["conversation_id", "record_id"]]);
   });
 });
+
+describe("trace MCP server — query_trace contains (trace-mcp-args-search task)", () => {
+  // SC18 schema diff 测在两条面 schema 上都会看到 contains, 自然通过。补一条
+  // 端到端: MCP 面输入 contains → 核 (reader) → 结果。
+  it("propagates contains to the core and returns the matching record", async () => {
+    const connected = await connectFixture();
+    try {
+      const result = await connected.client.callTool({
+        name: "query_trace",
+        arguments: {
+          conversation_id: "conversation-1",
+          contains: "private prompt",
+        },
+      });
+      const text = result.content[0];
+      assert.equal(text?.type, "text");
+      if (text?.type !== "text") throw new Error("expected text content");
+      const body = JSON.parse(text.text) as {
+        records: Array<{ llm_call_id?: string }>;
+      };
+      assert.equal(body.records.length, 2);
+      assert.deepEqual(
+        body.records.map((record) => record.llm_call_id).sort(),
+        ["llm-1", "llm-2"]
+      );
+    } finally {
+      await connected.close();
+    }
+  });
+
+  it("rejects an empty contains via zod .strict() as SDK schema-rejection", async () => {
+    // MCP 面的 .strict() 不拒 contains 本身 (它是 schema 的合法属性), 但
+    // 核抛 TraceQueryValidationError — 此处验面 catch arm 把它前缀成
+    // `query_trace: ...` 后回到调用方手里。
+    const connected = await connectFixture();
+    try {
+      const failed = await connected.client.callTool({
+        name: "query_trace",
+        arguments: {
+          conversation_id: "conversation-1",
+          contains: "",
+        },
+      });
+      const text = failed.content[0];
+      assert.equal(text?.type, "text");
+      if (text?.type !== "text") throw new Error("expected text content");
+      expect(failed.isError).toBe(true);
+      expect(text.text).toBe(
+        "query_trace: contains must be a non-empty string"
+      );
+    } finally {
+      await connected.close();
+    }
+  });
+});

@@ -7,4 +7,14 @@
 # - test:changed：基于 git HEAD 差异的窄测试（同 pre-commit 的窄路径），
 #   覆盖本次实际变更文件，体感 ~1min。
 # - 若确需跳过本钩子（如仅文档/纯数据变更），用 git push --no-verify（谨慎）。
+
+# git 会在钩子环境内自动注入 GIT_DIR / GIT_INDEX_FILE / GIT_WORK_TREE /
+# GIT_COMMON_DIR,子进程(vitest 里那些自建临时 git repo 的测试,例如
+# worktree-gate / hub-worktree-isolation / worktree-rebind / rebind-boundary-matrix)
+# 会继承并污染它们的 init,导致
+#   "Current directory is not a git directory!" / worktree add already exists
+# 在独立运行时 vitest 全绿,只在钩子里稳态挂。在钩子入口先 unset,
+# 让子进程拿到的就是"普通 shell 环境"。(与 .husky/pre-commit 同一防护)
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_COMMON_DIR
+
 npm run test:changed
