@@ -43,6 +43,7 @@
 - `skill-load-write-root.md` — skill 正文装配收口 + 写根 trailer（slash / `skill()` / Web 共用装配口；与 worker prior 同一写根文案）；plan: `plans/skill-load-write-root.md`
 - `disclosure-index-align.md` — 索引档对齐（#631 短描述收回、直呼加载、超限降档、删 `skill_search`）；amends ADR-0043 必经 `tool_search` 读法；plan: `plans/disclosure-index-align.md`
 - `406-secret-roundtrip-mask.md` — Secret roundtrip mask（supersedes `#126` hook-system）
+- `user-hook-router.md` — 用户钩子同进程 router（builtin / user 两车道；V1 声明式 PreToolUse/PreWrite/PreCommit；plan: `plans/user-hook-router.md`）；不替代 #126 契约或 #406 roundtrip
 - `task-worktree-lifecycle.md` — 隔离 ON 后进树/命名/list/remove 与身份根 grep·glob；plan: `plans/task-worktree-lifecycle.md`（amend ADR-0037 §3）；门禁分类与 unbound 文案 **amended by** `casual-ask-context-hygiene.md`
 
 ### 身份与记忆

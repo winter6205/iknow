@@ -51,7 +51,7 @@ const CANCELLED_RESULT_MESSAGE = "cancelled";
  *   - "guard-init"：secrets-guard 构造期 pattern 编译失败（T3 消费者）
  */
 export interface HookErrorEvent {
-  readonly phase: "pre" | "post" | "guard-init";
+  readonly phase: "pre" | "post" | "guard-init" | "user-rule-init";
   readonly tool?: string;
   readonly message: string;
 }

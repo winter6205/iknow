@@ -27,6 +27,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { loadIknowEnv, type IknowEnv } from "../../config/env.js";
+import { loadIknowSettings } from "../../config/settings.js";
 import {
   WORKSPACE_ROOT_ENV_KEY,
   resolveWorkspaceRoot,
@@ -48,6 +49,8 @@ import { DEFAULT_LSP_IDLE_TIMEOUT_MS } from "../lsp/client.js";
 import { deriveFileRefs, writeToolNamesFrom } from "./file-refs.js";
 import { createPermissionPolicy } from "../permission/policy.js";
 import { createNoAskUser } from "../permission/ask-user.js";
+import { createUserHookRouter } from "../hooks/index.js";
+import { classifyCall } from "../isolation/worktree-gate.js";
 import { createIknowSystemResolver } from "../identity/index.js";
 import { createGitSnapshotProvider } from "../identity/git-snapshot.js";
 import { createSkillScanner } from "../skill/scanner.js";
@@ -397,11 +400,24 @@ export async function createWorkerRuntime(
 
   const baseExecutor = createExecutor(reg.inner);
   const policy = createPermissionPolicy();
+  // user-hook-router（specs/user-hook-router.md / ADR-0055）: 子代理引擎经
+  // 同一份 merged settings 装配 user rules（spec Does #6 —— 无第二套后门）。
+  // settings 读根用 projectIdentityRoot（缺席回落 cwd，与 T3 身份发现同
+  // 款回落）：改绑后 worker cwd 是没有 `.iknow` 的裸 task worktree，项目级
+  // settings 只在主仓身份根上。enabled 缺席/false → 透明 hook（SC1）。
+  const userHook = createUserHookRouter(
+    loadIknowSettings({
+      cwd: projectIdentityRoot,
+      home: userHome,
+    }).hooks,
+    { classify: classifyCall }
+  );
   const executor = createAciExecutor({
     inner: baseExecutor,
     catalog: reg.catalog,
     policy,
     askUser,
+    hooks: { preToolUse: userHook },
   });
 
   // surface "ask" → shouldIncludeBootstrap false (无 BOOTSTRAP 段); worker
