@@ -159,6 +159,9 @@ describe("priorMessagesFromEnvelope — worker write-root prior (T3 ADR-0037 §4
   it("写根段字节 = writeRootSegment helper（文案 SSOT，specs/skill-load-write-root.md）", () => {
     // worker prior 与 skill 正文 trailer（createSkillBody）共用同一文案
     // 函数 —— 这里锁死字节相等，防止 worker 源内再长出第二份写根长句。
+    // T4 (write-situation-disclosure)：T6 之前 worker envelope 暂无处境字
+    // 段 → 桥接默认 `writable_main`（与改造前逐字节相等）；T6 接入
+    // envelope.writeSituation 后此断言用真实枚举重写。
     const sandboxRoot = "/tmp/task-wt";
     const env: WorkerEnvelope = { task: "t", sandboxRoot };
     const prior = priorMessagesFromEnvelope(env, passthroughEncodeUserText);
@@ -166,7 +169,7 @@ describe("priorMessagesFromEnvelope — worker write-root prior (T3 ADR-0037 §4
     const text = prior[0]!.content
       .map((b) => (b.type === "text" ? b.text : ""))
       .join("");
-    assert.equal(text, writeRootSegment(sandboxRoot)!);
+    assert.equal(text, writeRootSegment("writable_main", sandboxRoot)!);
   });
 });
 

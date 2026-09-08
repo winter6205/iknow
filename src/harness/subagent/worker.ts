@@ -674,8 +674,13 @@ export function priorMessagesFromEnvelope(
   // T3: 当前写根段。envelope.sandboxRoot 是必填,空串即视为缺席。
   // 写根文案 SSOT = writeRootSegment（specs/skill-load-write-root.md）:
   // 与 skill 正文 trailer（createSkillBody）共用同一函数,源内不留第二份长句。
+  // T4 桥接（write-situation-disclosure）：T6 之前 worker envelope 暂无处境
+  // 字段 —— 默认按隔离 OFF (`writable_main`) 渲染，与改造前逐字节相等
+  // （sandboxRoot 非空时 ① 与旧形态字节一致）。T6 会在 envelope 上新增
+  // `writeSituation` 字段并替换此默认值，③ 态直接走 typed skip（参 OQ1
+  // 采纳 (b)）。
   if (typeof env.sandboxRoot === "string" && env.sandboxRoot.length > 0) {
-    const segment = writeRootSegment(env.sandboxRoot);
+    const segment = writeRootSegment("writable_main", env.sandboxRoot);
     if (segment !== null) {
       prior.push(encodeUserText(segment));
     }
