@@ -32,6 +32,7 @@ import {
 } from "../../src/harness/build-engine.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
+import type { IknowSettings } from "../../src/config/settings.ts";
 import { createMcpManager } from "../../src/harness/mcp/manager.ts";
 import type { McpClientHandle } from "../../src/harness/mcp/manager.ts";
 import {
@@ -1886,6 +1887,199 @@ describe("buildHarnessEngine — T9 display surface", () => {
       await built.shutdown?.();
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T2 / plans/worktree-exclusive-lock.md / ADR-0070: `isolation.worktreeExclusive`
+// 装配期透传缝。OFF 档 enter 行为与今日逐字节一致（SC2 钉死）；ON 档
+// `built.worktreeExclusive === true`，session-api hub（T3 实施 bullet）据此
+// 决定是否在 `worktreeEnter` closure 内跑占用检查。
+//
+// 锁定不变式：
+//   - settings 缺席 / 非 `true` → `built.worktreeExclusive === false`（OFF 档
+//     严格走今日 enter 路径，不引入新拒绝路径）；不依赖 host 缝在场；
+//   - settings = true → `built.worktreeExclusive === true`；与 `worktreeOnMutate`
+//     正交、两字段独立解析（矩阵鉴面）；
+//   - 与 `isolationOn` 形态不同：`worktreeExclusive` 是纯设置判定（不带
+//     `&& isolationHost` 前置），严格反映 settings 解析结果；
+//   - 装配期一次性读取（ADR-0037 §5 硬要求 9），改绑不触发 settings 重载。
+// ---------------------------------------------------------------------------
+
+describe("buildHarnessEngine — T2 worktreeExclusive transmission seam", () => {
+  it("OFF档（settings 缺席）：built.worktreeExclusive === false, OFF 零回归", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t2-exclusive-off-"));
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t2-exclusive-off"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: {},
+      });
+      // OFF 档：未设 → false；不依赖 host 缝在场（无 worktreeIsolation 入参）。
+      expect(built.worktreeExclusive).toBe(false);
+      // 不污染 isolationOn 形态：未注入 worktreeIsolation host → isolationOn false。
+      expect(built.isolationOn).toBe(false);
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("OFF档（settings = false）：built.worktreeExclusive === false, OFF 零回归", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t2-exclusive-false-"));
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t2-exclusive-false"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeExclusive: false } },
+      });
+      expect(built.worktreeExclusive).toBe(false);
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ON档（settings = true）：built.worktreeExclusive === true, 独立于 host 缝在场", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t2-exclusive-on-"));
+    try {
+      // 不注入 worktreeIsolation host 缝：开关仍按 settings 解析为 true。
+      // 这与 `isolationOn` 不同（后者依赖 host 缝在场才返 true）。
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t2-exclusive-on"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeExclusive: true } },
+      });
+      expect(built.worktreeExclusive).toBe(true);
+      // isolationOn 仍 false（无 host 缝）：两字段独立。
+      expect(built.isolationOn).toBe(false);
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ON档 + host 缝在场：built.worktreeExclusive === true, isolationOn === true（两字段独立解析）", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t2-exclusive-on-host-"));
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t2-exclusive-on-host"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: {
+          isolation: { worktreeOnMutate: true, worktreeExclusive: true },
+        },
+        worktreeIsolation: {
+          provision: async () => root,
+        },
+      });
+      expect(built.worktreeExclusive).toBe(true);
+      expect(built.isolationOn).toBe(true);
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("worktreeOnMutate × worktreeExclusive 矩阵：两字段独立解析，互不影响", async () => {
+    // ADR-0070 已认下 trade-off：每多一个 boolean 设置即多一档组合状态，
+    // 测试矩阵相应增加。2×2 = 4 档分别验证 built 暴露的两字段。
+    // 注意：isolationOn = (host 在场) && wom=true（settings=false 在隔离
+    // resolver 一律按 OFF）；worktreeExclusive = exc=true（不依赖 host）。
+    const matrix: ReadonlyArray<{
+      readonly wom: boolean | undefined;
+      readonly exc: boolean | undefined;
+      readonly expectedWom: boolean;
+      readonly expectedExc: boolean;
+      readonly hostPresent: boolean;
+      readonly label: string;
+    }> = [
+      {
+        wom: undefined,
+        exc: undefined,
+        expectedWom: false,
+        expectedExc: false,
+        hostPresent: false,
+        label: "wom-absent-exc-absent",
+      },
+      {
+        wom: true,
+        exc: false,
+        expectedWom: true,
+        expectedExc: false,
+        hostPresent: true,
+        label: "wom-true-exc-false",
+      },
+      {
+        wom: false,
+        exc: true,
+        expectedWom: false,
+        expectedExc: true,
+        hostPresent: false,
+        label: "wom-false-exc-true",
+      },
+      {
+        wom: true,
+        exc: true,
+        expectedWom: true,
+        expectedExc: true,
+        hostPresent: true,
+        label: "wom-true-exc-true",
+      },
+    ];
+    for (const cell of matrix) {
+      const root = await mkdtemp(
+        join(tmpdir(), `iknow-t2-matrix-${cell.label}-`)
+      );
+      try {
+        const settings: IknowSettings =
+          cell.wom === undefined && cell.exc === undefined
+            ? {}
+            : {
+                isolation: {
+                  ...(cell.wom !== undefined
+                    ? { worktreeOnMutate: cell.wom }
+                    : {}),
+                  ...(cell.exc !== undefined
+                    ? { worktreeExclusive: cell.exc }
+                    : {}),
+                },
+              };
+        const built = await buildHarnessEngine({
+          env: makeEnv(`sk-test-t2-matrix-${cell.label}`),
+          askUser: createNoAskUser(),
+          surface: "chat",
+          cwd: root,
+          userHome: join(root, "home"),
+          settings,
+          ...(cell.hostPresent
+            ? {
+                worktreeIsolation: {
+                  provision: async () => root,
+                },
+              }
+            : {}),
+        });
+        // 注意：isolationOn = isolationEnabled = host && wom===true；
+        // worktreeExclusive = exc===true（与 host 无关）。
+        expect(built.worktreeExclusive).toBe(cell.expectedExc);
+        expect(built.isolationOn).toBe(cell.expectedWom);
+        await built.shutdown?.();
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     }
   });
 });

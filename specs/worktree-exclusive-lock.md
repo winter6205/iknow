@@ -58,7 +58,7 @@
 
 ### 已知限制（必须写进实施与文档，不得含糊）
 
-- **L1 枚举范围**：占用判据依赖「枚举现存会话记录」。**入口与成本未验**（见 Open Questions 1）。若代价过高而退回「只查当前 hub 已加载的会话」，则语义**弱一档**：跨进程 / 跨 hub 的占用看不见，两个独立 CLI 进程可以同时 enter 同一棵树而互不拦截。退回时必须在设置项文档、回执文案与本 spec 三处显式写明，**不得**让操作员以为拿到了跨进程排他。
+- **L1 枚举范围（已决：弱档）**：占用判据 = `SessionStore.list()`（`src/session-api/store/session-store.ts:515-534`）→ 对当前进程 dataDir 下**单一**项目命名空间 `<dataDir>/sessions/<basename(cwd)>-<sha1(cwd)[:12]>/` 做 `readdir` + 每条记录 `load()`（全量 JSONL parse） + 每条 `stat(workspaceRoot)` 分类 binding。**`SessionStore` 在每个进程只构造一份，绑定到一个 cwd / workspaceRoot**（`serve.ts:107` / `cli.ts:318` / `tui/hub-bridge.ts:248`）；无跨 root / 跨 dataDir 聚合入口。语义**弱一档**：跨进程（独立 CLI 会话、不同 PID 的 `iknow serve`）的占用看不见——同棵树可能被两个进程同时 enter 而本开关只挡得住本进程。**强档要"跨进程占用可见"必须扫遍 `<dataDir>/sessions/*` 全部项目命名空间，那是 M×N 个文件 parse，本 spec 不做**。**已决**：T1 票出后保留弱档；L1 披露**强制**三处同时在场——设置项文档（`worktreeExclusive` 段，写明「仅本进程可见」）、`worktree_claimed` 回执文案（`operator_required` 段自带 + 显式「其它 CLI 进程的占用看不见」）、本 spec。
 - **L2 并发 TOCTOU**：占用来自**持久化记录**，而记录在「工具成功 + 会话保存」时才写。两个会话在**同一时间窗**内 enter 同一棵尚未被任何记录指向的树，可能都读到「无占用」而双双成功。本 spec **不解决**——解决它需要锁文件或注册表，已在 Confirms with human 明确不做。要求：该窗口在文档里写明为已知限制，且 L1 的枚举越全，窗口越窄。
 
 ### 输入五类（S2，实施必须覆盖）
@@ -73,7 +73,7 @@
 
 ## Open Questions
 
-1. **枚举现存会话记录的入口与成本**：`hub` 有 recents / sessions，但是否有现成索引、跨 root 怎么算、一次枚举要读多少文件——**未验**。实施第一步必须先答这个，因为它决定 SC3 的语义强度与 L1 是否触发。若单次 enter 的枚举成本超过一次 git 子进程量级，应退回 L1 的弱档并显式标注。
+1. **枚举现存会话记录的入口与成本**（**已决**）：入口 = `SessionStore.list()`（`src/session-api/store/session-store.ts:515-534`），单进程单 dataDir 单根命名空间 `<dataDir>/sessions/<basename(cwd)>-<sha1(cwd)[:12]>/`。一次枚举 = 1 `readdir` + N × `load()`（全量 JSONL parse，复用 `parseSessionJsonl` / `projectSessionLog`，store 自己已经为 `hub.listSessions` 的 sidebar 场景埋了这条路径）+ N × `stat(workspaceRoot)`。N=10 实测 file-read 主导，~10ms 量级，**远低于一次 git 子进程**（冷启 30–80ms），因此成本**不构成**强制降档理由。**但本档仍为弱档**——因为 `SessionStore` 单进程单根，要看到"跨进程 / 跨 CLI 实例"的占用必须扫遍 `<dataDir>/sessions/*` 全部项目命名空间（M 个 workspace × N 个会话 = M×N 文件），那才是"强档"，成本完全不同且本 spec 不做。判定**弱档**（保留 SC3 现有语义 = 本进程 + 本根），并把 L1 三处强制披露写定。详见 L1 段。
 
 ## Inherits / Changes
 

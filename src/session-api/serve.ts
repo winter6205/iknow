@@ -13,7 +13,10 @@ import {
   WORKSPACE_ROOT_ENV_KEY,
   resolveWorkspaceRoot,
 } from "../config/workspace-root.js";
-import { loadIknowSettings } from "../config/settings.js";
+import {
+  loadIknowSettings,
+  resolveWorktreeExclusive,
+} from "../config/settings.js";
 import {
   initIknowWorkspaceSafe,
   runHostInitScriptSafe,
@@ -133,6 +136,13 @@ export async function startSessionServe(
   const graphModeCtx = createGraphModeContext(
     resolveGraphMode({ settings: startupSettings.graph })
   );
+  // T3 / plans/worktree-exclusive-lock.md / ADR-0070: enter-task-worktree
+  // 占用锁档一次性解析。`resolveWorktreeExclusive(settings)` 是单读点
+  // （与 `resolveWorktreeOnMutate` 同款形状；缺失 / 非 true 一律 OFF），
+  // 此处解析后透传给 hub opts.worktreeExclusive；hub 构造时再喂给
+  // createTaskWorktreeProvisioner（闭包冻结，rebind 不重读；ADR-0037 §5
+  // 硬要求 9）。OFF 默认 = 严格走今日 enter 路径（SC2 零回归钉死）。
+  const worktreeExclusive = resolveWorktreeExclusive(startupSettings);
 
   const hub = new SessionHub({
     store,
@@ -153,6 +163,12 @@ export async function startSessionServe(
     surface: "serve",
     permissionMode: permissionModeCtx,
     graphMode: graphModeCtx,
+    // T3 / plans/worktree-exclusive-lock.md / ADR-0070: 启动加载点一次性
+    // 解析的 boolean —— 透传给 hub → provisioner 闭包冻结。OFF 档 →
+    // `worktreeExclusive` 不在 opts（缺省 undefined → 透传给 provisioner
+    // 时 `opts.worktreeExclusive === true` 判定为 false → 占用检查完全跳过，
+    // 行为与今日逐字节一致，spec SC2）。
+    ...(worktreeExclusive ? { worktreeExclusive: true } : {}),
     ...opts?.hubOptions,
     // review-fix (M1 / H1) + T6:启动 bind root 透传 —— bash fence / identity
     // 与稳定 productRoot（MCP config）同源；rebind 不改 productRoot。

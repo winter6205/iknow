@@ -82,10 +82,14 @@ const ALL_KINDS: readonly WorktreeIsolationErrorKind[] = [
   "current_worktree",
   "worktree_remove_failed",
   "branch_delete_failed",
+  // T3 / plans/worktree-exclusive-lock.md / ADR-0070 — enter 前置占用
+  // 检查的拒收 kind（spec SC6 分类表行；归 operator_required 模型无法
+  // 解掉别人占用，详见 worktree-rebind.ts assertNotClaimed）。
+  "worktree_claimed",
 ];
 
 describe("RECOVERABILITY — SC6 编译期穷尽", () => {
-  it("覆盖全部 16 个 kind（typecheck 是主防线，此处为防呆）", () => {
+  it("覆盖全部 17 个 kind（typecheck 是主防线，此处为防呆）", () => {
     expect(Object.keys(RECOVERABILITY).sort()).toEqual([...ALL_KINDS].sort());
   });
 
@@ -105,9 +109,10 @@ describe("RECOVERABILITY — SC6 编译期穷尽", () => {
 // -- exception + negative：operator_required 类的停止指令 + 机读 kind ---------
 
 describe("RECOVERABILITY — operator_required 分类", () => {
-  it("not_a_git_repo 与 git_unavailable 归 operator_required（结构死路）", () => {
+  it("not_a_git_repo 、 git_unavailable 与 worktree_claimed 归 operator_required（结构死路）", () => {
     expect(RECOVERABILITY.not_a_git_repo.category).toBe("operator_required");
     expect(RECOVERABILITY.git_unavailable.category).toBe("operator_required");
+    expect(RECOVERABILITY.worktree_claimed.category).toBe("operator_required");
   });
 });
 
@@ -134,6 +139,20 @@ describe("gateBlockNotice — operator_required 停止指令语义", () => {
     expect(notice).toContain("kind=git_unavailable");
     expect(notice).toContain("Retry will not help");
     expect(notice).toContain("Report to the operator");
+  });
+
+  it("worktree_claimed 回执同形（归 operator_required；T3 / ADR-0070）", () => {
+    const notice = gateBlockNotice(
+      "worktree_claimed",
+      "task worktree /repo/.iknow/worktrees/conv-x is already claimed by session 'conv-y'"
+    );
+    expect(notice.startsWith(`${WORKTREE_ISOLATION_PREFIX} `)).toBe(true);
+    expect(notice).toContain("kind=worktree_claimed");
+    expect(notice).toContain("Retry will not help");
+    expect(notice).toContain("Report to the operator");
+    // detail 透传 — 占用者 id 与释放路径文案都得进回执
+    expect(notice).toContain("conv-y");
+    expect(notice).toContain("/repo/.iknow/worktrees/conv-x");
   });
 });
 

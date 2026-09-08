@@ -138,7 +138,16 @@ export type WorktreeIsolationErrorKind =
   | "unpublished_commits"
   | "current_worktree"
   | "worktree_remove_failed"
-  | "branch_delete_failed";
+  | "branch_delete_failed"
+  /**
+   * plans/worktree-exclusive-lock.md T3 / ADR-0070 — `enter-task-worktree`
+   * 前置占用检查：目标树已被**别的现存会话记录**的 `workspaceRoot` 指向。
+   * 占用判据 = 现存会话记录的 `workspaceRoot`（零新持久状态，SC7）；
+   * 释放 = 恢复该会话让它自己 `exit-task-worktree`，或删除该会话记录
+   * （spec SC3 / SC9 显式给出的两条出路）。归 `operator_required`——
+   * 模型解不了别人的占用（recoverability.ts 的穷尽表保证停止指令自动接入）。
+   */
+  | "worktree_claimed";
 
 /**
  * Typed, non-empty, visible error for every gate failure. Mirrors the

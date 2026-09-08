@@ -22,6 +22,7 @@ import { join } from "node:path";
 import {
   loadIknowSettings,
   resolveWorktreeOnMutate,
+  resolveWorktreeExclusive,
 } from "../../src/config/settings.ts";
 import { persistThinkingChanges } from "../../src/config/persist-settings.ts";
 
@@ -150,6 +151,159 @@ describe("settings.isolation.worktreeOnMutate", () => {
       { isolation: { worktreeOnMutate: true } }
     );
     assert.ok(Object.isFrozen(loadIknowSettings({ home, cwd }).isolation));
+  });
+});
+
+describe("settings.isolation.worktreeExclusive", () => {
+  // plans/worktree-exclusive-lock.md T2 / ADR-0070 / SC1: boolean-only；
+  // 缺失 / 非 `true` 一律按 OFF（fail-closed，镜像 resolveWorktreeOnMutate 形状）。
+  // 仅做 settings surface：不读 git、不持会话状态、不接 session-api 占用判定（T3）。
+  it("is OFF by default: absent field, resolved false, no isolation shape drift", async () => {
+    const { home, cwd } = await makeSettings({}, {});
+    const settings = loadIknowSettings({ home, cwd });
+    assert.equal(settings.isolation, undefined);
+    assert.equal(resolveWorktreeExclusive(settings), false);
+  });
+
+  it("reads an explicit true at runtime and resolves ON", async () => {
+    const { home, cwd } = await makeSettings(
+      {},
+      { isolation: { worktreeExclusive: true } }
+    );
+    const settings = loadIknowSettings({ home, cwd });
+    assert.deepEqual(settings.isolation, { worktreeExclusive: true });
+    assert.equal(resolveWorktreeExclusive(settings), true);
+  });
+
+  it("preserves an explicit false as a legal value (resolved OFF, isolation segment survives)", async () => {
+    const { home, cwd } = await makeSettings(
+      {},
+      { isolation: { worktreeExclusive: false } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }).isolation, {
+      worktreeExclusive: false,
+    });
+  });
+
+  for (const illegal of ["true", 1, null, { worktreeExclusive: true }]) {
+    it(`drops the non-boolean value ${JSON.stringify(
+      illegal
+    )} instead of coercing or throwing`, async () => {
+      const { home, cwd } = await makeSettings(
+        {},
+        { isolation: { worktreeExclusive: illegal } }
+      );
+      const settings = loadIknowSettings({ home, cwd });
+      assert.equal(settings.isolation, undefined);
+      assert.equal(resolveWorktreeExclusive(settings), false);
+    });
+  }
+
+  it("lets project override user", async () => {
+    const { home, cwd } = await makeSettings(
+      { isolation: { worktreeExclusive: false } },
+      { isolation: { worktreeExclusive: true } }
+    );
+    assert.equal(
+      resolveWorktreeExclusive(loadIknowSettings({ home, cwd })),
+      true
+    );
+  });
+
+  it("keeps the user value when project has no isolation section", async () => {
+    const { home, cwd } = await makeSettings(
+      { isolation: { worktreeExclusive: true } },
+      { llm: { model: "m" } }
+    );
+    assert.equal(
+      resolveWorktreeExclusive(loadIknowSettings({ home, cwd })),
+      true
+    );
+  });
+
+  it("drops an illegal project value without clobbering the user layer", async () => {
+    const { home, cwd } = await makeSettings(
+      { isolation: { worktreeExclusive: true } },
+      { isolation: { worktreeExclusive: "yes" } }
+    );
+    assert.equal(
+      resolveWorktreeExclusive(loadIknowSettings({ home, cwd })),
+      true
+    );
+  });
+
+  it("coexists with worktreeOnMutate: both fields preserved per-segment", async () => {
+    // ADR-0070 / spec SC1: 与 worktreeOnMutate 正交、同款值域纪律；两字段同
+    // 时在场时各自解析、互不影响（per-field project > user；missing / non-true
+    // 按 OFF）。matrix 鉴面。
+    const { home, cwd } = await makeSettings(
+      {},
+      {
+        isolation: {
+          worktreeOnMutate: true,
+          worktreeExclusive: true,
+        },
+      }
+    );
+    const settings = loadIknowSettings({ home, cwd });
+    assert.equal(resolveWorktreeOnMutate(settings), true);
+    assert.equal(resolveWorktreeExclusive(settings), true);
+    assert.deepEqual(settings.isolation, {
+      worktreeOnMutate: true,
+      worktreeExclusive: true,
+    });
+  });
+
+  it("matrix — worktreeOnMutate × worktreeExclusive 四档组合状态解析独立", async () => {
+    // ADR-0070 已认下 trade-off：每多一个 boolean 设置即多一档组合状态，
+    // 测试矩阵相应增加。下表枚举 2×2 = 4 档；OFF×OFF 是默认。
+    for (const [wom, exc] of [
+      [false, false],
+      [false, true],
+      [true, false],
+      [true, true],
+    ] as const) {
+      const { home, cwd } = await makeSettings(
+        {},
+        { isolation: { worktreeOnMutate: wom, worktreeExclusive: exc } }
+      );
+      const settings = loadIknowSettings({ home, cwd });
+      assert.equal(resolveWorktreeOnMutate(settings), wom, `wom=${wom}`);
+      assert.equal(resolveWorktreeExclusive(settings), exc, `exc=${exc}`);
+    }
+  });
+
+  it("drops an unknown sibling field without clobbering worktreeExclusive", async () => {
+    const { home, cwd } = await makeSettings(
+      {},
+      { isolation: { worktreeExclusive: true, futureFlag: "yes" } }
+    );
+    // 未知字段丢弃；已知 boolean 字段保留；段不产空（仍带 worktreeExclusive）。
+    assert.deepEqual(loadIknowSettings({ home, cwd }).isolation, {
+      worktreeExclusive: true,
+    });
+  });
+
+  it("freezes the parsed section", async () => {
+    const { home, cwd } = await makeSettings(
+      {},
+      { isolation: { worktreeExclusive: true } }
+    );
+    assert.ok(Object.isFrozen(loadIknowSettings({ home, cwd }).isolation));
+  });
+
+  it("survives a persist cycle without losing worktreeExclusive", async () => {
+    const { home, cwd, projectFile } = await makeSettings(
+      {},
+      {
+        isolation: { worktreeExclusive: true },
+        llm: { model: "claude-sonnet" },
+      }
+    );
+    await persistThinkingChanges(projectFile, { thinking: "adaptive" });
+    const settings = loadIknowSettings({ home, cwd });
+    assert.equal(resolveWorktreeExclusive(settings), true);
+    assert.equal(settings.llm?.thinking, "adaptive");
   });
 });
 
