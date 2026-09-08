@@ -54,6 +54,7 @@ import {
   createSecretsGuardHook,
   type HookErrorEvent,
 } from "./permission/index.js";
+import { composePreHooks, createUserHookRouter } from "./hooks/index.js";
 import {
   loadIknowSettings,
   resolveWorktreeOnMutate,
@@ -1237,13 +1238,28 @@ export async function buildHarnessEngine(
           ...(opts.onHookError ? { onHookError: opts.onHookError } : {}),
         })
       : undefined;
+  // user-hook-router（specs/user-hook-router.md / ADR-0055）: 用户钩子（user hooks）
+  // 装配 —— settings.hooks.enabled 时把声明式 deny-only 规则编进 Pre 缝，
+  // 与 内置钩子（builtin hooks）（secrets guard）经 multiplexer 组合（builtin 在前、
+  // user 在后，先拦先赢）。enabled 缺席/false → createUserHookRouter 返回
+  // 透明 hook（SC1）：内置钩子（builtin hooks） 不受 hooks 总闸影响（正交条款 SC7/SC8）。
+  // TUI Post 观测（opts.hooks）是 Step 5，与 Step 1 的 Pre 组合互不覆盖
+  // （SC9）。classifyCall 注入 = mutate SSOT 复用（PreWrite，SC3）。
+  const userHook = createUserHookRouter(settings.hooks, {
+    classify: classifyCall,
+    ...(opts.onHookError ? { onHookError: opts.onHookError } : {}),
+  });
+  const preToolUse = composePreHooks([
+    ...(secretsGuard ? [secretsGuard] : []),
+    userHook,
+  ]);
   const executor = createAciExecutor({
     inner: baseExecutor,
     catalog: reg.catalog,
     policy,
     askUser,
     hooks: {
-      ...(secretsGuard ? { preToolUse: secretsGuard } : {}),
+      preToolUse,
       ...(opts.hooks ? { postToolUse: opts.hooks } : {}),
     },
   });

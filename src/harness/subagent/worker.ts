@@ -27,6 +27,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { loadIknowEnv, type IknowEnv } from "../../config/env.js";
+import { loadIknowSettings } from "../../config/settings.js";
 import {
   WORKSPACE_ROOT_ENV_KEY,
   resolveWorkspaceRoot,
@@ -48,6 +49,8 @@ import { DEFAULT_LSP_IDLE_TIMEOUT_MS } from "../lsp/client.js";
 import { deriveFileRefs, writeToolNamesFrom } from "./file-refs.js";
 import { createPermissionPolicy } from "../permission/policy.js";
 import { createNoAskUser } from "../permission/ask-user.js";
+import { createUserHookRouter } from "../hooks/index.js";
+import { classifyCall } from "../isolation/worktree-gate.js";
 import { createIknowSystemResolver } from "../identity/index.js";
 import { createGitSnapshotProvider } from "../identity/git-snapshot.js";
 import { createSkillScanner } from "../skill/scanner.js";
@@ -358,8 +361,8 @@ export async function createWorkerRuntime(
   const bashMode: BashMode = opts.bashMode ?? capabilities.bashMode;
   // lsp-optimization 二期 B6/B7 closeout: worker 同构装配 LSP notifier +
   // warmup（与 build-engine 同缝）。SSOT: LspCtx.directory ≡ sandboxRoot。
-  // worker 不读 settings 文件，但注入 idleTimeoutMs 缺省（10min），与
-  // plan「走默认值」一致；超时/等待仍走工具层常量。
+  // lsp idleTimeoutMs 走常量缺省（10min），不读 settings.lsp（worker 仅
+  // 在下方 user-hook 装配处读 settings.hooks 段）；超时/等待仍走工具层常量。
   const lspCtx = {
     directory: sandboxRoot,
     idleTimeoutMs: DEFAULT_LSP_IDLE_TIMEOUT_MS,
@@ -397,11 +400,30 @@ export async function createWorkerRuntime(
 
   const baseExecutor = createExecutor(reg.inner);
   const policy = createPermissionPolicy();
+  // user-hook-router（specs/user-hook-router.md / ADR-0055）: 子代理引擎经
+  // 同一份 merged settings 装配 user rules（spec Does #6 —— 无第二套后门）。
+  // settings 读根用 projectIdentityRoot（缺席回落 cwd，与 T3 身份发现同
+  // 款回落）：改绑后 worker cwd 是没有 `.iknow` 的裸 task worktree，项目级
+  // settings 只在主仓身份根上 —— 读身份根是两条引擎看到同一份 user rules
+  // 的前提。enabled 缺席/false → 透明 hook（SC1）。onHookError 落 stderr：
+  // worker 无 host 观测信道，非法 pattern 剔除至少有日志出口（SC6 等价观测）。
+  const userHook = createUserHookRouter(
+    loadIknowSettings({
+      cwd: projectIdentityRoot,
+      home: userHome,
+    }).hooks,
+    {
+      classify: classifyCall,
+      onHookError: (e) =>
+        process.stderr.write(`[worker user-rule-init] ${e.message}\n`),
+    }
+  );
   const executor = createAciExecutor({
     inner: baseExecutor,
     catalog: reg.catalog,
     policy,
     askUser,
+    hooks: { preToolUse: userHook },
   });
 
   // surface "ask" → shouldIncludeBootstrap false (无 BOOTSTRAP 段); worker

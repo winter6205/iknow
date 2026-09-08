@@ -226,6 +226,50 @@ export interface IknowSettingsIsolation {
 }
 
 /**
+ * user-hook-router（specs/user-hook-router.md）: 用户钩子（user hooks） 规则条目。
+ *
+ * 仅承载声明式 deny-only 规则（deny-only、无 allow[]）；内置钩子（builtin hooks） 不经
+ * settings 装配（代码挂上），本段不承载 memory / secrets 等产品开关。
+ *
+ * 校验纪律（镜像 secrets.patterns）：单条结构性非法 → 丢弃该条（不抛）；
+ * `pattern` 的正则可编译性不在 settings 层判定 —— 由 hook router 构造期
+ * 编译，非法 pattern 剔除 + onHookError（SC6），settings 只做字符串透传。
+ */
+export interface IknowSettingsHookRule {
+  /** 规则 id（trace / reason 归因用）；非空串才合法。 */
+  id: string;
+  /** 触发事件；仅三值闭集（V1），非法值 → 丢弃该条。 */
+  event: "PreToolUse" | "PreWrite" | "PreCommit";
+  /** deny 回灌给模型的理由；非空串才合法。 */
+  reason: string;
+  /** 可选 matcher：精确工具名（如 "bash"）。 */
+  tool?: string;
+  /** 可选 matcher：工具名前缀（如 "mcp__github"）。字段名即事件名 `PreToolUse` 的小写形态。 */
+  pretooluse?: string;
+  /** 可选 matcher：对工具调用扫描串（stringify 截断后）的正则源串。 */
+  pattern?: string;
+}
+
+/**
+ * user-hook-router: `settings.hooks` 段（用户钩子（user hooks） only）。
+ *
+ * `enabled` 缺席 / 非 boolean → 消费方按 false 处理（默认关，fail-closed）；
+ * `rules` 非数组 → 丢弃该字段。段缺席 = 用户钩子（user hooks） 关，不影响 内置钩子（builtin hooks）
+ * （自动记忆、secrets 等产品开关与 hooks 总闸正交，ADR-0055）。
+ */
+export interface IknowSettingsHooks {
+  enabled?: boolean;
+  rules?: IknowSettingsHookRule[];
+}
+
+/** 用户钩子（user hooks） 事件闭集（V1）。 */
+export const HOOK_EVENT_VALUES: readonly IknowSettingsHookRule["event"][] = [
+  "PreToolUse",
+  "PreWrite",
+  "PreCommit",
+];
+
+/**
  * Web 工具配置段。回退链 env > settings > 默认（对齐 #353 maxTurns 先例），
  * 装配期字段（不在 settings 热更新白名单，改后需重启进程）。
  */
@@ -292,6 +336,8 @@ export interface IknowSettings {
   isolation?: IknowSettingsIsolation;
   /** lsp-optimization 二期 B7: LSP 配置段（全部可选，缺省走消费方默认值）。 */
   lsp?: IknowLspSettings;
+  /** user-hook-router: 用户钩子（user hooks） 段（声明式 deny-only，默认关）。 */
+  hooks?: IknowSettingsHooks;
   /** Web 工具配置段（web_search 后端选择等）。 */
   web?: IknowSettingsWeb;
 }
@@ -850,6 +896,64 @@ function mergeWeb(
   return out;
 }
 
+/**
+ * user-hook-router: 校验单个 `hooks` 层 —— 非法字段 / 条目丢弃（不抛）。
+ * 非普通对象 → undefined；enabled 非 boolean → 丢弃该字段；rules 非数组 →
+ * 丢弃该字段；单条规则 id/event/reason 结构非法 → 丢弃该条（其余保留）；
+ * 全部条目非法 → rules 不产出（enabled 合法仍保留）。
+ */
+function parseHooks(raw: unknown): IknowSettingsHooks | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const out: IknowSettingsHooks = {};
+  if (typeof raw.enabled === "boolean") out.enabled = raw.enabled;
+  if (Array.isArray(raw.rules)) {
+    const rules: IknowSettingsHookRule[] = [];
+    for (const entry of raw.rules) {
+      if (!isPlainObject(entry)) continue;
+      if (
+        !isNonEmptyString(entry.id) ||
+        !(HOOK_EVENT_VALUES as readonly string[]).includes(
+          typeof entry.event === "string" ? entry.event : ""
+        ) ||
+        !isNonEmptyString(entry.reason)
+      ) {
+        continue;
+      }
+      const rule: IknowSettingsHookRule = {
+        id: entry.id.trim(),
+        event: entry.event as IknowSettingsHookRule["event"],
+        reason: entry.reason.trim(),
+      };
+      if (isNonEmptyString(entry.tool)) rule.tool = entry.tool.trim();
+      if (isNonEmptyString(entry.pretooluse)) {
+        rule.pretooluse = entry.pretooluse.trim();
+      }
+      if (typeof entry.pattern === "string" && entry.pattern.length > 0) {
+        rule.pattern = entry.pattern;
+      }
+      rules.push(rule);
+    }
+    if (rules.length > 0) out.rules = rules;
+  }
+  if (out.enabled === undefined && out.rules === undefined) return undefined;
+  return out;
+}
+
+/** user-hook-router: 逐层合并 hooks —— project 字段优先，未覆盖的 user 字段保留。 */
+function mergeHooks(
+  user: IknowSettingsHooks | undefined,
+  project: IknowSettingsHooks | undefined
+): IknowSettingsHooks | undefined {
+  if (!user && !project) return undefined;
+  const out: IknowSettingsHooks = {};
+  if (project?.enabled !== undefined) out.enabled = project.enabled;
+  else if (user?.enabled !== undefined) out.enabled = user.enabled;
+  if (project?.rules !== undefined) out.rules = project.rules;
+  else if (user?.rules !== undefined) out.rules = user.rules;
+  if (out.enabled === undefined && out.rules === undefined) return undefined;
+  return out;
+}
+
 /** 逐层合并 llm：project 字段优先，未覆盖的 user 字段保留。 */
 function mergeLlm(
   user: IknowSettingsLlm | undefined,
@@ -1002,6 +1106,11 @@ function mergeSettings(
   const lsp = mergeLsp(parseLsp(userRaw.lsp), parseLsp(projectRaw.lsp));
   // Web 工具配置段（web_search 后端选择；env > settings 回退链在 env.ts）。
   const web = mergeWeb(parseWeb(userRaw.web), parseWeb(projectRaw.web));
+  // user-hook-router: 用户钩子（user hooks） 段（默认关 —— 段缺席即关）。
+  const hooks = mergeHooks(
+    parseHooks(userRaw.hooks),
+    parseHooks(projectRaw.hooks)
+  );
   const out: IknowSettings = {};
   if (llm) out.llm = llm;
   if (verify) out.verify = verify;
@@ -1013,6 +1122,7 @@ function mergeSettings(
   if (isolation) out.isolation = isolation;
   if (lsp) out.lsp = lsp;
   if (web) out.web = web;
+  if (hooks) out.hooks = hooks;
   return out;
 }
 

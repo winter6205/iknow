@@ -356,6 +356,21 @@ _Avoid_: Pre 失败 fail-open 静默放行；Post 异常推翻已成功的调用
 **secrets guard**: (#126 决议 D6) Pre 缝第一个真实产品消费者——密钥模式拦截钩子，拦「工具调用参数内容夹带密钥/凭据」，与 hard-wall（命令形态 + 敏感路径）互补不重叠；模式来源双层：代码内置默认集 + 项目 settings 覆盖/追加，接入 `createAciExecutor` 产品路径。
 _Avoid_: 与 hard-wall 职责混同；Pre 缝保持零产品消费者；把它当密钥防护唯一道防线
 
+**hook router**: (ADR-0055) 同进程工厂：把内置钩子（builtin hooks）与用户钩子（user hooks）编成挂上 permission-executor 第 1/5 步的纯 Pre/Post 函数。形态对齐 sandbox 执行面的 in-process router（ADR-0045），不是 OS 进程、不是 HTTP daemon、不并入 sandbox server。
+_Avoid_: fork/Unix socket 钩子进程；把 hook router 叫成 `iknow serve`；一个 Policy server 吞 isolation/hard-wall/secrets
+
+**内置钩子（builtin hooks）**: harness 用代码装配的拦截或观测（如 `secrets.mode=block` 的 secrets-guard、TUI `onToolEvent` Post、violation 杀会话观察者）。不出现在 `settings.hooks`，`hooks.enabled` 卸不掉。各自仍走原产品开关（`settings.secrets`、host 是否传 Post 等）。
+_Avoid_: 把 auto-memory / isolation / hard-wall 改挂成 settings.hooks 条目；用钩子总闸关掉 `/memory`
+
+**用户钩子（user hooks）**: 操作员声明的 deny-only 规则（V1 = `settings.hooks.rules`；目录文件源是后续贡献，不自动执行）。默认关（`enabled` 缺席=关）。只拦、不改参数/结果、不跑外壳命令。
+_Avoid_: 与内置钩子共用一个 enable 字段；目录落盘即生效；同义词 lane / 两车道
+
+**PreWrite (user hook event)**: 用户钩子事件名——同一条引擎内 Pre 缝，仅当 `classifyCall` 判定 mutate 时匹配。不是第 6 步链。
+_Avoid_: 第二套「会不会写」分类器；与 worktree isolation 门禁混成一个开关
+
+**PreCommit (user hook event)**: 用户钩子事件名——工具调用形态为 `git commit`（含 `git -C … commit`；第一个非 option 子命令为 `commit`）。不是 session JSONL 落盘（`createChatSessionCommitHook`）。
+_Avoid_: 拦 `git status` / `git commit --help`；把 transcript commit 当 PreCommit
+
 **渐进式披露 (progressive disclosure)**: (#631 / ADR-0046) 便宜索引常驻 + 重载荷按需：索引有描述则按精确名加载（`skill({name})` / 直呼 `discover`）；索引没有描述才 `tool_search`。机制仍是 lazy + `discover()` 尾部追加以保 KV 前缀；`<mcp_tools_overview>` 已撤。
 _Avoid_: 有描述仍强制先 search；把发现的工具插回注册序中部；概览段发空串占位
 
@@ -490,6 +505,11 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **直呼加载 vs tool_search**: 前缀有描述则按名加载；无描述才 search。退场内建保持名+描述故不走 search
 - **索引降档 vs 溢出治理（schema 退场）**: schema 退场把内建变成名+描述；索引降档只剥 MCP/skill 描述
 - **skill vs tool_search**: skill 按名取正文；工具/MCP 定义走直呼 `discover` 或无描述时的 `tool_search`；无 `skill_search`
+- **hook router vs sandbox server**: 都是同进程 router；sandbox 管围栏执行，hook router 管声明式拦截组合，不共用一个 server
+- **内置钩子（builtin hooks） vs 用户钩子（user hooks）**: 代码装配 vs `settings.hooks`；用户总闸卸不掉 builtin
+- **用户钩子（user hooks） vs 产品开关（memory / secrets / graph / isolation）**: 正交；`hooks.enabled` 不代管 `/memory` 或 `settings.secrets`
+- **PreWrite vs worktree isolation mode**: PreWrite 是用户 deny 事件；isolation 是写主仓门禁，不是 `settings.hooks` 条目
+- **PreCommit vs session transcript 落盘**: PreCommit 拦 git commit 形态；JSONL append 仍是 host commit hook，不是 user 事件
 
 ## Flagged ambiguities
 
