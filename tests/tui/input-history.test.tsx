@@ -40,7 +40,11 @@ import {
   attachSession,
   type TuiSessionState,
 } from "../../src/tui/session-state.js";
-import { resolveProjectSessionDir } from "../../src/session-api/store/session-store.js";
+import {
+  resolveConversationDir,
+  resolveProjectSessionDir,
+} from "../../src/session-api/store/session-store.js";
+import { deriveProjectIdentityRoot } from "../../src/harness/session-roots.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 
@@ -333,11 +337,20 @@ describe("会话恢复种子：per-session 输入历史（initialSession / openS
 
   test("openSessionAt：/sessions 切到 B 后 ↑ 召回 B 的种子，A 的输入不泄漏", async () => {
     // 盘上只播种 B（A 仅内存 attach，不落盘）→ 列表唯一条目 = B，index 恒 1。
+    // T1 (session-folder-consolidation)：bridge 以 `deriveProjectIdentityRoot(
+    // {cwd: dataDir})` 派生根,种子必须落同一 projectDir 的 `<convId>/` 文件夹。
     const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-histswitch-"));
     const fileB = sessionFileWithUserMessages(["msg-b1", "msg-b2"], {
       id: "conv-hist-b",
     });
-    const dir = resolveProjectSessionDir(dataDir, process.cwd());
+    const projectDir = resolveProjectSessionDir(
+      dataDir,
+      deriveProjectIdentityRoot({ cwd: dataDir })
+    );
+    const dir = resolveConversationDir({
+      projectDir,
+      conversationId: fileB.conversation_id,
+    });
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, `${fileB.conversation_id}.json`),

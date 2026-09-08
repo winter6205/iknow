@@ -21,9 +21,11 @@ import {
   createTuiBridge,
 } from "../../src/tui/hub-bridge.js";
 import {
+  resolveConversationDir,
   resolveProjectSessionDir,
   SessionStore,
 } from "../../src/session-api/store/session-store.js";
+import { deriveProjectIdentityRoot } from "../../src/harness/session-roots.js";
 import { parseSessionJsonl } from "../../src/session-api/store/jsonl.js";
 import { CURRENT_SCHEMA_VERSION } from "../../src/session-api/store/schema.js";
 import { SessionHub } from "../../src/session-api/hub.js";
@@ -32,10 +34,17 @@ import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
 describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
   let baseDir: string;
-  const cwd = process.cwd();
+  // T1 (session-folder-consolidation): both the bridge and the "independent
+  // entry" store must derive the same projectIdentityRoot (hub-bridge derives
+  // it from workspaceRoot) — otherwise the two land in different project
+  // folders and cross-entry reads hit not_found.
+  let projectIdentityRoot: string;
+  let projectDir: string;
 
   beforeEach(() => {
     baseDir = mkdtempSync(join(tmpdir(), "iknow-tui-cross-"));
+    projectIdentityRoot = deriveProjectIdentityRoot({ cwd: baseDir });
+    projectDir = resolveProjectSessionDir(baseDir, projectIdentityRoot);
   });
   afterEach(() => {
     rmSync(baseDir, { recursive: true, force: true });
@@ -60,7 +69,7 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
     await bridge.postMessage({ conversationId: id, text: "第二个问题" });
 
     // Step 2：独立 hub（模拟另一进程）load 断言一致
-    const serveStore = new SessionStore(baseDir, cwd);
+    const serveStore = new SessionStore(baseDir, projectIdentityRoot);
     const serveHub = new SessionHub({
       store: serveStore,
       deps: makeDeps([assistantResult({ texts: ["第三轮答复"] })]),
@@ -69,8 +78,9 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
     const serveView = await serveHub.getSession(id);
     expect(serveView.session.conversation_id).toBe(id);
     expect(serveView.session.turn_count).toBe(2);
-    // 磁盘 JSONL 头记录直读交叉核对（SSOT = 文件; #629 去掉 .json 镜像）。
-    const dir = resolveProjectSessionDir(baseDir, cwd);
+    // 磁盘 JSONL 头记录直读交叉核对（SSOT = 文件; #629 去掉 .json 镜像;
+    // T1 后权威 JSONL 在 `<projectDir>/<conversationId>/` 会话文件夹内）。
+    const dir = resolveConversationDir({ projectDir, conversationId: id });
     const jsonlRaw = readFileSync(join(dir, `${id}.jsonl`), "utf8");
     const raw = parseSessionJsonl(jsonlRaw).header as {
       schemaVersion: number;

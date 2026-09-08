@@ -91,7 +91,10 @@ export const DEFAULT_TEST_LLM_ENV: TestLlmEnv = {
   temperature: 0,
   thinking: "off",
   thinkingEffort: "",
-  stream: "on",
+  // Pre-T1 helper omitted this field (runtime consumers read undefined ≙
+  // off). Keep "off" — the capture server replies with a non-streaming JSON
+  // envelope; "on" would flip the adapter into streaming and break it.
+  stream: "off",
 };
 
 /**
