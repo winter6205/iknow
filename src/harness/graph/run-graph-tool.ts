@@ -30,6 +30,7 @@ import { createGraphProgressTracker } from "./progress.js";
 import { validateGraph, type GraphValidationError } from "./topo.js";
 import { runGraph } from "./scheduler.js";
 import { runGraphWithFailureEdges } from "./outcome-scheduler.js";
+import type { FailureEdgeViolation } from "./outcome-scheduler.js";
 import { createSubAgentNodeExecutor } from "./node-executor.js";
 import type { LiveGraphLedger, LiveGraphLedgerHost } from "./ledger.js";
 import { resolveResidualSubgraph } from "./residual.js";
@@ -333,6 +334,14 @@ function mergeResidual(
  * 终态 —— 而失败的真相要等下一段剩余子图提交再说。正常
  * settle(无 abort)路径下 failed 仍按 SC6 冻结,SC6 语义不变。
  *
+ * F2(review fix):熔断路径不复用 cancel 的「仅冻 done」规则 —— 熔断
+ * 路径上 executor 闭包返回的 failed 是**真实失败**(子代理 envelope
+ * failed / executor 入口熔断拒绝),与 abort 的「取消症状 failed」
+ * 语义不同。熔断走正常 settle 的冻结语义(done / failed 都冻):否则
+ * 下一段剩余子图可以重交这些 id 再跑一次,违反 ADR-0050「已完成不
+ * 重演」,也绕开 mergeResidual 的 frozen-failed 拒绝。cancel 语义
+ * (仅冻 done)不变 —— 本函数唯一需要区分的分支就是调用侧取消。
+ *
  * 只有 string 产出进账本:非 string 的 `output` 在浓缩层有 `String(...)`
  * 兜底渲染,但账本是跨调用的持久权威 —— 把对象 `String()` 化的
  * "[object Object]" 冻进账本,会在后续剩余子图里被当真产出写进下游 task。
@@ -344,7 +353,8 @@ function freezeResults(
 ): void {
   for (const result of Object.values(results)) {
     // 取消路径:仅 done 进账本;failed / skipped 留给后续剩余
-    // 子图。正常路径:账本单点强制 done / failed。
+    // 子图。熔断路径与正常 settle 路径:done / 真 failed 都进,skipped
+    // 由账本单点静默忽略。
     if (cancelled && result.status !== "done") continue;
     ledger.freeze(
       result.id,
@@ -391,7 +401,7 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
               onFailure: {
                 type: "string",
                 description:
-                  "Marked failure edge: the id of the single node to start if this one finishes with status `failed`. Target must be the id of another node in this submission (pointing at the same id is allowed — a marked single-cell re-entry). The host ignores `onFailure` from any node that finishes as `done`.",
+                  "Marked failure edge: the id of the single node to start if this one finishes with status `failed`. Target must be the id of another node in this submission (pointing at the same id is allowed — a marked single-cell re-entry). The host ignores `onFailure` from any node that finishes as `done` or `skipped`.",
               },
             },
             required: ["id", "task"],
@@ -427,9 +437,7 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
       const { specNodes, ledgerOutputs } = mergeResidual(nodes, ledger);
       const spec: GraphSpec = { nodes: specNodes };
       // T2:本段是否带失败边 —— 决定走哪条调度线(见下方 runGraph 分流)。
-      const hasFailureEdges = specNodes.some(
-        (n) => (n as { onFailure?: string }).onFailure !== undefined
-      );
+      const hasFailureEdges = specNodes.some((n) => n.onFailure !== undefined);
       // EXIT:拓扑非法 —— 在任何 spawn 之前 fail-fast(spec SC4 零 spawn)。
       const errors = validateGraph(spec);
       if (errors.length > 0) {
@@ -508,7 +516,7 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
             emitGraphProgress(ctx, tracker.onNode(result));
           },
         };
-        let violation: { from: string; target: string } | undefined;
+        let violation: FailureEdgeViolation | undefined;
         let execution: GraphExecution;
         if (hasFailureEdges) {
           // T3:fuse.signal 只喂给调度器 —— 停的是「新进入的启动」,
@@ -534,11 +542,12 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
         const cancelled = signal?.aborted === true;
         // T3:fuse tripped 走与 violation / abort 同一 partial-results 通
         // 道 —— done 部分先冻结(ADR-0057「熔断后已完成留下」),再 typed
-        // 拒。cancel 语义:仅冻结真 done,失败的 in-flight 不当终结冻结
-        // (SC8 + freezeResults 注释)。
+        // 拒。F2:熔断 ≠ cancel,沿用正常 settle 路径冻结 done + 真 failed,
+        // 避免下一段剩余子图重交这些 id(违反 ADR-0050)。cancel 仍优先:
+        // 调用侧都取消本轮了,abort 症状 failed 不冻结(SC8)。
         const fuseTripped = fuse?.signal.aborted === true;
         if (ledger !== undefined) {
-          freezeResults(ledger, execution.results, cancelled || fuseTripped);
+          freezeResults(ledger, execution.results, cancelled);
         }
         if (fuseTripped) {
           throw new ToolExecutionError(

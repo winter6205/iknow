@@ -38,6 +38,7 @@ import type {
   NodeOutcome,
   NodeStatus,
 } from "./types.js";
+import { formatNodeError } from "./error-render.js";
 
 export interface FailureEdgeViolation {
   /** 触发违规的起点 id（本段 failed，但其 `onFailure` 终点已 done）。 */
@@ -121,7 +122,7 @@ export async function runGraphWithFailureEdges(
    * 入的本体；终点 dep 着刚失败的起点是 SC2 的新格画法）。唯一不许的
    * 终点态是 done —— 那由调用方先查 violation。
    */
-  function kick(target: string): void {
+  function enqueueFailureEdgeTarget(target: string): void {
     if (queued.has(target)) return;
     queued.add(target);
     ready.push(target);
@@ -197,13 +198,20 @@ export async function runGraphWithFailureEdges(
       })
     );
 
+    // F1（review fix）：先遍一遍把整波所有 settle 结果全部写进 results
+    // / statuses / outputs（partial-results 通道的承诺：handler 据此
+    // 冻结整波已落定 id，违反 ADR-0050「已完成不重演」就会让下一段剩
+    // 余子图把它们再跑一次）。第二遍再判失败边 / violation —— 让整
+    // 波记录在 violation 抬升之前完成。
     for (const r of settled) {
       // 同 id 再进入：末次结局覆盖前次（results / statuses / onNode 同拍）。
       results[r.id] = r;
       statuses[r.id] = r.status;
       if (r.status === "done") outputs[r.id] = r.output;
       onNode?.(r);
+    }
 
+    for (const r of settled) {
       if (signal?.aborted) continue; // abort 后只落定、不推进
 
       if (r.status === "done") {
@@ -221,7 +229,7 @@ export async function runGraphWithFailureEdges(
             violation = { from: r.id, target };
             break;
           }
-          kick(target);
+          enqueueFailureEdgeTarget(target);
         }
         skipDependentsOf(r.id, `upstream node "${r.id}" did not complete`);
       }
@@ -238,21 +246,4 @@ export async function runGraphWithFailureEdges(
     }),
     ...(violation !== undefined ? { violation } : {}),
   };
-}
-
-/**
- * typed-error catch 契约（code-quality.md）：优先识别判别联合 `{kind,
- * context}`；未知形态退回 `err.message`；最末 `String(err)`。与
- * `scheduler.ts` 同款渲染。
- */
-function formatNodeError(err: unknown): string {
-  if (err && typeof err === "object" && "kind" in err) {
-    const e = err as { kind?: unknown; context?: unknown };
-    const kind = typeof e.kind === "string" ? e.kind : "unknown";
-    const ctxStr =
-      e.context !== undefined ? JSON.stringify(e.context) : JSON.stringify(err);
-    return `${kind}: ${ctxStr}`;
-  }
-  if (err instanceof Error) return err.message;
-  return String(err);
 }

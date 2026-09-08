@@ -66,3 +66,5 @@ export { skillCatalog, skillCheckGate } from "./skill-check-gate.js";
 
 export type { NodePlan, SubAgentNodeExecutorOptions } from "./node-executor.js";
 export { createSubAgentNodeExecutor } from "./node-executor.js";
+
+export { formatNodeError } from "./error-render.js";

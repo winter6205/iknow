@@ -159,6 +159,43 @@ describe("run_graph effort fuse — 熔断按单次调用计", () => {
   });
 });
 
+describe("run_graph effort fuse — SC7 冻结保留：fuse-trip 也冻真 failed", () => {
+  it("fuse 熔断后本段真实 failed 的 id 也冻结（避免下段剩余子图重跑）", async () => {
+    const { manager, children } = makeManager();
+    const host = createLiveGraphLedgerHost();
+    const t = createRunGraphTool({
+      manager,
+      ledger: host,
+      isEnabled: () => true,
+    });
+    // c 带 self-onFailure 恒 failed 空转（第 9 进入触发熔断）；d 是无失败边
+    // 的普通节点，wave 0 真跑一次即 failed —— 那是真终结而非 cancel 症状。
+    const pending = t.handler(
+      {
+        nodes: [
+          { id: "c", task: "tc", onFailure: "c" },
+          { id: "d", task: "td" },
+        ],
+      },
+      { conversationId: CONV }
+    );
+    // spawn 顺序：wave 0 = c1, d1（children 1-2）；此后每波 c 再进
+    // （c2..c8 = children 3-9，共 8 次）；c 第 9 进入零 spawn、熔断。
+    for (let entry = 1; entry <= 9; entry++) {
+      await waitForChildren(children, entry);
+      settle(children[entry - 1]!, fail("crashed"));
+    }
+    await expect(pending).rejects.toThrow(/effort fuse/);
+    expect(children).toHaveLength(9);
+    // F2：fuse 熔断 ≠ 调用侧 abort —— 本段真实 failed 的结局必须冻结，
+    // 否则下一段剩余子图重交 d / c 会被允许再 spawn，违反 ADR-0050。
+    const ledger = host.ledgerFor(CONV);
+    expect(ledger.statusOf("d")).toBe("failed");
+    expect(ledger.statusOf("c")).toBe("failed");
+    await manager.shutdown();
+  });
+});
+
 describe("run_graph effort fuse — SC9 plain Kahn 不装计数器", () => {
   it("无 onFailure 的 DAG 不受熔断影响：正常 Kahn 两波", async () => {
     const { manager, children } = makeManager();

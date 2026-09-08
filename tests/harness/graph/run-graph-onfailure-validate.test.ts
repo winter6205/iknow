@@ -115,7 +115,12 @@ describe("run_graph onFailure 校验：合法失败边通过", () => {
 describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn", () => {
   it("目标不在本次提交的 ids 里 → typed 拒、零 spawn（SC5）", async () => {
     const { manager, children } = makeManager();
-    const t = createRunGraphTool({ manager, isEnabled: () => true });
+    const host = createLiveGraphLedgerHost();
+    const t = createRunGraphTool({
+      manager,
+      ledger: host,
+      isEnabled: () => true,
+    });
     await expect(
       t.handler(
         { nodes: [{ id: "a", task: "ta", onFailure: "zz" }] },
@@ -123,6 +128,8 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
       )
     ).rejects.toThrow(/onFailure targeting unknown node "zz"/);
     expect(children).toHaveLength(0);
+    // 拒绝路径不建账本（SC1 / ASSUMPTIONS #4）
+    expect(host.ledgerFor(CONV).exists()).toBe(false);
     await manager.shutdown();
   });
 
@@ -153,6 +160,8 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
     ).rejects.toThrow(/onFailure targeting frozen node "x" \(done\)/);
     expect(children).toHaveLength(1);
     expect(host.ledgerFor(CONV).frozenIds()).toEqual(["x"]);
+    // 拒绝发生在第二段 —— 账本只由第一段 ensure，第二段拒绝不新建
+    expect(host.ledgerFor(CONV).exists()).toBe(true);
     await manager.shutdown();
   });
 

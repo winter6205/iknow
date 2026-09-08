@@ -205,6 +205,46 @@ describe("run_graph failure edges — mid-run violation", () => {
     expect(children).toHaveLength(2);
     await manager.shutdown();
   });
+
+  it("violation 波内已落定 done 的同波兄弟也冻结（整波先记录再判违规，ADR-0050）", async () => {
+    const { manager, children } = makeManager();
+    const host = createLiveGraphLedgerHost();
+    const t = createRunGraphTool({
+      manager,
+      ledger: host,
+      isEnabled: () => true,
+    });
+
+    // wave 0 同波三个根节点，settle 顺序 b(done) → a(failed) → c(done)：
+    // a 的失败边指向本段先 done 的 b → violation。c 与失败边无关，但与
+    // a 同波且已真跑完 —— 整波结局必须先全部记录，violation 才允许抬
+    // （否则 c 不进 results、freeze 冻不到它，下一段外环重交 c 会被
+    // 再跑一次，违反 ADR-0050「已完成不重演」）。
+    const pending = t.handler(
+      {
+        nodes: [
+          { id: "b", task: "tb" },
+          { id: "a", task: "ta", onFailure: "b" },
+          { id: "c", task: "tc" },
+        ],
+      },
+      { conversationId: CONV }
+    );
+    await waitForChildren(children, 3);
+    settle(children[0]!, ok("B-OK"));
+    settle(children[1]!, fail("crashed"));
+    settle(children[2]!, ok("C-OK"));
+    await expect(pending).rejects.toThrow(ToolExecutionError);
+    await expect(pending).rejects.toThrow(/already done/);
+    // 同波 done 兄弟 c 与触发点 b 一起冻结进账本
+    const ledger = host.ledgerFor(CONV);
+    expect(ledger.statusOf("b")).toBe("done");
+    expect(ledger.statusOf("c")).toBe("done");
+    expect(ledger.frozenIds()).toEqual(expect.arrayContaining(["b", "c"]));
+    // 无多余 spawn（c 不重跑）
+    expect(children).toHaveLength(3);
+    await manager.shutdown();
+  });
 });
 
 describe("run_graph failure edges — 阶段 1 不回退（SC9）", () => {
