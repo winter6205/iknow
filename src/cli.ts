@@ -49,7 +49,6 @@ export { isWorkspaceRootError, renderWorkspaceRootError };
 import { MaxTurnsExceeded } from "./harness/errors.js";
 import { maxTurnsEnvelope } from "./cli/max-turns.js";
 import { randomUUID } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { buildViolationWiring } from "./harness/sandbox/violation-executor.js";
 import { openBrowser } from "./cli/open-browser.js";
@@ -71,23 +70,17 @@ import { deriveProjectIdentityRoot } from "./harness/session-roots.js";
 import { resolveVerifyConfig } from "./config/verify-config.js";
 
 /**
- * T7: 写侧与读侧共用的默认 trace 目录 —— 每会话独立文件
- * （`<traceDir>/<convId>.jsonl`）。T2 后写侧语义即目录，默认值必须与读侧
- * 一致；旧单文件 `./trace.jsonl`（LEGACY_TRACE_FILE）只用于迁移 fail-fast 检测。
+ * T3 (plans/session-folder-consolidation.md / ADR-0071 Decision 1/4):
+ * trace 锚点已迁入会话文件夹,主会话写入由 `resolveConversationTraceFilePath`
+ * 经 hub / store 派生;本根只承担子代理聚合目录(`createTrace("subagent")`,
+ * T5 迁走)与 runTrace 的回放池(SC6 退役 cwd-relative `./trace/` 后的落点)。
+ * 默认 = `resolveServeDataDir()`(≈ `<home>/.iknow`),与读侧同源。
+ *
+ * `resolve` 把任意相对输入归一化为绝对路径,保证下游 mkdirSync / appendFileSync
+ * 不会被调用方传 cwd-relative 时「以启动时 CWD 为根」再次踩 T3 退役的坑。
  */
-const DEFAULT_TRACE_DIR = "./trace/";
-/**
- * 旧单文件格式（v2 写侧升级前）。若存在 → runTrace fail-fast 提示迁移，
- * 不静默把它当目录读（SC-C 21）。
- */
-const LEGACY_TRACE_FILE = "./trace.jsonl";
-
-/**
- * Resolve trace output path: flag > IKNOW_TRACE_OUT env > default directory.
- * ADR-0003 D3: default is relative to CWD. T2 后语义为目录。
- */
-function resolveTracePath(flag: string | undefined): string {
-  return flag ?? process.env.IKNOW_TRACE_OUT ?? DEFAULT_TRACE_DIR;
+function resolveTraceRoot(flag: string | undefined): string {
+  return resolve(flag ?? process.env.IKNOW_TRACE_OUT ?? resolveServeDataDir());
 }
 
 /**
@@ -161,7 +154,7 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
   }
 
   const bundle: RuntimeBundle = await prepareRuntime();
-  const tracePath = resolveTracePath(parsed.traceOut);
+  const tracePath = resolveTraceRoot(parsed.traceOut);
 
   let built: { deps: LoopEngineDeps };
   try {
@@ -290,7 +283,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
 
   // ADR-0035:生命周期 trace 与 content trace 解耦。chat 不装配 content
   // trace，但 subagent 的 spawn/state_change/stop 永久写入默认 trace 目录。
-  const tracePath = resolve(resolveTracePath(parsed.traceOut));
+  const tracePath = resolve(resolveTraceRoot(parsed.traceOut));
   const subagentTraceService = createJsonlTraceService({
     filePath: tracePath,
     conversationId: "subagent",
@@ -563,14 +556,14 @@ async function runTui(parsed: ParsedCli): Promise<void> {
     ...(parsed.workspaceRoot !== undefined
       ? { workspaceRoot: parsed.workspaceRoot }
       : {}),
-    traceOut: resolveTracePath(parsed.traceOut),
+    traceOut: resolveTraceRoot(parsed.traceOut),
     ...(parsed.autoMode ? { permissionMode: "full_auto" } : {}),
   });
   process.exitCode = exitCode;
 }
 
 async function runServe(parsed: ParsedCli): Promise<void> {
-  const tracePath = resolveTracePath(parsed.traceOut);
+  const tracePath = resolveTraceRoot(parsed.traceOut);
   const { startSessionServe } = await import("./session-api/serve.js");
   const { createSessionGrants } =
     await import("./harness/permission/session-grants.js");
@@ -620,27 +613,10 @@ async function runServe(parsed: ParsedCli): Promise<void> {
 }
 
 async function runTrace(parsed: ParsedCli): Promise<void> {
-  // T7: trace CLI 默认读 ./trace/ 目录（无需 --trace-out）。--trace-out 显式
-  // 提供时覆盖默认。注意：这里不复用写侧 resolveTracePath —— env
-  // IKNOW_TRACE_OUT 是写侧 (serve/chat/ask) 的，不是读侧。
-  const traceOut = parsed.traceOut ?? DEFAULT_TRACE_DIR;
-
-  // SC-C 21 fail-fast（ADR-0020 D2.3：两种模式都先于探测执行——都依赖迁移后
-  // 的目录语义）。检测到旧单文件格式 trace → 提示迁移，不静默当目录读。
-  const legacyConflict = detectLegacyTrace(
-    traceOut,
-    parsed.traceOut === undefined
-  );
-  if (legacyConflict) {
-    writeErr(
-      `错误: 检测到旧单文件格式的 trace。请先运行迁移脚本：\n` +
-        `  npx tsx scripts/trace-migrate.ts\n` +
-        `(把 ${LEGACY_TRACE_FILE} 转成 ${DEFAULT_TRACE_DIR}<convId>.jsonl 目录；` +
-        `干净迁移完成后脚本会自动删除旧文件)`
-    );
-    process.exitCode = 1;
-    return;
-  }
+  // T3 (SC6): 读侧与写侧同源 —— flag > env > `resolveServeDataDir()`。
+  // 旧单文件 fail-fast(`detectLegacyTrace`)随 SC6 退役;两级树 discovery
+  // 由 T6 承接。
+  const traceOut = resolveTraceRoot(parsed.traceOut);
 
   // ADR-0020 D2.1 默认模式：不起进程，探测 iknow serve health 后指向同进程
   // /trace 面板。探测目标 host/port 来自 --host/--port（缺省 127.0.0.1:8787）。
@@ -713,39 +689,6 @@ async function probeServeHealth(host: string, port: number): Promise<boolean> {
     return false;
   } finally {
     clearTimeout(timer);
-  }
-}
-
-/**
- * 检测旧单文件 trace（SC-C 21）：
- *   - traceOut 已存在但不是目录（文件）→ 冲突（单文件无法按目录读）。
- *   - 用默认目录且 CWD 下旧 ./trace.jsonl 存在 → 冲突（数据未迁移）。
- * stat 失败（目标不存在）→ 不算冲突，按「目录尚未创建」正常启动。
- */
-function detectLegacyTrace(
-  traceOut: string,
-  usingDefaultDir: boolean
-): boolean {
-  const resolvedDir = resolve(traceOut);
-  if (existsSync(resolvedDir) && !isDirectoryPath(resolvedDir)) {
-    return true;
-  }
-  if (usingDefaultDir && existsSync(resolve(LEGACY_TRACE_FILE))) {
-    return true;
-  }
-  return false;
-}
-
-/**
- * 判断路径是否指向「目录」。用 stat isDirectory 区分 ./trace.jsonl（文件）
- * 与 ./trace/（目录）—— 两者共存不冲突（SC-C 21）。stat 失败（目标不存在）
- * 按目录处理：后续 startTraceServe 的 readdir 会自然返回空列表。
- */
-function isDirectoryPath(p: string): boolean {
-  try {
-    return statSync(p).isDirectory();
-  } catch {
-    return true;
   }
 }
 

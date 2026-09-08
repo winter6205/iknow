@@ -8,7 +8,7 @@
  */
 import { afterAll, afterEach, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { join } from "node:path";
@@ -23,6 +23,7 @@ import type { SessionHub } from "../../src/session-api/hub.ts";
 import {
   parseSessionJsonl,
   resolveConversationDir,
+  resolveConversationTraceFilePath,
   resolveProjectSessionDir,
 } from "../../src/session-api/store/index.ts";
 import { deriveProjectIdentityRoot } from "../../src/harness/session-roots.ts";
@@ -166,6 +167,12 @@ describe("startSessionServe — option propagation", () => {
 
 describe("startSessionServe — trace health wiring", () => {
   it("health counts failures from a trace service created by the hub", async () => {
+    // T3 (SC6): 主会话 trace 锚在 `<projectDir>/<convId>/trace.jsonl`, 写侧
+    // 命中该路径后 appendFileSync 必报 EISDIR → traceWriteFailures ≥ 1。
+    // 策略: 先 createSession 让 store 在 `<projectDir>/<convId>/` 落 JSONL,
+    // 然后 mkdir 该 `<projectDir>/<convId>/trace.jsonl` 作为目录占据, 主
+    // 会话 trace 写入路径 `trace.jsonl` 时遇到同名目录 → appendFileSync 抛
+    // EISDIR → JsonlTraceService warn-once → traceWriteFailures += 1。
     baseDir = await mkdtemp(join(tmpdir(), "iknow-serve-trace-health-"));
     const traceOut = join(baseDir, "trace-out-file");
     await writeFile(traceOut, "", "utf8");
@@ -192,6 +199,15 @@ describe("startSessionServe — trace health wiring", () => {
         session: { conversation_id: string };
       }
     ).session.conversation_id;
+
+    // 计算与 hub.store 同一 projectDir, 占据同名 trace.jsonl 为目录 →
+    // appendFileSync 必报 EISDIR。
+    const projectDir = resolveProjectSessionDir(baseDir, process.cwd());
+    const traceFile = resolveConversationTraceFilePath({
+      projectDir,
+      conversationId: sessionId,
+    });
+    await mkdir(traceFile, { recursive: true });
 
     const posted = await fetch(
       `${origin}/api/v1/sessions/${sessionId}/messages`,

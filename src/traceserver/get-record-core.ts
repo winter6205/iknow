@@ -125,7 +125,12 @@ export function createGetRecordCore(
       throw new TraceRecordNotFoundError(parsed.recordId);
     }
 
-    const parts = await addressParts(found.match.row, parsed.detail, traceDir);
+    // T3 (SC7, ADR-0071): blob dereference 接收 `traceFilePath` 而非
+    // `traceDir` —— `dirname(traceFilePath)` = blobs 兄弟目录, 与 T3 主会话
+    // 写侧(`<baseDir>/projects/<slug>/<convId>/trace.jsonl` + 同目录 blobs/)
+    // 共派生。读侧仍按 `<traceDir>/<convId>.jsonl` 寻址 v2 文件, 待 T6
+    // (traceserver 读侧 discovery) 走两级树后这里再切到 traceFilePath 输入。
+    const parts = await addressParts(found.match.row, parsed.detail, filePath);
     return JSON.stringify(
       parsed.partIndex === undefined
         ? manifestOf(found.match, parsed, parts)
@@ -242,13 +247,16 @@ interface AddressablePart {
 async function addressParts(
   row: TraceRecordRow,
   detail: Detail,
-  traceDir: string
+  traceFilePath: string
 ): Promise<{
   readonly parts: ReadonlyArray<AddressablePart>;
   readonly messageCount: number;
 }> {
   const messages = Array.isArray(row["messages"]) ? row["messages"] : [];
-  const dereferenced = await dereferenceTraceMessages(messages, { traceDir });
+  // T3 (SC7): 传 traceFilePath 而非 traceDir —— blob 目录 = dirname(filePath)/blobs。
+  const dereferenced = await dereferenceTraceMessages(messages, {
+    traceFilePath,
+  });
   if (detail === "tool_results") {
     const results: readonly ProjectedToolResult[] =
       collectToolResults(dereferenced);

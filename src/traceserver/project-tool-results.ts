@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export const TOOL_RESULT_PREVIEW_CAP = 400;
 const TRUNCATION_MARKER = "...[truncated]";
@@ -55,7 +55,15 @@ export type ReadBlob = (
 ) => string | Uint8Array | Promise<string | Uint8Array>;
 
 export interface TraceMessageDereferenceOptions {
-  readonly traceDir?: string;
+  /**
+   * 主会话 trace 文件绝对路径。T3 (SC7, plans/session-folder-consolidation.md /
+   * ADR-0071 Decision 4) 起 `traceDir` 退役:blob 目录 = `dirname(traceFilePath) +
+   * "/blobs"`,与 `<baseDir>/projects/<slug>/<convId>/blobs` 同源派生
+   * (JsonlTraceService 在 blob 模式下的默认写盘位置)。传 `traceFilePath` 即隐含
+   * 接受该 blob 路径;读侧禁止 `traceDir` 单独存在 —— 仅文件路径足以承载 blob
+   * 解析的全部信息。
+   */
+  readonly traceFilePath?: string;
   readonly readBlob?: ReadBlob;
 }
 
@@ -155,11 +163,16 @@ export async function dereferenceTraceMessages(
         const reference = asBlobReference(message);
         const readBlob =
           options.readBlob ??
-          (options.traceDir === undefined
+          (options.traceFilePath === undefined
             ? undefined
             : (sha: string) =>
-                readFileSync(join(options.traceDir!, "blobs", sha)));
-        if (readBlob === undefined) throw new Error("traceDir is required");
+                readFileSync(
+                  join(dirname(options.traceFilePath!), "blobs", sha)
+                ));
+        if (readBlob === undefined)
+          throw new Error(
+            "traceFilePath is required to dereference blob references"
+          );
         const raw = await readBlob(reference.sha);
         const serialized =
           typeof raw === "string" ? raw : Buffer.from(raw).toString("utf8");

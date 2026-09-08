@@ -164,7 +164,12 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
       requestCount >= 2,
       `the parent and worker should call the stub model (stdout=${stdout}, stderr=${stderr})`
     );
-    const tracePath = join(scratch, "trace", "subagent.jsonl");
+    // T3 (SC6): `DEFAULT_TRACE_DIR = "./trace/"` 已退役。cli.ts 的
+    // `resolveTraceRoot` 默认退到 `resolveServeDataDir()` ≈ `<homedir>/.iknow`。
+    // 本测试把 HOME 重定向到 `<scratch>/home`, dataDir 落到
+    // `<scratch>/home/.iknow`, 子代理聚合流(filePath 模式)写该目录下
+    // `<convId>.jsonl`, 即 `subagent.jsonl`。
+    const tracePath = join(home, ".iknow", "subagent.jsonl");
     assert.ok(
       existsSync(tracePath),
       `missing trace file (stdout=${stdout}, stderr=${stderr}, requests=${requestCount})`

@@ -109,7 +109,7 @@ import {
   errorMessage,
 } from "../harness/errors.js";
 import { appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname } from "node:path";
 import { homedir } from "node:os";
 import type { AciCatalog } from "../harness/aci/types.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
@@ -122,6 +122,7 @@ import { resolveMcpRoots, type McpRoots } from "../harness/mcp/roots.js";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
+import { resolveConversationTraceFilePath } from "./store/index.js";
 import {
   appendCheckpoint,
   CURRENT_SCHEMA_VERSION,
@@ -2434,21 +2435,22 @@ export class SessionHub {
   private recordViolationTrace(conversationId: string, reason: string): void {
     if (!this.traceOut) return;
     try {
-      // T2 每会话独立文件: violation 与 JsonlTraceService 同域, 写
-      // <traceOut>/<conversationId>.jsonl (不再 append 到 traceOut 文件本身)。
-      // mkdir recursive 与 JsonlTraceService 构造一致兜底。
-      mkdirSync(this.traceOut, { recursive: true });
+      // T3 (plans/session-folder-consolidation.md / ADR-0071 Decision 4):
+      // violation 与主会话 trace 同域,锚在 `<projectDir>/<convId>/trace.jsonl`。
+      // 派生复用 `resolveConversationTraceFilePath`,与 `createTrace` 同源 →
+      // 同一会话的两条写入路径不会漂到不同文件。
+      const filePath = resolveConversationTraceFilePath({
+        projectDir: this.store.getProjectDir(),
+        conversationId,
+      });
+      mkdirSync(dirname(filePath), { recursive: true });
       const line = JSON.stringify({
         conversation_id: conversationId,
         record_type: "violation",
         ts: new Date().toISOString(),
         detail: safeParse(reason),
       });
-      appendFileSync(
-        join(this.traceOut, `${conversationId}.jsonl`),
-        line + "\n",
-        "utf8"
-      );
+      appendFileSync(filePath, line + "\n", "utf8");
     } catch {
       // Best-effort observability; never let trace I/O break the served turn.
     }
@@ -2483,10 +2485,25 @@ export class SessionHub {
     conversationId: string
   ): TraceServiceWithHealth | undefined {
     if (!this.traceOut) return undefined;
-    const trace = createJsonlTraceService({
-      filePath: this.traceOut,
-      conversationId,
-    });
+    // T3 (plans/session-folder-consolidation.md / ADR-0071 Decision 4): 主会话
+    // trace 锚在 `<projectDir>/<conversationId>/trace.jsonl`(同会话文件夹内)。
+    // 子代理聚合流仍走目录模式(`createTrace("subagent")`),与主会话锚点不同 —
+    // 子代理 trace 在 T5 迁入 `<sessionFolder>/subagents/agent-<id>.jsonl`,本处
+    // 只承担未迁完前的兼容位。主会话与 violation 共用同一 `resolveConversationTraceFilePath`
+    // 派生,确保两条写入路径落同一文件。
+    const trace =
+      conversationId === "subagent"
+        ? createJsonlTraceService({
+            filePath: this.traceOut,
+            conversationId,
+          })
+        : createJsonlTraceService({
+            traceFilePath: resolveConversationTraceFilePath({
+              projectDir: this.store.getProjectDir(),
+              conversationId,
+            }),
+            conversationId,
+          });
     this.traceServices.add(trace);
     return trace;
   }

@@ -54,8 +54,10 @@ export {
 } from "./rewind-targets.js";
 export {
   resolveConversationDir,
+  resolveConversationTraceFilePath,
   resolveProjectSessionDir,
   SessionStore,
+  TRACE_FILE_NAME,
   type SessionListEntry,
   type SessionBindingStatus,
 } from "./session-store.js";

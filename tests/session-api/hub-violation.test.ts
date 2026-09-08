@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { SessionHub } from "../../src/session-api/hub.ts";
 import { getVersion } from "../../src/cli/usage.ts";
 import {
+  resolveConversationTraceFilePath,
   resolveProjectSessionDir,
   SessionStore,
 } from "../../src/session-api/store/index.ts";
@@ -96,8 +97,12 @@ describe("SessionHub violation kill (serve entry)", () => {
       assert.equal(res.turn.answer.stopReason, "protocolError");
       // Serve must never kill the process: exitCode stays 0.
       assert.equal(process.exitCode, 0);
-      // The violation event is written to the per-session JSONL trace.
-      const tracePath = join(traceDir, `${convId}.jsonl`);
+      // T3 (SC6): violation 写 `<projectDir>/<convId>/trace.jsonl`,
+      // 与 hub.recordViolationTrace 共派生。读侧复用同一 SSOT,避免漂移。
+      const tracePath = resolveConversationTraceFilePath({
+        projectDir: store.getProjectDir(),
+        conversationId: convId,
+      });
       assert.equal(existsSync(tracePath), true);
       const raw = await readFile(tracePath, "utf8");
       const lines = raw

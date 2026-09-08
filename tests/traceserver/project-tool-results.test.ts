@@ -33,7 +33,8 @@ const toolResult = (
 const tempDirs: string[] = [];
 
 afterEach(() => {
-  for (const directory of tempDirs.splice(0)) rmSync(directory, { recursive: true });
+  for (const directory of tempDirs.splice(0))
+    rmSync(directory, { recursive: true });
 });
 
 describe("projectToolResults", () => {
@@ -79,7 +80,9 @@ describe("projectToolResults", () => {
     ];
 
     const projections = await Promise.all(
-      Array.from({ length: 2 }, () => Promise.resolve(projectToolResults(messages)))
+      Array.from({ length: 2 }, () =>
+        Promise.resolve(projectToolResults(messages))
+      )
     );
 
     assert.deepEqual(projections[0], projections[1]);
@@ -98,17 +101,27 @@ describe("projectToolResultsFromTrace", () => {
     const fromFull = await projectToolResultsFromTrace(fullMessages);
     const fromBlob = await projectToolResultsFromTrace(
       [fullMessages[0], { sha, bytes: Buffer.byteLength(serialized) }],
-      { readBlob: async (requestedSha) => requestedSha === sha ? serialized : "" }
+      {
+        readBlob: async (requestedSha) =>
+          requestedSha === sha ? serialized : "",
+      }
     );
 
     assert.deepEqual(fromBlob, fromFull);
   });
 
-  it("reads blob references from traceDir", async () => {
-    const traceDir = mkdtempSync(join(tmpdir(), "iknow-project-tool-results-"));
-    tempDirs.push(traceDir);
-    const blobDir = join(traceDir, "blobs");
+  it("reads blob references from traceFilePath (SC7)", async () => {
+    // SC7: blob 目录由 `dirname(traceFilePath)/blobs` 派生 —— 不再单独传
+    // traceDir, 调用方只提供 trace 文件路径即可, 派生在 `dereferenceTraceMessages`
+    // 内完成。fixture: 临时会话文件夹 + trace.jsonl + 同目录 blobs/, 验证 blob
+    // 被读出且 dereferenced 输出与 fullMessages 等价。
+    const sessionFolder = mkdtempSync(
+      join(tmpdir(), "iknow-project-tool-results-")
+    );
+    tempDirs.push(sessionFolder);
+    const blobDir = join(sessionFolder, "blobs");
     mkdirSync(blobDir);
+    const traceFilePath = join(sessionFolder, "trace.jsonl");
     const message = toolResult("toolu-1", "on disk");
     const serialized = JSON.stringify(message);
     const sha = createHash("sha256").update(serialized).digest("hex");
@@ -116,8 +129,11 @@ describe("projectToolResultsFromTrace", () => {
 
     assert.deepEqual(
       await projectToolResultsFromTrace(
-        [toolUse("toolu-1", "bash"), { sha, bytes: Buffer.byteLength(serialized) }],
-        { traceDir }
+        [
+          toolUse("toolu-1", "bash"),
+          { sha, bytes: Buffer.byteLength(serialized) },
+        ],
+        { traceFilePath }
       ),
       [
         {
@@ -135,7 +151,11 @@ describe("projectToolResultsFromTrace", () => {
     await assert.doesNotReject(async () => {
       const projection = await projectToolResultsFromTrace(
         [{ sha: "missing", bytes: 10 }],
-        { readBlob: () => { throw new Error("missing blob"); } }
+        {
+          readBlob: () => {
+            throw new Error("missing blob");
+          },
+        }
       );
       assert.deepEqual(projection, []);
     });

@@ -172,6 +172,25 @@ export function resolveConversationDir(opts: {
 }
 
 /**
+ * T3 (plans/session-folder-consolidation.md / ADR-0071 Decision 4):
+ * per-conversation trace 锚点 = `<projectDir>/<conversationId>/trace.jsonl`。
+ * 同一 baseDir + 同一 projectIdentityRoot + 同一 conversationId 必然派生出
+ * 同一绝对文件路径 —— 不同 cwd 启动同一仓的同一会话,文件路径稳定
+ * (跨 cwd 一致性 = plans/session-folder-consolidation.md SC6 的核心不变式)。
+ *
+ * 派生而不是字符串拼接:复用 `resolveConversationDir` 的 sanitize 与长度边界,
+ * 避免在调用方各自重写 path-join 导致 `..` / `/` 逃逸的回退风险。
+ */
+export const TRACE_FILE_NAME = "trace.jsonl";
+
+export function resolveConversationTraceFilePath(opts: {
+  readonly projectDir: string;
+  readonly conversationId: string;
+}): string {
+  return join(resolveConversationDir(opts), TRACE_FILE_NAME);
+}
+
+/**
  * Per-segment single-component cap on most POSIX-style filesystems.
  * Enforced as a typed boundary (no silent truncation) so callers see the
  * rejection instead of an arbitrary cut-off id producing an unexpected

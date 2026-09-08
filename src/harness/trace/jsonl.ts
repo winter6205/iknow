@@ -15,12 +15,9 @@
 
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
-import {
-  maybeRotate,
-  type TraceRotationOptions,
-} from "./rotation.js";
+import { maybeRotate, type TraceRotationOptions } from "./rotation.js";
 import type {
   TraceService,
   LlmCallRecord,
@@ -38,11 +35,21 @@ import type {
 
 export interface JsonlTraceOptions {
   /**
-   * trace 目录 (绝对或相对 CWD)。
-   * T2 每会话独立文件: 实际写入 <filePath>/<conversationId>.jsonl,
-   * 目录不存在时 mkdirSync recursive 创建 (ADR-0003 D4: conversation_id 仍实例绑定)。
+   * trace 目录 (绝对或相对 CWD)。T2 每会话独立文件: 实际写入
+   * `<filePath>/<conversationId>.jsonl`,目录不存在时 mkdirSync recursive 创建
+   * (ADR-0003 D4: conversation_id 仍实例绑定)。仅子代理聚合流(`subagent`
+   * conversationId)保留目录模式 —— 主会话写入改走 `traceFilePath` 文件模式,
+   * 锚在 `<baseDir>/projects/<slug>/<conversationId>/trace.jsonl`(T3,
+   * plans/session-folder-consolidation.md / ADR-0071 Decision 1)。
    */
-  filePath: string;
+  filePath?: string;
+  /**
+   * 直接给出 trace 文件路径(主会话模式, T3)。文件所在目录不存在时,工厂在
+   * 首次写入时按 `mkdirSync recursive` 创建;`maybeRotate` 仅在目录模式下触发
+   * (文件路径已收敛, 没有 `*.1.jsonl` / `*.2.jsonl` 之类的轮转目标)。
+   * 与 `filePath` 互斥 —— 同时传 / 同时缺席都报错,工厂构造期 fail-loud。
+   */
+  traceFilePath?: string;
   /** 实例绑定的 conversation_id, 每条记录都写入 (ADR Decision 4)。 */
   conversationId: string;
   /** 可选注入 writer (测试用 always-throw writer)。 */
@@ -138,8 +145,35 @@ function toBlobReferences(
 export function createJsonlTraceService(
   options: JsonlTraceOptions
 ): TraceServiceWithHealth {
-  const { filePath, conversationId } = options;
-  maybeRotate(filePath, options.rotation);
+  const { conversationId } = options;
+  // T3: mode dispatch — `filePath` 是目录(子代理聚合流), `traceFilePath` 是
+  // 文件路径(主会话锚在会话文件夹)。互斥: 同时传或同时缺席都 fail-loud,
+  // 工厂构造期显式,避免静默退化到 cwd-relative `./trace/`。
+  if (options.filePath === undefined && options.traceFilePath === undefined) {
+    throw new Error(
+      "JsonlTraceService requires either filePath (directory mode) or traceFilePath (file mode)"
+    );
+  }
+  if (options.filePath !== undefined && options.traceFilePath !== undefined) {
+    throw new Error(
+      "JsonlTraceService received both filePath and traceFilePath — set exactly one"
+    );
+  }
+  const filePath = options.filePath;
+  const traceFilePath = options.traceFilePath;
+  // 派生: 目录模式 → targetFile = <dir>/<convId>.jsonl, targetDir = <dir>;
+  // 文件模式 → targetFile = traceFilePath, targetDir = dirname(traceFilePath)。
+  // 上面的互斥检查保证此处一定有一项非空, 直接 narrow 即可。
+  const targetFile =
+    traceFilePath !== undefined
+      ? traceFilePath
+      : join(filePath as string, `${conversationId}.jsonl`);
+  const targetDir =
+    filePath !== undefined ? filePath : dirname(traceFilePath as string);
+  // 目录模式保留 maybeRotate(旧 `<dir>/<convId>.1.jsonl` 链); 文件模式无轮转目标。
+  if (filePath !== undefined) {
+    maybeRotate(filePath, options.rotation);
+  }
   let secretValues = currentSecretValues();
   let outputMask = createOutputMask(secretValues);
   function currentOutputMask(): ReturnType<typeof createOutputMask> {
@@ -151,22 +185,20 @@ export function createJsonlTraceService(
     return outputMask;
   }
   const messageStorageMode = resolveMessageStorageMode();
-  // T2 每会话独立文件: filePath 是目录, 实际写 <filePath>/<conversationId>.jsonl。
-  // mkdirSync recursive 兜底, 目录不存在时先建 (产品路径 traceOut 首次使用时目录
-  // 可能未建)。仅默认 writer 时建目录 —— 注入自定义 writer (测试用 always-throw)
-  // 时调用方掌控写盘, 目录创建由调用方负责, 不在工厂内强加 IO 副作用。
-  const sessionFile = join(filePath, `${conversationId}.jsonl`);
   // mkdir 延迟到首次写入: 构造期不做 IO —— 目标路径被同名文件占据等失败由
   // recordXxx 的 try/catch warn-once 兜底 (ADR-0003 D13), 不在构造时抛错打挂 turn。
+  // 目录模式建 <filePath>; 文件模式建 dirname(traceFilePath)。仅默认 writer 时建
+  // 目录 —— 注入自定义 writer (测试用 always-throw) 时调用方掌控写盘, 目录创建
+  // 由调用方负责, 不在工厂内强加 IO 副作用。
   let dirReady = false;
   const writer: (line: string) => void =
     options.writer ??
     ((line: string): void => {
       if (!dirReady) {
-        mkdirSync(filePath, { recursive: true });
+        mkdirSync(targetDir, { recursive: true });
         dirReady = true;
       }
-      appendFileSync(sessionFile, line + "\n", "utf8");
+      appendFileSync(targetFile, line + "\n", "utf8");
     });
 
   // 实例级去重: 首次写盘失败 warn 一次, 后续静默 (ADR Decision 13)。
@@ -204,7 +236,7 @@ export function createJsonlTraceService(
             ...fullLine,
             messages: toBlobReferences(
               record.messages,
-              filePath,
+              targetDir,
               currentOutputMask()
             ),
           };

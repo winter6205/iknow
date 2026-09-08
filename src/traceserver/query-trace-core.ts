@@ -104,7 +104,7 @@ export function createQueryTraceCore(
     };
     const result = reader.query(query);
     const projected = await Promise.all(
-      result.records.map((row) => projectRecord(row, traceDir))
+      result.records.map((row) => projectRecord(row, filePath))
     );
     return serializeListPage(
       toQueryTracePage(projected, {
@@ -217,7 +217,7 @@ function parseStatus(value: unknown): "ok" | "error" | undefined {
 
 async function projectRecord(
   row: TraceRecordRow,
-  traceDir: string
+  traceFilePath: string
 ): Promise<Record<string, unknown>> {
   const projected = projectRecordBase(row);
   if (row["record_type"] !== "llm_call") return projected;
@@ -242,7 +242,10 @@ async function projectRecord(
       }
     }
   }
-  const toolResults = await projectToolResultsFromTrace(messages, { traceDir });
+  // T3 (SC7): 传 traceFilePath, blob 目录由 dirname(filePath)/blobs 派生。
+  const toolResults = await projectToolResultsFromTrace(messages, {
+    traceFilePath,
+  });
   projected.tool_result_count = toolResults.length;
   if (toolResults.length > 0) {
     projected.tool_result_previews = toolResults

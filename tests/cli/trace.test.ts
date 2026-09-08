@@ -1,5 +1,5 @@
 /**
- * `iknow trace` CLI tests (spec #183 R2 + v2 T7).
+ * `iknow trace` CLI tests (spec #183 R2).
  *
  * Covers:
  *   - parseArgs recognizes the `trace` positional
@@ -7,51 +7,15 @@
  *   - defaults: port 24881, host 127.0.0.1, noOpen=false
  *   - bad --port throws a parse error
  *   - integration: startTraceServe from parsed opts → /api/v1/health live
- *   - T7: runTrace 默认 ./trace/ 目录 + 旧 ./trace.jsonl fail-fast + serve 与 trace 分开
+ *   - serve 与 trace 的 parseArgs 隔离(T3 后保留的唯一 T7 不变式)
  */
 import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
-import {
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-  mkdirSync,
-  statSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { parseArgs } from "../../src/cli/parse-args.ts";
 import {
   startTraceServe,
   type TraceListeningServer,
 } from "../../src/traceserver/serve.ts";
-
-// 仓库根（cli.ts 有 main().catch 副作用，不能 import，只能子进程跑真实 CLI）。
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-
-/**
- * 解析 tsx 运行时入口：worktree 的 node_modules 是空的（依赖从主仓库提升），
- * 从测试文件所在目录逐级向上找第一个含 node_modules/tsx/dist/cli.mjs 的目录。
- * npx 能解析到但测试要显式可复现，故手动定位。
- */
-function resolveTsxCli(): string {
-  let dir = dirname(fileURLToPath(import.meta.url));
-  for (;;) {
-    const candidate = join(dir, "node_modules", "tsx", "dist", "cli.mjs");
-    try {
-      if (statSync(candidate).isFile()) return candidate;
-    } catch {
-      // 继续向上
-    }
-    const parent = join(dir, "..");
-    if (parent === dir) throw new Error("cannot locate tsx/dist/cli.mjs");
-    dir = parent;
-  }
-}
-
-const tsxCli = resolveTsxCli();
 
 let listening: TraceListeningServer | undefined;
 
@@ -194,159 +158,19 @@ describe("iknow trace — integration", () => {
 
 // -- T7: runTrace 真实 CLI（子进程） -------------------------------------------
 //
-// cli.ts 顶层 `main().catch` 是副作用，无法 import 单测；这里用子进程跑真实
-// CLI 验证 T7 行为。每个用例在临时 CWD 里启动，避免污染仓库根的 ./trace*。
-// tsx 入口经 node_modules/tsx/dist/cli.mjs（worktree node_modules 为空但
-// npx 能解析到根仓库的 tsx；测试显式给绝对路径以保证可复现）。
-
-interface SpawnedTrace {
-  child: ChildProcess;
-  /** 解析后给出 trace CLI 打到 stderr 的 URL（含端口）。 */
-  url: Promise<string>;
-  /** 进程自行退出（fail-fast / 报错）时 resolve { code, output }。 */
-  exited: Promise<{ code: number | null; output: string }>;
-}
-
-/** 起 `iknow trace` 子进程，返回 URL / exited 两个信号 + child 句柄。 */
-function spawnTraceCli(cwd: string, args: string[]): SpawnedTrace {
-  const child = spawn(
-    process.execPath,
-    [tsxCli, join(repoRoot, "src", "cli.ts"), "trace", ...args],
-    { cwd, stdio: ["ignore", "pipe", "pipe"] }
-  );
-  let out = "";
-  let err = "";
-  child.stdout.on("data", (d) => (out += String(d)));
-  child.stderr.on("data", (d) => (err += String(d)));
-
-  const urlPromise = new Promise<string>((resolveUrl, rejectUrl) => {
-    const check = () => {
-      const m = err.match(/http:\/\/127\.0\.0\.1:(\d+)\//);
-      if (m) {
-        resolveUrl(`http://127.0.0.1:${m[1]}/`);
-        return true;
-      }
-      return false;
-    };
-    child.stderr.on("data", check);
-    child.on("error", rejectUrl);
-  });
-
-  const exited = new Promise<{ code: number | null; output: string }>(
-    (resolveExit) => {
-      // 用 close 事件(而非 exit)收尾:close 在 stdio 流完全关闭后触发,
-      // 保证 `out + err` 已 flush 完整。fail-fast 短寿子进程的 exit 事件
-      // 可能在 stdio pipe 数据尚未 flush 到父进程 buffer 时触发,导致
-      // assert.match(legacy.output, /迁移|migrate/) 在全量并行负载下偶
-      // 发失败(flaky)。close 解决该 race。
-      child.on("close", (code) => resolveExit({ code, output: out + err }));
-      child.on("error", () => resolveExit({ code: null, output: out + err }));
-    }
-  );
-
-  return { child, url: urlPromise, exited };
-}
-
-/** SIGTERM 后等 close;超时再 SIGKILL。已退出则立刻返回。 */
-async function terminateChild(
-  child: ChildProcess,
-  timeoutMs = 5_000
-): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-    }, timeoutMs);
-    child.once("close", () => {
-      clearTimeout(timer);
-      resolve();
-    });
-    child.kill("SIGTERM");
-  });
-}
-
-describe("runTrace — T7 默认目录 / fail-fast / serve 分开", () => {
-  let scratch: string;
-  let spawned: SpawnedTrace | undefined;
-  afterEach(async () => {
-    if (spawned) await terminateChild(spawned.child);
-    spawned = undefined;
-    if (scratch) rmSync(scratch, { recursive: true, force: true });
-  });
-
-  it("默认读 ./trace/ 目录（无需 --trace-out），/api/v1/sessions 服务该目录", async () => {
-    scratch = mkdtempSync(join(tmpdir(), "trace-t7-default-"));
-    // 预置 ./trace/<convId>.jsonl（每会话独立文件语义）。
-    mkdirSync(join(scratch, "trace"));
-    writeFileSync(
-      join(scratch, "trace", "c7.jsonl"),
-      JSON.stringify({
-        conversation_id: "c7",
-        record_type: "session",
-        agent_version: "test",
-        status: "ok",
-      }) + "\n",
-      "utf8"
-    );
-    // ADR-0020 D2.2: 独立进程目录语义现在走 --separate escape hatch。
-    spawned = spawnTraceCli(scratch, [
-      "--separate",
-      "--no-open",
-      "--port",
-      "0",
-    ]);
-    const url = await Promise.race([
-      spawned.url,
-      spawned.exited.then((e) => {
-        throw new Error(`trace exited early (code ${e.code}):\n${e.output}`);
-      }),
-    ]);
-    const sessions = await fetch(`${url}api/v1/sessions`);
-    assert.equal(sessions.status, 200);
-    const body = (await sessions.json()) as {
-      sessions: Array<{ conversation_id: string }>;
-    };
-    assert.ok(
-      body.sessions.some((s) => s.conversation_id === "c7"),
-      "默认 ./trace/ 目录下 c7 会话应被列出"
-    );
-  }, 30_000);
-
-  it("旧 ./trace.jsonl 存在 → fail-fast exit 1 + 提示迁移（不静默当目录）", async () => {
-    scratch = mkdtempSync(join(tmpdir(), "trace-t7-legacy-"));
-    writeFileSync(
-      join(scratch, "trace.jsonl"),
-      '{"conversation_id":"c1","record_type":"turn"}\n',
-      "utf8"
-    );
-    spawned = spawnTraceCli(scratch, []);
-    const legacy = await spawned.exited;
-    assert.equal(legacy.code, 1, "旧 ./trace.jsonl → fail-fast exit 1");
-    assert.match(legacy.output, /迁移|migrate/);
-    assert.match(legacy.output, /trace-migrate/);
-  }, 30_000);
-
-  it("显式 --trace-out 指向旧单文件（非目录）→ fail-fast 提示迁移", async () => {
-    scratch = mkdtempSync(join(tmpdir(), "trace-t7-explicit-"));
-    const file = join(scratch, "old.jsonl");
-    writeFileSync(file, '{"conversation_id":"c1"}\n', "utf8");
-    spawned = spawnTraceCli(scratch, ["--trace-out", file]);
-    const explicit = await spawned.exited;
-    assert.equal(explicit.code, 1, "显式单文件 --trace-out → fail-fast exit 1");
-    assert.match(explicit.output, /迁移|migrate/);
-  }, 30_000);
-
-  it("serve 与 trace 分开：serve 解析不连带 trace 读侧字段（SC-C 20/22）", () => {
-    // T7 改动是 trace 专属：serve 的 parseArgs 不应被默认 ./trace/ 目录或
-    // --no-open 污染 —— traceOut 仍 undefined（serve 只写不读），noOpen 仍
-    // false（自动 open 只属于 trace 命令）。
+// T3 (SC6, plans/session-folder-consolidation.md): 该 describe 块原 4 条测试中,
+// 「默认读 ./trace/」「旧 ./trace.jsonl fail-fast」「--trace-out 指向旧单文件
+// fail-fast」三条钉死的形态已随 T3 退役(`DEFAULT_TRACE_DIR` / `LEGACY_TRACE_FILE`
+// / `detectLegacyTrace` 从 cli.ts 移除),整块连同子进程脚手架归档到
+// archive/tests/cli/trace-t7-retired-fail-fast.test.ts(附归档原因)。
+// 「serve 与 trace 分开」认证的不变式仍然成立且等强于原断言, 重写保留于下。
+describe("parseArgs — serve 与 trace 命令的 traceOut 隔离", () => {
+  it("serve 解析不连带 trace 读侧字段（--no-open / 默认 trace 目录都不污染 serve）", () => {
+    // SC-C 20/22 升级: serve 不再被 trace 默认锚点影响。traceOut 仍 undefined
+    // (仅 flag / env 显式设),noOpen 仍 false(trace 专属 flag)。
     const serve = parseArgs({ argv: ["serve"] });
     assert.equal(serve.command, "serve");
-    assert.equal(
-      serve.traceOut,
-      undefined,
-      "serve 不因 T7 获得默认 trace 读目录"
-    );
+    assert.equal(serve.traceOut, undefined, "serve 不应自动获得 trace 读默认");
     assert.equal(serve.noOpen, false, "no-open 是 trace 专属 flag，serve 不设");
     // serve 显式传 --trace-out 仍只表达写路径（test 不校验行为，仅示切换）。
     const serveWithTrace = parseArgs({
