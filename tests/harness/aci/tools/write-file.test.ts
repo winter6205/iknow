@@ -191,6 +191,80 @@ describe("write_file — rejection and containment", () => {
   });
 });
 
+describe("write_file — SC4/SC5 可写合同 (specs/mutate-write-contract.md)", () => {
+  it("SC4: 写 /tmp 绝对路径仍拒——文案含活 taskRoot 路径与「/tmp 非交付落点」说明", async () => {
+    // SC4: bash 围栏允许 /tmp（进程临时面），但耐久写只落 taskRoot。
+    // 失败文案必须把这两件事都说清：当前写根 = 活 taskRoot（含路径），
+    // /tmp 不是交付落点 —— 模型据此用相对路径重试，而不是把交付物写进 /tmp。
+    const root = await makeScratch("write-file-sc4-");
+    const tool = createWriteFileTool(root);
+
+    await assert.rejects(
+      () =>
+        tool.handler({
+          path: "/tmp/write-file-sc4-not-a-delivery.txt",
+          content: "nope\n",
+        }),
+      (error: unknown) => {
+        if (!(error instanceof ToolExecutionError)) return false;
+        return (
+          error.message.includes("path outside workspace") &&
+          error.message.includes("current write root") &&
+          error.message.includes(root) &&
+          error.message.includes("taskRoot") &&
+          error.message.includes("not a delivery destination") &&
+          error.message.includes("/tmp")
+        );
+      }
+    );
+  });
+
+  it("SC5: 相对活 taskRoot 的合法路径（含尚未存在的子目录）可完成写入", async () => {
+    // SC5: 目标父目录不存在 ≠ outside；create_directories 默认建目录后落盘。
+    const root = await makeScratch("write-file-sc5-missing-subdir-");
+    const cell: LiveTaskRoot = createLiveTaskRoot(root);
+    const tool = createWriteFileTool(cell);
+
+    await tool.handler({ path: "new/deep/dir/file.txt", content: "ok\n" });
+
+    assert.equal(
+      await readFile(join(root, "new", "deep", "dir", "file.txt"), "utf8"),
+      "ok\n"
+    );
+  });
+
+  it("SC5: create_directories=false 时缺父目录是 typed「parent directory does not exist」，不是 outside", async () => {
+    // SC5: 可执行错误必须可区分于 containment 拒绝——文案不得含 outside。
+    const root = await makeScratch("write-file-sc5-nodir-");
+    const tool = createWriteFileTool(root);
+
+    await assert.rejects(
+      () =>
+        tool.handler({
+          path: "missing/parent/file.txt",
+          content: "x\n",
+          create_directories: false,
+        }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("parent directory does not exist") &&
+        !error.message.includes("outside workspace")
+    );
+  });
+
+  it("表 B overflow: 极深相对路径仍在 taskRoot 下——写入成功，不报 outside", async () => {
+    // 表 B overflow（工具面）：前缀裁决按整条链生效，极深合法路径不炸成 outside。
+    const root = await makeScratch("write-file-sc5-deep-");
+    const tool = createWriteFileTool(root);
+    const deepRel =
+      Array.from({ length: 30 }, (_, i) => `d${i}`).join("/") + "/leaf.txt";
+
+    await tool.handler({ path: deepRel, content: "deep\n" });
+
+    assert.equal(await readFile(join(root, deepRel), "utf8"), "deep\n");
+  });
+});
+
 describe("write_file — no patch-level lint (W4: whole-file content written verbatim)", () => {
   it("accepts content with balanced braces/brackets and unclosed chars inside comments and strings", async () => {
     // 整文件写入不需要 patch 级 lint;只有 edit_file 才走 lintPatch

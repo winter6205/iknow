@@ -74,10 +74,13 @@ export async function resolveWithinRoot(
     // path 仍是 `projectIdentityRoot`,但写工具失败时如果只回 `<target> not
     // under <root>`,模型很难把这两根区分开去重试一个相对路径。文案必须显式
     // 标 "current write root: <root>" 的引导,让模型能用相对路径重试。
+    // SC4 (specs/mutate-write-contract.md): bash 围栏允许 /tmp(进程临时面),
+    // 写工具拒绝 /tmp 是同一合同的另一面 —— 文案必须把「当前写根 = 活
+    // taskRoot」「/tmp 不是交付落点」都说明,防止模型把交付物写进 /tmp。
     // 写根缺席 → 退回原文案 (不崩,文案退化到 base 形态)。
     const writeRootHint =
       realRoot.length > 0
-        ? ` (current write root: ${realRoot}; retry with a path relative to it)`
+        ? ` (current write root is the live taskRoot: ${realRoot}; /tmp is the sandbox tmpfs — process-temporary and not a delivery destination. Retry with a path relative to the taskRoot.)`
         : "";
     throw new ToolExecutionError(
       `path outside workspace: ${resolvedTarget} not under ${realRoot}${writeRootHint}`
