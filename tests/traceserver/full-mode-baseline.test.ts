@@ -15,7 +15,7 @@
  * → tool-1（bash 调用 + result）→ llm-2（累计重复 messages，含 assistant
  * tool_use + user tool_result）→ turn-1。
  */
-import { readFileSync, mkdtempSync, rmSync, copyFileSync } from "node:fs";
+import { mkdtempSync, rmSync, copyFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";

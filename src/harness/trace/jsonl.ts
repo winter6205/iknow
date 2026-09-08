@@ -93,14 +93,6 @@ function sameSecretSet(
   return left.every((value) => rightSet.has(value));
 }
 
-type MessageStorageMode = "full" | "blob";
-
-function resolveMessageStorageMode(): MessageStorageMode {
-  return process.env.IKNOW_TRACE_MESSAGES?.trim().toLowerCase() === "blob"
-    ? "blob"
-    : "full";
-}
-
 function isAlreadyPresentError(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -110,15 +102,51 @@ function isAlreadyPresentError(error: unknown): boolean {
   );
 }
 
+/**
+ * blob 载荷的形状标记（ADR-0036 同日 Amendment 表 C）。Anthropic 的
+ * `content` 有两种合法形状：block 数组与纯字符串。外层套 `{kind, v}` 让
+ * 读侧（T6 起）无损还原两种形状 —— 字符串不被误包成数组，数组不被误拆。
+ */
+interface BlobPayload {
+  kind: "str" | "blocks";
+  v: unknown;
+}
+
+/**
+ * content 级 blob 引用（SC10, ADR-0036 同日 Amendment）：`messages[i]` 仍是
+ * `{role, content}` 两键，`content` 被 `{sha, bytes}` 替换 —— role 内联在场，
+ * 读侧 `messageRole()` 无需改动即返回正确 role。`role` 本身不进 blob，正文
+ * 重复仍是去重收益的主体（ADR-0071 Decision 3）。
+ *
+ * empty（空串 / 空数组 / null）同样寻址：空内容有其 sha，不特判内联（表 B）。
+ */
 function toBlobReferences(
   messages: ReadonlyArray<unknown>,
   traceDir: string,
   outputMask: ReturnType<typeof createOutputMask>
-): Array<{ sha: string; bytes: number }> {
+): Array<{ role: unknown; content: { sha: string; bytes: number } }> {
   const blobsDir = join(traceDir, "blobs");
   mkdirSync(blobsDir, { recursive: true });
   return messages.map((message) => {
-    const serialized = JSON.stringify(message) ?? "null";
+    if (
+      typeof message !== "object" ||
+      message === null ||
+      !("role" in message) ||
+      !("content" in message)
+    ) {
+      throw new TypeError(
+        "trace blob storage requires {role, content} message records"
+      );
+    }
+    const { role, content } = message as {
+      role: unknown;
+      content: unknown;
+    };
+    const payload: BlobPayload = {
+      kind: typeof content === "string" ? "str" : "blocks",
+      v: content,
+    };
+    const serialized = JSON.stringify(payload) ?? "null";
     const masked = outputMask.mask(serialized);
     const bytes = Buffer.byteLength(masked, "utf8");
     const sha = createHash("sha256").update(masked, "utf8").digest("hex");
@@ -130,7 +158,7 @@ function toBlobReferences(
     } catch (error) {
       if (!isAlreadyPresentError(error)) throw error;
     }
-    return { sha, bytes };
+    return { role, content: { sha, bytes } };
   });
 }
 
@@ -184,7 +212,6 @@ export function createJsonlTraceService(
     }
     return outputMask;
   }
-  const messageStorageMode = resolveMessageStorageMode();
   // mkdir 延迟到首次写入: 构造期不做 IO —— 目标路径被同名文件占据等失败由
   // recordXxx 的 try/catch warn-once 兜底 (ADR-0003 D13), 不在构造时抛错打挂 turn。
   // 目录模式建 <filePath>; 文件模式建 dirname(traceFilePath)。仅默认 writer 时建
@@ -229,23 +256,26 @@ export function createJsonlTraceService(
         llm_call_id: id,
         ...toSnakeCaseRecord(record),
       };
-      let line = fullLine;
-      if (messageStorageMode === "blob" && record.messages !== undefined) {
+      // SC11 (ADR-0036 同日 Amendment)：无故障回退。blob 是唯一模式（SC9
+      // 退役 full 分支）；内层 blob IO 失败时**不写任何内联全量行** ——
+      // recordFailure warn-once 后直接返回 undefined，该次调用零行落盘，
+      // turn 存活（ADR-0003 D13 继承：不向调用方抛）。loop-engine 侧 D14
+      // 契约（后续 recordToolCall 仍以 parent_llm_call_id=null 落盘）不受
+      // 本文件影响。
+      if (record.messages !== undefined) {
         try {
-          line = {
-            ...fullLine,
-            messages: toBlobReferences(
-              record.messages,
-              targetDir,
-              currentOutputMask()
-            ),
-          };
+          fullLine.messages = toBlobReferences(
+            record.messages,
+            targetDir,
+            currentOutputMask()
+          );
         } catch (err) {
           recordFailure(err);
+          return undefined;
         }
       }
       try {
-        writeLine(line);
+        writeLine(fullLine);
         return id;
       } catch (err) {
         recordFailure(err);

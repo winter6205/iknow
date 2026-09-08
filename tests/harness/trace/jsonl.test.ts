@@ -237,7 +237,10 @@ describe("createJsonlTraceService — snake_case 转换", () => {
     }
   });
 
-  it("不递归进 content payload: messages/arguments/result 内部 key 保持原样", async () => {
+  it("不递归进 content payload: messages role 内联 / arguments/result 内部 key 保持原样", async () => {
+    // T4 (SC10): llm_call 的 messages content 走 content 级 blob 引用，
+    // role 仍内联；camelToSnake 不递归的判据转移到 tool_call 的
+    // arguments / result（仍整体内联，内部 key 不转 snake_case）。
     const { lines, writer } = captureWriter();
     const svc = createJsonlTraceService({
       filePath: join(scratch, "trace.jsonl"),
@@ -250,7 +253,10 @@ describe("createJsonlTraceService — snake_case 转换", () => {
     const toolParsed = JSON.parse(lines[1]) as Record<string, unknown>;
     const messages = llmParsed.messages as Array<Record<string, unknown>>;
     assert.equal(messages[0]?.role, "user");
-    assert.equal(messages[0]?.content, "hi");
+    assert.deepEqual(Object.keys(messages[0]?.content as object).sort(), [
+      "bytes",
+      "sha",
+    ]);
     assert.deepEqual(toolParsed.arguments, { foo: "bar" });
     assert.deepEqual(toolParsed.result, { ok: true });
   });
@@ -586,8 +592,11 @@ describe("createJsonlTraceService — 真实 FS (T2 每会话独立文件)", () 
     await b.recordLlmCall(SAMPLE_LLM);
     assert.equal(existsSync(join(scratch, "conv-a.jsonl")), true);
     assert.equal(existsSync(join(scratch, "conv-b.jsonl")), true);
+    // T4 (SC10): blob 唯一模式下共享 traceDir 的两个会话还共享 blobs/
+    // 内容寻址池（同一 SAMPLE_LLM content → 恰好 1 个 blob）。
     const files = readdirSync(scratch).sort();
-    assert.deepEqual(files, ["conv-a.jsonl", "conv-b.jsonl"]);
+    assert.deepEqual(files, ["blobs", "conv-a.jsonl", "conv-b.jsonl"]);
+    assert.equal(readdirSync(join(scratch, "blobs")).length, 1);
   });
 
   it("目录不存在时 mkdirSync recursive 自动创建", async () => {
@@ -719,7 +728,7 @@ describe("#406 T3 — jsonl 输出 mask 兜底 (A4)", () => {
   beforeEach(() => clearActiveExtraSecrets());
   afterEach(() => clearActiveExtraSecrets());
 
-  it("registry 追踪值出现在 recordLlmCall 消息里 → 文件行含 *** 且不含真值", async () => {
+  it("registry 追踪值出现在 recordLlmCall 消息里 → blob 正文含 *** 且不含真值, 行内亦无真值", async () => {
     setActiveExtraSecrets(["sk-registry-secret"]);
     const svc = createJsonlTraceService({
       filePath: scratch,
@@ -733,14 +742,21 @@ describe("#406 T3 — jsonl 输出 mask 兜底 (A4)", () => {
 
     const filePath = join(scratch, "conv-t3-a4.jsonl");
     const content = readFileSync(filePath, "utf8");
-    assert.ok(content.includes("***"), `行应含 mask 结果（实际=${content}）`);
     assert.ok(
       !content.includes("sk-registry-secret"),
       `行不应含 registry 真值（实际=${content}）`
     );
+    // T4 (SC10): 正文进了 blob —— mask 后的 *** 在 blob 内容里。
+    const blobsDir = join(scratch, "blobs");
+    const blob = readFileSync(
+      join(blobsDir, readdirSync(blobsDir)[0]!),
+      "utf8"
+    );
+    assert.ok(blob.includes("***"), `blob 应含 mask 结果（实际=${blob}）`);
+    assert.ok(!blob.includes("sk-registry-secret"));
   });
 
-  it("clearActiveExtraSecrets 后 registry 值不再被遮蔽", async () => {
+  it("clearActiveExtraSecrets 后 registry 值不再被遮蔽 (blob 正文保留原值)", async () => {
     setActiveExtraSecrets(["sk-registry-secret"]);
     clearActiveExtraSecrets();
     const svc = createJsonlTraceService({
@@ -753,11 +769,14 @@ describe("#406 T3 — jsonl 输出 mask 兜底 (A4)", () => {
     };
     await svc.recordLlmCall(llm);
 
-    const filePath = join(scratch, "conv-t3-a4-clear.jsonl");
-    const content = readFileSync(filePath, "utf8");
+    const blobsDir = join(scratch, "blobs");
+    const blob = readFileSync(
+      join(blobsDir, readdirSync(blobsDir)[0]!),
+      "utf8"
+    );
     assert.ok(
-      content.includes("sk-registry-secret"),
-      `清槽位后应保留原值（实际=${content}）`
+      blob.includes("sk-registry-secret"),
+      `清槽位后应保留原值（实际=${blob}）`
     );
   });
 });
@@ -799,31 +818,179 @@ describe("createJsonlTraceService — output mask lifecycle", () => {
 
       assert.equal(lines.length, 1);
       assert.equal(lines[0]!.includes("NEWSECRET"), false);
-      assert.equal(lines[0]!.includes("***"), true);
+      // T4 (SC10): mask 生效面在 blob 正文 —— 行内 sha ref 看不出 mask,
+      // blob 里应有 ***。
+      const blobsDir = join(scratch, "blobs");
+      const blob = readFileSync(
+        join(blobsDir, readdirSync(blobsDir)[0]!),
+        "utf8"
+      );
+      assert.equal(blob.includes("NEWSECRET"), false);
+      assert.equal(blob.includes("***"), true);
     } finally {
       clearActiveExtraSecrets();
     }
   });
 });
 
-describe("createJsonlTraceService — blob message references", () => {
-  function withBlobMode(): () => void {
-    const previous = process.env.IKNOW_TRACE_MESSAGES;
-    process.env.IKNOW_TRACE_MESSAGES = "blob";
-    return () => {
-      if (previous === undefined) delete process.env.IKNOW_TRACE_MESSAGES;
-      else process.env.IKNOW_TRACE_MESSAGES = previous;
-    };
+describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () => {
+  // T4: blob 是唯一模式（SC9 开关退役），无条件启用，不再有 full 分支。
+  // 粒度 = content：messages[i] 仍是 {role, content} 两键，content 被
+  // {sha, bytes} 替换（ADR-0036 同日 Amendment 表 C）。
+  interface ContentRef {
+    sha: string;
+    bytes: number;
+    kind: "str" | "blocks";
   }
 
-  it("stores masked messages by sha and writes references in the JSONL row", async () => {
-    const restore = withBlobMode();
+  function parseMessages(line: string): Array<{
+    role: unknown;
+    content: ContentRef;
+  }> {
+    const parsed = JSON.parse(line) as {
+      messages: Array<{ role: unknown; content: ContentRef }>;
+    };
+    return parsed.messages;
+  }
+
+  it("messages[i] 保持 {role, content} 两键, content 为 {sha, bytes} ref (SC10)", async () => {
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-blob",
+      writer,
+    });
+    await svc.recordLlmCall({
+      ...SAMPLE_LLM,
+      messages: [{ role: "user", content: "plain body" }],
+    });
+
+    const messages = parseMessages(lines[0]!);
+    assert.equal(messages.length, 1);
+    const message = messages[0]!;
+    // SC10: role 内联在场 —— 读侧 messageRole() 源码零改动即返回正确 role。
+    assert.equal(message.role, "user");
+    // SC10: content 被替换为 {sha, bytes} ref。
+    assert.deepEqual(Object.keys(message.content).sort(), ["bytes", "sha"]);
+    assert.equal(typeof message.content.sha, "string");
+    assert.equal(typeof message.content.bytes, "number");
+  });
+
+  it("形状 1: block 数组 content 整体寻址; 形状 2: 字符串 content 寻址且 kind=str (表 C)", async () => {
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-blob-shapes",
+      writer,
+    });
+    await svc.recordLlmCall({
+      ...SAMPLE_LLM,
+      messages: [
+        { role: "user", content: "string shape" },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "block shape" }],
+        },
+      ],
+    });
+
+    const messages = parseMessages(lines[0]!);
+    // 形状 2 (字符串): blob 编码保留形状标记, 读侧还原为字符串不被误包成数组。
+    const strBlob = readFileSync(
+      join(scratch, "blobs", messages[0]!.content.sha),
+      "utf8"
+    );
+    const strPayload = JSON.parse(strBlob) as { kind: string; v: unknown };
+    assert.equal(strPayload.kind, "str");
+    assert.equal(strPayload.v, "string shape");
+    // 形状 1 (block 数组): 整个数组一条 blob。
+    const blocksBlob = readFileSync(
+      join(scratch, "blobs", messages[1]!.content.sha),
+      "utf8"
+    );
+    const blocksPayload = JSON.parse(blocksBlob) as {
+      kind: string;
+      v: Array<unknown>;
+    };
+    assert.equal(blocksPayload.kind, "blocks");
+    assert.deepEqual(blocksPayload.v, [{ type: "text", text: "block shape" }]);
+    // 两种形状 ref 字节各自匹配。
+    assert.equal(
+      messages[0]!.content.bytes,
+      Buffer.byteLength(strBlob, "utf8")
+    );
+    assert.equal(
+      messages[1]!.content.bytes,
+      Buffer.byteLength(blocksBlob, "utf8")
+    );
+  });
+
+  it("混合: 同一 messages 数组两种形状并存, 逐元素独立判定 (表 C)", async () => {
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-blob-mixed",
+      writer,
+    });
+    await svc.recordLlmCall({
+      ...SAMPLE_LLM,
+      messages: [
+        { role: "user", content: "string one" },
+        { role: "assistant", content: [{ type: "text", text: "blocks" }] },
+        { role: "user", content: "string two" },
+      ],
+    });
+
+    const messages = parseMessages(lines[0]!);
+    assert.equal(messages.length, 3);
+    for (const [index, message] of messages.entries()) {
+      const blob = readFileSync(
+        join(scratch, "blobs", message.content.sha),
+        "utf8"
+      );
+      const payload = JSON.parse(blob) as { kind: string; v: unknown };
+      if (index % 2 === 0) {
+        assert.equal(payload.kind, "str");
+      } else {
+        assert.equal(payload.kind, "blocks");
+      }
+    }
+  });
+
+  it("表 B empty: 空串 / 空数组 content 仍走内容寻址, 不内联", async () => {
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-blob-empty",
+      writer,
+    });
+    await svc.recordLlmCall({
+      ...SAMPLE_LLM,
+      messages: [
+        { role: "user", content: "" },
+        { role: "assistant", content: [] },
+      ],
+    });
+
+    const messages = parseMessages(lines[0]!);
+    for (const message of messages) {
+      assert.deepEqual(Object.keys(message.content).sort(), ["bytes", "sha"]);
+      const blobPath = join(scratch, "blobs", message.content.sha);
+      assert.equal(existsSync(blobPath), true, "empty content has its sha");
+    }
+    // 空串与空数组是不同内容 → 不同 sha、不同 blob。
+    assert.notEqual(messages[0]!.content.sha, messages[1]!.content.sha);
+    // 行内不含空串/空数组的内联字面（内容寻址生效）。
+    assert.ok(!lines[0]!.includes('"content":[]'));
+  });
+
+  it("SC13: blob 内容 mask 后写入, sha == 内容 sha256, bytes == 实际 UTF-8 字节数", async () => {
     setActiveExtraSecrets(["blob-secret"]);
     try {
       const { lines, writer } = captureWriter();
       const svc = createJsonlTraceService({
         filePath: scratch,
-        conversationId: "conv-blob",
+        conversationId: "conv-blob-mask",
         writer,
       });
       await svc.recordLlmCall({
@@ -831,12 +998,9 @@ describe("createJsonlTraceService — blob message references", () => {
         messages: [{ role: "user", content: "blob-secret" }],
       });
 
-      const parsed = JSON.parse(lines[0]!) as {
-        messages: Array<{ sha: string; bytes: number }>;
-      };
-      assert.equal(parsed.messages.length, 1);
-      const ref = parsed.messages[0]!;
-      assert.equal(ref.bytes > 0, true);
+      const messages = parseMessages(lines[0]!);
+      const ref = messages[0]!.content;
+      assert.ok(ref.bytes > 0);
       const blobPath = join(scratch, "blobs", ref.sha);
       assert.equal(existsSync(blobPath), true);
       const blob = readFileSync(blobPath, "utf8");
@@ -847,39 +1011,151 @@ describe("createJsonlTraceService — blob message references", () => {
         createHash("sha256").update(blob, "utf8").digest("hex")
       );
       assert.equal(ref.bytes, Buffer.byteLength(blob, "utf8"));
-    } finally {
-      clearActiveExtraSecrets();
-      restore();
-    }
-  });
-
-  it("falls back to the masked full row when blob storage fails", async () => {
-    const restore = withBlobMode();
-    setActiveExtraSecrets(["blob-secret"]);
-    try {
-      writeFileSync(join(scratch, "blobs"), "not a directory", "utf8");
-      const { lines, writer } = captureWriter();
-      const svc = createJsonlTraceService({
-        filePath: scratch,
-        conversationId: "conv-blob-fallback",
-        writer,
-      });
-      const result = await svc.recordLlmCall({
-        ...SAMPLE_LLM,
-        messages: [{ role: "user", content: "blob-secret" }],
-      });
-
-      assert.equal(typeof result, "string");
-      const parsed = JSON.parse(lines[0]!) as {
-        messages: Array<{ role: string; content: string }>;
-      };
-      assert.deepEqual(parsed.messages, [
-        { role: "user", content: "***" },
-      ]);
+      // 行内也不含 secret。
       assert.equal(lines[0]!.includes("blob-secret"), false);
     } finally {
       clearActiveExtraSecrets();
-      restore();
+    }
+  });
+
+  it("SC12: 同一 content 出现在两个 llm_call → blobs/ 恰好 1 个文件, 两行 sha 相同", async () => {
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-blob-dedup",
+      writer,
+    });
+    await svc.recordLlmCall({
+      ...SAMPLE_LLM,
+      messages: [{ role: "user", content: "repeated body" }],
+    });
+    await svc.recordLlmCall({
+      ...SAMPLE_LLM,
+      messages: [{ role: "user", content: "repeated body" }],
+    });
+
+    assert.equal(lines.length, 2);
+    const first = parseMessages(lines[0]!)[0]!.content;
+    const second = parseMessages(lines[1]!)[0]!.content;
+    assert.equal(first.sha, second.sha);
+    const blobsDir = join(scratch, "blobs");
+    const files = readdirSync(blobsDir);
+    assert.deepEqual(files, [first.sha]);
+  });
+
+  it("表 B overflow: 单条 891KB 级 content 写入不失败, bytes 准确", async () => {
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-blob-overflow",
+      writer,
+    });
+    const huge = "x".repeat(891_000);
+    const result = await svc.recordLlmCall({
+      ...SAMPLE_LLM,
+      messages: [{ role: "user", content: huge }],
+    });
+    assert.ok(typeof result === "string", "large content must not fail");
+
+    const messages = parseMessages(lines[0]!);
+    const ref = messages[0]!.content;
+    const blob = readFileSync(join(scratch, "blobs", ref.sha), "utf8");
+    assert.equal(JSON.parse(blob).v, huge);
+    assert.equal(ref.bytes, Buffer.byteLength(blob, "utf8"));
+    assert.equal(ref.bytes > 891_000, true);
+  });
+
+  it("表 B concurrent: 两个 service 实例同 sha write-if-missing → EEXIST 吞, 单文件, 不半写", async () => {
+    const content = "concurrently addressed body";
+    const svcA = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-blob-conc-a",
+    });
+    const svcB = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-blob-conc-b",
+    });
+    const results = await Promise.all([
+      svcA.recordLlmCall({
+        ...SAMPLE_LLM,
+        messages: [{ role: "user", content }],
+      }),
+      svcB.recordLlmCall({
+        ...SAMPLE_LLM,
+        messages: [{ role: "user", content }],
+      }),
+    ]);
+    assert.ok(typeof results[0] === "string");
+    assert.ok(typeof results[1] === "string");
+    // 同一 traceDir → 同一 blobs/ 目录, 恰好 1 个文件, 内容完整可解析。
+    const blobsDir = join(scratch, "blobs");
+    const files = readdirSync(blobsDir);
+    assert.equal(files.length, 1);
+    const blob = readFileSync(join(blobsDir, files[0]!), "utf8");
+    assert.equal(JSON.parse(blob).v, content);
+  });
+
+  it("SC11: blobs/ 不可写 → 零行落盘, 返回 undefined, 服务存活 (无内联回退)", async () => {
+    setActiveExtraSecrets(["blob-secret"]);
+    try {
+      writeFileSync(join(scratch, "blobs"), "not a directory", "utf8");
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const svc = createJsonlTraceService({
+          filePath: scratch,
+          conversationId: "conv-blob-failclosed",
+        });
+        const result = await svc.recordLlmCall({
+          ...SAMPLE_LLM,
+          messages: [{ role: "user", content: "blob-secret" }],
+        });
+
+        // (iii) recordLlmCall 返回 undefined 而不 throw (ADR-0003 D13)。
+        assert.equal(result, undefined);
+
+        // trace 文件不存在 → (i) 该 llm_call_id 零行 + (ii) 无任何内联全量行。
+        const traceFile = join(scratch, "conv-blob-failclosed.jsonl");
+        assert.equal(
+          existsSync(traceFile),
+          false,
+          "fail-closed: zero rows including zero inline fallback rows"
+        );
+
+        // (v) 服务存活: 同一实例继续记录后续事件 (turn) 正常返回 id。
+        const turnId = await svc.recordTurn(SAMPLE_TURN);
+        assert.ok(
+          typeof turnId === "string",
+          "service survives blob IO failure"
+        );
+
+        // (iv) 同轮后续 tool_call 仍在场 (真实 FS 落盘) 且 parent_llm_call_id
+        // 为 null —— loop-engine 侧行为 (ADR-0003 D14) 由
+        // loop-engine-trace.test.ts "recordLlmCall returns undefined" 用例认证;
+        // 此处认证写侧照常接收并落盘 null 链。
+        const toolSvc = createJsonlTraceService({
+          filePath: scratch,
+          conversationId: "conv-blob-failclosed",
+        });
+        const toolId = await toolSvc.recordToolCall({
+          ...SAMPLE_TOOL,
+          parentLlmCallId: undefined,
+        });
+        assert.ok(typeof toolId === "string");
+        const lines = readFileSync(traceFile, "utf8").trim().split("\n");
+        assert.equal(lines.length, 2);
+        const turnRow = JSON.parse(lines[0]!) as Record<string, unknown>;
+        const toolRow = JSON.parse(lines[1]!) as Record<string, unknown>;
+        assert.equal(turnRow["record_type"], "turn");
+        assert.equal(toolRow["record_type"], "tool_call");
+        assert.equal(toolRow["parent_llm_call_id"], null);
+
+        // 内层 blob IO 失败同样走 recordFailure warn-once。
+        assert.ok(warnSpy.mock.calls.length >= 1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    } finally {
+      clearActiveExtraSecrets();
     }
   });
 });
