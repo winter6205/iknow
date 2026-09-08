@@ -45,6 +45,7 @@ import type {
   ToolCall,
   ToolExecutionResult,
 } from "../tools/types.js";
+import { gateBlockNotice } from "./recoverability.js";
 
 /** Visible message prefix for every gate-produced block (SSOT for tests). */
 export const WORKTREE_ISOLATION_PREFIX = "[worktree_isolation]";
@@ -755,7 +756,25 @@ export interface WorktreeEnterContext {
  * Shared by the host opts, the `enter-task-worktree` ACI tool deps, and the
  * session-api provisioner — no per-module structural copies.
  */
-export type WorktreeEnterFn = (ctx: WorktreeEnterContext) => Promise<string>;
+export type WorktreeEnterFn = (
+  ctx: WorktreeEnterContext
+) => Promise<WorktreeEnterResult>;
+
+/**
+ * write-situation-disclosure T9 (SC10): the enter seam returns the rebound
+ * root AND the composed success receipt. `path` is what the live taskRoot
+ * cell and the durable rebind record consume; `receipt` is the model-facing
+ * success text, composed by the host seam (session-api) — it appends the
+ * creator disclosure only when the tree's owner sidecar yields an owner, and
+ * omits the sentence otherwise. Disclosure is constant-on and reads no
+ * setting (specs/worktree-exclusive-lock.md SC10).
+ */
+export interface WorktreeEnterResult {
+  /** The entered (rebound) task worktree root. */
+  readonly path: string;
+  /** Composed model-facing success receipt (includes the disclosure when known). */
+  readonly receipt: string;
+}
 
 /**
  * T8 symmetric-exit seam context: the session (conversationId) currently
@@ -1029,10 +1048,10 @@ export function createWorktreeIsolationExecutor(
             : new WorktreeIsolationError("rebind_failed", errorMessage(err));
         opts.onError?.(typed);
         setState(conversationId, { status: "open" }); // retry allowed, still fail-closed
-        return block(
-          call.id,
-          `${WORKTREE_ISOLATION_PREFIX} kind=${typed.kind} ${typed.detail}`
-        );
+        // T7: route through the single seam that carries the Recoverability
+        // policy (`operator_required` stop-directive vs not). See
+        // isolation/recoverability.ts.
+        return block(call.id, gateBlockNotice(typed.kind, typed.detail));
       }
       setState(conversationId, { status: "bound", boundRoot });
       if (boundRoot === snapshotRoot) return undefined; // already home
