@@ -1,1 +1,163 @@
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/tmp/
+.claude/private/
+.env
+.env.*
+!.env.example
+!.env.testing.example
+# local filled materials (never commit secrets)
+.env.local
+docs/integration-materials.env
+**/integration-materials.filled.env
+
+# runtime eval artifacts
+.evals/results/
+docs/iknow-spec/docs/eval/results/
+
+# temporary TUI design frame captures (view-only, regenerated on demand)
+.frames/
+
+# Node / TypeScript build
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+
+# Local agent workspace state (not product code)
+.grok/
+
+# --- Upstream reference ONLY (immutable). Never commit. Never import at runtime. ---
+upstream-*/
+
+# personal / local tooling (not team-shared)
+.claude/skills/
+.claude/worktrees/
+.serena/
+# .kiro/ is mostly shared, but teach is personal
+.kiro
+.playwright-mcp/
+code-reports/
+harness-lab/
+academy/
+ocr-reports/
+
+# local research dumps and scratch HTML/MD (third-party, not iknow)
+docs/deep_research/
+docs/1.html
+docs/2.html
+
+# session handoff is personal (between sessions of the same author),
+# not team content - EXCEPT tracked acceptance reports (wayfinder #49
+# decision output), which ARE team deliverables and must be committed.
+docs/handoff/*
+!docs/handoff/*.md
+# 019: i9 smoke acceptance reports (real-adapter e2e evidence) are team
+# deliverables; without this, lint-staged's force-less git add re-stage
+# fails because docs/handoff/* matches. Mirrors i4-smoke tracked files.
+!docs/handoff/i9-smoke/
+# 020: i10 CLI-harness smoke acceptance reports (real ask + chat-pipe e2e
+# evidence) are team artifacts; un-ignore the dir so the reports track even
+# though docs/handoff/* matches. Mirrors the i9-smoke exception above.
+!docs/handoff/i10-smoke/
+# 022: i11 session-api harness smoke acceptance reports (real serve-path
+# e2e evidence) are team artifacts; un-ignore the dir so the reports track.
+# Mirrors the i9-smoke / i10-smoke exceptions above.
+!docs/handoff/i11-smoke/
+# 118→132: i132 9router context-management passthrough probe (#132 wayfinder
+# task resolution: SDK server-side edit reuse is dead because 9router routes
+# to MiniMax M3, not Anthropic Claude; probe evidence is team artifact).
+# Mirrors the i9/i10/i11-smoke exceptions above.
+!docs/handoff/9router-context-mgmt-probe/
+# 196: identity assembly handoff evidence (smoke output + AC checklist).
+# Team artifact mirroring the i9/i10/i11-smoke exception pattern.
+!docs/handoff/2026-08-06-identity-assembly/
+# 408: i408 session-goal real-LLM smoke acceptance reports (#408
+# wayfinder task: session-level Goal for verify-loop task field, real-LLM
+# + real bwrap evidence). Mirrors the i9/i10/i11-smoke exceptions above.
+!docs/handoff/i408-smoke/
+# 467: i467 full-compact real-LLM smoke acceptance reports (real adapter
+# e2e + 25→90 timeout evidence + Claude Code wait-logic event verification).
+# Mirrors the i9/i10/i11-smoke exceptions above.
+!docs/handoff/i467-full-compact/
+
+# 022: session-api runtime JSON store (data/sessions/<id>.json), not team
+# content. The data/ top-level dir is kept via data/.gitkeep so the
+# directory exists in checkout; only the runtime session files are excluded.
+data/sessions/*
+
+# 064 T5: JSONL trace output (default path ./trace.jsonl)
+trace.jsonl
+# runtime trace service output directory (per-session JSONL files).
+# Root-anchored so tracked tests/harness/trace/ tests stay addable (#406 T3 A4).
+# 不能误伤已跟踪源码目录 src/harness/trace/ 与 tests/harness/trace/
+# （lint-staged re-add 时会被宽匹配 trace/ 误判忽略）。
+/trace/
+# clipboard fallback artifact when no clipboard is available (src/tui/clipboard.ts)
+last_copy.txt
+
+# local throwaway prototypes (logic/UI spikes; not team-shared)
+/prototypes/
+
+# local Next.js prototype (early-stage, not team-shared; built artifacts
+# also covered by node_modules/ etc. above)
+iknow-prototype/
+
+# local archive of files removed/superseded during branch sync
+_archive/
+
+# prototype / scratch HTML / 一次性手动文件沉到 archive/ 根（与已 commit
+# 的子目录 archive/prototypes/ archive/onetime-probes/ archive/tests-real-llm/
+# archive/tui-ink/ 互不干扰；仅匹配 archive/ 根级的 .html / AGENTS.md）
+/archive/*.html
+/archive/AGENTS.md
+
+# .claude/ is personal tooling (hooks, rules, skills, settings);
+# this is a personal project, not team-shared
+.claude/
+docs/kb-assistant-guide
+
+# Narrow exception: project-level .claude/settings.json IS team-shared.
+# The skill-routing-sync hook registration must be visible in every
+# worktree checkout so skill-state stays in sync when working isolated.
+# Git cannot re-include a file under an ignored dir directly, so we
+# un-ignore the dir then re-ignore everything inside except settings.json.
+!.claude/
+.claude/*
+!.claude/settings.json
+.playwright-cli
+.codebase-memory/
+
+docs/harness-report
+
+.reference/
 .iknow/
+!.iknow/
+.iknow/*
+!.iknow/mcp.json
+!.iknow/skills/
+!.iknow/skills/**
+.iknow/permissions.toml
+.qoder/
+AGENTS.md
+.mcp.json
+# 忽略 worktree symlink(共享宿主 node_modules,git add -A 会误抓)
+node_modules
+# Cloud start writes these; keep husky pre-commit/pre-push tracked.
+.husky/commit-msg
+.husky/prepare-commit-msg
+.cursor/*
+!.cursor/environment.json
+!.cursor/skills/
+!.cursor/skills/**
+!.cursor/agents/
+!.cursor/agents/**
+!.cursor/rules/
+!.cursor/rules/**
+!.cursor/vendor/
+!.cursor/vendor/**
+archive
+docs/demos
+# TUI deps-tools 测试残留（tests/tui/deps-tools.test.ts 用 mkdtemp(process.cwd()) 落目录，
+# 时序 flake 时残留 .iknow-tui-hooks-* / .iknow-tui-nohooks-*；根因修复见 tests/tui/deps-tools.test.ts）
+.iknow-tui-*
