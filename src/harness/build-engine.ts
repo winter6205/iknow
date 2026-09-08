@@ -725,7 +725,7 @@ export async function buildHarnessEngine(
   // 判定源（isolationEnabled），保证「工具在场 ⇔ 门禁已武装」；开关 OFF 时
   // 工具面与今日逐字节一致。开关只在启动加载点读一次（硬要求 9）。
   // T6: `isolationHost` / `isolationEnabled` 已上移至 settings 加载后
-  // (line 552 附近)—— subagentManager 构造需要透传 isolationOn。
+  // (下方 isolationEnabled 声明处)—— subagentManager 构造需要透传 isolationOn。
   // T4 (plans/worktree-live-task-root.md §5 D1 / §6 T4) — single writer
   // seam wrap. Host `provision` / `enter` / `exit` are wrapped with
   // `withLiveTaskRootWrite` so successful resolutions update the live

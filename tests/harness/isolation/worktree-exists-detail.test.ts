@@ -217,7 +217,9 @@ describe("T8 — worktree_exists detail 三臂（按 taskWorktreeOwnerOf 归属�
 // -- branch_exists 两子况 -----------------------------------------------------
 
 describe("T8 — branch_exists detail 两子况（按目标目录是否存在）", () => {
-  it("目标目录存在 → 与 worktree_exists 同形（按归属给指引）", async () => {
+  // 建树后删目录留分支——remove-task-worktree 默认不删分支的真实残留路径。
+  // 目录不存在 → 不点名 enter-task-worktree。
+  it("branch 残留（目录已删）→ 不点名 enter-task-worktree，指引换 label 或删分支", async () => {
     const repo = makeGitRepo();
     const convId = "conv-branch-exists";
     const worktreePath = taskWorktreePath(repo, convId, "branch-exists-label");
