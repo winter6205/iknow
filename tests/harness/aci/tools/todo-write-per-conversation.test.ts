@@ -3,7 +3,7 @@
  *
  * Invariant: a todo ledger is scoped to ONE conversation — `todo_write`
  * resolves the ledger at call time from `ctx.conversationId` (SSOT:
- * `resolveConversationTodoDir`), and the agent-status bar projection reads
+ * `resolveConversationTodoPath`), and the agent-status bar projection reads
  * the same per-conversation path. Cross-conversation leakage (issue: a
  * finished session's open item appearing in every later TUI session's
  * `<agent_status>` bar) must be structurally impossible.
@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createTodoWriteTool,
-  resolveConversationTodoDir,
+  resolveConversationTodoPath,
   TODOS_FILE,
 } from "../../../../src/harness/aci/tools/todo-write.ts";
 import {
@@ -53,15 +53,18 @@ async function add(
   return tool.handler({ mode: "add", item }, ctx);
 }
 
-describe("resolveConversationTodoDir", () => {
+describe("resolveConversationTodoPath", () => {
   it("with conversationId → <todoDir>/<sanitized conversationId>/todos.md", () => {
-    const p = resolveConversationTodoDir({ todoDir, conversationId: "conv-1" });
+    const p = resolveConversationTodoPath({
+      projectDir: todoDir,
+      conversationId: "conv-1",
+    });
     assert.equal(p, join(todoDir, "conv-1", TODOS_FILE));
   });
 
   it("sanitizes path-hostile segments (no traversal, no separators)", () => {
-    const p = resolveConversationTodoDir({
-      todoDir,
+    const p = resolveConversationTodoPath({
+      projectDir: todoDir,
       conversationId: "../../etc",
     });
     assert.ok(!p.includes(".."));
@@ -69,12 +72,15 @@ describe("resolveConversationTodoDir", () => {
   });
 
   it("absent conversationId → root todos.md (pre-isolation layout)", () => {
-    const p = resolveConversationTodoDir({ todoDir });
+    const p = resolveConversationTodoPath({ projectDir: todoDir });
     assert.equal(p, join(todoDir, TODOS_FILE));
   });
 
   it("empty conversationId → root todos.md", () => {
-    const p = resolveConversationTodoDir({ todoDir, conversationId: "" });
+    const p = resolveConversationTodoPath({
+      projectDir: todoDir,
+      conversationId: "",
+    });
     assert.equal(p, join(todoDir, TODOS_FILE));
   });
 });
@@ -93,8 +99,8 @@ describe("todo_write per-conversation isolation (handler reads ctx.conversationI
     const tool = createTodoWriteTool({ todoDir });
     await add(tool, "disk layout", { ...CALL_A });
     const content = await readFile(
-      resolveConversationTodoDir({
-        todoDir,
+      resolveConversationTodoPath({
+        projectDir: todoDir,
         conversationId: CALL_A.conversationId,
       }),
       "utf8"
@@ -137,7 +143,7 @@ describe("todo_write per-conversation isolation (handler reads ctx.conversationI
 // replace 比 add/check 多两个可跨会话泄漏的写动作：① 改名旧现行为快照、
 // ② 原子写新现行。两者都必须停在调用方自己的会话目录里 —— 一次 replace
 // 不得清空、覆盖或快照掉另一会话的账本。isolation 只在
-// `resolveConversationTodoDir` 一处派生（SSOT），本节把该不变式钉在 replace
+// `resolveConversationTodoPath` 一处派生（SSOT），本节把该不变式钉在 replace
 // 分支上。
 // ---------------------------------------------------------------------------
 
@@ -150,7 +156,7 @@ async function snapshotsOf(conversationId: string): Promise<string[]> {
 
 async function currentOf(conversationId: string): Promise<string> {
   return await readFile(
-    resolveConversationTodoDir({ todoDir, conversationId }),
+    resolveConversationTodoPath({ projectDir: todoDir, conversationId }),
     "utf8"
   );
 }

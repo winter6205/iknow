@@ -249,10 +249,13 @@ export type BuildEngineOpts = {
    * fail-closed），门禁本体见 `harness/isolation/worktree-gate.ts`。
    */
   readonly worktreeIsolation?: WorktreeIsolationHostOpts;
-  /** #440 D2 seam:session 作用域 todos.md 目录。host 注入：调用方
-   *  (chat-session / session-hub / TUI deps) 根据 conversationId 解析得到
-   *  唯一的 per-session 目录；测试可传 mkdtemp 路径隔离。surface === "ask"
-   *  路径不传(SC8 oneshot 剥离,与 memory / subagent / skill 编排同形态)。 */
+  /** #440 D2 seam + #950 T2 / session-folder-consolidation:「会话项目目录」
+   *  (`resolveProjectSessionDir(baseDir, projectIdentityRoot)`)。host 注入:
+   *  三入口 (chat-session / session-hub / TUI deps) 用同一对
+   *  `(baseDir, projectIdentityRoot)` 派生同一根,per-conversationId 文件
+   *  路径在调用期由 resolveConversationTodoPath 一处钉死。测试可传 mkdtemp
+   *  路径隔离。surface === "ask" 路径不传(SC8 oneshot 剥离,与 memory /
+   *  subagent / skill 编排同形态)。 */
   readonly todoDir?: string;
   /**
    * B6 / ADR-0043 §3:溢出治理 countTokens 注入缝(测试用)。生产默认 =

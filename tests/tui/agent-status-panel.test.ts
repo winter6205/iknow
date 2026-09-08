@@ -314,7 +314,7 @@ describe("端到端:bridge postMessage 透传 agent_status 事件", () => {
       const id = await bridge.ensureSession(undefined);
       // #304601e3:loop-engine 现按 conversationId 读
       // `<todoDir>/<conversationId>/todos.md`(与 todo_write 写入侧同一 SSOT,
-      // 见 resolveConversationTodoDir)。先 ensureSession 拿到 conversationId,
+      // 见 resolveConversationTodoPath)。先 ensureSession 拿到 conversationId,
       // 再把种子账本写到该会话自己的子目录。
       await mkdir(join(todoDir, id), { recursive: true });
       await writeFile(

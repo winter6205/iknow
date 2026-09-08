@@ -208,6 +208,22 @@ export class SessionStore {
     this.projectDir = resolveProjectSessionDir(baseDir, projectIdentityRoot);
   }
 
+  /**
+   * #950 T2 (plans/session-folder-consolidation.md):read-only projection of
+   * the resolved session project directory
+   * (`<baseDir>/projects/<basename>-<sha1[:12]>`). Consumers whose per-call
+   * leaf lives INSIDE the session folder — the todo ledger `todoDir` seam
+   * (`resolveConversationTodoPath`) and, from T3, the trace anchor — take
+   * this same root from the store instead of recomputing
+   * `resolveProjectSessionDir` at their own assembly sites, so there is
+   * exactly one `(baseDir, projectIdentityRoot)` decision per host process
+   * and the three entries (chat / serve / TUI) cannot drift into two
+   * different project folders for the same conversation.
+   */
+  getProjectDir(): string {
+    return this.projectDir;
+  }
+
   /** Per-conversation folder under the project dir. Pure projection of
    *  `projectDir` + `id` — see `resolveConversationDir` for the contract. */
   private conversationDir(id: string): string {

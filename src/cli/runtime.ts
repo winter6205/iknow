@@ -99,9 +99,10 @@ export interface CliBuildEngineOpts {
   /** D-α T3 / ADR-0030: graph 编排 overlay holder 透传（chat 传可变
    *  context；ask 不传 → run_graph 与编排段都不装配）。 */
   graphMode?: GraphModeContext;
-  /** #440 T1-fix:host 注入的 session-scoped todoDir,用于 todo_write 在主
-   *  loop 装配(per-conversationId resolution 是后续 ticket,见 todo-write.ts
-   * resolveSessionTodoDir 注释)。chat/ask CLI 入口由调用方解析后透传。 */
+  /** #440 T1-fix + #950 T2:host 注入的 session-scoped todoDir,语义为「会话项目根」
+   *  (`resolveProjectSessionDir(baseDir, projectIdentityRoot)`)。todo_write 在主
+   *  loop 装配时消费,per-conv 文件路径在调用期由 `resolveConversationTodoPath`
+   *  派生(SSOT 在 todo-write.ts)。chat/ask CLI 入口由调用方解析后透传。 */
   todoDir?: string;
   /** ADR-0019 (T2): per-root state anchor — CLI `--workspace-root` flag 透传
    *  到 build-engine(priority chain `[explicit, env, cwd]` 在 build-engine

@@ -25,7 +25,6 @@ import {
   buildHarnessEngine,
   type EngineBundle,
 } from "../harness/build-engine.js";
-import { resolveSessionTodoDir } from "../harness/aci/tools/todo-write.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import type { PostToolUseHook } from "../harness/permission/types.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
@@ -38,11 +37,14 @@ import type { AskUser } from "../harness/permission/types.js";
 import type { WorktreeIsolationHostOpts } from "../harness/isolation/worktree-gate.js";
 import type { IknowSettings } from "../config/settings.js";
 import type { LiveTaskRoot } from "../harness/session-roots.js";
+import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
 import { homedir } from "node:os";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import type { McpServerStatus } from "../harness/mcp/manager.js";
 import { loadMcpConfig } from "../harness/mcp/config.js";
 import type { AciToolDef } from "../harness/aci/types.js";
+import { resolveProjectSessionDir } from "../session-api/store/session-store.js";
+import { resolveServeDataDir } from "../session-api/serve.js";
 
 /** 工具摘要行事件（postToolUse 投影，observability-only）。 */
 export interface TuiToolEvent {
@@ -109,6 +111,17 @@ export interface BuildTuiDepsOptions {
    * 之外的全局 state,workspaceRoot 在 deps 层单向透明。
    */
   readonly workspaceRoot?: string;
+  /**
+   * #950 T2 / session-folder-consolidation: session pool root（与
+   * `createTuiBridge.dataDir` / `RunTuiOptions.dataDir` 同形）—— todo
+   * 会话文件夹根由此 + `workspaceRoot` 派生
+   * (`resolveProjectSessionDir(resolveServeDataDir(dataDir, workspaceRoot),
+   * deriveProjectIdentityRoot({ cwd: workspaceRoot }))`)。缺席 →
+   * `resolveServeDataDir` 缺省链(dataDir → `<workspaceRoot>/.iknow` →
+   * `~/.iknow`)。run.tsx 传已 resolve 的 dataDir,保证 bridge 的
+   * SessionStore 与 todo 落点是同一个 projects/<slug>/。
+   */
+  readonly dataDir?: string;
   /**
    * T6 / worktree-mcp-rebind-lifecycle:稳定主 checkout root。首次装配捕获后
    * 跨 rebind 原样透传；reload 的 mcpConfigRoot 只由此派生，禁止用 cwd 重算。
@@ -271,15 +284,22 @@ export async function buildTuiDeps(
         conversationId: "subagent",
       })
     : undefined;
-  // #440 T1-fix:TUI 入口注入 todoDir 让 todo_write 在主 loop 在场
-  // (per-conversationId resolution 是后续 ticket — soleInflightId 动态,
-  // per-conversationId 需 engine 重建,代价太高;v1 共享 ~/.iknow/todos/tui/)。
+  // #950 T2 / session-folder-consolidation / ADR-0071 Decision 2:TUI 入口
+  // 注入「会话文件夹根」让 todo_write 在主 loop 在场 —— 与 chat / serve
+  // 三入口同源 SSOT:同一 `(baseDir, projectIdentityRoot)` 派生公式
+  // (resolveProjectSessionDir),同一会话解析到同一 projectDir。TUI 的
+  // conversationId 由 hub per-run 注入(hub-bridge → SessionHub),不在本层
+  // 拼 —— 本层只给根。
+  const todoProjectDir = resolveProjectSessionDir(
+    resolveServeDataDir(opts.dataDir, opts.workspaceRoot),
+    deriveProjectIdentityRoot({ cwd: opts.workspaceRoot })
+  );
   const built = await buildHarnessEngine({
     env: bundle.env,
     askUser: opts.askUser,
     surface: "tui",
     memory: { enabled: true },
-    todoDir: resolveSessionTodoDir({ userHome, surface: "tui" }),
+    todoDir: todoProjectDir,
     // #365 T2: 沙箱根保持 TUI 历史语义(启动目录 = process.cwd());
     // build-engine 缺省即 process.cwd(),故不显式传。
     // memoryDir 同理缺省解析自 cwd(与 #146 TUI 启动目录语义一致)。

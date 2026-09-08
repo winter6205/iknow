@@ -51,7 +51,6 @@ import { maxTurnsEnvelope } from "./cli/max-turns.js";
 import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { resolveSessionTodoDir } from "./harness/aci/tools/todo-write.js";
 import { buildViolationWiring } from "./harness/sandbox/violation-executor.js";
 import { openBrowser } from "./cli/open-browser.js";
 import type { TraceServeOptions } from "./traceserver/serve.js";
@@ -62,6 +61,7 @@ import {
 // ADR-0037 review High-1/High-2 (2026-08-29): chat 入口的 worktree isolation
 // host 缝与启动 settings 钉住。
 import { SessionStore } from "./session-api/store/index.js";
+import { resolveProjectSessionDir } from "./session-api/store/index.js";
 import { resolveServeDataDir } from "./session-api/serve.js";
 import { createTaskWorktreeProvisioner } from "./session-api/worktree-rebind.js";
 import type { WorktreeIsolationHostOpts } from "./harness/isolation/worktree-gate.js";
@@ -329,6 +329,15 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   // T6:启动 workspace 即稳定 productRoot —— rebind 只换 workspaceRoot，
   // MCP 项目配置根跨 rebuild 保持本值。
   const productRoot = workspaceRoot;
+  // #950 T2 / session-folder-consolidation:chat 入口注入「会话项目目录」作
+  // todoDir —— 与上面 SessionStore 用同一对 `(resolveServeDataDir(),
+  // deriveProjectIdentityRoot(...))`,保证同一会话在 chat / serve / TUI 三
+  // 入口解析到同一 projectDir(`<surface>` 分裂消除)。per-conversationId
+  // 文件路径在调用期由 todo-write.ts:resolveConversationTodoPath 派生。
+  const todoProjectDir = resolveProjectSessionDir(
+    resolveServeDataDir(),
+    deriveProjectIdentityRoot({ cwd: workspaceRoot })
+  );
   // 初始装配与 rebind 重建共用的装配 opts（同一 askUser/holder/settings）。
   const chatEngineOpts = {
     askUser: createTtyAskUser(),
@@ -336,7 +345,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     memory: { enabled: true } as const,
     permissionMode,
     graphMode,
-    todoDir: resolveSessionTodoDir({ surface: "chat" }),
+    todoDir: todoProjectDir,
     // review-fix (Fix 1): subagent trace 生产装配 —— 仅显式配置 traceOut/env 时
     // 注入 <traceOut>/subagent.jsonl (conversationId="subagent", 聚合所有会话)。
     ...(subagentTraceService !== undefined
@@ -354,8 +363,8 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // chat TTY REPL: interactive y/N prompt via stdin/stdout.
     // #196 A12:chat 激活 BOOTSTRAP(surface="chat" → bootstrapActive=true)。
     // #194 T6:chat 显式 memory:{enabled:true} — 10 件工具 + memory_layer 装配。
-    // #440 T1-fix:chat 入口注入 todoDir 让 todo_write 在主 loop 在场
-    // (per-conversationId resolution 是后续 ticket,见 todo-write.ts resolveSessionTodoDir 注释)。
+    // #440 T1-fix + #950 T2:chat 入口注入 session-folder todoDir,per-conversationId 解析在
+    // todo-write.ts:resolveConversationTodoPath(SSOT 一处钉死,见上 todoProjectDir)。
     // ADR-0019 (T2):`--workspace-root` flag 透传到 per-root identity / memory seam。
     built = await buildHarnessEngine(bundle, chatEngineOpts);
   } catch (err) {

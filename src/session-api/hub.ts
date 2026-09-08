@@ -111,7 +111,6 @@ import {
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { resolveSessionTodoDir } from "../harness/aci/tools/todo-write.js";
 import type { AciCatalog } from "../harness/aci/types.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import type { LiveTaskRoot } from "../harness/session-roots.js";
@@ -2906,7 +2905,12 @@ export class SessionHub {
       // D-α T3 / ADR-0030:overlay holder 透传 —— serve / TUI 的 `/graph` 与
       // Shift+Tab 翻的是同一个它（SC3 三入口同 holder）。
       ...(this.graphMode ? { graphMode: this.graphMode } : {}),
-      todoDir: resolveSessionTodoDir({ surface: "serve" }),
+      // #950 T2 / session-folder-consolidation / ADR-0071 Decision 2:
+      // todos 落「会话文件夹」—— `todoDir` 改为「会话项目目录」
+      // (由 SessionStore.getProjectDir() 暴露的 read-only 投影)。三入口
+      // (cli / serve / TUI) 共享同一对 `(baseDir, projectIdentityRoot)` →
+      // 同一会话解析到同一 projectDir(`<surface>` 分裂消除)。
+      todoDir: this.store.getProjectDir(),
       ...(this.traceOut !== undefined
         ? {
             subagentTrace: this.createTrace("subagent"),
@@ -2977,9 +2981,10 @@ export class SessionHub {
     // The returned `engine` is built once (code-review 2026-08-05) and
     // discarded — serve only consumes `deps`, and the cost is a single
     // `createLoopEngine` allocation, not a per-message re-construction.
-    // #440 T1-fix:serve 入口注入 todoDir 让 todo_write 在主 loop 在场
-    // (per-conversationId resolution 是后续 ticket — serve 的 cachedDeps
-    // 跨所有会话共享,per-conversationId 需 engine 重建,代价太高)。
+    // #440 T1-fix + #950 T2:serve 入口注入 session-folder todoDir
+    // (`this.store.getProjectDir()`),per-conversationId 解析在调用期由
+    // todo-write.ts:resolveConversationTodoPath 派生 —— 不再需要 per-session
+    // engine 重建(cachedDeps 共享的只是「根」,叶子按 ctx.conversationId 分)。
     // review-fix (Fix 1): subagent 生命周期事件落盘（spec SC1 生产装配）——
     // hub 的 subagentManager 是单例共享（surface!=="ask" 在 build-engine.ts:307-320
     // 自建一次）, 所有 serve 会话的 subagent 事件聚合到 <traceOut>/subagent.jsonl
@@ -3039,7 +3044,10 @@ export class SessionHub {
       ...(this.workspaceRoot ? { workspaceRoot: this.workspaceRoot } : {}),
       // T6:稳定 productRoot（缺席时 build-engine 桥接为 workspaceRoot）。
       ...(this.productRoot ? { productRoot: this.productRoot } : {}),
-      todoDir: resolveSessionTodoDir({ surface: "serve" }),
+      // #950 T2 / session-folder-consolidation / ADR-0071 Decision 2:
+      // todos 落「会话文件夹」—— `todoDir` 取 store 投影的 projectDir,与
+      // 上面 `buildProductionEngine` 路径同源(`<surface>` 分裂消除)。
+      todoDir: this.store.getProjectDir(),
       ...(this.traceOut !== undefined
         ? {
             subagentTrace: this.createTrace("subagent"),

@@ -1,10 +1,14 @@
 /**
- * #440 T2/T3: todo_write tool — session-scope ledger with mode routing,
- * governance limits, and atomic write.
+ * #440 T2/T3 + #950 T2 / session-folder-consolidation / ADR-0071 Decision 2:
+ * todo_write tool — session-scope ledger with mode routing, governance limits,
+ * and atomic write.
  *
  * Spec: docs/handoff/2026-08-17-wayfinder-440-decisions.md D1/D2/D4/D5/D7.
  *   - D1: single-tool + mode enum shape (list / add / check).
- *   - D2: file at `<session 目录>/todos.md`; factory `todoDir` seam.
+ *   - D2: file at `<会话文件夹根>/<conversationId>/todos.md` (T2)。
+ *     工厂的 `todoDir` 字段语义升级:由「surface 目录」改为「会话项目目录」
+ *     (`resolveProjectSessionDir(baseDir, projectIdentityRoot)`),per-conv
+ *     文件路径在调用期由 `resolveConversationTodoPath` 派生。
  *   - D4: file limit 64 KB; per-item limit 500 codepoints; tmp + rename
  *     atomic write (negative-phrasing rejection is NOT applied — todo items
  *     like "别忘了跑测试" are legitimate tasks; only memory_save rejects
@@ -16,8 +20,9 @@
  *     `mode === "list"` to bypass ask (read-only sub-mode).
  *
  * #903: `mode = "replace"` 扩展 — 整张列表换成新现行,旧 `todos.md` 改名为
- * 同目录快照 `todos.<unixMs>.<hex>.md` 保留历史(ADR-0046);空 / 缺席现行
- * 不建快照。replace 仍是 write(默认 ask),与 add / check 同形态。
+ * 同目录快照 `todos.<unixMs>.<hex>.md` 保留历史(ADR-0046:快照与现行同会话
+ * 目录,T2 升级);空 / 缺席现行不建快照。replace 仍是 write(默认 ask),与
+ * add / check 同形态。
  *
  * Ownership boundary (D6): the worker assembly path does not inject todoDir
  * → todo_write is excluded from the worker tool surface at registry
@@ -31,7 +36,6 @@
  */
 import { mkdir, readFile, rename, writeFile, unlink } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import type { AciToolDef } from "../types.js";
@@ -91,6 +95,18 @@ export const MAX_FILE_BYTES = 64 * 1024;
 export const MAX_ITEM_CODEPOINTS = 500;
 
 export interface TodoWriteToolDeps {
+  /**
+   * 会话项目目录根(T2 / session-folder-consolidation):
+   *   `resolveProjectSessionDir(baseDir, projectIdentityRoot)` 的输出,
+   *   即 `<baseDir>/projects/<basename>-<sha1[:12]>`。
+   * Per-conversation 文件路径在调用期由 `resolveConversationTodoPath`
+   * 派生(`ctx.conversationId` 在场 → `<projectDir>/<sanitized id>/todos.md`,
+   * 缺席 → `<projectDir>/todos.md` 旧布局)。
+   *
+   * T2 之前这里叫「surface 目录」(`~/.iknow/todos/<surface>/`),T2 起改成
+   * 「会话项目目录」 —— 同一会话从 chat / serve / TUI 三入口注入同一根,
+   * `<surface>` 分裂消除,关键判据(SC5/T2 关键判据)。
+   */
   readonly todoDir: string;
   /** Test seam: deterministic tmp suffix (defaults to random hex). */
   readonly randomBytes?: (n: number) => Buffer;
@@ -143,8 +159,8 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
       // Per-conversation isolation: ledger resolves at CALL time from
       // ctx.conversationId (plumbed by the executor since #017) — one
       // conversation, one ledger. Absent ctx → legacy shared-root layout.
-      const filePath = resolveConversationTodoDir({
-        todoDir: deps.todoDir,
+      const filePath = resolveConversationTodoPath({
+        projectDir: deps.todoDir,
         conversationId: ctx?.conversationId,
       });
       const params = parseInput(input);
@@ -424,45 +440,15 @@ export function flipFirstOpenLine(
 }
 
 /**
- * #440 T1-fix: resolve the v1 process-stable per-surface todoDir.
- *
- * v1 limitation: returns a SHARED directory for all conversations within
- * a single surface (chat / serve / tui). D2 originally scoped per
- * conversationId — per-session resolution is a follow-up ticket because:
- *   - chat REPL: `conversationId = resumeId ?? randomUUID()` is created
- *     INSIDE `runChatSession` (chat-session.ts:963), AFTER buildHarnessEngine
- *     returns (cli.ts:239). Plumbing it requires either reordering cli.ts or
- *     computing the id twice. Deferred to #440-followup.
- *   - serve (hub): `cachedDeps` is shared across all conversations in the hub
- *     process (hub.ts ensureDeps caches the engine once). Per-conversationId
- *     todoDir requires engine rebuild per session — too expensive. Deferred.
- *   - TUI: `soleInflightId` is dynamic per message (deps.ts:153). Same
- *     architectural issue as serve. Deferred.
- *
- * Until per-conversationId isolation lands, all sessions within the same
- * surface share `<userHome>/.iknow/todos/<surface>/todos.md`. Stable across
- * turns within a session; per-surface (chat ≠ serve ≠ TUI on the same box);
- * per-user (multi-user → different userHome). Tests inject `userHome` to
- * redirect into a tmpdir (mirrors build-engine's userHome seam).
- *
- * Pure (no IO) — exported so chat/serve/tui callers can compute the same
- * path before calling `buildHarnessEngine({ todoDir })`.
- */
-export function resolveSessionTodoDir(opts: {
-  readonly userHome?: string;
-  readonly surface: "chat" | "serve" | "tui";
-}): string {
-  const userHome = opts.userHome ?? homedir();
-  return join(userHome, ".iknow", "todos", opts.surface);
-}
-
-/**
  * SSOT: where a conversation's `todos.md` lives, relative to the host-injected
- * per-surface `todoDir` root (D3 stays frozen).
+ * session-folder project root (`TodoWriteToolDeps.todoDir`, derived upstream
+ * by `resolveProjectSessionDir(baseDir, projectIdentityRoot)` — see
+ * session-store.ts).
  *
- *  - `conversationId` present and non-empty → `<todoDir>/<sanitized id>/todos.md`
- *    (per-conversation ledger; the original #440 D2 intent, un-deferred).
- *  - absent / empty → `<todoDir>/todos.md` (pre-isolation layout; hosts that
+ *  - `conversationId` present and non-empty → `<projectDir>/<sanitized id>/todos.md`
+ *    (per-conversation ledger; the original #440 D2 intent, finally un-deferred
+ *    in #950 T2 / session-folder-consolidation).
+ *  - absent / empty → `<projectDir>/todos.md` (pre-isolation layout; hosts that
  *    never inject conversationId keep byte-identical behavior).
  *
  * Pure (no IO). Both the writer (todo_write handler, via
@@ -470,13 +456,13 @@ export function resolveSessionTodoDir(opts: {
  * `deps.conversationId`) resolve through this one function — the two can
  * never disagree about the ledger location.
  */
-export function resolveConversationTodoDir(opts: {
-  readonly todoDir: string;
+export function resolveConversationTodoPath(opts: {
+  readonly projectDir: string;
   readonly conversationId?: string;
 }): string {
   if (opts.conversationId === undefined || opts.conversationId.length === 0) {
-    return join(opts.todoDir, TODOS_FILE);
+    return join(opts.projectDir, TODOS_FILE);
   }
   const segment = sanitizeConversationSegment(opts.conversationId);
-  return join(opts.todoDir, segment, TODOS_FILE);
+  return join(opts.projectDir, segment, TODOS_FILE);
 }

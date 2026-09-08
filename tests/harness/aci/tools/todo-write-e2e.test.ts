@@ -15,7 +15,7 @@
  * #903 SC6: `mode=replace` 在**真实 executor + 真实 conversationId** 路径上
  * 跑通 —— conversationId 由 `executeAll` 第 4 个位置参数流经 permission
  * runtime → inner executor → `ctx.conversationId` → handler,账本落在
- * per-conversation 目录（`resolveConversationTodoDir`），而非共享根。unit 层
+ * per-conversation 目录（`resolveConversationTodoPath`），而非共享根。unit 层
  * 直呼 `tool.handler(input, ctx)` 绕过了这条装配链,故此处单独钉住：装配链
  * 断了(conversationId 丢失)时账本会退回根 todos.md,unit 测试仍全绿。
  *
@@ -33,7 +33,7 @@ import { createNoAskUser } from "../../../../src/harness/permission/ask-user.ts"
 import { createPermissionPolicy } from "../../../../src/harness/permission/policy.ts";
 import {
   createTodoWriteTool,
-  resolveConversationTodoDir,
+  resolveConversationTodoPath,
 } from "../../../../src/harness/aci/tools/todo-write.ts";
 
 const tempDirs: string[] = [];
@@ -296,7 +296,10 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
     const conversationId = "conv-e2e-replace-happy";
-    const currentPath = resolveConversationTodoDir({ todoDir, conversationId });
+    const currentPath = resolveConversationTodoPath({
+      projectDir: todoDir,
+      conversationId,
+    });
 
     // 现行非空：两条未勾项，经真实 executor 落盘。
     const addResults = await exec.executeAll(
@@ -376,7 +379,10 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
     const conversationId = "conv-e2e-replace-then-addcheck";
-    const currentPath = resolveConversationTodoDir({ todoDir, conversationId });
+    const currentPath = resolveConversationTodoPath({
+      projectDir: todoDir,
+      conversationId,
+    });
 
     const results = await exec.executeAll(
       [
@@ -425,7 +431,10 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
     const conversationId = "conv-e2e-replace-mixed-fields";
-    const currentPath = resolveConversationTodoDir({ todoDir, conversationId });
+    const currentPath = resolveConversationTodoPath({
+      projectDir: todoDir,
+      conversationId,
+    });
 
     await exec.executeAll(
       [

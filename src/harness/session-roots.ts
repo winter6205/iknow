@@ -52,7 +52,7 @@ export const MAX_ROOT_DETAIL_CHARS = 120;
  *   - conversationId 在实践中是 UUID,所以丢弃 `.` 不丢语义。
  *
  * 共享原因:同一净化规则被两套消费者同时需要 ——
- *   - todo ledger(`resolveConversationTodoDir`,原 todo-write.ts 本地函数);
+ *   - todo ledger(`resolveConversationTodoPath`,todo-write.ts SSOT);
  *   - 会话文件夹叶子(`resolveConversationDir`,session-store.ts)。
  * 影子副本会让「`..` 不可逃逸」这一不变式被两份代码分别承担,日后修
  * 其一便破契约。本函数是 SSOT。
