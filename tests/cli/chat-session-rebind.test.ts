@@ -101,7 +101,7 @@ function makeManagerStub(
 describe("chat-session rebind 重建缝（review High-1）", () => {
   it("会话文件 workspaceRoot 变化 → 查询行开跑前以新根重建 deps 并保持包装语义", async () => {
     const dir = makeStoreDir();
-    const store = new SessionStore(dir);
+    const store = new SessionStore(dir, process.cwd());
     const conversationId = "conv-rebind-1";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
@@ -154,7 +154,7 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
 
   it("根未变化 / 无 workspaceRoot / 会话文件缺席 → 不重建（not_found 保持静默）", async () => {
     const dir = makeStoreDir();
-    const store = new SessionStore(dir);
+    const store = new SessionStore(dir, process.cwd());
     const conversationId = "conv-rebind-2";
     const mainRoot = join(dir, "main");
     await store.save({
@@ -190,7 +190,7 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
 
   it("重建失败 → 可见 stderr，保持旧 deps，回合仍完成", async () => {
     const dir = makeStoreDir();
-    const store = new SessionStore(dir);
+    const store = new SessionStore(dir, process.cwd());
     const conversationId = "conv-rebind-3";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
@@ -228,7 +228,7 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
 describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => {
   it("rebind 前已完成的 wait:false 结果在旧 manager shutdown 前 drain 并交付主模型（plan Goal #2）", async () => {
     const dir = makeStoreDir();
-    const store = new SessionStore(dir);
+    const store = new SessionStore(dir, process.cwd());
     const conversationId = "conv-rebind-closeout";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
@@ -313,7 +313,7 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
 
   it("rebind 等待旧 manager 的 running wait:false 任务完成后再 shutdown，并交付结果", async () => {
     const dir = makeStoreDir();
-    const store = new SessionStore(dir);
+    const store = new SessionStore(dir, process.cwd());
     const conversationId = "conv-rebind-running-closeout";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
@@ -396,7 +396,7 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
 
   it("旧 manager 的 running 任务无法完成时，shutdown 前明确告知结果未交付", async () => {
     const dir = makeStoreDir();
-    const store = new SessionStore(dir);
+    const store = new SessionStore(dir, process.cwd());
     const conversationId = "conv-rebind-running-failed";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
@@ -452,7 +452,7 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
 
   it("rebind 重建后 ctx 句柄切到重建引擎；旧引擎 shutdown 先收口、新 shutdown 注册进 engineShutdown.current", async () => {
     const dir = makeStoreDir();
-    const store = new SessionStore(dir);
+    const store = new SessionStore(dir, process.cwd());
     const conversationId = "conv-rebind-handles";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
@@ -537,7 +537,7 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
 
   it("rebind 重建后 drain 消费新 manager（split-brain 修复：旧 manager 不再被 drain）", async () => {
     const dir = makeStoreDir();
-    const store = new SessionStore(dir);
+    const store = new SessionStore(dir, process.cwd());
     const conversationId = "conv-rebind-drain";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
@@ -598,7 +598,7 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
 
   it("store.load 非 not_found 错误（io_error 等）→ stderr 可见降级，不重建", async () => {
     const dir = makeStoreDir();
-    const store = new SessionStore(dir);
+    const store = new SessionStore(dir, process.cwd());
     const conversationId = "conv-rebind-ioerr";
     const mainRoot = join(dir, "main");
     await store.save({
@@ -641,7 +641,7 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
 
   it("slash 行跳过 rebind 检测（省掉每行 store.load IO），查询行仍检测", async () => {
     const dir = makeStoreDir();
-    const store = new SessionStore(dir);
+    const store = new SessionStore(dir, process.cwd());
     const conversationId = "conv-rebind-slash";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
@@ -762,7 +762,7 @@ describe("rebind 后主会话写根段（specs/skill-load-write-root.md T5）", 
 
   it("改绑成功 → 下一次查询行 messages 出现一次 writeRootSegment 文案；再下一行不再有", async () => {
     const dir = makeStoreDir();
-    const store = new SessionStore(dir);
+    const store = new SessionStore(dir, process.cwd());
     const conversationId = "conv-wrt";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
@@ -815,7 +815,7 @@ describe("rebind 后主会话写根段（specs/skill-load-write-root.md T5）", 
 
   it("根未变化 → 不注入写根段（未改绑不多段）", async () => {
     const dir = makeStoreDir();
-    const store = new SessionStore(dir);
+    const store = new SessionStore(dir, process.cwd());
     const conversationId = "conv-wrt-norebind";
     const mainRoot = join(dir, "main");
     await store.save({
@@ -840,7 +840,7 @@ describe("rebind 后主会话写根段（specs/skill-load-write-root.md T5）", 
 
   it("重建失败 → 可见降级且不注入写根段（改绑失败不插入）", async () => {
     const dir = makeStoreDir();
-    const store = new SessionStore(dir);
+    const store = new SessionStore(dir, process.cwd());
     const conversationId = "conv-wrt-fail";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
@@ -880,7 +880,7 @@ describe("rebind 后主会话写根段（specs/skill-load-write-root.md T5）", 
     // mainCheckoutOf(newRoot)，注入的写根文案会与「Project path 只读」
     // 自相矛盾 → 必须不置入。
     const dir = makeStoreDir();
-    const store = new SessionStore(dir);
+    const store = new SessionStore(dir, process.cwd());
     const conversationId = "conv-wrt-exit";
     const mainRoot = join(dir, "main");
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);

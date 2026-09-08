@@ -10,6 +10,7 @@ import { SessionHub } from "../../src/session-api/hub.ts";
 import {
   CURRENT_SCHEMA_VERSION,
   pinGoal,
+  resolveConversationDir,
   resolveProjectSessionDir,
   SessionStore,
 } from "../../src/session-api/store/index.ts";
@@ -31,7 +32,7 @@ let store: SessionStore;
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-hub-continue-"));
   sessionDir = resolveProjectSessionDir(baseDir, process.cwd());
-  store = new SessionStore(baseDir);
+  store = new SessionStore(baseDir, process.cwd());
 });
 
 afterAll(async () => {
@@ -285,12 +286,12 @@ describe("continueSession store.load failures", () => {
   it("corrupt file → parse_failed, step not called", async () => {
     const { deps, stepCalls } = spyDeps([assistantResult({ texts: ["no"] })]);
     const hub = new SessionHub({ store, deps, workspaceRoot: process.cwd() });
-    await mkdir(sessionDir, { recursive: true });
-    await writeFile(
-      join(sessionDir, "corrupt-continue.json"),
-      "{not-json",
-      "utf8"
-    );
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: "corrupt-continue",
+    });
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "corrupt-continue.json"), "{not-json", "utf8");
     await assert.rejects(
       () => hub.continueSession("corrupt-continue"),
       (err: unknown) => {

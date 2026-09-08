@@ -91,10 +91,11 @@ export const DEFAULT_TEST_LLM_ENV: TestLlmEnv = {
   temperature: 0,
   thinking: "off",
   thinkingEffort: "",
+  stream: "on",
 };
 
 /**
- * Build a 9-field LlmEnv. Any field on `overrides` replaces the default —
+ * Build a 10-field LlmEnv. Any field on `overrides` replaces the default —
  * spread semantics preserve explicit `undefined` (so the no-key test path
  * still works) and leave omitted fields at the default value.
  */
@@ -113,10 +114,12 @@ export function makeTestLlmEnv(overrides: Partial<TestLlmEnv> = {}): {
 export type TestLlmEnv = {
   readonly baseUrl: string;
   readonly model: string;
+  readonly fallback: string[];
   readonly apiKey: string | undefined;
   readonly maxOutputTokens: number;
   readonly timeoutMs: number;
   readonly temperature: number;
   readonly thinking: "off" | "adaptive";
   readonly thinkingEffort: "" | "low" | "medium" | "high" | "xhigh" | "max";
+  readonly stream: "on" | "off";
 };

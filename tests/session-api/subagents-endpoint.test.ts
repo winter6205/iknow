@@ -42,7 +42,7 @@ async function startServer(
   hubOpts?: Omit<SessionHubOptions, "store" | "deps">
 ): Promise<void> {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-http-subagents-"));
-  const store = new SessionStore(baseDir);
+  const store = new SessionStore(baseDir, process.cwd());
   const hub = new SessionHub({
     store,
     workspaceRoot: process.cwd(),

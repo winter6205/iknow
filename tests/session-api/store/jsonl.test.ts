@@ -37,6 +37,7 @@ import {
   messageEventId,
   parseSessionJsonl,
   projectSessionLog,
+  resolveConversationDir,
   resolveProjectSessionDir,
   SESSION_JSONL_EXT,
   SessionStore,
@@ -87,9 +88,12 @@ const sampleFile = (opts: {
   ...opts.overrides,
 });
 
+const conversationDir = (id: string): string =>
+  resolveConversationDir({ projectDir: sessionDir, conversationId: id });
 const jsonlPath = (id: string): string =>
-  join(sessionDir, `${id}${SESSION_JSONL_EXT}`);
-const jsonPath = (id: string): string => join(sessionDir, `${id}.json`);
+  join(conversationDir(id), `${id}${SESSION_JSONL_EXT}`);
+const jsonPath = (id: string): string =>
+  join(conversationDir(id), `${id}.json`);
 
 const readJsonlLines = async (id: string): Promise<unknown[]> => {
   const raw = await readFile(jsonlPath(id), "utf8");
@@ -102,7 +106,7 @@ const readJsonlLines = async (id: string): Promise<unknown[]> => {
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-jsonl-"));
   sessionDir = resolveProjectSessionDir(baseDir, process.cwd());
-  store = new SessionStore(baseDir);
+  store = new SessionStore(baseDir, process.cwd());
 });
 
 afterAll(async () => {
@@ -730,7 +734,7 @@ describe("SessionStore.load — dual-shape detection", () => {
   });
 
   it("legacy-only <id>.json still loads (no .jsonl present)", async () => {
-    await mkdir(sessionDir, { recursive: true });
+    await mkdir(conversationDir("jl-legacy"), { recursive: true });
     const legacy = sampleFile({
       id: "jl-legacy",
       overrides: { title: "legacy", messages: [userMsg("old")] },
@@ -826,7 +830,7 @@ describe("corrupt JSONL (exception EXIT: drop-trailing-corrupt-line)", () => {
   });
 
   it("throws schema_invalid when the head references an unknown event id", async () => {
-    await mkdir(sessionDir, { recursive: true });
+    await mkdir(conversationDir("jl-bad-head"), { recursive: true });
     const file = sampleFile({
       id: "jl-bad-head",
       overrides: { messages: [userMsg("q")] },
@@ -958,7 +962,7 @@ describe("SessionStore.appendEvents", () => {
   });
 
   it("throws write_failed when only a legacy .json exists (save once to migrate)", async () => {
-    await mkdir(sessionDir, { recursive: true });
+    await mkdir(conversationDir("jl-append-legacy"), { recursive: true });
     await writeFile(
       jsonPath("jl-append-legacy"),
       JSON.stringify(sampleFile({ id: "jl-append-legacy" })),
@@ -1086,7 +1090,7 @@ describe("SessionStore.list/delete with both on-disk shapes", () => {
         overrides: { messages: [userMsg("q"), assistantMsg(`reply-${id}`)] },
       });
     await store.save({ id: "jl-list-dual", file: withReply("jl-list-dual") });
-    await mkdir(sessionDir, { recursive: true });
+    await mkdir(conversationDir("jl-list-legacy"), { recursive: true });
     await writeFile(
       jsonPath("jl-list-legacy"),
       JSON.stringify(withReply("jl-list-legacy")),
@@ -1144,7 +1148,7 @@ describe("SessionStore.list/delete with both on-disk shapes", () => {
   });
 
   it("delete() on a legacy-only session still works", async () => {
-    await mkdir(sessionDir, { recursive: true });
+    await mkdir(conversationDir("jl-del-legacy"), { recursive: true });
     await writeFile(
       jsonPath("jl-del-legacy"),
       JSON.stringify(sampleFile({ id: "jl-del-legacy" })),

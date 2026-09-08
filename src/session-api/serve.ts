@@ -21,6 +21,7 @@ import {
   initIknowWorkspaceSafe,
   runHostInitScriptSafe,
 } from "../harness/identity/index.js";
+import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
 import type { ServeAskUserHandle } from "../harness/permission/ask-user.js";
 import {
   resolveSessionDefaultWorkspace,
@@ -106,8 +107,14 @@ export async function startSessionServe(
   // D1.2:host-init 保持 global —— 不 thread workspaceRoot。
   await runHostInitScriptSafe();
   const dataDir = resolveServeDataDir(opts?.dataDir, workspaceRoot);
-  // cwd defaults to process.cwd() → the store picks its project namespace.
-  const store = new SessionStore(dataDir);
+  // T1 (session-folder-consolidation): store namespace keys by
+  // projectIdentityRoot, not cwd. mirror build-engine.ts:523 — derive from
+  // the same root the engine will independently validate inside
+  // resolveSessionRoots so the two stores never disagree.
+  const projectIdentityRoot = deriveProjectIdentityRoot({
+    cwd: workspaceRoot,
+  });
+  const store = new SessionStore(dataDir, projectIdentityRoot);
 
   // T6:稳定 productRoot = 启动 bind root（显式 workspace 或 default workspace）。
   // rebind 后 task worktree 只换 session workspaceRoot，MCP config 仍读本根。

@@ -57,7 +57,7 @@ beforeEach(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-trace-mounted-"));
   traceDir = await mkdtemp(join(tmpdir(), "iknow-trace-mounted-trace-"));
   await writeSession(traceDir, "c1");
-  const store = new SessionStore(baseDir);
+  const store = new SessionStore(baseDir, process.cwd());
   const hub = new SessionHub({ store, deps: makeDeps([]) });
   listening = await listenSessionServer({
     hub,
@@ -146,7 +146,8 @@ describe("mounted trace error envelope (exception class)", () => {
     );
     await writeFile(badTrace, "{}\n", "utf8");
     const store = new SessionStore(
-      await mkdtemp(join(tmpdir(), "iknow-trace-bad-store-"))
+      await mkdtemp(join(tmpdir(), "iknow-trace-bad-store-")),
+      process.cwd()
     );
     const hub = new SessionHub({ store, deps: makeDeps([]) });
     const bad = await listenSessionServer({
@@ -190,7 +191,8 @@ describe("mounted /trace SPA (stripPrefix static mount)", () => {
       "utf8"
     );
     const store = new SessionStore(
-      await mkdtemp(join(tmpdir(), "iknow-trace-spa-store-"))
+      await mkdtemp(join(tmpdir(), "iknow-trace-spa-store-")),
+      process.cwd()
     );
     const hub = new SessionHub({ store, deps: makeDeps([]) });
     spaServer = await listenSessionServer({

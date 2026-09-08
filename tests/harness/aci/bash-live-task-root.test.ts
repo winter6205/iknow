@@ -60,7 +60,7 @@ const { createBackgroundTaskManager, defaultBackgroundSpawn } =
 const sessionRootsModule =
   await import("../../../src/harness/session-roots.ts");
 const { createLiveTaskRoot, writeLiveTaskRoot } = sessionRootsModule;
-type LiveTaskRoot = (typeof sessionRootsModule)["LiveTaskRoot"];
+import type { LiveTaskRoot } from "../../../src/harness/session-roots.ts";
 
 function makeFakeChild(pid = 47171) {
   const kill = vi.fn(() => true);

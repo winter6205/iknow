@@ -96,7 +96,7 @@ let traceDir: string;
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-hub-goalstatus-"));
   resolveProjectSessionDir(baseDir, process.cwd());
-  store = new SessionStore(baseDir);
+  store = new SessionStore(baseDir, process.cwd());
   // traceOut 指向同一个临时根; hub-violation.test.ts 同模式。
   traceDir = baseDir;
 });

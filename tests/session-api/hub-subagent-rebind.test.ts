@@ -76,7 +76,7 @@ async function prepareReboundHub(): Promise<{
   readonly reboundRoot: string;
 }> {
   const baseDir = await mkdtemp(join(tmpdir(), "iknow-hub-subagent-rebind-"));
-  const store = new SessionStore(baseDir);
+  const store = new SessionStore(baseDir, process.cwd());
   const oldManager = makeManager("before");
   const newManager = makeManager("after");
   const reboundDeps = makeDeps([assistantResult({ texts: ["woken"] })]);
@@ -193,7 +193,7 @@ describe("SessionHub subagent manager aggregation across rebind", () => {
       subscribe: mailbox.subscribe,
     };
     const hub = new SessionHub({
-      store: new SessionStore(baseDir),
+      store: new SessionStore(baseDir, process.cwd()),
       deps: makeDeps([]),
       subagentManager: manager,
       surface: "serve",

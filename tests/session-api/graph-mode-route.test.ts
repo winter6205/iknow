@@ -40,7 +40,7 @@ afterEach(async () => {
 async function start(graphMode?: GraphModeContext): Promise<string> {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-graph-route-"));
   const hub = new SessionHub({
-    store: new SessionStore(baseDir),
+    store: new SessionStore(baseDir, process.cwd()),
     deps: makeDeps([assistantResult({ texts: ["ok"] })]),
     ...(graphMode ? { graphMode } : {}),
   });

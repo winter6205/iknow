@@ -37,7 +37,7 @@ beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-hub-violation-"));
   // Reference the namespaced dir so the store is rooted under baseDir.
   resolveProjectSessionDir(baseDir, process.cwd());
-  store = new SessionStore(baseDir);
+  store = new SessionStore(baseDir, process.cwd());
   // T2 每会话独立文件: traceOut 是目录, violation 写 <traceDir>/<convId>.jsonl。
   traceDir = baseDir;
 });

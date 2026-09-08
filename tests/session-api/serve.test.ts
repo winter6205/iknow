@@ -22,8 +22,10 @@ import type { ListeningServer } from "../../src/session-api/http.ts";
 import type { SessionHub } from "../../src/session-api/hub.ts";
 import {
   parseSessionJsonl,
+  resolveConversationDir,
   resolveProjectSessionDir,
 } from "../../src/session-api/store/index.ts";
+import { deriveProjectIdentityRoot } from "../../src/harness/session-roots.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
@@ -270,12 +272,22 @@ describe("startSessionServe — workspace pre-bind (T4)", () => {
   // we don't expose the store, just read the file the test owns via baseDir).
   async function readSessionWorkspaceRoot(
     baseDir: string,
+    workspaceRoot: string,
     conversationId: string
   ): Promise<string | undefined> {
     // #629: read the JSONL authority; the legacy `.json` mirror is no longer
-    // written. The session header record carries `workspaceRoot`.
+    // written. The session header record carries `workspaceRoot`. project
+    // identity is keyed off the workspace root (session-folder-consolidation
+    // T1: namespace key = projectIdentityRoot, not cwd), so the test must use
+    // the same root serve.ts derived for its store.
+    const projectIdentityRoot = deriveProjectIdentityRoot({
+      cwd: workspaceRoot,
+    });
     const filePath = join(
-      resolveProjectSessionDir(baseDir, process.cwd()),
+      resolveConversationDir({
+        projectDir: resolveProjectSessionDir(baseDir, projectIdentityRoot),
+        conversationId,
+      }),
       `${conversationId}.jsonl`
     );
     const raw = await readFile(filePath, "utf8");
@@ -316,8 +328,13 @@ describe("startSessionServe — workspace pre-bind (T4)", () => {
       // (c) 创建会话后写盘文件携带 workspaceRoot = 默认 workspace(T1
       // additivity: 缺字段 → cwd;这里 = default root,不是 cwd)。
       const created = await out.hub.createSession();
+      // serve.ts 没有显式 flag/env 时,projectIdentityRoot 退到
+      // `deriveProjectIdentityRoot({cwd: undefined})` → `mainCheckoutOf(process.cwd())`,
+      // 与 productRoot(expectedRoot) 不同 —— 测试必须镜像 serve.ts 的派生,
+      // 否则会把同 id 文件读到错误的 projects/<basename>-<hash> 下。
       const ws = await readSessionWorkspaceRoot(
         localBaseDir,
+        process.cwd(),
         created.session.conversation_id
       );
       assert.equal(ws, expectedRoot);
@@ -352,6 +369,7 @@ describe("startSessionServe — workspace pre-bind (T4)", () => {
       const created = await out.hub.createSession();
       const ws = await readSessionWorkspaceRoot(
         localBaseDir,
+        root,
         created.session.conversation_id
       );
       assert.equal(ws, root);
@@ -416,6 +434,7 @@ describe("startSessionServe — workspace pre-bind (T4)", () => {
       const created = await out.hub.createSession();
       const ws = await readSessionWorkspaceRoot(
         localBaseDir,
+        root,
         created.session.conversation_id
       );
       assert.equal(ws, root);

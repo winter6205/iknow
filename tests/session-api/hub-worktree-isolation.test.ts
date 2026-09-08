@@ -104,7 +104,7 @@ let settingsSource: ReturnType<typeof installTestSettingsSource>;
 beforeAll(async () => {
   baseDir = mkdtempSync(join(tmpdir(), "iknow-wt-hub-store-"));
   roots.push(baseDir);
-  store = new SessionStore(baseDir);
+  store = new SessionStore(baseDir, process.cwd());
   settingsSource = installTestSettingsSource();
 });
 

@@ -26,6 +26,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CURRENT_SCHEMA_VERSION,
+  resolveConversationDir,
   resolveProjectSessionDir,
   SESSION_JSONL_EXT,
   SessionStore,
@@ -84,20 +85,23 @@ const sampleFile = (opts: {
   ...opts.overrides,
 });
 
+const conversationDir = (id: string): string =>
+  resolveConversationDir({ projectDir: sessionDir, conversationId: id });
 const jsonlPath = (id: string): string =>
-  join(sessionDir, `${id}${SESSION_JSONL_EXT}`);
-const jsonPath = (id: string): string => join(sessionDir, `${id}.json`);
+  join(conversationDir(id), `${id}${SESSION_JSONL_EXT}`);
+const jsonPath = (id: string): string =>
+  join(conversationDir(id), `${id}.json`);
 
 /** Write a legacy-only `.json` session directly to disk (no `.jsonl`). */
 const writeLegacyJson = async (id: string, value: unknown): Promise<void> => {
-  await mkdir(sessionDir, { recursive: true });
+  await mkdir(conversationDir(id), { recursive: true });
   await writeFile(jsonPath(id), JSON.stringify(value), "utf8");
 };
 
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-jsonl-migration-"));
   sessionDir = resolveProjectSessionDir(baseDir, process.cwd());
-  store = new SessionStore(baseDir);
+  store = new SessionStore(baseDir, process.cwd());
 });
 
 afterAll(async () => {

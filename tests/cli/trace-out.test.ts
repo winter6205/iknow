@@ -178,7 +178,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
 
   it("SessionHub with traceOut writes <convId>.jsonl on postMessage with session conversation_id", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t5-hub-"));
-    const store = new SessionStore(scratch);
+    const store = new SessionStore(scratch, process.cwd());
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -216,7 +216,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
 
   it("SessionHub with traceOut writes a session root record with agent_version at run end", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t5-hub-sessroot-"));
-    const store = new SessionStore(scratch);
+    const store = new SessionStore(scratch, process.cwd());
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -252,7 +252,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
 
   it("SessionHub without traceOut does NOT write any trace file", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t5-noop-"));
-    const store = new SessionStore(scratch);
+    const store = new SessionStore(scratch, process.cwd());
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -293,7 +293,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
   it("postMessage creates a NEW trace instance per session (not cached in deps)", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t5-multi-"));
     const traceDir = scratch;
-    const store = new SessionStore(scratch);
+    const store = new SessionStore(scratch, process.cwd());
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);

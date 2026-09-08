@@ -30,6 +30,7 @@ import {
   seedResumeMessages,
 } from "../../src/cli/chat-session.ts";
 import {
+  resolveConversationDir,
   resolveProjectSessionDir,
   SessionStore,
 } from "../../src/session-api/store/index.ts";
@@ -113,7 +114,15 @@ function buildResult(opts: {
  * `seedResumeMessages` 的 warn 回调内部走 `writeErr` → `process.stderr.write`。
  * vitest spyOn 与 tui/run-errors.test.ts 同源(bun:test 版),跨文件复用稳定模式。
  */
-let stderrSpy: ReturnType<typeof vi.spyOn<typeof process.stderr, "write">>;
+// Capture stderr.write spy. vi.spyOn's generic resolution with
+// `process.stderr.write` overloads is brittle: TS picks an overload
+// whose method-key constraint defaults to array-method keys, so the
+// helper's constraint fails even though the runtime call is sound. We
+// type it via the concrete return type of the actual `vi.spyOn(...)`
+// assignment in `beforeEach`, then consume `mock.calls` / `mockRestore`
+// without further re-derivation.
+import type { MockInstance } from "vitest";
+let stderrSpy: MockInstance<typeof process.stderr.write>;
 
 function capturedStderr(): string {
   return stderrSpy.mock.calls
@@ -169,7 +178,10 @@ describe("seedResumeMessages — T4 seed helper", () => {
     tempDirs.push(tmp);
     const s = new SessionStore(tmp, process.cwd());
     const id = "corrupt";
-    const dir = resolveProjectSessionDir(tmp, process.cwd());
+    const dir = resolveConversationDir({
+      projectDir: resolveProjectSessionDir(tmp, process.cwd()),
+      conversationId: id,
+    });
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, `${id}.json`), "{not json", "utf8");
 
@@ -187,7 +199,10 @@ describe("seedResumeMessages — T4 seed helper", () => {
     tempDirs.push(tmp);
     const s = new SessionStore(tmp, process.cwd());
     const id = "bad-schema";
-    const dir = resolveProjectSessionDir(tmp, process.cwd());
+    const dir = resolveConversationDir({
+      projectDir: resolveProjectSessionDir(tmp, process.cwd()),
+      conversationId: id,
+    });
     await mkdir(dir, { recursive: true });
     // future schemaVersion → validateSessionFile returns "schemaVersion" →
     // sanitize throws → load re-throws schema_invalid.
@@ -211,10 +226,15 @@ describe("seedResumeMessages — T4 seed helper", () => {
     const s = new SessionStore(tmp, process.cwd());
     const id = "io-err";
     const projectDir = resolveProjectSessionDir(tmp, process.cwd());
-    // 把 projectDir 替换成一个普通文件:readFile 解析其子路径时 ENOTDIR →
-    // store.readRaw 把 ENOENT 之外的失败映射为 io_error。
-    await mkdir(join(tmp, "sessions"), { recursive: true });
-    await writeFile(projectDir, "blocker", "utf8");
+    const convDir = resolveConversationDir({
+      projectDir,
+      conversationId: id,
+    });
+    // 把 conversation subfolder 替换成一个普通文件:readFile 解析其子路径时
+    // ENOTDIR → store.readRaw 把 ENOENT 之外的失败映射为 io_error。
+    await mkdir(join(tmp, "projects"), { recursive: true });
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(convDir, "blocker", "utf8");
 
     const r = await seedResumeMessages({ store: s, id });
     assert.deepEqual(r.messages, []);
@@ -466,7 +486,10 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
     tempDirs.push(tmp);
     const s = new SessionStore(tmp, process.cwd());
     const id = "cp-null";
-    const dir = resolveProjectSessionDir(tmp, process.cwd());
+    const dir = resolveConversationDir({
+      projectDir: resolveProjectSessionDir(tmp, process.cwd()),
+      conversationId: id,
+    });
     await mkdir(dir, { recursive: true });
     await writeFile(
       join(dir, `${id}.json`),

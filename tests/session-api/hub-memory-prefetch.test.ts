@@ -110,7 +110,10 @@ async function makeDedupHub(opts: {
 
 describe("SessionHub — per-root memory prefetch", () => {
   it("uses each workspace's overlay, not the first-built process field", async () => {
-    const store = new SessionStore(await tmpDir("iknow-prefetch-store-"));
+    const store = new SessionStore(
+      await tmpDir("iknow-prefetch-store-"),
+      process.cwd()
+    );
     const rootA = await tmpDir("iknow-prefetch-a-");
     const rootB = await tmpDir("iknow-prefetch-b-");
     const seen: Record<string, string> = {};
@@ -170,7 +173,10 @@ describe("SessionHub — per-root memory prefetch", () => {
 
 describe("SessionHub — session-level prefetch dedup", () => {
   it("does not re-inject the same memory on a second query in the same conversation while the first block stays in history", async () => {
-    const store = new SessionStore(await tmpDir("iknow-dedup-store-"));
+    const store = new SessionStore(
+      await tmpDir("iknow-dedup-store-"),
+      process.cwd()
+    );
     const root = await tmpDir("iknow-dedup-root-");
     const overlayCalls: OverlayCall[] = [];
     /** User texts visible to the engine, one entry per postMessage turn. */
@@ -216,7 +222,10 @@ describe("SessionHub — session-level prefetch dedup", () => {
   });
 
   it("keeps same-query conversations independent, including concurrent turns, and re-injects for a new conversation", async () => {
-    const store = new SessionStore(await tmpDir("iknow-dedup-iso-store-"));
+    const store = new SessionStore(
+      await tmpDir("iknow-dedup-iso-store-"),
+      process.cwd()
+    );
     const root = await tmpDir("iknow-dedup-iso-root-");
     const overlayCalls: OverlayCall[] = [];
     const hub = await makeDedupHub({
@@ -263,7 +272,10 @@ describe("SessionHub — session-level prefetch dedup", () => {
   });
 
   it("does not re-inject memories recovered from resumed history (cold start)", async () => {
-    const store = new SessionStore(await tmpDir("iknow-dedup-resume-store-"));
+    const store = new SessionStore(
+      await tmpDir("iknow-dedup-resume-store-"),
+      process.cwd()
+    );
     const root = await tmpDir("iknow-dedup-resume-root-");
     const conversationId = "resume-prefetch-1";
     const now = "2026-01-01T00:00:00.000Z";

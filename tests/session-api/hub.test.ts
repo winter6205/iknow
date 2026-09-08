@@ -21,6 +21,7 @@ import {
   CURRENT_SCHEMA_VERSION,
   MAX_WORKSPACE_ROOT_CHARS,
   parseSessionJsonl,
+  resolveConversationDir,
   resolveProjectSessionDir,
   SESSION_JSONL_EXT,
   SessionStore,
@@ -104,7 +105,7 @@ let store: SessionStore;
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-hub-"));
   sessionDir = resolveProjectSessionDir(baseDir, process.cwd());
-  store = new SessionStore(baseDir);
+  store = new SessionStore(baseDir, process.cwd());
 });
 
 afterAll(async () => {
@@ -358,7 +359,7 @@ describe("createSession", () => {
     const isolatedDir = await mkdtemp(
       join(tmpdir(), "iknow-hub-create-unbound-")
     );
-    const isolatedStore = new SessionStore(isolatedDir);
+    const isolatedStore = new SessionStore(isolatedDir, process.cwd());
     const isolatedHub = new SessionHub({
       store: isolatedStore,
       deps: makeDeps([]),
@@ -391,7 +392,7 @@ describe("createSession", () => {
       const isolatedDir = await mkdtemp(
         join(tmpdir(), `iknow-hub-create-${label}-`)
       );
-      const isolatedStore = new SessionStore(isolatedDir);
+      const isolatedStore = new SessionStore(isolatedDir, process.cwd());
       const isolatedHub = new SessionHub({
         store: isolatedStore,
         deps: makeDeps([]),
@@ -482,8 +483,12 @@ describe("boundary: negative", () => {
   it("postMessage on corrupt file → parse_failed", async () => {
     const deps = makeDeps([]);
     const hub = makeHub(deps);
-    await mkdir(sessionDir, { recursive: true });
-    await writeFile(join(sessionDir, "corrupt-conv.json"), "{not-json", "utf8");
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: "corrupt-conv",
+    });
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "corrupt-conv.json"), "{not-json", "utf8");
     await assert.rejects(
       () => hub.postMessage({ conversationId: "corrupt-conv", text: "hi" }),
       (err: unknown) => {
@@ -1110,7 +1115,10 @@ describe("postMessage title projection", () => {
     // #629: legacy `.json` mirror is no longer written. Inject a stale title
     // by rewriting the JSONL header record in place (the authority file).
     const path = join(
-      sessionDir,
+      resolveConversationDir({
+        projectDir: sessionDir,
+        conversationId: session.conversation_id,
+      }),
       `${session.conversation_id}${SESSION_JSONL_EXT}`
     );
     const raw = await readFile(path, "utf8");
@@ -1722,7 +1730,13 @@ describe("T3 (#620): turn 内 commit — hub 注入 commitMessages 钩子", () =
       name: "probe",
       next: async () => {
         const raw = await readFile(
-          join(sessionDir, `${idRef.current}.jsonl`),
+          join(
+            resolveConversationDir({
+              projectDir: sessionDir,
+              conversationId: idRef.current ?? "",
+            }),
+            `${idRef.current}.jsonl`
+          ),
           "utf8"
         );
         const log = parseSessionJsonl(raw);
@@ -1771,7 +1785,13 @@ describe("T3 (#620): turn 内 commit — hub 注入 commitMessages 钩子", () =
     const loaded = await store.load(session.conversation_id);
     assert.equal(loaded.messages.length, 4);
     const raw = await readFile(
-      join(sessionDir, `${session.conversation_id}.jsonl`),
+      join(
+        resolveConversationDir({
+          projectDir: sessionDir,
+          conversationId: session.conversation_id,
+        }),
+        `${session.conversation_id}.jsonl`
+      ),
       "utf8"
     );
     const log = parseSessionJsonl(raw);
@@ -1785,9 +1805,13 @@ describe("T3 (#620): turn 内 commit — hub 注入 commitMessages 钩子", () =
     // 永远无法再跑。探针工具在 runOne 内读盘上 JSONL,证明 bootstrap + commit
     // 在工具执行前已完成(断言在工具外做,防 executor 收吞 assertion 假绿)。
     const id = "legacy-only-t3";
-    await mkdir(sessionDir, { recursive: true });
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
+    await mkdir(dir, { recursive: true });
     await writeFile(
-      join(sessionDir, `${id}.json`),
+      join(dir, `${id}.json`),
       JSON.stringify(
         sampleFile({
           id,
@@ -1810,7 +1834,7 @@ describe("T3 (#620): turn 内 commit — hub 注入 commitMessages 钩子", () =
     const probe = createStubTool({
       name: "probe",
       next: async () => {
-        const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+        const raw = await readFile(join(dir, `${id}.jsonl`), "utf8");
         const log = parseSessionJsonl(raw);
         observed.push({
           events: log.events.length,
@@ -1856,7 +1880,7 @@ describe("T3 (#620): turn 内 commit — hub 注入 commitMessages 钩子", () =
     const loaded = await store.load(id);
     assert.equal(loaded.messages.length, 6);
     assert.equal(loaded.turnCount, 3);
-    const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+    const raw = await readFile(join(dir, `${id}.jsonl`), "utf8");
     const log = parseSessionJsonl(raw);
     assert.equal(log.events.length, 6);
     assert.equal(log.head, "e5");
@@ -1886,7 +1910,10 @@ describe("T5 (#622): hub.rewindSession 移动 head、skipped 链保留", () => {
     await hub.postMessage({ conversationId: id, text: "q2" });
 
     // 2 turns on disk: e0=q1 e1=a1 e2=q2 e3=a2, head e3.
-    const jsonlFile = join(sessionDir, `${id}.jsonl`);
+    const jsonlFile = join(
+      resolveConversationDir({ projectDir: sessionDir, conversationId: id }),
+      `${id}.jsonl`
+    );
     const before = parseSessionJsonl(await readFile(jsonlFile, "utf8"));
     assert.equal(before.events.length, 4);
     assert.equal(before.head, "e3");
@@ -1939,7 +1966,7 @@ describe("T5 (#622): hub.rewindSession 移动 head、skipped 链保留", () => {
 
     // A second store instance over the same pool (another entry point) sees
     // the same head and the same projection.
-    const storeB = new SessionStore(baseDir);
+    const storeB = new SessionStore(baseDir, process.cwd());
     assert.equal(await storeB.readHead(id), "e1");
     const loaded = await storeB.load(id);
     assert.deepEqual(
@@ -1951,9 +1978,13 @@ describe("T5 (#622): hub.rewindSession 移动 head、skipped 链保留", () => {
 
   it("legacy .json-only 会话:hub.rewindSession 先迁移出 JSONL 再移动 head", async () => {
     const id = "legacy-rewind-t5";
-    await mkdir(sessionDir, { recursive: true });
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
+    await mkdir(dir, { recursive: true });
     await writeFile(
-      join(sessionDir, `${id}.json`),
+      join(dir, `${id}.json`),
       JSON.stringify(
         sampleFile({
           id,
@@ -1982,7 +2013,7 @@ describe("T5 (#622): hub.rewindSession 移动 head、skipped 链保留", () => {
     assert.equal(res.session.turn_count, 1);
     // Migrated: the jsonl now exists, head at the anchor, all events retained.
     const log = parseSessionJsonl(
-      await readFile(join(sessionDir, `${id}.jsonl`), "utf8")
+      await readFile(join(dir, `${id}.jsonl`), "utf8")
     );
     assert.equal(log.head, "e1");
     assert.equal(log.events.length, 4);

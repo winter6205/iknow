@@ -23,6 +23,7 @@ import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/typ
 import {
   CURRENT_SCHEMA_VERSION,
   parseSessionJsonl,
+  resolveConversationDir,
   resolveProjectSessionDir,
   SessionStore,
 } from "../../src/session-api/store/index.js";
@@ -55,7 +56,7 @@ async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
 describe("T3 (#620): createChatSessionCommitHook", () => {
   it("JSONL 缺失 without workspaceRoot → refuse bootstrap with typed error", async () => {
     await withTempDir(async (baseDir) => {
-      const store = new SessionStore(baseDir);
+      const store = new SessionStore(baseDir, process.cwd());
       const commit = createChatSessionCommitHook({
         store,
         conversationId: "chat-commit-rootless",
@@ -72,7 +73,7 @@ describe("T3 (#620): createChatSessionCommitHook", () => {
 
   it("JSONL 缺失:首个 commit 用 priors bootstrap,assistant 事件落盘", async () => {
     await withTempDir(async (baseDir) => {
-      const store = new SessionStore(baseDir);
+      const store = new SessionStore(baseDir, process.cwd());
       const id = "chat-commit-fresh";
       const priors = [userMsg("q1")];
       const commit = createChatSessionCommitHook({
@@ -86,7 +87,16 @@ describe("T3 (#620): createChatSessionCommitHook", () => {
       await commit([assistantMsg("a1")]);
 
       const sessionDir = resolveProjectSessionDir(baseDir, process.cwd());
-      const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+      const raw = await readFile(
+        join(
+          resolveConversationDir({
+            projectDir: sessionDir,
+            conversationId: id,
+          }),
+          `${id}.jsonl`
+        ),
+        "utf8"
+      );
       const log = parseSessionJsonl(raw);
       assert.equal(log.events.length, 2);
       assert.equal(log.head, "e1");
@@ -101,7 +111,7 @@ describe("T3 (#620): createChatSessionCommitHook", () => {
 
   it("后续 commit 链接到当前 head(turn 内逐条 append)", async () => {
     await withTempDir(async (baseDir) => {
-      const store = new SessionStore(baseDir);
+      const store = new SessionStore(baseDir, process.cwd());
       const id = "chat-commit-chain";
       const commit = createChatSessionCommitHook({
         store,
@@ -115,7 +125,16 @@ describe("T3 (#620): createChatSessionCommitHook", () => {
       await commit([userMsg("tool_result 占位")]);
 
       const sessionDir = resolveProjectSessionDir(baseDir, process.cwd());
-      const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+      const raw = await readFile(
+        join(
+          resolveConversationDir({
+            projectDir: sessionDir,
+            conversationId: id,
+          }),
+          `${id}.jsonl`
+        ),
+        "utf8"
+      );
       const log = parseSessionJsonl(raw);
       assert.equal(log.events.length, 2);
       assert.equal(log.head, "e1");
@@ -126,12 +145,16 @@ describe("T3 (#620): createChatSessionCommitHook", () => {
 
   it("legacy .json-only 会话:首个 commit 迁出 JSONL,title/turnCount 保留", async () => {
     await withTempDir(async (baseDir) => {
-      const store = new SessionStore(baseDir);
+      const store = new SessionStore(baseDir, process.cwd());
       const id = "chat-commit-legacy";
       const sessionDir = resolveProjectSessionDir(baseDir, process.cwd());
-      await mkdir(sessionDir, { recursive: true });
+      const dir = resolveConversationDir({
+        projectDir: sessionDir,
+        conversationId: id,
+      });
+      await mkdir(dir, { recursive: true });
       await writeFile(
-        join(sessionDir, `${id}.json`),
+        join(dir, `${id}.json`),
         JSON.stringify({
           schemaVersion: CURRENT_SCHEMA_VERSION,
           conversation_id: id,
@@ -159,7 +182,7 @@ describe("T3 (#620): createChatSessionCommitHook", () => {
       assert.equal(loaded.messages.length, 3);
       assert.equal(loaded.title, "legacy title");
       assert.equal(loaded.turnCount, 3);
-      const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+      const raw = await readFile(join(dir, `${id}.jsonl`), "utf8");
       const log = parseSessionJsonl(raw);
       assert.equal(log.events.length, 3);
       assert.equal(log.head, "e2");
@@ -168,9 +191,9 @@ describe("T3 (#620): createChatSessionCommitHook", () => {
 
   it("底层 IO 失败:以 typed store error 传播(不吞)", async () => {
     await withTempDir(async (baseDir) => {
-      // sessions/ 位置放一个普通文件 → mkdir/读写全部 ENOTDIR。
-      await writeFile(join(baseDir, "sessions"), "not a dir", "utf8");
-      const store = new SessionStore(baseDir);
+      // projects/ 位置放一个普通文件 → mkdir/读写全部 ENOTDIR。
+      await writeFile(join(baseDir, "projects"), "not a dir", "utf8");
+      const store = new SessionStore(baseDir, process.cwd());
       const commit = createChatSessionCommitHook({
         store,
         conversationId: "chat-commit-io-fail",

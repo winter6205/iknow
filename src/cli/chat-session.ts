@@ -29,6 +29,7 @@ import {
 import type { SessionContext } from "../shared/schema.js";
 import { isIknowError, ValidationError } from "../shared/errors.js";
 import { MaxTurnsExceeded } from "../harness/errors.js";
+import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
 import { maxTurnsNotice } from "./max-turns.js";
 import {
   clearErrLine,
@@ -2095,7 +2096,12 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   // **T4 顺序调整**:checkpointStore 提前到 state 构造之前 —— resume 路径要先
   // load 既有文件再 seed state.messages;依赖图(store 与 state)允许此顺序。
   const abortController = new AbortController();
-  const checkpointStore = new SessionStore(resolveServeDataDir());
+  // T1 (session-folder-consolidation): store namespace keys by
+  // projectIdentityRoot, not cwd. mirror build-engine.ts:523.
+  const checkpointStore = new SessionStore(
+    resolveServeDataDir(),
+    deriveProjectIdentityRoot({ cwd: opts.workspaceRoot })
+  );
 
   // T4: resume 时从既有 checkpoint 文件加载初始消息历史(seed)。
   //   - `opts.resumeId === undefined` → 零 IO,空 messages,行为与 T2 完全一致。
@@ -2116,7 +2122,9 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     opts.workspaceRoot !== ""
       ? {
           fallbackStore: new SessionStore(
-            resolveServeDataDir(undefined, opts.workspaceRoot)
+            resolveServeDataDir(undefined, opts.workspaceRoot),
+            // T1: namespace keys by projectIdentityRoot, mirror build-engine.
+            deriveProjectIdentityRoot({ cwd: opts.workspaceRoot })
           ),
         }
       : {}),

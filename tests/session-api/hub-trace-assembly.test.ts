@@ -49,7 +49,7 @@ describe("SessionHub — subagent diagnostics assembly", () => {
     const root = baseDir;
 
     const hub = new SessionHub({
-      store: new SessionStore(join(baseDir, "sessions")),
+      store: new SessionStore(join(baseDir, "sessions"), process.cwd()),
       askUser: createNoAskUser(),
       surface: "serve",
       traceOut,

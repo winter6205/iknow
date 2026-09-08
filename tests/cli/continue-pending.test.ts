@@ -21,6 +21,7 @@ import { parseArgs } from "../../src/cli/parse-args.ts";
 import { MAX_MESSAGE_CHARS } from "../../src/session-api/contract.ts";
 import {
   CURRENT_SCHEMA_VERSION,
+  resolveConversationDir,
   resolveProjectSessionDir,
   SessionStore,
   type SessionFileV1,
@@ -189,7 +190,7 @@ describe("T3 empty: empty session /continue → nothing_pending, run not called"
         };
         throw err;
       },
-    } as SessionStore;
+    } as unknown as SessionStore;
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["should-not-run"] })],
       checkpointStore: store,
@@ -456,8 +457,12 @@ describe("T3 exception: reload_before_continue + mapStoreError + no fallback", (
   it("store.load throw → typed kind EXIT, run not called", async () => {
     const { store, sessionDir } = await storeFor();
     const id = "corrupt-cli-continue";
-    await mkdir(sessionDir, { recursive: true });
-    await writeFile(join(sessionDir, `${id}.json`), "{not-json", "utf8");
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, `${id}.json`), "{not-json", "utf8");
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["should-not-run"] })],
       checkpointStore: store,

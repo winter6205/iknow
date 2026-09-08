@@ -32,6 +32,7 @@ import {
   CURRENT_SCHEMA_VERSION,
   parseSessionJsonl,
   projectSessionLog,
+  resolveConversationDir,
   resolveProjectSessionDir,
   SESSION_JSONL_EXT,
   SessionStore,
@@ -94,7 +95,11 @@ afterAll(async () => {
  *  shape). The codec mirrors `store.load()` so fork / rewind branches that
  *  leave abandoned events in the log do not surface in the comparison. */
 async function readDisk(id: string): Promise<Record<string, unknown>> {
-  const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+  const dir = resolveConversationDir({
+    projectDir: sessionDir,
+    conversationId: id,
+  });
+  const raw = await readFile(join(dir, `${id}.jsonl`), "utf8");
   return projectSessionLog(parseSessionJsonl(raw)) as unknown as Record<
     string,
     unknown
@@ -300,8 +305,12 @@ describe("T5 (#622) cross-entry rewind: hub head-move is visible to an independe
     );
 
     // The skipped chain stays in the SAME jsonl: all 4 events retained on disk.
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
     const log = parseSessionJsonl(
-      await readFile(join(sessionDir, `${id}${SESSION_JSONL_EXT}`), "utf8")
+      await readFile(join(dir, `${id}${SESSION_JSONL_EXT}`), "utf8")
     );
     assert.equal(log.events.length, 4);
     assert.equal(log.head, "e1");

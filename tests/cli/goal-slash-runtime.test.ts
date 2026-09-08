@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { processChatLine } from "../../src/cli/chat-session.ts";
 import {
   CURRENT_SCHEMA_VERSION,
+  resolveConversationDir,
   resolveProjectSessionDir,
   SessionStore,
 } from "../../src/session-api/store/index.ts";
@@ -113,7 +114,10 @@ describe("/goal 三面 runtime（真实 SessionStore + fresh conversationId）",
   it("typed-error 契约：schema_invalid 真实故障 → stderr `${kind}: ${conversation_id}`", async () => {
     const { store, baseDir } = await storeFor();
     const id = "schema-invalid";
-    const dir = resolveProjectSessionDir(baseDir, process.cwd());
+    const dir = resolveConversationDir({
+      projectDir: resolveProjectSessionDir(baseDir, process.cwd()),
+      conversationId: id,
+    });
     await mkdir(dir, { recursive: true });
     const now = new Date().toISOString();
     // 畸形 goal：text 字段为 number → isValidGoal false → sanitize 抛 schema_invalid。
@@ -146,7 +150,10 @@ describe("/goal 三面 runtime（真实 SessionStore + fresh conversationId）",
     // /goal status 输出不应泄露 taskFocus 段或焦点文本。
     const { store, baseDir } = await storeFor();
     const id = "pinned-with-legacy-taskfocus";
-    const dir = resolveProjectSessionDir(baseDir, process.cwd());
+    const dir = resolveConversationDir({
+      projectDir: resolveProjectSessionDir(baseDir, process.cwd()),
+      conversationId: id,
+    });
     await mkdir(dir, { recursive: true });
     const now = new Date().toISOString();
     const file = {

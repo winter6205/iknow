@@ -42,7 +42,7 @@ afterAll(async () => {
 function makeStore(): SessionStore {
   if (!baseDir) {
     baseDir = mkdtempSync(join(tmpdir(), "iknow-hub-hot-reload-"));
-    store = new SessionStore(baseDir);
+    store = new SessionStore(baseDir, process.cwd());
   }
   return store;
 }

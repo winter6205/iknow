@@ -58,7 +58,7 @@ async function makeStoreWithSession(
 ): Promise<SessionStore> {
   const storeDir = mkdtempSync(join(tmpdir(), "iknow-cli-wt-host-store-"));
   roots.push(storeDir);
-  const store = new SessionStore(storeDir);
+  const store = new SessionStore(storeDir, process.cwd());
   const now = new Date().toISOString();
   const file: SessionFileV1 = {
     schemaVersion: CURRENT_SCHEMA_VERSION,

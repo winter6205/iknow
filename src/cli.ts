@@ -66,6 +66,7 @@ import { resolveServeDataDir } from "./session-api/serve.js";
 import { createTaskWorktreeProvisioner } from "./session-api/worktree-rebind.js";
 import type { WorktreeIsolationHostOpts } from "./harness/isolation/worktree-gate.js";
 import { createWorktreeIsolationHost } from "./cli/worktree-host.js";
+import { deriveProjectIdentityRoot } from "./harness/session-roots.js";
 // 共享装配 (cli / serve / tui 三入口共用, SSOT): settings.verify → VerifyConfig。
 import { resolveVerifyConfig } from "./config/verify-config.js";
 
@@ -315,7 +316,12 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   // store 与 chat-session 的 checkpointStore 同池（resolveServeDataDir()）。
   // 开关读取在 build-engine 启动加载点（经 startupSettings）；OFF → 不包装。
   const worktreeProvisioner = createTaskWorktreeProvisioner({
-    store: new SessionStore(resolveServeDataDir()),
+    store: new SessionStore(
+      resolveServeDataDir(),
+      // T1 (session-folder-consolidation): store namespace keys by
+      // projectIdentityRoot, not cwd. mirror build-engine.ts:523.
+      deriveProjectIdentityRoot({ cwd: workspaceRoot })
+    ),
   });
   // worktree-host.ts 工厂装配（PR #869 name 透传修复点；可单测）。
   const worktreeIsolation: WorktreeIsolationHostOpts =

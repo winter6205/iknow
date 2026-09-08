@@ -53,6 +53,7 @@ export {
   type LedgerRewindTarget,
 } from "./rewind-targets.js";
 export {
+  resolveConversationDir,
   resolveProjectSessionDir,
   SessionStore,
   type SessionListEntry,

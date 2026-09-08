@@ -37,6 +37,7 @@ import { dirname, join } from "node:path";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
+import { sanitizeConversationSegment } from "../../session-roots.js";
 
 /** Allowed top-level keys — mirrors inputSchema. */
 const ALLOWED_KEYS = new Set(["mode", "item", "items"]);
@@ -453,17 +454,6 @@ export function resolveSessionTodoDir(opts: {
 }): string {
   const userHome = opts.userHome ?? homedir();
   return join(userHome, ".iknow", "todos", opts.surface);
-}
-
-/**
- * Path-hostile segment sanitizer for conversationId → directory segment.
- * Strictly `[A-Za-z0-9_-]` → everything else (including `.` and `/`) becomes
- * `_` — a `..`-style or separator-bearing id can never escape `todoDir`, not
- * even as a lookalike. conversationIds are UUIDs in practice, so dropping `.`
- * loses nothing.
- */
-function sanitizeConversationSegment(value: string): string {
-  return value.replace(/[^A-Za-z0-9_-]/g, "_");
 }
 
 /**
