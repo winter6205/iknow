@@ -315,6 +315,15 @@ describe("hard-wall format 子串退役 (SC2 / ADR-0068: format 不得子串匹�
     // 段内以独立词出现 format 命令（如多行脚本第二行）也拦。
     assert.equal(isDangerousCommand("echo a\nformat c:"), true);
   });
+
+  it("反斜杠逃逸 fo\\rmat → 词法闸仍命中（backslash strip 与子串扫描同源）", () => {
+    // review High 回归：词法闸必须吃与子串扫描同一 normalize 形态 ——
+    // bash 剥反斜杠后 `fo\rmat` 即 `format`，逃逸不能因闸间 normalize
+    // 不对称而漏过（`format` 已退出子串表，词法闸是唯一拦截面）。
+    assert.equal(isDangerousCommand("fo\\rmat C:"), true);
+    assert.equal(isDangerousCommand("fo\\rmat"), true);
+    assert.equal(isDangerousCommand("echo a\nfo\\rmat c:"), true);
+  });
 });
 
 describe("hard-wall deny reason 带 pattern id (SC3)", () => {

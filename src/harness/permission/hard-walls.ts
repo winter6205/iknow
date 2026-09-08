@@ -172,11 +172,13 @@ function splitForDangerousScan(command: string): string[] {
 }
 
 /**
- * Lexical (token-boundary) `format` command check for a single normalized
- * segment. Per ADR-0068, `format` is no longer substring-matched; instead the
- * hard-wall only fires when the segment's first token is exactly `format`
- * (with no leading shell noise), catching the `format C:` / `format c:` /
- * bare `format` host-disk-format case while letting `text-transform`,
+ * Lexical (token-boundary) `format` command check for a normalized segment
+ * (lowercase, backslash-stripped, whitespace-collapsed — the same form the
+ * substring scan consumes). Per ADR-0068, `format` is no longer
+ * substring-matched; instead the hard-wall only fires when the segment's
+ * first token is exactly `format` (with no leading shell noise), catching
+ * the `format C:` / `format c:` / bare `format` / backslash-escaped
+ * `fo\rmat` host-disk-format case while letting `text-transform`,
  * `git format-patch`, `printf format`, `formatting`, etc. through.
  */
 function isLexicalFormatCommand(segment: string): boolean {
@@ -223,7 +225,11 @@ export function findDangerousPattern(
       if (lower.includes(entry.pattern)) return entry;
     }
     // Lexical `format` command (SC2 / ADR-0068: no substring matching).
-    if (isLexicalFormatCommand(segment)) {
+    // Fed the SAME normalized segment as the substring scan: the backslash
+    // strip exists to defeat escape attempts (`fo\rmat` → `format` in bash),
+    // so the lexical gate must not be bypassed by the same escape
+    // (`isLexicalFormatCommand(raw)` saw firstToken `rmat` and let it through).
+    if (isLexicalFormatCommand(lower)) {
       return { id: "destructive-disk", pattern: "format" };
     }
     // Command-substitution / process substitution per-segment. Backticks
@@ -343,49 +349,54 @@ const NON_REDIRECT_METACHARS: readonly string[] = Object.freeze([
   ")",
 ]);
 
-function matchDangerousExecute(input: {
+/**
+ * Shared classification for the `hard-wall:execute-dangerous` match and its
+ * SC3 `reasonFor` renderer — a single seam so a future deny branch added
+ * here automatically flows into both the decision and the reason (no silent
+ * fallback to the static reason when the two drift apart).
+ */
+function classifyDangerousExecute(input: {
   tool: string;
   input: unknown;
-}): boolean {
-  if (input.tool !== "bash" && input.tool !== "execute") return false;
+}): string | null {
+  if (input.tool !== "bash" && input.tool !== "execute") return null;
   const command = (input.input as { command?: unknown } | null | undefined)
     ?.command;
-  if (typeof command !== "string") return false;
-  if (isDangerousCommand(command)) return true;
+  if (typeof command !== "string") return null;
+  const hit = findDangerousPattern(command);
+  if (hit !== null) {
+    return `dangerous command pattern matched (id=${hit.id}, pattern="${hit.pattern}")`;
+  }
   // Redirection exemption must NOT leak sensitive paths: `echo x > /etc/shadow`
   // passes the segment allowlist via redirect stripping but must still be denied.
-  if (commandContainsSensitivePath(command)) return true;
+  if (commandContainsSensitivePath(command)) {
+    return "dangerous command: sensitive path targeted by command";
+  }
   // Non-allowlisted commands are NOT hard-walled: they fall through to the
   // mode / category default (ask in default mode). The bwrap fence is the
   // execution-time boundary; a blanket allowlist deny made `pytest`, `cargo`,
   // `go test` etc. impossible to run even with user approval.
-  return false;
+  return null;
+}
+
+function matchDangerousExecute(input: {
+  tool: string;
+  input: unknown;
+}): boolean {
+  return classifyDangerousExecute(input) !== null;
 }
 
 /**
  * SC3 deny-reason input-specific override for `hard-wall:execute-dangerous`.
- * Returns a reason string that names the matched `DangerousPatternId` and
- * literal pattern (when the deny came from `findDangerousPattern`), or
- * flags the sensitive-path branch otherwise. Falls back to `undefined` so
- * the static `reason` on the spec is used (defensive: any future deny path
- * that does not provide a hit still gets a sensible default).
+ * Falls back to `undefined` so the static `reason` on the spec is used
+ * (defensive: a deny path that provides no classified reason still gets a
+ * sensible default).
  */
 function dangerousExecuteReasonFor(input: {
   tool: string;
   input: unknown;
 }): string | undefined {
-  if (input.tool !== "bash" && input.tool !== "execute") return undefined;
-  const command = (input.input as { command?: unknown } | null | undefined)
-    ?.command;
-  if (typeof command !== "string") return undefined;
-  const hit = findDangerousPattern(command);
-  if (hit !== null) {
-    return `dangerous command pattern matched (id=${hit.id}, pattern="${hit.pattern}")`;
-  }
-  if (commandContainsSensitivePath(command)) {
-    return "dangerous command: sensitive path targeted by command";
-  }
-  return undefined;
+  return classifyDangerousExecute(input) ?? undefined;
 }
 
 /**

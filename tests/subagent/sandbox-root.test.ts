@@ -31,7 +31,7 @@ import {
   chmodSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
@@ -220,6 +220,33 @@ describe("SubAgentManager sandboxRoot 收窄 — 越界失败 (typed error)", ()
       assert.equal(spawnCalls.length, 0);
     } finally {
       cleanup(parent);
+    }
+  });
+
+  it("symlinked 父根 + 父根下尚未存在的子路径（SC6）→ 放行，不假越界", () => {
+    // 不变式（review Medium2 回归）：ENOENT fallback 的 child 取「最近存在
+    // 祖先的 realpath + 未解析后缀」，与 parent 臂 realpath 形态对齐 ——
+    // 父根以 symlink 形态传入时（WSL /tmp → /tmpXXX 类、macOS /var →
+    // /private/var），纯词法 child 对 realpath(parent) 会假越界。
+    // spec 来源：SC6「父根下尚未存在的子路径不得报 outside」。
+    const real = freshTmpDir("sb-real-");
+    const link = join(freshTmpDir("sb-link-"), "parent-link");
+    symlinkSync(real, link);
+    try {
+      const { manager, spawnCalls } = makeHarness({
+        parentSandboxRoot: link, // manager 内部 realpath 成 real 形态
+      });
+      const ghost = join(link, "not-yet-created-dir");
+      assert.doesNotThrow(() => manager.spawn({ sandboxRoot: ghost }));
+      assert.equal(spawnCalls.length, 1);
+      // payload 携带 real 形态（ghost 的存在祖先 = link → realpath 成 real）
+      assert.equal(
+        spawnCalls[0]!.payload.sandboxRoot,
+        join(realpathSync(real), "not-yet-created-dir")
+      );
+    } finally {
+      cleanup(real);
+      cleanup(dirname(link));
     }
   });
 });
