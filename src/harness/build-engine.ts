@@ -57,6 +57,7 @@ import {
 import { composePreHooks, createUserHookRouter } from "./hooks/index.js";
 import {
   loadIknowSettings,
+  resolveWorktreeExclusive,
   resolveWorktreeOnMutate,
   type IknowSettings,
 } from "../config/settings.js";
@@ -390,6 +391,23 @@ export type BuiltEngine = EngineBundle & {
    */
   readonly isolationOn?: boolean;
   /**
+   * T2 / plans/worktree-exclusive-lock.md / ADR-0070 — enter-task-worktree
+   * 占用锁档判定结果（装配期一次性读取，`resolveWorktreeExclusive(settings)`，
+   * ADR-0037 §5 硬要求 9：开关只在启动加载点读一次，会话根改绑不重载）。
+   *
+   * 透传缝：session-api hub（T3 实施 bullet）在构造 `worktreeEnter` host
+   * closure 时读此值；true → closure 内部跑占用检查（typed `worktree_claimed`
+   * 拒绝），false → 完全跳过（行为与今日逐字节一致，spec SC2）。
+   *
+   * 该字段**没有**消费方在 T2 内使用（仅占位与透传）；缺席（注入 deps 形态）
+   * → T3 消费方按 OFF 处理，与旧 build-engine 默认形态一致。
+   *
+   * 注意：与 `isolationOn` 不同——`isolationOn` 仅在 host 提供了
+   * `worktreeIsolation` 缝时才为 true（gate 武装的前置），`worktreeExclusive`
+   * 是**纯设置**判定（不依赖 host 缝在场），OFF 默认 = 严格走今日 enter 路径。
+   */
+  readonly worktreeExclusive?: boolean;
+  /**
    * TUI live flags for /memory. Present when surface is `tui` and the memory
    * layer is on. The TUI mutates this box on Esc; the hook reads it per turn.
    */
@@ -558,6 +576,14 @@ export async function buildHarnessEngine(
   const isolationHost = opts.worktreeIsolation;
   const isolationEnabled =
     isolationHost !== undefined && resolveWorktreeOnMutate(settings);
+  // T2 / plans/worktree-exclusive-lock.md / ADR-0070:enter-task-worktree
+  // 占用锁开关的装配期解析 —— 与 `isolationEnabled` 同款 fail-closed 读取点
+  // （缺失 / 非 true → false）。**仅在这里读一次**（ADR-0037 §5 硬要求 9）：
+  // 会话根改绑（rebind）不触发 settings 重载，构造期冻结值贯穿本引擎寿命。
+  // OFF 档 → `worktreeExclusiveEnabled === false` → T3 在 session-api
+  // `enterWorktree` 装配 closure 时跳过占用检查，`enter-task-worktree` 行
+  // 为与今日逐字节一致（spec SC2 / ADR-0070「OFF 档零回归」钉死）。
+  const worktreeExclusiveEnabled = resolveWorktreeExclusive(settings);
   // #251 LSP 联动缝:edit_file 写盘成功后由装配层注入 lspNotifier.invalidate
   // 作为 registry 的 onEdit 回调(notifier 内部 fire-and-forget + 失败降级,
   // 详见 src/harness/lsp/notifier.ts)。SSOT:LspCtx.directory 必须等于
@@ -1637,6 +1663,13 @@ export async function buildHarnessEngine(
     // currentRoot)。单一来源 = `isolationEnabled`（buildHarnessEngine 启动
     // 加载点一次性读取），与门禁武装同源（决策 1 钉死）。
     isolationOn: isolationEnabled,
+    // T2 (plans/worktree-exclusive-lock.md / ADR-0070): enter 占用锁档
+    // 透传 —— session-api hub（T3 实施 bullet）构造 `worktreeEnter` host
+    // closure 时读此值决定是否跑占用检查；T2 不读、不消费、不修改 host 缝
+    // （`worktreeExclusiveEnabled` 仅作 settings 一次性 resolve 的镜像）。
+    // 与 `isolationOn` 不同：不依赖 `worktreeIsolation` host 缝在场；
+    // 严格反映 settings 解析结果（默认 OFF / 缺失 / 非 true 一律 false）。
+    worktreeExclusive: worktreeExclusiveEnabled,
     // D-α T3:host 每次 run() 前调 beginRound() 拍快照(chat / hub 两处 run
     // 入口)。缺席 = 本入口没接 overlay。
     ...(graphAssembly ? { graphAssembly } : {}),
