@@ -971,16 +971,16 @@ export class SessionHub {
     conversationId?: string;
     root: string;
     targetConversationId: string;
-  }): Promise<string> {
-    const enteredRoot = await this.worktreeProvisioner.enter(ctx);
+  }): Promise<{ path: string; receipt: string }> {
+    const entered = await this.worktreeProvisioner.enter(ctx);
     if (ctx.conversationId !== undefined) {
       this.markWorktreeRootDirty({
         conversationId: ctx.conversationId,
         currentRoot: ctx.root,
-        provisionedRoot: enteredRoot,
+        provisionedRoot: entered.path,
       });
     }
-    return enteredRoot;
+    return entered;
   }
 
   /**

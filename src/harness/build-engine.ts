@@ -719,7 +719,14 @@ export async function buildHarnessEngine(
     ? withLiveTaskRootWrite(isolationHost.provision, liveTaskRoot)
     : undefined;
   const wrappedEnter = isolationHost?.worktreeEnter
-    ? withLiveTaskRootWrite(isolationHost.worktreeEnter, liveTaskRoot)
+    ? withLiveTaskRootWrite(
+        isolationHost.worktreeEnter,
+        liveTaskRoot,
+        // T9 (write-situation-disclosure SC10): the enter seam resolves to
+        // `{ path, receipt }` — the cell keeps receiving the root; the
+        // receipt flows verbatim to the enter-task-worktree tool.
+        (resolved) => resolved.path
+      )
     : undefined;
   const wrappedExit = isolationHost?.worktreeExit
     ? withLiveTaskRootWrite(isolationHost.worktreeExit, liveTaskRoot)

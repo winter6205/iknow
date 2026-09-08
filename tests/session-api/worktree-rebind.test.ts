@@ -14,7 +14,13 @@
  */
 import { afterAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -525,7 +531,7 @@ describe("createTaskWorktreeProvisioner", () => {
       root: repo,
       targetConversationId: "fix-648",
     });
-    expect(entered).toBe(first);
+    expect(entered.path).toBe(first);
     expect((await store.load("conv-c")).workspaceRoot).toBe(first);
     expect(second).toBe(join(repo, ".iknow", "worktrees", "review"));
 
@@ -775,5 +781,78 @@ describe("createTaskWorktreeProvisioner", () => {
       "ROOT_TOKEN=secret\n"
     );
     expect(existsSync(join(worktree, "sub", ".env"))).toBe(false);
+  });
+
+  // write-situation-disclosure T9 / SC10 — the enter success receipt tells the
+  // model WHO created the tree it just entered (sidecar = disclosure, never
+  // authorization; ADR-0069). Constant-on: the receipt path reads no setting
+  // at all (specs/worktree-exclusive-lock.md SC10 keeps the two features
+  // independent). Read failure degrades to sentence omission — never a throw,
+  // never a placeholder (typed catch: missing/unreadable sidecar is a legal
+  // state for legacy trees, not a fault).
+  describe("enter success receipt discloses the tree creator (T9, constant-on)", () => {
+    it("entering a foreign tree appends the creator's conversation id from the sidecar and keeps the path as the rebind anchor", async () => {
+      const repo = makeGitRepo();
+      const { store } = await makeStoreWithSessions(repo, [
+        "conv-owner",
+        "conv-guest",
+      ]);
+      const prov = createTaskWorktreeProvisioner({ store });
+      const tree = await prov.provision({
+        conversationId: "conv-owner",
+        root: repo,
+        name: "fix-648",
+      });
+
+      const entered = await prov.enter({
+        conversationId: "conv-guest",
+        root: repo,
+        targetConversationId: "fix-648",
+      });
+
+      expect(entered.path).toBe(tree);
+      expect(entered.receipt).toContain(`entered task worktree: ${tree}`);
+      expect(entered.receipt).toContain("conv-owner");
+      expect((await store.load("conv-guest")).workspaceRoot).toBe(tree);
+    });
+
+    it("omits the creator sentence when the sidecar cannot be read (legacy tree) — enter still succeeds", async () => {
+      const repo = makeGitRepo();
+      const { store } = await makeStoreWithSessions(repo, ["conv-guest"]);
+      const prov = createTaskWorktreeProvisioner({ store });
+      // Legacy UUID-only leaf: pre-sidecar naming, so the owner is recovered
+      // from the leaf — still disclosed via the historical ownership anchor.
+      // For a TRUE no-ownership tree, strip the leaf-derived owner too: a
+      // foreign label-only tree whose sidecar file was removed must degrade
+      // to sentence omission, not to a placeholder or a crash.
+      const legacyTree = join(repo, ".iknow", "worktrees", "orphan-tree");
+      mkdirSync(join(repo, ".iknow", "worktrees"), { recursive: true });
+      await createTaskWorktree({
+        repoRoot: repo,
+        worktreePath: legacyTree,
+        branch: "iknow/task/orphan-tree",
+        conversationId: "conv-owner",
+      });
+      // Simulate an unreadable owner record: the sidecar's gitdir pointer
+      // resolves, but the sidecar file itself is removed afterwards.
+      const gitdirPointer = readFileSync(join(legacyTree, ".git"), "utf8");
+      const gitdir = /^gitdir:\s*(.+)$/m.exec(gitdirPointer)?.[1]?.trim();
+      expect(gitdir).toBeDefined();
+      rmSync(join(gitdir!, "iknow-conversation-id"));
+
+      const entered = await prov.enter({
+        conversationId: "conv-guest",
+        root: repo,
+        targetConversationId: "orphan-tree",
+      });
+
+      expect(entered.path).toBe(legacyTree);
+      // Enter itself is unaffected — success path stays success.
+      expect((await store.load("conv-guest")).workspaceRoot).toBe(legacyTree);
+      // The ownership sentence is absent; the historical UUID-derived owner
+      // (the leaf has no `--<id>` suffix either) contributes nothing.
+      expect(entered.receipt).toContain(`entered task worktree: ${legacyTree}`);
+      expect(entered.receipt).not.toContain("conv-owner");
+    });
   });
 });
