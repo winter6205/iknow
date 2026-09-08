@@ -15,12 +15,13 @@
 
 - `security-guardrails.md` — 安全护栏（权限三层 · 沙箱 · 中断/超时）
 - `mutate-write-contract.md` — 可写合同与 hard-wall 层退休（ADR-0068；耐久写 = `taskRoot`；plan: `plans/mutate-write-contract.md`）
-- `trace-service.md` — trace 观测（JSONL + 查询 API · A-scope）
+- `trace-service.md` — trace 观测（JSONL + 查询 API · A-scope）；落盘锚点与 messages 存储形态 **amended by** `session-folder-consolidation.md`（ADR-0071 / ADR-0036 同日 Amendment）
 - `query-trace-tool-results.md` — `query_trace` 从 llm_call.messages 投影 tool_result（不写 tool_call.result）；plan: `plans/query-trace-tool-results.md`
-- `trace-mcp-server.md` — stdio MCP server 暴露 trace 读侧三面（外部编码 agent 第三条读侧动线；#803）；v1.0 单工具 `query_trace`（plan: `plans/trace-mcp-server.md`）→ v1.1 按轴拆为 `list_sessions` / `query_trace` / `get_record`（plan: `plans/trace-mcp-read-side-split.md`）；承接 `query-trace-tool-results` 对 MCP 的 Out of scope
+- `trace-mcp-server.md` — stdio MCP server 暴露 trace 读侧三面（外部编码 agent 第三条读侧动线；#803）；v1.0 单工具 `query_trace`（plan: `plans/trace-mcp-server.md`）→ v1.1 按轴拆为 `list_sessions` / `query_trace` / `get_record`（plan: `plans/trace-mcp-read-side-split.md`）；承接 `query-trace-tool-results` 对 MCP 的 Out of scope；三工具寻址从平铺改两级树 + `query_trace` 补 content 解引用 **amended by** `session-folder-consolidation.md`
 - `120-session-persistence.md` — 会话持久化（schema v1→v2 + `~/.iknow` 跨进程池）；Q1「不迁 JSONL」已被 `session-jsonl-resume.md` / ADR-0027 覆盖
 - `checkpoint-rewind.md` — 检查点回退 UX（picker / 双 Esc）；截断落盘语义被 `session-jsonl-resume.md` 覆盖
-- `session-jsonl-resume.md` — 会话 JSONL 账本（边写、process 补洞、rewind 留分支）
+- `session-jsonl-resume.md` — 会话 JSONL 账本（边写、process 补洞、rewind 留分支）；落盘位置 **amended by** `session-folder-consolidation.md`（ADR-0027 同日 Amendment）
+- `session-folder-consolidation.md` — 会话文件夹归并（五锚点 → 一，分组键 `projectIdentityRoot`、叶子 conversationId）+ trace 正文 content 级内容寻址（blob 从 opt-in → 唯一模式，348MB → 约 62MB）+ traceserver 三工具走两级树（ADR-0071；**amends** ADR-0036 去重粒度与 opt-in、ADR-0035 位置、ADR-0003 greppability、ADR-0027 位置；plan: `plans/session-folder-consolidation.md`；**不兼容旧存量**）
 - `continue-pending.md` — 截断后续跑（`/continue` + CLI/TUI pending NL；Web 仅 slash+POST；同一 conversationId；非 ACI；#686 / map #270 / Resolution #277）
 - `672-fault-recovery.md` — FaultClass + ModelAdapter 传输重试 + 本 run 工具环检测（`fused`）；map #672；ADR-0029
 - `545-d-alpha-graph-mode.md` — D-α V1 graph mode overlay + `run_graph`（#545 CLOSED / ADR-0030；草稿 PR #698–#707 对照可摘，不合整链）

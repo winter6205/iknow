@@ -50,6 +50,19 @@ GH issue #64 (winter6205/iknow) — spawned from #51 Session API migration. When
 - (−) `recordLlmCall` failure produces `parent_llm_call_id: null` orphan records in JSONL. Intentional (decision 14), but the dev must learn to recognize the pattern as "trace write failed" not "business semantics".
 - 回退 = delete `src/harness/trace/`, remove the optional `trace` field on `LoopEngineDeps`, remove `--trace-out` flag, remove `trace.jsonl` from `.gitignore`. Low cost; the module is opt-in by default but additive.
 
+## Amendment 2026-09-08（ADR-0071）
+
+**「JSONL the dev can grep」在 messages 正文维度收窄。** ADR-0071 把 blob 内容寻址从 opt-in 改为唯一模式，`llm_call.messages[].content` 从此是 `{sha, bytes}` 引用，正文在会话文件夹内的 `blobs/<sha>`。**收窄只及这一个维度**：事件行本身、`tool_call` 参数、`status`、`error`、`turn` 决策、`verification` 判定全部仍内联可 grep。按 sha 取回正文的读法有两条既有面：`get_record`（字符窗口分页）与 `query_trace`（投影 + preview）。
+
+**D13 / D14 原样继承，不 amend。** 这条刻意写明，因为 ADR-0071 Decision 5「删故障回退」极易被误读成「让 trace 向调用方抛错」：
+
+- **D13**（`TraceService.recordXxx` MUST NOT throw，接口 `@throws never`，经 `safeTrace` 集中，loop-engine 埋点只 `await safeTrace(...)`）**不变**。blob 写入失败仍走内层 IO 抛出 → `safeTrace` / recordFailure warn-once 吞掉 → 返回 `undefined`。
+- **D14**（`recordLlmCall` 返回 `undefined` 时 `recordToolCall` 仍被调用，落 `parent_llm_call_id: null`）**不变**。
+
+被删掉的只是**存储形态上的第二条路**：不再有「blob 写不进去就退回写内联全量行」这个分支。异常契约与调用方可观察行为一字未改。
+
+**D10 scope 的两面敏感度分化。** content 面（`llm_call.messages` 正文）从此以 `blobs/` 可写为前置；D10 排除范围经 ADR-0035 收窄后剩下的**生命周期面**（`subagent_spawn` / `subagent_state_change` / `subagent_stop`）不含 messages 正文，`toBlobReferences` 对其从不触发，故不受该前置影响。详见 ADR-0035 的同日 Amendment。
+
 **Evidence pointers**:
 
 - GH issue #64 (winter6205/iknow) — origin, intent, 5 settled decisions (2026-07-29), T1-T5 plan, Non-goals.

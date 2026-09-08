@@ -20,6 +20,15 @@ _Avoid_: 把 `SessionFileV1.messages[]` 当第二份权威；把 harness trace J
 **rewind head**: 落盘的当前头指针（transcript 某条事件 id）。rewind 只改这个指针，不截断 JSONL。进程内工作副本跟它走。
 _Avoid_: 只在内存里 fork；用 `messagesCount` 当下标 SSOT
 
+**会话文件夹（session folder）**: harness 拥有的按会话记录面——`~/.iknow/projects/<项目 slug>/<conversationId>/`，分组键 = **projectIdentityRoot**（跨 session worktree rebind 不变），叶子 = conversationId 原文；装 session transcript / todos / trace / **内容寻址正文池** / subagents。与「写根 = 模型工作面」对立：这里的东西不是模型交付物，harness 也不把它读进 prompt。ADR-0071。
+_Avoid_: 把模型交付物放进来；当第五个根角色（稳定根清单不活化）；用 session `title` / `goal` / worktree label 当文件夹名；把带锁活状态（后台任务登记表 / worktrees 锚点）搬进来
+
+**模型实际所见（what the model saw）**: trace `llm_call.messages` 的语义——那一次调用真正送进模型的累计消息集，含 `<agent_status>` 尾部注入、worker prior messages、compaction 后的摘要视图与 mask 形态。与 **session transcript** **故意不相等**（实测同一会话 `agent_status` 在 trace 14 次 / transcript 11 次），故 trace 不得引用 transcript 来重建它：从增量事件流重算累计数组是**重算不是查表**，会漂移。「所见即所填」不变量的 SSOT 是 ADR-0036（它据此否决 delta/off 写侧模式），不是 ADR-0014。ADR-0036 / ADR-0071。
+_Avoid_: 用 transcript 当 trace 正文源；把两者当同一份记录的两种投影；为省空间截断它；把这个不变量溯源到 ADR-0014（那是 subagent spawn 语义，ADR-0036 误引）
+
+**内容寻址正文池（blobs）**: 会话文件夹内的 `blobs/<sha256>`——正文 mask 后另存**一份**、定长 sha256 当文件名、`flag:"wx"` write-if-missing，读侧按 sha 取回原文。哈希在这里是**命名用法不是摘要用法**：原文一字不少地存着，没有压缩也没有丢失；寿命 = 会话文件夹，删文件夹即回收（承接 ADR-0036 悬置未细化的 rotation orphans 规则）。ADR-0036 / ADR-0071。
+_Avoid_: 当全局共享池（那要自造引用计数 / GC）；当压缩或摘要；让 trace 引用 transcript 正文来代替它
+
 **continue_pending**: 截断后在**同一会话**把未完成的工具环接着跑完——先对人停住；用户再用 `/continue` 或（有 pending 时）续跑意图自然语言触发；不追加新任务 user message，先 sanitize 悬空 `tool_use`，再对已有 append-only messages 调用 `run`（#277）。匹配词表/策略属 spec；**不是** ACI 工具。
 _Avoid_: continue 工具；把续跑口令一律当普通新 user 任务句；新建 session 挂旧历史；无确认自动续跑
 
