@@ -8,7 +8,7 @@
  * 在 ./spawn.ts,T6 接线时由 build-engine 注入。
  */
 import { randomUUID } from "node:crypto";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import {
@@ -29,6 +29,7 @@ import type {
   SubagentState,
 } from "../trace/index.js";
 import { safeTrace } from "../trace/safe-trace.js";
+import { createJsonlTraceService } from "../trace/jsonl.js";
 import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../config/settings.js";
 import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
 import { writeSituation } from "../isolation/write-situation.js";
@@ -415,6 +416,27 @@ export function createSubAgentManager(opts: {
    * 走默认行为）。
    */
   readonly isolationOn?: boolean;
+  /**
+   * T5 (plans/session-folder-consolidation.md / SC8 + ADR-0071 Decision 1):
+   * 子代理 per-agent trace + meta 归属目录 = `<父会话文件夹>/subagents/`。
+   * 在场时:每次 spawn 懒建一个 file-mode JsonlTraceService 实例
+   * (`<subagentsDir>/agent-<taskId>.jsonl`, conversationId 钉 taskId);
+   * 同一 taskId 的三类 lifecycle 记录(subagent_spawn / _state_change / _stop)
+   * 全落该文件(父进程写, ADR-0035「无条件落盘」生命周期面保证不降级)。
+   * 首次 spawn 还写一次 `.meta.json`(SC8 acceptance: 至少
+   * `{agentType, toolUseId, spawnDepth}`,Postel 缺席则省略)。
+   * 缺席 → 走 NoopTraceService(同既有 build-engine 缺省形态, byte-stable)。
+   */
+  readonly subagentsDir?: string;
+  /**
+   * T5:可选 override — 用外部注入的 TraceService 工厂(每个 taskId 一份)
+   * 取代默认 `createJsonlTraceService` 文件实例。仅供测试/特殊注入;
+   * 生产路径走 file mode 默认。
+   */
+  readonly traceFactory?: (
+    filePath: string,
+    conversationId: string
+  ) => TraceService;
 }): SubAgentManager {
   const tasks = new Map<string, Task>();
   /** 所有未决 waitFor 的轮询句柄(非终态,shutdown 必须清,防进程悬挂)。 */
@@ -422,8 +444,81 @@ export function createSubAgentManager(opts: {
   /** 未决 waitFor 的 settleReject 引用:shutdown 时主动拒绝,SC16 不悬挂。 */
   const waitRejecters = new Set<(reason: unknown) => void>();
   const terminalMailbox = createSubAgentMailbox();
-  /** #358 T4: trace 句柄 closure 捕获, spawn/state_change/stop 三处共用。 */
-  const trace = opts.trace;
+  /**
+   * T5: 每个 task 独立持有的 per-agent trace 实例 + meta 写盘闭包。
+   * `opts.subagentsDir` 缺席时退化为 NoopTraceService(同 build-engine
+   * 缺省形态, byte-stable);在 spawn 入口懒建,任务结束后 GC 实例即可
+   * (写盘 trace 由操作系统 page cache / fsync 兜底,manager 不持有
+   * 长生命周期文件句柄)。
+   */
+  type PerAgentTrace = {
+    readonly trace: TraceService;
+    readonly filePath: string;
+  };
+  const perAgentTraces = new Map<string, PerAgentTrace>();
+  const noopTrace: TraceService | null = opts.subagentsDir
+    ? null
+    : (opts.trace ?? null);
+  /**
+   * 工厂默认实现:file mode JsonlTraceService,锚
+   * `<subagentsDir>/agent-<taskId>.jsonl`,conversationId 钉 taskId。
+   * 测试可注入 `opts.traceFactory` 覆盖。
+   */
+  const defaultTraceFactory = (
+    filePath: string,
+    conversationId: string
+  ): TraceService =>
+    createJsonlTraceService({ traceFilePath: filePath, conversationId });
+  const traceFactory = opts.traceFactory ?? defaultTraceFactory;
+  /** 解析 task → per-agent trace(懒建 + 复用, 同一 task 不开第二份)。 */
+  function resolvePerAgentTrace(taskId: string): TraceService | null {
+    if (!opts.subagentsDir) return noopTrace;
+    const cached = perAgentTraces.get(taskId);
+    if (cached !== undefined) return cached.trace;
+    const filePath = join(opts.subagentsDir, `agent-${taskId}.jsonl`);
+    mkdirSync(opts.subagentsDir, { recursive: true });
+    const traceInstance = traceFactory(filePath, taskId);
+    perAgentTraces.set(taskId, { trace: traceInstance, filePath });
+    return traceInstance;
+  }
+  /**
+   * SC8: per-task `.meta.json` 一次性写盘 —— 至少含
+   * `{agentType, toolUseId, spawnDepth}`,Postel 缺席字段省略。
+   * `agentType` 取 `def.role`(spawn_subagent → catalog id; judge → "judge";
+   * 缺省 / 未知 / 旧 wire → 字段省略)。
+   * 失败时 console.warn 一次(同 recordXxx warn-once 语义),不阻塞 spawn。
+   */
+  function writeMetaOnce(taskId: string, def: SubAgentDefinition): void {
+    if (!opts.subagentsDir) return;
+    const metaPath = join(opts.subagentsDir, `agent-${taskId}.meta.json`);
+    if (existsSync(metaPath)) return;
+    const meta: Record<string, unknown> = {};
+    if (typeof def.role === "string" && def.role.length > 0) {
+      meta.agentType = def.role;
+    }
+    if (typeof def.toolUseId === "string" && def.toolUseId.length > 0) {
+      meta.toolUseId = def.toolUseId;
+    }
+    if (typeof def.spawnDepth === "number") {
+      meta.spawnDepth = def.spawnDepth;
+    }
+    try {
+      // SC8: 子目录可能在 lazy resolvePerAgentTrace 之前就写 meta(此处没
+      // 经过 trace 路径);显式 mkdirSync 兜底 — resolvePerAgentTrace 内
+      // 的 mkdirSync 是 trace 写盘的 idempotent 保护,不替 meta 兜底。
+      mkdirSync(opts.subagentsDir, { recursive: true });
+      writeFileSync(metaPath, JSON.stringify(meta) + "\n");
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn(`[subagent] meta write skipped for ${taskId}: ${detail}`);
+    }
+  }
+  /**
+   * 兼容既有 `opts.trace` 注入(测试 seam):manager 直造场景若传 trace 但
+   * 没传 subagentsDir,沿用 #358 T4 形态——所有 task 共用单实例 trace
+   * (走 `subagent.jsonl` 目录模式聚合落盘),行为同改造前。
+   * 显式传了 subagentsDir 后,opts.trace 失效(per-agent 形态优先)。
+   */
   const maxConcurrentWorkers =
     typeof opts.maxConcurrentWorkers === "number" &&
     Number.isFinite(opts.maxConcurrentWorkers) &&
@@ -437,6 +532,9 @@ export function createSubAgentManager(opts: {
    * Postel: reason 仅 toState === "failed" 时填 (spec Code Style 121)。
    * 该函数: (1) 写入 task.state (2) 同步发 subagent_state_change 埋点 (3) 不 throw。
    * safeTrace 包裹: trace 写盘失败不阻塞 manager 业务。
+   * T5: trace per task —— per-agent 形态下按 taskId 取独立 trace 实例
+   * (`<subagentsDir>/agent-<taskId>.jsonl`);opts.subagentsDir 缺席时
+   * 退回到 `opts.trace` 兼容形态(#358 T4 既有聚合单实例)。
    */
   function emitStateChange(
     task: Task,
@@ -456,9 +554,10 @@ export function createSubAgentManager(opts: {
     // state_change 没有等价 flag, 靠 prev === toState 判定)。
     if (fromState === toState) return;
     task.state = toState;
-    if (!trace) return;
+    const taskTrace = resolvePerAgentTrace(task.id);
+    if (!taskTrace) return;
     void safeTrace(() =>
-      trace.recordSubagentStateChange({
+      taskTrace.recordSubagentStateChange({
         id: task.id,
         taskId: task.id,
         ...parentTurnFields(task.def),
@@ -527,9 +626,10 @@ export function createSubAgentManager(opts: {
       0,
       Date.parse(endedAt) - Date.parse(task.startedAt)
     );
-    if (!trace) return;
+    const taskTrace = resolvePerAgentTrace(task.id);
+    if (!taskTrace) return;
     void safeTrace(() =>
-      trace.recordSubagentStop({
+      taskTrace.recordSubagentStop({
         id: task.id,
         taskId: task.id,
         ...parentTurnFields(task.def),
@@ -582,10 +682,15 @@ export function createSubAgentManager(opts: {
       reason: "crashed",
       error,
     });
+    // T5 (plans/session-folder-consolidation.md / ADR-0035 同日 Amendment):
+    // stderr / subagentDiagnosticsDir 跟随 `<父会话文件夹>/subagents/` —
+    // 显式 diagnosticsDir 缺省 → 退化到 subagentsDir。subagentsDir 也缺
+    // → 不写 stderr pointer (与既有行为 byte-stable)。
+    const effectiveDiagnosticsDir = opts.diagnosticsDir ?? opts.subagentsDir;
     const stderrDiagnostics =
-      opts.diagnosticsDir !== undefined
+      effectiveDiagnosticsDir !== undefined
         ? persistStderrDiagnostics({
-            diagnosticsDir: opts.diagnosticsDir,
+            diagnosticsDir: effectiveDiagnosticsDir,
             taskId: task.id,
             stderr: opts2.stderr(),
             mask,
@@ -626,9 +731,13 @@ export function createSubAgentManager(opts: {
     // 拒绝吞成 task failed)。也不在 tasks.set 之后 —— 提前抛出保证 map 无残留。
     // buildWorkerPayload 单点校验所有 spawn 路径(模型工具 + 判官 + 将来角色),
     // 校验失败同步抛 SubAgentSandboxRootError(handler 转 ToolExecutionError)。
-    const payload = buildWorkerPayload(def);
-
+    //
+    // T5 (plans/session-folder-consolidation.md / SC8 + L2): buildWorkerPayload
+    // 现在接收 taskId —— 父侧 manager 已经锁定 taskId 才能算出对应的 traceFilePath
+    // (per-agent 形态: `<父会话文件夹>/subagents/agent-<taskId>.jsonl`),写到
+    // envelope 让 worker file-mode 落该路径,代替 L2 假 scope `randomUUID()`(已退役)。
     const id = randomUUID();
+    const payload = buildWorkerPayload(def, id);
     const startedAt = new Date().toISOString();
     const task: Task = {
       id,
@@ -641,6 +750,10 @@ export function createSubAgentManager(opts: {
     tasks.set(id, task);
 
     let child: ChildProcess;
+    // T5: meta.json 写盘一次(成功 / 失败两条路径都尝试)—— 在 spawn 工厂
+    // 调用之前写,这样失败路径也有 meta;生产路径 spawn 工厂 spawn
+    // child 也耗时,meta 在那之前落盘对观测侧更友好。
+    writeMetaOnce(id, def);
     try {
       child = opts.spawn(def, id, payload);
     } catch (err) {
@@ -653,9 +766,12 @@ export function createSubAgentManager(opts: {
       };
       // #358 T4: spawn 仍落 subagent_spawn (失败路径也记录尝试);
       // 紧接 emitStateChange(failed) + emitStop (single-emit lifecycle)。
-      if (trace) {
+      // T5: trace per taskId (per-agent 形态);subagentsDir 缺席走
+      // opts.trace 兼容形态。
+      const taskTrace = resolvePerAgentTrace(task.id);
+      if (taskTrace) {
         void safeTrace(() =>
-          trace.recordSubagentSpawn({
+          taskTrace.recordSubagentSpawn({
             id: task.id,
             taskId: task.id,
             ...parentTurnFields(def),
@@ -692,10 +808,12 @@ export function createSubAgentManager(opts: {
 
     // #358 T4: subagent_spawn 在 child 成功 launch 后 emit (task.state 此时还是
     // "starting",下方 emitStateChange("running") 联动跑 starting→running 迁移)。
-    if (trace) {
+    // T5: trace per taskId (per-agent 形态);subagentsDir 缺席走 opts.trace 兼容。
+    const taskTrace = resolvePerAgentTrace(task.id);
+    if (taskTrace) {
       const taskPreviewSource = truncateTaskPreview(def, 120);
       void safeTrace(() =>
-        trace.recordSubagentSpawn({
+        taskTrace.recordSubagentSpawn({
           id: task.id,
           taskId: task.id,
           ...parentTurnFields(def),
@@ -932,7 +1050,10 @@ export function createSubAgentManager(opts: {
     }
   }
 
-  function buildWorkerPayload(def: SubAgentDefinition): WorkerEnvelope {
+  function buildWorkerPayload(
+    def: SubAgentDefinition,
+    taskId: string
+  ): WorkerEnvelope {
     // #357 T1: 所有 spawn 路径必经此单点校验。语义:
     //   1. parentSandboxRoot 入口读一次:
     //      - sandboxRootCell 在场 (T8 D6) → cell.read() (活根)
@@ -1040,6 +1161,22 @@ export function createSubAgentManager(opts: {
             writeSituation: writeSituation(opts.isolationOn, resolved),
           }
         : { writeSituation: writeSituation(false, resolved) }),
+      // T5 (plans/session-folder-consolidation.md / SC8 + L2): 父 manager
+      // 已经替这个 taskId 建好 `<父会话文件夹>/subagents/agent-<taskId>.jsonl`,
+      // 把 traceFilePath + taskId 经 envelope 透传给 worker —— worker 直接
+      // file-mode 落该路径 + conversationId=taskId, 代替 L2 假 scope `randomUUID()`
+      // (已退役,per-agent 形态优先)。
+      // opts.subagentsDir 缺省 → 不写这两个加性字段 → worker 退化到既有
+      // IKNOW_TRACE_OUT / defaultTraceDir 形态 (legacy envelope byte-stable)。
+      // conditional 渲染走的是 envelope 的 interface 类型(TS readonly),
+      // 不是 schema 校验;严格 ajv 校验由 envelope.ts WORKER_SCHEMA.properties
+      // 显式声明覆盖(同 `writeSituation` 形态)。
+      ...(opts.subagentsDir !== undefined
+        ? {
+            taskId,
+            traceFilePath: join(opts.subagentsDir, `agent-${taskId}.jsonl`),
+          }
+        : {}),
     };
   }
 

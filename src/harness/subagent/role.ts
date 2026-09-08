@@ -71,6 +71,22 @@ export interface SubAgentDefinition {
    * WorkerEnvelope as an independent field; never concatenated into `task`.
    */
   readonly evidenceContext?: object;
+  /**
+   * T5 (plans/session-folder-consolidation.md / SC8 .meta.json):
+   * 派出这个子代理的那一次 tool_use 的 id (= spawn_subagent 的 tool_use_id)。
+   * 透传到 per-agent `.meta.json` 的 `toolUseId` 字段(spawn 时落盘一次),
+   * 用于把子代理记录反查回父 loop 的那一次工具调用;缺席 → meta 键省略(Postel)。
+   * Parent-only:不复制到 WorkerEnvelope(子进程不需要、也不该知道)。
+   */
+  readonly toolUseId?: string;
+  /**
+   * T5 (plans/session-folder-consolidation.md / SC8 .meta.json):
+   * 子代理嵌套深度。1 = 父代理直接派出的子代理;2+ = 子代理内部再次 spawn
+   * 出来的孙代理(SC9 v1 嵌套禁派发,当前永远 = 1,留 seam 给将来)。
+   * 缺席 → meta 键省略(Postel)。
+   * Parent-only:不复制到 WorkerEnvelope。
+   */
+  readonly spawnDepth?: number;
 }
 
 /** 默认 deny-list: 子代理禁止再派生子代理 (防递归爆炸)。frozen。 */

@@ -65,6 +65,26 @@ export interface WorkerEnvelope {
    * 在 WORKER_SCHEMA.properties 显式声明）。
    */
   readonly writeSituation?: WriteSituation;
+  /**
+   * T5 (plans/session-folder-consolidation.md / SC8 + L2): 该 worker 的
+   * taskId (parent spawn 时 manager.randomUUID() 锁定)。traceFilePath 配
+   * 对使用 —— worker file-mode 落该路径 + conversationId=taskId,代替
+   * L2 假 scope `randomUUID()`(已退役)。缺席 → 走 IKNOW_TRACE_OUT 退路。
+   * Wire additive + optional —— 与 `role` 同形态;旧 envelope / 跨版本 resume
+   * 仍 ajv 接受,worker 不退化(`additionalProperties:false` 下需在
+   * WORKER_SCHEMA.properties 显式声明)。
+   */
+  readonly taskId?: string;
+  /**
+   * T5 (plans/session-folder-consolidation.md / SC8 + L2): worker 进程内
+   * JsonlTraceService 的 file mode 锚点,由 spawn 期 `manager.buildWorkerPayload`
+   * 算好后透传(父进程已经替这个 taskId 建好 `<父会话文件夹>/subagents/agent-<taskId>.jsonl`)。
+   * worker 拿这个文件路径 + 对应 taskId 直接创 file-mode JsonlTraceService,
+   * 不再走 `randomUUID()` L2 假 scope(已退役,per-agent 形态优先)。
+   * Wire additive + optional —— 与 `role` 同形态;旧 envelope / 跨版本 resume →
+   * 缺席,worker 退化到既有 IKNOW_TRACE_OUT / defaultTraceDir 形态(byte-stable)。
+   */
+  readonly traceFilePath?: string;
 }
 
 /** 子→父 result 信封。schema 冻结形态见 PARENT_SCHEMA。 */
@@ -133,6 +153,14 @@ export const WORKER_SCHEMA: Record<string, unknown> = {
       type: "string",
       enum: ["writable_main", "writable_tree", "no_writable_root"],
     },
+    // T5: taskId —— 与 role 同形态（wire additive, optional）。
+    // 不锁格式（uuid 形态由调用方决定，无 SSOT 枚举）。
+    // 旧 envelope / 跨版本 resume → 缺省 → worker 走 IKNOW_TRACE_OUT 退路。
+    taskId: { type: "string" },
+    // T5: traceFilePath —— 与 role 同形态（wire additive, optional）。
+    // 字符串路径，不锁 enum（路径形态由调用方决定，无 SSOT 枚举）。
+    // 旧 envelope / 跨版本 resume → 缺省 → worker 走 IKNOW_TRACE_OUT 退路。
+    traceFilePath: { type: "string" },
   },
   required: ["task", "sandboxRoot"],
   additionalProperties: false,

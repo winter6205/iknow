@@ -1,16 +1,18 @@
 /**
- * #358 review-fix (Fix 1): build-engine 的 subagentTrace 注入缝 ——
- * SC1 生产装配面 (cli.ts chat path + hub.ts ensureDeps)。
+ * T5 (plans/session-folder-consolidation.md / SC8 + L2):
+ * build-engine 的 subagentsDir 注入缝 —— SC1 生产装配面
+ * (cli.ts chat path + hub.ts ensureDeps)。
  *
- * 契约（plans/358 §SC1 + spec AC）：
- *   1. buildHarnessEngine({ subagentTrace }) → 内置 createSubAgentManager
- *      收到该 trace；通过 fake spawn 工厂触发 spawn 后, 真实 JSONL 含
- *      subagent_spawn / subagent_state_change / subagent_stop 三类事件。
- *   2. 缺省 subagentTrace → manager 走 NoopTraceService（byte-stable）。
+ * 契约（plans/358 §SC1 + spec AC,迁到 T5 后语义）：
+ *   1. buildHarnessEngine({ subagentsDir }) → 内置 createSubAgentManager
+ *      收到该 subagentsDir；通过 fake spawn 工厂触发 spawn 后, 真实 JSONL
+ *      落在 `<subagentsDir>/agent-<taskId>.jsonl` 含三类事件。
+ *   2. 缺省 subagentsDir → manager 走 NoopTraceService（byte-stable,等价
+ *      旧 subagentTrace 缺省形态）。
  *
  * 与 tests/subagent/manager-trace.test.ts 的差异：后者直接构造 manager,
- * 注入 trace + fake spawn 工厂；本文件验证 build-engine 的 subagentTrace
- * 装配链 —— opts.subagentTrace 正确传入 manager.closure.trace。
+ * 注入 trace + fake spawn 工厂；本文件验证 build-engine 的 subagentsDir
+ * 装配链 —— opts.subagentsDir 正确传入 manager。
  *
  * Mock 策略：vi.mock 整模块（同步 fake — `vi.hoisted` 共享 state），
  * 让 build-engine.ts 的 `import { createSubAgentManager }` 解析到 spy，
@@ -64,6 +66,7 @@ const mockState = vi.hoisted(() => ({
   }>,
   captureCallCount: 0,
   capturedTraceOpt: undefined as unknown,
+  capturedSubagentsDir: undefined as unknown,
   capturedDiagnosticsDir: undefined as unknown,
 }));
 
@@ -78,11 +81,12 @@ vi.mock("../../src/harness/subagent/manager.ts", async (importActual) => {
     createSubAgentManager: vi.fn((opts: Parameters<typeof realCreate>[0]) => {
       mockState.captureCallCount += 1;
       mockState.capturedTraceOpt = opts.trace;
+      mockState.capturedSubagentsDir = opts.subagentsDir;
       mockState.capturedDiagnosticsDir = opts.diagnosticsDir;
       const fakeSpawn: (
         def: unknown,
         taskId: string,
-        payload: unknown,
+        payload: unknown
       ) => ChildProcess = (_def, _taskId, _payload) => {
         const stdin = new PassThrough();
         const stdout = new PassThrough();
@@ -98,7 +102,7 @@ vi.mock("../../src/harness/subagent/manager.ts", async (importActual) => {
           signalCode: null as NodeJS.Signals | null,
         });
         mockState.fakeChildren.push(
-          child as unknown as (typeof mockState.fakeChildren)[number],
+          child as unknown as (typeof mockState.fakeChildren)[number]
         );
         return child as unknown as ChildProcess;
       };
@@ -116,7 +120,6 @@ import {
 } from "../../src/harness/build-engine.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
-import { createJsonlTraceService } from "../../src/harness/trace/jsonl.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 
 // ── env fixture ─────────────────────────────────────────────────────────
@@ -150,7 +153,7 @@ function okEnvelope(result = "ok"): SubAgentEnvelope {
 
 function emitEnvelope(
   child: (typeof mockState.fakeChildren)[number],
-  env: SubAgentEnvelope,
+  env: SubAgentEnvelope
 ): void {
   child.stdout.write(JSON.stringify(env) + "\n");
   child.emit("exit", 0, null);
@@ -166,6 +169,7 @@ beforeEach(() => {
   mockState.fakeChildren.length = 0;
   mockState.captureCallCount = 0;
   mockState.capturedTraceOpt = undefined;
+  mockState.capturedSubagentsDir = undefined;
   mockState.capturedDiagnosticsDir = undefined;
 });
 
@@ -192,50 +196,47 @@ const traceSeam = {
   countTokens: async () => ({ inputTokens: 100 }),
 } as const;
 
-describe("buildHarnessEngine — subagentTrace 注入缝 (Fix 1 SC1)", () => {
-  it("opts.subagentTrace → 内置 createSubAgentManager 收到该 trace, spawn def → JSONL 含三类事件", async () => {
-    const trace = createJsonlTraceService({
-      filePath: scratchDir,
-      conversationId: "subagent",
-    });
+describe("buildHarnessEngine — subagentsDir 注入缝 (T5 SC8 + L2)", () => {
+  it("opts.subagentsDir → 内置 createSubAgentManager 收到该 subagentsDir, spawn def → per-agent JSONL 含三类事件", async () => {
     built = await buildHarnessEngine({
       env: makeEnv("sk-test-bld-subagent-trace-1"),
       askUser: createNoAskUser(),
-      subagentTrace: trace,
+      subagentsDir: scratchDir,
       ...traceSeam,
     });
 
-    // 1. manager 在场 + createSubAgentManager 被调用, 收到的 trace opt ===
-    //    我们注入的（验证 buildHarnessEngine opts.subagentTrace 透传到
-    //    createSubAgentManager({trace})）。
+    // 1. manager 在场 + createSubAgentManager 被调用, 收到的 subagentsDir opt ===
+    //    我们注入的（验证 buildHarnessEngine opts.subagentsDir 透传到
+    //    createSubAgentManager({subagentsDir})）。
     expect(built.subagentManager).toBeDefined();
     expect(mockState.captureCallCount).toBe(1);
-    expect(mockState.capturedTraceOpt).toBe(trace);
+    expect(mockState.capturedSubagentsDir).toBe(scratchDir);
 
-    // 2. spawn def → JSONL 含 subagent_spawn + subagent_state_change +
-    //    subagent_stop 三类事件（mirror manager-trace.test.ts:339）。
+    // 2. spawn def → per-agent JSONL 含 subagent_spawn / _state_change /
+    //    _stop 三类事件（mirror manager-trace.test.ts:339,但落点在
+    //    `<subagentsDir>/agent-<taskId>.jsonl` 而不是 `subagent.jsonl`）。
     const manager = built.subagentManager!;
-    manager.spawn({ task: "do thing" });
+    const { taskId } = manager.spawn({ task: "do thing" });
     expect(mockState.fakeChildren.length).toBe(1);
     emitEnvelope(mockState.fakeChildren[0]!, okEnvelope("r"));
     await new Promise((resolve) => setImmediate(resolve));
     await Promise.resolve();
 
-    const filePath = join(scratchDir, "subagent.jsonl");
+    const filePath = join(scratchDir, `agent-${taskId}.jsonl`);
     const content = readFileSync(filePath, "utf8");
     const lines = content.split("\n").filter(Boolean);
     const recordTypes = lines.map((l) => JSON.parse(l).record_type as string);
     const subagentLines = recordTypes.filter((t) => t.startsWith("subagent_"));
     assert.ok(
       subagentLines.length >= 3,
-      `expected >=3 subagent_* lines, got ${subagentLines.length} (${recordTypes.join(",")})`,
+      `expected >=3 subagent_* lines, got ${subagentLines.length} (${recordTypes.join(",")})`
     );
     expect(recordTypes).toContain("subagent_spawn");
     expect(recordTypes).toContain("subagent_state_change");
     expect(recordTypes).toContain("subagent_stop");
   });
 
-  it("缺省 subagentTrace → createSubAgentManager 收到的 trace 是 NoopTraceService", async () => {
+  it("缺省 subagentsDir → createSubAgentManager 收到的 trace 是 NoopTraceService", async () => {
     built = await buildHarnessEngine({
       env: makeEnv("sk-test-bld-subagent-noop-1"),
       askUser: createNoAskUser(),
@@ -243,13 +244,10 @@ describe("buildHarnessEngine — subagentTrace 注入缝 (Fix 1 SC1)", () => {
     });
     expect(built.subagentManager).toBeDefined();
     expect(mockState.captureCallCount).toBe(1);
-    // NoopTraceService 注入 → recordSubagentSpawn 调用返回 undefined,
-    // 不写盘（验证 byte-stable 默认行为）。
-    const traceLike = mockState.capturedTraceOpt as unknown as {
-      recordSubagentSpawn: () => Promise<unknown>;
-    };
-    expect(typeof traceLike.recordSubagentSpawn).toBe("function");
-    expect(await traceLike.recordSubagentSpawn({} as never)).toBeUndefined();
+    // T5: subagentsDir 缺省 + opts.trace 已退役 → manager 走 NoopTrace,
+    // 不写盘(验证 byte-stable 默认行为, 等价旧 subagentTrace 缺省形态)。
+    expect(mockState.capturedSubagentsDir).toBeUndefined();
+    expect(mockState.capturedTraceOpt).toBeUndefined();
   });
 
   it("subagentDiagnosticsDir → manager receives the crash diagnostics root", async () => {
@@ -273,7 +271,7 @@ describe("buildHarnessEngine — subagentTrace 注入缝 (Fix 1 SC1)", () => {
         turn_id: "turn-custom",
         started_at: "2026-08-28T00:00:01.000Z",
         status: "ok",
-      })}\n`,
+      })}\n`
     );
     built = await buildHarnessEngine({
       env: makeEnv("sk-test-bld-query-trace-dir-1"),
@@ -290,7 +288,7 @@ describe("buildHarnessEngine — subagentTrace 注入缝 (Fix 1 SC1)", () => {
     })) as string;
     const body = JSON.parse(raw) as { records: Array<{ turn_id?: string }> };
     expect(body.records.some((row) => row.turn_id === "turn-custom")).toBe(
-      true,
+      true
     );
     rmSync(customDir, { recursive: true, force: true });
   });

@@ -125,8 +125,6 @@ import {
   createDefaultSubAgentSpawn,
   resolveSubagentTraceDir,
 } from "./subagent/spawn.js";
-import { createNoopTraceService } from "./trace/noop.js";
-import type { TraceService } from "./trace/types.js";
 import {
   createBackgroundTaskManager,
   defaultBackgroundSpawn,
@@ -224,12 +222,21 @@ export type BuildEngineOpts = {
   /** #356 T6 测试缝:subagent manager 覆盖注入(生产默认不传则内部自建)。 */
   readonly subagentManager?: SubAgentManager;
   /**
-   * #358 T4 测试缝:subagent manager 配套 TraceService 覆盖注入。生产默认
-   * createNoopTraceService() (manager 透传 trace 字段来自各 caller,本缝保持
-   * 既有 byte-stable;集成路径在 cli.ts / hub.ts / #371 路由层把 per-conversation
-   * JsonlTraceService 注入 manager)。
+   * T5 (plans/session-folder-consolidation.md / SC8 + L2): 子代理 per-agent
+   * trace 归属目录 = `<父会话文件夹>/subagents/`(由 caller 用
+   * `resolveSubagentTraceDir({ projectDir, conversationId })` 派生后传入)。
+   *
+   * 在场时 manager 为每次 spawn 懒建 file-mode JsonlTraceService
+   * (`<subagentsDir>/agent-<taskId>.jsonl`, conversationId 钉 taskId) +
+   * 一次性 `.meta.json` —— 替换掉既有 `subagentTrace` 聚合单实例注入。
+   * 缺席 → 退化为 NoopTrace(同既有 build-engine 缺省形态, byte-stable)。
+   *
+   * 与旧 `subagentTrace` 的关系:`subagentTrace` (conversationId:"subagent"
+   * 聚合单文件) 已退役 —— 所有 caller (cli / hub / tui-deps) 改为传
+   * `subagentsDir`。`subagentTrace` 字段在本 commit 后无人引用,留作 seam
+   * 仅供尚未迁移的测试用,不再注入 manager。
    */
-  readonly subagentTrace?: TraceService;
+  readonly subagentsDir?: string;
   /** Crash diagnostics / worker trace root for subagent lifecycle evidence. */
   readonly subagentDiagnosticsDir?: string;
   /** TUI 工具摘要观测缝:透传给 createAciExecutor hooks.postToolUse(chat/serve 不传 → 零变化)。 */
@@ -706,9 +713,21 @@ export async function buildHarnessEngine(
           // 算 `writeSituation` 进 envelope；worker prior 据此渲染写根段。
           // 判定源 = `isolationEnabled`(line 716 单一读取点),worker 不重判。
           isolationOn: isolationEnabled,
-          trace: opts.subagentTrace ?? createNoopTraceService(),
+          // T5 (plans/session-folder-consolidation.md / SC8 + L2):
+          //   opts.subagentsDir 在场 → manager 内 per-agent file-mode
+          //   JsonlTraceService 形态,替换掉既有 `subagentTrace` 聚合单实例。
+          //   opts.subagentsDir 缺席 → manager 走 NoopTrace,语义同既有
+          //   (测试 seam: opts.subagentManager 已注入时由 caller 控制)。
+          //   opts.subagentDiagnosticsDir 仍保留,用于 subagent stderr pointer
+          //   —— T5 内部默认跟随 subagentsDir(manager 兜底),caller 不再
+          //   强绑。
+          ...(opts.subagentsDir !== undefined
+            ? { subagentsDir: opts.subagentsDir }
+            : {}),
           diagnosticsDir:
-            opts.subagentDiagnosticsDir ?? resolveSubagentTraceDir(),
+            opts.subagentDiagnosticsDir ??
+            opts.subagentsDir ??
+            resolveSubagentTraceDir(),
           taskTimeoutMs: env.subagent.taskTimeoutMs,
           maxConcurrentWorkers: env.subagent.maxConcurrentWorkers,
         }))

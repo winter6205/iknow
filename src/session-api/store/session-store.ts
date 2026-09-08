@@ -191,6 +191,27 @@ export function resolveConversationTraceFilePath(opts: {
 }
 
 /**
+ * T5 (plans/session-folder-consolidation.md / ADR-0071 Decision 1 +
+ * ADR-0035 同日 Amendment):子代理记录嵌进父会话文件夹,落在
+ * `<projectDir>/<conversationId>/subagents/` 下。
+ *
+ * 单文件聚合形态(`<traceOut>/subagent.jsonl`,conversationId="subagent",
+ * 全机所有子代理聚合成一个文件)按 SC8 退役;改 per-agent 形态后,各子代理
+ * 的 lifecycle / content trace + `.meta.json` 都按 taskId 散列到该目录下。
+ *
+ * 派生而不是字符串拼接:复用 `resolveConversationDir` 的 sanitize 与长度边界,
+ * 保证同 `(projectDir, conversationId)` 派生到同一目录。
+ */
+export const SUBAGENT_TRACE_DIR_NAME = "subagents";
+
+export function resolveSubagentTraceDir(opts: {
+  readonly projectDir: string;
+  readonly conversationId: string;
+}): string {
+  return join(resolveConversationDir(opts), SUBAGENT_TRACE_DIR_NAME);
+}
+
+/**
  * Per-segment single-component cap on most POSIX-style filesystems.
  * Enforced as a typed boundary (no silent truncation) so callers see the
  * rejection instead of an arbitrary cut-off id producing an unexpected

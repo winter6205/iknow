@@ -40,7 +40,6 @@ import {
   clearActiveExtraSecrets,
   setActiveExtraSecrets,
 } from "../../src/harness/sandbox/env-isolation.ts";
-import { createJsonlTraceService } from "../../src/harness/trace/jsonl.ts";
 
 const OK_ENVELOPE = JSON.stringify({
   status: "ok",
@@ -117,7 +116,7 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
     assert.equal(env.result, "r");
   });
 
-    it("fake 二进制立即 exit 2 (无 stdout envelope) → queryBuffer crashed", async () => {
+  it("fake 二进制立即 exit 2 (无 stdout envelope) → queryBuffer crashed", async () => {
     const fake = spawn(process.execPath, ["-e", "process.exit(2)"], {
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -157,10 +156,11 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
     const secret = "T2_FAKE_SECRET_9f8e7d6c";
     setActiveExtraSecrets([secret]);
     try {
-      const trace = createJsonlTraceService({
-        filePath: diagnosticsDir,
-        conversationId: "subagent",
-      });
+      // T5 (plans/session-folder-consolidation.md / SC8 + L2): per-agent 形态 ——
+      // subagentsDir 注入 manager 后, lifecycle / content trace 落
+      // `<subagentsDir>/agent-<taskId>.jsonl`(取代 `<traceOut>/subagent.jsonl`
+      // 聚合单文件, conversationId:"subagent" 假 scope 已退役)。
+      const subagentsDir = join(diagnosticsDir, "subagents");
       const fake = spawn(
         process.execPath,
         [
@@ -173,8 +173,8 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
       );
       const mgr = createSubAgentManager({
         spawn: () => fake,
-        diagnosticsDir,
-        trace,
+        diagnosticsDir: subagentsDir,
+        subagentsDir,
       });
       const { taskId } = mgr.spawn({});
       await waitExit(fake);
@@ -186,14 +186,14 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
         assert.match(q.summary, /boom-diagnostic/);
         assert.doesNotMatch(q.summary, new RegExp(secret));
       }
-      const stderrPath = join(diagnosticsDir, "stderr", `${taskId}.log`);
+      const stderrPath = join(subagentsDir, "stderr", `${taskId}.log`);
       assert.equal(existsSync(stderrPath), true);
       const stderrLog = readFileSync(stderrPath, "utf8");
       assert.match(stderrLog, /boom-diagnostic/);
       assert.doesNotMatch(stderrLog, new RegExp(secret));
       await new Promise((resolve) => setImmediate(resolve));
       const records = readFileSync(
-        join(diagnosticsDir, "subagent.jsonl"),
+        join(subagentsDir, `agent-${taskId}.jsonl`),
         "utf8"
       )
         .trim()
@@ -238,11 +238,7 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
       const second = mgr.spawn({});
       await Promise.all(children.map(waitExit));
       for (let attempt = 0; attempt < 100; attempt++) {
-        const firstPath = join(
-          diagnosticsDir,
-          "stderr",
-          `${first.taskId}.log`
-        );
+        const firstPath = join(diagnosticsDir, "stderr", `${first.taskId}.log`);
         const secondPath = join(
           diagnosticsDir,
           "stderr",

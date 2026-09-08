@@ -46,7 +46,7 @@ interface FakeChild {
   readonly stderr: PassThrough;
   readonly kill: ReturnType<typeof vi.fn>;
   readonly exitCode: number | null;
-  readonly signalCode: Nodejs.Signals | null;
+  readonly signalCode: NodeJS.Signals | null;
   readonly pid: number;
   emit: (event: string | symbol, ...args: unknown[]) => boolean;
 }

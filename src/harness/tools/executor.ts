@@ -250,6 +250,12 @@ export function createExecutor(registry: RegistryImpl): Executor {
       ...(conversationId !== undefined ? { conversationId } : {}),
       ...(turnId !== undefined ? { turnId } : {}),
       ...(onStream !== undefined ? { onStream } : {}),
+      // T5 (plans/session-folder-consolidation.md / SC8): 来自 call.id 的
+      // Anthropic tool_use_id (模型那侧 wire id) —— 与返回 ToolExecutionResult
+      // 顶上的 toolUseId 同源 (handler 自填 .toolUseId 字段不依赖此 ctx);
+      // spawn_subagent 消费后写进 def.toolUseId → manager 抄进 .meta.json。
+      // 直接调 handler / 测试注入不走 executeAll 的路径不填,Postel(meta 键省略)。
+      toolUseId: call.id,
     };
     try {
       const out =

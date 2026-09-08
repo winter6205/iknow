@@ -30,7 +30,7 @@ import type { PostToolUseHook } from "../harness/permission/types.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
 import type { GraphModeContext } from "../harness/graph/mode.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
-import { createJsonlTraceService } from "../harness/trace/index.js";
+import { randomUUID } from "node:crypto";
 import type { MemoryLiveFlags } from "../harness/memory/index.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import type { AskUser } from "../harness/permission/types.js";
@@ -43,7 +43,10 @@ import type { SkillCatalog } from "../harness/skill/catalog.js";
 import type { McpServerStatus } from "../harness/mcp/manager.js";
 import { loadMcpConfig } from "../harness/mcp/config.js";
 import type { AciToolDef } from "../harness/aci/types.js";
-import { resolveProjectSessionDir } from "../session-api/store/session-store.js";
+import {
+  resolveProjectSessionDir,
+  resolveSubagentTraceDir,
+} from "../session-api/store/session-store.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 
 /** 工具摘要行事件（postToolUse 投影，observability-only）。 */
@@ -132,6 +135,15 @@ export interface BuildTuiDepsOptions {
    * （与 serve hub 同形：`<traceOut>/subagent.jsonl`）。
    */
   readonly traceOut?: string;
+  /**
+   * T5 (plans/session-folder-consolidation.md / SC8 + L2): 当前 TUI 会话
+   * conversationId —— 派生 `<父会话文件夹>/subagents/` 用。caller
+   * (tui/run.tsx) 从 hub-bridge 拿到 soleInflightId 后透传。多会话并发
+   * 期间没有 soleInflightId → buildTuiDeps 退化为 randomUUID()(per-build
+   * 唯一;不会跨 rebuild 共享,与既有 subagentTrace 聚合单文件的"全在
+   * 一起"行为不同 —— T5 计划刻意为之,见 SC8 acceptance)。
+   */
+  readonly conversationId?: string;
   /** #337 Phase B 测试缝：MCP client 工厂覆盖（注入 stub 避免真实 stdio 启动）。 */
   readonly createMcpClient?: (
     server: import("../harness/mcp/config.js").McpServerConfig
@@ -274,16 +286,9 @@ export async function buildTuiDeps(
   // 与 build-engine #337 T8 同款。装配期 skill scanner + mcp config 都从这里取。
   const userHome = opts.userHome ?? homedir();
   const cwd = opts.cwd ?? process.cwd();
-  // 子代理生命周期事件落盘 —— 与 serve hub 同款：单例 manager 聚合到
-  // `<traceOut>/subagent.jsonl`（reader 按 task_id 过滤）。TUI 会话 turn
-  // 仍走 hub-bridge 的 per-conversation JSONL；子代理三事件与此对齐。
+  // 兼容 `opts.traceOut`(test seam / 旧 path) → 仍落 diagnosticsDir(stderr
+  // pointer);缺省时 manager 内 effectiveDiagnosticsDir 兜底跟随 subagentsDir。
   const traceOut = opts.traceOut;
-  const subagentTrace = traceOut
-    ? createJsonlTraceService({
-        filePath: traceOut,
-        conversationId: "subagent",
-      })
-    : undefined;
   // #950 T2 / session-folder-consolidation / ADR-0071 Decision 2:TUI 入口
   // 注入「会话文件夹根」让 todo_write 在主 loop 在场 —— 与 chat / serve
   // 三入口同源 SSOT:同一 `(baseDir, projectIdentityRoot)` 派生公式
@@ -294,6 +299,16 @@ export async function buildTuiDeps(
     resolveServeDataDir(opts.dataDir, opts.workspaceRoot),
     deriveProjectIdentityRoot({ cwd: opts.workspaceRoot })
   );
+  // T5 (plans/session-folder-consolidation.md / SC8 + L2): 子代理 lifecycle
+  // / content trace 改走 per-agent `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
+  // TUI 子代理根 = `<projectDir>/<conversationId>/subagents/`。conversationId
+  // 多会话并发没唯一值时 → 退化为 randomUUID()(T5 接受, 与 soleInflightId
+  // 不在场时的兜底语义一致)。
+  const subagentsConversationId = opts.conversationId ?? randomUUID();
+  const subagentsDir = resolveSubagentTraceDir({
+    projectDir: todoProjectDir,
+    conversationId: subagentsConversationId,
+  });
   const built = await buildHarnessEngine({
     env: bundle.env,
     askUser: opts.askUser,
@@ -316,10 +331,12 @@ export async function buildTuiDeps(
     ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
     // T6:稳定 productRoot 透传（缺席 → build-engine 桥接为 workspaceRoot）。
     ...(opts.productRoot ? { productRoot: opts.productRoot } : {}),
-    // 观测性地板:traceOut 在场 → subagent 三事件落 `<traceOut>/subagent.jsonl`。
-    ...(subagentTrace !== undefined
-      ? { subagentTrace, subagentDiagnosticsDir: traceOut }
-      : {}),
+    // 观测性地板:subagent lifecycle / content 走 per-agent 形态
+    // (subagentsDir); `opts.traceOut` 仍透传给 subagentDiagnosticsDir
+    // (stderr pointer) —— 旧 path 兼容, traceOut 缺席则由 manager 内兜底
+    // 跟随 subagentsDir。
+    subagentsDir,
+    ...(traceOut !== undefined ? { subagentDiagnosticsDir: traceOut } : {}),
     // #378 测试缝:createMcpManager 工厂覆盖(透传,捕获入参断言)。
     // prettier-ignore（master 一致单行：L3 review 复原；88 字符超 80 列，禁用 prettier 重排）。
     // prettier-ignore

@@ -42,6 +42,14 @@ export interface ToolExecutionContext {
    * `graph_progress`；缺席 = 不发事件（ask / 直调 handler 默认）。
    */
   readonly onStream?: (event: HarnessStreamEvent) => void;
+  /**
+   * T5 (plans/session-folder-consolidation.md / SC8):本次 tool_call 的
+   * Anthropic tool_use_id(模型那侧的 wire id) —— `spawn_subagent` 工具消费
+   * 后写入 def.toolUseId,manager 抄进 `.meta.json` 的 `toolUseId` 字段,
+   * 用于反查父 loop 的那一次工具调用。缺席 = Postel(meta 键省略),兼容
+   * 直接调 handler / 测试注入。
+   */
+  readonly toolUseId?: string;
 }
 
 /**

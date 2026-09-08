@@ -14,6 +14,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   statSync,
   writeFileSync,
   mkdtempSync,
@@ -40,6 +41,26 @@ function resolveTsxCli(): string {
 }
 
 const tsxCli = resolveTsxCli();
+
+/**
+ * T5 (plans/session-folder-consolidation.md / SC8): 递归搜 dataDir/projects
+ * 下任意 slug/convId/subagents 子目录,返回第一个存在的 subagents 目录。
+ * cli 测试把 HOME 重定向到 scratch 后, projectDir 含 basename 加 12 位
+ * sha1 后缀不可硬编码; walker 形态直接拿真实路径。
+ */
+function findSubagentsDir(dataDir: string): string | undefined {
+  const projectsDir = join(dataDir, "projects");
+  if (!existsSync(projectsDir)) return undefined;
+  for (const slug of readdirSync(projectsDir)) {
+    const slugDir = join(projectsDir, slug);
+    if (!statSync(slugDir).isDirectory()) continue;
+    for (const convId of readdirSync(slugDir)) {
+      const subagents = join(slugDir, convId, "subagents");
+      if (existsSync(subagents)) return subagents;
+    }
+  }
+  return undefined;
+}
 const toolUseResponse = {
   id: "msg_tool_use",
   type: "message",
@@ -164,17 +185,27 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
       requestCount >= 2,
       `the parent and worker should call the stub model (stdout=${stdout}, stderr=${stderr})`
     );
-    // T3 (SC6): `DEFAULT_TRACE_DIR = "./trace/"` 已退役。cli.ts 的
-    // `resolveTraceRoot` 默认退到 `resolveServeDataDir()` ≈ `<homedir>/.iknow`。
-    // 本测试把 HOME 重定向到 `<scratch>/home`, dataDir 落到
-    // `<scratch>/home/.iknow`, 子代理聚合流(filePath 模式)写该目录下
-    // `<convId>.jsonl`, 即 `subagent.jsonl`。
-    const tracePath = join(home, ".iknow", "subagent.jsonl");
+    // T5 (plans/session-folder-consolidation.md / SC8 + L2): 子代理 lifecycle /
+    // content trace 改走 per-agent 形态 — `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
+    // 本测试把 HOME 重定向到 `<scratch>/home` → dataDir 落到
+    // `<scratch>/home/.iknow`, projectDir 落到
+    // `<scratch>/home/.iknow/projects/<basename>-<sha1[:12]>/<convId>/subagents/`。
+    // 用 readdirSync 找 `agent-*.jsonl` 文件, 不硬编码路径(避免依赖
+    // resolveProjectSessionDir 的 `<basename>-<sha1[:12]>` 后缀)。
+    const dataDir = join(home, ".iknow");
+    const subagentsRoot = findSubagentsDir(dataDir);
     assert.ok(
-      existsSync(tracePath),
-      `missing trace file (stdout=${stdout}, stderr=${stderr}, requests=${requestCount})`
+      subagentsRoot !== undefined,
+      `missing subagents/ tree (stdout=${stdout}, stderr=${stderr}, requests=${requestCount})`
     );
-    const records = readFileSync(tracePath, "utf8")
+    const agentFiles = readdirSync(subagentsRoot!).filter(
+      (f) => f.startsWith("agent-") && f.endsWith(".jsonl")
+    );
+    assert.ok(
+      agentFiles.length >= 1,
+      `expected at least one agent-*.jsonl, got ${agentFiles.join(",")} in ${subagentsRoot}`
+    );
+    const records = readFileSync(join(subagentsRoot!, agentFiles[0]!), "utf8")
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as { record_type: string });

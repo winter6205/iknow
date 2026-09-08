@@ -60,7 +60,10 @@ import {
 // ADR-0037 review High-1/High-2 (2026-08-29): chat 入口的 worktree isolation
 // host 缝与启动 settings 钉住。
 import { SessionStore } from "./session-api/store/index.js";
-import { resolveProjectSessionDir } from "./session-api/store/index.js";
+import {
+  resolveProjectSessionDir,
+  resolveSubagentTraceDir,
+} from "./session-api/store/index.js";
 import { resolveServeDataDir } from "./session-api/serve.js";
 import { createTaskWorktreeProvisioner } from "./session-api/worktree-rebind.js";
 import type { WorktreeIsolationHostOpts } from "./harness/isolation/worktree-gate.js";
@@ -280,14 +283,20 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  // T5 (plans/session-folder-consolidation.md / SC8 + L2): chat 入口
+  // 锁定本次 conversationId —— 子代理 lifecycle / content trace 归属目录
+  // = `<父会话文件夹>/subagents/`,文件名 = agent-<taskId>.jsonl。
+  // rebuildDeps(改绑时)复用同一 conversationId,不另起(rebuild 不换会话)。
+  const conversationId = randomUUID();
 
   // ADR-0035:生命周期 trace 与 content trace 解耦。chat 不装配 content
   // trace，但 subagent 的 spawn/state_change/stop 永久写入默认 trace 目录。
+  // T5 (plans/session-folder-consolidation.md / SC8 + L2): 聚合单文件
+  // `subagent.jsonl` (conversationId:"subagent") 已退役 —— 改由
+  // buildHarnessEngine(opts.subagentsDir) 派生 per-agent `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
+  // 解析顺序保持(traceOut flag > IKNOW_TRACE_OUT env > 默认)只服务于
+  // 其余子代理相关形态(stderr pointer 退路)。
   const tracePath = resolve(resolveTraceRoot(parsed.traceOut));
-  const subagentTraceService = createJsonlTraceService({
-    filePath: tracePath,
-    conversationId: "subagent",
-  });
 
   let built: import("./harness/build-engine.js").BuiltEngine;
   // W2: chat REPL 持一个可变 PermissionModeContext —— /permissions 命令在
@@ -339,11 +348,16 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     permissionMode,
     graphMode,
     todoDir: todoProjectDir,
-    // review-fix (Fix 1): subagent trace 生产装配 —— 仅显式配置 traceOut/env 时
-    // 注入 <traceOut>/subagent.jsonl (conversationId="subagent", 聚合所有会话)。
-    ...(subagentTraceService !== undefined
-      ? { subagentTrace: subagentTraceService }
-      : {}),
+    // T5 (plans/session-folder-consolidation.md / SC8 + L2): subagentsDir
+    // 由 (projectDir, conversationId) 经 `resolveSubagentTraceDir` 派生 —— 与
+    // 上面 SessionStore 同源(`todoProjectDir === store.projectDir`,见 #950 T2)。
+    // build-engine 内部把 subagentsDir 同时传给 SubAgentManager(opts.subagentsDir)
+    // 与 traceFilePath 入 envelope —— 替代旧 `subagentTrace` (conversationId:"subagent"
+    // 聚合单文件,已退役)。
+    subagentsDir: resolveSubagentTraceDir({
+      projectDir: todoProjectDir,
+      conversationId,
+    }),
     subagentDiagnosticsDir: tracePath,
     // review-fix (M1/M5): `!== undefined` 守门 — 空字符串透传触 empty_explicit。
     workspaceRoot,

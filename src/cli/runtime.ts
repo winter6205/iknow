@@ -25,7 +25,6 @@ import {
 } from "../harness/permission/modes.js";
 import type { GraphModeContext } from "../harness/graph/mode.js";
 import { loadIknowEnv, type IknowEnv } from "../config/env.js";
-import type { TraceService } from "../harness/trace/types.js";
 import {
   WORKSPACE_ROOT_ENV_KEY,
   resolveWorkspaceRoot,
@@ -124,8 +123,6 @@ export interface CliBuildEngineOpts {
   projectIdentityRoot?: string;
   /** Crash diagnostics / worker trace root for subagent lifecycle evidence. */
   subagentDiagnosticsDir?: string;
-  /** Trace service for unconditional subagent lifecycle evidence. */
-  subagentTrace?: TraceService;
   /**
    * Review High-1 (2026-08-29 / ADR-0037): worktree isolation host 缝 ——
    * 透传给 build-engine。开关本体由 build-engine 从 `settings` 在启动加载点
