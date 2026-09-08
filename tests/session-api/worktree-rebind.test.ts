@@ -935,6 +935,21 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
         /exit-task-worktree|delete the session record/
       ),
     });
+    // T4 / L1 弱档披露钉住（spec L1「三处强制披露」之回执处）：回执必须
+    // 显式说「occupancy is visible only within the current process」——不让
+    // 操作员误以为拿到了跨进程排他（强档需要扫遍 <dataDir>/sessions/* 全
+    // 部项目命名空间，本 spec 不做）。
+    await expect(
+      guestProv.enter({
+        conversationId: "conv-guest",
+        root: repo,
+        targetConversationId: "conv-owner",
+      })
+    ).rejects.toMatchObject({
+      message: expect.stringContaining(
+        "occupancy is visible only within the current process"
+      ),
+    });
 
     // SC7 + zero new writes on rejection: guest session file untouched,
     // guest is NOT bound to anything.
@@ -1284,5 +1299,64 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
       kind: "worktree_claimed",
       message: expect.stringContaining("conv-claimant"),
     });
+  });
+
+  // T4 / plans/worktree-exclusive-lock.md — L2 TOCTOU 行为钉住。
+  //
+  // 已知行为（spec L2 + 输入五类表 concurrent 臂 + ADR-0070 已知限制）：
+  // 占用来自持久化记录，记录在「工具成功 + 会话保存」时才写。两个会话在
+  // 同一时间窗内 enter 同一棵尚未被任何记录指向的树，可能都读到「无占用」
+  // 而双双成功。spec 明确不解决（解决要锁文件或注册表，Confirms with human
+  // 已明确不做），只要求**钉住这个行为**——不假装互斥，不掩盖窗口。
+  //
+  // 构造方式：两个独立 provisioner 实例，各自 stub 一个 listSessions 永远
+  // 返回 []。这模拟「两会话的持久记录都还没写」的真实时序——等价于
+  // SessionStore.list() 在 enter 缝的 assertNotClaimed 与 persistWorkspaceRoot
+  // 之间的同一时间窗内的视角。注释与测试名明示这是 L2 已知行为，非缺陷。
+  it("L2 TOCTOU 行为钉住：两会话同窗 enter 同一棵无记录树 → 双双成功（已知行为，spec 不假装互斥）", async () => {
+    const repo = makeGitRepo();
+    // A bare-bones owner provisions the target tree (no occupancy check, no
+    // store plumbing — this just gives us a real linked worktree on disk so
+    // the two guests' enter() pass the four target-validation checks).
+    const ownerProv = createTaskWorktreeProvisioner({});
+    const tree = await ownerProv.provision({
+      conversationId: "conv-owner",
+      root: repo,
+    });
+
+    // Two fresh guests, each with its own provisioner (= its own process-
+    // equivalent `bound` Map) and its own stub listSessions. The stub
+    // freezes the "no record points at `tree` yet" timeline; in production
+    // that window is the span from assertNotClaimed's read up to
+    // persistWorkspaceRoot's write inside the same process, and across
+    // processes it's the same window crossed by two independent CLI runs.
+    const guest1 = createTaskWorktreeProvisioner({
+      worktreeExclusive: true,
+      listSessions: async () => [],
+    });
+    const guest2 = createTaskWorktreeProvisioner({
+      worktreeExclusive: true,
+      listSessions: async () => [],
+    });
+
+    const r1 = await guest1.enter({
+      conversationId: "conv-guest-1",
+      root: repo,
+      targetConversationId: "conv-owner",
+    });
+    const r2 = await guest2.enter({
+      conversationId: "conv-guest-2",
+      root: repo,
+      targetConversationId: "conv-owner",
+    });
+
+    // L2 钉住：双双成功，路径相同。这是已知行为，不是 bug，不许 fail 这条
+    // 测试去"修正"成互斥——修正会破坏 SC7 零新写盘 + Confirms with
+    // human「不做锁文件 / 不做占用注册表」。
+    expect(r1.path).toBe(tree);
+    expect(r2.path).toBe(tree);
+    // 各自的 bound Map 各自认领——TOCTOU 窗口后的事实态。
+    expect(guest1.isTaskWorktreeRoot(tree)).toBe(true);
+    expect(guest2.isTaskWorktreeRoot(tree)).toBe(true);
   });
 });
