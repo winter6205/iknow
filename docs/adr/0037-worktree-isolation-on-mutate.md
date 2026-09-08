@@ -4,11 +4,11 @@ Date: 2026-08-29
 
 Status: accepted
 
-> **Amendment 2026-09-04**（`specs/casual-ask-context-hygiene.md`）：§1「读放行、写才拦」不变。bash 是否 mutate **不得**复用 `validateReadonlyCommand`（那是 bash readonly **模式**的 deny-by-default 表，`2>&1` 也拒）。门禁自备「会不会写工作区」判定；`2>&1` / 管道 / 只读命令串为读。`validateReadonlyCommand` 不为本门禁放宽。`unboundMutateNotice` 仍点名 `create-task-worktree`、仍不 auto-provision；文案改为事实阻断（这次调用会写主仓、未执行；若要写则调工具再重试这一次），不得把模型下一拍收成「去建树」。不按用户问句分型。不改 `create-task-worktree` ACI 形状。
+> **Amendment 2026-09-04**（`specs/casual-ask-context-hygiene.md`）：§1「读放行、写才拦」不变。bash 是否 mutate **不得**复用 `validateReadonlyCommand`（那是 bash readonly **模式**的 deny-by-default 表，`2>&1` 也拒）。门禁自备「会不会写工作区」判定；`2>&1` / 管道 / 只读命令串为读。`validateReadonlyCommand` 不为本门禁放宽。`unboundMutateNotice` 仍点名 `create-task-worktree`、仍不 auto-provision；文案改为事实阻断（这次调用会写主仓、未执行；若要写则调工具再重试这一次），不得把模型下一拍收成「去建树」（**此半句 2026-09-08 由 ADR-0069 / `specs/write-situation-disclosure.md` 撤销**——回执只在写意图已证时出现，casual ask 结构上碰不到它，该顾虑在这个时点不成立；同批保留「不按用户问句分型」与三条子串禁令，并把验收从纯子串升级为**语义 + 子串**，因为纯子串断言拦不住语义空心化——本 amendment 锁定语义里的「再重试这一次调用」正是这样丢的）。不按用户问句分型。不改 `create-task-worktree` ACI 形状。
 
 > **Amendment 2026-09-07**（`plans/bare-repo-create-task-worktree.md`）：§6 的「主仓不是 git 仓库」收窄为**可用 gitdir（usable gitdir）**判定——`not_a_git_repo` 仅当该会话根上**没有可用 gitdir**（`git rev-parse --git-common-dir` 或等价探测失败）时抛出；bare gitdir（`git init --bare`，无工作文件）与 `core.bare=true` 但仍带工作文件的检出，只要 `git worktree add -b` 能成功，都是**可用 git 仓**，建树照常进行。判据是「能不能从该根上建 linked worktree」，不是「根下有没有工作文件」——本仓自身的布局（gitdir + 工作文件同根、`core.bare=true`）即是合法输入。空目录 / 非 git 根仍 `not_a_git_repo`，且保持零写入；git 二进制 spawn 失败仍 `git_unavailable`；无 commit 的空 bare 仍是有 gitdir 的根、**不**收成 `not_a_git_repo`，`worktree add` 的成败由 git 自身裁决（实测随版本而异：旧版失败 → `worktree_add_failed`，git ≥2.53 自动 `--orphan` 成功）。门禁与 fail-closed 语义不变：建树失败后主仓零写入仍是验收项。
 
-> Amendments: 2026-08-30 建树职责由 host 自动建树改为模型调用「创建工作树 ACI 工具」；2026-08-31 改绑只切 `taskRoot`（§4 重写）；2026-09-02 reopen——model-provision 契约 + 活 `taskRoot`（§7 新增）+ 撤销「same-turn mutator 列为非目标」（§8 显式撤销）；2026-09-05 bash 围栏身份根 ro-bind overlay + 模型可见写根（issue #891）；2026-09-06 reopen——bash 围栏闭世界化：全档位 deny-by-default 反转 + 读/写白名单裁决 + identity overlay 条款 superseded（§9 新增，issue #896）；2026-09-07 —— §6「主仓不是 git 仓库」收窄为可用 gitdir 判定（bare / `core.bare=true` 且能 `worktree add` 的根是可用仓，见 `plans/bare-repo-create-task-worktree.md`）。
+> Amendments: 2026-08-30 建树职责由 host 自动建树改为模型调用「创建工作树 ACI 工具」；2026-08-31 改绑只切 `taskRoot`（§4 重写）；2026-09-02 reopen——model-provision 契约 + 活 `taskRoot`（§7 新增）+ 撤销「same-turn mutator 列为非目标」（§8 显式撤销）；2026-09-05 bash 围栏身份根 ro-bind overlay + 模型可见写根（issue #891）；2026-09-06 reopen——bash 围栏闭世界化：全档位 deny-by-default 反转 + 读/写白名单裁决 + identity overlay 条款 superseded（§9 新增，issue #896）；2026-09-07 —— §6「主仓不是 git 仓库」收窄为可用 gitdir 判定（bare / `core.bare=true` 且能 `worktree add` 的根是可用仓，见 `plans/bare-repo-create-task-worktree.md`）；2026-09-08 —— 写处境三态告知 + 告知面/回执分工原则 + 建树失败可恢复性分类轴（ADR-0069，`specs/write-situation-disclosure.md`；Amendment 2026-09-04 的反引导半句撤销，SC7 验收升级为语义断言；§7 活根语义与 §9 围栏均不变）；worktree 占用锁可选档位 `isolation.worktreeExclusive`（ADR-0070，`specs/worktree-exclusive-lock.md`；与本开关正交、默认 OFF，§2/§3/§5 正文不变）。
 
 > **Amendment 2026-08-30**（issue #836 / 地图 #829）：ON 时门禁**只拦写、不自动 `git worktree add`**——建 task worktree 与会话根改绑由**模型调用「创建工作树 ACI 工具」**完成（成功 = 树在且会话根已切到该路径）；Host 不同波重放被拦的写，被拦的写由模型在新根上自己再调。原文 Decision 1 中「首次 mutate 被拦截 → host `git worktree add` 建树改绑」的读法 **superseded**。同批修订：说明书（rules）改为按需读——父会话不整段灌 rules、缺目录视为空，见 ADR-0009 D2 的 amended 说明与 `docs/CONTEXT.md` 术语「说明书读法」。
 >
@@ -48,6 +48,7 @@ ADR-0023 裁决 4 曾锁定「v1 = 单根 + recents + 三锚合一；worktree/�
 
 - **OFF（默认）**：会话行为与今日完全一致——读、写、permission、目录全部现状，不新增任何拦截点。（**2026-09-06 reopen 标 superseded，仅就 bash 围栏物理面**：OFF 档围栏同样闭世界化，见 §9.1；门禁、根改绑、permission 语义不变。）
 - **ON**：会话可**只读**主仓（read / grep / glob / 只读 bash 等读路径放行，可留在主仓）；一旦出现**写路径**（write_file / edit_file / 会改工作区的 bash 等 mutate），门禁把该写**拦住**——host **不自动** `git worktree add`，而是由**模型调用「创建工作树 ACI 工具」**完成建 task worktree（含 task 分支）与**当前会话**根锚改绑；工具成功 = 树已在且会话根已切到该路径，此后本会话 mutate 只进该根。已绑定本会话 task worktree 时写路径直接放行，不建第二棵树。
+- **正交档位 `isolation.worktreeExclusive`（2026-09-08 新增，ADR-0070 / `specs/worktree-exclusive-lock.md`）**：与本开关**正交**，boolean-only、默认 OFF、同款 fail-closed 值域纪律。ON 时 `enter-task-worktree` 多一道前置检查——目标树若被**别的现存会话**占用（判据 = 现存会话记录的 `workspaceRoot`，零新持久状态）则 typed 拒绝（`worktree_claimed`）。**本节 OFF / ON 两态语义与门禁裁决逻辑均不变**；OFF 档 enter 行为与今日逐字节一致。
 
 ### 2. 改绑只影响本会话（硬要求 2–5）
 
