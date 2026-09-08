@@ -290,8 +290,20 @@ _Avoid_: 用 memoryEnabled 一把关掉说明书；把说明书和 memory_recall
 **graph mode**: 会话级编排 overlay，不是 PermissionMode。Shift+Tab 三态轮 `Default → Auto → Graph → Default`（`/graph` 为非 TTY 对等物）；进 Graph 后**下一次 `run()` 装配**才生效（`run_graph` 由 handler gate 解锁、切换提示追加到 messages 末尾），过程中切换不拦、不中途重装配。ADR-0030；模型面表达方式经 ADR-0041 修订。
 _Avoid_: 第四种 PermissionMode；把 `src/harness/graph/` 写进 prompt；env gate 才注入；进图改 ask/auto；切模式当下 round 热替换工具面
 
-**run_graph**: 常驻注册的 ACI 工具——父代理声明 DAG，host 走 `validateGraph` → waves → `createSubAgentNodeExecutor`；图节点仍是前景 spawn。graph mode 关闭时由 handler 层 EXIT 拒绝调用，工具面不随模式增删（ADR-0041）。
-_Avoid_: 与 spawn_subagent 混名；默认任务进图；模型 import graph 模块
+**run_graph**: 常驻注册的 ACI 工具——父代理声明 DAG，host 走 `validateGraph` → waves → `createSubAgentNodeExecutor`；图节点仍是前景 spawn。graph mode 关闭时由 handler 层 EXIT 拒绝调用，工具面不随模式增删（ADR-0041）。跨回合权威不在单次回执里，见 **活图状态**。阶段 2 绕回仍用这一把，不另开工具（ADR-0061）。一段调用在跑时父代理不能并行干别的；最多主进程静默等待（ADR-0065）。
+_Avoid_: 与 spawn_subagent 混名；默认任务进图；模型 import graph 模块；把 condense JSON 当跨回合活图；为绕回另开一把图工具；给 run_graph 加 wait:false
+
+**活图状态**: 会话持有的那张可修订 DAG 及已完成节点——跨父代理回合、跨多次 `run_graph` 仍是同一张图；已完成在此冻结、不重演。不是 graph mode，也不是单次 `run_graph` 栈帧里的 `GraphExecution`。第一次交节点时建立；关 overlay 不销毁。ADR-0047 / ADR-0051。
+_Avoid_: 把 overlay 叫活图；live graph 当 graph mode 别名；图账本（易与 todo 账本混）；把 TUI `graph_progress` 当权威态；关 overlay 当清账本；compact 当丢图
+
+**外环修订**: 改活图剩余结构的刀口——一段 `run_graph` settle 或取消之后，由用户或主代理改 pending（含失败后加重要试格）。阶段 1 的失败再试是加新格，不是图上绕回。ADR-0048。
+_Avoid_: 同一次调用波间改图；每个节点唤醒主代理；把图内环当阶段 1 必达；说「无环就不算图」；阶段 1 单独立「外环次数」硬顶（ADR-0052）
+
+**剩余子图**: 外环交给 host 的那一截还要跑的 DAG（新节点与仍 pending 的节点）。已完成节点留在活图上、不出现在这次提交里。Host 按 id 冻结终态，禁止再跑。ADR-0050。
+_Avoid_: 每次把 done 节点再交一遍当合同；delta 算子（addEdge/removeNode）当阶段 1 主 API
+
+**图内绕回**: 阶段 2：同一次 `run_graph` 里沿边回到未冻结节点，**同一 id 再跑**；失败边也可指向尚未跑过的新格。回边由模型画在图上并**显式标明失败才走**；仅当该格 `NodeOutcome` 为 **failed** 时走，且失败后只启动**一个**格子；done 走前进边；skipped 不走回边。去向交图时写死，host 不选路。校验是图上普通节点，不是 host 暗闸。有圈却未标明回边、或回边指向已冻结 id、或边指向本次没有的 id，则该次调用拒绝。阶段 1 看见失败边标记亦拒。ADR-0053–0067。
+_Avoid_: 绕回却换新 id；阶段 1 放开 cycle；done 节点再进圈；host 失败时暗接上游；结束不论成败都走回边；host 另跑测试来决定绕不绕；靠检测环猜哪条是回边；未标明的圈硬跑；回边指到 done 却静默丢边；一格失败同时开多个格子；host 按失败内容改去向；指向不存在的 id 还 invent 节点；阶段 1 丢掉失败标记硬跑
 
 **外挂自检层 (external self-check layer)**: (#128 决议 D1) orchestrator 层的 advisor 形态验证闭环——`run()` 以完成收尾后执行项目 settings 声明的验证命令，失败则把结构化错误经 `priorMessages` 注入并再次 `run()`；引擎零改动、停止语义保持冻结，与引擎自带的工具级实时纠错（第一层）互补而非替代。
 _Avoid_: 把它当引擎内行为（enforcer 形态）；与第一层工具错误自动回流混同；说成"Stop 钩子拦截循环"
@@ -429,10 +441,28 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **状态栏 vs context usage (display)**: 状态栏是给模型的现势快照；context usage (display) 是给人看的 token 用量条
 - **状态栏 vs 环境现势**: 状态栏给模型（`last_tool` + open todos）；环境现势给人（cwd/git/diff），不进状态栏 user 消息（#655）
 - **todo 账本 vs 状态栏**: 账本是磁盘现行 `todos.md`；栏只投影其未勾行。replace 当跳不另灌列表；后续回合靠栏，不靠把快照拼进 messages（ADR-0046）
-- **todo 账本 vs run_graph**: 轻规划/清单在主 loop 的 todo；DAG 与日后 Dynamic Pipeline / replan 在图上，不把 todo 当管线
+- **todo 账本 vs run_graph**: 轻规划/清单在主 loop 的 todo；DAG 与长程管线在图上，不把 todo 当管线
+- **活图状态 vs graph mode**: 活图是会话里那张图的权威账本；graph mode 只是能否调用 `run_graph` 的 overlay。关 overlay 不停用账本，直到 `/reset` 或会话结束（ADR-0051）
+- **活图状态 vs run_graph**: `run_graph` 是往活图上跑/修订的入口；单次 tool_result 不是跨回合真相
+- **活图状态 vs todo 账本**: 清单可 replace、不当管线；活图冻结已完成节点并修订剩余 DAG（ADR-0046 / ADR-0047）
+- **外环修订 vs 图内环**: 外环是阶段 1 改 pending（仍是 DAG）；图内环是阶段 2 把绕回画进拓扑。阶段 1 不设外环次数硬顶，effort 缝留给阶段 2（ADR-0048 / ADR-0052）
+- **图内绕回 vs 剩余子图**: 绕回是一段调用内同一 id 再跑；剩余子图是调用之间只交还要跑的节点（ADR-0050 / ADR-0053）
+- **显式回边 vs 从环推断**: 失败才走的边必须写明；不因图上有圈而猜哪条是回边（ADR-0058）
+- **未标圈 vs 合法回边图**: 圈上该走的回边没写明则该次调用拒，不当 DAG 硬跑（ADR-0059）
+- **回边 vs 已冻结 id**: 回边不得指向 done；指向则该次调用拒，不丢边硬跑（ADR-0060）
+- **一条失败边 vs 扇出**: 一格 failed 只启动一个格子；要串行再做就画成链（ADR-0062）
+- **失败去新格 vs 回走旧格**: 两种都由模型在交图时指定；host 不选路（ADR-0063）
+- **未知 id vs 合法边**: 边的终点必须出现在这次提交的节点里，否则拒（ADR-0066）
+- **阶段 1 vs 失败边标记**: 阶段 1 看见标记就拒，不忽略后当 DAG 跑（ADR-0067）
+- **effort 熔断 vs 外环次数**: 阶段 2 按单次调用每 id 进入次数防空转，默认阈 8；阶段 1 不设外环次数硬顶（ADR-0052 / ADR-0057 / ADR-0064）
+- **外环修订 vs run_graph**: `run_graph` 跑当前这一段 DAG；外环是这段结束之后改活图
+- **剩余子图 vs 活图状态**: 剩余子图是这一次还要跑的；活图是含已完成在内的全账本（ADR-0050）
+- **plan/实施/replan vs 活图状态**: 前者是主代理认知循环；后者是有依赖、要冻结时的落地，不是规划的超集（ADR-0049）
 - **沙箱纪律 vs 前景/后景 spawn**: 沙箱纪律约束 `bash` 前台/后台围栏；前景/后景 spawn 是 `spawn_subagent` 的等待契约（ADR-0014）
 - **graph mode vs PermissionMode**: graph mode 是编排 overlay；PermissionMode 是 mutating 问/拒/放行。进 Graph 冻结当时 permission，不把 Graph 写入 `PERMISSION_MODES`
 - **run_graph vs spawn_subagent**: 有依赖的多节点走 `run_graph`；单次派活仍 `spawn_subagent`。图节点内部仍是前景 spawn，不经父代理再调 spawn 工具
+- **run_graph vs 图内绕回**: 绕回仍走同一把 `run_graph`；阶段差在 host 认不认标明的回边，不在工具名（ADR-0061）
+- **run_graph vs 后景 spawn**: 图没有 `wait:false`；跑图时父代理不能并行干别的，最多主进程静默等 settle（ADR-0065）
 - **父可见信封 vs 磁盘产物**: 父读摘要和路径；写文件以工作区为准，不靠把全文塞进 tool_result
 - **子代理并发上限 vs 派发张数**: 上限是帽子；张数由模型按任务拆，说明书写独立才并行
 - **说明书静态层 vs memory_layer 整段开关**: 通用 worker 要说明书、不要记忆工具；禁止再靠 memoryEnabled=false 把 AGENTS.md 一起跳过

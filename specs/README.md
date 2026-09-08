@@ -23,6 +23,8 @@
 - `continue-pending.md` — 截断后续跑（`/continue` + CLI/TUI pending NL；Web 仅 slash+POST；同一 conversationId；非 ACI；#686 / map #270 / Resolution #277）
 - `672-fault-recovery.md` — FaultClass + ModelAdapter 传输重试 + 本 run 工具环检测（`fused`）；map #672；ADR-0029
 - `545-d-alpha-graph-mode.md` — D-α V1 graph mode overlay + `run_graph`（#545 CLOSED / ADR-0030；草稿 PR #698–#707 对照可摘，不合整链）
+- `live-graph-phase1.md` — 会话活图 + 外环剩余子图 + id 冻结（#929；ADR-0047–0052 / 0065–0067）；plan: `plans/live-graph-phase1.md`（无 GitHub tracer）
+- `live-graph-phase2.md` — `onFailure` 失败边 + 同 id 再跑 + effort 8（#929；ADR-0053–0064）；plan: `plans/live-graph-phase2.md`（无 GitHub tracer；阶段 1 全绿后实施）
 - `todo-ledger-replace.md` — 主会话 `todo_write` replace + 同目录快照（ADR-0046 / [#903](https://github.com/winter6205/iknow/issues/903)）；plan: `plans/todo-ledger-replace.md`；图上 DP/replan 见 [#904](https://github.com/winter6205/iknow/issues/904)
 
 ### TUI
