@@ -56,14 +56,14 @@ _Avoid_: 固定条数尾窗；行账 / 行窗口；把 LLM `/compact` 当 UI 树
 **fence display cap**: TUI markdown 围栏在 OpenTUI 树上只挂前 32 行，溢出用 `还有 N 行`；会话正文仍是全文。与 write/edit 完成态 6 行预览窗分开。
 _Avoid_: 用只挂最近 N 条消息代替围栏截行；把围栏窗改成 6；为省树而删 session 里的代码
 
-**result preview（结果预览）**: 工具调用标题行下方的截断输出块——`⎿` 风格前缀、上限 5 行、bash 取尾部、ANSI 透传。只画在 **keep class** 的成功 bash 上；dim 只用于这种成功尾巴，不用来藏失败或点名着色。数据走 handler envelope 的 `meta` 观测旁路（plain-string tool output / #298），永不进模型视野；与 `fence display cap`（32 行）、write/edit 6 行预览并列三类显示窗。
-_Avoid_: 把 meta 字段经 encodeToolResults 带进 model tool_result；把 5 行窗与围栏 32 行或 write/edit 6 行混用；渲染空预览块；失败或 retract class 仍画 dim `⎿`
+**result preview（结果预览）**: live running 时工具标题下的截断输出窗（bash 尾部最多 5 行、ANSI 透传、装饰前缀）；成功落定后不画。失败走 **failure overlay** 一行短错误，不走本窗。数据走 handler envelope 的 `meta` 观测旁路，永不进模型视野。
+_Avoid_: 成功 bash 留五行走；失败或 retract 仍画 dim 预览尾巴；把 meta 经 encodeToolResults 带进 model tool_result；与围栏 32 行或 write/edit 6 行混用
 
 **settled appearance（落定态）**: TUI 里工具从 live 转为 idle 之后的可见性策略——按类留下足迹、收回去、或点名着色。不是「有已完成工具就整轮折成计数行」。
 _Avoid_: 一律折叠；把 live 过程叫落定态；D3 整轮藏标题
 
-**keep class（留）**: 落定后仍画出标题行的工具类（bash / write / edit / 会话动作）。bash 成功时标题带命令，并可带结果预览五行走；其它留类默认只留标题。
-_Avoid_: 只留 dim `⎿`、把标题藏进折叠计数
+**keep class（留）**: 落定后仍画出标题行的工具类（bash / write / edit / 会话动作）。bash 成功只留带命令的标题，不带结果预览；write/edit 另留完成态 6 行预览；其余留类默认只留标题。
+_Avoid_: 成功 bash 五行走；只留 dim 预览尾巴；把标题藏进折叠计数
 
 **retract class（收）**: 落定后标题和预览都从屏幕拿掉、只进折叠计数的工具类（读取 / 搜索 / 查询）。未知未注册工具缺省也是收。
 _Avoid_: 藏标题留预览；给 `read_file` 加内容预览；把失败的收类折进计数
@@ -77,8 +77,8 @@ _Avoid_: 失败跟成功走同一收；把失败当成第四类工具表；失�
 **thinking duration（思考时长）**: assistant 消息的落盘属性——adapter 流式路径测量（首条 `thinking_delta` 至首个非思考增量），`thinkingMs` 经 commit 钩子随事件链落盘，`SessionFileV1` 上照 `messageCreatedAt` 模式重建并行数组（additive，schema 版本不升）；折叠簇时长 = 簇内消息求和。非 UI 测量值。
 _Avoid_: TUI 墙上时钟副产物（只活当前轮/重启即失/跨会话串味）；挂在 thinking 内容块上（污染 provider replay）；旧会话回填；`thinkingMs <= 0` 或非有限数落盘（字段缺席）
 
-**unit fold**: TUI 把思考段和 retract-class 工具按**已完成单元**收成折叠行，包括 turn 仍在 `running-fg` 的时候；历史 retract 折叠不随当前 turn 的 retract 计数开关。
-_Avoid_: 只在 idle 才折叠；inLastTurn；用末轮 `turnToolTotal` 关掉全 transcript 折叠
+**unit fold**: TUI 把每一段已完成的思考、以及成功的 retract-class 工具，按**出现顺序原位**收成折叠行（一段思考 → 一行 `思考了 N 秒` → 随后正文或工具；下一轮模型再思考则再折一行）。turn 仍在 `running-fg` 时已完成单元也要折；历史段不随当前 live 思考开关。无秒数不画该行、不回落 `[思考]`；思考正文默认收，Ctrl+O 展开。
+_Avoid_: 整轮只留一行秒数；把秒数只挂在 final assistant / 末位工具簇；流式思考钉在 transcript 顶层摊全文；只在 idle 才折叠；inLastTurn；用末轮 `turnToolTotal` 关掉全 transcript 折叠；同一段思考再画一份 per-message 摘要
 
 **skill-load display projection**: 给人看的 skill-load 是 `loading skill <name>` 芯片，外加用户 remainder（若有）；SKILL 正文只留在进模型的 skill-load 信封里，不画成 user 气泡。
 _Avoid_: 把 `[skill-load name=]` 正文当作用户键入；加载技能；turn 结束后用落盘信封替换显示占位
@@ -453,7 +453,7 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **worktree isolation mode vs workspaceRoot vs workspace（serve 主根）**: git worktree 是会话级 mutate 物理隔离；`workspaceRoot` 是 per-root 状态锚（ADR-0019）；serve 主根是显式选定锚（ADR-0023）。rebind 只切本会话生效根，不改锚规则本身
 - **session worktree rebind vs taskRoot（活值）**: rebind 是动作（缝成功 resolve 的那一刻），taskRoot 是该动作写入的活 cell；动作对下一波 tool calls 生效（波快照边界），cell 读取面始终回答「当前生效根」
 - **task worktree label vs conversationId**: label 是文件夹名与 enter 定位；conversationId 是归属身份，不写进目录名
-- **settled appearance vs result preview**: 落定三类决定谁还上屏；五行走 ANSI 预览只作用于 keep class 的成功 bash
+- **settled appearance vs result preview**: 落定三类决定谁还上屏；结果预览只属于 live running，成功 bash 落定后不画
 - **failure overlay vs retract class**: 失败覆盖「收」，失败工具出独立行，不折进计数
 - **accent class vs failure overlay**: 成功点名走 accent；失败时 error 色优先，不用品牌色表示出错
 - **user.md vs user-level AGENTS.md vs 项目 AGENTS.md**: 画像与用户级行为约定同根 `~/.iknow/`、对所有项目生效；项目仓库根 `AGENTS.md` 叠在用户级之上且项目优先；都不是记忆库事实文件

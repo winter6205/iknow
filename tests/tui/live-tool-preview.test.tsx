@@ -617,10 +617,10 @@ describe("liveToolPreviewTextLines (#589 贴底尾巴不含成功只读完成行
     expect(text).not.toMatch(/read_file · .* · ok/);
   });
 
-  test("SC4 live 失败件：一行短错误截断长回执，不堆 dim ⎿ 多行", () => {
+  test("SC4 live 失败件：一行短错误截断长回执，不堆 dim 预览多行", () => {
     // D5（spec specs/tui-tool-settled-appearance.md）：live 失败件同样走
     // 一行短错误 —— message 长回执被 clipErrorLine 截成单行，且不再画
-    // dim ⎿ stderr 预览（失败件 resultPreviewOf 恒 empty）。
+    // dim stderr 预览（失败件 resultPreviewOf 恒 empty）。
     const run: LiveToolRun = {
       id: "tu-bash-fail-live2",
       name: "bash",
@@ -641,7 +641,7 @@ describe("liveToolPreviewTextLines (#589 贴底尾巴不含成功只读完成行
     expect(rows[1]!.startsWith("[worktree_isolation]")).toBe(true);
     expect(rows[1]!.endsWith("…")).toBe(true);
     // 不堆 stderr 长文。
-    expect(rows.some((r) => r.includes("⎿"))).toBe(false);
+    expect(rows.some((r) => r.includes("> "))).toBe(false);
     expect(rows.some((r) => r.includes("boom-"))).toBe(false);
   });
 });
@@ -663,18 +663,18 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     // 首行：完成态摘要（#tui-render-overhaul T3:无 [完成] 前缀）
     expect(rows[0]).toBe("bash · ls");
     expect(rows[0]?.includes("[完成]")).toBe(false);
-    // 尾 5 行带 ⎿ 前缀
-    expect(rows).toContain("⎿ out-3");
-    expect(rows).toContain("⎿ out-7");
+    // 尾 5 行带 > 前缀
+    expect(rows).toContain("> out-3");
+    expect(rows).toContain("> out-7");
     // 早于尾窗的不出现
-    expect(rows.some((r) => r.includes("⎿ out-0"))).toBe(false);
+    expect(rows.some((r) => r.includes("> out-0"))).toBe(false);
     // 溢出 +N 行
     expect(rows.some((r) => r.includes("… +") && r.includes("行"))).toBe(true);
   });
 
   test("完成态 bash 失败（status=failed）:不画 stderr 预览（D5 一行短错误）", () => {
     // D5（spec specs/tui-tool-settled-appearance.md）：失败件核置
-    // showPreview 假 —— 失败只有一行截断短错误，无 dim ⎿ 预览块。
+    // showPreview 假 —— 失败只有一行截断短错误，无 dim 预览块。
     const run: LiveToolRun = {
       id: "tu-bash-fail-live",
       name: "bash",
@@ -685,11 +685,11 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     };
     const rows = liveToolPreviewTextLines(run, 80);
     expect(rows[0]).toBe("[失败] bash · false");
-    expect(rows.some((r) => r.includes("⎿"))).toBe(false);
+    expect(rows.some((r) => r.includes("> "))).toBe(false);
     expect(rows.some((r) => r.includes("boom-"))).toBe(false);
   });
 
-  test("完成态 bash 空 stdout/全空白：仅状态行,无 ⎿", () => {
+  test("完成态 bash 空 stdout/全空白：仅状态行,无预览前缀行", () => {
     const run: LiveToolRun = {
       id: "tu-bash-empty",
       name: "bash",
@@ -703,10 +703,10 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     expect(rows[0]).toBe("bash · x");
     expect(rows[0]?.includes("[完成]")).toBe(false);
     expect(rows).toHaveLength(1);
-    expect(rows.some((r) => r.includes("⎿"))).toBe(false);
+    expect(rows.some((r) => r.includes("> "))).toBe(false);
   });
 
-  test("完成态 bash ANSI 透传:SGR 序列在 ⎿ 行内原样保留", () => {
+  test("完成态 bash ANSI 透传:SGR 序列在前缀行内原样保留", () => {
     const run: LiveToolRun = {
       id: "tu-bash-ansi-live",
       name: "bash",
@@ -716,10 +716,12 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
       stdout: "\x1b[31mERROR\x1b[0m line",
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    expect(rows.some((r) => r.includes("ERROR") && r.includes("⎿"))).toBe(true);
+    expect(rows.some((r) => r.includes("ERROR") && r.includes("> "))).toBe(
+      true
+    );
   });
 
-  test("live box 帧：bash 尾部预览 ⎿ 行出现", async () => {
+  test("live box 帧：bash 尾部预览 > 前缀行出现", async () => {
     const run: LiveToolRun = {
       id: "tu-bash-box",
       name: "bash",
@@ -733,12 +735,12 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     // #tui-render-overhaul T3:成功态无 [完成] 前缀。
     expect(frame).toContain("bash · ls");
     expect(frame.includes("[完成]")).toBe(false);
-    expect(frame).toContain("⎿ file-a");
-    expect(frame).toContain("⎿ file-c");
+    expect(frame).toContain("> file-a");
+    expect(frame).toContain("> file-c");
     await setup.renderer.destroy();
   });
 
-  test("running 态 bash:不画 ⎿ 预览（结果预览与状态行都不在 running 时挂）", () => {
+  test("running 态 bash:不画预览前缀行（结果预览与状态行都不在 running 时挂）", () => {
     const run: LiveToolRun = {
       id: "tu-bash-runn",
       name: "bash",
@@ -747,7 +749,7 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     };
     const rows = liveToolPreviewTextLines(run, 80);
     expect(rows[0]).toBe("[运行中] bash · ls");
-    expect(rows.some((r) => r.includes("⎿"))).toBe(false);
+    expect(rows.some((r) => r.includes("> "))).toBe(false);
     expect(liveToolPreviewRows(run, 80)).toBe(1);
   });
 
@@ -762,8 +764,8 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
       // （live previewer 走 resultText，未挂旁路）。
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    // 缺 resultText → 不画 ⎿
-    expect(rows.some((r) => r.includes("⎿"))).toBe(false);
+    // 缺 resultText → 不画预览前缀行
+    expect(rows.some((r) => r.includes("> "))).toBe(false);
   });
 
   test("SC5 live accent 成功：skill 完成行走 accent 色（非 dim）", async () => {

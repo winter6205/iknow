@@ -446,6 +446,125 @@ test("idle：同一 assistant 消息内按 tool/text 位置渲染 keep 标题", 
   await toolTextTool.setup.renderer.destroy();
 });
 
+test("idle：同一 assistant 消息拆成两个 tools 簇 → 「思考了 N 秒」不重复画（同消息去重）", async () => {
+  // CONTEXT.md unit fold(2026-09-08 操作员纠正):一段思考一行秒数;
+  // 去重单位 = 同一消息内的重复展示。同一条 assistant 消息内
+  // tool → text → tool 切出两个 tools 簇,两簇 anchor 是同一
+  // messageIndex → 簇秒数相同 → 不去重会重复画同一秒数。不同 assistant
+  // 消息之间不互相吞(见 thinking-fold-placement.test.tsx 分段各自画)。
+  const messages: AnthropicNativeMessage[] = [
+    { role: "user", content: [{ type: "text", text: "q" }] },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "第一段思考", signature: "s1" },
+        {
+          type: "tool_use",
+          id: "tu-m1",
+          name: "bash",
+          input: { command: "pwd" },
+        },
+        { type: "text", text: "中段说明" },
+        {
+          type: "tool_use",
+          id: "tu-m2",
+          name: "bash",
+          input: { command: "ls" },
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "tu-m1", content: "ok" },
+        { type: "tool_result", tool_use_id: "tu-m2", content: "ok" },
+      ],
+    },
+  ];
+  const thinkingMs: ReadonlyArray<number | null> = [null, 29000, null];
+  const setup = await testRender(
+    <ChatView
+      session={sessionWith(messages, thinkingMs)}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  const foldSecondsLines = frame
+    .split("\n")
+    .filter((l) => /思考了\s+\d+\s+秒/.test(l));
+  expect(foldSecondsLines).toHaveLength(1);
+  await setup.renderer.destroy();
+});
+
+test("idle：无秒数（thinkingMs 全 null）→ 无「思考了」行、无 [思考] 回落、无思考正文", async () => {
+  // CONTEXT.md unit fold:无秒数（thinkingMs 缺席/非有限）→ 不画该行、
+  // 不回落 `[思考]`、也不画思考正文（折叠态默认收）。
+  const messages: AnthropicNativeMessage[] = [
+    { role: "user", content: [{ type: "text", text: "q" }] },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "不该被看见的思考正文", signature: "s1" },
+        { type: "text", text: "回答正文" },
+      ],
+    },
+  ];
+  const thinkingMs: ReadonlyArray<number | null> = [null, null, null];
+  const setup = await testRender(
+    <ChatView
+      session={sessionWith(messages, thinkingMs)}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame.includes("思考了 ")).toBe(false);
+  expect(frame.includes("[思考]")).toBe(false);
+  expect(frame.includes("不该被看见的思考正文")).toBe(false);
+  // 正文照常可见。
+  expect(frame).toContain("回答正文");
+  await setup.renderer.destroy();
+});
+
+test("idle：Ctrl+O 展开 → 思考正文可见", async () => {
+  // CONTEXT.md unit fold:正文默认收,Ctrl+O 展开后 thinking 明文可见,
+  // 不论该消息有无落盘 thinkingMs。
+  const messages: AnthropicNativeMessage[] = [
+    { role: "user", content: [{ type: "text", text: "q" }] },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "展开后可见的思考正文", signature: "s1" },
+        { type: "text", text: "回答正文" },
+      ],
+    },
+  ];
+  const setup = await testRender(
+    <ChatView
+      session={sessionWith(messages, [null, null, null])}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={true}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("展开后可见的思考正文");
+  expect(frame).toContain("回答正文");
+  await setup.renderer.destroy();
+});
+
 test("idle：无历史 activity 时已完成 live retract 工具收出 tail（keep 留标题）", async () => {
   // D3:已完成 retract（read_file）进折叠计数、离开尾巴；keep（bash）
   // 标题独立留 —— tail 里不出现 live 完成形态 `· ok` 尾缀。
@@ -495,7 +614,8 @@ test("idle：无历史 activity 时已完成 live retract 工具收出 tail（ke
 
 test("idle：SC3 一轮成功 read_file + 成功 bash → bash 标题留、read 收进计数", async () => {
   // spec SC3：成功 read_file（retract）→ 无标题、无 ⎿ 预览、进折叠计数
-  // `read_file × 1`；成功 bash（keep）→ 标题（及预览）留，不进计数。
+  // `read_file × 1`；成功 bash（keep）→ 标题留、不带结果预览（CONTEXT
+  // keep class：bash 成功只留带命令的标题），不进计数。
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -544,9 +664,12 @@ test("idle：SC3 一轮成功 read_file + 成功 bash → bash 标题留、read 
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // bash keep：标题留、成功预览（⎿）留。#tui-render-overhaul T3:无 [完成] 前缀。
+  // bash keep：标题留、结果预览不留（CONTEXT keep class：成功 bash 不带
+  // 结果预览；result preview 只属于 live running）。#tui-render-overhaul
+  // T3:无 [完成] 前缀。
   expect(frame).toContain("bash · pwd");
-  expect(frame).toContain("⎿ /tmp");
+  expect(frame.includes("⎿")).toBe(false);
+  expect(frame.includes("⎿ /tmp")).toBe(false);
   expect(frame.includes("[完成]")).toBe(false);
   // read_file retract：无标题、无预览。
   expect(frame.includes("read_file ·")).toBe(false);

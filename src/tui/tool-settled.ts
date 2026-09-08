@@ -124,8 +124,11 @@ export function settledClassOf(name: string): SettledClass {
 function slotForClass(cls: SettledClass): SettledSlot {
   switch (cls) {
     case "keep":
-      // D4：keep 留标题；showPreview 由调用方预览通道再过滤（write/edit 走
-      // 既有 6 行窗、bash 走结果五行走、会话动作无预览内容自然为空）。
+      // D4 keep：标题留；showPreview 由调用方预览通道再过滤。
+      // docs/CONTEXT.md keep class：bash 成功只留带命令的标题（不带结果
+      // 预览），write / edit 留完成态 6 行预览；其余 keep（bash_stop /
+      // todo_write / memory_save）无预览内容自然为空。「谁真留预览」由
+      // KEEP_WITH_PREVIEW 决定（bash 不在其中，仅 write_file / edit_file）。
       return {
         showTitle: true,
         showPreview: true,
@@ -179,9 +182,10 @@ const RUNNING_SLOT: SettledSlot = {
   color: "default",
 };
 
-/** D4 中带预览足迹的 keep 工具（bash 结果预览 / write·edit 既有预览窗）。 */
+/** D4 中带预览足迹的 keep 工具（write·edit 既有 6 行预览窗）。
+ *  bash 已不在集合 —— docs/CONTEXT.md keep class 收口：成功 bash 只留
+ *  带命令的标题、不带结果预览（result preview 只属于 live running）。 */
 const KEEP_WITH_PREVIEW: ReadonlySet<string> = new Set([
-  "bash",
   "write_file",
   "edit_file",
 ]);
@@ -201,7 +205,9 @@ export function deriveSlot(name: string, state: SettledState): SettledSlot {
   if (cls === "subagent") return KEEP_TITLE_ONLY_SLOT;
   if (cls === "retract") return RETRACT_SLOT;
   if (cls === "accent") return ACCENT_SLOT;
-  // keep 内部再分：bash / write / edit 带预览足迹，其余只留标题（D4）。
+  // keep 内部再分：write / edit 带 6 行预览足迹，其余只留标题（D4）。
+  // bash 成功落定走 KEEP_TITLE_ONLY_SLOT（CONTEXT keep class：只留带命令
+  // 的标题）—— 与 bash_stop / todo_write / memory_save 同形态。
   return KEEP_WITH_PREVIEW.has(name)
     ? KEEP_WITH_PREVIEW_SLOT
     : KEEP_TITLE_ONLY_SLOT;

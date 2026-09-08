@@ -340,23 +340,16 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       running,
       turnToolTotal,
     });
-    // D3 (thinking-fold-placement):整 turn 折叠秒数归属 —— loop-engine 单
-    // commit 点(loop-engine.ts:2016-2020)只把 thinkingMs 挂在 final assistant
-    // 索引;非 final assistant 的 thinkingMs 全为 null。当折叠簇 anchor ≠
-    // final 时,按 anchor 求和得 0,导致 final 的思考秒数漂到 per-message
-    // ThinkingSummary 处与簇折叠行错位/重复。
-    // 不变式:整 turn 的思考秒数在折叠行只出现一次、挂在与思考实际发生的
-    // assistant 消息最近的簇 fold 行 —— 实现 = 末位 tool 簇在 anchor 自身
-    // thinkingMs 为 0 时,fall back 到 final 的 thinkingMs(独占,不重复;
-    // 前序簇继续走纯 anchor 求和,避免重复计数)。
-    const lastAssistantMessageIndex = (() => {
-      for (let i = visibleMessages.length - 1; i >= 0; i--) {
-        const m = visibleMessages[i];
-        if (m !== undefined && m.role === "assistant") return i;
-      }
-      return -1;
-    })();
-    const finalThinkingMs = thinkingMsAtVisible(lastAssistantMessageIndex);
+    // CONTEXT.md unit fold(2026-09-08 操作员纠正):一段思考完成 → 在该段
+    // 原位折一行「思考了 N 秒」→ 随后正文或工具;同一用户任务里下一段思考
+    // 再折一行。秒数来自对应 assistant 消息自己的 thinkingMs(per-message
+    // 并行数组),不跨段归并、不把 final 秒数贴到前段/末位工具簇。
+    // 旧「整轮收敛」(consumedThinkingMessageIndices 整回合吞秒 +
+    // finalThinkingMs 末位簇 fallback)是对合同的误读,整体删除。
+    // 已画出「思考了 N 秒」的 assistant messageIndex 集合 —— 同一消息内的
+    // 多个 tools 簇(tool → text → tool)共享 thinkingMs,后续簇按 0 计,
+    // 同一消息内不重复画;不同 assistant 消息之间不互相吞,各画各的。
+    const drawnThinkingForMessageIndex = new Set<number>();
     // 每簇独立的折叠行（思考秒数 = thinkingMs[anchorMsgs] 求和 → 秒）。
     // plans T1:`if (showTurnFold)` 包裹删除 —— per-segment 闸门
     // `shouldShowRetractFold` / `shouldShowThinkingFold` 与 running 解耦,
@@ -376,20 +369,19 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           segmentIndex === lastSegmentIndex
             ? mergeToolUseCounts(segment.entries, liveCompletedCounts)
             : segment.entries;
-        // 折叠簇思考秒数：thinkingMs[anchorMsgs] 求和 → 秒。
-        // anchorMsgs = 该簇的 assistant messageIndex 序列(单消息簇 = 单元素)。
-        // thinking-fold-placement:末位 tool 簇 anchor ≠ final 且 anchor 自身
-        // thinkingMs 为 0 时,归入 final 的 thinkingMs(独占展示位置,避免
-        // 漂到 per-message ThinkingSummary);前序簇继续按 anchor 求和(若有
-        // 多个独立 thinkingMs 已在测试 2 验证「严格归属到 anchor」不变式)。
+        // 折叠簇思考秒数 = 该段 anchor 消息自己的 thinkingMs(严格归属,
+        // 不跨段归并)。多个 assistant 消息 → 各自一行;无秒数段 → 0 →
+        // 只画工具计数行(或不画)。
         let clusterMs = thinkingMsAtVisible(segment.messageIndex);
+        // 同消息去重:同一 assistant messageIndex 拆出的多个 tools 簇
+        // (tool → text → tool)共享同一 thinkingMs,重复展示时后续簇按 0
+        // 计(只画工具计数)。去重单位 = 同一消息内的重复展示;不同
+        // assistant 消息之间不互相吞,各画各的。
         if (
-          clusterMs === 0 &&
-          segmentIndex === lastSegmentIndex &&
-          segment.messageIndex !== lastAssistantMessageIndex &&
-          finalThinkingMs > 0
+          clusterMs > 0 &&
+          drawnThinkingForMessageIndex.has(segment.messageIndex)
         ) {
-          clusterMs = finalThinkingMs;
+          clusterMs = 0;
         }
         const clusterSeconds = thinkingMsToSeconds(clusterMs);
         const segmentRetractTotal = entries.reduce((n, e) => n + e.count, 0);
@@ -411,16 +403,19 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         const lines = formatTurnActivityFold(clusterSeconds, entries);
         if (lines.length > 0) {
           foldLinesBySegmentIndex.set(segmentIndex, lines);
+          // 簇实际用上秒数(>0)才登记本消息已画 —— 0 秒簇不会画
+          // 「思考了 N 秒」,不占同消息去重的位置。
+          if (clusterSeconds > 0) {
+            drawnThinkingForMessageIndex.add(segment.messageIndex);
+          }
         }
       }
-      // 无工具段但有已完成的 live 工具 / final thinkingMs > 0 → 把折叠行
-      // 挂到最近的 text 段尾。thinking-fold-placement:扩展触发条件 —
-      // final assistant 思考秒数(落盘 thinkingMs[final])在场时,即使无
-      // live 已完成工具,也要把折叠行挂出,避免 final 的思考秒数丢失。
-      // plans T1:fallback 路径同样与 running 解耦 —— final 的 thinkingMs
-      // 冻结后,即便 turn 仍在 running,「思考了 N 秒」也要立刻可见。
-      const fallbackTrigger =
-        liveCompletedCounts.length > 0 || finalThinkingMs > 0;
+      // 无工具段但有已完成的 live 工具 → 把折叠行挂到最近的 text 段尾。
+      // 秒数只用该 text 段自身消息的 thinkingMs(thinkingMsAtVisible)。
+      // 不再依赖 finalThinkingMs —— final 只含 text 时,其思考秒数由
+      // per-message ThinkingSummary 原位承担,不外挂到 fallback 行。
+      // plans T1:fallback 路径与 running 解耦 —— 已完成单元照折。
+      const fallbackTrigger = liveCompletedCounts.length > 0;
       if (foldLinesBySegmentIndex.size === 0 && fallbackTrigger) {
         const lastText = activitySegments
           .map((segment, segmentIndex) => ({ segment, segmentIndex }))
@@ -470,6 +465,19 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           seg.messageIndex >= lastQueryVisible
         );
       });
+    // 当前 turn 是否已有带思考秒数的折叠行:有 → live thinking 面板让位
+    // (折叠行已替代「思考了 N 秒」表面);无 → 面板保留。旧判定
+    // `finalThinkingMs > 0` 是整轮收敛残留,改按当前 turn fold 行实际内容。
+    const currentTurnHasThinkingFold =
+      lastQueryVisible >= 0 &&
+      Array.from(foldLinesBySegmentIndex.entries()).some(
+        ([segmentIndex, lines]) => {
+          const seg = activitySegments[segmentIndex];
+          if (seg === undefined || seg.kind !== "tools") return false;
+          if (seg.messageIndex < lastQueryVisible) return false;
+          return lines.some((line) => line.includes("思考了 "));
+        }
+      );
     // thinking-fold-placement:折叠行已展示的 thinkingMs 值集合（ms）—— 按
     // 折叠行文案 `思考了 N 秒` 反推;per-message ThinkingSummary 仅在该值
     // 未被任何 fold 行覆盖时显示,避免重复 / 串位（fold 行 0-多次）。
@@ -504,17 +512,29 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       foldDisplayLines.length,
       turnToolTotal
     );
+    // T3（plans/tui-display-single-pipeline.md）：同一条工具调用只画一次。
+    // 历史 transcript 已含该 tool_use 块时,MessageBlocks 会按 slot 渲染
+    // 同一件（running 或落定态），tail 不得再叠一份完成标题。reference
+    // 去重以 tool_use id 为锚,全历史 id 集合一次派生(useMemo 稳定引用)。
+    // 实际 race 窗口:turnFinished 已 commit messages 而 liveToolRuns 尚未
+    // 清空(skipTurnRefresh / 刷新失败路径会残留);正常流中 commit 与清空
+    // 被 React 批处理合并,过滤为幂等 no-op。
+    const historyToolUseIds = useMemo(
+      () => toolUseIdsOf(visibleMessages),
+      [visibleMessages]
+    );
     const tailSlots = liveTailSlots(
-      collapseToolRows
-        ? liveToolRuns.filter(
-            (run) =>
-              run.status === "running" ||
+      liveToolRuns
+        .filter((run) => !historyToolUseIds.has(run.id))
+        .filter((run) =>
+          collapseToolRows
+            ? run.status === "running" ||
               !deriveSlot(run.name, {
                 running: false,
                 failed: run.status === "failed",
               }).inFoldCount
-          )
-        : liveToolRuns,
+            : true
+        ),
       deferredSegments
     );
     // #693 T1 D1：折叠行（思考了 N 秒 / bash × N）统一套壳，与
@@ -794,10 +814,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         {running &&
           deferredThinkingDrafts.length > 0 &&
           !currentTurnHasFold &&
-          !shouldShowThinkingFold({
-            running,
-            hasThinkingMs: finalThinkingMs > 0,
-          }) && (
+          !currentTurnHasThinkingFold && (
             <box flexDirection="column" width={contentWidth}>
               {thinkingExpanded ? (
                 <box width={contentWidth}>
