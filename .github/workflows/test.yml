@@ -109,6 +109,7 @@ jobs:
             --exclude tests/cli/tui-deps-subagent-trace-factory.test.ts \
             --exclude tests/cli/chat-subagent-trace.test.ts \
             --exclude tests/build-engine-hooks.test.ts \
+            --exclude tests/harness/build-engine-hooks.test.ts \
             --exclude tests/integration/mcp-chain.test.ts \
             --exclude tests/e2e/skill-mcp-acceptance.test.ts \
             --exclude tests/harness/build-engine.test.ts \
@@ -219,6 +220,7 @@ jobs:
             --exclude tests/cli/tui-deps-subagent-trace-factory.test.ts \
             --exclude tests/cli/chat-subagent-trace.test.ts \
             --exclude tests/build-engine-hooks.test.ts \
+            --exclude tests/harness/build-engine-hooks.test.ts \
             --exclude tests/integration/mcp-chain.test.ts \
             --exclude tests/e2e/skill-mcp-acceptance.test.ts \
             --exclude tests/harness/build-engine.test.ts \
