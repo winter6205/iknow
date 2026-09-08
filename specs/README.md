@@ -14,6 +14,7 @@
 ### 运行时核心
 
 - `security-guardrails.md` — 安全护栏（权限三层 · 沙箱 · 中断/超时）
+- `mutate-write-contract.md` — 可写合同与 hard-wall 层退休（ADR-0068；耐久写 = `taskRoot`；plan: `plans/mutate-write-contract.md`）
 - `trace-service.md` — trace 观测（JSONL + 查询 API · A-scope）
 - `query-trace-tool-results.md` — `query_trace` 从 llm_call.messages 投影 tool_result（不写 tool_call.result）；plan: `plans/query-trace-tool-results.md`
 - `trace-mcp-server.md` — stdio MCP server 暴露 trace 读侧三面（外部编码 agent 第三条读侧动线；#803）；v1.0 单工具 `query_trace`（plan: `plans/trace-mcp-server.md`）→ v1.1 按轴拆为 `list_sessions` / `query_trace` / `get_record`（plan: `plans/trace-mcp-read-side-split.md`）；承接 `query-trace-tool-results` 对 MCP 的 Out of scope
