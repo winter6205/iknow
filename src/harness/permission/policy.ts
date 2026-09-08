@@ -158,9 +158,13 @@ export function checkPermission(opts: CheckPermissionInput): PermissionOutcome {
   //    backstop and must run before mode resolution.
   for (const hardWall of opts.hardWalls) {
     if (hardWall.match(ctx)) {
+      // SC3: prefer the input-specific reason (carries the matched pattern
+      // id) over the static one when the hard-wall provides `reasonFor`.
+      const specific = hardWall.reasonFor?.(ctx);
+      const detail = specific ?? hardWall.reason;
       return {
         decision: "deny",
-        reason: `${HARD_WALL_DENY_PREFIX} ${hardWall.reason}`,
+        reason: `${HARD_WALL_DENY_PREFIX} ${detail}`,
       };
     }
   }
