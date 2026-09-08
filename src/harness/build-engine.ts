@@ -549,6 +549,15 @@ export async function buildHarnessEngine(
   // 二期 B7：上移到 LSP 装配之前 —— settings.lsp 注入 LspCtx（工具层超时/
   // 等待 + client idle sweep + disabledServers 过滤）。
   const settings = opts.settings ?? loadIknowSettings({ cwd, home: userHome });
+  // T6 (plans/write-situation-disclosure.md): worktree 隔离档上移到 settings
+  // 加载后立即算出 —— `subagentManager` 构造(line 617)需透传
+  // `isolationOn` 给 `createSubAgentManager`,manager.buildWorkerPayload
+  // 用它与 resolved sandboxRoot 算 `writeSituation` 进 envelope。
+  // 单一读取点不变(worktreeIsolation host + resolveWorktreeOnMutate),
+  // 仅位置前移 —— 装配期多算一次枚举(纯函数 O(1))。
+  const isolationHost = opts.worktreeIsolation;
+  const isolationEnabled =
+    isolationHost !== undefined && resolveWorktreeOnMutate(settings);
   // #251 LSP 联动缝:edit_file 写盘成功后由装配层注入 lspNotifier.invalidate
   // 作为 registry 的 onEdit 回调(notifier 内部 fire-and-forget + 失败降级,
   // 详见 src/harness/lsp/notifier.ts)。SSOT:LspCtx.directory 必须等于
@@ -663,6 +672,11 @@ export async function buildHarnessEngine(
           // 旧根里 def.sandboxRoot 的 prefix-of-parent 校验自动拒绝。
           sandboxRootCell: () => liveTaskRoot.read(),
           sandboxRoot,
+          // T6 (plans/write-situation-disclosure.md): 透传 worktree 隔离档
+          // —— manager.buildWorkerPayload 用它与 resolved sandboxRoot 一起
+          // 算 `writeSituation` 进 envelope；worker prior 据此渲染写根段。
+          // 判定源 = `isolationEnabled`(line 716 单一读取点),worker 不重判。
+          isolationOn: isolationEnabled,
           trace: opts.subagentTrace ?? createNoopTraceService(),
           diagnosticsDir:
             opts.subagentDiagnosticsDir ?? resolveSubagentTraceDir(),
@@ -710,12 +724,8 @@ export async function buildHarnessEngine(
   // 装配之前 —— T4 的 create-task-worktree ACI 工具与 mutate 门禁共用同一
   // 判定源（isolationEnabled），保证「工具在场 ⇔ 门禁已武装」；开关 OFF 时
   // 工具面与今日逐字节一致。开关只在启动加载点读一次（硬要求 9）。
-  // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）
-  // 已上移至 LSP 装配点之前（二期 B7：settings.lsp 注入 LspCtx），此处沿用
-  // 同一份 settings（line 398）。
-  const isolationHost = opts.worktreeIsolation;
-  const isolationEnabled =
-    isolationHost !== undefined && resolveWorktreeOnMutate(settings);
+  // T6: `isolationHost` / `isolationEnabled` 已上移至 settings 加载后
+  // (line 552 附近)—— subagentManager 构造需要透传 isolationOn。
   // T4 (plans/worktree-live-task-root.md §5 D1 / §6 T4) — single writer
   // seam wrap. Host `provision` / `enter` / `exit` are wrapped with
   // `withLiveTaskRootWrite` so successful resolutions update the live
