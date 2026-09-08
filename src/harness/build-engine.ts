@@ -381,6 +381,15 @@ export type BuiltEngine = EngineBundle & {
    */
   readonly liveTaskRoot?: LiveTaskRoot;
   /**
+   * T4 (plans/write-situation-disclosure.md) — worktree isolation 档判定结果
+   *（装配期一次性读取，`resolveWorktreeOnMutate(settings)`，硬要求 9）。hub
+   * `loadSkillBody`、ACI `skill()` 工具、chat-session rebind 注入三处消费
+   * 面用它算 `writeSituation(isolationOn, currentRoot)`——不重复读 settings
+   * 也避免宿主层重判。缺席（注入 deps 形态）→ 消费方默认按 `writable_main`
+   * 处理（与旧 build-engine 默认形态一致）。
+   */
+  readonly isolationOn?: boolean;
+  /**
    * TUI live flags for /memory. Present when surface is `tui` and the memory
    * layer is on. The TUI mutates this box on Esc; the hook reads it per turn.
    */
@@ -540,6 +549,15 @@ export async function buildHarnessEngine(
   // 二期 B7：上移到 LSP 装配之前 —— settings.lsp 注入 LspCtx（工具层超时/
   // 等待 + client idle sweep + disabledServers 过滤）。
   const settings = opts.settings ?? loadIknowSettings({ cwd, home: userHome });
+  // T6 (plans/write-situation-disclosure.md): worktree 隔离档上移到 settings
+  // 加载后立即算出 —— `subagentManager` 构造(line 617)需透传
+  // `isolationOn` 给 `createSubAgentManager`,manager.buildWorkerPayload
+  // 用它与 resolved sandboxRoot 算 `writeSituation` 进 envelope。
+  // 单一读取点不变(worktreeIsolation host + resolveWorktreeOnMutate),
+  // 仅位置前移 —— 装配期多算一次枚举(纯函数 O(1))。
+  const isolationHost = opts.worktreeIsolation;
+  const isolationEnabled =
+    isolationHost !== undefined && resolveWorktreeOnMutate(settings);
   // #251 LSP 联动缝:edit_file 写盘成功后由装配层注入 lspNotifier.invalidate
   // 作为 registry 的 onEdit 回调(notifier 内部 fire-and-forget + 失败降级,
   // 详见 src/harness/lsp/notifier.ts)。SSOT:LspCtx.directory 必须等于
@@ -654,6 +672,11 @@ export async function buildHarnessEngine(
           // 旧根里 def.sandboxRoot 的 prefix-of-parent 校验自动拒绝。
           sandboxRootCell: () => liveTaskRoot.read(),
           sandboxRoot,
+          // T6 (plans/write-situation-disclosure.md): 透传 worktree 隔离档
+          // —— manager.buildWorkerPayload 用它与 resolved sandboxRoot 一起
+          // 算 `writeSituation` 进 envelope；worker prior 据此渲染写根段。
+          // 判定源 = `isolationEnabled`(line 716 单一读取点),worker 不重判。
+          isolationOn: isolationEnabled,
           trace: opts.subagentTrace ?? createNoopTraceService(),
           diagnosticsDir:
             opts.subagentDiagnosticsDir ?? resolveSubagentTraceDir(),
@@ -701,12 +724,8 @@ export async function buildHarnessEngine(
   // 装配之前 —— T4 的 create-task-worktree ACI 工具与 mutate 门禁共用同一
   // 判定源（isolationEnabled），保证「工具在场 ⇔ 门禁已武装」；开关 OFF 时
   // 工具面与今日逐字节一致。开关只在启动加载点读一次（硬要求 9）。
-  // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）
-  // 已上移至 LSP 装配点之前（二期 B7：settings.lsp 注入 LspCtx），此处沿用
-  // 同一份 settings（line 398）。
-  const isolationHost = opts.worktreeIsolation;
-  const isolationEnabled =
-    isolationHost !== undefined && resolveWorktreeOnMutate(settings);
+  // T6: `isolationHost` / `isolationEnabled` 已上移至 settings 加载后
+  // (下方 isolationEnabled 声明处)—— subagentManager 构造需要透传 isolationOn。
   // T4 (plans/worktree-live-task-root.md §5 D1 / §6 T4) — single writer
   // seam wrap. Host `provision` / `enter` / `exit` are wrapped with
   // `withLiveTaskRootWrite` so successful resolutions update the live
@@ -719,7 +738,14 @@ export async function buildHarnessEngine(
     ? withLiveTaskRootWrite(isolationHost.provision, liveTaskRoot)
     : undefined;
   const wrappedEnter = isolationHost?.worktreeEnter
-    ? withLiveTaskRootWrite(isolationHost.worktreeEnter, liveTaskRoot)
+    ? withLiveTaskRootWrite(
+        isolationHost.worktreeEnter,
+        liveTaskRoot,
+        // T9 (write-situation-disclosure SC10): the enter seam resolves to
+        // `{ path, receipt }` — the cell keeps receiving the root; the
+        // receipt flows verbatim to the enter-task-worktree tool.
+        (resolved) => resolved.path
+      )
     : undefined;
   const wrappedExit = isolationHost?.worktreeExit
     ? withLiveTaskRootWrite(isolationHost.worktreeExit, liveTaskRoot)
@@ -1606,6 +1632,11 @@ export async function buildHarnessEngine(
     // specs/skill-load-write-root.md：活 taskRoot cell 透出，hub loadSkillBody
     // 调用时机读快照 —— 与 registry 工厂消费同一 cell 实例。
     liveTaskRoot,
+    // T4 (write-situation-disclosure): 透出隔离档判定，hub / ACI skill /
+    // chat-session rebind 注入三处消费方用它算 writeSituation(isolationOn,
+    // currentRoot)。单一来源 = `isolationEnabled`（buildHarnessEngine 启动
+    // 加载点一次性读取），与门禁武装同源（决策 1 钉死）。
+    isolationOn: isolationEnabled,
     // D-α T3:host 每次 run() 前调 beginRound() 拍快照(chat / hub 两处 run
     // 入口)。缺席 = 本入口没接 overlay。
     ...(graphAssembly ? { graphAssembly } : {}),

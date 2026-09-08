@@ -14,6 +14,7 @@ import type { Dirent } from "node:fs";
 import { join, sep } from "node:path";
 
 import type { SkillEntry } from "./catalog.js";
+import type { WriteSituation } from "../session-roots.js";
 
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 
@@ -40,12 +41,21 @@ export interface SkillBodyOptions {
   readonly entry: SkillEntry;
   readonly dir: string;
   /**
-   * 活 `taskRoot`（写根）快照。非空 → 正文末尾（`</skill_files>` 之后）追加
-   * 与子代理 prior 同一 helper 的写根段（specs/skill-load-write-root.md）；
-   * 缺席 / 空白 → 无 trailer（与 337 SC6 现形态逐字节一致）。生产调用方
-   * （TUI slash / hub loadSkillBody / ACI skill 工具）必须在调用时机读活
-   * cell 传入，不得传装配期冻结值。
+   * T4 (plans/write-situation-disclosure.md) — 处境枚举 + 活 `taskRoot`
+   * 配对传入（specs/write-situation-disclosure.md SC2-SC4 + skill-load-
+   * write-root.md 合同 6 amend）。**两字段同进同出**：
+   *   - 两者都缺席 → 无 trailer（与 337 SC6 改造前形态逐字节一致）；
+   *   - 两者都传 → 按处境渲染（`writable_main` / `writable_tree` 与改造
+   *     前**逐字节相等**；`no_writable_root` 输出 ③ 态披露，不点名建树
+   *     工具）；
+   *   - 只传 `taskRoot` 不传 `writeSituation` → fail-closed 无 trailer
+   *     （鼓励迁移：未补 `writeSituation` 的旧调用方暂保持沉默，不渲染
+   *     错误的「写主仓」字样；详见 ADR-0069 D3）。
+   * 判定函数 (`writeSituation`) 住 `isolation/`，本模块**不 import**
+   * `isolation/`（SC4 依赖方向钉死）—— 判定由消费方在调用时机做，渲染
+   * 面只吃枚举。
    */
+  readonly writeSituation?: WriteSituation;
   readonly taskRoot?: string;
   readonly fs?: SkillBodyFs;
 }
@@ -131,12 +141,36 @@ export function stripFrontmatter(raw: string): string {
 }
 
 /**
- * 「当前写根」段文案 SSOT —— skill 正文 trailer 与子代理 worker prior
- * （`priorMessagesFromEnvelope`）共用同一份字节。spec
- * skill-load-write-root.md：两处各写一套长句会漂移，故文案只有本函数。
- * 传入根为空 / 空白 → 返回 null（调用方不注入任何段）。
+ * T4 (plans/write-situation-disclosure.md) — 「当前写根」段文案 SSOT，按
+ * 处境三态渲染。skill 正文 trailer、子代理 worker prior
+ * （`priorMessagesFromEnvelope`）、chat-session rebind 一次性通知
+ * （`refreshChatDepsForRebind`）三处共用同一份字节。spec
+ * skill-load-write-root.md 合同 1「文案只有一份」。
+ *
+ * 语义（spec SC1-SC3 / ADR-0069 Decision 2/3）：
+ *   - `writable_main`（隔离 OFF）/ `writable_tree`（隔离 ON + 树形根）→
+ *     返回与改造前**逐字节相等**的写根段（含 `current write root ...`）。
+ *     形状判断由调用方的 `writeSituation(isolationOn, root)` 承担，本函数
+ *     不重复判定（SC4 依赖方向钉死：`body.ts` 不 import `isolation/`）。
+ *   - `no_writable_root`（隔离 ON + 非树形根）→ ③ 态披露：仅陈述事实，
+ *     **不点名** `create-task-worktree`（ADR-0069 D3：trailer 在装配时
+ *     进上下文，早于任何写意图；点名工具 = 对每个未绑会话推一次建树），
+ *     **不嵌入** `taskRoot`（无可写对象，指向根是错的）。
+ *
+ * empty 臂：`taskRoot` 空 / 空白 + `writable_main` / `writable_tree` → null
+ * （不渲染「写根 = 」半句，A 表 empty 臂）；`no_writable_root` + 空根 → 仍
+ * 返回披露（披露与根无关，typed 不 throw）。
  */
-export function writeRootSegment(taskRoot: string): string | null {
+export function writeRootSegment(
+  situation: WriteSituation,
+  taskRoot: string
+): string | null {
+  // ③ 态：纯披露，不嵌入根。SC3 / ADR-0069 D3 — trailer 在装配时进上下文，
+  // 早于任何写意图；点名工具 = 对每个未绑会话推一次建树（更激进）。
+  if (situation === "no_writable_root") {
+    return NO_WRITE_ROOT_DISCLOSURE;
+  }
+  // ① / ②: 与改造前逐字节相等（SC2 硬约束）。
   const root = taskRoot.trim();
   if (root.length === 0) return null;
   return (
@@ -146,8 +180,23 @@ export function writeRootSegment(taskRoot: string): string | null {
 }
 
 /**
+ * ③ 态披露文案（spec SC3 / ADR-0069 D3）：陈述「隔离开着、未绑树、主仓对
+ * 文件改动只读、此刻无可写根」四个事实，不点名建树工具，不嵌入任何根。
+ * 静态字面量（不随绑定 / 隔离开关漂移），便于单测做字节断言。
+ */
+const NO_WRITE_ROOT_DISCLOSURE =
+  `Worktree isolation is on for this session but no task worktree is bound: ` +
+  `the main checkout is read-only for file mutations, so there is no writable ` +
+  `root in scope right now.`;
+
+/**
  * 装配 skill 正文（frontmatter 剥离 + Base directory 行 + `<skill_files>` 段
  * + 可选写根 trailer）。同输入两次调用字符串相等（KV 缓存契约）。
+ *
+ * T4 (plans/write-situation-disclosure.md) — trailer 由处境枚举驱动：
+ * `writeSituation` + `taskRoot` 同进同出才渲染；任一缺席 → fail-closed 无
+ * trailer（鼓励调用方迁移到双参形态）。详见 `SkillBodyOptions.writeSituation`
+ * 注释。
  */
 export async function createSkillBody(
   options: SkillBodyOptions
@@ -164,7 +213,9 @@ export async function createSkillBody(
   segments.push(`Base directory: ${dir}`);
   segments.push(skillsSegment);
   const writeRoot =
-    options.taskRoot !== undefined ? writeRootSegment(options.taskRoot) : null;
+    options.writeSituation !== undefined && options.taskRoot !== undefined
+      ? writeRootSegment(options.writeSituation, options.taskRoot)
+      : null;
   if (writeRoot !== null) segments.push(writeRoot);
   return segments.join("\n\n");
 }

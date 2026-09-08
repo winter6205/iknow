@@ -47,6 +47,23 @@ export interface SessionRoots {
   readonly projectIdentityRoot: string;
 }
 
+/**
+ * T3 (plans/write-situation-disclosure.md) — 写处境三态。
+ *
+ * 单一来源：判定住 `src/harness/isolation/write-situation.ts`，渲染（告知面 /
+ * worker prior）住 `src/harness/skill/*`，枚举类型住本文件。SC4 钉死依赖方向：
+ * `skill/body.ts` 不 import `isolation/`，故渲染面只消费本枚举 + 一个非隔离根串。
+ *
+ * 语义（spec SC1 / SC3 / ADR-0069 Decision 2）：
+ *   - `writable_main`：隔离 OFF，主仓根 = 写根。**含「隔离 OFF + 树形路径」组合**——
+ *     negative 臂钉死防形状判断被单独误用（对齐 ADR-0037 §4 教训）。
+ *   - `writable_tree`：隔离 ON + 活根是本会话的 task worktree（路径形状合法）。
+ *   - `no_writable_root`：隔离 ON + 活根非树形（主仓对文件改动只读，告知面**不**
+ *     点名 `create-task-worktree`——spec SC3）。
+ */
+export type WriteSituation =
+  "writable_main" | "writable_tree" | "no_writable_root";
+
 export interface ResolveSessionRootsInput {
   /** 开会话时的主 checkout；项目身份与 per-root 状态的唯一来源。 */
   readonly productRoot: string | undefined;
@@ -289,11 +306,21 @@ export function writeLiveTaskRoot(cell: LiveTaskRoot, value: string): void {
  * (== `taskRoot`) is written.
  */
 export function withLiveTaskRootWrite<
-  F extends (...args: any[]) => Promise<string>,
->(seam: F, cell: LiveTaskRoot): F {
-  return (async (...args: any[]): Promise<string> => {
-    const resolved = await seam(...args);
-    writeLiveTaskRoot(cell, resolved);
+  F extends (...args: any[]) => Promise<unknown>,
+>(
+  seam: F,
+  cell: LiveTaskRoot,
+  /**
+   * write-situation-disclosure T9: how to extract the ROOT from the seam
+   * result. Omitted for plain string seams (`provision` / `exit`); the enter
+   * seam resolves to `{ path, receipt }` and passes `(r) => r.path` so the
+   * cell keeps receiving the root while the receipt flows to the tool layer.
+   */
+  rootOf: (value: Awaited<ReturnType<F>>) => string = (value) => value as string
+): F {
+  return (async (...args: any[]) => {
+    const resolved = (await seam(...args)) as Awaited<ReturnType<F>>;
+    writeLiveTaskRoot(cell, rootOf(resolved));
     return resolved;
   }) as F;
 }

@@ -813,29 +813,43 @@ describe("createWorktreeIsolationExecutor", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("unboundMutateNotice is a factual block: names the tool, no imperative 'create this conversation's worktree' framing (spec casual-ask-context-hygiene SC7)", () => {
+  it("unboundMutateNotice is actionable: conditional + re-issue-this-call semantics, plus the SC7 substring bans (spec casual-ask-context-hygiene SC7, amended 2026-09-08)", () => {
     const message = unboundMutateNotice();
     // visible gate prefix invariant (same as the executor-level assertions)
     expect(message.startsWith(`${WORKTREE_ISOLATION_PREFIX} `)).toBe(true);
-    // genuine mutations still get pointed at the tool (literal name, not
-    // only via the hint constant)
+    // substring ban (c): genuine mutations still get pointed at the tool
+    // (literal name, not only via the hint constant)
     expect(message).toContain("create-task-worktree");
     expect(message).toContain(CREATE_TASK_WORKTREE_TOOL_HINT);
-    // no imperative framing that turns the next model move into "go build a
-    // tree" — the notice states facts, the tool's existence, and the
-    // read-only main repo; it does not prescribe building a per-conversation
-    // worktree
+    // substring ban (d): no imperative framing that turns the next model move
+    // into "go build a tree" — the notice never prescribes building a
+    // per-conversation worktree by name
     expect(message).not.toContain("this conversation's task worktree");
     expect(message).not.toContain("end the turn");
-    // factual semantics locked: the call WOULD write, and was NOT executed
+    // substring ban (e): factual semantics locked — the call WOULD write, and
+    // was NOT executed
     expect(message).toContain("This call would write");
-    // full-text pin (spec 「vitest 全文锁定」): wording changes must be
-    // deliberate test changes, not drift
+    // semantic (a): conditional framing — the notice states WHEN the tool
+    // applies ("To write, ..."), not just that the tool exists. This is the
+    // assertion that catches the 2026-09-08 semantic hollowing: the old text
+    // passed every substring ban above while only saying "the tool exists".
+    expect(message).toContain("To write, ");
+    // semantic (b): re-issue guidance — the same call, retried after binding,
+    // is the way forward (spec锁定语义「再重试这一次调用」)
+    expect(message).toContain("re-issue this same call");
+    // ADR-0037 §7.5 wording discipline: next-WAVE-of-tool-calls-in-this-run,
+    // never "next turn"
+    expect(message).toContain("next wave of tool calls in this run");
+    expect(message.toLowerCase()).not.toContain("next turn");
+    // full-text pin: wording changes must be deliberate test changes, not
+    // drift
     expect(message).toBe(
       `${WORKTREE_ISOLATION_PREFIX} This call would write the workspace, and it was not executed: ` +
         `worktree isolation is ON and this session is not yet bound to a task worktree. ` +
-        `The main repo stays read-only. The ${CREATE_TASK_WORKTREE_TOOL_HINT} exists for ` +
-        `sessions that need a writable root (no auto-provisioning).`
+        `The main repo stays read-only. To write, call the ${CREATE_TASK_WORKTREE_TOOL_HINT} ` +
+        `to put this session on a writable root, then re-issue this same call — it ` +
+        `will land in the new root on the next wave of tool calls in this run ` +
+        `(no auto-provisioning).`
     );
   });
 

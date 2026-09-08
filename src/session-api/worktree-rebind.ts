@@ -62,6 +62,7 @@ import type {
   WorktreeRemoveContext,
   WorktreeProvisionContext,
   WorktreeEnterContext,
+  WorktreeEnterResult,
   WorktreeExitContext,
 } from "../harness/isolation/worktree-gate.js";
 import { errorMessage } from "../harness/errors.js";
@@ -128,7 +129,7 @@ export interface TaskWorktreeProvisioner {
    * caller already inside a worktree → `foreign_worktree` (exit first);
    * unsafe ids → `rebind_failed` before any fs/git access.
    */
-  enter(req: WorktreeEnterRequest): Promise<string>;
+  enter(req: WorktreeEnterRequest): Promise<WorktreeEnterResult>;
   /**
    * T8 symmetric exit: return the conversation to its MAIN repo root. No
    * tree is deleted (orphan cleanup is an explicit plan non-goal) and no
@@ -644,6 +645,33 @@ function escapeRegExpChar(ch: string): string {
   return /[\\^$.*+?()[\]{}|]/.test(ch) ? `\\${ch}` : ch;
 }
 
+/**
+ * write-situation-disclosure T9 (SC10): compose the enter success receipt.
+ * The tree's owner sidecar (via `taskWorktreeOwnerOf`) discloses WHO created
+ * the tree being entered — disclosure, never authorization (ADR-0069). The
+ * read is a single best-effort fs access: `taskWorktreeOwnerOf` already
+ * degrades missing / empty / unreadable sidecars to `undefined` (typed catch:
+ * an absent owner record is a legal legacy state, not an I/O fault), so the
+ * ownership sentence is simply omitted — no throw, no placeholder.
+ *
+ * Constant-on: this path reads no setting (specs/worktree-exclusive-lock.md
+ * SC10 — the exclusive-lock gate is a separate PR and must not gate this).
+ */
+function enterResultOf(path: string): WorktreeEnterResult {
+  const owner = taskWorktreeOwnerOf(path);
+  const disclosure =
+    owner !== undefined
+      ? ` This tree was created by conversation '${owner}'.`
+      : "";
+  return {
+    path,
+    receipt:
+      `entered task worktree: ${path} (session root rebound; ` +
+      `re-issue pending writes in the entered tree in the next wave of tool calls in this run)` +
+      disclosure,
+  };
+}
+
 export function createTaskWorktreeProvisioner(
   opts: TaskWorktreeProvisionerOpts
 ): TaskWorktreeProvisioner {
@@ -870,7 +898,9 @@ export function createTaskWorktreeProvisioner(
     return worktreePath;
   }
 
-  async function enter(req: WorktreeEnterRequest): Promise<string> {
+  async function enter(
+    req: WorktreeEnterRequest
+  ): Promise<WorktreeEnterResult> {
     const conversationId = req.conversationId;
     if (conversationId === undefined || conversationId.length === 0) {
       throw new WorktreeIsolationError(
@@ -914,7 +944,7 @@ export function createTaskWorktreeProvisioner(
       taskWorktreePath(req.root, req.targetConversationId, undefined);
     const current = bound.get(conversationId);
     if (current === target) {
-      return target; // idempotent re-enter (zero writes)
+      return enterResultOf(target); // idempotent re-enter (zero writes)
     }
 
     // Target validation, cheapest checks first:
@@ -950,7 +980,7 @@ export function createTaskWorktreeProvisioner(
 
     bound.set(conversationId, target);
     taskRoots.add(target);
-    return target;
+    return enterResultOf(target);
   }
 
   async function exit(req: WorktreeExitRequest): Promise<string> {

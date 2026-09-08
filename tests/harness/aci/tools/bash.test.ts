@@ -64,6 +64,22 @@ describe("createBashTool — schema and metadata", () => {
       timeoutTier: "build",
     });
   });
+
+  // SC11 (specs/write-situation-disclosure.md): bash description 必须告知
+  // 「/tmp 内文件仅在本命令期间存在、命令结束即无」语义，词汇与 hard-walls
+  // helpers.ts T3 文案一致（`process-temporary` / `not a delivery
+  // destination`，ADR-0068）。该句是静态事实 —— 与隔离态 / 绑定态无关，
+  // 不进写处境三态函数（两轴不混）。
+  it("description documents /tmp as process-temporary, not a delivery destination", async () => {
+    const cwd = await makeScratch("bash-desc-tmp-");
+    const tool = createBashTool(cwd);
+    assert.match(
+      tool.description,
+      /\/tmp.*is the sandbox tmpfs — process-temporary/
+    );
+    assert.match(tool.description, /not a delivery destination/);
+    assert.match(tool.description, /when it ends|when the command ends/i);
+  });
 });
 
 describe("bash — execution", () => {

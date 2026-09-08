@@ -395,6 +395,11 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     session: bundle.session,
     jsonMode: parsed.json,
     workspaceRoot,
+    // T4 (write-situation-disclosure)：rebind 一次性写根段的处境判定源
+    // —— 与 build-engine `isolationEnabled` 同一读取点（`startupSettings`
+    // 启动期一次性读，硬要求 9）。OFF → rebind 通知走 `writable_main` 旧形
+    // 态；ON → rebind 后根是树形 → `writable_tree`，与改造前 byte-equal。
+    isolationOn: built.isolationOn ?? false,
     // #152 T5:thinking 可见面(env flag → chat-session → format-run-human)。
     // env.ts SSOT;默认 off。
     showThinking: bundle.env.chat.showThinking,

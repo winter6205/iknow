@@ -169,6 +169,15 @@ export interface TuiExtensions {
    * 装配口。缺席（旧装配形态防御缺省）→ slash 不传写根（无 trailer）。
    */
   readonly liveTaskRoot?: LiveTaskRoot;
+  /**
+   * T6 (plans/write-situation-disclosure.md)：worktree 隔离档（来自 build-
+   * engine `isolationEnabled` 单一读取点的透出）。TUI slash 装配 skill 正文
+   * 时与 `liveTaskRoot` 配对算 `writeSituation(isolationOn, currentRoot)`，
+   * 传给 `createSkillBody` 双参形态（详见 body.ts SkillBodyOptions.write-
+   * Situation）。缺席 → 默认 false（旧形态 = writable_main，与改造前
+   * byte-equal；等价于 hub.ts / chat-session 的同一缺省回退）。
+   */
+  readonly isolationOn?: boolean;
   readonly mcp: {
     readonly status: () => readonly McpServerStatus[];
     readonly reload: () => Promise<void>;
@@ -354,6 +363,14 @@ export async function buildTuiDeps(
     // skill 正文时调用时机读快照 —— 与 build-engine 传给 registry 的同一实例。
     ...(built.liveTaskRoot !== undefined
       ? { liveTaskRoot: built.liveTaskRoot }
+      : {}),
+    // T6 (write-situation-disclosure)：worktree 隔离档透出。slash 装配
+    // skill 正文时与 liveTaskRoot 配对算 `writeSituation(isolationOn,
+    // currentRoot)`,传给 createSkillBody 双参形态。判定函数住
+    // `isolation/`,TUI 仅消费枚举(SC4 依赖方向)。缺席 → 默认 false
+    // (旧形态 = writable_main,与改造前 byte-equal)。
+    ...(built.isolationOn !== undefined
+      ? { isolationOn: built.isolationOn }
       : {}),
     mcp: {
       status: () => mcpManager?.status() ?? [],

@@ -487,6 +487,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           // specs/skill-load-write-root.md：slash 装配 skill 正文时读活
           // taskRoot 快照（TuiExtensions 透传；缺省 = undefined → 无 trailer）。
           liveTaskRoot={tuiExtensions?.liveTaskRoot}
+          // T6 (write-situation-disclosure)：slash 装配双参形态需要
+          // `isolationOn` 与 liveTaskRoot 配对算 writeSituation。缺省 →
+          // undefined → app.tsx 内 fail-closed 走等价于旧形态的
+          // writable_main，与改造前 byte-equal。
+          isolationOn={tuiExtensions?.isolationOn}
           // #361 Phase D：TuiApp 消费 MCP 看板扩展面（status / reload /
           // listMcpTools），缺省 = undefined → /mcp 提示「MCP 未装配」。
           mcp={

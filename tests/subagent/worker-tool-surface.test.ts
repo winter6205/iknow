@@ -455,6 +455,9 @@ describe("worker tool surface: T3 catalog deny contract", () => {
           sandboxRoot: root,
           disallowedTools: [...FILE_WRITE_TOOL_NAMES],
           role: "explore",
+          // T6: 缺 isolationOn 时,manager 默认按隔离 OFF + sandboxRoot(非
+          // 树形) → writable_main;与改造前 worker prior 形态逐字节相等。
+          writeSituation: "writable_main",
         })
       );
     } finally {

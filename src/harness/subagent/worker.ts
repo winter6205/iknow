@@ -671,11 +671,22 @@ export function priorMessagesFromEnvelope(
       )
     );
   }
-  // T3: 当前写根段。envelope.sandboxRoot 是必填,空串即视为缺席。
-  // 写根文案 SSOT = writeRootSegment（specs/skill-load-write-root.md）:
-  // 与 skill 正文 trailer（createSkillBody）共用同一函数,源内不留第二份长句。
-  if (typeof env.sandboxRoot === "string" && env.sandboxRoot.length > 0) {
-    const segment = writeRootSegment(env.sandboxRoot);
+  // T6 (plans/write-situation-disclosure.md) — 当前写根段由 envelope
+  // 处境枚举驱动（ADR-0069 D2; spec SC4 / OQ1）。
+  //   - 旧 envelope（无 writeSituation 字段）→ typed skip，不注入写根段
+  //     不回落旧文案（OQ1 采纳 (b) — 宁可不告知,不可说错）;
+  //   - writeSituation = "no_writable_root" → ③ 态披露（不嵌入 sandboxRoot,
+  //     不点名建树工具; spec SC3）;
+  //   - writeSituation = "writable_main" / "writable_tree" → ①/② 文案
+  //     与改造前逐字节相等（SC2 硬约束,前缀缓存与 skill-load-write-root
+  //     SC2 守门）。
+  // 顺序契约：[host dialogue?, evidence?, write root] —— 写根段永远是末段;
+  // typed skip 时该 slot 在 extras 数组过滤掉,顺序保持不变。
+  // 渲染 SSOT = writeRootSegment(skill/body.ts),与 skill 正文 trailer
+  // (createSkillBody) 共用同一函数 —— worker 源内不留第二份长句
+  // (skill-load-write-root 合同 1)。
+  if (env.writeSituation !== undefined) {
+    const segment = writeRootSegment(env.writeSituation, env.sandboxRoot);
     if (segment !== null) {
       prior.push(encodeUserText(segment));
     }

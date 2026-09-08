@@ -22,6 +22,7 @@ import type { ToolExecutionContext } from "../../tools/types.js";
 import type { SkillCatalog } from "../../skill/catalog.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import { createSkillBody } from "../../skill/body.js";
+import { writeSituation } from "../../isolation/write-situation.js";
 
 /**
  * 依赖注入：`catalog` 索引层（T2 提供），本工具经其
@@ -29,10 +30,16 @@ import { createSkillBody } from "../../skill/body.js";
  * `liveTaskRoot`（可选）：活 taskRoot cell —— handler 调用时机读快照传给
  * `createSkillBody`（specs/skill-load-write-root.md：skill() 与 slash /
  * hub 同一装配口，正文末尾带当前写根）。缺席 → 无 trailer（legacy parity）。
+ * `isolationOn`（可选，T4）：worktree isolation 档（build-engine 装配期
+ * 一次性读取的 `isolationEnabled`，与门禁武装同源）。与 `liveTaskRoot` 配
+ * 对算 `writeSituation(isolationOn, currentRoot)`，决定 trailer 是 `writable_*`
+ * 还是 ③ 态 `no_writable_root` 披露。缺席 → 默认 false（`writable_main`，
+ * 旧形态 byte-equal）。
  */
 export interface SkillToolDeps {
   readonly catalog: SkillCatalog;
   readonly liveTaskRoot?: LiveTaskRoot;
+  readonly isolationOn?: boolean;
 }
 
 /**
@@ -66,12 +73,21 @@ export function createSkillTool(deps: SkillToolDeps): AciToolDef {
       }
       // T6: 装配正文 (frontmatter 剥离 + Base directory 行 + skill_files 段)。
       // entry.dir 即 SKILL.md 所在目录（catalog.getBodyPath 内部 join(dir, "SKILL.md")）。
-      // 写根 trailer：handler 调用时机读活 cell 快照（specs/skill-load-write-root.md）。
+      // 写根 trailer（specs/skill-load-write-root.md + T4 write-situation-
+      // disclosure）：handler 调用时机读活 cell 快照算处境枚举，再以双参
+      // 形态传给 `createSkillBody`。cell 缺席 → 无 trailer（legacy parity）。
+      const taskRoot = deps.liveTaskRoot?.read();
       return await createSkillBody({
         entry,
         dir: entry.dir,
-        ...(deps.liveTaskRoot !== undefined
-          ? { taskRoot: deps.liveTaskRoot.read() }
+        ...(taskRoot !== undefined
+          ? {
+              taskRoot,
+              writeSituation: writeSituation(
+                deps.isolationOn ?? false,
+                taskRoot
+              ),
+            }
           : {}),
       });
     },

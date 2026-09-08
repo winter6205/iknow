@@ -238,6 +238,7 @@ import {
   type GraphModeContext,
 } from "../harness/graph/mode.js";
 import { buildSkillLoadText, createSkillBody } from "../harness/skill/body.js";
+import { writeSituation } from "../harness/isolation/write-situation.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import type { LiveTaskRoot } from "../harness/session-roots.js";
 import {
@@ -470,6 +471,13 @@ export interface TuiAppProps {
    *  正文时调用时机读快照 —— 与 ACI skill() / hub loadSkillBody 同一装配口。
    *  缺省 = undefined → 无 trailer（兼容 fixture / 测试）。 */
   readonly liveTaskRoot?: LiveTaskRoot;
+  /** T6 (plans/write-situation-disclosure.md)：worktree 隔离档（来自 build-
+   *  engine `isolationEnabled` 单一读取点的透出）。slash 装配 skill 正文时
+   * 与 `liveTaskRoot` 配对算 `writeSituation(isolationOn, currentRoot)`，
+   * 传给 `createSkillBody` 双参形态（详见 body.ts SkillBodyOptions）。
+   * 缺省 = undefined → 等价于隔离 OFF + liveTaskRoot 缺席 → 与改造前
+   * byte-equal（旧形态 = writable_main + 无 trailer）。 */
+  readonly isolationOn?: boolean;
   /** #361 Phase D：MCP 看板扩展面（TuiMcpViewExt 最小依赖）。缺省 =
    *  undefined → /mcp 切 view 时提示「MCP 未装配」。产品路径由 run.tsx 经
    *  TuiExtensions 注入；fixture / 测试可选 stub。 */
@@ -1049,6 +1057,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const skillList = useMemo(() => skillCatalog.available(), [skillCatalog]);
   // 活 taskRoot cell（specs/skill-load-write-root.md）：slash 装配读快照用。
   const liveTaskRoot = props.liveTaskRoot;
+  // T6 (plans/write-situation-disclosure.md)：隔离档从 props 取出，与
+  // liveTaskRoot 配对算 writeSituation(situation, root) 传给 createSkillBody。
+  // 缺省 = undefined → 默认 false（隔离 OFF 形态，与改造前 byte-equal）。
+  const isolationOn = props.isolationOn ?? false;
   const inputHintSuggestions = useMemo<ReadonlyArray<SlashCandidate>>(() => {
     if (!inputValue.trim().startsWith("/")) return [];
     return slashSuggestions(inputValue, skillList);
@@ -1858,11 +1870,19 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         try {
           // 写根 trailer（specs/skill-load-write-root.md）：调用时机读活
           // cell 快照；cell 缺席（fixture / 测试）→ 无 trailer。
+          // T6 (write-situation-disclosure)：双参形态 —— `isolationOn`
+          // 与 `taskRoot` 同进同出 → 按处境渲染。`writeSituation` 纯函数
+          // 算三态,缺 isolationOn 时默认 false(= 隔离 OFF = writable_main,
+          // 与改造前 byte-equal)。
+          const taskRoot = liveTaskRoot?.read();
           const body = await createSkillBody({
             entry,
             dir: entry.dir,
-            ...(liveTaskRoot !== undefined
-              ? { taskRoot: liveTaskRoot.read() }
+            ...(taskRoot !== undefined
+              ? {
+                  taskRoot,
+                  writeSituation: writeSituation(isolationOn, taskRoot),
+                }
               : {}),
           });
           const sendText = buildSkillLoadText(

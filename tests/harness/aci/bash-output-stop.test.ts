@@ -187,8 +187,10 @@ function makeWebEnv(): Pick<IknowEnv, "web"> {
  * 断言；handler 路径单测在各自工具目录下，不在本文件）。 */
 const fakeWorktreeProvision: CreateTaskWorktreeProvisionFn = async () =>
   "/tmp/fake-worktree";
-const fakeWorktreeEnter: WorktreeEnterToolDeps["worktreeEnter"] = async () =>
-  "/tmp/fake-worktree";
+const fakeWorktreeEnter: WorktreeEnterToolDeps["worktreeEnter"] = async () => ({
+  path: "/tmp/fake-worktree",
+  receipt: "entered task worktree: /tmp/fake-worktree",
+});
 const fakeWorktreeExit: WorktreeExitToolDeps["worktreeExit"] = async () =>
   "/tmp/fake-main";
 const fakeWorktreeList: ListTaskWorktreesToolDeps["worktreeList"] =

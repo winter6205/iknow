@@ -110,15 +110,16 @@ export function createEnterTaskWorktreeTool(
       try {
         const root =
           typeof deps.root === "string" ? deps.root : deps.root.read();
-        const worktreePath = await deps.worktreeEnter({
+        const entered = await deps.worktreeEnter({
           conversationId,
           root,
           targetConversationId: target,
         });
-        return (
-          `entered task worktree: ${worktreePath} (session root rebound; ` +
-          `re-issue pending writes in the entered tree in the next wave of tool calls in this run)`
-        );
+        // The receipt is composed by the host seam (session-api): base text
+        // plus the constant-on creator disclosure when the tree's owner
+        // sidecar yields one (write-situation-disclosure T9 / SC10). The
+        // tool emits it verbatim — no second copy of the wording here.
+        return entered.receipt;
       } catch (err) {
         if (err instanceof WorktreeIsolationError) {
           throw new ToolExecutionError(

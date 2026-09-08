@@ -116,6 +116,7 @@ import type { AciCatalog } from "../harness/aci/types.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import type { LiveTaskRoot } from "../harness/session-roots.js";
 import { createSkillBody, exceedsUserInputCap } from "../harness/skill/body.js";
+import { writeSituation } from "../harness/isolation/write-situation.js";
 import type { McpManager } from "../harness/mcp/manager.js";
 import { loadMcpConfig } from "../harness/mcp/config.js";
 import { resolveMcpRoots, type McpRoots } from "../harness/mcp/roots.js";
@@ -754,6 +755,14 @@ export class SessionHub {
   private skillCatalog: SkillCatalog | undefined;
   /** 活 taskRoot cell（specs/skill-load-write-root.md）：loadSkillBody 调用时机读快照。 */
   private liveTaskRoot: LiveTaskRoot | undefined;
+  /**
+   * T4 (plans/write-situation-disclosure.md)：装配期一次性读取的 worktree
+   * isolation 档。`loadSkillBody` 调用时机与 `liveTaskRoot.read()` 配对算
+   * `writeSituation(isolationOn, currentRoot)` —— 判定源与 build-engine
+   * `isolationEnabled` 同一读取点（避免宿主层重判）。缺席 → 默认 false
+   * （旧 build-engine 默认形态：隔离 OFF = `writable_main`）。
+   */
+  private isolationOn: boolean | undefined;
   private mcpManager: McpManager | undefined;
   private aciCatalog: AciCatalog | undefined;
   private mcpHome: string | undefined;
@@ -971,16 +980,16 @@ export class SessionHub {
     conversationId?: string;
     root: string;
     targetConversationId: string;
-  }): Promise<string> {
-    const enteredRoot = await this.worktreeProvisioner.enter(ctx);
+  }): Promise<{ path: string; receipt: string }> {
+    const entered = await this.worktreeProvisioner.enter(ctx);
     if (ctx.conversationId !== undefined) {
       this.markWorktreeRootDirty({
         conversationId: ctx.conversationId,
         currentRoot: ctx.root,
-        provisionedRoot: enteredRoot,
+        provisionedRoot: entered.path,
       });
     }
-    return enteredRoot;
+    return entered;
   }
 
   /**
@@ -2264,14 +2273,20 @@ export class SessionHub {
     if (entry === undefined || entry.disabled) {
       throw new NotFoundError(`skill not found: ${name}`);
     }
-    // 写根 trailer（specs/skill-load-write-root.md）：调用时机读活 cell 快照
-    // —— 与 ACI skill() 工具 / TUI slash 同一装配口。cell 缺席（注入 deps
-    // 形态）→ 无 trailer（legacy parity）。
+    // T4 (write-situation-disclosure)：写根 trailer 由处境枚举驱动。cell
+    // 缺席 → 旧 legacy 形态（无 trailer，与 #337 SC6 逐字节一致）；cell
+    // 在场 → 与 `isolationOn` 配对算 `writeSituation`，传给 createSkillBody
+    // 双参形态（详见 body.ts SkillBodyOptions.writeSituation）。判定函数
+    // 住 `isolation/`，hub 仅消费枚举（SC4 依赖方向）。
+    const taskRoot = this.liveTaskRoot?.read();
     const body = await createSkillBody({
       entry,
       dir: entry.dir,
-      ...(this.liveTaskRoot !== undefined
-        ? { taskRoot: this.liveTaskRoot.read() }
+      ...(taskRoot !== undefined
+        ? {
+            taskRoot,
+            writeSituation: writeSituation(this.isolationOn ?? false, taskRoot),
+          }
         : {}),
     });
     return { name: entry.name, body };
@@ -2874,6 +2889,9 @@ export class SessionHub {
     });
     this.skillCatalog = built.skillCatalog;
     this.liveTaskRoot = built.liveTaskRoot;
+    // T4 (write-situation-disclosure)：loadSkillBody 写处境判定的隔离档
+    // 来源。build-engine `isolationEnabled` 单一读取点的透出。
+    this.isolationOn = built.isolationOn;
     this.mcpHome = homedir();
     // T7:mcpManager / catalog / mcpRoots 由 getOrBuildEngine → activateMcpFace
     // 统一切换，避免此处抢先覆盖导致旧 manager 未收口。
@@ -3007,6 +3025,10 @@ export class SessionHub {
     this.activeGraphAssembly = built.graphAssembly;
     this.skillCatalog = built.skillCatalog;
     this.liveTaskRoot = built.liveTaskRoot;
+    // T4 (write-situation-disclosure)：未 bind 根兜底路径同样透出隔离档
+    // —— getOrBuildEngine 返回的 built.isolationOn 来自 build-engine 装配期
+    // 一次性读取，与门禁武装同源。
+    this.isolationOn = built.isolationOn;
     this.mcpHome = homedir();
     await this.activateMcpFace({
       ...(built.mcpManager ? { mcpManager: built.mcpManager } : {}),
