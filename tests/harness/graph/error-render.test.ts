@@ -24,7 +24,6 @@ import { createRunGraphTool } from "../../../src/harness/graph/run-graph-tool.ts
 import {
   makeManager,
   settle,
-  ok,
   fail,
   waitForChildren,
   parseCondensed as parse,
@@ -55,9 +54,6 @@ describe("formatNodeError — typed-error catch 契约", () => {
   });
 
   it("primitive / array 永不包含 [object Object]", () => {
-    // 范围钉在 primitive 与 array：无 kind 的 plain object 走 String()
-    // 会打 [object Object]（真实缺口，stop-and-report 上报，不在本轮
-    // 修行为）—— 本测试只钉已成立的部分。array 走 String() 得 "1,2,3"。
     for (const v of [[1, 2, 3], 42, null, undefined]) {
       const s = formatNodeError(v);
       expect(s).not.toContain("[object Object]");
@@ -66,6 +62,21 @@ describe("formatNodeError — typed-error catch 契约", () => {
       else if (typeof v === "number") expect(s).toBe("42");
       else expect(s).toBe("1,2,3");
     }
+  });
+
+  it("无 kind 的 plain object：渲染为 JSON 形式，字段可见，无 [object Object]", () => {
+    const s = formatNodeError({ foo: 1 });
+    expect(s).toContain("foo");
+    expect(s).not.toContain("[object Object]");
+    expect(s).toBe('{"foo":1}');
+  });
+
+  it("circular object：不崩、渲染不含 [object Object]，含可读信息", () => {
+    const circular: Record<string, unknown> = { a: 1 };
+    circular.self = circular;
+    const s = formatNodeError(circular);
+    expect(s).not.toContain("[object Object]");
+    expect(s).toContain("circular");
   });
 
   it("连线：executor 抛 typed plain-object 错误 → 调度器把它落 failed，error 字段带 kind 前缀", async () => {
