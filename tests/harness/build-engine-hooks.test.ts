@@ -1,8 +1,8 @@
 /**
  * user-hook-router（specs/user-hook-router.md）SC7 / SC8 / SC9 装配级回归钉子。
  *
- * 工厂层单元语义已由 tests/harness/hooks/user-lane.test.ts 钉住；本文件钉
- * 的是 build-engine 装配缝 —— user lane 与 builtin lane（auto-memory host
+ * 工厂层单元语义已由 tests/harness/hooks/user-hooks.test.ts 钉住；本文件钉
+ * 的是 build-engine 装配缝 —— 用户钩子（user hooks） 与 内置钩子（builtin hooks）（auto-memory host
  * 钩子、secrets guard）经真实 buildHarnessEngine 装配后互不覆盖：
  *   - SC7: hooks 总闸关不掉 memory.autoExtract 的 auto-memory host 钩子
  *     （断言面沿用 tests/harness/build-engine-auto-memory.test.ts 的

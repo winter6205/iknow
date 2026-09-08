@@ -226,9 +226,9 @@ export interface IknowSettingsIsolation {
 }
 
 /**
- * user-hook-router（specs/user-hook-router.md）: user hook lane 规则条目。
+ * user-hook-router（specs/user-hook-router.md）: 用户钩子（user hooks） 规则条目。
  *
- * 仅承载声明式 deny-only 规则（deny-only、无 allow[]）；builtin lane 不经
+ * 仅承载声明式 deny-only 规则（deny-only、无 allow[]）；内置钩子（builtin hooks） 不经
  * settings 装配（代码挂上），本段不承载 memory / secrets 等产品开关。
  *
  * 校验纪律（镜像 secrets.patterns）：单条结构性非法 → 丢弃该条（不抛）；
@@ -244,17 +244,17 @@ export interface IknowSettingsHookRule {
   reason: string;
   /** 可选 matcher：精确工具名（如 "bash"）。 */
   tool?: string;
-  /** 可选 matcher：工具名前缀（如 "mcp__github"）。 */
-  toolPrefix?: string;
+  /** 可选 matcher：工具名前缀（如 "mcp__github"）。字段名即事件名 `PreToolUse` 的小写形态。 */
+  pretooluse?: string;
   /** 可选 matcher：对工具调用扫描串（stringify 截断后）的正则源串。 */
   pattern?: string;
 }
 
 /**
- * user-hook-router: `settings.hooks` 段（user lane only）。
+ * user-hook-router: `settings.hooks` 段（用户钩子（user hooks） only）。
  *
  * `enabled` 缺席 / 非 boolean → 消费方按 false 处理（默认关，fail-closed）；
- * `rules` 非数组 → 丢弃该字段。段缺席 = user lane 关，不影响 builtin lane
+ * `rules` 非数组 → 丢弃该字段。段缺席 = 用户钩子（user hooks） 关，不影响 内置钩子（builtin hooks）
  * （自动记忆、secrets 等产品开关与 hooks 总闸正交，ADR-0055）。
  */
 export interface IknowSettingsHooks {
@@ -262,7 +262,7 @@ export interface IknowSettingsHooks {
   rules?: IknowSettingsHookRule[];
 }
 
-/** user hook lane 事件闭集（V1）。 */
+/** 用户钩子（user hooks） 事件闭集（V1）。 */
 export const HOOK_EVENT_VALUES: readonly IknowSettingsHookRule["event"][] = [
   "PreToolUse",
   "PreWrite",
@@ -336,7 +336,7 @@ export interface IknowSettings {
   isolation?: IknowSettingsIsolation;
   /** lsp-optimization 二期 B7: LSP 配置段（全部可选，缺省走消费方默认值）。 */
   lsp?: IknowLspSettings;
-  /** user-hook-router: user hook lane 段（声明式 deny-only，默认关）。 */
+  /** user-hook-router: 用户钩子（user hooks） 段（声明式 deny-only，默认关）。 */
   hooks?: IknowSettingsHooks;
   /** Web 工具配置段（web_search 后端选择等）。 */
   web?: IknowSettingsWeb;
@@ -925,8 +925,8 @@ function parseHooks(raw: unknown): IknowSettingsHooks | undefined {
         reason: entry.reason.trim(),
       };
       if (isNonEmptyString(entry.tool)) rule.tool = entry.tool.trim();
-      if (isNonEmptyString(entry.toolPrefix)) {
-        rule.toolPrefix = entry.toolPrefix.trim();
+      if (isNonEmptyString(entry.pretooluse)) {
+        rule.pretooluse = entry.pretooluse.trim();
       }
       if (typeof entry.pattern === "string" && entry.pattern.length > 0) {
         rule.pattern = entry.pattern;
@@ -1106,7 +1106,7 @@ function mergeSettings(
   const lsp = mergeLsp(parseLsp(userRaw.lsp), parseLsp(projectRaw.lsp));
   // Web 工具配置段（web_search 后端选择；env > settings 回退链在 env.ts）。
   const web = mergeWeb(parseWeb(userRaw.web), parseWeb(projectRaw.web));
-  // user-hook-router: user hook lane 段（默认关 —— 段缺席即关）。
+  // user-hook-router: 用户钩子（user hooks） 段（默认关 —— 段缺席即关）。
   const hooks = mergeHooks(
     parseHooks(userRaw.hooks),
     parseHooks(projectRaw.hooks)

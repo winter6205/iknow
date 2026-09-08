@@ -1,12 +1,12 @@
 /**
- * src/harness/hooks/user-lane.ts
+ * src/harness/hooks/user-hooks.ts
  *
- * user-hook-router（specs/user-hook-router.md）T2/T3/T4 —— user lane 的
+ * user-hook-router（specs/user-hook-router.md）T2/T3/T4 —— 用户钩子的
  * 声明式 deny-only hook router 工厂 + multiplexer 组合器。
  *
  * 职责：把 merged settings 的 `hooks` 段（IknowSettingsHooks）编译成挂
  * permission 5 步链 Step 1 的 PreToolUseHook。V1 三事件：
- *   - PreToolUse：matcher（tool 精确名 / toolPrefix 前缀 / pattern 正则）
+ *   - PreToolUse：matcher（tool 精确名 / pretooluse 前缀 / pattern 正则）
  *     全命中 → 拦；缺席 matcher 视为通配（SC2）。
  *   - PreWrite：先过 tool matcher，再要求 classify(call) === "mutate"
  *     （SC3；mutate SSOT = isolation/worktree-gate.ts classifyCall，经
@@ -75,7 +75,7 @@ interface CompiledRule {
 }
 
 /**
- * tool matcher：tool 精确名 / toolPrefix 前缀，两者都须命中（AND）；
+ * tool matcher：tool 精确名 / pretooluse 前缀，两者都须命中（AND）；
  * 都缺席 = 通配。
  */
 function toolMatcherMatches(
@@ -83,7 +83,7 @@ function toolMatcherMatches(
   tool: string
 ): boolean {
   if (rule.tool !== undefined && rule.tool !== tool) return false;
-  if (rule.toolPrefix !== undefined && !tool.startsWith(rule.toolPrefix)) {
+  if (rule.pretooluse !== undefined && !tool.startsWith(rule.pretooluse)) {
     return false;
   }
   return true;
@@ -223,7 +223,7 @@ function segmentIsGitCommit(segment: string): boolean {
 }
 
 /**
- * 构造 user lane 的 deny-only PreToolUseHook。
+ * 构造 用户钩子的 deny-only PreToolUseHook。
  *
  *  - hooks 段缺席 / enabled !== true / rules 非数组 → 恒 undefined 的
  *    透明 hook，不编译任何 pattern（SC1）。
@@ -272,7 +272,7 @@ export function createUserHookRouter(
  * multiplexer 组合器（T5 装配面）：顺序执行各 Pre hook，第一个返回非
  * undefined 即短路返回该 deny（先拦先赢）；全部未命中 → undefined。
  *
- * T5 用它组合 builtin lane（secrets-guard）与 user lane：builtin 在前、
+ * T5 用它组合内置钩子（secrets-guard）与用户钩子：builtin 在前、
  * user 在后 —— user deny 时后续 hook 不再被调用，builtin 先命中时 user
  * 规则不评估。
  */

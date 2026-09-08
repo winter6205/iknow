@@ -1,4 +1,4 @@
-# Spec: 用户钩子同进程 router（builtin / user 两车道）
+# Spec: 用户钩子同进程 router（内置/用户钩子）
 
 > 来源：operator 授权自判假设闸（「差不多行了，你自己判断」）+ 本会话 logicsync（A 声明式 deny-only；V1 三事件；同进程 router 非 OS server；H1 目录为第二源且本 spec 不装载；builtin 不进 `settings.hooks`；产品开关正交）。
 > 状态：SPECIFY。不 supersede `specs/126-hook-system.md`（引擎内 Pre/Post 契约仍有效）或 `specs/406-secret-roundtrip-mask.md`（默认密钥路径仍是 roundtrip）。
@@ -12,21 +12,21 @@
 - **secrets guard**: (#126 决议 D6) Pre 缝第一个真实产品消费者——密钥模式拦截钩子，拦「工具调用参数内容夹带密钥/凭据」，与 hard-wall（命令形态 + 敏感路径）互补不重叠；模式来源双层：代码内置默认集 + 项目 settings 覆盖/追加，接入 `createAciExecutor` 产品路径。
 - **project stack defaults (SSOT boundary) — settings 单承载收敛 (ADR-0015)**: LLM 配置收敛到 `~/.iknow/settings.json`（user）+ `<cwd>/.iknow/settings.json`（project 覆盖 user）单承载。
 
-本 spec **待写入**（persist 刷进 CONTEXT，不在此发明定义）：`hook router`、`builtin hook lane`、`user hook lane`、`PreWrite (user hook event)`、`PreCommit (user hook event)`。
+本 spec **待写入**（persist 刷进 CONTEXT，不在此发明定义）：`hook router`、`内置钩子（builtin hooks）`、`用户钩子（user hooks）`、`PreWrite (user hook event)`、`PreCommit (user hook event)`。
 
 ## Objective
 
-把引擎内 Pre 缝从「单槽手写 + v0 `createNoOpHooks`」收成 **同进程 hook router**：组合 **builtin lane**（harness 必装配的拦截/观测，代码挂上）与 **user lane**（声明式 deny-only，`settings.hooks` 默认关）。用户是配了 `settings.json` 的操作员；成功 = 能用三条事件名拦住工具调用，且关用户钩子不会关掉自动记忆等已有产品开关。
+把引擎内 Pre 缝从「单槽手写 + v0 `createNoOpHooks`」收成 **同进程 hook router**：组合 **内置钩子**（harness 必装配的拦截/观测，代码挂上）与 **用户钩子**（声明式 deny-only，`settings.hooks` 默认关）。用户是配了 `settings.json` 的操作员；成功 = 能用三条事件名拦住工具调用，且关用户钩子不会关掉自动记忆等已有产品开关。
 
 ## Boundaries
 
 - **Does:**
   - 新能力模块 `src/harness/hooks/`：工厂返回挂上 permission 第 1 步（及组合既有 Post）的纯函数；形态对齐 ADR-0045「同进程 router」，不 fork、不起 daemon、不走 Unix socket。
-  - User lane V1：`settings.hooks.enabled` 缺席=关；`rules[]` 声明 `id` + `event` + 可选 matcher + `reason`。事件仅 `PreToolUse` / `PreWrite` / `PreCommit`。
+  - 用户钩子（user hooks）V1：`settings.hooks.enabled` 缺席=关；`rules[]` 声明 `id` + `event` + 可选 matcher + `reason`。事件仅 `PreToolUse` / `PreWrite` / `PreCommit`。
   - PreWrite 复用 `classifyCall`（mutate SSOT），不自造「会不会写」。
   - PreCommit 只认工具调用形态为 `git commit`（含 `git -C <path> commit` 等：第一个非 option 子命令为 `commit`）；不认 `git status` / `git commit --help` / `git commit-tree`；**不是** session JSONL `createChatSessionCommitHook`。
   - Multiplexer：builtin 与 user 可叠；先拦先赢；坏正则构造期剔除 + `onHookError`，不毒化全工具面。
-  - `hooks.enabled === false`（或缺席）不调用 user rules；builtin lane 仍按各自原开关装配。
+  - `hooks.enabled === false`（或缺席）不调用 user rules；内置钩子（builtin hooks）仍按各自原开关装配。
   - permission bypass 仍跑 user deny（与 hard-wall 同层：钩子不是 PermissionMode）。
   - 子代理引擎经同一 `buildHarnessEngine` / 同一份 merged settings 装配 user rules，无第二套后门。
   - 留下 `HookContribution` 形状，供后续文件源接入；本 spec **不**扫描 `~/.iknow/hooks/`。
@@ -75,15 +75,15 @@
 **Changes**
 
 - 新增 `src/harness/hooks/` 能力模块；`build-engine` 改为 `createHookServer`（名可实施微调）产出 `{ pre, post }` 再交给 `createAciExecutor`。
-- `settings` 增 `hooks` 段（仅 user lane）。
+- `settings` 增 `hooks` 段（仅 user hooks）。
 - `createNoOpHooks` 可保留给测试；产品路径不再把「唯一 Pre」写成单函数覆盖。
 - CONTEXT + ADR-0055（persist）。
 - `specs/README.md` 活跃表加本文件；`docs/architecture.md` Capability 表加 Hook router 行（实施/docs 子弹，非本文件正文定义）。
 
 **待写入（persist）**
 
-- CONTEXT：`hook router`、`builtin hook lane`、`user hook lane`、`PreWrite (user hook event)`、`PreCommit (user hook event)`；关系条：user hooks vs 产品开关正交；hook router vs sandbox server。
-- ADR-0055：同进程 hook router、两车道、否决 OS daemon 与 Policy 巨兽、V1 不扫 hooks 目录。
+- CONTEXT：`hook router`、`内置钩子（builtin hooks）`、`用户钩子（user hooks）`、`PreWrite (user hook event)`、`PreCommit (user hook event)`；关系条：user hooks vs 产品开关正交；hook router vs sandbox server。
+- ADR-0055：同进程 hook router、内置/用户两类钩子、否决 OS daemon 与 Policy 巨兽、V1 不扫 hooks 目录。
 
 ## Assumptions
 

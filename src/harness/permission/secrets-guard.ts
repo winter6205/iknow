@@ -27,7 +27,7 @@ import { DEFAULT_SECRET_PATTERNS } from "../secret-roundtrip/index.js";
 export { DEFAULT_SECRET_PATTERNS };
 
 /** stringify 截断上界（ADR-0006 封顶精神；spec Constraints (c)）。
- *  导出共享：user-lane（hooks）的 pattern 扫描沿同一截断纪律，单一常量源。 */
+ *  导出共享：user-hooks（hooks）的 pattern 扫描沿同一截断纪律，单一常量源。 */
 export const MAX_SCAN_LENGTH = 20_000;
 
 /** guard-init 告警载荷（phase 统一 "guard-init"，无 tool 归属）。 */

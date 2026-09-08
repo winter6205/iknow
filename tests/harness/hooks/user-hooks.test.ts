@@ -1,5 +1,5 @@
 /**
- * user-hook-router: user lane hook router（T2/T3/T4 工厂）测试。
+ * user-hook-router: 用户钩子（user hooks） hook router（T2/T3/T4 工厂）测试。
  *
  * SSOT: specs/user-hook-router.md —— 逐条 SC2/SC3/SC4/SC5/SC6/SC10 定向
  * （SC1 侧 = enabled 缺席/false 恒 undefined 的透明 hook 也钉在这里）。
@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import {
   composePreHooks,
   createUserHookRouter,
-} from "../../../src/harness/hooks/user-lane.js";
+} from "../../../src/harness/hooks/user-hooks.js";
 import type { PreToolUseHook } from "../../../src/harness/permission/types.js";
 import type { IknowSettingsHooks } from "../../../src/config/settings.js";
 import { classifyCall } from "../../../src/harness/isolation/worktree-gate.js";
@@ -131,14 +131,14 @@ describe("createUserHookRouter — SC2: PreToolUse matcher 命中拦 / 未命中
     assertPassthrough(hook, "read_file", { path: "x" });
   });
 
-  it("toolPrefix 前缀命中 → 拦；不同前缀 → 放行", () => {
+  it("pretooluse 前缀命中 → 拦；不同前缀 → 放行", () => {
     const hook = makeHook({
       enabled: true,
       rules: [
         {
           id: "no-github",
           event: "PreToolUse",
-          toolPrefix: "mcp__github",
+          pretooluse: "mcp__github",
           reason: "github blocked",
         },
       ],

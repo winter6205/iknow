@@ -1,7 +1,7 @@
 /**
- * user-hook-router: `settings.hooks` 段（user lane only）的解析契约
+ * user-hook-router: `settings.hooks` 段（用户钩子（user hooks） only）的解析契约
  * （SSOT: specs/user-hook-router.md SC1 —— enabled 缺席或 false 时 user rules
- * 即使写了也不产生 [hook_blocked]，即段缺席 = user lane 关；非法值回退不抛
+ * 即使写了也不产生 [hook_blocked]，即段缺席 = 用户钩子（user hooks） 关；非法值回退不抛
  * 的纪律继承 src/config/settings.ts / ADR-0015）。
  *
  * Contract pinned here:
@@ -9,7 +9,7 @@
  *    与今日默认一致（空文件 → {}）。
  *  - enabled 只认 boolean；rules 只认数组；单条规则 id（非空串）/ event（三值
  *    闭集，大小写敏感）/ reason（非空串）结构性非法 → 丢弃该条不抛；可选
- *    tool / toolPrefix / pattern 非法 → 只丢该字段、规则保留。
+ *    tool / pretooluse / pattern 非法 → 只丢该字段、规则保留。
  *  - pattern 只做字符串透传：正则可编译性由 hook router 构造期判定（SC6，
  *    坏正则剔除 + onHookError），settings 层不预判。
  *  - 覆盖纪律与 llm/secrets 段一致：per-field project > user；project 非法值
@@ -98,7 +98,7 @@ describe("settings.hooks — 缺席 = 关（specs/user-hook-router.md SC1）", (
 });
 
 describe("settings.hooks — 合法段解析与 frozen 结构", () => {
-  it("enabled:true + 合法规则 → 结构保真（含可选 tool/toolPrefix/pattern）", async () => {
+  it("enabled:true + 合法规则 → 结构保真（含可选 tool/pretooluse/pattern）", async () => {
     const { home, cwd } = await makeSettings(
       {
         hooks: {
@@ -108,7 +108,7 @@ describe("settings.hooks — 合法段解析与 frozen 结构", () => {
               id: "block-rm-rf",
               event: "PreToolUse",
               tool: "bash",
-              toolPrefix: "mcp__github",
+              pretooluse: "mcp__github",
               pattern: "rm\\s+-rf",
               reason: "禁 rm -rf",
             },
@@ -125,7 +125,7 @@ describe("settings.hooks — 合法段解析与 frozen 结构", () => {
             id: "block-rm-rf",
             event: "PreToolUse",
             tool: "bash",
-            toolPrefix: "mcp__github",
+            pretooluse: "mcp__github",
             pattern: "rm\\s+-rf",
             reason: "禁 rm -rf",
           },
@@ -245,7 +245,7 @@ describe("settings.hooks — 非法输入逐项丢弃不抛", () => {
       ["空 reason", { id: "x", event: "PreToolUse", reason: "" }],
       ["非法 event PrePush", { id: "x", event: "PrePush", reason: "r" }],
       [
-        "非法 event PostToolUse（大小写敏感闭集，非本 lane 事件）",
+        "非法 event PostToolUse（大小写敏感闭集，非用户钩子事件）",
         { id: "x", event: "PostToolUse", reason: "r" },
       ],
       ["event 非字符串", { id: "x", event: 3, reason: "r" }],
@@ -406,13 +406,13 @@ describe("settings.hooks — 字段 trim", () => {
     });
   });
 
-  it("tool / toolPrefix 前后空白同样 trim（镜像 id/reason 纪律）", async () => {
+  it("tool / pretooluse 前后空白同样 trim（镜像 id/reason 纪律）", async () => {
     const { home, cwd } = await makeSettings(
       {
         hooks: {
           enabled: true,
           rules: [
-            validRule({ tool: "  bash  ", toolPrefix: "  mcp__github  " }),
+            validRule({ tool: "  bash  ", pretooluse: "  mcp__github  " }),
           ],
         },
       },
@@ -420,7 +420,7 @@ describe("settings.hooks — 字段 trim", () => {
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }).hooks, {
       enabled: true,
-      rules: [validRule({ tool: "bash", toolPrefix: "mcp__github" })],
+      rules: [validRule({ tool: "bash", pretooluse: "mcp__github" })],
     });
   });
 });

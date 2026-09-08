@@ -39,7 +39,7 @@
       {
         "id": "no-github-mcp",
         "event": "PreToolUse",
-        "toolPrefix": "mcp__github",
+        "pretooluse": "mcp__github",
         "reason": "禁止访问 GitHub MCP 工具",
       },
     ],
@@ -65,10 +65,10 @@
 | `event`      | ✅   | `"PreToolUse"` \| `"PreWrite"` \| `"PreCommit"` 三选一                          |
 | `reason`     | ✅   | 拦截时回灌给模型的文案（会出现在 `[hook_blocked]` 后面）                        |
 | `tool`       | —    | 精确工具名，如 `"bash"` / `"write_file"`；缺席 = 任意工具                       |
-| `toolPrefix` | —    | 工具名前缀，如 `"mcp__github"` 命中 `mcp__github_create_issue`；缺席 = 任意工具 |
+| `pretooluse` | —    | 工具名前缀，如 `"mcp__github"` 命中 `mcp__github_create_issue`；缺席 = 任意工具 |
 | `pattern`    | —    | 正则，对工具调用 input 的 JSON 串（截断 20000 字符）匹配；缺席 = 不做内容匹配   |
 
-`tool` / `toolPrefix` / `pattern` 同一条规则是 **AND** 关系：全部命中才拦；全都缺席 = 通配（任何调用都拦，慎用）。
+`tool` / `pretooluse` / `pattern` 同一条规则是 **AND** 关系：全部命中才拦；全都缺席 = 通配（任何调用都拦，慎用）。
 
 ### 三事件语义
 
@@ -96,4 +96,4 @@
 
 - 看拦截是否生效：模型收到 `[hook_blocked] <reason>` 的工具结果；TUI / trace 面板（`serve` 的 `/trace`）可见对应 `execution_failed`。
 - 看规则是否被加载：stderr 的 `[hook_error] user-rule-init ...` 告警 = 有规则因 pattern 非法或字段缺失被剔除；没有告警 = 规则全部通过构造期编译。
-- 单测参考：`tests/harness/hooks/user-lane.test.ts`（各 matcher / 事件语义的判定边界都在那里钉住）。
+- 单测参考：`tests/harness/hooks/user-hooks.test.ts`（各 matcher / 事件语义的判定边界都在那里钉住）。

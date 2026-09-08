@@ -49,7 +49,7 @@ const CANCELLED_RESULT_MESSAGE = "cancelled";
  *   - "pre"：PreToolUseHook 抛异常 → fail-closed（调用判 execution_failed）
  *   - "post"：PostToolUseHook 抛异常 → fire-and-forget（结果不变，仅观测）
  *   - "guard-init"：secrets-guard 构造期 pattern 编译失败（T3 消费者）
- *   - "user-rule-init"：user lane 规则 pattern 构造期编译失败（hook router
+ *   - "user-rule-init"：用户钩子（user hooks） 规则 pattern 构造期编译失败（hook router
  *     消费者，specs/user-hook-router.md SC6 —— 规则整条剔除 + 告警）
  */
 export interface HookErrorEvent {
