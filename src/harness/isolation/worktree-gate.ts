@@ -305,16 +305,32 @@ export async function createTaskWorktree(
     );
   }
   if (branchProbe.code === 0) {
+    // T8 (plans/write-situation-disclosure.md) — `branch_exists` detail must be
+    // unique (one actionable next step per receipt, ADR-0069 「回执说下一步做什
+    // 么」). Two sub-cases by whether the target directory is on disk:
+    //   - directory EXISTS (e.g. previous worktree remove left a branch behind
+    //     — `remove-task-worktree` defaults to NOT deleting the branch) → defer
+    //     to the same three-arm logic as `worktree_exists`; the branch is
+    //     bound to a real directory, so `enter-task-worktree` is reachable;
+    //   - directory MISSING → the branch is orphaned (no linked worktree); an
+    //     `enter-task-worktree` would unconditionally hit `worktree_not_found`
+    //     and produce a second empty turn. Detail MUST NOT mention
+    //     `enter-task-worktree` here; only "pick a different label" or "ask
+    //     the operator to delete the branch" are reachable next moves.
     throw new WorktreeIsolationError(
       "branch_exists",
-      `task branch '${branch}' already exists; resolve the leftover tree/branch manually before retrying (no silent overwrite)`
+      existsSync(worktreePath)
+        ? `task branch '${branch}' already exists and is bound to ${worktreePath}; ` +
+            worktreeGuidance(worktreePath, opts.conversationId)
+        : `task branch '${branch}' already exists with no linked worktree; pick a different label, or ask the operator to delete the branch (no silent overwrite)`
     );
   }
 
   if (existsSync(worktreePath)) {
     throw new WorktreeIsolationError(
       "worktree_exists",
-      `task worktree path already exists: ${worktreePath}; resolve the leftover tree manually before retrying (no silent overwrite)`
+      `task worktree path already exists: ${worktreePath}; ` +
+        worktreeGuidance(worktreePath, opts.conversationId)
     );
   }
 
@@ -697,6 +713,76 @@ export function taskWorktreeOwnerOf(root: string): string | undefined {
   const separator = leaf.lastIndexOf("--");
   const owner = separator === -1 ? leaf : leaf.slice(separator + 2);
   return SAFE_CONVERSATION_ID_RE.test(owner) ? owner : undefined;
+}
+
+/**
+ * T8 (plans/write-situation-disclosure.md SC8 / SC9) — single actionable
+ * guidance tail for the `worktree_exists` kind (and the directory-present
+ * sub-case of `branch_exists`). Returns ONLY the next-step phrase so each
+ * caller can compose its own opener (`worktree_path_already_exists` /
+ * `branch_already_exists_and_is_bound_to_<path>`). The kind stays
+ * machine-readable through `gateBlockNotice` (T7), so this helper is the
+ * human-facing half — one phrase, one move.
+ *
+ * Three arms by `taskWorktreeOwnerOf(worktreePath)`:
+ *   - owner === `selfConversationId` (this session's own tree) → point at
+ *     `enter-task-worktree` (single, unambiguous move);
+ *   - owner !== `selfConversationId` (a real, known other session owns the
+ *     tree) → either `enter-task-worktree` (explicit adoption) or use a
+ *     different label;
+ *   - owner undefined (no sidecar / off-shape directory / labeled leaf with
+ *     no recorded owner) → point at `list-task-worktrees` to discover who
+ *     owns it.
+ *
+ * A labeled-only leaf (`<slug>` with no `<slug>--<convId>` separator and no
+ * sidecar) is treated as "owner unknown" — the leaf itself can be a valid
+ * kebab-case label (matching `SAFE_CONVERSATION_ID_RE` by accident), so
+ * `taskWorktreeOwnerOf` cannot prove ownership from the leaf alone. Such a
+ * directory is a foreign object (e.g. an orphan left behind by some prior
+ * session or operator action); `enter-task-worktree` would then race against
+ * a missing durable owner record, so the receipt must send the model to
+ * `list-task-worktrees` first.
+ *
+ * Sidecar I/O failures (non-ENOENT) fall through `ownerFromGitdirSidecar`
+ * returning undefined; this helper then takes the third arm without
+ * throwing — fail-closed-to-discovery rather than fail-closed-to-error.
+ */
+export function worktreeGuidance(
+  worktreePath: string,
+  selfConversationId: string | undefined
+): string {
+  let owner: string | undefined;
+  try {
+    owner = taskWorktreeOwnerOf(worktreePath);
+  } catch {
+    // EXIT: defensive — `taskWorktreeOwnerOf` is designed never to throw,
+    // but if a future refactor changes that, we degrade to discovery rather
+    // than letting a typed error double-fire on top of the existing kind.
+    owner = undefined;
+  }
+  // Labeled-only leaf with no sidecar: owner === leaf is just the label
+  // string matching `SAFE_CONVERSATION_ID_RE` by accident, not a real
+  // conversation id. Treat as unknown — point at list-task-worktrees so
+  // the model can pick the right move (own / foreign / nothing).
+  const leaf = basename(worktreePath);
+  const isHistoricalLeaf = leaf.lastIndexOf("--") > 0;
+  const sidecar = (() => {
+    try {
+      return ownerFromGitdirSidecar(worktreePath);
+    } catch {
+      return undefined;
+    }
+  })();
+  const ownerIsLabelOnly =
+    owner !== undefined && !isHistoricalLeaf && sidecar === undefined;
+  const effectiveOwner = ownerIsLabelOnly ? undefined : owner;
+  if (effectiveOwner !== undefined && effectiveOwner === selfConversationId) {
+    return `this worktree belongs to this session (owner ${effectiveOwner}); use enter-task-worktree to bind this session to it`;
+  }
+  if (effectiveOwner !== undefined) {
+    return `this worktree is owned by another session (${effectiveOwner}); either call enter-task-worktree to explicitly adopt it, or pick a different label`;
+  }
+  return `owner is unknown (no sidecar or off-shape worktree); run list-task-worktrees to discover who owns it before retrying`;
 }
 
 /**
