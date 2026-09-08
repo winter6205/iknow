@@ -29,6 +29,7 @@ import type {
   PermissionDecision,
   ProjectSettingsPolicySource,
 } from "./types.js";
+import { isBashNetworkInput } from "./policy.js";
 
 /* -----------------------------------------------------------------------------
  * JSON Schema for `.iknow/permissions.toml`
@@ -49,6 +50,9 @@ const SUPPORTED_PREDICATES: ReadonlySet<string> = Object.freeze(
     "path_ends_with",
     "path_contains",
     "path_equals",
+    // #952 — bash network:true 资格门禁谓词。语义 SSOT = policy.ts
+    // isBashNetworkInput 的严格 === true（与 isBashNetworkTrue 共享 helper）。
+    "network_equals",
   ])
 );
 
@@ -80,6 +84,10 @@ const PROJECT_SETTINGS_SCHEMA = Object.freeze({
               path_ends_with: { type: "string" },
               path_contains: { type: "string" },
               path_equals: { type: "string" },
+              // #952 — 只接受布尔 true（const 钉死）。TOML 里写成字符串
+              // "true" 在 load 时即抛错（fail-loud），不会落地成一条永不
+              // 命中的静默死规则。
+              network_equals: { type: "boolean", const: true },
             },
           },
           decision: { enum: ["allow", "deny", "ask"] },
@@ -207,6 +215,16 @@ function matchPredicate(
     if (predicate === "path_ends_with") return pathVal.endsWith(expected);
     if (predicate === "path_contains") return pathVal.includes(expected);
     return pathVal === expected;
+  }
+  // network_equals — #952 资格门禁谓词（bash network:true）。expected 已被
+  // ajv schema（boolean const true）钉死；此处仍按宽松防御式实现：非 true
+  // 的 expected（schema gap 兜底）一律不命中。shape check 复用 policy.ts
+  // isBashNetworkInput（isBashNetworkTrue 的 input 侧），tool gate 由
+  // buildRuleMatcher 的 `ctx.tool === toolName`（match_tool = "bash"）承担，
+  // 故非 bash 工具的同名字段不会走到这里。
+  if (predicate === "network_equals") {
+    if (expected !== true) return false;
+    return isBashNetworkInput(inputObj);
   }
   return false;
 }
