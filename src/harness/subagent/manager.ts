@@ -910,8 +910,10 @@ export function createSubAgentManager(opts: {
     //   3. def.sandboxRoot 在场 → resolved = realpathSync(resolve(def.sandboxRoot)),
     //      rel = relative(parentSandboxRoot, resolved)。rel === "" 合法(相等);
     //      rel.startsWith("..") || isAbsolute(rel) → typed 拒绝。realpath 抛 ENOENT
-    //      → fail-closed 同样 typed 拒绝(避免给模型"声明未创建路径就能逃逸"的暗示);
-    //      其他 errno 原样 rethrow(让 unexpected I/O 故障暴露给上游)。
+    //      → 词法 fallback:用 resolve(def.sandboxRoot) 的词法路径重做 prefix 判定
+    //      (spec SC6:父根下尚未存在的子路径不是 outside,词法在父根内即放行);
+    //      词法越界仍 typed 拒绝(spec SC7 + 防"声明未创建路径 = 隐式扩大父根")。
+    //      其他 errno(EACCES / ELOOP 等)原样 rethrow,不得包装成 outside。
     //   4. `rel.startsWith("..")` 对合法目录名 `..foo` 也拒绝(spec Code Style 是
     //      合同,fail-closed 优先,不试图区分 `..foo` vs `..` / `../`)。
     let parentSandboxRoot: string;
@@ -944,18 +946,21 @@ export function createSubAgentManager(opts: {
     if (def.sandboxRoot === undefined) {
       resolved = parentSandboxRoot;
     } else {
+      let lexicalResolved: string | undefined;
       try {
         resolved = realpathSync(resolve(def.sandboxRoot));
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-          // fail-closed: 模型声明的 sandboxRoot 不存在 → typed 拒绝,
-          // 防止"声明一个未来创建的路径 = 隐式扩大父根"语义漏洞。
-          throw new SubAgentSandboxRootError({
-            parentSandboxRoot,
-            requested: def.sandboxRoot,
-          });
+          // spec SC6:父根下尚未存在的子路径不是 outside —— 词法放行。
+          // 不替 worker 建目录(fail-open at validation, fail at use site);
+          // 词法越界仍 typed 拒绝(SC7 / 防"声明未创建路径 = 隐式扩大父根")。
+          lexicalResolved = resolve(def.sandboxRoot);
+          resolved = lexicalResolved;
+        } else {
+          // 非 ENOENT 的 I/O(EACCES / ELOOP / ENOTDIR 等)原样 rethrow,
+          // 不得包装成 outside。
+          throw err;
         }
-        throw err;
       }
       const rel = relative(parentSandboxRoot, resolved);
       if (rel.startsWith("..") || isAbsolute(rel)) {
