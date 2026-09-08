@@ -35,7 +35,8 @@ OVERALL: PASS — hand to writing-plans
    - **Inherits:** spec Open Questions 1「实施第一步必须先答这个，因为它决定 SC3 的语义强度与 L1 是否触发」；已知限制 L1 的三处强制披露义务（设置项文档 / 回执文案 / spec）
    - **Surface:** `session-api`（会话记录的持有方）；产出是**决定 + `specs/worktree-exclusive-lock.md` L1 段的更新**
    - **Acceptance:** 明确回答三件事——(a) 枚举现存会话记录走哪个入口（`hub` recents / sessions 是否有现成索引、跨 root 怎么算）；(b) 单次 enter 的枚举成本量级，与「一次 git 子进程」比较；(c) 据此判定**强档**（全量枚举，跨进程占用可见）或**弱档**（只查当前 hub 已加载的会话）。判弱档时 L1 的三处披露文字必须同时写定，且 spec L1 段更新为已决状态；判强档时 L1 标为不触发并记录成本依据
-   - Status: [ ] pending
+   - **Decision (2026-09-08):** **弱档**。入口 = `SessionStore.list()`（`src/session-api/store/session-store.ts:515-534`），单进程单根命名空间。成本量级 ~10ms（N=10，file-read 主导），**远低于一次 git 子进程**；但跨进程 / 跨 CLI 占用看不见仍是不可避免的（需扫 `<dataDir>/sessions/*` 全部项目命名空间，量级到 M×N，本 spec 不做）。spec L1 段 + OQ1 段已更新为已决状态，T1 bullet 关单
+   - Status: [x] done
    - [blocks: T3]
 
 2. **设置项 `isolation.worktreeExclusive` + 单读点 + 装配期透传** — tag: `[implementation]`
