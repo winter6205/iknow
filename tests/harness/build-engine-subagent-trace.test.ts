@@ -28,6 +28,25 @@ import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
+import type { McpClientHandle } from "../../src/harness/mcp/manager.ts";
+import { createMcpManager } from "../../src/harness/mcp/manager.ts";
+
+// 隔离仓库根 .mcp.json 的 iknow-trace server(schema compile validator 在
+// 单测环境不可达，触发的 30s 装配期窗口与 tsx 子进程噪声都是同一条依赖面的
+// 副作用) —— 走 build-engine 已留的 createMcpManager / createMcpClient 测试缝。
+// 同时 stub 真实 SDK countTokens 网络调用(127.0.0.1:9999 死端口)。其它 MCP
+// 形态不动。stub scope 与不变式仍真实：trace 注入 / NoopTrace 默认 /
+// diagnosticsDir 透传 / query_trace 走 diagnosticsDir 树。
+const fakeMcpClient = (_server: unknown): McpClientHandle => ({
+  connect: async () => {},
+  listTools: async () => [],
+  callTool: async () => ({ result: { content: [] } }) as never,
+  close: async () => {},
+  onListChanged: () => {},
+  onClose: () => {},
+  listResources: async () => ({ resources: [] }),
+  readResource: async () => ({ contents: [] }),
+});
 
 // Module mock 必须先于 buildHarnessEngine 的 dynamic import。vi.hoisted
 // 共享 state 解决 vi.mock 工厂被 hoisted 与 fakeChildren 变量声明顺序问题。
@@ -63,7 +82,7 @@ vi.mock("../../src/harness/subagent/manager.ts", async (importActual) => {
       const fakeSpawn: (
         def: unknown,
         taskId: string,
-        payload: unknown
+        payload: unknown,
       ) => ChildProcess = (_def, _taskId, _payload) => {
         const stdin = new PassThrough();
         const stdout = new PassThrough();
@@ -79,7 +98,7 @@ vi.mock("../../src/harness/subagent/manager.ts", async (importActual) => {
           signalCode: null as NodeJS.Signals | null,
         });
         mockState.fakeChildren.push(
-          child as unknown as (typeof mockState.fakeChildren)[number]
+          child as unknown as (typeof mockState.fakeChildren)[number],
         );
         return child as unknown as ChildProcess;
       };
@@ -131,7 +150,7 @@ function okEnvelope(result = "ok"): SubAgentEnvelope {
 
 function emitEnvelope(
   child: (typeof mockState.fakeChildren)[number],
-  env: SubAgentEnvelope
+  env: SubAgentEnvelope,
 ): void {
   child.stdout.write(JSON.stringify(env) + "\n");
   child.emit("exit", 0, null);
@@ -160,6 +179,19 @@ afterEach(async () => {
 
 // ── SC1 生产装配面 ──────────────────────────────────────────────────────
 
+// 共享 seam：每个 buildHarnessEngine 调用点都注入这一组，截断仓库根
+// .mcp.json 的 iknow-trace server（schema compile + tsx 子进程噪声 +
+// 30s firstTurnReady 窗口）以及真实 SDK countTokens 网络调用。
+const traceSeam = {
+  createMcpManager: (opts: Parameters<typeof createMcpManager>[0]) =>
+    createMcpManager({
+      ...opts,
+      config: opts.config.filter((s) => s.name !== "iknow-trace"),
+    }),
+  createMcpClient: fakeMcpClient,
+  countTokens: async () => ({ inputTokens: 100 }),
+} as const;
+
 describe("buildHarnessEngine — subagentTrace 注入缝 (Fix 1 SC1)", () => {
   it("opts.subagentTrace → 内置 createSubAgentManager 收到该 trace, spawn def → JSONL 含三类事件", async () => {
     const trace = createJsonlTraceService({
@@ -170,6 +202,7 @@ describe("buildHarnessEngine — subagentTrace 注入缝 (Fix 1 SC1)", () => {
       env: makeEnv("sk-test-bld-subagent-trace-1"),
       askUser: createNoAskUser(),
       subagentTrace: trace,
+      ...traceSeam,
     });
 
     // 1. manager 在场 + createSubAgentManager 被调用, 收到的 trace opt ===
@@ -195,7 +228,7 @@ describe("buildHarnessEngine — subagentTrace 注入缝 (Fix 1 SC1)", () => {
     const subagentLines = recordTypes.filter((t) => t.startsWith("subagent_"));
     assert.ok(
       subagentLines.length >= 3,
-      `expected >=3 subagent_* lines, got ${subagentLines.length} (${recordTypes.join(",")})`
+      `expected >=3 subagent_* lines, got ${subagentLines.length} (${recordTypes.join(",")})`,
     );
     expect(recordTypes).toContain("subagent_spawn");
     expect(recordTypes).toContain("subagent_state_change");
@@ -206,6 +239,7 @@ describe("buildHarnessEngine — subagentTrace 注入缝 (Fix 1 SC1)", () => {
     built = await buildHarnessEngine({
       env: makeEnv("sk-test-bld-subagent-noop-1"),
       askUser: createNoAskUser(),
+      ...traceSeam,
     });
     expect(built.subagentManager).toBeDefined();
     expect(mockState.captureCallCount).toBe(1);
@@ -223,6 +257,7 @@ describe("buildHarnessEngine — subagentTrace 注入缝 (Fix 1 SC1)", () => {
       env: makeEnv("sk-test-bld-subagent-diagnostics-1"),
       askUser: createNoAskUser(),
       subagentDiagnosticsDir: scratchDir,
+      ...traceSeam,
     });
 
     expect(mockState.capturedDiagnosticsDir).toBe(scratchDir);
@@ -238,12 +273,13 @@ describe("buildHarnessEngine — subagentTrace 注入缝 (Fix 1 SC1)", () => {
         turn_id: "turn-custom",
         started_at: "2026-08-28T00:00:01.000Z",
         status: "ok",
-      })}\n`
+      })}\n`,
     );
     built = await buildHarnessEngine({
       env: makeEnv("sk-test-bld-query-trace-dir-1"),
       askUser: createNoAskUser(),
       subagentDiagnosticsDir: customDir,
+      ...traceSeam,
     });
     const tool = built.deps.registry
       .list()
@@ -254,7 +290,7 @@ describe("buildHarnessEngine — subagentTrace 注入缝 (Fix 1 SC1)", () => {
     })) as string;
     const body = JSON.parse(raw) as { records: Array<{ turn_id?: string }> };
     expect(body.records.some((row) => row.turn_id === "turn-custom")).toBe(
-      true
+      true,
     );
     rmSync(customDir, { recursive: true, force: true });
   });
