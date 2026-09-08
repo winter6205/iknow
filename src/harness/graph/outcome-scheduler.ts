@@ -18,9 +18,14 @@
  *     调度收敛，handler typed 拒（ADR-0060：done 永不因失败边再跑）。
  *   - **abort 后不再启动新进入**：in-flight 落定后收敛，不空转。
  *
- * 进入互斥：同一 id 同时至多一个进入在排队或执行（`queued` 集合）；多
- * 条失败边指到同一排队中的 id 只算一次启动。同 id 串行反复再进入的次数
- * 上限（effort 熔断）不在本模块 —— 那是 T3 在 executor 入口加的闸。
+ * 进入去重：`queued` 集合在「本批 ready 列表里」或「上一批已 splice 即
+ * 将执行的批里」持有该 id 时拒绝再入 —— 失败边 kick 与 deps 晋升都经
+ * `queued` 去重，所以**同一 id 同时至多一个进入**。这一保证由两层共同
+ * 构成：(a) `queued`/`isFinal` 在 enqueue 入口短路；(b) **失败边 kick 只
+ * 在整波 settle 完成、第二遍遍历结果时才抬升**（见下方 `for (const r of
+ * settled)`），所以在波内执行期间不会有 kick 把同一 id 第二次入队。同 id
+ * 串行反复再进入的次数上限（effort 熔断）不在本模块 —— 那是 T3 在
+ * executor 入口加的闸。
  *
  * 分层（complexity-anti-drift）：本模块不调 validateGraph（输入 spec 必
  * 须已过 handler 校验）、不读账本、不 import node-executor / loop-engine。
@@ -92,8 +97,10 @@ export async function runGraphWithFailureEdges(
   const results: Record<string, GraphNodeResult> = {};
   const outputs: Record<string, unknown> = {};
 
-  // ready：待启动批次；queued：已在 ready 排队或在当前批执行中的 id。
-  // 失败边 kick 与 deps 晋升都经 queued 去重 —— 同一 id 同时至多一个进入。
+  // ready：待启动批次；queued：已在 ready 排队或在已 splice 出当前批中
+  // 执行的 id（批 splice 时 delete —— 波内执行期间入队口仍被 isFinal /
+  // 第二遍 kick 时机挡住，见模块头「进入去重」）。失败边 kick 与 deps
+  // 晋升都经 queued 去重 —— 同一 id 同时至多一个进入。
   const ready: string[] = [];
   const queued = new Set<string>();
 

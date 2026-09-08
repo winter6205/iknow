@@ -236,13 +236,123 @@ describe("run_graph failure edges — mid-run violation", () => {
     settle(children[2]!, ok("C-OK"));
     await expect(pending).rejects.toThrow(ToolExecutionError);
     await expect(pending).rejects.toThrow(/already done/);
-    // 同波 done 兄弟 c 与触发点 b 一起冻结进账本
+    // 同波 done 兄弟 c 与触发点 b 一起冻结进账本。**真正的失败起点 a 也
+    // 必须冻结为 failed** —— F1 review fix 的承诺：violation 抬升前已
+    // 把整波 settle 结果写进 results，freezeResults 沿用正常 settle 路径
+    // 冻 done + 真 failed（不是 cancel 路径的「仅冻 done」），所以 a 与
+    // 兄弟 b/c 一起冻。否则下一段剩余子图重交 a 会被允许再 spawn，违
+    // 反 ADR-0050「已完成不重演」（冻结语义见 run-graph-tool.ts
+    // freezeResults 的 F2 注释）。
     const ledger = host.ledgerFor(CONV);
+    expect(ledger.statusOf("a")).toBe("failed");
     expect(ledger.statusOf("b")).toBe("done");
     expect(ledger.statusOf("c")).toBe("done");
-    expect(ledger.frozenIds()).toEqual(expect.arrayContaining(["b", "c"]));
+    expect(ledger.frozenIds()).toEqual(expect.arrayContaining(["a", "b", "c"]));
     // 无多余 spawn（c 不重跑）
     expect(children).toHaveLength(3);
+    await manager.shutdown();
+  });
+});
+
+describe("run_graph failure edges — 账本在调用中被销毁（phase2 边界）", () => {
+  it("child 未落定时 host.destroy(CONV)：settle 后不 crash、typed 路径照常返回；freeze 对已销毁账本是静默 no-op", async () => {
+    const { manager, children } = makeManager();
+    const host = createLiveGraphLedgerHost();
+    const t = createRunGraphTool({
+      manager,
+      ledger: host,
+      isEnabled: () => true,
+    });
+    // a(self-onFailure) + b：a 失败走失败边再进，b 普通节点。a(1) 先
+    // settle failed，b 的 child spawn 后不 settle —— 在这个间隙销毁
+    // 账本（模拟 reset / 会话结束与 run_graph 并发的窗口）。
+    const pending = t.handler(
+      {
+        nodes: [{ id: "a", task: "ta", onFailure: "a" }],
+      },
+      { conversationId: CONV }
+    );
+    await waitForChildren(children, 1);
+    const ledger = host.ledgerFor(CONV);
+    expect(ledger.exists()).toBe(true);
+    // a(1) settle failed → self 失败边 kick a(2)。
+    settle(children[0]!, fail("crashed"));
+    await waitForChildren(children, 2);
+    // 销毁账本 —— handler 闭包里持有的 ledger 引用仍在，但冻结集合
+    // 与 created 标志已清空。
+    host.destroy(CONV);
+    // a(2) settle ok：handler 收敛后调 freezeResults —— 对已销毁
+    // 账本（created === false）这是静默 no-op，不得 crash。
+    settle(children[1]!, ok("A-RETRY"));
+    const out = parse(await pending);
+    expect(out.nodes).toEqual([{ id: "a", status: "done", output: "A-RETRY" }]);
+    // 账本保持销毁态：freeze no-op 没有重建任何冻结痕迹（ACI 序列化
+    // 是真正的并发守卫；本测试钉的是「destroy 后 freeze 不复活账本」
+    // 这一防御性边界，而不是并发语义本身）。
+    expect(host.ledgerFor(CONV).exists()).toBe(false);
+    expect(host.ledgerFor(CONV).frozenIds()).toEqual([]);
+    await manager.shutdown();
+  }, 15_000);
+});
+
+describe("run_graph failure edges — abort-frozen 后再指向冻结（phase2 边界）", () => {
+  it("第一段 abort 把 a 冻结 done；第二段提交 onFailure:a → typed 拒、零 spawn、账本不变", async () => {
+    const { manager, children } = makeManager();
+    const host = createLiveGraphLedgerHost();
+    const t = createRunGraphTool({
+      manager,
+      ledger: host,
+      isEnabled: () => true,
+    });
+    const controller = new AbortController();
+    // 确定性锚：graph_progress 事件里 a 出现 done 才 abort —— 否则
+    // waitFor 的 25ms 轮询间隙里 abort 会把 a 打成取消症状 failed
+    // （run-graph-cancel.test.ts SC8 同款锚）。
+    const events: Array<{
+      type: string;
+      snapshot?: { nodes: Array<{ id: string; status: string }> };
+    }> = [];
+    let wakeDoneA: () => void = () => {};
+    const doneA = new Promise<void>((resolve) => {
+      wakeDoneA = resolve;
+    });
+
+    // 第一段：a 跑完 done 后 abort（与 run-graph-cancel.test.ts SC8 同
+    // 模式 —— a 冻结 done）。
+    const first = t.handler(
+      { nodes: [{ id: "a", task: "ta" }] },
+      {
+        signal: controller.signal,
+        conversationId: CONV,
+        onStream: (e) => {
+          events.push(e as never);
+          if (
+            e.type === "graph_progress" &&
+            e.snapshot?.nodes.some((n) => n.id === "a" && n.status === "done")
+          ) {
+            wakeDoneA();
+          }
+        },
+      }
+    );
+    await waitForChildren(children, 1);
+    settle(children[0]!, ok("A-OUT"));
+    await doneA;
+    controller.abort();
+    await expect(first).rejects.toThrow(/cancel/i);
+    const ledger = host.ledgerFor(CONV);
+    expect(ledger.statusOf("a")).toBe("done");
+
+    // 第二段：提交 r(onFailure:a) —— a 在账本上是已冻结 done（ADR-0060：
+    // done 永不因失败边再跑）。mergeResidual 的 frozen 重交拒绝 + 失败边
+    // frozen-target 拒绝都会触发。typed 拒、零 spawn、账本冻结集合不变。
+    await expect(
+      t.handler(
+        { nodes: [{ id: "r", task: "tr", onFailure: "a" }] },
+        { conversationId: CONV }
+      )
+    ).rejects.toThrow(ToolExecutionError);
+    expect(host.ledgerFor(CONV).frozenIds()).toEqual(["a"]);
     await manager.shutdown();
   });
 });

@@ -18,7 +18,13 @@ import { describe, expect, it } from "vitest";
 import { createRunGraphTool } from "../../../src/harness/graph/run-graph-tool.ts";
 import { createLiveGraphLedgerHost } from "../../../src/harness/graph/ledger.ts";
 import { ToolExecutionError } from "../../../src/harness/errors.ts";
-import { makeManager, settle, ok, waitForChildren } from "./_fake-manager.ts";
+import {
+  makeManager,
+  settle,
+  ok,
+  fail,
+  waitForChildren,
+} from "./_fake-manager.ts";
 
 const CONV = "conv-t3";
 
@@ -158,7 +164,103 @@ describe("run_graph 取消保留已 done：SC8", () => {
   });
 });
 
-// ── SC6 回归钉：非取消的正常 settle，failed 仍冻结 ─────────────────────
+// ── phase2 C5：失败边图上的调用侧取消 ─────────────────────────────────
+
+describe("run_graph 取消 × 失败边再进入（phase2 边界）", () => {
+  it("self-onFailure 第 2 次再进入 settle ok 之后 abort：typed cancel 拒、a 冻结 done（末次结局胜出）", async () => {
+    const { manager, children } = makeManager();
+    const host = createLiveGraphLedgerHost();
+    const tool = createRunGraphTool({
+      manager,
+      ledger: host,
+      isEnabled: () => true,
+    });
+    const controller = new AbortController();
+    // onNode 回调不可直接拿（handler 内部接 progress）—— 用 graph_progress
+    // 事件流作「a 第二次进入已 settle ok」的锚（与上方 SC8 测试同模式）。
+    const events: Array<{
+      type: string;
+      snapshot?: { nodes: Array<{ id: string; status: string }> };
+    }> = [];
+    let wakeDoneA: () => void = () => {};
+    const doneA = new Promise<void>((resolve) => {
+      wakeDoneA = resolve;
+    });
+    const noteDoneA = (): void => {
+      for (const e of events) {
+        if (
+          e.type === "graph_progress" &&
+          e.snapshot?.nodes.some((n) => n.id === "a" && n.status === "done")
+        ) {
+          wakeDoneA();
+          return;
+        }
+      }
+    };
+
+    const pending = tool.handler(
+      { nodes: [{ id: "a", task: "ta", onFailure: "a" }] },
+      {
+        signal: controller.signal,
+        conversationId: CONV,
+        onStream: (e) => {
+          events.push(e as never);
+          noteDoneA();
+        },
+      }
+    );
+    // 首进 failed → self 失败边 kick a(2)
+    await waitForChildren(children, 1);
+    settle(children[0]!, fail("crashed"));
+    // a(2) settle ok —— graph_progress 事件里 a 出现 done（onNode 末次
+    // 触发即此）。abort 打在 a(2) 已落定之后。
+    await waitForChildren(children, 2);
+    settle(children[1]!, ok("A-RETRY"));
+    await doneA;
+    controller.abort();
+
+    // handler typed 取消拒绝（abort 后 no-new-entries 使调度收敛）。
+    await expect(pending).rejects.toThrow(ToolExecutionError);
+    await expect(pending).rejects.toThrow(/cancel/i);
+    // cancel 规则「仅冻 done」：a 的末次结局 done（末次覆盖前次）→
+    // 冻结 done、产出可读 —— 取消不吞真结局。
+    const ledger = host.ledgerFor(CONV);
+    expect(ledger.statusOf("a")).toBe("done");
+    expect(ledger.outputOf("a")).toBe("A-RETRY");
+    await manager.shutdown();
+  }, 15_000);
+
+  it("abort 打在再进入仍 failed 时：a 不冻 done（cancel 规则），可下段再交", async () => {
+    const { manager, children } = makeManager();
+    const host = createLiveGraphLedgerHost();
+    const tool = createRunGraphTool({
+      manager,
+      ledger: host,
+      isEnabled: () => true,
+    });
+    const controller = new AbortController();
+
+    const pending = tool.handler(
+      { nodes: [{ id: "a", task: "ta", onFailure: "a" }] },
+      { signal: controller.signal, conversationId: CONV }
+    );
+    // 首进 ok（真 done，冻结候选）
+    await waitForChildren(children, 1);
+    settle(children[0]!, fail("crashed"));
+    // self 失败边 kick a(2)（再进入波）；在 a(2) 落定**之前** abort。
+    await waitForChildren(children, 2);
+    controller.abort();
+    // a(2) 仍按其真实结局落定 —— settle failed（取消症状 failed）。
+    settle(children[1]!, fail("still-crashed"));
+
+    await expect(pending).rejects.toThrow(ToolExecutionError);
+    await expect(pending).rejects.toThrow(/cancel/i);
+    // cancel 规则：abort 症状 failed 不冻结 —— a 未冻，下一段可再交。
+    const ledger = host.ledgerFor(CONV);
+    expect(ledger.isFrozen("a")).toBe(false);
+    await manager.shutdown();
+  }, 15_000);
+});
 
 describe("run_graph 正常 settle 冻结语义不变：SC6 回归", () => {
   it("无 abort 的正常失败 → failed 仍冻结（T3 只改取消路径）", async () => {

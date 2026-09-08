@@ -268,6 +268,29 @@ function emitGraphProgress(
 }
 
 /**
+ * 局部 AbortSignal 合并：任一被 abort → 返回的 signal 被 abort；两者
+ * 都缺席 → undefined。手写 listener 组合而非 `AbortSignal.any` ——
+ * 该静态方法需要 Node ≥ 20.3，而 package.json engines 只保证 `>=20`。
+ * 组合出的 controller 无引用泄漏风险：调度器生命周期 = 本次 handler
+ * 调用，listener 随 controller 被 GC。
+ */
+function combineAbortSignals(
+  a: AbortSignal | undefined,
+  b: AbortSignal | undefined
+): AbortSignal | undefined {
+  if (a === undefined && b === undefined) return undefined;
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  if (a.aborted) return a;
+  if (b.aborted) return b;
+  const controller = new AbortController();
+  for (const s of [a, b]) {
+    s.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+  return controller.signal;
+}
+
+/**
  * live-graph-phase1 T2:剩余子图合并(spec SC5–SC7 / ADR-0050)。
  * 在 validateGraph 之前先折叠账本:frozen-done dep → 满足,从 deps
  * 剔除(产出单独带回,并入 nodeCtx.outputs 供 renderTask 写入
@@ -519,17 +542,20 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
         let violation: FailureEdgeViolation | undefined;
         let execution: GraphExecution;
         if (hasFailureEdges) {
+          // 已知接受竞态（boundary review 记录在案）：并发第二次调用若同
+          // 时提交失败边，可能在第一次调用执行中读到未冻结的账本态并
+          // kick 同一 id。handler 层不装 per-conversation mutex（阶段 1
+          // M2 诚实钉，见 run-graph-concurrency.test.ts）—— 真正的串行
+          // 守卫在 ACI executor：run_graph 声明 isConcurrencySafe:false，
+          // 并发波次把 unsafe 调用与其它调用分波，同会话的两次 run_graph
+          // 在真实 executor 里不会并发，该竞态经生产路径不可达。
           // T3:fuse.signal 只喂给调度器 —— 停的是「新进入的启动」,
           // in-flight 节点照实落定(不喂节点 executor 的 signal,否则
-          // 会被误判成调用侧取消)。AbortSignal.any 同时兼容无 signal
-          // 与无 fuse 两种缺省。
+          // 会被误判成调用侧取消)。合并调用侧 signal 与 fuse.signal,
+          // 任一被 abort → 调度收敛。
           const r = await runGraphWithFailureEdges(spec, exec, {
             ...progressHooks,
-            signal: AbortSignal.any(
-              [signal, fuse?.signal].filter(
-                (s): s is AbortSignal => s !== undefined
-              )
-            ),
+            signal: combineAbortSignals(signal, fuse?.signal),
           });
           execution = r.execution;
           violation = r.violation;

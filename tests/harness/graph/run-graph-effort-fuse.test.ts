@@ -196,6 +196,74 @@ describe("run_graph effort fuse — SC7 冻结保留：fuse-trip 也冻真 faile
   });
 });
 
+describe("run_graph effort fuse — 熔断时同波 in-flight 兄弟照实落定（不喂节点 signal）", () => {
+  it("e 与第 9 进入同批且先 spawn：熔断后 e settle ok → e 落 done、冻结 done（不误标 failed、不丢）", async () => {
+    const { manager, children } = makeManager();
+    const host = createLiveGraphLedgerHost();
+    const t = createRunGraphTool({
+      manager,
+      ledger: host,
+      isEnabled: () => true,
+    });
+    // 结构说明（为什么这条测试长这样）：同批 Promise.all 等全部节点
+    // 落定，所以「熔断时 in-flight 的兄弟」只能与第 9 进入**同批**，
+    // 且 executor 进入顺序必须在 s(9) 之前（fuse abort 后 enter 恒
+    // false，晚于 s(9) 进入的节点会零 spawn 直接 failed）。做法：
+    //   - s(self-onFailure) 每波空转一次（8 次合法进入），第 9 进入
+    //     在 wave 8 触发熔断；
+    //   - h1..h7→g 的 done 链把 e 的 deps 晋升精确延迟到 wave 8
+    //     （g 在 wave 7 落定 done → e 晋升）；
+    //   - s 排在 spec 末位 → 每波 batch 里 done 链的晋升先于 s 的
+    //     self-kick → wave 8 batch = [e, s(9)]，e 先 spawn 成
+    //     in-flight，s(9) 随后熔断。
+    // fuse.signal 只喂调度器、不喂节点 executor：e 的 in-flight
+    // child 不被打断，settle ok 后按真实结局落 done 并冻结（T2
+    // violation 同一 partial-results 通道：先 freeze 再 typed 拒）。
+    const pending = t.handler(
+      {
+        nodes: [
+          { id: "h1", task: "t1" },
+          { id: "h2", task: "t2", deps: ["h1"] },
+          { id: "h3", task: "t3", deps: ["h2"] },
+          { id: "h4", task: "t4", deps: ["h3"] },
+          { id: "h5", task: "t5", deps: ["h4"] },
+          { id: "h6", task: "t6", deps: ["h5"] },
+          { id: "h7", task: "t7", deps: ["h6"] },
+          { id: "g", task: "tg", deps: ["h7"] },
+          { id: "e", task: "te", deps: ["g"] },
+          { id: "s", task: "ts", onFailure: "s" },
+        ],
+      },
+      { conversationId: CONV }
+    );
+    // waves 0-6：每批 [h(w+1), s(w+1)]（h 晋升先于 s 的 self-kick）。
+    // children[2w]=h(w+1)、children[2w+1]=s(w+1)。h 全部 ok、s 全部
+    // failed（s 的 8 次合法进入 = children 1,3,5,7,9,11,13,15）。
+    for (let w = 0; w <= 6; w++) {
+      await waitForChildren(children, 2 * w + 2);
+      settle(children[2 * w]!, ok(`H${w + 1}`));
+      settle(children[2 * w + 1]!, fail("crashed"));
+    }
+    // wave 7：[g, s(8)]（g 由 h7 晋升）。g ok、s(8) failed —— s(8)
+    // 的 self-kick 与 g 的 e 晋升把 wave 8 凑成 [e, s(9)]。
+    await waitForChildren(children, 16);
+    settle(children[14]!, ok("G-OK"));
+    settle(children[15]!, fail("crashed"));
+    // wave 8：e 先 spawn（in-flight），s(9) 第 9 进入熔断、零 spawn。
+    await waitForChildren(children, 17);
+    expect(children).toHaveLength(17);
+    // 熔断之后 e 才 settle ok —— 必须按真实结局落 done。
+    settle(children[16]!, ok("E-OK"));
+    await expect(pending).rejects.toThrow(/effort fuse/);
+    const ledger = host.ledgerFor(CONV);
+    expect(ledger.statusOf("e")).toBe("done");
+    expect(ledger.isFrozen("e")).toBe(true);
+    // s 的空转结局是真 failed（F2：熔断 ≠ cancel，failed 也冻）。
+    expect(ledger.statusOf("s")).toBe("failed");
+    await manager.shutdown();
+  }, 20_000);
+});
+
 describe("run_graph effort fuse — SC9 plain Kahn 不装计数器", () => {
   it("无 onFailure 的 DAG 不受熔断影响：正常 Kahn 两波", async () => {
     const { manager, children } = makeManager();

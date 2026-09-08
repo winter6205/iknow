@@ -238,6 +238,91 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
     await manager.shutdown();
   });
 
+  it('onFailure: " "（纯空白）→ unknown-target 分支（空白 id 同样不在本批 ids）', async () => {
+    const { manager, children } = makeManager();
+    const t = createRunGraphTool({ manager, isEnabled: () => true });
+    await expect(
+      t.handler(
+        { nodes: [{ id: "a", task: "ta", onFailure: " " }] },
+        { conversationId: CONV }
+      )
+    ).rejects.toThrow(/onFailure targeting unknown node " "/);
+    expect(children).toHaveLength(0);
+    await manager.shutdown();
+  });
+
+  it("校验优先级：frozen 重交拒绝先于 onFailure 校验（mergeResidual 的 frozen 拒胜出）", async () => {
+    const { manager, children } = makeManager();
+    const host = createLiveGraphLedgerHost();
+    const t = createRunGraphTool({
+      manager,
+      ledger: host,
+      isEnabled: () => true,
+    });
+
+    // 前置：x 在前一段跑完冻结为 done
+    const first = t.handler(
+      { nodes: [{ id: "x", task: "tx" }] },
+      {
+        conversationId: CONV,
+      }
+    );
+    await waitForChildren(children, 1);
+    settle(children[0]!, ok("X-OUT"));
+    await first;
+
+    // 本段：重交已冻结 x 且带非法 onFailure —— 两类拒绝同时成立。冻结
+    // 校验（mergeResidual → resolveResidualSubgraph）先于失败边校验
+    // （validateOnFailureEdges）跑（见 handler 顺序：mergeResidual 在
+    // validateOnFailureEdges 之前），所以胜出的是
+    // `frozen id(s) cannot be re-run`，不是 `onFailure targeting frozen
+    // node`。钉住的是「哪条信息胜出」这一确定行为，防止后续调序漂移
+    // 让同一次拒绝报出不同正文。
+    await expect(
+      t.handler(
+        {
+          nodes: [
+            { id: "a", task: "ta", onFailure: "x" },
+            { id: "x", task: "tx" },
+          ],
+        },
+        { conversationId: CONV }
+      )
+    ).rejects.toThrow(/frozen id\(s\) cannot be re-run/);
+    expect(children).toHaveLength(1); // 零新 spawn
+    // self-frozen 变体：onFailure 指向自己且自己已冻结 —— 同一优先级。
+    await expect(
+      t.handler(
+        { nodes: [{ id: "x", task: "tx", onFailure: "x" }] },
+        { conversationId: CONV }
+      )
+    ).rejects.toThrow(/frozen id\(s\) cannot be re-run/);
+    expect(children).toHaveLength(1);
+    await manager.shutdown();
+  });
+
+  it("onFailure 不能洗白 deps 环：纯 deps 环上叠加合法 onFailure → 仍 topo cycle 拒、零 spawn（ADR-0059）", async () => {
+    const { manager, children } = makeManager();
+    const t = createRunGraphTool({ manager, isEnabled: () => true });
+    // a deps[b] 且 onFailure:b（目标在本批，单独看是合法失败边）；
+    // b deps[a] —— deps 层面 a↔b 成环。环检测只认 deps，失败边不是
+    // Kahn 的豁免凭据（ADR-0059：未标明回边不算 —— deps 环必须靠
+    // deps 自己成 DAG，onFailure 不改拓扑）。
+    await expect(
+      t.handler(
+        {
+          nodes: [
+            { id: "a", task: "ta", deps: ["b"], onFailure: "b" },
+            { id: "b", task: "tb", deps: ["a"] },
+          ],
+        },
+        { conversationId: CONV }
+      )
+    ).rejects.toThrow(/cycle/);
+    expect(children).toHaveLength(0);
+    await manager.shutdown();
+  });
+
   it("节点带声明面之外的属性（例 retry）→ readNodes unknown property 拒、零 spawn（SC5 第二属性）", async () => {
     const { manager, children } = makeManager();
     const t = createRunGraphTool({ manager, isEnabled: () => true });
