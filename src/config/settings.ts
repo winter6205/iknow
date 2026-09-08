@@ -219,10 +219,22 @@ export interface IknowSettingsMemory {
  *
  * 值域合同（硬要求 9 / ADR-0037 §5）：config 层只承载 boolean 值域语义——
  * 不读 git、不持会话状态；开关只在启动加载点读取一次。
+ *
+ * ADR-0070 / plans/worktree-exclusive-lock.md T2：`worktreeExclusive` 与
+ * `worktreeOnMutate` **正交**、同款 boolean-only / 默认 OFF / fail-closed
+ * 纪律；缺失 / 非 `true` 一律按 OFF（`resolveWorktreeExclusive` 单读点）。
+ * 装配期由 `src/harness/build-engine.ts` 读取并透传给需要的缝（T3 在
+ * session-api `enter` 检查时消费），不在 settings 层做 git / 会话查询。
  */
 export interface IknowSettingsIsolation {
   /** mutate 时建 task worktree 并改绑会话的开关（默认 OFF）。 */
   worktreeOnMutate?: boolean;
+  /**
+   * ADR-0070: enter-task-worktree 多一道前置占用检查 —— 目标树若被别的现存
+   * 会话记录占用则 typed 拒绝（`worktree_claimed`）。默认 OFF（与今日逐字节
+   * 一致）；OFF 时 enter 行为与今日一致，不引入任何新拒绝路径。
+   */
+  worktreeExclusive?: boolean;
 }
 
 /**
@@ -300,6 +312,26 @@ export function resolveWorktreeOnMutate(
   settings: IknowSettings | undefined | null
 ): boolean {
   return settings?.isolation?.worktreeOnMutate === true;
+}
+
+/**
+ * ADR-0070 / plans/worktree-exclusive-lock.md T2:
+ * `isolation.worktreeExclusive` 的唯一 fail-closed 读取点（同
+ * `resolveWorktreeOnMutate` 形状）。
+ *
+ *  - 缺失 / 非 boolean / 非 `true` → false（回落至今日 enter 行为，逐字节
+ *    一致；SC2 / OFF 档零回归钉死）；
+ *  - config 层只承载 boolean 值域语义（ADR-0037 §5 硬要求 9）—— **不读
+ *    git、不持会话状态、不枚举现存会话记录**；占用判定（T3）由 session-api
+ *    `enter-task-worktree` 缝消费装配期一次性读取的结果执行；
+ *  - 开关只在启动加载点读取一次，会话根改绑（rebind）不触发 settings 重载
+ *    —— `WorktreeIsolationHostOpts.worktreeExclusive` 是该一次性读取结果
+ *    在装配期的透传载体。
+ */
+export function resolveWorktreeExclusive(
+  settings: IknowSettings | undefined | null
+): boolean {
+  return settings?.isolation?.worktreeExclusive === true;
 }
 
 /**
@@ -763,9 +795,10 @@ function mergeMemory(
 }
 
 /**
- * ADR-0037: 校验 `isolation` 层 —— 非法字段丢弃（镜像 parseGraph）。
- * 非普通对象 → undefined（丢弃该层）；worktreeOnMutate 非 boolean → 丢弃
- * 该字段（不转型）；字段全非法 / 缺席 → undefined（消费方按 OFF 处理）。
+ * ADR-0037 / ADR-0070: 校验 `isolation` 层 —— 非法字段丢弃（镜像 parseGraph）。
+ * 非普通对象 → undefined（丢弃该层）；worktreeOnMutate / worktreeExclusive
+ * 非 boolean → 丢弃该字段（不转型）；字段全非法 / 缺席 → undefined（消费方
+ * 按 OFF 处理）。两字段独立校验、互不影响——任一合法即保留段。
  */
 function parseIsolation(raw: unknown): IknowSettingsIsolation | undefined {
   if (!isPlainObject(raw)) return undefined;
@@ -773,11 +806,19 @@ function parseIsolation(raw: unknown): IknowSettingsIsolation | undefined {
   if (typeof raw.worktreeOnMutate === "boolean") {
     out.worktreeOnMutate = raw.worktreeOnMutate;
   }
-  if (out.worktreeOnMutate === undefined) return undefined;
+  if (typeof raw.worktreeExclusive === "boolean") {
+    out.worktreeExclusive = raw.worktreeExclusive;
+  }
+  if (out.worktreeOnMutate === undefined && out.worktreeExclusive === undefined)
+    return undefined;
   return out;
 }
 
-/** ADR-0037: 逐层合并 isolation：project 字段优先，未覆盖的 user 字段保留。 */
+/**
+ * ADR-0037 / ADR-0070: 逐层合并 isolation —— project 字段优先，未覆盖的
+ * user 字段保留。两字段独立 per-field project > user 合并（镜像 llm.timeoutMs
+ * 形态）；任一字段合并后合法即保留段。
+ */
 function mergeIsolation(
   user: IknowSettingsIsolation | undefined,
   project: IknowSettingsIsolation | undefined
@@ -789,7 +830,13 @@ function mergeIsolation(
   } else if (user?.worktreeOnMutate !== undefined) {
     out.worktreeOnMutate = user.worktreeOnMutate;
   }
-  if (out.worktreeOnMutate === undefined) return undefined;
+  if (project?.worktreeExclusive !== undefined) {
+    out.worktreeExclusive = project.worktreeExclusive;
+  } else if (user?.worktreeExclusive !== undefined) {
+    out.worktreeExclusive = user.worktreeExclusive;
+  }
+  if (out.worktreeOnMutate === undefined && out.worktreeExclusive === undefined)
+    return undefined;
   return out;
 }
 
