@@ -75,19 +75,36 @@ export function rootFlipMutateNotice(toolName: string): string {
 }
 
 /**
- * Unbound-mutate block notice: states facts only — isolation is ON and the
- * session is unbound, this call would write the main repo, it was NOT
- * executed, and the tool for a writable root exists (the gate never
- * auto-provisions). Deliberately no imperative "create this conversation's
- * task worktree" framing (spec casual-ask-context-hygiene SC7): the notice
- * must not steer the model's next move into building a tree.
+ * Unbound-mutate block notice. Three semantic pieces (spec
+ * casual-ask-context-hygiene.md:21 锁定语义, 2026-09-08 amendment):
+ *
+ *   (a) conditional — "To write, ..." names the condition under which the
+ *       named tool applies (this is the piece that the 2026-09-08 amendment
+ *       added as a hard semantic assertion; the pre-amendment text only said
+ *       "the tool exists", which is why the previous implementation passed
+ *       every substring ban while delivering no actionable next step);
+ *   (b) re-issue guidance — the model retries THIS SAME call after the
+ *       create-task-worktree flip; the call is the thing that should land
+ *       in the new root, not a different call;
+ *   (c) effect timing — "the next wave of tool calls in this run" per
+ *       ADR-0037 §7.5 wording discipline (binds the re-issue to the wave
+ *       after the rebind, never "next turn" — turnCount is per assistant
+ *       round, not per run).
+ *
+ * Plus the three SC7 substring bans that survive verbatim: literal
+ * `create-task-worktree`, no `this conversation's task worktree`, and the
+ * factual `This call would write` opener. The notice is intentionally one
+ * text — it never splits by user question type (casual-ask SC7 「不按用户
+ * 问句分两套文案」).
  */
 export function unboundMutateNotice(): string {
   return (
     `${WORKTREE_ISOLATION_PREFIX} This call would write the workspace, and it was not executed: ` +
     `worktree isolation is ON and this session is not yet bound to a task worktree. ` +
-    `The main repo stays read-only. The ${CREATE_TASK_WORKTREE_TOOL_HINT} exists for ` +
-    `sessions that need a writable root (no auto-provisioning).`
+    `The main repo stays read-only. To write, call the ${CREATE_TASK_WORKTREE_TOOL_HINT} ` +
+    `to put this session on a writable root, then re-issue this same call — it ` +
+    `will land in the new root on the next wave of tool calls in this run ` +
+    `(no auto-provisioning).`
   );
 }
 
