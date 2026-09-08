@@ -214,7 +214,9 @@ describe("isDangerousCommand (黑名单双保险层)", () => {
     "echo $(whoami)",
     "echo ${PATH}",
     "echo $(rm -rf /)",
-    "echo a\nrm",
+    // 段内危险子串（SC8 不回退）：换行后的段仍要命中 `rm -rf` 等。
+    "echo a\nrm -rf /",
+    "mkdir -p ./a\nrm -fr /tmp/x",
   ];
   for (const cmd of dangerous) {
     it(`detects dangerous: ${JSON.stringify(cmd)}`, () => {
@@ -249,12 +251,148 @@ describe("isDangerousCommand (黑名单双保险层)", () => {
     "cp a.ts b.ts",
     "mv a b",
     "curl -s http://x",
+    // 换行只作分段符（SC1 / ADR-0068）：换行本身不是危险模式。
+    // 原 dangerous 表里的 "echo a\nrm" 命中的是换行补丁（`\\n` 返回值），
+    // 不是 `rm` 段（裸 `rm` 无参数不匹配任何危险子串）。换行退役后
+    // 该样例按新合同归入 safe；段内真正危险子串的回归由上面
+    // "echo a\nrm -rf /" 两例钉住。
+    "echo a\nrm",
+    "mkdir -p ./a\nls",
+    "echo a\nls",
   ];
   for (const cmd of safe) {
     it(`allows safe: ${JSON.stringify(cmd)}`, () => {
       assert.equal(isDangerousCommand(cmd), false);
     });
   }
+});
+
+describe("hard-wall 按段扫描 — 换行只作分段符 (SC1 / ADR-0068)", () => {
+  it("多行白名单段命令不因换行本身 deny（\\n / \\r\\n / \\r 三种分隔）", () => {
+    assert.equal(isDangerousCommand("mkdir -p ./a\nls"), false);
+    assert.equal(isDangerousCommand("echo a\nls"), false);
+    assert.equal(isDangerousCommand("mkdir -p ./a\r\nls"), false);
+    assert.equal(isDangerousCommand("mkdir -p ./a\rls"), false);
+    assert.equal(isDangerousCommand("echo a\r\nls\r\ncat x"), false);
+  });
+
+  it("含换行但某段带危险子串 → 仍 deny（SC8 回归不回退）", () => {
+    assert.equal(isDangerousCommand("echo a\nrm -rf /"), true);
+    assert.equal(isDangerousCommand("mkdir -p ./a\nrm -fr /tmp/x"), true);
+    assert.equal(isDangerousCommand("echo a\r\nrm -rf /tmp"), true);
+    assert.equal(isDangerousCommand("echo a\nrm --recursive /tmp"), true);
+    assert.equal(isDangerousCommand("echo a\nshutdown -h now"), true);
+  });
+
+  it("末段危险（长命令 / 多换行 overflow 形态）→ 仍 deny", () => {
+    const manyLines = Array.from({ length: 50 }, () => "echo ok").join("\n");
+    assert.equal(isDangerousCommand(manyLines), false);
+    assert.equal(isDangerousCommand(`${manyLines}\nrm -rf /`), true);
+  });
+
+  it("换行不返回字面 `\\n` 命中值（旧换行补丁已退役）", () => {
+    // 旧实现 `/\r|\n/.test(command) → return "\\n"`；新合同换行只是分段符，
+    // 不产生任何命中。此断言钉住「换行不再作为 pattern 返回」。
+    assert.equal(isDangerousCommand("echo a\nls"), false);
+    assert.equal(isDangerousCommand("\n"), false);
+    assert.equal(isDangerousCommand("\r\n"), false);
+  });
+});
+
+describe("hard-wall format 子串退役 (SC2 / ADR-0068: format 不得子串匹配)", () => {
+  it("含 format 子串的合法内容不 hard-wall deny", () => {
+    assert.equal(isDangerousCommand("echo 'text-transform: uppercase'"), false);
+    assert.equal(isDangerousCommand("echo 'git format-patch -1'"), false);
+    assert.equal(isDangerousCommand("printf '%s format %s' a b"), false);
+    assert.equal(isDangerousCommand("cat format-notes.md"), false);
+    assert.equal(isDangerousCommand("echo transform"), false);
+  });
+
+  it("整段就是一个 format 命令形态 → 仍 deny（词法 token 匹配，非子串）", () => {
+    assert.equal(isDangerousCommand("format C:"), true);
+    assert.equal(isDangerousCommand("format c:"), true);
+    assert.equal(isDangerousCommand("format"), true);
+    // 段内以独立词出现 format 命令（如多行脚本第二行）也拦。
+    assert.equal(isDangerousCommand("echo a\nformat c:"), true);
+  });
+
+  it("反斜杠逃逸 fo\\rmat → 词法闸仍命中（backslash strip 与子串扫描同源）", () => {
+    // review High 回归：词法闸必须吃与子串扫描同一 normalize 形态 ——
+    // bash 剥反斜杠后 `fo\rmat` 即 `format`，逃逸不能因闸间 normalize
+    // 不对称而漏过（`format` 已退出子串表，词法闸是唯一拦截面）。
+    assert.equal(isDangerousCommand("fo\\rmat C:"), true);
+    assert.equal(isDangerousCommand("fo\\rmat"), true);
+    assert.equal(isDangerousCommand("echo a\nfo\\rmat c:"), true);
+  });
+});
+
+describe("hard-wall deny reason 带 pattern id (SC3)", () => {
+  const policy = createPermissionPolicy();
+
+  function denyReason(command: string): string {
+    const out = checkPermission({
+      def: makeTool({ name: "bash", category: "execute" }),
+      input: { command },
+      policy,
+    });
+    assert.equal(out.decision, "deny");
+    return out.reason;
+  }
+
+  it("rm 类命中 → reason 含 destructive-rm id 与命中子串", () => {
+    const reason = denyReason("rm -rf /");
+    assert.ok(reason.includes("dangerous command pattern"));
+    assert.ok(reason.includes("destructive-rm"), `reason=${reason}`);
+    assert.ok(reason.includes("rm -rf"), `reason=${reason}`);
+  });
+
+  it("命令替换命中 → reason 含 command-substitution id", () => {
+    const reason = denyReason("echo $(whoami)");
+    assert.ok(reason.includes("dangerous command pattern"));
+    assert.ok(reason.includes("command-substitution"), `reason=${reason}`);
+  });
+
+  it("换行后段内 rm 命中 → reason 仍带 destructive-rm id", () => {
+    const reason = denyReason("echo a\nrm -rf /");
+    assert.ok(reason.includes("destructive-rm"), `reason=${reason}`);
+  });
+});
+
+describe("输入五类表 A — findDangerousPattern / isDangerousCommand (S2)", () => {
+  // empty: `""` / 仅空白 → 既有空命令语义不变（不放行执行），且不得误标
+  // 为 format 子串命中。
+  it("empty: 空串 / 仅空白 → 非危险（既有空命令语义，由 handler 自验兜底）", () => {
+    assert.equal(isDangerousCommand(""), false);
+    assert.equal(isDangerousCommand("   "), false);
+    assert.equal(isDangerousCommand("\t\n "), false);
+  });
+
+  // negative: 合法多行白名单段；含 text-transform 的 echo → 不 hard-wall。
+  it("negative: 合法多行段 + text-transform echo → 不 hard-wall", () => {
+    assert.equal(isDangerousCommand("mkdir -p ./a\nls"), false);
+    assert.equal(isDangerousCommand("echo 'text-transform: uppercase'"), false);
+  });
+
+  // overflow: 很长命令 / 很多换行但仍为白名单段 → 不因长度/换行 deny；
+  // 段内 rm -rf 仍命中。
+  it("overflow: 长命令 / 多换行白名单段不 deny；末段危险仍命中", () => {
+    const longEcho = `echo ${"x".repeat(8000)}`;
+    assert.equal(isDangerousCommand(longEcho), false);
+    const manyLines = Array.from({ length: 200 }, () => "echo ok").join("\n");
+    assert.equal(isDangerousCommand(manyLines), false);
+    assert.equal(isDangerousCommand(`${manyLines}\nrm -rf /`), true);
+  });
+
+  // concurrent: 纯函数，无共享状态。
+  it("concurrent: N/A: pure（findDangerousPattern 为纯函数，无共享可变状态）", () => {
+    // N/A: pure
+  });
+
+  // exception: 真危险（rm -rf、$(...)）→ deny 且 reason 带 pattern id。
+  it("exception: 真危险 deny 且 reason 带 pattern id（见 SC3 describe）", () => {
+    assert.equal(isDangerousCommand("rm -rf /"), true);
+    assert.equal(isDangerousCommand("echo $(whoami)"), true);
+  });
 });
 
 describe("axis2 skeptic findings — regression guards", () => {

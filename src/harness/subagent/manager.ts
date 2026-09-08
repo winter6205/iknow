@@ -9,7 +9,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import {
   parseParentEnvelope,
@@ -897,6 +897,30 @@ export function createSubAgentManager(opts: {
     return { taskId: id };
   }
 
+  /**
+   * Sync 版 realpathWithMissingSuffix(src/harness/aci/tools/helpers.ts 同形):
+   * 沿现存祖先 realpath 后追加未解析后缀段。用于 sandboxRoot 校验的 ENOENT
+   * fallback —— child 与 parent 臂都落 realpath 形态,symlinked 父根
+   * (macOS /var → /private/var 等)下词法 child 才不会对 realpath parent 假越界。
+   * 非 ENOENT 错误原样抛出(调用方区分 I/O 故障与 outside)。
+   */
+  function resolveWithinParentForm(target: string): string {
+    const missingSegments: string[] = [];
+    let candidate = resolve(target);
+    while (true) {
+      try {
+        const existingAncestor = realpathSync(candidate);
+        return resolve(existingAncestor, ...missingSegments.reverse());
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+        const parent = dirname(candidate);
+        if (parent === candidate) throw err;
+        missingSegments.push(relative(parent, candidate));
+        candidate = parent;
+      }
+    }
+  }
+
   function buildWorkerPayload(def: SubAgentDefinition): WorkerEnvelope {
     // #357 T1: 所有 spawn 路径必经此单点校验。语义:
     //   1. parentSandboxRoot 入口读一次:
@@ -910,8 +934,10 @@ export function createSubAgentManager(opts: {
     //   3. def.sandboxRoot 在场 → resolved = realpathSync(resolve(def.sandboxRoot)),
     //      rel = relative(parentSandboxRoot, resolved)。rel === "" 合法(相等);
     //      rel.startsWith("..") || isAbsolute(rel) → typed 拒绝。realpath 抛 ENOENT
-    //      → fail-closed 同样 typed 拒绝(避免给模型"声明未创建路径就能逃逸"的暗示);
-    //      其他 errno 原样 rethrow(让 unexpected I/O 故障暴露给上游)。
+    //      → 词法 fallback:用 resolve(def.sandboxRoot) 的词法路径重做 prefix 判定
+    //      (spec SC6:父根下尚未存在的子路径不是 outside,词法在父根内即放行);
+    //      词法越界仍 typed 拒绝(spec SC7 + 防"声明未创建路径 = 隐式扩大父根")。
+    //      其他 errno(EACCES / ELOOP 等)原样 rethrow,不得包装成 outside。
     //   4. `rel.startsWith("..")` 对合法目录名 `..foo` 也拒绝(spec Code Style 是
     //      合同,fail-closed 优先,不试图区分 `..foo` vs `..` / `../`)。
     let parentSandboxRoot: string;
@@ -948,15 +974,22 @@ export function createSubAgentManager(opts: {
         resolved = realpathSync(resolve(def.sandboxRoot));
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-          // fail-closed: 模型声明的 sandboxRoot 不存在 → typed 拒绝,
-          // 防止"声明一个未来创建的路径 = 隐式扩大父根"语义漏洞。
-          throw new SubAgentSandboxRootError({
-            parentSandboxRoot,
-            requested: def.sandboxRoot,
-          });
+          // spec SC6:父根下尚未存在的子路径不是 outside —— 放行,但不用
+          // 纯词法 resolve:child 取「最近存在祖先的 realpath + 未解析
+          // 后缀」,与 parent 臂 realpath 形态对齐(见下方 relative 裁决
+          // 处注释;symlinked 父根下纯词法 child 会假越界)。
+          resolved = resolveWithinParentForm(def.sandboxRoot);
+        } else {
+          // 非 ENOENT 的 I/O(EACCES / ELOOP / ENOTDIR 等)原样 rethrow,
+          // 不得包装成 outside。
+          throw err;
         }
-        throw err;
       }
+      // 两臂同形态裁决:ENOENT fallback 的 child 不用纯词法 resolve ——
+      // symlinked 父根(macOS /var → /private/var 等)下,realpath(parent)
+      // 与词法 child 直接 relative() 会假越界。child 改取「最近存在祖先的
+      // realpath + 未解析后缀」,与 parent 臂的 realpath 形态对齐
+      // (helpers.ts realpathWithMissingSuffix 同形的 sync 版)。
       const rel = relative(parentSandboxRoot, resolved);
       if (rel.startsWith("..") || isAbsolute(rel)) {
         throw new SubAgentSandboxRootError({

@@ -314,6 +314,29 @@ describe("createEditFileTool — path / file errors", () => {
         error.message.includes("outside workspace")
     );
   });
+
+  it("SC4: 写 /tmp 仍拒——文案含活 taskRoot 路径与「/tmp 非交付落点」说明", async () => {
+    // SC4: write_file 与 edit_file 共享 resolveWithinRoot，所以同一文案两边都吃到。
+    const tool = createEditFileTool(scratch);
+    await assert.rejects(
+      tool.handler({
+        path: "/tmp/edit-file-sc4-not-a-delivery.txt",
+        old_str: "x",
+        new_str: "y",
+      }),
+      (error: unknown) => {
+        if (!(error instanceof ToolExecutionError)) return false;
+        return (
+          error.message.includes("path outside workspace") &&
+          error.message.includes("current write root") &&
+          error.message.includes(scratch) &&
+          error.message.includes("taskRoot") &&
+          error.message.includes("not a delivery destination") &&
+          error.message.includes("/tmp")
+        );
+      }
+    );
+  });
 });
 
 describe("createEditFileTool — input validation", () => {
