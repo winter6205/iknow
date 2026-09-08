@@ -1,6 +1,6 @@
 # Spec: 可写合同与 hard-wall 层退休
 
-> 假设门：2026-09-08 操作员确认方案 A（层退休，不是放宽换行补丁）。本文件只覆盖 **本 session 要修的闸与写根合同**。范围外方向见文末「后续（本 spec 不做）」。无 GitHub tracker。
+> 假设门：2026-09-08 操作员确认方案 A（层退休，不是放宽换行补丁）。本文件只覆盖 **本 session 要修的闸与写根合同**。范围外方向见文末「后续」与 [#946](https://github.com/winter6205/iknow/issues/946)。
 
 ## Glossary（exact copy from docs/CONTEXT.md）
 
@@ -112,7 +112,7 @@ minimal-change-verifier: yes — one session 方案 A write-contract (spec Chang
 
 ## 后续（本 spec 不做）
 
-可写合同落地之后再做。不在本轮实施，也不开 GitHub issue。
+可写合同落地之后再做。不在本轮实施。跟踪：[#946](https://github.com/winter6205/iknow/issues/946)。
 
 1. **隔离写路径** — 改工作区应先创建或进入本会话 task worktree，再在那棵树上写。写根必须说清楚，避免把交付物写到进程临时面，或把「身份根只读」理解成整个项目都不能写。
 2. **建树/认仓失败要可执行** — 隔离 ON 时，创建工作树失败必须是明确 typed 错误（有没有可用 gitdir、为何建不成），不能在错误类型之间空转。

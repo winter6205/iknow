@@ -6,7 +6,7 @@
 **ACR:** PASS（见下方五维）
 **Per-ticket loop (all bullets):** tdd → typecheck+tests → verification-before-completion → one commit on the ticket branch；全部 bullet 落地后再跑一轮 `code-review`。
 
-**Tracker:** 本地 markdown（无 GitHub issue）。范围外方向写在 spec「后续（本 spec 不做）」，不另开 tracker。
+**Tracker:** 范围外一条 [#946](https://github.com/winter6205/iknow/issues/946)。本 plan 的 T1–T3 不拆成 GitHub ticket。
 
 ## ACR
 
