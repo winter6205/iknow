@@ -796,9 +796,12 @@ describe("rebind 后主会话写根段（specs/skill-load-write-root.md T5）", 
       t.includes(WRT_MARK)
     );
     assert.equal(segments1.length, 1, "改绑后第一次查询行恰好注入一次");
+    // T4 (write-situation-disclosure)：rebind 通知由处境枚举驱动。本测试
+    // 没显式设 isolationOn → 默认 false → `writable_main`，wtRoot 是树形
+    // 但 `writable_main` 与 `writable_tree` 输出逐字节相等（SC2 硬约束）。
     assert.equal(
       segments1[0],
-      writeRootSegment(wtRoot),
+      writeRootSegment("writable_main", wtRoot),
       "文案必须与 writeRootSegment helper 字节一致"
     );
 

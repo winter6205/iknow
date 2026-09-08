@@ -381,6 +381,15 @@ export type BuiltEngine = EngineBundle & {
    */
   readonly liveTaskRoot?: LiveTaskRoot;
   /**
+   * T4 (plans/write-situation-disclosure.md) — worktree isolation 档判定结果
+   *（装配期一次性读取，`resolveWorktreeOnMutate(settings)`，硬要求 9）。hub
+   * `loadSkillBody`、ACI `skill()` 工具、chat-session rebind 注入三处消费
+   * 面用它算 `writeSituation(isolationOn, currentRoot)`——不重复读 settings
+   * 也避免宿主层重判。缺席（注入 deps 形态）→ 消费方默认按 `writable_main`
+   * 处理（与旧 build-engine 默认形态一致）。
+   */
+  readonly isolationOn?: boolean;
+  /**
    * TUI live flags for /memory. Present when surface is `tui` and the memory
    * layer is on. The TUI mutates this box on Esc; the hook reads it per turn.
    */
@@ -1613,6 +1622,11 @@ export async function buildHarnessEngine(
     // specs/skill-load-write-root.md：活 taskRoot cell 透出，hub loadSkillBody
     // 调用时机读快照 —— 与 registry 工厂消费同一 cell 实例。
     liveTaskRoot,
+    // T4 (write-situation-disclosure): 透出隔离档判定，hub / ACI skill /
+    // chat-session rebind 注入三处消费方用它算 writeSituation(isolationOn,
+    // currentRoot)。单一来源 = `isolationEnabled`（buildHarnessEngine 启动
+    // 加载点一次性读取），与门禁武装同源（决策 1 钉死）。
+    isolationOn: isolationEnabled,
     // D-α T3:host 每次 run() 前调 beginRound() 拍快照(chat / hub 两处 run
     // 入口)。缺席 = 本入口没接 overlay。
     ...(graphAssembly ? { graphAssembly } : {}),

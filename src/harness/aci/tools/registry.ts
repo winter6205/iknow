@@ -350,6 +350,15 @@ export interface CreateDefaultAciRegistryOptions {
    * roots stay frozen), so this field is intentionally narrow.
    */
   readonly liveTaskRoot?: LiveTaskRoot;
+  /**
+   * T4 (plans/write-situation-disclosure.md): worktree isolation 档判定
+   *（`buildHarnessEngine` 启动加载点一次性读取，与门禁武装同源）。`skill()`
+   * 工厂消费它 + 透传进来的 `liveTaskRoot` 算 `writeSituation(isolationOn,
+   * currentRoot)` 传给 `createSkillBody`。缺席 → 默认 false（旧形态 =
+   * `writable_main`，与改造前 ② 字节相等，因旧默认 `isolationEnabled` =
+   * false 时 taskRoot 总是主仓根）。
+   */
+  readonly isolationOn?: boolean;
 }
 
 /**
@@ -619,6 +628,13 @@ export function createDefaultAciRegistry(
               // 的 liveTaskRoot 透传同形态；缺席 → 无 trailer。
               ...(opts.liveTaskRoot !== undefined
                 ? { liveTaskRoot: opts.liveTaskRoot }
+                : {}),
+              // T4 (write-situation-disclosure)：handler 算 writeSituation
+              // 需要的隔离档，与门禁武装同源（`isolationEnabled` 单一读取
+              // 点）。缺席 → 默认 false（`writable_main`），与旧形态 byte-
+              // equal。
+              ...(opts.isolationOn !== undefined
+                ? { isolationOn: opts.isolationOn }
                 : {}),
             }),
         }

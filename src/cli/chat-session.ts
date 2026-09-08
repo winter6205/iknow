@@ -38,6 +38,7 @@ import {
 } from "./session-io.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
 import { mainCheckoutOf } from "../harness/isolation/worktree-gate.js";
+import { writeSituation } from "../harness/isolation/write-situation.js";
 import {
   renderTranscript,
   hasSuccessfulMemorySave,
@@ -209,6 +210,16 @@ export type ChatSessionOpts = {
   readonly engineShutdown?: { current?: () => Promise<void> };
   /** T1: resolved workspace root used by fresh checkpoint bootstraps. */
   readonly workspaceRoot?: string;
+  /**
+   * T4 (plans/write-situation-disclosure.md):worktree isolation 档判定
+   *（`buildHarnessEngine` 启动加载点一次性读取的 `isolationEnabled`，与门
+   * 禁武装同源）。`refreshChatDepsForRebind` 用它算 rebind 一次性写根段
+   * 的处境枚举 —— 隔离 ON + rebind 到非树形根时仍按 `no_writable_root`
+   * 披露（兜底，对齐 spec skill-load-write-root.md 合同 6 amend）。缺席
+   * → 默认 false（旧形态 = `writable_main`，与改造前 byte-equal；测试 /
+   * ask 入口不接本缝）。
+   */
+  readonly isolationOn?: boolean;
 };
 
 /**
@@ -320,6 +331,14 @@ export type ChatLineContext = {
    * 缺席 → 重建结果仅收敛 conversationId（tests）。
    */
   wrapRebuiltDeps?: (base: LoopEngineDeps) => LoopEngineDeps;
+  /**
+   * T4 (plans/write-situation-disclosure.md)：worktree isolation 档（与
+   * `ChatSessionOpts.isolationOn` 同源 —— runChatSession 透传）。用于
+   * `refreshChatDepsForRebind` 计算 rebind 一次性写根段的处境枚举。不会随
+   * rebind 变化（settings 启动读取，启动后只读）。缺席 → 默认 false
+   * （旧形态 = `writable_main`；tests / ask 不接本缝）。
+   */
+  isolationOn?: boolean;
 };
 
 /**
@@ -452,9 +471,17 @@ export async function refreshChatDepsForRebind(
   // 回主仓时两根相同，注入的「写根在上 / Project path 只读」文案会自相
   // 矛盾 → 不置入。仅在重建成功走到这里；重建失败 / 根未变化的提前
   // return 不经过。
+  //
+  // T4 (write-situation-disclosure)：处境枚举 = writeSituation(isolationOn,
+  // newRoot)。隔离 OFF 一律 `writable_main`（与改造前逐字节相等）；隔离
+  // ON + 树形 → `writable_tree`（同字节相等）；隔离 ON + 非树形 → ③ 态
+  // 披露（保守兜底，rebind 真要回主仓时上方 `mainCheckoutOf` 已先拒）。
   ctx.pendingWriteRootNotice =
     newRoot !== mainCheckoutOf(newRoot)
-      ? (writeRootSegment(newRoot) ?? undefined)
+      ? (writeRootSegment(
+          writeSituation(ctx.isolationOn ?? false, newRoot),
+          newRoot
+        ) ?? undefined)
       : undefined;
 }
 
@@ -2162,6 +2189,12 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     verifyConfig: opts.verifyConfig,
     autoMemory: opts.autoMemory,
     overlayMemoryPrefetch: opts.overlayMemoryPrefetch,
+    // T4 (write-situation-disclosure)：写处境判定用的隔离档，refresh
+    // 算 rebind 一次性写根段的处境枚举。缺席 → 默认 false（旧形态 =
+    // writable_main，与改造前 byte-equal）。
+    ...(opts.isolationOn !== undefined
+      ? { isolationOn: opts.isolationOn }
+      : {}),
     // Review High-1 (2026-08-29):rebind 检测缝 —— 会话文件 workspaceRoot 偏离
     // engineRoot 时以新根重建 deps（包装语义与初始装配同源，见 wrapChatDeps）。
     ...(opts.rebuildDeps
