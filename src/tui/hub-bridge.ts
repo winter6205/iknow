@@ -242,6 +242,13 @@ export interface CreateTuiBridgeOptions {
    * `getOrBuildEngine` 共享同一类型。
    */
   readonly buildEngine?: (root: string) => Promise<EngineBundle>;
+  /**
+   * T3 / plans/worktree-exclusive-lock.md / ADR-0070 — `isolation.worktreeExclusive`
+   * 装配期一次性解析结果（与 SessionHubOptions.worktreeExclusive 同形；缺席
+   * = OFF = 与今日逐字节一致 SC2）。由 TUI run.tsx 解析后透传，hub 构造时
+   * 再喂给 `createTaskWorktreeProvisioner` 闭包冻结（ADR-0037 §5 硬要求 9）。
+   */
+  readonly worktreeExclusive?: boolean;
 }
 
 export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
@@ -284,6 +291,10 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
       ? { injectedEngineRoot: opts.engineRoot }
       : {}),
     ...(opts.buildEngine ? { buildEngine: opts.buildEngine } : {}),
+    // T3 / plans/worktree-exclusive-lock.md / ADR-0070: 占用锁档透传。
+    // OFF（缺席 / 非 true）→ hub 构造时 `worktreeExclusive` 字段缺席，
+    // provisioner 完全跳过占用检查，行为与今日逐字节一致（SC2）。
+    ...(opts.worktreeExclusive === true ? { worktreeExclusive: true } : {}),
   });
 
   const toPostResult = (resp: PostMessageResponse): TuiPostResult => ({

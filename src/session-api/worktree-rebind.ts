@@ -66,7 +66,7 @@ import type {
   WorktreeExitContext,
 } from "../harness/isolation/worktree-gate.js";
 import { errorMessage } from "../harness/errors.js";
-import type { SessionFileV1 } from "./store/index.js";
+import type { SessionFileV1, SessionListEntry } from "./store/index.js";
 
 /** Minimal store surface the provisioner needs (SessionStore satisfies it). */
 export interface WorktreeRebindStore {
@@ -88,6 +88,32 @@ export interface TaskWorktreeProvisionerOpts {
    * When omitted, the main checkout derived from the request root is used.
    */
   readonly projectIdentityRoot?: string;
+  /**
+   * T3 / plans/worktree-exclusive-lock.md / ADR-0070 — enter-task-worktree
+   * 占用锁档。boolean-only；缺失 / 非 `true` 一律按 OFF（fail-closed，
+   * 与 `worktreeOnMutate` 同款值域纪律）。OFF 时 `enter()` 行为与今日
+   * 逐字节一致——四道检查不变、不新增任何拒绝路径（SC2）。
+   *
+   * 该字段**只**在装配期读取一次：缺失语义与 `isolation.worktreeExclusive`
+   * 设置项缺席等价 → OFF；后续 `enter()` 调用沿用本闭包冻结的值，**绝不**
+   * 在每次 enter 时重新判定（ADR-0037 §5 硬要求 9）。
+   */
+  readonly worktreeExclusive?: boolean;
+  /**
+   * T3 / ADR-0070 — 占用检查的会话枚举入口。`worktreeExclusive === true`
+   * 时必须提供；返回 `SessionStore.list()` 的同形态（`workspaceRoot` 缺席
+   * 即视为「该会话未占用任何 worktree」——empty 臂按无占用放行）。
+   *
+   * I/O 故障语义（exception 臂，spec 输入五类表）：
+   *   - 抛非 ENOENT I/O → typed `rebind_failed`（host-side rerun_after_change）。
+   *     **绝不**静默放行——那会让锁在管理员最需要它时自动解除。
+   *
+   * L1 弱档披露：当前实现只扫**本进程 dataDir 单一项目命名空间**
+   * （`SessionStore` 单进程单 cwd）；跨进程 / 跨 CLI 实例的占用看不见。
+   * 这是 SC3 / L1 的已决弱档语义，**不**是 bug——披露在设置项文档 + 回执文案 +
+   * spec 三处同时在场（spec Changes 段）。
+   */
+  readonly listSessions?: () => Promise<ReadonlyArray<SessionListEntry>>;
 }
 
 export interface TaskWorktreeProvisioner {
@@ -678,6 +704,24 @@ export function createTaskWorktreeProvisioner(
   const runGit = opts.runGit ?? defaultGitRunner;
   const now = opts.now ?? (() => new Date().toISOString());
   const projectIdentityRoot = opts.projectIdentityRoot;
+  /**
+   * T3 / ADR-0070 — enter-task-worktree 占用锁档。装配期一次性读取
+   * （ADR-0037 §5 硬要求 9 / `resolveWorktreeExclusive` 单读点同款形状）：
+   * 闭包冻结值贯穿本 provisioner 寿命，`enter()` 不重读 opts。缺失 /
+   * 非 `true` 一律 OFF（fail-closed）。
+   */
+  const worktreeExclusive = opts.worktreeExclusive === true;
+  /**
+   * T3 / ADR-0070 — 占用枚举入口。`worktreeExclusive === false` 时**绝不**
+   * 调用（OFF 档零回归 SC2）。`true` 时必须提供；缺席 → 装配期抛错（fail-
+   * closed：开锁却没装锁孔 = 锁无效，直接报错不让它跑起来）。
+   */
+  const listSessions = opts.listSessions;
+  if (worktreeExclusive && listSessions === undefined) {
+    throw new Error(
+      "worktree isolation: worktreeExclusive is true but listSessions is undefined; an enabled occupancy check without an enumerator would silently behave like OFF — refuse to construct the provisioner"
+    );
+  }
   /** conversationId → worktree path (provisioned / entered set). */
   const bound = new Map<string, string>();
   /** Coalesce concurrent first provisions for the same conversation. */
@@ -898,6 +942,60 @@ export function createTaskWorktreeProvisioner(
     return worktreePath;
   }
 
+  /**
+   * T3 / ADR-0070 — enter 前置占用检查纯函数式 helper。**只读**——
+   * 绝不调 store.save / mkdir / writeFile 等任何写盘动作（SC7 审查项）。
+   * 设计选择：
+   *   - 路径比较走 `resolve()` 单次归一化（化解尾随分隔符 / 长绝对路径），
+   *     两侧解析到绝对路径后再 `===` 裁决（overflow 臂）；
+   *   - 自占用（`entry.conversation_id === conversationId`）跳过——同一
+   *     会话自己点过自己不算占用（fresh 进程 bound Map 为空时尤其重要）；
+   *   - 缺 `workspaceRoot` / 空串 → 视为无占用放行（empty 臂，spec 显式要求）；
+   *   - listSessions 抛 → typed `rebind_failed`（exception 臂；host-side
+   *     rerun_after_change，绝不静默当成无占用）。
+   */
+  async function assertNotClaimed(
+    target: string,
+    selfConversationId: string,
+    list: () => Promise<ReadonlyArray<SessionListEntry>>
+  ): Promise<void> {
+    const normalizedTarget = resolve(target);
+    let entries: ReadonlyArray<SessionListEntry>;
+    try {
+      entries = await list();
+    } catch (err) {
+      // exception 臂 — typed fail-closed. 不重新 throw 原始错误对象（避免
+      // 把 SessionStoreError 形状泄漏进 WorktreeIsolationError.message）；
+      // errorMessage 抽 plain string 上下文（spec 输入五类表「原样 rethrow
+      // 或 typed fail-closed」二选一——这里选 typed fail-closed 一致性）。
+      throw new WorktreeIsolationError(
+        "rebind_failed",
+        `worktree isolation: cannot enumerate sessions for occupancy check: ${errorMessage(err)}`
+      );
+    }
+    for (const entry of entries) {
+      if (
+        entry.workspaceRoot === undefined ||
+        entry.workspaceRoot.length === 0
+      ) {
+        continue; // empty 臂 — 缺字段 / 空串视为无占用放行
+      }
+      if (entry.conversation_id === selfConversationId) {
+        continue; // 自占用不算占用（fresh 进程 bound Map 为空时尤其重要）
+      }
+      if (resolve(entry.workspaceRoot) === normalizedTarget) {
+        // 回执点名占用者 + 释放路径（spec SC3 / SC9）。
+        // L1 披露：占用枚举仅本进程可见，跨进程 / 跨 CLI 实例的占用看不见
+        // （spec L1「弱档」已决；该披露在设置项文档 + 回执文案 + spec 三处
+        // 同时在场，本句为回执处的强制披露点）。
+        throw new WorktreeIsolationError(
+          "worktree_claimed",
+          `worktree isolation: task worktree ${target} is already claimed by session '${entry.conversation_id}'; release it by resuming that session and calling exit-task-worktree, or by deleting the session record. Note: occupancy is visible only within the current process — other CLI processes' claims on the same tree are not visible to this check`
+        );
+      }
+    }
+  }
+
   async function enter(
     req: WorktreeEnterRequest
   ): Promise<WorktreeEnterResult> {
@@ -945,6 +1043,22 @@ export function createTaskWorktreeProvisioner(
     const current = bound.get(conversationId);
     if (current === target) {
       return enterResultOf(target); // idempotent re-enter (zero writes)
+    }
+
+    // T3 / ADR-0070 — ON 档 enter 前置占用检查（spec SC3 / SC4 / SC5）。
+    // 位置在幂等 re-enter 之后、四道目标校验之前：
+    //   - 同进程 bound Map 已认领（同会话自占用）→ 上面已早返回，零 list 开销；
+    //   - 别的现存会话记录占用 → typed worktree_claimed（fail-closed，归
+    //     operator_required，回执自带停止指令 + 释放路径，spec SC3 / SC6）。
+    //
+    // 输入五类表（spec 输入五类 + SC7 零新写盘）：
+    //   - empty          listSessions 空 / 记录缺 workspaceRoot / 字段空串 → 视为无占用放行（不 throw）；
+    //   - negative       OFF 档 → 完全跳过本检查（早返回前已断 worktreeExclusive；SC2）；
+    //   - overflow       路径比较走 `resolve()` 归一化（尾随分隔符 / 长绝对路径均正确裁决）；
+    //   - exception      listSessions 抛 → typed `rebind_failed`（**绝不**静默放行）；
+    //   - concurrent     双 enter 同窗双双成功（spec L2，本 ticket 不测，T4 留测试钉住）。
+    if (worktreeExclusive && listSessions !== undefined) {
+      await assertNotClaimed(target, conversationId, listSessions);
     }
 
     // Target validation, cheapest checks first:

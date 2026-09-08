@@ -52,7 +52,10 @@ import {
   createGraphModeContext,
   resolveGraphMode,
 } from "../harness/graph/mode.js";
-import { loadIknowSettings } from "../config/settings.js";
+import {
+  loadIknowSettings,
+  resolveWorktreeExclusive,
+} from "../config/settings.js";
 import { createTuiWorktreeIsolationHost } from "./worktree-host.js";
 import { resolveVerifyConfig } from "../session-api/serve.js";
 import { createEnvLoader, type EnvLoader } from "../config/env-loader.js";
@@ -428,6 +431,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         envVersion++;
         rerenderApp();
       },
+      // T3 / plans/worktree-exclusive-lock.md / ADR-0070: enter 占用锁档
+      // 一次性透传 —— 启动加载点解析后冻结（ADR-0037 §5 硬要求 9），
+      // bridge → hub → provisioner 闭包贯穿。OFF（缺席 / 非 true）→
+      // 完全跳过占用检查（SC2 零回归）。
+      worktreeExclusive: resolveWorktreeExclusive(startupSettings),
     });
     // Review High-1:bridge 就绪后回填 late-bound hub 引用（见上方 bridgeRef）。
     bridgeRef.hub = bridge.hub;

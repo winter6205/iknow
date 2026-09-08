@@ -66,13 +66,22 @@ function makeGitRepo(): string {
 }
 
 function makeSessionFile(id: string, workspaceRoot: string): SessionFileV1 {
+  // T3 / worktreeExclusive: a stub assistant message makes the session
+  // visible to `store.list()` (which filters sessions with no assistant
+  // text per #96 — sidebar concern, see session-store.tryListEntry). The
+  // occupancy check reads `store.list()` so test fixtures must populate
+  // it; existing tests are unaffected (they read via `store.load()`).
+  const stubMessage = {
+    role: "assistant" as const,
+    content: [{ type: "text" as const, text: "stub" }],
+  };
   const now = new Date().toISOString();
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     conversation_id: id,
-    messages: [],
+    messages: [stubMessage],
     jsonMode: true,
-    turnCount: 0,
+    turnCount: 1,
     updatedAt: now,
     title: "",
     cwd: workspaceRoot,
@@ -853,6 +862,427 @@ describe("createTaskWorktreeProvisioner", () => {
       // (the leaf has no `--<id>` suffix either) contributes nothing.
       expect(entered.receipt).toContain(`entered task worktree: ${legacyTree}`);
       expect(entered.receipt).not.toContain("conv-owner");
+    });
+  });
+});
+
+// -- T3 / plans/worktree-exclusive-lock.md --------------------------------------
+//
+// enter 前置占用检查 + `worktree_claimed`（ADR-0070 Decision 2 / SC3–SC8）。
+// 默认档（OFF）行为不变；ON 档占用 → typed 拒绝 + 占用者会话 id + 释放路径。
+//
+// 输入五类表（spec SC 末）：
+//   - empty          → list() 空 / 记录缺 workspaceRoot / 字段空串 → 放行；
+//   - negative       → OFF 档 + 占用 → 放行（OFF 档零回归 SC2）；
+//   - overflow       → 路径归一化（尾随分隔符 / 长绝对路径）；
+//   - concurrent     → T4 bullet：TOCTOU 双成功——本 ticket 不测，留给 L2 钉住测试；
+//   - exception      → listSessions 抛非 ENOENT → 原样 rethrow 或 typed
+//                      fail-closed（**绝不**静默放行）。
+//
+// 自占用不算占用：占用记录里 `conversation_id === self` 跳过（幂等 re-enter
+// 走 `bound.get(self) === target` 早返回，本身不会走到这里；但 self 通过
+// store.list() 显式枚举到也要排除——fresh 进程 bound Map 为空时尤其重要）。
+//
+// 不写盘：占用检查纯只读 store.list()，绝不调 store.save / mkdir / writeFile
+// 等任何写盘动作（SC7 审查项）。
+describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktree_claimed", () => {
+  it("ON档 + 目标树被别的现存会话记录占用 → typed worktree_claimed 含占用者会话 id + 释放路径", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, [
+      "conv-owner",
+      "conv-guest",
+    ]);
+
+    // Owner provisions its tree first — the provisioner with `store` persists
+    // the rebind, so store.list() will see owner.workspaceRoot === tree.
+    const ownerProv = createTaskWorktreeProvisioner({ store });
+    const tree = await ownerProv.provision({
+      conversationId: "conv-owner",
+      root: repo,
+    });
+    expect((await store.load("conv-owner")).workspaceRoot).toBe(tree);
+
+    // Guest enters with worktreeExclusive = ON — must reject with the
+    // occupier's session id AND a release-path sentence (resume + exit, or
+    // delete the session record). SC3 / SC9.
+    const guestProv = createTaskWorktreeProvisioner({
+      store,
+      worktreeExclusive: true,
+      listSessions: () => store.list(),
+    });
+
+    await expect(
+      guestProv.enter({
+        conversationId: "conv-guest",
+        root: repo,
+        targetConversationId: "conv-owner",
+      })
+    ).rejects.toMatchObject({
+      name: "WorktreeIsolationError",
+      kind: "worktree_claimed",
+      message: expect.stringContaining("conv-owner"),
+    });
+    // Release path sentence — one of the two reachable moves must appear
+    // verbatim (resume + exit-task-worktree OR delete the session record).
+    await expect(
+      guestProv.enter({
+        conversationId: "conv-guest",
+        root: repo,
+        targetConversationId: "conv-owner",
+      })
+    ).rejects.toMatchObject({
+      message: expect.stringMatching(
+        /exit-task-worktree|delete the session record/
+      ),
+    });
+
+    // SC7 + zero new writes on rejection: guest session file untouched,
+    // guest is NOT bound to anything.
+    const guestFile = await store.load("conv-guest");
+    expect(guestFile.workspaceRoot).toBe(repo);
+    expect(guestProv.isTaskWorktreeRoot(tree)).toBe(false);
+  });
+
+  it("ON档 + 无占用 → enter 照常成功（与 OFF 档一致）", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, [
+      "conv-owner",
+      "conv-guest",
+    ]);
+    const ownerProv = createTaskWorktreeProvisioner({ store });
+    const tree = await ownerProv.provision({
+      conversationId: "conv-owner",
+      root: repo,
+    });
+    // Owner EXIT its tree — record's workspaceRoot flips back to repo, so
+    // the tree is no longer occupied. Then a fresh guest enters it.
+    await ownerProv.exit({
+      conversationId: "conv-owner",
+      root: tree,
+    });
+    expect((await store.load("conv-owner")).workspaceRoot).toBe(repo);
+
+    const guestProv = createTaskWorktreeProvisioner({
+      store,
+      worktreeExclusive: true,
+      listSessions: () => store.list(),
+    });
+    const entered = await guestProv.enter({
+      conversationId: "conv-guest",
+      root: repo,
+      targetConversationId: "conv-owner",
+    });
+    expect(entered.path).toBe(tree);
+    expect((await store.load("conv-guest")).workspaceRoot).toBe(tree);
+  });
+
+  it("自占用不算占用：幂等 re-enter 返回同一根，零 list 调用（OFF 行为保留；SC5）", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, ["conv-a"]);
+    const ownerProv = createTaskWorktreeProvisioner({ store });
+    const tree = await ownerProv.provision({
+      conversationId: "conv-a",
+      root: repo,
+    });
+
+    // Same process — bound Map already has self → tree. Re-enter: skip
+    // list() entirely (zero occupancy check overhead).
+    let listCalls = 0;
+    const guestProv = createTaskWorktreeProvisioner({
+      store,
+      worktreeExclusive: true,
+      listSessions: () => {
+        listCalls += 1;
+        return store.list();
+      },
+    });
+    const first = await guestProv.enter({
+      conversationId: "conv-a",
+      root: repo,
+      targetConversationId: "conv-a",
+    });
+    const callsAfterFirst = listCalls;
+    const second = await guestProv.enter({
+      conversationId: "conv-a",
+      root: repo,
+      targetConversationId: "conv-a",
+    });
+    expect(second.path).toBe(first.path);
+    expect(second.path).toBe(tree);
+    // First call exercises the occupancy check and self-skips; the idempotent
+    // re-enter path (second call) skips list entirely (bound Map already has
+    // self → tree, early-return before the check).
+    expect(second.path).toBe(tree);
+    expect(listCalls).toBe(callsAfterFirst);
+  });
+
+  it("自占用不算占用：fresh process bound Map 为空、list 含 self → 跳过（不 throw）", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, ["conv-a"]);
+    const ownerProv = createTaskWorktreeProvisioner({ store });
+    const tree = await ownerProv.provision({
+      conversationId: "conv-a",
+      root: repo,
+    });
+    expect((await store.load("conv-a")).workspaceRoot).toBe(tree);
+
+    // Fresh provisioner = fresh process. bound Map is empty. Re-enter:
+    // the occupancy check runs and sees self in the list — must skip self.
+    let listCalled = false;
+    const guestProv = createTaskWorktreeProvisioner({
+      store,
+      worktreeExclusive: true,
+      listSessions: () => {
+        listCalled = true;
+        return store.list();
+      },
+    });
+    const entered = await guestProv.enter({
+      conversationId: "conv-a",
+      root: repo,
+      targetConversationId: "conv-a",
+    });
+    expect(entered.path).toBe(tree);
+    expect(listCalled).toBe(true); // check ran (and passed for self)
+  });
+
+  it("记录缺 workspaceRoot 字段 / 字段空串 → 视为无占用放行（不 throw；empty 臂）", async () => {
+    const repo = makeGitRepo();
+    let listCalled = 0;
+    const listSessions = async () => {
+      listCalled += 1;
+      // Mix in three shapes: missing field, empty string, valid unbound entry.
+      return [
+        { conversation_id: "ghost-1", workspaceRoot: undefined } as {
+          conversation_id: string;
+          workspaceRoot?: string;
+        },
+        { conversation_id: "ghost-2", workspaceRoot: "" } as {
+          conversation_id: string;
+          workspaceRoot?: string;
+        },
+        {
+          conversation_id: "ghost-3",
+          workspaceRoot: "/some/other/path",
+        } as { conversation_id: string; workspaceRoot?: string },
+      ];
+    };
+
+    // Owner provisions without store — the empty-records semantics under
+    // test live in `listSessions`, not in `store.list()`. We don't need a
+    // real store here.
+    const ownerProv = createTaskWorktreeProvisioner({});
+    const tree = await ownerProv.provision({
+      conversationId: "conv-a",
+      root: repo,
+    });
+
+    const guestProv = createTaskWorktreeProvisioner({
+      worktreeExclusive: true,
+      listSessions,
+    });
+    const entered = await guestProv.enter({
+      conversationId: "conv-b",
+      root: repo,
+      targetConversationId: "conv-a",
+    });
+    expect(entered.path).toBe(tree);
+    expect(listCalled).toBeGreaterThan(0);
+  });
+
+  it("listSessions 抛非 ENOENT I/O → typed rebind_failed（绝不静默放行；exception 臂）", async () => {
+    const repo = makeGitRepo();
+    const ownerProv = createTaskWorktreeProvisioner({});
+    await ownerProv.provision({ conversationId: "conv-a", root: repo });
+
+    const listSessions = async (): Promise<
+      ReadonlyArray<{ conversation_id: string; workspaceRoot?: string }>
+    > => {
+      throw {
+        kind: "io_error",
+        conversation_id: "",
+        cause: "EACCES: permission denied",
+      };
+    };
+
+    const guestProv = createTaskWorktreeProvisioner({
+      worktreeExclusive: true,
+      listSessions,
+    });
+    await expect(
+      guestProv.enter({
+        conversationId: "conv-b",
+        root: repo,
+        targetConversationId: "conv-a",
+      })
+    ).rejects.toMatchObject({
+      name: "WorktreeIsolationError",
+      kind: "rebind_failed",
+      message: expect.stringMatching(/EACCES|permission denied/),
+    });
+  });
+
+  it("路径归一化：占用者记录里的 workspaceRoot 带尾随分隔符仍被识别（overflow 臂）", async () => {
+    const repo = makeGitRepo();
+    const ownerProv = createTaskWorktreeProvisioner({});
+    const tree = await ownerProv.provision({
+      conversationId: "conv-a",
+      root: repo,
+    });
+
+    // Pretend an external record wrote the workspaceRoot with a trailing
+    // separator. path.resolve() normalizes both sides — must compare equal.
+    const listSessions = async () => [
+      { conversation_id: "conv-a", workspaceRoot: `${tree}/` },
+    ];
+
+    const guestProv = createTaskWorktreeProvisioner({
+      worktreeExclusive: true,
+      listSessions,
+    });
+    await expect(
+      guestProv.enter({
+        conversationId: "conv-b",
+        root: repo,
+        targetConversationId: "conv-a",
+      })
+    ).rejects.toMatchObject({
+      kind: "worktree_claimed",
+      message: expect.stringContaining("conv-a"),
+    });
+  });
+
+  it("OFF档零回归：worktreeExclusive 缺席 / false → 占用检查完全跳过（SC2）", async () => {
+    const repo = makeGitRepo();
+    const ownerProv = createTaskWorktreeProvisioner({});
+    await ownerProv.provision({ conversationId: "conv-a", root: repo });
+
+    // Injecting a listSessions that would refuse to be called. If the
+    // provisioner calls it under OFF档, the test fails fast.
+    let listCalls = 0;
+    const listSessions = () => {
+      listCalls += 1;
+      throw new Error("listSessions must not be called when OFF");
+    };
+
+    // Case 1: opt omitted entirely
+    const off1 = createTaskWorktreeProvisioner({ listSessions });
+    await off1.enter({
+      conversationId: "conv-b",
+      root: repo,
+      targetConversationId: "conv-a",
+    });
+    expect(listCalls).toBe(0);
+
+    // Case 2: opt explicitly false
+    const off2 = createTaskWorktreeProvisioner({
+      worktreeExclusive: false,
+      listSessions,
+    });
+    await off2.enter({
+      conversationId: "conv-c",
+      root: repo,
+      targetConversationId: "conv-a",
+    });
+    expect(listCalls).toBe(0);
+
+    // Case 3: opt truthy-but-not-true → also OFF (fail-closed)
+    const off3 = createTaskWorktreeProvisioner({
+      worktreeExclusive: "yes" as unknown as boolean,
+      listSessions,
+    });
+    await off3.enter({
+      conversationId: "conv-d",
+      root: repo,
+      targetConversationId: "conv-a",
+    });
+    expect(listCalls).toBe(0);
+  });
+
+  it("恢复路径：删除占用记录后另一会话 enter 成功（SC9）", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, [
+      "conv-owner",
+      "conv-guest",
+    ]);
+    const ownerProv = createTaskWorktreeProvisioner({ store });
+    const tree = await ownerProv.provision({
+      conversationId: "conv-owner",
+      root: repo,
+    });
+
+    // First attempt blocked.
+    const guestBlocked = createTaskWorktreeProvisioner({
+      store,
+      worktreeExclusive: true,
+      listSessions: () => store.list(),
+    });
+    await expect(
+      guestBlocked.enter({
+        conversationId: "conv-guest",
+        root: repo,
+        targetConversationId: "conv-owner",
+      })
+    ).rejects.toMatchObject({ kind: "worktree_claimed" });
+
+    // Delete the occupier's session record → release path.
+    await store.delete("conv-owner");
+
+    // Second attempt on a FRESH provisioner succeeds.
+    const guestOk = createTaskWorktreeProvisioner({
+      store,
+      worktreeExclusive: true,
+      listSessions: () => store.list(),
+    });
+    const entered = await guestOk.enter({
+      conversationId: "conv-guest",
+      root: repo,
+      targetConversationId: "conv-owner",
+    });
+    expect(entered.path).toBe(tree);
+    expect((await store.load("conv-guest")).workspaceRoot).toBe(tree);
+  });
+
+  it("listSessions 返回极多条目（>10）也不退化为笼统拒绝——按逐条 verdict 裁决（overflow 臂）", async () => {
+    const repo = makeGitRepo();
+    // Create the target tree without store plumbing (store not needed for
+    // occupancy check semantics here).
+    const ownerProv = createTaskWorktreeProvisioner({});
+    const tree = await ownerProv.provision({
+      conversationId: "conv-target",
+      root: repo,
+    });
+
+    // 50 unrelated entries + 1 real claim at the end. Verdict must hit the
+    // right one without short-circuiting on the long list.
+    const listSessions = async () => {
+      const entries: Array<{
+        conversation_id: string;
+        workspaceRoot?: string;
+      }> = [];
+      for (let i = 0; i < 50; i += 1) {
+        entries.push({
+          conversation_id: `noise-${i}`,
+          workspaceRoot: `/elsewhere/worktree-${i}`,
+        });
+      }
+      entries.push({ conversation_id: "conv-claimant", workspaceRoot: tree });
+      return entries;
+    };
+
+    const guestProv = createTaskWorktreeProvisioner({
+      worktreeExclusive: true,
+      listSessions,
+    });
+    await expect(
+      guestProv.enter({
+        conversationId: "conv-guest",
+        root: repo,
+        targetConversationId: "conv-target",
+      })
+    ).rejects.toMatchObject({
+      kind: "worktree_claimed",
+      message: expect.stringContaining("conv-claimant"),
     });
   });
 });

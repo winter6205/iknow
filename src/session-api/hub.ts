@@ -675,6 +675,18 @@ export type SessionHubOptions = {
    * 缺席 → bindWorkspace 保持 T2 语义（无 trust gate、不落 recents）。
    */
   readonly recentsHome?: string;
+  /**
+   * T3 / plans/worktree-exclusive-lock.md / ADR-0070 —
+   * `isolation.worktreeExclusive` 装配期解析结果。**只在启动加载点解析一次**
+   * （ADR-0037 §5 硬要求 9 / `resolveWorktreeExclusive` 单读点同款形状）：
+   * 该值在 hub 构造时透传给 `createTaskWorktreeProvisioner`，后者闭包冻结
+   * 贯穿本 engine 寿命，rebind 不重读。
+   *
+   * OFF 档（缺席 / 非 `true`）→ provisioner 完全跳过占用检查，enter 行为
+   * 与今日逐字节一致（SC2）。生产 caller（serve.ts）从 `startupSettings`
+   * 一次解析后传入。
+   */
+  readonly worktreeExclusive?: boolean;
 };
 
 /**
@@ -911,9 +923,24 @@ export class SessionHub {
     // 都由 provision 按会话锚定，hub 不传 conversation-agnostic 标记。
     // Root persistence belongs to this Hub's dirty-root conditional-save
     // protocol. The provisioner only creates/returns the task worktree here.
+    //
+    // T3 / plans/worktree-exclusive-lock.md / ADR-0070：把装配期冻结的
+    // `worktreeExclusive` 值透传到 provisioner 闭包——后者 `enter()` 据此
+    // 走 ON 档占用检查（typed worktree_claimed）或 OFF 档零回归路径（SC2）。
+    // 透传是单点：buildHarnessEngine 在 build-engine.ts:586 resolve 后透到
+    // BuiltEngine.worktreeExclusive（build-engine.ts:409），本 hub opts 取
+    // 这个 boolean 后直接喂给 provisioner。listSessions 由 hub 的 store
+    // 直接绑——store 是 SessionStore 实例，自带 list() 方法（spec 输入五类
+    // 表入口）。**不**新增任何写盘路径（SC7 审查项：list 是只读）。
     this.worktreeProvisioner = createTaskWorktreeProvisioner({
       ...(this.projectIdentityRoot !== undefined
         ? { projectIdentityRoot: this.projectIdentityRoot }
+        : {}),
+      ...(opts.worktreeExclusive === true
+        ? {
+            worktreeExclusive: true,
+            listSessions: () => this.store.list(),
+          }
         : {}),
     });
   }
