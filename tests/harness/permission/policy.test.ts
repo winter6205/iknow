@@ -462,6 +462,11 @@ describe("SC8: #503 T10 bash network:true 强制 ask（layered rule 先于 mode�
     assert.equal(out.decision, "ask");
     assert.ok(out.reason.includes("network"));
     assert.ok(out.reason.includes("host"));
+    // #951:reason 与 ask hint 同口径 —— 钉住 network-guard 绕过事实
+    assert.ok(
+      out.reason.includes("不经 network-guard"),
+      `reason must disclose network-guard bypass: ${out.reason}`
+    );
   });
 
   it("network:true + full_auto → ask（layered rule 先于 mode 解析，full_auto 永远到不了）", () => {

@@ -82,7 +82,17 @@ function makeCapturingAsk(capture: AskCapture): AskUser {
 }
 
 describe("#503 T10 — bash network hint + askUser ctx.network 透传", () => {
-  it("network bash → askUser ctx.summaryHint 含 [请求宿主网络] 标记 + 命令摘要", async () => {
+  // #951:hint 形态是产品契约 —— 测试持有期望文案（pin，非 import），
+  // 锁定「不经 network-guard」与「link-local 元数据」两项事实 + 长度算术。
+  const MARKER = "[请求宿主网络·不经 network-guard] ";
+  const TAIL =
+    "（宿主 netns 全量可见：localhost 服务 / 局域网 / link-local 元数据 169.254.169.254；无 IP 过滤、无域名过滤）";
+  const SECRET_WARNING =
+    " [secret 警告] 命令含 secret 占位符，批准后真值可能随命令出站";
+  // 80 字符封顶（marker + 截断命令 + "..." 都算在内），tail/secret 警告叠加在外。
+  const NETWORK_HINT_HEAD_CAP = 80;
+
+  it("network bash → askUser ctx.summaryHint 含 [请求宿主网络·不经 network-guard] 标记 + 命令摘要 + 常驻 tail", async () => {
     const capture: AskCapture = { ctx: undefined as never, calls: 0 };
     const executor = createPermissionExecutor({
       inner: makeInnerOk(),
@@ -101,10 +111,29 @@ describe("#503 T10 — bash network hint + askUser ctx.network 透传", () => {
       },
     ]);
     assert.equal(capture.calls, 1, "askUser should have been called once");
-    assert.ok(capture.ctx.summaryHint.includes("[请求宿主网络]"));
+    assert.ok(capture.ctx.summaryHint.includes(MARKER));
     assert.ok(
       capture.ctx.summaryHint.includes("curl http://127.0.0.1:3000/api")
     );
+    // #951 事实一：该批准路径绕过 network-guard SSRF 防线
+    assert.ok(
+      capture.ctx.summaryHint.includes("不经 network-guard"),
+      `hint must disclose network-guard bypass: ${capture.ctx.summaryHint}`
+    );
+    // #951 事实二：host netns 下 link-local 元数据端点可达
+    assert.ok(
+      capture.ctx.summaryHint.includes("link-local 元数据 169.254.169.254"),
+      `hint must disclose link-local metadata reachability: ${capture.ctx.summaryHint}`
+    );
+    assert.ok(
+      capture.ctx.summaryHint.includes("无 IP 过滤"),
+      "hint must disclose no IP filter"
+    );
+    assert.ok(
+      capture.ctx.summaryHint.includes("无域名过滤"),
+      "hint must disclose no domain filter"
+    );
+    assert.equal(capture.ctx.summaryHint.endsWith(TAIL), true);
     assert.equal(capture.ctx.network, true);
   });
 
@@ -124,6 +153,11 @@ describe("#503 T10 — bash network hint + askUser ctx.network 透传", () => {
     assert.ok(capture.ctx.summaryHint.includes("[secret 警告]"));
     assert.ok(capture.ctx.summaryHint.includes("<<<SECRET_1>>>"));
     assert.ok(capture.ctx.summaryHint.includes("命令含 secret 占位符"));
+    // #951:secret 警告叠加在 80 封顶之外，marker 变长也必须保持完整
+    assert.ok(capture.ctx.summaryHint.includes(SECRET_WARNING));
+    assert.ok(capture.ctx.summaryHint.includes(TAIL), "tail 在警告前保持常驻");
+    // tail 始终在末尾（即使叠加 secret 警告）
+    assert.ok(capture.ctx.summaryHint.endsWith(TAIL));
     assert.equal(capture.ctx.network, true);
   });
 
@@ -158,12 +192,56 @@ describe("#503 T10 — bash network hint + askUser ctx.network 透传", () => {
     await executor.executeAll([
       { id: "u1", name: "bash", input: { command: longCmd, network: true } },
     ]);
-    assert.ok(capture.ctx.summaryHint.endsWith("..."));
-    // 摘要总长度：标记 + 截断命令(80) + 尾省略号已在 80 内
-    // 标记 "[请求宿主网络] " 9 字符 + 80 字符 trim+省略 = 89
+    // 截断的 "..." 落在 head 中（80 封顶内），TAIL 追加在末尾（80 封顶之外）
+    const head = capture.ctx.summaryHint.slice(
+      0,
+      capture.ctx.summaryHint.length - TAIL.length
+    );
+    assert.ok(head.endsWith("..."));
+    // #951 长度算术：marker(26) + 截断命令(80-26-3=51) + "..."(3) = 80 封顶，
+    // 之后追加常驻 tail（在 80 封顶之外，与 secret 警告同栈）。退化检查：
+    // markerLen + 3 = 29 ≤ 80，slice 不为负，摘要不会塌缩成 "marker..."。
     assert.ok(
-      capture.ctx.summaryHint.length <= 90,
-      `hint too long: ${capture.ctx.summaryHint.length}`
+      capture.ctx.summaryHint.length > 0 &&
+        capture.ctx.summaryHint.startsWith(MARKER) &&
+        !capture.ctx.summaryHint.startsWith(`${MARKER}...`),
+      "marker + slice must not collapse to bare 'marker...' (markerLen+3 ≤ 80)"
+    );
+    const headLen = capture.ctx.summaryHint.length - TAIL.length;
+    assert.ok(
+      headLen <= NETWORK_HINT_HEAD_CAP,
+      `hint head (marker+summary) too long: ${headLen} > ${NETWORK_HINT_HEAD_CAP}`
+    );
+    // 全长 = head(≤80) + tail 常驻；无 secret 时 tail 是唯一叠加项
+    assert.equal(capture.ctx.summaryHint.endsWith(TAIL), true);
+  });
+
+  it("secret 警告与 tail 叠加时总长有界（head ≤ 80 + tail + warning）", async () => {
+    const capture: AskCapture = { ctx: undefined as never, calls: 0 };
+    const executor = createPermissionExecutor({
+      inner: makeInnerOk(),
+      registry: makeRegistry(makeBashTool()),
+      policy: createPermissionPolicy(),
+      askUser: makeCapturingAsk(capture),
+    });
+    const longSecretCmd = "curl " + "x".repeat(120) + " <<<SECRET_1>>>";
+    await executor.executeAll([
+      {
+        id: "u1",
+        name: "bash",
+        input: { command: longSecretCmd, network: true },
+      },
+    ]);
+    const hint = capture.ctx.summaryHint;
+    assert.ok(hint.startsWith(MARKER));
+    // TAIL 始终在末尾 —— 即使叠加 secret 警告，常驻披露也不能被挤掉
+    assert.ok(hint.endsWith(TAIL));
+    assert.ok(hint.includes(SECRET_WARNING));
+    const expectedMax =
+      NETWORK_HINT_HEAD_CAP + TAIL.length + SECRET_WARNING.length;
+    assert.ok(
+      hint.length <= expectedMax,
+      `stacked hint too long: ${hint.length} > ${expectedMax}`
     );
   });
 

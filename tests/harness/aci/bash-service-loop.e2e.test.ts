@@ -267,7 +267,15 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
       // (T10 bash-network-ask.test.ts 锁定该形态;这里再断言一次以锁闭环)
       assert.equal(askCalls.length, 1);
       assert.equal(askCalls[0]?.network, true);
-      assert.match(askCalls[0]?.summaryHint ?? "", /\[请求宿主网络\]/);
+      // #951:marker 强化披露 —— 必须含「不经 network-guard」与「link-local 元数据」两项事实
+      assert.match(
+        askCalls[0]?.summaryHint ?? "",
+        /\[请求宿主网络·不经 network-guard\]/
+      );
+      assert.match(
+        askCalls[0]?.summaryHint ?? "",
+        /link-local 元数据 169\.254\.169\.254/
+      );
 
       // handler 毫秒级返回 ok(不阻塞、不占 tier)
       assert.equal(spawnResult.kind, "ok");
