@@ -12,7 +12,7 @@
 
 **跨 plan 依赖（硬约束）:** T3 要把新 kind `worktree_claimed` 落进可恢复性穷尽表，而该表由 `plans/write-situation-disclosure.md` **T7** 新建（`isolation/recoverability.ts`）。因此本 plan 的 T3 必须排在那份 plan 的 T7 之后。T1 / T2 / T4 不受此约束。
 
-**合并顺序:** 同 `plans/write-situation-disclosure.md` 头部——所有 bullet 排在 PR #947 合并之后（doc 面位置冲突）。
+**合并顺序——已解除:** PR #947 已于 2026-09-08 合并（`4912fdd7`），本 plan 与 `plans/write-situation-disclosure.md` 的 commit 已 rebase 到其上、**零冲突**，doc 面共存已验证（详见那份 plan 头部的「合并顺序」段）。bullet 可立即开工，唯一仍然生效的顺序约束是上面那条**跨 plan 依赖**（T3 排在 disclosure T7 之后）。
 
 ## ACR
 

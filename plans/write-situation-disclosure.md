@@ -10,7 +10,7 @@
 
 **Tracker:** 操作员明确不开 GitHub ticket，本 plan 的 T1–T10 不拆成 issue；依赖图以本文件的 `[blocks:]` / `[parallel]` 标注为唯一事实源（同 `plans/mutate-write-contract.md` 的处理）。上游 [#946](https://github.com/winter6205/iknow/issues/946) 由 PR #947 关闭。
 
-**合并顺序（ACR note b，硬约束）:** 本 plan 与 PR #947 都要改 `docs/CONTEXT.md` / `specs/README.md` / `docs/adr/0037`。#947 仍 OPEN，**本 plan 的所有 bullet 必须排在 #947 合并之后**，否则三个 doc 文件位置冲突。代码面零交集（#947 = `hard-walls.ts` / `helpers.ts` / `manager.ts` / `permission/*`；本 plan = `skill/body.ts` / `isolation/*` / `session-roots.ts` / `build-engine.ts` / `worktree-rebind.ts` / `bash.ts`）。
+**合并顺序（ACR note b）——已解除:** 本 plan 与 PR #947 都要改 `docs/CONTEXT.md` / `specs/README.md`（#947 实测**未**触碰 `docs/adr/0037`）。#947 已于 2026-09-08 合并（`4912fdd7`），本 plan 的两个 commit 已 rebase 到其上，**零冲突**（双方改的是不同区段）。doc 面已验证共存：CONTEXT 的 `hard-wall`（#947，:242）与「占用」（:428）「写处境」（:437）三条并列；README 的 `mutate-write-contract.md`（:17，运行时核心组）与本 plan 两行（:51-52，工具与扩展源组）并列；ADR 编号 0068（#947）/ 0069 / 0070 无撞。代码面零交集（#947 = `hard-walls.ts` / `helpers.ts` / `manager.ts` / `permission/*`；本 plan = `skill/body.ts` / `isolation/*` / `session-roots.ts` / `build-engine.ts` / `worktree-rebind.ts` / `bash.ts`）。**bullet 可立即开工。** 附带实证：#947 的 T3 文案已落 master（`helpers.ts:83`，含 `process-temporary` / `not a delivery destination`），T10 的词汇对齐主张现在有据可依。
 
 ## ACR
 
