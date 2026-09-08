@@ -31,6 +31,7 @@ import type {
 import { safeTrace } from "../trace/safe-trace.js";
 import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../config/settings.js";
 import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
+import { writeSituation } from "../isolation/write-situation.js";
 
 // re-export: manager 的调用方(T4/T5 工具、host-drain)统一从 manager 侧拿
 // SubAgentDefinition,不必各自 import role.js。
@@ -404,6 +405,16 @@ export function createSubAgentManager(opts: {
    * `MAX_CONCURRENT_WORKERS`(15)。超限立即抛错，不排队。
    */
   readonly maxConcurrentWorkers?: number;
+  /**
+   * T6 (plans/write-situation-disclosure.md): 可选 worktree 隔离档
+   * (build-engine `isolationEnabled` 单一读取点的透出)。`buildWorkerPayload`
+   * 在 spawn 期用它与 resolved sandboxRoot 一起算 `writeSituation`，再透传
+   * 进 envelope —— worker prior 据此渲染写根段。缺省 → `false`(隔离 OFF,
+   * 等价 `writable_main`),与改造前 byte-equal（build-engine 装配层总会传
+   * 此值;该 seam 仅供 manager 直造场景如既有 manager.test.ts makeHarness
+   * 走默认行为）。
+   */
+  readonly isolationOn?: boolean;
 }): SubAgentManager {
   const tasks = new Map<string, Task>();
   /** 所有未决 waitFor 的轮询句柄(非终态,shutdown 必须清,防进程悬挂)。 */
@@ -1014,6 +1025,21 @@ export function createSubAgentManager(opts: {
       ...(def.evidenceContext !== undefined && {
         evidenceContext: def.evidenceContext,
       }),
+      // T6 (plans/write-situation-disclosure.md): 处境枚举由 spawn 期
+      // 算好后透传进 envelope。worker prior 据此渲染写根段:
+      //   - writable_main / writable_tree → ①/② 文案(与改造前逐字节相等);
+      //   - no_writable_root → ③ 态披露(隔离 ON + resolved 非树形 = 未绑树)。
+      // ADR-0069 D2: 单一来源 = spawn 时 `writeSituation(isolationOn,
+      // resolved)`,consumers(render / worker prior)不再各自判定形状;
+      // shape 判断仍归 `writeSituation`(`isolation/write-situation.ts`),
+      // 本处只算一次并透传。
+      // opts.isolationOn 缺省 → false(隔离 OFF);与既有 manager 直造场景
+      // (manager.test.ts makeHarness) 字节不变。
+      ...(opts.isolationOn !== undefined
+        ? {
+            writeSituation: writeSituation(opts.isolationOn, resolved),
+          }
+        : { writeSituation: writeSituation(false, resolved) }),
     };
   }
 

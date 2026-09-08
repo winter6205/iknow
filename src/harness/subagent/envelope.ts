@@ -24,6 +24,7 @@ import addFormats from "ajv-formats";
 import type { ValidateFunction } from "ajv";
 import { ProtocolError } from "../errors.js";
 import type { StopReason } from "../model-adapter/types.js";
+import type { WriteSituation } from "../session-roots.js";
 
 /** 父→子 worker 请求信封。schema 冻结形态见 WORKER_SCHEMA。 */
 export interface WorkerEnvelope {
@@ -49,6 +50,21 @@ export interface WorkerEnvelope {
    * Evidence prompt object (judge). Independent of `task`.
    */
   readonly evidenceContext?: object;
+  /**
+   * T6 (plans/write-situation-disclosure.md) — 写处境三态，由 spawn 期
+   * `manager.buildWorkerPayload` 调用 `writeSituation(isolationOn, resolved)`
+   * 算好后透传（ADR-0069 D2）。worker prior (`priorMessagesFromEnvelope`)
+   * 据此渲染写根段：
+   *   - `writable_main` / `writable_tree` → ①/② 文案（与改造前逐字节相等）；
+   *   - `no_writable_root` → ③ 态披露（不点名建树工具，不嵌入沙箱根）；
+   *   - 缺省（**legacy envelope** —— 跨版本 resume / 旧 worker bootstrap）→
+   *     typed skip（spec OQ1 采纳 (b)），不注入写根段，不回落旧文案。
+   *
+   * Wire additive + optional —— 与 `role` 同形态;旧 envelope（无此字段）
+   * 仍可被 ajv 接受，**不破现有契约**（`additionalProperties:false` 下需
+   * 在 WORKER_SCHEMA.properties 显式声明）。
+   */
+  readonly writeSituation?: WriteSituation;
 }
 
 /** 子→父 result 信封。schema 冻结形态见 PARENT_SCHEMA。 */
@@ -110,6 +126,13 @@ export const WORKER_SCHEMA: Record<string, unknown> = {
     role: { type: "string" },
     finalText: { type: "string" },
     evidenceContext: { type: "object" },
+    // T6: 写处境三态 —— 与 role 同形态（wire additive, optional）。
+    // 枚举值锁进 wire schema（与 status / reason 同 — 是判定面）；
+    // 旧 envelope（缺此字段）→ ajv 接受 → worker typed skip。
+    writeSituation: {
+      type: "string",
+      enum: ["writable_main", "writable_tree", "no_writable_root"],
+    },
   },
   required: ["task", "sandboxRoot"],
   additionalProperties: false,
