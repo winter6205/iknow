@@ -113,8 +113,10 @@ describe("fs-policy boundary — empty (empty whitelist roots / optional members
         `absent contract root ${absent} must not appear as a bind target`
       );
     }
-    // 写轴仍在：cwd bind + tmpfs。
-    assert.ok(argv.includes("--tmpfs"));
+    // 写轴仍在：cwd bind + pad bound at /tmp。
+    assert.ok(
+      argv.some((arg, i) => arg === "--bind" && argv[i + 2] === "/tmp")
+    );
     assert.ok(argv.includes(TASK));
   });
 

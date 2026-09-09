@@ -141,9 +141,10 @@ function isolationAxisFlags(argv: readonly string[]): Set<string> {
   if (argv.includes("--die-with-parent")) flags.add("die-with-parent");
   // env 隔离轴
   if (argv.includes("--clearenv")) flags.add("clearenv");
-  // rlimit + tmpfs
-  if (argv.includes("--size")) flags.add("rlimit-tmp-size");
-  if (argv.includes("--tmpfs")) flags.add("tmpfs");
+  // guest /tmp pad bind (ADR-0074); --size/--tmpfs retired for bind backing
+  if (argv.some((arg, i) => arg === "--bind" && argv[i + 2] === "/tmp")) {
+    flags.add("guest-tmp-bind");
+  }
   // cwd 绑定 verb --bind vs --ro-bind
   const hasCwdRoBind = argv.some(
     (arg, idx) => arg === "--ro-bind" && argv[idx + 1] === CWD
@@ -469,7 +470,10 @@ describe("defaultBackgroundSpawn negative — drives createBwrapFence seam", () 
     // argv 至少包含 cwd bind verb + /tmp + --clearenv(隔离护栏存在)。
     const argv = call?.[1] as readonly string[];
     assert.ok(argv.includes(CWD), "argv must include cwd");
-    assert.ok(argv.includes("--tmpfs"), "argv must include --tmpfs");
+    assert.ok(
+      argv.some((arg, i) => arg === "--bind" && argv[i + 2] === "/tmp"),
+      "argv must bind a host pad at /tmp"
+    );
     assert.ok(argv.includes("--clearenv"), "argv must include --clearenv");
   });
 

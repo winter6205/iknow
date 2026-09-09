@@ -108,21 +108,12 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
     );
     assert.notEqual(bindCwdIdx, -1, "expected --bind <cwd> <cwd> in argv");
     assert.equal(argv[bindCwdIdx + 2], cwd);
-    // --size <N> --tmpfs /tmp（连续三项）。
-    // 闭世界(T3):sensitive-path overlay 已删除 —— home 不再 bind,罩失效为
-    // 无操作,argv 里只有一处 --tmpfs(即 /tmp)。
-    const tmpfsIdx = argv.indexOf("--tmpfs", bindCwdIdx);
-    assert.notEqual(tmpfsIdx, -1);
-    let realTmpfsIdx = -1;
-    for (let i = tmpfsIdx; i < argv.length; i++) {
-      if (argv[i] === "--tmpfs" && argv[i + 1] === "/tmp") {
-        realTmpfsIdx = i;
-        break;
-      }
-    }
-    assert.notEqual(realTmpfsIdx, -1, "expected --tmpfs /tmp in argv");
-    assert.equal(argv[realTmpfsIdx - 2], "--size");
-    assert.equal(argv[realTmpfsIdx + 1], "/tmp");
+    // ADR-0074: `--bind <pad> /tmp` after the cwd write bind; no --tmpfs.
+    assert.equal(argv.includes("--tmpfs"), false);
+    const guestTmpIdx = argv.findIndex(
+      (arg, i) => i > bindCwdIdx && arg === "--bind" && argv[i + 2] === "/tmp"
+    );
+    assert.notEqual(guestTmpIdx, -1, "expected --bind <pad> /tmp in argv");
     // 闭世界反转:敏感路径 tmpfs 罩发射删除(home 下路径不可见 = 罩自动失效
     // 为无操作);isSensitive/protected-state 谓词保留在 fs-policy 层。
     assert.equal(

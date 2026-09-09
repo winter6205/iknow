@@ -1,4 +1,6 @@
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
@@ -24,6 +26,7 @@ import {
 import { restore, type SecretRegistry } from "../../secret-roundtrip/index.js";
 import type { BackgroundTaskManager } from "../../background/manager.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
+import { ensureMainSessionFenceTmpForConversation } from "../../sandbox/fence-tmp.js";
 
 interface BashInput {
   readonly command?: unknown;
@@ -86,6 +89,17 @@ export interface CreateBashToolOptions {
    *  fence 与 background spawn 消费同一份 token。仅 isolationEnabled 时由
    *  装配层提供(与既有传递条件一致)。 */
   readonly projectIdentityRoot?: string;
+  /**
+   * T1 (ADR-0074): host pad bound as fence `/tmp`. Tests inject
+   * `<sessionFolder>/fence-tmp`. When omitted, per-call resolution uses
+   * `projectDir` + `conversationId`, else a factory-lifetime fallback pad.
+   */
+  readonly tmpDir?: string;
+  /**
+   * Session project dir (`resolveProjectSessionDir` output). With
+   * `ctx.conversationId`, bash allocates `<sessionFolder>/fence-tmp`.
+   */
+  readonly projectDir?: string;
 }
 
 export function createBashTool(
@@ -99,7 +113,7 @@ export function createBashTool(
   // —— 这是 D4 的核心：bash handler 必须 per-call rebuild fsPolicy + bwrap
   // fence,不能闭包到工厂捕获 cwd。
   const home = opts?.home ?? homedir();
-  const tmpDir = tmpdir();
+  let fallbackFenceTmp: string | undefined;
   const workspaceRoot = opts?.workspaceRoot;
   // T4 闭世界:合同读根在工厂期捕获(installRoot / projectIdentityRoot 都是
   // process-stable,D3 稳定根),handler per-call rebuild 时喂进 policy。
@@ -137,6 +151,12 @@ export function createBashTool(
     const waveRoot: string = opts?.liveTaskRoot
       ? opts.liveTaskRoot.read()
       : cwd;
+    const tmpDir = resolveBashFenceTmp(opts, ctx?.conversationId, () => {
+      if (fallbackFenceTmp === undefined) {
+        fallbackFenceTmp = mkdtempSync(join(tmpdir(), "iknow-fence-tmp-"));
+      }
+      return fallbackFenceTmp;
+    });
     // T4 闭世界(ADR-0037 §9.2 #6):身份根是**无条件**读白名单成员 ——
     // 工厂期捕获的 projectIdentityRoot 直接进 policy 读白名单(T5 后 identity
     // 根单一入口 = policy),前台 fence 与 background spawn 消费同一 token
@@ -163,7 +183,8 @@ export function createBashTool(
         waveRoot,
         opts ?? {},
         ctx,
-        wantsHostNetwork
+        wantsHostNetwork,
+        tmpDir
       );
     }
     // #562 T6: bashMode="readonly" 派生 cwdReadonly:true 传给 fence + env。
@@ -172,10 +193,13 @@ export function createBashTool(
     // 缺省 "any" / undefined → 不传 cwdReadonly, T5 argv baseline 不破。
     const fenceIsReadonly =
       opts?.cwdReadonly === true || opts?.bashMode === "readonly";
-    const fenceEnv = applyCwdReadonlyFenceEnv(
-      envIsolation.filter(process.env),
-      fenceIsReadonly
-    );
+    const fenceEnv = {
+      ...applyCwdReadonlyFenceEnv(
+        envIsolation.filter(process.env),
+        fenceIsReadonly
+      ),
+      TMPDIR: "/tmp",
+    };
     // #406 T3:构造 fence 前还原占位符 —— 还原后的命令才是真正 spawn 进 bwrap
     // 的文本。原始命令（含占位符）只见于工具调用记录 / 模型上下文；模型永不
     // 见还原后的命令，只看到 bash 输出的 stdout。
@@ -301,8 +325,9 @@ async function handleBackground(
   finalCommand: string,
   cwd: string,
   opts: CreateBashToolOptions,
-  ctx?: ToolExecutionContext,
-  wantsHostNetwork = false
+  ctx: ToolExecutionContext | undefined,
+  wantsHostNetwork: boolean,
+  tmpDir: string
 ): Promise<{ task_id: string; log_path: string }> {
   const manager = opts.backgroundManager;
   if (!manager) {
@@ -341,6 +366,7 @@ async function handleBackground(
     ...(opts.bashMode === "readonly" || opts.cwdReadonly === true
       ? { cwdReadonly: true }
       : {}),
+    tmpDir,
   });
   if (result.status === "spawn_error") {
     // 与 bash 既有错误形态一致:typed-error 渲染（${kind}: ${context}）装进
@@ -357,4 +383,26 @@ async function handleBackground(
     );
   }
   return { task_id: result.task_id, log_path: result.log_path };
+}
+
+function resolveBashFenceTmp(
+  opts: CreateBashToolOptions | undefined,
+  conversationId: string | undefined,
+  fallback: () => string
+): string {
+  if (opts?.tmpDir !== undefined && opts.tmpDir.trim().length > 0) {
+    mkdirSync(opts.tmpDir, { recursive: true });
+    return opts.tmpDir;
+  }
+  if (
+    opts?.projectDir !== undefined &&
+    conversationId !== undefined &&
+    conversationId.trim().length > 0
+  ) {
+    return ensureMainSessionFenceTmpForConversation(
+      opts.projectDir,
+      conversationId
+    );
+  }
+  return fallback();
 }

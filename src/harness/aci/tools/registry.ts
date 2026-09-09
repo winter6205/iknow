@@ -533,6 +533,9 @@ export function createDefaultAciRegistry(
         ...(opts.projectIdentityRoot !== undefined
           ? { projectIdentityRoot: opts.projectIdentityRoot }
           : {}),
+        // T1: todoDir is the session project dir; bash resolves
+        // `<sessionFolder>/fence-tmp` per conversationId (ADR-0074).
+        ...(opts.todoDir !== undefined ? { projectDir: opts.todoDir } : {}),
       }),
     // T6 (plans/worktree-live-task-root.md §6 T6): read 路径工具工厂参数
     // 从冻结 sandboxRoot 扩为 `liveTaskRoot ?? sandboxRoot` (cell 缺席 / 未

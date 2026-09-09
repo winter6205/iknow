@@ -194,23 +194,16 @@ describe("closed-world 假设围栏 argv", () => {
 
   it("没有 home bind、没有 SENSITIVE_PATHS 罩——闭世界前提由形态本身钉住", () => {
     const args = buildClosedWorldBaseArgs({ ...base, tmpSize: 1 << 30 });
-    // 可写 --bind 只允许出现在 cwd 上(home bind token 不存在);
-    // tmpfs 罩只有 /tmp 一条,没有 ~/.ssh / ~/.iknow / ~/.bashrc 等敏感路径。
+    // 可写 --bind 只允许 cwd 与 tmp 垫底(home bind token 不存在);
+    // 无 --tmpfs;没有 ~/.ssh / ~/.iknow / ~/.bashrc 等敏感路径罩。
     for (let i = 0; i < args.length; i++) {
       if (args[i] === "--bind") {
-        assert.equal(
-          args[i + 1],
-          base.cwd,
-          `可写 bind 只许是 cwd,看到: ${args[i + 1]}`
+        assert.ok(
+          args[i + 1] === base.cwd || args[i + 1] === base.tmpDir,
+          `可写 bind 只许是 cwd 或 tmp 垫底,看到: ${args[i + 1]}`
         );
       }
-      if (args[i] === "--tmpfs") {
-        assert.equal(
-          args[i + 1],
-          "/tmp",
-          `tmpfs 罩只许是 /tmp,看到: ${args[i + 1]}`
-        );
-      }
+      assert.notEqual(args[i], "--tmpfs", "per-invocation tmpfs is retired");
     }
   });
 
@@ -239,11 +232,13 @@ describe("closed-world 假设围栏 argv", () => {
       "/opt",
       "/opt",
       "--bind",
+      base.tmpDir,
+      base.tmpDir,
+      "--bind",
       base.cwd,
       base.cwd,
-      "--size",
-      String(base.tmpSize),
-      "--tmpfs",
+      "--bind",
+      base.tmpDir,
       "/tmp",
       "--proc",
       "/proc",
@@ -258,12 +253,14 @@ describe("closed-world 假设围栏 argv", () => {
     const under = buildClosedWorldBaseArgs({ ...base, cwd: "/tmp/ws-x" });
     const rebindIdx = under.lastIndexOf("--bind");
     assert.equal(under[rebindIdx + 1], "/tmp/ws-x");
-    // 重绑必须在 --tmpfs /tmp 之后(tmpfs 会遮蔽先挂的 bind)。
-    const tmpfsIdx = under.indexOf("--tmpfs");
-    assert.ok(rebindIdx > tmpfsIdx);
-    // 桌面常规路径(不在 /tmp 下)不产生重绑。
+    // 重绑必须在 `--bind <pad> /tmp` 之后(挂 /tmp 会遮蔽先挂的 bind)。
+    const guestTmpIdx = under.findIndex(
+      (a, i) => a === "--bind" && under[i + 2] === "/tmp"
+    );
+    assert.ok(rebindIdx > guestTmpIdx);
+    // 桌面常规路径(不在 /tmp 下)不产生重绑(仅 tmp + cwd + pad@/tmp)。
     const outside = buildClosedWorldBaseArgs(base);
-    assert.equal(outside.filter((a) => a === "--bind").length, 1);
+    assert.equal(outside.filter((a) => a === "--bind").length, 3);
   });
 
   it("完整 argv:bwrap 打头,--clearenv 先于全部 --setenv,命令段在 -- 之后", () => {
