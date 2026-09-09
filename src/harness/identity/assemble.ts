@@ -35,6 +35,9 @@ import { IKNOW_USAGE_DEFAULT } from "./usage.js";
 import { bootstrapFilePath } from "./workspace.js";
 import { assembleStaticSystemPrompt } from "../memory/assembly.js";
 import { gitSnapshotSegment, type GitSnapshot } from "./git-snapshot.js";
+import { IKNOW_GIT_WORK_TEXT, gitWorkSegment } from "./git-work.js";
+
+export { IKNOW_GIT_WORK_TEXT, gitWorkSegment } from "./git-work.js";
 
 /** IKNOW-196 + #194 T6 + IKNOW-symbol-primary T1 装配顺序 (6 段 LOCKED)。 */
 export const IKNOW_ASSEMBLY_ORDER = [
@@ -121,6 +124,11 @@ export interface AssemblyContext {
    *  退化态(cwd_unavailable / not_a_git_repo / git_unavailable)→ 段缺席
    *  不报错(spec §9:「接受缺席即字节变化」)。 */
   readonly git?: () => GitSnapshot | undefined;
+  /** git 作业纪律段注入缝 (可选,布尔 gate):true → 装配 "## Git work" 段;
+   *  缺席 / false → 段缺席 (不写空串,不补教程,KV 缓存字节级稳定)。
+   *  生产路径仅 isolation ON 的 chat/tui/serve 传入;ask / worker 不传。
+   *  与 `## Git` 快照段正交,不替换、不改名。 */
+  readonly gitWorkDiscipline?: boolean;
 }
 
 /** #337 T6 `<available_skills>` 段元素形态(最小投影:name + description + disabled)。
@@ -332,6 +340,9 @@ export function createIknowSystemResolver(opts: {
    *  闭包在工厂调用时同步取一次快照,会话内冻结。详见
    *  AssemblyContext.git 注释。 */
   readonly git?: () => GitSnapshot | undefined;
+  /** git 作业纪律段:见 AssemblyContext.gitWorkDiscipline。
+   *  ask surface 即使为 true 也不透传到 ctx。 */
+  readonly gitWorkDiscipline?: boolean;
 }): () => Promise<string | undefined> {
   const bootstrapActive = shouldIncludeBootstrap(opts.surface);
   return () =>
@@ -355,6 +366,9 @@ export function createIknowSystemResolver(opts: {
         : {}),
       ...(opts.agentStatusReadRule ? { agentStatusReadRule: true } : {}),
       ...(opts.git ? { git: opts.git } : {}),
+      ...(opts.gitWorkDiscipline && opts.surface !== "ask"
+        ? { gitWorkDiscipline: true }
+        : {}),
     });
 }
 
@@ -387,6 +401,13 @@ export async function assembleIdentityContext(
   // 直接调用兜底:`projectIdentityRoot` 缺失时沿用 `cwd`(只对绕过 build-
   // engine 的旧装配代码可见);生产装配必须传稳定根。
   segments.push(projectPathSegment(ctx.projectIdentityRoot ?? ctx.cwd ?? ""));
+  // git 作业加性纪律段:append 在 projectPath 之后、skills 之前,不触碰
+  // LOCKED 顺序。仅 isolation ON 的 chat/tui/serve 传 gitWorkDiscipline;
+  // ask 即使传入也不透传;worker 缝缺席 → 段缺席 (不写空串、不补教程)。
+  // 正文是单段不可变常量。标题 "## Git work",不替换既有 "## Git" 快照段。
+  if (ctx.gitWorkDiscipline) {
+    segments.push(gitWorkSegment(IKNOW_GIT_WORK_TEXT));
+  }
   // #337 T6 加性段 `<available_skills>`:append 在 projectPath 之后;随后还有
   // #361 T8 coordinator 段在其后追加(见下),故本段不再是最末。不触碰 LOCKED
   // 顺序。缺席(seam 未注入)→ 跳过(字节级零变化);提供且经 disabled 过滤后

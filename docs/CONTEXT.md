@@ -419,6 +419,9 @@ _Avoid_: 与 mtime 门控缓存混同；会话中因源文件落盘而刷新；�
 **git 块 (git status block)**: (D1/ADR-0037 §4) 模型侧 git 感知的 system 段——当前分支 / 主分支（注明 PR 基线）/ status（截断上限 + 截断标记）/ 最近 5 条 commit，附「开局快照，会话期间不更新」免责句；读稳定 `projectIdentityRoot`（rebind 不抖）；退化态（非 git 仓库 / git 不可用）= 段整体缺席。属会话级快照段。
 _Avoid_: 块内放 diff；每回合刷新 status；rebind 时重建该段；缺席时渲染空占位
 
+**git 作业**: 主代理用 `bash` 完成的版本库侧效应链（工作区变更 → add → commit），不单独注册 ACI 工具。纪律段仅在 worktree isolation ON 时挂 chat/tui/serve，不进 ask / worker；远端不进 identity。
+_Avoid_: git ACI 工具；`git_commit` / `git_push`；把环境现势当作业面；让只读子代理提交；把 push / network 写进 system
+
 **stderr 指针**: worker crash 取证三件套的落盘形态——`subagent_stop.error` 结构化字段 + `stderr_path`/`stderr_bytes` 指针字段 + `<会话文件夹>/stderr/<taskId>.log` mask 后全量文件；父可见 summary 只留尾部 ≤2000 字符预览。specs/trace-agent-readability.md。
 _Avoid_: 把完整 stderr 内联进 JSONL 行；stderr 落盘绕过 SC20 mask；把 summary 截断当成诊断丢失
 
@@ -522,6 +525,9 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **blob 引用模式 vs 内容寻址正文池**: 前者是已退役开关名；后者是现行唯一落盘形态。messages 权威历史不受影响，TraceService 仍记录「模型实际所见」
 - **tool_result projection vs tool_call.result**: 投影只读 messages；不把 stdout 抄到 `tool_call` 行
 - **crash 取证无条件 vs ADR-0003 D10**: 生命周期三类事件 ≠ content trace；D10 的 chat REPL 排除只对 content trace 继续成立
+- **git 作业 vs worktree isolation mode**: 作业是 bash 上的版本库侧效应；隔离是写路径落点（现行 model-provision，见本表 **worktree isolation mode**）。隔离开时作业在 task 树内做完
+- **git 作业 vs 环境现势**: 现势给人看仓；作业是模型经 bash 改仓。现势不进模型消息
+- **git 作业 vs git 块**: 作业是纪律 SOP（`## Git work`）；git 块是会话级分支/status 快照（`## Git`）。两段并存，不得互替
 - **worktree isolation mode vs workspaceRoot vs workspace（serve 主根）**: git worktree 是会话级 mutate 物理隔离；`workspaceRoot` 是 per-root 状态锚（ADR-0019）；serve 主根是显式选定锚（ADR-0023）。rebind 只切本会话生效根，不改锚规则本身
 - **session worktree rebind vs taskRoot（活值）**: rebind 是动作（缝成功 resolve 的那一刻），taskRoot 是该动作写入的活 cell；动作对下一波 tool calls 生效（波快照边界），cell 读取面始终回答「当前生效根」
 - **task worktree label vs conversationId**: label 是文件夹名与 enter 定位；conversationId 是归属身份，不写进目录名

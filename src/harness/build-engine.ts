@@ -1554,6 +1554,11 @@ export async function buildHarnessEngine(
       // 同步取一次快照、会话内冻结。退化态(非 git 仓库 / git 不可用 /
       // cwd 不可解析)→ provider 返回 undefined → 装配段缺席,不报错。
       git: createGitSnapshotProvider({ cwd: projectIdentityRoot }),
+      // git 作业纪律段:与 isolationEnabled 同一判定源(启动一次、会话稳定)。
+      // ON → chat/tui/serve 注入;OFF → 字段缺席(字节级等同未传 gate)。
+      // ask 在 createIknowSystemResolver 内再挡一层(无工作树工具)。
+      // worker createWorkerDeps 不经过本层、不传 gate。
+      ...(isolationEnabled ? { gitWorkDiscipline: true } : {}),
       // ADR-0041 / plans/model-prefix-layering.md B3:`orchestration` system
       // 段撤出 —— 内容并入 graph 模式切换提示(loop-engine 消息尾追加,
       // 见下方 graphModeChange 缝)。graph 装配快照改为单点供 loop-engine

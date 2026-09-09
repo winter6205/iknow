@@ -56,6 +56,7 @@
 ### 身份与记忆
 
 - `196-identity-assembly.md` — 身份认知装配（identity / soul / 首启 BOOTSTRAP）
+- `git-work.md` — git 作业（bash add/commit 纪律段；仅 isolation ON 的 chat/tui/serve；不新增 git ACI 工具；plan: `plans/git-work.md`）
 - `auto-memory.md` — 自动记忆抽取 + 机械清理（兑现 ADR-0009 D5，决策沉淀于 ADR-0031；默认 OFF；plan: `plans/auto-memory.md`）
 - `memory-layer-follow-ups.md` — recall 过滤 disabled · type 封闭枚举 · 用户级 AGENTS 与 user.md 同根（叠项目 AGENTS）；plan: `plans/memory-layer-follow-ups.md`（#729–#732）
 - `auto-memory-complete-upgrade.md` — CJK 近邻切分 · dream 离线合并 · §2.5 Medium（per-root 钩子 / 共用 notify）；plan: `plans/auto-memory-complete-upgrade.md`（文档轨，无 tracker issue）
