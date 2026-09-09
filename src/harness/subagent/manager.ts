@@ -419,7 +419,7 @@ export function createSubAgentManager(opts: {
    */
   readonly isolationOn?: boolean;
   /**
-   * T5 (plans/session-folder-consolidation.md / SC8 + ADR-0071 Decision 1):
+   * T5 (ADR-0071 / SC8 + Decision 1):
    * 子代理 per-agent trace + meta 归属目录 = `<父会话文件夹>/subagents/`。
    * 在场时:每次 spawn 懒建一个 file-mode JsonlTraceService 实例
    * (`<subagentsDir>/agent-<taskId>.jsonl`, conversationId 钉 taskId);
@@ -737,7 +737,7 @@ export function createSubAgentManager(opts: {
       reason: "crashed",
       error,
     });
-    // T5 (plans/session-folder-consolidation.md / ADR-0035 同日 Amendment):
+    // T5 (ADR-0071 / ADR-0035 同日 Amendment):
     // stderr / subagentDiagnosticsDir 跟随 `<父会话文件夹>/subagents/` —
     // 显式 diagnosticsDir 缺省 → 退化到 subagentsDir。
     // review-fix (M5):退化链加 projectDir 两段式缝派生(同 def 落点) —
@@ -790,7 +790,7 @@ export function createSubAgentManager(opts: {
     // buildWorkerPayload 单点校验所有 spawn 路径(模型工具 + 判官 + 将来角色),
     // 校验失败同步抛 SubAgentSandboxRootError(handler 转 ToolExecutionError)。
     //
-    // T5 (plans/session-folder-consolidation.md / SC8 + L2): buildWorkerPayload
+    // T5 (ADR-0071 / SC8 + L2): buildWorkerPayload
     // 现在接收 taskId —— 父侧 manager 已经锁定 taskId 才能算出对应的 traceFilePath
     // (per-agent 形态: `<父会话文件夹>/subagents/agent-<taskId>.jsonl`),写到
     // envelope 让 worker file-mode 落该路径,代替 L2 假 scope `randomUUID()`(已退役)。
@@ -1219,7 +1219,7 @@ export function createSubAgentManager(opts: {
             writeSituation: writeSituation(opts.isolationOn, resolved),
           }
         : { writeSituation: writeSituation(false, resolved) }),
-      // T5 (plans/session-folder-consolidation.md / SC8 + L2): 父 manager
+      // T5 (ADR-0071 / SC8 + L2): 父 manager
       // 已经替这个 taskId 建好 `<父会话文件夹>/subagents/agent-<taskId>.jsonl`,
       // 把 traceFilePath + taskId 经 envelope 透传给 worker —— worker 直接
       // file-mode 落该路径 + conversationId=taskId, 代替 L2 假 scope `randomUUID()`

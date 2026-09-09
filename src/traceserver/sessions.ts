@@ -1,7 +1,7 @@
 /**
  * Session list reader (read side of the trace inspection panel, v2).
  *
- * T6 (plans/session-folder-consolidation.md / SC16): two-level tree walk.
+ * T6 (ADR-0071 / SC16): two-level tree walk.
  *   - `traceDir` is now the **baseDir** — the parent of `<baseDir>/projects/`.
  *     Same path the cli passes via `IKNOW_TRACE_OUT`; the read side used to
  *     treat it as a flat `<traceDir>/<convId>.jsonl` directory, but T1

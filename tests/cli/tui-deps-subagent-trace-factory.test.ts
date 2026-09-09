@@ -2,7 +2,7 @@
  * TUI 装配层（`src/tui/deps.ts`）的 subagent trace 接线（#704 onto #721 master，
  * T5 升级为 per-agent 形态）。
  *
- * T5 (plans/session-folder-consolidation.md / SC8 + L2): 父会话文件夹归并
+ * T5 (ADR-0071 / SC8 + L2): 父会话文件夹归并
  * 后,子代理 lifecycle / content trace 改走 per-agent 形态 —
  * `<父会话文件夹>/subagents/agent-<taskId>.jsonl`(派生公式
  * `resolveSubagentTraceDir({projectDir, conversationId})`)。
@@ -198,7 +198,7 @@ describe("buildTuiDeps — subagent trace 接线 (T5 per-agent 形态)", () => {
   });
 
   it("不配 conversationId → TUI 派生一个 fallback conversationId, subagentsDir 仍注入 manager", async () => {
-    // T5 (plans/session-folder-consolidation.md / SC8): TUI 入口要求
+    // T5 (ADR-0071 / SC8): TUI 入口要求
     // 每条 spawn 都能定位到 <父会话文件夹>/subagents/。即便 caller 不传
     // conversationId,装配层也得落一个(用 randomUUID() 兜底)让 per-agent
     // 形态可写 —— 不再依赖 caller 配/不配。验证 capturedSubagentsDir

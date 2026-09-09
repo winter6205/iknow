@@ -40,7 +40,7 @@ export interface JsonlTraceOptions {
    * (ADR-0003 D4: conversation_id 仍实例绑定)。仅子代理聚合流(`subagent`
    * conversationId)保留目录模式 —— 主会话写入改走 `traceFilePath` 文件模式,
    * 锚在 `<baseDir>/projects/<slug>/<conversationId>/trace.jsonl`(T3,
-   * plans/session-folder-consolidation.md / ADR-0071 Decision 1)。
+   * ADR-0071 Decision 1)。
    */
   filePath?: string;
   /**

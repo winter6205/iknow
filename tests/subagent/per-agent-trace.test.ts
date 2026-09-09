@@ -1,5 +1,5 @@
 /**
- * T5 (plans/session-folder-consolidation.md / ADR-0071 Decision 1 +
+ * T5 (ADR-0071 Decision 1 +
  * ADR-0035 同日 Amendment) — 子代理记录嵌套进父会话文件夹。
  *
  * SC8 + L2 + 操作员补丁:每个子代理的 lifecycle / content trace 都落

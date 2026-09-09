@@ -243,7 +243,7 @@ export interface CreateWorkerDepsOptions {
    */
   readonly bashMode?: "any" | "readonly";
   /**
-   * T5 (plans/session-folder-consolidation.md / SC8 + L2): 由 envelope.traceFilePath
+   * T5 (ADR-0071 / SC8 + L2): 由 envelope.traceFilePath
    * 透传的 worker content trace 锚点(父会话已经替这个 taskId 建好
    * `<父会话文件夹>/subagents/agent-<taskId>.jsonl`)。在场时 worker file-mode
    * 落该路径 + conversationId=taskId,替代 L2 假 scope `randomUUID()`(已退役)。
@@ -508,13 +508,13 @@ export async function createWorkerRuntime(
       : {}),
     system,
     promptTools: reg.visibleSchemas,
-    // T3 (plans/session-folder-consolidation.md) 已退役 `./trace/` cwd-relative
+    // T3 (ADR-0071) 已退役 `./trace/` cwd-relative
     // 退路(SC6)—— 主会话 trace 锚走会话文件夹 (resolveServeDataDir() 同源)。
     // worker 继承父进程 env (ADR-0001),这里再读一次 IKNOW_TRACE_OUT 保持解析
     // 顺序一致 (cli.ts resolveTraceRoot 形态)。traceFilePath 在场时优先 (T5
     // SC8 + L2,见下方 trace 装配分支)。
     //
-    // T5 (plans/session-folder-consolidation.md / SC8 + L2): opts.traceFilePath
+    // T5 (ADR-0071 / SC8 + L2): opts.traceFilePath
     // 在场时(由 envelope.traceFilePath 透传,父 manager 已经替这个 taskId
     // 建好 `<父会话文件夹>/subagents/agent-<taskId>.jsonl`),worker 直接 file-mode
     // 落该路径 + conversationId=taskId。
@@ -981,7 +981,7 @@ export async function runSubagentWorker(): Promise<void> {
     ...(env.productRoot !== undefined
       ? { projectIdentityRoot: env.productRoot }
       : {}),
-    // T5 (plans/session-folder-consolidation.md / SC8 + L2): 父 manager
+    // T5 (ADR-0071 / SC8 + L2): 父 manager
     // 已经在 spawn 期替这个 taskId 建好 `<父会话文件夹>/subagents/agent-<taskId>.jsonl`,
     // 把 traceFilePath + taskId 经 envelope 透传过来 ——
     // worker 直接 file-mode 落该路径,替代 L2 假 scope `randomUUID()`(已退役)。

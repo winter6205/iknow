@@ -110,7 +110,7 @@ export interface SessionListEntry {
 /**
  * Project namespace under the shared pool root.
  *
- * T1 (plans/session-folder-consolidation.md / ADR-0071 Decision 1/2) — the
+ * T1 (ADR-0071 Decision 1/2) — the
  * grouping key is `projectIdentityRoot`, not `cwd`. cwd moves with worktree
  * rebinds; the identity root is stable across rebinds (per
  * `docs/CONTEXT.md`), which is the grouping semantic the spec requires.
@@ -176,11 +176,11 @@ export function resolveConversationDir(opts: {
 }
 
 /**
- * T3 (plans/session-folder-consolidation.md / ADR-0071 Decision 4):
+ * T3 (ADR-0071 Decision 4):
  * per-conversation trace 锚点 = `<projectDir>/<conversationId>/trace.jsonl`。
  * 同一 baseDir + 同一 projectIdentityRoot + 同一 conversationId 必然派生出
  * 同一绝对文件路径 —— 不同 cwd 启动同一仓的同一会话,文件路径稳定
- * (跨 cwd 一致性 = plans/session-folder-consolidation.md SC6 的核心不变式)。
+ * (跨 cwd 一致性 = ADR-0071 SC6 的核心不变式)。
  *
  * 派生而不是字符串拼接:复用 `resolveConversationDir` 的 sanitize 与长度边界,
  * 避免在调用方各自重写 path-join 导致 `..` / `/` 逃逸的回退风险。
@@ -248,7 +248,7 @@ export class SessionStore {
   }
 
   /**
-   * #950 T2 (plans/session-folder-consolidation.md):read-only projection of
+   * #950 T2 (ADR-0071):read-only projection of
    * the resolved session project directory
    * (`<baseDir>/projects/<basename>-<sha1[:12]>`). Consumers whose per-call
    * leaf lives INSIDE the session folder — the todo ledger `todoDir` seam

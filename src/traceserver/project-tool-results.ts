@@ -56,7 +56,7 @@ export type ReadBlob = (
 
 export interface TraceMessageDereferenceOptions {
   /**
-   * 主会话 trace 文件绝对路径。T3 (SC7, plans/session-folder-consolidation.md /
+   * 主会话 trace 文件绝对路径。T3 (SC7, ADR-0071 /
    * ADR-0071 Decision 4) 起 `traceDir` 退役:blob 目录 = `dirname(traceFilePath) +
    * "/blobs"`,与 `<baseDir>/projects/<slug>/<convId>/blobs` 同源派生
    * (JsonlTraceService 在 blob 模式下的默认写盘位置)。传 `traceFilePath` 即隐含

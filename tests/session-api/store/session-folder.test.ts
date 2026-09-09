@@ -1,5 +1,5 @@
 /**
- * T1 (plans/session-folder-consolidation.md) — session folder layout & resolver
+ * T1 (ADR-0071) — session folder layout & resolver
  * pure-function contract tests. Covers SC1–SC4 + 输入五类表 A.
  *
  * These tests pin the **new** contract:

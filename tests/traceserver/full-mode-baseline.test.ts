@@ -1,11 +1,11 @@
 /**
- * SC15 / SC17 历史基线（plans/session-folder-consolidation.md T4 实施注意第 2 条）。
+ * SC15 / SC17 历史基线（ADR-0071 T4 实施注意第 2 条）。
  *
  * fixture `full-mode-baseline.trace.jsonl` 在 T3 HEAD（blob 仍是 opt-in、默认
  * full）用**真实写侧** `createJsonlTraceService` 生成，随机 UUID 后处理为
  * 确定性 id（llm-1 / llm-2 / tool-1 / turn-1）。它固定的是旧 full 模式
  * 「模型实际所见」逐字节形状，是 T6 读侧改造时 blob 模式逐字段相等的对照物
- * （specs/session-folder-consolidation.md SC15 / SC17）。
+ * （ADR-0071 SC15 / SC17）。
  *
  * 本文件的断言值全部从该 fixture 用 T3 时的读侧投影**实测**得出后固化 ——
  * 不从写侧或读侧源码派生（改实现不可能悄悄翻转这些值）。fixture 与本测试

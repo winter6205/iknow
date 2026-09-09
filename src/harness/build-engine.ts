@@ -222,7 +222,7 @@ export type BuildEngineOpts = {
   /** #356 T6 测试缝:subagent manager 覆盖注入(生产默认不传则内部自建)。 */
   readonly subagentManager?: SubAgentManager;
   /**
-   * T5 (plans/session-folder-consolidation.md / SC8 + L2): 子代理 per-agent
+   * T5 (ADR-0071 / SC8 + L2): 子代理 per-agent
    * trace 归属目录 = `<父会话文件夹>/subagents/`(由 caller 用
    * `resolveSubagentTraceDir({ projectDir, conversationId })` 派生后传入)。
    *
@@ -724,7 +724,7 @@ export async function buildHarnessEngine(
           // 算 `writeSituation` 进 envelope；worker prior 据此渲染写根段。
           // 判定源 = `isolationEnabled`(line 716 单一读取点),worker 不重判。
           isolationOn: isolationEnabled,
-          // T5 (plans/session-folder-consolidation.md / SC8 + L2):
+          // T5 (ADR-0071 / SC8 + L2):
           //   opts.subagentsDir 在场 → manager 内 per-agent file-mode
           //   JsonlTraceService 形态,替换掉既有 `subagentTrace` 聚合单实例。
           //   opts.subagentsDir 缺席 → manager 走 NoopTrace,语义同既有

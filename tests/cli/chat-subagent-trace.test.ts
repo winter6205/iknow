@@ -43,7 +43,7 @@ function resolveTsxCli(): string {
 const tsxCli = resolveTsxCli();
 
 /**
- * T5 (plans/session-folder-consolidation.md / SC8): 递归搜 dataDir/projects
+ * T5 (ADR-0071 / SC8): 递归搜 dataDir/projects
  * 下任意 slug/convId/subagents 子目录,返回第一个存在的 subagents 目录。
  * cli 测试把 HOME 重定向到 scratch 后, projectDir 含 basename 加 12 位
  * sha1 后缀不可硬编码; walker 形态直接拿真实路径。
@@ -185,7 +185,7 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
       requestCount >= 2,
       `the parent and worker should call the stub model (stdout=${stdout}, stderr=${stderr})`
     );
-    // T5 (plans/session-folder-consolidation.md / SC8 + L2): 子代理 lifecycle /
+    // T5 (ADR-0071 / SC8 + L2): 子代理 lifecycle /
     // content trace 改走 per-agent 形态 — `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
     // 本测试把 HOME 重定向到 `<scratch>/home` → dataDir 落到
     // `<scratch>/home/.iknow`, projectDir 落到

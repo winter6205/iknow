@@ -158,7 +158,7 @@ describe("iknow trace — integration", () => {
 
 // -- T7: runTrace 真实 CLI（子进程） -------------------------------------------
 //
-// T3 (SC6, plans/session-folder-consolidation.md): 该 describe 块原 4 条测试中,
+// T3 (SC6, ADR-0071): 该 describe 块原 4 条测试中,
 // 「默认读 ./trace/」「旧 ./trace.jsonl fail-fast」「--trace-out 指向旧单文件
 // fail-fast」三条钉死的形态已随 T3 退役(`DEFAULT_TRACE_DIR` / `LEGACY_TRACE_FILE`
 // / `detectLegacyTrace` 从 cli.ts 移除),整块连同子进程脚手架归档到

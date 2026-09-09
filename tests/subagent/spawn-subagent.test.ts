@@ -266,7 +266,7 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
   });
 
   it("T5 SC8: ctx.toolUseId → def.toolUseId (Anthropic tool_use_id 透传, manager 抄到 .meta.json)", async () => {
-    // T5 (plans/session-folder-consolidation.md / SC8): executor 把 call.id
+    // T5 (ADR-0071 / SC8): executor 把 call.id
     // 装进 ctx.toolUseId,spawn_subagent handler 消费后写入 def.toolUseId,
     // manager.writeMetaOnce 把它抄进 `<subagentsDir>/agent-<taskId>.meta.json`
     // 的 toolUseId 字段,用于反查父 loop 那次工具调用。

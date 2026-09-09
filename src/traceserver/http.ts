@@ -6,7 +6,7 @@
  *   /api/v1/traces/fields  — field declaration table (panel column SSOT)
  *   /api/v1/sessions       — 会话列表 (conversation_id / mtime / size / agent_version)
  *
- * T6 (plans/session-folder-consolidation.md / SC14–SC17): traceDir is the
+ * T6 (ADR-0071 / SC14–SC17): traceDir is the
  * **baseDir**; sessions live at
  * `<baseDir>/projects/<project-slug>/<convId>/trace.jsonl`.
  * Wire params stay snake_case; `conversation_id` walks the project tree via

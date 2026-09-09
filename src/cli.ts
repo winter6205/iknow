@@ -73,7 +73,7 @@ import { deriveProjectIdentityRoot } from "./harness/session-roots.js";
 import { resolveVerifyConfig } from "./config/verify-config.js";
 
 /**
- * T3 (plans/session-folder-consolidation.md / ADR-0071 Decision 1/4):
+ * T3 (ADR-0071 Decision 1/4):
  * trace 锚点已迁入会话文件夹,主会话写入由 `resolveConversationTraceFilePath`
  * 经 hub / store 派生;本根只承担子代理聚合目录(`createTrace("subagent")`,
  * T5 迁走)与 runTrace 的回放池(SC6 退役 cwd-relative `./trace/` 后的落点)。
@@ -283,7 +283,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  // T5 (plans/session-folder-consolidation.md / SC8 + L2): chat 入口
+  // T5 (ADR-0071 / SC8 + L2): chat 入口
   // 锁定本次 conversationId —— 子代理 lifecycle / content trace 归属目录
   // = `<父会话文件夹>/subagents/`,文件名 = agent-<taskId>.jsonl。
   // rebuildDeps(改绑时)复用同一 conversationId,不另起(rebuild 不换会话)。
@@ -297,7 +297,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
 
   // ADR-0035:生命周期 trace 与 content trace 解耦。chat 不装配 content
   // trace，但 subagent 的 spawn/state_change/stop 永久写入默认 trace 目录。
-  // T5 (plans/session-folder-consolidation.md / SC8 + L2): 聚合单文件
+  // T5 (ADR-0071 / SC8 + L2): 聚合单文件
   // `subagent.jsonl` (conversationId:"subagent") 已退役 —— 改由
   // buildHarnessEngine(opts.subagentsDir) 派生 per-agent `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
   // 解析顺序保持(traceOut flag > IKNOW_TRACE_OUT env > 默认)只服务于
@@ -354,7 +354,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     permissionMode,
     graphMode,
     todoDir: todoProjectDir,
-    // T5 (plans/session-folder-consolidation.md / SC8 + L2): subagentsDir
+    // T5 (ADR-0071 / SC8 + L2): subagentsDir
     // 由 (projectDir, conversationId) 经 `resolveSubagentTraceDir` 派生 —— 与
     // 上面 SessionStore 同源(`todoProjectDir === store.projectDir`,见 #950 T2)。
     // build-engine 内部把 subagentsDir 同时传给 SubAgentManager(opts.subagentsDir)

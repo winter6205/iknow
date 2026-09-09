@@ -136,7 +136,7 @@ export interface BuildTuiDepsOptions {
    */
   readonly traceOut?: string;
   /**
-   * T5 (plans/session-folder-consolidation.md / SC8 + L2): 当前 TUI 会话
+   * T5 (ADR-0071 / SC8 + L2): 当前 TUI 会话
    * conversationId —— 派生 `<父会话文件夹>/subagents/` 用。caller
    * (tui/run.tsx) 从 hub-bridge 拿到 soleInflightId 后透传。
    *
@@ -304,7 +304,7 @@ export async function buildTuiDeps(
     resolveServeDataDir(opts.dataDir, opts.workspaceRoot),
     deriveProjectIdentityRoot({ cwd: opts.workspaceRoot })
   );
-  // T5 (plans/session-folder-consolidation.md / SC8 + L2): 子代理 lifecycle
+  // T5 (ADR-0071 / SC8 + L2): 子代理 lifecycle
   // / content trace 改走 per-agent `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
   // TUI 子代理根 = `<projectDir>/<conversationId>/subagents/`。
   //

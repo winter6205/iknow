@@ -66,7 +66,7 @@ export interface WorkerEnvelope {
    */
   readonly writeSituation?: WriteSituation;
   /**
-   * T5 (plans/session-folder-consolidation.md / SC8 + L2): 该 worker 的
+   * T5 (ADR-0071 / SC8 + L2): 该 worker 的
    * taskId (parent spawn 时 manager.randomUUID() 锁定)。traceFilePath 配
    * 对使用 —— worker file-mode 落该路径 + conversationId=taskId,代替
    * L2 假 scope `randomUUID()`(已退役)。缺席 → 走 IKNOW_TRACE_OUT 退路。
@@ -76,7 +76,7 @@ export interface WorkerEnvelope {
    */
   readonly taskId?: string;
   /**
-   * T5 (plans/session-folder-consolidation.md / SC8 + L2): worker 进程内
+   * T5 (ADR-0071 / SC8 + L2): worker 进程内
    * JsonlTraceService 的 file mode 锚点,由 spawn 期 `manager.buildWorkerPayload`
    * 算好后透传(父进程已经替这个 taskId 建好 `<父会话文件夹>/subagents/agent-<taskId>.jsonl`)。
    * worker 拿这个文件路径 + 对应 taskId 直接创 file-mode JsonlTraceService,

@@ -1,5 +1,5 @@
 /**
- * T6 (plans/session-folder-consolidation.md / SC14–SC17): traceserver 读侧
+ * T6 (ADR-0071 / SC14–SC17): traceserver 读侧
  * 三工具走两级树 + query_trace 补 content 解引用。
  *
  * T4 后读侧关键变化:

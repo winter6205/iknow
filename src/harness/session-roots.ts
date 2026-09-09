@@ -45,7 +45,7 @@ export { SessionRootError } from "./errors.js";
 export const MAX_ROOT_DETAIL_CHARS = 120;
 
 /**
- * T1 (plans/session-folder-consolidation.md) — 路径敌意段净化器,会话文件夹
+ * T1 (ADR-0071) — 路径敌意段净化器,会话文件夹
  * 与 todo ledger 共用。「`..` 风格不可能逃逸」的保证由本函数唯一承担,
  * 任何拼接 `conversationId` 进文件路径的代码必须先过 sanitize:
  *   - 严格 `[A-Za-z0-9_-]` → 全部其它字符(含 `.` / `/` / `\0`)归 `_`。
@@ -239,7 +239,7 @@ export function resolveInstallRoot(): string {
 }
 
 /**
- * T1 (plans/session-folder-consolidation.md) — pre-assembly derivation of the
+ * T1 (ADR-0071) — pre-assembly derivation of the
  * session folder grouping root for the three production call sites
  * (`cli.ts` / `serve.ts` / `hub-bridge.ts`). Mirrors the build-engine
  * formula at `build-engine.ts:523`:

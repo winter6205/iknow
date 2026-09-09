@@ -1,5 +1,5 @@
 /**
- * T3 (plans/session-folder-consolidation.md / ADR-0071 Decision 4) trace 锚点
+ * T3 (ADR-0071 Decision 4) trace 锚点
  * 迁入会话文件夹的端到端契约。SC6 钉死不变式:
  *
  *   - trace 落 `<baseDir>/projects/<slug>/<convId>/trace.jsonl`, 不再 cwd-relative。

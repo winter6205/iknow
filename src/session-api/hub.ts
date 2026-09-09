@@ -2447,7 +2447,7 @@ export class SessionHub {
   private recordViolationTrace(conversationId: string, reason: string): void {
     if (!this.traceOut) return;
     try {
-      // T3 (plans/session-folder-consolidation.md / ADR-0071 Decision 4):
+      // T3 (ADR-0071 Decision 4):
       // violation 与主会话 trace 同域,锚在 `<projectDir>/<convId>/trace.jsonl`。
       // 派生复用 `resolveConversationTraceFilePath`,与 `createTrace` 同源 →
       // 同一会话的两条写入路径不会漂到不同文件。
@@ -2497,11 +2497,11 @@ export class SessionHub {
     conversationId: string
   ): TraceServiceWithHealth | undefined {
     if (!this.traceOut) return undefined;
-    // T3 (plans/session-folder-consolidation.md / ADR-0071 Decision 4):
+    // T3 (ADR-0071 Decision 4):
     // 主会话 + violation 共用同一 `resolveConversationTraceFilePath` 派生,
     // 确保两条写入路径落 `<projectDir>/<conversationId>/trace.jsonl`。
     //
-    // T5 (plans/session-folder-consolidation.md / SC8 + L2): 子代理聚合流
+    // T5 (ADR-0071 / SC8 + L2): 子代理聚合流
     // (`createTrace("subagent")` 字面 conversationId 假 scope, `<traceOut>/subagent.jsonl`)
     // 已退役 —— 子代理 lifecycle / content trace 由 manager 经
     // review-fix (M5) `projectDir` 两段式缝派生 per-agent

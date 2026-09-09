@@ -1,5 +1,5 @@
 /**
- * T5 (plans/session-folder-consolidation.md / SC8 + L2):
+ * T5 (ADR-0071 / SC8 + L2):
  * build-engine 的 subagentsDir 注入缝 —— SC1 生产装配面
  * (cli.ts chat path + hub.ts ensureDeps)。
  *

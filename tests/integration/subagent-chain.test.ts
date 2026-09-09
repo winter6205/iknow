@@ -156,7 +156,7 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
     const secret = "T2_FAKE_SECRET_9f8e7d6c";
     setActiveExtraSecrets([secret]);
     try {
-      // T5 (plans/session-folder-consolidation.md / SC8 + L2): per-agent 形态 ——
+      // T5 (ADR-0071 / SC8 + L2): per-agent 形态 ——
       // subagentsDir 注入 manager 后, lifecycle / content trace 落
       // `<subagentsDir>/agent-<taskId>.jsonl`(取代 `<traceOut>/subagent.jsonl`
       // 聚合单文件, conversationId:"subagent" 假 scope 已退役)。

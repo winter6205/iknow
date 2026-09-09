@@ -1,5 +1,5 @@
 /**
- * T3 (SC7, plans/session-folder-consolidation.md / ADR-0071 Decision 4):
+ * T3 (SC7, ADR-0071 Decision 4):
  * traceDir 由 traceFilePath 派生 —— `blobs/` 是 `trace.jsonl` 的兄弟目录,
  * 由 `dirname(traceFilePath) + "/blobs"` 唯一决定。`options.traceDir` 字段
  * 从 `TraceMessageDereferenceOptions` 退役, 唯一公开的输入是 `traceFilePath`。

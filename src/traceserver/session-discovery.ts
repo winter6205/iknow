@@ -1,5 +1,5 @@
 /**
- * T6 (plans/session-folder-consolidation.md / SC16): read-side two-level tree
+ * T6 (ADR-0071 / SC16): read-side two-level tree
  * discovery.
  *
  * Layout: `<baseDir>/projects/<project-slug>/<conversationId>/trace.jsonl`.
