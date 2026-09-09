@@ -574,7 +574,14 @@ export function createDefaultAciRegistry(
     edit_file: () =>
       createEditFileTool(opts.liveTaskRoot ?? sandboxRoot, { onEdit }),
     write_file: () => createWriteFileTool(opts.liveTaskRoot ?? sandboxRoot),
-    web_fetch: () => createWebFetchTool({ proxyUrl }),
+    web_fetch: () =>
+      createWebFetchTool({
+        proxyUrl,
+        backend: env.web.searchBackend,
+        exaApiKey: env.web.exaApiKey,
+        tavilyApiKey: env.web.tavilyApiKey,
+        braveApiKey: env.web.braveApiKey,
+      }),
     // #826 T4: 把 searchBackend + 三个 vendor key 透传给 web_search。
     // env loader 已把 EXA_API_KEY / TAVILY_API_KEY / BRAVE_API_KEY 经
     // expandPlaceholders 解析（空 / "yes" / 占位符解析失败 → undefined）；

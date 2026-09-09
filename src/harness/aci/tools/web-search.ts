@@ -26,6 +26,8 @@
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
+import { resolveWebCapability } from "../../../config/aci-web-backend.js";
+import type { WebCapability } from "../../../config/aci-web-backend.js";
 import {
   BRAVE_API_KEY_ENV_KEY,
   EXA_API_KEY_ENV_KEY,
@@ -52,7 +54,7 @@ const MAX_TITLE_CHARS = 200;
 const MAX_SNIPPET_CHARS = 500;
 const MAX_URL_CHARS = 2_000;
 const SEARCH_OUTPUT_BUDGET = 8_000;
-const SEARCH_TIMEOUT_MS = 20_000;
+export const SEARCH_TIMEOUT_MS = 20_000;
 /** B1 默认端点:Bing(中国区可达,DDG 在此类网络不可达)。DDG html 仍可经覆写。 */
 const DEFAULT_SEARCH_ENDPOINT = "https://cn.bing.com/search";
 
@@ -183,30 +185,33 @@ export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
   // 与显式 "bing" 在 `backendId` 上收敛,但三态 fail-closed 需要区分,
   // 故单独记 `backendUnset`。
   const backendUnset = deps?.backend === undefined;
-  const backendId: SearchBackendId = deps?.backend ?? "bing";
-  const backendFactory = deps?.backendFactory ?? selectBackend(backendId);
+  const capability = resolveWebCapability({
+    backend: deps?.backend,
+    exaApiKey: deps?.exaApiKey,
+    tavilyApiKey: deps?.tavilyApiKey,
+    braveApiKey: deps?.braveApiKey,
+  });
+  const searchBackendId: SearchBackendId =
+    capability.searchEngine === "exa" ? "exa" : "bing";
+  const backendFactory = deps?.backendFactory ?? selectBackend(searchBackendId);
   const apiKeys = collectApiKeys(deps);
   const handler = async (
     input: unknown,
     ctx?: ToolExecutionContext
   ): Promise<string> => {
-    // #826 T3: 三态 fail-closed 的两个配置态在 handler entry 判定 —— 先于
-    // compileSearchInput / 任何 backend 调用,配错不消耗一次出网。
-    assertBackendConfig(backendId, backendUnset, apiKeys);
-    assertSearchUrlAllowed(backendId, input);
+    // 配置态：未设 + 有 keyed key 仍 fail-closed。缺搜（stub / 无 key）
+    // 回落默认检索，不再 missing_key / not_shipped。
+    assertBackendConfig(backendUnset, apiKeys, capability);
+    assertSearchUrlAllowed(searchBackendId, input);
     const parsed = compileSearchInput(input, deps?.envSearchUrl);
     const cacheKey = `${parsed.endpoint}\u0000${parsed.query}`;
     const cachedResults = resultCache.get(cacheKey);
     const cacheHit = cachedResults !== undefined;
-    // #826 T2: per-call backend 实例(带 endpoint;Tavily/Exa/Brave
-    // 占位 backend 不读 endpoint,但传同一个 shape 保持工厂同形)。
-    // T4: 透传 keyed backend 的 apiKey（已由 assertBackendConfig 校验
-    // 非空；bing 不读此字段）。
     const backend = backendFactory({
       guardDeps,
       endpoint: parsed.endpoint,
-      ...(isKeyedBackendId(backendId) && apiKeys[backendId] !== undefined
-        ? { apiKey: apiKeys[backendId] }
+      ...(searchBackendId === "exa" && apiKeys.exa !== undefined
+        ? { apiKey: apiKeys.exa }
         : {}),
     });
     const resultsPromise =
@@ -307,11 +312,6 @@ type KeyedBackendId = keyof typeof KEYED_BACKEND_ENV_KEYS;
 
 type KeyedApiKeys = Readonly<Record<KeyedBackendId, string | undefined>>;
 
-/** keyed backend id 判定（`bing` 之外的三家）。 */
-function isKeyedBackendId(id: SearchBackendId): id is KeyedBackendId {
-  return id !== "bing";
-}
-
 /**
  * #826 T3: 把注入的三个 key 收成一张表。空白串按缺失处理 —— T1 env loader
  * 已把「空串 / 占位符解析失败」折成 undefined，这里再兜一次（直调 handler
@@ -341,21 +341,18 @@ function collectApiKeys(deps?: WebSearchToolDeps): KeyedApiKeys {
  * message 只出 backend id 与 env var **名**，绝不出 key 值。
  */
 function assertBackendConfig(
-  backendId: SearchBackendId,
   backendUnset: boolean,
-  apiKeys: KeyedApiKeys
+  apiKeys: KeyedApiKeys,
+  capability: WebCapability
 ): void {
-  if (isKeyedBackendId(backendId)) {
-    if (apiKeys[backendId] === undefined) {
-      // EXIT: keyed backend selected without a usable key — fail closed.
-      throw toToolExecutionError(
-        createSearchBackendError({
-          kind: "missing_key",
-          message: `backend "${backendId}" is selected but no API key resolved — set ${KEYED_BACKEND_ENV_KEYS[backendId]} (env / .env.local / .env), or unset ${SEARCH_BACKEND_ENV_KEY} to fall back to the default bing backend`,
-        })
-      );
-    }
-    return;
+  if (capability.searchEngine === "exa" && apiKeys.exa === undefined) {
+    // EXIT: Exa search selected but key vanished after capability resolve.
+    throw toToolExecutionError(
+      createSearchBackendError({
+        kind: "missing_key",
+        message: `backend "exa" is selected but no API key resolved — set ${EXA_API_KEY_ENV_KEY} (env / .env.local / .env), or unset ${SEARCH_BACKEND_ENV_KEY} to fall back to the default bing backend`,
+      })
+    );
   }
   if (!backendUnset) return;
   for (const id of Object.keys(KEYED_BACKEND_ENV_KEYS) as KeyedBackendId[]) {

@@ -40,6 +40,7 @@
 
 ### 工具与扩展源
 
+- `aci-web-backend.md` — **ACI network surface** 冻结 + **ACI web backend**（一个后端名、缺则回落；本轮厂商只接 Exa + 真出网实测；plan: `plans/aci-web-backend.md`）
 - `224-tool-extension-path.md` — 工具扩展路径（lazy / discover / visibleSchemas + tool_search）
 - `251-lsp-tool.md` — LSP 工具（自建客户端 + TS 首期）
 - `302-lsp-multilang.md` — LSP 多语言泛化

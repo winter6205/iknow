@@ -34,7 +34,10 @@ IKNOW_LLM_STREAM=on            # 流式臂开关 on|off，默认 on
 # Web 工具出站代理（可选，trust_env=false 语义：显式配置才生效）
 # 设 IKNOW_WEB_PROXY 后 web_fetch / web_search 走代理（HTTP 代理地址）
 
-# web_search 后端选择（可选；settings.web.searchBackend 已承载，env 仅作覆盖）
+# ACI web backend：发现（web_search）与阅读（web_fetch）共用一个名字
+# （可选；settings.web.searchBackend 已承载，env 仅作覆盖）
+# 本轮厂商只接 Exa。缺搜/缺抓回落默认（Bing HTML / 本机 network-guard）。
+# 通话仍是 bash + network:true（host-net amplify），不升第 9 件工具。
 # IKNOW_WEB_SEARCH_BACKEND=exa
 ```
 
@@ -68,17 +71,17 @@ IKNOW_LLM_STREAM=on            # 流式臂开关 on|off，默认 on
 
 `settings.json` 实际只承载 **`llm` 层与 `web` 层**，且只接受下表中的字段（`parseLlm` / `parseWeb` 逐字段校验，非法值丢弃不抛错）。字段来自 `src/config/settings.ts` 的 `IknowSettingsLlm` / `IknowSettingsWeb`（SSOT，勿以本表为准而以代码为准）。
 
-| 字段路径                       | 类型                                              | 默认（未配）        | 说明                                                                                   |
-| ------------------------------ | ------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------- |
-| `llm.model`                    | string（trim 非空）                               | **fail-fast 抛错**  | 模型路由 ID 字面值，唯一来源，**必填**。                                               |
-| `llm.apiKey`                   | string（字面或 `${VAR}` / `$VAR`）                | `undefined`         | key 来源；消费点守卫抛「LLM mode needs API key.」。                                    |
-| `llm.fallback`                 | string[]（非空）                                  | `[]`                | fallback 路由 ID 列表，用户自配。                                                      |
-| `llm.thinking`                 | `"off" \| "adaptive"`                             | `"off"`             | 缺省思考开关；`IKNOW_LLM_THINKING` env 显式设置时覆盖它（env > settings > 默认）。     |
-| `llm.thinkingEffort`           | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | `""`（不发）        | 缺省 effort；`IKNOW_LLM_THINKING_EFFORT` env 显式设置时覆盖它。                        |
-| `llm.maxTurns`                 | number（≥1 整数）                                 | `undefined`（无限） | 单次会话最大循环轮数；`IKNOW_LLM_MAX_TURNS` env 覆盖。                                 |
-| `llm.compress.contextWindow`   | number（>0 有限）                                 | `200000`            | 模型上下文窗口；`IKNOW_MODEL_CONTEXT_WINDOW` env 覆盖。                                |
-| `llm.compress.thresholdTokens` | number（>0 有限）                                 | `undefined`（推导） | proactive auto-compact 阈值；`IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` env 覆盖。          |
-| `web.searchBackend`            | `"bing" \| "exa" \| "tavily" \| "brave"`          | `"bing"`            | web_search 后端选择；`IKNOW_WEB_SEARCH_BACKEND` env 覆盖。keyed 后端另需对应 API key。 |
+| 字段路径                       | 类型                                              | 默认（未配）        | 说明                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------------------ | ------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `llm.model`                    | string（trim 非空）                               | **fail-fast 抛错**  | 模型路由 ID 字面值，唯一来源，**必填**。                                                                                                                                                                                                                                                                                                                     |
+| `llm.apiKey`                   | string（字面或 `${VAR}` / `$VAR`）                | `undefined`         | key 来源；消费点守卫抛「LLM mode needs API key.」。                                                                                                                                                                                                                                                                                                          |
+| `llm.fallback`                 | string[]（非空）                                  | `[]`                | fallback 路由 ID 列表，用户自配。                                                                                                                                                                                                                                                                                                                            |
+| `llm.thinking`                 | `"off" \| "adaptive"`                             | `"off"`             | 缺省思考开关；`IKNOW_LLM_THINKING` env 显式设置时覆盖它（env > settings > 默认）。                                                                                                                                                                                                                                                                           |
+| `llm.thinkingEffort`           | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | `""`（不发）        | 缺省 effort；`IKNOW_LLM_THINKING_EFFORT` env 显式设置时覆盖它。                                                                                                                                                                                                                                                                                              |
+| `llm.maxTurns`                 | number（≥1 整数）                                 | `undefined`（无限） | 单次会话最大循环轮数；`IKNOW_LLM_MAX_TURNS` env 覆盖。                                                                                                                                                                                                                                                                                                       |
+| `llm.compress.contextWindow`   | number（>0 有限）                                 | `200000`            | 模型上下文窗口；`IKNOW_MODEL_CONTEXT_WINDOW` env 覆盖。                                                                                                                                                                                                                                                                                                      |
+| `llm.compress.thresholdTokens` | number（>0 有限）                                 | `undefined`（推导） | proactive auto-compact 阈值；`IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` env 覆盖。                                                                                                                                                                                                                                                                                |
+| `web.searchBackend`            | `"bing" \| "exa" \| "tavily" \| "brave"`          | `"bing"`            | **ACI web backend** 一个名字同时驱动发现与阅读；`IKNOW_WEB_SEARCH_BACKEND` env 覆盖。本轮只适配 Exa（`EXA_API_KEY` → search + contents）。`tavily` / `brave` / 无 key 的 `exa` 缺的那一头回落：搜走现行默认检索，抓走本机 `web_fetch` + `network-guard`。非法 id 装配期 typed fail-loud，不静默改名。通话仍是 `bash` + `network: true`（host-net amplify）。 |
 
 **带默认值的字段都是可选**：不写 `thinking` / `thinkingEffort` 时，thinking 默认 `off`、effort 默认不发 —— 这不是「没读到」，而是「你用了默认」。
 
@@ -87,7 +90,7 @@ IKNOW_LLM_STREAM=on            # 流式臂开关 on|off，默认 on
 - `baseUrl`（`IKNOW_LLM_BASE_URL`）、`maxOutputTokens`（`IKNOW_LLM_MAX_OUTPUT_TOKENS`）、`timeoutMs`（`IKNOW_LLM_TIMEOUT_MS`）、`temperature`（`IKNOW_LLM_TEMPERATURE`）、`stream`（`IKNOW_LLM_STREAM`）
 - `chat.showThinking`（`IKNOW_CHAT_SHOW_THINKING`）、`web.searchUrl` / `web.proxy`（`IKNOW_WEB_SEARCH_URL` / `IKNOW_WEB_PROXY`）、`mcp.connectTimeoutMs`（`IKNOW_MCP_CONNECT_TIMEOUT_MS`）
 
-**例外**：`web.searchBackend`（web_search 后端选择）**已在 settings.json 承载**——`"bing" | "tavily" | "exa" | "brave"` 闭集，回退链 `IKNOW_WEB_SEARCH_BACKEND` env > `web.searchBackend` settings > 默认 `"bing"`。env 侧非法值抛 typed error；settings 侧非法值由 `src/config/settings.ts` 的 `parseWeb` 丢弃该字段（drop-not-throw，回落默认）。keyed 后端（exa / tavily / brave）还需对应 API key（`EXA_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY`，env / .env.local 承载）。装配期字段：改完需重启进程生效（不在热更新白名单，见下文「热更新」）。
+**例外**：`web.searchBackend`（**ACI web backend** 一个名字）**已在 settings.json 承载**——`"bing" | "tavily" | "exa" | "brave"` 闭集，回退链 `IKNOW_WEB_SEARCH_BACKEND` env > `web.searchBackend` settings > 默认 `"bing"`。env 侧非法值抛 typed error；settings 侧非法值由 `src/config/settings.ts` 的 `parseWeb` 丢弃该字段（drop-not-throw，回落默认）。本轮厂商只接 Exa（`EXA_API_KEY`）；缺搜/缺抓回落默认，不把 stub 报成已接通。通话仍是 amplify（`bash` + `network: true`），不另开 curl 工具。装配期字段：改完需重启进程生效（不在热更新白名单，见下文「热更新」）。
 
 #### 完整示例（含思考默认档）
 
@@ -173,6 +176,8 @@ IKNOW_LLM_STREAM=on
 ```bash
 # 配置后确认 iknow 能加载（settings 生效 + 真模型可达）
 npm run probe:settings-model     # i135 A/B/C/D 四组，12/12 通过 = 配置正确
+# ACI web backend：真打 api.exa.ai（search + contents）。缺 EXA_API_KEY → Not run / exit 0
+npm run probe:aci-web-backend
 # 真远程 e2e（指向 IKNOW_LLM_BASE_URL + settings.llm.model 真实调用）
 npm run test:real-llm
 ```

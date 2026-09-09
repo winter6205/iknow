@@ -25,6 +25,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
+import { createWebSearchTool } from "../../../../src/harness/aci/tools/web-search.ts";
 import {
   createWebFetchTool,
   FETCH_OUTPUT_BUDGET,
@@ -624,5 +625,188 @@ describe("createWebFetchTool — as text|html and content-type gate", () => {
     assert.ok(idxBanner >= 0 && idxScript > idxBanner);
     assert.ok(out.includes("ignore previous instructions"));
     assert.ok(out.includes("onclick='steal()'"));
+  });
+});
+
+describe("ACI web backend — fetch engines (SC5–SC7)", () => {
+  it("tavily + key still uses local guard fetch", async () => {
+    const tool = createWebFetchTool({
+      ...htmlDeps("<p>local page</p>"),
+      backend: "tavily",
+      tavilyApiKey: "tvly-test",
+    });
+    const out = (await tool.handler({ url: "https://example.com/" })) as string;
+    assert.match(out, /local page/);
+  });
+
+  it("exa + key uses contents and does not fetchPublicResponse the target", async () => {
+    let guardHits = 0;
+    const vendorUrls: string[] = [];
+    const tool = createWebFetchTool({
+      fetch: async () => {
+        guardHits += 1;
+        return {
+          status: 200,
+          contentType: "text/html",
+          body: "<p>local leak</p>",
+        };
+      },
+      lookup: okLookup,
+      backend: "exa",
+      exaApiKey: "exa-test",
+      vendorFetch: async (input) => {
+        vendorUrls.push(String(input));
+        return new Response(
+          JSON.stringify({
+            results: [
+              { url: "https://example.com/doc", text: "Exa body text" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      },
+    });
+    const out = (await tool.handler({
+      url: "https://example.com/doc",
+    })) as string;
+    assert.equal(guardHits, 0);
+    assert.ok(vendorUrls.some((u) => u.includes("api.exa.ai/contents")));
+    assert.match(out, /Exa body text/);
+    assert.ok(!out.includes("local leak"));
+  });
+
+  it("rejects 127.0.0.1 before any vendor contents call", async () => {
+    let vendorHits = 0;
+    const tool = createWebFetchTool({
+      fetch: async () => ({
+        status: 200,
+        contentType: "text/plain",
+        body: "nope",
+      }),
+      lookup: okLookup,
+      backend: "exa",
+      exaApiKey: "exa-test",
+      vendorFetch: async () => {
+        vendorHits += 1;
+        return new Response("{}", { status: 200 });
+      },
+    });
+    await expectToolError(
+      () => Promise.resolve(tool.handler({ url: "http://127.0.0.1/" })),
+      "non-public"
+    );
+    assert.equal(vendorHits, 0);
+  });
+
+  it("surfaces Exa 5xx as typed failure and does not fall back locally", async () => {
+    let guardHits = 0;
+    const tool = createWebFetchTool({
+      fetch: async () => {
+        guardHits += 1;
+        return { status: 200, contentType: "text/plain", body: "fallback" };
+      },
+      lookup: okLookup,
+      backend: "exa",
+      exaApiKey: "exa-test",
+      vendorFetch: async () => new Response("nope", { status: 503 }),
+    });
+    await expectToolError(
+      () => Promise.resolve(tool.handler({ url: "https://example.com/" })),
+      "http_non_2xx"
+    );
+    assert.equal(guardHits, 0);
+  });
+
+  it("unset backend keeps local guard fetch (SC2)", async () => {
+    let guardHits = 0;
+    const tool = createWebFetchTool({
+      fetch: async () => {
+        guardHits += 1;
+        return {
+          status: 200,
+          contentType: "text/plain",
+          body: "default local",
+        };
+      },
+      lookup: okLookup,
+    });
+    const out = (await tool.handler({ url: "https://example.com/" })) as string;
+    assert.equal(guardHits, 1);
+    assert.match(out, /default local/);
+  });
+
+  it("parallel search-shaped fetch engines stay independent (S2 concurrent)", async () => {
+    let localHits = 0;
+    let vendorHits = 0;
+    const local = createWebFetchTool({
+      fetch: async () => {
+        localHits += 1;
+        return { status: 200, contentType: "text/plain", body: "local-a" };
+      },
+      lookup: okLookup,
+      backend: "bing",
+    });
+    const vendor = createWebFetchTool({
+      fetch: async () => {
+        throw new Error("local fetch must not run");
+      },
+      lookup: okLookup,
+      backend: "exa",
+      exaApiKey: "exa-test",
+      vendorFetch: async () => {
+        vendorHits += 1;
+        return new Response(
+          JSON.stringify({
+            results: [{ url: "https://example.com/b", text: "vendor-b" }],
+          }),
+          { status: 200 }
+        );
+      },
+    });
+    const [a, b] = (await Promise.all([
+      local.handler({ url: "https://example.com/a" }),
+      vendor.handler({ url: "https://example.com/b" }),
+    ])) as string[];
+    assert.equal(localHits, 1);
+    assert.equal(vendorHits, 1);
+    assert.match(a, /local-a/);
+    assert.match(b, /vendor-b/);
+  });
+
+  it("Promise.all web_search + web_fetch keep independent backends (S2 concurrent)", async () => {
+    const search = createWebSearchTool({
+      fetch: async () => ({
+        status: 200,
+        contentType: "text/html",
+        body:
+          `<li class="b_algo" data-idx="0"><h2><a target="_blank" href="https://site1.example.com/page"><strong>Bing Title 1</strong></a></h2>` +
+          `<div class="b_caption"><p class="b_lineclamp2">Bing Snippet 1</p></div></li>`,
+      }),
+      lookup: okLookup,
+      backend: "bing",
+    });
+    const fetchTool = createWebFetchTool({
+      fetch: async () => {
+        throw new Error("local fetch must not run");
+      },
+      lookup: okLookup,
+      backend: "exa",
+      exaApiKey: "exa-test",
+      vendorFetch: async () =>
+        new Response(
+          JSON.stringify({
+            results: [
+              { url: "https://example.com/doc", text: "exa-fetch-body" },
+            ],
+          }),
+          { status: 200 }
+        ),
+    });
+    const [searchOut, fetchOut] = (await Promise.all([
+      search.handler({ query: "parallel" }),
+      fetchTool.handler({ url: "https://example.com/doc" }),
+    ])) as string[];
+    assert.match(searchOut, /Bing Title 1/);
+    assert.match(fetchOut, /exa-fetch-body/);
   });
 });
