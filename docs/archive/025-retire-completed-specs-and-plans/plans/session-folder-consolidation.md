@@ -28,13 +28,13 @@ minimal-change-verifier: yes — 一 bullet 一 commit,七个 commit 各自可�
    - **Inherits:** ADR-0071 Decision 1/2/7;spec SC1–SC4、输入五类表 A;CONTEXT「会话文件夹」词条;`projectIdentityRoot`「跨 session worktree rebind 不变」
    - **Surface:** `src/session-api/store`(既有 `resolveProjectSessionDir` 缝)+ `src/session-api`(SessionStore 消费面)
    - **Acceptance:** 同一 `projectIdentityRoot` + 两个不同 cwd(主仓 / 其 task worktree)解析到**同一路径**(SC1);叶子是 conversationId 原文、不含 label / title(SC2);slug 形式仍是 `<basename>-<sha1[:12]>`(SC3);解析是纯函数、缺根/空白/相对/不可规范化 typed fail-closed 且**绝不**回退 `process.cwd()`(SC4 + 表 A empty/negative/overflow/exception);两进程同建一个会话文件夹不产生半建态(表 A concurrent);新建会话后 TUI 列表能看见、`--resume` 能续跑(端到端可演示)
-   - Status: [ ] pending
+   - Status: [x] done (2026-09-09) — PR #963 T1
 
 2. **todos 进会话文件夹,`<surface>` 层退役** — tag: `[implementation]`
    - **Inherits:** ADR-0071 Decision 2;spec SC5、SC20;Assumption 1(不兼容旧 ledger);既有两段式缝(装配期注入根 + 调用期按 `ctx.conversationId` 拼);**ADR-0046** —— replace 模式把旧账本重命名成**同目录快照** `todos.<unixMs>.<hex>.md`(`todo-write.ts:347-358`,用 `dirname(filePath)`),故快照随归并自动进会话文件夹,**快照逻辑不需改**;ADR-0046 原文「旧文件留在**同一会话目录**当快照」与工具描述「`<session>/todos.md`」(`:119`)此前只是愿望(实际是 `<surface>` 共享根),归并后成为事实
    - **Surface:** `src/harness/aci/tools/todo-write` + 三个注入点(`cli.ts` / `tui/deps.ts` / `session-api/hub.ts`)
    - **Acceptance:** `todo_write` 落 `<会话文件夹>/todos.md`,状态栏投影读同一份(SC5);`resolveSessionTodoDir` 在 `src/` grep 为空、任何路径不出现 `todos/chat|serve|tui`(SC5);**同一会话从 TUI 与从 serve 各跑一次,todo 落同一文件**(这是 `<surface>` 分裂的可观察消除);**replace 后旧账本成为 `<会话文件夹>/todos.<unixMs>.<hex>.md`,与 `todos.md` 同目录**(ADR-0046 快照不丢、不散落到别处);SC20 四条注释断言全过 —— 含 `todo-write.ts:432` 那条裸引用 `chat-session.ts:963` 修正为真实位置 `src/cli/chat-session.ts:2062`(实测漂移约 1100 行)
-   - Status: [ ] pending
+   - Status: [x] done (2026-09-09) — PR #964 T2
    - [blocks: T1]
    - [parallel]
 
@@ -42,7 +42,7 @@ minimal-change-verifier: yes — 一 bullet 一 commit,七个 commit 各自可�
    - **Inherits:** ADR-0071 Decision 1;ADR-0035 同日 Amendment(stderr 指针跟随、per-agent 面由 T5 承接);spec SC6、SC7
    - **Surface:** `src/harness/trace` 写侧装配 + `src/cli.ts`(`DEFAULT_TRACE_DIR` 退役)+ trace 注入点
    - **Acceptance:** `DEFAULT_TRACE_DIR = "./trace/"` 退役(SC6);从仓库根与从其 task worktree 各启动同一会话 → trace 落**同一文件**(SC6 的可观察判据);仓库根不再新增 `trace/`;`blobs/` 与 `stderr/` 是 `trace.jsonl` 的兄弟目录;`traceDir` 由 `dirname(traceFilePath)` 派生,`project-tool-results.ts:161` 的 `options.traceDir!` 非空断言**消失**(SC7)
-   - Status: [ ] pending
+   - Status: [x] done (2026-09-09) — PR #964 T3
    - [blocks: T1]
    - [parallel]
 
@@ -50,14 +50,14 @@ minimal-change-verifier: yes — 一 bullet 一 commit,七个 commit 各自可�
    - **Inherits:** ADR-0036 同日 Amendment 三项;ADR-0071 Decision 3/4/5;ADR-0003 D13/D14 **继承不 amend**;spec SC9–SC13、输入五类表 B + 表 C
    - **Surface:** `src/harness/trace`(写侧 `toBlobReferences` 与模式解析)+ `tests/harness/trace`
    - **Acceptance:** `IKNOW_TRACE_MESSAGES` / `MessageStorageMode` / `resolveMessageStorageMode` 在 `src/` grep 为空(SC9);`messages[i]` 仍是 `{role, content}` 两键、`content` 为 `{sha,bytes}`,`messageRole()` **源码零改动**且返回正确 role(SC10);`blobs/` 不可写时五条可观察断言全过 —— 该 `llm_call_id` 零行、无任何内联全量行、`recordLlmCall` 返回 `undefined` 而不 throw、同轮后续 `tool_call` 仍在场且 `parent_llm_call_id` 为 `null`、loop 不中断(SC11,替换而非删除 `jsonl.test.ts:856`);同一 message 出现在 N 个 `llm_call` → `blobs/` 下恰好 1 个文件(SC12);mask / `bytes` / `sha` 三条完整性断言保持(SC13);表 B 五类 + 表 C 三种形状(数组 / 字符串 / 混合)各有用例
-   - Status: [ ] pending
+   - Status: [x] done (2026-09-09) — PR #965 T4
    - [blocks: T3]
 
 5. **子代理记录嵌套进 `subagents/`** — tag: `[implementation]`
    - **Inherits:** ADR-0071 Decision 1;ADR-0035 同日 Amendment(`createTrace("subagent")` 全机聚合退役);spec SC8、L2
    - **Surface:** `src/harness/subagent` + trace 装配(`hub.ts` / `cli.ts` / `tui/deps.ts` 的 `subagentTrace` 注入)
    - **Acceptance:** 派一个子代理跑完 → `<父会话文件夹>/subagents/agent-<id>.jsonl` + `.meta.json` 落盘,meta 至少含 `{agentType, toolUseId, spawnDepth}`(SC8);归并后 `~/.iknow/projects/**/` 顶层**不存在** `agent-*` 目录(SC8);`<id>` 取子代理自身 spawn id 而**不是** conversationId —— 因为 worker 的 `conversationId` 是硬编码字面量 `"subagent"`(L2,`cli.ts:295` / `tui/deps.ts:262`),断言需显式覆盖「两个并发子代理落到两个不同文件」;`createTrace("subagent")` 那种单文件聚合形态在 `src/` grep 为空
-   - Status: [ ] pending
+   - Status: [x] done (2026-09-09) — PR #965 T5
    - [blocks: T3]
    - [parallel]
 
@@ -65,14 +65,14 @@ minimal-change-verifier: yes — 一 bullet 一 commit,七个 commit 各自可�
    - **Inherits:** ADR-0071 Decision 3/6;spec SC14–SC17;ADR-0003 同日 Amendment(greppability 收窄只及 messages 正文)
    - **Surface:** `src/traceserver`(`list-sessions-core` / `query-trace-core` / `get-record-core` / `project-tool-results`)
    - **Acceptance:** `query_trace` 的 `first/last_message_preview` 是**正文**且不含 `"sha"` 字面量、有 assistant 消息时 `last_assistant_preview` **必须在场**(SC14,这条修的正是与合法空态不可区分的静默失效);`messages_count` / `tool_result_count` / `tool_result_previews` 与 full 模式历史基线**逐字段相等**(SC15);`list_sessions` 走两级树、返回的 id 集合与磁盘会话文件夹名集合相等、`agent_version` 取得到、`mtime`/`size` 语义择一并在测试钉死(SC16);`get_record` 两臂的 part 坐标 / `part_chars` / role 标注与基线一致(SC17);读侧「blob 缺失不抛进 turn」的既有 EXIT 保持;**`subagents/` 下的文件不得被 `list_sessions` 当成会话**(与 T5 的交互判据)
-   - Status: [ ] pending
+   - Status: [x] done (2026-09-09) — PR #966 T6
    - [blocks: T4, T5]
 
 7. **`dist/trace-mcp` 重建 + 实跑验收 + 旧存量归档** — tag: `[implementation]`
    - **Inherits:** spec SC18、SC19、L3;ADR-0071 Decision 7;Assumption 13(归档不进仓库 `archive/`,实测它未被 gitignore)
    - **Surface:** 构建产物 `dist/trace-mcp` + 盘上存量(`~/projects/iknow/trace/` → `~/.iknow/archive/trace-legacy/`)+ CHANGELOG / handoff
    - **Acceptance:** 重建后**实跑**三个工具(`list_sessions` → `query_trace` → `get_record`)对同一真实会话返回互相一致的内容且 preview 为正文 —— 仅单测全绿不算完成,因为 `scripts/iknow-trace-mcp.cjs:6-12` spawn 的是构建产物(SC18);仓库根**不存在** `trace/`、归档目录文件数 == 82、`archive/` 下零新增、`git status` 干净(SC19);CHANGELOG 与 handoff 显式写出 L3(旧会话 `--resume` 全失效、TUI 列表清空)
-   - Status: [ ] pending
+   - Status: [x] done (2026-09-09) — PR #966 T7
    - [blocks: T6]
 
 8. **`list_sessions` 扫描成本实测与索引决策** — tag: `[decision]`

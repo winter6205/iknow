@@ -1,17 +1,17 @@
-# Session Handoff — 会话文件夹归并 T1–T7 全落地（T8 实测性能判定待续）(2026-09-09)
+# Session Handoff — 会话文件夹归并 T1–T8 全落地 (2026-09-09)
 
 ## 当前 live 状态
 
 - **任务**: 会话存储从「`~/.iknow/sessions/<slug>/<id>.jsonl` + 仓库根 `trace/` + 根级 todos」归并为单一两级树 `~/.iknow/projects/<slug>/<conversationId>/`（叶子 = 会话文件夹，`todos.md` / `trace.jsonl` / `blobs/` / `subagents/` / `stderr/` 全部锚进叶子），读侧三工具走两级树，blob content 级粒度，旧存量归档。
 - **为什么重要**: 之前 trace 锚点在仓库根 `./trace/`（cwd 相对派生，跨 worktree 同会话漂移）、todos 散在 `<surface>` 层、blob 是整条 message 替换（role 丢失 → `last_assistant_preview` 静默消失）。归并后同 `(projectIdentityRoot, conversationId)` 派生出稳定唯一路径，跨 cwd 启动同一会话文件路径一致（SC6 核心不变式）。
-- **spec / plan**: `specs/session-folder-consolidation.md`、`plans/session-folder-consolidation.md`（T1–T7 done，T8 待续）。
+- **spec / plan**: 已归档 `docs/archive/025-retire-completed-specs-and-plans/{specs,plans}/session-folder-consolidation.md`（T1–T8 done）。
 
 ## 已固化工件（引用，不复制 inline）
 
 | 类型       | 路径                                                                                                                                                               |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 现役 spec  | `specs/session-folder-consolidation.md`（SC1–SC20）                                                                                                                |
-| 计划       | `plans/session-folder-consolidation.md`                                                                                                                            |
+| 归档 spec  | `docs/archive/025-retire-completed-specs-and-plans/specs/session-folder-consolidation.md`（SC1–SC20）                                                              |
+| 归档计划   | `docs/archive/025-retire-completed-specs-and-plans/plans/session-folder-consolidation.md`                                                                          |
 | 决策记录   | `docs/adr/0071-*.md`（session folder consolidation，7 个 Decision）                                                                                                |
 | 布局 SSOT  | `src/session-api/store/session-store.ts`（`resolveProjectSessionDir` / `resolveConversationDir` / `resolveConversationTraceFilePath` / `resolveSubagentTraceDir`） |
 | 读侧两级树 | `src/traceserver/session-discovery.ts`（`findConversationTraceFile` / `listConversations`，writer SSOT 不 import 的解耦声明在文件头）                              |
@@ -68,7 +68,6 @@
 
 ## 后续
 
-- **T8**（独立 bullet，未开工）: 实测扫描性能判定——plan `plans/session-folder-consolidation.md` §T8，扫描性能阈值与判定留给 T8。
-- **#950 依赖**: session-folder-consolidation 是 #950 的依赖项；归并落地后 #950 的 session 派生面收敛到 `resolveProjectSessionDir` 单点。
-- **spec「后续」清单**: `specs/session-folder-consolidation.md` 尾部。
-- **CONTEXT.md 词条**: read unit / session folder / 两级树等候选词等整轮收尾走 `domain-modeling`（同 trace-mcp 拆分轮惯例）。
+- **T8**: 已判定关闭 L1（中位 10.0ms，不引入索引）。见归档 plan §T8 Status。
+- **#950 依赖**: 归并落地后 #950 的 session 派生面收敛到 `resolveProjectSessionDir` 单点。
+- **spec「后续」清单**: 归档 spec 尾部（Phase 2 / tool-results 写入 / backgroundManager 等仍不在本 cutover）。

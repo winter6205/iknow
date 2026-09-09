@@ -34,6 +34,7 @@
 - `653-horizon-pkg1-perception.md` — 落地完成（PR #666）
 - `653-horizon-pkg2-kernel.md` — 落地完成（PR #671）；前台/后台 bash 沙箱纪律对齐 + `isConcurrencySafe` 并行调度
 - `251-lsp-tool.md` — superseded by `specs/symbol-primary-aci.md`（坐标模型面合同；客户端实现仍用）
+- `session-folder-consolidation.md` — 落地完成（PR #966；ADR-0071 L3；五锚点 → 会话文件夹 + blob 唯一 + 读侧两级树）
 
 ## plans/
 
@@ -61,6 +62,7 @@
 - `653-horizon-pkg2-kernel.md` — 落地完成（PR #671）
 - `trace-lifecycle-panel-v2.md` — 独立 `iknow trace` 进程（`#183`）+ web 面板取代
 - `trace-service.md` — trace 观测落地（JSONL + 查询 API，A-scope）
+- `session-folder-consolidation.md` — 落地完成（PR #966；ADR-0071 L3）
 
 ## docs-plans/
 
