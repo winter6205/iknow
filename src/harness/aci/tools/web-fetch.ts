@@ -19,8 +19,12 @@
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
+import { resolveWebCapability } from "../../../config/aci-web-backend.js";
+import type { SearchBackendId } from "../../../config/env.js";
 import { extractMainContent, htmlToText } from "./html-text.js";
+import { fetchExaContents, type ExaContentsFetch } from "./exa-contents.js";
 import {
+  assertPublicHttpTarget,
   createDefaultGuardDeps,
   fetchPublicResponse,
   type GuardDeps,
@@ -62,6 +66,12 @@ export interface WebFetchToolDeps {
   readonly fetch?: GuardFetchFn;
   readonly lookup?: GuardLookupFn;
   readonly proxyUrl?: string;
+  readonly backend?: SearchBackendId;
+  readonly exaApiKey?: string;
+  readonly tavilyApiKey?: string;
+  readonly braveApiKey?: string;
+  /** 测试 seam：替换厂商 contents 的 native fetch（默认 globalThis.fetch）。 */
+  readonly vendorFetch?: ExaContentsFetch;
 }
 
 interface FetchInput {
@@ -88,15 +98,18 @@ export function createWebFetchTool(deps?: WebFetchToolDeps): AciToolDef {
     ctx?: ToolExecutionContext
   ): Promise<string> => {
     const parsed = compileFetchInput(input);
+    await assertPublicHttpTarget(parsed.url, guardDeps.lookup, "web_fetch");
+    const capability = resolveWebCapability({
+      backend: deps?.backend,
+      exaApiKey: deps?.exaApiKey,
+      tavilyApiKey: deps?.tavilyApiKey,
+      braveApiKey: deps?.braveApiKey,
+    });
     const cachedResponse = responseCache.get(parsed.url);
     const cacheHit = cachedResponse !== undefined;
     const responsePromise =
       cachedResponse ??
-      fetchPublicResponse(parsed.url, guardDeps, {
-        tool: "web_fetch",
-        timeoutMs: FETCH_TIMEOUT_MS,
-        signal: ctx?.signal,
-      });
+      loadFetchResponse(parsed, capability.fetchEngine, guardDeps, deps, ctx);
     if (!cacheHit) {
       responseCache.set(parsed.url, responsePromise);
       responsePromise.catch(() => {
@@ -182,6 +195,31 @@ export function createWebFetchTool(deps?: WebFetchToolDeps): AciToolDef {
       // B6 / ADR-0043 §3:web 出口低频件,退场次序第五位(预置次序末位)。
       deferrable: true,
     },
+  });
+}
+
+function loadFetchResponse(
+  parsed: FetchInput,
+  fetchEngine: "local" | "exa",
+  guardDeps: GuardDeps,
+  deps: WebFetchToolDeps | undefined,
+  ctx: ToolExecutionContext | undefined
+): Promise<GuardPublicResponse> {
+  if (fetchEngine === "exa") {
+    const apiKey = deps?.exaApiKey?.trim() ?? "";
+    return fetchExaContents({
+      url: parsed.url,
+      apiKey,
+      as: parsed.as,
+      fetchFn: deps?.vendorFetch ?? globalThis.fetch,
+      signal: ctx?.signal,
+    });
+  }
+  // EXIT: no vendor fetch this round — local network-guard path.
+  return fetchPublicResponse(parsed.url, guardDeps, {
+    tool: "web_fetch",
+    timeoutMs: FETCH_TIMEOUT_MS,
+    signal: ctx?.signal,
   });
 }
 

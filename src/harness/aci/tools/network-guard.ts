@@ -371,6 +371,17 @@ async function runFetch(
   }
 }
 
+/**
+ * 选厂商引擎之前复用今日私网 / 语法 / 主机名防线（不发出站）。
+ */
+export async function assertPublicHttpTarget(
+  url: string,
+  lookup: GuardLookupFn,
+  tool: string
+): Promise<void> {
+  await ensurePublicTarget(url, lookup, failWithPrefix(tool));
+}
+
 /** 对单个目标 URL 跑 URL 语法 + IP/主机名 + DNS 四道防线。 */
 async function ensurePublicTarget(
   url: string,
