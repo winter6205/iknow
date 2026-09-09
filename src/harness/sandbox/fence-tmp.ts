@@ -1,5 +1,5 @@
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, type Dirent } from "node:fs";
+import { dirname, join } from "node:path";
 import { sanitizeConversationSegment } from "../session-roots.js";
 import { MAIN_SESSION_FENCE_TMP_DIR_NAME } from "../../shared/session-tree-names.js";
 
@@ -53,4 +53,89 @@ export function resolveSessionFenceTmp(input: {
     );
   }
   return undefined;
+}
+
+/** `<subagents>/<taskId>/` — new worker record + pad directory (ADR-0074). */
+export function workerTaskDir(subagentsDir: string, taskId: string): string {
+  return join(subagentsDir, taskId);
+}
+
+export function workerRecordPath(subagentsDir: string, taskId: string): string {
+  return join(workerTaskDir(subagentsDir, taskId), `agent-${taskId}.jsonl`);
+}
+
+export function workerMetaPath(subagentsDir: string, taskId: string): string {
+  return join(workerTaskDir(subagentsDir, taskId), `agent-${taskId}.meta.json`);
+}
+
+export function workerFenceTmpPath(
+  subagentsDir: string,
+  taskId: string
+): string {
+  return join(
+    workerTaskDir(subagentsDir, taskId),
+    MAIN_SESSION_FENCE_TMP_DIR_NAME
+  );
+}
+
+/** Pad sibling of a worker record file (`…/<taskId>/fence-tmp`). */
+export function workerFenceTmpBesideRecord(traceFilePath: string): string {
+  return join(dirname(traceFilePath), MAIN_SESSION_FENCE_TMP_DIR_NAME);
+}
+
+/** Create `subagents/<taskId>/` and its fence-tmp pad; return record + pad paths. */
+export function ensureWorkerSessionLayout(
+  subagentsDir: string,
+  taskId: string
+): {
+  readonly taskDir: string;
+  readonly recordPath: string;
+  readonly pad: string;
+} {
+  const taskDir = workerTaskDir(subagentsDir, taskId);
+  const pad = workerFenceTmpPath(subagentsDir, taskId);
+  mkdirSync(pad, { recursive: true });
+  return {
+    taskDir,
+    recordPath: workerRecordPath(subagentsDir, taskId),
+    pad,
+  };
+}
+
+/**
+ * SC8: new layout first, then leftover flat `subagents/agent-<taskId>.jsonl`.
+ */
+export function resolveExistingSubagentRecordPath(
+  subagentsDir: string,
+  taskId: string
+): string | undefined {
+  const nested = workerRecordPath(subagentsDir, taskId);
+  if (existsSync(nested)) return nested;
+  const flat = join(subagentsDir, `agent-${taskId}.jsonl`);
+  if (existsSync(flat)) return flat;
+  return undefined;
+}
+
+/**
+ * SC8 list: leftover flat `agent-*.jsonl` plus nested
+ * `subagents/<taskId>/agent-<taskId>.jsonl`. Does not migrate files.
+ */
+export function listSubagentRecordPaths(subagentsDir: string): string[] {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(subagentsDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const entry of entries) {
+    if (entry.isFile() && /^agent-.+\.jsonl$/.test(entry.name)) {
+      out.push(join(subagentsDir, entry.name));
+      continue;
+    }
+    if (!entry.isDirectory() || entry.name === "stderr") continue;
+    const nested = join(subagentsDir, entry.name, `agent-${entry.name}.jsonl`);
+    if (existsSync(nested)) out.push(nested);
+  }
+  return out;
 }

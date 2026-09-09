@@ -193,7 +193,7 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
       assert.doesNotMatch(stderrLog, new RegExp(secret));
       await new Promise((resolve) => setImmediate(resolve));
       const records = readFileSync(
-        join(subagentsDir, `agent-${taskId}.jsonl`),
+        join(subagentsDir, taskId, `agent-${taskId}.jsonl`),
         "utf8"
       )
         .trim()

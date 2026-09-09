@@ -290,6 +290,12 @@ export interface CreateDefaultAciRegistryOptions {
    *  todo_write 不入注册表（与 memoryDir 同形态：worker 装配路径不注入
    *  todoDir 即把所有权边界隔在主 loop 内,跨 executor 竞态由装配期排除）。 */
   readonly todoDir?: string;
+  /**
+   * T3: current-identity fence `/tmp` pad. Worker assembly points this at
+   * `subagents/<taskId>/fence-tmp`. Absent → bash/write keep the existing
+   * session/fallback resolve.
+   */
+  readonly tmpDir?: string;
   /** #502 T3:background 任务管理器。在场时透传给 bash 工厂 —— `background: true`
    *  分支可用（handler 经 manager.spawn 立即返 task_id）。缺席时 bash 的
    *  background:true → ToolExecutionError（fail-fast）。与 subagentManager /
@@ -536,6 +542,8 @@ export function createDefaultAciRegistry(
         // T1: todoDir is the session project dir; bash resolves
         // `<sessionFolder>/fence-tmp` per conversationId (ADR-0074).
         ...(opts.todoDir !== undefined ? { projectDir: opts.todoDir } : {}),
+        // T3: worker identity pad (nested under subagents/<taskId>/).
+        ...(opts.tmpDir !== undefined ? { tmpDir: opts.tmpDir } : {}),
       }),
     // T6 (plans/worktree-live-task-root.md §6 T6): read 路径工具工厂参数
     // 从冻结 sandboxRoot 扩为 `liveTaskRoot ?? sandboxRoot` (cell 缺席 / 未
@@ -578,10 +586,12 @@ export function createDefaultAciRegistry(
       createEditFileTool(opts.liveTaskRoot ?? sandboxRoot, {
         onEdit,
         ...(opts.todoDir !== undefined ? { projectDir: opts.todoDir } : {}),
+        ...(opts.tmpDir !== undefined ? { tmpDir: opts.tmpDir } : {}),
       }),
     write_file: () =>
       createWriteFileTool(opts.liveTaskRoot ?? sandboxRoot, {
         ...(opts.todoDir !== undefined ? { projectDir: opts.todoDir } : {}),
+        ...(opts.tmpDir !== undefined ? { tmpDir: opts.tmpDir } : {}),
       }),
     web_fetch: () =>
       createWebFetchTool({

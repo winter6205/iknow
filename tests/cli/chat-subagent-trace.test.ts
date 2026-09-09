@@ -198,14 +198,19 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
       subagentsRoot !== undefined,
       `missing subagents/ tree (stdout=${stdout}, stderr=${stderr}, requests=${requestCount})`
     );
-    const agentFiles = readdirSync(subagentsRoot!).filter(
-      (f) => f.startsWith("agent-") && f.endsWith(".jsonl")
-    );
+    const agentFiles = readdirSync(subagentsRoot!).flatMap((entry) => {
+      const nested = join(subagentsRoot!, entry, `agent-${entry}.jsonl`);
+      if (existsSync(nested)) return [nested];
+      const flat = join(subagentsRoot!, entry);
+      return entry.startsWith("agent-") && entry.endsWith(".jsonl")
+        ? [flat]
+        : [];
+    });
     assert.ok(
       agentFiles.length >= 1,
       `expected at least one agent-*.jsonl, got ${agentFiles.join(",")} in ${subagentsRoot}`
     );
-    const records = readFileSync(join(subagentsRoot!, agentFiles[0]!), "utf8")
+    const records = readFileSync(agentFiles[0]!, "utf8")
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as { record_type: string });

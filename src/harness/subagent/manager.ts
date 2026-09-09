@@ -35,6 +35,10 @@ import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
 import { writeSituation } from "../isolation/write-situation.js";
 import { sanitizeConversationSegment } from "../session-roots.js";
 import { SUBAGENT_TRACE_DIR_NAME } from "../../shared/session-tree-names.js";
+import {
+  ensureWorkerSessionLayout,
+  workerMetaPath,
+} from "../sandbox/fence-tmp.js";
 
 // re-export: manager 的调用方(T4/T5 工具、host-drain)统一从 manager 侧拿
 // SubAgentDefinition,不必各自 import role.js。
@@ -499,7 +503,7 @@ export function createSubAgentManager(opts: {
     if (cached !== undefined) return cached.trace;
     const subagentsDir = resolveSubagentsDirForDef(def);
     if (subagentsDir === undefined) return noopTrace;
-    const filePath = join(subagentsDir, `agent-${taskId}.jsonl`);
+    const filePath = ensureWorkerSessionLayout(subagentsDir, taskId).recordPath;
     mkdirSync(dirname(filePath), { recursive: true });
     const traceInstance = traceFactory(filePath, taskId);
     perAgentTraces.set(taskId, { trace: traceInstance, filePath });
@@ -546,7 +550,8 @@ export function createSubAgentManager(opts: {
   function writeMetaOnce(taskId: string, def: SubAgentDefinition): void {
     const subagentsDir = resolveSubagentsDirForDef(def);
     if (subagentsDir === undefined) return;
-    const metaPath = join(subagentsDir, `agent-${taskId}.meta.json`);
+    const metaPath = workerMetaPath(subagentsDir, taskId);
+    ensureWorkerSessionLayout(subagentsDir, taskId);
     if (existsSync(metaPath)) return;
     const meta: Record<string, unknown> = {};
     if (typeof def.role === "string" && def.role.length > 0) {
@@ -1233,10 +1238,10 @@ export function createSubAgentManager(opts: {
       ...(resolveSubagentsDirForDef(def) !== undefined
         ? {
             taskId,
-            traceFilePath: join(
+            traceFilePath: ensureWorkerSessionLayout(
               resolveSubagentsDirForDef(def) as string,
-              `agent-${taskId}.jsonl`
-            ),
+              taskId
+            ).recordPath,
           }
         : {}),
     };
