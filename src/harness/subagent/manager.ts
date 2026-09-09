@@ -33,6 +33,7 @@ import { createJsonlTraceService } from "../trace/jsonl.js";
 import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../config/settings.js";
 import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
 import { writeSituation } from "../isolation/write-situation.js";
+import { sanitizeConversationSegment } from "../session-roots.js";
 
 // re-export: manager 的调用方(T4/T5 工具、host-drain)统一从 manager 侧拿
 // SubAgentDefinition,不必各自 import role.js。
@@ -142,6 +143,10 @@ export class SubAgentWaitTimeoutError extends Error {
  * 立即抛 SubAgentCapacityError(显式失败,模型可降并发重试;不 queue 不静默)。
  */
 export const MAX_CONCURRENT_WORKERS = DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS;
+
+/** review-fix (M5):本模块内 SSOT —— 与 session-store 的同名常量同值但
+ *  不跨域 import(harness 不 import session-api)。 */
+const SUBAGENT_TRACE_DIR_NAME = "subagents";
 
 /**
  * #361 C1: spawn 并发超限 typed 拒绝。字段 `{ status:"failed", reason:"capacity",
@@ -429,6 +434,19 @@ export function createSubAgentManager(opts: {
    */
   readonly subagentsDir?: string;
   /**
+   * review-fix (M5):装配期根 —— `<baseDir>/projects/<slug>` 形式(serve hub
+   * 不在装配期持有 conversationId 时用此字段而非 `subagentsDir`)。
+   * spawn 期若 `def.conversationId` 在场 → 派生 per-conversation 子目录
+   * `<projectDir>/<sanitize(convId)>/subagents/`;若 convId 缺席 → 退回
+   * `<projectDir>/subagents/`(项目层平铺,兼容 legacy manager 直造场景)。
+   *
+   * 与 `subagentsDir` 互斥优先:`subagentsDir` 在场时按既有形态直接用;
+   * `subagentsDir` 缺席但 `projectDir` 在场 → 走本两段式缝派生。
+   * 与 `resolveConversationTodoPath` 同构(todo-write.ts SSOT),不要发明
+   * 新的形状。
+   */
+  readonly projectDir?: string;
+  /**
    * T5:可选 override — 用外部注入的 TraceService 工厂(每个 taskId 一份)
    * 取代默认 `createJsonlTraceService` 文件实例。仅供测试/特殊注入;
    * 生产路径走 file mode 默认。
@@ -456,9 +474,10 @@ export function createSubAgentManager(opts: {
     readonly filePath: string;
   };
   const perAgentTraces = new Map<string, PerAgentTrace>();
-  const noopTrace: TraceService | null = opts.subagentsDir
-    ? null
-    : (opts.trace ?? null);
+  /** review-fix (M5):subagentsDir / projectDir 任一在场 → 走 per-agent 形态
+   *  (null 触发 NoopTraceService);都缺 → 退回到 opts.trace 单实例兼容。 */
+  const noopTrace: TraceService | null =
+    opts.subagentsDir || opts.projectDir ? null : (opts.trace ?? null);
   /**
    * 工厂默认实现:file mode JsonlTraceService,锚
    * `<subagentsDir>/agent-<taskId>.jsonl`,conversationId 钉 taskId。
@@ -470,27 +489,67 @@ export function createSubAgentManager(opts: {
   ): TraceService =>
     createJsonlTraceService({ traceFilePath: filePath, conversationId });
   const traceFactory = opts.traceFactory ?? defaultTraceFactory;
-  /** 解析 task → per-agent trace(懒建 + 复用, 同一 task 不开第二份)。 */
-  function resolvePerAgentTrace(taskId: string): TraceService | null {
-    if (!opts.subagentsDir) return noopTrace;
+  /** 解析 task → per-agent trace(懒建 + 复用, 同一 task 不开第二份)。
+   * review-fix (M5):接受可选 `def` —— `def.conversationId` 在场时派生
+   * `<projectDir>/<sanitize(convId)>/subagents/`;否则退回装配期根
+   * (`opts.subagentsDir` 优先,否则 `<opts.projectDir>/subagents/`)。 */
+  function resolvePerAgentTrace(
+    taskId: string,
+    def?: SubAgentDefinition
+  ): TraceService | null {
+    if (!opts.subagentsDir && !opts.projectDir) return noopTrace;
     const cached = perAgentTraces.get(taskId);
     if (cached !== undefined) return cached.trace;
-    const filePath = join(opts.subagentsDir, `agent-${taskId}.jsonl`);
-    mkdirSync(opts.subagentsDir, { recursive: true });
+    const subagentsDir = resolveSubagentsDirForDef(def);
+    if (subagentsDir === undefined) return noopTrace;
+    const filePath = join(subagentsDir, `agent-${taskId}.jsonl`);
+    mkdirSync(dirname(filePath), { recursive: true });
     const traceInstance = traceFactory(filePath, taskId);
     perAgentTraces.set(taskId, { trace: traceInstance, filePath });
     return traceInstance;
+  }
+  /**
+   * review-fix (M5):两段式缝派生 —— 给定 def 派生「实际写入目录」。
+   *   1. `opts.subagentsDir` 在场 → 直接用(装配件已含 convId 段,cli/TUI
+   *      形态,byte-stable);
+   *   2. 否则 `opts.projectDir` + `def.conversationId` → 派生
+   *      `<projectDir>/<sanitize(convId)>/subagents/`(与 todo-write 的
+   *      `resolveConversationTodoPath` 同构);
+   *   3. `projectDir` 在场但 `def.conversationId` 缺席 → `<projectDir>/subagents/`
+   *      (项目层平铺,legacy manager 直造场景兜底)。
+   *
+   * 两种装配件 `subagentsDir` / `projectDir` 互斥共用 —— 同一 manager 不
+   * 同时收到两种装配件:build-engine 在装配件存在时优先透传 `subagentsDir`
+   * (cli/TUI);hub 全链路改走 `projectDir`。
+   */
+  function resolveSubagentsDirForDef(
+    def?: SubAgentDefinition
+  ): string | undefined {
+    if (opts.subagentsDir) return opts.subagentsDir;
+    if (!opts.projectDir) return undefined;
+    if (def?.conversationId !== undefined && def.conversationId.length > 0) {
+      const segment = sanitizeConversationSegment(def.conversationId);
+      return join(opts.projectDir, segment, SUBAGENT_TRACE_DIR_NAME);
+    }
+    return join(opts.projectDir, SUBAGENT_TRACE_DIR_NAME);
   }
   /**
    * SC8: per-task `.meta.json` 一次性写盘 —— 至少含
    * `{agentType, toolUseId, spawnDepth}`,Postel 缺席字段省略。
    * `agentType` 取 `def.role`(spawn_subagent → catalog id; judge → "judge";
    * 缺省 / 未知 / 旧 wire → 字段省略)。
+   *
+   * review-fix (M5):落点与 `resolvePerAgentTrace` 同源 —— 同一 def 派生
+   * 同一目录。装配件 subagentsDir / projectDir 互斥共用同一函数。
+   *
+   * review-fix (M6):`spawnDepth` 默认 1 —— 顶层 spawn 恒为 1(v1 禁嵌套);
+   * `def.spawnDepth` 显式值优先(seam 留给将来嵌套派发场景)。
    * 失败时 console.warn 一次(同 recordXxx warn-once 语义),不阻塞 spawn。
    */
   function writeMetaOnce(taskId: string, def: SubAgentDefinition): void {
-    if (!opts.subagentsDir) return;
-    const metaPath = join(opts.subagentsDir, `agent-${taskId}.meta.json`);
+    const subagentsDir = resolveSubagentsDirForDef(def);
+    if (subagentsDir === undefined) return;
+    const metaPath = join(subagentsDir, `agent-${taskId}.meta.json`);
     if (existsSync(metaPath)) return;
     const meta: Record<string, unknown> = {};
     if (typeof def.role === "string" && def.role.length > 0) {
@@ -499,14 +558,13 @@ export function createSubAgentManager(opts: {
     if (typeof def.toolUseId === "string" && def.toolUseId.length > 0) {
       meta.toolUseId = def.toolUseId;
     }
-    if (typeof def.spawnDepth === "number") {
-      meta.spawnDepth = def.spawnDepth;
-    }
+    // M6: v1 禁嵌套 → 普通 spawn 恒为 1;def.spawnDepth 显式值优先。
+    meta.spawnDepth = def.spawnDepth ?? 1;
     try {
       // SC8: 子目录可能在 lazy resolvePerAgentTrace 之前就写 meta(此处没
       // 经过 trace 路径);显式 mkdirSync 兜底 — resolvePerAgentTrace 内
       // 的 mkdirSync 是 trace 写盘的 idempotent 保护,不替 meta 兜底。
-      mkdirSync(opts.subagentsDir, { recursive: true });
+      mkdirSync(dirname(metaPath), { recursive: true });
       writeFileSync(metaPath, JSON.stringify(meta) + "\n");
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -554,7 +612,7 @@ export function createSubAgentManager(opts: {
     // state_change 没有等价 flag, 靠 prev === toState 判定)。
     if (fromState === toState) return;
     task.state = toState;
-    const taskTrace = resolvePerAgentTrace(task.id);
+    const taskTrace = resolvePerAgentTrace(task.id, task.def);
     if (!taskTrace) return;
     void safeTrace(() =>
       taskTrace.recordSubagentStateChange({
@@ -626,7 +684,7 @@ export function createSubAgentManager(opts: {
       0,
       Date.parse(endedAt) - Date.parse(task.startedAt)
     );
-    const taskTrace = resolvePerAgentTrace(task.id);
+    const taskTrace = resolvePerAgentTrace(task.id, task.def);
     if (!taskTrace) return;
     void safeTrace(() =>
       taskTrace.recordSubagentStop({
@@ -684,9 +742,12 @@ export function createSubAgentManager(opts: {
     });
     // T5 (plans/session-folder-consolidation.md / ADR-0035 同日 Amendment):
     // stderr / subagentDiagnosticsDir 跟随 `<父会话文件夹>/subagents/` —
-    // 显式 diagnosticsDir 缺省 → 退化到 subagentsDir。subagentsDir 也缺
-    // → 不写 stderr pointer (与既有行为 byte-stable)。
-    const effectiveDiagnosticsDir = opts.diagnosticsDir ?? opts.subagentsDir;
+    // 显式 diagnosticsDir 缺省 → 退化到 subagentsDir。
+    // review-fix (M5):退化链加 projectDir 两段式缝派生(同 def 落点) —
+    // hub 路径(def.conversationId 在场)下 stderr pointer 也落 per-conversation
+    // 叶子。三者都缺 → 不写 stderr pointer (与既有行为 byte-stable)。
+    const effectiveDiagnosticsDir =
+      opts.diagnosticsDir ?? resolveSubagentsDirForDef(task.def);
     const stderrDiagnostics =
       effectiveDiagnosticsDir !== undefined
         ? persistStderrDiagnostics({
@@ -768,7 +829,7 @@ export function createSubAgentManager(opts: {
       // 紧接 emitStateChange(failed) + emitStop (single-emit lifecycle)。
       // T5: trace per taskId (per-agent 形态);subagentsDir 缺席走
       // opts.trace 兼容形态。
-      const taskTrace = resolvePerAgentTrace(task.id);
+      const taskTrace = resolvePerAgentTrace(task.id, task.def);
       if (taskTrace) {
         void safeTrace(() =>
           taskTrace.recordSubagentSpawn({
@@ -809,7 +870,7 @@ export function createSubAgentManager(opts: {
     // #358 T4: subagent_spawn 在 child 成功 launch 后 emit (task.state 此时还是
     // "starting",下方 emitStateChange("running") 联动跑 starting→running 迁移)。
     // T5: trace per taskId (per-agent 形态);subagentsDir 缺席走 opts.trace 兼容。
-    const taskTrace = resolvePerAgentTrace(task.id);
+    const taskTrace = resolvePerAgentTrace(task.id, task.def);
     if (taskTrace) {
       const taskPreviewSource = truncateTaskPreview(def, 120);
       void safeTrace(() =>
@@ -1166,15 +1227,19 @@ export function createSubAgentManager(opts: {
       // 把 traceFilePath + taskId 经 envelope 透传给 worker —— worker 直接
       // file-mode 落该路径 + conversationId=taskId, 代替 L2 假 scope `randomUUID()`
       // (已退役,per-agent 形态优先)。
-      // opts.subagentsDir 缺省 → 不写这两个加性字段 → worker 退化到既有
-      // IKNOW_TRACE_OUT / defaultTraceDir 形态 (legacy envelope byte-stable)。
-      // conditional 渲染走的是 envelope 的 interface 类型(TS readonly),
-      // 不是 schema 校验;严格 ajv 校验由 envelope.ts WORKER_SCHEMA.properties
-      // 显式声明覆盖(同 `writeSituation` 形态)。
-      ...(opts.subagentsDir !== undefined
+      //
+      // review-fix (M5):落点与 `resolvePerAgentTrace` / `writeMetaOnce` 同源
+      // —— 同一 def 派生同一目录(cli/TUI 走 subagentsDir 既有形态;hub 走
+      // projectDir + def.conversationId 两段式缝)。任一在场即按派生结果发;
+      // 双缺 → 不写这两个加性字段 → worker 退化到既有 IKNOW_TRACE_OUT /
+      // defaultTraceDir 形态 (legacy envelope byte-stable)。
+      ...(resolveSubagentsDirForDef(def) !== undefined
         ? {
             taskId,
-            traceFilePath: join(opts.subagentsDir, `agent-${taskId}.jsonl`),
+            traceFilePath: join(
+              resolveSubagentsDirForDef(def) as string,
+              `agent-${taskId}.jsonl`
+            ),
           }
         : {}),
     };

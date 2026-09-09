@@ -109,7 +109,7 @@ import {
   errorMessage,
 } from "../harness/errors.js";
 import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { homedir } from "node:os";
 import type { AciCatalog } from "../harness/aci/types.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
@@ -123,7 +123,6 @@ import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
 import { resolveConversationTraceFilePath } from "./store/index.js";
-import { SUBAGENT_TRACE_DIR_NAME } from "./store/index.js";
 import {
   appendCheckpoint,
   CURRENT_SCHEMA_VERSION,
@@ -444,19 +443,16 @@ const OUTCOME_TO_STATUS: Record<VerifyLoopOutcome, GoalStatus | undefined> = {
  * 与 thinking/toolCalls/lastUsage 同 byte-stable 模式.
  */
 /**
- * T5 (plans/session-folder-consolidation.md / SC8 + L2): hub engine 跨
- * 会话共享（不重建 per-conversationId，见 cachedDeps 注释），把所有
- * conversationId 嵌入 subagentsDir 会强制每会话独立装配，违反缓存语义。
- *
- * 退路: hub 域内统一为 `<projectDir>/subagents/`，文件名 `agent-<taskId>.jsonl`
- * 由 manager.randomUUID() 锁定(taskId 全局 unique),跨会话写入不冲突。
- * cli / TUI 入口(单 engine per-conversationId)仍走 `resolveSubagentTraceDir`
- * 嵌入 conversationId —— 两路径并存,每个 taskId 文件名集合是
- * "两次 spawn 返回的 taskId 集合",spec SC8 操作员补丁接受。
+ * review-fix (M5):serve 路径子代理记录落点 —— hub engine 跨会话共享
+ * (不重建 per-conversationId,见 cachedDeps 注释),装配期拿不到单会话
+ * conversationId。改走两段式缝:装配期传 `projectDir`
+ * (`<baseDir>/projects/<slug>`),manager 在 spawn 期按 `def.conversationId`
+ * 派生 per-conversation 叶子 `<projectDir>/<convId>/subagents/`
+ * (与 todo-write 的 `resolveConversationTodoPath` 同构)。会话删除时
+ * `SessionStore.delete` 整删 `<convId>/` 文件夹,子代理记录同灭,
+ * 不在项目层留孤儿 —— 旧的项目层平铺形状(假注释「spec SC8 操作员补丁
+ * 接受」)已退役。
  */
-function resolveSubagentTraceDirShared(projectDir: string): string {
-  return join(projectDir, SUBAGENT_TRACE_DIR_NAME);
-}
 
 export function projectMessagesToTurns(
   messages: ReadonlyArray<AnthropicNativeMessage>,
@@ -2508,9 +2504,10 @@ export class SessionHub {
     // T5 (plans/session-folder-consolidation.md / SC8 + L2): 子代理聚合流
     // (`createTrace("subagent")` 字面 conversationId 假 scope, `<traceOut>/subagent.jsonl`)
     // 已退役 —— 子代理 lifecycle / content trace 由 manager 经
-    // `subagentsDir = <projectDir>/subagents/` 派生 per-agent
-    // `agent-<taskId>.jsonl`,见 buildProductionEngine / rebuildEngine 路径
-    // 的 subagentsDir 注入。本函数调用点不再传 conversationId="subagent"
+    // review-fix (M5) `projectDir` 两段式缝派生 per-agent
+    // `<projectDir>/<convId>/subagents/agent-<taskId>.jsonl`,见
+    // buildProductionEngine / rebuildEngine 路径的 projectDir 注入。
+    // 本函数调用点不再传 conversationId="subagent"
     // —— 残留调用(若有)会让 ajv 接受 `conversationId:"subagent"`,但
     // 写入路径已不存在,无副作用,仅 spec 一致性提示。
     const trace = createJsonlTraceService({
@@ -2944,15 +2941,15 @@ export class SessionHub {
       // (cli / serve / TUI) 共享同一对 `(baseDir, projectIdentityRoot)` →
       // 同一会话解析到同一 projectDir(`<surface>` 分裂消除)。
       todoDir: this.store.getProjectDir(),
-      // T5 (plans/session-folder-consolidation.md / SC8 + L2):
-      //   subagentsDir = `<projectDir>/subagents/`(不带 conversationId 段) ——
-      //   每个 taskId 全局唯一,文件名 `agent-<taskId>.jsonl` 不会跨会话冲突;
-      //   hub engine 跨会话共享(不重建 per-conversationId,见 cachedDeps 注释),
-      //   把 conversationId 嵌入 subagentsDir 会强制 per-conversationId 重建。
-      //   per-agent 文件名集合(<taskId>)天然唯一,所以 hub 的 subagentsDir
-      //   在 store 域内统一为 `<projectDir>/subagents/`。
-      //   `createTrace("subagent")` (conversationId 聚合单文件) 已退役。
-      subagentsDir: resolveSubagentTraceDirShared(this.store.getProjectDir()),
+      // review-fix (M5): 两段式缝 —— 装配期只传 projectDir
+      // (`<baseDir>/projects/<slug>`),manager spawn 期按 def.conversationId
+      // 派生 per-conversation 叶子 `<projectDir>/<convId>/subagents/`
+      // (与 todoDir 的 resolveConversationTodoPath 同构)。会话删除时
+      // SessionStore.delete 整删 `<convId>/` 文件夹,子代理记录同灭,
+      // 不在项目层留孤儿。旧的项目层平铺 `<projectDir>/subagents/`
+      // (`resolveSubagentTraceDirShared`)已退役。
+      // `createTrace("subagent")` (conversationId 聚合单文件) 已退役。
+      projectDir: this.store.getProjectDir(),
       ...(this.traceOut !== undefined
         ? { subagentDiagnosticsDir: this.traceOut }
         : {}),
@@ -3086,10 +3083,10 @@ export class SessionHub {
       // todos 落「会话文件夹」—— `todoDir` 取 store 投影的 projectDir,与
       // 上面 `buildProductionEngine` 路径同源(`<surface>` 分裂消除)。
       todoDir: this.store.getProjectDir(),
-      // T5 (plans/session-folder-consolidation.md / SC8 + L2):
-      //   同 buildProductionEngine 路径 —— subagentsDir 用 store 域共享根
-      //   `<projectDir>/subagents/`,文件名 taskId 天然唯一,跨会话不冲突。
-      subagentsDir: resolveSubagentTraceDirShared(this.store.getProjectDir()),
+      // review-fix (M5): 同 buildProductionEngine 路径 —— 两段式缝,装配期
+      // 传 projectDir,manager spawn 期按 def.conversationId 派生
+      // per-conversation 叶子(见 resolveSubagentTraceDirShared 退役注释)。
+      projectDir: this.store.getProjectDir(),
       ...(this.traceOut !== undefined
         ? { subagentDiagnosticsDir: this.traceOut }
         : {}),

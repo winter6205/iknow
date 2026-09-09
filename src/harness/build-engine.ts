@@ -237,6 +237,17 @@ export type BuildEngineOpts = {
    * 仅供尚未迁移的测试用,不再注入 manager。
    */
   readonly subagentsDir?: string;
+  /**
+   * review-fix (M5):装配期根缝 —— `<baseDir>/projects/<slug>` 形式(serve hub
+   * 装配期没有 conversationId,跨会话共享 engine 不重建)。透传给
+   * `createSubAgentManager({ projectDir })` —— manager 在 spawn 期按
+   * `def.conversationId` 两段式派生 per-conversation 叶子
+   * `<projectDir>/<sanitize(convId)>/subagents/`,与 todo-write 的
+   * `resolveConversationTodoPath` 同构。与 `subagentsDir` 互斥:两者都传时
+   * `subagentsDir` 优先(cli/TUI 形态 byte-stable);生产路径按入口二选一。
+   * 缺席且 `subagentsDir` 也缺席 → NoopTrace(同既有 byte-stable)。
+   */
+  readonly projectDir?: string;
   /** Crash diagnostics / worker trace root for subagent lifecycle evidence. */
   readonly subagentDiagnosticsDir?: string;
   /** TUI 工具摘要观测缝:透传给 createAciExecutor hooks.postToolUse(chat/serve 不传 → 零变化)。 */
@@ -721,8 +732,16 @@ export async function buildHarnessEngine(
           //   opts.subagentDiagnosticsDir 仍保留,用于 subagent stderr pointer
           //   —— T5 内部默认跟随 subagentsDir(manager 兜底),caller 不再
           //   强绑。
+          //
+          // review-fix (M5):opts.projectDir 缝透传 —— serve hub 装配期
+          // 无 conversationId,manager spawn 期按 def.conversationId 两段式
+          // 派生 per-conversation 叶子。与 subagentsDir 互斥共用(同传时
+          // manager 内 subagentsDir 优先,cli/TUI byte-stable)。
           ...(opts.subagentsDir !== undefined
             ? { subagentsDir: opts.subagentsDir }
+            : {}),
+          ...(opts.projectDir !== undefined
+            ? { projectDir: opts.projectDir }
             : {}),
           diagnosticsDir:
             opts.subagentDiagnosticsDir ??

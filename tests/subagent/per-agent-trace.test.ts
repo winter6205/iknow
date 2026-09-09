@@ -105,7 +105,10 @@ afterEach(() => {
 });
 
 function makeManager(opts: {
-  readonly subagentsDir: string | undefined;
+  readonly subagentsDir?: string | undefined;
+  /** review-fix (M5):hub 形态装配件 —— 仅传 projectDir,manager 内派生
+   *  per-conversation 叶子。与 subagentsDir 互斥共用。 */
+  readonly projectDir?: string | undefined;
   readonly sandboxRoot?: string;
 }): {
   readonly manager: SubAgentManager;
@@ -122,6 +125,7 @@ function makeManager(opts: {
     ...(opts.subagentsDir !== undefined
       ? { subagentsDir: opts.subagentsDir }
       : {}),
+    ...(opts.projectDir !== undefined ? { projectDir: opts.projectDir } : {}),
   });
   return { manager, spawned };
 }
@@ -205,7 +209,7 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
     assert.equal(meta.agentType, "explore");
   });
 
-  it("meta 含 toolUseId / spawnDepth 时落盘, 缺席时省略(Postel)", async () => {
+  it("meta 含 toolUseId 时落盘, 缺席时省略; spawnDepth 显式值落盘 (Postel + M6 显式优先)", async () => {
     const { manager, spawned } = makeManager({ subagentsDir });
     const withId = manager.spawn({
       task: "t1",
@@ -235,11 +239,8 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
       false,
       "toolUseId must be omitted"
     );
-    assert.equal(
-      "spawnDepth" in metaWithout,
-      false,
-      "spawnDepth must be omitted"
-    );
+    // review-fix (M6): spawnDepth 不再缺席 —— v1 禁嵌套,普通 spawn 恒为 1
+    // (见下方 M6 describe 的专用断言)。
   });
 
   it("stderr/ 子目录承载 per-task stderr pointer, 跟随 subagentsDir", async () => {
@@ -313,6 +314,131 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
     >;
     assert.equal(meta.toolUseId, "toolu_wire_id_abc");
     assert.equal(meta.agentType, "general-purpose");
+  });
+});
+
+describe("review-fix M5 — def.conversationId 派生 per-conversation 子目录 (两段式缝)", () => {
+  /**
+   * hub serve 路径装配期(单 engine 跨会话共享)只给装配期根 projectDir
+   * (`<baseDir>/projects/<slug>`);spawn 期 def.conversationId 在场时,
+   * manager 把落点移到 per-conversation 叶子
+   * `<projectDir>/<convId>/subagents/`,与 SessionStore.delete(整删
+   * `<convId>/` 会话文件夹)的寿命边界一致 —— 会话删除时子代理记录同灭,
+   * 不在项目层留孤儿。与 todo-write 的 resolveConversationTodoPath 同构。
+   */
+  it("def.conversationId 在场 → 记录落 <projectDir>/<convId>/subagents/, 项目层平铺不落盘", async () => {
+    const { manager, spawned } = makeManager({ projectDir: projectSlugDir });
+    const convId = "conv-abc-123";
+    const { taskId } = manager.spawn({
+      task: "scoped",
+      conversationId: convId,
+    });
+    emitOk(spawned[0]!, "r");
+    await flushTwoTicks();
+    await manager.shutdown();
+
+    // per-conversation 叶子
+    const convSubagentsDir = join(projectSlugDir, convId, "subagents");
+    assert.ok(
+      existsSync(join(convSubagentsDir, `agent-${taskId}.jsonl`)),
+      `expected lifecycle trace under per-conversation leaf ${convSubagentsDir}`
+    );
+    assert.ok(
+      existsSync(join(convSubagentsDir, `agent-${taskId}.meta.json`)),
+      `expected meta under per-conversation leaf ${convSubagentsDir}`
+    );
+    // 项目层平铺(无 convId)不产生任何文件 —— 项目层无孤儿
+    const flatDir = join(projectSlugDir, "subagents");
+    const flatEntries = existsSync(flatDir) ? readdirSync(flatDir) : [];
+    assert.deepEqual(
+      flatEntries,
+      [],
+      `项目层平铺 ${flatDir} 必须保持空 (无孤儿), got ${flatEntries.join(",")}`
+    );
+    // 且 per-conv 叶子目录不含 "agent-" 之外的错层(双层 subagents 防御)。
+    assert.equal(
+      existsSync(join(convSubagentsDir, "subagents")),
+      false,
+      "不得嵌出双层 subagents"
+    );
+  });
+
+  it("projectDir 装配 + def.conversationId 缺席 → 退回项目层平铺 <projectDir>/subagents/", async () => {
+    const { manager, spawned } = makeManager({ projectDir: projectSlugDir });
+    const { taskId } = manager.spawn({ task: "legacy-flat" });
+    emitOk(spawned[0]!, "r");
+    await flushTwoTicks();
+    await manager.shutdown();
+    const flatDir = join(projectSlugDir, "subagents");
+    assert.ok(
+      existsSync(join(flatDir, `agent-${taskId}.jsonl`)),
+      "无 conversationId 时退回项目层平铺"
+    );
+  });
+
+  it("subagentsDir 装配(两段式缝的 cli/TUI 形态)→ def.conversationId 不再嵌第二层 convId", async () => {
+    // 装配件已含 convId 段时,spawn 期 def.conversationId 在场也直接用
+    // 装配件 —— 防止嵌出 `.../subagents/<convId>/subagents/` 错形。
+    const { manager, spawned } = makeManager({ subagentsDir });
+    const { taskId } = manager.spawn({
+      task: "cli-form",
+      conversationId: "conv-abc-123",
+    });
+    emitOk(spawned[0]!, "r");
+    await flushTwoTicks();
+    await manager.shutdown();
+    assert.ok(
+      existsSync(join(subagentsDir, `agent-${taskId}.jsonl`)),
+      "subagentsDir 装配形态优先,直接落装配件"
+    );
+    assert.equal(
+      existsSync(join(subagentsDir, "conv-abc-123")),
+      false,
+      "不得在装配件下嵌 convId 第二层"
+    );
+  });
+
+  it("def.conversationId 缺席 → 退回装配期根平铺 (legacy manager 直造 byte-stable)", async () => {
+    const { manager, spawned } = makeManager({ subagentsDir });
+    const { taskId } = manager.spawn({ task: "legacy" });
+    emitOk(spawned[0]!, "r");
+    await flushTwoTicks();
+    await manager.shutdown();
+    assert.ok(
+      existsSync(join(subagentsDir, `agent-${taskId}.jsonl`)),
+      "无 conversationId 时退回装配期根"
+    );
+  });
+
+  it("普通 spawn 的 .meta.json 至少含 agentType + spawnDepth (M6: v1 禁嵌套恒为 1)", async () => {
+    const { manager, spawned } = makeManager({ subagentsDir });
+    const { taskId } = manager.spawn({ task: "t", role: "explore" });
+    emitOk(spawned[0]!, "r");
+    await flushTwoTicks();
+    await manager.shutdown();
+    const meta = JSON.parse(
+      readFileSync(join(subagentsDir, `agent-${taskId}.meta.json`), "utf8")
+    ) as Record<string, unknown>;
+    assert.equal(meta.agentType, "explore");
+    // v1 禁嵌套 → manager 侧 spawnDepth 恒写 1 (seam 留给将来嵌套派发)。
+    assert.equal(
+      meta.spawnDepth,
+      1,
+      "普通 spawn 的 meta.spawnDepth 必须恒为 1 (v1 禁嵌套)"
+    );
+    // 显式 def.spawnDepth 优先 (嵌套派发将来解开时从深层 manager 透传)。
+  });
+
+  it("def.spawnDepth 显式值覆盖 v1 常量 (嵌套 seam 保留)", async () => {
+    const { manager, spawned } = makeManager({ subagentsDir });
+    const { taskId } = manager.spawn({ task: "t", spawnDepth: 3 });
+    emitOk(spawned[0]!, "r");
+    await flushTwoTicks();
+    await manager.shutdown();
+    const meta = JSON.parse(
+      readFileSync(join(subagentsDir, `agent-${taskId}.meta.json`), "utf8")
+    ) as Record<string, unknown>;
+    assert.equal(meta.spawnDepth, 3);
   });
 });
 
