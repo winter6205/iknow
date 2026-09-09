@@ -23,6 +23,8 @@ import {
   resolveWithinRoot,
 } from "./helpers.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
+import type { ToolExecutionContext } from "../../tools/types.js";
+import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
 
 const TOOL_NAME = "edit_file";
 
@@ -32,6 +34,8 @@ const TOOL_NAME = "edit_file";
  */
 export interface EditFileOpts {
   readonly onEdit?: (file: string) => void;
+  readonly tmpDir?: string;
+  readonly projectDir?: string;
 }
 
 const ALLOWED_KEYS = new Set(["path", "old_str", "new_str", "replace_all"]);
@@ -131,11 +135,25 @@ export function createEditFileTool(
   root: string | LiveTaskRoot,
   opts?: EditFileOpts
 ): AciToolDef {
-  const handler = async (input: unknown): Promise<unknown> => {
+  const handler = async (
+    input: unknown,
+    ctx?: ToolExecutionContext
+  ): Promise<unknown> => {
     const validated = asEditFileInput(input);
     // T5 D2: per-call snapshot. resolve 与写入必须共用同一个根值。
     const rootAtCall = readRoot(root);
-    const absPath = await resolveWithinRoot(rootAtCall, validated.path);
+    const tmpWriteRoot = resolveSessionFenceTmp({
+      tmpDir: opts?.tmpDir,
+      projectDir: opts?.projectDir,
+      conversationId: ctx?.conversationId,
+    });
+    const absPath = await resolveWithinRoot(
+      rootAtCall,
+      validated.path,
+      undefined,
+      undefined,
+      tmpWriteRoot
+    );
 
     let content: string;
     try {

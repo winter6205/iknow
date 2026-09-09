@@ -47,25 +47,54 @@ function expandHome(p: string): string {
  * `root` OR any extra root; symlink-escape is still rejected (realpath runs
  * before this check). Read and write extra roots are passed independently —
  * write tools can use `extraWriteRoots` without exposing any read roots.
+ *
+ * `tmpWriteRoot` (optional, parent-visible-tmp T2): host pad bound as the
+ * current identity's fence `/tmp`. Guest paths under `/tmp` remap onto this
+ * pad; empty `/tmp/` is typed-rejected. Absent → `/tmp` stays outside
+ * (legacy / no-pad callers).
  */
 export async function resolveWithinRoot(
   root: string,
   target: string,
   extraReadRoots?: readonly string[],
-  extraWriteRoots?: readonly string[]
+  extraWriteRoots?: readonly string[],
+  tmpWriteRoot?: string
 ): Promise<string> {
   const realRoot = await realpath(resolve(root));
   const expandedTarget = expandHome(target);
-  const absoluteTarget = isAbsolute(expandedTarget)
-    ? resolve(expandedTarget)
-    : resolve(realRoot, expandedTarget);
+  let realTmpRoot: string | undefined;
+  let absoluteTarget: string;
+  if (
+    tmpWriteRoot !== undefined &&
+    tmpWriteRoot.trim().length > 0 &&
+    isGuestTmpLiteral(expandedTarget)
+  ) {
+    realTmpRoot = await realpath(resolve(tmpWriteRoot));
+    const remapped = remapGuestTmpOntoPad(resolve(expandedTarget), realTmpRoot);
+    if (remapped === "empty") {
+      throw new ToolExecutionError("empty path under /tmp");
+    }
+    absoluteTarget =
+      remapped !== undefined ? remapped : resolve(expandedTarget);
+  } else {
+    absoluteTarget = isAbsolute(expandedTarget)
+      ? resolve(expandedTarget)
+      : resolve(realRoot, expandedTarget);
+    if (tmpWriteRoot !== undefined && tmpWriteRoot.trim().length > 0) {
+      realTmpRoot = await realpath(resolve(tmpWriteRoot));
+    }
+  }
   const resolvedTarget = await realpathWithMissingSuffix(absoluteTarget);
 
   const withinPrimary = isWithinRoot(realRoot, resolvedTarget);
   const withinReadExtras = (extraReadRoots ?? []).some((r) =>
     isWithinRoot(resolve(r), resolvedTarget)
   );
-  const withinWriteExtras = (extraWriteRoots ?? []).some((r) =>
+  const writeExtras = [
+    ...(extraWriteRoots ?? []),
+    ...(realTmpRoot !== undefined ? [realTmpRoot] : []),
+  ];
+  const withinWriteExtras = writeExtras.some((r) =>
     isWithinRoot(resolve(r), resolvedTarget)
   );
   if (!withinPrimary && !withinReadExtras && !withinWriteExtras) {
@@ -213,4 +242,34 @@ function isWithinRoot(root: string, target: string): boolean {
     pathFromRoot === "" ||
     (!pathFromRoot.startsWith("..") && !isAbsolute(pathFromRoot))
   );
+}
+
+const GUEST_TMP = "/tmp";
+
+/** Model-supplied guest `/tmp` path — not a host path that merely lives under system `/tmp`. */
+function isGuestTmpLiteral(target: string): boolean {
+  return target === GUEST_TMP || target.startsWith(`${GUEST_TMP}/`);
+}
+
+/**
+ * Map a guest `/tmp` path onto the identity pad. `empty` = `/tmp` or `/tmp/`
+ * with no filename. `undefined` = not a guest `/tmp` path.
+ */
+function remapGuestTmpOntoPad(
+  absoluteTarget: string,
+  realTmpRoot: string
+): string | "empty" | undefined {
+  const normalized = resolve(absoluteTarget);
+  if (normalized === GUEST_TMP) return "empty";
+  const prefix = `${GUEST_TMP}/`;
+  if (!normalized.startsWith(prefix)) return undefined;
+  const suffix = normalized.slice(prefix.length);
+  if (suffix.length === 0) return "empty";
+  const remapped = resolve(realTmpRoot, suffix);
+  if (!isWithinRoot(realTmpRoot, remapped)) {
+    throw new ToolExecutionError(
+      `path outside workspace: ${remapped} not under ${realTmpRoot}`
+    );
+  }
+  return remapped;
 }

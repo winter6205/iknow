@@ -27,3 +27,30 @@ export function ensureMainSessionFenceTmpForConversation(
     join(projectDir, sanitizeConversationSegment(conversationId))
   );
 }
+
+/**
+ * Current-identity fence `/tmp` pad: explicit `tmpDir`, else
+ * `<projectDir>/<conversationId>/fence-tmp`. Missing inputs → undefined
+ * (write tools keep the legacy `/tmp` reject; bash supplies its own fallback).
+ */
+export function resolveSessionFenceTmp(input: {
+  readonly tmpDir?: string;
+  readonly projectDir?: string;
+  readonly conversationId?: string;
+}): string | undefined {
+  if (input.tmpDir !== undefined && input.tmpDir.trim().length > 0) {
+    mkdirSync(input.tmpDir, { recursive: true });
+    return input.tmpDir;
+  }
+  if (
+    input.projectDir !== undefined &&
+    input.conversationId !== undefined &&
+    input.conversationId.trim().length > 0
+  ) {
+    return ensureMainSessionFenceTmpForConversation(
+      input.projectDir,
+      input.conversationId
+    );
+  }
+  return undefined;
+}

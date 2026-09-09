@@ -13,8 +13,17 @@ import { dirname, relative, resolve } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
 import type { AciToolDef } from "../types.js";
+import type { ToolExecutionContext } from "../../tools/types.js";
 import { asToolExecutionError, resolveWithinRoot } from "./helpers.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
+import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
+
+export interface WriteFileOpts {
+  /** Explicit host pad (tests / T3 worker pad). */
+  readonly tmpDir?: string;
+  /** Session project dir; with `ctx.conversationId` → main-session pad. */
+  readonly projectDir?: string;
+}
 
 const TOOL_NAME = "write_file";
 const ALLOWED_KEYS = new Set(["path", "content", "create_directories"]);
@@ -91,15 +100,32 @@ function readRoot(root: string | LiveTaskRoot): string {
  * in the same run lands new writes in the rebound tree. `string` callers
  * (legacy tests, one-shot consumers) keep byte-identical behavior.
  */
-export function createWriteFileTool(root: string | LiveTaskRoot): AciToolDef {
-  const handler = async (input: unknown): Promise<unknown> => {
+export function createWriteFileTool(
+  root: string | LiveTaskRoot,
+  opts?: WriteFileOpts
+): AciToolDef {
+  const handler = async (
+    input: unknown,
+    ctx?: ToolExecutionContext
+  ): Promise<unknown> => {
     const params = parseInput(input);
     // T5 D2: per-call snapshot. resolve 与写入必须共用同一个根值。
     const rootAtCall = readRoot(root);
+    const tmpWriteRoot = resolveSessionFenceTmp({
+      tmpDir: opts?.tmpDir,
+      projectDir: opts?.projectDir,
+      conversationId: ctx?.conversationId,
+    });
 
     let target: string;
     try {
-      target = await resolveWithinRoot(rootAtCall, params.path);
+      target = await resolveWithinRoot(
+        rootAtCall,
+        params.path,
+        undefined,
+        undefined,
+        tmpWriteRoot
+      );
     } catch (error) {
       throw asToolExecutionError("[write_file] cannot resolve path", error);
     }

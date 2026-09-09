@@ -164,6 +164,52 @@ describe("resolveWithinRoot", () => {
         error.message.includes("outside workspace")
     );
   });
+
+  it("tmpWriteRoot: remaps /tmp/ok.txt onto the identity pad, not taskRoot", async () => {
+    const root = await makeScratch("aci-helper-tmp-root-");
+    const pad = await makeScratch("aci-helper-tmp-pad-");
+
+    assert.equal(
+      await resolveWithinRoot(root, "/tmp/ok.txt", undefined, undefined, pad),
+      join(pad, "ok.txt")
+    );
+  });
+
+  it("tmpWriteRoot: /tmp/ (empty basename) is typed-rejected", async () => {
+    const root = await makeScratch("aci-helper-tmp-empty-root-");
+    const pad = await makeScratch("aci-helper-tmp-empty-pad-");
+
+    await assert.rejects(
+      resolveWithinRoot(root, "/tmp/", undefined, undefined, pad),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("empty path under /tmp")
+    );
+  });
+
+  it("tmpWriteRoot: relative path under a /tmp-hosted taskRoot is not remapped", async () => {
+    const root = await makeScratch("aci-helper-tmp-rel-root-");
+    const pad = await makeScratch("aci-helper-tmp-rel-pad-");
+    await writeFile(join(root, "kept.txt"), "in-root\n");
+
+    assert.equal(
+      await resolveWithinRoot(root, "kept.txt", undefined, undefined, pad),
+      join(root, "kept.txt")
+    );
+  });
+
+  it("tmpWriteRoot: /tmp/../ escape that leaves guest /tmp is not treated as empty", async () => {
+    const root = await makeScratch("aci-helper-tmp-esc-root-");
+    const pad = await makeScratch("aci-helper-tmp-esc-pad-");
+
+    await assert.rejects(
+      resolveWithinRoot(root, "/tmp/../etc/passwd", undefined, undefined, pad),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("outside workspace") &&
+        !error.message.includes("empty path under /tmp")
+    );
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

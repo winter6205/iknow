@@ -575,8 +575,14 @@ export function createDefaultAciRegistry(
     // sandboxRoot，逐字节同今日；handler 内 cell.read() 一次取得 snapshot，
     // 同 handler 内 resolve 与写入共用该值（D2）。
     edit_file: () =>
-      createEditFileTool(opts.liveTaskRoot ?? sandboxRoot, { onEdit }),
-    write_file: () => createWriteFileTool(opts.liveTaskRoot ?? sandboxRoot),
+      createEditFileTool(opts.liveTaskRoot ?? sandboxRoot, {
+        onEdit,
+        ...(opts.todoDir !== undefined ? { projectDir: opts.todoDir } : {}),
+      }),
+    write_file: () =>
+      createWriteFileTool(opts.liveTaskRoot ?? sandboxRoot, {
+        ...(opts.todoDir !== undefined ? { projectDir: opts.todoDir } : {}),
+      }),
     web_fetch: () =>
       createWebFetchTool({
         proxyUrl,

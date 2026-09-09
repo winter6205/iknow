@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AciToolDef } from "../types.js";
@@ -26,7 +26,7 @@ import {
 import { restore, type SecretRegistry } from "../../secret-roundtrip/index.js";
 import type { BackgroundTaskManager } from "../../background/manager.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
-import { ensureMainSessionFenceTmpForConversation } from "../../sandbox/fence-tmp.js";
+import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
 
 interface BashInput {
   readonly command?: unknown;
@@ -390,19 +390,11 @@ function resolveBashFenceTmp(
   conversationId: string | undefined,
   fallback: () => string
 ): string {
-  if (opts?.tmpDir !== undefined && opts.tmpDir.trim().length > 0) {
-    mkdirSync(opts.tmpDir, { recursive: true });
-    return opts.tmpDir;
-  }
-  if (
-    opts?.projectDir !== undefined &&
-    conversationId !== undefined &&
-    conversationId.trim().length > 0
-  ) {
-    return ensureMainSessionFenceTmpForConversation(
-      opts.projectDir,
-      conversationId
-    );
-  }
-  return fallback();
+  return (
+    resolveSessionFenceTmp({
+      tmpDir: opts?.tmpDir,
+      projectDir: opts?.projectDir,
+      conversationId,
+    }) ?? fallback()
+  );
 }
