@@ -1554,6 +1554,9 @@ export async function buildHarnessEngine(
       // 同步取一次快照、会话内冻结。退化态(非 git 仓库 / git 不可用 /
       // cwd 不可解析)→ provider 返回 undefined → 装配段缺席,不报错。
       git: createGitSnapshotProvider({ cwd: projectIdentityRoot }),
+      // git 作业纪律段:四入口都挂;worker createWorkerDeps 不经过本层、不传
+      // gate → 段缺席。ask 仍不装配工作树工具。与上方 `## Git` 快照正交。
+      gitWorkDiscipline: true,
       // ADR-0041 / plans/model-prefix-layering.md B3:`orchestration` system
       // 段撤出 —— 内容并入 graph 模式切换提示(loop-engine 消息尾追加,
       // 见下方 graphModeChange 缝)。graph 装配快照改为单点供 loop-engine

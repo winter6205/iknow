@@ -123,6 +123,7 @@ jobs:
             --exclude tests/subagent/envelope-role.test.ts \
             --exclude tests/subagent/tool-constraints.test.ts \
             --exclude tests/subagent/bash-mode-channel.test.ts \
+            --exclude tests/subagent/git-work-discipline.test.ts \
             --exclude tests/tui/banner-scroll-fixes.test.tsx \
             --exclude tests/tui/logo-persists.test.tsx \
             --exclude 'tests/harness/secret-roundtrip/**' \
@@ -234,6 +235,7 @@ jobs:
             --exclude tests/subagent/envelope-role.test.ts \
             --exclude tests/subagent/tool-constraints.test.ts \
             --exclude tests/subagent/bash-mode-channel.test.ts \
+            --exclude tests/subagent/git-work-discipline.test.ts \
             --exclude tests/tui/banner-scroll-fixes.test.tsx \
             --exclude tests/tui/logo-persists.test.tsx \
             --exclude tests/harness/secret-roundtrip/e2e.test.ts \

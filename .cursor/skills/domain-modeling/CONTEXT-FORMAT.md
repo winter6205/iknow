@@ -27,6 +27,10 @@ _Avoid_: Bill, payment request
 **Customer**:
 A person or organization that places orders.
 _Avoid_: Client, buyer, account
+
+**git 作业**:
+主代理用 `bash` 完成的版本库侧效应链（工作区变更 → add → commit，可选 push），不单独注册 ACI 工具。纪律段挂四入口、不进 worker；ask 不装配工作树工具。
+_Avoid_: git ACI 工具; `git_commit` / `git_push`; 把环境现势当作业面; 让只读子代理提交
 ```
 
 ## Structural invariants

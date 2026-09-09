@@ -37,6 +37,8 @@ export {
   shouldIncludeBootstrap,
   createIknowSystemResolver,
   assembleIdentityContext,
+  IKNOW_GIT_WORK_TEXT,
+  gitWorkSegment,
 } from "./assemble.js";
 export type {
   IdentitySegmentKind,
