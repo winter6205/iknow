@@ -341,7 +341,7 @@ export function noticeRenderRows(
  *   - notice 本体 + 自身 marginBottom=1
  *   - modal 本体 + 自身 marginBottom=1
  *   - thinking-picker 面板 + 自身 marginBottom=1（pickerRows 同 modalRows 约定）
- *   - 子代理状态面板（ContextBar 下方，不计入 chrome 行账，避免把输入框往上顶）
+ *   - 子代理状态面板（ContextBar 之下第二站，不计入 chrome 行账，避免把输入框往上顶）
  *   - 后台运行标记行（存在 running-bg 时）
  */
 export function chromeReserveRows(opts: {
@@ -2962,27 +2962,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           }}
         />
       )}
-      {/* plans T7 验收钉死的 footer 顺序（prompt 之下）：
-            subagent task list → ContextBar → worktree isolation line → graph。
-          历史顺序为 worktree → ContextBar → graph → subagent（误读 envPaneRows
-          槽位 + 无依据 graph 夹层）。T7 重排后：
-          - SubagentPanel（chrome-focus subagent 环的可见段，prompt 之下第一站）；
-          - ContextBar（model + ctx）；
-          - worktree isolation line（worktreeIsolationLines，未绑定 → 0 行）；
-          - GraphChromePanel（graph 环，chrome-focus 最末站）。 */}
-      {/* 子代理状态：输入框之下第一站。不计入 chrome 行账（panelRows=0）。
-          T7：传 focusedRow —— chrome-focus subagent(row) 焦点时该行展开 taskPreview
-          （不再截断）+ 加 `> ` 前缀；其余行保持原截断。focusedRow 仅作用于 live 行
-          （reducer 圈定的子集），SubagentPanel 内部按 liveIndex 投影。 */}
-      {view === "chat" && (
-        <SubagentPanel
-          subagents={subagents}
-          cols={cols}
-          focusedRow={
-            chromeFocus.kind === "subagent" ? chromeFocus.row : undefined
-          }
-        />
-      )}
+      {/* chrome footer 顺序（prompt 之下，JSX 顺序 = 视觉顺序 —— 新增行必须
+          插在 ContextBar 之后，不得插到 ContextBar 与 PromptInput 之间）：
+            ContextBar（model + ctx，prompt 下第一行）→
+            subagent task list → worktree isolation line → graph。 */}
       {view === "chat" && (
         <box flexDirection="row" justifyContent="flex-start">
           <ContextBar
@@ -2998,8 +2981,21 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           />
         </box>
       )}
-      {/* ADR-0037 T5: 会话 worktree 隔离现势行（T7 重排：现在位于 ContextBar
-          之下、graph 之上；envPaneRows 槽位入账不变）。未绑定 → worktreeIsolationLines
+      {/* 子代理状态：ContextBar 之下。不计入 chrome 行账（panelRows=0）。
+          T7：传 focusedRow —— chrome-focus subagent(row) 焦点时该行展开 taskPreview
+          （不再截断）+ 加 `> ` 前缀；其余行保持原截断。focusedRow 仅作用于 live 行
+          （reducer 圈定的子集），SubagentPanel 内部按 liveIndex 投影。 */}
+      {view === "chat" && (
+        <SubagentPanel
+          subagents={subagents}
+          cols={cols}
+          focusedRow={
+            chromeFocus.kind === "subagent" ? chromeFocus.row : undefined
+          }
+        />
+      )}
+      {/* ADR-0037 T5: 会话 worktree 隔离现势行（ContextBar / SubagentPanel 之下、
+          graph 之上；envPaneRows 槽位入账不变）。未绑定 → worktreeIsolationLines
           返回空 → 不渲染。 */}
       {view === "chat" &&
         worktreeIsolationLines(active.workspaceRoot, cols).map((line, idx) => (

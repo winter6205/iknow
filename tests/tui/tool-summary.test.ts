@@ -121,10 +121,26 @@ describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
     expect(detail).toBe("(skill_search)");
   });
 
-  test("spawn_subagent / subagent_result 摘要（task / task_id）", () => {
+  test("spawn_subagent / subagent_result 摘要（role / task_id；task 不进 transcript）", () => {
     expect(
       summarizeToolCall("spawn_subagent", { task: "查 root cause" }).detail
-    ).toBe("派发子代理：查 root cause");
+    ).toBe("general-purpose");
+    expect(
+      summarizeToolCall(
+        "spawn_subagent",
+        { task: "查 root cause" },
+        undefined,
+        {
+          running: true,
+        }
+      ).detail
+    ).toBe("general-purpose running");
+    expect(
+      summarizeToolCall("spawn_subagent", {
+        task: "查 root cause",
+        subagent_type: "explore",
+      }).detail
+    ).toBe("explore");
     expect(
       summarizeToolCall("subagent_result", { task_id: "t-1" }).detail
     ).toBe("轮询 t-1");
@@ -478,8 +494,9 @@ describe("子代理工具专属显示（isSubagentTool / subagentDisplayMark / S
     // plans/tui-chrome-interaction.md T7：子代理工具不再以 `▣ 子代理` 形态
     // 渲染 live / history 工具卡 —— 子代理状态由 identity strip + SubagentPanel
     // 单独表达，避免 dual render。formatToolStatusLine 内仅返 detail。
-    expect(line).toBe("派发子代理：调查渲染层");
-    // 钉死无 `▣` glyph、无 `✓` 状态前缀（detail 内容可含「子代理」字面值）
+    expect(line).toBe("general-purpose");
+    // 钉死无 `▣` glyph、无 `✓` 状态前缀；task 正文不进 transcript
+    expect(line.includes("调查渲染层")).toBe(false);
     expect(line.includes("▣")).toBe(false);
     expect(line.includes("✓")).toBe(false);
   });
@@ -490,7 +507,8 @@ describe("子代理工具专属显示（isSubagentTool / subagentDisplayMark / S
       input: { task: "调查渲染层" },
       kind: "execution_failed",
     });
-    expect(line).toBe("派发子代理：调查渲染层");
+    expect(line).toBe("general-purpose");
+    expect(line.includes("调查渲染层")).toBe(false);
     expect(line.includes("✗")).toBe(false);
   });
 
