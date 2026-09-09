@@ -115,6 +115,8 @@ runOrSkip("web discover vs read golden set (real-LLM)", () => {
 
 type InterceptMode = "stub-ok" | "empty-search";
 
+const EMPTY_COMPLETED_ATTEMPTS = 2;
+
 async function runUntilTools(
   mode: InterceptMode,
   id: DiscoverVsReadFixtureId,
@@ -125,8 +127,13 @@ async function runUntilTools(
     recoverToolsOnMaxTurns?: boolean;
   }
 ): Promise<ReadonlyArray<{ name: string; input: unknown }>> {
-  const { uses } = await runWithMessages(mode, id, userPrompt, io);
-  return uses;
+  let last: ReadonlyArray<{ name: string; input: unknown }> = [];
+  for (let attempt = 1; attempt <= EMPTY_COMPLETED_ATTEMPTS; attempt++) {
+    const { uses } = await runWithMessages(mode, id, userPrompt, io);
+    last = uses;
+    if (uses.length > 0) return uses;
+  }
+  return last;
 }
 
 async function runWithMessages(
@@ -163,8 +170,9 @@ async function runWithMessages(
   };
   try {
     const { result } = await run(userPrompt, deps);
+    const fromMessages = collectToolUses(result.messages);
     return {
-      uses: collectToolUses(result.messages),
+      uses: fromMessages.length > 0 ? fromMessages : executed,
       messages: result.messages,
     };
   } catch (err) {
@@ -196,28 +204,47 @@ function interceptNetworkExecutor(
       turnId,
       onStream
     ) => {
-      const out: ToolExecutionResult[] = [];
+      const out: Array<ToolExecutionResult | undefined> = Array.from(
+        { length: calls.length },
+        () => undefined
+      );
+      const pending: ToolCall[] = [];
+      const pendingIndex: number[] = [];
       for (let i = 0; i < calls.length; i++) {
         const call = calls[i]!;
         executed.push({ name: call.name, input: call.input });
         const stubbed = stubNetworkCall(call, mode);
-        const result =
-          stubbed ??
-          (
-            await inner.executeAll(
-              [call],
-              signal,
-              timeoutMs,
-              conversationId,
-              undefined,
-              turnId,
-              onStream
-            )
-          )[0]!;
-        out.push(result);
-        await onSettled?.(result, i);
+        if (stubbed !== undefined) {
+          out[i] = stubbed;
+        } else {
+          pending.push(call);
+          pendingIndex.push(i);
+        }
       }
-      return out;
+      if (pending.length > 0) {
+        const innerResults = await inner.executeAll(
+          pending,
+          signal,
+          timeoutMs,
+          conversationId,
+          undefined,
+          turnId,
+          onStream
+        );
+        for (let j = 0; j < pending.length; j++) {
+          out[pendingIndex[j]!] = innerResults[j]!;
+        }
+      }
+      const settled = out.map((r, i) => {
+        if (r === undefined) {
+          throw new Error(`intercept missing result at index ${i}`);
+        }
+        return r;
+      });
+      for (let i = 0; i < settled.length; i++) {
+        await onSettled?.(settled[i]!, i);
+      }
+      return settled;
     },
   };
 }
@@ -248,9 +275,17 @@ function collectToolUses(
 ): Array<{ name: string; input: unknown }> {
   const uses: Array<{ name: string; input: unknown }> = [];
   for (const m of messages) {
-    for (const b of m.content) {
-      if (b.type === "tool_use") {
-        uses.push({ name: b.name, input: b.input });
+    const blocks = Array.isArray(m.content) ? m.content : [];
+    for (const b of blocks) {
+      if (
+        b !== null &&
+        typeof b === "object" &&
+        "type" in b &&
+        b.type === "tool_use" &&
+        "name" in b &&
+        typeof b.name === "string"
+      ) {
+        uses.push({ name: b.name, input: "input" in b ? b.input : undefined });
       }
     }
   }

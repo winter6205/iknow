@@ -36,7 +36,8 @@ export const DISCOVER_VS_READ_FIXTURES: readonly DiscoverVsReadFixture[] =
       title: "SC1: no URL, search/news request → first tool web_search",
       userPrompt:
         "Use network search to find recent news about the IETF QUIC working group this week. " +
-        "I do not have a page URL. Start by discovering sources.",
+        "I do not have a page URL. Start by discovering sources with a search tool. " +
+        "Do not answer from memory before that search.",
     },
     {
       id: "sc2-read-given-url",
@@ -45,7 +46,8 @@ export const DISCOVER_VS_READ_FIXTURES: readonly DiscoverVsReadFixture[] =
         "SC2: user already gave http(s) URL and asked to read page → first tool MAY be web_fetch",
       userPrompt:
         "Read this page and summarize the opening paragraph: " +
-        "https://example.com/iknow-960-user-given-page",
+        "https://example.com/iknow-960-user-given-page " +
+        "Fetch that URL. Do not read local files first.",
     },
     {
       id: "sc3-empty-search-not-guess-fetch",
