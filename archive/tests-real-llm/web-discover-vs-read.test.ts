@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { loadIknowEnv } from "../../src/config/env.ts";
+import { MaxTurnsExceeded } from "../../src/harness/errors.ts";
 import { buildHarnessEngine } from "../../src/harness/build-engine.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { run } from "../../src/harness/loop-engine.ts";
@@ -60,6 +61,7 @@ runOrSkip("web discover vs read golden set (real-LLM)", () => {
       const uses = await runUntilTools("stub-ok", sc1.id, sc1.userPrompt, {
         roots,
         shutdowns,
+        recoverToolsOnMaxTurns: true,
       });
       expect(uses.length).toBeGreaterThan(0);
       expect(uses[0]!.name).toBe("web_search");
@@ -74,6 +76,7 @@ runOrSkip("web discover vs read golden set (real-LLM)", () => {
       const uses = await runUntilTools("stub-ok", sc2.id, sc2.userPrompt, {
         roots,
         shutdowns,
+        recoverToolsOnMaxTurns: true,
       });
       expect(uses.length).toBeGreaterThan(0);
       expect(uses[0]!.name).toBe("web_fetch");
@@ -119,6 +122,7 @@ async function runUntilTools(
   io: {
     roots: string[];
     shutdowns: Array<() => Promise<void>>;
+    recoverToolsOnMaxTurns?: boolean;
   }
 ): Promise<ReadonlyArray<{ name: string; input: unknown }>> {
   const { uses } = await runWithMessages(mode, id, userPrompt, io);
@@ -132,6 +136,7 @@ async function runWithMessages(
   io: {
     roots: string[];
     shutdowns: Array<() => Promise<void>>;
+    recoverToolsOnMaxTurns?: boolean;
   }
 ): Promise<{
   uses: ReadonlyArray<{ name: string; input: unknown }>;
@@ -148,19 +153,38 @@ async function runWithMessages(
     cwd: root,
   });
   if (built.shutdown) io.shutdowns.push(built.shutdown);
+  const executed: Array<{ name: string; input: unknown }> = [];
   const deps = {
     ...built.deps,
-    executor: interceptNetworkExecutor(built.deps.executor, mode),
-    maxTurns: 4,
+    executor: interceptNetworkExecutor(built.deps.executor, mode, executed),
+    // Sibling real-llm files use 4–8; SC1 can spend thinking turns before
+    // the first tool, so 4 is tight and MaxTurnsExceeded drops messages.
+    maxTurns: 8,
   };
-  const { result } = await run(userPrompt, deps);
-  const uses = collectToolUses(result.messages);
-  return { uses, messages: result.messages };
+  try {
+    const { result } = await run(userPrompt, deps);
+    return {
+      uses: collectToolUses(result.messages),
+      messages: result.messages,
+    };
+  } catch (err) {
+    if (!(err instanceof MaxTurnsExceeded)) throw err;
+    // EXIT: first-tool callers only. SC3 needs a completed next step.
+    if (io.recoverToolsOnMaxTurns !== true) throw err;
+    // run() rethrows without attaching messages; executor already
+    // recorded every dispatched tool_use from completed turns.
+    expect(
+      executed.length,
+      `MaxTurnsExceeded after ${err.turnsRan} turns with no tool_use`
+    ).toBeGreaterThan(0);
+    return { uses: executed, messages: [] };
+  }
 }
 
 function interceptNetworkExecutor(
   inner: Executor,
-  mode: InterceptMode
+  mode: InterceptMode,
+  executed: Array<{ name: string; input: unknown }>
 ): Executor {
   return {
     executeAll: async (
@@ -175,6 +199,7 @@ function interceptNetworkExecutor(
       const out: ToolExecutionResult[] = [];
       for (let i = 0; i < calls.length; i++) {
         const call = calls[i]!;
+        executed.push({ name: call.name, input: call.input });
         const stubbed = stubNetworkCall(call, mode);
         const result =
           stubbed ??
