@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import {
   formatRunHuman,
   formatRunJson,
+  formatChatVerifyReport,
   formatVerifyReport,
   renderAssistantAnswer,
   renderThinkingSummary,
@@ -17,6 +18,7 @@ import {
   REDACTED_PLACEHOLDER,
 } from "../../src/cli/format.ts";
 import { deriveFinalText } from "../../src/harness/loop-engine.ts";
+import { projectVerifyHumanView } from "../../src/session-api/verify-human-view.ts";
 import {
   computeTotals,
   type AnthropicNativeMessage,
@@ -712,5 +714,96 @@ describe("formatVerifyReport — passed 成功态 (T2)", () => {
 
   it("failed 文案不变 (backward-compat 回归锚)", () => {
     assert.match(formatVerifyReport("failed", 1), /^\[验证\] 验证未通过/);
+  });
+});
+
+/**
+ * T3 (verify-claim-window SC2): chat 装配层不把 HITL 闲聊 passed 印成绿勾。
+ * formatVerifyReport("passed") 仍可产出文案（给非 chat 调用方），但
+ * formatChatVerifyReport 对 passed 静默 —— 钉住 chat-session 既有 gate。
+ */
+describe("formatChatVerifyReport — chat 不印 passed 绿勾 (SC2)", () => {
+  it("passed → undefined（不印 `[验证] 验证通过`）", () => {
+    assert.equal(formatChatVerifyReport("passed", 1), undefined);
+  });
+
+  it("failed / unstable / escalated 仍印报告", () => {
+    assert.match(
+      formatChatVerifyReport("failed", 2) ?? "",
+      /^\[验证\] 验证未通过/
+    );
+    assert.match(
+      formatChatVerifyReport("unstable", 1) ?? "",
+      /^\[验证\] 验证不稳定/
+    );
+    assert.match(
+      formatChatVerifyReport("escalated", 4) ?? "",
+      /^\[验证\] 验证耗尽/
+    );
+  });
+});
+
+/**
+ * T3 hub/TUI 投影: HITL + INSUFFICIENT + hitl_skip_completion_judge
+ * 不得上 wire passed（人读绿勾）。SUFFICIENT 短路仍可 passed。
+ */
+describe("projectVerifyHumanView — HITL 闲聊不打绿勾 (SC2/SC5)", () => {
+  it("HITL skip + INSUFFICIENT + passed → 字段缺席（无绿勾）", () => {
+    assert.equal(
+      projectVerifyHumanView({
+        outcome: "passed",
+        rounds: 1,
+        records: [
+          {
+            reason: "hitl_skip_completion_judge",
+            evidenceVerdict: "EVIDENCE_INSUFFICIENT",
+          },
+        ],
+      }),
+      undefined
+    );
+  });
+
+  it("SC5 无声称点：同一 INSUFFICIENT + skip 形状 → 无绿勾", () => {
+    assert.equal(
+      projectVerifyHumanView({
+        outcome: "passed",
+        rounds: 1,
+        records: [
+          {
+            reason: "hitl_skip_completion_judge",
+            evidenceVerdict: "EVIDENCE_INSUFFICIENT",
+          },
+        ],
+      }),
+      undefined
+    );
+  });
+
+  it("HITL SUFFICIENT 短路（无 skip+INSUFFICIENT）→ 仍 passed", () => {
+    assert.deepEqual(
+      projectVerifyHumanView({
+        outcome: "passed",
+        rounds: 1,
+        records: [{ reason: undefined, evidenceVerdict: undefined }],
+      }),
+      { outcome: "passed", rounds: 1 }
+    );
+  });
+
+  it("failed 不受 skip 记录影响，仍上 wire", () => {
+    assert.deepEqual(
+      projectVerifyHumanView({
+        outcome: "failed",
+        rounds: 2,
+        records: [
+          {
+            reason: "hitl_skip_completion_judge",
+            evidenceVerdict: "EVIDENCE_INSUFFICIENT",
+          },
+        ],
+      }),
+      { outcome: "failed", rounds: 2 }
+    );
   });
 });

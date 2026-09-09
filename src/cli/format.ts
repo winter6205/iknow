@@ -241,13 +241,24 @@ export function formatRunHuman(opts: FormatRunHumanOpts): string {
 }
 
 /**
- * #128 M3: 验证闭环最终判定的 CLI 人类可读报告。
- * T2 (#458): 参数联合增加 "passed" 成功态; abort / disabled 不进 wire。
- * chat 装配层 chat-session.ts:354 的 gate 维持三态 (failed/unstable/escalated),
- * 因此 chat 路径下本函数仍仅接收失败面; hub 路径下 hub.ts:1156 把 passed 也
- * 派生到 VerifyAnswerView DTO, 但本函数目前仅 chat 调用, 类型约束依调用点
- * 自然放宽 (passed 分支保留, 供未来 chat gate 扩展时无回归)。
+ * Chat assembly gate (SC2): never print the passed green-check line.
+ * Failure triad still uses formatVerifyReport. abort / disabled stay silent.
  */
+export function formatChatVerifyReport(
+  outcome: string,
+  rounds: number
+): string | undefined {
+  if (
+    outcome === "failed" ||
+    outcome === "unstable" ||
+    outcome === "escalated"
+  ) {
+    return formatVerifyReport(outcome, rounds);
+  }
+  return undefined;
+}
+
+/** #128 M3 / T2: CLI human verify line. Chat uses formatChatVerifyReport. */
 export function formatVerifyReport(
   outcome: "failed" | "unstable" | "escalated" | "passed",
   rounds: number

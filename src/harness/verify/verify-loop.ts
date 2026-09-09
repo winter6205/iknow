@@ -1079,7 +1079,7 @@ function runClassifierLoop(
     options,
     maxRounds,
     sessionId,
-    produceObservation: (round, current) => {
+    produceObservation: (_round, current) => {
       if (options.completionMode === "hitl") {
         // EXIT: HITL skips completion-facing LLM; checker already ran.
         return Promise.resolve({

@@ -221,6 +221,12 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
       "HITL (no goal) must not spawn completion-facing judge"
     );
     // 闭环 passed: 历史形状与裸 run 一致 (pass 不改消息面)。
+    // T3 SC2: HITL 闲聊不得印绿勾。
+    assert.equal(
+      r.output.includes("[验证] 验证通过"),
+      false,
+      "HITL chat must not print passed green check"
+    );
     assert.equal(ctx.state.messages.length, 2);
     assert.equal(ctx.state.messages[1]!.role, "assistant");
     // 验证命令 (command 为空, 不存在脚本) 绝不能执行。

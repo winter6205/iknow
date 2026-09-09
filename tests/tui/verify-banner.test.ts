@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { VerifyAnswerView } from "../../src/session-api/contract.js";
+import { projectVerifyHumanView } from "../../src/session-api/verify-human-view.js";
 import {
   describeVerifyErrorDetail,
   projectVerifyBanner,
@@ -464,5 +465,39 @@ describe("接线守卫:app.tsx 接入 verify-banner", () => {
     const src = readFileSync(appPath, "utf8");
     // 字面量出现 verifyRows: 行键,证明已并在 chromeReserveRows 入账。
     expect(src).toMatch(/verifyRows\s*:/);
+  });
+});
+
+// =============================================================================
+// T3 SC2/SC5: HITL 闲聊 / 无声称点 → 人不读「验证通过」
+// =============================================================================
+describe("projectVerifyHumanView + banner — HITL 闲聊不打绿勾 (SC2/SC5)", () => {
+  test("HITL skip + INSUFFICIENT → slot none → banner 0 行", () => {
+    const view = projectVerifyHumanView({
+      outcome: "passed",
+      rounds: 1,
+      records: [
+        {
+          reason: "hitl_skip_completion_judge",
+          evidenceVerdict: "EVIDENCE_INSUFFICIENT",
+        },
+      ],
+    });
+    const slot = verifyFromWire(view);
+    expect(slot).toEqual({ kind: "none" });
+    expect(projectVerifyBanner(slot, "hitl", 80)).toEqual([]);
+    expect(projectVerifyBanner(slot, "auto", 80)).toEqual([]);
+  });
+
+  test("HITL SUFFICIENT 短路 passed → 仍显示验证通过", () => {
+    const view = projectVerifyHumanView({
+      outcome: "passed",
+      rounds: 2,
+      records: [{}],
+    });
+    const slot = verifyFromWire(view);
+    const lines = projectVerifyBanner(slot, "hitl", 80);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.text).toBe("✓ 验证通过（2 轮）");
   });
 });

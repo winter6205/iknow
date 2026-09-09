@@ -18,7 +18,7 @@ import {
   formatRunHuman,
   formatRunJson,
   formatStatusLine,
-  formatVerifyReport,
+  formatChatVerifyReport,
 } from "./format.js";
 import {
   applySlashCommand,
@@ -1213,11 +1213,8 @@ async function runChatQueryLine(
         // 避免"模型声称完成但验证没过"仍显示正常完成 (SC2/SC6 交付面)。
         // 仅 verify 分支有 outcome/rounds; 裸 run 分支无 (无报告, 行为不变)。
         const verifyReport =
-          "outcome" in runOutcome &&
-          (runOutcome.outcome === "failed" ||
-            runOutcome.outcome === "unstable" ||
-            runOutcome.outcome === "escalated")
-            ? formatVerifyReport(runOutcome.outcome, runOutcome.rounds)
+          "outcome" in runOutcome
+            ? formatChatVerifyReport(runOutcome.outcome, runOutcome.rounds)
             : undefined;
         const baseOutput = human
           ? formatRunHuman({
