@@ -27,32 +27,32 @@ minimal-change-verifier: yes — 一个逻辑任务（web backend 回落），�
    - **Inherits:** **ACI web backend**；非法 id fail-loud；缺 = 无实现 / 无 key / 厂商无该 API；传输失败 ≠ 缺。
    - **Surface:** `src/config` + ACI web 工具模块（与 `SEARCH_BACKEND_VALUES` 同层）
    - **Acceptance:** 纯函数可回答「搜走谁 / 抓走谁」；仅 `exa`+key 为「有搜且有抓」；`bing` / `tavily` / `brave` / 无 key 的 `exa` 抓侧均为本机阅读。不出现 Tavily extract / Brave fetch 分支。
-   - Status: [ ] pending
+   - Status: [x] done
 
 2. **发现：缺搜不再 `not_shipped`** — tag: `[implementation]`
    - **Inherits:** SC4；Tavily/Brave stub 算无搜。
    - **Surface:** `web_search`
    - **Acceptance:** 选 `brave` / `tavily`（或无 key）时 `web_search` 走默认检索；不新写 Tavily/Brave HTTP 客户端。`exa`+key 仍走已有 Exa search。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T1]
 
 3. **阅读：只接 Exa contents，其余本机** — tag: `[implementation]`
    - **Inherits:** SC5–SC7；私网先拒；仅 `exa`+key+公开 URL 走 contents；模型 schema 不增 method/headers。
    - **Surface:** `web_fetch`
    - **Acceptance:** 非 Exa 或无 key 的公开 URL 仍 `network-guard`；`exa`+key 不对本机目标 URL 发 `fetchPublicResponse`；`127.0.0.1` 任意后端均拒。diff 不含 Tavily/Brave 抓取客户端。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T1]
 
 4. **默认零回归 + 操作员文档** — tag: `[implementation]`
    - **Inherits:** SC2、SC8、SC9；不改 `network: true`。
    - **Surface:** 既有 web 工具测试 + `docs/llm-config-quickstart.md`
    - **Acceptance:** 未设后端时搜/抓与今日默认路径锁定；文档写明本轮只适配 Exa、缺则回落、通话仍 amplify；`npm test` 与 `npm run typecheck` exit 0。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T2, T3]
 
 5. **Exa 真出网实测** — tag: `[implementation]`
    - **Inherits:** SC10；缺 `EXA_API_KEY` 显式 Not run，不得用 mock 过门。
    - **Surface:** 既有 probe / 门控实测入口（与 #826 T8 同档：真打 `api.exa.ai`，不进默认 `npm test` 收集）
    - **Acceptance:** 有 key 时同一次实测覆盖 Exa search 与 Exa contents（`web_fetch`）；非 2xx / 超时 typed 失败可见。无 key 时日志写 Not run + 命令名，SC10 标未过。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T3]
