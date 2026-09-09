@@ -46,6 +46,8 @@ import { TRACE_OUTPUT_BACKSTOP } from "../../../../src/traceserver/output-backst
 const scratchPaths: string[] = [];
 const RESULT_TEXT = "tool output secret";
 const OVERSIZE_NOTE_CHARS = 25_000;
+/** T6 (SC16): 会话落两级树 `<dir>/projects/<slug>/<convId>/trace.jsonl`。 */
+const TEST_PROJECT_SLUG = "test-project-aci-get-record";
 
 function makeTraceDir(prefix = "iknow-get-record-aci-"): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -54,8 +56,11 @@ function makeTraceDir(prefix = "iknow-get-record-aci-"): string {
 }
 
 function writeSession(dir: string, conversationId: string, rows: unknown[]) {
+  mkdirSync(join(dir, "projects", TEST_PROJECT_SLUG, conversationId), {
+    recursive: true,
+  });
   writeFileSync(
-    join(dir, `${conversationId}.jsonl`),
+    join(dir, "projects", TEST_PROJECT_SLUG, conversationId, "trace.jsonl"),
     rows.map((row) => JSON.stringify(row)).join("\n") + "\n",
     "utf8"
   );
@@ -389,11 +394,24 @@ describe("get_record ACI tool", () => {
   }, 120_000);
 
   it("maps the reader's `io_error` (TraceReadError) instead of leaking it bare", async () => {
-    // `get_record` 先用 existsSync 判会话在不在，所以把 `<conversation_id>.jsonl`
-    // 造成一个**目录**就能越过 session 判定、在 reader 里确定性地拿到 EISDIR ——
-    // 不需要 root 或 chmod，CI 安全。这是本面第六条（也是唯一非 typed 表的）路。
+    // T6 (SC14–SC17): under the two-level tree, `findConversationTraceFile` stat
+    // requires a *file* at `<convDir>/trace.jsonl` (a directory named like the
+    // file no longer passes the discovery gate — it now reads as
+    // session_not_found). The deterministic io_error left on this OS is a
+    // permission-denied read: stat succeeds (stat needs no read bit), the
+    // reader's openSync gets EACCES, and the mapper wraps it as TraceReadError.
+    // POSIX-only; skipped where the read bit is not enforced (Windows).
     const dir = makeTraceDir("iknow-get-record-aci-io-");
-    mkdirSync(join(dir, "c1.jsonl"));
+    writeSession(dir, "c1", [toolResultRow("c1", "llm-target")]);
+    const { chmodSync } = await import("node:fs");
+    const tracePath = join(
+      dir,
+      "projects",
+      TEST_PROJECT_SLUG,
+      "c1",
+      "trace.jsonl"
+    );
+    chmodSync(tracePath, 0o000);
     const tool = createGetRecordTool({ traceDir: dir });
 
     await assert.rejects(
@@ -408,7 +426,8 @@ describe("get_record ACI tool", () => {
         !(error instanceof GetRecordSessionNotFoundError) &&
         !(error instanceof GetRecordScanError) &&
         !(error instanceof GetRecordWindowOverflowError) &&
-        error.message === "get_record: trace file read failed: EISDIR"
+        typeof error.message === "string" &&
+        error.message.startsWith("get_record: trace file read failed")
     );
   });
 

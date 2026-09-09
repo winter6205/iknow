@@ -48,6 +48,11 @@ import { TraceReadError } from "../../src/traceserver/types.ts";
  */
 
 const traceDirs: string[] = [];
+/**
+ * T6 (SC16): all sessions sit at
+ *   `<traceDir>/projects/<slug>/<convId>/trace.jsonl`.
+ */
+const TEST_PROJECT_SLUG = "test-project-get-record-core";
 
 afterEach(() => {
   for (const traceDir of traceDirs.splice(0)) {
@@ -70,11 +75,41 @@ function writeSession(
   conversationId: string,
   rows: ReadonlyArray<Record<string, unknown>>
 ): void {
+  mkdirSync(join(traceDir, "projects", TEST_PROJECT_SLUG, conversationId), {
+    recursive: true,
+  });
   writeFileSync(
-    join(traceDir, `${conversationId}.jsonl`),
+    join(
+      traceDir,
+      "projects",
+      TEST_PROJECT_SLUG,
+      conversationId,
+      "trace.jsonl"
+    ),
     rows.map(jsonLine).join(""),
     "utf8"
   );
+}
+
+/**
+ * T6 (SC10/SC14): blob dir sits at `<traceDir>/projects/<slug>/<convId>/blobs`.
+ * Mirror of the writer's `JsonlTraceService` default (T3, ADR-0071 D4).
+ */
+function writeBlobFile(
+  traceDir: string,
+  conversationId: string,
+  sha: string,
+  stored: unknown
+): void {
+  const blobDir = join(
+    traceDir,
+    "projects",
+    TEST_PROJECT_SLUG,
+    conversationId,
+    "blobs"
+  );
+  mkdirSync(blobDir, { recursive: true });
+  writeFileSync(join(blobDir, sha), JSON.stringify(stored), "utf8");
 }
 
 function llmCallRow(
@@ -329,12 +364,17 @@ describe("get_record core — record addressing", () => {
     assert.ok(!("raw" in manifest.record));
   });
 
-  it("lets a TraceReadError through unprefixed, and reaches it deterministically", async () => {
-    // A *directory* named `<conversation_id>.jsonl` is the one IO failure that
-    // needs neither root nor chmod: existsSync passes, so the session exists as
-    // far as this axis is concerned, and the reader's readSync answers EISDIR.
+  it("surfaces a TraceSessionNotFoundError when the conversation folder has no trace.jsonl", async () => {
+    // T6 (SC14–SC17): the conv folder exists but carries no trace.jsonl. The
+    // old layout would EISDIR a directory named `<convId>.jsonl`; the new
+    // layout skips folders without the canonical name. The session is therefore
+    // "not found" (vs. "session folder present but unreadable"). The test now
+    // pins that distinction: TraceSessionNotFoundError comes through with the
+    // exact conversation_id the caller sent, unprefixed.
     const traceDir = makeTraceDir();
-    mkdirSync(join(traceDir, "c1.jsonl"));
+    mkdirSync(join(traceDir, "projects", TEST_PROJECT_SLUG, "c1"), {
+      recursive: true,
+    });
 
     await assert.rejects(
       () =>
@@ -343,9 +383,8 @@ describe("get_record core — record addressing", () => {
           record_id: "llm-1",
         }),
       (error: unknown) =>
-        error instanceof TraceReadError &&
-        error.kind === "io_error" &&
-        error.message === "trace file read failed: EISDIR"
+        error instanceof TraceSessionNotFoundError &&
+        error.conversationId === "c1"
     );
   });
 
@@ -1236,8 +1275,7 @@ describe("get_record core — blobs, output shape, and description", () => {
     const traceDir = makeTraceDir();
     const stored = { role: "user", content: [{ type: "text", text: "b0" }] };
     const sha = "a".repeat(64);
-    mkdirSync(join(traceDir, "blobs"), { recursive: true });
-    writeFileSync(join(traceDir, "blobs", sha), JSON.stringify(stored), "utf8");
+    writeBlobFile(traceDir, "c1", sha, stored);
     const core = coreFor(traceDir, [
       llmCallRow("c1", 1, { messages: [{ sha, bytes: 10 }] }),
     ]);
@@ -1511,9 +1549,7 @@ describe("get_record core — role projection (v1.2)", () => {
       },
       {
         role: "assistant",
-        content: [
-          { type: "text", text: "a0" },
-        ],
+        content: [{ type: "text", text: "a0" }],
       },
       {
         role: "user",
@@ -1569,12 +1605,7 @@ describe("get_record core — role projection (v1.2)", () => {
       content: [{ type: "text", text: "from-blob" }],
     };
     const sha = "a".repeat(64);
-    mkdirSync(join(traceDir, "blobs"), { recursive: true });
-    writeFileSync(
-      join(traceDir, "blobs", sha),
-      JSON.stringify(stored),
-      "utf8"
-    );
+    writeBlobFile(traceDir, "c1", sha, stored);
     const core = coreFor(traceDir, [
       llmCallRow("c1", 1, { messages: [{ sha, bytes: 10 }] }),
     ]);
@@ -1612,4 +1643,3 @@ describe("get_record core — role projection (v1.2)", () => {
     );
   });
 });
-

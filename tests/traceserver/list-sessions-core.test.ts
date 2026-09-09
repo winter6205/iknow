@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -46,6 +47,13 @@ import { TraceReadError } from "../../src/traceserver/types.ts";
 const traceDirs: string[] = [];
 const SECOND_MS = 1_000;
 const BASE_EPOCH = 1_600_000_000;
+/**
+ * T6 (SC16): all sessions sit at
+ *   `<traceDir>/projects/<slug>/<convId>/trace.jsonl`.
+ * Same slug across every test here, since sessions inside one project is the
+ * case under test, not cross-project enumeration.
+ */
+const TEST_PROJECT_SLUG = "test-project-list-sessions-core";
 
 afterEach(() => {
   for (const traceDir of traceDirs.splice(0)) {
@@ -114,7 +122,14 @@ function writeSession(
   rows: ReadonlyArray<Record<string, unknown>>,
   ageSeconds: number
 ): void {
-  const path = join(traceDir, `${conversationId}.jsonl`);
+  const path = join(
+    traceDir,
+    "projects",
+    TEST_PROJECT_SLUG,
+    conversationId,
+    "trace.jsonl"
+  );
+  mkdirSync(join(path, ".."), { recursive: true });
   writeFileSync(
     path,
     rows.map((row) => JSON.stringify(row)).join("\n") + "\n",
@@ -145,7 +160,14 @@ function writeSession(
  */
 function realisticSessionFile(traceDir: string, index: number): string {
   const conversationId = randomUUID();
-  const path = join(traceDir, `${conversationId}.jsonl`);
+  const path = join(
+    traceDir,
+    "projects",
+    TEST_PROJECT_SLUG,
+    conversationId,
+    "trace.jsonl"
+  );
+  mkdirSync(join(path, ".."), { recursive: true });
   writeFileSync(
     path,
     [
@@ -223,7 +245,14 @@ describe("list_sessions core — what it answers", () => {
     // update the description and the cost paragraph in sessions.ts, not to
     // relax the assertion.
     const traceDir = makeTraceDir();
-    const path = join(traceDir, "long-run.jsonl");
+    const path = join(
+      traceDir,
+      "projects",
+      TEST_PROJECT_SLUG,
+      "long-run",
+      "trace.jsonl"
+    );
+    mkdirSync(join(path, ".."), { recursive: true });
     writeFileSync(
       path,
       [
@@ -296,7 +325,9 @@ describe("list_sessions core — what it answers", () => {
   it("keeps the four SessionSummary keys and passes mtime/size through from stat", async () => {
     const traceDir = makeTraceDir();
     rootedSession(traceDir, "only-one");
-    const stats = statSync(join(traceDir, "only-one.jsonl"));
+    const stats = statSync(
+      join(traceDir, "projects", TEST_PROJECT_SLUG, "only-one", "trace.jsonl")
+    );
 
     const page = await pageOf(createListSessionsCore({ traceDir }), {});
 

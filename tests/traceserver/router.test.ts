@@ -14,7 +14,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import * as http from "node:http";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTraceRouter } from "../../src/traceserver/serve.ts";
@@ -68,6 +68,11 @@ function asServerResponse(res: FakeRes): http.ServerResponse {
 // -- fixtures ------------------------------------------------------------------
 
 const tmpDirs: string[] = [];
+/**
+ * T6 (SC16): all sessions sit at
+ *   `<dir>/projects/<slug>/<convId>/trace.jsonl`.
+ */
+const TEST_PROJECT_SLUG = "test-project-router";
 
 function mkTmp(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -81,8 +86,11 @@ afterEach(() => {
 });
 
 function writeSession(dir: string, convId: string): void {
+  mkdirSync(join(dir, "projects", TEST_PROJECT_SLUG, convId), {
+    recursive: true,
+  });
   writeFileSync(
-    join(dir, `${convId}.jsonl`),
+    join(dir, "projects", TEST_PROJECT_SLUG, convId, "trace.jsonl"),
     JSON.stringify({
       conversation_id: convId,
       record_type: "turn",

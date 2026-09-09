@@ -1,6 +1,3 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-
 import {
   messageRole,
   projectToolResultsFromTrace,
@@ -8,6 +5,7 @@ import {
 import { projectRecordBase } from "./record-lookup.js";
 import { TRACE_OUTPUT_BACKSTOP } from "./output-backstop.js";
 import { createJsonlTraceReader } from "./reader.js";
+import { findConversationTraceFile } from "./session-discovery.js";
 import {
   TRACE_RECORD_TYPES,
   type TraceRecordRow,
@@ -83,8 +81,8 @@ export function createQueryTraceCore(
     // missing file raises `session_not_found`, not the silent empty envelope the
     // pre-T7 default returned when the implicit "newest session" was also
     // missing.
-    const filePath = join(traceDir, `${parsed.conversationId}.jsonl`);
-    if (!existsSync(filePath)) {
+    const filePath = findConversationTraceFile(traceDir, parsed.conversationId);
+    if (filePath === undefined) {
       throw new TraceSessionNotFoundError(parsed.conversationId);
     }
     const reader = createJsonlTraceReader({ filePath });

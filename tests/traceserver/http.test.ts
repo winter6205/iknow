@@ -25,7 +25,13 @@
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -36,6 +42,12 @@ import {
 // -- per-test server lifecycle ------------------------------------------------
 
 const tmpDirs: string[] = [];
+/**
+ * T6 (SC16): all sessions sit at
+ *   `<dir>/projects/<slug>/<convId>/trace.jsonl`.
+ * Same slug across every test (one project, multiple conversations).
+ */
+const TEST_PROJECT_SLUG = "test-project-http";
 let listening: TraceListeningServer | undefined;
 let origin: string;
 
@@ -81,7 +93,9 @@ function sessionRootLine(convId: string, agentVersion?: string): string {
 }
 
 function writeSessionFile(dir: string, convId: string, lines: string[]): void {
-  writeFileSync(join(dir, `${convId}.jsonl`), lines.join("\n") + "\n", "utf8");
+  const path = join(dir, "projects", TEST_PROJECT_SLUG, convId, "trace.jsonl");
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, lines.join("\n") + "\n", "utf8");
 }
 
 /**
@@ -107,7 +121,11 @@ function writeSampleTraceDir(dir: string): void {
     }),
   ]);
   // 回拨 c2 的 mtime, 保证 c1 是最近活跃。
-  utimesSync(join(dir, "c2.jsonl"), new Date(0), new Date(0));
+  utimesSync(
+    join(dir, "projects", TEST_PROJECT_SLUG, "c2", "trace.jsonl"),
+    new Date(0),
+    new Date(0)
+  );
 
   writeSessionFile(dir, "c1", [
     JSON.stringify({
@@ -307,7 +325,11 @@ describe("GET /api/v1/traces — default conversation_id → most-recent session
         status: "ok",
       }),
     ]);
-    utimesSync(join(tmp, "old.jsonl"), new Date(0), new Date(0));
+    utimesSync(
+      join(tmp, "projects", TEST_PROJECT_SLUG, "old", "trace.jsonl"),
+      new Date(0),
+      new Date(0)
+    );
     // 新会话 (最近活跃)。
     writeSessionFile(tmp, "new", [
       JSON.stringify({

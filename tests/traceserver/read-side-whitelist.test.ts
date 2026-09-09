@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, it } from "vitest";
@@ -9,7 +9,10 @@ import {
   TRACE_FIELD_DEFS,
   TRACE_RECORD_TYPES,
 } from "../../src/traceserver/index.ts";
-import { startTraceServe, type TraceListeningServer } from "../../src/traceserver/serve.ts";
+import {
+  startTraceServe,
+  type TraceListeningServer,
+} from "../../src/traceserver/serve.ts";
 
 const rows = [
   {
@@ -56,8 +59,19 @@ describe("T7 traceserver read-side contract", () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "iknow-traceserver-t7-"));
-    tracePath = join(tmpDir, "c1.jsonl");
-    writeFileSync(tracePath, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    // T6 (SC16): 会话落两级树 `<tmpDir>/projects/<slug>/c1/trace.jsonl`。
+    tracePath = join(
+      tmpDir,
+      "projects",
+      "test-project-whitelist",
+      "c1",
+      "trace.jsonl"
+    );
+    mkdirSync(join(tracePath, ".."), { recursive: true });
+    writeFileSync(
+      tracePath,
+      rows.map((row) => JSON.stringify(row)).join("\n") + "\n"
+    );
   });
 
   afterEach(async () => {
@@ -66,10 +80,7 @@ describe("T7 traceserver read-side contract", () => {
   });
 
   it("appends verification and goal to the record-type whitelist", () => {
-    assert.deepEqual(
-      TRACE_RECORD_TYPES.slice(-2),
-      ["verification", "goal"]
-    );
+    assert.deepEqual(TRACE_RECORD_TYPES.slice(-2), ["verification", "goal"]);
   });
 
   it("declares scalar verification and goal columns", () => {
@@ -112,7 +123,9 @@ describe("T7 traceserver read-side contract", () => {
       const body = (await response.json()) as {
         records: Array<Record<string, unknown>>;
       };
-      assert.ok(body.records.every((record) => record.record_type === recordType));
+      assert.ok(
+        body.records.every((record) => record.record_type === recordType)
+      );
     }
 
     const turnResponse = await fetch(
@@ -122,7 +135,10 @@ describe("T7 traceserver read-side contract", () => {
     const turnBody = (await turnResponse.json()) as {
       records: Array<Record<string, unknown>>;
     };
-    assert.deepEqual(turnBody.records.map((record) => record.verification_id), ["v-2"]);
+    assert.deepEqual(
+      turnBody.records.map((record) => record.verification_id),
+      ["v-2"]
+    );
   });
 
   it("rejects an empty turn_id with a typed validation response", async () => {

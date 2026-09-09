@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, it } from "vitest";
@@ -36,12 +36,25 @@ const scratchPaths: string[] = [];
  * mkdtemp-only, and `pool: "forks"` runs each file in its own process.
  */
 const SCAN_CAP_TEST_TIMEOUT = 20_000;
+/** T6 (SC16): 会话落两级树 `<dir>/projects/<slug>/<convId>/trace.jsonl`。 */
+const TEST_PROJECT_SLUG = "test-project-aci-query-trace";
 
-function makeTraceDir(): string {
+function writeSession(convId: string, jsonl: string): string {
   const dir = mkdtempSync(join(tmpdir(), "iknow-query-trace-"));
   scratchPaths.push(dir);
+  mkdirSync(join(dir, "projects", TEST_PROJECT_SLUG, convId), {
+    recursive: true,
+  });
   writeFileSync(
-    join(dir, "c1.jsonl"),
+    join(dir, "projects", TEST_PROJECT_SLUG, convId, "trace.jsonl"),
+    jsonl
+  );
+  return dir;
+}
+
+function makeTraceDir(): string {
+  return writeSession(
+    "c1",
     [
       {
         conversation_id: "c1",
@@ -87,7 +100,6 @@ function makeTraceDir(): string {
       .map((row) => JSON.stringify(row))
       .join("\n") + "\n"
   );
-  return dir;
 }
 
 afterEach(() => {
@@ -307,8 +319,11 @@ describe("query_trace ACI tool -- role projection (v1.2)", () => {
     // past a non-assistant message to find the assistant tail.
     const dir = mkdtempSync(join(tmpdir(), "iknow-query-trace-v12-"));
     scratchPaths.push(dir);
+    mkdirSync(join(dir, "projects", TEST_PROJECT_SLUG, "c-v12"), {
+      recursive: true,
+    });
     writeFileSync(
-      join(dir, "c-v12.jsonl"),
+      join(dir, "projects", TEST_PROJECT_SLUG, "c-v12", "trace.jsonl"),
       [
         {
           conversation_id: "c-v12",
@@ -357,8 +372,11 @@ describe("query_trace ACI tool -- role projection (v1.2)", () => {
     // 钉住「缺席」语义, 不退化为 empty string.
     const dir = mkdtempSync(join(tmpdir(), "iknow-query-trace-v12-no-"));
     scratchPaths.push(dir);
+    mkdirSync(join(dir, "projects", TEST_PROJECT_SLUG, "c-v12"), {
+      recursive: true,
+    });
     writeFileSync(
-      join(dir, "c-v12.jsonl"),
+      join(dir, "projects", TEST_PROJECT_SLUG, "c-v12", "trace.jsonl"),
       [
         {
           conversation_id: "c-v12",

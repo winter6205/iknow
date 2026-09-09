@@ -16,7 +16,7 @@
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionHub } from "../../src/session-api/hub.ts";
@@ -32,10 +32,13 @@ let traceDir: string;
 let listening: ListeningServer;
 let origin: string;
 
-/** 写一个单会话 trace 目录（v2 每会话一文件）。 */
+/** 写一个单会话 trace 目录（T6 两级树 `<dir>/projects/<slug>/<convId>/trace.jsonl`）。 */
 async function writeSession(dir: string, convId: string): Promise<void> {
+  await mkdir(join(dir, "projects", "test-project-trace-mounted", convId), {
+    recursive: true,
+  });
   await writeFile(
-    join(dir, `${convId}.jsonl`),
+    join(dir, "projects", "test-project-trace-mounted", convId, "trace.jsonl"),
     JSON.stringify({
       conversation_id: convId,
       record_type: "turn",

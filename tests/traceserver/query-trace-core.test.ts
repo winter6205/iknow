@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, it } from "vitest";
@@ -33,6 +33,11 @@ import { TraceQueryValidationError } from "../../src/traceserver/query-trace-err
  */
 
 const traceDirs: string[] = [];
+/**
+ * T6 (SC16): all sessions sit at
+ *   `<traceDir>/projects/<slug>/<convId>/trace.jsonl`.
+ */
+const TEST_PROJECT_SLUG = "test-project-query-trace-core";
 
 afterEach(() => {
   for (const traceDir of traceDirs.splice(0)) {
@@ -50,7 +55,7 @@ function jsonLine(row: Record<string, unknown>): string {
   return `${JSON.stringify(row)}\n`;
 }
 
-/** Write `content` to `<traceDir>/<conversationId>.jsonl` (one file per session). */
+/** Write `content` to the conversation's `trace.jsonl` under the two-level tree. */
 function writeSession(
   traceDir: string,
   conversationId: string,
@@ -58,7 +63,19 @@ function writeSession(
 ): string {
   const text =
     content.length === 0 || content.endsWith("\n") ? content : `${content}\n`;
-  writeFileSync(join(traceDir, `${conversationId}.jsonl`), text);
+  mkdirSync(join(traceDir, "projects", TEST_PROJECT_SLUG, conversationId), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(
+      traceDir,
+      "projects",
+      TEST_PROJECT_SLUG,
+      conversationId,
+      "trace.jsonl"
+    ),
+    text
+  );
   return text;
 }
 

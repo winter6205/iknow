@@ -10,8 +10,16 @@ export interface TraceFixture {
 export function createTraceFixture(): TraceFixture {
   const traceDir = mkdtempSync(join(tmpdir(), "iknow-trace-mcp-"));
   mkdirSync(traceDir, { recursive: true });
+  // T6 (SC16): 会话落两级树 `<traceDir>/projects/<slug>/<convId>/trace.jsonl`。
+  const convDir = join(
+    traceDir,
+    "projects",
+    "test-project-trace-mcp",
+    "conversation-1"
+  );
+  mkdirSync(convDir, { recursive: true });
   writeFileSync(
-    join(traceDir, "conversation-1.jsonl"),
+    join(convDir, "trace.jsonl"),
     [
       {
         conversation_id: "conversation-1",

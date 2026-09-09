@@ -24,7 +24,13 @@
 
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -263,8 +269,16 @@ describe("buildHarnessEngine — subagentsDir 注入缝 (T5 SC8 + L2)", () => {
 
   it("subagentDiagnosticsDir → query_trace reads that tree, not workspaceRoot/trace", async () => {
     const customDir = mkdtempSync(join(tmpdir(), "iknow-query-trace-dir-"));
+    // T6 (SC16): 会话落两级树 `<baseDir>/projects/<slug>/<convId>/trace.jsonl`。
+    const convDir = join(
+      customDir,
+      "projects",
+      "test-project-subagent-trace",
+      "c-custom"
+    );
+    mkdirSync(convDir, { recursive: true });
     writeFileSync(
-      join(customDir, "c-custom.jsonl"),
+      join(convDir, "trace.jsonl"),
       `${JSON.stringify({
         conversation_id: "c-custom",
         record_type: "turn",

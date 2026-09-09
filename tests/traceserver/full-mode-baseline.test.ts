@@ -15,7 +15,7 @@
  * → tool-1（bash 调用 + result）→ llm-2（累计重复 messages，含 assistant
  * tool_use + user tool_result）→ turn-1。
  */
-import { mkdtempSync, rmSync, copyFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -35,6 +35,8 @@ const FIXTURE_PATH = join(
 );
 
 const traceDirs: string[] = [];
+/** T6 (SC16): fixture 会话落两级树 `<traceDir>/projects/<slug>/baseline-conv/trace.jsonl`。 */
+const TEST_PROJECT_SLUG = "test-project-full-baseline";
 
 afterEach(() => {
   for (const dir of traceDirs.splice(0)) {
@@ -42,11 +44,23 @@ afterEach(() => {
   }
 });
 
-/** 把 fixture 复制进临时 traceDir，保持 `baseline-conv.jsonl` 会话名。 */
+/** 把 fixture 复制进临时 traceDir 的两级树落点，保持 `baseline-conv` 会话名。 */
 function makeTraceDirWithFixture(): string {
   const traceDir = mkdtempSync(join(tmpdir(), "iknow-full-baseline-"));
   traceDirs.push(traceDir);
-  copyFileSync(FIXTURE_PATH, join(traceDir, "baseline-conv.jsonl"));
+  mkdirSync(join(traceDir, "projects", TEST_PROJECT_SLUG, "baseline-conv"), {
+    recursive: true,
+  });
+  copyFileSync(
+    FIXTURE_PATH,
+    join(
+      traceDir,
+      "projects",
+      TEST_PROJECT_SLUG,
+      "baseline-conv",
+      "trace.jsonl"
+    )
+  );
   return traceDir;
 }
 
