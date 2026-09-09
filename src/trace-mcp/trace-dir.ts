@@ -1,6 +1,16 @@
 import { statSync } from "node:fs";
 import { resolve } from "node:path";
 
+/**
+ * review-fix (L-tracedir):trace-mcp stdio MCP 入口的**旧 wire 默认** —— 该
+ * MCP server 是独立进程(T1 之前形态,见 `iknow-trace-mcp` bin),其 argv
+ * `--trace-out` 或 env `IKNOW_TRACE_OUT` 都缺省时的退路;不在本仓库 serve
+ * 路径的 `resolveServeDataDir()` 默认链上(T1 已迁移)。
+ *
+ * 不改成 `resolveServeDataDir()` 同源 —— 该默认值在 trace-mcp stdio 进程
+ * 上下文中不应触发数据目录派生(后者依赖 `dataDir / workspaceRoot` 派生,
+ * trace-mcp 进程无 workspaceRoot 概念);保留 `./trace/` 退路保向下兼容。
+ */
 const DEFAULT_TRACE_DIR = "./trace/";
 
 export interface TraceMcpEnvironment {

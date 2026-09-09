@@ -34,6 +34,7 @@ import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../config/settings.j
 import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
 import { writeSituation } from "../isolation/write-situation.js";
 import { sanitizeConversationSegment } from "../session-roots.js";
+import { SUBAGENT_TRACE_DIR_NAME } from "../../shared/session-tree-names.js";
 
 // re-export: manager 的调用方(T4/T5 工具、host-drain)统一从 manager 侧拿
 // SubAgentDefinition,不必各自 import role.js。
@@ -143,10 +144,6 @@ export class SubAgentWaitTimeoutError extends Error {
  * 立即抛 SubAgentCapacityError(显式失败,模型可降并发重试;不 queue 不静默)。
  */
 export const MAX_CONCURRENT_WORKERS = DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS;
-
-/** review-fix (M5):本模块内 SSOT —— 与 session-store 的同名常量同值但
- *  不跨域 import(harness 不 import session-api)。 */
-const SUBAGENT_TRACE_DIR_NAME = "subagents";
 
 /**
  * #361 C1: spawn 并发超限 typed 拒绝。字段 `{ status:"failed", reason:"capacity",

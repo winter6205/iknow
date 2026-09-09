@@ -78,6 +78,10 @@ import {
   sanitizeConversationSegment,
   SessionRootError,
 } from "../../harness/session-roots.js";
+import {
+  PROJECTS_DIR_NAME,
+  SUBAGENT_TRACE_DIR_NAME,
+} from "../../shared/session-tree-names.js";
 
 export type SessionBindingStatus = "unbound" | "invalid" | "bound";
 
@@ -131,7 +135,7 @@ export function resolveProjectSessionDir(
     .slice(0, 12);
   return join(
     baseDir,
-    "projects",
+    PROJECTS_DIR_NAME,
     `${basename(projectIdentityRoot)}-${digest}`
   );
 }
@@ -191,18 +195,13 @@ export function resolveConversationTraceFilePath(opts: {
 }
 
 /**
- * T5 (plans/session-folder-consolidation.md / ADR-0071 Decision 1 +
- * ADR-0035 同日 Amendment):子代理记录嵌进父会话文件夹,落在
- * `<projectDir>/<conversationId>/subagents/` 下。
- *
- * 单文件聚合形态(`<traceOut>/subagent.jsonl`,conversationId="subagent",
- * 全机所有子代理聚合成一个文件)按 SC8 退役;改 per-agent 形态后,各子代理
- * 的 lifecycle / content trace + `.meta.json` 都按 taskId 散列到该目录下。
- *
- * 派生而不是字符串拼接:复用 `resolveConversationDir` 的 sanitize 与长度边界,
- * 保证同 `(projectDir, conversationId)` 派生到同一目录。
+ * review-fix (M2/M3):re-export 自 `shared/session-tree-names.ts` ——
+ * 单一字面量 SSOT 在 shared 层(session-store / harness manager /
+ * traceserver 三方中立层)。本 re-export 保向下兼容(老 callers
+ * `import { SUBAGENT_TRACE_DIR_NAME } from "...store/session-store"`
+ * 不破)。
  */
-export const SUBAGENT_TRACE_DIR_NAME = "subagents";
+export { SUBAGENT_TRACE_DIR_NAME } from "../../shared/session-tree-names.js";
 
 export function resolveSubagentTraceDir(opts: {
   readonly projectDir: string;

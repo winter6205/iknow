@@ -28,6 +28,10 @@
 import { readdirSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { isEnoent, wrapIoError } from "./io.js";
+import {
+  PROJECTS_DIR_NAME,
+  SUBAGENT_TRACE_DIR_NAME,
+} from "../shared/session-tree-names.js";
 
 /** 会话列表条目的读侧元数据（wire 形状 snake_case）。 */
 export interface SessionSummary {
@@ -108,9 +112,6 @@ function agentVersionFromText(text: string | undefined): string | undefined {
 
 // -- 目录扫描 ------------------------------------------------------------------
 
-const PROJECTS_DIR_NAME = "projects";
-const SUBAGENTS_DIR_NAME = "subagents";
-
 /**
  * List every session in `traceDir` by two-level readdir + stat.
  *
@@ -147,7 +148,7 @@ export function listSessions(traceDir: string): SessionSummary[] {
     }
     for (const convDirName of convDirNames) {
       // SC16: 排除 subagents/ 文件夹 —— 它在 <project-slug>/ 下挂载, 不是会话。
-      if (convDirName === SUBAGENTS_DIR_NAME) continue;
+      if (convDirName === SUBAGENT_TRACE_DIR_NAME) continue;
       const convDir = join(projectDir, convDirName);
       const filePath = join(convDir, TRACE_FILE_NAME_FOR_LIST);
       let stats;
