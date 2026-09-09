@@ -24,6 +24,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
+import { createSearchBackendError } from "../../../../src/harness/aci/tools/web-search-errors.ts";
 import {
   createWebSearchTool,
   type WebSearchToolDeps,
@@ -527,5 +528,132 @@ describe("createWebSearchTool — concurrency", () => {
     assert.ok(!alpha.includes("beta title"));
     assert.match(beta, /beta title/);
     assert.ok(!beta.includes("alpha title"));
+  });
+});
+
+describe("ACI web backend — search fallback (SC4)", () => {
+  function defaultBingDeps(
+    extras: Partial<WebSearchToolDeps> = {}
+  ): WebSearchToolDeps {
+    return {
+      ...searchDeps(bingBody(1), 200, "https://www.bing.com/search"),
+      ...extras,
+    };
+  }
+
+  it("tavily stub falls back to default retrieval, not not_shipped", async () => {
+    const tool = createWebSearchTool(
+      defaultBingDeps({ backend: "tavily", tavilyApiKey: "tvly-test" })
+    );
+    const out = (await tool.handler({ query: "fallback" })) as string;
+    assert.match(out, /Bing Title 1/);
+    assert.ok(!out.includes("not_shipped"));
+  });
+
+  it("brave without a key falls back to default retrieval", async () => {
+    const tool = createWebSearchTool(defaultBingDeps({ backend: "brave" }));
+    const out = (await tool.handler({ query: "fallback" })) as string;
+    assert.match(out, /Bing Title 1/);
+    assert.ok(!out.includes("not_shipped"));
+    assert.ok(!out.includes("missing_key"));
+  });
+
+  it("exa without a key falls back to default retrieval", async () => {
+    const tool = createWebSearchTool(defaultBingDeps({ backend: "exa" }));
+    const out = (await tool.handler({ query: "fallback" })) as string;
+    assert.match(out, /Bing Title 1/);
+    assert.ok(!out.includes("missing_key"));
+  });
+
+  it("exa + key keeps the Exa path and does not hit the HTML guard fetch", async () => {
+    let guardHits = 0;
+    const tool = createWebSearchTool({
+      fetch: async () => {
+        guardHits += 1;
+        return {
+          status: 200,
+          contentType: "text/html",
+          body: bingBody(1),
+        };
+      },
+      lookup: okLookup,
+      backend: "exa",
+      exaApiKey: "exa-test",
+      backendFactory: () => ({
+        id: "exa",
+        fetchResults: async () => ({
+          results: [
+            {
+              title: "Exa Hit",
+              url: "https://exa.example.com/",
+              highlights: ["vendor snip"],
+            },
+          ],
+        }),
+        project: () => [
+          {
+            title: "Exa Hit",
+            url: "https://exa.example.com/",
+            snippet: "vendor snip",
+          },
+        ],
+        describe: () => ({ adapter: "exa", latencyMs: 1 }),
+      }),
+    });
+    const out = (await tool.handler({ query: "vendor" })) as string;
+    assert.equal(guardHits, 0);
+    assert.match(out, /Exa Hit/);
+  });
+
+  it("exa + key surfaces vendor 5xx as typed failure, not a capability fallback (S2 exception)", async () => {
+    let guardHits = 0;
+    const tool = createWebSearchTool({
+      fetch: async () => {
+        guardHits += 1;
+        return {
+          status: 200,
+          contentType: "text/html",
+          body: bingBody(1),
+        };
+      },
+      lookup: okLookup,
+      backend: "exa",
+      exaApiKey: "exa-test",
+      backendFactory: () => ({
+        id: "exa",
+        fetchResults: async () => {
+          throw createSearchBackendError({
+            kind: "http_non_2xx",
+            message: "upstream returned status 503",
+            endpoint: "https://api.exa.ai/search",
+          });
+        },
+        project: () => [],
+        describe: () => ({ adapter: "exa", latencyMs: 1 }),
+      }),
+    });
+    await expectToolError(
+      () => Promise.resolve(tool.handler({ query: "vendor-fail" })),
+      "http_non_2xx"
+    );
+    assert.equal(guardHits, 0);
+  });
+
+  it("unset backend keeps the default Bing HTML path (SC2)", async () => {
+    const hosts: string[] = [];
+    const tool = createWebSearchTool({
+      fetch: async (url) => {
+        hosts.push(new URL(url).hostname);
+        return {
+          status: 200,
+          contentType: "text/html",
+          body: bingBody(1),
+        };
+      },
+      lookup: okLookup,
+    });
+    const out = (await tool.handler({ query: "default" })) as string;
+    assert.ok(hosts.every((h) => h.endsWith("bing.com")));
+    assert.match(out, /Bing Title 1/);
   });
 });
