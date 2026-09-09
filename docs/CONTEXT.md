@@ -119,6 +119,15 @@ _Avoid_: 把 meta 拼入 model tool_result；让 TUI / Web 直接读 handler 原
 **ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；当前 8 件：`bash` / `read_file` / `grep` / `glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`，SSOT 工厂 = `src/harness/aci/tools/registry.ts:createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取，工具数永不同步漂移（#141 / #191 / a277f68）。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。
 _Avoid_: 在 harness 之外另起 tool 注册表；在 entry point 手写工具数组（#228 决议 D4——`memory_recall` / `memory_save` 入 SSOT 8+2=10）；让工具返回结构化 metadata
 
+**ACI network surface**: 装配层网络三职——发现是 `web_search`，阅读是 `web_fetch`，通话不升第 9 件工具、只走 `bash` 的 `network: true`（ADR-0022）。形状冻结；发现与阅读的后端选择见 **ACI web backend**。
+_Avoid_: curl 工具; http_request; HTTP 原语; 把 method / headers 并进 web_fetch
+
+**ACI web backend**: 发现与阅读共用一个后端名；该后端缺搜索或缺抓取时，缺的那一头回落到内建默认（搜索走现行默认检索，阅读走本机 `web_fetch` + `network-guard`）。
+_Avoid_: 分设 search_backend 与 fetch_backend; 把缺的能力当成已接通; 缺抓取时改走 bash curl
+
+**host-net amplify**: `bash` 带 `network: true` 且 ask 被同意后，该次调用宿主网零过滤；不是按域名的小开，也不另注册 curl 工具（ADR-0022；出口过滤见 ADR-0072）。
+_Avoid_: 批完再滤; 沙箱代理当默认; 一等 curl 工具
+
 **声明工具面 vs 实际工具面**: `SubAgentDefinition.disallowedTools` 写进 `WorkerEnvelope` 的是声明面；worker 进程装配后真正可被模型调用的工具集是实际面，二者必须相等——裁剪发生在 `createAciRegistry(tools)` **之前**的 def-list 期（`createDefaultAciRegistry` 工厂内），由构造期快照保证，不事后修补（`AciRegistry.inner` 是冻结快照）。
 _Avoid_: 给 `AciRegistry` 加 `.tools` 字段在产物上事后裁剪；声明 deny-list 但 worker 不消费（#468 修复对象）
 
