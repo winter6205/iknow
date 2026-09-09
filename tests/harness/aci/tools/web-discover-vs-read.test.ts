@@ -10,6 +10,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 
+import { createWebFetchTool } from "../../../../src/harness/aci/tools/web-fetch.ts";
+import { createWebSearchTool } from "../../../../src/harness/aci/tools/web-search.ts";
 import {
   DISCOVER_VS_READ_FIXTURES,
   fixtureById,
@@ -49,6 +51,25 @@ describe("web discover vs read golden set (fixtures)", () => {
     assertFixtureRunnable(fixture);
     assert.equal(httpUrlsIn(fixture.userPrompt).length, 0);
     assert.match(fixture.userPrompt, /search/i);
+  });
+});
+
+describe("web discover vs read descriptions (SC4)", () => {
+  it("web_search describes discover-by-keyword, not fetch-on-each-URL pairing", () => {
+    const description = createWebSearchTool().description;
+    assert.match(description, /\b(search|discover)\b/i);
+    assert.doesNotMatch(
+      description,
+      /Pair with web_fetch on each returned URL/i
+    );
+    assert.doesNotMatch(description, /before reading them with web_fetch/i);
+  });
+
+  it("web_fetch describes read-when-you-have-the-URL, not skip-search-as-default", () => {
+    const description = createWebFetchTool().description;
+    assert.match(description, /when you have the URL/i);
+    assert.match(description, /\b(fetch|read)\b/i);
+    assert.doesNotMatch(description, /skip search/i);
   });
 });
 
