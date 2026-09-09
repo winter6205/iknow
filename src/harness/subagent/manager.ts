@@ -13,6 +13,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import {
   attachParentVisibleTmp,
+  shouldAttachProductRoster,
   parseParentEnvelope,
   truncateEnvelopeResult,
   SUMMARY_LIMIT,
@@ -41,7 +42,7 @@ import {
   workerFenceTmpPath,
   workerMetaPath,
 } from "../sandbox/fence-tmp.js";
-import { inspectWorkerPad } from "./pad-inspect.js";
+import { inspectWorkerPad, listPadTopLevelNames } from "./pad-inspect.js";
 import type { PadQueryResult } from "./pad-inspect.js";
 
 export type { PadQueryResult } from "./pad-inspect.js";
@@ -551,10 +552,15 @@ export function createSubAgentManager(opts: {
 
   function locateEnvelope(task: Task, env: SubAgentEnvelope): SubAgentEnvelope {
     if (task.padRoot === undefined) return env;
-    return attachParentVisibleTmp(env, {
+    const located = attachParentVisibleTmp(env, {
       task_id: task.id,
       tmp_root: task.padRoot,
     });
+    if (!shouldAttachProductRoster(located)) return located;
+    return {
+      ...located,
+      product_roster: listPadTopLevelNames(task.padRoot),
+    };
   }
   /**
    * SC8: per-task `.meta.json` 一次性写盘 —— 至少含

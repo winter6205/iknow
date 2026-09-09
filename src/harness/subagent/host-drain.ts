@@ -82,7 +82,12 @@ function formatDrainedResults(
         visible.tmp_root !== undefined && visible.tmp_root.length > 0
           ? `\n\ntask_id: ${visible.task_id ?? taskId}\ntmp_root: ${visible.tmp_root}`
           : "";
-      return `${SUBAGENT_DRAIN_PREFIX}${taskId} result: ${visible.summary}\n\n${visible.result}${locator}`;
+      const roster =
+        visible.product_roster !== undefined &&
+        visible.product_roster.length > 0
+          ? `\n\nproduct_roster: ${visible.product_roster.join(", ")}`
+          : "";
+      return `${SUBAGENT_DRAIN_PREFIX}${taskId} result: ${visible.summary}\n\n${visible.result}${locator}${roster}`;
     })
     .join("\n\n");
 }

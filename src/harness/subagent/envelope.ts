@@ -285,6 +285,21 @@ function failedSummary(env: SubAgentEnvelope): string {
     : `subagent failed: ${env.reason}`;
 }
 
+/**
+ * SC5: empty handoff, or crash / timeout / truncated terminal.
+ * Host may attach a short top-level pad roster (names only).
+ */
+export function shouldAttachProductRoster(env: SubAgentEnvelope): boolean {
+  if (env.truncated === true) return true;
+  if (env.reason === "crashed" || env.reason === "timeout") return true;
+  if (env.summary.length === 0 && env.result.length === 0) return true;
+  return (
+    env.status === "failed" &&
+    env.result.length === 0 &&
+    env.summary === failedSummary(env)
+  );
+}
+
 function shortHandoff(
   summary: string,
   fileRefs: readonly string[] | undefined,

@@ -14,6 +14,8 @@ import { isAbsolute, relative, resolve } from "node:path";
 
 /** Same default window as `read_file` (`DEFAULT_LIMIT`). */
 const READ_FILE_DEFAULT_LIMIT = 200;
+/** Short envelope roster cap — same window as `read_file` list length. */
+export const PAD_ROSTER_NAME_LIMIT = READ_FILE_DEFAULT_LIMIT;
 const READ_FILE_MAX_FILE_BYTES = 1_048_576;
 
 export type PadInspectRejectReason = "path_escape" | "not_a_file";
@@ -59,6 +61,15 @@ function formatReadFileSlice(text: string): {
       .join("\n"),
     truncated,
   };
+}
+
+/** Top-level pad names for SC5 envelope roster (no file bodies). */
+export function listPadTopLevelNames(
+  padRoot: string | undefined
+): readonly string[] {
+  const listed = inspectWorkerPad(padRoot);
+  if (listed.status !== "list") return [];
+  return listed.names.slice(0, PAD_ROSTER_NAME_LIMIT);
 }
 
 export function inspectWorkerPad(
