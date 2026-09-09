@@ -191,6 +191,7 @@ import {
 // 读取器(grep 守卫钉死,见 tests/tui/environment-pane.test.tsx)。
 import {
   envSnapshotFromEvent,
+  resolveWorktreeChromeRoot,
   worktreeIsolationLines,
 } from "./environment-pane.js";
 import type { EnvSnapshot } from "../harness/env-snapshot.js";
@@ -2667,7 +2668,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 0 行,与今日一致。只读投影（worktreeIsolationLines）,零 git 操作。
   const envPaneRowBudget =
     view === "chat"
-      ? worktreeIsolationLines(active.workspaceRoot, cols).length
+      ? worktreeIsolationLines(
+          resolveWorktreeChromeRoot(active.workspaceRoot, liveTaskRoot?.read()),
+          cols,
+          props.cwd
+        ).length
       : 0;
   void envSnapshot;
   // #458 包2 T3:verify 闭环终态 banner 行数投影 —— active 会话槽 + 模式
@@ -2998,7 +3003,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           graph 之上；envPaneRows 槽位入账不变）。未绑定 → worktreeIsolationLines
           返回空 → 不渲染。 */}
       {view === "chat" &&
-        worktreeIsolationLines(active.workspaceRoot, cols).map((line, idx) => (
+        worktreeIsolationLines(
+          resolveWorktreeChromeRoot(active.workspaceRoot, liveTaskRoot?.read()),
+          cols,
+          props.cwd
+        ).map((line, idx) => (
           <text key={idx} fg={line.fg} wrapMode="none">
             {line.text}
           </text>

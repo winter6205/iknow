@@ -30,6 +30,7 @@ import {
   EnvironmentPane,
   envSnapshotFromEvent,
   envSnapshotLines,
+  resolveWorktreeChromeRoot,
   worktreeIsolationLines,
 } from "../../src/tui/environment-pane.js";
 import { chromeReserveRows } from "../../src/tui/app.js";
@@ -322,14 +323,35 @@ describe("no agent_status in environment-pane: 平行独立流", () => {
 // ---------------------------------------------------------------------------
 
 describe("worktreeIsolationLines: 会话 worktree 隔离现势", () => {
-  test("已绑定 task worktree → 1 行，含 worktree 标识与绑定根路径", () => {
+  test("已绑定 task worktree → 1 行，文案是项目到树的相对路径（不是绝对目录）", () => {
     const lines = worktreeIsolationLines(
       "/repo/.iknow/worktrees/conv-1",
-      80
+      80,
+      "/repo"
     );
     expect(lines.length).toBe(1);
     expect(lines[0]!.text).toContain("worktree:");
-    expect(lines[0]!.text).toContain("/repo/.iknow/worktrees/conv-1");
+    expect(lines[0]!.text).toContain(".iknow/worktrees/conv-1");
+    expect(lines[0]!.text).not.toContain("/repo/.iknow/worktrees/conv-1");
+  });
+
+  test("未传项目根时仍只显示 .iknow/worktrees/<叶>，不写盘符全路径", () => {
+    const lines = worktreeIsolationLines(
+      "/home/user/projects/iknow/.iknow/worktrees/my-label",
+      80
+    );
+    expect(lines[0]!.text).toContain("worktree: .iknow/worktrees/my-label");
+    expect(lines[0]!.text).not.toContain("/home/user");
+  });
+
+  test("项目根下的嵌套仓内树 → 从项目根起的相对路径", () => {
+    const lines = worktreeIsolationLines(
+      "/repo/wt/.iknow/worktrees/conv-2",
+      80,
+      "/repo"
+    );
+    expect(lines[0]!.text).toContain("worktree: wt/.iknow/worktrees/conv-2");
+    expect(lines[0]!.text).not.toContain("/repo/wt");
   });
 
   test("未绑定（undefined / null / 空串）→ 0 行（与今日一致，无多余状态）", () => {
@@ -392,6 +414,23 @@ describe("app.tsx worktree 隔离现势挂载契约", () => {
       "utf8"
     );
     expect(src.includes("worktreeIsolationLines")).toBe(true);
+    expect(src.includes("resolveWorktreeChromeRoot")).toBe(true);
+    expect(src.includes("liveTaskRoot")).toBe(true);
+  });
+});
+
+describe("resolveWorktreeChromeRoot: 活 taskRoot 优先于会话主根", () => {
+  test("会话仍是主仓、活根已是 task worktree → 用活根", () => {
+    expect(
+      resolveWorktreeChromeRoot("/repo", "/repo/.iknow/worktrees/label-a")
+    ).toBe("/repo/.iknow/worktrees/label-a");
+  });
+
+  test("活根缺席或非树、会话已是 task worktree → 用会话根", () => {
+    expect(
+      resolveWorktreeChromeRoot("/repo/.iknow/worktrees/conv-1", undefined)
+    ).toBe("/repo/.iknow/worktrees/conv-1");
+    expect(resolveWorktreeChromeRoot("/repo", "/repo")).toBeUndefined();
   });
 });
 

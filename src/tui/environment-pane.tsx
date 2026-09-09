@@ -174,9 +174,52 @@ export function envSnapshotLines(
  *     「已绑定」。
  *   - 复用环境现势的字形纪律(⌂)与 dim 调色,单行按 cols 视觉宽度截断。
  */
+/** 现势行优先活 taskRoot（改绑当回合即可读），否则会话文件 workspaceRoot。 */
+export function resolveWorktreeChromeRoot(
+  sessionWorkspaceRoot: string | null | undefined,
+  liveTaskRoot: string | null | undefined
+): string | undefined {
+  if (liveTaskRoot !== null && liveTaskRoot !== undefined) {
+    const live = liveTaskRoot.trim();
+    if (live.length > 0 && isTaskWorktreePath(live)) return live;
+  }
+  if (sessionWorkspaceRoot !== null && sessionWorkspaceRoot !== undefined) {
+    const session = sessionWorkspaceRoot.trim();
+    if (session.length > 0 && isTaskWorktreePath(session)) return session;
+  }
+  return undefined;
+}
+
+/** 项目根到 task worktree 的相对路径；无项目根则只留 `.iknow/worktrees/<叶>`。 */
+export function taskWorktreeDisplayPath(
+  root: string,
+  projectRoot?: string
+): string {
+  const normalizedRoot = root.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (projectRoot !== undefined && projectRoot.trim().length > 0) {
+    const normalizedProject = projectRoot
+      .replace(/\\/g, "/")
+      .replace(/\/+$/, "");
+    if (
+      normalizedRoot === normalizedProject ||
+      normalizedRoot.startsWith(`${normalizedProject}/`)
+    ) {
+      const rel = normalizedRoot
+        .slice(normalizedProject.length)
+        .replace(/^\//, "");
+      if (rel.length > 0) return rel;
+    }
+  }
+  const marker = "/.iknow/worktrees/";
+  const idx = normalizedRoot.lastIndexOf(marker);
+  if (idx >= 0) return normalizedRoot.slice(idx + 1);
+  return normalizedRoot;
+}
+
 export function worktreeIsolationLines(
   root: string | null | undefined,
-  cols: number
+  cols: number,
+  projectRoot?: string
 ): ReadonlyArray<EnvSnapshotLine> {
   if (root === null || root === undefined || root.trim().length === 0) {
     return [];
@@ -187,8 +230,9 @@ export function worktreeIsolationLines(
   if (!isTaskWorktreePath(root)) {
     return [];
   }
+  const display = taskWorktreeDisplayPath(root, projectRoot);
   const text = clipOneLineVisual(
-    `${HEADER_PREFIX}worktree: ${root}`,
+    `${HEADER_PREFIX}worktree: ${display}`,
     Math.max(0, cols)
   );
   return [{ fg: tuiPalette.dim, text }];
