@@ -19,13 +19,29 @@
  * （createAciRegistry 装配时编译 inputSchema，additionalProperties:false），
  * 工具 handler 收的是已校验 input——此处不重复测（依赖 registry 严校验）。
  */
-import { describe, expect, it } from "vitest";
+import { EventEmitter } from "node:events";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { performance } from "node:perf_hooks";
+import { PassThrough } from "node:stream";
+import type { ChildProcess } from "node:child_process";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createSubAgentResultTool } from "../../src/harness/subagent/subagent-result-tool.ts";
-import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
+import {
+  createSubAgentManager,
+  type SubAgentManager,
+} from "../../src/harness/subagent/manager.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { ToolExecutionError } from "../../src/harness/errors.ts";
+import { workerFenceTmpPath } from "../../src/harness/sandbox/fence-tmp.ts";
 
 /** fake manager：queryBuffer 按 taskId 映射四态之一；其余成员面 stub。 */
 function makeFakeManager(): SubAgentManager {
@@ -218,9 +234,196 @@ describe("subagent_result — AciToolDef 元数据", () => {
     const schema = tool.inputSchema as {
       required: string[];
       additionalProperties: boolean;
+      properties: Record<string, unknown>;
     };
     expect(schema.required).toEqual(["task_id"]);
     expect(schema.additionalProperties).toBe(false);
+    expect(schema.properties.tmp_path).toEqual({
+      type: "string",
+      description: expect.stringMatching(/relative/i),
+    });
     expect(Object.isFrozen(tool)).toBe(true);
+  });
+});
+
+/**
+ * T5 (parent-visible-tmp): list / read worker pad via subagent_result.
+ * Real manager + on-disk pad — fake queryBuffer cannot prove SC3/S2-B.
+ */
+interface FakeChild {
+  readonly stdin: PassThrough;
+  readonly stdout: PassThrough;
+  readonly stderr: PassThrough;
+  readonly kill: ReturnType<typeof vi.fn>;
+  emit: (event: string | symbol, ...args: unknown[]) => boolean;
+}
+
+function makePadChild(): FakeChild {
+  return Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    kill: vi.fn(() => true),
+    exitCode: null,
+    signalCode: null,
+    pid: 1001,
+  }) as unknown as FakeChild;
+}
+
+function emitPadEnvelope(child: FakeChild, env: SubAgentEnvelope): void {
+  child.stdout.write(`${JSON.stringify(env)}\n`);
+  child.emit("exit", env.status === "ok" ? 0 : 1, null);
+}
+
+function flushPadTicks(): Promise<void> {
+  return new Promise((r) => setImmediate(r)).then(
+    () => new Promise((r) => setImmediate(r))
+  );
+}
+
+const padScratch: string[] = [];
+
+function makePadScratch(): { root: string; subagentsDir: string } {
+  const root = mkdtempSync(join(tmpdir(), "iknow-t5-pad-"));
+  padScratch.push(root);
+  const subagentsDir = join(root, "subagents");
+  mkdirSync(subagentsDir, { recursive: true });
+  return { root, subagentsDir };
+}
+
+describe("subagent_result — T5 pad list/read (SC3 / SC6 / S2-B)", () => {
+  let subagentsDir: string;
+  let sessionRoot: string;
+
+  beforeEach(() => {
+    const made = makePadScratch();
+    sessionRoot = made.root;
+    subagentsDir = made.subagentsDir;
+  });
+
+  afterEach(() => {
+    for (const path of padScratch.splice(0)) {
+      rmSync(path, { recursive: true, force: true });
+    }
+  });
+
+  async function spawnSettled(fileOnPad?: { name: string; body: string }) {
+    const child = makePadChild();
+    const manager = createSubAgentManager({
+      spawn: () => child as unknown as ChildProcess,
+      subagentsDir,
+    });
+    const { taskId } = manager.spawn({ task: "pad" });
+    const pad = workerFenceTmpPath(subagentsDir, taskId);
+    mkdirSync(pad, { recursive: true });
+    if (fileOnPad !== undefined) {
+      writeFileSync(join(pad, fileOnPad.name), fileOnPad.body, "utf8");
+    }
+    emitPadEnvelope(child, { status: "ok", summary: "done", result: "done" });
+    await flushPadTicks();
+    const tool = createSubAgentResultTool({ manager });
+    return { manager, tool, taskId, pad };
+  }
+
+  it("S2-B empty: 合法 task_id + 空垫底 → tmp_names 空列表，不是错误", async () => {
+    const { tool, taskId } = await spawnSettled();
+    const parsed = JSON.parse(tool.handler({ task_id: taskId })) as {
+      status: string;
+      tmp_names?: unknown;
+    };
+    expect(parsed.status).not.toBe("not_found");
+    expect(parsed.status).not.toBe("rejected");
+    expect(parsed.tmp_names).toEqual([]);
+  });
+
+  it("SC3: 只传 task_id → 顶层名字含 worker 写下的文件", async () => {
+    const { tool, taskId } = await spawnSettled({
+      name: "z",
+      body: "worker-pad-body",
+    });
+    const parsed = JSON.parse(tool.handler({ task_id: taskId })) as {
+      tmp_names?: string[];
+    };
+    expect(parsed.tmp_names).toContain("z");
+  });
+
+  it("SC3: 再传相对 tmp_path → 读到内容（截断形态同 read_file）", async () => {
+    const { tool, taskId } = await spawnSettled({
+      name: "z",
+      body: "worker-pad-body\n",
+    });
+    const parsed = JSON.parse(
+      tool.handler({ task_id: taskId, tmp_path: "z" })
+    ) as { status: string; content?: string; truncated?: boolean };
+    expect(parsed.status).toBe("ok");
+    expect(parsed.content).toMatch(/worker-pad-body/);
+    expect(parsed.content).toMatch(/^\s*1\tworker-pad-body$/m);
+    expect(parsed.truncated).toBe(false);
+  });
+
+  it("SC6 / S2-B negative: 未知 task_id → typed not_found", () => {
+    const manager = createSubAgentManager({
+      spawn: () => makePadChild() as unknown as ChildProcess,
+      subagentsDir,
+    });
+    const tool = createSubAgentResultTool({ manager });
+    const out = tool.handler({ task_id: "no-such-task" });
+    expect(out).toBe(JSON.stringify({ status: "not_found" }));
+  });
+
+  it("SC6 / S2-B exception: tmp_path 含 .. 或逃逸垫底 → typed reject，不读垫底外文件", async () => {
+    const secret = join(sessionRoot, "secret.txt");
+    writeFileSync(secret, "SESSION-SECRET", "utf8");
+    const { tool, taskId, pad } = await spawnSettled({
+      name: "z",
+      body: "inside",
+    });
+    const escaped = JSON.parse(
+      tool.handler({ task_id: taskId, tmp_path: "../secret.txt" })
+    ) as { status: string; reason?: string; content?: string };
+    expect(escaped.status).toBe("rejected");
+    expect(escaped.reason).toBe("path_escape");
+    expect(JSON.stringify(escaped)).not.toContain("SESSION-SECRET");
+    expect(readFileSync(secret, "utf8")).toBe("SESSION-SECRET");
+
+    const dotted = JSON.parse(
+      tool.handler({ task_id: taskId, tmp_path: "z/../../secret.txt" })
+    ) as { status: string; reason?: string };
+    expect(dotted.status).toBe("rejected");
+    expect(dotted.reason).toBe("path_escape");
+
+    const abs = JSON.parse(
+      tool.handler({ task_id: taskId, tmp_path: secret })
+    ) as { status: string; reason?: string };
+    expect(abs.status).toBe("rejected");
+    expect(abs.reason).toBe("path_escape");
+
+    expect(readFileSync(join(pad, "z"), "utf8")).toBe("inside");
+  });
+
+  it("S2-B overflow: 超过 read_file 默认 200 行 → 截断，不灌全文", async () => {
+    const lines = Array.from({ length: 250 }, (_, i) => `L${i + 1}`);
+    const { tool, taskId } = await spawnSettled({
+      name: "big.txt",
+      body: `${lines.join("\n")}\n`,
+    });
+    const parsed = JSON.parse(
+      tool.handler({ task_id: taskId, tmp_path: "big.txt" })
+    ) as { content?: string; truncated?: boolean };
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.content).toMatch(/L200/);
+    expect(parsed.content).not.toMatch(/L201/);
+    expect(parsed.content).not.toMatch(/L250/);
+  });
+
+  it("handler 带 tmp_path 仍同步非阻塞（不暴露 waitFor/drain）", async () => {
+    const { tool, taskId, manager } = await spawnSettled({
+      name: "z",
+      body: "x",
+    });
+    const t0 = performance.now();
+    tool.handler({ task_id: taskId, tmp_path: "z" });
+    expect(performance.now() - t0).toBeLessThanOrEqual(10);
+    expect(manager.waitFor).not.toBe(tool.handler);
   });
 });

@@ -34,19 +34,38 @@ export interface SubAgentResultToolDeps {
   readonly manager: SubAgentManager;
 }
 
+function serializePoll(
+  result: ReturnType<SubAgentManager["queryBuffer"]>
+): object {
+  if (
+    result.status === "ok" ||
+    (result.status === "failed" &&
+      "result" in result &&
+      typeof result.result === "string")
+  ) {
+    return projectParentVisibleEnvelope(result);
+  }
+  return result;
+}
+
 export function createSubAgentResultTool(
   deps: SubAgentResultToolDeps
 ): AciToolDef {
   return Object.freeze({
     name: "subagent_result",
     description:
-      "Poll a sub-agent that was spawned with wait:false (or re-check after a wait:true completion); sync non-blocking, call again later to re-poll. Returns one JSON object whose parent-visible short handoff centers on `status`, `summary`, changed paths (`fileRefs`), and `stop_reason` when available: `status` ∈ `not_found` (no such task — unknown or expired id) / `running` / `completed` / `failed` (failed reports `reason` and `summary`).",
+      "Poll a sub-agent that was spawned with wait:false (or re-check after a wait:true completion); sync non-blocking, call again later to re-poll. Returns one JSON object whose parent-visible short handoff centers on `status`, `summary`, changed paths (`fileRefs`), and `stop_reason` when available: `status` ∈ `not_found` (no such task — unknown or expired id) / `running` / `completed` / `failed` (failed reports `reason` and `summary`). With only `task_id`, also lists top-level names on that worker's fence `/tmp` pad (`tmp_names`). Optional relative `tmp_path` reads one pad file (truncation same as read_file); `..` or pad escape is a typed reject.",
     inputSchema: {
       type: "object",
       properties: {
         task_id: {
           type: "string",
           description: "The task_id returned by spawn_subagent.",
+        },
+        tmp_path: {
+          type: "string",
+          description:
+            "Optional path relative to that worker's fence /tmp pad. Omit to list top-level names; pass to read one file.",
         },
       },
       required: ["task_id"],
@@ -69,17 +88,45 @@ export function createSubAgentResultTool(
           "subagent_result: missing or invalid `task_id`"
         );
       }
-      // 同步非阻塞：直返 manager.queryBuffer 的序列化结果。
-      const result = deps.manager.queryBuffer(taskId);
-      if (
-        result.status === "ok" ||
-        (result.status === "failed" &&
-          "result" in result &&
-          typeof result.result === "string")
-      ) {
-        return JSON.stringify(projectParentVisibleEnvelope(result));
+      const tmpPathRaw = obj.tmp_path;
+      if (tmpPathRaw !== undefined && typeof tmpPathRaw !== "string") {
+        throw new ToolExecutionError("subagent_result: invalid `tmp_path`");
       }
-      return JSON.stringify(result);
+      const tmpPath =
+        typeof tmpPathRaw === "string" && tmpPathRaw.length > 0
+          ? tmpPathRaw
+          : undefined;
+      // 同步非阻塞：queryBuffer + queryPad（无 waitFor / drain）。
+      const result = deps.manager.queryBuffer(taskId);
+      if (result.status === "not_found") {
+        return JSON.stringify({ status: "not_found" });
+      }
+      const queryPad = deps.manager.queryPad;
+      if (queryPad !== undefined) {
+        const pad = queryPad(taskId, tmpPath);
+        if (pad.status === "not_found") {
+          return JSON.stringify({ status: "not_found" });
+        }
+        if (pad.status === "rejected") {
+          return JSON.stringify({
+            status: "rejected",
+            reason: pad.reason,
+          });
+        }
+        if (pad.status === "read") {
+          return JSON.stringify({
+            status: "ok",
+            tmp_path: tmpPath,
+            content: pad.content,
+            truncated: pad.truncated,
+          });
+        }
+        return JSON.stringify({
+          ...serializePoll(result),
+          tmp_names: pad.names,
+        });
+      }
+      return JSON.stringify(serializePoll(result));
     },
   });
 }

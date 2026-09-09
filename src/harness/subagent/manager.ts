@@ -41,6 +41,10 @@ import {
   workerFenceTmpPath,
   workerMetaPath,
 } from "../sandbox/fence-tmp.js";
+import { inspectWorkerPad } from "./pad-inspect.js";
+import type { PadQueryResult } from "./pad-inspect.js";
+
+export type { PadQueryResult } from "./pad-inspect.js";
 
 // re-export: manager 的调用方(T4/T5 工具、host-drain)统一从 manager 侧拿
 // SubAgentDefinition,不必各自 import role.js。
@@ -83,6 +87,12 @@ export interface SubAgentManager {
   readonly spawn: (def: SubAgentDefinition) => { readonly taskId: string };
   /** 同步非阻塞四态查询(SC5)。 */
   readonly queryBuffer: (taskId: string) => QueryBufferResult;
+  /**
+   * T5: sync list/read of this worker's fence-tmp pad. Unknown id →
+   * `not_found` (same discriminant as queryBuffer). Optional on the
+   * interface so poll-only fakes stay structural.
+   */
+  readonly queryPad?: (taskId: string, tmpPath?: string) => PadQueryResult;
   /**
    * #361 C3: 第三参 `signal?: AbortSignal` —— caller abort → reject
    * SubAgentAbortError(与 SubAgentWaitTimeoutError 类型区分)。首查终态路径
@@ -1290,6 +1300,12 @@ export function createSubAgentManager(opts: {
     };
   }
 
+  function queryPad(taskId: string, tmpPath?: string): PadQueryResult {
+    const task = tasks.get(taskId);
+    if (!task) return { status: "not_found" };
+    return inspectWorkerPad(task.padRoot, tmpPath);
+  }
+
   function waitFor(
     taskId: string,
     timeoutMs?: number,
@@ -1557,6 +1573,7 @@ export function createSubAgentManager(opts: {
   return Object.freeze({
     spawn,
     queryBuffer,
+    queryPad,
     waitFor,
     shutdown,
     drainCompleted,
