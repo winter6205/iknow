@@ -347,8 +347,11 @@ _Avoid_: 把 escalate 当无限轮次；降级放行（验证未通过算完成�
 **判官（judge）**: 共用的只读 LLM 分类器系统（四态；内环 `maxTurns: 2`）；完成向评价只挂 goal 功能逻辑模块。
 _Avoid_: 另起一个 goal 专用判官产品；command 缺失就当总开关每轮请判官；给判官执行能力；与 evidence-checker 混同
 
-**checker 三态 verdict**: 证据充分性判定 = `EVIDENCE_SUFFICIENT` / `EVIDENCE_CONTRADICTED` / `EVIDENCE_INSUFFICIENT`；6 条检查封装在 `evidence-checker.ts` 内部。HITL 用它做硬失败/补跑；goal 功能里它只进 `evidenceContext` 当提示，绿了仍要 LLM 评 `goal.text`。
-_Avoid_: 与闭环「三态判定」混同；调用方自数 PASS 条件；`SUFFICIENT` 当作 goal 功能已完成
+**checker 三态 verdict**: 证据充分性判定 = `EVIDENCE_SUFFICIENT` / `EVIDENCE_CONTRADICTED` / `EVIDENCE_INSUFFICIENT`；6 条检查封装在 `evidence-checker.ts` 内部。HITL 用 SUFFICIENT 短路、用 INSUFFICIENT 表示没验过（不请完成向判官、不打绿勾）；CONTRADICTED 在 HITL 不当打回。goal 功能里 CONTRADICTED 仍可硬否决；绿了仍要 LLM 评 `goal.text`。
+_Avoid_: 与闭环「三态判定」混同；调用方自数 PASS 条件；`SUFFICIENT` 当作 goal 功能已完成；HITL 见 rm/写空测试就打回
+
+**声称位置**: `checkEvidence` 的窗口右端 = `messages` 数组下标，对准最后一条有非空 text 的 assistant（与 `deriveFinalText` 同一次回扫）；不是 verify 闭环的 `round`。
+_Avoid_: 把验证轮次当 claimIndex；首轮只看 messages[0]
 
 **green marker**: 测试框架输出里的通过摘要行（白名单 pytest / jest / vitest / go test / cargo test）；checker 只从框架摘要行读通过数字。
 _Avoid_: 扫描任意 stdout 判绿；白名单外自造框架解析
@@ -480,6 +483,7 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **Session HTTP -> run() -> AssistantTurnResult -> SessionHub**: session-api host 路径；messages 每回合投影到 UI
 - **正常模式 vs 自动模式**: HITL 每轮还键盘 vs 权限 `full_auto` 本轮不问工具；goal 功能不是这一对
 - **HITL 判官 vs goal 功能**: 两套判断逻辑模块，共用判官系统；不是一条 `goal ?? query` 链（ADR-0024 机制仍在，产品口不叫自动模式）
+- **声称位置 vs verify round**: 窗口右端是 messages 下标（与 `finalText` 同源回扫）；`round` 只记验证第几轮（ADR-0073）
 - **continue_pending vs goal 功能**: continue 是 HITL 同一会话 skip-append；`/goal` 钉着则拒绝（`goal_active`），禁止把 continue 当 goal 续跑的下一跳
 - **自动模式 vs goal 功能**: 自动模式是权限；goal 功能是斜杠钉使命后的续跑。正交，可同时开
 - **continue_pending vs in-flight closeout**: continue 只消费 `store.load` 的 closeout 投影补悬空 `tool_use`；不另写 sanitize 去删改 tool 对，也不把 closeout 本身当续跑口令

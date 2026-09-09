@@ -78,13 +78,14 @@
 
 ### 2.2 交互与 Agent 体验
 
-| 缺口                    | 说明                                                                                  |
-| ----------------------- | ------------------------------------------------------------------------------------- |
-| **9router key 对齐**    | shell key 与 9router chat 对齐仍为运维项（探针 `scripts/i4-probe-nine-endpoints.ts`） |
-| **指代/省略续问鲁棒性** | LLM 依赖模型与 harness history，未系统评测                                            |
-| **澄清轮（0 tool）**    | 设计允许「意图不清先问」；未作为一等状态机落地                                        |
-| **anthropic_tools**     | 仅 openai_tools；选 anthropic 会 fail-closed                                          |
-| **全量 context 打包**   | history 有字符预算；未从窗口严格扣 system/tools/检索正文                              |
+| 缺口                     | 说明                                                                                                                                  |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| **9router key 对齐**     | shell key 与 9router chat 对齐仍为运维项（探针 `scripts/i4-probe-nine-endpoints.ts`）                                                 |
+| **指代/省略续问鲁棒性**  | LLM 依赖模型与 harness history，未系统评测                                                                                            |
+| **澄清轮（0 tool）**     | 设计允许「意图不清先问」；未作为一等状态机落地                                                                                        |
+| **声称窗口 / HITL 绿勾** | **已落地**：`claimIndex`=声称位置（非 `round`）；HITL CONTRADICTED 不打回；闲聊不打绿勾。见 ADR-0073 / `specs/verify-claim-window.md` |
+| **anthropic_tools**      | 仅 openai_tools；选 anthropic 会 fail-closed                                                                                          |
+| **全量 context 打包**    | history 有字符预算；未从窗口严格扣 system/tools/检索正文                                                                              |
 
 ### 2.3 协议开放项（设计未决，禁止静默定稿）
 

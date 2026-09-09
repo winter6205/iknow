@@ -3,6 +3,7 @@
 > 来源：#449 map 的 G2 #451（规则引擎位置 / PASS 公式 / 三态 verdict 制）+ G4 #453（框架白名单 / 时效 / anti-gaming 两档 / fail-closed）+ G3 #452（D2 自动探测方向）；移植蓝图 = R2 #456（did-it evidence.py + agent-receipts gaming.py + truth structured/count 分层）；证据基线 = R3 #457（bash exit code 在 tool_result 结构化 JSON；插入点缝）。
 > 上游 map：#449（verify 证据优先判定）。
 > 定位：本 spec = **纯函数层**（G2-1 明示落点 `src/harness/verify/evidence-checker.ts`），零 IO、零 LLM、零 loop 接线；编排层（何时请判官、`task` 从哪来）归 SPEC `verify-goal-gate.md`。旧编排 spec `449-verify-evidence-first-loop.md` 已归档。
+> **`claimIndex` 与 HITL 对 CONTRADICTED 的消费 amended by** `specs/verify-claim-window.md` / ADR-0073：窗口右端是 messages 下标（不是 verify `round`）；HITL 不把本层 CONTRADICTED 当打回。
 > 假设闸门：operator 已授权"自己决策、自己审完写好"（delegated assumption confirmation）。
 
 ## Glossary（exact copy from docs/CONTEXT.md + 决议新术语）
@@ -84,7 +85,7 @@ export interface EvidenceReport {
 
 export function checkEvidence(args: {
   readonly messages: ReadonlyArray<AnthropicNativeMessage>; // 只读快照（截至最后一次 compact）
-  readonly claimIndex: number; // completed 声称位置（时效窗口右端）
+  readonly claimIndex: number; // 声称位置 = messages 下标（时效窗口右端）；不是 verify round。权威值由调用方与 deriveFinalText 同源回扫给出（ADR-0073 / specs/verify-claim-window.md）
 }): EvidenceReport;
 
 /** D2：项目标志文件 → 默认验证命令；探测失败返回 null（fail-closed，落判官）。 */
@@ -96,7 +97,7 @@ export function probeVerifyCommand(files: ReadonlyArray<string>): string | null;
 - exit code 提取：先 `JSON.parse` tool_result 首个 text block（`{code, stdout, stderr}`，bash.ts:79-83 → executor.ts:46 文本契约）；解析失败回退 `^Exit code (\d+)`；`is_error=true`（`[execution_failed]` 前缀）→ 无 code。
 - green marker 判定：命令位置锚定 + env 前缀 + 引用剥离识别 runner；**只读摘要行数字**（pytest 需 count+duration 双子句；jest/vitest `N total`/`Tests: N passed`；cargo `test result:`；go `ok pkg`）。
 - 时效：绿测试 turn 之后、claimIndex 之前存在 `edit_file`/`write_file` 且目标路径非 doc-only（`.md`/`.txt`/`docs/` 等）→ stale → 不 SUFFICIENT。bash 内联改文件（`sed -i`/`echo >`）v1 不追（G4-2 已知局限）。
-- CONTRADICTED 触发（二进制事实才配矛盾，truth count-based 永不指控）：`write_file` 把测试文件清空（内容 ≈ 空）；bash `rm` 测试文件。
+- CONTRADICTED 触发（二进制事实才配矛盾，truth count-based 永不指控）：`write_file` 把测试文件清空（内容 ≈ 空）；bash `rm` 测试文件。**纯函数仍报此态**；HITL 是否打回见 `verify-claim-window.md` / ADR-0073（正常会话不打回，`/goal` 仍硬否决）。
 - D2 探测表（v1 覆盖面）：`pyproject.toml`/`pytest.ini`→`pytest`；`package.json`（含 vitest dep）→`npx vitest run`、（含 jest dep）→`npx jest`；`go.mod`→`go test ./...`；`Cargo.toml`→`cargo test`。多标志冲突 → null（不猜）。
 
 ## Testing Strategy

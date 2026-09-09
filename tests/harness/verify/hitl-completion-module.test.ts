@@ -14,6 +14,7 @@ import {
   type VerifyLoopOptions,
 } from "../../../src/harness/verify/verify-loop.ts";
 import { REASON_HITL_SKIP_COMPLETION_JUDGE } from "../../../src/harness/verify/types.ts";
+import { projectVerifyHumanView } from "../../../src/session-api/verify-human-view.ts";
 import type { LoopTrace } from "../../../src/harness/loop-trace.ts";
 import type {
   AnthropicContentBlock,
@@ -63,11 +64,20 @@ const GREEN_FIRST_MESSAGES: AnthropicNativeMessage[] = [
   { role: "assistant", content: [textBlock("implemented")] },
 ];
 
-const CONTRADICTED_MESSAGES: AnthropicNativeMessage[] = [
+const CONTRADICTED_EMPTY_WRITE_MESSAGES: AnthropicNativeMessage[] = [
   { role: "assistant", content: bashGreenBlocks("g02") },
   {
     role: "assistant",
     content: [writeFile("w02", "src/foo.test.ts", "")],
+  },
+  { role: "assistant", content: [textBlock("implemented")] },
+];
+
+const CONTRADICTED_RM_MESSAGES: AnthropicNativeMessage[] = [
+  { role: "assistant", content: bashGreenBlocks("g03") },
+  {
+    role: "assistant",
+    content: [toolUse("r03", "rm -f src/foo.test.ts")],
   },
   { role: "assistant", content: [textBlock("implemented")] },
 ];
@@ -163,6 +173,36 @@ function hitlOptions(over: {
   };
 }
 
+/** goal 功能 (`/goal`) uses completionMode: "auto" — not PermissionMode 自动模式. */
+function autoOptions(over: {
+  readonly runFn: VerifyLoopOptions["runFn"];
+  readonly runClassifier: RunClassifierFn;
+}): VerifyLoopOptions {
+  return {
+    ...hitlOptions(over),
+    sessionId: "goal",
+    completionMode: "auto",
+    userText: "/goal ship it",
+  };
+}
+
+function unusedJudgeSpy(): {
+  readonly runClassifier: RunClassifierFn;
+  readonly calls: () => ReadonlyArray<unknown>;
+} {
+  return makeClassifierSpy([
+    {
+      status: "ok",
+      result: JSON.stringify({
+        kind: "pass",
+        reason: "should never spawn",
+        evidence: [],
+      }),
+      summary: "no",
+    },
+  ]);
+}
+
 describe("HITL completion module (plan T1)", () => {
   it("greeting completed + INSUFFICIENT: spawn = 0, named skip EXIT, StopReason stays completed", async () => {
     const { runFn } = makeEvidenceRunFn(GREETING_MESSAGES);
@@ -205,37 +245,117 @@ describe("HITL completion module (plan T1)", () => {
     assert.equal(calls().length, 0);
     assert.equal(out.outcome, "passed");
     assert.equal(out.result.stopReason, "completed");
+    assert.deepEqual(
+      projectVerifyHumanView({
+        outcome: out.outcome,
+        rounds: out.rounds,
+        records: out.records,
+      }),
+      { outcome: "passed", rounds: out.rounds },
+      "HITL SUFFICIENT short-circuit may still show human passed"
+    );
   });
 
-  it("HITL hard fail: inject envelope to main model, spawn = 0", async () => {
+  it("HITL + empty-test write CONTRADICTED: skip judge, no true-failure, no extra worker (SC3)", async () => {
     const { runFn, calls: runCalls } = makeEvidenceRunFn(
-      CONTRADICTED_MESSAGES,
+      CONTRADICTED_EMPTY_WRITE_MESSAGES
+    );
+    const { runClassifier, calls } = unusedJudgeSpy();
+    const out = await runVerifyLoop(hitlOptions({ runFn, runClassifier }));
+    assert.equal(calls().length, 0, "HITL CONTRADICTED must not spawn judge");
+    assert.equal(
+      runCalls().length,
+      1,
+      "no extra worker round for contradicted"
+    );
+    assert.notEqual(out.records[0]?.verdict, "true-failure");
+    assert.equal(out.outcome, "passed");
+    assert.equal(out.result.stopReason, "completed");
+    assert.equal(out.records[0]?.reason, REASON_HITL_SKIP_COMPLETION_JUDGE);
+    assert.equal(
+      out.records[0]?.evidenceVerdict,
+      "EVIDENCE_CONTRADICTED",
+      "HITL CONTRADICTED skip must persist verdict so projection can hide green"
+    );
+    assert.equal(
+      projectVerifyHumanView({
+        outcome: out.outcome,
+        rounds: out.rounds,
+        records: out.records,
+      }),
+      undefined,
+      "HITL CONTRADICTED skip must not wire human 验证通过"
+    );
+  });
+
+  it("HITL + rm test path CONTRADICTED: skip judge, no true-failure, no extra worker (SC3)", async () => {
+    const { runFn, calls: runCalls } = makeEvidenceRunFn(
+      CONTRADICTED_RM_MESSAGES
+    );
+    const { runClassifier, calls } = unusedJudgeSpy();
+    const out = await runVerifyLoop(hitlOptions({ runFn, runClassifier }));
+    assert.equal(calls().length, 0, "HITL CONTRADICTED must not spawn judge");
+    assert.equal(
+      runCalls().length,
+      1,
+      "no extra worker round for contradicted"
+    );
+    assert.notEqual(out.records[0]?.verdict, "true-failure");
+    assert.equal(out.outcome, "passed");
+    assert.equal(out.result.stopReason, "completed");
+    assert.equal(out.records[0]?.reason, REASON_HITL_SKIP_COMPLETION_JUDGE);
+    assert.equal(out.records[0]?.evidenceVerdict, "EVIDENCE_CONTRADICTED");
+    assert.equal(
+      projectVerifyHumanView({
+        outcome: out.outcome,
+        rounds: out.rounds,
+        records: out.records,
+      }),
+      undefined
+    );
+  });
+
+  it("goal 功能 + empty-test write CONTRADICTED: still true-failure hard reject (SC4)", async () => {
+    const { runFn, calls: runCalls } = makeEvidenceRunFn(
+      CONTRADICTED_EMPTY_WRITE_MESSAGES,
       {
         stopReasonFor: (call) => (call === 0 ? "completed" : "maxTurns"),
       }
     );
-    const { runClassifier, calls } = makeClassifierSpy([
-      {
-        status: "ok",
-        result: JSON.stringify({
-          kind: "pass",
-          reason: "should never spawn",
-          evidence: [],
-        }),
-        summary: "no",
-      },
-    ]);
-    const out = await runVerifyLoop(hitlOptions({ runFn, runClassifier }));
+    const { runClassifier, calls } = unusedJudgeSpy();
+    const out = await runVerifyLoop(autoOptions({ runFn, runClassifier }));
     assert.equal(
       calls().length,
       0,
-      "hard fail must not spawn completion judge"
+      "goal 功能 CONTRADICTED must not spawn judge"
     );
     assert.equal(out.records[0]?.verdict, "true-failure");
     assert.equal(
       runCalls()[1]?.lastUserText?.includes("[VALIDATION FAILED]"),
       true,
-      "next runFn must receive failure envelope"
+      "goal 功能 must inject failure envelope"
+    );
+  });
+
+  it("goal 功能 + rm test path CONTRADICTED: still true-failure hard reject (SC4)", async () => {
+    const { runFn, calls: runCalls } = makeEvidenceRunFn(
+      CONTRADICTED_RM_MESSAGES,
+      {
+        stopReasonFor: (call) => (call === 0 ? "completed" : "maxTurns"),
+      }
+    );
+    const { runClassifier, calls } = unusedJudgeSpy();
+    const out = await runVerifyLoop(autoOptions({ runFn, runClassifier }));
+    assert.equal(
+      calls().length,
+      0,
+      "goal 功能 CONTRADICTED must not spawn judge"
+    );
+    assert.equal(out.records[0]?.verdict, "true-failure");
+    assert.equal(
+      runCalls()[1]?.lastUserText?.includes("[VALIDATION FAILED]"),
+      true,
+      "goal 功能 must inject failure envelope"
     );
   });
 });

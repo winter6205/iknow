@@ -69,10 +69,11 @@
 
 ### Verify / 完成门禁
 
-- `verify-goal-gate.md` — HITL vs `/goal` 自动模式两套判断逻辑；完成向 LLM 只挂自动模式（supersedes 归档 `128-verify-classifier` / `458` 判定公式 / `449-loop` 判官门禁）；HITL compact 保焦见 `recent-user-tasks.md`
+- `verify-goal-gate.md` — HITL vs **goal 功能**两套判断逻辑；完成向 LLM 只挂 goal 功能（supersedes 归档 `128-verify-classifier` / `458` 判定公式 / `449-loop` 判官门禁）；HITL compact 保焦见 `recent-user-tasks.md`；HITL 对 CONTRADICTED 的消费 **amended by** `verify-claim-window.md`
+- `verify-claim-window.md` — 声称窗口 = messages 下标（非 `round`）；HITL 不因毁测试打回、闲聊不打绿勾；goal 功能仍硬否决（ADR-0073；plan: `plans/verify-claim-window.md`）
 - `recent-user-tasks.md` — compact 任务摘录（现抽现贴最近用户任务原话；删会话 `taskFocus`）；正交于 PR #601 压缩触发闸
 - `468-subagent-judge-tool-surface.md` — 子代理声明工具面=实际工具面（判官只读契约）
-- `449-evidence-checker.md` — 证据优先纯函数规则引擎（三态 verdict + 三防 + D2 探测）
+- `449-evidence-checker.md` — 证据优先纯函数规则引擎（三态 verdict + 三防 + D2 探测）；`claimIndex` 语义 **amended by** `verify-claim-window.md`
 
 ### Verify 证据优先重构（#449/#458，实施顺序 A→B→C→D）
 

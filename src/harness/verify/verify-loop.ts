@@ -32,6 +32,7 @@ import type {
 } from "../model-adapter/types.js";
 import type { LoopTrace } from "../loop-trace.js";
 import type { TraceService } from "../trace/index.js";
+import { deriveClaimIndex } from "../last-nonempty-assistant.js";
 import { checkEvidence } from "./evidence-checker.js";
 import { probeVerifyCommand } from "./command-probe.js";
 import {
@@ -164,7 +165,7 @@ export interface VerifyLoopOptions {
   /**
    * Completion-facing judge dispatch (ADR-0024).
    * `hitl` = skip LLM judge (named EXIT).
-   * `auto` = `/goal` module: spawn judge on completed unless hard-fail,
+   * `auto` = goal 功能 (`/goal`) judge module: spawn judge on completed unless hard-fail,
    * including checker SUFFICIENT.
    * Omitted keeps the legacy evidence-first short-circuit (SUFFICIENT skips
    * the judge) so existing classifier unit tests stay on the old path.
@@ -826,13 +827,16 @@ async function runVerifyLoopBody(opts: {
     //   EVIDENCE_SUFFICIENT → 默认 PASS 短路 (零判官零重跑, 即便配了 command, G3);
     //     例外: completionMode === "auto" 且 command 空 → 仍 spawn 完成向判官
     //     (ADR-0024 成功也评; 不把 command 沙箱闭环混进来);
-    //   EVIDENCE_CONTRADICTED → true-failure (进修正轮, 趋势/签名机制原样消费);
+    //   EVIDENCE_CONTRADICTED → goal 功能 (completionMode auto) / omitted:
+    //     true-failure (进修正轮);
+    //     HITL: 与 INSUFFICIENT 同 EXIT (跳过完成向判官, 不 true-failure,
+    //     不补跑/不打回干活模型; ADR-0073; HITL 落 evidenceVerdict 供人读投影);
     //   EVIDENCE_INSUFFICIENT → 落原 produceObservation (判官/命令既有机制), 且把
     //     evidenceVerdict + gamingSignals 合并进本轮 observation (buildRecord Postel
-    //     落盘)。SUFFICIENT/CONTRADICTED 不落 evidenceVerdict (B3 Postel 语义)。
+    //     落盘)。SUFFICIENT 与 goal 功能 CONTRADICTED 不落 evidenceVerdict (B3)。
     const evidenceReport = checkEvidence({
       messages: current.result.messages,
-      claimIndex: round,
+      claimIndex: deriveClaimIndex(current.result.messages),
     });
     let pendingEvidence:
       | {
@@ -856,16 +860,28 @@ async function runVerifyLoopBody(opts: {
         outputText: "",
       };
     } else if (evidenceReport.verdict === "EVIDENCE_CONTRADICTED") {
-      observation = {
-        verdict: "true-failure",
-        exitCode: 1,
-        signature: buildFailureSignature({
+      if (options.completionMode === "hitl") {
+        // EXIT: HITL CONTRADICTED consumes like INSUFFICIENT — skip
+        // completion judge, no true-failure, no extra worker/rerun round.
+        // Persist evidenceVerdict so human projection can hide 「验证通过」
+        // (B3 Postel still omits verdict on goal-功能 true-failure / SUFFICIENT).
+        observation = await opts.produceObservation(round, current);
+        pendingEvidence = {
+          evidenceVerdict: "EVIDENCE_CONTRADICTED",
+          gamingSignals: evidenceReport.gamingSignals,
+        };
+      } else {
+        observation = {
+          verdict: "true-failure",
           exitCode: 1,
-          outputText: evidenceReport.reasons.join("\n"),
-          countRegex: undefined,
-        }),
-        outputText: "",
-      };
+          signature: buildFailureSignature({
+            exitCode: 1,
+            outputText: evidenceReport.reasons.join("\n"),
+            countRegex: undefined,
+          }),
+          outputText: "",
+        };
+      }
     } else {
       // #449b B5 补跑信封 (Leader 裁决 v2: 判官路径专属机制): INSUFFICIENT +
       // deriveRerunCommand 非 null (command 空时 probeVerifyCommand 探测命中) 且
@@ -904,8 +920,8 @@ async function runVerifyLoopBody(opts: {
         gamingSignals: evidenceReport.gamingSignals,
       };
     }
-    // 仅 INSUFFICIENT 轮合并 evidenceVerdict/gamingSignals (Postel: 短路轮
-    // 不携带这些字段, buildRecord 不落盘)。
+    // INSUFFICIENT + HITL CONTRADICTED skip 合并 evidenceVerdict (Postel:
+    // SUFFICIENT / goal 功能 CONTRADICTED 短路不携带, buildRecord 不落盘)。
     if (pendingEvidence !== undefined) {
       observation = {
         ...observation,
@@ -1069,7 +1085,7 @@ function runClassifierLoop(
     options,
     maxRounds,
     sessionId,
-    produceObservation: (round, current) => {
+    produceObservation: (_round, current) => {
       if (options.completionMode === "hitl") {
         // EXIT: HITL skips completion-facing LLM; checker already ran.
         return Promise.resolve({
@@ -1081,10 +1097,10 @@ function runClassifierLoop(
       }
       const summary = current.result.finalText ?? "";
       // B6: 复用证据优先前级同源 report (checkEvidence 纯函数幂等, 二次调用
-      // 与 body 前级各自独立无副作用; claimIndex = round 与前级对齐)。
+      // 与 body 前级各自独立无副作用; claimIndex = 声称下标, 与前级对齐)。
       const report = checkEvidence({
         messages: current.result.messages,
-        claimIndex: round,
+        claimIndex: deriveClaimIndex(current.result.messages),
       });
       lastEvidenceContext = buildEvidenceContext(
         report,

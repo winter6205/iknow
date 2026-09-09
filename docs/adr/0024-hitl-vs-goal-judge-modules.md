@@ -7,7 +7,7 @@ Status: accepted
 
 Context: 字段已拆成 goal/taskFocus，但 verify 仍用一条 `goal ?? query`（及更早的 taskFocus）链，把 HITL 聊天接成完成向 LLM 判官；`/goal` 也没有独立自动循环。
 
-Decision: 同一套只读判官系统挂两套逻辑模块。正常模式（HITL）不请 LLM 评语义完成；`/goal` 钉上即自动循环，`task` 仅 `goal.text`，成功也评，停档为 Impossible 清 goal / 空转停循环不清 goal / 不可恢复错误清 goal。无默认轮次硬顶；命令可可选指定上限。自动模式内不存在 taskFocus（`session.taskFocus` 字段已由 ADR-0026 退役；compact 改任务摘录，自动模式不贴）。ADR-0017 的 checker 三级流 shape 保留；其「SUFFICIENT 永不请判官 / INSUFFICIENT 必请」仅覆盖完成向邀请。ADR-0018 的字段拆分与模型零写入保留；判定层三段公式作废。
+Decision: 同一套只读判官系统挂两套逻辑模块。正常模式（HITL）不请 LLM 评语义完成；`/goal` 钉上即自动循环，`task` 仅 `goal.text`，成功也评，停档为 Impossible 清 goal / 空转停循环不清 goal / 不可恢复错误清 goal。无默认轮次硬顶；命令可可选指定上限。自动模式内不存在 taskFocus（`session.taskFocus` 字段已由 ADR-0026 退役；compact 改任务摘录，自动模式不贴）。ADR-0017 的 checker 三级流 shape 保留；其「SUFFICIENT 永不请判官 / INSUFFICIENT 必请」仅覆盖完成向邀请。ADR-0018 的字段拆分与模型零写入保留；判定层三段公式作废。HITL 对 checker CONTRADICTED 的消费与声称窗口坐标 **amended by ADR-0073**（正常会话不因毁测试打回；`claimIndex` ≠ `round`）。
 
 Why: 参考 Claude Code 默认聊天 vs `/goal` Stop hook；统一公式是职责错配。
 

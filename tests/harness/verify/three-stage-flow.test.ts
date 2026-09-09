@@ -12,9 +12,11 @@
  *
  * 后续 bullet (B5 补跑信封 / B7 四态停法 / B9 只读复断言) 追加用例到此文件。
  *
- * messages fixture: B4 精确语义 claimIndex = round; 首轮 round=1 → checker 只计
- * messageIndex < 1 的 run → bash 证据必须在 messageIndex 0。沿用
- * evidence-checker/_fixtures 的 VITEST_GREEN + toolUse/toolResult 构造法。
+ * messages fixture: claimIndex is the messages index of the last assistant
+ * with non-empty text (same backward scan as deriveFinalText), not verify
+ * round. GREEN_FIRST keeps bash at index 0 and the claim at index 1 so the
+ * window still includes that run. Fixtures that pin "evidence must live in
+ * messages[0]" as B4 semantics belong in claim-window.test.ts (SC1).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -91,8 +93,7 @@ function bashFailBlocks(toolUseId: string): AnthropicContentBlock[] {
   ];
 }
 
-/** claimIndex=round=1 时, bash 证据须在 messageIndex 0 (< 1) 才被计入。
- *  绿 bash (index 0) + assistant "done" claim (index 1) → SUFFICIENT。 */
+/** 绿 bash (index 0) + assistant claim (index 1) → SUFFICIENT。 */
 const GREEN_FIRST_MESSAGES: AnthropicNativeMessage[] = [
   {
     role: "assistant",
@@ -120,7 +121,7 @@ const PROBE_OK_MESSAGES: AnthropicNativeMessage[] = [
 ];
 
 /** INSUFFICIENT + 有 run (exit≠0) + 软信号: bash fail + git commit --no-verify。
- *  bash 失败跑在 messageIndex 0 (claimIndex=1 → 计入 runs), hasContradiction=false
+ *  bash 失败跑在 messageIndex 0 (claim assistant later → 计入 runs), hasContradiction=false
  *  (无 rm/write_file 清空测试文件), computeVerdict 因 exit 1 落 INSUFFICIENT,
  *  gamingSignals 经 collectGamingSignals 透传。 */
 const INSUFFICIENT_WITH_SIGNAL_MESSAGES: AnthropicNativeMessage[] = [
