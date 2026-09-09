@@ -16,6 +16,10 @@ import { createJsonlTraceService } from "../../src/harness/trace/jsonl.ts";
 import { SessionHub } from "../../src/session-api/hub.ts";
 import { getVersion } from "../../src/cli/usage.ts";
 import { SessionStore } from "../../src/session-api/store/index.ts";
+import {
+  resolveConversationTraceFilePath,
+  resolveProjectSessionDir,
+} from "../../src/session-api/store/index.ts";
 import type { ListeningServer } from "../../src/session-api/http.ts";
 import { startSessionServe } from "../../src/session-api/serve.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
@@ -81,35 +85,10 @@ describe("parse-args --trace-out", () => {
   });
 });
 
-describe("trace path priority resolution", () => {
-  function resolveTracePath(flag: string | undefined): string {
-    return flag ?? process.env.IKNOW_TRACE_OUT ?? "./trace/";
-  }
-
-  let savedEnv: string | undefined;
-  afterEach(() => {
-    if (savedEnv === undefined) delete process.env.IKNOW_TRACE_OUT;
-    else process.env.IKNOW_TRACE_OUT = savedEnv;
-  });
-
-  it("flag wins over IKNOW_TRACE_OUT env", () => {
-    savedEnv = process.env.IKNOW_TRACE_OUT;
-    process.env.IKNOW_TRACE_OUT = "/tmp/env.jsonl";
-    assert.equal(resolveTracePath("/tmp/flag.jsonl"), "/tmp/flag.jsonl");
-  });
-
-  it("env wins over default when no flag", () => {
-    savedEnv = process.env.IKNOW_TRACE_OUT;
-    process.env.IKNOW_TRACE_OUT = "/tmp/env.jsonl";
-    assert.equal(resolveTracePath(undefined), "/tmp/env.jsonl");
-  });
-
-  it("default ./trace/ when no flag and no env", () => {
-    savedEnv = process.env.IKNOW_TRACE_OUT;
-    delete process.env.IKNOW_TRACE_OUT;
-    assert.equal(resolveTracePath(undefined), "./trace/");
-  });
-});
+// T3 (SC6): 原 describe 块「trace path priority resolution」钉死的
+// `./trace/` 默认已退役,整块归档到 archive/tests/cli/trace-out-priority.test.ts
+// (附归档原因)。现行优先级 SSOT = `cli.ts:resolveTraceRoot`:
+// flag > env > `resolveServeDataDir()`(≈ `<home>/.iknow`,与读侧同源)。
 
 describe("ask path: trace service injected into harness", () => {
   let scratch: string;
@@ -176,9 +155,13 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
     listening = undefined;
   });
 
-  it("SessionHub with traceOut writes <convId>.jsonl on postMessage with session conversation_id", async () => {
+  it("SessionHub with traceOut writes trace.jsonl under session folder on postMessage", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t5-hub-"));
-    const store = new SessionStore(scratch);
+    // T3 (SC6): per-session trace 锚在 `<projectDir>/<convId>/trace.jsonl`。
+    // `projectDir` 由 `resolveProjectSessionDir(scratch, process.cwd())` 派生,
+    // 与 hub.store.getProjectDir() 一致 → 两边指向同一文件。
+    const projectDir = resolveProjectSessionDir(scratch, process.cwd());
+    const store = new SessionStore(scratch, process.cwd());
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -198,10 +181,13 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
 
     await hub.postMessage({ conversationId: convId, text: "test query" });
 
-    const traceFile = join(scratch, `${convId}.jsonl`);
+    const traceFile = resolveConversationTraceFilePath({
+      projectDir,
+      conversationId: convId,
+    });
     assert.ok(
       existsSync(traceFile),
-      "<convId>.jsonl must exist after postMessage"
+      `trace.jsonl must exist after postMessage at ${traceFile}`
     );
     const content = readFileSync(traceFile, "utf8");
     const lines = content.split("\n").filter((l) => l.trim().length > 0);
@@ -216,7 +202,8 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
 
   it("SessionHub with traceOut writes a session root record with agent_version at run end", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t5-hub-sessroot-"));
-    const store = new SessionStore(scratch);
+    const projectDir = resolveProjectSessionDir(scratch, process.cwd());
+    const store = new SessionStore(scratch, process.cwd());
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -234,7 +221,10 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
     const convId = created.session.conversation_id;
     await hub.postMessage({ conversationId: convId, text: "hi" });
 
-    const traceFile = join(scratch, `${convId}.jsonl`);
+    const traceFile = resolveConversationTraceFilePath({
+      projectDir,
+      conversationId: convId,
+    });
     const content = readFileSync(traceFile, "utf8");
     const lines = content.split("\n").filter((l) => l.trim().length > 0);
     const roots = lines.filter((l) => l.includes('"record_type":"session"'));
@@ -252,7 +242,8 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
 
   it("SessionHub without traceOut does NOT write any trace file", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t5-noop-"));
-    const store = new SessionStore(scratch);
+    const projectDir = resolveProjectSessionDir(scratch, process.cwd());
+    const store = new SessionStore(scratch, process.cwd());
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -269,10 +260,15 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
       conversationId: created.session.conversation_id,
       text: "q",
     });
+    // T3: 缺 traceOut → 不写 trace.jsonl(同会话文件夹下也不写)。
+    const expectedTrace = resolveConversationTraceFilePath({
+      projectDir,
+      conversationId: created.session.conversation_id,
+    });
     assert.equal(
-      existsSync(join(scratch, "trace.jsonl")),
+      existsSync(expectedTrace),
       false,
-      "no trace.jsonl when traceOut omitted"
+      `no trace.jsonl when traceOut omitted (expected absent at ${expectedTrace})`
     );
   });
 
@@ -292,8 +288,9 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
 
   it("postMessage creates a NEW trace instance per session (not cached in deps)", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t5-multi-"));
+    const projectDir = resolveProjectSessionDir(scratch, process.cwd());
     const traceDir = scratch;
-    const store = new SessionStore(scratch);
+    const store = new SessionStore(scratch, process.cwd());
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -328,9 +325,13 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
     });
 
     const ids = [s1.session.conversation_id, s2.session.conversation_id];
-    // T2 每会话独立文件: 每个 session 各自一个 <convId>.jsonl, 不共写单文件。
+    // T3 (SC6): 每个 session 各自一个 `<convId>/trace.jsonl`, 不共写单文件;
+    // 文件名固定 `trace.jsonl`(SSOT = `TRACE_FILE_NAME`),与会话文件夹共寿命。
     const total = ids.reduce((acc, id) => {
-      const file = join(traceDir, `${id}.jsonl`);
+      const file = resolveConversationTraceFilePath({
+        projectDir,
+        conversationId: id,
+      });
       assert.equal(existsSync(file), true, `session file must exist: ${file}`);
       const content = readFileSync(file, "utf8");
       const lines = content.split("\n").filter((l) => l.trim().length > 0);

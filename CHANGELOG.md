@@ -2,6 +2,10 @@
 
 ## 0.1.0 (unreleased)
 
+### Breaking
+
+- **会话文件夹归并（session folder consolidation，T1–T7，2026-09-09）**: 会话存储统一为两级树 `~/.iknow/projects/<slug>/<conversationId>/`——叶子是会话文件夹，`<id>.jsonl`（历史权威）、`todos.md`、`trace.jsonl`（trace 锚点，T3 起不再写仓库根 `./trace/`）、`blobs/`（content 级 blob，整条 message 替换退役 → `last_assistant_preview` 等 role 投影在 blob 模式下恢复）、`subagents/agent-<taskId>.jsonl`（per-agent 子代理 trace，随机 UUID 聚合文件退役）、`stderr/` 全部锚进叶子。同一 `(projectIdentityRoot, conversationId)` 派生唯一稳定路径，跨 cwd / 跨 worktree 启动同一会话不再漂移（SC6）。读侧三工具（`list_sessions` / `query_trace` / `get_record`，ACI 与 stdio MCP 两张皮）走两级树；`query_trace` 的 message preview 在 blob 模式下解引用为正文。**旧布局存量全部失效，无自动迁移**: 旧会话（`~/.iknow/sessions/` 旧锚 + 仓库根 `trace/` + 根级 todos）`--resume` 全部续跑不了、TUI 会话列表清空（旧条目不进两级树枚举）；旧 trace 锚点（81 jsonl / 337M）已归档至 `~/.iknow/archive/trace-legacy/`，恢复需手动移回并按旧代码读。归档 spec/plan `docs/archive/025-retire-completed-specs-and-plans/{specs,plans}/session-folder-consolidation.md`；handoff `docs/handoff/2026-09-09-session-folder-consolidation-t1-t7.md`。
+
 ### Feature
 
 - **web_fetch HTML 窗口（2026-08-28）**: 传输层解码体 1 MiB 上限（流式读 + stub 二次拒绝）。`start_chars` 续抓，头部 `Window:` / `Representation:` 在 untrusted banner 之前；`max_chars` 上限 16000，整段 output ≤ executor 20000。opt-in `as=html` 返回 markup（仅 html content-type）；二进制类型拒绝。沙箱 curl / fence env 不改——看网页主路径仍是 SSRF 守卫下的 `web_fetch`。计划 `plans/web-fetch-html-window.md`。

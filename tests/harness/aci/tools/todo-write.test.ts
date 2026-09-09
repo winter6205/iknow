@@ -36,7 +36,7 @@ import {
   MAX_FILE_BYTES,
   MAX_ITEM_CODEPOINTS,
   codepointLength,
-  resolveConversationTodoDir,
+  resolveConversationTodoPath,
   TODO_WRITE_SKIP_CLAUSE,
 } from "../../../../src/harness/aci/tools/todo-write.ts";
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
@@ -208,8 +208,8 @@ describe("createTodoWriteTool — mode=replace", () => {
     );
     assert.equal(out, "Updated todos.md");
     const content = await readFile(
-      resolveConversationTodoDir({
-        todoDir,
+      resolveConversationTodoPath({
+        projectDir: todoDir,
         conversationId: "conv-replace-fresh-1",
       }),
       "utf8"
@@ -226,8 +226,8 @@ describe("createTodoWriteTool — mode=replace", () => {
     await tool.handler({ mode: "add", item: "old-2" }, ctx);
     await tool.handler({ mode: "add", item: "old-3" }, ctx);
     const beforeContent = await readFile(
-      resolveConversationTodoDir({
-        todoDir,
+      resolveConversationTodoPath({
+        projectDir: todoDir,
         conversationId: ctx.conversationId,
       }),
       "utf8"
@@ -236,8 +236,8 @@ describe("createTodoWriteTool — mode=replace", () => {
 
     await tool.handler({ mode: "replace", items: ["new-1", "new-2"] }, ctx);
 
-    const currentPath = resolveConversationTodoDir({
-      todoDir,
+    const currentPath = resolveConversationTodoPath({
+      projectDir: todoDir,
       conversationId: ctx.conversationId,
     });
     const dir = join(todoDir, ctx.conversationId);
@@ -271,8 +271,8 @@ describe("createTodoWriteTool — mode=replace", () => {
   it("replace 前现行空(0 字节文件)→ 不建快照,只写新列表", async () => {
     // 现行为空 → spec 决议:不建快照。
     const ctx = { conversationId: "conv-replace-empty-current" };
-    const currentPath = resolveConversationTodoDir({
-      todoDir,
+    const currentPath = resolveConversationTodoPath({
+      projectDir: todoDir,
       conversationId: ctx.conversationId,
     });
     await mkdir(join(todoDir, ctx.conversationId), { recursive: true });
@@ -290,8 +290,8 @@ describe("createTodoWriteTool — mode=replace", () => {
 
   it("replace 前现行缺席(无 todos.md)→ 不建快照,只写新列表", async () => {
     const ctx = { conversationId: "conv-replace-missing-current" };
-    const currentPath = resolveConversationTodoDir({
-      todoDir,
+    const currentPath = resolveConversationTodoPath({
+      projectDir: todoDir,
       conversationId: ctx.conversationId,
     });
     assert.equal(await fileExists(currentPath), false);
@@ -309,8 +309,8 @@ describe("createTodoWriteTool — mode=replace", () => {
   it("items=[] → 现行变为空文件,合法态;旧内容进快照", async () => {
     // 空 items 是合法操作:把整张列表清空。spec:不灌 messages,回执短字符串。
     const ctx = { conversationId: "conv-replace-clear" };
-    const currentPath = resolveConversationTodoDir({
-      todoDir,
+    const currentPath = resolveConversationTodoPath({
+      projectDir: todoDir,
       conversationId: ctx.conversationId,
     });
     await mkdir(join(todoDir, ctx.conversationId), { recursive: true });
@@ -372,8 +372,8 @@ describe("createTodoWriteTool — mode=replace", () => {
 
   it("replace items 含超过 500 codepoints 的元素 → typed error,文件不被动", async () => {
     const ctx = { conversationId: "conv-replace-overlong" };
-    const currentPath = resolveConversationTodoDir({
-      todoDir,
+    const currentPath = resolveConversationTodoPath({
+      projectDir: todoDir,
       conversationId: ctx.conversationId,
     });
     await mkdir(join(todoDir, ctx.conversationId), { recursive: true });
@@ -404,8 +404,8 @@ describe("createTodoWriteTool — mode=replace", () => {
     // 整文件 64 KB 上限对 replace 同样适用。limit 校验应在 rename 之前,
     // 失败时现行与目录都不动。
     const ctx = { conversationId: "conv-replace-huge" };
-    const currentPath = resolveConversationTodoDir({
-      todoDir,
+    const currentPath = resolveConversationTodoPath({
+      projectDir: todoDir,
       conversationId: ctx.conversationId,
     });
     await mkdir(join(todoDir, ctx.conversationId), { recursive: true });
@@ -492,8 +492,8 @@ describe("createTodoWriteTool — mode=replace", () => {
     const ctx = { conversationId: "conv-replace-snap-ok-write-fail" };
     const dir = join(todoDir, ctx.conversationId);
     await mkdir(dir, { recursive: true });
-    const currentPath = resolveConversationTodoDir({
-      todoDir,
+    const currentPath = resolveConversationTodoPath({
+      projectDir: todoDir,
       conversationId: ctx.conversationId,
     });
     const initialContent = formatOpenLine("preserved-by-atomic-fail");
@@ -559,8 +559,8 @@ describe("createTodoWriteTool — mode=replace", () => {
     const ctx = { conversationId: "conv-replace-snapshot-fail" };
     const dir = join(todoDir, ctx.conversationId);
     await mkdir(dir, { recursive: true });
-    const currentPath = resolveConversationTodoDir({
-      todoDir,
+    const currentPath = resolveConversationTodoPath({
+      projectDir: todoDir,
       conversationId: ctx.conversationId,
     });
     const initialContent = formatOpenLine("preserved-by-snapshot-fail");
@@ -611,8 +611,8 @@ describe("createTodoWriteTool — mode=replace", () => {
     const ctx = { conversationId: "conv-replace-read-fail" };
     const dir = join(todoDir, ctx.conversationId);
     await mkdir(dir, { recursive: true });
-    const currentPath = resolveConversationTodoDir({
-      todoDir,
+    const currentPath = resolveConversationTodoPath({
+      projectDir: todoDir,
       conversationId: ctx.conversationId,
     });
     // 把 filePath 预置为目录(覆盖现有 file)→ readFile 抛 EISDIR。

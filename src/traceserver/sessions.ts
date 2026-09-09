@@ -1,35 +1,37 @@
 /**
  * Session list reader (read side of the trace inspection panel, v2).
  *
- * 只读目录元数据 + 会话根记录的 agent_version，不读其它会话内容：
- *   - readdirSync 列目录 → 每个 `<convId>.jsonl` 文件 = 一个会话（文件名 = conversation_id）。
- *   - statSync 取 mtime / size（最近活跃 + 字节；`size` 直接来自 stat，不由正文推算）。
- *   - 前缀有界扫描（首 64 KiB）找会话根记录（record_type === "session"）提取 agent_version。
+ * T6 (plans/session-folder-consolidation.md / SC16): two-level tree walk.
+ *   - `traceDir` is now the **baseDir** — the parent of `<baseDir>/projects/`.
+ *     Same path the cli passes via `IKNOW_TRACE_OUT`; the read side used to
+ *     treat it as a flat `<traceDir>/<convId>.jsonl` directory, but T1
+ *     already moved writes under the projects tree, and the read side
+ *     has to follow.
+ *   - Walk: `<baseDir>/projects/<project-slug>/<convId>/trace.jsonl`.
+ *     Each conversation folder is a leaf, the `subagents/` sibling is
+ *     excluded (SC16 subagent exclusion), and the `blobs/` subfolder is
+ *     ignored (it sits under `<convId>/`, not a project root).
+ *   - `mtime` / `size` = stat `trace.jsonl` (the file the reader reads),
+ *     not the conversation folder or the project root. Pinned by tests
+ *     under `t6-two-level-tree.test.ts`.
  *
- * 根记录位置与写侧的关系（SC-R 18 修正）：
- *   recordSession 在 loop-engine run **末尾**落盘（诚实值红线：endedAt /
- *   durationMs / status 只有 run 结束才能确定，见 loop-engine.ts run()），
- *   所以真实 writer 产出文件里 session 根是**最后一行**，首行通常是
- *   llm_call/turn —— 读首行会让 agent_version 恒 absent。故改为有界扫描
- *   文件前缀找 `record_type==="session"` 的行取 agent_version；找不到 / 坏行
- *   → 字段 absent（SC-R 18 语义不变：缺失/坏行 → absent，不因单会话坏行
- *   整体失败）。cap 截断保证对超大文件仍保持有界（不整文件 readFileSync）。
+ * 读 + 派生 agent_version (前缀 64 KiB 扫根记录) + 总序比较 这三层依旧在
+ * 本文件;只是「每个会话在哪里」从「平铺目录文件」变成「两级树下找 leaf」。
+ * 沿用既有的有界前缀扫描 (见前 SC-R 18 注释),其窗口代价与父任务 T6 无关。
  *
- * 有界前缀扫描的已知代价（本票不修）：根记录在**末尾**，文件大于 64 KiB 窗口
- * 时根就落在窗口之外 → 已正常结束的会话同样报 absent（实测真实 trace 目录 81
- * 个会话里 17 个如此）。所以 absent 只表示「窗口内没找到根记录」，不能用来推断
- * 会话是否结束。要消掉这条代价得改读文件尾部，而尾部读取会同时改变 inspect
- * panel 的输出，panel face 被 spec SC15 冻结（`http.ts` 逐字节不动），故留后续票。
- *
- * 失败路径（SC-R 17/18）：
- *   - readdir ENOENT（无目录）→ 空列表，非 500 / 非 throw。
- *   - 单文件 stat ENOENT（读时该会话被删）→ 跳过该文件。
- *   - 根记录缺失 / 坏行 / 非 string agent_version → 字段 absent（optional，不整体失败）。
- *   - 其它读侧 IO 错误 → TraceReadError（serve.ts:157-166 映射 500，不泄漏 fs 细节）。
+ * 失败路径(沿用 T1 之前的契约):
+ *   - readdir ENOENT(无 baseDir / 无 projects/ 子层)→ 空列表,非 500 / 非 throw。
+ *   - 单文件 stat ENOENT(读时该会话被删)→ 跳过该文件。
+ *   - 根记录缺失 / 坏行 / 非 string agent_version → 字段 absent (optional, 不整体失败)。
+ *   - 其它读侧 IO 错误 → TraceReadError (serve.ts:157-166 映射 500, 不泄漏 fs 细节)。
  */
 import { readdirSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { isEnoent, wrapIoError } from "./io.js";
+import {
+  PROJECTS_DIR_NAME,
+  SUBAGENT_TRACE_DIR_NAME,
+} from "../shared/session-tree-names.js";
 
 /** 会话列表条目的读侧元数据（wire 形状 snake_case）。 */
 export interface SessionSummary {
@@ -39,7 +41,13 @@ export interface SessionSummary {
   agent_version?: string; // 从会话根记录读；缺失 / 坏行 → absent
 }
 
-const SESSION_FILE_SUFFIX = ".jsonl";
+/**
+ * T6 (SC16): trace file sits at the conversation folder root. The list
+ * only walks folders whose `trace.jsonl` exists — that's the SC16 session
+ * criterion. Folder-without-trace.jsonl is ignored (a freshly-mkdir'd
+ * session that hasn't recorded yet).
+ */
+const TRACE_FILE_NAME_FOR_LIST = "trace.jsonl";
 
 // -- 有界读取（不整文件 readFileSync） -----------------------------------------
 
@@ -105,41 +113,60 @@ function agentVersionFromText(text: string | undefined): string | undefined {
 // -- 目录扫描 ------------------------------------------------------------------
 
 /**
- * List every session in `traceDir` by readdir + stat.
+ * List every session in `traceDir` by two-level readdir + stat.
+ *
+ * Walk: `<traceDir>/projects/<project-slug>/<convId>/trace.jsonl`.
+ * The `subagents/` subfolder under each project is a per-agent sibling,
+ * not a session — it never carries a `trace.jsonl` (per-agent trace lives
+ * deeper at `<project-slug>/<convId>/subagents/agent-<taskId>.jsonl`),
+ * but excluding it by name is the SC16 contract and protects the listing
+ * if the per-agent file ever takes a `trace.jsonl` name.
  *
  * 无目录（readdir ENOENT）→ 空列表（非 500）；单文件 stat ENOENT → 跳过；
- * 其它 IO 错误 → TraceReadError。只统计 `.jsonl` 文件（每会话一文件，
- * 写侧 jsonl.ts 目录语义），conversation_id = 文件名去后缀。
+ * 其它 IO 错误 → TraceReadError。conversation_id = conversation folder
+ * 名（写侧 T1 已锁：sanitized UUID 形状）。
  */
 export function listSessions(traceDir: string): SessionSummary[] {
-  let names: string[];
+  const projectsRoot = join(traceDir, PROJECTS_DIR_NAME);
+  let projectDirNames: string[];
   try {
-    names = readdirSync(traceDir);
+    projectDirNames = readdirSync(projectsRoot);
   } catch (err) {
     if (isEnoent(err)) return [];
     throw wrapIoError(err);
   }
 
   const sessions: SessionSummary[] = [];
-  for (const name of names) {
-    if (!name.endsWith(SESSION_FILE_SUFFIX)) continue;
-    const conversationId = name.slice(0, -SESSION_FILE_SUFFIX.length);
-    const filePath = join(traceDir, name);
-    let stats;
+  for (const projectName of projectDirNames) {
+    const projectDir = join(projectsRoot, projectName);
+    let convDirNames: string[];
     try {
-      stats = statSync(filePath);
+      convDirNames = readdirSync(projectDir);
     } catch (err) {
-      if (isEnoent(err)) continue; // 读时该会话被删 → 跳过该文件
+      if (isEnoent(err)) continue; // project 目录在 list 中途被删 → 跳过
       throw wrapIoError(err);
     }
-    if (!stats.isFile()) continue;
-    const agentVersion = agentVersionFromText(readBounded(filePath));
-    sessions.push({
-      conversation_id: conversationId,
-      mtime: stats.mtimeMs,
-      size: stats.size,
-      ...(agentVersion !== undefined ? { agent_version: agentVersion } : {}),
-    });
+    for (const convDirName of convDirNames) {
+      // SC16: 排除 subagents/ 文件夹 —— 它在 <project-slug>/ 下挂载, 不是会话。
+      if (convDirName === SUBAGENT_TRACE_DIR_NAME) continue;
+      const convDir = join(projectDir, convDirName);
+      const filePath = join(convDir, TRACE_FILE_NAME_FOR_LIST);
+      let stats;
+      try {
+        stats = statSync(filePath);
+      } catch (err) {
+        if (isEnoent(err)) continue; // 该会话没 trace.jsonl → 跳过
+        throw wrapIoError(err);
+      }
+      if (!stats.isFile()) continue;
+      const agentVersion = agentVersionFromText(readBounded(filePath));
+      sessions.push({
+        conversation_id: convDirName,
+        mtime: stats.mtimeMs,
+        size: stats.size,
+        ...(agentVersion !== undefined ? { agent_version: agentVersion } : {}),
+      });
+    }
   }
   return sessions;
 }

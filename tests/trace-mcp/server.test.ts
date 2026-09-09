@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -77,8 +77,16 @@ const PADDED_CONVERSATION = "padded-conversation";
 function writePaddedTraceDir(pad: number): string {
   const traceDir = mkdtempSync(join(tmpdir(), "iknow-trace-mcp-pad-"));
   scratchPaths.push(traceDir);
+  // T6 (SC16): 会话落两级树 `<traceDir>/projects/<slug>/<convId>/trace.jsonl`。
+  const convDir = join(
+    traceDir,
+    "projects",
+    "test-project-trace-mcp",
+    PADDED_CONVERSATION
+  );
+  mkdirSync(convDir, { recursive: true });
   writeFileSync(
-    join(traceDir, `${PADDED_CONVERSATION}.jsonl`),
+    join(convDir, "trace.jsonl"),
     JSON.stringify({
       conversation_id: PADDED_CONVERSATION,
       record_type: "llm_call",
@@ -116,8 +124,15 @@ const WINDOW_SCALAR_PAD = 9_700;
 function writeWindowTraceDir(scalarPad: number): string {
   const traceDir = mkdtempSync(join(tmpdir(), "iknow-trace-mcp-window-"));
   scratchPaths.push(traceDir);
+  const convDir = join(
+    traceDir,
+    "projects",
+    "test-project-trace-mcp",
+    WINDOW_CONVERSATION
+  );
+  mkdirSync(convDir, { recursive: true });
   writeFileSync(
-    join(traceDir, `${WINDOW_CONVERSATION}.jsonl`),
+    join(convDir, "trace.jsonl"),
     JSON.stringify({
       conversation_id: WINDOW_CONVERSATION,
       record_type: "llm_call",

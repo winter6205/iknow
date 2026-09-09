@@ -16,7 +16,7 @@
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionHub } from "../../src/session-api/hub.ts";
@@ -32,10 +32,13 @@ let traceDir: string;
 let listening: ListeningServer;
 let origin: string;
 
-/** 写一个单会话 trace 目录（v2 每会话一文件）。 */
+/** 写一个单会话 trace 目录（T6 两级树 `<dir>/projects/<slug>/<convId>/trace.jsonl`）。 */
 async function writeSession(dir: string, convId: string): Promise<void> {
+  await mkdir(join(dir, "projects", "test-project-trace-mounted", convId), {
+    recursive: true,
+  });
   await writeFile(
-    join(dir, `${convId}.jsonl`),
+    join(dir, "projects", "test-project-trace-mounted", convId, "trace.jsonl"),
     JSON.stringify({
       conversation_id: convId,
       record_type: "turn",
@@ -57,7 +60,7 @@ beforeEach(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-trace-mounted-"));
   traceDir = await mkdtemp(join(tmpdir(), "iknow-trace-mounted-trace-"));
   await writeSession(traceDir, "c1");
-  const store = new SessionStore(baseDir);
+  const store = new SessionStore(baseDir, process.cwd());
   const hub = new SessionHub({ store, deps: makeDeps([]) });
   listening = await listenSessionServer({
     hub,
@@ -146,7 +149,8 @@ describe("mounted trace error envelope (exception class)", () => {
     );
     await writeFile(badTrace, "{}\n", "utf8");
     const store = new SessionStore(
-      await mkdtemp(join(tmpdir(), "iknow-trace-bad-store-"))
+      await mkdtemp(join(tmpdir(), "iknow-trace-bad-store-")),
+      process.cwd()
     );
     const hub = new SessionHub({ store, deps: makeDeps([]) });
     const bad = await listenSessionServer({
@@ -190,7 +194,8 @@ describe("mounted /trace SPA (stripPrefix static mount)", () => {
       "utf8"
     );
     const store = new SessionStore(
-      await mkdtemp(join(tmpdir(), "iknow-trace-spa-store-"))
+      await mkdtemp(join(tmpdir(), "iknow-trace-spa-store-")),
+      process.cwd()
     );
     const hub = new SessionHub({ store, deps: makeDeps([]) });
     spaServer = await listenSessionServer({

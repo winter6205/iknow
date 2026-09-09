@@ -106,7 +106,7 @@ let store: SessionStore;
 
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-chat-usertext-"));
-  store = new SessionStore(baseDir);
+  store = new SessionStore(baseDir, process.cwd());
 });
 
 afterAll(async () => {

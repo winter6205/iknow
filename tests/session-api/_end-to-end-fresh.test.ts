@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { processChatLine } from "../../src/cli/chat-session.ts";
 import {
   CURRENT_SCHEMA_VERSION,
+  resolveConversationDir,
   resolveProjectSessionDir,
   SessionStore,
   type SessionFileV1,
@@ -64,7 +65,10 @@ describe("typed-error catch 契约 (fresh conversation + 真实 SessionStore)", 
   it("schema_invalid 真实故障: 畸形 session 文件 + /goal status → stderr `${kind}: ${conversation_id}`", async () => {
     const { store, baseDir } = await storeFor();
     const id = "schema-invalid-fresh";
-    const dir = resolveProjectSessionDir(baseDir, process.cwd());
+    const dir = resolveConversationDir({
+      projectDir: resolveProjectSessionDir(baseDir, process.cwd()),
+      conversationId: id,
+    });
     await mkdir(dir, { recursive: true });
     const now = new Date().toISOString();
     // 畸形 goal: text 字段为 number → isValidGoal false → sanitize 抛

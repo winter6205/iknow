@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, it } from "vitest";
 
@@ -33,6 +34,11 @@ import { TraceQueryValidationError } from "../../src/traceserver/query-trace-err
  */
 
 const traceDirs: string[] = [];
+/**
+ * T6 (SC16): all sessions sit at
+ *   `<traceDir>/projects/<slug>/<convId>/trace.jsonl`.
+ */
+const TEST_PROJECT_SLUG = "test-project-query-trace-core";
 
 afterEach(() => {
   for (const traceDir of traceDirs.splice(0)) {
@@ -50,7 +56,7 @@ function jsonLine(row: Record<string, unknown>): string {
   return `${JSON.stringify(row)}\n`;
 }
 
-/** Write `content` to `<traceDir>/<conversationId>.jsonl` (one file per session). */
+/** Write `content` to the conversation's `trace.jsonl` under the two-level tree. */
 function writeSession(
   traceDir: string,
   conversationId: string,
@@ -58,7 +64,19 @@ function writeSession(
 ): string {
   const text =
     content.length === 0 || content.endsWith("\n") ? content : `${content}\n`;
-  writeFileSync(join(traceDir, `${conversationId}.jsonl`), text);
+  mkdirSync(join(traceDir, "projects", TEST_PROJECT_SLUG, conversationId), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(
+      traceDir,
+      "projects",
+      TEST_PROJECT_SLUG,
+      conversationId,
+      "trace.jsonl"
+    ),
+    text
+  );
   return text;
 }
 
@@ -174,6 +192,33 @@ interface ToolPageEnvelope {
 
 function envelope(json: string): ToolPageEnvelope {
   return JSON.parse(json) as ToolPageEnvelope;
+}
+
+/**
+ * SC14 blob-mode fixture (T7 SC18 实跑暴露的读侧残余): write `message` as a
+ * content-level blob reference exactly the way the writer side
+ * (`src/harness/trace/jsonl.ts:toBlobReferences`) does — blob file at
+ * `<convDir>/blobs/<sha>` with payload `{"kind":"str"|"blocks","v":content}`,
+ * trace row message `{role, content:{sha,bytes}}`.
+ * Returns the message element to embed in an llm_call row.
+ */
+function writeContentBlobMessage(
+  traceDir: string,
+  conversationId: string,
+  message: { role: string; content: unknown }
+): Record<string, unknown> {
+  const convDir = join(traceDir, "projects", TEST_PROJECT_SLUG, conversationId);
+  const payload = JSON.stringify({
+    kind: typeof message.content === "string" ? "str" : "blocks",
+    v: message.content,
+  });
+  const sha = createHash("sha256").update(payload, "utf8").digest("hex");
+  mkdirSync(join(convDir, "blobs"), { recursive: true });
+  writeFileSync(join(convDir, "blobs", sha), payload, "utf8");
+  return {
+    role: message.role,
+    content: { sha, bytes: Buffer.byteLength(payload, "utf8") },
+  };
 }
 
 function idsOf(page: ReadonlyArray<Record<string, unknown>>): unknown[] {
@@ -349,6 +394,108 @@ describe("query_trace traceserver core (T7)", () => {
         preview,
         expected.slice(0, QUERY_TRACE_PREVIEW_CAP) + MARKER
       );
+    });
+  });
+
+  // SC14 in blob mode (T7 SC18 实跑暴露): 之前 inline-content 单测都过
+  // （full-mode-baseline 钉死历史 inline 形态）, 但实跑走真实写侧
+  // `createJsonlTraceService` 落的是 SC10 content-level ref 形态
+  // (`{role, content:{sha,bytes}}`), `preview()` 直接 `JSON.stringify` 把
+  // `{"sha":...}` 塞进 preview —— SC14 「preview 为正文且不含 sha 字面量」
+  // 撞穿。下面的用例钉死 blob 模式下三个 preview 字段全部走 deref 后的
+  // inline 形态, 不得再含 `sha` 字面量, 且 `last_assistant_preview` 必须在场。
+  describe("blob-mode preview deref (SC14, T7 SC18)", () => {
+    it("first/last_message_preview + last_assistant_preview are deref prose, no sha literal", async () => {
+      const traceDir = makeTraceDir();
+      const userRef = writeContentBlobMessage(traceDir, "c-blob-1", {
+        role: "user",
+        content: "hello from blob content",
+      });
+      const assistantText = "final assistant answer from blob content";
+      const assistantRef = writeContentBlobMessage(traceDir, "c-blob-1", {
+        role: "assistant",
+        content: assistantText,
+      });
+      writeSession(
+        traceDir,
+        "c-blob-1",
+        jsonLine(
+          llmCallRow("c-blob-1", 1, {
+            messages: [userRef, assistantRef],
+          })
+        )
+      );
+
+      const parsed = envelope(
+        await createQueryTraceCore({ traceDir })({
+          conversation_id: "c-blob-1",
+        })
+      );
+      const record = parsed.records[0] ?? {};
+
+      // SC14: 三个 preview 都不含 "sha" 字面量 —— 解引用后的 inline 形态
+      // 一定走 `{role, content:"..."}`, 不得再带 blob 引用字符串。
+      const fp = record["first_message_preview"];
+      const lp = record["last_message_preview"];
+      const ap = record["last_assistant_preview"];
+      assert.equal(typeof fp, "string");
+      assert.equal(typeof lp, "string");
+      assert.equal(typeof ap, "string");
+      assert.ok(
+        !/sha/.test(fp as string),
+        `first_message_preview still contains "sha" literal: ${fp}`
+      );
+      assert.ok(
+        !/sha/.test(lp as string),
+        `last_message_preview still contains "sha" literal: ${lp}`
+      );
+      assert.ok(
+        !/sha/.test(ap as string),
+        `last_assistant_preview still contains "sha" literal: ${ap}`
+      );
+      // 解引用后 content 是字符串, 序列化形态 = `{role, content:"..."}`
+      // —— 与既有 last_assistant_preview inline 形态 (query-trace-core
+      // 单测) 同形, 不引入新形状。
+      assert.equal(
+        ap,
+        JSON.stringify({ role: "assistant", content: assistantText }),
+        "last_assistant_preview must be the deref-prose form"
+      );
+      assert.equal(
+        fp,
+        JSON.stringify({ role: "user", content: "hello from blob content" })
+      );
+      assert.equal(record["messages_count"], 2);
+    });
+
+    it("survives a missing blob file: messages_count 0, three previews absent (empty boundary)", async () => {
+      // 缺 blob 不抛进 turn (写侧 EXIT 继承) → preview 一律缺席, 形态
+      // 与 messages:[] 边界同形 —— 合法态, 不是错误。
+      const traceDir = makeTraceDir();
+      const ghost = {
+        role: "user",
+        content: { sha: "0".repeat(64), bytes: 5 },
+      };
+      writeSession(
+        traceDir,
+        "c-blob-missing",
+        jsonLine(
+          llmCallRow("c-blob-missing", 1, {
+            messages: [ghost],
+          })
+        )
+      );
+
+      const parsed = envelope(
+        await createQueryTraceCore({ traceDir })({
+          conversation_id: "c-blob-missing",
+        })
+      );
+      const record = parsed.records[0] ?? {};
+      assert.equal(record["messages_count"], 0);
+      assert.ok(!("first_message_preview" in record));
+      assert.ok(!("last_message_preview" in record));
+      assert.ok(!("last_assistant_preview" in record));
     });
   });
 

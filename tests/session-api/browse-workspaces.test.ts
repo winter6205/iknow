@@ -166,7 +166,7 @@ let origin: string;
 
 async function startServer(): Promise<void> {
   baseDir = await freshDir("iknow-browse-http-");
-  const store = new SessionStore(baseDir);
+  const store = new SessionStore(baseDir, process.cwd());
   const hub = new SessionHub({
     store,
     deps: makeDeps([assistantResult({ texts: ["x"] })]),

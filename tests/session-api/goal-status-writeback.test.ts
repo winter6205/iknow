@@ -80,6 +80,7 @@ vi.mock("../../src/harness/verify/index.ts", async () => {
 import { SessionHub } from "../../src/session-api/hub.ts";
 import {
   CURRENT_SCHEMA_VERSION,
+  resolveConversationTraceFilePath,
   resolveProjectSessionDir,
   SessionStore,
   type GoalState,
@@ -95,10 +96,11 @@ let traceDir: string;
 
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-hub-goalstatus-"));
-  resolveProjectSessionDir(baseDir, process.cwd());
-  store = new SessionStore(baseDir);
   // traceOut 指向同一个临时根; hub-violation.test.ts 同模式。
   traceDir = baseDir;
+  // T3 (SC6): hub.store.projectDir 用作 trace 锚点基底; 与 hub 共派生。
+  resolveProjectSessionDir(baseDir, process.cwd());
+  store = new SessionStore(baseDir, process.cwd());
 });
 
 afterAll(async () => {
@@ -157,7 +159,13 @@ async function load(id: string): Promise<SessionFileV1> {
 async function readWritebackGoalRecord(
   conversationId: string
 ): Promise<Record<string, unknown>> {
-  const tracePath = join(traceDir, `${conversationId}.jsonl`);
+  // T3 (SC6): 读侧从 `<projectDir>/<convId>/trace.jsonl` 派生, 与 hub 写侧
+  // 共 `resolveConversationTraceFilePath` —— 同 convId 必然同文件。
+  const projectDir = store.getProjectDir();
+  const tracePath = resolveConversationTraceFilePath({
+    projectDir,
+    conversationId,
+  });
   assert.ok(
     await stat(tracePath).then(
       () => true,

@@ -24,6 +24,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.test.json --noEmit",
     "test": "vitest run && $HOME/.bun/bin/bun test tests/tui/",
     "test:changed": "vitest run --changed",
     "test:pre-push": "vitest run --retry 1",

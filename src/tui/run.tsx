@@ -316,6 +316,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // memory / skill seam。
       // T6:启动 workspace 即稳定 productRoot —— rebuild 只换 workspaceRoot。
       ...(workspaceRoot ? { workspaceRoot, productRoot: workspaceRoot } : {}),
+      // #950 T2 / session-folder-consolidation:已 resolve 的 dataDir 透传给
+      // deps 层,让 todo 会话文件夹根与 bridge 的 SessionStore 落同一个
+      // projects/<slug>/(resolveServeDataDir 在上游只算一次)。
+      ...(dataDir !== undefined ? { dataDir } : {}),
       // Review High-2 / High-1 (2026-08-29):启动 settings 对象 + isolation
       // host 缝透传（build-engine 据此装配 mutate 门禁）。
       settings: startupSettings,

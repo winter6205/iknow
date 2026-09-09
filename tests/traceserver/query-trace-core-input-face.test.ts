@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, it } from "vitest";
@@ -26,6 +26,11 @@ import {
  */
 
 const traceDirs: string[] = [];
+/**
+ * T6 (SC16): all sessions sit at
+ *   `<traceDir>/projects/<slug>/<convId>/trace.jsonl`.
+ */
+const TEST_PROJECT_SLUG = "test-project-query-trace-input";
 
 afterEach(() => {
   for (const traceDir of traceDirs.splice(0)) {
@@ -51,8 +56,17 @@ function row(conversationId: string, llmCallId: string): string {
 
 function coreWithSession(conversationId: string): QueryTraceCoreHandler {
   const traceDir = makeTraceDir();
+  mkdirSync(join(traceDir, "projects", TEST_PROJECT_SLUG, conversationId), {
+    recursive: true,
+  });
   writeFileSync(
-    join(traceDir, `${conversationId}.jsonl`),
+    join(
+      traceDir,
+      "projects",
+      TEST_PROJECT_SLUG,
+      conversationId,
+      "trace.jsonl"
+    ),
     row(conversationId, "llm-1")
   );
   return createQueryTraceCore({ traceDir });
@@ -240,7 +254,13 @@ describe("query_trace core input face (T7)", () => {
     // reason the read side's `TraceSessionNotFoundError` was given a real kind
     // (T6) before T7 reused it on the row axis.
     const traceDir = makeTraceDir();
-    writeFileSync(join(traceDir, "present.jsonl"), row("present", "llm-1"));
+    mkdirSync(join(traceDir, "projects", TEST_PROJECT_SLUG, "present"), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(traceDir, "projects", TEST_PROJECT_SLUG, "present", "trace.jsonl"),
+      row("present", "llm-1")
+    );
     const core = createQueryTraceCore({ traceDir });
 
     let caught: unknown;
@@ -267,7 +287,13 @@ describe("query_trace core input face (T7)", () => {
     // a misconfigured host would see — never the implicit "most recent" answer
     // pre-T7 returned.
     const traceDir = makeTraceDir();
-    writeFileSync(join(traceDir, "only.jsonl"), row("only", "llm-only"));
+    mkdirSync(join(traceDir, "projects", TEST_PROJECT_SLUG, "only"), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(traceDir, "projects", TEST_PROJECT_SLUG, "only", "trace.jsonl"),
+      row("only", "llm-only")
+    );
     const core = createQueryTraceCore({ traceDir });
 
     let caught: unknown;

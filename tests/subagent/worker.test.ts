@@ -664,3 +664,108 @@ describe("subagent worker: #468 disallowedTools 透传 createDefaultAciRegistry 
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// G. T5 review-fix H1 — worker content trace file-mode 接线。envelope
+//    traceFilePath 是「文件路径」(manager 已在 spawn 期建好普通文件
+//    `agent-<taskId>.jsonl`),worker 侧必须用 JsonlTraceOptions 的 file-mode
+//    键 `traceFilePath`,不能用目录模式键 `filePath`(那会把文件路径当目录,
+//    落 `agent-<taskId>.jsonl/<taskId>.jsonl` → ENOTDIR → 静默零行)。
+//    断言锚点:worker content 记录与 manager lifecycle 行共存于同一
+//    `agent-<taskId>.jsonl` 单文件,conversation_id 一律 == taskId。
+// ---------------------------------------------------------------------------
+
+describe("subagent worker: traceFilePath file-mode 接线 (T5 H1 review-fix)", () => {
+  it("traceFilePath + taskId 在场 → file-mode 落同一文件,与 manager lifecycle 行共存", async () => {
+    const subagentsDir = await mkdtemp(
+      join(tmpdir(), "iknow-worker-filemode-")
+    );
+    const taskId = "11111111-2222-4333-8444-555555555555";
+    const traceFilePath = join(subagentsDir, `agent-${taskId}.jsonl`);
+    const previousTraceOut = process.env.IKNOW_TRACE_OUT;
+    delete process.env.IKNOW_TRACE_OUT;
+    try {
+      // 模拟 manager 已建好的普通文件 + 一条 lifecycle 行 (file-mode 写入
+      // 必须以 append 方式共存,不能因路径被同名目录占据而 ENOTDIR)。
+      const { appendFileSync } = await import("node:fs");
+      appendFileSync(
+        traceFilePath,
+        JSON.stringify({
+          conversation_id: taskId,
+          record_type: "subagent_spawn",
+          subagent_id: taskId,
+        }) + "\n",
+        "utf8"
+      );
+
+      const deps = await createWorkerDeps({
+        env: TEST_ENV,
+        sandboxRoot: subagentsDir,
+        cwd: subagentsDir,
+        model: createStubModel({ responses: [] }),
+        skillCatalog: createSkillCatalog([]),
+        system: () => undefined,
+        traceFilePath,
+        taskId,
+      });
+
+      // worker content 记录经这条 trace 服务落盘 —— 若走错目录模式键,
+      // appendFileSync 目标是 <traceFilePath>/<taskId>.jsonl (ENOTDIR) 或
+      // 构造期 EEXIST 失败 → traceWriteFailures > 0 / 无行落盘。
+      const trace = deps.trace;
+      assert.ok(trace, "traceFilePath 在场时必须装配 JsonlTraceService");
+      const id = await trace.recordTurn({
+        turnIndex: 0,
+        startedAt: new Date().toISOString(),
+        endedAt: new Date().toISOString(),
+        durationMs: 1,
+        llmCallIds: [],
+        toolCallIds: [],
+        decision: "completed",
+      });
+      assert.ok(typeof id === "string", "file-mode 写盘必须成功");
+
+      const { readFileSync, statSync } = await import("node:fs");
+      const lines = readFileSync(traceFilePath, "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      // manager lifecycle 行仍在,worker turn 行追加其后。
+      assert.equal(lines[0]?.record_type, "subagent_spawn");
+      assert.equal(lines[lines.length - 1]?.record_type, "turn");
+      assert.equal(lines[lines.length - 1]?.conversation_id, taskId);
+      // 绝无把 traceFilePath 当目录二次嵌套的产物。
+      assert.equal(
+        statSync(traceFilePath).isFile(),
+        true,
+        "agent-<taskId>.jsonl 必须保持普通文件"
+      );
+    } finally {
+      if (previousTraceOut === undefined) delete process.env.IKNOW_TRACE_OUT;
+      else process.env.IKNOW_TRACE_OUT = previousTraceOut;
+      await rm(subagentsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("traceFilePath 在场而 taskId 缺席 → 装配期 fail-loud (随机 UUID 假 scope 已退役)", async () => {
+    const subagentsDir = await mkdtemp(
+      join(tmpdir(), "iknow-worker-filemode-noid-")
+    );
+    try {
+      await assert.rejects(
+        createWorkerDeps({
+          env: TEST_ENV,
+          sandboxRoot: subagentsDir,
+          model: createStubModel({ responses: [] }),
+          skillCatalog: createSkillCatalog([]),
+          system: () => undefined,
+          traceFilePath: join(subagentsDir, "agent-x.jsonl"),
+        }),
+        /taskId/
+      );
+    } finally {
+      await rm(subagentsDir, { recursive: true, force: true });
+    }
+  });
+});

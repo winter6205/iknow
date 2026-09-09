@@ -32,8 +32,9 @@ import {
 } from "../../src/session-api/http.ts";
 import {
   parseSessionJsonl,
-  SessionStore,
+  resolveConversationDir,
   resolveProjectSessionDir,
+  SessionStore,
 } from "../../src/session-api/store/index.ts";
 import { createPermissionModeContext } from "../../src/harness/permission/modes.ts";
 import type { AssistantTurnResult } from "../../src/harness/index.ts";
@@ -57,7 +58,7 @@ async function startServer(
   hubOpts?: Omit<SessionHubOptions, "store" | "deps">
 ): Promise<void> {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-http-"));
-  const store = new SessionStore(baseDir);
+  const store = new SessionStore(baseDir, process.cwd());
   const hub = new SessionHub({
     store,
     workspaceRoot: process.cwd(),
@@ -120,7 +121,7 @@ function assertNestedError(opts: {
   assert.ok(b.error, "body must have top-level `error` object");
   assert.equal(b.error!.kind, kind);
   assert.equal(typeof b.error!.message, "string");
-  assert.ok(b.error!.message.length > 0, "message must be non-empty");
+  assert.ok(b.error!.message!.length > 0, "message must be non-empty");
 }
 
 async function createSession(): Promise<string> {
@@ -143,7 +144,7 @@ async function restartWithOptions(
   await listening.close();
   await rm(baseDir, { recursive: true, force: true });
   baseDir = await mkdtemp(join(tmpdir(), "iknow-http-restart-"));
-  const store = new SessionStore(baseDir);
+  const store = new SessionStore(baseDir, process.cwd());
   const hub = new SessionHub({
     store,
     workspaceRoot: process.cwd(),
@@ -184,7 +185,7 @@ describe("GET /api/v1/health", () => {
     await listening.close();
     await rm(baseDir, { recursive: true, force: true });
     baseDir = await mkdtemp(join(tmpdir(), "iknow-http-cw-"));
-    const store = new SessionStore(baseDir);
+    const store = new SessionStore(baseDir, process.cwd());
     const hub = new SessionHub({
       store,
       workspaceRoot: process.cwd(),
@@ -236,9 +237,7 @@ describe("GET /api/v1/health", () => {
 
     const { status, body } = await getJson("/api/v1/health");
     assert.equal(status, 200);
-    assert.ok(
-      (body as { traceWriteFailures: number }).traceWriteFailures >= 1
-    );
+    assert.ok((body as { traceWriteFailures: number }).traceWriteFailures >= 1);
   });
 });
 
@@ -943,7 +942,8 @@ describe("static file serving", () => {
       );
       await writeFile(join(staticRoot, "app.js"), "console.log('hi');", "utf8");
       const store = new SessionStore(
-        await mkdtemp(join(tmpdir(), "iknow-srv-"))
+        await mkdtemp(join(tmpdir(), "iknow-srv-")),
+        process.cwd()
       );
       const hub = new SessionHub({
         store,
@@ -1024,7 +1024,7 @@ describe("GET/PUT /api/v1/workspace + GET /api/v1/workspaces (T3)", () => {
     await listening.close();
     const recentsHome = await mkdtemp(join(tmpdir(), "iknow-http-recents-"));
     baseDir = await mkdtemp(join(tmpdir(), "iknow-http-ws-"));
-    const store = new SessionStore(baseDir);
+    const store = new SessionStore(baseDir, process.cwd());
     const hub = new SessionHub({
       store,
       deps: makeDeps([assistantResult({ texts: ["ws-bound"] })]),
@@ -1116,7 +1116,11 @@ describe("GET/PUT /api/v1/workspace + GET /api/v1/workspaces (T3)", () => {
       // #629: legacy `.json` mirror is no longer written).
       const cid = await createSession();
       const dir = resolveProjectSessionDir(baseDir, process.cwd());
-      const headerRaw = readFileSync(join(dir, `${cid}.jsonl`), "utf8");
+      const convDir = resolveConversationDir({
+        projectDir: dir,
+        conversationId: cid,
+      });
+      const headerRaw = readFileSync(join(convDir, `${cid}.jsonl`), "utf8");
       const header = parseSessionJsonl(headerRaw).header as {
         workspaceRoot?: string;
       };

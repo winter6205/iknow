@@ -13,7 +13,7 @@
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -244,7 +244,14 @@ describe("GET /api/v1/traces — #358 T5 subagent queries", () => {
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "iknow-trace-subagent-http-"));
-    writeFileSync(join(tmpDir, "c1.jsonl"), lines.join("\n") + "\n", "utf8");
+    // T6 (SC16): 会话落两级树 `<tmpDir>/projects/<slug>/c1/trace.jsonl`。
+    const convDir = join(tmpDir, "projects", "test-project-subagent", "c1");
+    mkdirSync(convDir, { recursive: true });
+    writeFileSync(
+      join(convDir, "trace.jsonl"),
+      lines.join("\n") + "\n",
+      "utf8"
+    );
     listening = await startTraceServe({
       host: "127.0.0.1",
       port: 0,

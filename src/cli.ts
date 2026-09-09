@@ -49,9 +49,7 @@ export { isWorkspaceRootError, renderWorkspaceRootError };
 import { MaxTurnsExceeded } from "./harness/errors.js";
 import { maxTurnsEnvelope } from "./cli/max-turns.js";
 import { randomUUID } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { resolveSessionTodoDir } from "./harness/aci/tools/todo-write.js";
 import { buildViolationWiring } from "./harness/sandbox/violation-executor.js";
 import { openBrowser } from "./cli/open-browser.js";
 import type { TraceServeOptions } from "./traceserver/serve.js";
@@ -62,31 +60,30 @@ import {
 // ADR-0037 review High-1/High-2 (2026-08-29): chat 入口的 worktree isolation
 // host 缝与启动 settings 钉住。
 import { SessionStore } from "./session-api/store/index.js";
+import {
+  resolveProjectSessionDir,
+  resolveSubagentTraceDir,
+} from "./session-api/store/index.js";
 import { resolveServeDataDir } from "./session-api/serve.js";
 import { createTaskWorktreeProvisioner } from "./session-api/worktree-rebind.js";
 import type { WorktreeIsolationHostOpts } from "./harness/isolation/worktree-gate.js";
 import { createWorktreeIsolationHost } from "./cli/worktree-host.js";
+import { deriveProjectIdentityRoot } from "./harness/session-roots.js";
 // 共享装配 (cli / serve / tui 三入口共用, SSOT): settings.verify → VerifyConfig。
 import { resolveVerifyConfig } from "./config/verify-config.js";
 
 /**
- * T7: 写侧与读侧共用的默认 trace 目录 —— 每会话独立文件
- * （`<traceDir>/<convId>.jsonl`）。T2 后写侧语义即目录，默认值必须与读侧
- * 一致；旧单文件 `./trace.jsonl`（LEGACY_TRACE_FILE）只用于迁移 fail-fast 检测。
+ * T3 (plans/session-folder-consolidation.md / ADR-0071 Decision 1/4):
+ * trace 锚点已迁入会话文件夹,主会话写入由 `resolveConversationTraceFilePath`
+ * 经 hub / store 派生;本根只承担子代理聚合目录(`createTrace("subagent")`,
+ * T5 迁走)与 runTrace 的回放池(SC6 退役 cwd-relative `./trace/` 后的落点)。
+ * 默认 = `resolveServeDataDir()`(≈ `<home>/.iknow`),与读侧同源。
+ *
+ * `resolve` 把任意相对输入归一化为绝对路径,保证下游 mkdirSync / appendFileSync
+ * 不会被调用方传 cwd-relative 时「以启动时 CWD 为根」再次踩 T3 退役的坑。
  */
-const DEFAULT_TRACE_DIR = "./trace/";
-/**
- * 旧单文件格式（v2 写侧升级前）。若存在 → runTrace fail-fast 提示迁移，
- * 不静默把它当目录读（SC-C 21）。
- */
-const LEGACY_TRACE_FILE = "./trace.jsonl";
-
-/**
- * Resolve trace output path: flag > IKNOW_TRACE_OUT env > default directory.
- * ADR-0003 D3: default is relative to CWD. T2 后语义为目录。
- */
-function resolveTracePath(flag: string | undefined): string {
-  return flag ?? process.env.IKNOW_TRACE_OUT ?? DEFAULT_TRACE_DIR;
+function resolveTraceRoot(flag: string | undefined): string {
+  return resolve(flag ?? process.env.IKNOW_TRACE_OUT ?? resolveServeDataDir());
 }
 
 /**
@@ -160,7 +157,7 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
   }
 
   const bundle: RuntimeBundle = await prepareRuntime();
-  const tracePath = resolveTracePath(parsed.traceOut);
+  const tracePath = resolveTraceRoot(parsed.traceOut);
 
   let built: { deps: LoopEngineDeps };
   try {
@@ -286,14 +283,26 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  // T5 (plans/session-folder-consolidation.md / SC8 + L2): chat 入口
+  // 锁定本次 conversationId —— 子代理 lifecycle / content trace 归属目录
+  // = `<父会话文件夹>/subagents/`,文件名 = agent-<taskId>.jsonl。
+  // rebuildDeps(改绑时)复用同一 conversationId,不另起(rebuild 不换会话)。
+  //
+  // review-fix (H2): --resume <id> 时 conversationId = resumeId 而非随机 —
+  // 子代理目录、checkpoint 文件、trace 锚点必须全部锚到被 resume 的会话文
+  // 件夹,否则 --resume 后子代理目录会落在全新随机 UUID 的文件夹下,既与
+  // 父会话脱钩,也会让 SC8 操作员补丁的「per-agent 文件集合 == 两次 spawn
+  // 的 taskId 集合」按不同会话分散两处。
+  const conversationId = parsed.resumeId ?? randomUUID();
 
   // ADR-0035:生命周期 trace 与 content trace 解耦。chat 不装配 content
   // trace，但 subagent 的 spawn/state_change/stop 永久写入默认 trace 目录。
-  const tracePath = resolve(resolveTracePath(parsed.traceOut));
-  const subagentTraceService = createJsonlTraceService({
-    filePath: tracePath,
-    conversationId: "subagent",
-  });
+  // T5 (plans/session-folder-consolidation.md / SC8 + L2): 聚合单文件
+  // `subagent.jsonl` (conversationId:"subagent") 已退役 —— 改由
+  // buildHarnessEngine(opts.subagentsDir) 派生 per-agent `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
+  // 解析顺序保持(traceOut flag > IKNOW_TRACE_OUT env > 默认)只服务于
+  // 其余子代理相关形态(stderr pointer 退路)。
+  const tracePath = resolve(resolveTraceRoot(parsed.traceOut));
 
   let built: import("./harness/build-engine.js").BuiltEngine;
   // W2: chat REPL 持一个可变 PermissionModeContext —— /permissions 命令在
@@ -315,7 +324,12 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   // store 与 chat-session 的 checkpointStore 同池（resolveServeDataDir()）。
   // 开关读取在 build-engine 启动加载点（经 startupSettings）；OFF → 不包装。
   const worktreeProvisioner = createTaskWorktreeProvisioner({
-    store: new SessionStore(resolveServeDataDir()),
+    store: new SessionStore(
+      resolveServeDataDir(),
+      // T1 (session-folder-consolidation): store namespace keys by
+      // projectIdentityRoot, not cwd. mirror build-engine.ts:523.
+      deriveProjectIdentityRoot({ cwd: workspaceRoot })
+    ),
   });
   // worktree-host.ts 工厂装配（PR #869 name 透传修复点；可单测）。
   const worktreeIsolation: WorktreeIsolationHostOpts =
@@ -323,6 +337,15 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   // T6:启动 workspace 即稳定 productRoot —— rebind 只换 workspaceRoot，
   // MCP 项目配置根跨 rebuild 保持本值。
   const productRoot = workspaceRoot;
+  // #950 T2 / session-folder-consolidation:chat 入口注入「会话项目目录」作
+  // todoDir —— 与上面 SessionStore 用同一对 `(resolveServeDataDir(),
+  // deriveProjectIdentityRoot(...))`,保证同一会话在 chat / serve / TUI 三
+  // 入口解析到同一 projectDir(`<surface>` 分裂消除)。per-conversationId
+  // 文件路径在调用期由 todo-write.ts:resolveConversationTodoPath 派生。
+  const todoProjectDir = resolveProjectSessionDir(
+    resolveServeDataDir(),
+    deriveProjectIdentityRoot({ cwd: workspaceRoot })
+  );
   // 初始装配与 rebind 重建共用的装配 opts（同一 askUser/holder/settings）。
   const chatEngineOpts = {
     askUser: createTtyAskUser(),
@@ -330,12 +353,17 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     memory: { enabled: true } as const,
     permissionMode,
     graphMode,
-    todoDir: resolveSessionTodoDir({ surface: "chat" }),
-    // review-fix (Fix 1): subagent trace 生产装配 —— 仅显式配置 traceOut/env 时
-    // 注入 <traceOut>/subagent.jsonl (conversationId="subagent", 聚合所有会话)。
-    ...(subagentTraceService !== undefined
-      ? { subagentTrace: subagentTraceService }
-      : {}),
+    todoDir: todoProjectDir,
+    // T5 (plans/session-folder-consolidation.md / SC8 + L2): subagentsDir
+    // 由 (projectDir, conversationId) 经 `resolveSubagentTraceDir` 派生 —— 与
+    // 上面 SessionStore 同源(`todoProjectDir === store.projectDir`,见 #950 T2)。
+    // build-engine 内部把 subagentsDir 同时传给 SubAgentManager(opts.subagentsDir)
+    // 与 traceFilePath 入 envelope —— 替代旧 `subagentTrace` (conversationId:"subagent"
+    // 聚合单文件,已退役)。
+    subagentsDir: resolveSubagentTraceDir({
+      projectDir: todoProjectDir,
+      conversationId,
+    }),
     subagentDiagnosticsDir: tracePath,
     // review-fix (M1/M5): `!== undefined` 守门 — 空字符串透传触 empty_explicit。
     workspaceRoot,
@@ -348,8 +376,8 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // chat TTY REPL: interactive y/N prompt via stdin/stdout.
     // #196 A12:chat 激活 BOOTSTRAP(surface="chat" → bootstrapActive=true)。
     // #194 T6:chat 显式 memory:{enabled:true} — 10 件工具 + memory_layer 装配。
-    // #440 T1-fix:chat 入口注入 todoDir 让 todo_write 在主 loop 在场
-    // (per-conversationId resolution 是后续 ticket,见 todo-write.ts resolveSessionTodoDir 注释)。
+    // #440 T1-fix + #950 T2:chat 入口注入 session-folder todoDir,per-conversationId 解析在
+    // todo-write.ts:resolveConversationTodoPath(SSOT 一处钉死,见上 todoProjectDir)。
     // ADR-0019 (T2):`--workspace-root` flag 透传到 per-root identity / memory seam。
     built = await buildHarnessEngine(bundle, chatEngineOpts);
   } catch (err) {
@@ -413,6 +441,10 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // T4: `--resume <id>` 续跑锚点。仅 chat 消费;ask/serve/tui 入口
     // 不传(解析虽 command-agnostic,host 各自决策)。undefined = 新开会话。
     resumeId: parsed.resumeId,
+    // review-fix (H2):REPL 级 conversationId 单一来源 —— cli.ts 入口算一次
+    // (resume 时 = resumeId,否则随机生成)并显式传入,checkpoint / 子代理
+    // 目录 / trace 锚点从同一值派生。runChatSession 内部不再二次生成。
+    conversationId,
     // #356 T7:host drain — chat 入口每轮 runHarness 前把 completed 子代理
     // 结果拼入 priorMessages。ask 入口无 manager(surface 门控),不传。
     subagentManager: built.subagentManager,
@@ -548,14 +580,14 @@ async function runTui(parsed: ParsedCli): Promise<void> {
     ...(parsed.workspaceRoot !== undefined
       ? { workspaceRoot: parsed.workspaceRoot }
       : {}),
-    traceOut: resolveTracePath(parsed.traceOut),
+    traceOut: resolveTraceRoot(parsed.traceOut),
     ...(parsed.autoMode ? { permissionMode: "full_auto" } : {}),
   });
   process.exitCode = exitCode;
 }
 
 async function runServe(parsed: ParsedCli): Promise<void> {
-  const tracePath = resolveTracePath(parsed.traceOut);
+  const tracePath = resolveTraceRoot(parsed.traceOut);
   const { startSessionServe } = await import("./session-api/serve.js");
   const { createSessionGrants } =
     await import("./harness/permission/session-grants.js");
@@ -605,27 +637,10 @@ async function runServe(parsed: ParsedCli): Promise<void> {
 }
 
 async function runTrace(parsed: ParsedCli): Promise<void> {
-  // T7: trace CLI 默认读 ./trace/ 目录（无需 --trace-out）。--trace-out 显式
-  // 提供时覆盖默认。注意：这里不复用写侧 resolveTracePath —— env
-  // IKNOW_TRACE_OUT 是写侧 (serve/chat/ask) 的，不是读侧。
-  const traceOut = parsed.traceOut ?? DEFAULT_TRACE_DIR;
-
-  // SC-C 21 fail-fast（ADR-0020 D2.3：两种模式都先于探测执行——都依赖迁移后
-  // 的目录语义）。检测到旧单文件格式 trace → 提示迁移，不静默当目录读。
-  const legacyConflict = detectLegacyTrace(
-    traceOut,
-    parsed.traceOut === undefined
-  );
-  if (legacyConflict) {
-    writeErr(
-      `错误: 检测到旧单文件格式的 trace。请先运行迁移脚本：\n` +
-        `  npx tsx scripts/trace-migrate.ts\n` +
-        `(把 ${LEGACY_TRACE_FILE} 转成 ${DEFAULT_TRACE_DIR}<convId>.jsonl 目录；` +
-        `干净迁移完成后脚本会自动删除旧文件)`
-    );
-    process.exitCode = 1;
-    return;
-  }
+  // T3 (SC6): 读侧与写侧同源 —— flag > env > `resolveServeDataDir()`。
+  // 旧单文件 fail-fast(`detectLegacyTrace`)随 SC6 退役;两级树 discovery
+  // 由 T6 承接。
+  const traceOut = resolveTraceRoot(parsed.traceOut);
 
   // ADR-0020 D2.1 默认模式：不起进程，探测 iknow serve health 后指向同进程
   // /trace 面板。探测目标 host/port 来自 --host/--port（缺省 127.0.0.1:8787）。
@@ -698,39 +713,6 @@ async function probeServeHealth(host: string, port: number): Promise<boolean> {
     return false;
   } finally {
     clearTimeout(timer);
-  }
-}
-
-/**
- * 检测旧单文件 trace（SC-C 21）：
- *   - traceOut 已存在但不是目录（文件）→ 冲突（单文件无法按目录读）。
- *   - 用默认目录且 CWD 下旧 ./trace.jsonl 存在 → 冲突（数据未迁移）。
- * stat 失败（目标不存在）→ 不算冲突，按「目录尚未创建」正常启动。
- */
-function detectLegacyTrace(
-  traceOut: string,
-  usingDefaultDir: boolean
-): boolean {
-  const resolvedDir = resolve(traceOut);
-  if (existsSync(resolvedDir) && !isDirectoryPath(resolvedDir)) {
-    return true;
-  }
-  if (usingDefaultDir && existsSync(resolve(LEGACY_TRACE_FILE))) {
-    return true;
-  }
-  return false;
-}
-
-/**
- * 判断路径是否指向「目录」。用 stat isDirectory 区分 ./trace.jsonl（文件）
- * 与 ./trace/（目录）—— 两者共存不冲突（SC-C 21）。stat 失败（目标不存在）
- * 按目录处理：后续 startTraceServe 的 readdir 会自然返回空列表。
- */
-function isDirectoryPath(p: string): boolean {
-  try {
-    return statSync(p).isDirectory();
-  } catch {
-    return true;
   }
 }
 

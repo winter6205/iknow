@@ -39,6 +39,7 @@ import { join } from "node:path";
 import type { AnthropicNativeMessage } from "../../../src/harness/index.ts";
 import {
   CURRENT_SCHEMA_VERSION,
+  resolveConversationDir,
   resolveProjectSessionDir,
   resolveRewindAnchor,
   SessionStore,
@@ -284,9 +285,10 @@ describe("exception — deeper IO tree (typed errors)", () => {
   it("save: 路径穿越普通文件(ENOTDIR)→ typed write_failed", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "iknow-boundary-enotdir-"));
     tempDirs.push(tmp);
-    // 把 <tmp>/sessions 做成普通文件:resolveProjectSessionDir 产出的
-    // <tmp>/sessions/<proj>-<hash> 穿越它 → mkdir/writeFile ENOTDIR。
-    await writeFile(join(tmp, "sessions"), "blocker", "utf8");
+    // T1 (session-folder-consolidation):把 <tmp>/projects 做成普通文件:
+    // resolveProjectSessionDir 产出的 <tmp>/projects/<proj>-<hash> 穿越它
+    // → mkdir/writeFile ENOTDIR。
+    await writeFile(join(tmp, "projects"), "blocker", "utf8");
     const s = new SessionStore(tmp, process.cwd());
     await assert.rejects(
       () =>
@@ -336,7 +338,10 @@ describe("exception — deeper IO tree (typed errors)", () => {
   it("load: JSON.parse 成功但根是原始值(42)→ typed schema_invalid field='root'", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "iknow-boundary-root-"));
     tempDirs.push(tmp);
-    const dir = sessionDirFor(tmp);
+    const dir = resolveConversationDir({
+      projectDir: sessionDirFor(tmp),
+      conversationId: "prim-root",
+    });
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "prim-root.json"), "42", "utf8");
     const s = new SessionStore(tmp, process.cwd());
@@ -358,7 +363,10 @@ describe("exception — deeper IO tree (typed errors)", () => {
     // 是硬拒,绝不归一化。load 必须抛 typed schema_invalid 而非裸 Error。
     const tmp = await mkdtemp(join(tmpdir(), "iknow-boundary-cpnull-"));
     tempDirs.push(tmp);
-    const dir = sessionDirFor(tmp);
+    const dir = resolveConversationDir({
+      projectDir: sessionDirFor(tmp),
+      conversationId: "cp-null",
+    });
     await mkdir(dir, { recursive: true });
     await writeFile(
       join(dir, "cp-null.json"),

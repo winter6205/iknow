@@ -34,7 +34,7 @@ let settingsSource: ReturnType<typeof installTestSettingsSource>;
 
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-max-turns-serve-"));
-  store = new SessionStore(baseDir);
+  store = new SessionStore(baseDir, process.cwd());
   // #164 第二阶段：IKNOW_LLM_MODEL 已退役，serve 装配的 loadIknowEnv() 需要
   // settings.llm.model 来源 → HOME 重定向到 tmp（settings.json 含 model + apiKey）。
   settingsSource = installTestSettingsSource();

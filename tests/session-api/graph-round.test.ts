@@ -35,7 +35,10 @@ async function tmpDir(prefix: string): Promise<string> {
 
 describe("SessionHub — graph 装配 round 边界", () => {
   it("每条 postMessage 前拍一次快照：翻 holder 要下一条消息才进装配面", async () => {
-    const store = new SessionStore(await tmpDir("iknow-graph-round-store-"));
+    const store = new SessionStore(
+      await tmpDir("iknow-graph-round-store-"),
+      process.cwd()
+    );
     const root = await tmpDir("iknow-graph-round-root-");
     const mode = createGraphModeContext();
     const inner: GraphAssembly = createGraphAssembly(mode);
@@ -82,7 +85,10 @@ describe("SessionHub — graph 装配 round 边界", () => {
     // TUI 的 engine 在 run.tsx 就装好了（buildTuiDeps），hub 只拿到成品 deps
     // —— 快照句柄因此必须能从构造 opts 直接进来，否则 TUI 的 `/graph` 永远
     // 停留在 holder 层、进不了下一次装配（SC3 会在 TUI 上破功）。
-    const store = new SessionStore(await tmpDir("iknow-graph-round-store3-"));
+    const store = new SessionStore(
+      await tmpDir("iknow-graph-round-store3-"),
+      process.cwd()
+    );
     const mode = createGraphModeContext();
     const graphAssembly = createGraphAssembly(mode);
 
@@ -113,7 +119,10 @@ describe("SessionHub — graph 装配 round 边界", () => {
   });
 
   it("buildEngine 不给 graphAssembly → postMessage 照常（未接 overlay 零变化）", async () => {
-    const store = new SessionStore(await tmpDir("iknow-graph-round-store2-"));
+    const store = new SessionStore(
+      await tmpDir("iknow-graph-round-store2-"),
+      process.cwd()
+    );
     const root = await tmpDir("iknow-graph-round-root2-");
     const hub = new SessionHub({
       store,

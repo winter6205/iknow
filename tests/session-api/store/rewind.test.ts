@@ -30,6 +30,7 @@ import { join } from "node:path";
 import {
   CURRENT_SCHEMA_VERSION,
   parseSessionJsonl,
+  resolveConversationDir,
   resolveProjectSessionDir,
   SESSION_JSONL_EXT,
   SessionStore,
@@ -73,8 +74,17 @@ const sampleFile = (opts: {
 });
 
 const jsonlPath = (id: string): string =>
-  join(sessionDir, `${id}${SESSION_JSONL_EXT}`);
-const jsonPath = (id: string): string => join(sessionDir, `${id}.json`);
+  join(
+    resolveConversationDir({ projectDir: sessionDir, conversationId: id }),
+    `${id}${SESSION_JSONL_EXT}`
+  );
+const jsonPath = (id: string): string =>
+  join(
+    resolveConversationDir({ projectDir: sessionDir, conversationId: id }),
+    `${id}.json`
+  );
+const conversationDir = (id: string): string =>
+  resolveConversationDir({ projectDir: sessionDir, conversationId: id });
 
 const readLog = async (id: string) =>
   parseSessionJsonl(await readFile(jsonlPath(id), "utf8"));
@@ -92,7 +102,7 @@ const threeTurnMessages = (): AnthropicNativeMessage[] => [
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-rewind-"));
   sessionDir = resolveProjectSessionDir(baseDir, process.cwd());
-  store = new SessionStore(baseDir);
+  store = new SessionStore(baseDir, process.cwd());
 });
 
 afterAll(async () => {
@@ -250,7 +260,9 @@ describe("SessionStore.rewindToAnchor (T5 head move)", () => {
 
   it("legacy .json-only session → write_failed (migration signal; legacy file untouched)", async () => {
     const id = "rw-legacy";
-    await mkdir(sessionDir, { recursive: true });
+    // T1 (session-folder-consolidation): legacy file lives inside
+    // <projectDir>/<id>/ (the conversation folder leaf).
+    await mkdir(conversationDir(id), { recursive: true });
     const legacy = sampleFile({
       id,
       overrides: { messages: threeTurnMessages(), turnCount: 3 },
@@ -605,7 +617,7 @@ describe("checkpoint anchor by event id (T5 D3)", () => {
 
   it("load migrates legacy messagesCount-only checkpoints in a hand-written jsonl header", async () => {
     const id = "rw-anchor-migrate";
-    await mkdir(sessionDir, { recursive: true });
+    await mkdir(conversationDir(id), { recursive: true });
     const header = {
       type: "session",
       schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -654,7 +666,7 @@ describe("checkpoint anchor by event id (T5 D3)", () => {
 
   it("legacy .json load derives anchorEventId from the message position", async () => {
     const id = "rw-anchor-legacy";
-    await mkdir(sessionDir, { recursive: true });
+    await mkdir(conversationDir(id), { recursive: true });
     await writeFile(
       jsonPath(id),
       JSON.stringify(
@@ -682,7 +694,7 @@ describe("checkpoint anchor by event id (T5 D3)", () => {
 
   it("out-of-range messagesCount → checkpoint kept, anchorEventId absent", async () => {
     const id = "rw-anchor-dangling";
-    await mkdir(sessionDir, { recursive: true });
+    await mkdir(conversationDir(id), { recursive: true });
     await writeFile(
       jsonPath(id),
       JSON.stringify(

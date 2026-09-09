@@ -125,8 +125,6 @@ import {
   createDefaultSubAgentSpawn,
   resolveSubagentTraceDir,
 } from "./subagent/spawn.js";
-import { createNoopTraceService } from "./trace/noop.js";
-import type { TraceService } from "./trace/types.js";
 import {
   createBackgroundTaskManager,
   defaultBackgroundSpawn,
@@ -224,12 +222,32 @@ export type BuildEngineOpts = {
   /** #356 T6 测试缝:subagent manager 覆盖注入(生产默认不传则内部自建)。 */
   readonly subagentManager?: SubAgentManager;
   /**
-   * #358 T4 测试缝:subagent manager 配套 TraceService 覆盖注入。生产默认
-   * createNoopTraceService() (manager 透传 trace 字段来自各 caller,本缝保持
-   * 既有 byte-stable;集成路径在 cli.ts / hub.ts / #371 路由层把 per-conversation
-   * JsonlTraceService 注入 manager)。
+   * T5 (plans/session-folder-consolidation.md / SC8 + L2): 子代理 per-agent
+   * trace 归属目录 = `<父会话文件夹>/subagents/`(由 caller 用
+   * `resolveSubagentTraceDir({ projectDir, conversationId })` 派生后传入)。
+   *
+   * 在场时 manager 为每次 spawn 懒建 file-mode JsonlTraceService
+   * (`<subagentsDir>/agent-<taskId>.jsonl`, conversationId 钉 taskId) +
+   * 一次性 `.meta.json` —— 替换掉既有 `subagentTrace` 聚合单实例注入。
+   * 缺席 → 退化为 NoopTrace(同既有 build-engine 缺省形态, byte-stable)。
+   *
+   * 与旧 `subagentTrace` 的关系:`subagentTrace` (conversationId:"subagent"
+   * 聚合单文件) 已退役 —— 所有 caller (cli / hub / tui-deps) 改为传
+   * `subagentsDir`。`subagentTrace` 字段在本 commit 后无人引用,留作 seam
+   * 仅供尚未迁移的测试用,不再注入 manager。
    */
-  readonly subagentTrace?: TraceService;
+  readonly subagentsDir?: string;
+  /**
+   * review-fix (M5):装配期根缝 —— `<baseDir>/projects/<slug>` 形式(serve hub
+   * 装配期没有 conversationId,跨会话共享 engine 不重建)。透传给
+   * `createSubAgentManager({ projectDir })` —— manager 在 spawn 期按
+   * `def.conversationId` 两段式派生 per-conversation 叶子
+   * `<projectDir>/<sanitize(convId)>/subagents/`,与 todo-write 的
+   * `resolveConversationTodoPath` 同构。与 `subagentsDir` 互斥:两者都传时
+   * `subagentsDir` 优先(cli/TUI 形态 byte-stable);生产路径按入口二选一。
+   * 缺席且 `subagentsDir` 也缺席 → NoopTrace(同既有 byte-stable)。
+   */
+  readonly projectDir?: string;
   /** Crash diagnostics / worker trace root for subagent lifecycle evidence. */
   readonly subagentDiagnosticsDir?: string;
   /** TUI 工具摘要观测缝:透传给 createAciExecutor hooks.postToolUse(chat/serve 不传 → 零变化)。 */
@@ -249,10 +267,13 @@ export type BuildEngineOpts = {
    * fail-closed），门禁本体见 `harness/isolation/worktree-gate.ts`。
    */
   readonly worktreeIsolation?: WorktreeIsolationHostOpts;
-  /** #440 D2 seam:session 作用域 todos.md 目录。host 注入：调用方
-   *  (chat-session / session-hub / TUI deps) 根据 conversationId 解析得到
-   *  唯一的 per-session 目录；测试可传 mkdtemp 路径隔离。surface === "ask"
-   *  路径不传(SC8 oneshot 剥离,与 memory / subagent / skill 编排同形态)。 */
+  /** #440 D2 seam + #950 T2 / session-folder-consolidation:「会话项目目录」
+   *  (`resolveProjectSessionDir(baseDir, projectIdentityRoot)`)。host 注入:
+   *  三入口 (chat-session / session-hub / TUI deps) 用同一对
+   *  `(baseDir, projectIdentityRoot)` 派生同一根,per-conversationId 文件
+   *  路径在调用期由 resolveConversationTodoPath 一处钉死。测试可传 mkdtemp
+   *  路径隔离。surface === "ask" 路径不传(SC8 oneshot 剥离,与 memory /
+   *  subagent / skill 编排同形态)。 */
   readonly todoDir?: string;
   /**
    * B6 / ADR-0043 §3:溢出治理 countTokens 注入缝(测试用)。生产默认 =
@@ -703,9 +724,29 @@ export async function buildHarnessEngine(
           // 算 `writeSituation` 进 envelope；worker prior 据此渲染写根段。
           // 判定源 = `isolationEnabled`(line 716 单一读取点),worker 不重判。
           isolationOn: isolationEnabled,
-          trace: opts.subagentTrace ?? createNoopTraceService(),
+          // T5 (plans/session-folder-consolidation.md / SC8 + L2):
+          //   opts.subagentsDir 在场 → manager 内 per-agent file-mode
+          //   JsonlTraceService 形态,替换掉既有 `subagentTrace` 聚合单实例。
+          //   opts.subagentsDir 缺席 → manager 走 NoopTrace,语义同既有
+          //   (测试 seam: opts.subagentManager 已注入时由 caller 控制)。
+          //   opts.subagentDiagnosticsDir 仍保留,用于 subagent stderr pointer
+          //   —— T5 内部默认跟随 subagentsDir(manager 兜底),caller 不再
+          //   强绑。
+          //
+          // review-fix (M5):opts.projectDir 缝透传 —— serve hub 装配期
+          // 无 conversationId,manager spawn 期按 def.conversationId 两段式
+          // 派生 per-conversation 叶子。与 subagentsDir 互斥共用(同传时
+          // manager 内 subagentsDir 优先,cli/TUI byte-stable)。
+          ...(opts.subagentsDir !== undefined
+            ? { subagentsDir: opts.subagentsDir }
+            : {}),
+          ...(opts.projectDir !== undefined
+            ? { projectDir: opts.projectDir }
+            : {}),
           diagnosticsDir:
-            opts.subagentDiagnosticsDir ?? resolveSubagentTraceDir(),
+            opts.subagentDiagnosticsDir ??
+            opts.subagentsDir ??
+            resolveSubagentTraceDir(),
           taskTimeoutMs: env.subagent.taskTimeoutMs,
           maxConcurrentWorkers: env.subagent.maxConcurrentWorkers,
         }))

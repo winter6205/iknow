@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CURRENT_SCHEMA_VERSION,
+  resolveConversationDir,
   resolveProjectSessionDir,
   SessionStore,
 } from "../../../src/session-api/store/index.ts";
@@ -69,7 +70,7 @@ const withReply = (id: string): SessionFileV1 =>
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-list-wsr-"));
   sessionDir = resolveProjectSessionDir(baseDir, process.cwd());
-  store = new SessionStore(baseDir);
+  store = new SessionStore(baseDir, process.cwd());
 });
 
 afterAll(async () => {
@@ -108,10 +109,15 @@ describe("SessionStore.list — workspaceRoot exposure", () => {
     // #629: save no longer writes a `.json` mirror. Hand-write a legacy
     // `.json` directly (the legacy-only on-disk shape) and ensure no `.jsonl`
     // exists, so the legacy load path is the one under test.
-    const jsonPath = join(sessionDir, "list-wsr-legacy-only.json");
-    const jsonlPath = join(sessionDir, "list-wsr-legacy-only.jsonl");
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: "list-wsr-legacy-only",
+    });
+    const jsonPath = join(dir, "list-wsr-legacy-only.json");
+    const jsonlPath = join(dir, "list-wsr-legacy-only.jsonl");
     const legacy = withReply("list-wsr-legacy-only");
     (legacy as unknown as Record<string, unknown>)["workspaceRoot"] = root;
+    await mkdir(dir, { recursive: true });
     await writeFile(jsonPath, JSON.stringify(legacy, null, 2), "utf8");
     await rm(jsonlPath, { force: true });
 
@@ -163,7 +169,12 @@ describe("SessionStore.list — workspaceRoot exposure", () => {
 
   it("classifies a malformed workspaceRoot without silently migrating the file", async () => {
     const id = "list-wsr-malformed-root";
-    const jsonPath = join(sessionDir, `${id}.json`);
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
+    await mkdir(dir, { recursive: true });
+    const jsonPath = join(dir, `${id}.json`);
     const legacy = { ...withReply(id), workspaceRoot: "relative/root" };
     await writeFile(jsonPath, JSON.stringify(legacy), "utf8");
     const before = await readFile(jsonPath, "utf8");
@@ -182,7 +193,11 @@ describe("SessionStore.list — workspaceRoot exposure", () => {
   });
 
   it("does not reject legacy v3/v4 raw files that lack workspaceRoot (#3 sanitize Postel)", async () => {
-    await mkdir(sessionDir, { recursive: true });
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: "list-wsr-legacy",
+    });
+    await mkdir(dir, { recursive: true });
     // schemaVersion 3 with no workspaceRoot — must still list without
     // schema_invalid. Sanitize must backfill it to v5 and the additive
     // optional field is omitted from sanitize output (spread-discipline:
@@ -199,7 +214,7 @@ describe("SessionStore.list — workspaceRoot exposure", () => {
       updatedAt: "2026-02-01T00:00:00.000Z",
     };
     await writeFile(
-      join(sessionDir, "list-wsr-legacy.json"),
+      join(dir, "list-wsr-legacy.json"),
       JSON.stringify(raw),
       "utf8"
     );

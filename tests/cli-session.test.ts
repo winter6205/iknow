@@ -340,9 +340,7 @@ describe("processChatLine (pipe simulation)", () => {
     // History keeps turn 1's advisory block; turn 2's user message has none.
     const userTexts = ctx.state.messages
       .filter((m) => m.role === "user")
-      .map(
-        (m) => (m.content[0] as { type: "text"; text: string }).text ?? ""
-      );
+      .map((m) => (m.content[0] as { type: "text"; text: string }).text ?? "");
     assert.ok(userTexts[0]!.includes(MEMORY_ADVISORY_PREFIX));
     assert.ok(!userTexts[1]!.includes(MEMORY_ADVISORY_PREFIX));
     assert.ok(userTexts[1]!.includes("same question"));
@@ -351,7 +349,7 @@ describe("processChatLine (pipe simulation)", () => {
   it("does not re-inject advisory blocks recovered from resumed history", async () => {
     const dir = await mkdtemp(join(tmpdir(), "iknow-cli-prefetch-resume-"));
     try {
-      const store = new SessionStore(dir);
+      const store = new SessionStore(dir, process.cwd());
       const conversationId = "cli-prefetch-resume-1";
       const now = "2026-01-01T00:00:00.000Z";
       const overlay =
@@ -363,9 +361,7 @@ describe("processChatLine (pipe simulation)", () => {
         messages: [
           {
             role: "user",
-            content: [
-              { type: "text", text: `${overlay}earlier question` },
-            ],
+            content: [{ type: "text", text: `${overlay}earlier question` }],
           },
           {
             role: "assistant",
@@ -403,9 +399,7 @@ describe("processChatLine (pipe simulation)", () => {
         seenExcluded[0]!.includes("mem-7"),
         "resumed advisory ids must reach the overlay as excludeIds"
       );
-      const lastUser = [
-        ...ctx.state.messages,
-      ]
+      const lastUser = [...ctx.state.messages]
         .reverse()
         .find((m) => m.role === "user")!;
       const lastUserText = (

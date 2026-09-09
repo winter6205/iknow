@@ -703,7 +703,7 @@ describe("T8 matrix — hub reload seams (negative + exception)", () => {
   beforeAll(() => {
     const base = mkdtempSync(join(tmpdir(), "iknow-t8-hub-store-"));
     roots.push(base);
-    store = new SessionStore(base);
+    store = new SessionStore(base, process.cwd());
   });
 
   afterAll(() => {

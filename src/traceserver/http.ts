@@ -6,10 +6,13 @@
  *   /api/v1/traces/fields  — field declaration table (panel column SSOT)
  *   /api/v1/sessions       — 会话列表 (conversation_id / mtime / size / agent_version)
  *
- * v2 目录语义 (spec SC-R 10-16): traceDir 是「每会话一文件」的目录，
- * `<traceDir>/<convId>.jsonl` 是会话文件。`conversation_id` 参数路由到该
- * 文件；缺省 → 最近活跃会话 (sessions.ts 的 newestConversationId)。`?poll=` +
- * 响应 `offset` 组成增量轮询闭环 (SC-R 14)。
+ * T6 (plans/session-folder-consolidation.md / SC14–SC17): traceDir is the
+ * **baseDir**; sessions live at
+ * `<baseDir>/projects/<project-slug>/<convId>/trace.jsonl`.
+ * Wire params stay snake_case; `conversation_id` walks the project tree via
+ * `findConversationTraceFile` (session-discovery.ts). Default routing (no
+ * `conversation_id`) keeps using `newestConversationId` so the "most-recent
+ * session" panel behavior is unchanged.
  *
  * Dispatch contract: src/session-api/http.ts performs a single prefix check
  * and delegates here; all parsing/validation/response logic lives in this file.
@@ -21,13 +24,13 @@
  * leaking fs details).
  */
 import * as http from "node:http";
-import { join } from "node:path";
 import { ValidationError } from "../shared/errors.js";
 import { TRACE_RECORD_TYPES, type TraceQuery } from "./types.js";
 import { TRACE_FIELD_DEFS } from "./fields.js";
 import { emptyResponseEnvelope, toResponseEnvelope } from "./envelope.js";
 import { createJsonlTraceReader } from "./reader.js";
 import { listSessions, newestConversationId } from "./sessions.js";
+import { findConversationTraceFile } from "./session-discovery.js";
 import type { TraceRecordType } from "./types.js";
 
 export interface TracesRequestOpts {
@@ -187,17 +190,21 @@ function sendNoTraceFile(res: http.ServerResponse): void {
 // -- 会话文件解析 ---------------------------------------------------------------
 
 /**
- * 由 conversation_id 解析到 `<traceDir>/<convId>.jsonl`。
- * conversation_id 作为文件名段使用, 必须拒绝路径分隔符, 防止目录穿越。
+ * 由 conversation_id 解析到 trace 文件的读侧路径。Walk 两级树
+ * `<baseDir>/projects/<project-slug>/<convId>/trace.jsonl`;`conversation_id`
+ * 必须不含路径分隔符（防目录穿越）。未命中 → undefined,调用方转 404。
  */
-function sessionFilePath(traceDir: string, conversationId: string): string {
+function sessionFilePath(
+  traceDir: string,
+  conversationId: string
+): string | undefined {
   if (conversationId.includes("/") || conversationId.includes("\\")) {
     throw new ValidationError(
       "conversation_id must not contain path separators",
       { field: "conversation_id" }
     );
   }
-  return join(traceDir, `${conversationId}.jsonl`);
+  return findConversationTraceFile(traceDir, conversationId);
 }
 
 // -- handlers ------------------------------------------------------------------
@@ -254,6 +261,11 @@ export function handleTracesRequest(opts: TracesRequestOpts): void {
     }
 
     const filePath = sessionFilePath(traceDir, conversationId);
+    if (filePath === undefined) {
+      // 未命中会话文件夹 → 404 (与 /api/v1/sessions 的 no-trace-out 契约一致)。
+      sendNoTraceFile(res);
+      return;
+    }
     const reader = createJsonlTraceReader({
       filePath,
       ...(opts.maxBytes !== undefined ? { maxBytes: opts.maxBytes } : {}),

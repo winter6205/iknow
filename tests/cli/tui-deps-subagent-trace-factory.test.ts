@@ -1,9 +1,18 @@
 /**
- * TUI 装配层（`src/tui/deps.ts`）的 subagent trace 接线（#704 onto #721 master）。
+ * TUI 装配层（`src/tui/deps.ts`）的 subagent trace 接线（#704 onto #721 master，
+ * T5 升级为 per-agent 形态）。
  *
- * master 上单例 subagentManager + hub 同形的 `<traceOut>/subagent.jsonl` 聚合落盘
- * （非旧链 per-conversation registry）。本文件锁：配 traceOut → spawn 三事件写盘；
- * 不配 → Noop。
+ * T5 (plans/session-folder-consolidation.md / SC8 + L2): 父会话文件夹归并
+ * 后,子代理 lifecycle / content trace 改走 per-agent 形态 —
+ * `<父会话文件夹>/subagents/agent-<taskId>.jsonl`(派生公式
+ * `resolveSubagentTraceDir({projectDir, conversationId})`)。
+ *
+ * 测试锁:
+ *   - 配 conversationId → spawn 三事件落 `<subagentsDir>/agent-<taskId>.jsonl`
+ *     (subagentsDir 由 `<projectDir>/<conversationId>/subagents/` 派生);
+ *   - traceOut 仍透传给 diagnosticsDir (stderr pointer), 见 TUI 装配层
+ *     `opts.traceOut` 兼容形态;
+ *   - 不配 → manager 走 NoopTrace, 不写盘。
  */
 
 import assert from "node:assert/strict";
@@ -27,6 +36,7 @@ const mockState = vi.hoisted(() => ({
     emit: (event: string | symbol, ...args: unknown[]) => boolean;
     once: (event: string | symbol, ...args: unknown[]) => unknown;
   }>,
+  capturedSubagentsDir: undefined as string | undefined,
   capturedDiagnosticsDir: undefined as string | undefined,
 }));
 
@@ -39,6 +49,7 @@ vi.mock("../../src/harness/subagent/manager.ts", async (importActual) => {
   return {
     ...actual,
     createSubAgentManager: vi.fn((opts: Parameters<typeof realCreate>[0]) => {
+      mockState.capturedSubagentsDir = opts.subagentsDir;
       mockState.capturedDiagnosticsDir = opts.diagnosticsDir;
       const fakeSpawn: (
         def: unknown,
@@ -110,6 +121,7 @@ let shutdown: (() => Promise<void>) | undefined;
 
 beforeEach(() => {
   mockState.fakeChildren.length = 0;
+  mockState.capturedSubagentsDir = undefined;
   mockState.capturedDiagnosticsDir = undefined;
   scratchDir = mkdtempSync(join(tmpdir(), "iknow-tui-trace-"));
   fixtureRoot = mkdtempSync(join(tmpdir(), "iknow-tui-fix-"));
@@ -124,19 +136,35 @@ afterEach(async () => {
   rmSync(fixtureRoot, { recursive: true, force: true });
 });
 
-describe("buildTuiDeps — subagentTrace 接线", () => {
-  it("配了 traceOut → manager 的 spawn/state_change/stop 落 subagent.jsonl", async () => {
+describe("buildTuiDeps — subagent trace 接线 (T5 per-agent 形态)", () => {
+  it("配 conversationId → manager spawn 三事件落 <subagentsDir>/agent-<taskId>.jsonl", async () => {
+    const conversationId = "tui-conv-on-1";
     const deps = await buildTuiDeps(makeBundle("sk-test-tui-trace-on"), {
       askUser: createNoAskUser(),
+      conversationId,
       traceOut: scratchDir,
       userHome: join(fixtureRoot, "home"),
       cwd: fixtureRoot,
     });
     shutdown = deps.shutdown;
 
+    // subagentsDir 由 TUI 装配层经 (projectDir, conversationId) 派生,
+    // 测试通过 mockState.capturedSubagentsDir 拿到实际值,避免硬编码
+    // resolveProjectSessionDir 的 `<basename>-<sha1[:12]>` 后缀。
+    assert.ok(
+      mockState.capturedSubagentsDir !== undefined,
+      "TUI 必须把 subagentsDir 注入 manager"
+    );
+    const subagentsDir = mockState.capturedSubagentsDir!;
+    assert.match(
+      subagentsDir,
+      new RegExp(`${conversationId}/subagents$`),
+      `subagentsDir 应该以 <conversationId>/subagents 收尾,实际 ${subagentsDir}`
+    );
+
     const manager = deps.subagentManager;
     assert.ok(manager, "surface=tui 必须有 subagentManager");
-    manager.spawn({ task: "trace me" });
+    const { taskId } = manager.spawn({ task: "trace me" });
     expect(mockState.fakeChildren.length).toBe(1);
     settle(mockState.fakeChildren[0]!, {
       status: "ok",
@@ -146,7 +174,8 @@ describe("buildTuiDeps — subagentTrace 接线", () => {
     await new Promise((resolve) => setImmediate(resolve));
     await Promise.resolve();
 
-    const types = readFileSync(join(scratchDir, "subagent.jsonl"), "utf8")
+    const filePath = join(subagentsDir, `agent-${taskId}.jsonl`);
+    const types = readFileSync(filePath, "utf8")
       .split("\n")
       .filter(Boolean)
       .map((l) => (JSON.parse(l) as { record_type: string }).record_type);
@@ -155,9 +184,10 @@ describe("buildTuiDeps — subagentTrace 接线", () => {
     expect(types).toContain("subagent_stop");
   });
 
-  it("traceOut → manager diagnosticsDir uses the same trace tree", async () => {
+  it("traceOut → manager diagnosticsDir uses the traceOut tree (stderr pointer 兼容)", async () => {
     const deps = await buildTuiDeps(makeBundle("sk-test-tui-diagnostics"), {
       askUser: createNoAskUser(),
+      conversationId: "tui-conv-diagnostics-1",
       traceOut: scratchDir,
       userHome: join(fixtureRoot, "home"),
       cwd: fixtureRoot,
@@ -167,7 +197,13 @@ describe("buildTuiDeps — subagentTrace 接线", () => {
     expect(mockState.capturedDiagnosticsDir).toBe(scratchDir);
   });
 
-  it("不配 traceOut → 不写盘（NoopTraceService）", async () => {
+  it("不配 conversationId → TUI 派生一个 fallback conversationId, subagentsDir 仍注入 manager", async () => {
+    // T5 (plans/session-folder-consolidation.md / SC8): TUI 入口要求
+    // 每条 spawn 都能定位到 <父会话文件夹>/subagents/。即便 caller 不传
+    // conversationId,装配层也得落一个(用 randomUUID() 兜底)让 per-agent
+    // 形态可写 —— 不再依赖 caller 配/不配。验证 capturedSubagentsDir
+    // 派生路径以 /subagents 收尾(与 conversationId 段无关:manager 拿到
+    // 派生后的 dir, 就会建目录)。
     const deps = await buildTuiDeps(makeBundle("sk-test-tui-trace-off"), {
       askUser: createNoAskUser(),
       userHome: join(fixtureRoot, "home"),
@@ -175,19 +211,22 @@ describe("buildTuiDeps — subagentTrace 接线", () => {
     });
     shutdown = deps.shutdown;
 
-    const manager = deps.subagentManager;
-    assert.ok(manager);
-    manager.spawn({ task: "no trace" });
-    settle(mockState.fakeChildren[0]!, {
-      status: "ok",
-      summary: "done",
-      result: "r",
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-
+    // 没传 conversationId → TUI 内部 randomUUID 兜底, 仍然 derive
+    // subagentsDir 并注入 manager(captured 字段非空)。
     assert.ok(
-      !existsSync(join(scratchDir, "subagent.jsonl")),
-      "无 traceOut 时不应写 JSONL"
+      mockState.capturedSubagentsDir !== undefined,
+      "TUI 必须给 manager 一个 subagentsDir,即便 caller 没传 conversationId"
+    );
+    assert.match(
+      mockState.capturedSubagentsDir!,
+      /\/subagents$/,
+      `subagentsDir 应以 /subagents 收尾, 实际 ${mockState.capturedSubagentsDir}`
+    );
+
+    // diagnosticsDir 缺省回落到 subagentsDir(stderr pointer 跟父目录走)
+    assert.equal(
+      mockState.capturedDiagnosticsDir,
+      mockState.capturedSubagentsDir
     );
   });
 });

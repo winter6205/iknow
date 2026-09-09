@@ -5,7 +5,7 @@
  * bun:test。真实 store + conversationId；谓词 SSOT = load，不是 lastStopReason。
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testRender } from "@opentui/react/test-utils";
@@ -624,11 +624,18 @@ describe("TUI /continue busy-guard + Ctrl+C", () => {
         8000,
         "interrupt-notice"
       );
-      const traceFiles = readdirSync(traceOut).filter((name) =>
-        name.endsWith(".jsonl")
+      // T3 (SC6): 主会话 trace 锚在 `<projectDir>/<convId>/trace.jsonl`
+      // （session-store.ts `resolveConversationTraceFilePath`），traceOut 仅
+      // 供 subagent 聚合流使用。读侧用 bridge.store 派生同一 SSOT 路径。
+      const conversationDirs = readdirSync(app.bridge.store.getProjectDir());
+      expect(conversationDirs).toHaveLength(1);
+      const tracePath = join(
+        app.bridge.store.getProjectDir(),
+        conversationDirs[0]!,
+        "trace.jsonl"
       );
-      expect(traceFiles).toHaveLength(1);
-      const records = readFileSync(join(traceOut, traceFiles[0]!), "utf8")
+      expect(existsSync(tracePath)).toBe(true);
+      const records = readFileSync(tracePath, "utf8")
         .trim()
         .split("\n")
         .filter(Boolean)

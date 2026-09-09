@@ -18,6 +18,7 @@
  */
 import { SessionStore } from "../session-api/store/session-store.js";
 import { SessionHub } from "../session-api/hub.js";
+import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
 import type { EngineBundle } from "../harness/build-engine.js";
 import type {
   PostMessageResponse,
@@ -252,7 +253,15 @@ export interface CreateTuiBridgeOptions {
 }
 
 export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
-  const store = new SessionStore(resolveServeDataDir(opts.dataDir));
+  // T1 (session-folder-consolidation): store namespace keys by
+  // projectIdentityRoot, not cwd. mirror build-engine.ts:523.
+  const projectIdentityRoot = deriveProjectIdentityRoot({
+    cwd: opts.workspaceRoot,
+  });
+  const store = new SessionStore(
+    resolveServeDataDir(opts.dataDir),
+    projectIdentityRoot
+  );
   const hub = new SessionHub({
     store,
     deps: opts.deps,

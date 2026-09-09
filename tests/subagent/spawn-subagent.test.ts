@@ -264,6 +264,30 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
       expect.objectContaining({ task: "t", sandboxRoot: "/tmp/work" })
     );
   });
+
+  it("T5 SC8: ctx.toolUseId → def.toolUseId (Anthropic tool_use_id 透传, manager 抄到 .meta.json)", async () => {
+    // T5 (plans/session-folder-consolidation.md / SC8): executor 把 call.id
+    // 装进 ctx.toolUseId,spawn_subagent handler 消费后写入 def.toolUseId,
+    // manager.writeMetaOnce 把它抄进 `<subagentsDir>/agent-<taskId>.meta.json`
+    // 的 toolUseId 字段,用于反查父 loop 那次工具调用。
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler(
+      { task: "t", wait: false },
+      { toolUseId: "toolu_wire_abc" }
+    );
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ task: "t", toolUseId: "toolu_wire_abc" })
+    );
+  });
+
+  it("T5 SC8: ctx 不带 toolUseId (ask / worker / 直调 handler) → def 整字段省略 (Postel)", async () => {
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({ task: "t", wait: false });
+    const calledDef = spawn.mock.calls[0][0] as SubAgentDefinition;
+    expect(calledDef.toolUseId).toBeUndefined();
+  });
 });
 
 describe("spawn_subagent — AciToolDef 元数据", () => {

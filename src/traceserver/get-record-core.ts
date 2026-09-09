@@ -16,9 +16,6 @@
  * `conversation_id` 在本面**必填**（Assumption 4）：`query_trace` 的「缺省=最近活
  * 跃会话」是外部 agent 读到过一个它从未点名的文件的根因，内容轴第一个把它关掉。
  */
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-
 import {
   collectToolResults,
   dereferenceTraceMessages,
@@ -27,6 +24,7 @@ import {
   type ProjectedToolResult,
 } from "./project-tool-results.js";
 import { createJsonlTraceReader } from "./reader.js";
+import { findConversationTraceFile } from "./session-discovery.js";
 import {
   lookupRecordById,
   projectRecordBase,
@@ -109,12 +107,12 @@ export function createGetRecordCore(
 
   return async (input: unknown): Promise<string> => {
     const parsed = parseInput(input);
-    const filePath = join(traceDir, `${parsed.conversationId}.jsonl`);
-    // 先判文件在不在，再判记录在不在：两者是不同的主张（「这个会话没被读到」vs
-    // 「读完了，没有这条」），合成一个 `record_not_found` 就会把前者说成后者。
-    // 用 existsSync 而非 statSync().isFile()：目录名撞上 `<conv>.jsonl` 时
-    // isFile() 会把一个 IO 问题报成 not found，交给 reader 报 EISDIR 才诚实。
-    if (!existsSync(filePath)) {
+    // T6 (SC14–SC17): read 走两级树 `<baseDir>/projects/<slug>/<convId>/trace.jsonl`,
+    // 由 session-discovery.ts 的 findConversationTraceFile 解析。未命中 →
+    // TraceSessionNotFoundError（与缺记录分开，「会话文件夹不存在」和「读完无
+    // 该条」是两条不同的主张，合成一个 record_not_found 会把前者说成后者）。
+    const filePath = findConversationTraceFile(traceDir, parsed.conversationId);
+    if (filePath === undefined) {
       throw new TraceSessionNotFoundError(parsed.conversationId);
     }
     const reader = createJsonlTraceReader({ filePath });
@@ -125,7 +123,12 @@ export function createGetRecordCore(
       throw new TraceRecordNotFoundError(parsed.recordId);
     }
 
-    const parts = await addressParts(found.match.row, parsed.detail, traceDir);
+    // T3 (SC7, ADR-0071): blob dereference 接收 `traceFilePath` 而非
+    // `traceDir` —— `dirname(traceFilePath)` = blobs 兄弟目录, 与 T3 主会话
+    // 写侧(`<baseDir>/projects/<slug>/<convId>/trace.jsonl` + 同目录 blobs/)
+    // 共派生。读侧寻址已切两级树 (T6, SC14–SC17): filePath 来自
+    // findConversationTraceFile。
+    const parts = await addressParts(found.match.row, parsed.detail, filePath);
     return JSON.stringify(
       parsed.partIndex === undefined
         ? manifestOf(found.match, parsed, parts)
@@ -242,13 +245,16 @@ interface AddressablePart {
 async function addressParts(
   row: TraceRecordRow,
   detail: Detail,
-  traceDir: string
+  traceFilePath: string
 ): Promise<{
   readonly parts: ReadonlyArray<AddressablePart>;
   readonly messageCount: number;
 }> {
   const messages = Array.isArray(row["messages"]) ? row["messages"] : [];
-  const dereferenced = await dereferenceTraceMessages(messages, { traceDir });
+  // T3 (SC7): 传 traceFilePath 而非 traceDir —— blob 目录 = dirname(filePath)/blobs。
+  const dereferenced = await dereferenceTraceMessages(messages, {
+    traceFilePath,
+  });
   if (detail === "tool_results") {
     const results: readonly ProjectedToolResult[] =
       collectToolResults(dereferenced);

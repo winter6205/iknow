@@ -20,7 +20,7 @@
  */
 import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -31,6 +31,11 @@ import {
 // -- per-test server lifecycle ------------------------------------------------
 
 const tmpDirs: string[] = [];
+/**
+ * T6 (SC16): all sessions sit at
+ *   `<dir>/projects/<slug>/<convId>/trace.jsonl`.
+ */
+const TEST_PROJECT_SLUG = "test-project-serve";
 let listening: TraceListeningServer | undefined;
 let origin: string;
 
@@ -99,7 +104,14 @@ function writeSampleTraceDir(dir: string): void {
     "{not-json",
     "42",
   ];
-  writeFileSync(join(dir, "c1.jsonl"), lines.join("\n") + "\n", "utf8");
+  mkdirSync(join(dir, "projects", TEST_PROJECT_SLUG, "c1"), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(dir, "projects", TEST_PROJECT_SLUG, "c1", "trace.jsonl"),
+    lines.join("\n") + "\n",
+    "utf8"
+  );
 }
 
 async function getJson(p: string): Promise<{ status: number; body: unknown }> {

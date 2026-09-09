@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, it } from "vitest";
@@ -46,7 +52,15 @@ function makeTraceDir(): string {
     ["older-session", 300],
     ["newer-session", 100],
   ] as const) {
-    const path = join(dir, `${name}.jsonl`);
+    // T6 (SC16): 会话落两级树 `<dir>/projects/<slug>/<convId>/trace.jsonl`。
+    const path = join(
+      dir,
+      "projects",
+      "test-project-aci-list",
+      name,
+      "trace.jsonl"
+    );
+    mkdirSync(join(path, ".."), { recursive: true });
     const body = [
       { record_type: "llm_call", conversation_id: name, llm_call_id: "llm-1" },
       {

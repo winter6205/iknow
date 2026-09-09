@@ -53,8 +53,13 @@ export {
   type LedgerRewindTarget,
 } from "./rewind-targets.js";
 export {
+  resolveConversationDir,
+  resolveConversationTraceFilePath,
   resolveProjectSessionDir,
+  resolveSubagentTraceDir,
   SessionStore,
+  SUBAGENT_TRACE_DIR_NAME,
+  TRACE_FILE_NAME,
   type SessionListEntry,
   type SessionBindingStatus,
 } from "./session-store.js";

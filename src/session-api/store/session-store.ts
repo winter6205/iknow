@@ -33,11 +33,12 @@ import {
   readFile,
   readdir,
   rename,
+  rm,
   stat,
-  unlink,
   writeFile,
 } from "node:fs/promises";
 import { basename, isAbsolute, join } from "node:path";
+import path from "node:path";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
@@ -72,6 +73,15 @@ import {
 import type { SessionFileV1 } from "./schema.js";
 import { extractTitle, sanitizeSessionFile } from "./schema.js";
 import { MAX_WORKSPACE_ROOT_CHARS } from "../../config/workspace-root.js";
+import {
+  MAX_ROOT_DETAIL_CHARS,
+  sanitizeConversationSegment,
+  SessionRootError,
+} from "../../harness/session-roots.js";
+import {
+  PROJECTS_DIR_NAME,
+  SUBAGENT_TRACE_DIR_NAME,
+} from "../../shared/session-tree-names.js";
 
 export type SessionBindingStatus = "unbound" | "invalid" | "bound";
 
@@ -98,22 +108,168 @@ export interface SessionListEntry {
 }
 
 /**
- * Project namespace under the shared pool root (spec #120 SC 1).
+ * Project namespace under the shared pool root.
  *
- * Layout: `<baseDir>/sessions/<basename(cwd)>-<sha1(cwd)[:12]>`.
+ * T1 (plans/session-folder-consolidation.md / ADR-0071 Decision 1/2) — the
+ * grouping key is `projectIdentityRoot`, not `cwd`. cwd moves with worktree
+ * rebinds; the identity root is stable across rebinds (per
+ * `docs/CONTEXT.md`), which is the grouping semantic the spec requires.
+ *
+ * Layout: `<baseDir>/projects/<basename(root)>-<sha1(root)[:12]>`.
  * basename keeps it human-browsable; the sha1 suffix disambiguates same-named
- * projects at different paths. Pure: no IO.
+ * projects at different paths. Pure: no IO, no `process.cwd()` fallback.
+ *
+ * SC4: empty / blank / relative / non-normalizable inputs fail closed with a
+ * typed `SessionRootError` (same kind vocabulary as `resolveSessionRoots`).
+ * The default-cwd fallback of the pre-T1 contract was removed: a caller
+ * without an explicit root must decide where the namespace belongs.
  */
-export function resolveProjectSessionDir(baseDir: string, cwd: string): string {
-  const digest = createHash("sha1").update(cwd).digest("hex").slice(0, 12);
-  return join(baseDir, "sessions", `${basename(cwd)}-${digest}`);
+export function resolveProjectSessionDir(
+  baseDir: string,
+  projectIdentityRoot: string
+): string {
+  requireValidRoot(projectIdentityRoot, "projectIdentityRoot");
+  const digest = createHash("sha1")
+    .update(projectIdentityRoot)
+    .digest("hex")
+    .slice(0, 12);
+  return join(
+    baseDir,
+    PROJECTS_DIR_NAME,
+    `${basename(projectIdentityRoot)}-${digest}`
+  );
+}
+
+/**
+ * Resolve the per-conversation folder under an already-resolved project
+ * directory (the output of `resolveProjectSessionDir`). The leaf is the
+ * `conversationId` verbatim, so a UUID-shaped id passes through unchanged
+ * (sanitize is the identity on `[A-Za-z0-9_-]`).
+ *
+ * SC2 (folder name = `conversationId` UUID verbatim) + SC4 (pure function,
+ * no IO, no `process.cwd()` fallback). Path-hostile inputs (containing `/`
+ * / `..` / `\0`) are sanitized so they CANNOT escape `projectDir` — `..`
+ * becomes `__`, slashes become `_`. Over-length inputs (>255 bytes single
+ * segment) fail closed without silent truncation.
+ */
+export function resolveConversationDir(opts: {
+  readonly projectDir: string;
+  readonly conversationId: string;
+}): string {
+  const id = opts.conversationId;
+  if (typeof id !== "string" || id.length === 0) {
+    throw new SessionRootError(
+      "missing_root",
+      "conversationId is required and was not provided"
+    );
+  }
+  if (id.length > MAX_CONVERSATION_ID_BYTES) {
+    throw new SessionRootError(
+      "invalid_root",
+      `conversationId length ${id.length} exceeds ${MAX_CONVERSATION_ID_BYTES} bytes`
+    );
+  }
+  // Sanitize even on the success path so a permissive `..` / `/` cannot
+  // escape via path-join downstream. The slug remains stable across calls.
+  const segment = sanitizeConversationSegment(id);
+  return join(opts.projectDir, segment);
+}
+
+/**
+ * T3 (plans/session-folder-consolidation.md / ADR-0071 Decision 4):
+ * per-conversation trace 锚点 = `<projectDir>/<conversationId>/trace.jsonl`。
+ * 同一 baseDir + 同一 projectIdentityRoot + 同一 conversationId 必然派生出
+ * 同一绝对文件路径 —— 不同 cwd 启动同一仓的同一会话,文件路径稳定
+ * (跨 cwd 一致性 = plans/session-folder-consolidation.md SC6 的核心不变式)。
+ *
+ * 派生而不是字符串拼接:复用 `resolveConversationDir` 的 sanitize 与长度边界,
+ * 避免在调用方各自重写 path-join 导致 `..` / `/` 逃逸的回退风险。
+ */
+export const TRACE_FILE_NAME = "trace.jsonl";
+
+export function resolveConversationTraceFilePath(opts: {
+  readonly projectDir: string;
+  readonly conversationId: string;
+}): string {
+  return join(resolveConversationDir(opts), TRACE_FILE_NAME);
+}
+
+/**
+ * review-fix (M2/M3):re-export 自 `shared/session-tree-names.ts` ——
+ * 单一字面量 SSOT 在 shared 层(session-store / harness manager /
+ * traceserver 三方中立层)。本 re-export 保向下兼容(老 callers
+ * `import { SUBAGENT_TRACE_DIR_NAME } from "...store/session-store"`
+ * 不破)。
+ */
+export { SUBAGENT_TRACE_DIR_NAME } from "../../shared/session-tree-names.js";
+
+export function resolveSubagentTraceDir(opts: {
+  readonly projectDir: string;
+  readonly conversationId: string;
+}): string {
+  return join(resolveConversationDir(opts), SUBAGENT_TRACE_DIR_NAME);
+}
+
+/**
+ * Per-segment single-component cap on most POSIX-style filesystems.
+ * Enforced as a typed boundary (no silent truncation) so callers see the
+ * rejection instead of an arbitrary cut-off id producing an unexpected
+ * `mkdir EEXIST` or hash-collision.
+ */
+const MAX_CONVERSATION_ID_BYTES = 255;
+
+function requireValidRoot(value: string, label: string): void {
+  if (typeof value !== "string") {
+    throw new SessionRootError(
+      "missing_root",
+      `${label} is required and was not provided`
+    );
+  }
+  const trimmed = value.trim();
+  if (trimmed === "" || trimmed.length > MAX_CONVERSATION_ID_BYTES) {
+    throw new SessionRootError(
+      "missing_root",
+      `${label} is required and must be non-empty`
+    );
+  }
+  if (!path.isAbsolute(trimmed)) {
+    throw new SessionRootError(
+      "invalid_root",
+      `${label} must be an absolute path, got '${trimmed.slice(0, MAX_ROOT_DETAIL_CHARS)}'`
+    );
+  }
 }
 
 export class SessionStore {
-  private readonly dir: string;
+  private readonly projectDir: string;
 
-  constructor(baseDir: string, cwd: string = process.cwd()) {
-    this.dir = resolveProjectSessionDir(baseDir, cwd);
+  constructor(baseDir: string, projectIdentityRoot: string) {
+    this.projectDir = resolveProjectSessionDir(baseDir, projectIdentityRoot);
+  }
+
+  /**
+   * #950 T2 (plans/session-folder-consolidation.md):read-only projection of
+   * the resolved session project directory
+   * (`<baseDir>/projects/<basename>-<sha1[:12]>`). Consumers whose per-call
+   * leaf lives INSIDE the session folder — the todo ledger `todoDir` seam
+   * (`resolveConversationTodoPath`) and, from T3, the trace anchor — take
+   * this same root from the store instead of recomputing
+   * `resolveProjectSessionDir` at their own assembly sites, so there is
+   * exactly one `(baseDir, projectIdentityRoot)` decision per host process
+   * and the three entries (chat / serve / TUI) cannot drift into two
+   * different project folders for the same conversation.
+   */
+  getProjectDir(): string {
+    return this.projectDir;
+  }
+
+  /** Per-conversation folder under the project dir. Pure projection of
+   *  `projectDir` + `id` — see `resolveConversationDir` for the contract. */
+  private conversationDir(id: string): string {
+    return resolveConversationDir({
+      projectDir: this.projectDir,
+      conversationId: id,
+    });
   }
 
   /**
@@ -206,7 +362,7 @@ export class SessionStore {
     const jsonlPath = this.jsonlPath(id);
     const jsonlTmp = `${jsonlPath}.tmp`;
     try {
-      await mkdir(this.dir, { recursive: true });
+      await mkdir(this.conversationDir(id), { recursive: true });
       let log: ParsedSessionLog | null = null;
       try {
         log = await this.readJsonlLog(id, jsonlPath, {
@@ -514,15 +670,19 @@ export class SessionStore {
    */
   async list(): Promise<SessionListEntry[]> {
     const names = await this.readDir();
-    // Both on-disk shapes live in the same dir (#120 Q6: all entries read the
-    // same store); dedupe ids present in both (load prefers the JSONL).
+    // T1 (session-folder-consolidation): the project dir holds one folder
+    // per conversationId. Each folder contains the JSONL authority and the
+    // legacy mirror (same on-disk shape contract as before; only the layout
+    // changed). Sub-folder names are conversationId-shaped (sanitized) —
+    // we feed them straight into tryListEntry() because the load path
+    // already accepts the sanitized form.
     const ids = new Set<string>();
     for (const name of names) {
-      if (name.endsWith(SESSION_JSONL_EXT)) {
-        ids.add(name.slice(0, -SESSION_JSONL_EXT.length));
-      } else if (name.endsWith(".json")) {
-        ids.add(name.slice(0, -".json".length));
+      if (name.endsWith(SESSION_JSONL_EXT) || name.endsWith(".json")) {
+        // Direct file under projectDir — legacy flat layout, ignore.
+        continue;
       }
+      ids.add(name);
     }
     const entries: SessionListEntry[] = [];
     for (const id of ids) {
@@ -538,25 +698,40 @@ export class SessionStore {
    * Throws: not_found | io_error
    */
   async delete(id: string): Promise<void> {
-    let removed = false;
-    for (const path of [this.jsonlPath(id), this.filePath(id)]) {
-      try {
-        await unlink(path);
-        removed = true;
-      } catch (err) {
-        if (!isEnoent(err)) {
-          throw {
-            kind: "io_error",
-            conversation_id: id,
-            cause: errMsg(err),
-          } satisfies SessionStoreError;
-        }
+    // T1 (session-folder-consolidation): delete the entire conversation
+    // folder under <projectDir>/<id>/. The folder may contain both the
+    // JSONL authority and the legacy mirror (older #629-mirror-removed
+    // callers could still leave one behind); rmdir recursive removes
+    // them atomically.
+    const dir = this.conversationDir(id);
+    // Probe presence BEFORE rm — force:true would otherwise silently
+    // swallow the not_found signal we owe the caller.
+    let existed = false;
+    try {
+      await stat(dir);
+      existed = true;
+    } catch (err) {
+      if (!isEnoent(err)) {
+        throw {
+          kind: "io_error",
+          conversation_id: id,
+          cause: errMsg(err),
+        } satisfies SessionStoreError;
       }
     }
-    if (!removed) {
+    if (!existed) {
       throw {
         kind: "not_found",
         conversation_id: id,
+      } satisfies SessionStoreError;
+    }
+    try {
+      await rm(dir, { recursive: true, force: true });
+    } catch (err) {
+      throw {
+        kind: "io_error",
+        conversation_id: id,
+        cause: errMsg(err),
       } satisfies SessionStoreError;
     }
   }
@@ -564,11 +739,11 @@ export class SessionStore {
   // -- private helpers -------------------------------------------------------
 
   private filePath(id: string): string {
-    return join(this.dir, `${id}.json`);
+    return join(this.conversationDir(id), `${id}.json`);
   }
 
   private jsonlPath(id: string): string {
-    return join(this.dir, `${id}${SESSION_JSONL_EXT}`);
+    return join(this.conversationDir(id), `${id}${SESSION_JSONL_EXT}`);
   }
 
   /** readFile that tolerates absence: null on ENOENT, io_error otherwise. */
@@ -675,7 +850,7 @@ export class SessionStore {
 
   private async readDir(): Promise<string[]> {
     try {
-      return await readdir(this.dir);
+      return await readdir(this.projectDir);
     } catch (err) {
       if (isEnoent(err)) return []; // no sessions yet
       throw {

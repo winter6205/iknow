@@ -15,12 +15,9 @@
 
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
-import {
-  maybeRotate,
-  type TraceRotationOptions,
-} from "./rotation.js";
+import { maybeRotate, type TraceRotationOptions } from "./rotation.js";
 import type {
   TraceService,
   LlmCallRecord,
@@ -38,11 +35,21 @@ import type {
 
 export interface JsonlTraceOptions {
   /**
-   * trace 目录 (绝对或相对 CWD)。
-   * T2 每会话独立文件: 实际写入 <filePath>/<conversationId>.jsonl,
-   * 目录不存在时 mkdirSync recursive 创建 (ADR-0003 D4: conversation_id 仍实例绑定)。
+   * trace 目录 (绝对或相对 CWD)。T2 每会话独立文件: 实际写入
+   * `<filePath>/<conversationId>.jsonl`,目录不存在时 mkdirSync recursive 创建
+   * (ADR-0003 D4: conversation_id 仍实例绑定)。仅子代理聚合流(`subagent`
+   * conversationId)保留目录模式 —— 主会话写入改走 `traceFilePath` 文件模式,
+   * 锚在 `<baseDir>/projects/<slug>/<conversationId>/trace.jsonl`(T3,
+   * plans/session-folder-consolidation.md / ADR-0071 Decision 1)。
    */
-  filePath: string;
+  filePath?: string;
+  /**
+   * 直接给出 trace 文件路径(主会话模式, T3)。文件所在目录不存在时,工厂在
+   * 首次写入时按 `mkdirSync recursive` 创建;`maybeRotate` 仅在目录模式下触发
+   * (文件路径已收敛, 没有 `*.1.jsonl` / `*.2.jsonl` 之类的轮转目标)。
+   * 与 `filePath` 互斥 —— 同时传 / 同时缺席都报错,工厂构造期 fail-loud。
+   */
+  traceFilePath?: string;
   /** 实例绑定的 conversation_id, 每条记录都写入 (ADR Decision 4)。 */
   conversationId: string;
   /** 可选注入 writer (测试用 always-throw writer)。 */
@@ -86,14 +93,6 @@ function sameSecretSet(
   return left.every((value) => rightSet.has(value));
 }
 
-type MessageStorageMode = "full" | "blob";
-
-function resolveMessageStorageMode(): MessageStorageMode {
-  return process.env.IKNOW_TRACE_MESSAGES?.trim().toLowerCase() === "blob"
-    ? "blob"
-    : "full";
-}
-
 function isAlreadyPresentError(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -103,15 +102,51 @@ function isAlreadyPresentError(error: unknown): boolean {
   );
 }
 
+/**
+ * blob 载荷的形状标记（ADR-0036 同日 Amendment 表 C）。Anthropic 的
+ * `content` 有两种合法形状：block 数组与纯字符串。外层套 `{kind, v}` 让
+ * 读侧（T6 起）无损还原两种形状 —— 字符串不被误包成数组，数组不被误拆。
+ */
+interface BlobPayload {
+  kind: "str" | "blocks";
+  v: unknown;
+}
+
+/**
+ * content 级 blob 引用（SC10, ADR-0036 同日 Amendment）：`messages[i]` 仍是
+ * `{role, content}` 两键，`content` 被 `{sha, bytes}` 替换 —— role 内联在场，
+ * 读侧 `messageRole()` 无需改动即返回正确 role。`role` 本身不进 blob，正文
+ * 重复仍是去重收益的主体（ADR-0071 Decision 3）。
+ *
+ * empty（空串 / 空数组 / null）同样寻址：空内容有其 sha，不特判内联（表 B）。
+ */
 function toBlobReferences(
   messages: ReadonlyArray<unknown>,
   traceDir: string,
   outputMask: ReturnType<typeof createOutputMask>
-): Array<{ sha: string; bytes: number }> {
+): Array<{ role: unknown; content: { sha: string; bytes: number } }> {
   const blobsDir = join(traceDir, "blobs");
   mkdirSync(blobsDir, { recursive: true });
   return messages.map((message) => {
-    const serialized = JSON.stringify(message) ?? "null";
+    if (
+      typeof message !== "object" ||
+      message === null ||
+      !("role" in message) ||
+      !("content" in message)
+    ) {
+      throw new TypeError(
+        "trace blob storage requires {role, content} message records"
+      );
+    }
+    const { role, content } = message as {
+      role: unknown;
+      content: unknown;
+    };
+    const payload: BlobPayload = {
+      kind: typeof content === "string" ? "str" : "blocks",
+      v: content,
+    };
+    const serialized = JSON.stringify(payload) ?? "null";
     const masked = outputMask.mask(serialized);
     const bytes = Buffer.byteLength(masked, "utf8");
     const sha = createHash("sha256").update(masked, "utf8").digest("hex");
@@ -123,7 +158,7 @@ function toBlobReferences(
     } catch (error) {
       if (!isAlreadyPresentError(error)) throw error;
     }
-    return { sha, bytes };
+    return { role, content: { sha, bytes } };
   });
 }
 
@@ -138,8 +173,35 @@ function toBlobReferences(
 export function createJsonlTraceService(
   options: JsonlTraceOptions
 ): TraceServiceWithHealth {
-  const { filePath, conversationId } = options;
-  maybeRotate(filePath, options.rotation);
+  const { conversationId } = options;
+  // T3: mode dispatch — `filePath` 是目录(子代理聚合流), `traceFilePath` 是
+  // 文件路径(主会话锚在会话文件夹)。互斥: 同时传或同时缺席都 fail-loud,
+  // 工厂构造期显式,避免静默退化到 cwd-relative `./trace/`。
+  if (options.filePath === undefined && options.traceFilePath === undefined) {
+    throw new Error(
+      "JsonlTraceService requires either filePath (directory mode) or traceFilePath (file mode)"
+    );
+  }
+  if (options.filePath !== undefined && options.traceFilePath !== undefined) {
+    throw new Error(
+      "JsonlTraceService received both filePath and traceFilePath — set exactly one"
+    );
+  }
+  const filePath = options.filePath;
+  const traceFilePath = options.traceFilePath;
+  // 派生: 目录模式 → targetFile = <dir>/<convId>.jsonl, targetDir = <dir>;
+  // 文件模式 → targetFile = traceFilePath, targetDir = dirname(traceFilePath)。
+  // 上面的互斥检查保证此处一定有一项非空, 直接 narrow 即可。
+  const targetFile =
+    traceFilePath !== undefined
+      ? traceFilePath
+      : join(filePath as string, `${conversationId}.jsonl`);
+  const targetDir =
+    filePath !== undefined ? filePath : dirname(traceFilePath as string);
+  // 目录模式保留 maybeRotate(旧 `<dir>/<convId>.1.jsonl` 链); 文件模式无轮转目标。
+  if (filePath !== undefined) {
+    maybeRotate(filePath, options.rotation);
+  }
   let secretValues = currentSecretValues();
   let outputMask = createOutputMask(secretValues);
   function currentOutputMask(): ReturnType<typeof createOutputMask> {
@@ -150,23 +212,20 @@ export function createJsonlTraceService(
     }
     return outputMask;
   }
-  const messageStorageMode = resolveMessageStorageMode();
-  // T2 每会话独立文件: filePath 是目录, 实际写 <filePath>/<conversationId>.jsonl。
-  // mkdirSync recursive 兜底, 目录不存在时先建 (产品路径 traceOut 首次使用时目录
-  // 可能未建)。仅默认 writer 时建目录 —— 注入自定义 writer (测试用 always-throw)
-  // 时调用方掌控写盘, 目录创建由调用方负责, 不在工厂内强加 IO 副作用。
-  const sessionFile = join(filePath, `${conversationId}.jsonl`);
   // mkdir 延迟到首次写入: 构造期不做 IO —— 目标路径被同名文件占据等失败由
   // recordXxx 的 try/catch warn-once 兜底 (ADR-0003 D13), 不在构造时抛错打挂 turn。
+  // 目录模式建 <filePath>; 文件模式建 dirname(traceFilePath)。仅默认 writer 时建
+  // 目录 —— 注入自定义 writer (测试用 always-throw) 时调用方掌控写盘, 目录创建
+  // 由调用方负责, 不在工厂内强加 IO 副作用。
   let dirReady = false;
   const writer: (line: string) => void =
     options.writer ??
     ((line: string): void => {
       if (!dirReady) {
-        mkdirSync(filePath, { recursive: true });
+        mkdirSync(targetDir, { recursive: true });
         dirReady = true;
       }
-      appendFileSync(sessionFile, line + "\n", "utf8");
+      appendFileSync(targetFile, line + "\n", "utf8");
     });
 
   // 实例级去重: 首次写盘失败 warn 一次, 后续静默 (ADR Decision 13)。
@@ -197,23 +256,26 @@ export function createJsonlTraceService(
         llm_call_id: id,
         ...toSnakeCaseRecord(record),
       };
-      let line = fullLine;
-      if (messageStorageMode === "blob" && record.messages !== undefined) {
+      // SC11 (ADR-0036 同日 Amendment)：无故障回退。blob 是唯一模式（SC9
+      // 退役 full 分支）；内层 blob IO 失败时**不写任何内联全量行** ——
+      // recordFailure warn-once 后直接返回 undefined，该次调用零行落盘，
+      // turn 存活（ADR-0003 D13 继承：不向调用方抛）。loop-engine 侧 D14
+      // 契约（后续 recordToolCall 仍以 parent_llm_call_id=null 落盘）不受
+      // 本文件影响。
+      if (record.messages !== undefined) {
         try {
-          line = {
-            ...fullLine,
-            messages: toBlobReferences(
-              record.messages,
-              filePath,
-              currentOutputMask()
-            ),
-          };
+          fullLine.messages = toBlobReferences(
+            record.messages,
+            targetDir,
+            currentOutputMask()
+          );
         } catch (err) {
           recordFailure(err);
+          return undefined;
         }
       }
       try {
-        writeLine(line);
+        writeLine(fullLine);
         return id;
       } catch (err) {
         recordFailure(err);

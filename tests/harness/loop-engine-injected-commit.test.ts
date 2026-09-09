@@ -41,6 +41,7 @@ import {
   CURRENT_SCHEMA_VERSION,
   parseSessionJsonl,
   projectSessionLog,
+  resolveConversationDir,
   resolveProjectSessionDir,
   SessionStore,
   type SessionFileV1,
@@ -298,7 +299,13 @@ describe("#888 end-to-end: cancelled run with injected bars saves without fork",
     });
 
     // 盘上投影必须与内存投影一致 —— fork 意味着丢失 e1..eN 前缀（#888 现象）。
-    const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+    const raw = await readFile(
+      join(
+        resolveConversationDir({ projectDir: sessionDir, conversationId: id }),
+        `${id}.jsonl`
+      ),
+      "utf8"
+    );
     const log = parseSessionJsonl(raw);
     const projected = projectSessionLog(log).messages;
     assert.deepEqual(

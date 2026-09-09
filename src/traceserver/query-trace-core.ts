@@ -1,13 +1,12 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-
 import {
+  dereferenceTraceMessages,
   messageRole,
   projectToolResultsFromTrace,
 } from "./project-tool-results.js";
 import { projectRecordBase } from "./record-lookup.js";
 import { TRACE_OUTPUT_BACKSTOP } from "./output-backstop.js";
 import { createJsonlTraceReader } from "./reader.js";
+import { findConversationTraceFile } from "./session-discovery.js";
 import {
   TRACE_RECORD_TYPES,
   type TraceRecordRow,
@@ -83,8 +82,8 @@ export function createQueryTraceCore(
     // missing file raises `session_not_found`, not the silent empty envelope the
     // pre-T7 default returned when the implicit "newest session" was also
     // missing.
-    const filePath = join(traceDir, `${parsed.conversationId}.jsonl`);
-    if (!existsSync(filePath)) {
+    const filePath = findConversationTraceFile(traceDir, parsed.conversationId);
+    if (filePath === undefined) {
       throw new TraceSessionNotFoundError(parsed.conversationId);
     }
     const reader = createJsonlTraceReader({ filePath });
@@ -104,7 +103,7 @@ export function createQueryTraceCore(
     };
     const result = reader.query(query);
     const projected = await Promise.all(
-      result.records.map((row) => projectRecord(row, traceDir))
+      result.records.map((row) => projectRecord(row, filePath))
     );
     return serializeListPage(
       toQueryTracePage(projected, {
@@ -217,12 +216,26 @@ function parseStatus(value: unknown): "ok" | "error" | undefined {
 
 async function projectRecord(
   row: TraceRecordRow,
-  traceDir: string
+  traceFilePath: string
 ): Promise<Record<string, unknown>> {
   const projected = projectRecordBase(row);
   if (row["record_type"] !== "llm_call") return projected;
 
-  const messages = Array.isArray(row["messages"]) ? row["messages"] : [];
+  const rawMessages = Array.isArray(row["messages"]) ? row["messages"] : [];
+  // T7 (SC18 实跑暴露的 SC14 残余): blob 模式下 `messages[i]` 形态是
+  // `{role, content:{sha,bytes}}`(SC10) 或整条 `{sha,bytes}`(T4 前残留);
+  // 读侧 `messageRole()` 对前者的 role 仍内联可读, 但 `preview()`
+  // 直接 `JSON.stringify` 整条 message 会把 `{"sha":...}` 塞进 preview 正文
+  // —— SC14 「preview 为正文且不含 sha 字面量」之前是 inline 形态才满足,
+  // blob 模式实跑下露馅。先 `dereferenceTraceMessages` 把 messages 还原成
+  // inline 形态 (`{role, content}` 二键, content 是字符串或数组), 后续
+  // `messageRole` / `preview` / `projectToolResultsFromTrace` 全部走还原后
+  // 形态。`dereferenceTraceMessages` 自己有「缺失/损坏不抛进 turn」的 try/catch
+  // 降级到 `[]`, 失败时 messages_count=0, 三个 preview 字段缺席 —— 与 empty
+  // 边界同形, 合法态。
+  const messages = await dereferenceTraceMessages(rawMessages, {
+    traceFilePath,
+  });
   projected.messages_count = messages.length;
   if (messages.length > 0) {
     projected.first_message_preview = preview(messages[0]);
@@ -242,7 +255,10 @@ async function projectRecord(
       }
     }
   }
-  const toolResults = await projectToolResultsFromTrace(messages, { traceDir });
+  // T3 (SC7): 传 traceFilePath, blob 目录由 dirname(filePath)/blobs 派生。
+  const toolResults = await projectToolResultsFromTrace(rawMessages, {
+    traceFilePath,
+  });
   projected.tool_result_count = toolResults.length;
   if (toolResults.length > 0) {
     projected.tool_result_previews = toolResults

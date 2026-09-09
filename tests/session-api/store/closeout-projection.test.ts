@@ -31,6 +31,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   closeoutOrphanToolUses,
+  resolveConversationDir,
   resolveProjectSessionDir,
   SESSION_JSONL_EXT,
   SessionStore,
@@ -92,8 +93,10 @@ const sampleFile = (opts: {
   ...opts.overrides,
 });
 
+const conversationDir = (id: string): string =>
+  resolveConversationDir({ projectDir: sessionDir, conversationId: id });
 const jsonlPath = (id: string): string =>
-  join(sessionDir, `${id}${SESSION_JSONL_EXT}`);
+  join(conversationDir(id), `${id}${SESSION_JSONL_EXT}`);
 
 type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
 type ToolResultBlock = Extract<AnthropicContentBlock, { type: "tool_result" }>;
@@ -143,7 +146,7 @@ function assertApiLegal(messages: ReadonlyArray<AnthropicNativeMessage>): void {
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-closeout-"));
   sessionDir = resolveProjectSessionDir(baseDir, process.cwd());
-  store = new SessionStore(baseDir);
+  store = new SessionStore(baseDir, process.cwd());
 });
 
 afterAll(async () => {

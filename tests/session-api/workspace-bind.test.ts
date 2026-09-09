@@ -37,7 +37,7 @@ async function tmpDir(prefix: string): Promise<string> {
 }
 
 async function makeStore(): Promise<SessionStore> {
-  return new SessionStore(await tmpDir("iknow-ws-bind-store-"));
+  return new SessionStore(await tmpDir("iknow-ws-bind-store-"), process.cwd());
 }
 
 async function writeUnboundSession(
@@ -182,7 +182,9 @@ describe("all session-backed surfaces reject unbound execution", () => {
       askUser: createNoAskUser(),
       buildEngine: async () => {
         buildCalls += 1;
-        return { deps: makeDeps([assistantResult({ texts: ["should-not-run"] })]) };
+        return {
+          deps: makeDeps([assistantResult({ texts: ["should-not-run"] })]),
+        };
       },
     });
     const conversationId = "invalid-root-post";

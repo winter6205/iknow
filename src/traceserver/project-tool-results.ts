@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export const TOOL_RESULT_PREVIEW_CAP = 400;
 const TRUNCATION_MARKER = "...[truncated]";
@@ -55,7 +55,15 @@ export type ReadBlob = (
 ) => string | Uint8Array | Promise<string | Uint8Array>;
 
 export interface TraceMessageDereferenceOptions {
-  readonly traceDir?: string;
+  /**
+   * 主会话 trace 文件绝对路径。T3 (SC7, plans/session-folder-consolidation.md /
+   * ADR-0071 Decision 4) 起 `traceDir` 退役:blob 目录 = `dirname(traceFilePath) +
+   * "/blobs"`,与 `<baseDir>/projects/<slug>/<convId>/blobs` 同源派生
+   * (JsonlTraceService 在 blob 模式下的默认写盘位置)。传 `traceFilePath` 即隐含
+   * 接受该 blob 路径;读侧禁止 `traceDir` 单独存在 —— 仅文件路径足以承载 blob
+   * 解析的全部信息。
+   */
+  readonly traceFilePath?: string;
   readonly readBlob?: ReadBlob;
 }
 
@@ -151,25 +159,94 @@ export async function dereferenceTraceMessages(
   try {
     return await Promise.all(
       messages.map(async (message) => {
-        if (!isRecord(message) || !("sha" in message)) return message;
+        // Two valid blob-ref shapes coexist:
+        //   (a) whole-message ref (T4 之前的整条 message 替换, 旧 fixture 残留):
+        //         { sha, bytes }  — message 整体作为 blob 写入
+        //   (b) content-level ref (T4, SC10):
+        //         { role, content: { sha, bytes } }  — role 内联, content 走 blob
+        // The deref point descends into (b)'s `content` so the post-derf shape
+        // matches the inline form: `{role, content}` where `content` is a
+        // string (kind="str") or array (kind="blocks"). Whole-message (a) keeps
+        // its historical escape-hatch behavior — JSON.parse the blob and
+        // return as-is — so legacy fixtures stay readable.
+        if (!isRecord(message)) return message;
+        if (isContentBlobReference(message)) {
+          const inner = await readBlobContent(message.content, options);
+          return { role: message.role, content: inner };
+        }
+        if (!("sha" in message)) return message;
         const reference = asBlobReference(message);
-        const readBlob =
-          options.readBlob ??
-          (options.traceDir === undefined
-            ? undefined
-            : (sha: string) =>
-                readFileSync(join(options.traceDir!, "blobs", sha)));
-        if (readBlob === undefined) throw new Error("traceDir is required");
-        const raw = await readBlob(reference.sha);
-        const serialized =
-          typeof raw === "string" ? raw : Buffer.from(raw).toString("utf8");
-        return JSON.parse(serialized) as unknown;
+        const inner = await readBlobPayload(reference.sha, options);
+        return inner;
       })
     );
   } catch {
     // EXIT: a missing/corrupt blob must not throw into the caller turn.
     return [];
   }
+}
+
+/**
+ * T4 (SC10): `content` field shaped `{ sha, bytes }` — the message is a
+ * content-level ref, the surrounding `role` is inline. Detected by **field
+ * shape**, not by `("sha" in message)` (which would also fire on whole-message
+ * refs and skip the role).
+ */
+function isContentBlobReference(
+  message: Record<string, unknown>
+): message is { role: unknown; content: { sha: string; bytes: number } } {
+  return isRecord(message.content) && isRecordContentRef(message.content);
+}
+
+function isRecordContentRef(value: unknown): value is {
+  sha: string;
+  bytes: number;
+} {
+  return (
+    isRecord(value) &&
+    "sha" in value &&
+    "bytes" in value &&
+    !("role" in value) &&
+    !("content" in value)
+  );
+}
+
+async function readBlobContent(
+  ref: { sha: string; bytes: number },
+  options: TraceMessageDereferenceOptions
+): Promise<unknown> {
+  // 写侧 toBlobReferences 形状: {kind:"str"|"blocks", v: content}。
+  // 读侧还原两条: kind="str" → 字符串; kind="blocks" → 数组(原样 v)。
+  // 损坏/缺失/形状不符 → 一律 throw 给外层 try/catch 降级到空数组。
+  const payload = await readBlobPayload(ref.sha, options);
+  if (
+    isRecord(payload) &&
+    (payload.kind === "str" || payload.kind === "blocks")
+  ) {
+    return payload.v;
+  }
+  // 不是 T4 形状 — 可能是整条 message ref 与本函数错配,直接 JSON.parse 原文。
+  return payload;
+}
+
+async function readBlobPayload(
+  sha: string,
+  options: TraceMessageDereferenceOptions
+): Promise<unknown> {
+  const readBlob =
+    options.readBlob ??
+    (options.traceFilePath === undefined
+      ? undefined
+      : (shaToRead: string) =>
+          readFileSync(
+            join(dirname(options.traceFilePath!), "blobs", shaToRead)
+          ));
+  if (readBlob === undefined)
+    throw new Error("traceFilePath is required to dereference blob references");
+  const raw = await readBlob(sha);
+  const serialized =
+    typeof raw === "string" ? raw : Buffer.from(raw).toString("utf8");
+  return JSON.parse(serialized) as unknown;
 }
 
 function collectToolNames(

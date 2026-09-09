@@ -287,6 +287,11 @@ export function createSpawnSubAgentTool(
         // _stop 三类 record。ctx 缺 turnId(worker / ask / 直接调 handler)时
         // 字段整个省略,Postel 不落空值。
         ...(ctx?.turnId !== undefined ? { parentTurnId: ctx.turnId } : {}),
+        // T5 (plans/session-folder-consolidation.md / SC8): 反查父 loop 那次
+        // 工具调用 —— executor 已把 call.id (Anthropic tool_use_id) 装进
+        // ctx.toolUseId,manager 把它抄进 .meta.json 的 toolUseId 字段。
+        // 缺省(ask / 直调 handler / 测试注入)整字段省略。
+        ...(ctx?.toolUseId !== undefined ? { toolUseId: ctx.toolUseId } : {}),
         // #556 T3 / T7: subagent_type 解析结果 (缺省也解析为 general-purpose)
         ...(resolvedRole !== undefined ? { role: resolvedRole } : {}),
         ...(typeof obj.systemPrompt === "string"

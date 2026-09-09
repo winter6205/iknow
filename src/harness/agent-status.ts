@@ -4,9 +4,13 @@
  * 边界:
  *   - `buildAgentStatusText` 纯函数(无 IO、无时间 / 随机依赖),T3(TUI
  *     只读最新现势)复用同一份快照计算发事件,不与消息编码内部耦合;
- *   - `readOpenTodoLines` 只投影 `<todoDir>/todos.md` 里 `- [ ]` 开头的
- *     未勾行,逐字保留;文件缺席 / 空文件 / 全勾 / 读取失败 → 空列表,
- *     绝不把读失败抛进模型回合(当"无 todo 段"静默处理);
+ *   - `readOpenTodoLines` 只投影 `<projectDir>/<conversationId>/todos.md`
+ *     里 `- [ ]` 开头的未勾行,逐字保留;文件缺席 / 空文件 / 全勾 / 读取
+ *     失败 → 空列表,绝不把读失败抛进模型回合(当"无 todo 段"静默处理);
+ *     `projectDir` 在 T2 / session-folder-consolidation 起是「会话文件夹根」
+ *     (`resolveProjectSessionDir(baseDir, projectIdentityRoot)`),由 chat /
+ *     serve / TUI 三入口用同一对 `(baseDir, projectIdentityRoot)` 派生,保证
+ *     同一会话解析到同一 projectDir(T2 关键判据);
  *   - 栏文本只承载代码算出的现势(last_tool + 未勾 todo 段),不含政策
  *     散言 / 读规则 / 跳过条件(那些归 T2 的 system 前缀与 tool
  *     description)。空槽不广告:无未勾项时整段缺席,不印空列表。
@@ -17,7 +21,7 @@ import { readFile } from "node:fs/promises";
 import type { AnthropicNativeMessage } from "./model-adapter/types.js";
 import {
   OPEN_PREFIX,
-  resolveConversationTodoDir,
+  resolveConversationTodoPath,
 } from "./aci/tools/todo-write.js";
 
 // 未勾行锚点:直接复用账本写入方 todo-write.ts 导出的 OPEN_PREFIX —— 写入
@@ -122,7 +126,10 @@ export async function readOpenTodoLines(
   todoDir: string,
   conversationId?: string
 ): Promise<ReadonlyArray<string>> {
-  const filePath = resolveConversationTodoDir({ todoDir, conversationId });
+  const filePath = resolveConversationTodoPath({
+    projectDir: todoDir,
+    conversationId,
+  });
   try {
     const content = await readFile(filePath, "utf8");
     return content.split("\n").filter((line) => line.startsWith(OPEN_PREFIX));

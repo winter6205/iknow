@@ -114,7 +114,7 @@ let settingsSource: ReturnType<typeof installTestSettingsSource>;
 
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-ensure-deps-"));
-  store = new SessionStore(baseDir);
+  store = new SessionStore(baseDir, process.cwd());
   // #164 第二阶段：IKNOW_LLM_MODEL 已退役，ensureDeps → buildHarnessEngine 装配
   // 路径需要 settings.llm.model + apiKey 来源 → HOME 重定向到 tmp。
   settingsSource = installTestSettingsSource();

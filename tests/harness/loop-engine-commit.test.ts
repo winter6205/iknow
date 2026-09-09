@@ -40,6 +40,7 @@ import {
   CURRENT_SCHEMA_VERSION,
   parseSessionJsonl,
   projectSessionLog,
+  resolveConversationDir,
   resolveProjectSessionDir,
   SessionStore,
   type SessionFileV1,
@@ -144,6 +145,10 @@ describe("T3 acceptance: 第一个 tool_result commit 后中断", () => {
   it("盘上 JSONL 有 assistant 事件与第一条 tool_result,无第二条", async () => {
     const { store, sessionDir } = await storeFor();
     const id = "t3-acceptance";
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
     // host 侧前置:会话 JSONL 已存在(hub createSession / chat bootstrap 语义)。
     await store.save({ id, file: emptySessionFile(id) });
 
@@ -173,7 +178,7 @@ describe("T3 acceptance: 第一个 tool_result commit 后中断", () => {
 
     // commit 恰好被调 3 次:assistant、tr_a、tr_b(崩溃);前两次已落盘。
     assert.equal(calls, 3);
-    const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+    const raw = await readFile(join(dir, `${id}.jsonl`), "utf8");
     const log = parseSessionJsonl(raw);
     assert.equal(log.events.length, 2);
     // e0 = assistant(含两个 tool_use),e1 = 第一条 tool_result 的 user message。
@@ -316,6 +321,10 @@ describe("D2 acceptance: thinkingMs flows from adapter to JSONL event record", (
   it("stub 流式回合带 thinkingMs → 盘上 JSONL assistant 事件挂值", async () => {
     const { store, sessionDir } = await storeFor();
     const id = "d2-thinking";
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
     await store.save({ id, file: emptySessionFile(id) });
 
     const responses = stubWithThinkingMs([1500, 2300]);
@@ -346,7 +355,7 @@ describe("D2 acceptance: thinkingMs flows from adapter to JSONL event record", (
 
     // 3 个 commit:assistant(1500) → tool_result user → assistant final(2300)。
     assert.deepEqual(committedThinking, [1500, undefined, 2300]);
-    const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+    const raw = await readFile(join(dir, `${id}.jsonl`), "utf8");
     const log = parseSessionJsonl(raw);
     assert.equal(log.events.length, 3);
     // e0 assistant — thinkingMs = 1500
@@ -367,6 +376,10 @@ describe("D2 acceptance: thinkingMs flows from adapter to JSONL event record", (
   it("无思考(thinkingMs 缺席) → 助手事件不挂 key(load projection 也不挂 array)", async () => {
     const { store, sessionDir } = await storeFor();
     const id = "d2-no-thinking";
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
     await store.save({ id, file: emptySessionFile(id) });
 
     const responses = stubWithThinkingMs([undefined, undefined]);
@@ -397,7 +410,7 @@ describe("D2 acceptance: thinkingMs flows from adapter to JSONL event record", (
 
     // 全部 undefined → 全部 缺席。
     assert.deepEqual(committedThinking, [undefined, undefined, undefined]);
-    const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+    const raw = await readFile(join(dir, `${id}.jsonl`), "utf8");
     const log = parseSessionJsonl(raw);
     for (const event of log.events) {
       assert.equal(
@@ -425,13 +438,17 @@ describe("D2 acceptance: thinkingMs flows from adapter to JSONL event record", (
     for (let i = 0; i < illegal.length; i++) {
       const seqId = `${id}-${i}`;
       await store.save({ id: seqId, file: emptySessionFile(seqId) });
+      const seqDir = resolveConversationDir({
+        projectDir: sessionDir,
+        conversationId: seqId,
+      });
       // ts-expect-error -- probe defensive behavior on illegal values
       await store.appendEvents({
         id: seqId,
         events: [assistantMsgShape(`a-${i}`)],
         thinkingMs: illegal[i] as number,
       });
-      const lines = (await readFile(join(sessionDir, `${seqId}.jsonl`), "utf8"))
+      const lines = (await readFile(join(seqDir, `${seqId}.jsonl`), "utf8"))
         .split("\n")
         .filter((l) => l.trim().length > 0)
         .map((l) => JSON.parse(l) as Record<string, unknown>);

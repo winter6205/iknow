@@ -35,9 +35,31 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { SessionRootError } from "./errors.js";
+import { mainCheckoutOf } from "./isolation/worktree-gate.js";
+
+/** Re-export so consumers (e.g. session-store resolver) can throw the typed
+ *  error without a separate detour into harness/errors. */
+export { SessionRootError } from "./errors.js";
 
 /** 诊断里回显根值的上限：长路径也要保持有限诊断。 */
 export const MAX_ROOT_DETAIL_CHARS = 120;
+
+/**
+ * T1 (plans/session-folder-consolidation.md) — 路径敌意段净化器,会话文件夹
+ * 与 todo ledger 共用。「`..` 风格不可能逃逸」的保证由本函数唯一承担,
+ * 任何拼接 `conversationId` 进文件路径的代码必须先过 sanitize:
+ *   - 严格 `[A-Za-z0-9_-]` → 全部其它字符(含 `.` / `/` / `\0`)归 `_`。
+ *   - conversationId 在实践中是 UUID,所以丢弃 `.` 不丢语义。
+ *
+ * 共享原因:同一净化规则被两套消费者同时需要 ——
+ *   - todo ledger(`resolveConversationTodoPath`,todo-write.ts SSOT);
+ *   - 会话文件夹叶子(`resolveConversationDir`,session-store.ts)。
+ * 影子副本会让「`..` 不可逃逸」这一不变式被两份代码分别承担,日后修
+ * 其一便破契约。本函数是 SSOT。
+ */
+export function sanitizeConversationSegment(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]/g, "_");
+}
 
 /** 三根，全部已规范化为绝对路径。 */
 export interface SessionRoots {
@@ -214,6 +236,36 @@ export function resolveInstallRoot(): string {
     "missing_root",
     `installRoot could not be derived: no package.json above ${quoteRoot(start, MAX_ROOT_DETAIL_CHARS)}`
   );
+}
+
+/**
+ * T1 (plans/session-folder-consolidation.md) — pre-assembly derivation of the
+ * session folder grouping root for the three production call sites
+ * (`cli.ts` / `serve.ts` / `hub-bridge.ts`). Mirrors the build-engine
+ * formula at `build-engine.ts:523`:
+ *
+ *   `mainCheckoutOf(opts.explicitProjectIdentityRoot ?? process.cwd())`
+ *
+ * Two reasons it lives here rather than being inlined at each call site:
+ *   1. The three callers + the engine must agree on the same root for the
+ *      store and the session-roots resolver — drift would split the session
+ *      pool across two folders. One source.
+ *   2. Production assembly wants to construct the store BEFORE the engine
+ *      runs (the store is host-injected into the worktree provisioner /
+ *      SessionHub before build-engine returns), so this is computed in the
+ *      same shape the engine will independently validate inside
+ *      `resolveSessionRoots`.
+ *
+ * `process.cwd()` is read here ONLY as a fallback when the host didn't pin
+ * one — same contract as `resolveWorkspaceRoot` slot 3.
+ */
+export function deriveProjectIdentityRoot(opts: {
+  readonly explicit?: string | undefined;
+  readonly cwd?: string | undefined;
+}): string {
+  const cwd = opts.cwd ?? process.cwd();
+  const value = opts.explicit ?? cwd;
+  return mainCheckoutOf(value);
 }
 
 // --------------------------------------------------------------------------

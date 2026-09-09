@@ -83,7 +83,7 @@ function makeHub(opts: {
   verifyConfig?: VerifyConfig;
   responses?: Parameters<typeof makeDeps>[0];
 }) {
-  const store = new SessionStore(dataDir);
+  const store = new SessionStore(dataDir, process.cwd());
   return new SessionHub({
     store,
     workspaceRoot: process.cwd(),
@@ -187,7 +187,7 @@ describe("SessionHub postMessage — verify-loop 装配 (T8)", () => {
       // 信封注入在第二轮 run 的 priorMessages 里 (messages 含
       // [VALIDATION FAILED] user 消息)。postMessage 已 conditionalSave 落盘,
       // 从盘上 load 最新文件断言。
-      const saved = await new SessionStore(dataDir).load(
+      const saved = await new SessionStore(dataDir, process.cwd()).load(
         session.conversation_id
       );
       const envelopes = saved.messages.filter(

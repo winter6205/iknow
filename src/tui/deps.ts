@@ -25,24 +25,29 @@ import {
   buildHarnessEngine,
   type EngineBundle,
 } from "../harness/build-engine.js";
-import { resolveSessionTodoDir } from "../harness/aci/tools/todo-write.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import type { PostToolUseHook } from "../harness/permission/types.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
 import type { GraphModeContext } from "../harness/graph/mode.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
-import { createJsonlTraceService } from "../harness/trace/index.js";
+import { randomUUID } from "node:crypto";
 import type { MemoryLiveFlags } from "../harness/memory/index.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import type { AskUser } from "../harness/permission/types.js";
 import type { WorktreeIsolationHostOpts } from "../harness/isolation/worktree-gate.js";
 import type { IknowSettings } from "../config/settings.js";
 import type { LiveTaskRoot } from "../harness/session-roots.js";
+import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
 import { homedir } from "node:os";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import type { McpServerStatus } from "../harness/mcp/manager.js";
 import { loadMcpConfig } from "../harness/mcp/config.js";
 import type { AciToolDef } from "../harness/aci/types.js";
+import {
+  resolveProjectSessionDir,
+  resolveSubagentTraceDir,
+} from "../session-api/store/session-store.js";
+import { resolveServeDataDir } from "../session-api/serve.js";
 
 /** 工具摘要行事件（postToolUse 投影，observability-only）。 */
 export interface TuiToolEvent {
@@ -110,6 +115,17 @@ export interface BuildTuiDepsOptions {
    */
   readonly workspaceRoot?: string;
   /**
+   * #950 T2 / session-folder-consolidation: session pool root（与
+   * `createTuiBridge.dataDir` / `RunTuiOptions.dataDir` 同形）—— todo
+   * 会话文件夹根由此 + `workspaceRoot` 派生
+   * (`resolveProjectSessionDir(resolveServeDataDir(dataDir, workspaceRoot),
+   * deriveProjectIdentityRoot({ cwd: workspaceRoot }))`)。缺席 →
+   * `resolveServeDataDir` 缺省链(dataDir → `<workspaceRoot>/.iknow` →
+   * `~/.iknow`)。run.tsx 传已 resolve 的 dataDir,保证 bridge 的
+   * SessionStore 与 todo 落点是同一个 projects/<slug>/。
+   */
+  readonly dataDir?: string;
+  /**
    * T6 / worktree-mcp-rebind-lifecycle:稳定主 checkout root。首次装配捕获后
    * 跨 rebind 原样透传；reload 的 mcpConfigRoot 只由此派生，禁止用 cwd 重算。
    */
@@ -119,6 +135,20 @@ export interface BuildTuiDepsOptions {
    * （与 serve hub 同形：`<traceOut>/subagent.jsonl`）。
    */
   readonly traceOut?: string;
+  /**
+   * T5 (plans/session-folder-consolidation.md / SC8 + L2): 当前 TUI 会话
+   * conversationId —— 派生 `<父会话文件夹>/subagents/` 用。caller
+   * (tui/run.tsx) 从 hub-bridge 拿到 soleInflightId 后透传。
+   *
+   * review-fix (M1) 事实说明:TUI 装配期(run.tsx buildTuiDeps 调用点)inflight
+   * 还没 mark —— 会话是 hub per-run 注入的,engine 早于首条消息建成。
+   * 所以 run.tsx 目前不传本字段,buildTuiDeps 走 randomUUID() 兜底(SC8
+   * acceptance 接受:per-build 唯一;rebuild / ensureSession 时重派生)。
+   * 子代理记录真实落点是 subagentManager 收到 spawn 时的 def.conversationId
+   * (hub-bridge postMessage → tool ctx → manager),file 锚点 =
+   * `<projectDir>/<装配期 id>/subagents/agent-<taskId>.jsonl`。
+   */
+  readonly conversationId?: string;
   /** #337 Phase B 测试缝：MCP client 工厂覆盖（注入 stub 避免真实 stdio 启动）。 */
   readonly createMcpClient?: (
     server: import("../harness/mcp/config.js").McpServerConfig
@@ -261,25 +291,46 @@ export async function buildTuiDeps(
   // 与 build-engine #337 T8 同款。装配期 skill scanner + mcp config 都从这里取。
   const userHome = opts.userHome ?? homedir();
   const cwd = opts.cwd ?? process.cwd();
-  // 子代理生命周期事件落盘 —— 与 serve hub 同款：单例 manager 聚合到
-  // `<traceOut>/subagent.jsonl`（reader 按 task_id 过滤）。TUI 会话 turn
-  // 仍走 hub-bridge 的 per-conversation JSONL；子代理三事件与此对齐。
+  // 兼容 `opts.traceOut`(test seam / 旧 path) → 仍落 diagnosticsDir(stderr
+  // pointer);缺省时 manager 内 effectiveDiagnosticsDir 兜底跟随 subagentsDir。
   const traceOut = opts.traceOut;
-  const subagentTrace = traceOut
-    ? createJsonlTraceService({
-        filePath: traceOut,
-        conversationId: "subagent",
-      })
-    : undefined;
-  // #440 T1-fix:TUI 入口注入 todoDir 让 todo_write 在主 loop 在场
-  // (per-conversationId resolution 是后续 ticket — soleInflightId 动态,
-  // per-conversationId 需 engine 重建,代价太高;v1 共享 ~/.iknow/todos/tui/)。
+  // #950 T2 / session-folder-consolidation / ADR-0071 Decision 2:TUI 入口
+  // 注入「会话文件夹根」让 todo_write 在主 loop 在场 —— 与 chat / serve
+  // 三入口同源 SSOT:同一 `(baseDir, projectIdentityRoot)` 派生公式
+  // (resolveProjectSessionDir),同一会话解析到同一 projectDir。TUI 的
+  // conversationId 由 hub per-run 注入(hub-bridge → SessionHub),不在本层
+  // 拼 —— 本层只给根。
+  const todoProjectDir = resolveProjectSessionDir(
+    resolveServeDataDir(opts.dataDir, opts.workspaceRoot),
+    deriveProjectIdentityRoot({ cwd: opts.workspaceRoot })
+  );
+  // T5 (plans/session-folder-consolidation.md / SC8 + L2): 子代理 lifecycle
+  // / content trace 改走 per-agent `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
+  // TUI 子代理根 = `<projectDir>/<conversationId>/subagents/`。
+  //
+  // review-fix (M1):TUI 装配期 deps 层拿不到真实 conversationId —— 会话
+  // 由 hub per-run 注入 (hub-bridge.ensureSession → mark → subagentManager
+  // 拿到 task def.conversationId),run.tsx 建成初始 engine 时 inflight 还是
+  // 空集。两种合理形态:
+  //   - (a) caller 已知(opts.conversationId 在场)→ 用 caller 给的值;
+  //   - (b) caller 未知 → 装配期 randomUUID() 兜底,T5 SC8 acceptance 接受
+  //     (per-build 唯一;rebuild/ensureSession 时 ctor 重新派生,以引擎重建缝
+  //     为转移点 —— hub 的 buildEngine 路径会拿到真实 conversationId)。
+  // 双段式缝设计:装配期根 + 调用期 id —— 仓库既有 todo-write.ts:
+  // resolveConversationTodoPath 与此处同构,不要发明新形状。
+  // TUI bridge 的 postMessage 钩子 (inflight.mark) 把会话 ID 透传到
+  // tool ctx.conversationId,manager 拿 def.conversationId 已经够用。
+  const subagentsConversationId = opts.conversationId ?? randomUUID();
+  const subagentsDir = resolveSubagentTraceDir({
+    projectDir: todoProjectDir,
+    conversationId: subagentsConversationId,
+  });
   const built = await buildHarnessEngine({
     env: bundle.env,
     askUser: opts.askUser,
     surface: "tui",
     memory: { enabled: true },
-    todoDir: resolveSessionTodoDir({ userHome, surface: "tui" }),
+    todoDir: todoProjectDir,
     // #365 T2: 沙箱根保持 TUI 历史语义(启动目录 = process.cwd());
     // build-engine 缺省即 process.cwd(),故不显式传。
     // memoryDir 同理缺省解析自 cwd(与 #146 TUI 启动目录语义一致)。
@@ -296,10 +347,12 @@ export async function buildTuiDeps(
     ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
     // T6:稳定 productRoot 透传（缺席 → build-engine 桥接为 workspaceRoot）。
     ...(opts.productRoot ? { productRoot: opts.productRoot } : {}),
-    // 观测性地板:traceOut 在场 → subagent 三事件落 `<traceOut>/subagent.jsonl`。
-    ...(subagentTrace !== undefined
-      ? { subagentTrace, subagentDiagnosticsDir: traceOut }
-      : {}),
+    // 观测性地板:subagent lifecycle / content 走 per-agent 形态
+    // (subagentsDir); `opts.traceOut` 仍透传给 subagentDiagnosticsDir
+    // (stderr pointer) —— 旧 path 兼容, traceOut 缺席则由 manager 内兜底
+    // 跟随 subagentsDir。
+    subagentsDir,
+    ...(traceOut !== undefined ? { subagentDiagnosticsDir: traceOut } : {}),
     // #378 测试缝:createMcpManager 工厂覆盖(透传,捕获入参断言)。
     // prettier-ignore（master 一致单行：L3 review 复原；88 字符超 80 列，禁用 prettier 重排）。
     // prettier-ignore

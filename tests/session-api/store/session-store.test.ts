@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import {
   CURRENT_SCHEMA_VERSION,
+  resolveConversationDir,
   resolveProjectSessionDir,
   SessionStore,
 } from "../../../src/session-api/store/index.ts";
@@ -27,9 +28,13 @@ import type { SessionStoreError } from "../../../src/session-api/store/index.ts"
 
 let store: SessionStore;
 let baseDir: string;
-// Namespaced session dir used for direct file manipulation (raw writes, stat
-// asserts, mkdir before raw writes). Matches the store's default cwd.
+// Per-conversation session folder under the project dir; the store keeps its
+// files inside `<projectDir>/<id>/` after T1 (session-folder-consolidation).
+// Tests use this for direct file manipulation (raw writes, stat asserts,
+// mkdir before raw writes).
 let sessionDir: string;
+const sessionDirFor = (id: string): string =>
+  resolveConversationDir({ projectDir: sessionDir, conversationId: id });
 
 const sampleFile = (opts: {
   readonly id: string;
@@ -54,7 +59,7 @@ const sampleFile = (opts: {
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-store-"));
   sessionDir = resolveProjectSessionDir(baseDir, process.cwd());
-  store = new SessionStore(baseDir);
+  store = new SessionStore(baseDir, process.cwd());
 });
 
 afterAll(async () => {
@@ -64,13 +69,13 @@ afterAll(async () => {
 // -- resolveProjectSessionDir (pure function contract) -----------------------
 
 describe("resolveProjectSessionDir", () => {
-  it("produces <base>/sessions/<basename>-<sha1(cwd)[:12]>", () => {
+  it("produces <base>/projects/<basename>-<sha1(root)[:12]> keyed by projectIdentityRoot (T1)", () => {
     const dir = resolveProjectSessionDir("/base", "/work/myproj");
     const digest = createHash("sha1")
       .update("/work/myproj")
       .digest("hex")
       .slice(0, 12);
-    assert.equal(dir, join("/base", "sessions", `myproj-${digest}`));
+    assert.equal(dir, join("/base", "projects", `myproj-${digest}`));
     assert.match(basename(dir), /^myproj-[0-9a-f]{12}$/);
   });
 
@@ -79,14 +84,14 @@ describe("resolveProjectSessionDir", () => {
     assert.match(basename(dir), /-[0-9a-f]{12}$/);
   });
 
-  it("is stable for the same cwd", () => {
+  it("is stable for the same projectIdentityRoot", () => {
     assert.equal(
       resolveProjectSessionDir("/base", "/work/p"),
       resolveProjectSessionDir("/base", "/work/p")
     );
   });
 
-  it("same basename at different paths does not collide", () => {
+  it("same basename at different projectIdentityRoot paths does not collide", () => {
     const a = resolveProjectSessionDir("/base", "/a/proj");
     const b = resolveProjectSessionDir("/base", "/b/proj");
     assert.notEqual(a, b);
@@ -95,7 +100,7 @@ describe("resolveProjectSessionDir", () => {
     assert.notEqual(basename(a), basename(b));
   });
 
-  it("different cwds always produce different dirs", () => {
+  it("different projectIdentityRoots always produce different dirs", () => {
     const a = resolveProjectSessionDir("/base", "/x/alpha");
     const b = resolveProjectSessionDir("/base", "/y/beta");
     const c = resolveProjectSessionDir("/base", "/z/gamma");
@@ -108,7 +113,7 @@ describe("resolveProjectSessionDir", () => {
 // -- SessionStore project namespace (spec #120 SC 1) -------------------------
 
 describe("SessionStore project namespace", () => {
-  it("two stores with same baseDir but different cwd are isolated", async () => {
+  it("two stores with same baseDir but different projectIdentityRoot are isolated", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "iknow-ns-iso-"));
     try {
       const storeA = new SessionStore(tmp, "/proj/alpha");
@@ -135,7 +140,7 @@ describe("SessionStore project namespace", () => {
       assert.deepEqual(
         await storeB.list(),
         [],
-        "different cwd must see no sessions from alpha"
+        "different projectIdentityRoot must see no sessions from alpha"
       );
       await assert.rejects(
         () => storeB.load("ns-iso-1"),
@@ -151,7 +156,7 @@ describe("SessionStore project namespace", () => {
     }
   });
 
-  it("same baseDir + same cwd sees the same file", async () => {
+  it("same baseDir + same projectIdentityRoot sees the same file", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "iknow-ns-shared-"));
     try {
       const storeA = new SessionStore(tmp, "/proj/shared");
@@ -197,8 +202,8 @@ describe("SessionStore project namespace", () => {
 
 describe("SessionStore.load", () => {
   it("sanitizes v1 in memory without writing", async () => {
-    await mkdir(sessionDir, { recursive: true });
-    const path = join(sessionDir, "conv-v1.json");
+    await mkdir(sessionDirFor("conv-v1"), { recursive: true });
+    const path = join(sessionDirFor("conv-v1"), "conv-v1.json");
     const raw = {
       schemaVersion: 1,
       conversation_id: "conv-v1",
@@ -224,9 +229,9 @@ describe("SessionStore.load", () => {
   });
 
   it("rejects malformed message elements with complete error", async () => {
-    await mkdir(sessionDir, { recursive: true });
+    await mkdir(sessionDirFor("conv-badmsg"), { recursive: true });
     await writeFile(
-      join(sessionDir, "conv-badmsg.json"),
+      join(sessionDirFor("conv-badmsg"), "conv-badmsg.json"),
       JSON.stringify({
         schemaVersion: 1,
         conversation_id: "conv-badmsg",
@@ -286,7 +291,8 @@ describe("SessionStore.load", () => {
 
   it("throws parse_failed (not bare Error) for corrupt JSON", async () => {
     // Write a file directly with garbage so JSON.parse fails.
-    const path = join(sessionDir, "conv-corrupt.json");
+    await mkdir(sessionDirFor("conv-corrupt"), { recursive: true });
+    const path = join(sessionDirFor("conv-corrupt"), "conv-corrupt.json");
     await writeFile(path, "{not-json", "utf8");
     try {
       await store.load("conv-corrupt");
@@ -309,7 +315,8 @@ describe("SessionStore.load", () => {
   it("throws schema_invalid when schemaVersion is above CURRENT (#120 range check)", async () => {
     // Under #120 T1, the range check accepts v1 and v2 (≤ CURRENT) and only
     // rejects future versions. schemaVersion 99 exercises the reject branch.
-    const path = join(sessionDir, "conv-badver.json");
+    await mkdir(sessionDirFor("conv-badver"), { recursive: true });
+    const path = join(sessionDirFor("conv-badver"), "conv-badver.json");
     await writeFile(path, JSON.stringify({ schemaVersion: 99 }), "utf8");
     try {
       await store.load("conv-badver");
@@ -323,7 +330,8 @@ describe("SessionStore.load", () => {
   });
 
   it("throws schema_invalid when a required field has the wrong type", async () => {
-    const path = join(sessionDir, "conv-badfield.json");
+    await mkdir(sessionDirFor("conv-badfield"), { recursive: true });
+    const path = join(sessionDirFor("conv-badfield"), "conv-badfield.json");
     await writeFile(
       path,
       JSON.stringify({
@@ -348,20 +356,26 @@ describe("SessionStore.load", () => {
 });
 
 describe("SessionStore.save", () => {
-  it("writes the JSONL authority to <namespace>/<id>.jsonl (#629)", async () => {
+  it("writes the JSONL authority to <namespace>/<id>/<id>.jsonl (#629)", async () => {
     const file = sampleFile({ id: "conv-save-ok" });
     await store.save({ id: "conv-save-ok", file });
-    const s = await stat(join(sessionDir, "conv-save-ok.jsonl"));
+    const s = await stat(
+      join(sessionDirFor("conv-save-ok"), "conv-save-ok.jsonl")
+    );
     assert.ok(s.isFile());
     // save no longer writes a `.json` mirror.
-    await assert.rejects(stat(join(sessionDir, "conv-save-ok.json")));
+    await assert.rejects(
+      stat(join(sessionDirFor("conv-save-ok"), "conv-save-ok.json"))
+    );
   });
 
   it("atomic write leaves no .tmp residue on success", async () => {
     const file = sampleFile({ id: "conv-atomic" });
     await store.save({ id: "conv-atomic", file });
     // The .tmp file must have been renamed, not left behind.
-    await assert.rejects(stat(join(sessionDir, "conv-atomic.json.tmp")));
+    await assert.rejects(
+      stat(join(sessionDirFor("conv-atomic"), "conv-atomic.json.tmp"))
+    );
   });
 
   it("overwrites an existing file", async () => {
@@ -382,7 +396,7 @@ describe("SessionStore.list", () => {
   it("returns [] when no sessions exist", async () => {
     // Use a fresh temp dir to ensure emptiness.
     const empty = await mkdtemp(join(tmpdir(), "iknow-store-empty-"));
-    const s = new SessionStore(empty);
+    const s = new SessionStore(empty, "/proj/empty");
     assert.deepEqual(await s.list(), []);
     await rm(empty, { recursive: true, force: true });
   });
@@ -529,7 +543,12 @@ describe("SessionStore.list", () => {
   });
 
   it("silently skips corrupt files in list()", async () => {
-    await writeFile(join(sessionDir, "list-corrupt.json"), "{garbage", "utf8");
+    await mkdir(sessionDirFor("list-corrupt"), { recursive: true });
+    await writeFile(
+      join(sessionDirFor("list-corrupt"), "list-corrupt.json"),
+      "{garbage",
+      "utf8"
+    );
     const entries = await store.list();
     assert.ok(!entries.some((e) => e.conversation_id === "list-corrupt"));
   });
@@ -587,7 +606,7 @@ describe("SessionStoreError kinds (full coverage)", () => {
     // Force save() to fail by making the base path traverse through a regular file.
     const blockerPath = join(blocker, "blocker");
     await writeFile(blockerPath, "x", "utf8");
-    const bad = new SessionStore(blockerPath);
+    const bad = new SessionStore(blockerPath, "/proj/block");
     try {
       await bad.save({ id: "x", file: sampleFile({ id: "x" }) });
       assert.fail("should have thrown");
@@ -602,8 +621,12 @@ describe("SessionStoreError kinds (full coverage)", () => {
 
   it("io_error — surfaced by readdir failure on a path that is a file (not a dir)", async () => {
     const blocker = await mkdtemp(join(tmpdir(), "iknow-store-err-"));
-    await writeFile(join(blocker, "sessions"), "x", "utf8");
-    const bad = new SessionStore(blocker);
+    // T1 (session-folder-consolidation): the project dir under the base
+    // is `<base>/projects/<basename>-<sha1[:12]>/`. Make `projects` a
+    // regular file so readdir() on the resolved projectDir surfaces
+    // ENOTDIR → typed io_error.
+    await writeFile(join(blocker, "projects"), "x", "utf8");
+    const bad = new SessionStore(blocker, "/proj/ioerr");
     try {
       await bad.list();
       assert.fail("should have thrown");
@@ -736,7 +759,7 @@ describe("SessionStore.appendEvents createdAt stamping", () => {
     // written before the stamping change. Load must succeed and the
     // projection must omit the messageCreatedAt key (spread-discipline,
     // conditional emit). Picker fallback reads undefined → "".
-    await mkdir(sessionDir, { recursive: true });
+    await mkdir(sessionDirFor("ts-load-legacy"), { recursive: true });
     const id = "ts-load-legacy";
     const raw = [
       JSON.stringify({
@@ -765,7 +788,7 @@ describe("SessionStore.appendEvents createdAt stamping", () => {
       }),
       JSON.stringify({ type: "head", id: "e1" }),
     ].join("\n");
-    const path = join(sessionDir, `${id}.jsonl`);
+    const path = join(sessionDirFor(id), `${id}.jsonl`);
     await writeFile(path, `${raw}\n`, "utf8");
     const loaded = await store.load(id);
     assert.equal(loaded.messages.length, 2);
@@ -970,7 +993,7 @@ describe("SessionStore.appendEvents thinkingMs stamping", () => {
     // Hand-craft a JSONL where no event carries thinkingMs — mirrors a file
     // written before the D2 change. Load must succeed and the projection
     // must omit the thinkingMs key (spread-discipline, conditional emit).
-    await mkdir(sessionDir, { recursive: true });
+    await mkdir(sessionDirFor("tm-load-legacy"), { recursive: true });
     const id = "tm-load-legacy";
     const raw = [
       JSON.stringify({
@@ -999,7 +1022,7 @@ describe("SessionStore.appendEvents thinkingMs stamping", () => {
       }),
       JSON.stringify({ type: "head", id: "e1" }),
     ].join("\n");
-    const path = join(sessionDir, `${id}.jsonl`);
+    const path = join(sessionDirFor(id), `${id}.jsonl`);
     await writeFile(path, `${raw}\n`, "utf8");
     const loaded = await store.load(id);
     assert.equal(loaded.messages.length, 2);
@@ -1036,7 +1059,7 @@ function assistantMsgShape(text: string): {
 }
 
 async function readJsonlLinesById(id: string): Promise<ReadonlyArray<unknown>> {
-  const path = join(sessionDir, `${id}.jsonl`);
+  const path = join(sessionDirFor(id), `${id}.jsonl`);
   const raw = await readFile(path, "utf8");
   return raw
     .split("\n")

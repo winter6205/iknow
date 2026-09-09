@@ -109,9 +109,8 @@ import {
   errorMessage,
 } from "../harness/errors.js";
 import { appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname } from "node:path";
 import { homedir } from "node:os";
-import { resolveSessionTodoDir } from "../harness/aci/tools/todo-write.js";
 import type { AciCatalog } from "../harness/aci/types.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import type { LiveTaskRoot } from "../harness/session-roots.js";
@@ -123,6 +122,7 @@ import { resolveMcpRoots, type McpRoots } from "../harness/mcp/roots.js";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
+import { resolveConversationTraceFilePath } from "./store/index.js";
 import {
   appendCheckpoint,
   CURRENT_SCHEMA_VERSION,
@@ -442,6 +442,18 @@ const OUTCOME_TO_STATUS: Record<VerifyLoopOutcome, GoalStatus | undefined> = {
  * `thinkingMs` (ms) 字段. 缺席 = 旧会话 / 非 assistant turn / sum = 0,
  * 与 thinking/toolCalls/lastUsage 同 byte-stable 模式.
  */
+/**
+ * review-fix (M5):serve 路径子代理记录落点 —— hub engine 跨会话共享
+ * (不重建 per-conversationId,见 cachedDeps 注释),装配期拿不到单会话
+ * conversationId。改走两段式缝:装配期传 `projectDir`
+ * (`<baseDir>/projects/<slug>`),manager 在 spawn 期按 `def.conversationId`
+ * 派生 per-conversation 叶子 `<projectDir>/<convId>/subagents/`
+ * (与 todo-write 的 `resolveConversationTodoPath` 同构)。会话删除时
+ * `SessionStore.delete` 整删 `<convId>/` 文件夹,子代理记录同灭,
+ * 不在项目层留孤儿 —— 旧的项目层平铺形状(假注释「spec SC8 操作员补丁
+ * 接受」)已退役。
+ */
+
 export function projectMessagesToTurns(
   messages: ReadonlyArray<AnthropicNativeMessage>,
   thinkingMs?: ReadonlyArray<number | null>
@@ -2435,21 +2447,22 @@ export class SessionHub {
   private recordViolationTrace(conversationId: string, reason: string): void {
     if (!this.traceOut) return;
     try {
-      // T2 每会话独立文件: violation 与 JsonlTraceService 同域, 写
-      // <traceOut>/<conversationId>.jsonl (不再 append 到 traceOut 文件本身)。
-      // mkdir recursive 与 JsonlTraceService 构造一致兜底。
-      mkdirSync(this.traceOut, { recursive: true });
+      // T3 (plans/session-folder-consolidation.md / ADR-0071 Decision 4):
+      // violation 与主会话 trace 同域,锚在 `<projectDir>/<convId>/trace.jsonl`。
+      // 派生复用 `resolveConversationTraceFilePath`,与 `createTrace` 同源 →
+      // 同一会话的两条写入路径不会漂到不同文件。
+      const filePath = resolveConversationTraceFilePath({
+        projectDir: this.store.getProjectDir(),
+        conversationId,
+      });
+      mkdirSync(dirname(filePath), { recursive: true });
       const line = JSON.stringify({
         conversation_id: conversationId,
         record_type: "violation",
         ts: new Date().toISOString(),
         detail: safeParse(reason),
       });
-      appendFileSync(
-        join(this.traceOut, `${conversationId}.jsonl`),
-        line + "\n",
-        "utf8"
-      );
+      appendFileSync(filePath, line + "\n", "utf8");
     } catch {
       // Best-effort observability; never let trace I/O break the served turn.
     }
@@ -2484,8 +2497,24 @@ export class SessionHub {
     conversationId: string
   ): TraceServiceWithHealth | undefined {
     if (!this.traceOut) return undefined;
+    // T3 (plans/session-folder-consolidation.md / ADR-0071 Decision 4):
+    // 主会话 + violation 共用同一 `resolveConversationTraceFilePath` 派生,
+    // 确保两条写入路径落 `<projectDir>/<conversationId>/trace.jsonl`。
+    //
+    // T5 (plans/session-folder-consolidation.md / SC8 + L2): 子代理聚合流
+    // (`createTrace("subagent")` 字面 conversationId 假 scope, `<traceOut>/subagent.jsonl`)
+    // 已退役 —— 子代理 lifecycle / content trace 由 manager 经
+    // review-fix (M5) `projectDir` 两段式缝派生 per-agent
+    // `<projectDir>/<convId>/subagents/agent-<taskId>.jsonl`,见
+    // buildProductionEngine / rebuildEngine 路径的 projectDir 注入。
+    // 本函数调用点不再传 conversationId="subagent"
+    // —— 残留调用(若有)会让 ajv 接受 `conversationId:"subagent"`,但
+    // 写入路径已不存在,无副作用,仅 spec 一致性提示。
     const trace = createJsonlTraceService({
-      filePath: this.traceOut,
+      traceFilePath: resolveConversationTraceFilePath({
+        projectDir: this.store.getProjectDir(),
+        conversationId,
+      }),
       conversationId,
     });
     this.traceServices.add(trace);
@@ -2906,15 +2935,25 @@ export class SessionHub {
       // D-α T3 / ADR-0030:overlay holder 透传 —— serve / TUI 的 `/graph` 与
       // Shift+Tab 翻的是同一个它（SC3 三入口同 holder）。
       ...(this.graphMode ? { graphMode: this.graphMode } : {}),
-      todoDir: resolveSessionTodoDir({ surface: "serve" }),
+      // #950 T2 / session-folder-consolidation / ADR-0071 Decision 2:
+      // todos 落「会话文件夹」—— `todoDir` 改为「会话项目目录」
+      // (由 SessionStore.getProjectDir() 暴露的 read-only 投影)。三入口
+      // (cli / serve / TUI) 共享同一对 `(baseDir, projectIdentityRoot)` →
+      // 同一会话解析到同一 projectDir(`<surface>` 分裂消除)。
+      todoDir: this.store.getProjectDir(),
+      // review-fix (M5): 两段式缝 —— 装配期只传 projectDir
+      // (`<baseDir>/projects/<slug>`),manager spawn 期按 def.conversationId
+      // 派生 per-conversation 叶子 `<projectDir>/<convId>/subagents/`
+      // (与 todoDir 的 resolveConversationTodoPath 同构)。会话删除时
+      // SessionStore.delete 整删 `<convId>/` 文件夹,子代理记录同灭,
+      // 不在项目层留孤儿。旧的项目层平铺 `<projectDir>/subagents/`
+      // (`resolveSubagentTraceDirShared`)已退役。
+      // `createTrace("subagent")` (conversationId 聚合单文件) 已退役。
+      projectDir: this.store.getProjectDir(),
       ...(this.traceOut !== undefined
-        ? {
-            subagentTrace: this.createTrace("subagent"),
-            subagentDiagnosticsDir: this.traceOut,
-          }
+        ? { subagentDiagnosticsDir: this.traceOut }
         : {}),
     });
-    this.skillCatalog = built.skillCatalog;
     this.liveTaskRoot = built.liveTaskRoot;
     // T4 (write-situation-disclosure)：loadSkillBody 写处境判定的隔离档
     // 来源。build-engine `isolationEnabled` 单一读取点的透出。
@@ -2977,9 +3016,10 @@ export class SessionHub {
     // The returned `engine` is built once (code-review 2026-08-05) and
     // discarded — serve only consumes `deps`, and the cost is a single
     // `createLoopEngine` allocation, not a per-message re-construction.
-    // #440 T1-fix:serve 入口注入 todoDir 让 todo_write 在主 loop 在场
-    // (per-conversationId resolution 是后续 ticket — serve 的 cachedDeps
-    // 跨所有会话共享,per-conversationId 需 engine 重建,代价太高)。
+    // #440 T1-fix + #950 T2:serve 入口注入 session-folder todoDir
+    // (`this.store.getProjectDir()`),per-conversationId 解析在调用期由
+    // todo-write.ts:resolveConversationTodoPath 派生 —— 不再需要 per-session
+    // engine 重建(cachedDeps 共享的只是「根」,叶子按 ctx.conversationId 分)。
     // review-fix (Fix 1): subagent 生命周期事件落盘（spec SC1 生产装配）——
     // hub 的 subagentManager 是单例共享（surface!=="ask" 在 build-engine.ts:307-320
     // 自建一次）, 所有 serve 会话的 subagent 事件聚合到 <traceOut>/subagent.jsonl
@@ -3039,12 +3079,16 @@ export class SessionHub {
       ...(this.workspaceRoot ? { workspaceRoot: this.workspaceRoot } : {}),
       // T6:稳定 productRoot（缺席时 build-engine 桥接为 workspaceRoot）。
       ...(this.productRoot ? { productRoot: this.productRoot } : {}),
-      todoDir: resolveSessionTodoDir({ surface: "serve" }),
+      // #950 T2 / session-folder-consolidation / ADR-0071 Decision 2:
+      // todos 落「会话文件夹」—— `todoDir` 取 store 投影的 projectDir,与
+      // 上面 `buildProductionEngine` 路径同源(`<surface>` 分裂消除)。
+      todoDir: this.store.getProjectDir(),
+      // review-fix (M5): 同 buildProductionEngine 路径 —— 两段式缝,装配期
+      // 传 projectDir,manager spawn 期按 def.conversationId 派生
+      // per-conversation 叶子(见 resolveSubagentTraceDirShared 退役注释)。
+      projectDir: this.store.getProjectDir(),
       ...(this.traceOut !== undefined
-        ? {
-            subagentTrace: this.createTrace("subagent"),
-            subagentDiagnosticsDir: this.traceOut,
-          }
+        ? { subagentDiagnosticsDir: this.traceOut }
         : {}),
     });
     this.cachedDeps = built.deps;

@@ -33,6 +33,8 @@ import { makeDeps } from "../cli/_fixtures.ts";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 import { resolveProjectSessionDir } from "../../src/session-api/store/session-store.js";
+import { deriveProjectIdentityRoot } from "../../src/harness/session-roots.js";
+import { resolveConversationDir } from "../../src/session-api/store/session-store.js";
 import { parseTuiInput } from "../../src/tui/slash.js";
 import type { ModalKeyEvent } from "../../src/tui/modal.js";
 
@@ -660,15 +662,27 @@ describe("isDoubleEsc（1000ms debounce 窗口）", () => {
 describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读回）", () => {
   let baseDir: string;
 
+  // T1 (session-folder-consolidation): the bridge derives its store root as
+  // `deriveProjectIdentityRoot({ cwd: workspaceRoot })` (hub-bridge.ts) — the
+  // seed must hit the SAME project dir, and the file must live inside the
+  // `<conversationId>/` session folder (store.load's discovery root).
+  let projectDir: string;
   beforeEach(async () => {
     baseDir = await mkdtemp(join(tmpdir(), "iknow-tui-rewind-"));
+    projectDir = resolveProjectSessionDir(
+      baseDir,
+      deriveProjectIdentityRoot({ cwd: baseDir })
+    );
   });
   afterEach(async () => {
     await rm(baseDir, { recursive: true, force: true });
   });
 
   async function seedFile(file: SessionFileV1): Promise<void> {
-    const dir = resolveProjectSessionDir(baseDir, process.cwd());
+    const dir = resolveConversationDir({
+      projectDir,
+      conversationId: file.conversation_id,
+    });
     await mkdir(dir, { recursive: true });
     await writeFile(
       join(dir, `${file.conversation_id}.json`),
@@ -791,7 +805,10 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   });
 
   test("错误路径：load parse_failed → typed kind 透传（不新造）", async () => {
-    const dir = resolveProjectSessionDir(baseDir, process.cwd());
+    const dir = resolveConversationDir({
+      projectDir,
+      conversationId: "conv-bad",
+    });
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "conv-bad.json"), "{garbage", "utf8");
     const bridge = makeBridge();
@@ -813,8 +830,12 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
     await seedFile(sampleFile());
     // 用同名目录占住 `${id}.jsonl.tmp` 路径 → persistHeadMove 的 writeFile
     // 失败 → write_failed。（#629 之前是 `${id}.json.tmp`，对应旧镜像写
-    // 路径；现在权威 JSONL 走 `${id}.jsonl.tmp`。）
-    const dir = resolveProjectSessionDir(baseDir, process.cwd());
+    // 路径；现在权威 JSONL 走 `${id}.jsonl.tmp`。T1 后权威文件位于
+    // `<projectDir>/<id>/` 会话文件夹内，占位目录同步迁入。）
+    const dir = resolveConversationDir({
+      projectDir,
+      conversationId: "conv-rewind",
+    });
     await mkdir(join(dir, "conv-rewind.jsonl.tmp"), { recursive: true });
     const bridge = makeBridge();
     await expect(
