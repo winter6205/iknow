@@ -46,10 +46,8 @@ import type { SubAgentEnvelope } from "./envelope.js";
 import { projectParentVisibleEnvelope } from "./envelope.js";
 import { ToolExecutionError, SubAgentSandboxRootError } from "../errors.js";
 import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../config/settings.js";
-import {
-  builtinCatalogResolver,
-  type AgentCatalogResolver,
-} from "./catalog.js";
+import type { AgentCatalogResolver } from "./catalog.js";
+import { createMergedCatalogResolver } from "./user-catalog.js";
 import { resolveSubagentCapabilities } from "./capability.js";
 
 /**
@@ -58,8 +56,9 @@ import { resolveSubagentCapabilities } from "./capability.js";
  * `waitFor(taskId, timeoutMs, signal)` 前景阻塞入口；drain 由 host 侧独占
  * （spec Never 暴露给 agent）。
  *
- * `catalog?` 是 #556 T3 新增 seam：可选 — 缺省走内部默认 `builtinCatalogResolver`
- * （builtin catalog 双面 list + get），production 装配 `registry.ts` 不显式注入
+ * `catalog?` 是 #556 T3 新增 seam：可选 — 缺省走内部默认 merged catalog
+ * （`createMergedCatalogResolver`：builtin + `~/.iknow/agents/` 用户角色，
+ * 双面 list + get），production 装配 `registry.ts` 不显式注入
  * （plan T3 决议：registry 职责是工具面，不是 agent 路由 — 不动 registry.ts）。
  * 测试可显式注入 fake resolver 验证 factory 真的在用 deps.catalog。
  */
@@ -67,7 +66,7 @@ export interface SpawnSubAgentToolDeps {
   readonly manager: SubAgentManager;
   /**
    * #556 T3: agent catalog resolver (双面 list + get)。
-   * 可选 — 缺省 = builtin catalog (`builtinCatalogResolver`)。
+   * 可选 — 缺省 = merged catalog (`createMergedCatalogResolver`)。
    * list() 供 enum + prose list 派生；get(id) 供 handler 单 id 校验。
    */
   readonly catalog?: AgentCatalogResolver;
@@ -115,10 +114,13 @@ function envelopeFromWaitTimeout(
 export function createSpawnSubAgentTool(
   deps: SpawnSubAgentToolDeps
 ): AciToolDef {
-  // #556 T3: catalog resolver 闭包 — factory 内部 default = builtin catalog
-  // (builtinCatalogResolver 双面 list + get)。registry.ts 不传 catalog, factory
-  // 兜底 (plan T3 决议: registry 职责是工具面, 不是 agent 路由)。
-  const catalog: AgentCatalogResolver = deps.catalog ?? builtinCatalogResolver;
+  // #556 T3: catalog resolver 闭包 — factory 内部 default = merged catalog
+  // (builtin + ~/.iknow/agents/ 用户角色, 记忆化; 双面 list + get)。
+  // registry.ts 不传 catalog, factory 兜底 (plan T3 决议: registry 职责是
+  // 工具面, 不是 agent 路由)。enum + prose list 在装配期从 merged list
+  // 派生, 用户角色文件在进程启动后即出现在工具面上。
+  const catalog: AgentCatalogResolver =
+    deps.catalog ?? createMergedCatalogResolver();
   const catalogIds = catalog.list().map((e) => e.id);
   const proseLines = catalog
     .list()
