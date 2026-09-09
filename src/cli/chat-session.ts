@@ -161,6 +161,16 @@ export type ChatSessionOpts = {
    */
   resumeId?: string;
   /**
+   * review-fix (H2):调用方注入的 REPL 级 conversationId。给定时直接作为本
+   * 会话锚点 (cli.ts 在 runChat 入口算一次并显式透传: --resume 时 =
+   * resumeId,否则 = randomUUID()),runChatSession 内部不再二次生成 —— 让
+   * subagentsDir、checkpoint 文件、trace 锚点共用同一会话文件夹 (与 cli.ts
+   * 同源 SSOT,见 #950 T2 / ADR-0071 Decision 2 + T5 SC8)。
+   * 缺省 (ask / 旧测试 seam) → `resumeId ?? randomUUID()` 行为不变
+   * (byte-stable 退路)。
+   */
+  conversationId?: string;
+  /**
    * #356 T7:host drain — chat 入口每轮 runHarness 之前,调
    * `drainPendingSubagents(subagentManager)` 把 completed 浓缩 envelope
    * 拼入 next turn 的 priorMessages。ask 入口无 manager → 不传。
@@ -2087,7 +2097,10 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   // T2 + T4: REPL 级 conversationId。`--resume <id>` 锚定既有 checkpoint
   // 文件 id;缺省(undefined)= 新开会话随机 UUID(`randomUUID` 与 cli.ts ask
   // 入口同源,确保 token 形态一致)。
-  const conversationId = opts.resumeId ?? randomUUID();
+  // review-fix (H2):调用方 (cli.ts) 显式注入的 conversationId 优先 —— 单一
+  // 来源,避免 cli.ts 的 subagentsDir 派生与本层 checkpoint 派生各拿一个 id
+  // (双源分裂)。缺省退路保持 `resumeId ?? randomUUID()` byte-stable。
+  const conversationId = opts.conversationId ?? opts.resumeId ?? randomUUID();
 
   // T2: REPL 级 AbortController + SessionStore 注入 ctx;ask/pipe 入口仍
   // 共享同一 ctx,缺省情况下 signal/store 不会走持久化路径(向 ask 开放零变化)。

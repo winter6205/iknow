@@ -287,7 +287,13 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   // 锁定本次 conversationId —— 子代理 lifecycle / content trace 归属目录
   // = `<父会话文件夹>/subagents/`,文件名 = agent-<taskId>.jsonl。
   // rebuildDeps(改绑时)复用同一 conversationId,不另起(rebuild 不换会话)。
-  const conversationId = randomUUID();
+  //
+  // review-fix (H2): --resume <id> 时 conversationId = resumeId 而非随机 —
+  // 子代理目录、checkpoint 文件、trace 锚点必须全部锚到被 resume 的会话文
+  // 件夹,否则 --resume 后子代理目录会落在全新随机 UUID 的文件夹下,既与
+  // 父会话脱钩,也会让 SC8 操作员补丁的「per-agent 文件集合 == 两次 spawn
+  // 的 taskId 集合」按不同会话分散两处。
+  const conversationId = parsed.resumeId ?? randomUUID();
 
   // ADR-0035:生命周期 trace 与 content trace 解耦。chat 不装配 content
   // trace，但 subagent 的 spawn/state_change/stop 永久写入默认 trace 目录。
@@ -435,6 +441,10 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // T4: `--resume <id>` 续跑锚点。仅 chat 消费;ask/serve/tui 入口
     // 不传(解析虽 command-agnostic,host 各自决策)。undefined = 新开会话。
     resumeId: parsed.resumeId,
+    // review-fix (H2):REPL 级 conversationId 单一来源 —— cli.ts 入口算一次
+    // (resume 时 = resumeId,否则随机生成)并显式传入,checkpoint / 子代理
+    // 目录 / trace 锚点从同一值派生。runChatSession 内部不再二次生成。
+    conversationId,
     // #356 T7:host drain — chat 入口每轮 runHarness 前把 completed 子代理
     // 结果拼入 priorMessages。ask 入口无 manager(surface 门控),不传。
     subagentManager: built.subagentManager,

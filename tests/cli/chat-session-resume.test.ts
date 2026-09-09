@@ -602,3 +602,66 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// review-fix (H2): ChatSessionOpts.conversationId SSOT —— 调用方 (cli.ts) 显式
+// 注入的 conversationId 必须能贯穿到 ctx.state.conversationId,REPL 内的
+// processChatLine + persistChatSessionCheckpoint 都用 state.conversationId,
+// 二者必须共享同一 id (resume 时不能分裂成 cli.ts 子代理目录 id ≠ REPL id)。
+//
+// runChatSession 是 TTY / pipe 入口(integration-heavy),不在此处直接调;
+// 改在 type-level 钉契约 + 用 runChatSession 的种子路径(seedResumeMessages)
+// 间接证:给定 conversationId 时,seed + persist 闭环都写到同一 id 的
+// checkpoint 文件,不另起 UUID。
+// ---------------------------------------------------------------------------
+
+describe("review-fix H2 — ChatSessionOpts.conversationId SSOT (resume 时单源)", () => {
+  it("给定固定 conversationId + resumeId 同值 → seed / persist 全部落在该 id 文件", async () => {
+    const s = await storeFor();
+    const fixedId = "fixed-conv-id-1234";
+    const seededMessages = [userMsg("q1"), assistantMsg("a1")];
+    await s.save({
+      id: fixedId,
+      file: seededFile({ id: fixedId, messages: seededMessages, turnCount: 1 }),
+    });
+
+    // seed 步骤 —— runChatSession 内同源 (lines 2130-2160)。
+    const seeded = await seedResumeMessages({ store: s, id: fixedId });
+    assert.equal(seeded.messages.length, 2);
+
+    // 构造与 runChatSession 同形态的 ctx (state.conversationId 来自 opts,
+    // 正是 H2 的修复点)。`opts.conversationId ?? opts.resumeId ?? randomUUID()`
+    // → 这里 opts.conversationId === fixedId 优先,绝不另起 UUID。
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["a2"] })],
+      checkpointStore: s,
+      workspaceRoot: process.cwd(),
+      stateOverrides: {
+        conversationId: fixedId,
+        messages: Object.freeze([...seeded.messages]),
+      },
+    });
+    const r = await processChatLine({ line: "q2", ctx });
+    assert.equal(r.ranQuery, true);
+    // 关键断言:文件依然以 fixedId 命名,未因 REPL 二次 randomUUID 漂移。
+    const file = await s.load(fixedId);
+    assert.equal(file.conversation_id, fixedId);
+    assert.equal(file.turnCount, 2);
+  });
+
+  it("type-level: ChatSessionOpts 接收可选 conversationId (compile-time 契约钉死)", () => {
+    // 编译期契约:不 import 实际函数体也能写出 opts 形态。仅 type assertion。
+    type Opts = Parameters<
+      typeof import("../../src/cli/chat-session.ts").runChatSession
+    >[0];
+    const opts: Opts = {
+      deps: {} as Opts["deps"],
+      session: {} as Opts["session"],
+      jsonMode: false,
+      // 关键字段 —— review-fix H2 加性 seam,缺省 (ask / 旧测试 seam) 退路
+      // 维持 `resumeId ?? randomUUID()`,与 byte-stable 行为对齐。
+      conversationId: "explicit-conv-id",
+    };
+    assert.equal(opts.conversationId, "explicit-conv-id");
+  });
+});

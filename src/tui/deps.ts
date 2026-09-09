@@ -138,10 +138,15 @@ export interface BuildTuiDepsOptions {
   /**
    * T5 (plans/session-folder-consolidation.md / SC8 + L2): 当前 TUI 会话
    * conversationId —— 派生 `<父会话文件夹>/subagents/` 用。caller
-   * (tui/run.tsx) 从 hub-bridge 拿到 soleInflightId 后透传。多会话并发
-   * 期间没有 soleInflightId → buildTuiDeps 退化为 randomUUID()(per-build
-   * 唯一;不会跨 rebuild 共享,与既有 subagentTrace 聚合单文件的"全在
-   * 一起"行为不同 —— T5 计划刻意为之,见 SC8 acceptance)。
+   * (tui/run.tsx) 从 hub-bridge 拿到 soleInflightId 后透传。
+   *
+   * review-fix (M1) 事实说明:TUI 装配期(run.tsx buildTuiDeps 调用点)inflight
+   * 还没 mark —— 会话是 hub per-run 注入的,engine 早于首条消息建成。
+   * 所以 run.tsx 目前不传本字段,buildTuiDeps 走 randomUUID() 兜底(SC8
+   * acceptance 接受:per-build 唯一;rebuild / ensureSession 时重派生)。
+   * 子代理记录真实落点是 subagentManager 收到 spawn 时的 def.conversationId
+   * (hub-bridge postMessage → tool ctx → manager),file 锚点 =
+   * `<projectDir>/<装配期 id>/subagents/agent-<taskId>.jsonl`。
    */
   readonly conversationId?: string;
   /** #337 Phase B 测试缝：MCP client 工厂覆盖（注入 stub 避免真实 stdio 启动）。 */
@@ -301,9 +306,20 @@ export async function buildTuiDeps(
   );
   // T5 (plans/session-folder-consolidation.md / SC8 + L2): 子代理 lifecycle
   // / content trace 改走 per-agent `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
-  // TUI 子代理根 = `<projectDir>/<conversationId>/subagents/`。conversationId
-  // 多会话并发没唯一值时 → 退化为 randomUUID()(T5 接受, 与 soleInflightId
-  // 不在场时的兜底语义一致)。
+  // TUI 子代理根 = `<projectDir>/<conversationId>/subagents/`。
+  //
+  // review-fix (M1):TUI 装配期 deps 层拿不到真实 conversationId —— 会话
+  // 由 hub per-run 注入 (hub-bridge.ensureSession → mark → subagentManager
+  // 拿到 task def.conversationId),run.tsx 建成初始 engine 时 inflight 还是
+  // 空集。两种合理形态:
+  //   - (a) caller 已知(opts.conversationId 在场)→ 用 caller 给的值;
+  //   - (b) caller 未知 → 装配期 randomUUID() 兜底,T5 SC8 acceptance 接受
+  //     (per-build 唯一;rebuild/ensureSession 时 ctor 重新派生,以引擎重建缝
+  //     为转移点 —— hub 的 buildEngine 路径会拿到真实 conversationId)。
+  // 双段式缝设计:装配期根 + 调用期 id —— 仓库既有 todo-write.ts:
+  // resolveConversationTodoPath 与此处同构,不要发明新形状。
+  // TUI bridge 的 postMessage 钩子 (inflight.mark) 把会话 ID 透传到
+  // tool ctx.conversationId,manager 拿 def.conversationId 已经够用。
   const subagentsConversationId = opts.conversationId ?? randomUUID();
   const subagentsDir = resolveSubagentTraceDir({
     projectDir: todoProjectDir,
