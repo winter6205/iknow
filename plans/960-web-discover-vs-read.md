@@ -22,21 +22,22 @@
    - **Inherits:** spec SC1–SC3、SC5 前半（无夹具不准改文案）；`prompt-development.md`「先写夹具」；夹具跟 ACI web 工具测试放。
    - **Surface:** harness ACI tools 测试
    - **Acceptance:** 三条可判定输入已在集里且能单独跑：无 URL 的搜索/新闻句 → 期望首工具 `web_search`；用户已给 URL → 允许 `web_fetch`；搜空后续 → 不是猜 URL 的 `web_fetch`。实现尚未改 description 时，集已存在（红或待接线均可，但不能缺条）。
-   - Status: [ ] pending
+   - Status: [x] done
 
 2. **description 对齐两职** — tag: `[implementation]`
    - **Inherits:** spec SC4、SC6；D9 正向触发；search 不是 fetch 前置；不写 do not / 不要；不改 soul / usage。
    - **Surface:** harness ACI `web_search` / `web_fetch`
    - **Acceptance:** 两件 description 表达「发现 / 阅读」而非「搜完必抓」；`d9-description-guard` 绿；T1 集在文案落地后按硬闸判定（真模型有 key 则 `npm run test:real-llm` 跑同一集，缺 key 记 Not run）。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T1]
 
 3. **溢出退场只凭真模型证据** — tag: `[decision]`
    - **Inherits:** spec SC5 后半、Boundaries「Confirms with human」、ADR-0043 现行序（search 先于 fetch 退）；未失败则保持。
    - **Surface:** `docs/adr/`（仅当要改序时产出修订）+ 既有 overflow 判定
    - **Acceptance:** T2 真模型已跑或显式 Not run。若发现句仍首抓：书面三选一（保持 / 两件同退 / fetch 先退）并只在改序时改 ADR-0043 + 退场数组。若已先搜或 Not run：记录保持现行序，不改 overflow 代码。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T2]
+   - **T3 决策（2026-09-09）：记录保持现行序。** T2 真模型黄金集 GREEN，SC1 首工具为 `web_search` 而非 `web_fetch`。不改 `DEFERRABLE_BUILTIN_RETIRE_ORDER`（`query_trace`, `list_sessions`, `get_record`, `web_search`, `web_fetch`），不修订 ADR-0043。
 
 ## Code review phase
 
