@@ -211,6 +211,63 @@ describe("C4: drain 不读取运行中任务且永不抛", () => {
   });
 });
 
+describe("SC4: wait:true tool_result 带 task_id + tmp_root", () => {
+  const locator = {
+    task_id: "tid-sc4",
+    tmp_root: "/session/subagents/tid-sc4/fence-tmp",
+  };
+
+  it("success tool_result 含非空 locator 且无产物名单", async () => {
+    const okEnvelope: SubAgentEnvelope = {
+      status: "ok",
+      summary: "done",
+      result: "done",
+      ...locator,
+    };
+    const tool = createSpawnSubAgentTool({
+      manager: baseManager({
+        spawn: () => ({ taskId: locator.task_id }),
+        waitFor: async () => okEnvelope,
+      }),
+    });
+    const out = (await tool.handler({
+      task: "t",
+      wait: true,
+    })) as SubAgentEnvelope;
+    expect(out.status).toBe("ok");
+    expect(out.task_id).toBe(locator.task_id);
+    expect(out.tmp_root).toBe(locator.tmp_root);
+    expect(out.task_id.length).toBeGreaterThan(0);
+    expect(out.tmp_root.length).toBeGreaterThan(0);
+    expect(
+      out.product_roster === undefined || out.product_roster.length === 0
+    ).toBe(true);
+  });
+
+  it("failure tool_result 同样含非空 locator", async () => {
+    const failedEnvelope: SubAgentEnvelope = {
+      status: "failed",
+      reason: "timeout",
+      summary: "timeout after 5000ms",
+      result: "",
+      ...locator,
+    };
+    const tool = createSpawnSubAgentTool({
+      manager: baseManager({
+        spawn: () => ({ taskId: locator.task_id }),
+        waitFor: async () => failedEnvelope,
+      }),
+    });
+    const out = (await tool.handler({
+      task: "t",
+      wait: true,
+    })) as SubAgentEnvelope;
+    expect(out.status).toBe("failed");
+    expect(out.task_id).toBe(locator.task_id);
+    expect(out.tmp_root).toBe(locator.tmp_root);
+  });
+});
+
 describe("C5: wait:true 失败 envelope 作 ok 返回; abort → execution_failed:cancelled", () => {
   it("wait:true + 失败 envelope → handler 解析为 envelope (status failed)", async () => {
     const failedEnvelope: SubAgentEnvelope = {

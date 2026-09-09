@@ -78,7 +78,11 @@ function formatDrainedResults(
   return entries
     .map(({ taskId, envelope }) => {
       const visible = projectParentVisibleEnvelope(envelope);
-      return `${SUBAGENT_DRAIN_PREFIX}${taskId} result: ${visible.summary}\n\n${visible.result}`;
+      const locator =
+        visible.tmp_root !== undefined && visible.tmp_root.length > 0
+          ? `\n\ntask_id: ${visible.task_id ?? taskId}\ntmp_root: ${visible.tmp_root}`
+          : "";
+      return `${SUBAGENT_DRAIN_PREFIX}${taskId} result: ${visible.summary}\n\n${visible.result}${locator}`;
     })
     .join("\n\n");
 }

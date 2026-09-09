@@ -18,6 +18,7 @@ export interface SubAgentTerminalNotice {
   readonly stop_reason?: SubAgentEnvelope["stop_reason"];
   readonly truncated?: boolean;
   readonly totalLength?: number;
+  readonly tmp_root?: string;
 }
 
 export type SubAgentTerminalSubscriber = (
@@ -62,12 +63,11 @@ function snapshotNotice(
     ...(notice.stop_reason !== undefined
       ? { stop_reason: notice.stop_reason }
       : {}),
-    ...(notice.truncated !== undefined
-      ? { truncated: notice.truncated }
-      : {}),
+    ...(notice.truncated !== undefined ? { truncated: notice.truncated } : {}),
     ...(notice.totalLength !== undefined
       ? { totalLength: notice.totalLength }
       : {}),
+    ...(notice.tmp_root !== undefined ? { tmp_root: notice.tmp_root } : {}),
   });
 }
 
@@ -108,9 +108,7 @@ export function createSubAgentMailbox(
     }
   };
 
-  const subscribe = (
-    subscriber: SubAgentTerminalSubscriber
-  ): (() => void) => {
+  const subscribe = (subscriber: SubAgentTerminalSubscriber): (() => void) => {
     const isNewSubscriber = !subscribers.has(subscriber);
     subscribers.add(subscriber);
     if (isNewSubscriber) {

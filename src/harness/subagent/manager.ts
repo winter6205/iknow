@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import {
+  attachParentVisibleTmp,
   parseParentEnvelope,
   truncateEnvelopeResult,
   SUMMARY_LIMIT,
@@ -37,6 +38,7 @@ import { sanitizeConversationSegment } from "../session-roots.js";
 import { SUBAGENT_TRACE_DIR_NAME } from "../../shared/session-tree-names.js";
 import {
   ensureWorkerSessionLayout,
+  workerFenceTmpPath,
   workerMetaPath,
 } from "../sandbox/fence-tmp.js";
 
@@ -272,6 +274,8 @@ interface Task {
   endedAt?: string;
   /** exit/error share one bounded stderr-drain continuation. */
   crashInFlight: boolean;
+  /** Host path of this worker's fence `/tmp` pad when session layout exists. */
+  padRoot?: string;
 }
 
 const WAIT_POLL_MS = 25;
@@ -534,6 +538,14 @@ export function createSubAgentManager(opts: {
     }
     return join(opts.projectDir, SUBAGENT_TRACE_DIR_NAME);
   }
+
+  function locateEnvelope(task: Task, env: SubAgentEnvelope): SubAgentEnvelope {
+    if (task.padRoot === undefined) return env;
+    return attachParentVisibleTmp(env, {
+      task_id: task.id,
+      tmp_root: task.padRoot,
+    });
+  }
   /**
    * SC8: per-task `.meta.json` 一次性写盘 —— 至少含
    * `{agentType, toolUseId, spawnDepth}`,Postel 缺席字段省略。
@@ -677,6 +689,9 @@ export function createSubAgentManager(opts: {
         ...(envelope.totalLength !== undefined
           ? { totalLength: envelope.totalLength }
           : {}),
+        ...(envelope.tmp_root !== undefined
+          ? { tmp_root: envelope.tmp_root }
+          : {}),
       });
     }
     const endedAt = new Date().toISOString();
@@ -732,12 +747,12 @@ export function createSubAgentManager(opts: {
     if (task.stoppedEmitted) return;
     const summary = mask.mask(opts2.summary());
     const error: TraceError = { type: "unknown", message: summary };
-    task.envelope = {
+    task.envelope = locateEnvelope(task, {
       status: "failed",
       reason: "crashed",
       summary,
       result: "",
-    };
+    });
     emitStateChange(task, "failed", {
       reason: "crashed",
       error,
@@ -810,6 +825,10 @@ export function createSubAgentManager(opts: {
       stoppedEmitted: false,
       crashInFlight: false,
     };
+    const layoutDir = resolveSubagentsDirForDef(def);
+    if (layoutDir !== undefined) {
+      task.padRoot = workerFenceTmpPath(layoutDir, id);
+    }
     tasks.set(id, task);
 
     let child: ChildProcess;
@@ -821,12 +840,12 @@ export function createSubAgentManager(opts: {
       child = opts.spawn(def, id, payload);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      task.envelope = {
+      task.envelope = locateEnvelope(task, {
         status: "failed",
         reason: "crashed",
         summary: `subagent spawn failed: ${errMsg}`,
         result: "",
-      };
+      });
       // #358 T4: spawn 仍落 subagent_spawn (失败路径也记录尝试);
       // 紧接 emitStateChange(failed) + emitStop (single-emit lifecycle)。
       // T5: trace per taskId (per-agent 形态);subagentsDir 缺席走
@@ -917,12 +936,12 @@ export function createSubAgentManager(opts: {
         // 不被 generic "timeout after <n>ms" 覆盖 (emitStateChange/emitStop
         // 已先发不可逆;timedOut 由 exit handler 的 guard 保 reason=timeout)。
         // SIGKILL 兜底只对忽略 SIGTERM 的 worker 生效 (armKillFallback)。
-        task.envelope = {
+        task.envelope = locateEnvelope(task, {
           status: "failed",
           reason: "timeout",
           summary: `timeout after ${effectiveTimeoutMs}ms`,
           result: "",
-        };
+        });
         emitStateChange(task, "failed", { reason: "timeout" });
         emitStop(task, "failed", {
           reason: "timeout",
@@ -962,7 +981,10 @@ export function createSubAgentManager(opts: {
         stdoutBuf = stdoutBuf.slice(idx + 1);
         if (line.trim().length === 0) continue;
         try {
-          const env = truncateEnvelopeResult(parseParentEnvelope(line));
+          const env = locateEnvelope(
+            task,
+            truncateEnvelopeResult(parseParentEnvelope(line))
+          );
           task.envelope = env;
           // #358 T4: state migration + stop event (single-emit 在 emitStop 内由
           // stoppedEmitted flag 守门,后续 exit/error 路径重复触发 no-op)。
@@ -991,12 +1013,12 @@ export function createSubAgentManager(opts: {
         } catch (err) {
           // SC13:信封校验失败 = 协议错误。
           const errMsg = err instanceof Error ? err.message : String(err);
-          task.envelope = {
+          task.envelope = locateEnvelope(task, {
             status: "failed",
             reason: "protocolError",
             summary: `subagent envelope protocol error: ${errMsg}`,
             result: "",
-          };
+          });
           emitStateChange(task, "failed", { reason: "protocolError" });
           emitStop(task, "failed", {
             reason: "protocolError",
@@ -1059,12 +1081,12 @@ export function createSubAgentManager(opts: {
         task.envelope === undefined
       ) {
         const summary = "worker exited cleanly without envelope";
-        task.envelope = {
+        task.envelope = locateEnvelope(task, {
           status: "failed",
           reason: "protocolError",
           summary,
           result: "",
-        };
+        });
         emitStateChange(task, "failed", { reason: "protocolError" });
         emitStop(task, "failed", {
           reason: "protocolError",

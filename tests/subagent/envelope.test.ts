@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 import { ProtocolError } from "../../src/harness/errors.ts";
 import {
+  PARENT_SCHEMA,
   parseParentEnvelope,
   parseWorkerEnvelope,
   projectParentVisibleEnvelope,
@@ -282,5 +283,114 @@ describe("subagent envelope types (SC2 field shape)", () => {
     };
     assert.equal(env.reason, "maxTurnsExceeded");
     assert.equal(env.truncated, true);
+  });
+});
+
+describe("parent-visible tmp locator (SC4)", () => {
+  const locator = {
+    task_id: "11111111-1111-4111-8111-111111111111",
+    tmp_root:
+      "/session/subagents/11111111-1111-4111-8111-111111111111/fence-tmp",
+  };
+
+  it("PARENT_SCHEMA declares task_id and tmp_root as non-empty strings", () => {
+    const props = PARENT_SCHEMA.properties as Record<
+      string,
+      { type?: string; minLength?: number }
+    >;
+    assert.equal(props.task_id?.type, "string");
+    assert.equal(props.task_id?.minLength, 1);
+    assert.equal(props.tmp_root?.type, "string");
+    assert.equal(props.tmp_root?.minLength, 1);
+  });
+
+  it("parses success and failure envelopes that carry task_id + tmp_root", () => {
+    const ok = parseParentEnvelope(
+      JSON.stringify({
+        status: "ok",
+        summary: "done",
+        result: "done",
+        ...locator,
+      })
+    );
+    assert.equal(ok.task_id, locator.task_id);
+    assert.equal(ok.tmp_root, locator.tmp_root);
+    assert.ok(
+      ok.product_roster === undefined || ok.product_roster.length === 0,
+      "success path has no product roster (or empty)"
+    );
+
+    const failed = parseParentEnvelope(
+      JSON.stringify({
+        status: "failed",
+        reason: "crashed",
+        summary: "boom",
+        result: "",
+        ...locator,
+      })
+    );
+    assert.equal(failed.task_id, locator.task_id);
+    assert.equal(failed.tmp_root, locator.tmp_root);
+  });
+
+  it("rejects empty task_id or empty tmp_root", () => {
+    assert.throws(
+      () =>
+        parseParentEnvelope(
+          JSON.stringify({
+            status: "ok",
+            summary: "s",
+            result: "r",
+            task_id: "",
+            tmp_root: locator.tmp_root,
+          })
+        ),
+      ProtocolError
+    );
+    assert.throws(
+      () =>
+        parseParentEnvelope(
+          JSON.stringify({
+            status: "ok",
+            summary: "s",
+            result: "r",
+            task_id: locator.task_id,
+            tmp_root: "",
+          })
+        ),
+      ProtocolError
+    );
+  });
+
+  it("legacy envelopes without locator fields still parse", () => {
+    const env = parseParentEnvelope(
+      JSON.stringify({ status: "ok", summary: "s", result: "r" })
+    );
+    assert.equal(env.task_id, undefined);
+    assert.equal(env.tmp_root, undefined);
+  });
+
+  it("projectParentVisibleEnvelope keeps non-empty locator on success and failure", () => {
+    const ok = projectParentVisibleEnvelope({
+      status: "ok",
+      summary: "changed the parser",
+      result: "draft body",
+      ...locator,
+    });
+    assert.equal(ok.task_id, locator.task_id);
+    assert.equal(ok.tmp_root, locator.tmp_root);
+    assert.ok(
+      ok.product_roster === undefined || ok.product_roster.length === 0
+    );
+
+    const failed = projectParentVisibleEnvelope({
+      status: "failed",
+      reason: "timeout",
+      summary: "timeout after 1ms",
+      result: "",
+      ...locator,
+    });
+    assert.equal(failed.task_id, locator.task_id);
+    assert.equal(failed.tmp_root, locator.tmp_root);
   });
 });

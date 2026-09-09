@@ -86,6 +86,44 @@ describe("drainPendingSubagents (SC7 host-drain)", () => {
     assert.equal(waitCalls, 0);
   });
 
+  it("SC4: success drain 文本含 task_id 与 tmp_root，无产物名单", async () => {
+    const mgr = fakeManager([
+      {
+        taskId: "tid-drain",
+        envelope: {
+          status: "ok",
+          summary: "summ",
+          result: "summ",
+          task_id: "tid-drain",
+          tmp_root: "/pad/tid-drain/fence-tmp",
+        },
+      },
+    ]);
+    const out = await drainPendingSubagents(mgr);
+    assert.match(out, /tid-drain/);
+    assert.match(out, /\/pad\/tid-drain\/fence-tmp/);
+    assert.doesNotMatch(out, /product_roster/);
+  });
+
+  it("SC4: failure drain 文本同样含 task_id 与 tmp_root", async () => {
+    const mgr = fakeManager([
+      {
+        taskId: "tid-fail",
+        envelope: {
+          status: "failed",
+          reason: "crashed",
+          summary: "boom",
+          result: "",
+          task_id: "tid-fail",
+          tmp_root: "/pad/tid-fail/fence-tmp",
+        },
+      },
+    ]);
+    const out = await drainPendingSubagents(mgr);
+    assert.match(out, /tid-fail/);
+    assert.match(out, /\/pad\/tid-fail\/fence-tmp/);
+  });
+
   it("1 个 completed → 单一 user message (## Sub-agent <id> result: <summary>\\n\\n[result])", async () => {
     const mgr = fakeManager([
       completedItem("tid-aaa", "summ-A", "result-A-body"),

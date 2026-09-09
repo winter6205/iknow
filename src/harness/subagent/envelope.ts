@@ -7,7 +7,8 @@
  *         sandboxRoot, env?, role?, finalText?, evidenceContext? }
  *   - 子→父 result (parseParentEnvelope / truncateEnvelopeResult):
  *       { status: "ok"|"failed", summary, result, fileRefs?, usage?, reason?,
- *         stop_reason?, truncated?, totalLength? }
+ *         stop_reason?, truncated?, totalLength?, task_id?, tmp_root?,
+ *         product_roster? }
  *
  * 校验规则 (SC13 / plan D1 acceptance 3):
  *   - 缺必填字段 / wrong type / 非对象 → throw ProtocolError (协议错误);
@@ -113,6 +114,21 @@ export interface SubAgentEnvelope {
   readonly stop_reason?: StopReason;
   readonly truncated?: boolean;
   readonly totalLength?: number;
+  /**
+   * SC4 locator (additive): worker task id. Wire name `task_id` matches
+   * wait:false spawn receipts. Absent on legacy envelopes.
+   */
+  readonly task_id?: string;
+  /**
+   * SC4 locator (additive): host path of this worker's fence `/tmp` pad
+   * (`…/subagents/<taskId>/fence-tmp`). Used to read by id later.
+   */
+  readonly tmp_root?: string;
+  /**
+   * SC5 short roster of pad top-level names. SC4 success path omits it
+   * or leaves it empty — T4 does not populate this field.
+   */
+  readonly product_roster?: readonly string[];
 }
 
 const TRUNCATION_LIMIT = 20000;
@@ -191,6 +207,12 @@ export const PARENT_SCHEMA: Record<string, unknown> = {
     stop_reason: { type: "string" },
     truncated: { type: "boolean" },
     totalLength: { type: "integer" },
+    // SC4 locator (additive, optional): non-empty when a current worker
+    // projects a parent-visible envelope. Legacy jsonl without these keys
+    // still parses. minLength:1 so empty strings are protocol errors.
+    task_id: { type: "string", minLength: 1 },
+    tmp_root: { type: "string", minLength: 1 },
+    product_roster: { type: "array", items: { type: "string" } },
   },
   required: ["status", "summary", "result"],
   additionalProperties: false,
@@ -284,6 +306,21 @@ function shortHandoff(
  * 父可见投影：给父模型看的交差层（短摘要 + 路径 + 停因），不是终稿全文。
  * `truncated` 在原文长于交差或超过 20000 字时为真（汇报收束，不是任务失败）。
  */
+/**
+ * Stamp SC4 locator fields onto a parent-visible envelope.
+ * `tmp_root` is omitted when the caller has no pad (legacy manager).
+ */
+export function attachParentVisibleTmp(
+  env: SubAgentEnvelope,
+  loc: { readonly task_id: string; readonly tmp_root?: string }
+): SubAgentEnvelope {
+  return {
+    ...env,
+    task_id: loc.task_id,
+    ...(loc.tmp_root !== undefined ? { tmp_root: loc.tmp_root } : {}),
+  };
+}
+
 export function projectParentVisibleEnvelope(
   env: SubAgentEnvelope
 ): SubAgentEnvelope {
