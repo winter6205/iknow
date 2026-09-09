@@ -79,7 +79,7 @@ minimal-change-verifier: yes — 一 bullet 一 commit,七个 commit 各自可�
    - **Inherits:** spec L1(触发重开条件已写在 spec:实测单次超 1s 则引入索引文件)
    - **Surface:** `src/traceserver/list-sessions-core` + 本 plan 文件(记录判定)
    - **Acceptance:** 在归并后的真实盘上(≥100 个会话文件夹跨 ≥5 个项目)实测单次 `list_sessions` 墙钟时间,数字写进本 bullet 的 Status 行;**≤1s → 判定 L1 关闭,不引入索引**;**>1s → 判定重开,把「索引文件」写成新 spec 的一条 Open Question**,不在本 plan 内实现。判定必须附实测命令与输出,不接受估算
-   - Status: [ ] pending
+   - Status: [x] done (2026-09-09) — **实测 10.0ms(中位,3 次:14.5/10.0/9.8),≤1s → L1 关闭,不引入索引**。实测条件:8 项目 / 150 会话文件夹(真实 48 + 探针 102,每会话含真实形状 trace.jsonl),经重建后的 `dist/trace-mcp/main.js` stdio MCP 实调 `list_sessions`;探针脚本 `~/.claude/jobs/39e870e7/tmp/t8-list-sessions-probe.mjs`,实测后探针已清理
    - [blocks: T6]
    - [parallel]
 
