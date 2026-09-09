@@ -14,8 +14,8 @@
  *      subagent_stop) 且第一行的 `subagent_id` == taskId。
  *   3. 每个文件旁有 `.meta.json`,至少含 `agentType`;toolUseId / spawnDepth
  *      缺席时按 Postel 省略对应键。
- *   4. subagents/ 下的 stderr/ 子目录承载 per-task stderr pointer
- *      (ADR-0035 同日 Amendment)。
+ *   4. 新 worker stderr 落在 `subagents/<taskId>/stderr.log`
+ *      （旧 `subagents/stderr/<taskId>.log` 不迁）。
  *   5. `agent-*` 不直接出现在项目根(项目身份层级 = `<baseDir>/projects/<slug>`
  *      顶层不能有 agent-* 目录;spec SC8 acceptance 写法)。
  */
@@ -43,6 +43,7 @@ import {
   listSubagentRecordPaths,
   workerMetaPath,
   workerRecordPath,
+  workerStderrPath,
 } from "../../src/harness/sandbox/fence-tmp.ts";
 
 interface FakeChild {
@@ -246,7 +247,7 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
     // (见下方 M6 describe 的专用断言)。
   });
 
-  it("stderr/ 子目录承载 per-task stderr pointer, 跟随 subagentsDir", async () => {
+  it("stderr.log 落在 subagents/<taskId>/, 跟随 subagentsDir", async () => {
     const { manager, spawned } = makeManager({ subagentsDir });
     const { taskId } = manager.spawn({ task: "crash" });
     // crashed exit + stderr burst → manager emitStop 写入 stderr pointer。
@@ -258,7 +259,7 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
     await flushTwoTicks();
     await manager.shutdown();
 
-    const stderrPath = join(subagentsDir, "stderr", `${taskId}.log`);
+    const stderrPath = workerStderrPath(subagentsDir, taskId);
     assert.ok(
       existsSync(stderrPath),
       `expected stderr pointer at ${stderrPath}`

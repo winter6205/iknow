@@ -78,6 +78,11 @@ export function workerFenceTmpPath(
   );
 }
 
+/** `<subagents>/<taskId>/stderr.log` — new-worker crash diagnostics (SC7). */
+export function workerStderrPath(subagentsDir: string, taskId: string): string {
+  return join(workerTaskDir(subagentsDir, taskId), "stderr.log");
+}
+
 /** Pad sibling of a worker record file (`…/<taskId>/fence-tmp`). */
 export function workerFenceTmpBesideRecord(traceFilePath: string): string {
   return join(dirname(traceFilePath), MAIN_SESSION_FENCE_TMP_DIR_NAME);

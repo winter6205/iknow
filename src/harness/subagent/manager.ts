@@ -41,6 +41,7 @@ import {
   ensureWorkerSessionLayout,
   workerFenceTmpPath,
   workerMetaPath,
+  workerStderrPath,
 } from "../sandbox/fence-tmp.js";
 import { inspectWorkerPad, listPadTopLevelNames } from "./pad-inspect.js";
 import type { PadQueryResult } from "./pad-inspect.js";
@@ -325,17 +326,11 @@ function persistStderrDiagnostics(opts: {
   readonly stderr: Buffer;
   readonly mask: ReturnType<typeof createOutputMask>;
 }): { readonly path: string; readonly bytes: number } | undefined {
-  const path = join(
-    resolve(opts.diagnosticsDir),
-    "stderr",
-    `${opts.taskId}.log`
-  );
+  const path = workerStderrPath(resolve(opts.diagnosticsDir), opts.taskId);
   const masked = opts.mask.mask(opts.stderr.toString("utf8"));
   const content = Buffer.from(masked).slice(-MAX_STDERR_DIAGNOSTICS_BYTES);
   try {
-    mkdirSync(join(resolve(opts.diagnosticsDir), "stderr"), {
-      recursive: true,
-    });
+    mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, content);
     return { path, bytes: content.byteLength };
   } catch (err) {
@@ -412,7 +407,8 @@ export function createSubAgentManager(opts: {
   readonly trace?: TraceService;
   /**
    * Crash diagnostics root. When present, stderr is masked and persisted at
-   * `<diagnosticsDir>/stderr/<taskId>.log` with a 1 MiB cap.
+   * `<diagnosticsDir>/<taskId>/stderr.log` (same dir as record + pad) with a
+   * 1 MiB cap. Leftover `<diagnosticsDir>/stderr/<taskId>.log` is not migrated.
    */
   readonly diagnosticsDir?: string;
   /**

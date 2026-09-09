@@ -1,6 +1,7 @@
 /**
  * T3 — worker 围栏 /tmp 垫底与主会话隔离；新布局 `subagents/<taskId>/`
- * （记录 + 垫底）。SC3 / SC7（目录）/ SC8。stderr 仍走旧路径（T7）。
+ * （记录 + 垫底）。SC3 / SC7（目录）/ SC8。
+ * T7 — 新 spawn 的 stderr 与记录、垫底同目录；旧 `stderr/<taskId>.log` 不迁、仍可读。
  */
 
 import assert from "node:assert/strict";
@@ -30,6 +31,7 @@ import {
   resolveExistingSubagentRecordPath,
   workerFenceTmpPath,
   workerRecordPath,
+  workerStderrPath,
 } from "../../src/harness/sandbox/fence-tmp.ts";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
@@ -181,19 +183,67 @@ describe("T3 worker session layout (SC7)", () => {
       "pad is fence-tmp under the taskId directory"
     );
   });
+});
 
-  it("stderr still lands on the legacy session-level pointer (T7 not in scope)", async () => {
+describe("T7 worker stderr in taskId dir (SC7)", () => {
+  it("new crash stderr lives beside record and pad, not session-level stderr/", async () => {
     const { manager, spawned } = makeManager();
     const { taskId } = manager.spawn({ task: "crash" });
-    spawned[0]!.stderr.write("legacy-stderr\n");
+    spawned[0]!.stderr.write("nested-stderr\n");
     spawned[0]!.stderr.end();
     spawned[0]!.emit("exit", 2, null);
     await flushTwoTicks();
     await manager.shutdown();
 
-    const legacyStderr = join(subagentsDir, "stderr", `${taskId}.log`);
-    assert.equal(existsSync(legacyStderr), true, `expected ${legacyStderr}`);
-    assert.match(readFileSync(legacyStderr, "utf8"), /legacy-stderr/);
+    const nested = workerStderrPath(subagentsDir, taskId);
+    assert.equal(existsSync(nested), true, `expected ${nested}`);
+    assert.match(readFileSync(nested, "utf8"), /nested-stderr/);
+    assert.equal(
+      nested,
+      join(subagentsDir, taskId, "stderr.log"),
+      "stderr is a file inside subagents/<taskId>/"
+    );
+    assert.equal(
+      existsSync(join(subagentsDir, "stderr", `${taskId}.log`)),
+      false,
+      "new spawn must not write the legacy session-level stderr log"
+    );
+
+    const records = readFileSync(workerRecordPath(subagentsDir, taskId), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const stop = records.find(
+      (record) => record.record_type === "subagent_stop"
+    );
+    assert.equal(stop?.stderr_path, nested);
+  });
+
+  it("does not migrate or overwrite a leftover subagents/stderr/<taskId>.log", async () => {
+    const leftoverId = "leftover-old-stderr";
+    const leftoverPath = join(subagentsDir, "stderr", `${leftoverId}.log`);
+    mkdirSync(dirname(leftoverPath), { recursive: true });
+    writeFileSync(leftoverPath, "pre-t7 leftover\n", "utf8");
+
+    const { manager, spawned } = makeManager();
+    const { taskId } = manager.spawn({ task: "crash" });
+    spawned[0]!.stderr.write("new-worker-stderr\n");
+    spawned[0]!.stderr.end();
+    spawned[0]!.emit("exit", 2, null);
+    await flushTwoTicks();
+    await manager.shutdown();
+
+    assert.equal(existsSync(leftoverPath), true, "legacy log must remain");
+    assert.equal(readFileSync(leftoverPath, "utf8"), "pre-t7 leftover\n");
+    assert.equal(
+      existsSync(workerStderrPath(subagentsDir, leftoverId)),
+      false,
+      "must not copy leftover stderr into a new task dir"
+    );
+    assert.match(
+      readFileSync(workerStderrPath(subagentsDir, taskId), "utf8"),
+      /new-worker-stderr/
+    );
   });
 });
 
