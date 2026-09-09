@@ -165,7 +165,7 @@ export interface VerifyLoopOptions {
   /**
    * Completion-facing judge dispatch (ADR-0024).
    * `hitl` = skip LLM judge (named EXIT).
-   * `auto` = `/goal` module: spawn judge on completed unless hard-fail,
+   * `auto` = goal 功能 (`/goal`) judge module: spawn judge on completed unless hard-fail,
    * including checker SUFFICIENT.
    * Omitted keeps the legacy evidence-first short-circuit (SUFFICIENT skips
    * the judge) so existing classifier unit tests stay on the old path.
@@ -827,7 +827,10 @@ async function runVerifyLoopBody(opts: {
     //   EVIDENCE_SUFFICIENT → 默认 PASS 短路 (零判官零重跑, 即便配了 command, G3);
     //     例外: completionMode === "auto" 且 command 空 → 仍 spawn 完成向判官
     //     (ADR-0024 成功也评; 不把 command 沙箱闭环混进来);
-    //   EVIDENCE_CONTRADICTED → true-failure (进修正轮, 趋势/签名机制原样消费);
+    //   EVIDENCE_CONTRADICTED → goal 功能 (completionMode auto) / omitted:
+    //     true-failure (进修正轮);
+    //     HITL: 与 INSUFFICIENT 同 EXIT (跳过完成向判官, 不 true-failure,
+    //     不补跑/不打回干活模型; ADR-0073);
     //   EVIDENCE_INSUFFICIENT → 落原 produceObservation (判官/命令既有机制), 且把
     //     evidenceVerdict + gamingSignals 合并进本轮 observation (buildRecord Postel
     //     落盘)。SUFFICIENT/CONTRADICTED 不落 evidenceVerdict (B3 Postel 语义)。
@@ -857,16 +860,22 @@ async function runVerifyLoopBody(opts: {
         outputText: "",
       };
     } else if (evidenceReport.verdict === "EVIDENCE_CONTRADICTED") {
-      observation = {
-        verdict: "true-failure",
-        exitCode: 1,
-        signature: buildFailureSignature({
+      if (options.completionMode === "hitl") {
+        // EXIT: HITL CONTRADICTED consumes like INSUFFICIENT — skip
+        // completion judge, no true-failure, no extra worker/rerun round.
+        observation = await opts.produceObservation(round, current);
+      } else {
+        observation = {
+          verdict: "true-failure",
           exitCode: 1,
-          outputText: evidenceReport.reasons.join("\n"),
-          countRegex: undefined,
-        }),
-        outputText: "",
-      };
+          signature: buildFailureSignature({
+            exitCode: 1,
+            outputText: evidenceReport.reasons.join("\n"),
+            countRegex: undefined,
+          }),
+          outputText: "",
+        };
+      }
     } else {
       // #449b B5 补跑信封 (Leader 裁决 v2: 判官路径专属机制): INSUFFICIENT +
       // deriveRerunCommand 非 null (command 空时 probeVerifyCommand 探测命中) 且
