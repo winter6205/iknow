@@ -7,6 +7,7 @@ Regression-test scaffold for project templates. Zero external deps — pure bash
 - `.evals/tasks/*.yaml` — task definitions (test cases)
 - `.evals/run.sh` — bash runner that executes each task's `test_command`
 - `.evals/results/<timestamp>.json` — pass/fail report
+- `.evals/retired/` — 已失去不变式的 eval（一次性收口）；不入 `run.sh` 收集（`archive/` 整树 gitignore，不能当团队归档）
 
 ## Task YAML schema (7 fields)
 

@@ -1,3 +1,4 @@
+# 归档原因：ink→OpenTUI 收口已完成。specs/README 已归档 321；docs/STATUS.md 已作 TUI 平台声明；性能探针已迁 archive/onetime-probes/。迁移检查清单（死钉版本号、bun tests/tui 全绿、探针可跑）不再是活不变式。
 id: 321-tui-opentui-migration
 tier: fast
 description: "TUI 渲染后端迁移 ink→@opentui/react 收口 — SC1 ink 零命中、迁移文件就位、tests/tui 全绿、性能探针可运行"
