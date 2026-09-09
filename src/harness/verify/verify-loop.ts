@@ -32,6 +32,7 @@ import type {
 } from "../model-adapter/types.js";
 import type { LoopTrace } from "../loop-trace.js";
 import type { TraceService } from "../trace/index.js";
+import { deriveClaimIndex } from "../last-nonempty-assistant.js";
 import { checkEvidence } from "./evidence-checker.js";
 import { probeVerifyCommand } from "./command-probe.js";
 import {
@@ -832,7 +833,7 @@ async function runVerifyLoopBody(opts: {
     //     落盘)。SUFFICIENT/CONTRADICTED 不落 evidenceVerdict (B3 Postel 语义)。
     const evidenceReport = checkEvidence({
       messages: current.result.messages,
-      claimIndex: round,
+      claimIndex: deriveClaimIndex(current.result.messages),
     });
     let pendingEvidence:
       | {
@@ -1081,10 +1082,10 @@ function runClassifierLoop(
       }
       const summary = current.result.finalText ?? "";
       // B6: 复用证据优先前级同源 report (checkEvidence 纯函数幂等, 二次调用
-      // 与 body 前级各自独立无副作用; claimIndex = round 与前级对齐)。
+      // 与 body 前级各自独立无副作用; claimIndex = 声称下标, 与前级对齐)。
       const report = checkEvidence({
         messages: current.result.messages,
-        claimIndex: round,
+        claimIndex: deriveClaimIndex(current.result.messages),
       });
       lastEvidenceContext = buildEvidenceContext(
         report,

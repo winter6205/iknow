@@ -78,6 +78,7 @@ import { safeTrace } from "./trace/index.js";
 import type { HarnessStreamEvent } from "./stream.js";
 import { safeEmitStream } from "./stream.js";
 import type { RaceTimers } from "./race-timers.js";
+import { lastNonEmptyAssistant } from "./last-nonempty-assistant.js";
 import {
   observeModelIdle,
   resolveModelClocks,
@@ -940,17 +941,7 @@ async function recordCompactLlmCall(opts: {
 export function deriveFinalText(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): string | null {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m && m.role === "assistant") {
-      const texts = m.content
-        .filter((b): b is { type: "text"; text: string } => b.type === "text")
-        .map((b) => b.text)
-        .filter((t) => t.trim().length > 0);
-      if (texts.length > 0) return texts.join("\n");
-    }
-  }
-  return null;
+  return lastNonEmptyAssistant(messages)?.text ?? null;
 }
 
 /** 017 A3:超时运行时兜底。仅当 side-specific 与主超时字段都缺省时生效;按阶段解析,不存储。 */
