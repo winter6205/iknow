@@ -6,7 +6,6 @@
  * success/failure semantics and does not hit Exa / live pages.
  *
  * HAS_KEY missing → describe.skip + Not run (do not fail CI without key).
- * Until tool descriptions align (T2), assertions may be RED.
  */
 
 import { afterAll, describe, expect, it } from "vitest";
@@ -54,51 +53,64 @@ runOrSkip("web discover vs read golden set (real-LLM)", () => {
     );
   });
 
-  it("SC1: no URL, search/news request → first tool web_search", async () => {
-    const fixture = fixtureById("sc1-search-no-url");
-    const uses = await runUntilTools("record", fixture.id, fixture.userPrompt, {
-      roots,
-      shutdowns,
-    });
-    expect(uses.length).toBeGreaterThan(0);
-    expect(uses[0]!.name).toBe("web_search");
-  }, 360_000);
+  const sc1 = fixtureById("sc1-search-no-url");
+  it(
+    sc1.title,
+    async () => {
+      const uses = await runUntilTools("stub-ok", sc1.id, sc1.userPrompt, {
+        roots,
+        shutdowns,
+      });
+      expect(uses.length).toBeGreaterThan(0);
+      expect(uses[0]!.name).toBe("web_search");
+    },
+    360_000
+  );
 
-  it("SC2: user already gave http(s) URL and asked to read page → first tool MAY be web_fetch", async () => {
-    const fixture = fixtureById("sc2-read-given-url");
-    const uses = await runUntilTools("record", fixture.id, fixture.userPrompt, {
-      roots,
-      shutdowns,
-    });
-    expect(uses.length).toBeGreaterThan(0);
-    expect(uses[0]!.name).toBe("web_fetch");
-  }, 360_000);
+  const sc2 = fixtureById("sc2-read-given-url");
+  it(
+    sc2.title,
+    async () => {
+      const uses = await runUntilTools("stub-ok", sc2.id, sc2.userPrompt, {
+        roots,
+        shutdowns,
+      });
+      expect(uses.length).toBeGreaterThan(0);
+      expect(uses[0]!.name).toBe("web_fetch");
+    },
+    360_000
+  );
 
-  it("SC3: after search returns zero results, next step is NOT a guessed-URL web_fetch", async () => {
-    const fixture = fixtureById("sc3-empty-search-not-guess-fetch");
-    const { uses } = await runWithMessages(
-      "empty-search",
-      fixture.id,
-      fixture.userPrompt,
-      { roots, shutdowns }
-    );
-    expect(uses.length).toBeGreaterThan(0);
-    expect(uses[0]!.name).toBe("web_search");
-    const givenUrls = new Set(
-      httpUrlsIn(fixture.userPrompt).map((u) => u.toLowerCase())
-    );
-    for (const call of uses.slice(1)) {
-      if (call.name !== "web_fetch") continue;
-      const url = fetchUrlFromInput(call.input);
-      const guessed = isHttpUrl(url) && !givenUrls.has(url.toLowerCase());
-      expect(guessed, `guessed-URL web_fetch after empty search: ${url}`).toBe(
-        false
+  const sc3 = fixtureById("sc3-empty-search-not-guess-fetch");
+  it(
+    sc3.title,
+    async () => {
+      const { uses } = await runWithMessages(
+        "empty-search",
+        sc3.id,
+        sc3.userPrompt,
+        { roots, shutdowns }
       );
-    }
-  }, 360_000);
+      expect(uses.length).toBeGreaterThan(0);
+      expect(uses[0]!.name).toBe("web_search");
+      const givenUrls = new Set(
+        httpUrlsIn(sc3.userPrompt).map((u) => u.toLowerCase())
+      );
+      for (const call of uses.slice(1)) {
+        if (call.name !== "web_fetch") continue;
+        const url = fetchUrlFromInput(call.input);
+        const guessed = isHttpUrl(url) && !givenUrls.has(url.toLowerCase());
+        expect(
+          guessed,
+          `guessed-URL web_fetch after empty search: ${url}`
+        ).toBe(false);
+      }
+    },
+    360_000
+  );
 });
 
-type InterceptMode = "record" | "empty-search";
+type InterceptMode = "stub-ok" | "empty-search";
 
 async function runUntilTools(
   mode: InterceptMode,

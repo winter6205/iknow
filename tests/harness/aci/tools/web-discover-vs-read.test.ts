@@ -30,27 +30,27 @@ describe("web discover vs read golden set (fixtures)", () => {
     ]);
   });
 
-  it("SC1: no URL, search/news request → first tool web_search", () => {
-    const fixture = fixtureById("sc1-search-no-url");
-    assertFixtureRunnable(fixture);
-    assert.equal(httpUrlsIn(fixture.userPrompt).length, 0);
-    assert.match(fixture.userPrompt, /search|news/i);
+  const sc1 = fixtureById("sc1-search-no-url");
+  it(sc1.title, () => {
+    assertFixtureRunnable(sc1);
+    assert.equal(httpUrlsIn(sc1.userPrompt).length, 0);
+    assert.match(sc1.userPrompt, /search|news/i);
   });
 
-  it("SC2: user already gave http(s) URL and asked to read page → first tool MAY be web_fetch", () => {
-    const fixture = fixtureById("sc2-read-given-url");
-    assertFixtureRunnable(fixture);
-    const urls = httpUrlsIn(fixture.userPrompt);
+  const sc2 = fixtureById("sc2-read-given-url");
+  it(sc2.title, () => {
+    assertFixtureRunnable(sc2);
+    const urls = httpUrlsIn(sc2.userPrompt);
     assert.ok(urls.length >= 1, "SC2 prompt must include an http(s) URL");
     assert.match(urls[0]!, /^https?:\/\//i);
-    assert.match(fixture.userPrompt, /read/i);
+    assert.match(sc2.userPrompt, /read/i);
   });
 
-  it("SC3: after search returns zero results, next step is NOT a guessed-URL web_fetch", () => {
-    const fixture = fixtureById("sc3-empty-search-not-guess-fetch");
-    assertFixtureRunnable(fixture);
-    assert.equal(httpUrlsIn(fixture.userPrompt).length, 0);
-    assert.match(fixture.userPrompt, /search/i);
+  const sc3 = fixtureById("sc3-empty-search-not-guess-fetch");
+  it(sc3.title, () => {
+    assertFixtureRunnable(sc3);
+    assert.equal(httpUrlsIn(sc3.userPrompt).length, 0);
+    assert.match(sc3.userPrompt, /search/i);
   });
 });
 

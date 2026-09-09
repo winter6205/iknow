@@ -74,6 +74,6 @@ export function isHttpUrl(value: unknown): value is string {
 
 export function fetchUrlFromInput(input: unknown): string | undefined {
   if (input === null || typeof input !== "object") return undefined;
-  const url = (input as { url?: unknown }).url;
-  return typeof url === "string" ? url : undefined;
+  if (!("url" in input)) return undefined;
+  return typeof input.url === "string" ? input.url : undefined;
 }
