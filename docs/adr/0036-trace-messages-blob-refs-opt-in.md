@@ -29,4 +29,4 @@ Status: accepted
 
 **负面 / Trade-offs（本次新增）**：ADR-0035 的崩溃取证完整性获得一个 **content 面**前置（`blobs/` 可写）；生命周期面不含 messages 正文故不受影响，两面敏感度从此不同——取证时须知「`llm_call` 缺席 ≠ 那次调用没发生」。
 
-Evidence pointers: `specs/trace-agent-readability.md`（Success Criteria 7）；2026-08-28 定量分析（99 文件 263.5MB、重复率 98.2%、去重后 37MB）；ADR-0006 落盘否决的域区分（可再生工具输出 ≠ trace 存储格式）；ADR-0071（会话文件夹归并与 trace 正文内容寻址）；`specs/session-folder-consolidation.md`（SC9–SC15、输入五类表 B/C）；2026-09-08 复测（`trace/` 337MB / 82 文件、`blobs/` 不存在、同一会话 trace 41 行 264K vs transcript 88 行 72K）。
+Evidence pointers: `specs/trace-agent-readability.md`（Success Criteria 7）；2026-08-28 定量分析（99 文件 263.5MB、重复率 98.2%、去重后 37MB）；ADR-0006 落盘否决的域区分（可再生工具输出 ≠ trace 存储格式）；ADR-0071（会话文件夹归并与 trace 正文内容寻址）；归档 spec `docs/archive/025-retire-completed-specs-and-plans/specs/session-folder-consolidation.md`（SC9–SC15、输入五类表 B/C）；2026-09-08 复测（`trace/` 337MB / 82 文件、`blobs/` 不存在、同一会话 trace 41 行 264K vs transcript 88 行 72K）。

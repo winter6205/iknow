@@ -17,4 +17,4 @@ Status: accepted
 
 **负面 / Trade-offs（本次新增）**：生命周期面与 content 面从此对 `blobs/` 健康度**敏感度不同**——同一次事故里可能生命周期行齐全而 `llm_call` 缺席。这是 ADR-0071 授权的取舍，取证时须知道「`llm_call` 缺席 ≠ 那次调用没发生」。
 
-Evidence pointers: `specs/trace-agent-readability.md`（Success Criteria 1/3/4）；PR #783（d1e5a9e7）与 buglog `c1a15695`（分支 docs/subagent-worker-startup-crash-buglog）；2026-08-28 trace 设计评估（4 路 Explore + skeptic 二审）；ADR-0071（会话文件夹归并与 trace 正文内容寻址）；`specs/session-folder-consolidation.md` SC8 / SC11。
+Evidence pointers: `specs/trace-agent-readability.md`（Success Criteria 1/3/4）；PR #783（d1e5a9e7）与 buglog `c1a15695`（分支 docs/subagent-worker-startup-crash-buglog）；2026-08-28 trace 设计评估（4 路 Explore + skeptic 二审）；ADR-0071（会话文件夹归并与 trace 正文内容寻址）；归档 spec `docs/archive/025-retire-completed-specs-and-plans/specs/session-folder-consolidation.md` SC8 / SC11。

@@ -100,7 +100,7 @@
 - `653-horizon-pkg1-perception.md` — 落地完成（PR #666）；TUI Verify 终态 + 环境现势
 - `653-horizon-pkg2-kernel.md` — 落地完成（PR #671）；前台/后台 bash 沙箱纪律对齐 + `isConcurrencySafe` 调度
 - `tui-display-consistency.md` D3 折叠合同 — superseded by `tui-tool-settled-appearance.md`（spec 仍活跃，仅 D3 让位；plan T3 cancelled）
-- `session-folder-consolidation.md` — 落地完成（PR #966；ADR-0071 L3 cutover；plan 同目录 `plans/session-folder-consolidation.md`）
+- `session-folder-consolidation.md` — 落地完成（PR #966；ADR-0071 L3 cutover；plan 同目录归档 `plans/session-folder-consolidation.md`）
 
 ---
 
