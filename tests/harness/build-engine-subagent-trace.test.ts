@@ -228,7 +228,7 @@ describe("buildHarnessEngine — subagentsDir 注入缝 (T5 SC8 + L2)", () => {
     await new Promise((resolve) => setImmediate(resolve));
     await Promise.resolve();
 
-    const filePath = join(scratchDir, `agent-${taskId}.jsonl`);
+    const filePath = join(scratchDir, taskId, `agent-${taskId}.jsonl`);
     const content = readFileSync(filePath, "utf8");
     const lines = content.split("\n").filter(Boolean);
     const recordTypes = lines.map((l) => JSON.parse(l).record_type as string);

@@ -21,3 +21,6 @@ export const PROJECTS_DIR_NAME = "projects";
 
 /** `<projectDir>/<convId>/subagents/` —— per-agent 子代理记录目录名。 */
 export const SUBAGENT_TRACE_DIR_NAME = "subagents";
+
+/** `<sessionFolder>/fence-tmp/` — 主会话围栏 `/tmp` 宿主垫底（ADR-0074）。不与 `subagents/` 碰撞。 */
+export const MAIN_SESSION_FENCE_TMP_DIR_NAME = "fence-tmp";

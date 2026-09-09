@@ -174,7 +174,7 @@ describe("buildTuiDeps — subagent trace 接线 (T5 per-agent 形态)", () => {
     await new Promise((resolve) => setImmediate(resolve));
     await Promise.resolve();
 
-    const filePath = join(subagentsDir, `agent-${taskId}.jsonl`);
+    const filePath = join(subagentsDir, taskId, `agent-${taskId}.jsonl`);
     const types = readFileSync(filePath, "utf8")
       .split("\n")
       .filter(Boolean)

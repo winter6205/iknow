@@ -33,16 +33,16 @@ export interface BwrapFenceOptions {
   // Per-call network opt-in (#503, ADR-0022). Absent/false = isolated
   // (keep --unshare-net); true = drop --unshare-net so the sandboxed
   // process has host-network visibility. The rest of the fence (user ns /
-  // die-with-parent / ro-binds / tmpfs / clearenv / chdir / command) is
-  // unchanged — this is the only approval axis this option touches.
+  // die-with-parent / ro-binds / /tmp pad bind / clearenv / chdir / command)
+  // is unchanged — this is the only approval axis this option touches.
   readonly network?: boolean;
   // #562 T5: cwdReadonly — absent/false = `--bind cwd cwd` (the writable
   // cwd); true = bind cwd as `--ro-bind cwd cwd` so a validator hole still
-  // gets EROFS at the kernel layer, and the post-tmpfs rebind stays
+  // gets EROFS at the kernel layer, and the post-/tmp-mount rebind stays
   // read-only. The closed-world argv order contract (system --ro-bind →
-  // read-whitelist --ro-bind → write --bind → --size/--tmpfs → post-tmpfs
-  // rebinds → --proc/--dev-bind) and the rebind-after-tmpfs rule (cwd
-  // isTmpDescendant) stay intact.
+  // read-whitelist --ro-bind → write --bind → --bind pad /tmp → post-/tmp
+  // rebinds → --proc/--dev-bind) and the rebind-after-/tmp rule (cwd
+  // isTmpDescendant of the guest /tmp mount) stay intact.
   readonly cwdReadonly?: boolean;
   readonly seccompProfile?: never;
 }
@@ -69,7 +69,8 @@ function readWhitelist(fsPolicy: FsPolicy): readonly string[] {
 
 /**
  * Closed-world argv (ADR-0037 §9.2): system ro-binds → read-whitelist
- * ro-binds → write binds → tmpfs → post-tmpfs rebinds → proc/dev.
+ * ro-binds → write binds → host pad `--bind` at `/tmp` → post-/tmp
+ * rebinds → proc/dev.
  *
  * bwrap's last-mount-wins semantics drive the ordering contract:
  *  - every read root enters as `--ro-bind` BEFORE the write binds, so the
@@ -79,7 +80,7 @@ function readWhitelist(fsPolicy: FsPolicy): readonly string[] {
  *    whitelist is invisible, which is what retires the SENSITIVE_PATHS tmpfs
  *    overlays (a tmpfs over an invisible path is a no-op);
  *  - the tmp write channel binds by role (`fsPolicy.tmpRoot()`), followed by
- *    the cwd bind as the last mount so nothing covers it.
+ *    the cwd bind, then the pad is mounted at guest `/tmp` (ADR-0074).
  */
 function baseArgs(
   cwd: string,
@@ -94,19 +95,18 @@ function baseArgs(
   // #562 T5: cwdReadonly switches the cwd-bind verb; the tmp write channel
   // stays writable (it is the sandbox /tmp mount) and orders before cwd.
   const cwdVerb = cwdReadonly ? "--ro-bind" : "--bind";
-  // `--tmpfs /tmp` (below) mounts an empty tmpfs over /tmp, which hides every
-  // /tmp/* subtree bound earlier — read roots and the cwd alike. The
-  // post-tmpfs rebinds re-assert them: read roots read-only first, the cwd
-  // last so it reclaims writability (or stays read-only under cwdReadonly).
-  // The old home rebind (#196 T12b) died with the writable-home base — home
-  // is no longer a bind root. The mechanism is uniform over the read
-  // whitelist: every read root (identity included, as a policy member) gets
-  // the same treatment, with no identity-specific conditional layer.
+  // `--bind <pad> /tmp` hides every /tmp/* subtree bound earlier — read
+  // roots and the cwd alike. Rebind against the guest mount `/tmp`, not the
+  // host pad path (the pad usually lives outside /tmp). Read roots first,
+  // cwd last so it reclaims writability (or stays read-only under
+  // cwdReadonly). Home is not a bind root.
+  const guestTmp = "/tmp";
   const readRebinds = readRoots
-    .filter((root) => isTmpDescendant(root, tmp))
+    .filter((root) => isTmpDescendant(root, guestTmp))
     .flatMap((root) => ["--ro-bind", root, root]);
-  const cwdRebind = isTmpDescendant(cwd, tmp) ? [cwdVerb, cwd, cwd] : [];
-  const postTmpfsRebinds = [...readRebinds, ...cwdRebind];
+  const cwdRebind = isTmpDescendant(cwd, guestTmp) ? [cwdVerb, cwd, cwd] : [];
+  const postTmpMountRebinds = [...readRebinds, ...cwdRebind];
+  void resources;
   return [
     "--unshare-user-try",
     // network:true is the only axis that drops --unshare-net (ADR-0022 #1);
@@ -120,18 +120,19 @@ function baseArgs(
     // Read whitelist (§9.2 #4–#7): contract roots + on-disk optional members,
     // all read-only.
     ...readBinds,
-    // Write whitelist (§9.2 #2–#3): tmp by role + cwd/taskRoot, last.
+    // Write whitelist (§9.2 #2–#3): tmp by role + cwd/taskRoot, then pad
+    // mounted at guest /tmp (ADR-0074). `--size`/`--tmpfs` is not a bind
+    // quota — do not invent a new byte product gate.
     "--bind",
     tmp,
     tmp,
     cwdVerb,
     cwd,
     cwd,
-    "--size",
-    String(resources.tmp),
-    "--tmpfs",
-    "/tmp",
-    ...postTmpfsRebinds,
+    "--bind",
+    tmp,
+    guestTmp,
+    ...postTmpMountRebinds,
     "--proc",
     "/proc",
     "--dev-bind",

@@ -14,8 +14,8 @@
  *      subagent_stop) 且第一行的 `subagent_id` == taskId。
  *   3. 每个文件旁有 `.meta.json`,至少含 `agentType`;toolUseId / spawnDepth
  *      缺席时按 Postel 省略对应键。
- *   4. subagents/ 下的 stderr/ 子目录承载 per-task stderr pointer
- *      (ADR-0035 同日 Amendment)。
+ *   4. 新 worker stderr 落在 `subagents/<taskId>/stderr.log`
+ *      （旧 `subagents/stderr/<taskId>.log` 不迁）。
  *   5. `agent-*` 不直接出现在项目根(项目身份层级 = `<baseDir>/projects/<slug>`
  *      顶层不能有 agent-* 目录;spec SC8 acceptance 写法)。
  */
@@ -39,6 +39,12 @@ import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
+import {
+  listSubagentRecordPaths,
+  workerMetaPath,
+  workerRecordPath,
+  workerStderrPath,
+} from "../../src/harness/sandbox/fence-tmp.ts";
 
 interface FakeChild {
   readonly stdin: PassThrough;
@@ -142,7 +148,7 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
 
     const taskIds = [first.taskId, second.taskId];
     for (const id of taskIds) {
-      const filePath = join(subagentsDir, `agent-${id}.jsonl`);
+      const filePath = workerRecordPath(subagentsDir, id);
       assert.ok(existsSync(filePath), `expected ${filePath} on disk`);
       // 绝无 "subagent" 字面感(已退役的 conversationId 假 scope)。
       assert.notEqual(id, "subagent");
@@ -159,9 +165,10 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
     await manager.shutdown();
 
     // 文件名集合 == taskId 集合(操作员补丁断言)
-    const files = readdirSync(subagentsDir)
-      .filter((f) => f.startsWith("agent-") && f.endsWith(".jsonl"))
-      .map((f) => f.replace(/^agent-/, "").replace(/\.jsonl$/, ""));
+    const files = listSubagentRecordPaths(subagentsDir).map((p) => {
+      const nestedId = p.split("/").at(-2);
+      return nestedId ?? p;
+    });
     assert.deepEqual(
       new Set(files),
       new Set(taskIds),
@@ -176,7 +183,7 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
     await flushTwoTicks();
     await manager.shutdown();
 
-    const filePath = join(subagentsDir, `agent-${taskId}.jsonl`);
+    const filePath = workerRecordPath(subagentsDir, taskId);
     const lines = readFileSync(filePath, "utf8")
       .trim()
       .split("\n")
@@ -200,7 +207,7 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
     await flushTwoTicks();
     await manager.shutdown();
 
-    const metaPath = join(subagentsDir, `agent-${taskId}.meta.json`);
+    const metaPath = workerMetaPath(subagentsDir, taskId);
     assert.ok(existsSync(metaPath), `expected ${metaPath}`);
     const meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<
       string,
@@ -223,16 +230,13 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
     await manager.shutdown();
 
     const metaWith = JSON.parse(
-      readFileSync(
-        join(subagentsDir, `agent-${withId.taskId}.meta.json`),
-        "utf8"
-      )
+      readFileSync(workerMetaPath(subagentsDir, withId.taskId), "utf8")
     ) as Record<string, unknown>;
     assert.equal(metaWith.toolUseId, "tool_use_abc");
     assert.equal(metaWith.spawnDepth, 2);
 
     const metaWithout = JSON.parse(
-      readFileSync(join(subagentsDir, `agent-${noId.taskId}.meta.json`), "utf8")
+      readFileSync(workerMetaPath(subagentsDir, noId.taskId), "utf8")
     ) as Record<string, unknown>;
     assert.equal(
       "toolUseId" in metaWithout,
@@ -243,7 +247,7 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
     // (见下方 M6 describe 的专用断言)。
   });
 
-  it("stderr/ 子目录承载 per-task stderr pointer, 跟随 subagentsDir", async () => {
+  it("stderr.log 落在 subagents/<taskId>/, 跟随 subagentsDir", async () => {
     const { manager, spawned } = makeManager({ subagentsDir });
     const { taskId } = manager.spawn({ task: "crash" });
     // crashed exit + stderr burst → manager emitStop 写入 stderr pointer。
@@ -255,7 +259,7 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
     await flushTwoTicks();
     await manager.shutdown();
 
-    const stderrPath = join(subagentsDir, "stderr", `${taskId}.log`);
+    const stderrPath = workerStderrPath(subagentsDir, taskId);
     assert.ok(
       existsSync(stderrPath),
       `expected stderr pointer at ${stderrPath}`
@@ -307,7 +311,7 @@ describe("T5 per-agent trace layout (SC8 / L2 / operator patch)", () => {
     await flushTwoTicks();
     await manager.shutdown();
 
-    const metaPath = join(subagentsDir, `agent-${taskId}.meta.json`);
+    const metaPath = workerMetaPath(subagentsDir, taskId);
     const meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<
       string,
       unknown
@@ -340,11 +344,11 @@ describe("review-fix M5 — def.conversationId 派生 per-conversation 子目录
     // per-conversation 叶子
     const convSubagentsDir = join(projectSlugDir, convId, "subagents");
     assert.ok(
-      existsSync(join(convSubagentsDir, `agent-${taskId}.jsonl`)),
+      existsSync(workerRecordPath(convSubagentsDir, taskId)),
       `expected lifecycle trace under per-conversation leaf ${convSubagentsDir}`
     );
     assert.ok(
-      existsSync(join(convSubagentsDir, `agent-${taskId}.meta.json`)),
+      existsSync(workerMetaPath(convSubagentsDir, taskId)),
       `expected meta under per-conversation leaf ${convSubagentsDir}`
     );
     // 项目层平铺(无 convId)不产生任何文件 —— 项目层无孤儿
@@ -371,7 +375,7 @@ describe("review-fix M5 — def.conversationId 派生 per-conversation 子目录
     await manager.shutdown();
     const flatDir = join(projectSlugDir, "subagents");
     assert.ok(
-      existsSync(join(flatDir, `agent-${taskId}.jsonl`)),
+      existsSync(workerRecordPath(flatDir, taskId)),
       "无 conversationId 时退回项目层平铺"
     );
   });
@@ -388,7 +392,7 @@ describe("review-fix M5 — def.conversationId 派生 per-conversation 子目录
     await flushTwoTicks();
     await manager.shutdown();
     assert.ok(
-      existsSync(join(subagentsDir, `agent-${taskId}.jsonl`)),
+      existsSync(workerRecordPath(subagentsDir, taskId)),
       "subagentsDir 装配形态优先,直接落装配件"
     );
     assert.equal(
@@ -405,7 +409,7 @@ describe("review-fix M5 — def.conversationId 派生 per-conversation 子目录
     await flushTwoTicks();
     await manager.shutdown();
     assert.ok(
-      existsSync(join(subagentsDir, `agent-${taskId}.jsonl`)),
+      existsSync(workerRecordPath(subagentsDir, taskId)),
       "无 conversationId 时退回装配期根"
     );
   });
@@ -417,7 +421,7 @@ describe("review-fix M5 — def.conversationId 派生 per-conversation 子目录
     await flushTwoTicks();
     await manager.shutdown();
     const meta = JSON.parse(
-      readFileSync(join(subagentsDir, `agent-${taskId}.meta.json`), "utf8")
+      readFileSync(workerMetaPath(subagentsDir, taskId), "utf8")
     ) as Record<string, unknown>;
     assert.equal(meta.agentType, "explore");
     // v1 禁嵌套 → manager 侧 spawnDepth 恒写 1 (seam 留给将来嵌套派发)。
@@ -436,7 +440,7 @@ describe("review-fix M5 — def.conversationId 派生 per-conversation 子目录
     await flushTwoTicks();
     await manager.shutdown();
     const meta = JSON.parse(
-      readFileSync(join(subagentsDir, `agent-${taskId}.meta.json`), "utf8")
+      readFileSync(workerMetaPath(subagentsDir, taskId), "utf8")
     ) as Record<string, unknown>;
     assert.equal(meta.spawnDepth, 3);
   });
@@ -460,12 +464,10 @@ describe("T5 spec SC8 acceptance — 项目根顶层不存在 agent-* 目录", (
       `agent-* must not exist at ${projectSlugDir}`
     );
     // 子代理记录落 <convId>/subagents/ 下, 不在项目 slug 同级平铺
-    const subEntries = existsSync(subagentsDir)
-      ? readdirSync(subagentsDir)
-      : [];
+    const listed = listSubagentRecordPaths(subagentsDir);
     assert.ok(
-      subEntries.some((e) => e.startsWith("agent-") && e.endsWith(".jsonl")),
-      `expected agent-*.jsonl in ${subagentsDir}, got ${subEntries.join(",")}`
+      listed.length >= 1,
+      `expected nested agent-*.jsonl under ${subagentsDir}, got ${listed.join(",")}`
     );
   });
 });

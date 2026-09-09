@@ -9,10 +9,7 @@ import {
 } from "../../../src/harness/sandbox/bwrap.js";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.js";
 import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.js";
-import {
-  createResourceLimits,
-  TMP_BYTES,
-} from "../../../src/harness/sandbox/resource-limits.js";
+import { createResourceLimits } from "../../../src/harness/sandbox/resource-limits.js";
 
 /**
  * T3 (plans/closed-world-bash-fence.md) — bwrap argv 闭世界反转。
@@ -21,8 +18,8 @@ import {
  *   系统 ro-bind(/usr /bin /lib /lib64 /etc + 可选 /opt /snap 存在性跳过)
  *   → 读白名单 ro-bind(合同根 + 可选成员)
  *   → 写白名单 bind(tmp + cwd/taskRoot)
- *   → --size + --tmpfs /tmp
- *   → post-tmpfs 重绑(读根 ro 夺回 + cwd 可写夺回,cwd ∈ /tmp 子树时)
+ *   → --bind <pad> /tmp
+ *   → post-/tmp 重绑(读根 ro 夺回 + cwd 可写夺回,cwd ∈ /tmp 子树时)
  *   → --proc /proc → --dev-bind /dev /dev。
  *
  * 反转合同:writable home 打底 token(`--bind home home`)彻底消失;
@@ -115,7 +112,7 @@ function fenceArgv(spec: FenceSpec = {}): readonly string[] {
 }
 
 describe("createBwrapFence — closed-world argv shape (T3)", () => {
-  it("builds system ro-binds → read whitelist → write binds → tmpfs → proc/dev, with no writable home token", () => {
+  it("builds system ro-binds → read whitelist → write binds → pad@/tmp → proc/dev, with no writable home token", () => {
     const argv = fenceArgv({ installRoot: INSTALL });
     assert.equal(argv[0], "bwrap");
     assert.equal(argv[1], "--unshare-user-try");
@@ -182,25 +179,31 @@ describe("createBwrapFence — closed-world argv shape (T3)", () => {
       0,
       "home itself is not a read member either"
     );
-    // 5. tmpfs:恰好一处 --tmpfs /tmp,前有 --size;敏感路径 tmpfs 罩发射
-    //    删除(闭世界下 home 不可见 = 罩失效为无操作)。
-    const tmpfsIndices: number[] = [];
-    for (let i = 0; i + 1 < argv.length; i++) {
-      if (argv[i] === "--tmpfs") tmpfsIndices.push(i);
-    }
-    assert.deepEqual(
-      tmpfsIndices.map((i) => argv[i + 1]),
-      ["/tmp"],
-      "exactly one tmpfs: /tmp; sensitive-path overlays are gone with the writable-home base"
+    // 5. guest /tmp: --bind <pad> /tmp after write binds; no --tmpfs.
+    assert.equal(
+      argv.includes("--tmpfs"),
+      false,
+      "per-invocation tmpfs is retired (ADR-0074)"
     );
-    const tmpfsIdx = tmpfsIndices[0] as number;
-    assert.equal(argv[tmpfsIdx - 2], "--size");
-    assert.equal(argv[tmpfsIdx - 1], String(TMP_BYTES));
-    assert.ok(tmpfsIdx > cwdBindIdx, "tmpfs covers the pre-binds");
+    let guestTmpIdx = -1;
+    for (let i = 0; i + 2 < argv.length; i++) {
+      if (
+        argv[i] === "--bind" &&
+        argv[i + 1] === TMP &&
+        argv[i + 2] === "/tmp"
+      ) {
+        guestTmpIdx = i;
+      }
+    }
+    assert.notEqual(guestTmpIdx, -1, "expected --bind <pad> /tmp");
+    assert.ok(
+      guestTmpIdx > cwdBindIdx,
+      "guest /tmp mount covers the pre-binds"
+    );
     // 6. proc/dev 收尾。
     const procIdx = argv.indexOf("--proc");
     const devIdx = argv.indexOf("--dev-bind");
-    assert.ok(procIdx > tmpfsIdx && devIdx > procIdx);
+    assert.ok(procIdx > guestTmpIdx && devIdx > procIdx);
     // 7. --clearenv 先于全部 --setenv(#225),且在 dev-bind 之后。
     const clearenvIdx = argv.indexOf("--clearenv");
     assert.ok(clearenvIdx > devIdx, "--clearenv follows the mount block");
@@ -230,7 +233,7 @@ describe("createBwrapFence — closed-world argv shape (T3)", () => {
   it("ro-binds optional host prefixes (/opt, /snap) when they exist", () => {
     const argv = fenceArgv();
     const etcIdx = assertTriple(argv, "--ro-bind", "/etc", "system /etc");
-    const sizeIdx = argv.indexOf("--size");
+    const writeIdx = argv.indexOf("--bind");
     for (const prefix of OPTIONAL_HOST_RO_PREFIXES) {
       if (existsSync(prefix)) {
         const idx = assertTriple(
@@ -240,8 +243,8 @@ describe("createBwrapFence — closed-world argv shape (T3)", () => {
           `optional host prefix ${prefix}`
         );
         assert.ok(
-          etcIdx < idx && idx < sizeIdx,
-          `${prefix} belongs in the system block (after /etc, before --size)`
+          etcIdx < idx && idx < writeIdx,
+          `${prefix} belongs in the system block (after /etc, before write binds)`
         );
       } else {
         assert.equal(
@@ -315,8 +318,11 @@ describe("createBwrapFence — cwdReadonly (closed world, #562 T5 semantics reta
       `exactly one ro cwd bind; argv=${JSON.stringify(argv)}`
     );
     const roIdx = roIndices[0] as number;
-    const tmpfsIdx = argv.indexOf("--tmpfs");
-    assert.ok(roIdx < tmpfsIdx, "ro cwd bind precedes --tmpfs");
+    let guestTmpIdx = -1;
+    for (let i = 0; i + 2 < argv.length; i++) {
+      if (argv[i] === "--bind" && argv[i + 2] === "/tmp") guestTmpIdx = i;
+    }
+    assert.ok(roIdx < guestTmpIdx, "ro cwd bind precedes guest /tmp mount");
     const etcIdx = assertTriple(argv, "--ro-bind", "/etc", "system /etc");
     assert.ok(etcIdx < roIdx, "cwd ro-bind follows the system block");
     // 唯一的可写 bind 是 tmp 写通道;不存在可写 home/祖先罩住 ro cwd。

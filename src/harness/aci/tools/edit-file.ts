@@ -19,10 +19,13 @@ import type { AciToolDef } from "../types.js";
 import { ToolExecutionError } from "../../errors.js";
 import {
   asToolExecutionError,
+  FENCE_WRITE_GUIDANCE,
   lintPatch,
   resolveWithinRoot,
 } from "./helpers.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
+import type { ToolExecutionContext } from "../../tools/types.js";
+import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
 
 const TOOL_NAME = "edit_file";
 
@@ -32,6 +35,8 @@ const TOOL_NAME = "edit_file";
  */
 export interface EditFileOpts {
   readonly onEdit?: (file: string) => void;
+  readonly tmpDir?: string;
+  readonly projectDir?: string;
 }
 
 const ALLOWED_KEYS = new Set(["path", "old_str", "new_str", "replace_all"]);
@@ -131,11 +136,21 @@ export function createEditFileTool(
   root: string | LiveTaskRoot,
   opts?: EditFileOpts
 ): AciToolDef {
-  const handler = async (input: unknown): Promise<unknown> => {
+  const handler = async (
+    input: unknown,
+    ctx?: ToolExecutionContext
+  ): Promise<unknown> => {
     const validated = asEditFileInput(input);
     // T5 D2: per-call snapshot. resolve 与写入必须共用同一个根值。
     const rootAtCall = readRoot(root);
-    const absPath = await resolveWithinRoot(rootAtCall, validated.path);
+    const tmpWriteRoot = resolveSessionFenceTmp({
+      tmpDir: opts?.tmpDir,
+      projectDir: opts?.projectDir,
+      conversationId: ctx?.conversationId,
+    });
+    const absPath = await resolveWithinRoot(rootAtCall, validated.path, {
+      tmpWriteRoot,
+    });
 
     let content: string;
     try {
@@ -182,7 +197,8 @@ export function createEditFileTool(
   return Object.freeze({
     name: TOOL_NAME,
     description:
-      "Apply a surgical in-place edit to an existing file when you have the exact `old_str` to anchor on; pair with read_file to confirm current contents before editing. Replaces old_str with new_str via split-join (no regex semantics — `$`/`&` literals pass through unchanged); lint(new_str) rejects unbalanced patches before any write. Default replace_all=false — the file must contain old_str exactly once; set replace_all=true to replace every occurrence.",
+      "Apply a surgical in-place edit to an existing file when you have the exact `old_str` to anchor on; pair with read_file to confirm current contents before editing. Replaces old_str with new_str via split-join (no regex semantics — `$`/`&` literals pass through unchanged); lint(new_str) rejects unbalanced patches before any write. Default replace_all=false — the file must contain old_str exactly once; set replace_all=true to replace every occurrence. " +
+      FENCE_WRITE_GUIDANCE,
     inputSchema: {
       type: "object",
       properties: {

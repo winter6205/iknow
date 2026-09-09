@@ -168,4 +168,22 @@ describe("subagent observability floor: PARENT_SCHEMA 收 stop_reason", () => {
     assert.equal(parsed.stop_reason, "completed");
     assert.deepEqual(parsed.fileRefs, ["a.ts"]);
   });
+
+  it("SC4: 带 task_id + tmp_root 的成功信封仍通过 parse（无 product_roster）", () => {
+    const parsed = parseParentEnvelope(
+      JSON.stringify({
+        status: "ok",
+        summary: "s",
+        result: "r",
+        stop_reason: "completed",
+        task_id: "tid-obs",
+        tmp_root: "/pad/fence-tmp",
+      })
+    );
+    assert.equal(parsed.task_id, "tid-obs");
+    assert.equal(parsed.tmp_root, "/pad/fence-tmp");
+    assert.ok(
+      parsed.product_roster === undefined || parsed.product_roster.length === 0
+    );
+  });
 });

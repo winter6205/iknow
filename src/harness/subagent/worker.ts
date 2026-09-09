@@ -25,6 +25,7 @@
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import { workerFenceTmpBesideRecord } from "../sandbox/fence-tmp.js";
 import Anthropic from "@anthropic-ai/sdk";
 import { loadIknowEnv, type IknowEnv } from "../../config/env.js";
 import { loadIknowSettings } from "../../config/settings.js";
@@ -270,6 +271,26 @@ export interface CreateWorkerDepsOptions {
    * traceFilePath 缺席时本字段被忽略(legacy IKNOW_TRACE_OUT 退路)。
    */
   readonly taskId?: string;
+  /**
+   * T3: explicit worker fence `/tmp` pad. Absent + `traceFilePath` present →
+   * `<dirname(traceFilePath)>/fence-tmp` (nested `subagents/<taskId>/`).
+   */
+  readonly tmpDir?: string;
+}
+
+function resolveWorkerFenceTmp(
+  opts: Pick<CreateWorkerDepsOptions, "tmpDir" | "traceFilePath">
+): string | undefined {
+  if (opts.tmpDir !== undefined && opts.tmpDir.trim().length > 0) {
+    return opts.tmpDir;
+  }
+  if (
+    opts.traceFilePath !== undefined &&
+    opts.traceFilePath.trim().length > 0
+  ) {
+    return workerFenceTmpBesideRecord(opts.traceFilePath);
+  }
+  return undefined;
 }
 
 /**
@@ -402,6 +423,7 @@ export async function createWorkerRuntime(
   };
   const lspNotifier = createLspNotifier(lspCtx);
   startLspWarmup(lspCtx);
+  const workerFenceTmp = resolveWorkerFenceTmp(opts);
   const reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
@@ -429,6 +451,7 @@ export async function createWorkerRuntime(
       ? { projectIdentityRoot: identityFenceRoot }
       : {}),
     ...(bashMode !== undefined ? { bashMode } : {}),
+    ...(workerFenceTmp !== undefined ? { tmpDir: workerFenceTmp } : {}),
   });
 
   const baseExecutor = createExecutor(reg.inner);

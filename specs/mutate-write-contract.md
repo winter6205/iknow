@@ -1,6 +1,8 @@
 # Spec: 可写合同与 hard-wall 层退休
 
 > 假设门：2026-09-08 操作员确认方案 A（层退休，不是放宽换行补丁）。本文件只覆盖 **本 session 要修的闸与写根合同**。范围外方向见文末「后续」与 [#946](https://github.com/winter6205/iknow/issues/946)。
+>
+> **Amendment 2026-09-09**：SC4「`write_file` 指向 `/tmp` 仍拒绝」由 `specs/parent-visible-tmp.md` **superseded**。`/tmp` 仍不是交付落点；写工具可写当前身份垫底。耐久交付仍只认 `taskRoot`。
 
 ## Glossary（exact copy from docs/CONTEXT.md）
 

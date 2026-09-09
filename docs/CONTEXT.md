@@ -257,6 +257,9 @@ _Avoid_: 把后台当成逃出 bwrap；与 #440 bash 产品面混名；与 spawn
 **闭世界围栏（closed-world fence）**: bash 围栏的默认姿态——deny-by-default:home 下非白名单不可见，可写集 = taskRoot + /tmp，其余按 ADR-0037 §9.2 读白名单按需 ro-bind；白名单 miss 分配置故障（spawn 前 typed fail-loud）与工具链断链（运行时可观察）两型。OFF 档同样生效（全档位反转）。
 _Avoid_: writable home 打底 + 黑名单补罩（已反转的旧形态）；identity 只读 overlay（§9 已 superseded，身份根改为读白名单恒进成员）
 
+**围栏 /tmp 垫底**: 每个身份（主会话或一个 worker）在会话文件夹里的宿主目录，bind 成该身份围栏的 `/tmp`；寿命跟会话文件夹；不是交付落点。ADR-0074。
+_Avoid_: 系统 /tmp；一次 bash 一块空 tmpfs；把垫底当仓库；给「按 id 读」另起产品名
+
 **hard-wall**: spawn 前意图过滤器——拦围栏看不见或拦不住的命令意图（毁灭性 rm、命令替换、敏感路径、fork-bomb），不可被 session grant 覆盖。不是第二套沙箱；换行只作分段符。耐久写只问 `taskRoot`。ADR-0068。
 _Avoid_: 把硬墙当沙箱；用换行/`format` 子串当危险；引导把交付物写到 bash `/tmp` tmpfs
 
@@ -293,8 +296,8 @@ _Avoid_: 把 drain 与"结果获取"混同（前景 spawn 不经 drain）；让 
 **mailbox**: 后景 spawn 的子→父终态回传通道。只投终态浓缩结果，不承载运行中消息，也不是子↔子协议。
 _Avoid_: 进度流；swarm / 子代理互投；把 mailbox 当 D-δ 低层 messaging
 
-**父可见信封**: 子代理交差给父模型看的那一层——短摘要、改过的路径、成败与停因；不是终稿全文，也不是磁盘上的代码。
-_Avoid_: 把完整 result 当任务产物；把汇报截断当成任务失败
+**父可见信封**: 子代理交差给父模型看的那一层——短摘要、改过的路径、成败与停因、`task_id` 与该 worker 的 `/tmp` 根；不是终稿全文，也不是垫底里的文件正文。
+_Avoid_: 把完整 result 当任务产物；把汇报截断当成任务失败；默认交差附带产物名单
 
 **子代理并发上限**: 同时处于 starting/running 的 worker 硬顶，可配、默认 15；发几张由模型决定，超限立即失败、不排队。
 _Avoid_: 静默排队；让用户每次填写要派几个
@@ -512,7 +515,8 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **run_graph vs spawn_subagent**: 有依赖的多节点走 `run_graph`；单次派活仍 `spawn_subagent`。图节点内部仍是前景 spawn，不经父代理再调 spawn 工具
 - **run_graph vs 图内绕回**: 绕回仍走同一把 `run_graph`；阶段差在 host 认不认标明的回边，不在工具名（ADR-0061）
 - **run_graph vs 后景 spawn**: 图没有 `wait:false`；跑图时父代理不能并行干别的，最多主进程静默等 settle（ADR-0065）
-- **父可见信封 vs 磁盘产物**: 父读摘要和路径；写文件以工作区为准，不靠把全文塞进 tool_result
+- **父可见信封 vs 磁盘产物**: 父读摘要、`task_id` 与 `/tmp` 根；仓库文件以工作区为准；垫底正文按 id 去读，不靠把全文塞进 tool_result
+- **围栏 /tmp 垫底 vs taskRoot**: 垫底是当前身份的 `/tmp`，不是交付；要留下的写 `taskRoot`，不自动从垫底拷进仓库
 - **子代理并发上限 vs 派发张数**: 上限是帽子；张数由模型按任务拆，说明书写独立才并行
 - **说明书静态层 vs memory_layer 整段开关**: 通用 worker 要说明书、不要记忆工具；禁止再靠 memoryEnabled=false 把 AGENTS.md 一起跳过
 - **状态栏 vs 任务摘录**: 摘录只在 compact 时贴用户原话；状态栏每轮由代码现算并追加

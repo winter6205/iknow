@@ -35,6 +35,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { workerStderrPath } from "../../src/harness/sandbox/fence-tmp.ts";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
 import {
   clearActiveExtraSecrets,
@@ -186,14 +187,14 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
         assert.match(q.summary, /boom-diagnostic/);
         assert.doesNotMatch(q.summary, new RegExp(secret));
       }
-      const stderrPath = join(subagentsDir, "stderr", `${taskId}.log`);
+      const stderrPath = workerStderrPath(subagentsDir, taskId);
       assert.equal(existsSync(stderrPath), true);
       const stderrLog = readFileSync(stderrPath, "utf8");
       assert.match(stderrLog, /boom-diagnostic/);
       assert.doesNotMatch(stderrLog, new RegExp(secret));
       await new Promise((resolve) => setImmediate(resolve));
       const records = readFileSync(
-        join(subagentsDir, `agent-${taskId}.jsonl`),
+        join(subagentsDir, taskId, `agent-${taskId}.jsonl`),
         "utf8"
       )
         .trim()
@@ -238,32 +239,22 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
       const second = mgr.spawn({});
       await Promise.all(children.map(waitExit));
       for (let attempt = 0; attempt < 100; attempt++) {
-        const firstPath = join(diagnosticsDir, "stderr", `${first.taskId}.log`);
-        const secondPath = join(
-          diagnosticsDir,
-          "stderr",
-          `${second.taskId}.log`
-        );
+        const firstPath = workerStderrPath(diagnosticsDir, first.taskId);
+        const secondPath = workerStderrPath(diagnosticsDir, second.taskId);
         if (existsSync(firstPath) && existsSync(secondPath)) break;
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
 
       for (const taskId of [first.taskId, second.taskId]) {
-        const path = join(diagnosticsDir, "stderr", `${taskId}.log`);
+        const path = workerStderrPath(diagnosticsDir, taskId);
         assert.equal(existsSync(path), true, `missing diagnostics log ${path}`);
         assert.ok(statSync(path).size <= 1024 * 1024);
         assert.match(readFileSync(path, "utf8"), new RegExp(taskId));
       }
       assert.notEqual(first.taskId, second.taskId);
       assert.notEqual(
-        readFileSync(
-          join(diagnosticsDir, "stderr", `${first.taskId}.log`),
-          "utf8"
-        ),
-        readFileSync(
-          join(diagnosticsDir, "stderr", `${second.taskId}.log`),
-          "utf8"
-        )
+        readFileSync(workerStderrPath(diagnosticsDir, first.taskId), "utf8"),
+        readFileSync(workerStderrPath(diagnosticsDir, second.taskId), "utf8")
       );
       await mgr.shutdown();
     } finally {

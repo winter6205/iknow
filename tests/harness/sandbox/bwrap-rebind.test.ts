@@ -60,16 +60,17 @@ function fenceArgs(spec: RebindSpec): readonly string[] {
   }).argv;
 }
 
-function tmpfsIdx(argv: readonly string[]): number {
-  const idx = argv.findIndex(
-    (arg, i) => arg === "--tmpfs" && argv[i + 1] === "/tmp"
-  );
-  assert.notEqual(idx, -1, "expected `--tmpfs /tmp` in argv");
+function guestTmpMountIdx(argv: readonly string[]): number {
+  let idx = -1;
+  for (let i = 0; i + 2 < argv.length; i++) {
+    if (argv[i] === "--bind" && argv[i + 2] === "/tmp") idx = i;
+  }
+  assert.notEqual(idx, -1, "expected `--bind <pad> /tmp` in argv");
   return idx;
 }
 
 function postTmpfs(argv: readonly string[]): readonly string[] {
-  return argv.slice(tmpfsIdx(argv) + 2);
+  return argv.slice(guestTmpMountIdx(argv) + 3);
 }
 
 /** `verb <target> <target>` 三元组位置(在给定切片内)。 */

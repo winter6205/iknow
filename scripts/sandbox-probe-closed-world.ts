@@ -155,8 +155,10 @@ export function buildClosedWorldBaseArgs(opts: {
   readonly tmpSize: number;
   readonly existingOptionalPrefixes: readonly string[];
 }): string[] {
-  const { cwd, tmpDir, tmpSize, existingOptionalPrefixes } = opts;
-  const cwdRebind = isTmpDescendant(cwd, tmpDir) ? ["--bind", cwd, cwd] : [];
+  const { cwd, tmpDir, existingOptionalPrefixes } = opts;
+  void opts.tmpSize;
+  const guestTmp = "/tmp";
+  const cwdRebind = isTmpDescendant(cwd, guestTmp) ? ["--bind", cwd, cwd] : [];
   return [
     "--unshare-user-try",
     "--unshare-net",
@@ -167,12 +169,14 @@ export function buildClosedWorldBaseArgs(opts: {
     ...READ_ONLY_SYSTEM_PATHS.flatMap((p) => ["--ro-bind", p, p]),
     ...existingOptionalPrefixes.flatMap((p) => ["--ro-bind", p, p]),
     "--bind",
+    tmpDir,
+    tmpDir,
+    "--bind",
     cwd,
     cwd,
-    "--size",
-    String(tmpSize),
-    "--tmpfs",
-    "/tmp",
+    "--bind",
+    tmpDir,
+    guestTmp,
     ...cwdRebind,
     "--proc",
     "/proc",

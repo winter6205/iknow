@@ -149,6 +149,8 @@ export interface BackgroundSpawnRequest {
    *  writable home」语义)。前台与后台共用同一 token(bash.ts 从工厂期捕获
    *  的同一选项透传);缺席 = 装配层未提供(isolation OFF),fs-policy 可选。 */
   readonly projectIdentityRoot?: string;
+  /** T1 (ADR-0074): same main-session pad the foreground bash bind-mounts at `/tmp`. */
+  readonly tmpDir?: string;
 }
 
 export type BackgroundSpawnResult =
@@ -255,7 +257,7 @@ export async function defaultBackgroundSpawn(
   const fsPolicy = createClosedWorldFsPolicy({
     cwd,
     home,
-    tmpDir: tmpdir(),
+    tmpDir: req.tmpDir ?? tmpdir(),
     ...(req.workspaceRoot ? { workspaceRoot: req.workspaceRoot } : {}),
     ...(req.installRoot !== undefined ? { installRoot: req.installRoot } : {}),
     ...(req.projectIdentityRoot !== undefined
@@ -265,10 +267,13 @@ export async function defaultBackgroundSpawn(
   const resources = createResourceLimits();
   const network = createNetworkPolicy();
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
-  const fenceEnv = applyCwdReadonlyFenceEnv(
-    envIsolation.filter(req.env ?? process.env),
-    req.cwdReadonly === true
-  );
+  const fenceEnv = {
+    ...applyCwdReadonlyFenceEnv(
+      envIsolation.filter(req.env ?? process.env),
+      req.cwdReadonly === true
+    ),
+    TMPDIR: "/tmp",
+  };
   const fence = createBwrapFence({
     command: "bash",
     args: ["-c", req.command],

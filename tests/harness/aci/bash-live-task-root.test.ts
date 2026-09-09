@@ -302,9 +302,12 @@ describe("bash T7: argv SHAPE+ORDER invariant under root rebind", () => {
       command: "echo tmp",
       background: true,
     });
-    const tmpfsIdx = argv.indexOf("--tmpfs");
-    assert.notEqual(tmpfsIdx, -1);
-    const postTmpfs = argv.slice(tmpfsIdx + 2);
+    let guestTmpIdx = -1;
+    for (let i = 0; i + 2 < argv.length; i++) {
+      if (argv[i] === "--bind" && argv[i + 2] === "/tmp") guestTmpIdx = i;
+    }
+    assert.notEqual(guestTmpIdx, -1);
+    const postTmpfs = argv.slice(guestTmpIdx + 3);
     // post-tmpfs must contain a `--bind <cwd> <cwd>` triple (the rebind).
     const rebindTripleIdx = postTmpfs.findIndex(
       (arg, i) =>

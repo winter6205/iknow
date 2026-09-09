@@ -14,7 +14,8 @@
 ### 运行时核心
 
 - `security-guardrails.md` — 安全护栏（权限三层 · 沙箱 · 中断/超时）
-- `mutate-write-contract.md` — 可写合同与 hard-wall 层退休（ADR-0068；耐久写 = `taskRoot`；plan: `plans/mutate-write-contract.md`）
+- `mutate-write-contract.md` — 可写合同与 hard-wall 层退休（ADR-0068；耐久写 = `taskRoot`；plan: `plans/mutate-write-contract.md`）；`write_file` 拒 `/tmp` 的 SC4 **amended by** `parent-visible-tmp.md`
+- `parent-visible-tmp.md` — 围栏 `/tmp` 每身份宿主垫底、跟会话同寿命；交差带 `task_id` 与 `/tmp` 根；`subagent_result` 按 id 列/读（ADR-0074；plan: `plans/parent-visible-tmp.md`）
 - `trace-service.md` — trace 观测（JSONL + 查询 API · A-scope）；落盘锚点与 messages 存储形态 **amended by** ADR-0071（归档 spec `docs/archive/025-retire-completed-specs-and-plans/specs/session-folder-consolidation.md`）
 - `query-trace-tool-results.md` — `query_trace` 从 llm_call.messages 投影 tool_result（不写 tool_call.result）；plan: `plans/query-trace-tool-results.md`
 - `trace-mcp-server.md` — stdio MCP server 暴露 trace 读侧三面（外部编码 agent 第三条读侧动线；#803）；v1.0 单工具 `query_trace`（plan: `plans/trace-mcp-server.md`）→ v1.1 按轴拆为 `list_sessions` / `query_trace` / `get_record`（plan: `plans/trace-mcp-read-side-split.md`）；承接 `query-trace-tool-results` 对 MCP 的 Out of scope；三工具寻址走 `~/.iknow/projects/<slug>/<conversationId>/` 两级树 + `query_trace` content 解引用 **amended by** ADR-0071（归档 spec `session-folder-consolidation.md`）

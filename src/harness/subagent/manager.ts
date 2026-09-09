@@ -12,6 +12,8 @@ import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import {
+  attachParentVisibleTmp,
+  shouldAttachProductRoster,
   parseParentEnvelope,
   truncateEnvelopeResult,
   SUMMARY_LIMIT,
@@ -35,6 +37,16 @@ import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
 import { writeSituation } from "../isolation/write-situation.js";
 import { sanitizeConversationSegment } from "../session-roots.js";
 import { SUBAGENT_TRACE_DIR_NAME } from "../../shared/session-tree-names.js";
+import {
+  ensureWorkerSessionLayout,
+  workerFenceTmpPath,
+  workerMetaPath,
+  workerStderrPath,
+} from "../sandbox/fence-tmp.js";
+import { inspectWorkerPad, listPadTopLevelNames } from "./pad-inspect.js";
+import type { PadQueryResult } from "./pad-inspect.js";
+
+export type { PadQueryResult } from "./pad-inspect.js";
 
 // re-export: manager 的调用方(T4/T5 工具、host-drain)统一从 manager 侧拿
 // SubAgentDefinition,不必各自 import role.js。
@@ -77,6 +89,12 @@ export interface SubAgentManager {
   readonly spawn: (def: SubAgentDefinition) => { readonly taskId: string };
   /** 同步非阻塞四态查询(SC5)。 */
   readonly queryBuffer: (taskId: string) => QueryBufferResult;
+  /**
+   * T5: sync list/read of this worker's fence-tmp pad. Unknown id →
+   * `not_found` (same discriminant as queryBuffer). Optional on the
+   * interface so poll-only fakes stay structural.
+   */
+  readonly queryPad?: (taskId: string, tmpPath?: string) => PadQueryResult;
   /**
    * #361 C3: 第三参 `signal?: AbortSignal` —— caller abort → reject
    * SubAgentAbortError(与 SubAgentWaitTimeoutError 类型区分)。首查终态路径
@@ -268,6 +286,8 @@ interface Task {
   endedAt?: string;
   /** exit/error share one bounded stderr-drain continuation. */
   crashInFlight: boolean;
+  /** Host path of this worker's fence `/tmp` pad when session layout exists. */
+  padRoot?: string;
 }
 
 const WAIT_POLL_MS = 25;
@@ -306,17 +326,11 @@ function persistStderrDiagnostics(opts: {
   readonly stderr: Buffer;
   readonly mask: ReturnType<typeof createOutputMask>;
 }): { readonly path: string; readonly bytes: number } | undefined {
-  const path = join(
-    resolve(opts.diagnosticsDir),
-    "stderr",
-    `${opts.taskId}.log`
-  );
+  const path = workerStderrPath(resolve(opts.diagnosticsDir), opts.taskId);
   const masked = opts.mask.mask(opts.stderr.toString("utf8"));
   const content = Buffer.from(masked).slice(-MAX_STDERR_DIAGNOSTICS_BYTES);
   try {
-    mkdirSync(join(resolve(opts.diagnosticsDir), "stderr"), {
-      recursive: true,
-    });
+    mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, content);
     return { path, bytes: content.byteLength };
   } catch (err) {
@@ -393,7 +407,8 @@ export function createSubAgentManager(opts: {
   readonly trace?: TraceService;
   /**
    * Crash diagnostics root. When present, stderr is masked and persisted at
-   * `<diagnosticsDir>/stderr/<taskId>.log` with a 1 MiB cap.
+   * `<diagnosticsDir>/<taskId>/stderr.log` (same dir as record + pad) with a
+   * 1 MiB cap. Leftover `<diagnosticsDir>/stderr/<taskId>.log` is not migrated.
    */
   readonly diagnosticsDir?: string;
   /**
@@ -499,7 +514,7 @@ export function createSubAgentManager(opts: {
     if (cached !== undefined) return cached.trace;
     const subagentsDir = resolveSubagentsDirForDef(def);
     if (subagentsDir === undefined) return noopTrace;
-    const filePath = join(subagentsDir, `agent-${taskId}.jsonl`);
+    const filePath = ensureWorkerSessionLayout(subagentsDir, taskId).recordPath;
     mkdirSync(dirname(filePath), { recursive: true });
     const traceInstance = traceFactory(filePath, taskId);
     perAgentTraces.set(taskId, { trace: traceInstance, filePath });
@@ -530,6 +545,19 @@ export function createSubAgentManager(opts: {
     }
     return join(opts.projectDir, SUBAGENT_TRACE_DIR_NAME);
   }
+
+  function locateEnvelope(task: Task, env: SubAgentEnvelope): SubAgentEnvelope {
+    if (task.padRoot === undefined) return env;
+    const located = attachParentVisibleTmp(env, {
+      task_id: task.id,
+      tmp_root: task.padRoot,
+    });
+    if (!shouldAttachProductRoster(located)) return located;
+    return {
+      ...located,
+      product_roster: listPadTopLevelNames(task.padRoot),
+    };
+  }
   /**
    * SC8: per-task `.meta.json` 一次性写盘 —— 至少含
    * `{agentType, toolUseId, spawnDepth}`,Postel 缺席字段省略。
@@ -546,7 +574,8 @@ export function createSubAgentManager(opts: {
   function writeMetaOnce(taskId: string, def: SubAgentDefinition): void {
     const subagentsDir = resolveSubagentsDirForDef(def);
     if (subagentsDir === undefined) return;
-    const metaPath = join(subagentsDir, `agent-${taskId}.meta.json`);
+    const metaPath = workerMetaPath(subagentsDir, taskId);
+    ensureWorkerSessionLayout(subagentsDir, taskId);
     if (existsSync(metaPath)) return;
     const meta: Record<string, unknown> = {};
     if (typeof def.role === "string" && def.role.length > 0) {
@@ -672,6 +701,9 @@ export function createSubAgentManager(opts: {
         ...(envelope.totalLength !== undefined
           ? { totalLength: envelope.totalLength }
           : {}),
+        ...(envelope.tmp_root !== undefined
+          ? { tmp_root: envelope.tmp_root }
+          : {}),
       });
     }
     const endedAt = new Date().toISOString();
@@ -727,12 +759,12 @@ export function createSubAgentManager(opts: {
     if (task.stoppedEmitted) return;
     const summary = mask.mask(opts2.summary());
     const error: TraceError = { type: "unknown", message: summary };
-    task.envelope = {
+    task.envelope = locateEnvelope(task, {
       status: "failed",
       reason: "crashed",
       summary,
       result: "",
-    };
+    });
     emitStateChange(task, "failed", {
       reason: "crashed",
       error,
@@ -805,6 +837,10 @@ export function createSubAgentManager(opts: {
       stoppedEmitted: false,
       crashInFlight: false,
     };
+    const layoutDir = resolveSubagentsDirForDef(def);
+    if (layoutDir !== undefined) {
+      task.padRoot = workerFenceTmpPath(layoutDir, id);
+    }
     tasks.set(id, task);
 
     let child: ChildProcess;
@@ -816,12 +852,12 @@ export function createSubAgentManager(opts: {
       child = opts.spawn(def, id, payload);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      task.envelope = {
+      task.envelope = locateEnvelope(task, {
         status: "failed",
         reason: "crashed",
         summary: `subagent spawn failed: ${errMsg}`,
         result: "",
-      };
+      });
       // #358 T4: spawn 仍落 subagent_spawn (失败路径也记录尝试);
       // 紧接 emitStateChange(failed) + emitStop (single-emit lifecycle)。
       // T5: trace per taskId (per-agent 形态);subagentsDir 缺席走
@@ -912,12 +948,12 @@ export function createSubAgentManager(opts: {
         // 不被 generic "timeout after <n>ms" 覆盖 (emitStateChange/emitStop
         // 已先发不可逆;timedOut 由 exit handler 的 guard 保 reason=timeout)。
         // SIGKILL 兜底只对忽略 SIGTERM 的 worker 生效 (armKillFallback)。
-        task.envelope = {
+        task.envelope = locateEnvelope(task, {
           status: "failed",
           reason: "timeout",
           summary: `timeout after ${effectiveTimeoutMs}ms`,
           result: "",
-        };
+        });
         emitStateChange(task, "failed", { reason: "timeout" });
         emitStop(task, "failed", {
           reason: "timeout",
@@ -957,7 +993,10 @@ export function createSubAgentManager(opts: {
         stdoutBuf = stdoutBuf.slice(idx + 1);
         if (line.trim().length === 0) continue;
         try {
-          const env = truncateEnvelopeResult(parseParentEnvelope(line));
+          const env = locateEnvelope(
+            task,
+            truncateEnvelopeResult(parseParentEnvelope(line))
+          );
           task.envelope = env;
           // #358 T4: state migration + stop event (single-emit 在 emitStop 内由
           // stoppedEmitted flag 守门,后续 exit/error 路径重复触发 no-op)。
@@ -986,12 +1025,12 @@ export function createSubAgentManager(opts: {
         } catch (err) {
           // SC13:信封校验失败 = 协议错误。
           const errMsg = err instanceof Error ? err.message : String(err);
-          task.envelope = {
+          task.envelope = locateEnvelope(task, {
             status: "failed",
             reason: "protocolError",
             summary: `subagent envelope protocol error: ${errMsg}`,
             result: "",
-          };
+          });
           emitStateChange(task, "failed", { reason: "protocolError" });
           emitStop(task, "failed", {
             reason: "protocolError",
@@ -1054,12 +1093,12 @@ export function createSubAgentManager(opts: {
         task.envelope === undefined
       ) {
         const summary = "worker exited cleanly without envelope";
-        task.envelope = {
+        task.envelope = locateEnvelope(task, {
           status: "failed",
           reason: "protocolError",
           summary,
           result: "",
-        };
+        });
         emitStateChange(task, "failed", { reason: "protocolError" });
         emitStop(task, "failed", {
           reason: "protocolError",
@@ -1233,10 +1272,10 @@ export function createSubAgentManager(opts: {
       ...(resolveSubagentsDirForDef(def) !== undefined
         ? {
             taskId,
-            traceFilePath: join(
+            traceFilePath: ensureWorkerSessionLayout(
               resolveSubagentsDirForDef(def) as string,
-              `agent-${taskId}.jsonl`
-            ),
+              taskId
+            ).recordPath,
           }
         : {}),
     };
@@ -1261,6 +1300,12 @@ export function createSubAgentManager(opts: {
       reason: "crashed",
       summary: "subagent failed without envelope",
     };
+  }
+
+  function queryPad(taskId: string, tmpPath?: string): PadQueryResult {
+    const task = tasks.get(taskId);
+    if (!task) return { status: "not_found" };
+    return inspectWorkerPad(task.padRoot, tmpPath);
   }
 
   function waitFor(
@@ -1530,6 +1575,7 @@ export function createSubAgentManager(opts: {
   return Object.freeze({
     spawn,
     queryBuffer,
+    queryPad,
     waitFor,
     shutdown,
     drainCompleted,

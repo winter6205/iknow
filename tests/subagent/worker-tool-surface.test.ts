@@ -599,3 +599,46 @@ async function buildWorkerWithFullSkillCatalog(): Promise<LoopEngineDeps> {
   };
   return createWorkerDeps(opts);
 }
+
+/**
+ * T8 (plans/parent-visible-tmp.md) — bash + 写工具 description：进项目写
+ * taskRoot；不必进仓写 `/tmp`。写根段仍只说交付根（见 envelope-write-situation）。
+ */
+describe("T8 parent-visible-tmp — bash / write-tool descriptions", () => {
+  it("bash, write_file, and edit_file say write into the project at taskRoot; write /tmp when it need not enter the repo", async () => {
+    const deps = await createWorkerDeps(hermeticOpts());
+    const names = ["bash", "write_file", "edit_file"] as const;
+    for (const name of names) {
+      const tool = deps.registry.list().find((t) => t.name === name);
+      assert.ok(tool, `worker surface missing ${name}`);
+      assert.match(
+        tool.description,
+        /write into the project at taskRoot/i,
+        `${name} description must name taskRoot as the project write`
+      );
+      assert.match(
+        tool.description,
+        /write \/tmp when it need not enter the repo/i,
+        `${name} description must name /tmp for files that need not enter the repo`
+      );
+    }
+  });
+
+  it("symbol mutate tools do not carry fence-write /tmp guidance", async () => {
+    const deps = await createWorkerDeps(hermeticOpts());
+    for (const name of SYMBOL_MUTATE_TOOL_NAMES) {
+      const tool = deps.registry.list().find((t) => t.name === name);
+      assert.ok(tool, `worker surface missing ${name}`);
+      assert.doesNotMatch(
+        tool.description,
+        /write into the project at taskRoot/i,
+        `${name} must not reuse bash/write_file fence-write guidance`
+      );
+      assert.doesNotMatch(
+        tool.description,
+        /write \/tmp when it need not enter the repo/i,
+        `${name} must not tell the model to write /tmp`
+      );
+    }
+  });
+});
