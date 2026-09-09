@@ -77,6 +77,11 @@ describe("createPermissionPolicy", () => {
       (r) => r.id === "code-ask-bash-network"
     )!;
     assert.equal(bashNet.decision, "ask");
+    // #951:reason 与 ask hint 口径一致 —— 必须含 network-guard 绕过事实
+    assert.ok(
+      bashNet.reason.includes("不经 network-guard"),
+      `reason must disclose network-guard bypass: ${bashNet.reason}`
+    );
     assert.ok(
       bashNet.match({ tool: "bash", input: { command: "x", network: true } }),
       "network:true bash matches"

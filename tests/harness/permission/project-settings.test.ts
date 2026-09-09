@@ -75,6 +75,261 @@ decision = "deny"
 reason = "explicit deny: read_file under .ssh"
 `;
 
+/**
+ * #952 — network_equals 谓词（资格门禁，不是安全边界）。
+ *
+ * 不变式（SSOT = policy.ts isBashNetworkInput 的严格 === true 语义）：
+ *  - 命中 ⇔ tool === "bash"（由 match_tool gate 承担）且 input.network 严格
+ *    === true。非布尔 "true" / 缺省 / false / 非 bash 工具同名字段都不命中。
+ *  - 工具名 gate 的 wrinkle：matchPredicate 收不到 tool 名，但 buildRuleMatcher
+ *    在谓词匹配前已检查 `ctx.tool === toolName`（project-settings.ts:149），
+ *    因此对 match_tool = "bash" 的规则，进入 matchPredicate 的 inputObj
+ *    必然来自 bash 调用 —— 此处做 `isBashNetworkInput(inputObj)` shape
+ *    check 与 isBashNetworkTrue(tool, input) 等价；非 bash 工具的同名字段
+ *    在 buildRuleMatcher 就已短路为 false。
+ *  - 定位诚实性：这是「模型有没有资格提这个请求」的资格门禁，不是 SSRF
+ *    防线 —— 规则未命中（或批准后）的出站内容仍零过滤；未设规则时默认
+ *    行为不变，仍走 code-ask-bash-network 的 ask。
+ *  - fail-loud：ajv schema 把 network_equals 钉死为 boolean const true，
+ *    TOML 里写成字符串 "true" 在 load 时即抛错并带 JSON path，而不是
+ *    落地成一条永不命中的静默死规则。
+ */
+describe("network_equals predicate (#952)", () => {
+  const NETWORK_TOML = `schema_version = 1
+
+[[rule]]
+id = "deny-bash-host-network"
+match_tool = "bash"
+match_input = { network_equals = true }
+decision = "deny"
+reason = "explicit deny: bash host-network opt-in"
+`;
+
+  function loadNetworkRule(dir: string) {
+    const path = writeToml(dir, "permissions.toml", NETWORK_TOML);
+    const src = loadProjectSettings({ filePath: path });
+    assert.ok(src);
+    assert.equal(src.rules.length, 1);
+    return src.rules[0]!;
+  }
+
+  it("network_equals = true matches {command, network: true} on bash", () => {
+    const dir = scratchDir();
+    try {
+      const rule = loadNetworkRule(dir);
+      assert.equal(
+        rule.match({
+          tool: "bash",
+          input: { command: "curl https://example.com", network: true },
+        }),
+        true
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not match network: false / missing / string 'true' (strict === true)", () => {
+    const dir = scratchDir();
+    try {
+      const rule = loadNetworkRule(dir);
+      assert.equal(
+        rule.match({
+          tool: "bash",
+          input: { command: "curl https://example.com", network: false },
+        }),
+        false
+      );
+      assert.equal(
+        rule.match({ tool: "bash", input: { command: "curl" } }),
+        false
+      );
+      // isBashNetworkInput SSOT 语义：字符串 "true" 不命中（不是布尔 true）。
+      assert.equal(
+        rule.match({
+          tool: "bash",
+          input: { command: "curl", network: "true" },
+        }),
+        false
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("non-bash tool with a same-named network:true field does not match (tool gate)", () => {
+    const dir = scratchDir();
+    try {
+      const rule = loadNetworkRule(dir);
+      // match_tool = "bash" 的规则对 web_fetch 的同名字段不生效：
+      // buildRuleMatcher 先检查 ctx.tool === "bash"，非 bash 直接 false。
+      assert.equal(
+        rule.match({
+          tool: "web_fetch",
+          input: { url: "https://example.com", network: true },
+        }),
+        false
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("AND-joins with command predicates (network:true + command shape both required)", () => {
+    const dir = scratchDir();
+    try {
+      const path = writeToml(
+        dir,
+        "permissions.toml",
+        `schema_version = 1
+
+[[rule]]
+id = "deny-curl-network"
+match_tool = "bash"
+match_input = { command_starts_with = "curl ", network_equals = true }
+decision = "deny"
+reason = "deny curl with host network"
+`
+      );
+      const src = loadProjectSettings({ filePath: path });
+      assert.ok(src);
+      const rule = src.rules[0]!;
+      assert.equal(
+        rule.match({
+          tool: "bash",
+          input: { command: "curl https://example.com", network: true },
+        }),
+        true
+      );
+      // network 缺省 → 整个 AND 不成立
+      assert.equal(
+        rule.match({
+          tool: "bash",
+          input: { command: "curl https://example.com" },
+        }),
+        false
+      );
+      // command 不匹配 → 整个 AND 不成立
+      assert.equal(
+        rule.match({
+          tool: "bash",
+          input: { command: "wget https://example.com", network: true },
+        }),
+        false
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('network_equals = "true" (TOML string) fails at schema load with JSON path (fail-loud, not silent dead rule)', () => {
+    const dir = scratchDir();
+    try {
+      const body = `schema_version = 1
+
+[[rule]]
+id = "string-true"
+match_tool = "bash"
+match_input = { network_equals = "true" }
+decision = "deny"
+reason = "should never load"
+`;
+      const path = writeToml(dir, "permissions.toml", body);
+      assert.throws(
+        () => loadProjectSettings({ filePath: path }),
+        (err: unknown) => {
+          if (!(err instanceof Error)) return false;
+          return (
+            err.message.includes("schema violation") &&
+            err.message.includes("network_equals")
+          );
+        }
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("unknown predicate still fails loud with the failing JSON path", () => {
+    const dir = scratchDir();
+    try {
+      const body = `schema_version = 1
+
+[[rule]]
+id = "typo-predicate"
+match_tool = "bash"
+match_input = { command_regex = "^curl" }
+decision = "deny"
+reason = "typo"
+`;
+      const path = writeToml(dir, "permissions.toml", body);
+      assert.throws(
+        () => loadProjectSettings({ filePath: path }),
+        (err: unknown) => {
+          if (!(err instanceof Error)) return false;
+          // ajv additionalProperties 错误的 JSON path 定位到 match_input，
+          // 消息不含属性名（与既有 unknown-predicate 测试口径一致）
+          return (
+            err.message.includes("schema violation") &&
+            err.message.includes("/rule/0/match_input")
+          );
+        }
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("integration: project-layer deny fires BEFORE code-layer ask in checkPermission layer order", () => {
+    // checkPermission 分层顺序 session > project > code，first match wins。
+    // 没有 #952 时 bash network:true 落到 code 层的 code-ask-bash-network
+    // ask；项目层 deny 规则命中时必须在 code 层之前截住。
+    const dir = scratchDir();
+    try {
+      const project = loadProjectSettings({
+        filePath: writeToml(dir, "permissions.toml", NETWORK_TOML),
+      });
+      assert.ok(project);
+      const policy = createPermissionPolicy({ project });
+      const out = checkPermission({
+        def: makeTool("bash", "execute"),
+        input: { command: "curl https://example.com", network: true },
+        sources: policy.sources,
+        hardWalls: policy.hardWalls,
+        defaultByCategory: policy.defaultByCategory,
+      });
+      assert.equal(out.decision, "deny");
+      assert.match(out.reason, /explicit deny: bash host-network opt-in/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("default behavior unchanged: without a network rule, bash network:true still asks via code-ask-bash-network", () => {
+    // 资格门禁是 opt-in 的：未设 network 规则时绝不偷偷改 deny，
+    // 仍走 code 层 code-ask-bash-network 的 ask（默认行为零变化）。
+    const dir = scratchDir();
+    try {
+      const project = loadProjectSettings({
+        filePath: writeToml(dir, "permissions.toml", VALID_TOML),
+      });
+      assert.ok(project);
+      const policy = createPermissionPolicy({ project });
+      const out = checkPermission({
+        def: makeTool("bash", "execute"),
+        input: { command: "curl https://example.com", network: true },
+        sources: policy.sources,
+        hardWalls: policy.hardWalls,
+        defaultByCategory: policy.defaultByCategory,
+      });
+      assert.equal(out.decision, "ask");
+      assert.match(out.reason, /code-ask-bash-network|network/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("loadProjectSettings", () => {
   it("returns undefined when the settings file is absent", () => {
     const dir = scratchDir();

@@ -490,15 +490,22 @@ const SECRET_PLACEHOLDER_RE = /<<<SECRET_\d+>>>/;
 
 /** 命令摘要截断基数（与 summarizeInput 同级 80 字符封顶 + "..."）。 */
 const NETWORK_HINT_BASE_MAX = 80;
-const NETWORK_HINT_MARKER = "[请求宿主网络] ";
+const NETWORK_HINT_MARKER = "[请求宿主网络·不经 network-guard] ";
 const SECRET_WARNING =
   " [secret 警告] 命令含 secret 占位符，批准后真值可能随命令出站";
+/** #951:常驻披露 tail —— host netns 下可达面全量公开（80 封顶之外追加）。 */
+const NETWORK_HINT_TAIL =
+  "（宿主 netns 全量可见：localhost 服务 / 局域网 / link-local 元数据 169.254.169.254；无 IP 过滤、无域名过滤）";
 
 /**
- * bash network:true 的 ask hint：`[请求宿主网络] <命令摘要>`，命令摘要沿用
- * summarizeInput 的 80 字符 + "..." 截断风格；命令含 `<<<SECRET_N>>>`
- * 占位符时追加 [secret 警告]（只 mark warning，不读出真值 —— 视图无权
- * 读取 registry 内容，ADR-0022 Decision 3）。非字符串命令兜底走原 JSON 路径。
+ * bash network:true 的 ask hint：`[请求宿主网络·不经 network-guard] <命令摘要>`
+ * + 常驻 tail。命令摘要沿用 summarizeInput 的 80 字符 + "..." 截断风格
+ * （截断基数按 markerLen 动态预留：80 - markerLen - 3，新 marker 26 字符
+ * → 预留 51，markerLen + 3 = 29 ≤ 80，slice 不会为负退化）；命令含
+ * `<<<SECRET_N>>>` 占位符时追加 [secret 警告]（只 mark warning，不读出
+ * 真值 —— 视图无权读取 registry 内容，ADR-0022 Decision 3）。tail 与
+ * secret 警告都叠加在 80 封顶之外（#951：批准轴诚实化，两段披露不可被
+ * 截断吃掉）。非字符串命令兜底走原 JSON 路径。
  */
 function summarizeNetworkBash(input: unknown): string {
   const command = (input as { command?: unknown } | null)?.command;
@@ -516,7 +523,7 @@ function summarizeNetworkBash(input: unknown): string {
     if (SECRET_PLACEHOLDER_RE.test(command)) {
       hint += SECRET_WARNING;
     }
-    return hint;
+    return hint + NETWORK_HINT_TAIL;
   }
   // command 缺失 / 非字符串（规则已命中 network:true）→ 兜底走原 JSON 路径。
   return summarizeInput(input);

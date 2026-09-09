@@ -245,7 +245,9 @@ describe("ServeAskUserHandle.pendingAll (commit B: web ask UI)", () => {
     const p = h.ask({
       tool: "bash",
       input: { command: "curl localhost", network: true },
-      summaryHint: '[请求宿主网络] "curl localhost"',
+      // #951:hint 文案升级；测试只锁透传,不锁文案形状
+      summaryHint:
+        '[请求宿主网络·不经 network-guard] "curl localhost"（宿主 netns 全量可见：localhost 服务 / 局域网 / link-local 元数据 169.254.169.254；无 IP 过滤、无域名过滤）',
       network: true,
     });
     await Promise.resolve();
