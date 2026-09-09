@@ -1,6 +1,6 @@
 /**
  * git 作业（specs/git-work.md）：worker 不注入纪律段；
- * explore 只读 bash 拒 commit/push；worker 无名 create-task-worktree。
+ * explore 只读 bash 仍拒 commit/push；worker 无名 create-task-worktree。
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";

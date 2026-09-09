@@ -3,9 +3,10 @@
  *
  * 行为真值:
  *   - 加性段，不触碰 IKNOW_ASSEMBLY_ORDER 六段 LOCKED。
- *   - chat / ask / tui / serve 在 gitWorkDiscipline=true 时含标题与作业要点。
- *   - gate 缺席 → 段缺席，不写空串，基线 system 仍非空。
- *   - 同一常量两次装配正文相同（无共享可变状态）。
+ *   - isolation ON → chat / tui / serve 含标题与本地作业要点。
+ *   - ask 即使传入 gitWorkDiscipline 也不注入（无工作树工具）。
+ *   - gate 缺席 / OFF → 段缺席，不写空串，不补「如何用 git」教程。
+ *   - 正文不含 push / network / force-push。
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
@@ -65,10 +66,12 @@ function expectGitWorkPoints(out: string): void {
   expect(out).toContain(IKNOW_GIT_WORK_TEXT);
   expect(out).toContain("bash");
   expect(out).toContain("create-task-worktree");
-  expect(out).toContain("network: true");
   expect(out).toContain("--no-verify");
-  expect(out).toMatch(/force-push|force push|--force/i);
   expect(out).toMatch(/readonly|read-only/i);
+  expect(out).not.toContain("network: true");
+  expect(out).not.toMatch(/force-push|force push|--force-with-lease/i);
+  expect(IKNOW_GIT_WORK_TEXT).not.toMatch(/git push|optional push/i);
+  expect(IKNOW_GIT_WORK_TEXT).not.toMatch(/Isolation off/i);
 }
 
 describe("git work additive segment — LOCKED order", () => {
@@ -84,14 +87,9 @@ describe("git work additive segment — LOCKED order", () => {
   });
 });
 
-describe("git work additive segment — four-entry hang", () => {
-  it("chat assembly with gitWorkDiscipline includes title and SOP points", async () => {
+describe("git work additive segment — isolation ON parent surfaces", () => {
+  it("chat assembly with gitWorkDiscipline includes title and local SOP points", async () => {
     const out = (await resolver("chat", { gitWorkDiscipline: true })()) ?? "";
-    expectGitWorkPoints(out);
-  });
-
-  it("ask assembly with gitWorkDiscipline includes title and SOP points", async () => {
-    const out = (await resolver("ask", { gitWorkDiscipline: true })()) ?? "";
     expectGitWorkPoints(out);
   });
 
@@ -101,6 +99,13 @@ describe("git work additive segment — four-entry hang", () => {
       (await resolver("serve", { gitWorkDiscipline: true })()) ?? "";
     expectGitWorkPoints(tui);
     expectGitWorkPoints(serve);
+  });
+
+  it("ask omits the segment even when gitWorkDiscipline is passed", async () => {
+    const out = (await resolver("ask", { gitWorkDiscipline: true })()) ?? "";
+    expect(out.length).toBeGreaterThan(0);
+    expect(out).not.toContain("## Git work");
+    expect(out).not.toContain(IKNOW_GIT_WORK_TEXT);
   });
 });
 
@@ -124,6 +129,7 @@ describe("git work additive segment — absence does not write empty system", ()
     });
     expect(undef).toBe(baseline);
     expect(off).toBe(baseline);
+    expect(off).not.toContain("## Git work");
   });
 
   it("createIknowSystemResolver without gitWorkDiscipline omits the segment", async () => {

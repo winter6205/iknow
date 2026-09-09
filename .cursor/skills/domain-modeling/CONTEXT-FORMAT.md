@@ -29,8 +29,8 @@ A person or organization that places orders.
 _Avoid_: Client, buyer, account
 
 **git 作业**:
-主代理用 `bash` 完成的版本库侧效应链（工作区变更 → add → commit，可选 push），不单独注册 ACI 工具。纪律段挂四入口、不进 worker；ask 不装配工作树工具。
-_Avoid_: git ACI 工具; `git_commit` / `git_push`; 把环境现势当作业面; 让只读子代理提交
+主代理用 `bash` 完成的版本库侧效应链（工作区变更 → add → commit），不单独注册 ACI 工具。纪律段仅在 worktree isolation ON 时挂 chat/tui/serve，不进 ask / worker；远端不进 identity。
+_Avoid_: git ACI 工具; `git_commit` / `git_push`; 把环境现势当作业面; 让只读子代理提交; 把 push / network 写进 system
 ```
 
 ## Structural invariants
