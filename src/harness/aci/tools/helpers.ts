@@ -52,73 +52,122 @@ function expandHome(p: string): string {
  * before this check). Read and write extra roots are passed independently —
  * write tools can use `extraWriteRoots` without exposing any read roots.
  *
- * `tmpWriteRoot` (optional, parent-visible-tmp T2): host pad bound as the
- * current identity's fence `/tmp`. Guest paths under `/tmp` remap onto this
- * pad; empty `/tmp/` is typed-rejected. Absent → `/tmp` stays outside
- * (legacy / no-pad callers).
+ * Extra containment roots plus optional identity pad. Prefer this object
+ * over a fifth positional `tmpWriteRoot` so `resolveWithinRoot` stays ≤4
+ * parameters. A third-arg array still means `extraReadRoots` (legacy).
  */
-export async function resolveWithinRoot(
-  root: string,
-  target: string,
-  extraReadRoots?: readonly string[],
-  extraWriteRoots?: readonly string[],
+export type ResolveWithinRootOptions = {
+  readonly extraReadRoots?: readonly string[];
+  readonly extraWriteRoots?: readonly string[];
+  readonly tmpWriteRoot?: string;
+};
+
+function isResolveOptions(
+  value: readonly string[] | ResolveWithinRootOptions | undefined
+): value is ResolveWithinRootOptions {
+  return value !== undefined && !Array.isArray(value);
+}
+
+function normalizeResolveOptions(
+  extraReadRootsOrOptions?: readonly string[] | ResolveWithinRootOptions,
+  extraWriteRoots?: readonly string[]
+): ResolveWithinRootOptions {
+  if (isResolveOptions(extraReadRootsOrOptions)) {
+    return extraReadRootsOrOptions;
+  }
+  return {
+    extraReadRoots: extraReadRootsOrOptions,
+    extraWriteRoots,
+  };
+}
+
+async function resolveAbsoluteTarget(
+  realRoot: string,
+  expandedTarget: string,
   tmpWriteRoot?: string
-): Promise<string> {
-  const realRoot = await realpath(resolve(root));
-  const expandedTarget = expandHome(target);
-  let realTmpRoot: string | undefined;
-  let absoluteTarget: string;
-  if (
-    tmpWriteRoot !== undefined &&
-    tmpWriteRoot.trim().length > 0 &&
-    isGuestTmpLiteral(expandedTarget)
-  ) {
-    realTmpRoot = await realpath(resolve(tmpWriteRoot));
+): Promise<{ absoluteTarget: string; realTmpRoot?: string }> {
+  const pad =
+    tmpWriteRoot !== undefined && tmpWriteRoot.trim().length > 0
+      ? tmpWriteRoot
+      : undefined;
+  if (pad !== undefined && isGuestTmpLiteral(expandedTarget)) {
+    const realTmpRoot = await realpath(resolve(pad));
     const remapped = remapGuestTmpOntoPad(resolve(expandedTarget), realTmpRoot);
     if (remapped === "empty") {
       throw new ToolExecutionError("empty path under /tmp");
     }
-    absoluteTarget =
-      remapped !== undefined ? remapped : resolve(expandedTarget);
-  } else {
-    absoluteTarget = isAbsolute(expandedTarget)
+    return {
+      absoluteTarget:
+        remapped !== undefined ? remapped : resolve(expandedTarget),
+      realTmpRoot,
+    };
+  }
+  return {
+    absoluteTarget: isAbsolute(expandedTarget)
       ? resolve(expandedTarget)
-      : resolve(realRoot, expandedTarget);
-    if (tmpWriteRoot !== undefined && tmpWriteRoot.trim().length > 0) {
-      realTmpRoot = await realpath(resolve(tmpWriteRoot));
-    }
-  }
-  const resolvedTarget = await realpathWithMissingSuffix(absoluteTarget);
+      : resolve(realRoot, expandedTarget),
+    realTmpRoot: pad !== undefined ? await realpath(resolve(pad)) : undefined,
+  };
+}
 
-  const withinPrimary = isWithinRoot(realRoot, resolvedTarget);
-  const withinReadExtras = (extraReadRoots ?? []).some((r) =>
-    isWithinRoot(resolve(r), resolvedTarget)
-  );
-  const writeExtras = [
-    ...(extraWriteRoots ?? []),
-    ...(realTmpRoot !== undefined ? [realTmpRoot] : []),
-  ];
-  const withinWriteExtras = writeExtras.some((r) =>
-    isWithinRoot(resolve(r), resolvedTarget)
-  );
-  if (!withinPrimary && !withinReadExtras && !withinWriteExtras) {
-    // T3 (plans/891-taskroot-remaining-consumers.md Task 3 / ADR-0037 §4 (e)):
-    // 改绑后 `root` 即活 `taskRoot` (= 写根)。模型看见的 system ## Project
-    // path 仍是 `projectIdentityRoot`,但写工具失败时如果只回 `<target> not
-    // under <root>`,模型很难把这两根区分开去重试一个相对路径。文案必须显式
-    // 标 "current write root: <root>" 的引导,让模型能用相对路径重试。
-    // SC4 (specs/mutate-write-contract.md): bash 围栏允许 /tmp(进程临时面),
-    // 写工具拒绝 /tmp 是同一合同的另一面 —— 文案必须把「当前写根 = 活
-    // taskRoot」「/tmp 不是交付落点」都说明,防止模型把交付物写进 /tmp。
-    // 写根缺席 → 退回原文案 (不崩,文案退化到 base 形态)。
-    const writeRootHint =
-      realRoot.length > 0
-        ? ` (current write root is the live taskRoot: ${realRoot}; /tmp is the current-identity pad — same lifetime as this identity and not a delivery destination. Retry with a path relative to the taskRoot.)`
-        : "";
-    throw new ToolExecutionError(
-      `path outside workspace: ${resolvedTarget} not under ${realRoot}${writeRootHint}`
-    );
+function assertContained(
+  resolvedTarget: string,
+  realRoot: string,
+  extras: {
+    readonly extraReadRoots?: readonly string[];
+    readonly extraWriteRoots?: readonly string[];
   }
+): void {
+  const withinPrimary = isWithinRoot(realRoot, resolvedTarget);
+  const withinReadExtras = (extras.extraReadRoots ?? []).some((r) =>
+    isWithinRoot(resolve(r), resolvedTarget)
+  );
+  const withinWriteExtras = (extras.extraWriteRoots ?? []).some((r) =>
+    isWithinRoot(resolve(r), resolvedTarget)
+  );
+  if (withinPrimary || withinReadExtras || withinWriteExtras) return;
+  // T3 (plans/891-taskroot-remaining-consumers.md Task 3 / ADR-0037 §4 (e)):
+  // 改绑后 `root` 即活 `taskRoot` (= 写根)。模型看见的 system ## Project
+  // path 仍是 `projectIdentityRoot`,但写工具失败时如果只回 `<target> not
+  // under <root>`,模型很难把这两根区分开去重试一个相对路径。文案必须显式
+  // 标 "current write root: <root>" 的引导,让模型能用相对路径重试。
+  // SC4 (specs/mutate-write-contract.md): bash 围栏允许 /tmp(进程临时面),
+  // 写工具拒绝 /tmp 是同一合同的另一面 —— 文案必须把「当前写根 = 活
+  // taskRoot」「/tmp 不是交付落点」都说明,防止模型把交付物写进 /tmp。
+  // 写根缺席 → 退回原文案 (不崩,文案退化到 base 形态)。
+  const writeRootHint =
+    realRoot.length > 0
+      ? ` (current write root is the live taskRoot: ${realRoot}; /tmp is the current-identity pad — same lifetime as this identity and not a delivery destination. Retry with a path relative to the taskRoot.)`
+      : "";
+  throw new ToolExecutionError(
+    `path outside workspace: ${resolvedTarget} not under ${realRoot}${writeRootHint}`
+  );
+}
+
+export async function resolveWithinRoot(
+  root: string,
+  target: string,
+  extraReadRootsOrOptions?: readonly string[] | ResolveWithinRootOptions,
+  extraWriteRoots?: readonly string[]
+): Promise<string> {
+  const options = normalizeResolveOptions(
+    extraReadRootsOrOptions,
+    extraWriteRoots
+  );
+  const realRoot = await realpath(resolve(root));
+  const { absoluteTarget, realTmpRoot } = await resolveAbsoluteTarget(
+    realRoot,
+    expandHome(target),
+    options.tmpWriteRoot
+  );
+  const resolvedTarget = await realpathWithMissingSuffix(absoluteTarget);
+  assertContained(resolvedTarget, realRoot, {
+    extraReadRoots: options.extraReadRoots,
+    extraWriteRoots: [
+      ...(options.extraWriteRoots ?? []),
+      ...(realTmpRoot !== undefined ? [realTmpRoot] : []),
+    ],
+  });
   return resolvedTarget;
 }
 

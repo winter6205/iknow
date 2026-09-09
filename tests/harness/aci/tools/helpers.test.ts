@@ -170,7 +170,7 @@ describe("resolveWithinRoot", () => {
     const pad = await makeScratch("aci-helper-tmp-pad-");
 
     assert.equal(
-      await resolveWithinRoot(root, "/tmp/ok.txt", undefined, undefined, pad),
+      await resolveWithinRoot(root, "/tmp/ok.txt", { tmpWriteRoot: pad }),
       join(pad, "ok.txt")
     );
   });
@@ -180,7 +180,7 @@ describe("resolveWithinRoot", () => {
     const pad = await makeScratch("aci-helper-tmp-empty-pad-");
 
     await assert.rejects(
-      resolveWithinRoot(root, "/tmp/", undefined, undefined, pad),
+      resolveWithinRoot(root, "/tmp/", { tmpWriteRoot: pad }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("empty path under /tmp")
@@ -193,7 +193,7 @@ describe("resolveWithinRoot", () => {
     await writeFile(join(root, "kept.txt"), "in-root\n");
 
     assert.equal(
-      await resolveWithinRoot(root, "kept.txt", undefined, undefined, pad),
+      await resolveWithinRoot(root, "kept.txt", { tmpWriteRoot: pad }),
       join(root, "kept.txt")
     );
   });
@@ -203,7 +203,7 @@ describe("resolveWithinRoot", () => {
     const pad = await makeScratch("aci-helper-tmp-esc-pad-");
 
     await assert.rejects(
-      resolveWithinRoot(root, "/tmp/../etc/passwd", undefined, undefined, pad),
+      resolveWithinRoot(root, "/tmp/../etc/passwd", { tmpWriteRoot: pad }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("outside workspace") &&

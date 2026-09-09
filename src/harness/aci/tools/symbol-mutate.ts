@@ -46,7 +46,6 @@ import type { LspCtx } from "../../lsp/types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
 import type { AciToolDef } from "../types.js";
-import { FENCE_WRITE_GUIDANCE } from "./helpers.js";
 import {
   DEFAULT_LSP_REQUEST_TIMEOUT_MS,
   compileValidator,
@@ -847,8 +846,7 @@ export function createSymbolMutateToolSet(
         "The language server computes every reference site (declaration + all references across the project), " +
         "the edits are applied to disk and the workspace LSP views are invalidated. " +
         "Returns the list of files touched and the edit count. " +
-        "Returns a typed failure string if the rename would conflict with an existing declaration; in that case nothing is written. " +
-        FENCE_WRITE_GUIDANCE
+        "Returns a typed failure string if the rename would conflict with an existing declaration; in that case nothing is written."
     ),
     makeReplaceSymbolBodyTool(
       ctx,
@@ -856,8 +854,7 @@ export function createSymbolMutateToolSet(
       "Replace the entire definition body of a symbol — including the declaration header and body — by its file path and symbol_path. " +
         "The replacement range is the symbol's full LSP range (selectionRange alone is too narrow). " +
         "The file is written and the workspace LSP view is invalidated; returns the files touched. " +
-        "Use it after find_declaration / get_hover to confirm the symbol, before writing the new body. " +
-        FENCE_WRITE_GUIDANCE
+        "Use it after find_declaration / get_hover to confirm the symbol, before writing the new body."
     ),
     makeInsertSymbolTool(ctx, onEdit, {
       name: "insert_before_symbol",
@@ -865,8 +862,7 @@ export function createSymbolMutateToolSet(
       description:
         "Insert code immediately before a symbol's definition (anchored to the start of the symbol's range) by its file path and symbol_path. " +
         "Use it to add a decorator, a sibling helper, or a leading comment block; pair with insert_after_symbol to bracket the symbol. " +
-        "Returns the files touched and the edit count. " +
-        FENCE_WRITE_GUIDANCE,
+        "Returns the files touched and the edit count.",
     }),
     makeInsertSymbolTool(ctx, onEdit, {
       name: "insert_after_symbol",
@@ -874,16 +870,14 @@ export function createSymbolMutateToolSet(
       description:
         "Insert code immediately after a symbol's definition (anchored to the end of the symbol's range) by its file path and symbol_path. " +
         "Use it to add a follow-up function, a trailing comment block, or a sibling symbol; pair with insert_before_symbol to bracket the symbol. " +
-        "Returns the files touched and the edit count. " +
-        FENCE_WRITE_GUIDANCE,
+        "Returns the files touched and the edit count.",
     }),
     makeSafeDeleteSymbolTool(
       ctx,
       onEdit,
       "Delete a symbol only if it has no references anywhere in the project. The tool first queries `textDocument/references` " +
         "(including the declaration); if any reference exists, it returns `{ deleted: false, references: [...] }` and writes nothing. " +
-        "Use it as the safety wrapper around delete; resolve the references first, then retry. " +
-        FENCE_WRITE_GUIDANCE
+        "Use it as the safety wrapper around delete; resolve the references first, then retry."
     ),
   ];
   // 构造期 fail-fast：名单与工厂分歧不留到运行期（与 registry Gate 3 同纪律）。

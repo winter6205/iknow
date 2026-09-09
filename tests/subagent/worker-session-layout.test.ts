@@ -29,6 +29,7 @@ import { MAIN_SESSION_FENCE_TMP_DIR_NAME } from "../../src/shared/session-tree-n
 import {
   listSubagentRecordPaths,
   resolveExistingSubagentRecordPath,
+  SubagentRecordListError,
   workerFenceTmpPath,
   workerRecordPath,
   workerStderrPath,
@@ -359,6 +360,21 @@ describe("T3 legacy flat agent-*.jsonl (SC8)", () => {
     assert.equal(
       readdirSync(subagentsDir).includes(`agent-${taskId}.jsonl`),
       false
+    );
+  });
+
+  it("listSubagentRecordPaths returns [] when the directory is missing (ENOENT)", () => {
+    const missing = join(subagentsDir, "no-such-subagents");
+    assert.deepEqual(listSubagentRecordPaths(missing), []);
+  });
+
+  it("listSubagentRecordPaths throws typed error when readdir fails for a non-directory", () => {
+    const asFile = join(subagentsDir, "not-a-dir");
+    writeFileSync(asFile, "x");
+    assert.throws(
+      () => listSubagentRecordPaths(asFile),
+      (error: unknown) =>
+        error instanceof SubagentRecordListError && error.code === "ENOTDIR"
     );
   });
 

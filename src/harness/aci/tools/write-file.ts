@@ -123,13 +123,9 @@ export function createWriteFileTool(
 
     let target: string;
     try {
-      target = await resolveWithinRoot(
-        rootAtCall,
-        params.path,
-        undefined,
-        undefined,
-        tmpWriteRoot
-      );
+      target = await resolveWithinRoot(rootAtCall, params.path, {
+        tmpWriteRoot,
+      });
     } catch (error) {
       throw asToolExecutionError("[write_file] cannot resolve path", error);
     }

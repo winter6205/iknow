@@ -121,6 +121,18 @@ export function resolveExistingSubagentRecordPath(
   return undefined;
 }
 
+/** readdir of `subagents/` failed for a reason other than missing directory. */
+export class SubagentRecordListError extends Error {
+  override readonly name = "SubagentRecordListError";
+  readonly code: string;
+  constructor(subagentsDir: string, cause: NodeJS.ErrnoException) {
+    super(
+      `listSubagentRecordPaths: cannot read '${subagentsDir}' (${cause.code ?? "UNKNOWN"})`
+    );
+    this.code = cause.code ?? "UNKNOWN";
+  }
+}
+
 /**
  * SC8 list: leftover flat `agent-*.jsonl` plus nested
  * `subagents/<taskId>/agent-<taskId>.jsonl`. Does not migrate files.
@@ -129,8 +141,13 @@ export function listSubagentRecordPaths(subagentsDir: string): string[] {
   let entries: Dirent[];
   try {
     entries = readdirSync(subagentsDir, { withFileTypes: true });
-  } catch {
-    return [];
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") {
+      // EXIT: no subagents dir yet — list is empty, not a listing failure
+      return [];
+    }
+    throw new SubagentRecordListError(subagentsDir, err);
   }
   const out: string[] = [];
   for (const entry of entries) {

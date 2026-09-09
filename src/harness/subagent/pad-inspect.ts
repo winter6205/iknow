@@ -72,31 +72,24 @@ export function listPadTopLevelNames(
   return listed.names.slice(0, PAD_ROSTER_NAME_LIMIT);
 }
 
-export function inspectWorkerPad(
-  padRoot: string | undefined,
-  tmpPath?: string
-): PadInspectResult {
-  if (tmpPath !== undefined) {
-    if (
-      tmpPath.length === 0 ||
-      hasDotDotSegment(tmpPath) ||
-      isAbsolute(tmpPath)
-    ) {
-      return { status: "rejected", reason: "path_escape" };
-    }
-  }
+function isValidRelativePadPath(tmpPath: string): boolean {
+  return (
+    tmpPath.length > 0 && !hasDotDotSegment(tmpPath) && !isAbsolute(tmpPath)
+  );
+}
+
+function listPadEntries(padRoot: string | undefined): PadInspectResult {
   if (padRoot === undefined || !existsSync(padRoot)) {
-    if (tmpPath === undefined) return { status: "list", names: [] };
-    return { status: "rejected", reason: "path_escape" };
+    return { status: "list", names: [] };
   }
-  const realPad = realpathSync(padRoot);
-  if (tmpPath === undefined) {
-    const names = readdirSync(realPad).filter(
-      (name) => name !== "." && name !== ".."
-    );
-    names.sort();
-    return { status: "list", names };
-  }
+  const names = readdirSync(realpathSync(padRoot)).filter(
+    (name) => name !== "." && name !== ".."
+  );
+  names.sort();
+  return { status: "list", names };
+}
+
+function readOnePadFile(realPad: string, tmpPath: string): PadInspectResult {
   const resolved = resolve(realPad, tmpPath);
   if (!isInsideRoot(realPad, resolved)) {
     return { status: "rejected", reason: "path_escape" };
@@ -125,4 +118,18 @@ export function inspectWorkerPad(
   }
   const { content, truncated } = formatReadFileSlice(buffer.toString("utf8"));
   return { status: "read", content, truncated };
+}
+
+export function inspectWorkerPad(
+  padRoot: string | undefined,
+  tmpPath?: string
+): PadInspectResult {
+  if (tmpPath !== undefined && !isValidRelativePadPath(tmpPath)) {
+    return { status: "rejected", reason: "path_escape" };
+  }
+  if (tmpPath === undefined) return listPadEntries(padRoot);
+  if (padRoot === undefined || !existsSync(padRoot)) {
+    return { status: "rejected", reason: "path_escape" };
+  }
+  return readOnePadFile(realpathSync(padRoot), tmpPath);
 }

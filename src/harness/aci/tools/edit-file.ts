@@ -148,13 +148,9 @@ export function createEditFileTool(
       projectDir: opts?.projectDir,
       conversationId: ctx?.conversationId,
     });
-    const absPath = await resolveWithinRoot(
-      rootAtCall,
-      validated.path,
-      undefined,
-      undefined,
-      tmpWriteRoot
-    );
+    const absPath = await resolveWithinRoot(rootAtCall, validated.path, {
+      tmpWriteRoot,
+    });
 
     let content: string;
     try {

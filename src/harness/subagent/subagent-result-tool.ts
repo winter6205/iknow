@@ -22,6 +22,7 @@
 import type { AciToolDef } from "../aci/types.js";
 import type { ToolExecutionContext } from "../tools/types.js";
 import type { SubAgentManager } from "./manager.js";
+import type { PadQueryResult } from "./pad-inspect.js";
 import { projectParentVisibleEnvelope } from "./envelope.js";
 import { ToolExecutionError } from "../errors.js";
 
@@ -46,6 +47,39 @@ function serializePoll(
     return projectParentVisibleEnvelope(result);
   }
   return result;
+}
+
+function parseTmpPath(raw: unknown): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "string") {
+    throw new ToolExecutionError("subagent_result: invalid `tmp_path`");
+  }
+  return raw.length > 0 ? raw : undefined;
+}
+
+function serializePadOrPoll(
+  result: ReturnType<SubAgentManager["queryBuffer"]>,
+  pad: PadQueryResult,
+  tmpPath: string | undefined
+): string {
+  if (pad.status === "not_found") {
+    return JSON.stringify({ status: "not_found" });
+  }
+  if (pad.status === "rejected") {
+    return JSON.stringify({ status: "rejected", reason: pad.reason });
+  }
+  if (pad.status === "read") {
+    return JSON.stringify({
+      status: "ok",
+      tmp_path: tmpPath,
+      content: pad.content,
+      truncated: pad.truncated,
+    });
+  }
+  return JSON.stringify({
+    ...serializePoll(result),
+    tmp_names: pad.names,
+  });
 }
 
 export function createSubAgentResultTool(
@@ -88,14 +122,7 @@ export function createSubAgentResultTool(
           "subagent_result: missing or invalid `task_id`"
         );
       }
-      const tmpPathRaw = obj.tmp_path;
-      if (tmpPathRaw !== undefined && typeof tmpPathRaw !== "string") {
-        throw new ToolExecutionError("subagent_result: invalid `tmp_path`");
-      }
-      const tmpPath =
-        typeof tmpPathRaw === "string" && tmpPathRaw.length > 0
-          ? tmpPathRaw
-          : undefined;
+      const tmpPath = parseTmpPath(obj.tmp_path);
       // 同步非阻塞：queryBuffer + queryPad（无 waitFor / drain）。
       const result = deps.manager.queryBuffer(taskId);
       if (result.status === "not_found") {
@@ -103,28 +130,7 @@ export function createSubAgentResultTool(
       }
       const queryPad = deps.manager.queryPad;
       if (queryPad !== undefined) {
-        const pad = queryPad(taskId, tmpPath);
-        if (pad.status === "not_found") {
-          return JSON.stringify({ status: "not_found" });
-        }
-        if (pad.status === "rejected") {
-          return JSON.stringify({
-            status: "rejected",
-            reason: pad.reason,
-          });
-        }
-        if (pad.status === "read") {
-          return JSON.stringify({
-            status: "ok",
-            tmp_path: tmpPath,
-            content: pad.content,
-            truncated: pad.truncated,
-          });
-        }
-        return JSON.stringify({
-          ...serializePoll(result),
-          tmp_names: pad.names,
-        });
+        return serializePadOrPoll(result, queryPad(taskId, tmpPath), tmpPath);
       }
       return JSON.stringify(serializePoll(result));
     },
