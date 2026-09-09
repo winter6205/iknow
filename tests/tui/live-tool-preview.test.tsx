@@ -532,7 +532,7 @@ describe("formatRunningToolLine: 子代理工具运行行（plans T7 钉死不�
       input: undefined,
     };
     const line = formatRunningToolLine(run);
-    expect(line).toBe("派发子代理：?");
+    expect(line).toBe("general-purpose running");
     expect(line.includes("▣")).toBe(false);
   });
 

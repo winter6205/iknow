@@ -143,6 +143,28 @@ export function subagentDisplayMark(kind: "running" | "ok" | "failed"): string {
   return "▣";
 }
 
+/** spawn 工具 input 的 catalog role 投影（与 SubagentIdentityStrip 同源 fallback）。 */
+export const SUBAGENT_ROLE_FALLBACK = "general-purpose";
+
+/** 从 spawn_subagent tool_use input 解析 catalog id（`subagent_type` → `role` → fallback）。 */
+export function resolveSubagentRoleFromInput(
+  rec: Record<string, unknown>
+): string {
+  const fromType = pickString(rec, "subagent_type", "").trim();
+  if (fromType.length > 0 && fromType !== "?") return fromType;
+  const fromRole = pickString(rec, "role", "").trim();
+  if (fromRole.length > 0 && fromRole !== "?") return fromRole;
+  return SUBAGENT_ROLE_FALLBACK;
+}
+
+function spawnSubagentSettledSummary(rec: Record<string, unknown>): string {
+  return resolveSubagentRoleFromInput(rec);
+}
+
+function spawnSubagentRunningSummary(rec: Record<string, unknown>): string {
+  return `${resolveSubagentRoleFromInput(rec)} running`;
+}
+
 /** 工具 → 摘要器 lookup table。每项返回未 clip 的 detail 文本。 */
 const SUMMARIZERS: Readonly<
   Record<string, (rec: Record<string, unknown>) => string>
@@ -172,8 +194,7 @@ const SUMMARIZERS: Readonly<
     return "检索工具 ?";
   },
   skill: (r) => `skill ${pickString(r, "name")}`,
-  spawn_subagent: (r) =>
-    `派发子代理：${pickString(r, "task", "").slice(0, 60) || "?"}`,
+  spawn_subagent: spawnSubagentSettledSummary,
   subagent_result: (r) => `轮询 ${pickString(r, "task_id")}`,
   // LSP 工具集：10 件。8 件共享 file[:line] 模板；documentSymbol / workspaceSymbol 走各自形态。
   lsp_definition: (r) => lspAt(r, "lsp_definition"),
@@ -329,7 +350,8 @@ const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
   // 子代理两件（spec D8 三类之外）：settledClass 取核内显式声明的 "subagent"
   // —— 不用 `!` 兜底，声明缺失/谎报在编译期或跨核闸失败。
   spawn_subagent: {
-    summary: SUMMARIZERS.spawn_subagent!,
+    summary: spawnSubagentSettledSummary,
+    runningSummary: spawnSubagentRunningSummary,
     settledClass: TOOL_SETTLED_CLASS.spawn_subagent,
   },
   subagent_result: {
@@ -885,8 +907,8 @@ export function formatToolStatusLine(opts: {
   // subagent_result）不再以 `▣ 子代理 · detail` 形态作为 live / history 工具
   // 卡 —— 子代理状态由 identity strip（prompt 正上方 `{role} running...`）
   // + SubagentPanel（输入框下方 task list）单独表达，避免 dual render。
-  // 工具卡仅保留 `detail`（已由 summarizeToolCall 派生，含子代理任务的
-  // 真实文本，例如「派发子代理：<task>」/「轮询 <task_id>」）。
+  // 工具卡仅保留 `detail`（spawn → `{role} running` / `{role}`；task 正文
+  // 只在 SubagentPanel；subagent_result → `轮询 <task_id>`）。
   if (isSubagentTool(opts.toolName)) {
     return detail;
   }

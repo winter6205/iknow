@@ -816,7 +816,8 @@ test("spawn_subagent 运行中 → 仅 detail（无 `▣` glyph，无 `[运行�
   };
   const setup = await renderBlocks(msg);
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("派发子代理：调查渲染层");
+  expect(frame).toContain("general-purpose");
+  expect(frame).not.toContain("调查渲染层");
   expect(frame.includes("▣")).toBe(false);
   expect(frame).not.toContain("[运行中] spawn_subagent");
   await setup.renderer.destroy();
@@ -838,7 +839,8 @@ test("spawn_subagent 完成 ok → 仅 detail（无 `✓` glyph、无 `[完成]`
     statusMap: new Map([["tu-spawn", false]]),
   });
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("派发子代理：调查渲染层");
+  expect(frame).toContain("general-purpose");
+  expect(frame).not.toContain("调查渲染层");
   expect(frame.includes("✓")).toBe(false);
   expect(frame).not.toContain("[完成]");
   await setup.renderer.destroy();
@@ -860,7 +862,8 @@ test("spawn_subagent 完成 failed → 仅 detail（无 `✗` glyph、无 `[失�
     statusMap: new Map([["tu-spawn", true]]),
   });
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("派发子代理：调查渲染层");
+  expect(frame).toContain("general-purpose");
+  expect(frame).not.toContain("调查渲染层");
   expect(frame.includes("✗")).toBe(false);
   expect(frame).not.toContain("[失败]");
   await setup.renderer.destroy();

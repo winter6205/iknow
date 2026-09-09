@@ -236,7 +236,7 @@ export function shortenMcpToolName(name: string): string {
  *  #693 T1 D7）。普通工具 → `[运行中] name`；子代理工具（spawn_subagent /
  *  subagent_result，plans/tui-chrome-interaction.md T7）不再以 `▣ 子代理`
  *  形态出现 —— 子代理状态由 identity strip + SubagentPanel 单独表达，
- *  formatToolStatusLine 内只返 `detail`（如 `派发子代理：<task>`），避免
+ *  formatToolStatusLine 内只返 `detail`（如 `explore running` / `general-purpose`），避免
  *  dual render。 */
 export function formatRunningToolLine(run: LiveToolRun): string {
   return formatToolStatusLine({
