@@ -14,6 +14,7 @@ import {
   type VerifyLoopOptions,
 } from "../../../src/harness/verify/verify-loop.ts";
 import { REASON_HITL_SKIP_COMPLETION_JUDGE } from "../../../src/harness/verify/types.ts";
+import { projectVerifyHumanView } from "../../../src/session-api/verify-human-view.ts";
 import type { LoopTrace } from "../../../src/harness/loop-trace.ts";
 import type {
   AnthropicContentBlock,
@@ -244,6 +245,15 @@ describe("HITL completion module (plan T1)", () => {
     assert.equal(calls().length, 0);
     assert.equal(out.outcome, "passed");
     assert.equal(out.result.stopReason, "completed");
+    assert.deepEqual(
+      projectVerifyHumanView({
+        outcome: out.outcome,
+        rounds: out.rounds,
+        records: out.records,
+      }),
+      { outcome: "passed", rounds: out.rounds },
+      "HITL SUFFICIENT short-circuit may still show human passed"
+    );
   });
 
   it("HITL + empty-test write CONTRADICTED: skip judge, no true-failure, no extra worker (SC3)", async () => {
@@ -262,6 +272,20 @@ describe("HITL completion module (plan T1)", () => {
     assert.equal(out.outcome, "passed");
     assert.equal(out.result.stopReason, "completed");
     assert.equal(out.records[0]?.reason, REASON_HITL_SKIP_COMPLETION_JUDGE);
+    assert.equal(
+      out.records[0]?.evidenceVerdict,
+      "EVIDENCE_CONTRADICTED",
+      "HITL CONTRADICTED skip must persist verdict so projection can hide green"
+    );
+    assert.equal(
+      projectVerifyHumanView({
+        outcome: out.outcome,
+        rounds: out.rounds,
+        records: out.records,
+      }),
+      undefined,
+      "HITL CONTRADICTED skip must not wire human 验证通过"
+    );
   });
 
   it("HITL + rm test path CONTRADICTED: skip judge, no true-failure, no extra worker (SC3)", async () => {
@@ -280,6 +304,15 @@ describe("HITL completion module (plan T1)", () => {
     assert.equal(out.outcome, "passed");
     assert.equal(out.result.stopReason, "completed");
     assert.equal(out.records[0]?.reason, REASON_HITL_SKIP_COMPLETION_JUDGE);
+    assert.equal(out.records[0]?.evidenceVerdict, "EVIDENCE_CONTRADICTED");
+    assert.equal(
+      projectVerifyHumanView({
+        outcome: out.outcome,
+        rounds: out.rounds,
+        records: out.records,
+      }),
+      undefined
+    );
   });
 
   it("goal 功能 + empty-test write CONTRADICTED: still true-failure hard reject (SC4)", async () => {

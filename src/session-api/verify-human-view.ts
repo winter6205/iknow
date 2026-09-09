@@ -2,8 +2,8 @@
  * Human-facing verify wire projection (verify-claim-window T3 / SC2 / SC5).
  *
  * Loop outcome may still be `passed` when HITL skips the completion judge
- * after INSUFFICIENT evidence. Humans must not see 「验证通过」 for that
- * shape. SUFFICIENT short-circuit stays on the wire.
+ * after INSUFFICIENT or CONTRADICTED evidence. Humans must not see
+ * 「验证通过」 for those shapes. SUFFICIENT short-circuit stays on the wire.
  */
 import {
   REASON_HITL_SKIP_COMPLETION_JUDGE,
@@ -29,19 +29,20 @@ export function projectVerifyHumanView(input: {
   ) {
     return undefined;
   }
-  if (input.outcome === "passed" && isHitlSkipInsufficient(input.records)) {
+  if (input.outcome === "passed" && isHitlSkipNotHumanPassed(input.records)) {
     return undefined;
   }
   return { outcome: input.outcome, rounds: input.rounds };
 }
 
-function isHitlSkipInsufficient(
+function isHitlSkipNotHumanPassed(
   records: readonly VerifyHumanRecord[]
 ): boolean {
   const last = records[records.length - 1];
   return (
     last !== undefined &&
     last.reason === REASON_HITL_SKIP_COMPLETION_JUDGE &&
-    last.evidenceVerdict === "EVIDENCE_INSUFFICIENT"
+    (last.evidenceVerdict === "EVIDENCE_INSUFFICIENT" ||
+      last.evidenceVerdict === "EVIDENCE_CONTRADICTED")
   );
 }

@@ -780,6 +780,22 @@ describe("projectVerifyHumanView — HITL 闲聊不打绿勾 (SC2/SC5)", () => {
     );
   });
 
+  it("HITL skip + CONTRADICTED + passed → 字段缺席（无绿勾）", () => {
+    assert.equal(
+      projectVerifyHumanView({
+        outcome: "passed",
+        rounds: 1,
+        records: [
+          {
+            reason: "hitl_skip_completion_judge",
+            evidenceVerdict: "EVIDENCE_CONTRADICTED",
+          },
+        ],
+      }),
+      undefined
+    );
+  });
+
   it("HITL SUFFICIENT 短路（无 skip+INSUFFICIENT）→ 仍 passed", () => {
     assert.deepEqual(
       projectVerifyHumanView({

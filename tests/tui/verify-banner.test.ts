@@ -489,6 +489,23 @@ describe("projectVerifyHumanView + banner — HITL 闲聊不打绿勾 (SC2/SC5)"
     expect(projectVerifyBanner(slot, "auto", 80)).toEqual([]);
   });
 
+  test("HITL skip + CONTRADICTED → slot none → 人不读验证通过", () => {
+    const view = projectVerifyHumanView({
+      outcome: "passed",
+      rounds: 1,
+      records: [
+        {
+          reason: "hitl_skip_completion_judge",
+          evidenceVerdict: "EVIDENCE_CONTRADICTED",
+        },
+      ],
+    });
+    const slot = verifyFromWire(view);
+    expect(slot).toEqual({ kind: "none" });
+    expect(projectVerifyBanner(slot, "hitl", 80)).toEqual([]);
+    expect(projectVerifyBanner(slot, "auto", 80)).toEqual([]);
+  });
+
   test("HITL SUFFICIENT 短路 passed → 仍显示验证通过", () => {
     const view = projectVerifyHumanView({
       outcome: "passed",

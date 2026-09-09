@@ -830,10 +830,10 @@ async function runVerifyLoopBody(opts: {
     //   EVIDENCE_CONTRADICTED → goal 功能 (completionMode auto) / omitted:
     //     true-failure (进修正轮);
     //     HITL: 与 INSUFFICIENT 同 EXIT (跳过完成向判官, 不 true-failure,
-    //     不补跑/不打回干活模型; ADR-0073);
+    //     不补跑/不打回干活模型; ADR-0073; HITL 落 evidenceVerdict 供人读投影);
     //   EVIDENCE_INSUFFICIENT → 落原 produceObservation (判官/命令既有机制), 且把
     //     evidenceVerdict + gamingSignals 合并进本轮 observation (buildRecord Postel
-    //     落盘)。SUFFICIENT/CONTRADICTED 不落 evidenceVerdict (B3 Postel 语义)。
+    //     落盘)。SUFFICIENT 与 goal 功能 CONTRADICTED 不落 evidenceVerdict (B3)。
     const evidenceReport = checkEvidence({
       messages: current.result.messages,
       claimIndex: deriveClaimIndex(current.result.messages),
@@ -863,7 +863,13 @@ async function runVerifyLoopBody(opts: {
       if (options.completionMode === "hitl") {
         // EXIT: HITL CONTRADICTED consumes like INSUFFICIENT — skip
         // completion judge, no true-failure, no extra worker/rerun round.
+        // Persist evidenceVerdict so human projection can hide 「验证通过」
+        // (B3 Postel still omits verdict on goal-功能 true-failure / SUFFICIENT).
         observation = await opts.produceObservation(round, current);
+        pendingEvidence = {
+          evidenceVerdict: "EVIDENCE_CONTRADICTED",
+          gamingSignals: evidenceReport.gamingSignals,
+        };
       } else {
         observation = {
           verdict: "true-failure",
@@ -914,8 +920,8 @@ async function runVerifyLoopBody(opts: {
         gamingSignals: evidenceReport.gamingSignals,
       };
     }
-    // 仅 INSUFFICIENT 轮合并 evidenceVerdict/gamingSignals (Postel: 短路轮
-    // 不携带这些字段, buildRecord 不落盘)。
+    // INSUFFICIENT + HITL CONTRADICTED skip 合并 evidenceVerdict (Postel:
+    // SUFFICIENT / goal 功能 CONTRADICTED 短路不携带, buildRecord 不落盘)。
     if (pendingEvidence !== undefined) {
       observation = {
         ...observation,
