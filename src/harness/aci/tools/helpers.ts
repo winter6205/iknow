@@ -16,6 +16,10 @@ export type {
   SpawnWithStopSignalResult,
 } from "../../sandbox/runner.js";
 
+/** T8: bash / write-tool description pair. Write-root segment stays silent on /tmp (ADR-0069). */
+export const FENCE_WRITE_GUIDANCE =
+  "Write into the project at taskRoot. Write /tmp when it need not enter the repo (same lifetime as the current identity, not a delivery destination).";
+
 /**
  * Resolve a target through symlinks and require its real location to stay under
  * the real workspace root. Missing write targets are supported by realpathing
@@ -109,7 +113,7 @@ export async function resolveWithinRoot(
     // 写根缺席 → 退回原文案 (不崩,文案退化到 base 形态)。
     const writeRootHint =
       realRoot.length > 0
-        ? ` (current write root is the live taskRoot: ${realRoot}; /tmp is the sandbox tmpfs — process-temporary and not a delivery destination. Retry with a path relative to the taskRoot.)`
+        ? ` (current write root is the live taskRoot: ${realRoot}; /tmp is the current-identity pad — same lifetime as this identity and not a delivery destination. Retry with a path relative to the taskRoot.)`
         : "";
     throw new ToolExecutionError(
       `path outside workspace: ${resolvedTarget} not under ${realRoot}${writeRootHint}`

@@ -27,6 +27,7 @@ import { restore, type SecretRegistry } from "../../secret-roundtrip/index.js";
 import type { BackgroundTaskManager } from "../../background/manager.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
+import { FENCE_WRITE_GUIDANCE } from "./helpers.js";
 
 interface BashInput {
   readonly command?: unknown;
@@ -275,7 +276,8 @@ export function createBashTool(
   return Object.freeze({
     name: "bash",
     description:
-      "Run shell commands inside the bwrap sandbox for builds, scripts, or one-shot operations without a dedicated tool; pair with read_file / grep / glob / edit_file / write_file for file work inside the fence. Returns {code, stdout, stderr}; stdout/stderr truncated at 12000 code points per stream. Hard-walls reject obvious destructive patterns and sensitive-path targets before spawn; non-hard-wall commands go through the normal permission flow. For long-running services (http servers, daemons, continuous watchers), set background: true — the call returns {task_id, log_path} immediately and the process keeps running beyond the call, outside the build-tier timeout; then read the log tail with bash_output(task_id, max_bytes?) (default 12 KB, cap 100 KB) and terminate the process group with bash_stop(task_id) (SIGTERM, 2-second grace, then SIGKILL; idempotent). The fence is network-isolated by default; set network: true for host-network access, routed through explicit permission approval. /tmp inside the fence is the sandbox tmpfs — process-temporary and not a delivery destination: files written under /tmp exist only for the duration of the calling command and disappear when it ends; route deliverables through the taskRoot, not /tmp.",
+      "Run shell commands inside the bwrap sandbox for builds, scripts, or one-shot operations without a dedicated tool; pair with read_file / grep / glob / edit_file / write_file for file work inside the fence. Returns {code, stdout, stderr}; stdout/stderr truncated at 12000 code points per stream. Hard-walls reject obvious destructive patterns and sensitive-path targets before spawn; non-hard-wall commands go through the normal permission flow. For long-running services (http servers, daemons, continuous watchers), set background: true — the call returns {task_id, log_path} immediately and the process keeps running beyond the call, outside the build-tier timeout; then read the log tail with bash_output(task_id, max_bytes?) (default 12 KB, cap 100 KB) and terminate the process group with bash_stop(task_id) (SIGTERM, 2-second grace, then SIGKILL; idempotent). The fence is network-isolated by default; set network: true for host-network access, routed through explicit permission approval. " +
+      FENCE_WRITE_GUIDANCE,
     inputSchema: {
       type: "object",
       properties: {

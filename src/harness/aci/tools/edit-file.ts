@@ -19,6 +19,7 @@ import type { AciToolDef } from "../types.js";
 import { ToolExecutionError } from "../../errors.js";
 import {
   asToolExecutionError,
+  FENCE_WRITE_GUIDANCE,
   lintPatch,
   resolveWithinRoot,
 } from "./helpers.js";
@@ -200,7 +201,8 @@ export function createEditFileTool(
   return Object.freeze({
     name: TOOL_NAME,
     description:
-      "Apply a surgical in-place edit to an existing file when you have the exact `old_str` to anchor on; pair with read_file to confirm current contents before editing. Replaces old_str with new_str via split-join (no regex semantics — `$`/`&` literals pass through unchanged); lint(new_str) rejects unbalanced patches before any write. Default replace_all=false — the file must contain old_str exactly once; set replace_all=true to replace every occurrence.",
+      "Apply a surgical in-place edit to an existing file when you have the exact `old_str` to anchor on; pair with read_file to confirm current contents before editing. Replaces old_str with new_str via split-join (no regex semantics — `$`/`&` literals pass through unchanged); lint(new_str) rejects unbalanced patches before any write. Default replace_all=false — the file must contain old_str exactly once; set replace_all=true to replace every occurrence. " +
+      FENCE_WRITE_GUIDANCE,
     inputSchema: {
       type: "object",
       properties: {

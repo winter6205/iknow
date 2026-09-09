@@ -14,7 +14,11 @@ import { dirname, relative, resolve } from "node:path";
 import { ToolExecutionError } from "../../errors.js";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
-import { asToolExecutionError, resolveWithinRoot } from "./helpers.js";
+import {
+  asToolExecutionError,
+  FENCE_WRITE_GUIDANCE,
+  resolveWithinRoot,
+} from "./helpers.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
 
@@ -189,7 +193,8 @@ export function createWriteFileTool(
   return Object.freeze({
     name: TOOL_NAME,
     description:
-      "Create a new file or fully overwrite an existing one inside the workspace root; prefer edit_file for surgical changes to an existing file. Writes verbatim UTF-8 (no template processing); parent directories auto-created unless create_directories=false. Writes outside the workspace root are out of scope.",
+      "Create a new file or fully overwrite an existing one inside the workspace root; prefer edit_file for surgical changes to an existing file. Writes verbatim UTF-8 (no template processing); parent directories auto-created unless create_directories=false. Writes outside the workspace root are out of scope. " +
+      FENCE_WRITE_GUIDANCE,
     inputSchema: {
       type: "object",
       properties: {

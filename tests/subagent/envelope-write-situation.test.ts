@@ -17,6 +17,7 @@ import {
   WORKER_SCHEMA,
 } from "../../src/harness/subagent/envelope.ts";
 import type { WriteSituation } from "../../src/harness/session-roots.ts";
+import { writeRootSegment } from "../../src/harness/skill/body.ts";
 
 describe("WorkerEnvelope.writeSituation — T6 wire schema (additive)", () => {
   it("envelope 缺 writeSituation（旧 wire）→ 解析成功,writeSituation = undefined", () => {
@@ -99,5 +100,36 @@ describe("WorkerEnvelope.writeSituation — T6 wire schema (additive)", () => {
       "no_writable_root",
     ];
     assert.equal(allSituations.length, 3);
+  });
+});
+
+/**
+ * T8 (plans/parent-visible-tmp.md) — 写处境 / 写根段仍只点名交付根
+ * （ADR-0069：不把 `/tmp` 揉进写根段）。Boundaries 两句落在 bash / 写工具
+ * description，不进本段。
+ */
+describe("T8 write-root segment names the delivery root only (ADR-0069)", () => {
+  it("writeRootSegment 三态都不提 /tmp（交付根路径本身也不在 /tmp 下）", () => {
+    const deliveryRoot = "/repo/.iknow/worktrees/conv-t8";
+    const situations: ReadonlyArray<WriteSituation> = [
+      "writable_main",
+      "writable_tree",
+      "no_writable_root",
+    ];
+    for (const situation of situations) {
+      const segment = writeRootSegment(situation, deliveryRoot);
+      assert.ok(segment, `writeRootSegment(${situation}) must render`);
+      assert.equal(
+        segment.includes("/tmp"),
+        false,
+        `${situation} write-root segment must not mention /tmp; got ${JSON.stringify(segment)}`
+      );
+      if (situation !== "no_writable_root") {
+        assert.ok(
+          segment.includes(deliveryRoot),
+          `${situation} must name the delivery root`
+        );
+      }
+    }
   });
 });
