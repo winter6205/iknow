@@ -1159,3 +1159,81 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// review-fix (M4): file-mode (`traceFilePath`) 直接 unit test。T5 起主会话与
+// per-agent 落点都收敛到 file-mode,但此前只被 manager / worker 的间接测试覆
+// 盖 —— 这里把互斥合约 (jsonl.ts 工厂) 直接钉死:
+//   1. file-mode 落点 = traceFilePath 本身 (不再拼 <dir>/<convId>.jsonl);
+//   2. 双键同传 fail-loud;
+//   3. 双键同缺 fail-loud;
+//   4. 目录模式 rotation 不作用于 file-mode。
+// ---------------------------------------------------------------------------
+
+describe("createJsonlTraceService — file-mode (traceFilePath) 互斥合约", () => {
+  it("file-mode 落点 = traceFilePath 本身, conversation_id 逐行写入", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "iknow-trace-jsonl-file-"));
+    try {
+      const target = join(dir, "subagents", "agent-fixed-id.jsonl");
+      const svc = createJsonlTraceService({
+        traceFilePath: target,
+        conversationId: "fixed-id",
+      });
+      await svc.recordToolCall(SAMPLE_TOOL);
+      assert.equal(existsSync(target), true, "file written at exact path");
+      const line = JSON.parse(readFileSync(target, "utf8").trim()) as Record<
+        string,
+        unknown
+      >;
+      assert.equal(line["conversation_id"], "fixed-id");
+      assert.equal(line["record_type"], "tool_call");
+      // 绝不产生 <dir>/<convId>.jsonl 目录模式形状的额外文件。
+      assert.equal(existsSync(join(dir, "subagents", "fixed-id.jsonl")), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("双键同传 → 构造期 fail-loud (both keys)", () => {
+    assert.throws(
+      () =>
+        createJsonlTraceService({
+          filePath: scratch,
+          traceFilePath: join(scratch, "x.jsonl"),
+          conversationId: "c",
+        }),
+      /both filePath and traceFilePath/
+    );
+  });
+
+  it("双键同缺 → 构造期 fail-loud (neither key)", () => {
+    assert.throws(
+      () =>
+        createJsonlTraceService({
+          conversationId: "c",
+        } as Parameters<typeof createJsonlTraceService>[0]),
+      /requires either filePath/
+    );
+  });
+
+  it("file-mode 不触发 rotation (无轮转目标, *.1.jsonl 永不产生)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "iknow-trace-jsonl-rot-"));
+    try {
+      const target = join(dir, "trace.jsonl");
+      const svc = createJsonlTraceService({
+        traceFilePath: target,
+        conversationId: "rot",
+        // 目录模式下的保守上限 (rotation.ts 默认 5MB) —— 用极小值证明
+        // file-mode 根本不进 maybeRotate 分支: 若轮转生效,首次写入就会
+        // 产出 trace.1.jsonl。
+        rotation: { maxFileBytes: 1 },
+      });
+      await svc.recordToolCall(SAMPLE_TOOL);
+      await svc.recordToolCall(SAMPLE_TOOL);
+      assert.equal(existsSync(join(dir, "trace.1.jsonl")), false);
+      assert.equal(existsSync(join(dir, "trace.2.jsonl")), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

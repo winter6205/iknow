@@ -252,8 +252,9 @@ export interface CreateWorkerDepsOptions {
   readonly traceFilePath?: string;
   /**
    * T5: 配套 traceFilePath —— 该 worker 的 taskId(parent spawn 时已锁)。
-   * 缺席时 conversationId 回退 `randomUUID()`(仅 legacy 退路形态,生产
-   * 装配层永远会同时传 traceFilePath + taskId 配对)。
+   * 生产装配层 (runSubagentWorker 经 manager envelope 透传) 永远会同时传
+   * `traceFilePath + taskId` 配对;两键同时在场是 file-mode 装配的前提,
+   * traceFilePath 缺席时本字段被忽略(legacy IKNOW_TRACE_OUT 退路)。
    */
   readonly taskId?: string;
 }
@@ -507,24 +508,40 @@ export async function createWorkerRuntime(
       : {}),
     system,
     promptTools: reg.visibleSchemas,
-    // cli.ts 同形态: traceOut flag > IKNOW_TRACE_OUT env > ./trace/。worker
-    // 继承父进程 env (ADR-0001), 这里再读一次 IKNOW_TRACE_OUT 保持解析顺序
-    // 一致 (cli.ts resolveTracePath 形态)。
+    // T3 (plans/session-folder-consolidation.md) 已退役 `./trace/` cwd-relative
+    // 退路(SC6)—— 主会话 trace 锚走会话文件夹 (resolveServeDataDir() 同源)。
+    // worker 继承父进程 env (ADR-0001),这里再读一次 IKNOW_TRACE_OUT 保持解析
+    // 顺序一致 (cli.ts resolveTraceRoot 形态)。traceFilePath 在场时优先 (T5
+    // SC8 + L2,见下方 trace 装配分支)。
     //
-    // T5 (plans/session-folder-consolidation.md / SC8 + L2):opts.traceFilePath
+    // T5 (plans/session-folder-consolidation.md / SC8 + L2): opts.traceFilePath
     // 在场时(由 envelope.traceFilePath 透传,父 manager 已经替这个 taskId
     // 建好 `<父会话文件夹>/subagents/agent-<taskId>.jsonl`),worker 直接 file-mode
-    // 落该路径 + conversationId=taskId —— 替代 `randomUUID()` L2 假 scope
-    // (已退役,per-agent 形态优先)。
+    // 落该路径 + conversationId=taskId。
+    //
+    // review-fix (H1): `filePath` 是 JsonlTraceOptions 的目录模式键(目录 +
+    // conversationId 派生出 <dir>/<convId>.jsonl),把文件路径当目录会让工
+    // 厂把目标文件当目录 → 子目录 <filePath>/<taskId>.jsonl 不存在 → 静默
+    // 零行落盘。修法:走 `traceFilePath` (file-mode 键) + `conversationId` 必
+    // 须 == opts.taskId。taskId 缺席 → 装配期 fail-loud,不再用 `randomUUID()`
+    // 假 scope(SC8 退役 L2,pack 配对契约写死)。
+    //
     // 缺席 → 走 IKNOW_TRACE_OUT / defaultTraceDir 退路(legacy envelope / 跨
     // 版本 resume / 测试未传, byte-stable)。
     trace:
       opts.trace ??
       (opts.traceFilePath !== undefined
-        ? createJsonlTraceService({
-            filePath: opts.traceFilePath,
-            conversationId: opts.taskId ?? randomUUID(),
-          })
+        ? (() => {
+            if (opts.taskId === undefined) {
+              throw new Error(
+                "createWorkerDeps: traceFilePath 必须在场时 taskId 也在场(file-mode 配对)"
+              );
+            }
+            return createJsonlTraceService({
+              traceFilePath: opts.traceFilePath,
+              conversationId: opts.taskId,
+            });
+          })()
         : createJsonlTraceService({
             filePath: process.env.IKNOW_TRACE_OUT ?? defaultTraceDir,
             conversationId: randomUUID(),
