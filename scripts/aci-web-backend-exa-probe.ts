@@ -4,14 +4,24 @@
  * 与 #826 T8 同档：真打 api.exa.ai，不进默认 `npm test` 收集。
  * 缺 / 空白 `EXA_API_KEY` → 打印 Not run 并以 0 退出，不得 mock 声称 SC10 已过。
  * 有 key → 同一次跑通 createWebSearchTool（Exa search）与
- * createWebFetchTool（Exa contents），backend=exa。非 2xx / 超时走工具 typed 失败。
+ * createWebFetchTool（Exa contents），backend=exa + key（阅读意图路径
+ * 是 api.exa.ai/contents，不是本机 guard）。handler 带 AbortSignal.timeout
+ * （SEARCH_TIMEOUT_MS / FETCH_TIMEOUT_MS）；超时是 typed 失败，不是 hang。
+ * 非 2xx / 超时走工具 typed 失败。
  * 永不打印 key。
  *
  * 运行：`npm run probe:aci-web-backend`
  */
 import { ToolExecutionError } from "../src/harness/errors.js";
-import { createWebFetchTool } from "../src/harness/aci/tools/web-fetch.js";
-import { createWebSearchTool } from "../src/harness/aci/tools/web-search.js";
+import {
+  createWebFetchTool,
+  FETCH_TIMEOUT_MS,
+  UNTRUSTED_BANNER,
+} from "../src/harness/aci/tools/web-fetch.js";
+import {
+  createWebSearchTool,
+  SEARCH_TIMEOUT_MS,
+} from "../src/harness/aci/tools/web-search.js";
 
 const NOT_RUN = "Not run: npm run probe:aci-web-backend (EXA_API_KEY unset)";
 const FETCH_URL = "https://example.com/";
@@ -50,18 +60,33 @@ async function main(): Promise<void> {
 
   try {
     const searchOut = String(
-      await search.handler({ query: SEARCH_QUERY, max_results: 1 })
+      await search.handler(
+        { query: SEARCH_QUERY, max_results: 1 },
+        { signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS) }
+      )
     );
     if (!searchOut.includes("URL:")) {
       throw new Error("web_search returned no URL line");
     }
     const fetchUrl = firstResultUrl(searchOut) ?? FETCH_URL;
-    const fetchOut = String(await fetchTool.handler({ url: fetchUrl }));
-    if (!fetchOut.includes("Status:")) {
-      throw new Error("web_fetch returned no Status line");
+    const fetchOut = String(
+      await fetchTool.handler(
+        { url: fetchUrl },
+        { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }
+      )
+    );
+    const bannerAt = fetchOut.indexOf(UNTRUSTED_BANNER);
+    const body =
+      bannerAt >= 0
+        ? fetchOut.slice(bannerAt + UNTRUSTED_BANNER.length).trim()
+        : "";
+    if (bannerAt < 0 || !(body.trim().length > 0)) {
+      throw new Error("web_fetch contents path returned empty text body");
     }
     console.log("PASS web_search (Exa search) hit api.exa.ai");
-    console.log("PASS web_fetch (Exa contents) hit api.exa.ai");
+    console.log(
+      "PASS web_fetch (Exa contents) intended path api.exa.ai/contents"
+    );
     console.log("SC10 PASS");
   } catch (err) {
     const message =

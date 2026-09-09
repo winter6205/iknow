@@ -25,6 +25,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
+import { createWebSearchTool } from "../../../../src/harness/aci/tools/web-search.ts";
 import {
   createWebFetchTool,
   FETCH_OUTPUT_BUDGET,
@@ -770,5 +771,42 @@ describe("ACI web backend — fetch engines (SC5–SC7)", () => {
     assert.equal(vendorHits, 1);
     assert.match(a, /local-a/);
     assert.match(b, /vendor-b/);
+  });
+
+  it("Promise.all web_search + web_fetch keep independent backends (S2 concurrent)", async () => {
+    const search = createWebSearchTool({
+      fetch: async () => ({
+        status: 200,
+        contentType: "text/html",
+        body:
+          `<li class="b_algo" data-idx="0"><h2><a target="_blank" href="https://site1.example.com/page"><strong>Bing Title 1</strong></a></h2>` +
+          `<div class="b_caption"><p class="b_lineclamp2">Bing Snippet 1</p></div></li>`,
+      }),
+      lookup: okLookup,
+      backend: "bing",
+    });
+    const fetchTool = createWebFetchTool({
+      fetch: async () => {
+        throw new Error("local fetch must not run");
+      },
+      lookup: okLookup,
+      backend: "exa",
+      exaApiKey: "exa-test",
+      vendorFetch: async () =>
+        new Response(
+          JSON.stringify({
+            results: [
+              { url: "https://example.com/doc", text: "exa-fetch-body" },
+            ],
+          }),
+          { status: 200 }
+        ),
+    });
+    const [searchOut, fetchOut] = (await Promise.all([
+      search.handler({ query: "parallel" }),
+      fetchTool.handler({ url: "https://example.com/doc" }),
+    ])) as string[];
+    assert.match(searchOut, /Bing Title 1/);
+    assert.match(fetchOut, /exa-fetch-body/);
   });
 });

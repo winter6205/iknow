@@ -36,7 +36,7 @@ import {
 const DEFAULT_MAX_CHARS = 8_000;
 const MIN_MAX_CHARS = 500;
 const MAX_MAX_CHARS = 16_000;
-const FETCH_TIMEOUT_MS = 15_000;
+export const FETCH_TIMEOUT_MS = 15_000;
 /** 与 executor OUTPUT_HARD_CAP / ADR-0006 对齐；本模块复制常量，不反向 import executor。 */
 export const FETCH_OUTPUT_BUDGET = 20_000;
 const WINDOW_DIGIT_WIDTH = 10;
@@ -109,7 +109,13 @@ export function createWebFetchTool(deps?: WebFetchToolDeps): AciToolDef {
     const cacheHit = cachedResponse !== undefined;
     const responsePromise =
       cachedResponse ??
-      loadFetchResponse(parsed, capability.fetchEngine, guardDeps, deps, ctx);
+      loadFetchResponse({
+        parsed,
+        fetchEngine: capability.fetchEngine,
+        guardDeps,
+        deps,
+        ctx,
+      });
     if (!cacheHit) {
       responseCache.set(parsed.url, responsePromise);
       responsePromise.catch(() => {
@@ -198,13 +204,19 @@ export function createWebFetchTool(deps?: WebFetchToolDeps): AciToolDef {
   });
 }
 
-function loadFetchResponse(
-  parsed: FetchInput,
-  fetchEngine: "local" | "exa",
-  guardDeps: GuardDeps,
-  deps: WebFetchToolDeps | undefined,
-  ctx: ToolExecutionContext | undefined
-): Promise<GuardPublicResponse> {
+function loadFetchResponse({
+  parsed,
+  fetchEngine,
+  guardDeps,
+  deps,
+  ctx,
+}: {
+  readonly parsed: FetchInput;
+  readonly fetchEngine: "local" | "exa";
+  readonly guardDeps: GuardDeps;
+  readonly deps: WebFetchToolDeps | undefined;
+  readonly ctx: ToolExecutionContext | undefined;
+}): Promise<GuardPublicResponse> {
   if (fetchEngine === "exa") {
     const apiKey = deps?.exaApiKey?.trim() ?? "";
     return fetchExaContents({

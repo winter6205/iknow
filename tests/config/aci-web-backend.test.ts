@@ -73,4 +73,33 @@ describe("resolveWebCapability", () => {
     assert.ok(!contentsSrc.includes("tavily"));
     assert.ok(!contentsSrc.includes("brave"));
   });
+
+  it("SC10 probe binds AbortSignal.timeout to SEARCH/FETCH module constants", () => {
+    const probeSrc = readFileSync(
+      new URL("../../scripts/aci-web-backend-exa-probe.ts", import.meta.url),
+      "utf8"
+    );
+    assert.match(probeSrc, /AbortSignal\.timeout\(SEARCH_TIMEOUT_MS\)/);
+    assert.match(probeSrc, /AbortSignal\.timeout\(FETCH_TIMEOUT_MS\)/);
+    assert.match(probeSrc, /SEARCH_TIMEOUT_MS/);
+    assert.match(probeSrc, /FETCH_TIMEOUT_MS/);
+  });
+
+  it("SC10 probe fetch PASS requires a non-empty body on the contents path", () => {
+    const probeSrc = readFileSync(
+      new URL("../../scripts/aci-web-backend-exa-probe.ts", import.meta.url),
+      "utf8"
+    );
+    assert.match(probeSrc, /UNTRUSTED_BANNER/);
+    assert.match(probeSrc, /api\.exa\.ai\/contents/);
+    assert.match(probeSrc, /trim\(\)\.length\s*>\s*0/);
+  });
+
+  it("loadFetchResponse takes one options object (S6 param pack)", () => {
+    const fetchSrc = readFileSync(
+      new URL("../../src/harness/aci/tools/web-fetch.ts", import.meta.url),
+      "utf8"
+    );
+    assert.match(fetchSrc, /function loadFetchResponse\(\s*\{/);
+  });
 });

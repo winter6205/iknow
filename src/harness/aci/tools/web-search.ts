@@ -54,7 +54,7 @@ const MAX_TITLE_CHARS = 200;
 const MAX_SNIPPET_CHARS = 500;
 const MAX_URL_CHARS = 2_000;
 const SEARCH_OUTPUT_BUDGET = 8_000;
-const SEARCH_TIMEOUT_MS = 20_000;
+export const SEARCH_TIMEOUT_MS = 20_000;
 /** B1 默认端点:Bing(中国区可达,DDG 在此类网络不可达)。DDG html 仍可经覆写。 */
 const DEFAULT_SEARCH_ENDPOINT = "https://cn.bing.com/search";
 
