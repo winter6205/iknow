@@ -22,14 +22,14 @@ Every map and ticket has a **name** — its issue title. In everything the human
 
 ## Input
 
-A loose idea (one-line ask) or an existing map (URL/number) on the repo's issue tracker. Wayfinder reads, doesn't write code.
+A loose idea (one-line ask) or an existing map (local path, or GitHub URL/number). Wayfinder reads, doesn't write code.
 
-| Input source                       | 形态                                    | 消费方式                                                                                          |
-| ---------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Loose idea from operator           | inline one-line ask                     | `## Invocation` chart mode: drives the `arthurpower:logicsync` session that names the destination |
-| Existing map (URL or issue number) | tracker URL / id                        | `## Invocation` work-through mode: load low-res map, pick or accept a frontier ticket             |
-| Map's `## Notes` block             | tracker issue body                      | names skills every session should consult before claiming                                         |
-| Related / closed ticket bodies     | tracker issue bodies, fetched on demand | zoomed in only when the current ticket depends on their resolution                                |
+| Input source                        | 形态                                       | 消费方式                                                                                          |
+| ----------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| Loose idea from operator            | inline one-line ask                        | `## Invocation` chart mode: drives the `arthurpower:logicsync` session that names the destination |
+| Existing map (path, URL, or number) | `docs/wayfinder/` path, or GitHub URL / id | `## Invocation` work-through mode: load low-res map, pick or accept a frontier ticket             |
+| Map's `## Notes` block              | tracker issue body                         | names skills every session should consult before claiming                                         |
+| Related / closed ticket bodies      | tracker issue bodies, fetched on demand    | zoomed in only when the current ticket depends on their resolution                                |
 
 **What this skill does NOT consume**：code or deliverables (wayfinder produces decisions, not artefacts), `docs/CONTEXT.md` / ADR files (it emits decisions that may _trigger_ an ADR via `arthurpower:domain-modeling`, never reads or authors them), or any spec/plan (downstream — `arthurpower:spec-driven-development` owns the spec, `arthurpower:writing-plans` owns the plan).
 
@@ -52,7 +52,7 @@ The map is a single issue labelled `wayfinder:map` — the canonical artifact. I
 
 The map is an **index**, not a store. A decision lives in exactly one place — its ticket — so the map only gists and links.
 
-**Where the map, its tickets, blocking, and frontier queries live is tracker-specific.** The tracker should have been provided — set one up if not; default to GitHub issues (label `wayfinder:map`). Local markdown (`docs/wayfinder/tickets/`) is a fallback only, when the `gh` CLI is unavailable (no GitHub remote, or `gh` not installed).
+**Where the map, its tickets, blocking, and frontier queries live is tracker-specific.** Default to local markdown (`docs/wayfinder/tickets/`). GitHub issues (label `wayfinder:map`) only when the operator this run names GitHub / 「用 issue」. A working `gh` is not a trigger.
 
 The map and ticket body **templates** are disclosed at [`references/map-templates.md`](./references/map-templates.md) — load only when charting a new map.
 

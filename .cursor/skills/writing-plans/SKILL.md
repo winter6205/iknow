@@ -44,12 +44,11 @@ During harvest and while writing bullets: if the plan introduces or changes a do
 6. **Leave the plan in a file.** Write `plans/<feature>.md` (or the commit body if the change is the plan). Chat scrollback is not the artifact. The **待写入** list lives in this file (header or persist section).
 7. **persist.** 待写入清单空则跳过。否则立刻 invoke `domain-modeling`，只写清单上的项。 Done when: flushed or skipped. Tracker work below does not replace this step.
 
-## Tracker = GitHub (main path)
+## Tracker
 
-GitHub issues are the main path; local markdown is the fallback. The chosen path is recorded in the plan header so a reader knows why no tracker edges exist (fallback case).
+Default storage is local markdown: `plans/<feature>.md` is the plan. Acceptance does not require GitHub issues. A GitHub remote or a working `gh` is not a trigger.
 
-- **Main path:** load [`references/tracker.md`](references/tracker.md) and apply it — one issue per tracer bullet with native blocking edges.
-- **Fallback:** local `plans/<feature>.md` when there is no GitHub remote or no `gh` auth. Note the fallback rationale in the plan header.
+Load [`references/tracker.md`](references/tracker.md) only when the operator this run names GitHub issues (「用 issue」「发到 GitHub」). Then publish per that file.
 
 ## Neighbours
 
