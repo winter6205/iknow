@@ -30,7 +30,7 @@ const tempDirs: string[] = [];
 function storeFor(): SessionStore {
   const tmp = mkdtempSync(join(tmpdir(), "iknow-graph-reset-"));
   tempDirs.push(tmp);
-  return new SessionStore(tmp);
+  return new SessionStore(tmp, process.cwd());
 }
 afterAll(() => {
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
