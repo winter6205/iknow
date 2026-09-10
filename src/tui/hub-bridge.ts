@@ -42,6 +42,7 @@ import type {
 } from "../harness/memory/index.js";
 import type { VerifyConfig } from "../harness/verify/index.js";
 import type { GraphAssembly } from "../harness/graph/assembly.js";
+import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import type { VerifyAnswerView } from "../session-api/contract.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import type { IknowEnv, LlmEnv } from "../config/env.js";
@@ -213,6 +214,12 @@ export interface CreateTuiBridgeOptions {
    * 进不了下一次装配。缺席 = 本入口未接 overlay。
    */
   readonly graphAssembly?: GraphAssembly;
+  /**
+   * live-graph-phase1 T1 / ADR-0047 / ADR-0051:活图账本 host（TUI 装配点
+   * 自建后经这里交进 hub —— hub 按 conversationId 解析；resetSession /
+   * hub.shutdown 销毁）。缺席 = 本入口未接活图。
+   */
+  readonly liveGraphLedger?: LiveGraphLedgerHost;
   /** T3: 上下文窗口容量（tokens）。缺省 `DEFAULT_CONTEXT_WINDOW = 200_000`。 */
   readonly contextWindow?: number;
   /** T2: LLM env 覆盖源，透传给 SessionHub（override 路径重建 adapter 时用，
@@ -281,6 +288,8 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     verifyConfig: opts.verifyConfig,
     // D-α T5: 每条 postMessage 前拍一次 graph 装配快照（SC3 与 chat 同语义）。
     ...(opts.graphAssembly ? { graphAssembly: opts.graphAssembly } : {}),
+    // live-graph-phase1 T1:账本 host 注入 hub —— 按 conversationId 解析。
+    ...(opts.liveGraphLedger ? { liveGraphLedger: opts.liveGraphLedger } : {}),
     // T2: LLM env 覆盖源 —— TUI 启动期校验过的 env 透到 override 路径，
     // 避免 override 重建 adapter 时回退到 process.env（reviewer blocker）。
     ...(opts.overrideEnv ? { overrideEnv: opts.overrideEnv } : {}),

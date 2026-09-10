@@ -38,6 +38,7 @@ import {
   createGraphModeContext,
   resolveGraphMode,
 } from "./harness/graph/mode.js";
+import { createLiveGraphLedgerHost } from "./harness/graph/ledger.js";
 import { isIknowError } from "./shared/errors.js";
 import {
   isWorkspaceRootError,
@@ -319,6 +320,10 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   const graphMode = createGraphModeContext(
     resolveGraphMode({ settings: startupSettings.graph })
   );
+  // live-graph-phase1 T1 / ADR-0051:活图账本 host —— 单会话,生命周期与
+  // chat REPL 同寿（reset / 进程退出销毁）。CLI 不需要按 conversationId
+  // 区分,但仍走同一 host 形状（统一 build-engine 接线,不解分叉类型）。
+  const liveGraphLedger = createLiveGraphLedgerHost();
   // Review High-1 (2026-08-29):worktree isolation host 缝 —— provision 负责
   // 建 task worktree + 仅本会话根改绑（session-api worktree-rebind SSOT）。
   // store 与 chat-session 的 checkpointStore 同池（resolveServeDataDir()）。
@@ -353,6 +358,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     memory: { enabled: true } as const,
     permissionMode,
     graphMode,
+    liveGraphLedger,
     todoDir: todoProjectDir,
     // T5 (ADR-0071 / SC8 + L2): subagentsDir
     // 由 (projectDir, conversationId) 经 `resolveSubagentTraceDir` 派生 —— 与
@@ -415,6 +421,9 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   // shutdownDefaultLspPool 注释）。
   const chatProcessShutdown = async (): Promise<void> => {
     await activeEngineShutdown.current?.();
+    // live-graph-phase1 T1 / ADR-0051:会话结束销毁活图账本（SC3）。对象
+    // 本随进程回收,这里显式清掉冻结语义,不留"半活"引用。
+    liveGraphLedger.destroyAll();
     await shutdownDefaultLspPool();
   };
   registerShutdown({ shutdown: chatProcessShutdown });
@@ -438,6 +447,9 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     graphMode,
     // D-α T3: 每条查询行开跑前拍一次快照 —— 翻键「下一次 run() 生效」。
     graphAssembly: built.graphAssembly,
+    // live-graph-phase1 T1:账本 host 传给 chat-session —— 与 graphMode
+    // 平行,reset / 进程退出销毁。
+    liveGraphLedger,
     // T4: `--resume <id>` 续跑锚点。仅 chat 消费;ask/serve/tui 入口
     // 不传(解析虽 command-agnostic,host 各自决策)。undefined = 新开会话。
     resumeId: parsed.resumeId,

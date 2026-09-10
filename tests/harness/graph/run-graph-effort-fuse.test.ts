@@ -1,0 +1,289 @@
+/**
+ * live-graph-phase2 T3 — effort 熔断（spec SC7 / ADR-0057 / 0064）。
+ *
+ * 与 outcome-scheduler.test.ts / run-graph-failure-edges.test.ts 的分工：
+ * 熔断闸在 handler 的 executor 入口（run-graph-tool.ts 的 exec 闭包现装
+ * createEffortFuse），不在调度器 / 校验层里。本组测试走真 SubAgentManager
+ * + 假 child，验证：
+ *   - **SC7 熔断**：同一 id 第 9 次 executor 进入 → 整次调用 typed 拒、
+ *     第 9 进入零 spawn（调度收敛、不空转）。
+ *   - **SC7 合法绕回**：进入 ≤8 不熔断（7 次失败 + 第 8 次 done）。
+ *   - **SC7 冻结保留**：熔断后已 done 的 id 仍冻结（与 T2 violation 同一
+ *     partial-results 通道：先 freeze 再拒）。
+ *   - **熔断按单次调用计**：熔断后外环下一段交新 id 正常 spawn。
+ *   - **SC9 不回退**：plain Kahn 路径（无 onFailure）不装计数器。
+ *   - **ADR-0064**：阈值常量 = 8，不进 settings（createRunGraphTool deps
+ *     无阈值旋钮 —— typecheck 级守门，这里钉常量值本身）。
+ */
+
+import { describe, expect, it } from "vitest";
+
+import { createRunGraphTool } from "../../../src/harness/graph/run-graph-tool.ts";
+import { createLiveGraphLedgerHost } from "../../../src/harness/graph/ledger.ts";
+import { createEffortFuse } from "../../../src/harness/graph/effort-fuse.ts";
+import { EFFORT_FUSE_THRESHOLD } from "../../../src/harness/graph/effort-threshold.ts";
+import { ToolExecutionError } from "../../../src/harness/errors.ts";
+import {
+  makeManager,
+  settle,
+  ok,
+  fail,
+  waitForChildren,
+  parseCondensed as parse,
+} from "./_fake-manager.ts";
+
+const CONV = "conv-p2-t3";
+
+describe("createEffortFuse — 计数器单元", () => {
+  it("每 id 独立计数：第 9 次进入同一 id 才熔断", () => {
+    const fuse = createEffortFuse();
+    for (let i = 0; i < EFFORT_FUSE_THRESHOLD; i++) {
+      expect(fuse.enter("a")).toBe(true);
+    }
+    expect(fuse.signal.aborted).toBe(false);
+    expect(fuse.enter("a")).toBe(false); // 第 9 次
+    expect(fuse.signal.aborted).toBe(true);
+    expect(fuse.trippedBy).toBe("a");
+  });
+
+  it("不同 id 互不挤占；熔断后一切进入都拒且不再计数", () => {
+    const fuse = createEffortFuse();
+    for (let i = 0; i < EFFORT_FUSE_THRESHOLD; i++) {
+      expect(fuse.enter("a")).toBe(true);
+      expect(fuse.enter("b")).toBe(true);
+    }
+    expect(fuse.enter("a")).toBe(false);
+    expect(fuse.trippedBy).toBe("a");
+    expect(fuse.enter("b")).toBe(false);
+    expect(fuse.enter("c")).toBe(false);
+    expect(fuse.trippedBy).toBe("a");
+  });
+
+  it("ADR-0064：阈值常量 = 8（不进 settings —— deps 类型无旋钮，typecheck 守门）", () => {
+    expect(EFFORT_FUSE_THRESHOLD).toBe(8);
+  });
+});
+
+describe("run_graph effort fuse — SC7 第 9 次进入熔断", () => {
+  it("self-onFailure 恒 failed：第 9 进入不 spawn、整次调用 typed 拒、done 仍冻结", async () => {
+    const { manager, children } = makeManager();
+    const host = createLiveGraphLedgerHost();
+    const t = createRunGraphTool({
+      manager,
+      ledger: host,
+      isEnabled: () => true,
+    });
+    // b 依赖 a：先让 a done（冻结候选），再让 b 恒 failed 空转
+    const pending = t.handler(
+      {
+        nodes: [
+          { id: "a", task: "ta" },
+          { id: "b", task: "tb", deps: ["a"], onFailure: "b" },
+        ],
+      },
+      { conversationId: CONV }
+    );
+    await waitForChildren(children, 1);
+    settle(children[0]!, ok("A-OK"));
+    // b 进入 1..8 各 spawn 一次（children[1..8]）；b 依赖的 a 已 done，
+    // 同 id 再进入合法（失败边绕过 deps 门）。
+    for (let entry = 1; entry <= 8; entry++) {
+      await waitForChildren(children, entry + 1);
+      settle(children[entry]!, fail("crashed"));
+    }
+    // 第 9 次进入被熔断：不再 spawn，整次调用 typed 拒
+    await expect(pending).rejects.toThrow(ToolExecutionError);
+    await expect(pending).rejects.toThrow(/effort fuse/);
+    expect(children).toHaveLength(9); // a 1 次 + b 8 次，第 9 进入零 spawn
+    // partial-results（T2 violation 同通道）：done 先冻结再拒
+    const ledger = host.ledgerFor(CONV);
+    expect(ledger.frozenIds()).toContain("a");
+    expect(ledger.statusOf("a")).toBe("done");
+    await manager.shutdown();
+  });
+});
+
+describe("run_graph effort fuse — SC7 进入 ≤8 合法绕回不熔断", () => {
+  it("7 次失败 + 第 8 次进入 done：正常返回、不熔断", async () => {
+    const { manager, children } = makeManager();
+    const t = createRunGraphTool({ manager, isEnabled: () => true });
+    const pending = t.handler(
+      { nodes: [{ id: "b", task: "tb", onFailure: "b" }] },
+      { conversationId: CONV }
+    );
+    for (let entry = 1; entry <= 7; entry++) {
+      await waitForChildren(children, entry);
+      settle(children[entry - 1]!, fail("crashed"));
+    }
+    await waitForChildren(children, 8);
+    settle(children[7]!, ok("B-RECOVERED")); // 第 8 次进入（含首次）合法
+    const out = parse(await pending);
+    expect(children).toHaveLength(8);
+    expect(out.nodes).toEqual([
+      { id: "b", status: "done", output: "B-RECOVERED" },
+    ]);
+    await manager.shutdown();
+  });
+});
+
+describe("run_graph effort fuse — 熔断按单次调用计", () => {
+  it("熔断后外环下一段交新 id：正常 spawn、正常返回", async () => {
+    const { manager, children } = makeManager();
+    const host = createLiveGraphLedgerHost();
+    const t = createRunGraphTool({
+      manager,
+      ledger: host,
+      isEnabled: () => true,
+    });
+    // 第一段：a self-onFailure 恒 failed → 第 9 进入熔断
+    const first = t.handler(
+      { nodes: [{ id: "a", task: "ta", onFailure: "a" }] },
+      { conversationId: CONV }
+    );
+    for (let entry = 1; entry <= 8; entry++) {
+      await waitForChildren(children, entry);
+      settle(children[entry - 1]!, fail("crashed"));
+    }
+    await expect(first).rejects.toThrow(/effort fuse/);
+    expect(children).toHaveLength(8);
+    // 第二段（同一会话账本）：新 id 不受上一段熔断影响
+    const second = t.handler(
+      { nodes: [{ id: "n", task: "tn" }] },
+      { conversationId: CONV }
+    );
+    await waitForChildren(children, 9);
+    settle(children[8]!, ok("N-OK"));
+    const out = parse(await second);
+    expect(out.nodes).toEqual([{ id: "n", status: "done", output: "N-OK" }]);
+    await manager.shutdown();
+  });
+});
+
+describe("run_graph effort fuse — SC7 冻结保留：fuse-trip 也冻真 failed", () => {
+  it("fuse 熔断后本段真实 failed 的 id 也冻结（避免下段剩余子图重跑）", async () => {
+    const { manager, children } = makeManager();
+    const host = createLiveGraphLedgerHost();
+    const t = createRunGraphTool({
+      manager,
+      ledger: host,
+      isEnabled: () => true,
+    });
+    // c 带 self-onFailure 恒 failed 空转（第 9 进入触发熔断）；d 是无失败边
+    // 的普通节点，wave 0 真跑一次即 failed —— 那是真终结而非 cancel 症状。
+    const pending = t.handler(
+      {
+        nodes: [
+          { id: "c", task: "tc", onFailure: "c" },
+          { id: "d", task: "td" },
+        ],
+      },
+      { conversationId: CONV }
+    );
+    // spawn 顺序：wave 0 = c1, d1（children 1-2）；此后每波 c 再进
+    // （c2..c8 = children 3-9，共 8 次）；c 第 9 进入零 spawn、熔断。
+    for (let entry = 1; entry <= 9; entry++) {
+      await waitForChildren(children, entry);
+      settle(children[entry - 1]!, fail("crashed"));
+    }
+    await expect(pending).rejects.toThrow(/effort fuse/);
+    expect(children).toHaveLength(9);
+    // F2：fuse 熔断 ≠ 调用侧 abort —— 本段真实 failed 的结局必须冻结，
+    // 否则下一段剩余子图重交 d / c 会被允许再 spawn，违反 ADR-0050。
+    const ledger = host.ledgerFor(CONV);
+    expect(ledger.statusOf("d")).toBe("failed");
+    expect(ledger.statusOf("c")).toBe("failed");
+    await manager.shutdown();
+  });
+});
+
+describe("run_graph effort fuse — 熔断时同波 in-flight 兄弟照实落定（不喂节点 signal）", () => {
+  it("e 与第 9 进入同批且先 spawn：熔断后 e settle ok → e 落 done、冻结 done（不误标 failed、不丢）", async () => {
+    const { manager, children } = makeManager();
+    const host = createLiveGraphLedgerHost();
+    const t = createRunGraphTool({
+      manager,
+      ledger: host,
+      isEnabled: () => true,
+    });
+    // 结构说明（为什么这条测试长这样）：同批 Promise.all 等全部节点
+    // 落定，所以「熔断时 in-flight 的兄弟」只能与第 9 进入**同批**，
+    // 且 executor 进入顺序必须在 s(9) 之前（fuse abort 后 enter 恒
+    // false，晚于 s(9) 进入的节点会零 spawn 直接 failed）。做法：
+    //   - s(self-onFailure) 每波空转一次（8 次合法进入），第 9 进入
+    //     在 wave 8 触发熔断；
+    //   - h1..h7→g 的 done 链把 e 的 deps 晋升精确延迟到 wave 8
+    //     （g 在 wave 7 落定 done → e 晋升）；
+    //   - s 排在 spec 末位 → 每波 batch 里 done 链的晋升先于 s 的
+    //     self-kick → wave 8 batch = [e, s(9)]，e 先 spawn 成
+    //     in-flight，s(9) 随后熔断。
+    // fuse.signal 只喂调度器、不喂节点 executor：e 的 in-flight
+    // child 不被打断，settle ok 后按真实结局落 done 并冻结（T2
+    // violation 同一 partial-results 通道：先 freeze 再 typed 拒）。
+    const pending = t.handler(
+      {
+        nodes: [
+          { id: "h1", task: "t1" },
+          { id: "h2", task: "t2", deps: ["h1"] },
+          { id: "h3", task: "t3", deps: ["h2"] },
+          { id: "h4", task: "t4", deps: ["h3"] },
+          { id: "h5", task: "t5", deps: ["h4"] },
+          { id: "h6", task: "t6", deps: ["h5"] },
+          { id: "h7", task: "t7", deps: ["h6"] },
+          { id: "g", task: "tg", deps: ["h7"] },
+          { id: "e", task: "te", deps: ["g"] },
+          { id: "s", task: "ts", onFailure: "s" },
+        ],
+      },
+      { conversationId: CONV }
+    );
+    // waves 0-6：每批 [h(w+1), s(w+1)]（h 晋升先于 s 的 self-kick）。
+    // children[2w]=h(w+1)、children[2w+1]=s(w+1)。h 全部 ok、s 全部
+    // failed（s 的 8 次合法进入 = children 1,3,5,7,9,11,13,15）。
+    for (let w = 0; w <= 6; w++) {
+      await waitForChildren(children, 2 * w + 2);
+      settle(children[2 * w]!, ok(`H${w + 1}`));
+      settle(children[2 * w + 1]!, fail("crashed"));
+    }
+    // wave 7：[g, s(8)]（g 由 h7 晋升）。g ok、s(8) failed —— s(8)
+    // 的 self-kick 与 g 的 e 晋升把 wave 8 凑成 [e, s(9)]。
+    await waitForChildren(children, 16);
+    settle(children[14]!, ok("G-OK"));
+    settle(children[15]!, fail("crashed"));
+    // wave 8：e 先 spawn（in-flight），s(9) 第 9 进入熔断、零 spawn。
+    await waitForChildren(children, 17);
+    expect(children).toHaveLength(17);
+    // 熔断之后 e 才 settle ok —— 必须按真实结局落 done。
+    settle(children[16]!, ok("E-OK"));
+    await expect(pending).rejects.toThrow(/effort fuse/);
+    const ledger = host.ledgerFor(CONV);
+    expect(ledger.statusOf("e")).toBe("done");
+    expect(ledger.isFrozen("e")).toBe(true);
+    // s 的空转结局是真 failed（F2：熔断 ≠ cancel，failed 也冻）。
+    expect(ledger.statusOf("s")).toBe("failed");
+    await manager.shutdown();
+  }, 20_000);
+});
+
+describe("run_graph effort fuse — SC9 plain Kahn 不装计数器", () => {
+  it("无 onFailure 的 DAG 不受熔断影响：正常 Kahn 两波", async () => {
+    const { manager, children } = makeManager();
+    const t = createRunGraphTool({ manager, isEnabled: () => true });
+    const pending = t.handler(
+      {
+        nodes: [
+          { id: "a", task: "ta" },
+          { id: "b", task: "tb", deps: ["a"] },
+        ],
+      },
+      { conversationId: CONV }
+    );
+    await waitForChildren(children, 1);
+    settle(children[0]!, ok("A"));
+    await waitForChildren(children, 2);
+    settle(children[1]!, ok("B"));
+    const out = parse(await pending);
+    expect(out.waveCount).toBe(2);
+    expect(children).toHaveLength(2);
+    await manager.shutdown();
+  });
+});

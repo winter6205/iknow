@@ -34,6 +34,7 @@ import { createPermissionPolicy } from "./permission/policy.js";
 import type { PermissionModeContext } from "./permission/modes.js";
 import type { GraphModeContext } from "./graph/mode.js";
 import { createGraphAssembly, type GraphAssembly } from "./graph/assembly.js";
+import type { LiveGraphLedgerHost } from "./graph/ledger.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
 import type { AciRegistry } from "./aci/aci-registry.js";
 import { runOverflowJudge } from "./aci/tool-overflow.js";
@@ -157,6 +158,13 @@ export type BuildEngineOpts = {
    *  快照 gate。缺席 = 未接 overlay（ask / 老调用方）→ 工具与段都不存在，
    *  字节级零变化。 */
   readonly graphMode?: GraphModeContext;
+  /**
+   * live-graph-phase1 T1 / ADR-0047 / ADR-0051:活图账本 host —— 会话
+   * runtime 持有（与 graphMode 平行，非 per-engine 快照），host 负责
+   * reset / 会话结束销毁。缺席 = `run_graph` handler 不建账（V1 零行为
+   * 变化，与 graphMode 缺席同形态）。
+   */
+  readonly liveGraphLedger?: LiveGraphLedgerHost;
   /** #337 T8 测试缝:userHome / cwd 覆盖(默认 homedir() / process.cwd())。 */
   readonly userHome?: string;
   readonly cwd?: string;
@@ -959,6 +967,11 @@ export async function buildHarnessEngine(
       // handler isEnabled gate 与 loop-engine 切换判定(常驻注册后 registry
       // 不再按它过滤工具面)。overlay 缺席 → 不传,handler 缺省恒关。
       ...(graphAssembly ? { graphAssembly } : {}),
+      // live-graph-phase1 T1:活图账本 host 透传 — handler 拿到后按
+      // ctx.conversationId 解析会话账本。缺席 → 工具零行为变化。
+      ...(opts.liveGraphLedger
+        ? { liveGraphLedger: opts.liveGraphLedger }
+        : {}),
       ...(memoryToolsEnabled ? { memoryDir } : undefined),
       skillCatalog,
       ...(subagentManager ? { subagentManager } : undefined),
@@ -1083,6 +1096,9 @@ export async function buildHarnessEngine(
       liveTaskRoot,
       ...(isolationEnabled ? { projectIdentityRoot } : {}),
       ...(graphAssembly ? { graphAssembly } : {}),
+      ...(opts.liveGraphLedger
+        ? { liveGraphLedger: opts.liveGraphLedger }
+        : {}),
       ...(memoryToolsEnabled ? { memoryDir } : undefined),
       skillCatalog,
       ...(subagentManager ? { subagentManager } : undefined),

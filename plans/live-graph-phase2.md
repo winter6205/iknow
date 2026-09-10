@@ -28,18 +28,18 @@ minimal-change-verifier: yes — 只加失败边与熔断；一刀一提交；�
    - **Inherits:** spec SC4–SC5 / Changes：可选 `onFailure` string；`additionalProperties: false`；未知 id、活图已冻 id、两条失败边、仅 `deps` 成环 → 拒零 spawn。`deps` 自依赖仍拒；`onFailure` 指向自己合法。
    - **Surface:** `src/harness/graph`
    - **Acceptance:** 合法带 `onFailure` 的提交通过校验；上列非法形 typed 拒且不 spawn；不带该字段的 DAG 仍与阶段 1 相同拒绝规则
-   - Status: [ ] pending
+   - Status: [x] done (commit 2697a6c7)
 
 2. **按 NodeOutcome 走失败边 + 同 id 再进入** — tag: `[implementation]`
    - **Inherits:** spec SC1–SC3、SC6、SC8 / ADR-0053–0056、0062–0063：failed 才走唯一 `onFailure`；done 不走；skipped 不走；终点 done 则 typed 拒不 spawn；同一未冻 id 可第二次进入；整段仍一次 handler 阻塞返回。
    - **Surface:** `src/harness/graph`（调度，不锁算法名）
    - **Acceptance:** 自回边与指向新格的失败边行为符合 SC1–SC2；skipped 不触发；done 终点不重跑；测试能看到同一 id 两次进入
-   - Status: [ ] pending
+   - Status: [x] done (commit 0a1d20ac)
    - [blocks: T1]
 
 3. **effort 阈 8 熔断** — tag: `[implementation]`
    - **Inherits:** spec SC7 / ADR-0064：一次调用每 id 进入含首次；第 9 次 typed 熔断；≤8 不熔；已 done 保留；外环新 id 仍可跑。不进 settings。
    - **Surface:** `src/harness/graph`
    - **Acceptance:** 同 id 第 9 次进入熔断且 done 仍冻；8 次合法再进不熔；`npm run typecheck` 与含本计划测试的 `npm test` 退出 0
-   - Status: [ ] pending
+   - Status: [x] done (commit 7be36849)
    - [blocks: T2]

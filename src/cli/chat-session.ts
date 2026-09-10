@@ -81,6 +81,7 @@ import {
   type GraphModeContext,
 } from "../harness/graph/mode.js";
 import type { GraphAssembly } from "../harness/graph/assembly.js";
+import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import {
   SessionStore,
   type SessionStoreError,
@@ -152,6 +153,13 @@ export type ChatSessionOpts = {
    * 「下一次 run() 才生效」。缺席 = 未接 overlay（工具与编排段都不存在）。
    */
   graphAssembly?: GraphAssembly;
+  /**
+   * live-graph-phase1 T1 / ADR-0051:活图账本 host。与 graphMode 平行挂在
+   * 会话 runtime 上（overlay 开关不销毁它）；`/reset` 与进程退出销毁。
+   * ask 不传（无活图）。注意：这是**会话级**对象 —— rebind 重建引擎时
+   * **不** rewire（与 graphMode 同理），否则 reset 语义跨 rebind 漂移。
+   */
+  liveGraphLedger?: LiveGraphLedgerHost;
   /**
    * T4: `--resume <id>` 锚定既有 conversationId 续跑。设置时 runChatSession
    * 以该 id 作为 conversationId(写回同一 checkpoint 文件),并尝试从
@@ -253,6 +261,11 @@ export type ChatLineContext = {
   graphMode?: GraphModeContext;
   /** D-α T3: graph 装配快照(由 runChatSession 透传;查询行开跑前拍一次)。 */
   graphAssembly?: GraphAssembly;
+  /**
+   * live-graph-phase1 T1:活图账本 host(同 ChatSessionOpts.liveGraphLedger,
+   * runChatSession 透传)。会话级 —— `/reset` 销毁,进程退出 destroyAll。
+   */
+  liveGraphLedger?: LiveGraphLedgerHost;
   /**
    * T2: REPL 级 AbortController。run() 的 signal 由此接线 —— SIGINT 第一次
    * busy 时 abort() 打断 in-flight,run 以 stopReason "cancelled" resolve。
@@ -1407,6 +1420,15 @@ async function processSlash(opts: {
       return { quit: false, output: "", stderr: effect.text };
 
     case "reset":
+      // live-graph-phase1 T1 / ADR-0051:reset 销毁活图账本 —— 之后同一
+      // 会话再 run_graph 可重用旧 id 并真正 spawn（SC3）。账本缺席（ask /
+      // 测试未接）→ no-op。
+      if (ctx.liveGraphLedger !== undefined) {
+        const convId = ctx.state.conversationId;
+        if (convId !== null) {
+          ctx.liveGraphLedger.destroy(convId);
+        }
+      }
       return { quit: false, output: effect.message };
 
     case "continue":
@@ -2198,6 +2220,7 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     permissionMode: opts.permissionMode,
     graphMode: opts.graphMode,
     graphAssembly: opts.graphAssembly,
+    ...(opts.liveGraphLedger ? { liveGraphLedger: opts.liveGraphLedger } : {}),
     abortController,
     checkpointStore,
     ...(opts.workspaceRoot !== undefined
