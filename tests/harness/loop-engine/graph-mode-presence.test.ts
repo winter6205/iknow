@@ -32,7 +32,11 @@ import type {
   LoopState,
 } from "../../../src/harness/model-adapter/types.ts";
 import type { LoopAdapter } from "../../../src/harness/loop-engine.ts";
-import type { Executor, Registry } from "../../../src/harness/tools/types.ts";
+import type {
+  Executor,
+  Registry,
+  ToolDef,
+} from "../../../src/harness/tools/types.ts";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -193,9 +197,10 @@ describe("loop engine ADR-0080 SC3: ask/worker(seam 缺席)→ 零短现势、�
     assert.equal(presenceHits(result.messages).length, 0);
   });
 
-  it("graphModePresence 在场但 graphModeChange 缺席(模拟组装错配)→ 仍零追加(零回退即最安全)", async () => {
-    // 不要求这种形态在生产里出现;但作为「seam 半缺席」的健壮性探针,
-    // 当前实现应当保守地零追加(assembly 仍在但长翻转缝缺失)。
+  it("graphModePresence 在场但 graphModeChange 缺席(装配错配)→ 保守零注入", async () => {
+    // build-engine 永远同 gate 同源接线两缝;presence 在场 / change 缺席的
+    // 错配只能来自装配 bug。此时 presence 缝保守零注入(overlay 缺席 =
+    // 零注入姿态),而不是脱离 change 的翻转语义独立生效。
     const holder = makeGraphModeHolder();
     const assembly = createGraphAssembly(holder.ctx);
     holder.set(true);
@@ -206,17 +211,15 @@ describe("loop engine ADR-0080 SC3: ask/worker(seam 缺席)→ 零短现势、�
       executor: emptyExecutor,
       registry: emptyRegistry,
       maxTurns: 5,
-      // 仅装 presence 不装 change —— 是错的装,但我们要求容错(零追加)
-      // 而非 panic。原因:Presence 不该独立于 Change 生效(它读 assembly
-      // 即可,但没有 Change 就无 lastSeenEnabled 概念 → 决策退化)。
+      // 仅装 presence 不装 change —— 装配错配,必须零追加而非 panic。
       graphModePresence: { assembly },
     };
 
     const { result } = await run("Q", deps);
     assert.equal(result.stopReason, "completed");
-    // 这种半装状态要么零追加,要么走与 Change 一致的去重逻辑;
-    // 两种行为都可接受 —— 我们只钉死「不会爆错」。
-    assert.equal(result.messages.length >= 3, true);
+    // 真零追加:holder on 也不贴短句;除首条 Q 外无任何 user 文本。
+    assert.equal(presenceHits(result.messages).length, 0);
+    assert.deepEqual(collectUserTexts(result.messages), ["Q"]);
   });
 });
 
@@ -513,22 +516,63 @@ describe("loop engine ADR-0080 SC6 / SC8: 不进禁区 + tools 常驻", () => {
     );
   });
 
-  it("SC8: graphModePresence seam 缺席 / 在场,工具面(此处空 registry)字节不变", async () => {
-    // SC8 的核心 assertion 已在 run-graph-assembly.test.ts:366-379 覆盖:
-    // graphMode 缺席时 registry 仍含 run_graph(handler 守门)。
-    // 本测试只钉死:graphModePresence 是 messages 缝,不动 registry。
-    const holder = makeGraphModeHolder();
-    holder.set(true);
-    const assembly = createGraphAssembly(holder.ctx);
-    const lastSeenEnabled: { value: boolean | undefined } = {
-      value: undefined,
+  it("SC8: graphModePresence 缝在场 / 缺席,模型收到的 tools 面字节相同", async () => {
+    // graphModePresence 是 messages 缝,不动 registry / promptTools ——
+    // 用含 run_graph 的 registry 对比 presence 缝在场 vs 缺席两次 run,
+    // adapter 实际收到的 tools 名称序列必须逐字相同(tools 面不随
+    // presence 缝抖动)。
+    const runGraphTool: ToolDef = {
+      name: "run_graph",
+      description: "run_graph stub",
+      inputSchema: { type: "object" },
+      handler: () => Promise.reject(new Error("not used")),
     };
-    const adapter = makeTextAdapter(["a1"]);
-    const deps = buildDeps({ adapter, assembly, lastSeenEnabled });
+    const registry: Registry = Object.freeze({
+      list: () => [runGraphTool],
+      get: (name: string) => (name === "run_graph" ? runGraphTool : undefined),
+    });
+    const runOnce = async (
+      withPresence: boolean
+    ): Promise<ReadonlyArray<unknown>> => {
+      const seenTools: ReadonlyArray<unknown>[] = [];
+      const holder = makeGraphModeHolder();
+      holder.set(true);
+      const assembly = createGraphAssembly(holder.ctx);
+      const lastSeenEnabled: { value: boolean | undefined } = { value: true };
+      const adapter = makeTextAdapter(["a1"]);
+      const base = {
+        step: adapter.step,
+        encodeUserText: adapter.encodeUserText,
+        encodeToolResults: adapter.encodeToolResults,
+      };
+      const wrapped: LoopAdapter = {
+        ...base,
+        step: async (state, request, signal) => {
+          seenTools.push((request.tools ?? []) as ReadonlyArray<unknown>);
+          return adapter.step(state, request, signal);
+        },
+      };
+      const deps: LoopEngineDeps = {
+        adapter: wrapped,
+        executor: emptyExecutor,
+        registry,
+        maxTurns: 5,
+        ...(withPresence
+          ? {
+              graphModeChange: { assembly, lastSeenEnabled },
+              graphModePresence: { assembly },
+            }
+          : {}),
+      };
+      const { result } = await run("Q", deps);
+      assert.equal(result.stopReason, "completed");
+      assert.equal(seenTools.length, 1);
+      return (seenTools[0] as Array<{ name: string }>).map((d) => d.name);
+    };
 
-    const { result } = await run("Q", deps);
-    assert.equal(result.stopReason, "completed");
-    // registry(空)字节不变:list() 仍为 [];presence 缝不增减工具。
-    assert.deepEqual(emptyRegistry.list(), []);
+    const withSeam = await runOnce(true);
+    const withoutSeam = await runOnce(false);
+    assert.deepEqual(withSeam, ["run_graph"]);
+    assert.deepEqual(withSeam, withoutSeam);
   });
 });

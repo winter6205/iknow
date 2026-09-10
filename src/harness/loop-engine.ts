@@ -665,6 +665,10 @@ async function appendGraphModePresence(
 ): Promise<LoopState> {
   const seam = deps.graphModePresence;
   if (seam === undefined) return state;
+  // 保守 guard:presence 在场而 change 缺席 = 装配错配(build-engine 永远
+  // 同 gate 同源接线两缝),此时零注入而非让 presence 脱离 change 的翻转
+  // 语义独立生效(与「overlay 缺席 = 零注入」同一保守姿态)。
+  if (deps.graphModeChange === undefined) return state;
   if (appendedLongOn) return state;
   if (!seam.assembly.enabled()) return state;
   const msg = deps.adapter.encodeUserText(
@@ -672,6 +676,33 @@ async function appendGraphModePresence(
   );
   pendingInjected.record(msg);
   return appendMessage({ state, msg });
+}
+
+/**
+ * 两条 graph 缝的编排收敛:appendGraphModeChange → appendGraphModePresence
+ * 按固定次序配对(change 先行,presence 拿 appendedLongOn 当 SC5 去重
+ * 信号)。首调与 reactive-compact 重试两处同形,提取本 helper 消除逐字
+ * 重复;次序语义(在 mcpReconnect / agentStatusBar 之前)由调用方保持。
+ */
+async function appendGraphSeams(
+  state: LoopState,
+  deps: LoopEngineDeps,
+  pendingInjected: PendingInjected,
+  onStream?: (event: HarnessStreamEvent) => void
+): Promise<{ state: LoopState; appendedLongOn: boolean }> {
+  const changed = await appendGraphModeChange(
+    state,
+    deps,
+    pendingInjected,
+    onStream
+  );
+  const next = await appendGraphModePresence(
+    changed.state,
+    deps,
+    pendingInjected,
+    changed.appendedLongOn
+  );
+  return { state: next, appendedLongOn: changed.appendedLongOn };
 }
 
 /**
@@ -1827,31 +1858,20 @@ async function stepWithTrace(opts: {
   type OkOrStop =
     | { kind: "ok"; result: AssistantTurnResult }
     | { kind: "stop"; transition: Transition; turn: TurnTrace };
-  // ADR-0041 / plans/model-prefix-layering.md B3:graph 模式切换追加缝
-  // —— 比 appendAgentStatusBar 先调,保证 messages 序列里「graph 切换
-  // 提示」永远早于 status bar(状态栏是更接近调模型的当前态,模型读
-  // 到时序是「graph 翻转 → status bar」)。seam 缺席 → 零追加(ask /
-  // worker / 未接 overlay 的入口零行为变化)。
-  // ADR-0080:返回 { state, appendedLongOn } —— appendedLongOn 给同段
-  // appendGraphModePresence 当 SC5 去重信号。
-  const graphModeState = await appendGraphModeChange(
+  // ADR-0041 / ADR-0080:graph 两条缝(change → presence)先于 mcpReconnect
+  // / agentStatusBar 调用,保证「graph 翻转提示 → 短现势 → 重连告知 →
+  // status bar」的模型可读时序;seam 缺席 → 零追加(ask / worker / 未接
+  // overlay 的入口零行为变化)。
+  const graphSeamState = await appendGraphSeams(
     opts.state,
     opts.deps,
     opts.pendingInjected,
     opts.onStream
   );
-  // ADR-0080 / specs/graph-mode-presence.md:每跳短现势 —— 仅当 holder
-  // on 且本拍未贴长 ON 时追加;seam 缺席 / 关着 / 当拍长 ON → 零追加。
-  const presenceState = await appendGraphModePresence(
-    graphModeState.state,
-    opts.deps,
-    opts.pendingInjected,
-    graphModeState.appendedLongOn
-  );
   // B4 / ADR-0043 §4:MCP 手动重连追加缝 —— 与 graphModeChange 同段
   // (环境级事件),在 status bar 之前消费 pending。seam 缺席 → 零追加。
   const mcpReconnectState = appendMcpReconnect(
-    presenceState,
+    graphSeamState.state,
     opts.deps,
     opts.pendingInjected
   );
@@ -1883,27 +1903,19 @@ async function stepWithTrace(opts: {
   const modelPhase: OkOrStop =
     firstPhase.kind === "reactive_compact_pending"
       ? await (async (): Promise<OkOrStop> => {
-          // ADR-0041:reactive compact 重试前同样检测 graph 翻转(同 round
-          // 两次模型调用之间 host 可能翻键);与首次调用路径同形态 —— 翻
-          // 转则追加,否则 state 原样传入下一 helper。ADR-0080 同段叠加
-          // appendGraphModePresence(若重试拍 holder 仍 on 则再贴短句,
-          // SC7:compact 之后下一跳仍 on → 再贴;无 compact 专用追加)。
-          const compactedWithGraph = await appendGraphModeChange(
+          // ADR-0041 / ADR-0080:reactive compact 重试前同样过 graph 两条缝
+          // (同 round 两次模型调用之间 host 可能翻键;SC7:compact 之后
+          // 下一跳仍 on 则再贴短现势,无 compact 专用追加)。
+          const compactedWithGraphSeams = await appendGraphSeams(
             firstPhase.state,
             opts.deps,
             opts.pendingInjected,
             opts.onStream
           );
-          const compactedWithPresence = await appendGraphModePresence(
-            compactedWithGraph.state,
-            opts.deps,
-            opts.pendingInjected,
-            compactedWithGraph.appendedLongOn
-          );
           // B4 / ADR-0043 §4:reactive compact 重试前同样消费重连 pending
           // (同 round 两次模型调用之间手动重连可能完成)。
           const compactedWithReconnect = appendMcpReconnect(
-            compactedWithPresence,
+            compactedWithGraphSeams.state,
             opts.deps,
             opts.pendingInjected
           );

@@ -320,8 +320,13 @@ describe("graph mode 每跳短现势 — SSOT 静态文本(ADR-0080)", () => {
   });
 
   it("短现势在会话内字节恒定(KV cache 尾部追加兼容,无 per-turn 插值)", () => {
-    expect(IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION).toBe(
-      IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION
+    // 无插值占位符(模板槽位会让会话内字节漂移,KV cache 契约),
+    // 也不把 agent_status 栏文本反向混入(SC6)。
+    expect(IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION).not.toContain("{{");
+    expect(IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION).not.toContain("<server>");
+    expect(IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION).not.toContain("<tools>");
+    expect(IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION).not.toContain(
+      "<agent_status>"
     );
   });
 
@@ -398,9 +403,11 @@ describe("buildHarnessEngine — graph 常驻 + handler gate 集成(SC5)", () =>
       expect(built.deps.promptTools!().map((d) => d.name)).toContain(
         "run_graph"
       );
-      // graphAssembly 缺席 → deps.graphModeChange 也缺席(loop-engine 不参与
-      // 切换判定,消息尾不追加任何 graph_mode 单行文本)。
+      // graphAssembly 缺席 → deps.graphModeChange / graphModePresence 两缝
+      // 同 gate 同时缺席(loop-engine 不参与切换判定,消息尾不追加任何
+      // graph_mode 单行文本)。
       expect(built.deps.graphModeChange).toBeUndefined();
+      expect(built.deps.graphModePresence).toBeUndefined();
     });
   });
 
@@ -431,6 +438,22 @@ describe("buildHarnessEngine — graph 常驻 + handler gate 集成(SC5)", () =>
       // system 全文不含 'run_graph'(段已撤出,内容走 messages 尾追加)。
       expect(systemOn).not.toContain("run_graph");
       expect(systemOff).not.toContain("run_graph");
+    });
+  });
+
+  it("graphMode 在场 → graphModeChange 与 graphModePresence 两缝同 gate 接线且同源 assembly", async () => {
+    // ADR-0080 装配契约:build-engine 永远同 gate 同源接线两缝 ——
+    // presence 缝与 change 缝指向同一 graphAssembly(presence 的保守
+    // 零注入 guard 依赖这一同源前提;错配 = 装配 bug)。
+    const mode = createGraphModeContext();
+    await withEngine(mode, (built) => {
+      expect(built.graphAssembly).toBeDefined();
+      expect(built.deps.graphModeChange).toBeDefined();
+      expect(built.deps.graphModePresence).toBeDefined();
+      expect(built.deps.graphModePresence!.assembly).toBe(
+        built.deps.graphModeChange!.assembly
+      );
+      expect(built.deps.graphModePresence!.assembly).toBe(built.graphAssembly!);
     });
   });
 
