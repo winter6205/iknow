@@ -8,6 +8,7 @@
 unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_COMMON_DIR
 
 npx lint-staged
+npm run lint:s5:staged
 npm run typecheck
 # 只跑与本次变更相关的测试（vitest --changed 基于 git HEAD 差异）。
 # 全量交给 pre-push 与 CI —— 本地 commit 全量 6.5min 且受 CPU 争用
