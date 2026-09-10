@@ -11,7 +11,7 @@
  * 端到端覆盖：
  *  1. 消息提交 → lazy create 建档 → turn 渲染（tracer）；
  *  2. 未知命令 → 「未知命令：...」notice；/info → 元信息行；
- *  3. /compact draft 会话 → 「还没有可压缩的上下文」；
+ *  3. /compact draft 会话 → 「Nothing to compact yet」（空会话护栏，英文）；
  *  4. turn 运行中发第二条 → 「正在运行」护栏 + 池内仅 1 个会话；
  *  5. slash 候选（输入 "/" 后 9 命令全显示）+ Tab 唯一匹配补全。
  */
@@ -357,7 +357,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     await app.pressEnter();
     await untilFrame(
       app.setup,
-      (f) => f.includes("还没有可压缩"),
+      (f) => f.includes("nothing to compact yet"),
       8000,
       "draft-compact"
     );

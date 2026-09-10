@@ -13,21 +13,23 @@ import { describe, expect, test } from "bun:test";
 import { compactNoticeFor } from "../../src/tui/app.tsx";
 
 describe("compactNoticeFor — /compact notice 文案决策", () => {
-  test("compacted=true + reason='windowed' → 「已压缩上下文（保留尾部，裁剪早期消息）。」", () => {
+  test("compacted=true + reason='windowed' → 「Context compacted (kept tail, trimmed early messages).」", () => {
     const lines = compactNoticeFor("windowed", true);
-    expect(lines).toEqual(["已压缩上下文（保留尾部，裁剪早期消息）。"]);
-  });
-
-  test("compacted=true + reason='full_summary' → 「已通过结构化摘要压缩上下文（保留尾部 + 摘要前缀）。」", () => {
-    const lines = compactNoticeFor("full_summary", true);
     expect(lines).toEqual([
-      "已通过结构化摘要压缩上下文（保留尾部 + 摘要前缀）。",
+      "Context compacted (kept tail, trimmed early messages).",
     ]);
   });
 
-  test("compacted=false + reason='messages_too_few' → 「没有可压缩的上下文」语义（空会话/整体失败共用）", () => {
+  test("compacted=true + reason='full_summary' → 「Context compacted (structured summary + kept tail).」", () => {
+    const lines = compactNoticeFor("full_summary", true);
+    expect(lines).toEqual([
+      "Context compacted (structured summary + kept tail).",
+    ]);
+  });
+
+  test("compacted=false + reason='messages_too_few' → 「Nothing to compact」语义（空会话/整体失败共用）", () => {
     const lines = compactNoticeFor("messages_too_few", false);
-    expect(lines).toEqual(["没有可压缩的上下文，会话保持原样。"]);
+    expect(lines).toEqual(["Nothing to compact — session unchanged."]);
   });
 
   test("auto token 门文案禁止出现在手动路径:below_token_threshold 在 compacted=false 下抛错", () => {

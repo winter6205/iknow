@@ -565,15 +565,19 @@ describe("/compact 词表", () => {
     expect(slashComplete("/comp")).toBe("/compact ");
   });
 
-  test("hint 描述：压缩上下文", () => {
+  test("hint 描述：Compact context（外显文案英文化）", () => {
     expect(slashHintLines(["compact"])).toEqual([
-      { command: "compact", description: "压缩上下文" },
+      { command: "compact", description: "Compact context" },
     ]);
   });
 
   test("/help 覆盖 /compact 且无 emoji", () => {
     const joined = helpLines().join("\n");
     expect(joined).toContain("/compact");
+    // help 行与 column 对齐（/compact 后 3 空格起描述）。
+    expect(joined).toContain(
+      "/compact   Compact context (keep tail, trim early messages)"
+    );
     expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
   });
 });
