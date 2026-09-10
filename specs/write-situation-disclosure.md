@@ -1,10 +1,12 @@
 # Spec: 写处境告知与建树失败出口
 
 > 承接 PR #947（`specs/mutate-write-contract.md` / ADR-0068，Closes #946）的**后续面**。#947 修的是「模型伸手要写的那一刻，拒绝理由错不错」；本 spec 修的是「模型伸手**之前**告知真不真」与「伸手注定失败时**有没有出路**」。两者 Changes 不重叠（#947 落 `hard-walls.ts` / `helpers.ts` / `manager.ts`；本 spec 落 `skill/body.ts` / `worktree-gate.ts` / `worktree-rebind.ts` / `bash.ts`）。
+>
+> **Amended 2026-09-10** by `specs/skill-body-short-circuit.md` / ADR-0079：告知面不再含 skill 正文 trailer。剩余告知面 = worker prior + 改绑后主会话一次。`writeRootSegment` helper SSOT、三态判定、回执与可恢复性表不变。Glossary 里 skill 消费句以现行 `docs/CONTEXT.md` 为准（正文不挂 trailer）。
 
 ## Glossary（exact copy from docs/CONTEXT.md）
 
-- **taskRoot**（活值）: 会话当前生效的 task worktree 根——**写与工具 cwd 只问它**（写工具 / 会改工作区的 bash / git / LSP 目录 / 子代理工作目录）。……装配初值 = `SessionRoots.taskRoot`（未改绑时等于主仓）……改绑后模型经 worker prior messages / path-outside 回执看见当前写根；消费 skill 时（slash 信封 / `skill()` tool_result / Web `getSkillBody`）正文末尾带当前写根，文案与 worker prior 同一份（`specs/skill-load-write-root.md`）；改绑后主会话另给一次（用户消息缝，非每轮、不进 system）；system `## Project path` 仍是身份根（`projectIdentityRoot`）。
+- **taskRoot**（活值）: 会话当前生效的 task worktree 根——**写与工具 cwd 只问它**（写工具 / 会改工作区的 bash / git / LSP 目录 / 子代理工作目录）。……装配初值 = `SessionRoots.taskRoot`（未改绑时等于主仓）……改绑后模型经 worker prior messages / path-outside 回执看见当前写根；消费 skill 时只灌技能程序，正文不挂写根 trailer（ADR-0079）；改绑后主会话另给一次（用户消息缝，非每轮、不进 system）；system `## Project path` 仍是身份根（`projectIdentityRoot`）。
 - **hard-wall**: spawn 前意图过滤器——拦围栏看不见或拦不住的命令意图（毁灭性 rm、命令替换、敏感路径、fork-bomb），不可被 session grant 覆盖。不是第二套沙箱；换行只作分段符。耐久写只问 `taskRoot`。ADR-0068。
 - **闭世界围栏（closed-world fence）**: bash 围栏的默认姿态——deny-by-default:home 下非白名单不可见，可写集 = taskRoot + /tmp……OFF 档同样生效（全档位反转）。
 - **session worktree rebind**: worktree isolation mode ON 下 `create-task-worktree`（或 enter / exit）ACI 工具成功后，把**当前会话**生效的根锚切到本会话 task worktree 的动作……**生效边界：同一轮（run）内对下一波 tool calls 生效**。
@@ -55,8 +57,8 @@
 
 1. **三态判定**：`writeSituation(false, <任意非空根>)` → `writable_main`；`writeSituation(true, <树形根>)` → `writable_tree`；`writeSituation(true, <非树形根>)` → `no_writable_root`。**含「隔离 OFF + 树形路径」组合必须 → `writable_main`**（防形状判断被单独误用，对齐 ADR-0037 §4「`taskWorktreeOwnerOf` 只是路径形状判断，单靠它会…拿到沙箱外的读放行」的同类教训）。空 / 空白根 → typed 结果，不 throw 不静默。
 2. **字节不变**：`writeRootSegment` 在 `writable_main` / `writable_tree` 两态的输出与改造前**逐字节相等**（断言锁死）。这是前缀缓存（prompt cache）与 `skill-load-write-root` SC2 / SC6 的硬约束。
-3. **③ 态不引导**：`no_writable_root` 态输出含「无可写根 / 主仓对文件改动只读」语义，且**不含** `create-task-worktree` 字面（子串断言）。理由：trailer 在 skill 装配时进上下文，**早于任何写意图**；点名工具等于对每个未绑会话推一次建树，比 SC7 已禁止的更激进。
-4. **依赖方向**：三条生产路径（TUI slash / hub `loadSkillBody` / ACI `skill()`）与 worker prior 均消费处境枚举；`src/harness/skill/body.ts` **不 import** `src/harness/isolation/`（判定住 isolation，渲染住 skill，枚举类型住 `session-roots.ts`，无环）。
+3. **③ 态不引导**：`no_writable_root` 态输出含「无可写根 / 主仓对文件改动只读」语义，且**不含** `create-task-worktree` 字面（子串断言）。理由：告知面（prior / 改绑一次）**早于或独立于**写意图；点名工具等于对每个未绑会话推一次建树，比 SC7 已禁止的更激进。（2026-09-10：不再以 skill 装配为告知时机。）
+4. **依赖方向**：worker prior 与改绑缝消费处境枚举；三条 skill 消费路径**不再**为 trailer 消费处境枚举。`src/harness/skill/body.ts` **不 import** `src/harness/isolation/`（判定住 isolation，渲染住 skill，枚举类型住 `session-roots.ts`，无环）。
 5. **回执语义恢复**：`unboundMutateNotice()` 同时满足——(a) 含条件式（`To write` / `若要写` 等价）；(b) 含「重发这次调用」语义（`re-issue` 等价）；(c) 仍含 `create-task-worktree`；(d) 仍**不含** `this conversation's task worktree`；(e) 仍含 `This call would write`。(a)(b) 是本次新增的**语义**断言，(c)(d)(e) 是 SC7 既有子串断言，全部保留。
 6. **可恢复性穷尽**：`Record<WorktreeIsolationErrorKind, Recoverability>` 覆盖**全部 16 个成员**；由 TypeScript 穷尽性保证——新增 kind 未分类则 `npm run typecheck` **失败**，不靠测试兜。
 7. **停止指令**：`operator_required` 类（至少 `not_a_git_repo` / `git_unavailable`）的门禁回执含停止指令语义（「重试无用 / 报给操作员」等价），并含机读 `kind`（沿用 PR #947 `HardRuleSpec.reasonFor` 建立的「机读 id 进 reason」惯例）。
