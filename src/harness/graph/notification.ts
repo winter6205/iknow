@@ -25,6 +25,19 @@
 
 export type GraphModeChange = "on" | "off";
 
+/**
+ * 人读过滤谓词（specs/tui-human-display.md D8 / SC7）：三条 graph 现势通知
+ * 都是 host 注入的机器可读信封，不是操作员键的输入 —— TUI 不得画成 ❯ 气泡。
+ * 与 `isAgentStatusText`（`src/harness/agent-status.ts`）同纪律同形态：
+ * 生产者本家声明谓词，消费侧（TUI / CLI）共用，避免消费侧各自重写前缀。
+ *
+ * 形态 = 整条 user message 以 `<graph_mode>` 开头（三常量皆以此为界，
+ * 模型侧 grep 同款）。前导空白容忍（与 agent_status 一致）。
+ */
+export function isGraphModeText(text: string): boolean {
+  return text.trimStart().startsWith("<graph_mode>");
+}
+
 /** 开图通知（SSOT，loop-engine 唯一来源）。 */
 export const IKNOW_GRAPH_MODE_ON_NOTIFICATION =
   "<graph_mode>Graph mode is now on. run_graph is available alongside spawn_subagent — call it when the work splits into pieces that depend on each other. Declare the whole shape in one call: every node gets an `id`, a self-contained `task`, and the `deps` it waits for. Nodes whose deps are all satisfied run in parallel; a node starts only once every node it depends on has finished, and its task arrives with those results appended. If a node fails, the nodes downstream of it come back skipped while unrelated branches keep running, and the call still returns one report covering every node. Read that report and decide what to do next. Keep using spawn_subagent for a single task, or for several tasks with no ordering between them — a graph with no edges buys nothing over parallel spawns.</graph_mode>";

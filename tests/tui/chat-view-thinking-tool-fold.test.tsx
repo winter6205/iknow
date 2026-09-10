@@ -159,7 +159,7 @@ test("idle：思考秒数 + 多轮 bash keep → 标题留、零条收无计数�
   // 不变式:成功态无 [完成] 前缀。
   expect(frame.includes("[完成]")).toBe(false);
   // 思考秒数行仍在（簇 thinkingMs 求和，思考行可单独在）。
-  expect(frame).toContain("思考了 2 秒");
+  expect(frame).toContain("Thought for 2s");
   expect(frame.includes("[思考]")).toBe(false);
   await setup.renderer.destroy();
 });
@@ -219,8 +219,8 @@ test("idle：两轮 bash keep → 两轮各自标题留，零条收无计数行�
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   // 两轮各自出思考秒数行:各带独立 thinkingMs。
-  expect(frame).toContain("思考了 4 秒");
-  expect(frame).toContain("思考了 6 秒");
+  expect(frame).toContain("Thought for 4s");
+  expect(frame).toContain("Thought for 6s");
   // keep 标题两轮各留（全轮生效，旧轮标题不消失）—— #tui-render-overhaul T3
   // 成功态无 [完成] 前缀;bash 标题行以 `bash` 起头（detail 空时只有 `bash`,
   // detail 非空时为 `bash · ...`）。数裸 `bash` 标题行（剥离 `× ` 计数行
@@ -269,8 +269,8 @@ test("idle：单工具无 thinkingMs（落盘缺席） → bash keep 标题留�
   expect(frame).toContain("bash");
   expect(frame.includes("× ")).toBe(false);
   expect(frame.includes("[完成]")).toBe(false);
-  // 无秒数 → 不显示 `思考了` 行。
-  expect(frame.includes("思考了 ")).toBe(false);
+  // 无秒数 → 不显示 `Thought for` 行。
+  expect(frame.includes("Thought for")).toBe(false);
   await setup.renderer.destroy();
 });
 
@@ -310,7 +310,7 @@ test("idle：旧会话无 thinkingMs（整链缺席） → bash keep 标题留�
   expect(frame).toContain("bash");
   expect(frame.includes("× ")).toBe(false);
   expect(frame.includes("[完成]")).toBe(false);
-  expect(frame.includes("思考了 ")).toBe(false);
+  expect(frame.includes("Thought for")).toBe(false);
   await setup.renderer.destroy();
 });
 
@@ -446,11 +446,11 @@ test("idle：同一 assistant 消息内按 tool/text 位置渲染 keep 标题", 
   await toolTextTool.setup.renderer.destroy();
 });
 
-test("idle：同一 assistant 消息拆成两个 tools 簇 → 「思考了 N 秒」不重复画（同消息去重）", async () => {
-  // CONTEXT.md unit fold(2026-09-08 操作员纠正):一段思考一行秒数;
+test("idle：同一 assistant 消息拆成两个 tools 簇 → `Thought for` 不重复画（同消息去重）", async () => {
+  // CONTEXT.md unit fold(2026-09-08 操作员纠正):一段思考一行时长;
   // 去重单位 = 同一消息内的重复展示。同一条 assistant 消息内
   // tool → text → tool 切出两个 tools 簇,两簇 anchor 是同一
-  // messageIndex → 簇秒数相同 → 不去重会重复画同一秒数。不同 assistant
+  // messageIndex → 簇时长相同 → 不去重会重复画同一时长。不同 assistant
   // 消息之间不互相吞(见 thinking-fold-placement.test.tsx 分段各自画)。
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
@@ -496,12 +496,12 @@ test("idle：同一 assistant 消息拆成两个 tools 簇 → 「思考了 N �
   const frame = setup.captureCharFrame();
   const foldSecondsLines = frame
     .split("\n")
-    .filter((l) => /思考了\s+\d+\s+秒/.test(l));
+    .filter((l) => /Thought for \d+s/.test(l));
   expect(foldSecondsLines).toHaveLength(1);
   await setup.renderer.destroy();
 });
 
-test("idle：无秒数（thinkingMs 全 null）→ 无「思考了」行、无 [思考] 回落、无思考正文", async () => {
+test("idle：无秒数（thinkingMs 全 null）→ 无 `Thought for` 行、无 [思考] 回落、无思考正文", async () => {
   // CONTEXT.md unit fold:无秒数（thinkingMs 缺席/非有限）→ 不画该行、
   // 不回落 `[思考]`、也不画思考正文（折叠态默认收）。
   const messages: AnthropicNativeMessage[] = [
@@ -527,7 +527,7 @@ test("idle：无秒数（thinkingMs 全 null）→ 无「思考了」行、无 [
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame.includes("思考了 ")).toBe(false);
+  expect(frame.includes("Thought for")).toBe(false);
   expect(frame.includes("[思考]")).toBe(false);
   expect(frame.includes("不该被看见的思考正文")).toBe(false);
   // 正文照常可见。
@@ -586,7 +586,7 @@ test("idle：无历史 activity 时已完成 live retract 工具收出 tail（ke
           name: "read_file",
           status: "ok",
           input: { path: "a.ts" },
-          detail: "读取 a.ts",
+          detail: "Read a.ts",
         },
         {
           id: "tu-live-bash",
@@ -604,7 +604,7 @@ test("idle：无历史 activity 时已完成 live retract 工具收出 tail（ke
   const frame = setup.captureCharFrame();
   // retract 件收起：不出现 live 完成形态（计数行锚点在历史 text 段，
   // 无历史 activity 时无可锚段 —— 计数行缺席属既有边界，SC3 历史路径覆盖）。
-  expect(frame).not.toContain("读取 a.ts · ok");
+  expect(frame).not.toContain("Read a.ts · ok");
   // keep 件标题留（live 完成行同 SSOT 形态）—— #tui-render-overhaul T3
   // 成功态无 [完成] 前缀。
   expect(frame).toContain("bash · pwd");
@@ -735,14 +735,14 @@ test("idle：SC4 失败 retract 工具 → 标题 + 一行短错误可见，不�
 test("running-fg：不提前收成 turn 摘要,历史成功 bash 标题仍可见", async () => {
   // D3:running 态仍逐条工具可见(行为不变);折叠行不出现。
   // spec D3 删除了 `thinkingFrozenSeconds` 副通道 —— running 期间不再有
-  // 冻结「思考了 N 秒」分支,流式面板恒 `思考中…`(测试 `thinking-peek.test.tsx`)。
+  // 冻结 `Thought for` 分支,流式面板恒 `Thinking…`(测试 `thinking-peek.test.tsx`)。
   const liveToolRuns: ReadonlyArray<LiveToolRun> = [
     {
       id: "tu-live",
       name: "bash",
       status: "ok",
       input: { command: "memory_recall" },
-      detail: "记忆 召回",
+      detail: "Recall",
     },
   ];
   const setup = await testRender(

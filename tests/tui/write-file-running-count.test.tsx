@@ -4,8 +4,8 @@
  *
  * 不变式：write_file 运行行的行数只在**已知**时出现。
  *  - 运行中 `content` 还不是非空 string（缺失 / 空串 / partial 未成形）→
- *    只画 `写入 <path>`，绝不出现 `（0 行）`——流式中途的 0 是假计数；
- *  - 落定态（ok / failed）的空文件是真实的 0 行，仍显示 `（0 行）`；
+ *    只画 `Wrote <path>`，绝不出现 `(0 lines)`——流式中途的 0 是假计数；
+ *  - 落定态（ok / failed）的空文件是真实的 0 行，仍显示 `(0 lines)`；
  *  - 运行中不把 `content` 正文流进状态行或 CodeBlock（该轮不做正文流式）。
  *
  * 五类边界：empty / negative / overflow / concurrent / exception。
@@ -38,18 +38,18 @@ function runningWrite(id: string, partialInput?: string): LiveToolRun {
   };
 }
 
-const FALSE_ZERO = "（0 行）";
+const FALSE_ZERO = "(0 lines)";
 
 describe("write_file 运行行：empty（无 partial JSON）", () => {
-  test("无增量 → `[运行中] write_file`，不出现假 0 行", () => {
+  test("无增量 → 裸过程行 `write_file`，不出现假 0 行", () => {
     const rows = liveToolPreviewTextLines(runningWrite("tu-empty"), 80);
-    expect(rows).toEqual(["[运行中] write_file"]);
+    expect(rows).toEqual(["write_file"]);
     expect(rows[0]).not.toContain(FALSE_ZERO);
   });
 
-  test("formatRunningToolLine 同源 → 无 `写入 ?（0 行）` 占位计数", () => {
+  test("formatRunningToolLine 同源 → 无 `Wrote ?` 占位计数", () => {
     const line = formatRunningToolLine(runningWrite("tu-empty"));
-    expect(line).toBe("[运行中] write_file");
+    expect(line).toBe("write_file");
     expect(line).not.toContain(FALSE_ZERO);
   });
 
@@ -59,12 +59,12 @@ describe("write_file 运行行：empty（无 partial JSON）", () => {
 });
 
 describe("write_file 运行行：negative（content 缺失 / 空串）", () => {
-  test("partial 仅 path → `写入 path`，无行数", () => {
+  test("partial 仅 path → `Wrote path`，无行数", () => {
     const rows = liveToolPreviewTextLines(
       runningWrite("tu-path", '{"path":"a.ts"}'),
       80
     );
-    expect(rows).toEqual(["[运行中] write_file · 写入 a.ts"]);
+    expect(rows).toEqual(["write_file · Wrote a.ts"]);
     expect(rows[0]).not.toContain("行）");
   });
 
@@ -73,7 +73,7 @@ describe("write_file 运行行：negative（content 缺失 / 空串）", () => {
       runningWrite("tu-empty-content", '{"path":"a.ts","content":""}'),
       80
     );
-    expect(rows).toEqual(["[运行中] write_file · 写入 a.ts"]);
+    expect(rows).toEqual(["write_file · Wrote a.ts"]);
     expect(rows[0]).not.toContain(FALSE_ZERO);
   });
 
@@ -85,14 +85,14 @@ describe("write_file 运行行：negative（content 缺失 / 空串）", () => {
         status: "running",
         cols: 80,
       })
-    ).toBe("[运行中] write_file · 写入 a.ts");
+    ).toBe("write_file · Wrote a.ts");
   });
 
   test("运行中 content 非 string（未成形）→ 只画 path", () => {
     expect(
       summarizeToolCall("write_file", { path: "a.ts" }, 80, { running: true })
         .detail
-    ).toBe("写入 a.ts");
+    ).toBe("Wrote a.ts");
   });
 
   test("落定态空文件仍显示 0 行（真实的空文件，不是未知）", () => {
@@ -103,10 +103,10 @@ describe("write_file 运行行：negative（content 缺失 / 空串）", () => {
         status: "ok",
         cols: 80,
       })
-    ).toBe("write_file · 写入 a.ts（0 行）");
+    ).toBe("write_file · Wrote a.ts (0 lines)");
     expect(
       summarizeToolCall("write_file", { path: "a.ts", content: "" }).detail
-    ).toBe("写入 a.ts（0 行）");
+    ).toBe("Wrote a.ts (0 lines)");
   });
 });
 
@@ -121,7 +121,7 @@ describe("write_file 运行行：overflow（大内容）", () => {
     const rows = liveToolPreviewTextLines(run, 80);
     expect(rows).toHaveLength(1);
     expect(liveToolPreviewRows(run, 80)).toBe(1);
-    expect(rows[0]).toContain("写入 a.ts（500 行）");
+    expect(rows[0]).toContain("Wrote a.ts (500 lines)");
     expect(rows.join("\n")).not.toContain("line-1");
   });
 
@@ -148,8 +148,8 @@ describe("write_file 运行行：concurrent（两个 run 的 count 隔离）", (
     const knownLine = liveToolPreviewTextLines(known, 80)[0] ?? "";
     const unknownLine = liveToolPreviewTextLines(unknown, 80)[0] ?? "";
 
-    expect(knownLine).toBe("[运行中] write_file · 写入 a.ts（3 行）");
-    expect(unknownLine).toBe("[运行中] write_file");
+    expect(knownLine).toBe("write_file · Wrote a.ts (3 lines)");
+    expect(unknownLine).toBe("write_file");
     expect(unknownLine).not.toContain("3 行");
     expect(unknownLine).not.toContain(FALSE_ZERO);
 
@@ -166,7 +166,7 @@ describe("write_file 运行行：exception（不完整 JSON）", () => {
       80
     );
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toBe("[运行中] write_file");
+    expect(rows[0]).toBe("write_file");
     const joined = rows.join("\n");
     expect(joined).not.toContain("SHOULD_NOT");
     expect(joined).not.toContain('{"path"');
@@ -186,10 +186,10 @@ describe("write_file 运行行：exception（不完整 JSON）", () => {
 
   test("summarizePartialInput 直驱：运行语义不产假 0 行", () => {
     expect(summarizePartialInput("write_file", '{"path":"a.ts"}', 80)).toBe(
-      "写入 a.ts"
+      "Wrote a.ts"
     );
     expect(
       summarizePartialInput("write_file", '{"path":"a.ts","content":""}', 80)
-    ).toBe("写入 a.ts");
+    ).toBe("Wrote a.ts");
   });
 });

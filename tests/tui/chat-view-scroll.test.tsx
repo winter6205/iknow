@@ -376,7 +376,8 @@ test("session 状态渲染：tool_use 摘要行 + statusMap 状态染色", async
   expect(frame).toContain("❯ 帮我写一个文件");
   expect(frame).toContain("write_file");
   // #tui-render-overhaul T3:成功态无 [完成] 前缀。
-  expect(frame).toContain("write_file · 写入 hello.ts（1 行）");
+  // spec D1：摘要统一英文 `Wrote <path> (N lines)`。
+  expect(frame).toContain("write_file · Wrote hello.ts (1 lines)");
   expect(frame.includes("[完成]")).toBe(false);
   expect(frame.includes("× ")).toBe(false);
   expect(api.handle?.scrollbox).not.toBeNull();
@@ -426,7 +427,7 @@ test("thinking 折叠态：无秒数不画 [思考]，展开时显示全文", as
   await setup1.renderer.destroy();
 });
 
-test("thinking 留存：session.thinkingMs 末位索引传给末条 assistant 折叠行 → 「思考了 N 秒」", async () => {
+test("thinking 留存：session.thinkingMs 末位索引传给末条 assistant 折叠行 → ", async () => {
   // 场景：turn 结束后流式面板消失，秒数由历史消息末条 assistant 的折叠行
   // 接棒。D3:折叠行思考秒数改读 session.thinkingMs(落盘数据,attachSession
   // 透传 SessionFileV1.thinkingMs);末条 assistant(index 1)thinkingMs = 4000ms。
@@ -455,16 +456,16 @@ test("thinking 留存：session.thinkingMs 末位索引传给末条 assistant �
   );
   await setup1.waitForVisualIdle();
   const frame = setup1.captureCharFrame();
-  // 末条 assistant 折叠行显示「思考了 4 秒」留存（非纯 [思考] 标记）。
-  expect(frame).toContain("思考了 4 秒");
-  expect(frame.split("思考了 4 秒").length - 1).toBe(1);
+  // 末条 assistant 折叠行显示 （spec D2 英文 unit fold）。
+  expect(frame).toContain("Thought for 4s");
+  expect(frame.split("Thought for 4s").length - 1).toBe(1);
   await setup1.renderer.destroy();
 });
 
-test("流式 thinking 未冻结：折叠行显示「思考中…」无实时秒数、不叠加 [思考] 前缀", async () => {
+test("流式 thinking 未冻结：折叠行显示 Thinking…，无实时秒数、不叠加 [思考] 前缀", async () => {
   // 场景：turn 运行中，thinking 阶段进行中（frozen=0）→ 折叠行显示静态
-  // `思考中…`（实时递增秒数已下线，2026-08-14 —— 思考时长由事后 frozen
-  // 摘要 `思考了 N 秒` 承担，避免与 mode 行运行时长视觉重复 + 语义混淆）。
+  // `Thinking…`（实时递增秒数已下线 —— 思考时长由事后 frozen
+  // 摘要 `Thought for <duration>` 承担，避免与 mode 行运行时长视觉重复）。
   const initial = sessionWith(makeMessages(1));
   const setup1 = await testRender(
     <ChatView
@@ -479,14 +480,14 @@ test("流式 thinking 未冻结：折叠行显示「思考中…」无实时秒�
   );
   await setup1.waitForVisualIdle();
   const frame = setup1.captureCharFrame();
-  expect(frame).toContain("思考中…");
+  expect(frame).toContain("Thinking…");
   expect(frame.includes("5 秒")).toBe(false);
   expect(frame.includes("[思考]")).toBe(false);
   await setup1.renderer.destroy();
 });
 
-test("流式 thinking 子秒未冻结：折叠行显示「思考中…」不显 0 秒", async () => {
-  // 场景：thinking 已开始但 <1s（子秒）→ 折叠行保持静态「思考中…」
+test("流式 thinking 子秒未冻结：折叠行显示 Thinking… 不显 0 秒", async () => {
+  // 场景：thinking 已开始但 <1s（子秒）→ 折叠行保持静态 `Thinking…`
   // （流式行无实时秒数，PR 1 后恒不显秒数 —— 子秒自然不显「0 秒」伪精度）。
   const initial = sessionWith(makeMessages(1));
   const setup1 = await testRender(
@@ -502,7 +503,7 @@ test("流式 thinking 子秒未冻结：折叠行显示「思考中…」不显 
   );
   await setup1.waitForVisualIdle();
   const frame = setup1.captureCharFrame();
-  expect(frame).toContain("思考中…");
+  expect(frame).toContain("Thinking…");
   expect(frame.includes("0 秒")).toBe(false);
   expect(frame.includes("[思考]")).toBe(false);
   await setup1.renderer.destroy();
@@ -512,7 +513,7 @@ test("thinking 留存：session.thinkingMs 只在末位索引有值时渲染", a
   // D3 (tui-display-consistency):折叠行思考秒数改读 session.thinkingMs —
   // — 每条 assistant message 按其索引读对应 thinkingMs。旧 assistant
   // (index 1) thinkingMs = null → 不画思考摘要;新 assistant (index 3)
-  // thinkingMs = 7000ms → 画「思考了 7 秒」;秒数只属于该 message 自身
+  // thinkingMs = 7000ms → 画 `Thought for 7s`;秒数只属于该 message 自身
   // (不再像旧 lastThinkingSeconds 那样只传给末条)。
   const initial = sessionWith(
     [
@@ -548,7 +549,7 @@ test("thinking 留存：session.thinkingMs 只在末位索引有值时渲染", a
   await setup1.waitForVisualIdle();
   const frame = setup1.captureCharFrame();
   // 末条「新回答」带 7 秒；前一条「旧回答」无秒 → 不回落 [思考]。
-  expect(frame).toContain("思考了 7 秒");
+  expect(frame).toContain("Thought for 7s");
   expect(frame.includes("[思考]")).toBe(false);
   expect(frame).toContain("旧回答");
   await setup1.renderer.destroy();
@@ -633,7 +634,9 @@ test("#589 ChatView tail：20 条 read_file ok + 1 running 不含完成读行", 
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("[运行中] grep");
+  // spec D1：running 过程行 = 英文 `grep · Search <pattern>`，无 `[运行中]`。
+  expect(frame).toContain("grep · Search");
+  expect(frame.includes("[运行中]")).toBe(false);
   expect(frame).not.toContain("CV_READ_OK_");
   expect(frame).not.toContain("read_file ·");
   await setup.renderer.destroy();
@@ -781,7 +784,7 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
           ...session,
           // D3 (tui-display-consistency):折叠行思考秒数改读 session.thinkingMs。
           // finalMessages 6 条 messages(0..5);末条 assistant(index 5)
-          // thinkingMs = 12000ms → 「思考了 12 秒」;两段 web_search 在同一 turn
+          // thinkingMs = 12000ms → `Thought for 12s`;两段 web_search 在同一 turn
           // (index 1 / 3)合并成 "web_search × 2" 折叠行,工具簇 anchor 思考
           // 落空 → 折叠行只显工具计数。
           thinkingMs: [null, null, null, null, null, 12000],
@@ -808,9 +811,9 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
   holder.api.finishTurn();
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("思考了 12 秒");
+  expect(frame).toContain("Thought for 12s");
   expect(frame).toContain("web_search × 2");
-  expect(frame).not.toContain("思考了 12 秒 · web_search × 2");
+  expect(frame).not.toContain("Thought for 12s · web_search × 2");
   // assistant 文本经 Markdown 渲染 + 盘古之白：今天的AI → 今天的 AI。
   expect(frame).toContain("以下是今天的 AI 新闻摘要");
   expect(frame.includes("[完成] web_search")).toBe(false);
@@ -821,7 +824,7 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
   expect(iText).toBeGreaterThanOrEqual(0);
   // 折叠行 →（1 行消息间距）→ 最终文本:行距 ≤ 4;被折叠的纯工具 /
   // 纯 tool_result 消息不得各留 1 行幻影 margin 连成空位。
-  // D3 后末条 assistant 多 1 行 ThinkingSummary「思考了 N 秒」（legacy ≤ 2
+  // D3 后末条 assistant 多 1 行 ThinkingSummary `Thought for Ns`（legacy ≤ 2
   // 是 lastThinkingSeconds 全局 + 折叠态压住末条 thinking 的旧形态;D3 改
   // per-message ThinkingSummary 后行距自然多 1 → ≤ 3）。
   // #tui-render-overhaul T4:assistant 内部块间补 1 行节奏（ThinkingSummary
@@ -970,10 +973,10 @@ test("running：第二段草稿画在后续工具之下（tool→text→tool→t
   // bash(epoch 0) < 第一段 < bash(epoch 1) < 第二段。
   const iFirstBash = frame.indexOf("bash");
   const iFirstDraft = frame.indexOf("第一段回答");
-  // epoch 1 bash 是 status="running" → 渲染为 `[运行中] bash`(带前缀),
-  // 不能用第二个 "bash" 找。改为查 "运行中" 标记,它只会出现在 epoch 1
-  // bash 的位置。
-  const iSecondBash = frame.indexOf("运行中");
+  // epoch 1 bash 是 status="running" → 渲染为 `Running 1 shell command… · …`
+  // (spec D1 过程行),不能用第二个 "bash" 找。改为查 `Running 1 shell
+  // command…` 前缀,它只会出现在 epoch 1 bash 的位置。
+  const iSecondBash = frame.indexOf("Running 1 shell command…");
   const iSecondDraft = frame.indexOf("第二段回答");
   expect(iFirstBash).toBeGreaterThanOrEqual(0);
   expect(iFirstDraft).toBeGreaterThanOrEqual(0);
@@ -987,7 +990,7 @@ test("running：第二段草稿画在后续工具之下（tool→text→tool→t
 
 test("idle：当前 turn bash keep 标题逐条留，零条收无计数行", async () => {
   // D3（spec specs/tui-tool-settled-appearance.md）：bash 是 keep 类 ——
-  // 落定后标题逐条留（含既有 thinking 摘要「思考了 N 秒」随消息渲染），
+  // 落定后标题逐条留（含既有 thinking 摘要 `Thought for Ns` 随消息渲染），
   // 零 retract 条目 → 无工具计数行。"完成。"文本独立行。
   const session = sessionWith(
     [
@@ -1044,12 +1047,13 @@ test("idle：当前 turn bash keep 标题逐条留，零条收无计数行", asy
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("思考了 29 秒");
+  expect(frame).toContain("Thought for 29s");
   // keep 标题按 slot 渲染：tu-b2 落定成功 → 成功态无 [完成] 前缀
-  // (#tui-render-overhaul T3);tu-b1 未配对 → [运行中](running slot
-  // 标题可见,D7)。两条标题都在屏幕上。
+  // (#tui-render-overhaul T3);tu-b1 未配对 → running 过程行（spec D1：
+  // `Running 1 shell command… · <命令>`，无 `[运行中]`）。
   expect(frame).toContain("bash · ls -la");
-  expect(frame).toContain("[运行中] bash · ls archive");
+  expect(frame).toContain("Running 1 shell command… · ls archive");
+  expect(frame.includes("[运行中]")).toBe(false);
   expect(frame).toContain("完成。");
   expect(frame.includes("[完成]")).toBe(false);
   // 零条收 → 无工具计数行。

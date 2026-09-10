@@ -8,9 +8,11 @@
  * 不漂移（parity）。
  *
  * T5 (tui-render-optimization)：running 态若有 `partialInput`（tool_input_delta
- * 累积），渲染 `[运行中] name · <partial 摘要>`（parse 成功走 summarizeToolCall，
- * 不完整 JSON 原样截断）；无增量 → 保持 `[运行中] name` 基础行。摘要统一由
- * `summarizePartialInput`（tool-summary.ts）产出，行账仍 1 行。
+ * 累积），渲染英文过程行 `name · <partial 摘要>`（bash 为
+ * `Running 1 shell command… · <command>`；parse 成功走 summarizeToolCall，
+ * 不完整 JSON 原样截断）；无增量 → 基础过程行（bash 只余 shell 前缀）。
+ * 摘要统一由 `summarizePartialInput`（tool-summary.ts）产出，行账仍 1 行。
+ * 无 `[运行中]`（spec D1）。
  *
  * write_file / edit_file 运行中不渲染 `content` 正文（含不完整 JSON）；
  * 完成后用 `completedToolPreview` 截断代码或 diff。
@@ -59,14 +61,15 @@ function writeEditRunningLine(run: LiveToolRun, cols: number): string {
     const rec = parsed as Record<string, unknown>;
     const path =
       typeof rec.path === "string" && rec.path.length > 0 ? rec.path : "?";
-    // Running write/edit: name + path (+ write line count when the streamed
-    // `content` is already a non-empty string). Never old/new/content body.
+    // Running write/edit: `Wrote <path> (N lines)` / `Edited <path>` —— 行数
+    // 只在流式 content 已成非空 string 时出现（半成品里缺失 ≠ 0 行）。绝不
+    // 把 old/new/content 正文流进状态行。
     const summary =
       run.name === "write_file"
         ? summarizeToolCall("write_file", parsed, cols, { running: true })
             .detail
         : clipOneLineVisual(
-            `编辑 ${path}`,
+            `Edited ${path}`,
             Math.min(80, Math.max(4, cols - visualWidth(run.name) - 12))
           );
     return summary.length === 0
@@ -86,9 +89,10 @@ function writeEditRunningLine(run: LiveToolRun, cols: number): string {
 }
 
 /**
- * running 状态行：有 partialInput 增量 → `[运行中] name · <partial 摘要>`；
- * 空 / 无增量 → 基础 `[运行中] name`（formatRunningToolLine）。摘要单源 =
- * summarizePartialInput，行账 1 行。write/edit 不把 content 流进该行。
+ * running 状态行：有 partialInput 增量 → 英文过程行 `name · <partial 摘要>`
+ * （bash 前缀 `Running 1 shell command…`）；空 / 无增量 → 基础过程行
+ * （formatRunningToolLine）。摘要单源 = summarizePartialInput，行账 1 行。
+ * write/edit 不把 content 流进该行。
  * #693 T1 D7：含 partial 的形态拼装委托 formatToolStatusLine（tool-summary SSOT），
  * 与历史 ToolSummaryRow 同源 —— 字节一致，无重复模板。
  */

@@ -27,6 +27,7 @@ import {
   type TuiAppProps,
 } from "../../src/tui/app.js";
 import type { TuiSessionState } from "../../src/tui/session-state.js";
+import { sessionLocationLines } from "../../src/tui/environment-pane.js";
 import {
   createInflightRegistry,
   createTuiBridge,
@@ -777,7 +778,7 @@ describe("T4b: agent_status resume hydrate", () => {
 // ADR-0037 T5: session worktree 隔离现势行（改绑后可演示）
 // ---------------------------------------------------------------------------
 
-describe("ADR-0037 T5: worktree 隔离现势行", () => {
+describe("D7 / SC6: 会话位置行常驻（主仓也画、绑树只换路径）", () => {
   function sessionFileWithWorktreeRoot(): SessionFileV1 {
     const messages: AnthropicNativeMessage[] = [
       { role: "user", content: [{ type: "text", text: "用户问题" }] },
@@ -798,7 +799,7 @@ describe("ADR-0037 T5: worktree 隔离现势行", () => {
     };
   }
 
-  test("改绑后的会话恢复 → 现势行显示绑定的 task worktree 路径", async () => {
+  test("改绑后的会话恢复 → 同一槽换成绑定的 task worktree 路径（不是多一行）", async () => {
     const file = sessionFileWithWorktreeRoot();
     const app = await mountAppAsync(
       [assistantResult({ texts: ["unused"] })],
@@ -806,21 +807,35 @@ describe("ADR-0037 T5: worktree 隔离现势行", () => {
       undefined,
       attachSession(file)
     );
+    // 绑树后位置行 = 项目根叶子 + 相对段（`repo/.iknow/worktrees/<叶>`），
+    // 不再是旧 `worktree: …` 前缀行。tui 测试的 props.cwd = "/tmp/proj"，
+    // 绑根在其外 → 显示原样根路径。
     const frame = await untilFrame(
       app.setup,
       (f) => f.includes("/repo/.iknow/worktrees/conv-wt-isolation"),
       8000
     );
-    expect(frame).toContain("worktree:");
     expect(frame).toContain("/repo/.iknow/worktrees/conv-wt-isolation");
+    expect(frame.includes("worktree:")).toBe(false);
     await app.destroy();
   }, 30_000);
 
-  test("未绑定（draft / 开关 OFF）→ 无 worktree 现势行（与今日一致）", async () => {
+  test("未绑定（draft / 开关 OFF）→ 位置行仍在（主仓路径），不是 0 行", async () => {
+    // spec D7 / SC6：位置行常驻 —— 未绑树时画项目根，不得靠「绑了才出现」
+    // 当「在不在树上」的信号。
     const app = await mountAppAsync([assistantResult({ texts: ["unused"] })]);
-    await untilFrame(app.setup, (f) => f.includes("Version"));
-    const frame = app.setup.captureCharFrame();
-    expect(frame).not.toContain("worktree:");
+    const frame = await untilFrame(app.setup, (f) => f.includes("proj"), 8000);
+    // 断言位置行**独占一行**（与投影同源），而不是随便一个含 "proj" 的
+    // 片段：substring 可能命中其它 chrome（banner / 路径提示），认证力不足。
+    // cwd=/tmp/proj 非 git 仓 → 分支未知 → 按 spec「只画路径段、不写占位符」，
+    // 该行即 `proj`；断言整行 trim 相等即钉住「这一行就是位置行在画」。
+    const expected = sessionLocationLines({
+      projectRoot: "/tmp/proj",
+      cols: 80,
+    })[0]?.text;
+    expect(expected).toBe("proj");
+    expect(frame.split("\n").some((l) => l.trim() === expected)).toBe(true);
+    expect(frame.includes("worktree:")).toBe(false);
     await app.destroy();
   }, 30_000);
 });

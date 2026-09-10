@@ -233,7 +233,9 @@ export function shortenMcpToolName(name: string): string {
 }
 
 /** 运行中条目格式化 —— 委托 `formatToolStatusLine`（tool-summary.ts SSOT，
- *  #693 T1 D7）。普通工具 → `[运行中] name`；子代理工具（spawn_subagent /
+ *  #693 T1 D7 + specs/tui-human-display.md D1）。普通工具 → 英文过程行
+ *  `name`（如 `read_file`；有 input 时带要点）或 bash 的
+ *  `Running 1 shell command…`；子代理工具（spawn_subagent /
  *  subagent_result，plans/tui-chrome-interaction.md T7）不再以 `▣ 子代理`
  *  形态出现 —— 子代理状态由 identity strip + SubagentPanel 单独表达，
  *  formatToolStatusLine 内只返 `detail`（如 `explore running` / `general-purpose`），避免

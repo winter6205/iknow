@@ -7,9 +7,10 @@
  *  - system 消息 → 独立分支：[已打断] 前缀 + 固定文案 Interrupted by user.，
  *    不进 Markdown 解析（#392 T3）；
  *  - assistant 文本 → Markdown 渲染（headings/code/lists 节选）；
- *  - thinking 折叠（默认）：无秒数不画摘要；有秒 → `思考了 N 秒`；
+ *  - thinking 折叠（默认）：无秒数不画摘要；有秒 → `Thought for Ns`（1 行）；
  *  - thinking 展开：thinking 文本全文 + redacted 占位；
- *  - tool_use 摘要行 + statusMap 驱动 ok/failed/运行中 标记染色；
+ *  - tool_use 摘要行 + statusMap 驱动 ok/failed/running 染色（running 走英文
+ *    过程行，无 `[运行中]` 括号）；
  *  - content 边界：空文本 user 消息返回 null，不渲染任何节点。
  *  - T7 间距 + 底色：消息块根 marginTop={1} → 字符帧消息间出现空白分隔行；
  *    底色为渲染元数据（captureCharFrame 字符帧不含背景色），结构层断言 =
@@ -22,6 +23,11 @@ import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/typ
 import { testRender } from "@opentui/react/test-utils";
 import { RGBA } from "@opentui/core";
 import { MessageBlocks } from "../../src/tui/message-blocks.js";
+import {
+  IKNOW_GRAPH_MODE_OFF_NOTIFICATION,
+  IKNOW_GRAPH_MODE_ON_NOTIFICATION,
+  IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,
+} from "../../src/harness/graph/notification.js";
 import { tuiPalette } from "../../src/tui/theme.js";
 
 const COLS = 60;
@@ -162,6 +168,28 @@ test("agent_status 栏注入：不渲染为 ❯ 用户气泡", async () => {
   expect(frame.includes("last_tool")).toBe(false);
   expect(frame.includes("agent_status")).toBe(false);
   await setup.renderer.destroy();
+});
+
+test("graph_mode 三条现势通知注入：不渲染为 ❯ 用户气泡（SC7 帧级）", async () => {
+  // spec D8 / SC7：与 agent_status 同纪律同谓词面（isGraphModeText）。
+  // 三条常量（翻转 ON / 翻转 OFF / 每拍 presence）都不得上屏 —— 帧里既无
+  // ❯ 气泡，也不出现标签本身。
+  for (const text of [
+    IKNOW_GRAPH_MODE_ON_NOTIFICATION,
+    IKNOW_GRAPH_MODE_OFF_NOTIFICATION,
+    IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,
+  ]) {
+    const msg: AnthropicNativeMessage = {
+      role: "user",
+      content: [{ type: "text", text }],
+    };
+    const setup = await renderBlocks(msg);
+    const frame = setup.captureCharFrame();
+    expect(frame.includes("❯")).toBe(false);
+    expect(frame.includes("<graph_mode>")).toBe(false);
+    expect(frame.includes("Graph mode")).toBe(false);
+    await setup.renderer.destroy();
+  }
 });
 
 test("memory prefetch overlay：❯ 只显示键入 query，不泄露记忆正文", async () => {
@@ -368,14 +396,14 @@ test("tool_use 非 bash 工具（write_file）：无 ran 计数，无 [完成] �
     statusMap: new Map([["tu-wf", false]]),
   });
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("write_file · 写入 a.ts（1 行）");
+  expect(frame).toContain("write_file · Wrote a.ts (1 lines)");
   expect(frame.includes("ran")).toBe(false);
   // #tui-render-overhaul T3:成功态无 [完成] 前缀。
   expect(frame.includes("[完成]")).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("thinking 折叠态 + thinkingSeconds：渲染 `思考了 N 秒` 替换 [思考]", async () => {
+test("thinking 折叠态 + thinkingSeconds：渲染 `Thought for Ns` 替换 [思考]", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -395,8 +423,9 @@ test("thinking 折叠态 + thinkingSeconds：渲染 `思考了 N 秒` 替换 [�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 新格式：折叠行 = `思考了 N 秒`（替换 [思考] 标记）。
-  expect(frame).toContain("思考了 3 秒");
+  // 新格式（spec D2 / CONTEXT `unit fold`）：折叠行 = `Thought for 3s`
+  // （英文，替换 [思考] 标记）。
+  expect(frame).toContain("Thought for 3s");
   expect(frame.includes("[思考]")).toBe(false);
   // text block 仍渲染（正式回答保留）。
   expect(frame).toContain("正式回答");
@@ -459,7 +488,7 @@ test("thinking 折叠态 + bash tool_use：无 thinkingSeconds → 无思考摘�
   await setup.renderer.destroy();
 });
 
-test("thinking 折叠态 + thinkingSeconds + bash：思考一行、ran 下一行", async () => {
+test("thinking 折叠态 + thinkingSeconds + bash：折叠摘要不另起 ran 第二行", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -485,21 +514,20 @@ test("thinking 折叠态 + thinkingSeconds + bash：思考一行、ran 下一行
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("思考了 3 秒");
-  expect(frame).toContain("ran 1 command");
-  expect(frame).not.toContain("思考了 3 秒 · ran 1 command");
-  const frameLines = frame.split("\n");
-  const thinkIdx = frameLines.findIndex((l) => l.includes("思考了 3 秒"));
-  const ranIdx = frameLines.findIndex((l) => l.includes("ran 1 command"));
-  expect(thinkIdx).toBeGreaterThanOrEqual(0);
-  expect(ranIdx).toBe(thinkIdx + 1);
+  // 不变式（spec D2 / CONTEXT `unit fold`）：折叠时长行只到
+  // `Thought for 3s`，原 `ran N command(s)` 第二行语义整体废弃 ——
+  // 计数只出现在 turn 级 `name × N` 折叠行，不在 message 级摘要里。
+  expect(frame).toContain("Thought for 3s");
+  expect(frame.includes("ran 1 command")).toBe(false);
+  expect(frame.includes("思考了")).toBe(false);
   expect(frame.includes("[思考]")).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("tool_use 状态染色：statusMap 缺位 = [运行中]，failed = [失败]，成功 = 无状态前缀", async () => {
+test("tool_use 状态染色：statusMap 缺位 = 过程行（无 [运行中]），failed = [失败]，成功 = 无状态前缀", async () => {
   // #tui-render-overhaul T3:成功态去掉 [完成] 前缀，状态由颜色/glyph 表达。
-  // 运行中 / 失败保留明示前缀。不变式：失败 / 运行中分支不动。
+  // spec D1（本轮）:running 也去掉 `[运行中]` —— 过程行改为英文
+  // `name · detail`，状态只由颜色表达。失败仍保留 `[失败]` 明示前缀。
   const okStatus = new Map<string, boolean>([["tu-ok", false]]);
   const failedStatus = new Map<string, boolean>([["tu-fail", true]]);
   const cases: ReadonlyArray<{
@@ -518,7 +546,12 @@ test("tool_use 状态染色：statusMap 缺位 = [运行中]，failed = [失败]
       expectNoCompleteMark: true,
     },
     { name: "失败染色", id: "tu-fail", map: failedStatus, mark: "[失败]" },
-    { name: "未配对", id: "tu-runn", map: emptyStatusMap(), mark: "[运行中]" },
+    {
+      name: "未配对",
+      id: "tu-runn",
+      map: emptyStatusMap(),
+      mark: "write_file · Wrote a.ts",
+    },
   ];
   for (const c of cases) {
     const msg: AnthropicNativeMessage = {
@@ -540,6 +573,8 @@ test("tool_use 状态染色：statusMap 缺位 = [运行中]，failed = [失败]
       // #tui-render-overhaul T3:成功态无 [完成] 前缀(由颜色表达)。
       expect(frame.includes("[完成]")).toBe(false);
     }
+    // spec D1：三条分支（成功 / 失败 / 未配对）都不出现 `[运行中]`。
+    expect(frame.includes("[运行中]")).toBe(false);
     await setup.renderer.destroy();
   }
 });
@@ -567,14 +602,15 @@ test("tool_use 摘要行：cols 收口单行不折（narrow cols）", async () =
     { width: 20, height: 10, exitOnCtrlC: false }
   );
   await setupNarrow.waitForVisualIdle();
-  const lines = setupNarrow
-    .captureCharFrame()
-    .split("\n")
-    .filter((l) => l.includes("[运行中]"));
+  const frame = setupNarrow.captureCharFrame();
+  // spec D1：running 过程行 = `write_file · <detail>`（英文，无状态括号），
+  // 且 cols=20 下仍收口在单行内（wrapMode none → 视觉裁剪，不折行）。
+  const lines = frame.split("\n").filter((l) => l.includes("write_file"));
   expect(lines.length).toBeGreaterThan(0);
   for (const l of lines) {
     expect(l.length).toBeLessThanOrEqual(20);
   }
+  expect(frame.includes("[运行中]")).toBe(false);
   await setupNarrow.renderer.destroy();
 });
 
@@ -608,7 +644,10 @@ test("tool_use preview 截断窗：新文件代码首窗可见，溢出标记，
   expect(frame).toContain("write_file");
   expect(frame).toContain("line-00");
   expect(frame).not.toContain("line-19");
-  expect(frame).toContain("还有");
+  // spec D3 / CONTEXT `write create preview`：溢出文案英文 `+N more lines`
+  // （20 行正文 − 10 行窗 = 10 行溢出）。
+  expect(frame).toContain("+10 more lines");
+  expect(frame).not.toContain("还有");
   expect(frame).not.toContain("+line-00");
   expect(frame.includes("[完成]")).toBe(false);
   await setup.renderer.destroy();
@@ -723,7 +762,7 @@ test("T7 assistant 消息：底色 box 包裹后渲染不崩，markdown 产物�
   await setup.renderer.destroy();
 });
 
-test("history write_file 未配对（空 statusMap）：仅 [运行中] 摘要，不含 content 正文", async () => {
+test("history write_file 未配对（空 statusMap）：仅过程行摘要，不含 content 正文", async () => {
   const bodyLine = "UNIQUE_WRITE_BODY_LINE_alpha";
   const msg: AnthropicNativeMessage = {
     role: "assistant",
@@ -738,7 +777,10 @@ test("history write_file 未配对（空 statusMap）：仅 [运行中] 摘要�
   };
   const setup = await renderBlocks(msg, { statusMap: emptyStatusMap() });
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("[运行中]");
+  // D1：过程行是英文 live tool line，无 `[运行中]` 括号；行数只在 content
+  // 已成形时出现（此处 input 是权威完整 input → 2 行）。
+  expect(frame).toContain("write_file · Wrote a.ts (2 lines)");
+  expect(frame.includes("[运行中]")).toBe(false);
   expect(frame).not.toContain(bodyLine);
   expect(frame).not.toContain("second-body-line");
   await setup.renderer.destroy();
@@ -792,8 +834,8 @@ test("T7 纯 tool_use 消息：底色 box 包裹后渲染不崩，摘要行可�
   };
   const setup = await renderBlocks(msg);
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("[运行中]");
-  expect(frame).toContain("write_file");
+  expect(frame).toContain("write_file · Wrote a.ts (1 lines)");
+  expect(frame.includes("[运行中]")).toBe(false);
   await setup.renderer.destroy();
 });
 
@@ -885,12 +927,12 @@ test("subagent_result 完成 ok → 仅 detail（无 `✓` glyph）", async () =
     statusMap: new Map([["tu-poll", false]]),
   });
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("轮询 t-1");
+  expect(frame).toContain("Poll t-1");
   expect(frame.includes("✓")).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("bash 回归：`[运行中] bash` / 完成态字节不变", async () => {
+test("bash 回归：过程行 `Running 1 shell command…` + 命令可见，完成态字节不变", async () => {
   const running: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -904,7 +946,10 @@ test("bash 回归：`[运行中] bash` / 完成态字节不变", async () => {
   };
   const setup = await renderBlocks(running);
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("[运行中] bash · ls");
+  // spec D1 / CONTEXT `live tool line`：running 的 bash 过程行带
+  // `Running 1 shell command…` 前缀且命令可见，无状态括号。
+  expect(frame).toContain("Running 1 shell command… · ls");
+  expect(frame.includes("[运行中]")).toBe(false);
   await setup.renderer.destroy();
 
   const done: AnthropicNativeMessage = {
@@ -1157,9 +1202,13 @@ test("SC5 accent 成功：建树工具人读表述（label / 路径叶子）走 
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("进入任务工作树");
+  // D1（specs/tui-human-display.md）人读过程行随摘要注册表改英文并点名目标
+  // （语义仍是 task worktree）。accent 色断言不变 —— 强于旧断言的是此处
+  // 再加「无中文残留」。
+  expect(frame).toContain("Entered worktree abc-leaf-123");
+  expect(frame.includes("进入任务工作树")).toBe(false);
   const expectedAccent = RGBA.fromHex(tuiPalette.accent);
-  const fg = fgOfSpanWith(setup, "进入任务工作树");
+  const fg = fgOfSpanWith(setup, "Entered worktree abc-leaf-123");
   expect(fg).toBeDefined();
   expect(rgbaEq(fg!, expectedAccent)).toBe(true);
   await setup.renderer.destroy();
@@ -1256,7 +1305,7 @@ test("T2 keep 标题：write_file 成功 fg = palette.text（非 dim）", async 
   await setup.waitForVisualIdle();
   const expectedText = RGBA.fromHex(tuiPalette.text);
   const expectedDim = RGBA.fromHex(tuiPalette.dim);
-  const fg = fgOfSpanWith(setup, "write_file · 写入 a.ts");
+  const fg = fgOfSpanWith(setup, "write_file · Wrote a.ts");
   expect(fg).toBeDefined();
   expect(rgbaEq(fg!, expectedText)).toBe(true);
   // 钉死不变式:不得是 dim。
@@ -1667,7 +1716,10 @@ test("D4 未配对 tool_use（statusMap 缺位）→ 不画结果预览", async 
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   // statusMap 缺位 → 等同 running 态：不画结果预览（spec D4 未配对不渲染）。
-  expect(frame).toContain("[运行中] bash");
+  // spec D1：过程行是英文 live tool line（running bash 带 `Running 1 shell
+  // command…` 前缀 + 可见命令），无 `[运行中]` 括号。
+  expect(frame).toContain("Running 1 shell command… · ls");
+  expect(frame.includes("[运行中]")).toBe(false);
   expect(frame).not.toContain("⎿");
   await setup.renderer.destroy();
 });
@@ -1750,7 +1802,7 @@ test("T4 assistant 内部块：thinking 折叠 + 工具行 + 文本，节点间 
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
   // 锚点行号。
-  const thinkIdx = lines.findIndex((l) => l.includes("思考了 3 秒"));
+  const thinkIdx = lines.findIndex((l) => l.includes("Thought for 3s"));
   const bashIdx = lines.findIndex((l) => l.includes("bash ·"));
   const textIdx = lines.findIndex((l) => l.includes("跑完了"));
   expect(thinkIdx).toBeGreaterThanOrEqual(0);
@@ -1778,10 +1830,10 @@ test("T4 assistant 单块无内部空白：仅 1 个文本块时,文本独占首
   await setup.renderer.destroy();
 });
 
-test("T4 assistant 思考行 + ran 后缀：两个相邻 dim 行同块（无间距）", async () => {
-  // ThinkingSummary 内部的 `思考了 N 秒` 与 `ran M commands` 是同一个 box
-  // 内的两条 sibling 行 —— 节点级别 = 1 个块,不补 margin。块间间距只在
-  // 块与块之间。
+test("T4 assistant 思考折叠块只占 1 行：无 ran 第二行，与工具行保持块间间距", async () => {
+  // spec D2：message 级思考折叠只有 `Thought for <duration>` 一行；原
+  // `ran M commands` 第二行语义整体废弃（计数只属 turn 级 `name × N` 折叠），
+  // 因此本块恒 1 行，块间间距判定回到「折叠行 → 工具行」。
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -1807,16 +1859,14 @@ test("T4 assistant 思考行 + ran 后缀：两个相邻 dim 行同块（无间�
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
-  const thinkIdx = lines.findIndex((l) => l.includes("思考了 3 秒"));
-  const ranIdx = lines.findIndex((l) => l.includes("ran 1 command"));
+  const thinkIdx = lines.findIndex((l) => l.includes("Thought for 3s"));
   const bashIdx = lines.findIndex((l) => l.includes("bash ·"));
   expect(thinkIdx).toBeGreaterThanOrEqual(0);
-  expect(ranIdx).toBeGreaterThanOrEqual(0);
   expect(bashIdx).toBeGreaterThanOrEqual(0);
-  // 思考行与 ran 后缀是同一 ThinkingSummary box 内的两行 → 相邻 1 行（无间距）。
-  expect(ranIdx - thinkIdx).toBe(1);
-  // ran 后缀与下一块 bash 之间补 1 行空白（≥ 2 行差）。
-  expect(bashIdx - ranIdx).toBeGreaterThanOrEqual(2);
+  // 折叠块只有 1 行（无 `ran N command(s)` 第二行）。
+  expect(frame.includes("ran 1 command")).toBe(false);
+  // 折叠行与下一块 bash 之间补 1 行空白（≥ 2 行差）。
+  expect(bashIdx - thinkIdx).toBeGreaterThanOrEqual(2);
   await setup.renderer.destroy();
 });
 

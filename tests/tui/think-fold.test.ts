@@ -3,18 +3,13 @@
  *
  * thinking 折叠行 / 流式行文案纯函数单测（think-fold.ts）。
  *
- * 2026-08-14 修复（两套文案渲染不统一）：
- *  - chat-view.tsx 流式折叠行旧文案 = `[思考] 思考中… N 秒` / `[思考] 思考了 N 秒`
- *    （秒数叠加在 [思考] 标记上）；
- *  - message-blocks.tsx 历史折叠行旧文案 = `思考了 N 秒` / 纯 `[思考]`
- *    （秒数替换 [思考] 标记）。
- * 本模块把两处收敛到同一纯函数，从源头统一：`思考了 N 秒` 本身即带语义，
- * 不再叠加 `[思考]` 前缀；子秒 / 无秒数 / 非有限 → 空串（不换括号标签，
- * 也不造「思考了 0 秒」）。
- * 流式行不再叠加实时秒数（恒 `思考中…`）—— 思考时长由事后落盘 thinkingMs
- * 摘要 `思考了 N 秒` 承担（spec D3：D2 落盘数据接管，app 层内存 pin/freeze
- * 副通道整条删除）。`pinThinkingSeconds` 已删除 —— 单元测试随函数删除而删除
- * （spec D3 授权，折叠行思考秒数来源语义变更）。
+ * 人读合同（specs/tui-human-display.md D1/D2 + CONTEXT `live tool line` /
+ * `unit fold`）：进行中行恒定英文 `Thinking…`（无实时秒数），结束态行
+ * `Thought for <duration>`（无 `[思考]` 前缀、无中文）。秒数缺失 / 非正 /
+ * 非有限 → 空串（不回落括号标签，也不造 0 秒行）。
+ *
+ * 本文件钉住的纯函数是 TUI 唯一文案源；渲染层（chat-view / message-blocks）
+ * 只调本模块，禁止另写模板字符串。
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -24,10 +19,15 @@ import {
   thinkingPeekLines,
 } from "../../src/tui/think-fold.js";
 
-describe("formatThinkingFold（历史折叠行文案）", () => {
-  test("seconds > 0 → `思考了 N 秒`（不叠加 [思考] 前缀）", () => {
-    expect(formatThinkingFold(7)).toBe("思考了 7 秒");
-    expect(formatThinkingFold(1)).toBe("思考了 1 秒");
+describe("formatThinkingFold（历史结束态折叠行文案）", () => {
+  test("seconds > 0 → 英文 `Thought for <duration>`（无中文、无 [思考] 前缀）", () => {
+    expect(formatThinkingFold(7)).toBe("Thought for 7s");
+    expect(formatThinkingFold(1)).toBe("Thought for 1s");
+  });
+
+  test("时长格式：60 秒以上按整秒数展示，不造中文单位", () => {
+    expect(formatThinkingFold(60)).toBe("Thought for 60s");
+    expect(formatThinkingFold(1e9)).toBe("Thought for 1000000000s");
   });
 
   test("empty：0 / undefined → 空串（不换 [思考]、不造 0 秒）", () => {
@@ -39,10 +39,6 @@ describe("formatThinkingFold（历史折叠行文案）", () => {
     expect(formatThinkingFold(-1)).toBe("");
   });
 
-  test("overflow：超大秒数仍格式化，不抛", () => {
-    expect(formatThinkingFold(1e9)).toBe("思考了 1000000000 秒");
-  });
-
   test("concurrent：同一输入重复调用结果稳定（纯函数）", () => {
     expect(formatThinkingFold(3)).toBe(formatThinkingFold(3));
     expect(formatThinkingFold(0)).toBe(formatThinkingFold(0));
@@ -52,6 +48,11 @@ describe("formatThinkingFold（历史折叠行文案）", () => {
     expect(formatThinkingFold(Number.NaN)).toBe("");
     expect(formatThinkingFold(Number.POSITIVE_INFINITY)).toBe("");
     expect(formatThinkingFold(Number.NEGATIVE_INFINITY)).toBe("");
+  });
+
+  test("旧中文文案不再出现（人读合同切换后不得残留）", () => {
+    expect(formatThinkingFold(7)).not.toContain("思考");
+    expect(formatThinkingFold(7)).not.toContain("秒");
   });
 });
 
@@ -67,8 +68,9 @@ describe("pinThinkingSeconds（已删除 — spec D3）", () => {
 });
 
 describe("formatThinkingLive（流式折叠行文案）", () => {
-  test("恒为 `思考中…`（实时秒数已下线 — 思考时长由事后 frozen 摘要承担）", () => {
-    expect(formatThinkingLive()).toBe("思考中…");
+  test("恒为英文 `Thinking…`（实时秒数已下线 — 思考时长由事后 frozen 摘要承担）", () => {
+    expect(formatThinkingLive()).toBe("Thinking…");
+    expect(formatThinkingLive()).not.toContain("思考");
   });
 });
 

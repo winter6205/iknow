@@ -35,7 +35,8 @@
 - `tui-transcript-viewport.md` — ChatView 视口挂载（取代 PR #592 固定条数尾窗；滚动文档全量，树上只挂视口+overscan）
 - `tui-markdown-stream-display.md` — markdown 围栏显示窗（32 行）+ 流式顶层块冻结；不改 session、不是消息条数尾窗
 - `tui-run-graph-view.md` — `run_graph` 执行中 chrome 一行 + 语义分组视图（map #749；原型 #751）；plan: `plans/tui-run-graph-view.md`
-- `tui-tool-settled-appearance.md` — 工具落定态（留 / 收 / 点名着色 + 失败横切 + `deriveSlot`）；**supersedes** `tui-display-consistency` D3；plan: `plans/tui-tool-settled-appearance.md`
+- `tui-tool-settled-appearance.md` — 工具落定态（留 / 收 / 点名着色 + 失败横切 + `deriveSlot`）；**supersedes** `tui-display-consistency` D3；plan: `plans/tui-tool-settled-appearance.md`；写/改 6 行与 `[运行中]` 过程文案 **amended by** `tui-human-display.md`
+- `tui-human-display.md` — 过程标题 / 收类不得蒸发 / 新建 10 行 / 编辑 diff / 进度覆盖 / 位置常驻 / 滤 `<graph_mode>`；plan: `plans/tui-human-display.md`
 - `tui-display-consistency.md` — 外壳统一 / thinkingMs / 结果预览窗（D4 ANSI·五行走·read 无内容预览）；**D3 折叠合同已让位** 给 `tui-tool-settled-appearance.md`
 
 ### 工具与扩展源

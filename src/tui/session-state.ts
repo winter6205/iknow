@@ -22,6 +22,7 @@ import type {
   TokenUsage,
 } from "../harness/model-adapter/types.js";
 import { isAgentStatusText } from "../harness/agent-status.js";
+import { isGraphModeText } from "../harness/graph/notification.js";
 import { isSubagentDrainText } from "../harness/subagent/host-drain.js";
 import { isVerifyInjectedText } from "../harness/verify/inject.js";
 import { stripPrefetchOverlay } from "../harness/memory/prefetch.js";
@@ -278,8 +279,9 @@ export function sessionRewound(
  *  - `[skill-load ` 开头：skill-load 代理正文会持久化进 transcript（见
  *    app.tsx sendTurn displayText 注释），但不得污染 ↑ 历史（显示占位
  *    约定「[加载技能 X]」）；
- *  - host-drain / verify 信封：给模型的注入，不是用户键入（与 isTurnQuery
- *    跳过 drain 同源，并覆盖 VALIDATION FAILED / VERIFY rerun）。
+ *  - host-drain / verify / graph_mode 信封：给模型的注入，不是用户键入（与
+ *    isTurnQuery 跳过 drain 同源，并覆盖 VALIDATION FAILED / VERIFY rerun /
+ *    `<graph_mode>` 三条通知）。
  *  - 相邻重复抑制：与上一条保留项相同则跳过（同提交路径
  *    `h[h.length-1] === text` 语义）；非相邻重复保留（真实重提同一问题）。
  */
@@ -291,8 +293,9 @@ export function joinedUserText(message: AnthropicNativeMessage): string {
 
 /**
  * Host-injected user messages that must not render as typed bubbles
- * (agent_status bar + drain summaries + verify envelopes). Model history
- * still holds them; TUI status/todo footer reads agent_status stream events.
+ * (agent_status bar + graph_mode notifications + drain summaries + verify
+ * envelopes). Model history still holds them; TUI status/todo footer reads
+ * agent_status stream events.
  */
 export function isTuiHiddenUserMessage(
   message: AnthropicNativeMessage
@@ -302,6 +305,7 @@ export function isTuiHiddenUserMessage(
   if (text.length === 0) return false;
   return (
     isAgentStatusText(text) ||
+    isGraphModeText(text) ||
     isSubagentDrainText(text) ||
     isVerifyInjectedText(text)
   );

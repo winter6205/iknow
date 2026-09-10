@@ -29,6 +29,12 @@ import {
   turnStarted,
   userMessageEchoed,
 } from "../../src/tui/session-state.js";
+import {
+  IKNOW_GRAPH_MODE_OFF_NOTIFICATION,
+  IKNOW_GRAPH_MODE_ON_NOTIFICATION,
+  IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,
+  isGraphModeText,
+} from "../../src/harness/graph/notification.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 
@@ -413,6 +419,26 @@ describe("session-state: isTuiHiddenUserMessage（host 注入不进 ❯ 气泡�
         )
       )
     ).toBe(true);
+    expect(isTuiHiddenUserMessage(msg("真实问题"))).toBe(false);
+  });
+
+  test("graph_mode 三条现势通知为 hidden（切换 ON/OFF + 每拍 presence）；普通 query 否", () => {
+    // spec D8 / SC7：与 agent_status 同纪律 —— 生产者本家谓词
+    // （src/harness/graph/notification.ts 的 isGraphModeText）判 hidden，
+    // 三条常量全走同一前缀，TUI 不画 ❯ 气泡。
+    for (const text of [
+      IKNOW_GRAPH_MODE_ON_NOTIFICATION,
+      IKNOW_GRAPH_MODE_OFF_NOTIFICATION,
+      IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,
+    ]) {
+      expect(isGraphModeText(text)).toBe(true);
+      expect(isTuiHiddenUserMessage(msg(text))).toBe(true);
+    }
+    // 伪造形态：只在正文里提到 `<graph_mode>`（非行首）不算信封 —— 谓词
+    // 与 agent_status 同款 trimStart 前缀判定，不误伤用户正文。
+    expect(
+      isTuiHiddenUserMessage(msg("为什么 transcript 里有 <graph_mode> 标签？"))
+    ).toBe(false);
     expect(isTuiHiddenUserMessage(msg("真实问题"))).toBe(false);
   });
 

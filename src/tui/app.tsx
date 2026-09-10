@@ -192,7 +192,7 @@ import {
 import {
   envSnapshotFromEvent,
   resolveWorktreeChromeRoot,
-  worktreeIsolationLines,
+  sessionLocationLines,
 } from "./environment-pane.js";
 import type { EnvSnapshot } from "../harness/env-snapshot.js";
 // #653 包1 T3:TUI verify 闭环终态人读 banner(HITL + auto 双模式 passed /
@@ -1055,7 +1055,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const skillCatalog = props.skillCatalog ?? emptySkillCatalog;
   const skillList = useMemo(() => skillCatalog.available(), [skillCatalog]);
   // 活 taskRoot cell（specs/skill-load-write-root.md）：slash 装配以外的
-  // chrome 渲染面（worktreeIsolationLines / resolveWorktreeChromeRoot）也
+  // chrome 渲染面（sessionLocationLines 经 resolveWorktreeChromeRoot）也
   // 消费。ADR-0079 后 slash 装配不再读此 cell（正文不再挂写根 trailer），
   // 但 cell 仍由 props 透传至此供 chrome 渲染。
   const liveTaskRoot = props.liveTaskRoot;
@@ -1870,7 +1870,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           // 一致）。写处境披露由 worker prior + chat-session rebind 一次性
           // 通知承担，共用 writeRootSegment helper。slash 装配只走 entry +
           // dir 单形态；liveTaskRoot / isolationOn 在本组件仍由 chrome 渲染
-          // （worktreeIsolationLines / resolveWorktreeChromeRoot）持有，本
+          // （sessionLocationLines 经 resolveWorktreeChromeRoot）持有，本
           // 路径不再消费。
           const body = await createSkillBody({ entry, dir: entry.dir });
           const sendText = buildSkillLoadText(
@@ -2649,18 +2649,25 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 非 chat 视图 / 尚无快照 → 0（组件渲染 null）。
   const agentStatusRowBudget =
     view === "chat" ? agentStatusLines(agentStatus, cols).length : 0;
-  // 环境现势事件仍收（harness 给人不给模型）。ADR-0037 T5:envPaneRows 槽位
-  // 现渲染会话 worktree 隔离现势行（0-1 行）—— 会话根被 T3 改绑到 task
-  // worktree 时显示绑定根;未绑定（开关 OFF / 尚未 mutate / 改绑失败）→
-  // 0 行,与今日一致。只读投影（worktreeIsolationLines）,零 git 操作。
+  // 环境现势事件仍收（harness 给人不给模型）。D7 / SC6:envPaneRows 槽位现渲染
+  // **常驻**会话位置行（0/1 行）—— 主仓 / 非 task 路径照样画,绑任务树只把
+  // 同一行路径换成树上根(活 taskRoot 优先),显隐不再由绑定决定。分支取
+  // env_snapshot 的 gitBranch;快照尚未到（启动首拍）→ 只画路径段,不留 0 行。
+  // 只读投影（sessionLocationLines）,零 git 操作。
   const envPaneRowBudget =
     view === "chat"
-      ? worktreeIsolationLines(
-          resolveWorktreeChromeRoot(active.workspaceRoot, liveTaskRoot?.read()),
+      ? sessionLocationLines({
+          projectRoot: props.cwd,
+          worktreeRoot:
+            resolveWorktreeChromeRoot(
+              active.workspaceRoot,
+              liveTaskRoot?.read()
+            ) ?? null,
+          branch: envSnapshot?.gitBranch ?? null,
           cols,
-          props.cwd
-        ).length
+        }).length
       : 0;
+  // 位置行随快照重算（分支首拍由 env_snapshot 填上）。
   void envSnapshot;
   // #458 包2 T3:verify 闭环终态 banner 行数投影 —— active 会话槽 + 模式
   // (hitl / auto),纯函数 projectVerifyBanner 实际行数(0 / 1)。
@@ -2986,15 +2993,20 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           }
         />
       )}
-      {/* ADR-0037 T5: 会话 worktree 隔离现势行（ContextBar / SubagentPanel 之下、
-          graph 之上；envPaneRows 槽位入账不变）。未绑定 → worktreeIsolationLines
-          返回空 → 不渲染。 */}
+      {/* D7 / SC6: 会话位置行（ContextBar / SubagentPanel 之下、graph 之上；
+          envPaneRows 槽位入账不变）—— 常驻 1 行 `路径 · 分支`，绑任务树时
+          同一槽换成树上根。不进焦点环、不带 dirty/diff。 */}
       {view === "chat" &&
-        worktreeIsolationLines(
-          resolveWorktreeChromeRoot(active.workspaceRoot, liveTaskRoot?.read()),
+        sessionLocationLines({
+          projectRoot: props.cwd,
+          worktreeRoot:
+            resolveWorktreeChromeRoot(
+              active.workspaceRoot,
+              liveTaskRoot?.read()
+            ) ?? null,
+          branch: envSnapshot?.gitBranch ?? null,
           cols,
-          props.cwd
-        ).map((line, idx) => (
+        }).map((line, idx) => (
           <text key={idx} fg={line.fg} wrapMode="none">
             {line.text}
           </text>

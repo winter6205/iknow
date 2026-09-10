@@ -308,7 +308,7 @@ test("代码块 c4 diff：+ 行首 add 绿，- 行首 del 红", async () => {
   await setup.renderer.destroy();
 });
 
-test("围栏显示窗：33 行只挂前 32 行并提示还有 1 行", async () => {
+test("围栏显示窗：33 行只挂前 32 行并提示 +1 more lines", async () => {
   const body = Array.from({ length: 33 }, (_, i) => `FENCE_LINE_${i + 1}`).join(
     "\n"
   );
@@ -319,9 +319,10 @@ test("围栏显示窗：33 行只挂前 32 行并提示还有 1 行", async () =
   await setup.renderOnce();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("FENCE_LINE_32");
-  expect(frame).toContain("还有 1 行");
+  // docs/CONTEXT.md `fence display cap`：溢出文案 = `+N more lines`。
+  expect(frame).toContain("+1 more lines");
   expect(frame.includes("FENCE_LINE_33")).toBe(false);
-  expect(blankLinesBetween(setup, "FENCE_LINE_32", "还有 1 行")).toBe(0);
+  expect(blankLinesBetween(setup, "FENCE_LINE_32", "+1 more lines")).toBe(0);
   await setup.renderer.destroy();
 });
 
@@ -337,7 +338,7 @@ test("围栏显示窗：32 行全挂且无溢出提示", async () => {
   const frame = setup.captureCharFrame();
   expect(frame).toContain("CAP_LINE_1");
   expect(frame).toContain("CAP_LINE_32");
-  expect(frame.includes("还有")).toBe(false);
+  expect(frame.includes("more lines")).toBe(false);
   await setup.renderer.destroy();
 });
 
@@ -540,14 +541,14 @@ test("围栏显示窗：超长未闭合围栏不超过 32 行源码", async () =
   await setup.renderOnce();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("OPEN_LINE_32");
-  expect(frame).toContain("还有 8 行");
+  expect(frame).toContain("+8 more lines");
   expect(frame.includes("OPEN_LINE_33")).toBe(false);
   await setup.renderer.destroy();
 });
 
 // ── html 块显示窗：与 fence 同一 32 行帽（无界 <style> 不整块挂树）──
 
-test("html 块显示窗：>32 行 html 只挂前 32 行并提示还有 N 行", async () => {
+test("html 块显示窗：>32 行 html 只挂前 32 行并提示 +N more lines", async () => {
   const body = Array.from(
     { length: 40 },
     (_, i) => `HTML_CAP_LINE_${i + 1}`
@@ -561,7 +562,7 @@ test("html 块显示窗：>32 行 html 只挂前 32 行并提示还有 N 行", a
   // 窗内恰 32 行：`<style>` + 前 31 行正文（HTML_CAP_LINE_31 是最后一行）。
   expect(frame).toContain("<style>");
   expect(frame).toContain("HTML_CAP_LINE_31");
-  expect(frame).toContain("还有 10 行");
+  expect(frame).toContain("+10 more lines");
   expect(frame.includes("HTML_CAP_LINE_32")).toBe(false);
   expect(frame.includes("HTML_CAP_LINE_40")).toBe(false);
   // html 块之后的正文不受截行影响（会话正文仍是全文）。
@@ -584,7 +585,7 @@ test("html 块显示窗：≤32 行全挂且无溢出提示", async () => {
   expect(frame).toContain("HTML_OK_LINE_1");
   expect(frame).toContain("HTML_OK_LINE_30");
   expect(frame).toContain("</style>");
-  expect(frame.includes("还有")).toBe(false);
+  expect(frame.includes("more lines")).toBe(false);
   await setup.renderer.destroy();
 });
 

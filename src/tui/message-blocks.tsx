@@ -28,7 +28,7 @@
  *
  * 留存的子组件：
  *  - `ToolSummaryRow`：tool_use 摘要行（收口 + mark 染色 + 完成态 bash
- *    `，ran N command(s)` 折叠摘要 — T4）；
+ *    命令可见）；
  *  - `ToolPreviewRows`：write_file / edit_file 完成态截断预览（与 live 同源
  *    `completedToolPreview`；新文件代码、覆盖/编辑 diff）；
  *  - `ThinkingSummary`：折叠态 thinking 摘要行；
@@ -54,8 +54,6 @@ import {
   formatToolStatusLine,
   completedToolPreview,
   resultToolPreview,
-  formatRanSuffix,
-  countBashCalls,
   clipErrorLine,
   type CompletedToolPreview,
   type ResultPreview,
@@ -76,14 +74,13 @@ import { stripPrefetchOverlay } from "../harness/memory/prefetch.js";
 
 type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
 
-/** tool_use 摘要行：`[运行中]|[完成]|[失败] name · detail`（普通工具），
- *  子代理工具走独立形态 `${mark} 子代理 · ${detail}`（glyph 已表状态）。
+/** tool_use 摘要行：运行中走英文过程行 `name · detail`（spec D1，无状态
+ *  括号），落定走 `name · detail`，失败走 `[失败] name · detail`；子代理
+ *  工具只画 detail（身份由 identity strip / SubagentPanel 承担）。
  *  文案拼装统一委托 `formatToolStatusLine`（tool-summary SSOT，#693 T1 D7），
- *  历史 + live 两侧字节一致 —— spec D1 列出要消除的「live `bash · pwd · ok`
- *  vs 历史 `[完成] bash · pwd`」不一致。
- *  2026-08-14：不再拼 `，ran N command(s)` 后缀 —— 工具计数只由
- *  ThinkingSummary（有秒数时）统一汇总一次（`思考了 N 秒 · ran M …`），
- *  避免「思考折叠行 + 工具行」双处重复计数造成结束状态混乱观感。
+ *  历史 + live 两侧字节一致。
+ *  工具计数不在本行：它只由 turn 级 `formatTurnActivityFold` 的
+ *  `Thought for … · name × N` 一行承担（spec D2 / CONTEXT `unit fold`）。
  *  cols 收口：单行不折（tool-summary 视觉宽度）。 */
 function ToolSummaryRow(props: {
   readonly tu: ToolUseBlock;
@@ -160,7 +157,8 @@ function failureTextOf(name: string, resultText: string | undefined): string {
  *  调用方先经 `completedToolPreview` / `resultToolPreview` 判定非空再挂载
  *  （空预览 / 未配对不产节点 —— 折叠态下空壳 box 会让消息无法收敛为 null，
  *  残留幻影间距）。与 live 完成态同一 `completedToolPreview` +
- *  `resultToolPreview` + TOOL_PREVIEW_WINDOW/RESULT_PREVIEW_WINDOW。截断即折叠。 */
+ *  `resultToolPreview` + WRITE_CREATE_PREVIEW_WINDOW（新建 10 行）/
+ *  RESULT_PREVIEW_WINDOW（结果尾窗 5 行）；编辑 diff 不套新建帽。截断即折叠。 */
 function ToolPreviewRows(props: {
   readonly preview: CompletedToolPreview;
   readonly resultPreview: ResultPreview;
@@ -180,7 +178,10 @@ function ToolPreviewRows(props: {
   );
 }
 
-/** 折叠态 thinking 摘要：结束态 `思考了 N 秒`；工具计数另起一行。 */
+/** 折叠态 thinking 摘要：结束态恒 1 行 `Thought for <duration>`。
+ *  spec D2 / CONTEXT `unit fold`：工具计数不再是本块的第二行 —— 它焊在
+ *  turn 级 `formatTurnActivityFold` 的同一行（`Thought for … · name × N`）。
+ *  这里不重复计数。 */
 function ThinkingSummary(props: {
   readonly message: AnthropicNativeMessage;
   readonly cols: number;
@@ -188,19 +189,10 @@ function ThinkingSummary(props: {
 }): ReactNode {
   const fold = formatThinkingFold(props.thinkingSeconds);
   if (fold.length === 0) return null;
-  const bashCount = countBashCalls(props.message);
-  const ran = formatRanSuffix(bashCount).replace(/^，/, "");
   return (
-    <box flexDirection="column">
-      <text fg={tuiPalette.dim} wrapMode="none">
-        {clipOneLineVisual(fold, props.cols)}
-      </text>
-      {ran.length > 0 ? (
-        <text fg={tuiPalette.dim} wrapMode="none">
-          {clipOneLineVisual(ran, props.cols)}
-        </text>
-      ) : null}
-    </box>
+    <text fg={tuiPalette.dim} wrapMode="none">
+      {clipOneLineVisual(fold, props.cols)}
+    </text>
   );
 }
 
@@ -209,7 +201,8 @@ function ThinkingSummary(props: {
  *  content，无 text block 时 fallback 该文案。 */
 const SYSTEM_INTERRUPT_TEXT = "Interrupted by user.";
 
-/** 中断警示前缀（橙 running 色 + 方括号，同 [思考]/[运行中] 符号约定）。 */
+/** 中断警示前缀（橙 running 色 + 方括号；人读过程行已废 `[思考]`/`[运行中]` 文案，
+ *  本标记只服务中断警示自身，不随过程行改名）。 */
 const SYSTEM_INTERRUPT_MARK = "[已打断]";
 
 /** 完整消息渲染（保留 Markdown 全功能 + tool_use 摘要 + thinking 折叠面板）。
@@ -219,7 +212,7 @@ const SYSTEM_INTERRUPT_MARK = "[已打断]";
  *  - `cols`：终端列宽（Markdown wrap + ToolSummaryRow 单行收口共用）；
  *  - `statusMap`：`toolResultStatusMap(session.messages)`（tool_use → 是否失败）；
  *  - `thinkingExpanded`：thinking 折叠面板展开态（false = 隐藏 thinking 明文；
- *    有正秒数才画 `思考了 N 秒`，无秒数不画摘要、不回落 `[思考]`）；
+ *    有正秒数才画 `Thought for <N>s`，无秒数不画摘要、不回落 `[思考]`）；
  *    折叠/展开由 Ctrl+O 翻转；/thinking 为独立开关（思考Enabled），不改折叠态。
  *    会话重启回退折叠。
  *  - `noTrailingSelfMargin`：true 时抹掉最后一个块的 marginBottom ——
@@ -242,7 +235,7 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
    *  缺省 / 无匹配 → 该 tool_use 不画结果预览（与 spec D4「未配对不渲染」对齐）。 */
   readonly resultTextMap?: ReadonlyMap<string, string>;
   readonly thinkingExpanded?: boolean;
-  /** 折叠态 thinking 行附带「思考了 N 秒」。仅末条 / 流式面板传入；
+  /** 折叠态 thinking 行附带 `Thought for <N>s`。仅末条 / 流式面板传入；
    *  缺省或非正 → 不画思考摘要行（不回落 `[思考]`）。 */
   readonly thinkingSeconds?: number;
   /** idle 时当前 turn 已由 ChatView 画 turn 级折叠行：本块不再画思考摘要。 */

@@ -20,9 +20,11 @@
  *   - 行账:envSnapshotLines 行数 → chromeReserveRows.envPaneRows(SSOT,
  *     与 ADR-0028 状态栏行账同款 linkage;基线 7 不变)。
  *   - 字形纪律:几何字形 ⌂ / Δ(项目惯例,spec #146:86 无 emoji)。
- *   - ADR-0037 T5 追加投影:worktreeIsolationLines —— 会话 worktree 隔离
- *     现势行(数据源是会话文件的 workspaceRoot 只读透传,非 env_snapshot;
- *     见该函数注释)。app.tsx 挂在 chat chrome 的 envPaneRows 槽位。
+ *   - D7 / SC6 追加投影:sessionLocationLines —— 会话位置行(session
+ *     location chrome)。底栏**常驻**一行 `路径 · 分支`,绑任务树只把同一
+ *     行的路径换成树上根(活 taskRoot 优先,否则会话 workspaceRoot 只读
+ *     透传),不决定显隐、不带 dirty/diff。app.tsx 挂在 chat chrome 的
+ *     envPaneRows 槽位。
  *   - 反向契约:本文件零引用模型向状态栏的事件类型 / 快照结构 / 账本读取器
  *     —— 与 ADR-0028 投影平行独立流(grep 守卫由 tests/tui/
  *     environment-pane.test.tsx 钉死)。
@@ -150,31 +152,16 @@ export function envSnapshotLines(
 }
 
 // ---------------------------------------------------------------------------
-// 投影:会话 worktree 隔离现势(ADR-0037 T5 只读投影)
+// 绑定根解析:会话位置行换路径用的数据源(ADR-0037 T5 只读)
 // ---------------------------------------------------------------------------
 
 /**
- * ADR-0037 / plans/worktree-isolation-on-mutate.md T5 — 会话 worktree 隔离
- * 现势行。与 T3 门禁的一次性 `[worktree_isolation]` 拦截消息互补:那条消息
- * 只在改绑当场出现一次,本投影是**持久现势** —— 只要会话根仍绑在 task
- * worktree 上,chrome 就显示绑定根,操作员无需猜路径。
- *
- *   - 数据唯一来源:TuiSessionState.workspaceRoot(session-state.ts 从会话
- *     文件的 workspaceRoot 字段只读透传;T3 改绑落盘的唯一写方是 session-api
- *     worktree-rebind)。本投影纯函数、零 git import、零 git 操作 —— TUI 只
- *     做展示(ACR bounded-context-guardian 边界)。
- *   - 显示条件锚定 task worktree 语义(review Medium-2, 2026-08-29):仅当
- *     root 命中 task worktree 确定性命名(`<x>/.iknow/worktrees/<leaf>`
- *     —— 复用 session-api isTaskWorktreePath 路径判定)才显示。任意非空
- *     workspaceRoot 不等于 worktree —— serve `bindWorkspace` 在 createSession
- *     时就把 workspaceRoot 写成主根,主根 / serve 绑定根 / 任意目录一律
- *     不渲染成 worktree 绑定。
- *   - 未绑定(undefined / null / 空串;开关 OFF / 尚未 mutate / 改绑失败)或
- *     非 task worktree 根 → 0 行,与今日一致,不出现多余状态,也绝不显示
- *     「已绑定」。
- *   - 复用环境现势的字形纪律(⌂)与 dim 调色,单行按 cols 视觉宽度截断。
+ * 绑定根优先活 taskRoot（改绑当回合即可读），否则会话文件 workspaceRoot。
+ * 仍是「是不是任务树」的判定缝（`isTaskWorktreePath`，复用 session-api
+ * 的确定性命名）—— 但自 spec D7 / SC6 起，这个判定**不再决定位置行的
+ * 显隐**，只决定同一行上的路径取绑定根还是项目根。数据源 = 会话
+ * workspaceRoot 只读透传 + 活 cell；本函数零 git import、零 git 操作。
  */
-/** 现势行优先活 taskRoot（改绑当回合即可读），否则会话文件 workspaceRoot。 */
 export function resolveWorktreeChromeRoot(
   sessionWorkspaceRoot: string | null | undefined,
   liveTaskRoot: string | null | undefined
@@ -190,50 +177,75 @@ export function resolveWorktreeChromeRoot(
   return undefined;
 }
 
-/** 项目根到 task worktree 的相对路径；无项目根则只留 `.iknow/worktrees/<叶>`。 */
-export function taskWorktreeDisplayPath(
+// ---------------------------------------------------------------------------
+// 投影:会话位置行(session location chrome,spec D7 / SC6)
+// ---------------------------------------------------------------------------
+
+/** 项目根到根的显示路径:在项目根下 → `~/projects/iknow` 形态(项目根名 +
+ *  相对段),否则原样根(调用方已把项目根本身当作显示基准)。 */
+export function locationDisplayPath(
   root: string,
   projectRoot?: string
 ): string {
   const normalizedRoot = root.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (normalizedRoot.length === 0) return "";
   if (projectRoot !== undefined && projectRoot.trim().length > 0) {
     const normalizedProject = projectRoot
       .replace(/\\/g, "/")
       .replace(/\/+$/, "");
     if (
-      normalizedRoot === normalizedProject ||
-      normalizedRoot.startsWith(`${normalizedProject}/`)
+      normalizedProject.length > 0 &&
+      (normalizedRoot === normalizedProject ||
+        normalizedRoot.startsWith(`${normalizedProject}/`))
     ) {
+      const leaf = normalizedProject.slice(
+        normalizedProject.lastIndexOf("/") + 1
+      );
       const rel = normalizedRoot
         .slice(normalizedProject.length)
         .replace(/^\//, "");
-      if (rel.length > 0) return rel;
+      return rel.length > 0 ? `${leaf}/${rel}` : leaf;
     }
   }
-  const marker = "/.iknow/worktrees/";
-  const idx = normalizedRoot.lastIndexOf(marker);
-  if (idx >= 0) return normalizedRoot.slice(idx + 1);
   return normalizedRoot;
 }
 
-export function worktreeIsolationLines(
-  root: string | null | undefined,
-  cols: number,
-  projectRoot?: string
-): ReadonlyArray<EnvSnapshotLine> {
-  if (root === null || root === undefined || root.trim().length === 0) {
-    return [];
-  }
-  // Review Medium-2: only a root that decomposes to the task worktree naming
-  // (`<x>/.iknow/worktrees/<leaf>`) is a binding — anything else
-  // (main repo root, serve-bound root, arbitrary dir) stays at 0 lines.
-  if (!isTaskWorktreePath(root)) {
-    return [];
-  }
-  const display = taskWorktreeDisplayPath(root, projectRoot);
+/**
+ * 会话位置行(spec D7 / docs/CONTEXT.md `session location chrome`) ——
+ * 底栏**常驻一行**,形如 `~/projects/iknow · master`(路径 · 分支)。
+ *
+ *   - 常驻:主仓 / 非 task 路径照样画,显隐不由绑定决定(旧
+ *     `worktreeIsolationLines` 的「仅 task 树才显示」合同作废)。
+ *   - 绑任务树:同一槽**换路径**(活 taskRoot 优先,否则会话
+ *     `workspaceRoot`;都缺时回落未绑形态),不另起一行、不从无到有。
+ *   - 无 dirty / diff(chrome 只给「在哪」,不给仓库状态;状态另属
+ *     env_snapshot 的 diff 面)。
+ *   - 分支缺省:未绑或分支未知 → 只画路径段(不写占位符)。
+ *   - 纯函数:调用方(EnvironmentPane / app.tsx)负责把 cols 与数据源喂进来。
+ */
+export function sessionLocationLines(opts: {
+  /** 主项目根(启动 cwd / workspaceRoot)。 */
+  readonly projectRoot: string;
+  /** 会话已绑的任务树(活 taskRoot 优先,否则会话 workspaceRoot)。 */
+  readonly worktreeRoot?: string | null;
+  /** git 分支(env_snapshot 提供;未知传 undefined)。 */
+  readonly branch?: string | null;
+  readonly cols: number;
+}): ReadonlyArray<EnvSnapshotLine> {
+  const bound =
+    opts.worktreeRoot === null || opts.worktreeRoot === undefined
+      ? ""
+      : opts.worktreeRoot.trim();
+  const path =
+    bound.length > 0
+      ? locationDisplayPath(bound, opts.projectRoot)
+      : locationDisplayPath(opts.projectRoot, opts.projectRoot);
+  if (path.length === 0) return [];
+  const branch =
+    opts.branch === null || opts.branch === undefined ? "" : opts.branch.trim();
   const text = clipOneLineVisual(
-    `${HEADER_PREFIX}worktree: ${display}`,
-    Math.max(0, cols)
+    branch.length > 0 ? `${path} · ${branch}` : path,
+    Math.max(0, opts.cols)
   );
   return [{ fg: tuiPalette.dim, text }];
 }
@@ -246,10 +258,31 @@ export interface EnvironmentPaneProps {
   /** 最新一份环境现势快照(env_snapshot 事件投影);null = 尚未有事件。 */
   readonly snapshot: EnvSnapshot | null;
   readonly cols: number;
+  /** D7:项目根(常驻位置行的路径基准;缺省 → 不画位置行)。 */
+  readonly projectRoot?: string;
+  /** D7:会话已绑任务树根;给定则同一槽换该路径。 */
+  readonly worktreeRoot?: string | null;
+}
+
+/** 位置行 = 路径 + 分支(分支取快照;快照缺席 → 只画路径段)。 */
+function locationLinesForPane(
+  props: EnvironmentPaneProps
+): ReadonlyArray<EnvSnapshotLine> {
+  return sessionLocationLines({
+    projectRoot: props.projectRoot!,
+    ...(props.worktreeRoot !== undefined
+      ? { worktreeRoot: props.worktreeRoot }
+      : {}),
+    branch: props.snapshot?.gitBranch ?? null,
+    cols: props.cols,
+  });
 }
 
 export function EnvironmentPane(props: EnvironmentPaneProps): ReactNode {
-  const lines = envSnapshotLines(props.snapshot, props.cols);
+  const lines =
+    props.projectRoot === undefined
+      ? envSnapshotLines(props.snapshot, props.cols)
+      : locationLinesForPane(props);
   if (lines.length === 0) return null;
   return (
     <box flexDirection="column">

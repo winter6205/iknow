@@ -17,6 +17,12 @@ import type { AnthropicNativeMessage } from "../../src/harness/index.ts";
 import { projectMessagesToTurns } from "../../src/session-api/hub.ts";
 import { SUBAGENT_DRAIN_PREFIX } from "../../src/harness/subagent/host-drain.ts";
 import {
+  IKNOW_GRAPH_MODE_OFF_NOTIFICATION,
+  IKNOW_GRAPH_MODE_ON_NOTIFICATION,
+  IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,
+  isGraphModeText,
+} from "../../src/harness/graph/notification.ts";
+import {
   MAX_THINKING_TEXT_CHARS,
   MAX_TOOL_INPUT_PREVIEW_CHARS,
   MAX_TOOL_OUTPUT_PREVIEW_CHARS,
@@ -438,6 +444,70 @@ describe("boundary: subagent drain messages in projectMessagesToTurns", () => {
   });
 });
 
+// -- boundary 10: graph_mode presence user messages --------------------
+// ADR-0081：开着图时每个 run() 开头贴一条短 <graph_mode> 现势（落在本轮
+// query 之后、assistant 之前）。它是 host 注入信封，既不得自己在 serve/web
+// 面开一个新 turn，也不得把前一个 turn 的 slice 从 query 处切断 —— 否则
+// 真实 query 的 answer 会被吞进 presence 的 turn。
+
+describe("boundary: graph_mode presence in projectMessagesToTurns", () => {
+  const presenceMsg = assistant("user", [
+    { type: "text", text: IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION },
+  ]);
+
+  it("presence message is not projected as a turn query", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "q1" }]),
+      presenceMsg,
+      assistant("assistant", [{ type: "text", text: "a1" }]),
+      assistant("user", [{ type: "text", text: "q2" }]),
+      presenceMsg,
+      assistant("assistant", [{ type: "text", text: "a2" }]),
+    ];
+    const turns = projectMessagesToTurns(messages);
+    assert.deepEqual(
+      turns.map((t) => t.query),
+      ["q1", "q2"]
+    );
+  });
+
+  it("presence message does not cut the preceding turn's slice", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "q1" }]),
+      assistant("assistant", [
+        { type: "tool_use", id: "t1", name: "noop", input: {} },
+      ]),
+      presenceMsg,
+      assistant("user", [
+        {
+          type: "tool_result",
+          tool_use_id: "t1",
+          content: [{ type: "text", text: "ok" }],
+        },
+      ]),
+      assistant("assistant", [{ type: "text", text: "final" }]),
+      assistant("user", [{ type: "text", text: "q2" }]),
+      assistant("assistant", [{ type: "text", text: "a2" }]),
+    ];
+    const turns = projectMessagesToTurns(messages);
+    assert.equal(turns.length, 2);
+    assert.equal(turns[0]?.query, "q1");
+    // slice 未被 presence 切断：tool_result 仍落在 turn 1 内，配对成功。
+    assert.equal(turns[0]?.answer.toolCalls?.[0]?.outputPreview, "ok");
+    assert.equal(turns[0]?.answer.finalText, "final");
+    assert.equal(turns[1]?.query, "q2");
+    assert.equal(turns[1]?.answer.finalText, "a2");
+  });
+
+  it("history containing only presence messages projects to []", () => {
+    const messages: AnthropicNativeMessage[] = [
+      presenceMsg,
+      assistant("assistant", [{ type: "text", text: "ack" }]),
+    ];
+    assert.deepEqual(projectMessagesToTurns(messages), []);
+  });
+});
+
 // -- shared turn-boundary helpers (hub.ts + store/checkpoint.ts SSOT) ----
 
 describe("messageText — 文本块拼接（共享 helper）", () => {
@@ -517,6 +587,48 @@ describe("isTurnQuery — turn 边界判定（共享 helper）", () => {
         ])
       ),
       false
+    );
+  });
+
+  // spec D8 / SC7：三条 graph 现势通知都是 host 注入信封，不是操作员键入 ——
+  // 与 TUI `isTuiHiddenUserMessage` 同一份「hidden 注入」名单。谓词来源必须是
+  // 生产者本家（isGraphModeText），消费侧不得再写一份前缀检查。
+  it("graph_mode 三条现势通知 user 消息 → false（host 注入非 query）", () => {
+    for (const text of [
+      IKNOW_GRAPH_MODE_ON_NOTIFICATION,
+      IKNOW_GRAPH_MODE_OFF_NOTIFICATION,
+      IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,
+    ]) {
+      assert.equal(isGraphModeText(text), true, "生产者谓词必须命中自家常量");
+      assert.equal(
+        isTurnQuery(assistant("user", [{ type: "text", text }])),
+        false
+      );
+    }
+  });
+
+  it("前导空白容忍（与 agent_status / TUI hidden 同款 trimStart）", () => {
+    assert.equal(
+      isTurnQuery(
+        assistant("user", [
+          {
+            type: "text",
+            text: `\n  ${IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION}`,
+          },
+        ])
+      ),
+      false
+    );
+  });
+
+  it("正文里提到 <graph_mode> 但非行首 → 仍是 query（不误伤用户话）", () => {
+    assert.equal(
+      isTurnQuery(
+        assistant("user", [
+          { type: "text", text: "为什么 transcript 里有 <graph_mode> 标签？" },
+        ])
+      ),
+      true
     );
   });
 });

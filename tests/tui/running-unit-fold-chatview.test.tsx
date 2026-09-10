@@ -11,7 +11,7 @@
  *
  * 子断言:
  *  (1) running + live thinking 已结束 + final thinkingMs > 0 → 帧内
- *      出现「思考了 N 秒」(不靠 per-message ThinkingSummary 兜底);
+ *      出现 `Thought for`(不靠 per-message ThinkingSummary 兜底);
  *  (2) running + 历史 turn 含 retract → 历史 retract 折叠行
  *      (e.g. `read_file × 1`) 仍渲染,不被 running 闸门吞掉;
  *  (3) running + 当前 turn live 已完成 retract → 进折叠计数,tail
@@ -53,12 +53,12 @@ function sessionWith(
   return { ...attachSession(file), runState };
 }
 
-test("running + thinking 已结束:final thinkingMs 已落盘,「思考了 N 秒」立刻出现(不等整 turn idle)", async () => {
+test("running + thinking 已结束:final thinkingMs 已落盘,`Thought for` 立刻出现(不等整 turn idle)", async () => {
   // 不变式:loop-engine 在 final assistant commit 时落盘 thinkingMs →
   // session.thinkingMs[finalIdx] > 0;此后 live thinking 流即清空
   // (deferredThinkingDrafts = ""),但本 turn 还在 running（final assistant
   // 之后还有 tool_call_start + tool_result 入站,流式未结束）。此时
-  // 「思考了 N 秒」必须立刻可见 —— 不再被 showTurnFold 的 running 闸
+  // `Thought for` 必须立刻可见 —— 不再被 showTurnFold 的 running 闸
   // 吞掉。
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
@@ -105,7 +105,7 @@ test("running + thinking 已结束:final thinkingMs 已落盘,「思考了 N 秒
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("思考了 12 秒");
+  expect(frame).toContain("Thought for 12s");
   await setup.renderer.destroy();
 });
 
@@ -217,7 +217,7 @@ test("running + 当前 turn live 已完成 retract:进入折叠,tail 不再保�
 test("exception:hidden agent_status 夹在 tool_result 与 final 之间 + running,final 的 thinkingMs 仍按 sourceIndex 映射", async () => {
   // 不变式:session.thinkingMs 与 messages 一一对应;ChatView 用过滤后的
   // visibleIndex 时,必须用 sourceIndexOfVisible 映射回盘上下标,否则
-  // final 的 thinkingMs 读到 status 槽的 null → 「思考了 N 秒」消失;
+  // final 的 thinkingMs 读到 status 槽的 null → `Thought for` 消失;
   // 再叠加 hideThinking 的掐摘,thinking 秒数彻底丢失 —— plan T1
   // 例外类的「hidden user messages 仍要按 source index 映射」要求。
   const messages: AnthropicNativeMessage[] = [
@@ -278,6 +278,6 @@ test("exception:hidden agent_status 夹在 tool_result 与 final 之间 + runnin
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("完成总结");
-  expect(frame).toContain("思考了 30 秒");
+  expect(frame).toContain("Thought for 30s");
   await setup.renderer.destroy();
 });

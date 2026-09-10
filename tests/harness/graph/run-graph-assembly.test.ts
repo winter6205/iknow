@@ -41,6 +41,8 @@ import {
   IKNOW_GRAPH_MODE_ON_NOTIFICATION,
   IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,
   renderGraphModeChangeNotification,
+  isGraphModeText,
+  IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,
 } from "../../../src/harness/graph/notification.ts";
 import {
   ACI_TOOLSET_NAMES,
@@ -292,6 +294,23 @@ describe("graph 模式切换提示 — SSOT 静态文本(KV cache 兼容)", () =
     expect(text.endsWith("</graph_mode>")).toBe(true);
     expect(text).toContain("Graph mode is now off");
     expect(text).toContain("spawn_subagent");
+  });
+
+  it("isGraphModeText 覆盖三条 notification 常量（生产者本家的人读谓词）", () => {
+    // specs/tui-human-display.md D8 / SC7：谓词与常量同处一文件（SSOT），
+    // TUI / CLI 消费侧不必各自重写 `<graph_mode>` 前缀。三条常量全命中，
+    // 正文里中段提到标签的用户文本不误伤（前缀判定，与 isAgentStatusText 同款）。
+    for (const text of [
+      IKNOW_GRAPH_MODE_ON_NOTIFICATION,
+      IKNOW_GRAPH_MODE_OFF_NOTIFICATION,
+      IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,
+    ]) {
+      expect(isGraphModeText(text)).toBe(true);
+    }
+    expect(isGraphModeText("为什么有 <graph_mode> 标签？")).toBe(false);
+    expect(
+      isGraphModeText("<agent_status>\nlast_tool: idle\n</agent_status>")
+    ).toBe(false);
   });
 
   it("两条静态文本在会话内字节恒定(无 per-turn 插值,KV cache 契约)", () => {
