@@ -48,6 +48,20 @@ describe("toAciToolDef", () => {
     expect(definition.inputSchema).toEqual(tool().inputSchema);
   });
 
+  it("不落输出闸豁免声明（ADR-0083：MCP 不可取得）", () => {
+    // 转换路径只映射 name / description / inputSchema / aci / handler，
+    // 外部源天然是第三方数据 —— 豁免只对内建 createSkillTool 装配期落值。
+    const definition = toAciToolDef({
+      server: "server",
+      tool: tool({ exemptFromOutputCap: true } as Partial<McpTool>),
+      call: vi.fn(),
+      timeoutMs: 1234,
+    });
+
+    expect(definition.exemptFromOutputCap).toBeUndefined();
+    expect("exemptFromOutputCap" in definition).toBe(false);
+  });
+
   it("uses an empty object schema when inputSchema is absent", () => {
     const definition = toAciToolDef({
       server: "server",

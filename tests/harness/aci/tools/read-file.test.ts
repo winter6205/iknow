@@ -82,6 +82,15 @@ describe("createReadFileTool — schema/aci shape", () => {
     assert.equal(tool.aci.isConcurrencySafe, true);
     assert.equal(tool.aci.interruptBehavior, "cancel");
   });
+
+  it("不带输出闸豁免声明（ADR-0083 只对 skill 内建落值）", async () => {
+    // read_file 输出仍走 executor 兜底闸：>1MB 拒绝 + offset/limit 窗口是它的
+    // 精度路径，豁免会去掉「换更精确输入重调」这条恢复路径的前提。
+    const root = await makeScratch("read-file-shape-");
+    const tool = createReadFileTool(root);
+
+    assert.equal(tool.exemptFromOutputCap, undefined);
+  });
 });
 
 describe("read_file — happy path", () => {

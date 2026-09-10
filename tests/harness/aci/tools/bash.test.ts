@@ -65,6 +65,13 @@ describe("createBashTool — schema and metadata", () => {
     });
   });
 
+  it("不带输出闸豁免声明（ADR-0083：只有内建 skill 装配期落值）", async () => {
+    const cwd = await makeScratch("bash-schema-");
+    const tool = createBashTool(cwd);
+
+    assert.equal(tool.exemptFromOutputCap, undefined);
+  });
+
   // T8 (parent-visible-tmp): bash description 两句 —— 进项目写 taskRoot；
   // 不必进仓写 /tmp（跟当前身份同寿命，不是交付）。写根段仍不提 /tmp。
   // 取代 write-situation-disclosure SC11 的「一次命令即灭」寿命句（ADR-0074）。

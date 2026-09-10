@@ -65,6 +65,16 @@ describe("skill — 元数据 (G1 Q1 / T5 acceptance 3)", () => {
     expect(tool.aci.timeoutTier).toBe("fast");
   });
 
+  it("exemptFromOutputCap === true（ADR-0083 装配期落值）", () => {
+    // 豁免声明的唯一落值点：装配期静态字段，executor 的 safeContent 读它。
+    // 契约 X（executor 是截断元数据唯一权威）不受影响——本字段是工具定义
+    // 属性，不是任何一次输出的截断声称。
+    const tool = createSkillTool({
+      catalog: createSkillCatalog([]),
+    });
+    expect(tool.exemptFromOutputCap).toBe(true);
+  });
+
   it("inputSchema: { name: string required, additionalProperties:false }", () => {
     const tool = createSkillTool({
       catalog: createSkillCatalog([]),

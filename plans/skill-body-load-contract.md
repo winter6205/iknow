@@ -26,21 +26,21 @@ minimal-change-verifier: yes — 单一主题；基线声明已补（叠 feat/sk
    - **Inherits:** spec Boundaries「豁免是装配期静态声明，落在 Foundation `ToolDef` 的可选字段上」（`specs/skill-body-load-contract.md`）；契约 X「工具不声称截断字段」不变（`docs/CONTEXT.md` `executor truncation authority`）。
    - **Surface:** `src/harness/tools`（`types.ts` 声明、`executor.ts` 读路径 `safeContent` / `applyOutputCap`）。
    - **Acceptance:** 名字未定的可选布尔字段存在于 `ToolDef`；`applyOutputCap` 在该字段为真时原样返回文本、不追加截断标记；为假 / 缺席时行为与今日逐字节相同（既有 executor 截断测试全绿，无需改断言）。`src/harness/tools/` 仍对 `src/harness/aci/` 零 import。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T2]
 
 2. **`createSkillTool` 装配期落值** — tag: `[implementation]`
    - **Inherits:** T1 的字段；spec Boundaries「`createSkillTool` 落值」；`skill-load-write-root.md` 合同 4「三处只经 `createSkillBody` 取正文」不变。
    - **Surface:** `src/harness/aci/tools/skill.ts`（工厂返回值）。
    - **Acceptance:** `createSkillTool(...)` 产出的 def 带该声明；其他内建 ACI 工厂不带（结构断言）。`skill({name})` 在 >20000 字符 SKILL.md 上返回完整装配正文、末段 `</skill_files>`、不含 `executor: 输出超长已截断`。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T3]
 
 3. **三路同源 + 闸不泄漏 + MCP 不可取得** — tag: `[implementation]`
    - **Inherits:** spec SC2 / SC3 / SC4；`skill-load-write-root.md` 合同 4 与 SC3（三路同一装配口）。
    - **Surface:** `src/harness/aci`（`aci-registry.ts` 的 `registerExternal` 加固）、`src/harness/mcp`（`adapter.ts` 不设声明）、`src/session-api`（`loadSkillBody`）、`tests/`。
    - **Acceptance:** 同一 skill 经 slash 信封 / `hub.loadSkillBody` / `skill()` 三路得到的正文与 `createSkillBody` 产物逐字节相等；内建非豁免工具与 MCP 工具的超长输出仍 ≤20000 且带既有标记；`registerExternal` 对 `mcp__` def 剥离 / 拒绝该声明（结构断言）；未知名仍返回既有引导句、读失败仍走既有失败路径。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T4]
    - 备注：短路相关断言（首次灌全文 / 二次短回执 / compact 后重灌）依赖基线分支，基线未合入前只跑非短路部分。
 
@@ -48,7 +48,7 @@ minimal-change-verifier: yes — 单一主题；基线声明已补（叠 feat/sk
    - **Inherits:** spec Assumptions 5「正文大小纪律是作者契约，不由运行时强制」；spec Changes「skill 作者契约进文档」。
    - **Surface:** 既有 skill 相关文档（作者可见面）。
    - **Acceptance:** 文档写明「正文精简、细则进 `references/`；运行时不对正文大小设限」；不新增运行时校验。
-   - Status: [ ] pending
+   - Status: [x] done
 
 ## 待写入（persist 清单）
 

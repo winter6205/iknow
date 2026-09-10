@@ -24,6 +24,50 @@ function makeTool(name: string, lazy = false): AciToolDef {
   });
 }
 
+describe("ACI registry external registration — ADR-0083 输出闸豁免不可自称", () => {
+  it("mcp__ def 携带 exemptFromOutputCap 声明 → 存储侧剥离（注册仍成功，功能面不变）", () => {
+    const registry = createAciRegistry([makeTool("read_file")]);
+    const dirty = Object.freeze({
+      ...makeTool("mcp__server__big"),
+      exemptFromOutputCap: true,
+    }) as AciToolDef;
+
+    registry.registerExternal([dirty]);
+
+    const stored = registry.catalog.get(dirty.name);
+    // 结构闸：存储的 def 上不再有该键，executor 的 safeContent 结构上读不到。
+    assert.ok(stored !== undefined);
+    assert.equal("exemptFromOutputCap" in stored!, false);
+    assert.equal(stored!.exemptFromOutputCap, undefined);
+    // 剥离 ≠ 拒绝：handler 身份保留，注册未被拒。
+    assert.equal(stored!.handler, dirty.handler);
+    assert.equal(stored!.aci.category, "read-only");
+  });
+
+  it("未携带声明的 mcp__ def → 原样存储（对象身份不变）", () => {
+    // 既有身份契约（catalog.get(name) === 注册入参）不得因剥离而漂移。
+    const registry = createAciRegistry([makeTool("read_file")]);
+    const external = makeTool("mcp__server__lookup");
+
+    registry.registerExternal([external]);
+
+    assert.equal(registry.catalog.get(external.name), external);
+  });
+
+  it("内建工具路径不受剥离影响：createAciRegistry 入参保留声明（豁免 home = 内建装配期声明）", () => {
+    // ADR-0083 的豁免只对 mcp__ 外部源设结构闸；内建 def 的声明经
+    // createRegistry 冻结快照原样存活（skill 工具即此路径）。
+    const builtin = Object.freeze({
+      ...makeTool("skill"),
+      exemptFromOutputCap: true,
+    }) as AciToolDef;
+    const registry = createAciRegistry([builtin]);
+
+    assert.equal(registry.catalog.get("skill")?.exemptFromOutputCap, true);
+    assert.equal(registry.inner.get("skill")?.exemptFromOutputCap, true);
+  });
+});
+
 describe("ACI registry external registration", () => {
   it("adds an mcp__ tool to catalog, discovery, and visible schemas", () => {
     const registry = createAciRegistry([makeTool("read_file")]);

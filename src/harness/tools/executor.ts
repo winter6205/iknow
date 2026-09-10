@@ -33,7 +33,10 @@ const OUTPUT_HARD_CAP = 20000;
 const TRUNCATION_MARKER_TEMPLATE =
   "…[executor: 输出超长已截断，原长 {original} 字符，保留 {kept} 字符；如需更多信息，用更精确的输入重新调用]";
 
-function safeContent(payload: unknown): AnthropicContentBlock[] {
+function safeContent(
+  payload: unknown,
+  exemptFromOutputCap: boolean
+): AnthropicContentBlock[] {
   let text: string;
   if (typeof payload === "string") {
     text = payload;
@@ -48,7 +51,39 @@ function safeContent(payload: unknown): AnthropicContentBlock[] {
     // Tool/Adapter 越界:Executor 兜底,不抛错,只形成可修正信号(ADR-0005 L22)。
     text = "[executor: payload not JSON-compatible]";
   }
-  return [{ type: "text", text: applyOutputCap(text) }];
+  // ADR-0083:装配期声明豁免的工具(工具 def 上的静态字段)不过兜底闸,
+  // 原样交付、不追加 marker;其余工具逐字节沿用既有截断语义。
+  const capped = exemptFromOutputCap ? text : applyOutputCap(text);
+  return [{ type: "text", text: capped }];
+}
+
+/**
+ * 对象守卫：null / 数组 / 原始值都不算。只查这三样、**不**查原型链 ——
+ * 与 isJsonCompatible 不同，Date / Map 之类的 class instance 在此放行
+ * （字段守卫随后自会判定其承载字段缺失）。
+ */
+function isNonArrayObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/** meta 可选字段守卫：undefined（缺席）或 string 都合法。 */
+function isOptionalString(v: unknown): boolean {
+  return v === undefined || typeof v === "string";
+}
+
+/**
+ * `meta` 形状守卫：非数组对象，且 `ToolResultMeta` 的四个已知字段若在场必须
+ * 是 string（未知字段不查 —— 与 `isJsonCompatible` 的白名单取向不同）。
+ * reject-fast 的落点 —— 任一已知字段非法即整体不算 envelope。
+ */
+function isMetaShape(v: unknown): boolean {
+  if (!isNonArrayObject(v)) return false;
+  return (
+    isOptionalString(v.oldContent) &&
+    isOptionalString(v.newContent) &&
+    isOptionalString(v.stdout) &&
+    isOptionalString(v.stderr)
+  );
 }
 
 /**
@@ -59,19 +94,10 @@ function safeContent(payload: unknown): AnthropicContentBlock[] {
  * envelope（meta 被丢弃）。
  */
 function isEnvelope(v: unknown): v is ToolOutputEnvelope {
-  if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
-  const o = v as Record<string, unknown>;
-  if (typeof o.output !== "string") return false;
-  const m = o.meta;
-  if (m === undefined) return true; // envelope with no meta
-  if (m === null || typeof m !== "object" || Array.isArray(m)) return false;
-  const meta = m as Record<string, unknown>;
-  return (
-    (meta.oldContent === undefined || typeof meta.oldContent === "string") &&
-    (meta.newContent === undefined || typeof meta.newContent === "string") &&
-    (meta.stdout === undefined || typeof meta.stdout === "string") &&
-    (meta.stderr === undefined || typeof meta.stderr === "string")
-  );
+  if (!isNonArrayObject(v)) return false;
+  if (typeof v.output !== "string") return false;
+  const m = v.meta;
+  return m === undefined || isMetaShape(m); // undefined = envelope with no meta
 }
 
 /** T4 #298:从已通过 isEnvelope 判别的 envelope 提取 side-channel meta。
@@ -226,6 +252,50 @@ function validateCall(registry: RegistryImpl, call: ToolCall): CallValidation {
 }
 
 /**
+ * ok 路径归档：envelope 的 meta 提升为可选 side-channel(类型已由 T2 在
+ * `ToolExecutionResult.ok` 声明),非 envelope 路径 meta 缺席;payload 一律
+ * 经 `safeContent`(截断豁免由 def 的装配期声明决定,ADR-0083)。
+ */
+function buildOkResult(
+  call: ToolCall,
+  out: unknown,
+  def: ToolDefinition
+): ToolExecutionResult {
+  // T4 #298:meta 先于 payload 求值,与提升引入前的求值顺序逐字节一致。
+  const meta: ToolResultMeta | undefined = isEnvelope(out)
+    ? extractMeta(out)
+    : undefined;
+  // meta 为可选字段：`{ meta }`（含 undefined）与条件展开等价，收敛为直写。
+  return {
+    kind: "ok",
+    toolUseId: call.id,
+    payload: safeContent(out, def.exemptFromOutputCap === true),
+    meta,
+  };
+}
+
+/**
+ * 失败路径归档：abort 优先于 timeout,其余异常净化后透出(绝不暴露 stack /
+ * 内部路径 / 凭据)。判定用的是**外层** signal —— 超时走 `stop.abort` 产生的
+ * 内部 signal 不算 caller 取消,归为 timeout。
+ */
+function buildFailureResult(
+  call: ToolCall,
+  err: unknown,
+  outerSignal: AbortSignal | undefined
+): ToolExecutionResult {
+  return {
+    kind: "execution_failed",
+    toolUseId: call.id,
+    message: outerSignal?.aborted
+      ? "cancelled"
+      : err === TIMEOUT
+        ? "timeout"
+        : sanitizeFailure(err),
+  };
+}
+
+/**
  * 构造 Executor。Executor 持有 Registry,通过 `registry.getValidator` 复用
  * 构造期已编译的 ajv ValidateFunction(015 同源 schema 强制);Executor 本体
  * 不再创建任何 ajv 实例,Registry 不可变,Executor 也不持有任何可变状态。
@@ -268,28 +338,9 @@ export function createExecutor(registry: RegistryImpl): Executor {
               timeoutMs,
               stop.abort
             );
-      // T4 #298:envelope 的 meta 提升为 ok result 的可选 side-channel(类型已
-      // 由 T2 在 ToolExecutionResult.ok 声明);非 envelope 路径 meta 缺席。
-      const meta: ToolResultMeta | undefined = isEnvelope(out)
-        ? extractMeta(out)
-        : undefined;
-      // meta 为可选字段：`{ meta }`（含 undefined）与条件展开等价，收敛为直写。
-      return {
-        kind: "ok",
-        toolUseId: call.id,
-        payload: safeContent(out),
-        meta,
-      };
+      return buildOkResult(call, out, validation.def);
     } catch (err) {
-      return {
-        kind: "execution_failed",
-        toolUseId: call.id,
-        message: signal?.aborted
-          ? "cancelled"
-          : err === TIMEOUT
-            ? "timeout"
-            : sanitizeFailure(err),
-      };
+      return buildFailureResult(call, err, signal);
     }
   }
 
