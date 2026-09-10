@@ -1,19 +1,21 @@
 # Spec: skill-load-write-root — skill 正文装配收口 + 写根 trailer
 
 > 输入 = `plans/skill-load-write-root.md`（ACR PASS 2026-09-07）+ 审计背景 `docs/audits/2026-09-07-skill-dir-pollution.md`（只读病因，不构成本 spec 合同）。
-> 范围 = 消费 skill 时模型在同一份正文末尾看见与子代理 prior 相同的「当前写根」；slash / `skill()` / Web 共用一个正文装配口。
+> 范围（历史）= 消费 skill 时模型在同一份正文末尾看见与子代理 prior 相同的「当前写根」；slash / `skill()` / Web 共用一个正文装配口。
 > 不做 = skill 包路径写拒绝、`.gitignore` 收白名单、改名/删除 `Base directory` 行、把活 `taskRoot` 写进 system `## Project path`（T9 红线）、每回合用户句重复 trailer、Web 前端复制 trailer。
+>
+> **Amended 2026-09-10** by `specs/skill-body-short-circuit.md` / ADR-0079：合同 2/3/4 与 SC2/SC3/SC5 不再要求 skill 正文挂写根 trailer。三条 skill 消费路径只灌技能程序。合同 1 / 6 / 7（helper SSOT、worker prior、改绑一次）仍有效。合同 6 末句「worker prior 之后 body 再带一次相同 trailer」**撤销**。
 
 ## 合同
 
 1. **写根文案 SSOT**：「当前写根」段文案只有一份，落点在 `src/harness/skill/body.ts` 旁的装配模块（helper 与 `src/harness/subagent/worker.ts` prior 共用同一函数，worker 源内不得留第二份长句）。
-2. **trailer 追加位置**：`createSkillBody` 在 `<skill_files>` 闭合之后追加写根段；trailer 存在时它永远是正文末段。
-3. **expand 形态（字节兼容）**：`taskRoot` 缺席 / 空白 → 无 trailer，输出与 337 SC6 现形态逐字节一致；同输入二次调用字符串相等（KV 缓存契约不变）。
-4. **生产消费方必须传活根（migrate）**：TUI slash、session-api `loadSkillBody`（Web `getSkillBody` 后端）、ACI `skill()` 工具三处生产调用读活 `taskRoot` cell 传入。三处不得绕过 `createSkillBody` 自拼 `Base directory` 或写根文案；Web 前端不拼 trailer（信封本地前缀维持现状）。
+2. **trailer 追加位置**（**revoked 2026-09-10**）：`createSkillBody` **不再**追加写根段。写根段只出现在 worker prior 与改绑后主会话一次（合同 6/7）。
+3. **expand 形态（字节兼容）**：`createSkillBody` 输出 = 337 SC6 装配形态（正文 + `Base directory` + `<skill_files>`），与是否传入 `taskRoot` / 写处境无关；同输入二次调用字符串相等。
+4. **生产消费方共用装配口**：TUI slash、session-api `loadSkillBody`、ACI `skill()` 三处仍只经 `createSkillBody` 取技能程序，不得自拼 `Base directory`；**不再**为写根传入活 `taskRoot`。Web 前端不拼写根 trailer。
 5. **未知 skill 名**：仍是既有引导句，无 trailer。
-6. **子代理 prior（contract）**：`priorMessagesFromEnvelope` 写根段改用同一 helper，入参为**处境枚举**（`WriteSituation`，定义见 `src/harness/session-roots.ts`，承载「隔离态 + 根形」组合 = 三态 `writable_main` / `writable_tree` / `no_writable_root`）而非裸 `sandboxRoot`；顺序契约 `[host dialogue?, evidence?, write root]` 不变；`sandboxRoot` 空 → 不注入；处境枚举为 `no_writable_root` 时同样**不注入**写根段（沿用「宁可不说，不可说错」立意，typed skip 不静默插一段）。（2026-09-08 amendment，承接 `specs/write-situation-disclosure.md` OQ1 采纳 (b)：envelope 旧版本（无处境字段）走 typed skip，不回落 legacy 文案。）worker prior 之后 body 再带一次相同 trailer 属可接受双份（同文案同语义）。
+6. **子代理 prior（contract）**：`priorMessagesFromEnvelope` 写根段改用同一 helper，入参为**处境枚举**（`WriteSituation`，定义见 `src/harness/session-roots.ts`，承载「隔离态 + 根形」组合 = 三态 `writable_main` / `writable_tree` / `no_writable_root`）而非裸 `sandboxRoot`；顺序契约 `[host dialogue?, evidence?, write root]` 不变；`sandboxRoot` 空 → 不注入；处境枚举为 `no_writable_root` 时同样**不注入**写根段（沿用「宁可不说，不可说错」立意，typed skip 不静默插一段）。（2026-09-08 amendment，承接 `specs/write-situation-disclosure.md` OQ1 采纳 (b)：envelope 旧版本（无处境字段）走 typed skip，不回落 legacy 文案。）~~worker prior 之后 body 再带一次相同 trailer 属可接受双份~~（2026-09-10 撤销，见文首 amendment）。
 7. **改绑后主会话再给一次**：仅当活写根 ≠ system `## Project path` 所钉身份根时，经既有 session worktree rebind / loop 用户消息缝注入一次与 helper 相同的写根段；不进 system、不进 `env_snapshot`；空白 taskRoot 走 typed skip（不静默插一段）；改绑失败不插入；未改绑不多段；非每条用户消息。
-8. **skill-load 长度豁免不变**：`SKILL_LOAD_PREFIX` / `isSkillLoadText` / `exceedsUserInputCap` 语义不动——超长 SKILL.md + trailer 仍可装配。
+8. **skill-load 长度豁免不变**：`SKILL_LOAD_PREFIX` / `isSkillLoadText` / `exceedsUserInputCap` 语义不动——超长 SKILL.md 仍可装配。
 
 ## Inherited decisions（不改写，仅锚定）
 
@@ -25,10 +27,10 @@
 ## Success Criteria
 
 - [ ] SC1 `taskRoot` 空 / 缺 → `createSkillBody` 输出与改造前逐字节一致（无 trailer）。
-- [ ] SC2 非空 `taskRoot` → trailer 段位于 `</skill_files>` 之后、含 `current write root`，且与 worker prior 写根段字节相同（同一 helper）。
-- [ ] SC3 TUI slash、hub `loadSkillBody`、ACI `skill()` 三条生产路径传入活 `taskRoot`；同一 skill 在三处进模型的正文末尾都带当前写根。
+- [ ] SC2 **amended 2026-09-10**：`createSkillBody` 在传入非空 `taskRoot` / 写处境时仍**无**写根段；`writeRootSegment` 与 worker prior 字节相同的断言改由 prior / 改绑测试承担，不挂在 skill 正文上。
+- [ ] SC3 **amended 2026-09-10**：TUI slash、hub `loadSkillBody`、ACI `skill()` 三条生产路径的装配正文都不带当前写根。
 - [ ] SC4 未知 skill 名返回既有引导句且无 trailer。
-- [ ] SC5 超长 SKILL.md 仍可装配且 trailer 保持在末尾；skill-load 豁免判定不变。
+- [ ] SC5 超长 SKILL.md 仍可装配；skill-load 豁免判定不变。正文末段是 `</skill_files>`，不是写根 trailer。
 - [ ] SC6 worker prior 源内无第二份写根长句；prior 测试对 `current write root` 与身份根只读句的断言不变或更强。（2026-09-08 amendment，承接 `specs/write-situation-disclosure.md` T5：原断言「worker 源内无第二份写根长句」强度保留——helper 入参由裸 `sandboxRoot` 改为处境枚举后，源内长句仍只许出现在 helper 一处，worker 侧只允许构造处境枚举并调 helper，不得自拼写根文案；`writable_main` / `writable_tree` 两态输出**逐字节与改造前相等**，`no_writable_root` 态**不注入**写根段。）
 - [ ] SC7 改绑成功且写根 ≠ 身份根 → 主会话 messages 出现一次 helper 文案写根段；未改绑 / 改绑失败 / 空白 taskRoot → 不出现。
 - [ ] SC8 `npm test` + `npm run typecheck` exit 0。

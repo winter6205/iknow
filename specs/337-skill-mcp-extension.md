@@ -215,7 +215,7 @@ export function toAciToolDef(
 - [ ] SC3 `disable-model-invocation: true` 的 skill（session-handoff 活体样本）不出现在 `<available_skills>` 段、`skill_search` 搜不到。
 - [ ] SC4 种子装配后 `<available_skills>` 段含 systematic-debugging / verification-before-completion / test-driven-development 三件（名字序渲染）。
 - [ ] SC5 `skill_search({query})` 大小写不敏感子串匹配，每行返回 `{name, description}` JSON；直呼名 `skill({name})` 返回正文，叫错名返回引导回检索的文本。
-- [ ] SC6 `skill({name})` 返回 = frontmatter 剥离正文 + Base directory 行 + `<skill_files>` 采样 ≤10 绝对路径；references/ 未递归。**（amended by `specs/skill-load-write-root.md`）**：传入非空活 `taskRoot` 时，正文末尾在 `</skill_files>` 之后追加与子代理 prior 同一 helper 的写根段；`taskRoot` 空 / 缺席 → 无 trailer（与上述形态字节一致）。
+- [ ] SC6 `skill({name})` 返回 = frontmatter 剥离正文 + Base directory 行 + `<skill_files>` 采样 ≤10 绝对路径；references/ 未递归。**（amended by `specs/skill-load-write-root.md`；再 amended by `specs/skill-body-short-circuit.md` / ADR-0079）**：装配正文**不**追加写根 trailer，与是否传入活 `taskRoot` 无关。写根告知只走 worker prior 与改绑一次。同名二次 `skill()` 的短路见 `skill-body-short-circuit.md`，不改本条首次装配形态。
 - [ ] SC7 两级 MCP config：项目级同名条目整体覆盖用户级；`disabled:true` / `enabled:false` 不连接；坏条目跳过且 warn 恰好一行且不含 env 值（单测断言）。
 - [ ] SC8 `buildHarnessEngine` 返回时间不因 MCP server 缺席 / 慢而阻塞（测试用慢 connect stub 断言返回先于连接完成）；连接成功后 `mcp__*` 工具经 tool_search discover 可见。
 - [ ] SC9 注册超时：30s 未连上 → 该 server 标 failed + warn，启动不失败，其余 server 不受影响。

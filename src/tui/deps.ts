@@ -201,18 +201,17 @@ export interface BuildTuiDepsOptions {
 export interface TuiExtensions {
   readonly skillCatalog: SkillCatalog;
   /**
-   * 活 taskRoot cell（specs/skill-load-write-root.md）：TUI slash 装配
-   * skill 正文时调用时机读快照 —— 与 ACI skill() / hub loadSkillBody 同一
-   * 装配口。缺席（旧装配形态防御缺省）→ slash 不传写根（无 trailer）。
+   * 活 taskRoot cell（specs/skill-load-write-root.md）：TUI chrome 渲染面
+   * （worktreeIsolationLines / resolveWorktreeChromeRoot）消费。ADR-0079 后
+   * slash 装配 skill 正文不再读此 cell（正文不再挂写根 trailer）。缺席
+   * （fixture / 测试）→ chrome 渲染退化到 workspaceRoot。
    */
   readonly liveTaskRoot?: LiveTaskRoot;
   /**
    * T6 (plans/write-situation-disclosure.md)：worktree 隔离档（来自 build-
-   * engine `isolationEnabled` 单一读取点的透出）。TUI slash 装配 skill 正文
-   * 时与 `liveTaskRoot` 配对算 `writeSituation(isolationOn, currentRoot)`，
-   * 传给 `createSkillBody` 双参形态（详见 body.ts SkillBodyOptions.write-
-   * Situation）。缺席 → 默认 false（旧形态 = writable_main，与改造前
-   * byte-equal；等价于 hub.ts / chat-session 的同一缺省回退）。
+   * engine `isolationEnabled` 单一读取点的透出）。ADR-0079 后 slash 装配
+   * skill 正文不再消费此档（正文不再挂写根 trailer）；字段保留以维持装配
+   * 面兼容（与 app.tsx TuiAppProps.isolationOn 同步保留）。
    */
   readonly isolationOn?: boolean;
   readonly mcp: {
@@ -424,16 +423,15 @@ export async function buildTuiDeps(
   // 收窄类型;极端防御缺省(空 catalog / no-op shutdown)保证回调不抛。
   opts.onExtensions?.({
     skillCatalog: skillCatalog!,
-    // specs/skill-load-write-root.md：活 taskRoot cell 透出，slash 装配
-    // skill 正文时调用时机读快照 —— 与 build-engine 传给 registry 的同一实例。
+    // specs/skill-load-write-root.md：活 taskRoot cell 透出，TUI chrome 渲染
+    // 面消费。ADR-0079 后 slash 装配 skill 正文不再读此 cell（正文不再挂
+    // 写根 trailer）。
     ...(built.liveTaskRoot !== undefined
       ? { liveTaskRoot: built.liveTaskRoot }
       : {}),
-    // T6 (write-situation-disclosure)：worktree 隔离档透出。slash 装配
-    // skill 正文时与 liveTaskRoot 配对算 `writeSituation(isolationOn,
-    // currentRoot)`,传给 createSkillBody 双参形态。判定函数住
-    // `isolation/`,TUI 仅消费枚举(SC4 依赖方向)。缺席 → 默认 false
-    // (旧形态 = writable_main,与改造前 byte-equal)。
+    // T6 (write-situation-disclosure)：worktree 隔离档透出。ADR-0079 后
+    // slash 装配不再消费此档；保留透出以维持 TuiExtensions 装配面兼容
+    // （与 TuiAppProps.isolationOn 同步保留）。
     ...(built.isolationOn !== undefined
       ? { isolationOn: built.isolationOn }
       : {}),

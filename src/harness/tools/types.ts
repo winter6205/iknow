@@ -11,7 +11,10 @@
  * 此处给出稳定可区分、对模型可操作、可无损编码且默认不泄露的最小形状。
  */
 
-import type { AnthropicContentBlock } from "../model-adapter/types.js";
+import type {
+  AnthropicContentBlock,
+  AnthropicNativeMessage,
+} from "../model-adapter/types.js";
 import type { HarnessStreamEvent } from "../stream.js";
 
 /**
@@ -50,6 +53,12 @@ export interface ToolExecutionContext {
    * 直接调 handler / 测试注入。
    */
   readonly toolUseId?: string;
+  /**
+   * 本回合模型可见历史的只读快照（append-only messages 的引用）。skill() 据此
+   * 判「该名成功全文是否仍在可见上下文」做二次短路；快照缺席（slash / 直调
+   * handler / 未接缝的路径）→ 消费方 fail-closed，行为与缺席前逐字节一致。
+   */
+  readonly messages?: ReadonlyArray<AnthropicNativeMessage>;
 }
 
 /**
@@ -171,6 +180,8 @@ export interface Executor {
       index: number
     ) => void | Promise<void>,
     turnId?: string, // F-4: 原样透传到 ctx.turnId;缺省 = 无归属回合
-    onStream?: (event: HarnessStreamEvent) => void // 图进度等工具内 emit
+    onStream?: (event: HarnessStreamEvent) => void, // 图进度等工具内 emit
+    /** skill() 二次短路:本回合模型可见历史只读快照;缺省 = handler 拿不到(fail-closed)。 */
+    messages?: ReadonlyArray<AnthropicNativeMessage>
   ) => Promise<ReadonlyArray<ToolExecutionResult>>;
 }

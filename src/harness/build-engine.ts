@@ -405,18 +405,21 @@ export type BuiltEngine = EngineBundle & {
   readonly catalog?: AciCatalog;
   /**
    * 活 taskRoot cell（specs/skill-load-write-root.md）：host 装配期句柄透出，
-   * hub `loadSkillBody` 在调用时机读快照传给 `createSkillBody`——skill 正文
-   * trailer 与 write_file / bash 工厂、worker spawn 同 vintage。缺席（旧
-   * host 注入 deps 形态）→ 调用方退化为无 trailer。
+   * 供 chat-session rebind / TUI chrome 渲染等活根消费面使用。ADR-0079 后
+   * skill 正文装配（`loadSkillBody` / ACI `skill()` / TUI slash）不再读此
+   * cell —— 写处境披露的权威路径是 worker prior + chat-session rebind 通知
+   * （共用 `writeRootSegment` helper）。缺席（旧 host 注入 deps 形态）→
+   * 上述消费面各自退化，与历史行为一致。
    */
   readonly liveTaskRoot?: LiveTaskRoot;
   /**
    * T4 (plans/write-situation-disclosure.md) — worktree isolation 档判定结果
-   *（装配期一次性读取，`resolveWorktreeOnMutate(settings)`，硬要求 9）。hub
-   * `loadSkillBody`、ACI `skill()` 工具、chat-session rebind 注入三处消费
-   * 面用它算 `writeSituation(isolationOn, currentRoot)`——不重复读 settings
-   * 也避免宿主层重判。缺席（注入 deps 形态）→ 消费方默认按 `writable_main`
-   * 处理（与旧 build-engine 默认形态一致）。
+   *（装配期一次性读取，`resolveWorktreeOnMutate(settings)`，硬要求 9）。
+   * chat-session rebind 注入与 ACI registry 透出面用它算
+   * `writeSituation(isolationOn, currentRoot)`——不重复读 settings 也避免
+   * 宿主层重判。ADR-0079 后 skill 正文装配不再消费此档（同上，披露路径迁
+   * worker prior / rebind 通知）。缺席（注入 deps 形态）→ 消费方默认按
+   * `writable_main` 处理（与旧 build-engine 默认形态一致）。
    */
   readonly isolationOn?: boolean;
   /**

@@ -1,5 +1,7 @@
 # Plan: skill 正文装配收口 + 写根 trailer
 
+> **2026-09-10：** skill 正文挂 trailer 已被 ADR-0079 / `specs/skill-body-short-circuit.md` 收回。本计划保持历史落地记录；现行实施走 `plans/skill-body-short-circuit.md`。
+
 **Goal:** 消费 skill 时，模型在同一段正文末尾看见与子代理 prior 相同的「当前写根」，不再把 `Base directory`（技能包）当成落盘目录；slash / `skill()` / Web 共用一个正文装配口。
 **Approach:** 不把活 `taskRoot` 写入 system（T9）。不写 skill 目录硬闸、不改 gitignore。先把写根文案收成一处 helper、`createSkillBody` 在技能包路径之后追加 trailer（expand），再让生产调用方传入活 `taskRoot`（migrate），子代理 prior 与改绑后的主会话改用同一 helper（contract）。运输层（`[skill-load]` 信封 vs tool_result）只包一层，不各自拼写根。
 **Spec link:** T1 落地 `specs/skill-load-write-root.md`（amends `specs/337-skill-mcp-extension.md` SC6）；审计背景 `docs/audits/2026-09-07-skill-dir-pollution.md`（只读病因，本计划不把审计当合同）。

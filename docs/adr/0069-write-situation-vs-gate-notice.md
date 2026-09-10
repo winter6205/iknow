@@ -2,7 +2,7 @@
 
 Date: 2026-09-08
 
-Status: accepted
+Status: accepted; superseded-by ADR-0079 §Decision 1 only
 
 > 来源：`specs/write-situation-disclosure.md`。承接 ADR-0068（可写合同）与 PR #947；#947 修「伸手要写那一刻拒绝理由错不错」，本 ADR 修「伸手之前告知真不真」与「伸手注定失败时有没有出路」。
 
