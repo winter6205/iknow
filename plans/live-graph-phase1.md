@@ -28,25 +28,25 @@ minimal-change-verifier: yes — 只加跨调用账本与冻结；不混阶段 2
    - **Inherits:** spec SC1–SC4 / ADR-0051：第一次校验通过的交节点建账本；空 overlay 不建；关 overlay 不毁；reset 与会话结束销毁；compact 不扔。进程内对象，不写 JSONL。
    - **Surface:** `src/harness/graph`、既有 session 持有（session-api 与/或 CLI runtime）
    - **Acceptance:** 测试能证明「未交节点无账本 / 交过则有 / reset 后旧 id 可再 spawn / compact 后账本仍在」；相关 `npm test` 子集退出 0
-   - Status: [ ] pending
+   - Status: [x] done (landed `#944` / `a5948155`)
 
 2. **剩余子图合并 + 按 id 冻结** — tag: `[implementation]`
    - **Inherits:** spec SC5–SC7 / ADR-0050：只 spawn 未冻 id；done 与 failed 冻；skipped 可再交；第二段可不交已 done 的上游但仍能接到产出。
    - **Surface:** `src/harness/graph`（`run_graph` 入口）
    - **Acceptance:** A done 后只交 B 不重跑 A；再交 A typed 拒零 spawn；failed id 再交拒；skipped id 再交会 spawn
-   - Status: [ ] pending
+   - Status: [x] done (landed `#944` / `a5948155`)
    - [blocks: T1]
 
 3. **取消保留已 done** — tag: `[implementation]`
    - **Inherits:** spec SC8 / ADR-0065：abort 不把半图当成功 condense；已 done 冻结；未跑完不记 done。
    - **Surface:** `src/harness/graph`
    - **Acceptance:** 跑图中 abort：handler typed 取消；随后剩余子图不重跑已 done；未完成 id 可再交
-   - Status: [ ] pending
+   - Status: [x] done (landed `#944` / `a5948155`)
    - [blocks: T2]
 
 4. **合同锁：说明、无 wait、拒多余字段、无外环次数闸** — tag: `[implementation]`
    - **Inherits:** spec SC9–SC12 / ADR-0052 / 0065 / 0067：工具说明写剩余子图；schema 无 wait；多余属性（含失败边字段）拒；连续 ≥3 次合法剩余子图不因次数失败。
    - **Surface:** `src/harness/graph`（`run_graph` schema 与 description）
    - **Acceptance:** 带 `wait` 或 `onFailure` 的节点/调用 typed 拒；三次外环剩余子图都能跑完；`npm run typecheck` 与含本计划测试的 `npm test` 退出 0
-   - Status: [ ] pending
+   - Status: [x] done (landed `#944` / `a5948155`)
    - [blocks: T2]

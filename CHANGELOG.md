@@ -8,6 +8,8 @@
 
 ### Feature
 
+- **活图阶段 1+2（#929，PR #944，2026-09-10）**: 同会话多次 `run_graph` 共用进程内活图账本（剩余子图、按 id 冻结、取消只留 done）；阶段 2 增加 `onFailure`、同 id 再进、每 id 进入 8 次熔断。账本不进 JSONL。spec `specs/live-graph-phase1.md` / `live-graph-phase2.md`。
+
 - **web_fetch HTML 窗口（2026-08-28）**: 传输层解码体 1 MiB 上限（流式读 + stub 二次拒绝）。`start_chars` 续抓，头部 `Window:` / `Representation:` 在 untrusted banner 之前；`max_chars` 上限 16000，整段 output ≤ executor 20000。opt-in `as=html` 返回 markup（仅 html content-type）；二进制类型拒绝。沙箱 curl / fence env 不改——看网页主路径仍是 SSRF 守卫下的 `web_fetch`。计划 `plans/web-fetch-html-window.md`。
 
 - **自动记忆 dream 双闸（#774，2026-08-28）**: `settings.memory.dream` 与抽取解绑。做梦须同时满足距上次成功或 skip 至少 24h、以及至少 5 个 distinct session（chat/TUI 进程内会话；serve `conversation_id`）。游标 JSON 落在各 `memoryDir`。现行条 &lt; 2 时 skip merge LLM 并推进时间闸。抽取仍为 `completed` + N≥2。
