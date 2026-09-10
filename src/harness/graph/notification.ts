@@ -49,3 +49,28 @@ export function renderGraphModeChangeNotification(
     ? IKNOW_GRAPH_MODE_ON_NOTIFICATION
     : IKNOW_GRAPH_MODE_OFF_NOTIFICATION;
 }
+
+/**
+ * ADR-0080 / specs/graph-mode-presence.md — 「开着图」本轮短现势（SSOT）。
+ *
+ *  用途：holder 仍 on 时，每次即将调模型在 messages 尾追加这一行——
+ *  让模型在工具 description（常驻、不随模式增删）之外，每跳都能读到
+ *  一句短现势。短句不替代长 ON/OFF（切换提示仍只在翻转那一拍一次），
+ *  也不进 system / run_graph 回执 / <agent_status>。
+ *
+ *  与长 ON 的区别：
+ *   - 短句不带完整编排说明书，只点名两个工具的语义差
+ *     （有相互依赖的拆分用 run_graph、活图可含标明失败回边；单发任务
+ *     用 spawn_subagent）。模型收到短句后会知道图仍开着、本轮该选
+ *     哪把工具。
+ *   - 文本明显短于长 ON，便于 session 内字节恒定（KV cache 尾部追加
+ *     兼容 + 模型 grep 形态），无 per-turn 插值。
+ *   - 出现节奏 = 每次即将调模型；长 ON/OFF = 翻转一拍一次（开图含
+ *     编排指引、关图含关闭提示）。
+ *
+ *  实现侧由 loop-engine 的 `appendGraphModePresence` seam 在调模型前
+ *  按 `assembly.enabled()` 决定是否追加：seam 缺席 / enabled() === false /
+ *  当拍刚贴过长 ON → 零追加；其余按追加缝记录进 pendingInjected（#888）。
+ */
+export const IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION =
+  "<graph_mode>Graph mode is still on. Prefer run_graph when the work splits into pieces with dependencies between them (declare the whole shape in one call — it's a live graph, not a single spawn, and may include marked failure edges); use spawn_subagent for a single task or for several independent tasks.</graph_mode>";
