@@ -107,8 +107,8 @@ _Avoid_: 回滚已追加的 assistant 回合；悬空未回填的 tool call；�
 **required runtime layer / conditional remediation layer**: 017 的两层对仗边界——required runtime layer（signal / timeout / trace / cancelled-timeout 停止 / in-flight closeout）已实施；conditional remediation layer（自动重试、checkpoint 落盘、token-cost 护栏、trace B 层字段、工具分类超时、错误分类细化、总耗时独立 stop、OTel 导出）017 显式禁止，推迟到 018 真实接通后按 013 条件式修复原则补。
 _Avoid_: 把 conditional remediation layer 提前带入 Foundation 内核；用禁词扫描注释/JSDoc 代替可执行面能力边界（checkpoint 落盘在 session-api）
 
-**executor truncation authority**（契约 X）: executor 是工具结果截断元数据的唯一权威——自测序列化后字符数、自截断、自合成标记；工具返回纯数据、不带 truncated/total 元字段，executor 永不信任工具声称的截断字段（防 MCP 第三方伪造绕过封顶）。#140 裁决，ADR-0004 / ADR-0006。
-_Avoid_: 工具自填 truncated/total 字段；executor 凭工具标记跳过兜底截断
+**executor truncation authority**（契约 X）: executor 是工具结果截断元数据的唯一权威——自测序列化后字符数、自截断、自合成标记；工具返回纯数据、不带 truncated/total 元字段，executor 永不信任工具声称的截断字段（防 MCP 第三方伪造绕过封顶）。#140 裁决，ADR-0004 / ADR-0006。**scope 例外**：`skill()` 正文不在此闸内——它是装配产物（非可再生查询），豁免为内建装配期静态声明；MCP 工具结构性不可取得（ADR-0083）。
+_Avoid_: 工具自填 truncated/total 字段；executor 凭工具标记跳过兜底截断；把 skill 正文豁免读成「工具可自证免截断」
 
 **plain-string tool output**: (契约 Y1, deprecated→#298) 原生产工具输出为纯字符串（wire 边界同形态）；bash 例外保留 `{code, stdout, stderr}`（Y1b）。#298 起 Y1「纯字符串」读法被 observability side-channel 取代——model-facing tool_result 仍纯字符串（Y1 精神保留），但 handler 可返 envelope `{ output, meta? }`，`meta` 走观测旁路，永不进模型视野。#140 裁决，ADR-0004。
 _Avoid_: 工具自填 structured metadata 进 model tool_result；把 bash 例外推广到其他工具
@@ -484,6 +484,7 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **run() messages -> adapter streaming arm -> interpretMessage**: harness LLM path（流事件以 `HarnessStreamEvent` 经 `onStream` 暴露）
 - **turn -> LoopEngine -> tool call -> result -> next turn**: harness 驱动；tool use 经 ACI permission middleware
 - **Session HTTP -> run() -> AssistantTurnResult -> SessionHub**: session-api host 路径；messages 每回合投影到 UI
+- **skill 正文豁免 vs 契约 X**: 豁免是**装配期静态声明**（内建 skill 工具落值，executor 读），不是工具运行期自称；契约 X 禁的是「工具声称截断字段绕过封顶」，两者不冲突（ADR-0083）
 - **正常模式 vs 自动模式**: HITL 每轮还键盘 vs 权限 `full_auto` 本轮不问工具；goal 功能不是这一对
 - **HITL 判官 vs goal 功能**: 两套判断逻辑模块，共用判官系统；不是一条 `goal ?? query` 链（ADR-0024 机制仍在，产品口不叫自动模式）
 - **声称位置 vs verify round**: 窗口右端是 messages 下标（与 `finalText` 同源回扫）；`round` 只记验证第几轮（ADR-0073）

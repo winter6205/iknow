@@ -45,13 +45,15 @@
 - `224-tool-extension-path.md` — 工具扩展路径（lazy / discover / visibleSchemas + tool_search）
 - `251-lsp-tool.md` — LSP 工具（自建客户端 + TS 首期）
 - `302-lsp-multilang.md` — LSP 多语言泛化
-- `337-skill-mcp-extension.md` — skill + MCP 扩展源（SC6 写根 trailer **amended by** `skill-load-write-root.md`）
-- `skill-load-write-root.md` — skill 正文装配收口 + 写根 trailer（slash / `skill()` / Web 共用装配口；与 worker prior 同一写根文案）；plan: `plans/skill-load-write-root.md`；合同 6 / SC6 **amended by** `write-situation-disclosure.md`
+- `337-skill-mcp-extension.md` — skill + MCP 扩展源（SC6 写根 trailer **amended by** `skill-load-write-root.md`，再 **amended by** `skill-body-short-circuit.md`：正文不再挂 trailer）
+- `skill-load-write-root.md` — skill 正文装配收口（slash / `skill()` / Web 共用装配口）；写根 helper 仍与 worker prior / 改绑一次共用；skill 正文挂 trailer 的合同 2/3/4 **amended by** `skill-body-short-circuit.md`；合同 6 / SC6 **amended by** `write-situation-disclosure.md`；plan: `plans/skill-load-write-root.md`（历史）/ `plans/skill-body-short-circuit.md`（现行）
+- `skill-body-short-circuit.md` — `skill()` 二次短路（可见历史已有全文则短回执）+ skill 正文不挂写根；ADR-0079；plan: `plans/skill-body-short-circuit.md`
+- `skill-body-load-contract.md` — skill 正文加载契约（三路同源、不经通用输出闸；豁免为内建装配期静态声明，MCP 不可取得）
 - `disclosure-index-align.md` — 索引档对齐（#631 短描述收回、直呼加载、超限降档、删 `skill_search`）；amends ADR-0043 必经 `tool_search` 读法；plan: `plans/disclosure-index-align.md`
 - `406-secret-roundtrip-mask.md` — Secret roundtrip mask（supersedes `#126` hook-system）
 - `user-hook-router.md` — 用户钩子同进程 router（内置/用户钩子；V1 声明式 PreToolUse/PreWrite/PreCommit；plan: `plans/user-hook-router.md`）；不替代 #126 契约或 #406 roundtrip
 - `task-worktree-lifecycle.md` — 隔离 ON 后进树/命名/list/remove 与身份根 grep·glob；plan: `plans/task-worktree-lifecycle.md`（amend ADR-0037 §3）；门禁分类与 unbound 文案 **amended by** `casual-ask-context-hygiene.md`
-- `write-situation-disclosure.md` — 写处境三态告知（告知面说「此刻能不能写」/ 回执说「下一步做什么」）+ `unboundMutateNotice` 语义恢复 + 建树失败可恢复性分类（ADR-0069；承接 PR #947 / `mutate-write-contract.md` 的后续面，Changes 不重叠；**amends** `casual-ask-context-hygiene.md` SC7 与 `skill-load-write-root.md` 合同 6/SC6）
+- `write-situation-disclosure.md` — 写处境三态告知（告知面说「此刻能不能写」/ 回执说「下一步做什么」）+ `unboundMutateNotice` 语义恢复 + 建树失败可恢复性分类（ADR-0069；承接 PR #947 / `mutate-write-contract.md` 的后续面，Changes 不重叠；**amends** `casual-ask-context-hygiene.md` SC7 与 `skill-load-write-root.md` 合同 6/SC6；告知面去掉 skill trailer **amended by** `skill-body-short-circuit.md` / ADR-0079）
 - `worktree-exclusive-lock.md` — worktree 占用锁可选档位 `isolation.worktreeExclusive`（默认 OFF · 占用 = 现存会话记录的 `workspaceRoot` · 零新状态 · 模型侧无 force；ADR-0070；**依赖** `write-situation-disclosure.md` 的可恢复性表）
 
 ### 身份与记忆
