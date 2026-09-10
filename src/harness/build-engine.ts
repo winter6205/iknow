@@ -1623,6 +1623,11 @@ export async function buildHarnessEngine(
             assembly: graphAssembly,
             lastSeenEnabled: { value: undefined as boolean | undefined },
           },
+          // ADR-0080 / specs/graph-mode-presence.md:每跳短现势注入缝
+          // —— graphAssembly 在场时一并透给 loop-engine(与上面 graphModeChange
+          // 同源 assembly,两缝解耦:change 持翻转状态,presence 只读 round 快照)。
+          // 缺席(ask / worker / 未接 overlay)→ 零追加。
+          graphModePresence: { assembly: graphAssembly },
         }
       : {}),
     // B4 / ADR-0043 §4:MCP 手动重连追加缝 —— mcpReconnectPending holder

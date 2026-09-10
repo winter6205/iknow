@@ -39,6 +39,7 @@ import { createRunGraphTool } from "../../../src/harness/graph/run-graph-tool.ts
 import {
   IKNOW_GRAPH_MODE_OFF_NOTIFICATION,
   IKNOW_GRAPH_MODE_ON_NOTIFICATION,
+  IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,
   renderGraphModeChangeNotification,
 } from "../../../src/harness/graph/notification.ts";
 import {
@@ -303,6 +304,30 @@ describe("graph 模式切换提示 — SSOT 静态文本(KV cache 兼容)", () =
     );
     expect(IKNOW_GRAPH_MODE_ON_NOTIFICATION).not.toBe(
       IKNOW_GRAPH_MODE_OFF_NOTIFICATION
+    );
+  });
+});
+
+describe("graph mode 每跳短现势 — SSOT 静态文本(ADR-0080)", () => {
+  it("短现势是 <graph_mode> 单行静态文本,点名 run_graph + spawn_subagent", () => {
+    const t = IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION;
+    expect(t.startsWith("<graph_mode>")).toBe(true);
+    expect(t.endsWith("</graph_mode>")).toBe(true);
+    expect(t).toContain("run_graph");
+    expect(t).toContain("spawn_subagent");
+    // 必须是活动图语言(spec §11),不能叫 DAG。
+    expect(t.toLowerCase()).not.toContain("dag");
+  });
+
+  it("短现势在会话内字节恒定(KV cache 尾部追加兼容,无 per-turn 插值)", () => {
+    expect(IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION).toBe(
+      IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION
+    );
+  });
+
+  it("短现势短于长 ON(SC1 形态约束:现势不重复长 ON 的全部编排说明)", () => {
+    expect(IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION.length).toBeLessThan(
+      IKNOW_GRAPH_MODE_ON_NOTIFICATION.length
     );
   });
 });

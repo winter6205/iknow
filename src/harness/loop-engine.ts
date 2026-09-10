@@ -105,6 +105,7 @@ import { readEnvSnapshot } from "./env-snapshot.js";
 import type { GraphAssembly } from "./graph/assembly.js";
 import {
   type GraphModeChange,
+  IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,
   renderGraphModeChangeNotification,
 } from "./graph/notification.js";
 
@@ -367,6 +368,25 @@ export interface LoopEngineDeps {
     readonly lastSeenEnabled: { value: boolean | undefined };
   };
   /**
+   * ADR-0080 / specs/graph-mode-presence.md — graph mode 每跳短现势注入缝。
+   * 字段在场 = stepWithTrace 每次即将调用模型前(首调 + reactive-compact
+   * 重试),在 appendGraphModeChange 之后、appendMcpReconnect 之前按
+   * `assembly.enabled()` 决定是否追加一句短 `<graph_mode>`
+   * (IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,SSOT in graph/notification.ts):
+   *   - seam 缺席 → 零追加(ask / worker / 未接 overlay 入口零行为变化);
+   *   - `enabled() === false` → 零追加(holder off / 从未开过);
+   *   - 当拍 appendGraphModeChange 刚贴过长 ON(翻入 on 那一拍)→
+   *     零追加(SC5:同一拍长 ON 与短现势不并存);
+   *   - 其余 → 短现势以 user 消息 immutable 追加,record 进 pendingInjected
+   *     (#888 契约,与 appendGraphModeChange 同形)。
+   * 判定读 `assembly.enabled()`(round 快照),不读 holder、不写
+   * lastSeenEnabled —— 翻转检测由 graphModeChange seam 独立承担,语义不混。
+   * 不进 system / 不进 run_graph 回执 / 不进 <agent_status> 栏。
+   */
+  readonly graphModePresence?: {
+    readonly assembly: GraphAssembly;
+  };
+  /**
    * B4 / ADR-0043 §4:MCP 手动重连追加缝。字段在场 = stepWithTrace 每次
    * 即将调用模型前消费 `takePending()` 拿到「回调已记录但尚未进 transcript」
    * 的重连事件,每个事件以 user 消息 immutable 追加一条单行静态文本
@@ -571,6 +591,12 @@ async function appendEnvSnapshot(
  * graph 切换提示之后(后注入的 message 排在末尾,模型面看到的次序
  * 与写入次序一致)。
  *
+ * 返回值 `{ state, appendedLongOn }`:`appendedLongOn === true` 当且仅当
+ * 本拍因翻入 on 实际贴了长 ON 通知(IKNOW_GRAPH_MODE_ON_NOTIFICATION),
+ * 给同段后续的 appendGraphModePresence 用作 SC5 去重信号 —— 同一拍长
+ * ON 与短现势不并存。其他路径(off 翻转 / 同值 / seam 缺席 / 初值观察)
+ * 均为 false。
+ *
  * #888:切换提示同样 record 进 pending 缓冲,随下一批 commit flush。
  */
 async function appendGraphModeChange(
@@ -578,18 +604,18 @@ async function appendGraphModeChange(
   deps: LoopEngineDeps,
   pendingInjected: PendingInjected,
   onStream?: (event: HarnessStreamEvent) => void
-): Promise<LoopState> {
+): Promise<{ state: LoopState; appendedLongOn: boolean }> {
   const seam = deps.graphModeChange;
-  if (seam === undefined) return state;
+  if (seam === undefined) return { state, appendedLongOn: false };
   const next = seam.assembly.enabled();
   const last = seam.lastSeenEnabled.value;
   // 初次观察(last = undefined):只记初值,不追加 —— 新会话/新 deps
   // 的第一轮没有「翻转」可言,关图开局更不能灌一条 off 提示。
   if (last === undefined) {
     seam.lastSeenEnabled.value = next;
-    return state;
+    return { state, appendedLongOn: false };
   }
-  if (last === next) return state;
+  if (last === next) return { state, appendedLongOn: false };
   const change: GraphModeChange = next ? "on" : "off";
   const text = renderGraphModeChangeNotification(change);
   seam.lastSeenEnabled.value = next;
@@ -598,6 +624,52 @@ async function appendGraphModeChange(
     enabled: next,
   });
   const msg = deps.adapter.encodeUserText(text);
+  pendingInjected.record(msg);
+  return {
+    state: appendMessage({ state, msg }),
+    appendedLongOn: change === "on",
+  };
+}
+
+/**
+ * ADR-0080 / specs/graph-mode-presence.md — graph mode 每跳短现势追加缝。
+ *
+ * 判定次序:在 appendGraphModeChange 之后、appendMcpReconnect 之前调用
+ * (与既有同段「环境级事件 → 当前态栏」次序一致;graph 切换提示之后,
+ * 短现势之后,再走 MCP 重连 + status bar + env snapshot)。形态镜像
+ * appendGraphModeChange 的 seam-缺席 → 零注入分支。
+ *
+ * 判定四段:
+ *   1. deps.graphModePresence 缺席 → 零追加(ask / worker / 未接 overlay
+ *      入口零行为变化,byte-identical);
+ *   2. `assembly.enabled() === false` → 零追加(holder off / 从未开过,
+ *      SC2);
+ *   3. `appendedLongOn === true` → 零追加(SC5:本拍因翻入 on 已贴长 ON,
+ *      不叠短现势;长 OFF 不冲突,因为关图意味着 enabled=false,前面
+ *      分支 2 已早退);
+ *   4. 其余 → encodeUserText + appendMessage + record 进 pendingInjected。
+ *
+ * 不写 lastSeenEnabled —— 翻转检测由 appendGraphModeChange seam 独立
+ * 承担,这里只读 enabled() 的 round 快照(SC4:同 round 中途翻键不出现
+ * 新短现势,beginRound 后才按新值)。
+ *
+ * 不进 system / run_graph 回执 / <agent_status> 栏(SC6);text = SSOT
+ * (IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION),会话内字节恒定 → KV cache
+ * 尾部追加兼容(每拍都追加同一字符串)。
+ */
+async function appendGraphModePresence(
+  state: LoopState,
+  deps: LoopEngineDeps,
+  pendingInjected: PendingInjected,
+  appendedLongOn: boolean
+): Promise<LoopState> {
+  const seam = deps.graphModePresence;
+  if (seam === undefined) return state;
+  if (appendedLongOn) return state;
+  if (!seam.assembly.enabled()) return state;
+  const msg = deps.adapter.encodeUserText(
+    IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION
+  );
   pendingInjected.record(msg);
   return appendMessage({ state, msg });
 }
@@ -1760,16 +1832,26 @@ async function stepWithTrace(opts: {
   // 提示」永远早于 status bar(状态栏是更接近调模型的当前态,模型读
   // 到时序是「graph 翻转 → status bar」)。seam 缺席 → 零追加(ask /
   // worker / 未接 overlay 的入口零行为变化)。
+  // ADR-0080:返回 { state, appendedLongOn } —— appendedLongOn 给同段
+  // appendGraphModePresence 当 SC5 去重信号。
   const graphModeState = await appendGraphModeChange(
     opts.state,
     opts.deps,
     opts.pendingInjected,
     opts.onStream
   );
+  // ADR-0080 / specs/graph-mode-presence.md:每跳短现势 —— 仅当 holder
+  // on 且本拍未贴长 ON 时追加;seam 缺席 / 关着 / 当拍长 ON → 零追加。
+  const presenceState = await appendGraphModePresence(
+    graphModeState.state,
+    opts.deps,
+    opts.pendingInjected,
+    graphModeState.appendedLongOn
+  );
   // B4 / ADR-0043 §4:MCP 手动重连追加缝 —— 与 graphModeChange 同段
   // (环境级事件),在 status bar 之前消费 pending。seam 缺席 → 零追加。
   const mcpReconnectState = appendMcpReconnect(
-    graphModeState,
+    presenceState,
     opts.deps,
     opts.pendingInjected
   );
@@ -1803,17 +1885,25 @@ async function stepWithTrace(opts: {
       ? await (async (): Promise<OkOrStop> => {
           // ADR-0041:reactive compact 重试前同样检测 graph 翻转(同 round
           // 两次模型调用之间 host 可能翻键);与首次调用路径同形态 —— 翻
-          // 转则追加,否则 state 原样传入下一 helper。
+          // 转则追加,否则 state 原样传入下一 helper。ADR-0080 同段叠加
+          // appendGraphModePresence(若重试拍 holder 仍 on 则再贴短句,
+          // SC7:compact 之后下一跳仍 on → 再贴;无 compact 专用追加)。
           const compactedWithGraph = await appendGraphModeChange(
             firstPhase.state,
             opts.deps,
             opts.pendingInjected,
             opts.onStream
           );
+          const compactedWithPresence = await appendGraphModePresence(
+            compactedWithGraph.state,
+            opts.deps,
+            opts.pendingInjected,
+            compactedWithGraph.appendedLongOn
+          );
           // B4 / ADR-0043 §4:reactive compact 重试前同样消费重连 pending
           // (同 round 两次模型调用之间手动重连可能完成)。
           const compactedWithReconnect = appendMcpReconnect(
-            compactedWithGraph,
+            compactedWithPresence,
             opts.deps,
             opts.pendingInjected
           );
