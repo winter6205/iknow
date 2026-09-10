@@ -51,7 +51,8 @@ Task arrives
 │
 ├── Reviewing
 │   ├── Pre-impl 5-verdict ─────────────→ architecture-change-reviewer
-│   └── Post-impl dual-axis review ──────→ code-review
+│   ├── Post-impl dual-axis review ──────→ code-review
+│   └── GATE BLOCKED / High open ───────→ review-report-repair
 │
 ├── Committing / branching
 │   └── 1 commit = 1 logical task ──────→ minimal-change-verifier
@@ -80,6 +81,6 @@ Git commit shape: `.cursor/skills/using-agent-skills/references/git-workflow.md`
 | Plan | architecture-change-reviewer, writing-plans |
 | Build | test-driven-development, defensive-contract-validator, bounded-context-guardian, complexity-anti-drift, error-handling-enforcer |
 | Verify | systematic-debugging, verification-before-completion, boundary-testing |
-| Review | code-review |
+| Review | code-review, review-report-repair |
 | Commit | minimal-change-verifier |
 | Orchestrate | dispatching-parallel-agents, session-handoff |
