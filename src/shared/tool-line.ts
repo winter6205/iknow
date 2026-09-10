@@ -187,8 +187,8 @@ interface ToolSummaryDisplay {
  *  detail 是英文「工具名 + 本轮要点」（search=query、fetch=url、read=path、
  *  grep=pattern）。
  *
- *  task worktree 生命周期五件（spec D8）—— 措辞只点名动作与目标 id，
- *  不写政策。 */
+ *  task worktree 生命周期五件（specs/create-worktree-tools.md D5：人读过程行
+ *  用新注册名）—— 语义仍是 task worktree，措辞只点名动作与目标 id，不写政策。 */
 export const TOOL_SUMMARIES: Readonly<Record<string, ToolSummaryDisplay>> = {
   write_file: {
     summary: wroteLinesSummary,
@@ -253,15 +253,15 @@ export const TOOL_SUMMARIES: Readonly<Record<string, ToolSummaryDisplay>> = {
   },
   query_trace: { summary: () => "Trace query" },
   // task worktree 生命周期五件（spec D5）：人读过程行用新注册名，动作 + 目标 id。
-  "create-task-worktree": { summary: () => "Created worktree" },
-  "enter-task-worktree": {
+  "create-worktree": { summary: () => "Created worktree" },
+  "enter-worktree": {
     summary: (r) => `Entered worktree ${pickString(r, "conversationId", "?")}`,
   },
-  "exit-task-worktree": { summary: () => "Exited worktree" },
-  "remove-task-worktree": {
+  "exit-worktree": { summary: () => "Exited worktree" },
+  "remove-worktree": {
     summary: (r) => `Removed worktree ${pickString(r, "conversationId", "?")}`,
   },
-  "list-task-worktrees": { summary: () => "Listed worktrees" },
+  "list-worktrees": { summary: () => "Listed worktrees" },
 };
 
 /**

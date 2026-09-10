@@ -123,19 +123,19 @@ describe("run_graph — ACI 常驻注册(ADR-0041 关键边界)", () => {
     //   idx 34..38 = 5 件符号改
     //   idx 39 = list_sessions(T5b 目录轴读)
     //   idx 40 = get_record(T6 内容轴读)
-    //   idx 41 = list-task-worktrees,idx 42 = remove-task-worktree
+    //   idx 41 = list-worktrees,idx 42 = remove-worktree
     expect(ACI_TOOLSET_NAMES[19]).toBe("run_graph");
     expect(ACI_TOOLSET_NAMES[20]).toBe("query_trace");
-    expect(ACI_TOOLSET_NAMES[21]).toBe("create-task-worktree");
-    expect(ACI_TOOLSET_NAMES[22]).toBe("enter-task-worktree");
-    expect(ACI_TOOLSET_NAMES[23]).toBe("exit-task-worktree");
+    expect(ACI_TOOLSET_NAMES[21]).toBe("create-worktree");
+    expect(ACI_TOOLSET_NAMES[22]).toBe("enter-worktree");
+    expect(ACI_TOOLSET_NAMES[23]).toBe("exit-worktree");
     expect(ACI_TOOLSET_NAMES[24]).toBe("find_symbol");
     expect(ACI_TOOLSET_NAMES[34]).toBe("rename_symbol");
     expect(ACI_TOOLSET_NAMES.at(-4)).toBe("list_sessions");
     expect(ACI_TOOLSET_NAMES.at(-3)).toBe("get_record");
-    expect(ACI_TOOLSET_NAMES.at(-2)).toBe("list-task-worktrees");
+    expect(ACI_TOOLSET_NAMES.at(-2)).toBe("list-worktrees");
     expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 1]).toBe(
-      "remove-task-worktree"
+      "remove-worktree"
     );
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",

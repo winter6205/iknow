@@ -14,8 +14,8 @@
  *
  * 测试覆盖（输入五类 B 表）：
  *   - overflow：16 个 kind 全有分类（额外加防呆 key 数断言，typecheck 是主防线）；
- *   - negative：`operator_required` 类的回执**不含** `create-task-worktree` /
- *     `enter-task-worktree` 等会引诱模型再试的子串；
+ *   - negative：`operator_required` 类的回执**不含** `create-worktree` /
+ *     `enter-worktree` 等会引诱模型再试的子串；
  *   - exception：`not_a_git_repo` / `git_unavailable` 的回执同时含「Retry will
  *     not help」等价停止指令 + 机读 `kind=`，并打 `[worktree_isolation]` 前缀；
  *   - empty：未知 kind 由 `Record` 联合兜底（typecheck 已保证覆盖；runtime 测
@@ -123,9 +123,9 @@ describe("gateBlockNotice — operator_required 停止指令语义", () => {
     expect(notice).toContain("kind=not_a_git_repo");
     expect(notice).toContain("Retry will not help");
     expect(notice).toContain("Report to the operator");
-    // 不引诱模型再试：negative 臂——不点名 create-task-worktree / enter-task-worktree
-    expect(notice).not.toContain("create-task-worktree");
-    expect(notice).not.toContain("enter-task-worktree");
+    // 不引诱模型再试：negative 臂——不点名 create-worktree / enter-worktree
+    expect(notice).not.toContain("create-worktree");
+    expect(notice).not.toContain("enter-worktree");
     // detail 透传
     expect(notice).toContain("no gitdir found: /tmp/x");
   });

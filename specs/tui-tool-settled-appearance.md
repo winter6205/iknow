@@ -3,6 +3,8 @@
 > 下游 plan：`plans/tui-tool-settled-appearance.md`。
 > 地图：`docs/wayfinder/tui-tool-settled-appearance-map.md`（G1–G5 已收口）。
 > **Supersedes** `specs/tui-display-consistency.md` **D3**（整轮一律折叠、藏全部标题）。D1 外壳 / D2 thinkingMs / D4 窗与 ANSI / D7 注册表同置仍继承。
+>
+> **Amended 2026-09-10** by `specs/create-worktree-tools.md`（ADR-0082）：本文档正文的显示注册表键与 SC5 里的模型面工具名已改为 `create-worktree` / `enter-worktree` / `exit-worktree` / `remove-worktree` / `list-worktrees`（去 `-task`）；原名 `create-task-worktree` / `enter-task-worktree` / `exit-task-worktree` / `remove-task-worktree` / `list-task-worktrees` 只作历史对照，不再进模型面（`src/tui/tool-settled.ts` 消费新键）。D1 策略核 / D3 折叠语义 / D8 留收分类合同本身不变。
 
 ## Objective
 
@@ -14,7 +16,7 @@ TUI 在工具从 live 转为 idle 之后，按类决定可见性：人要核验�
 
 - **Does:**
   - **D1 策略核**：在 `src/tui/` 增加纯 TS 策略核（无 React）。先单文件 `tool-settled.ts`。导出 `deriveSlot(name, { running, failed })` → `{ showTitle, showPreview, inFoldCount, color }`，`color` ∈ `default | accent | error`。失败横切在核内最后一步。running 时全部逐条可见（`showTitle` 真、`inFoldCount` 假）。未知工具缺省 retract、无预览。
-  - **D2 注册表一行**：`summary` + `preview?` + `settledClass`（keep / retract / accent）同置。缺 `settledClass` 的声明非法（测试拒绝）。建树四件必须进表：`create-task-worktree` / `enter-task-worktree` / `exit-task-worktree` / `remove-task-worktree`。
+  - **D2 注册表一行**：`summary` + `preview?` + `settledClass`（keep / retract / accent）同置。缺 `settledClass` 的声明非法（测试拒绝）。建树四件必须进表：`create-worktree` / `enter-worktree` / `exit-worktree` / `remove-worktree`。
   - **D3 折叠只数成功的收**：折叠计数行只聚合 `inFoldCount === true`（成功且 retract）。留 / 点名着色 / 失败出独立标题行，不进计数。本轮零条收 → 不画工具计数行；思考秒数行可单独在（消费既有 **thinking duration**）。思考秒数与计数分行。retract 必须 `showTitle` 与 `showPreview` 同假。
   - **D4 留的足迹**：keep 成功：`bash` 留标题（命令）+ **result preview** 五行走 ANSI（行数不重开）；`write_file` / `edit_file` 留标题 + 既有 6 行预览；`bash_stop` / `todo_write` / `memory_save` 只留标题。
   - **D5 失败横切**：任意类失败 → 标题留、error 色、一行短错误（截断）、不进折叠计数、不画五行走 dim `⎿`。error 色优先于 accent。
@@ -22,8 +24,8 @@ TUI 在工具从 live 转为 idle 之后，按类决定可见性：人要核验�
   - **D7 渲染只消费 slot**：`turn-activity` 只按 `inFoldCount` 聚合；`message-blocks` / live 预览只按 `showTitle` / `showPreview` / `color` 画。删除「藏标题、留预览」的组合路径。
   - **D8 分类表（成功态）**：
     - keep：`bash`、`write_file`、`edit_file`、`bash_stop`、`todo_write`、`memory_save`
-    - retract：`read_file`、`grep`、`glob`、`web_search`、`web_fetch`、`memory_recall`、`tool_search`、`skill_search`、全部 `lsp_*`、`bash_output`、`list_mcp_resources`、`read_mcp_resource`、`query_trace`、`list-task-worktrees`；未注册工具缺省 retract
-    - accent：`skill`、`create-task-worktree`、`enter-task-worktree`、`exit-task-worktree`、`remove-task-worktree`
+    - retract：`read_file`、`grep`、`glob`、`web_search`、`web_fetch`、`memory_recall`、`tool_search`、`skill_search`、全部 `lsp_*`、`bash_output`、`list_mcp_resources`、`read_mcp_resource`、`query_trace`、`list-worktrees`；未注册工具缺省 retract
+    - accent：`skill`、`create-worktree`、`enter-worktree`、`exit-worktree`、`remove-worktree`
     - 不进三类：`spawn_subagent` / `subagent_result` 沿用独立 glyph
 
 - **Confirms with human:** (none — assumption gate 2026-09-04 已清)
@@ -32,7 +34,7 @@ TUI 在工具从 live 转为 idle 之后，按类决定可见性：人要核验�
   - web 端同一套落定规则
   - Ctrl+O / 展开折叠快捷键
   - 子代理 glyph 重切
-  - `create-task-worktree` ACI 形状、门禁说明书、worktree isolation 开关
+  - `create-worktree` ACI 形状、门禁说明书、worktree isolation 开关
   - 模型上下文、tool_result 编码、meta 进模型
   - live 流式协议；running 仍逐条可见
   - 重开 bash ANSI 透传、五行走行数、`read_file` 内容预览、write/edit 六行窗
@@ -49,7 +51,7 @@ TUI 在工具从 live 转为 idle 之后，按类决定可见性：人要核验�
   - exception：失败横切见 SC1 第二断言与 SC4。
 - **SC3（收不残留预览）**：idle 一轮含成功 `read_file` + 成功 `bash`：画面有 bash 标题（及成功时五行走），无 read 标题、无 read `⎿`；折叠计数含 `read_file × 1`、不含 `bash`。命令：`bun test tests/tui/chat-view-thinking-tool-fold.test.tsx tests/tui/turn-activity.test.ts`。
 - **SC4（失败不进计数、不 dim 长文）**：idle 一轮含失败 mutate（如 `[worktree_isolation]` 长回执）：有红标题 + 一行短错误；无 dim 五行走 `⎿` 堆该文；折叠计数不含该失败件。命令：同上 + 策略核表测。
-- **SC5（点名非 dim）**：成功 `skill` / `create-task-worktree` 落定行走 `accent`，有人读表述，无五行走 skill 正文预览。命令：`bun test tests/tui/`。
+- **SC5（点名非 dim）**：成功 `skill` / `create-worktree` 落定行走 `accent`，有人读表述，无五行走 skill 正文预览。命令：`bun test tests/tui/`。
 - **SC6（注册表完备）**：`EXPECTED_TOOLSET_*` 与显示注册表每一件都有 `settledClass`；建树四件在表内。命令：`bun test tests/tui/deps-tools.test.ts tests/tui/tool-summary.test.ts`。
 - **SC7（rg 闸）**：`rg -n "hideToolSummaries" src/tui/` 零命中（组合路径删除，改走 slot）。
 - **SC8（回归）**：`npm test` 全绿。

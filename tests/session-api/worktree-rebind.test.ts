@@ -923,7 +923,7 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
       message: expect.stringContaining("conv-owner"),
     });
     // Release path sentence — one of the two reachable moves must appear
-    // verbatim (resume + exit-task-worktree OR delete the session record).
+    // verbatim (resume + exit-worktree OR delete the session record).
     await expect(
       guestProv.enter({
         conversationId: "conv-guest",
@@ -932,7 +932,7 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
       })
     ).rejects.toMatchObject({
       message: expect.stringMatching(
-        /exit-task-worktree|delete the session record/
+        /exit-worktree|delete the session record/
       ),
     });
     // T4 / L1 弱档披露钉住（spec L1「三处强制披露」之回执处）：回执必须

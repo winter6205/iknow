@@ -226,7 +226,7 @@ describe("priorMessagesFromEnvelope — worker write-root prior (T3 ADR-0037 §4
     // 不嵌入 sandboxRoot（无可写根 → 不能告诉模型去写哪个根）
     assert.ok(!text.includes(sandboxRoot));
     // 不点名建树工具
-    assert.ok(!text.includes("create-task-worktree"));
+    assert.ok(!text.includes("create-worktree"));
   });
 
   it("T6: 旧 envelope（无 writeSituation 字段）→ typed skip,不注入写根段（OQ1 采纳 (b)）", () => {
@@ -280,7 +280,7 @@ describe("priorMessagesFromEnvelope — worker write-root prior (T3 ADR-0037 §4
       .join("");
     // ③ 态披露 = writeRootSegment helper 同一份字面量。
     assert.equal(text, writeRootSegment("no_writable_root", "")!);
-    assert.ok(!text.includes("create-task-worktree"));
+    assert.ok(!text.includes("create-worktree"));
   });
 
   it("T6: writeSituation = writable_tree + 空 sandboxRoot → 不渲染（empty 臂 typed）", () => {

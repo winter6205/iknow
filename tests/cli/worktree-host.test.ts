@@ -1,6 +1,6 @@
 /**
  * CLI 入口的 worktree isolation host 缝（src/cli/worktree-host.ts）回归：
- * PR #869 在 hub 入口让 create-task-worktree 的 `name` label 透传到
+ * PR #869 在 hub 入口让 create-worktree 的 `name` label 透传到
  * provisioner（labeled leaf `<label>--<conversationId>`），但 cli.ts main()
  * 内联的手工解构 wrapper 把 `name` 静默丢弃 → CLI 入口全部退化为
  * UUID-only leaf（编译仍绿）。本测试接**真实 provisioner** + 临时 git repo

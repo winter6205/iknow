@@ -25,10 +25,12 @@ export default defineConfig({
     // model-prefix-layering B8 (SC9):本轮 LLM-touching 改动(B3/B4/B6)的
     // 真实模型 e2e,同走 settings 单承载 + HAS_KEY 守卫。
     // web discover vs read: 黄金集首工具轨迹（有 key 跑同一集；缺 key skip）。
+    // worktree tool names (ADR-0082): 建树/列出首工具轨迹，同 HAS_KEY 守卫。
     include: [
       "archive/tests-real-llm/t8-live-subagent-routing.test.ts",
       "archive/tests-real-llm/model-prefix-layering-e2e.test.ts",
       "archive/tests-real-llm/web-discover-vs-read.test.ts",
+      "archive/tests-real-llm/worktree-tool-names.test.ts",
     ],
     exclude: ["**/node_modules/**"],
     pool: "forks",

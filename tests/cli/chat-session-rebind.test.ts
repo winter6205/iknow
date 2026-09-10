@@ -874,7 +874,7 @@ describe("rebind 后主会话写根段（specs/skill-load-write-root.md T5）", 
     assert.equal(segments.length, 0, "重建失败不得注入写根段");
   });
 
-  it("exit-task-worktree 回主仓（活写根 = 身份根）→ 不注入写根段（spec 合同 7：仅当写根 ≠ 身份根）", async () => {
+  it("exit-worktree 回主仓（活写根 = 身份根）→ 不注入写根段（spec 合同 7：仅当写根 ≠ 身份根）", async () => {
     // 会话已在 task worktree（engineRoot = wtRoot），上一回合 /exit 把
     // workspaceRoot 改绑回主仓 → 重建触发。此时 newRoot = mainRoot =
     // mainCheckoutOf(newRoot)，注入的写根文案会与「Project path 只读」

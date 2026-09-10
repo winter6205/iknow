@@ -13,7 +13,7 @@
 
 1. 不在 ACI 外另起 git 工具套件；不新增 `git_commit` / `git_push` 等 ACI 工具。
 2. `bash` 默认模式可跑 mutating git；只读 bash 白名单不含 commit/push。
-3. 隔离开关默认关；打开后主仓 mutate 拦下且须模型先调 `create-task-worktree`。本轮不改 `src/harness/isolation/worktree-gate.ts` git 层、不让隔离门禁自动建树。
+3. 隔离开关默认关；打开后主仓 mutate 拦下且须模型先调 `create-worktree`。本轮不改 `src/harness/isolation/worktree-gate.ts` git 层、不让隔离门禁自动建树。
 4. 远端 git 不进 identity；仍走用户授权 + 既有网络权限。本轮不改 permission 内建规则。
 5. 纪律段仅 isolation ON 的 chat / tui / serve 注入；ask 即使传入 gate 也不注入（无工作树工具）。isolation OFF 段缺席，不补教程。
 6. worker 不注入该纪律段；explore 只读 bash 拒 commit/push；worker 工具面无工作树三件。
@@ -37,7 +37,7 @@
   - 新增 identity 加性纪律段（单段不可变常量 + 渲染函数），经 `createIknowSystemResolver` / `assembleIdentityContext` 注入。
   - `buildHarnessEngine` 用既有 `isolationEnabled` 作为唯一判定源：ON 才传 `gitWorkDiscipline`；OFF 字段缺席。
   - ask 在 resolver 内挡掉（即使传入 flag）；worker（`createWorkerDeps`）不传 gate。
-  - 段正文仅本地纪律：执行面 bash；有 `create-task-worktree` 则先建树再只在该树提交；禁止 `commit --no-verify` / `-n`；写仓 git 不得派给只读子代理。不含 push / network / force-push /「Isolation off」子弹。
+  - 段正文仅本地纪律：执行面 bash；有 `create-worktree` 则先建树再只在该树提交；禁止 `commit --no-verify` / `-n`；写仓 git 不得派给只读子代理。不含 push / network / force-push /「Isolation off」子弹。
   - isolation OFF 不追加替代教程段。
   - 现状页写明 git 作业走 bash + 条件纪律段。
 - **Confirms with human:** （无。）
@@ -52,7 +52,7 @@
 5. 同一常量被两次装配调用得到相同正文。
 6. 同一轮夹具里父会话 system 含作业段、worker system 不含。
 7. explore 路径 `bash git commit` 仍 typed 拒绝（`ReadonlyViolationError`）。
-8. worker 注册表无名 `create-task-worktree`（inner + promptTools）。
+8. worker 注册表无名 `create-worktree`（inner + promptTools）。
 9. `docs/STATUS.md` 已实现节有一行：parent bash + identity 段仅 isolation ON；无 git ACI 工具；无 push 进 system。
 10. `npx vitest run tests/harness/identity/git-work-segment.test.ts tests/subagent/git-work-discipline.test.ts` EXIT 0。
 

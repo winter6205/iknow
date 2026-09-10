@@ -1130,15 +1130,15 @@ describe("registeredToolDisplayNames: 注册表覆盖 EXPECTED_TOOLSET_30", () =
       "read_mcp_resource",
       "bash_output",
       "bash_stop",
-      // spec D2：建树四件 + list-task-worktrees 进入显示注册表。TUI 装配面
+      // spec D2：建树四件 + list-worktrees 进入显示注册表。TUI 装配面
       // 仍按 host 缝条件化装配（deps-tools EXPECTED_TUI_TOOLSET 剥除不动），
       // 显示注册表完备性与装配条件化解耦 —— 覆盖闸从 30 件扩为 35 件，
       // 不变量（注册表每件都有显示声明）等于或强于原断言。
-      "create-task-worktree",
-      "enter-task-worktree",
-      "exit-task-worktree",
-      "remove-task-worktree",
-      "list-task-worktrees",
+      "create-worktree",
+      "enter-worktree",
+      "exit-worktree",
+      "remove-worktree",
+      "list-worktrees",
     ];
     const names = new Set(registeredToolDisplayNames());
     for (const name of EXPECTED_TOOLSET_30) {
@@ -1176,13 +1176,13 @@ describe("settledClass: 落定态三分类（spec D2/D8）", () => {
     expect(settledClassOfDisplay("todo_write")).toBe("keep");
     expect(settledClassOfDisplay("read_file")).toBe("retract");
     expect(settledClassOfDisplay("grep")).toBe("retract");
-    expect(settledClassOfDisplay("list-task-worktrees")).toBe("retract");
+    expect(settledClassOfDisplay("list-worktrees")).toBe("retract");
     expect(settledClassOfDisplay("skill")).toBe("accent");
     for (const name of [
-      "create-task-worktree",
-      "enter-task-worktree",
-      "exit-task-worktree",
-      "remove-task-worktree",
+      "create-worktree",
+      "enter-worktree",
+      "exit-worktree",
+      "remove-worktree",
     ]) {
       expect(settledClassOfDisplay(name)).toBe("accent");
     }
@@ -1196,14 +1196,14 @@ describe("settledClass: 落定态三分类（spec D2/D8）", () => {
     expect(settledClassOfDisplay("subagent_result")).toBe("subagent");
   });
 
-  test("建树四件 + list-task-worktrees 进显示注册表（spec D2 建树四件必须入表）", () => {
+  test("建树四件 + list-worktrees 进显示注册表（spec D2 建树四件必须入表）", () => {
     const names = new Set(registeredToolDisplayNames());
     for (const name of [
-      "create-task-worktree",
-      "enter-task-worktree",
-      "exit-task-worktree",
-      "remove-task-worktree",
-      "list-task-worktrees",
+      "create-worktree",
+      "enter-worktree",
+      "exit-worktree",
+      "remove-worktree",
+      "list-worktrees",
     ]) {
       expect(names.has(name)).toBe(true);
     }

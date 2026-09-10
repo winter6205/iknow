@@ -309,29 +309,29 @@ const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
   },
   // task worktree 生命周期五件（spec D8）：enter/exit/create/remove 点名
   // 着色（accent），list 是查询类（retract）。人读表述随 D1 改英文并点名新
-  // task worktree 生命周期五件（spec D8）：enter/exit/create/remove 点名
+  // 注册名（specs/create-worktree-tools.md D5）—— 文本在 shared
   // TOOL_SUMMARIES 声明，CLI 侧无注册表可查，同源才不漂移。
   // 这五件在 TUI surface 属 host 缝条件化装配（deps-tools 期望集剥除），
   // 显示声明仍常驻 —— 渲染注册表完备性与装配条件化解耦。
-  "create-task-worktree": {
-    summary: TOOL_SUMMARIES["create-task-worktree"]!.summary,
-    settledClass: TOOL_SETTLED_CLASS["create-task-worktree"]!,
+  "create-worktree": {
+    summary: TOOL_SUMMARIES["create-worktree"]!.summary,
+    settledClass: TOOL_SETTLED_CLASS["create-worktree"]!,
   },
-  "enter-task-worktree": {
-    summary: TOOL_SUMMARIES["enter-task-worktree"]!.summary,
-    settledClass: TOOL_SETTLED_CLASS["enter-task-worktree"]!,
+  "enter-worktree": {
+    summary: TOOL_SUMMARIES["enter-worktree"]!.summary,
+    settledClass: TOOL_SETTLED_CLASS["enter-worktree"]!,
   },
-  "exit-task-worktree": {
-    summary: TOOL_SUMMARIES["exit-task-worktree"]!.summary,
-    settledClass: TOOL_SETTLED_CLASS["exit-task-worktree"]!,
+  "exit-worktree": {
+    summary: TOOL_SUMMARIES["exit-worktree"]!.summary,
+    settledClass: TOOL_SETTLED_CLASS["exit-worktree"]!,
   },
-  "remove-task-worktree": {
-    summary: TOOL_SUMMARIES["remove-task-worktree"]!.summary,
-    settledClass: TOOL_SETTLED_CLASS["remove-task-worktree"]!,
+  "remove-worktree": {
+    summary: TOOL_SUMMARIES["remove-worktree"]!.summary,
+    settledClass: TOOL_SETTLED_CLASS["remove-worktree"]!,
   },
-  "list-task-worktrees": {
-    summary: TOOL_SUMMARIES["list-task-worktrees"]!.summary,
-    settledClass: TOOL_SETTLED_CLASS["list-task-worktrees"]!,
+  "list-worktrees": {
+    summary: TOOL_SUMMARIES["list-worktrees"]!.summary,
+    settledClass: TOOL_SETTLED_CLASS["list-worktrees"]!,
   },
 };
 

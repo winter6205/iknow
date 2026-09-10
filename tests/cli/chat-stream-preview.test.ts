@@ -541,14 +541,14 @@ describe("createStreamPreviewSink: CLI 与 TUI 共用 live tool line（D1）", (
     assert.ok(!src.includes('"思考中…"'));
   });
 
-  it("(j) 注册表里的工作树五件人读表述为英文（D1 / create-task-worktree D5）", () => {
+  it("(j) 注册表里的工作树五件人读表述为英文（D1 / create-worktree D5）", () => {
     const names = new Set(registeredToolDisplayNames());
     for (const n of [
-      "create-task-worktree",
-      "enter-task-worktree",
-      "exit-task-worktree",
-      "remove-task-worktree",
-      "list-task-worktrees",
+      "create-worktree",
+      "enter-worktree",
+      "exit-worktree",
+      "remove-worktree",
+      "list-worktrees",
     ]) {
       assert.ok(names.has(n));
       const line = formatToolStatusLine({
@@ -560,19 +560,19 @@ describe("createStreamPreviewSink: CLI 与 TUI 共用 live tool line（D1）", (
     }
     assert.equal(
       formatToolStatusLine({
-        toolName: "create-task-worktree",
+        toolName: "create-worktree",
         input: {},
         status: "ok",
       }),
-      "create-task-worktree · Created worktree"
+      "create-worktree · Created worktree"
     );
     assert.equal(
       formatToolStatusLine({
-        toolName: "enter-task-worktree",
+        toolName: "enter-worktree",
         input: { conversationId: "abc" },
         status: "ok",
       }),
-      "enter-task-worktree · Entered worktree abc"
+      "enter-worktree · Entered worktree abc"
     );
   });
 });

@@ -1,5 +1,5 @@
 /**
- * src/harness/aci/tools/create-task-worktree.ts
+ * src/harness/aci/tools/create-worktree.ts
  *
  * T4 (plans/worktree-isolation-model-provision.md) — the 创建工作树 ACI tool
  * of the model-provision contract (ADR-0037 amended 2026-08-30): when
@@ -18,7 +18,7 @@
  *     session-api imports; the naming/git SSOT stays in
  *     `harness/isolation/worktree-gate.ts`.
  *   - the tool name is byte-identical to T3's
- *     `CREATE_TASK_WORKTREE_TOOL_HINT` ("create-task-worktree ACI tool") so
+ *     `CREATE_WORKTREE_TOOL_HINT` ("create-worktree ACI tool") so
  *     the gate block message points at a tool that exists by that name.
  *
  * Failure semantics (hard req 5–6): the host seam fails closed with a typed
@@ -46,9 +46,9 @@ import {
  * Back-compat alias for the gate's `WorktreeProvisionFn` SSOT (registry.ts
  * imports this name); the definition lives in worktree-gate.ts only.
  */
-export type { WorktreeProvisionFn as CreateTaskWorktreeProvisionFn };
+export type { WorktreeProvisionFn as CreateWorktreeProvisionFn };
 
-export interface CreateTaskWorktreeToolDeps {
+export interface CreateWorktreeToolDeps {
   /** Host provision seam (session-api hub, threaded through build-engine). */
   readonly provision: WorktreeProvisionFn;
   /** This engine's root — the session's current root at assembly time. */
@@ -56,28 +56,25 @@ export interface CreateTaskWorktreeToolDeps {
 }
 
 /**
- * Factory: createCreateTaskWorktreeTool(deps) — the model-facing escape hatch
+ * Factory: createCreateWorktreeTool(deps) — the model-facing escape hatch
  * of the isolation gate. Registered ONLY when the isolation switch is ON and
  * the host supplies the provision seam (build-engine threading; worker
  * assembly paths omit it, so the tool never enters a worker tool surface).
  */
-export function createCreateTaskWorktreeTool(
-  deps: CreateTaskWorktreeToolDeps
+export function createCreateWorktreeTool(
+  deps: CreateWorktreeToolDeps
 ): AciToolDef {
   return Object.freeze({
-    name: "create-task-worktree",
+    name: "create-worktree",
     description:
-      "Create this conversation's isolated git task worktree and rebind the session root to it. " +
-      "Use it when worktree isolation is ON and a workspace mutation came back blocked with the " +
-      "[worktree_isolation] notice. An optional lowercase kebab-case name (2-40 characters) " +
-      "adds a human-facing label while the conversation id remains the identity suffix. On " +
-      "success the tree exists at <repoRoot>/.iknow/worktrees/<label>--<conversationId> " +
-      "(or the historical UUID-only leaf) on its task branch and the session root has moved " +
-      "there; the next wave of tool calls in this run will land in the new root, re-issue the " +
-      "blocked write then. Calling it again for the same conversation is idempotent (returns " +
-      "the same root). Failures exit typed as kind=branch_exists | " +
-      "worktree_exists | worktree_add_failed | rebind_failed | foreign_worktree | not_a_git_repo | " +
-      "git_unavailable; resolve the reported leftover tree or branch manually, then retry.",
+      "Create this conversation's isolated git task worktree, rebind the session root to it, and return the tree path. " +
+      "An optional lowercase kebab-case name (2-40 characters) adds a human-facing label while the conversation id " +
+      "remains the identity suffix. On success the tree exists at " +
+      "<repoRoot>/.iknow/worktrees/<label>--<conversationId> (or the historical UUID-only leaf) on its task branch, " +
+      "and the next wave of tool calls in this run lands in the new root, so re-issue the pending workspace write then. " +
+      "Calling it again for the same conversation returns the same root. Failures exit typed as kind=branch_exists | " +
+      "worktree_exists | worktree_add_failed | rebind_failed | foreign_worktree | not_a_git_repo | git_unavailable; " +
+      "resolve the reported leftover tree or branch, then retry.",
     inputSchema: {
       type: "object",
       properties: {
@@ -120,11 +117,11 @@ export function createCreateTaskWorktreeTool(
       } catch (err) {
         if (err instanceof WorktreeIsolationError) {
           throw new ToolExecutionError(
-            `[create-task-worktree] kind=${err.kind} — ${err.detail}`
+            `[create-worktree] kind=${err.kind} — ${err.detail}`
           );
         }
         throw new ToolExecutionError(
-          `[create-task-worktree] provision failed: ${errorMessage(err)}`
+          `[create-worktree] provision failed: ${errorMessage(err)}`
         );
       }
     },

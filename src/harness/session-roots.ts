@@ -81,7 +81,7 @@ export interface SessionRoots {
  *     negative 臂钉死防形状判断被单独误用（对齐 ADR-0037 §4 教训）。
  *   - `writable_tree`：隔离 ON + 活根是本会话的 task worktree（路径形状合法）。
  *   - `no_writable_root`：隔离 ON + 活根非树形（主仓对文件改动只读，告知面**不**
- *     点名 `create-task-worktree`——spec SC3）。
+ *     点名 `create-worktree`——spec SC3）。
  */
 export type WriteSituation =
   "writable_main" | "writable_tree" | "no_writable_root";

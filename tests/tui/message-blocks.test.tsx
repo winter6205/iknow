@@ -1190,7 +1190,7 @@ test("SC5 accent 成功：建树工具人读表述（label / 路径叶子）走 
           {
             type: "tool_use",
             id: "tu-ctw",
-            name: "enter-task-worktree",
+            name: "enter-worktree",
             input: { conversationId: "abc-leaf-123" },
           },
         ],
@@ -1203,8 +1203,8 @@ test("SC5 accent 成功：建树工具人读表述（label / 路径叶子）走 
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   // D1（specs/tui-human-display.md）人读过程行随摘要注册表改英文并点名目标
-  // （语义仍是 task worktree）。accent 色断言不变 —— 强于旧断言的是此处
-  // 再加「无中文残留」。
+  // （specs/create-worktree-tools.md D5：人读行用新注册名，语义仍是 task
+  // worktree）。accen 色断言不变 —— 强于旧断言的是此处再加「无中文残留」。
   expect(frame).toContain("Entered worktree abc-leaf-123");
   expect(frame.includes("进入任务工作树")).toBe(false);
   const expectedAccent = RGBA.fromHex(tuiPalette.accent);

@@ -2904,7 +2904,7 @@ export class SessionHub {
         ...createWorktreeHostProvision({
           provisionWorktree: (ctx) => this.provisionWorktree(ctx),
         }),
-        // T7:enter-task-worktree 工具缝 —— 会话显式进入本仓已存在的 task
+        // T7:enter-worktree 工具缝 —— 会话显式进入本仓已存在的 task
         // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
         worktreeEnter: ({
           conversationId,
@@ -2916,7 +2916,7 @@ export class SessionHub {
             root: sessionRoot,
             targetConversationId,
           }),
-        // T8:exit-task-worktree 工具缝 —— 会话回到主仓根，树保留不删。
+        // T8:exit-worktree 工具缝 —— 会话回到主仓根，树保留不删。
         worktreeExit: ({ conversationId, root: sessionRoot }) =>
           this.exitWorktree({ conversationId, root: sessionRoot }),
         // task-worktree-lifecycle: read-only discovery and explicit cleanup
@@ -3044,7 +3044,7 @@ export class SessionHub {
         ...createWorktreeHostProvision({
           provisionWorktree: (ctx) => this.provisionWorktree(ctx),
         }),
-        // T7:enter-task-worktree 工具缝 —— 会话显式进入本仓已存在的 task
+        // T7:enter-worktree 工具缝 —— 会话显式进入本仓已存在的 task
         // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
         worktreeEnter: ({
           conversationId,
@@ -3056,7 +3056,7 @@ export class SessionHub {
             root: sessionRoot,
             targetConversationId,
           }),
-        // T8:exit-task-worktree 工具缝 —— 会话回到主仓根，树保留不删。
+        // T8:exit-worktree 工具缝 —— 会话回到主仓根，树保留不删。
         worktreeExit: ({ conversationId, root: sessionRoot }) =>
           this.exitWorktree({ conversationId, root: sessionRoot }),
         // task-worktree-lifecycle: read-only discovery and explicit cleanup.

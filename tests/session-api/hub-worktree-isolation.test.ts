@@ -5,7 +5,7 @@
  * Pins the end-to-end contract for the ON path under the ADR-0037 amendment
  * (model provision):
  *   - the first mutate through the session engine is blocked with the
- *     create-task-worktree ACI-tool notice and NEVER provisions — no
+ *     create-worktree ACI-tool notice and NEVER provisions — no
  *     `git worktree add` anywhere on the execution path, main repo zero-write,
  *     no session rebind;
  *   - creating the task worktree (`<root>/.iknow/worktrees/` +
@@ -207,7 +207,7 @@ describe("worktree isolation wiring (switch ON)", () => {
     // visible, non-empty failure exit — the write never reached the tool
     expect(result.kind).toBe("execution_failed");
     expect(result.message).toMatch(/^\[worktree_isolation\] /);
-    expect(result.message).toContain("create-task-worktree ACI tool");
+    expect(result.message).toContain("create-worktree ACI tool");
     expect(result.message).not.toContain("end the turn");
     expect(result.message!.length).toBeGreaterThan(20);
 
@@ -235,7 +235,7 @@ describe("worktree isolation wiring (switch ON)", () => {
     const blocked = await runMutate(firstDeps, conversationId);
     expect(blocked.kind).toBe("execution_failed"); // gate: no auto-provision
 
-    // T4 simulation: the model calls the create-task-worktree ACI tool, which
+    // T4 simulation: the model calls the create-worktree ACI tool, which
     // goes through the same host provision seam (create + session rebind)
     const reboundRoot = await hub.provisionWorktree({
       conversationId,
@@ -294,7 +294,7 @@ describe("worktree isolation wiring (T4 — passthrough)", () => {
     const { hub, conversationId } = await makeHubWithSession(repo);
 
     // T3/T4 flow: gate blocks on the main repo; the model calls the
-    // create-task-worktree ACI tool → provision seam creates tree + rebind
+    // create-worktree ACI tool → provision seam creates tree + rebind
     await ensure(hub, repo);
     const reboundRoot = await hub.provisionWorktree({
       conversationId,
@@ -377,7 +377,7 @@ describe("worktree isolation wiring (T4 — passthrough)", () => {
     // first mutate is blocked with the ACI-tool notice (no git call)
     expect(result.kind).toBe("execution_failed");
     expect(result.message).toContain("[worktree_isolation]");
-    expect(result.message).toContain("create-task-worktree ACI tool");
+    expect(result.message).toContain("create-worktree ACI tool");
     expect(readdirSync(manualWt).filter((n) => n !== ".iknow")).toEqual(before); // zero pollution of the foreign checkout
     expect(git(repo, "status", "--porcelain")).toBe("");
 
@@ -469,7 +469,7 @@ describe("review High-2 — hub reuses the startup settings object across rebind
     const result = await runMutate(deps, c1);
     expect(result.kind).toBe("execution_failed");
     expect(result.message).toContain("[worktree_isolation]");
-    expect(result.message).toContain("create-task-worktree ACI tool");
+    expect(result.message).toContain("create-worktree ACI tool");
     expect(existsSync(join(repo, "hello.txt"))).toBe(false);
     expect(existsSync(join(repo, ".iknow", "worktrees"))).toBe(false);
 
@@ -1182,7 +1182,7 @@ describe("workspace-root-required T3 — Hub dirty-root conditional save", () =>
     expect((await store.load(conversationId)).workspaceRoot).toBe(reboundRoot);
   });
 
-  // ADR-0037 §6 amendment 2026-09-07 (plans/bare-repo-create-task-worktree.md):
+  // ADR-0037 §6 amendment 2026-09-07 (plans/bare-repo-create-worktree.md):
   // the two usable-repo layouts — a bare gitdir with commits, and a
   // core.bare=true checkout holding the working files — must provision +
   // rebind through the hub exactly like a normal repo. The not_a_git_repo
@@ -1287,11 +1287,11 @@ describe("workspace-root-required T3 — Hub dirty-root conditional save", () =>
   });
 });
 
-// -- T4: create-task-worktree ACI tool (model-facing provision entry) ---------
+// -- T4: create-worktree ACI tool (model-facing provision entry) ---------
 
 /**
  * T4 (plans/worktree-isolation-model-provision.md) — the model calls the
- * `create-task-worktree` ACI tool through the SAME gated executor the loop
+ * `create-worktree` ACI tool through the SAME gated executor the loop
  * engine uses (executeAll carries conversationId). These tests pin:
  *   - the tool is present in the session engine's registry (switch ON) and
  *     absent when OFF;
@@ -1303,13 +1303,13 @@ describe("workspace-root-required T3 — Hub dirty-root conditional save", () =>
  *   - the SAME turn's blocked write stays blocked (Host replays nothing
  *     mid-turn; the model re-issues it in the new root next turn).
  */
-describe("worktree isolation wiring (T4 — create-task-worktree ACI tool)", () => {
+describe("worktree isolation wiring (T4 — create-worktree ACI tool)", () => {
   async function runTool(
     deps: LoopEngineDeps,
     conversationId: string
   ): Promise<ToolExecutionResult> {
     const [result] = await deps.executor.executeAll(
-      [{ id: "aci-tool-1", name: "create-task-worktree", input: {} }],
+      [{ id: "aci-tool-1", name: "create-worktree", input: {} }],
       undefined,
       undefined,
       conversationId
@@ -1322,14 +1322,14 @@ describe("worktree isolation wiring (T4 — create-task-worktree ACI tool)", () 
     const repo = makeGitRepo();
     const { hub, conversationId } = await makeHubWithSession(repo);
     const deps = await ensure(hub, repo);
-    expect(deps.registry.get("create-task-worktree")).toBeDefined();
+    expect(deps.registry.get("create-worktree")).toBeDefined();
 
     // switch OFF → tool absent (OFF stays byte-identical to today)
     await setSettingsIsolation(false);
     const repo2 = makeGitRepo();
     const { hub: hub2 } = await makeHubWithSession(repo2);
     const deps2 = await ensure(hub2, repo2);
-    expect(deps2.registry.get("create-task-worktree")).toBeUndefined();
+    expect(deps2.registry.get("create-worktree")).toBeUndefined();
     void conversationId;
   });
 
@@ -1343,7 +1343,7 @@ describe("worktree isolation wiring (T4 — create-task-worktree ACI tool)", () 
     // gate blocks the first mutate and points at the tool
     const blocked = await runMutate(deps, conversationId);
     expect(blocked.kind).toBe("execution_failed");
-    expect(blocked.message).toContain("create-task-worktree ACI tool");
+    expect(blocked.message).toContain("create-worktree ACI tool");
 
     // the model calls the ACI tool through the same executor
     const result = await runTool(deps, conversationId);
@@ -1362,7 +1362,7 @@ describe("worktree isolation wiring (T4 — create-task-worktree ACI tool)", () 
 
     // same run, next wave of tool calls (T10 / D2 batch snapshot semantics):
     // the gate snapshots liveTaskRoot at executeAll entry, so a fresh
-    // executeAll right after create-task-worktree sees the rebound cell
+    // executeAll right after create-worktree sees the rebound cell
     // value and admits the mutate. The D2 batch snapshot rule only
     // protects against mid-WAVE flips — across waves the rebind is
     // observed, so the previously-blocked write now lands in the new
@@ -1402,7 +1402,7 @@ describe("worktree isolation wiring (T4 — create-task-worktree ACI tool)", () 
       [
         {
           id: "aci-labeled-1",
-          name: "create-task-worktree",
+          name: "create-worktree",
           input: { name: "fix-648" },
         },
       ],
@@ -1481,12 +1481,12 @@ describe("worktree isolation wiring (T4 — create-task-worktree ACI tool)", () 
   });
 });
 
-// -- T7: enter-task-worktree (explicit adoption of an existing task worktree) --
+// -- T7: enter-worktree (explicit adoption of an existing task worktree) --
 
 /**
  * T7 (plans/worktree-isolation-model-provision.md) - the enter face of the
  * tool contract: session B, anchored at the MAIN repo, calls the
- * enter-task-worktree ACI tool through its engine executor (target = the
+ * enter-worktree ACI tool through its engine executor (target = the
  * tree conversation A owns) and lands ON A's tree. Authorization lives in
  * the durable record, not in-process: after the tool succeeds and the
  * conditional save persists workspaceRoot = wtA, the hub's provision seam
@@ -1495,7 +1495,7 @@ describe("worktree isolation wiring (T4 — create-task-worktree ACI tool)", () 
  * without that persisted anchor (fresh hub, session still anchored at the
  * main repo), the foreign root still rejects with typed foreign_worktree.
  */
-describe("worktree isolation wiring (T7 - enter-task-worktree)", () => {
+describe("worktree isolation wiring (T7 - enter-worktree)", () => {
   it("session B enters session A's task worktree via the ACI tool: ok, zero main-repo writes, worktree list unchanged, rebind persisted", async () => {
     await setSettingsIsolation(true);
     const repo = makeGitRepo();
@@ -1511,14 +1511,14 @@ describe("worktree isolation wiring (T7 - enter-task-worktree)", () => {
     await ensure(hub, wtA);
     const worktreesBefore = git(repo, "worktree", "list");
 
-    // (b) B (anchored at the main repo) calls the enter-task-worktree tool
+    // (b) B (anchored at the main repo) calls the enter-worktree tool
     // through its engine executor, exactly as the model would
     const bDeps = await ensure(hub, repo);
     const [enterResult] = await bDeps.executor.executeAll(
       [
         {
           id: "enter-1",
-          name: "enter-task-worktree",
+          name: "enter-worktree",
           input: { conversationId: convA },
         },
       ],
@@ -1586,7 +1586,7 @@ describe("worktree isolation wiring (T7 - enter-task-worktree)", () => {
       [
         {
           id: "create-a-labeled",
-          name: "create-task-worktree",
+          name: "create-worktree",
           input: { name: "fix-648" },
         },
       ],
@@ -1623,7 +1623,7 @@ describe("worktree isolation wiring (T7 - enter-task-worktree)", () => {
       [
         {
           id: "enter-404",
-          name: "enter-task-worktree",
+          name: "enter-worktree",
           input: { conversationId: convGhost },
         },
       ],
@@ -1638,17 +1638,17 @@ describe("worktree isolation wiring (T7 - enter-task-worktree)", () => {
   });
 });
 
-// -- T8: exit-task-worktree (symmetric return to the main repo root) ----------
+// -- T8: exit-worktree (symmetric return to the main repo root) ----------
 
 /**
  * T8 (plans/worktree-isolation-model-provision.md) - the exit face of the
  * tool contract: a session currently rebound to a task worktree calls the
- * exit-task-worktree ACI tool and returns to the MAIN repo root. The tree is
+ * exit-worktree ACI tool and returns to the MAIN repo root. The tree is
  * preserved (orphan cleanup is a plan non-goal); after the conditional save
  * persists workspaceRoot = repo, the session's next turn is gated again on
  * the main repo (unbound mutates blocked with the ACI-tool notice).
  */
-describe("worktree isolation wiring (T8 - exit-task-worktree)", () => {
+describe("worktree isolation wiring (T8 - exit-worktree)", () => {
   it("session B exits the entered tree: rebind back to the repo persists, the gate blocks mutates on the main repo again, the tree is preserved", async () => {
     await setSettingsIsolation(true);
     const repo = makeGitRepo();
@@ -1666,7 +1666,7 @@ describe("worktree isolation wiring (T8 - exit-task-worktree)", () => {
       [
         {
           id: "enter-1",
-          name: "enter-task-worktree",
+          name: "enter-worktree",
           input: { conversationId: convA },
         },
       ],
@@ -1680,10 +1680,10 @@ describe("worktree isolation wiring (T8 - exit-task-worktree)", () => {
 
     const worktreesBefore = git(repo, "worktree", "list");
 
-    // (f) B calls exit-task-worktree on the entered tree's engine
+    // (f) B calls exit-worktree on the entered tree's engine
     const enteredDeps = await ensure(hub, wtA);
     const [exitResult] = await enteredDeps.executor.executeAll(
-      [{ id: "exit-1", name: "exit-task-worktree", input: {} }],
+      [{ id: "exit-1", name: "exit-worktree", input: {} }],
       undefined,
       undefined,
       convB
@@ -1726,7 +1726,7 @@ describe("worktree isolation wiring (T8 - exit-task-worktree)", () => {
 
     const deps = await ensure(hub, repo);
     const [exitResult] = await deps.executor.executeAll(
-      [{ id: "exit-404", name: "exit-task-worktree", input: {} }],
+      [{ id: "exit-404", name: "exit-worktree", input: {} }],
       undefined,
       undefined,
       convB

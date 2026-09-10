@@ -1,5 +1,5 @@
 /**
- * src/harness/aci/tools/exit-task-worktree.ts
+ * src/harness/aci/tools/exit-worktree.ts
  *
  * T8 (plans/worktree-isolation-model-provision.md) — the symmetric-exit ACI
  * tool of the model-provision contract (ADR-0037 amended 2026-08-30, T8
@@ -8,7 +8,7 @@
  * engine root, and the main repo root is derived from the tree itself by
  * the host seam (git common dir; restart-safe). The task worktree is
  * PRESERVED (orphan cleanup is an explicit non-goal of the plan); re-enter
- * it later with the enter-task-worktree tool.
+ * it later with the enter-worktree tool.
  *
  * Module boundary (ACR bounded-context-guardian):
  *   - the tool owns NOTHING but the model-facing shape: it takes no input,
@@ -40,25 +40,22 @@ export interface WorktreeExitToolDeps {
 }
 
 /**
- * Factory: createExitTaskWorktreeTool(deps) — the model-facing symmetric
+ * Factory: createExitWorktreeTool(deps) — the model-facing symmetric
  * exit of the isolation tool face. Registered ONLY when the isolation
  * switch is ON and the host supplies the exit seam (build-engine threading;
  * TUI provision-only wiring, worker assembly paths, and hub-less inlets
  * omit it, so the tool never enters those surfaces).
  */
-export function createExitTaskWorktreeTool(
-  deps: WorktreeExitToolDeps
-): AciToolDef {
+export function createExitWorktreeTool(deps: WorktreeExitToolDeps): AciToolDef {
   return Object.freeze({
-    name: "exit-task-worktree",
+    name: "exit-worktree",
     description:
-      "Return this session's root to the main repository checkout from the task worktree it is currently bound to. " +
-      "Use it when the isolated task is finished and subsequent workspace writes should land in the main repo again. " +
-      "Takes no parameters. On success the session root returns to the main repo root and pending writes can be " +
-      "re-issued there in the next wave of tool calls in this run; the task worktree itself is preserved (work in it again later with the " +
-      "enter-task-worktree tool). Failures exit typed as kind=rebind_failed | git_unavailable — for example when " +
-      "this session is not currently bound to a task worktree. Calling it while already on the main repo root " +
-      "returns the typed rebind_failed kind instead of a silent no-op.",
+      "Return this session's root to the main repository checkout from the task worktree it is currently bound to, " +
+      "and return the main repo root. Takes no parameters. On success pending workspace writes can be re-issued " +
+      "in the main repo in the next wave of tool calls in this run, and the task worktree itself is preserved " +
+      "(work in it again later with the enter-worktree tool). Failures exit typed as kind=rebind_failed | " +
+      "git_unavailable — for example when this session is not currently bound to a task worktree. Calling it " +
+      "while already on the main repo root returns the typed rebind_failed kind instead of a silent no-op.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -87,11 +84,11 @@ export function createExitTaskWorktreeTool(
       } catch (err) {
         if (err instanceof WorktreeIsolationError) {
           throw new ToolExecutionError(
-            `[exit-task-worktree] kind=${err.kind} — ${err.detail}`
+            `[exit-worktree] kind=${err.kind} — ${err.detail}`
           );
         }
         throw new ToolExecutionError(
-          `[exit-task-worktree] exit failed: ${errorMessage(err)}`
+          `[exit-worktree] exit failed: ${errorMessage(err)}`
         );
       }
     },

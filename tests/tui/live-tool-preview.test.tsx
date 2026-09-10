@@ -821,7 +821,7 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
   test("SC5 live accent 成功：dim 不染 accent 完成行", async () => {
     const run: LiveToolRun = {
       id: "tu-ctw-accent",
-      name: "create-task-worktree",
+      name: "create-worktree",
       status: "ok",
       input: {},
       detail: "Created worktree",
@@ -829,12 +829,13 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     const setup = await renderBox(run, 80);
     const expectedDim = RGBA.fromHex(tuiPalette.dim);
     const { lines } = setup.captureSpans();
-    // D1（specs/tui-human-display.md）：人读行英文并点名注册名；渲染的
-    // detail 必须真出现在帧上，否则色断言空转（此处钉住实际可见文本）。
+    // D1（specs/tui-human-display.md）：人读行英文并点名新注册名
+    // （specs/create-worktree-tools.md D5）；渲染的 detail 必须真出现在帧上，
+    // 否则色断言空转（旧名断言在改名后失效，此处钉住实际可见文本）。
     let sawLine = false;
     for (const line of lines) {
       for (const span of line.spans) {
-        if (span.text.includes("create-task-worktree · Created worktree")) {
+        if (span.text.includes("create-worktree · Created worktree")) {
           sawLine = true;
           expect(rgbaEq(span.fg, expectedDim)).toBe(false);
         }

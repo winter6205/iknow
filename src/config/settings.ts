@@ -239,7 +239,7 @@ export interface IknowSettingsIsolation {
   /** mutate 时建 task worktree 并改绑会话的开关（默认 OFF）。 */
   worktreeOnMutate?: boolean;
   /**
-   * ADR-0070: enter-task-worktree 多一道前置占用检查 —— 目标树若被别的现存
+   * ADR-0070: enter-worktree 多一道前置占用检查 —— 目标树若被别的现存
    * 会话记录占用则 typed 拒绝（`worktree_claimed`）。默认 OFF（与今日逐字节
    * 一致）；OFF 时 enter 行为与今日一致，不引入任何新拒绝路径。
    */
@@ -332,7 +332,7 @@ export function resolveWorktreeOnMutate(
  *    一致；SC2 / OFF 档零回归钉死）；
  *  - config 层只承载 boolean 值域语义（ADR-0037 §5 硬要求 9）—— **不读
  *    git、不持会话状态、不枚举现存会话记录**；占用判定（T3）由 session-api
- *    `enter-task-worktree` 缝消费装配期一次性读取的结果执行；
+ *    `enter-worktree` 缝消费装配期一次性读取的结果执行；
  *  - 开关只在启动加载点读取一次，会话根改绑（rebind）不触发 settings 重载
  *    —— `WorktreeIsolationHostOpts.worktreeExclusive` 是该一次性读取结果
  *    在装配期的透传载体。
