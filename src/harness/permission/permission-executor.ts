@@ -17,6 +17,7 @@
 import type {
   Executor,
   ToolCall,
+  ToolExecutionContext,
   ToolExecutionResult,
   Registry,
   ToolDef,
@@ -174,7 +175,8 @@ export interface PermissionRuntime {
     timeoutMs?: number,
     conversationId?: string,
     turnId?: string,
-    onStream?: (event: HarnessStreamEvent) => void
+    onStream?: (event: HarnessStreamEvent) => void,
+    messages?: ToolExecutionContext["messages"]
   ) => Promise<ToolExecutionResult>;
 }
 
@@ -376,7 +378,8 @@ export function createPermissionRuntime(
     timeoutMs?: number,
     conversationId?: string,
     turnId?: string,
-    onStream?: (event: HarnessStreamEvent) => void
+    onStream?: (event: HarnessStreamEvent) => void,
+    messages?: ToolExecutionContext["messages"]
   ): Promise<ToolExecutionResult> {
     const [result] = await opts.inner.executeAll(
       [call],
@@ -385,7 +388,8 @@ export function createPermissionRuntime(
       conversationId,
       undefined,
       turnId,
-      onStream
+      onStream,
+      messages
     );
     const r = result as ToolExecutionResult;
     if (!def) return r;
@@ -425,7 +429,8 @@ export function createPermissionRuntime(
       index: number
     ) => void | Promise<void>,
     turnId?: string,
-    onStream?: (event: HarnessStreamEvent) => void
+    onStream?: (event: HarnessStreamEvent) => void,
+    messages?: ToolExecutionContext["messages"]
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
     for (const [index, call] of calls.entries()) {
@@ -440,7 +445,8 @@ export function createPermissionRuntime(
               timeoutMs,
               conversationId,
               turnId,
-              onStream
+              onStream,
+              messages
             );
       await onSettled?.(result, index);
       out.push(result);

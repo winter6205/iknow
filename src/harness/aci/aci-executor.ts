@@ -23,6 +23,7 @@
 import type {
   Executor,
   ToolCall,
+  ToolExecutionContext,
   ToolExecutionResult,
   Registry,
 } from "../tools/types.js";
@@ -150,7 +151,8 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
         index: number
       ) => void | Promise<void>,
       turnId?: string,
-      onStream?: (event: HarnessStreamEvent) => void
+      onStream?: (event: HarnessStreamEvent) => void,
+      messages?: ToolExecutionContext["messages"]
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
       if (calls.length === 0) return [];
       const waves = partitionConcurrencyWaves(
@@ -174,6 +176,7 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
           onSettled,
           indexBase,
           onStream,
+          messages,
         });
         for (const r of part) out.push(r);
         indexBase += wave.length;
@@ -256,6 +259,7 @@ async function runWave(opts: {
     | undefined;
   readonly indexBase: number;
   readonly onStream: ((event: HarnessStreamEvent) => void) | undefined;
+  readonly messages: ToolExecutionContext["messages"];
 }): Promise<ReadonlyArray<ToolExecutionResult>> {
   const gated: Array<{
     readonly item: WaveItem;
@@ -285,7 +289,8 @@ async function runWave(opts: {
                   undefined,
                   opts.conversationId,
                   opts.turnId,
-                  opts.onStream
+                  opts.onStream,
+                  opts.messages
                 ),
               call: g.item.call,
               def: g.item.def,

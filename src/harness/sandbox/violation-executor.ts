@@ -15,6 +15,7 @@
 import type {
   Executor,
   ToolCall,
+  ToolExecutionContext,
   ToolExecutionResult,
 } from "../tools/types.js";
 import type { HarnessStreamEvent } from "../stream.js";
@@ -52,7 +53,8 @@ export function wrapWithViolationHook(
         index: number
       ) => void | Promise<void>,
       turnId?: string,
-      onStream?: (event: HarnessStreamEvent) => void
+      onStream?: (event: HarnessStreamEvent) => void,
+      messages?: ToolExecutionContext["messages"]
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
       const seen = new Set<number>();
       const observe = (r: ToolExecutionResult, i: number): void => {
@@ -84,7 +86,8 @@ export function wrapWithViolationHook(
           await onSettled?.(result, index);
         },
         turnId,
-        onStream
+        onStream,
+        messages
       );
       for (let i = 0; i < out.length; i += 1) {
         const r = out[i];

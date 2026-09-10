@@ -365,11 +365,10 @@ export interface CreateDefaultAciRegistryOptions {
   readonly liveTaskRoot?: LiveTaskRoot;
   /**
    * T4 (plans/write-situation-disclosure.md): worktree isolation 档判定
-   *（`buildHarnessEngine` 启动加载点一次性读取，与门禁武装同源）。`skill()`
-   * 工厂消费它 + 透传进来的 `liveTaskRoot` 算 `writeSituation(isolationOn,
-   * currentRoot)` 传给 `createSkillBody`。缺席 → 默认 false（旧形态 =
-   * `writable_main`，与改造前 ② 字节相等，因旧默认 `isolationEnabled` =
-   * false 时 taskRoot 总是主仓根）。
+   *（`buildHarnessEngine` 启动加载点一次性读取，与门禁武装同源）。ADR-0079
+   * 后 `skill()` 正文装配不再消费此档（skill 正文不再挂写根 trailer，
+   * createSkillTool 只吃 catalog）；字段保留给未来可能的隔离档消费面。
+   * 缺席 → 无消费面受影响。
    */
   readonly isolationOn?: boolean;
 }
@@ -654,23 +653,11 @@ export function createDefaultAciRegistry(
     // 检索）。
     ...(skillCatalog
       ? {
-          skill: () =>
-            createSkillTool({
-              catalog: skillCatalog,
-              // 写根 trailer（specs/skill-load-write-root.md）：透传活
-              // taskRoot cell，handler 调用时机读快照 —— 与 bash/read_file
-              // 的 liveTaskRoot 透传同形态；缺席 → 无 trailer。
-              ...(opts.liveTaskRoot !== undefined
-                ? { liveTaskRoot: opts.liveTaskRoot }
-                : {}),
-              // T4 (write-situation-disclosure)：handler 算 writeSituation
-              // 需要的隔离档，与门禁武装同源（`isolationEnabled` 单一读取
-              // 点）。缺席 → 默认 false（`writable_main`），与旧形态 byte-
-              // equal。
-              ...(opts.isolationOn !== undefined
-                ? { isolationOn: opts.isolationOn }
-                : {}),
-            }),
+          // ADR-0079 — skill 正文不再挂写根 trailer：createSkillTool 不再
+          // 消费 liveTaskRoot / isolationOn；写处境披露的权威路径迁到
+          // worker prior（subagent/worker.ts）与 chat-session rebind 通知
+          // （chat-session.ts），共用同一 helper writeRootSegment。
+          skill: () => createSkillTool({ catalog: skillCatalog }),
         }
       : {}),
     // #356 T4 spawn_subagent 工具集（条件化装配：subagentManager 缺席时

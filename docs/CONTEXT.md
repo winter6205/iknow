@@ -294,13 +294,13 @@ _Avoid_: 把前景/后景与进程隔离混同；泛化的"同步/异步"；把 
 _Avoid_: 把 drain 与"结果获取"混同（前景 spawn 不经 drain）；让 agent 侧直接消费 manager buffer；把 drain 被动挂"下一轮用户输入"或阻塞轮询当作可靠唤醒源
 
 **mailbox**: 后景 spawn 的子→父终态回传通道。只投终态浓缩结果，不承载运行中消息，也不是子↔子协议。
-_Avoid_: 进度流；swarm / 子代理互投；把 mailbox 当 D-δ 低层 messaging
+_Avoid_: 进度流；swarm / 子代理互投；把 mailbox 当 D-δ 低层 messaging；接到 run_graph 或图节点（ADR-0076）
 
 **父可见信封**: 子代理交差给父模型看的那一层——短摘要、改过的路径、成败与停因、`task_id` 与该 worker 的 `/tmp` 根；不是终稿全文，也不是垫底里的文件正文。
 _Avoid_: 把完整 result 当任务产物；把汇报截断当成任务失败；默认交差附带产物名单
 
-**子代理并发上限**: 同时处于 starting/running 的 worker 硬顶，可配、默认 15；发几张由模型决定，超限立即失败、不排队。
-_Avoid_: 静默排队；让用户每次填写要派几个
+**子代理并发上限**: 同时处于 starting/running 的 worker 硬顶，可配、默认 15；图节点计入同一顶。发几张由模型决定，超限立即失败、不排队。ADR-0014 / ADR-0077。
+_Avoid_: 静默排队；让用户每次填写要派几个；per-graph inflight 第二顶（ADR-0077）
 
 **子代理根归属**: 子代理是**父会话的执行臂**，继承父会话当前生效根；不是独立隔离单元。父会话已 rebind 时与父共享同一棵 task worktree；manager 层用父 `conversationId`，worker/LoopEngine 层用自己的 `conversationId`。父会话尚未 rebind 时，满足只读门禁的子代理可留在主仓，但不创建独立 worktree。ADR-0040。
 _Avoid_: 每个子代理单独建 worktree；把子代理的 worker `conversationId` 当成父会话路由 ID；把主仓只读放行误读成独立根
@@ -311,20 +311,23 @@ _Avoid_: 用角色名白名单代替能力判定；把父代理 `disallowedTools
 **说明书静态层**: 用户级与项目级 AGENTS.md 及 rules，可注入通用 worker 的 system；与记忆工具、自动抽取、记忆库灌窗分开开关。
 _Avoid_: 用 memoryEnabled 一把关掉说明书；把说明书和 memory_recall 绑死
 
-**graph mode**: 会话级编排 overlay，不是 PermissionMode。Shift+Tab 三态轮 `Default → Auto → Graph → Default`（`/graph` 为非 TTY 对等物）；进 Graph 后**下一次 `run()` 装配**才生效（`run_graph` 由 handler gate 解锁、切换提示追加到 messages 末尾），过程中切换不拦、不中途重装配。ADR-0030；模型面表达方式经 ADR-0041 修订。
-_Avoid_: 第四种 PermissionMode；把 `src/harness/graph/` 写进 prompt；env gate 才注入；进图改 ask/auto；切模式当下 round 热替换工具面
+**graph mode**: 会话级编排 overlay，不是 PermissionMode。Shift+Tab 三态轮 `Default → Auto → Graph → Default`（`/graph` 为非 TTY 对等物）；进 Graph 后**下一次 `run()` 装配**才生效（`run_graph` 由 handler gate 解锁、切换提示追加到 messages 末尾），过程中切换不拦、不中途重装配。ADR-0030；模型面表达方式经 ADR-0041 修订。开着时每次调模型尾部贴短现势，不进 system、不进 `run_graph` 回执（ADR-0079）。
+_Avoid_: 第四种 PermissionMode；把 `src/harness/graph/` 写进 prompt；env gate 才注入；进图改 ask/auto；切模式当下 round 热替换工具面；每次 run_graph 回执重提编排；每跳 agent_status 灌编排说明书；把开图现势写进 system；只靠翻转一次或只靠 compact 再贴当唯一现势（ADR-0079）
 
-**run_graph**: 常驻注册的 ACI 工具——父代理声明 DAG，host 走 `validateGraph` → waves → `createSubAgentNodeExecutor`；图节点仍是前景 spawn。graph mode 关闭时由 handler 层 EXIT 拒绝调用，工具面不随模式增删（ADR-0041）。跨回合权威不在单次回执里，见 **活图状态**。阶段 2 绕回仍用这一把，不另开工具（ADR-0061）。一段调用在跑时父代理不能并行干别的；最多主进程静默等待（ADR-0065）。
-_Avoid_: 与 spawn_subagent 混名；默认任务进图；模型 import graph 模块；把 condense JSON 当跨回合活图；为绕回另开一把图工具；给 run_graph 加 wait:false
+**run_graph**: 常驻注册的 ACI 工具——父代理声明活图（前进边 + 可标明的失败回边），host 走 `validateGraph` → waves → `createSubAgentNodeExecutor`；图节点仍是前景 spawn。graph mode 关闭时由 handler 层 EXIT 拒绝调用，工具面不随模式增删（ADR-0041）。跨回合权威不在单次回执里，见 **活图状态**。阶段 2 绕回仍用这一把，不另开工具（ADR-0061）。一段调用在跑时父代理不能并行干别的；最多主进程静默等待（ADR-0065）。
+_Avoid_: 与 spawn_subagent 混名；默认任务进图；模型 import graph 模块；把 condense JSON 当跨回合活图；为绕回另开一把图工具；给 run_graph 或图节点加 wait:false（ADR-0065 / ADR-0076）；把活图叫成 DAG 产品
 
 **活图状态**: 会话持有的那张可修订 DAG 及已完成节点——跨父代理回合、跨多次 `run_graph` 仍是同一张图；已完成在此冻结、不重演。不是 graph mode，也不是单次 `run_graph` 栈帧里的 `GraphExecution`。第一次交节点时建立；关 overlay 不销毁。ADR-0047 / ADR-0051。
 _Avoid_: 把 overlay 叫活图；live graph 当 graph mode 别名；图账本（易与 todo 账本混）；把 TUI `graph_progress` 当权威态；关 overlay 当清账本；compact 当丢图
 
 **外环修订**: 改活图剩余结构的刀口——一段 `run_graph` settle 或取消之后，由用户或主代理改 pending（含失败后加重要试格）。阶段 1 的失败再试是加新格，不是图上绕回。ADR-0048。
-_Avoid_: 同一次调用波间改图；每个节点唤醒主代理；把图内环当阶段 1 必达；说「无环就不算图」；阶段 1 单独立「外环次数」硬顶（ADR-0052）
+_Avoid_: 同一次调用波间改图；每个节点唤醒主代理（ADR-0048 / ADR-0076）；把图内环当阶段 1 必达；说「无环就不算图」；阶段 1 单独立「外环次数」硬顶（ADR-0052）；把 Destination 收口做成 host 停闸（ADR-0075）
 
 **剩余子图**: 外环交给 host 的那一截还要跑的 DAG（新节点与仍 pending 的节点）。已完成节点留在活图上、不出现在这次提交里。Host 按 id 冻结终态，禁止再跑。ADR-0050。
 _Avoid_: 每次把 done 节点再交一遍当合同；delta 算子（addEdge/removeNode）当阶段 1 主 API
+
+**活图收口**: 活图不再修订的条件——空剩余（模型/用户不再交剩余子图）、人打断或 `/reset`、主 loop 既有停条件。不是 host「管线完成」事件，也不是外环次数硬顶。ADR-0052 / ADR-0075。
+_Avoid_: 管线完成；任务完成信号；外环预算闸；phase 3 host 收口
 
 **图内绕回**: 阶段 2：同一次 `run_graph` 里沿边回到未冻结节点，**同一 id 再跑**；失败边也可指向尚未跑过的新格。回边由模型画在图上并**显式标明失败才走**；仅当该格 `NodeOutcome` 为 **failed** 时走，且失败后只启动**一个**格子；done 走前进边；skipped 不走回边。去向交图时写死，host 不选路。校验是图上普通节点，不是 host 暗闸。有圈却未标明回边、或回边指向已冻结 id、或边指向本次没有的 id，则该次调用拒绝。阶段 1 看见失败边标记亦拒。ADR-0053–0067。
 _Avoid_: 绕回却换新 id；阶段 1 放开 cycle；done 节点再进圈；host 失败时暗接上游；结束不论成败都走回边；host 另跑测试来决定绕不绕；靠检测环猜哪条是回边；未标明的圈硬跑；回边指到 done 却静默丢边；一格失败同时开多个格子；host 按失败内容改去向；指向不存在的 id 还 invent 节点；阶段 1 丢掉失败标记硬跑
@@ -410,6 +413,9 @@ _Avoid_: MCP schema 全量 upfront；目录随连接改写；有描述仍报错�
 **直呼加载 (exact-name load)**: (ADR-0046) 前缀已有名字时按该名灌贵载荷——`skill({name})` 取 SKILL.md；未 discover 的工具或 MCP 调其名即 `discover`（参数齐则执行）。
 _Avoid_: 有描述仍先 `tool_search`；用已删除的 `skill_search`
 
+**skill() 二次短路**: 模型再调同名 `skill()` 时，若可见 messages 仍有该名成功全文 `tool_result`，只回短回执、不重装 SKILL 正文；compact 丢掉该条后才再灌全文。闸只罩 ACI `skill()`。ADR-0079。
+_Avoid_: 会话级已加载 Set；写处境变化当再灌理由；system 记已加载集合；静默吞掉配对 `tool_use`；slash / Web `getSkillBody` 一并短路
+
 **索引降档 (index demotion)**: (ADR-0046) MCP 与 skill 索引合计超窗口 10% 时，超限条目剥描述只留名；退场内建不参与剥描述。
 _Avoid_: 从目录删除条目；把 schema 退场内建件也剥成裸名
 
@@ -458,11 +464,11 @@ _Avoid_: 用 sidecar 归属当授权或当锁；活性检测（PID 探活 / 心�
 **worktreeinclude**: 位于 **projectIdentityRoot** 的 `.iknow/worktreeinclude`（gitignore 语法）。`create-task-worktree` 成功后只把「匹配且已被 gitignore」的文件拷进新树；文件缺席不失败建树。
 _Avoid_: 拷 tracked 文件；把 include 当第二份身份根；include 失败阻断 provision
 
-**taskRoot**（活值）: 会话当前生效的 task worktree 根——**写与工具 cwd 只问它**（写工具 / 会改工作区的 bash / git / LSP 目录 / 子代理工作目录）。活性语义（`src/harness/session-roots.ts` 的 `LiveTaskRoot` cell）：**调用时读取**——所有消费点（门禁 shape 判定、写工具 resolve、bash 围栏、LSP directory、子代理 spawn 取根、环境现势）在 handler 调用时机读 cell 快照，不再闭包冻结装配期根；**唯一 writer = 装配层对 host `provision` / `enter` / `exit` 缝的包装点**（`withLiveTaskRootWrite`，缝成功 resolve 才写，失败不写不回滚、typed error 原样冒泡）；**batch 快照（一波一根）**——一次 `executeAll`（= 一波 tool calls）只在入口读一次，整波共用该快照，波内建树不把一次逻辑改动劈进两棵树。装配初值 = `SessionRoots.taskRoot`（未改绑时等于主仓）；`productRoot` / `projectIdentityRoot` / `installRoot` / mcpConfigRoot / stateAnchor 等稳定根**不**随它走。改绑后模型经 worker prior messages / path-outside 回执看见当前写根；消费 skill 时（slash 信封 / `skill()` tool_result / Web `getSkillBody`）正文末尾带当前写根，文案与 worker prior 同一份（`specs/skill-load-write-root.md`）；**三个告知面均按「写处境」三态渲染**，`no_writable_root` 态只陈述事实、不点名 `create-task-worktree`（ADR-0069）；改绑后主会话另给一次（用户消息缝，非每轮、不进 system）；system `## Project path` 仍是身份根（`projectIdentityRoot`），bash 围栏把身份根恒进读白名单（closed-world fence）以保证「写仍不得进主仓」（ADR-0037 §9）。
+**taskRoot**（活值）: 会话当前生效的 task worktree 根——**写与工具 cwd 只问它**（写工具 / 会改工作区的 bash / git / LSP 目录 / 子代理工作目录）。活性语义（`src/harness/session-roots.ts` 的 `LiveTaskRoot` cell）：**调用时读取**——所有消费点（门禁 shape 判定、写工具 resolve、bash 围栏、LSP directory、子代理 spawn 取根、环境现势）在 handler 调用时机读 cell 快照，不再闭包冻结装配期根；**唯一 writer = 装配层对 host `provision` / `enter` / `exit` 缝的包装点**（`withLiveTaskRootWrite`，缝成功 resolve 才写，失败不写不回滚、typed error 原样冒泡）；**batch 快照（一波一根）**——一次 `executeAll`（= 一波 tool calls）只在入口读一次，整波共用该快照，波内建树不把一次逻辑改动劈进两棵树。装配初值 = `SessionRoots.taskRoot`（未改绑时等于主仓）；`productRoot` / `projectIdentityRoot` / `installRoot` / mcpConfigRoot / stateAnchor 等稳定根**不**随它走。改绑后模型经 worker prior messages / path-outside 回执看见当前写根；消费 skill 时（slash 信封 / `skill()` tool_result / Web `getSkillBody`）只灌技能程序，正文不挂写根 trailer（ADR-0079）；告知面为 worker prior 与改绑后主会话一次，均按「写处境」三态渲染，`no_writable_root` 态只陈述事实、不点名 `create-task-worktree`（ADR-0069）；改绑后主会话经用户消息缝再给一次（非每轮、不进 system）；system `## Project path` 仍是身份根（`projectIdentityRoot`），bash 围栏把身份根恒进读白名单（closed-world fence）以保证「写仍不得进主仓」（ADR-0037 §9）。
 _Avoid_: 闭包冻结装配期根（rebind 只在 run 边界重解析的旧实现）；第二写入口；一波内逐 call 重读（中途翻转劈两树）；把活 taskRoot 当 `productRoot` / 身份根 / per-root 状态锚（D3 稳定根清单不活化）；把「下一波生效」误述为「下一 turn」或要求 `/continue`；告知面无条件宣告「突变写该根」（隔离 ON 且未绑树时与门禁真值相反，见「写处境」）
 
-**写处境（write situation）**: 「此刻能不能写、写哪」的三态纯函数判定——`writable_main`（隔离 OFF，主仓可写）/ `writable_tree`（隔离 ON 且活 `taskRoot` 是树形）/ `no_writable_root`（隔离 ON 且非树形，无处可写）；判据 = 隔离开关 + **复用** `isTaskWorktreePath`，**不是**归属 sidecar（`enter-task-worktree` 四道检查无归属，会话可合法 adopt 外来树并被门禁放行）。告知面（skill 正文 trailer / worker prior / 改绑后注入）**共享此判定但不共享措辞**：`no_writable_root` 只陈述事实、不点名 `create-task-worktree`（trailer 早于任何写意图），点名留在门禁回执（意图已证）。ADR-0069。
-_Avoid_: 用 owner sidecar 当可写判据（会对 adopt 外来树的会话造反向谎）；重写第二份形状判断（shadow copy）；告知面与回执共用一份措辞；把 `no_writable_root` 写成祈使句；把 `/tmp` 短命事实塞进写根段（属 bash 面）
+**写处境（write situation）**: 「此刻能不能写、写哪」的三态纯函数判定——`writable_main`（隔离 OFF，主仓可写）/ `writable_tree`（隔离 ON 且活 `taskRoot` 是树形）/ `no_writable_root`（隔离 ON 且非树形，无处可写）；判据 = 隔离开关 + **复用** `isTaskWorktreePath`，**不是**归属 sidecar（`enter-task-worktree` 四道检查无归属，会话可合法 adopt 外来树并被门禁放行）。告知面（worker prior / 改绑后注入）**共享此判定但不共享措辞**：`no_writable_root` 只陈述事实、不点名 `create-task-worktree`，点名留在门禁回执（意图已证）。skill 正文不挂写根 trailer。ADR-0069；告知面组成见 ADR-0079。
+_Avoid_: 用 owner sidecar 当可写判据（会对 adopt 外来树的会话造反向谎）；重写第二份形状判断（shadow copy）；告知面与回执共用一份措辞；把 `no_writable_root` 写成祈使句；把 `/tmp` 短命事实塞进写根段（属 bash 面）；把写处境绑回 `skill()` 正文
 
 **productRoot**: 每个产品入口首次装配确定的稳定主 checkout root；session worktree rebind 后保持不变，不随当前 task worktree 改写。
 _Avoid_: workspaceRoot；task worktree root；product workspace 多根
@@ -507,18 +513,22 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **失败去新格 vs 回走旧格**: 两种都由模型在交图时指定；host 不选路（ADR-0063）
 - **未知 id vs 合法边**: 边的终点必须出现在这次提交的节点里，否则拒（ADR-0066）
 - **阶段 1 vs 失败边标记**: 阶段 1 看见标记就拒，不忽略后当 DAG 跑（ADR-0067）
-- **effort 熔断 vs 外环次数**: 阶段 2 按单次调用每 id 进入次数防空转，默认阈 8；阶段 1 不设外环次数硬顶（ADR-0052 / ADR-0057 / ADR-0064）
+- **effort 熔断 vs 外环次数**: 阶段 2 按单次调用每 id 进入次数防空转，默认阈 8；阶段 1 不设外环次数硬顶；Destination 第四句仍不另做 host 停闸（ADR-0052 / ADR-0057 / ADR-0064 / ADR-0075）
+- **活图收口 vs 任务完成**: 空剩余只说明不再交格；用户目标完成在主代理/人，host 不广播完成（ADR-0075）
 - **外环修订 vs run_graph**: `run_graph` 跑当前这一段 DAG；外环是这段结束之后改活图
 - **剩余子图 vs 活图状态**: 剩余子图是这一次还要跑的；活图是含已完成在内的全账本（ADR-0050）
 - **plan/实施/replan vs 活图状态**: 前者是主代理认知循环；后者是有依赖、要冻结时的落地，不是规划的超集（ADR-0049）
 - **沙箱纪律 vs 前景/后景 spawn**: 沙箱纪律约束 `bash` 前台/后台围栏；前景/后景 spawn 是 `spawn_subagent` 的等待契约（ADR-0014）
 - **graph mode vs PermissionMode**: graph mode 是编排 overlay；PermissionMode 是 mutating 问/拒/放行。进 Graph 冻结当时 permission，不把 Graph 写入 `PERMISSION_MODES`
+- **开图提示 vs 每跳短现势**: 翻转当拍可留一条长 ON/OFF；开着期间每次调模型再贴短「仍开着」，不进 system（ADR-0041 / ADR-0079）
+- **图现势 vs system 前缀**: 开着/关着会变，不进 system；现势走用户侧每跳短句，不靠抖 tools/system，也不单靠 compact 特补（ADR-0079）
 - **run_graph vs spawn_subagent**: 有依赖的多节点走 `run_graph`；单次派活仍 `spawn_subagent`。图节点内部仍是前景 spawn，不经父代理再调 spawn 工具
 - **run_graph vs 图内绕回**: 绕回仍走同一把 `run_graph`；阶段差在 host 认不认标明的回边，不在工具名（ADR-0061）
-- **run_graph vs 后景 spawn**: 图没有 `wait:false`；跑图时父代理不能并行干别的，最多主进程静默等 settle（ADR-0065）
+- **run_graph vs 后景 spawn**: 图没有 `wait:false`；跑图时父代理不能并行干别的，最多主进程静默等 settle；mailbox 不进活图（ADR-0065 / ADR-0076）
 - **父可见信封 vs 磁盘产物**: 父读摘要、`task_id` 与 `/tmp` 根；仓库文件以工作区为准；垫底正文按 id 去读，不靠把全文塞进 tool_result
 - **围栏 /tmp 垫底 vs taskRoot**: 垫底是当前身份的 `/tmp`，不是交付；要留下的写 `taskRoot`，不自动从垫底拷进仓库
 - **子代理并发上限 vs 派发张数**: 上限是帽子；张数由模型按任务拆，说明书写独立才并行
+- **图节点 vs 子代理并发上限**: 活图格子是同一顶上的 worker，不另起每图预算（ADR-0077）
 - **说明书静态层 vs memory_layer 整段开关**: 通用 worker 要说明书、不要记忆工具；禁止再靠 memoryEnabled=false 把 AGENTS.md 一起跳过
 - **状态栏 vs 任务摘录**: 摘录只在 compact 时贴用户原话；状态栏每轮由代码现算并追加
 - **状态栏 vs append-only messages**: 栏走同一条追加纪律；纠错靠新栏，不靠从历史上抠掉旧栏
@@ -547,6 +557,9 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **直呼加载 vs tool_search**: 前缀有描述则按名加载；无描述才 search。退场内建保持名+描述故不走 search
 - **索引降档 vs 溢出治理（schema 退场）**: schema 退场把内建变成名+描述；索引降档只剥 MCP/skill 描述
 - **skill vs tool_search**: skill 按名取正文；工具/MCP 定义走直呼 `discover` 或无描述时的 `tool_search`；无 `skill_search`
+- **skill() 二次短路 vs 渐进式披露**: 披露管索引常驻、正文按需进 messages；二次短路管同名 `skill()` 不再灌第二份全文
+- **skill() 二次短路 vs skill-load 信封**: 闸只罩模型 `skill()`；用户 slash 再装信封仍灌全文
+- **写处境告知面 vs skill 正文**: 告知走 worker prior / 改绑一次；技能程序不附 trailer；写工具成功路径不另注写处境
 - **hook router vs sandbox server**: 都是同进程 router；sandbox 管围栏执行，hook router 管声明式拦截组合，不共用一个 server
 - **内置钩子（builtin hooks） vs 用户钩子（user hooks）**: 代码装配 vs `settings.hooks`；用户总闸卸不掉 builtin
 - **用户钩子（user hooks） vs 产品开关（memory / secrets / graph / isolation）**: 正交；`hooks.enabled` 不代管 `/memory` 或 `settings.secrets`

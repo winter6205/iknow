@@ -148,15 +148,14 @@ describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
   });
 });
 
-// 写根 trailer（specs/skill-load-write-root.md T3）：serve lazy 装配路径下
-// hub 捕获 BuiltEngine.liveTaskRoot，loadSkillBody 调用时机读快照 ——
-// Web getSkillBody 后端与 ACI skill() / TUI slash 同一装配口。TUI slash
-// 路径（app.tsx createSkillBody 调用点）无独立装配测试：三条生产路径共用
-// createSkillBody + writeRootSegment 字节契约（tests/skill/body.test.ts）
-// + 同一 cell 读取形态，本文件与 tests/harness/aci/tools/skill.test.ts
-// 已分别覆盖 hub / skill() 两面的活性与字节，slash 面按同一契约推导。
-describe("SessionHub.loadSkillBody — 写根 trailer（lazy 装配路径）", () => {
-  it("build-engine 装配后 loadSkillBody 正文末尾带当前写根", async () => {
+// ADR-0079 — SessionHub.loadSkillBody 不再挂写根 trailer（与 #337 SC6 形
+// 态逐字节一致）。Web getSkillBody 后端与 ACI skill() / TUI slash 同一装
+// 配口，三条生产路径共用 createSkillBody 字节契约（tests/skill/body.test.ts）
+// —— 该契约已把 trailer 退场钉死。本文件覆盖 hub loadSkillBody 路径的「即
+// 便 hub 装配期捕获过活 taskRoot，正文也不再渲染写根段」不变式。slash 面
+// 按同一契约推导（无独立装配测试）。
+describe("SessionHub.loadSkillBody — 正文不挂写根（ADR-0079）", () => {
+  it("build-engine 装配后 loadSkillBody 正文末段是 </skill_files>，不出现 current write root", async () => {
     const { mkdir, writeFile } = await import("node:fs/promises");
     const skillDir = join(baseDir, "skills-wrt", "wrt-echo");
     await mkdir(skillDir, { recursive: true });
@@ -169,7 +168,6 @@ describe("SessionHub.loadSkillBody — 写根 trailer（lazy 装配路径）", (
     // tmp fixture 走此通道进 catalog，不依赖 cwd/.iknow 约定。
     const prevSkillDirs = process.env.IKNOW_SKILL_DIRS;
     process.env.IKNOW_SKILL_DIRS = join(baseDir, "skills-wrt");
-    let cell: { read(): string } | undefined;
     try {
       const hub = new SessionHub({
         store,
@@ -180,22 +178,22 @@ describe("SessionHub.loadSkillBody — 写根 trailer（lazy 装配路径）", (
         loadSkillBody: (
           name: string
         ) => Promise<{ name: string; body: string }>;
-        liveTaskRoot?: { read(): string };
       };
       await load.ensureDeps();
-      // hub 已捕获 BuiltEngine.liveTaskRoot（初值 = 装配期 taskRoot）。
-      cell = load.liveTaskRoot;
-      assert.ok(cell, "lazy 装配后 hub 必须持有 live taskRoot cell");
       const { body } = await load.loadSkillBody("wrt-echo");
-      assert.ok(body.includes("body line"));
+      assert.ok(body.includes("body line"), "skill 自身正文必须保留");
       assert.ok(
-        body.includes(
-          "current write root (for write_file / edit_file / bash cwd):"
-        ),
-        "正文末尾必须带与 worker prior 同一文案的写根段"
+        !body.includes("current write root"),
+        "正文末尾不得出现写根段（ADR-0079：trailer 退场）"
       );
-      assert.ok(body.includes(cell.read()));
-      assert.ok(body.trimEnd().includes("</skill_files>"));
+      assert.ok(
+        !body.includes("no writable root"),
+        "正文末尾不得出现 ③ 态披露（ADR-0079：trailer 退场）"
+      );
+      assert.ok(
+        body.trimEnd().endsWith("</skill_files>"),
+        "末段必须是 </skill_files>，与 #337 SC6 形态逐字节一致"
+      );
     } finally {
       if (prevSkillDirs === undefined) {
         delete process.env.IKNOW_SKILL_DIRS;

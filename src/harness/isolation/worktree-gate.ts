@@ -1183,7 +1183,8 @@ export function createWorktreeIsolationExecutor(
       index: number
     ) => void | Promise<void>,
     turnId?: string,
-    onStream?: (event: import("../stream.js").HarnessStreamEvent) => void
+    onStream?: (event: import("../stream.js").HarnessStreamEvent) => void,
+    messages?: import("../tools/types.js").ToolExecutionContext["messages"]
   ): Promise<ReadonlyArray<ToolExecutionResult>> => {
     if (!enabled) {
       return inner.executeAll(
@@ -1193,7 +1194,8 @@ export function createWorktreeIsolationExecutor(
         conversationId,
         onSettled,
         turnId,
-        onStream
+        onStream,
+        messages
       );
     }
     // T10 D2: snapshot live taskRoot ONCE at executeAll entry. The whole wave
@@ -1225,7 +1227,8 @@ export function createWorktreeIsolationExecutor(
         conversationId,
         onSettled,
         turnId,
-        onStream
+        onStream,
+        messages
       );
     }
     // mixed / mutating batch: per-call gating (read calls still batched one
@@ -1251,7 +1254,8 @@ export function createWorktreeIsolationExecutor(
           conversationId,
           undefined,
           turnId,
-          onStream
+          onStream,
+          messages
         );
         rootFlipped = true;
         rootFlipTool = call.name;
@@ -1263,7 +1267,8 @@ export function createWorktreeIsolationExecutor(
           conversationId,
           undefined,
           turnId,
-          onStream
+          onStream,
+          messages
         );
       } else if (rootFlipped) {
         result = block(
@@ -1282,7 +1287,8 @@ export function createWorktreeIsolationExecutor(
               conversationId,
               undefined,
               turnId,
-              onStream
+              onStream,
+              messages
             )
           )[0]!;
       }

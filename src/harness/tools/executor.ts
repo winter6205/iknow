@@ -237,7 +237,8 @@ export function createExecutor(registry: RegistryImpl): Executor {
     timeoutMs?: number,
     conversationId?: string,
     turnId?: string,
-    onStream?: ToolExecutionContext["onStream"]
+    onStream?: ToolExecutionContext["onStream"],
+    messages?: ToolExecutionContext["messages"]
   ): Promise<ToolExecutionResult> {
     const validation = validateCall(registry, call);
     if (!validation.ok) return validation.failure;
@@ -256,6 +257,7 @@ export function createExecutor(registry: RegistryImpl): Executor {
       // spawn_subagent 消费后写进 def.toolUseId → manager 抄进 .meta.json。
       // 直接调 handler / 测试注入不走 executeAll 的路径不填,Postel(meta 键省略)。
       toolUseId: call.id,
+      ...(messages !== undefined ? { messages } : {}),
     };
     try {
       const out =
@@ -301,7 +303,9 @@ export function createExecutor(registry: RegistryImpl): Executor {
       index: number
     ) => void | Promise<void>,
     turnId?: string,
-    onStream?: ToolExecutionContext["onStream"]
+    onStream?: ToolExecutionContext["onStream"],
+    // skill() 二次短路:模型可见历史只读快照,原样透传进 ctx.messages。
+    messages?: ToolExecutionContext["messages"]
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
     for (const [index, call] of calls.entries()) {
@@ -311,7 +315,8 @@ export function createExecutor(registry: RegistryImpl): Executor {
         timeoutMs,
         conversationId,
         turnId,
-        onStream
+        onStream,
+        messages
       );
       await onSettled?.(result, index);
       out.push(result);

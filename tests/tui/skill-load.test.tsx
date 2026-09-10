@@ -32,7 +32,12 @@ import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
 import { createPermissionModeContext } from "../../src/harness/permission/index.js";
 import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
 import type { SkillCatalog } from "../../src/harness/skill/catalog.js";
+import { createSkillTool } from "../../src/harness/aci/tools/skill.js";
+import { createRegistry } from "../../src/harness/tools/registry.js";
+import { createExecutor } from "../../src/harness/tools/executor.js";
+import type { LoopEngineDeps } from "../../src/harness/index.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
+import { createStubModel } from "../../src/harness/stubs/stub-model.js";
 
 /** 帧等待：mockInput 字节经 stdin 异步解析，需轮询 renderOnce。 */
 async function untilFrame(
@@ -126,15 +131,24 @@ interface DrivenApp {
 async function mountAppAsync(
   catalog: SkillCatalog,
   responses: Parameters<typeof makeDeps>[0],
-  opts: { readonly delayMs?: number } = {}
+  opts: {
+    readonly delayMs?: number;
+    /**
+     * skill-body-short-circuit T3 (SC4)：覆盖 harness deps（registry /
+     * executor / adapter），让真实 skill() 工具与本轮 turn 同池装配。
+     */
+    readonly depsOverride?: LoopEngineDeps;
+  } = {}
 ): Promise<DrivenApp> {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-skillload-data-"));
   const bridge = createTuiBridge({
     dataDir,
     workspaceRoot: dataDir,
-    deps: makeDeps(responses, {
-      ...(opts.delayMs ? { delayMs: opts.delayMs } : {}),
-    }),
+    deps:
+      opts.depsOverride ??
+      makeDeps(responses, {
+        ...(opts.delayMs ? { delayMs: opts.delayMs } : {}),
+      }),
     inflight: createInflightRegistry(),
   });
   const askBridge = createTuiAskUserBridge();
@@ -309,6 +323,127 @@ describe("Phase C: /skill-name 加载发送", () => {
     expect(finalFrame).toContain("❯ 帮我做 X");
     expect(finalFrame.includes("回声技能")).toBe(false);
     expect(finalFrame.includes("<skill_files>")).toBe(false);
+
+    await app.destroy();
+    await fx.cleanup();
+  }, 30_000);
+
+  test("SC4 slash 不闸：同会话模型已调 skill() 且全文在史 → slash envelope 仍灌装配全文", async () => {
+    // spec skill-body-short-circuit.md SC4：闸只罩 ACI skill() handler；
+    // slash 是 pre-run 用户输入注入，永远走 createSkillBody 全量装配。
+    // 行为断言（非结构性）：真实 skill() 工具与 stub-model 装配进同一
+    // registry/executor（生产同池），第一回合让模型调 skill("echo") 把全文
+    // tool_result 落进可见历史；第二回合用户 slash /echo → 落盘 envelope
+    // 必须仍含 337 装配形态全文（# body + Base directory + </skill_files>）。
+    // 若 slash 路径被误接进短路基（ctx.messages / wave map），信封会变成
+    // 短回执——本测试即失败。
+    const fx = await plantSkillFixture();
+    const registry = createRegistry([createSkillTool({ catalog: fx.catalog })]);
+    const deps: LoopEngineDeps = {
+      adapter: createStubModel({
+        responses: [
+          // 回合 1：模型调 skill("echo") → 全文 tool_result 入史。
+          assistantResult({
+            texts: ["已加载技能"],
+            toolCalls: [{ id: "s1", name: "skill", input: { name: "echo" } }],
+          }),
+          // 回合 1 收尾（stub-model 的 tool loop 同回合消费第二条）。
+          assistantResult({ texts: ["按正文执行"] }),
+          // 回合 2（slash skill-load turn）收尾。
+          assistantResult({ texts: ["slash 完成"] }),
+        ],
+      }),
+      executor: createExecutor(registry),
+      registry,
+      maxTurns: 5,
+    };
+    const app = await mountAppAsync(fx.catalog, [], { depsOverride: deps });
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+    await untilFrame(app.setup, (f) => f.includes("输入消息"));
+
+    // 回合 1：直接发消息，stub-model 脚本化触发 skill("echo")。turn 很快
+    // 完成，polling 可能跳过 running 瞬间 —— 直接等落盘的 tool_result 出现。
+    await app.typeText("加载 echo 技能");
+    await app.pressEnter();
+    await until(
+      async () => {
+        const list = await app.bridge.listSessions();
+        if (list.length === 0) return false;
+        const f = await app.bridge.loadSessionFile(list[0]!.conversation_id);
+        return f.messages.some((m) =>
+          m.content.some((b) => b.type === "tool_result")
+        );
+      },
+      8000,
+      "tool-result-persisted"
+    );
+
+    // 回合 2：slash skill-load —— 闸在场（skill() 同池装配），slash 不得短路。
+    await app.typeText("/echo 帮我做 X");
+    await app.pressEnter();
+    await until(
+      async () => {
+        const list = await app.bridge.listSessions();
+        const f = await app.bridge.loadSessionFile(list[0]!.conversation_id);
+        return f.messages.some(
+          (m) =>
+            m.role === "assistant" &&
+            m.content.some(
+              (b) =>
+                b.type === "text" &&
+                (b as { text: string }).text === "slash 完成"
+            )
+        );
+      },
+      8000,
+      "slash-turn-done"
+    );
+
+    // 落盘会话：最后一条 user 消息（skill-load envelope）仍含装配全文。
+    const list = await app.bridge.listSessions();
+    expect(list.length).toBe(1);
+    const sessionId = list[0]!.conversation_id;
+    const file = await app.bridge.loadSessionFile(sessionId);
+    const userTexts = file.messages
+      .filter((m) => m.role === "user")
+      .map((m) =>
+        m.content
+          .filter((b): b is { type: "text"; text: string } => b.type === "text")
+          .map((b) => b.text)
+          .join("\n")
+      );
+    const envelope = userTexts.find((t) =>
+      t.startsWith('[skill-load name="echo"]\n')
+    );
+    expect(envelope).toBeDefined();
+    expect(envelope).toContain("# 回声技能");
+    expect(envelope).toContain("Base directory: " + fx.skillDir);
+    expect(envelope).toContain("<skill_files>");
+    expect(envelope!.endsWith("帮我做 X")).toBe(true);
+    // 短回执不得顶替正文出现在信封里。
+    expect(envelope).not.toContain("already in context");
+
+    // 全链一致性：slash 信封里的装配正文与 ACI skill() 同输入字节相等
+    // （SC6 三路径同一 createSkillBody）。tool_result 的正文段 = 信封去头
+    // 去 remainder。
+    const envelopeBody = envelope!.slice(
+      '[skill-load name="echo"]\n'.length,
+      envelope!.lastIndexOf("\n\n帮我做 X")
+    );
+    const toolResultText = file.messages
+      .flatMap((m) => m.content)
+      .filter((b) => b.type === "tool_result")
+      .flatMap((b) => {
+        if (b.type !== "tool_result") return [];
+        return Array.isArray(b.content)
+          ? (b.content as Array<{ type?: string; text?: string }>)
+          : [];
+      })
+      .filter((b) => b.type === "text")
+      .map((b) => b.text ?? "")
+      .join("\n");
+    expect(toolResultText).toContain("# 回声技能");
+    expect(toolResultText).toBe(envelopeBody);
 
     await app.destroy();
     await fx.cleanup();

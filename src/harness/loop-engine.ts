@@ -1634,6 +1634,13 @@ async function executeWaveAndCommit(opts: {
   /** #888:注入消息随第一个 tool_result commit 随批 flush。 */
   readonly pendingInjected: PendingInjected;
   readonly onStream?: (event: HarnessStreamEvent) => void;
+  /**
+   * 本回合模型可见历史快照（skill() 二次短路）。append-only messages 的引用
+   * 在 wave 入口透传 —— 同波内 assistant 消息已在史（runToolPhase 的
+   * afterAssistantState），tool_result 尚未入史（见 executeWaveAndCommit），
+   * 所以同波二次同名短路由 handler 侧 wave map 兜住，不依赖本快照。
+   */
+  readonly messages: ReadonlyArray<AnthropicNativeMessage>;
 }): Promise<void> {
   const slots: Array<ToolExecutionResult | undefined> = Array.from(
     { length: opts.wave.length },
@@ -1663,7 +1670,8 @@ async function executeWaveAndCommit(opts: {
       await flushPrefix();
     },
     opts.turnId,
-    opts.onStream
+    opts.onStream,
+    opts.messages
   );
   for (let i = 0; i < waveResults.length; i++) {
     if (slots[i] === undefined) slots[i] = waveResults[i];
@@ -1706,6 +1714,8 @@ async function runToolPhase(opts: {
   });
   const results: ToolExecutionResult[] = [];
   const blocks: AnthropicContentBlock[] = [];
+  // skill() 二次短路:快照取 afterAssistantState.messages(含本波 assistant
+  // tool_use 消息,不含本波 tool_result —— 后者在整波完成后才 append)。
   for (const wave of waves) {
     await executeWaveAndCommit({
       wave,
@@ -1717,6 +1727,7 @@ async function runToolPhase(opts: {
       turnId: opts.turnId,
       pendingInjected: opts.pendingInjected,
       onStream: opts.onStream,
+      messages: opts.afterAssistantState.messages,
     });
   }
   const toolResultMsg: AnthropicNativeMessage = {

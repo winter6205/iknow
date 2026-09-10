@@ -209,11 +209,12 @@ describe("skill — 叫错名返回引导回 <available_skills> / read_file 的�
   });
 });
 
-// 写根 trailer（specs/skill-load-write-root.md）：skill() 工具 handler 调用
-// 时机读活 taskRoot cell 快照传给 createSkillBody —— 与 TUI slash / hub
-// loadSkillBody 同一装配口，正文末尾带当前写根；cell 缺席 → 无 trailer
-// （legacy parity）；未知 skill 名仍是引导句、无 trailer。
-describe("skill — 写根 trailer（specs/skill-load-write-root.md T3）", () => {
+// ADR-0079 — skill() 工具不再挂写根 trailer（specs/skill-load-write-root.md
+// 合同 6 amend）。handler 装配正文末段始终是 </skill_files>，与 #337 SC6
+// 形态逐字节一致；未知 skill 名仍是引导句。`SkillToolDeps` 也不再接受
+// `liveTaskRoot` / `isolationOn`（写处境披露的权威路径迁到 worker prior +
+// chat-session rebind，共用同一 helper `writeRootSegment`）。
+describe("skill — 正文不挂写根（ADR-0079）", () => {
   let scratch: string;
 
   beforeEach(async () => {
@@ -239,54 +240,46 @@ describe("skill — 写根 trailer（specs/skill-load-write-root.md T3）", () =
     );
   }
 
-  it("liveTaskRoot 在场 → handler 调用时读 cell 快照，正文末尾含当前写根", async () => {
-    const dir = join(scratch, "echo");
-    await writeEcho(dir);
-    const tool = createSkillTool({
-      catalog: echoCatalog(dir),
-      liveTaskRoot: createLiveTaskRoot("/tmp/task-wt-a"),
-    });
-    const out = await invokeSkill(tool, { name: "echo" });
-    expect(out).toContain(
-      "current write root (for write_file / edit_file / bash cwd): /tmp/task-wt-a"
-    );
+  it("SkillToolDeps 不再接受 liveTaskRoot（类型层钉死）", () => {
+    // TypeScript 编译期钉住：SkillToolDeps 上不再有 liveTaskRoot / iso-
+    // lationOn 字段。本用例在运行期只验工厂可被不含这俩字段的 deps 调用。
+    const dir = join(scratch, "echo-type");
+    const tool = createSkillTool({ catalog: echoCatalog(dir) });
+    expect(tool.name).toBe("skill");
   });
 
-  it("改绑后翻 cell → 同一工具下一次调用读到新根（活性：调用时读取）", async () => {
-    const dir = join(scratch, "echo");
-    await writeEcho(dir);
-    const cell = createLiveTaskRoot("/tmp/task-wt-a");
-    const tool = createSkillTool({
-      catalog: echoCatalog(dir),
-      liveTaskRoot: cell,
-    });
-    const before = await invokeSkill(tool, { name: "echo" });
-    expect(before).toContain("/tmp/task-wt-a");
-    // 模拟改绑：翻 cell（唯一 writer = writeLiveTaskRoot，装配层缝包装面）
-    writeLiveTaskRoot(cell, "/tmp/task-wt-b");
-    const after = await invokeSkill(tool, { name: "echo" });
-    expect(after).toContain("/tmp/task-wt-b");
-    expect(after).not.toContain("task-wt-a");
-  });
-
-  it("liveTaskRoot 缺席 → 无 trailer（与今日字节一致）", async () => {
+  it("handler 调用 → 末段是 </skill_files>，正文不出现 current write root（即使 caller 持 cell）", async () => {
+    // 守门 ADR-0079：cell 在场也不再渲染 trailer。本用例直接构造 cell 仅
+    // 是模拟「caller 侧仍在持有活根」，但 SkillToolDeps 已不接它；如要
+    // 模拟错误地把 cell 传过去，应通过未声明字段（编译失败）做强制收口。
     const dir = join(scratch, "echo");
     await writeEcho(dir);
     const tool = createSkillTool({ catalog: echoCatalog(dir) });
     const out = await invokeSkill(tool, { name: "echo" });
     expect(out).not.toContain("current write root");
+    expect(out).not.toContain("no writable root");
     expect(out.trimEnd().endsWith("</skill_files>")).toBe(true);
+    // 正文仍含 skill 自身装配形态（frontmatter 剥离 + Base directory 行）
+    expect(out).toContain("# echo body");
+    expect(out).toContain("Base directory:");
   });
 
-  it("未知 skill 名 → 仍是引导句，无 trailer（即使 cell 在场且非空）", async () => {
+  it("未知 skill 名 → 仍是引导句，无 trailer", async () => {
     const dir = join(scratch, "echo");
     await writeEcho(dir);
-    const tool = createSkillTool({
-      catalog: echoCatalog(dir),
-      liveTaskRoot: createLiveTaskRoot("/tmp/task-wt-a"),
-    });
+    const tool = createSkillTool({ catalog: echoCatalog(dir) });
     const out = await invokeSkill(tool, { name: "nope" });
     expect(out).toMatch(/available_skills|read_file/);
     expect(out).not.toContain("current write root");
+    expect(out).not.toContain("skill_search");
+  });
+
+  it("createLiveTaskRoot / writeLiveTaskRoot helper 仍存在（写处境披露的下游消费者继续用）", () => {
+    // writeRootSegment 的下游消费者（worker prior / chat-session rebind）
+    // 仍用 createLiveTaskRoot / writeLiveTaskRoot 持有活根 —— 本用例守
+    // 门 helper 不被本轮 T1 误删。
+    const cell = createLiveTaskRoot("/tmp/keep-alive");
+    writeLiveTaskRoot(cell, "/tmp/rebind");
+    expect(cell.read()).toBe("/tmp/rebind");
   });
 });

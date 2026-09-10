@@ -1,11 +1,14 @@
 // #337 T6: skill 正文装配 (src/harness/skill/body.ts) 单测。
 //
-// 行为真值 (spec 337-skill-mcp-extension.md § Code Style + SC6)：
+// 行为真值 (spec 337-skill-mcp-extension.md § Code Style + SC6 + ADR-0079)：
 //   - 正文 = frontmatter 剥离 + `Base directory: <abs dir>` 提示行
 //     + `<skill_files>` 段（glob `**/*` 排除 SKILL.md、排序、采样 ≤10、
 //     绝对路径、"file list is sampled" 提示）。
 //   - references/ 不递归：references/* 不出现在 skill_files 段里。
 //   - 字节级稳定：同输入二次调用字符串相等（KV 缓存契约）。
+//   - ADR-0079：装配结果不再追加写根 trailer（与 337 SC6 形态逐字节一致）。
+//     写处境披露的权威路径迁到 worker prior + chat-session rebind 一次性通
+//     知，共用同一 helper `writeRootSegment`（仍 export，本文件继续覆盖）。
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
@@ -20,8 +23,6 @@ import {
   stripFrontmatter,
   writeRootSegment,
 } from "../../src/harness/skill/body.js";
-import { writeSituation } from "../../src/harness/isolation/write-situation.ts";
-import type { WriteSituation } from "../../src/harness/session-roots.ts";
 import { MAX_MESSAGE_CHARS } from "../../src/session-api/contract.ts";
 import type { SkillEntry } from "../../src/harness/skill/catalog.js";
 
@@ -291,31 +292,34 @@ describe("createSkillBody", () => {
     expect(b).toBe(a);
   });
 
-  it("is byte-stable across repeat calls with the same non-empty taskRoot", async () => {
+  it("is byte-stable across repeat calls regardless of any external taskRoot-shaped inputs", async () => {
+    // ADR-0079 — createSkillBody 不再吃 taskRoot / writeSituation 字段；
+    // 装配面只读 entry + dir + fs。同输入两次调用字符串相等（KV 缓存契约），
+    // 与外部 taskRoot 形态无关。本用例锁住「外部即便试图塞入 taskRoot 形
+    // 状的入参也不会被装配面读走」这条不变式 —— 守门 helper 退场后的回归。
     const root = await mkdtemp(join(tmpdir(), "iknow-body-stable-tr-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
     await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\nbody`);
 
-    const a = await createSkillBody({
-      entry: entry(dir, "echo"),
-      dir,
-      taskRoot: "/tmp/task-wt",
-    });
-    const b = await createSkillBody({
-      entry: entry(dir, "echo"),
-      dir,
-      taskRoot: "/tmp/task-wt",
-    });
+    const a = await createSkillBody({ entry: entry(dir, "echo"), dir });
+    const b = await createSkillBody({ entry: entry(dir, "echo"), dir });
     expect(b).toBe(a);
+    // 末段必须是 </skill_files>，不再追加写根段。
+    expect(a.trimEnd().endsWith("</skill_files>")).toBe(true);
+    expect(a).not.toContain("current write root");
   });
 });
 
-// 写根 trailer（specs/skill-load-write-root.md）：文案 SSOT =
-// writeRootSegment（与 worker prior 同一 helper）；追加位置 =
-// </skill_files> 之后；空/缺 taskRoot → 与 337 SC6 现形态逐字节一致。
-describe("createSkillBody write-root trailer", () => {
-  it("omits the trailer entirely when taskRoot is undefined (byte-compat with pre-trailer SC6 shape)", async () => {
+// ADR-0079 — createSkillBody 不再追加写根 trailer。skill-load 消息正文末段
+// 始终是 </skill_files>（与 337 SC6 形态逐字节一致）；写根披露的权威路径
+// 迁到 worker prior（subagent/worker.ts）+ chat-session rebind 一次性通知
+// （chat-session.ts:503-509），共用同一 helper `writeRootSegment`（仍 export
+// 在 body.ts —— 见 `writeRootSegment — T4 按处境三态渲染` describe 的保留
+// 测试）。本 describe 钉住「装配面不挂写根」这条不变式，并覆盖历史 taskRoot
+// / writeSituation 形态的入参即便仍被传入也不会出现在正文里。
+describe("createSkillBody 写根不挂正文（ADR-0079）", () => {
+  it("无 taskRoot / writeSituation 入参 → 末段是 </skill_files>，与 337 SC6 形态逐字节一致", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-body-wrt-miss-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
@@ -324,83 +328,36 @@ describe("createSkillBody write-root trailer", () => {
     const text = await createSkillBody({ entry: entry(dir, "echo"), dir });
 
     expect(text).not.toContain("current write root");
+    expect(text).not.toContain("no writable root");
     expect(text.trimEnd().endsWith("</skill_files>")).toBe(true);
   });
 
-  it("omits the trailer for empty / whitespace taskRoot", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-body-wrt-blank-"));
+  it("即便传入 taskRoot 形态入参 → 装配面只读 entry + dir，正文仍无写根段", async () => {
+    // 守门 ADR-0079：装配面与外部写处境输入解耦。即便消费方路径（slash /
+    // skill() / loadSkillBody）未来若误传 taskRoot / writeSituation 形态入参
+    // —— 装配面必须 fail-closed，不允许它们出现在正文里。
+    const root = await mkdtemp(join(tmpdir(), "iknow-body-wrt-legacy-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
     await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\nbody`);
 
-    for (const taskRoot of ["", "   ", "\n"]) {
-      const text = await createSkillBody({
-        entry: entry(dir, "echo"),
-        dir,
-        taskRoot,
-      });
-      expect(text).not.toContain("current write root");
-      expect(text.trimEnd().endsWith("</skill_files>")).toBe(true);
-    }
-  });
-
-  it("appends the write-root segment after </skill_files> with the helper copy when taskRoot is non-empty", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-body-wrt-nonempty-"));
-    roots.push(root);
-    const dir = await fixtureDir(root, "echo");
-    await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\nbody`);
-    await fixtureFile(dir, "helper.md", "x");
-
-    // T4: 处境枚举 + taskRoot 同进同出 → 渲染 trailer。
-    // 树形根（isTaskWorktreePath 接受）→ writable_tree → 旧形态字节。
-    const taskRoot = "/repo/.iknow/worktrees/conv1234";
+    // 用 `as unknown as SkillBodyOptions` 绕过类型——模拟旧调用方传入
+    // taskRoot / writeSituation 形态的兜底；装配面必须忽略这些字段。
     const text = await createSkillBody({
       entry: entry(dir, "echo"),
       dir,
-      writeSituation: "writable_tree",
-      taskRoot,
+      ...({
+        taskRoot: "/tmp/task-wt",
+        writeSituation: "writable_tree",
+      } as unknown as Record<string, never>),
     });
 
-    const closing = text.lastIndexOf("</skill_files>");
-    const tail = text.slice(closing + "</skill_files>".length);
-    expect(tail).toContain("current write root");
-    const segment = writeRootSegment("writable_tree", taskRoot)!;
-    expect(tail).toContain(
-      segment.slice(
-        0,
-        `current write root (for write_file / edit_file / bash cwd): ${taskRoot}`
-          .length
-      )
-    );
-    // trailer 永远是正文末段
-    expect(text.trimEnd().endsWith(segment.trimEnd())).toBe(true);
+    expect(text).not.toContain("current write root");
+    expect(text).not.toContain("/tmp/task-wt");
+    expect(text.trimEnd().endsWith("</skill_files>")).toBe(true);
   });
 
-  it("uses the same segment copy as the subagent worker prior (shared helper)", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-body-wrt-helper-"));
-    roots.push(root);
-    const dir = await fixtureDir(root, "echo");
-    await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\nbody`);
-
-    const taskRoot = "/repo/.iknow/worktrees/conv1234";
-    const text = await createSkillBody({
-      entry: entry(dir, "echo"),
-      dir,
-      writeSituation: "writable_tree",
-      taskRoot,
-    });
-
-    // 同一 helper 的字节契约：trailer 内必须含与 worker prior 完全一致的
-    // 两句（写根句 + 身份根只读句），顺序一致。
-    expect(text).toContain(
-      `current write root (for write_file / edit_file / bash cwd): ${taskRoot}\n`
-    );
-    expect(text).toContain(
-      `System ## Project path is still the project identity root and is read-only; the write root above is where file mutations should land. Use relative paths from this root.`
-    );
-  });
-
-  it("keeps the trailer at the end when SKILL.md is huge (skill-load length-cap exemption semantics unchanged)", async () => {
+  it("SKILL.md 大到 90KB → 末段仍是 </skill_files>，装配文本仍享受 skill-load 长度豁免", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-body-wrt-overflow-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
@@ -408,24 +365,38 @@ describe("createSkillBody write-root trailer", () => {
     await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\n${huge}`);
     await fixtureFile(dir, "helper.md", "x");
 
-    const taskRoot = "/repo/.iknow/worktrees/conv1234";
-    const text = await createSkillBody({
-      entry: entry(dir, "echo"),
-      dir,
-      writeSituation: "writable_tree",
-      taskRoot,
-    });
+    const text = await createSkillBody({ entry: entry(dir, "echo"), dir });
 
     expect(text.length).toBeGreaterThan(90_000);
-    expect(
-      text
-        .trimEnd()
-        .endsWith(writeRootSegment("writable_tree", taskRoot)!.trimEnd())
-    ).toBe(true);
-    // 装配出的完整 skill-load 消息仍享受长度豁免
+    expect(text.trimEnd().endsWith("</skill_files>")).toBe(true);
+    expect(text).not.toContain("current write root");
+    // 装配出的完整 skill-load 消息仍享受长度豁免（trailer 退场不影响此契约）
     const loadText = buildSkillLoadText("echo", text);
     expect(isSkillLoadText(loadText)).toBe(true);
     expect(exceedsUserInputCap(loadText, MAX_MESSAGE_CHARS)).toBe(false);
+  });
+
+  it("非 tree 形根 + no_writable_root 形态入参同样被忽略（fail-closed 守门）", async () => {
+    // 旧装配面会按处境枚举渲染 ③ 态披露；新装配面已不挂 trailer，连披露
+    // 也不渲染 —— 披露的权威路径迁到 worker prior + chat-session rebind。
+    const root = await mkdtemp(join(tmpdir(), "iknow-body-wrt-no-"));
+    roots.push(root);
+    const dir = await fixtureDir(root, "echo");
+    await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\nbody`);
+
+    const text = await createSkillBody({
+      entry: entry(dir, "echo"),
+      dir,
+      ...({
+        taskRoot: "/home/user/project",
+        writeSituation: "no_writable_root",
+      } as unknown as Record<string, never>),
+    });
+
+    expect(text).not.toContain("current write root");
+    expect(text).not.toContain("no writable root");
+    expect(text).not.toContain("/home/user/project");
+    expect(text.trimEnd().endsWith("</skill_files>")).toBe(true);
   });
 });
 
@@ -520,11 +491,14 @@ describe("writeRootSegment — T4 按处境三态渲染", () => {
   });
 });
 
-// T4 — createSkillBody 接受处境枚举作为新装配口径。三态 + empty 臂覆盖。
-describe("createSkillBody — T4 处境枚举装配口", () => {
-  // 与 #337 现形态（小 skill）：body + Base directory 行 + <skill_files>
-  // 段。taskRoot/writeSituation 都缺席 → 无 trailer，与原 SC6 逐字节一致。
-  it("taskRoot + writeSituation 都缺席 → 无 trailer（与改造前 SC6 逐字节一致）", async () => {
+// ADR-0079 — createSkillBody 不再吃 writeSituation / taskRoot，装配面彻底与
+// 写处境判定解耦。本 describe 锁住「即便历史形态的入参（taskRoot + write-
+// Situation 同进同出 / 处境翻转）被传入，也绝不渲染任何写根段或 ③ 态披露」
+// 这条不变式 —— 写处境的权威路径迁到 worker prior（src/harness/subagent/
+// worker.ts）+ chat-session rebind 一次性通知（src/cli/chat-session.ts:
+// 503-509），共用同一 helper `writeRootSegment`（覆盖见上一个 describe）。
+describe("createSkillBody 装配面与写处境解耦（ADR-0079）", () => {
+  it("无 taskRoot / writeSituation 入参 → 末段是 </skill_files>，与 337 SC6 形态逐字节一致", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-body-t4-miss-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
@@ -536,7 +510,9 @@ describe("createSkillBody — T4 处境枚举装配口", () => {
     expect(text.trimEnd().endsWith("</skill_files>")).toBe(true);
   });
 
-  it("writable_tree + 树形根 → trailer 段含 'current write root ...'，与旧形态逐字节相等", async () => {
+  it("writable_tree 形态入参 + 树形根 → 正文不出现 'current write root'", async () => {
+    // 守门：旧 T4 装配口会渲染 trailer；新装配面即便被传入同形态入参也
+    // 不渲染。
     const root = await mkdtemp(join(tmpdir(), "iknow-body-t4-tree-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
@@ -546,17 +522,18 @@ describe("createSkillBody — T4 处境枚举装配口", () => {
     const text = await createSkillBody({
       entry: entry(dir, "echo"),
       dir,
-      writeSituation: "writable_tree",
-      taskRoot,
+      ...({
+        writeSituation: "writable_tree",
+        taskRoot,
+      } as unknown as Record<string, never>),
     });
 
-    expect(text).toContain("current write root");
-    // SC2 字节相等：trailer 段 = writeRootSegment("writable_tree", taskRoot)
-    const expected = writeRootSegment("writable_tree", taskRoot)!;
-    expect(text.trimEnd().endsWith(expected.trimEnd())).toBe(true);
+    expect(text).not.toContain("current write root");
+    expect(text).not.toContain(taskRoot);
+    expect(text.trimEnd().endsWith("</skill_files>")).toBe(true);
   });
 
-  it("writable_main + 任意根 → 与旧形态逐字节相等（SC2 字节相等约束）", async () => {
+  it("writable_main 形态入参 + 任意根 → 正文不出现 'current write root'", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-body-t4-main-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
@@ -566,18 +543,22 @@ describe("createSkillBody — T4 处境枚举装配口", () => {
     const text = await createSkillBody({
       entry: entry(dir, "echo"),
       dir,
-      writeSituation: "writable_main",
-      taskRoot,
+      ...({
+        writeSituation: "writable_main",
+        taskRoot,
+      } as unknown as Record<string, never>),
     });
 
-    const expected = writeRootSegment("writable_main", taskRoot)!;
-    expect(text.trimEnd().endsWith(expected.trimEnd())).toBe(true);
-    expect(text).toContain(
+    expect(text).not.toContain("current write root");
+    expect(text).not.toContain(
       `current write root (for write_file / edit_file / bash cwd): ${taskRoot}`
     );
+    expect(text.trimEnd().endsWith("</skill_files>")).toBe(true);
   });
 
-  it("no_writable_root + 非树形根（隔离 ON 未绑树典型）→ ③ 态披露，不含 current write root", async () => {
+  it("no_writable_root 形态入参（隔离 ON 未绑树典型）→ 正文不出现 ③ 态披露", async () => {
+    // 守门：旧 T4 装配口会渲染 ③ 态披露；新装配面即便被传入同形态入参也
+    // 不渲染。③ 态披露的权威路径迁到 worker prior + chat-session rebind。
     const root = await mkdtemp(join(tmpdir(), "iknow-body-t4-no-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
@@ -587,21 +568,20 @@ describe("createSkillBody — T4 处境枚举装配口", () => {
     const text = await createSkillBody({
       entry: entry(dir, "echo"),
       dir,
-      writeSituation: "no_writable_root",
-      taskRoot,
+      ...({
+        writeSituation: "no_writable_root",
+        taskRoot,
+      } as unknown as Record<string, never>),
     });
 
     expect(text).not.toContain("current write root");
-    // ③ 态披露要在正文末段
-    const expected = writeRootSegment("no_writable_root", taskRoot)!;
-    expect(text.trimEnd().endsWith(expected.trimEnd())).toBe(true);
-    // 不点名建树工具
+    expect(text).not.toContain("no writable root");
     expect(text).not.toContain("create-task-worktree");
-    // 不嵌入 taskRoot
     expect(text).not.toContain(taskRoot);
+    expect(text.trimEnd().endsWith("</skill_files>")).toBe(true);
   });
 
-  it("writeSituation 缺席 + taskRoot 在场 → fail-closed 无 trailer（鼓励迁移；TUI 等未迁移面暂保持沉默）", async () => {
+  it("只传 taskRoot 不传 writeSituation → fail-closed 无写根段（与改造前 SC6 一致）", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-body-t4-fc-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
@@ -610,15 +590,15 @@ describe("createSkillBody — T4 处境枚举装配口", () => {
     const text = await createSkillBody({
       entry: entry(dir, "echo"),
       dir,
-      taskRoot: "/tmp/legacy-call",
+      ...({ taskRoot: "/tmp/legacy-call" } as unknown as Record<string, never>),
     });
 
-    // fail-closed：不渲染（鼓励调用方补一次 writeSituation）。
     expect(text).not.toContain("current write root");
+    expect(text).not.toContain("/tmp/legacy-call");
     expect(text.trimEnd().endsWith("</skill_files>")).toBe(true);
   });
 
-  it("writeSituation 在场 + taskRoot 缺席 → fail-closed 无 trailer（empty 臂 typed）", async () => {
+  it("只传 writeSituation 不传 taskRoot → fail-closed 无写根段", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-body-t4-empty-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
@@ -627,37 +607,31 @@ describe("createSkillBody — T4 处境枚举装配口", () => {
     const text = await createSkillBody({
       entry: entry(dir, "echo"),
       dir,
-      writeSituation: "writable_tree",
+      ...({ writeSituation: "writable_tree" } as unknown as Record<
+        string,
+        never
+      >),
     });
 
     expect(text).not.toContain("current write root");
     expect(text.trimEnd().endsWith("</skill_files>")).toBe(true);
   });
 
-  it("三层耦合：writeSituation + taskRoot 同进同出 → 改绑后再装一遍字节稳定（KV 缓存契约，T4 显式声明）", async () => {
+  it("同输入两次调用字符串相等（KV 缓存契约；trailer 退场后由 entry + dir + fs 唯一驱动）", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-body-t4-stable-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
     await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\nbody`);
 
-    const a = await createSkillBody({
-      entry: entry(dir, "echo"),
-      dir,
-      writeSituation: "writable_tree",
-      taskRoot: "/repo/.iknow/worktrees/conv1234",
-    });
-    const b = await createSkillBody({
-      entry: entry(dir, "echo"),
-      dir,
-      writeSituation: "writable_tree",
-      taskRoot: "/repo/.iknow/worktrees/conv1234",
-    });
+    const a = await createSkillBody({ entry: entry(dir, "echo"), dir });
+    const b = await createSkillBody({ entry: entry(dir, "echo"), dir });
     expect(b).toBe(a);
   });
 
-  it("处境翻转（② → ③）→ 输出字节变化（旧字节本来就是错的，正确行为应当 miss）", async () => {
-    // ADR-0069 Consequences: 同一 skill 在 ③ 态装配过、之后绑树变 ② 态,
-    // 再装配字节不同 → 一次 prompt cache miss。这是正确行为的代价,不是回归。
+  it("处境翻转（② → ③）不再改变装配字节 —— 写处境彻底不再流入装配面", async () => {
+    // ADR-0069 Consequences 的旧翻转语义（② → ③ → 字节变化 → prompt cache
+    // miss）在 ADR-0079 后不存在：装配面既不吃 ② 也不吃 ③ → 翻转 = 同字节。
+    // 这条变更把 prompt cache miss 收紧到「只来自 skill 自身内容漂移」一处。
     const root = await mkdtemp(join(tmpdir(), "iknow-body-t4-flip-"));
     roots.push(root);
     const dir = await fixtureDir(root, "echo");
@@ -666,51 +640,22 @@ describe("createSkillBody — T4 处境枚举装配口", () => {
     const treeBody = await createSkillBody({
       entry: entry(dir, "echo"),
       dir,
-      writeSituation: "writable_tree",
-      taskRoot: "/repo/.iknow/worktrees/conv1234",
+      ...({
+        writeSituation: "writable_tree",
+        taskRoot: "/repo/.iknow/worktrees/conv1234",
+      } as unknown as Record<string, never>),
     });
     const noRootBody = await createSkillBody({
       entry: entry(dir, "echo"),
       dir,
-      writeSituation: "no_writable_root",
-      taskRoot: "/repo/.iknow/worktrees/conv1234",
+      ...({
+        writeSituation: "no_writable_root",
+        taskRoot: "/repo/.iknow/worktrees/conv1234",
+      } as unknown as Record<string, never>),
     });
-    expect(treeBody).not.toBe(noRootBody);
-  });
-
-  it("writeSituation 由 writeSituation() 派生（consumer 调用方契约）→ 真实复用三态判定函数", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-body-t4-derived-"));
-    roots.push(root);
-    const dir = await fixtureDir(root, "echo");
-    await fixtureFile(dir, "SKILL.md", `---\nname: echo\n---\nbody`);
-
-    const TREE_ROOT = "/repo/.iknow/worktrees/conv1234";
-    const MAIN_ROOT = "/home/user/project";
-
-    const cases: Array<{
-      readonly isolationOn: boolean;
-      readonly root: string;
-      readonly expected: WriteSituation;
-    }> = [
-      { isolationOn: true, root: TREE_ROOT, expected: "writable_tree" },
-      { isolationOn: true, root: MAIN_ROOT, expected: "no_writable_root" },
-      { isolationOn: false, root: TREE_ROOT, expected: "writable_main" },
-      { isolationOn: false, root: MAIN_ROOT, expected: "writable_main" },
-    ];
-
-    for (const c of cases) {
-      const situation = writeSituation(c.isolationOn, c.root);
-      expect(situation).toBe(c.expected);
-      // 同一 situation 传给 createSkillBody → trailer 段字节由 situation 驱动
-      const text = await createSkillBody({
-        entry: entry(dir, "echo"),
-        dir,
-        writeSituation: situation,
-        taskRoot: c.root,
-      });
-      const expectedSegment = writeRootSegment(situation, c.root)!;
-      expect(text.trimEnd().endsWith(expectedSegment.trimEnd())).toBe(true);
-    }
+    expect(treeBody).toBe(noRootBody);
+    expect(treeBody).not.toContain("current write root");
+    expect(treeBody).not.toContain("no writable root");
   });
 });
 

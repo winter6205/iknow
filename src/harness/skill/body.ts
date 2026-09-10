@@ -24,6 +24,18 @@ export const SKILL_FILES_SAMPLE_LIMIT = 10;
 /** references/ 目录名 — 此目录不递归进 skill_files。 */
 const REFERENCES_DIR = "references";
 
+/**
+ * 337 装配形态双标记（skill-body-short-circuit spec）：成功全文 tool_result
+ * 必然同时含 `Base directory:` 与 `</skill_files>`。recognizer（ACI skill()
+ * 二次短路）与装配 SSOT 共源 —— 改装配形态必须同步这两个字面量。
+ */
+export const SKILL_BODY_MARKERS = {
+  /** createSkillBody 渲染的 `Base directory: <dir>` 提示行前缀。 */
+  baseDirectory: "Base directory:",
+  /** `<skill_files>` 段闭合标签。 */
+  skillFilesClose: "</skill_files>",
+} as const;
+
 /** SKILL.md 文件名 — 不出现在 skill_files 清单里。 */
 const SKILL_BODY_FILE = "SKILL.md";
 
@@ -41,22 +53,13 @@ export interface SkillBodyOptions {
   readonly entry: SkillEntry;
   readonly dir: string;
   /**
-   * T4 (plans/write-situation-disclosure.md) — 处境枚举 + 活 `taskRoot`
-   * 配对传入（specs/write-situation-disclosure.md SC2-SC4 + skill-load-
-   * write-root.md 合同 6 amend）。**两字段同进同出**：
-   *   - 两者都缺席 → 无 trailer（与 337 SC6 改造前形态逐字节一致）；
-   *   - 两者都传 → 按处境渲染（`writable_main` / `writable_tree` 与改造
-   *     前**逐字节相等**；`no_writable_root` 输出 ③ 态披露，不点名建树
-   *     工具）；
-   *   - 只传 `taskRoot` 不传 `writeSituation` → fail-closed 无 trailer
-   *     （鼓励迁移：未补 `writeSituation` 的旧调用方暂保持沉默，不渲染
-   *     错误的「写主仓」字样；详见 ADR-0069 D3）。
-   * 判定函数 (`writeSituation`) 住 `isolation/`，本模块**不 import**
-   * `isolation/`（SC4 依赖方向钉死）—— 判定由消费方在调用时机做，渲染
-   * 面只吃枚举。
+   * ADR-0079 — skill 正文不再挂写根 trailer（与 337 SC6 形态逐字节一致：
+   * frontmatter 剥离 + Base directory 行 + `<skill_files>` 段）。
+   * 写处境披露的权威路径迁到 worker prior（`src/harness/subagent/worker.ts`
+   * 与 `chat-session.ts` rebind 通知）—— 共用同一 helper `writeRootSegment`，
+   * 但不再追加进 skill 正文装配结果。SkillBodyOptions 不再接受 `writeSituation` /
+   * `taskRoot` 字段。
    */
-  readonly writeSituation?: WriteSituation;
-  readonly taskRoot?: string;
   readonly fs?: SkillBodyFs;
 }
 
@@ -190,13 +193,13 @@ const NO_WRITE_ROOT_DISCLOSURE =
   `root in scope right now.`;
 
 /**
- * 装配 skill 正文（frontmatter 剥离 + Base directory 行 + `<skill_files>` 段
- * + 可选写根 trailer）。同输入两次调用字符串相等（KV 缓存契约）。
+ * 装配 skill 正文（frontmatter 剥离 + Base directory 行 + `<skill_files>` 段）。
+ * 同输入两次调用字符串相等（KV 缓存契约）。
  *
- * T4 (plans/write-situation-disclosure.md) — trailer 由处境枚举驱动：
- * `writeSituation` + `taskRoot` 同进同出才渲染；任一缺席 → fail-closed 无
- * trailer（鼓励调用方迁移到双参形态）。详见 `SkillBodyOptions.writeSituation`
- * 注释。
+ * ADR-0079 — 不再追加写根 trailer。写处境披露的权威路径迁到 worker prior
+ * （`src/harness/subagent/worker.ts` 与 `src/cli/chat-session.ts` rebind 通知），
+ * 共用同一 helper `writeRootSegment`。skill 正文装配只保留 skill 自身的两
+ * 段（Base directory 行 + skill_files 段），与 #337 SC6 形态逐字节一致。
  */
 export async function createSkillBody(
   options: SkillBodyOptions
@@ -212,11 +215,6 @@ export async function createSkillBody(
   if (body.length > 0) segments.push(body);
   segments.push(`Base directory: ${dir}`);
   segments.push(skillsSegment);
-  const writeRoot =
-    options.writeSituation !== undefined && options.taskRoot !== undefined
-      ? writeRootSegment(options.writeSituation, options.taskRoot)
-      : null;
-  if (writeRoot !== null) segments.push(writeRoot);
   return segments.join("\n\n");
 }
 
