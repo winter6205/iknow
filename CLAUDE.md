@@ -57,10 +57,6 @@
 npm test          # vitest：unit + harness + integration
 ```
 
-## 上游参考隔离
-
-- `upstream-openharness`（只读参考，gitignore）。
-
 ## Git 操作
 
 - 自动commit。
