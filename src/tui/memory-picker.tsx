@@ -12,6 +12,7 @@ import { useTimeline } from "@opentui/react";
 import type { ModalKeyEvent } from "./modal.js";
 import { PICKER_WIDTH } from "./thinking-picker.js";
 import { tuiPalette } from "./theme.js";
+import { BORDER_CYCLE_MS, flowBorderColor } from "./designs/_color.js";
 
 export interface MemoryPreview {
   readonly autoExtract: boolean;
@@ -83,46 +84,6 @@ export function reduceMemoryPickerKey(
 export function memoryPickerRows(): number {
   return 6;
 }
-
-function hexToRgb(hex: string): readonly [number, number, number] {
-  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
-  if (!m) return [1, 1, 1];
-  const v = parseInt(m[1]!, 16);
-  return [
-    ((v >> 16) & 0xff) / 255,
-    ((v >> 8) & 0xff) / 255,
-    (v & 0xff) / 255,
-  ] as const;
-}
-
-function mixHex(a: string, b: string, t: number): string {
-  const tt = Math.max(0, Math.min(1, t));
-  const [ar, ag, ab] = hexToRgb(a);
-  const [br, bg, bb] = hexToRgb(b);
-  const r = Math.round((ar + (br - ar) * tt) * 255);
-  const g = Math.round((ag + (bg - ag) * tt) * 255);
-  const bl = Math.round((ab + (bb - ab) * tt) * 255);
-  return `#${r.toString(16).padStart(2, "0")}${g
-    .toString(16)
-    .padStart(2, "0")}${bl.toString(16).padStart(2, "0")}`;
-}
-
-function flowBorderColor(phase: number): string {
-  const n = 4;
-  const idx = Math.floor(phase) % n;
-  const f = phase - Math.floor(phase);
-  const tokens = [
-    tuiPalette.logoInk,
-    tuiPalette.running,
-    tuiPalette.logoGold,
-    tuiPalette.running,
-  ];
-  const a = tokens[idx]!;
-  const b = tokens[(idx + 1) % n]!;
-  return mixHex(a, b, f);
-}
-
-const BORDER_CYCLE_MS = 8_000;
 
 export interface MemoryPickerState extends MemoryPreview {
   readonly focusedIndex: 0 | 1;

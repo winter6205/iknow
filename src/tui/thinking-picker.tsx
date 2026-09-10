@@ -40,7 +40,8 @@
  *    由 chromeReserveRows +1 入账）。
  *  - 面板宽度固定 PICKER_WIDTH（不占满屏宽），alignSelf="flex-start" 靠左对齐。
  *  - 颜色数学（gradAt / triangleWindow / flowBorderColor / mixHex）与
- *    design-25 逐字一致，保持 inline（design 文件私有声明，T2 不动它）。
+ *    design-25 逐字一致，收敛到 designs/_color.ts 单一实现（本文件不再内联
+ *    副本；design gallery 各文件按该目录合同保留自包含副本）。
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { TextAttributes, type Timeline } from "@opentui/core";
@@ -55,6 +56,13 @@ import {
   labelPad,
   segmentLen,
 } from "./designs/_geometry.js";
+import {
+  BORDER_CYCLE_MS,
+  flowBorderColor,
+  gradAt,
+  mixHex,
+  triangleWindow,
+} from "./designs/_color.js";
 
 /** 可调思考强度档位（SSOT 引用 slash.ts，不重复定义）。5 档 concrete 顺序
  *  low..max，索引 0..4；""=自适应不在此列。 */
@@ -224,68 +232,8 @@ export function thinkingPickerRows(kind: ThinkingPickerState["kind"]): number {
   return kind === "thinking" ? 5 : 7;
 }
 
-// ── design-25 颜色工具（与 design-25-flow-edge.tsx 逐字一致，inline 私有） ──
-
-/** hex → [r,g,b]（0..1）。非法输入回退 [1,1,1]。 */
-function hexToRgb(hex: string): readonly [number, number, number] {
-  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
-  if (!m) return [1, 1, 1];
-  const v = parseInt(m[1]!, 16);
-  return [
-    ((v >> 16) & 0xff) / 255,
-    ((v >> 8) & 0xff) / 255,
-    (v & 0xff) / 255,
-  ] as const;
-}
-
-/** a/b 按 t∈[0,1] 线性插值（越界 clamp）。 */
-function mixHex(a: string, b: string, t: number): string {
-  const tt = Math.max(0, Math.min(1, t));
-  const [ar, ag, ab] = hexToRgb(a);
-  const [br, bg, bb] = hexToRgb(b);
-  const r = Math.round((ar + (br - ar) * tt) * 255);
-  const g = Math.round((ag + (bg - ag) * tt) * 255);
-  const bl = Math.round((ab + (bb - ab) * tt) * 255);
-  return `#${r.toString(16).padStart(2, "0")}${g
-    .toString(16)
-    .padStart(2, "0")}${bl.toString(16).padStart(2, "0")}`;
-}
-
-/** 3-stop 线性渐变 logoInk(0) → running(0.5) → logoGold(1)，design-25 同款。 */
-function gradAt(t: number): string {
-  const k = Math.max(0, Math.min(1, t));
-  if (k <= 0.5) return mixHex(tuiPalette.logoInk, tuiPalette.running, k * 2);
-  return mixHex(tuiPalette.running, tuiPalette.logoGold, (k - 0.5) * 2);
-}
-
-/** 三角窗：中心 c、半宽 hw → [0,1] 强度（hw 外为 0）。 */
-function triangleWindow(i: number, c: number, hw: number): number {
-  if (hw <= 0) return 0;
-  const d = Math.abs(i - c);
-  if (d >= hw) return 0;
-  return 1 - d / hw;
-}
-
-/** 边框流光：相位 p ∈ [0, 4]，相邻 2 相位 RGB 插值。 */
-function flowBorderColor(phase: number): string {
-  const n = 4;
-  const idx = Math.floor(phase) % n;
-  const f = phase - Math.floor(phase);
-  const tokens = [
-    tuiPalette.logoInk,
-    tuiPalette.running,
-    tuiPalette.logoGold,
-    tuiPalette.running,
-  ];
-  const a = tokens[idx]!;
-  const b = tokens[(idx + 1) % n]!;
-  return mixHex(a, b, f);
-}
-
 // ── 渲染常量（design-25 同款） ──────────────────────────────────────────
 
-/** 边框流光 4 相位周期（design-5/25 同款）。 */
-const BORDER_CYCLE_MS = 8_000;
 /** 边界水线左右流动一趟的时长（alternate ping-pong 单程）。 */
 const EDGE_FLOW_MS = 2400;
 /** 水线晃动幅度（相对 segLen 的半幅，± 0.9 段）。 */
