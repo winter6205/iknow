@@ -111,6 +111,14 @@ describe("createGlobTool — factory shape", () => {
     });
   });
 
+  it("不带输出闸豁免声明（ADR-0083 只对 skill 内建落值）", () => {
+    // glob 输出仍走 executor 兜底闸：命中大量文件时可缩 pattern / path /
+    // limit 重调，「换更精确输入重调」这条恢复路径成立，故不豁免。
+    const tool = createGlobTool("/tmp");
+
+    assert.equal(tool.exemptFromOutputCap, undefined);
+  });
+
   it("inputSchema declares the contract surface (pattern/path/limit)", () => {
     const tool = createGlobTool("/tmp");
     const schema = tool.inputSchema as {

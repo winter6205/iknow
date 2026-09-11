@@ -24,6 +24,8 @@ import { join } from "node:path";
 import { SessionHub } from "../../src/session-api/hub.ts";
 import { SessionStore } from "../../src/session-api/store/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
+import { createSkillBody } from "../../src/harness/skill/body.ts";
+import { createSkillScanner } from "../../src/harness/skill/scanner.ts";
 import type { LoopEngineDeps } from "../../src/harness/index.ts";
 import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
 
@@ -148,14 +150,17 @@ describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
   });
 });
 
-// ADR-0079 — SessionHub.loadSkillBody 不再挂写根 trailer（与 #337 SC6 形
-// 态逐字节一致）。Web getSkillBody 后端与 ACI skill() / TUI slash 同一装
-// 配口，三条生产路径共用 createSkillBody 字节契约（tests/skill/body.test.ts）
-// —— 该契约已把 trailer 退场钉死。本文件覆盖 hub loadSkillBody 路径的「即
-// 便 hub 装配期捕获过活 taskRoot，正文也不再渲染写根段」不变式。slash 面
-// 按同一契约推导（无独立装配测试）。
-describe("SessionHub.loadSkillBody — 正文不挂写根（ADR-0079）", () => {
-  it("build-engine 装配后 loadSkillBody 正文末段是 </skill_files>，不出现 current write root", async () => {
+// specs/skill-body-load-contract.md SC2 — 同一 skill 经 TUI slash 信封 /
+// hub loadSkillBody / ACI skill() 三路进入上下文的正文，与 createSkillBody
+// 产物逐字节相等（三路同一装配口，装配形态由 tests/skill/body.test.ts 钉）。
+// ACI 腿见 tests/harness/aci/tools/skill-output-cap.test.ts；本 describe 补
+// hub 腿。期望值一侧不手搓 entry：装配期 catalog 的真条目（与 loadSkillBody
+// 内部同一 read 点）才是「交付正文的 dir = catalog 条目的 dir」这一环的证
+// 据，手搓会把该环绕过。ADR-0079：hub 侧即便装配期捕获过活 taskRoot，正文
+// 也不再渲染写根 trailer（与 #337 SC6 形态一致）—— 由逐字节相等 + 无写根
+// 段两条断言共同钉死。slash 面按同一契约推导（无独立装配测试）。
+describe("SessionHub.loadSkillBody — 正文不挂写根（ADR-0079 / SC2）", () => {
+  it("build-engine 装配后 loadSkillBody 正文与 createSkillBody 逐字节相等，末段 </skill_files>，不出现 current write root", async () => {
     const { mkdir, writeFile } = await import("node:fs/promises");
     const skillDir = join(baseDir, "skills-wrt", "wrt-echo");
     await mkdir(skillDir, { recursive: true });
@@ -180,7 +185,26 @@ describe("SessionHub.loadSkillBody — 正文不挂写根（ADR-0079）", () => 
         ) => Promise<{ name: string; body: string }>;
       };
       await load.ensureDeps();
+      // 期望值取自装配期同一 read 点：hub 的 skillCatalog 由 build-engine 经
+      // scanner 扫描三根（userHome / projectIdentityRoot / IKNOW_SKILL_DIRS）
+      // 建出，loadSkillBody 内部亦按 entry.dir 取值。这里用同形 scanner 复读
+      // 同一 catalog（settingsSource.home 与生产装配同源），拿到的真条目即
+      // 交付路径实际消费的那一条 —— 不手搓 entry。
+      const catalog = await createSkillScanner({
+        userHome: settingsSource.home,
+        projectIdentityRoot: process.cwd(),
+        env: process.env,
+      }).scan();
+      const entry = catalog.find((candidate) => candidate.name === "wrt-echo");
+      assert.ok(entry !== undefined, "fixture 必须经扫描根进 catalog");
+      const expected = await createSkillBody({ entry, dir: entry.dir });
+
       const { body } = await load.loadSkillBody("wrt-echo");
+      assert.equal(
+        body,
+        expected,
+        "hub 交付正文必须与 createSkillBody 产物逐字节相等（SC2 三路同源）"
+      );
       assert.ok(body.includes("body line"), "skill 自身正文必须保留");
       assert.ok(
         !body.includes("current write root"),

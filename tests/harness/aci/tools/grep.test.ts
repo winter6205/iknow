@@ -95,6 +95,15 @@ describe("createGrepTool — schema/aci shape", () => {
     assert.equal(tool.aci.isConcurrencySafe, true);
     assert.equal(tool.aci.interruptBehavior, "cancel");
   });
+
+  it("不带输出闸豁免声明（ADR-0083 只对 skill 内建落值）", async () => {
+    // grep 命中大文件时仍受 20000 兜底闸 + 引导语约束（用更精确 pattern /
+    // 缩小路径重调是可成立的恢复路径）。
+    const root = await makeScratch("grep-shape-");
+    const tool = createGrepTool(root);
+
+    assert.equal(tool.exemptFromOutputCap, undefined);
+  });
 });
 
 describe("grep — happy path", () => {
@@ -304,7 +313,9 @@ describe("grep — long matching lines", () => {
     );
     const missingRg: GrepToolDeps = {
       spawn: (() => {
-        const error = new Error("spawn missing ENOENT") as NodeJS.ErrnoException;
+        const error = new Error(
+          "spawn missing ENOENT"
+        ) as NodeJS.ErrnoException;
         error.code = "ENOENT";
         return () => {
           throw error;

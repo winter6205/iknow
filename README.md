@@ -55,16 +55,17 @@ Configure the model in `settings.json` (`llm.model`, `llm.apiKey` as a literal o
 
 ## Documentation
 
-| Doc                                                                          | What it is                                  |
-| ---------------------------------------------------------------------------- | ------------------------------------------- |
-| [`docs/architecture.md`](docs/architecture.md)                               | Runtime modules                             |
-| [`docs/guides/user-hooks.md`](docs/guides/user-hooks.md)                     | Declared deny-only hooks (`settings.hooks`) |
-| [`docs/guides/prompt-development.md`](docs/guides/prompt-development.md)     | Prompt development guide                    |
-| [`docs/STATUS.md`](docs/STATUS.md)                                           | What ships vs what does not                 |
-| [`docs/coding-agent-capability-gap.md`](docs/coding-agent-capability-gap.md) | Gap vs a full coding-agent harness          |
-| [`specs/README.md`](specs/README.md)                                         | Active specs only                           |
-| [`CHANGELOG.md`](CHANGELOG.md)                                               | Version history                             |
-| [`docs/adr/`](docs/adr/)                                                     | Architecture decisions                      |
+| Doc                                                                          | What it is                                    |
+| ---------------------------------------------------------------------------- | --------------------------------------------- |
+| [`docs/architecture.md`](docs/architecture.md)                               | Runtime modules                               |
+| [`docs/guides/user-hooks.md`](docs/guides/user-hooks.md)                     | Declared deny-only hooks (`settings.hooks`)   |
+| [`docs/guides/prompt-development.md`](docs/guides/prompt-development.md)     | Prompt development guide                      |
+| [`docs/guides/skill-authoring.md`](docs/guides/skill-authoring.md)           | Skill author contract (body vs `references/`) |
+| [`docs/STATUS.md`](docs/STATUS.md)                                           | What ships vs what does not                   |
+| [`docs/coding-agent-capability-gap.md`](docs/coding-agent-capability-gap.md) | Gap vs a full coding-agent harness            |
+| [`specs/README.md`](specs/README.md)                                         | Active specs only                             |
+| [`CHANGELOG.md`](CHANGELOG.md)                                               | Version history                               |
+| [`docs/adr/`](docs/adr/)                                                     | Architecture decisions                        |
 
 Historical rewrite notes (upstream mapping, vector retrieval, unused prototypes) live under [`docs/archive/`](docs/archive/), not in the live index.
 

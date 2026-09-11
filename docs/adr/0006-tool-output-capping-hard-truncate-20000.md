@@ -46,3 +46,5 @@ GH issue #140 C+D 块（Q9 截断策略 / Q10 封顶阈值，吸收自 #138 封�
 - 参照：`engine/query.py:524-553`（`_offload_tool_output_if_needed`，16000 阈值 + 3000 预览 + 落盘）/ `services/tool_outputs.py:10-12`（阈值可配 + microcompact 4000）/ `tools/bash_tool.py:139-140`（12000 硬编码）。
 - GH issue #136（token 核算，相对阈值的前置）/ #119（压缩策略，落盘重审点）。
 - 关联 ADR：0004（工具集 + 契约 X）/ 0005（executor 加固——兜底执行的主体）。
+
+**适用面收窄（ADR-0083）**：`skill()` 的装配正文移出本 ADR 的兜底闸——豁免是装配期静态声明（`ToolDef.exemptFromOutputCap`），不是运行期字段、不破契约 X。其余工具（含 MCP）的 20000 字符裁决不变。见 `docs/adr/0083-skill-body-exempt-from-executor-output-cap.md`。

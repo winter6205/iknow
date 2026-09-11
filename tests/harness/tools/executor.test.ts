@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { createRegistry } from "../../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../../src/harness/tools/executor.ts";
 import { toAnthropicToolResults } from "../../../src/harness/tools/tool-result.ts";
+import type { AnthropicContentBlock } from "../../../src/harness/model-adapter/types.ts";
 import type { ToolDef } from "../../../src/harness/tools/types.ts";
 
 const echo: ToolDef = {
@@ -602,6 +603,128 @@ describe("createExecutor (T3 JSON whitelist + 20000 cap)", () => {
     assert.ok(text !== undefined);
     assert.ok(text!.length <= 20000, `length ${text!.length} > 20000`);
     assert.ok(/\[executor: 输出超长已截断/.test(text!), "marker present");
+  });
+});
+
+describe("createExecutor (ADR-0083 装配期输出闸豁免声明)", () => {
+  // ADR-0083:豁免是**装配期静态声明**,落 Foundation `ToolDef` 可选字段;
+  // executor 读到 true 时原样交付(不截断、不追加 marker)。契约 X 只管
+  // 「不信任 payload 内声称的截断字段」——本字段是工具定义属性,不是任何
+  // 一次输出的元数据。未声明 / 显式 false 的工具行为与声明前逐字节相同。
+  //
+  // 断言面取「交付文本身份」而非块类型:豁免下 `text` 与 handler 返回逐字节
+  // 相等是本合同的核心命题,字符串相等同时覆盖长度与内容。
+  const deliveredText = (
+    r: { kind: string; payload?: readonly AnthropicContentBlock[] } | undefined
+  ): string | undefined => {
+    const block = r?.kind === "ok" ? r.payload?.[0] : undefined;
+    return block?.type === "text" ? block.text : undefined;
+  };
+
+  it("声明的工具:超长 payload 原样交付(逐字节相等、> 20000、无截断标记)", async () => {
+    const big = "技能正文".repeat(6000); // 24000 字符,远超 20000 兜底闸
+    assert.ok(big.length > 20000);
+    const exempt: ToolDef = {
+      name: "exempt-long",
+      description: "装配期声明豁免",
+      inputSchema: { type: "object", additionalProperties: false },
+      exemptFromOutputCap: true,
+      handler: () => big,
+    };
+    const exec = createExecutor(createRegistry([exempt]));
+    const results = await exec.executeAll([
+      { id: "c1", name: "exempt-long", input: {} },
+    ]);
+    assert.equal(results[0]!.kind, "ok");
+    const text = deliveredText(results[0]);
+    assert.equal(text, big);
+    assert.ok(text!.length > 20000, `length ${text!.length} not > 20000`);
+    assert.ok(
+      !text!.includes("executor: 输出超长已截断"),
+      "豁免路径不得出现 executor 截断标记"
+    );
+  });
+
+  it("声明的工具:恰好 20000 字符原样交付(边界)", async () => {
+    const exact = "y".repeat(20000);
+    const exempt: ToolDef = {
+      name: "exempt-exact",
+      description: "装配期声明豁免",
+      inputSchema: { type: "object", additionalProperties: false },
+      exemptFromOutputCap: true,
+      handler: () => exact,
+    };
+    const exec = createExecutor(createRegistry([exempt]));
+    const results = await exec.executeAll([
+      { id: "c1", name: "exempt-exact", input: {} },
+    ]);
+    assert.equal(results[0]!.kind, "ok");
+    assert.equal(deliveredText(results[0]), exact);
+  });
+
+  it("未声明(缺席 / 显式 false):超长 payload 仍截到 <= 20000 并带既有标记", async () => {
+    const make = (name: string, flag?: boolean): ToolDef => ({
+      name,
+      description: "无豁免声明",
+      inputSchema: { type: "object", additionalProperties: false },
+      ...(flag !== undefined ? { exemptFromOutputCap: flag } : {}),
+      handler: () => "z".repeat(25000),
+    });
+    const exec = createExecutor(
+      createRegistry([make("no-flag"), make("flag-false", false)])
+    );
+    for (const name of ["no-flag", "flag-false"]) {
+      const results = await exec.executeAll([{ id: name, name, input: {} }]);
+      assert.equal(results[0]!.kind, "ok");
+      const text = deliveredText(results[0]);
+      assert.ok(text !== undefined);
+      assert.ok(
+        text!.length <= 20000,
+        `${name}: length ${text!.length} > 20000`
+      );
+      assert.ok(
+        /\[executor: 输出超长已截断/.test(text!),
+        `${name}: 既有截断标记必须保留`
+      );
+      assert.ok(/如需更多信息，用更精确的输入重新调用/.test(text!));
+    }
+  });
+
+  it("未声明:恰好 20000 字符不截断(边界,仅 > 20000 触发闸)", async () => {
+    const exact = "w".repeat(20000);
+    const atLimit: ToolDef = {
+      name: "no-flag-exact",
+      description: "无豁免声明",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: () => exact,
+    };
+    const exec = createExecutor(createRegistry([atLimit]));
+    const results = await exec.executeAll([
+      { id: "c1", name: "no-flag-exact", input: {} },
+    ]);
+    assert.equal(results[0]!.kind, "ok");
+    assert.equal(deliveredText(results[0]), exact);
+  });
+
+  it("声明经 createRegistry 冻结后存活,executor 走注册表路径读到豁免", async () => {
+    const big = "q".repeat(25000);
+    const declared: ToolDef = {
+      name: "declared",
+      description: "装配期声明豁免",
+      inputSchema: { type: "object", additionalProperties: false },
+      exemptFromOutputCap: true,
+      handler: () => big,
+    };
+    const reg = createRegistry([declared]);
+    // 结构面:声明是 ToolDef 上的声明字段,经 Object.freeze({ ...def }) 不变
+    // (cast-free 读:类型上可见,不依赖影子契约)。
+    assert.equal(reg.get("declared")?.exemptFromOutputCap, true);
+    const exec = createExecutor(reg);
+    const results = await exec.executeAll([
+      { id: "c1", name: "declared", input: {} },
+    ]);
+    assert.equal(results[0]!.kind, "ok");
+    assert.equal(deliveredText(results[0]), big);
   });
 });
 

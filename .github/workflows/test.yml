@@ -138,7 +138,8 @@ jobs:
             --exclude tests/harness/sandbox/runner.test.ts \
             --exclude tests/harness/sandbox/server.test.ts \
             --exclude tests/subagent/envelope-freeze.test.ts \
-            --exclude tests/harness/disclosure-index-align/sc7-index-demotion.test.ts
+            --exclude tests/harness/disclosure-index-align/sc7-index-demotion.test.ts \
+            --exclude tests/harness/aci/tools/skill-output-cap.test.ts
 
   # 全量兜底（nightly cron + manual dispatch）。内容 = 原 test job。
   test-full:
@@ -253,4 +254,5 @@ jobs:
             --exclude tests/harness/sandbox/runner.test.ts \
             --exclude tests/harness/sandbox/server.test.ts \
             --exclude tests/subagent/envelope-freeze.test.ts \
-            --exclude tests/harness/disclosure-index-align/sc7-index-demotion.test.ts
+            --exclude tests/harness/disclosure-index-align/sc7-index-demotion.test.ts \
+            --exclude tests/harness/aci/tools/skill-output-cap.test.ts

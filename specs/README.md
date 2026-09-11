@@ -49,6 +49,7 @@
 - `337-skill-mcp-extension.md` — skill + MCP 扩展源（SC6 写根 trailer **amended by** `skill-load-write-root.md`，再 **amended by** `skill-body-short-circuit.md`：正文不再挂 trailer）
 - `skill-load-write-root.md` — skill 正文装配收口（slash / `skill()` / Web 共用装配口）；写根 helper 仍与 worker prior / 改绑一次共用；skill 正文挂 trailer 的合同 2/3/4 **amended by** `skill-body-short-circuit.md`；合同 6 / SC6 **amended by** `write-situation-disclosure.md`；plan: `plans/skill-load-write-root.md`（历史）/ `plans/skill-body-short-circuit.md`（现行）
 - `skill-body-short-circuit.md` — `skill()` 二次短路（可见历史已有全文则短回执）+ skill 正文不挂写根；ADR-0079；plan: `plans/skill-body-short-circuit.md`
+- `skill-body-load-contract.md` — skill 正文加载契约（三路同源、不经通用输出闸；豁免为内建装配期静态声明，MCP 不可取得）
 - `disclosure-index-align.md` — 索引档对齐（#631 短描述收回、直呼加载、超限降档、删 `skill_search`）；amends ADR-0043 必经 `tool_search` 读法；plan: `plans/disclosure-index-align.md`
 - `406-secret-roundtrip-mask.md` — Secret roundtrip mask（supersedes `#126` hook-system）
 - `user-hook-router.md` — 用户钩子同进程 router（内置/用户钩子；V1 声明式 PreToolUse/PreWrite/PreCommit；plan: `plans/user-hook-router.md`）；不替代 #126 契约或 #406 roundtrip

@@ -60,6 +60,23 @@ export interface AciRegistry {
 }
 
 /**
+ * ADR-0083 结构闸：MCP 工具**不可自称**取得 `exemptFromOutputCap` 豁免。
+ *
+ * 生产路径本就不落该声明（`src/harness/mcp/adapter.ts` 的 `toAciToolDef`
+ * 只映射 name / description / inputSchema / aci / handler），本函数防的是
+ * in-process 手工构造的 def 混入 —— 外部源天然是第三方数据，豁免只对内建
+ * `createSkillTool` 这一处装配期落值。
+ *
+ * 未携带声明的 def 原样返回（零拷贝，保持此前 `Map.set(def)` 的对象身份
+ * 契约：`catalog.get(name)` 与注册入参是同一引用）；携带时才重建冻结副本。
+ */
+function stripOutputCapExemption(def: AciToolDef): AciToolDef {
+  if (def.exemptFromOutputCap !== true) return def;
+  const { exemptFromOutputCap: _stripped, ...rest } = def;
+  return Object.freeze(rest);
+}
+
+/**
  * 构造 ACI registry：
  *   - inner = createRegistry(tools)（协议 registry，交给 createExecutor）；
  *   - catalog 持有 AciToolDef 全量（权限层与延迟加载共用）；
@@ -159,7 +176,12 @@ export function createAciRegistry(
           `validator compile failed for ${def.name}: ${msg}`
         );
       }
-      pending.set(def.name, def);
+      // 剥离豁免声明，不拒绝整次注册：丢弃声明后工具功能不变（只是回到
+      // 兜底闸），而拒绝会让一个外部源的坏 def 连累同批其它工具、并把装配
+      // 期错误留给 MCP 连接路径处置。剥离是结构闸 —— 存储侧不再携带该
+      // 字段，下游（executor 的 safeContent）结构上读不到，即便调用方先
+      // `catalog.get()` 再手工交 executor 也是 false。
+      pending.set(def.name, stripOutputCapExemption(def));
     }
     for (const [name, def] of pending) {
       externalByExt.set(name, def);

@@ -72,6 +72,20 @@ export interface ToolDef {
   /** JSON Schema(与 Executor 严格校验同源;015 冻)。 */
   readonly inputSchema: Record<string, unknown>;
   readonly handler: ToolHandler;
+  /**
+   * 装配期静态声明(ADR-0083):本工具输出不进 Executor 兜底输出闸
+   * (`OUTPUT_HARD_CAP`),executor 原样交付、不追加截断标记。
+   *
+   * 为什么存在:ADR-0006 的兜底闸以「输出是可再生查询」为前提;`skill()`
+   * 正文是一次装配产物(单一来源、整份语义),截断后没有「换更精确的输入
+   * 重调」这条恢复路径,半份技能程序反而更危险。
+   *
+   * 边界:声明写在 `ToolDef` 上、由工具工厂装配期落值,不是任何一次输出
+   * 的元数据,也**不是**截断元数据声称 —— 契约 X(executor 是截断元数据
+   * 唯一权威、永不信任 payload 内声称字段)不受影响。MCP 转换路径不落此
+   * 声明(不可自称取得)。
+   */
+  readonly exemptFromOutputCap?: boolean;
 }
 
 /** Registry 公共接口:构造期校验、不可变、按名定位(015 拥有)。 */

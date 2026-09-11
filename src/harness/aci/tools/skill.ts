@@ -34,7 +34,7 @@
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import type { AnthropicNativeMessage } from "../../model-adapter/types.js";
-import type { SkillCatalog } from "../../skill/catalog.js";
+import type { SkillCatalog, SkillEntry } from "../../skill/catalog.js";
 import { createSkillBody, SKILL_BODY_MARKERS } from "../../skill/body.js";
 
 /**
@@ -52,6 +52,45 @@ export interface SkillToolDeps {
 const SHORT_CIRCUIT_RECEIPT =
   "Skill body already in context. Do not call `skill` again — use the body fed earlier.";
 
+type ContentBlock = AnthropicNativeMessage["content"][number];
+type ToolUseBlock = Extract<ContentBlock, { type: "tool_use" }>;
+type ToolResultBlock = Extract<ContentBlock, { type: "tool_result" }>;
+
+/** 该 block 是不是「本次要判定的 skill 名」的 tool_use（名字不同不算）。 */
+function isSkillUseOf(
+  block: ContentBlock,
+  name: string
+): block is ToolUseBlock {
+  return (
+    block.type === "tool_use" &&
+    block.name === "skill" &&
+    (block.input as { name?: unknown } | null | undefined)?.name === name
+  );
+}
+
+/**
+ * 该 tool_result 是不是「已被认领的 id + 非 error」的成功结果。is_error
+ * 的失败结果不算 —— 失败文本可能带标记，但正文并未真的入史。
+ */
+function isSuccessResultOf(
+  block: ContentBlock,
+  wantedIds: ReadonlySet<string>
+): block is ToolResultBlock {
+  return (
+    block.type === "tool_result" &&
+    wantedIds.has(block.tool_use_id) &&
+    block.is_error !== true
+  );
+}
+
+/** 337 装配形态判据：结果文本同时含双标记（缺一 = 截断形，不作数）。 */
+function hasAssemblyMarkers(text: string): boolean {
+  return (
+    text.includes(SKILL_BODY_MARKERS.baseDirectory) &&
+    text.includes(SKILL_BODY_MARKERS.skillFilesClose)
+  );
+}
+
 /**
  * 判定可见历史里是否已有 skill 名 `name` 的成功全文 tool_result
  * （skill-body-short-circuit spec「成功全文」判据）：
@@ -67,31 +106,14 @@ export function hasVisibleFullSkillBody(
   const wantedIds = new Set<string>();
   for (const message of messages) {
     for (const block of message.content) {
-      if (
-        block.type === "tool_use" &&
-        block.name === "skill" &&
-        (block.input as { name?: unknown } | null | undefined)?.name === name
-      ) {
-        wantedIds.add(block.id);
-      }
+      if (isSkillUseOf(block, name)) wantedIds.add(block.id);
     }
   }
   if (wantedIds.size === 0) return false;
   for (const message of messages) {
     for (const block of message.content) {
-      if (
-        block.type === "tool_result" &&
-        wantedIds.has(block.tool_use_id) &&
-        block.is_error !== true
-      ) {
-        const text = resultBlockText(block.content);
-        if (
-          text.includes(SKILL_BODY_MARKERS.baseDirectory) &&
-          text.includes(SKILL_BODY_MARKERS.skillFilesClose)
-        ) {
-          return true;
-        }
-      }
+      if (!isSuccessResultOf(block, wantedIds)) continue;
+      if (hasAssemblyMarkers(resultBlockText(block.content))) return true;
     }
   }
   return false;
@@ -113,6 +135,45 @@ function resultBlockText(content: unknown): string {
       .join("\n");
   }
   return "";
+}
+
+/**
+ * 同波短路查询 + 预记，一步完成（SC7）：命中「该 turn 已装配过该名」返回
+ * `undefined`（调用方回短回执）；否则同步预记并返回回滚凭据。预记必须先于
+ * 装配 —— 同波 Promise.all 并发启动的第二个 handler 在本 handler 尚未返回
+ * 时就能读到（tool_result 入史前 wave map 是唯一可见判据）。
+ */
+function claimSameWave(
+  assembledByTurn: Map<string, Set<string>>,
+  turnId: string,
+  name: string
+): Set<string> | undefined {
+  const existing = assembledByTurn.get(turnId);
+  if (existing?.has(name) === true) return undefined;
+  const waveSet = existing ?? new Set<string>();
+  waveSet.add(name);
+  assembledByTurn.set(turnId, waveSet);
+  return waveSet;
+}
+
+/**
+ * 装配正文（T6：frontmatter 剥离 + Base directory 行 + skill_files 段；
+ * ADR-0079 起不再追加写根 trailer）。entry.dir 即 SKILL.md 所在目录
+ * （catalog.getBodyPath 内部 join(dir, "SKILL.md")）。装配抛错 → 回滚预记
+ * （fail-closed）：正文从未入史就不得谎称已加载，第二次同名调用应重装配
+ * 或让错误显形。
+ */
+async function assembleWithRollback(
+  entry: SkillEntry,
+  name: string,
+  waveSet: Set<string> | undefined
+): Promise<string> {
+  try {
+    return await createSkillBody({ entry, dir: entry.dir });
+  } catch (err) {
+    waveSet?.delete(name);
+    throw err;
+  }
 }
 
 /**
@@ -144,6 +205,13 @@ export function createSkillTool(deps: SkillToolDeps): AciToolDef {
       required: ["name"],
       additionalProperties: false,
     },
+    // ADR-0083 — 装配期静态声明:本工具的输出（一次装配产物、整份语义，
+    // 不是可再生查询）不进 executor 的 `OUTPUT_HARD_CAP` 兜底截断。落值
+    // 点在此，读点只在 `src/harness/tools/executor.ts`（safeContent）；
+    // 其余内建工厂不落此声明，MCP 转换路径不落（`toAciToolDef` 只映射
+    // name / description / inputSchema），`registerExternal` 另做剥离防
+    // 手工构造的 mcp__ def 混入。
+    exemptFromOutputCap: true,
     handler: async (
       input: unknown,
       ctx?: ToolExecutionContext
@@ -158,29 +226,15 @@ export function createSkillTool(deps: SkillToolDeps): AciToolDef {
       if (messages !== undefined && hasVisibleFullSkillBody(messages, name)) {
         return SHORT_CIRCUIT_RECEIPT;
       }
+      // turnId 缺席（slash / 直调 handler）→ 无同波登记可查，fail-closed 灌全文。
+      const turnId = ctx?.turnId;
       let waveSet: Set<string> | undefined;
-      if (ctx?.turnId !== undefined) {
-        if (assembledByTurn.get(ctx.turnId)?.has(name)) {
-          return SHORT_CIRCUIT_RECEIPT;
-        }
-        // 预记（同步，先于装配）：同波 Promise.all 并发启动的第二个 handler
-        // 在本 handler 尚未返回时就能读到 —— tool_result 入史前 wave map
-        // 是唯一可见判据。
-        waveSet = assembledByTurn.get(ctx.turnId) ?? new Set<string>();
-        waveSet.add(name);
-        assembledByTurn.set(ctx.turnId, waveSet);
+      if (turnId !== undefined) {
+        waveSet = claimSameWave(assembledByTurn, turnId, name);
+        // undefined = 该 turn 已装配过该名 → 正文已在场，短路。
+        if (waveSet === undefined) return SHORT_CIRCUIT_RECEIPT;
       }
-      // T6: 装配正文 (frontmatter 剥离 + Base directory 行 + skill_files 段)。
-      // entry.dir 即 SKILL.md 所在目录（catalog.getBodyPath 内部 join(dir, "SKILL.md")）。
-      // ADR-0079 — 不再追加写根 trailer。
-      try {
-        return await createSkillBody({ entry, dir: entry.dir });
-      } catch (err) {
-        // 装配失败 → 回滚预记（fail-closed）：第二次同名调用重装配或让
-        // 错误显形，不假装已加载。
-        waveSet?.delete(name);
-        throw err;
-      }
+      return await assembleWithRollback(entry, name, waveSet);
     },
     aci: {
       category: "read-only",
