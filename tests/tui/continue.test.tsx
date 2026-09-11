@@ -581,9 +581,11 @@ describe("TUI /continue busy-guard + Ctrl+C", () => {
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "seed");
     await app.typeText("/compact");
     await app.pressEnter();
+    // compact 在途标记 = design-25 进度面板标题（Compacting）；面板在
+    // promise 前建立，故此处即「压缩在跑」的可视证据。
     await untilFrame(
       app.setup,
-      (f) => f.includes("正在压缩"),
+      (f) => f.includes("Compacting"),
       8000,
       "compacting"
     );

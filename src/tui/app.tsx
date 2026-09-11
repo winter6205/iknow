@@ -126,6 +126,17 @@ import {
   type ThinkingPickerState,
 } from "./thinking-picker.js";
 import {
+  COMPACT_HOLD_MS,
+  CompactProgress,
+  compactProgressRows,
+  reduceCompactionEvent,
+  settleCompactPanel,
+  startCompactPanel,
+  type CompactProgressState,
+  type CompactProgressSource,
+  type CompactTerminalKind,
+} from "./compact-progress.js";
+import {
   MemoryPicker,
   applyMemoryPreviewToggle,
   committedMemoryPatch,
@@ -262,6 +273,44 @@ export { inputVisibleLineCount, inputWrapLineCount, MAX_INPUT_LINES };
  * 元素 → 0 行。
  */
 /**
+ * /compact 入口护栏文案 SSOT（纯函数，可单测 —— Spec review Medium#3：
+ * 五条 guard 原先内联在 switch 分支里，只有 draft 一条被 app 级测试间接覆盖）。
+ *
+ * 五条 guard 覆盖的手动路径前置条件：
+ *  - busy：turn 在跑，压缩要排队（runState 门）；
+ *  - in_flight：同一时刻只允许一条 /compact（compactingControllerRef 同步门）；
+ *  - draft：会话尚未建档，没有可压缩的东西；
+ *  - cancelled：promise 结果 cancelled（pre-abort 早返回 / 事件标记）；
+ *  - failed：compactSession 抛出（describeError 注入）。
+ */
+export type CompactGuard = "busy" | "in_flight" | "draft";
+
+export function compactGuardNoticeFor(guard: CompactGuard): string {
+  switch (guard) {
+    case "busy":
+      return "Session is running; compact after this turn ends.";
+    case "in_flight":
+      return "Compaction already in progress; press Esc to cancel.";
+    case "draft":
+      return "Empty session — nothing to compact yet.";
+    default: {
+      const _exhaustive: never = guard;
+      throw new Error(`unknown compact guard: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+/** 压缩成功取消（promise 结果 cancelled）的 notice 文案。 */
+export function compactCancelledNotice(): string {
+  return "Compaction cancelled — session unchanged.";
+}
+
+/** 压缩抛错的 notice 前缀（错误体由 describeError 兜底，非纯函数部分）。 */
+export function compactFailedNoticePrefix(): string {
+  return "Compaction failed: ";
+}
+
+/**
  * plan compress-trigger-gate T4 + review-fix:把 /compact notice 文案决策抽成
  * module-level 纯函数,便于 bun:test 单测覆盖 4 reason 分支(避免 mount
  * 整 TUI 渲染链路 + frozen bridge mock)。函数式 + exhaustiveness 检查
@@ -275,9 +324,9 @@ export function compactNoticeFor(
     // compacted=true 路径:windowed → 保留尾部 + 裁早期;full_summary → 摘要前缀 + 保留尾部。
     switch (reason) {
       case "windowed":
-        return ["已压缩上下文（保留尾部，裁剪早期消息）。"];
+        return ["Context compacted (kept tail, trimmed early messages)."];
       case "full_summary":
-        return ["已通过结构化摘要压缩上下文（保留尾部 + 摘要前缀）。"];
+        return ["Context compacted (structured summary + kept tail)."];
       case "below_token_threshold":
       case "messages_too_few":
         // 逻辑上 compacted=true 不该拿到这些 reason;列全满足 exhaustiveness。
@@ -297,7 +346,7 @@ export function compactNoticeFor(
   // / 压缩成功 reason 在此分支出现均属契约破坏,抛错而非呈现 auto 阈值文案。
   switch (reason) {
     case "messages_too_few":
-      return ["没有可压缩的上下文，会话保持原样。"];
+      return ["Nothing to compact — session unchanged."];
     case "below_token_threshold":
     case "windowed":
     case "full_summary":
@@ -341,9 +390,20 @@ export function noticeRenderRows(
  *   - notice 本体 + 自身 marginBottom=1
  *   - modal 本体 + 自身 marginBottom=1
  *   - thinking-picker 面板 + 自身 marginBottom=1（pickerRows 同 modalRows 约定）
+ *   - compact 进度面板 + 自身 marginBottom=1（compactRows 同上款约定）
  *   - 子代理状态面板（ContextBar 之下第二站，不计入 chrome 行账，避免把输入框往上顶）
  *   - 后台运行标记行（存在 running-bg 时）
  */
+/**
+ * 面板型槽位的统一入账：缺省 0，行数 > 0 → rows + 1（自身 marginBottom=1），
+ * 否则 0。notice / modal / picker / compact 四槽同款约定 —— 四处各写一遍
+ * `?? 0` + 三元必然漂移，也把 chromeReserveRows 的复杂度顶到硬门之上。
+ */
+function panelSlotRows(rows: number | undefined): number {
+  const n = rows ?? 0;
+  return n > 0 ? n + 1 : 0;
+}
+
 export function chromeReserveRows(opts: {
   readonly noticeRows: number;
   readonly inputHintRows: number;
@@ -367,21 +427,26 @@ export function chromeReserveRows(opts: {
   readonly verifyRows?: number;
   /** run_graph chrome 一行（0 或 1）。缺省 0 → 无快照不占行。 */
   readonly graphRows?: number;
+  /** compact 进度面板行数（compactProgressRows()，6 行）。缺省 0 → 无面板
+   *   不占行（旧调用 / 无压缩路径零影响）。 */
+  readonly compactRows?: number;
 }): number {
   const inputContentRows = Math.max(
     1,
     Math.min(opts.inputRows ?? 1, MAX_INPUT_LINES)
   );
-  const modalRows = opts.modalRows ?? 0;
-  const pickerRows = opts.pickerRows ?? 0;
-  const panelRows = opts.panelRows ?? 0;
-  const agentStatusRows = opts.agentStatusRows ?? 0;
-  const envPaneRows = opts.envPaneRows ?? 0;
-  const verifyRows = opts.verifyRows ?? 0;
-  const graphRows = opts.graphRows ?? 0;
-  const noticeTotal = opts.noticeRows > 0 ? opts.noticeRows + 1 : 0;
-  const modalTotal = modalRows > 0 ? modalRows + 1 : 0;
-  const pickerTotal = pickerRows > 0 ? pickerRows + 1 : 0;
+  // 尾部纯增槽位（含 marginBottom 已由各自 +1 表达的项）逐项求和。
+  const tailRows =
+    panelSlotRows(opts.noticeRows) + // notice + marginBottom
+    panelSlotRows(opts.modalRows) +
+    panelSlotRows(opts.pickerRows) +
+    panelSlotRows(opts.compactRows) + // compact 进度面板 + marginBottom
+    (opts.panelRows ?? 0) +
+    (opts.agentStatusRows ?? 0) +
+    (opts.envPaneRows ?? 0) +
+    (opts.verifyRows ?? 0) +
+    (opts.graphRows ?? 0) +
+    (opts.bgLine ? 1 : 0); // 后台运行标记行
   return (
     1 + // top headroom
     1 + // mode指示行
@@ -390,15 +455,7 @@ export function chromeReserveRows(opts: {
     opts.inputHintRows +
     1 + // ContextBar
     1 + // ask 槽
-    noticeTotal +
-    modalTotal +
-    pickerTotal +
-    panelRows +
-    agentStatusRows +
-    envPaneRows +
-    verifyRows +
-    graphRows +
-    (opts.bgLine ? 1 : 0)
+    tailRows
   );
 }
 
@@ -785,6 +842,142 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // re-entry 护栏(防止 /compact 重复触发)同样看此 ref(同步源,无 React
   // commit 竞态;Standards review Low#4 修复)。
   const compactingControllerRef = useRef<AbortController | null>(null);
+  // compact 进度面板(per-conversation keyed,与 liveToolRuns / agentStatuses
+  // 同款归属纪律:事件按到达时的会话分键,渲染只取 active 会话的条目)。
+  // 手动 /compact 与 turn 内 auto-compact 共用同一 reduce —— auto 路径此前
+  // 对用户完全静默,本面板是它的第一处可见化。
+  const [compactPanels, setCompactPanels] = useState<
+    Record<string, CompactProgressState>
+  >({});
+  // 终态停留 timer(conversationId → handle):终态后 HOLD_MS 卸载面板,
+  // 让 100% / 失败色可见。新压缩开始 / 卸载时清 pending,防迟到 timer 打到
+  // 新面板。
+  const compactTimersRef = useRef(
+    new Map<string, ReturnType<typeof setTimeout>>()
+  );
+  /** 清 pending timer(ref 簿记与 clearTimeout 成对,避免漏清)。 */
+  function clearCompactTimer(conversationId: string): void {
+    const timer = compactTimersRef.current.get(conversationId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      compactTimersRef.current.delete(conversationId);
+    }
+  }
+  /** 立即移除面板 + 清 pending timer(no-op / turn finally 清扫用)。 */
+  function clearCompactPanel(conversationId: string): void {
+    clearCompactTimer(conversationId);
+    setCompactPanels((prev) => {
+      if (!(conversationId in prev)) return prev;
+      const { [conversationId]: _dropped, ...rest } = prev;
+      return rest;
+    });
+  }
+  /**
+   * 武装 HOLD_MS 卸载 timer(幂等:已武装则不重置 —— 首个终态信号开始计时,
+   * 后续重复 settle 不延长停留窗口)。
+   *
+   * 两条路径都必须武装,且入口不同(turn 路径没有 promise 结果可依赖 ——
+   * 压缩发生在 run 内部,终态信号只能来自事件):漏了任何一条,面板就会带着
+   * `✓ done` 永久挂在屏上并持续顶着 chrome 行账(Spec review High)。
+   */
+  function armCompactHoldTimer(conversationId: string): void {
+    if (compactTimersRef.current.has(conversationId)) return;
+    const timer = setTimeout(() => {
+      compactTimersRef.current.delete(conversationId);
+      setCompactPanels((prev) => {
+        if (!(conversationId in prev)) return prev;
+        const { [conversationId]: _dropped, ...rest } = prev;
+        return rest;
+      });
+    }, COMPACT_HOLD_MS);
+    compactTimersRef.current.set(conversationId, timer);
+  }
+  /**
+   * 统一终态入口(promise 结果是终态权威,plan D3.5):设终态 + 武装 HOLD_MS
+   * 卸载 timer。面板已不在(no-op 已清 / 未曾建立)→ setState no-op;timer 仍
+   * 武装但到点是 no-op,无副作用。
+   */
+  function settleCompactPanelFor(
+    conversationId: string,
+    kind: CompactTerminalKind
+  ): void {
+    setCompactPanels((prev) => {
+      const current = prev[conversationId];
+      if (current === undefined) return prev;
+      const next = settleCompactPanel(current, kind, Date.now());
+      if (next === current) return prev;
+      return { ...prev, [conversationId]: next };
+    });
+    armCompactHoldTimer(conversationId);
+  }
+  /**
+   * 压缩事件统一投递入口（turn / manual 两条路径共用，plan D3）。
+   *
+   * 职责三件（顺序敏感）：
+   *  1. `compaction_started` → 先清该会话 pending hold timer：新 run 开始，
+   *     上一次的卸载 timer 若还在飞，到点会删掉**本次**的新面板（纪律见
+   *     compactTimersRef 注释）；
+   *  2. reduce 落 state（identity 守卫：非压缩事件 / 未变 → 不触发 re-render）；
+   *  3. 终态事件 → 武装 HOLD_MS 卸载 timer。
+   *
+   * 第 3 件是 Spec review High 的修复点：turn 路径的终态**只能**来自事件
+   * （压缩跑在 run 内部，没有 promise 结果可依赖），漏武装即 `✓ done` 面板
+   * 永久挂屏 + 持续顶着 chrome 行账。manual 路径重复武装是幂等 no-op。
+   */
+  function applyCompactEvent(
+    conversationId: string,
+    event: HarnessStreamEvent,
+    source: CompactProgressSource
+  ): void {
+    if (event.type === "compaction_started") {
+      clearCompactTimer(conversationId);
+    }
+    setCompactPanels((prev) => {
+      const next = reduceCompactionEvent(prev[conversationId], event, {
+        source,
+        nowMs: Date.now(),
+      });
+      if (next === prev[conversationId]) return prev;
+      if (next === undefined) {
+        const { [conversationId]: _dropped, ...rest } = prev;
+        return rest;
+      }
+      return { ...prev, [conversationId]: next };
+    });
+    if (
+      event.type === "compaction_completed" ||
+      event.type === "compaction_failed" ||
+      event.type === "compaction_cancelled"
+    ) {
+      armCompactHoldTimer(conversationId);
+    }
+  }
+  /**
+   * 非终态兜底清扫（plan D3.5 的「finally 强扫」语义，turn / manual 两条路径
+   * 共用）：面板仍非终态 → 立即移除，不留 95% 伪在途态。
+   *
+   * 为什么必须两条路径都扫：promise 结果是终态权威，但前提是每条路径都
+   * settle 过。turn 路径的终止点（finally）与 manual 的终止点（catch/finally）
+   * 都可能出现「没走到任何 settle 分支」的未来改动 —— 而 hold timer 只在
+   * settle 时才起，漏 settle 即**永久残留**。故在两侧终止点各扫一次，把
+   * 「漏 settle」从「永久残留」降级为「面板立即消失」。
+   */
+  function sweepCompactPanel(conversationId: string): void {
+    setCompactPanels((prev) => {
+      const current = prev[conversationId];
+      if (current === undefined || current.terminal !== null) return prev;
+      const { [conversationId]: _dropped, ...rest } = prev;
+      return rest;
+    });
+  }
+  // 卸载清 pending timer(防 setState-after-unmount)。
+  useEffect(() => {
+    const timers = compactTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
   const viewRef = useRef<TuiView>(view);
   viewRef.current = view;
   // #343 间歇性回归根因（v2 修复）：OpenTUI 在 mouse down 上若 defaultPrevented
@@ -1513,6 +1706,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           setGraphSelectedId(null);
         }
       }
+      // #467 压缩事件:auto-compact(proactive/reactive)此前对用户完全静默,
+      // 本面板是它的第一处可见化。与手动路径共用 applyCompactEvent(同一
+      // reduce + 同一终态 timer 武装),identity 守卫(非压缩事件返回同一引用)
+      // → 不新建对象、不触发 re-render。
+      if (event.type.startsWith("compaction_")) {
+        applyCompactEvent(targetId, event, "turn");
+      }
     };
     try {
       // thinking override gate：仅当用户实际改了状态才透传（初始化即 env
@@ -1585,6 +1785,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       }
     } finally {
       aborters.current.delete(targetId);
+      // compact 面板兜底清扫(plan D3.5):turn 结束仍非终态 = 缺终态事件
+      // (reactive compact 早返回 / 事件被吞咽)→ 立即清除,不留 95% 伪在途
+      // 面板。已终态 → 交给 HOLD_MS timer 自然卸载(不抢它的停留时间)。
+      // 与 manual 路径共用 sweepCompactPanel(同一契约,两处终止点各扫一次)。
+      sweepCompactPanel(targetId);
       // 快照本次 turn 的 thinking 最终秒数（reset 会置 0，必须先取）。
       // D3:thinking 秒数整条内存副通道全部下线 ——
       // 折叠行的「思考了 N 秒」改读落盘 thinkingMs（commitMessages → store.appendEvents 写入;
@@ -2028,7 +2233,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       case "compact": {
         if (active.runState !== "idle") {
           setNotice({
-            lines: ["当前会话正在运行；压缩等本轮结束后再执行。"],
+            lines: [compactGuardNoticeFor("busy")],
           });
           return;
         }
@@ -2036,54 +2241,47 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         // 拦不住;用 ref 作同步守护,React state 会有一帧 commit 滞后)。
         if (compactingControllerRef.current !== null) {
           setNotice({
-            lines: ["压缩进行中；按 Esc 取消或等待完成。"],
+            lines: [compactGuardNoticeFor("in_flight")],
           });
           return;
         }
         const targetId = active.conversationId;
         if (targetId === undefined) {
-          setNotice({ lines: ["当前是空会话，还没有可压缩的上下文。"] });
+          setNotice({ lines: [compactGuardNoticeFor("draft")] });
           return;
         }
         // #548:创建专属 AbortController(Esc/Ctrl+C 通过 compactingControllerRef
         // 触发 abort) + observer(透传 compaction_* 进度事件 + compaction_text_delta,
-        // 后者经 #550 wrapper 重映射后进入压缩预览,此处只展示 dropped 数与
-        // 终态消息,文本预览留作后续 UI 加挂)。progress 期间 notice 实时
-        // 刷新,终端事件由 promise resolve 后的最终 notice 接管。
+        // 后者经 #550 wrapper 重映射后进入压缩预览)。进度呈现 = design-25 面板
+        // (compact-progress.tsx,行账入 chromeReserveRows.compactRows);事件的
+        // 归约走 reduceCompactionEvent 同一套纯函数(与 turn 内 auto-compact 共用)。
         const compactController = new AbortController();
         compactingControllerRef.current = compactController;
-        setNotice({ lines: ["正在压缩上下文…(按 Esc 取消)"] });
+        // 面板先于任何事件出现(观察者要立刻看到"在压缩",不等第一个事件)。
+        // 建面板前清该会话的 pending hold timer(Standards review Low):上一次
+        // 压缩的终态 timer 若还在飞,到点会把**本次**的新面板删掉(纪律见
+        // compactTimersRef 注释:新压缩开始清 pending)。
+        clearCompactTimer(targetId);
+        setCompactPanels((prev) => ({
+          ...prev,
+          [targetId]: startCompactPanel("manual", Date.now()),
+        }));
         // #548:onStream 内的 compaction_cancelled 事件标记"中途取消"(bridge
         // 返回 compacted=false,与"无可压缩上下文"同形),promise resolve 后据此
         // 选择不同 notice 文案。闭包变量,无需 React state。
         // 注:pre-aborted signal(early-return at full-compact.ts:262)observer
-        // 不触发 — response.cancelled 字段兜底(Low #1 修复)。
+        // 不触发 — response.cancelled 字段兜底(Low #1 修复),且 settle 由
+        // promise 结果驱动(事件只是快路径,终态权威在下面)。
         let cancelledByUser = false;
         try {
           const compactResult = await props.bridge.compactSession(targetId, {
             signal: compactController.signal,
             onStream: (event) => {
-              switch (event.type) {
-                case "compaction_started":
-                  setNotice({
-                    lines: [
-                      `正在压缩上下文（${event.droppedCount} 条）…(按 Esc 取消)`,
-                    ],
-                  });
-                  return;
-                case "compaction_cancelled":
-                  cancelledByUser = true;
-                  return;
-                case "compaction_completed":
-                case "compaction_failed":
-                case "compaction_text_delta":
-                  // 终态/失败细节由 promise resolve 后的最终 notice 接管;
-                  // compaction_text_delta 留作 UI 加挂点(tracer bullet 仅接住,
-                  // 不渲染,以免主面板污染)。
-                  return;
-                default:
-                  return;
+              if (event.type === "compaction_cancelled") {
+                cancelledByUser = true;
               }
+              // 与 turn 路径同一入口(reduce + identity 守卫 + 终态 timer 武装)。
+              applyCompactEvent(targetId, event, "manual");
             },
           });
           const compacted = compactResult.compacted;
@@ -2093,8 +2291,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           if (cancelledByUser) {
             // #548:Claude Code 取消语义 — 会话保持原样,不 sessionCompacted
             // 投影(updatedAt / messages 均不变),仅提示用户。
+            settleCompactPanelFor(targetId, "cancelled");
             setNotice({
-              lines: ["压缩已取消，会话保持原样。"],
+              lines: [compactCancelledNotice()],
             });
           } else if (compacted) {
             // 实际裁剪完成 → 重读落盘文件 + sessionCompacted 投影。
@@ -2112,6 +2311,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
                 }),
               };
             });
+            settleCompactPanelFor(targetId, "done");
             // 文案决策 SSOT:compactNoticeFor 纯函数(manual-compact-trigger
             // T2:no-op 支语义为「没有可压缩的上下文」,below_token_threshold
             // 在手动路径抛错)。
@@ -2119,13 +2319,24 @@ export function TuiApp(props: TuiAppProps): ReactNode {
               lines: compactNoticeFor(compactResult.reason, true),
             });
           } else {
+            // no-op(compacted:false 且非 cancelled)= 压根没发生压缩 —— 立即
+            // 清除面板,不显示伪造的 done(plan D3.5)。
+            clearCompactPanel(targetId);
             setNotice({
               lines: compactNoticeFor(compactResult.reason, false),
             });
           }
         } catch (err) {
-          setNotice({ lines: [`压缩失败：${describeError(err)}`] });
+          settleCompactPanelFor(targetId, "failed");
+          setNotice({
+            lines: [`${compactFailedNoticePrefix()}${describeError(err)}`],
+          });
         } finally {
+          // 与 turn 路径对称的兜底清扫(plan D3.5 / Standards review Medium):
+          // 上面四分支已覆盖 cancelled / compacted / no-op / catch,但若未来新增
+          // 分支漏 settle,pending 面板会永久残留(hold timer 只随 settle 起)。
+          // 已终态 → sweep 是 no-op,不抢 HOLD_MS 停留时间。
+          sweepCompactPanel(targetId);
           compactingControllerRef.current = null;
         }
         return;
@@ -2627,6 +2838,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       : view === "chat" && memoryPickerOpen
         ? memoryPickerRows()
         : 0;
+  // compact 进度面板:只取 active 会话的条目(与 crunchedOf / verifySlots 同款
+  // 归属校验,切走会话不残留别的会话的压缩面板)。
+  const activeCompact: CompactProgressState | undefined =
+    active.conversationId !== undefined
+      ? compactPanels[active.conversationId]
+      : undefined;
   // 面板判别联合（渲染槽 + 类型标注共用，SSOT）。
   const pickerState: ThinkingPickerState | null =
     view === "chat" && thinkingPickerOpen !== null
@@ -2685,6 +2902,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         inputRows: inputContentRows,
         modalRows: modalRowsForBudget,
         pickerRows: pickerRowsForBudget,
+        compactRows:
+          view === "chat" && activeCompact !== undefined
+            ? compactProgressRows()
+            : 0,
         panelRows: 0,
         agentStatusRows: agentStatusRowBudget,
         envPaneRows: envPaneRowBudget,
@@ -2780,6 +3001,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             </text>
           ))}
         </box>
+      )}
+      {view === "chat" && activeCompact !== undefined && (
+        <CompactProgress state={activeCompact} />
       )}
       {pickerState !== null && <ThinkingPicker state={pickerState} />}
       {view === "chat" && memoryPickerOpen && (

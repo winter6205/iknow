@@ -9,6 +9,8 @@
  *    #647 T3 新增 agentStatusRows（agent 现势显示，0-6 行动态，缺省 0 ——
  *    基线用例零影响；专项用例见 agent-status-panel.test.ts）。
  *  - noticeRenderRows：空 / 空字符串 / 多行 / 视觉宽度折行 后行数。
+ *  - compactProgressRows（/compact 进度面板，6 行）单独一节：compactRows
+ *    缺省 0 —— 基线用例与旧调用方零影响。
  *
  * T8：输入框行账从固定 3 → `inputRows` 动态（默认 1 内容行 + 2 圆角边框行）。
  * inputRows 缺省 = 1 → 3（等价旧固定值）；5 行输入 / 8 行输入（maxLines 上限）
@@ -26,6 +28,7 @@ import {
 } from "../../src/tui/app.js";
 import { thinkingPickerRows } from "../../src/tui/thinking-picker.js";
 import { memoryPickerRows } from "../../src/tui/memory-picker.js";
+import { compactProgressRows } from "../../src/tui/compact-progress.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 
 function userMsg(text: string): AnthropicNativeMessage {
@@ -556,5 +559,53 @@ describe("memoryPickerRows（/memory 双开关面板行账）", () => {
       pickerRows: memoryPickerRows(),
     });
     expect(withMemory - base).toBe(7);
+  });
+});
+
+/**
+ * compactProgressRows 行账（design-25 压缩进度面板）。
+ *
+ * 6 行 = 边框 2 + 内容 4（标题 / 状态行 / 读条 / 键位提示），**不含
+ * marginBottom=1** —— 与 pickerRows / modalRows 同约定，由 chromeReserveRows
+ * 的 +1 入账。缺省 0：旧调用方（无压缩面板）行账零影响。
+ */
+describe("compactProgressRows（compact 进度面板行账）", () => {
+  test("6 行 = 边框 2 + 内容 4", () => {
+    expect(compactProgressRows()).toBe(6);
+  });
+
+  test("有 compact 面板：compactRows + 1 marginBottom = 7 行 delta", () => {
+    const base = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+    });
+    const withCompact = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+      compactRows: compactProgressRows(),
+    });
+    expect(base).toBe(7);
+    expect(withCompact - base).toBe(7);
+  });
+
+  test("compactRows 缺省（undefined）= 0，行为同未传", () => {
+    const base = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+    });
+    const explicit = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+      compactRows: undefined,
+    });
+    expect(explicit).toBe(base);
   });
 });
