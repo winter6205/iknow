@@ -1,16 +1,22 @@
 /**
- * ADR-0080 / specs/graph-mode-presence.md — "每跳短现势" 注入缝集成测试。
+ * ADR-0081 — 每个 run() 开头贴一次短现势(取代 ADR-0080 每跳)。
  *
  * 钉死不变式:
- *   SC1 holder on 连续两次即将调模型 → messages 尾两次都贴短 `<graph_mode>`
- *        (含 run_graph + spawn 指引),且短句短于长 ON。
+ *   SC1 holder 已 on → 一次 run / 两 hop(两次同 deps 的 step(),或
+ *        多 hop run)→ 仅第一 hop 贴一句短 `<graph_mode>`(含 run_graph
+ *        + spawn 指引);第二 hop 不再追加。短句短于长 ON。
  *   SC2 holder off / 从未开过 → 零短现势。
  *   SC3 ask/worker(seam 缺席)→ 零短现势、零长翻转句。
  *   SC4 同 round 中途翻 holder 不出现新短现势;下一次 run() 才按新值。
- *   SC5 同拍长 ON 与短现势不并存。
+ *   SC5 同 run 已贴长 ON → 该 hop 不叠短句,同 run 后续 hop 也不贴;
+ *        新 run()(latch 在 run() 开头重置)在 lastSeen=true 时可贴一条短。
  *   SC6 短句不出现在 system 字符串、不进 <agent_status> 栏正文。
- *   SC7 compact 之后(无 compact 专用追加),下一跳仍 on → 再贴。
+ *   SC7 PromptTooLong compact 重试是同一 run → 不追加第二句短现势
+ *        (0081:无 compact 专用再注入)。仍必须发生 retry。
  *   SC8 关 overlay 时 tools 面仍列 run_graph(回归即可,本文件复检一份)。
+ *
+ * 两次连续 step() 共用同一 deps = 同一 run() 的两 hop
+ * (实现会把 run 作用域 latch 放在 deps.graphModePresence,run() 开头重置)。
  *
  * 形态镜像 `tests/harness/loop-engine/graph-mode-reconnect.test.ts`:
  * stub adapter + 空 executor + 空 registry。
@@ -137,7 +143,10 @@ function buildDeps(opts: {
       assembly: opts.assembly,
       lastSeenEnabled: opts.lastSeenEnabled,
     },
-    graphModePresence: { assembly: opts.assembly },
+    graphModePresence: {
+      assembly: opts.assembly,
+      appendedThisRun: { value: false },
+    },
     ...(opts.compress ? { compress: opts.compress } : {}),
   };
   return deps;
@@ -147,7 +156,7 @@ function buildDeps(opts: {
 // SC2 / SC3 — 关着 / 缺席 → 零短现势
 // =========================================================================
 
-describe("loop engine ADR-0080 SC2: holder off → 零短现势", () => {
+describe("loop engine ADR-0081 SC2: holder off → 零短现势", () => {
   it("初始即 off,跑两 step:零 `<graph_mode>` 短句,零长翻转句", async () => {
     const holder = makeGraphModeHolder();
     const assembly = createGraphAssembly(holder.ctx);
@@ -181,7 +190,7 @@ describe("loop engine ADR-0080 SC2: holder off → 零短现势", () => {
   });
 });
 
-describe("loop engine ADR-0080 SC3: ask/worker(seam 缺席)→ 零短现势、零长翻转句", () => {
+describe("loop engine ADR-0081 SC3: ask/worker(seam 缺席)→ 零短现势、零长翻转句", () => {
   it("seam 全部缺席 → run 行为 byte-identical(无 graph_mode 任何形态)", async () => {
     const adapter = makeTextAdapter(["a1", "a2"]);
     const deps: LoopEngineDeps = {
@@ -212,7 +221,7 @@ describe("loop engine ADR-0080 SC3: ask/worker(seam 缺席)→ 零短现势、�
       registry: emptyRegistry,
       maxTurns: 5,
       // 仅装 presence 不装 change —— 装配错配,必须零追加而非 panic。
-      graphModePresence: { assembly },
+      graphModePresence: { assembly, appendedThisRun: { value: false } },
     };
 
     const { result } = await run("Q", deps);
@@ -224,11 +233,11 @@ describe("loop engine ADR-0080 SC3: ask/worker(seam 缺席)→ 零短现势、�
 });
 
 // =========================================================================
-// SC1 — 开着连续两拍:两次 messages 尾都有短 `<graph_mode>`
+// SC1 — 开着:一次 run / 两 hop → 仅第一 hop 一条短 `<graph_mode>`
 // =========================================================================
 
-describe("loop engine ADR-0080 SC1: holder on 连续两拍 → 两次短现势", () => {
-  it("用 step() 驱动连续两拍 → 两次 messages 尾都贴短 <graph_mode>", async () => {
+describe("loop engine ADR-0081 SC1: holder on 一 run 两 hop → 恰好一条短现势", () => {
+  it("用同 deps 连续两次 step() → 仅第一 hop 贴短 <graph_mode>", async () => {
     const holder = makeGraphModeHolder();
     holder.set(true); // 初始即 on —— createGraphAssembly 内部 beginRound 拍快照 = true
     const assembly = createGraphAssembly(holder.ctx);
@@ -238,7 +247,7 @@ describe("loop engine ADR-0080 SC1: holder on 连续两拍 → 两次短现势",
     const adapter = makeTextAdapter(["a1", "a2", "a3"]);
     const deps = buildDeps({ adapter, assembly, lastSeenEnabled });
 
-    // 驱动两次 step(初值 step 已观察过 → step1 直接贴;step2 同 round → 再贴)。
+    // 同 deps 两次 step = 同一 run 的两 hop;0081 只在第一 hop 贴一次。
     let state: LoopState = { messages: [makeUserMsg("Q")], turnCount: 0 };
     const t1 = await step(state, deps);
     assert.equal(t1.kind, "stop");
@@ -248,13 +257,13 @@ describe("loop engine ADR-0080 SC1: holder on 连续两拍 → 两次短现势",
     assert.equal(t2.kind, "stop");
     const s2 = t2 as { kind: "stop"; finalState: LoopState };
 
-    // step1 末尾一条短现势;step2 末尾第二条。
+    // step1 末尾一条短现势;step2 不再追加(累计仍 1)。
     const hits1 = presenceHits(s1.finalState.messages);
     const hits2 = presenceHits(s2.finalState.messages);
     assert.equal(hits1.length, 1, "step1 末尾贴一条短现势");
-    assert.equal(hits2.length, 2, "step2 末尾累计两条短现势");
+    assert.equal(hits2.length, 1, "同 run 第二 hop 不得再贴短现势");
 
-    // 内容形态:每次都是同一份静态文本,字节级恒定。
+    // 内容形态:静态文本,字节级恒定。
     for (const t of hits2) {
       assert.equal(t, IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION);
       assert.ok(t.includes("<graph_mode>"));
@@ -266,6 +275,33 @@ describe("loop engine ADR-0080 SC1: holder on 连续两拍 → 两次短现势",
       IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION.length <
         IKNOW_GRAPH_MODE_ON_NOTIFICATION.length,
       `短现势(${IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION.length}) 必须短于长 ON(${IKNOW_GRAPH_MODE_ON_NOTIFICATION.length})`
+    );
+  });
+
+  it("连续两次 run()(holder on + lastSeen=true)→ 各贡献恰好一条短现势", async () => {
+    const holder = makeGraphModeHolder();
+    holder.set(true);
+    const assembly = createGraphAssembly(holder.ctx);
+    const lastSeenEnabled: { value: boolean | undefined } = { value: true };
+    const adapter = makeTextAdapter(["a1", "a2", "a3"]);
+    const deps = buildDeps({ adapter, assembly, lastSeenEnabled });
+
+    const first = await run("Q1", deps);
+    assert.equal(first.result.stopReason, "completed");
+    assert.equal(
+      presenceHits(first.result.messages).length,
+      1,
+      "第一次 run() 恰好一条短现势"
+    );
+
+    const second = await run("Q2", deps, undefined, {
+      priorMessages: first.result.messages,
+    });
+    assert.equal(second.result.stopReason, "completed");
+    assert.equal(
+      presenceHits(second.result.messages).length,
+      2,
+      "两次 run() 各贡献一条,累计恰好两条"
     );
   });
 
@@ -284,7 +320,7 @@ describe("loop engine ADR-0080 SC1: holder on 连续两拍 → 两次短现势",
       registry: emptyRegistry,
       maxTurns: 5,
       graphModeChange: { assembly, lastSeenEnabled },
-      graphModePresence: { assembly },
+      graphModePresence: { assembly, appendedThisRun: { value: false } },
       system: async () => {
         seenSystem = "<system-static-stub>";
         return seenSystem;
@@ -303,7 +339,7 @@ describe("loop engine ADR-0080 SC1: holder on 连续两拍 → 两次短现势",
     );
     // 短句仍是独立 user 消息。
     const hits = presenceHits(s1.finalState.messages);
-    assert.ok(hits.length >= 1);
+    assert.equal(hits.length, 1, "单 hop 恰好一条短现势");
   });
 });
 
@@ -311,7 +347,7 @@ describe("loop engine ADR-0080 SC1: holder on 连续两拍 → 两次短现势",
 // SC4 — 同 round 中途翻 holder 不出现新短现势;下一 run() 才按新值
 // =========================================================================
 
-describe("loop engine ADR-0080 SC4: 同 round 中途翻 holder 不出现新短现势", () => {
+describe("loop engine ADR-0081 SC4: 同 round 中途翻 holder 不出现新短现势", () => {
   it("step1 期间翻 holder(但不 beginRound)→ step1 messages 尾仍按旧值;后续 step 也不热更新", async () => {
     const holder = makeGraphModeHolder();
     const assembly = createGraphAssembly(holder.ctx);
@@ -359,8 +395,8 @@ describe("loop engine ADR-0080 SC4: 同 round 中途翻 holder 不出现新短�
 // SC5 — 同一拍长 ON 与短现势不并存
 // =========================================================================
 
-describe("loop engine ADR-0080 SC5: 同一拍长 ON 与短现势不并存", () => {
-  it("初值关 → step1 期间 holder.set(true) + beginRound → step2 messages 尾只见长 ON,不见短句", async () => {
+describe("loop engine ADR-0081 SC5: 同 run 长 ON 后本 run 不再贴短现势", () => {
+  it("初值关 → 翻 on + beginRound → 长 ON 当 hop 不叠短;同 run 后续 hop 也不贴;新 run 可贴一条", async () => {
     const holder = makeGraphModeHolder();
     const assembly = createGraphAssembly(holder.ctx);
     const lastSeenEnabled: { value: boolean | undefined } = {
@@ -396,7 +432,7 @@ describe("loop engine ADR-0080 SC5: 同一拍长 ON 与短现势不并存", () =
     assert.equal(onCount, 1, "当拍长 ON 出现一次");
     assert.equal(presenceCount, 0, "当拍已贴长 ON → 不叠短现势");
 
-    // step3(同 round,enabled()=true,lastSeenEnabled=true)→ 出现短现势。
+    // step3(同 deps = 同 run,enabled()=true,lastSeenEnabled=true)→ 仍不贴短。
     state = s2.finalState;
     const t3 = await step(state, deps);
     const s3 = t3 as { kind: "stop"; finalState: LoopState };
@@ -404,19 +440,25 @@ describe("loop engine ADR-0080 SC5: 同一拍长 ON 与短现势不并存", () =
     const presenceCount3 = texts3.filter(
       (t) => t === IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION
     ).length;
-    assert.ok(
-      presenceCount3 >= 1,
-      "下一跳(同 round,enabled=true,lastSeen=true)该贴短现势"
+    assert.equal(presenceCount3, 0, "同 run 已贴长 ON → 后续 hop 也不贴短现势");
+
+    // 新 run() 开头重置 latch;holder on + lastSeen=true → 可贴一条短。
+    const { result: nextRun } = await run("Q2", deps);
+    assert.equal(nextRun.stopReason, "completed");
+    assert.equal(
+      presenceHits(nextRun.messages).length,
+      1,
+      "新 run() 在 lastSeen=true 时可贴恰好一条短现势"
     );
   });
 });
 
 // =========================================================================
-// SC7 — compact 之后下一跳仍 on → 再贴
+// SC7 — compact 重试属同一 run,不二次注入
 // =========================================================================
 
-describe("loop engine ADR-0080 SC7: compact 之后无特补;下一跳仍 on 则再贴", () => {
-  it("PromptTooLongError → compact 重试 → 重试前按 enabled() 决定短现势", async () => {
+describe("loop engine ADR-0081 SC7: compact 重试属同一 run → 不追加第二句短现势", () => {
+  it("PromptTooLongError → compact 重试发生,且全程至多一条短现势", async () => {
     const holder = makeGraphModeHolder();
     holder.set(true); // 初始 on —— 模拟会话里早就开了 graph
     const assembly = createGraphAssembly(holder.ctx);
@@ -456,7 +498,7 @@ describe("loop engine ADR-0080 SC7: compact 之后无特补;下一跳仍 on 则�
       maxTurns: 5,
       compress: { contextWindow: 200_000, thresholdTokens: 10_000 },
       graphModeChange: { assembly, lastSeenEnabled },
-      graphModePresence: { assembly },
+      graphModePresence: { assembly, appendedThisRun: { value: false } },
     };
 
     const prior = Array.from({ length: 12 }, (_, i) =>
@@ -468,16 +510,21 @@ describe("loop engine ADR-0080 SC7: compact 之后无特补;下一跳仍 on 则�
     assert.equal(result.stopReason, "completed");
     assert.ok(stepCalls >= 3, "reactive retry 必须发生");
 
-    // 重试请求看到的第一条含 <graph_mode> 的 user 消息 = 短现势(SC7:无 compact 特补)。
+    // 0081:compact 重试是同一 run,不得再贴第二句(无 compact 专用再注入)。
     const retrySeen = seenMessages[seenMessages.length - 1];
     assert.ok(retrySeen);
     const retryHits = presenceHits(retrySeen);
-    assert.ok(retryHits.length >= 1, "compact 后的下一跳仍 on → 再贴短现势");
-    // 注意:短现势是 appendGraphModePresence 路径(不是 appendGraphModeChange 翻转)。
-    assert.equal(
-      retryHits.some((t) => t === IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION),
-      true
+    assert.ok(
+      retryHits.length <= 1,
+      "最后一次请求至多一条短现势(compact 不二次注入)"
     );
+    assert.ok(
+      presenceHits(result.messages).length <= 1,
+      "终态 messages 至多一条短现势"
+    );
+    if (retryHits.length === 1) {
+      assert.equal(retryHits[0], IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION);
+    }
   });
 });
 
@@ -485,7 +532,7 @@ describe("loop engine ADR-0080 SC7: compact 之后无特补;下一跳仍 on 则�
 // SC6 / SC8 — 短句不进禁区;tools 常驻不变
 // =========================================================================
 
-describe("loop engine ADR-0080 SC6 / SC8: 不进禁区 + tools 常驻", () => {
+describe("loop engine ADR-0081 SC6 / SC8: 不进禁区 + tools 常驻", () => {
   it("SC6: 短现势是独立 user 消息,不是 assistant content 的一部分,也不是 agent_status 文本", async () => {
     const holder = makeGraphModeHolder();
     holder.set(true);
@@ -560,7 +607,10 @@ describe("loop engine ADR-0080 SC6 / SC8: 不进禁区 + tools 常驻", () => {
         ...(withPresence
           ? {
               graphModeChange: { assembly, lastSeenEnabled },
-              graphModePresence: { assembly },
+              graphModePresence: {
+                assembly,
+                appendedThisRun: { value: false },
+              },
             }
           : {}),
       };

@@ -368,23 +368,27 @@ export interface LoopEngineDeps {
     readonly lastSeenEnabled: { value: boolean | undefined };
   };
   /**
-   * ADR-0080 / specs/graph-mode-presence.md — graph mode 每跳短现势注入缝。
-   * 字段在场 = stepWithTrace 每次即将调用模型前(首调 + reactive-compact
-   * 重试),在 appendGraphModeChange 之后、appendMcpReconnect 之前按
+   * ADR-0081 — graph mode 每个 `run()` 开头一句短现势注入缝。
+   * 字段在场 = 本 run 第一次即将调模型前(含该次 reactive-compact 重试前
+   * 的首次判定),在 appendGraphModeChange 之后、appendMcpReconnect 之前按
    * `assembly.enabled()` 决定是否追加一句短 `<graph_mode>`
    * (IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,SSOT in graph/notification.ts):
    *   - seam 缺席 → 零追加(ask / worker / 未接 overlay 入口零行为变化);
    *   - `enabled() === false` → 零追加(holder off / 从未开过);
-   *   - 当拍 appendGraphModeChange 刚贴过长 ON(翻入 on 那一拍)→
-   *     零追加(SC5:同一拍长 ON 与短现势不并存);
+   *   - 当拍 appendGraphModeChange 刚贴过长 ON → 零追加且本 run 不再贴短
+   *     (SC5:同一 run 已贴长 ON 不叠短句);
+   *   - `appendedThisRun` 已置位 → 零追加(同 run 后续 hop / compact 重试);
    *   - 其余 → 短现势以 user 消息 immutable 追加,record 进 pendingInjected
    *     (#888 契约,与 appendGraphModeChange 同形)。
-   * 判定读 `assembly.enabled()`(round 快照),不读 holder、不写
-   * lastSeenEnabled —— 翻转检测由 graphModeChange seam 独立承担,语义不混。
+   * `run()` 开头把 `appendedThisRun` 重置;exported `step()` 不重置,同 deps
+   * 连续 step = 同一 run 的 hop。判定读 `assembly.enabled()`(round 快照),
+   * 不读 holder、不写 lastSeenEnabled。
    * 不进 system / 不进 run_graph 回执 / 不进 <agent_status> 栏。
    */
   readonly graphModePresence?: {
     readonly assembly: GraphAssembly;
+    /** 本 run 是否已结算短现势(已贴或因长 ON 抑制)。装配期装箱,run() 重置。 */
+    readonly appendedThisRun: { value: boolean };
   };
   /**
    * B4 / ADR-0043 §4:MCP 手动重连追加缝。字段在场 = stepWithTrace 每次
@@ -632,31 +636,25 @@ async function appendGraphModeChange(
 }
 
 /**
- * ADR-0080 / specs/graph-mode-presence.md — graph mode 每跳短现势追加缝。
+ * ADR-0081 — graph mode 每个 `run()` 一句短现势追加缝。
  *
- * 判定次序:在 appendGraphModeChange 之后、appendMcpReconnect 之前调用
- * (与既有同段「环境级事件 → 当前态栏」次序一致;graph 切换提示之后,
- * 短现势之后,再走 MCP 重连 + status bar + env snapshot)。形态镜像
- * appendGraphModeChange 的 seam-缺席 → 零注入分支。
+ * 判定次序:在 appendGraphModeChange 之后、appendMcpReconnect 之前调用。
  *
- * 判定四段:
- *   1. deps.graphModePresence 缺席 → 零追加(ask / worker / 未接 overlay
- *      入口零行为变化,byte-identical);
- *   2. `assembly.enabled() === false` → 零追加(holder off / 从未开过,
- *      SC2);
- *   3. `appendedLongOn === true` → 零追加(SC5:本拍因翻入 on 已贴长 ON,
- *      不叠短现势;长 OFF 不冲突,因为关图意味着 enabled=false,前面
- *      分支 2 已早退);
- *   4. 其余 → encodeUserText + appendMessage + record 进 pendingInjected。
- *
- * 不写 lastSeenEnabled —— 翻转检测由 appendGraphModeChange seam 独立
- * 承担,这里只读 enabled() 的 round 快照(SC4:同 round 中途翻键不出现
- * 新短现势,beginRound 后才按新值)。
- *
- * 不进 system / run_graph 回执 / <agent_status> 栏(SC6);text = SSOT
- * (IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION),会话内字节恒定 → KV cache
- * 尾部追加兼容(每拍都追加同一字符串)。
+ * 判定:
+ *   1. deps.graphModePresence 缺席 → 零追加;
+ *   2. graphModeChange 缺席(装配错配)→ 零追加;
+ *   3. `appendedThisRun` 已结算 → 零追加(同 run 后续 hop / compact 重试);
+ *   4. `appendedLongOn === true` → 结算 latch、零追加(SC5);
+ *   5. `assembly.enabled() === false` → 零追加且不结算(关着时下一 hop
+ *      仍可在 beginRound 后按新快照判定);
+ *   6. 其余 → 贴短句并结算 latch。
  */
+function resetGraphPresenceLatch(deps: LoopEngineDeps): void {
+  const seam = deps.graphModePresence;
+  if (seam === undefined) return;
+  seam.appendedThisRun.value = false;
+}
+
 async function appendGraphModePresence(
   state: LoopState,
   deps: LoopEngineDeps,
@@ -669,8 +667,14 @@ async function appendGraphModePresence(
   // 同 gate 同源接线两缝),此时零注入而非让 presence 脱离 change 的翻转
   // 语义独立生效(与「overlay 缺席 = 零注入」同一保守姿态)。
   if (deps.graphModeChange === undefined) return state;
-  if (appendedLongOn) return state;
+  const latch = seam.appendedThisRun;
+  if (latch.value) return state;
+  if (appendedLongOn) {
+    latch.value = true;
+    return state;
+  }
   if (!seam.assembly.enabled()) return state;
+  latch.value = true;
   const msg = deps.adapter.encodeUserText(
     IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION
   );
@@ -1869,10 +1873,9 @@ async function stepWithTrace(opts: {
   type OkOrStop =
     | { kind: "ok"; result: AssistantTurnResult }
     | { kind: "stop"; transition: Transition; turn: TurnTrace };
-  // ADR-0041 / ADR-0080:graph 两条缝(change → presence)先于 mcpReconnect
+  // ADR-0041 / ADR-0081:graph 两条缝(change → presence)先于 mcpReconnect
   // / agentStatusBar 调用,保证「graph 翻转提示 → 短现势 → 重连告知 →
-  // status bar」的模型可读时序;seam 缺席 → 零追加(ask / worker / 未接
-  // overlay 的入口零行为变化)。
+  // status bar」的模型可读时序;presence 每 run 至多一句;seam 缺席 → 零追加。
   const graphSeamState = await appendGraphSeams(
     opts.state,
     opts.deps,
@@ -1914,9 +1917,8 @@ async function stepWithTrace(opts: {
   const modelPhase: OkOrStop =
     firstPhase.kind === "reactive_compact_pending"
       ? await (async (): Promise<OkOrStop> => {
-          // ADR-0041 / ADR-0080:reactive compact 重试前同样过 graph 两条缝
-          // (同 round 两次模型调用之间 host 可能翻键;SC7:compact 之后
-          // 下一跳仍 on 则再贴短现势,无 compact 专用追加)。
+          // ADR-0041 / ADR-0081:reactive compact 重试前同样过 graph 两条缝
+          // (同 run 内 change 仍可翻键;presence latch 已结算则不再贴短句)。
           const compactedWithGraphSeams = await appendGraphSeams(
             firstPhase.state,
             opts.deps,
@@ -2428,6 +2430,8 @@ export async function run(
   const toolLoopRef = { events: [] as ToolLoopEvent[], nextPhase: 0 };
   // #888:run 作用域注入消息 pending 缓冲(见 createPendingInjected)。
   const pendingInjected = createPendingInjected();
+  // ADR-0081:每个 run() 重新结算短现势(同 deps 跨 run 不沿用旧 latch)。
+  resetGraphPresenceLatch(deps);
   while (true) {
     // #119 T7:compress 缝缺省(字段缺席)→ 跳过检查,行为零变化(byte-identical)。
     // 仅 turnCount 自增(>lastCompactTurn)后扫一次,避免每轮重复 estimate。

@@ -172,7 +172,7 @@ test("agent_status 栏注入：不渲染为 ❯ 用户气泡", async () => {
 
 test("graph_mode 三条现势通知注入：不渲染为 ❯ 用户气泡（SC7 帧级）", async () => {
   // spec D8 / SC7：与 agent_status 同纪律同谓词面（isGraphModeText）。
-  // 三条常量（翻转 ON / 翻转 OFF / 每拍 presence）都不得上屏 —— 帧里既无
+  // 三条常量（翻转 ON / 翻转 OFF / 每 run presence）都不得上屏 —— 帧里既无
   // ❯ 气泡，也不出现标签本身。
   for (const text of [
     IKNOW_GRAPH_MODE_ON_NOTIFICATION,

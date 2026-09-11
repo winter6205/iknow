@@ -422,7 +422,7 @@ describe("session-state: isTuiHiddenUserMessage（host 注入不进 ❯ 气泡�
     expect(isTuiHiddenUserMessage(msg("真实问题"))).toBe(false);
   });
 
-  test("graph_mode 三条现势通知为 hidden（切换 ON/OFF + 每拍 presence）；普通 query 否", () => {
+  test("graph_mode 三条现势通知为 hidden（切换 ON/OFF + 每 run presence）；普通 query 否", () => {
     // spec D8 / SC7：与 agent_status 同纪律 —— 生产者本家谓词
     // （src/harness/graph/notification.ts 的 isGraphModeText）判 hidden，
     // 三条常量全走同一前缀，TUI 不画 ❯ 气泡。

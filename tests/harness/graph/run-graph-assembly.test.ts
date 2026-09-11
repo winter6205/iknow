@@ -327,7 +327,7 @@ describe("graph 模式切换提示 — SSOT 静态文本(KV cache 兼容)", () =
   });
 });
 
-describe("graph mode 每跳短现势 — SSOT 静态文本(ADR-0080)", () => {
+describe("graph mode 每 run 短现势 — SSOT 静态文本(ADR-0081)", () => {
   it("短现势是 <graph_mode> 单行静态文本,点名 run_graph + spawn_subagent", () => {
     const t = IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION;
     expect(t.startsWith("<graph_mode>")).toBe(true);
