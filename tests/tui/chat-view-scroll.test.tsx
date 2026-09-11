@@ -36,6 +36,10 @@ import {
   type LiveToolRun,
 } from "../../src/tui/live-tool-state.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
+import {
+  SCROLLBAR_THUMB_HOVER_ALPHA,
+  SCROLLBAR_THUMB_IDLE_ALPHA,
+} from "../../src/tui/scrollbar-style.js";
 
 const COLS = 60;
 const ROWS = 12;
@@ -340,6 +344,70 @@ test("长会话（100 条）滚动文档全量：顶见最早、底见最末、�
   await setup.waitForVisualIdle();
   expect(sb.scrollTop).toBe(maxScrollTop(api.handle!));
   expect(setup.captureCharFrame()).toContain("追加的长会话尾巴");
+  await setup.renderer.destroy();
+});
+
+/**
+ * 滚动条观感（scrollbar-style.ts 的策略在真实 scrollbox 上生效）：
+ * idle 极淡、指针移入显色、移开回落；track 始终全透明。
+ *
+ * 断言取 scrollbar 滑块的实际 RGBA（渲染取色），不读样式常量 —— 常量本身
+ * 已由 scrollbar-style.test.ts 钉住，此处钉的是「常量确实接到了控件上」。
+ */
+function scrollbarColors(handle: ChatViewHandle): {
+  thumbAlpha: number;
+  trackAlpha: number;
+} {
+  const bar = handle.scrollbox!.verticalScrollBar as unknown as {
+    slider: {
+      backgroundColor: { toInts(): [number, number, number, number] };
+      foregroundColor: { toInts(): [number, number, number, number] };
+    };
+  };
+  return {
+    thumbAlpha: bar.slider.foregroundColor.toInts()[3],
+    trackAlpha: bar.slider.backgroundColor.toInts()[3],
+  };
+}
+
+test("滚动条：idle 极淡、指针移入显色、移开回落，track 恒隐形", async () => {
+  const initial = sessionWith(makeMessages(30)); // 溢出视口 → 滚动条可见
+  const { setup, api } = await renderChat(initial);
+  const handle = api.handle!;
+  const sb = handle.scrollbox!;
+  const bar = sb.verticalScrollBar as unknown as {
+    x: number;
+    y: number;
+  };
+  expect(sb.verticalScrollBar.visible).toBe(true);
+
+  const idle = scrollbarColors(handle);
+  expect(idle.thumbAlpha).toBe(SCROLLBAR_THUMB_IDLE_ALPHA);
+  expect(idle.trackAlpha).toBe(0);
+
+  // 指针移入滚动条所在列。
+  await act(async () => {
+    await setup.mockMouse.moveTo(bar.x, bar.y + 4);
+  });
+  await setup.waitForVisualIdle();
+  const hovered = scrollbarColors(handle);
+  expect(hovered.thumbAlpha).toBe(SCROLLBAR_THUMB_HOVER_ALPHA);
+  expect(hovered.thumbAlpha).toBeGreaterThan(idle.thumbAlpha);
+  expect(hovered.trackAlpha).toBe(0); // hover 只点亮 thumb，不加轨道噪音
+
+  // 移开 → 回落到 idle（可重复，不是一次性）。
+  await act(async () => {
+    await setup.mockMouse.moveTo(2, bar.y + 4);
+  });
+  await setup.waitForVisualIdle();
+  expect(scrollbarColors(handle).thumbAlpha).toBe(SCROLLBAR_THUMB_IDLE_ALPHA);
+
+  await act(async () => {
+    await setup.mockMouse.moveTo(bar.x, bar.y + 4);
+  });
+  await setup.waitForVisualIdle();
+  expect(scrollbarColors(handle).thumbAlpha).toBe(SCROLLBAR_THUMB_HOVER_ALPHA);
+
   await setup.renderer.destroy();
 });
 

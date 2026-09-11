@@ -73,6 +73,11 @@ import {
 } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { chatWheelScrollAccel } from "./wheel-scroll.js";
+import {
+  attachScrollbarHover,
+  scrollbarThumbColor,
+  scrollbarTrackColor,
+} from "./scrollbar-style.js";
 import { Markdown } from "./markdown.js";
 import { MessageBlocks } from "./message-blocks.js";
 import { MessageShell } from "./message-shell.js";
@@ -176,14 +181,24 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       setItemHeights([]);
       setScrollTop(Number.MAX_SAFE_INTEGER);
     }
+    const [scrollbarHovered, setScrollbarHovered] = useState(false);
     useLayoutEffect(() => {
       const sb = sbRef.current;
       if (sb === null) return; // EXIT: unmounted scrollbox
       // Official OpenTUI path: slider change → scrollbar `change` { position }.
       // Do not patch scrollTop (Feature Envy) or rAF-poll (sticky still 0).
-      return listenScrollBoxTop(sb, (next) => {
+      const stopTracking = listenScrollBoxTop(sb, (next) => {
         setScrollTop((prev) => (prev === next ? prev : next));
       });
+      // hover 槽挂在 scrollbar renderable 上（Slider 自身只接 down/drag/up）。
+      const stopHover = attachScrollbarHover(
+        sb.verticalScrollBar,
+        setScrollbarHovered
+      );
+      return () => {
+        stopTracking();
+        stopHover();
+      };
     }, []);
     useImperativeHandle(ref, () => ({
       scrollToBottom() {
@@ -572,6 +587,12 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         stickyScroll={true}
         stickyStart="bottom"
         scrollAcceleration={chatWheelScrollAccel}
+        verticalScrollbarOptions={{
+          trackOptions: {
+            backgroundColor: scrollbarTrackColor(),
+            foregroundColor: scrollbarThumbColor(scrollbarHovered),
+          },
+        }}
       >
         {/* banner 段（首段，与消息共享 scroll space）。#321 设计定案：圆角外框 +
             顶框内嵌 title `◆ iknow`（操作员要求靠左；与 PromptInput 同款
