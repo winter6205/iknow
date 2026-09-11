@@ -43,6 +43,7 @@ import {
 } from "./deps.js";
 import { createTuiAskUserBridge } from "./ask-user.js";
 import { createInflightRegistry, createTuiBridge } from "./hub-bridge.js";
+import { resolveTraceRoot } from "../cli/trace-root.js";
 import { createToolEventSink, TuiApp, type TuiAppProps } from "./app.js";
 import { attachSession, type TuiSessionState } from "./session-state.js";
 import { createSessionGrants } from "../harness/permission/session-grants.js";
@@ -88,7 +89,8 @@ export interface RunTuiOptions {
    * workspaceRoot。缺省 undefined → dataDir 默认 ~/.iknow。
    */
   readonly workspaceRoot?: string;
-  /** JSONL trace 输出路径。 */
+  /** JSONL trace 输出路径。缺省(经 resolveTraceRoot)落本入口写侧 dataDir ——
+   *  与 hub 写 trace 的会话文件夹同池,读侧工具/面板扫描根不与写侧分叉。 */
   readonly traceOut?: string;
   /**
    * `iknow tui --auto-mode`：显式初始权限模式。优先于 IKNOW_PERMISSION_MODE。
@@ -224,6 +226,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // ADR-0019 (T2): explicit workspaceRoot → resolveServeDataDir 落
     // `<workspaceRoot>/.iknow`;缺省 → ~/.iknow(spec #120 SC 1 既有默认)。
     const dataDir = resolveServeDataDir(options.dataDir, workspaceRoot);
+    // trace 读侧扫描根(ACI 三工具 + 面板)缺省 = 本入口写侧 dataDir —— 同一
+    // 解析结果,读侧不与写侧分叉(flag > IKNOW_TRACE_OUT env > dataDir)。
+    const traceOut = resolveTraceRoot(options.traceOut, dataDir);
     // settings 双向持久化（T4）：/thinking /effort 面板 Esc → 写回 settings.json。
     // 目标文件按「project 存在写 project，否则 user」解析（project 本就覆盖 user，
     // 写 user 等于无效——对齐 settings.ts merge 优先级）。写回后登记 self-write
@@ -333,7 +338,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // 观测性地板:与下方 createTuiBridge 的 traceOut 同一个值 —— hub 写会话
       // 的 turn / tool 记录,deps 层的工厂让子代理三事件落同一个
       // `<traceOut>/<conversationId>.jsonl`。
-      ...(options.traceOut !== undefined ? { traceOut: options.traceOut } : {}),
+      traceOut,
       onExtensions: (ext) => {
         tuiExtensions = ext;
       },
@@ -420,7 +425,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // 装配；缺席（默认 OFF）→ hub 不调，行为逐字节不变。
       autoMemory,
       overlayMemoryPrefetch,
-      traceOut: options.traceOut,
+      traceOut,
       // #128 T8: settings.verify 段 → 闭环配置 (经 hub-bridge 透传 SessionHub)。
       // command 缺失 (含 verify 段缺失) → { command: "" }, hub 装配
       // subagentManager 时 runClassifier 接管 (spec #128 Objective)。与 serve

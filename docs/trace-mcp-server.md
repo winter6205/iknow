@@ -9,7 +9,11 @@ character window you address).
 `--trace-out` / `IKNOW_TRACE_OUT` is the **scan root**, not a flat `*.jsonl`
 directory. After ADR-0071 the product write side is the two-level tree
 `<scanRoot>/projects/<slug>/<conversationId>/trace.jsonl`. Point the flag at
-the serve data dir (usually `~/.iknow`).
+the serve data dir the writer actually uses: after ADR-0019 the pool shards
+per workspace root — the main checkout writes `<workspaceRoot>/.iknow`
+(explicit `--workspace-root` > env `IKNOW_WORKSPACE_ROOT` > cwd fallback for
+the TUI), while `iknow serve` without a root uses `~/.iknow`. Match the flag to
+the entry point's data dir, or the scan finds nothing.
 
 When the flag and env are both omitted, the stdio process still falls back to
 `./trace/` (legacy wire for old checkouts). That path is **not** where new

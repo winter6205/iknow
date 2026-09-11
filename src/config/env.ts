@@ -368,6 +368,23 @@ function envOptional(opts: EnvGetOpts): string | undefined {
   return raw.length > 0 ? raw : undefined;
 }
 
+/**
+ * 单字段 workspaceRoot env 读取 —— `loadIknowEnv().workspaceRoot` 的同源轻量面
+ * （同 `envOptional` 优先级：process.env > `<cwd>/.env.local` > `<cwd>/.env`，
+ * 未设 → undefined）。存在理由：`loadIknowEnv` 读 settings 链并对缺
+ * `llm.model` fail-fast，不是纯函数 —— 只需要一个 env 档值的调用方
+ * （cli 缺省根派生等路径解析点）不得被 settings 状态拖崩。
+ */
+export function loadWorkspaceRootEnv(
+  cwd: string = process.cwd()
+): string | undefined {
+  const file = {
+    ...parseEnvFile(join(cwd, ".env")),
+    ...parseEnvFile(join(cwd, ".env.local")),
+  };
+  return envOptional({ file, key: WORKSPACE_ROOT_ENV_KEY });
+}
+
 function envOptionalBool(opts: EnvGetOpts): boolean | undefined {
   const raw = envOptional(opts);
   if (raw === undefined) return undefined;

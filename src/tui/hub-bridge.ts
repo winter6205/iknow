@@ -266,7 +266,10 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     cwd: opts.workspaceRoot,
   });
   const store = new SessionStore(
-    resolveServeDataDir(opts.dataDir),
+    // ADR-0019:数据根与写侧同源 —— resolveServeDataDir(dataDir, workspaceRoot)
+    // 同一解析链(dataDir 优先,否则 <workspaceRoot>/.iknow,缺省 ~/.iknow)。
+    // 此前漏传 workspaceRoot,显式 root 的会话会被落回旧全局池 ~/.iknow。
+    resolveServeDataDir(opts.dataDir, opts.workspaceRoot),
     projectIdentityRoot
   );
   const hub = new SessionHub({

@@ -66,26 +66,14 @@ import {
   resolveSubagentTraceDir,
 } from "./session-api/store/index.js";
 import { resolveServeDataDir } from "./session-api/serve.js";
+import { loadWorkspaceRootEnv } from "./config/env.js";
 import { createTaskWorktreeProvisioner } from "./session-api/worktree-rebind.js";
 import type { WorktreeIsolationHostOpts } from "./harness/isolation/worktree-gate.js";
 import { createWorktreeIsolationHost } from "./cli/worktree-host.js";
 import { deriveProjectIdentityRoot } from "./harness/session-roots.js";
 // 共享装配 (cli / serve / tui 三入口共用, SSOT): settings.verify → VerifyConfig。
 import { resolveVerifyConfig } from "./config/verify-config.js";
-
-/**
- * T3 (ADR-0071 Decision 1/4):
- * trace 锚点已迁入会话文件夹,主会话写入由 `resolveConversationTraceFilePath`
- * 经 hub / store 派生;本根只承担子代理聚合目录(`createTrace("subagent")`,
- * T5 迁走)与 runTrace 的回放池(SC6 退役 cwd-relative `./trace/` 后的落点)。
- * 默认 = `resolveServeDataDir()`(≈ `<home>/.iknow`),与读侧同源。
- *
- * `resolve` 把任意相对输入归一化为绝对路径,保证下游 mkdirSync / appendFileSync
- * 不会被调用方传 cwd-relative 时「以启动时 CWD 为根」再次踩 T3 退役的坑。
- */
-function resolveTraceRoot(flag: string | undefined): string {
-  return resolve(flag ?? process.env.IKNOW_TRACE_OUT ?? resolveServeDataDir());
-}
+import { resolveTraceRoot } from "./cli/trace-root.js";
 
 /**
  * review-fix (M5): WorkspaceRootError type guard —— resolver 抛的是 plain
@@ -158,7 +146,9 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
   }
 
   const bundle: RuntimeBundle = await prepareRuntime();
-  const tracePath = resolveTraceRoot(parsed.traceOut);
+  // 写侧数据根同源:ask 入口 store 池恒 `resolveServeDataDir()`
+  // (chat-session.ts:2190 同链,与 workspaceRoot 无关),读侧缺省根跟同一池。
+  const tracePath = resolveTraceRoot(parsed.traceOut, resolveServeDataDir());
 
   let built: { deps: LoopEngineDeps };
   try {
@@ -302,8 +292,12 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   // `subagent.jsonl` (conversationId:"subagent") 已退役 —— 改由
   // buildHarnessEngine(opts.subagentsDir) 派生 per-agent `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
   // 解析顺序保持(traceOut flag > IKNOW_TRACE_OUT env > 默认)只服务于
-  // 其余子代理相关形态(stderr pointer 退路)。
-  const tracePath = resolve(resolveTraceRoot(parsed.traceOut));
+  // 其余子代理相关形态(stderr pointer 退路)。默认与 chat 写侧数据根同源
+  // (chat-session.ts 的 store 池恒 `resolveServeDataDir()`,与 workspaceRoot
+  // 无关;workspaceRoot 变量只喂 identity 派生)。
+  const tracePath = resolve(
+    resolveTraceRoot(parsed.traceOut, resolveServeDataDir())
+  );
 
   let built: import("./harness/build-engine.js").BuiltEngine;
   // W2: chat REPL 持一个可变 PermissionModeContext —— /permissions 命令在
@@ -592,14 +586,23 @@ async function runTui(parsed: ParsedCli): Promise<void> {
     ...(parsed.workspaceRoot !== undefined
       ? { workspaceRoot: parsed.workspaceRoot }
       : {}),
-    traceOut: resolveTraceRoot(parsed.traceOut),
+    // traceOut 缺省派生放 run.tsx(dataDir 已解析处):TUI 写侧 dataDir 有
+    // cwd 兜底(<cwd>/.iknow),cli 层拿不到 env 档,在此预解析会与写侧分叉。
+    traceOut: resolveTraceRoot(parsed.traceOut, undefined),
     ...(parsed.autoMode ? { permissionMode: "full_auto" } : {}),
   });
   process.exitCode = exitCode;
 }
 
 async function runServe(parsed: ParsedCli): Promise<void> {
-  const tracePath = resolveTraceRoot(parsed.traceOut);
+  // ADR-0019:读侧面板根与写侧数据根同源。serve 写侧链 = explicit workspaceRoot
+  // > env IKNOW_WORKSPACE_ROOT > ~/.iknow(serve 不落 cwd 兜底);缺省派生复刻
+  // 同一链,两侧必须落同一池。
+  const serveDataDir = resolveServeDataDir(
+    parsed.dataDir,
+    parsed.workspaceRoot ?? loadWorkspaceRootEnv()
+  );
+  const tracePath = resolveTraceRoot(parsed.traceOut, serveDataDir);
   const { startSessionServe } = await import("./session-api/serve.js");
   const { createSessionGrants } =
     await import("./harness/permission/session-grants.js");
@@ -649,10 +652,18 @@ async function runServe(parsed: ParsedCli): Promise<void> {
 }
 
 async function runTrace(parsed: ParsedCli): Promise<void> {
-  // T3 (SC6): 读侧与写侧同源 —— flag > env > `resolveServeDataDir()`。
-  // 旧单文件 fail-fast(`detectLegacyTrace`)随 SC6 退役;两级树 discovery
-  // 由 T6 承接。
-  const traceOut = resolveTraceRoot(parsed.traceOut);
+  // T3 (SC6): 读侧与写侧同源 —— flag > env > serve 写侧数据根
+  // (`iknow trace` 缺省探测的是同进程 `iknow serve` 的 /trace 面板,所以
+  // 缺省根复刻 serve 的解析链:explicit workspaceRoot > env > ~/.iknow;
+  // 与 runServe 同构)。旧单文件 fail-fast(`detectLegacyTrace`)随 SC6 退役;
+  // 两级树 discovery 由 T6 承接。
+  const traceOut = resolveTraceRoot(
+    parsed.traceOut,
+    resolveServeDataDir(
+      parsed.dataDir,
+      parsed.workspaceRoot ?? loadWorkspaceRootEnv()
+    )
+  );
 
   // ADR-0020 D2.1 默认模式：不起进程，探测 iknow serve health 后指向同进程
   // /trace 面板。探测目标 host/port 来自 --host/--port（缺省 127.0.0.1:8787）。
