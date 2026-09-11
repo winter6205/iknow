@@ -365,4 +365,16 @@ describe("run_graph 合同锁：DESCRIPTION 覆盖剩余子图语义", () => {
     expect(d).toContain("spawn_subagent");
     expect(d).not.toContain("src/harness/graph");
   });
+
+  it("说明不把无边并行当 run_graph 用例（与通知文分工同向）", () => {
+    // 分工 SSOT = graph/notification.ts：run_graph 的用例是「相互依赖的
+    // 有序拆分」；单发或无依赖多任务走 spawn_subagent（「a graph with no
+    // edges buys nothing over parallel spawns」）。description 若反向邀请
+    // 无边并行，模型在 graph ON 下会优先选错入口 —— 这条钉住与 SSOT 同向
+    // 的分工，使回归不必只靠真模型轨迹集兜。
+    const d = tool.description.toLowerCase();
+    expect(d).not.toContain("or parallel sub-agent work");
+    expect(d).toContain("no ordering");
+    expect(d).toContain("no edges");
+  });
 });

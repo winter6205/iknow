@@ -210,8 +210,12 @@ test("多段各自持有 thinkingMs:时长按各自 anchor 严格归属,不串�
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
   // (1) `Thought for 12s` 与 `Thought for 25s` 各出现一次、按消息顺序。
-  const think12Idx = lines.findIndex((line) => line.includes("Thought for 12s"));
-  const think25Idx = lines.findIndex((line) => line.includes("Thought for 25s"));
+  const think12Idx = lines.findIndex((line) =>
+    line.includes("Thought for 12s")
+  );
+  const think25Idx = lines.findIndex((line) =>
+    line.includes("Thought for 25s")
+  );
   expect(think12Idx).toBeGreaterThanOrEqual(0);
   expect(think25Idx).toBeGreaterThanOrEqual(0);
   expect(think12Idx).toBeLessThan(think25Idx);

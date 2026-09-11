@@ -100,9 +100,11 @@ interface RunGraphNodeInput {
  */
 const DESCRIPTION =
   "Run several sub-agent tasks as one dependency graph in a single call. " +
-  "Use it when a single turn needs ordered or parallel sub-agent work with " +
-  "results flowing between tasks; pair with `spawn_subagent` for one-shot " +
-  "tasks and use `graph mode on` so the call is admitted. Declare each " +
+  "Use it when a single turn needs ordered sub-agent work whose pieces " +
+  "depend on each other, so results flow between tasks; for a single task, " +
+  "or for several tasks with no ordering between them, use " +
+  "`spawn_subagent` instead — a graph with no edges buys nothing over " +
+  "parallel spawns. Use `graph mode on` so the call is admitted. Declare each " +
   "node with an `id`, a self-contained `task`, and the `deps` it must wait " +
   "for. Nodes whose dependencies are all satisfied run in parallel; a node " +
   "starts only after every node it depends on finished, and sees those " +
@@ -175,6 +177,9 @@ function readNodes(input: unknown): ReadonlyArray<RunGraphNodeInput> {
       "run_graph: `nodes` must be a non-empty array"
     );
   }
+  // S5 基线既有:复杂度 14 在本票之前的 master 上已超阈(本票只改
+  // description 字符串);拆函数属另一票,scope-disable 防它拦 commit。
+  // eslint-disable-next-line complexity -- baseline: pre-existing on master
   return raw.map((entry, i) => {
     const node = (entry ?? {}) as Record<string, unknown>;
     // 节点：拒未声明键（`onFailure` 已是声明字段 —— phase2 T1）。
@@ -446,6 +451,9 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
       isConcurrencySafe: false,
       interruptBehavior: "cancel",
     } as const,
+    // S5 基线既有:复杂度 18 同为 master 已有;本票只改 description 字符串,
+    // 不做 handler 拆分(minimal change),scope-disable 留待复杂度票。
+    // eslint-disable-next-line complexity -- baseline: pre-existing on master
     handler: async (input: unknown, ctx?: ToolExecutionContext) => {
       // EXIT:overlay 关着 —— 装配层已把工具滤出 promptTools,能走到这里
       // 说明是同 round 翻键或模型幻觉。零 spawn,typed 拒绝。

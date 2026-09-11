@@ -20,7 +20,7 @@
 
 ## Completion
 
-汇报使用中文。实测矩阵见已引用的测试规范；模型可见文案或装配先读 `docs/guides/prompt-development.md`。
+汇报使用中文。实测矩阵见已引用的测试规范；模型可见文案或装配先读 `docs/guides/prompt-development.md`（含黄金集名册：不另开总柜；无集的面补集或登记缺口）。
 
 完成后简要报告：
 

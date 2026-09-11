@@ -157,7 +157,14 @@ node_modules
 !.cursor/rules/**
 !.cursor/vendor/
 !.cursor/vendor/**
-archive
+# archive/ 整体是本地归档；已 commit 的子目录 archive/tests-real-llm/（real-LLM
+# e2e 快照，#960 先例）白名单放行——父目录被排除时无法 re-include 子内容，
+# 故走 .claude/ 同款三段式。顺带修复 lint-staged 对该目录下 staged 新文件
+# 重跑不带 -f 的 git add 时报 ignored 路径错、commit 无法落地的问题。
+!archive/
+archive/*
+!archive/tests-real-llm/
+!archive/tests-real-llm/**
 docs/demos
 # TUI deps-tools 测试残留（tests/tui/deps-tools.test.ts 用 mkdtemp(process.cwd()) 落目录，
 # 时序 flake 时残留 .iknow-tui-hooks-* / .iknow-tui-nohooks-*；根因修复见 tests/tui/deps-tools.test.ts）

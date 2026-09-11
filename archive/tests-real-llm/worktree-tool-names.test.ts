@@ -56,7 +56,11 @@ runOrSkip("worktree tool golden set (real-LLM)", () => {
         roots,
         shutdowns,
       });
-      expectDecidingTool(uses, sc3.expectedFirstTool, sc3.toleratedPreludeTools);
+      expectDecidingTool(
+        uses,
+        sc3.expectedFirstTool,
+        sc3.toleratedPreludeTools
+      );
     },
     360_000
   );
@@ -69,7 +73,11 @@ runOrSkip("worktree tool golden set (real-LLM)", () => {
         roots,
         shutdowns,
       });
-      expectDecidingTool(uses, sc4.expectedFirstTool, sc4.toleratedPreludeTools);
+      expectDecidingTool(
+        uses,
+        sc4.expectedFirstTool,
+        sc4.toleratedPreludeTools
+      );
     },
     360_000
   );

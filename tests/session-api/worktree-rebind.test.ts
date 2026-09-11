@@ -931,9 +931,7 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
         targetConversationId: "conv-owner",
       })
     ).rejects.toMatchObject({
-      message: expect.stringMatching(
-        /exit-worktree|delete the session record/
-      ),
+      message: expect.stringMatching(/exit-worktree|delete the session record/),
     });
     // T4 / L1 弱档披露钉住（spec L1「三处强制披露」之回执处）：回执必须
     // 显式说「occupancy is visible only within the current process」——不让

@@ -350,7 +350,10 @@ describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutate
   /** Inner executor mirroring production: an enter/exit-worktree call
    * reaches inner (lifecycle tools are not workspace mutates), and its
    * handler resolves the wrapped host seam, which flips the live cell. */
-  function flippingRootInner(cell: LiveTaskRoot, flipTo: string): {
+  function flippingRootInner(
+    cell: LiveTaskRoot,
+    flipTo: string
+  ): {
     readonly inner: Executor;
     readonly reached: string[];
   } {
@@ -406,7 +409,10 @@ describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutate
     // Session bound on its own tree; enter adopts another conversation's
     // tree mid-wave (the wrapped enter seam flips the cell to OTHER_TREE).
     const cell = createLiveTaskRoot(WORKTREE_ROOT);
-    const { inner, reached } = flippingRootInner(cell, "/repo/.iknow/worktrees/conv-2");
+    const { inner, reached } = flippingRootInner(
+      cell,
+      "/repo/.iknow/worktrees/conv-2"
+    );
     const gate = makeGate({
       liveTaskRoot: cell,
       provision: async ({ root }) => root,
@@ -441,7 +447,10 @@ describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutate
       inner,
     });
 
-    const out = await gate.executeAll([writeCall("w1"), { id: "exit-1", name: "exit-worktree", input: {} }]);
+    const out = await gate.executeAll([
+      writeCall("w1"),
+      { id: "exit-1", name: "exit-worktree", input: {} },
+    ]);
 
     expect(out[0]!.kind).toBe("ok");
     expect(out[1]!.kind).toBe("ok");

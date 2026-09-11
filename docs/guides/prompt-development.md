@@ -29,6 +29,43 @@
 4. **一次改一个变量。** 同一 PR 不要同时换模型、换抽取 prompt、换预取帽。回归了才知道是哪一层。
 5. **文案和闸同仓。** `buildExtractPrompt` 一类函数导出或固定字符串，测试断言关键纪律句仍在；否决类能 tokenize 重叠的走代码，不把唯一否决写在 prompt。
 
+## 名册：哪些面有集、哪些是已登记缺口
+
+**规则：黄金集跟被锁行为同放，不另开总柜文件夹；无集的面补集或登记缺口，不得只记 Not run。**
+
+理由：集和它锁的文案同目录，改文案的人在同一处看见集；集中放会制造第二处要同步的地址。夹具路径写进下表即够，缺的是**登记**而不是**目录**。
+
+**锁的三档**（避免把单测当集）：
+
+- `STATIC` — 断言常量/子串仍在。
+- `SEAM` — 断言注入/不注入、进不进 system、字节恒定。
+- `轨迹集` — 固定输入 + 可判定首工具/轨迹。**只有这一档是黄金集。**
+
+| 面               | SSOT 源                                                      | 锁                        | 集路径（轨迹集才有）                                                                                 |
+| ---------------- | ------------------------------------------------------------ | ------------------------- | ---------------------------------------------------------------------------------------------------- |
+| tool description | 各 `src/harness/aci/tools/*.ts`（graph / subagent 两件在外） | STATIC（D9 闸 + 各工具）  | 仅 web 两件与 run_graph 有轨迹集                                                                     |
+| web 发现 vs 阅读 | `web-search.ts` / `web-fetch.ts`                             | STATIC + 轨迹集           | `tests/harness/aci/tools/web-discover-vs-read.fixtures.ts`                                           |
+| graph 通知文     | `graph/notification.ts`                                      | STATIC + SEAM + 轨迹集    | `tests/harness/graph/graph-mode-notification.fixtures.ts`（SEAM 锁 = `graph-mode-presence.test.ts`） |
+| graph 工具选型   | `graph/run-graph-tool.ts`                                    | STATIC + 轨迹集（同上集） | 同上集（G1 锁 run_graph 侧——两行共用一套夹具）                                                       |
+| soul / usage     | `identity/soul.ts` / `identity/usage.ts`                     | STATIC + SEAM             | **缺口**                                                                                             |
+| 抽取 prompt      | `memory/ingest.ts`（`buildExtractPrompt`）                   | STATIC                    | **缺口**（纪律句有锁，行为无集）                                                                     |
+| 梦境 prompt      | `memory/dream.ts`                                            | 仅 cap                    | **缺口**（正文无锁）                                                                                 |
+| system 前缀装配  | `identity/assemble.ts`                                       | SEAM（序 + 字节恒定）     | n/a（装配由 SEAM 锁，无需轨迹集）                                                                    |
+| tool schema      | `aci-registry.ts` / `build-engine.ts`                        | SEAM                      | n/a                                                                                                  |
+| 溢出退场         | `aci/tool-overflow.ts`                                       | STATIC + SEAM             | n/a                                                                                                  |
+| `<agent_status>` | `agent-status.ts`                                            | STATIC + SEAM             | **缺口**                                                                                             |
+| MCP 重连通知     | `loop-engine.ts`                                             | STATIC + SEAM             | **缺口**                                                                                             |
+| 记忆预取         | `memory/prefetch.ts`                                         | STATIC + SEAM             | **缺口**                                                                                             |
+| 子代理 persona   | `subagent/worker.ts`                                         | SEAM                      | **缺口**                                                                                             |
+| skill 正文加载   | `aci/tools/skill.ts`                                         | STATIC + SEAM             | **缺口**                                                                                             |
+
+**缺口怎么处置（这是本表存在的理由）：** 碰到「缺口」行的面被改动时，两条路二选一，不得只记一条 Not run 就收工：
+
+1. **补集** — 按本页流程先写夹具（离线 + 真模型半边），跑绿再改文案；集路径回填本表。
+2. **登记不建** — 在改动 commit 正文写明「登记缺口：<面> 无轨迹集，理由是 <成本/无行为分歧>」，并在本行留痕。缺口就从「每次重新发现」变成「一次性结论」。
+
+**Trajectory 集必须真跑模型。** 只跑离线半边 = 只证明夹具形状对（#960 的离线文件就是这么写的），首工具判定必须过 `npm run test:real-llm`。缺 key → 如实记 Not run，不得把离线绿当集绿。
+
 ## 记忆相关（与 ADR 0048 一致）
 
 - 代码默认关自动抽取；本仓库项目 env 开，方便本地测评。过度注意黄金集是验收（招呼零预取；装配无全库书单/promote；抽取输出合法且否决类不入库；研究轨有数字必须 retrieve；库里有公司名仍搜档案；显式记住可跨线程），不是上电闸。

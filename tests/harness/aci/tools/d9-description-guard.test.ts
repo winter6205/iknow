@@ -140,8 +140,7 @@ const fakeWorktreeEnter: WorktreeEnterToolDeps["worktreeEnter"] = async () => ({
 });
 const fakeWorktreeExit: WorktreeExitToolDeps["worktreeExit"] = async () =>
   "/tmp/fake-main";
-const fakeWorktreeList: ListWorktreesToolDeps["worktreeList"] =
-  async () => [];
+const fakeWorktreeList: ListWorktreesToolDeps["worktreeList"] = async () => [];
 const fakeWorktreeRemove: RemoveWorktreeToolDeps["worktreeRemove"] =
   async () => ({
     label: undefined,
