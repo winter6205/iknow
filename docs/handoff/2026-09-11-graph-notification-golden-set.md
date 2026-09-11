@@ -16,11 +16,11 @@
 ## 审查结论
 
 - Standards 轴：0 High / 2 Medium（死 manager 注入、测试注释带迭代史）→ 均已修复；Low 中名册 SSOT 范围已修。
-- Spec 轴：表格列 2 个 High，实质同一问题——夹具 `basis` 字段锚定 ADR-0080（主仓已标 superseded by 0081）。修复 = 删 `basis`、判定改锚 SSOT 文本常量；0081（未合入 master，按 operator 指示不碰）落地后集无需改写。Medium/Low 已修：SEAM 锁引用补进名册行、live 集加「模型跳过委派自答」诊断。
+- Spec 轴：表格列 2 个 High，实质同一问题——夹具 `basis` 字段锚定 ADR-0080（主仓已标 superseded by 0081）。修复 = 删 `basis`、判定改锚 SSOT 文本常量；0081 已合入 master（PR #989），本集无需改写。Medium/Low 已修：SEAM 锁引用补进名册行、live 集加「模型跳过委派自答」诊断。
 
 ## 未做 / 留给后续
 
-- ADR-0081 的 once-per-run latch 落地时：`graph-mode-presence.test.ts` SC1 的「连续两拍各贴一条」断言需按 0081 收紧；本集（首工具判定）无需改。
+- ADR-0081 once-per-run latch 已落地（PR #989）：`graph-mode-presence.test.ts` SC1/SC5/SC7 已按每个 `run()` 一条收紧；本集（首工具判定）无需改。
 - `.claude/rules/` 不进 git（`.gitignore:127`）→ worktree 会话读不到 test.md，eval `003-rules-files` / `001-bootstrap-pass` 在 worktree 恒红。已向 operator 提请授权把 rules 纳入版本控制，未决。
 - 4 条既有测试红（`~/.iknow/agents` 用户级泄漏进 subagent_type enum）与 3 条 eval 红（同因 + rules 目录缺席）均为环境问题，干净 HOME 下全绿，非本轮引入。
 

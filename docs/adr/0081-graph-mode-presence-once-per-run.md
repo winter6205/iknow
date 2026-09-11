@@ -2,6 +2,7 @@
 
 Date: 2026-09-10
 Status: accepted
+Landed: PR #989（`19fde472`，2026-09-11）
 
 「此刻开着图」按**一次 `run()`**（一条人话的那一轮）在 messages 尾贴一句短 `<graph_mode>`，不按内环每一次即将调模型。翻转当拍仍可一条长 ON/OFF；同一 `run()` 已贴长 ON 则不叠短句。不进 system、不进 `run_graph` 回执、不进 `<agent_status>`。关着或从未开过：不贴。人读面：TUI/CLI 不把 `<graph_mode>` 画成用户气泡，与 `<agent_status>` 同纪律。
 

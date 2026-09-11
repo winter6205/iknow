@@ -8,6 +8,8 @@
 
 ### Feature
 
+- **graph mode 短现势 once-per-run（ADR-0081，PR #989，2026-09-11）**: 开着图时每个 `run()` 开头贴一句短 `<graph_mode>`，同一轮内环不再每跳追加。翻转当拍仍可贴长 ON/OFF，已贴长 ON 则本轮不叠短句。取代 ADR-0080 每跳语义。
+
 - **活图阶段 1+2（#929，PR #944，2026-09-10）**: 同会话多次 `run_graph` 共用进程内活图账本（剩余子图、按 id 冻结、取消只留 done）；阶段 2 增加 `onFailure`、同 id 再进、每 id 进入 8 次熔断。账本不进 JSONL。spec `specs/live-graph-phase1.md` / `live-graph-phase2.md`。
 
 - **web_fetch HTML 窗口（2026-08-28）**: 传输层解码体 1 MiB 上限（流式读 + stub 二次拒绝）。`start_chars` 续抓，头部 `Window:` / `Representation:` 在 untrusted banner 之前；`max_chars` 上限 16000，整段 output ≤ executor 20000。opt-in `as=html` 返回 markup（仅 html content-type）；二进制类型拒绝。沙箱 curl / fence env 不改——看网页主路径仍是 SSRF 守卫下的 `web_fetch`。计划 `plans/web-fetch-html-window.md`。
