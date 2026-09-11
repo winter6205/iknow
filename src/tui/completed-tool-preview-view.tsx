@@ -6,13 +6,11 @@
  * live box 与历史 `ToolPreviewRows` 都走这里，避免两处复制 JSX。
  * 数据 SSOT 仍是 `completedToolPreview`；本文件只渲染。
  *
- * #693 T4 D4:扩 resultPreview —— 标题行下方的 `>` 风格 dim 5 行尾部预览
+ * #693 T4 D4:扩 resultPreview —— 标题行下方的 dim 5 行尾部预览
  * （bash / skill 等子进程输出）。live + 历史共用同一渲染面（spec D4 同规则）。
  * 失败由 caller 在外层包 error 色 token 体现；preview 文本本身不变。
  *
- * 前缀字形：纯 ASCII `>`（Windows Terminal / 窄终端稳定不回退成 `|__`），
- * 替代历史 `⎿`（U+23BF —— box-drawing 系，不在 ASCII 集）。溢出标记
- * `… +N 行` 已是 ASCII `…` + 数字 + 行 + 空格，不需要再换。
+ * 正文 gutter：单条 `│`（装饰 dim）；溢出 `… +N 行` 不加 gutter / 不加 `>`。
  */
 import type { ReactNode } from "react";
 import {
@@ -25,13 +23,10 @@ import { DiffView, diffRowTexts } from "./diff-view.js";
 import { CodeBlock } from "./markdown.js";
 import { tuiPalette } from "./theme.js";
 
-/** 工具结果预览的前缀（spec D4 dim 装饰行）。TUI 一致性：装饰前缀用
- *  纯 ASCII `>`（稳定不回退）；与 `[失败]` / 工具卡 `▣|✓|✗` 字形是不同族
- *  —— 工具卡走几何字形表状态，preview 行走 ASCII 前缀表「这是
- *  stdout/stderr 的尾窗」。 */
-const RESULT_PREVIEW_PREFIX = ">";
+/** 结果预览正文 gutter（spec D4 dim 装饰）。一条 `│`，不再每行 `>`。 */
+const RESULT_PREVIEW_PREFIX = "│";
 
-/** 结果预览行（带前缀），供行账（liveToolPreviewRows）与渲染同源。 */
+/** 结果预览行（带 │ gutter），供行账（liveToolPreviewRows）与渲染同源。 */
 export function resultPreviewTextLines(preview: ResultPreview): string[] {
   if (preview.kind === "empty") return [];
   const out: string[] = [];
@@ -109,12 +104,12 @@ export function CompletedToolPreviewView(props: {
         <>
           {resultOverflow !== null && (
             <text fg={tuiPalette.dim} wrapMode="none">
-              {`${RESULT_PREVIEW_PREFIX} ${resultOverflow}`}
+              {resultOverflow}
             </text>
           )}
           {resultPreview.lines.map((line, i) => (
-            // #tui-render-overhaul T1:dim 只属装饰（前缀 / 溢出）—— 内容行
-            // 走正文色，避免「结果预览一坨灰」。前缀与内容分段渲染，分属
+            // #tui-render-overhaul T1:dim 只属装饰（gutter / 溢出）—— 内容行
+            // 走正文色，避免「结果预览一坨灰」。gutter 与内容分段渲染，分属
             // 不同 fg token 互不污染。
             <text key={`rp-${i}`} wrapMode="none">
               <span fg={tuiPalette.dim}>{`${RESULT_PREVIEW_PREFIX} `}</span>

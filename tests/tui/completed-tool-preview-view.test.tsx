@@ -110,7 +110,7 @@ describe("CompletedToolPreviewView write_file code c4", () => {
 
 import { type ResultPreview } from "../../src/tui/tool-summary.js";
 
-describe("CompletedToolPreviewView resultPreview: > dim 5 行尾部 + 溢出", () => {
+describe("CompletedToolPreviewView resultPreview: │ gutter 5 行尾部 + 溢出", () => {
   test("kind=empty 时不挂载（不渲染空块）", async () => {
     const setup = await testRender(
       <CompletedToolPreviewView
@@ -123,10 +123,11 @@ describe("CompletedToolPreviewView resultPreview: > dim 5 行尾部 + 溢出", (
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
     expect(frame).not.toContain("> ");
+    expect(frame).not.toContain("│ ");
     await setup.renderer.destroy();
   });
 
-  test("仅 resultPreview 有内容时：⏵ 风格 dim 行渲染", async () => {
+  test("仅 resultPreview 有内容时：│ gutter 行渲染", async () => {
     const preview: ResultPreview = {
       kind: "result",
       lines: ["out-1", "out-2"],
@@ -142,8 +143,9 @@ describe("CompletedToolPreviewView resultPreview: > dim 5 行尾部 + 溢出", (
     );
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("> out-1");
-    expect(frame).toContain("> out-2");
+    expect(frame).toContain("│ out-1");
+    expect(frame).toContain("│ out-2");
+    expect(frame).not.toContain("> out-1");
     await setup.renderer.destroy();
   });
 
@@ -164,8 +166,10 @@ describe("CompletedToolPreviewView resultPreview: > dim 5 行尾部 + 溢出", (
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
     expect(frame).toContain("… +7 行");
-    expect(frame).toContain("> l7");
-    expect(frame).toContain("> l11");
+    expect(frame).not.toContain("> … +7 行");
+    expect(frame).not.toContain("> …");
+    expect(frame).toContain("│ l7");
+    expect(frame).toContain("│ l11");
     await setup.renderer.destroy();
   });
 
@@ -192,17 +196,18 @@ describe("CompletedToolPreviewView resultPreview: > dim 5 行尾部 + 溢出", (
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
     expect(frame).toContain("export");
-    expect(frame).toContain("> side-effect-output");
+    expect(frame).toContain("│ side-effect-output");
+    expect(frame).not.toContain("> side-effect-output");
     await setup.renderer.destroy();
   });
 });
 
 // -- #tui-render-overhaul T1:resultPreview 内容行不再 dim ----------------------
 //
-// 不变式：装饰元素（`>` 前缀、`… +N 行` 溢出）保留 dim，让读者一眼识别
+// 不变式：装饰元素（`│` gutter、`… +N 行` 溢出）保留 dim，让读者一眼识别
 // 为辅助形态；正文内容（bash stdout/stderr 实际产出）走正文色，与终端其
 // 余渲染一致——避免「结果预览一坨灰、读者看不到内容」。spec D4 词条由
-// 「dim 只属成功 bash 尾巴」改为「dim 只属装饰（前缀/溢出）」。
+// 「dim 只属成功 bash 尾巴」改为「dim 只属装饰（gutter/溢出）」。
 
 describe("CompletedToolPreviewView squeeze（spec D5）", () => {
   test("squeezed 投影 = 只留标题行 `Wrote N lines to <path>`，正文预览整段让位", async () => {
@@ -229,7 +234,7 @@ describe("CompletedToolPreviewView squeeze（spec D5）", () => {
 });
 
 describe("CompletedToolPreviewView resultPreview: 内容行不再 dim（仅装饰 dim）", () => {
-  test("内容行 fg = palette.text（不再是 dim）；> 前缀保持 dim", async () => {
+  test("内容行 fg = palette.text（不再是 dim）；│ gutter 保持 dim", async () => {
     const preview: ResultPreview = {
       kind: "result",
       lines: ["RESULT_CONTENT_LINE"],
@@ -254,12 +259,15 @@ describe("CompletedToolPreviewView resultPreview: 内容行不再 dim（仅装�
     expect(contentSpan).toBeDefined();
     expect(rgbaEq(contentSpan!.fg, expectedText)).toBe(true);
     expect(rgbaEq(contentSpan!.fg, expectedDim)).toBe(false);
-    // 前缀 span: 含 ">" 字符的 span 必须保留 dim 色。
+    // gutter span: 含 "│" 的 span 必须保留 dim 色，且不再出现 `>`。
     const prefixSpan = lines
       .flatMap((l) => l.spans)
-      .find((s) => s.text.includes(">"));
+      .find((s) => s.text.includes("│"));
     expect(prefixSpan).toBeDefined();
     expect(rgbaEq(prefixSpan!.fg, expectedDim)).toBe(true);
+    expect(
+      lines.flatMap((l) => l.spans).some((s) => s.text.includes(">"))
+    ).toBe(false);
     await setup.renderer.destroy();
   });
 
@@ -285,6 +293,8 @@ describe("CompletedToolPreviewView resultPreview: 内容行不再 dim（仅装�
       .find((s) => s.text.includes("… +3 行"));
     expect(overflowSpan).toBeDefined();
     expect(rgbaEq(overflowSpan!.fg, expectedDim)).toBe(true);
+    expect(overflowSpan!.text.includes(">")).toBe(false);
+    expect(overflowSpan!.text.startsWith("> ")).toBe(false);
     await setup.renderer.destroy();
   });
 });

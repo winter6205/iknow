@@ -3197,7 +3197,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       {/* chrome footer 顺序（prompt 之下，JSX 顺序 = 视觉顺序 —— 新增行必须
           插在 ContextBar 之后，不得插到 ContextBar 与 PromptInput 之间）：
             ContextBar（model + ctx，prompt 下第一行）→
-            subagent task list → worktree isolation line → graph。 */}
+            session location（路径 · 分支）→ subagent task list → graph。 */}
       {view === "chat" && (
         <box flexDirection="row" justifyContent="flex-start">
           <ContextBar
@@ -3213,22 +3213,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           />
         </box>
       )}
-      {/* 子代理状态：ContextBar 之下。不计入 chrome 行账（panelRows=0）。
-          T7：传 focusedRow —— chrome-focus subagent(row) 焦点时该行展开 taskPreview
-          （不再截断）+ 加 `> ` 前缀；其余行保持原截断。focusedRow 仅作用于 live 行
-          （reducer 圈定的子集），SubagentPanel 内部按 liveIndex 投影。 */}
-      {view === "chat" && (
-        <SubagentPanel
-          subagents={subagents}
-          cols={cols}
-          focusedRow={
-            chromeFocus.kind === "subagent" ? chromeFocus.row : undefined
-          }
-        />
-      )}
-      {/* D7 / SC6: 会话位置行（ContextBar / SubagentPanel 之下、graph 之上；
-          envPaneRows 槽位入账不变）—— 常驻 1 行 `路径 · 分支`，绑任务树时
-          同一槽换成树上根。不进焦点环、不带 dirty/diff。 */}
+      {/* D7 / SC6: 会话位置行（ContextBar 之下、子代理之上；envPaneRows 槽位
+          入账不变）—— 常驻 1 行 `路径 · 分支`，绑任务树时同一槽换成树上根。
+          不进焦点环、不带 dirty/diff。 */}
       {view === "chat" &&
         sessionLocationLines({
           projectRoot: props.cwd,
@@ -3244,6 +3231,19 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             {line.text}
           </text>
         ))}
+      {/* 子代理状态：路径行之下。不计入 chrome 行账（panelRows=0）。
+          T7：传 focusedRow —— chrome-focus subagent(row) 焦点时该行展开 taskPreview
+          （不再截断）+ 加 `> ` 前缀；其余行保持原截断。focusedRow 仅作用于 live 行
+          （reducer 圈定的子集），SubagentPanel 内部按 liveIndex 投影。 */}
+      {view === "chat" && (
+        <SubagentPanel
+          subagents={subagents}
+          cols={cols}
+          focusedRow={
+            chromeFocus.kind === "subagent" ? chromeFocus.row : undefined
+          }
+        />
+      )}
       {view === "chat" && (
         <GraphChromePanel
           snapshot={graphProgress}

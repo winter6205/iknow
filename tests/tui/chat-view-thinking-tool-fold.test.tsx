@@ -613,9 +613,8 @@ test("idle：无历史 activity 时已完成 live retract 工具收出 tail（ke
 });
 
 test("idle：SC3 一轮成功 read_file + 成功 bash → bash 标题留、read 收进计数", async () => {
-  // spec SC3：成功 read_file（retract）→ 无标题、无 ⎿ 预览、进折叠计数
-  // `read_file × 1`；成功 bash（keep）→ 标题留、不带结果预览（CONTEXT
-  // keep class：bash 成功只留带命令的标题），不进计数。
+  // spec SC3：成功 read_file（retract）→ 无标题、无预览、进折叠计数
+  // `read_file × 1`；成功 bash（keep）→ 标题留 + 折叠结果预览，不进计数。
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -664,12 +663,8 @@ test("idle：SC3 一轮成功 read_file + 成功 bash → bash 标题留、read 
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // bash keep：标题留、结果预览不留（CONTEXT keep class：成功 bash 不带
-  // 结果预览；result preview 只属于 live running）。#tui-render-overhaul
-  // T3:无 [完成] 前缀。
   expect(frame).toContain("bash · pwd");
-  expect(frame.includes("⎿")).toBe(false);
-  expect(frame.includes("⎿ /tmp")).toBe(false);
+  expect(frame).toContain("│ /tmp");
   expect(frame.includes("[完成]")).toBe(false);
   // read_file retract：无标题、无预览。
   expect(frame.includes("read_file ·")).toBe(false);

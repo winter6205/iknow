@@ -46,6 +46,7 @@ import {
   visualWidth,
 } from "../shared/tool-line.js";
 import { computeDiff, type DiffLine } from "./diff-unified.js";
+import { foldBashPreviewLines } from "./progress-tick.js";
 import { TOOL_SETTLED_CLASS, type SettledClass } from "./tool-settled.js";
 
 // D1 文本层单源 = src/shared/tool-line.ts（CLI 同源）。re-export 保持既有
@@ -162,7 +163,7 @@ function bashPreview(
   if (streams.length === 0) return EMPTY_RESULT_PREVIEW;
   const merged = streams.join("\n");
   if (!isRenderableOutput(merged)) return EMPTY_RESULT_PREVIEW;
-  const lines = splitOutputLines(merged);
+  const lines = foldBashPreviewLines(merged);
   if (lines.length === 0) return EMPTY_RESULT_PREVIEW;
   const { visible, hiddenLineCount } = takeTailWindow(lines);
   if (visible.length === 0) return EMPTY_RESULT_PREVIEW;
@@ -432,14 +433,6 @@ export type ResultPreview =
     };
 
 const EMPTY_RESULT_PREVIEW: ResultPreview = { kind: "empty" };
-
-/** 按行切分（保留 ANSI；与 toolPreviewRows 共用语义）。尾部空行去掉
- *  （bash 输出常见 trailing \n）。 */
-function splitOutputLines(s: string): readonly string[] {
-  if (s.length === 0) return [];
-  const lines = s.split("\n");
-  return lines[lines.length - 1] === "" ? lines.slice(0, -1) : lines;
-}
 
 /** 尾部取 N 行 + 溢出计数。lines.length <= N → 整段透传。 */
 function takeTailWindow(lines: readonly string[]): {

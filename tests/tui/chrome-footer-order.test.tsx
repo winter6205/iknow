@@ -2,9 +2,9 @@
 /**
  * tests/tui/chrome-footer-order.test.tsx
  *
- * 回归：输入框之下第一行永远是 ContextBar（model + ctx 用量条）；子代理任务
- * 列表与其它 chrome 信息必须排在 ContextBar 之后。JSX 顺序 = 视觉顺序
- * （根容器 flexDirection="column"）。
+ * 回归：输入框之下第一行永远是 ContextBar（model + ctx 用量条）；其后是
+ * session location（路径 · 分支）、再是子代理任务预览、再是 graph。
+ * JSX 顺序 = 视觉顺序（根容器 flexDirection="column"）。
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -17,6 +17,7 @@ import { createPermissionModeContext } from "../../src/harness/permission/index.
 import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 import type { SubagentInfo } from "../../src/harness/subagent/manager.js";
+import { sessionLocationLines } from "../../src/tui/environment-pane.js";
 
 const TASK_PREVIEW = "查找文档";
 
@@ -85,7 +86,7 @@ function fakeBridge(subagents: ReadonlyArray<SubagentInfo>): TuiBridge {
 }
 
 describe("TuiApp chrome footer 顺序（ContextBar 紧贴输入框之下）", () => {
-  test("ContextBar 行在 SubagentPanel 行之上（输入框 ❯ 之上为 identity strip）", async () => {
+  test("有活子代理时：ContextBar → 路径行 → 子代理任务预览", async () => {
     const bridge = fakeBridge([makeSubagent({ state: "running" })]);
     let setupRef: TestRendererSetup | undefined;
     const setup = await testRender(
@@ -118,10 +119,20 @@ describe("TuiApp chrome footer 顺序（ContextBar 紧贴输入框之下）", ()
       );
       expect(ctxIdx).toBeGreaterThan(inputIdx);
 
+      const locationText = sessionLocationLines({
+        projectRoot: "/tmp/proj",
+        cols: 80,
+      })[0]?.text;
+      expect(locationText).toBeDefined();
+      const locIdx = lines.findIndex(
+        (l, i) => i > ctxIdx && l === locationText
+      );
+      expect(locIdx).toBeGreaterThan(ctxIdx);
+
       const panelIdx = lines.findIndex(
         (l, i) => i > ctxIdx && l.includes(TASK_PREVIEW)
       );
-      expect(panelIdx).toBeGreaterThan(ctxIdx);
+      expect(panelIdx).toBeGreaterThan(locIdx);
     } finally {
       if (setupRef && !setupRef.renderer.isDestroyed)
         setupRef.renderer.destroy();

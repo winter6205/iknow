@@ -1038,15 +1038,53 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
   });
 });
 
-describe("SC5 / D6：bash 进度流只留最后一行，不堆百分比史", () => {
-  test("百分比流（1%→100%）的 result 预览只含末尾行，早期百分比行不出现", () => {
-    // spec D6 / CONTEXT `progress tick`：`1%`→`100%` 这类过程流只在同一行
-    // 原地更新，落定不留轨迹。TUI 的落定面 = result 预览尾窗（5 行），
-    // 早期百分比行既不在可见行、也不在可回看面 —— 只有一条 bash 结果行。
-    const stdout = Array.from(
-      { length: 20 },
-      (_, i) => `progress ${String((i + 1) * 5)}%`
-    ).join("\n");
+describe("SC5：bash 进度先折再 5 行窗（旧合同「最后 5 条百分行」作废）", () => {
+  test("Updating files 1%→100% + 两行实况 → 最后一跳与实况，无中间百分比", () => {
+    const ticks = Array.from({ length: 20 }, (_, i) => {
+      const pct = (i + 1) * 5;
+      return `Updating files: ${pct}% (${pct * 10}/1000)`;
+    });
+    const stdout = [
+      ...ticks,
+      "Preparing worktree",
+      "HEAD is now at abc1234",
+    ].join("\n");
+    const p = resultToolPreview(
+      "bash",
+      { command: "git checkout" },
+      { resultText: JSON.stringify({ code: 0, stdout, stderr: "" }) }
+    );
+    expect(p.kind).toBe("result");
+    if (p.kind !== "result") return;
+    expect(p.lines).toEqual([
+      "Updating files: 100% (1000/1000)",
+      "Preparing worktree",
+      "HEAD is now at abc1234",
+    ]);
+    expect(p.hiddenLineCount).toBe(0);
+    expect(p.lines.some((l) => l.includes("5%"))).toBe(false);
+    expect(p.lines.some((l) => l.includes("80%"))).toBe(false);
+  });
+
+  test("\\r 原地覆盖：同一物理行只留最后一跳", () => {
+    const stdout =
+      "Updating files: 69% (690/1000)\rUpdating files: 80%\rUpdating files: 100% (1000/1000)\nPreparing worktree\n";
+    const p = resultToolPreview(
+      "bash",
+      { command: "git checkout" },
+      { resultText: JSON.stringify({ code: 0, stdout, stderr: "" }) }
+    );
+    expect(p.kind).toBe("result");
+    if (p.kind !== "result") return;
+    expect(p.lines).toEqual([
+      "Updating files: 100% (1000/1000)",
+      "Preparing worktree",
+    ]);
+    expect(p.lines.some((l) => l.includes("69%"))).toBe(false);
+  });
+
+  test("negative: `failed at 50%` / `done at 50%` 不是 progress tick，不折", () => {
+    const stdout = "failed at 50%\ndone at 50%\n";
     const p = resultToolPreview(
       "bash",
       { command: "build" },
@@ -1054,41 +1092,39 @@ describe("SC5 / D6：bash 进度流只留最后一行，不堆百分比史", () 
     );
     expect(p.kind).toBe("result");
     if (p.kind !== "result") return;
-    // 窗内 5 行 = 最后 5 行（80%..100%），早期 5% 不在可见面。
-    expect(p.lines.length).toBe(RESULT_PREVIEW_WINDOW);
-    expect(p.lines[p.lines.length - 1]).toBe("progress 100%");
-    expect(p.lines.some((l) => l === "progress 5%")).toBe(false);
-    expect(p.hiddenLineCount).toBe(15);
+    expect(p.lines).toEqual(["failed at 50%", "done at 50%"]);
+    expect(p.hiddenLineCount).toBe(0);
   });
 
-  test("同一 tool_use 的进度更新不按事件追加行：行数只由最终输出决定", () => {
-    // 不变式：结果预览的面是「最终输出尾窗」，不是「每次进度事件的追加」。
-    // 同一份输出无论中途被更新过多少步，都只渲染一条 bash 结果面
-    // —— 不存在「按事件追加行」的路径。
-    const steps = Array.from({ length: 20 }, (_, i) => `progress ${i + 1}%`);
-    const early = resultToolPreview(
-      "bash",
-      { command: "build" },
-      { resultText: JSON.stringify({ code: 0, stdout: steps[0], stderr: "" }) }
+  test("overflow: 先折再 takeTailWindow — hidden 按折叠后行数计", () => {
+    const ticks = Array.from(
+      { length: 20 },
+      (_, i) => `Updating files: ${(i + 1) * 5}%`
     );
-    const late = resultToolPreview(
+    const extras = ["L0", "L1", "L2", "L3", "L4", "L5"];
+    const stdout = [...ticks, ...extras].join("\n");
+    const p = resultToolPreview(
       "bash",
-      { command: "build" },
-      {
-        resultText: JSON.stringify({
-          code: 0,
-          stdout: steps.join("\n"),
-          stderr: "",
-        }),
-      }
+      { command: "git checkout" },
+      { resultText: JSON.stringify({ code: 0, stdout, stderr: "" }) }
     );
-    expect(resultPreviewTextLines(early).length).toBe(1);
-    // 溢出标记 1 行 + 窗内 RESULT_PREVIEW_WINDOW 行。
-    expect(resultPreviewTextLines(late).length).toBe(RESULT_PREVIEW_WINDOW + 1);
-    // 早期百分比行不会被保留成第二条历史行。
+    expect(p.kind).toBe("result");
+    if (p.kind !== "result") return;
+    // 折后 7 行（最后一跳 + L0..L5）→ 尾窗 5 = L1..L5，hidden = 2。
+    // 旧合同若先取尾 5 再谈折：hidden 会是 21（20 百分行 + L0 被窗切掉）。
+    expect(p.lines).toEqual(["L1", "L2", "L3", "L4", "L5"]);
+    expect(p.hiddenLineCount).toBe(2);
+    expect(resultPreviewTextLines(p).some((l) => l.includes("5%"))).toBe(false);
+  });
+
+  test("空 stdout → empty preview", () => {
     expect(
-      resultPreviewTextLines(late).some((l) => l.includes("progress 1%"))
-    ).toBe(false);
+      resultToolPreview(
+        "bash",
+        { command: "true" },
+        { resultText: JSON.stringify({ code: 0, stdout: "", stderr: "" }) }
+      ).kind
+    ).toBe("empty");
   });
 });
 

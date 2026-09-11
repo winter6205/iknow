@@ -65,11 +65,11 @@ _Avoid_: 固定条数尾窗；行账 / 行窗口；把 LLM `/compact` 当 UI 树
 **fence display cap**: TUI markdown 围栏在 OpenTUI 树上只挂前 32 行，溢出用 `+N more lines`；会话正文仍是全文。与新建文件 10 行预览、编辑 diff 分开。
 _Avoid_: 用只挂最近 N 条消息代替围栏截行；把围栏窗改成写预览帽；为省树而删 session 里的代码
 
-**result preview（结果预览）**: live running 时工具标题下的截断输出窗（bash 尾部最多 5 行、ANSI 透传、装饰前缀）；成功落定后不画。失败走 **failure overlay** 一行短错误，不走本窗。数据走 handler envelope 的 `meta` 观测旁路，永不进模型视野。
-_Avoid_: 成功 bash 留五行走；失败或 retract 仍画 dim 预览尾巴；把 meta 经 encodeToolResults 带进 model tool_result；与围栏或写预览帽混用；百分比流按行追加进气泡
+**result preview（结果预览）**: 工具标题下的截断输出窗：先做 **progress tick** 再取 bash 尾部最多 5 行（ANSI 透传）；live 完成态与成功落定的 bash 都画。装饰不用每行 `>`，溢出 `… +N 行` 无箭头；失败走 **failure overlay**；`meta` 旁路不进模型。
+_Avoid_: 每行 `>`；失败或 retract 仍画预览尾巴；把 meta 经 encodeToolResults 带进 model tool_result；与围栏或写预览帽混用；百分比流按行追加进气泡
 
-**progress tick（进度覆盖）**: `1%`→`100%` 这类过程流只在同一行原地更新，落定不留轨迹。这是噪音，不是必须看见的改动。
-_Avoid_: 每一跳百分比占会话一行；把进度史当 bash 标题
+**progress tick（进度覆盖）**: `Updating files: N%` / `1%`→`100%` 同一过程只占一行，留当前或最后一跳给人看；`\r` 原地覆盖与连续百分比行都折成这一行。落定不留中间轨迹，也不把这类信息整段藏掉。
+_Avoid_: 每一跳百分比占会话一行；把 Updating files 整段藏掉；把进度史当 bash 标题
 
 **write create preview（新建预览）**: 新建文件落定后挂正文前 10 行 + `+N more lines`。不是编辑。
 _Avoid_: 6 行帽；把新建预览套到 edit diff 上
@@ -83,8 +83,8 @@ _Avoid_: 一律折叠；把 live 过程叫落定态；D3 整轮藏标题；过�
 **live tool line（过程标题）**: 进行中给人看的英文行——思考是 `Thinking…`；命令是 `Running N shell command(s)…` 加可见的 `bash` 命令。工具名加本轮要点（search=query、fetch=url、read=path、grep=pattern）。不要 `[运行中]` / `[完成]`；**retract class** 跑完进折叠计数，不是整段抹掉。
 _Avoid_: `[运行中]` 前缀；思考中藏秒数合同另开；跑着的命令只留工具名不露命令；收类未完成就进计数；读/搜整段隐身
 
-**keep class（留）**: 落定后仍画出标题行的工具类（bash / write / edit / 会话动作）。bash 成功只留命令；新建走 **write create preview**；编辑走 **edit diff preview**；挤档可只留 `Wrote N lines to path`。
-_Avoid_: 成功 bash 五行走；只留 dim 预览尾巴；把标题藏进折叠计数；把本次改动折没
+**keep class（留）**: 落定后仍画出标题行的工具类（bash / write / edit / 会话动作）。bash 成功留命令 + 折叠后的 **result preview**；新建走 **write create preview**；编辑走 **edit diff preview**；挤档可只留 `Wrote N lines to path`。
+_Avoid_: 成功 bash 只留标题把 Updating files 藏掉；只留 dim 预览尾巴；把标题藏进折叠计数；把本次改动折没
 
 **retract class（收）**: 落定后标题和预览都从屏幕拿掉、只进折叠计数的工具类（读取 / 搜索 / 查询，含 `read_file` / `grep` / `web_search` / `web_fetch`）。未知未注册工具缺省也是收。
 _Avoid_: 藏标题留预览；给 `read_file` 加内容预览；把失败的收类折进计数；收成「完全不出现」（无过程行、无 `name × N`）
@@ -107,7 +107,7 @@ _Avoid_: 把 `[skill-load name=]` 正文当作用户键入；加载技能；turn
 **chrome focus**: TUI 底栏焦点环 `input` | 子代理行 | `graph` 的单一 reducer；有子代理行时 Down 先入该列，再 graph；Up 反向回到输入框。
 _Avoid_: 只有 graph 抢 Down；焦点落在 ContextBar；子代理面板不可聚焦；位置行进焦点环
 
-**session location chrome（会话位置行）**: TUI 底栏**常驻一行**，形如 `~/projects/iknow · master`（路径 · 分支）。绑 task worktree 只把路径换成树上的根（同一行，例如 `.iknow/worktrees/<叶> · <branch>`），不另起一行、不靠绑树决定显隐。子代理行在它下面；不进模型消息；不带 dirty/diff。
+**session location chrome（会话位置行）**: TUI 底栏在 ContextBar 之下**常驻一行** `路径 · 分支`；绑 task worktree 只换同一行的路径。子代理与 Graph 在它下面（两者都有时子代理在上）；不进焦点环、不进模型消息、不带 dirty/diff。
 _Avoid_: 绑树才出现；未绑树 0 行；用显隐当「在不在树上」；常驻第二行 dirty/diff；子代理画在位置行上面
 
 **streaming block freeze**: 会变长的那串 markdown 里，除最后一个顶层块外钉住，后续增量不再 lexer、不再重建前缀子树；边界只前进。
@@ -571,8 +571,8 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **task worktree label vs conversationId**: label 是文件夹名与 enter 定位；conversationId 是归属身份，不写进目录名
 - **工作树说明书 vs 闸 vs 提示词**: description 先回答 agent 能不能调、做什么；写被拦点名是 harness；人喊创建是 usage/夹具
 - **create-worktree vs create-task-worktree**: 模型面用前者；后者是旧注册名，不再给模型
-- **settled appearance vs result preview**: 落定三类决定谁还上屏；结果预览只属于 live running，成功 bash 落定后不画
-- **必须看见 vs 噪音**: 本次改动 diff、新建 10 行预览、进行中命令、位置行必须看见；百分比轨迹、`[运行中]`、收类正文、`<graph_mode>` 气泡是噪音
+- **settled appearance vs result preview**: 落定三类决定谁还上屏；成功 bash 的结果预览是折叠后的尾窗，不是百分比轨迹
+- **必须看见 vs 噪音**: 本次改动 diff、新建 10 行预览、进行中命令、位置行、进度最后一跳必须看见；中间百分比轨迹、`[运行中]`、收类正文、`<graph_mode>` 气泡是噪音
 - **本轮人读合同 vs 旧显示数字**: 一行 `Thought for …` + 原第二行计数 / 进行中 `Thinking…` 与可见命令 / 新建 10 行 / 编辑 diff / 位置常驻 / 图每个 `run()` 一次 —— 与旧两行折叠、`思考了`、6 行帽、`[运行中]`、仅绑树才显示冲突时以本轮词条为准
 - **新建预览 vs 改动 diff**: 新建才 10 行帽；编辑不套该帽，人要核验的是这次改了什么
 - **failure overlay vs retract class**: 失败覆盖「收」，失败工具出独立行，不折进计数

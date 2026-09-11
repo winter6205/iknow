@@ -144,8 +144,7 @@ test("T3 idle race：history 已渲染 bash 标题 + liveToolRuns 残留 bash ok
   // 折叠计数行含 read_file × 1(bash 不进)。
   expect(frame).toContain("read_file × 1");
   expect(frame.includes("bash ×")).toBe(false);
-  // result preview 不属于落定态的 bash(只在 live running 才挂)。
-  expect(frame.includes("\u23bf")).toBe(false);
+  expect(frame).toContain("│ /tmp");
   await setup.renderer.destroy();
 });
 
@@ -218,8 +217,7 @@ test("T3 idle race：keep 完成态 + accent 完成态 同 tool_use_id → 每�
   // 两条完成态各画一次。
   expect(countOccurrences(frame, "skill echo")).toBe(1);
   expect(countOccurrences(frame, "bash · echo hi")).toBe(1);
-  // accent 走 accent 色 + bold(渲染细节),但不带 result preview。
-  expect(frame.includes("\u23bf")).toBe(false);
+  expect(frame).toContain("│ hi");
   await setup.renderer.destroy();
 });
 
@@ -307,10 +305,7 @@ test("T3 legacy 行：liveToolLines 残留 legacy 完成行不与历史同件叠
   // 落定的 bash 在历史中已渲染;legacy 行若未被过滤也会带"bash · pwd"。
   // acceptance:同 name 工具的标题只画一次。legacy 行若与历史叠画,
   // 计数 = 2;正确实现 = 1(history only)。
-  // 实际 legacy 路径的视觉等同 bash · pwd,history 侧 bash keep 标题
-  // 也是 bash · pwd,共用同一视觉。允差:legacy 行不应再挂 result preview
-  // (`\u23bf`)—— legacy 是已落定状态,挂预览是 T3 任务定义的双画路径之一。
-  expect(frame.includes("\u23bf")).toBe(false);
+  expect(frame).toContain("│ /tmp");
   await setup.renderer.destroy();
 });
 

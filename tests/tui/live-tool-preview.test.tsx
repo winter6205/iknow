@@ -691,13 +691,17 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     // 首行：完成态摘要（#tui-render-overhaul T3:无 [完成] 前缀）
     expect(rows[0]).toBe("bash · ls");
     expect(rows[0]?.includes("[完成]")).toBe(false);
-    // 尾 5 行带 > 前缀
-    expect(rows).toContain("> out-3");
-    expect(rows).toContain("> out-7");
+    // 尾 5 行带 │ gutter，不再以 `>` 开头
+    expect(rows).toContain("│ out-3");
+    expect(rows).toContain("│ out-7");
+    expect(rows.some((r) => r.startsWith("> "))).toBe(false);
     // 早于尾窗的不出现
-    expect(rows.some((r) => r.includes("> out-0"))).toBe(false);
-    // 溢出 +N 行
-    expect(rows.some((r) => r.includes("… +") && r.includes("行"))).toBe(true);
+    expect(rows.some((r) => r.includes("│ out-0"))).toBe(false);
+    // 溢出 +N 行（无 `>` / `> `）
+    const overflow = rows.find((r) => r.includes("… +") && r.includes("行"));
+    expect(overflow).toBeDefined();
+    expect(overflow!.includes(">")).toBe(false);
+    expect(overflow!.startsWith("> ")).toBe(false);
   });
 
   test("完成态 bash 失败（status=failed）:不画 stderr 预览（D5 一行短错误）", () => {
@@ -744,12 +748,12 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
       stdout: "\x1b[31mERROR\x1b[0m line",
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    expect(rows.some((r) => r.includes("ERROR") && r.includes("> "))).toBe(
+    expect(rows.some((r) => r.includes("ERROR") && r.includes("│ "))).toBe(
       true
     );
   });
 
-  test("live box 帧：bash 尾部预览 > 前缀行出现", async () => {
+  test("live box 帧：bash 尾部预览 │ gutter 行出现", async () => {
     const run: LiveToolRun = {
       id: "tu-bash-box",
       name: "bash",
@@ -763,8 +767,9 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     // #tui-render-overhaul T3:成功态无 [完成] 前缀。
     expect(frame).toContain("bash · ls");
     expect(frame.includes("[完成]")).toBe(false);
-    expect(frame).toContain("> file-a");
-    expect(frame).toContain("> file-c");
+    expect(frame).toContain("│ file-a");
+    expect(frame).toContain("│ file-c");
+    expect(frame).not.toContain("> file-a");
     await setup.renderer.destroy();
   });
 

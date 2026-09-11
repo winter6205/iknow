@@ -52,13 +52,11 @@ describe("deriveSlot: SC1 单一派生", () => {
 });
 
 describe("deriveSlot: keep class（留的足迹，spec D4）", () => {
-  test("bash 成功 → 只留标题（CONTEXT keep class：成功 bash 不带结果预览）", () => {
-    // docs/CONTEXT.md keep class：bash 成功只留带命令的标题，不带结果预览
-    // —— result preview 只属于 live running（docs/CONTEXT.md「result
-    // preview」词条：成功落定后不画）。
+  test("bash 成功 → 标题 + 折叠结果预览（KEEP_WITH_PREVIEW）", () => {
+    // docs/CONTEXT.md keep class：bash 成功留命令 + 折叠后的 result preview。
     expect(deriveSlot("bash", { running: false, failed: false })).toEqual({
       showTitle: true,
-      showPreview: false,
+      showPreview: true,
       inFoldCount: false,
       color: "default",
     });
