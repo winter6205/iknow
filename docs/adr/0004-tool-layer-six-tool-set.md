@@ -3,6 +3,8 @@
 Date: 2026-08-04
 Status: accepted
 
+Amendment 2026-09-12：`grep` 默认输出与条数参数 **`head_limit`** 见 ADR-0084 / `specs/aci-file-search-surface.md`。本文件 L16「输出纯字符串 `路径:行号:行内容`」不再是默认出法（那是 `output=content`）。同日改口：`read_file` 不写 `limit` 则从 offset 读到 EOF（L14「默认 200 行」作废；曾草案的默认/顶皆 2000 亦否决）；显式 `limit` 硬顶仍 2000。`write_file` 非空未读硬拒见 ADR-0084，`edit_file` 不硬前置 last-read。曾草案的「过短锚禁止 `replace_all`」否决；L17 的唯一匹配 + 显式 `replace_all` 维持。
+
 ## Context
 
 GH issue #140（winter6205/iknow，`[wayfinder:grilling]` 工具层重写设计，父 #114 记忆层地图）。现行 5 个 ACI 工具（`shell_exec` / `fs_search` / `fs_view` / `fs_edit` / `context_manager`）自身均标 `PROTOTYPE（throwaway）`，且逐个有致命硬伤：shell_exec timeout 不杀进程 + allowlist 是可执行文件名非能力；fs_search 单工具混"搜内容/找文件"两语义（`pattern:""` 匹配所有文件）；fs_view 标 `isConcurrencySafe:true` 却用闭包共享状态 `lastPath/lastOffset`；context_manager 实际是死的（`lazy:true` 真实 CLI 路径失效）。#125 已裁决 context_manager 删除。重写是兑现既定 graduation 债务。业界参照：SWE-agent。操作员 2026-08-03~04 经 10 轮逐题 HITL grilling 裁决。

@@ -134,6 +134,18 @@ _Avoid_: 把 meta 拼入 model tool_result；让 TUI / Web 直接读 handler 原
 **ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；当前 8 件：`bash` / `read_file` / `grep` / `glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`，SSOT 工厂 = `src/harness/aci/tools/registry.ts:createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取，工具数永不同步漂移（#141 / #191 / a277f68）。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。
 _Avoid_: 在 harness 之外另起 tool 注册表；在 entry point 手写工具数组（#228 决议 D4——`memory_recall` / `memory_save` 入 SSOT 8+2=10）；让工具返回结构化 metadata
 
+**last-read ledger**: 本 conversation 内「看过的规范 path」登记表。**进程内存**，键为 conversationId，不落会话文件夹。入账：成功 `read_file`，或成功且可抽单一 path 的白名单 `bash`（`cat` / `nl` / `bat` / `batcat` / `head` / `tail` / `sed -n 'X,Yp'` / `grep` / `egrep` / `fgrep` / `rg`；单文件、无管道、无重定向）。只供已存在且 size>0 的 `write_file` 查表，没有则硬拒不写盘；新建与空文件免检。`edit_file` 不查表。不扫 `ctx.messages`。无 conversationId 则非空覆写 fail-closed。resume 空表。ADR-0084。
+_Avoid_: 用对话字符串判断读过；进程级全局表；落盘当权威；把任意只读 bash（`ls`/`stat`/管道）当入账；复用 `validateReadonlyCommand` 当入账；把 last-read 当作 `edit_file` 前置
+
+**grep output mode**: `grep` 的出法枚举：默认 `paths`（只要相对路径）；`content` 为匹配行；`count` 为每文件条数加全库 total。结果名单条数参数为 `head_limit`（默认 50、顶 2000）。ADR-0084。
+_Avoid_: 默认吐匹配行；把 `limit` 改名为 `grep_limit`
+
+**line window**: `grep` 的 `also` + `within_lines`：主词命中后只在该行窗找第二段。不是裸跨行正则。ADR-0084。
+_Avoid_: multiline 开关；`.*` 吞整文件
+
+**install-rooted rg**: 安装根上钉死版本+校验和的搜引擎二进制；生产 `grep` 只 exec 这一路径。起不来走 Node 全语义扫，不回落 PATH `rg`。ADR-0084。
+_Avoid_: which rg；环境依赖当主路径
+
 **ACI network surface**: 装配层网络三职——发现是 `web_search`，阅读是 `web_fetch`，通话不升第 9 件工具、只走 `bash` 的 `network: true`（ADR-0022）。形状冻结；发现与阅读的后端选择见 **ACI web backend**。
 _Avoid_: curl 工具; http_request; HTTP 原语; 把 method / headers 并进 web_fetch
 
