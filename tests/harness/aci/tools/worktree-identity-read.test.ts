@@ -93,8 +93,14 @@ describe("rebound task roots can read the stable project identity root", () => {
       },
     });
 
+    // D2：grep 默认出法是 paths（只回相对路径），行内容要显式 output=content。
+    // 本用例锁的不变式是「identity root 可达」，不是出法默认值。
     const grepResult = String(
-      await grep.handler({ pattern: "identity", path: repo })
+      await grep.handler({
+        pattern: "identity",
+        path: repo,
+        output: "content",
+      })
     );
     const globResult = String(
       await glob.handler({ pattern: "AGENTS.md", path: repo })
@@ -125,7 +131,13 @@ describe("rebound task roots can read the stable project identity root", () => {
 
     writeLiveTaskRoot(liveRoot, task);
     assert.match(
-      String(await grep.handler({ pattern: "identity", path: identity })),
+      String(
+        await grep.handler({
+          pattern: "identity",
+          path: identity,
+          output: "content",
+        })
+      ),
       /AGENTS\.md:1:identity guidance/
     );
     assert.match(

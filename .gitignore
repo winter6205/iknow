@@ -171,3 +171,8 @@ docs/demos
 .iknow-tui-*
 # personal agent skill (not in specs index)
 .iknow/skills/design-taste-frontend/
+
+# D6 自带搜引擎的下载产物（scripts/install-search-engine.ts 落到安装根）：
+# 平台二进制不入仓，换台机器跑 `npm run install:search-engine` 重下即可。
+# 根锚定 —— 不误伤已跟踪的 `.cursor/vendor/`（那是团队共享的规则目录）。
+/vendor/

@@ -1,56 +1,52 @@
 /**
- * grep 工具（T8，#141 工具层重写）：在 workspace 内按正则搜索文件内容。
- *
- * 契约真值：ADR-0004 L15 + ADR-0005 L14 + T1-7 裁定。
+ * grep 工具 — 搜面契约（specs/aci-file-search-surface.md D2–D7 / SC4–SC10）。
  *
  * 行为概要：
- *   - 入口先 resolve+containment 校验搜索根（symlink 越界拒绝）。
- *   - 优先 ripgrep：`rg --line-number --no-heading --color never
- *     [--ignore-case] -- <pattern> <搜索根>`，通过 spawnWithStopSignal
- *     启动并把 ctx.signal 透传，abort 时按 detached 进程树 SIGTERM→2s→SIGKILL。
- *   - ripgrep 不可用（ENOENT）→ Node fallback：递归遍历文本文件，
- *     用 new RegExp(pattern, ignoreCase ? "i" : "") 匹配；跳过 NUL（二进制）
- *     与超大文件（>1MB，二进制/超大文件策略注释说明）。
- *   - 输出纯字符串，每行 `相对路径:行号:行内容`，\n 连接；limit 截断（上限 2000）。
- *   - 默认大小写敏感；ignoreCase=true 才不敏感。
- *   - 非法正则 → ToolExecutionError（消息含 pattern）。
- *   - 无匹配 → 空字符串。
+ *   - 出法（D2）：`paths`（默认，唯一相对路径）/ `content`（`path:line:text`）/
+ *     `count`（`path:条数` + 全库 `total:`）。
+ *   - 分页（D3）：`offset` + `head_limit`（默认 50、硬顶 2000）切**已排序**
+ *     名单；排序（path 再行号）发生在切片之前。偏移越过最后一条且本次有命中
+ *     → 精确回执 `No entries at this offset`；无匹配 → 空串。
+ *   - 收窄（D4）：`path`（目录）/ `glob`（文件名模式）/ `type`（语言，二者并列）。
+ *     未知 `type` 与坏正则是**两种** typed 错误（SC10）。
+ *   - 行窗（D5）：`also` + `within_lines`（默认 5）是**过滤**，只在窗内找第二段。
+ *   - 引擎（D6）：只 exec 安装根钉死的二进制；起不来（不存在 / ENOENT /
+ *     不可执行）→ Node 扫实现 D2–D5 全语义。**不** 回落到 PATH 上的 `rg`。
+ *
+ * 复杂度（SC12）：flag 解析 / argv / 行解析 / 行窗 / 组构造 / 排序 / 分页 /
+ * 投影各自独立成模块，本文件只做装配与引擎分派。
  */
 
-import { readdir, readFile, stat } from "node:fs/promises";
-import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
-import { isAbsolute, join, relative } from "node:path";
-import { realpath } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
 import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
-import type { LiveTaskRoot } from "../../session-roots.js";
-import { resolveWithinRoot, spawnWithStopSignal } from "./helpers.js";
+import { resolveInstallRoot, type LiveTaskRoot } from "../../session-roots.js";
+import { resolveWithinRoot } from "./helpers.js";
+import { compilePattern } from "../search/pattern.js";
+import { parseQuerySpec, rejectRetiredLimitField } from "../search/options.js";
+import { engineSpecFor, renderResult } from "../search/pipeline.js";
+import { readWorkspaceLines } from "../search/file-lines.js";
+import { nodeScan } from "../search/node-scan.js";
+import {
+  engineBinaryPath,
+  RIPGREP_VERSION,
+} from "../search/engine-manifest.js";
+import {
+  runRgEngine,
+  type EngineResult,
+  type SpawnFn,
+} from "../search/rg-engine.js";
+import type { QuerySpec } from "../search/types.js";
 
-const DEFAULT_LIMIT = 200;
-const MAX_LIMIT = 2000;
-const FALLBACK_SCAN_LIMIT_BYTES = 1_048_576; // 与 read_file 对齐：1MB
-const FALLBACK_BINARY_PROBE_BYTES = 8_192; // 探测 NUL 的窗口大小
-const RG_BINARY = "rg";
-const MAX_MATCH_LINE_COLUMNS = 2_000;
-const TRUNCATION_MARKER = "...[truncated]";
+export type { SpawnFn } from "../search/rg-engine.js";
 
-/** 测试 seam：生产 = node:child_process.spawn；测试可注入 stub（ENOENT 模拟 rg 缺失）。 */
-export type SpawnFn = (
-  command: string,
-  args: readonly string[],
-  options: Parameters<typeof nodeSpawn>[2]
-) => ChildProcess;
-
-/**
- * 依赖注入：覆盖点（默认 = 生产值）。
- *
- * - `spawn` 覆盖点：替换 ripgrep 调用为别的 spawn（最常见的用法：抛 ENOENT
- *   以强制 Node fallback 路径）。
- */
+/** 依赖注入：覆盖点（默认 = 生产值）。 */
 export interface GrepToolDeps {
+  /** 替换引擎 spawn（最常见用法：模拟安装根二进制缺失以驱动 Node 全语义）。 */
   readonly spawn?: SpawnFn;
   /**
    * Stable project identity root. When present, absolute paths (and relative
@@ -63,21 +59,21 @@ export interface GrepToolDeps {
    * OFF assembly sets this false to preserve the historical read boundary.
    */
   readonly allowProjectIdentityRoot?: boolean;
+  /**
+   * 覆盖钉死二进制路径。缺席 → `<resolveInstallRoot()>/vendor/ripgrep/...`。
+   * 测试可指向不存在的路径来驱动「安装根二进制不存在」这一 D6 分支。
+   */
+  readonly engineBinaryPath?: string;
 }
 
 interface HandlerInput {
-  readonly pattern: unknown;
+  readonly pattern?: unknown;
   readonly path?: unknown;
-  readonly ignoreCase?: unknown;
-  readonly limit?: unknown;
 }
 
 interface CompiledInput {
-  readonly pattern: string;
+  readonly spec: QuerySpec;
   readonly searchRoot: string;
-  readonly ignoreCase: boolean;
-  readonly limit: number;
-  /** Workspace root (resolved). Used to make output paths root-relative. */
   readonly workspaceRoot: string;
 }
 
@@ -93,70 +89,69 @@ function readRoot(root: string | LiveTaskRoot): string {
   return typeof root === "string" ? root : root.read();
 }
 
-/**
- * 工厂：createGrepTool(root, deps?) — 内容搜索工具。
- *
- * 返回的 AciToolDef 满足：
- *   - name === "grep"
- *   - inputSchema: { pattern 必填 + path? + ignoreCase?(默认 false) + limit?(默认 200, 上限 2000) }
- *   - aci 元数据：category=read-only / isConcurrencySafe=true / interruptBehavior=cancel
- *
- * T6 (plans/worktree-live-task-root.md §6 T6): `root` may be a
- * `LiveTaskRoot` cell; the handler reads the snapshot at call time, so
- * `worktree rebind` in the same run lands the next call in the rebound
- * tree. `string` callers (legacy tests, one-shot consumers) keep
- * byte-identical behavior.
- */
 export function createGrepTool(
   root: string | LiveTaskRoot,
   deps?: GrepToolDeps
 ): AciToolDef {
-  // When the test seam (deps.spawn) is provided we use it directly so
-  // ENOENT-style stubs can drive the fallback branch. Production goes
-  // through spawnWithStopSignal which handles detached process-group kill.
-  const testSpawn = deps?.spawn;
-
   const handler = async (
     input: unknown,
     ctx?: ToolExecutionContext
   ): Promise<string> => {
-    // T6 D2: per-handler batch snapshot. root 在入口读一次冻结为 resolvedRoot,
-    // 贯穿整条路径（compileInput → rg / fallback）。handler 内后续 cell 翻转
-    // 不渗透进本次调用。cell 缺席 → 退到工厂捕获 root（legacy parity）。
+    // T6 D2: per-handler batch snapshot —— root 在入口读一次冻结，贯穿整条
+    // 路径（compileInput → rg / Node 扫）。handler 内后续 cell 翻转不渗透
+    // 进本次调用。cell 缺席 → 退到工厂捕获 root（legacy parity）。
+    rejectRetiredLimitField(input);
     const rootAtCall = readRoot(root);
     const projectIdentityRoot = resolveProjectIdentityRoot(rootAtCall, deps);
-    // Resolve per call (matches sibling tools) so a missing/unreachable
-    // root surfaces at the point of use instead of from a cached promise.
     const resolvedRoot = await realpath(rootAtCall);
     const compiled = await compileInput(
       input,
       resolvedRoot,
       projectIdentityRoot
     );
-    const matches = await runRipgrepOrFallback(
-      testSpawn,
+
+    const binaryPath =
+      deps?.engineBinaryPath ??
+      engineBinaryPath(resolveInstallRoot(), process.platform, process.arch);
+    // 取样 spec：`also` 在场时改取内容行（行窗要行号才能判）。
+    const sampleSpec = engineSpecFor(compiled.spec);
+    const regex = compilePattern(sampleSpec.pattern, sampleSpec.ignoreCase);
+    const readLines = (path: string) =>
+      readWorkspaceLines(compiled.workspaceRoot, path);
+
+    const result = await resolveEngineResult({
+      binaryPath,
       compiled,
-      ctx?.signal
-    );
-    return matches.slice(0, compiled.limit).join("\n");
+      sampleSpec,
+      regex,
+      spawn: deps?.spawn,
+      signal: ctx?.signal,
+    });
+
+    return renderResult({ spec: compiled.spec, result, readLines });
   };
 
   return Object.freeze({
     name: "grep",
-    description:
-      "Search file contents under a workspace directory using a regular expression; prefer this over reading whole files when the search root or query isn't pinpointed. Returns `relative_path:line:content` lines (relative to the workspace root), capped at `limit` (default 200, hard cap 2000); case-sensitive by default — set ignoreCase=true to disable. Falls back to a Node scan if ripgrep is unavailable. Pair with read_file offset/limit on the matched region, or with glob first to pick a tighter search root.",
+    description: `Search file contents under a workspace directory using a regular expression; use it to discover which files carry a pattern before reading them, and pair it with read_file once you have a pinpointed path. Returns relative paths by default (output=paths) — set output=\"content\" for path:line:text or output=\"count\" for per-file counts plus a total:. Narrow with glob / type, show nearby lines with context, or keep only hits whose second literal also appears within within_lines of the match. Page a sorted result list with offset + head_limit (default 50, hard cap ${String(2000)}); an offset past the last entry returns "No entries at this offset". Runs on a bundled search engine (ripgrep ${RIPGREP_VERSION}) resolved from the install root, and falls back to a built-in Node scan with the same semantics when that engine is unavailable.`,
     inputSchema: {
       type: "object",
       properties: {
         pattern: { type: "string" },
         path: { type: "string" },
-        ignoreCase: { type: "boolean", default: false },
-        limit: {
-          type: "integer",
-          default: DEFAULT_LIMIT,
-          minimum: 0,
-          maximum: MAX_LIMIT,
+        output: {
+          type: "string",
+          enum: ["paths", "content", "count"],
+          default: "paths",
         },
+        ignoreCase: { type: "boolean", default: false },
+        context: { type: "integer", default: 0, minimum: 0, maximum: 50 },
+        glob: { type: "string" },
+        type: { type: "string" },
+        also: { type: "string" },
+        within_lines: { type: "integer", default: 5, minimum: 0 },
+        offset: { type: "integer", default: 0, minimum: 0 },
+        head_limit: { type: "integer", default: 50, minimum: 1, maximum: 2000 },
       },
       required: ["pattern"],
       additionalProperties: false,
@@ -171,30 +166,58 @@ export function createGrepTool(
   });
 }
 
+/**
+ * 引擎分派（D6 / SC9）。
+ *
+ * 生产路径只 exec 安装根钉死二进制；起不来 → Node 扫（D2–D5 全语义）。
+ * 这里**没有** PATH `rg` 的分支 —— 那是契约明令禁止的凑合路径。
+ */
+async function resolveEngineResult(input: {
+  readonly binaryPath: string | undefined;
+  readonly compiled: CompiledInput;
+  readonly sampleSpec: QuerySpec;
+  readonly regex: RegExp;
+  readonly spawn: SpawnFn | undefined;
+  readonly signal: AbortSignal | undefined;
+}): Promise<EngineResult> {
+  const fromRg = await runRgEngine({
+    spec: input.sampleSpec,
+    binaryPath: input.binaryPath,
+    searchRoot: input.compiled.searchRoot,
+    workspaceRoot: input.compiled.workspaceRoot,
+    signal: input.signal,
+    spawn: input.spawn,
+  });
+  if (fromRg.kind !== "unavailable") return fromRg;
+
+  const lines = await nodeScan({
+    spec: input.sampleSpec,
+    workspaceRoot: input.compiled.workspaceRoot,
+    searchRoot: input.compiled.searchRoot,
+    regex: input.regex,
+  });
+  return { kind: "lines", lines };
+}
+
 async function compileInput(
   input: unknown,
   workspaceRoot: string,
   projectIdentityRoot?: string
 ): Promise<CompiledInput> {
-  const obj = (input ?? {}) as HandlerInput;
-  if (typeof obj.pattern !== "string" || obj.pattern.length === 0) {
-    throw new ToolExecutionError("grep: pattern must be a non-empty string");
-  }
-  const rawSub = typeof obj.path === "string" ? obj.path : ".";
+  const spec = parseQuerySpec(input);
+  const rawSub = readSubPath(input);
   const searchRoot = await resolveSearchRoot(
     workspaceRoot,
     rawSub,
     projectIdentityRoot
   );
-  const ignoreCase = obj.ignoreCase === true;
-  const limit = clampLimit(obj.limit);
-  return {
-    pattern: obj.pattern,
-    searchRoot,
-    ignoreCase,
-    limit,
-    workspaceRoot,
-  };
+  return { spec, searchRoot, workspaceRoot };
+}
+
+function readSubPath(input: unknown): string {
+  if (input === null || typeof input !== "object") return ".";
+  const path = (input as HandlerInput).path;
+  return typeof path === "string" ? path : ".";
 }
 
 /**
@@ -204,14 +227,11 @@ async function compileInput(
  * - Explicit `projectIdentityRoot` threaded: returns it iff
  *   `allowProjectIdentityRoot` is `true` AND the live root is already a
  *   task worktree (post-rebind); `allowProjectIdentityRoot === false` is
- *   a hard deny. Threading an explicit root without a rebind is the
- *   "OFF assembly / pre-rebind main checkout" surface and returns
- *   `undefined` so the live-root fence stays intact.
+ *   a hard deny.
  * - No explicit `projectIdentityRoot`: returns `undefined`. There is no
  *   shape-based fallback to a derived main checkout — OFF assembly must get
- *   no extra read root (spec SC4: byte-identical to the historical read
- *   boundary) and worker assembly must not widen its tool surface (spec
- *   clause 14) merely because the root path looks task-worktree-shaped.
+ *   no extra read root and worker assembly must not widen its tool surface
+ *   merely because the root path looks task-worktree-shaped.
  */
 function resolveProjectIdentityRoot(
   root: string,
@@ -257,268 +277,7 @@ async function resolveSearchRoot(
   }
 }
 
-function clampLimit(raw: unknown): number {
-  if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_LIMIT;
-  const floored = Math.floor(raw);
-  if (floored <= 0) return DEFAULT_LIMIT;
-  if (floored > MAX_LIMIT) return MAX_LIMIT;
-  return floored;
-}
-
-async function runRipgrepOrFallback(
-  spawn: SpawnFn | undefined,
-  compiled: CompiledInput,
-  signal: AbortSignal | undefined
-): Promise<string[]> {
-  try {
-    return await runRipgrep(spawn, compiled, signal);
-  } catch (error) {
-    if (isMissingRipgrep(error)) {
-      return runNodeFallback(compiled);
-    }
-    throw error;
-  }
-}
-
-function isMissingRipgrep(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException)?.code === "ENOENT";
-}
-
-async function runRipgrep(
-  spawn: SpawnFn | undefined,
-  compiled: CompiledInput,
-  signal: AbortSignal | undefined
-): Promise<string[]> {
-  const args: string[] = ["--line-number", "--no-heading", "--color", "never"];
-  args.push(`--max-columns=${MAX_MATCH_LINE_COLUMNS}`, "--max-columns-preview");
-  if (compiled.ignoreCase) args.push("--ignore-case");
-  args.push("--", compiled.pattern, compiled.searchRoot);
-
-  // Production: use spawnWithStopSignal for SIGTERM→2s→SIGKILL detached
-  // process-group kill. Test seam: when deps.spawn is injected (e.g. to
-  // simulate rg missing via ENOENT), we run it directly with a manual
-  // signal listener — adequate for tests that only check exit code or
-  // immediate throw behaviour.
-  if (!spawn) {
-    const { done } = spawnWithStopSignal(RG_BINARY, args, {
-      cwd: compiled.searchRoot,
-      signal,
-    });
-    const result = await done;
-    return interpretRipgrepResult(result, compiled, signal);
-  }
-
-  // Test seam branch: invoke the injected spawn directly. We collect
-  // stdout/stderr into the standard SpawnResult shape so the rest of the
-  // pipeline is identical to the production path.
-  //
-  // NOTE: This seam is scoped to ENOENT simulation + parse-logic tests.
-  // The kill semantics intentionally differ from the production path
-  // (which uses `spawnWithStopSignal` and escalates SIGTERM→2s→SIGKILL
-  // across the detached process group). Tests that need full abort/kill
-  // coverage go through the production path; tests that just need to
-  // force ENOENT or a known output use this branch.
-  const child = spawn(RG_BINARY, args, {
-    cwd: compiled.searchRoot,
-    detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let stdout = "";
-  let stderr = "";
-  child.stdout?.setEncoding("utf8");
-  child.stderr?.setEncoding("utf8");
-  child.stdout?.on("data", (chunk: string) => {
-    stdout += chunk;
-  });
-  child.stderr?.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-
-  const abortHandler = (): void => {
-    const pid = child.pid;
-    if (pid !== undefined) {
-      try {
-        process.kill(-pid, "SIGTERM");
-      } catch {
-        // already gone
-      }
-    }
-  };
-  if (signal?.aborted) abortHandler();
-  else signal?.addEventListener("abort", abortHandler, { once: true });
-
-  // Single cleanup point used by both the "error" and "close" paths so the
-  // AbortSignal listener is always detached — no listener leak regardless
-  // of which path settles the promise.
-  const cleanupAbort = (): void => {
-    signal?.removeEventListener("abort", abortHandler);
-  };
-
-  const result = await new Promise<{
-    code: number | null;
-    signal: NodeJS.Signals | null;
-    stdout: string;
-    stderr: string;
-  }>((resolveDone, rejectDone) => {
-    child.once("error", (error) => {
-      cleanupAbort();
-      rejectDone(error);
-    });
-    child.once("close", (code, sig) => {
-      cleanupAbort();
-      resolveDone({ code, signal: sig, stdout, stderr });
-    });
-  });
-  return interpretRipgrepResult(result, compiled, signal);
-}
-
-function interpretRipgrepResult(
-  result: {
-    code: number | null;
-    signal: NodeJS.Signals | null;
-    stdout: string;
-    stderr: string;
-  },
-  compiled: CompiledInput,
-  signal: AbortSignal | undefined
-): string[] {
-  // ripgrep 退出码：
-  //   0 = 至少一处匹配；1 = 无匹配；2 = 正则/使用错误（非法正则）。
-  if (result.code === 0 || result.code === 1) {
-    return parseRipgrepOutput(
-      result.stdout,
-      compiled.searchRoot,
-      compiled.workspaceRoot
-    );
-  }
-  if (result.code === 2) {
-    throw new ToolExecutionError(`grep: invalid pattern: ${compiled.pattern}`);
-  }
-  if (signal?.aborted || result.signal !== null) {
-    throw new ToolExecutionError(
-      `grep: aborted before completion${result.signal ? ` (signal=${result.signal})` : ""}`
-    );
-  }
-  throw new ToolExecutionError(
-    `grep: ripgrep exited with code ${String(result.code)}: ${result.stderr}`
-  );
-}
-
-function parseRipgrepOutput(
-  stdout: string,
-  searchRoot: string,
-  workspaceRoot: string
-): string[] {
-  if (stdout.length === 0) return [];
-  return stdout
-    .split("\n")
-    .filter((line) => line.length > 0)
-    .map((line) => normalizeRipgrepLine(line, searchRoot, workspaceRoot));
-}
-
-function normalizeRipgrepLine(
-  line: string,
-  searchRoot: string,
-  workspaceRoot: string
-): string {
-  // rg line shape: `<path>:<lineno>:<content>` (rg --no-heading --line-number).
-  const colonIdx = line.indexOf(":");
-  if (colonIdx === -1) return line;
-  const pathPart = line.slice(0, colonIdx);
-  const rest = line.slice(colonIdx + 1);
-  // rg reports paths relative to the cwd we gave it (the search root).
-  const abs = pathPart.startsWith("/") ? pathPart : join(searchRoot, pathPart);
-  const rel = relative(workspaceRoot, abs);
-  // Strip a leading "./" so the output matches the T1-7 contract exactly.
-  const cleaned = rel.startsWith("./") ? rel.slice(2) : rel;
-  const lineNumberEnd = rest.indexOf(":");
-  if (lineNumberEnd === -1) return `${cleaned}:${rest}`;
-  const lineNumber = rest.slice(0, lineNumberEnd);
-  const content = rest.slice(lineNumberEnd + 1);
-  return `${cleaned}:${lineNumber}:${truncateMatchContent(content)}`;
-}
-
-async function runNodeFallback(compiled: CompiledInput): Promise<string[]> {
-  const regexp = compileRegExp(compiled);
-  const out: string[] = [];
-  const root = compiled.searchRoot;
-  const ws = compiled.workspaceRoot;
-  await walk(root, async (filePath) => {
-    const statInfo = await stat(filePath).catch(() => null);
-    if (!statInfo || !statInfo.isFile()) return;
-    if (statInfo.size > FALLBACK_SCAN_LIMIT_BYTES) return; // 超大文件跳过
-    const text = await readFile(filePath).catch(() => null);
-    if (text === null) return;
-    if (containsNul(text, FALLBACK_BINARY_PROBE_BYTES)) return; // 二进制跳过
-    scanLines(text, (line, lineNo) => {
-      if (regexp.test(line)) {
-        const rel = relative(ws, filePath);
-        const cleaned = rel.startsWith("./") ? rel.slice(2) : rel;
-        out.push(`${cleaned}:${String(lineNo)}:${truncateMatchContent(line)}`);
-      }
-    });
-  });
-  return out;
-}
-
-function truncateMatchContent(content: string): string {
-  if (content.length <= MAX_MATCH_LINE_COLUMNS) return content;
-  return `${content.slice(0, MAX_MATCH_LINE_COLUMNS)}${TRUNCATION_MARKER}`;
-}
-
-function compileRegExp(compiled: CompiledInput): RegExp {
-  try {
-    return new RegExp(compiled.pattern, compiled.ignoreCase ? "i" : "");
-  } catch (error) {
-    throw new ToolExecutionError(`grep: invalid pattern: ${compiled.pattern}`);
-  }
-}
-
-function containsNul(buffer: Buffer, probeBytes: number): boolean {
-  const end = Math.min(buffer.length, probeBytes);
-  for (let i = 0; i < end; i++) {
-    if (buffer[i] === 0) return true;
-  }
-  return false;
-}
-
-function scanLines(
-  buffer: Buffer,
-  visit: (line: string, lineNo: number) => void
-): void {
-  const text = buffer.toString("utf8");
-  let start = 0;
-  let lineNo = 1;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text.charCodeAt(i);
-    if (ch === 10 /* \n */) {
-      const raw = text.slice(start, i);
-      const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-      visit(line, lineNo);
-      lineNo++;
-      start = i + 1;
-    }
-  }
-  if (start < text.length) {
-    const raw = text.slice(start);
-    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-    visit(line, lineNo);
-  }
-}
-
-async function walk(
-  dir: string,
-  visit: (filePath: string) => Promise<void>
-): Promise<void> {
-  const entries = await readdir(dir, { withFileTypes: true }).catch(() => null);
-  if (!entries) return;
-  for (const entry of entries) {
-    if (entry.name === "node_modules" || entry.name === ".git") continue;
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await walk(full, visit);
-    } else if (entry.isFile()) {
-      await visit(full);
-    }
-  }
+/** 供工具层其余消费者复用的 typed 错误入口（错误文案单点）。 */
+export function grepError(message: string): ToolExecutionError {
+  return new ToolExecutionError(`grep: ${message}`);
 }
