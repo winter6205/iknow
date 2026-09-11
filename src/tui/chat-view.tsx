@@ -3,7 +3,10 @@
  * src/tui/chat-view.tsx
  *
  * #343 T6-B：会话视图（OpenTUI 全内容滚动版，替代 T3 简化壳 + 终结 T5 ink
- * 行级窗口路径）。
+ * 行级窗口路径）。#986：本文件归零到 S5 hard-gate error 0、嵌套 ≤4、
+ * ChatView complexity ≤10 —— 把折叠派生抽到 `turn-fold-lines.ts`、banner
+ * 抽到 `transcript-banner.tsx`、挂载消息行抽到 `message-row.tsx`、尾部抽
+ * 到 `transcript-tail.tsx`；本文件保留 hooks + memo 派生 + scrollbox 装配。
  *
  * 滚动纪律（spec SC3 + D3 裁决，沿用 T3）：
  *  - 整体交给内建 `<scrollbox stickyScroll stickyStart="bottom">`——
@@ -15,37 +18,22 @@
  *  - 强制滚底通道：ChatViewHandle.scrollToBottom()。
  *
  * 渲染内容（scrollbox 内全部内容，水平整宽，垂直自滚）：
- *  - banner 段（若提供 props.bannerLines）：首段，方案 B — 与消息共享 scroll
- *    space；用户上滚能翻回 banner（不复位 collapse，2026-08-08 裁定）。
- *    眼睛段用 eyeGradientCells 逐 cell 上色（e2 黄昏魔法石渐变：#1a1d6e →
- *    #ffafaf，c 权重 0.6 / r 权重 0.4），info 栏（Version/Cwd/Data dir）取
- *    bannerLines 行尾段；窄终端（bannerLines.length === 1）保持单行降级；
+ *  - banner 段（若提供 props.bannerLines）：首段，与消息共享 scroll space。
+ *    实现由 `<TranscriptBanner>` 承担。
  *  - **视口挂载**（`transcript-viewport.ts`）：session 全量仍在
  *    `session.messages`；OpenTUI 树只挂视口+overscan 内的消息，spacer 撑住
  *    `scrollHeight`。禁止固定条数尾窗 / 行账。Live tail 不进虚拟化集合。
- *    方案 B banner 仍是滚动区首段（可随上翻回到眼睛）。
  *    视口窗口的 scrollTop 来自 `verticalScrollBar` 的 `change` 事件
  *    （赋值 scrollTop 会间接 emit）；禁止 patch setter / rAF 轮询。
- *  - 每条 **已 mount** 消息 → `MessageBlocks`（user → ❯ accent / assistant
- *    → Markdown + thinking 折叠 + tool_use 摘要 + statusMap 状态染色）。
- *    **T7 消息间距 + 底色**：消息间 1 行节奏由 MessageBlocks 根节点
- *    `marginTop` prop 提供（`visibleIndex===0?0:1`，首条无顶部 margin，避免
- *    进入会话时第一行无谓下推造成的间距抖动）。2026-08-22 起 margin 随
- *    MessageBlocks 存亡：折叠后渲染为 null 的消息不再残留 wrapper 幻影
- *    间距。userBg/assistantBg 底色块由 MessageBlocks 内部实现
- *    （paddingX={1} 水平缩进 + paddingY=0 底色贴内容）。
+ *  - 每条 **已 mount** 消息 → `<MessageRow>`（透传 visibleIndex /
+ *    foldLinesBySegmentIndex / 派生 messageSegments）。
  *  - tail（流式 thinking / draft 面板 + liveToolRuns + legacy liveToolLines
- *    + askLine + spinner）。尾部按真实事件顺序插入：`liveTailSlots` 按
- *    `draftEpoch` 把工具组与草稿段交错 —— 工具 → 文本 → 工具 → 文本
- *    与历史 content 块顺序一致（不再整 turn 合并成一份草稿）。
+ *    + askLine + spinner）：由 `<TranscriptTail>` 承担。
  *
  * 工具输出展开位置的区分（T3，plans/tui-render-optimization.md）：
- *  - **历史消息里的 preview**：`MessageBlocks.ToolPreviewRows` → 内嵌
- *    `CompletedToolPreviewView`（同源 `completedToolPreview` + 行截断，
- *    主消息流只显截断预览行）；
- *  - **live tail**：`liveToolRuns.map(liveToolPreviewBox)` 保持展开（运行中
- *    工具逐条展开预览行，与「截断历史 preview」是两件事——live 行是尾部
- *    临时面板，不占用历史消息流）。
+ *  - **历史消息里的 preview**：在 `<MessageRow>` 内部走
+ *    `MessageBlocks.ToolPreviewRows` → `CompletedToolPreviewView`；
+ *  - **live tail**：`<TranscriptTail>` 走 `liveToolPreviewBox` 路径。
  *
  * 流式并发防御（spec SC8）：`draftSegments` 与 `thinkingDraftMasked` 经
  * useDeferredValue — 高频更新降级低优先级，与 app 层 startTransition 构成
@@ -58,9 +46,6 @@
  *  - selection / onWindow / HighlightedLine（OpenTUI renderer 处理选区）。
  *
  * ChatViewHandle 保留：scrollToBottom + scrollbox ref 直查。
- *
- * ⚠️ T6-C 再做 app.tsx 接线；本组件在此阶段已具备完整渲染能力，
- * 仅由测试与下游装配消费。
  */
 import {
   forwardRef,
@@ -70,50 +55,60 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
+import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
 import { chatWheelScrollAccel } from "./wheel-scroll.js";
 import {
   attachScrollbarHover,
   scrollbarThumbColor,
   scrollbarTrackColor,
 } from "./scrollbar-style.js";
-import { Markdown } from "./markdown.js";
-import { MessageBlocks } from "./message-blocks.js";
-import { MessageShell } from "./message-shell.js";
-import { liveToolPreviewBox } from "./live-tool-preview.js";
 import {
   isTuiHiddenUserMessage,
   type TuiSessionState,
 } from "./session-state.js";
 import { liveTailSlots, type LiveToolRun } from "./live-tool-state.js";
-import { EYE_LINES, eyeGradientCells } from "./banner.js";
-import { Spinner } from "./components.js";
-import { tuiPalette } from "./theme.js";
+import { liveToolPreviewBox } from "./live-tool-preview.js";
 import { toolResultStatusMap, toolResultTextMap } from "./tool-summary.js";
-import { formatCrunched } from "./run-stats.js";
-import { formatThinkingLive, thinkingPeekLines } from "./think-fold.js";
 import {
   listenScrollBoxTop,
   selectViewportMountWindow,
+  type ViewportMountWindow,
 } from "./transcript-viewport.js";
 import {
   countNamedCalls,
   countToolUsesByName,
   formatTurnActivityFold,
   lastTurnQueryIndex,
+  mergeToolUseCounts,
   orderedTurnActivitySegments,
   shouldCollapseTurnToolRows,
-  shouldShowRetractFold,
-  shouldShowThinkingFold,
   shouldShowTurnActivityFold,
-  mergeToolUseCounts,
   sliceTurnFrom,
-  sumThinkingMsInRange,
   thinkingMsToSeconds,
   toolUseIdsOf,
 } from "./turn-activity.js";
 import { deriveSlot } from "./tool-settled.js";
+import { TranscriptBanner } from "./transcript-banner.js";
+import { MessageRow, messageSegmentsOfVisible } from "./message-row.js";
+import {
+  TranscriptTail,
+  TailSpacer,
+  type TailSlotDecision,
+} from "./transcript-tail.js";
+import {
+  buildFoldLinesBySegmentIndex,
+  currentTurnHasFoldFor,
+  currentTurnHasThinkingFoldFor,
+  findLastToolSegmentIndex,
+  makeThinkingMsAtVisibleFromSource,
+  type FoldLinesBySegmentIndex,
+  type ShownThinkingMsValues,
+  type ThinkingMsAtVisible,
+} from "./turn-fold-lines.js";
+import type { TurnActivitySegment } from "./turn-activity.js";
 
 export interface ChatViewHandle {
   /**
@@ -182,34 +177,12 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       setScrollTop(Number.MAX_SAFE_INTEGER);
     }
     const [scrollbarHovered, setScrollbarHovered] = useState(false);
-    useLayoutEffect(() => {
-      const sb = sbRef.current;
-      if (sb === null) return; // EXIT: unmounted scrollbox
-      // Official OpenTUI path: slider change → scrollbar `change` { position }.
-      // Do not patch scrollTop (Feature Envy) or rAF-poll (sticky still 0).
-      const stopTracking = listenScrollBoxTop(sb, (next) => {
-        setScrollTop((prev) => (prev === next ? prev : next));
-      });
-      // hover 槽挂在 scrollbar renderable 上（Slider 自身只接 down/drag/up）。
-      const stopHover = attachScrollbarHover(
-        sb.verticalScrollBar,
-        setScrollbarHovered
-      );
-      return () => {
-        stopTracking();
-        stopHover();
-      };
-    }, []);
-    useImperativeHandle(ref, () => ({
-      scrollToBottom() {
-        const sb = sbRef.current;
-        if (sb === null) return; // EXIT: unmounted
-        sb.scrollTop = Math.max(0, sb.scrollHeight - sb.viewport.height);
-      },
-      get scrollbox() {
-        return sbRef.current;
-      },
-    }));
+    useScrollboxBindings({
+      sbRef,
+      setScrollbarHovered,
+      setScrollTop,
+      ref,
+    });
     // 并发防御：流式草稿高频更新走低优先级（SC8 — spec 同款）。
     const draftSegments = useMemo((): ReadonlyArray<string> => {
       if (props.draftSegments !== undefined) {
@@ -245,11 +218,10 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     const renderLiveRuns = (runs: ReadonlyArray<LiveToolRun>) =>
       runs.map((run) => liveToolPreviewBox(run, contentWidth));
     const bannerLines = props.bannerLines ?? [];
-    const pal = tuiPalette;
-    // thinkingMs 与 session.messages 一一对应。visible 列表会丢掉
-    // agent_status / drain 等隐藏 user 消息，下标比盘上短。所有
-    // thinkingMs 查找必须映射回 sourceIndex，否则 `Thought for` 读到
-    // null 槽，折叠行消失，hideThinking 又把消息框里的摘要掐掉。
+    // visible 列表会丢掉 agent_status / drain 等隐藏 user 消息，下标比
+    // 盘上短。所有 thinkingMs 查找必须映射回 sourceIndex，否则
+    // `Thought for` 读到 null 槽，折叠行消失，hideThinking 又把消息框
+    // 里的摘要掐掉。
     const visibleEntries = useMemo(
       () =>
         props.session.messages
@@ -265,10 +237,14 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       () => visibleEntries.map((entry) => entry.sourceIndex),
       [visibleEntries]
     );
-    const thinkingMsAtVisible = (visibleIndex: number): number =>
-      sumThinkingMsInRange(props.session.thinkingMs, [
-        sourceIndexOfVisible[visibleIndex] ?? visibleIndex,
-      ]);
+    const thinkingMsAtVisible = useMemo(
+      () =>
+        makeThinkingMsAtVisibleFromSource(
+          props.session.thinkingMs,
+          sourceIndexOfVisible
+        ),
+      [props.session.thinkingMs, sourceIndexOfVisible]
+    );
     const measuredViewport = sbRef.current?.viewport.height ?? 0;
     const viewportHeight = measuredViewport > 0 ? measuredViewport : props.rows;
     const mountWindow = useMemo(
@@ -281,23 +257,14 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       [visibleMessages, scrollTop, viewportHeight, itemHeights]
     );
     useLayoutEffect(() => {
-      const sb = sbRef.current;
-      if (sb === null) return; // EXIT: unmounted during measure
-      let changed = false;
-      const next = visibleMessages.map((_, i) => itemHeights[i] ?? 0);
-      for (let i = mountWindow.startIndex; i < mountWindow.endIndex; i++) {
-        const node = sb.getRenderable(`tmsg-${i}`);
-        const h = node?.height;
-        if (
-          Number.isFinite(h) &&
-          (h as number) > 0 &&
-          next[i] !== (h as number)
-        ) {
-          next[i] = h as number;
-          changed = true;
-        }
-      }
-      if (changed) setItemHeights(next);
+      measureMountedHeights(
+        sbRef.current,
+        visibleMessages,
+        itemHeights,
+        mountWindow.startIndex,
+        mountWindow.endIndex,
+        setItemHeights
+      );
     }, [
       mountWindow.startIndex,
       mountWindow.endIndex,
@@ -308,211 +275,100 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     // D3（spec specs/tui-tool-settled-appearance.md）：折叠计数只聚合成功且
     // retract 的件 —— resolver 从 statusMap（tool_use_id → 是否失败）派生每件
     // 的 slot；未配对（live running / cancelled）不进计数。
-    const inFoldCountOf = (
-      call: Readonly<{ readonly id: string; readonly name: string }>
-    ): boolean =>
-      statusMap.has(call.id) &&
-      deriveSlot(call.name, {
-        running: false,
-        failed: statusMap.get(call.id) === true,
-      }).inFoldCount;
+    // `useMemo` 包裹：闭包每 render 都是新引用，下面 `activitySegments` /
+    // `historyToolCounts` 的 useMemo 依赖它，没稳定就每次 render 都重算。
+    const inFoldCountOf = useMemo(
+      () =>
+        (
+          call: Readonly<{ readonly id: string; readonly name: string }>
+        ): boolean =>
+          statusMap.has(call.id) &&
+          deriveSlot(call.name, {
+            running: false,
+            failed: statusMap.get(call.id) === true,
+          }).inFoldCount,
+      [statusMap]
+    );
     // D3 (tui-display-consistency):折叠作用于每一轮历史 —— 不再切片到
     // lastTurnSlice;`activitySegments` 从 0 起构建(0 = 首条 user query 之前的
     // assistant 起步;lastQueryVisible < 0 → 全历史)。
-    const activitySegments = orderedTurnActivitySegments(visibleMessages, 0, {
-      inFoldCountOf,
-    });
+    const activitySegments = useMemo(
+      () => orderedTurnActivitySegments(visibleMessages, 0, { inFoldCountOf }),
+      [visibleMessages, inFoldCountOf]
+    );
     // last-turn live 计数(工具运行中状态接棒 / 合并最后一段折叠用)。
     // live 已完成件同样只聚合 slot.inFoldCount（retract 收）；keep / accent /
     // failed 件留在 tail 画独立标题行，不进计数。
     const lastTurnSlice = sliceTurnFrom(visibleMessages, lastQueryVisible);
-    const historyToolCounts = countToolUsesByName(lastTurnSlice, {
-      inFoldCountOf,
-    });
-    const liveCompletedCounts = countNamedCalls(
-      liveToolRuns
-        .filter((run) => run.status !== "running")
-        .filter(
-          (run) =>
-            deriveSlot(run.name, {
-              running: false,
-              failed: run.status === "failed",
-            }).inFoldCount
-        )
-        .map((run) => ({ id: run.id, name: run.name })),
-      toolUseIdsOf(lastTurnSlice)
+    const historyToolCounts = useMemo(
+      () => countToolUsesByName(lastTurnSlice, { inFoldCountOf }),
+      [lastTurnSlice, inFoldCountOf]
+    );
+    const liveCompletedCounts = useMemo(
+      () =>
+        countNamedCalls(
+          liveToolRuns
+            .filter((run) => run.status !== "running")
+            .filter(
+              (run) =>
+                deriveSlot(run.name, {
+                  running: false,
+                  failed: run.status === "failed",
+                }).inFoldCount
+            )
+            .map((run) => ({ id: run.id, name: run.name })),
+          toolUseIdsOf(lastTurnSlice)
+        ),
+      [liveToolRuns, lastTurnSlice]
     );
     const turnToolCounts = mergeToolUseCounts(
       historyToolCounts,
       liveCompletedCounts
     );
     const turnToolTotal = turnToolCounts.reduce((n, e) => n + e.count, 0);
-    // plans/tui-chrome-interaction.md T1:折叠按**已完成单元**判定,running
-    // 不再一刀切压制整轮折叠;具体行渲染由 per-segment 闸门承担。本变量
-    // 保留作为「当前 turn 折叠行是否启用」的 helper（只控 `foldDisplayLines`
-    // 与 tail 折叠判定,不再卡整轮 foldLinesBySegmentIndex 的计算入口）。
     const showTurnFold = shouldShowTurnActivityFold({
       running,
       turnToolTotal,
     });
-    // CONTEXT.md unit fold(2026-09-08 操作员纠正):一段思考完成 → 在该段
-    // 原位折一行 `Thought for <N>s`（含计数）→ 随后正文或工具;同一用户任务里下一段思考
-    // 再折一行。秒数来自对应 assistant 消息自己的 thinkingMs(per-message
-    // 并行数组),不跨段归并、不把 final 秒数贴到前段/末位工具簇。
-    // 旧「整轮收敛」(consumedThinkingMessageIndices 整回合吞秒 +
-    // finalThinkingMs 末位簇 fallback)是对合同的误读,整体删除。
-    // 已画出 `Thought for` 折叠行的 assistant messageIndex 集合 —— 同一消息内的
-    // 多个 tools 簇(tool → text → tool)共享 thinkingMs,后续簇按 0 计,
-    // 同一消息内不重复画;不同 assistant 消息之间不互相吞,各画各的。
-    const drawnThinkingForMessageIndex = new Set<number>();
-    // 每簇独立的折叠行（思考秒数 = thinkingMs[anchorMsgs] 求和 → 秒）。
-    // plans T1:`if (showTurnFold)` 包裹删除 —— per-segment 闸门
-    // `shouldShowRetractFold` / `shouldShowThinkingFold` 与 running 解耦,
-    // 历史 retract folds 在 running turn 期间仍要渲染;整 turn 一律按
-    // 已完成单元判定。空 entries + 0 秒数 → `formatTurnActivityFold` 返
-    // 空数组,segMap 跳过写入,渲染层 fold 行天然不出。
-    const foldLinesBySegmentIndex = new Map<number, ReadonlyArray<string>>();
-    // 已画出的折叠行时长（ms），按派生值登记而非事后解析显示文案 ——
-    // `unit fold` 时长与计数同处一行，正则反推会在格式变化时静默失效。
-    const shownThinkingMsValues = new Set<number>();
-    {
-      const toolSegments = activitySegments.flatMap((segment, segmentIndex) =>
-        segment.kind === "tools" ? [{ segment, segmentIndex }] : []
-      );
-      const lastSegmentIndex =
-        toolSegments[toolSegments.length - 1]?.segmentIndex ?? -1;
-      for (const [, { segment, segmentIndex }] of toolSegments.entries()) {
-        // 最后一段折叠合并 live 已完成工具;其余段用纯历史计数。
-        const entries =
-          segmentIndex === lastSegmentIndex
-            ? mergeToolUseCounts(segment.entries, liveCompletedCounts)
-            : segment.entries;
-        // 折叠簇思考秒数 = 该段 anchor 消息自己的 thinkingMs(严格归属,
-        // 不跨段归并)。多个 assistant 消息 → 各自一行;无秒数段 → 0 →
-        // 只画工具计数行(或不画)。
-        let clusterMs = thinkingMsAtVisible(segment.messageIndex);
-        // 同消息去重:同一 assistant messageIndex 拆出的多个 tools 簇
-        // (tool → text → tool)共享同一 thinkingMs,重复展示时后续簇按 0
-        // 计(只画工具计数)。去重单位 = 同一消息内的重复展示;不同
-        // assistant 消息之间不互相吞,各画各的。
-        if (
-          clusterMs > 0 &&
-          drawnThinkingForMessageIndex.has(segment.messageIndex)
-        ) {
-          clusterMs = 0;
-        }
-        const clusterSeconds = thinkingMsToSeconds(clusterMs);
-        const segmentRetractTotal = entries.reduce((n, e) => n + e.count, 0);
-        // plans T1:per-segment 闸门与 running 解耦 —— retract 完成即入
-        // 折叠;thinkingMs 冻结即显示秒数。running 仅在 foldDisplayLines /
-        // tail 折叠判定等整-turn 决策点参与,不在此处压制。
-        if (
-          !shouldShowRetractFold({
-            running,
-            segmentRetractTotal,
-          }) &&
-          !shouldShowThinkingFold({
-            running,
-            hasThinkingMs: clusterSeconds > 0,
-          })
-        ) {
-          continue;
-        }
-        const lines = formatTurnActivityFold(clusterSeconds, entries);
-        if (lines.length > 0) {
-          foldLinesBySegmentIndex.set(segmentIndex, lines);
-          // 簇实际用上秒数(>0)才登记本消息已画 —— 0 秒簇不会画时长段,
-          // 不占同消息去重的位置。同时登记已展示的 ms 值(hideThinking 用)。
-          if (clusterSeconds > 0) {
-            drawnThinkingForMessageIndex.add(segment.messageIndex);
-            shownThinkingMsValues.add(clusterMs);
-          }
-        }
-      }
-      // 无工具段但有已完成的 live 工具 → 把折叠行挂到最近的 text 段尾。
-      // 秒数只用该 text 段自身消息的 thinkingMs(thinkingMsAtVisible)。
-      // 不再依赖 finalThinkingMs —— final 只含 text 时,其思考秒数由
-      // per-message ThinkingSummary 原位承担,不外挂到 fallback 行。
-      // plans T1:fallback 路径与 running 解耦 —— 已完成单元照折。
-      const fallbackTrigger = liveCompletedCounts.length > 0;
-      if (foldLinesBySegmentIndex.size === 0 && fallbackTrigger) {
-        const lastText = activitySegments
-          .map((segment, segmentIndex) => ({ segment, segmentIndex }))
-          .reverse()
-          .find(({ segment }) => segment.kind === "text");
-        if (lastText !== undefined) {
-          const clusterMs = thinkingMsAtVisible(lastText.segment.messageIndex);
-          const clusterSeconds = thinkingMsToSeconds(clusterMs);
-          const fallbackRetractTotal = liveCompletedCounts.reduce(
-            (n, e) => n + e.count,
-            0
-          );
-          if (
-            !shouldShowRetractFold({
-              running,
-              segmentRetractTotal: fallbackRetractTotal,
-            }) &&
-            !shouldShowThinkingFold({
-              running,
-              hasThinkingMs: clusterSeconds > 0,
-            })
-          ) {
-            // 闸门拒绝 → 不写 fallback 行,保留空 foldLinesBySegmentIndex。
-          } else {
-            const lines = formatTurnActivityFold(
-              clusterSeconds,
-              liveCompletedCounts
-            );
-            if (lines.length > 0) {
-              foldLinesBySegmentIndex.set(lastText.segmentIndex, lines);
-              if (clusterSeconds > 0) {
-                shownThinkingMsValues.add(clusterMs);
-              }
-            }
-          }
-        }
-      }
-    }
-    // plans T1:当前 turn 折叠行是否在场 —— 决定流式 thinking 面板是否
-    // 让位给折叠行。任一折叠行 anchor 落在 current turn slice 内(消息
-    // 下标 >= lastQueryVisible)即视为当前 turn 已有 fold 行,live 面板
-    // 隐藏；否则面板保留（让用户继续看思考过程）。
-    const currentTurnHasFold =
-      lastQueryVisible >= 0 &&
-      Array.from(foldLinesBySegmentIndex.keys()).some((segmentIndex) => {
-        const seg = activitySegments[segmentIndex];
-        return (
-          seg !== undefined &&
-          seg.kind === "tools" &&
-          seg.messageIndex >= lastQueryVisible
-        );
-      });
-    // 当前 turn 是否已有带时长的折叠行:有 → live thinking 面板让位
-    // (折叠行已替代结束态时长表面);无 → 面板保留。判定按派生值
-    // `drawnThinkingForMessageIndex`(只登记真正画出时长段的簇),不解析
-    // 显示文案 —— 文案格式变化不再静默影响面板让位。
-    const currentTurnHasThinkingFold =
-      lastQueryVisible >= 0 &&
-      Array.from(foldLinesBySegmentIndex.keys()).some((segmentIndex) => {
-        const seg = activitySegments[segmentIndex];
-        return (
-          seg !== undefined &&
-          seg.kind === "tools" &&
-          seg.messageIndex >= lastQueryVisible &&
-          drawnThinkingForMessageIndex.has(seg.messageIndex)
-        );
-      });
-    // Keep the tail-collapse decision based on the fold that would be shown,
-    // not on whether an historical message supplied an insertion point.
+    // 折叠行集合（anchor segmentIndex → unit fold 行）由纯模块派生。
+    // #986 把 L307–475 的派生逻辑全数迁出；本处只消费结果。
+    const foldDerivation = useMemo(
+      () =>
+        buildFoldLinesBySegmentIndex({
+          activitySegments,
+          thinkingMsAtVisible,
+          running,
+          lastToolSegmentIndex: findLastToolSegmentIndex(activitySegments),
+          liveCompletedCounts,
+        }),
+      [activitySegments, thinkingMsAtVisible, running, liveCompletedCounts]
+    );
+    const {
+      foldLinesBySegmentIndex,
+      drawnThinkingForMessageIndex,
+      shownThinkingMsValues,
+    } = foldDerivation;
+    // 当前 turn 折叠行是否在场 —— 决定流式 thinking 面板让位。
+    const currentTurnHasFold = currentTurnHasFoldFor({
+      activitySegments,
+      foldLinesBySegmentIndex,
+      lastQueryVisible,
+    });
+    const currentTurnHasThinkingFold = currentTurnHasThinkingFoldFor({
+      activitySegments,
+      foldLinesBySegmentIndex,
+      drawnThinkingForMessageIndex,
+      lastQueryVisible,
+    });
+    // 折叠生效（idle 且计数行在场）→ tail 里已完成的 retract 件（已进折叠
+    // 计数）离开尾巴；keep / accent / failed 件保留独立标题行（D3/D7：渲染
+    // 只消费 slot，成功 retract 的标题与预览同假）。running 件始终在尾巴。
     const foldDisplayLines = showTurnFold
       ? formatTurnActivityFold(
           thinkingMsToSeconds(thinkingMsAtVisible(lastQueryVisible)),
           turnToolCounts
         )
       : [];
-    // 折叠生效（idle 且计数行在场）→ tail 里已完成的 retract 件（已进折叠
-    // 计数）离开尾巴；keep / accent / failed 件保留独立标题行（D3/D7：渲染
-    // 只消费 slot，成功 retract 的标题与预览同假）。running 件始终在尾巴。
     const collapseToolRows = shouldCollapseTurnToolRows(
       running,
       foldDisplayLines.length,
@@ -520,352 +376,230 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     );
     // T3（plans/tui-display-single-pipeline.md）：同一条工具调用只画一次。
     // 历史 transcript 已含该 tool_use 块时,MessageBlocks 会按 slot 渲染
-    // 同一件（running 或落定态），tail 不得再叠一份完成标题。reference
-    // 去重以 tool_use id 为锚,全历史 id 集合一次派生(useMemo 稳定引用)。
-    // 实际 race 窗口:turnFinished 已 commit messages 而 liveToolRuns 尚未
-    // 清空(skipTurnRefresh / 刷新失败路径会残留);正常流中 commit 与清空
-    // 被 React 批处理合并,过滤为幂等 no-op。
+    // 同一件（running 或落定态），tail 不得再叠一份完成标题。
     const historyToolUseIds = useMemo(
       () => toolUseIdsOf(visibleMessages),
       [visibleMessages]
     );
-    const tailSlots = liveTailSlots(
-      liveToolRuns
-        .filter((run) => !historyToolUseIds.has(run.id))
-        .filter((run) =>
-          collapseToolRows
-            ? run.status === "running" ||
-              !deriveSlot(run.name, {
-                running: false,
-                failed: run.status === "failed",
-              }).inFoldCount
-            : true
+    const tailSlots = useMemo(
+      () =>
+        liveTailSlots(
+          liveToolRuns
+            .filter((run) => !historyToolUseIds.has(run.id))
+            .filter((run) =>
+              collapseToolRows
+                ? run.status === "running" ||
+                  !deriveSlot(run.name, {
+                    running: false,
+                    failed: run.status === "failed",
+                  }).inFoldCount
+                : true
+            ),
+          deferredSegments
         ),
-      deferredSegments
+      [liveToolRuns, historyToolUseIds, collapseToolRows, deferredSegments]
     );
-    // #693 T1 D1：折叠行（Thought for <N>s · bash × N，单行）统一套壳，与
-    // assistant 外壳共用 MessageShell —— 消除「折叠行裸挂左移一列」的
-    // 不一致（spec D1）。壳内文本 wrapMode="none" 强制单行不折。
-    const renderFoldLines = (segmentIndex: number, keyPrefix: string) => {
-      const lines = foldLinesBySegmentIndex.get(segmentIndex) ?? [];
-      if (lines.length === 0) return null;
-      return (
-        <MessageShell
-          key={`${keyPrefix}-shell-${segmentIndex}`}
-          cols={contentWidth}
-        >
-          {lines.map((line, foldIdx) => (
-            <text
-              key={`${keyPrefix}-${segmentIndex}-${foldIdx}`}
-              fg={pal.dim}
-              wrapMode="none"
-              width={Math.max(1, contentWidth - 2)}
-            >
-              {line}
-            </text>
-          ))}
-        </MessageShell>
-      );
-    };
-    // e2 黄昏魔法石渐变（与 scripts/banner-gradient-preview/exotic-e2.ts 一致）：
-    // 13×32 逐 cell 上色，对角线 t = cWeight·(c/31) + rWeight·(r/12)。
-    const eyeGradient = eyeGradientCells({
-      from: pal.logoInk,
-      to: pal.logoGold,
-      cWeight: 0.6,
-      rWeight: 0.4,
-    });
-    // renderBannerLines 每行 = EYE_LINES[r] + GAP(3) + info 栏；info 栏从
-    // bannerLines 行尾段切出（banner.ts 布局 SSOT，GAP 同值）。
-    const EYE_W = [...(EYE_LINES[0] ?? "")].length;
-    const BANNER_GAP = 3;
     return (
-      <scrollbox
-        ref={sbRef}
-        width={props.cols}
-        height={props.rows}
-        stickyScroll={true}
-        stickyStart="bottom"
-        scrollAcceleration={chatWheelScrollAccel}
-        verticalScrollbarOptions={{
-          trackOptions: {
-            backgroundColor: scrollbarTrackColor(),
-            foregroundColor: scrollbarThumbColor(scrollbarHovered),
-          },
-        }}
-      >
-        {/* banner 段（首段，与消息共享 scroll space）。#321 设计定案：圆角外框 +
-            顶框内嵌 title `◆ iknow`（操作员要求靠左；与 PromptInput 同款
-            borderStyle="rounded"，borderColor 用 pal.border 灰棕，不与眼形撞色）。
-            e2 黄昏魔法石渐变：眼睛段逐 cell 上色（eyeGradientCells，对角线
-            t = 0.6·(c/31) + 0.4·(r/12)，端点 pal.logoInk → pal.logoGold）；
-            info 栏（Version/Cwd/Data dir）取 bannerLines 行尾段；窄终端
-            （renderBannerLines 返回单行 short）保持单行降级。 */}
-        {bannerLines.length > 0 && (
-          <box
-            flexDirection="column"
-            borderStyle="rounded"
-            borderColor={pal.border}
-            title="◆ iknow"
-            titleAlignment="left"
-            paddingX={1}
-          >
-            {bannerLines.length === 1 ? (
-              <text key="banner-short" fg={pal.logoInk} wrapMode="none">
-                {bannerLines[0] === "" ? " " : bannerLines[0]}
-              </text>
-            ) : (
-              eyeGradient.map((row, r) => {
-                // 行尾段 = GAP 之后的 info 栏（banner.ts renderBannerLines 布局）。
-                const infoPart = (bannerLines[r] ?? "").slice(
-                  EYE_W + BANNER_GAP
-                );
-                return (
-                  <text key={`banner-${r}`} wrapMode="none">
-                    {row.map((seg, c) => (
-                      <span key={`b-${r}-${c}`} fg={seg.hex}>
-                        {seg.text}
-                      </span>
-                    ))}
-                    <span fg={pal.logoInk}>
-                      {infoPart === "" ? " " : infoPart}
-                    </span>
-                  </text>
-                );
-              })
-            )}
-          </box>
-        )}
-        {/* 视口挂载：只 map 视口+overscan 内的消息，spacer 撑住滚动高度。
-            消息间 1 行节奏由 MessageBlocks 根节点 marginTop prop 提供
-            （随消息存亡）；全量第一条 (visibleIndex===0) 不带顶部 margin。 */}
-        {mountWindow.spacerBefore > 0 && (
-          <box
-            key="transcript-spacer-before"
-            width={contentWidth}
-            height={mountWindow.spacerBefore}
-            flexShrink={0}
-          />
-        )}
-        {mountWindow.mounted.map((message, i) => {
-          const visibleIndex = mountWindow.startIndex + i;
-          // D3 (tui-display-consistency):`thinkingMs` 来自落盘数据(挂在
-          // session.thinkingMs 上,与 messages 一一对应);无 thinkingMs →
-          // undefined → `MessageBlocks` 不显示 `Thought for` 折叠行。
-          const messageThinkingMs = thinkingMsAtVisible(visibleIndex);
-          const messageThinkingSeconds = thinkingMsToSeconds(messageThinkingMs);
-          const messageSegments = activitySegments
-            .map((segment, segmentIndex) => ({ segment, segmentIndex }))
-            .filter(({ segment }) => segment.messageIndex === visibleIndex);
-          const renderInContentOrder =
-            message.role === "assistant" &&
-            messageSegments.length > 1 &&
-            messageSegments.some(({ segmentIndex }) =>
-              foldLinesBySegmentIndex.has(segmentIndex)
-            );
-          // D3:`inLastTurn` 闸已删除。任何已完成工具轮次都折叠（包含历史轮次）。
-          // hideThinking 改为按 thinkingMs 是否已被 fold 行吸收：
-          // thinking-fold-placement —— 折叠行已替代 `Thought for` 摘要时
-          // 才隐藏 per-message ThinkingSummary,避免重复;若本消息的
-          // thinkingMs 值未被任何 fold 行覆盖,仍保留 per-message 摘要
-          // (测试 2:asst-1 的 12s 与 final 的 25s 各自唯一展示)。
-          const thisMessageHasFoldLine = messageSegments.some(
-            ({ segmentIndex }) => foldLinesBySegmentIndex.has(segmentIndex)
-          );
-          const hideThinkingForThisMessage =
-            (thisMessageHasFoldLine ||
-              (messageThinkingMs > 0 &&
-                shownThinkingMsValues.has(messageThinkingMs))) &&
-            !thinkingExpanded;
-          return (
-            <box
-              id={`tmsg-${visibleIndex}`}
-              key={visibleIndex}
-              width={contentWidth}
-              flexShrink={0}
-            >
-              {renderInContentOrder ? (
-                messageSegments.map(({ segment, segmentIndex }, partIndex) => {
-                  const blockIndex = segment.contentBlockIndex;
-                  const nextSegment = messageSegments[partIndex + 1]?.segment;
-                  const endIndex =
-                    nextSegment?.messageIndex === visibleIndex
-                      ? nextSegment.contentBlockIndex
-                      : message.content.length;
-                  const activityBlocks =
-                    segment.kind === "text"
-                      ? [message.content[blockIndex]].filter(
-                          (block) => block !== undefined
-                        )
-                      : message.content
-                          .slice(blockIndex, endIndex)
-                          .filter((block) => block.type === "tool_use");
-                  const thinkingBlocks =
-                    partIndex === 0
-                      ? message.content.filter(
-                          (block) =>
-                            block.type === "thinking" ||
-                            block.type === "redacted_thinking"
-                        )
-                      : [];
-                  const segmentMessage = {
-                    ...message,
-                    content: [...thinkingBlocks, ...activityBlocks],
-                  };
-                  // 该簇是否已有折叠行 → 决定本段是否隐藏 thinking 与
-                  // tool_use 摘要(折叠行已在 MessageShell 内替代二者)。
-                  // 按 shownThinkingMsValues 反推:fold 行已展示的 ms 值,
-                  // per-message 不再画 ThinkingSummary,避免重复。
-                  const segmentHasFold =
-                    foldLinesBySegmentIndex.has(segmentIndex);
-                  const hideSegmentThinking =
-                    (segmentHasFold ||
-                      (messageThinkingMs > 0 &&
-                        shownThinkingMsValues.has(messageThinkingMs))) &&
-                    !thinkingExpanded;
-                  return (
-                    <box
-                      key={`turn-segment-${visibleIndex}-${segmentIndex}`}
-                      flexDirection="column"
-                    >
-                      <MessageBlocks
-                        message={segmentMessage}
-                        cols={contentWidth}
-                        statusMap={statusMap}
-                        resultTextMap={resultTextMap}
-                        thinkingExpanded={thinkingExpanded}
-                        thinkingSeconds={
-                          partIndex === 0 ? messageThinkingSeconds : undefined
-                        }
-                        hideThinking={hideSegmentThinking}
-                        marginTop={
-                          partIndex === 0 && visibleIndex !== 0 ? 1 : 0
-                        }
-                      />
-                      {renderFoldLines(segmentIndex, "turn-fold")}
-                    </box>
-                  );
-                })
-              ) : (
-                <>
-                  <MessageBlocks
-                    message={message}
-                    cols={contentWidth}
-                    statusMap={statusMap}
-                    resultTextMap={resultTextMap}
-                    thinkingExpanded={thinkingExpanded}
-                    thinkingSeconds={messageThinkingSeconds}
-                    hideThinking={hideThinkingForThisMessage}
-                    marginTop={visibleIndex === 0 ? 0 : 1}
-                  />
-                  {messageSegments.flatMap(({ segmentIndex }) =>
-                    renderFoldLines(segmentIndex, "turn-fold")
-                  )}
-                </>
-              )}
-            </box>
-          );
-        })}
-        {mountWindow.spacerAfter > 0 && (
-          <box
-            key="transcript-spacer-after"
-            width={contentWidth}
-            height={mountWindow.spacerAfter}
-            flexShrink={0}
-          />
-        )}
-        {/* crunched 留存行：消息流末尾（末条消息之后、live tail 之前）。
-            最近一次完成 turn 的运行时长（app 层 finally 快照传
-            crunchedSeconds）；>0 才渲染（sub-second 回合不显 `0s`），
-            缺省 undefined / 0 → 无输出。与 [思考] 折叠行同款 dim 视觉。 */}
-        {(props.crunchedSeconds ?? 0) > 0 && (
-          <text fg={pal.dim} wrapMode="none">
-            {formatCrunched(props.crunchedSeconds ?? 0)}
-          </text>
-        )}
-        {/* 流式尾部：工具组与草稿段按 draftEpoch 交错（主流 agent 顺序：
-            工具 → 文本 → 工具 → 文本）。liveToolLines 仍挂在末尾（legacy）。
-            #tui-render-overhaul T4:多块时相邻 slot 间补 1 行节奏（与
-            MessageBlocks 内部块间距同步），首块不补顶 margin —— 锚在历史
-            折叠行 / 草稿段末尾的尾巴接续位置自然衔接。 */}
-        {tailSlots.map((slot, i) => {
-          const slotGap = i === 0 ? 0 : 1;
-          return slot.kind === "tools" ? (
-            <box
-              key={`live-tools-${i}`}
-              flexDirection="column"
-              width={contentWidth}
-              marginTop={slotGap}
-            >
-              {renderLiveRuns(slot.runs)}
-            </box>
-          ) : (
-            running && (
-              <MessageShell
-                key={`live-draft-${i}`}
-                cols={contentWidth}
-                marginTop={slotGap}
-              >
-                <Markdown
-                  text={slot.text}
-                  width={Math.max(1, contentWidth - 2)}
-                  streaming
-                />
-              </MessageShell>
-            )
-          );
-        })}
-        {/* 流式 thinking 面板：跟在已返回的 live 正文 / 工具后面，而不是
-            钉在 live 区顶部。思考 → 正文 时 stream-draft 会清 buffer 收起
-            本面板；下一轮 thinking_delta 再出现在这段正文下面。
-            折叠态 = 静态 `思考中…` + 正文末 ≤3 行预览；展开态走 Markdown。
-            plans T1:`showTurnFold` 不再作为隐藏闸门 —— 历史 folds 在 running
-            期也会在场。改为「当前 turn 折叠行是否在场」(`currentTurnHasFold`)
-            才隐藏 live 面板：fold 行不存在 + draft 仍在流 → 面板保留;
-            current turn 已有折叠行 → 面板让位给折叠行。 */}
-        {running &&
-          deferredThinkingDrafts.length > 0 &&
-          !currentTurnHasFold &&
-          !currentTurnHasThinkingFold && (
-            <box flexDirection="column" width={contentWidth}>
-              {thinkingExpanded ? (
-                <box width={contentWidth}>
-                  <Markdown
-                    text={deferredThinkingDrafts}
-                    width={contentWidth}
-                    streaming
-                  />
-                </box>
-              ) : (
-                <>
-                  <text fg={pal.dim} wrapMode="none">
-                    {formatThinkingLive()}
-                  </text>
-                  {thinkingPeekLines(deferredThinkingDrafts).map((line, i) => (
-                    <text key={`think-peek-${i}`} fg={pal.dim} wrapMode="none">
-                      {line}
-                    </text>
-                  ))}
-                </>
-              )}
-            </box>
-          )}
-        {props.liveToolLines.length > 0 && (
-          <box flexDirection="column" width={contentWidth}>
-            {props.liveToolLines.map((line, i) => (
-              <text key={`legacy-${i}`} fg={pal.dim} wrapMode="none">
-                {line === "" ? " " : line}
-              </text>
-            ))}
-          </box>
-        )}
-        {props.askLine !== undefined && (
-          <text fg={pal.running} wrapMode="word" width={contentWidth}>
-            {props.askLine}
-          </text>
-        )}
-        {running && <Spinner />}
-      </scrollbox>
+      <ChatScrollbox
+        sbRef={sbRef}
+        cols={props.cols}
+        rows={props.rows}
+        scrollbarHovered={scrollbarHovered}
+        bannerLines={bannerLines}
+        mountWindow={mountWindow}
+        contentWidth={contentWidth}
+        activitySegments={activitySegments}
+        foldLinesBySegmentIndex={foldLinesBySegmentIndex}
+        shownThinkingMsValues={shownThinkingMsValues}
+        statusMap={statusMap}
+        resultTextMap={resultTextMap}
+        thinkingExpanded={thinkingExpanded}
+        thinkingMsAtVisible={thinkingMsAtVisible}
+        running={running}
+        tailSlots={tailSlots}
+        renderLiveRuns={renderLiveRuns}
+        deferredThinkingDrafts={deferredThinkingDrafts}
+        currentTurnHasFold={currentTurnHasFold}
+        currentTurnHasThinkingFold={currentTurnHasThinkingFold}
+        liveToolLines={props.liveToolLines}
+        askLine={props.askLine}
+        crunchedSeconds={props.crunchedSeconds ?? 0}
+      />
     );
   }
 );
+
+/**
+ * 视口挂载行高度量测（#986 — 从 ChatView 抽出）。每条挂载消息根节点的
+ * DOM id 是 `tmsg-${i}`（`MessageRow` 内 id 契约）；本函数按可见下标
+ * 通过 `scrollbox.getRenderable` 读真实高度，写回 itemHeights。变更才
+ * 触发 setState，避免无谓重渲染。
+ */
+function measureMountedHeights(
+  sb: ScrollBoxRenderable | null,
+  visibleMessages: ReadonlyArray<AnthropicNativeMessage>,
+  prevHeights: ReadonlyArray<number>,
+  startIndex: number,
+  endIndex: number,
+  setHeights: (next: ReadonlyArray<number>) => void
+): void {
+  if (sb === null) return; // EXIT: unmounted during measure
+  let changed = false;
+  const next = visibleMessages.map((_, i) => prevHeights[i] ?? 0);
+  for (let i = startIndex; i < endIndex; i++) {
+    const node = sb.getRenderable(`tmsg-${i}`);
+    const h = node?.height;
+    if (Number.isFinite(h) && (h as number) > 0 && next[i] !== (h as number)) {
+      next[i] = h as number;
+      changed = true;
+    }
+  }
+  if (changed) setHeights(next);
+}
+
+/**
+ * scrollbox 元素 + ref 绑定（#986 — 从 ChatView 抽出）。两个
+ * `useLayoutEffect`（scrollTop 追踪 + scrollbar hover 绑定）与
+ * `useImperativeHandle`（ChatViewHandle 暴露 scrollToBottom +
+ * scrollbox 直查）。承载 invariant：scrollbox 元素与 ref 绑定由
+ * ChatView 顶层无条件调用，不得挪到 render helper。
+ */
+function useScrollboxBindings(args: {
+  readonly sbRef: { current: ScrollBoxRenderable | null };
+  readonly setScrollbarHovered: (hovered: boolean) => void;
+  readonly setScrollTop: (next: number | ((prev: number) => number)) => void;
+  readonly ref: React.Ref<ChatViewHandle>;
+}): void {
+  const { sbRef, setScrollbarHovered, setScrollTop, ref } = args;
+  useLayoutEffect(() => {
+    const sb = sbRef.current;
+    if (sb === null) return; // EXIT: unmounted scrollbox
+    // Official OpenTUI path: slider change → scrollbar `change` { position }.
+    // Do not patch scrollTop (Feature Envy) or rAF-poll (sticky still 0).
+    const stopTracking = listenScrollBoxTop(sb, (next) => {
+      setScrollTop((prev) => (prev === next ? prev : next));
+    });
+    // hover 槽挂在 scrollbar renderable 上（Slider 自身只接 down/drag/up）。
+    const stopHover = attachScrollbarHover(
+      sb.verticalScrollBar,
+      setScrollbarHovered
+    );
+    return () => {
+      stopTracking();
+      stopHover();
+    };
+  }, [sbRef, setScrollTop, setScrollbarHovered]);
+  useImperativeHandle(ref, () => ({
+    scrollToBottom() {
+      const sb = sbRef.current;
+      if (sb === null) return; // EXIT: unmounted
+      sb.scrollTop = Math.max(0, sb.scrollHeight - sb.viewport.height);
+    },
+    get scrollbox() {
+      return sbRef.current;
+    },
+  }));
+}
+
+/**
+ * `<scrollbox>` 渲染（#986 — 从 ChatView 抽出）。所有分支（banner /
+ * spacerBefore / mounted map / TranscriptTail）与 props 透传集中到本组件，
+ * ChatView 顶层只剩 hook 装配 + memo 派生，complexity 落回 ≤10。
+ *
+ * props 全是 ChatView 已派生 / useMemo 稳定的引用（statusMap /
+ * resultTextMap / visibleMessages / foldLinesBySegmentIndex 等），本组件
+ * 只挂 JSX，不再派生。
+ */
+function ChatScrollbox(props: {
+  readonly sbRef: { current: ScrollBoxRenderable | null };
+  readonly cols: number;
+  readonly rows: number;
+  readonly scrollbarHovered: boolean;
+  readonly bannerLines: ReadonlyArray<string>;
+  readonly mountWindow: ViewportMountWindow<AnthropicNativeMessage>;
+  readonly contentWidth: number;
+  readonly activitySegments: ReadonlyArray<TurnActivitySegment>;
+  readonly foldLinesBySegmentIndex: FoldLinesBySegmentIndex;
+  readonly shownThinkingMsValues: ShownThinkingMsValues;
+  readonly statusMap: ReadonlyMap<string, boolean>;
+  readonly resultTextMap: ReadonlyMap<string, string>;
+  readonly thinkingExpanded: boolean;
+  readonly thinkingMsAtVisible: ThinkingMsAtVisible;
+  readonly running: boolean;
+  readonly tailSlots: ReadonlyArray<TailSlotDecision>;
+  readonly renderLiveRuns: (runs: ReadonlyArray<LiveToolRun>) => ReactNode;
+  readonly deferredThinkingDrafts: string;
+  readonly currentTurnHasFold: boolean;
+  readonly currentTurnHasThinkingFold: boolean;
+  readonly liveToolLines: ReadonlyArray<string>;
+  readonly askLine: string | undefined;
+  readonly crunchedSeconds: number;
+}): ReactNode {
+  return (
+    <scrollbox
+      ref={props.sbRef}
+      width={props.cols}
+      height={props.rows}
+      stickyScroll={true}
+      stickyStart="bottom"
+      scrollAcceleration={chatWheelScrollAccel}
+      verticalScrollbarOptions={{
+        trackOptions: {
+          backgroundColor: scrollbarTrackColor(),
+          foregroundColor: scrollbarThumbColor(props.scrollbarHovered),
+        },
+      }}
+    >
+      {props.bannerLines.length > 0 && (
+        <TranscriptBanner bannerLines={props.bannerLines} />
+      )}
+      {props.mountWindow.spacerBefore > 0 && (
+        <box
+          key="transcript-spacer-before"
+          width={props.contentWidth}
+          height={props.mountWindow.spacerBefore}
+          flexShrink={0}
+        />
+      )}
+      {props.mountWindow.mounted.map((message, i) => {
+        const visibleIndex = props.mountWindow.startIndex + i;
+        const messageThinkingMs = props.thinkingMsAtVisible(visibleIndex);
+        return (
+          <MessageRow
+            key={visibleIndex}
+            message={message}
+            visibleIndex={visibleIndex}
+            contentWidth={props.contentWidth}
+            messageThinkingMs={messageThinkingMs}
+            messageSegments={messageSegmentsOfVisible(
+              props.activitySegments,
+              visibleIndex
+            )}
+            foldLinesBySegmentIndex={props.foldLinesBySegmentIndex}
+            shownThinkingMsValues={props.shownThinkingMsValues}
+            statusMap={props.statusMap}
+            resultTextMap={props.resultTextMap}
+            thinkingExpanded={props.thinkingExpanded}
+          />
+        );
+      })}
+      <TailSpacer
+        height={props.mountWindow.spacerAfter}
+        contentWidth={props.contentWidth}
+      />
+      <TranscriptTail
+        contentWidth={props.contentWidth}
+        running={props.running}
+        crunchedSeconds={props.crunchedSeconds}
+        tailSlots={props.tailSlots}
+        renderLiveRuns={props.renderLiveRuns}
+        deferredThinkingDrafts={props.deferredThinkingDrafts}
+        thinkingExpanded={props.thinkingExpanded}
+        currentTurnHasFold={props.currentTurnHasFold}
+        currentTurnHasThinkingFold={props.currentTurnHasThinkingFold}
+        liveToolLines={props.liveToolLines}
+        askLine={props.askLine}
+      />
+    </scrollbox>
+  );
+}

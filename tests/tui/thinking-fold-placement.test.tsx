@@ -474,3 +474,64 @@ test("running 中间态:前段已落定的工具折叠行,在后段思考开始�
   expect(frame.includes("先读文件")).toBe(false);
   await setup.renderer.destroy();
 });
+
+test("多段渲染 (content-order)：text 段无 fold 行但 message 的 thinkingMs 已被 tools 段 fold 行覆盖 → text 段不重复画 ThinkingSummary", async () => {
+  // 不变式 (d) 的 content-order 强化：同一 assistant 拆出多段（text →
+  // tools），tools 段 fold 行已显示 `Thought for Ns · read_file × 1`，
+  // text 段（partIndex===0，挂 thinkingSeconds）**不得**再画一份独立的
+  // `Thought for Ns`。message-row.tsx 在 #986 拆分时把 `messageThinkingMs`
+  // 硬编码成 0 喂给 TurnFoldSegment，导致 content-order 分支的
+  // `shownThinkingMsValues.has(...)` 子句失效 → text 段 ThinkingSummary
+  // 不去重 → 屏幕上看到两条 `Thought for Ns`（一条 fold 行、一条摘要）。
+  //
+  // 数据构造：assistant 自身带 `thinking + text + tool_use(read_file)`,
+  // tool_result 在其后。activitySegments = [text(0), tools(1)] →
+  // renderInContentOrder 走 content-order 分支 → text 段是 partIndex 0
+  // （挂 thinkingSeconds）,tools 段是 partIndex 1（不挂）。
+  const messages: AnthropicNativeMessage[] = [
+    { role: "user", content: [{ type: "text", text: "q" }] },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "想一下", signature: "s" },
+        { type: "text", text: "先说结论" },
+        {
+          type: "tool_use",
+          id: "tu-1",
+          name: "read_file",
+          input: { path: "a" },
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "tu-1", content: "ok" }],
+    },
+  ];
+  const thinkingMs: ReadonlyArray<number | null> = [null, 12000, null];
+  const setup = await testRender(
+    <ChatView
+      session={sessionWith(messages, thinkingMs)}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  const lines = frame.split("\n");
+  // (1) `Thought for 12s` 只出现一次：tools 段 fold 行（`Thought for 12s
+  //     · read_file × 1`）焊在同一行；text 段 ThinkingSummary 必须被 hide
+  //     掉（message-row.tsx TurnFoldSegment 内 hideSegmentThinking 走
+  //     `messageThinkingMs > 0 && shownThinkingMsValues.has(...)`）。
+  const thinkLines = lines.filter((l) => /Thought for \d+s/.test(l));
+  expect(thinkLines).toHaveLength(1);
+  expect(thinkLines[0]).toContain("Thought for 12s");
+  // (2) read_file 计数行必须在场（content-order 路径下 fold 行挂 tools 段）。
+  expect(frame).toContain("read_file × 1");
+  // (3) text 段正文仍在（hideThinking 只去 ThinkingSummary，不动 text block）。
+  expect(frame).toContain("先说结论");
+  await setup.renderer.destroy();
+});
