@@ -423,7 +423,7 @@ export type BuiltEngine = EngineBundle & {
    */
   readonly isolationOn?: boolean;
   /**
-   * T2 / plans/worktree-exclusive-lock.md / ADR-0070 — enter-task-worktree
+   * T2 / plans/worktree-exclusive-lock.md / ADR-0070 — enter-worktree
    * 占用锁档判定结果（装配期一次性读取，`resolveWorktreeExclusive(settings)`，
    * ADR-0037 §5 硬要求 9：开关只在启动加载点读一次，会话根改绑不重载）。
    *
@@ -608,12 +608,12 @@ export async function buildHarnessEngine(
   const isolationHost = opts.worktreeIsolation;
   const isolationEnabled =
     isolationHost !== undefined && resolveWorktreeOnMutate(settings);
-  // T2 / plans/worktree-exclusive-lock.md / ADR-0070:enter-task-worktree
+  // T2 / plans/worktree-exclusive-lock.md / ADR-0070:enter-worktree
   // 占用锁开关的装配期解析 —— 与 `isolationEnabled` 同款 fail-closed 读取点
   // （缺失 / 非 true → false）。**仅在这里读一次**（ADR-0037 §5 硬要求 9）：
   // 会话根改绑（rebind）不触发 settings 重载，构造期冻结值贯穿本引擎寿命。
   // OFF 档 → `worktreeExclusiveEnabled === false` → T3 在 session-api
-  // `enterWorktree` 装配 closure 时跳过占用检查，`enter-task-worktree` 行
+  // `enterWorktree` 装配 closure 时跳过占用检查，`enter-worktree` 行
   // 为与今日逐字节一致（spec SC2 / ADR-0070「OFF 档零回归」钉死）。
   const worktreeExclusiveEnabled = resolveWorktreeExclusive(settings);
   // #251 LSP 联动缝:edit_file 写盘成功后由装配层注入 lspNotifier.invalidate
@@ -799,7 +799,7 @@ export async function buildHarnessEngine(
     }
   }
   // ADR-0037 T3/T4:worktree isolation host 缝 + 开关判定上移到 registry
-  // 装配之前 —— T4 的 create-task-worktree ACI 工具与 mutate 门禁共用同一
+  // 装配之前 —— T4 的 create-worktree ACI 工具与 mutate 门禁共用同一
   // 判定源（isolationEnabled），保证「工具在场 ⇔ 门禁已武装」；开关 OFF 时
   // 工具面与今日逐字节一致。开关只在启动加载点读一次（硬要求 9）。
   // T6: `isolationHost` / `isolationEnabled` 已上移至 settings 加载后
@@ -821,7 +821,7 @@ export async function buildHarnessEngine(
         liveTaskRoot,
         // T9 (write-situation-disclosure SC10): the enter seam resolves to
         // `{ path, receipt }` — the cell keeps receiving the root; the
-        // receipt flows verbatim to the enter-task-worktree tool.
+        // receipt flows verbatim to the enter-worktree tool.
         (resolved) => resolved.path
       )
     : undefined;
@@ -1019,10 +1019,10 @@ export async function buildHarnessEngine(
         ? {
             worktreeProvision: wrappedProvision!,
             // T7:enter 缝在场时透传（与 provision 同一 isolationEnabled 判定源）；
-            // 缺席（TUI 只接 provision）→ enter-task-worktree 不入注册表。
+            // 缺席（TUI 只接 provision）→ enter-worktree 不入注册表。
             ...(wrappedEnter ? { worktreeEnter: wrappedEnter } : {}),
             // T8:exit 缝在场时透传（同一 isolationEnabled 判定源）；缺席 →
-            // exit-task-worktree 不入注册表。
+            // exit-worktree 不入注册表。
             ...(wrappedExit ? { worktreeExit: wrappedExit } : {}),
             // task-worktree-lifecycle: discovery and explicit removal are
             // host-only seams; they do not change the live root themselves.
@@ -1309,7 +1309,7 @@ export async function buildHarnessEngine(
   // worker registry through the same factory with the worker-only option
   // shape (no parent managers, state tools, or worktree host seams), then
   // apply the worker deny-list path in the classifier below. This keeps
-  // host-only write-category tools such as create-task-worktree and bash_stop
+  // host-only write-category tools such as create-worktree and bash_stop
   // out of the isolation decision without maintaining a second exclusion list.
   const workerBaseTools = isolationEnabled
     ? createDefaultAciRegistry({
@@ -1414,7 +1414,7 @@ export async function buildHarnessEngine(
   };
 
   // ADR-0037 T3:mutate 门禁（harness executor 缝）。开关判定已上移（同一
-  // isolationEnabled 同时驱动 T4 create-task-worktree 工具的条件化装配，
+  // isolationEnabled 同时驱动 T4 create-worktree 工具的条件化装配，
   // 见上方 registry 调用）；host 缝（provision / initiallyBound）由
   // session-api hub 注入。OFF / host 缺席 → 不包装，行为与今日逐字节一致。
   //

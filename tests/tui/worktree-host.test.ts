@@ -2,7 +2,8 @@
  * TUI 入口的 worktree isolation host 缝（src/tui/worktree-host.ts）回归：
  * run.tsx 原内联手工解构只取 { conversationId, root }，把
  * WorktreeProvisionContext 的 `name` 静默丢弃 → TUI 入口所有带名字的
- * create-task-worktree 退化为 UUID-only leaf（编译仍绿）。与 CLI 缝
+ * create-worktree 退化为 UUID-only leaf（编译仍绿）；旧注册名
+ * `create-task-worktree` 见 ADR-0082 改名。与 CLI 缝
  * tests/cli/worktree-host.test.ts 同构的本测试接捕获 ctx 的 spy hub，
  * 钉死 TUI 装配层必须整 ctx 透传（含 `name`）； labeled leaf 端到端
  * 形态由 session-api provisioner 侧测试覆盖。

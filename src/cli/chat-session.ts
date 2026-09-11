@@ -70,6 +70,11 @@ import {
 } from "../harness/sandbox/violation-handling.js";
 import { createStreamDraft } from "./stream-draft.js";
 import {
+  formatThinkingLive,
+  formatToolStatusLine,
+  summarizePartialInput,
+} from "../shared/tool-line.js";
+import {
   parsePermissionMode,
   type PermissionMode,
   type PermissionModeContext,
@@ -491,7 +496,7 @@ export async function refreshChatDepsForRebind(
   // 写根段（specs/skill-load-write-root.md T5 合同 7）：改绑成功且**活写根
   // ≠ 身份根**时，下一次主模型 run 再给一次当前写根（与 worker prior /
   // skill trailer 同一 helper 文案）。身份根判定 = mainCheckoutOf(newRoot)
-  //（纯路径派生，与装配期 projectIdentityRoot 同源）：exit-task-worktree
+  //（纯路径派生，与装配期 projectIdentityRoot 同源）：exit-worktree
   // 回主仓时两根相同，注入的「写根在上 / Project path 只读」文案会自相
   // 矛盾 → 不置入。仅在重建成功走到这里；重建失败 / 根未变化的提前
   // return 不经过。
@@ -2037,14 +2042,22 @@ function resolveQuiet(optsQuiet: boolean | undefined): boolean {
  *
  * 返回 `{ feed, textStreamed }`(替代 #195 前的裸回调),作为
  * `processChatLine` 的 `onStream`:
- *   - `feed` 把 harness 流式事件按"stdout 直出最终答案 / stderr 工具提示"
+ *   - `feed` 把 harness 流式事件按"stdout 直出最终答案 / stderr 工具过程行"
  *     分流路由:
  *     - `text_delta` → 经 `opts.writeOut` 写为 stdout 的**最终输出**(增量
  *       滚动);首个 delta 到来时先经 `opts.writeErr` 写 `\r\x1b[K` 清掉
- *       stderr 上的「思考中…」spinner(one-shot);同时翻转 `textStreamed`
+ *       stderr 上的 `Thinking…` spinner(one-shot);同时翻转 `textStreamed`
  *       为 `true`(经 getter 暴露,host 据此决定回合结束只补状态行)。
- *     - `tool_call_start` → 经 `opts.writeErr` 输出工具名提示(状态行,
- *       永久留在屏幕);**不**翻转 `textStreamed`(纯提示,不承载答案)。
+ *     - 工具调用 → **延迟 flush**：CLI 的事件序是 `tool_call_start {name,id}`
+ *       之后才有 `tool_input_delta {id,partialJson}`，且**没有
+ *       input-complete 事件**。start 时就画只能得到裸工具名（D1 要求要点
+ *       可见），故此处暂存 pending 调用、按 id 累积增量 JSON，等第一个
+ *       「不是该 id 增量」的事件到达时 flush **恰一行** —— 由共享
+ *       `formatToolStatusLine`（`src/shared/tool-line.ts`，与 TUI 同一函数）
+ *       拼装：`read_file · Read a.ts` / `Running 1 shell command… · ls`。
+ *       增量 JSON 不完整 → 走 `summarizePartialInput` 的原样截断，仍一行、
+ *       不 throw（input 未到 → name-only 行）。**不**翻转 `textStreamed`
+ *       （纯提示,不承载答案）。
  *   - `textStreamed` 反映是否有答案文本已流式(stdout)过。
  *
  * #195 修复要点:答案文本只直出一次到 stdout(不再回写 stderr 预览再被
@@ -2059,10 +2072,25 @@ export interface StreamPreviewSink {
   readonly textStreamed: boolean;
 }
 
+/** 运行中工具调用的人读行（D1 单源在 `src/shared/tool-line.ts`）。
+ *  pending 的 input 累积是流式半成品 → 传 `running: true`，与 TUI live 行
+ *  同一语义（write_file 的行数这类「只有 input 齐了才可信」的量被省略）。
+ *  增量 JSON 不完整（CLI 常见：分片未拼完）→ 共享
+ *  `summarizePartialInput` 原样截断；空 → 裸 `name` 行仍立得住。 */
+function formatCliToolLine(name: string, partialJson: string): string {
+  const detail = summarizePartialInput(name, partialJson);
+  return formatToolStatusLine({
+    toolName: name,
+    input: undefined,
+    status: "running",
+    detail,
+  });
+}
+
 export function createStreamPreviewSink(opts: {
   /** 答案文本 → stdout 最终输出。交互 REPL 传 `process.stdout.write`。 */
   readonly writeOut: (chunk: string) => void;
-  /** spinner 清除 + 工具提示 → stderr。交互 REPL 传 `process.stderr.write`。 */
+  /** spinner 清除 + 工具过程行 → stderr。交互 REPL 传 `process.stderr.write`。 */
   readonly writeErr: (chunk: string) => void;
 }): StreamPreviewSink {
   let textStreamed = false;
@@ -2074,11 +2102,27 @@ export function createStreamPreviewSink(opts: {
   // 片段形式裸写出。SC20 完整密钥命中场景正常遮蔽。
   const streamDraft = createStreamDraft();
   let lastWrittenLen = 0;
+  // 延迟 flush 的 pending 工具调用（D1）。同一时刻至多一个 —— harness loop
+  // 串行，start 与它的增量之间不会插入另一个 start；真插入时先行 flush
+  // （恰一行/调用，不丢行）。
+  let pending: {
+    readonly id: string;
+    readonly name: string;
+    json: string;
+  } | null = null;
+  const flushPending = (): void => {
+    if (pending === null) return;
+    const line = formatCliToolLine(pending.name, pending.json);
+    pending = null;
+    if (line.length > 0) opts.writeErr(`\n${line}\n`);
+  };
   const feed = (event: HarnessStreamEvent): void => {
     try {
       if (event.type === "text_delta") {
+        // 任何非「当前 pending 的 input 增量」事件都是关闭点（见上）。
+        flushPending();
         if (!textStreamed) {
-          // 清掉「思考中…」spinner(one-shot);首个 delta 之后不再清除。
+          // 清掉 `Thinking…` spinner(one-shot);首个 delta 之后不再清除。
           opts.writeErr("\r\x1b[K");
         }
         streamDraft.append(event);
@@ -2091,11 +2135,23 @@ export function createStreamPreviewSink(opts: {
         textStreamed = true;
         return;
       }
+      if (event.type === "tool_input_delta") {
+        // 只累积当前 pending 调用的增量；其他 id（异常序）不 flushing、
+        // 不丢当前行（保持「一个调用恰一行」）。
+        if (pending !== null && pending.id === event.id) {
+          pending.json += event.partialJson;
+        }
+        return;
+      }
+      // 其余事件（tool_call_start / thinking_delta / stop_summary / …）都是
+      // 关闭点：先 flush 上一件，再处理本事件。
+      flushPending();
       if (event.type === "tool_call_start") {
         if (!textStreamed) {
           opts.writeErr("\r\x1b[K");
         }
-        opts.writeErr(`\n调用工具:${event.name}\n`);
+        // 只登记 pending，不落行 —— input 增量还没到（上）。
+        pending = { id: event.id, name: event.name, json: "" };
       }
     } catch {
       // 观察者写入失败不得影响回合交付(stderr/stdout 断流等;D3)。
@@ -2376,14 +2432,16 @@ async function runInteractive(opts: {
 
       const looksLikeQuery =
         line.trim().length > 0 && !line.trim().startsWith("/");
-      // 思考中 only when stderr is a TTY (never spam pipes / redirected logs).
+      // Thinking… spinner only when stderr is a TTY (never spam pipes /
+      // redirected logs). 文案来自 shared/tool-line（D1：与 TUI
+      // `formatThinkingLive` 同一函数，CLI 不另写中文字面量）。
       showThinking = looksLikeQuery && Boolean(process.stderr.isTTY);
 
       if (showThinking) {
-        process.stderr.write("思考中…");
+        process.stderr.write(formatThinkingLive());
       }
 
-      // #179 T6 + #195:流式最终输出(仅 stderr TTY 时;与「思考中…」同门槛)。
+      // #179 T6 + #195:流式最终输出(仅 stderr TTY 时;与 Thinking… 同门槛)。
       // 答案文本经 feed 直出 stdout 作为最终输出;首个 delta 自动清 spinner。
       // textStreamed 供回合结束判断(见下方 #195 分支)。
       if (showThinking) {

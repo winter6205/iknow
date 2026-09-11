@@ -272,7 +272,7 @@ describe("get_record ACI tool", () => {
     // 此断言让「之后还能 append 但不得插队」成为可测不变式。
     for (const name of afterContentAxis) {
       assert.ok(
-        name === "list-task-worktrees" || name === "remove-task-worktree",
+        name === "list-worktrees" || name === "remove-worktree",
         `get_record 后只能 append host 缝条件化件,unexpected "${name}"`
       );
     }

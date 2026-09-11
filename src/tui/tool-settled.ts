@@ -92,7 +92,7 @@ export const TOOL_SETTLED_CLASS: Readonly<Record<string, SettledClass>> = {
   list_mcp_resources: "retract",
   read_mcp_resource: "retract",
   query_trace: "retract",
-  "list-task-worktrees": "retract",
+  "list-worktrees": "retract",
   lsp_definition: "retract",
   lsp_references: "retract",
   lsp_hover: "retract",
@@ -105,10 +105,10 @@ export const TOOL_SETTLED_CLASS: Readonly<Record<string, SettledClass>> = {
   lsp_workspace_symbol: "retract",
   // accent（点名着色，D6）
   skill: "accent",
-  "create-task-worktree": "accent",
-  "enter-task-worktree": "accent",
-  "exit-task-worktree": "accent",
-  "remove-task-worktree": "accent",
+  "create-worktree": "accent",
+  "enter-worktree": "accent",
+  "exit-worktree": "accent",
+  "remove-worktree": "accent",
   // 三类之外（D8「沿用独立 glyph」）：显式声明，核在 class 分派前特判
   // keep-title-only —— 注册表与核共享同一子代理名单，跨核闸钉住一致性。
   spawn_subagent: "subagent",

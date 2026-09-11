@@ -242,10 +242,11 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     await app.destroy();
   }, 30_000);
 
-  test("thinking 留存：turn 结束 → 末条 assistant 折叠行显示「思考了 N 秒」", async () => {
+  test("thinking 留存：turn 结束 → 末条 assistant 折叠行显示 Thought for Ns", async () => {
     // 需求：thinking 秒数结束后留存界面而不是消失。turn 结束后流式面板消失，
     // app 层在 runTurnOnce finally 快照 thinkingSeconds → 历史消息末条 assistant
-    // 折叠行显示「思考了 N 秒」（秒数接棒，不随草稿清空丢失）。
+    // 折叠行显示 `Thought for <duration>`（spec D2 英文 unit fold；秒数接棒，
+    // 不随草稿清空丢失）。
     // 内联 adapter：发 thinking_delta 后 await 3000ms 再返回 → thinkingStartedAt
     // 打点后经 ≥1s，thinkingSeconds() 在 finally 快照时 > 0。
     const thinkingAdapter: ModelAdapter = {
@@ -300,10 +301,11 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
 
     // turn 完成。
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
-    // 末条 assistant 折叠行显示「思考了 N 秒」留存（N≥1，3s delay 保证秒数>0）。
+    // 末条 assistant 折叠行显示 `Thought for <duration>` 留存（N≥1，3s delay
+    // 保证秒数>0；spec D2 英文 unit fold）。
     await untilFrame(
       app.setup,
-      (f) => /思考了 \d+ 秒/.test(f),
+      (f) => /Thought for \d+s/.test(f),
       8000,
       "thinking-persisted"
     );
@@ -379,7 +381,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
     await untilFrame(
       app.setup,
-      (f) => /思考了 [12] 秒/.test(f),
+      (f) => /Thought for [12]s/.test(f),
       8000,
       "thinking-pure-duration"
     );
@@ -402,9 +404,9 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     expect(draft.thinkingSeconds()).toBe(0);
   });
 
-  test("tool_call_start → LiveToolRun 「[运行中] noop」实时追加", async () => {
+  test("tool_call_start → LiveToolRun running 过程行实时追加", async () => {
     // 时序说明（T7 修复）：stub-model 的 streamEventsByStep 在 delay 之后
-    // 发出事件、随即返回 → turn 立即完成 → [运行中] 状态窗口太短抓不到。
+    // 发出事件、随即返回 → turn 立即完成 → running 窗口太短抓不到。
     // 这里用内联 adapter：发出 tool_call_start 后 await 3000ms 再返回，
     // 制造「工具运行中、turn 未完成」的稳定窗口（archive 同款模式）。
     const toolAdapter: ModelAdapter = {
@@ -452,10 +454,11 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     await app.typeText("hi");
     await app.pressEnter();
 
-    // LiveToolRun 流式阶段：render 含「[运行中] noop」摘要行（turn 未完成）。
+    // LiveToolRun 流式阶段：render 含 running 过程行（spec D1，无 `[运行中]`；
+    // noop 无 input → detail 空 → 行内只有工具名）。
     await untilFrame(
       app.setup,
-      (f) => f.includes("[运行中] noop") || f.includes("运行"),
+      (f) => f.includes("noop"),
       8000,
       "tool-running"
     );
@@ -533,7 +536,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     // running 阶段：partial 参数已累积 → 摘要行含 `git status`（parse 成功）。
     await untilFrame(
       app.setup,
-      (f) => f.includes("[运行中] bash") && f.includes("git status"),
+      (f) => f.includes("Running 1 shell command…") && f.includes("git status"),
       8000,
       "tool-partial-rendered"
     );
@@ -608,14 +611,18 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
 
     await untilFrame(
       app.setup,
-      (f) => f.includes("[运行中] bash") && f.includes("order-probe-draft"),
+      (f) =>
+        f.includes("Running 1 shell command…") &&
+        f.includes("order-probe-draft"),
       8000,
       "mixed-order-window"
     );
     const frame = app.setup.captureCharFrame();
-    const iEarly = frame.indexOf("[运行中] web_search");
+    // spec D1：running 过程行无 `[运行中]` —— web_search / bash 分别用
+    // 「裸工具名」（无 input → detail 空）与 `Running 1 shell command…` 前缀定位。
+    const iEarly = frame.indexOf("web_search");
     const iDraft = frame.indexOf("order-probe-draft");
-    const iLate = frame.indexOf("[运行中] bash");
+    const iLate = frame.indexOf("Running 1 shell command…");
     expect(iEarly).toBeGreaterThanOrEqual(0);
     expect(iDraft).toBeGreaterThanOrEqual(0);
     expect(iLate).toBeGreaterThanOrEqual(0);
@@ -680,16 +687,17 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     await untilFrame(
       app.setup,
       (f) =>
-        f.includes("[运行中] bash") &&
+        f.includes("Running 1 shell command…") &&
         f.includes("order-seg-one") &&
         f.includes("order-seg-two"),
       8000,
       "two-segment-order-window"
     );
     const frame = app.setup.captureCharFrame();
-    const iEarly = frame.indexOf("[运行中] web_search");
+    // spec D1：running 过程行无 `[运行中]`（web_search 无 input → 裸工具名）。
+    const iEarly = frame.indexOf("web_search");
     const iFirst = frame.indexOf("order-seg-one");
-    const iLate = frame.indexOf("[运行中] bash");
+    const iLate = frame.indexOf("Running 1 shell command…");
     const iSecond = frame.indexOf("order-seg-two");
     expect(iEarly).toBeGreaterThanOrEqual(0);
     expect(iFirst).toBeGreaterThanOrEqual(0);

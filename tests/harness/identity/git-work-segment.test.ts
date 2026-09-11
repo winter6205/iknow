@@ -65,7 +65,7 @@ function expectGitWorkPoints(out: string): void {
   expect(out).toContain("## Git work");
   expect(out).toContain(IKNOW_GIT_WORK_TEXT);
   expect(out).toContain("bash");
-  expect(out).toContain("create-task-worktree");
+  expect(out).toContain("create-worktree");
   expect(out).toContain("--no-verify");
   expect(out).toMatch(/readonly|read-only/i);
   expect(out).not.toContain("network: true");

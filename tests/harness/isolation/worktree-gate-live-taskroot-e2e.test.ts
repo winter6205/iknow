@@ -2,10 +2,10 @@
  * T12 (plans/worktree-live-task-root.md §6 T12) — run-level e2e reproduction
  * of the §1 trace scenario, exercising the full assembly + loop-engine path
  * (`buildHarnessEngine` + `run()` + stub model + real ACI write_file /
- * create-task-worktree tools).
+ * create-worktree tools).
  *
  * Acceptance (§6 T12 + §5 D1/D2/D11):
- *   - turn 0: model emits `create-task-worktree` → gate admits (classified as
+ *   - turn 0: model emits `create-worktree` → gate admits (classified as
  *     "read" → bypasses the gate) → inner handler invokes the host
  *     `provision` seam, which is wrapped with `withLiveTaskRootWrite` so
  *     successful resolutions update the live `taskRoot` cell.
@@ -92,7 +92,7 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
 /**
  * Shape of the stub-model script used by the run-level e2e: three scripted
  * responses, one per step:
- *   - step 0 (turn 0): assistant emits `create-task-worktree` tool call;
+ *   - step 0 (turn 0): assistant emits `create-worktree` tool call;
  *   - step 1 (turn 1): assistant emits `write_file` tool call;
  *   - step 2 (turn 2): assistant emits success text → run() completes.
  */
@@ -100,7 +100,7 @@ function e2eResponses(filePath: string, fileContent: string) {
   return [
     assistantResult({
       texts: [],
-      toolCalls: [{ id: "ctw", name: "create-task-worktree", input: {} }],
+      toolCalls: [{ id: "ctw", name: "create-worktree", input: {} }],
     }),
     assistantResult({
       texts: [],
@@ -163,8 +163,8 @@ async function fakeProvision(ctx: {
 // T12 — run-level e2e
 // ---------------------------------------------------------------------------
 
-describe("T12 — run-level e2e: create-task-worktree + write_file in one run", () => {
-  it("mutate after create-task-worktree lands in the new task worktree; main repo untouched", async () => {
+describe("T12 — run-level e2e: create-worktree + write_file in one run", () => {
+  it("mutate after create-worktree lands in the new task worktree; main repo untouched", async () => {
     const mainRoot = await makeMainRoot();
     const conversationId = "conv-t12-e2e-1";
     const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
@@ -191,7 +191,7 @@ describe("T12 — run-level e2e: create-task-worktree + write_file in one run", 
 
     // The engine's static taskRoot is the main repo (pre-rebind snapshot);
     // the live cell is created from it and only flips via the wrapped
-    // provision seam after the model's create-task-worktree call.
+    // provision seam after the model's create-worktree call.
     expect(built.sessionRoots.taskRoot).toBe(mainRoot);
 
     // ---- Stub model + run() ----
@@ -213,7 +213,7 @@ describe("T12 — run-level e2e: create-task-worktree + write_file in one run", 
       assert.equal(result.turnCount, 3);
 
       // ---- provision seam: exactly twice ----
-      //   call 1 = turn 0: the create-task-worktree handler directly invokes
+      //   call 1 = turn 0: the create-worktree handler directly invokes
       //     the wrapped provision seam (model-provision contract — the gate
       //     itself never provisions; ctw is classified "read" and bypasses
       //     the gate entirely).
@@ -407,7 +407,7 @@ describe("T12 — trace double-track (test.md 纪律)", () => {
       assert.equal(lines[1]!["parent_llm_call_id"], turn0LlmId);
       assert.equal(lines[4]!["parent_llm_call_id"], turn1LlmId);
       // tool_call names captured.
-      assert.equal(lines[1]!["tool_name"], "create-task-worktree");
+      assert.equal(lines[1]!["tool_name"], "create-worktree");
       assert.equal(lines[4]!["tool_name"], "write_file");
       // turn records carry the tool_call_ids of their wave.
       assert.deepEqual(lines[2]!["tool_call_ids"], [turn0ToolId]);

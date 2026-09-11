@@ -125,11 +125,11 @@ export const RECOVERABILITY = {
   },
   // plans/worktree-exclusive-lock.md T3 / ADR-0070: enter 前置占用检查
   // (worktree_claimed)——目标树被别人的现存会话记录占用。模型无法解掉别人的
-  // 占用（释放路径 = 恢复该会话让它自己 exit-task-worktree / 删除该会话
+  // 占用（释放路径 = 恢复该会话让它自己 exit-worktree / 删除该会话
   // 记录），所以归 operator_required，回执自带停止指令（spec SC3 / SC6）。
   worktree_claimed: {
     category: "operator_required",
-    note: "task worktree is already claimed by another existing session record; release it via the other session's exit-task-worktree or by deleting the session record",
+    note: "task worktree is already claimed by another existing session record; release it via the other session's exit-worktree or by deleting the session record",
   },
 } as const satisfies Record<WorktreeIsolationErrorKind, Recoverability>;
 

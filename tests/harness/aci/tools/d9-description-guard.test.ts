@@ -50,11 +50,11 @@ import type { IknowEnv } from "../../../../src/config/env.js";
 import type { SubAgentManager } from "../../../../src/harness/subagent/manager.js";
 import type { McpManager } from "../../../../src/harness/mcp/manager.js";
 import type { BackgroundTaskManager } from "../../../../src/harness/background/manager.js";
-import type { CreateTaskWorktreeProvisionFn } from "../../../../src/harness/aci/tools/create-task-worktree.js";
-import type { WorktreeEnterToolDeps } from "../../../../src/harness/aci/tools/enter-task-worktree.js";
-import type { WorktreeExitToolDeps } from "../../../../src/harness/aci/tools/exit-task-worktree.js";
-import type { ListTaskWorktreesToolDeps } from "../../../../src/harness/aci/tools/list-task-worktrees.js";
-import type { RemoveTaskWorktreeToolDeps } from "../../../../src/harness/aci/tools/remove-task-worktree.js";
+import type { CreateWorktreeProvisionFn } from "../../../../src/harness/aci/tools/create-worktree.js";
+import type { WorktreeEnterToolDeps } from "../../../../src/harness/aci/tools/enter-worktree.js";
+import type { WorktreeExitToolDeps } from "../../../../src/harness/aci/tools/exit-worktree.js";
+import type { ListWorktreesToolDeps } from "../../../../src/harness/aci/tools/list-worktrees.js";
+import type { RemoveWorktreeToolDeps } from "../../../../src/harness/aci/tools/remove-worktree.js";
 
 /** #483 D9: 12-word blocklist — mirrors tests/harness/aci/tools/todo-write.test.ts:533.
  *
@@ -132,7 +132,7 @@ const fakeBackgroundManager: BackgroundTaskManager = {
 
 /** ADR-0037 worktree isolation host fakes —— sufficient for assembly。
  * handler 路径单测在各自工具目录下,本文件只验证 description D9 闸门。 */
-const fakeWorktreeProvision: CreateTaskWorktreeProvisionFn = async () =>
+const fakeWorktreeProvision: CreateWorktreeProvisionFn = async () =>
   "/tmp/fake-worktree";
 const fakeWorktreeEnter: WorktreeEnterToolDeps["worktreeEnter"] = async () => ({
   path: "/tmp/fake-worktree",
@@ -140,9 +140,9 @@ const fakeWorktreeEnter: WorktreeEnterToolDeps["worktreeEnter"] = async () => ({
 });
 const fakeWorktreeExit: WorktreeExitToolDeps["worktreeExit"] = async () =>
   "/tmp/fake-main";
-const fakeWorktreeList: ListTaskWorktreesToolDeps["worktreeList"] =
+const fakeWorktreeList: ListWorktreesToolDeps["worktreeList"] =
   async () => [];
-const fakeWorktreeRemove: RemoveTaskWorktreeToolDeps["worktreeRemove"] =
+const fakeWorktreeRemove: RemoveWorktreeToolDeps["worktreeRemove"] =
   async () => ({
     label: undefined,
     conversationId: "fake-conversation",

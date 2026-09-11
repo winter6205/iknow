@@ -5,7 +5,7 @@
  *   - ON + session NOT yet bound (main-repo root): the mutate is BLOCKED and
  *     the gate NEVER provisions — no `provision()` call, hence no
  *     `git worktree add` on the execution path, main repo zero-write. The
- *     block message points the model at the create-task-worktree ACI tool
+ *     block message points the model at the create-worktree ACI tool
  *     (not an auto-provision "end the turn and retry" protocol).
  *   - ON + engine rooted at a task-worktree-shaped root (post-rebind): the
  *     per-conversation passthrough adjudication via `provision` still holds
@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 
 import {
-  CREATE_TASK_WORKTREE_TOOL_HINT,
+  CREATE_WORKTREE_TOOL_HINT,
   WorktreeIsolationError,
   classifyCall,
   createTaskWorktree,
@@ -190,7 +190,7 @@ describe("createTaskWorktree", () => {
     expect(await readdir(plain)).toEqual(before);
   });
 
-  // ADR-0037 §6 amendment 2026-09-07 (plans/bare-repo-create-task-worktree.md):
+  // ADR-0037 §6 amendment 2026-09-07 (plans/bare-repo-create-worktree.md):
   // a bare gitdir is a USABLE git repo — the probe is `rev-parse
   // --git-common-dir`, not `--is-inside-work-tree`, so `git worktree add` runs
   // and succeeds. The old "bare → not_a_git_repo" classification was narrower
@@ -447,7 +447,7 @@ describe("createTaskWorktree", () => {
   // only reaches this exit on older versions (git >= 2.53 infers --orphan),
   // so the stub pins what the live-git case cannot — a gitdir that probes
   // clean but whose `worktree add` fails maps to worktree_add_failed, never
-  // not_a_git_repo (plans/bare-repo-create-task-worktree.md T2 acceptance).
+  // not_a_git_repo (plans/bare-repo-create-worktree.md T2 acceptance).
   it("empty bare whose worktree add fails maps to worktree_add_failed (stubbed, version-independent)", async () => {
     const runner: GitRunner = async (args) => {
       if (args[0] === "worktree") {
@@ -796,7 +796,7 @@ describe("createWorktreeIsolationExecutor", () => {
     );
     // the message points the model at the create-worktree ACI tool, NOT at an
     // auto-provision "end the turn and retry" protocol
-    expect(first[0]!.message).toContain(CREATE_TASK_WORKTREE_TOOL_HINT);
+    expect(first[0]!.message).toContain(CREATE_WORKTREE_TOOL_HINT);
     expect(first[0]!.message).not.toContain("end the turn");
     expect(first[0]!.message!.length).toBeGreaterThan(20);
     // the gate NEVER provisions on the blocked path: no provision() call means
@@ -808,7 +808,7 @@ describe("createWorktreeIsolationExecutor", () => {
     // subsequent mutates keep blocking with zero side effects (still fail-closed)
     const second = await gate.executeAll([writeCall("c2")]);
     expect(second[0]!.kind).toBe("execution_failed");
-    expect(second[0]!.message).toContain(CREATE_TASK_WORKTREE_TOOL_HINT);
+    expect(second[0]!.message).toContain(CREATE_WORKTREE_TOOL_HINT);
     expect(provisioned).toBe(0);
     expect(calls).toHaveLength(0);
   });
@@ -819,8 +819,8 @@ describe("createWorktreeIsolationExecutor", () => {
     expect(message.startsWith(`${WORKTREE_ISOLATION_PREFIX} `)).toBe(true);
     // substring ban (c): genuine mutations still get pointed at the tool
     // (literal name, not only via the hint constant)
-    expect(message).toContain("create-task-worktree");
-    expect(message).toContain(CREATE_TASK_WORKTREE_TOOL_HINT);
+    expect(message).toContain("create-worktree");
+    expect(message).toContain(CREATE_WORKTREE_TOOL_HINT);
     // substring ban (d): no imperative framing that turns the next model move
     // into "go build a tree" — the notice never prescribes building a
     // per-conversation worktree by name
@@ -846,7 +846,7 @@ describe("createWorktreeIsolationExecutor", () => {
     expect(message).toBe(
       `${WORKTREE_ISOLATION_PREFIX} This call would write the workspace, and it was not executed: ` +
         `worktree isolation is ON and this session is not yet bound to a task worktree. ` +
-        `The main repo stays read-only. To write, call the ${CREATE_TASK_WORKTREE_TOOL_HINT} ` +
+        `The main repo stays read-only. To write, call the ${CREATE_WORKTREE_TOOL_HINT} ` +
         `to put this session on a writable root, then re-issue this same call — it ` +
         `will land in the new root on the next wave of tool calls in this run ` +
         `(no auto-provisioning).`

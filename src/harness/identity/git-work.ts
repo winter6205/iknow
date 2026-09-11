@@ -11,7 +11,7 @@
 export const IKNOW_GIT_WORK_TEXT = `
 Version-control side effects (workspace change → git add → git commit) go through the existing \`bash\` tool. There is no dedicated git ACI tool.
 
-- If \`create-task-worktree\` is available, call it before committing, then commit only inside that task worktree. Do not write the main checkout to work around isolation.
+- If \`create-worktree\` is available, call it before committing, then commit only inside that task worktree. Do not write the main checkout to work around isolation.
 - Never use \`git commit --no-verify\` or \`-n\`.
 - Do not delegate mutating git (commit or staging for commit) to a readonly sub-agent. Parent-session bash only.
 `.trim();

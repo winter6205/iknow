@@ -4,7 +4,8 @@
  * 当前 turn 的工具折叠摘要（纯函数）。ChatView 把「本 turn 里每个工具
  * 调用了几次」收成一行（idle 与 running 在已有完成工具时共用），避免
  * 旧的逐条 `[思考]` / `[完成] bash` 与 turn 级折叠叠在一起。
- * 结束态两行：先 `思考了 N 秒`，下一行工具计数 `bash × N`。
+ * 结束态**一行**（`unit fold`）：`Thought for <duration>` 与工具计数
+ * `bash × N` 焊在同一行 —— retract 计数不蒸发、不另起第二行。
  *
  * turn 边界与 `isTurnQuery` 同源：最后一条无 tool_result 的 user query
  * 起到会话末尾（含中间 tool_result user 消息）。
@@ -252,8 +253,12 @@ export function formatToolUseCounts(
 }
 
 /**
- * idle 折叠行。seconds≤0 且无工具 → 空数组。
- * 有秒数 → 先一行 `思考了 N 秒`；有工具 → 下一行计数（不拼进同一行）。
+ * idle 折叠行（D2 `unit fold`）：至多 1 行 —— 结束态时长段
+ * （`Thought for <duration>`）与原第二行计数 `formatToolUseCounts`
+ * （`bash × N · read_file × 1`）焊在同一行，中间 ` · ` 分隔。
+ *
+ * 收类（retract）计数不得蒸发，也不得另起第二行；无秒数 → 只计数行；
+ * 无计数 → 只时长行；两者皆无 → 空数组（不回落 `[思考]`）。
  */
 export function formatTurnActivityFold(
   seconds: number | undefined,
@@ -261,10 +266,14 @@ export function formatTurnActivityFold(
 ): ReadonlyArray<string> {
   const counts = formatToolUseCounts(entries);
   const think = formatThinkingFold(seconds);
-  const lines: string[] = [];
-  if (think.length > 0) lines.push(think);
-  if (counts.length > 0) lines.push(counts);
-  return lines;
+  if (think.length === 0 && counts.length === 0) return [];
+  const line =
+    think.length === 0
+      ? counts
+      : counts.length === 0
+        ? think
+        : `${think} · ${counts}`;
+  return [line];
 }
 
 /**
@@ -306,10 +315,10 @@ export function thinkingMsToSeconds(ms: number): number {
 }
 
 /**
- * 思考秒数折叠行（`思考了 N 秒`）显示判定 —— plans/tui-chrome-interaction.md T1：
+ * 思考秒数折叠行（`Thought for <duration>`）显示判定 —— plans/tui-chrome-interaction.md T1：
  * running 态不阻止冻结的思考秒数渲染。fold by **completed unit**，不等整
  * turn idle：live thinking 一旦结束（final commit 写入落盘 thinkingMs），
- * 「思考了 N 秒」立刻可见，即便 tools 仍在 running。
+ * 时长段立刻可见，即便 tools 仍在 running。
  *
  * 不变式 = 决策只看 frozen thinkingMs（hasThinkingMs 派生自
  * session.thinkingMs[anchor] > 0），与 running 解耦 —— running 只用于

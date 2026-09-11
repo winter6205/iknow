@@ -1,6 +1,6 @@
 /**
  * git 作业（specs/git-work.md）：worker 不注入纪律段；
- * explore 只读 bash 仍拒 commit/push；worker 无名 create-task-worktree。
+ * explore 只读 bash 仍拒 commit/push；worker 无名 create-worktree。
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
@@ -37,9 +37,9 @@ const TEST_ENV = {
 } as unknown as IknowEnv;
 
 const WORKTREE_TOOLS = [
-  "create-task-worktree",
-  "enter-task-worktree",
-  "exit-task-worktree",
+  "create-worktree",
+  "enter-worktree",
+  "exit-worktree",
 ] as const;
 
 let workDir: string;
@@ -113,7 +113,7 @@ describe("git work — worker does not inject the parent discipline", () => {
     );
   });
 
-  it("worker registry has no create-task-worktree (inner + promptTools)", async () => {
+  it("worker registry has no create-worktree (inner + promptTools)", async () => {
     const deps = await createWorkerDeps(
       hermeticOpts({ system: () => undefined })
     );

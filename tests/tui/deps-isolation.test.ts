@@ -96,10 +96,10 @@ describe("buildTuiDeps — worktree isolation host seam (review High-1)", () => 
     expect(result.kind).toBe("execution_failed");
     expect(result.message).toContain("[worktree_isolation]");
     // T3 model-provision 契约：主仓 unbound mutate 直接拦截，gate NEVER
-    // provisions —— 建 task worktree 是模型的职责（create-task-worktree
+    // provisions —— 建 task worktree 是模型的职责（create-worktree
     // ACI 工具），block 文案必须指向它。
     expect(calls).toEqual([]);
-    expect(result.message).toContain("create-task-worktree");
+    expect(result.message).toContain("create-worktree");
     // 主仓零写入（门禁拦截在工具执行前）
     expect(await Bun.file(join(root, "hello.txt")).exists()).toBe(false);
   });

@@ -16,6 +16,7 @@ import type {
   AnthropicNativeMessage,
 } from "../harness/index.js";
 import { isAgentStatusText } from "../harness/agent-status.js";
+import { isGraphModeText } from "../harness/graph/notification.js";
 import { isSubagentDrainText } from "../harness/subagent/host-drain.js";
 import type { ActivityItem, ThinkingView, ToolCallView } from "./contract.js";
 
@@ -82,10 +83,16 @@ export function messageText(msg: AnthropicNativeMessage): string {
  * Turn-boundary rule SSOT (hub.ts projectMessagesToTurns 与
  * store/checkpoint.ts splitTurns 共用；原 hub `isQueryMessage` / checkpoint
  * `isQuery` 三条件收敛于此): a turn starts at a user message that carries NO
- * tool_result block and is NOT a subagent drain summary nor an agent_status
- * bar injection; user messages with only tool_result blocks are continuation,
- * not queries. Drain / agent_status messages are host-injected — they neither
- * surface as a turn nor bound the preceding turn's slice.
+ * tool_result block and is NOT a subagent drain summary, an agent_status
+ * bar injection, nor a graph_mode notification (切换 ON/OFF + ADR-0081 每
+ * run() 一条短现势); user messages with only tool_result blocks are
+ * continuation, not queries. Drain / agent_status / graph_mode messages are
+ * host-injected — they neither surface as a turn nor bound the preceding
+ * turn's slice.
+ *
+ * 四类注入信封与 TUI `isTuiHiddenUserMessage` 同一份名单（spec D8 / SC7：
+ * 「hidden 注入」两条消费面不得各自漂移）；谓词一律取自生产者本家
+ * (`isSubagentDrainText` / `isAgentStatusText` / `isGraphModeText`)。
  */
 export function isTurnQuery(msg: AnthropicNativeMessage): boolean {
   const text = messageText(msg);
@@ -93,7 +100,8 @@ export function isTurnQuery(msg: AnthropicNativeMessage): boolean {
     msg.role === "user" &&
     !msg.content.some((b) => b.type === "tool_result") &&
     !isSubagentDrainText(text) &&
-    !isAgentStatusText(text)
+    !isAgentStatusText(text) &&
+    !isGraphModeText(text)
   );
 }
 

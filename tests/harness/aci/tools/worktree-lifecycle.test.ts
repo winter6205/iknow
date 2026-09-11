@@ -3,21 +3,21 @@ import { describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import {
-  createCreateTaskWorktreeTool,
-  type CreateTaskWorktreeProvisionFn,
-} from "../../../../src/harness/aci/tools/create-task-worktree.ts";
-import { createListTaskWorktreesTool } from "../../../../src/harness/aci/tools/list-task-worktrees.ts";
-import { createRemoveTaskWorktreeTool } from "../../../../src/harness/aci/tools/remove-task-worktree.ts";
+  createCreateWorktreeTool,
+  type CreateWorktreeProvisionFn,
+} from "../../../../src/harness/aci/tools/create-worktree.ts";
+import { createListWorktreesTool } from "../../../../src/harness/aci/tools/list-worktrees.ts";
+import { createRemoveWorktreeTool } from "../../../../src/harness/aci/tools/remove-worktree.ts";
 import { WorktreeIsolationError } from "../../../../src/harness/isolation/worktree-gate.ts";
 
 describe("task worktree lifecycle ACI tools", () => {
   it("passes an optional name to provision and reports a discarded invalid name with the actual path", async () => {
     const calls: Array<Record<string, unknown>> = [];
-    const provision: CreateTaskWorktreeProvisionFn = async (ctx) => {
+    const provision: CreateWorktreeProvisionFn = async (ctx) => {
       calls.push(ctx);
       return "/repo/.iknow/worktrees/conv-1";
     };
-    const tool = createCreateTaskWorktreeTool({
+    const tool = createCreateWorktreeTool({
       provision,
       root: "/repo",
     });
@@ -35,7 +35,7 @@ describe("task worktree lifecycle ACI tools", () => {
   });
 
   it("lists worktrees as JSON and preserves the read-only ACI category", async () => {
-    const tool = createListTaskWorktreesTool({
+    const tool = createListWorktreesTool({
       root: "/repo",
       worktreeList: async () => [
         {
@@ -65,7 +65,7 @@ describe("task worktree lifecycle ACI tools", () => {
 
   it("removes by conversationId or label and forwards delete_branch", async () => {
     let received: Record<string, unknown> | undefined;
-    const tool = createRemoveTaskWorktreeTool({
+    const tool = createRemoveWorktreeTool({
       root: "/repo",
       worktreeRemove: async (ctx) => {
         received = ctx;
@@ -95,7 +95,7 @@ describe("task worktree lifecycle ACI tools", () => {
   });
 
   it("maps a typed host failure to an actionable tool error", async () => {
-    const tool = createListTaskWorktreesTool({
+    const tool = createListWorktreesTool({
       root: "/repo",
       worktreeList: async () => {
         throw new ToolExecutionError("git unavailable");
@@ -112,14 +112,14 @@ describe("task worktree lifecycle ACI tools", () => {
 
   it("validates lifecycle options before calling the host seam", async () => {
     let calls = 0;
-    const list = createListTaskWorktreesTool({
+    const list = createListWorktreesTool({
       root: "/repo",
       worktreeList: async () => {
         calls += 1;
         return [];
       },
     });
-    const remove = createRemoveTaskWorktreeTool({
+    const remove = createRemoveWorktreeTool({
       root: "/repo",
       worktreeRemove: async () => {
         calls += 1;
@@ -143,7 +143,7 @@ describe("task worktree lifecycle ACI tools", () => {
   });
 
   it("renders a WorktreeIsolationError with its stable kind", async () => {
-    const tool = createRemoveTaskWorktreeTool({
+    const tool = createRemoveWorktreeTool({
       root: "/repo",
       worktreeRemove: async () => {
         throw new WorktreeIsolationError(
@@ -157,7 +157,7 @@ describe("task worktree lifecycle ACI tools", () => {
       () => tool.handler({ conversationId: "conv-1" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
-        error.message.includes("[remove-task-worktree] kind=worktree_dirty")
+        error.message.includes("[remove-worktree] kind=worktree_dirty")
     );
   });
 });

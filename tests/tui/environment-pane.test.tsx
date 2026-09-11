@@ -31,7 +31,7 @@ import {
   envSnapshotFromEvent,
   envSnapshotLines,
   resolveWorktreeChromeRoot,
-  worktreeIsolationLines,
+  sessionLocationLines,
 } from "../../src/tui/environment-pane.js";
 import { chromeReserveRows } from "../../src/tui/app.js";
 import type { EnvSnapshot } from "../../src/harness/env-snapshot.ts";
@@ -322,78 +322,72 @@ describe("no agent_status in environment-pane: 平行独立流", () => {
 // ADR-0037 T5: session worktree 隔离现势行（只读投影）
 // ---------------------------------------------------------------------------
 
-describe("worktreeIsolationLines: 会话 worktree 隔离现势", () => {
-  test("已绑定 task worktree → 1 行，文案是项目到树的相对路径（不是绝对目录）", () => {
-    const lines = worktreeIsolationLines(
-      "/repo/.iknow/worktrees/conv-1",
-      80,
-      "/repo"
-    );
+describe("sessionLocationLines: 会话位置行常驻（spec D7 / SC6）", () => {
+  test("主仓（未绑树）→ 1 行 `路径 · 分支`；旧「仅 task 树才显示」合同作废", () => {
+    // SC6：主仓 + 非 task 路径仍渲染 1 行 —— 不得 0 行。文案 = 项目根叶子
+    // + 分支（人读 `~/projects/iknow · master` 形态）。
+    const lines = sessionLocationLines({
+      projectRoot: "/home/user/projects/iknow",
+      branch: "master",
+      cols: 80,
+    });
     expect(lines.length).toBe(1);
-    expect(lines[0]!.text).toContain("worktree:");
-    expect(lines[0]!.text).toContain(".iknow/worktrees/conv-1");
-    expect(lines[0]!.text).not.toContain("/repo/.iknow/worktrees/conv-1");
+    expect(lines[0]!.text).toBe("iknow · master");
   });
 
-  test("未传项目根时仍只显示 .iknow/worktrees/<叶>，不写盘符全路径", () => {
-    const lines = worktreeIsolationLines(
-      "/home/user/projects/iknow/.iknow/worktrees/my-label",
-      80
-    );
-    expect(lines[0]!.text).toContain("worktree: .iknow/worktrees/my-label");
-    expect(lines[0]!.text).not.toContain("/home/user");
+  test("分支未知（快照尚未到）→ 仍 1 行，只画路径段（不留悬空分隔符）", () => {
+    // 启动首拍：env_snapshot 还没到 → 位置行不得因此消失（D7「禁止
+    // void envSnapshot 后 0 行」）。
+    for (const branch of [undefined, null, "", "   "]) {
+      const lines = sessionLocationLines({
+        projectRoot: "/home/user/projects/iknow",
+        branch,
+        cols: 80,
+      });
+      expect(lines.length).toBe(1);
+      expect(lines[0]!.text).toBe("iknow");
+      expect(lines[0]!.text.includes("·")).toBe(false);
+    }
   });
 
-  test("项目根下的嵌套仓内树 → 从项目根起的相对路径", () => {
-    const lines = worktreeIsolationLines(
-      "/repo/wt/.iknow/worktrees/conv-2",
-      80,
-      "/repo"
-    );
-    expect(lines[0]!.text).toContain("worktree: wt/.iknow/worktrees/conv-2");
-    expect(lines[0]!.text).not.toContain("/repo/wt");
+  test("绑任务树 → 同一槽换成树上路径（不是多一行、不是从无到有）", () => {
+    const bound = sessionLocationLines({
+      projectRoot: "/repo",
+      worktreeRoot: "/repo/.iknow/worktrees/conv-1",
+      branch: "feat/x",
+      cols: 80,
+    });
+    const unbound = sessionLocationLines({
+      projectRoot: "/repo",
+      branch: "feat/x",
+      cols: 80,
+    });
+    // 两态都恰好 1 行 —— 绑树只换路径。
+    expect(unbound.length).toBe(1);
+    expect(bound.length).toBe(1);
+    expect(bound[0]!.text).toBe("repo/.iknow/worktrees/conv-1 · feat/x");
+    expect(bound[0]!.text).not.toContain("/repo/.iknow/worktrees/conv-1");
   });
 
-  test("未绑定（undefined / null / 空串）→ 0 行（与今日一致，无多余状态）", () => {
-    expect(worktreeIsolationLines(undefined, 80)).toEqual([]);
-    expect(worktreeIsolationLines(null, 80)).toEqual([]);
-    expect(worktreeIsolationLines("", 80)).toEqual([]);
-  });
-
-  test("改绑失败语义：root 仍 undefined → 0 行，绝不渲染「已绑定」", () => {
-    const lines = worktreeIsolationLines(undefined, 80);
-    const joined = lines.map((l) => l.text).join("\n");
-    expect(joined).not.toContain("worktree:");
-  });
-
-  // Review Medium-2 (2026-08-29): 任意非空 workspaceRoot ≠ worktree ——
-  // serve bind 在 createSession 时就把 workspaceRoot 写成主根。显示条件
-  // 锚定 task worktree 语义（`<x>/.iknow/worktrees/<conversationId>` 路径
-  // 判定，复用 session-api taskWorktreeOwnerOf），非 task worktree 根 → 0 行。
-  test("review Medium-2: 主根 / serve 绑定根（非 task worktree 路径）→ 0 行", () => {
-    expect(worktreeIsolationLines("/repo", 80)).toEqual([]);
-    expect(worktreeIsolationLines("/home/user/project", 80)).toEqual([]);
-    // serve bind 写主根的形态：workspaceRoot = 主仓根
-    expect(worktreeIsolationLines("/srv/iknow-main", 80)).toEqual([]);
-  });
-
-  test("review Medium-2: `.iknow` 下但非 worktrees 叶、worktrees 目录本身 → 0 行", () => {
-    expect(worktreeIsolationLines("/repo/.iknow/state.json", 80)).toEqual([]);
-    expect(worktreeIsolationLines("/repo/.iknow/worktrees", 80)).toEqual([]);
-    expect(worktreeIsolationLines("/repo/.iknow/other/conv-1", 80)).toEqual([]);
-  });
-
-  test("review Medium-2: task worktree 路径（含嵌套仓内树）→ 1 行", () => {
-    expect(
-      worktreeIsolationLines("/repo/.iknow/worktrees/conv-1", 80).length
-    ).toBe(1);
-    const nested = "/repo/wt/.iknow/worktrees/conv-2";
-    expect(worktreeIsolationLines(nested, 80).length).toBe(1);
+  test("不带 dirty / diff：未提交计数与 diff 内容不进位置行", () => {
+    const lines = sessionLocationLines({
+      projectRoot: "/repo",
+      branch: "main",
+      cols: 80,
+    });
+    const text = lines[0]!.text;
+    expect(text.includes("clean")).toBe(false);
+    expect(text.includes("未提交")).toBe(false);
+    expect(text.includes("Δ")).toBe(false);
   });
 
   test("行宽受 cols 限制：超长路径按视觉宽度单行截断", () => {
-    const longRoot = `/repo/${"w".repeat(200)}/.iknow/worktrees/conv-1`;
-    const lines = worktreeIsolationLines(longRoot, 40);
+    const longRoot = `/repo/${"w".repeat(200)}`;
+    const lines = sessionLocationLines({
+      projectRoot: longRoot,
+      branch: "master",
+      cols: 40,
+    });
     expect(lines.length).toBe(1);
     const width = [...lines[0]!.text].reduce((acc, ch) => {
       const cp = ch.codePointAt(0)!;
@@ -403,19 +397,67 @@ describe("worktreeIsolationLines: 会话 worktree 隔离现势", () => {
   });
 });
 
+describe("EnvironmentPane: projectRoot 给定 → 常驻位置行（分支取快照）", () => {
+  test("快照在场 → `路径 · 分支`；同一槽只 1 行", async () => {
+    const setup = await testRender(
+      <EnvironmentPane
+        snapshot={makeSnapshot({ cwd: "/repo", gitBranch: "main" })}
+        projectRoot="/repo"
+        cols={80}
+      />,
+      { width: 80, height: 10 }
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("repo · main");
+    await setup.renderer.destroy();
+  });
+
+  test("快照缺席（启动首拍）→ 仍画路径段，不渲染成 0 行", async () => {
+    const setup = await testRender(
+      <EnvironmentPane snapshot={null} projectRoot="/repo" cols={80} />,
+      { width: 80, height: 10 }
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("repo");
+    await setup.renderer.destroy();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // ADR-0037 T5 挂载契约:app.tsx 渲染隔离现势行并入账 envPaneRows 槽位
 // ---------------------------------------------------------------------------
 
-describe("app.tsx worktree 隔离现势挂载契约", () => {
-  test("src/tui/app.tsx 消费 worktreeIsolationLines（chat 视图渲染绑定根）", () => {
+describe("app.tsx 位置行挂载契约（D7 / SC6）", () => {
+  test("src/tui/app.tsx 消费 sessionLocationLines（chat 视图常驻位置行）", () => {
     const src = readFileSync(
       join(import.meta.dir, "..", "..", "src", "tui", "app.tsx"),
       "utf8"
     );
-    expect(src.includes("worktreeIsolationLines")).toBe(true);
+    expect(src.includes("sessionLocationLines")).toBe(true);
     expect(src.includes("resolveWorktreeChromeRoot")).toBe(true);
     expect(src.includes("liveTaskRoot")).toBe(true);
+    // 绑定判定不再决定显隐：旧投影退场。
+    expect(src.includes("worktreeIsolationLines")).toBe(false);
+  });
+
+  test("位置行入账 envPaneRows = 投影行数（常驻 1 行，主仓也算）", () => {
+    const rows = sessionLocationLines({
+      projectRoot: "/repo",
+      branch: "main",
+      cols: 80,
+    }).length;
+    expect(rows).toBe(1);
+    expect(
+      chromeReserveRows({
+        noticeRows: 0,
+        inputHintRows: 0,
+        bgLine: false,
+        inputRows: 1,
+        envPaneRows: rows,
+      })
+    ).toBe(7 + 1);
   });
 });
 

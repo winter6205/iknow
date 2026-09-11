@@ -1,12 +1,12 @@
 /**
  * T10 (plans/worktree-live-task-root.md §6 T10) — the contract phase that
  * closes the original bug: the gate now reads the LIVE `taskRoot` cell
- * instead of the assembly-time-frozen `root`. After `create-task-worktree`
+ * instead of the assembly-time-frozen `root`. After `create-worktree`
  * succeeds inside a run, the same engine's next wave of mutate tool calls
  * lands in the new task worktree.
  *
  * Acceptance (per §6 T10 / D1/D2/D11):
- *   - red → green: 门禁读活根后,「run 内 turn 0 `create-task-worktree` 成功 →
+ *   - red → green: 门禁读活根后,「run 内 turn 0 `create-worktree` 成功 →
  *     同 run 后续 turn 的 mutate 落地到新树」这条从 red 转 green.
  *   - D2 batch 快照 — 同一波 executeAll 内活根翻转不被观察到(整波一个根);
  *     跨波才生效.
@@ -22,7 +22,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  CREATE_TASK_WORKTREE_TOOL_HINT,
+  CREATE_WORKTREE_TOOL_HINT,
   createWorktreeIsolationExecutor,
   WORKTREE_ISOLATION_PREFIX,
 } from "../../../src/harness/isolation/worktree-gate.ts";
@@ -108,7 +108,7 @@ function makeGate(opts: {
 // ============================================================================
 
 describe("T10 — gate reads live taskRoot (red→green of the original bug)", () => {
-  it("after `create-task-worktree` flips the cell, the next wave's mutate lands in the new tree", async () => {
+  it("after `create-worktree` flips the cell, the next wave's mutate lands in the new tree", async () => {
     // T4: live cell initialised at the assembly-time sandboxRoot (main repo).
     const cell = createLiveTaskRoot("/main");
     const { inner, invocations } = fakeInner();
@@ -131,11 +131,11 @@ describe("T10 — gate reads live taskRoot (red→green of the original bug)", (
     expect(
       blocked[0]!.message!.startsWith(`${WORKTREE_ISOLATION_PREFIX} `)
     ).toBe(true);
-    expect(blocked[0]!.message).toContain(CREATE_TASK_WORKTREE_TOOL_HINT);
+    expect(blocked[0]!.message).toContain(CREATE_WORKTREE_TOOL_HINT);
     expect(provisionCalls).toBe(0); // never provisions on the blocked path
     expect(invocations).toHaveLength(0); // inner never reached
 
-    // 2) Model calls `create-task-worktree` in the SAME run. The tool's
+    // 2) Model calls `create-worktree` in the SAME run. The tool's
     //    handler calls `provision` (host seam), which updates the live cell
     //    via withLiveTaskRootWrite (T4 wrap). We simulate that here by
     //    writing the new taskRoot into the cell directly.
@@ -169,7 +169,7 @@ describe("T10 — gate reads live taskRoot (red→green of the original bug)", (
     for (const id of ["m1", "m2", "m3"]) {
       const out = await gate.executeAll([writeCall(id)]);
       expect(out[0]!.kind).toBe("execution_failed");
-      expect(out[0]!.message).toContain(CREATE_TASK_WORKTREE_TOOL_HINT);
+      expect(out[0]!.message).toContain(CREATE_WORKTREE_TOOL_HINT);
     }
     expect(provisionCalls).toBe(0); // never provisions
     expect(invocations).toHaveLength(0); // inner never reached
@@ -181,16 +181,16 @@ describe("T10 — gate reads live taskRoot (red→green of the original bug)", (
 // ============================================================================
 
 describe("T10 — D2 batch snapshot (one wave = one root)", () => {
-  it("a wave that contains both create-task-worktree and a mutate uses the OLD root for the mutate (no half-write to two trees)", async () => {
+  it("a wave that contains both create-worktree and a mutate uses the OLD root for the mutate (no half-write to two trees)", async () => {
     // The wave snapshot is taken at executeAll entry. Even though
-    // create-task-worktree updates the cell mid-wave, the mutate that follows
+    // create-worktree updates the cell mid-wave, the mutate that follows
     // in the same wave is still adjudicated against the old root (D2). This
     // is the "one wave = one root" invariant: a single logical change cannot
     // get split across two trees.
     const cell = createLiveTaskRoot("/main");
 
     // Instrument a fake inner that flips the cell mid-wave when it sees
-    // create-task-worktree. This is the same effect the production handler
+    // create-worktree. This is the same effect the production handler
     // would have via withLiveTaskRootWrite(provision, cell), but we trigger
     // it directly so the test exercises only the gate's snapshot logic.
     const recorded: Array<{ calls: ReadonlyArray<ToolCall> }> = [];
@@ -198,7 +198,7 @@ describe("T10 — D2 batch snapshot (one wave = one root)", () => {
       executeAll: async (batch) => {
         recorded.push({ calls: batch });
         for (const c of batch) {
-          if (c.name === "create-task-worktree") {
+          if (c.name === "create-worktree") {
             writeLiveTaskRoot(cell, WORKTREE_ROOT);
           }
         }
@@ -220,15 +220,15 @@ describe("T10 — D2 batch snapshot (one wave = one root)", () => {
       inner: flippingInner,
     });
 
-    // Wave: [create-task-worktree (classified "read" → bypasses gate,
+    // Wave: [create-worktree (classified "read" → bypasses gate,
     // reaches inner directly), write_file (classified "mutate" → gateMutate)].
     const calls: ToolCall[] = [
-      { id: "ctw", name: "create-task-worktree", input: {} },
+      { id: "ctw", name: "create-worktree", input: {} },
       writeCall("w1"),
     ];
     const out = await gate.executeAll(calls);
 
-    // create-task-worktree goes through (it is classified as "read" by the
+    // create-worktree goes through (it is classified as "read" by the
     // gate, so it reaches inner directly and is allowed even on the main repo).
     expect(out[0]!.kind).toBe("ok");
     // write_file is adjudicated against the OLD snapshot ("/main") and
@@ -236,7 +236,7 @@ describe("T10 — D2 batch snapshot (one wave = one root)", () => {
     // though the cell now reads the new task worktree, the snapshot is
     // already taken and the wave is locked to one root.
     expect(out[1]!.kind).toBe("execution_failed");
-    expect(out[1]!.message).toContain(CREATE_TASK_WORKTREE_TOOL_HINT);
+    expect(out[1]!.message).toContain(CREATE_WORKTREE_TOOL_HINT);
 
     // D2 evidence: the gate did NOT invoke provision — the gate's snapshot
     // was "/main" (not task-worktree-shaped), so the mutate went straight to
@@ -244,7 +244,7 @@ describe("T10 — D2 batch snapshot (one wave = one root)", () => {
     // side effect, but the gate's snapshot already captured the pre-flip
     // value. The rebind takes effect on the NEXT wave.
     expect(provisionCalls).toBe(0);
-    // create-task-worktree reached inner; write_file did NOT.
+    // create-worktree reached inner; write_file did NOT.
     expect(recorded).toHaveLength(1);
     expect(recorded[0]!.calls[0]!.id).toBe("ctw");
   });
@@ -293,7 +293,7 @@ describe("T10 — D11 invariant (gate adjudication root == consumer handler root
     // executeAll is sequential within a single wave (the gate awaits each
     // inner call before iterating to the next), there is no opportunity for
     // a mid-wave flip — the only tool that flips the cell is
-    // create-task-worktree, and when it appears with a mutate in the same
+    // create-worktree, and when it appears with a mutate in the same
     // wave the gate's snapshot is the OLD root (D2), so the consumer also
     // sees the OLD root from its call-time read (no flip happened yet).
     const cell = createLiveTaskRoot("/main");
@@ -347,7 +347,7 @@ describe("T10 — D11 invariant (gate adjudication root == consumer handler root
  * the mutate is blocked and must be re-issued in the next wave.
  */
 describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutates are blocked", () => {
-  /** Inner executor mirroring production: an enter/exit-task-worktree call
+  /** Inner executor mirroring production: an enter/exit-worktree call
    * reaches inner (lifecycle tools are not workspace mutates), and its
    * handler resolves the wrapped host seam, which flips the live cell. */
   function flippingRootInner(cell: LiveTaskRoot, flipTo: string): {
@@ -359,7 +359,7 @@ describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutate
       executeAll: async (batch) => {
         for (const c of batch) {
           reached.push(c.id);
-          if (c.name === "exit-task-worktree" || c.name === "enter-task-worktree") {
+          if (c.name === "exit-worktree" || c.name === "enter-worktree") {
             writeLiveTaskRoot(cell, flipTo);
           }
         }
@@ -373,7 +373,7 @@ describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutate
     return { inner, reached };
   }
 
-  it("[exit-task-worktree, write_file] same wave: write_file is blocked (never written to the flipped main-repo root)", async () => {
+  it("[exit-worktree, write_file] same wave: write_file is blocked (never written to the flipped main-repo root)", async () => {
     // Session bound on its task worktree; the wave starts with the cell at
     // WORKTREE_ROOT (that is the gate's snapshot) and the exit handler flips
     // it to the main repo mid-wave.
@@ -386,7 +386,7 @@ describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutate
     });
 
     const out = await gate.executeAll([
-      { id: "exit-1", name: "exit-task-worktree", input: {} },
+      { id: "exit-1", name: "exit-worktree", input: {} },
       writeCall("w1"),
     ]);
 
@@ -402,7 +402,7 @@ describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutate
     expect(reached).toEqual(["exit-1"]);
   });
 
-  it("[enter-task-worktree, write_file] same wave: write_file is blocked (never written to the entered foreign tree)", async () => {
+  it("[enter-worktree, write_file] same wave: write_file is blocked (never written to the entered foreign tree)", async () => {
     // Session bound on its own tree; enter adopts another conversation's
     // tree mid-wave (the wrapped enter seam flips the cell to OTHER_TREE).
     const cell = createLiveTaskRoot(WORKTREE_ROOT);
@@ -416,7 +416,7 @@ describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutate
     const out = await gate.executeAll([
       {
         id: "enter-1",
-        name: "enter-task-worktree",
+        name: "enter-worktree",
         input: { conversationId: "conv-2" },
       },
       writeCall("w1"),
@@ -430,7 +430,7 @@ describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutate
   });
 
   it("a mutate BEFORE the root-flip call in the same wave is still adjudicated on the wave snapshot (ordering preserved)", async () => {
-    // [write_file, exit-task-worktree]: the mutate executes first against the
+    // [write_file, exit-worktree]: the mutate executes first against the
     // wave-entry snapshot (== the cell value at its call time), then the exit
     // flips. No window — the pre-flip adjudication matches the pre-flip write.
     const cell = createLiveTaskRoot(WORKTREE_ROOT);
@@ -441,7 +441,7 @@ describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutate
       inner,
     });
 
-    const out = await gate.executeAll([writeCall("w1"), { id: "exit-1", name: "exit-task-worktree", input: {} }]);
+    const out = await gate.executeAll([writeCall("w1"), { id: "exit-1", name: "exit-worktree", input: {} }]);
 
     expect(out[0]!.kind).toBe("ok");
     expect(out[1]!.kind).toBe("ok");
@@ -458,7 +458,7 @@ describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutate
     });
 
     const out = await gate.executeAll([
-      { id: "exit-1", name: "exit-task-worktree", input: {} },
+      { id: "exit-1", name: "exit-worktree", input: {} },
       { id: "r1", name: "read_file", input: { path: "a.txt" } },
     ]);
 

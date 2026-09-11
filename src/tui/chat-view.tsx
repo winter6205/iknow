@@ -233,7 +233,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     const pal = tuiPalette;
     // thinkingMs 与 session.messages 一一对应。visible 列表会丢掉
     // agent_status / drain 等隐藏 user 消息，下标比盘上短。所有
-    // thinkingMs 查找必须映射回 sourceIndex，否则「思考了 N 秒」读到
+    // thinkingMs 查找必须映射回 sourceIndex，否则 `Thought for` 读到
     // null 槽，折叠行消失，hideThinking 又把消息框里的摘要掐掉。
     const visibleEntries = useMemo(
       () =>
@@ -341,12 +341,12 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       turnToolTotal,
     });
     // CONTEXT.md unit fold(2026-09-08 操作员纠正):一段思考完成 → 在该段
-    // 原位折一行「思考了 N 秒」→ 随后正文或工具;同一用户任务里下一段思考
+    // 原位折一行 `Thought for <N>s`（含计数）→ 随后正文或工具;同一用户任务里下一段思考
     // 再折一行。秒数来自对应 assistant 消息自己的 thinkingMs(per-message
     // 并行数组),不跨段归并、不把 final 秒数贴到前段/末位工具簇。
     // 旧「整轮收敛」(consumedThinkingMessageIndices 整回合吞秒 +
     // finalThinkingMs 末位簇 fallback)是对合同的误读,整体删除。
-    // 已画出「思考了 N 秒」的 assistant messageIndex 集合 —— 同一消息内的
+    // 已画出 `Thought for` 折叠行的 assistant messageIndex 集合 —— 同一消息内的
     // 多个 tools 簇(tool → text → tool)共享 thinkingMs,后续簇按 0 计,
     // 同一消息内不重复画;不同 assistant 消息之间不互相吞,各画各的。
     const drawnThinkingForMessageIndex = new Set<number>();
@@ -357,6 +357,9 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     // 已完成单元判定。空 entries + 0 秒数 → `formatTurnActivityFold` 返
     // 空数组,segMap 跳过写入,渲染层 fold 行天然不出。
     const foldLinesBySegmentIndex = new Map<number, ReadonlyArray<string>>();
+    // 已画出的折叠行时长（ms），按派生值登记而非事后解析显示文案 ——
+    // `unit fold` 时长与计数同处一行，正则反推会在格式变化时静默失效。
+    const shownThinkingMsValues = new Set<number>();
     {
       const toolSegments = activitySegments.flatMap((segment, segmentIndex) =>
         segment.kind === "tools" ? [{ segment, segmentIndex }] : []
@@ -403,10 +406,11 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         const lines = formatTurnActivityFold(clusterSeconds, entries);
         if (lines.length > 0) {
           foldLinesBySegmentIndex.set(segmentIndex, lines);
-          // 簇实际用上秒数(>0)才登记本消息已画 —— 0 秒簇不会画
-          // 「思考了 N 秒」,不占同消息去重的位置。
+          // 簇实际用上秒数(>0)才登记本消息已画 —— 0 秒簇不会画时长段,
+          // 不占同消息去重的位置。同时登记已展示的 ms 值(hideThinking 用)。
           if (clusterSeconds > 0) {
             drawnThinkingForMessageIndex.add(segment.messageIndex);
+            shownThinkingMsValues.add(clusterMs);
           }
         }
       }
@@ -446,6 +450,9 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             );
             if (lines.length > 0) {
               foldLinesBySegmentIndex.set(lastText.segmentIndex, lines);
+              if (clusterSeconds > 0) {
+                shownThinkingMsValues.add(clusterMs);
+              }
             }
           }
         }
@@ -465,37 +472,21 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           seg.messageIndex >= lastQueryVisible
         );
       });
-    // 当前 turn 是否已有带思考秒数的折叠行:有 → live thinking 面板让位
-    // (折叠行已替代「思考了 N 秒」表面);无 → 面板保留。旧判定
-    // `finalThinkingMs > 0` 是整轮收敛残留,改按当前 turn fold 行实际内容。
+    // 当前 turn 是否已有带时长的折叠行:有 → live thinking 面板让位
+    // (折叠行已替代结束态时长表面);无 → 面板保留。判定按派生值
+    // `drawnThinkingForMessageIndex`(只登记真正画出时长段的簇),不解析
+    // 显示文案 —— 文案格式变化不再静默影响面板让位。
     const currentTurnHasThinkingFold =
       lastQueryVisible >= 0 &&
-      Array.from(foldLinesBySegmentIndex.entries()).some(
-        ([segmentIndex, lines]) => {
-          const seg = activitySegments[segmentIndex];
-          if (seg === undefined || seg.kind !== "tools") return false;
-          if (seg.messageIndex < lastQueryVisible) return false;
-          return lines.some((line) => line.includes("思考了 "));
-        }
-      );
-    // thinking-fold-placement:折叠行已展示的 thinkingMs 值集合（ms）—— 按
-    // 折叠行文案 `思考了 N 秒` 反推;per-message ThinkingSummary 仅在该值
-    // 未被任何 fold 行覆盖时显示,避免重复 / 串位（fold 行 0-多次）。
-    const shownThinkingMsValues = new Set<number>();
-    {
-      const re = /思考了\s+(\d+)\s+秒/;
-      for (const lines of foldLinesBySegmentIndex.values()) {
-        for (const line of lines) {
-          const m = re.exec(line);
-          if (m !== null) {
-            const seconds = Number(m[1]);
-            if (Number.isFinite(seconds) && seconds > 0) {
-              shownThinkingMsValues.add(seconds * 1000);
-            }
-          }
-        }
-      }
-    }
+      Array.from(foldLinesBySegmentIndex.keys()).some((segmentIndex) => {
+        const seg = activitySegments[segmentIndex];
+        return (
+          seg !== undefined &&
+          seg.kind === "tools" &&
+          seg.messageIndex >= lastQueryVisible &&
+          drawnThinkingForMessageIndex.has(seg.messageIndex)
+        );
+      });
     // Keep the tail-collapse decision based on the fold that would be shown,
     // not on whether an historical message supplied an insertion point.
     const foldDisplayLines = showTurnFold
@@ -537,7 +528,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         ),
       deferredSegments
     );
-    // #693 T1 D1：折叠行（思考了 N 秒 / bash × N）统一套壳，与
+    // #693 T1 D1：折叠行（Thought for <N>s · bash × N，单行）统一套壳，与
     // assistant 外壳共用 MessageShell —— 消除「折叠行裸挂左移一列」的
     // 不一致（spec D1）。壳内文本 wrapMode="none" 强制单行不折。
     const renderFoldLines = (segmentIndex: number, keyPrefix: string) => {
@@ -639,7 +630,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           const visibleIndex = mountWindow.startIndex + i;
           // D3 (tui-display-consistency):`thinkingMs` 来自落盘数据(挂在
           // session.thinkingMs 上,与 messages 一一对应);无 thinkingMs →
-          // undefined → `MessageBlocks` 不显示「思考了 N 秒」折叠行。
+          // undefined → `MessageBlocks` 不显示 `Thought for` 折叠行。
           const messageThinkingMs = thinkingMsAtVisible(visibleIndex);
           const messageThinkingSeconds = thinkingMsToSeconds(messageThinkingMs);
           const messageSegments = activitySegments
@@ -653,7 +644,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             );
           // D3:`inLastTurn` 闸已删除。任何已完成工具轮次都折叠（包含历史轮次）。
           // hideThinking 改为按 thinkingMs 是否已被 fold 行吸收：
-          // thinking-fold-placement —— 折叠行已替代「思考了 N 秒」摘要时
+          // thinking-fold-placement —— 折叠行已替代 `Thought for` 摘要时
           // 才隐藏 per-message ThinkingSummary,避免重复;若本消息的
           // thinkingMs 值未被任何 fold 行覆盖,仍保留 per-message 摘要
           // (测试 2:asst-1 的 12s 与 final 的 25s 各自唯一展示)。

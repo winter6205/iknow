@@ -16,8 +16,8 @@
  */
 import type { ReactNode } from "react";
 import {
-  previewOverflowLabel,
   resultPreviewOverflowLabel,
+  writePreviewOverflowLabel,
   type CompletedToolPreview,
   type ResultPreview,
 } from "./tool-summary.js";
@@ -26,9 +26,9 @@ import { CodeBlock } from "./markdown.js";
 import { tuiPalette } from "./theme.js";
 
 /** 工具结果预览的前缀（spec D4 dim 装饰行）。TUI 一致性：装饰前缀用
- *  纯 ASCII `>`（稳定不回退）；与 `[运行中]` / `[完成]` / `[失败]` /
- *  `▣|✓|✗` 工具卡字形是不同族 —— 工具卡走几何字形表状态，preview 行
- *  走 ASCII 前缀表「这是 stdout/stderr 的尾窗」。 */
+ *  纯 ASCII `>`（稳定不回退）；与 `[失败]` / 工具卡 `▣|✓|✗` 字形是不同族
+ *  —— 工具卡走几何字形表状态，preview 行走 ASCII 前缀表「这是
+ *  stdout/stderr 的尾窗」。 */
 const RESULT_PREVIEW_PREFIX = ">";
 
 /** 结果预览行（带前缀），供行账（liveToolPreviewRows）与渲染同源。 */
@@ -44,23 +44,26 @@ export function resultPreviewTextLines(preview: ResultPreview): string[] {
   return out;
 }
 
-/** 完成态预览的纯文本行（行账 / live text lines 与 JSX 同源）。 */
+/** 完成态预览的纯文本行（行账 / live text lines 与 JSX 同源）。
+ *  挤档（D5）无正文行 —— 标题行由调用方拼装（`squeezeWriteSummary`）。 */
 export function completedToolPreviewTextLines(
   preview: CompletedToolPreview,
   cols: number
 ): string[] {
-  if (preview.kind === "empty") return [];
+  if (preview.kind === "empty" || preview.kind === "squeeze") return [];
   const lines =
     preview.kind === "code"
       ? [...preview.lines]
       : diffRowTexts(preview.rows, cols);
   if (preview.hiddenLineCount > 0) {
-    lines.push(previewOverflowLabel(preview.hiddenLineCount));
+    lines.push(writePreviewOverflowLabel(preview.hiddenLineCount));
   }
   return lines;
 }
 
-/** 完成态 write/edit 预览节点：代码行或截断 DiffView，加可选溢出行。 */
+/** 完成态 write/edit 预览节点：代码行（新建 10 行 + `+N more lines`）或
+ *  本次改动 DiffView（不截断）。挤档（D5）由调用方走 `squeezeWriteSummary`
+ *  的标题行，本节点不渲染。 */
 export function CompletedToolPreviewView(props: {
   readonly preview: CompletedToolPreview;
   readonly cols: number;
@@ -69,14 +72,15 @@ export function CompletedToolPreviewView(props: {
 }): ReactNode {
   const { preview, cols, resultPreview } = props;
   if (
-    preview.kind === "empty" &&
+    (preview.kind === "empty" || preview.kind === "squeeze") &&
     (resultPreview === undefined || resultPreview.kind === "empty")
   ) {
     return null;
   }
   const overflow =
-    preview.kind !== "empty" && preview.hiddenLineCount > 0
-      ? previewOverflowLabel(preview.hiddenLineCount)
+    (preview.kind === "code" || preview.kind === "diff") &&
+    preview.hiddenLineCount > 0
+      ? writePreviewOverflowLabel(preview.hiddenLineCount)
       : null;
   const resultOverflow =
     resultPreview !== undefined &&
@@ -88,6 +92,10 @@ export function CompletedToolPreviewView(props: {
     <>
       {preview.kind === "code" ? (
         <CodeBlock lang="" lines={preview.lines} />
+      ) : preview.kind === "squeeze" ? (
+        <text fg={tuiPalette.dim} wrapMode="none">
+          {preview.line}
+        </text>
       ) : (
         preview.kind === "diff" &&
         preview.rows.length > 0 && <DiffView rows={preview.rows} cols={cols} />

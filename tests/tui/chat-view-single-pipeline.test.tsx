@@ -256,9 +256,10 @@ test("T3 running：bash 还在 running（liveToolRuns）→ history 与 live 同
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // running 标题在 tail(历史无该 tool_use)→ 1 次。
-  expect(frame).toContain("[运行中] bash");
-  expect(countOccurrences(frame, "[运行中] bash")).toBe(1);
+  // running 标题在 tail(历史无该 tool_use)→ 1 次。spec D1：过程行
+  // `Running 1 shell command… · <命令>`，无 `[运行中]`。
+  expect(frame).toContain("Running 1 shell command… · pwd");
+  expect(countOccurrences(frame, "Running 1 shell command…")).toBe(1);
   await setup.renderer.destroy();
 });
 

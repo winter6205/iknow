@@ -35,7 +35,8 @@
 - `tui-transcript-viewport.md` — ChatView 视口挂载（取代 PR #592 固定条数尾窗；滚动文档全量，树上只挂视口+overscan）
 - `tui-markdown-stream-display.md` — markdown 围栏显示窗（32 行）+ 流式顶层块冻结；不改 session、不是消息条数尾窗
 - `tui-run-graph-view.md` — `run_graph` 执行中 chrome 一行 + 语义分组视图（map #749；原型 #751）；plan: `plans/tui-run-graph-view.md`
-- `tui-tool-settled-appearance.md` — 工具落定态（留 / 收 / 点名着色 + 失败横切 + `deriveSlot`）；**supersedes** `tui-display-consistency` D3；plan: `plans/tui-tool-settled-appearance.md`
+- `tui-tool-settled-appearance.md` — 工具落定态（留 / 收 / 点名着色 + 失败横切 + `deriveSlot`）；**supersedes** `tui-display-consistency` D3；plan: `plans/tui-tool-settled-appearance.md`；写/改 6 行与 `[运行中]` 过程文案 **amended by** `tui-human-display.md`；显示注册表工具名 **amended by** `create-worktree-tools.md`（ADR-0082）
+- `tui-human-display.md` — 过程标题 / 收类不得蒸发 / 新建 10 行 / 编辑 diff / 进度覆盖 / 位置常驻 / 滤 `<graph_mode>`；plan: `plans/tui-human-display.md`
 - `tui-display-consistency.md` — 外壳统一 / thinkingMs / 结果预览窗（D4 ANSI·五行走·read 无内容预览）；**D3 折叠合同已让位** 给 `tui-tool-settled-appearance.md`
 
 ### 工具与扩展源
@@ -51,9 +52,10 @@
 - `disclosure-index-align.md` — 索引档对齐（#631 短描述收回、直呼加载、超限降档、删 `skill_search`）；amends ADR-0043 必经 `tool_search` 读法；plan: `plans/disclosure-index-align.md`
 - `406-secret-roundtrip-mask.md` — Secret roundtrip mask（supersedes `#126` hook-system）
 - `user-hook-router.md` — 用户钩子同进程 router（内置/用户钩子；V1 声明式 PreToolUse/PreWrite/PreCommit；plan: `plans/user-hook-router.md`）；不替代 #126 契约或 #406 roundtrip
-- `task-worktree-lifecycle.md` — 隔离 ON 后进树/命名/list/remove 与身份根 grep·glob；plan: `plans/task-worktree-lifecycle.md`（amend ADR-0037 §3）；门禁分类与 unbound 文案 **amended by** `casual-ask-context-hygiene.md`
-- `write-situation-disclosure.md` — 写处境三态告知（告知面说「此刻能不能写」/ 回执说「下一步做什么」）+ `unboundMutateNotice` 语义恢复 + 建树失败可恢复性分类（ADR-0069；承接 PR #947 / `mutate-write-contract.md` 的后续面，Changes 不重叠；**amends** `casual-ask-context-hygiene.md` SC7 与 `skill-load-write-root.md` 合同 6/SC6；告知面去掉 skill trailer **amended by** `skill-body-short-circuit.md` / ADR-0079）
-- `worktree-exclusive-lock.md` — worktree 占用锁可选档位 `isolation.worktreeExclusive`（默认 OFF · 占用 = 现存会话记录的 `workspaceRoot` · 零新状态 · 模型侧无 force；ADR-0070；**依赖** `write-situation-disclosure.md` 的可恢复性表）
+- `task-worktree-lifecycle.md` — 隔离 ON 后进树/命名/list/remove 与身份根 grep·glob；plan: `plans/task-worktree-lifecycle.md`（amend ADR-0037 §3）；门禁分类与 unbound 文案 **amended by** `casual-ask-context-hygiene.md`；模型面工具名 **amended by** `create-worktree-tools.md`
+- `create-worktree-tools.md` — 模型面五件注册名去 `-task`（`create-worktree` 一族）+ description 去政策 + 建树/列出首工具黄金夹具；plan: `plans/create-worktree-tools.md`（ADR-0082）
+- `write-situation-disclosure.md` — 写处境三态告知（告知面说「此刻能不能写」/ 回执说「下一步做什么」）+ `unboundMutateNotice` 语义恢复 + 建树失败可恢复性分类（ADR-0069；承接 PR #947 / `mutate-write-contract.md` 的后续面，Changes 不重叠；**amends** `casual-ask-context-hygiene.md` SC7 与 `skill-load-write-root.md` 合同 6/SC6；告知面去掉 skill trailer **amended by** `skill-body-short-circuit.md` / ADR-0079；回执点名的工具名 **amended by** `create-worktree-tools.md`（ADR-0082））
+- `worktree-exclusive-lock.md` — worktree 占用锁可选档位 `isolation.worktreeExclusive`（默认 OFF · 占用 = 现存会话记录的 `workspaceRoot` · 零新状态 · 模型侧无 force；ADR-0070；**依赖** `write-situation-disclosure.md` 的可恢复性表；工具名 **amended by** `create-worktree-tools.md`（ADR-0082））
 
 ### 身份与记忆
 
@@ -63,7 +65,7 @@
 - `memory-layer-follow-ups.md` — recall 过滤 disabled · type 封闭枚举 · 用户级 AGENTS 与 user.md 同根（叠项目 AGENTS）；plan: `plans/memory-layer-follow-ups.md`（#729–#732）
 - `auto-memory-complete-upgrade.md` — CJK 近邻切分 · dream 离线合并 · §2.5 Medium（per-root 钩子 / 共用 notify）；plan: `plans/auto-memory-complete-upgrade.md`（文档轨，无 tracker issue）
 - `auto-memory-low-trust-read.md` — 目录进 system · 预取进用户消息 · 低信任英文标注（第三次读路径改进；底 = 完整升级 + dream 双闸）；plan: `plans/auto-memory-low-trust-read.md`；指针/纪律句/recall 默认条数 **amended by** `casual-ask-context-hygiene.md`
-- `casual-ask-context-hygiene.md` — 记忆读通道停下令 + worktree 门禁按「会不会写工作区」分类与错误文本（地图 G1–G4）；plan: `plans/casual-ask-context-hygiene.md`；promote 进 system **amended by** `promote-bodies-never-enter-system.md`；SC7 反引导半句 **amended by** `write-situation-disclosure.md`（ADR-0069：撤销「不把下一拍收成去建树」，子串禁令与「不按问句分型」保留，验收升级为语义断言）
+- `casual-ask-context-hygiene.md` — 记忆读通道停下令 + worktree 门禁按「会不会写工作区」分类与错误文本（地图 G1–G4）；plan: `plans/casual-ask-context-hygiene.md`；promote 进 system **amended by** `promote-bodies-never-enter-system.md`；SC7 反引导半句 **amended by** `write-situation-disclosure.md`（ADR-0069：撤销「不把下一拍收成去建树」，子串禁令与「不按问句分型」保留，验收升级为语义断言）；回执命名工具 `create-task-worktree` → `create-worktree` **amended by** `create-worktree-tools.md`（ADR-0082）
 - `auto-memory-extract-discipline.md` — 抽取对照说明书丢弃 · 不记仓库可推（prompt）· 本轮 save 跳过 extract；plan: `plans/auto-memory-extract-discipline.md`
 - `auto-memory-layering.md` — 抽取收窄 · 梦境 `replaces` 落盘 · `dream.json` · 软禁归档；promote 进 system **superseded by** `promote-bodies-never-enter-system.md`；plan: `plans/auto-memory-layering.md`
 - `promote-bodies-never-enter-system.md` — 记忆正文不再进 system；promote 资格只给 GC；预取不按资格排除（ADR-0044）；plan: `plans/promote-bodies-never-enter-system.md`

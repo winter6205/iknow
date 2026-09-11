@@ -8,23 +8,23 @@
  *     抛 `WorktreeIsolationError` 时，detail 必须**只**指向一个模型可执行的
  *     下一步（不再说 "resolve … manually"——模型手里没有 manual 工具）。
  *   - `worktree_exists` 按 `taskWorktreeOwnerOf(worktreePath)` 分三臂：
- *       owner === 本会话 → 点名 `enter-task-worktree`；
- *       owner !== 本会话 → 点名 `enter-task-worktree`（显式接手）或换 label；
- *       owner 读不出（无 sidecar / 历史树 / 旁路） → 点名 `list-task-worktrees`。
+ *       owner === 本会话 → 点名 `enter-worktree`；
+ *       owner !== 本会话 → 点名 `enter-worktree`（显式接手）或换 label；
+ *       owner 读不出（无 sidecar / 历史树 / 旁路） → 点名 `list-worktrees`。
  *   - `branch_exists` 按目标目录**是否存在**分两子况：
  *       目录存在 → 与 `worktree_exists` 同形（按归属分三臂）；
  *       目录不存在 → 指引换 label 或请操作员删分支，且**不含**
- *       `enter-task-worktree`（enter 必撞 `worktree_not_found`）。
+ *       `enter-worktree`（enter 必撞 `worktree_not_found`）。
  *   - sidecar 读 I/O 故障（非 ENOENT）退化到「owner 读不出」臂，**不 throw**
  *     （`taskWorktreeOwnerOf` 已有此保证；测试钉住）。
  *
  * 测试矩阵（输入五类 B 表）：
- *   - empty：sidecar 缺席 / 内容为空 / 不可读 → 退化到「list-task-worktrees」
+ *   - empty：sidecar 缺席 / 内容为空 / 不可读 → 退化到「list-worktrees」
  *     臂；detail **不含**「manually」、不含「operator」（这是 model 路径，不是
  *     operator_required 路径；operator_required 停止指令由 T7 的
  *     `gateBlockNotice` 另行附加）。
  *   - negative：`branch_exists` 且目标目录**不存在** → detail **不含**
- *     `enter-task-worktree`。
+ *     `enter-worktree`。
  *   - exception：sidecar 读失败（非 ENOENT I/O）→ 退化、不 throw。
  *   - overflow：极长 path / 多 owner 候选 / 旁路路径形态 → 仍走对应的归属臂。
  */
@@ -74,7 +74,7 @@ afterAll(() => {
 // -- worktree_exists 三臂 ----------------------------------------------------
 
 describe("T8 — worktree_exists detail 三臂（按 taskWorktreeOwnerOf 归属）", () => {
-  it("owner === 本会话 → detail 点名 enter-task-worktree，不说 'manually'", async () => {
+  it("owner === 本会话 → detail 点名 enter-worktree，不说 'manually'", async () => {
     const repo = makeGitRepo();
     const convId = "conv-own";
     const worktreePath = taskWorktreePath(repo, convId, "own-label");
@@ -99,14 +99,14 @@ describe("T8 — worktree_exists detail 三臂（按 taskWorktreeOwnerOf 归属�
     }
     expect(err).toBeInstanceOf(WorktreeIsolationError);
     expect(err!.kind).toBe("worktree_exists");
-    expect(err!.detail).toContain("enter-task-worktree");
+    expect(err!.detail).toContain("enter-worktree");
     // 不引诱「手工解决」——模型手里没有 manual 工具
     expect(err!.detail).not.toContain("manually");
     // 归属臂细节：owner === 本会话，不强调「换 label」
     expect(err!.detail).toContain(convId);
   });
 
-  it("owner !== 本会话（别的会话建过） → detail 点名 enter-task-worktree + 换 label 二选一", async () => {
+  it("owner !== 本会话（别的会话建过） → detail 点名 enter-worktree + 换 label 二选一", async () => {
     const repo = makeGitRepo();
     const otherConv = "conv-other";
     const worktreePath = taskWorktreePath(repo, otherConv, "shared-label");
@@ -133,13 +133,13 @@ describe("T8 — worktree_exists detail 三臂（按 taskWorktreeOwnerOf 归属�
     }
     expect(err).toBeInstanceOf(WorktreeIsolationError);
     expect(err!.kind).toBe("worktree_exists");
-    // 两条出路：enter-task-worktree（显式接手）+ 换 label
-    expect(err!.detail).toContain("enter-task-worktree");
+    // 两条出路：enter-worktree（显式接手）+ 换 label
+    expect(err!.detail).toContain("enter-worktree");
     expect(err!.detail).toMatch(/label/);
     expect(err!.detail).toContain(otherConv);
   });
 
-  it("owner 读不出（旁路目录、无 .git） → detail 点名 list-task-worktrees", async () => {
+  it("owner 读不出（旁路目录、无 .git） → detail 点名 list-worktrees", async () => {
     const repo = makeGitRepo();
     // 在工作树路径下放一个「像 worktree 但不是 git 工作树」的目录——has shape
     // (<repo>/.iknow/worktrees/<leaf>) but no .git pointer inside. owner inversion
@@ -160,13 +160,13 @@ describe("T8 — worktree_exists detail 三臂（按 taskWorktreeOwnerOf 归属�
     }
     expect(err).toBeInstanceOf(WorktreeIsolationError);
     expect(err!.kind).toBe("worktree_exists");
-    // 退化臂：唯一的可执行出路是 list-task-worktrees
-    expect(err!.detail).toContain("list-task-worktrees");
+    // 退化臂：唯一的可执行出路是 list-worktrees
+    expect(err!.detail).toContain("list-worktrees");
     // 不说 manually，不引诱换 label（不知道是不是被别的会话占着）
     expect(err!.detail).not.toContain("manually");
   });
 
-  it("sidecar I/O 故障（非 ENOENT，例如权限拒绝） → 退化到 list-task-worktrees，不 throw", async () => {
+  it("sidecar I/O 故障（非 ENOENT，例如权限拒绝） → 退化到 list-worktrees，不 throw", async () => {
     const repo = makeGitRepo();
     const convId = "conv-io-fail";
     const worktreePath = taskWorktreePath(repo, convId, "iofail-label");
@@ -210,16 +210,16 @@ describe("T8 — worktree_exists detail 三臂（按 taskWorktreeOwnerOf 归属�
     // taskWorktreeOwnerOf 走 sidecar + leaf 分支：sidecar 缺席则走 historical
     // `<slug>--<conversationId>` 形式判定——leaf 是 iofail-label，不是
     // iofail-label--xxx，所以最终返回 undefined（owner 读不出）。
-    expect(err!.detail).toContain("list-task-worktrees");
+    expect(err!.detail).toContain("list-worktrees");
   });
 });
 
 // -- branch_exists 两子况 -----------------------------------------------------
 
 describe("T8 — branch_exists detail 两子况（按目标目录是否存在）", () => {
-  // 建树后删目录留分支——remove-task-worktree 默认不删分支的真实残留路径。
-  // 目录不存在 → 不点名 enter-task-worktree。
-  it("branch 残留（目录已删）→ 不点名 enter-task-worktree，指引换 label 或删分支", async () => {
+  // 建树后删目录留分支——remove-worktree 默认不删分支的真实残留路径。
+  // 目录不存在 → 不点名 enter-worktree。
+  it("branch 残留（目录已删）→ 不点名 enter-worktree，指引换 label 或删分支", async () => {
     const repo = makeGitRepo();
     const convId = "conv-branch-exists";
     const worktreePath = taskWorktreePath(repo, convId, "branch-exists-label");
@@ -229,7 +229,7 @@ describe("T8 — branch_exists detail 两子况（按目标目录是否存在）
       branch: taskWorktreeBranch(convId, "branch-exists-label"),
       conversationId: convId,
     });
-    // 把 worktree 删掉但保留 branch —— 模拟 remove-task-worktree 默认不删分支
+    // 把 worktree 删掉但保留 branch —— 模拟 remove-worktree 默认不删分支
     execFileSync("git", ["worktree", "remove", "--force", worktreePath], {
       cwd: repo,
       encoding: "utf8",
@@ -252,15 +252,15 @@ describe("T8 — branch_exists detail 两子况（按目标目录是否存在）
     // 当前实现先检 branch 再检 worktree——目录不存在则 branch_exists 在前。
     expect(branchErr).toBeInstanceOf(WorktreeIsolationError);
     expect(branchErr!.kind).toBe("branch_exists");
-    // 目录不存在 → detail **不含** enter-task-worktree（enter 必撞
+    // 目录不存在 → detail **不含** enter-worktree（enter 必撞
     // worktree_not_found，照抄会造第二次空转）
-    expect(branchErr!.detail).not.toContain("enter-task-worktree");
+    expect(branchErr!.detail).not.toContain("enter-worktree");
     // 指引换 label 或请操作员删分支
     expect(branchErr!.detail).toMatch(/label|operator/i);
     expect(branchErr!.detail).not.toContain("manually");
   });
 
-  it("目标目录不存在 + branch 残留 → 不点名 enter-task-worktree，指引换 label 或删分支", async () => {
+  it("目标目录不存在 + branch 残留 → 不点名 enter-worktree，指引换 label 或删分支", async () => {
     const repo = makeGitRepo();
     const convId = "conv-orphan-branch";
     const worktreePath = taskWorktreePath(repo, convId, "orphan-label");
@@ -287,13 +287,13 @@ describe("T8 — branch_exists detail 两子况（按目标目录是否存在）
     expect(err).toBeInstanceOf(WorktreeIsolationError);
     expect(err!.kind).toBe("branch_exists");
     // 目录不存在（worktreePath 未被建过）→ 不走 enter 路径
-    expect(err!.detail).not.toContain("enter-task-worktree");
+    expect(err!.detail).not.toContain("enter-worktree");
     // 指引换 label 或请操作员删分支
     expect(err!.detail).toMatch(/label|operator/i);
     expect(err!.detail).not.toContain("manually");
   });
 
-  it("目标目录存在 + branch 残留 → 与 worktree_exists 同形（点 enter-task-worktree）", async () => {
+  it("目标目录存在 + branch 残留 → 与 worktree_exists 同形（点 enter-worktree）", async () => {
     const repo = makeGitRepo();
     const convId = "conv-branch-with-dir";
     const worktreePath = taskWorktreePath(repo, convId, "both-present-label");
@@ -322,12 +322,12 @@ describe("T8 — branch_exists detail 两子况（按目标目录是否存在）
     // 实现顺序：先 branch probe，再 existsSync 检查。
     expect(err).toBeInstanceOf(WorktreeIsolationError);
     expect(err!.kind).toBe("branch_exists");
-    // 目录存在 → 走 worktree_exists 同形指引：list-task-worktrees（旁路目录，
-    // 没有 .git 指针 → owner 读不出）或 enter-task-worktree（若 owner 反演
+    // 目录存在 → 走 worktree_exists 同形指引：list-worktrees（旁路目录，
+    // 没有 .git 指针 → owner 读不出）或 enter-worktree（若 owner 反演
     // 成功）。此处 .git 指针存在但 sidecar 缺席，owner 走 leaf 形态判定：
     // leaf = both-present-x 是合法 label 且 != convId，所以 taskWorktreeOwnerOf
     // 返回 undefined（因为 leaf 不是 `<slug>--<convId>` 形态）→ 退化臂。
-    expect(err!.detail).toMatch(/list-task-worktrees|enter-task-worktree/);
+    expect(err!.detail).toMatch(/list-worktrees|enter-worktree/);
     expect(err!.detail).not.toContain("manually");
   });
 });
@@ -378,8 +378,8 @@ describe("T8 — 共同不变式（detail 文案唯一性、字面约定）", ()
       () => undefined,
       (e: unknown) => e as WorktreeIsolationError
     );
-    // 「resolve」一字不再单独成指令；要么 enter-task-worktree，要么换 label，
-    // 要么 list-task-worktrees。
+    // 「resolve」一字不再单独成指令；要么 enter-worktree，要么换 label，
+    // 要么 list-worktrees。
     expect(err!.detail).not.toMatch(/\bresolve\b/);
   });
 });

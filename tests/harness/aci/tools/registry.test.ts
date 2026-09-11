@@ -44,11 +44,11 @@ import type { IknowEnv } from "../../../../src/config/env.js";
 import type { SubAgentManager } from "../../../../src/harness/subagent/manager.js";
 import type { McpManager } from "../../../../src/harness/mcp/manager.js";
 import type { BackgroundTaskManager } from "../../../../src/harness/background/manager.js";
-import type { CreateTaskWorktreeProvisionFn } from "../../../../src/harness/aci/tools/create-task-worktree.js";
-import type { WorktreeEnterToolDeps } from "../../../../src/harness/aci/tools/enter-task-worktree.js";
-import type { WorktreeExitToolDeps } from "../../../../src/harness/aci/tools/exit-task-worktree.js";
-import type { ListTaskWorktreesToolDeps } from "../../../../src/harness/aci/tools/list-task-worktrees.js";
-import type { RemoveTaskWorktreeToolDeps } from "../../../../src/harness/aci/tools/remove-task-worktree.js";
+import type { CreateWorktreeProvisionFn } from "../../../../src/harness/aci/tools/create-worktree.js";
+import type { WorktreeEnterToolDeps } from "../../../../src/harness/aci/tools/enter-worktree.js";
+import type { WorktreeExitToolDeps } from "../../../../src/harness/aci/tools/exit-worktree.js";
+import type { ListWorktreesToolDeps } from "../../../../src/harness/aci/tools/list-worktrees.js";
+import type { RemoveWorktreeToolDeps } from "../../../../src/harness/aci/tools/remove-worktree.js";
 
 /** 合法最小 env(仅 web 字段;LLM 字段工厂不消费)。 */
 function makeWebEnv(
@@ -79,7 +79,7 @@ const fakeSubagentManager: SubAgentManager = {
 
 /** worktree isolation host fakes —— 仅断言条件化装配，handler 路径在
  * tests/harness/aci/tools/worktree-lifecycle.test.ts。 */
-const fakeWorktreeProvision: CreateTaskWorktreeProvisionFn = async () =>
+const fakeWorktreeProvision: CreateWorktreeProvisionFn = async () =>
   "/tmp/fake-worktree";
 const fakeWorktreeEnter: WorktreeEnterToolDeps["worktreeEnter"] = async () => ({
   path: "/tmp/fake-worktree",
@@ -87,9 +87,9 @@ const fakeWorktreeEnter: WorktreeEnterToolDeps["worktreeEnter"] = async () => ({
 });
 const fakeWorktreeExit: WorktreeExitToolDeps["worktreeExit"] = async () =>
   "/tmp/fake-main";
-const fakeWorktreeList: ListTaskWorktreesToolDeps["worktreeList"] =
+const fakeWorktreeList: ListWorktreesToolDeps["worktreeList"] =
   async () => [];
-const fakeWorktreeRemove: RemoveTaskWorktreeToolDeps["worktreeRemove"] =
+const fakeWorktreeRemove: RemoveWorktreeToolDeps["worktreeRemove"] =
   async () => ({
     label: undefined,
     conversationId: "fake-conversation",
@@ -197,11 +197,11 @@ describe("createDefaultAciRegistry — 正常路径", () => {
           n !== "run_graph" &&
           // worktree isolation (ADR-0037):worktreeProvision / worktreeEnter /
           // worktreeExit host 缝皆缺席 → 3 件 worktree 工具缺席。
-          n !== "create-task-worktree" &&
-          n !== "enter-task-worktree" &&
-          n !== "exit-task-worktree" &&
-          n !== "list-task-worktrees" &&
-          n !== "remove-task-worktree"
+          n !== "create-worktree" &&
+          n !== "enter-worktree" &&
+          n !== "exit-worktree" &&
+          n !== "list-worktrees" &&
+          n !== "remove-worktree"
       )
     );
     expect(reg.catalog.get("tool_search")).toBeDefined();
@@ -273,9 +273,9 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     // worktree isolation (master ADR-0037):三件 append-only:21→24,末位 3 件,
     // 不重排既有 21 件。create/enter/exit 三件顺序与工作流先后一致。
     expect(ACI_TOOLSET_NAMES.slice(21, 24)).toEqual([
-      "create-task-worktree",
-      "enter-task-worktree",
-      "exit-task-worktree",
+      "create-worktree",
+      "enter-worktree",
+      "exit-worktree",
     ]);
     // symbol-primary-aci T2 符号查询工具集 append-only:24→34,末位 10 件,
     // 不重排既有 24 件。
@@ -308,8 +308,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
       "get_record",
     ]);
     expect(ACI_TOOLSET_NAMES.slice(41, 43)).toEqual([
-      "list-task-worktrees",
-      "remove-task-worktree",
+      "list-worktrees",
+      "remove-worktree",
     ]);
   });
 });
@@ -458,9 +458,9 @@ function expectedSurface(
     // worktreeExit host 缝皆在场时才入注册表。
     ...(opts.worktree
       ? []
-      : ["create-task-worktree", "enter-task-worktree", "exit-task-worktree"]),
-    ...(opts.worktreeList ? [] : ["list-task-worktrees"]),
-    ...(opts.worktreeRemove ? [] : ["remove-task-worktree"]),
+      : ["create-worktree", "enter-worktree", "exit-worktree"]),
+    ...(opts.worktreeList ? [] : ["list-worktrees"]),
+    ...(opts.worktreeRemove ? [] : ["remove-worktree"]),
   ];
   return [...ACI_TOOLSET_NAMES].filter(
     (n) => !conditionallyAbsent.includes(n) && !deny.includes(n)
@@ -621,17 +621,17 @@ describe("createDefaultAciRegistry — task worktree lifecycle seams", () => {
     expect(listOnly.inner.list().map((tool) => tool.name)).toEqual(
       expectedSurface([], { worktreeList: true })
     );
-    expect(listOnly.catalog.get("list-task-worktrees")?.aci.category).toBe(
+    expect(listOnly.catalog.get("list-worktrees")?.aci.category).toBe(
       "read-only"
     );
-    expect(listOnly.catalog.get("remove-task-worktree")).toBeUndefined();
+    expect(listOnly.catalog.get("remove-worktree")).toBeUndefined();
     expect(removeOnly.inner.list().map((tool) => tool.name)).toEqual(
       expectedSurface([], { worktreeRemove: true })
     );
-    expect(removeOnly.catalog.get("remove-task-worktree")?.aci.category).toBe(
+    expect(removeOnly.catalog.get("remove-worktree")?.aci.category).toBe(
       "write"
     );
-    expect(removeOnly.catalog.get("list-task-worktrees")).toBeUndefined();
+    expect(removeOnly.catalog.get("list-worktrees")).toBeUndefined();
   });
 
   it("does not register list/remove when only the legacy provision/enter/exit seams exist (OFF-adjacent host shape)", () => {
@@ -644,9 +644,9 @@ describe("createDefaultAciRegistry — task worktree lifecycle seams", () => {
     });
     const names = reg.inner.list().map((tool) => tool.name);
     expect(names).toEqual(expectedSurface([], { worktree: true }));
-    expect(reg.catalog.get("create-task-worktree")).toBeDefined();
-    expect(reg.catalog.get("list-task-worktrees")).toBeUndefined();
-    expect(reg.catalog.get("remove-task-worktree")).toBeUndefined();
+    expect(reg.catalog.get("create-worktree")).toBeDefined();
+    expect(reg.catalog.get("list-worktrees")).toBeUndefined();
+    expect(reg.catalog.get("remove-worktree")).toBeUndefined();
   });
 });
 

@@ -156,7 +156,7 @@ export function stripFrontmatter(raw: string): string {
  *     形状判断由调用方的 `writeSituation(isolationOn, root)` 承担，本函数
  *     不重复判定（SC4 依赖方向钉死：`body.ts` 不 import `isolation/`）。
  *   - `no_writable_root`（隔离 ON + 非树形根）→ ③ 态披露：仅陈述事实，
- *     **不点名** `create-task-worktree`（ADR-0069 D3：trailer 在装配时
+ *     **不点名** `create-worktree`（ADR-0069 D3：trailer 在装配时
  *     进上下文，早于任何写意图；点名工具 = 对每个未绑会话推一次建树），
  *     **不嵌入** `taskRoot`（无可写对象，指向根是错的）。
  *

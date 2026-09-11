@@ -357,13 +357,24 @@ describe("formatToolUseCounts / formatTurnActivityFold", () => {
     expect(formatToolUseCounts([{ name: "bash", count: -3 }])).toBe("");
   });
 
-  test("有秒数 + 工具 → 思考一行、工具折叠下一行（不同行）", () => {
-    expect(
-      formatTurnActivityFold(29, [
-        { name: "bash", count: 18 },
-        { name: "write_file", count: 8 },
-      ])
-    ).toEqual(["思考了 29 秒", "bash × 18 · write_file × 8"]);
+  test("有秒数 + 工具 → 至多 1 行：`Thought for` 与计数焊在同一行（D2 收类不蒸发）", () => {
+    const lines = formatTurnActivityFold(29, [
+      { name: "bash", count: 18 },
+      { name: "write_file", count: 8 },
+    ]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toBe("Thought for 29s · bash × 18 · write_file × 8");
+  });
+
+  test("retract 类（read_file）落定后计数仍在同一行，不是第二行、不是隐身", () => {
+    const lines = formatTurnActivityFold(5, [
+      { name: "read_file", count: 3 },
+      { name: "grep", count: 1 },
+    ]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("Thought for 5s");
+    expect(lines[0]).toContain("read_file × 3");
+    expect(lines[0]).toContain("grep × 1");
   });
 
   test("无秒数有工具 → 只计数一行（不换 [思考]、不造 0 秒）", () => {
@@ -380,8 +391,28 @@ describe("formatToolUseCounts / formatTurnActivityFold", () => {
     expect(formatTurnActivityFold(undefined, [])).toEqual([]);
   });
 
-  test("只有秒数无工具 → 仅思考一行", () => {
-    expect(formatTurnActivityFold(6, [])).toEqual(["思考了 6 秒"]);
+  test("只有秒数无工具 → 仅结束态一行", () => {
+    expect(formatTurnActivityFold(6, [])).toEqual(["Thought for 6s"]);
+  });
+
+  test("恒 ≤1 行的硬合同：任意秒数 × 任意计数组合", () => {
+    const combos: ReadonlyArray<number | undefined> = [0, 1, 30, undefined];
+    for (const seconds of combos) {
+      for (const entries of [[], [{ name: "read_file", count: 2 }]]) {
+        expect(
+          formatTurnActivityFold(seconds, entries).length
+        ).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  test("旧中文 `思考了` 文案不再出现在折叠行", () => {
+    const line = formatTurnActivityFold(9, [
+      { name: "read_file", count: 1 },
+    ])[0];
+    expect(line).toBeDefined();
+    expect(line).not.toContain("思考了");
+    expect(line).not.toContain("秒");
   });
 });
 

@@ -17,7 +17,7 @@ import {
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 
-export interface RemoveTaskWorktreeToolDeps {
+export interface RemoveWorktreeToolDeps {
   readonly worktreeRemove: WorktreeRemoveFn;
   readonly root: string | LiveTaskRoot;
 }
@@ -31,9 +31,7 @@ function parseInput(input: unknown): {
   readonly deleteBranch: boolean;
 } {
   if (input === null || typeof input !== "object") {
-    throw new ToolExecutionError(
-      "[remove-task-worktree] input must be an object"
-    );
+    throw new ToolExecutionError("[remove-worktree] input must be an object");
   }
   const raw = input as {
     conversationId?: unknown;
@@ -44,12 +42,12 @@ function parseInput(input: unknown): {
     raw.conversationId.length === 0
   ) {
     throw new ToolExecutionError(
-      "[remove-task-worktree] conversationId must be a non-empty conversation id or task label"
+      "[remove-worktree] conversationId must be a non-empty conversation id or task label"
     );
   }
   if (!SAFE_CONVERSATION_ID_RE.test(raw.conversationId)) {
     throw new ToolExecutionError(
-      `[remove-task-worktree] kind=worktree_not_found — selector ${JSON.stringify(raw.conversationId)} is not a safe conversation id or label`
+      `[remove-worktree] kind=worktree_not_found — selector ${JSON.stringify(raw.conversationId)} is not a safe conversation id or label`
     );
   }
   if (
@@ -57,7 +55,7 @@ function parseInput(input: unknown): {
     typeof raw.delete_branch !== "boolean"
   ) {
     throw new ToolExecutionError(
-      "[remove-task-worktree] delete_branch must be a boolean"
+      "[remove-worktree] delete_branch must be a boolean"
     );
   }
   return {
@@ -77,13 +75,13 @@ function serialize(removal: WorktreeRemoval): string {
   });
 }
 
-export function createRemoveTaskWorktreeTool(
-  deps: RemoveTaskWorktreeToolDeps
+export function createRemoveWorktreeTool(
+  deps: RemoveWorktreeToolDeps
 ): AciToolDef {
   return Object.freeze({
-    name: "remove-task-worktree",
+    name: "remove-worktree",
     description:
-      "Remove a clean task worktree selected by conversationId or label after its task is finished. Use delete_branch=true to remove the associated local task branch too. The host checks the current root, working-tree status, repository ownership, and unpushed commits first, then returns an auditable JSON receipt with the path, branch, HEAD, and branchDeleted result.",
+      "Remove a clean task worktree selected by conversationId or label after its task is finished, and return an auditable JSON receipt. Use delete_branch=true to remove the associated local task branch too. The host checks the current root, working-tree status, repository ownership, and unpushed commits first; the receipt carries the path, branch, HEAD, and branchDeleted result.",
     inputSchema: {
       type: "object",
       properties: {
@@ -91,7 +89,7 @@ export function createRemoveTaskWorktreeTool(
           type: "string",
           minLength: 1,
           description:
-            "Conversation id or the unique label returned by list-task-worktrees.",
+            "Conversation id or the unique label returned by list-worktrees.",
         },
         delete_branch: {
           type: "boolean",
@@ -124,11 +122,11 @@ export function createRemoveTaskWorktreeTool(
       } catch (err) {
         if (err instanceof WorktreeIsolationError) {
           throw new ToolExecutionError(
-            `[remove-task-worktree] kind=${err.kind} — ${err.detail}`
+            `[remove-worktree] kind=${err.kind} — ${err.detail}`
           );
         }
         throw new ToolExecutionError(
-          `[remove-task-worktree] remove failed: ${errorMessage(err)}`
+          `[remove-worktree] remove failed: ${errorMessage(err)}`
         );
       }
     },

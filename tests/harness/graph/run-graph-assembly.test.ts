@@ -41,6 +41,8 @@ import {
   IKNOW_GRAPH_MODE_ON_NOTIFICATION,
   IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,
   renderGraphModeChangeNotification,
+  isGraphModeText,
+  IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,
 } from "../../../src/harness/graph/notification.ts";
 import {
   ACI_TOOLSET_NAMES,
@@ -121,19 +123,19 @@ describe("run_graph — ACI 常驻注册(ADR-0041 关键边界)", () => {
     //   idx 34..38 = 5 件符号改
     //   idx 39 = list_sessions(T5b 目录轴读)
     //   idx 40 = get_record(T6 内容轴读)
-    //   idx 41 = list-task-worktrees,idx 42 = remove-task-worktree
+    //   idx 41 = list-worktrees,idx 42 = remove-worktree
     expect(ACI_TOOLSET_NAMES[19]).toBe("run_graph");
     expect(ACI_TOOLSET_NAMES[20]).toBe("query_trace");
-    expect(ACI_TOOLSET_NAMES[21]).toBe("create-task-worktree");
-    expect(ACI_TOOLSET_NAMES[22]).toBe("enter-task-worktree");
-    expect(ACI_TOOLSET_NAMES[23]).toBe("exit-task-worktree");
+    expect(ACI_TOOLSET_NAMES[21]).toBe("create-worktree");
+    expect(ACI_TOOLSET_NAMES[22]).toBe("enter-worktree");
+    expect(ACI_TOOLSET_NAMES[23]).toBe("exit-worktree");
     expect(ACI_TOOLSET_NAMES[24]).toBe("find_symbol");
     expect(ACI_TOOLSET_NAMES[34]).toBe("rename_symbol");
     expect(ACI_TOOLSET_NAMES.at(-4)).toBe("list_sessions");
     expect(ACI_TOOLSET_NAMES.at(-3)).toBe("get_record");
-    expect(ACI_TOOLSET_NAMES.at(-2)).toBe("list-task-worktrees");
+    expect(ACI_TOOLSET_NAMES.at(-2)).toBe("list-worktrees");
     expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 1]).toBe(
-      "remove-task-worktree"
+      "remove-worktree"
     );
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -292,6 +294,23 @@ describe("graph 模式切换提示 — SSOT 静态文本(KV cache 兼容)", () =
     expect(text.endsWith("</graph_mode>")).toBe(true);
     expect(text).toContain("Graph mode is now off");
     expect(text).toContain("spawn_subagent");
+  });
+
+  it("isGraphModeText 覆盖三条 notification 常量（生产者本家的人读谓词）", () => {
+    // specs/tui-human-display.md D8 / SC7：谓词与常量同处一文件（SSOT），
+    // TUI / CLI 消费侧不必各自重写 `<graph_mode>` 前缀。三条常量全命中，
+    // 正文里中段提到标签的用户文本不误伤（前缀判定，与 isAgentStatusText 同款）。
+    for (const text of [
+      IKNOW_GRAPH_MODE_ON_NOTIFICATION,
+      IKNOW_GRAPH_MODE_OFF_NOTIFICATION,
+      IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,
+    ]) {
+      expect(isGraphModeText(text)).toBe(true);
+    }
+    expect(isGraphModeText("为什么有 <graph_mode> 标签？")).toBe(false);
+    expect(
+      isGraphModeText("<agent_status>\nlast_tool: idle\n</agent_status>")
+    ).toBe(false);
   });
 
   it("两条静态文本在会话内字节恒定(无 per-turn 插值,KV cache 契约)", () => {

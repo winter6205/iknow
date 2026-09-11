@@ -144,7 +144,7 @@ export async function startSessionServe(
   const graphModeCtx = createGraphModeContext(
     resolveGraphMode({ settings: startupSettings.graph })
   );
-  // T3 / plans/worktree-exclusive-lock.md / ADR-0070: enter-task-worktree
+  // T3 / plans/worktree-exclusive-lock.md / ADR-0070: enter-worktree
   // 占用锁档一次性解析。`resolveWorktreeExclusive(settings)` 是单读点
   // （与 `resolveWorktreeOnMutate` 同款形状；缺失 / 非 true 一律 OFF），
   // 此处解析后透传给 hub opts.worktreeExclusive；hub 构造时再喂给

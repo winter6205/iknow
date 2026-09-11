@@ -236,12 +236,12 @@ describe("createUserHookRouter — SC3: PreWrite 只拦 classify=mutate", () => 
     assertPassthrough(hook, "read_file", { path: "a.txt" });
   });
 
-  it("root_flip 不算 mutate：enter-task-worktree 不因 PreWrite 被拦", () => {
+  it("root_flip 不算 mutate：enter-worktree 不因 PreWrite 被拦", () => {
     const hook = makeHook({
       enabled: true,
       rules: [{ id: "w", event: "PreWrite", reason: "no writes" }],
     });
-    assertPassthrough(hook, "enter-task-worktree", {
+    assertPassthrough(hook, "enter-worktree", {
       conversationId: "c1",
     });
   });

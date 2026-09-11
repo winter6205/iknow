@@ -89,7 +89,7 @@ export interface TaskWorktreeProvisionerOpts {
    */
   readonly projectIdentityRoot?: string;
   /**
-   * T3 / plans/worktree-exclusive-lock.md / ADR-0070 — enter-task-worktree
+   * T3 / plans/worktree-exclusive-lock.md / ADR-0070 — enter-worktree
    * 占用锁档。boolean-only；缺失 / 非 `true` 一律按 OFF（fail-closed，
    * 与 `worktreeOnMutate` 同款值域纪律）。OFF 时 `enter()` 行为与今日
    * 逐字节一致——四道检查不变、不新增任何拒绝路径（SC2）。
@@ -246,7 +246,7 @@ export {
  * This rejects path traversal (`..`, `a/b`), leading dashes/dots (option or
  * glob ambiguity in `git worktree add -b`), whitespace / shell metacharacters,
  * and empty strings. The regex SSOT lives in
- * `harness/isolation/worktree-gate.ts` (the T7 enter-task-worktree tool
+ * `harness/isolation/worktree-gate.ts` (the T7 enter-worktree tool
  * validates its model-supplied id against the same contract); re-exported
  * here for existing importers.
  */
@@ -705,7 +705,7 @@ export function createTaskWorktreeProvisioner(
   const now = opts.now ?? (() => new Date().toISOString());
   const projectIdentityRoot = opts.projectIdentityRoot;
   /**
-   * T3 / ADR-0070 — enter-task-worktree 占用锁档。装配期一次性读取
+   * T3 / ADR-0070 — enter-worktree 占用锁档。装配期一次性读取
    * （ADR-0037 §5 硬要求 9 / `resolveWorktreeExclusive` 单读点同款形状）：
    * 闭包冻结值贯穿本 provisioner 寿命，`enter()` 不重读 opts。缺失 /
    * 非 `true` 一律 OFF（fail-closed）。
@@ -990,7 +990,7 @@ export function createTaskWorktreeProvisioner(
         // 同时在场，本句为回执处的强制披露点）。
         throw new WorktreeIsolationError(
           "worktree_claimed",
-          `worktree isolation: task worktree ${target} is already claimed by session '${entry.conversation_id}'; release it by resuming that session and calling exit-task-worktree, or by deleting the session record. Note: occupancy is visible only within the current process — other CLI processes' claims on the same tree are not visible to this check`
+          `worktree isolation: task worktree ${target} is already claimed by session '${entry.conversation_id}'; release it by resuming that session and calling exit-worktree, or by deleting the session record. Note: occupancy is visible only within the current process — other CLI processes' claims on the same tree are not visible to this check`
         );
       }
     }
@@ -1027,7 +1027,7 @@ export function createTaskWorktreeProvisioner(
     if (isLinkedWorktreeRoot(req.root)) {
       throw new WorktreeIsolationError(
         "foreign_worktree",
-        `worktree isolation: session ${conversationId} is currently inside a git worktree (${req.root}); return to the main repo root (exit-task-worktree) before entering another task worktree`
+        `worktree isolation: session ${conversationId} is currently inside a git worktree (${req.root}); return to the main repo root (exit-worktree) before entering another task worktree`
       );
     }
 
@@ -1069,7 +1069,7 @@ export function createTaskWorktreeProvisioner(
     if (!existsSync(target)) {
       throw new WorktreeIsolationError(
         "worktree_not_found",
-        `worktree isolation: no task worktree matches '${req.targetConversationId}' at ${target}; check the conversation id or label, or create the tree first with the create-task-worktree tool`
+        `worktree isolation: no task worktree matches '${req.targetConversationId}' at ${target}; check the conversation id or label, or create the tree first with the create-worktree tool`
       );
     }
     if (!isLinkedWorktreeRoot(target)) {
@@ -1227,7 +1227,7 @@ export function createTaskWorktreeProvisioner(
     if (resolve(ctx.root) === resolve(selected.path)) {
       throw new WorktreeIsolationError(
         "current_worktree",
-        `worktree isolation: cannot remove the caller's current task worktree ${selected.path}; exit-task-worktree first`
+        `worktree isolation: cannot remove the caller's current task worktree ${selected.path}; exit-worktree first`
       );
     }
     if (selected.dirty) {

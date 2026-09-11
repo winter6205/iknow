@@ -1,12 +1,12 @@
 /**
- * src/harness/aci/tools/enter-task-worktree.ts
+ * src/harness/aci/tools/enter-worktree.ts
  *
  * T7 (plans/worktree-isolation-model-provision.md) — the explicit-enter ACI
  * tool of the model-provision contract (ADR-0037 amended 2026-08-30, T7
  * tool-surface extension): when worktree isolation is ON, a session anchored
  * at the MAIN repo can adopt an EXISTING task worktree of THIS repository —
  * including the tree another conversation owns — by passing the owner's
- * conversationId or a unique label returned by list-task-worktrees. The target
+ * conversationId or a unique label returned by list-worktrees. The target
  * path is SSOT-derived (`<repoRoot>/.iknow/worktrees/<label>--<conversationId>`
  * or the historical UUID-only leaf); the tool NEVER takes a free-form path.
  *
@@ -50,35 +50,33 @@ export interface WorktreeEnterToolDeps {
 }
 
 /**
- * Factory: createEnterTaskWorktreeTool(deps) — the model-facing explicit
+ * Factory: createEnterWorktreeTool(deps) — the model-facing explicit
  * enter of the isolation tool face. Registered ONLY when the isolation
  * switch is ON and the host supplies the enter seam (build-engine threading;
  * TUI provision-only wiring, worker assembly paths, and hub-less inlets omit
  * it, so the tool never enters those surfaces).
  */
-export function createEnterTaskWorktreeTool(
+export function createEnterWorktreeTool(
   deps: WorktreeEnterToolDeps
 ): AciToolDef {
   return Object.freeze({
-    name: "enter-task-worktree",
+    name: "enter-worktree",
     description:
-      "Enter an existing git task worktree of this repository and rebind this session's root to it. " +
-      "Use it when worktree isolation is ON and the work you need continues in a task worktree that already " +
-      "exists — for example the tree another conversation created: pass that conversation's id or the unique " +
-      "label returned by list-task-worktrees; target resolution uses the repository's task-worktree naming " +
-      "SSOT instead of a free-form path. " +
-      "On success the session root moves to the entered tree; re-issue pending workspace writes there in " +
-      "the next wave of tool calls in this run. Calling it again for the same target returns the same path (idempotent). " +
-      "Failures exit typed as kind=worktree_not_found | ambiguous_worktree | foreign_worktree | rebind_failed | git_unavailable; " +
-      "resolve the reported condition (wrong id, tree in another repository, or leftover state), then retry. " +
-      "The entered tree stays untouched; exit-task-worktree returns this session to the main repo root.",
+      "Enter an existing git task worktree of this repository, rebind this session's root to it, and return the entered path. " +
+      "Pass the owning conversation id or the unique label returned by list-worktrees (for example the tree another " +
+      "conversation created); target resolution uses the repository's task-worktree naming SSOT instead of a free-form path. " +
+      "On success the session root moves to the entered tree, so re-issue pending workspace writes there in the next wave " +
+      "of tool calls in this run. Calling it again for the same target returns the same path. Failures exit typed as " +
+      "kind=worktree_not_found | ambiguous_worktree | foreign_worktree | rebind_failed | git_unavailable; resolve the " +
+      "reported condition (wrong id, tree in another repository, or leftover state), then retry. " +
+      "The entered tree stays untouched, and exit-worktree returns this session to the main repo root.",
     inputSchema: {
       type: "object",
       properties: {
         conversationId: {
           type: "string",
           description:
-            "Conversation id or the unique task-worktree label returned by list-task-worktrees.",
+            "Conversation id or the unique task-worktree label returned by list-worktrees.",
           minLength: 1,
         },
       },
@@ -97,14 +95,14 @@ export function createEnterTaskWorktreeTool(
         ?.conversationId;
       if (typeof target !== "string" || target.length === 0) {
         throw new ToolExecutionError(
-          "[enter-task-worktree] conversationId is required and must be a non-empty string (the id of the conversation that owns the task worktree)"
+          "[enter-worktree] conversationId is required and must be a non-empty string (the id of the conversation that owns the task worktree)"
         );
       }
       if (!SAFE_CONVERSATION_ID_RE.test(target)) {
         // Same typed-exit label as the WorktreeIsolationError mapping below —
         // the provisioner fails this id with kind=rebind_failed too.
         throw new ToolExecutionError(
-          `[enter-task-worktree] kind=rebind_failed — conversationId ${JSON.stringify(target)} is not a safe path/branch segment (expected ^[A-Za-z0-9][A-Za-z0-9_-]*$)`
+          `[enter-worktree] kind=rebind_failed — conversationId ${JSON.stringify(target)} is not a safe path/branch segment (expected ^[A-Za-z0-9][A-Za-z0-9_-]*$)`
         );
       }
       try {
@@ -123,11 +121,11 @@ export function createEnterTaskWorktreeTool(
       } catch (err) {
         if (err instanceof WorktreeIsolationError) {
           throw new ToolExecutionError(
-            `[enter-task-worktree] kind=${err.kind} — ${err.detail}`
+            `[enter-worktree] kind=${err.kind} — ${err.detail}`
           );
         }
         throw new ToolExecutionError(
-          `[enter-task-worktree] enter failed: ${errorMessage(err)}`
+          `[enter-worktree] enter failed: ${errorMessage(err)}`
         );
       }
     },

@@ -122,10 +122,10 @@ describe("deriveSlot: accent class（点名着色，spec D6）", () => {
   test("skill / 建树四件成功 → accent 色、标题、无预览、不进计数", () => {
     for (const name of [
       "skill",
-      "create-task-worktree",
-      "enter-task-worktree",
-      "exit-task-worktree",
-      "remove-task-worktree",
+      "create-worktree",
+      "enter-worktree",
+      "exit-worktree",
+      "remove-worktree",
     ]) {
       expect(deriveSlot(name, { running: false, failed: false })).toEqual({
         showTitle: true,
@@ -163,7 +163,7 @@ describe("deriveSlot: SC2 五类边界", () => {
       "list_mcp_resources",
       "read_mcp_resource",
       "query_trace",
-      "list-task-worktrees",
+      "list-worktrees",
       "lsp_definition",
       "lsp_references",
       "lsp_hover",

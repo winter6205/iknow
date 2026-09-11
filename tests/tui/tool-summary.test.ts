@@ -8,28 +8,31 @@
  *  - toolPreviewRows 统一 diff 预览行（side-channel 精确 diff / intent 回退）。
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   SUBAGENT_TOOL_LABEL,
   settledClassOfDisplay,
   clipOneLine,
   clipOneLineVisual,
-  countBashCalls,
   formatLiveToolEvent,
-  formatRanSuffix,
+  formatToolStatusLine,
   isSubagentTool,
+  previewOverflowLabel,
   projectToolLines,
   registeredToolDisplayNames,
   resultPreviewOverflowLabel,
   resultToolPreview,
+  writePreviewOverflowLabel,
   stripAnsi,
   subagentDisplayMark,
   summarizeToolCall,
   RESULT_PREVIEW_WINDOW,
-  TOOL_PREVIEW_WINDOW,
+  WRITE_CREATE_PREVIEW_WINDOW,
   completedToolPreview,
   toolPreviewRows,
   visualWidth,
 } from "../../src/tui/tool-summary.js";
+import { resultPreviewTextLines } from "../../src/tui/completed-tool-preview-view.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 
 describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
@@ -38,32 +41,32 @@ describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
       path: "docs/a.md",
       content: "l1\nl2\nl3",
     });
-    expect(detail).toBe("写入 docs/a.md（3 行）");
+    expect(detail).toBe("Wrote docs/a.md (3 lines)");
   });
 
-  test("edit_file → 路径 + old→new（变更对比摘要）", () => {
+  test("edit_file → 路径 + 行数（描述性；本次改动 diff 由预览承担）", () => {
     const { detail } = summarizeToolCall("edit_file", {
       path: "src/x.ts",
       old_str: "foo",
       new_str: "bar",
     });
-    expect(detail).toContain("编辑 src/x.ts");
-    expect(detail).toContain("foo");
-    expect(detail).toContain("bar");
+    expect(detail).toBe("Edited src/x.ts (1 → 1 lines)");
+    // 旧内联 old→new 片段已下线：改动由 D4 diff 预览表达，标题行不再夹片段。
+    expect(detail).not.toContain("foo");
   });
 
-  test("bash → 命令摘要；read_file/grep/glob → 各自动词", () => {
+  test("bash → 命令摘要；read_file/grep/glob → 各自动词（英文人读行）", () => {
     expect(summarizeToolCall("bash", { command: "npm test" }).detail).toBe(
       "npm test"
     );
     expect(summarizeToolCall("read_file", { path: "a.ts" }).detail).toBe(
-      "读取 a.ts"
+      "Read a.ts"
     );
     expect(summarizeToolCall("grep", { pattern: "foo" }).detail).toBe(
-      "搜索 foo"
+      "Search foo"
     );
     expect(summarizeToolCall("glob", { pattern: "*.ts" }).detail).toBe(
-      "匹配 *.ts"
+      "Glob *.ts"
     );
   });
 
@@ -74,39 +77,37 @@ describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
     expect(detail.includes("x".repeat(200))).toBe(false);
   });
 
-  test("web_search → 搜索 query（聚焦首个关键字段，不落 JSON 全文）", () => {
-    const { detail } = summarizeToolCall("web_search", {
+  test("web_search → `Search <query>`；web_fetch → `Fetch <url>`（首个关键字段）", () => {
+    const search = summarizeToolCall("web_search", {
       query: "DeepSeek V4 评测",
       max_results: 6,
-    });
-    expect(detail).toBe("搜索 DeepSeek V4 评测");
-    expect(detail.includes('"max_results"')).toBe(false);
-  });
-
-  test("web_fetch → 抓取 url", () => {
-    const { detail } = summarizeToolCall("web_fetch", {
-      url: "https://example.com/a",
-      max_chars: 500,
-    });
-    expect(detail).toBe("抓取 https://example.com/a");
+    }).detail;
+    expect(search).toBe("Search DeepSeek V4 评测");
+    expect(search.includes('"max_results"')).toBe(false);
+    expect(
+      summarizeToolCall("web_fetch", {
+        url: "https://example.com/a",
+        max_chars: 500,
+      }).detail
+    ).toBe("Fetch https://example.com/a");
   });
 
   test("memory_recall / memory_save / tool_search / skill 摘要（SC5 删 skill_search）", () => {
     expect(
       summarizeToolCall("memory_recall", { query: "TUI", limit: 5 }).detail
-    ).toBe("记忆 召回 TUI");
+    ).toBe("Recall TUI");
     expect(
       summarizeToolCall("memory_save", { title: "TUI 折叠", body: "x" }).detail
-    ).toBe("记忆 写入 TUI 折叠");
+    ).toBe("Remember TUI 折叠");
     expect(summarizeToolCall("tool_search", { query: "web" }).detail).toBe(
-      "检索工具 web"
+      "Tool search web"
     );
     expect(
       summarizeToolCall("tool_search", {
         names: ["web_search", "web_fetch"],
       }).detail
-    ).toBe("检索工具名 web_search");
-    expect(summarizeToolCall("tool_search", {}).detail).toBe("检索工具 ?");
+    ).toBe("Tool search web_search");
+    expect(summarizeToolCall("tool_search", {}).detail).toBe("Tool search ?");
     expect(summarizeToolCall("skill", { name: "playwright-cli" }).detail).toBe(
       "skill playwright-cli"
     );
@@ -143,7 +144,7 @@ describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
     ).toBe("explore");
     expect(
       summarizeToolCall("subagent_result", { task_id: "t-1" }).detail
-    ).toBe("轮询 t-1");
+    ).toBe("Poll t-1");
   });
 
   test("LSP 工具 → LSP <op> file[:line]（不落 JSON 全文）", () => {
@@ -161,48 +162,20 @@ describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
   });
 });
 
-describe("countBashCalls / formatRanSuffix: 折叠摘要 ran N（T4）", () => {
-  const bashMsg: AnthropicNativeMessage = {
-    role: "assistant",
-    content: [
-      { type: "text", text: "试一下" },
-      {
-        type: "tool_use",
-        id: "tu-1",
-        name: "bash",
-        input: { command: "npm test" },
-      },
-      { type: "tool_use", id: "tu-2", name: "write_file", input: {} },
-      {
-        type: "tool_use",
-        id: "tu-3",
-        name: "bash",
-        input: { command: "git status" },
-      },
-    ],
-  };
-
-  test("countBashCalls：仅统计 assistant 消息内 name === bash 的 tool_use", () => {
-    expect(countBashCalls(bashMsg)).toBe(2);
-    expect(
-      countBashCalls({
-        role: "user",
-        content: [],
-      } satisfies AnthropicNativeMessage)
-    ).toBe(0);
-    expect(
-      countBashCalls({
-        role: "assistant",
-        content: [{ type: "text", text: "x" }],
-      })
-    ).toBe(0);
-  });
-
-  test("formatRanSuffix：1 → ran 1 command，>1 → ran N commands，0 → 空串", () => {
-    expect(formatRanSuffix(1)).toBe("，ran 1 command");
-    expect(formatRanSuffix(2)).toBe("，ran 2 commands");
-    expect(formatRanSuffix(0)).toBe("");
-    expect(formatRanSuffix(-1)).toBe("");
+describe("countBashCalls / formatRanSuffix: 已退役的 ran N 语义", () => {
+  // spec D2 / CONTEXT `unit fold`：`ran N command(s)` 第二行语义整体废弃，
+  // 计数只由 turn 级 `formatToolUseCounts`（`bash × N`）承担；两个 helper
+  // 及其测试一并退役到 archive/tests/tui/（不变式已永久消失，不是断言漂移）。
+  test("生产面不再有任何 ran N 后缀调用方（退役闸）", () => {
+    const src = readFileSync(
+      new URL("../../src/tui/message-blocks.tsx", import.meta.url),
+      "utf8"
+    );
+    // 只看代码：注释里提到旧语义不算调用方（`formatRanSuffix(` 调用形态）。
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(code.includes("formatRanSuffix")).toBe(false);
+    expect(code.includes("countBashCalls")).toBe(false);
+    expect(code.includes("ran ")).toBe(false);
   });
 });
 
@@ -261,17 +234,16 @@ describe("projectToolLines: tool_use_id 配对状态", () => {
 
 describe("formatLiveToolEvent", () => {
   // #693 T1 D7：live 完成行文案收敛为历史形态。
-  // #tui-render-overhaul T3：成功态去掉 `[完成]` 前缀（保留 `[运行中]` /
-  // `[失败]`），状态由颜色/glyph 表达——避免「已完成工具还在开头挂 `[完成]`」
-  // 干扰读者扫读；行首不残留多余空格。不变式：detail 非空 → `name · detail`；
-  // detail 空 → `name`（无 ` · ` 残留）。
-  test("完成态 ok → `name · detail`（去 [完成] 前缀，与 ToolSummaryRow 同源）", () => {
+  // 人读合同（specs/tui-human-display.md D1）：完成态只画 `name · detail`，
+  // 无 `[完成]`、无 `[运行中]`；失败仍显式 `[失败]` 前缀（failure overlay 不在
+  // 本票改动面）。不变式：detail 非空 → `name · detail`；detail 空 → `name`。
+  test("完成态 ok → `name · detail`（无 [完成] 前缀，与 ToolSummaryRow 同源）", () => {
     const line = formatLiveToolEvent({
       toolName: "read_file",
       input: { path: "a.ts" },
       kind: "ok",
     });
-    expect(line).toBe("read_file · 读取 a.ts");
+    expect(line).toBe("read_file · Read a.ts");
     // 不变式:成功态无状态前缀。
     expect(line.includes("[完成]")).toBe(false);
   });
@@ -291,9 +263,9 @@ describe("formatLiveToolEvent", () => {
       toolName: "edit_file",
       input: {},
       kind: "ok",
-      detail: "编辑 a.ts：old → new",
+      detail: "Edited a.ts (2 → 3 lines)",
     });
-    expect(line).toBe("edit_file · 编辑 a.ts：old → new");
+    expect(line).toBe("edit_file · Edited a.ts (2 → 3 lines)");
   });
 
   test("detail 空 → `name`（无 ` · ` 残留，无状态前缀）", () => {
@@ -309,37 +281,129 @@ describe("formatLiveToolEvent", () => {
   });
 });
 
-describe("summarizeToolCall(cols): 窄终端宽度收口（行账不漂移）", () => {
-  test("窄终端：终稿形态 [运行中] name · detail 单行放得下", () => {
-    const cols = 60;
-    const { detail } = summarizeToolCall(
-      "bash",
-      { command: "x".repeat(300) },
-      cols
-    );
-    const finalLine = `[运行中] bash · ${detail}`;
-    expect(visualWidth(finalLine)).toBeLessThanOrEqual(cols);
+describe("formatToolStatusLine: running 人读行（D1 无状态括号）", () => {
+  test("bash running → `Running 1 shell command… · <command>`（命令可见）", () => {
+    const line = formatToolStatusLine({
+      toolName: "bash",
+      input: { command: "npm test" },
+      status: "running",
+    });
+    expect(line).toBe("Running 1 shell command… · npm test");
+    expect(line.includes("[运行中]")).toBe(false);
   });
 
-  test("窄终端：live 完成形态 name · detail · failed 单行放得下", () => {
+  test("read_file / grep / web_search running → 英文动词 + 路径 / 模式 / 查询", () => {
+    expect(
+      formatToolStatusLine({
+        toolName: "read_file",
+        input: { path: "a.ts" },
+        status: "running",
+      })
+    ).toBe("read_file · Read a.ts");
+    expect(
+      formatToolStatusLine({
+        toolName: "grep",
+        input: { pattern: "foo" },
+        status: "running",
+      })
+    ).toBe("grep · Search foo");
+    expect(
+      formatToolStatusLine({
+        toolName: "web_search",
+        input: { query: "clickhouse merge" },
+        status: "running",
+      })
+    ).toBe("web_search · Search clickhouse merge");
+    expect(
+      formatToolStatusLine({
+        toolName: "web_fetch",
+        input: { url: "https://example.com/a" },
+        status: "running",
+      })
+    ).toBe("web_fetch · Fetch https://example.com/a");
+  });
+
+  test("bash running 已过行数闸（runningBashSummary：任一非空片段都可见）", () => {
+    expect(
+      formatToolStatusLine({
+        toolName: "bash",
+        input: { command: "npm run test:real-llm", timeout_ms: 600000 },
+        status: "running",
+      })
+    ).toBe("Running 1 shell command… · npm run test:real-llm");
+  });
+
+  test("running 行不得出现 `[运行中]`（旧状态括号文案整体作废）", () => {
+    for (const name of ["bash", "read_file", "write_file", "mystery"]) {
+      const line = formatToolStatusLine({
+        toolName: name,
+        input: {},
+        status: "running",
+      });
+      expect(line.includes("[运行中]")).toBe(false);
+    }
+  });
+
+  test("bash running 只透传命令，不再渲染行数（D5 挤档：Wrote N lines to path）", () => {
+    const line = formatToolStatusLine({
+      toolName: "bash",
+      input: { command: "ls -la" },
+      status: "running",
+    });
+    expect(line).toBe("Running 1 shell command… · ls -la");
+  });
+
+  test("写入 running → `write_file · Wrote N lines to <path>`（计数已知才带）", () => {
+    expect(
+      formatToolStatusLine({
+        toolName: "write_file",
+        input: undefined,
+        status: "running",
+        detail: "Wrote 5 lines to a.ts",
+      })
+    ).toBe("write_file · Wrote 5 lines to a.ts");
+  });
+});
+
+describe("summarizeToolCall(cols): 窄终端宽度收口（行账不漂移）", () => {
+  test("窄终端：running 人读形态 `Running 1 shell command… · <detail>` 单行放得下", () => {
     const cols = 60;
-    const { detail } = summarizeToolCall(
-      "bash",
-      { command: "x".repeat(300) },
-      cols
-    );
-    const liveLine = `bash · ${detail} · failed`;
+    // D1：running 拼装 = 英文前缀 + ` · ` + detail（不再有状态括号）；
+    // 前缀变长后由 formatToolStatusLine 对整行兜底收口。
+    const line = formatToolStatusLine({
+      toolName: "bash",
+      input: { command: "x".repeat(300) },
+      status: "running",
+      cols,
+    });
+    expect(line.startsWith("Running 1 shell command… · ")).toBe(true);
+    expect(visualWidth(line)).toBeLessThanOrEqual(cols);
+  });
+
+  test("窄终端：失败完成形态单行放得下（断言真实发射字节，非手拼串）", () => {
+    const cols = 60;
+    // 宽度不变式必须挂在 formatToolStatusLine 真正发射的形态上：
+    // 手拼 `name · detail · failed` 在失败分支下并不存在（真实是
+    // `[失败] name · detail`），拼串断言会认证一条生产不发射的行。
+    const liveLine = formatToolStatusLine({
+      toolName: "bash",
+      input: { command: "x".repeat(300) },
+      status: "failed",
+      cols,
+    });
+    expect(liveLine.startsWith("[失败] bash")).toBe(true);
     expect(visualWidth(liveLine)).toBeLessThanOrEqual(cols);
   });
 
   test("CJK 内容按视觉宽度收口（字符数截断会低估列数 → 折行）", () => {
     const cols = 50;
-    const { detail } = summarizeToolCall(
-      "bash",
-      { command: "测".repeat(200) },
-      cols
-    );
-    expect(visualWidth(`[运行中] bash · ${detail}`)).toBeLessThanOrEqual(cols);
+    const line = formatToolStatusLine({
+      toolName: "bash",
+      input: { command: "测".repeat(200) },
+      status: "running",
+      cols,
+    });
+    expect(visualWidth(line)).toBeLessThanOrEqual(cols);
   });
 
   test("宽终端：不超过 legacy 80 上限", () => {
@@ -389,7 +453,7 @@ describe("toolPreviewRows: 写/改文件内容可见（统一 diff）", () => {
     expect(rows[0]?.text).toMatch(/^@@ -1,0 \+1,2 @@$/);
   });
 
-  test("write_file 60 行 create → completed 截断到窗，不是无封顶绿 diff", () => {
+  test("write_file create 窗 = 10 行（旧 6 行闸作废），可见正文为首 10 行", () => {
     const content = Array.from({ length: 60 }, (_, i) => `line-${i}`).join(
       "\n"
     );
@@ -399,9 +463,12 @@ describe("toolPreviewRows: 写/改文件内容可见（统一 diff）", () => {
     });
     expect(preview.kind).toBe("code");
     if (preview.kind !== "code") return;
-    expect(preview.lines).toHaveLength(TOOL_PREVIEW_WINDOW);
+    // SC3：窗数字面钉死 10（不是从常量派生 —— 派生写 6 也照样绿）。
+    expect(WRITE_CREATE_PREVIEW_WINDOW).toBe(10);
+    expect(preview.lines).toHaveLength(10);
     expect(preview.lines[0]).toBe("line-0");
-    expect(preview.hiddenLineCount).toBe(60 - TOOL_PREVIEW_WINDOW);
+    expect(preview.lines[9]).toBe("line-9");
+    expect(preview.hiddenLineCount).toBe(50);
   });
 
   test("edit_file → old（del）/ new（add）diff", () => {
@@ -518,7 +585,7 @@ describe("子代理工具专属显示（isSubagentTool / subagentDisplayMark / S
       input: { task_id: "t-1" },
       kind: "ok",
     });
-    expect(line).toBe("轮询 t-1");
+    expect(line).toBe("Poll t-1");
   });
 
   test("formatLiveToolEvent 子代理 detail 空（显式 override）→ 空串（无 glyph / `· ` 残留）", () => {
@@ -642,11 +709,12 @@ describe("completedToolPreview: 完成态分类 + 截断窗", () => {
     });
     expect(preview.kind).toBe("code");
     if (preview.kind !== "code") return;
-    expect(preview.lines).toHaveLength(TOOL_PREVIEW_WINDOW);
-    expect(preview.hiddenLineCount).toBe(20 - TOOL_PREVIEW_WINDOW);
+    // 字面 10：从常量派生会让「常量被改成 6」也照样绿（旧 6 行闸回归无感）。
+    expect(preview.lines).toHaveLength(10);
+    expect(preview.hiddenLineCount).toBe(10);
   });
 
-  test("overwrite/edit visible rows 是 toolPreviewRows 的截断前缀", () => {
+  test("overwrite/edit diff 全量可见：rows === toolPreviewRows（无 10 行帽）", () => {
     const oldContent = Array.from({ length: 40 }, (_, i) => `old-${i}`).join(
       "\n"
     );
@@ -659,11 +727,14 @@ describe("completedToolPreview: 完成态分类 + 截断窗", () => {
     const preview = completedToolPreview("edit_file", input, opts);
     expect(preview.kind).toBe("diff");
     if (preview.kind !== "diff") return;
-    expect(preview.rows).toEqual(all.slice(0, TOOL_PREVIEW_WINDOW));
-    expect(preview.hiddenLineCount).toBe(all.length - TOOL_PREVIEW_WINDOW);
+    // spec D4 / CONTEXT `edit diff preview`：人必须看见**本次改动**的
+    // diff，不套新建那 10 行帽 —— rows 即全量，无隐藏行。
+    expect(preview.rows).toEqual(all);
+    expect(preview.hiddenLineCount).toBe(0);
+    expect(preview.rows.length).toBeGreaterThan(10);
   });
 
-  test("超长 overwrite diff → 截断到同一窗常数", () => {
+  test("超长 overwrite diff 不被 10 行窗截断（与新建预览分道）", () => {
     const oldContent = Array.from({ length: 40 }, (_, i) => `old-${i}`).join(
       "\n"
     );
@@ -677,11 +748,17 @@ describe("completedToolPreview: 完成态分类 + 截断窗", () => {
     );
     expect(preview.kind).toBe("diff");
     if (preview.kind !== "diff") return;
-    expect(preview.rows.length).toBeLessThanOrEqual(TOOL_PREVIEW_WINDOW);
-    expect(preview.hiddenLineCount).toBeGreaterThan(0);
-    expect(preview.rows.length + preview.hiddenLineCount).toBeGreaterThan(
-      TOOL_PREVIEW_WINDOW
-    );
+    // 反面对照：同长度的 write_file 新建走 10 行帽并产出 hiddenLineCount，
+    // edit diff 两者都不出现 —— 两条预览路径的帽互相独立。
+    const create = completedToolPreview("write_file", {
+      path: "a.ts",
+      content: newContent,
+    });
+    expect(create.kind).toBe("code");
+    if (create.kind !== "code") return;
+    expect(create.lines).toHaveLength(10);
+    expect(preview.rows.length).toBeGreaterThan(10);
+    expect(preview.hiddenLineCount).toBe(0);
   });
 
   test("bash 等非 write/edit → 空", () => {
@@ -694,8 +771,8 @@ describe("completedToolPreview: 完成态分类 + 截断窗", () => {
 
 // M5 fixup：formatLiveToolEvent opts.cols 透传 —— detail override 缺省时
 // 走 summarizeToolCall(name, input, cols) 视觉宽度收口（窄终端 CJK 不溢出）。
-// #693 T1 D7 + #tui-render-overhaul T3：成功态文案 `name · detail`，去
-// `[完成]` 前缀 + 尾缀 `· ok`。失败态保留 `[失败]`；运行中保留 `[运行中]`。
+// 人读合同（spec D1）：成功态 `name · detail`（无 `[完成]` 前缀、无 `· ok`
+// 尾缀）；running 态走英文过程行（无 `[运行中]`）；只有失败态保留 `[失败]`。
 describe("formatLiveToolEvent(cols) 透传：detail 空时按视觉宽度收口", () => {
   test("窄 cols + CJK 长 command → 单行 ≤ cols（不在中间换行）", () => {
     // detail 空走 summarizeToolCall；提供 cols 时 detail 按视觉宽度收口。
@@ -752,6 +829,24 @@ describe("resultPreviewOverflowLabel: `… +N 行` 文案", () => {
   test("N>0 → `… +N 行`", () => {
     expect(resultPreviewOverflowLabel(3)).toBe("… +3 行");
     expect(resultPreviewOverflowLabel(100)).toBe("… +100 行");
+  });
+});
+
+describe("previewOverflowLabel / writePreviewOverflowLabel: `+N more lines`", () => {
+  test("围栏 32 行帽与新建 10 行帽共用同一英文文案（单一 SSOT）", () => {
+    expect(previewOverflowLabel(1)).toBe("+1 more lines");
+    expect(previewOverflowLabel(8)).toBe("+8 more lines");
+    expect(previewOverflowLabel(10)).toBe("+10 more lines");
+  });
+  test("writePreviewOverflowLabel 是同一函数的语义别名（字节一致）", () => {
+    expect(writePreviewOverflowLabel(10)).toBe(previewOverflowLabel(10));
+    expect(writePreviewOverflowLabel(0)).toBe("+0 more lines");
+  });
+  test("中文旧文案 `还有 N 行` 不再出现（人读合同已换英文）", () => {
+    expect(previewOverflowLabel(3).includes("还有")).toBe(false);
+    for (const n of [0, 1, 7, 32]) {
+      expect(previewOverflowLabel(n)).toMatch(/^\+\d+ more lines$/);
+    }
   });
 });
 
@@ -943,6 +1038,60 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
   });
 });
 
+describe("SC5 / D6：bash 进度流只留最后一行，不堆百分比史", () => {
+  test("百分比流（1%→100%）的 result 预览只含末尾行，早期百分比行不出现", () => {
+    // spec D6 / CONTEXT `progress tick`：`1%`→`100%` 这类过程流只在同一行
+    // 原地更新，落定不留轨迹。TUI 的落定面 = result 预览尾窗（5 行），
+    // 早期百分比行既不在可见行、也不在可回看面 —— 只有一条 bash 结果行。
+    const stdout = Array.from(
+      { length: 20 },
+      (_, i) => `progress ${String((i + 1) * 5)}%`
+    ).join("\n");
+    const p = resultToolPreview(
+      "bash",
+      { command: "build" },
+      { resultText: JSON.stringify({ code: 0, stdout, stderr: "" }) }
+    );
+    expect(p.kind).toBe("result");
+    if (p.kind !== "result") return;
+    // 窗内 5 行 = 最后 5 行（80%..100%），早期 5% 不在可见面。
+    expect(p.lines.length).toBe(RESULT_PREVIEW_WINDOW);
+    expect(p.lines[p.lines.length - 1]).toBe("progress 100%");
+    expect(p.lines.some((l) => l === "progress 5%")).toBe(false);
+    expect(p.hiddenLineCount).toBe(15);
+  });
+
+  test("同一 tool_use 的进度更新不按事件追加行：行数只由最终输出决定", () => {
+    // 不变式：结果预览的面是「最终输出尾窗」，不是「每次进度事件的追加」。
+    // 同一份输出无论中途被更新过多少步，都只渲染一条 bash 结果面
+    // —— 不存在「按事件追加行」的路径。
+    const steps = Array.from({ length: 20 }, (_, i) => `progress ${i + 1}%`);
+    const early = resultToolPreview(
+      "bash",
+      { command: "build" },
+      { resultText: JSON.stringify({ code: 0, stdout: steps[0], stderr: "" }) }
+    );
+    const late = resultToolPreview(
+      "bash",
+      { command: "build" },
+      {
+        resultText: JSON.stringify({
+          code: 0,
+          stdout: steps.join("\n"),
+          stderr: "",
+        }),
+      }
+    );
+    expect(resultPreviewTextLines(early).length).toBe(1);
+    // 溢出标记 1 行 + 窗内 RESULT_PREVIEW_WINDOW 行。
+    expect(resultPreviewTextLines(late).length).toBe(RESULT_PREVIEW_WINDOW + 1);
+    // 早期百分比行不会被保留成第二条历史行。
+    expect(
+      resultPreviewTextLines(late).some((l) => l.includes("progress 1%"))
+    ).toBe(false);
+  });
+});
+
 describe("registeredToolDisplayNames: 注册表覆盖 EXPECTED_TOOLSET_30", () => {
   test("注册表至少覆盖 EXPECTED_TOOLSET_30 的所有工具名（声明密度单点）", () => {
     // spec D7：新增一种工具的显示只需在 TOOL_DISPLAYS 加一条声明。
@@ -981,15 +1130,15 @@ describe("registeredToolDisplayNames: 注册表覆盖 EXPECTED_TOOLSET_30", () =
       "read_mcp_resource",
       "bash_output",
       "bash_stop",
-      // spec D2：建树四件 + list-task-worktrees 进入显示注册表。TUI 装配面
+      // spec D2：建树四件 + list-worktrees 进入显示注册表。TUI 装配面
       // 仍按 host 缝条件化装配（deps-tools EXPECTED_TUI_TOOLSET 剥除不动），
       // 显示注册表完备性与装配条件化解耦 —— 覆盖闸从 30 件扩为 35 件，
       // 不变量（注册表每件都有显示声明）等于或强于原断言。
-      "create-task-worktree",
-      "enter-task-worktree",
-      "exit-task-worktree",
-      "remove-task-worktree",
-      "list-task-worktrees",
+      "create-worktree",
+      "enter-worktree",
+      "exit-worktree",
+      "remove-worktree",
+      "list-worktrees",
     ];
     const names = new Set(registeredToolDisplayNames());
     for (const name of EXPECTED_TOOLSET_30) {
@@ -1027,13 +1176,13 @@ describe("settledClass: 落定态三分类（spec D2/D8）", () => {
     expect(settledClassOfDisplay("todo_write")).toBe("keep");
     expect(settledClassOfDisplay("read_file")).toBe("retract");
     expect(settledClassOfDisplay("grep")).toBe("retract");
-    expect(settledClassOfDisplay("list-task-worktrees")).toBe("retract");
+    expect(settledClassOfDisplay("list-worktrees")).toBe("retract");
     expect(settledClassOfDisplay("skill")).toBe("accent");
     for (const name of [
-      "create-task-worktree",
-      "enter-task-worktree",
-      "exit-task-worktree",
-      "remove-task-worktree",
+      "create-worktree",
+      "enter-worktree",
+      "exit-worktree",
+      "remove-worktree",
     ]) {
       expect(settledClassOfDisplay(name)).toBe("accent");
     }
@@ -1047,14 +1196,14 @@ describe("settledClass: 落定态三分类（spec D2/D8）", () => {
     expect(settledClassOfDisplay("subagent_result")).toBe("subagent");
   });
 
-  test("建树四件 + list-task-worktrees 进显示注册表（spec D2 建树四件必须入表）", () => {
+  test("建树四件 + list-worktrees 进显示注册表（spec D2 建树四件必须入表）", () => {
     const names = new Set(registeredToolDisplayNames());
     for (const name of [
-      "create-task-worktree",
-      "enter-task-worktree",
-      "exit-task-worktree",
-      "remove-task-worktree",
-      "list-task-worktrees",
+      "create-worktree",
+      "enter-worktree",
+      "exit-worktree",
+      "remove-worktree",
+      "list-worktrees",
     ]) {
       expect(names.has(name)).toBe(true);
     }

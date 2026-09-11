@@ -19,10 +19,7 @@ import { useState } from "react";
 import { useKeyboard } from "@opentui/react";
 import { testRender } from "@opentui/react/test-utils";
 import { RGBA } from "@opentui/core";
-import {
-  completedToolPreview,
-  visualWidth,
-} from "../../src/tui/tool-summary.js";
+import { completedToolPreview } from "../../src/tui/tool-summary.js";
 import { completedToolPreviewTextLines } from "../../src/tui/completed-tool-preview-view.js";
 import {
   liveToolPreviewBox,
@@ -122,7 +119,10 @@ describe("liveToolPreviewBox（live 工具 tail 渲染）", () => {
     };
     const setup = await renderBox(running, 80);
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("[运行中] bash");
+    // spec D1：running process line —— input 未到（detail 空）时仍立 shell
+    // 过程行，不退化成裸工具名、不留悬空 ` ·`。
+    expect(frame).toContain("Running 1 shell command…");
+    expect(frame.includes("[运行中]")).toBe(false);
     expect(frame).not.toContain("@@");
     expect(liveToolPreviewRows(running, 80)).toBe(1);
     await setup.renderer.destroy();
@@ -134,7 +134,7 @@ describe("liveToolPreviewBox（live 工具 tail 渲染）", () => {
       name: "write_file",
       status: "ok",
       input: { path: "a.ts", content: "export const x = 1;\n" },
-      detail: "写入 a.ts（1 行）",
+      detail: "Wrote a.ts (1 lines)",
       oldContent: "",
       newContent: "export const x = 1;\n",
     };
@@ -166,13 +166,13 @@ describe("liveToolPreviewTextLines（flat 行）", () => {
       name: "write_file",
       status: "ok",
       input: { path: "a.ts", content: "x" },
-      detail: "写入 a.ts（1 行）",
+      detail: "Wrote a.ts (1 lines)",
       oldContent: "",
       newContent: "hello\n",
     };
     const rows = liveToolPreviewTextLines(run, 80);
     // #tui-render-overhaul T3:成功态无 [完成] 前缀。
-    expect(rows[0]).toBe("write_file · 写入 a.ts（1 行）");
+    expect(rows[0]).toBe("write_file · Wrote a.ts (1 lines)");
     expect(rows[0]?.includes("[完成]")).toBe(false);
     expect(rows).toContain("hello");
     expect(rows.some((r) => r.includes("+hello"))).toBe(false);
@@ -185,7 +185,7 @@ describe("liveToolPreviewTextLines（flat 行）", () => {
       name: "write_file",
       status: "ok",
       input: { path: "a.ts", content: "hello\nworld\n" },
-      detail: "写入 a.ts（2 行）",
+      detail: "Wrote a.ts (2 lines)",
       oldContent: "",
       newContent: "hello\nworld\n",
     };
@@ -207,14 +207,15 @@ describe("liveToolPreviewTextLines（flat 行）", () => {
       name: "write_file",
       status: "ok",
       input: { path: "a.ts", content },
-      detail: "写入 a.ts（20 行）",
+      detail: "Wrote a.ts (20 lines)",
       oldContent: "",
       newContent: content,
     };
     const rows = liveToolPreviewTextLines(run, 80);
     expect(rows).toContain("body-0");
     expect(rows.some((r) => r.includes("body-19"))).toBe(false);
-    expect(rows.some((r) => r.includes("还有") && r.includes("行"))).toBe(true);
+    // spec D3 / CONTEXT `write create preview`：溢出文案英文 `+N more lines`。
+    expect(rows.some((r) => r.includes("+10 more lines"))).toBe(true);
   });
 
   test("已完成 overwrite/edit：截断 diff 可见", () => {
@@ -235,12 +236,21 @@ describe("liveToolPreviewTextLines（flat 行）", () => {
 
 describe("运行态 → 完成态切换（reducer 驱动）", () => {
   function SwitchHarness() {
+    // 运行态由「start + 首个 input 增量」构成：write_file 的过程行要有路径
+    // 就必须读到流式 input（权威 input 只在完成事件一次性交付）。
     const [runs, setRuns] = useState<ReadonlyArray<LiveToolRun>>(() =>
-      liveToolReduce([], {
-        kind: "tool_call_start",
-        id: "tu-9",
-        name: "write_file",
-      })
+      liveToolReduce(
+        liveToolReduce([], {
+          kind: "tool_call_start",
+          id: "tu-9",
+          name: "write_file",
+        }),
+        {
+          kind: "tool_input_delta",
+          id: "tu-9",
+          partialJson: '{"path":"a.ts"}',
+        }
+      )
     );
     useKeyboard((e) => {
       if (e.name === "return") {
@@ -251,7 +261,7 @@ describe("运行态 → 完成态切换（reducer 驱动）", () => {
             name: "write_file",
             input: { path: "a.ts", content: "hello" },
             ok: true,
-            detail: "写入 a.ts（1 行）",
+            detail: "Wrote a.ts (1 lines)",
             oldContent: "",
             newContent: "hello\n",
           })
@@ -270,13 +280,17 @@ describe("运行态 → 完成态切换（reducer 驱动）", () => {
       exitOnCtrlC: false,
     });
     await setup.renderOnce();
-    expect(setup.captureCharFrame()).toContain("[运行中] write_file");
+    // spec D1：running 是英文过程行（write_file 有 path → `Wrote <path>`；
+    // 行数要等 content 到齐才可信，半成品里不显示），无 `[运行中]` 括号。
+    const runningFrame = setup.captureCharFrame();
+    expect(runningFrame).toContain("write_file · Wrote a.ts");
+    expect(runningFrame.includes("[运行中]")).toBe(false);
     setup.mockInput.pressEnter();
     // #tui-render-overhaul T3:成功态无 [完成] 前缀。
     const frame = await untilFrame(
       setup,
       (f) =>
-        f.includes("write_file · 写入 a.ts（1 行）") && !f.includes("[完成]")
+        f.includes("write_file · Wrote a.ts (1 lines)") && !f.includes("[完成]")
     );
     expect(frame).not.toContain("[运行中]");
     expect(frame).toContain("hello");
@@ -388,7 +402,7 @@ describe("T5: tool_input_delta 增量累积（reducer）", () => {
 });
 
 describe("T5: running 态 partial 摘要渲染", () => {
-  test("partial parse 成功 → `[运行中] bash · <摘要>`（含 ls）", () => {
+  test("partial parse 成功 → `Running 1 shell command… · <摘要>`（含 ls）", () => {
     const run: LiveToolRun = {
       id: "tu-1",
       name: "bash",
@@ -397,9 +411,10 @@ describe("T5: running 态 partial 摘要渲染", () => {
       partialInput: '{"command":"ls"}',
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    expect(rows[0]).toContain("[运行中] bash");
+    // spec D1：running bash 过程行 = `Running 1 shell command… · <命令>`。
+    expect(rows[0]).toContain("Running 1 shell command…");
     expect(rows[0]).toContain("ls");
-    expect(rows[0]).not.toContain("[运行中] bash · {"); // parse 成功走摘要
+    expect(rows[0]).not.toContain(" · {"); // parse 成功走摘要
   });
 
   test('partial 不完整 JSON → 原样截断显示（含 `{"co`）', () => {
@@ -414,7 +429,7 @@ describe("T5: running 态 partial 摘要渲染", () => {
     expect(rows[0]).toContain('{"co');
   });
 
-  test("partialInput 空 / undefined → 保持 `[运行中] name` 基础行", () => {
+  test("partialInput 空 / undefined → 保持基础过程行（bash 只余 shell 前缀）", () => {
     const empty: LiveToolRun = {
       id: "tu-1",
       name: "bash",
@@ -422,14 +437,18 @@ describe("T5: running 态 partial 摘要渲染", () => {
       input: undefined,
       partialInput: "",
     };
-    expect(liveToolPreviewTextLines(empty, 80)[0]).toBe("[运行中] bash");
+    expect(liveToolPreviewTextLines(empty, 80)[0]).toBe(
+      "Running 1 shell command…"
+    );
     const none: LiveToolRun = {
       id: "tu-2",
       name: "bash",
       status: "running",
       input: undefined,
     };
-    expect(liveToolPreviewTextLines(none, 80)[0]).toBe("[运行中] bash");
+    expect(liveToolPreviewTextLines(none, 80)[0]).toBe(
+      "Running 1 shell command…"
+    );
   });
 
   test("行账 parity：partial 渲染仍是 1 行", () => {
@@ -444,7 +463,7 @@ describe("T5: running 态 partial 摘要渲染", () => {
     expect(liveToolPreviewTextLines(run, 80).length).toBe(1);
   });
 
-  test("窄终端：partial 摘要视觉宽度收口（单行不折）", () => {
+  test("窄终端：partial 摘要视觉宽度收口（始终恰好 1 行，不折行）", () => {
     const run: LiveToolRun = {
       id: "tu-1",
       name: "bash",
@@ -452,10 +471,17 @@ describe("T5: running 态 partial 摘要渲染", () => {
       input: undefined,
       partialInput: `{"command":"${"x".repeat(300)}"}`,
     };
-    const line = liveToolPreviewTextLines(run, 30)[0] ?? "";
-    // 视觉宽度收口契约：完整行（含 [运行中] 前缀 + 分隔符）≤ 终端列宽。
-    expect(line.length).toBeGreaterThan(0);
-    expect(visualWidth(line)).toBeLessThanOrEqual(30);
+    const rows = liveToolPreviewTextLines(run, 30);
+    // spec D1/D6 的单行契约：无论终端多窄、命令多长，过程行都只占 1 行
+    // （行账 parity：`liveToolPreviewRows` 也必须是 1）。截断按视觉宽度，
+    // 长命令以 `…` 收口而不是折成第二行 —— 才是「不折」的真实不变式；
+    // 宽度收口由 tool-summary 的 clipDetail 预算保证（回归见
+    // tool-summary.test.ts 的 running 前缀用例）。
+    expect(rows.length).toBe(1);
+    expect(liveToolPreviewRows(run, 30)).toBe(1);
+    const line = rows[0] ?? "";
+    expect(line.startsWith("Running 1 shell command…")).toBe(true);
+    expect(line.endsWith("…")).toBe(true);
   });
 
   test("running write_file + 完整 partial：1 行且不出现 content 正文", () => {
@@ -468,7 +494,7 @@ describe("T5: running 态 partial 摘要渲染", () => {
     };
     const rows = liveToolPreviewTextLines(run, 80);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toContain("[运行中] write_file");
+    expect(rows[0]).toContain("write_file · Wrote a.ts");
     expect(rows.join("\n")).not.toContain("SHOULD_NOT_STREAM");
   });
 
@@ -517,7 +543,7 @@ describe("T5: running 态 partial 摘要渲染", () => {
     };
     const setup = await renderBox(run, 80);
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("[运行中] bash");
+    expect(frame).toContain("Running 1 shell command…");
     expect(frame).toContain("git status");
     await setup.renderer.destroy();
   });
@@ -544,18 +570,18 @@ describe("formatRunningToolLine: 子代理工具运行行（plans T7 钉死不�
       input: undefined,
     };
     const line = formatRunningToolLine(run);
-    expect(line).toBe("轮询 ?");
+    expect(line).toBe("Poll ?");
     expect(line.includes("▣")).toBe(false);
   });
 
-  test("bash run 回归 → `[运行中] bash`（普通工具形态不受影响）", () => {
+  test("bash run 回归 → `Running 1 shell command…`（普通工具形态）", () => {
     const run: LiveToolRun = {
       id: "tu-bash",
       name: "bash",
       status: "running",
       input: undefined,
     };
-    expect(formatRunningToolLine(run)).toBe("[运行中] bash");
+    expect(formatRunningToolLine(run)).toBe("Running 1 shell command…");
   });
 });
 
@@ -611,7 +637,9 @@ describe("liveToolPreviewTextLines (#589 贴底尾巴不含成功只读完成行
       name: "read_file",
     });
     const text = previewLines(reduceTail(events));
-    expect(text).toContain("[运行中] read_file");
+    // spec D1：read_file 的运行过程行（retract 类过程仍在，落定后才收进
+    // 计数），无 `[运行中]` 括号。
+    expect(text).toContain("read_file · Read ?");
     expect(text).toContain("GREP_FAIL_MARKER");
     expect(text).not.toContain("MARKER_READ_OK_");
     expect(text).not.toMatch(/read_file · .* · ok/);
@@ -748,7 +776,7 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
       input: { command: "ls" },
     };
     const rows = liveToolPreviewTextLines(run, 80);
-    expect(rows[0]).toBe("[运行中] bash · ls");
+    expect(rows[0]).toBe("Running 1 shell command… · ls");
     expect(rows.some((r) => r.includes("> "))).toBe(false);
     expect(liveToolPreviewRows(run, 80)).toBe(1);
   });
@@ -793,21 +821,27 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
   test("SC5 live accent 成功：dim 不染 accent 完成行", async () => {
     const run: LiveToolRun = {
       id: "tu-ctw-accent",
-      name: "create-task-worktree",
+      name: "create-worktree",
       status: "ok",
       input: {},
-      detail: "创建任务工作树",
+      detail: "Created worktree",
     };
     const setup = await renderBox(run, 80);
     const expectedDim = RGBA.fromHex(tuiPalette.dim);
     const { lines } = setup.captureSpans();
+    // D1（specs/tui-human-display.md）：人读行英文并点名新注册名
+    // （specs/create-worktree-tools.md D5）；渲染的 detail 必须真出现在帧上，
+    // 否则色断言空转（旧名断言在改名后失效，此处钉住实际可见文本）。
+    let sawLine = false;
     for (const line of lines) {
       for (const span of line.spans) {
-        if (span.text.includes("创建任务工作树")) {
+        if (span.text.includes("create-worktree · Created worktree")) {
+          sawLine = true;
           expect(rgbaEq(span.fg, expectedDim)).toBe(false);
         }
       }
     }
+    expect(sawLine).toBe(true);
     await setup.renderer.destroy();
   });
 });

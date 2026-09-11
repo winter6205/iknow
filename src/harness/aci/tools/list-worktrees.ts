@@ -14,7 +14,7 @@ import type {
 import { WorktreeIsolationError } from "../../isolation/worktree-gate.js";
 import type { AciToolDef } from "../types.js";
 
-export interface ListTaskWorktreesToolDeps {
+export interface ListWorktreesToolDeps {
   readonly worktreeList: WorktreeListFn;
   readonly root: string | LiveTaskRoot;
 }
@@ -25,15 +25,13 @@ function readRoot(root: string | LiveTaskRoot): string {
 
 function includeStaleFrom(input: unknown): boolean {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
-    throw new ToolExecutionError(
-      "[list-task-worktrees] input must be an object"
-    );
+    throw new ToolExecutionError("[list-worktrees] input must be an object");
   }
   const value = (input as { include_stale?: unknown }).include_stale;
   if (value === undefined) return false;
   if (typeof value !== "boolean") {
     throw new ToolExecutionError(
-      "[list-task-worktrees] include_stale must be a boolean"
+      "[list-worktrees] include_stale must be a boolean"
     );
   }
   return value;
@@ -53,13 +51,15 @@ function serialize(entries: ReadonlyArray<TaskWorktreeInfo>): string {
   );
 }
 
-export function createListTaskWorktreesTool(
-  deps: ListTaskWorktreesToolDeps
+export function createListWorktreesTool(
+  deps: ListWorktreesToolDeps
 ): AciToolDef {
   return Object.freeze({
-    name: "list-task-worktrees",
+    name: "list-worktrees",
     description:
-      "List task worktrees belonging to this repository with their label, conversation id, path, branch, HEAD, and dirty state. Use include_stale=true to discover task branches that currently have no linked checkout; the result is JSON suitable for selecting a unique label before enter-task-worktree or auditing a cleanup.",
+      "List task worktrees belonging to this repository with their label, conversation id, path, branch, HEAD, and dirty state. " +
+      "Use include_stale=true to also discover task branches that currently have no linked checkout; the result is JSON " +
+      "suitable for selecting a unique label before enter-worktree or auditing a cleanup.",
     inputSchema: {
       type: "object",
       properties: {
@@ -89,11 +89,11 @@ export function createListTaskWorktreesTool(
       } catch (err) {
         if (err instanceof WorktreeIsolationError) {
           throw new ToolExecutionError(
-            `[list-task-worktrees] kind=${err.kind} — ${err.detail}`
+            `[list-worktrees] kind=${err.kind} — ${err.detail}`
           );
         }
         throw new ToolExecutionError(
-          `[list-task-worktrees] list failed: ${errorMessage(err)}`
+          `[list-worktrees] list failed: ${errorMessage(err)}`
         );
       }
     },

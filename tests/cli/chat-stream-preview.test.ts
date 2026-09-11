@@ -14,11 +14,23 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   processChatLine,
   createStreamPreviewSink,
+  type StreamPreviewSink,
 } from "../../src/cli/chat-session.ts";
 import type { HarnessStreamEvent } from "../../src/harness/index.ts";
+import {
+  BASH_RUNNING_PREFIX,
+  formatThinkingLive,
+  formatToolStatusLine,
+} from "../../src/shared/tool-line.ts";
+import {
+  formatToolStatusLine as tuiFormatToolStatusLine,
+  registeredToolDisplayNames,
+} from "../../src/tui/tool-summary.ts";
+import { formatThinkingLive as tuiFormatThinkingLive } from "../../src/tui/think-fold.ts";
 import { assistantResult, makeCtx } from "./_fixtures.ts";
 
 describe("processChatLine onStream forwarding (#179 T6)", () => {
@@ -109,7 +121,7 @@ describe("createStreamPreviewSink (#179 T6 TTY spinner replacement)", () => {
     assert.equal(sink.textStreamed, true);
   });
 
-  it("emits a tool-name hint to stderr for tool_call_start", () => {
+  it("emits the shared tool line to stderr once the call closes", () => {
     const { err, writers } = captureStreams();
     const sink = createStreamPreviewSink(writers);
     sink.feed({
@@ -117,11 +129,19 @@ describe("createStreamPreviewSink (#179 T6 TTY spinner replacement)", () => {
       name: "bash",
       id: "toolu_bash_remaining",
     });
-    // First chunk clears the spinner, second carries the tool hint.
+    // input 增量未到之前不落行：CLI 的 start 事件不携带 input，只有
+    // tool_input_delta 齐了才画得出 detail（D1 合同）。
+    assert.ok(err.every((chunk) => !chunk.includes("bash")));
+    sink.feed({
+      type: "tool_input_delta",
+      id: "toolu_bash_remaining",
+      partialJson: '{"command":"npm test"}',
+    });
+    sink.feed({ type: "text_delta", text: "done" });
     const joined = err.join("");
-    assert.ok(joined.includes("bash"));
+    assert.ok(joined.includes("Running 1 shell command… · npm test"));
     // tool_call_start is a status hint, not answer text.
-    assert.equal(sink.textStreamed, false);
+    assert.equal(sink.textStreamed, true);
   });
 
   it("writer errors are swallowed (observer must not break the turn)", () => {
@@ -248,5 +268,311 @@ describe("createStreamPreviewSink (#179 T6 TTY spinner replacement)", () => {
     sink.feed({ type: "text_delta", text: "" });
     assert.deepEqual(out, ["x"], "empty delta must not produce a second write");
     assert.equal(sink.textStreamed, true);
+  });
+});
+
+/** stderr 行中「工具行」的判定：CLI 只往 stderr 写工具过程行与 spinner 清除
+ *  序列，其余（答案文本）走 stdout。过滤掉纯清行序列后按顺序取工具行。 */
+function toolLinesOf(err: ReadonlyArray<string>): ReadonlyArray<string> {
+  return err.filter((chunk) => chunk.includes("\n")).map((c) => c.trim());
+}
+
+/** 驱动一次工具调用：start → input 增量 → 关闭（下一个非增量事件）。 */
+function feedToolCall(
+  sink: StreamPreviewSink,
+  opts: {
+    readonly id: string;
+    readonly name: string;
+    readonly partialJson?: string;
+    readonly closeWith: HarnessStreamEvent;
+  }
+): void {
+  sink.feed({ type: "tool_call_start", name: opts.name, id: opts.id });
+  if (opts.partialJson !== undefined) {
+    sink.feed({
+      type: "tool_input_delta",
+      id: opts.id,
+      partialJson: opts.partialJson,
+    });
+  }
+  sink.feed(opts.closeWith);
+}
+
+/** 与 shared 模块同源的期望行（不手抄模板字符串）。 */
+function expectedLine(
+  name: string,
+  input: unknown,
+  status: "running" | "ok" | "failed" = "running"
+): string {
+  return formatToolStatusLine({ toolName: name, input, status });
+}
+
+describe("createStreamPreviewSink: CLI 与 TUI 共用 live tool line（D1）", () => {
+  it("(a) 工具行由共享函数产出：与 shared formatToolStatusLine 同字节", () => {
+    const { err, writers } = captureStreams();
+    const sink = createStreamPreviewSink(writers);
+    feedToolCall(sink, {
+      id: "tu-shared-1",
+      name: "bash",
+      partialJson: '{"command":"npm test"}',
+      closeWith: { type: "text_delta", text: "ok" },
+    });
+    const lines = toolLinesOf(err);
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0], expectedLine("bash", { command: "npm test" }));
+    // 生产面同源闸：tui 侧 re-export 与 shared 逐字节一致（同一函数对象）。
+    assert.equal(tuiFormatToolStatusLine, formatToolStatusLine);
+    assert.equal(tuiFormatThinkingLive, formatThinkingLive);
+  });
+
+  it("(b) 行是英文：不含 调用工具 / [运行中] / [完成]", () => {
+    const { err, writers } = captureStreams();
+    const sink = createStreamPreviewSink(writers);
+    feedToolCall(sink, {
+      id: "tu-en-1",
+      name: "read_file",
+      partialJson: '{"path":"src/app.ts"}',
+      closeWith: { type: "text_delta", text: "x" },
+    });
+    const line = toolLinesOf(err)[0] ?? "";
+    assert.equal(line, "read_file · Read src/app.ts");
+    assert.ok(!line.includes("调用工具"));
+    assert.ok(!line.includes("[运行中]"));
+    assert.ok(!line.includes("[完成]"));
+  });
+
+  it("(c) detail 齐了才落行：bash 命令 / 路径 / 查询 / URL 均可见", () => {
+    const cases: ReadonlyArray<{
+      readonly name: string;
+      readonly partialJson: string;
+      readonly expect: string;
+    }> = [
+      {
+        name: "bash",
+        partialJson: '{"command":"ls -la"}',
+        expect: `Running 1 shell command… · ls -la`,
+      },
+      {
+        name: "read_file",
+        partialJson: '{"path":"a/b.ts"}',
+        expect: "read_file · Read a/b.ts",
+      },
+      {
+        name: "grep",
+        partialJson: '{"pattern":"TODO"}',
+        expect: "grep · Search TODO",
+      },
+      {
+        name: "web_search",
+        partialJson: '{"query":"bun test"}',
+        expect: "web_search · Search bun test",
+      },
+      {
+        name: "web_fetch",
+        partialJson: '{"url":"https://x.dev"}',
+        expect: "web_fetch · Fetch https://x.dev",
+      },
+    ];
+    for (const c of cases) {
+      const { err, writers } = captureStreams();
+      const sink = createStreamPreviewSink(writers);
+      feedToolCall(sink, {
+        id: `tu-${c.name}`,
+        name: c.name,
+        partialJson: c.partialJson,
+        closeWith: { type: "text_delta", text: "x" },
+      });
+      const lines = toolLinesOf(err);
+      assert.equal(lines.length, 1, `${c.name}: exactly one line`);
+      assert.equal(lines[0], c.expect, `${c.name}: detail visible`);
+      assert.ok(
+        lines[0] === expectedLine(c.name, JSON.parse(c.partialJson)),
+        `${c.name}: same source as shared summarizer`
+      );
+    }
+    // bash 前缀本身来自 shared 常量（不是 CLI 侧新字面量）。
+    assert.ok(BASH_RUNNING_PREFIX.startsWith("Running 1 shell command"));
+  });
+
+  it("(c2) 增量 JSON 不完整 / 缺席 → 仍落一行（name-only），不 throw", () => {
+    const { err, writers } = captureStreams();
+    const sink = createStreamPreviewSink(writers);
+    feedToolCall(sink, {
+      id: "tu-partial",
+      name: "read_file",
+      partialJson: '{"path":"src/partial',
+      closeWith: { type: "text_delta", text: "x" },
+    });
+    feedToolCall(sink, {
+      id: "tu-noinput",
+      name: "mystery_tool",
+      closeWith: { type: "text_delta", text: "y" },
+    });
+    const lines = toolLinesOf(err);
+    assert.equal(lines.length, 2);
+    // 不完整 JSON：走 summarizePartialInput 的原样截断（同一共享函数），
+    // 行仍成立、detail 部分可见。
+    assert.ok(lines[0]!.startsWith("read_file · "));
+    assert.ok(lines[0]!.includes("src/partial"));
+    assert.equal(lines[1], "mystery_tool");
+  });
+
+  it("(d) 每个工具调用恰一行：连续调用不重复、不追加", () => {
+    const { err, writers } = captureStreams();
+    const sink = createStreamPreviewSink(writers);
+    feedToolCall(sink, {
+      id: "tu-a",
+      name: "read_file",
+      partialJson: '{"path":"a.ts"}',
+      closeWith: { type: "tool_call_start", name: "bash", id: "tu-b" },
+    });
+    sink.feed({
+      type: "tool_input_delta",
+      id: "tu-b",
+      partialJson: '{"command":"pwd"}',
+    });
+    sink.feed({ type: "text_delta", text: "end" });
+    const lines = toolLinesOf(err);
+    assert.equal(lines.length, 2, "one line per tool call");
+    assert.equal(lines[0], "read_file · Read a.ts");
+    assert.equal(lines[1], "Running 1 shell command… · pwd");
+    // 同 id 的多个增量不产生多行（累积到关闭时才 flush）。
+    const joined = err.join("");
+    assert.equal(joined.split("Running 1 shell command… · pwd").length - 1, 1);
+  });
+
+  it("(d2) 同 id 多个 input 增量累积成一行（不逐段刷行）", () => {
+    const { err, writers } = captureStreams();
+    const sink = createStreamPreviewSink(writers);
+    sink.feed({ type: "tool_call_start", name: "bash", id: "tu-frag" });
+    for (const frag of ['{"comma', 'nd":"git ', 'status"}']) {
+      sink.feed({ type: "tool_input_delta", id: "tu-frag", partialJson: frag });
+    }
+    // 增量期间不落行。
+    assert.ok(err.every((chunk) => !chunk.includes("bash")));
+    sink.feed({ type: "stop_summary", text: "done" });
+    const lines = toolLinesOf(err);
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0], "Running 1 shell command… · git status");
+  });
+
+  it("(e) 回合结束 flush：最后一个工具调用不留悬浮（turn 尾部事件）", () => {
+    const { err, writers } = captureStreams();
+    const sink = createStreamPreviewSink(writers);
+    sink.feed({ type: "tool_call_start", name: "bash", id: "tu-last" });
+    sink.feed({
+      type: "tool_input_delta",
+      id: "tu-last",
+      partialJson: '{"command":"tail"}',
+    });
+    sink.feed({ type: "stop_summary", text: "" });
+    const lines = toolLinesOf(err);
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0], "Running 1 shell command… · tail");
+  });
+
+  it("(f) 非增量事件到达即 flush：thinking_delta / agent_status 同样是关闭点", () => {
+    for (const closing of [
+      { type: "thinking_delta", text: "hmm" },
+      { type: "agent_status", lastTool: "bash", openTodoLines: [] },
+      { type: "stop_summary", text: "" },
+    ] as ReadonlyArray<HarnessStreamEvent>) {
+      const { err, writers } = captureStreams();
+      const sink = createStreamPreviewSink(writers);
+      sink.feed({ type: "tool_call_start", name: "grep", id: "tu-c" });
+      sink.feed({
+        type: "tool_input_delta",
+        id: "tu-c",
+        partialJson: '{"pattern":"x"}',
+      });
+      sink.feed(closing);
+      const lines = toolLinesOf(err);
+      assert.equal(lines.length, 1, `closing=${closing.type}`);
+      assert.equal(lines[0], "grep · Search x", `closing=${closing.type}`);
+    }
+  });
+
+  it("(g) 其他 id 的 input 增量不属于当前工具 → 不提前 flush", () => {
+    const { err, writers } = captureStreams();
+    const sink = createStreamPreviewSink(writers);
+    sink.feed({ type: "tool_call_start", name: "bash", id: "tu-own" });
+    sink.feed({
+      type: "tool_input_delta",
+      id: "tu-other",
+      partialJson: '{"command":"nope"}',
+    });
+    // 未关闭：不落行（其他 id 的增量不构成关闭点）。
+    assert.ok(err.every((chunk) => !chunk.includes("bash")));
+    sink.feed({
+      type: "tool_input_delta",
+      id: "tu-own",
+      partialJson: '{"command":"yes"}',
+    });
+    sink.feed({ type: "text_delta", text: "z" });
+    const lines = toolLinesOf(err);
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0], "Running 1 shell command… · yes");
+  });
+
+  it("(h) 生产面闸：CLI 不再有 调用工具 中文裸名 dump；CLI 不 import src/tui", () => {
+    const src = readFileSync(
+      new URL("../../src/cli/chat-session.ts", import.meta.url),
+      "utf8"
+    );
+    // 只看代码：注释里提旧文案（如「清掉 Thinking… spinner」沿革说明）不算
+    // 生产面（同 tests/tui/tool-summary.test.ts 的 readFileSync 闸纪律）。
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    assert.ok(!code.includes("调用工具"), "raw tool-name dump retired");
+    assert.ok(!code.includes("思考中"), "Chinese spinner retired (D1)");
+    assert.ok(
+      !/from "\.\.\/tui\//.test(code),
+      "CLI must not import src/tui (layering inversion)"
+    );
+  });
+
+  it("(i) spinner 文案来自共享函数：Thinking…（TUI 同源）", () => {
+    const src = readFileSync(
+      new URL("../../src/cli/chat-session.ts", import.meta.url),
+      "utf8"
+    );
+    assert.ok(src.includes("formatThinkingLive"));
+    assert.equal(formatThinkingLive(), "Thinking…");
+    assert.equal(formatThinkingLive(), tuiFormatThinkingLive());
+    assert.ok(!src.includes('"思考中…"'));
+  });
+
+  it("(j) 注册表里的工作树五件人读表述为英文（D1 / create-worktree D5）", () => {
+    const names = new Set(registeredToolDisplayNames());
+    for (const n of [
+      "create-worktree",
+      "enter-worktree",
+      "exit-worktree",
+      "remove-worktree",
+      "list-worktrees",
+    ]) {
+      assert.ok(names.has(n));
+      const line = formatToolStatusLine({
+        toolName: n,
+        input: {},
+        status: "ok",
+      });
+      assert.ok(!/[一-鿿]/.test(line), `${n} line is English: ${line}`);
+    }
+    assert.equal(
+      formatToolStatusLine({
+        toolName: "create-worktree",
+        input: {},
+        status: "ok",
+      }),
+      "create-worktree · Created worktree"
+    );
+    assert.equal(
+      formatToolStatusLine({
+        toolName: "enter-worktree",
+        input: { conversationId: "abc" },
+        status: "ok",
+      }),
+      "enter-worktree · Entered worktree abc"
+    );
   });
 });

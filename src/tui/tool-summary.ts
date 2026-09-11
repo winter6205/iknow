@@ -9,55 +9,63 @@
  * T5 (tui-render-optimization)：`summarizePartialInput` — 运行中 partial JSON
  * 文本摘要（parse 成功走 summarizeToolCall，不完整 JSON 原样截断）。
  *
- * 宽度纪律（窄终端修复）：摘要行渲染形态有三种——终稿 `[运行中] name · detail`、
- * live 完成行 `name · detail · ok`、live 运行行（T5 含 partial 摘要）——
- * 行级窗口账目一律按 1 行计。传 `cols` 时按视觉宽度收口（预留最宽装饰），
- * 保证三种形态单行不折。
+ * D1（specs/tui-human-display.md）拆分：**文本层**（摘要 / 状态行拼装 /
+ * 收口助手 / 子代理文案）已搬到中立模块 `src/shared/tool-line.ts` —— CLI
+ * 与该模块共用同一实现（CLI import src/tui 是反向分层）。本文件对它们做
+ * re-export，既有 TUI 调用方与 tests/tui/* 的 import 路径与字节不变；
+ * 本文件保留 TUI 独有的部分：**结果预览**（completedToolPreview /
+ * resultToolPreview / toolPreviewRows）与带 settledClass 的显示注册表。
+ *
+ * 宽度纪律（窄终端修复）：摘要行渲染形态有三种——running 过程行
+ * （`Running 1 shell command… · <command>` / `name · detail`）、完成行
+ * `name · detail`（failed 才有 `[失败]` 前缀）——行级窗口账目一律按
+ * 1 行计。传 `cols` 时按视觉宽度收口（预留最宽装饰），保证各形态单行不折
+ * （running bash 前缀较长，拼装后由 `formatToolStatusLine` 整行兜底收口）。
  *
  * 内容可见性：write_file / edit_file 完成后 `completedToolPreview` 产出
  * 截断代码或 diff（UI SSOT）；live box 与历史 `ToolPreviewRows` 共用
  * `CompletedToolPreviewView` 渲染。`toolPreviewRows` 仍是无界 DiffLine
  * 助手（测试锁 create 整文件绿 diff），生产 UI 不直接调用。
- *
- * 文本收口助手（visualWidth / clipOneLine / clipOneLineVisual）：归档时代
- * SSOT 在 text.ts（未入 T4 迁移清单），T4 范围内收敛在本文件导出，供
- * context-bar / list-view 共用；后续弹如需独立 text.ts 再整体搬移。
  */
-import stringWidth from "string-width";
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
+import {
+  BASH_RUNNING_PREFIX,
+  SUBAGENT_ROLE_FALLBACK,
+  SUBAGENT_TOOL_LABEL,
+  TOOL_SUMMARIES,
+  clipOneLine,
+  clipOneLineVisual,
+  formatLiveToolEvent,
+  formatThinkingLive,
+  formatToolStatusLine,
+  isSubagentTool,
+  resolveSubagentRoleFromInput,
+  subagentDisplayMark,
+  summarizePartialInput,
+  summarizeToolCall,
+  visualWidth,
+} from "../shared/tool-line.js";
 import { computeDiff, type DiffLine } from "./diff-unified.js";
 import { TOOL_SETTLED_CLASS, type SettledClass } from "./tool-settled.js";
 
-/** 视觉列宽（CJK / 全角按 2 列，string-width 口径）。 */
-export function visualWidth(s: string): number {
-  return stringWidth(s);
-}
-
-/** 单行裁剪（字符数口径）：折叠空白，超长按字符数截断补 `…`。 */
-export function clipOneLine(s: string, max: number): string {
-  const oneLine = s.replace(/\s+/g, " ").trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
-}
-
-/**
- * 按**视觉宽度**截断单行（CJK 占 2 列）。保证结果 `visualWidth <= maxWidth`；
- * 省略号预留 1 列。maxWidth <= 0 返回空串。
- */
-export function clipOneLineVisual(s: string, maxWidth: number): string {
-  const oneLine = s.replace(/\s+/g, " ").trim();
-  if (maxWidth <= 0) return "";
-  if (visualWidth(oneLine) <= maxWidth) return oneLine;
-  const budget = maxWidth - 1;
-  let acc = "";
-  let w = 0;
-  for (const ch of oneLine) {
-    const cw = visualWidth(ch);
-    if (w + cw > budget) break;
-    acc += ch;
-    w += cw;
-  }
-  return `${acc}…`;
-}
+// D1 文本层单源 = src/shared/tool-line.ts（CLI 同源）。re-export 保持既有
+// TUI 调用方与 tests/tui/* 的 import 路径不变（字节零变化）。
+export {
+  BASH_RUNNING_PREFIX,
+  SUBAGENT_ROLE_FALLBACK,
+  SUBAGENT_TOOL_LABEL,
+  clipOneLine,
+  clipOneLineVisual,
+  formatLiveToolEvent,
+  formatThinkingLive,
+  formatToolStatusLine,
+  isSubagentTool,
+  resolveSubagentRoleFromInput,
+  subagentDisplayMark,
+  summarizePartialInput,
+  summarizeToolCall,
+  visualWidth,
+};
 
 /** ANSI CSI / OSC escape 序列（多见 CSI SGR `\x1b[...m` / OSC `\x1b]...BEL/ST`）。
  *  strip 时一并吞掉终止符（m / K / H / J / BEL / ST = ESC \），保证不会把
@@ -77,14 +85,6 @@ export interface ToolSummaryLine {
   readonly status: "ok" | "failed" | "unknown";
 }
 
-const MAX_DETAIL = 80;
-/** 装饰预留（统一形态 `#693 T1 D7`，live 完成态去尾缀）：终稿行
- *  `[运行中] `（9 列）+ 分隔 ` · `（3 列）= 12。历史 + live 共用同一形态
- *  后，再无「live 完成行 ` · failed`」的尾缀差异；按形态最大值收口保证
- *  单行不折。子代理分支走 `▣|✓|✗ 子代理 · detail`（≈ 12 列），同样落在
- *  预算内。 */
-const CHROME_RESERVE = 12;
-
 function inputRecord(input: unknown): Record<string, unknown> {
   return typeof input === "object" && input !== null
     ? (input as Record<string, unknown>)
@@ -94,133 +94,6 @@ function inputRecord(input: unknown): Record<string, unknown> {
 function countLines(s: unknown): number {
   if (typeof s !== "string" || s.length === 0) return 0;
   return s.split("\n").length;
-}
-
-/** detail 截断：给了 cols 走视觉宽度收口（保证单行不折），否则 legacy 80。 */
-function clipDetail(s: string, name: string, cols: number | undefined): string {
-  if (cols === undefined) return clipOneLine(s, MAX_DETAIL);
-  const budget = Math.max(4, cols - visualWidth(name) - CHROME_RESERVE);
-  return clipOneLineVisual(s, Math.min(MAX_DETAIL, budget));
-}
-
-/** 字段提取辅助：string 字段（缺失 → fallback），避免逐 case 重复防御。 */
-function pickString(
-  rec: Record<string, unknown>,
-  key: string,
-  fallback = "?"
-): string {
-  const v = rec[key];
-  return typeof v === "string" ? v : fallback;
-}
-
-/** 字段提取辅助：number 字段（缺失/非有限数 → null）。 */
-function pickNumber(rec: Record<string, unknown>, key: string): number | null {
-  const v = rec[key];
-  return typeof v === "number" && Number.isFinite(v) ? v : null;
-}
-
-/** LSP 工具：共享「file[:line]」模板（definition/references/hover/...）。 */
-function lspAt(rec: Record<string, unknown>, name: string): string {
-  const file = pickString(rec, "file");
-  const line = pickNumber(rec, "line");
-  return `LSP ${name.replace("lsp_", "")} ${file}${line !== null ? `:${line}` : ""}`;
-}
-
-/** 子代理工具专属显示（与普通工具行区分；主流 Agent 惯例：子代理调用有独立
- *  视觉，不与普通工具共用 `[运行中] name · detail` 形态）。几何字形，无 emoji
- *  （spec #146:86）。 */
-export const SUBAGENT_TOOL_LABEL = "子代理";
-
-/** 子代理工具判定：spawn_subagent（派发）+ subagent_result（轮询）。 */
-export function isSubagentTool(name: string): boolean {
-  return name === "spawn_subagent" || name === "subagent_result";
-}
-
-/** 子代理工具状态字形：running → ▣，ok → ✓，failed → ✗。 */
-export function subagentDisplayMark(kind: "running" | "ok" | "failed"): string {
-  if (kind === "ok") return "✓";
-  if (kind === "failed") return "✗";
-  return "▣";
-}
-
-/** spawn 工具 input 的 catalog role 投影（与 SubagentIdentityStrip 同源 fallback）。 */
-export const SUBAGENT_ROLE_FALLBACK = "general-purpose";
-
-/** 从 spawn_subagent tool_use input 解析 catalog id（`subagent_type` → `role` → fallback）。 */
-export function resolveSubagentRoleFromInput(
-  rec: Record<string, unknown>
-): string {
-  const fromType = pickString(rec, "subagent_type", "").trim();
-  if (fromType.length > 0 && fromType !== "?") return fromType;
-  const fromRole = pickString(rec, "role", "").trim();
-  if (fromRole.length > 0 && fromRole !== "?") return fromRole;
-  return SUBAGENT_ROLE_FALLBACK;
-}
-
-function spawnSubagentSettledSummary(rec: Record<string, unknown>): string {
-  return resolveSubagentRoleFromInput(rec);
-}
-
-function spawnSubagentRunningSummary(rec: Record<string, unknown>): string {
-  return `${resolveSubagentRoleFromInput(rec)} running`;
-}
-
-/** 工具 → 摘要器 lookup table。每项返回未 clip 的 detail 文本。 */
-const SUMMARIZERS: Readonly<
-  Record<string, (rec: Record<string, unknown>) => string>
-> = {
-  write_file: (r) =>
-    `写入 ${pickString(r, "path")}（${countLines(r.content)} 行）`,
-  bash: (r) => pickString(r, "command", ""),
-  edit_file: (r) => {
-    const all = r.replace_all === true;
-    return `编辑 ${pickString(r, "path")}${all ? "（全部替换）" : ""}：${pickString(r, "old_str", "")} → ${pickString(r, "new_str", "")}`;
-  },
-  read_file: (r) => `读取 ${pickString(r, "path")}`,
-  grep: (r) => `搜索 ${pickString(r, "pattern")}`,
-  glob: (r) => `匹配 ${pickString(r, "pattern")}`,
-  // web / memory / skill / search 类：聚焦首个关键字段，避免 JSON 全文外露。
-  web_search: (r) => `搜索 ${pickString(r, "query")}`,
-  web_fetch: (r) => `抓取 ${pickString(r, "url")}`,
-  memory_recall: (r) => `记忆 召回 ${pickString(r, "query")}`,
-  memory_save: (r) => `记忆 写入 ${pickString(r, "title")}`,
-  tool_search: (r) => {
-    const query = pickString(r, "query", "");
-    if (query.length > 0) return `检索工具 ${query}`;
-    if (Array.isArray(r.names) && r.names.length > 0) {
-      const firstName = r.names[0];
-      return `检索工具名 ${typeof firstName === "string" ? firstName : r.names.length}`;
-    }
-    return "检索工具 ?";
-  },
-  skill: (r) => `skill ${pickString(r, "name")}`,
-  spawn_subagent: spawnSubagentSettledSummary,
-  subagent_result: (r) => `轮询 ${pickString(r, "task_id")}`,
-  // LSP 工具集：10 件。8 件共享 file[:line] 模板；documentSymbol / workspaceSymbol 走各自形态。
-  lsp_definition: (r) => lspAt(r, "lsp_definition"),
-  lsp_references: (r) => lspAt(r, "lsp_references"),
-  lsp_hover: (r) => lspAt(r, "lsp_hover"),
-  lsp_go_to_implementation: (r) => lspAt(r, "lsp_go_to_implementation"),
-  lsp_prepare_call_hierarchy: (r) => lspAt(r, "lsp_prepare_call_hierarchy"),
-  lsp_incoming_calls: (r) => lspAt(r, "lsp_incoming_calls"),
-  lsp_outgoing_calls: (r) => lspAt(r, "lsp_outgoing_calls"),
-  lsp_diagnostics: (r) => lspAt(r, "lsp_diagnostics"),
-  lsp_document_symbol: (r) => `LSP documentSymbol ${pickString(r, "file")}`,
-  lsp_workspace_symbol: (r) => `LSP workspaceSymbol ${pickString(r, "query")}`,
-};
-
-/** write_file 运行中摘要：路径与行数都只在**已知**时出现。运行中的 input 是
- *  流式半成品 —— `content` 缺失 / 非 string / 空串都只说明「还没到」，不是
- *  「文件有 0 行」，此时只画路径；连 `path` 都还没到 → 空串（调用方落到裸
- *  `[运行中] write_file`，不画 `写入 ?`）。落定态（summary）的空 content 才
- *  是真实的空文件，仍显示 `（0 行）`。 */
-function writeFileRunningSummary(r: Record<string, unknown>): string {
-  const path = r.path;
-  if (typeof path !== "string" || path.length === 0) return "";
-  const content = r.content;
-  if (typeof content !== "string" || content.length === 0)
-    return `写入 ${path}`;
-  return `写入 ${path}（${countLines(content)} 行）`;
 }
 
 /** #693 T4 D4:工具显示注册表 — 「摘要 + 结果预览」一体声明。
@@ -237,6 +110,8 @@ function writeFileRunningSummary(r: Record<string, unknown>): string {
  *  来源 = `toolResultTextMap(session.messages)`）。
  */
 interface ToolDisplay {
+  /** 摘要声明：引用 shared TOOL_SUMMARIES 的同一函数对象（不是复制文本）——
+   *  CLI 与 TUI 的 detail 文本单源，注册表只把它纳入「一体声明」行。 */
   readonly summary: (rec: Record<string, unknown>) => string;
   /** 运行中摘要（可选）。字段缺席 = 运行态与落定态同文案；声明它的工具，
    *  其落定摘要含「只有 input 齐了才可信的量」（write_file 的行数）——
@@ -295,159 +170,168 @@ function bashPreview(
 }
 
 const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
-  // settledClass 值取自 tool-settled.ts 的 D8 分类表（单一来源，注册表只复用
-  // 不复制；summary + preview? + settledClass 同置一行，spec D7）。
+  // settledClass 值取自 tool-settled.ts 的 D8 分类表、summary 取自 shared
+  // TOOL_SUMMARIES（两处均为单一来源，注册表只复用不复制；summary +
+  // preview? + settledClass 同置一行，spec D7）。
   write_file: {
-    summary: SUMMARIZERS.write_file!,
-    runningSummary: writeFileRunningSummary,
+    summary: TOOL_SUMMARIES.write_file!.summary,
+    runningSummary: TOOL_SUMMARIES.write_file!.runningSummary,
     settledClass: TOOL_SETTLED_CLASS.write_file!,
   },
   edit_file: {
-    summary: SUMMARIZERS.edit_file!,
+    summary: TOOL_SUMMARIES.edit_file!.summary,
     settledClass: TOOL_SETTLED_CLASS.edit_file!,
   },
   bash: {
-    summary: SUMMARIZERS.bash!,
+    summary: TOOL_SUMMARIES.bash!.summary,
     preview: bashPreview,
     settledClass: TOOL_SETTLED_CLASS.bash!,
   },
   read_file: {
-    summary: SUMMARIZERS.read_file!,
+    summary: TOOL_SUMMARIES.read_file!.summary,
     settledClass: TOOL_SETTLED_CLASS.read_file!,
   },
-  grep: { summary: SUMMARIZERS.grep!, settledClass: TOOL_SETTLED_CLASS.grep! },
-  glob: { summary: SUMMARIZERS.glob!, settledClass: TOOL_SETTLED_CLASS.glob! },
+  grep: {
+    summary: TOOL_SUMMARIES.grep!.summary,
+    settledClass: TOOL_SETTLED_CLASS.grep!,
+  },
+  glob: {
+    summary: TOOL_SUMMARIES.glob!.summary,
+    settledClass: TOOL_SETTLED_CLASS.glob!,
+  },
   web_search: {
-    summary: SUMMARIZERS.web_search!,
+    summary: TOOL_SUMMARIES.web_search!.summary,
     settledClass: TOOL_SETTLED_CLASS.web_search!,
   },
   web_fetch: {
-    summary: SUMMARIZERS.web_fetch!,
+    summary: TOOL_SUMMARIES.web_fetch!.summary,
     settledClass: TOOL_SETTLED_CLASS.web_fetch!,
   },
   memory_recall: {
-    summary: SUMMARIZERS.memory_recall!,
+    summary: TOOL_SUMMARIES.memory_recall!.summary,
     settledClass: TOOL_SETTLED_CLASS.memory_recall!,
   },
   memory_save: {
-    summary: SUMMARIZERS.memory_save!,
+    summary: TOOL_SUMMARIES.memory_save!.summary,
     settledClass: TOOL_SETTLED_CLASS.memory_save!,
   },
   tool_search: {
-    summary: SUMMARIZERS.tool_search!,
+    summary: TOOL_SUMMARIES.tool_search!.summary,
     settledClass: TOOL_SETTLED_CLASS.tool_search!,
   },
   // D6（spec specs/tui-tool-settled-appearance.md）：skill 是 accent 类 ——
   // 只点名着色（`skill <name>`），不把 skill 正文摊成五行走浅色预览；
   // 声明无 preview 字段（resultToolPreview 走 empty）。
   skill: {
-    summary: SUMMARIZERS.skill!,
+    summary: TOOL_SUMMARIES.skill!.summary,
     settledClass: TOOL_SETTLED_CLASS.skill!,
   },
   // disclosure-index-align T2: skill_search 已删（spec ADR-0046 / SC5）。
-  // 历史 tool_result 可能仍含该名 → 走默认 placeholder（已不在 SUMMARIZERS），
+  // 历史 tool_result 可能仍含该名 → 走默认 placeholder（已不在 TOOL_SUMMARIES），
   // 行为与未注册工具一致（无显示声明即 retract 兜底）。
   // 子代理两件（spec D8 三类之外）：settledClass 取核内显式声明的 "subagent"
   // —— 不用 `!` 兜底，声明缺失/谎报在编译期或跨核闸失败。
   spawn_subagent: {
-    summary: spawnSubagentSettledSummary,
-    runningSummary: spawnSubagentRunningSummary,
+    summary: TOOL_SUMMARIES.spawn_subagent!.summary,
+    runningSummary: TOOL_SUMMARIES.spawn_subagent!.runningSummary,
     settledClass: TOOL_SETTLED_CLASS.spawn_subagent,
   },
   subagent_result: {
-    summary: SUMMARIZERS.subagent_result!,
+    summary: TOOL_SUMMARIES.subagent_result!.summary,
     settledClass: TOOL_SETTLED_CLASS.subagent_result,
   },
   lsp_definition: {
-    summary: SUMMARIZERS.lsp_definition!,
+    summary: TOOL_SUMMARIES.lsp_definition!.summary,
     settledClass: TOOL_SETTLED_CLASS.lsp_definition!,
   },
   lsp_references: {
-    summary: SUMMARIZERS.lsp_references!,
+    summary: TOOL_SUMMARIES.lsp_references!.summary,
     settledClass: TOOL_SETTLED_CLASS.lsp_references!,
   },
   lsp_hover: {
-    summary: SUMMARIZERS.lsp_hover!,
+    summary: TOOL_SUMMARIES.lsp_hover!.summary,
     settledClass: TOOL_SETTLED_CLASS.lsp_hover!,
   },
   lsp_go_to_implementation: {
-    summary: SUMMARIZERS.lsp_go_to_implementation!,
+    summary: TOOL_SUMMARIES.lsp_go_to_implementation!.summary,
     settledClass: TOOL_SETTLED_CLASS.lsp_go_to_implementation!,
   },
   lsp_prepare_call_hierarchy: {
-    summary: SUMMARIZERS.lsp_prepare_call_hierarchy!,
+    summary: TOOL_SUMMARIES.lsp_prepare_call_hierarchy!.summary,
     settledClass: TOOL_SETTLED_CLASS.lsp_prepare_call_hierarchy!,
   },
   lsp_incoming_calls: {
-    summary: SUMMARIZERS.lsp_incoming_calls!,
+    summary: TOOL_SUMMARIES.lsp_incoming_calls!.summary,
     settledClass: TOOL_SETTLED_CLASS.lsp_incoming_calls!,
   },
   lsp_outgoing_calls: {
-    summary: SUMMARIZERS.lsp_outgoing_calls!,
+    summary: TOOL_SUMMARIES.lsp_outgoing_calls!.summary,
     settledClass: TOOL_SETTLED_CLASS.lsp_outgoing_calls!,
   },
   lsp_diagnostics: {
-    summary: SUMMARIZERS.lsp_diagnostics!,
+    summary: TOOL_SUMMARIES.lsp_diagnostics!.summary,
     settledClass: TOOL_SETTLED_CLASS.lsp_diagnostics!,
   },
   lsp_document_symbol: {
-    summary: SUMMARIZERS.lsp_document_symbol!,
+    summary: TOOL_SUMMARIES.lsp_document_symbol!.summary,
     settledClass: TOOL_SETTLED_CLASS.lsp_document_symbol!,
   },
   lsp_workspace_symbol: {
-    summary: SUMMARIZERS.lsp_workspace_symbol!,
+    summary: TOOL_SUMMARIES.lsp_workspace_symbol!.summary,
     settledClass: TOOL_SETTLED_CLASS.lsp_workspace_symbol!,
   },
   // bash_output / bash_stop / todo_write / list_mcp_resources / read_mcp_resource /
   // query_trace:host 工具 / 无内容可预览 —— 仅 summary 声明,无 preview
-  // (期望 TUI 显示与 SUMMARIZERS 同字节,模型视野与现状一致)。
+  // (CLI 与 TUI 同字节,模型视野与现状一致)。
   bash_output: {
-    summary: (r) => `读取后台日志 ${pickString(r, "task_id", "?")}`,
+    summary: TOOL_SUMMARIES.bash_output!.summary,
     settledClass: TOOL_SETTLED_CLASS.bash_output!,
   },
   bash_stop: {
-    summary: (r) => `停止后台任务 ${pickString(r, "task_id", "?")}`,
+    summary: TOOL_SUMMARIES.bash_stop!.summary,
     settledClass: TOOL_SETTLED_CLASS.bash_stop!,
   },
   todo_write: {
-    summary: (r) => `待办 ${pickString(r, "id", "?")}`,
+    summary: TOOL_SUMMARIES.todo_write!.summary,
     settledClass: TOOL_SETTLED_CLASS.todo_write!,
   },
   list_mcp_resources: {
-    summary: () => "MCP 资源列表",
+    summary: TOOL_SUMMARIES.list_mcp_resources!.summary,
     settledClass: TOOL_SETTLED_CLASS.list_mcp_resources!,
   },
   read_mcp_resource: {
-    summary: (r) => `MCP 资源 ${pickString(r, "uri", "?")}`,
+    summary: TOOL_SUMMARIES.read_mcp_resource!.summary,
     settledClass: TOOL_SETTLED_CLASS.read_mcp_resource!,
   },
   query_trace: {
-    summary: () => "trace 查询",
+    summary: TOOL_SUMMARIES.query_trace!.summary,
     settledClass: TOOL_SETTLED_CLASS.query_trace!,
   },
   // task worktree 生命周期五件（spec D8）：enter/exit/create/remove 点名
-  // 着色（accent，人读表述带 label 或路径叶子），list 是查询类（retract）。
+  // 着色（accent），list 是查询类（retract）。人读表述随 D1 改英文并点名新
+  // 注册名（specs/create-worktree-tools.md D5）—— 文本在 shared
+  // TOOL_SUMMARIES 声明，CLI 侧无注册表可查，同源才不漂移。
   // 这五件在 TUI surface 属 host 缝条件化装配（deps-tools 期望集剥除），
   // 显示声明仍常驻 —— 渲染注册表完备性与装配条件化解耦。
-  "create-task-worktree": {
-    summary: () => "创建任务工作树",
-    settledClass: TOOL_SETTLED_CLASS["create-task-worktree"]!,
+  "create-worktree": {
+    summary: TOOL_SUMMARIES["create-worktree"]!.summary,
+    settledClass: TOOL_SETTLED_CLASS["create-worktree"]!,
   },
-  "enter-task-worktree": {
-    summary: (r) => `进入任务工作树 ${pickString(r, "conversationId", "?")}`,
-    settledClass: TOOL_SETTLED_CLASS["enter-task-worktree"]!,
+  "enter-worktree": {
+    summary: TOOL_SUMMARIES["enter-worktree"]!.summary,
+    settledClass: TOOL_SETTLED_CLASS["enter-worktree"]!,
   },
-  "exit-task-worktree": {
-    summary: () => "退出任务工作树",
-    settledClass: TOOL_SETTLED_CLASS["exit-task-worktree"]!,
+  "exit-worktree": {
+    summary: TOOL_SUMMARIES["exit-worktree"]!.summary,
+    settledClass: TOOL_SETTLED_CLASS["exit-worktree"]!,
   },
-  "remove-task-worktree": {
-    summary: (r) => `删除任务工作树 ${pickString(r, "conversationId", "?")}`,
-    settledClass: TOOL_SETTLED_CLASS["remove-task-worktree"]!,
+  "remove-worktree": {
+    summary: TOOL_SUMMARIES["remove-worktree"]!.summary,
+    settledClass: TOOL_SETTLED_CLASS["remove-worktree"]!,
   },
-  "list-task-worktrees": {
-    summary: () => "任务工作树列表",
-    settledClass: TOOL_SETTLED_CLASS["list-task-worktrees"]!,
+  "list-worktrees": {
+    summary: TOOL_SUMMARIES["list-worktrees"]!.summary,
+    settledClass: TOOL_SETTLED_CLASS["list-worktrees"]!,
   },
 };
 
@@ -482,43 +366,6 @@ export function settledClassOfDisplay(name: string): SettledClass {
 }
 
 /**
- * 单个工具调用的参数摘要。`cols` = 终端列宽：提供时 detail 按视觉宽度
- * 收口到「装饰 + 工具名 + detail」单行放得下（窄终端不折行，行账不漂移）。
- *
- * `opts.running` = 该调用的 input 还是流式半成品（运行中）：注册表声明了
- * `runningSummary` 的工具走运行态摘要，省略「只有 input 齐了才可信的量」
- * （write_file 行数）。未声明 → 与落定态同文案，行为不变。
- *
- * lookup table（SUMMARIZERS）dispatch：每个工具独立摘要器，函数体保持
- * ≤10 行 / 圈复杂度 ≤10（complexity-anti-drift）；未知工具走 `(name)`
- * 占位符（2026-08-13 用户反馈 tool fold 不该 JSON 全文外露）。
- */
-export function summarizeToolCall(
-  name: string,
-  input: unknown,
-  cols?: number,
-  opts?: { readonly running?: boolean }
-): { detail: string } {
-  const rec = inputRecord(input);
-  const clip = (s: string): string => clipDetail(s, name, cols);
-  // 真未知工具：仅显示工具名占位，避免 JSON 全文外露
-  // （2026-08-13 用户反馈 tool fold 不该把 input args 全 JSON stringify）。
-  // D6：摘要单源 = TOOL_DISPLAYS.summary（建树四件等人读 label 在注册表
-  // 声明而不在 SUMMARIZERS）—— 标题行走注册表声明，SUMMARIZERS 仅兜底
-  // 未知工具占位。
-  const declared = TOOL_DISPLAYS[name];
-  if (declared !== undefined) {
-    const summarize =
-      opts?.running === true && declared.runningSummary !== undefined
-        ? declared.runningSummary
-        : declared.summary;
-    return { detail: clip(summarize(rec)) };
-  }
-  if (!(name in SUMMARIZERS)) return { detail: clip(`(${name})`) };
-  return { detail: clip(SUMMARIZERS[name]!(rec)) };
-}
-
-/**
  * D5（spec specs/tui-tool-settled-appearance.md）：失败一行短错误。
  * 单源截断：折叠空白 → `clipOneLineVisual` 按视觉宽度收口（窄终端单行
  * 不折），带 `…` 省略号 —— 不把长回执（如 `[worktree_isolation]`）摊成
@@ -529,73 +376,31 @@ export function clipErrorLine(text: string, cols: number): string {
   return clipOneLineVisual(text, Math.max(1, cols - 2));
 }
 
-/**
- * T5:运行中 partial JSON 文本的摘要。对逐段累积的 `partialJson` 尽力
- * `JSON.parse`：
- *  - parse 成功 → 走 `summarizeToolCall`（运行语义：注册表声明了
- *    `runningSummary` 的工具省略未知量 —— partial 里的 `content` 可能只是
- *    「还没到」，不能显示成 `（0 行）`）；
- *  - parse 失败（partial 不完整 JSON，如 `{"command":"l`）或 primitive 形态
- *    （null / 数字 / 布尔）→ `clipDetail` 原样截断显示（单源，视觉宽度纪律）；
- *  - 空串 → 空串。
- *
- * 遮蔽说明：partial 里可能含密钥形态，但增量只服务展示层中间态——完成后的
- * 权威完整 input 才进模型；此处仅视觉截断，不接 output mask（风险低，保持
- * 单行收口简单）。
- */
-export function summarizePartialInput(
-  name: string,
-  partialJson: string,
-  cols?: number
-): string {
-  if (partialJson.length === 0) return "";
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(partialJson);
-  } catch {
-    parsed = undefined;
-  }
-  // 不完整 JSON（parse 失败）或 primitive 形态（null / 数字 / 布尔 —— 工具参数
-  // 语义上只有 object/array）→ 原样截断显示。截断口径 = clipDetail 单源
-  // （与完成态摘要同一视觉宽度纪律，避免预算公式漂移）。
-  if (
-    parsed === undefined ||
-    (typeof parsed !== "object" && typeof parsed !== "boolean")
-  ) {
-    return clipDetail(partialJson, name, cols);
-  }
-  return summarizeToolCall(name, parsed, cols, { running: true }).detail;
-}
+/** 新建文件（write create preview）可见窗：正文前 10 行（spec D3）。
+ *  **不是**编辑 diff 的帽 —— 编辑/覆盖已有文件的 diff 不截断。 */
+export const WRITE_CREATE_PREVIEW_WINDOW = 10;
 
-/** 一条 assistant 消息内 `name === "bash"` 的 `tool_use` block 计数（T4）。
- *  折叠摘要「ran N command(s)」的 N 数据源：聚合语义——「某命令跑了几次」
- *  对同一条 assistant 消息内多次调 bash 最有意义，非 per-call。非 bash /
- *  非 assistant 消息一律 0（"ran N commands" 只对 shell 语义成立）。 */
-export function countBashCalls(message: AnthropicNativeMessage): number {
-  if (message.role !== "assistant") return 0;
-  let n = 0;
-  for (const block of message.content) {
-    if (block.type === "tool_use" && block.name === "bash") n += 1;
-  }
-  return n;
-}
-
-/** ran N command(s) 后缀文案（T4）。逗号全角接在 detail 后；N <= 0 → 空串。
- *  plural：N === 1 → `ran 1 command`；N > 1 → `ran N commands`。 */
-export function formatRanSuffix(count: number): string {
-  if (count === 1) return "，ran 1 command";
-  if (count > 1) return `，ran ${count} commands`;
-  return "";
-}
-
-/** 完成态 write/edit 预览可见窗（live 完成态与历史共用；截断即折叠）。 */
-export const TOOL_PREVIEW_WINDOW = 6;
+/** 兼容别名：既有调用方/测试引用的 `TOOL_PREVIEW_WINDOW` 现等于新建窗 10。
+ *  编辑 diff 不再共用该帽（D4：diff 全量可见）。 */
+export const TOOL_PREVIEW_WINDOW = WRITE_CREATE_PREVIEW_WINDOW;
 
 /** #693 T4 D4:结果预览（bash / skill）可见窗（尾部 tail，截断即折叠）。 */
 export const RESULT_PREVIEW_WINDOW = 5;
 
+/** 新建预览溢出文案：`+N more lines`（N = 被截去的行数）。人读合同
+ *  （spec D3 / docs/CONTEXT.md write create preview / fence display cap）
+ *  钉死英文形态；围栏 32 行帽与新建 10 行帽共用本标签，两条渲染路径
+ *  （markdown fence / html）与完成态预览不再各写一份文案。 */
+export function previewOverflowLabel(hiddenLineCount: number): string {
+  return `+${hiddenLineCount} more lines`;
+}
+
+/** 语义别名：新建预览溢出（D3）。保留独立名让完成态预览的调用点读到意图，
+ *  字节与 `previewOverflowLabel` 一致（同一 SSOT 函数）。 */
+export const writePreviewOverflowLabel = previewOverflowLabel;
+
 /** #693 T4 D4:结果预览溢出文案。`… +N 行`（N = 被截去的行数）—— 与
- *  write/edit `还有 N 行` 对齐意图（藏尾部行数），但 spec D4 钉死为
+ *  write/edit 溢出对齐意图（藏尾部行数），但 spec D4 钉死为
  *  `… +N 行` 形态（首行前置），把测试摘要/git 结果通常在末尾这一信号
  *  显式给到读者。 */
 export function resultPreviewOverflowLabel(hiddenLineCount: number): string {
@@ -666,14 +471,22 @@ function isRenderableOutput(s: string): boolean {
 export type CompletedToolPreview =
   | { readonly kind: "empty" }
   | {
+      /** write create preview：新建文件正文前 10 行 + `+N more lines`。 */
       readonly kind: "code";
       readonly lines: readonly string[];
       readonly hiddenLineCount: number;
     }
   | {
+      /** edit diff preview：本次改动 diff，**不截断**（D4）。 */
       readonly kind: "diff";
       readonly rows: readonly DiffLine[];
       readonly hiddenLineCount: number;
+    }
+  | {
+      /** 挤档（spec D5）：视图被多写/子代理挤住时，写/改只留标题行的
+       *  `Wrote N lines to <path>`，正文预览整段让位（不是被截断）。 */
+      readonly kind: "squeeze";
+      readonly line: string;
     };
 
 const EMPTY_COMPLETED_PREVIEW: CompletedToolPreview = { kind: "empty" };
@@ -684,23 +497,27 @@ function splitContentLines(content: string): readonly string[] {
   return lines[lines.length - 1] === "" ? lines.slice(0, -1) : lines;
 }
 
+/** 可见窗截断（仅用于 **write create preview**；编辑 diff 不截断）。 */
 function truncateWindow<T>(items: readonly T[]): {
   readonly visible: readonly T[];
   readonly hiddenLineCount: number;
 } {
-  if (items.length <= TOOL_PREVIEW_WINDOW) {
+  if (items.length <= WRITE_CREATE_PREVIEW_WINDOW) {
     return { visible: items, hiddenLineCount: 0 };
   }
   return {
-    visible: items.slice(0, TOOL_PREVIEW_WINDOW),
-    hiddenLineCount: items.length - TOOL_PREVIEW_WINDOW,
+    visible: items.slice(0, WRITE_CREATE_PREVIEW_WINDOW),
+    hiddenLineCount: items.length - WRITE_CREATE_PREVIEW_WINDOW,
   };
 }
 
 function resolveWriteEditPair(
   name: string,
   rec: Record<string, unknown>,
-  opts?: { readonly oldContent?: string; readonly newContent?: string }
+  opts?: {
+    readonly oldContent?: string;
+    readonly newContent?: string;
+  }
 ): { readonly oldContent: string; readonly newContent: string } | null {
   let oldContent = opts?.oldContent;
   let newContent = opts?.newContent;
@@ -714,7 +531,10 @@ function resolveWriteEditPair(
     } else if (name === "write_file") {
       const c = rec.content;
       if (typeof c !== "string") return null;
-      oldContent = "";
+      // 无 side-channel 旧内容 → 视为新建（纯 add）。历史路径没有读盘前的
+      // 旧内容（meta 在 model 边界被丢弃），该假设由调用方显式传
+      // oldContent 才被推翻。
+      if (oldContent === undefined) oldContent = "";
       newContent = c;
     } else {
       return null;
@@ -728,20 +548,42 @@ function hasPreviewPath(rec: Record<string, unknown>): boolean {
 }
 
 /**
- * 完成态 write/edit 预览：分类（新文件→代码行；覆盖/编辑→diff）+ 截断到
- * `TOOL_PREVIEW_WINDOW`。非 write/edit、缺 path、空正文 → `{ kind: "empty" }`。
- * 不读工作区；权威数据 = input + 旁路 old/new。
+ * 完成态 write/edit 预览分类（specs/tui-human-display.md D3–D5）：
+ *  - **新建**（write_file 且旧内容为空）→ `kind: "code"`，正文前 10 行 +
+ *    `+N more lines`（`WRITE_CREATE_PREVIEW_WINDOW`）；
+ *  - **覆盖已有文件 / edit_file** → `kind: "diff"`，本次改动 diff **不截断**
+ *    （hiddenLineCount 恒 0；D4 明令不套新建那 10 行帽）；
+ *  - **挤档**（调用方显式声明视图被挤，如子代理并排）→ `kind: "squeeze"`，
+ *    正文预览让位，只留标题行 `Wrote N lines to <path>`（由调用方拼装）。
+ *
+ *  非 write/edit、缺 path、空正文（无 diff 行且非新建正文）→ `{ kind: "empty" }`。
+ *  不读工作区；权威数据 = input + 旁路 old/newContent。
  */
 export function completedToolPreview(
   name: string,
   input: unknown,
-  opts?: { readonly oldContent?: string; readonly newContent?: string }
+  opts?: {
+    /** 写盘前旧内容（write_file 覆盖判定 → diff 基线）。 */
+    readonly oldContent?: string;
+    readonly newContent?: string;
+    /** 挤档：视图被多写/子代理挤住 → 正文预览整段让位（D5）。
+     *  **尚未接线**：D5 是「可」权限不是硬要求，主会话默认走 D3/D4；
+     *  当前无调用方传本值时该分支不可达，待拥挤信号（同轮多写 /
+     *  子代理挤视图）在渲染层可用后再接。 */
+    readonly squeezed?: boolean;
+  }
 ): CompletedToolPreview {
   if (name !== "write_file" && name !== "edit_file") {
     return EMPTY_COMPLETED_PREVIEW;
   }
   const rec = inputRecord(input);
   if (!hasPreviewPath(rec)) return EMPTY_COMPLETED_PREVIEW;
+  if (opts?.squeezed === true) {
+    return {
+      kind: "squeeze",
+      line: squeezeWriteSummary(input, opts.newContent),
+    };
+  }
   const pair = resolveWriteEditPair(name, rec, opts);
   if (pair === null) return EMPTY_COMPLETED_PREVIEW;
   if (name === "write_file" && pair.oldContent === "") {
@@ -751,19 +593,13 @@ export function completedToolPreview(
     if (visible.length === 0) return EMPTY_COMPLETED_PREVIEW;
     return { kind: "code", lines: visible, hiddenLineCount };
   }
-  const { visible, hiddenLineCount } = truncateWindow(
-    toolPreviewRows(name, rec, 0, {
-      oldContent: pair.oldContent,
-      newContent: pair.newContent,
-    })
-  );
-  if (visible.length === 0) return EMPTY_COMPLETED_PREVIEW;
-  return { kind: "diff", rows: visible, hiddenLineCount };
-}
-
-/** 完成态预览截断后的溢出提示（live / 历史共用文案）。 */
-export function previewOverflowLabel(hiddenLineCount: number): string {
-  return `还有 ${hiddenLineCount} 行`;
+  // D4：编辑/覆盖画本次改动 diff，不截断（hiddenLineCount 恒 0）。
+  const rows = toolPreviewRows(name, rec, 0, {
+    oldContent: pair.oldContent,
+    newContent: pair.newContent,
+  });
+  if (rows.length === 0) return EMPTY_COMPLETED_PREVIEW;
+  return { kind: "diff", rows, hiddenLineCount: 0 };
 }
 
 /**
@@ -783,12 +619,30 @@ export function toolPreviewRows(
   name: string,
   input: unknown,
   _cols: number,
-  opts?: { readonly oldContent?: string; readonly newContent?: string }
+  opts?: {
+    readonly oldContent?: string;
+    readonly newContent?: string;
+  }
 ): readonly DiffLine[] {
   if (name !== "edit_file" && name !== "write_file") return [];
   const pair = resolveWriteEditPair(name, inputRecord(input), opts);
   if (pair === null) return [];
   return computeDiff(name, pair.oldContent, pair.newContent);
+}
+
+/** 挤档标题行（spec D5）：`Wrote N lines to <path>`。N = 本次写入正文的
+ *  可见行数；`newContent` 缺席（历史无旁路）→ 省略 N，只留路径。 */
+export function squeezeWriteSummary(
+  input: unknown,
+  newContent?: string
+): string {
+  const rec = inputRecord(input);
+  const path =
+    typeof rec.path === "string" && rec.path.length > 0 ? rec.path : "?";
+  if (typeof newContent !== "string" || newContent.length === 0) {
+    return `Wrote to ${path}`;
+  }
+  return `Wrote ${countLines(newContent)} lines to ${path}`;
 }
 
 /** tool_use_id → is_error 状态映射（tool_result 精确配对，SSOT）。 */
@@ -875,94 +729,6 @@ export function projectToolLines(
   return lines;
 }
 
-/** 工具状态行文案 SSOT（#693 T1 D1/D7 + #tui-render-overhaul T3）。
- *
- * 历史与 live 两侧的「工具状态行」拼装收敛到本函数：
- *  - 普通工具：成功 `name · detail`（去 `[完成]` 前缀，状态由颜色/glyph
- *    表达）；运行中 `[运行中] name · detail`；失败 `[失败] name · detail`。
- *  - 子代理工具（spawn_subagent / subagent_result）独立形态：
- *    `▣|✓|✗ 子代理 · detail`（glyph 已表状态，不再拼 [运行中]/[完成]/[失败]）。
- *
- * live 完成态去尾缀 ` · ok/failed` —— 这是 spec D1 列出的不一致
- * （`bash · pwd · ok` vs `[完成] bash · pwd`）。
- *
- * cols 透传（与 `summarizeToolCall(cols)` 同纪律）：给定时 detail 按
- * 视觉宽度收口到单行放得下；缺省 → legacy 80 字符截断（既有调用方
- * 字节兼容）。`detail` 可选 override：装配层已完成事件携带 precomputed
- * detail（liveToolReducer 落地）时，通过显式 detail 跳过
- * `summarizeToolCall` 重算，保证 reducer state.detail 字节一致。 */
-export function formatToolStatusLine(opts: {
-  readonly toolName: string;
-  readonly input: unknown;
-  readonly status: "running" | "ok" | "failed";
-  readonly detail?: string;
-  readonly cols?: number;
-}): string {
-  const detail =
-    opts.detail ??
-    summarizeToolCall(opts.toolName, opts.input, opts.cols, {
-      running: opts.status === "running",
-    }).detail;
-  // plans/tui-chrome-interaction.md T7：子代理工具（spawn_subagent /
-  // subagent_result）不再以 `▣ 子代理 · detail` 形态作为 live / history 工具
-  // 卡 —— 子代理状态由 identity strip（prompt 正上方 `{role} running...`）
-  // + SubagentPanel（输入框下方 task list）单独表达，避免 dual render。
-  // 工具卡仅保留 `detail`（spawn → `{role} running` / `{role}`；task 正文
-  // 只在 SubagentPanel；subagent_result → `轮询 <task_id>`）。
-  if (isSubagentTool(opts.toolName)) {
-    return detail;
-  }
-  // #tui-render-overhaul T3:成功态去掉 `[完成]` 前缀 —— 状态由颜色/glyph
-  // 表达,行首不残留多余空格。失败/运行中保留明示前缀（不变式）。
-  const mark =
-    opts.status === "ok"
-      ? ""
-      : opts.status === "failed"
-        ? "[失败]"
-        : "[运行中]";
-  if (mark.length === 0) {
-    if (detail.length === 0) return opts.toolName;
-    return `${opts.toolName} · ${detail}`;
-  }
-  if (detail.length === 0) return `${mark} ${opts.toolName}`;
-  return `${mark} ${opts.toolName} · ${detail}`;
-}
-
-/** 运行时 postToolUse 事件的摘要行文案（turn 进行中逐条出现）。
- *  委托 `formatToolStatusLine`（#693 T1 D7 SSOT）—— live 完成行 / 历史
- *  完成行 / running 行共用同一文案契约，避免复制粘贴模板。
- *
- *  字节规则（spec D7 + #tui-render-overhaul T3）：
- *   - 普通工具成功：detail 非空 → `name · detail`；detail 空 → `name`。
- *     完成前缀已去掉（状态由颜色/glyph 表达），行首不残留多余空格。
- *   - 普通工具失败：`[失败] name · detail` / `[失败] name`（保留明示前缀）。
- *   - 子代理工具（spawn_subagent / subagent_result）独立形态：
- *     `✓|✗ 子代理 · detail` / `✓|✗ 子代理`（glyph 已表状态，不拼 [xxx] 前缀）。
- *
- *  kind 入参兼容 history 用例：仅识别 `"ok"`（→ ok），其它任意值按
- *  failed 处理。
- *
- *  `detail` 可选 override：装配层已完成事件携带 precomputed detail
- *  （如 liveToolReducer 落地）时，通过显式 detail 跳过 summarizeToolCall
- *  重算，保证完成事件渲染与 reducer state.detail 字节一致。
- *
- *  `cols` 透传：提供时 detail 按视觉宽度收口（与 summarizeToolCall 同纪律）；
- *  缺省 → legacy 80 字符截断（与既有调用方字节兼容）。 */
-export function formatLiveToolEvent(opts: {
-  readonly toolName: string;
-  readonly input: unknown;
-  readonly kind: string;
-  /** 显式 detail override；提供时跳过 summarizeToolCall 重算。 */
-  readonly detail?: string;
-  /** 终端列宽（可选）：提供时 detail 按视觉宽度收口；缺省 legacy 80 截断。 */
-  readonly cols?: number;
-}): string {
-  const status: "ok" | "failed" = opts.kind === "ok" ? "ok" : "failed";
-  return formatToolStatusLine({
-    toolName: opts.toolName,
-    input: opts.input,
-    status,
-    detail: opts.detail,
-    cols: opts.cols,
-  });
-}
+// 运行中 bash 前缀（BASH_RUNNING_PREFIX）与工具状态行拼装
+// （formatToolStatusLine / formatLiveToolEvent）的实现均在
+// src/shared/tool-line.ts（CLI 同源），本文件顶部 re-export。

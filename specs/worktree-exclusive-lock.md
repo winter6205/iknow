@@ -3,10 +3,12 @@
 > 承接 `specs/write-situation-disclosure.md`（告知面与出口）。本 spec 是**新增一个策略档位**，不是修告知面：默认档行为与今日逐字节一致，操作员显式打开后才多一道拦截。
 >
 > **依赖**：`write-situation-disclosure.md` 的可恢复性穷尽表（新 kind `worktree_claimed` 要进表）。两份 spec 不共享代码改动面，但实施顺序上本份在后。
+>
+> **Amended 2026-09-10** by `specs/create-worktree-tools.md`（ADR-0082）：模型面工具名已由 `create-task-worktree` / `enter-task-worktree` / `exit-task-worktree` / `remove-task-worktree` / `list-task-worktrees` 改为 `create-worktree` / `enter-worktree` / `exit-worktree` / `remove-worktree` / `list-worktrees`。本文 Glossary、Architectural Constraints、Objective、Success Criteria、Inherits / Changes 与 Assumptions 里的工具名已换为现名（`task worktree` 作为对象种类词保留）；引 ADR-0037 既有 amendment 的旧名字面只作历史对照。占用判据 / 零新状态 / 默认 OFF 的合同本身不变。
 
 ## Glossary（exact copy from docs/CONTEXT.md）
 
-- **session worktree rebind**: worktree isolation mode ON 下 `create-task-worktree`（或 enter / exit）ACI 工具成功后，把**当前会话**生效的根锚切到本会话 task worktree 的动作；只影响本会话——不 checkout 其它会话 / 其它 worktree 的 HEAD……同会话重复调工具幂等（一棵树、一个 task 分支，不跑第二次 `git worktree add`）。
+- **session worktree rebind**: worktree isolation mode ON 下 `create-worktree`（或 enter / exit）ACI 工具成功后，把**当前会话**生效的根锚切到本会话 task worktree 的动作；只影响本会话——不 checkout 其它会话 / 其它 worktree 的 HEAD……同会话重复调工具幂等（一棵树、一个 task 分支，不跑第二次 `git worktree add`）。
 - **task worktree label**: 给人/模型认树的 kebab 目录名。有合法 label 时叶子就是 `<slug>`，conversationId 不进文件夹（写在 gitdir sidecar；历史 `<slug>--<conversationId>` 仍可反演）。
 - **taskRoot**（活值）: 会话当前生效的 task worktree 根——**写与工具 cwd 只问它**。
 - **unbound**: 没有可校验 `workspaceRoot` 的过渡或遗留无效状态，不是正常产品状态。……serve 当前无 flag/env 时绑定 `<homedir>/.iknow/default`，不属于 unbound。
@@ -18,16 +20,16 @@
 - **ADR-0037 §2**：改绑只影响本会话；子代理跟随父会话同一棵树，不触发第二棵树。
 - **ADR-0037 §3**：fail-closed——不静默覆盖、不复用归属不明的树、不 checkout 其它会话的 HEAD。
 - **ADR-0037 §5**：开关**只在启动加载点读取一次**；config 层只承载 boolean 值域语义，不读 git、不持会话状态；会话根改绑**不隐式重载** settings。
-- **ADR-0037 Amendment 2026-08-30（工具面扩展）**：`enter-task-worktree` 显式进入一棵本仓已存在的 task worktree（**含他人树**）；授权锚 = 持久化的 `session.workspaceRoot`，只由工具成功 + 会话保存写成，故是**天然的显式进入持久记录**；`exit-task-worktree` 回主仓根，**树保留不删**（孤儿树自动删除仍是明确非目标）。
+- **ADR-0037 Amendment 2026-08-30（工具面扩展）**：`enter-worktree` 显式进入一棵本仓已存在的 task worktree（**含他人树**）；授权锚 = 持久化的 `session.workspaceRoot`，只由工具成功 + 会话保存写成，故是**天然的显式进入持久记录**；`exit-worktree` 回主仓根，**树保留不删**（孤儿树自动删除仍是明确非目标）。（该 amendment 原文写于换名前，字面为 `enter-task-worktree` / `exit-task-worktree`；2026-09-10 amended by `create-worktree-tools.md` / ADR-0082。）
 - **`settings.isolation.worktreeOnMutate` 的值域纪律**（`src/config/settings.ts:223-226`、单读点 `:299-303`）：boolean-only、默认 OFF、缺失或非 `true` 一律按 OFF（fail-closed）。本 spec 的新开关**同款**。
 - **ADR-0023**：serve 主根 / recents / unbound 语义不被本 spec 触碰。
 - **`write-situation-disclosure.md`**：可恢复性穷尽表是本 spec 新 kind 的落点；归属 sidecar 的职责是**告知**，不是授权。
 
 ## Objective
 
-**What:** 新增 `isolation.worktreeExclusive`（boolean-only，默认 OFF）。ON 时 `enter-task-worktree` 多一道检查：目标树若被**别的现存会话**占用，typed 拒绝。占用判据**只有**现存会话记录里的 `workspaceRoot`——不新增任何持久状态。
+**What:** 新增 `isolation.worktreeExclusive`（boolean-only，默认 OFF）。ON 时 `enter-worktree` 多一道检查：目标树若被**别的现存会话**占用，typed 拒绝。占用判据**只有**现存会话记录里的 `workspaceRoot`——不新增任何持久状态。
 
-**Why:** 今天 `enter-task-worktree` 的四道检查（`worktree-rebind.ts:896-944`：调用方在主仓 / 目标存在 / 目标是 linked 检出 / 同仓库）**没有一道是归属**，所以两个活会话可以同时绑同一棵树：交错编辑、共享同一个 git index、提交互相插队。ADR-0037 的立项理由正是「多个会话并行改动会互相踩踏」，而这条路径上今天没有闸。
+**Why:** 今天 `enter-worktree` 的四道检查（`worktree-rebind.ts:896-944`：调用方在主仓 / 目标存在 / 目标是 linked 检出 / 同仓库）**没有一道是归属**，所以两个活会话可以同时绑同一棵树：交错编辑、共享同一个 git index、提交互相插队。ADR-0037 的立项理由正是「多个会话并行改动会互相踩踏」，而这条路径上今天没有闸。
 
 但默认档**不该**变：操作员平时不需要锁，锁只在「确实要隔离每棵树的归属」时才开。所以做成可选档位，而不是把排他变成默认。
 
@@ -45,13 +47,13 @@
 ## Success Criteria
 
 1. **值域纪律**：`isolation.worktreeExclusive` boolean-only；缺失 / 非 `true` 一律按 OFF；**只在启动加载点读一次**，会话根改绑不触发 settings 重载（对齐 ADR-0037 §5 与 `resolveWorktreeOnMutate` 单读点形状）。
-2. **OFF 档零回归**：OFF 时 `enter-task-worktree` 的行为与今日**逐字节一致**——四道检查不变、不新增任何拒绝路径、回执不新增任何句子之外的内容。要有断言锁死。
-3. **ON 档拦截**：目标树的 `workspaceRoot` 出现在**别的**现存会话记录里 → typed 拒绝，`kind === "worktree_claimed"`，回执含**占用者会话 id** 与**释放路径**（恢复那个会话让它自己 `exit-task-worktree`，或删除该会话记录）。
+2. **OFF 档零回归**：OFF 时 `enter-worktree` 的行为与今日**逐字节一致**——四道检查不变、不新增任何拒绝路径、回执不新增任何句子之外的内容。要有断言锁死。
+3. **ON 档拦截**：目标树的 `workspaceRoot` 出现在**别的**现存会话记录里 → typed 拒绝，`kind === "worktree_claimed"`，回执含**占用者会话 id** 与**释放路径**（恢复那个会话让它自己 `exit-worktree`，或删除该会话记录）。
 4. **ON 档放行**：无任何现存会话记录指向目标树 → enter 照常成功，行为与 OFF 档一致。
 5. **自占用不算占用**：占用者就是本会话（幂等 re-enter）→ 返回同一根、**零写**，与今日 `if (current === target) return target` 行为一致。
 6. **进可恢复性表**：`worktree_claimed` 在 `Record<WorktreeIsolationErrorKind, Recoverability>` 里有分类且为 `operator_required`，因此回执自带停止指令（「重试无用 / 报给操作员」等价）。漏分类 → `npm run typecheck` 失败。
 7. **零新持久状态**：不写锁文件、不给 owner sidecar 加字段、不建占用注册表、不加内存 Map 跨调用存活。判据**只有**现存会话记录的 `workspaceRoot`。代码审查项：本 spec 的 diff 不得新增任何写盘路径。
-8. **无 force**：`enter-task-worktree` 的 `inputSchema` **不新增**任何覆盖 / 强制字段。被锁约束的一方不得持有覆盖开关，否则锁等于建议。
+8. **无 force**：`enter-worktree` 的 `inputSchema` **不新增**任何覆盖 / 强制字段。被锁约束的一方不得持有覆盖开关，否则锁等于建议。
 9. **恢复路径可走通**：至少一条有测试——删除占用会话记录后，另一会话 enter 成功。（另一条路径「恢复该会话并让它自己 exit」依赖 restart-safe 设计，见 Assumptions 3，属既有行为，本 spec 不改。）
 10. **归属告知不受本开关影响**：`write-situation-disclosure.md` SC10 的「enter 成功回执告知创建者」是**恒定开**的；OFF 档也必须告知。两个特性互不为前提。
 11. **绿线**：`npm test` 与 `npm run typecheck` exit 0。
@@ -77,7 +79,7 @@
 
 ## Inherits / Changes
 
-**Inherits:** ADR-0037 §2/§3/§5 与 Amendment 2026-08-30（enter/exit 语义、树保留不删、授权锚 = 持久化 `session.workspaceRoot`）；`worktreeOnMutate` 的 boolean-only / fail-closed / 单读点纪律；`enter-task-worktree` 既有四道检查与幂等 re-enter；owner sidecar 与 `taskWorktreeOwnerOf`；`write-situation-disclosure.md` 的可恢复性穷尽表与「归属 sidecar 只负责告知」定位；restart-safe adoption（`worktree-rebind.ts:790-798`）与 `initiallyBound`（`worktree-gate.ts:913`）。
+**Inherits:** ADR-0037 §2/§3/§5 与 Amendment 2026-08-30（enter/exit 语义、树保留不删、授权锚 = 持久化 `session.workspaceRoot`）；`worktreeOnMutate` 的 boolean-only / fail-closed / 单读点纪律；`enter-worktree` 既有四道检查与幂等 re-enter；owner sidecar 与 `taskWorktreeOwnerOf`；`write-situation-disclosure.md` 的可恢复性穷尽表与「归属 sidecar 只负责告知」定位；restart-safe adoption（`worktree-rebind.ts:790-798`）与 `initiallyBound`（`worktree-gate.ts:913`）。
 
 **Changes:**
 
@@ -85,7 +87,7 @@
 - **ADR-0037**：Amendments 行加 0070 指针；§1 补一句「ON 档另见 `isolation.worktreeExclusive`」；**§2/§3/§5 正文不改**。
 - **`docs/CONTEXT.md`**：新增 **占用（worktree claim）** 词条——含「只告知不授权」的 sidecar 定位与「释放靠显式 exit」的语义。
 - **`specs/README.md`**：活跃表加本文件一行。
-- **代码**：`src/config/settings.ts`（新设置项 + 单读点）、`src/session-api/worktree-rebind.ts`（enter 前置检查 + 新 kind 抛出）、`src/harness/isolation/worktree-gate.ts`（**仅** `WorktreeIsolationErrorKind` 加 `worktree_claimed` 成员——该文件已 1167 行，不追加逻辑）、`src/harness/isolation/recoverability.ts`（往 `write-situation-disclosure.md` 新建的穷尽表**加一行**）、`src/harness/build-engine.ts`（装配期读取并透传）。**不改** `exit-task-worktree` / `remove-task-worktree` / 门禁裁决逻辑 / 围栏。
+- **代码**：`src/config/settings.ts`（新设置项 + 单读点）、`src/session-api/worktree-rebind.ts`（enter 前置检查 + 新 kind 抛出）、`src/harness/isolation/worktree-gate.ts`（**仅** `WorktreeIsolationErrorKind` 加 `worktree_claimed` 成员——该文件已 1167 行，不追加逻辑）、`src/harness/isolation/recoverability.ts`（往 `write-situation-disclosure.md` 新建的穷尽表**加一行**）、`src/harness/build-engine.ts`（装配期读取并透传）。**不改** `exit-worktree` / `remove-worktree` / 门禁裁决逻辑 / 围栏。
 
 ## ACR
 
@@ -112,15 +114,15 @@ OVERALL: PASS — hand to writing-plans
 
 1. 锁是**可选档位**，默认 OFF。操作员平时不用锁；打开即接受「释放靠显式 exit」。
 2. 占用**不需要新状态**——它就是会话存档里已有的 `workspaceRoot` 字段。会话正常 exit → 字段改回主仓 → 占用自动消失 → 别人自然能进。
-3. **僵尸占用不是不可恢复态**：会话是持久可恢复的，恢复 A 会话时引擎带着 A 的绑定起来（`worktree-rebind.ts:790-798`「restart-safe explicit opt-in」、`worktree-gate.ts:913` `initiallyBound`），A 自己调 `exit-task-worktree` 即释放。不丢历史、不删会话、不需要新命令。
+3. **僵尸占用不是不可恢复态**：会话是持久可恢复的，恢复 A 会话时引擎带着 A 的绑定起来（`worktree-rebind.ts:790-798`「restart-safe explicit opt-in」、`worktree-gate.ts:913` `initiallyBound`），A 自己调 `exit-worktree` 即释放。不丢历史、不删会话、不需要新命令。
 4. 因此**不做** `release`：它的唯一独立价值是「解绑但保留会话记录」，而 (3) 已经能不丢历史地解绑。若将来真的出现「为放开一棵树而不得不删掉想留的历史」并且觉得痛，再补，形状已想清（只改绑定记录、不动树、不动未提交改动）。
 5. **不做活性检测**：PID 探活有进程号复用与跨机失效，心跳要每会话一个定时器；两者都是「不能保证百分百」的机制，而 (3) 已用既有设计覆盖同一需求。
-6. `enter-task-worktree` 今天**允许**进他人树（四道检查无归属），这是本 spec 要可选地收紧的行为，不是 bug。
+6. `enter-worktree` 今天**允许**进他人树（四道检查无归属），这是本 spec 要可选地收紧的行为，不是 bug。
 
 ## 后续（本 spec 不做）
 
 1. **`force` / 覆盖入口** — 模型侧永不加（SC8）。操作员侧若将来需要，形状是「解绑而不删树」，见 Assumptions 4。
 2. **活性检测 / 锁文件 / 占用注册表** — 见 Assumptions 5；且任何跨进程共享状态一旦失效就回到僵尸问题，与 (3) 的零新状态取向冲突。
 3. **L1 升级到跨进程排他** — 需要共享状态，重新考虑的条件：实测到两个独立进程同时写一棵树造成真实损坏，且操作员明确要求跨进程排他。
-4. **`remove-task-worktree` 与占用的交互** — 今天它拒脏树、拒未推送独占提交、拒当前根。ON 档下「删一棵被别人占用的树」该不该另加一道拒绝，本 spec 未裁决；等 L1 的枚举入口定了再议，避免在未知成本上先立语义。
+4. **`remove-worktree` 与占用的交互** — 今天它拒脏树、拒未推送独占提交、拒当前根。ON 档下「删一棵被别人占用的树」该不该另加一道拒绝，本 spec 未裁决；等 L1 的枚举入口定了再议，避免在未知成本上先立语义。
 5. **明确不做** — 把排他变成默认档；用 sidecar 归属当授权（sidecar 只负责告知）；把锁与 `write-situation-disclosure.md` 的归属告知耦成一个开关。

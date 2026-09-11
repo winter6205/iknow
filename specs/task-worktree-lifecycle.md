@@ -2,13 +2,15 @@
 
 > 门禁语义沿用 ADR-0037：隔离开则主仓只读，写被拦，host 不自动建树；模型调 ACI 建树并 **session worktree rebind**。本 spec 只补闸后面的产品面：可读标签、一把可执行的进树动作、列出与显式删除、以及改绑后仍能读项目身份根。
 >
-> **Amended 2026-09-04** by `specs/casual-ask-context-hygiene.md`：门禁「什么算写」不再复用 `validateReadonlyCommand`；unbound 说明书改成事实阻断。条款 6 仍点名 `create-task-worktree`；条款 8 文案以 hygiene spec 为准。本文件仍管命名 / 进树 / list / remove，不改 ACI 工具形态。
+> **Amended 2026-09-04** by `specs/casual-ask-context-hygiene.md`：门禁「什么算写」不再复用 `validateReadonlyCommand`；unbound 说明书改成事实阻断。条款 8 文案以 hygiene spec 为准。本文件仍管命名 / 进树 / list / remove，不改 ACI 工具形态。
+>
+> **Amended 2026-09-10** by `specs/create-worktree-tools.md`（ADR-0082）：本文档正文的模型面注册名已改为 `create-worktree` / `enter-worktree` / `exit-worktree` / `remove-worktree` / `list-worktrees`（去 `-task`）；旧名字面只作历史对照，不再进模型面。命名 / 进树 / list / remove 合同本身不变。
 
 ## Objective
 
-隔离 ON 时，模型被拦一次写之后，用 **一次** `create-task-worktree`（可选短名）建树并改绑，下一波把同一写打进该树。之后能列出本仓 task 树、按标签或 conversationId 进入已有树、显式删掉不再需要的树。新树不是空壳到无法读说明书：`grep` / `glob` 与 `read_file` 一样能读 `projectIdentityRoot`。叶子名兼职身份与展示的现状结束。
+隔离 ON 时，模型被拦一次写之后，用 **一次** `create-worktree`（可选短名）建树并改绑，下一波把同一写打进该树。之后能列出本仓 task 树、按标签或 conversationId 进入已有树、显式删掉不再需要的树。新树不是空壳到无法读说明书：`grep` / `glob` 与 `read_file` 一样能读 `projectIdentityRoot`。叶子名兼职身份与展示的现状结束。
 
-成功 = 带合法 `name` 建树后路径为 `<repoRoot>/.iknow/worktrees/<slug>`；非法 `name` 回落 UUID 叶子且 tool_result 写明实际路径；同名已存在 → typed `worktree_exists` 不覆盖；`list-task-worktrees` 给出 label + conversationId；`remove-task-worktree` 可审计删除；历史 `<slug>--<conversationId>` 与无 `--` 叶子仍可反演。
+成功 = 带合法 `name` 建树后路径为 `<repoRoot>/.iknow/worktrees/<slug>`；非法 `name` 回落 UUID 叶子且 tool_result 写明实际路径；同名已存在 → typed `worktree_exists` 不覆盖；`list-worktrees` 给出 label + conversationId；`remove-worktree` 可审计删除；历史 `<slug>--<conversationId>` 与无 `--` 叶子仍可反演。
 
 ## Glossary
 
@@ -37,19 +39,19 @@ _Avoid_: 用 session `title` / `goal` 推导 label；把 label 当 conversationI
 
 ### 进树（闸的那一次）
 
-6. 门禁 unbound mutate 的 hint **仍指向** `create-task-worktree`（与今日常量对齐）。
-7. `create-task-worktree` 增加可选 `name`（string，maxLength 40）。省略或非法 → 条款 4。成功 = 树在且本会话已 rebind；同会话再调幂等，不第二次 `worktree add`。
+6. 门禁 unbound mutate 的 hint **仍指向** `create-worktree`（与今日常量对齐）。
+7. `create-worktree` 增加可选 `name`（string，maxLength 40）。省略或非法 → 条款 4。成功 = 树在且本会话已 rebind；同会话再调幂等，不第二次 `worktree add`。
 8. 当波被拦的写仍不执行；下一波在新根重发。文案保持「再打一次写」，不要求 `/continue`。
 9. 建树成功后，若身份根存在 `.iknow/worktreeinclude`，按条款「只拷匹配且 gitignored」拷进新树；文件缺席或空 = 不拷，不失败建树。
 
 ### 发现与进入已有树
 
-10. `list-task-worktrees`：只读 ACI。实现以主 checkout 的 `git worktree list` 为主，用 `taskWorktreeOwnerOf` 过滤。每条至少 `{ label, conversationId, path, branch, head, dirty }`。可选 `include_stale`：无活树但存在对应 `iknow/task*` 分支的条目。不进 `ROOT_FLIP_TOOLS`。host 缝缺席则不注册。
-11. `enter-task-worktree` 仍不收自由路径。入参为 conversationId **或** 与 list 相同的 label（本仓唯一匹配）。歧义（同 label 多棵）typed 失败，列出 conversationId。
+10. `list-worktrees`：只读 ACI。实现以主 checkout 的 `git worktree list` 为主，用 `taskWorktreeOwnerOf` 过滤。每条至少 `{ label, conversationId, path, branch, head, dirty }`。可选 `include_stale`：无活树但存在对应 `iknow/task*` 分支的条目。不进 `ROOT_FLIP_TOOLS`。host 缝缺席则不注册。
+11. `enter-worktree` 仍不收自由路径。入参为 conversationId **或** 与 list 相同的 label（本仓唯一匹配）。歧义（同 label 多棵）typed 失败，列出 conversationId。
 
 ### 回收
 
-12. `remove-task-worktree`：入参与 enter 同形。fail-closed：脏树 / 有未推送独占提交 / 是调用者当前根（须先 exit）/ 非本仓。默认 `git worktree remove`，**不删分支**；`delete_branch: true` 且无独占未推送提交才删分支。ACI `category=write`。门禁分类不得标成 workspace `mutate`（否则主仓上无法回收），也不得进 `ROOT_FLIP_TOOLS`。
+12. `remove-worktree`：入参与 enter 同形。fail-closed：脏树 / 有未推送独占提交 / 是调用者当前根（须先 exit）/ 非本仓。默认 `git worktree remove`，**不删分支**；`delete_branch: true` 且无独占未推送提交才删分支。ACI `category=write`。门禁分类不得标成 workspace `mutate`（否则主仓上无法回收），也不得进 `ROOT_FLIP_TOOLS`。
 13. 操作员脚本默认 report-only，列出无活树且无独占提交的 `iknow/task*` 分支；`--apply` 才删。不进 ACI 名单。
 
 ### 进树后读身份根
@@ -72,11 +74,11 @@ _Avoid_: 用 session `title` / `goal` 推导 label；把 label 当 conversationI
 npx vitest run tests/harness/isolation tests/harness/aci/tools/registry.test.ts tests/session-api/hub-worktree-isolation.test.ts
 ```
 
-1. ON + `create-task-worktree` `{"name":"fix-648"}` → 叶子 `fix-648`，分支 `iknow/task/fix-648-<uuid8>`，会话改绑，下一波 mutate 进该树，主仓该写未落。
+1. ON + `create-worktree` `{"name":"fix-648"}` → 叶子 `fix-648`，分支 `iknow/task/fix-648-<uuid8>`，会话改绑，下一波 mutate 进该树，主仓该写未落。
 2. 同会话再 create → 同一棵树，无第二次 `worktree add`。
 3. `name` 含 `--` / 大写 / 超长 → 不抛错，叶子为纯 uuid，tool_result 含实际 path。
 4. 现存 `.iknow/worktrees/<uuid>` 与 `.iknow/worktrees/<slug>--<uuid>` 的 provision / enter / exit / 沙箱放行与今日逐字一致。
-5. `list-task-worktrees` 在缝在场时列出全部本仓 task 树；OFF / worker 名单中无此名。
+5. `list-worktrees` 在缝在场时列出全部本仓 task 树；OFF / worker 名单中无此名。
 6. 带 label 的树上 `foreign_worktree` 仍 fail-closed（owner 反演往返）。
 7. 另一会话再用同一 `name` → `worktree_exists`，不覆盖。
 8. `enter` 用 list 返回的 label 进入唯一匹配树。

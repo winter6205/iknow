@@ -2,6 +2,8 @@
 
 > 承接 PR #947（`specs/mutate-write-contract.md` / ADR-0068，Closes #946）的**后续面**。#947 修的是「模型伸手要写的那一刻，拒绝理由错不错」；本 spec 修的是「模型伸手**之前**告知真不真」与「伸手注定失败时**有没有出路**」。两者 Changes 不重叠（#947 落 `hard-walls.ts` / `helpers.ts` / `manager.ts`；本 spec 落 `skill/body.ts` / `worktree-gate.ts` / `worktree-rebind.ts` / `bash.ts`）。
 >
+> **Amended 2026-09-10** by `specs/create-worktree-tools.md`（ADR-0082）：模型面工具名已由 `create-task-worktree` / `enter-task-worktree` / `exit-task-worktree` / `remove-task-worktree` / `list-task-worktrees` 改为 `create-worktree` / `enter-worktree` / `exit-worktree` / `remove-worktree` / `list-worktrees`。本文 Glossary、Objective、Success Criteria、五类表、Inherits 与 Assumptions 里的工具名已换为现名；Background 缺陷链与文末历史引用中的旧名只作历史对照，不再进模型面（回执字面 = `create-worktree ACI tool`，`CREATE_WORKTREE_TOOL_HINT`，`src/harness/isolation/worktree-gate.ts:59`）。三态告知 / 回执分工、可恢复性穷尽表、SC3 ③ 态不点名与 SC5 子串断言结构本身不变。
+>
 > **Amended 2026-09-10** by `specs/skill-body-short-circuit.md` / ADR-0079：告知面不再含 skill 正文 trailer。剩余告知面 = worker prior + 改绑后主会话一次。`writeRootSegment` helper SSOT、三态判定、回执与可恢复性表不变。Glossary 里 skill 消费句以现行 `docs/CONTEXT.md` 为准（正文不挂 trailer）。
 
 ## Glossary（exact copy from docs/CONTEXT.md）
@@ -9,7 +11,7 @@
 - **taskRoot**（活值）: 会话当前生效的 task worktree 根——**写与工具 cwd 只问它**（写工具 / 会改工作区的 bash / git / LSP 目录 / 子代理工作目录）。……装配初值 = `SessionRoots.taskRoot`（未改绑时等于主仓）……改绑后模型经 worker prior messages / path-outside 回执看见当前写根；消费 skill 时只灌技能程序，正文不挂写根 trailer（ADR-0079）；改绑后主会话另给一次（用户消息缝，非每轮、不进 system）；system `## Project path` 仍是身份根（`projectIdentityRoot`）。
 - **hard-wall**: spawn 前意图过滤器——拦围栏看不见或拦不住的命令意图（毁灭性 rm、命令替换、敏感路径、fork-bomb），不可被 session grant 覆盖。不是第二套沙箱；换行只作分段符。耐久写只问 `taskRoot`。ADR-0068。
 - **闭世界围栏（closed-world fence）**: bash 围栏的默认姿态——deny-by-default:home 下非白名单不可见，可写集 = taskRoot + /tmp……OFF 档同样生效（全档位反转）。
-- **session worktree rebind**: worktree isolation mode ON 下 `create-task-worktree`（或 enter / exit）ACI 工具成功后，把**当前会话**生效的根锚切到本会话 task worktree 的动作……**生效边界：同一轮（run）内对下一波 tool calls 生效**。
+- **session worktree rebind**: worktree isolation mode ON 下 `create-worktree`（或 enter / exit）ACI 工具成功后，把**当前会话**生效的根锚切到本会话 task worktree 的动作……**生效边界：同一轮（run）内对下一波 tool calls 生效**。（2026-09-10 amended by `create-worktree-tools.md` / ADR-0082：原名 `create-task-worktree`。）
 - **task worktree label**: 给人/模型认树的 kebab 目录名。有合法 label 时叶子就是 `<slug>`，conversationId 不进文件夹（写在 gitdir sidecar；历史 `<slug>--<conversationId>` 仍可反演）。非法或缺席则叶子仍是纯 conversationId。**同名已存在 → 建树失败不覆盖。**
 
 （完整句以 `docs/CONTEXT.md` 为准，本 spec 不重定义。）
@@ -34,8 +36,8 @@
 **Why:** 三处实测/代码可证的缺陷，同一根因——harness 给模型的信息不可信或没有出口：
 
 1. **告知面说谎**：`writeRootSegment`（`src/harness/skill/body.ts:139-146`）只吃一个路径字符串，无条件输出 `the write root above is where file mutations should land`。而装配初值 `taskRoot: sandboxRoot`（`build-engine.ts:486`）= 主仓，`liveTaskRoot` 无条件创建（`:506`），三个生产调用方无条件 `read()`（`skill.ts:73-75`、`hub.ts:2273-2275`、`chat-session.ts:457`）。于是**隔离 ON + 未绑树**时，文案宣告「写主仓」，而门禁同一时刻以 `unboundMutateNotice` 拒绝一切写主仓的 mutate（`classifyCall` 把 `write_file`/`edit_file` 判 `mutate`，`worktree-gate.ts:479-490`）。两句真值相反的话**同时在场**。
-2. **回执语义空心化**：`casual-ask-context-hygiene.md:21` 的锁定语义是「**若要写，调 `create-task-worktree` 再重试这一次调用**」；实现（`worktree-gate.ts:84-91`）只剩「该工具**存在**，供需要可写根的会话使用」——**「再重试这一次调用」这半句丢了**，唯一可行动的部分消失。SC7 验收（`:33`）只断言三个子串，实现满足子串、语义已空，测试全绿无人察觉。
-3. **失败没有出口**：`worktree_exists` / `branch_exists` 的 detail 指向 `resolve the leftover tree/branch **manually**`（`:292`、`:299`），而模型手里有 `enter-task-worktree` / `list-task-worktrees`；`not_a_git_repo` / `git_unavailable` 是**结构性死路**（本会话不可能取得可写根），detail 只诊断不给出口，模型会重试至回合耗尽。
+2. **回执语义空心化**：`casual-ask-context-hygiene.md:23` 的锁定语义是「**若要写，调 `create-worktree` 再重试这一次调用**」（2026-09-10 amended by `create-worktree-tools.md` / ADR-0082：引用原文写于换名前，字面为 `create-task-worktree`）；实现（`worktree-gate.ts:84-91`）只剩「该工具**存在**，供需要可写根的会话使用」——**「再重试这一次调用」这半句丢了**，唯一可行动的部分消失。SC7 验收（`:33`）只断言三个子串，实现满足子串、语义已空，测试全绿无人察觉。
+3. **失败没有出口**：`worktree_exists` / `branch_exists` 的 detail 指向 `resolve the leftover tree/branch **manually**`（`:292`、`:299`），而模型手里有 `enter-worktree` / `list-worktrees`；`not_a_git_repo` / `git_unavailable` 是**结构性死路**（本会话不可能取得可写根），detail 只诊断不给出口，模型会重试至回合耗尽。
 
 **Who:** CLI / TUI / serve 操作员；下游实施 = 本 worktree 上的 harness 改动。
 
@@ -48,7 +50,7 @@
   - `unboundMutateNotice` 恢复 spec 锁定语义（条件式 + 重发指引）；SC7 验收从纯子串升级为**语义 + 子串**。
   - `WorktreeIsolationErrorKind` 的**可恢复性穷尽表**；`operator_required` 类自带停止指令。
   - `worktree_exists` 按 sidecar 归属给**唯一**指引；`branch_exists` 分「目标目录在 / 不在」两子况。
-  - `enter-task-worktree` 成功回执告知该树的创建者会话（**恒定开**，零成本一次文件读）。
+  - `enter-worktree` 成功回执告知该树的创建者会话（**恒定开**，零成本一次文件读）。
   - bash 工具描述补 `/tmp` 进程临时事实，**沿用 ADR-0068 / `helpers.ts` T3 已定词汇**。
 - **Confirms with human:**（本 session 已确认，不再开口）不恢复 auto-provision；不做宿主草稿纸 / 第 5 个根；不做 `web_fetch` `save_to`；不做装配期 git 预检；不做 `force` / `release` / 活性检测 / 锁文件；网络两条移出本 spec 且**不开 issue**；锁另立 `specs/worktree-exclusive-lock.md`。
 - **Out of this spec:** 见文末「后续（本 spec 不做）」。
@@ -57,14 +59,14 @@
 
 1. **三态判定**：`writeSituation(false, <任意非空根>)` → `writable_main`；`writeSituation(true, <树形根>)` → `writable_tree`；`writeSituation(true, <非树形根>)` → `no_writable_root`。**含「隔离 OFF + 树形路径」组合必须 → `writable_main`**（防形状判断被单独误用，对齐 ADR-0037 §4「`taskWorktreeOwnerOf` 只是路径形状判断，单靠它会…拿到沙箱外的读放行」的同类教训）。空 / 空白根 → typed 结果，不 throw 不静默。
 2. **字节不变**：`writeRootSegment` 在 `writable_main` / `writable_tree` 两态的输出与改造前**逐字节相等**（断言锁死）。这是前缀缓存（prompt cache）与 `skill-load-write-root` SC2 / SC6 的硬约束。
-3. **③ 态不引导**：`no_writable_root` 态输出含「无可写根 / 主仓对文件改动只读」语义，且**不含** `create-task-worktree` 字面（子串断言）。理由：告知面（prior / 改绑一次）**早于或独立于**写意图；点名工具等于对每个未绑会话推一次建树，比 SC7 已禁止的更激进。（2026-09-10：不再以 skill 装配为告知时机。）
-4. **依赖方向**：worker prior 与改绑缝消费处境枚举；三条 skill 消费路径**不再**为 trailer 消费处境枚举。`src/harness/skill/body.ts` **不 import** `src/harness/isolation/`（判定住 isolation，渲染住 skill，枚举类型住 `session-roots.ts`，无环）。
-5. **回执语义恢复**：`unboundMutateNotice()` 同时满足——(a) 含条件式（`To write` / `若要写` 等价）；(b) 含「重发这次调用」语义（`re-issue` 等价）；(c) 仍含 `create-task-worktree`；(d) 仍**不含** `this conversation's task worktree`；(e) 仍含 `This call would write`。(a)(b) 是本次新增的**语义**断言，(c)(d)(e) 是 SC7 既有子串断言，全部保留。
+3. **③ 态不引导**：`no_writable_root` 态输出含「无可写根 / 主仓对文件改动只读」语义，且**不含** `create-worktree` 字面（子串断言；2026-09-10 amended by `create-worktree-tools.md` / ADR-0082：原名 `create-task-worktree`）。理由：告知面（prior / 改绑一次）**早于或独立于**写意图；点名工具等于对每个未绑会话推一次建树，比 SC7 已禁止的更激进。（2026-09-10：不再以 skill 装配为告知时机。）
+4. **依赖方向**：worker prior 与改绑缝消费处境枚举；三条 skill 消费路径**不再**为 trailer 消费处境枚举；`src/harness/skill/body.ts` **不 import** `src/harness/isolation/`（判定住 isolation，渲染住 skill，枚举类型住 `session-roots.ts`，无环）。
+5. **回执语义恢复**：`unboundMutateNotice()` 同时满足——(a) 含条件式（`To write` / `若要写` 等价）；(b) 含「重发这次调用」语义（`re-issue` 等价）；(c) 仍含 `create-worktree`（2026-09-10 amended by `create-worktree-tools.md` / ADR-0082：原名 `create-task-worktree`）；(d) 仍**不含** `this conversation's task worktree`；(e) 仍含 `This call would write`。(a)(b) 是本次新增的**语义**断言，(c)(d)(e) 是 SC7 既有子串断言，全部保留。
 6. **可恢复性穷尽**：`Record<WorktreeIsolationErrorKind, Recoverability>` 覆盖**全部 16 个成员**；由 TypeScript 穷尽性保证——新增 kind 未分类则 `npm run typecheck` **失败**，不靠测试兜。
 7. **停止指令**：`operator_required` 类（至少 `not_a_git_repo` / `git_unavailable`）的门禁回执含停止指令语义（「重试无用 / 报给操作员」等价），并含机读 `kind`（沿用 PR #947 `HardRuleSpec.reasonFor` 建立的「机读 id 进 reason」惯例）。
-8. **`worktree_exists` 指引唯一**：按 `taskWorktreeOwnerOf(worktreePath)` 分三种，各有测试——owner === 本会话 → 点名 `enter-task-worktree`；owner !== 本会话 → 点名 `enter-task-worktree`（显式接手）**或**换 label；owner 读不出（无 sidecar / 历史树）→ 点名 `list-task-worktrees`。sidecar 读取失败不得 throw，退化到第三种。
-9. **`branch_exists` 分子况**：目标目录**存在** → 与 SC8 同形；目标目录**不存在**（`remove-task-worktree` 默认不删分支造成的遗留分支）→ 指引换 label 或请操作员删分支，且**不含** `enter-task-worktree`（此时 enter 必撞 `worktree_not_found`，照抄会造第二次空转）。
-10. **归属告知恒定开**：`enter-task-worktree` 成功回执含该树 sidecar 记录的创建者会话 id；读不出则**省略该句**（不崩、不占位）。此告知**不受任何设置控制**——零成本、永不阻塞，与 `specs/worktree-exclusive-lock.md` 的拦截档位是两件事。
+8. **`worktree_exists` 指引唯一**：按 `taskWorktreeOwnerOf(worktreePath)` 分三种，各有测试——owner === 本会话 → 点名 `enter-worktree`；owner !== 本会话 → 点名 `enter-worktree`（显式接手）**或**换 label；owner 读不出（无 sidecar / 历史树）→ 点名 `list-worktrees`。sidecar 读取失败不得 throw，退化到第三种。
+9. **`branch_exists` 分子况**：目标目录**存在** → 与 SC8 同形；目标目录**不存在**（`remove-worktree` 默认不删分支造成的遗留分支）→ 指引换 label 或请操作员删分支，且**不含** `enter-worktree`（此时 enter 必撞 `worktree_not_found`，照抄会造第二次空转）。
+10. **归属告知恒定开**：`enter-worktree` 成功回执含该树 sidecar 记录的创建者会话 id；读不出则**省略该句**（不崩、不占位）。此告知**不受任何设置控制**——零成本、永不阻塞，与 `specs/worktree-exclusive-lock.md` 的拦截档位是两件事。
 11. **bash `/tmp` 事实**：bash 工具描述含「`/tmp` 内文件仅在本命令期间存在、命令结束即无」语义，词汇与 `helpers.ts` T3 文案一致（`process-temporary` / `not a delivery destination`）。**静态**，不进三态函数（该事实与隔离态、绑定态无关）。
 12. **绿线**：`npm test` 与 `npm run typecheck` exit 0。
 
@@ -72,20 +74,20 @@
 
 **A. `writeSituation` / `writeRootSegment`**
 
-| 类         | 输入                                    | 期望                                                            |
-| ---------- | --------------------------------------- | --------------------------------------------------------------- |
-| empty      | 根为空串 / 仅空白                       | typed 结果，不 throw；不渲染出「写根 = 」这种半句               |
-| negative   | 隔离 OFF + 树形路径；隔离 ON + 树形路径 | 分别 → `writable_main` / `writable_tree`；①② 输出**逐字节不变** |
-| overflow   | 极长绝对路径 / 深层嵌套 / 尾随分隔符    | 形状判定仍按 `isTaskWorktreePath` 裁决，不自造第二套            |
-| concurrent | `// N/A: pure`                          | —                                                               |
-| exception  | 隔离 ON + 非树形根                      | → `no_writable_root`；输出不含 `create-task-worktree`           |
+| 类         | 输入                                    | 期望                                                                            |
+| ---------- | --------------------------------------- | ------------------------------------------------------------------------------- |
+| empty      | 根为空串 / 仅空白                       | typed 结果，不 throw；不渲染出「写根 = 」这种半句                               |
+| negative   | 隔离 OFF + 树形路径；隔离 ON + 树形路径 | 分别 → `writable_main` / `writable_tree`；①② 输出**逐字节不变**                 |
+| overflow   | 极长绝对路径 / 深层嵌套 / 尾随分隔符    | 形状判定仍按 `isTaskWorktreePath` 裁决，不自造第二套                            |
+| concurrent | `// N/A: pure`                          | —                                                                               |
+| exception  | 隔离 ON + 非树形根                      | → `no_writable_root`；输出不含 `create-worktree`（原名 `create-task-worktree`） |
 
 **B. Recoverability 表 + detail 渲染（`worktree_exists` / `branch_exists` / 结构性死路）**
 
 | 类         | 输入                                                        | 期望                                                                |
 | ---------- | ----------------------------------------------------------- | ------------------------------------------------------------------- |
-| empty      | sidecar 缺席 / 内容为空 / 不可读                            | 退化到「读不出归属」臂，点名 `list-task-worktrees`；**不 throw**    |
-| negative   | `branch_exists` 且目标目录**不存在**                        | 指引换 label 或请操作员删分支；**不含** `enter-task-worktree`       |
+| empty      | sidecar 缺席 / 内容为空 / 不可读                            | 退化到「读不出归属」臂，点名 `list-worktrees`；**不 throw**         |
+| negative   | `branch_exists` 且目标目录**不存在**                        | 指引换 label 或请操作员删分支；**不含** `enter-worktree`            |
 | overflow   | 16 个 kind 全表                                             | 每个都有分类；漏一个 → `typecheck` 失败（编译期，不是测试期）       |
 | concurrent | `// N/A: pure`（同步校验；sidecar 读在失败路径，单次）      | —                                                                   |
 | exception  | `not_a_git_repo` / `git_unavailable`；sidecar 读抛非 ENOENT | 前者 → `operator_required` + 停止指令 + 机读 kind；后者原样 rethrow |
@@ -146,7 +148,7 @@ OVERALL: PASS — hand to writing-plans
 
 1. 修法是「告知面说真话 + 回执给出路」，不是恢复 auto-provision，也不是加长说明书。
 2. 三态而非四态：草稿根不做（触发门未触发），所以处境枚举不含第四态。
-3. 归属 sidecar 的职责是**告知**，不是授权、不是拦截——所以僵尸树堵不住任何东西（`enter-task-worktree` 四道检查里没有归属：调用方在主仓 / 目标存在 / 是 linked 检出 / 同仓库）。
+3. 归属 sidecar 的职责是**告知**，不是授权、不是拦截——所以僵尸树堵不住任何东西（`enter-worktree` 四道检查里没有归属：调用方在主仓 / 目标存在 / 是 linked 检出 / 同仓库）。
 4. 僵尸占用的恢复走既有「恢复会话 + 让它自己 exit」，是 restart-safe 的既有设计（`worktree-rebind.ts:790-798`、`worktree-gate.ts:913`），不需要 `release` 命令。
 5. 认下的残留：外来树 + 无持久化 enter 记录 → trailer 说可写、门禁给 `foreign_worktree`。不修，因为该错误自带出路（`move this session back to the main repo first`，`worktree-rebind.ts:817`）；乐观告知 + 自洽错误 = 一步可恢复，而两句真值相反 = 不可推理。消掉它要让纯函数读可变门禁状态，不划算。
 6. 网络出口两条（模型请求资格前置、批准文案说实话）**移出本 spec 且不开 issue**，记入「后续」留档。

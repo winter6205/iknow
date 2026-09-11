@@ -1421,7 +1421,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       });
 
       expect(result.kind).toBe("execution_failed");
-      expect(result.message).toContain("create-task-worktree ACI tool");
+      expect(result.message).toContain("create-worktree ACI tool");
       expect(spawnedTasks).toEqual([]);
       expect(provisioned).toBe(0);
       await built.shutdown?.();
@@ -1452,7 +1452,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       });
 
       expect(result.kind).toBe("execution_failed");
-      expect(result.message).toContain("create-task-worktree ACI tool");
+      expect(result.message).toContain("create-worktree ACI tool");
       expect(spawnedTasks).toEqual([]);
       await built.shutdown?.();
     } finally {
@@ -1483,7 +1483,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       });
 
       expect(result.kind).toBe("execution_failed");
-      expect(result.message).toContain("create-task-worktree ACI tool");
+      expect(result.message).toContain("create-worktree ACI tool");
       expect(spawnedTasks).toEqual([]);
       await built.shutdown?.();
     } finally {
@@ -1867,9 +1867,9 @@ describe("buildHarnessEngine — T9 display surface", () => {
       const liveReader = seam!.readCwd;
       expect(liveReader()).toBe(root);
 
-      // 触发 withLiveTaskRootWrite 缝:用真实的 create-task-worktree 工具
+      // 触发 withLiveTaskRootWrite 缝:用真实的 create-worktree 工具
       // 路径(handler 直接走 build-engine 装配层),跑出 rebind 后再读。
-      const provisionTool = built.deps.registry.get("create-task-worktree");
+      const provisionTool = built.deps.registry.get("create-worktree");
       expect(provisionTool).toBeDefined();
       const toolResult = await provisionTool!.handler(
         {},

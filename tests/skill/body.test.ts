@@ -457,9 +457,9 @@ describe("writeRootSegment — T4 按处境三态渲染", () => {
     expect(out.toLowerCase()).toMatch(/(no.{0,3}writable|writable.{0,3}root)/);
   });
 
-  it("③ no_writable_root → 不点名 create-task-worktree（SC3 / ADR-0069 D3：trailer 在装配时进上下文，早于写意图）", () => {
+  it("③ no_writable_root → 不点名 create-worktree（SC3 / ADR-0069 D3：trailer 在装配时进上下文，早于写意图）", () => {
     const out = writeRootSegment("no_writable_root", TREE_ROOT)!;
-    expect(out).not.toContain("create-task-worktree");
+    expect(out).not.toContain("create-worktree");
     // 也不含其他可能的推销字面（具体的「create-*」建树工具 + 「run」动词 +
     // 「re-issue this call」重发引导 —— 全部留给回执面）
     expect(out).not.toMatch(/create-\w+/);
@@ -487,7 +487,7 @@ describe("writeRootSegment — T4 按处境三态渲染", () => {
     expect(out2).not.toBeNull();
     expect(out1).toBe(out2); // typed stable
     expect(out1).not.toContain("current write root");
-    expect(out1).not.toContain("create-task-worktree");
+    expect(out1).not.toContain("create-worktree");
   });
 });
 
@@ -575,8 +575,10 @@ describe("createSkillBody 装配面与写处境解耦（ADR-0079）", () => {
     });
 
     expect(text).not.toContain("current write root");
+    // #981 / ADR-0079：skill 正文装配不再追加写根段（trailer 已删除），
+    // 故不再断言「③ 态披露在正文末段」；此处只钉死不点名建树工具。
     expect(text).not.toContain("no writable root");
-    expect(text).not.toContain("create-task-worktree");
+    expect(text).not.toContain("create-worktree");
     expect(text).not.toContain(taskRoot);
     expect(text.trimEnd().endsWith("</skill_files>")).toBe(true);
   });

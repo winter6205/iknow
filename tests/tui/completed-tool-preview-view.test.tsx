@@ -8,7 +8,10 @@
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
 import { RGBA } from "@opentui/core";
-import { CompletedToolPreviewView } from "../../src/tui/completed-tool-preview-view.js";
+import {
+  CompletedToolPreviewView,
+  completedToolPreviewTextLines,
+} from "../../src/tui/completed-tool-preview-view.js";
 import { completedToolPreview } from "../../src/tui/tool-summary.js";
 import { tuiPalette } from "../../src/tui/theme.js";
 
@@ -200,6 +203,30 @@ describe("CompletedToolPreviewView resultPreview: > dim 5 行尾部 + 溢出", (
 // 为辅助形态；正文内容（bash stdout/stderr 实际产出）走正文色，与终端其
 // 余渲染一致——避免「结果预览一坨灰、读者看不到内容」。spec D4 词条由
 // 「dim 只属成功 bash 尾巴」改为「dim 只属装饰（前缀/溢出）」。
+
+describe("CompletedToolPreviewView squeeze（spec D5）", () => {
+  test("squeezed 投影 = 只留标题行 `Wrote N lines to <path>`，正文预览整段让位", async () => {
+    const preview = completedToolPreview(
+      "write_file",
+      { path: "a.ts", content: "l1\nl2\nl3" },
+      { oldContent: "", newContent: "l1\nl2\nl3", squeezed: true }
+    );
+    expect(preview.kind).toBe("squeeze");
+    if (preview.kind !== "squeeze") return;
+    // 标题行是 D5 的唯一人读面（`Wrote N lines to path`）。
+    expect(preview.line).toBe("Wrote 3 lines to a.ts");
+    // 正文整段让位（不是被截成 10 行）：预览行账 = 0，标题由调用方拼。
+    expect(completedToolPreviewTextLines(preview, 80)).toEqual([]);
+    const setup = await testRender(
+      <CompletedToolPreviewView preview={preview} cols={80} />,
+      { width: 80, height: 10 }
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain("l1");
+    await setup.renderer.destroy();
+  });
+});
 
 describe("CompletedToolPreviewView resultPreview: 内容行不再 dim（仅装饰 dim）", () => {
   test("内容行 fg = palette.text（不再是 dim）；> 前缀保持 dim", async () => {
