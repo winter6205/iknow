@@ -5,6 +5,8 @@ Status: accepted
 
 > **Amendment 2026-09-05**（ADR-0044）：promote 段不再装配进 `system`，因此不再是本 ADR 的快照住户。catalog（若仍装）与 git 块仍按本票快照。
 
+> **Amendment 2026-09-11**（memory-toggle-live）：快照前提是「输入构造上不可能在会话内变」，但 TUI `/memory` 面板把 autoExtract 变成了宿主可翻转的 live flag——翻转后快照继续输出旧开关态的 catalog，违背装配层既有契约（`autoExtract === false` → 不注入 catalog）。修订：**显式用户开关翻转是快照的受控例外**——TUI 表面的 resolver 按 flag 值分档快照（每值各冻结一份，无翻转时字节稳定不变），宿主在 commit 时经 `invalidateMemorySystem` 作废快照，翻转在**下一轮**生效；一次性 KV 缓存失效是该例外的已接受代价。仅限显式用户动作，auto-memory 落盘仍不触发失效（D1 原裁决不变）。
+
 ## Context
 
 wayfinder 图「模型面前缀分层与缓存兑现」G1 票（前缀稳定边界）盘问中段裁决。G1 采用从严资格线：一段内容要有资格留在前缀区（`tools` + `system`），其输入来源必须**构造上**不可能在会话内变——「实测没变」不算数。按线盘点，`memory_layer` 中不合格的只有 catalog 段（[ADR-0034](0034-auto-memory-catalog-prefetch-channels.md) D1 允许进 system 的 live titles/hooks + 纪律句）：它经 `memory/refresh.ts` 的 mtime 门控读取，auto-memory 落盘（ADR-0031，completed 闸后异步、成簇写入）当下一次装配就变——R4 实测每会话抖 1~3 次，每次废掉 system 之后**整条 messages history** 的被动缓存。ADR-0034 D2 已把重载荷（bodies / prefetch）放在 user 消息侧、不碰前缀，本票只处理 catalog。

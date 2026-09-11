@@ -248,6 +248,18 @@ export function mcpServerOfToolName(name: string): string {
 }
 
 /**
+ * memory-toggle-live（S5 整改）: 可选字段落盘 helper —— 值在场时才产出
+ * `{ [key]: value }`，缺席产出空对象。`buildTuiDeps` 返回块的一串条件
+ * spread 统一走这里，宿主解构语义不变（缺席字段不出现）。
+ */
+function presentFields<V>(
+  key: string,
+  value: V | undefined
+): { readonly [k: string]: V } {
+  return value === undefined ? {} : { [key]: value };
+}
+
+/**
  * T1 观测缝(#365):把 TUI 的 onToolEvent + soleInflightId 归因包装成
  * build-engine 的 PostToolUseHook(透传进 createAciExecutor)。语义与委托前
  * 一致:postToolUse 触发 → soleInflightId 归因 → onToolEvent 投影为
@@ -287,6 +299,7 @@ export async function buildTuiDeps(
   LoopEngineDeps &
     Omit<EngineBundle, "deps"> & {
       readonly memoryFlags?: MemoryLiveFlags;
+      readonly invalidateMemorySystem?: () => void;
     }
 > {
   if (!bundle.env.llm.apiKey) {
@@ -448,17 +461,16 @@ export async function buildTuiDeps(
 
   return {
     ...built.deps,
-    ...(built.subagentManager
-      ? { subagentManager: built.subagentManager }
-      : {}),
-    ...(built.shutdown ? { shutdown: built.shutdown } : {}),
-    ...(built.graphAssembly ? { graphAssembly: built.graphAssembly } : {}),
+    ...presentFields("subagentManager", built.subagentManager),
+    ...presentFields("shutdown", built.shutdown),
+    ...presentFields("graphAssembly", built.graphAssembly),
     // auto-memory T4:自动记忆钩子随 deps 平铺透出，run.tsx 解构后交给
     // createTuiBridge → SessionHub。缺席（默认 OFF）→ 字段不出现。
-    ...(built.autoMemory ? { autoMemory: built.autoMemory } : {}),
-    ...(built.overlayMemoryPrefetch
-      ? { overlayMemoryPrefetch: built.overlayMemoryPrefetch }
-      : {}),
-    ...(built.memoryFlags ? { memoryFlags: built.memoryFlags } : {}),
+    ...presentFields("autoMemory", built.autoMemory),
+    ...presentFields("overlayMemoryPrefetch", built.overlayMemoryPrefetch),
+    ...presentFields("memoryFlags", built.memoryFlags),
+    // memory-toggle-live: system 快照失效句柄随 deps 平铺 —— /memory commit
+    // 时由 app 层调用，翻转在下一轮生效。缺席（非 TUI / 注入形态）→ 不调用。
+    ...presentFields("invalidateMemorySystem", built.invalidateMemorySystem),
   };
 }

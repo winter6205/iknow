@@ -347,6 +347,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       autoMemory,
       overlayMemoryPrefetch,
       memoryFlags,
+      invalidateMemorySystem,
       ...deps
     } = await buildTuiDeps(bundle, depsOpts);
     // #365 T4:挂 MCP + subagent 组合 shutdown 到进程信号(runtime.ts 语义,
@@ -541,6 +542,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           onPersistMemory={persistMemory}
           defaultMemory={loadIknowSettings().memory}
           memoryFlags={memoryFlags}
+          invalidateMemorySystem={invalidateMemorySystem}
           onQuit={onQuitBridge!.destroy}
         />
       );

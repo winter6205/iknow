@@ -336,4 +336,90 @@ describe("createSystemResolver", () => {
     expect(await resolver()).toBe("retry-success-content");
     expect(spiedAssemble).toHaveBeenCalledTimes(2);
   });
+
+  // -- live autoExtract 开关（memory-toggle-live）----------------------------
+  //
+  // ADR-0042 会话级快照的成立前提是「输入构造上不可能在会话内变」。TUI
+  // /memory 面板打破了该前提：flags 是宿主持有的可变盒子，提交时翻转。
+  // resolver 因此必须读 flags 的**当前值**决定 catalog 装配（flags 在场时
+  // 覆盖 ctx.autoExtract），并暴露 invalidate() 让显式用户动作把快照作废，
+  // 下一轮重装配。这不是放弃 ADR-0042：无翻转时快照语义逐字节不变。
+
+  it("overrides ctx.autoExtract from live flags on every resolve (flags: false hides the catalog)", async () => {
+    const base = await makeContext();
+    const ctx = { ...base, autoExtract: true };
+    await writeFile(join(base.projectIdentityRoot, "AGENTS.md"), "flags-proj");
+    await seedMemoryEntry(base.memoryDir, "dddddddddddd", "Toggled entry");
+
+    const flags = { autoExtract: true, dream: false };
+    const resolver = createSystemResolver(ctx, { flags });
+    const first = await resolver();
+    expect(first).toContain("Toggled entry");
+
+    // Host flips the box (same object identity, as the TUI mutates in place).
+    flags.autoExtract = false;
+    const afterOff = await resolver();
+    expect(afterOff).not.toContain("Toggled entry");
+    expect(afterOff).not.toContain(MEMORY_CATALOG_DISCIPLINE);
+
+    // Flip back on: catalog re-enters. ctx.autoExtract stays true throughout —
+    // flags alone decide.
+    flags.autoExtract = true;
+    expect(await resolver()).toContain("Toggled entry");
+  });
+
+  it("flags absent → snapshot semantics unchanged (no flags read)", async () => {
+    const base = await makeContext();
+    const ctx = { ...base, autoExtract: true };
+    await writeFile(join(base.projectIdentityRoot, "AGENTS.md"), "noflags");
+    await seedMemoryEntry(base.memoryDir, "eeeeeeeeeeee", "Plain entry");
+    const resolver = createSystemResolver(ctx);
+    const first = await resolver();
+    expect(first).toContain("Plain entry");
+    expect(await resolver()).toBe(first);
+    expect(spiedAssemble).toHaveBeenCalledTimes(1);
+  });
+
+  it("invalidate() drops the snapshot so the next resolve reassembles", async () => {
+    const base = await makeContext();
+    const ctx = { ...base, autoExtract: true };
+    await writeFile(join(base.projectIdentityRoot, "AGENTS.md"), "inv-proj");
+    await seedMemoryEntry(base.memoryDir, "ffffffffffff", "First entry");
+
+    const resolver = createSystemResolver(ctx);
+    const first = await resolver();
+    expect(first).toContain("First entry");
+
+    await tick();
+    resolver.invalidate();
+    await seedMemoryEntry(base.memoryDir, "000000000001", "Second entry");
+    const second = await resolver();
+    expect(second).not.toBe(first);
+    expect(second).toContain("Second entry");
+    // After the reassembly the snapshot freezes again.
+    expect(await resolver()).toBe(second);
+  });
+
+  it("invalidate() before any successful call is a no-op (not a poison)", async () => {
+    const ctx = await makeContext();
+    await writeFile(join(ctx.projectIdentityRoot, "AGENTS.md"), "noop-inv");
+    mockedAssemble.mockRejectedValueOnce(new Error("early failure"));
+    const resolver = createSystemResolver(ctx);
+    await expect(resolver()).rejects.toThrow("early failure");
+    // 失败态下 invalidate 不改变「失败不毒化」契约。
+    expect(() => resolver.invalidate()).not.toThrow();
+    mockedAssemble.mockResolvedValueOnce("late-success");
+    expect(await resolver()).toBe("late-success");
+  });
+
+  it("invalidate() dedupes concurrent reassembly (in-flight dedupe survives)", async () => {
+    const base = await makeContext();
+    const ctx = { ...base, autoExtract: true };
+    await writeFile(join(base.projectIdentityRoot, "AGENTS.md"), "conc-inv");
+    const resolver = createSystemResolver(ctx);
+    await resolver();
+    resolver.invalidate();
+    const results = await Promise.all([resolver(), resolver(), resolver()]);
+    expect(new Set(results).size).toBe(1);
+  });
 });

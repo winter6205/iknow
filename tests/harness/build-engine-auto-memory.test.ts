@@ -83,6 +83,16 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
     expect(engine.overlayMemoryPrefetch).toBeDefined();
   });
 
+  it("exposes invalidateMemorySystem on TUI only (memory-toggle-live)", async () => {
+    // TUI: the only surface whose host can flip /memory mid-session — the
+    // snapshot-dropping handle must be present even with autoExtract off.
+    const tui = await build({ surface: "tui" });
+    expect(typeof tui.invalidateMemorySystem).toBe("function");
+    // chat: settings toggle is read only at assembly; no live toggle exists.
+    const chat = await build();
+    expect(chat.invalidateMemorySystem).toBeUndefined();
+  });
+
   it("leaves autoMemory absent on an explicit false", async () => {
     const engine = await build({
       settings: { memory: { autoExtract: false } },

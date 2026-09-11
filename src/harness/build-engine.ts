@@ -96,6 +96,7 @@ import {
   type MemoryLiveFlags,
   type OverlayPrefetchFn,
   type PrefetchQueryOpts,
+  type SystemResolver,
 } from "./memory/index.js";
 import { createAdapterExtractLlm } from "./auto-memory-wire.js";
 import {
@@ -444,6 +445,14 @@ export type BuiltEngine = EngineBundle & {
    * layer is on. The TUI mutates this box on Esc; the hook reads it per turn.
    */
   readonly memoryFlags?: MemoryLiveFlags;
+  /**
+   * memory-toggle-live: drop the memory_layer system snapshot so the next
+   * turn reassembles it under the current live flags. Present only for the
+   * TUI surface (the only host that can flip /memory mid-session); the
+   * caller must tolerate a one-off prefix change (KV-cache break is the
+   * accepted cost of an explicit user toggle).
+   */
+  readonly invalidateMemorySystem?: () => void;
 };
 
 /**
@@ -599,6 +608,16 @@ export async function buildHarnessEngine(
   // 二期 B7：上移到 LSP 装配之前 —— settings.lsp 注入 LspCtx（工具层超时/
   // 等待 + client idle sweep + disabledServers 过滤）。
   const settings = opts.settings ?? loadIknowSettings({ cwd, home: userHome });
+  // memory-toggle-live: TUI live flags 在 settings 加载后立即算出 ——
+  // memoryResolver 构造点（下方 system 注入缝）需要它，原定义点
+  // （auto-memory 钩子装配段）随之复用同一值。
+  const autoExtractOn = settings.memory?.autoExtract === true;
+  const dreamOn = settings.memory?.dream === true;
+  const memoryFlags: MemoryLiveFlags = {
+    autoExtract: autoExtractOn,
+    dream: dreamOn,
+  };
+  const tuiLive = surface === "tui" && memoryEnabled;
   // T6 (plans/write-situation-disclosure.md): worktree 隔离档上移到 settings
   // 加载后立即算出 —— `subagentManager` 构造(line 617)需透传
   // `isolationOn` 给 `createSubAgentManager`,manager.buildWorkerPayload
@@ -1469,6 +1488,20 @@ export async function buildHarnessEngine(
   // 都缺席。(同语义表达式还在上方 registry todoDir seam 内联一次,改动需同步。)
   const agentStatusTodoDir: string | undefined =
     surface !== "ask" && opts.todoDir ? opts.todoDir : undefined;
+  // memory-toggle-live: memory_layer resolver 提前构造 —— deps.system 注入缝
+  // 与 BuiltEngine.invalidateMemorySystem 消费同一实例。TUI 表面挂 live flags
+  // （catalog 装配档随 /memory 翻转），其余表面维持原快照形态。
+  const memorySystemResolver = memoryToolsEnabled
+    ? buildMemorySystemResolver({
+        projectIdentityRoot,
+        userHome,
+        workspaceRoot,
+        memoryDir,
+        autoExtract: settings.memory?.autoExtract === true,
+        flags: memoryFlags,
+        flagsActive: tuiLive,
+      })
+    : undefined;
   const deps: LoopEngineDeps = {
     adapter,
     executor: loopExecutor,
@@ -1520,21 +1553,7 @@ export async function buildHarnessEngine(
       workspaceRoot,
       surface,
       memoryEnabled: memoryToolsEnabled,
-      ...(memoryToolsEnabled
-        ? {
-            memoryResolver: createSystemResolver({
-              projectIdentityRoot,
-              userHome,
-              // ADR-0019 (T2):memoryResolver ctx 也带 workspaceRoot —
-              // refresh discover + assemble 的 user-scope 物理根同源。
-              workspaceRoot,
-              memoryDir,
-              ...(settings.memory?.autoExtract === true
-                ? { autoExtract: true }
-                : {}),
-            }),
-          }
-        : {}),
+      ...(memorySystemResolver ? { memoryResolver: memorySystemResolver } : {}),
       // T5 / spec Does #6:skills 索引 = 装配期首轮判定后冻结的 holder
       // (`skillIndexList`)—— 降档把超阈条目的 description 剥掉只留名,渲染层
       // 按数据形态输出裸名行(单一 SSOT,不在段函数里做第二套判定)。未超阈
@@ -1659,13 +1678,7 @@ export async function buildHarnessEngine(
   // 非 ask 表面。任一不成立 → 钩子缺席,宿主侧零调用、零 LLM、零写盘。
   // TUI 例外：层在场时始终装配钩子 + live flags，让 /memory 能在本会话翻转。
   // 读路径预取只跟 autoExtract（dream-only 不灌用户消息）。
-  const autoExtractOn = settings.memory?.autoExtract === true;
-  const dreamOn = settings.memory?.dream === true;
-  const memoryFlags: MemoryLiveFlags = {
-    autoExtract: autoExtractOn,
-    dream: dreamOn,
-  };
-  const tuiLive = surface === "tui" && memoryEnabled;
+  // （autoExtractOn / dreamOn / memoryFlags / tuiLive 定义在 settings 加载点。）
   const autoMemory =
     memoryEnabled && surface !== "ask" && (autoExtractOn || dreamOn || tuiLive)
       ? createAutoMemoryHook({
@@ -1719,6 +1732,7 @@ export async function buildHarnessEngine(
     ...(autoMemory ? { autoMemory } : {}),
     ...(overlayMemoryPrefetch ? { overlayMemoryPrefetch } : {}),
     ...(tuiLive ? { memoryFlags } : {}),
+    ...tuiMemoryInvalidateField(tuiLive, memorySystemResolver),
     ...(subagentManager ? { subagentManager } : {}),
     // #337 T8 / #361 Phase D:透出 skillCatalog + mcpManager + catalog,供
     // TUI deps 构建扩展面(TuiExtensions.skillCatalog / mcp.status / mcp.reload /
@@ -1824,4 +1838,48 @@ function createDynamicExecutorRegistry(
       return v;
     },
   });
+}
+
+/**
+ * memory-toggle-live: memory_layer system resolver 构造收口（从
+ * `buildHarnessEngine` 内联三态表达式抽出，S5 复杂度回归整改）。
+ *
+ * TUI 表面（`flags` 在场）挂 live flags —— resolver 按 flag 值分档快照，
+ * `/memory` 翻转经 `invalidateMemorySystem` 在下一轮生效（ADR-0042
+ * Amendment 2026-09-11）；其余表面维持原单快照形态，行为逐字节不变。
+ * `autoExtract` 载入 ctx 与 ADR-0034 装配契约同源（false → 不注入 catalog）。
+ */
+function buildMemorySystemResolver(args: {
+  readonly projectIdentityRoot: string;
+  readonly userHome: string;
+  readonly workspaceRoot: string;
+  readonly memoryDir: string;
+  readonly autoExtract: boolean;
+  readonly flags?: MemoryLiveFlags;
+  /** TUI 表面才挂 live flags（其它表面 flags 传了也不生效）。 */
+  readonly flagsActive?: boolean;
+}): SystemResolver {
+  const ctx = {
+    projectIdentityRoot: args.projectIdentityRoot,
+    userHome: args.userHome,
+    workspaceRoot: args.workspaceRoot,
+    memoryDir: args.memoryDir,
+    ...(args.autoExtract ? { autoExtract: true } : {}),
+  };
+  return args.flagsActive && args.flags
+    ? createSystemResolver(ctx, { flags: args.flags })
+    : createSystemResolver(ctx);
+}
+
+/**
+ * memory-toggle-live（S5 整改）: TUI 表面才透出的快照失效字段 —— resolver
+ * 在场且表面为 TUI 时产出 `{ invalidateMemorySystem }`，否则空对象。
+ */
+function tuiMemoryInvalidateField(
+  tuiLive: boolean,
+  resolver: SystemResolver | undefined
+): { readonly invalidateMemorySystem: () => void } | Record<string, never> {
+  return tuiLive && resolver
+    ? { invalidateMemorySystem: resolver.invalidate }
+    : {};
 }

@@ -158,4 +158,4 @@ export {
   formatCatalogLine,
   formatMemoryCatalog,
 } from "./catalog.js";
-export { createSystemResolver } from "./refresh.js";
+export { createSystemResolver, type SystemResolver } from "./refresh.js";

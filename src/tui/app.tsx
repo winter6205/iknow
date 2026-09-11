@@ -584,6 +584,12 @@ export interface TuiAppProps {
     autoExtract: boolean;
     dream: boolean;
   };
+  /**
+   * memory-toggle-live: memory_layer system 快照失效句柄（build-engine
+   * invalidateMemorySystem 经 deps 透传）。/memory commit 时调用，翻转在
+   * 下一轮生效。缺省（测试 / 旧宿主）→ 不调用。
+   */
+  readonly invalidateMemorySystem?: () => void;
 }
 
 interface Notice {
@@ -2415,6 +2421,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       props.memoryFlags.autoExtract = patch.autoExtract;
       props.memoryFlags.dream = patch.dream;
     }
+    // memory-toggle-live: 同一次 commit 让 memory_layer system 快照作废，
+    // 翻转（含关闭）在下一轮生效 —— 快照不再困住旧开关态。
+    props.invalidateMemorySystem?.();
     if (props.onPersistMemory === undefined) return;
     void props.onPersistMemory(patch).then(
       (res) => {
