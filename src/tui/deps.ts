@@ -125,11 +125,11 @@ export interface BuildTuiDepsOptions {
    * #950 T2 / session-folder-consolidation: session pool root（与
    * `createTuiBridge.dataDir` / `RunTuiOptions.dataDir` 同形）—— todo
    * 会话文件夹根由此 + `workspaceRoot` 派生
-   * (`resolveProjectSessionDir(resolveServeDataDir(dataDir, workspaceRoot),
+   * (`resolveProjectSessionDir(resolveServeDataDir(dataDir),
    * deriveProjectIdentityRoot({ cwd: workspaceRoot }))`)。缺席 →
-   * `resolveServeDataDir` 缺省链(dataDir → `<workspaceRoot>/.iknow` →
-   * `~/.iknow`)。run.tsx 传已 resolve 的 dataDir,保证 bridge 的
-   * SessionStore 与 todo 落点是同一个 projects/<slug>/。
+   * `resolveServeDataDir` 缺省 `~/.iknow`（ADR-0087）。run.tsx 传已 resolve
+   * 的 dataDir,保证 bridge 的 SessionStore 与 todo 落点是同一个
+   * projects/<slug>/。
    */
   readonly dataDir?: string;
   /**
@@ -320,7 +320,7 @@ export async function buildTuiDeps(
   // conversationId 由 hub per-run 注入(hub-bridge → SessionHub),不在本层
   // 拼 —— 本层只给根。
   const todoProjectDir = resolveProjectSessionDir(
-    resolveServeDataDir(opts.dataDir, opts.workspaceRoot),
+    resolveServeDataDir(opts.dataDir),
     deriveProjectIdentityRoot({ cwd: opts.workspaceRoot })
   );
   // T5 (ADR-0071 / SC8 + L2): 子代理 lifecycle

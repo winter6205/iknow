@@ -1,15 +1,8 @@
 /**
- * 会话管理「分类升级」(session folder consolidation, ADR-0071 + ADR-0019)
- * 之后的读侧根派生回归测试。
+ * 会话文件夹归并（ADR-0071 + ADR-0087）之后的读侧根派生回归测试。
  *
- * 认证的不变式：trace 读侧（CLI `--trace-out` 缺省派生 / TUI bridge 数据根）
- * 与写侧 SessionStore 数据根必须解析到**同一个** baseDir —— 否则写侧落
- * `<workspaceRoot>/.iknow`、读侧扫 `~/.iknow`，trace MCP / trace 面板对
- * workspaceRoot 会话恒空。
- *
- * 根因场景：run.tsx 写侧把 workspaceRoot 传进 resolveServeDataDir
- * (`<workspaceRoot>/.iknow`)，而 cli.ts:resolveTraceRoot 与
- * hub-bridge.ts 的读侧派生漏传 —— 根分叉。
+ * 不变式：trace 读侧缺省派生与写侧 SessionStore 数据根必须是同一个
+ * baseDir。会话池不跟 workspaceRoot 分片（显式 dataDir 除外）。
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -18,15 +11,10 @@ import { join } from "node:path";
 import { resolveServeDataDir } from "../../src/session-api/serve.ts";
 import { resolveTraceRoot } from "../../src/cli/trace-root.ts";
 
-describe("trace read-side root == write-side data root (ADR-0019/0071)", () => {
-  it("resolveTraceRoot follows the write-side dataDir (workspaceRoot sharded)", () => {
-    const wsRoot = "/tmp/iknow-fixture-ws";
-    const writeDataDir = resolveServeDataDir(undefined, wsRoot);
-    assert.equal(
-      writeDataDir,
-      join(wsRoot, ".iknow"),
-      "resolveServeDataDir contract: workspaceRoot shards the pool"
-    );
+describe("trace read-side root == write-side data root (ADR-0087)", () => {
+  it("workspaceRoot does not shard the session pool", () => {
+    const writeDataDir = resolveServeDataDir();
+    assert.equal(writeDataDir, join(homedir(), ".iknow"));
     assert.equal(
       resolveTraceRoot(undefined, writeDataDir),
       writeDataDir,
@@ -34,9 +22,16 @@ describe("trace read-side root == write-side data root (ADR-0019/0071)", () => {
     );
   });
 
+  it("explicit --data-dir still wins", () => {
+    assert.equal(
+      resolveServeDataDir("/tmp/iknow-explicit-pool"),
+      "/tmp/iknow-explicit-pool"
+    );
+  });
+
   it("explicit --trace-out flag still wins over the derived root", () => {
     assert.equal(
-      resolveTraceRoot("/tmp/flag-root", "/tmp/iknow-fixture-ws/.iknow"),
+      resolveTraceRoot("/tmp/flag-root", join(homedir(), ".iknow")),
       "/tmp/flag-root"
     );
   });
@@ -46,7 +41,7 @@ describe("trace read-side root == write-side data root (ADR-0019/0071)", () => {
     try {
       process.env.IKNOW_TRACE_OUT = "/tmp/env-root";
       assert.equal(
-        resolveTraceRoot(undefined, "/tmp/iknow-fixture-ws/.iknow"),
+        resolveTraceRoot(undefined, join(homedir(), ".iknow")),
         "/tmp/env-root"
       );
     } finally {
@@ -55,7 +50,7 @@ describe("trace read-side root == write-side data root (ADR-0019/0071)", () => {
     }
   });
 
-  it("no flag, no env, no dataDir → legacy ~/.iknow pool", () => {
+  it("no flag, no env, no dataDir → ~/.iknow pool", () => {
     assert.equal(
       resolveTraceRoot(undefined, undefined),
       join(homedir(), ".iknow")

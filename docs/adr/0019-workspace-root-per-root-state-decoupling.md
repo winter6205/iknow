@@ -4,6 +4,10 @@ Date: 2026-08-17
 
 Status: accepted
 
+> **Amendment 2026-09-13**（ADR-0088）：**tasks** 也不跟 `workspaceRoot` 分片，落 home 项目树 `projects/<slug>/tasks/`。D1 其余 per-root 仍是 memory / settings 写回 / worktrees。Positive 里 throwaway 隔离对 **serve / 会话记录 / tasks** 均不成立。
+>
+> **Amendment 2026-09-13**（ADR-0087 / #1000）：会话池（transcript / todos / trace / blobs）**不**跟 `workspaceRoot` 分片，落 `~/.iknow/projects/…`（显式 `--data-dir` 除外）。T2 把 serve data 写成 `<workspaceRoot>/.iknow` 的读法 **superseded**（仅就会话记录）。memory / settings 写回 / worktrees 仍 per-root（tasks 见上条 0088）。Positive 里「throwaway dir 完全隔离 identity / memory / serve / settings」对 **serve/会话记录** 不再成立。
+
 ## Context
 
 当前 iknow 在任意根目录启动时，identity workspace seed（`user.md` / `BOOTSTRAP.md` / `state.json`）、memory store、serve data、settings 写回 fallback 全部隐式跟随 `~/.iknow` —— 用户在多项目根目录间切换时，无法做到「每个根目录的 iknow per-root 状态相互隔离，而 global 配置跨根目录共享」。前置约束（本 ADR 均不位移）：ADR-0009（memory layered injection）锁定 user-level = `~/.iknow`、project-level = `<cwd>/AGENTS.md`，memory 读序与 slot 已定；ADR-0010（memory-injection landing）锁定 `IKNOW_ASSEMBLY_ORDER` 顺序与 slot 索引；ADR-0015（settings.json single source）锁定 settings merge 的 `home` 参数为 global config anchor。本 ADR 引入 `workspaceRoot` 作为**新增维度**（per-root state anchor），不是替换这三个 ADR 的任何语义。

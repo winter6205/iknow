@@ -66,7 +66,6 @@ import {
   resolveSubagentTraceDir,
 } from "./session-api/store/index.js";
 import { resolveServeDataDir } from "./session-api/serve.js";
-import { loadWorkspaceRootEnv } from "./config/env.js";
 import { createTaskWorktreeProvisioner } from "./session-api/worktree-rebind.js";
 import type { WorktreeIsolationHostOpts } from "./harness/isolation/worktree-gate.js";
 import { createWorktreeIsolationHost } from "./cli/worktree-host.js";
@@ -586,8 +585,7 @@ async function runTui(parsed: ParsedCli): Promise<void> {
     ...(parsed.workspaceRoot !== undefined
       ? { workspaceRoot: parsed.workspaceRoot }
       : {}),
-    // traceOut 缺省派生放 run.tsx(dataDir 已解析处):TUI 写侧 dataDir 有
-    // cwd 兜底(<cwd>/.iknow),cli 层拿不到 env 档,在此预解析会与写侧分叉。
+    // traceOut 缺省派生放 run.tsx：会话池 ~/.iknow，cli 层不预解析 dataDir。
     traceOut: resolveTraceRoot(parsed.traceOut, undefined),
     ...(parsed.autoMode ? { permissionMode: "full_auto" } : {}),
   });
@@ -595,13 +593,8 @@ async function runTui(parsed: ParsedCli): Promise<void> {
 }
 
 async function runServe(parsed: ParsedCli): Promise<void> {
-  // ADR-0019:读侧面板根与写侧数据根同源。serve 写侧链 = explicit workspaceRoot
-  // > env IKNOW_WORKSPACE_ROOT > ~/.iknow(serve 不落 cwd 兜底);缺省派生复刻
-  // 同一链,两侧必须落同一池。
-  const serveDataDir = resolveServeDataDir(
-    parsed.dataDir,
-    parsed.workspaceRoot ?? loadWorkspaceRootEnv()
-  );
+  // ADR-0087:读侧面板根与写侧会话池同源 = 显式 dataDir 否则 ~/.iknow。
+  const serveDataDir = resolveServeDataDir(parsed.dataDir);
   const tracePath = resolveTraceRoot(parsed.traceOut, serveDataDir);
   const { startSessionServe } = await import("./session-api/serve.js");
   const { createSessionGrants } =
@@ -617,9 +610,8 @@ async function runServe(parsed: ParsedCli): Promise<void> {
       port: parsed.port,
       json_mode: parsed.json,
       dataDir: parsed.dataDir,
-      // ADR-0019 (T2):`--workspace-root` flag 透传到 serve 入口 — init /
-      // resolveServeDataDir 消费(详见 session-api/serve.ts)。
-      // review-fix (M1/M5): `!== undefined` 守门 — 空字符串透传触 empty_explicit。
+      // ADR-0019:`--workspace-root` 透传到 serve 入口（memory / bind），
+      // 不改变会话池根（ADR-0087）。
       ...(parsed.workspaceRoot !== undefined
         ? { workspaceRoot: parsed.workspaceRoot }
         : {}),
@@ -659,10 +651,7 @@ async function runTrace(parsed: ParsedCli): Promise<void> {
   // 两级树 discovery 由 T6 承接。
   const traceOut = resolveTraceRoot(
     parsed.traceOut,
-    resolveServeDataDir(
-      parsed.dataDir,
-      parsed.workspaceRoot ?? loadWorkspaceRootEnv()
-    )
+    resolveServeDataDir(parsed.dataDir)
   );
 
   // ADR-0020 D2.1 默认模式：不起进程，探测 iknow serve health 后指向同进程

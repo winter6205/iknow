@@ -192,7 +192,7 @@ export interface TuiBridge {
 }
 
 export interface CreateTuiBridgeOptions {
-  /** 会话池根目录；缺省 ~/.iknow（与 serve 同款 resolveServeDataDir）。 */
+  /** 会话池根目录；缺省 ~/.iknow（ADR-0087，与 serve 同款 resolveServeDataDir）。 */
   readonly dataDir?: string;
   /** T1: resolved workspace root used when lazily creating a session. */
   readonly workspaceRoot?: string;
@@ -277,10 +277,7 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     cwd: opts.workspaceRoot,
   });
   const store = new SessionStore(
-    // ADR-0019:数据根与写侧同源 —— resolveServeDataDir(dataDir, workspaceRoot)
-    // 同一解析链(dataDir 优先,否则 <workspaceRoot>/.iknow,缺省 ~/.iknow)。
-    // 此前漏传 workspaceRoot,显式 root 的会话会被落回旧全局池 ~/.iknow。
-    resolveServeDataDir(opts.dataDir, opts.workspaceRoot),
+    resolveServeDataDir(opts.dataDir),
     projectIdentityRoot
   );
   const hub = new SessionHub({

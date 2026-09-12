@@ -3,6 +3,10 @@
 Date: 2026-09-08
 Status: accepted
 
+> **Amendment 2026-09-13**（ADR-0088）：Decision 2「后台任务登记留在 `stateAnchor` / 工作区 `.iknow/tasks`」**superseded**。登记表仍不进会话文件夹叶子，但落在同一 home 项目树的 `tasks/` 兄弟目录。退役 `sessions/` 布局仍适用 Decision 7（不自动迁移）。
+>
+> **Amendment 2026-09-13**（ADR-0087）：会话池根是 `home/.iknow`（或显式 dataDir），不是 `<workspaceRoot>/.iknow`。Decision 1 的路径字面量原样有效；实现曾把 `baseDir` 绑到 workspace 分片，与本 ADR 冲突，现收回。
+
 ## Context
 
 同一个会话的记录面散在**五个锚点**,彼此用同一个 `conversationId` 做键却不共享位置(实测 2026-09-08):
@@ -39,7 +43,7 @@ Status: accepted
 
 **2. 判据是「记录 vs 带锁活状态」,不是「按会话与否」。**
 
-append-only 的记录(transcript / todos / trace / blobs / 子代理记录)进会话文件夹;**带锁或 per-root 的活状态不进** —— 后台任务登记表留在 `stateAnchor`(ADR-0021 D1.3 + ADR-0037 §4 明写「改绑后仍看得见改绑前起的任务,树上不另开一份登记」),worktrees 留在 `repoRoot`。两者寿命与访问模式不同:记录随会话生死,活状态要跨改绑存活。
+append-only 的记录(transcript / todos / trace / blobs / 子代理记录)进会话文件夹;**带锁的活状态不进叶子** —— 后台任务登记表落在同一 home 项目树的 `tasks/` 兄弟目录(ADR-0088 / ADR-0021 D1.3)，改绑后仍看得见、树上不另开一份登记(ADR-0037 §4)；worktrees 留在 `repoRoot`。寿命与访问模式不同:记录随会话生死,活状态要跨改绑存活。
 
 **3. blob 去重从 opt-in 改为唯一模式,去重粒度从整条 message 改为 `content`。**
 
