@@ -30,6 +30,7 @@ import {
   assertEngineAlignable,
   assertIgnoreCaseAlignable,
   assertLineContentOnly,
+  assertStructuralAlignable,
   compilePattern,
   keepsUnicodeMode,
 } from "../../../../src/harness/aci/search/pattern.ts";
@@ -108,6 +109,89 @@ describe("assertEngineAlignable — 无法对齐的构造", () => {
       "a.c",
     ]) {
       assert.doesNotThrow(() => assertEngineAlignable(pattern), pattern);
+    }
+  });
+
+  it("数字族 `\\N` / `\\NN` / `\\NNN`：三条子判据各自拒绝，且文案点名该形态", () => {
+    // 生成式 fuzz 反推出的三条语义判据（见 pattern.ts 的
+    // `assertDigitEscapeAlignable` 注释）。每条都先有 DIVERGE 实测、后才
+    // 有这条 assert —— 不是照拼写补的。
+    const cases: Array<readonly [string, RegExp]> = [
+      // 1. > 3 位：PCRE2 rc=2 拒，JS 读前 3 位 octal + 余下字面
+      ["\\0409", /more than 3 digits/],
+      ["\\0007", /more than 3 digits/],
+      // 2. 含 8/9：PCRE2 rc=2，JS 读字面数字
+      ["\\8", /out of range for an octal escape/],
+      ["\\9", /out of range for an octal escape/],
+      ["\\88", /out of range for an octal escape/],
+      // 3. 八进制值 ≥ 0x80：rg 按 UTF-8 码点解、JS 按单字节解
+      ["\\200", /at or above 0x80/],
+      ["\\277", /at or above 0x80/],
+      ["\\377", /at or above 0x80/],
+      // 4. 单数字反向引用越界：PCRE2 rc=2、JS 读字面数字
+      ["\\1", /backreference to a group that does not exist/],
+      ["(a)(b)\\3", /backreference to a group that does not exist/],
+    ];
+    for (const [pattern, expected] of cases) {
+      rejects(() => assertEngineAlignable(pattern), expected);
+    }
+  });
+
+  it("数字族的正向控制：这些形态实测两引擎对齐，必须继续放行", () => {
+    // 高频用法全部落在低半区 / 合法反向引用 —— 这条是防止把本族简化成
+    // 「数字转义一律拒」的护栏。
+    for (const pattern of [
+      "\\040", // 空格：低半区，两引擎同读 0x20
+      "\\101", // 'A'
+      "\\177", // DEL 边界（低半区上沿）
+      "\\0", // NUL：前导 0 不是反向引用
+      "\\01",
+      "\\017",
+      "(a)\\1", // 合法反向引用：N ≤ groupCount
+      "(a)(b)\\2",
+      "(?<n>a)\\1", // 具名捕获组同样计入 groupCount
+    ]) {
+      assert.doesNotThrow(() => assertEngineAlignable(pattern), pattern);
+    }
+  });
+
+  it("非捕获构造不计入 groupCount：`(?:a)\\1` 仍按越界拒", () => {
+    // `countCaptureGroups` 的负向控制 —— 若把 `(?:` 也数成组，这条会静默放行
+    // 一个两引擎答案不同的 pattern（PCRE2 对 `\1` 无组时 rc=2）。
+    rejects(
+      () => assertEngineAlignable("(?:a)\\1"),
+      /backreference to a group that does not exist/
+    );
+    rejects(
+      () => assertEngineAlignable("(?=a)\\1"),
+      /backreference to a group that does not exist/
+    );
+  });
+
+  it("结构层残项：空下界量词与空字符类拒绝，字面形态放行", () => {
+    // 同一份生成式 fuzz 的结构层残项（不带反斜杠的分歧），按「两条引擎能
+    // 对这一段给出同一答案吗」判，不按「它是不是合法量词」判。
+    for (const pattern of ["a{,2}", "a{,2,3}", "a{,}", "a{ ,2}"]) {
+      rejects(() => assertStructuralAlignable(pattern), /empty lower bound/);
+    }
+    for (const pattern of ["[]", "[^]"]) {
+      rejects(
+        () => assertStructuralAlignable(pattern),
+        /empty character class/
+      );
+    }
+    // 正向控制：这些看着像、实测两引擎同判。
+    for (const pattern of [
+      "a{2}", // 正常量词
+      "a{2,}", // 开上界
+      "\\{,2}", // 转义 `{` = 字面，不是量词
+      "[{,2}]", // 类内 `{` 是类成员
+      "[!]", // POSIX 否定类的字面形态（非空类）
+      "[\\]]", // 转义 `]` 开头的正常类
+      "a{}", // 空体的字面 `{}`，两引擎同判
+      "[a[", // `[` 作类成员的未闭类，两引擎同判
+    ]) {
+      assert.doesNotThrow(() => assertStructuralAlignable(pattern), pattern);
     }
   });
 });

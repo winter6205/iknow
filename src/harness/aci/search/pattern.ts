@@ -530,6 +530,84 @@ function tryCompile(pattern: string, flags: string): RegExp | null {
 }
 
 /**
+ * 白名单：两条引擎解析成**同一个原子**的反斜杠转义字母。
+ *
+ * 来源不是文档、是 fuzz：整字母表 × 4 种后缀形态（裸 / `{...}` / `HH` /
+ * `HHHH` / `HHHHHHHH`）× 类内类外，用真实 rg + 真实 argv 与 Node 回退各跑
+ * 一遍（`/tmp/fuzz-escapes.mts`，824 行）。**只列两边同判的**；表外一律拒。
+ *
+ * 为什么是「白名单反转」而不是「再枚举一列坏拼写」：这是同一个坑的第三次
+ * （按拼写枚举 → 漏下一族）。fuzz 的结论是发散**不是有限的拼写表** ——
+ * 24 个字母 × 4 种后缀 × 两种位置，靠枚举永远补不完。反过来只放行已实测
+ * 对齐的集合，rg 将来新增转义也只会落进拒绝面，不会静默分叉。
+ *
+ * 各字母的实测归类（`/tmp/escape-semantics.mts` 97 行）：
+ *   - **对齐（进白名单）**：`\. \* \+ \? \( \) \[ \] \{ \} \| \^ \$ \\ \/
+ *     \- \# \& \~ \_ \! \@ \% \ ` 等**标点类**（两引擎都读字面）、
+ *     `\t \f \v \n \r`（控制字符）、`\0`+八进制、`\cX`（control）、
+ *     `\xHH` / `\uHHHH` / `\UHHHHHHHH`（定长十六进制，**仅当解析成功**）、
+ *     `\d \D \w \W \s \S \b \B`（D5 层按 Unicode 口径管）、
+ *     `\p{...}` / `\P{...}` / `\u{...}` / `\x{...}` / `\N{...}`（上文已拒）。
+ *   - **不对齐（出白名单 → 拒）**：`\a`（JS 读字面 `a`、rg 读 BEL）、
+ *     `\e`（JS 字面 `e`、PCRE2 读 ESC）、`\A \z \Z \G \K`（锚，rg 命中
+ *     全部行、JS 读字面字母）、`\h \H \R \V \X \C \N`（PCRE2 专有类，
+ *     JS 读字面）、`\g \i \j \k \l \m \o \q \y`（两引擎都拒、JS 读字面）、
+ *     `\E \Q`（PCRE2 引号对，JS 读字面）、`\F \I \J \L \M \O \T \Y`
+ *     （PCRE2 拒、Rust 拒、JS 读字面）。
+ *   - **后缀敏感**：`\x` / `\u` / `\U` / `\c` **光杆**时 JS 读字面、不被
+ *     当作转义；`\uHHHH` / `\UHHHHHHHH` 解析成功但 rg（Rust）拒收 —— 这两
+ *     条的歧义靠 D1 层按**值**收口（值是 LF/CR 就 D1 拒），非 LF/CR 值时
+ *     `A` / `\U00000041` 实测**不**进分叉表（见 fuzz 基线）。`\o{...}`
+ *     走 D1 的值判据（`\o{12}` = LF 已拒）；非终止符值（`\o{40}` / `\o{101}`）
+ *     实测 DIVERGE，**不在白名单**。
+ *
+ * 单字母索引（`ALIGNED_ESCAPE_LETTERS`）；结构性转义（十六进制 / 八进制 /
+ * control / `{...}` 形态）另有判据。**不在白名单的字母直接拒**，不看后缀。
+ */
+const ALIGNED_ESCAPE_LETTERS = new Set([
+  // 控制字符转义：两引擎同值
+  "t",
+  "n",
+  "r",
+  "f",
+  "v",
+  // 定长十六进制 / 八进制 / control：由 `readFixedHex` / `readOctalDigits` /
+  // `readControlEscape` 按值解析；解析成功即两引擎同值
+  "x",
+  "u",
+  "U",
+  "c",
+  // 字符类（D5 层管口径）
+  "d",
+  "D",
+  "w",
+  "W",
+  "s",
+  "S",
+  "b",
+  "B",
+  // property escape / 码点转义：上文 PROPERTY_ESCAPE / CODE_POINT_ESCAPE 已拒
+  "p",
+  "P",
+  "N",
+  // 八进制字面（`\0` / `\12` / `\101`）：`\0` 后跟数字才成八进制，
+  // 由数值判据（D1）收口；光杆 `\0` 两引擎都读 NUL，SAME
+  "0",
+]);
+
+/**
+ * 标点类转义：`\.` / `\*` / `\\` 等。两引擎都读字面，永远对齐。
+ *
+ * 判据是「非字母数字」而不是枚举标点 —— JS 对非字母数字的转义一律读字面，
+ * rg 同样（`. * + ? ( ) [ ] { } | ^ $ \ / - # & ~ _ ! @ %` 实测 SAME）。
+ * 非 ASCII 字面（`\漢` / `\é`）也走这条（实测 SAME；`\é` rg 默认 rc=2、
+ * auto 退 PCRE2 rc=1，两边都回空，仍 SAME）。
+ */
+function isLiteralEscapeLetter(ch: string): boolean {
+  return !/[A-Za-z0-9]/.test(ch);
+}
+
+/**
  * 已知会让 rg 与 JS `RegExp` 分叉、且**无法**用 `--no-unicode` 对齐的构造
  * → typed 拒绝。
  *
@@ -552,6 +630,386 @@ export function assertEngineAlignable(pattern: string): void {
       `grep: unsupported pattern construct in ${pattern}: POSIX bracket class ([[:name:]]) — ripgrep reads it as an ASCII class while JavaScript RegExp reads it as a literal character set, so the two engines would answer differently; spell the class out (e.g. [A-Za-z] / [0-9])`
     );
   }
+  /**
+   * 结构层（与反斜杠转义并列）的两条 fuzz 残项 —— 不带 `\letter`，所以
+   * 转义字母扫描挡不住；按生成式探针实测两边仍分叉：
+   *
+   * - `{,N}` / `{,N,M}` / `{,}` **从**空下界的量词：rg（Rust 与 PCRE2）把它
+   *   解析成量词（"0 to N"），JS RegExp 把 `{` 当字面，整段不命中（实测
+   *   `a{,2}` rg 命中全部文件、JS 命中 `a{,2}b` 那一行）。带非空下界
+   *   `a{2,}` / `a{2,5}` 两条引擎同判（都是量词），不放进这里。
+   *
+   * - 空字符类 `[]` / `[^]`：rg-default 与 rg-pcre2 **都** rc=2 拒收，
+   *   JS RegExp 编过、`test()` 永远 false —— 一个 typed-reject、一个静默空答，
+   *   是用户看见的"工具答不出来"和"工具说没结果"的差别。这种 case 用
+   *   typed 拒绝把两条路径对齐成同一个错误。`[!]` 是 POSIX 否定类，rg 与
+   *   JS 都按 POSIX 处理，**不**算分叉 —— 不要误拒。
+   */
+  assertStructuralAlignable(pattern);
+  /**
+   * 反斜杠转义字母接受集差异（fuzz 结果收口）：不在 `ALIGNED_ESCAPE_LETTERS`
+   * 且不是标点类的字母 → typed 拒绝。
+   *
+   * 不看后缀形态（`{...}` / `HH` / `HHHH` / `HHHHHHHH`），只看**字母本身**
+   * —— `\o` 裸在 rg 侧 rc=2、JS 侧读字面 `o`，与 `\o{101}` 是同一个字
+   * 母的问题；`\A{2}` / `\A41` 是同一个字母的不同后缀，由同一条 gate 拒。
+   * D1 / D5 的按值判据会先在这里跑，LF/CR 值转义与 Unicode 模式下的类转
+   * 义已在前面拒掉；这里只负责把"两引擎解析不同"的那族字母统统一刀。
+   */
+  assertAlignedEscapeLetter(pattern);
+}
+
+/**
+ * fuzz 出的非对齐字母扫描（见 `assertEngineAlignable` 上面的注释）。`\o`
+ * 的解析要求形态是 `\o{NNN}`；不在白名单的光杆一律拒，光杆 `\o` 由它本身
+ * 出白名单触发。`\\` 是合法的转义对（`\\s` = 字面 `\s`，两引擎 SAME），
+ * 跳过整对。
+ *
+ * 结构敏感族（`\x` / `\u` / `\U` / `\c` / `\N` / `\p` / `\P` / `\o` / `\0` /
+ * `\n` 等控制字符）需要**同时**校验后缀形态：
+ *   - `\x` 必须跟 **2** 个十六进制位；`\xZ` / `\x` rg rc=2、JS 读字面 `x`。
+ *   - `\u` 必须跟 **4** 位十六进制（**不**带大括号 —— 带大括号走
+ *     CODE_POINT_ESCAPE 上游 gate）。`\u` 光杆、`\uZZZZ` 都是分歧。
+ *   - `\U` 必须跟 **8** 位十六进制。
+ *   - `\c` 必须跟 **一个字母**（`\cJ` = LF、`\cA` = SOH）。`\c{...}` / `\cHH`
+ *     在 rg 侧被解析成数字（在 PCRE2 里 `\c{...}` 是字符类 / 量化），JS 读
+ *     字面 `\c{...}` —— 与 `\cX` 不同形，要拒。
+ *   - `\N` 必须跟 `{...}`（走 CODE_POINT_ESCAPE 上游 gate），光杆 JS 读字面 N。
+ *   - `\p` / `\P` 必须跟 `{...}` 或单字母（走 PROPERTY_ESCAPE 上游 gate），
+ *     光杆 rg rc=2、JS 读字面。
+ *   - `\o` 必须跟 `{octal}` 且值为 LF/CR（前者交给下游 D1 按值判据）；裸
+ *     `\o` / `\o40` / `\o{101}` JS 读字面。
+ *   - `\NNN`（数字起头）走八进制数字解析；光杆 `\1` / `\8`（数字 8 在八进制
+ *     范围外）在两条引擎上一致拒（rg rc=2、JS 也编不过）—— 不需要在这里
+ *     单独拒，但需要把 `\d` 这类已知的 D5 / D1 路径让位给它们。
+ *
+ * `\d` / `\D` / `\w` / `\W` / `\s` / `\S` / `\b` / `\B` 后**不能再接量化**
+ * 在两条引擎上分歧（`\D{...}` / `\W{...}` 实测 rg 命中非数字行、JS 编不过）
+ * —— 这条只对 `{}` 形态的量化生效（`*` / `+` / `?` 是合法量化），由
+ * `assertAlignedEscapeSuffix` 的量化收尾段挡。
+ */
+function assertAlignedEscapeLetter(pattern: string): void {
+  const escaped = pattern.replace(/\\\\/g, "");
+  const chars = [...escaped];
+  for (let i = 0; i < chars.length - 1; i += 1) {
+    if (chars[i] !== "\\") continue;
+    const letter = chars[i + 1]!;
+    if (isLiteralEscapeLetter(letter)) {
+      i += 1; // 整对跳过：`\\.` / `\\*` 一类的标点 / 非 ASCII 两引擎读字面
+      continue;
+    }
+    if (letter >= "0" && letter <= "9") {
+      /** `\N` / `\NN` / `\NNN` —— 反向引用 / 八进制 / 字面三岔口，判据见
+       * `assertDigitEscapeAlignable`。 */
+      i = assertDigitEscapeAlignable(escaped, chars, i) - 1;
+      continue;
+    }
+    if (ALIGNED_ESCAPE_LETTERS.has(letter)) {
+      /** 结构族（hex / 控制字符 / property / code point / octal）走
+       * `assertAlignedEscapeSuffix` 验后缀形态。 */
+      i = assertAlignedEscapeSuffix(chars, i, letter) - 1;
+      continue;
+    }
+    // `\letter`（letter ∉ 白名单 ∉ 标点）→ 出 fuzz 的 288 行 DIVERGE
+    throw new ToolExecutionError(
+      `grep: unsupported pattern construct in ${pattern}: \\${letter} — ripgrep and JavaScript RegExp parse this escape differently (one engine rejects with rc=2, the other reads it as the literal character \\${letter}, or only one engine accepts a feature escape while the other does not); pick a different escape — see \\p / \\P / \\d / \\D / \\w / \\W / \\b / \\B / \\s / \\S / \\n / \\r / \\t / \\f / \\v / \\xHH / \\uHHHH / \\UHHHHHHHH / \\cX / \\NNN / \\p{...} / \\u{...} / \\x{...} / \\N{...} / \\o{NNN} (LF/CR only) / \\. \\* \\+ \\? \\( \\) \\[ \\] \\{ \\} \\| \\^ \\$ \\\\`
+    );
+  }
+}
+
+/**
+ * 数字族（`\N` / `\NN` / `\NNN`）：两引擎的"反向引用 vs 八进制 vs 字面"
+ * 三岔口收口。判据按**语义**（这一段在两引擎上解析成同一个原子吗），不按
+ * 拼写枚举 —— 本族到此为止按拼写补过多次，每次都有漏网的成员。
+ *
+ * 三条子判据，每条都由生成式 fuzz 的 DIVERGE 表反推、并被同一 fuzz 复跑
+ * 验证归零（`/home/winner/.claude/jobs/0df87588/tmp/fuzz-escapes.mts`）：
+ *
+ * 1. **> 3 位数字整族拒。** 两引擎都只把前 3 位当八进制，但第 4 位起
+ *    PCRE2 直接 rc=2 拒、JS 读字面数字 → 给不出同一答案。
+ *
+ * 2. **含 8/9 整族拒。** `\8` / `\9` 在八进制范围外：PCRE2 rc=2 拒，JS 读
+ *    字面 `8` / `9`。
+ *
+ * 3. **八进制值 ≥ 0x80 整族拒。** 这是本族最容易按拼写漏掉的一条：值在
+ *    低半区（`\0`..`\177`）时两引擎都当 ASCII 字节，一致；到 `\200` 以上，
+ *    rg 按 **UTF-8 码点**解、JS 按**单字节**解 —— 同一段文本一个命中
+ *    `b80`（字节 0x80）另一个不命中。实测 `\200` / `\277` / `\300` 在
+ *    `0groups` / `1group` / `2groups` 三档下 rg=rc1-无命中、JS=命中 `b80`。
+ *
+ *    **高频用法 `\040`（空格）落在低半区，仍然放行** —— 这是本条不能简化成
+ *    "数字转义一律拒"的原因。
+ *
+ * 4. **单数字 `\1`..`\9` 越界拒。** PCRE2 只把 1-9 当反向引用，目标组不
+ *    存在时 rc=2 拒整条 pattern；JS 在 `N > groupCount` 时读**字面数字**。
+ *    判据要看**前缀**的捕获组数（`countCaptureGroups`）。多数字（`\12` /
+ *    `\040`）不走这条：两引擎都按八进制读，无此歧义，前导 `0` 更不是
+ *    反向引用。
+ *
+ * 值的 **LF/CR**（`\12` / `\15`）由上游 `assertLineContentOnly` 按值拒，
+ * 这里不重复 —— 两处都判会让错误文案二义。
+ */
+function assertDigitEscapeAlignable(
+  pattern: string,
+  chars: ReadonlyArray<string>,
+  i: number
+): number {
+  /** `\N` 的 N 起点 = 转义字母本身（letter 已在 `[0-9]` 命中），取其后的
+   * 连续数字 —— octal 路径两引擎都只吃**前 3 位**。 */
+  let j = i + 1;
+  while (j < chars.length && chars[j]! >= "0" && chars[j]! <= "9") j += 1;
+  const run = chars.slice(i + 1, j).join("");
+  const head = run.slice(0, 3);
+  const digitError = (detail: string): never => {
+    throw new ToolExecutionError(
+      `grep: unsupported pattern construct in ${pattern}: \\${run} ${detail} — ripgrep and JavaScript RegExp would answer differently; write the character itself, or an octal escape of at most 3 digits in the range \\0..\\177`
+    );
+  };
+  if (run.length > 3) {
+    digitError(
+      "has more than 3 digits (ripgrep rejects it while JavaScript RegExp reads the first 3 as an octal escape and the rest as literal digits)"
+    );
+  }
+  if (/[89]/.test(run)) {
+    digitError(
+      "contains 8 or 9, which is out of range for an octal escape (ripgrep rejects it while JavaScript RegExp reads the digit literally)"
+    );
+  }
+  /** 八进制值 ≥ 0x80 时 rg 按 UTF-8 码点解、JS 按单字节解（实测
+   * `probe-numeric.mts`：`\200` 在 0/1 组时 rg rc=1 而 JS rc=0 命中
+   * `b80`）。低半区（`\0`..`\177`）两边同为 ASCII 字节，才对齐 —— 正向
+   * 对照 `\040`（空格）/ `\177`（DEL）在 `probe-positive-controls.mts` 里
+   * 两边同为 rc=0。 */
+  const value = parseInt(head, 8);
+  if (value >= 0x80) {
+    digitError(
+      `is the octal value ${value} (0x${value.toString(16)}), at or above 0x80 — ripgrep decodes it as a UTF-8 code point while JavaScript RegExp matches the single byte, so the two engines would answer differently`
+    );
+  }
+  /** 单数字反向引用 `\1`..`\9`：PCRE2 只接受指向真实存在的组，组号越界时
+   * rc=2 拒；JS 在 `N > groupCount` 时读**字面数字** —— 分叉。实测
+   * `fuzz-escapes` Dimension 7 的 `0groups\1`..`2groups\7` 共 19 行在修复前
+   * 是 DIVERGE（rg ERR:engine-rc2 / node RESULT），加这条后归零。
+   *
+   * 多数字（`\12` / `\040`）没有这层歧义：两引擎都按八进制读，所以不查
+   * groupCount（实测同一 fuzz 的多数字行修复前后都是 SAME）。前导 `0`
+   * （`\0` / `\040`）同样不是反向引用。 */
+  const groupCount = countCaptureGroups(chars, i);
+  if (run.length === 1 && run !== "0" && parseInt(run, 10) > groupCount) {
+    digitError(
+      `is a backreference to a group that does not exist (only ${groupCount} capturing group(s) precede it) — ripgrep rejects the pattern with rc=2 while JavaScript RegExp reads the digit literally, so the two engines would answer differently`
+    );
+  }
+  return j;
+}
+
+/**
+ * `\` 之前出现的**捕获组**个数（`(` 不计 `(?` 开头的非捕获构造）。
+ *
+ * 只服务于 `assertDigitEscapeAlignable` 的反向引用判据：`\N` 是否指向一个
+ * 真实存在的组。`(?<name>...)` 是**具名捕获组**，`(?P<name>...)` 同理；
+ * `(?:` / `(?=` / `(?!` / `(?<=` / `(?<!` / `(?#` / `(?i` 一类不是捕获组。
+ */
+function countCaptureGroups(
+  chars: ReadonlyArray<string>,
+  until: number
+): number {
+  let count = 0;
+  for (let k = 0; k < until; k += 1) {
+    if (chars[k] !== "(") continue;
+    const next = chars[k + 1];
+    if (next !== "?") {
+      count += 1; // 普通捕获组
+      continue;
+    }
+    const third = chars[k + 2];
+    /** `(?<name>` 与 `(?P<name>` 是具名捕获组；`(?<=` / `(?<!` 是断言。 */
+    if (third === "<" && chars[k + 3] !== "=" && chars[k + 3] !== "!")
+      count += 1;
+    if (third === "P" && chars[k + 3] === "<") count += 1;
+  }
+  return count;
+}
+
+/**
+ * 结构层 fuzz 残项（与反斜杠转义并列）：`{,N}` 量词 + 空字符类。
+ *
+ * `assertAlignedEscapeLetter` 处理 `\letter` 一族，不带反斜杠的结构分歧走
+ * 这里。判据只盯"被两条引擎解析成不同东西"的最窄集合 —— 探针实测过、不靠
+ * 拼写枚举（**这个坑的第四次按拼写补**）。两条路径都从同一份 fuzz 同源
+ * 收口（`fuzz-escapes.mts` Dimension 6 + 本 pass），判据是
+ * "两条引擎对这一段能给出同一个答案吗"，不是"它是不是合法量词"。
+ *
+ * - **空下界量词** `{,N}` / `{,N,M}` / `{,}` —— 必须从 `{` 后**没有数字**
+ *   就接 `,` 才算。`\{,N\}` 是字面序列，两条引擎都读字面，**不**算分叉。
+ *   类内（`[{,2}]`）两引擎都把它当类成员，**不**算分叉（实测 SAME）。
+ *
+ * - **空字符类** `[]` / `[^]` —— 必须在 `[` 后**第一个**字符就是 `]`（或
+ *   `^` 加 `]`）。`[!]` 是 POSIX 否定类，两引擎都按 POSIX 处理，**不**算
+ *   分叉（实测 SAME）。`\[` 是字面 `[`，两引擎都读字面，**不**算分叉。
+ *   `[\]]` 类的闭合在转义 `\]` 之后，正常类，**不**算分叉（实测 SAME）。
+ *
+ * 检测时跳过 `\\` （剥成对反斜杠：字面 `\\` 在两条引擎上读字面 `\\`，不是
+ * 转义起点）；并跟踪 `[]` 类内 / 类外位置（量词只在类外歧义）。
+ */
+export function assertStructuralAlignable(pattern: string): void {
+  const stripped = pattern.replace(/\\\\/g, "");
+  const chars = [...stripped];
+  let inClass = false;
+  for (let i = 0; i < chars.length; i += 1) {
+    const ch = chars[i]!;
+    if (ch === "\\") {
+      i += 1; // 跳过整对转义：\`letter` 不参与结构层判断
+      continue;
+    }
+    if (inClass) {
+      if (ch === "]") inClass = false;
+      continue;
+    }
+    if (ch === "[") {
+      const next = chars[i + 1];
+      const after = chars[i + 2];
+      /** 空字符类 `[]` / `[^]`：rg 拒、JS 读字面。`[!]` 是 POSIX，两边同判。 */
+      if (next === "]" || (next === "^" && after === "]")) {
+        throw new ToolExecutionError(
+          `grep: unsupported pattern construct in ${pattern}: empty character class (${ch}${next ?? ""}${after ?? ""}) — ripgrep rejects an empty class with rc=2 while JavaScript RegExp accepts it (matches nothing), so the two engines would answer differently; write the class you actually want, e.g. [a-z] or [^\\n]`
+        );
+      }
+      inClass = true;
+      continue;
+    }
+    if (ch === "{") {
+      /** 空下界量词 `{,N}` / `{,N,M}` / `{,}` —— rg 解析成量词、JS 读字面
+       * `{`。判断：跳过空白后**第一个非空字符**是 `,`。类内（已在上面
+       * `continue`）和 `\{...\}`（`\\` 整对跳过）都不算。 */
+      let j = i + 1;
+      while (j < chars.length && chars[j] === " ") j += 1;
+      if (j < chars.length && chars[j] === ",") {
+        throw new ToolExecutionError(
+          `grep: unsupported pattern construct in ${pattern}: brace quantifier with an empty lower bound ({,N} or {,}) — ripgrep parses it as a quantifier (0 to N matches) while JavaScript RegExp reads the { as a literal character, so the two engines would answer differently; write the lower bound explicitly (e.g. {0,2} instead of {,2})`
+        );
+      }
+    }
+  }
+}
+
+/**
+ * 验转义对 `\letter`（letter ∈ `ALIGNED_ESCAPE_LETTERS`）的**后缀形态**
+ * 是不是被两条引擎都接受。返回**新下标**（跳过整对与后缀），不合规则
+ * typed 拒绝。
+ */
+function assertAlignedEscapeSuffix(
+  chars: ReadonlyArray<string>,
+  i: number,
+  letter: string
+): number {
+  /** 控制字符 `\t` / `\n` / `\r` / `\f` / `\v` —— 整对 2 字符。 */
+  if (
+    letter === "t" ||
+    letter === "n" ||
+    letter === "r" ||
+    letter === "f" ||
+    letter === "v"
+  ) {
+    return i + 2;
+  }
+  /** `\x` 必须跟 **2** 个十六进制位。 */
+  if (letter === "x") {
+    const slice = chars.slice(i + 2, i + 4).join("");
+    if (slice.length !== 2 || !/^[0-9a-fA-F]+$/.test(slice)) {
+      throw escapeSuffixError(chars, i, "\\x requires exactly 2 hex digits");
+    }
+    return i + 4;
+  }
+  /** `\u` 必须跟 **4** 个十六进制位（**不带**大括号 —— 带大括号走
+   * 上游 CODE_POINT_ESCAPE gate）。值落在 UTF-16 代理对范围（U+D800..
+   * U+DFFF）时两条引擎**仍**分叉：rg（Rust 引擎）按码点拒收，JS 按
+   * code unit 读 —— 实测 `probe-comment-claims.mts`：`\uD83D` rg rc=2、
+   * JS rc=0 命中 `emoji.txt,surr.txt`；`A` 两边同为 rc=0 `A.txt`
+   * （对照组）。所以这条不只是"格式校验"，还要按**值**再卡一次。之后**也**
+   * 不能跟更多十六进制位（`\uHHHHHH` rg rc=2、JS 读 `\uHHHH` + 字面）。 */
+  if (letter === "u") {
+    const slice = chars.slice(i + 2, i + 6).join("");
+    if (slice.length !== 4 || !/^[0-9a-fA-F]+$/.test(slice)) {
+      throw escapeSuffixError(
+        chars,
+        i,
+        "\\u requires exactly 4 hex digits (without braces; \\u{...} is a different gate)"
+      );
+    }
+    const cp = parseInt(slice, 16);
+    if (cp >= 0xd800 && cp <= 0xdfff) {
+      throw new ToolExecutionError(
+        `grep: unsupported pattern construct in ${chars.join("")}: \\u${slice} is in the UTF-16 surrogate range (U+D800..U+DFFF) — ripgrep rejects it as an invalid code point while JavaScript RegExp reads it as a lone surrogate code unit, so the two engines would answer differently; use the surrogate pair \\uD83D\\uDE00 for 😀, or write the supplementary character itself`
+      );
+    }
+    const tail = chars[i + 6];
+    if (tail !== undefined && /[0-9a-fA-F]/.test(tail)) {
+      throw new ToolExecutionError(
+        `grep: unsupported pattern construct in ${chars.join("")}: \\u${slice} followed by another hex digit — the two engines disagree on the suffix boundary`
+      );
+    }
+    return i + 6;
+  }
+  /** `\U` 不是 JS 转义 —— JS 把 `\U00000041` 读成字面 `U00000041`
+   *（反斜杠 + U 字母 + 8 位十六进制字面），rg 解析为码点 U+41 = `A`。
+   * 任何 8-hex 值都会分叉（实测 `probe-comment-claims.mts`：`\U00000041`
+   * rg rc=0 `A.txt` / JS rc=1；`\U0001F600` rg rc=0 `emoji.txt` / JS rc=1）。
+   * **整族拒**，不只拒 LF/CR —— 没有一个值能让两条引擎给出同一答案。 */
+  if (letter === "U") {
+    const slice = chars.slice(i + 2, i + 10).join("");
+    if (slice.length !== 8 || !/^[0-9a-fA-F]+$/.test(slice)) {
+      throw escapeSuffixError(chars, i, "\\U requires exactly 8 hex digits");
+    }
+    throw new ToolExecutionError(
+      `grep: unsupported pattern construct in ${chars.join("")}: \\U${slice} — JavaScript RegExp has no \\UHHHHHHHH escape (it reads \\U + 8 hex digits literally as the text "U${slice}"), while ripgrep parses \\U${slice} as the Unicode code point U+${slice}, so the two engines would answer differently; for code points above U+FFFF use the surrogate pair (\\uD83D\\uDE00) or write the character itself`
+    );
+  }
+  /** `\c` 必须跟**一个字母**（控制转义）。`\c{...}` / `\cHH` 不在此形。 */
+  if (letter === "c") {
+    const next = chars[i + 2];
+    if (next === undefined || !/[A-Za-z]/.test(next)) {
+      throw escapeSuffixError(chars, i, "\\c requires exactly one letter");
+    }
+    return i + 3;
+  }
+  /** `\p` / `\P` / `\N` —— 已由上游 PROPERTY_ESCAPE / CODE_POINT_ESCAPE 拒，
+   * 这里只校验"光杆也要拒"。 */
+  if (letter === "p" || letter === "P" || letter === "N") {
+    throw escapeSuffixError(
+      chars,
+      i,
+      `\\${letter} requires a {name} or single-letter form (handled by an upstream gate) — the bare \\${letter} diverges between ripgrep and JavaScript RegExp`
+    );
+  }
+  /** 类原子 `\d` / `\D` / `\w` / `\W` / `\s` / `\S` / `\b` / `\B` —— 后
+   * 不能接 `{...}` 量化。`*` / `+` / `?` / `{,N}` / `{N,}` 量化在两条
+   * 引擎上一致；但 `{...}` 实测 DIVERGE（rg 命中、JS 编不过）。 */
+  if ("dDwWbBsS".includes(letter)) {
+    const next = chars[i + 2];
+    if (next === "{") {
+      throw escapeSuffixError(
+        chars,
+        i,
+        `\\${letter} cannot be followed by a brace — the two engines diverge on \\${letter}{...} (ripgrep accepts it, JavaScript RegExp rejects the syntax)`
+      );
+    }
+    return i + 2;
+  }
+  return i + 2;
+}
+
+function escapeSuffixError(
+  chars: ReadonlyArray<string>,
+  i: number,
+  detail: string
+): never {
+  // Aborts the loop early by throwing — handler catches the ToolExecutionError.
+  void chars;
+  void i;
+  throw new ToolExecutionError(
+    `grep: unsupported pattern construct: ${detail}`
+  );
 }
 
 /**
