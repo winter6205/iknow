@@ -113,6 +113,11 @@ describe("#337 T11 E2E A：skill 链 stub-model 脚本化（SC13 + SC8）", () =
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
+      // 本文件验 skill / MCP 链本身,不验溢出退场 / 索引降档 —— 断言只看
+      // 名字在场(降档也只剥描述、名字永在),两条路径的专测见
+      // build-engine-tool-overflow.test.ts 与 disclosure-index-align/。
+      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      skipCountTokens: true,
     });
     cleanup.push(async () => {
       if (built.shutdown) await built.shutdown();
@@ -183,6 +188,7 @@ describe("#337 T11 E2E A：<available_skills> 段装配（SC3/SC4）", () => {
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
+      skipCountTokens: true, // 同上:验 skills 段在场,不验溢出 / 索引降档。
     });
     cleanup.push(async () => {
       if (built.shutdown) await built.shutdown();
@@ -245,6 +251,7 @@ Validation:
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
+      skipCountTokens: true, // 同上:验 MCP 工具注册,不验溢出 / 索引降档。
     });
     cleanup.push(async () => {
       if (built.shutdown) await built.shutdown();

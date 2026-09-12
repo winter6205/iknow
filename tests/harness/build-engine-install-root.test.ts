@@ -124,6 +124,10 @@ async function buildChat(opts: { installRoot?: string }): Promise<BuiltEngine> {
     cwd: productRoot,
     workspaceRoot,
     productRoot,
+    // 本文件验 installRoot 透传到 bash 工厂,不验溢出退场 / 索引降档
+    // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
+    // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+    skipCountTokens: true,
     ...(opts.installRoot !== undefined
       ? { installRoot: opts.installRoot }
       : {}),
@@ -163,6 +167,8 @@ describe("buildHarnessEngine — installRoot threaded to the bash factory (T4)",
       workspaceRoot: root,
       productRoot: root,
       installRoot: INSTALL,
+      // 同上:验 installRoot 透传,不验溢出 / 索引降档。
+      skipCountTokens: true,
     });
     const calls = engineBashCalls();
     expect(calls.length).toBeGreaterThan(0);

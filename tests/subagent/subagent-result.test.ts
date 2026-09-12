@@ -10,7 +10,7 @@
  *   5. taskId="maxTurnsExceeded" → reason:"maxTurnsExceeded"
  *   6. taskId="timeout" → reason:"timeout"
  *   7. taskId="protocolError" → reason:"protocolError"
- *   8. handler 同步 ≤10ms 返回（performance.now() 前后差）
+ *   8. handler 同步返回（返回值形态，非墙钟）
  *   9. task_id 缺失 → 抛 ToolExecutionError
  *   10. task_id:123（非 string）→ 抛 ToolExecutionError
  *   11. aci 元数据：category:"read-only" / timeoutTier:"fast" / lazy:false
@@ -29,7 +29,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { performance } from "node:perf_hooks";
 import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -170,12 +169,14 @@ describe("subagent_result — 正常路径", () => {
     expect(parsed.summary).toBe("bad envelope");
   });
 
-  it("handler 同步 ≤10ms 返回", () => {
+  it("handler 同步返回（返回值而非 Promise）", () => {
     const tool = createSubAgentResultTool({ manager: makeFakeManager() });
-    const t0 = performance.now();
-    tool.handler({ task_id: "ok" });
-    const elapsed = performance.now() - t0;
-    expect(elapsed).toBeLessThanOrEqual(10);
+    // 同步非阻塞 = 结构性契约:handler 是普通函数,只查 buffer/pad,
+    // 不 await、不 waitFor/drain。用返回值形态钉它 —— 墙钟上界只是机器
+    // 速度的代理,负载下必假红(同 build-engine 的时间下界改法)。
+    const out = tool.handler({ task_id: "ok" });
+    expect(typeof out).toBe("string");
+    expect(out).not.toBeInstanceOf(Promise);
   });
 });
 
@@ -421,9 +422,10 @@ describe("subagent_result — T5 pad list/read (SC3 / SC6 / S2-B)", () => {
       name: "z",
       body: "x",
     });
-    const t0 = performance.now();
-    tool.handler({ task_id: taskId, tmp_path: "z" });
-    expect(performance.now() - t0).toBeLessThanOrEqual(10);
+    // 同上:同步性由返回形态钉死,不用墙钟(负载下必假红)。
+    const out = tool.handler({ task_id: taskId, tmp_path: "z" });
+    expect(typeof out).toBe("string");
+    expect(out).not.toBeInstanceOf(Promise);
     expect(manager.waitFor).not.toBe(tool.handler);
   });
 });

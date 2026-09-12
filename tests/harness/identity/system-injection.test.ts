@@ -2,7 +2,7 @@
  * #196 IKNOW T4: build-engine 4 入口 surface → deps.system → assembleIdentityContext
  * 链路集成测试。
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import {
   mkdtemp,
   rm,
@@ -17,6 +17,11 @@ import { buildHarnessEngine } from "../../../src/harness/build-engine.ts";
 import { createNoAskUser } from "../../../src/harness/permission/ask-user.ts";
 import { initializeIknowWorkspace } from "../../../src/harness/identity/index.js";
 import type { IknowEnv } from "../../../src/config/env.ts";
+
+// 每条用例都真装配一次 buildHarnessEngine（真实 identity 装配 + skill 扫描），
+// 单跑约 3s、全量并发（forks×3）下可超 vitest 默认 5s —— 与
+// hub-worktree-isolation / build-engine 同款放宽，避免把装配耗时误报成失败。
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
 
 function makeEnv(apiKey: string | undefined): IknowEnv {
   return {
@@ -69,6 +74,10 @@ async function buildSystem(surface: "chat" | "tui" | "ask" | "serve") {
     surface,
     // ADR-0019 (T2):per-root identity seed 锚 workDir,默认 cwd 已不适用。
     workspaceRoot: workDir,
+    // 本文件验的是 deps.system 的 identity 装配,不碰溢出判定/索引降档。
+    // countTokens 走真 adapter 会打到不可达的 fixture baseUrl,SDK 自带
+    // maxRetries=2 + 退避,每次装配白烧 ~2.5s。
+    skipCountTokens: true,
   });
   return (await (deps.system as () => Promise<string | undefined>)()) ?? "";
 }
@@ -153,6 +162,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
       env: makeEnv("sk-test-identity-default"),
       askUser: createNoAskUser(),
       workspaceRoot: workDir,
+      skipCountTokens: true,
     });
     const out =
       (await (deps.system as () => Promise<string | undefined>)()) ?? "";
@@ -166,6 +176,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
       surface: "ask",
       memory: { enabled: false },
       workspaceRoot: workDir,
+      skipCountTokens: true,
     });
     expect(typeof deps.system).toBe("function");
     const out = (await deps.system?.()) ?? "";

@@ -27,7 +27,7 @@ import { spawn as spawnChild } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  buildHarnessEngine,
+  buildHarnessEngine as rawBuildHarnessEngine,
   type BuiltEngine,
 } from "../../src/harness/build-engine.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
@@ -147,6 +147,121 @@ const EXPECTED_TOOLS = [
  *  在场需显式传 todoDir(主循环生产路径,非测试默认形态)。具体件数 =
  *  EXPECTED_TOOLS_NO_TODO.length = 38,以数组为 source of truth。 */
 const EXPECTED_TOOLS_NO_TODO = EXPECTED_TOOLS.filter((n) => n !== "todo_write");
+
+/**
+ * 本文件 61 个 callsite 验的是**装配后的形状**(工具表 / 透传字段 / 门禁
+ * 判定),不验「溢出退场」与「索引降档」两条路径 —— 那两条的测试在
+ * build-engine-tool-overflow.test.ts 与 disclosure-index-align/。
+ *
+ * 为此封装 `buildHarnessEngine`,加三处**装配期成本**治理,断言一字不改:
+ *
+ * 1. `skipCountTokens`:不旁路时装配期真调 `adapter.countTokens`(SDK,
+ *    baseURL 指向不可达的 127.0.0.1:9999),SDK 自带 maxRetries=2 + 指数
+ *    退避 ⇒ 每次装配白烧 ~2.5s 只为走到「Connection error → skip 本会话」
+ *    这个确定性分支(实测 maxRetries=2 → 2493ms vs 0 → 2ms)。
+ * 2. `mcpFirstTurnReadyTimeoutMs`:窗口是生产契约 30s;本文件只断言窗口
+ *    resolve 之后的装配形状,不需要真等满(详见该缝的 BuildEngineOpts 注释)。
+ * 3. 缺 `cwd` 的 callsite 喂**本文件私有 tmp 根**(见下):否则默认
+ *    `process.cwd()` = 真实仓库根,会读到仓库自带的 `.iknow/mcp.json`
+ *    (2 个真 stdio server:`npx -y codebase-memory-mcp` + `node scripts/
+ *    iknow-trace-mcp-dev.cjs`)。那些用例不 shutdown 该 manager,真子进程
+ *    只在本进程存活期内挂着(实测:单次不 shutdown 的仓库根装配在同一进程
+ *    里留下 5 个 MCP 子孙进程;18 次装配后 90 个,进程一退就被回收 —— 所以
+ *    不是跨 run 的常驻泄漏,而是**测试进程存活期的资源挤占**:每个子进程都
+ *    占 CPU/内存,直接放大并发档下的调度延迟)。这些用例的断言全部与仓库
+ *    内容无关(工具名表 / env 透传 / secret 表),tmp 根不削弱任何一条 ——
+ *    反而去掉「读真实仓库配置」这一隐式依赖。
+ */
+const BE_TEST_BUILD_DEFAULTS = {
+  mcpFirstTurnReadyTimeoutMs: 150,
+  skipCountTokens: true,
+} as const;
+
+/**
+ * 缺 cwd 的 callsite 专用 hermetic 根(懒建一次,进程内复用)。
+ * 同时钉 cwd / userHome,避免读真实 `~/.iknow`。
+ */
+let hermeticRoot: { cwd: string; home: string } | undefined;
+async function hermeticBuildRoot(): Promise<{ cwd: string; home: string }> {
+  if (!hermeticRoot) {
+    const dir = await mkdtemp(join(tmpdir(), "iknow-build-engine-hermetic-"));
+    hermeticRoot = { cwd: dir, home: join(dir, "home") };
+  }
+  return hermeticRoot;
+}
+
+// 进程级收尾:hermeticRoot 懒建且跨用例复用,没有用例级 afterEach 能覆盖它;
+// 不在此清收则每个测试进程都在 /tmp 留下一个
+// `iknow-build-engine-hermetic-*` 目录。未建(undefined)时 no-op。
+afterAll(async () => {
+  if (hermeticRoot) {
+    await removeTmpTree(hermeticRoot.cwd);
+    hermeticRoot = undefined;
+  }
+});
+
+/**
+ * tmp 树清收 —— 本文件全部 `mkdtemp` 根共用。
+ *
+ * 为什么不是裸 `rm(root, { recursive: true, force: true })`:`force` 只压
+ * ENOENT,压不住「rm 走到最后一步 rmdir(root) 时,root 里**刚好**又长出一个
+ * 目录」。而本文件的根确实会这样长:装配期 `createSystemResolver`
+ * (src/harness/memory/refresh.ts:53)对 `<root>/.iknow/memory/<ns>` 走的是
+ * **fire-and-forget** `void mkdir(..., { recursive: true }).catch(() => {})`
+ * —— ADR-0019 明确「不阻塞装配」。实测该 mkdir 落在 buildHarnessEngine
+ * 返回后 0–28ms(40 次采样:median 2ms / p90 17ms / max 28ms),而 T2 矩阵
+ * 那种 `await built.shutdown?.()` 紧接 `rm` 的写法,rm 的最后一步 rmdir 与
+ * 这条 mkdir 存在**真实重叠窗口**。这解释了全量并发下偶发的
+ * `ENOTEMPTY: directory not empty, rmdir '/tmp/iknow-t2-matrix-…'`(实测该
+ * 竞态窗口极窄:单测 503ms 绿;10 路并发 × 200 次复现探针 0 失败 —— 故只
+ * 在全量 maxForks=3 + 同文件多用例排队时才现形)。
+ *
+ * `maxRetries` / `retryDelay` 是 Node `fs.rm` 针对**并发目录变动**的标准面:
+ * rimraf 只在 `retryErrorCodes`(含 ENOTEMPTY)上按 `retries * retryDelay`
+ * 线性退避重试,且**重试耗尽后原错误照抛**。实测三条界线:
+ *   - 持续写入的同名竞态:maxRetries=0/1/5 均抛 ENOTEMPTY,20 才成功
+ *     ⇒ 重试是「等到不抖」,不是「抹掉错误」;
+ *   - 只读父目录(EACCES):maxRetries=3 仍抛 EACCES ⇒ 真实权限失败照旧
+ *     暴露,不被吞;
+ *   - 路径穿过普通文件(ENOTDIR,非 retryErrorCodes):立即抛 ⇒ 非竞态
+ *     错误零延迟上浮。
+ * 本文件的写者只写一次(单次 mkdir),3 次 × 50ms 退避(共 ~300ms)远大于
+ * 实测 28ms 窗口。
+ *
+ * 适用范围:喂给 `buildHarnessEngine` 的**装配根**(cwd / workspaceRoot /
+ * userHome 都在其下者)。纯 fixture 目录(装配不碰,如上面那个 `outside`)
+ * 保持裸 `rm` —— 没有写者就没有可重试的竞态,裸 rm 反而是「零重试」的
+ * 诚实信号。
+ */
+async function removeTmpTree(path: string): Promise<void> {
+  await rm(path, {
+    recursive: true,
+    force: true,
+    maxRetries: 3,
+    retryDelay: 50,
+  });
+}
+
+/**
+ * 与 `buildHarnessEngine` 同签名的本文件默认封装。调用方显式传的字段
+ * (含 cwd/userHome)一律覆盖默认。
+ *
+ * `skipCountTokens: true` 是**默认值**,但显式传 `countTokens` 的调用方
+ * 不受影响 —— build-engine 侧优先级是 `countTokens ?? (skip ? undefined :
+ * adapter.countTokens)`,显式注入永远最高(见该处注释)。本文件当前没有
+ * 传 `countTokens` 的 callsite;要验真 countTokens 路径的测试在别处。
+ */
+const buildHarnessEngine: typeof rawBuildHarnessEngine = (async (opts) =>
+  rawBuildHarnessEngine({
+    ...BE_TEST_BUILD_DEFAULTS,
+    ...(opts.cwd === undefined && opts.userHome === undefined
+      ? {
+          cwd: (await hermeticBuildRoot()).cwd,
+          userHome: (await hermeticBuildRoot()).home,
+        }
+      : {}),
+    ...opts,
+  })) as typeof rawBuildHarnessEngine;
 
 /** Deterministic env: never read process.env / .env files (env.ts SSOT). */
 function makeEnv(apiKey: string | undefined): IknowEnv {
@@ -450,7 +565,7 @@ describe("buildHarnessEngine (SSOT passthrough)", () => {
         expect(result.message).toMatch(/path outside workspace/);
       }
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
       await rm(outside, { recursive: true, force: true });
     }
   });
@@ -477,9 +592,7 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
   const roots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(
-      roots.splice(0).map((r) => rm(r, { recursive: true, force: true }))
-    );
+    await Promise.all(roots.splice(0).map((r) => removeTmpTree(r)));
   });
 
   it("chat surface：skill catalog 装配后 skill 一件工具在场（SC5 删 skill_search）", async () => {
@@ -573,9 +686,7 @@ describe("buildHarnessEngine — #337 T8 MCP manager 装配", () => {
   const roots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(
-      roots.splice(0).map((r) => rm(r, { recursive: true, force: true }))
-    );
+    await Promise.all(roots.splice(0).map((r) => removeTmpTree(r)));
   });
 
   it("chat surface：mcp config 缺席时 manager 在场 + shutdown 句柄透出", async () => {
@@ -662,7 +773,7 @@ describe("buildHarnessEngine — #337 T8 MCP manager 装配", () => {
         },
       });
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
     const last = captured.at(-1);
     expect(last).toBeDefined();
@@ -674,9 +785,7 @@ describe("buildHarnessEngine — #356 T6 subagent manager 装配", () => {
   const roots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(
-      roots.splice(0).map((r) => rm(r, { recursive: true, force: true }))
-    );
+    await Promise.all(roots.splice(0).map((r) => removeTmpTree(r)));
   });
 
   /** fake manager 注入验证装配不崩(spawn 不被调用;仅验证 registry 含两件 +
@@ -749,9 +858,7 @@ describe("buildHarnessEngine — #126 T5 secrets guard 装配", () => {
   const roots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(
-      roots.splice(0).map((r) => rm(r, { recursive: true, force: true }))
-    );
+    await Promise.all(roots.splice(0).map((r) => removeTmpTree(r)));
   });
 
   it("block 模式：内置模式拦截密钥正例（sc-1），普通命令放行（sc-2）", async () => {
@@ -955,7 +1062,7 @@ describe("buildHarnessEngine — #406 T2 secret registry 装配", () => {
 
       if (built.shutdown) await built.shutdown();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -977,7 +1084,7 @@ describe("buildHarnessEngine — #406 T2 secret registry 装配", () => {
 
       if (built.shutdown) await built.shutdown();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 });
@@ -1090,7 +1197,7 @@ describe("buildHarnessEngine — #406 T4 secrets.mode 装配矩阵", () => {
       expect(built.deps.secretRegistry).toBeDefined();
       if (built.shutdown) await built.shutdown();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1109,7 +1216,7 @@ describe("buildHarnessEngine — #406 T4 secrets.mode 装配矩阵", () => {
       expect(built.deps.secretRegistry).toBeUndefined();
       if (built.shutdown) await built.shutdown();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1128,7 +1235,7 @@ describe("buildHarnessEngine — #406 T4 secrets.mode 装配矩阵", () => {
       expect(built.deps.secretRegistry).toBeDefined();
       if (built.shutdown) await built.shutdown();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1147,7 +1254,7 @@ describe("buildHarnessEngine — #406 T4 secrets.mode 装配矩阵", () => {
       expect(built.deps.secretRegistry).toBeDefined();
       if (built.shutdown) await built.shutdown();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 });
@@ -1185,7 +1292,7 @@ describe("buildHarnessEngine — #558 T2 默认不注入 coordinator 段", () =>
 
       if (built.shutdown) await built.shutdown();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1209,7 +1316,7 @@ describe("buildHarnessEngine — #558 T2 默认不注入 coordinator 段", () =>
 
       if (built.shutdown) await built.shutdown();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1232,7 +1339,7 @@ describe("buildHarnessEngine — #558 T2 默认不注入 coordinator 段", () =>
 
       if (built.shutdown) await built.shutdown();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 });
@@ -1271,7 +1378,7 @@ describe("buildHarnessEngine — #841 T6 父会话 rules 清单化", () => {
 
         if (built.shutdown) await built.shutdown();
       } finally {
-        await rm(root, { recursive: true, force: true });
+        await removeTmpTree(root);
       }
     });
   }
@@ -1291,7 +1398,7 @@ describe("buildHarnessEngine — #841 T6 父会话 rules 清单化", () => {
       expect(systemText.length).toBeGreaterThan(0);
       if (built.shutdown) await built.shutdown();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 });
@@ -1334,7 +1441,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       expect(provisioned).toBe(0);
       await built.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1390,7 +1497,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       expect(provisioned).toBe(0);
       await built.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1426,7 +1533,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       expect(provisioned).toBe(0);
       await built.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1456,7 +1563,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       expect(spawnedTasks).toEqual([]);
       await built.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1487,7 +1594,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       expect(spawnedTasks).toEqual([]);
       await built.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1542,7 +1649,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       expect(reboundPayloads[0]?.sandboxRoot).toBe(taskRoot);
       await reboundBuilt.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1583,7 +1690,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       await offBuilt.shutdown?.();
       await baselineBuilt.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 });
@@ -1624,7 +1731,7 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
       expect(built.liveTaskRoot?.read()).toBe(root);
       await built.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1668,7 +1775,7 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
 
       await built.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1708,7 +1815,7 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
 
       await built.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1761,7 +1868,7 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
 
       await built.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 });
@@ -1839,7 +1946,7 @@ describe("buildHarnessEngine — T9 display surface", () => {
 
       await built.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1886,7 +1993,7 @@ describe("buildHarnessEngine — T9 display surface", () => {
 
       await built.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 });
@@ -1925,7 +2032,7 @@ describe("buildHarnessEngine — T2 worktreeExclusive transmission seam", () => 
       expect(built.isolationOn).toBe(false);
       await built.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1943,7 +2050,7 @@ describe("buildHarnessEngine — T2 worktreeExclusive transmission seam", () => 
       expect(built.worktreeExclusive).toBe(false);
       await built.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1965,7 +2072,7 @@ describe("buildHarnessEngine — T2 worktreeExclusive transmission seam", () => 
       expect(built.isolationOn).toBe(false);
       await built.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -1989,7 +2096,7 @@ describe("buildHarnessEngine — T2 worktreeExclusive transmission seam", () => 
       expect(built.isolationOn).toBe(true);
       await built.shutdown?.();
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTmpTree(root);
     }
   });
 
@@ -2040,6 +2147,11 @@ describe("buildHarnessEngine — T2 worktreeExclusive transmission seam", () => 
       },
     ];
     for (const cell of matrix) {
+      // 清收走 removeTmpTree 而非裸 rm:装配期 `void mkdir(<root>/.iknow/
+      // memory/<ns>)` 是 fire-and-forget,实测落在 buildHarnessEngine 返回后
+      // 0–28ms;本循环 `await shutdown()` 紧接清收,rm 的最后一步 rmdir 可能
+      // 撞上它 —— 全量并发(maxForks=3)下正是此处报过
+      // `ENOTEMPTY: … rmdir '/tmp/iknow-t2-matrix-…'`。详见 removeTmpTree 注释。
       const root = await mkdtemp(
         join(tmpdir(), `iknow-t2-matrix-${cell.label}-`)
       );
@@ -2078,7 +2190,7 @@ describe("buildHarnessEngine — T2 worktreeExclusive transmission seam", () => 
         expect(built.isolationOn).toBe(cell.expectedWom);
         await built.shutdown?.();
       } finally {
-        await rm(root, { recursive: true, force: true });
+        await removeTmpTree(root);
       }
     }
   });

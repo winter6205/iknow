@@ -180,6 +180,10 @@ describe("T12 — run-level e2e: create-worktree + write_file in one run", () =>
       cwd: mainRoot,
       userHome: join(mainRoot, "home"),
       settings: { isolation: { worktreeOnMutate: true } },
+      // 本文件验 worktree 门禁的 run-level 行为,不验溢出退场 / 索引降档
+      // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
+      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      skipCountTokens: true,
       worktreeIsolation: {
         // Model-provision seam (see fakeProvision above).
         provision: async ({ root }) => {
@@ -272,6 +276,7 @@ describe("T12 — run-level e2e: create-worktree + write_file in one run", () =>
       cwd: mainRoot,
       userHome: join(mainRoot, "home"),
       settings: { isolation: { worktreeOnMutate: true } },
+      skipCountTokens: true, // 同上:验 run-level worktree 落点。
       worktreeIsolation: {
         provision: async ({ root }) =>
           fakeProvision({ root, mainRoot, wtRoot }),
@@ -338,6 +343,7 @@ describe("T12 — trace double-track (test.md 纪律)", () => {
       cwd: mainRoot,
       userHome: join(mainRoot, "home"),
       settings: { isolation: { worktreeOnMutate: true } },
+      skipCountTokens: true, // 同上:验 trace 事件序列。
       worktreeIsolation: {
         provision: async ({ root }) =>
           fakeProvision({ root, mainRoot, wtRoot }),
@@ -438,6 +444,7 @@ describe("T12 — trace double-track (test.md 纪律)", () => {
         cwd: mainRoot,
         userHome: join(mainRoot, "home"),
         settings: { isolation: { worktreeOnMutate: true } },
+        skipCountTokens: true, // 同上:验 RunResult 基线 deepEqual。
         worktreeIsolation: {
           provision: async ({ root }) =>
             fakeProvision({ root, mainRoot, wtRoot }),

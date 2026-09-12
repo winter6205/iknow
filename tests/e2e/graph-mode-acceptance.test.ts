@@ -131,6 +131,10 @@ describe("D-α V1 graph mode e2e — 图不是单次 spawn（SC5）", () => {
       cwd: root,
       subagentManager: manager,
       graphMode,
+      // 本文件验 graph mode 的 run() 现势与工具面,不验溢出退场 / 索引降档
+      // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
+      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      skipCountTokens: true,
     });
     cleanup.push(async () => {
       if (built.shutdown) await built.shutdown();

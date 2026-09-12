@@ -98,6 +98,11 @@ describe("#356 T7 E2E A: stub-model host drain 全链路 (SC14)", () => {
       userHome: join(root, "home"),
       cwd: root,
       subagentManager: fakeMgr,
+      // 本文件验 subagent 工具 handler 与 fake manager 接线,不验溢出退场 /
+      // 索引降档(专测见 build-engine-tool-overflow.test.ts、
+      // disclosure-index-align/)。旁路装配期 countTokens:缝语义见
+      // BuildEngineOpts.skipCountTokens 注释。
+      skipCountTokens: true,
     });
     cleanup.push(async () => {
       if (built.shutdown) await built.shutdown();

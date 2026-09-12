@@ -401,6 +401,10 @@ describe("buildHarnessEngine — graph 常驻 + handler gate 集成(SC5)", () =>
       memory: { enabled: false },
       userHome: home,
       cwd,
+      // 本文件验 graph 常驻工具面与 handler gate,不验溢出退场 / 索引降档
+      // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
+      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      skipCountTokens: true,
       ...(graphMode ? { graphMode } : {}),
     });
     try {

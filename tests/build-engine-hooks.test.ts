@@ -62,6 +62,10 @@ describe("buildHarnessEngine — #365 T1 hooks 透传观测缝", () => {
         productRoot: root,
         sandboxRoot: root,
         hooks,
+        // 本文件验 hooks 透传,不验溢出退场 / 索引降档(专测见
+        // build-engine-tool-overflow.test.ts、disclosure-index-align/)。
+        // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+        skipCountTokens: true,
       });
 
       // createAciExecutor 返回 Executor 类型(executeAll 是函数)。
@@ -105,6 +109,7 @@ describe("buildHarnessEngine — #365 T1 hooks 透传观测缝", () => {
         workspaceRoot: root,
         productRoot: root,
         sandboxRoot: root,
+        skipCountTokens: true, // 同上:验不传 hooks 时装配照常。
       });
 
       expect(typeof built.deps.executor.executeAll).toBe("function");

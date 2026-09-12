@@ -130,6 +130,11 @@ describe("secret-roundtrip e2e — 4 surface × 2 mode 装配矩阵 (#406)", () 
           userHome: home,
           cwd: root,
           sandboxRoot: root,
+          // 本文件验 secrets 装配矩阵,不验溢出退场 / 索引降档(专测见
+          // build-engine-tool-overflow.test.ts、disclosure-index-align/)。
+          // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens
+          // 注释。
+          skipCountTokens: true,
         });
         try {
           if (mode === "roundtrip") {

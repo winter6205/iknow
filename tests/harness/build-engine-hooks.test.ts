@@ -82,6 +82,10 @@ async function build(
     userHome: root,
     workspaceRoot: root,
     sandboxRoot: root,
+    // 本文件验 hooks 路由与 memory 正交,不验溢出退场 / 索引降档(专测见
+    // build-engine-tool-overflow.test.ts、disclosure-index-align/)。
+    // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+    skipCountTokens: true,
     ...(opts.postToolUse ? { hooks: opts.postToolUse } : {}),
     settings,
   });

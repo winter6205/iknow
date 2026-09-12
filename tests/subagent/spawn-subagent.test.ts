@@ -21,8 +21,18 @@
  * 超字段 {task:"x", foo:"bar"} 的严格性由 registry 的 ajv strict 校验守门
  * （createAciRegistry 装配时编译 inputSchema，additionalProperties:false），
  * 工具 handler 收的是已校验 input——此处不重复测（依赖 registry 严校验）。
+ *
+ * catalog 密闭性：factory 缺省 resolver = merged catalog（builtin +
+ * `~/.iknow/agents/` 用户角色，#556 T3 默认路径契约）。断言 enum / prose list
+ * 等于 builtin 的用例若读真实 home，会随运行者装了什么用户角色漂移；本文件
+ * beforeEach 把 HOME 指向空 tmp 目录（`os.homedir()` 读 `$HOME`），
+ * 缺省路径因此恒为纯 builtin。默认 resolver = merged 的证明在
+ * tests/subagent/user-agents-wiring.test.ts（不依赖真实 home）。
  */
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
 
@@ -45,6 +55,39 @@ import {
   getAgentEntry,
 } from "../../src/harness/subagent/catalog.ts";
 import { FILE_WRITE_TOOL_NAMES } from "../../src/harness/subagent/catalog.ts";
+import { resetUserAgentsCache } from "../../src/harness/subagent/user-catalog.ts";
+
+/**
+ * catalog 密闭性 fixture：整个文件把 HOME 指向空 tmp 目录。
+ *
+ * factory 缺省 resolver = merged catalog（builtin + home 下的用户角色），
+ * 真实 home 的 `~/.iknow/agents/` 内容会渗进 enum / prose list 断言。空 HOME
+ * 让缺省路径恒为纯 builtin（目录 ENOENT → 空用户集，见 user-catalog.ts）。
+ * `resetUserAgentsCache()` 必须在 HOME 切换后调用：merged 结果按 resolved
+ * agentsDir 记忆化，不清缓存会读到上一个 HOME 的扫描结果。
+ */
+let savedHome: string | undefined;
+let hermeticHome: string;
+
+function emptyHermeticHome(): void {
+  savedHome = process.env.HOME;
+  hermeticHome = mkdtempSync(join(tmpdir(), "iknow-spawn-tool-home-"));
+  process.env.HOME = hermeticHome;
+  // 真实 home 的用户角色已可能被同进程早前的扫描记忆化，切 HOME 后必须重扫。
+  resetUserAgentsCache();
+}
+
+beforeEach(() => {
+  emptyHermeticHome();
+});
+
+afterEach(() => {
+  if (savedHome === undefined) delete process.env.HOME;
+  else process.env.HOME = savedHome;
+  rmSync(hermeticHome, { recursive: true, force: true });
+  // 缓存 key 是本文件用过的 tmp agentsDir；清掉避免污染同进程其他测试文件。
+  resetUserAgentsCache();
+});
 
 /** ajv 实例（与仓库同款 strict + allErrors + formats）— T3 测 inputSchema 编译。 */
 function makeAjv(): Ajv.default {
@@ -387,7 +430,9 @@ describe("spawn_subagent — #357 T1: SubAgentSandboxRootError → ToolExecution
 describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
   const fixtureManager = (): SubAgentManager => makeFakeManager().manager;
   let description: string;
-  beforeAll(() => {
+  beforeEach(() => {
+    // beforeEach（非 beforeAll）：HOME 密闭性 fixture 在 beforeEach 生效，
+    // beforeAll 会先于它跑，读到真实 home 的用户角色 prose。
     description = createSpawnSubAgentTool({
       manager: fixtureManager(),
     }).description;
@@ -523,10 +568,10 @@ describe("spawn_subagent — #556 T3 subagent_type 参数 + ajv enum", () => {
         (e as { keyword?: string }).keyword === "enum"
     );
     expect(enumErr).toBeDefined();
-    // params.allowedValues 含 catalog ids
+    // params.allowedValues 含 catalog ids（从 SSOT 派生，空 home 下 = builtin）
     const allowed = (enumErr as { params?: { allowedValues?: unknown } })
       ?.params?.allowedValues;
-    expect(allowed).toEqual(["explore", "general-purpose"]);
+    expect(allowed).toEqual(resolveAgentCatalog().map((e) => e.id));
   });
 
   it("ajv 编译: subagent_type 非 string 类型被拒", () => {
@@ -740,15 +785,21 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
 });
 
 describe("spawn_subagent — #556 T3 deps.catalog (additive, default = builtin)", () => {
-  it("未传 catalog → factory 内部 fallback resolveAgentCatalog, ajv enum 仍 = builtin ids", () => {
+  it("未传 catalog → factory 内部 fallback, ajv enum = builtin ids 派生 (空 home 密闭)", () => {
     // plan 决议: dist 装配 (registry.ts) 不传 catalog, factory 内部用 default。
-    // 此处验证 default 行为: 即使 deps 没显式给 catalog, ajv enum 仍来自
-    // resolveAgentCatalog().map(e => e.id) = ['explore', 'general-purpose'].
+    // default = merged catalog (builtin + home 用户角色), 故此处认证的命题是
+    // 「缺省 resolver 下 enum 由 builtin catalog ids 派生」——在空 HOME 隔离下
+    // merged 退化纯 builtin, 断言与 resolveAgentCatalog() 派生值一致。
+    // merged 合并语义 (user 追加 / 同名保留 builtin) 的独立认证在
+    // tests/subagent/user-agents-wiring.test.ts + user-catalog.test.ts。
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     const schema = tool.inputSchema as {
       properties: Record<string, { enum?: ReadonlyArray<string> }>;
     };
+    expect([...schema.properties.subagent_type.enum!]).toEqual(
+      resolveAgentCatalog().map((e) => e.id)
+    );
     expect([...schema.properties.subagent_type.enum!]).toEqual([
       "explore",
       "general-purpose",
@@ -809,7 +860,9 @@ describe("spawn_subagent — #556 T3 deps.catalog (additive, default = builtin)"
 describe("spawn_subagent description — #556 T3 prose list 段 (catalog entries)", () => {
   const fixtureManager = (): SubAgentManager => makeFakeManager().manager;
   let description: string;
-  beforeAll(() => {
+  beforeEach(() => {
+    // 同上前一个 describe：必须晚于 HOME 密闭性 fixture 生效才能取 default
+    // resolver 的快照，否则真实 home 的用户角色会混进 prose list。
     description = createSpawnSubAgentTool({
       manager: fixtureManager(),
     }).description;

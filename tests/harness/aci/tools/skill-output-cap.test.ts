@@ -267,6 +267,11 @@ describe("ADR-0083 SC1 — 超长正文经 executor 完整交付", () => {
           // 命题不被工作区状态污染。
           cwd: scratch,
           userHome: emptyHome,
+          // 本用例验 skill 正文在**生产装配链上**的 exemptFromOutputCap 落值,
+          // 不验溢出退场 / 索引降档(专测见 build-engine-tool-overflow.test.ts、
+          // disclosure-index-align/)。旁路装配期 countTokens:缝语义见
+          // BuildEngineOpts.skipCountTokens 注释。
+          skipCountTokens: true,
         });
         try {
           const def = built.deps.registry.get("skill");

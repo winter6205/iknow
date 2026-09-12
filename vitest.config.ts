@@ -27,6 +27,13 @@ export default defineConfig({
     poolOptions: {
       forks: { maxForks: 3, minForks: 1 },
     },
+    // vitest 默认 testTimeout = 5_000ms。本仓库大量用例真装配引擎
+    // （buildHarnessEngine / runChatSession / createWorkerDeps）、真起
+    // 子进程、真读 git —— 这些是 IO/装配预算，不是被测契约：满负载下
+    // 同一用例墙钟可涨到数倍，撞 5s 就被记成超时红。放宽到 30s 让超时
+    // 重新成为「真挂死」的信号；跑得更慢的用例另行单独收窄。
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     reporter: "default",
   },
 });

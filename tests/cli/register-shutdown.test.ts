@@ -28,7 +28,25 @@
  * process.emit 假装验证 — emit 只同步跑 listener,不真投递信号,掩盖
  * DRIFT-1 的 re-kill 死循环(旧测试注释"单次 emit 后 kill 在 Linux 异步
  * 投递、不重入"实测为假)。子进程内注册真实 registerShutdown(runtime.ts),
- * ready 就绪后 kill 真实信号;父进程 30s 超时 guard — 挂死即 fail。
+ * ready 就绪后 kill 真实信号;父进程 60s 超时 guard — 挂死即 fail。
+ *
+ * 子进程拓扑必须无 wrapper:
+ *   - `node <tsx/dist/cli.mjs> -e <script>` 不是单进程 —— tsx CLI 先起一个
+ *     wrapper,再由 wrapper spawn 真正的脚本进程。child.kill(signal) 只打到
+ *     wrapper,脚本进程靠 tsx 的 relay 转发。
+ *   - tsx 4.23.0 relay 语义(实测校准):转发信号后只等子进程 30ms
+ *     (`waitForSignalFromChild` 的 30ms race),"Previous process hasn't
+ *     exited yet" 即升级 SIGKILL,然后 wrapper 自己 `process.exit(128+signo)`
+ *     ——SIGINT 恰好也是 130,与脚本进程的 re-kill 退出码不可区分。
+ *   - 后果:冷启动/负载下 dispose 比 30ms 慢时,脚本进程被 SIGKILL 打断在
+ *     writeFileSync 之前,父进程看到 code=130 但哨兵缺失。实测:handler
+ *     200ms 工作 → 4/4 哨兵丢失;handler 30ms 边界内 → 正常。这是子进程
+ *     互杀竞态,不是 registerShutdown 的竞态(产品 `bin/iknow → dist/cli.js`
+ *     直跑,无 tsx wrapper)。
+ *   - 本文件用 `node --import tsx/esm --input-type=module -e`,被测脚本即直接
+ *     spawn 的进程(实测 `process.pid === child.pid`),信号直达 handler,
+ *     无 relay 窗口。DRIFT-1 挂死仍被捕获(无 wrapper 兜底下挂死更确定)。
+ *     `--input-type=module` 是显式声明(不依赖 Node 未来的语法探测默认值)。
  *
  * 副作用隔离:
  *   - fork 内 emit 测试用 vi.spyOn(process, 'kill') 把 re-kill 桩成 no-op,
@@ -68,14 +86,25 @@ function cleanupSignalListeners(): void {
 }
 
 /**
- * 定位 tsx CLI(worktree 的 node_modules 是空的,依赖从主仓库提升):
- * 从本文件目录逐级向上找第一个含 node_modules/tsx/dist/cli.mjs 的目录
- * (与 tests/cli/trace.test.ts 同款解析)。
+ * 定位 tsx 的 ESM register 入口(worktree 的 node_modules 是空的,依赖从主
+ * 仓库提升):从本文件目录逐级向上找第一个含 node_modules/tsx/dist/esm/index.mjs
+ * 的目录(与 tests/cli/trace.test.ts 同款解析)。
+ *
+ * 注意用 `dist/esm/index.mjs`(node --import 的 register 入口),不是
+ * `dist/cli.mjs` —— 后者是 wrapper CLI,会再生一层子进程 + 30ms relay
+ * 升级 SIGKILL(见文件头无 wrapper 拓扑说明)。
  */
-function resolveTsxCli(): string {
+function resolveTsxEsm(): string {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (;;) {
-    const candidate = join(dir, "node_modules", "tsx", "dist", "cli.mjs");
+    const candidate = join(
+      dir,
+      "node_modules",
+      "tsx",
+      "dist",
+      "esm",
+      "index.mjs"
+    );
     try {
       if (statSync(candidate).isFile()) {
         return candidate;
@@ -84,26 +113,33 @@ function resolveTsxCli(): string {
       // 继续向上
     }
     const parent = join(dir, "..");
-    if (parent === dir) throw new Error("cannot locate tsx/dist/cli.mjs");
+    if (parent === dir) throw new Error("cannot locate tsx/dist/esm/index.mjs");
     dir = parent;
   }
 }
 
-// 与 tsx -e 的模块解析一致:子进程 cwd = 仓库根,内联脚本用相对 import。
+// 与 `node --import tsx` 的模块解析一致:子进程 cwd = 仓库根,内联脚本用相对 import。
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const tsxCli = resolveTsxCli();
+const tsxEsm = resolveTsxEsm();
 
 /**
- * 真实信号投递子进程:tsx -e 内注册真实 registerShutdown(runtime.ts),
- * ready 就绪后由父进程 kill 真实信号。返回 { code, timedOut, disposeRan }。
+ * 真实信号投递子进程:`node --import tsx` 内注册真实 registerShutdown
+ * (runtime.ts),ready 就绪后由父进程 kill 真实信号。返回
+ * { code, timedOut, disposeRan }。
  *   - code:子进程退出码(130/143=期望;null=SIGKILL timeout);
- *   - timedOut:true = 父进程 15s guard 触发 → DRIFT-1 旧实现在此挂死被捕获;
+ *   - timedOut:true = 父进程 60s guard 触发 → DRIFT-1 旧实现在此挂死被捕获;
  *   - disposeRan:shutdown 钩子是否真跑过(文件侧通道同步写,绕开 process.exit
  *     不排空 stdio pipe 的丢失风险)。
  *
  * 哨兵写入走 child 侧 `import { writeFileSync } from 'node:fs'`(ESM 语法,
- * tsx -e 内 require 不可用 —— 实测 exit 1:ReferenceError: require is not
+ * 内联脚本内 require 不可用 —— 实测 exit 1:ReferenceError: require is not
  * defined),文件名由 SIG_SENTINEL 环境变量注入,不依赖 stdio pipe 排空。
+ *
+ * 为什么不是 `node <tsx/dist/cli.mjs> -e`:tsx CLI 是 wrapper,会再 spawn
+ * 一层真正跑脚本的子进程,并在收到信号后只等 30ms 就 SIGKILL(见文件头)。
+ * `node --import tsx/esm` + `--input-type=module` 让脚本进程就是 spawn 出来
+ * 的那个进程(实测 process.pid === child.pid),信号直达 handler。
+ * `--input-type=module` 显式声明模块类型;相对 import 与 cwd 仍按仓库根解析。
  */
 function runSignalChild(
   shutdownStub: string | null,
@@ -114,6 +150,10 @@ function runSignalChild(
   timedOut: boolean;
   disposeRan: boolean;
   stderr: string;
+  /** 子进程自报的 process.pid(脚本进程身份,用于无 wrapper 不变量断言)。 */
+  selfPid: number | null;
+  /** spawn() 返回的 pid(= selfPid 当且仅当没有中间 wrapper)。 */
+  spawnPid: number | null;
 }> {
   const sentinel = join(sentinelDir, "dispose-ran");
   // 通过环境变量把哨兵路径传给子进程,内联脚本从 process.env.SIG_SENTINEL 读。
@@ -121,26 +161,36 @@ function runSignalChild(
   const shutdownBody = shutdownStub
     ? `${shutdownStub}\n    registerShutdown({ shutdown: _shutdown });`
     : "registerShutdown({});";
+  // selfPid 随 ready 行一起自报:若 spawn 的是 wrapper(如 tsx CLI),它会
+  // 再 spawn 一层脚本进程 → selfPid !== spawnPid,测试据此 fail-fast
+  // (wrapper 的 30ms relay 会升级 SIGKILL 丢哨兵,见文件头)。
   const script = `
     import { registerShutdown } from './src/cli/runtime.ts';
     import { writeFileSync } from 'node:fs';
     ${shutdownBody}
-    console.error('stage: ready');
+    console.error('stage: ready pid=' + process.pid);
     setInterval(() => {}, 1000);
   `;
-  const child = spawn(process.execPath, [tsxCli, "-e", script], {
-    cwd: repoRoot,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, SIG_SENTINEL: sentinel },
-  });
+  const child = spawn(
+    process.execPath,
+    ["--import", tsxEsm, "--input-type=module", "-e", script],
+    {
+      cwd: repoRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, SIG_SENTINEL: sentinel },
+    }
+  );
   let err = "";
   let signalled = false;
+  let selfPid: number | null = null;
   child.stdout.on("data", () => {
     /* 抑制 stdout;只用 stderr 判定 ready */
   });
   child.stderr.on("data", (d) => {
     err += String(d);
-    if (err.includes("stage: ready") && !signalled) {
+    const m = /stage: ready pid=(\d+)/.exec(err);
+    if (m && !signalled) {
+      selfPid = Number(m[1]);
       signalled = true;
       child.kill(signal);
     }
@@ -155,6 +205,8 @@ function runSignalChild(
       timedOut: boolean;
       disposeRan: boolean;
       stderr: string;
+      selfPid: number | null;
+      spawnPid: number | null;
     }) => {
       if (settled) return;
       settled = true;
@@ -171,6 +223,8 @@ function runSignalChild(
         timedOut: true,
         disposeRan: existsSync(sentinel),
         stderr: err,
+        selfPid,
+        spawnPid: child.pid ?? null,
       });
     }, 60000);
     // close(而非 exit)收尾:close 在 stdio 流完全关闭后触发,err 缓冲
@@ -183,9 +237,34 @@ function runSignalChild(
         timedOut: false,
         disposeRan: existsSync(sentinel),
         stderr: err,
+        selfPid,
+        spawnPid: child.pid ?? null,
       });
     });
   });
+}
+
+/**
+ * 无 wrapper 不变量:脚本进程必须就是 spawn 出来的那个进程。
+ * 若回退成 `node <tsx/dist/cli.mjs> -e`,tsx CLI 会再 spawn 一层脚本进程,
+ * 父进程的 kill 只打到 wrapper,脚本进程被 30ms relay 升级 SIGKILL 打断
+ * → 哨兵随负载随机丢失。此处 fail-fast 把这条拓扑约束钉在测试里,避免
+ * 日后改回去又变成偶发红。
+ */
+function expectNoWrapper(r: {
+  selfPid: number | null;
+  spawnPid: number | null;
+  stderr: string;
+}): void {
+  expect(
+    r.selfPid,
+    `子进程未上报 pid(脚本可能未跑到 ready 行): ${r.stderr}`
+  ).not.toBeNull();
+  expect(
+    r.selfPid,
+    `被测脚本不是 spawn 的直接子进程(selfPid=${r.selfPid} spawnPid=${r.spawnPid}) ` +
+      `— 中间存在 wrapper(如 tsx CLI),信号 relay 会引入 SIGKILL 竞态`
+  ).toBe(r.spawnPid);
 }
 
 describe("registerShutdown (#365 T5)", () => {
@@ -317,6 +396,7 @@ describe("registerShutdown (#365 T5)", () => {
       sentinelDir
     );
     expect(r.timedOut).toBe(false);
+    expectNoWrapper(r);
     expect(r.code, `child stderr: ${r.stderr}`).toBe(130);
     expect(r.disposeRan, `child stderr: ${r.stderr}`).toBe(true);
     expect(readFileSync(join(sentinelDir, "dispose-ran"), "utf8")).toBe("ran");
@@ -329,6 +409,7 @@ describe("registerShutdown (#365 T5)", () => {
       sentinelDir
     );
     expect(r.timedOut).toBe(false);
+    expectNoWrapper(r);
     expect(r.code).toBe(143);
     expect(r.disposeRan).toBe(true);
   }, 90000);
@@ -336,6 +417,7 @@ describe("registerShutdown (#365 T5)", () => {
   it("真实 SIGINT 投递 + shutdown 缺席:no-op dispose 后同样二次强杀 → 130", async () => {
     const r = await runSignalChild(null, "SIGINT", sentinelDir);
     expect(r.timedOut).toBe(false);
+    expectNoWrapper(r);
     expect(r.code).toBe(130);
     expect(r.disposeRan).toBe(false);
   }, 90000);

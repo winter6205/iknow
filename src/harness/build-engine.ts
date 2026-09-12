@@ -228,6 +228,38 @@ export type BuildEngineOpts = {
    * 捕获 createMcpManager 入参(如 timeoutMsOverride 透传)。
    */
   readonly createMcpManager?: typeof import("./mcp/manager.js").createMcpManager;
+  /**
+   * B4 / ADR-0043 §4 测试缝:装配期 firstTurnReady 窗口覆盖。**缺省 =
+   * 30_000ms,即生产契约本身**(见下方 `mcpManager.start()` 调用点的常量
+   * 注释)—— 生产调用方(CLI / hub / TUI deps)不传本字段,字节级不变。
+   *
+   * 为什么需要:缺省窗口要求装配期真等满 30s 才 resolve(未连上的 server
+   * 按同会话缺席处理)。测试若要验「窗口到点后行为」,真实等满 30s 会让
+   * 单条用例的墙钟与窗口长度绑定。注入小值(如 50ms)让同一条窗口路径快
+   * 速走完 —— 被测语义(超时 = 缺席、目录冻结、flip-back 不回写)一字不改,
+   * 只是窗口参数变小。
+   *
+   * 注意:本字段只缩短**外层的窗口轮询**;单 server 自身的 connect 超时
+   * 仍由 `env.mcp.connectTimeoutMs` 决定(manager 的 `timeoutMsOverride`)。
+   * 窗口 < connect 超时 ⇒ 走「窗口到点即缺席」;窗口 > connect 超时 ⇒
+   * server 先标 failed、窗口提前 resolve(终态判定)。两者都是真实路径。
+   */
+  readonly mcpFirstTurnReadyTimeoutMs?: number;
+  /**
+   * B6 / ADR-0043 §3 测试缝:装配期 countTokens 覆盖的**旁路**开关。
+   *
+   * `countTokens` 缺席时装配层退回 `adapter.countTokens`(真 SDK 调用)。
+   * 该调用打在 env.llm.baseUrl(测试 fixture 恒为不可达的 127.0.0.1:9999),
+   * SDK 自带 `maxRetries=2` + 指数退避 ⇒ 每次装配白白烧 ~2.5s 只为了走到
+   * 「Connection error → skip 本会话」这个确定性分支。
+   *
+   * 置 true = 装配期直接走 countTokens 缺席语义(调用方省略 `countTokens`
+   * 与不传本字段同形:溢出判定与索引降档都 skip + warn 一行,全部 deferrable
+   * 内建件保持常驻)。用于**不验溢出/索引降档**的装配用例 —— 要验这两条
+   * 路径的用例必须显式传 `countTokens` stub(见 build-engine-tool-overflow /
+   * disclosure-index-align 两套测试)。
+   */
+  readonly skipCountTokens?: boolean;
   /** #356 T6 测试缝:subagent manager 覆盖注入(生产默认不传则内部自建)。 */
   readonly subagentManager?: SubAgentManager;
   /**
@@ -1055,11 +1087,17 @@ export async function buildHarnessEngine(
         : {}),
     });
     // B4 / ADR-0043 §4:build-engine 装配期 `await manager.start({firstTurnReadyTimeoutMs})`。
-    // 30s 是 hard-req 装配期窗口 —— 窗口内连上的 server 进首轮装配(注册到
-    // ACI registry,session 在册);窗口内未连上的 server = session 缺席
-    // (不进名字目录,不进 tools),缺席者本会话不再有自动重试。装配照常发首轮
-    // —— 仅缺席者退到下一轮由用户手动重连(`onManualReconnect` 缝)。start
-    // 内部 bootSlot 仍是 fire-and-forget,但本调用方在装配期 await 至窗口到点。
+    // 窗口长度 = 模块级常量 `MCP_FIRST_TURN_READY_TIMEOUT_MS`(hard-req 装配
+    // 期窗口的生产契约)—— 窗口内连上的 server 进首轮装配(注册到 ACI
+    // registry,session 在册);窗口内未连上的 server = session 缺席(不进名字
+    // 目录,不进 tools),缺席者本会话不再有自动重试。装配照常发首轮 —— 仅
+    // 缺席者退到下一轮由用户手动重连(`onManualReconnect` 缝)。
+    // start 内部 bootSlot 仍是 fire-and-forget,但本调用方在装配期 await 至
+    // 窗口到点。
+    //
+    // `opts.mcpFirstTurnReadyTimeoutMs` 是测试缝:缺席 ⇒ 用上面的常量(生产
+    // 字节级不变,见 BuildEngineOpts 字段注释);在场 ⇒ 用注入值。两者走的是
+    // 同一条窗口轮询路径,只有窗口长度不同。
     //
     // 顺序关键:`reg` 必须在 `await mcpManager.start()` 之前构造完毕(见
     // 上面 `reg = createDefaultAciRegistry({...})` 调用)。mcpManager
@@ -1067,7 +1105,11 @@ export async function buildHarnessEngine(
     // listTools → registerTools → registerExternal 路径上会拿到
     // `reg === undefined` 抛错,标 slot 为 failed(不再翻回)。
     try {
-      await mcpManager.start({ firstTurnReadyTimeoutMs: 30_000 });
+      await mcpManager.start({
+        firstTurnReadyTimeoutMs: resolveFirstTurnReadyTimeoutMs(
+          opts.mcpFirstTurnReadyTimeoutMs
+        ),
+      });
     } catch (err) {
       // start 内部 void allSettled 不会 reject;此 catch 留作未来加 timeout
       // 收尾时的兜底,目前仅 warn。装配照常发首轮,缺席者按 session 缺席处理。
@@ -1191,21 +1233,7 @@ export async function buildHarnessEngine(
       "iknow harness identity.\n\n" +
       overflowSystemText,
   };
-  const countTokensFn =
-    opts.countTokens ??
-    (adapter.countTokens !== undefined
-      ? async (input: {
-          readonly tools?: ReadonlyArray<unknown>;
-          readonly system?: string;
-        }) => {
-          // 真实 adapter:仅传 tools + system(messages 缺席 = SDK 接受空
-          // 消息;首轮判定场景下 messages 必空)。
-          return adapter.countTokens!({
-            tools: input.tools as ReadonlyArray<unknown> | undefined,
-            system: input.system,
-          });
-        }
-      : undefined);
+  const countTokensFn = selectCountTokensFn(adapter, opts);
   // 装配期首轮判定:只跑一次(session 内恒定,后续每轮 promptTools
   // 不重测)。失败/缺席 = 跳过本会话 + warn(全部 deferrable 内建件
   // 保持常驻);超阈值 = 退场次序内 stamp lazy:true。
@@ -1882,4 +1910,54 @@ function tuiMemoryInvalidateField(
   return tuiLive && resolver
     ? { invalidateMemorySystem: resolver.invalidate }
     : {};
+}
+
+/**
+ * B4 / ADR-0043 §4:hard-req 装配期 firstTurnReady 窗口的生产契约(ms)——
+ * 窗口内连上的 MCP server 进首轮装配(session 在册);窗口内未连上 = 本会话
+ * 缺席(不进名字目录,不进 tools),不自动重试。测试缝只在窗口长度上覆盖,
+ * 生产调用方不传该缝 ⇒ 走本常量,字节级不变。
+ */
+const MCP_FIRST_TURN_READY_TIMEOUT_MS = 30_000;
+
+/**
+ * 测试缝 `opts.mcpFirstTurnReadyTimeoutMs` 的 resolver:缺席 ⇒ 生产契约常量;
+ * 在场 ⇒ 注入值(见 BuildEngineOpts 字段注释)。两种走同一条窗口轮询路径,
+ * 只有窗口长度不同 —— 故这里只选长度,不做任何窗口语义分支。
+ */
+function resolveFirstTurnReadyTimeoutMs(injected?: number): number {
+  return injected ?? MCP_FIRST_TURN_READY_TIMEOUT_MS;
+}
+
+/**
+ * B6 / ADR-0043 §3:装配期 countTokens 来源选择(自 `buildHarnessEngine`
+ * 抽出,使装配主体不必内联四分支的优先级判定)。
+ *
+ * 优先级:显式 `countTokens` > `skipCountTokens` 旁路 > adapter 真调用。
+ * 显式注入必须永远最高 —— 否则「验溢出路径」的调用方一旦同时设了 skip
+ * 就会被静默旁路,断言悄悄失效。
+ *
+ * `skipCountTokens` 缝见 BuildEngineOpts 字段注释:绕开 adapter 的 SDK
+ * 调用(测试 env 的 baseUrl 不可达,SDK maxRetries=2 + 退避让每次装配
+ * 白烧 ~2.5s);与 countTokens 缺席同形。adapter 自身未实现(Stub / 离线
+ * adapter)也归入缺席语义 —— 装配层跳过本会话的溢出判定与索引降档。
+ */
+function selectCountTokensFn(
+  adapter: LoopEngineDeps["adapter"],
+  opts: Pick<BuildEngineOpts, "countTokens" | "skipCountTokens">
+): BuildEngineOpts["countTokens"] {
+  if (opts.countTokens !== undefined) return opts.countTokens;
+  if (opts.skipCountTokens === true) return undefined;
+  if (adapter.countTokens === undefined) return undefined;
+  // 真实 adapter:仅传 tools + system(messages 缺席 = SDK 接受空消息;
+  // 首轮判定场景下 messages 必空)。
+  return async (input: {
+    readonly tools?: ReadonlyArray<unknown>;
+    readonly system?: string;
+  }) => {
+    return adapter.countTokens!({
+      tools: input.tools as ReadonlyArray<unknown> | undefined,
+      system: input.system,
+    });
+  };
 }

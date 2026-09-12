@@ -116,6 +116,10 @@ describe("buildHarnessEngine — disclosure-index-align T1 MCP 名字目录段�
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
+      // 断言看的是名字目录段的渲染形态(含描述),不验溢出退场 / 索引降档
+      // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
+      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      skipCountTokens: true,
       createMcpClient: () =>
         makeInstantClient([
           {
@@ -169,6 +173,7 @@ describe("buildHarnessEngine — disclosure-index-align T1 MCP 名字目录段�
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
+      skipCountTokens: true, // 同上:验服务名 '-' 的服务段归属,不验溢出 / 索引降档。
       createMcpClient: () =>
         makeInstantClient([
           {
@@ -201,6 +206,7 @@ describe("buildHarnessEngine — disclosure-index-align T1 MCP 名字目录段�
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
+      skipCountTokens: true, // 同上:验零连接服务时段缺席,不验溢出 / 索引降档。
       createMcpClient: () => makeInstantClient([]),
     });
     shutdowns.push(async () => {

@@ -93,6 +93,10 @@ describe("buildHarnessEngine — B4 MCP seam wire", () => {
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
+      // 本文件验 MCP seam 的 wire 形态,不验溢出退场 / 索引降档
+      // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
+      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      skipCountTokens: true,
       createMcpClient: () =>
         makeInstantClient([
           {
@@ -125,6 +129,7 @@ describe("buildHarnessEngine — B4 MCP seam wire", () => {
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
+      skipCountTokens: true, // 同上:验 onManualReconnect wire,不验溢出 / 索引降档。
       createMcpClient: () =>
         makeInstantClient([
           {
@@ -161,6 +166,7 @@ describe("buildHarnessEngine — MCP 名字目录段(替代旧概览段)", () =>
       surface: "chat",
       userHome: join(root, "home"),
       cwd: root,
+      skipCountTokens: true, // 同上:验名字目录段,不验溢出 / 索引降档。
       createMcpClient: () =>
         makeInstantClient([
           {
@@ -203,6 +209,7 @@ describe("buildHarnessEngine — manager 未装配 (ask 路径) 字节级零变�
       surface: "ask",
       userHome: join(root, "home"),
       cwd: root,
+      skipCountTokens: true, // 同上:验 ask 路径零接线,不验溢出 / 索引降档。
     });
     // ask 表面不创建 MCP manager
     expect(built.mcpManager).toBeUndefined();

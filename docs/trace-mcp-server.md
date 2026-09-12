@@ -60,3 +60,11 @@ This is the same shape `iknow-trace-mcp` (the bin) takes; it is only the entry
 mechanism that differs (dev: tsx + repo-relative launcher; bin: prebuilt
 `dist/trace-mcp/main.js`). When you `npm run build`, the bin becomes the
 canonical entry and the dev wrapper can be retired.
+
+`dist/` is gitignored and absent from a fresh checkout, so the two startup
+tests that exercise the built entry (`tests/trace-mcp/startup.test.ts`: the bin
+symlink and the `dist/trace-mcp/main.js` symlink) need it to exist. `npm test`
+builds it once via `pretest`; when you run `npx vitest run <file>` directly,
+run `npm run build` first. Without the artifact those two cases skip with a
+visible reason instead of failing — the other cases in the file are
+dist-independent and always run.

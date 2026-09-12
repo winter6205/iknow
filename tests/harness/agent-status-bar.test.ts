@@ -532,6 +532,9 @@ describe("agent status bar T1: gating (ask / worker do not inject)", () => {
     tempDirs.push(tmp);
     const todoDir = join(tmp, "todos");
 
+    // 本用例验 agentStatus 的 surface 门禁,不验溢出退场 / 索引降档
+    // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
+    // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
     const ask = await buildHarnessEngine({
       env: makeEnv("sk-agent-status-t1"),
       askUser: createNoAskUser(),
@@ -540,6 +543,7 @@ describe("agent status bar T1: gating (ask / worker do not inject)", () => {
       todoDir,
       userHome: tmp,
       cwd: tmp,
+      skipCountTokens: true,
     });
     assert.equal(
       ask.deps.agentStatus,
@@ -554,6 +558,7 @@ describe("agent status bar T1: gating (ask / worker do not inject)", () => {
       todoDir,
       userHome: tmp,
       cwd: tmp,
+      skipCountTokens: true,
     });
     assert.deepEqual(chat.deps.agentStatus, { todoDir });
 

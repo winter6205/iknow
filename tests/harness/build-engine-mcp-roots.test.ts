@@ -94,6 +94,10 @@ describe("buildHarnessEngine — T5 resolveMcpRoots single-root wiring", () => {
       cwd: productRoot,
       workspaceRoot,
       productRoot,
+      // 本文件验 mcpRoots 派生与 fail-closed 门禁,不验溢出退场 / 索引降档
+      // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
+      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      skipCountTokens: true,
       createMcpManager: (opts) => {
         captured.push(opts);
         return createMcpManager(opts);
@@ -152,6 +156,7 @@ describe("buildHarnessEngine — T5 resolveMcpRoots single-root wiring", () => {
         workspaceRoot,
         productRoot,
         sandboxRoot: foreignSandbox,
+        skipCountTokens: true, // 同上:验 fail-closed,不验溢出 / 索引降档。
         createMcpManager: (opts) => {
           managerCalls += 1;
           return createMcpManager(opts);
@@ -181,6 +186,7 @@ describe("buildHarnessEngine — T5 resolveMcpRoots single-root wiring", () => {
       cwd: root,
       workspaceRoot: root,
       productRoot: root,
+      skipCountTokens: true, // 同上:验 ask surface 门禁,不验溢出 / 索引降档。
       createMcpManager: (opts) => {
         managerCalls += 1;
         return createMcpManager(opts);
@@ -208,6 +214,7 @@ describe("buildHarnessEngine — T5 resolveMcpRoots single-root wiring", () => {
         cwd: tmpdir(),
         workspaceRoot: "relative/not/absolute",
         productRoot: tmpdir(),
+        skipCountTokens: true, // 同上:验 fail-closed,不验溢出 / 索引降档。
         createMcpManager: (opts) => {
           managerCalls += 1;
           return createMcpManager(opts);

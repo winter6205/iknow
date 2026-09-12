@@ -101,6 +101,10 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
       userHome: join(root, "home"),
       cwd: root,
       subagentManager: fakeMgr,
+      // 本文件验 subagent trace 接入,不验溢出退场 / 索引降档(专测见
+      // build-engine-tool-overflow.test.ts、disclosure-index-align/)。
+      // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+      skipCountTokens: true,
     });
     cleanup.push(async () => {
       if (built.shutdown) await built.shutdown();
@@ -197,6 +201,7 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
       userHome: join(root, "home"),
       cwd: root,
       subagentManager: fakeMgr,
+      skipCountTokens: true, // 同上:验 trace drain,不验溢出 / 索引降档。
     });
     cleanup.push(async () => {
       if (built.shutdown) await built.shutdown();

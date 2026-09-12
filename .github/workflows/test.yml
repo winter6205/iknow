@@ -15,6 +15,15 @@ name: test
 # ACI 测试在标准 runner 上结构性跑不了，保留在本地（WSL）验证，
 # CI 排除它们 —— 不删测试，仅 CI 不跑。排除集是 CI 实证失败集。
 #
+# 排除集 SSOT 在 vitest.ci-excludes.ts（不再是本文件里的 --exclude 长串）：
+#   CI_EXCLUDES      — 两个 job 共同（bwrap 物理执行 + 装配依赖 bwrap 类）
+#   CI_FAST_EXCLUDES — test-fast 额外（e2e / integration / secret-roundtrip
+#                      整目录；该 job 不装 bwrap）
+# 两个 job 各自经 config overlay 消费：
+#   test-fast → vitest.ci-fast.config.ts（不装 bwrap）
+#   test-full → vitest.ci.config.ts（装 bwrap）
+# 双向校验见 scripts/ci-check-test-excludes.ts（正向覆盖 + 反向死条目）。
+#
 # 另：TUI 时序类测试在 runner 上用 --retry 1 吸收偶发 flaky（重试后
 # 仍失败才是真失败）。
 on:
@@ -27,12 +36,11 @@ on:
 
 jobs:
   # PR 级快速门。目标 ~5min 内给 PR 通过/失败反馈。
-  # 排除集镜像 test-full（CI 实证失败集：bwrap 装配/物理执行依赖 +
-  # TUI 时序 flake）。runner 跑不通的测试由本地 WSL 全量验证；CI 仅
-  # 缩短反馈时间。TUI 时序 flake 靠 --retry 1 兜底（与 test-full 一致）。
-  # 注：不装 bubblewrap —— 沙箱/ACI 测试在 runner 上结构性跑不通（无
-  # user-namespace + bwrap 物理执行），纯靠 --exclude 拦掉。本地 WSL
-  # 验证，CI 缩短反馈时间。
+  # 不装 bubblewrap —— 沙箱/ACI 测试在 runner 上结构性跑不通（无
+  # user-namespace + bwrap 物理执行），靠 vitest.ci-fast.config.ts 的
+  # exclude 拦掉（SSOT 见 vitest.ci-excludes.ts）。runner 跑不通的测试
+  # 由本地 WSL 全量验证；CI 仅缩短反馈时间。TUI 时序 flake 靠 --retry 1
+  # 兜底（与 test-full 一致）。
   test-fast:
     runs-on: ubuntu-latest
     timeout-minutes: 8
@@ -45,101 +53,21 @@ jobs:
       - run: npm ci
       - name: Typecheck
         run: npm run typecheck
+      # dist/ 是 gitignore 产物，不随 checkout 存在。trace-mcp startup 的两条
+      # 用例（bin symlink / dist/trace-mcp/main.js symlink）需要真产物才真跑，
+      # 否则会走 ctx.skip 静默变 skip —— 那是 CI 覆盖净减少。这里显式 build
+      # 一次（本地由 npm test 的 pretest 承担）。tsc 约 40s，8min 预算内。
+      - name: Build (dist for trace-mcp startup tests)
+        run: npm run build
       - name: Check bwrap test excludes (CI guard — #467 merge regression)
         run: npx tsx scripts/ci-check-test-excludes.ts
       - name: Vitest fast subset (bail-10 + retry-1 for flaky timing)
-        # 排除集 = test-full 镜像。bwrap 物理执行类（runner 无 user-namespace）：
-        #   bash-sandbox / demo / interrupt-routing / bash / grep /
-        #   mcp-chain / skill-mcp-acceptance / build-engine / ensure-deps /
-        #   secret-roundtrip/（整目录，不装 bwrap 所以全目录排除）。
-        # 装配依赖 bwrap 类（bwrap 缺失时 requireBwrap fail-loud）：
-        #   permission / registry / system-injection / max-turns-serve /
-        #   deps-tools / build-engine-hooks（经 buildHarnessEngine →
-        #   createDefaultAciRegistry → createBashTool → requireBwrap）。
-        #   #468 新增：worker-tool-surface / worker.test.ts 走真实
-        #   createWorkerDeps → createDefaultAciRegistry → createBashTool
-        #   → requireBwrap，同属装配依赖 bwrap 类，一并排除。
-        #   #562 新增：envelope-role / tool-constraints /
-        #   bash-mode-channel（皆走 createWorkerDeps → createBashTool →
-        #   requireBwrap 装配链），一并排除。
-        #   ADR-0037 / #814 实证：hub-worktree-isolation 经 hub executor
-        #   真 mutate → runInSandbox → requireBwrap（注释里的
-        #   buildHarnessEngine 不命中 ci-check 调用形态，须手加）。
-        # 慢/重路径 + TUI 时序 flaky（runner 环境偶发，--retry 1 兜底）：
-        #   e2e / integration / banner-scroll-fixes / logo-persists。
-        #   e2e / integration 用 'dir/**' glob 排除整目录（vitest exclude
-        #   glob 语义，目录级剪枝 + 文件级 picomatch 双保险）。
-        # 本地 WSL 全量绿；排除仅影响 CI，不删测试。
-        run: |
-          npx vitest run --retry 1 --bail=10 \
-            --exclude 'tests/e2e/**' \
-            --exclude 'tests/integration/**' \
-            --exclude tests/harness/aci/bash-sandbox.test.ts \
-            --exclude tests/harness/aci/bash-background.test.ts \
-            --exclude tests/harness/aci/bash-output-stop.test.ts \
-            --exclude tests/harness/aci/bash-service-loop.e2e.test.ts \
-            --exclude tests/harness/aci/demo.test.ts \
-            --exclude tests/harness/aci/interrupt-routing.test.ts \
-            --exclude tests/harness/aci/tools/bash.test.ts \
-            --exclude tests/harness/aci/tools/bash-readonly.test.ts \
-            --exclude tests/harness/aci/tools/grep.test.ts \
-            --exclude tests/harness/aci/tools/query-trace.test.ts \
-            --exclude tests/harness/aci/tools/list-sessions.test.ts \
-            --exclude tests/harness/aci/tools/get-record.test.ts \
-            --exclude tests/harness/aci/permission.test.ts \
-            --exclude tests/harness/aci/registry-workspace-root.test.ts \
-            --exclude tests/harness/aci/tools/d9-description-guard.test.ts \
-            --exclude tests/harness/aci/tools/registry.test.ts \
-            --exclude tests/harness/agent-status-bar.test.ts \
-            --exclude tests/harness/identity/agent-status-read-rule.test.ts \
-            --exclude tests/harness/identity/system-injection.test.ts \
-            --exclude tests/session-api/max-turns-serve.test.ts \
-            --exclude tests/session-api/workspace-bind.test.ts \
-            --exclude tests/session-api/hub-worktree-isolation.test.ts \
-            --exclude tests/harness/aci/bash-live-task-root.test.ts \
-            --exclude tests/harness/aci/bash-identity-overlay.test.ts \
-            --exclude tests/harness/aci/bash-closed-world-read-roots.test.ts \
-            --exclude tests/harness/aci/bash-identity-read-whitelist.test.ts \
-            --exclude tests/harness/aci/bash-main-session-fence-tmp.test.ts \
-            --exclude tests/harness/build-engine-install-root.test.ts \
-            --exclude tests/harness/verify/sandbox-run.test.ts \
-            --exclude tests/subagent/worker-identity-root.test.ts \
-            --exclude tests/subagent/worker-install-root.test.ts \
-            --exclude tests/subagent/worker-session-layout.test.ts \
-            --exclude tests/harness/isolation/worktree-gate-live-taskroot-e2e.test.ts \
-            --exclude tests/tui/deps-tools.test.ts \
-            --exclude tests/cli/tui-deps-subagent-trace-factory.test.ts \
-            --exclude tests/cli/chat-subagent-trace.test.ts \
-            --exclude tests/build-engine-hooks.test.ts \
-            --exclude tests/harness/build-engine-hooks.test.ts \
-            --exclude tests/integration/mcp-chain.test.ts \
-            --exclude tests/e2e/skill-mcp-acceptance.test.ts \
-            --exclude tests/harness/build-engine.test.ts \
-            --exclude tests/harness/build-engine-auto-memory.test.ts \
-            --exclude tests/harness/build-engine-subagent-trace.test.ts \
-            --exclude tests/harness/build-engine-mcp-roots.test.ts \
-            --exclude tests/harness/graph/run-graph-assembly.test.ts \
-            --exclude tests/session-api/ensure-deps-aci-tools.test.ts \
-            --exclude tests/subagent/worker-tool-surface.test.ts \
-            --exclude tests/subagent/worker.test.ts \
-            --exclude tests/subagent/envelope-role.test.ts \
-            --exclude tests/subagent/tool-constraints.test.ts \
-            --exclude tests/subagent/bash-mode-channel.test.ts \
-            --exclude tests/subagent/git-work-discipline.test.ts \
-            --exclude tests/subagent/user-agents-wiring.test.ts \
-            --exclude tests/tui/banner-scroll-fixes.test.tsx \
-            --exclude tests/tui/logo-persists.test.tsx \
-            --exclude 'tests/harness/secret-roundtrip/**' \
-            --exclude tests/harness/mcp/zero-linkage-guard.test.ts \
-            --exclude tests/harness/mcp/build-engine-mcp-overview.test.ts \
-            --exclude tests/harness/mcp/build-engine-mcp-startwire.test.ts \
-            --exclude tests/harness/build-engine-tool-overflow.test.ts \
-            --exclude tests/harness/prefix-stability/assertion2-matrix.test.ts \
-            --exclude tests/harness/sandbox/runner.test.ts \
-            --exclude tests/harness/sandbox/server.test.ts \
-            --exclude tests/subagent/envelope-freeze.test.ts \
-            --exclude tests/harness/disclosure-index-align/sc7-index-demotion.test.ts \
-            --exclude tests/harness/aci/tools/skill-output-cap.test.ts
+        # 排除集 = vitest.ci-fast.config.ts（= 本地 config + CI_EXCLUDES +
+        # CI_FAST_EXCLUDES）。分类与逐条理由的 SSOT 在 vitest.ci-excludes.ts；
+        # 本 job 不装 bwrap，故比 test-full 多排 e2e / integration /
+        # secret-roundtrip 整目录。runner 跑不通的测试由本地 WSL 全量验证，
+        # 排除仅影响 CI，不删测试。
+        run: npx vitest run --config vitest.ci-fast.config.ts --retry 1 --bail=10
 
   # 全量兜底（nightly cron + manual dispatch）。内容 = 原 test job。
   test-full:
@@ -161,98 +89,16 @@ jobs:
       - run: npm ci
       - name: Typecheck
         run: npm run typecheck
+      # dist/ 是 gitignore 产物，不随 checkout 存在。trace-mcp startup 的两条
+      # 用例需要真产物才真跑，否则 ctx.skip 静默变 skip（CI 覆盖净减少）。
+      - name: Build (dist for trace-mcp startup tests)
+        run: npm run build
       - name: Check bwrap test excludes (CI guard — #467 merge regression)
         run: npx tsx scripts/ci-check-test-excludes.ts
       - name: Test suite (full — exclude sandbox-dependent, retry flaky)
-        # 排除集 = 两次 CI 实证失败集的并集（bwrap 物理执行依赖 + 装配
-        # 依赖 bwrap 缺失 + TUI 时序 flaky）。本地 WSL 全量绿；排除仅
-        # 影响 CI，不删测试，sandbox 在本地验证。
-        #   bwrap 物理执行类（无 user-namespace 的 runner 起不来）：
-        #     bash-sandbox / demo / interrupt-routing / bash / grep /
-        #     mcp-chain / skill-mcp-acceptance / build-engine / ensure-deps /
-        #     secret-roundtrip/e2e（chat × roundtrip 用例 createBashTool
-        #     真实 spawn echo 还原占位符；#406 合并时遗漏，CI 实证
-        #     bashResult.code 1!==0）
-        #   装配依赖 bwrap 类（bwrap 缺失时 requireBwrap fail-loud，
-        #   装了也仅能装配不能执行）：
-        #     permission / registry / system-injection / max-turns-serve /
-        #     deps-tools / build-engine-hooks（经 buildHarnessEngine →
-        #     createDefaultAciRegistry → createBashTool → requireBwrap）。
-        #   #468 新增：worker-tool-surface / worker.test.ts 走真实
-        #   createWorkerDeps → createDefaultAciRegistry → createBashTool
-        #   → requireBwrap，同属装配依赖 bwrap 类，一并排除。
-        #   #562 新增：envelope-role / tool-constraints /
-        #   bash-mode-channel（皆走 createWorkerDeps → createBashTool →
-        #   requireBwrap 装配链），一并排除。
-        #   TUI 时序 flaky（runner 环境偶发，--retry 1 兜底）：
-        #     banner-scroll-fixes / logo-persists
-        # 注意：sandbox/bwrap.test、resource-limits 等纯逻辑测试在 CI
-        #   通过（不真实 spawn bwrap），不排除。
-        run: |
-          npx vitest run --retry 1 \
-            --exclude tests/harness/aci/bash-sandbox.test.ts \
-            --exclude tests/harness/aci/bash-background.test.ts \
-            --exclude tests/harness/aci/bash-output-stop.test.ts \
-            --exclude tests/harness/aci/bash-service-loop.e2e.test.ts \
-            --exclude tests/harness/aci/demo.test.ts \
-            --exclude tests/harness/aci/interrupt-routing.test.ts \
-            --exclude tests/harness/aci/tools/bash.test.ts \
-            --exclude tests/harness/aci/tools/bash-readonly.test.ts \
-            --exclude tests/harness/aci/tools/grep.test.ts \
-            --exclude tests/harness/aci/tools/query-trace.test.ts \
-            --exclude tests/harness/aci/tools/list-sessions.test.ts \
-            --exclude tests/harness/aci/tools/get-record.test.ts \
-            --exclude tests/harness/aci/permission.test.ts \
-            --exclude tests/harness/aci/registry-workspace-root.test.ts \
-            --exclude tests/harness/aci/tools/d9-description-guard.test.ts \
-            --exclude tests/harness/aci/tools/registry.test.ts \
-            --exclude tests/harness/agent-status-bar.test.ts \
-            --exclude tests/harness/identity/agent-status-read-rule.test.ts \
-            --exclude tests/harness/identity/system-injection.test.ts \
-            --exclude tests/session-api/max-turns-serve.test.ts \
-            --exclude tests/session-api/workspace-bind.test.ts \
-            --exclude tests/session-api/hub-worktree-isolation.test.ts \
-            --exclude tests/harness/aci/bash-live-task-root.test.ts \
-            --exclude tests/harness/aci/bash-identity-overlay.test.ts \
-            --exclude tests/harness/aci/bash-closed-world-read-roots.test.ts \
-            --exclude tests/harness/aci/bash-identity-read-whitelist.test.ts \
-            --exclude tests/harness/aci/bash-main-session-fence-tmp.test.ts \
-            --exclude tests/harness/build-engine-install-root.test.ts \
-            --exclude tests/harness/verify/sandbox-run.test.ts \
-            --exclude tests/subagent/worker-identity-root.test.ts \
-            --exclude tests/subagent/worker-install-root.test.ts \
-            --exclude tests/subagent/worker-session-layout.test.ts \
-            --exclude tests/harness/isolation/worktree-gate-live-taskroot-e2e.test.ts \
-            --exclude tests/tui/deps-tools.test.ts \
-            --exclude tests/cli/tui-deps-subagent-trace-factory.test.ts \
-            --exclude tests/cli/chat-subagent-trace.test.ts \
-            --exclude tests/build-engine-hooks.test.ts \
-            --exclude tests/harness/build-engine-hooks.test.ts \
-            --exclude tests/integration/mcp-chain.test.ts \
-            --exclude tests/e2e/skill-mcp-acceptance.test.ts \
-            --exclude tests/harness/build-engine.test.ts \
-            --exclude tests/harness/build-engine-auto-memory.test.ts \
-            --exclude tests/harness/build-engine-subagent-trace.test.ts \
-            --exclude tests/harness/build-engine-mcp-roots.test.ts \
-            --exclude tests/harness/graph/run-graph-assembly.test.ts \
-            --exclude tests/session-api/ensure-deps-aci-tools.test.ts \
-            --exclude tests/subagent/worker-tool-surface.test.ts \
-            --exclude tests/subagent/worker.test.ts \
-            --exclude tests/subagent/envelope-role.test.ts \
-            --exclude tests/subagent/tool-constraints.test.ts \
-            --exclude tests/subagent/bash-mode-channel.test.ts \
-            --exclude tests/subagent/git-work-discipline.test.ts \
-            --exclude tests/subagent/user-agents-wiring.test.ts \
-            --exclude tests/tui/banner-scroll-fixes.test.tsx \
-            --exclude tests/tui/logo-persists.test.tsx \
-            --exclude tests/harness/secret-roundtrip/e2e.test.ts \
-            --exclude tests/harness/mcp/zero-linkage-guard.test.ts \
-            --exclude tests/harness/mcp/build-engine-mcp-overview.test.ts \
-            --exclude tests/harness/mcp/build-engine-mcp-startwire.test.ts \
-            --exclude tests/harness/build-engine-tool-overflow.test.ts \
-            --exclude tests/harness/prefix-stability/assertion2-matrix.test.ts \
-            --exclude tests/harness/sandbox/runner.test.ts \
-            --exclude tests/harness/sandbox/server.test.ts \
-            --exclude tests/subagent/envelope-freeze.test.ts \
-            --exclude tests/harness/disclosure-index-align/sc7-index-demotion.test.ts \
-            --exclude tests/harness/aci/tools/skill-output-cap.test.ts
+        # 排除集 = vitest.ci.config.ts（= 本地 config + CI_EXCLUDES）。
+        # 分类与逐条理由的 SSOT 在 vitest.ci-excludes.ts。本 job 已装 bwrap，
+        # 能装配的测试照跑；仅物理执行类仍跑不了（runner 无 user-namespace）。
+        # 注意：sandbox/bwrap.test、resource-limits 等纯逻辑测试不真实 spawn
+        #   bwrap，CI 通过，不排除。
+        run: npx vitest run --config vitest.ci.config.ts --retry 1

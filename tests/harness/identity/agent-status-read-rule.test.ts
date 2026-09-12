@@ -143,6 +143,10 @@ describe("T2 ① build-engine gate — deps.agentStatus 与读规则段同门(�
         todoDir,
         userHome: tmp,
         cwd: tmp,
+        // 本文件验 agentStatus 门禁与读规则句,不验溢出退场 / 索引降档
+        // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
+        // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+        skipCountTokens: true,
       });
       try {
         expect(deps.agentStatus).toEqual({ todoDir });
@@ -167,6 +171,7 @@ describe("T2 ① build-engine gate — deps.agentStatus 与读规则段同门(�
         todoDir,
         userHome: tmp,
         cwd: tmp,
+        skipCountTokens: true, // 同上:验同一 gate 的另一臂。
       });
       expect(deps.agentStatus).toBeUndefined();
       const out = (await deps.system?.()) ?? "";
@@ -185,6 +190,7 @@ describe("T2 ① build-engine gate — deps.agentStatus 与读规则段同门(�
         surface: "chat",
         userHome: tmp,
         cwd: tmp,
+        skipCountTokens: true, // 同上:验未注入 todoDir 时栏与读规则句同时缺席。
       });
       try {
         expect(deps.agentStatus).toBeUndefined();

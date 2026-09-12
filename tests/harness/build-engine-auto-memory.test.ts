@@ -65,6 +65,11 @@ async function build(opts: Record<string, unknown> = {}): Promise<BuiltEngine> {
     userHome,
     workspaceRoot: cwd,
     sandboxRoot: cwd,
+    // 本文件验的是 autoMemory 的 opt-in 接线,不验溢出退场 / 索引降档 ——
+    // 那两条路径的专测在 build-engine-tool-overflow.test.ts 与
+    // disclosure-index-align/sc7-index-demotion.test.ts。故旁路装配期
+    // countTokens(缝语义见 BuildEngineOpts.skipCountTokens 注释)。
+    skipCountTokens: true,
     ...opts,
   });
   built.push(engine);
@@ -174,6 +179,8 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
       userHome,
       workspaceRoot: cwd,
       sandboxRoot: cwd,
+      // 同上:验 settings.json 驱动 autoMemory,不验溢出 / 索引降档。
+      skipCountTokens: true,
     });
     built.push(engine);
     expect(engine.autoMemory).toBeDefined();

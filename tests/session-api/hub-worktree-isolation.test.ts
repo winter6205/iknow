@@ -571,11 +571,20 @@ describe("T6 — hub productRoot stable across per-root rebuild", () => {
     const wtRoot = join(productRoot, ".iknow", "worktrees", "conv-t6");
     await mkdir(wtRoot, { recursive: true });
     await mkdir(join(productRoot, ".iknow"), { recursive: true });
+    // 被测对象 = mcpConfigRoot 的**路径来源**(product 级 mcp.json 而非 task
+    // 树级),不是 server 能否连上。server 用立即退出的 command,slot 迅速进
+    // failed 终态,装配期 firstTurnReady 窗口据此提前 resolve,不必等满生产
+    // 30s 上限。failed 槽仍进 status()(manager.status() 对终态槽一律输出),
+    // 下面按名断言 from-product 在场 / from-task 缺席的语义不变。
     await writeFile(
       join(productRoot, ".iknow", "mcp.json"),
       JSON.stringify({
         mcpServers: {
-          "from-product": { type: "stdio", command: "node" },
+          "from-product": {
+            type: "stdio",
+            command: "node",
+            args: ["-e", "process.exit(1)"],
+          },
         },
       }),
       "utf8"
@@ -585,7 +594,11 @@ describe("T6 — hub productRoot stable across per-root rebuild", () => {
       join(wtRoot, ".iknow", "mcp.json"),
       JSON.stringify({
         mcpServers: {
-          "from-task": { type: "stdio", command: "node" },
+          "from-task": {
+            type: "stdio",
+            command: "node",
+            args: ["-e", "process.exit(1)"],
+          },
         },
       }),
       "utf8"
@@ -629,11 +642,10 @@ describe("T6 — hub productRoot stable across per-root rebuild", () => {
     } finally {
       await priv.shutdown();
     }
-  }, 90_000); // B4 / ADR-0043 §4:每个 buildHarnessEngine 装配期 await
-  // firstTurnReadyTimeoutMs=30s,两次 getOrBuildEngine 串行执行 → 上限
-  // 60s,加 shutdown 留 30s 余量。test 用真实 stdio ("node") 进 MCP 连接
-  // 试探,在 default 30s 窗口内不会 ready,但装配照常返回(缺席 server 按
-  // session 缺席处理),断言只看 mcpRoots 形状与 status 名集。
+  }, 60_000); // B4 / ADR-0043 §4:每个 buildHarnessEngine 装配期 await
+  // firstTurnReady 窗口。fixture 的 server 用 `node -e process.exit(1)`
+  // 立即进 failed 终态 → 窗口提前 resolve(不等满生产 30s 上限)。test 断言
+  // 只看 mcpRoots 形状与 status 名集,与 server 连接结果无关。
 
   it("serve.ts / hub.ts：productRoot 字段贯通，reload 不读 process.cwd() 作 config root", () => {
     const serveSrc = readFileSync(

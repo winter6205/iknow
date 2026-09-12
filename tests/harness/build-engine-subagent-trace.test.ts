@@ -192,6 +192,12 @@ afterEach(async () => {
 // 共享 seam：每个 buildHarnessEngine 调用点都注入这一组，截断仓库根
 // .mcp.json 的 iknow-trace server（schema compile + tsx 子进程噪声 +
 // 30s firstTurnReady 窗口）以及真实 SDK countTokens 网络调用。
+//
+// `countTokens` 用固定小值 stub（而非 skipCountTokens）是刻意的：本文件验
+// subagentsDir / NoopTrace / query_trace 的接线，溢出判定走哪条分支与断言
+// 无关 —— 固定值让判定落在确定性的「未超阈」分支，不依赖装配期真调死端口
+// 的失败路径。要验溢出/索引降档两条路径的专测见
+// build-engine-tool-overflow.test.ts 与 disclosure-index-align/。
 const traceSeam = {
   createMcpManager: (opts: Parameters<typeof createMcpManager>[0]) =>
     createMcpManager({

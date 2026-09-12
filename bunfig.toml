@@ -1,0 +1,7 @@
+[test]
+# bun test 的位置参数是「路径子串正则」而非目录：`bun test tests/tui/`
+# 会连带扫到 _archive/ 下旧 worktree 快照里的 tests/tui/ 副本（例如
+# _archive/worktrees-2026-08-25/*/tests/tui/），这些副本引用已不存在的
+# 模块，产生 4 fail + 2 error 的假失败。排除本地归档目录，让 bun 段只
+# 跑当前工作树。
+pathIgnorePatterns = ["_archive/**", "archive/**"]

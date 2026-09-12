@@ -2,7 +2,7 @@
  * B7 / spec model-prefix-layering SC2 — 断言②总装矩阵:同一会话相邻两轮
  * 装配 `promptTools()` + `deps.system()` deep-equal,五场景收齐:
  *
- *   a. MCP 连上(fake timer 控制窗口内连上 / 窗口超时两种)
+ *   a. MCP 连上(注入小窗口:窗口内连上 / 窗口超时两种)
  *   b. graph 关 → 开 → 关(连续三次相邻轮全 deep-equal)
  *   c. 会话内记忆文件落盘(B2 快照语义:落盘前后 deep-equal)
  *   d. compact 重装配(reactive compact 路径;spec §G5:messages 会废,
@@ -59,12 +59,18 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 /**
- * build-engine 硬编码 firstTurnReady 窗口 30s(生产契约)。a-ii / a-iii 用
- * 真实窗口等待(测试超时 60s 给足);fake timer 快进与 build-engine 内部
- * 非 timer 等待点实测相冲(见 a-iii 走真实窗口通过的对照),不采用。
+ * 窗口长度不是本场景的被测对象 —— 被测的是「窗口到点那一刻目录定稿、
+ * 之后不再回写」。故 a-ii / a-iii 经 `mcpFirstTurnReadyTimeoutMs` 缝注入
+ * 小窗口,让同一条真实窗口轮询路径快速走完;**不得**用 fake timer 快进
+ * (与 build-engine 内部非 timer 等待点实测相冲),也不把窗口调成 0
+ * (0 会让「窗口内连上」与「窗口超时」两分支不可区分)。
+ *
+ * 单 server 自身的 connect 超时仍走 `makeMatrixEnv().mcp.connectTimeoutMs`
+ * = 60s:窗口 < connect 超时 ⇒ 到点即缺席(a-ii / a-iii 的实测路径)。
  */
+const MATRIX_FIRST_TURN_WINDOW_MS = 150;
 
-describe("断言② 场景 a — MCP 连上(fake timer 控制窗口)", () => {
+describe("断言② 场景 a — MCP 连上(窗口定稿)", () => {
   it("a-i 窗口内连上 → 相邻两轮 tools + system deep-equal(connected 后定稿)", async () => {
     const { root, cleanup } = await makeTempRoot("mcp-in-window");
     cleanupRoots.push(cleanup);
@@ -78,6 +84,7 @@ describe("断言② 场景 a — MCP 连上(fake timer 控制窗口)", () => {
       cwd: root,
       createMcpClient: () =>
         makeInstantClient([{ name: "alpha", description: "d" }]),
+      mcpFirstTurnReadyTimeoutMs: MATRIX_FIRST_TURN_WINDOW_MS,
     });
     try {
       // 装配期已 await firstTurnReady → fastsvc 应已 connected。
@@ -96,7 +103,7 @@ describe("断言② 场景 a — MCP 连上(fake timer 控制窗口)", () => {
     } finally {
       await built.shutdown?.();
     }
-  }, 30_000);
+  }, 20_000);
 
   it("a-ii 窗口超时 server 迟到连上 → 目录不回写,相邻轮 system 仍 deep-equal(产品 bug 已修)", async () => {
     // spec §4:超时者本会话缺席(不进名字目录)。#378 flip-back 会让迟到
@@ -115,12 +122,13 @@ describe("断言② 场景 a — MCP 连上(fake timer 控制窗口)", () => {
       userHome: join(root, "home"),
       cwd: root,
       createMcpClient: () => gated.handle,
+      mcpFirstTurnReadyTimeoutMs: MATRIX_FIRST_TURN_WINDOW_MS,
     });
     try {
       const before = await built.deps.system!();
       assert.ok(!before!.includes("latesvc"), "窗口超时 → 缺席,不进目录");
 
-      // 迟到连上(远超 30s 窗口之后的真实时点;测试直接 release 闸门)。
+      // 迟到连上(装配期窗口早已到点;测试直接 release 闸门)。
       gated.release();
       await new Promise((r) => setTimeout(r, 100));
 
@@ -136,7 +144,7 @@ describe("断言② 场景 a — MCP 连上(fake timer 控制窗口)", () => {
     } finally {
       await built.shutdown?.();
     }
-  }, 60_000);
+  }, 30_000);
 
   it("a-iii 全部 server 窗口超时 → 段缺席,相邻轮 deep-equal", async () => {
     const { root, cleanup } = await makeTempRoot("mcp-timeout");
@@ -150,16 +158,18 @@ describe("断言② 场景 a — MCP 连上(fake timer 控制窗口)", () => {
       userHome: join(root, "home"),
       cwd: root,
       createMcpClient: () => makeNeverResolvingClient(),
+      mcpFirstTurnReadyTimeoutMs: MATRIX_FIRST_TURN_WINDOW_MS,
     });
     try {
-      // own connect-timeout 60s > 30s firstTurnReady 窗口 → 窗口到点即缺席。
+      // server 自身 connect 永不 resolve(自己的 connect 超时 60s 远大于
+      // 注入的窗口)→ 窗口到点即缺席。
       const system = await built.deps.system!();
       assert.ok(!system!.includes("<mcp_name_directory>"));
       await assertAdjacentTurnsStable(built, "a-iii adjacent turns");
     } finally {
       await built.shutdown?.();
     }
-  }, 60_000);
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------
