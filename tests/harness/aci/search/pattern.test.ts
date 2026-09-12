@@ -25,6 +25,7 @@ import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import {
   assertEngineAlignable,
   assertIgnoreCaseAlignable,
+  assertLineContentOnly,
   compilePattern,
   keepsUnicodeMode,
 } from "../../../../src/harness/aci/search/pattern.ts";
@@ -104,6 +105,141 @@ describe("assertEngineAlignable — 无法对齐的构造", () => {
     ]) {
       assert.doesNotThrow(() => assertEngineAlignable(pattern), pattern);
     }
+  });
+});
+
+describe("assertLineContentOnly — 行终止符原子必须同判（D1）", () => {
+  it("裸 `\\n` / `\\r` → typed 拒绝且点名构造", () => {
+    rejects(() => assertLineContentOnly("\\n"), /line terminator/);
+    rejects(() => assertLineContentOnly("\\r"), /line terminator/);
+    rejects(() => assertLineContentOnly("\\n"), /\\n/);
+  });
+
+  it("带量词的终止符原子（`+` / `{1,}` / `{2}` / lazy `+?`）同样拒绝", () => {
+    // 实测：`\n+?` 是 lazy 但仍要求至少一次 → rg 报每个文件、Node 报空。
+    for (const pattern of [
+      "\\n+",
+      "\\r+",
+      "\\n+?",
+      "\\n{1}",
+      "\\n{1,}",
+      "\\n{2}",
+      "\\n{2,3}",
+      "a\\n",
+      "a\\nb",
+      "^\\n",
+    ]) {
+      rejects(() => assertLineContentOnly(pattern), /line terminator/);
+    }
+  });
+
+  it("只含终止符的类（`[\\n]` / `[\\r]` / `[\\n\\r]` / `[\\x0a]`）拒绝", () => {
+    for (const pattern of [
+      "[\\n]",
+      "[\\r]",
+      "[\\n\\r]",
+      "[\\r\\n]",
+      "[\\x0a]",
+      "[\\x0d]",
+    ]) {
+      rejects(() => assertLineContentOnly(pattern), /line terminator/);
+    }
+  });
+
+  it("等价拼写（`\\x0a` / `\\cJ` / `\\012` / `\\o{12}`）按数值判，不看拼法", () => {
+    for (const pattern of [
+      "\\x0a",
+      "\\x0d",
+      "\\cJ",
+      "\\cM",
+      "\\012",
+      "\\015",
+      "\\o{12}",
+      "\\o{015}",
+    ]) {
+      rejects(() => assertLineContentOnly(pattern), /line terminator/);
+    }
+    // `\x41` = 'A'、`\o{40}` = 空格、`\101` = 'A'：不是终止符，必须放行。
+    for (const pattern of ["\\x41", "\\o{40}", "\\101", "\\040"]) {
+      assert.doesNotThrow(() => assertLineContentOnly(pattern), pattern);
+    }
+  });
+
+  it("允许零次的量词豁免：`\\n?` / `\\n*` / `\\n{0,2}` / `[\\n]?` / `(?:\\n)?`", () => {
+    // 实测 SAME：空匹配到处成立，两条引擎都不必碰行边界。
+    for (const pattern of [
+      "\\n?",
+      "\\n??",
+      "\\n*",
+      "\\n*?",
+      "\\n{0}",
+      "\\n{0,2}",
+      "\\n{0,1}?",
+      "[\\n]?",
+      "[\\n]*",
+      "[\\n]{0,1}",
+      "(?:\\n)?",
+      "(\\n)?",
+      "(?:\\n){0}",
+      "\\r?",
+    ]) {
+      assert.doesNotThrow(() => assertLineContentOnly(pattern), pattern);
+    }
+  });
+
+  it("否定断言内的终止符原子豁免（`(?!\\n)` / `(?<!\\n)`）", () => {
+    // 实测 SAME：断言在「不是行终止符」时成立，行内到处成立。
+    for (const pattern of ["(?!\\n)", "(?<!\\n)", "a(?!\\n)", "(?!\\r)"]) {
+      assert.doesNotThrow(() => assertLineContentOnly(pattern), pattern);
+    }
+  });
+
+  it("正向断言**不**豁免：`(?=\\n)` / `(?<=\\n)` 实测 DIFF", () => {
+    for (const pattern of ["(?=\\n)", "(?<=\\n)", "a(?=\\n)"]) {
+      rejects(() => assertLineContentOnly(pattern), /line terminator/);
+    }
+  });
+
+  it("交替**不**豁免：`\\n|a` 的一致是语料巧合", () => {
+    // `\n|a` 在含 a 的语料上两侧都靠 `a` 命中（巧合）；语料换成不含 a 时
+    // rg 立刻报全部文件、Node 报空（实测 `\n|zz`）。故不做分支推断。
+    rejects(() => assertLineContentOnly("\\n|a"), /line terminator/);
+    rejects(() => assertLineContentOnly("\\n|zz"), /line terminator/);
+    rejects(() => assertLineContentOnly("(?:\\n|a)"), /line terminator/);
+    rejects(() => assertLineContentOnly("(a|\\n)"), /line terminator/);
+  });
+
+  it("可匹配行内内容的构造放行（`[^\\n]` / `[abc\\n]` / `\\d` / `\\s` / `.`）", () => {
+    for (const pattern of [
+      "[^\\n]",
+      "[^\\r]",
+      "[^\\n\\r]",
+      "[abc\\n]",
+      "[a\\nb]",
+      "[\\nabc]",
+      "[abc\\n]+",
+      "\\d",
+      "\\s",
+      "\\S",
+      "\\W",
+      "\\D",
+      ".",
+      "a.c",
+      "foo",
+      "",
+    ]) {
+      assert.doesNotThrow(() => assertLineContentOnly(pattern), pattern);
+    }
+  });
+
+  it("文案与既有三类构造互不混同（SC10）", () => {
+    const message = messageOf(() => assertLineContentOnly("\\n"));
+    assert.match(message, /line terminator/);
+    assert.doesNotMatch(
+      message,
+      /property escape|code point escape|POSIX bracket/
+    );
+    assert.match(message, /\\n/);
   });
 });
 

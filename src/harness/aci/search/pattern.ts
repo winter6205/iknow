@@ -39,6 +39,26 @@
  * 各写一遍判据就有漂移出「rg 切了字节、Node 没切」的余地，所以只留一个名字。
  * `u` 编译失败时退回无 `u`（见 `compilePattern`），接受集只增不减。
  *
+ * 行终止符字面（D1，实测）：`\n` 在两条引擎上**必须同判**，否则一条 `\n`
+ * 就是「rg 报每个文件、Node 报空」。机制是 `--crlf` 与 `--engine=auto`
+ * **叠加**的结果，单看任一个都不是原因（逐条实测）：
+ *   - 只有 `--crlf`：rg 默认引擎的守卫照常命中 → rc=2，两条引擎都不给结果；
+ *   - 只有 `--engine=auto`：PCRE2 收下 `\n`，但没有 `--crlf` 时行边界不在
+ *     可匹配面上 → rc=1，与 Node 的空结果一致；
+ *   - 两者都在：`--crlf` 触发守卫 rc=2 → auto 换 PCRE2 → PCRE2 在 `--crlf`
+ *     下把行边界放进可匹配面 → rc=0 且**命中每一个文件**，Node 侧仍回空。
+ *
+ * 本工具是**按行**搜索：`file-lines.splitLines` 按 `\n` 切行、行内容里不含
+ * LF，所以「只能匹配行终止符」的原子是死查询 —— Node 侧永远匹配不到，rg
+ * 侧却可能把它当行边界。两条引擎给不出同一答案，因此这类原子在共享入口
+ * typed 拒绝（`assertLineContentOnly`）：**只要 pattern 里出现一个只匹配
+ * LF / CR 的原子就拒**，不看它是否被问号/星号包着（rg 的字面量预筛会让
+ * `\n|zz` 这类交替也命中全部行，实测），也不看它落在哪种出法下。宁可入口
+ * 报错，也不要同一个查询的答案取决于哪条引擎在跑。
+ *
+ * `\o{...}`（PCRE2 的字节转义，`\o{12}` = LF）走同一刀：rg 由 auto 退到
+ * PCRE2 才收，JS 读成字面 `o` + 量词 —— 见 `assertEngineAlignable`。
+ *
  * 已知残留（逐条实测过，两类都不在本模块的处理面上；要收只能改成 typed
  * 拒绝，属另一刀）：
  *
@@ -94,6 +114,303 @@ const ESCAPED_PAIR = /\\./g;
  * 于是 `\[[:alpha:]]`（转义后的字面 `[`）不会被误判。
  */
 const POSIX_CLASS = /\[[^\]]*\[:[A-Za-z]+\:\]/;
+
+/**
+ * 只匹配行终止符的原子（D1）：`\n` / `\r` 及其等价拼写。
+ *
+ * 命中即说明这个原子在**按行**搜索里没有可匹配的内容 —— `file-lines.splitLines`
+ * 按 LF 切行、行内容不含 LF，CRLF 行尾的 CR 也被剥掉。Node 侧因此永远匹配
+ * 不到，rg 侧却可能（`--crlf` + `--engine=auto`，见文件头）把它当行边界，
+ * 于是每个文件都「命中」。两条引擎给不出同一答案 → 入口 typed 拒绝。
+ *
+ * 判据是**行为式**的、不看拼法：rg 的守卫按字面量长度决定是否放行
+ * （实测 `\n|a` rc=0 而 `\n|zz` rc=2），同一条交替在语料变化时还会从「巧合
+ * 一致」翻成「全命中」。所以这里只问「有没有一个原子只可能匹配 LF/CR」，
+ * 不问它周围长什么样。
+ */
+export function assertLineContentOnly(pattern: string): void {
+  const atom = findMandatoryTerminatorAtom(pattern);
+  if (atom === null) return;
+  throw new ToolExecutionError(
+    `grep: unsupported pattern construct in ${pattern}: the atom ${atom} can only match a line terminator (LF / CR) — this tool searches line by line, so JavaScript RegExp can never match it while ripgrep may treat it as a line boundary and report every file, so the two engines would answer differently; search for something that can appear inside a line, or drop the terminator`
+  );
+}
+
+/**
+ * 找 pattern 里第一个「**必须**匹配行终止符」的原子；没有则返回 null。
+ *
+ * 三条例外（都逐条实测过是两条引擎一致的，不是推断）：
+ *   - **允许零次**的量词跟在原子或它所在的组之后（`?` / `??` / `*` / `*?` /
+ *     `{0}` / `{0,N}` / `{0,N}?`）→ 空匹配到处成立，两条引擎都不必碰行边界。
+ *     `+?` **不**豁免：lazy 只改匹配顺序，仍要求至少一次（实测 DIFF）；
+ *   - **否定** look-around 内（`(?!` / `(?<!`）→ 断言在「后面/前面不是行终止符」
+ *     时成立，行内到处都成立，两条引擎同判；
+ *   - 类里**还有别的可匹配成员**（`[abc\n]` / `[a\nb]`）→ 普通内容就能命中，
+ *     实测 SAME。只有「整个类的成员都只能是 LF/CR」（`[\n]` / `[\r]` /
+ *     `[\n\r]` / `[\x0a]`）才拒。
+ *
+ * **交替不豁免**：`\n|a` 看起来一致只是因为语料里恰好有 `a`（两条引擎各自靠
+ * `a` 命中，是巧合）；换 `\n|zz` 立刻变成 rg 报全部、Node 只报 `zz`（实测）。
+ * 所以不做「有非终止符分支就放行」的推断。
+ *
+ * 量词要**隔着组的右括号**看：`(?:\n)?` 与 `(\n)?` 都被实测为一致，而
+ * `(?:\n)` 与 `(\n)` 不一致 —— 判据因此把「组」当成一个可被子孙污染的单位，
+ * 在 `)` 处结算：组自己允许零次 → 里面的原子不带出来；否则带出来给外层。
+ * 正向 look-around（`(?=` / `(?<=`）不带 `?` 时**照样带出**：`(?=\n)` 实测
+ * DIFF，断言要求真的有一个行终止符，行内容里没有。
+ */
+function findMandatoryTerminatorAtom(pattern: string): string | null {
+  const chars = [...pattern];
+  /** 顶层用一个哨兵根帧；`pop` 永不丢顶层。 */
+  const stack: GroupFrame[] = [{ negative: false, atom: null }];
+  let inClass = false;
+  let classHasNonTerminator = false;
+  let classNegated = false;
+  let classTerminator: TerminatorAtom | null = null;
+
+  for (let i = 0; i < chars.length; i += 1) {
+    const ch = chars[i]!;
+
+    if (ch === "\\") {
+      const atom = readTerminatorEscape(chars, i);
+      const nextOpt = quantifyAfter(chars, i + (atom?.length ?? 2)).optional;
+      if (atom !== null) {
+        if (inClass) {
+          /** 类内成员的 quantifier 没意义（类只描述「匹配哪些字符」），只看下一个类外量词。 */
+          if (classTerminator === null)
+            classTerminator = { text: atom.text, optional: nextOpt };
+          else classTerminator.optional &&= nextOpt;
+        } else {
+          recordAtom(stack, { text: atom.text, optional: nextOpt });
+        }
+      } else if (inClass) {
+        /** 非终止符转义（如 `\d` / `\w`）也算类里有「别的成员」。 */
+        classHasNonTerminator = true;
+      }
+      i += (atom?.length ?? 2) - 1;
+      continue;
+    }
+
+    if (inClass) {
+      if (ch === "]") {
+        inClass = false;
+        if (
+          !classHasNonTerminator &&
+          classTerminator !== null &&
+          !classNegated
+        ) {
+          /** 类自己的量词（`?` / `*` / `{0,N}`）跟在 `]` 之后，要看。 */
+          classTerminator.optional ||= quantifyAfter(chars, i + 1).optional;
+          recordAtom(stack, classTerminator);
+        }
+        classTerminator = null;
+        classHasNonTerminator = false;
+        classNegated = false;
+      } else if (ch !== "-" && ch !== "[") {
+        /** 普通字面量是「类里有别的成员」；`-` / `[` 是 rg 的 range / 类中类前缀，不算成员。 */
+        classHasNonTerminator = true;
+      }
+      continue;
+    }
+
+    if (ch === "[") {
+      inClass = true;
+      classHasNonTerminator = false;
+      classTerminator = null;
+      /** `^` / `!` 是否定前缀；`[]]` 的首个 `]` 是字面成员（rg / PCRE2）。 */
+      const next = chars[i + 1];
+      if (next === "^" || next === "!") {
+        classNegated = true;
+        i += 1;
+      } else {
+        classNegated = false;
+        if (next === "]") i += 1;
+      }
+      continue;
+    }
+
+    if (ch === "(") {
+      stack.push({ negative: isNegativeAssertion(chars, i), atom: null });
+      continue;
+    }
+
+    if (ch === ")") {
+      /** `)` 自己的量词在这里结算：组允许零次 → 里面的原子不带出来。 */
+      if (quantifyAfter(chars, i + 1).optional) stack.pop();
+      else {
+        const closed = stack.pop();
+        if (closed !== undefined && !closed.negative && closed.atom !== null) {
+          recordAtom(stack, closed.atom);
+        }
+      }
+      continue;
+    }
+  }
+
+  return (
+    stack.find((frame) => frame.atom !== null && !frame.negative)?.atom?.text ??
+    null
+  );
+}
+
+/**
+ * 记录一个「必须匹配」的原子。允许零次的不记；否定断言内的一律不记。
+ *
+ * 只在**最内层**记 —— 外层组结算时会把内层带出来的原子再带一层，所以同一
+ * 个原子不会被重复记，也不会因为内层组允许零次而在外层复活。
+ */
+function recordAtom(
+  stack: Array<{ negative: boolean; atom: TerminatorAtom | null }>,
+  atom: TerminatorAtom
+): void {
+  if (atom.optional) return;
+  const current = stack[stack.length - 1];
+  if (current === undefined || current.negative) return;
+  if (current.atom === null) current.atom = atom;
+}
+
+/** 组帧：`negative` 是否定断言；`atom` 是组内**必须匹配**的终止符原子。 */
+interface GroupFrame {
+  negative: boolean;
+  atom: TerminatorAtom | null;
+}
+
+interface TerminatorAtom {
+  text: string;
+  optional: boolean;
+}
+
+/** `(?<!` / `(?!` 起始（不含 `(?<=` / `(?=`）。 */
+function isNegativeAssertion(chars: ReadonlyArray<string>, i: number): boolean {
+  if (chars[i + 1] !== "?") return false;
+  if (chars[i + 2] === "!") return true;
+  if (chars[i + 2] !== "<") return false;
+  return chars[i + 3] === "!";
+}
+
+/**
+ * `i` 处的转义是否只匹配 LF/CR（`\n` / `\r` / `\x0a` / `\cJ` / `\012` /
+ * `\o{12}` 及其 CR 等价拼写）。返回原子原文与长度；不是则 null。
+ *
+ * 只认「**只**可能匹配终止符」的：`\s` / `\S` / `\W` / `\D` / `.` 都能匹配
+ * 行内内容，不在此列（它们的 BOM/NEL 分歧属 D5，另一刀）。
+ */
+function readTerminatorEscape(
+  chars: ReadonlyArray<string>,
+  i: number
+): { text: string; length: number } | null {
+  const kind = chars[i + 1];
+  if (kind === undefined) return null;
+
+  if (kind === "n" || kind === "r") return { text: `\\${kind}`, length: 2 };
+
+  const twoHex = readFixedHex(chars, i, 2);
+  if (twoHex !== null && isTerminatorCode(twoHex.value)) {
+    return { text: twoHex.text, length: twoHex.length };
+  }
+
+  const control = readControlEscape(chars, i);
+  if (control !== null && isTerminatorCode(control.value)) {
+    return { text: control.text, length: control.length };
+  }
+
+  const octal = readOctalEscape(chars, i);
+  if (octal !== null && isTerminatorCode(octal.value)) {
+    return { text: octal.text, length: octal.length };
+  }
+  return null;
+}
+
+/** `\xHH`（定长两位）。`\x{...}`（码点转义）另有判据，不在此处理。 */
+function readFixedHex(
+  chars: ReadonlyArray<string>,
+  i: number,
+  digits: number
+): { value: number; text: string; length: number } | null {
+  if (chars[i + 1] !== "x") return null;
+  const slice = chars.slice(i + 2, i + 2 + digits).join("");
+  if (slice.length !== digits || !/^[0-9a-fA-F]+$/.test(slice)) return null;
+  return {
+    value: parseInt(slice, 16),
+    text: `\\x${slice}`,
+    length: 2 + digits,
+  };
+}
+
+/** `\cJ` / `\cM`（control escape，大小写不敏感）。 */
+function readControlEscape(
+  chars: ReadonlyArray<string>,
+  i: number
+): { value: number; text: string; length: number } | null {
+  if (chars[i + 1] !== "c") return null;
+  const letter = chars[i + 2];
+  if (letter === undefined) return null;
+  const upper = letter.toUpperCase();
+  if (upper === "J") return { value: 10, text: `\\c${letter}`, length: 3 };
+  if (upper === "M") return { value: 13, text: `\\c${letter}`, length: 3 };
+  return null;
+}
+
+/**
+ * 八进制转义：`\0NN` / `\NNN` / `\o{NN}`。值是字节，只认 10（LF）/ 13（CR）。
+ *
+ * `\40`（空格）这类**不是**终止符，必须放行 —— 判据按数值而不是按拼法。
+ */
+function readOctalEscape(
+  chars: ReadonlyArray<string>,
+  i: number
+): { value: number; text: string; length: number } | null {
+  if (chars[i + 1] === "o" && chars[i + 2] === "{") {
+    const close = chars.indexOf("}", i + 3);
+    if (close === -1) return null;
+    const digits = chars.slice(i + 3, close).join("");
+    if (!/^[0-7]+$/.test(digits)) return null;
+    return {
+      value: parseInt(digits, 8),
+      text: `\\o{${digits}}`,
+      length: close - i + 1,
+    };
+  }
+  const digits = readOctalDigits(chars, i + 1);
+  if (digits === "") return null;
+  return {
+    value: parseInt(digits, 8),
+    text: `\\${digits}`,
+    length: 1 + digits.length,
+  };
+}
+
+/** 取 `\` 之后连续的八进制数字（最多 3 位）。 */
+function readOctalDigits(chars: ReadonlyArray<string>, from: number): string {
+  let digits = "";
+  for (let i = from; i < chars.length && digits.length < 3; i += 1) {
+    const ch = chars[i]!;
+    if (ch < "0" || ch > "7") break;
+    digits += ch;
+  }
+  return digits;
+}
+
+function isTerminatorCode(value: number): boolean {
+  return value === 10 || value === 13;
+}
+
+/** 紧随位置 `from` 的量词是否允许零次重复（`?` / `*` / `{0,...}`，含 lazy）。 */
+function quantifyAfter(
+  chars: ReadonlyArray<string>,
+  from: number
+): { optional: boolean } {
+  const ch = chars[from];
+  if (ch === "?") return { optional: chars[from + 1] !== "+" };
+  if (ch === "*") return { optional: true };
+  if (ch !== "{") return { optional: false };
+  const close = chars.indexOf("}", from);
+  if (close === -1) return { optional: false };
+  const body = chars.slice(from + 1, close).join("");
+  const match = /^(\d+)(?:,(\d*))?$/.exec(body);
+  if (match === null) return { optional: false };
+  return { optional: match[1] === "0" };
+}
 
 /**
  * 编译主 pattern；坏正则 → typed 拒绝（消息含 pattern 原文）。

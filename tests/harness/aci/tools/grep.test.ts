@@ -700,6 +700,60 @@ describe("grep — 两引擎正则语义对齐（D6/SC9/SC10）", () => {
     });
   });
 
+  it("行终止符原子（`\\n` / `\\n+` / `[\\n]` / `\\n\\n`）→ 两条引擎同一条拒绝（D1）", async () => {
+    // 复现（修复前，真实二进制）：`{pattern:"\\n",output:"paths"}` 在 rg 侧回
+    // 全部文件、Node 侧回 `""` —— `--crlf` 与 `--engine=auto` 叠加后 PCRE2 把
+    // 行边界当成可匹配面。本用例钉住「同一个查询的答案不取决于哪条引擎在跑」。
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-lineterm-");
+      await writeFile(join(root, "a.txt"), "alpha\n", "utf8");
+      await writeFile(join(root, "b.txt"), "beta\n", "utf8");
+
+      const rejected: ReadonlyArray<RegExp> = [/line terminator/];
+      for (const pattern of ["\\n", "\\n+", "[\\n]", "\\n\\n"]) {
+        // 三种出法都必须拒（不能只在某一种出法下才校验收口）。
+        for (const output of ["paths", "content", "count"] as const) {
+          await assert.rejects(
+            () => makeTool(root).handler({ pattern, output }),
+            (error: unknown) =>
+              error instanceof ToolExecutionError &&
+              rejected.some((expected) => expected.test(error.message)) &&
+              /pattern/.test(error.message) &&
+              !/unknown type/.test(error.message),
+            `${pattern} / ${output}`
+          );
+        }
+        // 有 / 无 `path`、有 / 无 `also` 都同判。
+        await assert.rejects(
+          () => makeTool(root).handler({ pattern, path: "a.txt" }),
+          ToolExecutionError,
+          `${pattern} / path`
+        );
+        await assert.rejects(
+          () => makeTool(root).handler({ pattern, also: "alpha" }),
+          ToolExecutionError,
+          `${pattern} / also`
+        );
+      }
+    });
+  });
+
+  it("可匹配行内内容的构造继续放行（`[^\\n]` / `[abc\\n]` / `\\d` / `.`）", async () => {
+    // 反证：判据只砍「只可能匹配行终止符」的原子，不能误伤普通查询。
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-lineterm-pos-");
+      await writeFile(join(root, "a.txt"), "alpha 1\n", "utf8");
+
+      for (const pattern of ["[^\\n]", "[abc\\n]", "\\d", ".", "\\s", "\\W"]) {
+        assert.equal(
+          await makeTool(root).handler({ pattern }),
+          "a.txt",
+          pattern
+        );
+      }
+    });
+  });
+
   it("`ignoreCase` + 有大小写的非 ASCII → 拒绝；CJK 不受影响", async () => {
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-ignore-case-");

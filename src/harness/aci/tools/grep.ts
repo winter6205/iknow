@@ -28,6 +28,7 @@ import { resolveWithinRoot } from "./helpers.js";
 import {
   assertEngineAlignable,
   assertIgnoreCaseAlignable,
+  assertLineContentOnly,
   compilePattern,
 } from "../search/pattern.js";
 import { parseQuerySpec, rejectRetiredLimitField } from "../search/options.js";
@@ -125,6 +126,7 @@ export function createGrepTool(
     const regex = compilePattern(sampleSpec.pattern, sampleSpec.ignoreCase);
     assertEngineAlignable(sampleSpec.pattern);
     assertIgnoreCaseAlignable(sampleSpec.pattern, sampleSpec.ignoreCase);
+    assertLineContentOnly(sampleSpec.pattern);
     // 搜索根是显式点名的文件时，体积闸对它让路（rg 的 `--max-filesize` 只管
     // 遍历期，见 `argv.ts` / `node-scan.ts`）。展示侧的取行（`also` 行窗、
     // `context` 组构造）必须与「这个文件能不能被搜到」同口径 —— 否则 rg 出

@@ -49,10 +49,12 @@ export function buildRgArgs(
   //   - rg 收而 Node 读字面量：`\A` / `\z`（Rust 默认引擎就收，auto 不必
   //     换引擎）与 `\Z` / `\N` / `\h` 一类（Rust 不收、auto 退 PCRE2 收下）；
   //     两边都「接受」，命中的行却不同 —— 反向的静默分叉，auto 管不了。
-  //   - rg 拒而 Node 收：`\q` / `\g` / `\k` / `\o` / `\y` / `\T` 一类，Rust
-  //     与 PCRE2 都编不过 → rc=2 typed 失败，JS（无 `u`）读成字面量 `q` /
-  //     `g` / `k`… 静默命中（`\c` 同类但 JS 读成两字符序列 `\c`，命中对象与
-  //     单字符不同，实测）。
+  //   - rg 拒而 Node 收：`\q` / `\g` / `\k` / `\y` / `\T` 一类，Rust 与
+  //     PCRE2 都编不过 → rc=2 typed 失败，JS（无 `u`）读成字面量 `q` / `g`
+  //     / `k`… 静默命中（`\c` 同类但 JS 读成两字符序列 `\c`，命中对象与单字
+  //     符不同，实测）。注意 `\o{...}`（PCRE2 的字节转义，`\o{12}` = LF）
+  //     走另一条路：Rust 默认拒、auto 退 PCRE2 才收 —— 是「rg 收、Node 收成
+  //     字面 `o`」的静默分叉，由 `assertLineContentOnly` 入口收口。
   // 注：`a{2,1}` **不是**这类反例 —— JS 也拒（`numbers out of order`），两
   // 边同为 typed 拒绝。
   // 所以 auto 的实测保证只有一条：**「rg 默认引擎编不过」不必然等于「rg 拒
