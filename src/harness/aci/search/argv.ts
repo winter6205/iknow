@@ -17,7 +17,7 @@ import type { QuerySpec } from "./types.js";
 import { TYPE_GLOBS } from "./type-table.js";
 import { MAX_TEXT_FILE_BYTES } from "./file-lines.js";
 import { NEWLINE_PATH_EXCLUDES } from "./path-representable.js";
-import { rgNeedsUnicodeDisabled } from "./pattern.js";
+import { keepsUnicodeMode } from "./pattern.js";
 import { rgTransportBudgetBytes } from "./rg-output.js";
 
 /** 词表里常被用到的样例（测试锁形状用；真值仍在 TYPE_GLOBS）。 */
@@ -38,21 +38,27 @@ export function buildRgArgs(
 ): string[] {
   const args: string[] = [];
   pushOutputMode(args, spec);
-  // `--engine=auto`：默认走 Rust 正则引擎，只在模式用到 look-around /
-  // backreference 这类它不支持的构造时才切 PCRE2。Node 引擎用 JS `RegExp`，
-  // 它**支持**那些构造；不切引擎的话 `(?=hit)` 在 rg 路径是 rc=2 失败、在
-  // Node 路径却正常命中 —— 同一个 pattern 的含义取决于哪条引擎在跑，正是
-  // D6 禁止的静默改语义。auto 让两条引擎的接受集对齐，且普通模式零开销
-  //（对比 `--pcre2` 强制全量换引擎）。
+  // `--engine=auto`：默认走 Rust 正则引擎，默认引擎编不过时退 PCRE2
+  // （实测不限于 look-around / backreference：`\Z` / `\h` 这类 Rust 不认而
+  // PCRE2 认的转义同样被它接住）。Node 侧是 JS `RegExp`，接受集与 PCRE2 相近，
+  // 所以 `(?=hit)` 在 rg 路径不再 rc=2 失败、在 Node 路径正常命中 —— 少了这
+  // 一行，同一个 pattern 的含义就取决于哪条引擎在跑，正是 D6 禁止的静默改
+  // 语义。普通模式零开销（对比 `--pcre2` 强制全量换引擎）。
+  //
+  // 这不是「接受集完全对齐」：Rust / PCRE2 都编不过的（`\q`、`a{2,1}`）在 rg
+  // 侧仍是 rc=2 typed 失败、Node 侧当字面量静默命中（见 `pattern.ts` 文件头
+  // 的残留清单）。auto 只保证「rg 会接受的，Node 也接受」这一半。
   args.push("--engine=auto");
-  // `--no-unicode`：**只在 pattern 完全不含多字节敏感构造时**加，让 rg 的
-  // `\d` / `\w` / `\D` / `\W` / `\b` / `\B` 与 JS `RegExp`（无 `u` flag，
-  // code unit 语义）逐字对齐 —— JS 的这些类只认 ASCII，Rust regex 默认
-  // Unicode 类，实测 `\d` 在 rg 吃 ٣٤、`\w` 吃 CJK、`\b` 把 `é` 当词字符。
-  // 判定与理由见 `pattern.ts`（常开会打坏 `.` / `\s` / `\S`：`.` 退化成
-  // 「一个字节」，`a.c` 反而不匹配 `aéc`；`\s` 不再匹配 NBSP）。无法对齐的
-  // 构造在解析层已 typed 拒绝，所以这里只需处理「要不要切」。
-  if (rgNeedsUnicodeDisabled(spec.pattern)) args.push("--no-unicode");
+  // `--no-unicode`：判据是 `keepsUnicodeMode`（**唯一**模式判据，见
+  // `pattern.ts`），此处是它的 rg 侧投影 —— Node 侧按同一判据决定要不要加
+  // `u` flag。不加 `--no-unicode`（= 判据为 true）时 rg 留在 Unicode 模式：
+  // `.` / 计数 quantifier 按 code point，`\s` 认 NBSP；Node 加 `u` 后同口径。
+  // 加 `--no-unicode`（= 判据为 false）时 rg 切字节语义，把 `\d` / `\w` /
+  // `\D` / `\W` / `\b` / `\B` 对齐到 JS 的 ASCII 类（实测 rg 默认 `\d` 吃
+  // ٣٤、`\w` 吃 CJK、`\b` 把 `é` 当词字符），Node 侧则**不加** `u`。
+  // 常开会打坏 `.` / `\s` / `\S`（实测 `--no-unicode` 下 `.` 退化成「一个
+  // 字节」，`a.c` 反而不匹配 `aéc`），所以必须按 pattern 判。
+  if (!keepsUnicodeMode(spec.pattern)) args.push("--no-unicode");
   // `--no-messages` 收掉**文件级**告警（不可读文件的 Permission denied、坏
   // 符号链接），但**不收**正则 / 用法错误。于是 rc=2 且 stderr 空 = 只是某个
   // 文件没读到（stdout 里的命中照常有效）；rc=2 且 stderr 非空 = 查询本身被

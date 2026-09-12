@@ -1115,6 +1115,23 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
       "٣٤ alpha\n漢字 test\néfoo café\n　nbsp\n",
       "utf8"
     );
+    // code point vs code unit 的夹具（D6/SC9）。`.` 与计数 quantifier 在 rg
+    // 里一次吃一个 **code point**、在 JS 无 `u` 时只吃一个 **code unit**：
+    // 实测 `a.c` 不命中 `a😀c`（emoji 是 2 个 code unit）、`^.{3}$` 不命中
+    // `éx`（`é` 用 combining 拼是 2 个 code point / 3 个 code unit）。
+    // 内容刻意不含 `hit` / 数字，避免改变既有行的期望集。
+    await writeFile(join(root, "emoji.txt"), "a\u{1F600}c\n", "utf8");
+    await writeFile(join(root, "combining.txt"), "éx\n", "utf8");
+    await writeFile(
+      join(root, "doubleemoji.txt"),
+      "\u{1F600}\u{1F600}\n",
+      "utf8"
+    );
+    // simple case folding 的两个特殊等价类：U+212A KELVIN 与 U+017F LONG S。
+    // rg 留在 Unicode 模式时 `-i k` / `-i s` 折它们；切了 `--no-unicode` 就不折
+    // —— Node 侧的 `u` 必须跟着同一个判据走（两向都由本组测试钉住）。
+    await writeFile(join(root, "kelvin.txt"), "\u{212A}x\n", "utf8");
+    await writeFile(join(root, "longs.txt"), "\u{017F}x\n", "utf8");
     // 上下文行走的是另一条截断路径（`context-groups.ts`），单独一条。
     await writeFile(
       join(root, "longctxcjk.ts"),
@@ -1269,6 +1286,63 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
       { pattern: "\\s", output: "content", path: "unicode.txt" },
       { pattern: "café", output: "content", path: "unicode.txt" },
       { pattern: "漢", output: "content", path: "unicode.txt" },
+      // code point vs code unit（D6/SC9）：`.` 与计数 quantifier 在 rg 按
+      // code point、JS 无 `u` 时按 code unit。判据为 true 的 pattern 两条
+      // 引擎都留在 Unicode 口径（rg 不加 `--no-unicode`，Node 加 `u`）。
+      // 少了 Node 侧的 `u`，`a😀c` 与 combining `éx` 这两行就会只在一侧命中。
+      { pattern: "a.c", output: "content", path: "emoji.txt" },
+      { pattern: "^.{3}$", output: "content", path: "emoji.txt" },
+      { pattern: "^.{3}$", output: "content", path: "combining.txt" },
+      // 同文件的负面边界：`é` 用 combining 拼是 **2** 个 code point，
+      // `^.{2}$` 必须两边都不中（若哪侧按 code unit 数就会误中）。
+      { pattern: "^.{2}$", output: "content", path: "combining.txt" },
+      // 非 BMP 字面量的计数 quantifier：无 `u` 时量化的是单个 surrogate，
+      // 两个 emoji 反而匹配不上。
+      { pattern: "\u{1F600}{2}", output: "content", path: "doubleemoji.txt" },
+      // `.` 在类 / 交替 / 分组里同样按 code point（判据只看 pattern 里有没有
+      // 敏感构造，与它在语法树里的位置无关）。
+      { pattern: "[a-z.]", output: "content", path: "unicode.txt" },
+      { pattern: "a.c|zzz", output: "content", path: "emoji.txt" },
+      { pattern: "^(a|b).c$", output: "content", path: "emoji.txt" },
+      // 对照：转义后的 `\.` 不是敏感构造（判据为 false），但两边同样不该命中。
+      { pattern: "\\.", output: "content", path: "emoji.txt" },
+      // 类里的非 BMP 成员：无 `u` 时字符类退化成两个 surrogate 的并集，
+      // 能匹配到**半个** emoji —— 加 `u` 后与 rg 同为整个字符。
+      { pattern: "[\u{1F600}]", output: "content", path: "emoji.txt" },
+      // simple case folding 的**负面控制**：判据为 false 的 ASCII 类不拿 `u`
+      // （rg 切了 `--no-unicode`，`-i` 只折 ASCII）——`k`/`s` 必须不命中
+      // KELVIN / LONG S。这两条在判据被写反时会立刻变红。
+      { pattern: "k", output: "content", ignoreCase: true, path: "kelvin.txt" },
+      { pattern: "s", output: "content", ignoreCase: true, path: "longs.txt" },
+      // 正面对照：判据为 true 时 `iu` 的折叠与 rg 的 Unicode `-i` 同向
+      // （`\w` 两类都折；`.` 让 pattern 留下 `u` 后同样折）。
+      {
+        pattern: "\\w",
+        output: "content",
+        ignoreCase: true,
+        path: "kelvin.txt",
+      },
+      {
+        pattern: "\\w",
+        output: "content",
+        ignoreCase: true,
+        path: "longs.txt",
+      },
+      {
+        pattern: "k.",
+        output: "content",
+        ignoreCase: true,
+        path: "kelvin.txt",
+      },
+      { pattern: "s.", output: "content", ignoreCase: true, path: "longs.txt" },
+      // 反面边界：`[a-z]x` 的判据为 false（无敏感构造）⇒ 不拿 `u`，
+      // `-i` 不折 KELVIN —— 与 rg 切了 `--no-unicode` 后的 ASCII 折叠同向。
+      {
+        pattern: "[a-z]x",
+        output: "content",
+        ignoreCase: true,
+        path: "kelvin.txt",
+      },
       // ignoreCase × 非 ASCII：CJK 无大小写 → 必须继续命中（两条引擎都放行）。
       {
         pattern: "漢",

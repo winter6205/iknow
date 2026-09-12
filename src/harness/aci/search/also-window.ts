@@ -10,6 +10,7 @@
  */
 
 import { ToolExecutionError } from "../../errors.js";
+import { compilePattern } from "./pattern.js";
 import type { LineHit } from "./types.js";
 
 export interface AlsoWindowInput {
@@ -43,14 +44,21 @@ export function filterHitsByAlsoWindow(input: AlsoWindowInput): LineHit[] {
 
 /**
  * 把 `also` 文本编译为正则（与主 `pattern` 同口径：默认大小写敏感，
- * `ignoreCase` 共用）。
+ * `ignoreCase` 共用，模式判据同源）。
+ *
+ * `also` 是**字面词**（D5 的行窗第二段），不是主 pattern 的宽正则：它在
+ * `also-window.ts` 里只做 `test()`，两端引擎共用本函数，所以不需要
+ * `--no-unicode` 那类跨引擎 argv。但「匹配单位」口径仍要与 rg 侧一致 ——
+ * `also` 里的 `.` 在 rg 的行窗判定里已经不存在（rg 只按主 pattern 出命中，
+ * 窗由本模块判），故这里走与主 pattern 同一套编译（含 `u` 规则与退回），
+ * 两条引擎的窗判定因此逐字相同。
  *
  * 坏正则 → typed 拒绝，文案点名 `also` —— 与主 pattern 的错误区分，也与
  * 未知 `type` 的错误区分（SC10 要求两类错误不可混为一种）。
  */
 export function expandAlsoNeedle(also: string, ignoreCase: boolean): RegExp {
   try {
-    return new RegExp(also, ignoreCase ? "i" : "");
+    return compilePattern(also, ignoreCase);
   } catch {
     throw new ToolExecutionError(
       `grep: invalid also pattern: ${also} (the main pattern was fine; fix the also expression)`

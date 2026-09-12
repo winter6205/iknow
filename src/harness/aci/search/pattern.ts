@@ -5,7 +5,8 @@
  *   - 把 `pattern` + `ignoreCase` 编译成 RegExp，坏正则 → typed 拒绝；
  *   - 把**无法让两条引擎给出同一答案**的构造 typed 拒绝（宁可入口报错，
  *     也不要同一个查询的答案取决于哪条引擎在跑）；
- *   - 给出 rg 侧要不要 `--no-unicode`（`rgNeedsUnicodeDisabled`）。
+ *   - 给出「这个 pattern 是否必须留在 Unicode 口径」的唯一判据
+ *     （`keepsUnicodeMode`），rg 与 Node 两条引擎各按它收口。
  *
  * Node 引擎直接用 `compilePattern`；rg 引擎用它做**前置**校验（rg 自己也会
  * 以 rc=2 报同类错误，前置校验让两条路径文案一致、且不必先花一次进程启动）。
@@ -16,17 +17,35 @@
  *
  * ── 为什么要做模式选择（逐条实测，不是推断）──
  *
- * JS `RegExp` 不带 `u` flag 是 **UTF-16 code unit** 语义：`\d` / `\w` / `\b`
- * 只认 ASCII，但 `\s` 是 **Unicode 的**（NBSP / U+3000 都算）。Rust regex 默认
- * 是 **code point + Unicode 类**：`\d` 吃 ٣٤、`\w` 吃 CJK、`\b` 把 `é` 当词
- * 字符。两边在最常用的构造上就不同，实测分歧：
- *   - `\d` / `\w` / `\D` / `\W` / `\b`：rg 默认**多收**非 ASCII；
- *   - `\s` / `\S`：rg 默认**少**收 NBSP / U+3000（JS `\s` 收）。
- * `--no-unicode` 把 rg 切成字节语义，能对齐前者（这正是本工具要的），却会打坏
- * 后者 —— 实测 `a.c` 在 `--no-unicode` 下不匹配 `aéc`（`.` 退化成「一个
- * 字节」），`\s` 也不再匹配 NBSP。所以既不能常开也不能常关：**只在 pattern
- * 完全不含「匹配单位可能是多字节字符」的构造时**才加（此时两边逐字对齐），
- * 其余构造由 `assertEngineAlignable` / `assertIgnoreCaseAlignable` 在入口拒绝。
+ * 两条引擎的默认「匹配单位」口径不同：
+ *   - JS `RegExp` **不带 `u`** 是 UTF-16 code unit 语义：`.` 与计数 quantifier
+ *     一次只吃一个 code unit（实测 `a.c` 不匹配 `a😀c`、`^.{3}$` 不匹配
+ *     `a😀c`），`\d` / `\w` / `\b` 只认 ASCII，但 `\s` 是 **Unicode 的**
+ *     （NBSP / U+3000 都算）；
+ *   - Rust regex 默认是 **code point + Unicode 类**：`.` 一次吃一个 code
+ *     point，`\d` 吃 ٣٤、`\w` 吃 CJK、`\b` 把 `é` 当词字符，`\s` 与 JS 同为
+ *     Unicode 口径。
+ *
+ * 唯一判据是 `keepsUnicodeMode(pattern)`（本模块是它的唯一实现处），两条引擎
+ * 各按它收口、共用同一次扫描结果：
+ *   - rg 侧：**不含**敏感构造 → 加 `--no-unicode`（切字节语义），把 `\d` /
+ *     `\w` / `\b` 一类对齐到 JS 的 ASCII 口径。常开不行 —— 实测 `--no-unicode`
+ *     下 `.` 退化成「一个字节」，`a.c` 反而不匹配 `aéc`，`\s` 也不再匹配
+ *     NBSP；
+ *   - Node 侧：**含**敏感构造 → 编译加 `u` flag（切 code point 语义），把 `.` /
+ *     计数 quantifier / 字符类对齐到 rg 的 code point 口径。加 `u` 只在 rg
+ *     同样留在 Unicode 模式时有意义，两边的开关因此是同一个判据的两面。
+ *
+ * 各写一遍判据就有漂移出「rg 切了字节、Node 没切」的余地，所以只留一个名字。
+ * `u` 编译失败时退回无 `u`（见 `compilePattern`），接受集只增不减。
+ *
+ * 已知边界（判据为真的 pattern，即 rg 留在 Unicode 模式的那些）：
+ *   - rg 的 `\d` / `\w` / `\b` 此时是 Unicode 类，而 JS 加了 `u` 仍是 ASCII
+ *     类 —— 于是「敏感构造与这些类混排」（`\d.` / `\w.c`）两条引擎仍会分叉。
+ *     `--no-unicode` 不能加（会打坏 `.`），`u` 也补不上，属残留；
+ *   - 「Rust 引擎不收、PCRE2 收」的转义（`\A` / `\Z` / `\N` 一类，argv 恒带
+ *     `--engine=auto`）会被 rg 收下，而 JS 读成字面量 —— 同属残留。
+ * 两类都不在本模块的处理面上：要收只能改成 typed 拒绝，属另一刀。
  */
 
 import { ToolExecutionError } from "../../errors.js";
@@ -67,12 +86,37 @@ const POSIX_CLASS = /\[[^\]]*\[:[A-Za-z]+\:\]/;
  *
  * 本函数**不做**可行性校验（那是 `assertEngineAlignable` 的职责）——handler
  * 里两道依次走，坏正则的文案因此不会被新错误抢走。
+ *
+ * `u` flag 只在 pattern 必须留在 Unicode 口径时加（`keepsUnicodeMode`，与
+ * rg 侧「不加 `--no-unicode`」是同一个判据）——此时 JS 的 `.` / 计数
+ * quantifier / 字符类才与 rg 的 code point 语义逐字对齐。
+ *
+ * 加得上才加：`u` 会收紧语法，`{` / `]` / `\A` / `\q` / `\u` 一类在它下面
+ * 编不过，而它们今天在两条引擎上要么一致、要么是既有的别的分歧类。所以
+ * **先试带 `u`，编不过退回不带 `u`**（今天的行为）——接受集只增不减，
+ * 不存在「今天能编、改完被拒」的 pattern。
+ *
+ * 顺序还有一层：不带 `u` 的接受集更宽，若先编无 `u` 再按需试 `u`，就必须
+ * 把「u 编不过」也实现成退回，两条分支的文案还要各写一遍。先试 `u` 只有
+ * 一个出口。
  */
 export function compilePattern(pattern: string, ignoreCase: boolean): RegExp {
+  const base = ignoreCase ? "i" : "";
+  if (keepsUnicodeMode(pattern)) {
+    const unicode = tryCompile(pattern, `${base}u`);
+    if (unicode !== null) return unicode;
+  }
+  const plain = tryCompile(pattern, base);
+  if (plain !== null) return plain;
+  throw new ToolExecutionError(`grep: invalid pattern: ${pattern}`);
+}
+
+/** 编得过就返回；编不过返回 null（由调用方决定退到哪一档）。 */
+function tryCompile(pattern: string, flags: string): RegExp | null {
   try {
-    return new RegExp(pattern, ignoreCase ? "i" : "");
+    return new RegExp(pattern, flags);
   } catch {
-    throw new ToolExecutionError(`grep: invalid pattern: ${pattern}`);
+    return null;
   }
 }
 
@@ -124,17 +168,30 @@ export function assertIgnoreCaseAlignable(
 }
 
 /**
- * rg 侧要不要加 `--no-unicode`。
+ * 这个 pattern 是否必须留在 Unicode 口径 —— 两条引擎的**唯一**模式判据。
  *
- * `true` = pattern 只含「两边本来就同语义」的构造，`--no-unicode` 把
- * `\d` / `\w` / `\D` / `\W` / `\b` / `\B` 一并对齐且不伤任何东西；
- * `false` = 含多字节敏感构造（`.` / `\s` / `\S` / `\u` / `\x` / `\0` 以外的
- * 非 ASCII / 否定类），切字节语义会打坏它们，必须留在 Unicode 模式。
+ * `true`（含多字节敏感构造：`.` / `\s` / `\S` / `\u` / `\x` / 非 ASCII /
+ * 否定类）→ rg **不加** `--no-unicode`（切字节语义会打坏它们），Node 编译
+ * **加** `u`（否则 `.` / 计数 quantifier 停在 code unit 上）。
+ * `false` → rg 加 `--no-unicode`，把 `\d` / `\w` / `\D` / `\W` / `\b` / `\B`
+ * 对齐到 JS 的 ASCII 口径；Node 不加 `u`（加了反而把 KELVIN / LONG S 折进来，
+ * 见下）。
  *
- * 判定取保守方向：**宁可不切，也不切坏**（见文件头注释的实测分歧）。
+ * 取保守方向：**宁可不切，也不切坏**（见文件头注释的实测分歧）。
+ *
+ * ignoreCase 的两点边界（实测）：
+ *   - 非 ASCII pattern + `ignoreCase` 已在入口 typed 拒绝
+ *     （`assertIgnoreCaseAlignable`），所以这里只需考虑 ASCII pattern；
+ *   - `i` × `u` 会把 U+212A KELVIN / U+017F LONG S 折进 `k` / `s`（实测
+ *     `new RegExp("k","iu").test("\\u212A")` 为 true）—— 与 rg 留在 Unicode
+ *     模式时的 simple case folding **同向**（实测 `rg -i k` 命中 `Kx`），所以
+ *     判据为 true 时加 `u` 在 ignoreCase 下是**改善**而不是新分歧。
+ *     反面：判据为 false 时 rg 切了 `--no-unicode`，`-i k` 不再命中 `Kx`
+ *     （实测），而 Node 若加 `u` 会命中 —— 所以那侧 **不能**加 `u`，两条
+ *     引擎的开关必须同源。
  */
-export function rgNeedsUnicodeDisabled(pattern: string): boolean {
-  return !hasMultiByteSensitiveConstruct(pattern);
+export function keepsUnicodeMode(pattern: string): boolean {
+  return hasMultiByteSensitiveConstruct(pattern);
 }
 
 /**
