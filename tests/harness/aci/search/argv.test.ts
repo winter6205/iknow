@@ -7,6 +7,8 @@
  *   - `--null` 常开（路径分隔符由 NUL 承担，见 rg-output.ts）。
  *   - `context` 只在 content 出法转成 `-C N`；`paths` / `count` 不带。
  *   - `glob` / `type` 与 `path` 并列生效（D4）。
+ *   - 遍历语义与 Node 扫对齐：`--no-ignore` / `--hidden` / 两条排除 glob /
+ *     `--max-filesize` / `--crlf`（D6 / SC9；取舍见 argv.ts 注释）。
  *   - 未知 `type` 是 typed 错误，且**文案与坏正则不同**（SC10）。
  */
 
@@ -16,9 +18,10 @@ import { describe, it } from "vitest";
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import {
   buildRgArgs,
-  resolveTypeName,
   KNOWN_TYPE_SAMPLE,
 } from "../../../../src/harness/aci/search/argv.ts";
+import { MAX_TEXT_FILE_BYTES } from "../../../../src/harness/aci/search/file-lines.ts";
+import { resolveTypeName } from "../../../../src/harness/aci/search/type-table.ts";
 import { compilePattern } from "../../../../src/harness/aci/search/pattern.ts";
 import type { QuerySpec } from "../../../../src/harness/aci/search/types.ts";
 
@@ -42,33 +45,22 @@ function argv(specOverrides: Partial<QuerySpec> = {}): string[] {
 
 describe("buildRgArgs — 出法", () => {
   it("paths → -l（每个唯一文件一条）", () => {
-    assert.deepEqual(argv({ output: "paths" }), [
-      "-l",
-      "--engine=auto",
-      "--null",
-      "--color",
-      "never",
-      "--no-messages",
-      "-H",
-      "--",
-      "hit",
-      ".",
-    ]);
+    const args = argv({ output: "paths" });
+
+    assert.ok(args.includes("-l"));
+    // 出法互斥：content / count 的旗标不得混入。
+    assert.equal(args.includes("--line-number"), false);
+    assert.equal(args.includes("--count"), false);
+    // 尾部始终是 `-- <pattern> <path>`（路径按生产口径相对 workspace）。
+    assert.deepEqual(args.slice(-3), ["--", "hit", "."]);
   });
 
   it("count → --count", () => {
-    assert.deepEqual(argv({ output: "count" }), [
-      "--count",
-      "--engine=auto",
-      "--null",
-      "--color",
-      "never",
-      "--no-messages",
-      "-H",
-      "--",
-      "hit",
-      ".",
-    ]);
+    const args = argv({ output: "count" });
+
+    assert.ok(args.includes("--count"));
+    assert.equal(args.includes("-l"), false);
+    assert.deepEqual(args.slice(-3), ["--", "hit", "."]);
   });
 
   it("`--engine=auto` 常开：rg 的接受集与 Node 引擎的 JS RegExp 对齐", () => {
@@ -126,19 +118,25 @@ describe("buildRgArgs — 收窄（D4）", () => {
   it("glob → --glob <pattern>", () => {
     const args = argv({ glob: "*.ts" });
 
-    assert.equal(args[args.indexOf("--glob") + 1], "*.ts");
+    // 收窄旗标与引擎级 glob 并列出现（后者见 ignore 语义那组），
+    // 用户模式必须原样传递、不被挤压/改写。
+    assert.ok(args.includes("--glob"));
+    assert.ok(args.includes("*.ts"));
+    assert.equal(args[args.indexOf("--type")], undefined);
   });
 
   it("type → --type <name>", () => {
     const args = argv({ type: "ts" });
 
     assert.equal(args[args.indexOf("--type") + 1], "ts");
+    // 只给 type 时不得凭空长出用户 glob（引擎级排除 glob 是另一回事）。
+    assert.equal(args.includes("*.ts"), false);
   });
 
   it("glob 与 type 并列时同时带上（D4 两者是并列维度）", () => {
     const args = argv({ glob: "src/**", type: "ts" });
 
-    assert.equal(args[args.indexOf("--glob") + 1], "src/**");
+    assert.ok(args.includes("src/**"));
     assert.equal(args[args.indexOf("--type") + 1], "ts");
   });
 
@@ -148,6 +146,48 @@ describe("buildRgArgs — 收窄（D4）", () => {
     assert.equal(args[args.length - 3], "--");
     assert.equal(args[args.length - 2], "-weird");
     assert.equal(args[args.length - 1], ".");
+  });
+});
+
+/**
+ * 引擎级遍历语义（D6 / SC9）。
+ *
+ * 契约要求两条引擎**接受集一致**：同一个目录树喂同一个查询，rg 与 Node 扫
+ * 必须看见同一批文件。rg 默认会读 `.gitignore` / `.ignore`、跳过隐藏项、
+ * 跳过 git 忽略目录；Node 侧的 `walkFiles` 只跳过 `node_modules` / `.git`。
+ * 这里把差异**一次性抹平到 Node 口径**（`--no-ignore --hidden` + 两条排除
+ * glob），而不是教 Node 读 gitignore 语法（negation / 目录作用域 / 层级作用
+ * 域是另一件工具的体量）。判定细节见 `argv.ts` 内的中文注释。
+ */
+describe("buildRgArgs — 遍历语义与 Node 扫对齐（D6）", () => {
+  it("--no-ignore 常开：.gitignore / .ignore 不改变接受集", () => {
+    for (const output of ["paths", "content", "count"] as const) {
+      assert.ok(
+        argv({ output }).includes("--no-ignore"),
+        `${output} 缺 --no-ignore`
+      );
+    }
+  });
+
+  it("--hidden 常开：点文件 / 点目录与 Node 扫同见", () => {
+    assert.ok(argv({}).includes("--hidden"));
+  });
+
+  it("node_modules / .git 用排除 glob 表达（Node walkFiles 的跳过集）", () => {
+    const args = argv({});
+
+    assert.ok(args.includes("!**/node_modules"));
+    assert.ok(args.includes("!**/.git"));
+  });
+
+  it("--max-filesize 取共享的体积常量（与 readWorkspaceLines 同源）", () => {
+    assert.ok(
+      argv({}).includes(`--max-filesize=${String(MAX_TEXT_FILE_BYTES)}`)
+    );
+  });
+
+  it("--crlf 常开：CRLF 行按行边界处理（Node splitLines 同口径）", () => {
+    assert.ok(argv({}).includes("--crlf"));
   });
 });
 

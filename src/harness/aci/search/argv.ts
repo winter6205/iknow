@@ -8,13 +8,14 @@
  *   - `--null` 常开：路径以 NUL 收尾，把「路径含冒号」从分列问题里移除。
  *   - `-C N` 只在 content 出法带上（其它出法没有「附近几行」的概念）。
  *
- * 未知 `type` 在这里 typed 拒绝（**不是**非法正则）—— 两种错误文案互不
- * 包含对方的关键词，SC10 由 `argv.test.ts` 直接断言。
+ * 未知 `type` 的 typed 拒绝**不在这里**：它在 `options.ts` 的 `parseQuerySpec`
+ * 就挡下（见该处注释）—— 校验若只挂在本函数上，就只在「自带引擎在场」时才
+ * 生效，Node 全会话会静默回空（SC10 在一条引擎上失效）。
  */
 
-import { ToolExecutionError } from "../../errors.js";
 import type { QuerySpec } from "./types.js";
-import { KNOWN_TYPES, TYPE_GLOBS } from "./type-table.js";
+import { TYPE_GLOBS } from "./type-table.js";
+import { MAX_TEXT_FILE_BYTES } from "./file-lines.js";
 
 /** 词表里常被用到的样例（测试锁形状用；真值仍在 TYPE_GLOBS）。 */
 export const KNOWN_TYPE_SAMPLE: ReadonlyArray<string> = [
@@ -49,6 +50,29 @@ export function buildRgArgs(
   // `-H` 常开：`path` 指向单个文件时 rg 默认省掉文件名（只剩 `行号:内容`），
   // 与 paths / count 出法及 Node 引擎的 `path:line:text` 形状都不兼容。
   args.push("--null", "--color", "never", "--no-messages", "-H");
+  // 遍历纪律：Node 扫（`walkFiles`）只看这两个目录名，不认 `.gitignore` /
+  // `.ignore` / 隐藏文件。rg 默认相反（尊重 ignore、跳过隐藏）。两边不等价
+  // 就是 SC9 失败 —— 且同一次查询「换台引擎就少半仓」是最坏的一种静默改
+  // 语义。取「跟 Node 已有行为对齐」而不是「教 Node 读 ignore 规则」：
+  // 后者要复刻 rg 的 gitignore 语法（取反 / 目录限定 / 层级作用域），是另
+  // 一件工具的体量；`--no-ignore --hidden` 是一行且与既有语义一致。旧
+  // Node 回退（ADR-0004 修订）本来就不跳过隐藏文件，因此这不是新放宽。
+  args.push(
+    "--no-ignore",
+    "--hidden",
+    "--glob",
+    "!**/node_modules",
+    "--glob",
+    "!**/.git"
+  );
+  // 遍历期的体积闸；显式点名的文件不受它约束（rg 语义），Node 侧同口径。
+  args.push(`--max-filesize=${String(MAX_TEXT_FILE_BYTES)}`);
+  // CRLF 对齐：Node 扫按 `\n` 切行后剥掉尾随 `\r`（`file-lines.splitLines`，
+  // 旧 Node 回退亦然），于是 `foo$` 能命中 CRLF 行。rg 默认把 `\r` 当行内容，
+  // 同一个 `foo$` 在 CRLF 文件上**一个都不中** —— 验收口径随引擎变。`--crlf`
+  // 让 rg 把 CRLF 当行终止符，`$` / `.` 的边界与 Node 一致。行内容里的 `\r`
+  // 由解析层剥掉（rg 仍原样回显），见 `rg-output.ts`。
+  args.push("--crlf");
   if (spec.output === "content") {
     // 超长匹配行的两道闸：先让 rg 自己收口（`--max-columns-preview` 会写自己的
     // 省略标记），再由投影层按 code point 收到 MAX_MATCH_LINE_COLUMNS。少了第一
@@ -59,7 +83,7 @@ export function buildRgArgs(
   }
   if (spec.ignoreCase) args.push("--ignore-case");
   if (spec.glob !== undefined) args.push("--glob", spec.glob);
-  if (spec.type !== undefined) args.push("--type", resolveTypeName(spec.type));
+  if (spec.type !== undefined) args.push("--type", spec.type);
   // 搜索路径**相对 cwd**（cwd = workspace 根，见 rg-engine）：rg 把路径原样
   // 回显，喂绝对路径就会把绝对路径吐给模型（SC4 要求相对）；且 `--glob` 的
   // 锚定是相对 cwd 判的，喂绝对路径会让 `sub/*.ts` 这类模式在 cwd 不是
@@ -78,23 +102,6 @@ function pushOutputMode(args: string[], spec: QuerySpec): void {
     return;
   }
   args.push("--line-number", "--no-heading");
-}
-
-/**
- * 校验 `type` 是否在 rg 词表内。
- *
- * 未知类型是**输入**类 typed 错误（与坏正则同属 ToolExecutionError，但文案
- * 点名 `type` 与类型名、不含 `pattern` —— SC10 要求两类不可混为「illegal
- * regex」一种）。rg 自己也会以 rc=2 报同类错误，这道前置校验让两条引擎路径
- * （rg / Node）给出同一文案，也避免「先花一次进程启动才发现名字错」。
- */
-export function resolveTypeName(type: string): string {
-  if (!KNOWN_TYPES.has(type)) {
-    throw new ToolExecutionError(
-      `grep: unknown type: ${type} (the type filter takes a ripgrep language name such as ts / py / rust; check the spelling)`
-    );
-  }
-  return type;
 }
 
 /**
