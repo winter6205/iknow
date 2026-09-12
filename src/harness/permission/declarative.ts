@@ -26,6 +26,12 @@
  *    `command`, Read/Edit path, WebFetch `url`) and path-style specifiers on
  *    non-family tools are rejected at compile time with a warning.
  *
+ * `Bash(network:true|false|*)` is a `param:value` rule on a non-primary
+ * scalar field (the Bash family shares the deny/ask-only contract above):
+ * it is the declarative equivalent of the code-layer
+ * `code-ask-bash-network` eligibility gate, inherited from the retired
+ * `network_equals` predicate. `allow` is rejected for it per the spec.
+ *
  * Match closures are pure: they never throw and return `false` on malformed
  * runtime input (schema violations are already fail-loud at load time).
  */
@@ -197,7 +203,7 @@ function buildMatcher(
     return makeToolMatcher(familyName, decision);
   }
   if (familyName === "bash") {
-    return buildBashMatcher(rule.specifier, ctx);
+    return buildBashMatcher(rule.specifier, decision, ctx);
   }
   if (familyName === "read" || familyName === "edit") {
     return buildPathMatcher(familyName, rule.specifier, decision, ctx);
@@ -407,9 +413,20 @@ function scalarEquals(actual: unknown, expected: string): boolean {
 
 function buildBashMatcher(
   specifier: string,
+  decision: PermissionDecision,
   ctx: CompileCtx
 ): NormalRuleSpec["match"] | undefined {
   if (specifier.startsWith("network:")) {
+    // Spec Does: "allow 不走 param:value". The Bash family takes the same
+    // rule; `network:true|false|*` is the legacy eligibility gate for
+    // code-ask-bash-network, expressed here so existing project-side
+    // denials migrate without losing the ask fence.
+    if (decision === "allow") {
+      ctx.onWarn(
+        `[permissions] ignore allow rule ${JSON.stringify(`Bash(${specifier})`)}: param:value is deny/ask only`
+      );
+      return undefined;
+    }
     const expected = specifier.slice("network:".length);
     if (expected !== "true" && expected !== "false" && expected !== "*") {
       ctx.onWarn(
@@ -485,9 +502,22 @@ function escapeRegexChar(ch: string): string {
 }
 
 /**
- * Split a command on `;` / `&&` / `||` / `|` / `&` / newline. Backslash
- * escapes are kept literal (`\;` does not split). Quoted separators are not
- * exempted — see `compileCommandPattern`.
+ * Split a command on `;` / `&&` / `||` / `|` / `&` / `\n` / `\r`.
+ *
+ * Intentionally distinct from `hard-walls.splitShellSegments`:
+ *  - declarative adds `&` (any-depth `&` between commands), `|&` (treated
+ *    as a unit boundary by the spec), and `\n` / `\r` as separators;
+ *  - `hard-walls.splitShellSegments` only splits on `;` / `&&` / `||` /
+ *    `|` because the dangerous-pattern scan is conservative — keeping
+ *    newlines and bare `&` inside a single segment lets existing
+ *    substring patterns keep matching commands like `echo a & rm -rf /`.
+ *
+ * Reusing the hard-walls splitter here would weaken the spec Does rule
+ * that compound commands (`&`, `|&`, newlines) require every segment to
+ * match, so the two implementations stay separate. Backslash escapes are
+ * kept literal in both; quoted separators are not exempted (mirrors the
+ * hard-walls conservative stance — quoted metachars fail to match rather
+ * than silently bypass).
  */
 function splitCommandSegments(command: string): string[] {
   const segments: string[] = [];
@@ -510,14 +540,6 @@ function splitCommandSegments(command: string): string[] {
   return segments.map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
-const SIMPLE_WRAPPERS: ReadonlySet<string> = new Set([
-  "time",
-  "nohup",
-  "builtin",
-  "noglob",
-  "command",
-]);
-
 const DURATION_PATTERN = /^\d+(?:\.\d+)?[smhd]?$/;
 const INTEGER_PATTERN = /^\d+$/;
 const MAX_WRAPPER_ROUNDS = 8;
@@ -525,44 +547,90 @@ const MAX_WRAPPER_ROUNDS = 8;
 /**
  * Strip fixed leading wrappers from one command segment. Returns the
  * remaining payload, or `null` when the segment has no command left.
+ *
+ * Wrapper handling is table-driven: each stripper owns the rules for one
+ * wrapper name; the main loop only does "look up → apply → continue".
+ * Behaviour parity with the original if/else chain:
+ *   - SIMPLE_WRAPPERS (time, nohup, builtin, noglob, command): drop head.
+ *   - nice [-n INT]: drop head + optional `-n` + integer.
+ *   - stdbuf [-FLAG]: drop head + optional single-token flag.
+ *   - timeout [-FLAG] DURATION: drop head + optional single-token flag +
+ *     duration matching DURATION_PATTERN.
+ *   - xargs (flag-free only): drop head iff the next token does NOT start
+ *     with `-`; `xargs -0 …` is preserved so the rule does not match.
+ * `MAX_WRAPPER_ROUNDS` (8) caps chained wrappers; the loop exits with the
+ * current payload otherwise (mirrors the original "fall through and
+ * return" behaviour).
  */
 function stripWrappers(segment: string): string | null {
   let tokens = segment.split(/\s+/).filter((t) => t.length > 0);
   if (tokens.length === 0) return null;
   for (let round = 0; round < MAX_WRAPPER_ROUNDS; round += 1) {
     const head = tokens[0]!;
-    if (SIMPLE_WRAPPERS.has(head)) {
-      tokens = tokens.slice(1);
-      continue;
-    }
-    if (head === "nice") {
-      tokens = tokens.slice(1);
-      if (tokens[0]?.startsWith("-") === true) {
-        tokens = tokens.slice(1);
-        if (INTEGER_PATTERN.test(tokens[0] ?? "")) tokens = tokens.slice(1);
-      }
-      continue;
-    }
-    if (head === "stdbuf") {
-      tokens = tokens.slice(1);
-      if (tokens[0]?.startsWith("-") === true) tokens = tokens.slice(1);
-      continue;
-    }
-    if (head === "timeout") {
-      tokens = tokens.slice(1);
-      if (tokens[0]?.startsWith("-") === true) tokens = tokens.slice(1);
-      if (DURATION_PATTERN.test(tokens[0] ?? "")) tokens = tokens.slice(1);
-      continue;
-    }
-    if (head === "xargs" && tokens[1]?.startsWith("-") !== true) {
-      // Only the flag-free form is a wrapper; `xargs -0 ...` changes
-      // argument semantics and is left in place (conservative no-match).
-      tokens = tokens.slice(1);
-      continue;
-    }
-    return tokens.join(" ");
+    const stripper = WRAPPER_STRIPPERS.get(head);
+    if (stripper === undefined) break;
+    const next = stripper(tokens);
+    if (next === null) break;
+    tokens = next;
   }
   return tokens.length > 0 ? tokens.join(" ") : null;
+}
+
+type WrapperStripper = (tokens: string[]) => string[] | null;
+
+/**
+ * A `Map` (not a plain object) so an arbitrary first token can never hit
+ * `Object.prototype` members (`constructor`, `toString`, …) and be called
+ * as a stripper.
+ */
+const WRAPPER_STRIPPERS: ReadonlyMap<string, WrapperStripper> = new Map<
+  string,
+  WrapperStripper
+>([
+  ...["time", "nohup", "builtin", "noglob", "command"].map(
+    (name) => [name, dropHead] as const
+  ),
+  [
+    "nice",
+    (tokens: string[]) => {
+      let t = tokens.slice(1);
+      if (t[0]?.startsWith("-") === true) {
+        t = t.slice(1);
+        if (INTEGER_PATTERN.test(t[0] ?? "")) t = t.slice(1);
+      }
+      return t;
+    },
+  ],
+  [
+    "stdbuf",
+    (tokens: string[]) => {
+      let t = tokens.slice(1);
+      if (t[0]?.startsWith("-") === true) t = t.slice(1);
+      return t;
+    },
+  ],
+  [
+    "timeout",
+    (tokens: string[]) => {
+      let t = tokens.slice(1);
+      if (t[0]?.startsWith("-") === true) t = t.slice(1);
+      if (DURATION_PATTERN.test(t[0] ?? "")) t = t.slice(1);
+      return t;
+    },
+  ],
+  [
+    "xargs",
+    (tokens: string[]) => {
+      // Only the flag-free form is a wrapper; `xargs -0 …` changes
+      // argument semantics and is left in place (conservative no-match).
+      if (tokens[1]?.startsWith("-") === true) return null;
+      return tokens.slice(1);
+    },
+  ],
+]);
+
+function dropHead(tokens: string[]): string[] {
+  return tokens.slice(1);
 }
 
 /* -----------------------------------------------------------------------------

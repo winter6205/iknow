@@ -131,6 +131,113 @@ function ajvErrorMessage(
 }
 
 /**
+ * Fail-loud checks shared by `loadProjectSettings` and
+ * `readProjectDefaultMode`. Both entries use the same shape detection so
+ * the operator sees one error message per root cause (legacy DSL /
+ * self-granted automatic mode).
+ *
+ * Order is fixed: legacy-shape detection runs first (the new schema would
+ * otherwise misreport it as `schema_violation`); `defaultMode` is checked
+ * only after the section is confirmed to be the new-form shape.
+ */
+function checkNewFormSection(
+  section: unknown,
+  filePath: string
+): Record<string, unknown> | undefined {
+  if (!isPlainObjectRoot(section)) return undefined;
+  if ("schema_version" in section || "rule" in section) {
+    throw new ProjectSettingsError(
+      "legacy_predicate_form",
+      `project-settings: legacy_predicate_form: ${filePath} uses the old ` +
+        `"schema_version" + "rule" predicate DSL. Migrate to the new ` +
+        `declarative form, e.g.:\n${NEW_FORM_EXAMPLE}`
+    );
+  }
+  if (section.defaultMode === "full_auto") {
+    throw new ProjectSettingsError(
+      "forbidden_default_mode",
+      `project-settings: forbidden_default_mode: ${filePath} sets ` +
+        `'defaultMode: "full_auto"'. Shared repositories must not ` +
+        `self-grant automatic mode; automatic mode is a per-session ` +
+        `operator choice (ADR-0090).`
+    );
+  }
+  return section;
+}
+
+/** ajv gate: throws `schema_violation` when the section does not validate. */
+function assertSchemaValid(
+  section: Record<string, unknown>,
+  filePath: string
+): void {
+  const ajv = makeAjv();
+  const validate: ValidateFunction = ajv.compile(PROJECT_PERMISSIONS_SCHEMA);
+  if (validate(section)) return;
+  throw new ProjectSettingsError(
+    "schema_violation",
+    `project-settings: schema violation at ${filePath}: ${ajvErrorMessage(
+      validate.errors
+    )}`
+  );
+}
+
+/**
+ * Compile anchor + optional knobs for `compileDeclarativePermissions`.
+ * `projectIdentityRoot` / `knownToolNames` / `onWarn` stay absent when the
+ * caller did not supply them so the compiler's own defaults apply.
+ */
+function compileOptsFor(opts: LoadProjectSettingsOpts): DeclarativeCompileOpts {
+  const base: DeclarativeCompileOpts = {
+    workRoot: opts.workRoot ?? opts.cwd ?? process.cwd(),
+  };
+  return {
+    ...base,
+    ...(opts.cwd !== undefined ? { projectIdentityRoot: opts.cwd } : {}),
+    ...(opts.knownToolNames !== undefined
+      ? { knownToolNames: opts.knownToolNames }
+      : {}),
+    ...(opts.onWarn !== undefined ? { onWarn: opts.onWarn } : {}),
+  };
+}
+
+/** `default` / `plan` pass through; anything else leaves the key off. */
+function declaredDefaultMode(raw: unknown): "default" | "plan" | undefined {
+  return raw === "default" || raw === "plan" ? raw : undefined;
+}
+
+/**
+ * Validate a section against the ajv schema, then compile its rules.
+ * Caller has already resolved `filePath` and verified the file / section
+ * shape; this is the single point that turns a JSON section into a
+ * frozen `ProjectSettingsPolicySource`.
+ */
+function compileSection(
+  section: Record<string, unknown>,
+  filePath: string,
+  opts: LoadProjectSettingsOpts
+): ProjectSettingsPolicySource {
+  assertSchemaValid(section, filePath);
+
+  const typed = section as RawSection;
+  const rules: ReadonlyArray<NormalRuleSpec> = compileDeclarativePermissions(
+    {
+      allow: typed.allow as readonly string[] | undefined,
+      ask: typed.ask as readonly string[] | undefined,
+      deny: typed.deny as readonly string[] | undefined,
+    },
+    compileOptsFor(opts)
+  );
+  const defaultMode = declaredDefaultMode(typed.defaultMode);
+
+  return Object.freeze({
+    kind: "project",
+    filePath,
+    rules,
+    ...(defaultMode !== undefined ? { defaultMode } : {}),
+  }) as ProjectSettingsPolicySource;
+}
+
+/**
  * Load the `permissions` section of the project settings file and return
  * the parsed project policy source.
  *
@@ -154,89 +261,28 @@ export function loadProjectSettings(
   const section = raw.permissions;
   if (section === undefined) return undefined;
 
-  if (opts.filePath === undefined) {
-    const tomlPath = resolveLegacyTomlPath(opts.cwd);
-    if (existsSync(tomlPath)) {
-      throw new ProjectSettingsError(
-        "toml_and_json_present",
-        `project-settings: toml_and_json_present: legacy ${tomlPath} and ` +
-          `permissions section in ${filePath} both exist; remove one ` +
-          `(ADR-0084: toml is retired as the permission source)`
-      );
-    }
-  }
+  assertLegacyTomlAbsence(opts, filePath);
+  // `checkNewFormSection` may throw (legacy / forbidden) or return undefined
+  // (non-object section → ajv will report `schema_violation`); either path
+  // lands at `compileSection` which is the single validation + assembly
+  // point.
+  checkNewFormSection(section, filePath);
+  return compileSection(section as Record<string, unknown>, filePath, opts);
+}
 
-  // Legacy shape detection must run before ajv — the new schema does not
-  // know about `schema_version` / `rule` keys (additionalProperties: false
-  // would turn them into a generic `schema_violation` and lose the
-  // actionable hint).
-  if (
-    typeof section === "object" &&
-    section !== null &&
-    !Array.isArray(section) &&
-    ("schema_version" in section || "rule" in section)
-  ) {
-    throw new ProjectSettingsError(
-      "legacy_predicate_form",
-      `project-settings: legacy_predicate_form: ${filePath} uses the old ` +
-        `"schema_version" + "rule" predicate DSL. Migrate to the new ` +
-        `declarative form, e.g.:\n${NEW_FORM_EXAMPLE}`
-    );
-  }
-
-  // `defaultMode: "full_auto"` is rejected here rather than by ajv (ajv
-  // enum doesn't include it; ajv would misreport `schema_violation`).
-  const dm = (section as { defaultMode?: unknown }).defaultMode;
-  if (dm === "full_auto") {
-    throw new ProjectSettingsError(
-      "forbidden_default_mode",
-      `project-settings: forbidden_default_mode: ${filePath} sets ` +
-        `'defaultMode: "full_auto"'. Shared repositories must not ` +
-        `self-grant automatic mode; automatic mode is a per-session ` +
-        `operator choice (ADR-0090).`
-    );
-  }
-
-  const ajv = makeAjv();
-  const validate: ValidateFunction = ajv.compile(PROJECT_PERMISSIONS_SCHEMA);
-  if (!validate(section)) {
-    throw new ProjectSettingsError(
-      "schema_violation",
-      `project-settings: schema violation at ${filePath}: ${ajvErrorMessage(
-        validate.errors
-      )}`
-    );
-  }
-
-  const typed = section as RawSection;
-  const compileOpts: DeclarativeCompileOpts = {
-    workRoot: opts.workRoot ?? opts.cwd ?? process.cwd(),
-    ...(opts.cwd !== undefined ? { projectIdentityRoot: opts.cwd } : {}),
-    ...(opts.knownToolNames !== undefined
-      ? { knownToolNames: opts.knownToolNames }
-      : {}),
-    ...(opts.onWarn !== undefined ? { onWarn: opts.onWarn } : {}),
-  };
-  const rules: ReadonlyArray<NormalRuleSpec> = compileDeclarativePermissions(
-    {
-      allow: typed.allow as readonly string[] | undefined,
-      ask: typed.ask as readonly string[] | undefined,
-      deny: typed.deny as readonly string[] | undefined,
-    },
-    compileOpts
+function assertLegacyTomlAbsence(
+  opts: LoadProjectSettingsOpts,
+  filePath: string
+): void {
+  if (opts.filePath !== undefined) return;
+  const tomlPath = resolveLegacyTomlPath(opts.cwd);
+  if (!existsSync(tomlPath)) return;
+  throw new ProjectSettingsError(
+    "toml_and_json_present",
+    `project-settings: toml_and_json_present: legacy ${tomlPath} and ` +
+      `permissions section in ${filePath} both exist; remove one ` +
+      `(ADR-0084: toml is retired as the permission source)`
   );
-
-  const defaultMode =
-    typed.defaultMode === "default" || typed.defaultMode === "plan"
-      ? typed.defaultMode
-      : undefined;
-
-  return Object.freeze({
-    kind: "project",
-    filePath,
-    rules,
-    ...(defaultMode !== undefined ? { defaultMode } : {}),
-  }) as ProjectSettingsPolicySource;
 }
 
 /**
@@ -312,30 +358,14 @@ export function readProjectDefaultMode(
   if (raw === undefined) return undefined;
   const section = raw.permissions;
   if (section === undefined) return undefined;
-  if (
-    typeof section === "object" &&
-    section !== null &&
-    !Array.isArray(section) &&
-    ("schema_version" in section || "rule" in section)
-  ) {
-    throw new ProjectSettingsError(
-      "legacy_predicate_form",
-      `project-settings: legacy_predicate_form: ${filePath} uses the old ` +
-        `"schema_version" + "rule" predicate DSL. Migrate to the new ` +
-        `declarative form, e.g.:\n${NEW_FORM_EXAMPLE}`
-    );
-  }
-  const dm = (section as { defaultMode?: unknown }).defaultMode;
-  if (dm === "full_auto") {
-    throw new ProjectSettingsError(
-      "forbidden_default_mode",
-      `project-settings: forbidden_default_mode: ${filePath} sets ` +
-        `'defaultMode: "full_auto"'. Shared repositories must not ` +
-        `self-grant automatic mode; automatic mode is a per-session ` +
-        `operator choice (ADR-0090).`
-    );
-  }
-  return dm === "default" || dm === "plan" ? dm : undefined;
+  // No ajv here: an unknown `defaultMode` string ("yolo", …) must stay
+  // `undefined` for the startup-mode seed, not throw — schema validation
+  // belongs to `loadProjectSettings`. Legacy-shape and self-grant
+  // detection share `checkNewFormSection` so both read paths emit the
+  // same error.
+  const checked = checkNewFormSection(section, filePath);
+  if (checked === undefined) return undefined;
+  return declaredDefaultMode(checked.defaultMode);
 }
 
 /* -----------------------------------------------------------------------------
