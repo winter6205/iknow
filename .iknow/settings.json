@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "schema_version": 1,
+    "rule": [
+      {
+        "id": "allow-bash-echo",
+        "match_tool": "bash",
+        "match_input": { "command_starts_with": "echo " },
+        "decision": "allow",
+        "reason": "explicit allow: bash echo"
+      },
+      {
+        "id": "deny-read-ssh",
+        "match_tool": "read_file",
+        "match_input": { "path_contains": ".ssh/" },
+        "decision": "deny",
+        "reason": "explicit deny: read_file under .ssh"
+      }
+    ]
+  }
+}

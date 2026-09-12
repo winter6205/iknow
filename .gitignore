@@ -136,9 +136,9 @@ docs/harness-report
 !.iknow/
 .iknow/*
 !.iknow/mcp.json
+!.iknow/settings.json
 !.iknow/skills/
 !.iknow/skills/**
-.iknow/permissions.toml
 .qoder/
 AGENTS.md
 .mcp.json
