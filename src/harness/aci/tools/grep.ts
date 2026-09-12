@@ -26,6 +26,7 @@ import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
 import { resolveInstallRoot, type LiveTaskRoot } from "../../session-roots.js";
 import { resolveWithinRoot } from "./helpers.js";
 import {
+  assertClassEscapesAlignable,
   assertEngineAlignable,
   assertIgnoreCaseAlignable,
   assertLineContentOnly,
@@ -127,6 +128,9 @@ export function createGrepTool(
     assertEngineAlignable(sampleSpec.pattern);
     assertIgnoreCaseAlignable(sampleSpec.pattern, sampleSpec.ignoreCase);
     assertLineContentOnly(sampleSpec.pattern);
+    // D5：字符类转义（`\s`/`\S` 无条件；`\d`/`\w`/`\b` 一族在 Unicode 模式下）
+    // 两条引擎给不出同一答案 —— 详见 `assertClassEscapesAlignable` 的实测表。
+    assertClassEscapesAlignable(sampleSpec.pattern);
     // 搜索根是显式点名的文件时，体积闸对它让路（rg 的 `--max-filesize` 只管
     // 遍历期，见 `argv.ts` / `node-scan.ts`）。展示侧的取行（`also` 行窗、
     // `context` 组构造）必须与「这个文件能不能被搜到」同口径 —— 否则 rg 出

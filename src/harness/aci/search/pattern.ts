@@ -59,27 +59,23 @@
  * `\o{...}`（PCRE2 的字节转义，`\o{12}` = LF）走同一刀：rg 由 auto 退到
  * PCRE2 才收，JS 读成字面 `o` + 量词 —— 见 `assertEngineAlignable`。
  *
- * 已知残留（逐条实测过，两类都不在本模块的处理面上；要收只能改成 typed
- * 拒绝，属另一刀）：
+ * 单反斜杠转义的接受集差异（逐条实测过，不在本模块的处理面上；要收只能改成
+ * typed 拒绝，属另一刀）。两侧都「收」，但 `\` + 字母在 rg / PCRE2 与 JS 里
+ * 含义不同，且分两种来源：
+ *   - Rust **默认引擎**就收的：`\A` / `\z`（rg 命中全部行，JS 读成字面量
+ *     `A` / `z`，命中含该字母的行）；
+ *   - Rust 不收、argv 的 `--engine=auto` 退到 PCRE2 才收的：`\Z` / `\N` /
+ *     `\h` / `\H` / `\R` / `\e` / `\G` / `\K` / `\X` / `\C`（实测；PCRE2 的
+ *     `\Z` 是文末锚，rg 命中全部行，JS 读字面量 `Z`）。
+ * `\q` / `\g` / `\k` / `\o` / `\y` / `\T`（以及读成两字符序列 `\c` 的
+ * `\c`）是**两个引擎都拒**：rg rc=2 typed 失败，JS（不带 `u`）读字面量
+ * `q` / `g` / `k`… 静默命中 —— 同向「都算错」，但形状不同。
+ * 注意 `a{2,1}` **不是**这类残留：JS 也拒（`numbers out of order`），两边
+ * 同为 typed 拒绝。
  *
- * 1) 敏感构造 × rg 的 Unicode 类混排。判据为真时 rg 留在 Unicode 模式，它的
- *    `\d` / `\w` / `\b` 是 Unicode 类；JS 即使加了 `u` 这些类仍是 ASCII 的
- *    —— `\d.` 于是 rg 多收「٣٤ alpha」（`\d` 吃阿拉伯-印度数字、`.` 吃一个
- *    code point）、JS 只收 ASCII 数字；`\w.c` 同理（rg 多收 `漢xc`）。既不能
- *    加 `--no-unicode`（会打坏 `.`），`u` 也补不上这些类。
- *
- * 2) 单反斜杠转义的接受集差异。两侧都「收」，但 `\` + 字母在 rg / PCRE2 与
- *    JS 里含义不同，且分两种来源：
- *      - Rust **默认引擎**就收的：`\A` / `\z`（rg 命中全部行，JS 读成字面量
- *        `A` / `z`，命中含该字母的行）；
- *      - Rust 不收、argv 的 `--engine=auto` 退到 PCRE2 才收的：`\Z` / `\N` /
- *        `\h` / `\H` / `\R` / `\e` / `\G` / `\K` / `\X` / `\C`（实测；PCRE2 的
- *        `\Z` 是文末锚，rg 命中全部行，JS 读字面量 `Z`）。
- *    `\q` / `\g` / `\k` / `\o` / `\y` / `\T`（以及读成两字符序列 `\c` 的
- *    `\c`）是**两个引擎都拒**：rg rc=2 typed 失败，JS（不带 `u`）读字面量
- *    `q` / `g` / `k`… 静默命中 —— 同向「都算错」，但形状不同。
- *    注意 `a{2,1}` **不是**这类残留：JS 也拒（`numbers out of order`），两边
- *    同为 typed 拒绝。
+ * 字符类转义（`\s` / `\S` / `\d` / `\D` / `\w` / `\W` / `\b` / `\B`）**不再
+ * 是残留**：五族曾列在这里，D5 逐族实测后由 `assertClassEscapesAlignable`
+ * 在共享入口 typed 拒绝（理由与判据见该函数）。
  */
 
 import { ToolExecutionError } from "../../errors.js";
@@ -472,6 +468,64 @@ export function assertEngineAlignable(pattern: string): void {
   if (POSIX_CLASS.test(pattern.replace(ESCAPED_PAIR, ""))) {
     throw new ToolExecutionError(
       `grep: unsupported pattern construct in ${pattern}: POSIX bracket class ([[:name:]]) — ripgrep reads it as an ASCII class while JavaScript RegExp reads it as a literal character set, so the two engines would answer differently; spell the class out (e.g. [A-Za-z] / [0-9])`
+    );
+  }
+}
+
+/**
+ * 字符类转义 × Unicode 口径分叉（D5，逐条实测）：
+ *
+ * 五族都无法让两条引擎在「同一个 pattern、同一个语料」下给出同一答案 —
+ * - 不是「这条慢那条快」也不是「这条少一条」那种可静默修的对齐缺口，而是
+ *   「同一个输入，两条引擎给的命中集真的不同」。选择标准：宁可 typed 拒绝，
+ *   也不要同一个查询的答案取决于哪条引擎在跑（SC9 / SC10）。
+ *
+ * 拆成两层（与 `hasSensitiveEscape` / `keepsUnicodeMode` 的判据对齐）：
+ *
+ * - `\s` / `\S` —— **永远**拒绝。两条引擎的 Unicode 空白表天生不同：
+ *   rg 收 NEL（U+0085）不收 BOM（U+FEFF），JS 收 BOM 不收 NEL（实测，
+ *   `nel-bom-detail.mts`）。任意语料都可能踩到其中一边，让两条引擎落到
+ *   同一答案的可能性是 0。ASCII 空白（SP / TAB）两边一致 —— 但这是
+ *   「恰好这条语料里没 BOM/NEL」的巧合，不是契约能保的事。
+ *
+ * - `\d` / `\D` / `\w` / `\W` / `\b` / `\B` —— **只在 Unicode 模式**拒绝。
+ *   字节模式（rg `--no-unicode` + Node 不加 `u`，由 `keepsUnicodeMode=false`
+ *   触发）下两边的类都按 ASCII 走，`\d` 不吃 `٣`、`\w` 不吃 `漢`、`\b` 把
+ *   `é` 当非词字符 —— 完全 SAME（实测 `H1` 系列）。但 `漢` / `.` / 否定类
+ *   一旦逼出 Unicode 模式，类原子就分叉（实测 `H2` 系列）：rg 收 `٣`
+ *   而 JS 不收（`\d.` on `٣٤`）、rg 收 `漢` 而 JS 不收（`\w.` on `漢x`）、
+ *   `é` 两侧词字归属相反（`\bé` 在 `café` 上一致但 `\b漢` 在 `a漢b` 上
+ *   rg 空 / JS 命中）。
+ *
+ * 替代方案被实测否定（不必再考虑）：
+ * - 「`(?-u)` 局部关 Unicode」会让 `.` 退字节（`(?-u)a.c` 不匹配 `aéc`），
+ *   不能在保留 `.` 的同时让 `\d` 走 ASCII。
+ * - 「rg 的 `(*UCP)` / `(*NO_UCP)`」由 `--engine=auto` 拒收（实测 rc=2）。
+ * - 「`--no-unicode` 常开」打坏 `.` / `\s` / NBSP（实测）。
+ *
+ * 因此收口只有 typed 拒绝一处。判据只问构造名（不含类内位置 —— 见 `B` 例
+ * 外）：`[\\b]` 是退格字节（0x08），两边都吃，不会被本判据误伤；
+ * `[^\\w]` 是字符类，`\\w` 是它**唯一**的成员，按家族语义拒绝即可。
+ *
+ * 字面量先剥掉成对反斜杠：`\\\\s` 在两条引擎上都读成字面 `\\s`，是用户
+ * 在搜字面反斜杠 + s，不算敏感构造。
+ */
+export function assertClassEscapesAlignable(pattern: string): void {
+  /** `\s` / `\S` —— 必拒（无条件）。 */
+  const WHITESPACE_FAMILY = /\\[sS]/;
+  /** `\d` / `\D` / `\w` / `\W` / `\b` / `\B` —— Unicode 模式下必拒。 */
+  const CLASS_FAMILY = /\\[dDwWbB]/;
+  const escaped = pattern.replace(/\\\\/g, "");
+
+  if (WHITESPACE_FAMILY.test(escaped)) {
+    throw new ToolExecutionError(
+      `grep: unsupported pattern construct in ${pattern}: \\s / \\S whitespace class — ripgrep and JavaScript RegExp use different Unicode whitespace tables (ripgrep accepts NEL but not BOM; JavaScript accepts BOM but not NEL), so the two engines would answer differently on the same query; spell out the whitespace characters you need (e.g. [ \\t] for ASCII, [ \\t\\u00a0] to also include NBSP)`
+    );
+  }
+
+  if (keepsUnicodeMode(pattern) && CLASS_FAMILY.test(escaped)) {
+    throw new ToolExecutionError(
+      `grep: unsupported pattern construct in ${pattern}: \\d / \\D / \\w / \\W / \\b / \\B class escape combined with a Unicode-mode trigger (non-ASCII literal, '.', or negated class) — ripgrep uses Unicode classes (\\d eats ٣, \\w eats 漢, \\b treats é as a word char) while JavaScript RegExp keeps these classes ASCII-only, so the two engines would answer differently; remove the Unicode trigger to stay in byte mode (where both engines agree on ASCII classes) or spell the class out (e.g. [0-9] for digits, [A-Za-z] for words)`
     );
   }
 }

@@ -5,7 +5,10 @@
  *   - 坏正则 → typed 拒绝且文案点名 `pattern`；
  *   - 无法让两引擎对齐的构造（`\p{...}` / `\P{...}` / `\u{...}` /
  *     `[[:name:]]`）在**共享入口**拒绝，文案点名构造与理由；
- *   - 三类新文案与坏正则、未知 `type` 的文案互不混同（SC10）；
+ *   - 字符类转义分叉（D5）：`\s` / `\S` 无条件拒绝（两条引擎的 Unicode 空白
+ *     表不同），`\d` / `\D` / `\w` / `\W` / `\b` / `\B` 只在 Unicode 模式下
+ *     拒绝（byte 模式下两边的类都按 ASCII 走、同判）；
+ *   - 上述各文案与坏正则、未知 `type` 的文案互不混同（SC10）；
  *   - `ignoreCase` + 有大小写的非 ASCII → 拒绝；CJK（无大小写）+ `ignoreCase`
  *     必须继续放行；
  *   - `keepsUnicodeMode`：`.` / `\s` / `\S` / `\u` / 非 ASCII / 否定类必须留在
@@ -23,6 +26,7 @@ import { describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import {
+  assertClassEscapesAlignable,
   assertEngineAlignable,
   assertIgnoreCaseAlignable,
   assertLineContentOnly,
@@ -105,6 +109,122 @@ describe("assertEngineAlignable — 无法对齐的构造", () => {
     ]) {
       assert.doesNotThrow(() => assertEngineAlignable(pattern), pattern);
     }
+  });
+});
+
+describe("assertClassEscapesAlignable — 字符类转义分叉（D5）", () => {
+  it("`\\s` / `\\S` 无条件拒绝：两条引擎的 Unicode 空白表天生不同", () => {
+    for (const pattern of ["\\s", "\\S"]) {
+      rejects(() => assertClassEscapesAlignable(pattern), /whitespace class/);
+      rejects(
+        () => assertClassEscapesAlignable(pattern),
+        /two engines would answer differently/
+      );
+    }
+  });
+
+  it("`\\s` 在字符类内（`[\\s]`）同样拒绝：不是位置例外", () => {
+    rejects(() => assertClassEscapesAlignable("[\\s]"), /whitespace class/);
+    rejects(() => assertClassEscapesAlignable("[^\\s]"), /whitespace class/);
+  });
+
+  it("`\\s` 在 ASCII pattern 下也拒绝：判据无条件，不看是否触发 Unicode", () => {
+    // 防止有人误以为「`\\s` 在 byte 模式下两引擎同判」 —— 不是的，
+    // 两边空白表是 Unicode 表，不是字节表。
+    rejects(() => assertClassEscapesAlignable("a\\sb"), /whitespace class/);
+  });
+
+  it("`\\d` / `\\D` / `\\w` / `\\W` / `\\b` / `\\B` × Unicode 触发 → typed 拒绝", () => {
+    const cases: Array<readonly [string, string]> = [
+      ["\\d.漢", "\\d"],
+      ["\\D.漢", "\\D"],
+      ["\\w.漢", "\\w"],
+      ["\\W.漢", "\\W"],
+      ["\\b漢", "\\b"],
+      ["\\B漢", "\\B"],
+      // 否定类是 Unicode 触发构造（`hasSensitiveLiteral` 的判据），同样要把
+      // `\d` 拽进 Unicode 模式。
+      ["[^a]\\d", "\\d"],
+    ];
+    for (const [pattern, family] of cases) {
+      const msg = messageOf(() => assertClassEscapesAlignable(pattern));
+      assert.ok(
+        msg.includes(family),
+        `${pattern} → 文案含 \\${family}：${msg}`
+      );
+      assert.match(msg, /Unicode-mode trigger/);
+      assert.match(msg, /two engines would answer differently/);
+    }
+  });
+
+  it("`\\d` / `\\w` / `\\b` 在 ASCII-only pattern 下（byte 模式）继续放行", () => {
+    // 反证：判据只在 Unicode 模式下砍类原子。ASCII-only pattern 不触发
+    // Unicode mode —— 两边都按 ASCII 走，两引擎同判（D5 H1 系列）。
+    for (const pattern of [
+      "\\d",
+      "\\d+",
+      "\\d{3}",
+      "\\w",
+      "\\w+",
+      "\\bfoo\\b",
+      "[\\d]",
+    ]) {
+      assert.doesNotThrow(
+        () => assertClassEscapesAlignable(pattern),
+        `应放行：${pattern}`
+      );
+    }
+  });
+
+  it("`[^\\d]` 是**否定类**（Unicode 触发构造）→ 类原子同样进拒绝", () => {
+    // 反证：否定类只匹配单个 code point，是 `hasSensitiveLiteral` 的触发
+    // 判据之一；`[^\\d]` 因此进 Unicode 模式，`\\d` 在两侧归属相反 —— 实测
+    // `[^\\d] Arabic`（语料 `٣٤`）rg 空 / Node 命中。不能因为「它是类」就
+    // 放行。
+    rejects(
+      () => assertClassEscapesAlignable("[^\\d]"),
+      /Unicode-mode trigger/
+    );
+  });
+
+  it("`[\\b]`（类内退格字节）放行：退格是字面字节，两引擎一致", () => {
+    // 防止把 `\\b` 误判为词边界 —— 类内的 `\\b` 是退格 0x08，与本函数无关。
+    assert.doesNotThrow(() => assertClassEscapesAlignable("[\\b]"));
+  });
+
+  it("`\\\\s`（成对反斜杠 = 字面 `\\s`）放行：剥掉转义对后无敏感构造", () => {
+    assert.doesNotThrow(() => assertClassEscapesAlignable("\\\\s"));
+  });
+
+  it("新文案与既有失败域互不混同（SC10）", () => {
+    // `\s` / `\S` 文案点名构造名（whitespace class），不含 D1 的 line terminator。
+    const wsMsg = messageOf(() => assertClassEscapesAlignable("\\s"));
+    assert.ok(
+      !/line terminator/.test(wsMsg),
+      `\\s 文案不应混 line terminator：${wsMsg}`
+    );
+    assert.ok(
+      !/property escape/.test(wsMsg),
+      `\\s 文案不应混 property escape：${wsMsg}`
+    );
+    assert.ok(
+      !/POSIX bracket class/.test(wsMsg),
+      `\\s 文案不应混 POSIX：${wsMsg}`
+    );
+    assert.ok(
+      !/code point escape/.test(wsMsg),
+      `\\s 文案不应混 code point：${wsMsg}`
+    );
+    // 类原子 Unicode-mode 文案点名构造名 + Unicode-mode trigger。
+    const classMsg = messageOf(() => assertClassEscapesAlignable("\\d.漢"));
+    assert.ok(
+      !/whitespace class/.test(classMsg),
+      `类原子文案不应混 whitespace：${classMsg}`
+    );
+    assert.ok(
+      !/property escape/.test(classMsg),
+      `类原子文案不应混 property：${classMsg}`
+    );
   });
 });
 
@@ -443,7 +563,7 @@ describe("compilePattern — `u` 规则与退回（code point 对齐）", () => 
 });
 
 describe("新文案与既有失败域互不混同（SC10）", () => {
-  it("三类构造文案与坏正则、未知 type 的文案两两不同", () => {
+  it("构造文案与坏正则、未知 type 的文案两两不同", () => {
     const badRegex = messageOf(() => compilePattern("(unclosed", false));
     const unknownType = messageOf(() => resolveTypeName("nosuchtype"));
     const property = messageOf(() => assertEngineAlignable("\\p{L}"));
@@ -451,6 +571,11 @@ describe("新文案与既有失败域互不混同（SC10）", () => {
     const posix = messageOf(() => assertEngineAlignable("[[:alpha:]]"));
     const caseFolding = messageOf(() =>
       assertIgnoreCaseAlignable("CAFÉ", true)
+    );
+    const lineTerminator = messageOf(() => assertLineContentOnly("\\n"));
+    const whitespaceClass = messageOf(() => assertClassEscapesAlignable("\\s"));
+    const unicodeModeClass = messageOf(() =>
+      assertClassEscapesAlignable("\\d.漢")
     );
 
     const all = [
@@ -460,6 +585,9 @@ describe("新文案与既有失败域互不混同（SC10）", () => {
       codePoint,
       posix,
       caseFolding,
+      lineTerminator,
+      whitespaceClass,
+      unicodeModeClass,
     ];
     for (const message of all) assert.notEqual(message, "");
     assert.equal(new Set(all).size, all.length, all.join("\n---\n"));
@@ -467,7 +595,15 @@ describe("新文案与既有失败域互不混同（SC10）", () => {
     // 未知 type 仍不得泄漏 `pattern` 关键词（既有 SC10 纪律不变）。
     assert.equal(/pattern/.test(unknownType), false, unknownType);
     // 新文案不得被读成「未知 type」。
-    for (const message of [property, codePoint, posix, caseFolding]) {
+    for (const message of [
+      property,
+      codePoint,
+      posix,
+      caseFolding,
+      lineTerminator,
+      whitespaceClass,
+      unicodeModeClass,
+    ]) {
       assert.equal(/unknown type/.test(message), false, message);
       assert.equal(/\btype\b/.test(message), false, message);
     }

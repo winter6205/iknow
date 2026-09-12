@@ -758,17 +758,111 @@ describe("grep — 两引擎正则语义对齐（D6/SC9/SC10）", () => {
 
   it("可匹配行内内容的构造继续放行（`[^\\n]` / `[abc\\n]` / `\\d` / `.`）", async () => {
     // 反证：判据只砍「只可能匹配行终止符」的原子，不能误伤普通查询。
+    // `\\d` 单独出现时 `keepsUnicodeMode=false`（无敏感触发），落在字节模式
+    // → 两边类都按 ASCII 走，`\\d` 在 `alpha 1` 上两引擎同判（D5）。
+    // `\\s` / `\\W` 已被 D5 收口（typed 拒绝），不在本正控列里。
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-lineterm-pos-");
       await writeFile(join(root, "a.txt"), "alpha 1\n", "utf8");
 
-      for (const pattern of ["[^\\n]", "[abc\\n]", "\\d", ".", "\\s", "\\W"]) {
+      for (const pattern of ["[^\\n]", "[abc\\n]", "\\d", "."]) {
         assert.equal(
           await makeTool(root).handler({ pattern }),
           "a.txt",
           pattern
         );
       }
+    });
+  });
+
+  it("`\\s` / `\\S` 两条引擎的 Unicode 空白表天生不同 → typed 拒绝（D5）", async () => {
+    // 反证：实测 `nel-bom-detail.mts` —— rg 收 NEL（U+0085）不收 BOM（U+FEFF），
+    // JS 收 BOM 不收 NEL。同一份语料（如 `x\n<U+FEFF>\n`）上两条引擎的
+    // `\s` / `\S` 命中集**反向分叉** —— 没法让两条引擎都按用户的口径走，
+    // 只能入口拒绝。同一条 typed 拒绝在两条引擎上都命中，不能让 Node 静默
+    // 「全命中」或「全空」、也不能让 rg 命中而 Node 空。
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-d5-ws-");
+      await writeFile(join(root, "in.txt"), "alpha 1\n", "utf8");
+
+      for (const pattern of ["\\s", "\\S"]) {
+        await assert.rejects(
+          () => makeTool(root).handler({ pattern }),
+          (error: unknown) =>
+            error instanceof ToolExecutionError &&
+            /whitespace class/.test(error.message) &&
+            /two engines would answer differently/.test(error.message)
+        );
+      }
+    });
+  });
+
+  it("`\\d` / `\\D` / `\\w` / `\\W` / `\\b` / `\\B` × Unicode 触发 → typed 拒绝（D5）", async () => {
+    // 反证：判据为真时 rg 留在 Unicode 模式，它的 `\d` 吃 `٣` / `\w` 吃 `漢` /
+    // `\b` 把 `é` 当词字符；JS 即使加 `u` 这些类仍是 ASCII 的。同一个
+    // pattern 在两条引擎上的命中集反向分叉（实测 `family-complete.mts` 的
+    // `\d. ٣` / `\w. 漢x` / `\b漢 a漢b` 行）。
+    //
+    // 字节模式（`keepsUnicodeMode=false`，即 pattern 里没有 Unicode 触发构造）
+    // 下两边的类都按 ASCII 走 —— `\d` 不吃 `٣`、`\w` 不吃 `漢`、`\b` 把 `é`
+    // 当非词字符 —— 完全 SAME（实测 H1 系列）。所以本判据不拒「`\d` 单独
+    // 出现」这类 ASCII 查询。
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-d5-class-uni-");
+      await writeFile(join(root, "in.txt"), "alpha 123\n", "utf8");
+
+      const triggerPatterns: ReadonlyArray<readonly [string, string]> = [
+        // [pattern, 类名（用于消息断言）]
+        ["\\d.漢", "\\d"],
+        ["\\D.漢", "\\D"],
+        ["\\w.漢", "\\w"],
+        ["\\W.漢", "\\W"],
+        ["\\b漢", "\\b"],
+        ["\\B漢", "\\B"],
+      ];
+      for (const [pattern, family] of triggerPatterns) {
+        // 文案里出现的「\\d」是字面量「反斜杠 + d」（4 个 TS 字符 → 2 个
+        // 实际字符），与 pattern 里的「\\d」同形。
+        await assert.rejects(
+          () => makeTool(root).handler({ pattern }),
+          (error: unknown) =>
+            error instanceof ToolExecutionError &&
+            error.message.includes(family) &&
+            /Unicode-mode trigger/.test(error.message) &&
+            /two engines would answer differently/.test(error.message)
+        );
+      }
+    });
+  });
+
+  it("`\\d` / `\\w` / `\\b` 在 ASCII-only pattern 下（字节模式）继续放行（D5 不误伤）", async () => {
+    // 反证：判据只拒「在 Unicode 模式下的类原子」；ASCII-only pattern 下
+    // 两边都按 ASCII 走，两引擎命中集同形 —— 这条是 D5 的正控，必须继续
+    // 走通。同一条期望值喂两条引擎。
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-d5-class-ascii-");
+      await writeFile(join(root, "digits.txt"), "abc 123\n", "utf8");
+      await writeFile(join(root, "word.txt"), "foo bar\n", "utf8");
+      await writeFile(join(root, "efe.txt"), "éfoo\n", "utf8");
+
+      assert.equal(
+        await makeTool(root).handler({ pattern: "\\d" }),
+        "digits.txt"
+      );
+      // `\b` 把 `é` 当非词字符（与 JS 同）：`éfoo` 里命中；ASCII 的
+      // `foo bar` 当然也命中（paths 出法按 path 排序，两条都要在）。
+      assert.deepEqual(
+        String(await makeTool(root).handler({ pattern: "\\bfoo\\b" })).split(
+          "\n"
+        ),
+        ["efe.txt", "word.txt"]
+      );
+      // `\d+` / `\w+` / `\\d{3}` 这些是普通查询，量词不触发 Unicode mode，
+      // 仍应继续可用。
+      assert.equal(
+        await makeTool(root).handler({ pattern: "\\d+" }),
+        "digits.txt"
+      );
     });
   });
 
@@ -934,19 +1028,21 @@ describe("grep — 两引擎正则语义对齐（D6/SC9/SC10）", () => {
     });
   });
 
-  it("`.` / `\\s` / 非 ASCII 字面量没被字节语义切坏（留 Unicode 模式）", async () => {
+  it("`.` / 非 ASCII 字面量没被字节语义切坏（留 Unicode 模式）", async () => {
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-unicode-mode-");
       // `.` 必须能吃下一个多字节字符（字节语义下 `a.c` 不匹配 `aéc`）。
       await writeFile(join(root, "aec.txt"), "aéc\n", "utf8");
-      // `\s` 必须认 NBSP / 全角空格（JS 的 `\s` 是 Unicode 的；rg 切了
-      // `--no-unicode` 就只认 ASCII 空白）。
-      await writeFile(join(root, "nbsp.txt"), " \n", "utf8");
+      // 注：原用例还断言「`\s` 认 NBSP」。D5 逐族实测后该断言被证伪 —— 见
+      // 下面 `\s` / `\S` 的 typed 拒绝用例：`\s` 在 BOM / NEL 上与 rg 反向
+      // 分叉，NBSP 上的一致只是那条语料恰好没踩到 BOM / NEL 的巧合。
 
       assert.equal(await makeTool(root).handler({ pattern: "a.c" }), "aec.txt");
+      // 非 ASCII 字面量同理：字节语义下 `漢` 是三个字节，`漢` 自己该命中。
+      await writeFile(join(root, "kanji.txt"), "漢字\n", "utf8");
       assert.equal(
-        await makeTool(root).handler({ pattern: "\\s" }),
-        "nbsp.txt"
+        await makeTool(root).handler({ pattern: "漢" }),
+        "kanji.txt"
       );
     });
   });
@@ -1457,10 +1553,11 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
       { pattern: "\\w+" },
       { pattern: "\\bfoo\\b" },
       { pattern: "\\w+", output: "content" },
-      // `.` / `\s` / 非 ASCII 字面量留在 Unicode 模式：字节语义会打坏它们
-      // （`.` 退化成「一个字节」、`\s` 不再匹配 NBSP），这两条钉住没切坏。
+      // `.` / 非 ASCII 字面量留在 Unicode 模式：字节语义会打坏它们
+      // （`.` 退化成「一个字节」）。注：`\s` 已由 D5 收口为 typed 拒绝，
+      // 不在本对照表里 —— 它的两条引擎空白表天生不同，没有两边都能跑的
+      // 语料（见 D5 的 `\s` / `\S` 拒绝用例）。
       { pattern: ".", output: "content", path: "unicode.txt" },
-      { pattern: "\\s", output: "content", path: "unicode.txt" },
       { pattern: "café", output: "content", path: "unicode.txt" },
       { pattern: "漢", output: "content", path: "unicode.txt" },
       // code point vs code unit（D6/SC9）：`.` 与计数 quantifier 在 rg 按
