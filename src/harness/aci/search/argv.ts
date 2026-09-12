@@ -10,14 +10,13 @@
  *
  * 未知 `type` 的 typed 拒绝**不在这里**：它在 `options.ts` 的 `parseQuerySpec`
  * 就挡下（见该处注释）—— 校验若只挂在本函数上，就只在「自带引擎在场」时才
- * 生效，Node 全会话会静默回空（SC10 在一条引擎上失效）。
+ * 生效。
  */
 
 import type { QuerySpec } from "./types.js";
 import { TYPE_GLOBS } from "./type-table.js";
 import { MAX_TEXT_FILE_BYTES } from "./file-lines.js";
 import { NEWLINE_PATH_EXCLUDES } from "./path-representable.js";
-import { keepsUnicodeMode } from "./pattern.js";
 import { rgTransportBudgetBytes } from "./rg-output.js";
 
 /** 词表里常被用到的样例（测试锁形状用；真值仍在 TYPE_GLOBS）。 */
@@ -38,38 +37,11 @@ export function buildRgArgs(
 ): string[] {
   const args: string[] = [];
   pushOutputMode(args, spec);
-  // `--engine=auto`：默认走 Rust 正则引擎，**默认引擎编不过**时退 PCRE2
-  // （实测不限于 look-around / backreference：`\Z` / `\N` / `\h` 这类 Rust
-  // 不认而 PCRE2 认的转义同样被它接住）。少了这一行，`(?=hit)` 在 rg 路径是
-  // rc=2 typed 失败、在 Node 路径正常命中（JS `RegExp` 支持 look-around）——
-  // 同一次查询「报错还是出结果」取决于哪条引擎在跑，正是 D6 要消除的引擎
-  // 依赖。普通模式零开销（对比 `--pcre2` 强制全量换引擎）。
-  //
-  // 这不是「接受集完全对齐」，两个方向都还有口子（逐条实测）：
-  //   - rg 收而 Node 读字面量：`\A` / `\z`（Rust 默认引擎就收，auto 不必
-  //     换引擎）与 `\Z` / `\N` / `\h` 一类（Rust 不收、auto 退 PCRE2 收下）；
-  //     两边都「接受」，命中的行却不同 —— 反向的静默分叉，auto 管不了。
-  //   - rg 拒而 Node 收：`\q` / `\g` / `\k` / `\y` / `\T` 一类，Rust 与
-  //     PCRE2 都编不过 → rc=2 typed 失败，JS（无 `u`）读成字面量 `q` / `g`
-  //     / `k`… 静默命中（`\c` 同类但 JS 读成两字符序列 `\c`，命中对象与单字
-  //     符不同，实测）。注意 `\o{...}`（PCRE2 的字节转义，`\o{12}` = LF）
-  //     走另一条路：Rust 默认拒、auto 退 PCRE2 才收 —— 是「rg 收、Node 收成
-  //     字面 `o`」的静默分叉，由 `assertLineContentOnly` 入口收口。
-  // 注：`a{2,1}` **不是**这类反例 —— JS 也拒（`numbers out of order`），两
-  // 边同为 typed 拒绝。
-  // 所以 auto 的实测保证只有一条：**「rg 默认引擎编不过」不必然等于「rg 拒
-  // 这条查询」**，能换 PCRE2 的它会换。
-  args.push("--engine=auto");
-  // `--no-unicode`：判据是 `keepsUnicodeMode`（**唯一**模式判据，见
-  // `pattern.ts`），此处是它的 rg 侧投影 —— Node 侧按同一判据决定要不要加
-  // `u` flag。不加 `--no-unicode`（= 判据为 true）时 rg 留在 Unicode 模式：
-  // `.` / 计数 quantifier 按 code point，`\s` 认 NBSP；Node 加 `u` 后同口径。
-  // 加 `--no-unicode`（= 判据为 false）时 rg 切字节语义，把 `\d` / `\w` /
-  // `\D` / `\W` / `\b` / `\B` 对齐到 JS 的 ASCII 类（实测 rg 默认 `\d` 吃
-  // ٣٤、`\w` 吃 CJK、`\b` 把 `é` 当词字符），Node 侧则**不加** `u`。
-  // 常开会打坏 `.` / `\s` / `\S`（实测 `--no-unicode` 下 `.` 退化成「一个
-  // 字节」，`a.c` 反而不匹配 `aéc`），所以必须按 pattern 判。
-  if (!keepsUnicodeMode(spec.pattern)) args.push("--no-unicode");
+  // 不给 rg 加任何 Unicode 模式开关（`--no-unicode` / `--engine`）：这两个都是
+  // 「把 rg 的语义掰向 JS」的杠杆，ADR-0089 禁止用它们凑两引擎对齐。rg 按自己
+  // 的默认 Unicode 语义跑，`\w` / `\d` / `\b` 因此认非 ASCII 词字符；Node
+  // 路径按 JS 的语义跑，命中集与 rg 不同是**已接受的合同**（见 `pattern.ts`
+  // 文件头；回归钉子见 `tests/harness/aci/search/argv.test.ts`）。
   // `--no-messages` 收掉**文件级**告警（不可读文件的 Permission denied、坏
   // 符号链接），但**不收**正则 / 用法错误。于是 rc=2 且 stderr 空 = 只是某个
   // 文件没读到（stdout 里的命中照常有效）；rc=2 且 stderr 非空 = 查询本身被

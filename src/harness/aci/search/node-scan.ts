@@ -1,14 +1,15 @@
 /**
- * Node 扫引擎（D6 / SC9）。
+ * Node 扫引擎（D6 / SC9 / ADR-0089）。
  *
- * 契约要求：自带引擎起不来（安装根二进制不存在，或 spawn 得 ENOENT /
- * 无法执行）时，Node 扫必须实现 **D2–D5 全语义** —— 出法 / 排序 / 分页 /
- * context / count / glob / type / also within_lines 一个不少。不是少功能
- * 成功，也不是该调用直接拒绝，更不许去 exec PATH 上的 `rg`。
+ * 自带引擎起不来（安装根二进制不存在，或 spawn 得 ENOENT / 无法执行）时
+ * 启用：Node 遍历文件 + 用 `RegExp` 跑 `compilePattern` 编得过的 pattern，
+ * 调用仍成功。**不**少功能成功（直接拒绝），**不**许 exec PATH 上的 `rg`。
+ * 命中集允许与 rg 不同 —— Node 不模仿 rg 的默认引擎拒绝集（lookaround /
+ * `\d` 类等在无 rg 机器上可能更宽，文档与测试视为特性，不是漏测）。
  *
  * 单点职责：**产出与 rg 引擎同形的原始命中**（`LineHit[]` 已按 (path,line)
  * 稳定排序）。分页 / 投影 / 行窗过滤是共用层的事，本模块不重复实现 ——
- * 两条引擎的等价性因此来自「喂进同一条流水线」而不是两套镜像逻辑。
+ * 两条引擎的下游共用因此来自「喂进同一条流水线」而不是两套镜像逻辑。
  *
  * 收窄（D4）走共享层：`type` 用 `type-table.ts` 的 rg 原词表（按文件名判），
  * `glob` 用 `glob-match.ts` 的 rg 同口径匹配。二者与 rg 引擎的 `--type` /

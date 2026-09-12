@@ -10,8 +10,10 @@
  *   - 收窄（D4）：`path`（目录）/ `glob`（文件名模式）/ `type`（语言，二者并列）。
  *     未知 `type` 与坏正则是**两种** typed 错误（SC10）。
  *   - 行窗（D5）：`also` + `within_lines`（默认 5）是**过滤**，只在窗内找第二段。
- *   - 引擎（D6）：只 exec 安装根钉死的二进制；起不来（不存在 / ENOENT /
- *     不可执行）→ Node 扫实现 D2–D5 全语义。**不** 回落到 PATH 上的 `rg`。
+ *   - 引擎（D6 / ADR-0089）：有 rg 时匹配只出 rg（不再 JS 再滤）；起不来
+ *     （不存在 / ENOENT / 不可执行）→ Node 遍历 + JS `RegExp` 编得过的
+ *     pattern，调用仍成功。命中集不必与 rg 一致 —— Node 不模仿 rg 的
+ *     默认引擎拒绝集。**不** 回落到 PATH 上的 `rg`。
  *
  * 复杂度（SC12）：flag 解析 / argv / 行解析 / 行窗 / 组构造 / 排序 / 分页 /
  * 投影各自独立成模块，本文件只做装配与引擎分派。
@@ -25,13 +27,7 @@ import type { ToolExecutionContext } from "../../tools/types.js";
 import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
 import { resolveInstallRoot, type LiveTaskRoot } from "../../session-roots.js";
 import { resolveWithinRoot } from "./helpers.js";
-import {
-  assertClassEscapesAlignable,
-  assertEngineAlignable,
-  assertIgnoreCaseAlignable,
-  assertLineContentOnly,
-  compilePattern,
-} from "../search/pattern.js";
+import { compilePattern } from "../search/pattern.js";
 import { parseQuerySpec, rejectRetiredLimitField } from "../search/options.js";
 import { engineSpecFor, renderResult } from "../search/pipeline.js";
 import { readWorkspaceLines } from "../search/file-lines.js";
@@ -51,7 +47,7 @@ export type { SpawnFn } from "../search/rg-engine.js";
 
 /** 依赖注入：覆盖点（默认 = 生产值）。 */
 export interface GrepToolDeps {
-  /** 替换引擎 spawn（最常见用法：模拟安装根二进制缺失以驱动 Node 全语义）。 */
+  /** 替换引擎 spawn（最常见用法：模拟安装根二进制缺失以驱动 Node 降级路径）。 */
   readonly spawn?: SpawnFn;
   /**
    * Stable project identity root. When present, absolute paths (and relative
@@ -120,21 +116,11 @@ export function createGrepTool(
       engineBinaryPath(resolveInstallRoot(), process.platform, process.arch);
     // 取样 spec：`also` 在场时改取内容行（行窗要行号才能判）。
     const sampleSpec = engineSpecFor(compiled.spec);
-    // 语义可行性校验必须在**两条引擎分派之前**（SC9/SC10）：这些构造在 rg
-    // 与 JS `RegExp` 之间无法对齐，若只在 rg 路径校验，同一个 pattern 会随
-    // 「自带二进制在不在」在「typed 拒绝」与「静默错答案」之间摇摆。坏正则
-    // 与它的顺序固定为先编译（坏正则先报自己的文案）。
+    // 编译主 pattern 供 Node 降级路径使用（ADR-0089）：有 rg 时匹配只出 rg，
+    // 这条 RegExp 不会被用来再滤 rg 命中；rg 起不来时 Node 遍历 + 这条
+    // RegExp 出结果，调用仍成功。rg 路径自身的 pattern 错误由 rg 子进程
+    // （rc=2）报，不靠共享入口预判。
     const regex = compilePattern(sampleSpec.pattern, sampleSpec.ignoreCase);
-    assertEngineAlignable(sampleSpec.pattern);
-    assertIgnoreCaseAlignable(sampleSpec.pattern, sampleSpec.ignoreCase);
-    assertLineContentOnly(sampleSpec.pattern);
-    // D5：字符类转义（`\s`/`\S` 无条件；`\d`/`\w`/`\b` 一族在 Unicode 模式下）
-    // 两条引擎给不出同一答案 —— 详见 `assertClassEscapesAlignable` 的实测表。
-    assertClassEscapesAlignable(sampleSpec.pattern);
-    // 搜索根是显式点名的文件时，体积闸对它让路（rg 的 `--max-filesize` 只管
-    // 遍历期，见 `argv.ts` / `node-scan.ts`）。展示侧的取行（`also` 行窗、
-    // `context` 组构造）必须与「这个文件能不能被搜到」同口径 —— 否则 rg 出
-    // 了命中、过滤层却因为读不到行而把它丢掉，两条引擎的产出又分叉。
     const explicitFileRel = await explicitFileRelative(compiled);
     const readLines = (path: string) =>
       readWorkspaceLines(compiled.workspaceRoot, path, {
@@ -168,7 +154,7 @@ export function createGrepTool(
 }
 
 /** 模型可见文案（D7）：schema 与描述提为模块常量，工厂保持短小。 */
-export const GREP_DESCRIPTION = `Search file contents under a workspace directory using a regular expression; use it to discover which files carry a pattern before reading them, and pair it with read_file once you have a pinpointed path. Returns relative paths by default (output=paths) — set output=\"content\" for path:line:text or output=\"count\" for per-file counts plus a total:. Narrow with glob / type, show nearby lines with context, or keep only hits whose second literal also appears within within_lines of the match. Page a sorted result list with offset + head_limit (default 50, hard cap ${String(2000)}); an offset past the last entry returns "No entries at this offset". Runs on a bundled search engine (ripgrep ${RIPGREP_VERSION}) resolved from the install root, and falls back to a built-in Node scan with the same semantics when that engine is unavailable.`;
+export const GREP_DESCRIPTION = `Search file contents under a workspace directory using a regular expression; use it to discover which files carry a pattern before reading them, and pair it with read_file once you have a pinpointed path. Returns relative paths by default (output=paths) — set output=\"content\" for path:line:text or output=\"count\" for per-file counts plus a total:. Narrow with glob / type, show nearby lines with context, or keep only hits whose second literal also appears within within_lines of the match. Page a sorted result list with offset + head_limit (default 50, hard cap ${String(2000)}); an offset past the last entry returns "No entries at this offset". Runs on a bundled search engine (ripgrep ${RIPGREP_VERSION}) resolved from the install root, and falls back to a built-in Node scan when that engine is unavailable — the Node fallback walks files and matches with JavaScript RegExp and may answer differently from ripgrep.`;
 
 /**
  * 输入 schema（与 `options.ts` 的解析层是同一契约的两道防线）。
@@ -216,9 +202,11 @@ async function explicitFileRelative(
 }
 
 /**
- * 引擎分派（D6 / SC9）。
+ * 引擎分派（D6 / SC9 / ADR-0089）。
  *
- * 生产路径只 exec 安装根钉死二进制；起不来 → Node 扫（D2–D5 全语义）。
+ * 生产路径只 exec 安装根钉死二进制；rg 在场 → 直接用 rg 的命中（不再 JS
+ * 再滤）。起不来 → Node 遍历 + JS `RegExp`（`compilePattern` 已编过的），
+ * 调用仍成功。命中集允许两条路径不同（Node 不模仿 rg 的默认引擎拒绝集）。
  * 这里**没有** PATH `rg` 的分支 —— 那是契约明令禁止的凑合路径。
  */
 async function resolveEngineResult(input: {

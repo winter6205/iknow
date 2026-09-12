@@ -1,19 +1,20 @@
 /**
  * grep 工具 — 搜面契约（specs/aci-file-search-surface.md D2–D7 / SC4–SC10）。
  *
- * 覆盖策略：除 schema / aci 形状外，**每一条行为断言都在两条引擎上各跑一遍**
- * （rg-stub 注入固定 stdout / Node 扫）。SC9 要的「自带起不来时 Node 全语义」
- * 不是靠再写一套镜像断言来锁，而是靠「同一张表、同一组期望值喂两条引擎」——
- * 任何一侧少功能都会让表里某行只在一侧变红。
+ * 覆盖策略（ADR-0089 后）：单引擎的形状 / 渲染 / 分页 / glob / type / `also`
+ * / context 等行为在 **rg** 这条生产默认路径上钉一遍；Node 降级路径在专属
+ * describe 块里用 `engineBinaryPath` 指向不存在路径驱动 `unavailable → nodeScan`，
+ * 钉「ENOENT 时仍能搜、调用不拒绝、分页 / context / count 同形」。两条引擎
+ * 不再被强行同判（命中集允许不同），过去那张 parity 表退役 —— 见
+ * 「grep — SC9 自带引擎缺席 → Node 遍历 + JS RegExp」块的注释。
  *
  * 引擎选择（`GrepEngine`）：
- *   - `node`  —— `engineBinaryPath` 指向不存在的路径：D6 的「安装根二进制不
- *                存在」判据，走 Node 全语义。
+ *   - `node`  —— `engineBinaryPath` 指向不存在的路径：驱动 D6 降级（不走真
+ *                rg，所以测试只验 Node 路径的形状）。
  *   - `rg`    —— 真实安装根二进制。
  *
- * **引擎在场是硬前置**：本文件是全仓唯一认证「rg 路径真的等价于 Node 路径」
- * 的地方，静默 skip 会让 SC9 的另一半无人认证（`--engine=auto`、`--crlf`、
- * 遍历语义这些也只在真引擎上才验得到）。缺席 = 整文件 fail，文案点名修复
+ * **引擎在场是硬前置**：本文件覆盖 rg 的生产路径，而 rg 的命中 / argv /
+ * `--crlf` / 遍历语义必须在真二进制上验。缺席 = 整文件 fail，文案点名修复
  * 命令 `npm run install:search-engine`，不提供「跳过继续」的分支。
  *
  * CI 形状：本文件已在 test-fast / test-full 的 `--exclude` 名单里（两个 job
@@ -30,7 +31,10 @@
  *     错误，文案互不包含对方关键词（SC10）。
  *   - D5 行窗：`also` + `within_lines` 是**过滤**；窗内没有第二段 → 该命中
  *     不算（SC8）。
- *   - D6/SC9：安装根二进制缺席 → Node 全语义，不 typed 拒绝该调用。
+ *   - D6 / SC9 / ADR-0089：
+ *       - rg 在场：匹配只出 rg（不再 JS 再滤）；rg 自己 rc=2 → handler 转
+ *         `search engine rejected the query`，不是合成的「两边对齐」错误。
+ *       - rg 缺席：Node 遍历 + JS `RegExp`，调用仍成功。
  *   - SC4/SC5/SC6/SC7 各自的形状断言。
  *   - 旧契约保持：containment 越界拒绝、abort typed 拒绝、超长行截断、
  *     aci 元数据。
@@ -92,9 +96,11 @@ if (installedEngine === undefined || !existsSync(installedEngine)) {
       "grep 测试需要自带搜索引擎：安装根上找不到 rg 二进制。",
       `  期望路径: ${installedEngine ?? "(该平台在 engine-manifest 中无资产)"}`,
       "  修复: npm run install:search-engine",
-      "为什么是硬前置：本文件是 SC9 引擎等价的唯一认证面，skip 等于让 rg 那",
-      "一半无人认证。CI 两个 job 已 --exclude 本文件（runner 无网），所以这条",
-      "要求在本地 fail-loud、在 CI 不出现。",
+      "为什么是硬前置：本文件直接驱动生产 handler，两条路径（rg 在场 / rg 缺席）",
+      "都要在这里落字。rg 路径的命中 / argv / 遍历语义只可能在真二进制上验 —",
+      "Node 降级路径专属描述块只验 ENOENT 分支，rg 那条路径缺了真二进制就无人",
+      "认证。CI 两个 job 已 --exclude 本文件（runner 无网），所以这条要求在本地",
+      "fail-loud、在 CI 不出现。",
     ].join("\n")
   );
 }
@@ -104,6 +110,13 @@ if (installedEngine === undefined || !existsSync(installedEngine)) {
  *
  * `node` 用「安装根二进制不存在」驱动 D6 降级（不是注入假 spawn —— 那会绕过
  * 真实的 `runRgEngine → isUnavailable → nodeScan` 接线）。
+ *
+ * ADR-0089 之后两引擎不再被同一条断言表比对：每条用例按它想验的路径选
+ * `rg` / `node` / 两者都需要（前者直接 `toolFor(root, "rg")`，后者在
+ * `bothEngines` 里各跑一遍）。`bothEngines` 现在仍存在 —— 形状 / 渲染 /
+ * 体积 / glob / type 等下游共用分派不挑引擎，两条路径都得验；handler 级
+ * 接受集差异（`\s` / `\n` / look-around / 类转义的 Unicode 口径）则走单引擎
+ * 用例。
  */
 const ENGINES = [{ name: "node" }, { name: "rg" }] as const;
 
@@ -119,13 +132,13 @@ function toolFor(
       ? { ...extra }
       : {
           ...extra,
-          // D6 判据：安装根没有这条二进制 → Node 全语义。
+          // D6 判据：安装根没有这条二进制 → Node 降级。
           engineBinaryPath: join(root, "__no_such_engine__", "rg"),
         };
   return createGrepTool(root, deps);
 }
 
-/** 同一张断言表喂两条引擎：任何一侧缺功能都会让本函数在某一行抛。 */
+/** 同一组断言在两条引擎上各跑一遍：覆盖下游共用分派（与引擎路径无关的部分）。 */
 async function bothEngines(
   body: (
     makeTool: (root: string) => ReturnType<typeof createGrepTool>
@@ -687,232 +700,173 @@ describe("grep — D4 glob / type 收窄", () => {
   });
 });
 
-// ───────────── 引擎语义对齐（F1：无法对齐的构造在共享入口拒绝） ─────────────
+// ───────────── ADR-0089 接受集差异（handler 级，rg / Node 各自实测） ─────────────
+//
+// 旧的「grep — 两引擎正则语义对齐（D6/SC9/SC10）」块整体退役：那些用例断言
+// 的是「同一个 pattern 在两条引擎上必须给出同一条 typed 拒绝」，是 D6 旧合同。
+// ADR-0089 收窄合同：rg 在场时匹配只出 rg，rg 自己的 rc=2 按 rg 自己的错误
+// （`search engine rejected the query`）处理；Node 降级路径不再模仿 rg 默认
+// 引擎拒绝集（lookaround / `\p{...}` / `\s` 等在无 rg 机器上可能更宽，文档与
+// 测试视为特性）。下面用单引擎用例钉住每条路径**实测**到的行为；跨引擎相等
+// 断言（`assert.equal(fromNode, fromRg)`）已按要求删除 —— 那条不变式已作废。
+//
+// 保留的共用不变量（与 engine 选择无关，仍在两条路径上验）：
+//   - glob / type 收窄与否定 glob 的语义（D4）；
+//   - 用户 glob 不能撤销工具自带的 `!**/node_modules` / `!**/.git`（D2）；
+//   - `.` / 非 ASCII 字面量在两条引擎上都走 code point 语义（rg 默认就是，
+//     Node 走 `u` flag）；
+//   - rg 侧不再被任何 argv 开关掰成 ASCII 口径（`--no-unicode` 已退役 ——
+//     见 `tests/harness/aci/search/argv.test.ts` 的回归钉子）。
+//
+// rg 路径下的 `\d` / `\w` / `\b` 在默认 Unicode 语义下会认非 ASCII 类成员
+// （`\w` 命中 `漢字`、`\d` 命中 `٣٤`）—— 这与 Node 路径（JS 无 `u` 已停在
+// ASCII）的行为**有意不同**。ADR-0089 接受这种命中集差异。下面那块「
+// `\d` / `\w` / `\b`」用例钉的就是这条新合同。
+describe("grep — ADR-0089 接受集差异（handler 级）", () => {
+  it("rg 路径：`\\d` / `\\w` / `\\b` 走默认 Unicode 口径（命中非 ASCII 类）", async () => {
+    // rg 一律按自己的默认 Unicode 语义跑（ADR-0089）：`\\w` 认 `漢字`、
+    // `\\d` 认 `٣٤`、`\\b` 把 `é` 当词字符。这是新合同 —— 本工具不再用
+    // `--no-unicode` 把 rg 掰向 ASCII。Node 路径走 JS 的 ASCII 口径（无
+    // `u` 时停在 [0-9] / [A-Za-z0-9_]），命中集因此**有意不同**，那是
+    // 同一判据在两侧投影的差异，不是跨引擎对齐。
+    const root = await makeScratch("grep-rg-unicode-classes-");
+    await writeFile(join(root, "arabic.txt"), "٣٤ digits\n", "utf8");
+    await writeFile(join(root, "ascii.txt"), "42 digits\n", "utf8");
+    await writeFile(join(root, "efe.txt"), "éfoo\n", "utf8");
+    await writeFile(join(root, "kanji.txt"), "漢字\n", "utf8");
 
-describe("grep — 两引擎正则语义对齐（D6/SC9/SC10）", () => {
-  /**
-   * 无法让 rg 与 JS `RegExp` 给出同一答案的构造，必须在**两条引擎上给出
-   * 同一条 typed 拒绝** —— 而不是「rg 能搜、Node 静默回空」。文案还要点名
-   * 构造与理由，并与坏正则 / 未知 type 互不混同（SC10）。
-   */
-  it("`\\p{...}` / `\\P{...}` / `\\u{...}` / `[[:name:]]` → 两条引擎同一条拒绝", async () => {
-    await bothEngines(async (makeTool) => {
-      const root = await makeScratch("grep-alignable-");
-      await writeFile(join(root, "a.ts"), "alpha 123\n", "utf8");
-      const cases: ReadonlyArray<readonly [string, RegExp]> = [
-        ["\\p{L}+", /property escape/],
-        ["\\P{L}", /property escape/],
-        ["\\u{6f22}", /code point escape/],
-        ["[[:alpha:]]", /POSIX bracket class/],
-      ];
-      for (const [pattern, expected] of cases) {
-        await assert.rejects(
-          () => makeTool(root).handler({ pattern }),
-          (error: unknown) =>
-            error instanceof ToolExecutionError &&
-            expected.test(error.message) &&
-            /pattern/.test(error.message) &&
-            !/unknown type/.test(error.message)
-        );
-      }
-    });
+    // `\\d` 命中 `٣٤` 与 `42`：两条都在结果里（rg 默认 Unicode 类）。
+    assert.equal(
+      await toolFor(root, "rg").handler({ pattern: "\\d" }),
+      "arabic.txt\nascii.txt"
+    );
+    // `\\w` 命中 `漢字`：CJK 是 rg 的词字符。
+    assert.equal(
+      await toolFor(root, "rg").handler({ pattern: "\\w" }),
+      "arabic.txt\nascii.txt\nefe.txt\nkanji.txt"
+    );
+    // `\\bfoo\\b` 在 `éfoo` 上不命中：`é` 是词字符，前缀无边界。
+    assert.equal(
+      await toolFor(root, "rg").handler({ pattern: "\\bfoo\\b" }),
+      ""
+    );
   });
 
-  it("行终止符原子（`\\n` / `\\n+` / `[\\n]` / `\\n\\n`）→ 两条引擎同一条拒绝（D1）", async () => {
-    // 复现（修复前，真实二进制）：`{pattern:"\\n",output:"paths"}` 在 rg 侧回
-    // 全部文件、Node 侧回 `""` —— `--crlf` 与 `--engine=auto` 叠加后 PCRE2 把
-    // 行边界当成可匹配面。本用例钉住「同一个查询的答案不取决于哪条引擎在跑」。
-    await bothEngines(async (makeTool) => {
-      const root = await makeScratch("grep-lineterm-");
-      await writeFile(join(root, "a.txt"), "alpha\n", "utf8");
-      await writeFile(join(root, "b.txt"), "beta\n", "utf8");
+  it("Node 路径：`\\d` / `\\w` / `\\b` 停在 ASCII 类口径（与 rg 有意不同）", async () => {
+    // JS 无 `u` 时 `\\d` / `\\w` 按 ASCII 走 —— 与 rg 默认 Unicode 口径有意
+    // 不同。本工具**不**用 argv 把 rg 掰过来凑这个一致。
+    const root = await makeScratch("grep-node-ascii-classes-");
+    await writeFile(join(root, "arabic.txt"), "٣٤ digits\n", "utf8");
+    await writeFile(join(root, "ascii.txt"), "42 digits\n", "utf8");
+    await writeFile(join(root, "efe.txt"), "éfoo\n", "utf8");
 
-      const rejected: ReadonlyArray<RegExp> = [/line terminator/];
-      for (const pattern of ["\\n", "\\n+", "[\\n]", "\\n\\n"]) {
-        // 三种出法都必须拒（不能只在某一种出法下才校验收口）。
-        for (const output of ["paths", "content", "count"] as const) {
-          await assert.rejects(
-            () => makeTool(root).handler({ pattern, output }),
-            (error: unknown) =>
-              error instanceof ToolExecutionError &&
-              rejected.some((expected) => expected.test(error.message)) &&
-              /pattern/.test(error.message) &&
-              !/unknown type/.test(error.message),
-            `${pattern} / ${output}`
-          );
-        }
-        // 有 / 无 `path`、有 / 无 `also` 都同判。
-        await assert.rejects(
-          () => makeTool(root).handler({ pattern, path: "a.txt" }),
-          ToolExecutionError,
-          `${pattern} / path`
-        );
-        await assert.rejects(
-          () => makeTool(root).handler({ pattern, also: "alpha" }),
-          ToolExecutionError,
-          `${pattern} / also`
-        );
-      }
-    });
+    // `\\d` 不吃 `٣٤`：只命中 ASCII 数字。
+    assert.equal(
+      await toolFor(root, "node").handler({ pattern: "\\d" }),
+      "ascii.txt"
+    );
+    // `\\bfoo\\b` 在 `éfoo` 上命中（`é` 是非词字符，前缀有边界）。
+    assert.equal(
+      await toolFor(root, "node").handler({ pattern: "\\bfoo\\b" }),
+      "efe.txt"
+    );
   });
 
-  it("可匹配行内内容的构造继续放行（`[^\\n]` / `[abc\\n]` / `\\d` / `.`）", async () => {
-    // 反证：判据只砍「只可能匹配行终止符」的原子，不能误伤普通查询。
-    // `\\d` 单独出现时 `keepsUnicodeMode=false`（无敏感触发），落在字节模式
-    // → 两边类都按 ASCII 走，`\\d` 在 `alpha 1` 上两引擎同判（D5）。
-    // `\\s` / `\\W` 已被 D5 收口（typed 拒绝），不在本正控列里。
-    await bothEngines(async (makeTool) => {
-      const root = await makeScratch("grep-lineterm-pos-");
-      await writeFile(join(root, "a.txt"), "alpha 1\n", "utf8");
+  it("rg 在场 + `\\w` 命中 CJK：钉 ADR-0089 的新合同（rg 默认 Unicode 口径）", async () => {
+    // 回归钉子：本工具**不再**用 `--no-unicode` 把 rg 掰成 ASCII。`\\w` 在
+    // rg 默认语义下认 CJK 词字符。验证：用真二进制跑这条用例，命中应包含
+    // 那个仅含 CJK 内容的文件。若本工具重新加了 `--no-unicode`，该文件
+    // 会从结果里消失 —— 这条钉子就是拦那一类回归。
+    const root = await makeScratch("grep-rg-cjk-word-");
+    await writeFile(join(root, "kanji-only.txt"), "漢字\n", "utf8");
 
-      for (const pattern of ["[^\\n]", "[abc\\n]", "\\d", "."]) {
-        assert.equal(
-          await makeTool(root).handler({ pattern }),
-          "a.txt",
-          pattern
-        );
-      }
-    });
+    const fromRg = (await toolFor(root, "rg").handler({
+      pattern: "\\w",
+    })) as string;
+    assert.match(fromRg, /kanji-only\.txt/);
   });
 
-  it("`\\s` / `\\S` 两条引擎的 Unicode 空白表天生不同 → typed 拒绝（D5）", async () => {
-    // 反证：实测 `nel-bom-detail.mts` —— rg 收 NEL（U+0085）不收 BOM（U+FEFF），
-    // JS 收 BOM 不收 NEL。同一份语料（如 `x\n<U+FEFF>\n`）上两条引擎的
-    // `\s` / `\S` 命中集**反向分叉** —— 没法让两条引擎都按用户的口径走，
-    // 只能入口拒绝。同一条 typed 拒绝在两条引擎上都命中，不能让 Node 静默
-    // 「全命中」或「全空」、也不能让 rg 命中而 Node 空。
-    await bothEngines(async (makeTool) => {
-      const root = await makeScratch("grep-d5-ws-");
-      await writeFile(join(root, "in.txt"), "alpha 1\n", "utf8");
+  it("rg 在场 + pattern `\\n` → rg 自己的 rc=2（不是合成的行终止符门）", async () => {
+    const root = await makeScratch("grep-adr-rg-lineterm-");
+    await writeFile(join(root, "a.txt"), "alpha\nbeta\n", "utf8");
 
-      for (const pattern of ["\\s", "\\S"]) {
-        await assert.rejects(
-          () => makeTool(root).handler({ pattern }),
-          (error: unknown) =>
-            error instanceof ToolExecutionError &&
-            /whitespace class/.test(error.message) &&
-            /two engines would answer differently/.test(error.message)
-        );
-      }
-    });
+    await assert.rejects(
+      () => toolFor(root, "rg").handler({ pattern: "\\n" }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        /search engine rejected the query/.test(error.message) &&
+        !/line terminator/.test(error.message) &&
+        !/unsupported pattern construct/.test(error.message)
+    );
   });
 
-  it("`\\d` / `\\D` / `\\w` / `\\W` / `\\b` × Unicode 触发 → typed 拒绝（D5）", async () => {
-    // 反证：判据为真时 rg 留在 Unicode 模式，它的 `\d` 吃 `٣` / `\w` 吃 `漢` /
-    // `\b` 把 `é` 当词字符；JS 即使加 `u` 这些类仍是 ASCII 的。同一个
-    // pattern 在两条引擎上的命中集反向分叉（实测 `family-complete.mts` 的
-    // `\d. ٣` / `\w. 漢x` / `\b漢 a漢b` 行）。
-    //
-    // 字节模式（`keepsUnicodeMode=false`，即 pattern 里没有 Unicode 触发构造）
-    // 下两边的类都按 ASCII 走 —— `\d` 不吃 `٣`、`\w` 不吃 `漢`、`\b` 把 `é`
-    // 当非词字符 —— 完全 SAME（实测 H1 系列）。所以本判据不拒「`\d` 单独
-    // 出现」这类 ASCII 查询。
-    await bothEngines(async (makeTool) => {
-      const root = await makeScratch("grep-d5-class-uni-");
-      await writeFile(join(root, "in.txt"), "alpha 123\n", "utf8");
+  it("rg 缺席 + pattern `\\n` → 空结果、无错误（Node 静默回空的边界）", async () => {
+    // 本工具按行搜索：Node 侧把文件按 `\n` 切行、行内容里不含 LF，所以
+    // 「只能匹配行终止符」的 pattern **永远匹配不到**。ADR-0089 接受这个
+    // 静默空结果（旧合同要在共享入口 typed 拒绝它，理由是「rg 可能报每个
+    // 文件」—— 那条对齐理由已废）。这里钉住：调用**成功**且回空，不抛。
+    const root = await makeScratch("grep-adr-node-lineterm-");
+    await writeFile(join(root, "a.txt"), "alpha\nbeta\n", "utf8");
 
-      const triggerPatterns: ReadonlyArray<readonly [string, string]> = [
-        // [pattern, 类名（用于消息断言）]
-        ["\\d.漢", "\\d"],
-        ["\\D.漢", "\\D"],
-        ["\\w.漢", "\\w"],
-        ["\\W.漢", "\\W"],
-        ["\\b漢", "\\b"],
-      ];
-      for (const [pattern, family] of triggerPatterns) {
-        // 文案里出现的「\\d」是字面量「反斜杠 + d」（4 个 TS 字符 → 2 个
-        // 实际字符），与 pattern 里的「\\d」同形。
-        await assert.rejects(
-          () => makeTool(root).handler({ pattern }),
-          (error: unknown) =>
-            error instanceof ToolExecutionError &&
-            error.message.includes(family) &&
-            /Unicode-mode trigger/.test(error.message) &&
-            /two engines would answer differently/.test(error.message)
-        );
-      }
+    const result = await toolFor(root, "node").handler({
+      pattern: "\\n",
+      output: "content",
     });
+    assert.equal(result, "");
   });
 
-  it("`\\B` 无条件 typed 拒绝：byte 模式也分叉（D5-leak）", async () => {
-    // 本轮 D5-leak。原判据把 `\\B` 与 `\\b` 并列放在「Unicode 模式才拒」的
-    // 条件层，前提「byte 模式能对齐 `\\B`」被实测推翻（`/tmp/tool-bmode.mts`）：
-    // rg 在 byte 模式下把多字节字符的内部字节边界也算非词边界（`a漢b` /
-    // `a€b` / `a£b` 都命中），JS 逐 code unit 看结论相反。所以 `\\B` 现在
-    // 走**无条件**文案（non-word-boundary），ASCII-only pattern 也拒。
-    await bothEngines(async (makeTool) => {
-      const root = await makeScratch("grep-d5-leak-B-");
-      await writeFile(join(root, "in.txt"), "alpha 123\n", "utf8");
+  it("rg 缺席 + `\\s` → 成功出命中（Node 允许比 rg 宽）", async () => {
+    // 实测：`\s` 在 BOM（U+FEFF）上 rg 空、Node 命中 —— 两条路径的空白表
+    // 天生不同。旧合同要入口拒绝 `\s` / `\S`；ADR-0089 之后 Node 路径直接
+    // 跑 JS 的 Unicode 空白表，宽出来的部分算特性。
+    const root = await makeScratch("grep-adr-node-ws-");
+    await writeFile(join(root, "bom.txt"), "﻿alpha\n", "utf8");
 
-      const patterns = ["\\B", "a\\Bb", "\\B漢", "漢\\B", "[\\B]", "[a\\B]"];
-      for (const pattern of patterns) {
-        await assert.rejects(
-          () => makeTool(root).handler({ pattern }),
-          (error: unknown) =>
-            error instanceof ToolExecutionError &&
-            /non-word-boundary/.test(error.message) &&
-            /two engines would answer differently/.test(error.message)
-        );
-      }
+    const result = (await toolFor(root, "node").handler({
+      pattern: "\\s",
+      output: "content",
+    })) as string;
+    assert.match(result, /bom\.txt:1:/);
+
+    // 对照：同一语料 rg 路径回空（它不把 BOM 当 `\s`）。两条路径的答案不同
+    // 是允许的，不是回归。
+    const fromRg = await toolFor(root, "rg").handler({
+      pattern: "\\s",
+      output: "content",
     });
+    assert.equal(fromRg, "");
   });
 
-  it("`\\d` / `\\w` / `\\b` 在 ASCII-only pattern 下（字节模式）继续放行（D5 不误伤）", async () => {
-    // 反证：判据只拒「在 Unicode 模式下的类原子」；ASCII-only pattern 下
-    // 两边都按 ASCII 走，两引擎命中集同形 —— 这条是 D5 的正控，必须继续
-    // 走通。同一条期望值喂两条引擎。
-    await bothEngines(async (makeTool) => {
-      const root = await makeScratch("grep-d5-class-ascii-");
-      await writeFile(join(root, "digits.txt"), "abc 123\n", "utf8");
-      await writeFile(join(root, "word.txt"), "foo bar\n", "utf8");
-      await writeFile(join(root, "efe.txt"), "éfoo\n", "utf8");
+  it("look-around：rg 在场 rc=2 / rg 缺席 Node 出命中", async () => {
+    // 去掉 `--engine=auto` 之后 rg 的 Rust 默认引擎**拒绝** look-around
+    // （这是 ADR-0089 的直接后果：不再为了凑对齐去换 PCRE2）。两条路径的
+    // 行为各自钉一条。
+    const root = await makeScratch("grep-adr-lookaround-");
+    await writeFile(join(root, "a.txt"), "hit x\nhit y\n", "utf8");
 
-      assert.equal(
-        await makeTool(root).handler({ pattern: "\\d" }),
-        "digits.txt"
-      );
-      // `\b` 把 `é` 当非词字符（与 JS 同）：`éfoo` 里命中；ASCII 的
-      // `foo bar` 当然也命中（paths 出法按 path 排序，两条都要在）。
-      assert.deepEqual(
-        String(await makeTool(root).handler({ pattern: "\\bfoo\\b" })).split(
-          "\n"
-        ),
-        ["efe.txt", "word.txt"]
-      );
-      // `\d+` / `\w+` / `\\d{3}` 这些是普通查询，量词不触发 Unicode mode，
-      // 仍应继续可用。
-      assert.equal(
-        await makeTool(root).handler({ pattern: "\\d+" }),
-        "digits.txt"
-      );
+    await assert.rejects(
+      () =>
+        toolFor(root, "rg").handler({
+          pattern: "hit(?= y)",
+          output: "content",
+        }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        /search engine rejected the query/.test(error.message)
+    );
+
+    const fromNode = await toolFor(root, "node").handler({
+      pattern: "hit(?= y)",
+      output: "content",
     });
+    assert.equal(fromNode, "a.txt:2:hit y");
   });
 
-  it("`ignoreCase` + 有大小写的非 ASCII → 拒绝；CJK 不受影响", async () => {
-    await bothEngines(async (makeTool) => {
-      const root = await makeScratch("grep-ignore-case-");
-      await writeFile(join(root, "a.txt"), "café\n漢字\n", "utf8");
-
-      await assert.rejects(
-        () => makeTool(root).handler({ pattern: "CAFÉ", ignoreCase: true }),
-        (error: unknown) =>
-          error instanceof ToolExecutionError &&
-          /ignoreCase/.test(error.message) &&
-          /É/.test(error.message)
-      );
-      // CJK 没有大小写：拒绝它会砍掉一条两条引擎本来就一致的查询。
-      assert.equal(
-        await makeTool(root).handler({ pattern: "漢", ignoreCase: true }),
-        "a.txt"
-      );
-    });
-  });
-
-  it("`type` + `glob` 并列时与 rg 同判（D3：肯定 glob 覆盖 type，否定 glob 与 type 交集）", async () => {
+  it("`type` + `glob` 并列：肯定 glob 覆盖 type、否定 glob 与 type 交集（D3）", async () => {
     // 复现：原 Node 侧是 AND（两者都要满足），rg 的实测规则是「肯定 glob 在场
     // → type 完全被忽略；只有否定 glob → type 仍生效」（逐条实测，不是文档）。
-    // 这与 D2 的顺序契约同源 —— glob 是显式收窄，type 是隐式词表，两者并列时
-    // 用户写的 glob 优先；要表达交集请写成一条 `sub/*.ts`。
+    // 这条规则与引擎无关（`parseQuerySpec` + `glob-match` 共用），两侧都要
+    // 保持同形 —— 单引擎已足够钉住规则本身，rg 那条是生产默认路径。
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-type-glob-");
       await mkdir(join(root, "sub"), { recursive: true });
@@ -964,8 +918,7 @@ describe("grep — 两引擎正则语义对齐（D6/SC9/SC10）", () => {
     // 复现：原顺序把用户 glob 排在工具的 `!**/node_modules` / `!**/.git` 之
     // 后，rg 的 last-glob-wins 让宽放 glob（`*` / `**` / `{*,.*}`）撤销了这两
     // 条排除 → rg 命中 5 条（含 node_modules / .git），Node 仍按 walkFiles
-    // 的 3 条。两条引擎给不同答案。
-    // 修复后：用户 glob 先投递、工具排除后投递，两条引擎都仍排除。
+    // 的 3 条。修复后：用户 glob 先投递、工具排除后投递，两条引擎都仍排除。
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-glob-override-");
       await mkdir(join(root, "src"), { recursive: true });
@@ -981,7 +934,7 @@ describe("grep — 两引擎正则语义对齐（D6/SC9/SC10）", () => {
       await writeFile(join(root, ".git/config"), "needle\n", "utf8");
       await writeFile(join(root, "README.md"), "needle\n", "utf8");
 
-      // 基线（无 glob）：两条引擎同判，都是 3 条（src 两 + README）。
+      // 基线（无 glob）：两条引擎都不带 node_modules / .git。
       const baseline = await makeTool(root).handler({ pattern: "needle" });
       assert.ok(typeof baseline === "string", "baseline");
 
@@ -1013,51 +966,11 @@ describe("grep — 两引擎正则语义对齐（D6/SC9/SC10）", () => {
     });
   });
 
-  it("被拒绝的构造在两条引擎上都不产生「半边能搜」的结果", async () => {
-    // 反证：Node 路径（JS RegExp 把 `\p{L}` 读成字面 `p{L}`）若不被前置拒绝，
-    // 含 `p{L}` 字面文本的文件会命中而 rg 不命中 —— 同一个查询的答案取决于
-    // 哪条引擎在跑。这里钉住两条路径都拒绝，而非一边有一边空。
-    await bothEngines(async (makeTool) => {
-      const root = await makeScratch("grep-alignable-neg-");
-      await writeFile(join(root, "literal.txt"), "p{L} literal\n", "utf8");
-
-      await assert.rejects(
-        () => makeTool(root).handler({ pattern: "\\p{L}", output: "content" }),
-        ToolExecutionError
-      );
-    });
-  });
-
-  it("`\\d` / `\\w` / `\\b` 对齐到 JS 的 ASCII 口径（不吃非 ASCII 类）", async () => {
-    await bothEngines(async (makeTool) => {
-      const root = await makeScratch("grep-alignable-pos-");
-      // 非 ASCII 数字 / 词：JS 的 `\d` / `\w` 只认 ASCII，rg 的 Unicode 类会
-      // 把它们一起收下 —— 这正是 `--no-unicode` 要抹平的分歧。
-      await writeFile(join(root, "arabic.txt"), "٣٤ digits\n", "utf8");
-      await writeFile(join(root, "ascii.txt"), "42 digits\n", "utf8");
-      await writeFile(join(root, "efe.txt"), "éfoo\n", "utf8");
-
-      // `\d` 只认 [0-9]：阿拉伯-印度数字不算。
-      assert.equal(
-        await makeTool(root).handler({ pattern: "\\d" }),
-        "ascii.txt"
-      );
-      // `\b` 把 `é` 当非词字符（与 JS 同）：`\bfoo\b` 在 `éfoo` 里命中。
-      assert.equal(
-        await makeTool(root).handler({ pattern: "\\bfoo\\b" }),
-        "efe.txt"
-      );
-    });
-  });
-
   it("`.` / 非 ASCII 字面量没被字节语义切坏（留 Unicode 模式）", async () => {
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-unicode-mode-");
       // `.` 必须能吃下一个多字节字符（字节语义下 `a.c` 不匹配 `aéc`）。
       await writeFile(join(root, "aec.txt"), "aéc\n", "utf8");
-      // 注：原用例还断言「`\s` 认 NBSP」。D5 逐族实测后该断言被证伪 —— 见
-      // 下面 `\s` / `\S` 的 typed 拒绝用例：`\s` 在 BOM / NEL 上与 rg 反向
-      // 分叉，NBSP 上的一致只是那条语料恰好没踩到 BOM / NEL 的巧合。
 
       assert.equal(await makeTool(root).handler({ pattern: "a.c" }), "aec.txt");
       // 非 ASCII 字面量同理：字节语义下 `漢` 是三个字节，`漢` 自己该命中。
@@ -1065,6 +978,33 @@ describe("grep — 两引擎正则语义对齐（D6/SC9/SC10）", () => {
       assert.equal(
         await makeTool(root).handler({ pattern: "漢" }),
         "kanji.txt"
+      );
+    });
+  });
+
+  it("`ignoreCase` × 非 ASCII 两条路径都放行（不再入口拒绝）", async () => {
+    // ADR-0089 之后不再预筛：rg 用 `-i` 自己的折叠表、Node 用 JS `iu` / `i`，
+    // 实测这条查询两条路径都能命中 `café`。CJK 无大小写同理。
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-ignore-case-");
+      await writeFile(join(root, "a.txt"), "café\n漢字\n", "utf8");
+
+      assert.equal(
+        await makeTool(root).handler({
+          pattern: "CAFÉ",
+          output: "content",
+          ignoreCase: true,
+        }),
+        "a.txt:1:café"
+      );
+      // CJK 无大小写，折叠与否不影响。
+      assert.equal(
+        await makeTool(root).handler({
+          pattern: "漢",
+          output: "content",
+          ignoreCase: true,
+        }),
+        "a.txt:2:漢字"
       );
     });
   });
@@ -1291,9 +1231,9 @@ describe("grep — SC6 content + context 不脏行", () => {
   });
 });
 
-// ───────────────────────── 引擎等价（SC9 / D6） ─────────────────────────
+// ───────────────────────── 自带引擎缺席 → Node 降级（D6 / SC9） ─────────────────────────
 
-describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
+describe("grep — 自带引擎缺席 → Node 遍历 + JS RegExp", () => {
   it("安装根二进制不存在时不 typed 拒绝该调用，而是 Node 扫出同样的结果", async () => {
     const root = await makeScratch("grep-node-only-");
     await writeFile(join(root, "a.ts"), "alpha\nbeta hitOne\n", "utf8");
@@ -1341,325 +1281,6 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
       })) as string,
       "b.ts"
     );
-  });
-
-  it("rg 与 Node 对同一查询给出同一结果（接受集与形状对齐）", async () => {
-    const root = await makeScratch("grep-parity-");
-    await mkdir(join(root, "sub"), { recursive: true });
-    await writeFile(join(root, "a.ts"), "hit a\nsecond\n", "utf8");
-    await writeFile(join(root, "sub", "b.ts"), "hit b\n", "utf8");
-    await writeFile(join(root, "c.md"), "hit c\n", "utf8");
-    // 相邻命中：两窗相接（[1,3] / [2,4]）→ 一组，两条命中都必须是 `:`。
-    await writeFile(join(root, "adj.ts"), "hit1\nhit2\n", "utf8");
-    // 重叠窗：l1 的窗吞掉 l4，l4 的窗又吞掉 l5 → 一组，三条命中都是 `:`。
-    await writeFile(join(root, "ov.ts"), "l1\nhitA\nhitB\nl4\nhitC\n", "utf8");
-    // 花括号交替（D4 的 glob 语法）：rg 支持、Node 若只做 `*`/`?` 交集就漏。
-    await writeFile(join(root, "brace.ts"), "hit brace\n", "utf8");
-    await writeFile(join(root, "brace.md"), "hit brace md\n", "utf8");
-    await writeFile(join(root, "brace.txt"), "hit brace txt\n", "utf8");
-    // 空组 → 空串（`brace{}` 命中名为 `brace` 的文件）；`{1..3}` **不是**
-    // 范围展开，剥括号后是字面 `1..3` —— 两条引擎都得给出同名文件。
-    await writeFile(join(root, "brace"), "hit brace bare\n", "utf8");
-    await writeFile(join(root, "1..3.ts"), "hit literal dots\n", "utf8");
-    // 点文件 / 点目录：Node walkFiles 只看目录名（不跳隐藏项），rg 默认相反。
-    await writeFile(join(root, ".dot.ts"), "hit dot\n", "utf8");
-    await mkdir(join(root, ".dotdir"), { recursive: true });
-    await writeFile(join(root, ".dotdir", "nested.ts"), "hit nested\n", "utf8");
-    // 被 node_modules / .git 目录名挡掉的文件：两条引擎都不该看见。
-    await mkdir(join(root, "node_modules", "pkg"), { recursive: true });
-    await writeFile(
-      join(root, "node_modules", "pkg", "dep.ts"),
-      "hit dep\n",
-      "utf8"
-    );
-    // `.gitignore` 不改变接受集（rg 侧 --no-ignore，Node 侧本来就不读）。
-    await writeFile(join(root, ".gitignore"), "hidden-by-ignore.ts\n", "utf8");
-    await writeFile(join(root, "hidden-by-ignore.ts"), "hit ignored\n", "utf8");
-    // 超过 1 MiB 的文件：遍历期两条引擎都跳过；显式点名时都搜（见下）。
-    const oversizeLine = "x".repeat(1_100_000);
-    await writeFile(join(root, "big.ts"), `${oversizeLine}\nhit big\n`, "utf8");
-    // 超宽**上下文**行（>2000 列）：展示侧两类行同闸，两条引擎都得截断。
-    await writeFile(
-      join(root, "longctx.ts"),
-      `${"y".repeat(3_000)}\nhit\n`,
-      "utf8"
-    );
-    // CRLF 行：`$` 按行边界解释、尾随 `\r` 不混进回显（两条引擎同口径）。
-    await writeFile(join(root, "crlf.ts"), "hit crlf\r\nplain\r\n", "utf8");
-    // 非 ASCII 宽行：ASCII 用例里 byte == code point，看不出两个单位不同。
-    // CJK / emoji 的 byte:cp 比是 3:1 / 4:1，取 1000 个只有 3–4 KB、code
-    // point 数远在 2000 以下 —— 只要传输预算被压回「等于 code point 上限」，
-    // rg 就会在自己的省略标记里切一刀，而 Node 侧原样保留：同一行的字节数、
-    // 标记文本、可复制的正文全都不同（D6/SC9）。这组用例钉住预算必须是 4 倍。
-    await writeFile(
-      join(root, "longcjk.ts"),
-      `hit${"漢".repeat(1_000)}\n`,
-      "utf8"
-    );
-    await writeFile(
-      join(root, "longemoji.ts"),
-      `hit${"😀".repeat(1_000)}\n`,
-      "utf8"
-    );
-    // 非 ASCII 内容的类语义夹具：`\d` / `\w` / `\b` 的分歧只在含非 ASCII
-    // 词的目录里显形（ASCII-only 树里两条引擎恰好一致，钉不住修复）。
-    // `٣٤`（阿拉伯-印度数字）验 `\d`、`漢字` 验 `\w`、`éfoo` 验 `\b`，
-    // `café` 与全角空格验 `.` / `\s` 没被 `--no-unicode` 切坏。
-    await writeFile(
-      join(root, "unicode.txt"),
-      "٣٤ alpha\n漢字 test\néfoo café\n　nbsp\n",
-      "utf8"
-    );
-    // code point vs code unit 的夹具（D6/SC9）。`.` 与计数 quantifier 在 rg
-    // 里一次吃一个 **code point**、在 JS 无 `u` 时只吃一个 **code unit**：
-    // 实测 `a.c` 不命中 `a😀c`（emoji 是 2 个 code unit）、`^.{3}$` 不命中
-    // `éx`（`é` 用 combining 拼是 2 个 code point / 3 个 code unit）。
-    // 内容刻意不含 `hit` / 数字，避免改变既有行的期望集。
-    await writeFile(join(root, "emoji.txt"), "a\u{1F600}c\n", "utf8");
-    await writeFile(join(root, "combining.txt"), "éx\n", "utf8");
-    await writeFile(
-      join(root, "doubleemoji.txt"),
-      "\u{1F600}\u{1F600}\n",
-      "utf8"
-    );
-    // simple case folding 的两个特殊等价类：U+212A KELVIN 与 U+017F LONG S。
-    // rg 留在 Unicode 模式时 `-i k` / `-i s` 折它们；切了 `--no-unicode` 就不折
-    // —— Node 侧的 `u` 必须跟着同一个判据走（两向都由本组测试钉住）。
-    await writeFile(join(root, "kelvin.txt"), "\u{212A}x\n", "utf8");
-    await writeFile(join(root, "longs.txt"), "\u{017F}x\n", "utf8");
-    // 上下文行走的是另一条截断路径（`context-groups.ts`），单独一条。
-    await writeFile(
-      join(root, "longctxcjk.ts"),
-      `${"漢".repeat(1_000)}\nhit\n`,
-      "utf8"
-    );
-    // CRLF 上的**边界行**：正文 7999 字节 / 2000 code point（未超权威闸），
-    // 但加上尾随 `\r` 恰好 8000 字节 → rg 会追加自己的省略标记。剥标记时要
-    // 把 `\r` 那一个字节补回触发基数，否则同一行在 rg 路径被当成「超宽」再截
-    // 一次、Node 路径原样保留（D6/SC9）。LF 版本作对照（不触发）。
-    const crlfEdge = `€${"😀".repeat(1_999)}`;
-    await writeFile(join(root, "crlf-edge.ts"), `${crlfEdge}\r\n`, "utf8");
-    await writeFile(join(root, "lf-edge.ts"), `${crlfEdge}\n`, "utf8");
-    // 二进制准入：NUL 在早期 / 窗口之外两个方向各来一个，且命中行都在 NUL
-    // 之后 —— 「二进制文件不搜」这条口径下两条引擎都必须看不见它们。
-    await writeFile(
-      join(root, "nul-early.ts"),
-      Buffer.concat([
-        Buffer.from("hit early\n"),
-        Buffer.from([0]),
-        Buffer.from("hit after\n"),
-      ])
-    );
-    await writeFile(
-      join(root, "nul-late.ts"),
-      Buffer.concat([
-        Buffer.from("hit early\n"),
-        Buffer.alloc(70_000, 0x61),
-        Buffer.from([0]),
-        Buffer.from("\nhit after\n"),
-      ])
-    );
-    // 反方向：命中行在 NUL **之前**（rg 的 `-l` 命中即返回，会把这个文件列
-    // 出来；`--count` 读到尾才发现 NUL 而略过 —— 同一文件两种答案。本工具的
-    // 口径是「二进制文件不搜」，两条引擎都必须看不见它）。
-    await writeFile(
-      join(root, "nul-hitfirst.ts"),
-      Buffer.concat([Buffer.from("hit before\n"), Buffer.from([0])])
-    );
-    // 语境对照：文件里有 NUL 但没有命中 —— 不能因为「过滤掉一条告警记录」
-    // 就把该文件的正常命中一起丢掉，也不能反过来凭空造出命中。
-    await writeFile(
-      join(root, "nul-nohit.ts"),
-      Buffer.concat([
-        Buffer.from("plain\n"),
-        Buffer.from([0]),
-        Buffer.from("plain again\n"),
-      ])
-    );
-    // 同一目录里的干净邻居：二进制文件不得让它一起消失（也不能把整次查询
-    // 变成失败 —— 见下面 `path: "."` 的用例）。
-    await writeFile(join(root, "clean-neighbor.ts"), "hit neighbor\n", "utf8");
-
-    const viaRg = toolFor(root, "rg");
-    const viaNode = toolFor(root, "node");
-
-    const cases: ReadonlyArray<Record<string, unknown>> = [
-      { pattern: "hit" },
-      { pattern: "hit", output: "content" },
-      { pattern: "hit", output: "count" },
-      { pattern: "hit", glob: "*.ts" },
-      { pattern: "hit", glob: "sub/*.ts" },
-      { pattern: "hit", glob: "[ab].ts" },
-      { pattern: "hit", glob: "c[!x].md" },
-      { pattern: "hit", type: "ts" },
-      { pattern: "hit", output: "content", context: 1 },
-      // 窗相接 / 重叠时，落入前窗的后一条命中不得被降级成上下文行（SC6）。
-      { pattern: "hit", output: "content", context: 1, path: "adj.ts" },
-      { pattern: "hit", output: "content", context: 2, path: "adj.ts" },
-      { pattern: "hit", output: "content", context: 1, path: "ov.ts" },
-      { pattern: "hit", output: "content", context: 2, path: "ov.ts" },
-      // 花括号交替：多元素 / 单元素 / 空组 / 嵌套 / 笛卡尔积 / 无范围展开。
-      { pattern: "hit", glob: "brace.{ts,md}" },
-      { pattern: "hit", glob: "brace.{ts}" },
-      { pattern: "hit", glob: "brace{}" },
-      { pattern: "hit", glob: "{brace.ts,sub/*.ts}" },
-      { pattern: "hit", glob: "{adj,ov}.{ts,md}" },
-      { pattern: "hit", glob: "{1..3}.ts" },
-      { pattern: "hit", glob: "brace.{ts,{md,txt}}" },
-      // 整模式锚定：`/` 出现在花括号**内**时整个模式锚定搜索根，
-      // `{sub/nope,zz}.ts` 不得退化成「裸基名 zz.ts 也收」。
-      { pattern: "hit", glob: "{brace.ts,sub/b.ts}" },
-      { pattern: "hit", glob: "{sub/nope,brace}.ts" },
-      // 上下文行也过行宽闸：rg 与 Node 都要截断到同一列数 + 同一标记。
-      { pattern: "hit", output: "content", context: 1, path: "longctx.ts" },
-      // 非 ASCII 超宽行（byte:cp = 3:1 / 4:1）：唯一权威是 code point 闸，
-      // rg 按字节判超宽后塞进来的省略标记不得进入正文。
-      { pattern: "hit", output: "content", path: "longcjk.ts" },
-      { pattern: "hit", output: "content", path: "longemoji.ts" },
-      { pattern: "hit", output: "content", context: 1, path: "longctxcjk.ts" },
-      // CRLF 边界行：`\r` 计入 rg 的触发基数 —— 剥标记不漏、正文与 Node 等长。
-      // 上下文行走的是另一个分列入口（`context-groups.parseRgContextStdout`），
-      // 同一行在那里也要过同一道洗痕 —— 单独一条覆盖。
-      { pattern: "€", output: "content", path: "crlf-edge.ts" },
-      { pattern: "€", output: "content", context: 1, path: "crlf-edge.ts" },
-      { pattern: "€", output: "content", path: "lf-edge.ts" },
-      // 二进制准入：含 NUL 的文件三条出法都不该被搜到（两个 NUL 位置方向
-      // 都验，且 `nul-nohit.ts` 证明过滤不误伤）。
-      { pattern: "hit", output: "paths", path: "nul-early.ts" },
-      { pattern: "hit", output: "content", path: "nul-early.ts" },
-      { pattern: "hit", output: "count", path: "nul-early.ts" },
-      { pattern: "hit", output: "paths", path: "nul-late.ts" },
-      { pattern: "hit", output: "content", path: "nul-late.ts" },
-      { pattern: "hit", output: "count", path: "nul-late.ts" },
-      // 命中在 NUL 之前：rg 的 `-l` 会列出、`--count` 会略过，两条出法先
-      // 自相矛盾 —— 统一口径后三条出法都必须看不见它。
-      { pattern: "hit", output: "paths", path: "nul-hitfirst.ts" },
-      { pattern: "hit", output: "content", path: "nul-hitfirst.ts" },
-      { pattern: "hit", output: "count", path: "nul-hitfirst.ts" },
-      { pattern: "hit", output: "paths", path: "nul-nohit.ts" },
-      { pattern: "hit", output: "content", path: "nul-nohit.ts" },
-      { pattern: "hit", output: "count", path: "nul-nohit.ts" },
-      // 二进制文件不得把整次查询变成失败，也不得污染同目录的干净文件。
-      { pattern: "hit", output: "paths", path: "." },
-      { pattern: "hit", output: "count" },
-      // glob 边界：裸 `!` 在 rg 是「不选中任何文件」（不是「全收」），
-      // 尾随 `/` 的模式（`*/` / `**/` / `brace.ts/`）也不得命中。
-      { pattern: "hit", glob: "!" },
-      { pattern: "hit", glob: "*/" },
-      { pattern: "hit", glob: "**/" },
-      { pattern: "hit", glob: "a.ts/" },
-      { pattern: "hit", glob: "sub/" },
-      // 遍历语义：点文件 / 点目录可见，node_modules 不可见，.gitignore 不生效。
-      { pattern: "hit", glob: ".dot.ts" },
-      { pattern: "hit", glob: ".dotdir/*.ts" },
-      { pattern: "hit", glob: "node_modules/**" },
-      { pattern: "hit", glob: "hidden-by-ignore.ts" },
-      { pattern: "hit", output: "paths", path: "node_modules" },
-      // 体积闸：遍历跳过 / 显式点名照搜（两个方向都要一致）。
-      { pattern: "hit", glob: "big.ts" },
-      { pattern: "hit", output: "content", path: "big.ts" },
-      { pattern: "hit", output: "count", path: "big.ts" },
-      // CRLF：`$` 锚定与行尾 `\r` 的剥离（`plain$` 只该命中 LF 行）。
-      { pattern: "hit", output: "content", path: "crlf.ts" },
-      { pattern: "crlf$", output: "content", path: "crlf.ts" },
-      { pattern: "plain$", output: "content", path: "crlf.ts" },
-      { pattern: "hit", also: "second" },
-      { pattern: "hit", head_limit: 1 },
-      { pattern: "hit", offset: 99 },
-      // 非 ASCII 内容的类语义：`\d` / `\w` / `\b` 在 JS RegExp（无 `u`，
-      // code unit）里只认 ASCII，rg 默认是 Unicode 类 —— 实测 `\d` 在 rg
-      // 吃 ٣٤、`\w` 吃 CJK、`\b` 把 `é` 当词字符。argv 的 `--no-unicode`
-      // 按 pattern 是否含多字节敏感构造决定要不要加（见 pattern.ts）。
-      { pattern: "\\d" },
-      { pattern: "\\d+" },
-      { pattern: "\\w+" },
-      { pattern: "\\bfoo\\b" },
-      { pattern: "\\w+", output: "content" },
-      // `.` / 非 ASCII 字面量留在 Unicode 模式：字节语义会打坏它们
-      // （`.` 退化成「一个字节」）。注：`\s` 已由 D5 收口为 typed 拒绝，
-      // 不在本对照表里 —— 它的两条引擎空白表天生不同，没有两边都能跑的
-      // 语料（见 D5 的 `\s` / `\S` 拒绝用例）。
-      { pattern: ".", output: "content", path: "unicode.txt" },
-      { pattern: "café", output: "content", path: "unicode.txt" },
-      { pattern: "漢", output: "content", path: "unicode.txt" },
-      // code point vs code unit（D6/SC9）：`.` 与计数 quantifier 在 rg 按
-      // code point、JS 无 `u` 时按 code unit。判据为 true 的 pattern 两条
-      // 引擎都留在 Unicode 口径（rg 不加 `--no-unicode`，Node 加 `u`）。
-      // 少了 Node 侧的 `u`，`a😀c` 与 combining `éx` 这两行就会只在一侧命中。
-      { pattern: "a.c", output: "content", path: "emoji.txt" },
-      { pattern: "^.{3}$", output: "content", path: "emoji.txt" },
-      { pattern: "^.{3}$", output: "content", path: "combining.txt" },
-      // 同文件的负面边界：`é` 用 combining 拼是 **2** 个 code point，
-      // `^.{2}$` 必须两边都不中（若哪侧按 code unit 数就会误中）。
-      { pattern: "^.{2}$", output: "content", path: "combining.txt" },
-      // 非 BMP 字面量的计数 quantifier：无 `u` 时量化的是单个 surrogate，
-      // 两个 emoji 反而匹配不上。
-      { pattern: "\u{1F600}{2}", output: "content", path: "doubleemoji.txt" },
-      // `.` 在类 / 交替 / 分组里同样按 code point（判据只看 pattern 里有没有
-      // 敏感构造，与它在语法树里的位置无关）。
-      { pattern: "[a-z.]", output: "content", path: "unicode.txt" },
-      { pattern: "a.c|zzz", output: "content", path: "emoji.txt" },
-      { pattern: "^(a|b).c$", output: "content", path: "emoji.txt" },
-      // 对照：转义后的 `\.` 不是敏感构造（判据为 false），但两边同样不该命中。
-      { pattern: "\\.", output: "content", path: "emoji.txt" },
-      // 类里的非 BMP 成员：无 `u` 时字符类退化成两个 surrogate 的并集，
-      // 能匹配到**半个** emoji —— 加 `u` 后与 rg 同为整个字符。
-      { pattern: "[\u{1F600}]", output: "content", path: "emoji.txt" },
-      // simple case folding 的**负面控制**：判据为 false 的 ASCII 类不拿 `u`
-      // （rg 切了 `--no-unicode`，`-i` 只折 ASCII）——`k`/`s` 必须不命中
-      // KELVIN / LONG S。这两条在判据被写反时会立刻变红。
-      { pattern: "k", output: "content", ignoreCase: true, path: "kelvin.txt" },
-      { pattern: "s", output: "content", ignoreCase: true, path: "longs.txt" },
-      // 正面对照：判据为 true 时 `iu` 的折叠与 rg 的 Unicode `-i` 同向
-      // （`\w` 两类都折；`.` 让 pattern 留下 `u` 后同样折）。
-      {
-        pattern: "\\w",
-        output: "content",
-        ignoreCase: true,
-        path: "kelvin.txt",
-      },
-      {
-        pattern: "\\w",
-        output: "content",
-        ignoreCase: true,
-        path: "longs.txt",
-      },
-      {
-        pattern: "k.",
-        output: "content",
-        ignoreCase: true,
-        path: "kelvin.txt",
-      },
-      { pattern: "s.", output: "content", ignoreCase: true, path: "longs.txt" },
-      // 反面边界：`[a-z]x` 的判据为 false（无敏感构造）⇒ 不拿 `u`，
-      // `-i` 不折 KELVIN —— 与 rg 切了 `--no-unicode` 后的 ASCII 折叠同向。
-      {
-        pattern: "[a-z]x",
-        output: "content",
-        ignoreCase: true,
-        path: "kelvin.txt",
-      },
-      // ignoreCase × 非 ASCII：CJK 无大小写 → 必须继续命中（两条引擎都放行）。
-      {
-        pattern: "漢",
-        ignoreCase: true,
-        output: "content",
-        path: "unicode.txt",
-      },
-      { pattern: "hit", ignoreCase: true },
-      { pattern: "HIT", ignoreCase: true },
-      { pattern: "zzz" },
-    ];
-
-    for (const input of cases) {
-      const fromRg = await viaRg.handler(input);
-      const fromNode = await viaNode.handler(input);
-      assert.equal(
-        fromNode,
-        fromRg,
-        `两条引擎分歧：${JSON.stringify(input)}\n  rg   = ${JSON.stringify(fromRg)}\n  node = ${JSON.stringify(fromNode)}`
-      );
-    }
   });
 
   it("不可读的邻居文件不把整次查询变成失败（两条引擎都只是跳过它）", async () => {
@@ -1851,21 +1472,40 @@ describe("grep — 大小写与正则语义", () => {
     });
   });
 
-  it("look-around 在两条引擎上都可用（接受集对齐，不因引擎而变）", async () => {
-    // rg 默认的 Rust 引擎不支持 look-around，JS RegExp 支持 —— 不显式对齐，
-    // 同一 pattern 的含义就取决于哪条引擎在跑（D6 禁止）。
-    await bothEngines(async (makeTool) => {
-      const root = await makeScratch("grep-lookaround-");
-      await writeFile(join(root, "a.ts"), "hit x\nhit y\n", "utf8");
+  it("look-around 在 rg 上以 rc=2 报错（rg 自己的拒绝，不是合成的对齐门）", async () => {
+    // ADR-0089 之后 rg 的 Rust 默认引擎**拒绝** look-around（不再为了凑
+    // 对齐去换 PCRE2）。这条错误**来自 rg 子进程**，handler 转成
+    // `search engine rejected the query`。验收对象是 handler 错误文案，
+    // 不是 rg 的内部报错原文。
+    const root = await makeScratch("grep-lookaround-rg-");
+    await writeFile(join(root, "a.ts"), "hit x\nhit y\n", "utf8");
 
-      const result = (await makeTool(root).handler({
-        pattern: "hit(?= y)",
-        output: "content",
-      })) as string;
+    await assert.rejects(
+      () =>
+        toolFor(root, "rg").handler({
+          pattern: "hit(?= y)",
+          output: "content",
+        }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        /search engine rejected the query/.test(error.message)
+    );
+  });
 
-      // 前瞻只留 `hit y`；`hit x` 被排除。
-      assert.equal(result, "a.ts:2:hit y");
-    });
+  it("look-around 在 rg 缺席（Node 路径）上正常出命中", async () => {
+    // ADR-0089 的核心特性：Node 路径用 JS `RegExp` 跑 look-around 合法
+    // pattern，调用**成功**。这条用例与上一条配对，钉住「同一个 pattern 的
+    // rg-rc=2 / Node-OK 不再是回归 —— 是 ADR-0089 接受的特性」。
+    const root = await makeScratch("grep-lookaround-node-");
+    await writeFile(join(root, "a.ts"), "hit x\nhit y\n", "utf8");
+
+    const result = (await toolFor(root, "node").handler({
+      pattern: "hit(?= y)",
+      output: "content",
+    })) as string;
+
+    // 前瞻只留 `hit y`；`hit x` 被排除。
+    assert.equal(result, "a.ts:2:hit y");
   });
 });
 
@@ -1899,12 +1539,12 @@ describe("grep — 超长匹配行截断", () => {
  * 显式文件豁免的体积上界（Finding 4）。
  *
  * 「显式点名的文件不受 `--max-filesize` 约束」这条豁免是为对齐 rg 语义而设
- * （遍历期才管体积），但豁免若无上界，`{path: "<巨型文件>"}` 就是无界读。上界
- * 取 `MAX_EXPLICIT_FILE_BYTES`，且**两条引擎必须同界**：只有一边砍，同一个
- * `path` 参数的答案就随引擎变 —— 那正是豁免当初要修掉的分歧。
+ * （遍历期才管体积），但豁免若无上界，`{path: "<巨型文件>"}` 就是无界读。
+ * 上界取 `MAX_EXPLICIT_FILE_BYTES`，由 `file-lines.ts` 单点定义 —— 两条引
+ * 擎都从这里取值，所以这条口径与引擎选择无关，单引擎用例已足够钉住。
  */
-describe("grep — 显式文件的体积上界（两条引擎同界）", () => {
-  it("界内显式点名照搜、界外两条引擎都看不见（同一答案）", async () => {
+describe("grep — 显式文件的体积上界", () => {
+  it("界内显式点名照搜（rg），界外被上界挡掉", async () => {
     const root = await makeScratch("grep-explicit-cap-");
     // 界内：1 MiB + 1（超过遍历闸，但远在显式上界之内）。
     await writeFile(
@@ -1919,47 +1559,56 @@ describe("grep — 显式文件的体积上界（两条引擎同界）", () => {
       "utf8"
     );
 
-    const viaRg = toolFor(root, "rg");
-    const viaNode = toolFor(root, "node");
+    const tool = toolFor(root, "rg");
 
-    // 界内：两条引擎都搜得到（豁免本身没有被上界取消）。
-    for (const [name, tool] of [
-      ["rg", viaRg],
-      ["node", viaNode],
-    ] as const) {
-      const inside = (await tool.handler({
-        pattern: "hit",
-        path: "inside.ts",
-        output: "content",
-      })) as string;
-      assert.match(inside, /inside\.ts:2:hit inside/, `${name} 界内应可搜`);
-    }
+    const inside = (await tool.handler({
+      pattern: "hit",
+      path: "inside.ts",
+      output: "content",
+    })) as string;
+    assert.match(inside, /inside\.ts:2:hit inside/);
 
-    // 界外：两条引擎给出**同一个**答案（无论那个答案是空还是截断 —— 关键是
-    // 不因为谁在跑而不同）。
-    const beyondRg = (await viaRg.handler({
+    // 界外：超过显式上界 → 命中行读不到 → 命中集空（与 rg 一致）。
+    const beyond = (await tool.handler({
       pattern: "hit",
       path: "beyond.ts",
       output: "content",
     })) as string;
-    const beyondNode = (await viaNode.handler({
+    assert.equal(beyond, "");
+
+    // 遍历期走 `--max-filesize` 闸也看不见它。
+    const glob = await tool.handler({ pattern: "hit", glob: "beyond.ts" });
+    assert.equal(glob, "");
+  });
+
+  it("Node 降级路径同样在显式上界内可见、上界外不可见", async () => {
+    const root = await makeScratch("grep-explicit-cap-node-");
+    await writeFile(
+      join(root, "inside.ts"),
+      `${"x".repeat(1_100_000)}\nhit inside\n`,
+      "utf8"
+    );
+    await writeFile(
+      join(root, "beyond.ts"),
+      `${"x".repeat(MAX_EXPLICIT_FILE_BYTES)}\nhit beyond\n`,
+      "utf8"
+    );
+
+    const tool = toolFor(root, "node");
+
+    const inside = (await tool.handler({
+      pattern: "hit",
+      path: "inside.ts",
+      output: "content",
+    })) as string;
+    assert.match(inside, /inside\.ts:2:hit inside/);
+
+    const beyond = (await tool.handler({
       pattern: "hit",
       path: "beyond.ts",
       output: "content",
     })) as string;
-    assert.equal(beyondNode, beyondRg, "界外两条引擎必须同答案");
-
-    // 遍历期两条引擎也都不看它（超遍历闸）。
-    const globRg = (await viaRg.handler({
-      pattern: "hit",
-      glob: "beyond.ts",
-    })) as string;
-    const globNode = (await viaNode.handler({
-      pattern: "hit",
-      glob: "beyond.ts",
-    })) as string;
-    assert.equal(globRg, "");
-    assert.equal(globNode, "");
+    assert.equal(beyond, "");
   });
 });
 

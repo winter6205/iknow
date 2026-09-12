@@ -19,7 +19,7 @@
   - **D3 附近几行 + 分页 + parser**：`content` 可带对称 `context`（整数，上下各 N 行）。`offset`（默认 0）+ **`head_limit`**（默认 **50**、硬顶 **2000**）切**已排序结果名单**，三种出法共用。不叫 `limit`（避免和 `read_file` 行窗撞名），不叫 `grep_limit`。偏移超过最后一条且本次查询**有**命中 → 回执精确为 `No entries at this offset`（不是空串、不是「无匹配」）。无匹配仍空串。parser 分列 `:` / `-` / `--`；稳定排序（path 再行号）发生在切片之前。与 D2–D6 **同票**，不可拆成「先加参数后改解析」。
   - **D4 收窄**：保留 `path`（目录）。加文件名 `glob`。加语言 `type`（与 glob 并列）。`type` 未知或引擎拒收不得报成非法正则。
   - **D5 行窗（过滤）**：可选 `also` + `within_lines`（`also` 在场时默认 5）。主词命中后只在该行窗找第二段，窗内没有则当没中。不是 D3 那种展示附近原文。不做裸跨行正则开关。落地后须实测模型会不会调、过滤是否减噪；有问题写入计划汇报，不在本切片先砍。
-  - **D6 自带引擎**：安装/发版按平台下载钉死版本 + 校验和，放到安装根；运行只 exec 这一路径。PATH 上的 `rg` 不当主路径。「自带起不来」= 安装根二进制不存在，或 spawn 该路径得到 ENOENT / 无法执行。此时 **Node 扫必须实现 D2–D5 全语义**（不是少功能成功、也不是该调用直接拒绝）。禁止为凑合去 exec PATH `rg`。
+  - **D6 自带引擎**：安装/发版按平台下载钉死版本 + 校验和，放到安装根；运行只 exec 这一路径。PATH 上的 `rg` 不当主路径。「自带起不来」= 安装根二进制不存在，或 spawn 该路径得到 ENOENT / 无法执行。**有 rg 时匹配只出 rg**（不再经 JS 再滤）；**起不来时 Node 只做遍历 + JS `RegExp` 编得过的 pattern，调用仍成功**，命中集不必与 rg 相同；Node **不**模仿 rg 默认引擎的拒绝集。禁止为凑合去 exec PATH `rg`。禁止用 `--engine=auto` / `--no-unicode` 一类 rg 引擎开关去凑两引擎对齐（两者都是「把 rg 的语义掰向 JS」的杠杆：`--engine=auto` 换引擎、`--no-unicode` 把 `\w` / `\d` / `\b` 切到 ASCII 口径）。发布门是生产 handler `createGrepTool`，不是方言对齐 fuzz。匹配类口径 = 有 rg 时 rg 默认 Unicode（`\w` / `\d` / `\b` 认 CJK / 阿拉伯-印度数字），无 rg 时 JS 的 ASCII —— 两侧命中集可能不同 = 特性，不是漏测（ADR-0089）。
   - **D7 说明书**：改 `grep` / `read_file` / `edit_file` / `write_file` description 与失败文案须先夹具或登记缺口（`docs/guides/prompt-development.md`）。不加长 soul / usage。
   - **D8 打包**：本文件是**一张契约**。落地拆 **两个 logical task**（可两 PR）：Task A = D1+D1c+D7（账本、`write_file` 闸、`read_file` 窗、写/读说明书）；Task B = D2–D7 搜面。两 task 可并行，**禁止**单 diff 混进两批。各 task 内部不拆（尤其 Task B 的 parser/排序/出法/引擎）。CI 取消 `grep` 排除、黄金集补建、字段别名细抠、存量外部产品具名清理 — **后切**（见 Out）。D1b 不单独开 task。
 - **Confirms with human:** (none — 地图已裁)
@@ -43,7 +43,7 @@
 - **SC6（context 不脏行）**：`output=content` 且 `context≥1` 时，上下文行与 `--` 不被切成假 `path:line:text`。
 - **SC7（分页）**：有命中、`offset` 越过最后一条 → 回执为 `No entries at this offset`；`offset=0, head_limit=50` 与 `offset=50` 的路径集合不重叠。
 - **SC8（行窗）**：`also` + `within_lines` 只在窗内第二段命中时回报；窗外第二段不报。
-- **SC9（引擎）**：生产 handler 默认 exec 安装根钉死二进制，不先 `which rg`。测试注入缺失二进制 → **Node 全语义**（D2–D5），不得 typed 拒绝该调用，不得调用 PATH `rg`。
+- **SC9（引擎）**：生产 handler 默认 exec 安装根钉死二进制，不先 `which rg`。测试注入缺失二进制 → Node 遍历 + JS `RegExp`（编得过的 pattern），**调用仍成功**（不得 typed 拒绝该调用，不得调用 PATH `rg`）；命中集不必与 rg 一致。有 rg 时匹配只出 rg，不 JS 再滤。有 rg 档 `\w` / `\d` / `\b` 按 rg 默认 Unicode 口径（认 CJK / 阿拉伯-印度数字），无 rg 档按 JS 的 ASCII 口径 —— 两侧命中集可能不同 = 特性，不是漏测（ADR-0089）。
 - **SC10（非法 / 类型）**：坏正则与未知 `type` 为两种 typed 错误，文案不可混为「illegal regex」一种。
 - **SC11（回归）**：本地必跑现行 `tests/harness/aci/tools/grep.test.ts` 与 `edit-file` / `write-file` / `read-file` 相关套件。`npm test` 全绿。改 description 则补轨迹集或 commit 登记缺口。
 - **SC12（复杂度）**：`grep` 扩张按职责拆函数（flag / argv / 行解析 / 计数 / 文件命中），遵守 `complexity-anti-drift` 门，不把整份 handler 写成一坨。
@@ -73,7 +73,8 @@
 ```
 bounded-context-guardian: yes — 落在 harness ACI read/edit/write/grep + 安装根；TUI/CI 装引擎在 Out。
 defensive-contract-validator: yes — 空/负/溢/并发（SC1b 只罩 write）/异常（SC10、D6）五类有 SC。
-error-handling-enforcer: yes — 无 conversationId 时非空 write fail-closed；edit 不因无 id 拒；偏移过头/坏正则/未知 type typed；D6 起不来唯一 EXIT = Node 全语义，SC9 与 D6 对齐。
+error-handling-enforcer: yes — 无 conversationId 时非空 write fail-closed；edit 不因无 id 拒；偏移过头/坏正则/未知 type typed；D6 起不来唯一 EXIT = Node 遍历 + JS `RegExp`，调用不被 typed 拒绝；rg 在场时匹配只出 rg；SC9 与 D6 对齐（ADR-0089）。
 complexity-anti-drift: yes — Task B 按 flag/argv/解析/计数/命中拆；禁止单 handler 吞形态。
 minimal-change-verifier: yes — D8 两 logical task、禁混 PR；一张契约两落地任务。
+**注（D6/SC9 ADR-0089 修订）：** 验收对象是生产 handler `createGrepTool`，**不是**「两引擎命中集严格同判」的 fuzz / dialect-parity 测；本 PR 改写后该 fuzz 不再是 D6/SC9 的发布门。
 ```

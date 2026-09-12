@@ -5,8 +5,10 @@
  * `within_lines` 的闭区间内找第二段；窗内没有 → 该命中当没中。不把附近
  * 原文带进结果（那是 `context` 的职责），也不做裸跨行正则。
  *
- * 与引擎解耦：输入命中行 + 「按 path 取全文行」的回调。rg 引擎与 Node 引擎
- * 共用本层，SC9 的「Node 全语义」因此自动继承同一判定。
+ * 与引擎解耦：输入命中行 + 「按 path 取全文行」的回调。rg 引擎与 Node 降级
+ * 引擎共用本层。ADR-0089 之后本层只对 rg 路径的命中做 also 过滤（用 JS
+ * `RegExp` 跑 `also` 文本）—— 不再声称「两条引擎同判」：rg 给出命中就
+ * 用这些命中过本层，Node 路径因命中集不同而可能过滤掉的命中数也不同。
  */
 
 import { ToolExecutionError } from "../../errors.js";
@@ -47,11 +49,10 @@ export function filterHitsByAlsoWindow(input: AlsoWindowInput): LineHit[] {
  * `ignoreCase` 共用，模式判据同源）。
  *
  * `also` 是**字面词**（D5 的行窗第二段），不是主 pattern 的宽正则：它在
- * `also-window.ts` 里只做 `test()`，两端引擎共用本函数，所以不需要
- * `--no-unicode` 那类跨引擎 argv。但「匹配单位」口径仍要与 rg 侧一致 ——
- * `also` 里的 `.` 在 rg 的行窗判定里已经不存在（rg 只按主 pattern 出命中，
- * 窗由本模块判），故这里走与主 pattern 同一套编译（含 `u` 规则与退回），
- * 两条引擎的窗判定因此逐字相同。
+ * `also-window.ts` 里只做 `test()`，两端引擎共用本函数，所以不需要任何
+ * rg argv 开关（本模块的判据不再投影到 rg）。`also` 的窗判定只在 Node 侧
+ * 跑（rg 只按主 pattern 出命中），故这里走与主 pattern 同一套编译（含
+ * `u` 规则与退回）即可 —— 与 rg 的命中集差异是 ADR-0089 已接受的合同。
  *
  * 坏正则 → typed 拒绝，文案点名 `also` —— 与主 pattern 的错误区分，也与
  * 未知 `type` 的错误区分（SC10 要求两类错误不可混为一种）。

@@ -9,6 +9,9 @@
  *   - `glob` / `type` 与 `path` 并列生效（D4）。
  *   - 遍历语义与 Node 扫对齐：`--no-ignore` / `--hidden` / 两条排除 glob /
  *     `--max-filesize` / `--crlf`（D6 / SC9；取舍见 argv.ts 注释）。
+ *   - **不给 rg 任何模式对齐开关**（ADR-0089）：`--engine=auto` 与
+ *     `--no-unicode` 都不在 argv 里。两者都是「把 rg 掰向 JS」的杠杆 ——
+ *     禁用是回归钉子，见对应用例。
  *   - 未知 `type` 是 typed 错误，且**文案与坏正则不同**（SC10）。
  */
 
@@ -68,13 +71,55 @@ describe("buildRgArgs — 出法", () => {
     assert.deepEqual(args.slice(-3), ["--", "hit", "."]);
   });
 
-  it("`--engine=auto` 常开：rg 的接受集与 Node 引擎的 JS RegExp 对齐", () => {
-    // 默认的 Rust 引擎不支持 look-around / backreference，JS RegExp 支持；
-    // 不带 auto，`(?=hit)` 会在 rg 路径 rc=2 失败、在 Node 路径正常命中 ——
-    // 同一 pattern 的含义取决于哪条引擎在跑（D6 禁止）。auto 只在模式需要
-    // 时才切 PCRE2，普通模式仍走默认引擎（零开销）。
+  it("`--engine=auto` 不在 argv 里：引擎方言不由本工具切换（ADR-0089）", () => {
+    // 回归钉子。历史上这里常开 `--engine=auto`，好让 rg 在 Rust 默认引擎
+    // 编不过时退到 PCRE2、把接受集凑近 JS `RegExp`。ADR-0089 废掉了那条
+    // 「两条引擎同判」合同：rg 在场时匹配只出 rg，rg 自己编不过的 pattern
+    // 由 rg 以 rc=2 报出（handler 转 `search engine rejected the query`）；
+    // rg 缺席时 Node 用 JS `RegExp` 出结果，命中集允许与 rg 不同。
+    // `--engine=auto` 是那条已废对齐路的唯一开关 —— 它若回来，rg 路径会
+    // 重新悄悄换引擎，令同一 pattern 的接受与否取决于本工具而非 rg 自己。
     for (const output of ["content", "paths", "count"] as const) {
-      assert.ok(argv({ output }).includes("--engine=auto"));
+      assert.equal(
+        argv({ output }).includes("--engine=auto"),
+        false,
+        `${output} 不得带 --engine=auto`
+      );
+    }
+    // 任何 pattern 都不行，包括历史上靠它才收下的 look-around。
+    for (const pattern of ["(?=hit)hit", "\\Z", "\\N", "\\h"]) {
+      assert.equal(
+        argv({ pattern }).includes("--engine=auto"),
+        false,
+        `${pattern} 不得带 --engine=auto`
+      );
+    }
+  });
+
+  it("`--no-unicode` 不在 argv 里：不把 rg 的类语义掰成 ASCII（ADR-0089）", () => {
+    // 回归钉子。历史上这里按 `keepsUnicodeMode()` 给 `\d` / `\w` / `\b`
+    // 一类 pattern 加 `--no-unicode`，好让 rg 的 Unicode 词类退到 JS 的
+    // ASCII 口径。那是与 `--engine=auto` 同一种杠杆：拿 rg 的开关去凑两条
+    // 引擎的「一致」，代价是 rg 侧**正确的** Unicode 行为被改坏。
+    // 实测（rg 15.1.0，vendor 二进制）：`rg '\w'` 命中 `漢字`，
+    // `rg --no-unicode '\w'` 不命中；`rg '\d'` 命中 `٣٤`，加了开关不命中。
+    // ADR-0089 收窄合同后：rg 按自己的默认 Unicode 语义跑，Node 按 JS 语义
+    // 跑，命中集**允许不同**。这条开关若回来，rg 路径会重新被掰成 ASCII 方言，
+    // 同一 pattern 的命中集取决于本工具而非 rg 自己。
+    for (const output of ["content", "paths", "count"] as const) {
+      assert.equal(
+        argv({ output }).includes("--no-unicode"),
+        false,
+        `${output} 不得带 --no-unicode`
+      );
+    }
+    // 任何 pattern 都不行 —— 包括历史上正是靠它才切过去的那些类。
+    for (const pattern of ["\\d", "\\w+", "\\bfoo\\b", "[\\d]+", "hit"]) {
+      assert.equal(
+        argv({ pattern }).includes("--no-unicode"),
+        false,
+        `${pattern} 不得带 --no-unicode`
+      );
     }
   });
 
@@ -235,32 +280,6 @@ describe("buildRgArgs — 遍历语义与 Node 扫对齐（D6）", () => {
     }
     // 用户 glob 仍原样投递（不被挤压/改写）。
     assert.ok(argv({ glob: "*.ts" }).includes("*.ts"));
-  });
-});
-
-describe("buildRgArgs — `--no-unicode` 模式选择（D6/SC9）", () => {
-  it("`\\d` / `\\w` / `\\b` 一类 pattern → 带上 `--no-unicode`", () => {
-    // JS RegExp（无 `u`）的 `\d` / `\w` / `\b` 只认 ASCII，Rust regex 默认
-    // Unicode 类 —— 这两个构造实测就分歧（rg 的 `\d` 吃 ٣٤、`\b` 把 `é` 当
-    // 词字符）。切了才对齐。
-    for (const pattern of ["\\d", "\\w+", "\\bfoo\\b", "[\\d]+"]) {
-      assert.ok(
-        argv({ pattern }).includes("--no-unicode"),
-        `${pattern} 应切 --no-unicode`
-      );
-    }
-  });
-
-  it("`.` / `\\s` / 非 ASCII 字面量 → **不**带 `--no-unicode`（切了会打坏）", () => {
-    // 字节语义下 `.` 只吃一个字节（`a.c` 不匹配 `aéc`）、`\s` 不认 NBSP；
-    // 非 ASCII 字面量同理。这些构造必须留在 Unicode 模式。
-    for (const pattern of ["a.c", "\\s", "\\S", "café", "漢字", "[^x]{2}"]) {
-      assert.equal(
-        argv({ pattern }).includes("--no-unicode"),
-        false,
-        `${pattern} 不应切 --no-unicode`
-      );
-    }
   });
 });
 
