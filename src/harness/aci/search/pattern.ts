@@ -112,17 +112,34 @@ const ESCAPED_PAIR = /\\./g;
 const POSIX_CLASS = /\[[^\]]*\[:[A-Za-z]+\:\]/;
 
 /**
- * 只匹配行终止符的原子（D1）：`\n` / `\r` 及其等价拼写。
+ * 只匹配行终止符的原子（D1）：任何**值是 LF (0x0A) 或 CR (0x0D)** 的原子。
  *
  * 命中即说明这个原子在**按行**搜索里没有可匹配的内容 —— `file-lines.splitLines`
  * 按 LF 切行、行内容不含 LF，CRLF 行尾的 CR 也被剥掉。Node 侧因此永远匹配
  * 不到，rg 侧却可能（`--crlf` + `--engine=auto`，见文件头）把它当行边界，
  * 于是每个文件都「命中」。两条引擎给不出同一答案 → 入口 typed 拒绝。
  *
- * 判据是**行为式**的、不看拼法：rg 的守卫按字面量长度决定是否放行
- * （实测 `\n|a` rc=0 而 `\n|zz` rc=2），同一条交替在语料变化时还会从「巧合
- * 一致」翻成「全命中」。所以这里只问「有没有一个原子只可能匹配 LF/CR」，
- * 不问它周围长什么样。
+ * 判据是**按数值**（LF = 10，CR = 13），不看拼法 —— 这是本轮的关键修正
+ * （之前用「按拼写枚举」漏了 `\u000a` / `\U0000000A` / 裸 LF / 裸 CR）。拼写
+ * 枚举永远会漏下一族：实测表覆盖以下**全部**拼写（任一族被忽略就会漏一族）：
+ *
+ *   - 字面转义：`\n` / `\r`
+ *   - 定长十六进制：`\xHH`（2 位）、`\uHHHH`（4 位）、`\UHHHHHHHH`（8 位）
+ *   - 控制转义：`\cJ` / `\cM`（不分大小写）
+ *   - 八进制：`\NNN` / `\0NN` / `\o{NNN}`（任意位数的合法八进制数）
+ *   - **裸字节**：pattern 字符串里**直接**出现 LF (U+000A) / CR (U+000D)
+ *     字符 —— 这是与「拼写枚举」对立的语义：不是看 `\`，是看 code point。
+ *
+ * 上下文同样按数值判：
+ *   - 类（`[...]`）：成员里**全部**只能匹配 LF/CR（`[\n]` / `[\r]` /
+ *     `[\u000a]`）→ 拒。**有别的可匹配成员**（`[a\nb]` / `[\n a]`）→ 放
+ *     行：普通内容就能命中（实测 SAME）。
+ *   - 组（`(...)` / `(?...)`）：外层**允许零次**（`?` / `??` / `*` / `*?` /
+ *     `{0}` / `{0,N}`）→ 里面的 LF 原子不带出来（实测 SAME）；否则带出。
+ *   - 否定 look-around（`(?!...)` / `(?<!...)`）→ LF 原子不带出（实测
+ *     SAME：行内到处不是 LF，断言总成立）。
+ *   - **交替不豁免**：`\n|a` 看起来一致只是因为语料里恰好有 `a`；换 `\n|zz`
+ *     立刻 rg 报全部、Node 只报 `zz`（实测）。所以不靠「有非终止符分支」。
  */
 export function assertLineContentOnly(pattern: string): void {
   const atom = findMandatoryTerminatorAtom(pattern);
@@ -134,6 +151,9 @@ export function assertLineContentOnly(pattern: string): void {
 
 /**
  * 找 pattern 里第一个「**必须**匹配行终止符」的原子；没有则返回 null。
+ *
+ * 判据是**值**（LF = 10 / CR = 13），不是拼写 —— 见 `assertLineContentOnly`
+ * 的实测表。裸 LF/CR 字符与 `\n` / `\u000a` / `\U0000000A` 走同一条路。
  *
  * 三条例外（都逐条实测过是两条引擎一致的，不是推断）：
  *   - **允许零次**的量词跟在原子或它所在的组之后（`?` / `??` / `*` / `*?` /
@@ -171,11 +191,16 @@ function findMandatoryTerminatorAtom(pattern: string): string | null {
       const atom = readTerminatorEscape(chars, i);
       const nextOpt = quantifyAfter(chars, i + (atom?.length ?? 2)).optional;
       if (atom !== null) {
+        /**
+         * 类内成员的 quantifier 没意义（类只描述「匹配哪些字符」），只看下
+         * 一个类外量词；类外原子照常按「允许零次」结算。
+         */
         if (inClass) {
-          /** 类内成员的 quantifier 没意义（类只描述「匹配哪些字符」），只看下一个类外量词。 */
-          if (classTerminator === null)
+          if (classTerminator === null) {
             classTerminator = { text: atom.text, optional: nextOpt };
-          else classTerminator.optional &&= nextOpt;
+          } else {
+            classTerminator.optional &&= nextOpt;
+          }
         } else {
           recordAtom(stack, { text: atom.text, optional: nextOpt });
         }
@@ -202,10 +227,37 @@ function findMandatoryTerminatorAtom(pattern: string): string | null {
         classTerminator = null;
         classHasNonTerminator = false;
         classNegated = false;
+      } else if (ch === "\n" || ch === "\r") {
+        /**
+         * **裸 LF / CR 字节**（本轮新增的一族）：不是 `\` 转义，而是 pattern
+         * 字符串里直接出现 U+000A / U+000D。语义判据（值 = 10 / 13）在这里
+         * 生效 —— 与 `\n` / `\x0a` 及「类内裸 LF」走同一条记录路径，而不是
+         * 再枚举一族拼写。实测（`/tmp/tool-matrix.mts`，真实二进制 + 真实
+         * argv）：类内裸 LF 在 rg 侧命中每个文件、Node 侧回空。
+         */
+        if (classTerminator === null) {
+          classTerminator = {
+            text: ch === "\n" ? "\\n" : "\\r",
+            optional: false,
+          };
+        }
       } else if (ch !== "-" && ch !== "[") {
         /** 普通字面量是「类里有别的成员」；`-` / `[` 是 rg 的 range / 类中类前缀，不算成员。 */
         classHasNonTerminator = true;
       }
+      continue;
+    }
+
+    if (ch === "\n" || ch === "\r") {
+      /**
+       * 裸 LF / CR 在**类外**：与 `\n` / `\r` 同为终止符原子（同一个值），
+       * 走同一条记录路径。实测（`/tmp/tool-matrix.mts`）：`a<LF>` 在 rg 侧
+       * 命中 `a` 结尾的行、Node 侧回空 —— 不是「两条引擎都没得匹配」的巧合。
+       */
+      recordAtom(stack, {
+        text: ch === "\n" ? "\\n" : "\\r",
+        optional: quantifyAfter(chars, i + 1).optional,
+      });
       continue;
     }
 
@@ -285,11 +337,23 @@ function isNegativeAssertion(chars: ReadonlyArray<string>, i: number): boolean {
 }
 
 /**
- * `i` 处的转义是否只匹配 LF/CR（`\n` / `\r` / `\x0a` / `\cJ` / `\012` /
- * `\o{12}` 及其 CR 等价拼写）。返回原子原文与长度；不是则 null。
+ * `i` 处的转义是否只匹配 LF/CR。返回原子原文与长度；不是则 null。
+ *
+ * 判据是**值 = 10 或 13**，覆盖全部会取到该值的拼写（实测表见
+ * `assertLineContentOnly` 的 doc）：
+ *   - `\n` / `\r`（字面转义）
+ *   - `\xHH`（2 位定长十六进制）
+ *   - `\uHHHH`（4 位定长十六进制）—— 本轮新增；实测 `\u000a` rg rc=2
+ *     （`rg: the literal "\n" is not allowed in a regex`）、Node 静默
+ *     回空（JS 无 `u` 时 `\u000a` 是**既存**转义，值就是 LF）
+ *   - `\UHHHHHHHH`（8 位定长十六进制）—— 本轮新增；`\U0000000A` 实测
+ *     rg rc=2、Node 静默回空（**裸** JS 无 `u` 时它读成字面 `U` + 数字，
+ *     值不是 10，但 rg 读成码点 10 → 分叉）
+ *   - `\cJ` / `\cM`（control escape，大小写不敏感）
+ *   - `\NNN` / `\0NN` / `\o{NNN}`（八进制，值按数值判）
  *
  * 只认「**只**可能匹配终止符」的：`\s` / `\S` / `\W` / `\D` / `.` 都能匹配
- * 行内内容，不在此列（它们的 BOM/NEL 分歧属 D5，另一刀）。
+ * 行内内容，不在此列（它们的空白表 / 类口径分歧属 D5，另一刀）。
  */
 function readTerminatorEscape(
   chars: ReadonlyArray<string>,
@@ -300,9 +364,21 @@ function readTerminatorEscape(
 
   if (kind === "n" || kind === "r") return { text: `\\${kind}`, length: 2 };
 
-  const twoHex = readFixedHex(chars, i, 2);
-  if (twoHex !== null && isTerminatorCode(twoHex.value)) {
-    return { text: twoHex.text, length: twoHex.length };
+  /**
+   * 定长十六进制三兄弟共用 `readFixedHex`：只有**宽度**不同，判据（值是否
+   * 10 / 13）同一份。`\u{...}` / `\x{...}`（变宽码点转义）不走这里 —— 它们
+   * 由 `assertEngineAlignable` 的 `CODE_POINT_ESCAPE` 收口。
+   */
+  for (const [marker, digits] of [
+    ["x", 2],
+    ["u", 4],
+    ["U", 8],
+  ] as const) {
+    if (kind !== marker) continue;
+    const fixed = readFixedHex(chars, i, digits, marker);
+    if (fixed !== null && isTerminatorCode(fixed.value)) {
+      return { text: fixed.text, length: fixed.length };
+    }
   }
 
   const control = readControlEscape(chars, i);
@@ -317,18 +393,22 @@ function readTerminatorEscape(
   return null;
 }
 
-/** `\xHH`（定长两位）。`\x{...}`（码点转义）另有判据，不在此处理。 */
+/**
+ * `\<marker>` + 定长 `digits` 位十六进制（`\xHH` / `\uHHHH` / `\UHHHHHHHH`）。
+ * `\x{...}` / `\u{...}`（变宽码点转义）另有判据，不在此处理。
+ */
 function readFixedHex(
   chars: ReadonlyArray<string>,
   i: number,
-  digits: number
+  digits: number,
+  marker: string
 ): { value: number; text: string; length: number } | null {
-  if (chars[i + 1] !== "x") return null;
+  if (chars[i + 1] !== marker) return null;
   const slice = chars.slice(i + 2, i + 2 + digits).join("");
   if (slice.length !== digits || !/^[0-9a-fA-F]+$/.test(slice)) return null;
   return {
     value: parseInt(slice, 16),
-    text: `\\x${slice}`,
+    text: `\\${marker}${slice}`,
     length: 2 + digits,
   };
 }

@@ -363,6 +363,230 @@ describe("assertLineContentOnly — 行终止符原子必须同判（D1）", () 
   });
 });
 
+/**
+ * D1-leak 回归：拼写矩阵（本轮的关键修正）。
+ *
+ * 原判据按**拼写枚举**（只列 `\n` / `\r` / `\xHH` / `\cJ` / `\NNN` / `\o{NNN}`），
+ * 漏了 `\uHHHH` / `\UHHHHHHHH` / **裸 LF/CR 字符** —— 每条都实测 DIVERGE
+ * （rg 报每个文件或 rc=2，Node 静默回空，`/tmp/tool-matrix.mts` 修前 17 条
+ * DIVERGE）。修法是把判据换成**按值**（LF = 10 / CR = 13），本 describe 把
+ * 「值的每一种拼写」逐条钉住：任一族再漏掉，这里必红。
+ */
+describe("assertLineContentOnly — LF/CR 值 → 拼写矩阵（D1-leak 回归）", () => {
+  const LF = "\n";
+  const CR = "\r";
+
+  it("定长十六进制三兄弟：`\\xHH` / `\\uHHHH` / `\\UHHHHHHHH` 全按值拒", () => {
+    for (const pattern of [
+      "\\x0a",
+      "\\x0d",
+      "\\x0A",
+      "\\x0D",
+      "\\u000a",
+      "\\u000A",
+      "\\u000d",
+      "\\u000D",
+      "\\U0000000A",
+      "\\U0000000a",
+      "\\U0000000D",
+      "\\U0000000d",
+    ]) {
+      rejects(() => assertLineContentOnly(pattern), /line terminator/);
+    }
+  });
+
+  it("定长十六进制的**非**终止符值照常放行（`\\u0041` / `\\U00000041`）", () => {
+    // 反证：判据按值，不是「见到 `\u` / `\U` 就拒」。
+    for (const pattern of [
+      "\\u0041",
+      "\\U00000041",
+      "\\U0001F600",
+      "\\x41",
+      "\\x0b", // VT，不是 LF/CR
+      "\\u000b",
+    ]) {
+      assert.doesNotThrow(() => assertLineContentOnly(pattern), pattern);
+    }
+  });
+
+  it("八进制家族：`\\NNN` / `\\0NN` / `\\o{NNN}` 按数值判", () => {
+    // `\012` = LF、`\015` = CR；`\o{12}` / `\o{015}` 同值。位数与 `\o{}` 的
+    // 前导零都不改变值。
+    for (const pattern of [
+      "\\012",
+      "\\15",
+      "\\015",
+      "\\o{12}",
+      "\\o{15}",
+      "\\o{015}",
+      "\\o{0012}",
+    ]) {
+      rejects(() => assertLineContentOnly(pattern), /line terminator/);
+    }
+    // `\101` = 'A'、`\o{40}` = 空格、`\040` = 空格：值不是 10/13，放行。
+    for (const pattern of ["\\101", "\\o{101}", "\\o{40}", "\\040", "\\0"]) {
+      assert.doesNotThrow(() => assertLineContentOnly(pattern), pattern);
+    }
+  });
+
+  it("控制转义 `\\cJ` / `\\cM`（大小写不敏感）按值拒；`\\cA` 放行", () => {
+    for (const pattern of ["\\cJ", "\\cj", "\\cM", "\\cm"]) {
+      rejects(() => assertLineContentOnly(pattern), /line terminator/);
+    }
+    assert.doesNotThrow(() => assertLineContentOnly("\\cA"));
+    assert.doesNotThrow(() => assertLineContentOnly("\\cZ"));
+  });
+
+  it("**裸 LF / CR 字符**（pattern 里直接出现 U+000A / U+000D）按值拒", () => {
+    // 这一族是「按拼写枚举」永远够不到的：没有反斜杠，只有 code point。
+    // 实测修前 `\n`（裸）在 rg 侧命中每个文件、Node 侧回空。
+    for (const pattern of [
+      LF,
+      CR,
+      `${LF}+`,
+      `a${LF}`,
+      `${LF}a`,
+      `a${LF}b`,
+      `${LF}|a`,
+      `${CR}a`,
+      `a${CR}`,
+      `(?:${LF})`,
+      `(${LF})`,
+      `(?:${LF})+`,
+      `(( ${LF} ))`,
+    ]) {
+      rejects(() => assertLineContentOnly(pattern), /line terminator/);
+    }
+  });
+
+  it("裸 LF/CR 在**类内**（`[<LF>]` / `[<LF><CR>]`）同样拒：类成员也按值判", () => {
+    // 修前这一族被当成「类里有别的成员」直接跳过 —— 实测 `[<LF>]` rg 命中
+    // 每个文件、Node 回空。
+    for (const pattern of [
+      `[${LF}]`,
+      `[${CR}]`,
+      `[${LF}${CR}]`,
+      `[${CR}${LF}]`,
+    ]) {
+      rejects(() => assertLineContentOnly(pattern), /line terminator/);
+    }
+  });
+
+  it("等价拼写在**类内 / 组内 / 量词下**一律按值拒（位置不改判据）", () => {
+    for (const pattern of [
+      "[\\u000a]",
+      "[\\u000d]",
+      "[\\U0000000A]",
+      "[\\x0a]",
+      "[\\cJ]",
+      "[\\o{12}]",
+      "(?:\\u000a)",
+      "(\\u000a)",
+      "(?:(?:\\u000a))",
+      "(?:\\u000a)+",
+      "\\u000a+",
+      "\\u000a{1,}",
+      "\\u000a+?",
+      "a\\u000ab",
+      "\\u000a|a",
+      "(?=\\u000a)",
+    ]) {
+      rejects(() => assertLineContentOnly(pattern), /line terminator/);
+    }
+  });
+
+  it("正向控制：类有非终止符成员（`[a<LF>b]` / `[^<LF>]`）必须放行", () => {
+    // 协调者点名的正向控制（实测 SAME）：类里**还有别的可匹配成员**时普通
+    // 内容就能命中（rg / PCRE2 / JS 同判 `[abc\n]` / `[^a\n]`）；判据不能
+    // 因为「类里有 LF 值」就把整个类拒掉。`[^LF]` 是更严的边界 —— 否定类
+    // 只匹配单个字符，rg / JS 一致判定为「不是 LF」。
+    for (const pattern of [
+      `[a${LF}b]`,
+      `[${LF} a]`,
+      `[${LF}a]`,
+      `[a${CR}b]`,
+      `[^${LF}]`,
+      `[^${CR}]`,
+      `[abc${LF}]`,
+      `[abc${LF}${CR}]`,
+    ]) {
+      assert.doesNotThrow(() => assertLineContentOnly(pattern), pattern);
+    }
+  });
+
+  it("**非类内**裸 LF/CR 强制匹配：宁可 typed 拒绝也不静默给空", () => {
+    // 顶层的「`a<LF>b` / `a<CR>b`」在两条引擎下**都**给空（按行不跨行，LF
+    // 永远没机会匹配），表面看 SAME-empty，但用户大概率是误敲了换行。
+    // 拒绝优于静默：让入口直接告诉用户「你的 pattern 里有个换行符」。
+    // 这与原 D1（`\n` / `\r` 在两条引擎上必须同判）的判据一致 —— 既然无
+    // 论 rg / Node 都永远没机会命中，typed 拒绝既不会缩小可工作的查询集，
+    // 又能在第一时间抓出 pattern 拼写错误。
+    for (const pattern of [
+      `a${LF}b`,
+      `a${CR}b`,
+      `${LF}b`,
+      `a${LF}`,
+      `${CR}a`,
+      `a${CR}`,
+      `${LF}+`,
+      `(${LF})`,
+      `(?:${LF})`,
+      `(?:${LF})+`,
+    ]) {
+      rejects(() => assertLineContentOnly(pattern), /line terminator/);
+    }
+  });
+
+  it("裸 LF/CR 的「允许零次」与「否定断言」豁免同样成立", () => {
+    for (const pattern of [
+      `${LF}?`,
+      `${LF}*`,
+      `${LF}{0}`,
+      `${LF}{0,2}`,
+      `(?:${LF})?`,
+      `(?!${LF})`,
+      `(?<!${LF})`,
+    ]) {
+      assert.doesNotThrow(() => assertLineContentOnly(pattern), pattern);
+    }
+  });
+
+  it("矩阵完整性：LF/CR 值的拼写全表两两不同且都被这条文案拒", () => {
+    // 把「全部拼写」显式列成一张表，防止将来某个拼写被新加的白名单绕过。
+    const spellings = [
+      "\\n",
+      "\\r",
+      "\\x0a",
+      "\\x0d",
+      "\\u000a",
+      "\\u000d",
+      "\\U0000000A",
+      "\\U0000000D",
+      "\\cJ",
+      "\\cM",
+      "\\012",
+      "\\015",
+      "\\o{12}",
+      "\\o{15}",
+      LF,
+      CR,
+    ];
+    assert.equal(new Set(spellings).size, spellings.length);
+    for (const spelling of spellings) {
+      const message = messageOf(() => assertLineContentOnly(spelling));
+      assert.match(message, /line terminator/, JSON.stringify(spelling));
+    }
+  });
+
+  it("D1 文案不越界到 D5：`\\B` / `\\s` 不被行终止符判据拒", () => {
+    // D1 判据只问「原子的值是不是 10 / 13」；`\B` / `\s` / `\S` 能匹配行内
+    // 内容，归 D5（`assertClassEscapesAlignable`）管，两条文案不能互相抢。
+    for (const pattern of ["\\B", "\\s", "\\S", "\\b", "\\d", "\\w"]) {
+      assert.doesNotThrow(() => assertLineContentOnly(pattern), pattern);
+    }
+  });
+});
+
 describe("assertIgnoreCaseAlignable — ignoreCase × 非 ASCII（SC9）", () => {
   it("非 ASCII 且有大小写 + ignoreCase → typed 拒绝且点名 ignoreCase 与字符", () => {
     rejects(() => assertIgnoreCaseAlignable("CAFÉ", true), /ignoreCase/);
