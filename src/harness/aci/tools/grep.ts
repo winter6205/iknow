@@ -116,11 +116,11 @@ export function createGrepTool(
       engineBinaryPath(resolveInstallRoot(), process.platform, process.arch);
     // 取样 spec：`also` 在场时改取内容行（行窗要行号才能判）。
     const sampleSpec = engineSpecFor(compiled.spec);
-    // 编译主 pattern 供 Node 降级路径使用（ADR-0089）：有 rg 时匹配只出 rg，
-    // 这条 RegExp 不会被用来再滤 rg 命中；rg 起不来时 Node 遍历 + 这条
-    // RegExp 出结果，调用仍成功。rg 路径自身的 pattern 错误由 rg 子进程
-    // （rc=2）报，不靠共享入口预判。
-    const regex = compilePattern(sampleSpec.pattern, sampleSpec.ignoreCase);
+    // 主 pattern 的编译**只在 Node 降级路径里**触发（ADR-0089）：有 rg 时
+    // 匹配只出 rg，rg 自身的 pattern 错误由 rg 子进程（rc=2）报；rg 起不来
+    // 时 Node 遍历 + `RegExp` 出结果，调用仍成功。共享入口不预判 rg 路径的
+    // pattern 合法性 —— rg 接受而 JS 拒绝的构造（PCRE2 命名组 `(?P<n>abc)`、
+    // inline flag `(?i)abc` 等）必须能走通 rg 路径。
     const explicitFileRel = await explicitFileRelative(compiled);
     const readLines = (path: string) =>
       readWorkspaceLines(compiled.workspaceRoot, path, {
@@ -131,7 +131,6 @@ export function createGrepTool(
       binaryPath,
       compiled,
       sampleSpec,
-      regex,
       spawn: deps?.spawn,
       signal: ctx?.signal,
     });
@@ -213,7 +212,6 @@ async function resolveEngineResult(input: {
   readonly binaryPath: string | undefined;
   readonly compiled: CompiledInput;
   readonly sampleSpec: QuerySpec;
-  readonly regex: RegExp;
   readonly spawn: SpawnFn | undefined;
   readonly signal: AbortSignal | undefined;
 }): Promise<EngineResult> {
@@ -227,11 +225,19 @@ async function resolveEngineResult(input: {
   });
   if (fromRg.kind !== "unavailable") return fromRg;
 
+  // Node 降级路径（ADR-0089）：此处才编主 pattern —— rg 路径不预判合法性，
+  // rg 接受而 JS 拒绝的构造（PCRE2 命名组 / inline flag 等）必须能走通 rg
+  // 路径。Node 侧编不过 → typed 拒绝（文案点名 pattern，与未知 type 的失败
+  // 域互不混同，SC10）。
+  const regex = compilePattern(
+    input.sampleSpec.pattern,
+    input.sampleSpec.ignoreCase
+  );
   const lines = await nodeScan({
     spec: input.sampleSpec,
     workspaceRoot: input.compiled.workspaceRoot,
     searchRoot: input.compiled.searchRoot,
-    regex: input.regex,
+    regex,
   });
   return { kind: "lines", lines };
 }

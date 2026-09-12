@@ -6,9 +6,10 @@
  * 原文带进结果（那是 `context` 的职责），也不做裸跨行正则。
  *
  * 与引擎解耦：输入命中行 + 「按 path 取全文行」的回调。rg 引擎与 Node 降级
- * 引擎共用本层。ADR-0089 之后本层只对 rg 路径的命中做 also 过滤（用 JS
- * `RegExp` 跑 `also` 文本）—— 不再声称「两条引擎同判」：rg 给出命中就
- * 用这些命中过本层，Node 路径因命中集不同而可能过滤掉的命中数也不同。
+ * 引擎共用本层 —— pipeline.applyAlsoFilter 把两条引擎归一后的命中行都喂进
+ * 本层做 also 过滤（用 JS RegExp 跑 also 文本）。两条引擎的命中集可能不同，
+ * 过滤后保留的命中数也随之不同 —— 这是 ADR-0089 已接受的合同；本层只判定
+ * 窗内是否存在第二段，不挑引擎。
  */
 
 import { ToolExecutionError } from "../../errors.js";

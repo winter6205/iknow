@@ -5,8 +5,8 @@
  * / context 等行为在 **rg** 这条生产默认路径上钉一遍；Node 降级路径在专属
  * describe 块里用 `engineBinaryPath` 指向不存在路径驱动 `unavailable → nodeScan`，
  * 钉「ENOENT 时仍能搜、调用不拒绝、分页 / context / count 同形」。两条引擎
- * 不再被强行同判（命中集允许不同），过去那张 parity 表退役 —— 见
- * 「grep — SC9 自带引擎缺席 → Node 遍历 + JS RegExp」块的注释。
+ * 不被强行同判（命中集允许不同），见「grep — SC9 自带引擎缺席 → Node 遍历
+ * + JS RegExp」块的注释。
  *
  * 引擎选择（`GrepEngine`）：
  *   - `node`  —— `engineBinaryPath` 指向不存在的路径：驱动 D6 降级（不走真
@@ -653,19 +653,35 @@ describe("grep — D4 glob / type 收窄", () => {
     });
   });
 
-  it("坏正则 → typed 拒绝，文案点名 pattern、不含关键词 type（SC10）", async () => {
-    await bothEngines(async (makeTool) => {
-      const root = await makeScratch("grep-bad-regex-");
-      await writeFile(join(root, "a.ts"), "hit\n", "utf8");
+  it("坏正则（Node 路径）→ typed 拒绝点名 pattern，不含关键词 type（SC10）", async () => {
+    // Node 降级路径自己的坏正则失败域：`compilePattern` typed 拒绝，文案点名
+    // pattern 原文；与未知 type 的失败域互不混同（SC10）。
+    const root = await makeScratch("grep-bad-regex-node-");
+    await writeFile(join(root, "a.ts"), "hit\n", "utf8");
 
-      await assert.rejects(
-        () => makeTool(root).handler({ pattern: "(unclosed" }),
-        (error: unknown) =>
-          error instanceof ToolExecutionError &&
-          /pattern/.test(error.message) &&
-          !/type/.test(error.message)
-      );
-    });
+    await assert.rejects(
+      () => toolFor(root, "node").handler({ pattern: "(unclosed" }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        /pattern/.test(error.message) &&
+        !/type/.test(error.message)
+    );
+  });
+
+  it("坏正则（rg 路径）→ rg 子进程自己的 rc=2（typed），不含关键词 type（SC10）", async () => {
+    // rg 路径的坏正则失败域来自 rg 子进程 rc=2（ADR-0089：rg 自己的 pattern
+    // 错误由 rg 自己报，共享入口不预判）。handler 转成 typed
+    // `search engine rejected the query`；与未知 type 的失败域仍互不混同。
+    const root = await makeScratch("grep-bad-regex-rg-");
+    await writeFile(join(root, "a.ts"), "hit\n", "utf8");
+
+    await assert.rejects(
+      () => toolFor(root, "rg").handler({ pattern: "(unclosed" }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        /search engine rejected the query/.test(error.message) &&
+        !/type/.test(error.message)
+    );
   });
 
   it("type 非法时先于 pattern 判定（类型检查在参数规范化期，与引擎无关）", async () => {
@@ -784,6 +800,45 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
       pattern: "\\w",
     })) as string;
     assert.match(fromRg, /kanji-only\.txt/);
+  });
+
+  it("rg 在场：rg 接受而 JS 拒绝的 pattern 走通 rg 路径（ADR-0089）", async () => {
+    // 回归钉子：rg 路径**不预判**主 pattern 的 JS 合法性。`(?P<n>abc)` 是
+    // PCRE2 命名组 —— rg 接受、JS `RegExp` 拒绝（"Invalid group"）。
+    // 旧 handler 在共享入口 `compilePattern` 处抛 ToolExecutionError，把这条
+    // 合法 rg 查询也拒掉，与「有 rg 只信 rg」的合同相反。修复后 rg 子进程
+    // 自己跑这条 pattern 并给出命中，handler 把命中回给模型、不抛错。
+    // `(?i)abc` 是 inline flag —— 同性质：rg 接受、JS 拒绝。
+    const root = await makeScratch("grep-adr-rg-only-pattern-");
+    await writeFile(join(root, "a.txt"), "abc ABC\n", "utf8");
+
+    const namedFromRg = (await toolFor(root, "rg").handler({
+      pattern: "(?P<n>abc)",
+    })) as string;
+    assert.equal(namedFromRg, "a.txt");
+
+    const inlineFromRg = (await toolFor(root, "rg").handler({
+      pattern: "(?i)abc",
+    })) as string;
+    assert.equal(inlineFromRg, "a.txt");
+  });
+
+  it("rg 缺席：JS 拒绝的 pattern 在 Node 路径上仍 typed 拒绝（SC10）", async () => {
+    // 反向钉子：rg 路径放宽**不**意味着 Node 路径也放宽。Node 路径在
+    // `compilePattern` 处 typed 拒绝 `(?P<n>abc)`，文案点名 pattern 原文、
+    // 不含 type 关键词（与未知 type 的失败域互不混同，SC10）。这是 Node
+    // 路径**自己的**合同，不依赖 rg 子进程。
+    const root = await makeScratch("grep-adr-node-only-pattern-");
+    await writeFile(join(root, "a.txt"), "abc ABC\n", "utf8");
+
+    await assert.rejects(
+      () => toolFor(root, "node").handler({ pattern: "(?P<n>abc)" }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        /invalid pattern/.test(error.message) &&
+        /\(\?P<n>abc\)/.test(error.message) &&
+        !/type/.test(error.message)
+    );
   });
 
   it("rg 在场 + pattern `\\n` → rg 自己的 rc=2（不是合成的行终止符门）", async () => {

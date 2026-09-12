@@ -186,11 +186,12 @@ describe("compilePattern — `u` 规则与退回（code point 对齐）", () => 
     rejects(() => compilePattern("a**", false), /pattern/);
   });
 
-  it("已知残留：单反斜杠转义在 JS 侧读字面量（文件头清单的钉子）", () => {
-    // 这些 pattern 在 rg 侧被接受（Rust 默认引擎或 PCRE2），JS 却读成字面量
-    // —— 两侧都「接受」但命中不同。ADR-0089 接受这是 Node 路径与 rg 路径的
-    // 命中集差异（Node 不模仿 rg 默认引擎拒绝集），测试只钉住 JS 侧的
-    // 实际读法。
+  it("单反斜杠转义在 JS 侧读字面量（Node 路径的编读钉子）", () => {
+    // 这些转义 JS 不认作元字符（rg 默认引擎或 PCRE2 才认作），JS `RegExp`
+    // 把它当两字面字符序列 —— Node 路径因此「接受」但命中的是去反斜杠的
+    // 文本。rg 路径同样接受这些 pattern（按 rg 自己的语义命中），两条引擎
+    // 的命中集可能不同，是 ADR-0089 已接受的合同。本测试只钉 Node 路径**自
+    // 己**的实际编读：编得过、且命中的是去掉反斜杠后的字面字符。
     for (const [pattern, literal] of [
       ["\\A", "A"],
       ["\\z", "z"],
@@ -206,16 +207,17 @@ describe("compilePattern — `u` 规则与退回（code point 对齐）", () => 
       ["\\R", "R"],
     ] as const) {
       const compiled = compilePattern(pattern, false);
-      assert.equal(compiled.unicode, false, pattern); // 两侧都编不过带 `u` 的形态
+      assert.equal(compiled.unicode, false, pattern); // 带 `u` 的形态编不过
       assert.equal(compiled.test(literal), true, pattern);
     }
   });
 
-  it("已知残留：Rust 与 PCRE2 都拒的转义在 JS 侧静默命中（清单的钉子）", () => {
-    // rg 在这些转义上 rc=2 报（typed 失败域：rg 自己拒），JS 读字面量并
-    // 命中 —— Node 路径因此**比 rg 路径更宽**，ADR-0089 视为特性（不是
-    // 漏测）。`\c` 单独列 —— JS 把它读成两字符序列 `\c`，命中对象不是
-    // 单个 `c`（实测）。
+  it("rg 拒的转义在 JS 侧静默命中（Node 路径的编读钉子）", () => {
+    // 这些转义 rg 默认引擎会 rc=2 拒（typed 失败域：rg 自己报），JS `RegExp`
+    // 读字面量并命中 —— Node 路径因此**比 rg 路径更宽**，ADR-0089 视为特性
+    // （不是漏测）。`\c` 单独列 —— JS 把它读成两字符序列 `\c`，命中对象
+    // 不是单个 `c`（实测）。本测试钉 Node 路径**自己**的编读，不假设 rg
+    // 也命中。
     for (const [pattern, literal] of [
       ["\\q", "q"],
       ["\\g", "g"],

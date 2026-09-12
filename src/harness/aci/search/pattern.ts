@@ -78,11 +78,9 @@ function tryCompile(pattern: string, flags: string): RegExp | null {
  *     判据为 false 时 Node 不加 `u`，`-i k` 不折 KELVIN —— 这里 Node 比 rg
  *     窄，是已接受的命中集差异。
  *
- * 历史注：旧版在这里挂着「字符类转义 × Unicode 模式」分叉的 typed 拒绝，
- * ADR-0089 之后不再做两引擎同判。`keepsUnicodeMode` 只决定 Node 加不加
- * `u`，不再决定哪些构造要 typed 拒。那些分叉构造在 rg 路径上由 rg 自己报，
- * 在 Node 路径上由 `RegExp` 自然处理，命中集可能不同 —— 这是「Node 不模仿
- * rg 拒绝集」的直接体现。
+ * 本判据**只**作用于 Node 侧编译的 `u` flag；rg 路径不读它，由 rg 子进程按
+ * 自己的默认 Unicode 语义处理自己的 pattern 错误（rc=2）。两条引擎因此可能
+ * 对同一个 pattern 给出不同命中集 —— 这是 ADR-0089 已接受的合同。
  */
 export function keepsUnicodeMode(pattern: string): boolean {
   return hasMultiByteSensitiveConstruct(pattern);
