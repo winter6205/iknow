@@ -296,7 +296,7 @@ describe("ReadonlyViolationError — typed error shape", () => {
 
 // Handler wiring tests call createBashTool → requireBwrap(), so they depend on
 // bwrap being present at construction time. They run locally (bwrap 0.11.1);
-// CI excludes this file (see .github/workflows/test.yml).
+// CI excludes this file (SSOT: vitest.ci-excludes.ts).
 describe("bash handler — readonly mode wiring", () => {
   it("bashMode='readonly' rejects a write command with ReadonlyViolationError", async () => {
     const cwd = await makeScratch("bash-ro-reject-");

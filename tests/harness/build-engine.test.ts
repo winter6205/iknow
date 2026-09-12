@@ -20,7 +20,7 @@ import {
 
 // 装配类用例（真实 MCP manager / bwrap 探测 / skill scanner）在并发负载下
 // 可超 vitest 默认 5s —— 与 hub-worktree-isolation.test.ts 同款放宽。
-// 这些用例同属 CI 实证排除集（.github/workflows/test.yml），本地仍需可过。
+// 这些用例同属 CI 排除集（SSOT: vitest.ci-excludes.ts），本地仍需可过。
 vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { spawn as spawnChild } from "node:child_process";

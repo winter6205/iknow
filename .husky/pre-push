@@ -1,11 +1,11 @@
-# 提交前的全量测试兜底（push 时执行，比 commit 更重）。
-#
-# 2026-08-14 改法 A：本地 push 从全量 vitest（6.5min）降为变更相关窄路径，
-# 全量由 GitHub Actions test.yml 兜底（CI 跑全量 + retry 1 + exclude 17，
-# 失败拦 merge）。与 pre-commit 注释"全量交给 pre-push 与 CI"设计意图对齐。
+# push 兜底：只跑变更相关窄路径，全量交给 CI。
 #
 # - test:changed：基于 git HEAD 差异的窄测试（同 pre-commit 的窄路径），
 #   覆盖本次实际变更文件，体感 ~1min。
+# - 全量交给 CI（GitHub Actions test.yml）：test-fast 每次事件都跑（PR / push
+#   master / nightly / dispatch；快子集，不装 bwrap，retry 1 + bail 10）；
+#   test-full 仅 nightly cron / workflow_dispatch（全量兜底，装 bwrap，retry 1）。
+#   CI 失败拦 merge；排除集 SSOT = vitest.ci-excludes.ts。
 # - 若确需跳过本钩子（如仅文档/纯数据变更），用 git push --no-verify（谨慎）。
 
 # git 会在钩子环境内自动注入 GIT_DIR / GIT_INDEX_FILE / GIT_WORK_TREE /
