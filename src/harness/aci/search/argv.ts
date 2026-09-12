@@ -14,9 +14,10 @@
  */
 
 import type { QuerySpec } from "./types.js";
-import { rgNeedsUnicodeDisabled } from "./pattern.js";
 import { TYPE_GLOBS } from "./type-table.js";
 import { MAX_TEXT_FILE_BYTES } from "./file-lines.js";
+import { NEWLINE_PATH_EXCLUDES } from "./path-representable.js";
+import { rgNeedsUnicodeDisabled } from "./pattern.js";
 import { rgTransportBudgetBytes } from "./rg-output.js";
 
 /** 词表里常被用到的样例（测试锁形状用；真值仍在 TYPE_GLOBS）。 */
@@ -73,7 +74,8 @@ export function buildRgArgs(
     "--glob",
     "!**/node_modules",
     "--glob",
-    "!**/.git"
+    "!**/.git",
+    ...NEWLINE_PATH_EXCLUDES.flatMap((glob) => ["--glob", glob])
   );
   // 遍历期的体积闸；显式点名的文件不受它约束（rg 语义），Node 侧同口径。
   args.push(`--max-filesize=${String(MAX_TEXT_FILE_BYTES)}`);

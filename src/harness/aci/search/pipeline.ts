@@ -21,6 +21,7 @@ import type { EngineResult } from "./rg-engine.js";
 import { expandAlsoNeedle, filterHitsByAlsoWindow } from "./also-window.js";
 import { buildContextGroups } from "./context-groups.js";
 import { NO_ENTRIES_AT_OFFSET } from "./paginate.js";
+import { keepRepresentablePaths } from "./path-representable.js";
 import { sortContextGroups, sortLineHits } from "./sort.js";
 import {
   projectContent,
@@ -56,22 +57,70 @@ export async function renderResult(input: PipelineInput): Promise<string> {
     );
   }
 
-  const lines = await applyAlsoFilter(input);
+  const engineResult = dropUnrepresentable(result);
+  const lines = await applyAlsoFilter({ ...input, result: engineResult });
 
   if (spec.output === "content") {
-    if (spec.context > 0) return renderContext(input, lines);
+    if (spec.context > 0)
+      return renderContext({ ...input, result: engineResult }, lines);
     return projectContent(projection(lines, spec));
   }
   if (spec.output === "count") {
-    if (result.kind === "counts" && !hasAlso(spec)) {
-      return projectCounts(result.counts, spec.offset, spec.headLimit);
+    if (engineResult.kind === "counts" && !hasAlso(spec)) {
+      return projectCounts(engineResult.counts, spec.offset, spec.headLimit);
     }
     return projectCount(projection(lines, spec));
   }
-  if (result.kind === "paths" && !hasAlso(spec)) {
-    return projectPathList(result.paths, spec.offset, spec.headLimit);
+  if (engineResult.kind === "paths" && !hasAlso(spec)) {
+    return projectPathList(engineResult.paths, spec.offset, spec.headLimit);
   }
   return projectPaths(projection(lines, spec));
+}
+
+/**
+ * 行协议可表示性收口（D2；两条引擎共用）。
+ *
+ * 含 `\n` / `\0` 的路径在任何出法里都不能出现：`\n` 会把自己的记录拆成两条
+ * （`path:line:text` 的行协议下前半段长成一条假命中），`\0` 与 `--null` 的
+ * 分隔符撞车。这里放在**两条引擎的汇流点**，而不是各引擎内部 —— 将来任何
+ * 新引擎只要走这条流水线就自动继承，不会再分叉出第三种坏法。
+ *
+ * 遍历期已由 argv 的排除 glob 挡掉绝大多数（含 `\n` 目录的整棵子树）；
+ * rg 的显式点名目标由 `rg-engine.ts` 在 exec 前挡掉；本层兜住其余一切
+ * （Node 扫、显式文件参数、以及「路径只在祖先段里带换行」这类漏网）。
+ * 判定与理由见 `path-representable.ts`。
+ */
+function dropUnrepresentable(result: EngineResult): EngineResult {
+  if (result.kind === "unavailable") return result;
+  if (result.kind === "lines") {
+    return {
+      kind: "lines",
+      lines: keepRepresentablePaths(result.lines, (hit) => hit.path),
+    };
+  }
+  if (result.kind === "paths") {
+    return {
+      kind: "paths",
+      paths: keepRepresentablePaths(result.paths, (path) => path),
+    };
+  }
+  if (result.kind === "counts") {
+    return {
+      kind: "counts",
+      counts: keepRepresentablePaths(result.counts, (count) => count.path),
+    };
+  }
+  if (result.kind === "context") {
+    return {
+      kind: "context",
+      groups: result.groups
+        .map((group) => ({
+          entries: keepRepresentablePaths(group.entries, (entry) => entry.path),
+        }))
+        .filter((group) => group.entries.length > 0),
+    };
+  }
+  return result;
 }
 
 /**

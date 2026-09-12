@@ -50,6 +50,9 @@ export function matchesGlobSet(
   // rc=1（同树的 `--glob '!*'` 也是 rc=1）。不能靠「空模式匹配空串」在
   // `matchOne` 里自然落到 false —— 集合语义下没有肯定模式会默认全收，裸 `!`
   // 因此反转成「列全仓」（Finding 3）。
+  // 可达性：工具面只暴露单个 `glob` 参数，喂进来的就是这**一条**模式，
+  // 「裸 `!` 与其它 glob 并列」的形状从工具表面走不到；留在这里是因为
+  // `matchesGlobSet` 是集合语义的通用实现（`node-scan` 也按集合喂）。
   if (globs.some((g) => g === "!")) return false;
   const positives = globs.filter((g) => !isNegation(g));
   const negatives = globs.filter((g) => isNegation(g)).map((g) => g.slice(1));

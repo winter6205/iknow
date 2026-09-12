@@ -23,6 +23,7 @@ import { spawnWithStopSignal } from "../../sandbox/runner.js";
 import { buildRgArgs } from "./argv.js";
 import { parseRgContextStdout } from "./context-groups.js";
 import { admittedPaths } from "./file-lines.js";
+import { isPathRepresentable } from "./path-representable.js";
 import {
   MAX_MATCH_LINE_COLUMNS,
   parseRgNullCounts,
@@ -67,6 +68,14 @@ export async function runRgEngine(input: RgEngineInput): Promise<EngineResult> {
   // `--glob` 的锚定相对 cwd 判段 —— 两者都要求搜索路径相对 workspace 表达，
   // 才能与 Node 引擎（按 workspace 相对 path 判段、吐相对 path）同口径。
   const searchPath = toSearchPath(input.workspaceRoot, input.searchRoot);
+  // 搜索目标本身含 `\n` / `\0` 时直接给空结果，**不** exec rg：rg 的 `--glob`
+  // 排除只作用于遍历期，显式点名的文件 / 目录照搜（实测 15.1.0），而它的
+  // 记录用 `\n` 收尾 —— 带 `\n` 的路径会把一条记录拆成两段，后半段长成一条
+  // **假命中**（`nl\nname.txt` → `name.txt:1:<正文>`），且该假路径若真存在就
+  // 能通过文本准入活到模型面前。搜索目标不可表示时它**整棵子树**也不可表示
+  // （任何子孙路径都带这段祖先名），空结果与「全部跳过」同义。规则与理由见
+  // `path-representable.ts`；Node 引擎侧由 `pipeline.ts` 的同一判据兜住。
+  if (!isPathRepresentable(searchPath)) return parseByMode("", input);
   const args = buildRgArgs(input.spec, searchPath, MAX_MATCH_LINE_COLUMNS);
   const collected = await collect(input, args);
   if (collected === "unavailable") return { kind: "unavailable" };

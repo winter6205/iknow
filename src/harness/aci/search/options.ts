@@ -90,15 +90,26 @@ export function parseQuerySpec(input: unknown): QuerySpec {
   };
 }
 
-/** `limit` 已退役：出现即 typed 拒绝，把旧名误导挡在入口（D3）。 */
+/**
+ * 退役名 `limit` / `grep_limit`：出现即 typed 拒绝，把旧名误导挡在入口（D3）。
+ *
+ * 两个名字都要拦：契约写的是「不叫 `limit`，**不叫 `grep_limit`**」，
+ * schema 的 `additionalProperties: false` 只保证新装配不认它，直呼工具 / 旧
+ * 装配仍可能带进来 —— 只拦 `limit` 会让 `grep_limit` 静默失效（模型以为
+ * 自己限了条数，实际拿到默认 50 条）。
+ */
 export function rejectRetiredLimitField(input: unknown): void {
   if (input === null || typeof input !== "object") return;
-  if ((input as Record<string, unknown>).limit !== undefined) {
-    throw new ToolExecutionError(
-      "grep: `limit` is not a grep parameter; the result-list count is `head_limit` (read_file uses `limit` for its line window)"
-    );
-  }
+  const raw = input as Record<string, unknown>;
+  const retired = RETIRED_LIMIT_FIELDS.find((name) => raw[name] !== undefined);
+  if (retired === undefined) return;
+  throw new ToolExecutionError(
+    `grep: \`${retired}\` is not a grep parameter; the result-list count is \`head_limit\` (read_file uses \`limit\` for its line window)`
+  );
 }
+
+/** 退役的条数字段名（D3；文案里点名 head_limit，见上）。 */
+const RETIRED_LIMIT_FIELDS: ReadonlyArray<string> = ["limit", "grep_limit"];
 
 function readNonEmptyString(value: unknown, name: string): string {
   if (typeof value !== "string" || value.length === 0) {

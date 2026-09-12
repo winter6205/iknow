@@ -1323,6 +1323,107 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
   });
 });
 
+// ───────────── 行协议可表示性（含 `\n` 的路径在两条引擎上都不出现） ─────────────
+
+describe("grep — 含换行的路径（行协议不可表示）", () => {
+  /**
+   * 三种出法都是行协议（每行一条记录），路径里的 `\n` 会把一条记录拆成两条。
+   * 实测 rg 15.1.0 的坏法与 Node 不同但同样坏：rg 侧前半段长成一条**假命中**
+   * （`name.txt:1:<正文>`，磁盘上并没有这个文件），Node 侧原样吐出带换行的
+   * 路径。口径是「两条引擎都跳过它」，且干净邻居照常报告。
+   */
+  async function makeTree(prefix: string): Promise<string> {
+    const root = await makeScratch(prefix);
+    await mkdir(join(root, "a\nb"), { recursive: true });
+    await writeFile(join(root, "nl\nname.txt"), "needle here\n", "utf8");
+    await writeFile(join(root, "a\nb", "inner.txt"), "needle inner\n", "utf8");
+    await writeFile(join(root, "plain.txt"), "needle plain\n", "utf8");
+    return root;
+  }
+
+  it("paths / content / count 三种出法都看不见它，干净邻居照常", async () => {
+    await bothEngines(async (makeTool) => {
+      const root = await makeTree("grep-nl-path-");
+      const tool = makeTool(root);
+
+      const paths = (await tool.handler({ pattern: "needle" })) as string;
+      const content = (await tool.handler({
+        pattern: "needle",
+        output: "content",
+      })) as string;
+      const count = (await tool.handler({
+        pattern: "needle",
+        output: "count",
+      })) as string;
+
+      for (const [label, out] of [
+        ["paths", paths],
+        ["content", content],
+        ["count", count],
+      ] as const) {
+        assert.equal(
+          out.includes("nl\nname.txt"),
+          false,
+          `${label} 漏出含换行路径: ${JSON.stringify(out)}`
+        );
+        // 假命中：rg 会把 `nl\nname.txt` 的记录拆成 `name.txt:1:needle`。
+        // 磁盘上没有 `name.txt`，这条绝不能出现。
+        assert.equal(
+          /(^|\n)name\.txt:/.test(out),
+          false,
+          `${label} 出现假命中 name.txt: ${JSON.stringify(out)}`
+        );
+        assert.equal(
+          out.includes("a\nb/"),
+          false,
+          `${label} 漏出含换行目录下的路径: ${JSON.stringify(out)}`
+        );
+      }
+      // 干净邻居照常报告（跳过不等于整次查询空）。
+      assert.equal(paths, "plain.txt");
+      assert.equal(content, "plain.txt:1:needle plain");
+    });
+  });
+
+  it("head_limit 与 total: 计数自洽（跳过项不进分母）", async () => {
+    await bothEngines(async (makeTool) => {
+      const root = await makeTree("grep-nl-count-");
+
+      const count = (await makeTool(root).handler({
+        pattern: "needle",
+        output: "count",
+      })) as string;
+
+      assert.deepEqual(count.split("\n"), ["plain.txt:1", "total:1"]);
+    });
+  });
+
+  it("显式点名含换行的文件 / 目录 → 空结果（不是假命中）", async () => {
+    // rg 的 `--glob` 排除**不作用于显式点名的路径参数**（实测 15.1.0），
+    // 所以这条靠 `rg-engine` 在 exec 前的可表示性短路 —— 少了它，点名
+    // `nl\nname.txt` 会吐出 `name.txt:1:needle here` 这条假命中。
+    await bothEngines(async (makeTool) => {
+      const root = await makeTree("grep-nl-explicit-");
+      const tool = makeTool(root);
+
+      for (const path of ["nl\nname.txt", "a\nb"]) {
+        for (const output of ["paths", "content", "count"] as const) {
+          const out = (await tool.handler({
+            pattern: "needle",
+            path,
+            output,
+          })) as string;
+          assert.equal(out, "", `${path} / ${output} 应为空: ${out}`);
+        }
+      }
+      // 对照：干净文件照常搜得到。
+      assert.equal(
+        await tool.handler({ pattern: "needle", path: "plain.txt" }),
+        "plain.txt"
+      );
+    });
+  });
+});
 
 // ───────────────────────── 大小写 / 正则 ─────────────────────────
 describe("grep — 大小写与正则语义", () => {

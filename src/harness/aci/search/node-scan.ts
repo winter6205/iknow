@@ -21,6 +21,7 @@ import { join, relative } from "node:path";
 import { fileNameMatchesType } from "./argv.js";
 import { matchesGlobSet } from "./glob-match.js";
 import { readWorkspaceLines } from "./file-lines.js";
+import { isPathRepresentable } from "./path-representable.js";
 import { truncateMatchContent } from "./rg-output.js";
 import type { LineHit, QuerySpec } from "./types.js";
 
@@ -49,6 +50,11 @@ export async function nodeScan(input: NodeScanInput): Promise<LineHit[]> {
     // —— 同一个 path 参数的答案取决于哪条引擎在跑。越界已由 resolveSearchRoot
     // 的 containment 校验挡在入口，遍历本身只走 searchRoot 之下。
     const relPath = toWorkspaceRelative(input.workspaceRoot, absPath);
+    // 行协议不可表示的路径直接跳过：含 `\n` 的路径会把自己的记录拆成两条
+    // （见 `path-representable.ts`）。跳过而不是报错 —— rg 侧遍历期用排除
+    // glob 静默跳过，两边必须同样「看不见」，否则同一个目录的条数、`total:`
+    // 与命中集又会随引擎变（D6/SC9）。
+    if (!isPathRepresentable(relPath)) continue;
     if (!explicitFile && !passesFilters(relPath, input.spec)) continue;
     const lines = await readWorkspaceLines(input.workspaceRoot, relPath, {
       allowOversize: explicitFile,

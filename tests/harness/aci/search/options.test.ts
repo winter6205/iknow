@@ -123,6 +123,20 @@ describe("parseQuerySpec — head_limit 语义（D3）", () => {
       rejectRetiredLimitField({ pattern: "a", head_limit: 5 })
     );
   });
+
+  it("`grep_limit` 同样是退役名：typed 拒绝且文案点名 head_limit", () => {
+    // 契约 D3 明说「不叫 `limit`，不叫 `grep_limit`」。schema 的
+    // `additionalProperties: false` 只拦新装配，直呼工具 / 旧装配仍可能带
+    // 进来 —— 只拦 `limit` 会让 `grep_limit` 静默失效（模型以为限了条数，
+    // 实际拿默认 50 条）。
+    assert.throws(
+      () => rejectRetiredLimitField({ pattern: "a", grep_limit: 200 }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        /head_limit/.test(error.message) &&
+        /grep_limit/.test(error.message)
+    );
+  });
 });
 
 describe("parseQuerySpec — 空 / 非法输入", () => {

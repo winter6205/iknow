@@ -21,6 +21,7 @@ import {
   KNOWN_TYPE_SAMPLE,
 } from "../../../../src/harness/aci/search/argv.ts";
 import { MAX_TEXT_FILE_BYTES } from "../../../../src/harness/aci/search/file-lines.ts";
+import { NEWLINE_PATH_EXCLUDES } from "../../../../src/harness/aci/search/path-representable.ts";
 import {
   MAX_MATCH_LINE_COLUMNS,
   rgTransportBudgetBytes,
@@ -206,6 +207,16 @@ describe("buildRgArgs — 遍历语义与 Node 扫对齐（D6）", () => {
 
   it("--crlf 常开：CRLF 行按行边界处理（Node splitLines 同口径）", () => {
     assert.ok(argv({}).includes("--crlf"));
+  });
+
+  it("含 `\\n` 路径的排除 glob 常开：行协议拆不开的记录不进遍历", () => {
+    // 排除集与 `path-representable.ts` 共用同一份常量（含 `\n` 目录的整棵
+    // 子树也要剔 —— 只按基名剔会漏掉 `a\nb/inner.txt`）。
+    const args = argv({});
+
+    for (const glob of NEWLINE_PATH_EXCLUDES) {
+      assert.ok(args.includes(glob), `缺排除 glob: ${JSON.stringify(glob)}`);
+    }
   });
 });
 
