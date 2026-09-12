@@ -22,7 +22,6 @@ import { isAbsolute } from "node:path";
 
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
-import { ToolExecutionError } from "../../errors.js";
 import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
 import { resolveInstallRoot, type LiveTaskRoot } from "../../session-roots.js";
 import { resolveWithinRoot } from "./helpers.js";
@@ -30,7 +29,7 @@ import { compilePattern } from "../search/pattern.js";
 import { parseQuerySpec, rejectRetiredLimitField } from "../search/options.js";
 import { engineSpecFor, renderResult } from "../search/pipeline.js";
 import { readWorkspaceLines } from "../search/file-lines.js";
-import { nodeScan } from "../search/node-scan.js";
+import { nodeScan, toWorkspaceRelative } from "../search/node-scan.js";
 import {
   engineBinaryPath,
   RIPGREP_VERSION,
@@ -116,8 +115,15 @@ export function createGrepTool(
     // 取样 spec：`also` 在场时改取内容行（行窗要行号才能判）。
     const sampleSpec = engineSpecFor(compiled.spec);
     const regex = compilePattern(sampleSpec.pattern, sampleSpec.ignoreCase);
+    // 搜索根是显式点名的文件时，体积闸对它让路（rg 的 `--max-filesize` 只管
+    // 遍历期，见 `argv.ts` / `node-scan.ts`）。展示侧的取行（`also` 行窗、
+    // `context` 组构造）必须与「这个文件能不能被搜到」同口径 —— 否则 rg 出
+    // 了命中、过滤层却因为读不到行而把它丢掉，两条引擎的产出又分叉。
+    const explicitFileRel = await explicitFileRelative(compiled);
     const readLines = (path: string) =>
-      readWorkspaceLines(compiled.workspaceRoot, path);
+      readWorkspaceLines(compiled.workspaceRoot, path, {
+        allowOversize: path === explicitFileRel,
+      });
 
     const result = await resolveEngineResult({
       binaryPath,
@@ -133,29 +139,8 @@ export function createGrepTool(
 
   return Object.freeze({
     name: "grep",
-    description: `Search file contents under a workspace directory using a regular expression; use it to discover which files carry a pattern before reading them, and pair it with read_file once you have a pinpointed path. Returns relative paths by default (output=paths) — set output=\"content\" for path:line:text or output=\"count\" for per-file counts plus a total:. Narrow with glob / type, show nearby lines with context, or keep only hits whose second literal also appears within within_lines of the match. Page a sorted result list with offset + head_limit (default 50, hard cap ${String(2000)}); an offset past the last entry returns "No entries at this offset". Runs on a bundled search engine (ripgrep ${RIPGREP_VERSION}) resolved from the install root, and falls back to a built-in Node scan with the same semantics when that engine is unavailable.`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        pattern: { type: "string" },
-        path: { type: "string" },
-        output: {
-          type: "string",
-          enum: ["paths", "content", "count"],
-          default: "paths",
-        },
-        ignoreCase: { type: "boolean", default: false },
-        context: { type: "integer", default: 0, minimum: 0, maximum: 50 },
-        glob: { type: "string" },
-        type: { type: "string" },
-        also: { type: "string" },
-        within_lines: { type: "integer", default: 5, minimum: 0 },
-        offset: { type: "integer", default: 0, minimum: 0 },
-        head_limit: { type: "integer", default: 50, minimum: 1, maximum: 2000 },
-      },
-      required: ["pattern"],
-      additionalProperties: false,
-    },
+    description: GREP_DESCRIPTION,
+    inputSchema: GREP_INPUT_SCHEMA,
     handler,
     aci: {
       category: "read-only" as const,
@@ -164,6 +149,45 @@ export function createGrepTool(
       timeoutTier: "default" as const,
     },
   });
+}
+
+/** 模型可见文案（D7）：schema 与描述提为模块常量，工厂保持短小。 */
+export const GREP_DESCRIPTION = `Search file contents under a workspace directory using a regular expression; use it to discover which files carry a pattern before reading them, and pair it with read_file once you have a pinpointed path. Returns relative paths by default (output=paths) — set output=\"content\" for path:line:text or output=\"count\" for per-file counts plus a total:. Narrow with glob / type, show nearby lines with context, or keep only hits whose second literal also appears within within_lines of the match. Page a sorted result list with offset + head_limit (default 50, hard cap ${String(2000)}); an offset past the last entry returns "No entries at this offset". Runs on a bundled search engine (ripgrep ${RIPGREP_VERSION}) resolved from the install root, and falls back to a built-in Node scan with the same semantics when that engine is unavailable.`;
+
+/** 输入 schema（与 `options.ts` 的解析层是同一契约的两道防线）。 */
+export const GREP_INPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    pattern: { type: "string" },
+    path: { type: "string" },
+    output: {
+      type: "string",
+      enum: ["paths", "content", "count"],
+      default: "paths",
+    },
+    ignoreCase: { type: "boolean", default: false },
+    context: { type: "integer", default: 0, minimum: 0, maximum: 50 },
+    glob: { type: "string" },
+    type: { type: "string" },
+    also: { type: "string" },
+    within_lines: { type: "integer", default: 5, minimum: 0 },
+    offset: { type: "integer", default: 0, minimum: 0 },
+    head_limit: { type: "integer", default: 50, minimum: 1, maximum: 2000 },
+  },
+  required: ["pattern"],
+  additionalProperties: false,
+} as const;
+
+/**
+ * 搜索根是文件时的 workspace 相对路径（与 `node-scan` 吐出的 relPath 同形）；
+ * 目录 / 不存在的路径 → `undefined`（体积闸照常生效）。
+ */
+async function explicitFileRelative(
+  compiled: CompiledInput
+): Promise<string | undefined> {
+  const info = await stat(compiled.searchRoot).catch(() => null);
+  if (info === null || !info.isFile()) return undefined;
+  return toWorkspaceRelative(compiled.workspaceRoot, compiled.searchRoot);
 }
 
 /**
@@ -275,9 +299,4 @@ async function resolveSearchRoot(
       return primary;
     }
   }
-}
-
-/** 供工具层其余消费者复用的 typed 错误入口（错误文案单点）。 */
-export function grepError(message: string): ToolExecutionError {
-  return new ToolExecutionError(`grep: ${message}`);
 }

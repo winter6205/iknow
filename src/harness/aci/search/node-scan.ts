@@ -35,7 +35,11 @@ export interface NodeScanInput {
 /** 全量命中（未排序；调用方走 sort → paginate → project）。 */
 export async function nodeScan(input: NodeScanInput): Promise<LineHit[]> {
   const hits: LineHit[] = [];
-  for await (const absPath of walkCandidates(input)) {
+  // 搜索根是**显式点名的单个文件**时，体积闸与 `glob` / `type` 都让路 ——
+  // rg 的 `--max-filesize` 只在递归遍历期生效、用户 glob/type 也不作用于
+  // 显式文件参数（均实测）。Node 侧若照旧拦，同一个 `path` 的答案就随引擎变。
+  const explicitFile = await isFile(input.searchRoot);
+  for await (const absPath of walkCandidates(input, explicitFile)) {
     // 路径必须是 **workspace 相对**：SC4 要求模型可见行皆相对路径，且 D4 的
     // `glob` 锚定匹配（`src/*.ts`）按相对路径判段。
     //
@@ -45,12 +49,20 @@ export async function nodeScan(input: NodeScanInput): Promise<LineHit[]> {
     // —— 同一个 path 参数的答案取决于哪条引擎在跑。越界已由 resolveSearchRoot
     // 的 containment 校验挡在入口，遍历本身只走 searchRoot 之下。
     const relPath = toWorkspaceRelative(input.workspaceRoot, absPath);
-    if (!passesFilters(relPath, input.spec)) continue;
-    const lines = await readWorkspaceLines(input.workspaceRoot, relPath);
+    if (!explicitFile && !passesFilters(relPath, input.spec)) continue;
+    const lines = await readWorkspaceLines(input.workspaceRoot, relPath, {
+      allowOversize: explicitFile,
+    });
     if (lines === null) continue;
     collectHits(relPath, lines, input.regex, hits);
   }
   return hits;
+}
+
+/** 搜索根是否指向一个存在的文件（决定「显式文件」豁免是否适用）。 */
+async function isFile(path: string): Promise<boolean> {
+  const info = await stat(path).catch(() => null);
+  return info !== null && info.isFile();
 }
 
 /**
@@ -59,10 +71,11 @@ export async function nodeScan(input: NodeScanInput): Promise<LineHit[]> {
  * 只递归目录会让 `path: "a.ts"` 静默回空 —— rg 那边是命中的，两条引擎对同
  * 一个参数给出不同答案（SC9）。所以先 stat 判型，是文件就直接作为唯一候选。
  */
-async function* walkCandidates(input: NodeScanInput): AsyncGenerator<string> {
-  const info = await stat(input.searchRoot).catch(() => null);
-  if (info === null) return;
-  if (info.isFile()) {
+async function* walkCandidates(
+  input: NodeScanInput,
+  explicitFile: boolean
+): AsyncGenerator<string> {
+  if (explicitFile) {
     yield input.searchRoot;
     return;
   }

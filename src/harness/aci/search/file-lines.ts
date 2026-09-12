@@ -13,21 +13,38 @@
 import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
-/** 与 read_file 对齐：1MB 以上不当文本读。 */
+/**
+ * 文本文件的体积闸（**唯一权威**）：1 MiB 以上不当文本读。
+ *
+ * 与 `read_file` 的拒读线同值但**不是同一份常量** —— `read-file.ts` 另有私有
+ * `MAX_FILE_BYTES`（Task A 面，本切片不动）。搜索侧三处消费者（遍历期的
+ * `--max-filesize`、`readWorkspaceLines`、`node-scan` 的准入）都从这里取，
+ * 避免再长出一份漂移的复制。
+ */
 export const MAX_TEXT_FILE_BYTES = 1_048_576;
 
 /** 二进制探针窗口。 */
 export const BINARY_PROBE_BYTES = 8_192;
 
-/** Workspace 相对路径 → 行数组；不可读 / 二进制 / 超大 → null。 */
+/**
+ * Workspace 相对路径 → 行数组；不可读 / 二进制 / 超大 → null。
+ *
+ * `allowOversize` 只给「搜索根是**显式点名的单个文件**」这一条路用：rg 的
+ * `--max-filesize` 只在**递归遍历**时生效，显式喂进来的文件即使超限也照搜
+ * （实测 rg 15.1.0）。Node 侧若一律按体积拒读，同一个 `path: "big.ts"`
+ * 就会在两条引擎上给出不同答案。
+ */
 export async function readWorkspaceLines(
   workspaceRoot: string,
-  relPath: string
+  relPath: string,
+  options?: { readonly allowOversize?: boolean }
 ): Promise<ReadonlyArray<string> | null> {
   const abs = resolve(workspaceRoot, relPath);
   const info = await stat(abs).catch(() => null);
   if (info === null || !info.isFile()) return null;
-  if (info.size > MAX_TEXT_FILE_BYTES) return null;
+  if (!(options?.allowOversize === true) && info.size > MAX_TEXT_FILE_BYTES) {
+    return null;
+  }
   const buf = await readFile(abs).catch(() => null);
   if (buf === null) return null;
   if (containsNul(buf, BINARY_PROBE_BYTES)) return null;
