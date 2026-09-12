@@ -774,6 +774,60 @@ describe("grep — 两引擎正则语义对齐（D6/SC9/SC10）", () => {
     });
   });
 
+
+  it("用户 glob 不能撤销工具自带的遍历排除（D2）", async () => {
+    // 复现：原顺序把用户 glob 排在工具的 `!**/node_modules` / `!**/.git` 之
+    // 后，rg 的 last-glob-wins 让宽放 glob（`*` / `**` / `{*,.*}`）撤销了这两
+    // 条排除 → rg 命中 5 条（含 node_modules / .git），Node 仍按 walkFiles
+    // 的 3 条。两条引擎给不同答案。
+    // 修复后：用户 glob 先投递、工具排除后投递，两条引擎都仍排除。
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-glob-override-");
+      await mkdir(join(root, "src"), { recursive: true });
+      await mkdir(join(root, "node_modules/pkg"), { recursive: true });
+      await mkdir(join(root, ".git"), { recursive: true });
+      await writeFile(join(root, "src/needle.txt"), "needle\n", "utf8");
+      await writeFile(join(root, "src/other.txt"), "needle\n", "utf8");
+      await writeFile(
+        join(root, "node_modules/pkg/index.js"),
+        "needle\n",
+        "utf8"
+      );
+      await writeFile(join(root, ".git/config"), "needle\n", "utf8");
+      await writeFile(join(root, "README.md"), "needle\n", "utf8");
+
+      // 基线（无 glob）：两条引擎同判，都是 3 条（src 两 + README）。
+      const baseline = await makeTool(root).handler({ pattern: "needle" });
+      assert.ok(typeof baseline === "string", "baseline");
+
+      // 宽放 glob 在两种引擎下都仍要排除 node_modules / .git。
+      for (const glob of ["*", "**", "**/*", "{*,.*}"]) {
+        for (const output of ["paths", "content", "count"] as const) {
+          const result = await makeTool(root).handler({
+            pattern: "needle",
+            output,
+            glob,
+          });
+          const text =
+            typeof result === "string" ? result : JSON.stringify(result);
+          assert.ok(!text.includes("node_modules"), `${glob}/${output}`);
+          assert.ok(!text.includes(".git/"), `${glob}/${output}`);
+        }
+      }
+
+      // 收窄 glob（`*.txt` / `src/*`）仍按用户意图收窄。
+      const narrowed = ["src/needle.txt", "src/other.txt"];
+      for (const glob of ["*.txt", "src/*"]) {
+        const result = await makeTool(root).handler({
+          pattern: "needle",
+          glob,
+        });
+        assert.ok(typeof result === "string", glob);
+        assert.deepEqual(result.split("\n").sort(), narrowed, glob);
+      }
+    });
+  });
+
   it("被拒绝的构造在两条引擎上都不产生「半边能搜」的结果", async () => {
     // 反证：Node 路径（JS RegExp 把 `\p{L}` 读成字面 `p{L}`）若不被前置拒绝，
     // 含 `p{L}` 字面文本的文件会命中而 rg 不命中 —— 同一个查询的答案取决于

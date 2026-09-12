@@ -85,9 +85,14 @@ export function buildRgArgs(
   // 后者要复刻 rg 的 gitignore 语法（取反 / 目录限定 / 层级作用域），是另
   // 一件工具的体量；`--no-ignore --hidden` 是一行且与既有语义一致。旧
   // Node 回退（ADR-0004 修订）本来就不跳过隐藏文件，因此这不是新放宽。
+  //
+  // **顺序是契约**：用户 `spec.glob` 先于工具自带排除投递，rg 的
+  // `last-glob-wins` 因此让「跳过 node_modules / .git」成为最终胜负 —— 用户
+  // glob 是收窄（`*.ts`）时这条仍生效（命中限制在 `.ts`），用户 glob 是宽放
+  // （`**` / `*`）时也不会把仓库内部的依赖目录、git 配置吐回给模型（D2）。
+  args.push("--no-ignore", "--hidden");
+  if (spec.glob !== undefined) args.push("--glob", spec.glob);
   args.push(
-    "--no-ignore",
-    "--hidden",
     "--glob",
     "!**/node_modules",
     "--glob",
@@ -120,7 +125,6 @@ export function buildRgArgs(
     if (spec.context > 0) args.push("-C", String(spec.context));
   }
   if (spec.ignoreCase) args.push("--ignore-case");
-  if (spec.glob !== undefined) args.push("--glob", spec.glob);
   if (spec.type !== undefined) args.push("--type", spec.type);
   // 搜索路径**相对 cwd**（cwd = workspace 根，见 rg-engine）：rg 把路径原样
   // 回显，喂绝对路径就会把绝对路径吐给模型（SC4 要求相对）；且 `--glob` 的

@@ -218,6 +218,24 @@ describe("buildRgArgs — 遍历语义与 Node 扫对齐（D6）", () => {
       assert.ok(args.includes(glob), `缺排除 glob: ${JSON.stringify(glob)}`);
     }
   });
+
+  it("用户 glob 不能撤销工具自带的 `!**/node_modules` / `!**/.git`（D2）", () => {
+    // 顺序契约：用户 glob 先投递，工具排除后投递，rg 的 last-glob-wins 让
+    // 「跳过 node_modules / .git」成为最终胜负。用户 glob 是收窄（`*.ts`）
+    // 时仍生效，是宽放（`*` / `**`）时也不会把仓库内部的依赖目录、git 配置
+    // 吐回给模型（实测：原顺序会让 rg 把 5 条命中吐回，Node 只 3 条）。
+    for (const userGlob of ["*", "**", "**/*", "{*,.*}"]) {
+      const args = argv({ glob: userGlob });
+      const excludeNodeModules = args.lastIndexOf("!**/node_modules");
+      const excludeGit = args.lastIndexOf("!**/.git");
+      const userGlobIndex = args.indexOf("--glob", excludeNodeModules);
+      assert.ok(excludeNodeModules > args.indexOf("--glob"));
+      assert.ok(excludeGit > excludeNodeModules);
+      assert.ok(userGlobIndex > 0);
+    }
+    // 用户 glob 仍原样投递（不被挤压/改写）。
+    assert.ok(argv({ glob: "*.ts" }).includes("*.ts"));
+  });
 });
 
 describe("buildRgArgs — `--no-unicode` 模式选择（D6/SC9）", () => {
