@@ -1398,8 +1398,15 @@ export async function buildHarnessEngine(
   // JSON 两份 SSOT 并存都必须在启动时可见,不吞成降级配置。
   // 「无项目规则」= undefined,由 `createPermissionPolicy` 的 spread-guard
   // 丢弃(与 key 缺席同形),此处不再叠一层条件分支。
+  // ADR-0090: 声明式规则的相对路径锚 = session sandboxRoot;`knownToolNames`
+  // 取 reg.catalog 全量(内建 + 动态 mcp__*),让未知工具名的 deny/ask 规则
+  // 加载期告警(规则本身仍保留编译,动态注册后即生效)。
   const policy = createPermissionPolicy({
-    project: resolveProjectPermissionSource({ projectIdentityRoot }),
+    project: resolveProjectPermissionSource({
+      projectIdentityRoot,
+      workRoot: sandboxRoot,
+      knownToolNames: new Set(reg.catalog.all().map((def) => def.name)),
+    }),
     ...(opts.session ? { session: opts.session } : {}),
     // W2: mode context — REPL toggles this via /permissions; absent → default.
     ...(opts.permissionMode ? { mode: opts.permissionMode } : {}),

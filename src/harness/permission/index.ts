@@ -71,3 +71,8 @@ export {
   MAX_SCAN_LENGTH,
 } from "./secrets-guard.js";
 export type { SecretsGuardHookOpts } from "./secrets-guard.js";
+
+export { compileDeclarativePermissions } from "./declarative.js";
+export type { DeclarativeCompileOpts } from "./declarative.js";
+export { ProjectSettingsError } from "./project-settings.js";
+export type { ProjectSettingsErrorKind } from "./project-settings.js";

@@ -22,6 +22,7 @@ import {
   runHostInitScriptSafe,
 } from "../harness/identity/index.js";
 import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
+import { readProjectDefaultMode } from "../harness/permission/project-settings.js";
 import type { ServeAskUserHandle } from "../harness/permission/ask-user.js";
 import {
   resolveSessionDefaultWorkspace,
@@ -127,17 +128,26 @@ export async function startSessionServe(
     productRoot = resolveSessionDefaultWorkspace();
   }
 
-  // W2: serve 从 env IKNOW_PERMISSION_MODE 读初始 mode(可选)。holder 提为
-  // 局部变量,hub 与 http 层共用同一实例 —— web Shift+Tab 经
-  // POST /api/v1/permission-mode 运行时切换(与 TUI 同 SSOT nextShiftTabMode)。
-  const permissionModeCtx = createPermissionModeContext(
-    parsePermissionMode(process.env.IKNOW_PERMISSION_MODE) ?? "default"
-  );
   // Review High-2 (2026-08-29 / hard req 9):settings 只在启动加载点读一次，
   // 同一对象既驱动 graph / verify 装配，也经 hub opts.settings 钉给后续所有
   // engine 构建 —— rebind 后 worktree 根内 `.iknow/` 缺席（gitignore），隐式
   // loadIknowSettings({cwd: worktreeRoot}) 会静默丢 project settings。
   const startupSettings = loadIknowSettings();
+  // W2 + T5 (ADR-0090): serve 启动初始 mode 优先级 env IKNOW_PERMISSION_MODE
+  // > 项目 permissions.defaultMode > "default"(CLI flag 是 tui 专属)。
+  // 项目 settings 读根 = projectIdentityRoot(上述派生,不是 cwd):rebind 后
+  // cwd 是没有 `.iknow` 的裸 task worktree。fail-loud(legacy / full_auto)
+  // 原路上抛,启动错误路径呈现。holder 提为局部变量,hub 与 http 层共用同一
+  // 实例 —— web Shift+Tab 经 POST /api/v1/permission-mode 运行时切换(与 TUI
+  // 同 SSOT nextShiftTabMode),holder 在 new SessionHub 之前定义即可。
+  const projectDefaultMode = readProjectDefaultMode({
+    cwd: projectIdentityRoot,
+  });
+  const permissionModeCtx = createPermissionModeContext(
+    parsePermissionMode(process.env.IKNOW_PERMISSION_MODE) ??
+      projectDefaultMode ??
+      "default"
+  );
   // D-α V1 / ADR-0030:graph overlay holder —— 初值走 settings(默认关),
   // 运行中由 POST /api/v1/graph-mode(`/graph` 的 serve 对等物)翻。与
   // permissionModeCtx 同款:hub 与 http 层共用同一实例(SC3 三入口同 holder)。

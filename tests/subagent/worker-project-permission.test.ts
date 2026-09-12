@@ -1,8 +1,8 @@
 /**
- * ADR-0084 / spec Slice B SC5 — worker 与主链共用同一份项目权限规则。
+ * ADR-0084 / ADR-0090 / spec Slice B SC5 — worker 与主链共用同一份项目权限规则。
  *
- * 不变式：worker 是同一会话的子代理面，项目 `permissions.rule` 必须与主链
- * 同源 —— 否则被主链 deny 的调用可从 worker 绕行（权限平权）。读根 =
+ * 不变式：worker 是同一会话的子代理面，项目 `permissions` 声明式列表必须与
+ * 主链同源 —— 否则被主链 deny 的调用可从 worker 绕行（权限平权）。读根 =
  * `projectIdentityRoot`（worker 无 sessionRoots，身份根经 IKNOW_PRODUCT_ROOT
  * wire 送达 / 缺席回落 cwd）。
  *
@@ -39,18 +39,13 @@ const TEST_ENV = {
   chat: { showThinking: false, quiet: false },
 } as unknown as IknowEnv;
 
-/** 项目 `permissions` 段：deny 命中 path 含 `secret.txt` 的 read_file。 */
+/**
+ * 项目 `permissions` 段（ADR-0090 声明式）：deny 命中任意深度 `secret.txt`
+ * 的读工具调用。deny 的单段路径在工作根下任意深度命中，故 `Read(secret.txt)`
+ * 覆盖工作根顶层的 `<root>/secret.txt`（旧 `path_contains` 语义的等价表达）。
+ */
 const DENY_SECRET_SECTION = {
-  schema_version: 1,
-  rule: [
-    {
-      id: "deny-secret-read",
-      match_tool: "read_file",
-      match_input: { path_contains: "secret.txt" },
-      decision: "deny",
-      reason: "project rule: secret.txt is off-limits",
-    },
-  ],
+  deny: ["Read(secret.txt)"],
 };
 
 async function scratch(): Promise<string> {
@@ -113,7 +108,8 @@ describe("createWorkerDeps — 项目权限源与主链同源（ADR-0084 / SC5�
     const denied = await readFileResult(deps, join(root, "secret.txt"));
     expect(denied.kind).toBe("execution_failed");
     expect(denied.message).toMatch(/\[permission_denied\]/);
-    expect(denied.message).toMatch(/project rule: secret\.txt is off-limits/);
+    // 编译期生成的 reason 回显声明式规则原文（文件里不写 id / reason）。
+    expect(denied.message).toMatch(/Read\(secret\.txt\)/);
 
     // 选择性：未命中的路径仍走 read-only 类别默认 allow。
     const allowed = await readFileResult(deps, join(root, "ok.txt"));
@@ -128,24 +124,14 @@ describe("createWorkerDeps — 项目权限源与主链同源（ADR-0084 / SC5�
     // cwd 侧（task worktree）铺一份**放行**的诱饵 settings：读错根会让 deny
     // 消失，测试因此能区分「读了身份根」与「读了 cwd」。
     await plantProject(taskRoot, {
-      permissions: {
-        schema_version: 1,
-        rule: [
-          {
-            id: "allow-secret-read",
-            match_tool: "read_file",
-            match_input: { path_contains: "secret.txt" },
-            decision: "allow",
-            reason: "decoy: task root allows it",
-          },
-        ],
-      },
+      permissions: { allow: ["Read(secret.txt)"] },
     });
 
     const deps = await workerAt(identityRoot, taskRoot);
     const result = await readFileResult(deps, join(taskRoot, "secret.txt"));
     expect(result.kind).toBe("execution_failed");
-    expect(result.message).toMatch(/project rule: secret\.txt is off-limits/);
+    // 编译期生成的 reason 回显声明式规则原文（文件里不写 id / reason）。
+    expect(result.message).toMatch(/Read\(secret\.txt\)/);
   });
 
   it("身份根上 toml 与 JSON permissions 并存 → worker 装配 typed fail-loud", async () => {

@@ -23,6 +23,7 @@ import {
   createPermissionModeContext,
   type PermissionModeContext,
 } from "../harness/permission/modes.js";
+import { readProjectDefaultMode } from "../harness/permission/project-settings.js";
 import type { GraphModeContext } from "../harness/graph/mode.js";
 import { loadIknowEnv, type IknowEnv } from "../config/env.js";
 import {
@@ -38,18 +39,33 @@ export type RuntimeBundle = {
 
 /**
  * Resolve the initial permission mode for CLI entry points.
- * Priority: explicit > env IKNOW_PERMISSION_MODE > default.
+ * Priority: explicit > env IKNOW_PERMISSION_MODE > project
+ * `permissions.defaultMode` > default.
+ *
+ * `projectDefaultModeSettings` (optional) carries the **project identity
+ * root** to light-read `defaultMode` from — not the process cwd (after a
+ * worktree rebind the cwd is a bare task worktree with no `.iknow/`).
+ * When the argument is present the file is always read: legacy shapes and
+ * `defaultMode: "full_auto"` fail loud from `readProjectDefaultMode`
+ * (ADR-0090 — a shared repo must not self-grant automatic mode), and the
+ * caller's startup error path renders the typed `ProjectSettingsError`.
  *
  * The returned context is always mutable (PermissionModeContext exposes
  * `set`); ask/serve callers simply don't call it. Only the chat REPL's
  * `/permissions` slash command actually flips it.
  */
 export function resolvePermissionMode(
-  explicit: unknown
+  explicit: unknown,
+  projectDefaultModeSettings?: { readonly cwd: string }
 ): PermissionModeContext {
+  const projectDefaultMode =
+    projectDefaultModeSettings === undefined
+      ? undefined
+      : readProjectDefaultMode({ cwd: projectDefaultModeSettings.cwd });
   const parsed =
     parsePermissionMode(explicit) ??
-    parsePermissionMode(process.env.IKNOW_PERMISSION_MODE);
+    parsePermissionMode(process.env.IKNOW_PERMISSION_MODE) ??
+    projectDefaultMode;
   return createPermissionModeContext(parsed ?? "default");
 }
 

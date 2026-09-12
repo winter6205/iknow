@@ -245,8 +245,8 @@ _Avoid_: 零依赖静态壳当产品；展示层省略 trace 字段
 **正常模式**: 默认 HITL 产品：每轮说完把回合还给用户；完成向 LLM 关闭；硬失败打回干活模型。
 _Avoid_: 每个 completed 请 LLM 评「做完没」；先问有没有 goal 再决定怎么判；把正常模式当成「没开 goal」的别名
 
-**自动模式**: 权限轴 `PermissionMode` 的 `full_auto`：本轮 mutating 不问人，跑完仍把键盘还给用户。Shift+Tab / 徽标上的 Auto 就是它。ADR-0032。
-_Avoid_: 把 `/goal` 续跑叫自动模式；全自动模式；第三种 PermissionMode
+**自动模式**: 权限轴 `PermissionMode` 的 `full_auto`：不逐次征求批准、对 mutating 工具直接放行的会话级权限模式；本轮不问人，跑完仍把键盘还给用户。hard-wall 仍先拦。Shift+Tab / 徽标上的 Auto 就是它。项目 settings 不得写入该值（`defaultMode: "full_auto"` 加载 fail-loud，仓库不得自授自动模式）。ADR-0032 / ADR-0090。
+_Avoid_: 把 `/goal` 续跑叫自动模式；全自动模式；第三种 PermissionMode；项目 settings 自授 `full_auto`
 
 **goal 功能**: 斜杠钉上会话使命后的续跑：`/goal <text>` 写入后 hub 用 `goal.text` 接着跑，直到条件成立、判官 Impossible、不可恢复错误、可选轮次上限或 `/goal clear`；空转停循环但 goal 可留着。不是模式，不进 Shift+Tab。ADR-0032。
 _Avoid_: 自动模式；全自动模式；`## GOAL:` 当产品入口
@@ -308,7 +308,10 @@ _Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 
   **保留机制**: provider = 9router、`baseUrl` 代码默认 `http://localhost:20128/v1` 焊进 `env.ts`（`IKNOW_LLM_BASE_URL` 仍读）；非 LLM 字段（context window / maxTurns / web 端点 / mcp 超时等）的 `process.env > .env.local > .env` 优先级链不变。
   _Avoid_: 在 `.env.local` 重复声明已与代码默认一致的非密项；把 model 切换当「每机配置」而非「项目栈决策」
 
-**项目 settings 允许名单**: 共享项目 `<仓>/.iknow/settings.json` 只采纳 `hooks` / `verify` / `secrets` / `permissions`；其余顶层段丢弃、不覆盖用户层。权限 SSOT = 项目 `settings.permissions`（原 toml rule DSL），用户层不接；toml 与 json 并存 fail-loud。ADR-0084。
+**声明式权限规则**: 项目 `<仓>/.iknow/settings.json` 的 `permissions` 段用 `Tool` / `Tool(specifier)` 字符串（`allow` / `ask` / `deny` 三档 + 可选 `defaultMode`，值域 `default` | `plan`）；同项目层评估序 deny → ask → allow；编译为既有 `NormalRuleSpec` 进项目权限层，不新开决策轴。旧形态（`schema_version` + `rule[]` 谓词 DSL）加载 typed fail-loud、错误含新形态示例。模式名到 ACI 工具的映射、glob / param:value / Bash 复合命令分段 / 路径 specifier 形态见 `specs/declarative-project-permissions.md` Does。ADR-0090 / #1004。
+_Avoid_: 沿用 `schema_version` + `rule[]` 谓词 DSL；写 toml 当并存 SSOT；项目层写 `full_auto`（加载 fail-loud）；让用户层接 `permissions`；用 param:value 匹配 Bash `command` / Read/Edit 路径 / WebFetch `url`；给规则手写 `id` / `reason`
+
+**项目 settings 允许名单**: 共享项目 `<仓>/.iknow/settings.json` 只采纳 `hooks` / `verify` / `secrets` / `permissions`；其余顶层段丢弃、不覆盖用户层。权限 SSOT = 项目 `settings.permissions`，规则形态 = **声明式权限规则**（ADR-0090 取代旧 toml 谓词 DSL），用户层不接；toml 与 json 并存 fail-loud。ADR-0084 / ADR-0090。
 _Avoid_: 第三层 local settings；项目文件盖 isolation / llm / memory / subagent；用户 settings 写 permissions；继续读 `permissions.toml` 当并存 SSOT
 
 **前景 spawn / 后景 spawn**: `spawn_subagent` 的两种结果契约（#361 裁决，ADR-0014）——前景（`wait:true`，默认）= handler 同步等 worker 到终态、envelope 直接作 tool_result 返回，当回合闭环；后景（`wait:false`，显式选项）= 立即返回 task_id，结果经 host 唤醒/drain 通道回传。worker 恒为独立进程，与前景/后景正交。

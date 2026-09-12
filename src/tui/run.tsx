@@ -48,6 +48,7 @@ import { createToolEventSink, TuiApp, type TuiAppProps } from "./app.js";
 import { attachSession, type TuiSessionState } from "./session-state.js";
 import { createSessionGrants } from "../harness/permission/session-grants.js";
 import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
+import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
 import { resolvePermissionMode } from "../cli/runtime.js";
 import {
   createGraphModeContext,
@@ -281,7 +282,14 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     const inflight = createInflightRegistry();
     const toolEventSink = createToolEventSink();
     const askBridge = createTuiAskUserBridge();
-    const permissionMode = resolvePermissionMode(options.permissionMode);
+    // T5 (ADR-0090):启动 mode 种子优先级 `--auto-mode`(explicit) >
+    // IKNOW_PERMISSION_MODE > 项目 permissions.defaultMode > "default"。
+    // 项目 settings 读根 = projectIdentityRoot(不是 cwd):rebind 后 cwd 是
+    // 没有 `.iknow` 的裸 task worktree。fail-loud(legacy / full_auto)经
+    // resolvePermissionMode 原路上抛,由本函数的错误路径呈现。
+    const permissionMode = resolvePermissionMode(options.permissionMode, {
+      cwd: deriveProjectIdentityRoot({ cwd: workspaceRoot }),
+    });
     const sessionGrants = createSessionGrants();
     // D-α V1 / ADR-0030:graph overlay 的会话 holder —— 初值走 settings
     // （默认关），运行中由 Shift+Tab 与 `/graph` 就地翻，引擎不重建。

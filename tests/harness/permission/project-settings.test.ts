@@ -2,19 +2,20 @@
  * tests/harness/permission/project-settings.test.ts
  *
  * Loader tests for the `permissions` section of `<cwd>/.iknow/settings.json`
- * (T6 / #122 Q2b; ADR-0084 moved the rule DSL out of `.iknow/permissions.toml`).
+ * (T6 / #122 Q2b; ADR-0084 moved the section out of `.iknow/permissions.toml`;
+ * ADR-0090 replaced the predicate DSL with the declarative string lists).
  *
  * Boundary classes covered:
- *  - normal: missing settings file → undefined; missing `permissions` section
- *    → undefined; valid section → policy source
- *  - negative: schema violation (unknown predicate, missing required field,
- *    bad decision) → throws with descriptive message
- *  - overflow: empty rule array (minItems=1 violation)
- *  - exception: legacy toml + json section both present → typed fail-loud
+ *  - normal: missing settings file / missing `permissions` section /
+ *    declarative section → policy source.
+ *  - negative: schema violation (unknown key, wrong value type, bad
+ *    `defaultMode`) → throws with descriptive message.
+ *  - legacy: `schema_version` + `rule[]` → typed fail-loud naming the new form.
+ *  - exception: retired toml + JSON section both present → typed fail-loud.
+ *  - forbidden: `defaultMode: "full_auto"` → typed fail-loud.
  *  - concurrent: re-loading same file twice yields independent but
- *    structurally-equal sources (no shared state)
- *  - malformed: predicate string type mismatch silently doesn't match (no
- *    false positives — predicates are narrow and total)
+ *    structurally-equal sources (no shared state).
+ *  - malformed input: non-string rule entries never produce false positives.
  */
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -27,6 +28,7 @@ import assert from "node:assert/strict";
 import {
   loadProjectSettings,
   resolveProjectPermissionSource,
+  readProjectDefaultMode,
   ProjectSettingsError,
 } from "../../../src/harness/permission/project-settings.js";
 import {
@@ -58,7 +60,7 @@ function writeProjectDir(
   return { cwd: base, file };
 }
 
-/** Legacy toml fixture (the retired source) — used only by the fail-loud test. */
+/** Legacy toml fixture (the retired source) — only the fail-loud test. */
 function writeLegacyToml(dir: string): string {
   const path = join(dir, ".iknow", "permissions.toml");
   mkdirSync(dirname(path), { recursive: true });
@@ -85,299 +87,17 @@ function makeTool(
   });
 }
 
+/** Declarative section in the shape the loader consumes. */
 const VALID_SECTION = {
-  schema_version: 1,
-  rule: [
-    {
-      id: "allow-bash-echo",
-      match_tool: "bash",
-      match_input: { command_starts_with: "echo " },
-      decision: "allow",
-      reason: "explicit allow: bash echo",
-    },
-    {
-      id: "deny-read-ssh",
-      match_tool: "read_file",
-      match_input: { path_contains: ".ssh/" },
-      decision: "deny",
-      reason: "explicit deny: read_file under .ssh",
-    },
-  ],
+  allow: ["Bash(echo:*)"],
+  deny: ["Read(**/*.pem)"],
 };
 
-/** Single-rule helper: the shape most negative tests vary one field of. */
-function oneRule(overrides: Record<string, unknown>): Record<string, unknown> {
-  return {
-    id: "r1",
-    match_tool: "bash",
-    match_input: { command_starts_with: "echo " },
-    decision: "allow",
-    reason: "explicit allow",
-    ...overrides,
-  };
-}
-
-/**
- * #952 — network_equals 谓词（资格门禁，不是安全边界）。
- *
- * 不变式（SSOT = policy.ts isBashNetworkInput 的严格 === true 语义）：
- *  - 命中 ⇔ tool === "bash"（由 match_tool gate 承担）且 input.network 严格
- *    === true。非布尔 "true" / 缺省 / false / 非 bash 工具同名字段都不命中。
- *  - 工具名 gate 的 wrinkle：matchPredicate 收不到 tool 名，但 buildRuleMatcher
- *    在谓词匹配前已检查 `ctx.tool === toolName`（project-settings.ts:149），
- *    因此对 match_tool = "bash" 的规则，进入 matchPredicate 的 inputObj
- *    必然来自 bash 调用 —— 此处做 `isBashNetworkInput(inputObj)` shape
- *    check 与 isBashNetworkTrue(tool, input) 等价；非 bash 工具的同名字段
- *    在 buildRuleMatcher 就已短路为 false。
- *  - 定位诚实性：这是「模型有没有资格提这个请求」的资格门禁，不是 SSRF
- *    防线 —— 规则未命中（或批准后）的出站内容仍零过滤；未设规则时默认
- *    行为不变，仍走 code-ask-bash-network 的 ask。
- *  - fail-loud：ajv schema 把 network_equals 钉死为 boolean const true，
- *    TOML 里写成字符串 "true" 在 load 时即抛错并带 JSON path，而不是
- *    落地成一条永不命中的静默死规则。
- */
-describe("network_equals predicate (#952)", () => {
-  const NETWORK_SECTION = {
-    schema_version: 1,
-    rule: [
-      {
-        id: "deny-bash-host-network",
-        match_tool: "bash",
-        match_input: { network_equals: true },
-        decision: "deny",
-        reason: "explicit deny: bash host-network opt-in",
-      },
-    ],
-  };
-
-  function loadNetworkRule(dir: string) {
-    const path = writePermissions(dir, NETWORK_SECTION);
-    const src = loadProjectSettings({ filePath: path });
-    assert.ok(src);
-    assert.equal(src.rules.length, 1);
-    return src.rules[0]!;
-  }
-
-  it("network_equals = true matches {command, network: true} on bash", () => {
-    const dir = scratchDir();
-    try {
-      const rule = loadNetworkRule(dir);
-      assert.equal(
-        rule.match({
-          tool: "bash",
-          input: { command: "curl https://example.com", network: true },
-        }),
-        true
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("does not match network: false / missing / string 'true' (strict === true)", () => {
-    const dir = scratchDir();
-    try {
-      const rule = loadNetworkRule(dir);
-      assert.equal(
-        rule.match({
-          tool: "bash",
-          input: { command: "curl https://example.com", network: false },
-        }),
-        false
-      );
-      assert.equal(
-        rule.match({ tool: "bash", input: { command: "curl" } }),
-        false
-      );
-      // isBashNetworkInput SSOT 语义：字符串 "true" 不命中（不是布尔 true）。
-      assert.equal(
-        rule.match({
-          tool: "bash",
-          input: { command: "curl", network: "true" },
-        }),
-        false
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("non-bash tool with a same-named network:true field does not match (tool gate)", () => {
-    const dir = scratchDir();
-    try {
-      const rule = loadNetworkRule(dir);
-      // match_tool = "bash" 的规则对 web_fetch 的同名字段不生效：
-      // buildRuleMatcher 先检查 ctx.tool === "bash"，非 bash 直接 false。
-      assert.equal(
-        rule.match({
-          tool: "web_fetch",
-          input: { url: "https://example.com", network: true },
-        }),
-        false
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("AND-joins with command predicates (network:true + command shape both required)", () => {
-    const dir = scratchDir();
-    try {
-      const path = writePermissions(dir, {
-        schema_version: 1,
-        rule: [
-          {
-            id: "deny-curl-network",
-            match_tool: "bash",
-            match_input: {
-              command_starts_with: "curl ",
-              network_equals: true,
-            },
-            decision: "deny",
-            reason: "deny curl with host network",
-          },
-        ],
-      });
-      const src = loadProjectSettings({ filePath: path });
-      assert.ok(src);
-      const rule = src.rules[0]!;
-      assert.equal(
-        rule.match({
-          tool: "bash",
-          input: { command: "curl https://example.com", network: true },
-        }),
-        true
-      );
-      // network 缺省 → 整个 AND 不成立
-      assert.equal(
-        rule.match({
-          tool: "bash",
-          input: { command: "curl https://example.com" },
-        }),
-        false
-      );
-      // command 不匹配 → 整个 AND 不成立
-      assert.equal(
-        rule.match({
-          tool: "bash",
-          input: { command: "wget https://example.com", network: true },
-        }),
-        false
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('network_equals = "true" (JSON string) fails at schema load with JSON path (fail-loud, not silent dead rule)', () => {
-    const dir = scratchDir();
-    try {
-      const path = writePermissions(dir, {
-        schema_version: 1,
-        rule: [oneRule({ match_input: { network_equals: "true" } })],
-      });
-      assert.throws(
-        () => loadProjectSettings({ filePath: path }),
-        (err: unknown) => {
-          if (!(err instanceof Error)) return false;
-          return (
-            err.message.includes("schema violation") &&
-            err.message.includes("network_equals")
-          );
-        }
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("unknown predicate still fails loud with the failing JSON path", () => {
-    const dir = scratchDir();
-    try {
-      const path = writePermissions(dir, {
-        schema_version: 1,
-        rule: [
-          oneRule({
-            id: "typo-predicate",
-            match_input: { command_regex: "^curl" },
-            decision: "deny",
-            reason: "typo",
-          }),
-        ],
-      });
-      assert.throws(
-        () => loadProjectSettings({ filePath: path }),
-        (err: unknown) => {
-          if (!(err instanceof Error)) return false;
-          // ajv additionalProperties 错误的 JSON path 定位到 match_input，
-          // 消息不含属性名（与既有 unknown-predicate 测试口径一致）
-          return (
-            err.message.includes("schema violation") &&
-            err.message.includes("/rule/0/match_input")
-          );
-        }
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("integration: project-layer deny fires BEFORE code-layer ask in checkPermission layer order", () => {
-    // checkPermission 分层顺序 session > project > code，first match wins。
-    // 没有 #952 时 bash network:true 落到 code 层的 code-ask-bash-network
-    // ask；项目层 deny 规则命中时必须在 code 层之前截住。
-    const dir = scratchDir();
-    try {
-      const project = loadProjectSettings({
-        filePath: writePermissions(dir, NETWORK_SECTION),
-      });
-      assert.ok(project);
-      const policy = createPermissionPolicy({ project });
-      const out = checkPermission({
-        def: makeTool("bash", "execute"),
-        input: { command: "curl https://example.com", network: true },
-        sources: policy.sources,
-        hardWalls: policy.hardWalls,
-        defaultByCategory: policy.defaultByCategory,
-      });
-      assert.equal(out.decision, "deny");
-      assert.match(out.reason, /explicit deny: bash host-network opt-in/);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("default behavior unchanged: without a network rule, bash network:true still asks via code-ask-bash-network", () => {
-    // 资格门禁是 opt-in 的：未设 network 规则时绝不偷偷改 deny，
-    // 仍走 code 层 code-ask-bash-network 的 ask（默认行为零变化）。
-    const dir = scratchDir();
-    try {
-      const project = loadProjectSettings({
-        filePath: writePermissions(dir, VALID_SECTION),
-      });
-      assert.ok(project);
-      const policy = createPermissionPolicy({ project });
-      const out = checkPermission({
-        def: makeTool("bash", "execute"),
-        input: { command: "curl https://example.com", network: true },
-        sources: policy.sources,
-        hardWalls: policy.hardWalls,
-        defaultByCategory: policy.defaultByCategory,
-      });
-      assert.equal(out.decision, "ask");
-      assert.match(out.reason, /code-ask-bash-network|network/);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("loadProjectSettings", () => {
+describe("loadProjectSettings — declarative section", () => {
   it("returns undefined when the settings file is absent", () => {
     const dir = scratchDir();
     try {
-      const result = loadProjectSettings({ cwd: dir });
-      assert.equal(result, undefined);
+      assert.equal(loadProjectSettings({ cwd: dir }), undefined);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -386,144 +106,122 @@ describe("loadProjectSettings", () => {
   it("returns undefined when explicit filePath is ENOENT", () => {
     const dir = scratchDir();
     try {
-      const result = loadProjectSettings({
-        filePath: join(dir, "no-such-file.json"),
-      });
-      assert.equal(result, undefined);
+      assert.equal(
+        loadProjectSettings({ filePath: join(dir, "no-such-file.json") }),
+        undefined
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("parses a settings.json permissions section with two rules and exposes a ProjectSettingsPolicySource", () => {
+  it("returns undefined when the JSON has no permissions section", () => {
+    const dir = scratchDir();
+    try {
+      const path = join(dir, "settings.json");
+      writeFileSync(
+        path,
+        JSON.stringify({ verify: { command: "npm test" } }),
+        "utf8"
+      );
+      assert.equal(loadProjectSettings({ filePath: path }), undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("parses a declarative section into project-layer rules (deny → allow order)", () => {
     const dir = scratchDir();
     try {
       const path = writePermissions(dir, VALID_SECTION);
-      const src = loadProjectSettings({ filePath: path });
+      const src = loadProjectSettings({ filePath: path, workRoot: "/w" });
       assert.ok(src);
       assert.equal(src.kind, "project");
       assert.equal(src.filePath, path);
       assert.equal(src.rules.length, 2);
-      assert.equal(src.rules[0]?.id, "allow-bash-echo");
-      assert.equal(src.rules[1]?.id, "deny-read-ssh");
-      assert.equal(src.rules[0]?.decision, "allow");
-      assert.equal(src.rules[1]?.decision, "deny");
+      assert.equal(src.rules[0]?.id, "project-deny-1");
+      assert.equal(src.rules[0]?.decision, "deny");
+      assert.equal(src.rules[1]?.id, "project-allow-1");
+      assert.equal(src.rules[1]?.decision, "allow");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("throws when an unknown predicate is used", () => {
+  it("compiles rules that actually match through the policy layer", () => {
+    const dir = scratchDir();
+    try {
+      const path = writePermissions(dir, VALID_SECTION);
+      const src = loadProjectSettings({ filePath: path, workRoot: "/w" });
+      assert.ok(src);
+      const allowRule = src.rules.find((r) => r.decision === "allow");
+      assert.ok(allowRule);
+      assert.equal(
+        allowRule.match({ tool: "bash", input: { command: "echo hi" } }),
+        true
+      );
+      assert.equal(
+        allowRule.match({ tool: "bash", input: { command: "rm -rf /" } }),
+        false
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("generated id does not embed the operator's rule string", () => {
     const dir = scratchDir();
     try {
       const path = writePermissions(dir, {
-        schema_version: 1,
-        rule: [
-          oneRule({
-            id: "bad-predicate",
-            match_input: { command_regex: "^echo" },
-          }),
-        ],
+        deny: ["Read(/very/long/../path/with/slashes/**)"],
       });
-      assert.throws(
-        () => loadProjectSettings({ filePath: path }),
-        (err: unknown) => {
-          if (!(err instanceof Error)) return false;
-          return (
-            err.message.includes("schema violation") &&
-            err.message.includes("match_input")
-          );
-        }
-      );
+      const src = loadProjectSettings({ filePath: path, workRoot: "/w" });
+      assert.ok(src);
+      assert.equal(src.rules[0]?.id, "project-deny-1");
+      assert.ok(src.rules[0]?.reason.includes("project settings: deny"));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("throws when required fields are missing (id)", () => {
+  it("empty allow / deny arrays are legal and produce no rules", () => {
     const dir = scratchDir();
     try {
-      const { match_tool, match_input, decision, reason } = oneRule({});
-      const path = writePermissions(dir, {
-        schema_version: 1,
-        rule: [{ match_tool, match_input, decision, reason }],
-      });
-      assert.throws(
-        () => loadProjectSettings({ filePath: path }),
-        (err: unknown) => {
-          if (!(err instanceof Error)) return false;
-          return (
-            err.message.includes("schema violation") &&
-            err.message.includes("id")
-          );
-        }
-      );
+      const path = writePermissions(dir, { allow: [], deny: [] });
+      const src = loadProjectSettings({ filePath: path, workRoot: "/w" });
+      assert.ok(src);
+      assert.equal(src.rules.length, 0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("throws when required fields are missing (match_tool)", () => {
+  it("a section with only defaultMode is a legal source with no rules", () => {
     const dir = scratchDir();
     try {
-      const { id, match_input, decision, reason } = oneRule({});
-      const path = writePermissions(dir, {
-        schema_version: 1,
-        rule: [{ id, match_input, decision, reason }],
-      });
-      assert.throws(
-        () => loadProjectSettings({ filePath: path }),
-        (err: unknown) =>
-          err instanceof Error && err.message.includes("match_tool")
-      );
+      const path = writePermissions(dir, { defaultMode: "plan" });
+      const src = loadProjectSettings({ filePath: path, workRoot: "/w" });
+      assert.ok(src);
+      assert.equal(src.rules.length, 0);
+      assert.equal(src.defaultMode, "plan");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("throws when decision is not in {allow, deny, ask}", () => {
+  it("defaultMode 'default' / 'plan' survive; absence leaves the key off", () => {
     const dir = scratchDir();
     try {
-      const path = writePermissions(dir, {
-        schema_version: 1,
-        rule: [oneRule({ decision: "pass_through" })],
-      });
-      assert.throws(
-        () => loadProjectSettings({ filePath: path }),
-        (err: unknown) =>
-          err instanceof Error && err.message.includes("schema violation")
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("throws when schema_version is missing or wrong value", () => {
-    const dir = scratchDir();
-    try {
-      const path = writePermissions(dir, {
-        schema_version: 2,
-        rule: [oneRule({})],
-      });
-      assert.throws(
-        () => loadProjectSettings({ filePath: path }),
-        (err: unknown) =>
-          err instanceof Error && err.message.includes("schema violation")
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("throws when rule array is empty (minItems=1)", () => {
-    const dir = scratchDir();
-    try {
-      const path = writePermissions(dir, { schema_version: 1, rule: [] });
-      assert.throws(
-        () => loadProjectSettings({ filePath: path }),
-        (err: unknown) =>
-          err instanceof Error && err.message.includes("schema violation")
-      );
+      for (const mode of ["default", "plan"] as const) {
+        const path = writePermissions(dir, { defaultMode: mode });
+        const src = loadProjectSettings({ filePath: path });
+        assert.ok(src);
+        assert.equal(src.defaultMode, mode);
+      }
+      const path = writePermissions(dir, { allow: ["Bash"] });
+      const src = loadProjectSettings({ filePath: path });
+      assert.ok(src);
+      assert.equal("defaultMode" in src, false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -540,73 +238,7 @@ describe("loadProjectSettings", () => {
     }
   });
 
-  it("settings JSON without a permissions section → undefined", () => {
-    const dir = scratchDir();
-    try {
-      const path = join(dir, "settings.json");
-      writeFileSync(
-        path,
-        JSON.stringify({ verify: { command: "npm test" } }),
-        "utf8"
-      );
-      assert.equal(loadProjectSettings({ filePath: path }), undefined);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("rule match: command_starts_with evaluates correctly (positive + negative)", () => {
-    const dir = scratchDir();
-    try {
-      const path = writePermissions(dir, VALID_SECTION);
-      const src = loadProjectSettings({ filePath: path });
-      assert.ok(src);
-      const echoRule = src.rules[0]!;
-      assert.equal(
-        echoRule.match({ tool: "bash", input: { command: "echo hi" } }),
-        true
-      );
-      assert.equal(
-        echoRule.match({ tool: "bash", input: { command: "ls" } }),
-        false
-      );
-      // tool name mismatch also negative
-      assert.equal(
-        echoRule.match({ tool: "read_file", input: { command: "echo hi" } }),
-        false
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("rule match: path_contains checks .ssh/ anywhere in the path", () => {
-    const dir = scratchDir();
-    try {
-      const path = writePermissions(dir, VALID_SECTION);
-      const src = loadProjectSettings({ filePath: path });
-      assert.ok(src);
-      const denyRule = src.rules[1]!;
-      assert.equal(
-        denyRule.match({
-          tool: "read_file",
-          input: { path: "/home/user/.ssh/id_rsa" },
-        }),
-        true
-      );
-      assert.equal(
-        denyRule.match({
-          tool: "read_file",
-          input: { path: "/home/user/.config/something" },
-        }),
-        false
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("returned source is frozen (Object.isFrozen on rules array)", () => {
+  it("returned source is frozen", () => {
     const dir = scratchDir();
     try {
       const path = writePermissions(dir, VALID_SECTION);
@@ -628,7 +260,6 @@ describe("loadProjectSettings", () => {
       assert.ok(a && b);
       assert.equal(a.rules.length, b.rules.length);
       assert.equal(a.rules[0]?.id, b.rules[0]?.id);
-      // Different objects: closing-over new state each call.
       assert.notEqual(a, b);
       assert.notEqual(a.rules, b.rules);
     } finally {
@@ -636,79 +267,228 @@ describe("loadProjectSettings", () => {
     }
   });
 
-  it("predicates with non-string command don't match (no false positives)", () => {
+  it("non-string / malformed rule entries never produce false positives", () => {
     const dir = scratchDir();
     try {
-      const path = writePermissions(dir, {
-        schema_version: 1,
-        rule: [
-          oneRule({
-            id: "needs-string-command",
-            reason: "needs string command",
-          }),
-        ],
-      });
+      const path = writePermissions(dir, { deny: ["((("] });
       const src = loadProjectSettings({ filePath: path });
       assert.ok(src);
-      const rule = src.rules[0]!;
-      // input without `command` field → no match
-      assert.equal(rule.match({ tool: "bash", input: {} }), false);
-      // input where command is not a string → no match
-      assert.equal(rule.match({ tool: "bash", input: { command: 42 } }), false);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("integration: loaded project source flows through createPermissionPolicy + checkPermission", () => {
-    // SC3 覆盖语义：project 层 allow 规则放行匹配的 bash echo，
-    // 未匹配的 bash 命令仍走 category default（execute → ask）。
-    const dir = scratchDir();
-    try {
-      const path = writePermissions(dir, VALID_SECTION);
-      const project = loadProjectSettings({ filePath: path });
-      assert.ok(project);
-      const policy = createPermissionPolicy({ project });
-
-      // allow rule 命中 → allow（绕过 execute category 的默认 ask）
-      const allowOut = checkPermission({
-        def: makeTool("bash", "execute"),
-        input: { command: "echo hello" },
-        sources: policy.sources,
-        hardWalls: policy.hardWalls,
-        defaultByCategory: policy.defaultByCategory,
-      });
-      assert.equal(allowOut.decision, "allow");
-      assert.match(allowOut.reason, /explicit allow: bash echo/);
-
-      // 未命中 project 规则的 bash → category default ask
-      const askOut = checkPermission({
-        def: makeTool("bash", "execute"),
-        input: { command: "npm install" },
-        sources: policy.sources,
-        hardWalls: policy.hardWalls,
-        defaultByCategory: policy.defaultByCategory,
-      });
-      assert.equal(askOut.decision, "ask");
-
-      // 硬墙优先于 project 层：危险命令仍 deny（project 无法放宽硬墙）
-      const denyOut = checkPermission({
-        def: makeTool("bash", "execute"),
-        input: { command: "rm -rf /" },
-        sources: policy.sources,
-        hardWalls: policy.hardWalls,
-        defaultByCategory: policy.defaultByCategory,
-      });
-      assert.equal(denyOut.decision, "deny");
-      assert.match(denyOut.reason, /\[hard_wall\]/);
+      // The malformed entry is dropped with a warning, so no rule matches.
+      assert.equal(src.rules.length, 0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 });
 
-describe("loadProjectSettings — cwd form + legacy toml fail-loud (ADR-0084 / SC5)", () => {
-  it("cwd form resolves <cwd>/.iknow/settings.json and loads its permissions section", () => {
+/* -----------------------------------------------------------------------------
+ * Schema violations / fail-loud
+ * -------------------------------------------------------------------------- */
+
+describe("loadProjectSettings — schema violations", () => {
+  it("unknown key inside the section → schema_violation (additionalProperties:false)", () => {
+    const dir = scratchDir();
+    try {
+      const path = writePermissions(dir, {
+        allow: ["Bash"],
+        unexpected: true,
+      });
+      assert.throws(
+        () => loadProjectSettings({ filePath: path }),
+        (err: unknown) =>
+          err instanceof ProjectSettingsError && err.kind === "schema_violation"
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("non-string entry in a rule array → schema_violation", () => {
+    const dir = scratchDir();
+    try {
+      const path = writePermissions(dir, { deny: [42] });
+      assert.throws(
+        () => loadProjectSettings({ filePath: path }),
+        (err: unknown) =>
+          err instanceof ProjectSettingsError &&
+          err.kind === "schema_violation" &&
+          err.message.includes("/deny/0")
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("illegal defaultMode ('yolo') → schema_violation (ajv enum)", () => {
+    const dir = scratchDir();
+    try {
+      const path = writePermissions(dir, { defaultMode: "yolo" });
+      assert.throws(
+        () => loadProjectSettings({ filePath: path }),
+        (err: unknown) =>
+          err instanceof ProjectSettingsError && err.kind === "schema_violation"
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("defaultMode 'full_auto' → forbidden_default_mode (not schema_violation)", () => {
+    const dir = scratchDir();
+    try {
+      const path = writePermissions(dir, { defaultMode: "full_auto" });
+      assert.throws(
+        () => loadProjectSettings({ filePath: path }),
+        (err: unknown) => {
+          if (!(err instanceof ProjectSettingsError)) return false;
+          return (
+            err.kind === "forbidden_default_mode" &&
+            err.message.includes("full_auto")
+          );
+        }
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("section is a non-object → schema_violation", () => {
+    for (const bad of ["x", 1, []]) {
+      const dir = scratchDir();
+      try {
+        const path = writePermissions(dir, bad);
+        assert.throws(
+          () => loadProjectSettings({ filePath: path }),
+          (err: unknown) =>
+            err instanceof ProjectSettingsError &&
+            err.kind === "schema_violation",
+          `section=${JSON.stringify(bad)}`
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+});
+
+/* -----------------------------------------------------------------------------
+ * Legacy predicate DSL → typed fail-loud
+ * -------------------------------------------------------------------------- */
+
+describe("loadProjectSettings — legacy predicate DSL fail-loud", () => {
+  it("schema_version + rule → legacy_predicate_form with a new-form example", () => {
+    const dir = scratchDir();
+    try {
+      const path = writePermissions(dir, {
+        schema_version: 1,
+        rule: [
+          {
+            id: "allow-bash-echo",
+            match_tool: "bash",
+            match_input: { command_starts_with: "echo " },
+            decision: "allow",
+            reason: "explicit allow: bash echo",
+          },
+        ],
+      });
+      assert.throws(
+        () => loadProjectSettings({ filePath: path }),
+        (err: unknown) => {
+          if (!(err instanceof ProjectSettingsError)) return false;
+          return (
+            err.kind === "legacy_predicate_form" &&
+            err.message.includes("allow") &&
+            err.message.includes("deny")
+          );
+        }
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("legacy shape without rules present (schema_version only) still fails loud", () => {
+    const dir = scratchDir();
+    try {
+      const path = writePermissions(dir, { schema_version: 1 });
+      assert.throws(
+        () => loadProjectSettings({ filePath: path }),
+        (err: unknown) =>
+          err instanceof ProjectSettingsError &&
+          err.kind === "legacy_predicate_form"
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("readProjectDefaultMode shares the legacy-shape fail-loud", () => {
+    const dir = scratchDir();
+    try {
+      const path = writePermissions(dir, { schema_version: 1, rule: [] });
+      assert.throws(
+        () => readProjectDefaultMode({ filePath: path }),
+        (err: unknown) =>
+          err instanceof ProjectSettingsError &&
+          err.kind === "legacy_predicate_form"
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/* -----------------------------------------------------------------------------
+ * readProjectDefaultMode — light read for the startup-mode seed
+ * -------------------------------------------------------------------------- */
+
+describe("readProjectDefaultMode", () => {
+  it("returns the declared mode", () => {
+    const dir = scratchDir();
+    try {
+      const path = writePermissions(dir, { defaultMode: "plan" });
+      assert.equal(readProjectDefaultMode({ filePath: path }), "plan");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns undefined when the file / section / field is absent", () => {
+    const dir = scratchDir();
+    try {
+      assert.equal(
+        readProjectDefaultMode({ filePath: join(dir, "nope.json") }),
+        undefined
+      );
+      const path = writePermissions(dir, { allow: ["Bash"] });
+      assert.equal(readProjectDefaultMode({ filePath: path }), undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("'full_auto' fails loud here too", () => {
+    const dir = scratchDir();
+    try {
+      const path = writePermissions(dir, { defaultMode: "full_auto" });
+      assert.throws(
+        () => readProjectDefaultMode({ filePath: path }),
+        (err: unknown) =>
+          err instanceof ProjectSettingsError &&
+          err.kind === "forbidden_default_mode"
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/* -----------------------------------------------------------------------------
+ * cwd form + legacy toml fail-loud (ADR-0084)
+ * -------------------------------------------------------------------------- */
+
+describe("loadProjectSettings — cwd form + legacy toml fail-loud", () => {
+  it("cwd form resolves <cwd>/.iknow/settings.json and loads its section", () => {
     const base = scratchDir();
     try {
       const { cwd, file } = writeProjectDir(base, VALID_SECTION);
@@ -716,7 +496,6 @@ describe("loadProjectSettings — cwd form + legacy toml fail-loud (ADR-0084 / S
       assert.ok(src);
       assert.equal(src.filePath, file);
       assert.equal(src.rules.length, 2);
-      assert.equal(src.rules[0]?.id, "allow-bash-echo");
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
@@ -738,57 +517,7 @@ describe("loadProjectSettings — cwd form + legacy toml fail-loud (ADR-0084 / S
     }
   });
 
-  it("legacy permissions.toml + settings permissions section both present → fail-loud typed error naming both paths", () => {
-    const base = scratchDir();
-    try {
-      const { file } = writeProjectDir(base, VALID_SECTION);
-      const toml = writeLegacyToml(base);
-      assert.throws(
-        () => loadProjectSettings({ cwd: base }),
-        (err: unknown) => {
-          if (!(err instanceof Error)) return false;
-          return (
-            err.message.includes("toml_and_json_present") &&
-            err.message.includes(toml) &&
-            err.message.includes(file)
-          );
-        }
-      );
-    } finally {
-      rmSync(base, { recursive: true, force: true });
-    }
-  });
-
-  it("legacy permissions.toml present alone (no settings permission section) → loads fine (toml is inert, one SSOT only)", () => {
-    // ADR-0084 的 fail-loud 触发条件是「两份**同时存在**」——只有退役 toml
-    // 在场时没有第二个 SSOT 可争,启动不得被拦下。
-    const base = scratchDir();
-    try {
-      const cwd = join(base, ".iknow");
-      mkdirSync(cwd, { recursive: true });
-      writeFileSync(
-        join(cwd, "settings.json"),
-        JSON.stringify({ verify: { command: "npm test" } }),
-        "utf8"
-      );
-      writeLegacyToml(base);
-      assert.equal(loadProjectSettings({ cwd: base }), undefined);
-    } finally {
-      rmSync(base, { recursive: true, force: true });
-    }
-  });
-
-  it("legacy permissions.toml alone with settings.json absent → loads fine (no second SSOT to conflict with)", () => {
-    const base = scratchDir();
-    try {
-      writeLegacyToml(base);
-      assert.equal(loadProjectSettings({ cwd: base }), undefined);
-    } finally {
-      rmSync(base, { recursive: true, force: true });
-    }
-  });
-
-  it("legacy permissions.toml + JSON permissions section both present → typed ProjectSettingsError carrying kind", () => {
+  it("legacy toml + JSON section both present → fail-loud typed error naming both paths", () => {
     const base = scratchDir();
     try {
       const { file } = writeProjectDir(base, VALID_SECTION);
@@ -809,26 +538,30 @@ describe("loadProjectSettings — cwd form + legacy toml fail-loud (ADR-0084 / S
     }
   });
 
-  it("schema violation is a typed ProjectSettingsError with kind schema_violation", () => {
-    const dir = scratchDir();
+  it("legacy toml alone (no settings permission section) → loads fine (single SSOT)", () => {
+    const base = scratchDir();
     try {
-      const path = writePermissions(dir, {
-        schema_version: 2,
-        rule: [oneRule({})],
-      });
-      assert.throws(
-        () => loadProjectSettings({ filePath: path }),
-        (err: unknown) =>
-          err instanceof ProjectSettingsError && err.kind === "schema_violation"
+      const cwd = join(base, ".iknow");
+      mkdirSync(cwd, { recursive: true });
+      writeFileSync(
+        join(cwd, "settings.json"),
+        JSON.stringify({ verify: { command: "npm test" } }),
+        "utf8"
       );
+      writeLegacyToml(base);
+      assert.equal(loadProjectSettings({ cwd: base }), undefined);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(base, { recursive: true, force: true });
     }
   });
 });
 
+/* -----------------------------------------------------------------------------
+ * resolveProjectPermissionSource — shared assembly read path
+ * -------------------------------------------------------------------------- */
+
 describe("resolveProjectPermissionSource — 装配共用读路径", () => {
-  it("reads <projectIdentityRoot>/.iknow/settings.json and returns the project source", () => {
+  it("reads <projectIdentityRoot>/.iknow/settings.json and returns the source", () => {
     const base = scratchDir();
     try {
       const { file } = writeProjectDir(base, VALID_SECTION);
@@ -839,6 +572,26 @@ describe("resolveProjectPermissionSource — 装配共用读路径", () => {
       assert.equal(src.kind, "project");
       assert.equal(src.filePath, file);
       assert.equal(src.rules.length, 2);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("forwards workRoot / knownToolNames / onWarn to the loader", () => {
+    const base = scratchDir();
+    try {
+      writeProjectDir(base, { deny: ["Future_Tool"] });
+      const warnings: string[] = [];
+      const src = resolveProjectPermissionSource({
+        projectIdentityRoot: base,
+        workRoot: "/w",
+        knownToolNames: new Set(["bash"]),
+        onWarn: (m) => warnings.push(m),
+      });
+      assert.ok(src);
+      assert.equal(src.rules.length, 1);
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0]!, /Future_Tool/);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
@@ -869,6 +622,258 @@ describe("resolveProjectPermissionSource — 装配共用读路径", () => {
       );
     } finally {
       rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+/* -----------------------------------------------------------------------------
+ * Integration through the policy layer
+ * -------------------------------------------------------------------------- */
+
+describe("policy integration", () => {
+  it("project deny fires ahead of a project allow on the same command", () => {
+    const dir = scratchDir();
+    try {
+      const project = loadProjectSettings({
+        filePath: writePermissions(dir, {
+          deny: ["Bash(git status:*)"],
+          allow: ["Bash(git status:*)"],
+        }),
+        workRoot: "/w",
+      });
+      assert.ok(project);
+      const policy = createPermissionPolicy({ project });
+      const out = checkPermission({
+        def: makeTool("bash", "execute"),
+        input: { command: "git status" },
+        sources: policy.sources,
+        hardWalls: policy.hardWalls,
+        defaultByCategory: policy.defaultByCategory,
+      });
+      assert.equal(out.decision, "deny");
+      assert.match(out.reason, /project settings: deny/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("project allow lets a matched bash echo through; unmatched still asks", () => {
+    const dir = scratchDir();
+    try {
+      const project = loadProjectSettings({
+        filePath: writePermissions(dir, VALID_SECTION),
+        workRoot: "/w",
+      });
+      assert.ok(project);
+      const policy = createPermissionPolicy({ project });
+
+      const allowOut = checkPermission({
+        def: makeTool("bash", "execute"),
+        input: { command: "echo hello" },
+        sources: policy.sources,
+        hardWalls: policy.hardWalls,
+        defaultByCategory: policy.defaultByCategory,
+      });
+      assert.equal(allowOut.decision, "allow");
+
+      const askOut = checkPermission({
+        def: makeTool("bash", "execute"),
+        input: { command: "npm install" },
+        sources: policy.sources,
+        hardWalls: policy.hardWalls,
+        defaultByCategory: policy.defaultByCategory,
+      });
+      assert.equal(askOut.decision, "ask");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("hard-wall still outranks a project allow (dangerous command)", () => {
+    const dir = scratchDir();
+    try {
+      const project = loadProjectSettings({
+        filePath: writePermissions(dir, VALID_SECTION),
+        workRoot: "/w",
+      });
+      assert.ok(project);
+      const policy = createPermissionPolicy({ project });
+      const out = checkPermission({
+        def: makeTool("bash", "execute"),
+        input: { command: "rm -rf /" },
+        sources: policy.sources,
+        hardWalls: policy.hardWalls,
+        defaultByCategory: policy.defaultByCategory,
+      });
+      assert.equal(out.decision, "deny");
+      assert.match(out.reason, /\[hard_wall\]/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/* -----------------------------------------------------------------------------
+ * #952 network opt-in — expressed through the declarative form
+ * -------------------------------------------------------------------------- */
+
+/**
+ * bash `network:true` eligibility gate.
+ *
+ * Invariant (SSOT = `policy.ts` `isBashNetworkInput`, strict `=== true`):
+ *  - match ⇔ tool === "bash" AND `input.network` is exactly the boolean true.
+ *    A string `"true"`, an absent field, `false`, and a non-object input all
+ *    miss.
+ *  - This is a request-eligibility gate, not an SSRF boundary: traffic
+ *    content is unfiltered either way, and without a matching rule the
+ *    default `code-ask-bash-network` ask still stands.
+ *  - The declarative form expresses the gate as `bash(network:true)`
+ *    (`param:value` on a non-primary scalar field); `bash(network:*)`
+ *    generalises it to "any explicit network value".
+ */
+describe("bash network gate via declarative form", () => {
+  const NETWORK_SECTION = { deny: ["bash(network:true)"] };
+
+  function loadNetworkRule(dir: string) {
+    const path = writePermissions(dir, NETWORK_SECTION);
+    const src = loadProjectSettings({ filePath: path, workRoot: "/w" });
+    assert.ok(src);
+    assert.equal(src.rules.length, 1);
+    return src.rules[0]!;
+  }
+
+  it("network:true matches {command, network: true} on bash", () => {
+    const dir = scratchDir();
+    try {
+      const rule = loadNetworkRule(dir);
+      assert.equal(
+        rule.match({
+          tool: "bash",
+          input: { command: "curl https://example.com", network: true },
+        }),
+        true
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not match network:false / missing / string 'true' (strict boolean)", () => {
+    const dir = scratchDir();
+    try {
+      const rule = loadNetworkRule(dir);
+      assert.equal(
+        rule.match({
+          tool: "bash",
+          input: { command: "curl https://example.com", network: false },
+        }),
+        false
+      );
+      assert.equal(
+        rule.match({ tool: "bash", input: { command: "curl" } }),
+        false
+      );
+      assert.equal(
+        rule.match({
+          tool: "bash",
+          input: { command: "curl", network: "true" },
+        }),
+        false
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("non-bash tool with a same-named network:true field does not match", () => {
+    const dir = scratchDir();
+    try {
+      const rule = loadNetworkRule(dir);
+      assert.equal(
+        rule.match({
+          tool: "web_fetch",
+          input: { url: "https://example.com", network: true },
+        }),
+        false
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("network:* matches any scalar network value on bash", () => {
+    const dir = scratchDir();
+    try {
+      const path = writePermissions(dir, { deny: ["bash(network:*)"] });
+      const src = loadProjectSettings({ filePath: path, workRoot: "/w" });
+      assert.ok(src);
+      const rule = src.rules[0]!;
+      assert.equal(
+        rule.match({
+          tool: "bash",
+          input: { command: "curl", network: true },
+        }),
+        true
+      );
+      assert.equal(
+        rule.match({
+          tool: "bash",
+          input: { command: "curl", network: false },
+        }),
+        true
+      );
+      assert.equal(
+        rule.match({ tool: "bash", input: { command: "curl" } }),
+        false
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("integration: project-layer deny fires before the code-layer ask", () => {
+    const dir = scratchDir();
+    try {
+      const project = loadProjectSettings({
+        filePath: writePermissions(dir, NETWORK_SECTION),
+        workRoot: "/w",
+      });
+      assert.ok(project);
+      const policy = createPermissionPolicy({ project });
+      const out = checkPermission({
+        def: makeTool("bash", "execute"),
+        input: { command: "curl https://example.com", network: true },
+        sources: policy.sources,
+        hardWalls: policy.hardWalls,
+        defaultByCategory: policy.defaultByCategory,
+      });
+      assert.equal(out.decision, "deny");
+      assert.match(out.reason, /project settings: deny/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("default behavior unchanged: without a network rule, bash network:true still asks via code-ask-bash-network", () => {
+    const dir = scratchDir();
+    try {
+      const project = loadProjectSettings({
+        filePath: writePermissions(dir, VALID_SECTION),
+        workRoot: "/w",
+      });
+      assert.ok(project);
+      const policy = createPermissionPolicy({ project });
+      const out = checkPermission({
+        def: makeTool("bash", "execute"),
+        input: { command: "curl https://example.com", network: true },
+        sources: policy.sources,
+        hardWalls: policy.hardWalls,
+        defaultByCategory: policy.defaultByCategory,
+      });
+      assert.equal(out.decision, "ask");
+      assert.match(out.reason, /code-ask-bash-network|network/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

@@ -1684,27 +1684,51 @@ describe("loadIknowSettings — 项目 allowlist / permissions（ADR-0084 / SC4 
     assert.match(String(captured[0]![0]), /"llm"/);
   });
 
-  it("project permissions 段：schema_version + rule 原样透传（形状透传，语义归 permission 层）", async () => {
-    const rules = [
-      {
-        id: "allow-bash-echo",
-        match_tool: "bash",
-        match_input: { command_starts_with: "echo " },
-        decision: "allow",
-        reason: "explicit allow",
-      },
-    ];
+  it("project permissions 段：defaultMode + allow/ask/deny 字符串数组原样透传（形状透传，语义归 permission 层）", async () => {
     const { home, cwd } = await makeSettings(
       {},
-      { permissions: { schema_version: 1, rule: rules } }
+      {
+        permissions: {
+          defaultMode: "plan",
+          allow: ["Bash(echo:*)"],
+          ask: ["Bash(git commit:*)"],
+          deny: ["Read(**/.pem)"],
+        },
+      }
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      permissions: { schema_version: 1, rule: rules },
+      permissions: {
+        defaultMode: "plan",
+        allow: ["Bash(echo:*)"],
+        ask: ["Bash(git commit:*)"],
+        deny: ["Read(**/.pem)"],
+      },
     });
   });
 
-  it("project permissions 非普通对象 / rule 非数组 → 丢弃该段（drop-not-throw）", async () => {
-    for (const bad of ["x", 1, [], { rule: "not-array" }, { rule: {} }]) {
+  it("project permissions 段：缺字段的合法形态也透传", async () => {
+    for (const section of [
+      { allow: ["Bash"] },
+      { deny: ["Read(.env)"] },
+      { defaultMode: "default" },
+      { allow: [], deny: [] },
+    ]) {
+      const { home, cwd } = await makeSettings({}, { permissions: section });
+      assert.deepEqual(loadIknowSettings({ home, cwd }), {
+        permissions: section,
+      });
+    }
+  });
+
+  it("project permissions 非普通对象 / 字段类型错 → 丢弃该段（drop-not-throw）", async () => {
+    for (const bad of [
+      "x",
+      1,
+      [],
+      { allow: "not-array" },
+      { deny: 42 },
+      { defaultMode: 7 },
+    ]) {
       const { home, cwd } = await makeSettings({}, { permissions: bad });
       assert.deepEqual(
         loadIknowSettings({ home, cwd }),
@@ -1718,15 +1742,7 @@ describe("loadIknowSettings — 项目 allowlist / permissions（ADR-0084 / SC4 
     const { home, cwd } = await makeSettings(
       {
         permissions: {
-          schema_version: 1,
-          rule: [
-            {
-              id: "user-rule",
-              match_tool: "bash",
-              decision: "allow",
-              reason: "never accepted",
-            },
-          ],
+          allow: ["Bash(echo:*)"],
         },
       },
       {}
@@ -1740,25 +1756,14 @@ describe("loadIknowSettings — 项目 allowlist / permissions（ADR-0084 / SC4 
     assert.match(warnings[0]!, /"permissions"/);
   });
 
-  it("返回对象深 frozen 含 permissions.rule 数组", async () => {
+  it("返回对象深 frozen 含 permissions 段与字符串数组", async () => {
     const { home, cwd } = await makeSettings(
       {},
-      {
-        permissions: {
-          schema_version: 1,
-          rule: [
-            {
-              id: "r1",
-              match_tool: "bash",
-              decision: "deny",
-              reason: "no",
-            },
-          ],
-        },
-      }
+      { permissions: { allow: ["Bash"], deny: ["Read(.env)"] } }
     );
     const s = loadIknowSettings({ home, cwd });
     assert.ok(Object.isFrozen(s.permissions));
-    assert.ok(Object.isFrozen(s.permissions!.rule));
+    assert.ok(Object.isFrozen(s.permissions!.allow));
+    assert.ok(Object.isFrozen(s.permissions!.deny));
   });
 });
