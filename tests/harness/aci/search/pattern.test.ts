@@ -251,6 +251,59 @@ describe("compilePattern — `u` 规则与退回（code point 对齐）", () => 
     rejects(() => compilePattern("[", false), /pattern/);
     rejects(() => compilePattern("a**", false), /pattern/);
   });
+
+  it("已知残留：单反斜杠转义在 JS 侧读字面量（文件头清单的钉子）", () => {
+    // 这些 pattern 在 rg 侧被接受（`\A` / `\z` 走 Rust 默认引擎，`\Z` / `\e`
+    // 一类靠 `--engine=auto` 退 PCRE2），JS 却读成字面量 —— 两侧都「接受」
+    // 但命中不同，属 pattern.ts 文件头列明的残留 2-A。这里只钉住 JS 侧的
+    // 实际读法，不声称对齐（对齐要靠 typed 拒绝，属另一刀）。
+    for (const [pattern, literal] of [
+      ["\\A", "A"],
+      ["\\z", "z"],
+      ["\\Z", "Z"],
+      ["\\N", "N"],
+      ["\\e", "e"],
+      ["\\G", "G"],
+      ["\\K", "K"],
+      ["\\X", "X"],
+      ["\\C", "C"],
+      ["\\h", "h"],
+      ["\\H", "H"],
+      ["\\R", "R"],
+    ] as const) {
+      const compiled = compilePattern(pattern, false);
+      assert.equal(compiled.unicode, false, pattern); // 两侧都编不过带 `u` 的形态
+      assert.equal(compiled.test(literal), true, pattern);
+    }
+  });
+
+  it("已知残留：Rust 与 PCRE2 都拒的转义在 JS 侧静默命中（清单的钉子）", () => {
+    // 残留 2-C：rg rc=2 typed 失败，JS 读字面量并命中。`\c` 单独列 —— JS 把
+    // 它读成两字符序列 `\c`，命中对象不是单个 `c`（实测）。
+    for (const [pattern, literal] of [
+      ["\\q", "q"],
+      ["\\g", "g"],
+      ["\\k", "k"],
+      ["\\o", "o"],
+      ["\\y", "y"],
+      ["\\T", "T"],
+    ] as const) {
+      const compiled = compilePattern(pattern, false);
+      assert.equal(compiled.unicode, false, pattern);
+      assert.equal(compiled.test(literal), true, pattern);
+    }
+    const c = compilePattern("\\c", false);
+    assert.equal(c.unicode, false);
+    assert.equal(c.test("c"), false);
+    assert.equal(c.test("\\c"), true);
+  });
+
+  it("残留清单里点名的「不是残留」：`a{2,1}` 两边同为 typed 拒绝", () => {
+    // argv.ts 的 auto 注释专门排除这条：JS 也拒（numbers out of order），
+    // 不是「rg 拒而 Node 静默命中」那一类。
+    rejects(() => compilePattern("a{2,1}", false), /pattern/);
+    rejects(() => compilePattern("a{2,1}", false), /a\{2,1\}/);
+  });
 });
 
 describe("新文案与既有失败域互不混同（SC10）", () => {

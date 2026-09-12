@@ -38,16 +38,25 @@ export function buildRgArgs(
 ): string[] {
   const args: string[] = [];
   pushOutputMode(args, spec);
-  // `--engine=auto`：默认走 Rust 正则引擎，默认引擎编不过时退 PCRE2
-  // （实测不限于 look-around / backreference：`\Z` / `\h` 这类 Rust 不认而
-  // PCRE2 认的转义同样被它接住）。Node 侧是 JS `RegExp`，接受集与 PCRE2 相近，
-  // 所以 `(?=hit)` 在 rg 路径不再 rc=2 失败、在 Node 路径正常命中 —— 少了这
-  // 一行，同一个 pattern 的含义就取决于哪条引擎在跑，正是 D6 禁止的静默改
-  // 语义。普通模式零开销（对比 `--pcre2` 强制全量换引擎）。
+  // `--engine=auto`：默认走 Rust 正则引擎，**默认引擎编不过**时退 PCRE2
+  // （实测不限于 look-around / backreference：`\Z` / `\N` / `\h` 这类 Rust
+  // 不认而 PCRE2 认的转义同样被它接住）。少了这一行，`(?=hit)` 在 rg 路径是
+  // rc=2 typed 失败、在 Node 路径正常命中（JS `RegExp` 支持 look-around）——
+  // 同一次查询「报错还是出结果」取决于哪条引擎在跑，正是 D6 要消除的引擎
+  // 依赖。普通模式零开销（对比 `--pcre2` 强制全量换引擎）。
   //
-  // 这不是「接受集完全对齐」：Rust / PCRE2 都编不过的（`\q`、`a{2,1}`）在 rg
-  // 侧仍是 rc=2 typed 失败、Node 侧当字面量静默命中（见 `pattern.ts` 文件头
-  // 的残留清单）。auto 只保证「rg 会接受的，Node 也接受」这一半。
+  // 这不是「接受集完全对齐」，两个方向都还有口子（逐条实测）：
+  //   - rg 收而 Node 读字面量：`\A` / `\z`（Rust 默认引擎就收，auto 不必
+  //     换引擎）与 `\Z` / `\N` / `\h` 一类（Rust 不收、auto 退 PCRE2 收下）；
+  //     两边都「接受」，命中的行却不同 —— 反向的静默分叉，auto 管不了。
+  //   - rg 拒而 Node 收：`\q` / `\g` / `\k` / `\o` / `\y` / `\T` 一类，Rust
+  //     与 PCRE2 都编不过 → rc=2 typed 失败，JS（无 `u`）读成字面量 `q` /
+  //     `g` / `k`… 静默命中（`\c` 同类但 JS 读成两字符序列 `\c`，命中对象与
+  //     单字符不同，实测）。
+  // 注：`a{2,1}` **不是**这类反例 —— JS 也拒（`numbers out of order`），两
+  // 边同为 typed 拒绝。
+  // 所以 auto 的实测保证只有一条：**「rg 默认引擎编不过」不必然等于「rg 拒
+  // 这条查询」**，能换 PCRE2 的它会换。
   args.push("--engine=auto");
   // `--no-unicode`：判据是 `keepsUnicodeMode`（**唯一**模式判据，见
   // `pattern.ts`），此处是它的 rg 侧投影 —— Node 侧按同一判据决定要不要加
