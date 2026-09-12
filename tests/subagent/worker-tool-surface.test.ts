@@ -23,7 +23,7 @@
 
 import assert from "node:assert/strict";
 import { spawn as spawnChild } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "vitest";
@@ -40,6 +40,11 @@ import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { ACI_TOOLSET_NAMES } from "../../src/harness/aci/tools/registry.ts";
+import {
+  createTodoWriteTool,
+  resolveConversationTodoPath,
+} from "../../src/harness/aci/tools/todo-write.ts";
+import { ToolExecutionError } from "../../src/harness/errors.ts";
 import { assessSubagentIsolation } from "../../src/harness/subagent/capability.ts";
 import {
   FILE_WRITE_TOOL_NAMES,
@@ -514,62 +519,225 @@ describe("worker tool surface: 并发 N/A — 占位说明", () => {
 });
 
 // ---------------------------------------------------------------------------
-// #440 T5: D6 worker ownership isolation — todo_write 不入 worker 工具面
-// 装配路径 createWorkerDeps → createDefaultAciRegistry(无 todoDir)
-// → factories 缺 todo_write → 双面（inner + visibleSchemas）俱缺席。
-// 即使主 loop 注册表装配了 todo_write（buildHarnessEngine + todoDir），
-// worker 子进程仍是 25 件（25 - subagent2 - memory2 - todo_write = 21，
-// 加 skill 2 = 23；详见 D6 决策 + #440 T4 todoDir seam）。
+// ADR-0085 / SC9 — worker 与父会话共用同一本账（原 #440 D6「worker 无
+// todo_write」契约已被 ADR-0085 推翻）。
+//
+// 新不变式（替代旧四条）：
+//   1. envelope.todoLedger 在场 → todo_write **在** worker 双面工具面上
+//      （不是「工具缺席」——模型要读得到 `add` 的拒绝原因）；
+//   2. worker 的 read / update 落在父会话账本（同一个 todos.md 文件）；
+//   3. worker 的 `add` 是工具自身的 typed 拒绝（ToolExecutionError +
+//      `[todo_write]` 前缀），文件不动；
+//   4. 两个父会话的账本互不交叉（每 conversationId 一本，id 不串）。
+//   5. envelope 缺 todoLedger（旧 wire）→ 仍退回缺席形态，byte-stable。
 // ---------------------------------------------------------------------------
 
-describe("worker tool surface: #440 T5 D6 ownership — todo_write 缺席", () => {
-  it("worker 装配路径不传 memoryDir → memory_recall / memory_save 均缺席", async () => {
+describe("worker tool surface: ADR-0085 SC9 — worker 共用父会话账本", () => {
+  it("worker 装配路径不传 memoryDir → memory_recall / memory_save 均缺席(条件化未回退)", async () => {
     const deps = await buildWorkerWithFullSkillCatalog();
     const names = deps.registry.list().map((d) => d.name);
     assert.ok(!names.includes("memory_recall"));
     assert.ok(!names.includes("memory_save"));
   });
 
-  it("worker 装配路径不传 todoDir → inner.list() 不含 todo_write", async () => {
+  it("envelope.todoLedger 缺席（旧 wire）→ inner + promptTools 双面均不含 todo_write", async () => {
+    // 旧 wire / 跨版本 resume 形态：worker 工具面维持 ADR-0085 之前的 25 件，
+    // 不因新字段的存在而漂移。
     const deps = await buildWorkerWithFullSkillCatalog();
-    const names = deps.registry.list().map((d) => d.name);
-    assert.ok(
-      !names.includes("todo_write"),
-      `worker surface should exclude todo_write, got: ${names.join(", ")}`
-    );
+    assertSurface(deps, ["todo_write"], [...WORKER_BASE_SURFACE]);
   });
 
-  it("worker 装配路径不传 todoDir → promptTools() 不含 todo_write", async () => {
-    const deps = await buildWorkerWithFullSkillCatalog();
-    if (!deps.promptTools) {
-      // promptTools 缺席本身是合法（无注册表 → 无可见面），跳过本断言
-      return;
+  it("envelope.todoLedger 在场 → todo_write 在 inner + promptTools 双面（工具在场,非静默缺席）", async () => {
+    const todoDir = await mkdtemp(join(tmpdir(), "iknow-sc9-worker-"));
+    try {
+      const deps = await buildWorkerLedgerDeps({
+        todoLedger: { projectDir: todoDir, conversationId: "conv-parent" },
+      });
+      assertSurface(deps, [], [...WORKER_BASE_SURFACE, "todo_write"]);
+      // 双面件数 = 基础面 + 1（todo_write 是唯一增量）。
+      assert.equal(deps.registry.list().length, WORKER_BASE_SURFACE.length + 1);
+    } finally {
+      await rm(todoDir, { recursive: true, force: true });
     }
-    const names = deps.promptTools().map((d) => d.name);
-    assert.ok(
-      !names.includes("todo_write"),
-      `worker promptTools should exclude todo_write, got: ${names.join(", ")}`
-    );
   });
 
-  it("worker 装配路径不传 todoDir → reg.catalog.get(todo_write) === undefined（双层防护）", async () => {
-    const deps = await buildWorkerWithFullSkillCatalog();
-    // 通过 dynamic registry wrapper 测试（executor 实际可见的查找路径）
-    const found = (deps.registry as { get?: (n: string) => unknown }).get?.(
-      "todo_write"
-    );
-    assert.equal(found, undefined);
+  it("worker read / update 落在父会话账本上（同一个 todos.md）", async () => {
+    const todoDir = await mkdtemp(join(tmpdir(), "iknow-sc9-shared-"));
+    try {
+      const conversationId = "conv-parent-shared";
+      // 父会话先写两条（父路径 = 同一 projectDir + 同一 conversationId）。
+      const parent = createTodoWriteTool({ todoDir, actor: { canAdd: true } });
+      await parent.handler(
+        { mode: "add", items: ["parent step 1", "parent step 2"] },
+        { conversationId }
+      );
+
+      const deps = await buildWorkerLedgerDeps({
+        todoLedger: { projectDir: todoDir, conversationId },
+      });
+      const tool = deps.registry.get("todo_write");
+      assert.ok(tool, "worker surface 必须含 todo_write");
+
+      // worker 无 ctx（worker 进程 executor 不合成 conversationId）——
+      // 路径由 deps.actor.conversationId 回退解析到父账本。
+      const seen = (await tool.handler({ mode: "read" })) as string;
+      assert.match(seen, /\[t1\] parent step 1/);
+      assert.match(seen, /\[t2\] parent step 2/);
+
+      const receipt = await tool.handler({
+        mode: "update",
+        id: "t1",
+        status: "completed",
+      });
+      assert.equal(receipt, "Updated t1: status=completed");
+
+      // 父会话回读：看到 worker 的更动 —— 同一本账（物理文件即父会话路径）。
+      const parentView = (await parent.handler(
+        { mode: "read" },
+        { conversationId }
+      )) as string;
+      assert.match(parentView, /\[x\] \[t1\] parent step 1/);
+      assert.match(
+        await readFile(
+          resolveConversationTodoPath({
+            projectDir: todoDir,
+            conversationId,
+          }),
+          "utf8"
+        ),
+        /\[x\] \[t1\] parent step 1/
+      );
+    } finally {
+      await rm(todoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("worker `add` → 工具自身 typed 拒绝（[todo_write] 前缀 + parent-only），文件不动", async () => {
+    const todoDir = await mkdtemp(join(tmpdir(), "iknow-sc9-add-"));
+    try {
+      const conversationId = "conv-parent-add";
+      const parent = createTodoWriteTool({ todoDir });
+      await parent.handler(
+        { mode: "add", item: "parent owns additions" },
+        { conversationId }
+      );
+
+      const deps = await buildWorkerLedgerDeps({
+        todoLedger: { projectDir: todoDir, conversationId },
+      });
+      const tool = deps.registry.get("todo_write");
+      assert.ok(tool);
+
+      await assert.rejects(
+        tool.handler({ mode: "add", item: "worker addition" }),
+        (err: unknown) => {
+          assert.ok(
+            err instanceof ToolExecutionError,
+            "typed error,非静默丢弃"
+          );
+          assert.match((err as Error).message, /^\[todo_write\]/);
+          assert.match((err as Error).message, /parent-only/);
+          return true;
+        }
+      );
+
+      // 拒绝发生在任何写盘之前：父账本只有父会话那一条。
+      const onDisk = await readFile(
+        resolveConversationTodoPath({ projectDir: todoDir, conversationId }),
+        "utf8"
+      );
+      assert.equal(onDisk, "- [ ] [t1] parent owns additions\n");
+    } finally {
+      await rm(todoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("两个父会话的账本互不交叉：A 的 worker 读不到也改不到 B 的条目", async () => {
+    const todoDir = await mkdtemp(join(tmpdir(), "iknow-sc9-isolation-"));
+    try {
+      const convA = "conv-aaa";
+      const convB = "conv-bbb";
+      const parent = createTodoWriteTool({ todoDir });
+      await parent.handler(
+        { mode: "add", item: "A-item" },
+        { conversationId: convA }
+      );
+      await parent.handler(
+        { mode: "add", item: "B-item" },
+        { conversationId: convB }
+      );
+
+      // A 的 worker（装配锚点 = A 的 conversationId）。
+      const depsA = await buildWorkerLedgerDeps({
+        todoLedger: { projectDir: todoDir, conversationId: convA },
+      });
+      const toolA = depsA.registry.get("todo_write");
+      assert.ok(toolA);
+
+      const seenByA = (await toolA.handler({ mode: "read" })) as string;
+      assert.match(seenByA, /A-item/);
+      assert.ok(!seenByA.includes("B-item"), "A 的 worker 不得看见 B 的账本");
+
+      // A 的 worker 用 B 的 id 去 update → 在 A 的账本里 t1 是 A 的条目，
+      // 故此处以「B 账本逐字节不动」为判据（id 空间本就会重叠，文件轴才是
+      // 隔离轴）。
+      await toolA.handler({ mode: "update", id: "t1", status: "completed" });
+
+      const pathA = resolveConversationTodoPath({
+        projectDir: todoDir,
+        conversationId: convA,
+      });
+      const pathB = resolveConversationTodoPath({
+        projectDir: todoDir,
+        conversationId: convB,
+      });
+      assert.notEqual(pathA, pathB);
+      assert.equal(await readFile(pathA, "utf8"), "- [x] [t1] A-item\n");
+      assert.equal(
+        await readFile(pathB, "utf8"),
+        "- [ ] [t1] B-item\n",
+        "B 的账本不得被 A 的 worker 触碰"
+      );
+
+      // B 的 worker 同样看不到 A 的更动之外的任何 A 内容。
+      const depsB = await buildWorkerLedgerDeps({
+        todoLedger: { projectDir: todoDir, conversationId: convB },
+      });
+      const seenByB = (await depsB.registry.get("todo_write")!.handler({
+        mode: "read",
+      })) as string;
+      assert.ok(!seenByB.includes("A-item"));
+      assert.match(seenByB, /B-item/);
+    } finally {
+      await rm(todoDir, { recursive: true, force: true });
+    }
   });
 });
 
 /**
  * 走真实 createWorkerDeps 装配：注入 stub-model + 空 skill catalog 让
  * skill 静态在场（Gate 3 锁,disclosure-index-align T2 删 skill_search 后只剩
- * 1 件），不加 subagentManager 与 memoryDir（worker 装配特征），不传
- * todoDir（D6 ownership）。返回值含 deps.registry（executor 真实可见）+
- * deps.promptTools（模型可见）。
+ * 1 件），不加 subagentManager 与 memoryDir（worker 装配特征）。默认不传
+ * todoLedger —— 旧 wire 形态（ADR-0085 之前的 worker 工具面）。
+ * 返回值含 deps.registry（executor 真实可见）+ deps.promptTools（模型可见）。
  */
-async function buildWorkerWithFullSkillCatalog(): Promise<LoopEngineDeps> {
+async function buildWorkerWithFullSkillCatalog(
+  extra?: Partial<CreateWorkerDepsOptions>
+): Promise<LoopEngineDeps> {
+  return createWorkerDeps(workerBaseOpts(extra));
+}
+
+/** ADR-0085 SC9 用例专用：装配锚定父会话账本的 worker registry。 */
+async function buildWorkerLedgerDeps(extra: {
+  readonly todoLedger: { projectDir: string; conversationId: string };
+}): Promise<LoopEngineDeps> {
+  return buildWorkerWithFullSkillCatalog(extra);
+}
+
+/** createWorkerDeps 的最小 hermetic opts（stub-model + 空 skill + noop trace）。 */
+function workerBaseOpts(
+  extra?: Partial<CreateWorkerDepsOptions>
+): CreateWorkerDepsOptions {
   const env: IknowEnv = {
     llm: {
       baseUrl: "http://127.0.0.1:9999",
@@ -589,15 +757,14 @@ async function buildWorkerWithFullSkillCatalog(): Promise<LoopEngineDeps> {
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
   };
-  const opts: CreateWorkerDepsOptions = {
-    envelope: {} as WorkerEnvelope,
+  return {
     env,
     model: createStubModel({ responses: [] }),
     sandboxRoot: "/tmp/sandbox-worker-t5",
     trace: createNoopTraceService(),
     skillCatalog: createSkillCatalog([]),
+    ...extra,
   };
-  return createWorkerDeps(opts);
 }
 
 /**

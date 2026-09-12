@@ -10,10 +10,10 @@
  *  6. 权限：tmp 文件 mode 0600（rename 前断言）。
  *  7. 父目录缺失 → mkdir -p 后成功写。
  *  8. merge 对非法 patch 值防御（thinking / thinkingEffort 越界 → throw）。
- *  9. resolveThinkingSettingsPath（ADR-0019 D1.3 三档）：project 存在 → project；
- *     不存在 → `<workspaceRoot>/.iknow/settings.json`（NOT home fallback，kill
- *     global-pollution 路径；workspaceRoot 默认 `resolveWorkspaceRoot()` =
- *     process.cwd()）。
+ *  9. resolveThinkingSettingsPath（ADR-0084 写回落对层）：thinking / memory 是
+ *     用户层键 → 目标恒为 `<home>/.iknow/settings.json`，**与 project 文件是否
+ *     存在解耦**（旧 ADR-0019 D1.3 的「project 存在 → project」档已退役：
+ *     项目文件不采纳 llm / memory，写进去静默无效）。home 缺省 homedir()。
  * 10. hashSettingsContent：同串同哈希，异串异哈希。
  * 11. 并发类：串行 await 两次 persist → 最终 = 第二次 patch + 保留字段。
  * 12. 异常类：目标父路径为普通文件（ENOTDIR）→ reject，错误含路径。
@@ -31,7 +31,6 @@
  */
 import { afterAll, describe, expect, test, vi } from "vitest";
 import {
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -160,80 +159,72 @@ describe("hashSettingsContent", () => {
   });
 });
 
-describe("resolveThinkingSettingsPath（ADR-0019 D1.3 三档）", () => {
-  test("opts 缺省 → 回退 process.cwd() 为 workspaceRoot 再按存在性选择", () => {
-    // 假 cwd 用 tmpdir() 派生（bun WSL 下 /tmp 路径会被改写，rmSync 会
-    // EFAULT）；fakeRoot 挂进 tmpBases 由 afterAll 统一清理。
-    // cwd 用 process.chdir 真实切换（不 spy process / os.homedir —— vitest 禁止
-    // spy ESM namespace 导出，bun 又无法 vi.mock node 内建，二者都不可靠）。
-    // workspaceRoot 缺省 → resolveWorkspaceRoot() 默认 process.cwd()，
-    // 与 cwd 同一解析（不涉及 home，断言确定）。
-    const fakeRoot = mkdtempSync(join(tmpdir(), "iknow-persist-defaults-"));
-    tmpBases.push(fakeRoot);
-    const fakeCwd = join(fakeRoot, "cwd");
-    mkdirSync(fakeCwd, { recursive: true });
-    const prevCwd = process.cwd();
-    process.chdir(fakeCwd);
-    try {
-      // project 不存在 → workspace 档 = <cwd>/.iknow（D1.3 fallback，非 home）。
-      expect(resolveThinkingSettingsPath()).toBe(
-        join(fakeCwd, ".iknow", "settings.json")
-      );
-      // project 存在 → project 路径（无 opts）。
-      mkdirSync(join(fakeCwd, ".iknow"), { recursive: true });
-      writeFileSync(join(fakeCwd, ".iknow", "settings.json"), "{}");
-      expect(resolveThinkingSettingsPath()).toBe(
-        join(fakeCwd, ".iknow", "settings.json")
-      );
-    } finally {
-      process.chdir(prevCwd); // 恢复，避免污染同进程后续测试
-    }
+describe("resolveThinkingSettingsPath（ADR-0084 写回落对层）", () => {
+  test("opts 缺省 → homedir()/.iknow/settings.json（与 loadIknowSettings 同源）", () => {
+    expect(resolveThinkingSettingsPath()).toBe(
+      join(homedir(), ".iknow", "settings.json")
+    );
   });
 
-  test("project 文件存在 → project 路径；不存在 → workspace 路径（NOT home）", () => {
-    const base = makeTmpRoot("iknow-persist-path-");
+  test("SC6 核心不变式：project 文件在场 → 写回目标仍是 user 文件，且 project 的 llm 不被创建/修改", async () => {
+    const base = makeTmpRoot("iknow-persist-layer-");
+    const home = join(base, "home");
     const cwd = join(base, "cwd");
-    const workspaceRoot = join(base, "wr");
-    // home 下也建一个 .iknow：旧实现（home fallback）会选中它，三档实现
-    // 必须无视 —— 断言 NOT home 是 kill global-pollution 路径的直接证明。
-    mkdirSync(join(base, "home", ".iknow"), { recursive: true });
     mkdirSync(join(cwd, ".iknow"), { recursive: true });
-    const workspacePath = join(workspaceRoot, ".iknow", "settings.json");
-
-    expect(resolveThinkingSettingsPath({ cwd, workspaceRoot })).toBe(
-      workspacePath
+    const projectFile = join(cwd, ".iknow", "settings.json");
+    // 项目文件里带一个「用户层键」llm（允许名单外）与一个允许名单内的 verify。
+    writeFileSync(
+      projectFile,
+      JSON.stringify({
+        llm: { model: "project-model" },
+        verify: { command: "x" },
+      }),
+      "utf8"
     );
-    writeFileSync(join(cwd, ".iknow", "settings.json"), "{}");
-    expect(resolveThinkingSettingsPath({ cwd, workspaceRoot })).toBe(
-      join(cwd, ".iknow", "settings.json")
-    );
-  });
 
-  test("T3 acceptance #1：workspaceRoot 显式注入 → 返回 workspace 路径，不落 cwd 也不落 home", () => {
-    const base = makeTmpRoot("iknow-persist-wr-");
-    const cwd = join(base, "cwd");
-    // 故意不在 cwd 建 .iknow（project 不存在分支）。
-    const target = resolveThinkingSettingsPath({
-      cwd,
-      workspaceRoot: join(base, "y"),
-    });
-    expect(target).toBe(join(base, "y", ".iknow", "settings.json"));
-    // NOT cwd（不是 <cwd>/.iknow/settings.json）——
-    expect(target).not.toBe(join(cwd, ".iknow", "settings.json"));
-    // NOT home —— 断言不包含真实 home 前缀。
-    expect(target.startsWith(homedir())).toBe(false);
-  });
+    // 目标 = user 路径（不是 project），与 project 是否存在解耦。
+    const target = resolveThinkingSettingsPath({ home });
+    expect(target).toBe(join(home, ".iknow", "settings.json"));
+    expect(target).not.toBe(projectFile);
 
-  test("home 参数保留只为向后兼容（显式 home + 显式 workspaceRoot → workspace 仍优先）", () => {
-    const base = makeTmpRoot("iknow-persist-home-");
-    const workspacePath = join(base, "wr", ".iknow", "settings.json");
+    await persistThinkingChanges(target, { thinking: "adaptive" });
+    // user 文件拿到 thinking；project 文件的 llm 逐字节不变（未创建 / 未修改）。
     expect(
-      resolveThinkingSettingsPath({
-        cwd: join(base, "cwd"),
-        home: join(base, "home"),
-        workspaceRoot: join(base, "wr"),
+      (JSON.parse(readFileSync(target, "utf8")) as { llm: unknown }).llm
+    ).toEqual({ thinking: "adaptive" });
+    expect(readFileSync(projectFile, "utf8")).toBe(
+      JSON.stringify({
+        llm: { model: "project-model" },
+        verify: { command: "x" },
       })
-    ).toBe(workspacePath);
+    );
+  });
+
+  test("SC6：显式 home 下写回 memory 亦落 user 文件，project 文件不被触碰", async () => {
+    const base = makeTmpRoot("iknow-persist-layer-mem-");
+    const home = join(base, "home");
+    const cwd = join(base, "cwd");
+    mkdirSync(join(cwd, ".iknow"), { recursive: true });
+    const projectFile = join(cwd, ".iknow", "settings.json");
+    writeFileSync(projectFile, "{}", "utf8");
+    const target = resolveThinkingSettingsPath({ home });
+    await persistMemoryChanges(target, { autoExtract: true, dream: false });
+    expect(JSON.parse(readFileSync(target, "utf8"))).toEqual({
+      memory: { autoExtract: true, dream: false },
+    });
+    expect(readFileSync(projectFile, "utf8")).toBe("{}");
+  });
+
+  test("无 cwd / workspaceRoot 入参：目标恒为 home 层（写回锚点只有 home）", () => {
+    const base = makeTmpRoot("iknow-persist-cwd-");
+    const home = join(base, "home");
+    // 项目文件存在也不改变目标层（签名已收窄为 { home }，项目文件探测退役）。
+    const cwd = join(base, "cwd");
+    mkdirSync(join(cwd, ".iknow"), { recursive: true });
+    writeFileSync(join(cwd, ".iknow", "settings.json"), "{}", "utf8");
+    expect(resolveThinkingSettingsPath({ home })).toBe(
+      join(home, ".iknow", "settings.json")
+    );
   });
 });
 

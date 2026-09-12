@@ -49,6 +49,7 @@ import { startLspWarmup } from "../lsp/warmup.js";
 import { DEFAULT_LSP_IDLE_TIMEOUT_MS } from "../lsp/client.js";
 import { deriveFileRefs, writeToolNamesFrom } from "./file-refs.js";
 import { createPermissionPolicy } from "../permission/policy.js";
+import { resolveProjectPermissionSource } from "../permission/project-settings.js";
 import { createNoAskUser } from "../permission/ask-user.js";
 import { createUserHookRouter } from "../hooks/index.js";
 import { classifyCall } from "../isolation/worktree-gate.js";
@@ -276,6 +277,18 @@ export interface CreateWorkerDepsOptions {
    * `<dirname(traceFilePath)>/fence-tmp` (nested `subagents/<taskId>/`).
    */
   readonly tmpDir?: string;
+  /**
+   * ADR-0085 / SC9:父会话账本锚点(由 envelope.todoLedger 透传)。
+   * `projectDir` = 父会话项目目录(`TodoWriteToolDeps.todoDir` 同一值),
+   * `conversationId` = 父会话 id。在场 → worker registry 装配 todo_write:
+   * 与父共用同一本账(可 read / update),`add` 由工具自身 typed 拒绝
+   * (添加仅父会话;worker 权限层是 no-ask,不能靠它兜)。
+   * 缺席(旧 wire / 跨版本 resume)→ 不装配 todo_write,工具面 byte-stable。
+   */
+  readonly todoLedger?: {
+    readonly projectDir: string;
+    readonly conversationId: string;
+  };
 }
 
 function resolveWorkerFenceTmp(
@@ -291,6 +304,33 @@ function resolveWorkerFenceTmp(
     return workerFenceTmpBesideRecord(opts.traceFilePath);
   }
   return undefined;
+}
+
+/**
+ * ADR-0085 / SC9:worker 侧账本注册缝 —— 父会话账本锚点(经 envelope
+ * `todoLedger` 透传)在场 → `todo_write` 入 worker 工具面,挂到与父**同一本**
+ * todos.md;`canAdd:false` 让工具自身 typed 拒绝 `add`(读 / 更新可用)。
+ * 缺席 → 不装配(旧 wire byte-stable,worker 工具面不含 todo_write)。
+ *
+ * 与主 loop registry 同源:`todoDir` 就是父 registry 拿到的那个值,worker 不
+ * 另派生(路径分段清洗归 `resolveConversationTodoPath`)。
+ */
+function todoLedgerRegistryOpts(
+  ledger:
+    | {
+        readonly projectDir: string;
+        readonly conversationId: string;
+      }
+    | undefined
+): {
+  todoDir?: string;
+  todoActor?: { conversationId: string; canAdd: false };
+} {
+  if (ledger === undefined) return {};
+  return {
+    todoDir: ledger.projectDir,
+    todoActor: { conversationId: ledger.conversationId, canAdd: false },
+  };
 }
 
 /**
@@ -452,10 +492,21 @@ export async function createWorkerRuntime(
       : {}),
     ...(bashMode !== undefined ? { bashMode } : {}),
     ...(workerFenceTmp !== undefined ? { tmpDir: workerFenceTmp } : {}),
+    ...todoLedgerRegistryOpts(opts.todoLedger),
   });
 
   const baseExecutor = createExecutor(reg.inner);
-  const policy = createPermissionPolicy();
+  // ADR-0084 / SC5 worker 平权:worker 是同一会话的子代理面,项目权限规则
+  // 必须与主链同源 —— 否则被主链 deny 的命令可从 worker 绕行。读根 =
+  // `projectIdentityRoot`(与上方 user-hook settings 读根同一份,worker 无
+  // sessionRoots,身份根经 IKNOW_PRODUCT_ROOT wire 送达 / 缺席回落 cwd);
+  // fail-loud 原路上抛(typed ProjectSettingsError),worker 进程顶层
+  // (cli.ts)转 stderr + exit 2,不静默降级成「无项目规则」。无项目规则 =
+  // undefined,由 `createPermissionPolicy` 的 spread-guard 丢弃(与 key 缺席
+  // 同形),此处不再叠一层条件分支。
+  const policy = createPermissionPolicy({
+    project: resolveProjectPermissionSource({ projectIdentityRoot }),
+  });
   // user-hook-router（specs/user-hook-router.md / ADR-0055）: 子代理引擎经
   // 同一份 merged settings 装配 user rules（spec Does #6 —— 无第二套后门）。
   // settings 读根用 projectIdentityRoot（缺席回落 cwd，与 T3 身份发现同
@@ -1035,6 +1086,14 @@ export async function runSubagentWorker(): Promise<void> {
           traceFilePath: workerEnvelope.traceFilePath,
           taskId: workerEnvelope.taskId,
         }
+      : {}),
+    // ADR-0085 / SC9:父会话账本锚点 —— 父 manager spawn 期已把它算进
+    // envelope(projectDir 与主 loop registry 的 todoDir 同源,conversationId
+    // = 父会话 id)。worker 据此把 todo_write 挂到父账本上(读 / 更新;
+    // 添加由工具 typed 拒绝)。缺席(旧 wire / 跨版本 resume)→ 不传,
+    // worker 工具面维持旧形态。
+    ...(workerEnvelope.todoLedger !== undefined
+      ? { todoLedger: workerEnvelope.todoLedger }
       : {}),
   });
   // D-α 观测地板: fileRefs 的派生源 = 本 worker 实际装配出的 ACI catalog

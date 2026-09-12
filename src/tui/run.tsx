@@ -230,9 +230,12 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // 解析结果,读侧不与写侧分叉(flag > IKNOW_TRACE_OUT env > dataDir)。
     const traceOut = resolveTraceRoot(options.traceOut, dataDir);
     // settings 双向持久化（T4）：/thinking /effort 面板 Esc → 写回 settings.json。
-    // 目标文件按「project 存在写 project，否则 user」解析（project 本就覆盖 user，
-    // 写 user 等于无效——对齐 settings.ts merge 优先级）。写回后登记 self-write
-    // 哨兵（activeEnvLoader.markSelfWrite）→ 自身 fs.watch 不回环。失败 → 返回
+    // ADR-0084 写回落对层：thinking / memory 是**用户层键**（llm / memory 段），
+    // 项目文件不再采纳这两段（项目允许名单 = hooks / verify / secrets /
+    // permissions），故写回目标恒为 <home>/.iknow/settings.json，与「项目文件
+    // 是否存在」解耦（旧 ADR-0019 D1.3 的 project 优先档会把用户层键写进不再被
+    // 读取的项目文件）。写回后登记 self-write 哨兵
+    // （activeEnvLoader.markSelfWrite）→ 自身 fs.watch 不回环。失败 → 返回
     // { ok:false, reason } 由 app 以 notice 呈现，不 crash TUI（in-memory
     // override 保留）。persistThinkingChanges 内部原子写（tmp + rename），
     // 写回不重建 adapter（哨兵吞 reload，当前 env / adapter 不动）。
@@ -240,14 +243,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       TuiAppProps["onPersistThinking"]
     > = async (patch) => {
       try {
-        // ADR-0019 D1.3（T3）: 用 T2 已透传的 workspaceRoot 替代硬编码 homedir()；
-        // 未显式注入时由 persist-settings.ts 内 resolveWorkspaceRoot({cwd}) 兜底
-        // （process.cwd()，与 buildTuiDeps / initIknowWorkspaceSafe 同源）。这样
-        // 单 TUI 重定向 + dual-TUI 并行都落 <workspaceRoot>/.iknow/settings.json，
-        // 不再写 ~/.iknow/settings.json（kill global-pollution 路径）。
+        // home 与 EnvLoader / loadIknowSettings 同源（本入口 line 216 同一
+        // homedir()），读侧写侧不落两层。
         const path = resolveThinkingSettingsPath({
-          cwd,
-          workspaceRoot,
+          home: homedir(),
         });
         const { bytes } = await persistThinkingChanges(path, patch);
         activeEnvLoader.markSelfWrite(path, bytes);
@@ -264,9 +263,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       patch
     ) => {
       try {
+        // 同 persistThinking：memory 亦用户层键 → 恒写 <home>/.iknow/settings.json。
         const path = resolveThinkingSettingsPath({
-          cwd,
-          workspaceRoot,
+          home: homedir(),
         });
         const { bytes } = await persistMemoryChanges(path, patch);
         activeEnvLoader.markSelfWrite(path, bytes);

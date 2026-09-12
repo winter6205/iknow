@@ -41,10 +41,12 @@ export interface WorktreeExitToolDeps {
 
 /**
  * Factory: createExitWorktreeTool(deps) — the model-facing symmetric
- * exit of the isolation tool face. Registered ONLY when the isolation
- * switch is ON and the host supplies the exit seam (build-engine threading;
- * TUI provision-only wiring, worker assembly paths, and hub-less inlets
- * omit it, so the tool never enters those surfaces).
+ * exit of the isolation tool face. Registered whenever the host supplies the
+ * exit seam (build-engine threading; TUI provision-only wiring, worker
+ * assembly paths, and hub-less inlets omit it, so the tool never enters those
+ * surfaces). Presence is decoupled from `isolation.worktreeOnMutate` — the
+ * switch arms only the mutate gate (ADR-0037 Amendment 2026-09-11 /
+ * specs/agent-control-surface.md Slice A).
  */
 export function createExitWorktreeTool(deps: WorktreeExitToolDeps): AciToolDef {
   return Object.freeze({

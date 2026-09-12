@@ -1133,6 +1133,22 @@ export class SessionHub {
   }
 
   /**
+   * Slice D / SC14: host-initiated hard kill of one worker (TUI Ctrl+X on a
+   * chrome-focused subagent row). Settles that task's in-flight `waitFor`
+   * with `SubAgentAbortError` first (the parent turn reads `cancelled`), then
+   * signals the worker. Returns true only when the task was still live;
+   * unknown / already-terminal ids and a missing manager (ask surface) are a
+   * no-op → false, never a fabricated kill.
+   *
+   * Scope contract: the taskId is the identity. The registry fans out over
+   * per-root managers and a taskId belongs to exactly one of them, so no
+   * conversationId is needed.
+   */
+  abortSubagentTask(taskId: string): boolean {
+    return this.subagentManagers.abortTask(taskId);
+  }
+
+  /**
    * #356 High#4 (SC12/SC3):serve 长程入口的清理句柄 —— 转发 ensureDeps 缓存
    * 的 built.shutdown（组合句柄 mcpManager first → subagentManager second）。
    * cli.ts runServe 用 registerShutdown(hub) 把本方法挂到 SIGINT/SIGTERM,

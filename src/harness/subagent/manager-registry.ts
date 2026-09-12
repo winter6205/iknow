@@ -24,6 +24,13 @@ export interface SubagentManagerReadView extends SubagentManagerWakeView {
   readonly listSubagents: (
     conversationId?: string
   ) => ReadonlyArray<SubagentInfo>;
+  /**
+   * Slice D / SC14: host-initiated hard kill of one worker (TUI Ctrl+X).
+   * Optional so poll-only fakes and wake-only views stay structural; absent →
+   * the registry reports "not aborted" instead of fabricating a kill.
+   * Returns true only when an in-flight worker was actually signalled.
+   */
+  readonly abortTask?: (taskId: string) => boolean;
 }
 
 export class SubagentManagerDrainError extends Error {
@@ -49,6 +56,8 @@ export interface CreateSubagentManagerRegistryOptions {
 }
 
 export interface SubagentManagerRegistry extends SubagentManagerReadView {
+  /** Always present on the aggregate (per-manager seam stays optional). */
+  readonly abortTask: (taskId: string) => boolean;
   readonly register: (manager: SubagentManagerReadView | undefined) => void;
 }
 
@@ -159,6 +168,19 @@ export function createSubagentManagerRegistry(
     return listed;
   };
 
+  /**
+   * Slice D / SC14: fans one hard kill across the per-root managers. A
+   * taskId is claimed by at most one manager, so the first manager that
+   * reports true wins; managers without an abort seam are skipped rather
+   * than treated as a failed kill.
+   */
+  const abortTask = (taskId: string): boolean => {
+    for (const manager of managers) {
+      if (manager.abortTask?.(taskId) === true) return true;
+    }
+    return false;
+  };
+
   const subscribe = (
     subscriber: SubAgentTerminalSubscriber,
     conversationId?: string
@@ -193,6 +215,7 @@ export function createSubagentManagerRegistry(
     register,
     drainCompleted,
     listSubagents,
+    abortTask,
     subscribe,
   });
 }

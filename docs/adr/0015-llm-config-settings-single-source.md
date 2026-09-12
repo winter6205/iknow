@@ -3,6 +3,8 @@
 Date: 2026-08-12
 Status: accepted
 
+> **Amendment 2026-09-12**（ADR-0084 / `specs/agent-control-surface.md` Slice B）：§1 与 §2 引用的守卫文案中指向 `<cwd>/.iknow/settings.json` 的尾句 **superseded**——`llm` 是用户层键，项目文件只采纳 `hooks` / `verify` / `secrets` / `permissions`，文案只指向 `~/.iknow/settings.json`（`src/config/messages.ts`）。§1 model 字面唯一来源、§2 apiKey 单字段与占位符语义、§5 不动范围均不变。
+
 ## Context
 
 iknow 历史上 LLM 配置存在多个并存入口（ADR-0001 substack 的体现）：

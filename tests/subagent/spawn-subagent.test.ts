@@ -922,19 +922,74 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
     );
   });
 
-  it("exception: WaitTimeout + running → failed timeout envelope（ok 数据）", async () => {
+  it("exception: WaitTimeout + running → ToolExecutionError，不再合成 ok 数据（SC13）", async () => {
+    // SC13 / plan task 7：墙钟到期 + worker 未终态 = 没有可读交差，父可见
+    // tool result kind 必须非 ok。message 带 taskId + 超时事实，且不得撞
+    // loop-engine 的整回合停因字面量（"cancelled" / "timeout"）。
     const tool = createSpawnSubAgentTool({
       manager: managerRejectingWait({
         buffer: { status: "running" },
         err: new SubAgentWaitTimeoutError(),
       }),
     });
+    let caught: unknown;
+    try {
+      await tool.handler({ task: "t", wait: true });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ToolExecutionError);
+    const message = (caught as ToolExecutionError).message;
+    expect(message).toContain("fixed-task-id-1");
+    expect(message).toContain("wall-clock timeout");
+    expect(message).not.toBe("cancelled");
+    expect(message).not.toBe("timeout");
+  });
+
+  it("exception: 终态信封 reason=timeout（per-task timer 路径）→ 同样非 ok（SC13）", async () => {
+    // 第二条超时路径：manager per-task timer 已写 failed 信封、waitFor 正常
+    // resolve —— kind 也不得为 ok（此前只有 running 分支被盯住）。
+    const tool = createSpawnSubAgentTool({
+      manager: {
+        ...makeFakeManager().manager,
+        waitFor: async () => ({
+          status: "failed" as const,
+          reason: "timeout" as const,
+          summary: "timeout after 600000ms",
+          result: "",
+        }),
+      },
+    });
+    let caught: unknown;
+    try {
+      await tool.handler({ task: "t", wait: true });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ToolExecutionError);
+    expect((caught as ToolExecutionError).message).toContain(
+      "wall-clock timeout"
+    );
+  });
+
+  it("boundary: 终态信封 reason=crashed → 仍作 ok 数据（SC13 不越界）", async () => {
+    const tool = createSpawnSubAgentTool({
+      manager: {
+        ...makeFakeManager().manager,
+        waitFor: async () => ({
+          status: "failed" as const,
+          reason: "crashed" as const,
+          summary: "worker exited with code 3",
+          result: "",
+        }),
+      },
+    });
     const out = (await tool.handler({ task: "t", wait: true })) as {
       status: string;
       reason?: string;
     };
     expect(out.status).toBe("failed");
-    expect(out.reason).toBe("timeout");
+    expect(out.reason).toBe("crashed");
   });
 
   it("exception: WaitTimeout + failed buffer → 原 reason/summary，不合成", async () => {
@@ -985,5 +1040,56 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
     await expect(tool.handler({ task: "t", wait: true })).rejects.toThrow(
       /cancelled/
     );
+  });
+
+  it("SC14: 调用方 signal 未 abort 的 SubAgentAbortError → 操作员强杀归因（不是 caller abort / 不是墙钟）", async () => {
+    // 操作员强杀（TUI Ctrl+X → manager.abortTask）不 abort ctx.signal，
+    // executor 因此不归一到严格 "cancelled"；模型可见归因全靠这句文本。
+    const tool = createSpawnSubAgentTool({
+      manager: managerRejectingWait({
+        buffer: { status: "running" },
+        err: new SubAgentAbortError("task-killed-1"),
+      }),
+    });
+    let caught: unknown;
+    try {
+      await tool.handler({ task: "t", wait: true }, { signal: undefined });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ToolExecutionError);
+    const message = (caught as ToolExecutionError).message;
+    expect(message).toContain("cancelled");
+    expect(message).toContain("operator killed");
+    expect(message).toContain("task-killed-1");
+    expect(message).not.toContain("caller aborted");
+    expect(message).not.toContain("wall-clock timeout");
+    // 不得撞 loop-engine 整回合停因字面量（loop-engine.ts:1605-1618）。
+    expect(message).not.toBe("cancelled");
+    expect(message).not.toBe("timeout");
+  });
+
+  it("SC14: 调用方 signal 已 abort 的 SubAgentAbortError → 保留 caller abort 文本（不误标操作员）", async () => {
+    const tool = createSpawnSubAgentTool({
+      manager: managerRejectingWait({
+        buffer: { status: "running" },
+        err: new SubAgentAbortError("task-caller-1"),
+      }),
+    });
+    const controller = new AbortController();
+    controller.abort();
+    let caught: unknown;
+    try {
+      await tool.handler(
+        { task: "t", wait: true },
+        { signal: controller.signal }
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ToolExecutionError);
+    const message = (caught as ToolExecutionError).message;
+    expect(message).toContain("caller aborted");
+    expect(message).not.toContain("operator killed");
   });
 });

@@ -1,16 +1,23 @@
 /**
- * #440 T2: todo_write tool factory tests (mode routing + checkbox format).
+ * #440 T2 + ADR-0085 / specs/agent-control-surface.md Slice C: todo_write tool
+ * factory tests (mode routing, ledger shape, typed errors).
  *
- * Spec: docs/handoff/2026-08-17-wayfinder-440-decisions.md D1/D5. T2 covers
- * mode parsing, checkbox format (open/closed lines), and typed errors.
- * Atomic write + governance limits live in T3; harness integration in T7.
+ * Spec: docs/adr/0085-todo-ledger-id-and-three-ops.md. Modes are the three
+ * operations — read / add / update — plus the whole-table escape hatch
+ * (`replace`, ADR-0046 snapshots). Old `list` → read, old `check` → update
+ * status=completed.
  *
  * Scope:
  *   - factory shape (name / schema / aci metadata)
- *   - mode = "list": empty file returns ""; full content returned verbatim
- *   - mode = "add": appends `- [ ] <item>\n`; receipt `"Updated todos.md"`
- *   - mode = "check": flips first exact `- [ ] <item>` to `- [x] <item>`
- *   - typed errors: invalid mode, missing item for add/check, no-match check
+ *   - mode = "read": missing file → ""; current items with id / subject / status
+ *   - mode = "add": one item or many; appends (never overwrites); receipt names
+ *     the new ids (SC7)
+ *   - mode = "update": by id — subject / status / delete; unknown id → typed
+ *     error, file untouched (SC8)
+ *   - mode = "replace": whole-table swap + same-directory snapshot
+ *   - SC11: empty add / empty subject / over-limit → typed error, file
+ *     byte-identical (no half-write)
+ *   - id stability across delete+add and across reload
  *
  * Isolation: mkdtemp baseDir; tests don't share filesystem state.
  */
@@ -31,14 +38,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createTodoWriteTool,
-  formatOpenLine,
-  flipFirstOpenLine,
   MAX_FILE_BYTES,
   MAX_ITEM_CODEPOINTS,
   codepointLength,
   resolveConversationTodoPath,
   TODO_WRITE_SKIP_CLAUSE,
 } from "../../../../src/harness/aci/tools/todo-write.ts";
+import {
+  formatLedgerLine,
+  serializeLedger,
+} from "../../../../src/harness/aci/tools/todo-ledger.ts";
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 
 let todoDir: string;
@@ -60,7 +69,7 @@ async function listSnapshotNames(dir: string): Promise<string[]> {
 // -- tool shape / metadata ---------------------------------------------------
 
 describe("createTodoWriteTool — tool shape", () => {
-  it("exposes the todo_write schema with mode required (list|add|check|replace) and item/items optional", () => {
+  it("exposes the todo_write schema with mode required (read|add|update|replace) and per-mode fields", () => {
     const tool = createTodoWriteTool({ todoDir });
     const schema = tool.inputSchema as Record<string, unknown>;
     const props = schema.properties as Record<string, Record<string, unknown>>;
@@ -70,11 +79,21 @@ describe("createTodoWriteTool — tool shape", () => {
     assert.deepEqual(schema.required, ["mode"]);
     assert.equal(schema.additionalProperties, false);
     assert.equal(props.mode.type, "string");
-    assert.deepEqual(props.mode.enum, ["list", "add", "check", "replace"]);
+    assert.deepEqual(props.mode.enum, ["read", "add", "update", "replace"]);
+    // add: 单条 item 或一次多条 items(G2 决议:多步计划一次写完)。
     assert.equal(props.item.type, "string");
-    // #903 SC1: replace 模式携带 items (array of string)
     assert.equal(props.items.type, "array");
     assert.deepEqual(props.items.items, { type: "string" });
+    // update: 目标 id + 至少一个改动字段(delete 是更新操作,不是第四态)。
+    assert.equal(props.id.type, "string");
+    assert.equal(props.subject.type, "string");
+    assert.equal(props.status.type, "string");
+    assert.deepEqual(props.status.enum, [
+      "pending",
+      "in_progress",
+      "completed",
+    ]);
+    assert.equal(props.delete.type, "boolean");
   });
 
   it("uses write, non-concurrency-safe, block, default aci metadata (D7)", () => {
@@ -88,119 +107,325 @@ describe("createTodoWriteTool — tool shape", () => {
   });
 });
 
-// -- mode = list -------------------------------------------------------------
+// -- mode = read -------------------------------------------------------------
 
-describe("createTodoWriteTool — mode=list", () => {
+describe("createTodoWriteTool — mode=read", () => {
   it("todos.md missing → returns empty string (legal state, not an error)", async () => {
     const tool = createTodoWriteTool({ todoDir });
-    const out = await tool.handler({ mode: "list" });
+    const out = await tool.handler({ mode: "read" });
     assert.equal(out, "");
   });
 
-  it("todos.md present → returns full content as-is", async () => {
+  it("todos.md present → returns every item as id / status / subject", async () => {
     const file = join(todoDir, "todos.md");
     await fsWriteFile(
       file,
-      "- [ ] task A\n- [x] task B\n- [ ] task C\n",
+      "- [ ] [t1] task A\n- [x] [t2] task B\n- [~] [t3] task C\n",
       "utf8"
     );
     const tool = createTodoWriteTool({ todoDir });
-    const out = await tool.handler({ mode: "list" });
-    assert.equal(out, "- [ ] task A\n- [x] task B\n- [ ] task C\n");
+    const out = await tool.handler({ mode: "read" });
+    assert.equal(
+      out,
+      "- [ ] [t1] task A\n- [x] [t2] task B\n- [~] [t3] task C\n"
+    );
+  });
+
+  it("legacy lines without ids are readable: read synthesizes ids in file order", async () => {
+    const file = join(todoDir, "todos.md");
+    await fsWriteFile(file, "- [ ] task A\n- [x] task B\n", "utf8");
+    const tool = createTodoWriteTool({ todoDir });
+    const out = await tool.handler({ mode: "read" });
+    assert.equal(out, "- [ ] [t1] task A\n- [x] [t2] task B\n");
+  });
+
+  it("read does not silently repair malformed lines (skipped, not invented)", async () => {
+    const file = join(todoDir, "todos.md");
+    await fsWriteFile(file, "prose\n- [ ] [t1] real\n", "utf8");
+    const tool = createTodoWriteTool({ todoDir });
+    const out = await tool.handler({ mode: "read" });
+    assert.equal(out, "- [ ] [t1] real\n");
   });
 });
 
 // -- mode = add --------------------------------------------------------------
 
 describe("createTodoWriteTool — mode=add", () => {
-  it("append `- [ ] <item>` line to empty file; receipt = 'Updated todos.md'", async () => {
+  it("single item: appends `- [ ] [t1] <item>`; receipt names the new id", async () => {
     const tool = createTodoWriteTool({ todoDir });
     const out = await tool.handler({ mode: "add", item: "task A" });
-    assert.equal(out, "Updated todos.md");
-    const content = await readFile(join(todoDir, "todos.md"), "utf8");
-    assert.equal(content, formatOpenLine("task A"));
-  });
-
-  it("append second item preserves earlier lines", async () => {
-    const tool = createTodoWriteTool({ todoDir });
-    await tool.handler({ mode: "add", item: "first" });
-    await tool.handler({ mode: "add", item: "second" });
+    assert.equal(out, "Added 1 item: t1");
     const content = await readFile(join(todoDir, "todos.md"), "utf8");
     assert.equal(
       content,
-      `${formatOpenLine("first")}${formatOpenLine("second")}`
+      formatLedgerLine({ id: "t1", status: "pending", subject: "task A" })
     );
+  });
+
+  // SC7: 一次 add 多条 → 现行 N 条 pending,回执含 N 个 id。
+  it("multi-item: one call appends N pending items and the receipt names N ids (SC7)", async () => {
+    const tool = createTodoWriteTool({ todoDir });
+    const out = await tool.handler({
+      mode: "add",
+      items: ["step 1", "step 2", "step 3"],
+    });
+    assert.equal(out, "Added 3 items: t1, t2, t3");
+
+    const content = await readFile(join(todoDir, "todos.md"), "utf8");
+    const expected = serializeLedger([
+      { id: "t1", status: "pending", subject: "step 1" },
+      { id: "t2", status: "pending", subject: "step 2" },
+      { id: "t3", status: "pending", subject: "step 3" },
+    ]);
+    assert.equal(content, expected);
+
+    // read 回读同形:N 条 pending。
+    const readBack = await tool.handler({ mode: "read" });
+    assert.equal(readBack, expected);
+  });
+
+  it("multi-item append preserves earlier lines and continues the id sequence", async () => {
+    const tool = createTodoWriteTool({ todoDir });
+    await tool.handler({ mode: "add", item: "first" });
+    const out = await tool.handler({ mode: "add", items: ["second", "third"] });
+    assert.equal(out, "Added 2 items: t2, t3");
+    const content = await readFile(join(todoDir, "todos.md"), "utf8");
+    assert.equal(
+      content,
+      serializeLedger([
+        { id: "t1", status: "pending", subject: "first" },
+        { id: "t2", status: "pending", subject: "second" },
+        { id: "t3", status: "pending", subject: "third" },
+      ])
+    );
+  });
+
+  it("add on a legacy file persists synthesized ids for the old lines too", async () => {
+    const file = join(todoDir, "todos.md");
+    await fsWriteFile(file, "- [ ] legacy\n", "utf8");
+    const tool = createTodoWriteTool({ todoDir });
+    const out = await tool.handler({ mode: "add", item: "fresh" });
+    assert.equal(out, "Added 1 item: t2");
+    const content = await readFile(file, "utf8");
+    assert.equal(content, "- [ ] [t1] legacy\n- [ ] [t2] fresh\n");
   });
 });
 
-// -- mode = check ------------------------------------------------------------
+// -- mode = update -----------------------------------------------------------
 
-describe("createTodoWriteTool — mode=check", () => {
-  it("flip first exact-match `- [ ] <item>` to `- [x] <item>`; receipt short", async () => {
-    const file = join(todoDir, "todos.md");
-    await fsWriteFile(
-      file,
-      `- [ ] task A\n- [ ] task B\n- [ ] task C\n`,
-      "utf8"
+describe("createTodoWriteTool — mode=update", () => {
+  async function seed(): Promise<ReturnType<typeof createTodoWriteTool>> {
+    const tool = createTodoWriteTool({ todoDir });
+    await tool.handler({ mode: "add", items: ["a", "b", "c"] });
+    return tool;
+  }
+
+  it("status=completed flips the addressed line only (old check semantics by id)", async () => {
+    const tool = await seed();
+    const out = await tool.handler({
+      mode: "update",
+      id: "t2",
+      status: "completed",
+    });
+    assert.equal(out, "Updated t2: status=completed");
+    const content = await readFile(join(todoDir, "todos.md"), "utf8");
+    assert.equal(
+      content,
+      serializeLedger([
+        { id: "t1", status: "pending", subject: "a" },
+        { id: "t2", status: "completed", subject: "b" },
+        { id: "t3", status: "pending", subject: "c" },
+      ])
     );
-    const tool = createTodoWriteTool({ todoDir });
-    const out = await tool.handler({ mode: "check", item: "task A" });
-    assert.equal(out, "Updated todos.md");
-    const content = await readFile(file, "utf8");
-    assert.equal(content, `- [x] task A\n- [ ] task B\n- [ ] task C\n`);
   });
 
-  it("only the FIRST open match is flipped; later matches left open", async () => {
-    const file = join(todoDir, "todos.md");
-    await fsWriteFile(file, `- [ ] task A\n- [ ] task A\n`, "utf8");
-    const tool = createTodoWriteTool({ todoDir });
-    await tool.handler({ mode: "check", item: "task A" });
-    const content = await readFile(file, "utf8");
-    assert.equal(content, `- [x] task A\n- [ ] task A\n`);
+  it("status=in_progress is a distinct state (not folded into pending)", async () => {
+    const tool = await seed();
+    const out = await tool.handler({
+      mode: "update",
+      id: "t1",
+      status: "in_progress",
+    });
+    assert.equal(out, "Updated t1: status=in_progress");
+    const content = await readFile(join(todoDir, "todos.md"), "utf8");
+    assert.match(content, /^- \[~\] \[t1\] a$/m);
   });
 
-  it("already-checked line (`- [x] <item>`) is NOT a match → typed error", async () => {
-    const file = join(todoDir, "todos.md");
-    await fsWriteFile(file, `- [x] task A\n- [ ] task B\n`, "utf8");
-    const tool = createTodoWriteTool({ todoDir });
+  it("subject change keeps status; receipt reports the new subject", async () => {
+    const tool = await seed();
+    const out = await tool.handler({
+      mode: "update",
+      id: "t3",
+      subject: "renamed",
+    });
+    assert.equal(out, "Updated t3: subject=renamed");
+    const content = await readFile(join(todoDir, "todos.md"), "utf8");
+    assert.match(content, /^- \[ \] \[t3\] renamed$/m);
+  });
+
+  it("subject + status in one call → both applied", async () => {
+    const tool = await seed();
+    const out = await tool.handler({
+      mode: "update",
+      id: "t2",
+      subject: "renamed",
+      status: "completed",
+    });
+    assert.equal(out, "Updated t2: status=completed, subject=renamed");
+    const content = await readFile(join(todoDir, "todos.md"), "utf8");
+    assert.match(content, /^- \[x\] \[t2\] renamed$/m);
+  });
+
+  it("delete:true removes the line (delete is an update op, not a fourth status)", async () => {
+    const tool = await seed();
+    const out = await tool.handler({ mode: "update", id: "t2", delete: true });
+    assert.equal(out, "Deleted t2");
+    const content = await readFile(join(todoDir, "todos.md"), "utf8");
+    assert.equal(
+      content,
+      serializeLedger([
+        { id: "t1", status: "pending", subject: "a" },
+        { id: "t3", status: "pending", subject: "c" },
+      ])
+    );
+  });
+
+  // SC8: 未知 id → typed error,现行不动。
+  it("unknown id → typed error naming the id; file untouched (SC8)", async () => {
+    const tool = await seed();
+    const before = await readFile(join(todoDir, "todos.md"), "utf8");
     await assert.rejects(
-      tool.handler({ mode: "check", item: "task A" }),
+      tool.handler({ mode: "update", id: "t99", status: "completed" }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
-        assert.match((err as Error).message, /no open item matches/);
+        assert.match((err as Error).message, /\[todo_write\] unknown id: t99/);
         return true;
       }
     );
-    // File untouched (typed error before any write).
-    const content = await readFile(file, "utf8");
-    assert.equal(content, `- [x] task A\n- [ ] task B\n`);
+    const after = await readFile(join(todoDir, "todos.md"), "utf8");
+    assert.equal(after, before, "unknown id must not rewrite the file");
   });
 
-  it("no line matches item → typed error; file untouched", async () => {
-    const file = join(todoDir, "todos.md");
-    await fsWriteFile(file, `- [ ] task A\n`, "utf8");
-    const tool = createTodoWriteTool({ todoDir });
+  it("unknown id on delete → typed error; file untouched", async () => {
+    const tool = await seed();
+    const before = await readFile(join(todoDir, "todos.md"), "utf8");
     await assert.rejects(
-      tool.handler({ mode: "check", item: "task Z" }),
+      tool.handler({ mode: "update", id: "t42", delete: true }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
-        assert.match((err as Error).message, /no open item matches: task Z/);
+        assert.match((err as Error).message, /unknown id: t42/);
         return true;
       }
     );
-    const content = await readFile(file, "utf8");
-    assert.equal(content, `- [ ] task A\n`);
+    assert.equal(await readFile(join(todoDir, "todos.md"), "utf8"), before);
+  });
+
+  it("update with no change field → typed error", async () => {
+    const tool = await seed();
+    await assert.rejects(
+      tool.handler({ mode: "update", id: "t1" }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match(
+          (err as Error).message,
+          /requires subject, status, or delete:true/
+        );
+        return true;
+      }
+    );
+  });
+
+  it("update without id → typed error", async () => {
+    const tool = await seed();
+    await assert.rejects(
+      tool.handler({ mode: "update", status: "completed" }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match((err as Error).message, /id must be a string/);
+        return true;
+      }
+    );
+  });
+
+  it("delete:true combined with another change field → typed error", async () => {
+    const tool = await seed();
+    await assert.rejects(
+      tool.handler({
+        mode: "update",
+        id: "t1",
+        status: "completed",
+        delete: true,
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match((err as Error).message, /delete:true on its own/);
+        return true;
+      }
+    );
+  });
+
+  it("invalid status value → typed error naming the enum", async () => {
+    const tool = await seed();
+    await assert.rejects(
+      tool.handler({ mode: "update", id: "t1", status: "done" as never }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match(
+          (err as Error).message,
+          /status must be one of pending \| in_progress \| completed/
+        );
+        return true;
+      }
+    );
+  });
+
+  it("delete:false alone is not a change → typed error (file untouched)", async () => {
+    const tool = await seed();
+    const before = await readFile(join(todoDir, "todos.md"), "utf8");
+    await assert.rejects(
+      tool.handler({ mode: "update", id: "t1", delete: false }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        return true;
+      }
+    );
+    assert.equal(await readFile(join(todoDir, "todos.md"), "utf8"), before);
+  });
+
+  it("ids stay stable across delete + add (no reuse of a live number)", async () => {
+    const tool = await seed();
+    await tool.handler({ mode: "update", id: "t2", delete: true });
+    const out = await tool.handler({ mode: "add", item: "d" });
+    assert.equal(out, "Added 1 item: t4");
+    const content = await readFile(join(todoDir, "todos.md"), "utf8");
+    assert.equal(
+      content,
+      serializeLedger([
+        { id: "t1", status: "pending", subject: "a" },
+        { id: "t3", status: "pending", subject: "c" },
+        { id: "t4", status: "pending", subject: "d" },
+      ])
+    );
+  });
+
+  it("ids stay stable across reload (read → update still addresses the same item)", async () => {
+    const tool = await seed();
+    const readBack = (await tool.handler({ mode: "read" })) as string;
+    assert.match(readBack, /^- \[ \] \[t2\] b$/m);
+    await tool.handler({ mode: "update", id: "t2", status: "completed" });
+    const reloaded = (await tool.handler({ mode: "read" })) as string;
+    assert.match(reloaded, /^- \[x\] \[t2\] b$/m);
   });
 });
 
 // -- mode = replace ----------------------------------------------------------
-// #903 SC2/SC3: replace 主路径 — 把现行 todos.md 换成新列表,旧文件留同目录
-// 快照(`todos.<unixMs>.<hex>.md`),`list` 仍只读现行。
+// ADR-0046: replace 主路径 — 把现行 todos.md 换成新列表,旧文件留同目录
+// 快照(`todos.<unixMs>.<hex>.md`);read 仍只读现行。降级为整表逃生口。
 // ---------------------------------------------------------------------------
 
 describe("createTodoWriteTool — mode=replace", () => {
-  it("fresh conversationId + items=[A,B] → 现行恰好两行 `- [ ] A`/`- [ ] B`;回执短字符串", async () => {
-    // T1 SC2:真实 per-conversation 路径 + fresh conversationId(不预存文件)。
+  it("fresh conversationId + items=[A,B] → 现行恰好两条 pending(新 id);回执短字符串", async () => {
+    // 真实 per-conversation 路径 + fresh conversationId(不预存文件)。
     const tool = createTodoWriteTool({ todoDir });
     const out = await tool.handler(
       { mode: "replace", items: ["A", "B"] },
@@ -214,62 +439,63 @@ describe("createTodoWriteTool — mode=replace", () => {
       }),
       "utf8"
     );
-    assert.equal(content, `${formatOpenLine("A")}${formatOpenLine("B")}`);
+    assert.equal(
+      content,
+      serializeLedger([
+        { id: "t1", status: "pending", subject: "A" },
+        { id: "t2", status: "pending", subject: "B" },
+      ])
+    );
   });
 
   it("replace 前现行非空 → 同目录出现快照文件,内容=旧全文;现行=新列表", async () => {
-    // T1 SC3:真实 per-conversation 路径。先 add 三条 → 现行非空,再 replace
-    // → 快照保留旧全文,现行换新。
     const tool = createTodoWriteTool({ todoDir });
     const ctx = { conversationId: "conv-replace-snapshot" };
-    await tool.handler({ mode: "add", item: "old-1" }, ctx);
-    await tool.handler({ mode: "add", item: "old-2" }, ctx);
-    await tool.handler({ mode: "add", item: "old-3" }, ctx);
-    const beforeContent = await readFile(
-      resolveConversationTodoPath({
-        projectDir: todoDir,
-        conversationId: ctx.conversationId,
-      }),
-      "utf8"
+    await tool.handler(
+      { mode: "add", items: ["old-1", "old-2", "old-3"] },
+      ctx
     );
-    const expectedSnapshotContent = beforeContent;
-
-    await tool.handler({ mode: "replace", items: ["new-1", "new-2"] }, ctx);
-
     const currentPath = resolveConversationTodoPath({
       projectDir: todoDir,
       conversationId: ctx.conversationId,
     });
+    const beforeContent = await readFile(currentPath, "utf8");
+
+    await tool.handler({ mode: "replace", items: ["new-1", "new-2"] }, ctx);
+
     const dir = join(todoDir, ctx.conversationId);
     const snapshotNames = await listSnapshotNames(dir);
     assert.equal(snapshotNames.length, 1, "exactly one snapshot file");
-    const snapshotPath = join(dir, snapshotNames[0]);
-    const snapshotContent = await readFile(snapshotPath, "utf8");
-    assert.equal(snapshotContent, expectedSnapshotContent);
+    const snapshotContent = await readFile(
+      join(dir, snapshotNames[0]!),
+      "utf8"
+    );
+    assert.equal(snapshotContent, beforeContent);
     const currentContent = await readFile(currentPath, "utf8");
     assert.equal(
       currentContent,
-      `${formatOpenLine("new-1")}${formatOpenLine("new-2")}`
+      serializeLedger([
+        { id: "t1", status: "pending", subject: "new-1" },
+        { id: "t2", status: "pending", subject: "new-2" },
+      ])
     );
   });
 
-  it("replace 后 `list` 只返回新现行,不含快照正文", async () => {
-    // T1 SC3 第二段:`list` 不读快照。
+  it("replace 后 `read` 只返回新现行,不含快照正文", async () => {
     const tool = createTodoWriteTool({ todoDir });
-    const ctx = { conversationId: "conv-replace-list" };
+    const ctx = { conversationId: "conv-replace-read" };
     await tool.handler({ mode: "add", item: "still-here-in-snapshot" }, ctx);
     await tool.handler({ mode: "replace", items: ["only-new-1"] }, ctx);
 
-    const listed = (await tool.handler({ mode: "list" }, ctx)) as string;
-    assert.match(listed, /- \[ \] only-new-1/);
+    const listed = (await tool.handler({ mode: "read" }, ctx)) as string;
+    assert.match(listed, /- \[ \] \[t1\] only-new-1/);
     assert.ok(
       !listed.includes("still-here-in-snapshot"),
-      `list 不应包含快照里的旧项,got: ${listed}`
+      `read 不应包含快照里的旧项,got: ${listed}`
     );
   });
 
   it("replace 前现行空(0 字节文件)→ 不建快照,只写新列表", async () => {
-    // 现行为空 → spec 决议:不建快照。
     const ctx = { conversationId: "conv-replace-empty-current" };
     const currentPath = resolveConversationTodoPath({
       projectDir: todoDir,
@@ -282,10 +508,12 @@ describe("createTodoWriteTool — mode=replace", () => {
     await tool.handler({ mode: "replace", items: ["x"] }, ctx);
 
     const dir = join(todoDir, ctx.conversationId);
-    const snapshotNames = await listSnapshotNames(dir);
-    assert.equal(snapshotNames.length, 0, "no snapshot for empty current");
-    const content = await readFile(currentPath, "utf8");
-    assert.equal(content, formatOpenLine("x"));
+    assert.equal(
+      (await listSnapshotNames(dir)).length,
+      0,
+      "no snapshot for empty current"
+    );
+    assert.match(await readFile(currentPath, "utf8"), /^- \[ \] \[t1\] x$/m);
   });
 
   it("replace 前现行缺席(无 todos.md)→ 不建快照,只写新列表", async () => {
@@ -299,22 +527,30 @@ describe("createTodoWriteTool — mode=replace", () => {
     const tool = createTodoWriteTool({ todoDir });
     await tool.handler({ mode: "replace", items: ["only"] }, ctx);
 
-    const dir = join(todoDir, ctx.conversationId);
-    const snapshotNames = await listSnapshotNames(dir);
-    assert.equal(snapshotNames.length, 0, "no snapshot when current missing");
-    const content = await readFile(currentPath, "utf8");
-    assert.equal(content, formatOpenLine("only"));
+    assert.equal(
+      (await listSnapshotNames(join(todoDir, ctx.conversationId))).length,
+      0,
+      "no snapshot when current missing"
+    );
+    assert.equal(
+      await readFile(currentPath, "utf8"),
+      formatLedgerLine({ id: "t1", status: "pending", subject: "only" })
+    );
   });
 
   it("items=[] → 现行变为空文件,合法态;旧内容进快照", async () => {
-    // 空 items 是合法操作:把整张列表清空。spec:不灌 messages,回执短字符串。
+    // 空 items 是合法操作:把整张列表清空(逃生口的清空语义保留)。
     const ctx = { conversationId: "conv-replace-clear" };
     const currentPath = resolveConversationTodoPath({
       projectDir: todoDir,
       conversationId: ctx.conversationId,
     });
     await mkdir(join(todoDir, ctx.conversationId), { recursive: true });
-    await fsWriteFile(currentPath, `${formatOpenLine("keep-me")}`, "utf8");
+    await fsWriteFile(
+      currentPath,
+      formatLedgerLine({ id: "t1", status: "pending", subject: "keep-me" }),
+      "utf8"
+    );
 
     const tool = createTodoWriteTool({ todoDir });
     const out = await tool.handler({ mode: "replace", items: [] }, ctx);
@@ -323,10 +559,11 @@ describe("createTodoWriteTool — mode=replace", () => {
     const dir = join(todoDir, ctx.conversationId);
     const snapshotNames = await listSnapshotNames(dir);
     assert.equal(snapshotNames.length, 1);
-    const snapshotContent = await readFile(join(dir, snapshotNames[0]), "utf8");
-    assert.equal(snapshotContent, formatOpenLine("keep-me"));
-    const currentContent = await readFile(currentPath, "utf8");
-    assert.equal(currentContent, "");
+    assert.match(
+      await readFile(join(dir, snapshotNames[0]!), "utf8"),
+      /\[t1\] keep-me/
+    );
+    assert.equal(await readFile(currentPath, "utf8"), "");
   });
 
   it("replace 带 `item` 字段 → typed error(per-mode 字段互斥)", async () => {
@@ -337,6 +574,10 @@ describe("createTodoWriteTool — mode=replace", () => {
       }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
+        assert.match(
+          (err as Error).message,
+          /mode replace does not accept item/
+        );
         return true;
       }
     );
@@ -351,6 +592,10 @@ describe("createTodoWriteTool — mode=replace", () => {
       ),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
+        assert.match(
+          (err as Error).message,
+          /items must be an array of strings/
+        );
         return true;
       }
     );
@@ -365,6 +610,10 @@ describe("createTodoWriteTool — mode=replace", () => {
       ),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
+        assert.match(
+          (err as Error).message,
+          /item must be a non-empty string ≤ 500 codepoints/
+        );
         return true;
       }
     );
@@ -377,7 +626,11 @@ describe("createTodoWriteTool — mode=replace", () => {
       conversationId: ctx.conversationId,
     });
     await mkdir(join(todoDir, ctx.conversationId), { recursive: true });
-    const initialContent = formatOpenLine("original");
+    const initialContent = formatLedgerLine({
+      id: "t1",
+      status: "pending",
+      subject: "original",
+    });
     await fsWriteFile(currentPath, initialContent, "utf8");
 
     const tool = createTodoWriteTool({ todoDir });
@@ -393,11 +646,12 @@ describe("createTodoWriteTool — mode=replace", () => {
         return true;
       }
     );
-    const postContent = await readFile(currentPath, "utf8");
-    assert.equal(postContent, initialContent);
-    const dir = join(todoDir, ctx.conversationId);
-    const snapshotNames = await listSnapshotNames(dir);
-    assert.equal(snapshotNames.length, 0, "no snapshot when items invalid");
+    assert.equal(await readFile(currentPath, "utf8"), initialContent);
+    assert.equal(
+      (await listSnapshotNames(join(todoDir, ctx.conversationId))).length,
+      0,
+      "no snapshot when items invalid"
+    );
   });
 
   it("replace items 整文件超 64 KB → typed error,旧文件保留", async () => {
@@ -409,14 +663,17 @@ describe("createTodoWriteTool — mode=replace", () => {
       conversationId: ctx.conversationId,
     });
     await mkdir(join(todoDir, ctx.conversationId), { recursive: true });
-    const initialContent = formatOpenLine("keep");
+    const initialContent = formatLedgerLine({
+      id: "t1",
+      status: "pending",
+      subject: "keep",
+    });
     await fsWriteFile(currentPath, initialContent, "utf8");
 
     // 构造一组会让最终文件超 64 KB 的 items:每条 ≤ 500 codepoints(通过
-    // per-item 校验),但累计 bytes > 64 KB。每条 500 个 ASCII = 500 字节 +
-    // "- [ ] \n" = 507 字节。130 条 × 507 = 65910 字节 > 64 KB。
+    // per-item 校验),但累计 bytes > 64 KB。id 前缀 + 500 字节 ≈ 512 字节/条。
     const items: string[] = [];
-    for (let i = 0; i < 130; i++) items.push("y".repeat(500));
+    for (let i = 0; i < 140; i++) items.push("y".repeat(500));
 
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
@@ -427,53 +684,75 @@ describe("createTodoWriteTool — mode=replace", () => {
         return true;
       }
     );
-    const postContent = await readFile(currentPath, "utf8");
-    assert.equal(postContent, initialContent);
-    const dir = join(todoDir, ctx.conversationId);
-    const snapshotNames = await listSnapshotNames(dir);
-    assert.equal(snapshotNames.length, 0, "no snapshot on limit failure");
+    assert.equal(await readFile(currentPath, "utf8"), initialContent);
+    assert.equal(
+      (await listSnapshotNames(join(todoDir, ctx.conversationId))).length,
+      0,
+      "no snapshot on limit failure"
+    );
   });
 
-  it("add 带 `items` 字段 → typed error(add 仍只认 item)", async () => {
+  it("add 同时带 item 与 items → typed error(字段二选一)", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "add", items: ["x"] } as never, {
-        conversationId: "conv-add-items",
+      tool.handler({ mode: "add", item: "x", items: ["y"] } as never, {
+        conversationId: "conv-add-both",
       }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
+        assert.match(
+          (err as Error).message,
+          /mode add accepts item or items, not both/
+        );
         return true;
       }
     );
   });
 
-  it("check 带 `items` 字段 → typed error(check 仍只认 item)", async () => {
+  it("update 带 `items` 字段 → typed error(per-mode 字段互斥)", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "check", items: ["x"] } as never, {
-        conversationId: "conv-check-items",
+      tool.handler({ mode: "update", items: ["x"], id: "t1" } as never, {
+        conversationId: "conv-update-items",
       }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
+        assert.match(
+          (err as Error).message,
+          /mode update does not accept items/
+        );
+        return true;
+      }
+    );
+  });
+
+  it("read 带 `item` 字段 → typed error(per-mode 字段互斥)", async () => {
+    const tool = createTodoWriteTool({ todoDir });
+    await assert.rejects(
+      tool.handler({ mode: "read", item: "x" } as never, {
+        conversationId: "conv-read-item",
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match((err as Error).message, /mode read does not accept item/);
         return true;
       }
     );
   });
 
   it("两次连续 replace(同 conversationId,non-empty current)→ 产生两个快照,文件名不撞", async () => {
-    // 快照名 unixMs + 随机 hex 保证不撞;两次串行 replace 后应有两个快照。
     const tool = createTodoWriteTool({ todoDir });
     const ctx = { conversationId: "conv-replace-twice" };
-    await tool.handler({ mode: "add", item: "v1-a" }, ctx);
-    await tool.handler({ mode: "add", item: "v1-b" }, ctx);
+    await tool.handler({ mode: "add", items: ["v1-a", "v1-b"] }, ctx);
     await tool.handler({ mode: "replace", items: ["v2-a"] }, ctx);
     // 注入一点时间偏移确保 unixMs 不撞(在极快机器上仍可命中 hex 兜底)。
     await new Promise((r) => setTimeout(r, 5));
     await tool.handler({ mode: "add", item: "v2-b" }, ctx);
     await tool.handler({ mode: "replace", items: ["v3-a"] }, ctx);
 
-    const dir = join(todoDir, ctx.conversationId);
-    const snapshotNames = await listSnapshotNames(dir);
+    const snapshotNames = await listSnapshotNames(
+      join(todoDir, ctx.conversationId)
+    );
     assert.equal(snapshotNames.length, 2);
     assert.notEqual(snapshotNames[0], snapshotNames[1]);
   });
@@ -496,7 +775,11 @@ describe("createTodoWriteTool — mode=replace", () => {
       projectDir: todoDir,
       conversationId: ctx.conversationId,
     });
-    const initialContent = formatOpenLine("preserved-by-atomic-fail");
+    const initialContent = formatLedgerLine({
+      id: "t1",
+      status: "pending",
+      subject: "preserved-by-atomic-fail",
+    });
     await fsWriteFile(currentPath, initialContent, "utf8");
 
     let randomCalls = 0;
@@ -534,8 +817,10 @@ describe("createTodoWriteTool — mode=replace", () => {
     // 不变量 ①:快照已落盘且内容 = 旧全文。
     const snapshotNames = await listSnapshotNames(dir);
     assert.equal(snapshotNames.length, 1, "exactly one snapshot present");
-    const snapshotContent = await readFile(join(dir, snapshotNames[0]), "utf8");
-    assert.equal(snapshotContent, initialContent);
+    assert.equal(
+      await readFile(join(dir, snapshotNames[0]!), "utf8"),
+      initialContent
+    );
 
     // 不变量 ②:现行 todos.md 不存在(原文件已被 snapshot rename 移走,
     // atomic write 失败 → 现行未创建)。这是"无半截"的实证:现行不是部分
@@ -563,7 +848,11 @@ describe("createTodoWriteTool — mode=replace", () => {
       projectDir: todoDir,
       conversationId: ctx.conversationId,
     });
-    const initialContent = formatOpenLine("preserved-by-snapshot-fail");
+    const initialContent = formatLedgerLine({
+      id: "t1",
+      status: "pending",
+      subject: "preserved-by-snapshot-fail",
+    });
     await fsWriteFile(currentPath, initialContent, "utf8");
 
     // 子目录去掉 w 权限 → snapshot rename 写不进 todos.<…>.md 报 EACCES。
@@ -590,13 +879,14 @@ describe("createTodoWriteTool — mode=replace", () => {
     assert.ok(threw, "replace rejected (snapshot rename EACCES)");
 
     // 不变量:现行仍是旧内容 + 无快照 + 无 .tmp。
-    const postCurrent = await readFile(currentPath, "utf8");
-    assert.equal(postCurrent, initialContent);
-    const snapshotNames = await listSnapshotNames(dir);
-    assert.equal(snapshotNames.length, 0, "no snapshot when rename fails");
-    const postEntries = await readdir(dir);
+    assert.equal(await readFile(currentPath, "utf8"), initialContent);
     assert.equal(
-      postEntries.filter((e) => e.endsWith(".tmp")).length,
+      (await listSnapshotNames(dir)).length,
+      0,
+      "no snapshot when rename fails"
+    );
+    assert.equal(
+      (await readdir(dir)).filter((e) => e.endsWith(".tmp")).length,
       0,
       "no `.tmp` leftovers"
     );
@@ -628,11 +918,13 @@ describe("createTodoWriteTool — mode=replace", () => {
       }
     );
 
-    const postEntries = await readdir(dir);
-    const snapshotNames = await listSnapshotNames(dir);
-    assert.equal(snapshotNames.length, 0, "no snapshot when read fails");
     assert.equal(
-      postEntries.filter((e) => e.endsWith(".tmp")).length,
+      (await listSnapshotNames(dir)).length,
+      0,
+      "no snapshot when read fails"
+    );
+    assert.equal(
+      (await readdir(dir)).filter((e) => e.endsWith(".tmp")).length,
       0,
       "no `.tmp` leftovers"
     );
@@ -642,10 +934,25 @@ describe("createTodoWriteTool — mode=replace", () => {
 // -- typed-error paths -------------------------------------------------------
 
 describe("createTodoWriteTool — typed-error catch", () => {
-  it("unknown mode → ToolExecutionError", async () => {
+  it("unknown mode → ToolExecutionError naming the new enum", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
       tool.handler({ mode: "purge" as never }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match(
+          (err as Error).message,
+          /mode must be one of read \| add \| update \| replace/
+        );
+        return true;
+      }
+    );
+  });
+
+  it("removed mode `list` → typed error (the enum is the new four)", async () => {
+    const tool = createTodoWriteTool({ todoDir });
+    await assert.rejects(
+      tool.handler({ mode: "list" as never }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /mode must be one of/);
@@ -654,7 +961,19 @@ describe("createTodoWriteTool — typed-error catch", () => {
     );
   });
 
-  it("add without item → ToolExecutionError", async () => {
+  it("removed mode `check` → typed error (check folded into update)", async () => {
+    const tool = createTodoWriteTool({ todoDir });
+    await assert.rejects(
+      tool.handler({ mode: "check", item: "x" } as never),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match((err as Error).message, /mode must be one of/);
+        return true;
+      }
+    );
+  });
+
+  it("add without item → ToolExecutionError (SC11: empty add typed)", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(tool.handler({ mode: "add" }), (err: unknown) => {
       assert.ok(err instanceof ToolExecutionError);
@@ -681,22 +1000,10 @@ describe("createTodoWriteTool — typed-error catch", () => {
     );
   });
 
-  it("check without item → ToolExecutionError", async () => {
-    const tool = createTodoWriteTool({ todoDir });
-    await assert.rejects(tool.handler({ mode: "check" }), (err: unknown) => {
-      assert.ok(err instanceof ToolExecutionError);
-      assert.match(
-        (err as Error).message,
-        /item must be a non-empty string ≤ 500 codepoints/
-      );
-      return true;
-    });
-  });
-
   it("unknown field in input → ToolExecutionError", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "list", evil: "x" as never }),
+      tool.handler({ mode: "read", evil: "x" as never }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /unknown field: evil/);
@@ -712,24 +1019,6 @@ describe("createTodoWriteTool — typed-error catch", () => {
       assert.match((err as Error).message, /input must be an object/);
       return true;
     });
-  });
-});
-
-// -- pure helpers (exported) --------------------------------------------------
-
-describe("formatOpenLine / flipFirstOpenLine — pure helpers", () => {
-  it("formatOpenLine: appends newline; item is verbatim", () => {
-    assert.equal(formatOpenLine("task A"), "- [ ] task A\n");
-    assert.equal(formatOpenLine(""), "- [ ] \n");
-  });
-
-  it("flipFirstOpenLine: no match → null", () => {
-    assert.equal(flipFirstOpenLine("- [ ] other\n", "task A"), null);
-  });
-
-  it("flipFirstOpenLine: preserves trailing newline structure", () => {
-    const out = flipFirstOpenLine("- [ ] task A\n- [ ] task B\n", "task A");
-    assert.equal(out, "- [x] task A\n- [ ] task B\n");
   });
 });
 
@@ -757,46 +1046,43 @@ describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
         return true;
       }
     );
-    // File untouched.
-    const file = join(todoDir, "todos.md");
-    assert.equal(await fileExists(file), false);
+    assert.equal(await fileExists(join(todoDir, "todos.md")), false);
   });
 
-  it("per-item limit 用 codepoint 计数：CJK 字符按 1 个 codepoint 算", async () => {
+  it("per-item limit 用 codepoint 计数：CJK 500 字接受,501 字拒绝（多条目同规则）", async () => {
     const tool = createTodoWriteTool({ todoDir });
     // 500 CJK characters = 500 codepoints; just under the limit → accepted.
     const ok = "中".repeat(MAX_ITEM_CODEPOINTS);
     const out = await tool.handler({ mode: "add", item: ok });
-    assert.equal(out, "Updated todos.md");
+    assert.equal(out, "Added 1 item: t1");
     const content = await readFile(join(todoDir, "todos.md"), "utf8");
-    assert.match(content, /^- \[ \] 中+$/m);
-  });
+    assert.match(content, /^- \[ \] \[t1\] 中+$/m);
 
-  it("per-item limit 用 codepoint 计数：501 CJK 字符 → typed error", async () => {
-    const tool = createTodoWriteTool({ todoDir });
-    const tooMany = "中".repeat(MAX_ITEM_CODEPOINTS + 1);
+    // 数组里任一元素超限 → 整次 add typed error,不半写。
+    const before = await readFile(join(todoDir, "todos.md"), "utf8");
     await assert.rejects(
-      tool.handler({ mode: "add", item: tooMany }),
+      tool.handler({ mode: "add", items: ["fine", "中".repeat(501)] }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match(
           (err as Error).message,
-          /item must be a non-empty string ≤ 500 codepoints/
+          /non-empty string ≤ 500 codepoints/
         );
         return true;
       }
     );
+    assert.equal(await readFile(join(todoDir, "todos.md"), "utf8"), before);
   });
 
   it("文件上限 64 KB：add 到现有文件使之超过上限 → typed error", async () => {
     const file = join(todoDir, "todos.md");
-    // Each open line `- [ ] <item>\n`: item of 400 chars → 407 bytes per line.
-    // Pre-fill with 161 lines × 407 bytes = 65527 bytes (just under 64 KB).
-    // Adding one more 407-byte line pushes to 65934 bytes (over 64 KB).
+    // Each pending line `- [ ] [tN] <item>\n` is ~414 bytes (id marker +
+    // 400-char item). 158 lines = 65304 bytes, just under 64 KB; one more
+    // 400-char item pushes the file over.
     const item400 = "a".repeat(400);
     const preLines: string[] = [];
-    for (let i = 0; i < 161; i++) {
-      preLines.push(`- [ ] ${item400}`);
+    for (let i = 0; i < 158; i++) {
+      preLines.push(`- [ ] [t${i + 1}] ${item400}`);
     }
     await fsWriteFile(file, preLines.join("\n") + "\n", "utf8");
     const preBytes = Buffer.byteLength(await readFile(file, "utf8"), "utf8");
@@ -817,33 +1103,37 @@ describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
       }
     );
     // File untouched: pre-existing content is preserved byte-for-byte.
-    const postContent = await readFile(file, "utf8");
-    assert.equal(postContent, preLines.join("\n") + "\n");
+    assert.equal(await readFile(file, "utf8"), preLines.join("\n") + "\n");
   });
 
   it("负面措辞不拒绝（add '别忘了跑测试' 成功）", async () => {
-    // D4 决议：todo 工具不实现 negative_form 拒绝；与 memory_save 形成对照。
     const tool = createTodoWriteTool({ todoDir });
     const out = await tool.handler({ mode: "add", item: "别忘了跑测试" });
-    assert.equal(out, "Updated todos.md");
+    assert.equal(out, "Added 1 item: t1");
     const content = await readFile(join(todoDir, "todos.md"), "utf8");
-    assert.match(content, /^- \[ \] 别忘了跑测试$/m);
+    assert.match(content, /^- \[ \] \[t1\] 别忘了跑测试$/m);
   });
 
   it("串行 add 不丢更新：3 个串行 await add → 3 条全在文件中", async () => {
     // D6 决议：主 loop 单写者；loop engine 串行 tool call（isConcurrencySafe:
     // false）。本测试断言在串行调用下所有 add 都落地、顺序保持。
-    // 并发竞态由装配期所有权边界排除（loop-engine 不会并发触发），故
-    // 不在工厂层测试 Promise.all 的合并语义。
     const tool = createTodoWriteTool({ todoDir });
-    await tool.handler({ mode: "add", item: "first" });
-    await tool.handler({ mode: "add", item: "second" });
-    await tool.handler({ mode: "add", item: "third" });
+    assert.equal(
+      await tool.handler({ mode: "add", item: "first" }),
+      "Added 1 item: t1"
+    );
+    assert.equal(
+      await tool.handler({ mode: "add", item: "second" }),
+      "Added 1 item: t2"
+    );
+    assert.equal(
+      await tool.handler({ mode: "add", item: "third" }),
+      "Added 1 item: t3"
+    );
     const content = await readFile(join(todoDir, "todos.md"), "utf8");
-    assert.match(content, /^- \[ \] first$/m);
-    assert.match(content, /^- \[ \] second$/m);
-    assert.match(content, /^- \[ \] third$/m);
-    // Order preserved.
+    assert.match(content, /^- \[ \] \[t1\] first$/m);
+    assert.match(content, /^- \[ \] \[t2\] second$/m);
+    assert.match(content, /^- \[ \] \[t3\] third$/m);
     assert.ok(
       content.indexOf("first") < content.indexOf("second"),
       "first < second"
@@ -856,7 +1146,7 @@ describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
 
   it("写失败不污染既有 todos.md：rename 抛错时原文件不变 + tmp 被清理", async () => {
     const file = join(todoDir, "todos.md");
-    const initialContent = "- [ ] preserved\n";
+    const initialContent = "- [ ] [t1] preserved\n";
     await fsWriteFile(file, initialContent, "utf8");
 
     // Make the directory read-only so the write/rename step fails (mkdir
@@ -885,16 +1175,142 @@ describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
     assert.ok(threw, "tool call rejected (read-only todoDir)");
 
     // Pre-existing file untouched (byte-for-byte preserved).
-    const postContent = await readFile(file, "utf8");
-    assert.equal(postContent, initialContent);
-
-    // No `.tmp` leftovers in todoDir.
-    const entries = await readdir(todoDir);
+    assert.equal(await readFile(file, "utf8"), initialContent);
     assert.equal(
-      entries.filter((e) => e.endsWith(".tmp")).length,
+      (await readdir(todoDir)).filter((e) => e.endsWith(".tmp")).length,
       0,
       "no `.tmp` leftovers after failed write"
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SC11: empty / overflow — typed failure and NO half-write.
+//
+// 每个用例先建立一个非空现行,失败后逐字节比对:现行既不能变成半截新内
+// 容,也不能被清空。
+// ---------------------------------------------------------------------------
+
+describe("SC11 — empty / overflow typed failure leaves the ledger byte-identical", () => {
+  /** Seed a two-item ledger and return the exact bytes on disk. */
+  async function seed(): Promise<string> {
+    const tool = createTodoWriteTool({ todoDir });
+    await tool.handler({ mode: "add", items: ["keep-1", "keep-2"] });
+    return await readFile(join(todoDir, "todos.md"), "utf8");
+  }
+
+  it("add items:[] → typed error, file byte-identical", async () => {
+    const before = await seed();
+    const tool = createTodoWriteTool({ todoDir });
+    await assert.rejects(
+      tool.handler({ mode: "add", items: [] }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match((err as Error).message, /at least one subject/);
+        return true;
+      }
+    );
+    assert.equal(await readFile(join(todoDir, "todos.md"), "utf8"), before);
+  });
+
+  it("add item:'' → typed error, file byte-identical", async () => {
+    const before = await seed();
+    const tool = createTodoWriteTool({ todoDir });
+    await assert.rejects(
+      tool.handler({ mode: "add", item: "" }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match((err as Error).message, /non-empty string/);
+        return true;
+      }
+    );
+    assert.equal(await readFile(join(todoDir, "todos.md"), "utf8"), before);
+  });
+
+  it("add items with one empty subject → typed error, no partial append", async () => {
+    const before = await seed();
+    const tool = createTodoWriteTool({ todoDir });
+    await assert.rejects(
+      tool.handler({ mode: "add", items: ["ok", ""] }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        return true;
+      }
+    );
+    assert.equal(await readFile(join(todoDir, "todos.md"), "utf8"), before);
+  });
+
+  it("update subject:'' → typed error, file byte-identical", async () => {
+    const before = await seed();
+    const tool = createTodoWriteTool({ todoDir });
+    await assert.rejects(
+      tool.handler({ mode: "update", id: "t1", subject: "" }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match((err as Error).message, /non-empty string/);
+        return true;
+      }
+    );
+    assert.equal(await readFile(join(todoDir, "todos.md"), "utf8"), before);
+  });
+
+  it("add items over the 500-codepoint limit → typed error, file byte-identical", async () => {
+    const before = await seed();
+    const tool = createTodoWriteTool({ todoDir });
+    await assert.rejects(
+      tool.handler({ mode: "add", items: ["ok", "中".repeat(501)] }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match((err as Error).message, /≤ 500 codepoints/);
+        return true;
+      }
+    );
+    assert.equal(await readFile(join(todoDir, "todos.md"), "utf8"), before);
+  });
+
+  it("add that would push the file over 64 KB → typed error, file byte-identical", async () => {
+    const file = join(todoDir, "todos.md");
+    const tool = createTodoWriteTool({ todoDir });
+    // 158 lines × ~414 bytes = 65304 bytes, just under the cap.
+    const big = "b".repeat(400);
+    const preLines: string[] = [];
+    for (let i = 0; i < 158; i++) preLines.push(`- [ ] [t${i + 1}] ${big}`);
+    await fsWriteFile(file, preLines.join("\n") + "\n", "utf8");
+    const before = await readFile(file, "utf8");
+
+    await assert.rejects(
+      tool.handler({ mode: "add", items: [big, big] }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match((err as Error).message, /file would exceed 65536 bytes/);
+        return true;
+      }
+    );
+    assert.equal(await readFile(file, "utf8"), before);
+  });
+
+  it("update that would keep the file over 64 KB → typed error, file byte-identical", async () => {
+    const file = join(todoDir, "todos.md");
+    const tool = createTodoWriteTool({ todoDir });
+    const big = "c".repeat(400);
+    const preLines: string[] = [];
+    for (let i = 0; i < 158; i++) preLines.push(`- [ ] [t${i + 1}] ${big}`);
+    await fsWriteFile(file, preLines.join("\n") + "\n", "utf8");
+    const before = await readFile(file, "utf8");
+
+    await assert.rejects(
+      tool.handler({
+        mode: "update",
+        id: "t1",
+        subject: "中".repeat(MAX_ITEM_CODEPOINTS),
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match((err as Error).message, /file would exceed 65536 bytes/);
+        return true;
+      }
+    );
+    assert.equal(await readFile(file, "utf8"), before);
   });
 });
 
@@ -950,8 +1366,7 @@ describe("createTodoWriteTool — typed-error catch 渲染契约 (code-quality.m
       (caught as Error).message.startsWith("[todo_write]"),
       `message prefix preserved: ${(caught as Error).message}`
     );
-    // mode validation 报告枚举集合(不内嵌 bad value),断言正确渲染集合。
-    assert.ok((caught as Error).message.includes("list | add | check"));
+    assert.ok((caught as Error).message.includes("read | add | update"));
   });
 
   it("empty item on add: 同样以 [todo_write] 前缀抛 typed-error", async () => {
@@ -965,6 +1380,19 @@ describe("createTodoWriteTool — typed-error catch 渲染契约 (code-quality.m
     assert.ok(caught instanceof ToolExecutionError);
     assert.ok((caught as Error).message.startsWith("[todo_write]"));
     assert.ok((caught as Error).message.includes("non-empty"));
+  });
+
+  it("unknown id on update: 以 [todo_write] 前缀抛 typed-error 且带 id", async () => {
+    const tool = createTodoWriteTool({ todoDir });
+    let caught: unknown;
+    try {
+      await tool.handler({ mode: "update", id: "t7", status: "completed" });
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught instanceof ToolExecutionError);
+    assert.ok((caught as Error).message.startsWith("[todo_write]"));
+    assert.ok((caught as Error).message.includes("t7"));
   });
 
   it("通用 catch 模板正确提取 message(模拟 code-quality.md 渲染契约)", () => {
@@ -991,8 +1419,142 @@ describe("createTodoWriteTool — typed-error catch 渲染契约 (code-quality.m
     const plain = { kind: "tool_error", reason: "x" };
     const rendered = String(plain);
     assert.equal(rendered, "[object Object]");
-    // 注:todo_write 当前所有错误路径都 throw ToolExecutionError,此断言只
-    // 是反向文档(防止回归到 plain object 抛错)。
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0085 / SC9: actor capability —— worker 与父会话共用同一本账。
+//
+// 契约(ADR-0085「同一主会话内子代理与父共用账本」):
+//   - worker 可 read / update 父会话账本(scoped write 的 update 仍合法);
+//   - worker `add` 是**工具自身**的 typed 拒绝(ToolExecutionError +
+//     [todo_write] 前缀),不是静默丢弃、不是「工具不在场」——工具必须在
+//     worker 工具面上,模型才能读到拒绝原因;
+//   - 执行的拒绝不依赖权限层(worker 装配用 no-ask askUser → 权限层恒真)。
+//
+// 缝形状:worker 进程的 executor 不合成 ctx.conversationId(worker deps 无
+// conversationId),故 deps.actor.conversationId 是回退源;父会话仍以
+// ctx.conversationId 为准(显式传入者优先)。
+// ---------------------------------------------------------------------------
+
+describe("createTodoWriteTool — ADR-0085 SC9 actor capability", () => {
+  it("canAdd:false → add 抛 ToolExecutionError,消息带 [todo_write] 前缀并点名 parent-only 共享账本", async () => {
+    const tool = createTodoWriteTool({
+      todoDir,
+      actor: { conversationId: "conv-parent", canAdd: false },
+    });
+    await assert.rejects(
+      tool.handler({ mode: "add", item: "worker must not add" }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError, "typed error 形态");
+        const message = (err as Error).message;
+        assert.match(message, /^\[todo_write\]/);
+        // 模型必须能读出「为什么被拒 + 还能做什么」——不是静默丢弃。
+        assert.match(message, /parent-only/);
+        assert.match(message, /read.*update|update.*read/);
+        return true;
+      }
+    );
+  });
+
+  it("canAdd:false → 拒绝先于任何写盘:账本文件不产生(add 失败不半写)", async () => {
+    const tool = createTodoWriteTool({
+      todoDir,
+      actor: { conversationId: "conv-parent", canAdd: false },
+    });
+    await assert.rejects(tool.handler({ mode: "add", item: "x" }));
+    await assert.rejects(
+      readFile(
+        resolveConversationTodoPath({
+          projectDir: todoDir,
+          conversationId: "conv-parent",
+        }),
+        "utf8"
+      ),
+      /ENOENT/
+    );
+  });
+
+  it("canAdd:false → read / update 仍作用于 actor.conversationId 指向的父账本", async () => {
+    // 父会话先写一本账(ctx.conversationId 路径,与 worker 的是同一本)。
+    const parent = createTodoWriteTool({ todoDir });
+    const receipt = await parent.handler(
+      { mode: "add", item: "shared item" },
+      { conversationId: "conv-parent" }
+    );
+    const id = /Added 1 item: (t\d+)/.exec(String(receipt))![1]!;
+
+    // worker 装配形态:无 ctx.conversationId,靠 deps.actor 回退。
+    const worker = createTodoWriteTool({
+      todoDir,
+      actor: { conversationId: "conv-parent", canAdd: false },
+    });
+    const seen = (await worker.handler({ mode: "read" })) as string;
+    assert.match(seen, /\[t1\] shared item/);
+    await worker.handler({ mode: "update", id, status: "completed" });
+    assert.equal(
+      await readFile(
+        resolveConversationTodoPath({
+          projectDir: todoDir,
+          conversationId: "conv-parent",
+        }),
+        "utf8"
+      ),
+      "- [x] [t1] shared item\n"
+    );
+  });
+
+  it("canAdd 缺省(true) → 父会话 add 语义逐字节不变", async () => {
+    const tool = createTodoWriteTool({ todoDir });
+    const receipt = await tool.handler(
+      { mode: "add", item: "parent add" },
+      { conversationId: "conv-parent" }
+    );
+    assert.equal(receipt, "Added 1 item: t1");
+  });
+
+  it("ctx.conversationId 优先于 deps.actor.conversationId(显式调用方赢)", async () => {
+    const tool = createTodoWriteTool({
+      todoDir,
+      actor: { conversationId: "conv-from-deps", canAdd: false },
+    });
+    await tool
+      .handler(
+        { mode: "update", id: "t1", status: "completed" },
+        { conversationId: "conv-from-ctx" }
+      )
+      .catch(() => undefined);
+    // ctx 路径缺文件 → unknown id;deps 路径文件必然缺席。
+    await assert.rejects(
+      readFile(
+        resolveConversationTodoPath({
+          projectDir: todoDir,
+          conversationId: "conv-from-deps",
+        }),
+        "utf8"
+      ),
+      /ENOENT/
+    );
+    await assert.rejects(
+      readFile(
+        resolveConversationTodoPath({
+          projectDir: todoDir,
+          conversationId: "conv-from-ctx",
+        }),
+        "utf8"
+      ),
+      /ENOENT/
+    );
+  });
+
+  it("replace 在 canAdd:false 下照常可用(整表逃生口是 update 族,不被 actor 裁剪)", async () => {
+    // ADR-0085 只说「添加仅父会话」;replace 是整表逃生口,不在 add 语义内。
+    const tool = createTodoWriteTool({
+      todoDir,
+      actor: { conversationId: "conv-parent", canAdd: false },
+    });
+    const out = await tool.handler({ mode: "replace", items: ["only"] });
+    assert.equal(out, "Updated todos.md");
   });
 });
 
@@ -1003,6 +1565,8 @@ describe("createTodoWriteTool — typed-error catch 渲染契约 (code-quality.m
 // 噪声会变多）。description 字面在 ToolDef.description 字段,经 registry
 // catalog 暴露给模型 promptTools —— 测试用 reg.inner.get 拿 def.description
 // 锁形态(系统 prompt grep 锚点 = ToolDef.description)。
+//
+// ADR-0085 起 vocabulary 是三件事:read / add / update(+ replace 逃生口)。
 // ---------------------------------------------------------------------------
 
 const NEGATIVE_PHRASES = [
@@ -1028,7 +1592,6 @@ describe("createTodoWriteTool — #440 T6 D9 正面引导式 description (无负
 
   it("正面触发条件自显：含 'multi-step' / 'progress' 等正向关键词", () => {
     const desc = readDescription().toLowerCase();
-    // 至少一个正向触发关键词（multi-step / multi-turn / progress / track）。
     const positiveKeys = ["multi-step", "multi-turn", "progress", "track"];
     assert.ok(
       positiveKeys.some((k) => desc.includes(k)),
@@ -1046,22 +1609,29 @@ describe("createTodoWriteTool — #440 T6 D9 正面引导式 description (无负
     }
   });
 
-  it("description 明确告知三个 mode 的形态(list/add/check/replace),无歧义", () => {
+  it("description 明确告知新 mode 形态(read/add/update/replace)与 id 寻址,无歧义", () => {
     const desc = readDescription();
-    assert.ok(desc.includes("list"));
+    assert.ok(desc.includes("read"));
     assert.ok(desc.includes("add"));
-    assert.ok(desc.includes("check"));
-    // #903: replace 模式也在正面描述里
+    assert.ok(desc.includes("update"));
+    // replace 逃生口也在正面描述里
     assert.ok(desc.includes("replace"));
+    // id 寻址是 update 的入参事实,模型要能从 description 读出来。
+    assert.ok(desc.includes("id"));
+    // 三个 status 值在校验层,description 至少点名 status 轴。
+    assert.ok(desc.includes("status"));
+    assert.ok(desc.includes("delete"));
+  });
+
+  it("description 不再广告已退役的 mode=check / mode=list", () => {
+    const desc = readDescription();
+    assert.ok(!/mode=check/.test(desc), "check 已并入 update");
+    assert.ok(!/mode=list/.test(desc), "list 已更名 read");
   });
 
   it("registry catalog 暴露的 description 与 factory 直接读一致（系统 prompt grep 锚点）", () => {
     const tool = createTodoWriteTool({ todoDir });
-    // factory 直接读
     const factoryDesc = tool.description;
-    // 模拟系统 prompt 暴露：经 ACI 工具面（registry.inner）的同一 def
-    // 此刻不依赖 registry 装配（隔离测试），但 assert factory 形态稳定
-    // (promptTools 经 reg.visibleSchemas 拿到的 def.description 字段同源)
     assert.equal(typeof factoryDesc, "string");
     assert.ok(factoryDesc.length > 20, "description should be informative");
   });
@@ -1074,7 +1644,6 @@ describe("createTodoWriteTool — #440 T6 D9 正面引导式 description (无负
       desc.includes(TODO_WRITE_SKIP_CLAUSE),
       `description 应含 TODO_WRITE_SKIP_CLAUSE, got: ${desc}`
     );
-    // 正面触发仍在:多步骤 / 跨多轮 / 进度持存(T2 不削弱既有正向表述)。
     assert.ok(desc.includes("multi-step"));
     assert.ok(desc.includes("multi-turn"));
     assert.ok(/multiple turns/.test(desc));
@@ -1089,7 +1658,6 @@ describe("createTodoWriteTool — #440 T6 D9 正面引导式 description (无负
         `跳过条件句不应含负面措辞 "${phrase}", got: ${TODO_WRITE_SKIP_CLAUSE}`
       );
     }
-    // D9 纪律硬钉(T2 重申):无「简单任务」式模糊禁令。
     assert.ok(!clause.includes("simple task"));
   });
 });

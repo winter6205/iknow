@@ -26,6 +26,7 @@ import type { ChildProcess } from "node:child_process";
 import {
   createSubAgentManager,
   MAX_CONCURRENT_WORKERS,
+  SubAgentAbortError,
   SubAgentCapacityError,
   SubAgentWaitTimeoutError,
 } from "../../src/harness/subagent/manager.ts";
@@ -810,6 +811,73 @@ describe("SubAgentManager abortTask (#361 T5)", () => {
   it("未知 taskId → no-op 返回 false", () => {
     const { manager } = makeHarness();
     assert.equal(manager.abortTask("nope"), false);
+  });
+
+  // ── SC14: 操作员强杀必须 settle 本任务在飞的 waitFor ─────────────────────
+  it("SC14: in-flight waitFor → abortTask 以 SubAgentAbortError 拒绝(非 WaitTimeout)", async () => {
+    const { manager, spawned } = makeHarness();
+    const { taskId } = manager.spawn({});
+    const pending = manager.waitFor(taskId, 60000);
+    const rejected = assert.rejects(pending, (err: unknown) => {
+      assert.ok(
+        err instanceof SubAgentAbortError,
+        `expected SubAgentAbortError, got ${String((err as Error)?.name)}`
+      );
+      assert.equal(err.taskId, taskId);
+      assert.ok(!(err instanceof SubAgentWaitTimeoutError));
+      return true;
+    });
+    assert.equal(manager.abortTask(taskId), true);
+    await rejected;
+    // 拒绝之后才轮到 SIGTERM(顺序契约:先 settle 父侧 wait,再杀 worker)。
+    assert.deepEqual(
+      spawned[0]!.kill.mock.calls.map((c) => c[0]),
+      ["SIGTERM"]
+    );
+  });
+
+  it("SC14: abortTask 只拒绝本任务;另一任务的 waitFor 不受影响", async () => {
+    const { manager, spawned } = makeHarness();
+    const { taskId: victim } = manager.spawn({});
+    const { taskId: bystander } = manager.spawn({});
+    let bystanderSettled = false;
+    const bystanderWait = manager.waitFor(bystander, 60000).finally(() => {
+      bystanderSettled = true;
+    });
+    bystanderWait.catch(() => {});
+    const victimWait = assert.rejects(
+      manager.waitFor(victim, 60000),
+      SubAgentAbortError
+    );
+    assert.equal(manager.abortTask(victim), true);
+    await victimWait;
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(bystanderSettled, false, "bystander wait must stay pending");
+    // 旁观任务仍活:终态信封到达后正常 resolve。
+    emitEnvelope(spawned[1]!, okEnvelope("bystander done"));
+    assert.equal((await bystanderWait).summary, "done");
+    assert.equal(bystanderSettled, true);
+  });
+
+  it("SC14: 已 settle 的 waitFor 不再被 abortTask 二次 settle(cleanup 摘除)", async () => {
+    const { manager, spawned } = makeHarness();
+    const { taskId } = manager.spawn({});
+    const first = manager.waitFor(taskId, 1000);
+    emitEnvelope(spawned[0]!, okEnvelope("early"));
+    assert.equal((await first).summary, "done");
+    // task 已 completed → abortTask no-op(既有契约),且不会抛 / 二次 reject。
+    assert.equal(manager.abortTask(taskId), false);
+  });
+
+  it("SC13 不回归: 真墙钟到期仍是 SubAgentWaitTimeoutError(不是 abort 归因)", async () => {
+    const { manager } = makeHarness();
+    const { taskId } = manager.spawn({});
+    const pending = manager.waitFor(taskId, 50);
+    await assert.rejects(pending, (err: unknown) => {
+      assert.ok(err instanceof SubAgentWaitTimeoutError);
+      assert.ok(!(err instanceof SubAgentAbortError));
+      return true;
+    });
   });
 
   it("已终态(completed)task → no-op 返回 false,不再 SIGTERM", () => {

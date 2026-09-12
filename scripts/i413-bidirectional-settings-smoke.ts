@@ -6,9 +6,11 @@
  *   写回正确 → 其它字段原样保留 → 自写不回环 → 外部改动仍热更新。
  *
  * 四组（每组独立 tmp，隔离互不串扰）：
- *   A. 写回正确性：project 级 settings.json（apiKey / model / fallback / secrets）
- *      → persistThinkingChanges(thinking=adaptive, effort=high) → 读盘断言
- *      thinking / thinkingEffort 写入 + 其它字段原样 + mode 0600 + 无 .tmp 残留。
+ *   A. 写回正确性（ADR-0084 写回落对层）：user 级 settings.json（apiKey /
+ *      model / fallback / secrets）→ persistThinkingChanges(thinking=adaptive,
+ *      effort=high) → 读盘断言 thinking / thinkingEffort 写入 user 文件 +
+ *      其它字段原样 + mode 0600 + 无 .tmp 残留；并断言 project 文件即便在场也
+ *      不被创建 / 不被修改（用户层键只写用户文件）。
  *   B. self-write 不回环：起 EnvLoader（注入 tmp home/cwd）→ 写回 →
  *      markSelfWrite(path, bytes) → 真实文件写 + 哨兵命中路径 → 断言 subscriber
  *      不被调（env 引用不变，写回不回环）。
@@ -117,8 +119,9 @@ function makeDirs(): Dirs {
 }
 
 /**
- * A 组：写回正确性 —— project 级含 apiKey/model/fallback/secrets 的 settings
- * 写回后 thinking 两键在 + 其它字段原样 + mode 0600 + 无 .tmp 残留。
+ * A 组：写回正确性 —— user 级含 apiKey/model/fallback/secrets 的 settings
+ * 写回后 thinking 两键在 + 其它字段原样 + mode 0600 + 无 .tmp 残留；项目文件
+ * 在场也不被触碰（ADR-0084：用户层键只写用户文件）。
  */
 async function groupA(): Promise<void> {
   const dirs = makeDirs();
@@ -126,7 +129,7 @@ async function groupA(): Promise<void> {
     const homeSettings = join(dirs.home, ".iknow", "settings.json");
     const projectSettings = join(dirs.cwd, ".iknow", "settings.json");
     writeFileSync(
-      projectSettings,
+      homeSettings,
       JSON.stringify({
         llm: {
           model: "claude-sonnet",
@@ -138,12 +141,23 @@ async function groupA(): Promise<void> {
       }) + "\n",
       "utf8"
     );
-    // project 级存在 → 写回目标 = project 级（project over user 优先级）。
+    // 项目文件在场（含一个允许名单内段）—— 写回必须无视它。
+    writeFileSync(
+      projectSettings,
+      JSON.stringify({ verify: { command: "npm test" } }) + "\n",
+      "utf8"
+    );
+    const projectBefore = readFileSync(projectSettings, "utf8");
+    // ADR-0084：thinking 是用户层键 → 目标恒为 user 级（project 在场不改变层）。
     const target = resolveThinkingSettingsPath({
       cwd: dirs.cwd,
       home: dirs.home,
     });
-    record("A1 目标 = project 级 settings", target === projectSettings, target);
+    record(
+      "A1 目标 = user 级 settings（project 在场亦然）",
+      target === homeSettings,
+      target
+    );
     await persistThinkingChanges(target, {
       thinking: "adaptive",
       thinkingEffort: "high",
@@ -201,11 +215,14 @@ async function groupA(): Promise<void> {
       residual.length === 0,
       `residual=${JSON.stringify(residual)}`
     );
-    // user 级不因写 project 而生成（写回只碰目标文件）。
+    // project 文件不因写回而改变（用户层键不落共享仓库）。
+    const projectAfter = existsSync(projectSettings)
+      ? readFileSync(projectSettings, "utf8")
+      : "";
     record(
-      "A10 user 级 settings 未被创建",
-      !existsSync(homeSettings),
-      `homeSettings=${homeSettings}`
+      "A10 project 级 settings 逐字节不变",
+      projectAfter === projectBefore,
+      `projectSettings=${projectSettings}`
     );
   } finally {
     rmSync(dirs.base, { recursive: true, force: true });
@@ -218,10 +235,10 @@ async function groupA(): Promise<void> {
 async function groupB(): Promise<void> {
   const dirs = makeDirs();
   try {
-    // project 级存在 → EnvLoader 加载 project 级（watcher 也 watch project 文件）。
-    const projectSettings = join(dirs.cwd, ".iknow", "settings.json");
+    // ADR-0084：llm 是用户层键 → 模型放 user 文件（project 文件的 llm 被丢弃）。
+    const homeSettings = join(dirs.home, ".iknow", "settings.json");
     writeFileSync(
-      projectSettings,
+      homeSettings,
       JSON.stringify({ llm: { model: "m-b", apiKey: "k-b" } }) + "\n",
       "utf8"
     );
@@ -239,7 +256,7 @@ async function groupB(): Promise<void> {
       );
       // 生产路径：persist 写回 → markSelfWrite 登记 → watcher onChange 读到同
       // 内容 → 哨兵命中 → skip reload（subscriber 不动）。真实文件写 + 哨兵竞态同款。
-      const { path, bytes } = await persistThinkingChanges(projectSettings, {
+      const { path, bytes } = await persistThinkingChanges(homeSettings, {
         thinking: "adaptive",
       });
       loader.markSelfWrite(path, bytes);
@@ -268,9 +285,10 @@ async function groupB(): Promise<void> {
 async function groupC(): Promise<void> {
   const dirs = makeDirs();
   try {
-    const projectSettings = join(dirs.cwd, ".iknow", "settings.json");
+    // ADR-0084：llm 用户层键 → 外部改动也落在 user 文件（watcher 两文件都 watch）。
+    const homeSettings = join(dirs.home, ".iknow", "settings.json");
     writeFileSync(
-      projectSettings,
+      homeSettings,
       JSON.stringify({ llm: { model: "m-c1", apiKey: "k-c" } }) + "\n",
       "utf8"
     );
@@ -288,7 +306,7 @@ async function groupC(): Promise<void> {
       );
       // 外部改动：写不同内容，不登记 self-write → watcher 照常 reload。
       writeFileSync(
-        projectSettings,
+        homeSettings,
         JSON.stringify({ llm: { model: "m-c2", apiKey: "k-c" } }) + "\n",
         "utf8"
       );
@@ -327,7 +345,7 @@ async function groupD(): Promise<void> {
         "\n",
       "utf8"
     );
-    // 只有 user 级文件 → 写回目标 = user 级（project 不存在）。
+    // ADR-0084：目标恒为 user 级 settings。
     const target = resolveThinkingSettingsPath({
       cwd: dirs.cwd,
       home: dirs.home,

@@ -599,27 +599,27 @@ describe("SC8: #503 T10 bash network:true 强制 ask（layered rule 先于 mode�
 });
 
 // ---------------------------------------------------------------------------
-// #440 T5: todo_write D7 权限规则 — list 子模式 bypass ask (read-only),
-//         add / check 走 category default ask (write)。
+// #440 T5 / ADR-0085: todo_write D7 权限规则 — read 子模式 bypass ask
+//         (read-only), add / update 走 category default ask (write)。
 // ---------------------------------------------------------------------------
 
-describe("SC7: #440 T5 todo_write list 子模式 bypass ask (read-only), add/check 走默认 ask", () => {
+describe("SC7: #440 T5 todo_write read 子模式 bypass ask (read-only), add/update 走默认 ask", () => {
   const policy = createPermissionPolicy();
 
-  it("todo_write list mode → allow (bypass ask, read-only 子模式)", () => {
+  it("todo_write read mode → allow (bypass ask, read-only 子模式)", () => {
     const out = checkPermission({
       def: makeTool({ name: "todo_write", category: "write" }),
-      input: { mode: "list" },
+      input: { mode: "read" },
       sources: policy.sources,
       hardWalls: policy.hardWalls,
       defaultByCategory: policy.defaultByCategory,
     });
     assert.equal(out.decision, "allow");
     assert.ok(out.reason.includes("todo_write"));
-    assert.ok(out.reason.includes("list"));
+    assert.ok(out.reason.includes("read"));
   });
 
-  it("todo_write add mode → ask (write category 默认, list 子模式豁免不适用)", () => {
+  it("todo_write add mode → ask (write category 默认, read 子模式豁免不适用)", () => {
     const out = checkPermission({
       def: makeTool({ name: "todo_write", category: "write" }),
       input: { mode: "add", item: "ship T5" },
@@ -631,10 +631,10 @@ describe("SC7: #440 T5 todo_write list 子模式 bypass ask (read-only), add/che
     assert.ok(out.reason.includes("write"));
   });
 
-  it("todo_write check mode → ask (write category 默认, list 子模式豁免不适用)", () => {
+  it("todo_write update mode → ask (write category 默认, read 子模式豁免不适用)", () => {
     const out = checkPermission({
       def: makeTool({ name: "todo_write", category: "write" }),
-      input: { mode: "check", item: "ship T5" },
+      input: { mode: "update", id: "t1", status: "completed" },
       sources: policy.sources,
       hardWalls: policy.hardWalls,
       defaultByCategory: policy.defaultByCategory,
@@ -643,8 +643,8 @@ describe("SC7: #440 T5 todo_write list 子模式 bypass ask (read-only), add/che
     assert.ok(out.reason.includes("write"));
   });
 
-  // #903 SC5:replace 是 write 默认 ask;list 子模式豁免不适用(仅 list bypass)。
-  it("todo_write replace mode → ask (write category 默认;list 子模式豁免不适用)", () => {
+  // #903 SC5:replace 是 write 默认 ask;read 子模式豁免不适用(仅 read bypass)。
+  it("todo_write replace mode → ask (write category 默认;read 子模式豁免不适用)", () => {
     const out = checkPermission({
       def: makeTool({ name: "todo_write", category: "write" }),
       input: { mode: "replace", items: ["A", "B"] },
@@ -654,8 +654,8 @@ describe("SC7: #440 T5 todo_write list 子模式 bypass ask (read-only), add/che
     });
     assert.equal(out.decision, "ask");
     assert.ok(out.reason.includes("write"));
-    // 不应命中 list bypass(decision=allow / reason 含 list)
-    assert.ok(!out.reason.includes("todo_write list mode"));
+    // 不应命中 read bypass(decision=allow / reason 含 read)
+    assert.ok(!out.reason.includes("todo_write read mode"));
   });
 
   it("todo_write replace mode 在 full_auto mode → ask(layered rule 先于 mode, write ask 路径仍生效)", () => {
@@ -675,7 +675,7 @@ describe("SC7: #440 T5 todo_write list 子模式 bypass ask (read-only), add/che
     assert.ok(out.reason.includes("full_auto"));
   });
 
-  it("todo_write 缺 mode → ask (defense in depth, list 子模式豁免不适用)", () => {
+  it("todo_write 缺 mode → ask (defense in depth, read 子模式豁免不适用)", () => {
     const out = checkPermission({
       def: makeTool({ name: "todo_write", category: "write" }),
       input: {},
@@ -699,11 +699,11 @@ describe("SC7: #440 T5 todo_write list 子模式 bypass ask (read-only), add/che
     assert.ok(out.reason.includes("write"));
   });
 
-  it("todo_write list mode 在 full_auto mode → allow (mode 优先级高于 code-rule, 但结果同 allow)", () => {
+  it("todo_write read mode 在 full_auto mode → allow (mode 优先级高于 code-rule, 但结果同 allow)", () => {
     const fullAuto = createPermissionPolicy({ mode: "full_auto" });
     const out = checkPermission({
       def: makeTool({ name: "todo_write", category: "write" }),
-      input: { mode: "list" },
+      input: { mode: "read" },
       sources: fullAuto.sources,
       hardWalls: fullAuto.hardWalls,
       defaultByCategory: fullAuto.defaultByCategory,

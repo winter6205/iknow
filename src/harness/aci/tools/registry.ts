@@ -47,7 +47,7 @@ import { createBashStopTool } from "./bash-stop.js";
 import { buildWorkerToolSurface } from "../../subagent/role.js";
 import { RegistryConstructionError, ToolExecutionError } from "../../errors.js";
 import type { SkillCatalog } from "../../skill/catalog.js";
-import { createTodoWriteTool } from "./todo-write.js";
+import { createTodoWriteTool, type TodoWriteActor } from "./todo-write.js";
 import { createQueryTraceTool } from "./query-trace.js";
 import { createListSessionsTool } from "./list-sessions.js";
 import { createGetRecordTool } from "./get-record.js";
@@ -126,8 +126,10 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // #440 双 Stream 工具集 append-only：24→27（并集，#480 Stream B 先合 +
   // #481 Stream A 后合）。三件都条件化装配（Gate 3 在 toolsetNames 端
   // 镜像过滤，见工厂尾部注释）：
-  //   - todo_write: todoDir 缺席时不入注册表 — worker 装配路径 + ask 表面
-  //     均不传 todoDir（D6 所有权边界 / SC8 oneshot 剥离）
+  //   - todo_write: todoDir 缺席时不入注册表 — ask 表面不传（SC8 oneshot
+  //     剥离）；worker 装配路径在父会话经 envelope 透传 `todoLedger` 时
+  //     传入 todoDir + todoActor{canAdd:false}（ADR-0085 / SC9：与父共用
+  //     同一本账，可读可更；`add` 拒绝在工具 handler 内，不是「工具不在场」）
   //   - list_mcp_resources / read_mcp_resource: mcpManager 缺席时不入
   //     注册表 — ask 入口零件 + 任务型 worker；与 subagentManager /
   //     skillCatalog / memoryDir 同形态
@@ -154,7 +156,8 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   "query_trace", // trace read-side projection and record drill-down
   // T4 (plans/worktree-isolation-model-provision.md) 创建工作树 ACI 工具
   // append-only：30→31。条件化装配（worktreeProvision host 缝缺席时不入
-  // 注册表 —— 开关 OFF / worker 装配路径 / 无 hub 的入口；Gate 3 在
+  // 注册表 —— 无 hub 的入口 / worker 装配路径；ADR-0037 Amendment 2026-09-11
+  // 已撤销「工具在场 ⇔ 开关 ON」，开关 OFF 不再卸掉工具。Gate 3 在
   // toolsetNames 端镜像过滤，见工厂尾部注释）。名字与 T3 门禁 hint 常量
   // `CREATE_WORKTREE_TOOL_HINT`（"create-worktree ACI tool"）
   // 逐字对齐 —— 被拦 mutate 的 block 文案指向的工具名必须真实存在。
@@ -289,9 +292,16 @@ export interface CreateDefaultAciRegistryOptions {
   readonly disallowedTools?: ReadonlyArray<string>;
   /** #440 D2/D6:session 作用域 todos.md 目录。host 注入：build-engine
    *  从 session/conversationId 解析（每 conversationId 一份）。缺席时
-   *  todo_write 不入注册表（与 memoryDir 同形态：worker 装配路径不注入
-   *  todoDir 即把所有权边界隔在主 loop 内,跨 executor 竞态由装配期排除）。 */
+   *  todo_write 不入注册表（与 memoryDir 同形态：ask 入口零件场景）。
+   *
+   *  ADR-0085 / SC9:worker 装配路径也注入本项 —— worker 与父会话共用同一
+   *  本账（读 / 更新），与 `todoActor` 配对表达「添加仅父会话」。 */
   readonly todoDir?: string;
+  /** ADR-0085 / SC9:todo_write 调用方能力（actor）。conversationId 是
+   *  `ctx.conversationId` 的回退源（worker 进程的 executor 不合成该 ctx
+   *  字段）；`canAdd:false` 时工具的 `add` 在 handler 内 typed 拒绝。
+   *  缺席 → 旧行为逐字节不变（canAdd 视为 true、只看 ctx.conversationId）。 */
+  readonly todoActor?: TodoWriteActor;
   /**
    * T3: current-identity fence `/tmp` pad. Worker assembly points this at
    * `subagents/<taskId>/fence-tmp`. Absent → bash/write keep the existing
@@ -476,18 +486,22 @@ export function createDefaultAciRegistry(
   // so existing callers without per-root state stay byte-identical.
   const workspaceRoot = opts.workspaceRoot ?? sandboxRoot;
   // #440 T4 todo_write 条件化装配的开关。host 注入；build-engine 在
-  // surface !== "ask" 解析 session 级目录并透传。worker 装配路径不传 →
-  // todo_write 不入 worker 工具面（D6 所有权边界）；ask 不传 → tool 不
-  // 入注册表（SC8 oneshot 剥离）。Gate 3 镜像过滤见下。
+  // surface !== "ask" 解析 session 级目录并透传；ask 不传 → tool 不入
+  // 注册表（SC8 oneshot 剥离）。worker 装配路径经 `todoLedger` 透传同一
+  // 父会话根（ADR-0085 / SC9：共享账本，`add` 由工具 handler typed 拒绝，
+  // 工具本身仍在 worker 面上）。Gate 3 镜像过滤见下。
   const todoDir = opts.todoDir;
+  // ADR-0085 / SC9:todo_write 的 actor 能力位(父 vs worker)——只透传,
+  // Gate 3 开关仍以 todoDir 单键为准(工具名/件数不因 actor 漂移)。
+  const todoActor = opts.todoActor;
   // T4:创建工作树 ACI 工具的条件化装配开关（host provision 缝）。build-engine
-  // 仅在 worktree isolation 开关 ON 且 hub 注入 host 缝时透传；worker /
-  // ask / hub-less 入口不传 → create-worktree 不入注册表。Gate 3
-  // 镜像过滤见下。
+  // 在 hub 注入 host 缝时透传，与 isolationEnabled 解耦（ADR-0037
+  // Amendment 2026-09-11 / SC1：开关 OFF 也注册）；worker / ask / hub-less
+  // 入口不传 → create-worktree 不入注册表。Gate 3 镜像过滤见下。
   const worktreeProvision = opts.worktreeProvision;
   // T7:enter-worktree 的条件化装配开关（host enter 缝）。build-engine
-  // 在 isolation ON 且 host 注入 enter 缝时透传；TUI（只接 provision）/
-  // worker / hub-less 入口不传 → 工具不入注册表。Gate 3 镜像过滤见下。
+  // 在 host 注入 enter 缝时透传；TUI（只接 provision）/ worker / hub-less
+  // 入口不传 → 工具不入注册表。Gate 3 镜像过滤见下。
   const worktreeEnter = opts.worktreeEnter;
   // T8:exit-worktree 的条件化装配开关（host exit 缝）。同 worktreeEnter
   // 形态：TUI（只接 provision）/ worker / hub-less 入口不传 → 不入注册表。
@@ -678,11 +692,18 @@ export function createDefaultAciRegistry(
         }
       : {}),
     // #440 T4 todo_write 工具集（条件化装配：todoDir 缺席时不入注册表 —
-    // worker 装配路径不传 todoDir（D6 所有权边界）；ask 表面 build-engine
-    // 也不传 todoDir（SC8 oneshot 剥离）；Gate 3 镜像过滤，见下）。
+    // ask 表面 build-engine 不传 todoDir（SC8 oneshot 剥离）；Gate 3 镜像
+    // 过滤，见下）。
+    // ADR-0085 / SC9:worker 装配路径也传 todoDir + todoActor{canAdd:false}
+    // —— 工具在场（模型能读到 `add` 的 typed 拒绝原因），actor 缝承载父会话
+    // id 与能力位。
     ...(todoDir
       ? {
-          todo_write: () => createTodoWriteTool({ todoDir }),
+          todo_write: () =>
+            createTodoWriteTool({
+              todoDir,
+              ...(todoActor !== undefined ? { actor: todoActor } : {}),
+            }),
         }
       : {}),
     // #440 T11 MCP resources 工具集（条件化装配：mcpManager 缺席时
@@ -824,7 +845,8 @@ export function createDefaultAciRegistry(
     // ADR-0041:run_graph 常驻后只剩 subagentManager 同门条件(graphAssembly
     // 缺席不再触发缺席 —— handler isEnabled 缺省恒关,run_graph 仍在注册表)。
     ...(subagentManager ? [] : ["run_graph"]),
-    // T4：host 缝缺席（开关 OFF / worker / hub-less 入口）→ 建树工具不入注册表。
+    // T4：host 缝缺席（worker / hub-less 入口）→ 建树工具不入注册表。开关
+    // OFF 不在此列（ADR-0037 Amendment 2026-09-11：工具面常在，只有门禁跟开关）。
     // T7：enter 缝缺席（TUI provision-only / worker / hub-less 入口）→
     // enter 工具不入注册表。
     ...(worktreeProvision ? [] : ["create-worktree"]),

@@ -24,10 +24,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   createTodoWriteTool,
-  formatOpenLine,
   resolveConversationTodoPath,
   TODOS_FILE,
 } from "../../../../src/harness/aci/tools/todo-write.ts";
+import { formatLedgerLine } from "../../../../src/harness/aci/tools/todo-ledger.ts";
 import { resolveProjectSessionDir } from "../../../../src/session-api/store/session-store.ts";
 import { deriveProjectIdentityRoot } from "../../../../src/harness/session-roots.ts";
 
@@ -129,8 +129,8 @@ describe("T2 关键判据: <surface> 收敛 — 同一会话从两入口落同�
     const fromServe = createTodoWriteTool({ todoDir: projectDir });
 
     await fromTui.handler({ mode: "add", item: "from TUI" }, ctx);
-    const listedFromServe = await fromServe.handler({ mode: "list" }, ctx);
-    assert.equal(listedFromServe, "- [ ] from TUI\n");
+    const listedFromServe = await fromServe.handler({ mode: "read" }, ctx);
+    assert.equal(listedFromServe, "- [ ] [t1] from TUI\n");
   });
 
   it("两 surface 各自 add 一条 → 同一文件累积两条,顺序按时间", async () => {
@@ -152,7 +152,7 @@ describe("T2 关键判据: <surface> 收敛 — 同一会话从两入口落同�
     const content = await readFile(path, "utf8");
     assert.equal(
       content,
-      `${formatOpenLine("tui-step")}${formatOpenLine("serve-step")}`
+      `${formatLedgerLine({ id: "t1", status: "pending", subject: "tui-step" })}${formatLedgerLine({ id: "t2", status: "pending", subject: "serve-step" })}`
     );
   });
 });

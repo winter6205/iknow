@@ -111,9 +111,11 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
   it("writes spawn/state_change/stop to trace/subagent.jsonl without traceOut", async () => {
     scratch = mkdtempSync(join(tmpdir(), "iknow-cli-chat-trace-"));
     const home = join(scratch, "home");
-    mkdirSync(join(scratch, ".iknow"), { recursive: true });
+    // ADR-0084：llm 是用户层键 → fixture 必须落在子进程 HOME 解析到的用户层
+    // （childEnv.HOME = <scratch>/home）；项目文件里的 llm 会被允许名单丢弃。
+    mkdirSync(join(home, ".iknow"), { recursive: true });
     writeFileSync(
-      join(scratch, ".iknow", "settings.json"),
+      join(home, ".iknow", "settings.json"),
       JSON.stringify({
         llm: { model: "test-model", apiKey: "sk-test-chat-trace" },
       })

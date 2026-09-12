@@ -45,7 +45,7 @@
 - **沙箱机制**（#123 Q6 实测定案，方案 A）：`bubblewrap`（bwrap ≥ 0.11.1）+ user namespace + seccomp（`--seccomp FD`，v0 可不启用，接口预留）；rlimit（setrlimit 经 bwrap `--rlimit` 或 wrapper）+ tmpfs（`--tmpfs`）双层资源限制。AppArmor 不需要（WSL2 最小内核 enabled=N）。cgroup v2 留 v1。
 - **bwrap 是运行时硬依赖**：启动期探测，缺失 → fail-loud（清晰报错 + 安装指引），bash 工具拒绝装配。不 fallback 到 allowlist-only 生产模式（allowlist 仅是沙箱落地前的过渡，ADR-0004）。
 - **既有依赖**：`@anthropic-ai/sdk` / `ajv` / `ajv-formats`（v0 项目设置文件校验用 ajv）。
-- **新增依赖**：`smol-toml`（TOML 解析，项目设置文件格式；选它因为零依赖、只读场景）。**此项已进假设门（A19）并确认**。
+- **新增依赖**：`smol-toml`（TOML 解析，项目设置文件格式；选它因为零依赖、只读场景）。**此项已进假设门（A19）并确认**。**已于 ADR-0084 移除**：权限规则 DSL 从 `.iknow/permissions.toml` 迁到 `<cwd>/.iknow/settings.json` 的 `permissions` 段后，toml 文件不再被读取，依赖随之删除（本 spec 中提 toml 的段落均为历史记录，以 settings.json 为现状）。
 - **测试**：vitest（既有）+ bwrap 探针脚本（`scripts/`，真起 bwrap）。
 - 技术栈变更需新假设门。
 
@@ -69,7 +69,7 @@ src/harness/
 ├── permission/                 # 新增：权限三层（#122）
 │   ├── types.ts                # PermissionDecision / PermissionOutcome / PermissionRule / Policy
 │   ├── policy.ts               # 规则三层 + 硬墙（代码内置层；项目设置；会话授予）
-│   ├── project-settings.ts     # .iknow/permissions.toml 加载 + ajv schema 校验（构造期，不热加载）
+│   ├── project-settings.ts     # <cwd>/.iknow/settings.json 的 permissions 段加载 + ajv schema 校验（构造期，不热加载）
 │   ├── session-grants.ts       # in-memory 会话授予（不持久化）
 │   ├── hooks.ts                # PreToolUse/PostToolUse 骨架（v0 no-op，调用位齐全）
 │   ├── ask-user.ts             # AskUser 接口 + 三入口各自实现
@@ -98,7 +98,7 @@ src/cli/                        # 三入口装配（#162 平权）
 ├── runtime.ts                  # ask：oneshot askUser 实现（具体形态 Open Question）
 └── session-io.ts               # serve：SPA 交互通道 askUser
 
-.iknow/permissions.toml         # 新增：v0 项目设置层（仓库根；TOML；git 友好）
+.iknow/settings.json            # 新增：v0 项目设置层（仓库根；JSON；permissions 段承载规则 DSL）
 scripts/sandbox-probe.ts        # 新增：Q7 验收矩阵探针（真起 bwrap）
 specs/security-guardrails.md    # 本 spec
 plans/security-guardrails.md    # writing-plans 产物（Step 5 后）
@@ -133,7 +133,7 @@ export interface PermissionOutcome {
 ## Boundaries
 
 - **Always do**: 跑 `npm test` + `npm run probe:sandbox` 后才 commit；deny 路径零副作用（不调 inner）；密钥名/值只从 `env.ts` SSOT 取；违规处置复用 `spawnWithStopSignal` 进程组 kill（017/023 成熟机制）；单次误碰敏感路径只拒单次 + 计数，不杀会话。
-- **Ask first**: 新增运行时依赖（smol-toml 已确认，其余需新授权）；锁文件变更；`interruptBehavior`/`timeoutTier` 之外的 AciMeta 字段增删；网络白名单条目增删；违规计数 N 的默认值变更。
+- **Ask first**: 新增运行时依赖（smol-toml 已确认、后于 ADR-0084 移除，其余需新授权）；锁文件变更；`interruptBehavior`/`timeoutTier` 之外的 AciMeta 字段增删；网络白名单条目增删；违规计数 N 的默认值变更。
 - **Never do**: 硬编码 `NINE_ROUTER_KEY` 字面量进沙箱层；把 `~/.ssh` 等敏感清单条目放进白名单；为让构建过而删/降测试；把 bwrap 缺失静默降级成无沙箱执行；allowlist 作为沙箱落地后的生产主门（它只是过渡 + 纵深双保险）；会话授予持久化到磁盘（v0）。
 
 ## Success Criteria（binary）

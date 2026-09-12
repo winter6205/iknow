@@ -27,7 +27,8 @@
 - `545-d-alpha-graph-mode.md` — D-α V1 graph mode overlay + `run_graph`（#545 CLOSED / ADR-0030；草稿 PR #698–#707 对照可摘，不合整链）
 - `live-graph-phase1.md` — 会话活图 + 外环剩余子图 + id 冻结（#929；ADR-0047–0052 / 0065–0067）；plan: `plans/live-graph-phase1.md`；**host 已落地** PR `#944`（地图仍 OPEN：Destination 收口未锁）
 - `live-graph-phase2.md` — `onFailure` 失败边 + 同 id 再跑 + effort 8（#929；ADR-0053–0064）；plan: `plans/live-graph-phase2.md`；**host 已落地** PR `#944`
-- `todo-ledger-replace.md` — 主会话 `todo_write` replace + 同目录快照（ADR-0046 / [#903](https://github.com/winter6205/iknow/issues/903)）；plan: `plans/todo-ledger-replace.md`；图上 DP/replan 见 [#904](https://github.com/winter6205/iknow/issues/904)
+- `todo-ledger-replace.md` — 主会话 `todo_write` replace + 同目录快照（ADR-0046 / [#903](https://github.com/winter6205/iknow/issues/903)）；plan: `plans/todo-ledger-replace.md`；图上 DP/replan 见 [#904](https://github.com/winter6205/iknow/issues/904)；账本形状 / 三件事 / worker 共用 **amended by** `agent-control-surface.md`
+- `agent-control-surface.md` — 主代理控制面（工作树工具与隔离解耦 · 项目 settings 允许名单与权限搬家 · todo id 三件事 · 前景取消与子代理 TUI）；plan: `plans/agent-control-surface.md`；图 `docs/wayfinder/agent-control-surface-map.md`
 
 ### TUI
 

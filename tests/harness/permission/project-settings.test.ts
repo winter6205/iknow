@@ -1,28 +1,34 @@
 /**
  * tests/harness/permission/project-settings.test.ts
  *
- * Loader tests for `.iknow/permissions.toml` (T6 / #122 Q2b).
+ * Loader tests for the `permissions` section of `<cwd>/.iknow/settings.json`
+ * (T6 / #122 Q2b; ADR-0084 moved the rule DSL out of `.iknow/permissions.toml`).
  *
  * Boundary classes covered:
- *  - normal: missing file → undefined; valid TOML → policy source
+ *  - normal: missing settings file → undefined; missing `permissions` section
+ *    → undefined; valid section → policy source
  *  - negative: schema violation (unknown predicate, missing required field,
  *    bad decision) → throws with descriptive message
  *  - overflow: empty rule array (minItems=1 violation)
- *  - exception: malformed TOML → throws
+ *  - exception: legacy toml + json section both present → typed fail-loud
  *  - concurrent: re-loading same file twice yields independent but
  *    structurally-equal sources (no shared state)
  *  - malformed: predicate string type mismatch silently doesn't match (no
  *    false positives — predicates are narrow and total)
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { loadProjectSettings } from "../../../src/harness/permission/project-settings.js";
+import {
+  loadProjectSettings,
+  resolveProjectPermissionSource,
+  ProjectSettingsError,
+} from "../../../src/harness/permission/project-settings.js";
 import {
   createPermissionPolicy,
   checkPermission,
@@ -33,9 +39,30 @@ function scratchDir(): string {
   return mkdtempSync(join(tmpdir(), "iknow-proj-settings-"));
 }
 
-function writeToml(dir: string, name: string, body: string): string {
-  const path = join(dir, name);
-  writeFileSync(path, body, "utf8");
+/** Write a settings.json carrying a `permissions` section; returns its path. */
+function writePermissions(dir: string, section: unknown): string {
+  const path = join(dir, "settings.json");
+  writeFileSync(path, JSON.stringify({ permissions: section }), "utf8");
+  return path;
+}
+
+/** The `.iknow` layout the cwd-form loader expects (ADR-0084). */
+function writeProjectDir(
+  base: string,
+  section: unknown
+): { cwd: string; file: string } {
+  const cwd = join(base, ".iknow");
+  mkdirSync(cwd, { recursive: true });
+  const file = join(cwd, "settings.json");
+  writeFileSync(file, JSON.stringify({ permissions: section }), "utf8");
+  return { cwd: base, file };
+}
+
+/** Legacy toml fixture (the retired source) — used only by the fail-loud test. */
+function writeLegacyToml(dir: string): string {
+  const path = join(dir, ".iknow", "permissions.toml");
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, "schema_version = 1\n", "utf8");
   return path;
 }
 
@@ -58,22 +85,37 @@ function makeTool(
   });
 }
 
-const VALID_TOML = `schema_version = 1
+const VALID_SECTION = {
+  schema_version: 1,
+  rule: [
+    {
+      id: "allow-bash-echo",
+      match_tool: "bash",
+      match_input: { command_starts_with: "echo " },
+      decision: "allow",
+      reason: "explicit allow: bash echo",
+    },
+    {
+      id: "deny-read-ssh",
+      match_tool: "read_file",
+      match_input: { path_contains: ".ssh/" },
+      decision: "deny",
+      reason: "explicit deny: read_file under .ssh",
+    },
+  ],
+};
 
-[[rule]]
-id = "allow-bash-echo"
-match_tool = "bash"
-match_input = { command_starts_with = "echo " }
-decision = "allow"
-reason = "explicit allow: bash echo"
-
-[[rule]]
-id = "deny-read-ssh"
-match_tool = "read_file"
-match_input = { path_contains = ".ssh/" }
-decision = "deny"
-reason = "explicit deny: read_file under .ssh"
-`;
+/** Single-rule helper: the shape most negative tests vary one field of. */
+function oneRule(overrides: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: "r1",
+    match_tool: "bash",
+    match_input: { command_starts_with: "echo " },
+    decision: "allow",
+    reason: "explicit allow",
+    ...overrides,
+  };
+}
 
 /**
  * #952 — network_equals 谓词（资格门禁，不是安全边界）。
@@ -95,18 +137,21 @@ reason = "explicit deny: read_file under .ssh"
  *    落地成一条永不命中的静默死规则。
  */
 describe("network_equals predicate (#952)", () => {
-  const NETWORK_TOML = `schema_version = 1
-
-[[rule]]
-id = "deny-bash-host-network"
-match_tool = "bash"
-match_input = { network_equals = true }
-decision = "deny"
-reason = "explicit deny: bash host-network opt-in"
-`;
+  const NETWORK_SECTION = {
+    schema_version: 1,
+    rule: [
+      {
+        id: "deny-bash-host-network",
+        match_tool: "bash",
+        match_input: { network_equals: true },
+        decision: "deny",
+        reason: "explicit deny: bash host-network opt-in",
+      },
+    ],
+  };
 
   function loadNetworkRule(dir: string) {
-    const path = writeToml(dir, "permissions.toml", NETWORK_TOML);
+    const path = writePermissions(dir, NETWORK_SECTION);
     const src = loadProjectSettings({ filePath: path });
     assert.ok(src);
     assert.equal(src.rules.length, 1);
@@ -178,19 +223,21 @@ reason = "explicit deny: bash host-network opt-in"
   it("AND-joins with command predicates (network:true + command shape both required)", () => {
     const dir = scratchDir();
     try {
-      const path = writeToml(
-        dir,
-        "permissions.toml",
-        `schema_version = 1
-
-[[rule]]
-id = "deny-curl-network"
-match_tool = "bash"
-match_input = { command_starts_with = "curl ", network_equals = true }
-decision = "deny"
-reason = "deny curl with host network"
-`
-      );
+      const path = writePermissions(dir, {
+        schema_version: 1,
+        rule: [
+          {
+            id: "deny-curl-network",
+            match_tool: "bash",
+            match_input: {
+              command_starts_with: "curl ",
+              network_equals: true,
+            },
+            decision: "deny",
+            reason: "deny curl with host network",
+          },
+        ],
+      });
       const src = loadProjectSettings({ filePath: path });
       assert.ok(src);
       const rule = src.rules[0]!;
@@ -222,19 +269,13 @@ reason = "deny curl with host network"
     }
   });
 
-  it('network_equals = "true" (TOML string) fails at schema load with JSON path (fail-loud, not silent dead rule)', () => {
+  it('network_equals = "true" (JSON string) fails at schema load with JSON path (fail-loud, not silent dead rule)', () => {
     const dir = scratchDir();
     try {
-      const body = `schema_version = 1
-
-[[rule]]
-id = "string-true"
-match_tool = "bash"
-match_input = { network_equals = "true" }
-decision = "deny"
-reason = "should never load"
-`;
-      const path = writeToml(dir, "permissions.toml", body);
+      const path = writePermissions(dir, {
+        schema_version: 1,
+        rule: [oneRule({ match_input: { network_equals: "true" } })],
+      });
       assert.throws(
         () => loadProjectSettings({ filePath: path }),
         (err: unknown) => {
@@ -253,16 +294,17 @@ reason = "should never load"
   it("unknown predicate still fails loud with the failing JSON path", () => {
     const dir = scratchDir();
     try {
-      const body = `schema_version = 1
-
-[[rule]]
-id = "typo-predicate"
-match_tool = "bash"
-match_input = { command_regex = "^curl" }
-decision = "deny"
-reason = "typo"
-`;
-      const path = writeToml(dir, "permissions.toml", body);
+      const path = writePermissions(dir, {
+        schema_version: 1,
+        rule: [
+          oneRule({
+            id: "typo-predicate",
+            match_input: { command_regex: "^curl" },
+            decision: "deny",
+            reason: "typo",
+          }),
+        ],
+      });
       assert.throws(
         () => loadProjectSettings({ filePath: path }),
         (err: unknown) => {
@@ -287,7 +329,7 @@ reason = "typo"
     const dir = scratchDir();
     try {
       const project = loadProjectSettings({
-        filePath: writeToml(dir, "permissions.toml", NETWORK_TOML),
+        filePath: writePermissions(dir, NETWORK_SECTION),
       });
       assert.ok(project);
       const policy = createPermissionPolicy({ project });
@@ -311,7 +353,7 @@ reason = "typo"
     const dir = scratchDir();
     try {
       const project = loadProjectSettings({
-        filePath: writeToml(dir, "permissions.toml", VALID_TOML),
+        filePath: writePermissions(dir, VALID_SECTION),
       });
       assert.ok(project);
       const policy = createPermissionPolicy({ project });
@@ -345,7 +387,7 @@ describe("loadProjectSettings", () => {
     const dir = scratchDir();
     try {
       const result = loadProjectSettings({
-        filePath: join(dir, "no-such-file.toml"),
+        filePath: join(dir, "no-such-file.json"),
       });
       assert.equal(result, undefined);
     } finally {
@@ -353,10 +395,10 @@ describe("loadProjectSettings", () => {
     }
   });
 
-  it("parses a TOML with two rules and exposes a ProjectSettingsPolicySource", () => {
+  it("parses a settings.json permissions section with two rules and exposes a ProjectSettingsPolicySource", () => {
     const dir = scratchDir();
     try {
-      const path = writeToml(dir, "permissions.toml", VALID_TOML);
+      const path = writePermissions(dir, VALID_SECTION);
       const src = loadProjectSettings({ filePath: path });
       assert.ok(src);
       assert.equal(src.kind, "project");
@@ -374,16 +416,15 @@ describe("loadProjectSettings", () => {
   it("throws when an unknown predicate is used", () => {
     const dir = scratchDir();
     try {
-      const body = `schema_version = 1
-
-[[rule]]
-id = "bad-predicate"
-match_tool = "bash"
-match_input = { command_regex = "^echo" }
-decision = "allow"
-reason = "explicit allow"
-`;
-      const path = writeToml(dir, "permissions.toml", body);
+      const path = writePermissions(dir, {
+        schema_version: 1,
+        rule: [
+          oneRule({
+            id: "bad-predicate",
+            match_input: { command_regex: "^echo" },
+          }),
+        ],
+      });
       assert.throws(
         () => loadProjectSettings({ filePath: path }),
         (err: unknown) => {
@@ -402,15 +443,11 @@ reason = "explicit allow"
   it("throws when required fields are missing (id)", () => {
     const dir = scratchDir();
     try {
-      const body = `schema_version = 1
-
-[[rule]]
-match_tool = "bash"
-match_input = { command_starts_with = "echo " }
-decision = "allow"
-reason = "explicit allow"
-`;
-      const path = writeToml(dir, "permissions.toml", body);
+      const { match_tool, match_input, decision, reason } = oneRule({});
+      const path = writePermissions(dir, {
+        schema_version: 1,
+        rule: [{ match_tool, match_input, decision, reason }],
+      });
       assert.throws(
         () => loadProjectSettings({ filePath: path }),
         (err: unknown) => {
@@ -429,15 +466,11 @@ reason = "explicit allow"
   it("throws when required fields are missing (match_tool)", () => {
     const dir = scratchDir();
     try {
-      const body = `schema_version = 1
-
-[[rule]]
-id = "r1"
-match_input = { command_starts_with = "echo " }
-decision = "allow"
-reason = "explicit allow"
-`;
-      const path = writeToml(dir, "permissions.toml", body);
+      const { id, match_input, decision, reason } = oneRule({});
+      const path = writePermissions(dir, {
+        schema_version: 1,
+        rule: [{ id, match_input, decision, reason }],
+      });
       assert.throws(
         () => loadProjectSettings({ filePath: path }),
         (err: unknown) =>
@@ -451,16 +484,10 @@ reason = "explicit allow"
   it("throws when decision is not in {allow, deny, ask}", () => {
     const dir = scratchDir();
     try {
-      const body = `schema_version = 1
-
-[[rule]]
-id = "r1"
-match_tool = "bash"
-match_input = { command_starts_with = "echo " }
-decision = "pass_through"
-reason = "explicit allow"
-`;
-      const path = writeToml(dir, "permissions.toml", body);
+      const path = writePermissions(dir, {
+        schema_version: 1,
+        rule: [oneRule({ decision: "pass_through" })],
+      });
       assert.throws(
         () => loadProjectSettings({ filePath: path }),
         (err: unknown) =>
@@ -474,16 +501,10 @@ reason = "explicit allow"
   it("throws when schema_version is missing or wrong value", () => {
     const dir = scratchDir();
     try {
-      const body = `schema_version = 2
-
-[[rule]]
-id = "r1"
-match_tool = "bash"
-match_input = { command_starts_with = "echo " }
-decision = "allow"
-reason = "explicit allow"
-`;
-      const path = writeToml(dir, "permissions.toml", body);
+      const path = writePermissions(dir, {
+        schema_version: 2,
+        rule: [oneRule({})],
+      });
       assert.throws(
         () => loadProjectSettings({ filePath: path }),
         (err: unknown) =>
@@ -497,10 +518,7 @@ reason = "explicit allow"
   it("throws when rule array is empty (minItems=1)", () => {
     const dir = scratchDir();
     try {
-      const body = `schema_version = 1
-rule = []
-`;
-      const path = writeToml(dir, "permissions.toml", body);
+      const path = writePermissions(dir, { schema_version: 1, rule: [] });
       assert.throws(
         () => loadProjectSettings({ filePath: path }),
         (err: unknown) =>
@@ -511,20 +529,27 @@ rule = []
     }
   });
 
-  it("throws when TOML is malformed", () => {
+  it("malformed settings JSON → undefined (mirrors config readSettingsFile tolerance)", () => {
     const dir = scratchDir();
     try {
-      const body = `schema_version = 1
+      const path = join(dir, "settings.json");
+      writeFileSync(path, "{ not-json", "utf8");
+      assert.equal(loadProjectSettings({ filePath: path }), undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
-[[rule
-id = "r1"
-`;
-      const path = writeToml(dir, "permissions.toml", body);
-      assert.throws(
-        () => loadProjectSettings({ filePath: path }),
-        (err: unknown) =>
-          err instanceof Error && err.message.includes("TOML parse failed")
+  it("settings JSON without a permissions section → undefined", () => {
+    const dir = scratchDir();
+    try {
+      const path = join(dir, "settings.json");
+      writeFileSync(
+        path,
+        JSON.stringify({ verify: { command: "npm test" } }),
+        "utf8"
       );
+      assert.equal(loadProjectSettings({ filePath: path }), undefined);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -533,7 +558,7 @@ id = "r1"
   it("rule match: command_starts_with evaluates correctly (positive + negative)", () => {
     const dir = scratchDir();
     try {
-      const path = writeToml(dir, "permissions.toml", VALID_TOML);
+      const path = writePermissions(dir, VALID_SECTION);
       const src = loadProjectSettings({ filePath: path });
       assert.ok(src);
       const echoRule = src.rules[0]!;
@@ -558,7 +583,7 @@ id = "r1"
   it("rule match: path_contains checks .ssh/ anywhere in the path", () => {
     const dir = scratchDir();
     try {
-      const path = writeToml(dir, "permissions.toml", VALID_TOML);
+      const path = writePermissions(dir, VALID_SECTION);
       const src = loadProjectSettings({ filePath: path });
       assert.ok(src);
       const denyRule = src.rules[1]!;
@@ -584,7 +609,7 @@ id = "r1"
   it("returned source is frozen (Object.isFrozen on rules array)", () => {
     const dir = scratchDir();
     try {
-      const path = writeToml(dir, "permissions.toml", VALID_TOML);
+      const path = writePermissions(dir, VALID_SECTION);
       const src = loadProjectSettings({ filePath: path });
       assert.ok(src);
       assert.equal(Object.isFrozen(src), true);
@@ -597,7 +622,7 @@ id = "r1"
   it("re-loading the same file yields structurally-equal but independent sources", () => {
     const dir = scratchDir();
     try {
-      const path = writeToml(dir, "permissions.toml", VALID_TOML);
+      const path = writePermissions(dir, VALID_SECTION);
       const a = loadProjectSettings({ filePath: path });
       const b = loadProjectSettings({ filePath: path });
       assert.ok(a && b);
@@ -614,16 +639,15 @@ id = "r1"
   it("predicates with non-string command don't match (no false positives)", () => {
     const dir = scratchDir();
     try {
-      const body = `schema_version = 1
-
-[[rule]]
-id = "needs-string-command"
-match_tool = "bash"
-match_input = { command_starts_with = "echo " }
-decision = "allow"
-reason = "needs string command"
-`;
-      const path = writeToml(dir, "permissions.toml", body);
+      const path = writePermissions(dir, {
+        schema_version: 1,
+        rule: [
+          oneRule({
+            id: "needs-string-command",
+            reason: "needs string command",
+          }),
+        ],
+      });
       const src = loadProjectSettings({ filePath: path });
       assert.ok(src);
       const rule = src.rules[0]!;
@@ -641,7 +665,7 @@ reason = "needs string command"
     // 未匹配的 bash 命令仍走 category default（execute → ask）。
     const dir = scratchDir();
     try {
-      const path = writeToml(dir, "permissions.toml", VALID_TOML);
+      const path = writePermissions(dir, VALID_SECTION);
       const project = loadProjectSettings({ filePath: path });
       assert.ok(project);
       const policy = createPermissionPolicy({ project });
@@ -679,6 +703,172 @@ reason = "needs string command"
       assert.match(denyOut.reason, /\[hard_wall\]/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("loadProjectSettings — cwd form + legacy toml fail-loud (ADR-0084 / SC5)", () => {
+  it("cwd form resolves <cwd>/.iknow/settings.json and loads its permissions section", () => {
+    const base = scratchDir();
+    try {
+      const { cwd, file } = writeProjectDir(base, VALID_SECTION);
+      const src = loadProjectSettings({ cwd });
+      assert.ok(src);
+      assert.equal(src.filePath, file);
+      assert.equal(src.rules.length, 2);
+      assert.equal(src.rules[0]?.id, "allow-bash-echo");
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("cwd form with settings.json present but no permissions section → undefined", () => {
+    const base = scratchDir();
+    try {
+      const cwd = join(base, ".iknow");
+      mkdirSync(cwd, { recursive: true });
+      writeFileSync(
+        join(cwd, "settings.json"),
+        JSON.stringify({ secrets: { enabled: true } }),
+        "utf8"
+      );
+      assert.equal(loadProjectSettings({ cwd: base }), undefined);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("legacy permissions.toml + settings permissions section both present → fail-loud typed error naming both paths", () => {
+    const base = scratchDir();
+    try {
+      const { file } = writeProjectDir(base, VALID_SECTION);
+      const toml = writeLegacyToml(base);
+      assert.throws(
+        () => loadProjectSettings({ cwd: base }),
+        (err: unknown) => {
+          if (!(err instanceof Error)) return false;
+          return (
+            err.message.includes("toml_and_json_present") &&
+            err.message.includes(toml) &&
+            err.message.includes(file)
+          );
+        }
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("legacy permissions.toml present alone (no settings permission section) → loads fine (toml is inert, one SSOT only)", () => {
+    // ADR-0084 的 fail-loud 触发条件是「两份**同时存在**」——只有退役 toml
+    // 在场时没有第二个 SSOT 可争,启动不得被拦下。
+    const base = scratchDir();
+    try {
+      const cwd = join(base, ".iknow");
+      mkdirSync(cwd, { recursive: true });
+      writeFileSync(
+        join(cwd, "settings.json"),
+        JSON.stringify({ verify: { command: "npm test" } }),
+        "utf8"
+      );
+      writeLegacyToml(base);
+      assert.equal(loadProjectSettings({ cwd: base }), undefined);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("legacy permissions.toml alone with settings.json absent → loads fine (no second SSOT to conflict with)", () => {
+    const base = scratchDir();
+    try {
+      writeLegacyToml(base);
+      assert.equal(loadProjectSettings({ cwd: base }), undefined);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("legacy permissions.toml + JSON permissions section both present → typed ProjectSettingsError carrying kind", () => {
+    const base = scratchDir();
+    try {
+      const { file } = writeProjectDir(base, VALID_SECTION);
+      const toml = writeLegacyToml(base);
+      assert.throws(
+        () => loadProjectSettings({ cwd: base }),
+        (err: unknown) => {
+          if (!(err instanceof ProjectSettingsError)) return false;
+          return (
+            err.kind === "toml_and_json_present" &&
+            err.message.includes(toml) &&
+            err.message.includes(file)
+          );
+        }
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("schema violation is a typed ProjectSettingsError with kind schema_violation", () => {
+    const dir = scratchDir();
+    try {
+      const path = writePermissions(dir, {
+        schema_version: 2,
+        rule: [oneRule({})],
+      });
+      assert.throws(
+        () => loadProjectSettings({ filePath: path }),
+        (err: unknown) =>
+          err instanceof ProjectSettingsError && err.kind === "schema_violation"
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("resolveProjectPermissionSource — 装配共用读路径", () => {
+  it("reads <projectIdentityRoot>/.iknow/settings.json and returns the project source", () => {
+    const base = scratchDir();
+    try {
+      const { file } = writeProjectDir(base, VALID_SECTION);
+      const src = resolveProjectPermissionSource({
+        projectIdentityRoot: base,
+      });
+      assert.ok(src);
+      assert.equal(src.kind, "project");
+      assert.equal(src.filePath, file);
+      assert.equal(src.rules.length, 2);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("absent settings file → undefined (built-in defaults stand)", () => {
+    const base = scratchDir();
+    try {
+      assert.equal(
+        resolveProjectPermissionSource({ projectIdentityRoot: base }),
+        undefined
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("propagates the typed fail-loud instead of swallowing it", () => {
+    const base = scratchDir();
+    try {
+      writeProjectDir(base, VALID_SECTION);
+      writeLegacyToml(base);
+      assert.throws(
+        () => resolveProjectPermissionSource({ projectIdentityRoot: base }),
+        (err: unknown) =>
+          err instanceof ProjectSettingsError &&
+          err.kind === "toml_and_json_present"
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
     }
   });
 });

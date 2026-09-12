@@ -335,7 +335,9 @@ describe("端到端:bridge postMessage 透传 agent_status 事件", () => {
       );
       expect(received.length).toBe(1);
       expect(received[0]!.lastTool).toBe("idle");
-      expect([...received[0]!.openTodoLines]).toEqual(["- [ ] e2e open task"]);
+      expect([...received[0]!.openTodoLines]).toEqual([
+        "- [ ] [t1] e2e open task",
+      ]);
 
       // 同一份现势:落盘会话里模型实际看到的栏文本含同一字段(未勾项在场、
       // 已勾项缺席)。
@@ -354,7 +356,7 @@ describe("端到端:bridge postMessage 透传 agent_status 事件", () => {
         .map((b) => (b.type === "text" ? b.text : ""))
         .join("");
       expect(barText).toContain("last_tool: idle");
-      expect(barText).toContain("- [ ] e2e open task");
+      expect(barText).toContain("- [ ] [t1] e2e open task");
       expect(barText).not.toContain("[x]");
     } finally {
       await rm(baseDir, { recursive: true, force: true });

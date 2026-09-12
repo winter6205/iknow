@@ -165,11 +165,13 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
     expect(engine.autoMemory).toBeUndefined();
   });
 
-  it("wires autoMemory from project settings.json without an injected settings object", async () => {
+  it("wires autoMemory from user settings.json without an injected settings object", async () => {
+    // ADR-0084：memory 是用户层键 → 承载文件是 <userHome>/.iknow/settings.json；
+    // 项目文件里的 memory 段会被允许名单丢弃。
     const { cwd, userHome } = await isolate();
-    await mkdir(join(cwd, ".iknow"), { recursive: true });
+    await mkdir(join(userHome, ".iknow"), { recursive: true });
     await writeFile(
-      join(cwd, ".iknow", "settings.json"),
+      join(userHome, ".iknow", "settings.json"),
       JSON.stringify({ memory: { autoExtract: true } })
     );
     const engine = await buildHarnessEngine({

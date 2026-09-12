@@ -108,6 +108,15 @@ const EXPECTED_TOOLS = [
   //（读侧内容轴,与目录轴同样无装配条件 → serve 全装配必在场;三轴顺序 = append
   //  顺序,不重排既有件)。
   "get_record",
+  // ADR-0037 Amendment 2026-09-11 (specs/agent-control-surface.md Slice A /
+  // SC1):worktree ACI 五件由 host 缝在场驱动(与 isolation.worktreeOnMutate
+  // 解耦)。session-api hub 是恒定五项全接的 host(hub.ts 两处 buildHarnessEngine
+  // 调用点),所以 serve 路径的注册表 = ACI_TOOLSET_NAMES 全长,与开关态无关。
+  "create-worktree",
+  "enter-worktree",
+  "exit-worktree",
+  "list-worktrees",
+  "remove-worktree",
 ];
 
 let baseDir: string;
@@ -128,7 +137,7 @@ afterAll(async () => {
 });
 
 describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
-  it("returns the ACI 24-tool registry (incl. todo_write + run_graph) when serve constructs without deps", async () => {
+  it("returns the full ACI registry (incl. todo_write + run_graph + the five worktree tools) when serve constructs without deps", async () => {
     const hub = new SessionHub({
       store,
       askUser: createNoAskUser(),

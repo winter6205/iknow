@@ -2,7 +2,8 @@
  * D-α V1 graph mode T2 — `settings.graph` 段（新会话默认；缺省关）。
  *
  * 纪律镜像 `settings.subagent`：drop-not-throw（非法字段丢弃、不抛）、
- * project > user 逐字段合并、全段非法/缺席 → 不产出 graph 段。
+ * 全段非法/缺席 → 不产出 graph 段。合并层（ADR-0084）：`graph` 属用户层键，
+ * 项目文件里的 graph 段被允许名单丢弃，永不覆盖 user 值。
  */
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert/strict";
@@ -72,25 +73,33 @@ describe("settings.graph — parse (D-α T2)", () => {
   });
 });
 
-describe("settings.graph — merge (project > user)", () => {
-  it("project 覆盖 user", async () => {
+describe("settings.graph — 项目层不参与（ADR-0084 允许名单）", () => {
+  it("project 的 graph 段被丢弃且发警告 → user 值胜出（非 project 覆盖）", async () => {
     const { home, cwd } = await makeSettings(
       { graph: { enabled: true } },
       { graph: { enabled: false } }
     );
-    assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      graph: { enabled: false },
-    });
+    const warnings: string[] = [];
+    assert.deepEqual(
+      loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) }),
+      { graph: { enabled: true } }
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"graph"/);
   });
 
-  it("project 非法 → 不抹掉 user 值", async () => {
+  it("project 非法 graph 值同样被丢弃 → 不抹掉 user 值", async () => {
     const { home, cwd } = await makeSettings(
       { graph: { enabled: true } },
       { graph: { enabled: 1 } }
     );
-    assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      graph: { enabled: true },
-    });
+    const warnings: string[] = [];
+    assert.deepEqual(
+      loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) }),
+      { graph: { enabled: true } }
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"graph"/);
   });
 });
 
@@ -102,7 +111,7 @@ describe("settings.graph — 初值链落到 holder", () => {
   });
 
   it("settings.graph.enabled=true → 新会话初值开", async () => {
-    const { home, cwd } = await makeSettings({}, { graph: { enabled: true } });
+    const { home, cwd } = await makeSettings({ graph: { enabled: true } }, {});
     const settings = loadIknowSettings({ home, cwd });
     assert.equal(resolveGraphMode({ settings: settings.graph }).enabled, true);
   });

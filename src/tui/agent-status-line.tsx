@@ -12,7 +12,7 @@
  */
 import type { ReactNode } from "react";
 import type { AgentStatusSnapshot } from "../harness/agent-status.js";
-import { OPEN_PREFIX } from "../harness/aci/tools/todo-write.js";
+import { parseLedger } from "../harness/aci/tools/todo-ledger.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import { clipOneLineVisual, visualWidth } from "./tool-summary.js";
 import { tuiPalette } from "./theme.js";
@@ -34,8 +34,9 @@ export function agentStatusFromEvent(
   });
 }
 
+/** 行的显示文本 = 账本语法 SSOT 解析出的 subject;非语法行原样透传。 */
 function todoBody(raw: string): string {
-  return raw.startsWith(OPEN_PREFIX) ? raw.slice(OPEN_PREFIX.length) : raw;
+  return parseLedger(raw)[0]?.subject ?? raw;
 }
 
 export function agentStatusLines(

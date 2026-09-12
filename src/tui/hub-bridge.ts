@@ -178,6 +178,17 @@ export interface TuiBridge {
   readonly listSubagents: (
     conversationId?: string
   ) => ReadonlyArray<SubagentInfo>;
+  /**
+   * Slice D / SC14: 强杀单个子代理（TUI Ctrl+X，chrome-focus 聚焦行）。
+   * 返回 true = 任务当时仍在飞（先 settle 父侧 waitFor，再对 worker 发
+   * SIGTERM）；未知 / 已终态 id、无 manager（ask surface）→ false
+   * （空操作，不抛错）。
+   *
+   * **同步取消父 turn 的 wait**：`manager.abortTask` 先以
+   * `SubAgentAbortError` 拒绝该任务的在飞 `waitFor`（SC14「父 turn 收到
+   * cancelled」），再中止 worker 子进程。见 `src/tui/subagent-kill.ts` 头注。
+   */
+  readonly abortSubagentTask: (taskId: string) => boolean;
 }
 
 export interface CreateTuiBridgeOptions {
@@ -425,6 +436,8 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     contextWindow: opts.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     // #358 T7: 子代理只读投影。无 manager（ask surface / 旧产品路径） → 空。
     listSubagents: (conversationId) => hub.listSubagents(conversationId),
+    // Slice D / SC14: 强杀出口（Ctrl+X）。hub 侧 no-op 语义 → false。
+    abortSubagentTask: (taskId) => hub.abortSubagentTask(taskId),
   };
   return Object.freeze(bridge);
 }

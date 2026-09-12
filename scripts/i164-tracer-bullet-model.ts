@@ -10,7 +10,11 @@
  *   4. 响应 `model` 字段 === 9router 改写后的上游 ID（wire 证据 settings 生效）
  *
  * 用法：`npx tsx scripts/i164-tracer-bullet-model.ts [cwd]`
- *   cwd 缺省 = process.cwd()；settings.json 读 `<cwd>/.iknow/settings.json`。
+ *   cwd 缺省 = process.cwd()；cwd 只定 env 文件（`.env` / `.env.local`）与项目层
+ *   settings 的读根 —— `llm` 是**用户层键**（ADR-0084），`loadIknowEnv` 经
+ *   `loadIknowSettings` 从 `~/.iknow/settings.json` 取 model / apiKey；项目层
+ *   `<cwd>/.iknow/settings.json` 只采纳 hooks / verify / secrets / permissions，
+ *   写在那里的 `llm` 会被丢弃。
  *
  * 失败路径（自身验收门，fixture 由调用方铺好）：
  *   - settings 无 model → `loadIknowEnv` fail-fast 抛「no LLM model configured in
@@ -157,7 +161,7 @@ async function main(): Promise<void> {
   if (!env.llm.apiKey) {
     console.error(
       "LLM mode needs API key. Set settings.llm.apiKey (literal or ${VAR} placeholder) " +
-        "in ~/.iknow/settings.json or <cwd>/.iknow/settings.json."
+        "in ~/.iknow/settings.json (llm is a user-layer key, ADR-0084)."
     );
     process.exitCode = 1;
     return;

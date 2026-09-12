@@ -123,8 +123,8 @@ describe("agent_status stream event T3: same snapshot as the injected bar", () =
     const ev2 = probe.agentStatusEvents[1]!;
     assert.equal(ev1.lastTool, "idle");
     assert.deepEqual(ev1.openTodoLines, [
-      "- [ ] alpha task",
-      "- [ ] beta task",
+      "- [ ] [t1] alpha task",
+      "- [ ] [t3] beta task",
     ]);
     assert.deepEqual(parseBar(tailBar(captured[0]!)), {
       lastTool: ev1.lastTool,
@@ -368,7 +368,7 @@ describe("agent_status stream event T3: reactive compact retry", () => {
     assert.equal(probe.agentStatusEvents.length, 2);
     const retryEv = probe.agentStatusEvents[1]!;
     assert.equal(retryEv.lastTool, "idle");
-    assert.deepEqual(retryEv.openTodoLines, ["- [ ] survive compact"]);
+    assert.deepEqual(retryEv.openTodoLines, ["- [ ] [t1] survive compact"]);
     assert.deepEqual(parseBar(tailBar(captured[1]!)), {
       lastTool: retryEv.lastTool,
       todoLines: [...retryEv.openTodoLines],

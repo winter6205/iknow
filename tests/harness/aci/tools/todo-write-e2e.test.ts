@@ -2,12 +2,12 @@
  * #440 T7: todo_write 端到端 — 真实 executor 路径 + fresh todoDir（不预存
  * todos.md 文件），覆盖：
  *
- *   a. happy path: list / add / check 三 mode 全跑通,todos.md 落盘内容
- *      形态正确（`- [ ] item` / `- [x] item` 形态持久化）
+ *   a. happy path: read / add / update 三件事全跑通,todos.md 落盘内容
+ *      形态正确（`- [ ] [tN] item` / `- [x] [tN] item` 形态持久化）
  *   b. typed-error catch 渲染契约（code-quality.md §typed-error catch 契约）：
  *      executor 对 ToolExecutionError 渲染 message 含 `[todo_write]` 前缀,
- *      保留 error.name === "ToolExecutionError" 区分,合法态（mode=list
- *      缺文件 → ""）与真实故障（empty item / no-match check / 超 64KB）
+ *      保留 error.name === "ToolExecutionError" 区分,合法态（mode=read
+ *      缺文件 → ""）与真实故障（empty item / unknown id update / 超 64KB）
  *      严格分流。schema 校验失败（mode 枚举外 / 非对象 input）走 AJV 层
  *      validation_failed,与 handler 层 ToolExecutionError execution_failed
  *      区分（typed-error catch 契约:按 kind 分流）。
@@ -69,8 +69,8 @@ function readText(payload: unknown): string {
 /**
  * 装配 todo_write 单工具真实 executor:createAciRegistry 单工厂 → reg.inner
  * 冻结快照 → createExecutor(reg.inner) → createAciExecutor 装饰层（含
- * permission policy,默认 write category → ask → todo_write list mode
- * bypass ask via code-built-in rule,add/check 在本 happy path 不触发）。
+ * permission policy,默认 write category → ask → todo_write read mode
+ * bypass ask via code-built-in rule,add/update 在本 happy path 不触发）。
  */
 function buildE2EHarness(todoDir: string): {
   readonly exec: ReturnType<typeof createAciExecutor>;
@@ -87,11 +87,11 @@ function buildE2EHarness(todoDir: string): {
 }
 
 describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
-  it("list mode 缺文件 → ok + empty string（fresh conversation 合法态）", async () => {
+  it("read mode 缺文件 → ok + empty string（fresh conversation 合法态）", async () => {
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
     const [result] = await exec.executeAll([
-      { id: "t7-list-empty", name: "todo_write", input: { mode: "list" } },
+      { id: "t7-list-empty", name: "todo_write", input: { mode: "read" } },
     ]);
     expect(result.kind).toBe("ok");
     if (result.kind === "ok") {
@@ -100,7 +100,7 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
     }
   });
 
-  it("add mode → todos.md 落盘 `- [ ] <item>` + 短 receipt `Updated todos.md`", async () => {
+  it("add mode → todos.md 落盘 `- [ ] [t1] <item>` + receipt 含新 id", async () => {
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
     const [addResult] = await exec.executeAll([
@@ -112,24 +112,25 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
     ]);
     expect(addResult.kind).toBe("ok");
     if (addResult.kind === "ok") {
-      expect(readText(addResult.payload)).toBe("Updated todos.md");
+      // SC7:回执点名新 id。
+      expect(readText(addResult.payload)).toBe("Added 1 item: t1");
     }
 
     // 落盘文件正确
     const onDisk = await readFile(join(todoDir, "todos.md"), "utf8");
-    expect(onDisk).toBe("- [ ] ship T7\n");
+    expect(onDisk).toBe("- [ ] [t1] ship T7\n");
 
-    // list mode 回读 → 同一内容
+    // read mode 回读 → 同一内容
     const [listResult] = await exec.executeAll([
-      { id: "t7-list-1", name: "todo_write", input: { mode: "list" } },
+      { id: "t7-list-1", name: "todo_write", input: { mode: "read" } },
     ]);
     expect(listResult.kind).toBe("ok");
     if (listResult.kind === "ok") {
-      expect(readText(listResult.payload)).toBe("- [ ] ship T7\n");
+      expect(readText(listResult.payload)).toBe("- [ ] [t1] ship T7\n");
     }
   });
 
-  it("check mode → 把首个 `- [ ] <item>` 翻为 `- [x] <item>`", async () => {
+  it("update mode (status=completed) → 把该 id 的行翻为 `- [x] [tN] <item>`", async () => {
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
 
@@ -142,25 +143,25 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
       },
     ]);
 
-    // check → 翻为 closed
+    // update status=completed → 翻为 closed(id 由 add 回执给出)
     const [checkResult] = await exec.executeAll([
       {
         id: "t7-check-1",
         name: "todo_write",
-        input: { mode: "check", item: "first task" },
+        input: { mode: "update", id: "t1", status: "completed" },
       },
     ]);
     expect(checkResult.kind).toBe("ok");
     if (checkResult.kind === "ok") {
-      expect(readText(checkResult.payload)).toBe("Updated todos.md");
+      expect(readText(checkResult.payload)).toBe("Updated t1: status=completed");
     }
 
     // 落盘文件正确
     const onDisk = await readFile(join(todoDir, "todos.md"), "utf8");
-    expect(onDisk).toBe("- [x] first task\n");
+    expect(onDisk).toBe("- [x] [t1] first task\n");
   });
 
-  it("happy + failure 混合: add × 2 + check first + list → 全 ok + 落盘正确", async () => {
+  it("happy 混合: add × 2 + update first + read → 全 ok + 落盘正确", async () => {
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
     const results = await exec.executeAll([
@@ -177,16 +178,16 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
       {
         id: "t7-mix-3",
         name: "todo_write",
-        input: { mode: "check", item: "first" },
+        input: { mode: "update", id: "t1", status: "completed" },
       },
-      { id: "t7-mix-4", name: "todo_write", input: { mode: "list" } },
+      { id: "t7-mix-4", name: "todo_write", input: { mode: "read" } },
     ]);
     // 全 ok
     for (const r of results) {
       expect(r.kind).toBe("ok");
     }
     const finalContent = await readFile(join(todoDir, "todos.md"), "utf8");
-    expect(finalContent).toBe("- [x] first\n- [ ] second\n");
+    expect(finalContent).toBe("- [x] [t1] first\n- [ ] [t2] second\n");
   });
 
   it("schema validation 失败: invalid mode → validation_failed (AJV 层先于 handler 拒绝)", async () => {
@@ -226,30 +227,30 @@ describe("todo_write 端到端 (T7): 真实 executor + fresh todoDir", () => {
     }
   });
 
-  it("typed-error: check no-match → execution_failed + `[todo_write] no open item matches`", async () => {
+  it("typed-error: update 未知 id → execution_failed + `[todo_write] unknown id` (SC8)", async () => {
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
     const [result] = await exec.executeAll([
       {
         id: "t7-nomatch",
         name: "todo_write",
-        input: { mode: "check", item: "ghost" },
+        input: { mode: "update", id: "t99", status: "completed" },
       },
     ]);
     expect(result.kind).toBe("execution_failed");
     if (result.kind === "execution_failed") {
       expect(result.message).toMatch(/^\[todo_write\]/);
-      expect(result.message).toContain("no open item matches");
-      expect(result.message).toContain("ghost");
+      expect(result.message).toContain("unknown id");
+      expect(result.message).toContain("t99");
     }
   });
 
   it("typed-error: 文件超 64KB → execution_failed + `file would exceed 65536 bytes`", async () => {
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
-    // 先 seed 一个接近上限的文件 (400-char items × 161 行 ≈ 65000 bytes)
+    // 先 seed 一个接近上限的文件(158 行 × ~414 字节 = 65304 bytes)
     const seedItem = "x".repeat(400);
-    for (let i = 0; i < 161; i++) {
+    for (let i = 0; i < 158; i++) {
       await exec.executeAll([
         {
           id: `t7-seed-${i}`,
@@ -324,7 +325,7 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
     // 账本必须落在 per-conversation 目录 —— 证明 conversationId 真的流到了
     // handler（断链则会写共享根 todos.md）。
     const beforeReplace = await readFile(currentPath, "utf8");
-    expect(beforeReplace).toBe("- [ ] old-step-1\n- [ ] old-step-2\n");
+    expect(beforeReplace).toBe("- [ ] [t1] old-step-1\n- [ ] [t2] old-step-2\n");
     expect(await listSnapshots(currentPath)).toHaveLength(0);
 
     // replace：整表换新。
@@ -346,9 +347,9 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
       expect(readText(replaceResult.payload)).toBe("Updated todos.md");
     }
 
-    // 现行恰好是新两行未勾项。
+    // 现行恰好是新两行未勾项(id 从 t1 重新编号 — 整表是新表)。
     expect(await readFile(currentPath, "utf8")).toBe(
-      "- [ ] new-step-1\n- [ ] new-step-2\n"
+      "- [ ] [t1] new-step-1\n- [ ] [t2] new-step-2\n"
     );
 
     // 快照落盘且内容 === replace 之前的现行全文。
@@ -360,7 +361,7 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
 
     // list 只读新现行，不含快照正文。
     const [listResult] = await exec.executeAll(
-      [{ id: "e2e-rep-list", name: "todo_write", input: { mode: "list" } }],
+      [{ id: "e2e-rep-list", name: "todo_write", input: { mode: "read" } }],
       undefined,
       undefined,
       conversationId
@@ -368,13 +369,13 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
     expect(listResult.kind).toBe("ok");
     if (listResult.kind === "ok") {
       const listed = readText(listResult.payload);
-      expect(listed).toBe("- [ ] new-step-1\n- [ ] new-step-2\n");
+      expect(listed).toBe("- [ ] [t1] new-step-1\n- [ ] [t2] new-step-2\n");
       expect(listed).not.toContain("old-step");
     }
   });
 
-  it("replace 后 add/check 语义不变：新现行上继续 add + check 首个未勾项", async () => {
-    // SC6 回归：replace 不是终态 —— 换表之后 add/check 仍在**新**现行上工作，
+  it("replace 后 add/update 语义不变：新现行上继续 add + update 首个未勾项", async () => {
+    // SC6 回归：replace 不是终态 —— 换表之后 add/update 仍在**新**现行上工作，
     // 不会误碰快照。
     const todoDir = await freshTodoDir();
     const { exec } = buildE2EHarness(todoDir);
@@ -404,7 +405,7 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
         {
           id: "e2e-ra-check",
           name: "todo_write",
-          input: { mode: "check", item: "fresh-a" },
+          input: { mode: "update", id: "t1", status: "completed" },
         },
       ],
       undefined,
@@ -414,14 +415,14 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
     for (const r of results) expect(r.kind).toBe("ok");
 
     expect(await readFile(currentPath, "utf8")).toBe(
-      "- [x] fresh-a\n- [ ] fresh-b\n- [ ] fresh-c\n"
+      "- [x] [t1] fresh-a\n- [ ] [t2] fresh-b\n- [ ] [t3] fresh-c\n"
     );
-    // 快照仍是 replace 当时的旧全文，后续 add/check 不回写快照。
+    // 快照仍是 replace 当时的旧全文，后续 add/update 不回写快照。
     const snapshots = await listSnapshots(currentPath);
     expect(snapshots).toHaveLength(1);
     expect(
       await readFile(join(dirname(currentPath), snapshots[0]), "utf8")
-    ).toBe("- [ ] stale-plan\n");
+    ).toBe("- [ ] [t1] stale-plan\n");
   });
 
   it("typed-error: replace 带 item 字段 → execution_failed + `[todo_write]` 前缀,现行不动", async () => {
@@ -468,7 +469,7 @@ describe("todo_write replace 端到端 (#903 SC6): 真实 executor + 真实 conv
     }
 
     // 失败不半写：现行保持旧内容，无快照。
-    expect(await readFile(currentPath, "utf8")).toBe("- [ ] keep-me\n");
+    expect(await readFile(currentPath, "utf8")).toBe("- [ ] [t1] keep-me\n");
     expect(await listSnapshots(currentPath)).toHaveLength(0);
   });
 });

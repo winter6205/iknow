@@ -266,7 +266,9 @@ describe("T2 ③ bar text carries facts only — no policy prose", () => {
         todoDir: tmp,
       });
       expect(text).toContain("last_tool: read_file");
-      expect(text).toContain("- [ ] open item");
+      expect(text).toContain("- [ ] [t1] open item");
+      // 完成项绝不进栏(断言强于字面形态:任何已勾标记都不该出现)。
+      expect(text).not.toContain("[x]");
       expect(text).not.toContain(IKNOW_AGENT_STATUS_READ_RULE);
       expect(text).not.toContain(TODO_WRITE_SKIP_CLAUSE);
     } finally {

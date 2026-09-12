@@ -186,7 +186,7 @@ async function main(): Promise<void> {
     // settings-model-extension：key 来源 = settings.llm.apiKey（字面或 ${VAR}）。
     console.error(
       "no API key — set settings.llm.apiKey (literal or ${VAR}) in " +
-        "~/.iknow/settings.json or <cwd>/.iknow/settings.json"
+        "~/.iknow/settings.json (llm is a user-layer key, ADR-0084)"
     );
     process.exitCode = 1;
     return;

@@ -1305,8 +1305,9 @@ describe("workspace-root-required T3 — Hub dirty-root conditional save", () =>
  * T4 (plans/worktree-isolation-model-provision.md) — the model calls the
  * `create-worktree` ACI tool through the SAME gated executor the loop
  * engine uses (executeAll carries conversationId). These tests pin:
- *   - the tool is present in the session engine's registry (switch ON) and
- *     absent when OFF;
+ *   - the tool is present in the session engine's registry whenever the host
+ *     seam is wired (the switch does NOT gate tool presence — it only arms
+ *     the mutate gate);
  *   - one tool call creates the task worktree and rebinds the session
  *     (persisted via the hub's dirty-root conditional save), so the NEXT
  *     turn's mutate lands in the worktree with the main repo zero-write;
@@ -1329,19 +1330,27 @@ describe("worktree isolation wiring (T4 — create-worktree ACI tool)", () => {
     return result;
   }
 
-  it("switch ON: the tool is registered in the session engine registry", async () => {
+  it("host seam present: the tool is registered regardless of the switch (switch only arms the gate)", async () => {
     await setSettingsIsolation(true);
     const repo = makeGitRepo();
     const { hub, conversationId } = await makeHubWithSession(repo);
     const deps = await ensure(hub, repo);
     expect(deps.registry.get("create-worktree")).toBeDefined();
 
-    // switch OFF → tool absent (OFF stays byte-identical to today)
+    // ADR-0037 Amendment 2026-09-11 (specs/agent-control-surface.md Slice A /
+    // SC1): tool presence is keyed on the host seam, not on
+    // isolation.worktreeOnMutate. The switch OFF disarms ONLY the mutate gate
+    // (see the "worktree isolation wiring (switch OFF)" block above: mutate
+    // executes, no tree, no gate message) — the tool stays registered.
     await setSettingsIsolation(false);
     const repo2 = makeGitRepo();
     const { hub: hub2 } = await makeHubWithSession(repo2);
     const deps2 = await ensure(hub2, repo2);
-    expect(deps2.registry.get("create-worktree")).toBeUndefined();
+    expect(deps2.registry.get("create-worktree")).toBeDefined();
+    expect(deps2.registry.get("list-worktrees")).toBeDefined();
+    expect(deps2.registry.get("enter-worktree")).toBeDefined();
+    expect(deps2.registry.get("exit-worktree")).toBeDefined();
+    expect(deps2.registry.get("remove-worktree")).toBeDefined();
     void conversationId;
   });
 

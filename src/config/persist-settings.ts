@@ -25,7 +25,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import {
@@ -33,9 +33,11 @@ import {
   type IknowSettingsThinking,
   type IknowSettingsThinkingEffort,
 } from "./settings.js";
-import { resolveWorkspaceRoot } from "./workspace-root.js";
 
-/** settings.json 文件名（user / project 两处共用）。 */
+/**
+ * settings.json 文件名。仅与 `<home>/.iknow/` 拼接（见
+ * `resolveThinkingSettingsPath`）：ADR-0084 起写回恒落用户层，不写项目层。
+ */
 const SETTINGS_FILENAME = "settings.json";
 
 /**
@@ -53,29 +55,23 @@ export interface MemoryPersistPatch {
   dream: boolean;
 }
 
-/** resolveThinkingSettingsPath 的注入选项（ADR-0019 D1.3 三档）。 */
+/**
+ * resolveThinkingSettingsPath 的注入选项（ADR-0084 写回落对层）。
+ *
+ * ADR-0084：thinking / memory 是**用户层键**（`llm` / `memory` 段），项目文件
+ * 不再采纳这两段（项目允许名单 = hooks / verify / secrets / permissions）。
+ * 因此写回目标恒为用户层文件 `<home>/.iknow/settings.json`，与「项目文件是否
+ * 存在」解耦 —— 旧 ADR-0019 D1.3 的「project 存在写 project」在允许名单下会把
+ * 用户层键写进一个不再被读取的项目文件（静默无效 + 污染共享仓库），故退役。
+ */
 export interface ResolveSettingsPathOptions {
-  /** 项目根，默认 process.cwd()（project 级 `<cwd>/.iknow/settings.json`）。 */
-  cwd?: string;
   /**
-   * per-root state anchor（ADR-0019 / plans/workspace-root-launch.md D1.3）——
-   * 无 project settings.json 时的写回 fallback 目标。默认
-   * `resolveWorkspaceRoot({cwd})`（T1 resolver，priority
-   * `[explicit, env, cwd]`，默认 cwd）。`persistThinkingChanges` 内部对父目录
-   * `mkdir -p`，fresh workspace 也能直接落盘。
-   */
-  workspaceRoot?: string;
-  /**
-   * 保留字段仅作向后兼容（settings.ts LoadSettingsOpts 同形签名）。T3 起不再
-   * 用作 fallback 目标 —— 三档实现中只有 cwd + workspaceRoot 两档生效。
+   * 用户 home（global config anchor，ADR-0015/0019）。写回目标 =
+   * `<home>/.iknow/settings.json`；缺省 `homedir()`（与 `loadIknowSettings`
+   * 的 user 层解析同一 SSOT，读侧写侧同源）。测试注入 tmp home 隔离真实
+   * 用户目录。
    */
   home?: string;
-  /**
-   * review-fix (H1/H2): env 槽位透传 —— 调用方缺省 workspaceRoot 时,
-   * 让 resolver 读 env SSOT(IknowEnv.workspaceRoot)而非裸 process.env。
-   * 与 build-engine 的 env SSOT fidelity 同一契约。
-   */
-  env?: Readonly<Record<string, string | undefined>>;
 }
 
 /** 普通对象（raw JSON 的顶层 / llm 层只可能是这种；排除 null / 数组）。 */
@@ -189,25 +185,21 @@ export function mergeMemoryPatch(
 }
 
 /**
- * 选择写回目标 settings 文件路径（ADR-0019 D1.3 三档，plans/
- * workspace-root-launch.md T3 acceptance）：
- *  1. project 级 `<cwd>/.iknow/settings.json` 存在 → 其路径（project 本就覆盖
- *     user，写 user 等于无效）；
- *  2. 否则 → `<workspaceRoot>/.iknow/settings.json`（per-root state anchor，
- *     mkdir -p 由 persistThinkingChanges 负责）；
- *  3. **不再** fallback 到 `<home>/.iknow/settings.json` —— 该路径是用户抱怨
- *     的 global-pollution 路径，T3 彻底杀死。目录既有性用 existsSync 探测
- *     （与 workspace-root.ts / settings.ts 惯例一致，纯 meta-query）。
+ * 选择写回目标 settings 文件路径（ADR-0084 写回落对层）：
+ *  - thinking / memory 是**用户层键**（`llm` / `memory` 段）→ 目标恒为
+ *    `<home>/.iknow/settings.json`；`home` 缺省 `homedir()`（与
+ *    `loadIknowSettings` 同一解析）。
+ *  - **不看** project 文件是否存在 —— 项目文件已不采纳 `llm` / `memory`
+ *    （ADR-0084 允许名单），写进去等于静默无效并污染共享仓库。旧 ADR-0019
+ *    D1.3 的「project 存在 → project 路径 / 否则 workspaceRoot 路径」两档
+ *    （含 `existsSync` 探测）整体退役。
+ *  - 目标目录不存在时由 `persistThinkingChanges` 内部 `mkdir -p` 兜底。
  */
 export function resolveThinkingSettingsPath(
   opts?: ResolveSettingsPathOptions
 ): string {
-  const cwd = opts?.cwd ?? process.cwd();
-  const projectFile = join(cwd, ".iknow", SETTINGS_FILENAME);
-  if (existsSync(projectFile)) return projectFile;
-  const workspaceRoot =
-    opts?.workspaceRoot ?? resolveWorkspaceRoot({ cwd, env: opts?.env });
-  return join(workspaceRoot, ".iknow", SETTINGS_FILENAME);
+  const home = opts?.home ?? homedir();
+  return join(home, ".iknow", SETTINGS_FILENAME);
 }
 
 async function persistMergedSettings(

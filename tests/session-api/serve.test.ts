@@ -202,7 +202,16 @@ describe("startSessionServe — trace health wiring", () => {
 
     // 计算与 hub.store 同一 projectDir, 占据同名 trace.jsonl 为目录 →
     // appendFileSync 必报 EISDIR。
-    const projectDir = resolveProjectSessionDir(baseDir, process.cwd());
+    // 必须镜像 serve.ts 的派生: hub 的 projectIdentityRoot 走
+    // `deriveProjectIdentityRoot({cwd: workspaceRoot})`, 本用例无 flag/env →
+    // workspaceRoot undefined → `mainCheckoutOf(process.cwd())`。cwd 是 task
+    // worktree 路径时会被折回主 checkout; 若直接用 process.cwd() 会派到另一个
+    // `<basename>-<sha1>` 文件夹(CI 平铺 checkout 下两者恰好相同 —— 这正是
+    // 该用例只在 worktree 开发时红的原因)。
+    const projectDir = resolveProjectSessionDir(
+      baseDir,
+      deriveProjectIdentityRoot({ cwd: undefined })
+    );
     const traceFile = resolveConversationTraceFilePath({
       projectDir,
       conversationId: sessionId,

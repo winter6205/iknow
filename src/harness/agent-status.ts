@@ -5,28 +5,29 @@
  *   - `buildAgentStatusText` 纯函数(无 IO、无时间 / 随机依赖),T3(TUI
  *     只读最新现势)复用同一份快照计算发事件,不与消息编码内部耦合;
  *   - `readOpenTodoLines` 只投影 `<projectDir>/<conversationId>/todos.md`
- *     里 `- [ ]` 开头的未勾行,逐字保留;文件缺席 / 空文件 / 全勾 / 读取
- *     失败 → 空列表,绝不把读失败抛进模型回合(当"无 todo 段"静默处理);
+ *     里未完成的条目(pending + in_progress,绝不含 completed),按账本语法
+ *     SSOT 规范化成带 id 的行形态(`- [ ] [tN] subject` /
+ *     `- [~] [tN] subject`);文件缺席 / 空文件 / 全完成 / 读取失败 →
+ *     空列表,绝不把读失败抛进模型回合(当"无 todo 段"静默处理);
  *     `projectDir` 在 T2 / session-folder-consolidation 起是「会话文件夹根」
  *     (`resolveProjectSessionDir(baseDir, projectIdentityRoot)`),由 chat /
  *     serve / TUI 三入口用同一对 `(baseDir, projectIdentityRoot)` 派生,保证
  *     同一会话解析到同一 projectDir(T2 关键判据);
- *   - 栏文本只承载代码算出的现势(last_tool + 未勾 todo 段),不含政策
+ *   - 栏文本只承载代码算出的现势(last_tool + 未完成 todo 段),不含政策
  *     散言 / 读规则 / 跳过条件(那些归 T2 的 system 前缀与 tool
  *     description)。空槽不广告:无未勾项时整段缺席,不印空列表。
  *
- * 本模块不改 todo_write 的 add/check/list 语义,只读文件。
+ * 本模块不改 todo_write 的 read/add/update/replace 语义（ADR-0085 三件事 +
+ * replace 整表逃生口；`check` 已并入 update）,只读文件。
  */
 import { readFile } from "node:fs/promises";
 import type { AnthropicNativeMessage } from "./model-adapter/types.js";
-import {
-  OPEN_PREFIX,
-  resolveConversationTodoPath,
-} from "./aci/tools/todo-write.js";
+import { formatLedgerLine, parseLedger } from "./aci/tools/todo-ledger.js";
+import { resolveConversationTodoPath } from "./aci/tools/todo-write.js";
 
-// 未勾行锚点:直接复用账本写入方 todo-write.ts 导出的 OPEN_PREFIX —— 写入
-// 与投影共享同一真源(含尾随空格,只匹配写入方产出的行形态,不误匹配裸
-// "- [ ]" 拼接的畸形行)。todo 账本文件名同理(TODOS_FILE)。
+// 投影锚点:账本语法 SSOT 是 todo-ledger.ts 的 parseLedger / formatLedgerLine
+// —— 投影不再按行前缀逐字透传,而是解析后重建规范行(带 id、状态标记正确),
+// 写入侧与投影侧共用同一份语法定义,畸形 / 遗留行也走同一条解析路径。
 
 /**
  * 本回合尚未跑过工具时的 last_tool 值(ADR-0028 Consequences:
@@ -38,7 +39,7 @@ export const AGENT_STATUS_IDLE_TOOL = "idle";
 export interface AgentStatusSnapshot {
   /** 上一跳刚完成的工具名(run 作用域);本回合尚未跑过工具 = "idle"。 */
   readonly lastTool: string;
-  /** todos.md 里逐字投影的未勾 `- [ ]` 行;无未勾项 = 空列表。 */
+  /** 未完成条目的规范账本行(pending + in_progress,带 id);无 = 空列表。 */
   readonly openTodoLines: ReadonlyArray<string>;
 }
 
@@ -115,12 +116,21 @@ export function agentStatusFromMessages(
 }
 
 /**
- * IO 读取器:读 `<todoDir>/[<conversationId>/]todos.md`,只投影 `- [ ]`
- * 开头的未勾行(逐字,保序)。conversationId 在场 → 读该会话自己的账本
- * (与 todo_write 写入侧同一 SSOT 解析);缺席 → 根 todos.md(向后兼容)。
- * 文件缺席 / 空文件 / 全勾 / 任何读取失败 → 空列表;绝不 throw
- * (调用侧是即将进行的模型回合,读失败按"无 todo 段"处理,无 fallback
- * 噪音)。
+ * 未完成条目 → 规范账本行(保序)。completed 不投影 —— 状态栏只报没做完的。
+ */
+function projectUnfinishedItems(content: string): ReadonlyArray<string> {
+  return parseLedger(content)
+    .filter((i) => i.status !== "completed")
+    .map((i) => formatLedgerLine(i).trimEnd());
+}
+
+/**
+ * IO 读取器:读 `<todoDir>/[<conversationId>/]todos.md`,只投影未完成的
+ * 条目(pending + in_progress,保序),按账本语法 SSOT 规范化成带 id 的行。
+ * conversationId 在场 → 读该会话自己的账本(与 todo_write 写入侧同一 SSOT
+ * 解析);缺席 → 根 todos.md(向后兼容)。文件缺席 / 空文件 / 全完成 /
+ * 任何读取失败 → 空列表;绝不 throw(调用侧是即将进行的模型回合,读失败
+ * 按"无 todo 段"处理,无 fallback 噪音)。
  */
 export async function readOpenTodoLines(
   todoDir: string,
@@ -132,7 +142,7 @@ export async function readOpenTodoLines(
   });
   try {
     const content = await readFile(filePath, "utf8");
-    return content.split("\n").filter((line) => line.startsWith(OPEN_PREFIX));
+    return projectUnfinishedItems(content);
   } catch {
     // EXIT: 任何读失败(含 ENOENT / EACCES / ENOTDIR)→ 空列表
     // (ADR-0028 静默收敛:读失败当"无 todo 段",绝不抛进模型回合)

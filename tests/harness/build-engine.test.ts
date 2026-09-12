@@ -12,6 +12,7 @@ import {
   afterAll,
   afterEach,
   beforeAll,
+  beforeEach,
   describe,
   expect,
   it,
@@ -23,9 +24,41 @@ import {
 // 这些用例同属 CI 排除集（SSOT: vitest.ci-excludes.ts），本地仍需可过。
 vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { spawn as spawnChild } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// ADR-0085 SC9: worker 子进程用假 child 顶替 —— 断言面 = 子进程 stdin 上的
+// wire 字节（build-engine → manager → envelope），不真起 worker。
+// 只遮 `createDefaultSubAgentSpawn` 一个缝：同文件其余用例要么注入自己的
+// manager，要么（secrets guard / rebind 的 bash）真起子进程 —— 若改遮
+// `node:child_process`，那些用例会被一并打掉。未设 override 时透传真实实现。
+const workerSpawnOverride = vi.hoisted(() => ({
+  current: undefined as ((...args: readonly unknown[]) => unknown) | undefined,
+}));
+vi.mock("../../src/harness/subagent/spawn.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("../../src/harness/subagent/spawn.ts")
+    >();
+  return {
+    ...actual,
+    createDefaultSubAgentSpawn: (
+      ...args: Parameters<typeof actual.createDefaultSubAgentSpawn>
+    ): ReturnType<typeof actual.createDefaultSubAgentSpawn> => {
+      const real = actual.createDefaultSubAgentSpawn(...args);
+      const override = workerSpawnOverride.current;
+      if (override === undefined) return real;
+      return (() => override()) as unknown as ReturnType<
+        typeof actual.createDefaultSubAgentSpawn
+      >;
+    },
+  };
+});
+
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import type { ChildProcess } from "node:child_process";
+import { spawn as spawnChild } from "node:child_process";
 import {
   buildHarnessEngine as rawBuildHarnessEngine,
   type BuiltEngine,
@@ -97,9 +130,10 @@ const EXPECTED_TOOLS = [
   // 才在场;ask 缺 subagentManager → 12 件)。
   "spawn_subagent",
   "subagent_result",
-  // #440 双 Stream 并集 append-only:14→17。todo_write（T4，全装配 chat surface
-  // + todoDir 在场才入注册表；ask + worker 装配路径不传 todoDir → 不在场）+
-  // MCP resources 两件（T11，全装配 chat surface 才在场；ask 缺 mcpManager → 不在场）。
+  // #440 双 Stream 并集 append-only:14→17。todo_write（T4，chat surface +
+  // todoDir 在场才入注册表；ask 不传 todoDir → 不在场。worker 在父会话经
+  // envelope 透传 todoLedger 时**在场**，见 ADR-0085 / SC9）+ MCP resources
+  // 两件（T11，全装配 chat surface 才在场；ask 缺 mcpManager → 不在场）。
   "todo_write",
   "list_mcp_resources",
   "read_mcp_resource",
@@ -332,6 +366,46 @@ function makeCapturingSubagentManager(sandboxRoot: string): {
     },
   });
   return { manager, payloads };
+}
+
+/** SC9 用例内造的假 child（beforeEach 清空）。 */
+const fakeWorkerChildren: ChildProcess[] = [];
+
+/**
+ * ADR-0085 SC9: 假 child —— `spawn()` 的返回值，它的 stdin 收 manager 写的
+ * envelope（真实 wire 字节）。stdout/stderr 也换成 PassThrough，避免任何
+ * 真实子进程 I/O。
+ */
+function makeFakeWorkerChild(): ChildProcess {
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    pid: 70001,
+    kill: vi.fn(() => true),
+    exitCode: null as number | null,
+    signalCode: null as NodeJS.Signals | null,
+  }) as unknown as ChildProcess;
+  fakeWorkerChildren.push(child);
+  return child;
+}
+
+/**
+ * 最近一次 worker spawn 写到 stdin 的 envelope（真实 wire 字节）。
+ * 读的是**假 child 自己**的 stdin —— 不看 spawn 调用记录（`calls[0]` 只是
+ * argv 首项，child 是返回值）。
+ */
+function firstWorkerEnvelope(): WorkerEnvelope | undefined {
+  for (const child of fakeWorkerChildren) {
+    const stdin = (child as unknown as { stdin?: PassThrough }).stdin;
+    if (!stdin || typeof stdin.read !== "function") continue;
+    const chunk = stdin.read() as Buffer | null;
+    if (!chunk) continue;
+    const text = chunk.toString("utf8").trim();
+    if (text.length === 0) continue;
+    return JSON.parse(text) as WorkerEnvelope;
+  }
+  return undefined;
 }
 
 async function runSpawn(
@@ -1696,6 +1770,87 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
 });
 
 // --------------------------------------------------------------------------
+// ADR-0085 / SC9 — build-engine 把 host-injected todoDir 透传给
+// createSubAgentManager，manager spawn 期落 `todoLedger` 进 worker envelope。
+//
+// 这是「父会话账本 → worker 工具面」整条链的装配侧端点：build-engine 是
+// todoDir 的 host 注入点（与主 loop registry 同一值），manager 是落线点，
+// worker 是消费点（worker-tool-surface.test.ts 钉住消费侧）。
+// --------------------------------------------------------------------------
+
+describe("buildHarnessEngine — ADR-0085 SC9 worker 账本锚点", () => {
+  beforeEach(() => {
+    fakeWorkerChildren.length = 0;
+    workerSpawnOverride.current = () => makeFakeWorkerChild();
+  });
+
+  afterEach(() => {
+    // 透传真实 spawn —— 不留全局 override 影响同文件其余用例。
+    workerSpawnOverride.current = undefined;
+  });
+
+  it("todoDir 在场 → spawn envelope 带 {projectDir: todoDir, conversationId: def 的父会话}", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-sc9-eng-"));
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-sc9-todo"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        todoDir: join(root, "projects", "repo-deadbeef"),
+        isolation: { worktreeOnMutate: false },
+      });
+
+      const result = await runSpawn(
+        built,
+        { task: "share the ledger", wait: false },
+        "conv-sc9-parent"
+      );
+      expect(result.kind).toBe("ok");
+      // 断言面 = 子进程 stdin 上的 wire 字节（build-engine → manager →
+      // envelope 全链的真实出口；inject 一个 manager 会绕过本测试要证的
+      // todoDir 透传）。
+      const payload = firstWorkerEnvelope();
+      expect(payload?.todoLedger).toEqual({
+        projectDir: join(root, "projects", "repo-deadbeef"),
+        conversationId: "conv-sc9-parent",
+      });
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("todoDir 缺席 → envelope 无 todoLedger（旧 wire 形态，零变化）", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-sc9-eng-off-"));
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-sc9-todo-off"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        isolation: { worktreeOnMutate: false },
+      });
+
+      const result = await runSpawn(
+        built,
+        { task: "no ledger", wait: false },
+        "conv-sc9-parent"
+      );
+      expect(result.kind).toBe("ok");
+      const payload = firstWorkerEnvelope();
+      expect(payload).toBeDefined();
+      expect(payload && "todoLedger" in payload).toBe(false);
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// --------------------------------------------------------------------------
 // T4 (plans/worktree-live-task-root.md §6 T4) — build-engine wires the live
 // taskRoot holder + single writer at the host seam boundary. T4 初期无消费
 // 方；specs/skill-load-write-root.md 起 BuiltEngine 透出该 cell（skill 正文
@@ -1704,6 +1859,76 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
 // --------------------------------------------------------------------------
 
 describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", () => {
+  it("host seams present + isolation OFF → worktree tools registered (seam-keyed), gate passthrough", async () => {
+    // ADR-0037 Amendment 2026-09-11 (specs/agent-control-surface.md Slice A /
+    // SC1): the worktree ACI tools are keyed on host-seam presence, NOT on
+    // `isolation.worktreeOnMutate`. The switch arms ONLY the mutate gate.
+    // Pins both halves: (a) registry membership follows the seams; (b) no
+    // interception happens with the switch OFF (write lands, nothing blocked).
+    const root = await mkdtemp(join(tmpdir(), "iknow-slice-a-off-"));
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-slice-a-off"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: false } },
+        worktreeIsolation: {
+          provision: async () => root,
+          worktreeEnter: async () => ({
+            path: root,
+            receipt: `entered task worktree: ${root}`,
+          }),
+          worktreeExit: async () => root,
+          worktreeList: async () => [],
+          worktreeRemove: async () => ({
+            label: undefined,
+            conversationId: "conv-1",
+            path: root,
+            branch: "iknow/task-conv-1",
+            head: "deadbeef",
+            branchDeleted: false,
+          }),
+        },
+      });
+
+      // (a) seam presence ⇒ tool present, independent of the switch.
+      expect(built.deps.registry.get("create-worktree")).toBeDefined();
+      expect(built.deps.registry.get("list-worktrees")).toBeDefined();
+      expect(built.deps.registry.get("enter-worktree")).toBeDefined();
+      expect(built.deps.registry.get("exit-worktree")).toBeDefined();
+      expect(built.deps.registry.get("remove-worktree")).toBeDefined();
+      // The gate itself stays disarmed: BuiltEngine.isolationOn mirrors
+      // `isolationEnabled` (host && switch), so OFF never arms it.
+      expect(built.isolationOn).toBe(false);
+
+      // (b) gate OFF passthrough: an unbound main-repo mutate executes.
+      const [result] = await built.deps.executor.executeAll(
+        [
+          {
+            id: "slice-a-write",
+            name: "write_file",
+            input: { path: "slice-a.txt", content: "gate is off" },
+          },
+        ],
+        undefined,
+        undefined,
+        "conv-1"
+      );
+      expect(result.kind).toBe("ok");
+      expect(result.message ?? "").not.toContain("[worktree_isolation]");
+      const { readFile } = await import("node:fs/promises");
+      expect(await readFile(join(root, "slice-a.txt"), "utf8")).toBe(
+        "gate is off"
+      );
+
+      await built.shutdown?.();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("isolation OFF → wrap is NOT installed (T3 baseline preserved)", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-t4-off-"));
     try {

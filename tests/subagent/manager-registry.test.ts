@@ -258,4 +258,34 @@ describe("createSubagentManagerRegistry", () => {
     expect(notices).toEqual(["first-a", "second-a"]);
     unsubscribe();
   });
+
+  it("fans one hard kill to the owning manager and reports it (Slice D / SC14)", () => {
+    const firstAbort = vi.fn(() => false);
+    const secondAbort = vi.fn((taskId: string) => taskId === "second-live");
+    const first = readManager(() => []);
+    const second = readManager(() => []);
+    const registry = createSubagentManagerRegistry();
+    registry.register({ ...first, abortTask: firstAbort });
+    registry.register({ ...second, abortTask: secondAbort });
+
+    expect(registry.abortTask("second-live")).toBe(true);
+    // taskId 归属唯一 manager：第一个报告 false 后继续问下一个。
+    expect(firstAbort).toHaveBeenCalledWith("second-live");
+    expect(secondAbort).toHaveBeenCalledWith("second-live");
+  });
+
+  it("returns false when no manager claims the task (unknown id / no abort seam)", () => {
+    const withSeam = readManager(() => []);
+    const registry = createSubagentManagerRegistry();
+    registry.register({ ...withSeam, abortTask: () => false });
+
+    expect(registry.abortTask("ghost")).toBe(false);
+    // 无 manager（ask surface）→ 空操作，不抛错。
+    const empty = createSubagentManagerRegistry();
+    expect(empty.abortTask("ghost")).toBe(false);
+    // 结构兼容的 wake/read-only view（无 abort seam）→ 跳过，不伪造 kill。
+    const seamLess = createSubagentManagerRegistry();
+    seamLess.register(readManager(() => []));
+    expect(seamLess.abortTask("ghost")).toBe(false);
+  });
 });

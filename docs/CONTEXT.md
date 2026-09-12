@@ -104,8 +104,8 @@ _Avoid_: 结束态两行（秒数一行、计数一行）；`思考了 N 秒`；
 **skill-load display projection**: 给人看的 skill-load 是 `loading skill <name>` 芯片，外加用户 remainder（若有）；SKILL 正文只留在进模型的 skill-load 信封里，不画成 user 气泡。
 _Avoid_: 把 `[skill-load name=]` 正文当作用户键入；加载技能；turn 结束后用落盘信封替换显示占位
 
-**chrome focus**: TUI 底栏焦点环 `input` | 子代理行 | `graph` 的单一 reducer；有子代理行时 Down 先入该列，再 graph；Up 反向回到输入框。
-_Avoid_: 只有 graph 抢 Down；焦点落在 ContextBar；子代理面板不可聚焦；位置行进焦点环
+**chrome focus**: TUI 底栏焦点环 `input` | 子代理行 | `graph` 的单一 reducer；有子代理行时 Down 先入该列，再 graph；Up 反向回到输入框。子代理行聚焦时 **Ctrl+X** 强杀该子代理（父 turn 收到 cancelled）；无聚焦则空操作。
+_Avoid_: 只有 graph 抢 Down；焦点落在 ContextBar；子代理面板不可聚焦；位置行进焦点环；Enter 钻进子代理会话；第二套 picker 文案
 
 **session location chrome（会话位置行）**: TUI 底栏在 ContextBar 之下**常驻一行** `路径 · 分支`；绑 task worktree 只换同一行的路径。子代理与 Graph 在它下面（两者都有时子代理在上）；不进焦点环、不进模型消息、不带 dirty/diff。
 _Avoid_: 绑树才出现；未绑树 0 行；用显隐当「在不在树上」；常驻第二行 dirty/diff；子代理画在位置行上面
@@ -257,11 +257,11 @@ _Avoid_: 按 token 或字数切窗；拆开一对 `tool_use`/`tool_result`
 **任务摘录**: 仅 compact 发生时从当时 `messages` 现抽现贴的最近至多 3 句合格用户任务原话；不进会话字段；goal 功能续跑时不贴。
 _Avoid_: taskFocus；当前任务卡；每回合或压缩时让 LLM 填卡；把摘录自己再抽成用户任务句
 
-**状态栏**: 每次即将调模型前由 harness 算出的现势，以 **user** 消息追加在 `messages` 末尾（含同一用户回合内 tool loop）；旧栏留在历史上，不替换、不写 `deps.system`；UI 只读同一份，in-flight 只给 TUI。字段仅 `last_tool`（本回合尚未跑过工具则为 idle）以及有未勾项时才出现的 todo 段（只投影现行 todo 账本的 `- [ ]` 行；文件缺席 / 空 / 全勾则整段缺席）。ADR-0028；todo 账本见 ADR-0046。
+**状态栏**: 每次即将调模型前由 harness 算出的现势，以 **user** 消息追加在 `messages` 末尾（含同一用户回合内 tool loop）；旧栏留在历史上，不替换、不写 `deps.system`；UI 只读同一份，in-flight 只给 TUI。字段仅 `last_tool`（本回合尚未跑过工具则为 idle）以及有未勾项时才出现的 todo 段（只投影现行 todo 账本的未完成项，带 id 的 `- [ ]` / `- [~]` 行；文件缺席 / 空 / 全勾则整段缺席）。ADR-0028；todo 账本见 ADR-0085。
 _Avoid_: 每轮替换/删除旧栏；写进 system；把 TUI 当主物；与 context usage (display) 混名；让 LLM 维护栏；把栏接入 verify；每跳塞任务摘录/cwd/技能清单；把调模型时的 in-flight 写进栏；taskFocus / 当前任务卡；空清单仍印 todo 段；全勾后栏里带 `- [x]`；用「本跳是否调用过 todo_write」当在场条件；政策散文进栏；把 **环境现势**（cwd/git/diff）塞进本栏；replace 当跳把新列表再灌进 messages
 
-**todo 账本**: 主会话可修订的任务清单（`todo_write`）；允许开跑前写一版全局步骤，执行中用 replace 换成新的现行列表。现行文件是会话目录里的 `todos.md`；replace 时旧文件改名留在同目录当快照，不当待办。不是图、不是 Plan Mode、不是 Dynamic Pipeline。ADR-0046。
-_Avoid_: 把清单并进 `run_graph`；进 plan 相位写计划再执行；同一文件里两套未勾项并存；换表当跳把全文追加进 messages；删掉旧账本文件
+**todo 账本**: 同一**主会话**里可修订的任务清单；每条有稳定 id，状态 `pending` | `in_progress` | `completed`。三件事：批量添加、按 id 更新（含完成与删除）、读取现行。子代理与父共用这份账本（worker 可读取/更新，添加仅父会话）。`replace` 只是整表逃生口。现行文件仍是会话目录 `todos.md`。ADR-0085（修正 `0046-todo-ledger-replace-and-snapshots` 主路径）。
+_Avoid_: 把清单并进 `run_graph`；进 plan 相位写计划再执行；同一文件里两套未勾项并存；换表当跳把全文追加进 messages；删掉旧账本文件；跨主会话共用账本；worker 静默丢弃 add
 
 **环境现势**: 给人看的工作区快照（至少 cwd / git 摘要 / diff 要点），投放在 TUI（或等价）人读面；**不**写入 ADR-0028 状态栏 user 消息，也**不**充当 verify 输入。#655（G1）验收画像锁定。
 _Avoid_: 状态栏；agent-status；把 cwd/git/diff 每跳追加进 `messages`；与 context usage (display) 混名
@@ -293,7 +293,7 @@ _Avoid_: `goal ?? taskFocus ?? query`；`goal.text ?? query`；把 evidenceConte
 **streaming arm**: LLM 客户端默认流式臂（`IKNOW_LLM_STREAM` 值域 `on | off`，默认 `on`，`env.ts` SSOT），`off` 回退非流式臂；原生 SSE 事件不出 adapter 边界，收敛为 `HarnessStreamEvent` 最小集（`text_delta` / `tool_call_start`，`src/harness/stream.ts`），终态经 SDK `finalMessage()` -> `interpretMessage`（SSOT）落为同形 `AssistantTurnResult`。
 _Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 事件逸出 adapter 边界
 
-**project stack defaults (SSOT boundary) — settings 单承载收敛 (ADR-0015)**: LLM 配置收敛到 `~/.iknow/settings.json`（user）+ `<cwd>/.iknow/settings.json`（project 覆盖 user）单承载（ADR-0015 / `plans/settings-model-extension.md`）。
+**project stack defaults (SSOT boundary) — settings 单承载收敛 (ADR-0015)**: LLM 配置收敛到 `~/.iknow/settings.json`（user）+ `<cwd>/.iknow/settings.json`（project）双文件（ADR-0015）。项目层**不再**任意覆盖 user：只采纳允许名单（ADR-0084）。
 
 - `settings.llm.model`（字面值，唯一来源，trim 后非空串）: 模型路由 ID 的全局可寻址位；缺失 → `loadIknowEnv` fail-fast 抛「no LLM model configured in settings.llm.model」，不再有 hardcoded 兜底。
 - `settings.llm.apiKey`（字面或 `${VAR}` / `$VAR` 占位符）: 唯一 key 承载。字面 → 原样；占位符 → 经 `expandPlaceholders` 从 `process.env[VAR]` 优先 / `.env.local` / `.env` 兜底解析。解析不到 → undefined（消费点守卫抛「no API key configured」）。
@@ -301,6 +301,9 @@ _Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 
   **退役机制**: `IKNOW_LLM_MODEL`（env 覆盖 model）已不再读取；`IKNOW_LLM_API_KEY_ENV`（env 覆盖 key 变量名）已不再读取；`LlmEnv.apiKeyEnv` 字段已删。`IKNOW_LLM_BASE_URL` 仍读（provider/baseUrl 是 9router 项目级决策，保留为代码默认 fallback）。`.env.local` 退化为「占位符真值源」（`.env.local` 持有 `${VAR}` 指向的变量值本身），不再是 model / key 变量名的配置口。
   **保留机制**: provider = 9router、`baseUrl` 代码默认 `http://localhost:20128/v1` 焊进 `env.ts`（`IKNOW_LLM_BASE_URL` 仍读）；非 LLM 字段（context window / maxTurns / web 端点 / mcp 超时等）的 `process.env > .env.local > .env` 优先级链不变。
   _Avoid_: 在 `.env.local` 重复声明已与代码默认一致的非密项；把 model 切换当「每机配置」而非「项目栈决策」
+
+**项目 settings 允许名单**: 共享项目 `<仓>/.iknow/settings.json` 只采纳 `hooks` / `verify` / `secrets` / `permissions`；其余顶层段丢弃、不覆盖用户层。权限 SSOT = 项目 `settings.permissions`（原 toml rule DSL），用户层不接；toml 与 json 并存 fail-loud。ADR-0084。
+_Avoid_: 第三层 local settings；项目文件盖 isolation / llm / memory / subagent；用户 settings 写 permissions；继续读 `permissions.toml` 当并存 SSOT
 
 **前景 spawn / 后景 spawn**: `spawn_subagent` 的两种结果契约（#361 裁决，ADR-0014）——前景（`wait:true`，默认）= handler 同步等 worker 到终态、envelope 直接作 tool_result 返回，当回合闭环；后景（`wait:false`，显式选项）= 立即返回 task_id，结果经 host 唤醒/drain 通道回传。worker 恒为独立进程，与前景/后景正交。
 _Avoid_: 把前景/后景与进程隔离混同；泛化的"同步/异步"；把 V1"立即返回 task_id"当默认契约（已被反转）
@@ -464,11 +467,11 @@ _Avoid_: 改 `last_message_preview` 语义（它仍是逐字最后一条消息�
 **crash 取证无条件**: `subagent_spawn`/`subagent_state_change`/`subagent_stop` 生命周期事件与 stderr 指针文件在所有产品入口（含 chat REPL）落盘，与主循环 content trace 的入口开关解耦。ADR-0035（对 ADR-0003 D10 的范围修正）。
 _Avoid_: 把生命周期事件绑回 `--trace-out`；把该扩张理解为 content trace 进 chat REPL
 
-**worktree isolation mode**（`settings.isolation.worktreeOnMutate`，默认 OFF）: 全局隔离开关——OFF 时会话行为与今日完全一致；ON 时会话可只读主仓，写路径 mutate 被门禁拦下（门禁**从不**自动建树），由模型调 `create-worktree` ACI 工具建 task worktree（含 task 分支）并 **session worktree rebind** 到该树，此后本会话 mutate 只进该根；已绑定则放行，不建第二棵树。只在启动加载点读取一次；config 层不读 git、不持会话状态；改绑不隐式重载 project settings。建树/绑定失败与主仓非 git 仓库一律 fail-closed：typed 可见错误，不静默放行写主仓。task worktree / 分支名已存在 → 报错不覆盖。ADR-0037（对 ADR-0023「worktree/多根只读推迟」的窄面 reopen；git worktree ≠ product workspace 多根）。条件 ACI 同族另有 `list-worktrees` / `remove-worktree`；`create-worktree` 可带 **task worktree label**（`specs/task-worktree-lifecycle.md`）。
-_Avoid_: 默认 ON；门禁自动建树（auto-provision）；把建树当 host 职责而非模型调工具；把 git worktree 混成 serve 主根或 `workspaceRoot` 多根；config 层读 git 或持会话状态；改绑后隐式重载 settings；建树失败静默写主仓；只建树不改绑会话；同名树静默覆盖
+**worktree isolation mode**（`settings.isolation.worktreeOnMutate`，默认 OFF）: **用户层**写门禁开关——ON 时未绑树的 mutate 被拦（门禁从不自动建树）；OFF 时无门禁、主仓可写。工作树 ACI（create/enter/exit/list/remove）在 host 缝在场时**常注册**，不跟本开关捆死。`create-worktree` / enter / exit 成功才 **session worktree rebind**；bash `git worktree add` 不是 rebind。只在启动加载点读取一次。ADR-0037（amended `specs/agent-control-surface.md`）。
+_Avoid_: 默认 ON；门禁自动建树（auto-provision）；把工具在场等同门禁已武装；把建树当 host 职责而非模型调工具；把 git worktree 混成 serve 主根或 `workspaceRoot` 多根；config 层读 git 或持会话状态；改绑后隐式重载 settings；建树失败静默写主仓；只建树不改绑会话；同名树静默覆盖；项目文件覆盖 isolation
 
-**session worktree rebind**: worktree isolation mode ON 下 `create-worktree`（或 enter / exit）ACI 工具成功后，把**当前会话**生效的根锚（cwd / `workspaceRoot` 取值）切到本会话 task worktree 的动作；只影响本会话——不 checkout 其它会话 / 其它 worktree 的 HEAD，push / 开 PR 不拖动主仓或其它 worktree 当前分支。同会话重复调工具幂等（一棵树、一个 task 分支，不跑第二次 `git worktree add`）。**生效边界：同一轮（run）内对下一波 tool calls 生效**——建树成功的当波 mutate 仍按波快照旧根裁决，下一波起写与工具 cwd 落进新树；不需要操作员再发消息或 `/continue`。发现与回收走同族条件工具 `list-worktrees` / `remove-worktree`（ADR-0037；`specs/task-worktree-lifecycle.md`）。
-_Avoid_: 改绑波及其它会话；把 rebind 当 serve 主根重绑（ADR-0023 unbound / recents 语义不变）；让 rebind 触发 settings 重载；把改绑后的根错当成 product workspace 多根；把 rebind 说成 mutate 门禁的自动副作用；要求操作员再发一条消息才生效（same-turn 生效语义已随活 taskRoot 落地）
+**session worktree rebind**: `create-worktree`（或 enter / exit）ACI 成功后，把**当前会话**的活 `taskRoot` 切到该树（exit 切回主仓）。与 isolation ON/OFF 无关：OFF 也可改绑；ON 只决定未绑树时写是否被门禁拦。bash `git worktree add` 不是本动作。只影响本会话。同一轮内对下一波 tool calls 生效。
+_Avoid_: 改绑波及其它会话；把 rebind 当 serve 主根重绑；把 bash 建树当成 rebind；让 rebind 触发 settings 重载；要求操作员再发一条消息才生效
 
 **task worktree label**: 给人/模型认树的 kebab 目录名。有合法 label 时叶子就是 `<slug>`，conversationId 不进文件夹（写在 gitdir sidecar；历史 `<slug>--<conversationId>` 仍可反演）。非法或缺席则叶子仍是纯 conversationId。同名已存在 → 建树失败不覆盖。
 _Avoid_: 把 label 当 conversationId；用 session `title` / `goal` 当 slug；把 uuid 写进文件夹名当展示面
@@ -497,7 +500,7 @@ _Avoid_: workspaceRoot；task worktree；process.cwd()
 **SessionRoots**: 会话四角色根 SSOT（`src/harness/session-roots.ts`）——`productRoot` / `projectIdentityRoot` / `taskRoot` / `installRoot` 一次按角色归位，消费者只消费返回值，不再自行拼 `join(cwd, '.iknow', …)`、读 `process.cwd()` 或自行判断 task worktree。`resolveSessionRoots` 是纯函数：不读 git、不碰文件系统、不持会话状态，缺根 / 空白 / 相对 / 不可规范化一律 typed fail-closed（`SessionRootError`），**绝不**回退 `process.cwd()`。
 _Avoid_: 「三根」（实为四角色）；把 `resolveSessionRoots` 当有 IO 的解析器；让消费者自行拼 `.iknow` 路径；用 `workspaceRoot` 顶替角色分工
 
-**projectIdentityRoot**: 用户此刻在做的那个项目的身份根，宿主启动时钉一次、跨 session worktree rebind 不变——**项目身份只问它**：rules / 项目 `AGENTS.md` / `permissions.toml` / 项目 skills 发现 / 子代理继承的身份根 / 记忆库命名空间名。与 `productRoot` 分开是因为宿主按 ADR-0019 从 `workspaceRoot` 取 `productRoot`，而 `--workspace-root <dir>` 重定向档下 `dir ≠ cwd`；取值由装配层决定（宿主钉的值优先，缺席时 `mainCheckoutOf(cwd)`），校验在 SessionRoots。
+**projectIdentityRoot**: 用户此刻在做的那个项目的身份根，宿主启动时钉一次、跨 session worktree rebind 不变——**项目身份只问它**：rules / 项目 `AGENTS.md` / 项目 `settings.permissions` / 项目 skills 发现 / 子代理继承的身份根 / 记忆库命名空间名。与 `productRoot` 分开是因为宿主按 ADR-0019 从 `workspaceRoot` 取 `productRoot`，而 `--workspace-root <dir>` 重定向档下 `dir ≠ cwd`；取值由装配层决定（宿主钉的值优先，缺席时 `mainCheckoutOf(cwd)`），校验在 SessionRoots。
 _Avoid_: productRoot；workspaceRoot；cwd；task worktree（身份根不可以是 task worktree，钉与不钉两条路径都过 `mainCheckoutOf`）
 
 **installRoot**: iknow 运行时自身的安装位置（子代理 worker bootstrap 解析 tsx 与自身依赖），锚 `import.meta.url` 向上找最近 `package.json`，**不**锚任何会话根或 `process.cwd()`；进程级缓存、刻意不给 reset 缝（测试换安装根走 `opts.installRoot` 注入）。≠ 用户项目的 `node_modules`，故裸 task worktree 上 worker 仍能起。
@@ -518,7 +521,7 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **状态栏 vs context usage (display)**: 状态栏是给模型的现势快照；context usage (display) 是给人看的 token 用量条
 - **状态栏 vs 环境现势**: 状态栏给模型（`last_tool` + open todos）；环境现势给人（cwd/git/diff），不进状态栏 user 消息（#655）
 - **会话位置行 vs 环境现势**: 位置行是常驻身份（主仓/分支/树）；环境现势可以更宽，本轮位置行不带 dirty/diff
-- **todo 账本 vs 状态栏**: 账本是磁盘现行 `todos.md`；栏只投影其未勾行。replace 当跳不另灌列表；后续回合靠栏，不靠把快照拼进 messages（ADR-0046）
+- **todo 账本 vs 状态栏**: 账本是磁盘现行 `todos.md`；栏只投影未完成项。replace 当跳不另灌列表；后续回合靠栏，不靠把快照拼进 messages（ADR-0085）
 - **todo 账本 vs run_graph**: 轻规划/清单在主 loop 的 todo；DAG 与长程管线在图上，不把 todo 当管线
 - **活图状态 vs graph mode**: 活图是会话里那张图的权威账本；graph mode 只是能否调用 `run_graph` 的 overlay。关 overlay 不停用账本，直到 `/reset` 或会话结束（ADR-0051）
 - **活图状态 vs run_graph**: `run_graph` 是往活图上跑/修订的入口；单次 tool_result 不是跨回合真相

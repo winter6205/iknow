@@ -12,8 +12,8 @@
  *    tool / pretooluse / pattern 非法 → 只丢该字段、规则保留。
  *  - pattern 只做字符串透传：正则可编译性由 hook router 构造期判定（SC6，
  *    坏正则剔除 + onHookError），settings 层不预判。
- *  - 覆盖纪律与 llm/secrets 段一致：per-field project > user；project 非法值
- *    不覆盖 user 合法值。
+ *  - 覆盖纪律与其它允许名单键（如 secrets）一致：per-field project > user；
+ *    project 非法值不覆盖 user 合法值。
  *  - 返回结构深 frozen（immutable 纪律）。
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
@@ -328,15 +328,18 @@ describe("settings.hooks — 覆盖纪律（per-field project > user）", () => 
     });
   });
 
-  it("project 无 hooks 段 → user 段完整保留（逐层合并）", async () => {
+  it("project 无 hooks 段 → user 段完整保留；project 的 llm（允许名单外）被丢弃", async () => {
     const { home, cwd } = await makeSettings(
       { hooks: { enabled: true, rules: [validRule()] } },
       { llm: { maxTurns: 5 } }
     );
-    assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { maxTurns: 5 },
-      hooks: { enabled: true, rules: [validRule()] },
-    });
+    const warnings: string[] = [];
+    assert.deepEqual(
+      loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) }),
+      { hooks: { enabled: true, rules: [validRule()] } }
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"llm"/);
   });
 
   it("project hooks 非法（整层）→ 不覆盖 user 合法段", async () => {

@@ -72,6 +72,7 @@ import {
   wrapModalLines,
   type PermissionAnswer,
 } from "./modal.js";
+import { abortForegroundTurnOnQuit } from "./quit-abort.js";
 import {
   DRAFT_SESSION_ID,
   appendInputHistory,
@@ -172,6 +173,13 @@ import { ContextBar } from "./context-bar.js";
 // Open/Close 仍是它的职责；不与三环焦点切换混）。
 import { type ChromeFocus, reduceChromeFocus } from "./chrome-focus.js";
 import { SubagentIdentityStrip } from "./subagent-identity-strip.js";
+// Slice D / SC14: Ctrl+X 强杀聚焦子代理 —— 纯分派模块（行序与面板同源）。
+import { dispatchKillFocusedSubagent } from "./subagent-kill.js";
+// Slice D / SC14: 两行投影行账（chrome 预算入账，SSOT 与 strip 渲染同源）。
+import {
+  isLiveSubagent,
+  subagentMessageRowCount,
+} from "./subagent-message-lines.js";
 // #647 T3 / ADR-0028:agent 现势显示(与 ContextBar 的 context usage 显示是
 // 两回事,命名刻意区分)—— 只读 agent_status 流事件的最新一份快照。
 import {
@@ -404,6 +412,29 @@ function panelSlotRows(rows: number | undefined): number {
   return n > 0 ? n + 1 : 0;
 }
 
+/**
+ * 零默认槽位求和（缺省 / 显式 0 都按 0 计）。`chromeReserveRows` 的尾部槽
+ * 位已有 6 个，逐项写 `(x ?? 0)` 会把这一个组合函数推过 S5 复杂度硬门；
+ * 折叠进本 helper 让新增槽位只增一行调用，不再逐个加分支。
+ */
+function zeroDefaultRows(rows: ReadonlyArray<number | undefined>): number {
+  let total = 0;
+  for (const n of rows) total += n ?? 0;
+  return total;
+}
+
+/**
+ * Slice D / SC14：会话消息内两行投影的 chrome 行账（SSOT 派生自投影）。
+ * 非 chat 视图不渲染该条 → 0；无 live 子代理 → 0（组件渲染 null）。
+ * 抽成模块级函数而非 TuiApp 内联三元，避免给 TuiApp 增分支（S5 硬门）。
+ */
+function subagentRowBudget(
+  view: TuiView,
+  subagents: ReadonlyArray<SubagentInfo>
+): number {
+  return view === "chat" ? subagentMessageRowCount(subagents) : 0;
+}
+
 export function chromeReserveRows(opts: {
   readonly noticeRows: number;
   readonly inputHintRows: number;
@@ -416,6 +447,14 @@ export function chromeReserveRows(opts: {
   /** 子代理状态面板行数。产品路径恒 0：面板画在输入框下方，不挤 transcript /
    *   不把输入框往上顶。函数仍接受显式值（单测 / 旧调用兼容）。 */
   readonly panelRows?: number;
+  /**
+   * Slice D / SC14：会话消息内子代理两行投影的实际行数
+   * （`subagentMessageRowCount(subagents)`，每 live 子代理 2 行）。产品路径
+   * 必须入账：该条画在输入框上方，行数随 live 子代理数增长；不入账时
+   * chrome 总高超出 rows，Yoga 会把两行块压成一行（文本重叠，实测
+   * tests/tui/subagent-kill-key.test.tsx）。缺省 0 → 无 live 不占行。
+   */
+  readonly subagentRows?: number;
   /** agent 现势显示行数（agentStatusLines 实际产出，0-1）。缺省 0 →
    *   不占行（无快照 / 组件渲染 null / 旧行为兼容）。 */
   readonly agentStatusRows?: number;
@@ -441,11 +480,16 @@ export function chromeReserveRows(opts: {
     panelSlotRows(opts.modalRows) +
     panelSlotRows(opts.pickerRows) +
     panelSlotRows(opts.compactRows) + // compact 进度面板 + marginBottom
-    (opts.panelRows ?? 0) +
-    (opts.agentStatusRows ?? 0) +
-    (opts.envPaneRows ?? 0) +
-    (opts.verifyRows ?? 0) +
-    (opts.graphRows ?? 0) +
+    // 零默认槽位（缺省 0 = 不占行）求和：逐项 `?? 0` 会把本函数复杂度推过
+    // S5 硬门，故共用一个折叠 helper（与 panelSlotRows 同款动机）。
+    zeroDefaultRows([
+      opts.panelRows,
+      opts.subagentRows,
+      opts.agentStatusRows,
+      opts.envPaneRows,
+      opts.verifyRows,
+      opts.graphRows,
+    ]) +
     (opts.bgLine ? 1 : 0); // 后台运行标记行
   return (
     1 + // top headroom
@@ -1213,9 +1257,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 终态窗口过后 subagents 数组仍可能保留该条但 Date.parse 距 now > 窗口 →
   // hasRecentEndedSubagent=false → subagentWatch=false → effect cleanup 停表,
   // 不浪费 1Hz 轮询。
-  const hasLiveSubagent = subagents.some(
-    (s) => s.state === "starting" || s.state === "running"
-  );
+  const hasLiveSubagent = subagents.some(isLiveSubagent);
   const hasRecentEndedSubagent = subagents.some((s) => {
     if (s.endedAt === undefined) return false;
     const ageMs = Date.now() - Date.parse(s.endedAt);
@@ -1300,9 +1342,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 子代理行数」（starting + running；与 projectSubagentLines 投影同源口径）。
   // 用于 reduceChromeFocus 的 subagentCount 与 SubagentPanel 的 focusedRow
   // 越界 clamp。
-  const liveSubagentCount = subagents.filter(
-    (s) => s.state === "starting" || s.state === "running"
-  ).length;
+  const liveSubagentCount = subagents.filter(isLiveSubagent).length;
   // plans T7：chrome-focus 焦点 clamp —— subagent 行数变化（live 子代理退出
   // / 新增 / 完成窗口过期）时，chromeFocus.kind === "subagent" 的 row 可能
   // 越界。Reducer 在 key press 时做 clamp，但本 effect 兜底无键位下的 stale
@@ -1980,6 +2020,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       });
       return;
     }
+    // SC12 / plan task 7：先 abort 当前前台 turn 再收尾 —— 前景
+    // spawn_subagent(wait:true) 的 inflight promise 会一直等到子代理 per-task
+    // 墙钟（缺省 7200s），不 abort 就等于退出挂起。后台会话不动（同一次
+    // /quit 的二次确认分支仍负责等它们落盘）。链路见 quit-abort.ts 头注。
+    abortForegroundTurnOnQuit({ session: active, aborters: aborters.current });
     await Promise.allSettled([...inflightPromises.current]);
     props.onQuit?.(active.conversationId);
     if (!renderer.isDestroyed) renderer.destroy();
@@ -1988,6 +2033,44 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   /** Ctrl+O：折叠态翻转（thinkingExpanded），语义与 /thinking 开关无关。 */
   function toggleThinkingFold(): void {
     setThinkingExpanded((prev) => !prev);
+  }
+
+  /**
+   * Ctrl+C 打断分支体：running-fg → abort 该会话前台 turn（canInterrupt
+   * 是唯一判据，与 /quit / Esc 同源）；否则只出提示，不伪造打断。
+   */
+  function interruptForegroundTurn(): void {
+    if (canInterrupt(active)) {
+      const id = active.conversationId;
+      const controller =
+        id === undefined ? undefined : aborters.current.get(id);
+      if (controller !== undefined) {
+        controller.abort();
+      }
+      return;
+    }
+    setNotice({
+      lines: ["Ctrl+C：无前台运行中的 turn；/quit 退出。"],
+    });
+  }
+
+  /**
+   * Ctrl+X 分支体（spec Slice D / SC14–SC15）：强杀 chrome-focus 聚焦的
+   * live 子代理。无聚焦 / 陈旧行（子代理刚终态、clamp 尚未跑）→ 纯函数回
+   * `kind:"none"` → 空操作，不抛错、不伪造 taskId。行→taskId 映射与
+   * SubagentPanel 的 focusedRow 同为 live 行序（见 subagent-kill.ts 头注）。
+   */
+  function killFocusedSubagent(): void {
+    const kill = dispatchKillFocusedSubagent(chromeFocus, subagents);
+    if (kill.kind !== "kill") return;
+    const aborted = props.bridge.abortSubagentTask(kill.taskId);
+    setNotice({
+      lines: [
+        aborted
+          ? `已强杀子代理 ${kill.role ?? kill.taskId}。`
+          : `子代理 ${kill.role ?? kill.taskId} 已不在运行。`,
+      ],
+    });
   }
 
   /** T6：打开 L3 回退锚点选择器（/rewind 与双 Esc 共用路径）。
@@ -2596,18 +2679,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         );
         return;
       }
-      if (canInterrupt(active)) {
-        const id = active.conversationId;
-        const controller =
-          id === undefined ? undefined : aborters.current.get(id);
-        if (controller !== undefined) {
-          controller.abort();
-        }
-      } else {
-        setNotice({
-          lines: ["Ctrl+C：无前台运行中的 turn；/quit 退出。"],
-        });
-      }
+      interruptForegroundTurn();
+      return;
+    }
+    // Ctrl+X：强杀 chrome-focus 聚焦的 live 子代理（spec Slice D / SC14）。
+    // 判键留在 handler（S5：handler 只做键位分派，分支体在 helper 内）。
+    if (e.ctrl && e.name === "x") {
+      killFocusedSubagent();
       return;
     }
     if (view !== "chat") return;
@@ -2923,6 +3001,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             ? compactProgressRows()
             : 0,
         panelRows: 0,
+        // Slice D / SC14：两行投影画在输入框上方 → 必须入账，否则 chrome
+        // 溢出把每个 2 行块压成 1 行（行内文本重叠）。
+        subagentRows: subagentRowBudget(view, subagents),
         agentStatusRows: agentStatusRowBudget,
         envPaneRows: envPaneRowBudget,
         verifyRows: verifyRowBudget,
@@ -3085,9 +3166,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       {view === "chat" && (
         <VerifyBannerStrip slot={verifySlot} mode={verifyMode} cols={cols} />
       )}
-      {/* plans/tui-chrome-interaction.md T7 —— 子代理身份条（immediately
-          above the prompt）。live 子代理 catalog id 用 `· ` 连接，无 task 文本。
-          不入 chrome 行账（永远单行，按 cols 视觉宽度截断；live === 0 → 不渲染）。
+      {/* plans/tui-chrome-interaction.md T7 + Slice D / SC14 —— 子代理身份条
+          （immediately above the prompt）。每个 live 子代理两行（role 行 +
+          dim taskPreview 行），live === 0 → 不渲染。行数**入 chrome 行账**
+          （`subagentRowBudget` → `chromeReserveRows.subagentRows`，
+          每 live 子代理 2 行）—— 不入账时两行块会被 Yoga 压成一行。
           activeToolLabel 已剥除 `▣ 子代理`（dual render 移除）；identity strip
           + SubagentPanel 双轨表达 live 子代理状态。JSX 顺序 = 视觉顺序：
           本条必须在 <PromptInput> 之前。 */}

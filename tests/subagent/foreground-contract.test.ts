@@ -34,6 +34,10 @@ import { drainPendingSubagents } from "../../src/harness/subagent/host-drain.ts"
 import { createSpawnSubAgentTool } from "../../src/harness/subagent/spawn-subagent-tool.ts";
 import { ToolExecutionError } from "../../src/harness/errors.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
+// SC14 归因测用真 registry + 真 executor —— 归因链的 executor 段不可 fake
+// （fake 会把「executor 如何归一 message」变成测试自己写的同义反复）。
+import { createRegistry } from "../../src/harness/tools/registry.ts";
+import { createExecutor } from "../../src/harness/tools/executor.ts";
 
 /** PER_TASK_TIMEOUT_MS 默认 2 小时(契约 T13; #358 spec Assumptions 1)。 */
 const PER_TASK_TIMEOUT_MS_DEFAULT = 120 * 60 * 1000;
@@ -245,10 +249,12 @@ describe("SC4: wait:true tool_result 带 task_id + tmp_root", () => {
   });
 
   it("failure tool_result 同样含非空 locator", async () => {
+    // SC13 之后 reason=timeout 不再是 ok 数据，故本条用非超时失败
+    // （crashed）认证「失败 envelope 仍带 locator」这个原不变式。
     const failedEnvelope: SubAgentEnvelope = {
       status: "failed",
-      reason: "timeout",
-      summary: "timeout after 5000ms",
+      reason: "crashed",
+      summary: "worker exited with code 3",
       result: "",
       ...locator,
     };
@@ -269,11 +275,13 @@ describe("SC4: wait:true tool_result 带 task_id + tmp_root", () => {
 });
 
 describe("C5: wait:true 失败 envelope 作 ok 返回; abort → execution_failed:cancelled", () => {
-  it("wait:true + 失败 envelope → handler 解析为 envelope (status failed)", async () => {
+  it("wait:true + 非超时失败 envelope（crashed）→ handler 解析为 envelope (status failed)", async () => {
+    // SC13 边界：只有墙钟超时改判非 ok；crashed / maxTurnsExceeded /
+    // protocolError 是「任务结局是数据」，仍走 ok envelope（C5）。
     const failedEnvelope: SubAgentEnvelope = {
       status: "failed",
-      reason: "timeout",
-      summary: "timeout after 5000ms",
+      reason: "crashed",
+      summary: "worker exited with code 3",
       result: "",
     };
     const fakeManager = baseManager({
@@ -287,7 +295,27 @@ describe("C5: wait:true 失败 envelope 作 ok 返回; abort → execution_faile
       wait: true,
     })) as SubAgentEnvelope;
     expect(out.status).toBe("failed");
-    expect(out.reason).toBe("timeout");
+    expect(out.reason).toBe("crashed");
+  });
+
+  it("maxTurnsExceeded 同样保持 ok 数据（非墙钟，不误伤）", async () => {
+    const failedEnvelope: SubAgentEnvelope = {
+      status: "failed",
+      reason: "maxTurnsExceeded",
+      summary: "max turns exceeded",
+      result: "",
+    };
+    const fakeManager = baseManager({
+      spawn: () => ({ taskId: "tid" }),
+      waitFor: async () => failedEnvelope,
+    });
+    const tool = createSpawnSubAgentTool({ manager: fakeManager });
+    const out = (await tool.handler({
+      task: "t",
+      wait: true,
+    })) as SubAgentEnvelope;
+    expect(out.status).toBe("failed");
+    expect(out.reason).toBe("maxTurnsExceeded");
   });
 
   it("wait:true + 调用侧 abort → ToolExecutionError (归因 cancelled)", async () => {
@@ -323,7 +351,9 @@ describe("C5: wait:true 失败 envelope 作 ok 返回; abort → execution_faile
     expect(caught).toBeInstanceOf(ToolExecutionError);
   });
 
-  it("wait:true + WaitTimeoutError + queryBuffer running → timeout envelope 作 ok", async () => {
+  it("wait:true + WaitTimeoutError + queryBuffer running → ToolExecutionError（SC13：不得为 ok）", async () => {
+    // SC13 / plan task 7：墙钟到期时 worker 未终态，没有可读的终态交差 ——
+    // 父可见 tool result kind 必须非 ok，模型才能把它与「跑完但失败」区分。
     const fakeManager = baseManager({
       spawn: () => ({ taskId: "tid" }),
       queryBuffer: () => ({ status: "running" }) as const,
@@ -332,14 +362,178 @@ describe("C5: wait:true 失败 envelope 作 ok 返回; abort → execution_faile
       },
     });
     const tool = createSpawnSubAgentTool({ manager: fakeManager });
-    const out = (await tool.handler({
-      task: "t",
-      wait: true,
-    })) as SubAgentEnvelope;
-    expect(out.status).toBe("failed");
-    expect(out.reason).toBe("timeout");
+    let caught: unknown;
+    try {
+      await tool.handler({ task: "t", wait: true });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ToolExecutionError);
+    const message = (caught as ToolExecutionError).message;
+    // 模型必须能读出 taskId + 超时事实。
+    expect(message).toContain("tid");
+    expect(message).toContain("wall-clock timeout");
+    // 不得撞 loop-engine 的整回合停因字面量（loop-engine.ts:1605-1618）——
+    // 撞了会把单个子任务的墙钟误升级为整回合 cancelled / timeout。
+    expect(message).not.toBe("cancelled");
+    expect(message).not.toBe("timeout");
   });
 });
+
+/**
+ * SC14 全链路归因（真 manager + 真 executor，不 fake 归因链上的任何一臂）：
+ *
+ *   操作员强杀（abortTask）→ waitFor reject SubAgentAbortError
+ *   → handler 转 ToolExecutionError（操作员强杀文本）
+ *   → executor 因 `outerSignal.aborted === false` **不**归一，message 原样
+ *   透出（要归一成严格 `"cancelled"` 需要调用方 signal 真 abort，强杀不是）
+ *   → 模型读到的就是那句「task X 被操作员杀掉，没有完成结果」。
+ *
+ * 反面锚点（SC13 不回归）：同一条链的墙钟臂（worker SIGTERM 收尾 →
+ * reason:"timeout" 信封）仍给 `"wall-clock timeout"` 归因；调用侧 abort 臂
+ * （Ctrl+C）仍归一为严格 `"cancelled"`。三种归因互不撞脸。
+ */
+describe("SC14: 操作员强杀 → 父可见归因是 cancelled（不是 timeout）", () => {
+  function makeLiveWorkerManager(taskTimeoutMs: number): SubAgentManager {
+    return createSubAgentManager({
+      spawn: makeLiveSpawnFactory(),
+      taskTimeoutMs,
+    });
+  }
+
+  /** 与 LoopEngineDeps 的调用形态同形：真实 name/input + 调用方 signal。 */
+  const spawnCall = {
+    id: "call-1",
+    name: "spawn_subagent",
+    input: { task: "hang", wait: true },
+  } as const;
+
+  it("abortTask → ToolExecutionError（操作员强杀文本），且不是墙钟归因", async () => {
+    const mgr = makeLiveWorkerManager(60_000);
+    const tool = createSpawnSubAgentTool({ manager: mgr });
+    // 与生产同形：操作员强杀不 abort 调用方 signal（那是 Ctrl+C / quit 的事）。
+    const signal = new AbortController().signal;
+    const executor = createExecutor(createRegistry([tool]));
+
+    const pending = executor.executeAll([spawnCall], signal);
+    // 等 spawn 真发生（child 在场）再强杀，模拟操作员在 running 行按 Ctrl+X。
+    const live = await waitForActive(mgr);
+    expect(live.length).toBe(1);
+    expect(mgr.abortTask(live[0]!)).toBe(true);
+
+    const [result] = await pending;
+    expect(result!.kind).toBe("execution_failed");
+    const failed = result as { kind: "execution_failed"; message: string };
+    // 模型可见归因：识别为 cancelled，且能读出是操作员杀的（不是超时）。
+    expect(failed.message).toContain("cancelled");
+    expect(failed.message).toContain("operator killed");
+    expect(failed.message).toContain(live[0]!);
+    expect(failed.message).not.toContain("wall-clock timeout");
+    // loop-engine.computeToolStopFlags 的整回合判据是 strict-equal：撞字面量
+    // 会把「一个子任务被强杀」误升级成整回合 stop。
+    expect(failed.message).not.toBe("cancelled");
+    expect(failed.message).not.toBe("timeout");
+    await mgr.shutdown();
+  }, 30_000);
+
+  it("SC13 不回归：真墙钟到期仍归因 wall-clock timeout（不是 cancelled）", async () => {
+    // 真 manager 的 per-task 钟到点 → 写 reason:"timeout" 信封 + SIGTERM；
+    // 与操作员强杀走不同代码路径（timeoutTimer），归因必须保持 timeout。
+    const mgr = makeLiveWorkerManager(400);
+    const tool = createSpawnSubAgentTool({ manager: mgr });
+    const executor = createExecutor(createRegistry([tool]));
+
+    const [result] = await executor.executeAll(
+      [spawnCall],
+      new AbortController().signal
+    );
+    expect(result!.kind).toBe("execution_failed");
+    const failed = result as { kind: "execution_failed"; message: string };
+    expect(failed.message).toContain("wall-clock timeout");
+    expect(failed.message).not.toContain("operator killed");
+    expect(failed.message).not.toBe("cancelled");
+    await mgr.shutdown();
+  }, 30_000);
+
+  it("SC14 回归锚点：worker 收到 SIGTERM 写回 reason:timeout 信封时，归因仍是强杀而不是墙钟", async () => {
+    // 忠实复刻真 worker 的 SIGTERM 收尾（worker.ts:881-944）：真 worker 收到
+    // SIGTERM 会 abort("subagent-timeout") → 自跑收尾轮 → 写回 reason:"timeout"
+    // 的失败信封。修复前 abortTask 只发 SIGTERM、从不 settle 在飞 waitFor，
+    // 父侧只能拿到这个 timeout 信封 —— 强杀被读成墙钟到期。修复后拒绝先于
+    // SIGTERM 发生，信封再写回也不改变归因。
+    const worker = makeSigtermEpilogueWorkerSpawn();
+    const mgr = createSubAgentManager({
+      spawn: worker.spawn,
+      taskTimeoutMs: 60_000, // 墙钟 timer 远未到点：归因只可能来自强杀路径
+    });
+    const tool = createSpawnSubAgentTool({ manager: mgr });
+    const executor = createExecutor(createRegistry([tool]));
+
+    const pending = executor.executeAll(
+      [spawnCall],
+      new AbortController().signal
+    );
+    await worker.ready; // 等 handler 装好（真 worker 同样在 run() 前进场）
+    const live = await waitForActive(mgr);
+    expect(live.length).toBe(1);
+    expect(mgr.abortTask(live[0]!)).toBe(true);
+
+    const [result] = await pending;
+    expect(result!.kind).toBe("execution_failed");
+    const failed = result as { kind: "execution_failed"; message: string };
+    expect(failed.message).toContain("operator killed");
+    expect(failed.message).not.toContain("wall-clock timeout");
+    await mgr.shutdown();
+  }, 30_000);
+});
+
+/**
+ * 忠实 SIGTERM 收尾 worker：收到 SIGTERM 写回 `reason:"timeout"` 失败信封后
+ * 退出 0（worker.ts:938-944 的同形最小复刻）。stderr 的 READY 是就绪握手 ——
+ * 真 worker 在 run() 之前就装好 handler（worker.ts:885），探针/测试必须等
+ * handler 就位再杀，否则测到的是默认信号处置而非收尾路径。
+ */
+function makeSigtermEpilogueWorkerSpawn(): {
+  spawn: SubAgentSpawn;
+  ready: Promise<void>;
+} {
+  const script = [
+    `process.on("SIGTERM", () => {`,
+    `  const line = JSON.stringify({ status: "failed", reason: "timeout",`,
+    `    summary: "SIGTERM epilogue: worker wrote reason=timeout envelope",`,
+    `    result: "" });`,
+    `  process.stdout.write(line + "\\n", () => process.exit(0));`,
+    `});`,
+    `process.stderr.write("READY\\n");`,
+    `setInterval(() => {}, 1e6);`,
+  ].join("\n");
+  let resolveReady: () => void = () => {};
+  const ready = new Promise<void>((resolve) => {
+    resolveReady = resolve;
+  });
+  const spawnFn: SubAgentSpawn = () => {
+    const child = spawn(process.execPath, ["-e", script], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (chunk.toString("utf8").includes("READY")) resolveReady();
+    });
+    return child;
+  };
+  return { spawn: spawnFn, ready };
+}
+
+/** 轮询至 manager 有 live 任务（executor 的 spawn 是异步派发的一跳）。 */
+async function waitForActive(
+  mgr: SubAgentManager
+): Promise<ReadonlyArray<string>> {
+  for (let i = 0; i < 200; i++) {
+    const active = mgr.listActive();
+    if (active.length > 0) return active;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return mgr.listActive();
+}
 
 describe("T13: PER_TASK_TIMEOUT_MS 默认 2 小时", () => {
   it("PER_TASK_TIMEOUT_MS = 7_200_000 (契约 7200s, spec Assumptions 1)", () => {

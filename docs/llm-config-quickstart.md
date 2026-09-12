@@ -1,13 +1,14 @@
 # iknow LLM 配置快速上手 — settings.json 单承载（ADR-0015）
 
 > 本文件是 `.env.local` 模板 + `settings.json` 模板的落地文档。合并后从 PR 文件列表可见。
-> SSOT = ADR-0015（`docs/adr/0015-llm-config-settings-single-source.md`）。
+> SSOT = ADR-0015（`docs/adr/0015-llm-config-settings-single-source.md`）+ ADR-0084
+> （`docs/adr/0084-project-settings-allowlist-and-permissions.md`；项目 settings 允许名单）。
 
 ---
 
 ## 一、一句话总结
 
-**所有模型 / 密钥配置都写在 `settings.json` 一个地方**（`~/.iknow/settings.json` 全局 + `<cwd>/.iknow/settings.json` 项目覆盖）。`.env.local` 退化为**纯 env var 装载器**——只负责提供占位符 `${VAR}` 的真值，不再直接当配置口。
+**所有模型 / 密钥配置都写在 `settings.json` 一个地方，且只写用户层 `~/.iknow/settings.json`**。共享项目层 `<cwd>/.iknow/settings.json` 只采纳 `hooks` / `verify` / `secrets` / `permissions` 四段；`llm`（以及 `web` / `isolation` / `memory` / `subagent` / `lsp` / `loop` / `graph`）是**用户层键**，写进项目文件会被丢弃且不覆盖用户值，启动时打警告（ADR-0084）。`.env.local` 退化为**纯 env var 装载器**——只负责提供占位符 `${VAR}` 的真值，不再直接当配置口。
 
 ---
 
@@ -45,7 +46,7 @@ IKNOW_LLM_STREAM=on            # 流式臂开关 on|off，默认 on
 
 ---
 
-## 三、`settings.json` 模板（`~/.iknow/settings.json` 或 `<cwd>/.iknow/settings.json`）
+## 三、`settings.json` 模板（只写用户层 `~/.iknow/settings.json`）
 
 ```json
 {
@@ -64,12 +65,14 @@ IKNOW_LLM_STREAM=on            # 流式臂开关 on|off，默认 on
 - **`apiKey`**：两种写法二选一——
   - 占位符（推荐）：`"${ANTHROPIC_AUTH_TOKEN}"`，解析时从 `process.env[VAR]` > `.env.local` > `.env` 找真值；
   - 字面值：`"sk-..."` 直接落 key（不依赖 env，但 key 会进 settings 文件）。
-  - 不写 → `undefined`，消费点守卫抛「LLM mode needs API key. Set settings.llm.apiKey (literal or ${VAR} placeholder)...」。
+  - 不写 → `undefined`，消费点守卫抛「LLM mode needs API key. Set settings.llm.apiKey (literal or ${VAR} placeholder) in ~/.iknow/settings.json. llm is a user-layer key (ADR-0084)...」。
 - **`fallback`**（可选）：模型 fallback 路由 ID 数组，用户自配，代码不预置。
+
+> **层级归属（ADR-0084）**：以下 `llm` / `web` 两段都是**用户层键**——只写 `~/.iknow/settings.json`。项目文件 `<cwd>/.iknow/settings.json` 只采纳 `hooks` / `verify` / `secrets` / `permissions`，项目文件里的 `llm` / `web` 段被丢弃（`filterProjectSettingsKeys`，`src/config/settings.ts`）、不覆盖用户值，启动打 `[settings] project settings key "..." ignored` 警告。
 
 ### 3.1 `settings.json` schema 全字段参考
 
-`settings.json` 实际只承载 **`llm` 层与 `web` 层**，且只接受下表中的字段（`parseLlm` / `parseWeb` 逐字段校验，非法值丢弃不抛错）。字段来自 `src/config/settings.ts` 的 `IknowSettingsLlm` / `IknowSettingsWeb`（SSOT，勿以本表为准而以代码为准）。
+用户层 `settings.json` 实际只承载 **`llm` 层与 `web` 层**，且只接受下表中的字段（`parseLlm` / `parseWeb` 逐字段校验，非法值丢弃不抛错）。字段来自 `src/config/settings.ts` 的 `IknowSettingsLlm` / `IknowSettingsWeb`（SSOT，勿以本表为准而以代码为准）。
 
 | 字段路径                       | 类型                                              | 默认（未配）        | 说明                                                                                                                                                                                                                                                                                                                                                         |
 | ------------------------------ | ------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -108,7 +111,7 @@ IKNOW_LLM_STREAM=on            # 流式臂开关 on|off，默认 on
 
 > **关于「热更新」**：settings.json 是**热更新生效**的 —— `src/config/settings-watch.ts`（`fs.watch` + `fs.watchFile`，100ms debounce）监听 `~/.iknow/settings.json` 与 `<cwd>/.iknow/settings.json`，改动后下一轮 postMessage 即以新 env 调 LLM。**热更新生效字段仅限白名单 9 项**——`model` / `apiKey` / `thinking` / `thinkingEffort` / `fallback` / `baseUrl` / `maxOutputTokens` / `temperature` / `stream`（即 `createAdapterFromEnv` 的全部入参面，详 `src/harness/build-engine.ts:124-142`）；不在白名单的字段，如 `llm.compress.contextWindow` / `llm.compress.thresholdTokens`（loop-engine `compress` 配置，hub 热重建不重跑）、`llm.maxTurns`（loop-engine `maxTurns`，同款原因）、`chat.showThinking` / `web.searchUrl` / `web.proxy` / `mcp.connectTimeoutMs`（装配期/`IknowEnv` 其它臂，非 adapter 入参）等，**改完需重启进程**才生效。reload 失败（坏 JSON / model 缺失 / apiKey 解析失败）→ **保留旧 env**（不崩进程，默认写 stderr `[settings-hot-reload] reload failed: ...`）。TUI chat 路径已接入：ContextBar 的 model 名与 thinking 基线实时刷新。`.env.local` / `.env` 同链路热重读（`loadIknowEnv` 每次 reload 重读）。
 >
-> **关于「反向通道 / 面板写回」**：运行时 `/thinking` / `/effort` 面板 **Esc 保存退出**会写回 `settings.json`（project 级文件存在写 project，否则写 user 级；合并 llm 子树，apiKey/model/secrets 等其它字段原样保留），写回不触发自身 reload（sha256 self-write 哨兵内容哈希命中即跳过，防回环；PR #413 文件 → 运行时单向通道不变）；写回失败（EACCES / 磁盘满 / 序列化失败）→ TUI notice 提示，in-memory override 保留、不 crash。面板内 Enter 固定 / Space-Tab 预览不落盘；重启后回到 settings.json（或默认）值。
+> **关于「反向通道 / 面板写回」**：运行时 `/thinking` / `/effort` 面板 **Esc 保存退出**会写回 `settings.json`（ADR-0084 写回落对层：`thinking` / `effort` / `memory` 都是用户层键，**恒写用户层 `~/.iknow/settings.json`**，与项目文件是否存在无关；合并 llm 子树，apiKey/model/secrets 等其它字段原样保留），写回不触发自身 reload（sha256 self-write 哨兵内容哈希命中即跳过，防回环；PR #413 文件 → 运行时单向通道不变）；写回失败（EACCES / 磁盘满 / 序列化失败）→ TUI notice 提示，in-memory override 保留、不 crash。面板内 Enter 固定 / Space-Tab 预览不落盘；重启后回到 settings.json（或默认）值。
 
 ---
 
@@ -144,7 +147,7 @@ IKNOW_LLM_TEMPERATURE=0
 IKNOW_LLM_STREAM=on
 ```
 
-**`<cwd>/.iknow/settings.json`（项目级，已 gitignore）补 model + apiKey 占位符：**
+**`~/.iknow/settings.json`（用户层）补 model + apiKey 占位符：**
 
 ```json
 {
@@ -155,8 +158,10 @@ IKNOW_LLM_STREAM=on
 }
 ```
 
+> `llm` 是用户层键（ADR-0084）——写进 `<cwd>/.iknow/settings.json` 会被丢弃、不生效。
+
 - `llm.model` 走字面值（env 已退役，ADR-0015）；MiniMax-M3 = 1M context 最新模型，支持 tool use / streaming / thinking。备选 `MiniMax-M2.7` / `MiniMax-M2.5` / `MiniMax-M2.1` / `MiniMax-M2` / `-highspeed` 变体。
-- `llm.apiKey` 用 `${MINIMAX_API_KEY}` 占位符 → `expandPlaceholders` 从 `process.env > .env.local > .env` 链解析真值（`src/config/env.ts:495-498`）。
+- `llm.apiKey` 用 `${MINIMAX_API_KEY}` 占位符 → `expandPlaceholders`（`src/config/env.ts`）经 `resolveValueFromFilename` 按 `process.env[VAR] > .env.local > .env` 优先级解析真值；文件侧 `fileMap` 由 `loadIknowEnv` 内的 `parseEnvFile` 合并构造（不引行号，避免随代码漂移）。
 - 变量名不强制 `MINIMAX_API_KEY`：写什么变量名都行，settings.json 和 `.env.local` 里对齐即可（如 `"${ANTHROPIC_AUTH_TOKEN}"` + `ANTHROPIC_AUTH_TOKEN=<key>` 也可）。
 
 **其它 Anthropic 兼容 endpoint（同一链路）：**
@@ -190,7 +195,7 @@ npm run test:real-llm
 
 ### 步骤 1：本地一次性配置（脚手架已就位）
 
-`<cwd>/.env.example`（git tracked，commit `b17875f`）+ `<cwd>/.iknow/settings.json`（gitignore，本机已含 model + apiKey 占位符）已就位。用户只需：
+`<cwd>/.env.example`（git tracked，commit `b17875f`）+ `~/.iknow/settings.json`（用户层，本机已含 model + apiKey 占位符）已就位。用户只需：
 
 ```bash
 cd /path/to/iknow
@@ -204,13 +209,14 @@ vim .env.local
 #   MINIMAX_API_KEY=eyJhbGciOi...
 ```
 
-> `.iknow/settings.json` 已含 `model: "MiniMax-M3"` + `apiKey: "${MINIMAX_API_KEY}"`，无需再动；变量名变更时改这一处对齐即可。
+> `~/.iknow/settings.json` 已含 `model: "MiniMax-M3"` + `apiKey: "${MINIMAX_API_KEY}"`，无需再动；变量名变更时改这一处对齐即可。
 
 ### 步骤 2：scp 两个文件到云端
 
 ```bash
-scp .env.local .iknow/settings.json user@cloud-vm:/path/to/iknow/
-# .env.example 已 git tracked，云端 git pull 后自动有；.env.local + settings.json 是 gitignored 的，逐机传
+scp .env.local user@cloud-vm:/path/to/iknow/.env.local
+scp ~/.iknow/settings.json user@cloud-vm:~/.iknow/settings.json   # llm 是用户层键（ADR-0084），传用户层
+# .env.example 已 git tracked，云端 git pull 后自动有；.env.local 是 gitignored、用户层 settings 在仓库外，两者都逐机传
 ```
 
 ### 步骤 3：云端 VM 验证
@@ -219,7 +225,7 @@ scp .env.local .iknow/settings.json user@cloud-vm:/path/to/iknow/
 ssh user@cloud-vm
 cd /path/to/iknow
 git pull                            # 拉 .env.example（git tracked）
-ls -la .env.local .iknow/settings.json   # 应都存在
+ls -la .env.local ~/.iknow/settings.json   # 应都存在
 npm run probe:settings-model        # 远程 A1/A2 应 PASS（settings 加载 + 占位符解析）
 ```
 
@@ -236,11 +242,11 @@ settings.json 不变，env 链 (`process.env > .env.local > .env`) 自动热重�
 
 ### 新机器全新 clone
 
-git clone 后本机没有 `.iknow/settings.json` —— 此时 iknow fail-fast 抛「no LLM model configured in settings.llm.model」。补建：
+git clone 后本机用户层没有 `~/.iknow/settings.json` —— 此时 iknow fail-fast 抛「no LLM model configured in settings.llm.model. Set it in ~/.iknow/settings.json.」。补建（**用户层**，不是 `<cwd>/.iknow/settings.json`）：
 
 ```bash
-mkdir -p .iknow
-cat > .iknow/settings.json <<'EOF'
+mkdir -p ~/.iknow
+cat > ~/.iknow/settings.json <<'EOF'
 {
   "llm": {
     "thinking": "adaptive",
@@ -249,7 +255,7 @@ cat > .iknow/settings.json <<'EOF'
   }
 }
 EOF
-chmod 600 .iknow/settings.json
+chmod 600 ~/.iknow/settings.json
 cp .env.example .env.local && chmod 600 .env.local && vim .env.local
 ```
 
@@ -258,6 +264,7 @@ cp .env.example .env.local && chmod 600 .env.local && vim .env.local
 ## 关联
 
 - ADR-0015 `docs/adr/0015-llm-config-settings-single-source.md`
+- ADR-0084 `docs/adr/0084-project-settings-allowlist-and-permissions.md`（项目 settings 允许名单：项目文件只采纳 `hooks` / `verify` / `secrets` / `permissions`）
 - `docs/integration-materials.env.example`（完整变量名文档）
 - `plans/settings-model-extension.md`
 - `.env.example`（项目根；git 跟踪；远程端点 + 占位符真值模板）

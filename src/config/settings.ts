@@ -1,9 +1,13 @@
 /**
  * #353: iknow settings 文件机制（loop 配置的单一事实源）。
  *
- * 读取 user 级 `~/.iknow/settings.json` 与 project 级 `<cwd>/.iknow/settings.json`，
- * project 覆盖 user（llm / secrets 内部逐层合并：project 只覆盖其实际出现的合法字段，
- * 未覆盖的 user 字段保留）。
+ * 两层文件：user 级 `~/.iknow/settings.json` 与 project 级
+ * `<cwd>/.iknow/settings.json`。ADR-0084 项目允许名单：项目文件**只采纳**
+ * `hooks` / `verify` / `secrets` / `permissions` 四段 —— 这四段仍是 project
+ * 覆盖 user（段内逐字段：project 只覆盖其实际出现的合法字段，未覆盖的 user
+ * 字段保留）。其余顶层段（`llm` / `isolation` / `subagent` / `web` / `lsp` /
+ * `memory` / `loop` / `graph`）为用户层键：出现在项目文件即丢弃并告警
+ * （`filterProjectSettingsKeys`），只有 user 层能提供。
  *
  * `secrets` 段（#126 hook-system）：
  *  - `secrets.enabled`：是否启用 hook 敏感信息脱敏，boolean 才合法；缺失 → 消费方按
@@ -361,10 +365,38 @@ export interface IknowLspSettings {
   disabledServers?: string[];
 }
 
+/**
+ * ADR-0084: 项目层 `permissions` 段（原 `.iknow/permissions.toml` 的 rule DSL
+ * 原样迁入项目 settings）。本层只做「普通对象 + 两个顶层键形态」的门禁：
+ * `schema_version` 仅 number 透传、`rule` 仅数组透传；**值域 / 谓词语义 /
+ * ajv schema 校验的 SSOT 是 `src/harness/permission/project-settings.ts`**
+ * （config 层不反向 import harness）。
+ */
+export interface IknowSettingsPermissions {
+  /** 规则 schema 版本（只认整数 1 的校验归 permission 层 ajv）。 */
+  schema_version?: number;
+  /** 规则数组（形状 / 谓词校验归 permission 层 ajv）。 */
+  rule?: ReadonlyArray<unknown>;
+}
+
 export interface IknowSettings {
   llm?: IknowSettingsLlm;
   verify?: IknowSettingsVerify;
   secrets?: IknowSettingsSecrets;
+  /**
+   * ADR-0084: 项目层权限规则段（`schema_version` + `rule[]`，原
+   * `.iknow/permissions.toml` 的 rule DSL 原样迁入）。**仅项目层解析**——
+   * 用户层 `permissions` 不接（ADR-0084，见 `loadIknowSettings`）。
+   * 本接口只承载原始 JSON 形状；谓词语义 / ajv 校验归
+   * `src/harness/permission/project-settings.ts`（同一 SSOT）。
+   *
+   * **运行时不消费本字段**：权限源由装配层经
+   * `resolveProjectPermissionSource({ projectIdentityRoot })` 单点读取
+   * （build-engine / worker 共用），本层是形状门禁而非第二读者。本层丢弃
+   * 非法字段（drop-not-throw），拿它当策略源会把 schema 违规静默降级成
+   * 「无项目规则」，正是 ADR-0084 fail-loud 要排除的形态。
+   */
+  permissions?: IknowSettingsPermissions;
   /** #358 T1: 子代理配置段（per-task wallclock）。 */
   subagent?: IknowSettingsSubagent;
   /** D-α: graph 编排 overlay 的新会话默认（缺省关）。 */
@@ -387,11 +419,35 @@ export interface IknowSettingsLoop {
   detectToolLoop?: boolean;
 }
 
+/**
+ * ADR-0084: 共享项目 settings 文件的顶层键允许名单 —— 项目文件只采纳
+ * 「团队契约」四段；其余顶层键（isolation / llm / memory / subagent / web /
+ * lsp / loop / graph ...）出现在项目文件即丢弃、不覆盖用户层值，并经
+ * `LoadSettingsOpts.onWarn` 告警。用户层键不得写进项目文件（写回落对层见
+ * `persist-settings.ts`）。
+ */
+export const PROJECT_SETTINGS_ALLOWED_KEYS = [
+  "hooks",
+  "verify",
+  "secrets",
+  "permissions",
+] as const;
+
+const PROJECT_SETTINGS_ALLOWED_KEY_SET: ReadonlySet<string> = Object.freeze(
+  new Set<string>(PROJECT_SETTINGS_ALLOWED_KEYS)
+);
+
 export interface LoadSettingsOpts {
   /** 项目根，默认 process.cwd()。 */
   cwd?: string;
   /** 用户 home，默认 os.homedir()。 */
   home?: string;
+  /**
+   * ADR-0084 告警通道：项目文件出现非允许名单顶层键 / 用户文件出现
+   * `permissions` 时逐条调用（每条一个键）。缺省 → `console.warn`；
+   * 测试注入以捕获消息（不注入时走默认，不重复上报）。
+   */
+  onWarn?: (message: string) => void;
 }
 
 /** 普通对象（JSON.parse 产出的顶层/中间层只可能是这种；排除 null / 数组）。 */
@@ -827,6 +883,8 @@ function parseIsolation(raw: unknown): IknowSettingsIsolation | undefined {
  * ADR-0037 / ADR-0070: 逐层合并 isolation —— project 字段优先，未覆盖的
  * user 字段保留。两字段独立 per-field project > user 合并（镜像 llm.timeoutMs
  * 形态）；任一字段合并后合法即保留段。
+ * ADR-0084: `isolation` 是用户层键 —— 生产路径上 `project` 恒为空对象（见
+ * `mergeSettings`），项目文件不得卸门禁。
  */
 function mergeIsolation(
   user: IknowSettingsIsolation | undefined,
@@ -1010,7 +1068,11 @@ function mergeHooks(
   return out;
 }
 
-/** 逐层合并 llm：project 字段优先，未覆盖的 user 字段保留。 */
+/**
+ * 逐层合并 llm：project 字段优先，未覆盖的 user 字段保留。
+ * ADR-0084: `llm` 是用户层键 —— 生产路径上 `project` 恒为空对象（见
+ * `mergeSettings`），实际只有 user 值生效。
+ */
 function mergeLlm(
   user: IknowSettingsLlm | undefined,
   project: IknowSettingsLlm | undefined
@@ -1123,7 +1185,17 @@ function mergeSecrets(
   return out;
 }
 
-/** 先对每层做值校验，再合并；被丢弃的字段不参与覆盖。 */
+/**
+ * 先对每层做值校验，再合并；被丢弃的字段不参与覆盖。
+ *
+ * ADR-0084: 生产路径上 `projectRaw` 已过项目允许名单
+ * （`loadIknowSettings` → `filterProjectSettingsKeys`），非允许名单段
+ * （llm / isolation / subagent / web / lsp / memory / loop / graph）恒为空对象
+ * —— 各 `mergeXxx` 的 `project > user` 分支对这些段当前不可达（保留以维持
+ * 合并函数自身语义完整，不删分支）。
+ * 允许名单四段（hooks / verify / secrets / permissions）不受影响，project 仍按
+ * 字段覆盖 user。
+ */
 function mergeSettings(
   userRaw: Record<string, unknown>,
   projectRaw: Record<string, unknown>
@@ -1167,18 +1239,49 @@ function mergeSettings(
     parseHooks(userRaw.hooks),
     parseHooks(projectRaw.hooks)
   );
+  // ADR-0084: 权限规则段 —— 只从项目层解析（用户层同名键在
+  // `loadIknowSettings` 已被丢弃）。`projectRaw` 进来前已过允许名单。
+  const permissions = parsePermissions(projectRaw.permissions);
+  return assembleSettings({
+    llm,
+    verify,
+    secrets,
+    subagent,
+    loop,
+    graph,
+    memory,
+    isolation,
+    lsp,
+    web,
+    hooks,
+    permissions,
+  });
+}
+
+/** 只把已解析出的段放进结果对象（absent 段不产出键）。 */
+function assembleSettings(segments: IknowSettings): IknowSettings {
   const out: IknowSettings = {};
-  if (llm) out.llm = llm;
-  if (verify) out.verify = verify;
-  if (secrets) out.secrets = secrets;
-  if (subagent) out.subagent = subagent;
-  if (loop) out.loop = loop;
-  if (graph) out.graph = graph;
-  if (memory) out.memory = memory;
-  if (isolation) out.isolation = isolation;
-  if (lsp) out.lsp = lsp;
-  if (web) out.web = web;
-  if (hooks) out.hooks = hooks;
+  for (const [key, value] of Object.entries(segments)) {
+    if (value !== undefined) (out as Record<string, unknown>)[key] = value;
+  }
+  return out;
+}
+
+/**
+ * ADR-0084: 项目层 `permissions` 段只做形状门禁（普通对象 / `schema_version`
+ * number / `rule` 数组），值域与谓词合法性由
+ * `src/harness/permission/project-settings.ts` 的 ajv schema 校验（typed
+ * error）。形状不合法的字段丢弃，不抛错。
+ */
+function parsePermissions(raw: unknown): IknowSettingsPermissions | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const out: { schema_version?: number; rule?: ReadonlyArray<unknown> } = {};
+  if (typeof raw.schema_version === "number")
+    out.schema_version = raw.schema_version;
+  if (Array.isArray(raw.rule)) out.rule = raw.rule;
+  // 空段（两个键都非法 / 缺席）→ 不产出 permissions（对齐 parseSecrets 纪律）。
+  if (out.schema_version === undefined && out.rule === undefined)
+    return undefined;
   return out;
 }
 
@@ -1193,12 +1296,40 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
+/**
+ * ADR-0084: 项目文件顶层键过滤 —— 只放行允许名单内的键；名单外的键丢弃并
+ * 逐键告警（一个键一条消息，消息含键名）。丢弃是刻意的：项目文件不得覆盖
+ * 用户层（drop-not-throw，非法来源不生效）。
+ */
+function filterProjectSettingsKeys(
+  projectRaw: Record<string, unknown>,
+  onWarn: (message: string) => void
+): Record<string, unknown> {
+  const accepted: Record<string, unknown> = {};
+  for (const key of Object.keys(projectRaw)) {
+    if (PROJECT_SETTINGS_ALLOWED_KEY_SET.has(key))
+      accepted[key] = projectRaw[key];
+    else
+      onWarn(
+        `[settings] project settings key "${key}" ignored (not in project allowlist)`
+      );
+  }
+  return accepted;
+}
+
 export function loadIknowSettings(opts?: LoadSettingsOpts): IknowSettings {
   const cwd = opts?.cwd ?? process.cwd();
   const home = opts?.home ?? homedir();
+  const onWarn = opts?.onWarn ?? ((message: string) => console.warn(message));
 
   const userRaw = readSettingsFile(join(home, ".iknow", "settings.json"));
   const projectRaw = readSettingsFile(join(cwd, ".iknow", "settings.json"));
+  if (Object.prototype.hasOwnProperty.call(userRaw, "permissions"))
+    onWarn(
+      '[settings] user settings key "permissions" ignored (project-layer only)'
+    );
 
-  return deepFreeze(mergeSettings(userRaw, projectRaw));
+  return deepFreeze(
+    mergeSettings(userRaw, filterProjectSettingsKeys(projectRaw, onWarn))
+  );
 }

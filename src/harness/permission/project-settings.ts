@@ -1,15 +1,20 @@
 /**
  * src/harness/permission/project-settings.ts
  *
- * Project settings loader (T6 / #122 Q2b / ticket #169).
+ * Project settings loader (T6 / #122 Q2b / ticket #169; ADR-0084 move).
  *
- * Reads `.iknow/permissions.toml` from the project working directory and
- * converts the entries into `NormalRuleSpec` so they slot into the project
- * layer of the permission three-tier policy.
+ * Reads the `permissions` section of `<cwd>/.iknow/settings.json` and converts
+ * the entries into `NormalRuleSpec` so they slot into the project layer of the
+ * permission three-tier policy. ADR-0084 moved the rule DSL out of
+ * `.iknow/permissions.toml` — the toml file is no longer a source (stop
+ * reading). While both the toml file and a `permissions` section exist, load
+ * fails loud (`toml_and_json_present`): two live SSOTs are unrecoverable
+ * ambiguity, not a precedence question.
  *
  * Design constraints:
  *  - Synchronous load at construction time; no hot-reload (spec §T6).
- *  - Missing file → `undefined` (graceful: built-in defaults stand).
+ *  - Missing settings file / missing `permissions` section → `undefined`
+ *    (graceful: built-in defaults stand).
  *  - Schema violation → throws Error with a descriptive message including the
  *    failing JSON path so the operator can locate the issue.
  *  - Only a narrow predicate DSL is supported:
@@ -17,11 +22,13 @@
  *      * `match_input` — table of supported predicates against the input
  *        object. Each predicate is mapped to a specific shape check.
  *    Unknown predicates fail the ajv schema at load time (fail-loud).
+ *  - `filePath` injection (tests) keeps pointing at the JSON file that carries
+ *    the section; the toml coexistence probe is skipped for injected paths
+ *    (no cwd to derive `permissions.toml` from).
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import { parse as parseToml } from "smol-toml";
 import Ajv from "ajv";
 import type { ValidateFunction } from "ajv";
 import type {
@@ -103,13 +110,37 @@ function makeAjv(): Ajv.default {
 }
 
 /* -----------------------------------------------------------------------------
+ * Typed failure
+ * -------------------------------------------------------------------------- */
+
+export type ProjectSettingsErrorKind =
+  "toml_and_json_present" | "schema_violation";
+
+/**
+ * ADR-0084 装配期 fail-loud 的 typed 信号。两种 kind 都是**不可恢复的配置
+ * 歧义**（两份 SSOT 并存 / 规则 DSL 违反 schema），不是可降级的建议：
+ * 调用方（build-engine / worker 装配）原路上抛，由进程顶层转成可见启动
+ * 错误。调用方 catch 时必须按 `kind` 判别，不得把消息压成泛型字符串
+ * （code-quality.md typed-error catch 契约）。
+ */
+export class ProjectSettingsError extends Error {
+  override readonly name = "ProjectSettingsError";
+  readonly kind: ProjectSettingsErrorKind;
+
+  constructor(kind: ProjectSettingsErrorKind, message: string) {
+    super(message);
+    this.kind = kind;
+  }
+}
+
+/* -----------------------------------------------------------------------------
  * Loader
  * -------------------------------------------------------------------------- */
 
 export interface LoadProjectSettingsOpts {
-  /** Explicit absolute or relative path. Overrides cwd lookup. */
+  /** Explicit absolute or relative path to the JSON settings file. Overrides cwd lookup. */
   readonly filePath?: string;
-  /** Project cwd; used to resolve `.iknow/permissions.toml` when filePath absent. */
+  /** Project cwd; used to resolve `.iknow/settings.json` when filePath absent. */
   readonly cwd?: string;
 }
 
@@ -241,11 +272,19 @@ function ruleFromRaw(raw: RawRule): NormalRuleSpec {
 }
 
 /**
- * Load `.iknow/permissions.toml` and return the parsed project policy source.
+ * Load the `permissions` section of the project settings file and return the
+ * parsed project policy source.
  *
- *  - filePath absent → resolves to `<cwd>/.iknow/permissions.toml`.
- *  - File absent → returns undefined (built-in defaults stand).
- *  - Parse error (smol-toml) → throws with toml error message.
+ *  - filePath absent → resolves to `<cwd>/.iknow/settings.json`.
+ *  - Settings file absent / no `permissions` section → returns undefined
+ *    (built-in defaults stand).
+ *  - Settings JSON malformed → returns undefined (mirrors `readSettingsFile`:
+ *    a file the config layer treats as empty cannot be a permission source).
+ *  - `.iknow/permissions.toml` also present **and** the JSON carries a
+ *    `permissions` section (cwd form only) → throws
+ *    (`toml_and_json_present`, ADR-0084 fail-loud). The toml alone is inert:
+ *    ADR-0084 makes two live SSOTs the unrecoverable ambiguity, not the
+ *    leftover file.
  *  - Schema violation (ajv) → throws with descriptive message including the
  *    JSON path of the first error.
  */
@@ -253,42 +292,39 @@ export function loadProjectSettings(
   opts: LoadProjectSettingsOpts = {}
 ): ProjectSettingsPolicySource | undefined {
   const filePath = opts.filePath ?? resolveProjectSettingsPath(opts.cwd);
-  let raw: string;
-  try {
-    raw = readFileSync(filePath, "utf8");
-  } catch (err) {
-    if (
-      typeof err === "object" &&
-      err !== null &&
-      "code" in err &&
-      (err as { code?: unknown }).code === "ENOENT"
-    ) {
-      return undefined;
-    }
-    throw err;
-  }
+  const raw = readSettingsJson(filePath);
+  if (raw === undefined) return undefined;
 
-  let parsed: unknown;
-  try {
-    parsed = parseToml(raw);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `project-settings: TOML parse failed at ${filePath}: ${msg}`
-    );
+  const section = raw.permissions;
+  if (section === undefined) return undefined;
+
+  // ADR-0084 fail-loud requires BOTH sources live: the JSON must actually
+  // carry a `permissions` section. A repo still holding the retired toml with
+  // no JSON section has exactly one source and must not fail startup.
+  if (opts.filePath === undefined) {
+    const tomlPath = resolveLegacyTomlPath(opts.cwd);
+    if (existsSync(tomlPath)) {
+      throw new ProjectSettingsError(
+        "toml_and_json_present",
+        `project-settings: toml_and_json_present: legacy ${tomlPath} and ` +
+          `permissions section in ${filePath} both exist; remove one ` +
+          `(ADR-0084: toml is retired as the permission source)`
+      );
+    }
   }
 
   const ajv = makeAjv();
   const validate: ValidateFunction = ajv.compile(PROJECT_SETTINGS_SCHEMA);
-  if (!validate(parsed)) {
-    throw new Error(
+  if (!validate(section)) {
+    throw new ProjectSettingsError(
+      "schema_violation",
       `project-settings: schema violation at ${filePath}: ${ajvErrorMessage(
         validate.errors
       )}`
     );
   }
 
-  const settings = parsed as RawProjectSettingsFile;
+  const settings = section as RawProjectSettingsFile;
   const rules = settings.rule.map((r) => ruleFromRaw(r));
 
   return Object.freeze({
@@ -298,9 +334,102 @@ export function loadProjectSettings(
   });
 }
 
+/**
+ * Read the JSON settings file: ENOENT / malformed JSON / non-object root →
+ * undefined (same tolerance as `readSettingsFile` in config/settings.ts —
+ * the toml era threw a parse error here, but a file the rest of the config
+ * layer discards must not become a permissions hard failure).
+ */
+function readSettingsJson(path: string): Record<string, unknown> | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (err) {
+    if (isEnoent(err)) return undefined;
+    throw err;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    if (err instanceof SyntaxError) return undefined;
+    throw err;
+  }
+  if (!isPlainObjectRoot(parsed)) return undefined;
+  return parsed;
+}
+
+/**
+ * 读失败是否「文件不存在」这一合法态（与真实 I/O 故障区分）。
+ * 刻意不复用 `config/settings.ts` 的读法：那边用 `existsSync` 前置探测 +
+ * 「坏 JSON → 丢弃」（drop-not-throw），本层要求 `permissions` 段的 schema
+ * 违规 fail-loud；共用 helper 会把两套失败纪律搅在一起。
+ */
+function isEnoent(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === "ENOENT"
+  );
+}
+
+/**
+ * JSON 根须为普通对象（排除 null / 数组 / 标量）。与 `config/settings.ts`
+ * 的同名谓词字面相同但**不同源**：本层只解析 `permissions` 段、
+ * 违规即抛，settings.ts 的谓词服务整份宽松合并（非法字段丢弃）。
+ * 抽公共 helper 会把两条失败纪律耦合成一条。
+ */
+function isPlainObjectRoot(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * `<cwd>/.iknow/settings.json`。与 `config/settings.ts` 的内联派生**不是
+ * 重复**：那边传的是会话 cwd（`loadIknowSettings({cwd})`），本函数的调用方
+ * 传的是 `projectIdentityRoot`（ADR-0037 §4：改绑后 cwd 是裸 task worktree，
+ * 读它会让项目规则静默消失）。根不同 → 派生不可合并；本层多出的
+ * `permissions.toml` 探测路径（见下）config 侧没有。
+ */
 function resolveProjectSettingsPath(cwd: string | undefined): string {
+  const base = cwd ?? process.cwd();
+  return isAbsolute(base)
+    ? `${base}/.iknow/settings.json`
+    : resolve(base, ".iknow/settings.json");
+}
+
+/** 退役 toml 的探测路径 —— 只为 ADR-0084「两份 SSOT 并存」fail-loud 服务。 */
+function resolveLegacyTomlPath(cwd: string | undefined): string {
   const base = cwd ?? process.cwd();
   return isAbsolute(base)
     ? `${base}/.iknow/permissions.toml`
     : resolve(base, ".iknow/permissions.toml");
+}
+
+/* -----------------------------------------------------------------------------
+ * Assembly seam
+ * -------------------------------------------------------------------------- */
+
+export interface ResolveProjectPermissionSourceOpts {
+  /**
+   * 项目身份根（ADR-0037 §4）—— 项目契约（rules / AGENTS.md / skills /
+   * `settings.permissions`）的唯一读根。改绑后会话 cwd 是一棵没有 `.iknow`
+   * 的裸 task worktree，读 cwd 会静默丢掉项目规则；两条引擎（主链 /
+   * worker）必须读同一份。
+   */
+  readonly projectIdentityRoot: string;
+}
+
+/**
+ * 装配期项目权限源：主链（build-engine）与 worker 共用这一条读路径，避免
+ * 两处各自内联 `loadProjectSettings` 后在读根 / 失败策略上漂移。
+ *
+ * 契约：fail-loud 原路出（`ProjectSettingsError`），不吞、不降级 ——
+ * schema 违规 / 两份 SSOT 并存都是操作员必须看见的启动错误；「无项目规则」
+ * 是合法态，返回 `undefined` 交策略层用内建默认。
+ */
+export function resolveProjectPermissionSource(
+  opts: ResolveProjectPermissionSourceOpts
+): ProjectSettingsPolicySource | undefined {
+  return loadProjectSettings({ cwd: opts.projectIdentityRoot });
 }

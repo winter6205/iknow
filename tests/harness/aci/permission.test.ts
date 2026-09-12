@@ -51,8 +51,8 @@ describe("createPermissionPolicy", () => {
     // The code layer ships with built-in allow rules:
     //   - code-allow-memory-save: agent self-write to its own memory library
     //     (unblocks non-interactive inlets — ask/serve/chat TTY without prompt)
-    //   - code-allow-todo-write-list (#440 T5): todo_write list 子模式只读,
-    //     bypass ask。add/check 仍走默认 write → ask。
+    //   - code-allow-todo-write-read (#440 T5 / ADR-0085): todo_write read
+    //     子模式只读,bypass ask。add/update 仍走默认 write → ask。
     //   - code-ask-bash-network (#503 T10 / ADR-0022):bash network:true
     //     强制 ask（layered rule 先于 mode 解析,full_auto 不豁免 fence
     //     形状变化 = 宿主网络批准轴）。
@@ -66,12 +66,12 @@ describe("createPermissionPolicy", () => {
     assert.ok(memSave.match({ tool: "memory_save", input: {} }));
     assert.equal(memSave.match({ tool: "edit_file", input: {} }), false);
     const todoList = p.sources.code.rules.find(
-      (r) => r.id === "code-allow-todo-write-list"
+      (r) => r.id === "code-allow-todo-write-read"
     )!;
     assert.equal(todoList.decision, "allow");
     assert.ok(
-      todoList.match({ tool: "todo_write", input: { mode: "list" } }),
-      "list mode matches"
+      todoList.match({ tool: "todo_write", input: { mode: "read" } }),
+      "read mode matches"
     );
     const bashNet = p.sources.code.rules.find(
       (r) => r.id === "code-ask-bash-network"

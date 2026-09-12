@@ -31,6 +31,8 @@ interface Dirs {
   base: string;
   cwd: string;
   home: string;
+  userFile: string;
+  /** 项目文件不承载 llm（ADR-0084 允许名单外）——仅用于 watcher/哨兵路径断言。 */
   projectFile: string;
 }
 
@@ -44,13 +46,24 @@ function makeDirs(): Dirs {
     base,
     cwd,
     home,
+    userFile: join(home, ".iknow", "settings.json"),
     projectFile: join(cwd, ".iknow", "settings.json"),
   };
 }
 
-function writeSettings(dirs: Dirs, model: string, apiKey?: string): void {
+/**
+ * 写 llm 段。ADR-0084：llm 是用户层键 → 恒写 user 文件；project 文件里的
+ * 同名字段会被允许名单丢弃。watcher 仍同时监听两个文件，故传 target 可把
+ * 内容投到 project 路径（哨兵路径断言用）。
+ */
+function writeSettings(
+  dirs: Dirs,
+  model: string,
+  apiKey?: string,
+  target: string = dirs.userFile
+): void {
   writeFileSync(
-    dirs.projectFile,
+    target,
     JSON.stringify({
       llm: { model, ...(apiKey !== undefined ? { apiKey } : {}) },
     }) + "\n",
@@ -149,7 +162,7 @@ describe("createEnvLoader", () => {
         const errors: unknown[] = [];
         loader.onError((err) => errors.push(err));
         // 写坏 JSON → watcher 触发 → reload 抛错 → 缓存保持旧值。
-        writeFileSync(dirs.projectFile, "{ not-json", "utf8");
+        writeFileSync(dirs.userFile, "{ not-json", "utf8");
         await waitUntil(() => errors.length >= 1, "onError 收到坏 JSON 错误");
         expect(loader.get()).toBe(env1); // 缓存不变（旧引用）
         expect(loader.get().llm.model).toBe("model-a");
@@ -238,7 +251,7 @@ describe("createEnvLoader", () => {
         loader.onError((err) => errors.push(err));
         loader.get();
         await new Promise((r) => setTimeout(r, 80));
-        writeFileSync(dirs.projectFile, "{ not-json", "utf8"); // 坏 JSON → reload 抛错
+        writeFileSync(dirs.userFile, "{ not-json", "utf8"); // 坏 JSON → reload 抛错
         await waitUntil(() => errors.length >= 1, "第二个 onError 收到错误");
         expect(loader.get().llm.model).toBe("model-a"); // 缓存保持旧值
       } finally {
@@ -337,10 +350,11 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         const received: string[] = [];
         loader.subscribe((env) => received.push(env.llm.model));
         await new Promise((r) => setTimeout(r, 80));
-        // 模拟一次写回：内容写入文件 + 登记同一 bytes（run.tsx 写回后的接线）。
+        // 模拟一次写回：内容写入文件 + 登记同一 bytes（run.tsx 写回后的接线；
+        // ADR-0084：写回目标是用户文件）。
         const bytes = `${JSON.stringify({ llm: { model: "model-a" } })}\n`;
-        writeFileSync(dirs.projectFile, bytes, "utf8");
-        loader.markSelfWrite(dirs.projectFile, bytes);
+        writeFileSync(dirs.userFile, bytes, "utf8");
+        loader.markSelfWrite(dirs.userFile, bytes);
         // 同一内容稳定窗口内不得触发 reload（跳过）。
         await new Promise((r) => setTimeout(r, SETTLE_MS));
         expect(received.length).toBe(0);
@@ -368,15 +382,15 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         // 同一路径登记两个不同内容（thinking 面板 + effort 面板两次写回）。
         const bytesX = `${JSON.stringify({ llm: { model: "model-x" } })}\n`;
         const bytesY = `${JSON.stringify({ llm: { model: "model-y" } })}\n`;
-        loader.markSelfWrite(dirs.projectFile, bytesX);
-        loader.markSelfWrite(dirs.projectFile, bytesY);
+        loader.markSelfWrite(dirs.userFile, bytesX);
+        loader.markSelfWrite(dirs.userFile, bytesY);
         // 写回内容 X → 命中登记（Set 剩 Y）→ 跳过 reload。
-        writeFileSync(dirs.projectFile, bytesX, "utf8");
+        writeFileSync(dirs.userFile, bytesX, "utf8");
         await new Promise((r) => setTimeout(r, SETTLE_MS));
         expect(received.length).toBe(0);
         expect(loader.get()).toBe(env1);
         // 写回内容 Y → 命中剩余登记（Set 清空）→ 跳过 reload。
-        writeFileSync(dirs.projectFile, bytesY, "utf8");
+        writeFileSync(dirs.userFile, bytesY, "utf8");
         await new Promise((r) => setTimeout(r, SETTLE_MS));
         expect(received.length).toBe(0);
         expect(loader.get()).toBe(env1);
@@ -401,7 +415,7 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         await new Promise((r) => setTimeout(r, 80));
         // 登记一个「当前文件」的哨兵，但外部写的内容不同 → 不该被吞。
         loader.markSelfWrite(
-          dirs.projectFile,
+          dirs.userFile,
           `${JSON.stringify({ llm: { model: "model-ghost" } })}\n`
         );
         writeSettings(dirs, "model-b"); // 外部改动：内容 ≠ 登记内容
@@ -431,13 +445,14 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         const bytes = `${JSON.stringify({ llm: { model: "model-b" } })}\n`;
         // 第一次写回：写盘后登记（100ms debounce 窗口内登记必先于 onChange 到达，
         // 与 run.tsx 的 persist → markSelfWrite 时序一致）→ 哨兵命中吞掉。
-        writeFileSync(dirs.projectFile, bytes, "utf8");
-        loader.markSelfWrite(dirs.projectFile, bytes);
+        // 路径 = write-back 目标（ADR-0084：用户层键写用户文件）。
+        writeFileSync(dirs.userFile, bytes, "utf8");
+        loader.markSelfWrite(dirs.userFile, bytes);
         await new Promise((r) => setTimeout(r, SETTLE_MS));
         expect(received.length).toBe(0);
         expect(loader.get()).toBe(env1); // 未 reload（缓存引用不变）
         // 同一内容再次出现（外部重复写，无新登记）→ 哨兵已一次性消费 → 按外部 reload。
-        writeFileSync(dirs.projectFile, bytes, "utf8");
+        writeFileSync(dirs.userFile, bytes, "utf8");
         await waitUntil(
           () => received.length >= 1,
           "第二次同内容被外部 reload"
@@ -464,15 +479,15 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         const received: string[] = [];
         loader.subscribe((env) => received.push(env.llm.model));
         await new Promise((r) => setTimeout(r, 80));
-        // 登记 9 条不同路径 → 第 1 条（projectFile）被 LRU 挤掉。
+        // 登记 9 条不同路径 → 第 1 条（userFile，即写回目标）被 LRU 挤掉。
         const filler = (i: number): string =>
           `${JSON.stringify({ llm: { model: `filler-${i}` } })}\n`;
-        loader.markSelfWrite(dirs.projectFile, filler(0));
+        loader.markSelfWrite(dirs.userFile, filler(0));
         for (let i = 1; i < 9; i++) {
           loader.markSelfWrite(join(dirs.base, `other-${i}.json`), filler(i));
         }
-        // projectFile 是最旧路径 → 被挤掉 → 同内容事件按外部 reload。
-        writeFileSync(dirs.projectFile, filler(0), "utf8");
+        // userFile 是最旧路径 → 被挤掉 → 同内容事件按外部 reload。
+        writeFileSync(dirs.userFile, filler(0), "utf8");
         await waitUntil(() => received.length >= 1, "旧路径不再命中 → reload");
         expect(received[0]).toBe("filler-0");
         expect(loader.get()).not.toBe(env1);
@@ -499,10 +514,10 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         // 登记当前内容 → 删除文件（外部操作）→ watcher 事件触发时读失败 →
         // consumeSelfWrite 返回 false → 照常 reload（模型缺失 → onError）。
         loader.markSelfWrite(
-          dirs.projectFile,
+          dirs.userFile,
           `${JSON.stringify({ llm: { model: "model-a" } })}\n`
         );
-        rmSync(dirs.projectFile);
+        rmSync(dirs.userFile);
         const errors: unknown[] = [];
         loader.onError((err) => errors.push(err));
         await waitUntil(() => errors.length >= 1, "onError 收到模型缺失错误");

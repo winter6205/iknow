@@ -86,6 +86,24 @@ export interface WorkerEnvelope {
    * 缺席,worker 退化到既有 IKNOW_TRACE_OUT / defaultTraceDir 形态(byte-stable)。
    */
   readonly traceFilePath?: string;
+  /**
+   * ADR-0085 / SC9:父会话账本锚点 —— worker 与父共用**同一本** todos.md,
+   * `projectDir` = 父会话项目目录(`TodoWriteToolDeps.todoDir` 的同一值),
+   * `conversationId` = 父会话 id。worker 装配期把它透传给 todo_write 工厂,
+   * 工具据此 read / update 父账本,并对其 `add` 做 typed 拒绝(添加仅父会话)。
+   *
+   * 不从 trace 文件布局反推(fragile coupling):manager 从 host 注入的
+   * `opts.todoDir` + `def.conversationId` 直接落值,与 todo-write.ts 的
+   * `resolveConversationTodoPath` 同一对 (projectDir, conversationId)。
+   *
+   * Wire additive + optional —— 与 `role` 同形态;旧 envelope(无此字段)
+   * 仍可被 ajv 接受,worker 装配路径退回「无 todoDir」旧形态
+   * (`additionalProperties:false` 下需在 WORKER_SCHEMA.properties 显式声明)。
+   */
+  readonly todoLedger?: {
+    readonly projectDir: string;
+    readonly conversationId: string;
+  };
 }
 
 /** 子→父 result 信封。schema 冻结形态见 PARENT_SCHEMA。 */
@@ -177,6 +195,19 @@ export const WORKER_SCHEMA: Record<string, unknown> = {
     // 字符串路径，不锁 enum（路径形态由调用方决定，无 SSOT 枚举）。
     // 旧 envelope / 跨版本 resume → 缺省 → worker 走 IKNOW_TRACE_OUT 退路。
     traceFilePath: { type: "string" },
+    // ADR-0085 / SC9: 父会话账本锚点 —— 与 role 同形态（wire additive,
+    // optional）。两个子字段都必填(锚点不完整即 repudiate,让装配层
+    // 收到 ProtocolError 而不是一个残缺的 ledger 缝);旧 envelope 缺此
+    // 字段 → ajv 接受 → worker 退回无 todoDir 的旧工具面。
+    todoLedger: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", minLength: 1 },
+        conversationId: { type: "string", minLength: 1 },
+      },
+      required: ["projectDir", "conversationId"],
+      additionalProperties: false,
+    },
   },
   required: ["task", "sandboxRoot"],
   additionalProperties: false,

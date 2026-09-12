@@ -17,7 +17,7 @@
 - **host drain**: host 侧把 completed 子代理 envelope 浓缩成一条消息、注入下一轮 run() priorMessages 的机制（#356 V1）；只 drain completed，不修改 buffer 状态。#361 裁决后仅在异步臂生效。
 - **in-flight closeout**: abort/timeout 发生时的收尾语义——模型在途则整回合不进历史；工具在途则 assistant 回合已原子追加（不可回滚），在途 tool call 填 `execution_failed`，所有 tool_result 编码为一条 user message 原子追加后 stop。signal 优先于 timeout。
   _Avoid_: 回滚已追加的 assistant 回合；悬空未回填的 tool call。
-- **project stack defaults (SSOT boundary) — settings 单承载收敛 (ADR-0015)**: LLM 配置收敛到 `~/.iknow/settings.json`（user）+ `<cwd>/.iknow/settings.json`（project 覆盖 user）单承载；非 LLM 字段的 `process.env > .env.local > .env` 优先级链不变。
+- **project stack defaults (SSOT boundary) — settings 单承载收敛 (ADR-0015)**: LLM 配置收敛到 `~/.iknow/settings.json`（user）+ `<cwd>/.iknow/settings.json`（project）双文件（ADR-0015）。项目层**不再**任意覆盖 user：只采纳允许名单（ADR-0084）；非 LLM 字段的 `process.env > .env.local > .env` 优先级链不变。
 
 **本 spec 新术语**：
 

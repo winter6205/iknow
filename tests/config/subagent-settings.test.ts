@@ -2,9 +2,10 @@
  * #358 T1 — subagent settings 双字段集成（per-call llm.timeoutMs + per-task subagent.taskTimeoutMs）。
  *
  * settings + env 联合：
- *  - settings 文件层 parse/merge（drop-not-throw + project > user）；
+ *  - settings 文件层 parse/merge（drop-not-throw）；ADR-0084 后 llm/subagent
+ *    均为用户层键 → 项目文件里的同名段被允许名单丢弃，不参与合并；
  *  - env 文件层 + process.env 层 fallback（env > settings）；
- *  - 跨进程继承（子代理自装配同 cwd → 继承 project settings 的两个字段）。
+ *  - 跨进程继承（子代理自装配同 cwd + 同 home → 继承 user settings 的两个字段）。
  *
  * 覆盖：单字段、双字段并存、合并覆盖、env 覆盖 settings、跨进程继承、frozen。
  */
@@ -109,50 +110,64 @@ describe("subagent settings — settings 文件层 parse (#358 T1)", () => {
   });
 });
 
-describe("subagent settings — settings 文件层 merge (#358 T1)", () => {
-  it("project 覆盖 user llm.timeoutMs", async () => {
+describe("subagent settings — 项目层不参与（ADR-0084 允许名单）", () => {
+  it("project 的 llm 被丢弃并告警 → user 值胜出（不再被 project 覆盖）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { timeoutMs: 60_000 } },
       { llm: { timeoutMs: 30_000 } }
     );
-    assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { timeoutMs: 30_000 },
-    });
+    const warnings: string[] = [];
+    assert.deepEqual(
+      loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) }),
+      { llm: { timeoutMs: 60_000 } }
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"llm"/);
   });
 
-  it("project 覆盖 user subagent.taskTimeoutMs", async () => {
+  it("project 的 subagent 被丢弃并告警 → user 值胜出", async () => {
     const { home, cwd } = await makeSettings(
       { subagent: { taskTimeoutMs: 7_200_000 } },
       { subagent: { taskTimeoutMs: 1_800_000 } }
     );
-    assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      subagent: { taskTimeoutMs: 1_800_000 },
-    });
+    const warnings: string[] = [];
+    assert.deepEqual(
+      loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) }),
+      { subagent: { taskTimeoutMs: 7_200_000 } }
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"subagent"/);
   });
 
-  it("逐层合并：user 配 llm.timeoutMs、project 配 subagent.taskTimeoutMs → 两段都保留", async () => {
+  it("user 只配 llm.timeoutMs、project 只配 subagent → 项目段丢弃，仅 user 段保留", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { timeoutMs: 60_000 } },
       { subagent: { taskTimeoutMs: 7_200_000 } }
     );
-    assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { timeoutMs: 60_000 },
-      subagent: { taskTimeoutMs: 7_200_000 },
-    });
+    const warnings: string[] = [];
+    assert.deepEqual(
+      loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) }),
+      { llm: { timeoutMs: 60_000 } }
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"subagent"/);
   });
 
-  it("逐层合并：user 配 subagent.taskTimeoutMs、project 配 llm.timeoutMs → 两段都保留", async () => {
+  it("user 只配 subagent.taskTimeoutMs、project 只配 llm → 项目段丢弃，仅 user 段保留", async () => {
     const { home, cwd } = await makeSettings(
       { subagent: { taskTimeoutMs: 7_200_000 } },
       { llm: { timeoutMs: 30_000 } }
     );
-    assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { timeoutMs: 30_000 },
-      subagent: { taskTimeoutMs: 7_200_000 },
-    });
+    const warnings: string[] = [];
+    assert.deepEqual(
+      loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) }),
+      { subagent: { taskTimeoutMs: 7_200_000 } }
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"llm"/);
   });
 
-  it("project 非法 timeoutMs 不覆盖 user 合法（保留 user 值）", async () => {
+  it("project llm 段整体丢弃 → user timeoutMs 胜出（project 非法值未参与校验）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { timeoutMs: 60_000 } },
       { llm: { timeoutMs: "bad" } }
@@ -162,7 +177,7 @@ describe("subagent settings — settings 文件层 merge (#358 T1)", () => {
     });
   });
 
-  it("project 非法 taskTimeoutMs 不覆盖 user 合法（保留 user 值）", async () => {
+  it("project subagent 段整体丢弃 → user taskTimeoutMs 胜出（project 非法值未参与校验）", async () => {
     const { home, cwd } = await makeSettings(
       { subagent: { taskTimeoutMs: 7_200_000 } },
       { subagent: { taskTimeoutMs: -1 } }
@@ -235,14 +250,18 @@ describe("subagent settings — 跨进程继承 (#358 T1, 跨 process boundary)"
     for (const k of ENV_KEYS_CROSS) delete process.env[k];
   });
 
-  it("子代理 process 在相同 cwd → 继承 project settings 的 llm.timeoutMs + subagent.taskTimeoutMs", async () => {
+  it("子代理 process 在相同 cwd + 相同 home → 继承 user settings 的 llm.timeoutMs + subagent.taskTimeoutMs", async () => {
+    // ADR-0084：llm/subagent 都是用户层键 → 继承锚点是 <home>/.iknow/settings.json；
+    // home 显式注入（POSIX 上 os.homedir() 确实跟随 $HOME，靠它虽能工作但
+    // 隐式、易被破坏）。
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-subagent-inherit-t1-"));
     const emptyHome = await mkdtemp(
       join(tmpdir(), "iknow-subagent-inherit-home-")
     );
     await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    await mkdir(join(emptyHome, ".iknow"), { recursive: true });
     await writeFile(
-      join(tmpCwd, ".iknow", "settings.json"),
+      join(emptyHome, ".iknow", "settings.json"),
       JSON.stringify({
         llm: { model: "test-model", timeoutMs: 45_000 },
         subagent: { taskTimeoutMs: 7_200_000 },
@@ -250,16 +269,9 @@ describe("subagent settings — 跨进程继承 (#358 T1, 跨 process boundary)"
     );
 
     try {
-      const prevHome = process.env.HOME;
-      process.env.HOME = emptyHome;
-      try {
-        const env = loadIknowEnv(tmpCwd);
-        assert.equal(env.llm.timeoutMs, 45_000);
-        assert.equal(env.subagent?.taskTimeoutMs, 7_200_000);
-      } finally {
-        if (prevHome === undefined) delete process.env.HOME;
-        else process.env.HOME = prevHome;
-      }
+      const env = loadIknowEnv(tmpCwd, undefined, emptyHome);
+      assert.equal(env.llm.timeoutMs, 45_000);
+      assert.equal(env.subagent?.taskTimeoutMs, 7_200_000);
     } finally {
       await rm(tmpCwd, { recursive: true, force: true });
       await rm(emptyHome, { recursive: true, force: true });

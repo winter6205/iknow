@@ -94,7 +94,6 @@
     "diff": "^9.0.0",
     "marked": "^18.0.9",
     "react": "^19.2.8",
-    "smol-toml": "^1.7.1",
     "string-width": "^8.2.2",
     "undici": "^7.29.0",
     "vscode-jsonrpc": "^9.0.1",

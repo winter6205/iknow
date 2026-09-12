@@ -176,6 +176,86 @@ describe("subagent envelope schema (SC13 / D1)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// ADR-0085 / SC9: todoLedger wire 字段（父会话账本锚点）
+//
+// `additionalProperties: false` 下新字段必须显式声明,否则 ajv 把带字段的
+// envelope 判成 ProtocolError。旧 envelope（缺此字段）必须继续被接受 ——
+// 与 role / writeSituation 同形态的 wire-additive 纪律。
+// ---------------------------------------------------------------------------
+
+describe("WorkerEnvelope.todoLedger (ADR-0085 / SC9)", () => {
+  it("带完整锚点的 envelope 被接受,两字段原样透传", () => {
+    const env = parseWorkerEnvelope(
+      JSON.stringify({
+        task: "work",
+        sandboxRoot: "/tmp/sb",
+        todoLedger: {
+          projectDir: "/data/projects/repo-abc123",
+          conversationId: "conv-parent",
+        },
+      })
+    );
+    assert.deepEqual(env.todoLedger, {
+      projectDir: "/data/projects/repo-abc123",
+      conversationId: "conv-parent",
+    });
+  });
+
+  it("旧 envelope 缺 todoLedger → 接受且字段为 undefined(跨版本 resume 不退化)", () => {
+    const env = parseWorkerEnvelope(
+      JSON.stringify({ task: "legacy", sandboxRoot: "/tmp/sb" })
+    );
+    assert.equal(env.todoLedger, undefined);
+  });
+
+  it("锚点不完整(缺 conversationId)→ ProtocolError,不落半个 ledger 缝", () => {
+    assert.throws(
+      () =>
+        parseWorkerEnvelope(
+          JSON.stringify({
+            task: "work",
+            sandboxRoot: "/tmp/sb",
+            todoLedger: { projectDir: "/data/projects/repo-abc123" },
+          })
+        ),
+      ProtocolError
+    );
+  });
+
+  it("锚点空串(projectDir: '')→ ProtocolError(minLength:1)", () => {
+    assert.throws(
+      () =>
+        parseWorkerEnvelope(
+          JSON.stringify({
+            task: "work",
+            sandboxRoot: "/tmp/sb",
+            todoLedger: { projectDir: "", conversationId: "conv-parent" },
+          })
+        ),
+      ProtocolError
+    );
+  });
+
+  it("锚点含未声明子字段 → ProtocolError(additionalProperties:false)", () => {
+    assert.throws(
+      () =>
+        parseWorkerEnvelope(
+          JSON.stringify({
+            task: "work",
+            sandboxRoot: "/tmp/sb",
+            todoLedger: {
+              projectDir: "/p",
+              conversationId: "c",
+              canAdd: false,
+            },
+          })
+        ),
+      ProtocolError
+    );
+  });
+});
+
 describe("subagent envelope truncation (SC10)", () => {
   it("replaces a mid-size draft with the parent-visible short handoff", () => {
     const draft = "final draft body ".repeat(40);

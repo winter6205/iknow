@@ -3,25 +3,35 @@
  *
  * 目的：在真实 9router 模型下验证 LLM 配置已收敛到 `settings.json` 单承载
  * （`#353` 第二阶段 / `#164`）。四组验证：
- *   A. settings.json 写 `${ANTHROPIC_AUTH_TOKEN}` 占位符 → env loader 解析 →
+ *   A. user 层 settings.json 写 `${ANTHROPIC_AUTH_TOKEN}` 占位符 → env loader 解析 →
  *      真实 chat 走通（响应 model 字段被 9router 改写成上游 ID `deepseek-v4-flash`）；
- *   B. settings.json `{}` → `loadIknowEnv` fail-fast 抛「no LLM model configured
- *      in settings.llm.model」（不再有硬编码兜底）；
- *   C. settings.json 有 model 但无 apiKey + `ANTHROPIC_AUTH_TOKEN=""` →
+ *   B. user / project 两层皆无 llm（隔离空 home + 无 project settings）→
+ *      `loadIknowEnv` fail-fast 抛「no LLM model configured in settings.llm.model」
+ *      （不再有硬编码兜底）；
+ *   C. user 层 settings.json 有 model 但无 apiKey + `ANTHROPIC_AUTH_TOKEN=""` →
  *      `env.llm.apiKey === undefined` → 守卫抛「no API key configured」；
- *   D. settings.json 字面写 `"apiKey": "<real>"`（**脚本运行时经 Node fs 写入
- *      tmp cwd，断言后 `finally rm`，绝不落 bash 命令行 / git / 日志 / fixtures**）
- *      → 删除 env key 后 `loadIknowEnv` 仍走通（不依赖 env）。
+ *   D. user 层 settings.json 字面写 `"apiKey": "<real>"`（**脚本运行时经 Node fs
+ *      写入 tmp HOME，断言后 `finally rm`，绝不落 bash 命令行 / git / 日志 /
+ *      仓库内 fixtures**）→ 删除 env key 后 `loadIknowEnv` 仍走通（不依赖 env）。
+ *
+ * ADR-0084 分层（`docs/adr/0084-project-settings-allowlist-and-permissions.md`）：
+ * `llm` 是 **user 层键** —— project 文件 `<cwd>/.iknow/settings.json` 只采纳
+ * `hooks` / `verify` / `secrets` / `permissions`，出现 `llm` 即丢弃 + 告警。
+ * 故 A / C / D 三组的 fixture 一律写 tmp HOME（`<home>/.iknow/settings.json`）；
+ * 写 project 层会让 `llm` 段被丢弃，`loadIknowEnv` 随即因 `settings.llm.model`
+ * 缺失而 fail-fast。
  *
  * 纪律（对齐 i9 / i132 / t4 / i164）：
  *   - host-layer guard：读自身源码扫禁词 `src/cli` / `src/session-api` /
  *     `src/interaction` / `web/`，命中即 throw + exit 1。
  *   - 不 import host 层。
- *   - key 仅打 `len` + `sha256_12` 指纹，绝不打印全文 / 写入 fixtures / 源码 /
- *     git / 日志。
+ *   - key 仅打 `len` + `sha256_12` 指纹，绝不打印全文 / 写入仓库内 fixtures /
+ *     源码 / git / 日志。
  *   - baseUrl 常量 = `http://172.31.128.1:20128/v1`（9router 内网入口）。
- *   - 每组独立 tmp HOME + tmp CWD（fork-local 隔离，不读真实 `~/.iknow`）。
- *   - 临时 tmp 目录 `finally rm`，不污染仓库。
+ *   - 4 组共享一个 tmp HOME + 每组独立 tmp CWD（fork-local 隔离，不读真实
+ *     `~/.iknow`）。共享 HOME 意味着每组必须清掉自己的 user 层 fixture —— 否则
+ *     残留的 `llm` 会污染后续组（尤以 B 组「两层皆无 llm」前提为甚）。
+ *   - 临时 tmp 文件 / 目录 `finally rm`，不污染仓库。
  *   - 输出约定：每行 `[PASS]/[FAIL] <断言名>: <细节>` 到 stdout；
  *     末尾一行 `i135 result=...` 到 stderr；exit 0 = 全断言过，
  *     exit 1 = 任何失败。
@@ -216,19 +226,25 @@ async function withIsolatedHome<T>(
   }
 }
 
-/** A 组：settings `${ANTHROPIC_AUTH_TOKEN}` 占位符 → loader 解析 → 真实 chat。 */
+/**
+ * A 组：user 层 settings `${ANTHROPIC_AUTH_TOKEN}` 占位符 → loader 解析 → 真实 chat。
+ *
+ * fixture 写 user 层（`<home>/.iknow/settings.json`，ADR-0084：llm 是 user 层键）；
+ * cwd 只作为「无 project settings」的空项目根（不写 `<cwd>/.iknow`）。
+ */
 async function groupA(home: string): Promise<void> {
   const cwd = await mkdtemp(join(tmpdir(), "iknow-i135-A-"));
-  await mkdir(join(cwd, ".iknow"), { recursive: true });
+  const settingsPath = join(home, ".iknow", "settings.json");
+  await mkdir(join(home, ".iknow"), { recursive: true });
   await writeFile(
-    join(cwd, ".iknow", "settings.json"),
+    settingsPath,
     JSON.stringify({
       llm: { model: SETTINGS_MODEL, apiKey: "${ANTHROPIC_AUTH_TOKEN}" },
     }) + "\n",
     "utf8"
   );
   try {
-    const env = loadIknowEnv(cwd);
+    const env = loadIknowEnv(cwd, undefined, home);
     record(
       "A1 loader: env.llm.model === settings.llm.model",
       env.llm.model === SETTINGS_MODEL,
@@ -256,17 +272,27 @@ async function groupA(home: string): Promise<void> {
       `text=${JSON.stringify(turn.text)} stop=${turn.stop}`
     );
   } finally {
+    // 只删本组 fixture 文件：tmp HOME 目录本身归 withIsolatedHome 所有，不在此 rm。
+    // 必须删——4 组共享同一个 HOME，残留的 llm 会让 B 组「两层皆无 llm」前提失效。
+    await rm(settingsPath, { force: true });
     await rm(cwd, { recursive: true, force: true });
   }
 }
 
-/** B 组：settings `{}` → loadIknowEnv fail-fast 抛「no LLM model configured」。 */
+/**
+ * B 组：user / project 两层皆无 llm（隔离空 HOME + 无 project settings）→
+ * loadIknowEnv fail-fast 抛「no LLM model configured」。
+ *
+ * 前提依赖「隔离 HOME 此刻为空」：前序组（A）的 fixture 已在自身 finally 清除。
+ * home 显式注入（而非依赖 os.homedir() 读 process.env.HOME）：本组断言的正是
+ * 这个 home 的缺席，且 env.ts 对 home 的契约本身就是「须显式注入」。
+ */
 async function groupB(home: string): Promise<void> {
   const cwd = await mkdtemp(join(tmpdir(), "iknow-i135-B-"));
   try {
     let err: Error | undefined;
     try {
-      loadIknowEnv(cwd);
+      loadIknowEnv(cwd, undefined, home);
     } catch (e) {
       err = e instanceof Error ? e : new Error(String(e));
     }
@@ -281,19 +307,24 @@ async function groupB(home: string): Promise<void> {
   }
 }
 
-/** C 组：settings 有 model 无 apiKey + ANTHROPIC_AUTH_TOKEN="" → 守卫抛。 */
+/**
+ * C 组：user 层 settings 有 model 无 apiKey + ANTHROPIC_AUTH_TOKEN="" → 守卫抛。
+ *
+ * fixture 写 user 层（`<home>/.iknow/settings.json`，ADR-0084：llm 是 user 层键）。
+ */
 async function groupC(home: string): Promise<void> {
   const cwd = await mkdtemp(join(tmpdir(), "iknow-i135-C-"));
-  await mkdir(join(cwd, ".iknow"), { recursive: true });
+  const settingsPath = join(home, ".iknow", "settings.json");
+  await mkdir(join(home, ".iknow"), { recursive: true });
   await writeFile(
-    join(cwd, ".iknow", "settings.json"),
+    settingsPath,
     JSON.stringify({ llm: { model: SETTINGS_MODEL } }) + "\n",
     "utf8"
   );
   const prevKey = process.env.ANTHROPIC_AUTH_TOKEN;
   process.env.ANTHROPIC_AUTH_TOKEN = "";
   try {
-    const env = loadIknowEnv(cwd);
+    const env = loadIknowEnv(cwd, undefined, home);
     record(
       "C1 loader: apiKey 解析为 undefined（settings 无 apiKey + env key 空）",
       env.llm.apiKey === undefined,
@@ -319,22 +350,26 @@ async function groupC(home: string): Promise<void> {
   } finally {
     if (prevKey === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
     else process.env.ANTHROPIC_AUTH_TOKEN = prevKey;
+    // 只删本组 fixture 文件（tmp HOME 目录归 withIsolatedHome 所有，不在此 rm）。
+    await rm(settingsPath, { force: true });
     await rm(cwd, { recursive: true, force: true });
   }
 }
 
 /**
- * D 组：settings 字面写 `"apiKey": "<real>"` → 删 env key → 真实 chat 走通。
+ * D 组：user 层 settings 字面写 `"apiKey": "<real>"` → 删 env key → 真实 chat 走通。
  *
  * key 来源：`process.env.ANTHROPIC_AUTH_TOKEN`（脚本运行时内存；不落 bash 命令行
- * / fixtures / 源码 / git / 日志；只进 tmp cwd 的 settings.json，写入后 `finally rm`）。
+ * / 仓库 fixtures / 源码 / git / 日志；只进 tmp HOME 的 settings.json，写入后
+ * `finally rm`）。ADR-0084：llm 是 user 层键，project 文件会丢弃该段。
  */
 async function groupD(home: string, realKey: string): Promise<void> {
   const cwd = await mkdtemp(join(tmpdir(), "iknow-i135-D-"));
-  await mkdir(join(cwd, ".iknow"), { recursive: true });
-  // 字面 apiKey 写入 tmp settings.json（脚本内 Node fs，断言后立即删）。
+  const settingsPath = join(home, ".iknow", "settings.json");
+  await mkdir(join(home, ".iknow"), { recursive: true });
+  // 字面 apiKey 写入 tmp HOME settings.json（脚本内 Node fs，断言后立即删）。
   await writeFile(
-    join(cwd, ".iknow", "settings.json"),
+    settingsPath,
     JSON.stringify({
       llm: { model: SETTINGS_MODEL, apiKey: realKey },
     }) + "\n",
@@ -344,7 +379,7 @@ async function groupD(home: string, realKey: string): Promise<void> {
   const prevKey = process.env.ANTHROPIC_AUTH_TOKEN;
   delete process.env.ANTHROPIC_AUTH_TOKEN;
   try {
-    const env = loadIknowEnv(cwd);
+    const env = loadIknowEnv(cwd, undefined, home);
     record(
       "D1 loader: apiKey 字面解析 === settings 字面（不依赖 env）",
       env.llm.apiKey === realKey,
@@ -369,6 +404,8 @@ async function groupD(home: string, realKey: string): Promise<void> {
   } finally {
     if (prevKey === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
     else process.env.ANTHROPIC_AUTH_TOKEN = prevKey;
+    // 只删本组 fixture 文件（tmp HOME 目录归 withIsolatedHome 所有，不在此 rm）。
+    await rm(settingsPath, { force: true });
     await rm(cwd, { recursive: true, force: true });
   }
 }

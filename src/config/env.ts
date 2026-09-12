@@ -691,9 +691,12 @@ export function loadIknowEnv(
   home?: string
 ): IknowEnv {
   // process.env still wins via envGet; among files, .env.local overrides .env.
-  // settings 参数是测试注入缝；不传时自动读取真实 settings 文件（project > user 合并）。
-  // home 参数透传给 loadIknowSettings：测试隔离 user 级 settings 用（os.homedir()
-  // 不响应运行时 process.env.HOME 修改，须显式注入）。
+  // settings 参数是测试注入缝；不传时自动读取真实 settings 文件。ADR-0084 项目允许名单下
+  // 项目文件只贡献 hooks / verify / secrets / permissions；本函数消费的 `llm` 是用户层键
+  // （唯一来源 = `~/.iknow/settings.json`）。
+  // home 参数透传给 loadIknowSettings：测试隔离 user 级 settings 用。显式注入固定该层，
+  // 不依赖 ambient process.env.HOME；POSIX 上 os.homedir() 确实跟随 $HOME，靠它虽能工作，
+  // 但隐式、易被破坏。
   const mergedSettings = settings ?? loadIknowSettings({ cwd, home });
 
   const file = {

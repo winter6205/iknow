@@ -53,6 +53,13 @@ async function add(
   return tool.handler({ mode: "add", item }, ctx);
 }
 
+/** First id of a read result (add receipt already names it; kept for clarity). */
+function firstIdOf(receipt: unknown): string {
+  const match = /Added 1 item: (t\d+)/.exec(String(receipt));
+  if (match === null) throw new Error(`no id in receipt: ${String(receipt)}`);
+  return match[1]!;
+}
+
 describe("resolveConversationTodoPath", () => {
   it("with conversationId → <todoDir>/<sanitized conversationId>/todos.md", () => {
     const p = resolveConversationTodoPath({
@@ -86,11 +93,11 @@ describe("resolveConversationTodoPath", () => {
 });
 
 describe("todo_write per-conversation isolation (handler reads ctx.conversationId)", () => {
-  it("add under conv-a is invisible to conv-b list", async () => {
+  it("add under conv-a is invisible to conv-b read", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await add(tool, "only in a", { ...CALL_A });
-    const seenByB = await tool.handler({ mode: "list" }, { ...CALL_B });
-    const seenByA = await tool.handler({ mode: "list" }, { ...CALL_A });
+    const seenByB = await tool.handler({ mode: "read" }, { ...CALL_B });
+    const seenByA = await tool.handler({ mode: "read" }, { ...CALL_A });
     assert.equal(seenByB, "");
     assert.match(seenByA as string, /only in a/);
   });
@@ -105,7 +112,7 @@ describe("todo_write per-conversation isolation (handler reads ctx.conversationI
       }),
       "utf8"
     );
-    assert.match(content, /- \[ \] disk layout/);
+    assert.match(content, /- \[ \] \[t1\] disk layout/);
     // root ledger untouched
     await assert.rejects(readFile(join(todoDir, TODOS_FILE), "utf8"), /ENOENT/);
   });
@@ -114,25 +121,30 @@ describe("todo_write per-conversation isolation (handler reads ctx.conversationI
     const tool = createTodoWriteTool({ todoDir });
     await add(tool, "legacy layout");
     const content = await readFile(join(todoDir, TODOS_FILE), "utf8");
-    assert.match(content, /- \[ \] legacy layout/);
+    assert.match(content, /- \[ \] \[t1\] legacy layout/);
   });
 
   it("ctx without conversationId → legacy root todos.md", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await add(tool, "no id", {});
     const content = await readFile(join(todoDir, TODOS_FILE), "utf8");
-    assert.match(content, /- \[ \] no id/);
+    assert.match(content, /- \[ \] \[t1\] no id/);
   });
 
-  it("check flips within the caller's conversation only", async () => {
+  it("update status=completed flips within the caller's conversation only", async () => {
     const tool = createTodoWriteTool({ todoDir });
-    await add(tool, "task x", { ...CALL_A });
-    await tool.handler({ mode: "check", item: "task x" }, { ...CALL_A });
-    const a = (await tool.handler({ mode: "list" }, { ...CALL_A })) as string;
-    assert.match(a, /- \[x\] task x/);
-    // conv-b never saw the item → check there is a typed error, not a flip
+    const receipt = await add(tool, "task x", { ...CALL_A });
+    const id = firstIdOf(receipt);
+    await tool.handler(
+      { mode: "update", id, status: "completed" },
+      { ...CALL_A }
+    );
+    const a = (await tool.handler({ mode: "read" }, { ...CALL_A })) as string;
+    assert.match(a, /- \[x\] \[t1\] task x/);
+    // conv-b never saw the item → the same id is unknown there: typed error.
     await assert.rejects(
-      tool.handler({ mode: "check", item: "task x" }, { ...CALL_B })
+      tool.handler({ mode: "update", id, status: "completed" }, { ...CALL_B }),
+      /unknown id/
     );
   });
 });
@@ -170,13 +182,16 @@ describe("todo_write replace per-conversation isolation", () => {
     await tool.handler({ mode: "replace", items: ["a-new-1"] }, { ...CALL_A });
 
     // conv-a：换表 + 自己目录里一份快照。
-    assert.equal(await currentOf(CALL_A.conversationId), "- [ ] a-new-1\n");
+    assert.equal(
+      await currentOf(CALL_A.conversationId),
+      "- [ ] [t1] a-new-1\n"
+    );
     assert.equal((await snapshotsOf(CALL_A.conversationId)).length, 1);
 
     // conv-b：现行逐字节不动 + 目录里没有任何快照。
     assert.equal(
       await currentOf(CALL_B.conversationId),
-      "- [ ] b-keeps-this\n"
+      "- [ ] [t1] b-keeps-this\n"
     );
     assert.deepEqual(await snapshotsOf(CALL_B.conversationId), []);
   });
@@ -203,12 +218,12 @@ describe("todo_write replace per-conversation isolation", () => {
       join(todoDir, CALL_B.conversationId, bSnaps[0]),
       "utf8"
     );
-    assert.equal(aSnapshot, "- [ ] a-v1\n");
-    assert.equal(bSnapshot, "- [ ] b-v1\n");
+    assert.equal(aSnapshot, "- [ ] [t1] a-v1\n");
+    assert.equal(bSnapshot, "- [ ] [t1] b-v1\n");
 
     // 现行同样各自独立。
-    assert.equal(await currentOf(CALL_A.conversationId), "- [ ] a-v2\n");
-    assert.equal(await currentOf(CALL_B.conversationId), "- [ ] b-v2\n");
+    assert.equal(await currentOf(CALL_A.conversationId), "- [ ] [t1] a-v2\n");
+    assert.equal(await currentOf(CALL_B.conversationId), "- [ ] [t1] b-v2\n");
   });
 
   it("replace 清空(items=[])只清空调用方,另一会话的未勾项仍在 list 与栏里", async () => {
@@ -222,15 +237,15 @@ describe("todo_write replace per-conversation isolation", () => {
 
     assert.equal(await currentOf(CALL_A.conversationId), "");
     const seenByA = (await tool.handler(
-      { mode: "list" },
+      { mode: "read" },
       { ...CALL_A }
     )) as string;
     const seenByB = (await tool.handler(
-      { mode: "list" },
+      { mode: "read" },
       { ...CALL_B }
     )) as string;
     assert.equal(seenByA, "");
-    assert.equal(seenByB, "- [ ] b-survives\n");
+    assert.equal(seenByB, "- [ ] [t1] b-survives\n");
 
     // 栏投影同源：conv-b 的未勾项不受 conv-a 清空影响。
     assert.deepEqual(
@@ -238,7 +253,7 @@ describe("todo_write replace per-conversation isolation", () => {
       []
     );
     assert.deepEqual(await readOpenTodoLines(todoDir, CALL_B.conversationId), [
-      "- [ ] b-survives",
+      "- [ ] [t1] b-survives",
     ]);
   });
 
@@ -253,7 +268,7 @@ describe("todo_write replace per-conversation isolation", () => {
     // 根账本逐字节不动。
     assert.equal(
       await readFile(join(todoDir, TODOS_FILE), "utf8"),
-      "- [ ] legacy root item\n"
+      "- [ ] [t1] legacy root item\n"
     );
     // 根目录下没有快照文件（快照应落在 conv-a 子目录）。
     const { readdir } = await import("node:fs/promises");
@@ -272,7 +287,7 @@ describe("agent-status projection is per-conversation", () => {
     await add(tool, "open in a", { ...CALL_A });
     const forA = await readOpenTodoLines(todoDir, CALL_A.conversationId);
     const forB = await readOpenTodoLines(todoDir, CALL_B.conversationId);
-    assert.deepEqual(forA, ["- [ ] open in a"]);
+    assert.deepEqual(forA, ["- [ ] [t1] open in a"]);
     assert.deepEqual(forB, []);
   });
 
@@ -283,6 +298,6 @@ describe("agent-status projection is per-conversation", () => {
       lastTool: "bash",
       todoDir,
     });
-    assert.deepEqual(snap.openTodoLines, ["- [ ] root item"]);
+    assert.deepEqual(snap.openTodoLines, ["- [ ] [t1] root item"]);
   });
 });

@@ -32,6 +32,9 @@ import type { SubagentInfo } from "../harness/subagent/manager.js";
 import { clipOneLineVisual, visualWidth } from "./tool-summary.js";
 import { formatRunDuration } from "./run-stats.js";
 import { tuiPalette } from "./theme.js";
+// SC14/SC15 行序合同：live 判据是单一谓词（starting + running），与投影 /
+// 强杀分派 / app focus 计数同源 —— 面板行序漂移会让 Ctrl+X 杀错行。
+import { isLiveSubagent } from "./subagent-message-lines.js";
 
 export interface SubagentPanelProps {
   /** 只读投影（#358 T7）：host 传 SubagentInfo 列表，本组件不改写。 */
@@ -113,7 +116,7 @@ export function projectSubagentLines(
     const nameWidth = visualWidth(name);
     const previewBudget = Math.max(4, cols - DECOR_RESERVE - nameWidth);
     const narrowReasonBudget = Math.max(4, cols - (2 + nameWidth + 3));
-    if (s.state === "starting" || s.state === "running") {
+    if (isLiveSubagent(s)) {
       liveIndex += 1;
       const icon = s.state === "starting" ? "○" : "●";
       const fg = s.state === "starting" ? tuiPalette.dim : tuiPalette.running;

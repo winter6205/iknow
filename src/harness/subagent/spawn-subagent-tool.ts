@@ -73,6 +73,80 @@ export interface SpawnSubAgentToolDeps {
 }
 
 /**
+ * SC13 / plan task 7：子代理墙钟到期，父可见 tool result kind **不得**为 ok。
+ *
+ * 超时是唯一破例：crashed / maxTurnsExceeded / protocolError 仍是「任务结局是
+ * 数据」，走 ok envelope（C5）；墙钟到期没有可读的终态交差，只有把它抛成
+ * `execution_failed` 才能让模型把「子代理卡死在墙钟」和「子代理跑完但失败」
+ * 区分开。envelope.status 本就是 "failed"，规格说的是 result kind。
+ *
+ * message **不得**恰好等于 `"cancelled"` / `"timeout"` —— loop-engine 用
+ * `execution_failed && message === "cancelled"` 判整回合取消、`=== "timeout"`
+ * 判整回合超时（loop-engine.ts:1605-1618）；撞字面量会把单个子任务的墙钟
+ * 误升级成整回合停因。
+ */
+function throwWallClockTimeout(taskId: string, detail: string): never {
+  const suffix = detail.length > 0 ? ` (${detail})` : "";
+  throw new ToolExecutionError(
+    `spawn_subagent: task ${taskId} hit its wall-clock timeout${suffix}; ` +
+      `the sub-agent has no completed result to hand back`
+  );
+}
+
+/**
+ * SC14 / plan task 8：`SubAgentAbortError` → 父可见 `ToolExecutionError`。
+ *
+ * 两种 abort 来源必须能分开：
+ *   - **调用侧 abort**（Ctrl+C / `/quit`）：ctx.signal 已 abort，executor 的
+ *     `buildFailureResult` 随后把 message 归一成严格 `"cancelled"`（整回合
+ *     取消，loop-engine 消费）—— 这里保留 caller 文本只为不丢归因来源；
+ *   - **操作员强杀**（TUI Ctrl+X → `manager.abortTask`，SC14）：ctx.signal
+ *     **没有** abort，executor 不归一，message 原样透出 —— 所以这条文本就是
+ *     模型能看见的全部归因。若沿用调用侧那句「caller aborted」，强杀会被读成
+ *     调用方取消；若沿用墙钟那句，则与 SC13 的超时归因撞脸。
+ *
+ * 两者的共同点是**绝不**恰好等于 `"cancelled"` / `"timeout"`：撞字面量会把
+ * 单个子任务的结局误升级成整回合停因（loop-engine.ts:1605-1618）。
+ *
+ * 放在 handler 外：整个归因判定（含 `ctx?.signal` 读）不占 handler 的圈复杂度
+ * （S5 硬门：handler 已在基线上，任何新分支都会判回归）。
+ */
+function throwAbortAttribution(
+  err: SubAgentAbortError,
+  ctx: ToolExecutionContext | undefined
+): never {
+  if (ctx?.signal?.aborted === true) {
+    throw new ToolExecutionError(
+      `spawn_subagent: cancelled (caller aborted while waiting for task ${err.taskId})`
+    );
+  }
+  throw new ToolExecutionError(
+    `spawn_subagent: cancelled (the operator killed task ${err.taskId}; ` +
+      `it returned no completed result)`
+  );
+}
+
+/** 已带 timeout 终态的信封 → 非 ok（详见 throwWallClockTimeout）。 */
+function assertNotWallClockTimeout(
+  env: SubAgentEnvelope,
+  taskId: string
+): void {
+  if (env.status === "failed" && env.reason === "timeout") {
+    throwWallClockTimeout(taskId, env.summary);
+  }
+}
+
+/** 父可见投影 + SC13 超时闸（终态信封交回模型的唯一出口）。 */
+function projectEnvelopeOrThrow(
+  env: SubAgentEnvelope,
+  taskId: string
+): SubAgentEnvelope {
+  const projected = projectParentVisibleEnvelope(env);
+  assertNotWallClockTimeout(projected, taskId);
+  return projected;
+}
+
+/**
  * waitFor 墙钟拒绝后按 queryBuffer 分流。SubAgentWaitTimeoutError 复用于
  * unknown task / shutdown 清 map / failed-without-envelope / 真墙钟，不能一律合成 timeout。
  */
@@ -86,19 +160,17 @@ function envelopeFromWaitTimeout(
       `spawn_subagent: task ${taskId} not found after wait timeout`
     );
   }
-  // EXIT: running — 墙钟到但 worker 未终态；失败是数据（C5）。
+  // EXIT: running — 墙钟到但 worker 未终态（真墙钟；SC13 非 ok）。
   if (buffer.status === "running") {
-    return {
-      status: "failed",
-      reason: "timeout",
-      summary: `spawn_subagent: wait timed out while task ${taskId} still running`,
-      result: "",
-    };
+    throwWallClockTimeout(taskId, "worker still running when the wait expired");
   }
   if (buffer.status === "failed") {
     // EXIT: buffer 已是失败投影（含 protocolError / crashed / timeout envelope）。
     if ("result" in buffer && typeof buffer.result === "string") {
-      return projectParentVisibleEnvelope(buffer);
+      return projectEnvelopeOrThrow(buffer, taskId);
+    }
+    if (buffer.reason === "timeout") {
+      throwWallClockTimeout(taskId, buffer.summary);
     }
     return {
       status: "failed",
@@ -107,8 +179,9 @@ function envelopeFromWaitTimeout(
       result: buffer.summary,
     };
   }
-  // EXIT: completed ok envelope 已在 buffer。
-  return projectParentVisibleEnvelope(buffer);
+  // EXIT: completed ok envelope 已在 buffer（status=failed 的终态信封也走这里，
+  // 由 SC13 闸按 reason 分流）。
+  return projectEnvelopeOrThrow(buffer, taskId);
 }
 
 export function createSpawnSubAgentTool(
@@ -348,15 +421,17 @@ export function createSpawnSubAgentTool(
           ctx?.signal
         );
         // C5：成功 tool_result = envelope（executor 20000 截断,天然复用）。
-        // 失败 envelope 也作 ok 数据返回（失败是数据,非异常;模型读 summary/reason）。
-        return projectParentVisibleEnvelope(envelope);
+        // 非超时的失败 envelope 仍作 ok 数据返回（crashed / maxTurnsExceeded /
+        // protocolError 是任务结局,模型读 summary/reason）。
+        // SC13：reason=timeout 的终态信封（manager per-task timer / worker
+        // SIGTERM 收尾）改抛 ToolExecutionError → 非 ok（projectEnvelopeOrThrow）。
+        return projectEnvelopeOrThrow(envelope, taskId);
       } catch (err) {
-        // #361 C5 abort 归因：ctx.signal abort → ToolExecutionError → executor
-        // 因 signal.aborted 归一 execution_failed:cancelled。
+        // #361 C5 / SC14 abort 归因：调用侧 abort（executor 再归一成严格
+        // "cancelled"）与操作员强杀（原样透出）用不同文本，见
+        // throwAbortAttribution 头注。
         if (err instanceof SubAgentAbortError) {
-          throw new ToolExecutionError(
-            `spawn_subagent: cancelled (caller aborted while waiting for task ${err.taskId})`
-          );
+          throwAbortAttribution(err, ctx);
         }
         // concurrent: ACI/caller abort 与 wait poll 竞态时 abort 优先，
         // 不把 WaitTimeoutError 合成 timeout envelope。

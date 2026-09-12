@@ -57,9 +57,11 @@ export interface CreateWorktreeToolDeps {
 
 /**
  * Factory: createCreateWorktreeTool(deps) — the model-facing escape hatch
- * of the isolation gate. Registered ONLY when the isolation switch is ON and
- * the host supplies the provision seam (build-engine threading; worker
- * assembly paths omit it, so the tool never enters a worker tool surface).
+ * of the isolation gate. Registered whenever the host supplies the provision
+ * seam (build-engine threading; worker assembly paths omit it, so the tool
+ * never enters a worker tool surface). Presence is decoupled from
+ * `isolation.worktreeOnMutate` — the switch arms only the mutate gate
+ * (ADR-0037 Amendment 2026-09-11 / specs/agent-control-surface.md Slice A).
  */
 export function createCreateWorktreeTool(
   deps: CreateWorktreeToolDeps

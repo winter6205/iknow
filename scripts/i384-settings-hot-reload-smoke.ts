@@ -149,6 +149,12 @@ interface Dirs {
   settingsFile: string;
 }
 
+/**
+ * fixture 写 **user 层**（`<home>/.iknow/settings.json`）：ADR-0084 起
+ * `llm` 是 user 层键 —— project 文件 `<cwd>/.iknow/settings.json` 只采纳
+ * `hooks` / `verify` / `secrets` / `permissions`，写 project 层会被丢弃 +
+ * 告警，`loadIknowEnv` 随即因 model 缺失 fail-fast。cwd 只作空项目根。
+ */
 function makeDirs(): Dirs {
   const base = mkdtempSync(join(tmpdir(), "iknow-i384-"));
   const home = join(base, "home");
@@ -159,7 +165,7 @@ function makeDirs(): Dirs {
     base,
     cwd,
     home,
-    settingsFile: join(cwd, ".iknow", "settings.json"),
+    settingsFile: join(home, ".iknow", "settings.json"),
   };
 }
 

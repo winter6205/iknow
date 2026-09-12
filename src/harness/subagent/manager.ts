@@ -119,9 +119,10 @@ export interface SubAgentManager {
    */
   readonly listActive: () => ReadonlyArray<string>;
   /**
-   * #361 T5: 主动 abort 单任务 → 传播 task.abortCtrl.abort + child.SIGTERM +
-   * 5s SIGKILL 兜底(以本次 SIGTERM 为基准重排,review-fix S1)。对未找到 /
-   * 已终态任务 no-op。
+   * #361 T5 / SC14: 主动 abort 单任务 → 先以 SubAgentAbortError settle 本任务
+   * 在飞的 `waitFor`(操作员强杀归因),再传播 task.abortCtrl.abort +
+   * child.SIGTERM + 5s SIGKILL 兜底(以本次 SIGTERM 为基准重排,review-fix S1)。
+   * 对未找到 / 已终态任务 no-op。
    */
   readonly abortTask: (taskId: string) => boolean;
   /**
@@ -288,6 +289,14 @@ interface Task {
   crashInFlight: boolean;
   /** Host path of this worker's fence `/tmp` pad when session layout exists. */
   padRoot?: string;
+  /**
+   * #358 T5 / SC14: 本任务未决 waitFor 的 settleReject 引用。
+   * `abortTask`(操作员强杀)据此**同步**拒绝该任务的 wait 者 —— 只杀 worker
+   * 子进程不够:父侧前景 wait 不带 manager 侧 abort 信号,否则只能等 SIGTERM
+   * 让 worker 写回失败信封(归因还会被误标成 timeout)。
+   * 与全局 `waitRejecters`(shutdown 全量拒绝)分开:这里是单任务作用域。
+   */
+  readonly waitRejects: Set<(reason: unknown) => void>;
 }
 
 const WAIT_POLL_MS = 25;
@@ -379,6 +388,29 @@ function armKillFallback(task: Task, reset = false): void {
   task.timeoutKillFallback = killFallback;
 }
 
+/**
+ * ADR-0085 / SC9:父会话账本锚点 —— worker 与父共用同一本 todos.md。
+ *
+ * 数据源 = host 注入的 `todoDir`(与主 loop registry 同一值;不解析 trace
+ * 文件布局来反推,避免 fragile coupling)+ `conversationId`(父会话 id,
+ * spawn_subagent 从 ctx 透传)。缺任一、或 id 为空串(空 id 会被
+ * `resolveConversationTodoPath` 解释成 legacy 根账本) → 不发该字段,worker
+ * 退回无 todoDir 的旧工具面(byte-stable)。
+ */
+function todoLedgerAnchor(
+  todoDir: string | undefined,
+  conversationId: string | undefined
+): { readonly todoLedger?: { projectDir: string; conversationId: string } } {
+  if (
+    todoDir === undefined ||
+    conversationId === undefined ||
+    conversationId.length === 0
+  ) {
+    return {};
+  }
+  return { todoLedger: { projectDir: todoDir, conversationId } };
+}
+
 export function createSubAgentManager(opts: {
   readonly spawn: SubAgentSpawn;
   /**
@@ -458,6 +490,18 @@ export function createSubAgentManager(opts: {
    * 新的形状。
    */
   readonly projectDir?: string;
+  /**
+   * ADR-0085 / SC9:父会话项目目录(`TodoWriteToolDeps.todoDir` 的同一值,
+   * host 注入)。在场且 `def.conversationId` 在场 → `buildWorkerPayload` 把
+   * `{projectDir, conversationId}` 作为 `todoLedger` 落进 envelope,worker
+   * 装配期据此把 **同一本** todos.md 挂给 worker 的 todo_write(读 / 更新;
+   * 添加由工具对 worker typed 拒绝)。缺席 → 不发该字段(旧 wire 形态,
+   * worker 工具面不含 todo_write,byte-stable)。
+   *
+   * 不从 trace 文件布局反推 —— 落值与 `resolveConversationTodoPath`
+   * (todo-write.ts SSOT)同一对 (projectDir, conversationId)。
+   */
+  readonly todoDir?: string;
   /**
    * T5:可选 override — 用外部注入的 TraceService 工厂(每个 taskId 一份)
    * 取代默认 `createJsonlTraceService` 文件实例。仅供测试/特殊注入;
@@ -836,6 +880,7 @@ export function createSubAgentManager(opts: {
       startedAt,
       stoppedEmitted: false,
       crashInFlight: false,
+      waitRejects: new Set(),
     };
     const layoutDir = resolveSubagentsDirForDef(def);
     if (layoutDir !== undefined) {
@@ -1278,6 +1323,7 @@ export function createSubAgentManager(opts: {
             ).recordPath,
           }
         : {}),
+      ...todoLedgerAnchor(opts.todoDir, def.conversationId),
     };
   }
 
@@ -1341,6 +1387,9 @@ export function createSubAgentManager(opts: {
         if (interval) clearInterval(interval);
         waitPollers.delete(interval as ReturnType<typeof setInterval>);
         waitRejecters.delete(settleReject);
+        // SC14: 本任务的 wait 已 settle(任一臂) → 从 abortTask 的单任务
+        // 拒绝集摘除,避免陈旧 setter 在后续 abortTask 时二次 settle。
+        task.waitRejects.delete(settleReject);
         if (signal) signal.removeEventListener("abort", onAbort);
       };
       const settleReject = (reason: unknown): void => {
@@ -1377,22 +1426,39 @@ export function createSubAgentManager(opts: {
       interval = setInterval(check, WAIT_POLL_MS);
       waitPollers.add(interval);
       waitRejecters.add(settleReject);
+      // SC14: 同源注册进本任务的拒绝集 —— abortTask 据此 settle 本任务在飞
+      // wait(操作员强杀 → 父 turn 收 cancelled)。
+      task.waitRejects.add(settleReject);
       signal?.addEventListener("abort", onAbort);
       check(); // 立即首查:已终态任务直接收敛,不等首个 tick
     });
   }
 
   /**
-   * #361 T5: 主动 abort 单任务。传播 abortCtrl.abort() → child SIGTERM →
-   * SIGKILL 兜底 5s。review-fix S1:先进去清旧兜底计时器,再以本次 SIGTERM
-   * 为基准重排 5s —— 否则 spawn 早期(per-task timeout 前)arm 的旧兜底仍
-   * 在旧基准 fire,与 timeout SIGTERM 同点双发。未找到 / 已终态任务 no-op
-   * 返回 false;实际对 in-flight child 发起中止返回 true。
+   * #361 T5 / SC14: 主动 abort 单任务。先 settle 本任务在飞的 `waitFor`
+   * (以 `SubAgentAbortError` 拒绝 —— 与 shutdown 同形,但只作用于这一个
+   * task),再传播 abortCtrl.abort() → child SIGTERM → SIGKILL 兜底 5s。
+   *
+   * 顺序是契约:拒绝必须发生在 SIGTERM 之前 —— worker 对 SIGTERM 的收尾会
+   * 写回 `reason:"timeout"` 的失败信封,若先杀后拒,父侧看到的就是墙钟超时
+   * 归因(SC13 文案),而操作员强杀与墙钟到期必须可区分(SC14)。
+   *
+   * review-fix S1:先进去清旧兜底计时器,再以本次 SIGTERM 为基准重排 5s ——
+   * 否则 spawn 早期(per-task timeout 前)arm 的旧兜底仍在旧基准 fire,与
+   * timeout SIGTERM 同点双发。未找到 / 已终态任务 no-op 返回 false;实际对
+   * in-flight child 发起中止返回 true。
    */
   function abortTask(taskId: string): boolean {
     const task = tasks.get(taskId);
     if (!task) return false;
     if (task.state !== "starting" && task.state !== "running") return false;
+    // 1. 先 settle wait 者(snapshot:settleReject 在自身 cleanup 中 mutate
+    //    本 set 跳过迭代)。
+    for (const reject of [...task.waitRejects]) {
+      reject(new SubAgentAbortError(taskId));
+    }
+    task.waitRejects.clear();
+    // 2. 再中止 worker 子进程 + 兜底。
     task.abortCtrl?.abort();
     if (task.child) {
       try {

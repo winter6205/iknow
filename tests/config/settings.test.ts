@@ -1,10 +1,18 @@
 /**
- * #353: settings 文件机制 —— user/project 双层加载 + 逐层合并 + 非法值回退。
+ * #353: settings 文件机制 —— user/project 双层加载 + 非法值回退。
+ *
+ * ADR-0084 项目允许名单：项目文件只贡献 hooks / verify / secrets /
+ * permissions 四个顶层键，其余顶层键（llm / isolation / subagent / ...）整段
+ * 丢弃并告警。因此双层纪律分两类：
+ *   - 允许名单键（verify / secrets / hooks / permissions）→ project 逐字段覆盖
+ *     user（同字段替换，非 merge 残留）；
+ *   - 名单外键（llm / isolation / subagent / ...）→ project 值被丢弃，user 值胜出。
  *
  * 覆盖：
  *  - 文件不存在 → 空对象（不抛错）；
- *  - user 值读取 / project 覆盖 user（同字段替换，非 merge 残留）；
- *  - 逐层合并（project 只覆盖 llm.maxTurns，保留 user 的 llm.compress）；
+ *  - 允许名单键 user 值读取 / project 逐字段覆盖 user（如 verify.command、
+ *    secrets.enabled）；
+ *  - 名单外键（llm）project 值丢弃 → user 值胜出；
  *  - 坏 JSON → 空对象（user / project 分别测）；
  *  - 非法值丢弃（maxTurns 0 / -5 / "abc" / 1.5；contextWindow 0 / "bad"；
  *    thresholdTokens 0）；
@@ -70,33 +78,37 @@ describe("loadIknowSettings — settings 文件机制 (#353)", () => {
     });
   });
 
-  it("project 覆盖 user（同字段替换，非 merge 残留）", async () => {
+  it("project 的 llm 段被允许名单丢弃 → user 值胜出（ADR-0084，非 project 覆盖）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { maxTurns: 20 } },
       { llm: { maxTurns: 5 } }
     );
-    assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { maxTurns: 5 },
-    });
+    const warnings: string[] = [];
+    assert.deepEqual(
+      loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) }),
+      { llm: { maxTurns: 20 } }
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"llm"/);
   });
 
-  it("逐层合并：project 只覆盖 llm.maxTurns，保留 user 的 llm.compress", async () => {
+  it("project llm 段整体丢弃 → user 的 maxTurns + compress 完整保留", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { maxTurns: 20, compress: { contextWindow: 200000 } } },
       { llm: { maxTurns: 5 } }
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { maxTurns: 5, compress: { contextWindow: 200000 } },
+      llm: { maxTurns: 20, compress: { contextWindow: 200000 } },
     });
   });
 
-  it("压缩字段逐层合并：project 只覆盖 compress.thresholdTokens，保留 user 的 contextWindow", async () => {
+  it("project compress 段随 llm 丢弃 → user 的 contextWindow + thresholdTokens 均保留", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { compress: { contextWindow: 200000, thresholdTokens: 150000 } } },
       { llm: { compress: { thresholdTokens: 100000 } } }
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { compress: { contextWindow: 200000, thresholdTokens: 100000 } },
+      llm: { compress: { contextWindow: 200000, thresholdTokens: 150000 } },
     });
   });
 
@@ -170,23 +182,23 @@ describe("loadIknowSettings — settings 文件机制 (#353)", () => {
     }
   });
 
-  it("project 覆盖 user 的 thinking / thinkingEffort（同字段替换）", async () => {
+  it("project thinking / thinkingEffort 丢弃 → user 的两个值都保留（写回落对层的读侧对偶）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { thinking: "adaptive", thinkingEffort: "low" } },
       { llm: { thinking: "off", thinkingEffort: "max" } }
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { thinking: "off", thinkingEffort: "max" },
+      llm: { thinking: "adaptive", thinkingEffort: "low" },
     });
   });
 
-  it("逐层合并：project 只设置 thinking → 保留 user 的 thinkingEffort", async () => {
+  it("project 只设置 thinking → 整段丢弃，user 的 thinking + thinkingEffort 原样保留", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { thinking: "adaptive", thinkingEffort: "high" } },
       { llm: { thinking: "off" } }
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { thinking: "off", thinkingEffort: "high" },
+      llm: { thinking: "adaptive", thinkingEffort: "high" },
     });
   });
 
@@ -245,7 +257,7 @@ describe("loadIknowSettings — settings 文件机制 (#353)", () => {
     });
   });
 
-  it("project 非法值不覆盖 user 合法值（保留 user 值）", async () => {
+  it("project llm 段整体丢弃 → user maxTurns 胜出（project 非法值未参与校验）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { maxTurns: 20 } },
       { llm: { maxTurns: "bad" } }
@@ -255,7 +267,7 @@ describe("loadIknowSettings — settings 文件机制 (#353)", () => {
     });
   });
 
-  it("project compress 非法不覆盖 user compress（user 的 compress 完整保留）", async () => {
+  it("project llm.compress 随 llm 段整体丢弃 → user 的 compress 完整保留", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { compress: { contextWindow: 200000, thresholdTokens: 150000 } } },
       { llm: { compress: { contextWindow: 0, thresholdTokens: "bad" } } }
@@ -316,17 +328,21 @@ describe("loadIknowSettings — settings 文件机制 (#353)", () => {
     });
   });
 
-  it("project 写 llm.model=x，user 写 llm.model=y → project 覆盖", async () => {
+  it("project 写 llm.model=x，user 写 llm.model=y → user 的 y 胜出（SC4 核心不变式）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { model: "y" } },
       { llm: { model: "x" } }
     );
-    assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { model: "x" },
-    });
+    const warnings: string[] = [];
+    assert.deepEqual(
+      loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) }),
+      { llm: { model: "y" } }
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"llm"/);
   });
 
-  it("project 写非法 model，user 写合法 → user 保留（非法不覆盖）", async () => {
+  it("project 写非法 model，user 写合法 → user 保留（llm 段整体丢弃，未进校验器）", async () => {
     for (const bad of [123, "", true]) {
       const { home, cwd } = await makeSettings(
         { llm: { model: "y" } },
@@ -361,13 +377,13 @@ describe("loadIknowSettings — settings 文件机制 (#353)", () => {
     assert.deepEqual(loadIknowSettings({ home, cwd }), {});
   });
 
-  it("user/project 都没 model → 返回对象无 model 字段", async () => {
+  it("user/project 都没 model → 返回对象无 model 字段（maxTurns 取 user）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { maxTurns: 5 } },
       { llm: { maxTurns: 3 } }
     );
     const s = loadIknowSettings({ home, cwd });
-    assert.deepEqual(s, { llm: { maxTurns: 3 } });
+    assert.deepEqual(s, { llm: { maxTurns: 5 } });
     assert.equal(s.llm?.model, undefined);
   });
 
@@ -391,27 +407,27 @@ describe("loadIknowSettings — settings 文件机制 (#353)", () => {
     });
   });
 
-  it("project 写 llm.fallback，user 也写 → project 覆盖（替换非 merge 残留）", async () => {
+  it("project fallback 丢弃 → user fallback 胜出（无 merge 残留）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { fallback: ["user-a", "user-b"] } },
       { llm: { fallback: ["project-a"] } }
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { fallback: ["project-a"] },
+      llm: { fallback: ["user-a", "user-b"] },
     });
   });
 
-  it("user 写 fallback、project 写其它字段 → user fallback 保留（逐层合并）", async () => {
+  it("user 写 fallback、project 写 maxTurns → project 整段丢弃，只剩 user fallback", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { fallback: ["u1"] } },
       { llm: { maxTurns: 5 } }
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { fallback: ["u1"], maxTurns: 5 },
+      llm: { fallback: ["u1"] },
     });
   });
 
-  it("project fallback 非法不覆盖 user 合法（保留 user 值）", async () => {
+  it("project llm 段整体丢弃 → user fallback 胜出（project 非法值未参与校验）", async () => {
     for (const bad of [123, "", "x", [], ["a", 5], [""], null, [1, 2]]) {
       const { home, cwd } = await makeSettings(
         { llm: { fallback: ["user-keep"] } },
@@ -527,17 +543,17 @@ describe("loadIknowSettings — llm.timeoutMs (#358 settings 双字段)", () => 
     }
   });
 
-  it("project 覆盖 user timeoutMs（同字段替换）", async () => {
+  it("project timeoutMs 丢弃 → user timeoutMs 胜出（同字段亦不覆盖）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { timeoutMs: 60_000 } },
       { llm: { timeoutMs: 30_000 } }
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { timeoutMs: 30_000 },
+      llm: { timeoutMs: 60_000 },
     });
   });
 
-  it("project 非法 timeoutMs 不覆盖 user 合法（保留 user 值）", async () => {
+  it("project llm 段整体丢弃 → user timeoutMs 胜出（project 非法值未参与校验）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { timeoutMs: 60_000 } },
       { llm: { timeoutMs: "bad" } }
@@ -547,13 +563,13 @@ describe("loadIknowSettings — llm.timeoutMs (#358 settings 双字段)", () => 
     });
   });
 
-  it("逐层合并：project 只覆盖 timeoutMs，保留 user 的 maxTurns", async () => {
+  it("project 只写 timeoutMs → 整段丢弃，user 的 maxTurns + timeoutMs 都保留", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { maxTurns: 20, timeoutMs: 60_000 } },
       { llm: { timeoutMs: 30_000 } }
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { maxTurns: 20, timeoutMs: 30_000 },
+      llm: { maxTurns: 20, timeoutMs: 60_000 },
     });
   });
 
@@ -612,14 +628,18 @@ describe("loadIknowSettings — subagent 段 (#358 settings 双字段)", () => {
     }
   });
 
-  it("project maxConcurrentWorkers 覆盖 user 值", async () => {
+  it("project subagent 段丢弃 → user maxConcurrentWorkers 胜出", async () => {
     const { home, cwd } = await makeSettings(
       { subagent: { maxConcurrentWorkers: 6 } },
       { subagent: { maxConcurrentWorkers: 3 } }
     );
-    assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      subagent: { maxConcurrentWorkers: 3 },
-    });
+    const warnings: string[] = [];
+    assert.deepEqual(
+      loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) }),
+      { subagent: { maxConcurrentWorkers: 6 } }
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"subagent"/);
   });
 
   it("合法 taskTimeoutMs=7200000 → 透传（per-task 缺省）", async () => {
@@ -670,17 +690,17 @@ describe("loadIknowSettings — subagent 段 (#358 settings 双字段)", () => {
     }
   });
 
-  it("project 覆盖 user taskTimeoutMs（同字段替换）", async () => {
+  it("project taskTimeoutMs 丢弃 → user taskTimeoutMs 胜出", async () => {
     const { home, cwd } = await makeSettings(
       { subagent: { taskTimeoutMs: 7_200_000 } },
       { subagent: { taskTimeoutMs: 1_800_000 } }
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      subagent: { taskTimeoutMs: 1_800_000 },
+      subagent: { taskTimeoutMs: 7_200_000 },
     });
   });
 
-  it("project 非法 taskTimeoutMs 不覆盖 user 合法（保留 user 值）", async () => {
+  it("project subagent 段整体丢弃 → user taskTimeoutMs 胜出（project 非法值未参与校验）", async () => {
     const { home, cwd } = await makeSettings(
       { subagent: { taskTimeoutMs: 7_200_000 } },
       { subagent: { taskTimeoutMs: "bad" } }
@@ -730,14 +750,13 @@ describe("loadIknowSettings — subagent 段 (#358 settings 双字段)", () => {
     });
   });
 
-  it("逐层合并：user 配 llm.timeoutMs、project 配 subagent.taskTimeoutMs → 两段都保留", async () => {
+  it("user 配 llm.timeoutMs、project 配 subagent.taskTimeoutMs → 只出 user 段（project 段被丢弃）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { timeoutMs: 60_000 } },
       { subagent: { taskTimeoutMs: 7_200_000 } }
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }), {
       llm: { timeoutMs: 60_000 },
-      subagent: { taskTimeoutMs: 7_200_000 },
     });
   });
 
@@ -871,17 +890,17 @@ describe("loadIknowSettings — llm.apiKey validator (settings-model-extension)"
     });
   });
 
-  it("project > user 合并 + apiKey 字段（project 覆盖 user）", async () => {
+  it("apiKey 层选择：project llm 段丢弃 → user ${USER_KEY} 胜出（密钥不落共享仓库）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { apiKey: "${USER_KEY}" } },
       { llm: { apiKey: "${PROJECT_KEY}" } }
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { apiKey: "${PROJECT_KEY}" },
+      llm: { apiKey: "${USER_KEY}" },
     });
   });
 
-  it("project apiKey 非法不覆盖 user 合法（保留 user 值）", async () => {
+  it("project llm 段整体丢弃 → user apiKey 胜出（project 非法值未参与校验）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { apiKey: "${USER_KEY}" } },
       { llm: { apiKey: "${1BAD}" } }
@@ -891,13 +910,13 @@ describe("loadIknowSettings — llm.apiKey validator (settings-model-extension)"
     });
   });
 
-  it("user apiKey 字面、project apiKey ${VAR} → project 覆盖", async () => {
+  it("user apiKey 字面、project apiKey ${VAR} → user 胜出（project 段整体丢弃）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { apiKey: "sk-literal" } },
       { llm: { apiKey: "${PROJECT_KEY}" } }
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }), {
-      llm: { apiKey: "${PROJECT_KEY}" },
+      llm: { apiKey: "sk-literal" },
     });
   });
 
@@ -1577,5 +1596,169 @@ describe("loadIknowSettings — secrets.mode 段 (#406 T4)", () => {
     assert.throws(() => {
       (s.secrets as { mode: string }).mode = "roundtrip";
     }, TypeError);
+  });
+});
+
+describe("loadIknowSettings — 项目 allowlist / permissions（ADR-0084 / SC4 / SC5）", () => {
+  it("SC4：项目含 isolation / llm.model → 合并结果等于用户层值 + 每键一条警告", async () => {
+    const { home, cwd } = await makeSettings(
+      {
+        isolation: { worktreeOnMutate: true, worktreeExclusive: true },
+        llm: { model: "user-model" },
+      },
+      {
+        isolation: { worktreeOnMutate: false },
+        llm: { model: "project-model" },
+      }
+    );
+    const warnings: string[] = [];
+    const s = loadIknowSettings({
+      home,
+      cwd,
+      onWarn: (m) => warnings.push(m),
+    });
+    assert.deepEqual(s, {
+      isolation: { worktreeOnMutate: true, worktreeExclusive: true },
+      llm: { model: "user-model" },
+    });
+    assert.equal(warnings.length, 2);
+    assert.match(warnings[0]!, /"isolation"/);
+    assert.match(warnings[1]!, /"llm"/);
+  });
+
+  it("用户层无对应值时项目值也不生效（不因 user 缺席而回落到 project）", async () => {
+    const { home, cwd } = await makeSettings(
+      {},
+      { isolation: { worktreeOnMutate: true } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("允许名单键（verify / secrets / hooks / permissions）仍按 project 覆盖 user 合并", async () => {
+    const { home, cwd } = await makeSettings(
+      {
+        verify: { command: "user-test", timeoutSec: 300 },
+        secrets: { enabled: true },
+        hooks: { enabled: true, rules: [] },
+      },
+      {
+        verify: { command: "project-test" },
+        secrets: { enabled: false },
+        hooks: { enabled: false },
+      }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      verify: { command: "project-test", timeoutSec: 300 },
+      secrets: { enabled: false },
+      hooks: { enabled: false },
+    });
+  });
+
+  it("未知顶层键 → 丢弃 + 警告（前向兼容：不抛错）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { model: "u" } },
+      { somethingNew: { a: 1 } }
+    );
+    const warnings: string[] = [];
+    assert.deepEqual(
+      loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) }),
+      { llm: { model: "u" } }
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"somethingNew"/);
+  });
+
+  it("不注入 onWarn → 默认走 console.warn 且不抛错（默认通道可测）", async () => {
+    const { home, cwd } = await makeSettings({}, { llm: { model: "p" } });
+    const original = console.warn;
+    const captured: unknown[][] = [];
+    console.warn = (...args: unknown[]) => {
+      captured.push(args);
+    };
+    try {
+      assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+    } finally {
+      console.warn = original;
+    }
+    assert.equal(captured.length, 1);
+    assert.match(String(captured[0]![0]), /"llm"/);
+  });
+
+  it("project permissions 段：schema_version + rule 原样透传（形状透传，语义归 permission 层）", async () => {
+    const rules = [
+      {
+        id: "allow-bash-echo",
+        match_tool: "bash",
+        match_input: { command_starts_with: "echo " },
+        decision: "allow",
+        reason: "explicit allow",
+      },
+    ];
+    const { home, cwd } = await makeSettings(
+      {},
+      { permissions: { schema_version: 1, rule: rules } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      permissions: { schema_version: 1, rule: rules },
+    });
+  });
+
+  it("project permissions 非普通对象 / rule 非数组 → 丢弃该段（drop-not-throw）", async () => {
+    for (const bad of ["x", 1, [], { rule: "not-array" }, { rule: {} }]) {
+      const { home, cwd } = await makeSettings({}, { permissions: bad });
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `permissions=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("用户层 permissions 不接：值不生效 + 警告点名（ADR-0084）", async () => {
+    const { home, cwd } = await makeSettings(
+      {
+        permissions: {
+          schema_version: 1,
+          rule: [
+            {
+              id: "user-rule",
+              match_tool: "bash",
+              decision: "allow",
+              reason: "never accepted",
+            },
+          ],
+        },
+      },
+      {}
+    );
+    const warnings: string[] = [];
+    assert.deepEqual(
+      loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) }),
+      {}
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"permissions"/);
+  });
+
+  it("返回对象深 frozen 含 permissions.rule 数组", async () => {
+    const { home, cwd } = await makeSettings(
+      {},
+      {
+        permissions: {
+          schema_version: 1,
+          rule: [
+            {
+              id: "r1",
+              match_tool: "bash",
+              decision: "deny",
+              reason: "no",
+            },
+          ],
+        },
+      }
+    );
+    const s = loadIknowSettings({ home, cwd });
+    assert.ok(Object.isFrozen(s.permissions));
+    assert.ok(Object.isFrozen(s.permissions!.rule));
   });
 });

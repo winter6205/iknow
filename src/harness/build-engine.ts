@@ -31,6 +31,7 @@ import {
   clearActiveExtraSecrets,
 } from "./sandbox/env-isolation.js";
 import { createPermissionPolicy } from "./permission/policy.js";
+import { resolveProjectPermissionSource } from "./permission/project-settings.js";
 import type { PermissionModeContext } from "./permission/modes.js";
 import type { GraphModeContext } from "./graph/mode.js";
 import { createGraphAssembly, type GraphAssembly } from "./graph/assembly.js";
@@ -805,6 +806,13 @@ export async function buildHarnessEngine(
           ...(opts.projectDir !== undefined
             ? { projectDir: opts.projectDir }
             : {}),
+          // ADR-0085 / SC9:父会话账本锚点透传 —— manager spawn 期把
+          // `{projectDir: opts.todoDir, conversationId: def.conversationId}`
+          // 落进 worker envelope,worker 的 todo_write 因此挂到与本 loop
+          // registry 同一本 todos.md(读 / 更新;添加对 worker typed 拒绝)。
+          // 与 subagentsDir / projectDir 同门:缺席时 manager 不发该字段,
+          // worker 工具面维持旧形态(byte-stable)。
+          ...(opts.todoDir !== undefined ? { todoDir: opts.todoDir } : {}),
           diagnosticsDir:
             opts.subagentDiagnosticsDir ??
             opts.subagentsDir ??
@@ -850,9 +858,10 @@ export async function buildHarnessEngine(
     }
   }
   // ADR-0037 T3/T4:worktree isolation host 缝 + 开关判定上移到 registry
-  // 装配之前 —— T4 的 create-worktree ACI 工具与 mutate 门禁共用同一
-  // 判定源（isolationEnabled），保证「工具在场 ⇔ 门禁已武装」；开关 OFF 时
-  // 工具面与今日逐字节一致。开关只在启动加载点读一次（硬要求 9）。
+  // 装配之前。**Amendment 2026-09-11 撤销了「工具在场 ⇔ 门禁已武装」**：
+  // 工具面只跟 host 缝在场挂钩（见下方 registry 透传处），`isolationEnabled`
+  // 只武装 mutate 门禁 —— 开关 OFF 时模型仍可 create/enter 显式 rebind，
+  // 只是没有门禁拦写。开关只在启动加载点读一次（硬要求 9）。
   // T6: `isolationHost` / `isolationEnabled` 已上移至 settings 加载后
   // (下方 isolationEnabled 声明处)—— subagentManager 构造需要透传 isolationOn。
   // T4 (plans/worktree-live-task-root.md §5 D1 / §6 T4) — single writer
@@ -1042,11 +1051,12 @@ export async function buildHarnessEngine(
       // secretRegistry 已在上方构造（T2 段），registry 工厂只在 handler 调用时
       // 解引用 opts.secretRegistry（惰性），无循环依赖。
       ...(secretRegistry ? { secretRegistry } : {}),
-      // #440 D2/D6 seam：surface !== "ask" 时把 host-injected todoDir 透传
-      // 给 registry（todo_write 条件化装配的开关）。ask 不传 → tool 不入注册表
-      // （与 memoryEnabled / subagentManager / skillCatalog 同形态）。worker
-      // 装配路径 (createWorkerDeps → createDefaultAciRegistry) 不传 todoDir
-      // → 所有权边界隔在主 loop 内。
+      // #440 seam：host-injected todoDir 透传给 registry（todo_write 条件化
+      // 装配的开关）。ask 分支在上方 registry 调用点不传 → tool 不入注册表
+      // （与 memoryEnabled / subagentManager / skillCatalog 同形态）。
+      // worker 装配路径 (createWorkerDeps → createDefaultAciRegistry) 在父会话
+      // 经 envelope 透传 `todoLedger` 时传入同一 todoDir（ADR-0085 / SC9：
+      // 共享父账本，`add` 在工具 handler 内 typed 拒绝）。
       // (#646 T2: 本 gate 表达式与下方 agentStatusTodoDir 处是同语义的两处
       //  内联 —— 改动任一处需同步另一处。)
       ...(opts.todoDir ? { todoDir: opts.todoDir } : {}),
@@ -1062,18 +1072,19 @@ export async function buildHarnessEngine(
       ...(opts.subagentDiagnosticsDir
         ? { traceDir: opts.subagentDiagnosticsDir }
         : {}),
-      // ADR-0037 T4:创建工作树 ACI 工具的条件化装配 —— 与 mutate 门禁同一
-      // 判定源（isolationEnabled，见上方上移注释）；host provision 缝透传给
-      // registry，handler 闭包绑定 sandboxRoot = 会话当前根。OFF / worker /
-      // hub-less 入口不透传 → 工具不入注册表（Gate 3 镜像过滤）。
-      ...(isolationEnabled && isolationHost
+      // ADR-0037 Amendment 2026-09-11 (specs/agent-control-surface.md Slice A /
+      // SC1):工作树 ACI 工具在场只跟 host 缝在场挂钩,与 mutate 门禁判定
+      // (isolationEnabled)解耦 —— 开关 OFF 时模型仍可 create/enter 显式 rebind,
+      // 只是没有门禁拦写。单个缝的条件 spread 保持原样,只接 provision 的入口
+      // (TUI/CLI)因此仍只注册 create-worktree。worker / hub-less 入口不传 host
+      // 缝 → 工具不入注册表(Gate 3 镜像过滤)。
+      ...(isolationHost
         ? {
             worktreeProvision: wrappedProvision!,
-            // T7:enter 缝在场时透传（与 provision 同一 isolationEnabled 判定源）；
-            // 缺席（TUI 只接 provision）→ enter-worktree 不入注册表。
+            // T7:enter 缝在场时透传；缺席（TUI 只接 provision）→
+            // enter-worktree 不入注册表。
             ...(wrappedEnter ? { worktreeEnter: wrappedEnter } : {}),
-            // T8:exit 缝在场时透传（同一 isolationEnabled 判定源）；缺席 →
-            // exit-worktree 不入注册表。
+            // T8:exit 缝在场时透传；缺席 → exit-worktree 不入注册表。
             ...(wrappedExit ? { worktreeExit: wrappedExit } : {}),
             // task-worktree-lifecycle: discovery and explicit removal are
             // host-only seams; they do not change the live root themselves.
@@ -1171,13 +1182,15 @@ export async function buildHarnessEngine(
       onEdit: (file) => lspNotifier.invalidate(file),
       lspCtx,
       ...(secretRegistry ? { secretRegistry } : {}),
-      // ask 不传 todoDir → todo_write 不装配。
+      // ask 路径（本分支）不传 todoDir → todo_write 不装配（与首次构造的
+      // todoDir 透传同门；此处条件再兜一次 surface !== "ask"）。
       ...(surface !== "ask" && opts.todoDir ? { todoDir: opts.todoDir } : {}),
       ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
       ...(opts.subagentDiagnosticsDir
         ? { traceDir: opts.subagentDiagnosticsDir }
         : {}),
-      ...(isolationEnabled && isolationHost
+      // 同主构造路径:工具在场 ⇔ host 缝在场(ADR-0037 Amendment 2026-09-11)。
+      ...(isolationHost
         ? {
             worktreeProvision: wrappedProvision!,
             ...(wrappedEnter ? { worktreeEnter: wrappedEnter } : {}),
@@ -1378,7 +1391,15 @@ export async function buildHarnessEngine(
   const baseExecutor = createExecutor(dynamicExecutorRegistry);
   // 5-step permission middleware: 危险命令由硬墙无条件拦截(#122)。
   // `createAciExecutor` 内部已装配 permission-executor,不要再外包一层。
+  // ADR-0084 / SC5:项目 `settings.permissions` 段进 project 层。读根 =
+  // `projectIdentityRoot`(项目身份锚,见上文 sessionRoots 注释)——项目契约
+  // 只在身份根上;改绑后 cwd 是裸 task worktree,读 cwd 会静默丢掉项目规则。
+  // fail-loud 原路上抛(typed ProjectSettingsError):schema 违规 / toml 与
+  // JSON 两份 SSOT 并存都必须在启动时可见,不吞成降级配置。
+  // 「无项目规则」= undefined,由 `createPermissionPolicy` 的 spread-guard
+  // 丢弃(与 key 缺席同形),此处不再叠一层条件分支。
   const policy = createPermissionPolicy({
+    project: resolveProjectPermissionSource({ projectIdentityRoot }),
     ...(opts.session ? { session: opts.session } : {}),
     // W2: mode context — REPL toggles this via /permissions; absent → default.
     ...(opts.permissionMode ? { mode: opts.permissionMode } : {}),

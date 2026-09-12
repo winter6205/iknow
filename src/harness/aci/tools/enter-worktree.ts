@@ -51,10 +51,12 @@ export interface WorktreeEnterToolDeps {
 
 /**
  * Factory: createEnterWorktreeTool(deps) — the model-facing explicit
- * enter of the isolation tool face. Registered ONLY when the isolation
- * switch is ON and the host supplies the enter seam (build-engine threading;
- * TUI provision-only wiring, worker assembly paths, and hub-less inlets omit
- * it, so the tool never enters those surfaces).
+ * enter of the isolation tool face. Registered whenever the host supplies the
+ * enter seam (build-engine threading; TUI provision-only wiring, worker
+ * assembly paths, and hub-less inlets omit it, so the tool never enters those
+ * surfaces). Presence is decoupled from `isolation.worktreeOnMutate` — the
+ * switch arms only the mutate gate (ADR-0037 Amendment 2026-09-11 /
+ * specs/agent-control-surface.md Slice A).
  */
 export function createEnterWorktreeTool(
   deps: WorktreeEnterToolDeps

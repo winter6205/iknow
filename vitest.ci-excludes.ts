@@ -91,6 +91,9 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/harness/build-engine-install-root.test.ts",
   "tests/harness/build-engine-hooks.test.ts",
   "tests/harness/build-engine-subagent-trace.test.ts",
+  // ADR-0084 Slice B SC5：真 buildHarnessEngine 装配读项目 permissions
+  // → createDefaultAciRegistry → createBashTool → requireBwrap。
+  "tests/harness/build-engine-permission-project.test.ts",
   "tests/harness/mcp/build-engine-mcp-overview.test.ts",
   "tests/harness/mcp/build-engine-mcp-startwire.test.ts",
   "tests/build-engine-hooks.test.ts",
@@ -113,6 +116,9 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/subagent/git-work-discipline.test.ts",
   "tests/subagent/user-agents-wiring.test.ts",
   "tests/subagent/envelope-freeze.test.ts",
+  // ADR-0084 Slice B SC5：真 createWorkerDeps 装配读项目 permissions
+  // → createDefaultAciRegistry → createBashTool → requireBwrap。
+  "tests/subagent/worker-project-permission.test.ts",
   // CLI 侧 harness / subagent trace 装配
   "tests/cli/tui-deps-subagent-trace-factory.test.ts",
   "tests/cli/chat-subagent-trace.test.ts",

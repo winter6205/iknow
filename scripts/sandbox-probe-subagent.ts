@@ -453,7 +453,7 @@ async function main(): Promise<void> {
   if (!env.llm.apiKey) {
     console.error(
       "no API key — set settings.llm.apiKey (literal or ${VAR}) in " +
-        "~/.iknow/settings.json or <cwd>/.iknow/settings.json"
+        "~/.iknow/settings.json (llm is a user-layer key, ADR-0084)"
     );
     process.exitCode = 1;
     return;

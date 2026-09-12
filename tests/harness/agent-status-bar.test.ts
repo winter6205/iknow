@@ -218,8 +218,8 @@ describe("agent status bar T1: todo section projects unchecked lines only", () =
         "some prose line that is not a checkbox",
         "- [ ] beta task",
         "- [x] another done",
-        // 畸形行:裸 "- [ ]" 后无空格 —— 非写入方 OPEN_PREFIX("- [ ] ")产出
-        // 的形态,不投影(prefix 以写入方 todo-write.ts 导出常量为锚)。
+        // 畸形行:裸 "- [ ]" 后无空格 —— 账本语法(ITEM_LINE)不接受,解析
+        // 时被跳过;它也不占 id 序号(投影锚在语法 SSOT,不是行前缀)。
         "- [ ]malformed-no-space",
       ].join("\n") + "\n"
     );
@@ -241,16 +241,19 @@ describe("agent status bar T1: todo section projects unchecked lines only", () =
     });
     const bar = barTexts(captured[0]!)[0]!;
     const parsed = parseBar(bar);
-    assert.deepEqual(parsed.todoLines, ["- [ ] alpha task", "- [ ] beta task"]);
+    assert.deepEqual(parsed.todoLines, [
+      "- [ ] [t1] alpha task",
+      "- [ ] [t3] beta task",
+    ]);
   });
 });
 
 // ---------------------------------------------------------------------------
-// AC ④ 同一跳 check 掉最后一条未勾 → 新栏去 todo 段,旧栏不动(真实 todo_write)
+// AC ④ 同一跳 update 掉最后一条未勾 → 新栏去 todo 段,旧栏不动(真实 todo_write)
 // ---------------------------------------------------------------------------
 
 describe("agent status bar T1: recompute per hop (real todo_write)", () => {
-  it("④ check 掉最后未勾项后:新栏无 todo 段,当跳开始前注入的旧栏不变", async () => {
+  it("④ update 掉最后未勾项后:新栏无 todo 段,当跳开始前注入的旧栏不变", async () => {
     const todoDir = await makeTodoDir("- [ ] Task A\n");
     const todoWrite = createTodoWriteTool({ todoDir });
     const reg = createRegistry([todoWrite]);
@@ -264,7 +267,8 @@ describe("agent status bar T1: recompute per hop (real todo_write)", () => {
             {
               id: "t1",
               name: "todo_write",
-              input: { mode: "check", item: "Task A" },
+              // 种子是 legacy 行 → parse 合成 id t1,update 按 id 命中。
+              input: { mode: "update", id: "t1", status: "completed" },
             },
           ],
         }),
@@ -286,9 +290,9 @@ describe("agent status bar T1: recompute per hop (real todo_write)", () => {
     assert.equal(result.stopReason, "completed");
     assert.equal(captured.length, 2);
 
-    // 第一步(栏注入时尚未 check):栏带 todo 段,含那条未勾行。
+    // 第一步(栏注入时尚未 update):栏带 todo 段,含那条未勾行。
     const barBefore = barTexts(captured[0]!)[0]!;
-    assert.deepEqual(parseBar(barBefore).todoLines, ["- [ ] Task A"]);
+    assert.deepEqual(parseBar(barBefore).todoLines, ["- [ ] [t1] Task A"]);
 
     // 第二步:新栏(尾部)无 todo 段;旧栏在同一请求里逐字节不变。
     const tailBar = textOfLastMessage(captured[1]!);
@@ -417,7 +421,9 @@ describe("agent status bar T1: bar lands after compact", () => {
     // 重试请求最后一条消息 = compact 之后追加的新栏(含 todo 段)。
     const tailBar = textOfLastMessage(retry);
     assert.ok(tailBar !== undefined, "retry request must end with a fresh bar");
-    assert.deepEqual(parseBar(tailBar).todoLines, ["- [ ] survive compact"]);
+    assert.deepEqual(parseBar(tailBar).todoLines, [
+      "- [ ] [t1] survive compact",
+    ]);
 
     // 边界占位(reactive compact 的 fallback 路径)在新栏之前。
     const placeholderIndex = retry.findIndex((m) =>
@@ -608,7 +614,7 @@ describe("agent status bar T1: replace does not leak snapshot lines into the bar
     const openLines = await readOpenTodoLines(todoDir, ctx.conversationId);
     assert.deepEqual(
       [...openLines],
-      ["- [ ] new-1", "- [ ] new-2"],
+      ["- [ ] [t1] new-1", "- [ ] [t2] new-2"],
       `bar must only project current ledger, got: ${[...openLines].join(" | ")}`
     );
     // 防御:旧项的字面字符串不在返回里(快照留在磁盘上,栏读现行)。
@@ -649,7 +655,7 @@ describe("agent status bar T1: replace does not leak snapshot lines into the bar
     const openLines = await readOpenTodoLines(todoDir, conversationId);
     assert.deepEqual(
       [...openLines],
-      ["- [ ] live-1", "- [ ] live-2"],
+      ["- [ ] [t1] live-1", "- [ ] [t2] live-2"],
       `dirty snapshot dir must not leak into bar projection, got: ${[...openLines].join(" | ")}`
     );
     // 关键词兜底:快照字面不进栏(快照形态文件名 + 行内 ghost 字面都
@@ -680,8 +686,54 @@ describe("agent status bar T1: replace does not leak snapshot lines into the bar
     const openLines = await readOpenTodoLines(todoDir);
     assert.deepEqual(
       [...openLines],
-      ["- [ ] live-shared-root"],
+      ["- [ ] [t1] live-shared-root"],
       `shared-root read must ignore same-dir snapshots, got: ${[...openLines].join(" | ")}`
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SC10: 状态栏只投影未完成条目(pending + in_progress),completed 永不进栏;
+// 投影行取自账本语法 SSOT(parseLedger / formatLedgerLine),legacy 无 id 行
+// 由解析器补 id 后按规范形态呈现。
+// ---------------------------------------------------------------------------
+
+describe("agent status bar SC10: unfinished items only", () => {
+  /** 读真实 todos.md 的投影(不走模型回合 —— 本节钉投影本身)。 */
+  async function projectLines(seed: string): Promise<readonly string[]> {
+    const todoDir = await makeTodoDir(seed);
+    return readOpenTodoLines(todoDir);
+  }
+
+  it("(a) 只有 in_progress 项 → 段在场,行保留 `- [~]` 标记与 id", async () => {
+    const lines = await projectLines("- [~] [t1] wip task\n");
+    assert.deepEqual([...lines], ["- [~] [t1] wip task"]);
+  });
+
+  it("(b) pending + in_progress + completed 混合 → 恰为未完成子集,绝不出现 `- [x]`", async () => {
+    const lines = await projectLines(
+      "- [ ] [t1] alpha\n- [~] [t2] beta wip\n- [x] [t3] gamma done\n"
+    );
+    assert.deepEqual(
+      [...lines],
+      ["- [ ] [t1] alpha", "- [~] [t2] beta wip"],
+      `projection must be exactly the unfinished subset, got: ${[...lines].join(" | ")}`
+    );
+    assert.ok(
+      !lines.some((l) => l.includes("[x]")),
+      "completed items must never enter the bar"
+    );
+  });
+
+  it("(c) legacy 无 id 的 in_progress 行 → 解析器补 id,输出规范形态", async () => {
+    const lines = await projectLines("- [~] legacy wip\n");
+    assert.deepEqual([...lines], ["- [~] [t1] legacy wip"]);
+  });
+
+  it("(d) in_progress + 全 completed → 只投影 in_progress 那条", async () => {
+    const lines = await projectLines(
+      "- [x] [t1] done a\n- [~] [t2] wip b\n- [x] [t3] done c\n"
+    );
+    assert.deepEqual([...lines], ["- [~] [t2] wip b"]);
   });
 });

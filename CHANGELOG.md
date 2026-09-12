@@ -8,6 +8,8 @@
 
 ### Feature
 
+- **项目 settings 允许名单 + 权限 DSL 搬进 `settings.permissions`（ADR-0084，2026-09-12）**: 项目层 `<cwd>/.iknow/settings.json` 只采纳 `hooks` / `verify` / `secrets` / `permissions` 四段，其余顶层段（`isolation` / `llm` / `subagent` / `web` / `lsp` / `memory` / `loop` / `graph`）出现在项目文件即**丢弃、不覆盖用户层值**并逐键启动告警（drop-not-throw）——`llm` 等是**用户层键**，只承载于 `~/.iknow/settings.json`。权限机械层（`schema_version` + rule DSL / allow|deny|ask / 谓词语义不变）从 `.iknow/permissions.toml` 迁入项目 `settings.permissions`，**toml 不再被读取**；toml 与 `permissions` 段并存 → 装配期 typed `ProjectSettingsError` fail-loud（`kind: toml_and_json_present`），仅 toml 单独在场不拦（退役文件是惰性的）。用户层不接 `permissions`（写了逐条告警忽略）。写回**落对层**：thinking / memory 等用户层键恒写 `~/.iknow/settings.json`，「项目文件存在就写项目」的旧两档判定退役（读回一个不再采纳 `llm` 的项目文件等于静默无效 + 污染共享仓库）。spec `specs/agent-control-surface.md` Slice B；ADR `docs/adr/0084-project-settings-allowlist-and-permissions.md`。
+
 - **graph mode 短现势 once-per-run（ADR-0081，PR #989，2026-09-11）**: 开着图时每个 `run()` 开头贴一句短 `<graph_mode>`，同一轮内环不再每跳追加。翻转当拍仍可贴长 ON/OFF，已贴长 ON 则本轮不叠短句。取代 ADR-0080 每跳语义。
 
 - **活图阶段 1+2（#929，PR #944，2026-09-10）**: 同会话多次 `run_graph` 共用进程内活图账本（剩余子图、按 id 冻结、取消只留 done）；阶段 2 增加 `onFailure`、同 id 再进、每 id 进入 8 次熔断。账本不进 JSONL。spec `specs/live-graph-phase1.md` / `live-graph-phase2.md`。

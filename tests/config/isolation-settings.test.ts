@@ -9,7 +9,10 @@
  *  - boolean-only（镜像 memory.autoExtract / graph.enabled 纪律）：非 boolean
  *    → 丢弃该字段（drop-not-throw，不转型），被丢弃字段不参与覆盖。
  *  - persist 往返：persist-settings 的 raw-merge 通道原样保留 isolation 段
- *    （写入 → persist thinking patch → 读回保真）。
+ *    （写入 → persist thinking patch → 读回保真）。thinking 与 isolation 同属
+ *    用户层键（ADR-0084）→ 往返锚点都是 <home>/.iknow/settings.json。
+ *  - 层归属（ADR-0084）：isolation 在项目允许名单外 → 项目文件的 isolation
+ *    段被丢弃、不覆盖 user 值，启动发一条含键名的警告。
  *
  * 只做 settings surface：不读 git、不持会话状态、不接 harness 门禁（T3）。
  */
@@ -39,23 +42,26 @@ afterAll(async () => {
 async function makeSettings(
   user: Record<string, unknown>,
   project: Record<string, unknown>
-): Promise<{ home: string; cwd: string; projectFile: string }> {
+): Promise<{
+  home: string;
+  cwd: string;
+  userFile: string;
+  projectFile: string;
+}> {
   const seed = Math.random().toString(36).slice(2);
   const home = join(workDir, "home", seed);
   const cwd = join(workDir, "cwd", seed);
+  const userFile = join(home, ".iknow", "settings.json");
   const projectFile = join(cwd, ".iknow", "settings.json");
   await mkdir(join(home, ".iknow"), { recursive: true });
   await mkdir(join(cwd, ".iknow"), { recursive: true });
   if (Object.keys(user).length > 0) {
-    await writeFile(
-      join(home, ".iknow", "settings.json"),
-      JSON.stringify(user)
-    );
+    await writeFile(userFile, JSON.stringify(user));
   }
   if (Object.keys(project).length > 0) {
     await writeFile(projectFile, JSON.stringify(project));
   }
-  return { home, cwd, projectFile };
+  return { home, cwd, userFile, projectFile };
 }
 
 describe("settings.isolation.worktreeOnMutate", () => {
@@ -70,8 +76,8 @@ describe("settings.isolation.worktreeOnMutate", () => {
 
   it("reads an explicit true at runtime", async () => {
     const { home, cwd } = await makeSettings(
-      {},
-      { isolation: { worktreeOnMutate: true } }
+      { isolation: { worktreeOnMutate: true } },
+      {}
     );
     const settings = loadIknowSettings({ home, cwd });
     assert.deepEqual(settings.isolation, { worktreeOnMutate: true });
@@ -80,8 +86,8 @@ describe("settings.isolation.worktreeOnMutate", () => {
 
   it("preserves an explicit false as a legal value (resolved OFF)", async () => {
     const { home, cwd } = await makeSettings(
-      {},
-      { isolation: { worktreeOnMutate: false } }
+      { isolation: { worktreeOnMutate: false } },
+      {}
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }).isolation, {
       worktreeOnMutate: false,
@@ -93,8 +99,8 @@ describe("settings.isolation.worktreeOnMutate", () => {
       illegal
     )} instead of coercing or throwing`, async () => {
       const { home, cwd } = await makeSettings(
-        {},
-        { isolation: { worktreeOnMutate: illegal } }
+        { isolation: { worktreeOnMutate: illegal } },
+        {}
       );
       const settings = loadIknowSettings({ home, cwd });
       assert.equal(settings.isolation, undefined);
@@ -102,21 +108,26 @@ describe("settings.isolation.worktreeOnMutate", () => {
     });
   }
 
-  it("lets project override user", async () => {
+  it("ADR-0084：project 的 isolation 被丢弃并告警 → user 值胜出（不再被 project 覆盖）", async () => {
     const { home, cwd } = await makeSettings(
       { isolation: { worktreeOnMutate: false } },
       { isolation: { worktreeOnMutate: true } }
     );
+    const warnings: string[] = [];
     assert.equal(
-      resolveWorktreeOnMutate(loadIknowSettings({ home, cwd })),
-      true
+      resolveWorktreeOnMutate(
+        loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) })
+      ),
+      false
     );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"isolation"/);
   });
 
-  it("keeps the user value when project has no isolation section", async () => {
+  it("keeps the user value when the project has no isolation section", async () => {
     const { home, cwd } = await makeSettings(
       { isolation: { worktreeOnMutate: true } },
-      { llm: { model: "m" } }
+      {}
     );
     assert.equal(
       resolveWorktreeOnMutate(loadIknowSettings({ home, cwd })),
@@ -124,31 +135,36 @@ describe("settings.isolation.worktreeOnMutate", () => {
     );
   });
 
-  it("drops an illegal project value without clobbering the user layer", async () => {
+  it("project 的非法 isolation 值随段丢弃 → 不抹掉 user 值且发警告", async () => {
     const { home, cwd } = await makeSettings(
       { isolation: { worktreeOnMutate: true } },
       { isolation: { worktreeOnMutate: "yes" } }
     );
+    const warnings: string[] = [];
     assert.equal(
-      resolveWorktreeOnMutate(loadIknowSettings({ home, cwd })),
+      resolveWorktreeOnMutate(
+        loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) })
+      ),
       true
     );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"isolation"/);
   });
 
   it("drops a non-object isolation section", async () => {
-    const { home, cwd } = await makeSettings({}, { isolation: "on" });
+    const { home, cwd } = await makeSettings({ isolation: "on" }, {});
     assert.equal(loadIknowSettings({ home, cwd }).isolation, undefined);
   });
 
   it("drops an isolation section carrying only unknown keys (drop-not-throw convention)", async () => {
-    const { home, cwd } = await makeSettings({}, { isolation: { nope: 1 } });
+    const { home, cwd } = await makeSettings({ isolation: { nope: 1 } }, {});
     assert.equal(loadIknowSettings({ home, cwd }).isolation, undefined);
   });
 
   it("freezes the parsed section", async () => {
     const { home, cwd } = await makeSettings(
-      {},
-      { isolation: { worktreeOnMutate: true } }
+      { isolation: { worktreeOnMutate: true } },
+      {}
     );
     assert.ok(Object.isFrozen(loadIknowSettings({ home, cwd }).isolation));
   });
@@ -167,8 +183,8 @@ describe("settings.isolation.worktreeExclusive", () => {
 
   it("reads an explicit true at runtime and resolves ON", async () => {
     const { home, cwd } = await makeSettings(
-      {},
-      { isolation: { worktreeExclusive: true } }
+      { isolation: { worktreeExclusive: true } },
+      {}
     );
     const settings = loadIknowSettings({ home, cwd });
     assert.deepEqual(settings.isolation, { worktreeExclusive: true });
@@ -177,8 +193,8 @@ describe("settings.isolation.worktreeExclusive", () => {
 
   it("preserves an explicit false as a legal value (resolved OFF, isolation segment survives)", async () => {
     const { home, cwd } = await makeSettings(
-      {},
-      { isolation: { worktreeExclusive: false } }
+      { isolation: { worktreeExclusive: false } },
+      {}
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }).isolation, {
       worktreeExclusive: false,
@@ -190,8 +206,8 @@ describe("settings.isolation.worktreeExclusive", () => {
       illegal
     )} instead of coercing or throwing`, async () => {
       const { home, cwd } = await makeSettings(
-        {},
-        { isolation: { worktreeExclusive: illegal } }
+        { isolation: { worktreeExclusive: illegal } },
+        {}
       );
       const settings = loadIknowSettings({ home, cwd });
       assert.equal(settings.isolation, undefined);
@@ -199,21 +215,26 @@ describe("settings.isolation.worktreeExclusive", () => {
     });
   }
 
-  it("lets project override user", async () => {
+  it("ADR-0084：project 的 isolation 被丢弃并告警 → user 值胜出（不再被 project 覆盖）", async () => {
     const { home, cwd } = await makeSettings(
       { isolation: { worktreeExclusive: false } },
       { isolation: { worktreeExclusive: true } }
     );
+    const warnings: string[] = [];
     assert.equal(
-      resolveWorktreeExclusive(loadIknowSettings({ home, cwd })),
-      true
+      resolveWorktreeExclusive(
+        loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) })
+      ),
+      false
     );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"isolation"/);
   });
 
-  it("keeps the user value when project has no isolation section", async () => {
+  it("keeps the user value when the project has no isolation section", async () => {
     const { home, cwd } = await makeSettings(
       { isolation: { worktreeExclusive: true } },
-      { llm: { model: "m" } }
+      {}
     );
     assert.equal(
       resolveWorktreeExclusive(loadIknowSettings({ home, cwd })),
@@ -221,29 +242,34 @@ describe("settings.isolation.worktreeExclusive", () => {
     );
   });
 
-  it("drops an illegal project value without clobbering the user layer", async () => {
+  it("project 的非法 isolation 值随段丢弃 → 不抹掉 user 值且发警告", async () => {
     const { home, cwd } = await makeSettings(
       { isolation: { worktreeExclusive: true } },
       { isolation: { worktreeExclusive: "yes" } }
     );
+    const warnings: string[] = [];
     assert.equal(
-      resolveWorktreeExclusive(loadIknowSettings({ home, cwd })),
+      resolveWorktreeExclusive(
+        loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) })
+      ),
       true
     );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"isolation"/);
   });
 
   it("coexists with worktreeOnMutate: both fields preserved per-segment", async () => {
     // ADR-0070 / spec SC1: 与 worktreeOnMutate 正交、同款值域纪律；两字段同
-    // 时在场时各自解析、互不影响（per-field project > user；missing / non-true
-    // 按 OFF）。matrix 鉴面。
+    // 时在场时各自解析、互不影响（isolation 属用户层键（ADR-0084），值只来自
+    // user 层；missing / non-true 按 OFF）。matrix 鉴面。
     const { home, cwd } = await makeSettings(
-      {},
       {
         isolation: {
           worktreeOnMutate: true,
           worktreeExclusive: true,
         },
-      }
+      },
+      {}
     );
     const settings = loadIknowSettings({ home, cwd });
     assert.equal(resolveWorktreeOnMutate(settings), true);
@@ -264,8 +290,8 @@ describe("settings.isolation.worktreeExclusive", () => {
       [true, true],
     ] as const) {
       const { home, cwd } = await makeSettings(
-        {},
-        { isolation: { worktreeOnMutate: wom, worktreeExclusive: exc } }
+        { isolation: { worktreeOnMutate: wom, worktreeExclusive: exc } },
+        {}
       );
       const settings = loadIknowSettings({ home, cwd });
       assert.equal(resolveWorktreeOnMutate(settings), wom, `wom=${wom}`);
@@ -275,8 +301,8 @@ describe("settings.isolation.worktreeExclusive", () => {
 
   it("drops an unknown sibling field without clobbering worktreeExclusive", async () => {
     const { home, cwd } = await makeSettings(
-      {},
-      { isolation: { worktreeExclusive: true, futureFlag: "yes" } }
+      { isolation: { worktreeExclusive: true, futureFlag: "yes" } },
+      {}
     );
     // 未知字段丢弃；已知 boolean 字段保留；段不产空（仍带 worktreeExclusive）。
     assert.deepEqual(loadIknowSettings({ home, cwd }).isolation, {
@@ -286,21 +312,22 @@ describe("settings.isolation.worktreeExclusive", () => {
 
   it("freezes the parsed section", async () => {
     const { home, cwd } = await makeSettings(
-      {},
-      { isolation: { worktreeExclusive: true } }
+      { isolation: { worktreeExclusive: true } },
+      {}
     );
     assert.ok(Object.isFrozen(loadIknowSettings({ home, cwd }).isolation));
   });
 
   it("survives a persist cycle without losing worktreeExclusive", async () => {
-    const { home, cwd, projectFile } = await makeSettings(
-      {},
+    // ADR-0084：isolation 与 llm 同为用户层键 → 往返锚点是 user 文件。
+    const { home, cwd, userFile } = await makeSettings(
       {
         isolation: { worktreeExclusive: true },
         llm: { model: "claude-sonnet" },
-      }
+      },
+      {}
     );
-    await persistThinkingChanges(projectFile, { thinking: "adaptive" });
+    await persistThinkingChanges(userFile, { thinking: "adaptive" });
     const settings = loadIknowSettings({ home, cwd });
     assert.equal(resolveWorktreeExclusive(settings), true);
     assert.equal(settings.llm?.thinking, "adaptive");
@@ -309,16 +336,16 @@ describe("settings.isolation.worktreeExclusive", () => {
 
 describe("isolation persist round-trip", () => {
   it("survives a persist cycle: isolation survives a thinking patch write-back", async () => {
-    const { home, cwd, projectFile } = await makeSettings(
-      {},
+    const { home, cwd, userFile } = await makeSettings(
       {
         isolation: { worktreeOnMutate: true },
         llm: { model: "claude-sonnet" },
-      }
+      },
+      {}
     );
 
     // persist 通道（raw-merge + 原子写）只改 llm.thinking，isolation 原样保留。
-    await persistThinkingChanges(projectFile, { thinking: "adaptive" });
+    await persistThinkingChanges(userFile, { thinking: "adaptive" });
 
     const settings = loadIknowSettings({ home, cwd });
     assert.equal(resolveWorktreeOnMutate(settings), true);
@@ -327,12 +354,12 @@ describe("isolation persist round-trip", () => {
   });
 
   it("bootstraps isolation into a fresh settings file via persist and reads it back", async () => {
-    const { home, cwd, projectFile } = await makeSettings({}, {});
+    const { home, cwd, userFile } = await makeSettings({}, {});
 
     // 模拟操作员写入开关后，persist 往返（写入 → 读回）保真。
-    await persistThinkingChanges(projectFile, { thinking: "off" });
+    await persistThinkingChanges(userFile, { thinking: "off" });
     await writeFile(
-      projectFile,
+      userFile,
       JSON.stringify(
         {
           isolation: { worktreeOnMutate: true },
@@ -343,7 +370,7 @@ describe("isolation persist round-trip", () => {
       )
     );
     // 再走一次 persist：确认后续写回不吞掉 isolation 段。
-    await persistThinkingChanges(projectFile, { thinking: "adaptive" });
+    await persistThinkingChanges(userFile, { thinking: "adaptive" });
 
     const settings = loadIknowSettings({ home, cwd });
     assert.deepEqual(settings.isolation, { worktreeOnMutate: true });

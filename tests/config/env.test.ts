@@ -777,9 +777,13 @@ describe("loadIknowEnv — settings merge (#353)", () => {
     assert.equal(env.llm.thinkingEffort, "high");
   });
 
-  it("未传 settings 时自动读取 .iknow/settings.json（真实文件集成）", async () => {
+  it("未传 settings 时自动读取用户层 .iknow/settings.json（真实文件集成）", async () => {
+    // ADR-0084：llm 属用户层键 → 只有 <home>/.iknow/settings.json 是配置来源；
+    // 项目文件里的 llm 被允许名单丢弃。home 须显式注入：POSIX 上 os.homedir()
+    // 确实跟随 $HOME，靠它虽能工作但隐式、易被破坏（见 loader 注释）。
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-settings-"));
-    const settingsDir = join(tmpCwd, ".iknow");
+    const tmpHome = await mkdtemp(join(tmpdir(), "iknow-env-settings-home-"));
+    const settingsDir = join(tmpHome, ".iknow");
     await mkdir(settingsDir, { recursive: true });
     await writeFile(
       join(settingsDir, "settings.json"),
@@ -791,62 +795,68 @@ describe("loadIknowEnv — settings merge (#353)", () => {
         },
       })
     );
+    // 项目文件同时在场且 llm 值不同 → 必须被丢弃，不参与 env。
+    await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    await writeFile(
+      join(tmpCwd, ".iknow", "settings.json"),
+      JSON.stringify({ llm: { maxTurns: 7, model: "project-model" } })
+    );
 
     try {
-      const env = loadIknowEnv(tmpCwd);
+      const env = loadIknowEnv(tmpCwd, undefined, tmpHome);
+      assert.equal(env.llm.model, "test-model");
       assert.equal(env.llm.maxTurns, 42);
       assert.equal(env.compress.contextWindow, 400000);
       assert.equal(env.compress.thresholdTokens, undefined);
     } finally {
       await rm(tmpCwd, { recursive: true, force: true });
+      await rm(tmpHome, { recursive: true, force: true });
     }
   });
 
-  it("真实文件集成：.iknow/settings.json 写 llm.model → env.llm.model 生效", async () => {
+  it("真实文件集成：用户层 settings.json 写 llm.model → env.llm.model 生效", async () => {
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-settings-model-"));
-    await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    const tmpHome = await mkdtemp(
+      join(tmpdir(), "iknow-env-settings-model-home-")
+    );
+    await mkdir(join(tmpHome, ".iknow"), { recursive: true });
     await writeFile(
-      join(tmpCwd, ".iknow", "settings.json"),
+      join(tmpHome, ".iknow", "settings.json"),
       JSON.stringify({ llm: { model: "hy3-combo", maxTurns: 42 } })
     );
 
     try {
-      const env = loadIknowEnv(tmpCwd);
+      const env = loadIknowEnv(tmpCwd, undefined, tmpHome);
       assert.equal(env.llm.model, "hy3-combo");
       assert.equal(env.llm.maxTurns, 42);
     } finally {
       await rm(tmpCwd, { recursive: true, force: true });
+      await rm(tmpHome, { recursive: true, force: true });
     }
   });
 
-  it("真实文件集成：project model 覆盖 user model（隔离 HOME）", async () => {
+  it("真实文件集成（ADR-0084）：project model 被丢弃 → user model 胜出", async () => {
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-model-merge-"));
-    const emptyHome = await mkdtemp(join(tmpdir(), "iknow-env-model-home-"));
+    const tmpHome = await mkdtemp(join(tmpdir(), "iknow-env-model-home-"));
     await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
     await writeFile(
       join(tmpCwd, ".iknow", "settings.json"),
       JSON.stringify({ llm: { model: "project-model" } })
     );
-    await mkdir(join(emptyHome, ".iknow"), { recursive: true });
+    await mkdir(join(tmpHome, ".iknow"), { recursive: true });
     await writeFile(
-      join(emptyHome, ".iknow", "settings.json"),
+      join(tmpHome, ".iknow", "settings.json"),
       JSON.stringify({ llm: { model: "user-model" } })
     );
 
     try {
-      // 隔离 HOME，让 user 级文件真实参与 merge（project > user）。
-      const prevHome = process.env.HOME;
-      process.env.HOME = emptyHome;
-      try {
-        const env = loadIknowEnv(tmpCwd);
-        assert.equal(env.llm.model, "project-model");
-      } finally {
-        if (prevHome === undefined) delete process.env.HOME;
-        else process.env.HOME = prevHome;
-      }
+      // llm 是用户层键：项目文件不再覆盖 user（旧 ADR-0015 project > user
+      // 对 llm 已退役）；显式注入 home 让 user 文件真实参与装配。
+      const env = loadIknowEnv(tmpCwd, undefined, tmpHome);
+      assert.equal(env.llm.model, "user-model");
     } finally {
       await rm(tmpCwd, { recursive: true, force: true });
-      await rm(emptyHome, { recursive: true, force: true });
+      await rm(tmpHome, { recursive: true, force: true });
     }
   });
 
@@ -870,10 +880,12 @@ describe("loadIknowEnv — settings merge (#353)", () => {
   it("settings 值经 loadIknowEnv 进入装配入口（serve/hub/runtime 同源）", async () => {
     // serve.ts:88 / hub.ts:762 / runtime.ts:52 均直接调 loadIknowEnv()，
     // settings 自动读取后经同一链路流入 LoopEngineDeps / HealthResponse。
+    // ADR-0084：llm 为用户层键 → fixture 写 <home>/.iknow/settings.json。
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-serve-settings-"));
-    await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    const tmpHome = await mkdtemp(join(tmpdir(), "iknow-env-serve-home-"));
+    await mkdir(join(tmpHome, ".iknow"), { recursive: true });
     await writeFile(
-      join(tmpCwd, ".iknow", "settings.json"),
+      join(tmpHome, ".iknow", "settings.json"),
       JSON.stringify({
         llm: {
           maxTurns: 9,
@@ -883,13 +895,14 @@ describe("loadIknowEnv — settings merge (#353)", () => {
       })
     );
     try {
-      const env = loadIknowEnv(tmpCwd);
+      const env = loadIknowEnv(tmpCwd, undefined, tmpHome);
       assert.equal(env.llm.maxTurns, 9);
       assert.equal(env.compress.contextWindow, 900000);
       // thresholdTokens 未设 → undefined（proactive compact 关）。
       assert.equal(env.compress.thresholdTokens, undefined);
     } finally {
       await rm(tmpCwd, { recursive: true, force: true });
+      await rm(tmpHome, { recursive: true, force: true });
     }
   });
 });
@@ -956,8 +969,9 @@ describe("loadIknowEnv — llm.fallback (settings-model-extension)", () => {
     const emptyHome = await mkdtemp(join(tmpdir(), "iknow-env-fallback-home-"));
     await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
     await mkdir(join(emptyHome, ".iknow"), { recursive: true });
+    // ADR-0084：llm 为用户层键 → 非法 fallback 的承载文件是 user settings。
     await writeFile(
-      join(tmpCwd, ".iknow", "settings.json"),
+      join(emptyHome, ".iknow", "settings.json"),
       JSON.stringify({
         llm: { model: "test-model", fallback: ["x", 5] },
       })
@@ -987,13 +1001,14 @@ describe("loadIknowEnv — subagent inheritance (#353)", () => {
   });
 
   it("子代理在相同 project cwd 自装配时继承 settings（跨进程模拟）", async () => {
-    // 主代理 project settings 写入 tmpCwd/.iknow/settings.json；
-    // 子代理进程重新走 loadIknowEnv(同 cwd) → 自动读同一文件，天然继承。
+    // ADR-0084：llm 是用户层键 → 继承锚点是 <home>/.iknow/settings.json；
+    // 子代理进程走 loadIknowEnv(同 cwd, undefined, 同 home) → 读同一文件。
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-subagent-inherit-"));
     const emptyHome = await mkdtemp(join(tmpdir(), "iknow-subagent-home-"));
     await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    await mkdir(join(emptyHome, ".iknow"), { recursive: true });
     await writeFile(
-      join(tmpCwd, ".iknow", "settings.json"),
+      join(emptyHome, ".iknow", "settings.json"),
       JSON.stringify({
         llm: {
           maxTurns: 77,
@@ -1003,18 +1018,11 @@ describe("loadIknowEnv — subagent inheritance (#353)", () => {
       })
     );
     try {
-      // 模拟子代理进程：隔离 HOME（避免真实 ~/.iknow/settings.json 干扰），
-      // 以 project cwd 自装配。
-      const prevHome = process.env.HOME;
-      process.env.HOME = emptyHome;
-      try {
-        const env = loadIknowEnv(tmpCwd);
-        assert.equal(env.llm.maxTurns, 77);
-        assert.equal(env.compress.contextWindow, 600000);
-      } finally {
-        if (prevHome === undefined) delete process.env.HOME;
-        else process.env.HOME = prevHome;
-      }
+      // 模拟子代理进程：显式注入隔离 home（POSIX 上 os.homedir() 确实跟随
+      // $HOME，靠它虽能工作，但隐式、易被破坏）。
+      const env = loadIknowEnv(tmpCwd, undefined, emptyHome);
+      assert.equal(env.llm.maxTurns, 77);
+      assert.equal(env.compress.contextWindow, 600000);
     } finally {
       await rm(tmpCwd, { recursive: true, force: true });
       await rm(emptyHome, { recursive: true, force: true });
@@ -1022,11 +1030,17 @@ describe("loadIknowEnv — subagent inheritance (#353)", () => {
   });
 
   it("子代理在隔离 cwd（无 settings、无 model）→ fail-fast 抛错（不继承）", async () => {
-    // 主代理 project settings 在 tmpCwdWith（含 model），但子代理被 spawn 到
-    // tmpCwdEmpty（隔离 cwd）→ loadIknowEnv(tmpCwdEmpty, undefined, emptyHome)
-    // 读不到 project settings 也无 user settings，env 也未设 IKNOW_LLM_MODEL
-    // → model 无来源，fail-fast 抛错（不静默回退）。emptyHome 经 loadIknowEnv
-    // 显式透传（os.homedir 不响应运行时 process.env.HOME 修改）。
+    // 子代理被 spawn 到 tmpCwdEmpty（隔离 cwd）+ emptyHome（空 user 层）
+    // → loadIknowEnv(tmpCwdEmpty, undefined, emptyHome) 的 settings 链上无
+    // 任何 llm.model，env 也未设 IKNOW_LLM_MODEL（该 env 支已退役）→ model
+    // 无来源，fail-fast 抛错（不静默回退）。emptyHome 经 loadIknowEnv 显式透传
+    // （POSIX 上 os.homedir() 确实跟随 $HOME，靠它虽能工作，但隐式、易被破坏）。
+    //
+    // 注：tmpCwdWith 的项目文件 fixture（llm.model）自 ADR-0084 起已完全不
+    // 生效——llm 是用户层键，project 值被允许名单丢弃；即便子代理 cwd 相同也
+    // 读不到。它对本用例断言始终是旁观道具（loadIknowEnv 只读 tmpEmpty +
+    // emptyHome），现属 vestigial fixture，保留只为体现「主代理项目 settings
+    // 含 model，子代理仍不继承」的场景原貌。
     const tmpWith = await mkdtemp(join(tmpdir(), "iknow-subagent-with-"));
     const tmpEmpty = await mkdtemp(join(tmpdir(), "iknow-subagent-empty-"));
     const emptyHome = await mkdtemp(join(tmpdir(), "iknow-subagent-home2-"));
@@ -1178,9 +1192,11 @@ describe("loadIknowEnv — apiKey 解析路径 (settings-model-extension)", () =
   it("settings.llm.apiKey ${VAR} + .env.local 兜底 → 展开", async () => {
     // fileMap = <cwd>/.env.local 合并；process.env 无该变量时读 file。
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-apikey-file-"));
-    await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    const tmpHome = await mkdtemp(join(tmpdir(), "iknow-env-apikey-home-"));
+    await mkdir(join(tmpHome, ".iknow"), { recursive: true });
+    // ADR-0084：apiKey 随 llm 段属用户层键 → 承载文件是 user settings。
     await writeFile(
-      join(tmpCwd, ".iknow", "settings.json"),
+      join(tmpHome, ".iknow", "settings.json"),
       JSON.stringify({
         llm: { model: "test-model", apiKey: "${IKNOW_TEST_API_KEY}" },
       })
@@ -1190,28 +1206,37 @@ describe("loadIknowEnv — apiKey 解析路径 (settings-model-extension)", () =
       "IKNOW_TEST_API_KEY=sk-from-file\n"
     );
     try {
-      const env = loadIknowEnv(tmpCwd);
+      const env = loadIknowEnv(tmpCwd, undefined, tmpHome);
       assert.equal(env.llm.apiKey, "sk-from-file");
     } finally {
       await rm(tmpCwd, { recursive: true, force: true });
+      await rm(tmpHome, { recursive: true, force: true });
     }
   });
 
   it('.env.local 值 = "yes" → 视同未设 → undefined', async () => {
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-apikey-yes-"));
-    await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    const tmpHome = await mkdtemp(join(tmpdir(), "iknow-env-apikey-yes-home-"));
+    await mkdir(join(tmpHome, ".iknow"), { recursive: true });
+    // ADR-0084：apiKey 随 llm 段属用户层键 → 承载文件是 user settings；
+    // 项目文件里的 llm 会被允许名单丢弃（home 须显式注入，见 loader 注释）。
     await writeFile(
-      join(tmpCwd, ".iknow", "settings.json"),
+      join(tmpHome, ".iknow", "settings.json"),
       JSON.stringify({
         llm: { model: "test-model", apiKey: "${IKNOW_TEST_API_KEY}" },
       })
     );
+    // .env.local 仍读 <cwd>（fileMap = <cwd>/.env.local 合并）。
     await writeFile(join(tmpCwd, ".env.local"), "IKNOW_TEST_API_KEY=yes\n");
     try {
-      const env = loadIknowEnv(tmpCwd);
+      const env = loadIknowEnv(tmpCwd, undefined, tmpHome);
+      // model 必须来自 tmpHome fixture（而非真实 ~/.iknow/settings.json）：
+      // 若 home 注入丢失，本断言在开发机上同样失败，不再被本机配置掩蔽。
+      assert.equal(env.llm.model, "test-model");
       assert.equal(env.llm.apiKey, undefined);
     } finally {
       await rm(tmpCwd, { recursive: true, force: true });
+      await rm(tmpHome, { recursive: true, force: true });
     }
   });
 

@@ -7,7 +7,8 @@
  *
  * Follows the settings-layer discipline the rest of the file already keeps:
  * drop-not-throw on an illegal value, and a dropped field does not overwrite
- * the layer below it.
+ * the layer below it. ADR-0084: `memory` is a user-layer key — the project
+ * file's memory section is dropped by the allowlist and never overrides user.
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -64,8 +65,8 @@ describe("settings.memory.autoExtract", () => {
 
   it("reads an explicit true", async () => {
     const { home, cwd } = await makeSettings(
-      {},
-      { memory: { autoExtract: true } }
+      { memory: { autoExtract: true } },
+      {}
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }).memory, {
       autoExtract: true,
@@ -74,22 +75,26 @@ describe("settings.memory.autoExtract", () => {
 
   it("reads an explicit false", async () => {
     const { home, cwd } = await makeSettings(
-      {},
-      { memory: { autoExtract: false } }
+      { memory: { autoExtract: false } },
+      {}
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }).memory, {
       autoExtract: false,
     });
   });
 
-  it("lets project override user", async () => {
+  it("ADR-0084：project 的 memory 被丢弃并告警 → user 值胜出（不再被 project 覆盖）", async () => {
     const { home, cwd } = await makeSettings(
       { memory: { autoExtract: true } },
       { memory: { autoExtract: false } }
     );
-    assert.deepEqual(loadIknowSettings({ home, cwd }).memory, {
-      autoExtract: false,
-    });
+    const warnings: string[] = [];
+    assert.deepEqual(
+      loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) }).memory,
+      { autoExtract: true }
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"memory"/);
   });
 
   it("keeps the user value when project has no memory section", async () => {
@@ -128,12 +133,12 @@ describe("settings.memory.autoExtract", () => {
 
 describe("settings.memory.dream", () => {
   it("reads dream independently when autoExtract is absent", async () => {
-    const { home, cwd } = await makeSettings({}, { memory: { dream: true } });
+    const { home, cwd } = await makeSettings({ memory: { dream: true } }, {});
     assert.deepEqual(loadIknowSettings({ home, cwd }).memory, { dream: true });
   });
 
   it("preserves an explicit false as the default-off value", async () => {
-    const { home, cwd } = await makeSettings({}, { memory: { dream: false } });
+    const { home, cwd } = await makeSettings({ memory: { dream: false } }, {});
     assert.deepEqual(loadIknowSettings({ home, cwd }).memory, { dream: false });
   });
 

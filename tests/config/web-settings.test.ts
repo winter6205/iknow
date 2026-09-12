@@ -5,7 +5,8 @@
  * Contract pinned here:
  *  - settings 解析：闭集 "bing"|"exa"|"tavily"|"brave"；非法值 drop-not-throw
  *    （镜像 parseIsolation 纪律），被丢弃字段不参与覆盖；非对象段 → undefined。
- *  - 合并：project 优先，未覆盖的 user 字段保留（镜像 mergeIsolation）。
+ *  - 合并（ADR-0084）：`web` 属用户层键 → 项目文件的 web 段被允许名单丢弃、
+ *    永不覆盖 user；启动发一条含键名的警告。
  *  - env 回退链：env > settings.web.searchBackend > 默认 "bing"（对齐 #353
  *    maxTurns 先例）；env 未设返回 undefined 而非折叠成显式 "bing"。
  *  - env 非法值仍抛 typed `WebEnvConfigError("invalid_search_backend")`
@@ -147,13 +148,20 @@ describe("settings.web.searchBackend — settings surface", () => {
     assert.equal(loadIknowSettings({ cwd, home }).web, undefined);
   });
 
-  it("project overrides user", async () => {
+  it("ADR-0084：web 在项目允许名单外 → 项目值被丢弃，user 值胜出（非 project 覆盖）", async () => {
     const { home, cwd } = await makeSettings(
       withModel({ web: { searchBackend: "exa" } }),
       { web: { searchBackend: "tavily" } }
     );
-    const settings = loadIknowSettings({ cwd, home });
-    assert.equal(settings.web?.searchBackend, "tavily");
+    const warnings: string[] = [];
+    const settings = loadIknowSettings({
+      cwd,
+      home,
+      onWarn: (m) => warnings.push(m),
+    });
+    assert.equal(settings.web?.searchBackend, "exa");
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"web"/);
   });
 
   it("keeps the user value when project has no web section", async () => {
