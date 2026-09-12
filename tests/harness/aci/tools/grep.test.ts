@@ -9,9 +9,16 @@
  * 引擎选择（`GrepEngine`）：
  *   - `node`  —— `engineBinaryPath` 指向不存在的路径：D6 的「安装根二进制不
  *                存在」判据，走 Node 全语义。
- *   - `rg`    —— 真实安装根二进制（本机跑过 `npm run install:search-engine`
- *                时在场）。缺席则整组 skip 并记 Not run，不静默降级成只测
- *                Node —— 那会让 SC9 的另一半无人认证。
+ *   - `rg`    —— 真实安装根二进制。
+ *
+ * **引擎在场是硬前置**：本文件是全仓唯一认证「rg 路径真的等价于 Node 路径」
+ * 的地方，静默 skip 会让 SC9 的另一半无人认证（`--engine=auto`、`--crlf`、
+ * 遍历语义这些也只在真引擎上才验得到）。缺席 = 整文件 fail，文案点名修复
+ * 命令 `npm run install:search-engine`，不提供「跳过继续」的分支。
+ *
+ * CI 形状：本文件已在 test-fast / test-full 的 `--exclude` 名单里（两个 job
+ * 都跑在无网 runner 上，装不了二进制），硬前置因此不会把 CI 变红；CI 守卫
+ * `scripts/ci-check-test-excludes.ts` 仍是这条排除的 SSOT。
  *
  * 覆盖契约：
  *   - D2 出法：paths（默认，唯一相对路径）/ content（`path:line:text`）/
@@ -64,14 +71,30 @@ afterEach(async () => {
   );
 });
 
-/** 本机安装根上钉死的引擎二进制；未安装 → undefined（该组 skip）。 */
+/**
+ * 本机安装根上钉死的引擎二进制。
+ *
+ * D6 的对照臂，**硬前置**：缺席即整文件 fail（不是 skip），文案给出修复命令。
+ * 覆盖 `undefined`（该平台无资产）与「路径在、文件不在」两种缺席形态。
+ */
 const installedEngine: string | undefined = engineBinaryPath(
   resolveInstallRoot(),
   process.platform,
   process.arch
 );
-const hasInstalledEngine =
-  installedEngine !== undefined && existsSync(installedEngine);
+
+if (installedEngine === undefined || !existsSync(installedEngine)) {
+  throw new Error(
+    [
+      "grep 测试需要自带搜索引擎：安装根上找不到 rg 二进制。",
+      `  期望路径: ${installedEngine ?? "(该平台在 engine-manifest 中无资产)"}`,
+      "  修复: npm run install:search-engine",
+      "为什么是硬前置：本文件是 SC9 引擎等价的唯一认证面，skip 等于让 rg 那",
+      "一半无人认证。CI 两个 job 已 --exclude 本文件（runner 无网），所以这条",
+      "要求在本地 fail-loud、在 CI 不出现。",
+    ].join("\n")
+  );
+}
 
 /**
  * 两条引擎的构造器。
@@ -79,10 +102,7 @@ const hasInstalledEngine =
  * `node` 用「安装根二进制不存在」驱动 D6 降级（不是注入假 spawn —— 那会绕过
  * 真实的 `runRgEngine → isUnavailable → nodeScan` 接线）。
  */
-const ENGINES = [
-  { name: "node", installed: true },
-  { name: "rg", installed: hasInstalledEngine },
-] as const;
+const ENGINES = [{ name: "node" }, { name: "rg" }] as const;
 
 type EngineName = (typeof ENGINES)[number]["name"];
 
@@ -109,7 +129,6 @@ async function bothEngines(
   ) => Promise<void>
 ): Promise<void> {
   for (const engine of ENGINES) {
-    if (!engine.installed) continue;
     await body((root) => toolFor(root, engine.name));
   }
 }
@@ -617,10 +636,10 @@ describe("grep — D4 glob / type 收窄", () => {
     });
   });
 
-  it("两个参数同时非法时，两条引擎报同一个失败域（顺序不在契约内，一致性在）", async () => {
-    // SC10 的字面要求：两类失败域不可混为「illegal regex」一种。哪个先报
-    // 契约没规定，但**不能随引擎变** —— 否则同一份输入在自带引擎起不来时
-    // 报出另一种错误。这里锁的是「两条引擎同序」。
+  it("type 非法时先于 pattern 判定（类型检查在参数规范化期，与引擎无关）", async () => {
+    // SC10 要求两类失败域各自可辨。`type` 的合法性检查放在
+    // `parseQuerySpec`（两条引擎共同入口）而不是 argv 构造期 —— 后者只在
+    // 自带引擎在场时才跑到，同一份输入会因为引擎起不起得来而换一种报错。
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-two-errors-");
       const messages: string[] = [];
@@ -636,12 +655,15 @@ describe("grep — D4 glob / type 收窄", () => {
         }
       }
 
-      // pattern 非法 → 报 pattern；pattern 合法而 type 非法 → 报 type。
-      assert.ok(
-        /pattern/.test(messages[0]!),
-        `第一条应报 pattern: ${messages[0]}`
-      );
+      // 两条输入都该报 type：pattern 的好坏不改变「类型未知」这个更早的拒绝。
+      // 只坏 pattern 的那条（`alpha` 合法）在别处已单独覆盖 → 报 pattern。
+      assert.ok(/type/.test(messages[0]!), `第一条应报 type: ${messages[0]}`);
       assert.ok(/type/.test(messages[1]!), `第二条应报 type: ${messages[1]}`);
+      assert.equal(
+        /pattern/.test(messages[0]!),
+        false,
+        `type 文案不得混入 pattern: ${messages[0]}`
+      );
     });
   });
 });
@@ -763,9 +785,9 @@ describe("grep — SC6 content + context 不脏行", () => {
       })) as string;
 
       assert.deepEqual(result.split("\n"), [
-        "a.ts-2-l2",
+        "a.ts:2-l2",
         "a.ts:3:hit three",
-        "a.ts-4-l4",
+        "a.ts:4-l4",
       ]);
     });
   });
@@ -792,11 +814,13 @@ describe("grep — SC6 content + context 不脏行", () => {
     });
   });
 
-  it("内容是 `path-N-text` 形时也不被切成假命中（分隔符由首段决定）", async () => {
+  it("上下文内容带 `:N:` 也不长出假命中（真假只由行号后那一个字符决定）", async () => {
     await bothEngines(async (makeTool) => {
       const root = await makeScratch("grep-ctx-tricky-");
-      // 上下文行的**内容**本身长得像一条记录，SC6 要求它不被读成命中。
-      await writeFile(join(root, "a.ts"), "a.ts-9-fake\nhit\n", "utf8");
+      // 上下文行的**内容**本身长得像一条记录：SC6 要求它不被读成命中。
+      // 这是 `path-line-text` 形态挡不住的形状 —— 那段前缀里允许任意字符，
+      // `a.ts:1-see x:9:fake` 会被 `^[^:]*:\d+:` 读成一条真命中。
+      await writeFile(join(root, "a.ts"), "see x:9:fake\nhit\n", "utf8");
 
       const result = (await makeTool(root).handler({
         pattern: "hit",
@@ -805,10 +829,12 @@ describe("grep — SC6 content + context 不脏行", () => {
       })) as string;
       const out = result.split("\n");
 
-      // 唯一 `:` 分列的匹配行是真正的命中；上下文行保持 `-` 形态。
+      // 匹配行之外没有第二种 `path:整数:` 形状：前缀由路径+行号构成，
+      // 冒充 `path:整数:` 需要内容里的冒号去补第三个字段 —— 而那一位
+      // 被 `-` 占据。
       const matchLines = out.filter((line) => /^[^:]*:\d+:/.test(line));
       assert.deepEqual(matchLines, ["a.ts:2:hit"]);
-      assert.ok(out.includes("a.ts-1-a.ts-9-fake"));
+      assert.ok(out.includes("a.ts:1-see x:9:fake"));
     });
   });
 
@@ -836,8 +862,8 @@ describe("grep — SC6 content + context 不脏行", () => {
         head_limit: 1,
       })) as string;
 
-      assert.equal(first, "a.ts:1:hit one\na.ts-2-x");
-      assert.equal(second, "a.ts-8-x\na.ts:9:hit two");
+      assert.equal(first, "a.ts:1:hit one\na.ts:2-x");
+      assert.equal(second, "a.ts:8-x\na.ts:9:hit two");
     });
   });
 
@@ -899,7 +925,7 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
         context: 1,
         head_limit: 1,
       })) as string,
-      "a.ts-1-l1\na.ts:2:hit\na.ts-3-l3\na.ts:4:hit\na.ts-5-l5"
+      "a.ts:1-l1\na.ts:2:hit\na.ts:3-l3\na.ts:4:hit\na.ts:5-l5"
     );
     assert.equal(
       (await node.handler({ pattern: "hit", output: "count" })) as string,
@@ -916,7 +942,6 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
   });
 
   it("rg 与 Node 对同一查询给出同一结果（接受集与形状对齐）", async () => {
-    if (!hasInstalledEngine) return;
     const root = await makeScratch("grep-parity-");
     await mkdir(join(root, "sub"), { recursive: true });
     await writeFile(join(root, "a.ts"), "hit a\nsecond\n", "utf8");
@@ -926,11 +951,42 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
     await writeFile(join(root, "adj.ts"), "hit1\nhit2\n", "utf8");
     // 重叠窗：l1 的窗吞掉 l4，l4 的窗又吞掉 l5 → 一组，三条命中都是 `:`。
     await writeFile(join(root, "ov.ts"), "l1\nhitA\nhitB\nl4\nhitC\n", "utf8");
+    // 花括号交替（D4 的 glob 语法）：rg 支持、Node 若只做 `*`/`?` 交集就漏。
+    await writeFile(join(root, "brace.ts"), "hit brace\n", "utf8");
+    await writeFile(join(root, "brace.md"), "hit brace md\n", "utf8");
+    await writeFile(join(root, "brace.txt"), "hit brace txt\n", "utf8");
+    // 空组 → 空串（`brace{}` 命中名为 `brace` 的文件）；`{1..3}` **不是**
+    // 范围展开，剥括号后是字面 `1..3` —— 两条引擎都得给出同名文件。
+    await writeFile(join(root, "brace"), "hit brace bare\n", "utf8");
+    await writeFile(join(root, "1..3.ts"), "hit literal dots\n", "utf8");
+    // 点文件 / 点目录：Node walkFiles 只看目录名（不跳隐藏项），rg 默认相反。
+    await writeFile(join(root, ".dot.ts"), "hit dot\n", "utf8");
+    await mkdir(join(root, ".dotdir"), { recursive: true });
+    await writeFile(join(root, ".dotdir", "nested.ts"), "hit nested\n", "utf8");
+    // 被 node_modules / .git 目录名挡掉的文件：两条引擎都不该看见。
+    await mkdir(join(root, "node_modules", "pkg"), { recursive: true });
+    await writeFile(
+      join(root, "node_modules", "pkg", "dep.ts"),
+      "hit dep\n",
+      "utf8"
+    );
+    // `.gitignore` 不改变接受集（rg 侧 --no-ignore，Node 侧本来就不读）。
+    await writeFile(join(root, ".gitignore"), "hidden-by-ignore.ts\n", "utf8");
+    await writeFile(join(root, "hidden-by-ignore.ts"), "hit ignored\n", "utf8");
+    // 超过 1 MiB 的文件：遍历期两条引擎都跳过；显式点名时都搜（见下）。
+    const oversizeLine = "x".repeat(1_100_000);
+    await writeFile(join(root, "big.ts"), `${oversizeLine}\nhit big\n`, "utf8");
+    // 超宽**上下文**行（>2000 列）：展示侧两类行同闸，两条引擎都得截断。
+    await writeFile(
+      join(root, "longctx.ts"),
+      `${"y".repeat(3_000)}\nhit\n`,
+      "utf8"
+    );
+    // CRLF 行：`$` 按行边界解释、尾随 `\r` 不混进回显（两条引擎同口径）。
+    await writeFile(join(root, "crlf.ts"), "hit crlf\r\nplain\r\n", "utf8");
 
-    const viaRg = createGrepTool(root);
-    const viaNode = createGrepTool(root, {
-      engineBinaryPath: join(root, "__no_such_engine__", "rg"),
-    });
+    const viaRg = toolFor(root, "rg");
+    const viaNode = toolFor(root, "node");
 
     const cases: ReadonlyArray<Record<string, unknown>> = [
       { pattern: "hit" },
@@ -947,6 +1003,34 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
       { pattern: "hit", output: "content", context: 2, path: "adj.ts" },
       { pattern: "hit", output: "content", context: 1, path: "ov.ts" },
       { pattern: "hit", output: "content", context: 2, path: "ov.ts" },
+      // 花括号交替：多元素 / 单元素 / 空组 / 嵌套 / 笛卡尔积 / 无范围展开。
+      { pattern: "hit", glob: "brace.{ts,md}" },
+      { pattern: "hit", glob: "brace.{ts}" },
+      { pattern: "hit", glob: "brace{}" },
+      { pattern: "hit", glob: "{brace.ts,sub/*.ts}" },
+      { pattern: "hit", glob: "{adj,ov}.{ts,md}" },
+      { pattern: "hit", glob: "{1..3}.ts" },
+      { pattern: "hit", glob: "brace.{ts,{md,txt}}" },
+      // 整模式锚定：`/` 出现在花括号**内**时整个模式锚定搜索根，
+      // `{sub/nope,zz}.ts` 不得退化成「裸基名 zz.ts 也收」。
+      { pattern: "hit", glob: "{brace.ts,sub/b.ts}" },
+      { pattern: "hit", glob: "{sub/nope,brace}.ts" },
+      // 上下文行也过行宽闸：rg 与 Node 都要截断到同一列数 + 同一标记。
+      { pattern: "hit", output: "content", context: 1, path: "longctx.ts" },
+      // 遍历语义：点文件 / 点目录可见，node_modules 不可见，.gitignore 不生效。
+      { pattern: "hit", glob: ".dot.ts" },
+      { pattern: "hit", glob: ".dotdir/*.ts" },
+      { pattern: "hit", glob: "node_modules/**" },
+      { pattern: "hit", glob: "hidden-by-ignore.ts" },
+      { pattern: "hit", output: "paths", path: "node_modules" },
+      // 体积闸：遍历跳过 / 显式点名照搜（两个方向都要一致）。
+      { pattern: "hit", glob: "big.ts" },
+      { pattern: "hit", output: "content", path: "big.ts" },
+      { pattern: "hit", output: "count", path: "big.ts" },
+      // CRLF：`$` 锚定与行尾 `\r` 的剥离（`plain$` 只该命中 LF 行）。
+      { pattern: "hit", output: "content", path: "crlf.ts" },
+      { pattern: "crlf$", output: "content", path: "crlf.ts" },
+      { pattern: "plain$", output: "content", path: "crlf.ts" },
       { pattern: "hit", also: "second" },
       { pattern: "hit", head_limit: 1 },
       { pattern: "hit", offset: 99 },
@@ -1173,7 +1257,9 @@ describe("grep — abort", () => {
     const root = await makeScratch("grep-abort-");
     await writeFile(join(root, "huge.txt"), "a".repeat(2_000_000));
 
-    const tool = createGrepTool(root);
+    // abort 语义与引擎无关，但**必须**在真引擎上验：这条路径走的是
+    // spawnWithStopSignal 的中断接线，Node 扫不经过它。
+    const tool = toolFor(root, "rg");
     const controller = new AbortController();
     controller.abort();
 
@@ -1188,7 +1274,7 @@ describe("grep — abort", () => {
     const root = await makeScratch("grep-abort-mid-");
     await writeFile(join(root, "big.txt"), "a".repeat(2_000_000));
 
-    const tool = createGrepTool(root);
+    const tool = toolFor(root, "rg");
     const controller = new AbortController();
     const promise = tool.handler(
       { pattern: "a" },
