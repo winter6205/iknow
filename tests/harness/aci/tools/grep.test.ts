@@ -922,6 +922,10 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
     await writeFile(join(root, "a.ts"), "hit a\nsecond\n", "utf8");
     await writeFile(join(root, "sub", "b.ts"), "hit b\n", "utf8");
     await writeFile(join(root, "c.md"), "hit c\n", "utf8");
+    // 相邻命中：两窗相接（[1,3] / [2,4]）→ 一组，两条命中都必须是 `:`。
+    await writeFile(join(root, "adj.ts"), "hit1\nhit2\n", "utf8");
+    // 重叠窗：l1 的窗吞掉 l4，l4 的窗又吞掉 l5 → 一组，三条命中都是 `:`。
+    await writeFile(join(root, "ov.ts"), "l1\nhitA\nhitB\nl4\nhitC\n", "utf8");
 
     const viaRg = createGrepTool(root);
     const viaNode = createGrepTool(root, {
@@ -938,6 +942,11 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
       { pattern: "hit", glob: "c[!x].md" },
       { pattern: "hit", type: "ts" },
       { pattern: "hit", output: "content", context: 1 },
+      // 窗相接 / 重叠时，落入前窗的后一条命中不得被降级成上下文行（SC6）。
+      { pattern: "hit", output: "content", context: 1, path: "adj.ts" },
+      { pattern: "hit", output: "content", context: 2, path: "adj.ts" },
+      { pattern: "hit", output: "content", context: 1, path: "ov.ts" },
+      { pattern: "hit", output: "content", context: 2, path: "ov.ts" },
       { pattern: "hit", also: "second" },
       { pattern: "hit", head_limit: 1 },
       { pattern: "hit", offset: 99 },

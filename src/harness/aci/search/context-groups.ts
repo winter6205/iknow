@@ -66,6 +66,9 @@ function groupsForFile(
   lines: ReadonlyArray<string>,
   context: number
 ): ContextGroup[] {
+  // 命中行集合（不是「当前这一条」）：后一条命中落进前一条的窗时，它仍要
+  // 以 `:` 出（rg 口径 —— 窗合并后组内所有命中行都是匹配行）。
+  const matchLines = new Set(hits.map((hit) => hit.line));
   const groups: ContextGroup[] = [];
   let current: ContextEntry[] = [];
   let windowEnd = -1;
@@ -80,13 +83,10 @@ function groupsForFile(
     const emitFrom = Math.max(from, windowEnd + 1);
     for (let line = emitFrom; line <= to; line++) {
       current.push(
-        entryFor(path, line, lines[line - 1] ?? "", line === hit.line)
+        entryFor(path, line, lines[line - 1] ?? "", matchLines.has(line))
       );
     }
     windowEnd = Math.max(windowEnd, to);
-    if (current.length > 0 && current[current.length - 1]!.line < to) {
-      windowEnd = to;
-    }
   }
   if (current.length > 0) groups.push({ entries: current });
   return groups;
