@@ -25,7 +25,8 @@ user query
     ▼
  harness (src/harness/)  ──maxTurns──►  Anthropic adapter
     │
-    ├── bash (ACI; foreground runInSandbox + background spawn share one bwrap fence)
+    ├── bash (ACI; foreground runInSandbox + background spawn share one bwrap fence;
+    │         background registry → home 项目树 `<池根>/projects/<slug>/tasks/`, ADR-0088)
     ├── read_file / grep / glob (ACI, read-only)
     └── edit_file / write_file (ACI, write)
 ```
@@ -73,8 +74,10 @@ path; until then `POST /api/v1/sessions/:id/messages` returns 400
 path. Trust roster lives in `<home>/.iknow/workspaces.json`; new absolute
 paths require explicit `confirmTrust` on PUT (optimistic rev-CAS).
 
-ADR-0019 (per-root state anchor) is unchanged for `chat` / `tui` / `ask`;
-this ADR is the serve-surface exception. See
+ADR-0019 (per-root state anchor) is unchanged for `chat` / `tui` / `ask`
+for per-root state (memory dir / settings 写回); it does **not** anchor session
+transcripts or the background task registry — both live on the home project
+tree (ADR-0087 / ADR-0088). This ADR is the serve-surface exception. See
 `docs/adr/0023-serve-workspace-explicit.md` and
 `specs/serve-workspace.md` (`specs/README.md:36`).
 

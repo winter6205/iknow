@@ -89,8 +89,8 @@ afterAll(async () => {
 });
 
 /** mkdtemp + SessionStore(默认 cwd,与既有测试一致)+ 记录清理。返回
- *  `{store, baseDir}` —— baseDir 用于直接 stat/readFile `<base>/sessions/...`,
- *  store 不暴露该路径。 */
+ *  `{store, baseDir}` —— baseDir 用于直接 stat/readFile
+ *  `<base>/projects/<slug>/...`,store 不暴露该路径。 */
 async function storeFor(
   prefix: string
 ): Promise<{ store: SessionStore; baseDir: string }> {

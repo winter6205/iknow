@@ -2,7 +2,8 @@
  * Stateless filesystem-backed session store (022 spec §Session Store).
  *
  * Why stateless: concurrency serialization is the hub's responsibility
- * (spec A15). This class is a thin typed-IO wrapper over data/sessions/*.
+ * (spec A15). This class is a thin typed-IO wrapper over
+ * `<baseDir>/projects/<slug>/<conversationId>/` (ADR-0071 / ADR-0087).
  * Every failure path throws a typed SessionStoreError — never a bare Error.
  *
  * #618 T1 (spec session-jsonl-resume / ADR-0027): single on-disk shape.
