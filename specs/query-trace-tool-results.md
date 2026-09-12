@@ -74,7 +74,7 @@
 
 ## Inherits / Changes
 
-- Inherits：`specs/trace-agent-readability.md` T9 `query_trace`；ADR-0003 A-scope JSONL；ADR-0006 不落可再生工具输出第二份盘；ADR-0036 blob。
+- Inherits：归档 spec `docs/archive/025-retire-completed-specs-and-plans/specs/trace-agent-readability.md` T9 `query_trace`；ADR-0003 A-scope JSONL；ADR-0006 不落可再生工具输出第二份盘；ADR-0036 blob。
 - Inherits：`createJsonlTraceReader` 为读侧 SSOT。
 - Changes（T7）：`projectRecord` 列表投影保留；`record_id` / `detail` 路径删除并迁出；`offset` 暴露；`resume_offset` 删除；envelope 由 `ResponseEnvelope` 拆为 `QueryTracePage`（少 `total` / `truncated` / `skipped_lines` 三键）；`conversation_id` 改必填 + 缺席抛 `session_not_found`。
 - Test command: `npx vitest run tests/harness/aci/tools/query-trace.test.ts` 及投影函数测 + `tests/traceserver/query-trace-core-input-face.test.ts`（T7 新增）。

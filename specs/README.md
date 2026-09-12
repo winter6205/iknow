@@ -109,6 +109,10 @@
 - `653-horizon-pkg2-kernel.md` — 落地完成（PR #671）；前台/后台 bash 沙箱纪律对齐 + `isConcurrencySafe` 调度
 - `tui-display-consistency.md` D3 折叠合同 — superseded by `tui-tool-settled-appearance.md`（spec 仍活跃，仅 D3 让位；plan T3 cancelled）
 - `session-folder-consolidation.md` — 落地完成（PR #966；ADR-0071 L3 cutover；plan 同目录归档 `plans/session-folder-consolidation.md`）
+- `357-subagent-process-tools-surface.md` — 落地完成（PR #516；sandboxRoot 收窄 + 判官 allow-list + output-mask + 4 类探针；plan 同目录归档 `plans/357-subagent-process-tools-surface.md`）
+- `358-subagent-runtime-observability.md` — 落地完成（PR #517；trace 三类生命周期事件 + settings 双 timeout 通道 + timeout 优雅收尾 + `GET /sessions/:id/subagents`；plan 同目录归档 `plans/358-subagent-runtime-observability.md`）
+- `model-prefix-layering.md` — 落地完成（PR #883，bullet B1–B8；ADR-0041 / 0042 / 0043；map 收口 `c595fa78`；plan 同目录归档 `plans/model-prefix-layering.md`）
+- `trace-agent-readability.md` — 落地完成（PR #802；crash 取证三件套 + 读侧动线 + rotation / 磁盘止血；plan 同目录归档 `plans/trace-agent-readability.md`）
 
 ---
 

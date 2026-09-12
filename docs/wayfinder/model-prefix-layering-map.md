@@ -229,7 +229,7 @@ IKNOW-196 锁死的六段顺序（`user_profile` / `bootstrap` / `memory_layer` 
 
 **## Resolution**
 
-**不重排，六段 LOCKED 契约原样保留**（spec `model-prefix-layering.md` Boundaries #10 / G2 裁决落地）。D8（memory_layer 快照化，ADR-0042）+ D10（`<mcp_tools_overview>` 撤出，ADR-0043）之后，六段全部满足 D9 资格线，重排的收益基础消失 —— 剩余的易变段全部有了去处，顺序不再承载任何易变输入。关闭形式 = spec 层裁决（不需要新 ADR，因为没有推翻任何既有 ADR）。
+**不重排，六段 LOCKED 契约原样保留**（归档 spec `docs/archive/025-retire-completed-specs-and-plans/specs/model-prefix-layering.md` Boundaries #10 / G2 裁决落地）。D8（memory_layer 快照化，ADR-0042）+ D10（`<mcp_tools_overview>` 撤出，ADR-0043）之后，六段全部满足 D9 资格线，重排的收益基础消失 —— 剩余的易变段全部有了去处，顺序不再承载任何易变输入。关闭形式 = spec 层裁决（不需要新 ADR，因为没有推翻任何既有 ADR）。
 
 ### G3 · 易变段的去处
 
@@ -242,7 +242,7 @@ IKNOW-196 锁死的六段顺序（`user_profile` / `bootstrap` / `memory_layer` 
 
 **## Resolution**
 
-**无剩余搬家工作，两票（与 G2 一并）在 spec 层关闭**（spec `model-prefix-layering.md` Boundaries #10）。原问题里两个段各得去处且都**不是**搬 messages 尾部：`memory_layer` catalog → 会话级快照（D8 / ADR-0042，留在 system 但输入来源构造上会话内恒定，过资格线）；`<mcp_tools_overview>` → 整体撤出 system（D10 / ADR-0043，信息由名字目录 + tool_search 结果消息承载）。D7 已先撤走 `orchestration`。至此 system 侧不存在待搬家段，本票的问题空间为空。
+**无剩余搬家工作，两票（与 G2 一并）在 spec 层关闭**（归档 spec `docs/archive/025-retire-completed-specs-and-plans/specs/model-prefix-layering.md` Boundaries #10）。原问题里两个段各得去处且都**不是**搬 messages 尾部：`memory_layer` catalog → 会话级快照（D8 / ADR-0042，留在 system 但输入来源构造上会话内恒定，过资格线）；`<mcp_tools_overview>` → 整体撤出 system（D10 / ADR-0043，信息由名字目录 + tool_search 结果消息承载）。D7 已先撤走 `orchestration`。至此 system 侧不存在待搬家段，本票的问题空间为空。
 
 ### G4 · tools 数组是否恒定化
 
@@ -273,7 +273,7 @@ IKNOW-196 锁死的六段顺序（`user_profile` / `bootstrap` / `memory_layer` 
 
 **## Resolution**
 
-**承认 compact 那一跳缓存必废，不为此推迟/加重压缩；ADR-0013 不动**（spec `model-prefix-layering.md` Boundaries #11 / G5 裁决落地）。压缩是上下文生存问题、缓存是成本问题，前者优先级恒高，用缓存收益反证压缩让步是本末倒置。唯一约束 = compact 后的重装配同样过断言②（相邻两轮 `tools` + `system` deep-equal）—— 即缓存作废只许发生在 messages 侧的一次性改写，不许把 tools/system 拉回易变态。该约束已由 B7 断言②矩阵的 compact 场景钉死（`tests/harness/prefix-stability/`，deep-equal 总装 SC2）。
+**承认 compact 那一跳缓存必废，不为此推迟/加重压缩；ADR-0013 不动**（归档 spec `docs/archive/025-retire-completed-specs-and-plans/specs/model-prefix-layering.md` Boundaries #11 / G5 裁决落地）。压缩是上下文生存问题、缓存是成本问题，前者优先级恒高，用缓存收益反证压缩让步是本末倒置。唯一约束 = compact 后的重装配同样过断言②（相邻两轮 `tools` + `system` deep-equal）—— 即缓存作废只许发生在 messages 侧的一次性改写，不许把 tools/system 拉回易变态。该约束已由 B7 断言②矩阵的 compact 场景钉死（`tests/harness/prefix-stability/`，deep-equal 总装 SC2）。
 
 ### ~~G6 · clear_tool_uses 是否接入~~
 

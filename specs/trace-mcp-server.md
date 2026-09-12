@@ -129,7 +129,7 @@
 
 ## Inherits / Changes
 
-- Inherits：ADR-0003 A-scenario JSONL；ADR-0020 读侧 reader SSOT（`createJsonlTraceReader`）；ADR-0036 blob 解引用后再投影；`specs/trace-agent-readability.md` T9；`specs/query-trace-tool-results.md`（投影纯函数；其 Out of scope 之「trace MCP」由本 spec 承接）。
+- Inherits：ADR-0003 A-scenario JSONL；ADR-0020 读侧 reader SSOT（`createJsonlTraceReader`）；ADR-0036 blob 解引用后再投影；归档 spec `docs/archive/025-retire-completed-specs-and-plans/specs/trace-agent-readability.md` T9；`specs/query-trace-tool-results.md`（投影纯函数；其 Out of scope 之「trace MCP」由本 spec 承接）。
 - Inherits：写侧/ACI 目录解析惯例 `flag > IKNOW_TRACE_OUT > ./trace/`（`src/cli.ts` `resolveTracePath`；`registry.ts` traceDir 回落）。
 - Inherits：仓库已有 `@modelcontextprotocol/client` ^2.0.0（本 spec 不改 client 行为）。
 - Changes：票①抽出 `src/traceserver/` 共享核并改 ACI 薄包；票②新增 `@modelcontextprotocol/server` + bin + `src/trace-mcp/`；#803 前置改为「投影 SSOT + query_trace 已存在」。

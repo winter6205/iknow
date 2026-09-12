@@ -35,6 +35,10 @@
 - `653-horizon-pkg2-kernel.md` — 落地完成（PR #671）；前台/后台 bash 沙箱纪律对齐 + `isConcurrencySafe` 并行调度
 - `251-lsp-tool.md` — superseded by `specs/symbol-primary-aci.md`（坐标模型面合同；客户端实现仍用）
 - `session-folder-consolidation.md` — 落地完成（PR #966；ADR-0071 L3；五锚点 → 会话文件夹 + blob 唯一 + 读侧两级树）
+- `357-subagent-process-tools-surface.md` — 落地完成（PR #516；sandboxRoot 收窄 + 判官 allow-list + output-mask + 4 类探针）
+- `358-subagent-runtime-observability.md` — 落地完成（PR #517；trace 三类生命周期事件 + settings 双 timeout 通道 + timeout 优雅收尾 + Web 实时状态）
+- `model-prefix-layering.md` — 落地完成（PR #883 Bullet B1–B8；ADR-0041 / 0042 / 0043；wayfinder map 收口 `c595fa78`）
+- `trace-agent-readability.md` — 落地完成（PR #802；crash 取证三件套 + 读侧动线 + rotation / blob 去重）
 
 ## plans/
 
@@ -63,6 +67,10 @@
 - `trace-lifecycle-panel-v2.md` — 独立 `iknow trace` 进程（`#183`）+ web 面板取代
 - `trace-service.md` — trace 观测落地（JSONL + 查询 API，A-scope）
 - `session-folder-consolidation.md` — 落地完成（PR #966；ADR-0071 L3）
+- `357-subagent-process-tools-surface.md` — 落地完成（PR #516）
+- `358-subagent-runtime-observability.md` — 落地完成（PR #517）
+- `model-prefix-layering.md` — 落地完成（PR #883 Bullet B1–B8）
+- `trace-agent-readability.md` — 落地完成（PR #802）
 
 ## docs-plans/
 

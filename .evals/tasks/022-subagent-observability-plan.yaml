@@ -4,4 +4,4 @@ repo: .
 test_command: |
   set -e
   npx vitest run tests/subagent tests/traceserver tests/config tests/session-api
-prompt: "Run `bash .evals/run.sh --task 022-subagent-observability-plan`. Confirms subagent runtime observability contract (trace events, settings timeout channels, graceful timeout, session-api endpoint) holds; plans/358-subagent-runtime-observability.md bullets land green here."
+prompt: "Run `bash .evals/run.sh --task 022-subagent-observability-plan`. Confirms subagent runtime observability contract (trace events, settings timeout channels, graceful timeout, session-api endpoint) holds; docs/archive/025-retire-completed-specs-and-plans/plans/358-subagent-runtime-observability.md bullets land green here."

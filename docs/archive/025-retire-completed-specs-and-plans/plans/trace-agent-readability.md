@@ -27,21 +27,21 @@ minimal-change-verifier: yes — 1 个逻辑任务簇「trace 对 agent 可读�
    - **Inherits:** spec C2——「exit 保终态 emit 不动 + stderr 流 end/close 有界 race（≤500ms）后构建 summary；不裸换 close」；`SubagentStopRecord.error`/`SubagentStateChangeRecord.error` 补填（Postel 留位已在 types.ts:289/308）；manager.test.ts:272「空 stderrBuf 保裸 base」锁定不破；envelope wire schema 零 diff。
    - **Surface:** `src/harness/subagent/`（manager crash 分支 + child.on("error") 同修）、`src/harness/trace/`（两 record 的 error 填充通道）。
    - **Acceptance:** >64KB stderr burst 后立即 `exit(2)` 的子进程，crash summary 含最后一条 stderr 行（竞态专项测试）；stop/state_change 行 `error.type` 非空；timeout 语义不被 crashed 覆盖（manager.ts:643 既有 guard 测试全绿）。Check: `npx vitest run tests/subagent`。
-   - Status: [ ] pending
+   - Status: [x] done (2026-08-29) — PR #802
    - [blocks: T2]
 
 2. **stderr 指针落盘 + diagnosticsDir DI 缝** — tag: `[implementation]`
    - **Inherits:** spec C1——`<traceDir>/stderr/<taskId>.log`、过 `createOutputMask` 后落盘、1MiB cap；`subagent_stop` 增 `stderr_path`/`stderr_bytes` Postel 可选字段；crashedSummary（父可见信封、模型面）同过 mask——修既有裸奔洞。
    - **Surface:** `src/harness/subagent/`（manager 工厂增 `diagnosticsDir?` 参数 + tee）、`src/harness/trace/`（stop record 两可选字段）。
    - **Acceptance:** 真实 OS pipe 必崩 worker（`stderr.write('boom'); exit(2)`）→ `.log` 存在且含 boom；注入 fake secret 后 `.log` 与信封 summary 均无明文；.log 恰在 1MiB cap 截断；多 worker 同时 crash 的 .log 按 taskId 互不覆盖。Check: tests/subagent 集成 + grep 断言。
-   - Status: [ ] pending
+   - Status: [x] done (2026-08-29) — PR #802
    - [blocks: T3]
 
 3. **crash 取证无条件装配 + worker trace 目录锚定** — tag: `[implementation]`
    - **Inherits:** ADR-0035（生命周期事件所有入口无条件；content trace 仍守 ADR-0003 D10 不进 chat REPL）；spec C3——worker trace 默认目录从 CWD 相对改 workspaceRoot 锚定；spawn env 透传 `IKNOW_TRACE_OUT=<resolved traceDir>`。
    - **Surface:** `src/cli.ts`（chat 入口 subagent 生命周期 trace 无条件装配）、`src/harness/build-engine.ts`（diagnosticsDir 透传）、`src/harness/subagent/`（spawn.ts / worker.ts）。
    - **Acceptance:** chat REPL（pipe、未配 traceOut）跑一次 spawn_subagent → `trace/subagent.jsonl` 出现三类生命周期事件；worker run 的 trace 文件落在锚定目录而非任意 CWD。Check: integration test。
-   - Status: [ ] pending
+   - Status: [x] done (2026-08-29) — PR #802
 
 ### 组 B — P1 写侧止血
 
@@ -49,14 +49,14 @@ minimal-change-verifier: yes — 1 个逻辑任务簇「trace 对 agent 可读�
    - **Inherits:** spec C3（operator 复审修正 2026-08-29）——>500MB 或 >100 文件触发、env 可关、活跃文件（mtime < 5min）保护；驱逐序机械零 LLM（memory_gc 先例）：先删「无 error 记录且体量最小」（打招呼/调设置类会话的机械代理，同大小取更旧），再按 mtime 删最旧；error 扫描对候选惰性执行（从小文件起，成本有界）；crash stderr 日志与 `subagent.jsonl` 聚合文件不删；blobs/ 回收按 mtime orphans 规则起步（spec Open Questions 首版裁决）。
    - **Surface:** `src/harness/trace/`（新 rotation 模块 + jsonl 工厂接线，帽值检查在工厂创建时）。
    - **Acceptance:** 夹具目录超任一帽 → 无 error 且最小的夹具先被删、含 error 的夹具在帽内存活、总数 ≤ 帽；env=off 不删；rotation 与并发写竞争时不删活跃文件与受保护文件。Check: rotation 单测。
-   - Status: [ ] pending
+   - Status: [x] done (2026-08-29) — PR #802
    - [parallel]
 
 5. **maskJsonLine 工厂缓存** — tag: `[implementation]`
    - **Inherits:** spec C5——兑现 jsonl.ts:76 注释承诺（mask built once per factory call），行为不变。
    - **Surface:** `src/harness/trace/`（jsonl.ts mask 生命周期）。
    - **Acceptance:** 既有 #406 secret-roundtrip 测试全绿；新断言 mask 构造每工厂实例 1 次。Check: 既有 mask 测试 + 新单测。
-   - Status: [ ] pending
+   - Status: [x] done (2026-08-29) — PR #802
    - [parallel]
    - [blocks: T6]
 
@@ -64,7 +64,7 @@ minimal-change-verifier: yes — 1 个逻辑任务簇「trace 对 agent 可读�
    - **Inherits:** ADR-0036——`IKNOW_TRACE_MESSAGES=full|blob`（默认 full，byte-shape 兼容）；blob 模式 messages 元素→`{sha, bytes}`、正文 mask 后写 `<traceDir>/blobs/<sha>` write-if-missing；`messages_captured` 语义不变；`tests/e2e/subagent-foreground-trace.test.ts:164` 断言路径零改动；blob 写失败显式降级 full 行。
    - **Surface:** `src/harness/trace/`（jsonl.ts recordLlmCall 序列化分支 + blobs 写入）。
    - **Acceptance:** 默认 full 下 e2e 全绿；`IKNOW_TRACE_MESSAGES=blob` 下行内为 sha 引用、`blobs/<sha>` 命中且内容无 secret 明文；blob 目录不可写时降级 full 不丢记录。Check: 两模式单测 + e2e 回归。
-   - Status: [ ] pending
+   - Status: [x] done (2026-08-29) — PR #802
 
 ### 组 C — P1 读侧动线
 
@@ -72,7 +72,7 @@ minimal-change-verifier: yes — 1 个逻辑任务簇「trace 对 agent 可读�
    - **Inherits:** spec C4——`TRACE_RECORD_TYPES` + verification/goal、fields 列映射、`?turn_id=` 精确过滤；不加聚合端点（`status=error` + 降序 + `limit=1` 已覆盖「最新错误」）；ADR-0020 拓扑零改动。
    - **Surface:** `src/traceserver/`（types / http / reader / fields）。
    - **Acceptance:** `?record_type=verification`（与 goal）返回 200 且 fields 含列；`?turn_id=` 命中；既有 traceserver 测试全绿。Check: `npx vitest run tests/traceserver`。
-   - Status: [ ] pending
+   - Status: [x] done (2026-08-29) — PR #802
    - [parallel]
    - [blocks: T9]
 
@@ -80,14 +80,14 @@ minimal-change-verifier: yes — 1 个逻辑任务簇「trace 对 agent 可读�
    - **Inherits:** ADR-0006 工具级参数域（工具级管「读多少」语义单位）——rg 路径 `--max-columns=2000`、Node fallback 在 scanLines visit 处截单行 + 截断标记；executor 20k 兜底不变（契约 X）。
    - **Surface:** `src/harness/aci/tools/`（grep）。
    - **Acceptance:** 命中 1MB 单行时该条 ≤2000 chars + 标记，同查询其余命中不被挤出。Check: grep 单测。
-   - Status: [ ] pending
+   - Status: [x] done (2026-08-29) — PR #802
    - [parallel]
 
 9. **query_trace ACI 工具** — tag: `[implementation]`
    - **Inherits:** spec 裁决 4——进 `createDefaultAciRegistry` SSOT（第 11 工具、permission read-only + fast timeout tier）；投影模式：llm_call 默认返回 `messages_count` + 首/末条预览 + error、`record_id` 精确下钻；返回体自限 ≤4000 chars；record_type 校验镜像 traceserver 白名单（消费 T7 定案集合）；进程内直调 `createJsonlTraceReader`。
    - **Surface:** `src/harness/aci/tools/`（新 query-trace 工具 + registry 注册）。
    - **Acceptance:** registry 工具数 SSOT 断言更新；`status=error` 命中错误行且返回不含 messages 全文；`record_id` 下钻取到单条详情；未知 record_type → typed 错误；单次返回 ≤4000 chars。Check: tests/aci 单测。
-   - Status: [ ] pending
+   - Status: [x] done (2026-08-29) — PR #802
    - [blocks: T7]
 
 10. **trace 写失败计数经 health 暴露** — tag: `[implementation]`
@@ -95,7 +95,7 @@ minimal-change-verifier: yes — 1 个逻辑任务簇「trace 对 agent 可读�
 - **Inherits:** spec C6——维持 ADR-0003 D13 never-throw + warn-once，追加实例级失败计数，`GET /api/v1/health` 暴露 `traceWriteFailures`。
 - **Surface:** `src/harness/trace/`（jsonl/noop 实例计数）、`src/session-api/`（health 只读消费）。
 - **Acceptance:** 模拟写盘失败 → health `traceWriteFailures` ≥1 且 loop 不 crash。Check: session-api 单测。
-- Status: [ ] pending
+- Status: [x] done (2026-08-29) — PR #802
 - [parallel]
 
 ## Tracker
