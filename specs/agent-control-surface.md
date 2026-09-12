@@ -3,7 +3,7 @@
 > 图：`docs/wayfinder/agent-control-surface-map.md`（G1–G4 + R1–R3）。
 > 下游 plan：`plans/agent-control-surface.md`。
 > 本文件不写 CONTEXT / ADR 正文；待写入见文末。
-> **Amends** `create-worktree-tools.md`（工具在场条件）；`todo-ledger-replace.md` / ADR-0046（账本形状与 mode）；`358-subagent-runtime-observability.md`（TUI 显示面 + 取消；该 spec 已落地，归档见 `docs/archive/025-retire-completed-specs-and-plans/specs/`）；`146-tui.md`（chrome 强杀）；设置通道（ADR-0015）加项目允许名单。
+> **Amends** `create-worktree-tools.md`（工具在场条件）；`todo-ledger-replace.md` / ADR-0046（账本形状与 mode）；`358-subagent-runtime-observability.md`（TUI 显示面 + 取消；该 spec 已落地，归档见 `docs/archive/025-retire-completed-specs-and-plans/specs/`）；`146-tui.md`（chrome 强杀）；设置通道（ADR-0015）加项目允许名单。项目 `permissions` 规则形态 **amended by** `declarative-project-permissions.md`（ADR-0090）。
 
 ## ASSUMPTIONS（wayfinder grilling 已收；不重开）
 
@@ -52,7 +52,7 @@
   - **项目允许名单**：项目文件只采纳 `hooks`、`verify`、`secrets`、`permissions`。其余顶层段（`isolation` / `llm` / `subagent` / `web` / `lsp` / `memory` / `loop` / `graph`）出现在项目文件 → **丢弃、不覆盖用户值**，启动可见警告。
   - 面板 / 写回：用户层键只写用户文件；不得因「项目文件已存在」把 thinking 等写入项目。
   - **权限搬家**：现有 `permissions.toml` 的 `schema_version` + `rule` DSL 迁入项目 settings 的 `permissions`；**停读 toml**；两份同时存在 → 启动 fail-loud。用户层不接 `permissions`。
-- **Out of this spec:** 托管/MDM 层；把权限做成 allow 字符串列表。
+- **Out of this spec:** 托管/MDM 层。权限字符串列表 **amended by** `declarative-project-permissions.md` / ADR-0090（#1004）：Slice B 只搬家到 JSON，形态由后继 spec 换成 `allow`/`ask`/`deny`。
 
 ### Slice C — todo 三件事
 
@@ -92,7 +92,7 @@
 **B 设置**
 
 4. 项目文件含 `isolation` / `llm.model` 时，合并结果等于用户层值，且有警告通道可测。`npx vitest run tests/config/settings.test.ts` 退出 0。
-5. 仅项目 `permissions.rule` 时，策略层能加载与今日 toml 同形的一条 deny/allow。toml 与 json 并存 → 启动/加载 typed fail。`npx vitest run tests/harness/permission/project-settings.test.ts tests/config/settings.test.ts` 退出 0。
+5. 仅项目 `permissions` 时策略层能加载团队规则。toml 与 json 并存 → 启动/加载 typed fail。规则形态 **amended by** `declarative-project-permissions.md`（不再要求 `permissions.rule` 谓词对象）。`npx vitest run tests/harness/permission/project-settings.test.ts tests/config/settings.test.ts` 退出 0。
 6. 写回 thinking 不创建/不改项目文件里的 `llm`（项目文件缺席或在场皆然）。TUI/settings 写回相关测试退出 0。
 
 **C todo**
@@ -120,7 +120,7 @@
 **Inherits：**
 
 - ADR-0037（不 auto-provision；rebind 只经 ACI 缝）；ADR-0069 / 0079 / 0082（告知面 vs 回执点名；工具名）。
-- ADR-0014（默认 wait:true）；ADR-0015（settings 双文件）；ADR-0084（项目层只采纳允许名单 `hooks` / `verify` / `secrets` / `permissions`，其余顶层段丢弃 —— Slice B 即兑现）。
+- ADR-0014（默认 wait:true）；ADR-0015（settings 双文件）；ADR-0084（项目层只采纳允许名单 `hooks` / `verify` / `secrets` / `permissions`，其余顶层段丢弃 —— Slice B 即兑现）；ADR-0090（项目 permissions 声明式字符串列表）。
 - ADR-0028（栏追加、不灌整表进 messages）；`0046-todo-ledger-replace-and-snapshots` 的快照/不灌 messages；**形状与三件事见 ADR-0085**（64KB/500 仍 Inherits）。
 - `#440` D6 今日 worker 无 todoDir——Slice C **改**为共用账本，见 Changes。
 - chrome-focus / SubagentPanel `● ○` / `> ` / identity strip（Slice D 叠加强杀与消息两行）。
