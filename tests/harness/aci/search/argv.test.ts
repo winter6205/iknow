@@ -123,6 +123,20 @@ describe("buildRgArgs — 出法", () => {
     }
   });
 
+  it("rg 专有 pattern 原样透传：本层不改写、不转义、不预判 JS 合法性（ADR-0089）", () => {
+    // 回归钉子。rg 接受而 JS 拒绝的构造（PCRE2 命名组 / inline flag / `\p{L}`）
+    // 必须**逐字节**到达 rg：本层若替它们转义或改写，rg 收到的就不是用户给的
+    // 那条 pattern；`--engine=auto` 若回来，这些 pattern 又会被偷偷换引擎。
+    // 与「rg 路径不预判 JS 合法性」是同一合同的两道防线（另一道在 handler：
+    // 共享入口不再无条件 `compilePattern`）。尾部按生产口径是
+    // `-- <pattern> <path>` —— 断言 pattern 那一段逐字节等于输入。
+    for (const pattern of ["(?P<n>foo)", "(?i)abc", "\\p{L}"]) {
+      const args = argv({ pattern });
+      assert.equal(args.at(-3), "--", `${pattern} 应位于 -- 之后`);
+      assert.equal(args.at(-2), pattern, `${pattern} 应原样透传`);
+    }
+  });
+
   it("`-H` 常开：path 指向单文件时 rg 不再省掉文件名（两种引擎同形状）", () => {
     assert.ok(argv({ output: "content" }).includes("-H"));
     assert.ok(argv({ output: "paths" }).includes("-H"));

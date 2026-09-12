@@ -10,6 +10,11 @@
  * 本层做 also 过滤（用 JS RegExp 跑 also 文本）。两条引擎的命中集可能不同，
  * 过滤后保留的命中数也随之不同 —— 这是 ADR-0089 已接受的合同；本层只判定
  * 窗内是否存在第二段，不挑引擎。
+ *
+ * 注意 `also` 与主 pattern 的**接受集不对称**：主 pattern 在 rg 路径上由 rg
+ * 自己判合法性（rg 接受而 JS 拒绝的构造可走通，见 grep.ts 的延迟编译），但
+ * `also` 无论哪条引擎都在本层用 JS `RegExp` 跑 —— 它是第二段判据，没有 rg
+ * 侧对应物。故 `also` 编不过 → typed 拒绝，即便主 pattern 走了 rg 路径。
  */
 
 import { ToolExecutionError } from "../../errors.js";
