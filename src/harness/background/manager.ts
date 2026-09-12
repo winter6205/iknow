@@ -101,7 +101,9 @@ interface MutableClientState {
 }
 
 export interface CreateBackgroundTaskManagerOptions {
-  /** 落盘根:`<workspaceRoot>/.iknow/tasks`(ADR-0021 D1.3)。 */
+  /** 落盘根:`<poolRoot>/projects/<slug>/tasks/`(ADR-0088 home 项目树)——
+   *  与会话文件夹叶子同层同 slug,经 host 注入的已解析绝对路径(不再自派生
+   *  workspaceRoot,见 `buildHarnessEngine` opts.tasksDir 注释)。 */
   readonly tasksDir: string;
   /** DI spawn 工厂:由调用方注入(fake 测试 / 生产 defaultBackgroundSpawn)。 */
   readonly spawn: BackgroundSpawn;

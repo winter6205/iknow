@@ -182,7 +182,10 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
 
       // 3) 装配:manager + bash/bash_output/bash_stop 工具 + 审批 askUser
       const manager = createBackgroundTaskManager({
-        tasksDir: resolveTasksDir(tempRoot),
+        tasksDir: resolveTasksDir({
+          dataDir: tempRoot,
+          projectIdentityRoot: tempRoot,
+        }),
         spawn: defaultBackgroundSpawn,
       });
       lastManager = manager;

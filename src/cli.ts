@@ -70,6 +70,7 @@ import { createTaskWorktreeProvisioner } from "./session-api/worktree-rebind.js"
 import type { WorktreeIsolationHostOpts } from "./harness/isolation/worktree-gate.js";
 import { createWorktreeIsolationHost } from "./cli/worktree-host.js";
 import { deriveProjectIdentityRoot } from "./harness/session-roots.js";
+import { resolveTasksDir } from "./harness/background/paths.js";
 // 共享装配 (cli / serve / tui 三入口共用, SSOT): settings.verify → VerifyConfig。
 import { resolveVerifyConfig } from "./config/verify-config.js";
 import { resolveTraceRoot } from "./cli/trace-root.js";
@@ -344,6 +345,14 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     resolveServeDataDir(),
     deriveProjectIdentityRoot({ cwd: workspaceRoot })
   );
+  // ADR-0088:后台任务登记跟**同一个** `(dataDir, projectIdentityRoot)` 的
+  // 项目树 —— 与会话文件夹同一 slug,与 workspaceRoot 解耦(throwaway
+  // `--workspace-root` 不再另开活账本)。rebuild 复用 chatEngineOpts,故
+  // rebind 后 tasksDir 不变(登记表不是 per-root 状态)。
+  const tasksDir = resolveTasksDir({
+    dataDir: resolveServeDataDir(),
+    projectIdentityRoot: deriveProjectIdentityRoot({ cwd: workspaceRoot }),
+  });
   // 初始装配与 rebind 重建共用的装配 opts（同一 askUser/holder/settings）。
   const chatEngineOpts = {
     askUser: createTtyAskUser(),
@@ -353,6 +362,8 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     graphMode,
     liveGraphLedger,
     todoDir: todoProjectDir,
+    // ADR-0088:登记根随会话池,不随 workspaceRoot。
+    tasksDir,
     // T5 (ADR-0071 / SC8 + L2): subagentsDir
     // 由 (projectDir, conversationId) 经 `resolveSubagentTraceDir` 派生 —— 与
     // 上面 SessionStore 同源(`todoProjectDir === store.projectDir`,见 #950 T2)。
