@@ -40,6 +40,7 @@ import {
 } from "../src/harness/model-adapter/anthropic-adapter.js";
 import { buildHarnessEngine } from "../src/harness/build-engine.js";
 import { createNoAskUser } from "../src/harness/permission/ask-user.js";
+import { deriveProjectIdentityRoot } from "../src/harness/session-roots.js";
 import { SessionHub } from "../src/session-api/hub.js";
 import { SessionStore } from "../src/session-api/store/index.js";
 import {
@@ -113,7 +114,13 @@ const adapter = createRealAnthropicAdapter({
 const askUser = createNoAskUser();
 const dataDir = join(tmpCwd, ".iknow", "sessions");
 await mkdir(dataDir, { recursive: true });
-const store = new SessionStore(dataDir);
+// T1 (session-folder-consolidation):store 命名空间按 projectIdentityRoot 分组,
+// 不是 cwd。身份根取本探针自己的 workspaceRoot(tmpCwd)——与下方
+// buildHarnessEngine 的 workspaceRoot 同源,避免 store 与引擎分到两个项目文件夹。
+const store = new SessionStore(
+  dataDir,
+  deriveProjectIdentityRoot({ cwd: tmpCwd })
+);
 
 const engine = await buildHarnessEngine({
   env,

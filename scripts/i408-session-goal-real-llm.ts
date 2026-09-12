@@ -62,6 +62,7 @@ import { createRegistry } from "../src/harness/tools/registry.js";
 import { createExecutor } from "../src/harness/tools/executor.js";
 import { SessionHub } from "../src/session-api/hub.js";
 import { SessionStore } from "../src/session-api/store/index.js";
+import { deriveProjectIdentityRoot } from "../src/harness/session-roots.js";
 import type { GoalState } from "../src/session-api/store/index.js";
 import type { VerifyConfig } from "../src/harness/verify/types.js";
 
@@ -226,7 +227,13 @@ async function buildHub(opts: {
     registry: registry as never,
     maxTurns: opts.maxTurns,
   };
-  const store = new SessionStore(opts.dataDir);
+  // T1 (session-folder-consolidation)：store 命名空间按 projectIdentityRoot 分组，
+  // 不是 cwd。本脚本无独立 workspace 根（dataDir 是会话池 scratch），会话文件里
+  // 记的 cwd 就是 process.cwd() → 身份根同源取它，保证 store 与 hub 同一个项目桶。
+  const store = new SessionStore(
+    opts.dataDir,
+    deriveProjectIdentityRoot({ cwd: process.cwd() })
+  );
   return new SessionHub({
     store,
     deps,
@@ -325,7 +332,10 @@ async function main(): Promise<void> {
     listening: SessionHub;
   }> => {
     // 用一个 stub hub 仅写空 session 文件 + 拿到 store,然后丢;真 hub 重读。
-    const preStore = new SessionStore(dataDir);
+    const preStore = new SessionStore(
+      dataDir,
+      deriveProjectIdentityRoot({ cwd: process.cwd() })
+    );
     const file = await preStore.save({
       id: conversationId,
       file: {
@@ -363,7 +373,10 @@ async function main(): Promise<void> {
     conversationId,
     text: goalText,
   });
-  const afterA1 = await new SessionStore(dataDir).load(conversationId);
+  const afterA1 = await new SessionStore(
+    dataDir,
+    deriveProjectIdentityRoot({ cwd: process.cwd() })
+  ).load(conversationId);
 
   // Turn 2: 故意发一个与 goalText 完全不同的 query → T4 bind userText = goalText
   // (注意 goalText 在末尾带 UUID 后缀,query 是固定短串 → 可严格区分)。
@@ -372,7 +385,10 @@ async function main(): Promise<void> {
     conversationId,
     text: decoyQuery,
   });
-  const afterA2 = await new SessionStore(dataDir).load(conversationId);
+  const afterA2 = await new SessionStore(
+    dataDir,
+    deriveProjectIdentityRoot({ cwd: process.cwd() })
+  ).load(conversationId);
 
   // 观测:读 trace JSONL 找 turn 2 的 llm_call messages。
   const traceFile = join(traceDir, `${conversationId}.jsonl`);
@@ -448,7 +464,10 @@ async function main(): Promise<void> {
     conversationId,
     text: `## GOAL: ${newGoalText}`,
   });
-  const afterB = await new SessionStore(dataDir).load(conversationId);
+  const afterB = await new SessionStore(
+    dataDir,
+    deriveProjectIdentityRoot({ cwd: process.cwd() })
+  ).load(conversationId);
 
   const priorGoalSnapshot: GoalState | undefined = afterB.goal?.history?.[0];
   const sectionBAssertions: AssertionCheck[] = [

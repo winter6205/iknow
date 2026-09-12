@@ -31,6 +31,7 @@ import { processChatLine } from "../src/cli/chat-session.js";
 import type { ChatLineContext } from "../src/cli/chat-session.js";
 import { buildHarnessEngine } from "../src/harness/build-engine.js";
 import { createNoAskUser } from "../src/harness/permission/ask-user.js";
+import { deriveProjectIdentityRoot } from "../src/harness/session-roots.js";
 import { createPermissionModeContext } from "../src/harness/permission/modes.js";
 import { createSubAgentManager } from "../src/harness/subagent/manager.js";
 import type { SubAgentDefinition } from "../src/harness/subagent/manager.js";
@@ -96,7 +97,14 @@ async function main(): Promise<void> {
     subagentManager: manager,
   });
 
-  const store = new SessionStore(dataDir);
+  // T1 (session-folder-consolidation)：store 命名空间按 projectIdentityRoot
+  // 分组，不是 cwd。身份根取本 smoke 的项目根 ws —— 与上面
+  // buildHarnessEngine({ workspaceRoot: ws, cwd: ws }) 同一根，也让
+  // `built.sessionRoots.projectIdentityRoot` 与 store 分组一致。
+  const store = new SessionStore(
+    dataDir,
+    deriveProjectIdentityRoot({ cwd: ws })
+  );
   const verifyConfig = resolveVerifyConfig(undefined);
   const deps = { ...built.deps, maxTurns: 4 };
 

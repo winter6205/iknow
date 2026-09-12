@@ -51,6 +51,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadIknowEnv } from "../src/config/env.js";
+import { deriveProjectIdentityRoot } from "../src/harness/session-roots.js";
 import { startSessionServe } from "../src/session-api/serve.js";
 import { SessionHub } from "../src/session-api/hub.js";
 import { SessionStore } from "../src/session-api/store/index.js";
@@ -299,7 +300,15 @@ async function runHubWithDeps(
 ): Promise<HubPostResult> {
   const dataDir = mkdtempSync(join(tmpdir(), "i11-smoke-hub-"));
   try {
-    const store = new SessionStore(dataDir);
+    // T1 (session-folder-consolidation)：store 命名空间按 projectIdentityRoot
+    // 分组，不是 cwd。本 helper 的会话池是 scratch temp dir（finally 即删），
+    // 注入 deps 的 hub 又没有自己的项目 cwd → 身份根走
+    // `deriveProjectIdentityRoot` 的 cwd fallback，与同脚本 serve 段
+    // `startSessionServe` 缺省 workspaceRoot 时的形态一致。
+    const store = new SessionStore(
+      dataDir,
+      deriveProjectIdentityRoot({ cwd: process.cwd() })
+    );
     const hub = new SessionHub({
       store,
       deps,

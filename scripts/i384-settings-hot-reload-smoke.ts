@@ -41,6 +41,7 @@ import { SessionHub } from "../src/session-api/hub.js";
 import { SessionStore } from "../src/session-api/store/index.js";
 import { startSessionServe } from "../src/session-api/serve.js";
 import { createNoAskUser } from "../src/harness/permission/ask-user.js";
+import { deriveProjectIdentityRoot } from "../src/harness/session-roots.js";
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -211,7 +212,13 @@ async function groupA(dirs: Dirs): Promise<void> {
   try {
     writeSettings(dirs, "model-a", "test-key");
     const loader = createEnvLoader({ cwd: dirs.cwd, home: dirs.home });
-    const store = new SessionStore(dirs.base);
+    // T1 (session-folder-consolidation):store 命名空间按 projectIdentityRoot
+    // 分组,不是 cwd。身份根取本组自己的项目根 dirs.cwd(makeDirs 造的「空项目
+    // 根」,与 createEnvLoader 的 cwd 同源),不用 process.cwd()。
+    const store = new SessionStore(
+      dirs.base,
+      deriveProjectIdentityRoot({ cwd: dirs.cwd })
+    );
     const hub = new SessionHub({
       store,
       askUser: createNoAskUser(),
@@ -362,7 +369,11 @@ async function groupC(dirs: Dirs): Promise<void> {
   try {
     writeSettings(dirs, "model-c1", "test-key");
     const loader = createEnvLoader({ cwd: dirs.cwd, home: dirs.home });
-    const store = new SessionStore(dirs.base);
+    // 同 A 组：身份根 = dirs.cwd（本组自己的空项目根）。
+    const store = new SessionStore(
+      dirs.base,
+      deriveProjectIdentityRoot({ cwd: dirs.cwd })
+    );
     const hub = new SessionHub({
       store,
       askUser: createNoAskUser(),
