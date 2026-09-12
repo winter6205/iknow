@@ -239,4 +239,59 @@ describe("matchesGlobSet — `!` 否定", () => {
   it("空集合 → 全收（无 glob 即无收窄）", () => {
     assert.equal(matchesGlobSet("anything.txt", []), true);
   });
+
+  it("裸 `!` → 一条都不收（不是「无正模式→全收」）", () => {
+    // 实测 rg 15.1.0：单条 `--glob '!'` rc=1（空模式不匹配任何真实路径），
+    // 同树 `--glob '!*'` 也是 rc=1。集合语义下若把它当「没有正模式」，就会
+    // 反转成列出全仓 —— 正是 Node 与 rg 分歧的那个方向。
+    for (const path of ["a.ts", "sub/c.ts", "anything.txt", "!"]) {
+      assert.equal(matchesGlobSet(path, ["!"]), false, path);
+    }
+  });
+
+  it("`\\!x` 是转义后的字面 `!`，仍是正模式（不是否定）", () => {
+    // 实测 rg 15.1.0：`--glob '!bang.ts'` 不剔 `!bang.ts`（回全仓）、
+    // `--glob '\!bang.ts'` 只回 `!bang.ts`。
+    assert.equal(matchesGlobSet("!bang.ts", ["\\!bang.ts"]), true);
+    assert.equal(matchesGlobSet("a.ts", ["\\!bang.ts"]), false);
+    assert.equal(matchesGlobSet("!bang.ts", ["!bang.ts"]), true);
+  });
+});
+
+/**
+ * 尾随 `/` 的模式（Finding 3）。
+ *
+ * rg 实测（15.1.0）：`sub/`、`a.ts/`、双星尾斜杠与 `//`、`sub//c.ts` 一样
+ * 一个文件都不选 —— 空段只能匹配空名字，目录本身不是候选文件。
+ * 旧实现把尾随空段 pop 掉，于是 `sub/` 退化成 `sub`、通配尾斜杠退化成通配，
+ * 在 Node 路径收下一整个仓库而 rg 路径回空。
+ */
+describe("matchOne — 尾随空段不剔除", () => {
+  it("尾随 `/` 的正模式不匹配任何文件", () => {
+    for (const glob of ["sub/", "*/", "**/", "a.ts/", "/", "//", "sub//c.ts"]) {
+      for (const path of ["a.ts", "sub/c.ts", "sub"]) {
+        assert.equal(matchOne(path, glob), false, `${glob} vs ${path}`);
+      }
+    }
+  });
+
+  it("否定形态的尾随 `/` 同样按子目录剔除（`!sub/` 剔掉 sub 全子树）", () => {
+    // rg 实测：`--glob '!sub/'` 剔掉 sub/ 下的一切（含深层），`!deep/` 同理。
+    assert.equal(matchesGlobSet("a.ts", ["!sub/"]), true);
+    assert.equal(matchesGlobSet("sub/c.ts", ["!sub/"]), false);
+    assert.equal(matchesGlobSet("sub/deep/d.ts", ["!sub/"]), false);
+  });
+
+  it("`!*/` / `!**/` 剔掉有一层以上目录的路径（rg 实测只留根级文件）", () => {
+    assert.equal(matchesGlobSet("a.ts", ["!*/"]), true);
+    assert.equal(matchesGlobSet("sub/c.ts", ["!*/"]), false);
+    assert.equal(matchesGlobSet("a.ts", ["!**/"]), true);
+    assert.equal(matchesGlobSet("sub/c.ts", ["!**/"]), false);
+  });
+
+  it("完整文件名 + 尾随 `/` 不是「匹配该名字」（`!a.ts/` 不剔 a.ts）", () => {
+    // rg 实测：`--glob '!a.ts/'` 回全仓（含 a.ts）—— 它不匹配任何路径。
+    assert.equal(matchesGlobSet("a.ts", ["!a.ts/"]), true);
+    assert.equal(matchesGlobSet("sub/c.ts", ["!a.ts/"]), true);
+  });
 });

@@ -32,19 +32,67 @@ export function assertValidGlob(glob: string): void {
   expandGlob(glob);
 }
 
-/** 判定一条相对路径是否被 glob 集合收下。 */
+/**
+ * 判定一条相对路径是否被 glob 集合收下。
+ *
+ * 裸 `!`（剥掉否定记号后什么都不剩）是**不选中任何文件**，不是「全收」：
+ * 实测 rg 15.1.0 单条 `--glob '!'` rc=1，与 `--glob '!*'`（否定一切）同结果。
+ * 空模式只能匹配空路径，而候选路径都非空 —— 所以它作为否定不剔任何文件、
+ * 作为肯定不选任何文件。旧实现把 `!` 剥成空串当肯定模式，`matchOne` 拿空
+ * 段的模式去比真实路径恰好全不中，却在**集合语义**上退化成「没有肯定模式
+ * → 全收」，于是 `glob: "!"` 在 Node 路径列出全仓、rg 路径回空（Finding 3）。
+ */
 export function matchesGlobSet(
   relPath: string,
   globs: ReadonlyArray<string>
 ): boolean {
-  const positives = globs.filter((g) => !g.startsWith("!"));
-  const negatives = globs
-    .filter((g) => g.startsWith("!"))
-    .map((g) => g.slice(1));
+  // 裸 `!` 让整组不再收下任何路径：它是**空模式**，rg 实测单条 `--glob '!'`
+  // rc=1（同树的 `--glob '!*'` 也是 rc=1）。不能靠「空模式匹配空串」在
+  // `matchOne` 里自然落到 false —— 集合语义下没有肯定模式会默认全收，裸 `!`
+  // 因此反转成「列全仓」（Finding 3）。
+  if (globs.some((g) => g === "!")) return false;
+  const positives = globs.filter((g) => !isNegation(g));
+  const negatives = globs.filter((g) => isNegation(g)).map((g) => g.slice(1));
   if (positives.length > 0 && !positives.some((g) => matchOne(relPath, g))) {
     return false;
   }
-  return !negatives.some((g) => matchOne(relPath, g));
+  return !negatives.some((g) => matchesNegation(relPath, g));
+}
+
+/**
+ * 否定模式的匹配（**与正模式不同**，别复用 `matchOne`）。
+ *
+ * 差别只在尾随 `/`：正模式 `sub/` 一个文件都不选（空段只能匹配空名字），
+ * 而否定模式 `!sub/` 会把 `sub` 这个**目录整棵子树**剔掉（实测 15.1.0：
+ * `--glob '!sub/'` 剔掉 `sub/c.ts` 与 `sub/deep/d.ts`）。这与 gitignore 的
+ * 「目录限定」同源 —— rg 对否定 glob 走的是目录剪枝，不是逐文件匹配。
+ *
+ * 祖先前缀（不含最后一段 = 文件本身）逐个过匹配器，因此
+ *   - 单星尾斜杠只剔「有一层以上目录」的路径（根级文件留下），
+ *   - 双星尾斜杠剔掉所有非根级路径，
+ *   - `!a.ts/` 不剔任何东西（没有叫 `a.ts/` 的祖先目录）。
+ * 三条都与 rg 实测一致。
+ */
+function matchesNegation(relPath: string, glob: string): boolean {
+  if (!glob.endsWith("/")) return matchOne(relPath, glob);
+  const dirGlob = glob.slice(0, -1);
+  // `!/` → 目录模式为空，剔不掉任何东西（rg 实测：结果与无 glob 相同）。
+  if (dirGlob.length === 0) return false;
+  const segments = relPath.split("/").filter((s) => s.length > 0);
+  for (let depth = 1; depth < segments.length; depth += 1) {
+    if (matchOne(segments.slice(0, depth).join("/"), dirGlob)) return true;
+  }
+  return false;
+}
+
+/**
+ * `!` 开头的否定形态；`\!` 是转义后的字面 `!`，仍是肯定模式。
+ *
+ * 实测 rg 15.1.0：`--glob '!bang.ts'` 不剔 `!bang.ts`（回全仓），
+ * `--glob '\!bang.ts'` 只回 `!bang.ts` —— 转义的 `!` 是字面字符。
+ */
+function isNegation(glob: string): boolean {
+  return glob.startsWith("!") && !glob.startsWith("\\!");
 }
 
 /** 单条 glob 匹配（`!` 由 `matchesGlobSet` 剥掉，这里只收正模式）。 */
@@ -64,9 +112,12 @@ export function matchOne(relPath: string, glob: string): boolean {
   // `/z.ts` 那条备选要求路径里真的有个空段 —— 实测 rc=1。
   const normalized = glob.startsWith("/") ? glob.slice(1) : glob;
   for (const expanded of expandGlob(normalized)) {
+    // 空段一律保留为「不可匹配」：尾随 `/`（`sub/`、`*/`、`a.ts/`）在 rg 里
+    // **一个文件都不选**（实测 15.1.0，单条 glob 与否定形态都一样），与中间
+    // 空段（`a//b`）同因 —— 空段只能匹配空名字。旧实现把尾随空段 pop 掉，
+    // 于是 `sub/` 退化成 `sub`、`*/` 退化成 `*`，在 Node 路径收下一整个仓库，
+    // 而 rg 路径回空（Finding 3）。
     const pattern = expanded.split("/");
-    // 尾随空段（`src/`）容忍；中间空段（`a//b`）保留为「不可匹配」。
-    if (pattern[pattern.length - 1] === "") pattern.pop();
     const matched = anchored
       ? matchSegments(pattern, 0)(segments, 0)
       : matchSegments(pattern, 0)([base], 0);
