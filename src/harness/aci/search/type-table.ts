@@ -9,6 +9,8 @@
  * `tests/harness/aci/search/argv.test.ts` 锁表形状（非空 / 已知名在场）。
  */
 
+import { ToolExecutionError } from "../../errors.js";
+
 export const TYPE_GLOBS: Readonly<Record<string, readonly string[]>> =
   Object.freeze({
     ada: ["*.adb", "*.ads"],
@@ -458,3 +460,24 @@ export const TYPE_GLOBS: Readonly<Record<string, readonly string[]>> =
 export const KNOWN_TYPES: ReadonlySet<string> = new Set(
   Object.keys(TYPE_GLOBS)
 );
+
+/**
+ * 校验 `type` 是否在 rg 词表内；返回原值便于链式使用。
+ *
+ * 未知类型是**输入**类 typed 错误（与坏正则同属 ToolExecutionError，但文案
+ * 点名 `type` 与类型名、不含 `pattern` —— SC10 要求两类不可混为「illegal
+ * regex」一种）。rg 自己也会以 rc=2 报同类错误，这道前置校验让两条引擎路径
+ * （rg / Node）给出同一文案，也避免「先花一次进程启动才发现名字错」。
+ *
+ * **调用点在 `options.ts` 的 `parseQuerySpec`，不在 argv 构造里**：argv 只在
+ * 自带引擎在场时才会被走到，校验挂在那里会让 `type: "nosuchtype"` 在 Node
+ * 全会话上静默回空 —— SC10 的「两种 typed 错误」就只在一条引擎上成立。
+ */
+export function resolveTypeName(type: string): string {
+  if (!KNOWN_TYPES.has(type)) {
+    throw new ToolExecutionError(
+      `grep: unknown type: ${type} (the type filter takes a ripgrep language name such as ts / py / rust; check the spelling)`
+    );
+  }
+  return type;
+}

@@ -8,6 +8,7 @@
 
 import { ToolExecutionError } from "../../errors.js";
 import { assertValidGlob } from "./glob-match.js";
+import { resolveTypeName } from "./type-table.js";
 import type { GrepOutput, QuerySpec } from "./types.js";
 
 /** D3：默认 50、硬顶 2000（ADR-0006 Amendment）。 */
@@ -39,33 +40,42 @@ export function parseQuerySpec(input: unknown): QuerySpec {
   // 坏 glob 必须在入口就挡下（不是只在 Node 引擎里当字面量）：rg 对它是
   // rc=2 整次失败，两条引擎的成败不能取决于谁在跑（SC9）。
   if (glob !== undefined) assertValidGlob(glob);
+  // 未知 `type` 同样必须在入口挡下 —— 但理由与坏 glob 不同：rg 自己的
+  // `--type` 校验只在 argv 构造里跑，而 argv 只在**自带引擎在场**时才被走到。
+  // 若把校验留在那一层，`{pattern,type:"nosuchtype"}` 在安装根缺二进制
+  // （D6 降级）或该平台无资产时会静默回空串，而不是 SC10 要求的 typed 错误
+  // —— 同一个输入的错误与否取决于哪条引擎在跑。校验提到解析层后，两条引擎
+  // 共用同一个失败域（`resolveTypeName` 是唯一文案源）。
   const type = readOptionalNonEmptyString(raw.type, "type");
+  if (type !== undefined) resolveTypeName(type);
   const output = readOutput(raw.output);
-  const context = readBoundedInteger(raw.context, "context", 0, MAX_CONTEXT, 0);
-  const offset = readBoundedInteger(
-    raw.offset,
-    "offset",
-    0,
-    Number.MAX_SAFE_INTEGER,
-    0
-  );
-  const rawHeadLimit = readBoundedInteger(
-    raw.head_limit,
-    "head_limit",
-    1,
-    Number.MAX_SAFE_INTEGER,
-    DEFAULT_HEAD_LIMIT
-  );
+  const context = readBoundedInteger(raw.context, {
+    name: "context",
+    min: 0,
+    max: MAX_CONTEXT,
+    fallback: 0,
+  });
+  const offset = readBoundedInteger(raw.offset, {
+    name: "offset",
+    min: 0,
+    max: Number.MAX_SAFE_INTEGER,
+    fallback: 0,
+  });
+  const rawHeadLimit = readBoundedInteger(raw.head_limit, {
+    name: "head_limit",
+    min: 1,
+    max: Number.MAX_SAFE_INTEGER,
+    fallback: DEFAULT_HEAD_LIMIT,
+  });
   const withinLines =
     also === undefined
       ? DEFAULT_WITHIN_LINES
-      : readBoundedInteger(
-          raw.within_lines,
-          "within_lines",
-          0,
-          Number.MAX_SAFE_INTEGER,
-          DEFAULT_WITHIN_LINES
-        );
+      : readBoundedInteger(raw.within_lines, {
+          name: "within_lines",
+          min: 0,
+          max: Number.MAX_SAFE_INTEGER,
+          fallback: DEFAULT_WITHIN_LINES,
+        });
   return {
     pattern,
     ...(also !== undefined ? { also } : {}),
@@ -115,18 +125,25 @@ function readOutput(value: unknown): GrepOutput {
   return value as GrepOutput;
 }
 
-function readBoundedInteger(
-  value: unknown,
-  name: string,
-  min: number,
-  max: number,
-  fallback: number
-): number {
-  if (value === undefined) return fallback;
-  if (typeof value !== "number" || !Number.isInteger(value) || value < min) {
+/** 整数 flag 的界（一个 flag 一份；比 5 个位置参数更难写反）。 */
+interface BoundedIntegerSpec {
+  readonly name: string;
+  readonly min: number;
+  readonly max: number;
+  readonly fallback: number;
+}
+
+/** 读一个非负整数 flag：缺席取 fallback，非整数 / 越下界 typed 拒绝，上界夹住。 */
+function readBoundedInteger(value: unknown, spec: BoundedIntegerSpec): number {
+  if (value === undefined) return spec.fallback;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < spec.min
+  ) {
     throw new ToolExecutionError(
-      `grep: ${name} must be an integer >= ${String(min)}`
+      `grep: ${spec.name} must be an integer >= ${String(spec.min)}`
     );
   }
-  return Math.min(value, max);
+  return Math.min(value, spec.max);
 }

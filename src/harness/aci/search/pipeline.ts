@@ -15,6 +15,7 @@
  * 走这条快路，`total:` 仍按「切片前」算，与慢路一致。
  */
 
+import { ToolExecutionError } from "../../errors.js";
 import type { LineHit, QuerySpec } from "./types.js";
 import type { EngineResult } from "./rg-engine.js";
 import { expandAlsoNeedle, filterHitsByAlsoWindow } from "./also-window.js";
@@ -46,7 +47,13 @@ export interface PipelineInput {
 export async function renderResult(input: PipelineInput): Promise<string> {
   const { spec, result } = input;
   if (result.kind === "unavailable") {
-    throw new Error("renderResult must not receive an unavailable result");
+    // 本层不该见到 unavailable：分派逻辑（`grep.ts` resolveEngineResult）
+    // 已经在降级时改走 Node 扫。走到这里说明装配出了 bug，用本层统一的
+    // typed 错误抛出（`ToolExecutionError`，与工具层其余失败同形），别让
+    // 裸 Error 混进 ACI 的失败域。
+    throw new ToolExecutionError(
+      "grep: internal error: result projection received an unavailable engine result"
+    );
   }
 
   const lines = await applyAlsoFilter(input);
