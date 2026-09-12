@@ -191,29 +191,35 @@ describe("projectContext — content + context（SC6）", () => {
     ]);
 
     assert.deepEqual(out.split("\n"), [
-      "m.txt-4-line4",
+      "m.txt:4-line4",
       "m.txt:5:hit A",
-      "m.txt-6-line6",
+      "m.txt:6-line6",
       "--",
       "m.txt:15:hit B",
     ]);
   });
 
-  it("上下文行的内容含冒号时仍不被切成假 path:line:text（SC6）", () => {
+  it("上下文行内容自带 `:N:` 时也不被读成假命中（SC6 判别位置唯一）", () => {
+    // 最刁的形状：内容本身就是 `x:9:fake`。若上下文行渲染成
+    // `a.ts-3-see x:9:fake`，`^[^:]+:\d+:` 会把它读成一条真命中
+    // （路径段吃掉 `a.ts-3-see x`）—— 上下文行必须与匹配行共用
+    // `path:line` 前缀，真假只由行号后那一个字符承担。
     const out = projectContext([
       {
         entries: [
-          { path: "a.ts", line: 3, text: "key: value", isMatch: false },
+          { path: "a.ts", line: 3, text: "see x:9:fake", isMatch: false },
           { path: "a.ts", line: 4, text: "hit", isMatch: true },
         ],
       },
     ]);
 
     const lines = out.split("\n");
-    assert.equal(lines[0], "a.ts-3-key: value");
-    // 关键：第一行不得被读成 `path:line:text`。
+    assert.equal(lines[0], "a.ts:3-see x:9:fake");
     assert.equal(/^[^:]+:\d+:/.test(lines[0]!), false);
-    assert.equal(lines[1], "a.ts:4:hit");
+    assert.deepEqual(
+      lines.filter((line) => /^[^:]+:\d+:/.test(line)),
+      ["a.ts:4:hit"]
+    );
   });
 
   it("单组不产出 `--` 前后缀", () => {

@@ -12,7 +12,13 @@
  * 构造同样的组 —— 两种引擎产出的形状完全一致，投影层不需要知道谁算的。
  */
 
-import type { ContextEntry, ContextGroup, LineHit } from "./types.js";
+import { stripCr, truncateMatchContent } from "./rg-output.js";
+import {
+  CONTEXT_GROUP_SEPARATOR,
+  type ContextEntry,
+  type ContextGroup,
+  type LineHit,
+} from "./types.js";
 
 export interface ContextBuildInput {
   /** 命中行（已按 (path, line) 排序）。 */
@@ -92,21 +98,28 @@ function groupsForFile(
   return groups;
 }
 
+/**
+ * 组内每条都过同一道行宽闸（匹配行与上下文行**一视同仁**）。
+ *
+ * rg 的 `--max-columns-preview` 对两类行都生效（实测：5000 字符的上下文行
+ * 同样被收到 2000 + 它自己的省略标记），Node 侧若只收匹配行，同一查询在
+ * 两条引擎下的字节数就不同 —— SC9。
+ */
 function entryFor(
   path: string,
   line: number,
   text: string,
   isMatch: boolean
 ): ContextEntry {
-  return { path, line, text, isMatch };
+  return { path, line, text: truncateMatchContent(text), isMatch };
 }
 
 /**
  * 把 rg `--null -C N` 的 stdout 解析成组（rg 引擎路径）。
  *
- * rg 自己插的 `--` 是组边界；这里信任它，不重新按行号推导 —— rg 的合并
- * 阈值可能与上面 Node 路径的实现有细微出入，直接采用 rg 的边界比「猜它
- * 怎么分的」更稳。损坏记录整条跳过（不猜、不产生假命中）。
+ * rg 自己插的分组行是组边界；这里信任它，不重新按行号推导 —— rg 的合并
+ * 阈值与上面 Node 路径的实现若有细微出入，直接采用 rg 的边界比「猜它怎么
+ * 分的」更稳。损坏记录整条跳过（不猜、不产生假命中）。
  */
 export function parseRgContextStdout(stdout: string): ContextGroup[] {
   const groups: ContextGroup[] = [];
@@ -119,7 +132,7 @@ export function parseRgContextStdout(stdout: string): ContextGroup[] {
   };
   for (const record of stdout.split("\n")) {
     if (record.length === 0) continue;
-    if (record === "--") {
+    if (isGroupSeparator(record)) {
       flush();
       continue;
     }
@@ -129,6 +142,16 @@ export function parseRgContextStdout(stdout: string): ContextGroup[] {
   }
   flush();
   return groups;
+}
+
+/**
+ * 分组行判定。
+ *
+ * `--null` 下 rg 用 NUL 包夹分隔符（路径段为空），不带 `--null` 时是裸
+ * `--` —— 两种形态都收，判定只此一处。
+ */
+function isGroupSeparator(record: string): boolean {
+  return record.split("\0").join("").trim() === CONTEXT_GROUP_SEPARATOR;
 }
 
 function parseContextRecord(record: string): ContextEntry | undefined {
@@ -145,7 +168,16 @@ function parseContextRecord(record: string): ContextEntry | undefined {
   if (sep !== ":" && sep !== "-") return undefined;
   const line = Number(rest.slice(0, i));
   if (!Number.isInteger(line) || line < 1) return undefined;
-  return { path, line, text: rest.slice(i + 1), isMatch: sep === ":" };
+  // 与 Node 路径同闸：rg 的 `--max-columns` 已先收过一遍（带自己的标记），
+  // 这里再按 code point 收口，且**两类行都剥尾随 `\r`**（`--crlf` 下 rg
+  // 仍回显它，而 Node 侧按 `\n` 切行时已剥）—— 少一道就是两条引擎对同一
+  // CRLF 文件输出差一个不可见字符。
+  return {
+    path,
+    line,
+    text: truncateMatchContent(stripCr(rest.slice(i + 1))),
+    isMatch: sep === ":",
+  };
 }
 
 function stripDotSlash(path: string): string {

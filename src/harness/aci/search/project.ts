@@ -7,7 +7,12 @@
  * 投影层不碰 fs / 进程：输入是两条引擎归一后的原始产物。
  */
 
-import type { ContextGroup, FileCount, LineHit, QuerySpec } from "./types.js";
+import {
+  CONTEXT_GROUP_SEPARATOR,
+  type ContextGroup,
+  type FileCount,
+  type LineHit,
+} from "./types.js";
 import { NO_ENTRIES_AT_OFFSET, paginate } from "./paginate.js";
 import { sortCounts, sortLineHits, sortPaths } from "./sort.js";
 
@@ -91,26 +96,27 @@ export function projectPathList(
 /**
  * 渲染 `content + context` 的组序列（SC6）。
  *
- * 匹配行 `path:line:text`；上下文行 `path-line-text`；组间插 `--`。
- * 上下文行**绝不**长成 `path:line:text` 形 —— 这是 SC6 的字面要求。
+ * 匹配行 `path:line:text`；上下文行 `path:line-text`；组间插 `--`。
+ *
+ * 为什么上下文行是 `path:line-text` 而**不是** `path-line-text`：后者的
+ * 行号前那一段里允许出现任意字符，于是「内容里带冒号」的上下文行会长成
+ * `a.ts-1-see x:9:fake` —— 任何按 `^[^:]*:\d+:` 判匹配行的消费者（人也
+ * 好、下游 parser 也好）都会把它读成一条真命中，SC6 的「不脏行」就破了。
+ * 把路径与行号用同一种分隔符框住（`path:line` 前缀），真假只由行号之后
+ * 那**一个字符**承担（`:` = 匹配、`-` = 上下文），与 rg 原生 `--null
+ * -C N` 输出的判别位置完全一致（那里是 `\0` 之后的 `path\0line:text` /
+ * `path\0line-text`）。这样无论内容含什么，上下文行都无法被拆成
+ * `path:整数:text` 三元组。
  */
 export function projectContext(groups: ReadonlyArray<ContextGroup>): string {
   if (groups.length === 0) return "";
   const blocks = groups.map((group) =>
     group.entries
-      .map((entry) =>
-        entry.isMatch
-          ? `${entry.path}:${String(entry.line)}:${entry.text}`
-          : `${entry.path}-${String(entry.line)}-${entry.text}`
+      .map(
+        (entry) =>
+          `${entry.path}:${String(entry.line)}${entry.isMatch ? ":" : "-"}${entry.text}`
       )
       .join("\n")
   );
-  return blocks.join("\n--\n");
-}
-
-/** 出法 → 投影入口（handler 的单点分派；避免 handler 里再长 switch）。 */
-export function projectBySpec(spec: QuerySpec, input: ProjectionInput): string {
-  if (spec.output === "content") return projectContent(input);
-  if (spec.output === "count") return projectCount(input);
-  return projectPaths(input);
+  return blocks.join(`\n${CONTEXT_GROUP_SEPARATOR}\n`);
 }

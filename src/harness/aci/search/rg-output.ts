@@ -10,6 +10,7 @@
  * 按 **code point** 切（不拆 surrogate pair，ADR-0004 修订）。
  */
 
+import { truncateByCodePoint } from "../../sandbox/runner.js";
 import type { LineHit } from "./types.js";
 
 export const MAX_MATCH_LINE_COLUMNS = 2_000;
@@ -35,10 +36,23 @@ export function parseRgNullLines(stdout: string): LineHit[] {
     hits.push({
       path,
       line,
-      text: truncateMatchContent(rest.slice(colonIdx + 1)),
+      text: truncateMatchContent(stripCr(rest.slice(colonIdx + 1))),
     });
   }
   return hits;
+}
+
+/**
+ * 剥尾随 `\r`（rg stdout 的每一条内容记录都要过这道）。
+ *
+ * `argv.ts` 带了 `--crlf`：rg 按 CRLF 判行边界（`foo$` 因此能命中 CRLF 行），
+ * 但**回显的行内容仍带 `\r`**（实测 15.1.0，`--null` 与否都一样）。Node 侧按
+ * `\n` 切行后已剥 `\r`（见 `file-lines.splitLines`），这里不剥就是同一查询两条
+ * 引擎输出差一个不可见字符 —— 模型看不到它，但字节比较与后续 `edit_file` 的
+ * `old_str` 都会撞上。命中行与上下文行共用本函数（`context-groups.ts` 也引）。
+ */
+export function stripCr(text: string): string {
+  return text.endsWith("\r") ? text.slice(0, -1) : text;
 }
 
 /**
@@ -75,10 +89,16 @@ export function parseRgNullPaths(stdout: string): string[] {
   return paths;
 }
 
+/**
+ * 单行内容收口：按 **code point** 收到 MAX_MATCH_LINE_COLUMNS，超出加标记。
+ *
+ * 与 `sandbox/runner.ts` 的 `truncateByCodePoint` 是同一件事 —— 这里只是
+ * 套上本层的省略标记与上限常量，切法不另写一份（旧实现的 `Array.from` +
+ * `slice` 是第二份实现，漂移风险白担）。
+ */
 export function truncateMatchContent(content: string): string {
-  const chars = Array.from(content);
-  if (chars.length <= MAX_MATCH_LINE_COLUMNS) return content;
-  return `${chars.slice(0, MAX_MATCH_LINE_COLUMNS).join("")}${RG_TRUNCATION_MARKER}`;
+  if (Array.from(content).length <= MAX_MATCH_LINE_COLUMNS) return content;
+  return `${truncateByCodePoint(content, MAX_MATCH_LINE_COLUMNS)}${RG_TRUNCATION_MARKER}`;
 }
 
 function stripDotSlash(path: string): string {

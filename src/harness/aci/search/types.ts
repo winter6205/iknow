@@ -65,7 +65,13 @@ export interface ContextEntry {
   readonly isMatch: boolean;
 }
 
-/** 两种引擎的统一产物：已按 (path, line) 稳定排序前的原始命中集合。 */
-export interface SearchHits {
-  readonly lines: ReadonlyArray<LineHit>;
-}
+/**
+ * 组间分隔行（渲染与解析的唯一权威）。
+ *
+ * rg 在 `--null -C N` 下把分组行印成**两个空格加 `--`**
+ * （`\0--\0\n`，实测 15.1.0，与不带 `--null` 时的裸 `--` 不同）。解析侧
+ * 若只认裸 `--`，分组行会被当成损坏记录丢掉 —— 相邻两组于是被拼成一组
+ * （`--` 没了，`head_limit` 的组数、`offset` 的落点全跟着变），而 Node 侧
+ * 是自己造组的、不受影响：同一个 `-C N` 查询在两条引擎下的分页结果分叉。
+ */
+export const CONTEXT_GROUP_SEPARATOR = "--";
