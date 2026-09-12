@@ -110,6 +110,115 @@ describe("matchOne — 段内元字符", () => {
   });
 });
 
+describe("matchOne — brace 交替（rg 实测口径）", () => {
+  it("`{a,b}` 交替展开", () => {
+    assert.equal(matchOne("a.ts", "{a,b}.ts"), true);
+    assert.equal(matchOne("b.ts", "{a,b}.ts"), true);
+    assert.equal(matchOne("c.ts", "{a,b}.ts"), false);
+  });
+
+  it("单元素 `{ts}` 等价于 `ts`；`{}` 匹配空模式（不命中真实文件）", () => {
+    assert.equal(matchOne("a.ts", "*.{ts}"), true);
+    assert.equal(matchOne("ab", "a{}b"), true);
+    assert.equal(matchOne("a", "a{}"), true);
+    assert.equal(matchOne("a.ts", "{}"), false);
+  });
+
+  it("空备选 = 空串（`{a,}` ≡ a 或空，`{,}` ≡ 空模式）", () => {
+    assert.equal(matchOne("a.ts", "{a,}.ts"), true);
+    assert.equal(matchOne("b.ts", "{a,}.ts"), false);
+    assert.equal(matchOne(".ts", "{a,}.ts"), true);
+    // `{,}` 展开为空模式：空路径才可能命中，真实文件名不命中。
+    assert.equal(matchOne("a.ts", "{,}.ts"), false);
+    assert.equal(matchOne(".ts", "{,}.ts"), true);
+    // 备选里的 `/` 让整条锚定（见下），空备选仍不产生可命中的候选。
+    assert.equal(matchOne("z.ts", "{sub,/}z.ts"), false);
+  });
+
+  it("嵌套与多组笛卡尔积", () => {
+    assert.equal(matchOne("b", "{a,{b,c}}"), true);
+    assert.equal(matchOne("c", "{a,{b,c}}"), true);
+    assert.equal(matchOne("d", "{a,{b,c}}"), false);
+    assert.equal(matchOne("a1", "{a,b}{1,2}"), true);
+    assert.equal(matchOne("b2", "{a,b}{1,2}"), true);
+    assert.equal(matchOne("c1", "{a,b}{1,2}"), false);
+  });
+
+  it("不做 shell 区间展开：`{1..3}` 是**字面 `1..3`**（花括号只被剥掉）", () => {
+    // rg 实测：`{1..3}` 不展开成 1/2/3，而是等价于 `1..3` —— 命中名为
+    // `1..3` 的文件，不命中 `1` / `2` / `3`，也不命中字面 `{1..3}`。
+    assert.equal(matchOne("1", "{1..3}"), false);
+    assert.equal(matchOne("2", "{1..3}"), false);
+    assert.equal(matchOne("1..3", "{1..3}"), true);
+    assert.equal(matchOne("{1..3}", "{1..3}"), false);
+    assert.equal(matchOne("a..c", "{a..c}"), true);
+    assert.equal(matchOne("b", "{a..c}"), false);
+  });
+
+  it("`\\{` / `\\}` / `\\*` 转义为字面字符", () => {
+    assert.equal(matchOne("a{b", "a\\{b"), true);
+    assert.equal(matchOne("a}b", "a\\}b"), true);
+    assert.equal(matchOne("star*", "star\\*"), true);
+    assert.equal(matchOne("starX", "star\\*"), false);
+  });
+
+  it("字符类里的花括号是字面成员，不参与分组", () => {
+    assert.equal(matchOne("{.ts", "[{].ts"), true);
+    assert.equal(matchOne("}.ts", "[{}].ts"), true);
+    assert.equal(matchOne("a.ts", "[{].ts"), false);
+    assert.doesNotThrow(() => assertValidGlob("[{}].ts"));
+  });
+});
+
+describe("matchOne — 锚定是整条模式的性质（brace 不改判）", () => {
+  it("只要原文含 `/` 就锚定，哪怕它在 brace 备选里", () => {
+    // rg 实测：`{a,sub/only}.ts` 同时命中根下 a.ts 与 sub/only.ts；
+    // 而 `{sub/nope,zz}.ts` 不命中 sub/zz.ts（整体锚定，基名收缩失效）。
+    assert.equal(matchOne("a.ts", "{a,sub/only}.ts"), true);
+    assert.equal(matchOne("sub/only.ts", "{a,sub/only}.ts"), true);
+    assert.equal(matchOne("sub/zz.ts", "{sub/nope,zz}.ts"), false);
+    assert.equal(matchOne("zz.ts", "zz.ts"), true);
+    assert.equal(matchOne("sub/zz.ts", "zz.ts"), true);
+  });
+
+  it("单个前导 `/` 是「从搜索根起」，不是空段", () => {
+    assert.equal(matchOne("a.ts", "/a.ts"), true);
+    assert.equal(matchOne("sub/a.ts", "/a.ts"), false);
+    assert.equal(matchOne("a.ts", "/*.ts"), true);
+    assert.equal(matchOne("a.ts", "//a.ts"), false);
+  });
+});
+
+describe("assertValidGlob — brace 语法错误（rg rc=2 口径）", () => {
+  it("`{` 缺 `}` → unclosed alternate group", () => {
+    assert.throws(
+      () => assertValidGlob("{a,b"),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        /glob/.test(error.message) &&
+        /unclosed/.test(error.message)
+    );
+    assert.throws(() => assertValidGlob("x{y"), /unclosed/);
+  });
+
+  it("`}` 无 `{` → unopened alternate group", () => {
+    assert.throws(
+      () => assertValidGlob("a,b}"),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        /glob/.test(error.message) &&
+        /unopened/.test(error.message)
+    );
+    assert.throws(() => assertValidGlob("{a,b}}"), /unopened/);
+  });
+
+  it("合法形态不抛（含转义与字符类里的花括号）", () => {
+    for (const glob of ["{a,b}", "{a,{b,c}}", "a\\{b", "[{]x", "{a,}b"]) {
+      assert.doesNotThrow(() => assertValidGlob(glob), glob);
+    }
+  });
+});
+
 describe("matchesGlobSet — `!` 否定", () => {
   it("只有正模式时按正模式收", () => {
     assert.equal(matchesGlobSet("a.ts", ["*.ts"]), true);
