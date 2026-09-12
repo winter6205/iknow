@@ -209,6 +209,32 @@ describe("buildRgArgs — 遍历语义与 Node 扫对齐（D6）", () => {
   });
 });
 
+describe("buildRgArgs — `--no-unicode` 模式选择（D6/SC9）", () => {
+  it("`\\d` / `\\w` / `\\b` 一类 pattern → 带上 `--no-unicode`", () => {
+    // JS RegExp（无 `u`）的 `\d` / `\w` / `\b` 只认 ASCII，Rust regex 默认
+    // Unicode 类 —— 这两个构造实测就分歧（rg 的 `\d` 吃 ٣٤、`\b` 把 `é` 当
+    // 词字符）。切了才对齐。
+    for (const pattern of ["\\d", "\\w+", "\\bfoo\\b", "[\\d]+"]) {
+      assert.ok(
+        argv({ pattern }).includes("--no-unicode"),
+        `${pattern} 应切 --no-unicode`
+      );
+    }
+  });
+
+  it("`.` / `\\s` / 非 ASCII 字面量 → **不**带 `--no-unicode`（切了会打坏）", () => {
+    // 字节语义下 `.` 只吃一个字节（`a.c` 不匹配 `aéc`）、`\s` 不认 NBSP；
+    // 非 ASCII 字面量同理。这些构造必须留在 Unicode 模式。
+    for (const pattern of ["a.c", "\\s", "\\S", "café", "漢字", "[^x]{2}"]) {
+      assert.equal(
+        argv({ pattern }).includes("--no-unicode"),
+        false,
+        `${pattern} 不应切 --no-unicode`
+      );
+    }
+  });
+});
+
 describe("resolveTypeName — 未知 type（SC10）", () => {
   it("已知类型原样返回", () => {
     assert.equal(resolveTypeName("ts"), "ts");

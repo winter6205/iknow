@@ -669,6 +669,112 @@ describe("grep — D4 glob / type 收窄", () => {
   });
 });
 
+// ───────────── 引擎语义对齐（F1：无法对齐的构造在共享入口拒绝） ─────────────
+
+describe("grep — 两引擎正则语义对齐（D6/SC9/SC10）", () => {
+  /**
+   * 无法让 rg 与 JS `RegExp` 给出同一答案的构造，必须在**两条引擎上给出
+   * 同一条 typed 拒绝** —— 而不是「rg 能搜、Node 静默回空」。文案还要点名
+   * 构造与理由，并与坏正则 / 未知 type 互不混同（SC10）。
+   */
+  it("`\\p{...}` / `\\P{...}` / `\\u{...}` / `[[:name:]]` → 两条引擎同一条拒绝", async () => {
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-alignable-");
+      await writeFile(join(root, "a.ts"), "alpha 123\n", "utf8");
+      const cases: ReadonlyArray<readonly [string, RegExp]> = [
+        ["\\p{L}+", /property escape/],
+        ["\\P{L}", /property escape/],
+        ["\\u{6f22}", /code point escape/],
+        ["[[:alpha:]]", /POSIX bracket class/],
+      ];
+      for (const [pattern, expected] of cases) {
+        await assert.rejects(
+          () => makeTool(root).handler({ pattern }),
+          (error: unknown) =>
+            error instanceof ToolExecutionError &&
+            expected.test(error.message) &&
+            /pattern/.test(error.message) &&
+            !/unknown type/.test(error.message)
+        );
+      }
+    });
+  });
+
+  it("`ignoreCase` + 有大小写的非 ASCII → 拒绝；CJK 不受影响", async () => {
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-ignore-case-");
+      await writeFile(join(root, "a.txt"), "café\n漢字\n", "utf8");
+
+      await assert.rejects(
+        () => makeTool(root).handler({ pattern: "CAFÉ", ignoreCase: true }),
+        (error: unknown) =>
+          error instanceof ToolExecutionError &&
+          /ignoreCase/.test(error.message) &&
+          /É/.test(error.message)
+      );
+      // CJK 没有大小写：拒绝它会砍掉一条两条引擎本来就一致的查询。
+      assert.equal(
+        await makeTool(root).handler({ pattern: "漢", ignoreCase: true }),
+        "a.txt"
+      );
+    });
+  });
+
+  it("被拒绝的构造在两条引擎上都不产生「半边能搜」的结果", async () => {
+    // 反证：Node 路径（JS RegExp 把 `\p{L}` 读成字面 `p{L}`）若不被前置拒绝，
+    // 含 `p{L}` 字面文本的文件会命中而 rg 不命中 —— 同一个查询的答案取决于
+    // 哪条引擎在跑。这里钉住两条路径都拒绝，而非一边有一边空。
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-alignable-neg-");
+      await writeFile(join(root, "literal.txt"), "p{L} literal\n", "utf8");
+
+      await assert.rejects(
+        () => makeTool(root).handler({ pattern: "\\p{L}", output: "content" }),
+        ToolExecutionError
+      );
+    });
+  });
+
+  it("`\\d` / `\\w` / `\\b` 对齐到 JS 的 ASCII 口径（不吃非 ASCII 类）", async () => {
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-alignable-pos-");
+      // 非 ASCII 数字 / 词：JS 的 `\d` / `\w` 只认 ASCII，rg 的 Unicode 类会
+      // 把它们一起收下 —— 这正是 `--no-unicode` 要抹平的分歧。
+      await writeFile(join(root, "arabic.txt"), "٣٤ digits\n", "utf8");
+      await writeFile(join(root, "ascii.txt"), "42 digits\n", "utf8");
+      await writeFile(join(root, "efe.txt"), "éfoo\n", "utf8");
+
+      // `\d` 只认 [0-9]：阿拉伯-印度数字不算。
+      assert.equal(
+        await makeTool(root).handler({ pattern: "\\d" }),
+        "ascii.txt"
+      );
+      // `\b` 把 `é` 当非词字符（与 JS 同）：`\bfoo\b` 在 `éfoo` 里命中。
+      assert.equal(
+        await makeTool(root).handler({ pattern: "\\bfoo\\b" }),
+        "efe.txt"
+      );
+    });
+  });
+
+  it("`.` / `\\s` / 非 ASCII 字面量没被字节语义切坏（留 Unicode 模式）", async () => {
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-unicode-mode-");
+      // `.` 必须能吃下一个多字节字符（字节语义下 `a.c` 不匹配 `aéc`）。
+      await writeFile(join(root, "aec.txt"), "aéc\n", "utf8");
+      // `\s` 必须认 NBSP / 全角空格（JS 的 `\s` 是 Unicode 的；rg 切了
+      // `--no-unicode` 就只认 ASCII 空白）。
+      await writeFile(join(root, "nbsp.txt"), " \n", "utf8");
+
+      assert.equal(await makeTool(root).handler({ pattern: "a.c" }), "aec.txt");
+      assert.equal(
+        await makeTool(root).handler({ pattern: "\\s" }),
+        "nbsp.txt"
+      );
+    });
+  });
+});
+
 // ───────────────────────── D5 行窗（SC8） ─────────────────────────
 
 describe("grep — D5 also + within_lines 行窗", () => {
@@ -1000,6 +1106,15 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
       `hit${"😀".repeat(1_000)}\n`,
       "utf8"
     );
+    // 非 ASCII 内容的类语义夹具：`\d` / `\w` / `\b` 的分歧只在含非 ASCII
+    // 词的目录里显形（ASCII-only 树里两条引擎恰好一致，钉不住修复）。
+    // `٣٤`（阿拉伯-印度数字）验 `\d`、`漢字` 验 `\w`、`éfoo` 验 `\b`，
+    // `café` 与全角空格验 `.` / `\s` 没被 `--no-unicode` 切坏。
+    await writeFile(
+      join(root, "unicode.txt"),
+      "٣٤ alpha\n漢字 test\néfoo café\n　nbsp\n",
+      "utf8"
+    );
     // 上下文行走的是另一条截断路径（`context-groups.ts`），单独一条。
     await writeFile(
       join(root, "longctxcjk.ts"),
@@ -1139,6 +1254,30 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
       { pattern: "hit", also: "second" },
       { pattern: "hit", head_limit: 1 },
       { pattern: "hit", offset: 99 },
+      // 非 ASCII 内容的类语义：`\d` / `\w` / `\b` 在 JS RegExp（无 `u`，
+      // code unit）里只认 ASCII，rg 默认是 Unicode 类 —— 实测 `\d` 在 rg
+      // 吃 ٣٤、`\w` 吃 CJK、`\b` 把 `é` 当词字符。argv 的 `--no-unicode`
+      // 按 pattern 是否含多字节敏感构造决定要不要加（见 pattern.ts）。
+      { pattern: "\\d" },
+      { pattern: "\\d+" },
+      { pattern: "\\w+" },
+      { pattern: "\\bfoo\\b" },
+      { pattern: "\\w+", output: "content" },
+      // `.` / `\s` / 非 ASCII 字面量留在 Unicode 模式：字节语义会打坏它们
+      // （`.` 退化成「一个字节」、`\s` 不再匹配 NBSP），这两条钉住没切坏。
+      { pattern: ".", output: "content", path: "unicode.txt" },
+      { pattern: "\\s", output: "content", path: "unicode.txt" },
+      { pattern: "café", output: "content", path: "unicode.txt" },
+      { pattern: "漢", output: "content", path: "unicode.txt" },
+      // ignoreCase × 非 ASCII：CJK 无大小写 → 必须继续命中（两条引擎都放行）。
+      {
+        pattern: "漢",
+        ignoreCase: true,
+        output: "content",
+        path: "unicode.txt",
+      },
+      { pattern: "hit", ignoreCase: true },
+      { pattern: "HIT", ignoreCase: true },
       { pattern: "zzz" },
     ];
 
@@ -1184,8 +1323,8 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
   });
 });
 
-// ───────────────────────── 大小写 / 正则 ─────────────────────────
 
+// ───────────────────────── 大小写 / 正则 ─────────────────────────
 describe("grep — 大小写与正则语义", () => {
   it("默认大小写敏感", async () => {
     await bothEngines(async (makeTool) => {

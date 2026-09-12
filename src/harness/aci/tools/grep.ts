@@ -25,7 +25,11 @@ import type { ToolExecutionContext } from "../../tools/types.js";
 import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
 import { resolveInstallRoot, type LiveTaskRoot } from "../../session-roots.js";
 import { resolveWithinRoot } from "./helpers.js";
-import { compilePattern } from "../search/pattern.js";
+import {
+  assertEngineAlignable,
+  assertIgnoreCaseAlignable,
+  compilePattern,
+} from "../search/pattern.js";
 import { parseQuerySpec, rejectRetiredLimitField } from "../search/options.js";
 import { engineSpecFor, renderResult } from "../search/pipeline.js";
 import { readWorkspaceLines } from "../search/file-lines.js";
@@ -114,7 +118,13 @@ export function createGrepTool(
       engineBinaryPath(resolveInstallRoot(), process.platform, process.arch);
     // 取样 spec：`also` 在场时改取内容行（行窗要行号才能判）。
     const sampleSpec = engineSpecFor(compiled.spec);
+    // 语义可行性校验必须在**两条引擎分派之前**（SC9/SC10）：这些构造在 rg
+    // 与 JS `RegExp` 之间无法对齐，若只在 rg 路径校验，同一个 pattern 会随
+    // 「自带二进制在不在」在「typed 拒绝」与「静默错答案」之间摇摆。坏正则
+    // 与它的顺序固定为先编译（坏正则先报自己的文案）。
     const regex = compilePattern(sampleSpec.pattern, sampleSpec.ignoreCase);
+    assertEngineAlignable(sampleSpec.pattern);
+    assertIgnoreCaseAlignable(sampleSpec.pattern, sampleSpec.ignoreCase);
     // 搜索根是显式点名的文件时，体积闸对它让路（rg 的 `--max-filesize` 只管
     // 遍历期，见 `argv.ts` / `node-scan.ts`）。展示侧的取行（`also` 行窗、
     // `context` 组构造）必须与「这个文件能不能被搜到」同口径 —— 否则 rg 出
