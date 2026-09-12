@@ -134,14 +134,13 @@ describe("assertClassEscapesAlignable — 字符类转义分叉（D5）", () => 
     rejects(() => assertClassEscapesAlignable("a\\sb"), /whitespace class/);
   });
 
-  it("`\\d` / `\\D` / `\\w` / `\\W` / `\\b` / `\\B` × Unicode 触发 → typed 拒绝", () => {
+  it("`\\d` / `\\D` / `\\w` / `\\W` / `\\b` × Unicode 触发 → typed 拒绝", () => {
     const cases: Array<readonly [string, string]> = [
       ["\\d.漢", "\\d"],
       ["\\D.漢", "\\D"],
       ["\\w.漢", "\\w"],
       ["\\W.漢", "\\W"],
       ["\\b漢", "\\b"],
-      ["\\B漢", "\\B"],
       // 否定类是 Unicode 触发构造（`hasSensitiveLiteral` 的判据），同样要把
       // `\d` 拽进 Unicode 模式。
       ["[^a]\\d", "\\d"],
@@ -155,6 +154,64 @@ describe("assertClassEscapesAlignable — 字符类转义分叉（D5）", () => 
       assert.match(msg, /Unicode-mode trigger/);
       assert.match(msg, /two engines would answer differently/);
     }
+  });
+
+  it("`\\B` 无条件拒绝：byte 模式下也分叉，`\\B漢` 不再走 Unicode-trigger 文案", () => {
+    // 本轮 D5-leak 的核心修正。原判据把 `\B` 与 `\b` 并列放进条件层，前提
+    // 「byte 模式能对齐 `\B`」被实测推翻（/tmp/tool-bmode.mts）：rg 把多字节
+    // 字符的内部字节边界也算非词边界，Node 逐 code unit 看结论相反。
+    // 所以 `\B` 必须在**无条件**层被拒 —— 下面两条在 ASCII-only pattern 上
+    // 也要拒（条件层放行的那种），文案走 non-word-boundary 一条。
+    for (const pattern of ["\\B", "\\B漢", "a\\Bb", "漢\\B"]) {
+      const msg = messageOf(() => assertClassEscapesAlignable(pattern));
+      assert.match(msg, /non-word-boundary/, pattern);
+      assert.match(msg, /two engines would answer differently/, pattern);
+    }
+    // 无条件层不看 `keepsUnicodeMode`：ASCII-only 也拒。
+    assert.equal(keepsUnicodeMode("\\B"), false);
+    rejects(() => assertClassEscapesAlignable("\\B"), /non-word-boundary/);
+  });
+
+  it("`[\\B]` 类内形态拒绝：rg 两种模式都 rc=2，JS 静默读字面 `B`", () => {
+    // 实测（/tmp/d5-class-b.mts）：rg 对 `[\B]` 在 `--no-unicode` 与默认模式
+    // 下**都** rc=2（Rust 引擎 invalid escape in character class，PCRE2 也
+    // 拒），JS 把 `\B` 读成字面 `B` 并命中 —— 一个 rc=2 一个 rc=0，任何语料
+    // 都救不回来。类内位置不豁免 `\B`（与 `\b` 的退格例外不同）。
+    for (const pattern of ["[\\B]", "[a\\B]", "[\\B ]", "[\\b\\B]", "[^\\B]"]) {
+      rejects(() => assertClassEscapesAlignable(pattern), /non-word-boundary/);
+    }
+  });
+
+  it("`[\\b]`（类内退格）在 Unicode 触发下仍放行：位置例外只给 `\\b`", () => {
+    // 实测（/tmp/d5-class-b.mts）：`[\b]` 是退格字节 0x08，rg 与 JS 都按字面
+    // 字节读，含 Unicode 触发的 `[\b]漢` / `[\b.]` / `[\b£]` 也 SAME。原判据
+    // 用 `/\\[dDwWbB]/` 盲扫，把这些**一致**的 pattern 误拒了 —— 本轮修掉。
+    for (const pattern of [
+      "[\\b]",
+      "[\\b]漢",
+      "[\\b.]",
+      "[\\b\\d]",
+      "[\\b.]漢",
+      "[\\b£]",
+    ]) {
+      assert.doesNotThrow(
+        () => assertClassEscapesAlignable(pattern),
+        `应放行：${pattern}`
+      );
+    }
+  });
+
+  it("`\\b` 的类内豁免只给 `\\b`：`[\\d]漢` / `[\\w]漢` 照常拒", () => {
+    // 反证：`\d` / `\w` 在类内仍是类成员（不是退格那种字面字节），随类的
+    // Unicode 触发一起分叉（实测 `[\d]漢` / `[\w]漢` DIVERGE）。
+    rejects(
+      () => assertClassEscapesAlignable("[\\d]漢"),
+      /Unicode-mode trigger/
+    );
+    rejects(
+      () => assertClassEscapesAlignable("[\\w]漢"),
+      /Unicode-mode trigger/
+    );
   });
 
   it("`\\d` / `\\w` / `\\b` 在 ASCII-only pattern 下（byte 模式）继续放行", () => {

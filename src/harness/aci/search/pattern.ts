@@ -75,7 +75,9 @@
  *
  * 字符类转义（`\s` / `\S` / `\d` / `\D` / `\w` / `\W` / `\b` / `\B`）**不再
  * 是残留**：五族曾列在这里，D5 逐族实测后由 `assertClassEscapesAlignable`
- * 在共享入口 typed 拒绝（理由与判据见该函数）。
+ * 在共享入口 typed 拒绝（理由与判据见该函数）——其中 `\s` / `\S` / `\B`
+ * 无条件拒，`\d` / `\D` / `\w` / `\W` / `\b` 仅在 Unicode 模式拒
+ * （`[\b]` 类内退格豁免）。
  */
 
 import { ToolExecutionError } from "../../errors.js";
@@ -555,27 +557,45 @@ export function assertEngineAlignable(pattern: string): void {
 /**
  * 字符类转义 × Unicode 口径分叉（D5，逐条实测）：
  *
- * 五族都无法让两条引擎在「同一个 pattern、同一个语料」下给出同一答案 —
- * - 不是「这条慢那条快」也不是「这条少一条」那种可静默修的对齐缺口，而是
- *   「同一个输入，两条引擎给的命中集真的不同」。选择标准：宁可 typed 拒绝，
- *   也不要同一个查询的答案取决于哪条引擎在跑（SC9 / SC10）。
+ * 各家族都无法让两条引擎在「同一个 pattern、同一个语料」下给出同一答案 —
+ * 不是「这条慢那条快」也不是「这条少一条」那种可静默修的对齐缺口，而是
+ * 「同一个输入，两条引擎给的命中集真的不同」。选择标准：宁可 typed 拒绝，
+ * 也不要同一个查询的答案取决于哪条引擎在跑（SC9 / SC10）。
  *
- * 拆成两层（与 `hasSensitiveEscape` / `keepsUnicodeMode` 的判据对齐）：
+ * 拆成三层（层与层的差别是**拒绝条件**，不是构造名）：
  *
- * - `\s` / `\S` —— **永远**拒绝。两条引擎的 Unicode 空白表天生不同：
- *   rg 收 NEL（U+0085）不收 BOM（U+FEFF），JS 收 BOM 不收 NEL（实测，
- *   `nel-bom-detail.mts`）。任意语料都可能踩到其中一边，让两条引擎落到
- *   同一答案的可能性是 0。ASCII 空白（SP / TAB）两边一致 —— 但这是
- *   「恰好这条语料里没 BOM/NEL」的巧合，不是契约能保的事。
+ * - `\s` / `\S` —— **无条件**拒绝。两条引擎的 Unicode 空白表天生不同：
+ *   rg 收 NEL（U+0085）不收 BOM（U+FEFF），JS 收 BOM 不收 NEL（实测
+ *   `/tmp/s-uncond.mts`）。且不止于 Unicode：`--crlf` 让 rg 在匹配前剥掉
+ *   行尾 CR，JS 的 `\s` 却把 CR 当空白 —— 纯 ASCII 语料里一个**行中**裸 CR
+ *   就够分叉（实测 `a\rb`：rg 不命中、Node 命中），所以「限 ASCII 就安全」
+ *   不成立。两条路都堵死，只能无条件拒。
  *
- * - `\d` / `\D` / `\w` / `\W` / `\b` / `\B` —— **只在 Unicode 模式**拒绝。
- *   字节模式（rg `--no-unicode` + Node 不加 `u`，由 `keepsUnicodeMode=false`
- *   触发）下两边的类都按 ASCII 走，`\d` 不吃 `٣`、`\w` 不吃 `漢`、`\b` 把
- *   `é` 当非词字符 —— 完全 SAME（实测 `H1` 系列）。但 `漢` / `.` / 否定类
- *   一旦逼出 Unicode 模式，类原子就分叉（实测 `H2` 系列）：rg 收 `٣`
- *   而 JS 不收（`\d.` on `٣٤`）、rg 收 `漢` 而 JS 不收（`\w.` on `漢x`）、
- *   `é` 两侧词字归属相反（`\bé` 在 `café` 上一致但 `\b漢` 在 `a漢b` 上
- *   rg 空 / JS 命中）。
+ * - `\B` —— **无条件**拒绝（本轮从条件层挪上来）。原以为「byte 模式能对齐
+ *   `\B`」的前提**不成立**，实测（`/tmp/d5-class-b.mts`，真实 argv）：
+ *   rg 在 byte 模式下把多字节字符的**内部**字节边界也算「非词边界」，
+ *   `a漢b` / `a€b` / `a£b` 都命中；JS 无 `u` 时逐 code unit 看，`漢` / `€` /
+ *   `£` 前后的 code unit 全是非词字符，`\B` 不成立 → 同一行 rg 命中、Node
+ *   不命中。类内形态更硬：rg 对 `[\B]` **两种模式都 rc=2**（Rust 引擎
+ *   `invalid escape sequence found in character class`，PCRE2 也拒），JS 却
+ *   把 `\B` 读成字面 `B` 静默命中 —— 一个 rc=2 一个 rc=0，没有任何语料
+ *   能让二者同判。
+ *
+ * - `\d` / `\D` / `\w` / `\W` / `\b` —— **只在 Unicode 模式**拒绝。字节模式
+ *   （rg `--no-unicode` + Node 不加 `u`，由 `keepsUnicodeMode=false` 触发）
+ *   下两边的类都按 ASCII 走，`\d` 不吃 `٣`、`\w` 不吃 `漢`、`\b` 把 `é`
+ *   当非词字符 —— 完全 SAME（实测 `/tmp/tool-bmode.mts` 的 byte 段）。
+ *   但 `漢` / `.` / 否定类一旦逼出 Unicode 模式，类原子就分叉（同文件
+ *   unicode 段）：rg 收 `٣` 而 JS 不收（`\d.` on `٣٤`）、rg 收 `漢` 而 JS
+ *   不收（`\w.` on `漢x`）、`é` 两侧词字归属相反（`\b漢` 在 `a漢b` 上
+ *   rg 命中 `a漢b` / Node 命中 `漢` 那一行之外的文件）。
+ *
+ * **类内 `\b` 是唯一的位置例外**：`[\b]` 是退格字节 0x08，rg 与 JS 都按
+ * 字面字节读（实测 `[\b]` 在两模式下都 SAME，含 `[\b]漢` / `[\b.]` /
+ * `[\b£]` 这类 Unicode 触发组合）。所以 `\b` 的扫描必须**区分类内类外** ——
+ * 类外 `\b` 是词边界（Unicode 模式下分叉），类内 `\b` 是退格（永远一致）。
+ * 只对 `\b` 开这个口子：`\d` / `\w` 在类内仍是类成员，照常按家族拒
+ * （`[\d]漢` 实测 DIVERGE）。
  *
  * 替代方案被实测否定（不必再考虑）：
  * - 「`(?-u)` 局部关 Unicode」会让 `.` 退字节（`(?-u)a.c` 不匹配 `aéc`），
@@ -583,31 +603,103 @@ export function assertEngineAlignable(pattern: string): void {
  * - 「rg 的 `(*UCP)` / `(*NO_UCP)`」由 `--engine=auto` 拒收（实测 rc=2）。
  * - 「`--no-unicode` 常开」打坏 `.` / `\s` / NBSP（实测）。
  *
- * 因此收口只有 typed 拒绝一处。判据只问构造名（不含类内位置 —— 见 `B` 例
- * 外）：`[\\b]` 是退格字节（0x08），两边都吃，不会被本判据误伤；
- * `[^\\w]` 是字符类，`\\w` 是它**唯一**的成员，按家族语义拒绝即可。
- *
- * 字面量先剥掉成对反斜杠：`\\\\s` 在两条引擎上都读成字面 `\\s`，是用户
- * 在搜字面反斜杠 + s，不算敏感构造。
+ * 因此收口只有 typed 拒绝一处。字面量先剥掉成对反斜杠：`\\\\s` 在两条
+ * 引擎上都读成字面 `\\s`，是用户在搜字面反斜杠 + s，不算敏感构造。
  */
 export function assertClassEscapesAlignable(pattern: string): void {
-  /** `\s` / `\S` —— 必拒（无条件）。 */
-  const WHITESPACE_FAMILY = /\\[sS]/;
-  /** `\d` / `\D` / `\w` / `\W` / `\b` / `\B` —— Unicode 模式下必拒。 */
-  const CLASS_FAMILY = /\\[dDwWbB]/;
   const escaped = pattern.replace(/\\\\/g, "");
 
-  if (WHITESPACE_FAMILY.test(escaped)) {
+  /** `\s` / `\S` —— 必拒（无条件，含类内）。 */
+  if (hasEscape(escaped, (kind) => kind === "s" || kind === "S")) {
     throw new ToolExecutionError(
-      `grep: unsupported pattern construct in ${pattern}: \\s / \\S whitespace class — ripgrep and JavaScript RegExp use different Unicode whitespace tables (ripgrep accepts NEL but not BOM; JavaScript accepts BOM but not NEL), so the two engines would answer differently on the same query; spell out the whitespace characters you need (e.g. [ \\t] for ASCII, [ \\t\\u00a0] to also include NBSP)`
+      `grep: unsupported pattern construct in ${pattern}: \\s / \\S whitespace class — ripgrep and JavaScript RegExp use different Unicode whitespace tables (ripgrep accepts NEL but not BOM; JavaScript accepts BOM but not NEL) and ripgrep's --crlf strips a trailing CR before matching while JavaScript's \\s matches it, so the two engines would answer differently on the same query; spell out the whitespace characters you need (e.g. [ \\t] for ASCII, [ \\t\\u00a0] to also include NBSP)`
     );
   }
 
-  if (keepsUnicodeMode(pattern) && CLASS_FAMILY.test(escaped)) {
+  /**
+   * `\B` —— 必拒（无条件，含类内）：byte 模式下 rg 把多字节字符的内部字节
+   * 边界也算非词边界，JS 逐 code unit 看结论相反；类内 `[\B]` 更是 rg
+   * rc=2 而 JS 静默读字面 `B`。
+   */
+  if (hasEscape(escaped, (kind) => kind === "B")) {
     throw new ToolExecutionError(
-      `grep: unsupported pattern construct in ${pattern}: \\d / \\D / \\w / \\W / \\b / \\B class escape combined with a Unicode-mode trigger (non-ASCII literal, '.', or negated class) — ripgrep uses Unicode classes (\\d eats ٣, \\w eats 漢, \\b treats é as a word char) while JavaScript RegExp keeps these classes ASCII-only, so the two engines would answer differently; remove the Unicode trigger to stay in byte mode (where both engines agree on ASCII classes) or spell the class out (e.g. [0-9] for digits, [A-Za-z] for words)`
+      `grep: unsupported pattern construct in ${pattern}: \\B non-word-boundary — ripgrep counts a byte position inside a multi-byte character as a non-word boundary while JavaScript RegExp (without the u flag) does not, and inside a character class ripgrep rejects \\B outright while JavaScript reads it as a literal 'B', so the two engines would answer differently; there is no way to spell a non-word-boundary that both engines compute the same way`
     );
   }
+
+  if (
+    keepsUnicodeMode(pattern) &&
+    hasClassAwareEscape(
+      escaped,
+      (kind) => "dDwWb".includes(kind),
+      (kind) => kind === "b"
+    )
+  ) {
+    throw new ToolExecutionError(
+      `grep: unsupported pattern construct in ${pattern}: \\d / \\D / \\w / \\W / \\b class escape combined with a Unicode-mode trigger (non-ASCII literal, '.', or negated class) — ripgrep uses Unicode classes (\\d eats ٣, \\w eats 漢, \\b treats é as a word char) while JavaScript RegExp keeps these classes ASCII-only, so the two engines would answer differently; remove the Unicode trigger to stay in byte mode (where both engines agree on ASCII classes) or spell the class out (e.g. [0-9] for digits, [A-Za-z] for words)`
+    );
+  }
+}
+
+/**
+ * 剥过成对反斜杠的 pattern 里，是否有**任意位置**（含类内）的家族转义。
+ *
+ * 用于无条件家族（`\s` / `\S` / `\B`）：这三族在类内类外都分叉，位置无关。
+ */
+function hasEscape(
+  escaped: string,
+  inFamily: (kind: string) => boolean
+): boolean {
+  const chars = [...escaped];
+  for (let i = 0; i < chars.length - 1; i += 1) {
+    if (chars[i] !== "\\") continue;
+    const kind = chars[i + 1]!;
+    if (inFamily(kind)) return true;
+    i += 1; // 整对跳过：`\\d` 的 `d` 不是转义起始
+  }
+  return false;
+}
+
+/**
+ * 剥过成对反斜杠的 pattern 里，是否有**家族内**的转义，且与 `classExempt`
+ * 集合里的转义在类内不算。
+ *
+ * 用于条件家族（`\d` / `\D` / `\w` / `\W` / `\b`）：类内 `\b` 是退格字节
+ * 0x08（两条引擎一致），但 `\d` / `\w` 在类内仍是类成员，会随类的
+ * Unicode 模式触发一起分叉（实测 `[\d]漢` / `[\w]漢` 都是 DIVERGE）。
+ * `classExempt` 只豁免 `\b`，其余成员照常计入。
+ */
+function hasClassAwareEscape(
+  escaped: string,
+  inFamily: (kind: string) => boolean,
+  classExempt: (kind: string) => boolean
+): boolean {
+  const chars = [...escaped];
+  let inClass = false;
+  for (let i = 0; i < chars.length; i += 1) {
+    const ch = chars[i]!;
+    if (ch === "\\") {
+      const kind = chars[i + 1];
+      if (kind !== undefined && inFamily(kind)) {
+        if (!inClass || !classExempt(kind)) return true;
+      }
+      i += 1; // 整对跳过
+      continue;
+    }
+    if (inClass) {
+      if (ch === "]") inClass = false;
+      continue;
+    }
+    if (ch === "[") {
+      inClass = true;
+      /** `[^` / `[!` 是否定前缀；`[]]` 的首个 `]` 是字面成员（rg 语法）。 */
+      const next = chars[i + 1];
+      if (next === "^" || next === "!") i += 1;
+      else if (next === "]") i += 1;
+      continue;
+    }
+  }
+  return false;
 }
 
 /**
@@ -638,9 +730,11 @@ export function assertIgnoreCaseAlignable(
  * `true`（含多字节敏感构造：`.` / `\s` / `\S` / `\u` / `\x` / 非 ASCII /
  * 否定类）→ rg **不加** `--no-unicode`（切字节语义会打坏它们），Node 编译
  * **加** `u`（否则 `.` / 计数 quantifier 停在 code unit 上）。
- * `false` → rg 加 `--no-unicode`，把 `\d` / `\w` / `\D` / `\W` / `\b` / `\B`
- * 对齐到 JS 的 ASCII 口径；Node 不加 `u`（加了反而把 KELVIN / LONG S 折进来，
- * 见下）。
+ * `false` → rg 加 `--no-unicode`，把 `\d` / `\w` / `\D` / `\W` / `\b` 对齐到
+ * JS 的 ASCII 口径；Node 不加 `u`（加了反而把 KELVIN / LONG S 折进来，见下）。
+ * `\B` 曾按此对齐，实测推翻了前提（byte 模式下 rg 仍把多字节字符的内部字节
+ * 边界算非词边界）——现在它由 `assertClassEscapesAlignable` 无条件拒绝，不在
+ * 本判据的覆盖面上。
  *
  * 取保守方向：**宁可不切，也不切坏**（见文件头注释的实测分歧）。
  *

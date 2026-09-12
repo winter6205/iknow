@@ -797,7 +797,7 @@ describe("grep — 两引擎正则语义对齐（D6/SC9/SC10）", () => {
     });
   });
 
-  it("`\\d` / `\\D` / `\\w` / `\\W` / `\\b` / `\\B` × Unicode 触发 → typed 拒绝（D5）", async () => {
+  it("`\\d` / `\\D` / `\\w` / `\\W` / `\\b` × Unicode 触发 → typed 拒绝（D5）", async () => {
     // 反证：判据为真时 rg 留在 Unicode 模式，它的 `\d` 吃 `٣` / `\w` 吃 `漢` /
     // `\b` 把 `é` 当词字符；JS 即使加 `u` 这些类仍是 ASCII 的。同一个
     // pattern 在两条引擎上的命中集反向分叉（实测 `family-complete.mts` 的
@@ -818,7 +818,6 @@ describe("grep — 两引擎正则语义对齐（D6/SC9/SC10）", () => {
         ["\\w.漢", "\\w"],
         ["\\W.漢", "\\W"],
         ["\\b漢", "\\b"],
-        ["\\B漢", "\\B"],
       ];
       for (const [pattern, family] of triggerPatterns) {
         // 文案里出现的「\\d」是字面量「反斜杠 + d」（4 个 TS 字符 → 2 个
@@ -829,6 +828,29 @@ describe("grep — 两引擎正则语义对齐（D6/SC9/SC10）", () => {
             error instanceof ToolExecutionError &&
             error.message.includes(family) &&
             /Unicode-mode trigger/.test(error.message) &&
+            /two engines would answer differently/.test(error.message)
+        );
+      }
+    });
+  });
+
+  it("`\\B` 无条件 typed 拒绝：byte 模式也分叉（D5-leak）", async () => {
+    // 本轮 D5-leak。原判据把 `\\B` 与 `\\b` 并列放在「Unicode 模式才拒」的
+    // 条件层，前提「byte 模式能对齐 `\\B`」被实测推翻（`/tmp/tool-bmode.mts`）：
+    // rg 在 byte 模式下把多字节字符的内部字节边界也算非词边界（`a漢b` /
+    // `a€b` / `a£b` 都命中），JS 逐 code unit 看结论相反。所以 `\\B` 现在
+    // 走**无条件**文案（non-word-boundary），ASCII-only pattern 也拒。
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-d5-leak-B-");
+      await writeFile(join(root, "in.txt"), "alpha 123\n", "utf8");
+
+      const patterns = ["\\B", "a\\Bb", "\\B漢", "漢\\B", "[\\B]", "[a\\B]"];
+      for (const pattern of patterns) {
+        await assert.rejects(
+          () => makeTool(root).handler({ pattern }),
+          (error: unknown) =>
+            error instanceof ToolExecutionError &&
+            /non-word-boundary/.test(error.message) &&
             /two engines would answer differently/.test(error.message)
         );
       }
