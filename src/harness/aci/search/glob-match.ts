@@ -94,7 +94,7 @@ function matchesNegation(relPath: string, glob: string): boolean {
  * 实测 rg 15.1.0：`--glob '!bang.ts'` 不剔 `!bang.ts`（回全仓），
  * `--glob '\!bang.ts'` 只回 `!bang.ts` —— 转义的 `!` 是字面字符。
  */
-function isNegation(glob: string): boolean {
+export function isNegation(glob: string): boolean {
   return glob.startsWith("!") && !glob.startsWith("\\!");
 }
 

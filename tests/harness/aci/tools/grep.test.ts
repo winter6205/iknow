@@ -774,6 +774,57 @@ describe("grep — 两引擎正则语义对齐（D6/SC9/SC10）", () => {
     });
   });
 
+  it("`type` + `glob` 并列时与 rg 同判（D3：肯定 glob 覆盖 type，否定 glob 与 type 交集）", async () => {
+    // 复现：原 Node 侧是 AND（两者都要满足），rg 的实测规则是「肯定 glob 在场
+    // → type 完全被忽略；只有否定 glob → type 仍生效」（逐条实测，不是文档）。
+    // 这与 D2 的顺序契约同源 —— glob 是显式收窄，type 是隐式词表，两者并列时
+    // 用户写的 glob 优先；要表达交集请写成一条 `sub/*.ts`。
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-type-glob-");
+      await mkdir(join(root, "sub"), { recursive: true });
+      await writeFile(join(root, "sub/a.ts"), "needle\n", "utf8");
+      await writeFile(join(root, "sub/b.js"), "needle\n", "utf8");
+      await writeFile(join(root, "top.ts"), "needle\n", "utf8");
+      await writeFile(join(root, "top.js"), "needle\n", "utf8");
+
+      // 肯定 glob 在场 → type 让位：glob 决定纳入集。
+      assert.equal(
+        await makeTool(root).handler({
+          pattern: "needle",
+          type: "ts",
+          glob: "sub/*",
+        }),
+        "sub/a.ts\nsub/b.js"
+      );
+      assert.equal(
+        await makeTool(root).handler({
+          pattern: "needle",
+          type: "ts",
+          glob: "sub/*.js",
+        }),
+        "sub/b.js"
+      );
+      // 否定 glob 在场 → type 仍生效。
+      assert.equal(
+        await makeTool(root).handler({
+          pattern: "needle",
+          type: "ts",
+          glob: "!sub/*",
+        }),
+        "top.ts"
+      );
+      // 只给 type：按词表判。
+      assert.equal(
+        await makeTool(root).handler({ pattern: "needle", type: "ts" }),
+        "sub/a.ts\ntop.ts"
+      );
+      // 只给 glob：按 glob 判。
+      assert.equal(
+        await makeTool(root).handler({ pattern: "needle", glob: "sub/*" }),
+        "sub/a.ts\nsub/b.js"
+      );
+    });
+  });
 
   it("用户 glob 不能撤销工具自带的遍历排除（D2）", async () => {
     // 复现：原顺序把用户 glob 排在工具的 `!**/node_modules` / `!**/.git` 之

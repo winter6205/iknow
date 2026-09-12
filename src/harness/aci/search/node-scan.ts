@@ -19,7 +19,7 @@ import { readdir, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 
 import { fileNameMatchesType } from "./argv.js";
-import { matchesGlobSet } from "./glob-match.js";
+import { isNegation, matchesGlobSet } from "./glob-match.js";
 import { readWorkspaceLines } from "./file-lines.js";
 import { isPathRepresentable } from "./path-representable.js";
 import { truncateMatchContent } from "./rg-output.js";
@@ -88,16 +88,35 @@ async function* walkCandidates(
   yield* walkFiles(input.searchRoot);
 }
 
-/** 收窄：`glob` 与 `type` 并列（D4），二者都在场时须同时通过。 */
+/**
+ * 收窄：`glob` 与 `type` 并列（D4、D3）。
+ *
+ * rg 的真实规则（逐条实测，不是文档推断）：**只要给了一个肯定 glob，`--type`
+ * 就完全不参与判定** —— glob 决定纳入集，type 被静默忽略。原 Node 侧实现是
+ * AND（两者都要满足），同一查询 `{type:"ts", glob:"sub/*"}` 在 rg 侧回
+ * `sub/a.ts` + `sub/b.js`（`sub/b.js` 不是 `.ts` 也进来，因为 glob 说了算），
+ * Node 侧只回 `sub/a.ts`（D3）。
+ *
+ * 只有**否定** glob 时 type 仍然生效：`--type ts --glob` 加一条排除
+ * node_modules 的否定 glob，实测 = `sub/a.ts,top.ts`（type 先筛，否定 glob
+ * 再排除），与「只给那条否定 glob」的 4 条不同。
+ *
+ * 本函数按 rg 的实测规则实现，两条引擎因此同判。语义上这意味着「`type` 与
+ * `glob` 不是可以叠加的收窄维度」：要表达交集请写成一条 `sub/*.ts`。
+ * 注意这与 D2 的顺序契约是同一套机制的两面 —— D2 让工具的排除 glob 成为
+ * 最终胜负，D3 让用户 glob 对 type 的覆盖与 rg 一致。
+ */
 function passesFilters(relPath: string, spec: QuerySpec): boolean {
-  if (
-    spec.type !== undefined &&
-    !fileNameMatchesType(baseName(relPath), spec.type)
-  ) {
-    return false;
-  }
-  const globs = spec.glob === undefined ? [] : [spec.glob];
-  return matchesGlobSet(relPath, globs);
+  const { type, glob } = spec;
+  if (type === undefined && glob === undefined) return true;
+  if (glob === undefined) return fileNameMatchesType(baseName(relPath), type!);
+  if (type === undefined) return matchesGlobSet(relPath, [glob]);
+  // 并列：肯定 glob 在场 → type 让位（rg 实测）；只有否定 glob → type 仍生效。
+  if (!isNegation(glob)) return matchesGlobSet(relPath, [glob]);
+  return (
+    fileNameMatchesType(baseName(relPath), type) &&
+    matchesGlobSet(relPath, [glob])
+  );
 }
 
 function collectHits(
