@@ -166,7 +166,17 @@ export function createGrepTool(
 /** 模型可见文案（D7）：schema 与描述提为模块常量，工厂保持短小。 */
 export const GREP_DESCRIPTION = `Search file contents under a workspace directory using a regular expression; use it to discover which files carry a pattern before reading them, and pair it with read_file once you have a pinpointed path. Returns relative paths by default (output=paths) — set output=\"content\" for path:line:text or output=\"count\" for per-file counts plus a total:. Narrow with glob / type, show nearby lines with context, or keep only hits whose second literal also appears within within_lines of the match. Page a sorted result list with offset + head_limit (default 50, hard cap ${String(2000)}); an offset past the last entry returns "No entries at this offset". Runs on a bundled search engine (ripgrep ${RIPGREP_VERSION}) resolved from the install root, and falls back to a built-in Node scan with the same semantics when that engine is unavailable.`;
 
-/** 输入 schema（与 `options.ts` 的解析层是同一契约的两道防线）。 */
+/**
+ * 输入 schema（与 `options.ts` 的解析层是同一契约的两道防线）。
+ *
+ * 不开 `additionalProperties: false` —— SC10 / D4 承诺「退役字段 `limit` /
+ * `grep_limit`」要给到模型一条 typed 指引（指向 `head_limit`），但 ajv 的
+ * `additionalProperties` 泛化消息（`must NOT have additional properties`）
+ * 会抢先于 handler 里的 `rejectRetiredLimitField` 命中，模型只看到前者。
+ * 改为放行 extra，由 handler 第 107 行的 `rejectRetiredLimitField` 接住退役
+ * 名（拒）；其它真正未知的字段由 `compileInput → parseQuerySpec` 静默忽略
+ * （与 `additionalProperties:true` 同形，不变 schema 已知的必填与类型闸门）。
+ */
 export const GREP_INPUT_SCHEMA = {
   type: "object",
   properties: {
@@ -187,7 +197,6 @@ export const GREP_INPUT_SCHEMA = {
     head_limit: { type: "integer", default: 50, minimum: 1, maximum: 2000 },
   },
   required: ["pattern"],
-  additionalProperties: false,
 } as const;
 
 /**

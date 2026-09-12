@@ -52,6 +52,8 @@ import { afterEach, describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import { createGrepTool } from "../../../../src/harness/aci/tools/grep.ts";
+import { createAciRegistry } from "../../../../src/harness/aci/aci-registry.ts";
+import { createExecutor } from "../../../../src/harness/tools/executor.ts";
 import { MAX_EXPLICIT_FILE_BYTES } from "../../../../src/harness/aci/search/file-lines.ts";
 import { engineBinaryPath } from "../../../../src/harness/aci/search/engine-manifest.ts";
 import { resolveInstallRoot } from "../../../../src/harness/session-roots.ts";
@@ -143,14 +145,30 @@ describe("createGrepTool — schema/aci shape", () => {
     assert.equal(tool.name, "grep");
   });
 
-  it("inputSchema enforces pattern required and additionalProperties:false", async () => {
+  it("inputSchema enforces pattern required，且退役字段的 typed 指引可达模型（D4）", async () => {
+    // 反证式：原 schema 的 `additionalProperties:false` 会让 ajv 的
+    // `must NOT have additional properties` 抢先于 handler 的
+    // `rejectRetiredLimitField` 命中，SC10 承诺的指引进不了模型。
+    // 这里钉「经 createExecutor → executeAll 的生产路径」拿到的是那条指引，
+    // 而不是 ajv 的泛化消息。
     const root = await makeScratch("grep-shape-");
     const tool = createGrepTool(root);
     const schema = tool.inputSchema as Record<string, unknown>;
 
     assert.equal(schema.type, "object");
     assert.deepEqual(schema.required, ["pattern"]);
-    assert.equal(schema.additionalProperties, false);
+
+    const registry = createAciRegistry([tool]);
+    const executor = createExecutor(registry.inner);
+    const [failure] = await executor.executeAll([
+      { name: "grep", input: { pattern: "needle", limit: 10 } },
+    ]);
+    assert.ok(failure !== undefined, "有回执");
+    assert.equal(failure.kind, "execution_failed");
+    const message = (failure as { message: string }).message;
+    assert.match(message, /is not a grep parameter/);
+    assert.match(message, /head_limit/);
+    assert.doesNotMatch(message, /additional properties/);
   });
 
   it("inputSchema exposes the documented property shapes and defaults", async () => {
