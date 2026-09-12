@@ -85,6 +85,22 @@ const put = async (
 const get = async (slug: string): Promise<MemoryEntryV1> =>
   parseMemoryEntry(await readFile(join(memoryDir, `${slug}.md`), "utf8"));
 
+/**
+ * Classifier fixtures (specs/runtime-capability-memory-gate.md): the sweep
+ * must disable the runtime capability observation and leave the product
+ * policy `constraint` alone.
+ */
+const CAPABILITY = {
+  title: "web_search is unavailable in this sandbox",
+  body: "The sandbox DNS/SSRF benchmarking segment blocks outbound network access.",
+} as const;
+
+const POLICY = {
+  type: "constraint",
+  title: "Worktree policy",
+  body: "隔离 ON 时 mutate 须先建 worktree。",
+} as const;
+
 // -- planMemoryGc: TTL rule --------------------------------------------------
 
 describe("planMemoryGc — TTL rule", () => {
@@ -126,7 +142,10 @@ describe("planMemoryGc — supersede rule", () => {
     const plan = planMemoryGc(
       [
         { slug: "old", entry: entry({ title: "Old fact" }) },
-        { slug: "new", entry: entry({ title: "New fact", supersedes: ["old"] }) },
+        {
+          slug: "new",
+          entry: entry({ title: "New fact", supersedes: ["old"] }),
+        },
       ],
       { nowMs: NOW }
     );
@@ -632,6 +651,191 @@ describe("runMemoryGc — archive disabled entries out of the hot dir", () => {
       scan.entries.map((c) => c.slug),
       ["live"],
       "listStoreEntries must not traverse archive/"
+    );
+  });
+});
+
+// -- capability sweep (specs/runtime-capability-memory-gate.md) --------------
+//
+// The sweep shares the GC pass: a live entry whose title/body trips
+// `detectCapabilityObservation` is soft-disabled (`disabled: true`, never a
+// hard delete) with the typed `capability_observation` reason. It runs in the
+// same pass as TTL / supersede / cap — the fixture below pins one observable
+// order: capability first, then the rest.
+
+describe("planMemoryGc — capability sweep rule", () => {
+  it("disables a runtime capability observation with the typed reason", () => {
+    const plan = planMemoryGc(
+      [{ slug: "cap", entry: entry({ ...CAPABILITY, disabled: false }) }],
+      { nowMs: NOW }
+    );
+    assert.deepEqual(plan.disable, [
+      { slug: "cap", reason: "capability_observation" },
+    ]);
+    assert.deepEqual(plan.keep, []);
+  });
+
+  it("leaves a product-policy constraint and a convention alone", () => {
+    const plan = planMemoryGc(
+      [
+        { slug: "policy", entry: entry({ ...POLICY, disabled: false }) },
+        {
+          slug: "convention",
+          entry: entry({
+            type: "convention",
+            title: "Test command",
+            body: "Run npm test in the repo root.",
+            disabled: false,
+          }),
+        },
+      ],
+      { nowMs: NOW }
+    );
+    assert.deepEqual(plan.disable, []);
+    assert.deepEqual([...plan.keep].sort(), ["convention", "policy"]);
+  });
+
+  it("is idempotent — an already-disabled capability entry is not re-disabled", () => {
+    const first = planMemoryGc(
+      [{ slug: "cap", entry: entry({ ...CAPABILITY, disabled: false }) }],
+      { nowMs: NOW }
+    );
+    const second = planMemoryGc(
+      [{ slug: "cap", entry: entry({ ...CAPABILITY, disabled: true }) }],
+      { nowMs: NOW }
+    );
+    assert.deepEqual(first.disable, [
+      { slug: "cap", reason: "capability_observation" },
+    ]);
+    assert.deepEqual(second.disable, [], "no second disable");
+  });
+
+  // Overflow (spec SC3): the capability verdict must not be crowded out by the
+  // cap rule — every category is disabled in the same pass, so an over-cap
+  // store still sweeps its capability rows. Order pinned: capability rows
+  // first, then TTL, supersede, cap.
+  it("sweeps the capability row even when the store is over cap", () => {
+    const plan = planMemoryGc(
+      [
+        { slug: "cap", entry: entry({ ...CAPABILITY, importance: 9 }) },
+        { slug: "hot", entry: entry({ importance: 5 }) },
+        { slug: "other", entry: entry({ importance: 1 }) },
+      ],
+      { nowMs: NOW, cap: 1 }
+    );
+    assert.deepEqual(plan.disable, [
+      { slug: "cap", reason: "capability_observation" },
+      { slug: "other", reason: "cap_evicted" },
+    ]);
+  });
+
+  it("orders capability first when a TTL expiry lands in the same pass", () => {
+    const plan = planMemoryGc(
+      [
+        { slug: "cap", entry: entry({ ...CAPABILITY }) },
+        {
+          slug: "stale",
+          entry: entry({ ttl_days: 1, updated_at: daysAgo(9) }),
+        },
+      ],
+      { nowMs: NOW }
+    );
+    assert.deepEqual(plan.disable, [
+      { slug: "cap", reason: "capability_observation" },
+      { slug: "stale", reason: "ttl_expired" },
+    ]);
+  });
+});
+
+describe("runMemoryGc — capability sweep", () => {
+  it("soft-disables the capability entry on disk and keeps the policy constraint live", async () => {
+    await put("cap", { ...CAPABILITY });
+    await put("policy", { ...POLICY });
+    const result = await runMemoryGc(memoryDir, { nowMs: NOW });
+    assert.deepEqual(result.disabled, [
+      { slug: "cap", reason: "capability_observation" },
+    ]);
+    assert.equal((await get("cap")).disabled, true);
+    assert.equal((await get("policy")).disabled, false);
+    assert.equal(
+      (await readdir(memoryDir)).includes("cap.md"),
+      true,
+      "sweep never hard-deletes the file"
+    );
+  });
+
+  it("is idempotent on a second pass", async () => {
+    await put("cap", { ...CAPABILITY });
+    const first = await runMemoryGc(memoryDir, { nowMs: NOW });
+    const second = await runMemoryGc(memoryDir, { nowMs: NOW });
+    assert.deepEqual(first.disabled, [
+      { slug: "cap", reason: "capability_observation" },
+    ]);
+    assert.deepEqual(second.disabled, [], "second pass has nothing to do");
+    assert.deepEqual(second.archived, []);
+    assert.equal((await get("cap")).disabled, true);
+  });
+
+  it("archives a capability entry exactly like any other disabled row", async () => {
+    // Sweep + archive discipline share one path: an old capability row leaves
+    // the hot dir (rename) and its MEMORY.md line is dropped, so the read-side
+    // filter and the on-disk sweep agree.
+    await put("cap", { ...CAPABILITY, updated_at: daysAgo(31) });
+    await writeFile(
+      join(memoryDir, "MEMORY.md"),
+      ["- [Old](cap.md) · importance=1", "- [Keep](keep.md)", ""].join("\n"),
+      "utf8"
+    );
+    await put("keep", { updated_at: daysAgo(1) });
+    const result = await runMemoryGc(memoryDir, { nowMs: NOW });
+    assert.deepEqual(result.archived, ["cap"]);
+    const index = await readFile(join(memoryDir, "MEMORY.md"), "utf8");
+    assert.ok(!index.includes("cap.md"));
+    assert.ok(index.includes("keep.md"));
+    assert.deepEqual((await readdir(join(memoryDir, "archive"))).sort(), [
+      "cap.md",
+    ]);
+  });
+
+  // Concurrent (spec SC4): interleaving a legal memory_save with sweep/GC on
+  // one memoryDir leaves no half files, and a second pass is a no-op.
+  it("does not half-write when memory_save interleaves with the sweep", async () => {
+    await put("cap", { ...CAPABILITY });
+    const save = createMemorySaveTool({
+      memoryDir,
+      now: () => new Date(NOW).toISOString(),
+    });
+    const [saveResult] = await Promise.all([
+      save.handler({ title: "Fresh fact", body: "Prefer baz() for new code." }),
+      runMemoryGc(memoryDir, { nowMs: NOW }),
+    ]);
+    assert.ok(saveResult, "the concurrent save must land");
+    const names = (await readdir(memoryDir)).filter(
+      (n) => n.endsWith(".md") && n !== "MEMORY.md"
+    );
+    for (const name of names) {
+      parseMemoryEntry(await readFile(join(memoryDir, name), "utf8"));
+    }
+    assert.ok(
+      (await readdir(memoryDir)).every((n) => !n.endsWith(".tmp")),
+      "no tmp files left behind"
+    );
+    const second = await runMemoryGc(memoryDir, { nowMs: NOW });
+    assert.deepEqual(second.disabled, [], "second pass is idempotent");
+  });
+
+  // Exception (spec SC5): an unreadable store must surface the typed error,
+  // not a partial disable set.
+  it("throws a typed MemoryIOError when a sweep write target is not writable", async () => {
+    await put("cap", { ...CAPABILITY });
+    // A regular file where the archive dir must go: the archive rename path
+    // fails with the typed error (same posture as the pre-existing archive
+    // test) — the sweep's own write is exercised by the disable assertions.
+    await writeFile(join(memoryDir, "archive"), "not a dir", "utf8");
+    await put("old", { disabled: true, updated_at: daysAgo(31) });
+    await assert.rejects(
+      runMemoryGc(memoryDir, { nowMs: NOW }),
+      (e: unknown) => e instanceof MemoryIOError
     );
   });
 });

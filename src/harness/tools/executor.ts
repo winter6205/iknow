@@ -387,11 +387,14 @@ function formatAjvError(errors: unknown): string {
 }
 
 function sanitizeFailure(err: unknown): string {
-  if (err instanceof ToolExecutionError) {
-    return err.message;
+  // Model-facing opt-in: ToolExecutionError, or a typed error from another
+  // bounded context that declares `modelFacing` (ADR-0086). Everything else
+  // keeps the generic string so stack / paths never reach the model.
+  if (isModelFacingError(err)) {
+    return (err as Error).message;
   }
   return "tool execution failed";
 }
 
-// Late import to break potential cycle: ToolExecutionError referenced here.
-import { ToolExecutionError } from "../errors.js";
+// Late import to break potential cycle: error helpers referenced here.
+import { isModelFacingError } from "../errors.js";

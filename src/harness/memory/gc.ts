@@ -1,9 +1,12 @@
 /**
  * auto-memory T2: mechanical memory GC (TTL / supersede / cap eviction).
  *
- * Spec: specs/auto-memory.md D3; ADR-0031 Decision 4. Three mechanical rules,
- * no LLM, soft-disable only:
+ * Spec: specs/auto-memory.md D3; ADR-0031 Decision 4; ADR-0086
+ * (capability memory sweep). Mechanical rules, no LLM, soft-disable only:
  *
+ *   0. `detectCapabilityObservation` trips on title/body → `disabled: true`
+ *      (runtime-capability-memory-gate: an environment snapshot must not
+ *      survive as durable memory — the live tool result is authoritative)
  *   1. `ttl_days > 0` and `updated_at + ttl_days` elapsed → `disabled: true`
  *   2. a slug named by a live entry's `supersedes` → `disabled: true`
  *   3. active entries beyond the store cap → the lowest-utility ones disabled,
@@ -30,6 +33,10 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import {
+  CAPABILITY_OBSERVATION_REASON,
+  detectCapabilityObservation,
+} from "./capability-gate.js";
 import { MemoryGcOptionInvalid, MemoryIOError } from "./errors.js";
 import { loadUsageSidecar, type UsageSidecar } from "./promote.js";
 import type { MemoryEntryV1 } from "./schema.js";
@@ -54,8 +61,19 @@ const ARCHIVE_MIN_AGE_DAYS = 30;
  */
 const RECENCY_HALFLIFE_DAYS = 30;
 
-/** Why GC disabled an entry. Wire-stable: future versions only add members. */
-export type MemoryGcReason = "ttl_expired" | "superseded" | "cap_evicted";
+/**
+ * Why GC disabled an entry. Wire-stable: future versions only add members.
+ * `capability_observation` is the sweep half (ADR-0086) — the same pass, a
+ * distinct reason so a host can tell "this was an environment snapshot" from
+ * "this expired / was superseded / lost the cap". The token's single source
+ * is capability-gate.ts, so a sweep verdict and a save rejection can never
+ * drift apart.
+ */
+export type MemoryGcReason =
+  | typeof CAPABILITY_OBSERVATION_REASON
+  | "ttl_expired"
+  | "superseded"
+  | "cap_evicted";
 
 /** One entry offered to GC, keyed by its on-disk slug (filename stem). */
 export type MemoryGcCandidate = StoredMemoryEntry;
@@ -66,7 +84,11 @@ export interface MemoryGcDisable {
 }
 
 export interface MemoryGcPlan {
-  /** Slugs to soft-disable, ordered TTL → supersede → cap (lowest utility first). */
+  /**
+   * Slugs to soft-disable, ordered capability → TTL → supersede → cap
+   * (lowest utility first). The capability verdict leads so a store over cap
+   * still sweeps environment snapshots rather than evicting by utility alone.
+   */
   readonly disable: ReadonlyArray<MemoryGcDisable>;
   /** Slugs that stay active, in candidate input order. */
   readonly keep: ReadonlyArray<string>;
@@ -111,7 +133,26 @@ export function memoryEntryUtility(
   );
 }
 
-/** Plan the three GC rules over a candidate set. Pure: no IO, no clock read. */
+/**
+ * Rule 0: capability sweep (ADR-0086). A live entry whose title/body trips the
+ * same pure predicate `memory_save` rejects with becomes one disable verdict:
+ * one verdict, two entry points, so a relabeled observation cannot survive on
+ * disk just because it entered before the gate existed. Slug-sorted so the
+ * plan never depends on directory scan order.
+ */
+function capabilitySweep(
+  live: ReadonlyArray<MemoryGcCandidate>
+): MemoryGcDisable[] {
+  return live
+    .filter((c) =>
+      detectCapabilityObservation({ title: c.entry.title, body: c.entry.body })
+    )
+    .map((c) => c.slug)
+    .sort()
+    .map((slug) => ({ slug, reason: CAPABILITY_OBSERVATION_REASON }));
+}
+
+/** Plan the mechanical rules over a candidate set. Pure: no IO, no clock read. */
 export function planMemoryGc(
   candidates: ReadonlyArray<MemoryGcCandidate>,
   opts?: MemoryGcOptions
@@ -126,9 +167,16 @@ export function planMemoryGc(
 
   const disable: MemoryGcDisable[] = [];
 
-  // Rule 1: TTL.
+  // Rule 0: capability sweep (ADR-0086) — same predicate as the save gate.
+  const capability = capabilitySweep(live);
+  const capabilitySlugs = new Set(capability.map((d) => d.slug));
+  disable.push(...capability);
+
+  // Rule 1: TTL. Capability rows already carry their verdict.
   const expired = new Set(
-    live.filter((c) => isExpired(c.entry, nowMs)).map((c) => c.slug)
+    live
+      .filter((c) => !capabilitySlugs.has(c.slug) && isExpired(c.entry, nowMs))
+      .map((c) => c.slug)
   );
   for (const slug of [...expired].sort()) {
     disable.push({ slug, reason: "ttl_expired" });
@@ -136,7 +184,9 @@ export function planMemoryGc(
 
   // Rule 2: supersede. Only live, non-expired entries carry a live pointer —
   // a dead entry's `supersedes` must not keep disabling its target forever.
-  const survivors = live.filter((c) => !expired.has(c.slug));
+  const survivors = live.filter(
+    (c) => !expired.has(c.slug) && !capabilitySlugs.has(c.slug)
+  );
   const supersededTargets = new Set<string>();
   const survivorSlugs = new Set(survivors.map((c) => c.slug));
   for (const c of survivors) {
@@ -176,8 +226,9 @@ export function planMemoryGc(
 }
 
 /**
- * Scan a memory store, plan GC, and write the plan back as soft-disables,
- * then archive disabled entries out of the hot dir.
+ * Scan a memory store, plan GC (capability sweep + TTL / supersede / cap),
+ * and write the plan back as soft-disables, then archive disabled entries out
+ * of the hot dir.
  *
  * A missing / unreadable directory is an empty store, not a failure: GC is a
  * maintenance pass that must be safe to call before anything has been saved.
@@ -249,8 +300,7 @@ function planMemoryArchive(
   disabled: ReadonlyArray<MemoryGcCandidate>,
   opts: { cap: number; nowMs: number }
 ): string[] {
-  const cutoffMs =
-    opts.nowMs - ARCHIVE_MIN_AGE_DAYS * 24 * 3600 * 1000;
+  const cutoffMs = opts.nowMs - ARCHIVE_MIN_AGE_DAYS * 24 * 3600 * 1000;
   const ageEligible: string[] = [];
   const recent: MemoryGcCandidate[] = [];
   for (const c of disabled) {
@@ -271,7 +321,8 @@ function planMemoryArchive(
     archived.push(
       ...[...recent]
         .sort(
-          (a, b) => tsOrZero(a.entry) - tsOrZero(b.entry) ||
+          (a, b) =>
+            tsOrZero(a.entry) - tsOrZero(b.entry) ||
             a.slug.localeCompare(b.slug)
         )
         .slice(0, excess)

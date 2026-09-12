@@ -34,8 +34,19 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMemorySaveTool } from "../../../src/harness/memory/tools/save.ts";
-import { parseMemoryEntry } from "../../../src/harness/memory/index.ts";
-import type { MemoryError } from "../../../src/harness/memory/index.ts";
+import {
+  CAPABILITY_OBSERVATION_REASON,
+  parseMemoryEntry,
+} from "../../../src/harness/memory/index.ts";
+import type {
+  MemoryCapabilityRejected,
+  MemoryError,
+} from "../../../src/harness/memory/index.ts";
+import { createRegistry } from "../../../src/harness/tools/registry.ts";
+import { createExecutor } from "../../../src/harness/tools/executor.ts";
+import { toAnthropicToolResults } from "../../../src/harness/tools/tool-result.ts";
+import { createAciRegistry } from "../../../src/harness/aci/aci-registry.ts";
+import { createAciExecutor } from "../../../src/harness/aci/aci-executor.ts";
 
 let memoryDir: string;
 
@@ -328,6 +339,193 @@ describe("memory_save — concurrent writes do not corrupt the filesystem", () =
         (err as MemoryError).name === "MemoryError" ||
         (err as MemoryError).name === "MemoryIOError"
     );
+  });
+});
+
+// -- runtime capability persist gate (ADR-0086 / SC1) ------------------------
+
+describe("memory_save — runtime capability persist gate", () => {
+  const CAPABILITY_FIXTURES = [
+    {
+      label: "web_search unavailable via sandbox DNS/SSRF segment",
+      title: "web_search is unavailable in this sandbox",
+      body: "The sandbox DNS/SSRF benchmarking segment blocks web_search.",
+      type: "constraint",
+    },
+    {
+      label: "no real outbound network in this environment",
+      title: "本环境没有真实出网",
+      body: "本环境没有真实出网，web 工具与搜索工具均不可用。",
+      type: "constraint",
+    },
+  ];
+
+  for (const fixture of CAPABILITY_FIXTURES) {
+    it(`rejects and writes nothing: ${fixture.label}`, async () => {
+      const tool = createMemorySaveTool({ memoryDir });
+      await assert.rejects(
+        async () => {
+          await tool.handler({
+            title: fixture.title,
+            body: fixture.body,
+            type: fixture.type,
+          });
+        },
+        (err: unknown) => {
+          const e = err as MemoryCapabilityRejected;
+          return (
+            e.name === "MemoryCapabilityRejected" &&
+            e.reason === CAPABILITY_OBSERVATION_REASON &&
+            e.detail.length > 0
+          );
+        }
+      );
+      // No new slug, no MEMORY.md: the gate fires before any disk mutation.
+      assert.deepEqual(await readdir(memoryDir), []);
+    });
+  }
+
+  it("leaves an existing MEMORY.md byte-identical after a rejected save", async () => {
+    const tool = createMemorySaveTool({ memoryDir });
+    await tool.handler({ title: "Use bar()", body: "bar() is the entry point." });
+    const indexPath = join(memoryDir, "MEMORY.md");
+    const before = await readFile(indexPath, "utf8");
+    const filesBefore = await readdir(memoryDir);
+
+    await assert.rejects(async () => {
+      await tool.handler({
+        title: "本环境没有真实出网",
+        body: "本环境没有真实出网，web 工具与搜索工具均不可用。",
+      });
+    });
+
+    assert.equal(await readFile(indexPath, "utf8"), before);
+    assert.deepEqual(await readdir(memoryDir), filesBefore);
+  });
+
+  it("still persists a product-policy constraint (SC1 positive)", async () => {
+    const tool = createMemorySaveTool({ memoryDir });
+    const out = await tool.handler({
+      title: "隔离 ON 时 mutate 须先建 worktree",
+      body: "隔离开启时，任何 mutate 类工具调用必须先建立 worktree 再执行。",
+      type: "constraint",
+    });
+    assert.match(out as string, /persisted as/);
+    const files = await readdir(memoryDir);
+    assert.equal(
+      files.filter((f) => f.endsWith(".md") && f !== "MEMORY.md").length,
+      1
+    );
+  });
+
+  it("still persists a project convention", async () => {
+    const tool = createMemorySaveTool({ memoryDir });
+    const out = await tool.handler({
+      title: "测试命令与目录习惯",
+      body: "跑测试用 npm test；单元测试放 tests/harness。",
+      type: "convention",
+    });
+    assert.match(out as string, /persisted as/);
+  });
+
+  // Order is pinned: the empty-input gate must win before the capability gate,
+  // so an empty draft reports the older, more precise failure.
+  it("hits the empty-input gate first for an empty title/body draft", async () => {
+    const tool = createMemorySaveTool({ memoryDir });
+    await assert.rejects(
+      async () => {
+        await tool.handler({ title: "", body: "" });
+      },
+      (err: unknown) => {
+        const e = err as MemoryError;
+        return (
+          e.name === "MemoryError" && /title must be a non-empty/.test(e.message)
+        );
+      }
+    );
+  });
+
+  it("hits the affirmative-phrasing gate before the capability gate", async () => {
+    const tool = createMemorySaveTool({ memoryDir });
+    await assert.rejects(
+      async () => {
+        await tool.handler({
+          title: "Never call web_search",
+          body: "web_search is unavailable here.",
+        });
+      },
+      (err: unknown) => {
+        const e = err as MemoryError;
+        return e.name === "MemoryError" && /negative_form/.test(e.message);
+      }
+    );
+  });
+
+  // Model-visible string, pinned end to end: handler -> registry -> executor
+  // -> anthropic tool_result. The rejection reason must reach the model, not
+  // collapse into the executor's generic "tool execution failed".
+  it("reaches the model as an execution_failed tool_result with the reason", async () => {
+    const tool = createMemorySaveTool({ memoryDir });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const results = await exec.executeAll([
+      {
+        id: "c1",
+        name: "memory_save",
+        input: {
+          title: "本环境没有真实出网",
+          body: "本环境没有真实出网，web 工具与搜索工具均不可用。",
+        },
+      },
+    ]);
+    assert.equal(results[0]!.kind, "execution_failed");
+    const message =
+      results[0]!.kind === "execution_failed" ? results[0]!.message : "";
+    assert.match(message, /memory_save/);
+    assert.match(message, /capability_observation/);
+    assert.deepEqual(
+      await readdir(memoryDir),
+      [],
+      "the rejected draft must not touch disk"
+    );
+
+    const blocks = toAnthropicToolResults(results);
+    assert.equal(blocks[0]!.type, "tool_result");
+    const content = blocks[0]!.content;
+    const text =
+      typeof content === "string"
+        ? content
+        : (content as ReadonlyArray<{ text: string }>)[0]!.text;
+    assert.ok(
+      text.includes("capability_observation"),
+      `model-visible string must carry the reason, got: ${text}`
+    );
+  });
+
+  // Same claim on the production wiring (ACI registry + permission gate), so
+  // the reason cannot be lost in a layer the bare executor test skips.
+  it("keeps the reason readable through the real ACI executor chain", async () => {
+    const tool = createMemorySaveTool({ memoryDir });
+    const reg = createAciRegistry([tool]);
+    const exec = createAciExecutor({
+      inner: createExecutor(reg.inner),
+      catalog: reg.catalog,
+    });
+    const results = await exec.executeAll([
+      {
+        id: "c1",
+        name: "memory_save",
+        input: {
+          title: "本环境没有真实出网",
+          body: "本环境没有真实出网，web 工具与搜索工具均不可用。",
+        },
+      },
+    ]);
+    assert.equal(results[0]!.kind, "execution_failed");
+    const message =
+      results[0]!.kind === "execution_failed" ? results[0]!.message : "";
+    assert.match(message, /capability_observation/);
+    assert.deepEqual(await readdir(memoryDir), []);
   });
 });
 

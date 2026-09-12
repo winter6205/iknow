@@ -63,7 +63,8 @@
 
 - `196-identity-assembly.md` — 身份认知装配（identity / soul / 首启 BOOTSTRAP）
 - `git-work.md` — git 作业（bash add/commit 纪律段；仅 isolation ON 的 chat/tui/serve；不新增 git ACI 工具；plan: `plans/git-work.md`）
-- `auto-memory.md` — 自动记忆抽取 + 机械清理（兑现 ADR-0009 D5，决策沉淀于 ADR-0031；默认 OFF；plan: `plans/auto-memory.md`）
+- `auto-memory.md` — 自动记忆抽取 + 机械清理（兑现 ADR-0009 D5，决策沉淀于 ADR-0031；默认 OFF；plan: `plans/auto-memory.md`）；完成回合闸与双关钩子 **amended by** `runtime-capability-memory-gate.md`
+- `runtime-capability-memory-gate.md` — 能力观测不准进库 · 读侧过滤 · 与抽取同闸 sweep（默认 3 个 `completed`；#988；plan: `plans/runtime-capability-memory-gate.md`）
 - `memory-layer-follow-ups.md` — recall 过滤 disabled · type 封闭枚举 · 用户级 AGENTS 与 user.md 同根（叠项目 AGENTS）；plan: `plans/memory-layer-follow-ups.md`（#729–#732）
 - `auto-memory-complete-upgrade.md` — CJK 近邻切分 · dream 离线合并 · §2.5 Medium（per-root 钩子 / 共用 notify）；plan: `plans/auto-memory-complete-upgrade.md`（文档轨，无 tracker issue）
 - `auto-memory-low-trust-read.md` — 目录进 system · 预取进用户消息 · 低信任英文标注（第三次读路径改进；底 = 完整升级 + dream 双闸）；plan: `plans/auto-memory-low-trust-read.md`；指针/纪律句/recall 默认条数 **amended by** `casual-ask-context-hygiene.md`

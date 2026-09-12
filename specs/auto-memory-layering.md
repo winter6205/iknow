@@ -3,6 +3,8 @@
 > 2026-08-29 LogicSync：整理归梦境、抽取为第一层；`autoExtract` 开则梦境一起开；闸文件 SSOT 为 `dream.json`（无旧名兼容）。操作员授权本讨论结论直接成文。
 >
 > **Amended 2026-09-05** by `specs/promote-bodies-never-enter-system.md`：promote 资格只给 `memory_gc` 效用、`system` 不再拼 promote 正文；本 spec 的 promote 装配闸段、SC7/SC8、auto_extract 的 promote 装配提法、Assumption 4 的 promote 段描述、Objective 的 promote-in-system 提法、Changes 的 promote 装配条目让位给彼 spec。本 spec 余下范围（抽取收窄、梦境 `replaces` 落盘、`dream.json`、热目录归档）仍有效。
+>
+> **Amended 2026-09-11** by `specs/runtime-capability-memory-gate.md`：完成回合闸与双关钩子以 CONTEXT / ADR-0031 现行条为准（N≥3、机械-only 钩子可在场）。本文件 Glossary 里旧「N≥2 / 双关钩子缺席」不再是 SSOT。
 
 ## Glossary（exact copy from docs/CONTEXT.md）
 
@@ -51,7 +53,7 @@ chat / tui / serve 上自动记忆分成两层：**抽取**只从本段对话往
   - **promote 装配**：本 spec 原「`assembleSystemPrompt` 仅当 `ctx.autoExtract === true` 且有资格条时 `formatPromote`」条款已让位给 `specs/promote-bodies-never-enter-system.md` / ADR-0044：任何 provenance、任何 `autoExtract` 值下都不输出 `formatPromote` 形态正文。本 spec 不再单列 promote 装配口径。
   - **归档**：`disabled === true` 且（`updated_at` 距今 ≥ 30 天 **或** 热目录内 disabled 条数 > store cap）→ 将该 `<slug>.md` 移到 `memoryDir/archive/`。`listStoreEntries` / recall / prefetch / 梦境 prompt 输入不打开 `archive/`。不硬删。`MEMORY.md` 对应行删除或忽略失效链（实施钉一种，测例锁）。
 - **Confirms with human:** （无。2026-08-29 操作员确认分层、同闸、A 落盘、归档进本张、`dream.json`、不做兼容。）
-- **Out of this spec:** 默认 ON；向量/图；记忆 MCP / 冷库；硬删归档后的文件；任务中 `memory_update` / `memory_save` 按 id；ES；改 BM25 公式；改抽取 N≥2 或梦境 24h∧5；改 catalog/prefetch 数值；STATUS §2.5 Low（drain / 错误类型）除非挡住本契约；`ask` 接线。
+- **Out of this spec:** 默认 ON；向量/图；记忆 MCP / 冷库；硬删归档后的文件；任务中 `memory_update` / `memory_save` 按 id；ES；改 BM25 公式；改梦境 24h∧5；改 catalog/prefetch 数值；STATUS §2.5 Low（drain / 错误类型）除非挡住本契约；`ask` 接线。抽取完成回合闸 **amended by** `runtime-capability-memory-gate.md`（原「不改 N≥2」让位）。
 
 ## Success Criteria
 

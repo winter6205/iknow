@@ -1,5 +1,7 @@
 # Spec: auto-memory（自动记忆抽取 + 清理）
 
+> **Amended by** `runtime-capability-memory-gate.md`：默认 `completed` 闸 2→3；`autoExtract` 关时机械-only 钩子仍可跑 GC+sweep（SC1「关抽取则与现网逐字节一致」不再涵盖机械段）；能力观测不得 persist。
+>
 > 兑现 ADR-0009 Decision 5 延期项：在现有 FS 记忆库 + BM25 + `memory_save`/`memory_recall` + promote 之上，落地可开关的自动写入与清理。
 
 ## Objective
@@ -23,7 +25,7 @@ chat / tui / serve 在 **opt-in** 下，于成功 run 结束后异步抽出跨�
 
 | ID  | 决策                                                                                                                                                               |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| D1  | **触发**：成功 `StopReason=completed` 之后异步（host 侧）；默认 **session 收尾或 N≥2 完成 turn 闸**，禁止每 turn 强制巩固。                                        |
+| D1  | **触发**：成功 `StopReason=completed` 之后异步（host 侧）；默认完成 turn 闸见 `runtime-capability-memory-gate.md`（现行 **N≥3**），禁止每 turn 强制巩固。          |
 | D2  | **写入算法**：LLM 抽原子候选 → BM25 近邻 → 裁定 `ADD \| UPDATE \| SUPERSEDE \| NOOP` → 共用 `memory_save` 原子写路径；frontmatter `source: auto`；肯定句门禁复用。 |
 | D3  | **清理算法**：机械 GC 优先——TTL disable、store cap 效用驱逐（`importance × recency × recall_count`）、supersede 软禁；LLM 离线合并 **本轨不做**。                  |
 | D4  | **信任**：`source:auto` 只走 tool_result 通道；不自动 promote；抽取失败 typed + host `// EXIT:` 吞掉，不 fail turn。                                               |

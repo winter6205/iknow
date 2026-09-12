@@ -9,6 +9,7 @@
  * remove eligible entries from the user-side overlay.
  */
 import { scoreMemoryEntries, type ScoredEntry } from "./bm25.js";
+import { isCapabilityObservationEntry } from "./capability-gate.js";
 import type { MemoryEntryV1 } from "./schema.js";
 import { listStoreEntries } from "./store.js";
 
@@ -66,9 +67,14 @@ export function selectPrefetchHits(
   const excludeIds = opts?.excludeIds;
   // T1 contract: already-injected ids are removed BEFORE scoring, so dedup
   // never consumes one of the top-5 slots (next-best entry backfills).
+  // `disabled` stays the first gate, so a soft-disabled row is never
+  // classified; the capability filter then drops runtime snapshots (spec
+  // runtime-capability-memory-gate 读侧过滤) before they can consume a slot.
   const live = entries.filter(
     (entry) =>
-      !entry.disabled && !(excludeIds !== undefined && excludeIds.has(entry.id))
+      !entry.disabled &&
+      !(excludeIds !== undefined && excludeIds.has(entry.id)) &&
+      !isCapabilityObservationEntry(entry)
   );
   const scored = scoreMemoryEntries(query, live, { nowMs: opts?.nowMs });
   // ADR-0044: zero-overlap hits are still ineligible; promote eligibility is

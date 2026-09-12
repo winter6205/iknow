@@ -11,6 +11,10 @@
  *   - affirmative phrasing rejection: any of `don't`/`never`/`禁止`/`不要`/
  *     `不能`/body starting with `not ` (case-insensitive word match) → typed
  *     MemoryError before any disk mutation (spec SC 9)
+ *   - runtime capability persist gate (runtime-capability-memory-gate T2 /
+ *     ADR-0086): a runtime capability / environment-availability observation
+ *     → typed `MemoryCapabilityRejected` before any disk mutation; product
+ *     policy constraints and conventions still pass
  *   - atomic write (tmp/rename): every rename lands a complete file or no file
  *     (concurrent saves cannot interleave a partial entry — 5 boundary class)
  *   - frontmatter auto-writes 6 fields + current timestamp
@@ -27,7 +31,15 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
 import type { AciToolDef } from "../../aci/types.js";
-import { MemoryError, MemoryIOError } from "../errors.js";
+import {
+  MemoryCapabilityRejected,
+  MemoryError,
+  MemoryIOError,
+} from "../errors.js";
+import {
+  CAPABILITY_OBSERVATION_REASON,
+  detectCapabilityObservation,
+} from "../capability-gate.js";
 import { serializeMemoryEntry } from "../frontmatter.js";
 import { normalizeMemoryType } from "../schema.js";
 import type { MemoryEntryV1 } from "../schema.js";
@@ -84,12 +96,7 @@ export function createMemorySaveTool(deps: MemorySaveToolDeps): AciToolDef {
     } as const,
     handler: async (input: unknown) => {
       const params = parseInput(input);
-      const reason = validateAffirmativePhrasing(params.title, params.body);
-      if (reason !== null) {
-        throw new MemoryError(
-          `[memory_save] rejected: negative_form — ${reason}`
-        );
-      }
+      assertDraftAllowed(params);
       const entry: MemoryEntryV1 = {
         id: "", // filled by serialize from frontmatter; we use slug as canonical key
         type: params.type,
@@ -140,6 +147,30 @@ function parseInput(input: unknown): ParsedInput {
       ? DEFAULT_IMPORTANCE
       : requireImportance(raw.importance);
   return { title: raw.title, body: raw.body, type, importance };
+}
+
+/**
+ * The two persist gates, in their pinned order: affirmative phrasing (spec
+ * SC 9) first, then the runtime capability gate (ADR-0086). `parseInput` has
+ * already rejected empty / malformed input, and nothing may touch disk until
+ * both pass. The capability arm throws rather than dropping because
+ * `memory_save` is a foreground tool call the model must learn from.
+ */
+function assertDraftAllowed(params: ParsedInput): void {
+  const reason = validateAffirmativePhrasing(params.title, params.body);
+  if (reason !== null) {
+    throw new MemoryError(`[memory_save] rejected: negative_form — ${reason}`);
+  }
+  const capabilityReason = detectCapabilityObservation({
+    title: params.title,
+    body: params.body,
+  });
+  if (capabilityReason !== null) {
+    throw new MemoryCapabilityRejected(
+      CAPABILITY_OBSERVATION_REASON,
+      capabilityReason
+    );
+  }
 }
 
 function requireImportance(value: unknown): number {
@@ -254,18 +285,96 @@ export async function upsertMemoryIndex(
       });
     }
   }
-  const line = `- [${entry.title}](${slug}.md) · importance=${entry.importance} · updated_at=${entry.updated_at}`;
-  const next = appendLine(existing, line);
-  const tmpPath = `${indexPath}.${process.pid}.${Date.now()}.${slug}.tmp`;
+  const next = appendLine(existing, formatIndexLine(slug, entry));
   try {
     await mkdir(memoryDir, { recursive: true });
-    await writeFile(tmpPath, next, "utf8");
-    await rename(tmpPath, indexPath);
+    await replaceIndexFile(indexPath, next, slug);
   } catch (error) {
     throw new MemoryIOError(`[memory_save] MEMORY.md update failed`, {
       cause: error,
     });
   }
+}
+
+/**
+ * Replace the row that links `<slug>.md` with a row rendered from the stored
+ * entry (runtime-capability-memory-gate T5 / SC10). A refreshed row carries
+ * the new title as well as importance and updated_at, so the human index
+ * never points at a title the store no longer holds.
+ *
+ * The link `(slug.md)` is the row's identity — the title in front of it is
+ * exactly what an UPDATE changes. Rows for other slugs are preserved byte for
+ * byte. An UPDATE on a slug with no row adds it: the index is derived from
+ * the store, so a missing row is a gap rather than a statement.
+ *
+ * A missing MEMORY.md stays missing — refreshing one row is not a reason to
+ * materialize a file that was never written (same choice as the GC line
+ * remover). Re-running is a no-op: the second pass writes an identical row.
+ */
+export async function refreshMemoryIndexLine(
+  memoryDir: string,
+  slug: string,
+  entry: MemoryEntryV1
+): Promise<void> {
+  const indexPath = join(memoryDir, "MEMORY.md");
+  let existing: string;
+  try {
+    existing = await readFile(indexPath, "utf8");
+  } catch (error) {
+    // EXIT: no-op — the index was never written; not an error.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new MemoryIOError(`[memory_save] read MEMORY.md failed`, {
+      cause: error,
+    });
+  }
+  const next = replaceSlugLine(existing, slug, formatIndexLine(slug, entry));
+  if (next === existing) return;
+  try {
+    await replaceIndexFile(indexPath, next, slug);
+  } catch (error) {
+    throw new MemoryIOError(`[memory_save] MEMORY.md update failed`, {
+      cause: error,
+    });
+  }
+}
+
+/** The one place the MEMORY.md row format lives. */
+function formatIndexLine(slug: string, entry: MemoryEntryV1): string {
+  return `- [${entry.title}](${slug}.md) · importance=${entry.importance} · updated_at=${entry.updated_at}`;
+}
+
+/** Write MEMORY.md via tmp+rename: a reader sees the old rows or the new. */
+async function replaceIndexFile(
+  indexPath: string,
+  content: string,
+  slug: string
+): Promise<void> {
+  const tmpPath = `${indexPath}.${process.pid}.${Date.now()}.${slug}.tmp`;
+  await writeFile(tmpPath, content, "utf8");
+  await rename(tmpPath, indexPath);
+}
+
+/**
+ * Swap the row linking `slug.md` for `line`, dropping later duplicates of the
+ * same link so a slug owns at most one row. Unrelated rows keep their
+ * position. Appends when no row mentions the slug.
+ */
+function replaceSlugLine(existing: string, slug: string, line: string): string {
+  const link = `(${slug}.md)`;
+  const rows = existing.split("\n");
+  if (!rows.some((row) => row.includes(link)))
+    return appendLine(existing, line);
+  const out: string[] = [];
+  let replaced = false;
+  for (const row of rows) {
+    if (!row.includes(link)) {
+      out.push(row);
+    } else if (!replaced) {
+      out.push(line);
+      replaced = true;
+    }
+  }
+  return out.join("\n");
 }
 
 /** Append `line` to `existing` if not already present (idempotent on replay). */

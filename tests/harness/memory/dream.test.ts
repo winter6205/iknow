@@ -469,3 +469,103 @@ describe("runMemoryDream — replaces", () => {
     }
   });
 });
+
+// -- runtime capability persist gate (ADR-0086) ------------------------------
+
+describe("runMemoryDream — runtime capability gate", () => {
+  const seed = async (memoryDir: string): Promise<void> => {
+    await writeFile(
+      join(memoryDir, "old.md"),
+      serializeMemoryEntry(entry("old")),
+      "utf8"
+    );
+    await writeFile(
+      join(memoryDir, "sib.md"),
+      serializeMemoryEntry(
+        entry("sib", {
+          title: "Use queue for parallel work",
+          body: "The scheduler queue handles concurrent tasks.",
+        })
+      ),
+      "utf8"
+    );
+  };
+
+  // The dream path shares persistMemoryOps with extract: a capability
+  // candidate must be dropped there too, without breaking the merge pass.
+  it("drops a capability candidate while a sibling SUPERSEDE still lands", async () => {
+    const memoryDir = await mkdtemp(join(tmpdir(), "memory-dream-cap-"));
+    try {
+      await seed(memoryDir);
+      const llm: MemoryExtractLlm = {
+        complete: async () =>
+          JSON.stringify([
+            {
+              title: "本环境没有真实出网",
+              body: "本环境没有真实出网，web 工具与搜索工具均不可用。",
+              type: "constraint",
+            },
+            {
+              title: "Use queue for concurrency",
+              body: "Concurrency routes through the scheduler queue as of v3.",
+              type: "convention",
+              importance: 4,
+              replaces: ["old"],
+            },
+          ]),
+      };
+
+      const result = await runMemoryDream({ memoryDir, llm });
+
+      assert.ok(
+        result.ops.some((op) => op.kind === "SUPERSEDE"),
+        "the non-capability candidate must still be decided"
+      );
+      assert.equal(result.written.length, 1);
+      assert.equal(result.written[0]!.kind, "SUPERSEDE");
+      const fresh = await readFile(
+        join(memoryDir, `${result.written[0]!.slug}.md`),
+        "utf8"
+      );
+      assert.ok(
+        !/capability|出网/.test(fresh),
+        "capability text must not reach disk"
+      );
+    } finally {
+      await rm(memoryDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps SUPERSEDE working when no capability candidate is present", async () => {
+    const memoryDir = await mkdtemp(join(tmpdir(), "memory-dream-nocap-"));
+    try {
+      await seed(memoryDir);
+      const llm: MemoryExtractLlm = {
+        complete: async () =>
+          JSON.stringify([
+            {
+              title: "Use queue for concurrency",
+              body: "Concurrency routes through the scheduler queue as of v3.",
+              type: "convention",
+              importance: 4,
+              replaces: ["old"],
+            },
+          ]),
+      };
+
+      const result = await runMemoryDream({ memoryDir, llm });
+
+      assert.equal(result.written.length, 1);
+      assert.equal(result.written[0]!.kind, "SUPERSEDE");
+      const stored = parseMemoryEntry(
+        await readFile(
+          join(memoryDir, `${result.written[0]!.slug}.md`),
+          "utf8"
+        )
+      );
+      assert.deepEqual(stored.supersedes, ["old"]);
+    } finally {
+      await rm(memoryDir, { recursive: true, force: true });
+    }
+  });
+});

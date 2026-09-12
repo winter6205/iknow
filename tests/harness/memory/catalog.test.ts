@@ -66,3 +66,22 @@ describe("formatMemoryCatalog", () => {
     assert.ok(out.startsWith(MEMORY_CATALOG_DISCIPLINE));
   });
 });
+
+describe("formatMemoryCatalog — capability filtering lives in the caller", () => {
+  // The formatter stays a dumb renderer: it takes whatever live list the
+  // caller passes, and the read-side filter (assembly / recall / prefetch)
+  // is what drops capability observations. Pin the separation so a later
+  // "just filter inside the formatter" edit cannot silently change recall /
+  // prefetch behavior through this shared helper.
+  it("renders whatever list it is handed, capability-shaped titles included", () => {
+    const out = formatMemoryCatalog([
+      live(
+        "cap",
+        "沙箱 DNS / SSRF / benchmarking 段导致 web_search 不可用",
+        "本环境没有真实出网，不要调用 web 工具"
+      ),
+    ]);
+    assert.ok(out !== undefined, "formatter renders the list it is given");
+    assert.ok(out?.includes("沙箱 DNS / SSRF"));
+  });
+});

@@ -40,6 +40,7 @@ import {
   type MemoryLayerEntry,
 } from "./discovery.js";
 import { formatMemoryCatalog } from "./catalog.js";
+import { isCapabilityObservationEntry } from "./capability-gate.js";
 import type { MemoryEntryV1 } from "./schema.js";
 import { listStoreEntries } from "./store.js";
 
@@ -208,6 +209,10 @@ function rulesManifestSegment(
 /**
  * Live-entry directory + locked English discipline. IO / parse failure
  * skips the segment so a missing catalog cannot fail the user turn.
+ * `disabled` stays the first gate; the capability filter then keeps runtime
+ * snapshots out of the session snapshot (spec runtime-capability-memory-gate
+ * 读侧过滤 / SC7, ADR-0042 snapshot eats the filtered list). Filtering lives
+ * here, not in formatMemoryCatalog, which stays a dumb formatter.
  */
 async function loadCatalogSegment(
   memoryDir: string
@@ -215,7 +220,9 @@ async function loadCatalogSegment(
   try {
     const scan = await listStoreEntries(memoryDir);
     const live = scan.entries
-      .filter((row) => !row.entry.disabled)
+      .filter(
+        (row) => !row.entry.disabled && !isCapabilityObservationEntry(row.entry)
+      )
       .map((row) => row.entry);
     return formatMemoryCatalog(live);
   } catch (err) {

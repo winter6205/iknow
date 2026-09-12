@@ -104,6 +104,18 @@ const slugsOnDisk = async (): Promise<string[]> =>
     .map((n) => n.slice(0, -3))
     .sort();
 
+/** MEMORY.md lines linking the slug — the index rows a human would read. */
+const indexLines = async (slug: string): Promise<string[]> =>
+  (await readFile(join(memoryDir, "MEMORY.md"), "utf8"))
+    .split("\n")
+    .filter((line) => line.includes(`(${slug}.md)`));
+
+/** Exactly the line the ADD path writes, so UPDATE can be seeded a stale one. */
+const indexLine = (slug: string, o: Partial<MemoryEntryV1>): string => {
+  const e = entry({ id: slug, ...o });
+  return `- [${e.title}](${slug}.md) · importance=${e.importance} · updated_at=${e.updated_at}`;
+};
+
 const TRANSCRIPT = [
   "user: which entry point is safe to call from two threads?",
   "assistant: bar() is the thread-safe entry point in this repo.",
@@ -496,7 +508,8 @@ describe("extract bilingual keyword discipline", () => {
   });
   const keywordFree = entry({
     id: "keyword-free",
-    title: "Follow artificial-intelligence news outlets for daily model releases",
+    title:
+      "Follow artificial-intelligence news outlets for daily model releases",
     body: "The assistant tracks model releases from official labs each morning.",
   });
 
@@ -516,7 +529,10 @@ describe("extract bilingual keyword discipline", () => {
     assert.equal(result.written.length, 1);
     const stored = await readSlug(result.written[0]!.slug);
     const scored = scoreMemoryEntries(QUERY, [stored])[0]!;
-    assert.ok(scored.titleHits > 0, "title keywords must hit the Chinese query");
+    assert.ok(
+      scored.titleHits > 0,
+      "title keywords must hit the Chinese query"
+    );
     assert.ok(scored.bodyHits > 0, "body keywords must hit the Chinese query");
   });
 
@@ -787,8 +803,20 @@ describe("persistMemoryOps", () => {
 
     const added = await persistMemoryOps(
       memoryDir,
-      [{ kind: "ADD", candidate: candidate({ title: "Release cadence", body: "Releases ship every Tuesday." }) }],
-      { now: () => NOW_ISO, randomBytes: () => Buffer.from("aabbccddeeff", "hex"), ttlDays: 7 }
+      [
+        {
+          kind: "ADD",
+          candidate: candidate({
+            title: "Release cadence",
+            body: "Releases ship every Tuesday.",
+          }),
+        },
+      ],
+      {
+        now: () => NOW_ISO,
+        randomBytes: () => Buffer.from("aabbccddeeff", "hex"),
+        ttlDays: 7,
+      }
     );
     assert.equal(
       (await readSlug(added[0]!.slug)).ttl_days,
@@ -845,6 +873,300 @@ describe("persistMemoryOps", () => {
     const index = await readFile(join(memoryDir, "MEMORY.md"), "utf8");
     assert.ok(index.includes(`${written[0]!.slug}.md`), index);
   });
+
+  it("appends exactly one index line per ADD, even when the slug repeats", async () => {
+    const deps = {
+      now: () => NOW_ISO,
+      randomBytes: () => Buffer.from("aabbccddeeff", "hex"),
+    };
+    await persistMemoryOps(
+      memoryDir,
+      [{ kind: "ADD", candidate: candidate() }],
+      deps
+    );
+    await persistMemoryOps(
+      memoryDir,
+      [{ kind: "ADD", candidate: candidate() }],
+      deps
+    );
+    assert.equal((await indexLines("aabbccddeeff")).length, 1);
+  });
+
+  // SC10: the index is the human entry point into the store. A title change
+  // that leaves the old link text behind points a reader at a lie.
+  it("replaces the slug's index line on UPDATE (old title gone, exactly one line)", async () => {
+    await put("old");
+    await writeFile(
+      join(memoryDir, "MEMORY.md"),
+      `${indexLine("old", {})}\n`,
+      "utf8"
+    );
+    const next = candidate({ title: "Use baz() for concurrency" });
+    await persistMemoryOps(
+      memoryDir,
+      [{ kind: "UPDATE", slug: "old", candidate: next }],
+      { now: () => NOW_ISO, randomBytes: seqBytes() }
+    );
+    const lines = await indexLines("old");
+    assert.equal(lines.length, 1, JSON.stringify(lines));
+    assert.equal(
+      lines[0],
+      indexLine("old", {
+        title: next.title,
+        importance: next.importance,
+        updated_at: NOW_ISO,
+      })
+    );
+  });
+
+  it("is idempotent on a replayed UPDATE (still exactly one line)", async () => {
+    await put("old");
+    await writeFile(
+      join(memoryDir, "MEMORY.md"),
+      `${indexLine("old", {})}\n`,
+      "utf8"
+    );
+    const op = {
+      kind: "UPDATE" as const,
+      slug: "old",
+      candidate: candidate({ title: "Use baz() for concurrency" }),
+    };
+    await persistMemoryOps(memoryDir, [op], {
+      now: () => NOW_ISO,
+      randomBytes: seqBytes(),
+    });
+    await persistMemoryOps(memoryDir, [op], {
+      now: () => NOW_ISO,
+      randomBytes: seqBytes(),
+    });
+    assert.equal((await indexLines("old")).length, 1);
+  });
+
+  it("replaces the ADD-written line on a following UPDATE without growing the index", async () => {
+    const written = await persistMemoryOps(
+      memoryDir,
+      [{ kind: "ADD", candidate: candidate() }],
+      {
+        now: () => NOW_ISO,
+        randomBytes: () => Buffer.from("aabbccddeeff", "hex"),
+      }
+    );
+    const slug = written[0]!.slug;
+    assert.equal((await indexLines(slug)).length, 1, "ADD writes one row");
+    const rowsBefore = (
+      await readFile(join(memoryDir, "MEMORY.md"), "utf8")
+    ).split("\n").length;
+
+    const next = candidate({ title: "Use baz() for concurrency" });
+    await persistMemoryOps(
+      memoryDir,
+      [{ kind: "UPDATE", slug, candidate: next }],
+      { now: () => NOW_ISO, randomBytes: seqBytes() }
+    );
+    const lines = await indexLines(slug);
+    assert.equal(lines.length, 1, "UPDATE must not append a sibling row");
+    assert.ok(lines[0]!.includes(next.title), lines[0]!);
+    assert.ok(!lines[0]!.includes(candidate().title), lines[0]!);
+    assert.equal(
+      (await readFile(join(memoryDir, "MEMORY.md"), "utf8")).split("\n").length,
+      rowsBefore,
+      "the row count is stable across ADD then UPDATE"
+    );
+  });
+
+  // ADD stays append-only: it never rewrites an existing row, so a slug that
+  // somehow already has one gains a second rather than losing the old text.
+  // Row surgery is the UPDATE path's job (refreshMemoryIndexLine).
+  it("keeps ADD append-only semantics when a stale line for the slug exists", async () => {
+    await writeFile(
+      join(memoryDir, "MEMORY.md"),
+      `${indexLine("deadbeefcafe", { title: "Stale title" })}\n`,
+      "utf8"
+    );
+    await persistMemoryOps(
+      memoryDir,
+      [{ kind: "ADD", candidate: candidate() }],
+      {
+        now: () => NOW_ISO,
+        randomBytes: () => Buffer.from("deadbeefcafe", "hex"),
+      }
+    );
+    const lines = await indexLines("deadbeefcafe");
+    assert.equal(
+      lines.length,
+      2,
+      "ADD appends; it does not own the stale line"
+    );
+    assert.ok(
+      lines.some((l) => l.includes("Stale title")),
+      lines.join("\n")
+    );
+    assert.ok(
+      lines.some((l) => l.includes(candidate().title)),
+      lines.join("\n")
+    );
+  });
+
+  it("refreshes title, importance and updated_at together on UPDATE", async () => {
+    await put("old");
+    await writeFile(
+      join(memoryDir, "MEMORY.md"),
+      `${indexLine("old", { importance: 1 })}\n`,
+      "utf8"
+    );
+    const next = candidate({
+      title: "Use baz() for concurrency",
+      importance: 5,
+    });
+    await persistMemoryOps(
+      memoryDir,
+      [{ kind: "UPDATE", slug: "old", candidate: next }],
+      { now: () => NOW_ISO, randomBytes: seqBytes() }
+    );
+    const lines = await indexLines("old");
+    assert.equal(lines.length, 1, JSON.stringify(lines));
+    const line = lines[0]!;
+    assert.ok(line.includes(next.title), line);
+    assert.ok(line.includes("importance=5"), line);
+    assert.ok(line.includes(`updated_at=${NOW_ISO}`), line);
+  });
+
+  // Missing MEMORY.md is the same no-op the GC line remover chooses: updating
+  // one row is not a reason to materialize an index that was never written.
+  it("leaves a missing MEMORY.md missing on UPDATE while the entry still lands", async () => {
+    await put("old");
+    await persistMemoryOps(
+      memoryDir,
+      [
+        {
+          kind: "UPDATE",
+          slug: "old",
+          candidate: candidate({ title: "Use baz() for concurrency" }),
+        },
+      ],
+      { now: () => NOW_ISO, randomBytes: seqBytes() }
+    );
+    assert.ok(
+      !(await readdir(memoryDir)).includes("MEMORY.md"),
+      "UPDATE must not create the index"
+    );
+    assert.equal((await readSlug("old")).title, "Use baz() for concurrency");
+  });
+});
+
+// -- runtime capability persist gate (ADR-0086 / SC6) ------------------------
+
+describe("persistMemoryOps — runtime capability gate", () => {
+  const CAPABILITY_BODY = "本环境没有真实出网，web 工具与搜索工具均不可用。";
+
+  // Contrast with the save path: here the op is dropped, not thrown — the
+  // caller is a background pass and must not fail the user turn.
+  it("drops a capability ADD without throwing", async () => {
+    const written = await persistMemoryOps(
+      memoryDir,
+      [
+        {
+          kind: "ADD",
+          candidate: candidate({
+            title: "web_search is unavailable in this sandbox",
+            body: "The sandbox blocks outbound network access.",
+          }),
+        },
+      ],
+      { now: () => NOW_ISO, randomBytes: seqBytes() }
+    );
+    assert.deepEqual(written, []);
+    assert.deepEqual(await slugsOnDisk(), []);
+  });
+
+  it("persists a sibling non-capability candidate in the same batch", async () => {
+    const written = await persistMemoryOps(
+      memoryDir,
+      [
+        {
+          kind: "ADD",
+          candidate: candidate({
+            title: "web_search is unavailable in this sandbox",
+            body: "The sandbox blocks outbound network access.",
+          }),
+        },
+        {
+          kind: "ADD",
+          candidate: candidate({
+            title: "Release cadence",
+            body: "Releases ship every Tuesday.",
+          }),
+        },
+      ],
+      { now: () => NOW_ISO, randomBytes: seqBytes() }
+    );
+    assert.equal(written.length, 1, "only the usable sibling may land");
+    const slugs = await slugsOnDisk();
+    assert.equal(slugs.length, 1);
+    assert.equal((await readSlug(slugs[0]!)).title, "Release cadence");
+  });
+
+  it("drops a capability candidate even when typed as constraint", async () => {
+    const written = await persistMemoryOps(
+      memoryDir,
+      [
+        {
+          kind: "ADD",
+          candidate: candidate({
+            title: "本环境没有真实出网",
+            body: CAPABILITY_BODY,
+            type: "constraint",
+          }),
+        },
+      ],
+      { now: () => NOW_ISO, randomBytes: seqBytes() }
+    );
+    assert.deepEqual(written, []);
+    assert.deepEqual(await slugsOnDisk(), []);
+  });
+
+  it("drops a capability SUPERSEDE without disabling the named target", async () => {
+    await put("old");
+    const before = await readFile(join(memoryDir, "old.md"), "utf8");
+    const written = await persistMemoryOps(
+      memoryDir,
+      [
+        {
+          kind: "SUPERSEDE",
+          supersedes: ["old"],
+          candidate: candidate({
+            title: "本环境没有真实出网",
+            body: CAPABILITY_BODY,
+          }),
+        },
+      ],
+      { now: () => NOW_ISO, randomBytes: seqBytes() }
+    );
+    assert.deepEqual(written, []);
+    assert.deepEqual(await slugsOnDisk(), ["old"]);
+    assert.equal(await readFile(join(memoryDir, "old.md"), "utf8"), before);
+  });
+
+  it("drops a capability UPDATE and leaves the neighbor untouched", async () => {
+    await put("old");
+    const before = await readFile(join(memoryDir, "old.md"), "utf8");
+    const written = await persistMemoryOps(
+      memoryDir,
+      [
+        {
+          kind: "UPDATE",
+          slug: "old",
+          candidate: candidate({
+            title: "web_fetch cannot reach the network",
+            body: "web_fetch cannot reach the internet from this environment.",
+          }),
+        },
+      ],
+      { now: () => NOW_ISO, randomBytes: seqBytes() }
+    );
+    assert.deepEqual(written, []);
+    assert.equal(await readFile(join(memoryDir, "old.md"), "utf8"), before);
+  });
 });
 
 // -- ingestMemory ------------------------------------------------------------
@@ -880,6 +1202,63 @@ describe("ingestMemory", () => {
       "auto"
     );
     assert.equal(stored.importance, 3);
+  });
+
+  // SC6: a capability candidate from the extractor never lands, while the
+  // non-capability candidate in the same batch still ADDs.
+  it("drops a capability candidate and keeps the sibling (SC6)", async () => {
+    const llm = llmReturning(
+      JSON.stringify([
+        {
+          title: "本环境没有真实出网",
+          body: "本环境没有真实出网，web 工具与搜索工具均不可用。",
+          type: "constraint",
+          confidence: 0.95,
+        },
+        {
+          title: "Use bar() for concurrency",
+          body: "bar() is the thread-safe entry point in this repo.",
+          confidence: 0.95,
+        },
+      ])
+    );
+    const result = await ingestMemory({
+      memoryDir,
+      transcript: TRANSCRIPT,
+      llm,
+      gc: false,
+      now: () => NOW_ISO,
+      randomBytes: seqBytes(),
+    });
+    assert.equal(result.written.length, 1);
+    const slugs = await slugsOnDisk();
+    assert.equal(slugs.length, 1, "the capability candidate must not land");
+    assert.equal(
+      (await readSlug(slugs[0]!)).title,
+      "Use bar() for concurrency"
+    );
+  });
+
+  it("writes nothing at all when every candidate is a capability observation", async () => {
+    const llm = llmReturning(
+      JSON.stringify([
+        {
+          title: "web_search is unavailable in this sandbox",
+          body: "The sandbox DNS/SSRF segment blocks web_search.",
+          confidence: 0.95,
+        },
+      ])
+    );
+    const result = await ingestMemory({
+      memoryDir,
+      transcript: TRANSCRIPT,
+      llm,
+      gc: false,
+      now: () => NOW_ISO,
+      randomBytes: seqBytes(),
+    });
+    assert.deepEqual(result.written, []);
+    assert.deepEqual(await slugsOnDisk(), []);
   });
 
   it("does not write a candidate that overlaps the static layer", async () => {

@@ -155,20 +155,26 @@ _Avoid_: 逐 slot 独立消费缓存；再拆拼接后的整串；把拼接顺�
 **surface split (identity vs memory)**: 入口面（`chat` / `tui` / `ask` / `serve`）的两层语义——身份认知层（`identity` / `soul` / `user_profile` + 仅 chat/tui 触发的 `bootstrap`）恒在；记忆层（`AGENTS.md` + rules + 记忆库 + `memory_recall` / `memory_save` 工具）只对 chat / tui / serve 装配，`ask` 全 opt-out（`memory_layer` slot 不挂、memory 工具不入注册表）。#228 决议 D3。
 _Avoid_: `ask` 全 opt-out（破"我是谁"答复路径）；`ask` 全 opt-in（破 #121 "ask 无状态"前提）；按 surface flag 同时决定两层
 
-**auto_extract**（`settings.memory.autoExtract`）: 自动记忆抽取的产品总闸，boolean-only、**默认 OFF**——段缺失或非 `true` 一律关抽取与 **memory_catalog** 装配。`true` 时 host 仍按 N≥2 抽，且梦境双闸满足时必跑梦境 LLM（即使 `settings.memory.dream === false`）。仅当 extract 与 dream 均关时 `BuiltEngine.autoMemory` 缺席。ADR-0031 D1/D5；分层 `specs/auto-memory-layering.md`；钩子见 ADR-0033。记忆 body 不进 `system`（ADR-0044）。
-_Avoid_: 把默认改成 ON；开抽取却不要梦境；把记忆正文装进 system；把抽取 prompt 内嵌进 loop-engine；给 `ask` 接线；让 ingest 失败冒泡成用户 turn 失败；开抽取却不注 memory_catalog
+**auto_extract**（`settings.memory.autoExtract`）: 自动记忆抽取的产品总闸，boolean-only、**默认 OFF**——段缺失或非 `true` 一律关抽取与 **memory_catalog** 装配。`true` 时 host 仍按默认 **3** 个 `StopReason=completed` 抽，且梦境双闸满足时必跑梦境 LLM（即使 `settings.memory.dream === false`）。extract 与 dream 均关时仍可装配机械-only 钩子（**memory_gc** + **capability memory sweep**，零 LLM）；`ask` 仍不接线。ADR-0031 D1/D5 amendment 2026-09-11；ADR-0086；`specs/runtime-capability-memory-gate.md`。记忆 body 不进 `system`（ADR-0044）。
+_Avoid_: 把默认改成 ON；开抽取却不要梦境；把记忆正文装进 system；把抽取 prompt 内嵌进 loop-engine；给 `ask` 接线；让 ingest 失败冒泡成用户 turn 失败；开抽取却不注 memory_catalog；双关时拆掉机械钩子以致假闸永不软禁
 
 **memory_op**（`ADD` | `UPDATE` | `SUPERSEDE` | `NOOP`）: persist 仍认四态；**抽取** `decide ops` 只用 ADD / 保守 UPDATE / NOOP（无 CONTRADICTION_FLOOR SUPERSEDE）。`SUPERSEDE` 由梦境 `replaces` 点名后 persist 写出 `supersedes`，旧条仍经 **memory_gc** 软禁。三段函数分离不变。ADR-0031 D2 修订；`specs/auto-memory-layering.md`。
 _Avoid_: 抽取再用低词重叠当矛盾作废；把四态压成 upsert；绕开 `memory_save` 写纪律；把三段合成一个函数
 
-**memory_gc**: 可重复、幂等的机械清理，三条规则、**零 LLM**——`ttl_days > 0` 且已过期 → `disabled: true`；被别的条目 `supersedes` 指名 → `disabled: true`；活跃条目超 store cap → 按效用分 `importance × recency × (1 + recall_count)`（recall 次数取自既有 `usage.json` sidecar）从低到高软禁。GC **只软禁不删文件**，误驱逐改一行 frontmatter 就能收回。ADR-0031 D4。
-_Avoid_: 硬删文件；把 LLM 离线合并 / 摘要塞进 GC（合并走 **dream**，ADR-0033）；让 GC 依赖 frontmatter + usage sidecar 之外的运行时状态
+**memory_gc**: 可重复、幂等的机械清理，三条规则、**零 LLM**——`ttl_days > 0` 且已过期 → `disabled: true`；被别的条目 `supersedes` 指名 → `disabled: true`；活跃条目超 store cap → 按效用分 `importance × recency × (1 + recall_count)`（recall 次数取自既有 `usage.json` sidecar）从低到高软禁。与抽取共用默认 3 个 `completed` 闸，并可在进程退出 best-effort；同趟可跑 **capability memory sweep**。GC **只软禁不删文件**。ADR-0031 D4；`specs/runtime-capability-memory-gate.md`。
+_Avoid_: 硬删文件；把 LLM 离线合并 / 摘要塞进 GC（合并走 **dream**，ADR-0033）；让 GC 依赖 frontmatter + usage sidecar 之外的运行时状态；会话开局同步全量 GC 挡首包；只靠 Ctrl+C 当唯一闸
 
 **promote**: `usage.json` 里一条记忆被 ≥2 个不同 session 召回后的资格。资格只进入 **memory_gc** 效用，**不再**把正文装进 `system`；常驻说明书只在 `AGENTS.md`。ADR-0044。
 _Avoid_: 用召回次数买 system 席位；auto-promote；把晋升当记忆进说明书的通道
 
 **memory_type**: 事实条目 frontmatter `type` 的封闭枚举：`convention` | `decision` | `gotcha` | `constraint` | `note`。手动 `memory_save` 与自动 ingest 同一套；空或非法值收成 `note`，不 fail 写入。`specs/memory-layer-follow-ups.md`。
 _Avoid_: 自由字符串当 type；自动与手动两套词表；非法 type 整次写入失败
+
+**runtime capability persist gate**: persist 之前挡住「运行时能力/环境可用性」观测写成跨会话记忆（尤其 `type: constraint`）；`memory_save` 与抽取 persist 同一条闸，拒写是 typed 失败不是静默 NOOP。ADR-0086。
+_Avoid_: 有用性品味过滤；短 TTL 当主药；改成 `note` 先塞进去；只靠 advisory 包装
+
+**capability memory sweep**: 把已落盘的能力观测条机械软禁（`disabled: true`），与 **memory_gc** 同闸（默认 3 个 `completed`）并可退出尽力；读路径（prefetch / recall / catalog）在软禁前也不得把它们送给模型。ADR-0086。
+_Avoid_: 开局同步扫全库；把作废还给会话内 `memory_save`；抽取 CONTRADICTION_FLOOR
 
 **source: auto**: 自动写入条目的 provenance 标记，落在 frontmatter（`sanitizeMemoryFile` / `serializeMemoryEntry` 已 round-trip 未知字段，无需 schema 升版）。自动条目**只经 `memory_recall` 的 tool_result 与 memory_prefetch 用户侧块**到达模型（低信、常过时），**body 永不进 `system`**（ADR-0044）。没有 auto-promote。该标记同时是批量回退的抓手。ADR-0031 D3。
 _Avoid_: 给高 importance 的自动条目开 auto-promote；把 `source: auto` 当成信任等级之外的纯装饰；用别的字段区分人写 / 机写；把自动条包装成必须遵守的规则
@@ -554,7 +560,9 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **说明书静态层 vs memory_layer 整段开关**: 通用 worker 要说明书、不要记忆工具；禁止再靠 memoryEnabled=false 把 AGENTS.md 一起跳过
 - **状态栏 vs 任务摘录**: 摘录只在 compact 时贴用户原话；状态栏每轮由代码现算并追加
 - **状态栏 vs append-only messages**: 栏走同一条追加纪律；纠错靠新栏，不靠从历史上抠掉旧栏
-- **`memory_save`（显式写） vs auto_extract（自动写）**: 两条写路径共用同一套肯定句门禁与 tmp+rename 原子写；显式写是模型当场决定的一次工具调用，自动写是 host 在 turn 完成后异步跑的一趟 ingest。差别只在触发方式与 `source: auto` 标记，不在信任通道——两者都只经 tool_result / prefetch 回到模型
+- **`memory_save`（显式写） vs auto_extract（自动写）**: 两条写路径共用同一套肯定句门禁、**runtime capability persist gate** 与 tmp+rename 原子写；显式写是模型当场决定的一次工具调用，自动写是 host 在 turn 完成后异步跑的一趟 ingest。差别只在触发方式与 `source: auto` 标记，不在信任通道——两者都只经 tool_result / prefetch 回到模型
+- **runtime capability persist gate vs capability memory sweep**: 闸挡新写；sweep 软禁已有条；读滤在两步之间让模型当下看不见
+- **capability memory sweep vs memory_gc**: sweep 认能力观测；GC 认 TTL / supersede / cap；默认同 3 个 `completed` 一趟，均可退出尽力
 - **memory_catalog vs memory_prefetch**: 目录进 system（抽取开、库非空、短、稳）；预取进用户消息（每轮重算、最多 5 条正文、零词命中不贴）
 - **memory_catalog vs promote**: 目录是短索引（通道是否仍进 system 见 ADR-0034 D1）；promote 是 GC 用的跨会话召回资格，不再提供 system 正文（ADR-0044）
 - **memory_prefetch vs memory_recall**: 同一 `scoreMemoryEntries`；预取宿主先贴最多 5 条；recall 模型主动搜、默认最多 3 条原文（读通道不下令召回，spec casual-ask-context-hygiene）

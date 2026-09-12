@@ -18,7 +18,7 @@
   - 顺序：抽取 → 说明书重叠丢弃 → 四态 decide → persist。库内近邻四态保留。
   - 同一 `completed` turn 内已有成功 `memory_save` → 即使 N≥2 到期也不调用 `ingestMemory` 的 extract。dream 双闸独立，该做梦仍做。save 未发生或失败 → 抽取与今日相同。
 - **Confirms with human:** （无。操作员确认按上列三刀落地。）
-- **Out of this spec:** 自动 promote / 正文进 `system`；改默认 ON；扫仓检测；拦截后回灌模型；改 N≥2；改 dream 闸；改目录/预取/召回；记忆 UI；`ask` 接线。
+- **Out of this spec:** 自动 promote / 正文进 `system`；改默认 ON；扫仓检测；拦截后回灌模型；改 dream 闸；改目录/预取/召回；记忆 UI；`ask` 接线。默认完成回合闸与能力观测 persist **amended by** `runtime-capability-memory-gate.md`（原「不改 N≥2」让位）。
 
 ## Success Criteria
 

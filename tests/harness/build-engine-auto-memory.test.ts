@@ -1,12 +1,21 @@
 /**
  * auto-memory T4: `BuiltEngine.autoMemory` wiring.
  *
- * Spec: specs/auto-memory.md D1/SC1; ADR-0031 Decision 1/5. The assembly
- * point is where the opt-in becomes a live hook, so this is where the
- * default-OFF promise and the `ask` opt-out (ADR-0010 D3) are pinned.
+ * Spec: specs/auto-memory.md D1/SC1; ADR-0031 Decision 1/5; ADR-0031 D5
+ * amendment 2026-09-11 + specs/runtime-capability-memory-gate.md (SC2 / SC5 /
+ * SC8 / SC11). The assembly point is where the opt-in becomes a live hook, so
+ * this is where the default-OFF promise, the mechanical-only dual-off hook and
+ * the `ask` opt-out (ADR-0010 D3) are pinned.
  */
 import { afterAll, describe, expect, it } from "vitest";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +25,13 @@ import {
   type BuiltEngine,
 } from "../../src/harness/build-engine.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
+import {
+  DEFAULT_COMPLETED_TURN_GATE,
+  parseMemoryEntry,
+  resolveProjectMemoryDir,
+  serializeMemoryEntry,
+} from "../../src/harness/memory/index.ts";
+import type { MemoryEntryV1 } from "../../src/harness/memory/index.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 
 const built: BuiltEngine[] = [];
@@ -56,8 +72,11 @@ async function isolate(): Promise<{ cwd: string; userHome: string }> {
   return { cwd, userHome };
 }
 
-async function build(opts: Record<string, unknown> = {}): Promise<BuiltEngine> {
-  const { cwd, userHome } = await isolate();
+async function buildIn(
+  cwd: string,
+  userHome: string,
+  opts: Record<string, unknown> = {}
+): Promise<BuiltEngine> {
   const engine = await buildHarnessEngine({
     env: makeEnv(),
     askUser: createNoAskUser(),
@@ -76,9 +95,80 @@ async function build(opts: Record<string, unknown> = {}): Promise<BuiltEngine> {
   return engine;
 }
 
+async function build(opts: Record<string, unknown> = {}): Promise<BuiltEngine> {
+  const { cwd, userHome } = await isolate();
+  return buildIn(cwd, userHome, opts);
+}
+
+/**
+ * Classifier fixtures (specs/runtime-capability-memory-gate.md): the sweep
+ * disables the runtime capability observation and leaves the product-policy
+ * `constraint` live. Written straight to disk because these rows predate the
+ * persist gate — that is exactly the population the sweep exists for.
+ */
+const capabilityRow = (): MemoryEntryV1 => ({
+  id: "cap",
+  type: "note",
+  importance: 5,
+  ttl_days: 0,
+  disabled: false,
+  supersedes: null,
+  title: "web_search is unavailable in this sandbox",
+  body: "The sandbox DNS/SSRF benchmarking segment blocks outbound network access.",
+  updated_at: "2026-08-26T00:00:00.000Z",
+});
+
+const readDisabled = async (path: string): Promise<boolean> =>
+  parseMemoryEntry(await readFile(path, "utf8")).disabled;
+
 describe("buildHarnessEngine — auto-memory opt-in", () => {
-  it("leaves autoMemory absent with no settings at all (default OFF)", async () => {
-    expect((await build()).autoMemory).toBeUndefined();
+  it("wires a mechanical-only autoMemory with no settings at all (dual-off)", async () => {
+    // Dual-off still wires the hook (ADR-0031 D5 amendment): the mechanical
+    // segment is what an opted-out user needs, so capability rows written
+    // ahead of the persist gate stop surviving on disk. Default OFF means
+    // zero LLM / zero extract, never absent wiring.
+    const { cwd, userHome } = await isolate();
+    const engine = await buildIn(cwd, userHome);
+    expect(engine.autoMemory).toBeDefined();
+    expect(typeof engine.autoMemory!.onTurnComplete).toBe("function");
+    expect(typeof engine.autoMemory!.onExit).toBe("function");
+    // Read-side prefetch still follows autoExtract alone.
+    expect(engine.overlayMemoryPrefetch).toBeUndefined();
+    expect(engine.memoryFlags).toBeUndefined();
+    // SC2/SC8: below the gate and on an empty store nothing is written at all.
+    const memoryDir = resolveProjectMemoryDir(cwd, cwd);
+    for (let n = 1; n < DEFAULT_COMPLETED_TURN_GATE; n++) {
+      engine.autoMemory!.onTurnComplete({
+        stopReason: "completed",
+        transcript: `user: turn ${n}`,
+      });
+    }
+    await engine.autoMemory!.drain();
+    await expect(readdir(memoryDir)).rejects.toThrow();
+  });
+
+  it("does not scan the whole memory store on the startup path (SC11)", async () => {
+    // Startup must not await a full-store GC: the first packet cannot wait on
+    // a maintenance pass. The scan is only reachable from the gated turn and
+    // from the exit seam — so building the engine must leave the pre-existing
+    // capability row untouched, however many times it is built.
+    const { cwd, userHome } = await isolate();
+    const memoryDir = resolveProjectMemoryDir(cwd, cwd);
+    await mkdir(memoryDir, { recursive: true });
+    await writeFile(
+      join(memoryDir, "cap.md"),
+      serializeMemoryEntry(capabilityRow()),
+      "utf8"
+    );
+    const first = await buildIn(cwd, userHome);
+    expect(await readDisabled(join(memoryDir, "cap.md"))).toBe(false);
+    // A second assembly on the same root is the TUI/chat rebind shape.
+    const second = await buildIn(cwd, userHome, { surface: "tui" });
+    expect(second.autoMemory).toBeDefined();
+    expect(await readDisabled(join(memoryDir, "cap.md"))).toBe(false);
+    // The handle exists but is lazy: only the gate (or exit) moves the row.
+    await first.autoMemory!.onExit!();
+    expect(await readDisabled(join(memoryDir, "cap.md"))).toBe(true);
   });
 
   it("wires autoMemory on TUI even when both flags are off, with live flags", async () => {
@@ -98,11 +188,40 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
     expect(chat.invalidateMemorySystem).toBeUndefined();
   });
 
-  it("leaves autoMemory absent on an explicit false", async () => {
-    const engine = await build({
+  it("keeps a mechanical-only autoMemory on an explicit false, with zero LLM", async () => {
+    // An explicit false still wires the hook: mechanical-only presence with
+    // the same gate and the same on-disk sweep. The extract arm stays off
+    // because `runExtractPass` is guarded on the live `enabled` flag.
+    const { cwd, userHome } = await isolate();
+    const engine = await buildIn(cwd, userHome, {
       settings: { memory: { autoExtract: false } },
     });
-    expect(engine.autoMemory).toBeUndefined();
+    expect(engine.autoMemory).toBeDefined();
+    expect(typeof engine.autoMemory!.onTurnComplete).toBe("function");
+
+    // A capability row written straight to disk, bypassing the persist gate,
+    // is swept on the gated turn — the whole point of keeping the hook around.
+    const memoryDir = resolveProjectMemoryDir(cwd, cwd);
+    await mkdir(memoryDir, { recursive: true });
+    await writeFile(
+      join(memoryDir, "cap.md"),
+      serializeMemoryEntry(capabilityRow()),
+      "utf8"
+    );
+    for (let n = 1; n < DEFAULT_COMPLETED_TURN_GATE; n++) {
+      engine.autoMemory!.onTurnComplete({
+        stopReason: "completed",
+        transcript: `user: turn ${n}`,
+      });
+    }
+    await engine.autoMemory!.drain();
+    expect(await readDisabled(join(memoryDir, "cap.md"))).toBe(false);
+    engine.autoMemory!.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: gated turn",
+    });
+    await engine.autoMemory!.drain();
+    expect(await readDisabled(join(memoryDir, "cap.md"))).toBe(true);
   });
 
   it("wires overlayMemoryPrefetch on an explicit true", async () => {

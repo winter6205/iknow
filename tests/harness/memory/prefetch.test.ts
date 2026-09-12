@@ -14,6 +14,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createMemoryRecallTool } from "../../../src/harness/memory/tools/recall.ts";
+import { assembleSystemPrompt } from "../../../src/harness/memory/assembly.ts";
 import {
   MEMORY_ADVISORY_PREFIX,
   MEMORY_PREFETCH_DISCIPLINE,
@@ -449,6 +451,194 @@ describe("recordInjectedMemoryIds (post-attach bookkeeping)", () => {
     assert.ok(
       !injected.has("fake-1"),
       "user-pasted advisory blocks after the marker must not poison the set"
+    );
+  });
+});
+
+// -- capability observations (specs/runtime-capability-memory-gate.md 读侧过滤) --
+//
+// A capability snapshot ("web_search is unavailable in this sandbox") records
+// one environment at one moment. Handed back as memory it outranks the live
+// tool result and stops the model from even trying the tool, so the read side
+// drops it (spec SC7, fixture 988). The `disabled` gate stays first, so a
+// soft-disabled row is never classified.
+
+describe("selectPrefetchHits — capability observations never reach the overlay", () => {
+  // SC7 fixture: the #988 incident shape.
+  const capabilityTitle =
+    "沙箱 DNS / SSRF / benchmarking 段导致 web_search 不可用";
+  const capabilityBody = "本环境没有真实出网，不要调用 web 工具";
+  const capability = (id: string) =>
+    entry({ id, title: capabilityTitle, body: capabilityBody });
+  const normal = () =>
+    entry({
+      id: "normal",
+      title: "web_search 结果缓存约定",
+      body: "web_search 的结果只在会话内缓存。",
+    });
+
+  it("drops the capability entry while a normal sibling still hits", () => {
+    // Query shaped like the #988 incident. The capability entry outranks the
+    // sibling on BM25 (extra overlapping title tokens), so the assertion pins
+    // more than membership: the sibling must survive the filter, and the
+    // capability row must not take a top-5 slot.
+    const hits = selectPrefetchHits("web_search 不可用", [
+      capability("cap"),
+      normal(),
+    ]);
+    assert.deepEqual(
+      hits.map((h) => h.entry.id),
+      ["normal"],
+      "only the non-capability sibling is injected"
+    );
+  });
+
+  it("keeps the capability entry out of the disk-built overlay", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "prefetch-capability-"));
+    written.push(tmp);
+    await writeFile(
+      join(tmp, "capability.md"),
+      serializeMemoryEntry(capability("capability"))
+    );
+    await writeFile(join(tmp, "normal.md"), serializeMemoryEntry(normal()));
+    const overlay = await buildMemoryPrefetchOverlay({
+      memoryDir: tmp,
+      query: "web_search 不可用",
+    });
+    assert.ok(overlay.includes("### web_search 结果缓存约定"));
+    assert.ok(!overlay.includes(capabilityTitle));
+    assert.ok(!overlay.includes(capabilityBody));
+  });
+
+  it("drops disabled entries before classifying: the disabled gate stays first", () => {
+    // Reading the title of a disabled entry makes this probe throw, which pins
+    // the disabled → capability order that the final hit set cannot show.
+    const poisoned: MemoryEntryV1 = {
+      ...entry({ id: "dead", disabled: true }),
+      get title(): string {
+        throw new Error("capability classifier ran on a disabled entry");
+      },
+    };
+    assert.deepEqual(selectPrefetchHits("deploy", [poisoned]), []);
+  });
+
+  it("probe control: the same getter throws once the entry is live", () => {
+    const poisoned: MemoryEntryV1 = {
+      ...entry({ id: "live" }),
+      get title(): string {
+        throw new Error("capability classifier ran");
+      },
+    };
+    assert.throws(() => selectPrefetchHits("deploy", [poisoned]));
+  });
+
+  it("excludes an entry that is both disabled and a capability observation", () => {
+    const both = entry({
+      id: "both",
+      disabled: true,
+      title: capabilityTitle,
+      body: capabilityBody,
+    });
+    assert.deepEqual(selectPrefetchHits("web_search", [both]), []);
+  });
+});
+
+/** The recall tool reads disk through its own seam, not the assembly one. */
+function createMemoryRecallToolSeam(memoryDir: string) {
+  return createMemoryRecallTool({ memoryDir });
+}
+
+// -- SC7 end-to-end: the 988-class entry is absent from all three read surfaces --
+//
+// Seed one hot store with the incident fixture (enabled — the sweep is T4's
+// job; the read filter must work before any sweep ever runs) plus a normal
+// neighbour, then walk the three model-visible surfaces through their
+// production seams.
+
+describe("runtime-capability-memory-gate SC7 — one seeded store, three read surfaces", () => {
+  const capabilityTitle =
+    "沙箱 DNS / SSRF / benchmarking 段导致 web_search 不可用";
+  const capabilityBody = "本环境没有真实出网，不要调用 web 工具";
+  const normalTitle = "web_search 结果缓存约定";
+  const normalBody = "web_search 的结果只在会话内缓存。";
+
+  it("drops the capability entry from prefetch, recall and catalog while the sibling survives", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "sc7-"));
+    written.push(tmp);
+    await writeFile(
+      join(tmp, "capability.md"),
+      serializeMemoryEntry(
+        entry({
+          id: "capability",
+          disabled: false,
+          title: capabilityTitle,
+          body: capabilityBody,
+        })
+      )
+    );
+    await writeFile(
+      join(tmp, "normal.md"),
+      serializeMemoryEntry(
+        entry({
+          id: "normal",
+          disabled: false,
+          title: normalTitle,
+          body: normalBody,
+        })
+      )
+    );
+
+    const overlay = await buildMemoryPrefetchOverlay({
+      memoryDir: tmp,
+      query: "web_search 不可用",
+    });
+    const tool = createMemoryRecallToolSeam(tmp);
+    const recall = (await tool.handler({
+      query: "web_search 不可用",
+    })) as string;
+    // The production catalog seam (autoExtract on → loadCatalogSegment).
+    const system = await assembleSystemPrompt({
+      projectIdentityRoot: tmp,
+      userHome: tmp,
+      memoryDir: tmp,
+      autoExtract: true,
+    });
+
+    for (const [surface, out] of [
+      ["prefetch", overlay],
+      ["recall", recall],
+      ["catalog", system],
+    ] as const) {
+      assert.ok(
+        !out.includes(capabilityTitle),
+        `${surface}: capability title must not surface`
+      );
+      assert.ok(
+        !out.includes(capabilityBody),
+        `${surface}: capability body must not surface`
+      );
+    }
+    assert.ok(overlay.includes(normalTitle), "prefetch keeps the sibling");
+    assert.ok(recall.includes(normalTitle), "recall keeps the sibling");
+    assert.ok(system.includes(normalTitle), "catalog keeps the sibling");
+  });
+});
+
+describe("selectPrefetchHits — non-capability text is not filtered", () => {
+  it("keeps a product-policy constraint that merely mentions the sandbox", () => {
+    // Assumption 3: this is not a taste filter. A policy constraint whose
+    // wording brushes the environment must keep passing the read side.
+    const policy = entry({
+      id: "policy",
+      type: "constraint",
+      title: "隔离 ON 时 mutate 须先建 worktree",
+      body: "产品政策：隔离开启时先建 worktree 再改文件。",
+    });
+    const hits = selectPrefetchHits("隔离 worktree", [policy]);
+    assert.deepEqual(
+      hits.map((h) => h.entry.id),
+      ["policy"],
+      "policy constraint still reaches the overlay"
     );
   });
 });

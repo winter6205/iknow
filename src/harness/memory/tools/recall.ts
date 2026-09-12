@@ -25,6 +25,7 @@ import { join } from "node:path";
 import type { AciToolDef } from "../../aci/types.js";
 import { ToolExecutionError } from "../../errors.js";
 import { scoreMemoryEntries } from "../bm25.js";
+import { isCapabilityObservationEntry } from "../capability-gate.js";
 import { MEMORY_ADVISORY_PREFIX } from "../prefetch.js";
 import { parseMemoryEntry } from "../frontmatter.js";
 import type { MemoryEntryV1 } from "../schema.js";
@@ -70,8 +71,12 @@ export function createMemoryRecallTool(deps: MemoryRecallToolDeps): AciToolDef {
         deps.entries ?? (await readEntriesFromDisk(deps.memoryDir));
       // Soft-disabled entries (memory_gc never hard-deletes) stay on disk but
       // must not reach the model — drop them before scoring so they cannot
-      // occupy a limit slot either.
-      const entries = resolved.filter((entry) => !entry.disabled);
+      // occupy a limit slot either. The capability gate follows: a runtime
+      // snapshot must not be handed back as durable fact (spec
+      // runtime-capability-memory-gate 读侧过滤 / SC7).
+      const entries = resolved.filter(
+        (entry) => !entry.disabled && !isCapabilityObservationEntry(entry)
+      );
       const scored = scoreMemoryEntries(params.query, entries)
         .filter((row) => row.titleHits + row.bodyHits > 0)
         .slice(0, params.limit);

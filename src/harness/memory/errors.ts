@@ -6,6 +6,8 @@
  * (lightweight class extends Error + name override); index.ts re-exports.
  */
 
+import type { ModelFacingError } from "../errors.js";
+
 /** Base error for everything in src/harness/memory/. */
 export class MemoryError extends Error {
   override readonly name: string = "MemoryError";
@@ -51,6 +53,37 @@ export class MemoryIOError extends MemoryError {
   override readonly name: string = "MemoryIOError";
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
+  }
+}
+
+/**
+ * runtime-capability-memory-gate T2 (ADR-0086): the draft is a runtime
+ * capability / environment-availability observation ("web_search is
+ * unavailable in this sandbox"). Subclass of `MemoryError` so #121's
+ * typed-error contract still holds; a named subclass lets the host and the
+ * tests tell "this fact may not be stored" apart from a malformed input or an
+ * IO fault. `reason` is the wire-stable token
+ * (`CAPABILITY_OBSERVATION_REASON`) and `detail` the human-readable why.
+ */
+export class MemoryCapabilityRejected
+  extends MemoryError
+  implements ModelFacingError
+{
+  override readonly name: string = "MemoryCapabilityRejected";
+  /**
+   * Executor opacity opt-in (see `ModelFacingError` in src/harness/errors.ts):
+   * the rejection reason is the whole point — the model must learn *why* the
+   * fact may not be stored, and this message names no path or secret. The
+   * `implements` clause is the type-level tie; `isModelFacingError` still
+   * matches the runtime property.
+   */
+  readonly modelFacing = true as const;
+  readonly reason: string;
+  readonly detail: string;
+  constructor(reason: string, detail: string) {
+    super(`[memory_save] rejected: ${reason} — ${detail}`);
+    this.reason = reason;
+    this.detail = detail;
   }
 }
 

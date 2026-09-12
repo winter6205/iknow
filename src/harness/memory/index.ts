@@ -7,6 +7,11 @@
  */
 export { resolveProjectMemoryDir, resolveUserMemoryDir } from "./paths.js";
 
+export {
+  CAPABILITY_OBSERVATION_REASON,
+  detectCapabilityObservation,
+} from "./capability-gate.js";
+
 export type { MemoryEntryV1, MemoryFileV1, MemoryType } from "./schema.js";
 export {
   CURRENT_MEMORY_SCHEMA_VERSION,
@@ -24,6 +29,7 @@ export {
 } from "./frontmatter.js";
 
 export {
+  MemoryCapabilityRejected,
   MemoryError,
   MemoryExtractError,
   MemoryGcOptionInvalid,

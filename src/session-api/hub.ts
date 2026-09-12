@@ -600,14 +600,17 @@ export type SessionHubOptions = {
   readonly subagentManager?: SubAgentManager;
   /**
    * auto-memory T4 / ADR-0031 D1:自动记忆 host 钩子。serve 入口经
-   * `buildHarnessEngine` 自建(仅 `settings.memory.autoExtract === true`);
+   * `buildHarnessEngine` 自建(memory 层在场且非 ask);
    * 构造时未注入则 `ensureDeps()` 后从 `built.autoMemory` 懒取。缺席
-   * (默认 OFF / ask / 注入 deps 的测试)→ 不调,行为逐字节不变。
+   * (memory 层关 / ask / 注入 deps 的测试)→ 不调; 两个开关全关时钩子仍在场,只跑零 LLM 机械段。
    */
   readonly autoMemory?: AutoMemoryHook;
   /**
-   * auto-memory low-trust read: per-turn prefetch overlay. Same gate as
-   * autoMemory. Host prepends onto the user payload; never deps.system.
+   * auto-memory low-trust read: per-turn prefetch overlay. Shares the
+   * memory-layer / non-`ask` gate with autoMemory, but the handle also
+   * requires `autoExtract` at assembly (TUI may instead hold it with live
+   * flags and re-check `memoryFlags.autoExtract` each turn). Host prepends
+   * onto the user payload; never deps.system.
    * T1: hosts pass `excludeIds` (session-level dedup) via the second arg.
    */
   readonly overlayMemoryPrefetch?: OverlayPrefetchFn;

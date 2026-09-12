@@ -392,7 +392,7 @@ export type EngineBundle = {
   readonly subagentManager?: SubAgentManager;
   /** graph 装配快照 —— `/graph` 与 Shift+Tab 快照随活跃引擎走(graphMode 在场)。 */
   readonly graphAssembly?: GraphAssembly;
-  /** auto-memory 钩子(autoExtract 或 dream 在场时透出)。 */
+  /** auto-memory 钩子(memory 层在场且非 ask 时透出;双关仍透出,只跑机械段)。 */
   readonly autoMemory?: AutoMemoryHook;
   /** auto-memory 低信任读:每轮 user 文本 overlay 预取(autoExtract 在场时透出)。 */
   readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
@@ -1723,13 +1723,18 @@ export async function buildHarnessEngine(
       : {}),
   };
   const engine = createLoopEngine(deps);
-  // auto-memory T4 / ADR-0031 D1+D5:三重同门 —— 显式 opt-in、memory 层在场、
-  // 非 ask 表面。任一不成立 → 钩子缺席,宿主侧零调用、零 LLM、零写盘。
-  // TUI 例外：层在场时始终装配钩子 + live flags，让 /memory 能在本会话翻转。
+  // auto-memory T4 / ADR-0031 D1+D5:两重同门 —— memory 层在场、非 ask 表面。
+  // 任一不成立 → 钩子缺席,宿主侧零调用、零 LLM、零写盘。
   // 读路径预取只跟 autoExtract（dream-only 不灌用户消息）。
   // （autoExtractOn / dreamOn / memoryFlags / tuiLive 定义在 settings 加载点。）
+  // ADR-0031 D5 amendment 2026-09-11（specs/runtime-capability-memory-gate.md）：
+  // extract 与 dream 均关时钩子仍在场 —— 机械段（memory_gc + capability
+  // sweep）仍要按 completed 闸跑，否则旧能力条永远等不到软禁。零 LLM 由钩子
+  // 内部保证（dual-off 只进 runMechanicalPass），extract 仍由 live `enabled`
+  // 把门。原先的 `(autoExtractOn || dreamOn || tuiLive)` 项随之退役：三者
+  // 皆假时机械段恰恰是最需要的。
   const autoMemory =
-    memoryEnabled && surface !== "ask" && (autoExtractOn || dreamOn || tuiLive)
+    memoryEnabled && surface !== "ask"
       ? createAutoMemoryHook({
           memoryDir,
           llm: createAdapterExtractLlm(adapter),
@@ -1819,13 +1824,18 @@ export async function buildHarnessEngine(
     // 测试/多引擎场景每次装配重新 spawn language server）;终止+latch 必须
     // 只发生在宿主进程退出缝（TUI shutdownExtensions / chat 退出缝）,见
     // client.ts shutdownDefaultLspPool。
-    ...(mcpManager || subagentManager || backgroundManager
+    ...(mcpManager || subagentManager || backgroundManager || autoMemory
       ? {
           shutdown: async (): Promise<void> => {
             await Promise.all([
               mcpManager?.shutdown(),
               subagentManager?.shutdown(),
               backgroundManager?.shutdown(),
+              // ADR-0086 / spec Assumptions 8: best-effort `memory_gc` +
+              // capability sweep on process exit. The hook's `onExit` is
+              // optimistic by contract (never throws) and is deliberately not
+              // the only gate — the completed-turn gate stays authoritative.
+              autoMemory?.onExit?.(),
             ]);
           },
         }

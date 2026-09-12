@@ -4,7 +4,7 @@
  * Spec: specs/auto-memory.md D1/D4; ADR-0031 Decision 1/5. The hook is the
  * seam a host calls after every turn. It must:
  *   - do nothing at all unless explicitly enabled (default OFF)
- *   - fire only after StopReason=completed, and only on the N>=2 turn gate
+ *   - fire only after StopReason=completed, and only on the completed-turn gate
  *   - run ingest off the caller's critical path (fire-and-forget)
  *   - never throw and never reject, whatever ingest does
  *
@@ -20,11 +20,15 @@ import { join } from "node:path";
 
 import {
   createAutoMemoryHook,
+  DEFAULT_COMPLETED_TURN_GATE,
   DREAM_CURSOR_FILENAME,
   parseMemoryEntry,
   serializeMemoryEntry,
 } from "../../../src/harness/memory/index.ts";
-import type { MemoryExtractLlm } from "../../../src/harness/memory/index.ts";
+import {
+  MemoryIOError,
+  type MemoryExtractLlm,
+} from "../../../src/harness/memory/index.ts";
 import type { MemoryEntryV1 } from "../../../src/harness/memory/index.ts";
 
 let memoryDir: string;
@@ -165,7 +169,7 @@ describe("createAutoMemoryHook — completed gate", () => {
   });
 });
 
-// -- the N>=2 turn gate ------------------------------------------------------
+// -- the completed-turn gate (N from DEFAULT_COMPLETED_TURN_GATE) ------------
 
 describe("createAutoMemoryHook — static layer on extract", () => {
   it("forwards a loaded static layer into the extract prompt", async () => {
@@ -219,31 +223,13 @@ describe("createAutoMemoryHook — static layer on extract", () => {
 });
 
 describe("createAutoMemoryHook — completed-turn gate", () => {
-  it("waits for the second completed turn at the default gate", async () => {
-    const llm = countingLlm(FACT);
-    const hook = createAutoMemoryHook({
-      memoryDir,
-      llm,
-      enabled: true,
-      now: () => NOW_ISO,
-      nowMs: Date.parse(NOW_ISO),
-    });
-    hook.onTurnComplete({
-      stopReason: "completed",
-      transcript: "user: turn one",
-    });
-    await hook.drain();
-    assert.equal(llm.calls(), 0, "one completed turn is below the gate");
-
-    hook.onTurnComplete({
-      stopReason: "completed",
-      transcript: "user: turn two",
-    });
-    await hook.drain();
-    assert.equal(llm.calls(), 1);
+  it("defaults to 3 completed turns (ADR-0031 D1 amendment 2026-09-11)", () => {
+    // SSOT: the value is asserted against the exported constant, never a
+    // re-hardcoded number — the gate must not drift silently again.
+    assert.equal(DEFAULT_COMPLETED_TURN_GATE, 3);
   });
 
-  it("skips extract when this completed turn already saved memory", async () => {
+  it("extracts only on the third completed turn at the default gate", async () => {
     const llm = countingLlm(FACT);
     const hook = createAutoMemoryHook({
       memoryDir,
@@ -252,16 +238,46 @@ describe("createAutoMemoryHook — completed-turn gate", () => {
       now: () => NOW_ISO,
       nowMs: Date.parse(NOW_ISO),
     });
-    hook.onTurnComplete({
-      stopReason: "completed",
-      transcript: "user: turn one",
-    });
+    const turn = (n: number) => {
+      hook.onTurnComplete({
+        stopReason: "completed",
+        transcript: `user: turn ${n}`,
+      });
+    };
+    for (let n = 1; n < DEFAULT_COMPLETED_TURN_GATE; n++) {
+      turn(n);
+      await hook.drain();
+      assert.equal(
+        llm.calls(),
+        0,
+        `turn ${n} is below the default gate of ${DEFAULT_COMPLETED_TURN_GATE}`
+      );
+      assert.equal(await entryCount(), 0);
+    }
+    turn(DEFAULT_COMPLETED_TURN_GATE);
     await hook.drain();
-    assert.equal(llm.calls(), 0);
+    assert.equal(llm.calls(), 1, "the gated turn extracts");
+    assert.equal(await entryCount(), 1);
+  });
 
+  it("skips extract when the gated turn already saved memory", async () => {
+    const llm = countingLlm(FACT);
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm,
+      enabled: true,
+      now: () => NOW_ISO,
+      nowMs: Date.parse(NOW_ISO),
+    });
+    for (let n = 1; n < DEFAULT_COMPLETED_TURN_GATE; n++) {
+      hook.onTurnComplete({
+        stopReason: "completed",
+        transcript: `user: turn ${n}`,
+      });
+    }
     hook.onTurnComplete({
       stopReason: "completed",
-      transcript: "user: turn two",
+      transcript: "user: gated turn",
       memorySaveSucceeded: true,
     });
     await hook.drain();
@@ -277,13 +293,15 @@ describe("createAutoMemoryHook — completed-turn gate", () => {
       now: () => NOW_ISO,
       nowMs: Date.parse(NOW_ISO),
     });
+    for (let n = 1; n < DEFAULT_COMPLETED_TURN_GATE; n++) {
+      hook.onTurnComplete({
+        stopReason: "completed",
+        transcript: `user: turn ${n}`,
+      });
+    }
     hook.onTurnComplete({
       stopReason: "completed",
-      transcript: "user: turn one",
-    });
-    hook.onTurnComplete({
-      stopReason: "completed",
-      transcript: "user: turn two",
+      transcript: "user: gated turn",
       memorySaveSucceeded: false,
     });
     await hook.drain();
@@ -445,7 +463,7 @@ const twoLiveEntries = async (): Promise<void> => {
 };
 
 describe("createAutoMemoryHook — dream pass", () => {
-  it("does not run dream on the extract N>=2 gate alone", async () => {
+  it("does not run dream on the extract gate alone", async () => {
     await twoLiveEntries();
     const llm = countingLlm("[]");
     const hook = createAutoMemoryHook({
@@ -930,6 +948,526 @@ describe("createAutoMemoryHook — dream pass", () => {
     assert.equal(
       await readFile(join(memoryDir, DREAM_CURSOR_FILENAME), "utf8"),
       corrupt
+    );
+  });
+});
+
+// -- mechanical-only segment (ADR-0031 D5 amendment 2026-09-11) --------------
+//
+// autoExtract and dream both off still reach `memory_gc` + capability sweep
+// on the same completed-turn gate, with zero LLM calls. This is what makes the
+// on-disk soft-disable happen for a user who never opted into extraction —
+// without the mechanical segment, old capability rows survive on disk forever
+// because no LLM pass ever comes due.
+
+const CAPABILITY_ENTRY: MemoryEntryV1 = {
+  id: "cap",
+  type: "note",
+  importance: 5,
+  ttl_days: 0,
+  disabled: false,
+  supersedes: null,
+  title: "web_search is unavailable in this sandbox",
+  body: "The sandbox DNS/SSRF benchmarking segment blocks outbound network access.",
+  updated_at: NOW_ISO,
+};
+
+const policyEntry = (): MemoryEntryV1 => ({
+  id: "policy",
+  type: "constraint",
+  importance: 1,
+  ttl_days: 0,
+  disabled: false,
+  supersedes: null,
+  title: "Worktree policy",
+  body: "隔离 ON 时 mutate 须先建 worktree。",
+  updated_at: NOW_ISO,
+});
+
+describe("createAutoMemoryHook — mechanical-only segment on dual-off", () => {
+  it("sweeps capability rows on the gated turn with zero LLM calls", async () => {
+    const llm = countingLlm(FACT);
+    await writeFile(
+      join(memoryDir, "cap.md"),
+      serializeMemoryEntry(CAPABILITY_ENTRY),
+      "utf8"
+    );
+    await writeFile(
+      join(memoryDir, "policy.md"),
+      serializeMemoryEntry(policyEntry()),
+      "utf8"
+    );
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm,
+      enabled: false,
+      dream: false,
+      now: () => NOW_ISO,
+      nowMs: Date.parse(NOW_ISO),
+    });
+
+    for (let n = 1; n < DEFAULT_COMPLETED_TURN_GATE; n++) {
+      hook.onTurnComplete({
+        stopReason: "completed",
+        transcript: `user: turn ${n}`,
+      });
+    }
+    await hook.drain();
+    assert.equal(llm.calls(), 0, "below the gate: nothing runs at all");
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "cap.md"), "utf8"))
+        .disabled,
+      false,
+      "below the gate nothing is written"
+    );
+
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: gated turn",
+    });
+    await hook.drain();
+    assert.equal(llm.calls(), 0, "mechanical segment is zero-LLM");
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "cap.md"), "utf8"))
+        .disabled,
+      true,
+      "the gated turn sweeps the capability row"
+    );
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "policy.md"), "utf8"))
+        .disabled,
+      false,
+      "product-policy constraint stays live"
+    );
+  });
+
+  it("reads live flags so a TUI flip to dual-off keeps the mechanical segment", async () => {
+    const llm = countingLlm(FACT);
+    await writeFile(
+      join(memoryDir, "cap.md"),
+      serializeMemoryEntry(CAPABILITY_ENTRY),
+      "utf8"
+    );
+    const flags = { autoExtract: true, dream: true };
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm,
+      enabled: true,
+      minCompletedTurns: 1,
+      flags,
+      now: () => NOW_ISO,
+      nowMs: Date.parse(NOW_ISO),
+    });
+    // Flip to dual-off before the turn: the hook stays wired and must still
+    // reach the mechanical segment on the gate.
+    flags.autoExtract = false;
+    flags.dream = false;
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: hi",
+    });
+    await hook.drain();
+    assert.equal(llm.calls(), 0, "dual-off spends no LLM call");
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "cap.md"), "utf8"))
+        .disabled,
+      true
+    );
+  });
+
+  // SC2 empty: a due mechanical pass on an empty store is a zero-LLM no-op
+  // that creates nothing and is idempotent.
+  it("is an idempotent no-op on an empty store", async () => {
+    const llm = countingLlm(FACT);
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm,
+      enabled: false,
+      dream: false,
+      minCompletedTurns: 1,
+      now: () => NOW_ISO,
+      nowMs: Date.parse(NOW_ISO),
+    });
+    hook.onTurnComplete({ stopReason: "completed", transcript: "user: hi" });
+    await hook.drain();
+    assert.equal(llm.calls(), 0);
+    assert.deepEqual(await readdir(memoryDir), [], "zero new files");
+    hook.onTurnComplete({ stopReason: "completed", transcript: "user: hi" });
+    await hook.drain();
+    assert.equal(llm.calls(), 0);
+    assert.deepEqual(await readdir(memoryDir), [], "still zero new files");
+  });
+
+  // SC5 exception: a write-path fault (archive target is a regular file)
+  // surfaces as the typed MemoryIOError and is reported through onError; the
+  // callback itself never throws and the turn still completes.
+  it("reports a typed IO fault from the mechanical pass without throwing", async () => {
+    await writeFile(
+      join(memoryDir, "cap.md"),
+      serializeMemoryEntry({
+        ...CAPABILITY_ENTRY,
+        updated_at: "2026-06-01T00:00:00.000Z",
+      }),
+      "utf8"
+    );
+    await writeFile(join(memoryDir, "archive"), "not a dir", "utf8");
+    const seen: unknown[] = [];
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm: countingLlm(FACT),
+      enabled: false,
+      dream: false,
+      minCompletedTurns: 1,
+      now: () => NOW_ISO,
+      nowMs: Date.parse(NOW_ISO),
+      onError: (error) => seen.push(error),
+    });
+    assert.doesNotThrow(() => {
+      hook.onTurnComplete({ stopReason: "completed", transcript: "user: hi" });
+    });
+    await hook.drain();
+    assert.equal(seen.length, 1, "the typed fault is reported, not thrown");
+    assert.ok(
+      seen[0] instanceof MemoryIOError,
+      "the report carries the typed error"
+    );
+  });
+
+  // The existing GC posture is kept: a missing / unreadable directory reads as
+  // an empty store, so an unusable memoryDir is a silent no-op rather than a
+  // crash on every turn.
+  it("treats an unusable memoryDir as an empty store", async () => {
+    const blocker = join(memoryDir, "blocker");
+    await writeFile(blocker, "not a directory", "utf8");
+    const seen: unknown[] = [];
+    const hook = createAutoMemoryHook({
+      memoryDir: join(blocker, "memory"),
+      llm: countingLlm(FACT),
+      enabled: false,
+      dream: false,
+      minCompletedTurns: 1,
+      nowMs: Date.parse(NOW_ISO),
+      onError: (error) => seen.push(error),
+    });
+    assert.doesNotThrow(() => {
+      hook.onTurnComplete({ stopReason: "completed", transcript: "user: hi" });
+    });
+    await hook.drain();
+    assert.deepEqual(seen, []);
+  });
+
+  it("does not run the mechanical segment on a non-completed turn", async () => {
+    await writeFile(
+      join(memoryDir, "cap.md"),
+      serializeMemoryEntry(CAPABILITY_ENTRY),
+      "utf8"
+    );
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm: countingLlm(FACT),
+      enabled: false,
+      dream: false,
+      minCompletedTurns: 1,
+      now: () => NOW_ISO,
+      nowMs: Date.parse(NOW_ISO),
+    });
+    hook.onTurnComplete({ stopReason: "cancelled", transcript: "user: hi" });
+    hook.onTurnComplete({ stopReason: "timeout", transcript: "user: hi" });
+    await hook.drain();
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "cap.md"), "utf8"))
+        .disabled,
+      false,
+      "cancel / timeout do not count toward the gate"
+    );
+  });
+});
+
+// -- extract-enabled gated turn still sweeps (ADR-0086 / spec SC7) -----------
+//
+// Assumption 6: every gate-due completed turn runs exactly one mechanical
+// GC+sweep, and an extract pass is no exception — its persist path writes
+// nothing when the model yields no usable fact, so the sweep cannot be
+// conditional on extract having written.
+//
+// Exactly one: on a turn whose dual dream gate is met, the dream pass's own
+// GC is that turn's mechanical pass (asserted by the extract/dream call pair
+// plus the surviving live entries) — a second mechanical GC would double it.
+
+const llmReturning = (raw: string): MemoryExtractLlm => ({
+  complete: async () => raw,
+});
+
+describe("createAutoMemoryHook — extract-enabled gated turn sweeps", () => {
+  it("sweeps the pre-existing capability row when extract yields no candidate", async () => {
+    await writeFile(
+      join(memoryDir, "cap.md"),
+      serializeMemoryEntry(CAPABILITY_ENTRY),
+      "utf8"
+    );
+    const hook = createAutoMemoryHook(
+      hookOpts(llmReturning("[]"), { minCompletedTurns: 1 })
+    );
+    hook.onTurnComplete({ stopReason: "completed", transcript: "user: hi" });
+    await hook.drain();
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "cap.md"), "utf8"))
+        .disabled,
+      true,
+      "an extract that writes nothing must still leave the sweep running"
+    );
+  });
+
+  it("sweeps the pre-existing capability row when extract yields only a capability candidate", async () => {
+    const capabilityOnly = JSON.stringify([
+      {
+        title: "web_search is unavailable in this sandbox",
+        body: "The sandbox DNS/SSRF segment blocks web_search.",
+        confidence: 0.95,
+      },
+    ]);
+    await writeFile(
+      join(memoryDir, "cap.md"),
+      serializeMemoryEntry(CAPABILITY_ENTRY),
+      "utf8"
+    );
+    const hook = createAutoMemoryHook(
+      hookOpts(llmReturning(capabilityOnly), { minCompletedTurns: 1 })
+    );
+    hook.onTurnComplete({ stopReason: "completed", transcript: "user: hi" });
+    await hook.drain();
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "cap.md"), "utf8"))
+        .disabled,
+      true,
+      "a dropped candidate still counts as a gate-due extract turn"
+    );
+  });
+
+  it("sweeps when extract writes a real entry and leaves no GC temp file", async () => {
+    await writeFile(
+      join(memoryDir, "cap.md"),
+      serializeMemoryEntry(CAPABILITY_ENTRY),
+      "utf8"
+    );
+    const hook = createAutoMemoryHook(
+      hookOpts(countingLlm(FACT), { minCompletedTurns: 1 })
+    );
+    hook.onTurnComplete({ stopReason: "completed", transcript: "user: hi" });
+    await hook.drain();
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "cap.md"), "utf8"))
+        .disabled,
+      true,
+      "a real extract write must not skip the sweep"
+    );
+    assert.deepEqual(
+      (await readdir(memoryDir)).filter((n) => n.includes(".gc.tmp")),
+      [],
+      "no half-written GC temp file may remain"
+    );
+  });
+
+  it("sweeps the capability row on a dream-due turn via dream's own GC", async () => {
+    // The other gate-due shape: the dual dream gate is met, so the dream
+    // pass's GC is this turn's mechanical pass — and it must carry the
+    // capability sweep with it (the dream path is not an escape hatch).
+    await twoLiveEntries();
+    await writeFile(
+      join(memoryDir, "cap.md"),
+      serializeMemoryEntry(CAPABILITY_ENTRY),
+      "utf8"
+    );
+    const nowMs = Date.parse(NOW_ISO);
+    await seedDreamGate(memoryDir, nowMs);
+    const responses = [FACT, "[]"];
+    let calls = 0;
+    const hook = createAutoMemoryHook(
+      hookOpts(
+        {
+          complete: async () => responses[calls++] ?? "[]",
+        },
+        { dream: true, minCompletedTurns: 1, nowMs }
+      )
+    );
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: hi",
+      sessionKey: "s5",
+    });
+    await hook.drain();
+    assert.equal(calls, 2, "one extract call followed by one dream call");
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "cap.md"), "utf8"))
+        .disabled,
+      true,
+      "dream's GC is the turn's sweep"
+    );
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "old.md"), "utf8"))
+        .disabled,
+      false,
+      "an unrelated live entry survives the same pass"
+    );
+  });
+});
+
+// -- process-exit mechanical pass (ADR-0086 / spec Assumptions 8) ------------
+//
+// The exit path is best-effort and never the only gate. It must run one
+// zero-LLM `memory_gc` + capability sweep, never throw, and never leave an
+// unhandled rejection behind — a process exiting because of a fault in its
+// exit hook would be the worst possible failure mode.
+
+describe("createAutoMemoryHook — process-exit mechanical pass", () => {
+  it("sweeps capability rows on exit with zero LLM calls", async () => {
+    const llm = countingLlm(FACT);
+    await writeFile(
+      join(memoryDir, "cap.md"),
+      serializeMemoryEntry(CAPABILITY_ENTRY),
+      "utf8"
+    );
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm,
+      enabled: false,
+      dream: false,
+      minCompletedTurns: 1,
+      now: () => NOW_ISO,
+      nowMs: Date.parse(NOW_ISO),
+    });
+    assert.ok(hook.onExit, "the exit seam is present on every hook");
+    await hook.onExit!();
+    assert.equal(llm.calls(), 0, "exit pass is mechanical-only");
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "cap.md"), "utf8"))
+        .disabled,
+      true,
+      "exit sweeps even when the gate never came due"
+    );
+  });
+
+  it("is idempotent across repeated exits and below-gate turns", async () => {
+    await writeFile(
+      join(memoryDir, "cap.md"),
+      serializeMemoryEntry(CAPABILITY_ENTRY),
+      "utf8"
+    );
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm: countingLlm(FACT),
+      enabled: false,
+      dream: false,
+      nowMs: Date.parse(NOW_ISO),
+    });
+    // A sub-gate turn and an exit sweep both run; the second exit is a no-op.
+    hook.onTurnComplete({ stopReason: "completed", transcript: "user: hi" });
+    await hook.onExit!();
+    await hook.onExit!();
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "cap.md"), "utf8"))
+        .disabled,
+      true
+    );
+    // No entry files appeared: only the swept row and the usage sidecar the
+    // GC pass is entitled to touch (promote.ts owns its shape).
+    assert.deepEqual(
+      (await readdir(memoryDir)).filter((n) => n.endsWith(".md")),
+      ["cap.md"]
+    );
+  });
+
+  it("reports a typed IO fault without throwing out of the exit callback", async () => {
+    await writeFile(
+      join(memoryDir, "cap.md"),
+      serializeMemoryEntry({
+        ...CAPABILITY_ENTRY,
+        updated_at: "2026-06-01T00:00:00.000Z",
+      }),
+      "utf8"
+    );
+    await writeFile(join(memoryDir, "archive"), "not a dir", "utf8");
+    const seen: unknown[] = [];
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm: countingLlm(FACT),
+      enabled: false,
+      dream: false,
+      nowMs: Date.parse(NOW_ISO),
+      onError: (error) => seen.push(error),
+    });
+    // The contract is explicit: never throw from the exit callback.
+    await assert.doesNotReject(() => hook.onExit!());
+    assert.equal(seen.length, 1);
+    assert.ok(seen[0] instanceof MemoryIOError);
+  });
+
+  it("resolves and reports when the exit's mechanical pass genuinely faults", async () => {
+    // The exit pass faults for real: GC plans an archive move (a disabled row
+    // old enough to leave the hot dir) and `archive` is a regular file, so
+    // `runMemoryGc` throws MemoryIOError. The reachable contract is that
+    // `onExit` never rejects, the typed fault reaches onError, and the
+    // soft-disable the pass wrote before the failing step survives.
+    await writeFile(
+      join(memoryDir, "cap.md"),
+      serializeMemoryEntry({
+        ...CAPABILITY_ENTRY,
+        updated_at: "2026-06-01T00:00:00.000Z",
+      }),
+      "utf8"
+    );
+    await writeFile(join(memoryDir, "archive"), "not a dir", "utf8");
+    const seen: unknown[] = [];
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm: countingLlm(FACT),
+      enabled: false,
+      dream: false,
+      nowMs: Date.parse(NOW_ISO),
+      onError: (error) => seen.push(error),
+    });
+    await assert.doesNotReject(() => hook.onExit!());
+    assert.equal(seen.length, 1, "the typed fault is reported, not thrown");
+    assert.ok(
+      seen[0] instanceof MemoryIOError,
+      "the report carries the typed identity of the failure"
+    );
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "cap.md"), "utf8"))
+        .disabled,
+      true,
+      "the soft-disable written before the archive fault stays applied"
+    );
+  });
+
+  it("counts an exit pass as mechanical work, not as a completed turn", async () => {
+    // SC9: the exit sweep must not reset or advance the completed counter —
+    // the gate keeps its own authority and stays the primary trigger.
+    const llm = countingLlm(FACT);
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm,
+      enabled: true,
+      now: () => NOW_ISO,
+      nowMs: Date.parse(NOW_ISO),
+    });
+    for (let n = 1; n < DEFAULT_COMPLETED_TURN_GATE; n++) {
+      hook.onTurnComplete({
+        stopReason: "completed",
+        transcript: `user: turn ${n}`,
+      });
+    }
+    await hook.onExit!();
+    assert.equal(llm.calls(), 0, "exit is zero-LLM");
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: gated turn",
+    });
+    await hook.drain();
+    assert.equal(
+      llm.calls(),
+      1,
+      "the gate still comes due on the third completed turn"
     );
   });
 });

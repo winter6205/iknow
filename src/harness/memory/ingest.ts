@@ -21,6 +21,7 @@
 import { randomBytes as nodeRandomBytes } from "node:crypto";
 
 import { scoreMemoryEntries } from "./bm25.js";
+import { detectCapabilityObservation } from "./capability-gate.js";
 import { MemoryExtractError } from "./errors.js";
 import { runMemoryGc, type MemoryGcResult } from "./gc.js";
 import { normalizeMemoryType } from "./schema.js";
@@ -28,6 +29,7 @@ import type { MemoryEntryV1 } from "./schema.js";
 import { listStoreEntries, type StoredMemoryEntry } from "./store.js";
 import { tokenize } from "./tokenize.js";
 import {
+  refreshMemoryIndexLine,
   upsertMemoryIndex,
   validateAffirmativePhrasing,
   writeMemoryEntryAtomic,
@@ -383,6 +385,10 @@ function nearestNeighbor(
  * disk mutation: the write path is the trust boundary, and a hand-built op
  * must not be able to smuggle a prohibition past a gate that only guarded the
  * model's output.
+ *
+ * The runtime capability gate also runs here (ADR-0086), but drops the op
+ * instead of throwing: an extract / dream candidate is model output, and one
+ * unusable candidate must not cost the user turn or the sibling writes.
  */
 export async function persistMemoryOps(
   memoryDir: string,
@@ -408,7 +414,7 @@ export async function persistMemoryOps(
 
   const written: PersistedMemoryOp[] = [];
   for (const op of ops) {
-    if (op.kind === "NOOP") continue;
+    if (mustNotPersist(op)) continue;
     const slug = op.kind === "UPDATE" ? op.slug : random(6).toString("hex");
     // UPDATE preserves the neighbor's stored ttl_days (the candidate carries
     // no TTL of its own); a hand-built UPDATE without one falls back to deps.
@@ -422,12 +428,34 @@ export async function persistMemoryOps(
       supersedes: op.kind === "SUPERSEDE" ? op.supersedes : null,
     });
     await writeMemoryEntryAtomic(memoryDir, slug, entry);
-    if (op.kind !== "UPDATE") {
-      await upsertMemoryIndex(memoryDir, slug, entry);
-    }
+    // ADD / SUPERSEDE append a row; UPDATE rewrites the slug's existing row so
+    // the title in the index matches the stored entry (SC10).
+    await (op.kind === "UPDATE"
+      ? refreshMemoryIndexLine(memoryDir, slug, entry)
+      : upsertMemoryIndex(memoryDir, slug, entry));
     written.push({ slug, kind: op.kind });
   }
   return written;
+}
+
+/**
+ * True when the op must not reach disk, for either reason:
+ *   - NOOP — the decide table already chose not to write it;
+ *   - runtime capability / environment-availability observation
+ *     (runtime-capability-memory-gate T2 / ADR-0086) — dropped here rather
+ *     than thrown, because the caller is a background pass (extract / dream)
+ *     and one bad candidate must not fail the user turn or block its
+ *     siblings. Same predicate as the `memory_save` gate, so a hand-built op
+ *     cannot smuggle what the tool refuses.
+ */
+function mustNotPersist(op: MemoryOp): boolean {
+  if (op.kind === "NOOP") return true;
+  return (
+    detectCapabilityObservation({
+      title: op.candidate.title,
+      body: op.candidate.body,
+    }) !== null
+  );
 }
 
 function buildEntry(input: {

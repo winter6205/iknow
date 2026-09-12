@@ -465,7 +465,7 @@ export async function buildTuiDeps(
     ...presentFields("shutdown", built.shutdown),
     ...presentFields("graphAssembly", built.graphAssembly),
     // auto-memory T4:自动记忆钩子随 deps 平铺透出，run.tsx 解构后交给
-    // createTuiBridge → SessionHub。缺席（默认 OFF）→ 字段不出现。
+    // createTuiBridge → SessionHub。缺席（memory 层关）→ 字段不出现；双关仍透出（机械段）。
     ...presentFields("autoMemory", built.autoMemory),
     ...presentFields("overlayMemoryPrefetch", built.overlayMemoryPrefetch),
     ...presentFields("memoryFlags", built.memoryFlags),

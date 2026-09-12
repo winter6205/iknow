@@ -546,3 +546,48 @@ describe("assembleSystemPrompt — memory_catalog", () => {
     );
   });
 });
+
+// -- capability observations (specs/runtime-capability-memory-gate.md 读侧过滤) --
+//
+// Old capability rows stay on disk (the sweep soft-disables them later) but
+// must not render a catalog line (spec SC7; ADR-0042 snapshot eats the filtered
+// list). The existence pointer still tracks files on disk, so an
+// all-capability store keeps the pointer live — same semantics as the
+// all-disabled case above.
+
+describe("assembleSystemPrompt — capability observations stay out of the catalog", () => {
+  const capabilityTitle =
+    "沙箱 DNS / SSRF / benchmarking 段导致 web_search 不可用";
+  const capabilityBody = "本环境没有真实出网，不要调用 web 工具";
+  const capability = (id: string) =>
+    memoryEntry(id, capabilityTitle, capabilityBody);
+
+  it("omits the capability entry while a sibling normal entry still renders", async () => {
+    await write(
+      join(memoryDir, "capability.md"),
+      serializeMemoryEntry(capability("capability"))
+    );
+    await write(
+      join(memoryDir, "normal.md"),
+      serializeMemoryEntry(
+        memoryEntry("normal", "web_search 结果缓存约定", "hook line\nBODY")
+      )
+    );
+    const out = await assembleSystemPrompt(ctx({ autoExtract: true }));
+    assert.ok(out.includes(MEMORY_CATALOG_DISCIPLINE));
+    assert.ok(out.includes("web_search 结果缓存约定"));
+    assert.ok(!out.includes(capabilityTitle));
+    assert.ok(!out.includes(capabilityBody));
+  });
+
+  it("keeps the existence pointer but skips the catalog when every entry is a capability observation", async () => {
+    await write(
+      join(memoryDir, "capability.md"),
+      serializeMemoryEntry(capability("capability"))
+    );
+    const out = await assembleSystemPrompt(ctx({ autoExtract: true }));
+    assert.ok(out.includes(EXISTENCE_POINTER));
+    assert.ok(!out.includes(MEMORY_CATALOG_DISCIPLINE));
+    assert.ok(!out.includes(capabilityTitle));
+  });
+});

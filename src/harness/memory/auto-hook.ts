@@ -12,6 +12,12 @@
  * gate (24h since last success-or-skip ∧ 5 distinct sessions) persisted
  * under the memory root.
  *
+ * ADR-0031 D5 amendment 2026-09-11 (specs/runtime-capability-memory-gate.md):
+ * the dual-off case still gets a hook, but a mechanical-only one — the same
+ * `completed` counter drives `memory_gc` + the capability sweep with zero LLM
+ * calls, so old environment snapshots are actually soft-disabled instead of
+ * surviving on disk forever because nobody opted into extraction.
+ *
  * Two contracts the hosts depend on:
  *
  *   - `onTurnComplete` is synchronous, total, and returns nothing. It cannot
@@ -35,7 +41,7 @@ import type { MemoryExtractLlm, MemoryIngestResult } from "./ingest.js";
 import { runMemoryGc } from "./gc.js";
 
 /** Completed turns to accumulate before a pass. ADR-0031 D1: never per-turn. */
-export const DEFAULT_COMPLETED_TURN_GATE = 2;
+export const DEFAULT_COMPLETED_TURN_GATE = 3;
 
 export interface AutoMemoryTurn {
   /** The run's `StopReason`; anything but `completed` is ignored. */
@@ -59,6 +65,13 @@ export interface AutoMemoryHook {
   readonly onTurnComplete: (turn: AutoMemoryTurn) => void;
   /** Resolve once in-flight passes settle. Test seam and shutdown hook. */
   readonly drain: () => Promise<void>;
+  /**
+   * Best-effort mechanical pass for the process-exit path (ADR-0086 / spec
+   * Assumptions 8): one `memory_gc` + capability sweep, zero LLM, serialized
+   * behind in-flight passes. Optimistic by contract — it never throws and is
+   * never the only gate (the completed-turn gate stays authoritative).
+   */
+  readonly onExit?: () => Promise<void>;
 }
 
 export interface AutoMemoryHookOptions {
@@ -134,29 +147,29 @@ export function createAutoMemoryHook(
 
   const onTurnComplete = (turn: AutoMemoryTurn): void => {
     const { enabled, dream } = liveFlags(opts);
-    if (!enabled && !dream) return;
     if (turn.stopReason !== "completed") return;
     const extractEligible = enabled && turn.transcript.trim().length > 0;
     // autoExtract implies dream (spec specs/auto-memory-layering.md
-    // Assumptions 2-3): there is no "extract without dream" escape hatch,
-    // so the dual gate is evaluated whenever either flag is live.
-    const dreamEligible = dream || enabled;
-    if (!extractEligible && !dreamEligible) return;
+    // Assumptions 2-3): there is no "extract without dream" escape hatch.
+    // This is the *queueing* decision only — whether a pass is worth
+    // scheduling at all; the pass itself re-reads the flags (below).
+    const dreamWanted = dream || enabled;
 
-    let extractDue = false;
-    if (extractEligible) {
-      completedTurns++;
-      if (completedTurns >= gate) {
-        completedTurns = 0;
-        extractDue = true;
-      }
-    }
-    if (!extractDue && !dreamEligible) return;
+    // The completed counter gates the extract pass and the mechanical
+    // segment (ADR-0031 D1/D5 amendment 2026-09-11). Dream keeps its own
+    // 24h ∧ 5-session gate and is still evaluated on every completed turn.
+    completedTurns++;
+    const gateDue = completedTurns >= gate;
+    if (gateDue) completedTurns = 0;
+    if (!gateDue && !dreamWanted) return;
 
     const transcript = turn.transcript;
     const sessionKey = turn.sessionKey;
     const skipExtract = turn.memorySaveSucceeded === true;
     chain = chain.then(async () => {
+      // Live re-read inside the chain: a TUI flip before the queued pass runs
+      // is honored, so a dual-off flip spends no LLM call even on a gated turn
+      // (ADR-0031 D5 amendment: dual-off is mechanical-only).
       const live = liveFlags(opts);
       // Dream dual gate: evaluated when dream is on OR autoExtract is on —
       // autoExtract implies dream (no extract-without-dream hatch).
@@ -165,18 +178,45 @@ export function createAutoMemoryHook(
           ? await persistAndEvaluateDreamGate(opts, sessionKey, opts.onError)
           : false;
 
-      if (extractDue && live.enabled && !skipExtract) {
-        await runExtractPass(opts, transcript, dreamDue);
+      const extractDue =
+        gateDue && extractEligible && live.enabled && !skipExtract;
+      if (extractDue) {
+        await runExtractPass(opts, transcript);
       }
       if (dreamDue) {
+        // Dream runs its own GC + sweep, so this turn's mechanical pass is
+        // already covered.
         await runDreamPass(opts);
+      } else if (gateDue) {
+        // Mechanical segment (zero LLM): the dual-off default, and the
+        // backstop for every other gate-due turn. Extract defers its GC here
+        // (gc: false) because it may write nothing, and a turn that produced
+        // no fact would otherwise never sweep. Exactly one pass runs per
+        // gate-due turn: this branch when no dream, `runDreamPass` when dream.
+        await runMechanicalPass(opts);
       }
     });
+  };
+
+  const onExit = async (): Promise<void> => {
+    try {
+      // Recover a poisoned chain first: the exit sweep is best-effort but must
+      // still get its chance. No link is expected to reject (every pass
+      // swallows its own faults), so this is the second line of defense, not
+      // the first. The exit pass deliberately does not touch `completedTurns`.
+      chain = chain.catch(() => undefined).then(() => runMechanicalPass(opts));
+      await chain;
+    } catch (error) {
+      // EXIT: log-and-continue — a process-exit fault must not become an
+      // unhandled rejection or a nonzero exit code.
+      safeReport(opts.onError, error);
+    }
   };
 
   return {
     onTurnComplete,
     drain: () => chain,
+    onExit,
   };
 }
 
@@ -203,8 +243,7 @@ async function persistAndEvaluateDreamGate(
 
 async function runExtractPass(
   opts: AutoMemoryHookOptions,
-  transcript: string,
-  deferGcForDream: boolean
+  transcript: string
 ): Promise<void> {
   let staticLayer = "";
   try {
@@ -223,13 +262,35 @@ async function runExtractPass(
       ...(opts.nowMs !== undefined ? { nowMs: opts.nowMs } : {}),
       ...(opts.randomBytes ? { randomBytes: opts.randomBytes } : {}),
       ...(opts.ttlDays !== undefined ? { ttlDays: opts.ttlDays } : {}),
-      ...(deferGcForDream ? { gc: false } : {}),
+      // GC is always deferred to the post-pass segment: this pass may write
+      // nothing, and the gate-due turn must sweep regardless.
+      gc: false,
       ...(opts.cap !== undefined ? { cap: opts.cap } : {}),
     });
     opts.onIngest?.(ingestResult);
   } catch (error) {
     // EXIT: log-and-continue (ADR-0031 D5). Extract failure must not
     // skip the later dream/GC stages or fail the user turn.
+    safeReport(opts.onError, error);
+  }
+}
+
+/**
+ * Mechanical-only segment (zero LLM): `memory_gc` + capability sweep.
+ *
+ * Reached on every gate-due completed turn that runs no dream pass — the
+ * dual-off default, an extract skipped after a successful `memory_save`, and
+ * an extract pass (which defers its GC here). One implementation, one pass
+ * per turn, so the sweep cannot be forgotten on any gate-due path.
+ */
+async function runMechanicalPass(opts: AutoMemoryHookOptions): Promise<void> {
+  try {
+    await runMemoryGc(opts.memoryDir, {
+      ...(opts.nowMs !== undefined ? { nowMs: opts.nowMs } : {}),
+      ...(opts.cap !== undefined ? { cap: opts.cap } : {}),
+    });
+  } catch (error) {
+    // EXIT: log-and-continue — GC/sweep IO must not fail the user turn.
     safeReport(opts.onError, error);
   }
 }

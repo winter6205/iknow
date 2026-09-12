@@ -84,6 +84,31 @@ export class ToolExecutionError extends Error {
   override readonly name: string = "ToolExecutionError";
 }
 
+/**
+ * runtime-capability-memory-gate T2 (ADR-0086):「message 可向模型透出」的自愿
+ * 契约。Executor 的失败净化默认只放行 `ToolExecutionError` 的 message,其余
+ * 异常一律塌成常量字符串(不泄漏 stack / 路径)。
+ *
+ * 某些 bounded context 有自己的 typed error 基类(如 memory 的 `MemoryError`),
+ * 但它们的失败原因同样要让模型读到 —— 继承 `ToolExecutionError` 会把
+ * foundation 类塞进该上下文的错误层级。这类子类只需实现本接口(落
+ * `readonly modelFacing = true`),无需换基类。
+ *
+ * 注意这是**申报**而非推断:未申报的错误 message 仍被净化,默认不放宽。
+ */
+export interface ModelFacingError {
+  readonly modelFacing: true;
+}
+
+/** `ToolExecutionError` 命中,或错误自行申报 `modelFacing`。 */
+export function isModelFacingError(err: unknown): boolean {
+  if (err instanceof ToolExecutionError) return true;
+  return (
+    err instanceof Error &&
+    (err as { readonly modelFacing?: unknown }).modelFacing === true
+  );
+}
+
 /** Stable failure discriminants for MCP root/config/reload lifecycle edges. */
 export type McpLifecycleErrorKind =
   | "missing_cwd"

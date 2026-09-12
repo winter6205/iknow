@@ -385,3 +385,94 @@ describe("memory_recall — read-only contract (ADR-0044 SC4)", () => {
     );
   });
 });
+
+// -- capability observations (specs/runtime-capability-memory-gate.md 读侧过滤) --
+//
+// The read side must not hand a capability snapshot back to the model (spec
+// SC7): the live tool result is authoritative. The `disabled` gate stays
+// first, so a soft-disabled row is never classified.
+
+describe("memory_recall — capability observations never reach the model", () => {
+  const capabilityTitle =
+    "沙箱 DNS / SSRF / benchmarking 段导致 web_search 不可用";
+  const capabilityBody = "本环境没有真实出网，不要调用 web 工具";
+  const capability = (id: string) =>
+    entry({ id, title: capabilityTitle, body: capabilityBody });
+  const normal = () =>
+    entry({
+      id: "normal",
+      title: "web_search 结果缓存约定",
+      body: "web_search 的结果只在会话内缓存。",
+    });
+
+  it("drops a capability entry from the injected entries seam", async () => {
+    const tool = createMemoryRecallTool({
+      memoryDir,
+      entries: [capability("cap"), normal()],
+    });
+    const out = (await tool.handler({ query: "web_search 不可用" })) as string;
+    assert.ok(out.includes("### web_search 结果缓存约定"), "sibling present");
+    assert.ok(!out.includes(capabilityTitle), "capability title gone");
+    assert.ok(!out.includes(capabilityBody), "capability body gone");
+  });
+
+  it("drops a capability entry read from disk", async () => {
+    await writeSlug("capability", capability("capability"));
+    await writeSlug("normal", normal());
+    const tool = createMemoryRecallTool({ memoryDir });
+    const out = (await tool.handler({ query: "web_search 不可用" })) as string;
+    assert.ok(out.includes("### web_search 结果缓存约定"), "sibling present");
+    assert.ok(!out.includes(capabilityTitle), "capability title gone");
+    assert.ok(!out.includes(capabilityBody), "capability body gone");
+  });
+
+  it("returns an empty string when every entry is a capability observation", async () => {
+    const tool = createMemoryRecallTool({
+      memoryDir,
+      entries: [capability("cap-a"), capability("cap-b")],
+    });
+    assert.equal(await tool.handler({ query: "web_search 不可用" }), "");
+  });
+
+  it("drops disabled entries before classifying: the disabled gate stays first", async () => {
+    // Reading the title of a disabled entry makes this probe throw, which pins
+    // the disabled → capability order inside the handler.
+    const poisoned: MemoryEntryV1 = {
+      ...entry({ id: "dead", disabled: true }),
+      get title(): string {
+        throw new Error("capability classifier ran on a disabled entry");
+      },
+    };
+    const tool = createMemoryRecallTool({ memoryDir, entries: [poisoned] });
+    assert.equal(await tool.handler({ query: "deploy" }), "");
+  });
+
+  it("probe control: the same getter throws once the entry is live", async () => {
+    const poisoned: MemoryEntryV1 = {
+      ...entry({ id: "live" }),
+      get title(): string {
+        throw new Error("capability classifier ran");
+      },
+    };
+    const tool = createMemoryRecallTool({ memoryDir, entries: [poisoned] });
+    await assert.rejects(async () => tool.handler({ query: "deploy" }));
+  });
+
+  it("after a lost capability hit, a lower-ranked normal entry fills the limit slot", async () => {
+    const tool = createMemoryRecallTool({
+      memoryDir,
+      entries: [capability("cap"), normal()],
+    });
+    // The capability entry outranks the sibling on BM25 for this query, so a
+    // limit of 1 pins the slot itself: the filter must run before scoring /
+    // slicing, not after.
+    const out = (await tool.handler({
+      query: "web_search 不可用",
+      limit: 1,
+    })) as string;
+    assert.ok(
+      out.includes("### web_search 结果缓存约定"),
+      "capability entry must not consume the only limit slot"
+    );
+  });
+});

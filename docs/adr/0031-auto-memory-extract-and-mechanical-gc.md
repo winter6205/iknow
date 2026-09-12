@@ -3,6 +3,8 @@
 Date: 2026-08-26
 Status: accepted
 
+> **Amendment 2026-09-11**（#988 / ADR-0086 / `specs/runtime-capability-memory-gate.md`）：D1 默认完成回合闸从 N≥2 改为 **N≥3**。D5「`autoExtract` 非 true 则钩子缺席、零写盘」收窄为：**零 LLM**；extract 与 dream 均关时仍可装配机械-only 钩子，跑 `memory_gc` 与 capability memory sweep。ingest 失败仍不得 fail 用户 turn。
+
 ## Context
 
 ADR-0009 Decision 5 shipped the memory layer as **explicit-write v0**: the store layout, `memory_recall` / `memory_save`, quarantine + promote grading. Background LLM auto-extraction was explicitly deferred to "a later standalone module", on the grounds that auto-extraction is the primary entry point for wrong memories (arXiv 2606.25161 — consolidation errors become persistent system-state errors) and that deferring it kept every v0 entry accountable.
@@ -17,7 +19,7 @@ There is also no cleanup at all today. `ttl_days` is honored by `listPromotableE
 
 Five decisions, mirroring `specs/auto-memory.md` D1–D5.
 
-1. **Trigger = host-side, async, after a successful run.** Auto-extraction fires only after `StopReason=completed`, on the host side (chat / tui / serve), never inside the loop engine. The gate is session wind-down or an N≥2 completed-turn counter — **not** per-turn forced consolidation. Rationale: per-turn extraction doubles the LLM call count on the hot path, and a single turn rarely contains a cross-session fact worth persisting; a turn counter is a cheap mechanical proxy for "this conversation has accumulated something". `ask` gets no wiring at all (ADR-0010 D3 opt-out stands).
+1. **Trigger = host-side, async, after a successful run.** Auto-extraction fires only after `StopReason=completed`, on the host side (chat / tui / serve), never inside the loop engine. The gate is session wind-down or an N≥3 completed-turn counter — **not** per-turn forced consolidation. Rationale: per-turn extraction doubles the LLM call count on the hot path, and a single turn rarely contains a cross-session fact worth persisting; a turn counter is a cheap mechanical proxy for "this conversation has accumulated something". `ask` gets no wiring at all (ADR-0010 D3 opt-out stands).
 
 2. **Write algorithm = extract → neighbor → four-state op → shared atomic write.** An LLM pass extracts atomic candidate facts from the transcript slice; each candidate is scored against existing entries with the existing BM25-lite heuristic; the top neighbor decides one of four ops:
 
@@ -36,7 +38,7 @@ Five decisions, mirroring `specs/auto-memory.md` D1–D5.
 
 4. **Cleanup = mechanical GC, no LLM.** A repeatable, idempotent GC pass with exactly three mechanical rules: (a) `ttl_days > 0` and elapsed → set `disabled: true`; (b) an entry named by another entry's `supersedes` → set `disabled: true`; (c) active entries over the store cap → disable the lowest-utility ones, where utility = `importance × recency × (1 + recall_count)` read from the existing `usage.json` sidecar. GC only ever soft-disables — it never deletes a file, so a wrong eviction is recoverable by hand-editing one frontmatter line. LLM-driven offline merge / summarization of the store is explicitly **not** in this track.
 
-5. **Default OFF, failure never fails the turn.** `settings.memory.autoExtract` defaults to `false`; with the flag absent or non-`true`, behavior is byte-identical to today (no extra LLM call, no disk write, no new code path entered). Extraction failures raise typed `MemoryError` subclasses inside the module; the host call site swallows them behind an explicit `// EXIT: log-and-continue` comment. An ingest failure must never turn a successful user turn into a failed one — the user got their answer; a missed memory is not worth surfacing as an error.
+5. **Default OFF, failure never fails the turn.** `settings.memory.autoExtract` defaults to `false`; with the flag absent or non-`true`, **no extract LLM**. Mechanical-only hook (GC + capability sweep) may still run on the N≥3 `completed` gate and on process-exit best-effort. Extraction / GC failures raise typed `MemoryError` subclasses; the host call site swallows them behind `// EXIT: log-and-continue`. An ingest or sweep failure must never turn a successful user turn into a failed one.
 
 ## Consequences
 
