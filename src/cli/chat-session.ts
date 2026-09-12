@@ -235,6 +235,14 @@ export type ChatSessionOpts = {
   /** T1: resolved workspace root used by fresh checkpoint bootstraps. */
   readonly workspaceRoot?: string;
   /**
+   * review-fix (M2 / ADR-0087):显式 `--data-dir` 的会话池根。
+   * `undefined` → `resolveServeDataDir()` 缺省 `~/.iknow` —— **不是** cwd 分片。
+   * cli.ts runChat 透传 `parsed.dataDir`,使 `iknow chat --data-dir <alt>`
+   * 的 checkpoint / resume 落 `<alt>` 而非静默写 `~/.iknow`(ADR-0087
+   * «显式 dataDir = 独立池»)。ask / 旧测试不传 → 缺省池根。
+   */
+  readonly dataDir?: string;
+  /**
    * T4 (plans/write-situation-disclosure.md):worktree isolation 档判定
    *（`buildHarnessEngine` 启动加载点一次性读取的 `isolationEnabled`，与门
    * 禁武装同源）。`refreshChatDepsForRebind` 用它算 rebind 一次性写根段
@@ -2166,8 +2174,11 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   const abortController = new AbortController();
   // T1 (session-folder-consolidation): store namespace keys by
   // projectIdentityRoot, not cwd. mirror build-engine.ts:523.
+  // review-fix (M2 / ADR-0087): 池根跟 `opts.dataDir`(显式 `--data-dir` 否则
+  // `~/.iknow`)—— 与 cli.ts runChat 的 worktreeProvisioner / todoDir / tasksDir
+  // 同一池,`iknow chat --data-dir <alt>` 不再静默写 `~/.iknow`。
   const checkpointStore = new SessionStore(
-    resolveServeDataDir(),
+    resolveServeDataDir(opts.dataDir),
     deriveProjectIdentityRoot({ cwd: opts.workspaceRoot })
   );
 

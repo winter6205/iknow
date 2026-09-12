@@ -21,7 +21,6 @@ import { createBackgroundRegistry } from "../../../src/harness/background/regist
 import { EventEmitter } from "node:events";
 import { writeFile as fsWriteFile } from "node:fs/promises";
 import { promises as fs } from "node:fs";
-import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { tmpdir } from "node:os";
@@ -34,6 +33,7 @@ import {
 import type { BackgroundTaskManager } from "../../../src/harness/background/manager.js";
 import { renderTaskError } from "../../../src/harness/background/registry.js";
 import { resolveTasksDir } from "../../../src/harness/background/paths.js";
+import { resolveProjectSessionDir } from "../../../src/session-api/store/session-store.js";
 
 // ── fake ChildProcess 工厂(沿用 subagent/manager.test.ts 先例)─────────────────
 
@@ -474,17 +474,13 @@ describe("typed-error catch 契约(kind 判别)", () => {
 // ── paths.ts 纯函数 ───────────────────────────────────────────────────────────
 
 describe("paths.resolveTasksDir", () => {
-  it("返回 <pool>/projects/<slug>/tasks，slug 与 resolveProjectSessionDir 同公式", () => {
-    // ADR-0088：任务登记跟会话池同一项目树。slug = basename(root)-sha1(root)[:12]，
-    // 与 src/session-api/store/session-store.ts 的 resolveProjectSessionDir 逐字节相同
-    // （两处刻意不共享实现：harness 不得反向依赖 session-api）。
-    const digest = createHash("sha1")
-      .update("/repo")
-      .digest("hex")
-      .slice(0, 12);
+  it("返回 <pool>/projects/<slug>/tasks，与 resolveProjectSessionDir 严格同树", () => {
+    // ADR-0088:任务登记跟会话池同一项目树。公式/上限共享
+    // `src/shared/project-slug.ts`;断言改用跨函数等式,任一边漂移即失败
+    // (此前测试独立重算 sha1,公式漂移后两边仍各自"绿")。
     assert.equal(
       resolveTasksDir({ dataDir: "/home/x", projectIdentityRoot: "/repo" }),
-      join("/home/x", "projects", `repo-${digest}`, "tasks")
+      join(resolveProjectSessionDir("/home/x", "/repo"), "tasks")
     );
   });
 
@@ -501,6 +497,32 @@ describe("paths.resolveTasksDir", () => {
     });
     assert.equal(a, b);
     assert.ok(!a.includes(".iknow/tasks"));
+  });
+
+  it("边界回归:121–255 字符的 projectIdentityRoot 两边都接受(review 抓到的区间)", () => {
+    // 此前 paths.ts 用 MAX_ROOT_DETAIL_CHARS=120 上限,session-store.ts 用 255。
+    // 121–255 字符的根:会话文件夹已解析,登记表抛错 → 孤儿账本。
+    // 现在两边共享 MAX_PROJECT_IDENTITY_ROOT_BYTES=255,跨函数必须同接受。
+    const longRoot = "/" + "a".repeat(254); // 255 字符整
+    assert.equal(longRoot.length, 255);
+    assert.doesNotThrow(() => resolveProjectSessionDir("/pool", longRoot));
+    assert.doesNotThrow(() =>
+      resolveTasksDir({ dataDir: "/pool", projectIdentityRoot: longRoot })
+    );
+    // 跨函数等式:同一个长根必须落到同一个 slug 兄弟目录。
+    assert.equal(
+      resolveTasksDir({ dataDir: "/pool", projectIdentityRoot: longRoot }),
+      join(resolveProjectSessionDir("/pool", longRoot), "tasks")
+    );
+  });
+
+  it("边界外:256 字符根两边一致拒绝(同一上限派生同一报错)", () => {
+    const tooLong = "/" + "a".repeat(255); // 256 字符
+    assert.equal(tooLong.length, 256);
+    assert.throws(() => resolveProjectSessionDir("/pool", tooLong));
+    assert.throws(() =>
+      resolveTasksDir({ dataDir: "/pool", projectIdentityRoot: tooLong })
+    );
   });
 
   it("缺根 / 空白 / 相对 / 超长 projectIdentityRoot → typed SessionRootError", () => {

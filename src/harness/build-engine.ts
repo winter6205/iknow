@@ -176,7 +176,7 @@ export type BuildEngineOpts = {
    *
    * T4 (plans/worktree-session-roots.md / ADR-0037 §4 amended 2026-08-31):
    * 改绑后宿主把它切到 task worktree，所以它**只在自身不是 task worktree 时**
-   * 充当状态锚（记忆库 / tasks 登记）；是树时退到 `sessionRoots.productRoot`
+   * 充当状态锚（记忆库）；是树时退到 `sessionRoots.productRoot`
    * —— 这样 `--workspace-root` 重定向仍生效而状态不落进树。本字段留在
    * **写与围栏**一侧：fs-policy 的保护路径与 bwrap bind root（task worktree
    * 位于 `<productRoot>/.iknow/worktrees/…` 之下，若把状态锚设成 productRoot，

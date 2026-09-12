@@ -50,21 +50,21 @@ minimal-change-verifier: yes — 单任务「home 项目树」；不含 grep 排
    - **Inherits:** ADR-0088：`…/projects/<slug>/tasks/`；`--data-dir` 同会话池；不跟 `workspaceRoot`。
    - **Surface:** harness background（paths + 装配）
    - **Acceptance:** 新 background task 的 json/log 不出现在 `<workspaceRoot>/.iknow/tasks/`；出现在池根下该 slug 的 `tasks/`。既有 conversation scope / stale reap / 进程退出 reap 语义不变。相关 vitest 绿。
-   - Status: [ ] pending
+   - Status: [x] done 2026-09-13
    - [blocks: T1]
 
 3. **工作区三目录存量离开 checkout** — tag: `[implementation]`
    - **Inherits:** 冲突不覆盖；`sessions/` 不自动变成 `projects/` 叶子；产品路径不再写 `<ws>/.iknow/{projects,sessions,tasks}`。
    - **Surface:** 一次性挪盘（操作员环境 + 若代码仍写 `sessions/` 则掐写）
-   - **Acceptance:** 本仓（及文档点名的同类路径）工作区这三目录不再作为产品写点；残留要么空/删除，要么仅冲突 SKIP 叶子。新 TUI 回合与新 bg task 不在工作区这三处落盘。
-   - Status: [ ] pending
+   - **Acceptance:** 本仓（及文档点名的同类路径）工作区这三目录不再作为产品写点；残留要么空/删除，要么仅冲突 SKIP 叶子。新 TUI 回合与新 bg task 不在工作区这三处落盘。挪盘一次性操作 = `npm run migrate:workspace-iknow`（脚本：报告默认；`--apply` 才动盘；exit 1 = 有冲突或失败）。
+   - Status: [x] done 2026-09-13
    - [blocks: T2]
 
 4. **现状文档跟代码同句** — tag: `[implementation]`
    - **Inherits:** ADR-0088 路径字面量。
    - **Surface:** `docs/STATUS.md`、`docs/architecture.md`（仅事实句，不另开 ADR）
    - **Acceptance:** STATUS / architecture 不再把 tasks 写成 `<workspaceRoot>/.iknow/tasks/`，也不把工作区 `.iknow/sessions` 写成现行会话池。
-   - Status: [ ] pending
+   - Status: [x] done 2026-09-13
    - [blocks: T2]
    - [parallel] 可与 T3 并行（T3 不改文档字面也可先挪盘）
 

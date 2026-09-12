@@ -12,10 +12,14 @@
  *
  * 纯函数:不做 mkdir,IO 归 registry / manager(stale-reap 对缺失目录容忍)。
  */
-import { createHash } from "node:crypto";
-import { basename, isAbsolute, join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import { SessionRootError } from "../errors.js";
+import { MAX_ROOT_DETAIL_CHARS } from "../session-roots.js";
+import {
+  computeProjectSlug,
+  MAX_PROJECT_IDENTITY_ROOT_BYTES,
+} from "../../shared/project-slug.js";
 import {
   PROJECTS_DIR_NAME,
   TASKS_DIR_NAME,
@@ -24,12 +28,10 @@ import {
 /**
  * 任务 registry 根:`<dataDir>/projects/<basename>-<sha1[:12]>/tasks`。
  *
- * slug 公式**刻意内联**而不从 `src/session-api/store/session-store.ts` 的
- * `resolveProjectSessionDir` 导入:`src/harness/` 是底层能力模块,不可反向
- * 依赖 `src/session-api/`(Gate B,同 `harness/skill/body.ts` 对
- * `MAX_MESSAGE_CHARS` 的处理)。两处必须**逐字节一致** —— 任务登记与会话
- * 文件夹挂在同一个 `<slug>` 下,漂移会把账本分到孤儿目录。改任一处必须
- * 同步另一处(消费方测试用 `createHash` 现算摘要,不写死字面量)。
+ * slug 公式与长度上限的唯一来源 = `src/shared/project-slug.ts`(与会话文件夹
+ * 的 `resolveProjectSessionDir` 同一函数、同一常量)。`src/harness/` 是底层
+ * 能力模块,不可反向依赖 `src/session-api/`(Gate B),`src/shared/` 是三方
+ * 中立层 —— 公式只此一份实现,漂移不再可能。
  *
  * fail-closed 语义同 `resolveProjectSessionDir`:缺根 / 空白 / 相对 /
  * 超长 `projectIdentityRoot` 一律抛 typed `SessionRootError`(与
@@ -47,7 +49,7 @@ export function resolveTasksDir(opts: {
     );
   }
   const trimmed = root.trim();
-  if (trimmed === "" || trimmed.length > MAX_ROOT_DETAIL_CHARS) {
+  if (trimmed === "" || trimmed.length > MAX_PROJECT_IDENTITY_ROOT_BYTES) {
     throw new SessionRootError(
       "missing_root",
       "projectIdentityRoot is required and must be non-empty"
@@ -59,17 +61,10 @@ export function resolveTasksDir(opts: {
       `projectIdentityRoot must be an absolute path, got '${trimmed.slice(0, MAX_ROOT_DETAIL_CHARS)}'`
     );
   }
-  const digest = createHash("sha1").update(trimmed).digest("hex").slice(0, 12);
   return join(
     opts.dataDir,
     PROJECTS_DIR_NAME,
-    `${basename(trimmed)}-${digest}`,
+    computeProjectSlug(trimmed),
     TASKS_DIR_NAME
   );
 }
-
-/**
- * `path.isAbsolute` 的等价判定 —— 见 `session-store.ts` 的同一常量用法:
- * 上限与 `SessionRootError` 诊断回显口径对齐。
- */
-const MAX_ROOT_DETAIL_CHARS = 120;

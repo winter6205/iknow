@@ -23,7 +23,6 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
 
@@ -33,6 +32,7 @@ import {
 } from "../../../src/harness/background/manager.js";
 import { reapStaleTasks } from "../../../src/harness/background/stale-reap.js";
 import { resolveTasksDir } from "../../../src/harness/background/paths.js";
+import { resolveProjectSessionDir } from "../../../src/session-api/store/session-store.js";
 import { readProcStartTime as readStartTime } from "../../../src/harness/background/proc.js";
 import type {
   BackgroundTaskRecord,
@@ -619,17 +619,14 @@ describe("T6 reap 接缝 onConversationDeleted(subscription point)", () => {
 // ── paths.resolveTasksDir ────────────────────────────────────────────────────
 
 describe("paths.resolveTasksDir", () => {
-  it("返回 <pool>/projects/<slug>/tasks，slug 与 resolveProjectSessionDir 同公式", () => {
-    // ADR-0088：任务登记跟会话池同一项目树。slug = basename(root)-sha1(root)[:12]，
-    // 与 src/session-api/store/session-store.ts 的 resolveProjectSessionDir
-    // 逐字节相同（两处刻意不共享实现：harness 不得反向依赖 session-api）。
-    const digest = createHash("sha1")
-      .update("/repo")
-      .digest("hex")
-      .slice(0, 12);
+  it("返回 <pool>/projects/<slug>/tasks，与 resolveProjectSessionDir 严格同树", () => {
+    // ADR-0088:任务登记跟会话池同一项目树。公式与上限共享
+    // `src/shared/project-slug.ts` 的 `computeProjectSlug`,与
+    // `resolveProjectSessionDir` 必然同 slug —— 断言改用跨函数等式,任何
+    // 一边漂移都会失败(此前测试独立重算 hash,漂移后两边仍各自"绿")。
     assert.equal(
       resolveTasksDir({ dataDir: "/home/x", projectIdentityRoot: "/repo" }),
-      join("/home/x", "projects", `repo-${digest}`, "tasks")
+      join(resolveProjectSessionDir("/home/x", "/repo"), "tasks")
     );
   });
 

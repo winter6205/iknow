@@ -27,7 +27,6 @@
  *     every subsequent save. rewindToAnchor() moves the persisted head to
  *     an earlier turn boundary WITHOUT truncating the log.
  */
-import { createHash } from "node:crypto";
 import {
   appendFile,
   mkdir,
@@ -38,7 +37,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { basename, isAbsolute, join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import path from "node:path";
 import type {
   AnthropicContentBlock,
@@ -79,6 +78,10 @@ import {
   sanitizeConversationSegment,
   SessionRootError,
 } from "../../harness/session-roots.js";
+import {
+  computeProjectSlug,
+  MAX_PROJECT_IDENTITY_ROOT_BYTES,
+} from "../../shared/project-slug.js";
 import {
   PROJECTS_DIR_NAME,
   SUBAGENT_TRACE_DIR_NAME,
@@ -130,14 +133,12 @@ export function resolveProjectSessionDir(
   projectIdentityRoot: string
 ): string {
   requireValidRoot(projectIdentityRoot, "projectIdentityRoot");
-  const digest = createHash("sha1")
-    .update(projectIdentityRoot)
-    .digest("hex")
-    .slice(0, 12);
+  // review-fix (M1/M2/M3): slug 公式与上限的单一来源 = shared/project-slug.ts
+  // （harness/background/paths.ts 的 resolveTasksDir 消费同一函数与同一上限）。
   return join(
     baseDir,
     PROJECTS_DIR_NAME,
-    `${basename(projectIdentityRoot)}-${digest}`
+    computeProjectSlug(projectIdentityRoot)
   );
 }
 
@@ -227,7 +228,10 @@ function requireValidRoot(value: string, label: string): void {
     );
   }
   const trimmed = value.trim();
-  if (trimmed === "" || trimmed.length > MAX_CONVERSATION_ID_BYTES) {
+  // review-fix (M1/M2/M3): 上限来自 shared/project-slug.ts —— 与
+  // harness/background/paths.ts 的 resolveTasksDir 同一常量,121–255 字符的
+  // 根两边都接受(此前 paths.ts 用 120 会在该区间抛错 → 登记表孤儿)。
+  if (trimmed === "" || trimmed.length > MAX_PROJECT_IDENTITY_ROOT_BYTES) {
     throw new SessionRootError(
       "missing_root",
       `${label} is required and must be non-empty`

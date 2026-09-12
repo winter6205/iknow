@@ -618,9 +618,10 @@ export type SessionHubOptions = {
   /**
    * review-fix (M1 / H1): per-root state anchor。serve 入口解析后
    * 透传 —— 让 hub 的 buildHarnessEngine 走 entry-resolved workspaceRoot,
-   * 保证 serve 与 CLI flag 路径同形态(seed 落 `<workspaceRoot>/.iknow`,
-   * bash fence 保护 `<workspaceRoot>/.iknow`)。缺席 → build-engine
-   * 走 cwd fallback(legacy 默认)。
+   * 保证 serve 与 CLI flag 路径同形态(per-root 状态锚 = 记忆库 / skill
+   * seam / 项目 `AGENTS.md` 发现)。seed 落 `~/.iknow`(#196 T5,与
+   * workspaceRoot 无关);会话池 / tasks 落点见 ADR-0087 / ADR-0088。
+   * 缺席 → build-engine 走 cwd fallback(legacy 默认)。
    */
   readonly workspaceRoot?: string;
   /**

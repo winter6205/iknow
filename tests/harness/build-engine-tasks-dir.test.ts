@@ -13,10 +13,9 @@
  * `createBackgroundTaskManager` 抓 `opts.tasksDir`(委托真实工厂,行为不变),
  * 其余装配走真实路径。
  */
-import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const captured = vi.hoisted(() => ({ tasksDirs: [] as string[] }));
@@ -40,6 +39,7 @@ import {
   type BuiltEngine,
 } from "../../src/harness/build-engine.js";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.js";
+import { resolveProjectSessionDir } from "../../src/session-api/store/session-store.js";
 import type { IknowEnv } from "../../src/config/env.js";
 
 function makeEnv(): IknowEnv {
@@ -64,21 +64,13 @@ function makeEnv(): IknowEnv {
   };
 }
 
-/** 与 `resolveProjectSessionDir` 逐字节同公式的期望值(测试现算,不写死字面量)。 */
+/** 与 `resolveProjectSessionDir` 严格同公式的期望值:跨函数等式(不要独立重算
+ *  哈希 —— review fix:测试独立重算会让公式漂移后两边仍各自"绿")。 */
 function expectedTasksDir(
   poolRoot: string,
   projectIdentityRoot: string
 ): string {
-  const digest = createHash("sha1")
-    .update(projectIdentityRoot)
-    .digest("hex")
-    .slice(0, 12);
-  return join(
-    poolRoot,
-    "projects",
-    `${basename(projectIdentityRoot)}-${digest}`,
-    "tasks"
-  );
+  return join(resolveProjectSessionDir(poolRoot, projectIdentityRoot), "tasks");
 }
 
 const roots: string[] = [];

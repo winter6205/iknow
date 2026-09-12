@@ -11,13 +11,13 @@ Status: accepted
 
 同一个会话的记录面散在**五个锚点**,彼此用同一个 `conversationId` 做键却不共享位置(实测 2026-09-08):
 
-| 状态               | 锚点                                                 | 出处                                 |
-| ------------------ | ---------------------------------------------------- | ------------------------------------ |
-| session transcript | `<dataDir>/sessions/<basename(cwd)>-<sha1[:12]>/`    | `session-store.ts:107-110`           |
-| todos              | `~/.iknow/todos/<surface>/<conversationId>/todos.md` | `todo-write.ts:450-456`              |
-| 后台任务登记表     | `<stateAnchor>/.iknow/tasks`                         | `build-engine.ts:667`(ADR-0021 D1.3) |
-| trace              | `./trace/<conversationId>.jsonl`(**cwd 相对**)       | `cli.ts:77`                          |
-| worktrees          | `<repoRoot>/.iknow/worktrees/<leaf>`                 | `worktree-gate.ts:548-556`           |
+| 状态               | 锚点                                                                                         | 出处                                 |
+| ------------------ | -------------------------------------------------------------------------------------------- | ------------------------------------ |
+| session transcript | `<dataDir>/sessions/<basename(cwd)>-<sha1[:12]>/`                                            | `session-store.ts:107-110`           |
+| todos              | `~/.iknow/todos/<surface>/<conversationId>/todos.md`                                         | `todo-write.ts:450-456`              |
+| 后台任务登记表     | `<stateAnchor>/.iknow/tasks`（现 `<pool>/projects/<slug>/tasks`，见上方 ADR-0088 amendment） | `build-engine.ts:667`(ADR-0021 D1.3) |
+| trace              | `./trace/<conversationId>.jsonl`(**cwd 相对**)                                               | `cli.ts:77`                          |
+| worktrees          | `<repoRoot>/.iknow/worktrees/<leaf>`                                                         | `worktree-gate.ts:548-556`           |
 
 三处可实测的缺陷:
 
