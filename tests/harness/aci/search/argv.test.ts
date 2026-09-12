@@ -21,6 +21,10 @@ import {
   KNOWN_TYPE_SAMPLE,
 } from "../../../../src/harness/aci/search/argv.ts";
 import { MAX_TEXT_FILE_BYTES } from "../../../../src/harness/aci/search/file-lines.ts";
+import {
+  MAX_MATCH_LINE_COLUMNS,
+  rgTransportBudgetBytes,
+} from "../../../../src/harness/aci/search/rg-output.ts";
 import { resolveTypeName } from "../../../../src/harness/aci/search/type-table.ts";
 import { compilePattern } from "../../../../src/harness/aci/search/pattern.ts";
 import type { QuerySpec } from "../../../../src/harness/aci/search/types.ts";
@@ -91,9 +95,23 @@ describe("buildRgArgs — 出法", () => {
     const args = argv({ output: "content" });
 
     assert.deepEqual(args.slice(0, 2), ["--line-number", "--no-heading"]);
-    // 第一道闸交给 rg（否则整行 1MB 原样回传），第二道在投影层按 code point。
-    assert.ok(args.includes("--max-columns=2000"));
+    // 第一道闸交给 rg（否则整行 1MB 原样回传），但它的字节预算取
+    // `MAX_MATCH_LINE_COLUMNS × 4`（UTF-8 单字符最大宽度）—— 预算若等于
+    // code point 上限，`hit + 漢×1000`（3003 字节 / 1003 code point）会被 rg
+    // 截断并塞进它自己的省略标记，而投影层的 code point 闸认为没超限：两条
+    // 引擎对同一行给出不同字节数（D6/SC9）。断言从常量派生，不写死数字。
+    assert.ok(
+      args.includes(
+        `--max-columns=${String(
+          rgTransportBudgetBytes(MAX_MATCH_LINE_COLUMNS)
+        )}`
+      )
+    );
     assert.ok(args.includes("--max-columns-preview"));
+    // 预算必须**严大于** code point 上限，否则 rg 会抢在权威闸之前动手。
+    assert.ok(
+      rgTransportBudgetBytes(MAX_MATCH_LINE_COLUMNS) > MAX_MATCH_LINE_COLUMNS
+    );
   });
 
   it("content + context>0 → -C N（对称上下文）", () => {

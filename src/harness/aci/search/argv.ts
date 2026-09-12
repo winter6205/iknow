@@ -16,6 +16,7 @@
 import type { QuerySpec } from "./types.js";
 import { TYPE_GLOBS } from "./type-table.js";
 import { MAX_TEXT_FILE_BYTES } from "./file-lines.js";
+import { rgTransportBudgetBytes } from "./rg-output.js";
 
 /** 词表里常被用到的样例（测试锁形状用；真值仍在 TYPE_GLOBS）。 */
 export const KNOWN_TYPE_SAMPLE: ReadonlyArray<string> = [
@@ -74,11 +75,20 @@ export function buildRgArgs(
   // 由解析层剥掉（rg 仍原样回显），见 `rg-output.ts`。
   args.push("--crlf");
   if (spec.output === "content") {
-    // 超长匹配行的两道闸：先让 rg 自己收口（`--max-columns-preview` 会写自己的
-    // 省略标记），再由投影层按 code point 收到 MAX_MATCH_LINE_COLUMNS。少了第一
-    // 道，rg 会把整行原样吐回来，缓冲一整行 1MB 文本才发现要截断。`paths` /
-    // `count` 不吐行内容，因此不带。
-    args.push(`--max-columns=${String(maxColumns)}`, "--max-columns-preview");
+    // 超长匹配行的两道闸：先让 rg 自己收口，再由投影层按 code point 收到
+    // MAX_MATCH_LINE_COLUMNS（唯一权威）。第一道只为**传输量**存在 —— 少了
+    // 它，rg 会把整行原样吐回来，缓冲一整行 1MB 文本才发现要截断。因此它的
+    // 字节预算取 `rgTransportBudgetBytes`（= 4 倍 code point 上限，即 UTF-8
+    // 单字符最大宽度）：rg 的触发按**字节**、切片按 **code point**，预算取满
+    // 4 倍才让「rg 加了标记」不会伴随内容被切（见 `rg-output` 的实测说明）。
+    // 预算若更小，`hit + 漢×1000`（3003 字节 / 1003 个 code point）会在 2000
+    // 字节的线上触发，标记落进正文而 Node 侧原样保留 —— 同一行的字节数、
+    // 正文、可复制内容全不同（D6/SC9）。投影层再把 rg 的标记剥掉后统一收口，
+    // 两条引擎的最终形状因此只由权威口径决定。
+    args.push(
+      `--max-columns=${String(rgTransportBudgetBytes(maxColumns))}`,
+      "--max-columns-preview"
+    );
     if (spec.context > 0) args.push("-C", String(spec.context));
   }
   if (spec.ignoreCase) args.push("--ignore-case");

@@ -15,18 +15,19 @@
 
 import type { ChildProcess } from "node:child_process";
 import { spawn as nodeSpawn } from "node:child_process";
+import { stat } from "node:fs/promises";
 import { relative } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
 import { spawnWithStopSignal } from "../../sandbox/runner.js";
 import { buildRgArgs } from "./argv.js";
 import { parseRgContextStdout } from "./context-groups.js";
+import { admittedPaths } from "./file-lines.js";
 import {
   MAX_MATCH_LINE_COLUMNS,
   parseRgNullCounts,
   parseRgNullLines,
   parseRgNullPaths,
-  truncateMatchContent,
 } from "./rg-output.js";
 import type { ContextGroup, FileCount, LineHit, QuerySpec } from "./types.js";
 
@@ -69,7 +70,95 @@ export async function runRgEngine(input: RgEngineInput): Promise<EngineResult> {
   const args = buildRgArgs(input.spec, searchPath, MAX_MATCH_LINE_COLUMNS);
   const collected = await collect(input, args);
   if (collected === "unavailable") return { kind: "unavailable" };
-  return interpret(collected, input);
+  return applyAdmission(interpret(collected, input), input);
+}
+
+/**
+ * 二进制 / 超大的**准入复核**（D6/SC9：两条引擎同一条准入线）。
+ *
+ * 为什么 rg 报出来的路径还要复核：rg 自己的二进制检测是按 64 KiB 窗口做的，
+ * 且**同一文件在不同出法下结论不同**（实测 15.1.0：NUL 在 70 KB 处的文件
+ * `-l` 列出、`--count` 略过、`content` 吐 WARNING）。那种口径没有可复刻的
+ * 一致含义，所以本工具的口径是「二进制（整文件含 NUL）不搜」—— 与
+ * `read_file` 的 `buffer.includes(0x00)` 同源（ADR-0004），单一权威落在
+ * `file-lines.ts` 的 `readTextBuffer`。rg 自带的检测因此只当省 I/O 的粗筛：
+ * 它再准，最终接受集也由这里决定，两条引擎对同一个文件要么都收、要么都拒。
+ *
+ * `allowOversize` 的判据与 Node 扫同形（搜索根是显式点名的文件）—— 少了它，
+ * `path: "big.ts"` 在 Node 路径能搜、rg 路径被这里拒掉，等于把豁免修复的
+ * 分歧又倒回来。
+ */
+async function applyAdmission(
+  result: EngineResult,
+  input: RgEngineInput
+): Promise<EngineResult> {
+  // `unavailable` 不是本层产物（调用方已分派掉），但它属于同一联合类型；
+  // 显式挡掉后其余三种形状各处都需要具体成员访问。
+  if (result.kind === "unavailable") return result;
+  const paths = resultPaths(result);
+  if (paths.length === 0) return result;
+  const unique = new Set(paths);
+  const admitted = await admittedPaths(input.workspaceRoot, paths, {
+    allowOversize: await isExplicitFile(input),
+  });
+  // 全员通过时原样返回（省掉一次逐条重造）：比较基数是**去重后**的数量，
+  // 命中行形状下同一文件会出现多次，拿 `paths.length` 比会永远走不到快路。
+  if (admitted.size === unique.size) return result;
+  return keepAdmitted(result, admitted);
+}
+
+/** 结果涉及的路径（三种形状各自的投影面）。 */
+function resultPaths(
+  result: Exclude<EngineResult, { kind: "unavailable" }>
+): string[] {
+  if (result.kind === "lines") return result.lines.map((hit) => hit.path);
+  if (result.kind === "paths") return [...result.paths];
+  if (result.kind === "counts") return result.counts.map((count) => count.path);
+  if (result.kind === "context") {
+    return result.groups.flatMap((group) =>
+      group.entries.map((entry) => entry.path)
+    );
+  }
+  return [];
+}
+
+/** 按准入集合过滤结果（保持各形状的原有顺序）。 */
+function keepAdmitted(
+  result: Exclude<EngineResult, { kind: "unavailable" }>,
+  admitted: ReadonlySet<string>
+): EngineResult {
+  if (result.kind === "lines") {
+    return {
+      kind: "lines",
+      lines: result.lines.filter((hit) => admitted.has(hit.path)),
+    };
+  }
+  if (result.kind === "paths") {
+    return {
+      kind: "paths",
+      paths: result.paths.filter((path) => admitted.has(path)),
+    };
+  }
+  if (result.kind === "counts") {
+    return {
+      kind: "counts",
+      counts: result.counts.filter((count) => admitted.has(count.path)),
+    };
+  }
+  return {
+    kind: "context",
+    groups: result.groups
+      .map((group) => ({
+        entries: group.entries.filter((entry) => admitted.has(entry.path)),
+      }))
+      .filter((group) => group.entries.length > 0),
+  };
+}
+
+/** 搜索根是否指向一个存在的文件（与 `node-scan` / `grep.ts` 同判据）。 */
+async function isExplicitFile(input: RgEngineInput): Promise<boolean> {
+  const info = await stat(input.searchRoot).catch(() => null);
+  return info !== null && info.isFile();
 }
 
 type Collected =
@@ -197,13 +286,9 @@ function parseByMode(stdout: string, input: RgEngineInput): EngineResult {
   if (spec.context > 0) {
     return { kind: "context", groups: parseRgContextStdout(stdout) };
   }
-  return {
-    kind: "lines",
-    lines: parseRgNullLines(stdout).map((hit) => ({
-      ...hit,
-      text: truncateMatchContent(hit.text),
-    })),
-  };
+  // `parseRgNullLines` 内部已按 MAX_MATCH_LINE_COLUMNS 走唯一一道闸，这里
+  // 不再收第二遍 —— 重复收口只会让「到底谁是权威」变得含糊。
+  return { kind: "lines", lines: parseRgNullLines(stdout) };
 }
 
 function firstLine(text: string): string {

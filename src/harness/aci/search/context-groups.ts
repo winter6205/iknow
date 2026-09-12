@@ -12,7 +12,11 @@
  * 构造同样的组 —— 两种引擎产出的形状完全一致，投影层不需要知道谁算的。
  */
 
-import { stripCr, truncateMatchContent } from "./rg-output.js";
+import {
+  isRgBinaryNotice,
+  truncateMatchContent,
+  truncateRgContent,
+} from "./rg-output.js";
 import {
   CONTEXT_GROUP_SEPARATOR,
   type ContextEntry,
@@ -136,6 +140,11 @@ export function parseRgContextStdout(stdout: string): ContextGroup[] {
       flush();
       continue;
     }
+    // 二进制提示行与 `path:line:text` 同形（`path: binary file matches (...)`），
+    // 形状判定要先于分列 —— 否则它会被解析成一条 `isMatch` 的假命中（见
+    // `rg-output.isRgBinaryNotice`）。判定收在循环里（不是 `parseContextRecord`
+    // 内），分列函数的分支数因此不因这条防线增长。
+    if (isRgBinaryNotice(record)) continue;
     const entry = parseContextRecord(record);
     if (entry === undefined) continue;
     current.push(entry);
@@ -168,14 +177,13 @@ function parseContextRecord(record: string): ContextEntry | undefined {
   if (sep !== ":" && sep !== "-") return undefined;
   const line = Number(rest.slice(0, i));
   if (!Number.isInteger(line) || line < 1) return undefined;
-  // 与 Node 路径同闸：rg 的 `--max-columns` 已先收过一遍（带自己的标记），
-  // 这里再按 code point 收口，且**两类行都剥尾随 `\r`**（`--crlf` 下 rg
-  // 仍回显它，而 Node 侧按 `\n` 切行时已剥）—— 少一道就是两条引擎对同一
-  // CRLF 文件输出差一个不可见字符。
+  // rg 路径专用入口：先洗传输层痕迹（尾随 `\r` + 它自己的省略标记）再过共用
+  // 展示闸。**交原样内容**、不在调用点先剥 `\r`：那个字节计入 rg 的超长判定
+  // 基数（见 `rg-output.truncateRgContent`）。
   return {
     path,
     line,
-    text: truncateMatchContent(stripCr(rest.slice(i + 1))),
+    text: truncateRgContent(rest.slice(i + 1)),
     isMatch: sep === ":",
   };
 }

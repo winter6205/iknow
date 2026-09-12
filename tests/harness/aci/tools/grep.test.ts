@@ -52,6 +52,7 @@ import { afterEach, describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import { createGrepTool } from "../../../../src/harness/aci/tools/grep.ts";
+import { MAX_EXPLICIT_FILE_BYTES } from "../../../../src/harness/aci/search/file-lines.ts";
 import { engineBinaryPath } from "../../../../src/harness/aci/search/engine-manifest.ts";
 import { resolveInstallRoot } from "../../../../src/harness/session-roots.ts";
 
@@ -984,6 +985,73 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
     );
     // CRLF 行：`$` 按行边界解释、尾随 `\r` 不混进回显（两条引擎同口径）。
     await writeFile(join(root, "crlf.ts"), "hit crlf\r\nplain\r\n", "utf8");
+    // 非 ASCII 宽行：ASCII 用例里 byte == code point，看不出两个单位不同。
+    // CJK / emoji 的 byte:cp 比是 3:1 / 4:1，取 1000 个只有 3–4 KB、code
+    // point 数远在 2000 以下 —— 只要传输预算被压回「等于 code point 上限」，
+    // rg 就会在自己的省略标记里切一刀，而 Node 侧原样保留：同一行的字节数、
+    // 标记文本、可复制的正文全都不同（D6/SC9）。这组用例钉住预算必须是 4 倍。
+    await writeFile(
+      join(root, "longcjk.ts"),
+      `hit${"漢".repeat(1_000)}\n`,
+      "utf8"
+    );
+    await writeFile(
+      join(root, "longemoji.ts"),
+      `hit${"😀".repeat(1_000)}\n`,
+      "utf8"
+    );
+    // 上下文行走的是另一条截断路径（`context-groups.ts`），单独一条。
+    await writeFile(
+      join(root, "longctxcjk.ts"),
+      `${"漢".repeat(1_000)}\nhit\n`,
+      "utf8"
+    );
+    // CRLF 上的**边界行**：正文 7999 字节 / 2000 code point（未超权威闸），
+    // 但加上尾随 `\r` 恰好 8000 字节 → rg 会追加自己的省略标记。剥标记时要
+    // 把 `\r` 那一个字节补回触发基数，否则同一行在 rg 路径被当成「超宽」再截
+    // 一次、Node 路径原样保留（D6/SC9）。LF 版本作对照（不触发）。
+    const crlfEdge = `€${"😀".repeat(1_999)}`;
+    await writeFile(join(root, "crlf-edge.ts"), `${crlfEdge}\r\n`, "utf8");
+    await writeFile(join(root, "lf-edge.ts"), `${crlfEdge}\n`, "utf8");
+    // 二进制准入：NUL 在早期 / 窗口之外两个方向各来一个，且命中行都在 NUL
+    // 之后 —— 「二进制文件不搜」这条口径下两条引擎都必须看不见它们。
+    await writeFile(
+      join(root, "nul-early.ts"),
+      Buffer.concat([
+        Buffer.from("hit early\n"),
+        Buffer.from([0]),
+        Buffer.from("hit after\n"),
+      ])
+    );
+    await writeFile(
+      join(root, "nul-late.ts"),
+      Buffer.concat([
+        Buffer.from("hit early\n"),
+        Buffer.alloc(70_000, 0x61),
+        Buffer.from([0]),
+        Buffer.from("\nhit after\n"),
+      ])
+    );
+    // 反方向：命中行在 NUL **之前**（rg 的 `-l` 命中即返回，会把这个文件列
+    // 出来；`--count` 读到尾才发现 NUL 而略过 —— 同一文件两种答案。本工具的
+    // 口径是「二进制文件不搜」，两条引擎都必须看不见它）。
+    await writeFile(
+      join(root, "nul-hitfirst.ts"),
+      Buffer.concat([Buffer.from("hit before\n"), Buffer.from([0])])
+    );
+    // 语境对照：文件里有 NUL 但没有命中 —— 不能因为「过滤掉一条告警记录」
+    // 就把该文件的正常命中一起丢掉，也不能反过来凭空造出命中。
+    await writeFile(
+      join(root, "nul-nohit.ts"),
+      Buffer.concat([
+        Buffer.from("plain\n"),
+        Buffer.from([0]),
+        Buffer.from("plain again\n"),
+      ])
+    );
+    // 同一目录里的干净邻居：二进制文件不得让它一起消失（也不能把整次查询
+    // 变成失败 —— 见下面 `path: "."` 的用例）。
+    await writeFile(join(root, "clean-neighbor.ts"), "hit neighbor\n", "utf8");
 
     const viaRg = toolFor(root, "rg");
     const viaNode = toolFor(root, "node");
@@ -1017,6 +1085,43 @@ describe("grep — SC9 自带引擎缺席 → Node 全语义", () => {
       { pattern: "hit", glob: "{sub/nope,brace}.ts" },
       // 上下文行也过行宽闸：rg 与 Node 都要截断到同一列数 + 同一标记。
       { pattern: "hit", output: "content", context: 1, path: "longctx.ts" },
+      // 非 ASCII 超宽行（byte:cp = 3:1 / 4:1）：唯一权威是 code point 闸，
+      // rg 按字节判超宽后塞进来的省略标记不得进入正文。
+      { pattern: "hit", output: "content", path: "longcjk.ts" },
+      { pattern: "hit", output: "content", path: "longemoji.ts" },
+      { pattern: "hit", output: "content", context: 1, path: "longctxcjk.ts" },
+      // CRLF 边界行：`\r` 计入 rg 的触发基数 —— 剥标记不漏、正文与 Node 等长。
+      // 上下文行走的是另一个分列入口（`context-groups.parseRgContextStdout`），
+      // 同一行在那里也要过同一道洗痕 —— 单独一条覆盖。
+      { pattern: "€", output: "content", path: "crlf-edge.ts" },
+      { pattern: "€", output: "content", context: 1, path: "crlf-edge.ts" },
+      { pattern: "€", output: "content", path: "lf-edge.ts" },
+      // 二进制准入：含 NUL 的文件三条出法都不该被搜到（两个 NUL 位置方向
+      // 都验，且 `nul-nohit.ts` 证明过滤不误伤）。
+      { pattern: "hit", output: "paths", path: "nul-early.ts" },
+      { pattern: "hit", output: "content", path: "nul-early.ts" },
+      { pattern: "hit", output: "count", path: "nul-early.ts" },
+      { pattern: "hit", output: "paths", path: "nul-late.ts" },
+      { pattern: "hit", output: "content", path: "nul-late.ts" },
+      { pattern: "hit", output: "count", path: "nul-late.ts" },
+      // 命中在 NUL 之前：rg 的 `-l` 会列出、`--count` 会略过，两条出法先
+      // 自相矛盾 —— 统一口径后三条出法都必须看不见它。
+      { pattern: "hit", output: "paths", path: "nul-hitfirst.ts" },
+      { pattern: "hit", output: "content", path: "nul-hitfirst.ts" },
+      { pattern: "hit", output: "count", path: "nul-hitfirst.ts" },
+      { pattern: "hit", output: "paths", path: "nul-nohit.ts" },
+      { pattern: "hit", output: "content", path: "nul-nohit.ts" },
+      { pattern: "hit", output: "count", path: "nul-nohit.ts" },
+      // 二进制文件不得把整次查询变成失败，也不得污染同目录的干净文件。
+      { pattern: "hit", output: "paths", path: "." },
+      { pattern: "hit", output: "count" },
+      // glob 边界：裸 `!` 在 rg 是「不选中任何文件」（不是「全收」），
+      // 尾随 `/` 的模式（`*/` / `**/` / `brace.ts/`）也不得命中。
+      { pattern: "hit", glob: "!" },
+      { pattern: "hit", glob: "*/" },
+      { pattern: "hit", glob: "**/" },
+      { pattern: "hit", glob: "a.ts/" },
+      { pattern: "hit", glob: "sub/" },
       // 遍历语义：点文件 / 点目录可见，node_modules 不可见，.gitignore 不生效。
       { pattern: "hit", glob: ".dot.ts" },
       { pattern: "hit", glob: ".dotdir/*.ts" },
@@ -1177,6 +1282,74 @@ describe("grep — 超长匹配行截断", () => {
       assert.ok(lines[0]!.length <= 2_100, "长结果必须有界");
       assert.equal(lines[1], "long.txt:2:needle sibling");
     });
+  });
+});
+
+/**
+ * 显式文件豁免的体积上界（Finding 4）。
+ *
+ * 「显式点名的文件不受 `--max-filesize` 约束」这条豁免是为对齐 rg 语义而设
+ * （遍历期才管体积），但豁免若无上界，`{path: "<巨型文件>"}` 就是无界读。上界
+ * 取 `MAX_EXPLICIT_FILE_BYTES`，且**两条引擎必须同界**：只有一边砍，同一个
+ * `path` 参数的答案就随引擎变 —— 那正是豁免当初要修掉的分歧。
+ */
+describe("grep — 显式文件的体积上界（两条引擎同界）", () => {
+  it("界内显式点名照搜、界外两条引擎都看不见（同一答案）", async () => {
+    const root = await makeScratch("grep-explicit-cap-");
+    // 界内：1 MiB + 1（超过遍历闸，但远在显式上界之内）。
+    await writeFile(
+      join(root, "inside.ts"),
+      `${"x".repeat(1_100_000)}\nhit inside\n`,
+      "utf8"
+    );
+    // 界外：上界 + 1 字节。
+    await writeFile(
+      join(root, "beyond.ts"),
+      `${"x".repeat(MAX_EXPLICIT_FILE_BYTES)}\nhit beyond\n`,
+      "utf8"
+    );
+
+    const viaRg = toolFor(root, "rg");
+    const viaNode = toolFor(root, "node");
+
+    // 界内：两条引擎都搜得到（豁免本身没有被上界取消）。
+    for (const [name, tool] of [
+      ["rg", viaRg],
+      ["node", viaNode],
+    ] as const) {
+      const inside = (await tool.handler({
+        pattern: "hit",
+        path: "inside.ts",
+        output: "content",
+      })) as string;
+      assert.match(inside, /inside\.ts:2:hit inside/, `${name} 界内应可搜`);
+    }
+
+    // 界外：两条引擎给出**同一个**答案（无论那个答案是空还是截断 —— 关键是
+    // 不因为谁在跑而不同）。
+    const beyondRg = (await viaRg.handler({
+      pattern: "hit",
+      path: "beyond.ts",
+      output: "content",
+    })) as string;
+    const beyondNode = (await viaNode.handler({
+      pattern: "hit",
+      path: "beyond.ts",
+      output: "content",
+    })) as string;
+    assert.equal(beyondNode, beyondRg, "界外两条引擎必须同答案");
+
+    // 遍历期两条引擎也都不看它（超遍历闸）。
+    const globRg = (await viaRg.handler({
+      pattern: "hit",
+      glob: "beyond.ts",
+    })) as string;
+    const globNode = (await viaNode.handler({
+      pattern: "hit",
+      glob: "beyond.ts",
+    })) as string;
+    assert.equal(globRg, "");
+    assert.equal(globNode, "");
   });
 });
 
