@@ -4,6 +4,8 @@ Date: 2026-08-29
 
 Status: accepted
 
+> **Amendment 2026-09-13**（ADR-0088）：§4「per-root 状态（记忆库落盘根 / tasks 登记）的锚是 `workspaceRoot`」对 **tasks** **superseded**——登记跟 home 项目树。记忆库仍 per-root。改绑仍只切 `taskRoot`，树上仍不另开一份登记。
+>
 > **Amendment 2026-09-11**（`specs/agent-control-surface.md`）：撤销「工具在场 ⇔ 门禁已武装」。工作树 ACI（create / enter / exit / list / remove）在 isolation host 缝在场时**常注册**，不再要求 `isolationEnabled`。`worktreeOnMutate` **只**武装 mutate 门禁（ON 拦未绑树的写、从不 auto-provision；OFF 主仓可写）。OFF 时模型仍可用 create/enter **session worktree rebind**。bash `git worktree add` 仍不是 rebind。本开关属**用户层** settings（项目文件出现 isolation 段则丢弃，ADR-0084）。§1 OFF「会话行为与今日完全一致、不新增任何拦截点」在**门禁**面上仍成立；**工具面**改为常在，不再随 OFF 卸掉。
 
 > **Amendment 2026-09-04**（`specs/casual-ask-context-hygiene.md`）：§1「读放行、写才拦」不变。bash 是否 mutate **不得**复用 `validateReadonlyCommand`（那是 bash readonly **模式**的 deny-by-default 表，`2>&1` 也拒）。门禁自备「会不会写工作区」判定；`2>&1` / 管道 / 只读命令串为读。`validateReadonlyCommand` 不为本门禁放宽。`unboundMutateNotice` 仍点名 `create-task-worktree`、仍不 auto-provision；文案改为事实阻断（这次调用会写主仓、未执行；若要写则调工具再重试这一次），不得把模型下一拍收成「去建树」（**此半句 2026-09-08 由 ADR-0069 / `specs/write-situation-disclosure.md` 撤销**——回执只在写意图已证时出现，casual ask 结构上碰不到它，该顾虑在这个时点不成立；同批保留「不按用户问句分型」与三条子串禁令，并把验收从纯子串升级为**语义 + 子串**，因为纯子串断言拦不住语义空心化——本 amendment 锁定语义里的「再重试这一次调用」正是这样丢的）。不按用户问句分型。不改 `create-task-worktree` ACI 形状。

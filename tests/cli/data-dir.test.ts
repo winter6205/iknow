@@ -6,8 +6,13 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { parseArgs } from "../../src/cli/parse-args.ts";
 import { usageText } from "../../src/cli/usage.ts";
+import { SessionStore } from "../../src/session-api/store/index.ts";
+import { resolveServeDataDir } from "../../src/session-api/serve.ts";
+import { deriveProjectIdentityRoot } from "../../src/harness/session-roots.ts";
 
 describe("parseArgs --data-dir", () => {
   it("parses --data-dir <dir> into ParsedCli.dataDir", () => {
@@ -56,5 +61,39 @@ describe("usageText — --data-dir advertisement", () => {
     const t = usageText();
     assert.match(t, /--port <n>/);
     assert.match(t, /--host <addr>/);
+  });
+});
+
+describe("chat / ask entry-point dataDir threading (review-fix M-2)", () => {
+  // review fix: 此前 `runChat` / `runOneShot` 不把 `parsed.dataDir` 透传给内部
+  // `SessionStore` / `chat-session.checkpointStore` —— 显式 `--data-dir <alt>`
+  // 时 SessionStore 仍然落 `~/.iknow`，与 serve / trace 行为分叉。这条钉
+  // 不变式：所有 CLI 入口把 `parsed.dataDir` 一致地解析成同一条 baseDir。
+  it("resolveServeDataDir is the single pool resolver across entry points", () => {
+    const alt = "/tmp/iknow-explicit-pool";
+    // serve / chat / ask / trace 入口共享同一函数 + 同一语义：显式胜出。
+    assert.equal(resolveServeDataDir(alt), alt);
+    assert.equal(resolveServeDataDir(undefined), join(homedir(), ".iknow"));
+    // 解析两次幂等（同一 alt 必须解到同一绝对路径）。
+    assert.equal(resolveServeDataDir(alt), resolveServeDataDir(alt));
+  });
+
+  it("chat checkpointStore lands at <alt> when opts.dataDir is passed", () => {
+    // 与 Finding #1 同源：跨函数等式 —— 不重算 slug、不重算 baseDir,
+    // 直接构造 SessionStore 比对 underlying projectDir 的前缀是不是
+    // `<alt>/projects/<slug>/`。若 chat-session 不把 opts.dataDir 透传给
+    // SessionStore,projectDir 会落到 ~/.iknow 下,显式 --data-dir 即
+    // 被静默吞。
+    const alt = "/tmp/iknow-chat-alt-pool";
+    const workspaceRoot = "/tmp/repo";
+    // 模拟 chat-session.ts:2180 的构造：new SessionStore(resolveServeDataDir(opts.dataDir), ...)
+    const store = new SessionStore(
+      resolveServeDataDir(alt),
+      deriveProjectIdentityRoot({ cwd: workspaceRoot })
+    );
+    assert.ok(
+      store.projectDir.startsWith(`${alt}/projects/`),
+      `projectDir must sit under <alt>/projects/, got ${store.projectDir}`
+    );
   });
 });

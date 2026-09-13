@@ -32,6 +32,7 @@ import {
 } from "../../../src/harness/background/manager.js";
 import { reapStaleTasks } from "../../../src/harness/background/stale-reap.js";
 import { resolveTasksDir } from "../../../src/harness/background/paths.js";
+import { resolveProjectSessionDir } from "../../../src/session-api/store/session-store.js";
 import { readProcStartTime as readStartTime } from "../../../src/harness/background/proc.js";
 import type {
   BackgroundTaskRecord,
@@ -116,7 +117,7 @@ async function makeFakeManager(): Promise<{
   const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-life-"));
   const spawned: FakeChild[] = [];
   const manager = createBackgroundTaskManager({
-    tasksDir: resolveTasksDir(root),
+    tasksDir: resolveTasksDir({ dataDir: root, projectIdentityRoot: root }),
     spawn: async () => {
       const child = makeFakeChild(31337 + spawned.length);
       spawned.push(child);
@@ -131,7 +132,9 @@ async function makeRealManager(opts?: {
 }): Promise<{ manager: BackgroundTaskManager }> {
   const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-life-"));
   const manager = createBackgroundTaskManager({
-    tasksDir: opts?.tasksDir ?? resolveTasksDir(root),
+    tasksDir:
+      opts?.tasksDir ??
+      resolveTasksDir({ dataDir: root, projectIdentityRoot: root }),
     spawn: async () => spawnRealDetached() as unknown as ChildProcess,
   });
   return { manager };
@@ -173,7 +176,10 @@ function makeRecord(opts: {
 describe("T6 manager.shutdown 进程级收尾", () => {
   it("shutdown 杀真实 detached 进程组 + json 标 killed", async () => {
     const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-life-"));
-    const tasksDir = resolveTasksDir(root);
+    const tasksDir = resolveTasksDir({
+      dataDir: root,
+      projectIdentityRoot: root,
+    });
     const manager = createBackgroundTaskManager({
       tasksDir,
       spawn: async () => spawnRealDetached() as unknown as ChildProcess,
@@ -208,7 +214,10 @@ describe("T6 manager.shutdown 进程级收尾", () => {
       const initial = new Date("2026-08-18T00:00:00.000Z");
       vi.setSystemTime(initial);
       const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-life-"));
-      const tasksDir = resolveTasksDir(root);
+      const tasksDir = resolveTasksDir({
+        dataDir: root,
+        projectIdentityRoot: root,
+      });
       const manager = createBackgroundTaskManager({
         tasksDir,
         spawn: async () => makeFakeChild() as unknown as ChildProcess,
@@ -238,7 +247,10 @@ describe("T6 manager.shutdown 进程级收尾", () => {
 
   it("shutdown 幂等 —— 第二次调用不 throw", async () => {
     const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-life-"));
-    const tasksDir = resolveTasksDir(root);
+    const tasksDir = resolveTasksDir({
+      dataDir: root,
+      projectIdentityRoot: root,
+    });
     const manager = createBackgroundTaskManager({
       tasksDir,
       spawn: async () => spawnRealDetached() as unknown as ChildProcess,
@@ -253,7 +265,10 @@ describe("T6 manager.shutdown 进程级收尾", () => {
     vi.useFakeTimers();
     try {
       const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-life-"));
-      const tasksDir = resolveTasksDir(root);
+      const tasksDir = resolveTasksDir({
+        dataDir: root,
+        projectIdentityRoot: root,
+      });
       const spawned: FakeChild[] = [];
       const manager = createBackgroundTaskManager({
         tasksDir,
@@ -308,7 +323,10 @@ describe("T6 启动 stale 清扫 reapStaleTasks", () => {
 
   it("owner-dead + starttime 匹配 → 杀组 + json 标 dead + summary.reaped", async () => {
     const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-reap-"));
-    const tasksDir = resolveTasksDir(root);
+    const tasksDir = resolveTasksDir({
+      dataDir: root,
+      projectIdentityRoot: root,
+    });
     const orphan = spawnRealDetached();
     const pgid = orphan.pid as number;
     const starttime = readStartTime(pgid);
@@ -336,7 +354,10 @@ describe("T6 启动 stale 清扫 reapStaleTasks", () => {
 
   it("starttime mismatch → 只标 dead、不 kill(dummy 组存活)", async () => {
     const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-reap-"));
-    const tasksDir = resolveTasksDir(root);
+    const tasksDir = resolveTasksDir({
+      dataDir: root,
+      projectIdentityRoot: root,
+    });
     const dummy = spawnRealDetached();
     const pgid = dummy.pid as number;
     const realStart = readStartTime(pgid) as number;
@@ -362,7 +383,10 @@ describe("T6 启动 stale 清扫 reapStaleTasks", () => {
 
   it("无 starttime → 保守跳过(json 保持 running,summary.skipped 含,组存活)", async () => {
     const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-reap-"));
-    const tasksDir = resolveTasksDir(root);
+    const tasksDir = resolveTasksDir({
+      dataDir: root,
+      projectIdentityRoot: root,
+    });
     const dummy = spawnRealDetached();
     const pgid = dummy.pid as number;
 
@@ -386,7 +410,10 @@ describe("T6 启动 stale 清扫 reapStaleTasks", () => {
 
   it("owner-alive(owner_pid = process.pid) → 跳过且 json 不动", async () => {
     const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-reap-"));
-    const tasksDir = resolveTasksDir(root);
+    const tasksDir = resolveTasksDir({
+      dataDir: root,
+      projectIdentityRoot: root,
+    });
     const live = spawnRealDetached();
     const pgid = live.pid as number;
     const starttime = readStartTime(pgid) as number;
@@ -411,7 +438,10 @@ describe("T6 启动 stale 清扫 reapStaleTasks", () => {
 
   it("reap 幂等 —— 第二次 zero reaped / 已 dead json 不再改写", async () => {
     const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-reap-"));
-    const tasksDir = resolveTasksDir(root);
+    const tasksDir = resolveTasksDir({
+      dataDir: root,
+      projectIdentityRoot: root,
+    });
     const orphan = spawnRealDetached();
     const pgid = orphan.pid as number;
     const starttime = readStartTime(pgid) as number;
@@ -457,7 +487,10 @@ describe("T6 启动 stale 清扫 reapStaleTasks", () => {
 
   it("broken json record → 该条 skipped,其他记录正常处理,不 throw", async () => {
     const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-reap-"));
-    const tasksDir = resolveTasksDir(root);
+    const tasksDir = resolveTasksDir({
+      dataDir: root,
+      projectIdentityRoot: root,
+    });
     await fs.mkdir(tasksDir, { recursive: true });
     await fs.writeFile(join(tasksDir, "bg-reap-bad.json"), "{bad json", "utf8");
     const orphan = spawnRealDetached();
@@ -481,7 +514,10 @@ describe("T6 启动 stale 清扫 reapStaleTasks", () => {
 
   it("reap 追加 log marker + 无 log 文件不 crash", async () => {
     const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-reap-"));
-    const tasksDir = resolveTasksDir(root);
+    const tasksDir = resolveTasksDir({
+      dataDir: root,
+      projectIdentityRoot: root,
+    });
     await fs.mkdir(tasksDir, { recursive: true });
 
     const withLog = spawnRealDetached();
@@ -532,7 +568,10 @@ describe("T6 启动 stale 清扫 reapStaleTasks", () => {
   it("reap 标 dead 落盘失败 → 不 throw,该条已处理(尽力而为)", async () => {
     if (isRoot) return; // root 无视 chmod 只读,这种失败无法构造(跳过)
     const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-reap-"));
-    const tasksDir = resolveTasksDir(root);
+    const tasksDir = resolveTasksDir({
+      dataDir: root,
+      projectIdentityRoot: root,
+    });
     const orphan = spawnRealDetached();
     const pgid = orphan.pid as number;
     await writeRec(
@@ -577,10 +616,30 @@ describe("T6 reap 接缝 onConversationDeleted(subscription point)", () => {
   });
 });
 
-// ── paths.resolveTasksDir 保持 ───────────────────────────────────────────────
+// ── paths.resolveTasksDir ────────────────────────────────────────────────────
 
-describe("T6 paths.resolveTasksDir", () => {
-  it("仍返回 <workspaceRoot>/.iknow/tasks", () => {
-    assert.equal(resolveTasksDir("/w"), "/w/.iknow/tasks");
+describe("paths.resolveTasksDir", () => {
+  it("返回 <pool>/projects/<slug>/tasks，与 resolveProjectSessionDir 严格同树", () => {
+    // ADR-0088:任务登记跟会话池同一项目树。公式与上限共享
+    // `src/shared/project-slug.ts` 的 `computeProjectSlug`,与
+    // `resolveProjectSessionDir` 必然同 slug —— 断言改用跨函数等式,任何
+    // 一边漂移都会失败(此前测试独立重算 hash,漂移后两边仍各自"绿")。
+    assert.equal(
+      resolveTasksDir({ dataDir: "/home/x", projectIdentityRoot: "/repo" }),
+      join(resolveProjectSessionDir("/home/x", "/repo"), "tasks")
+    );
+  });
+
+  it("workspaceRoot 不再影响派生（ADR-0088 throwaway 不另开活账本）", () => {
+    const a = resolveTasksDir({
+      dataDir: "/pool-a",
+      projectIdentityRoot: "/repo",
+    });
+    const b = resolveTasksDir({
+      dataDir: "/pool-a",
+      projectIdentityRoot: "/repo",
+    });
+    assert.equal(a, b);
+    assert.ok(!a.includes(".iknow/tasks"));
   });
 });

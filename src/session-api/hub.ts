@@ -103,6 +103,7 @@ import {
   upsertWorkspaceRecent,
 } from "../config/workspaces-recents.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
+import { TASKS_DIR_NAME } from "../shared/session-tree-names.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import {
   MaxTurnsExceeded,
@@ -110,7 +111,7 @@ import {
   errorMessage,
 } from "../harness/errors.js";
 import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { AciCatalog } from "../harness/aci/types.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
@@ -617,9 +618,10 @@ export type SessionHubOptions = {
   /**
    * review-fix (M1 / H1): per-root state anchor。serve 入口解析后
    * 透传 —— 让 hub 的 buildHarnessEngine 走 entry-resolved workspaceRoot,
-   * 保证 serve 与 CLI flag 路径同形态(seed 落 `<workspaceRoot>/.iknow`,
-   * bash fence 保护 `<workspaceRoot>/.iknow`)。缺席 → build-engine
-   * 走 cwd fallback(legacy 默认)。
+   * 保证 serve 与 CLI flag 路径同形态(per-root 状态锚 = 记忆库 / skill
+   * seam / 项目 `AGENTS.md` 发现)。seed 落 `~/.iknow`(#196 T5,与
+   * workspaceRoot 无关);会话池 / tasks 落点见 ADR-0087 / ADR-0088。
+   * 缺席 → build-engine 走 cwd fallback(legacy 默认)。
    */
   readonly workspaceRoot?: string;
   /**
@@ -2959,6 +2961,10 @@ export class SessionHub {
       // (cli / serve / TUI) 共享同一对 `(baseDir, projectIdentityRoot)` →
       // 同一会话解析到同一 projectDir(`<surface>` 分裂消除)。
       todoDir: this.store.getProjectDir(),
+      // ADR-0088:后台任务登记根 = 同一项目树的兄弟 `tasks/`。store 的
+      // projectDir 已是 `<poolRoot>/projects/<slug>`(ADR-0071 公式),故
+      // 任务登记与会话文件夹同 slug,不锚 workspaceRoot。
+      tasksDir: join(this.store.getProjectDir(), TASKS_DIR_NAME),
       // review-fix (M5): 两段式缝 —— 装配期只传 projectDir
       // (`<baseDir>/projects/<slug>`),manager spawn 期按 def.conversationId
       // 派生 per-conversation 叶子 `<projectDir>/<convId>/subagents/`
@@ -3106,6 +3112,9 @@ export class SessionHub {
       // todos 落「会话文件夹」—— `todoDir` 取 store 投影的 projectDir,与
       // 上面 `buildProductionEngine` 路径同源(`<surface>` 分裂消除)。
       todoDir: this.store.getProjectDir(),
+      // ADR-0088:同 `buildProductionEngine` 路径 —— 登记根 = 项目树兄弟
+      // `tasks/`(store 投影同一 slug)。
+      tasksDir: join(this.store.getProjectDir(), TASKS_DIR_NAME),
       // review-fix (M5): 同 buildProductionEngine 路径 —— 两段式缝,装配期
       // 传 projectDir,manager spawn 期按 def.conversationId 派生
       // per-conversation 叶子(见 resolveSubagentTraceDirShared 退役注释)。

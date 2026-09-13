@@ -176,7 +176,7 @@ export type BuildEngineOpts = {
    *
    * T4 (plans/worktree-session-roots.md / ADR-0037 §4 amended 2026-08-31):
    * 改绑后宿主把它切到 task worktree，所以它**只在自身不是 task worktree 时**
-   * 充当状态锚（记忆库 / tasks 登记）；是树时退到 `sessionRoots.productRoot`
+   * 充当状态锚（记忆库）；是树时退到 `sessionRoots.productRoot`
    * —— 这样 `--workspace-root` 重定向仍生效而状态不落进树。本字段留在
    * **写与围栏**一侧：fs-policy 的保护路径与 bwrap bind root（task worktree
    * 位于 `<productRoot>/.iknow/worktrees/…` 之下，若把状态锚设成 productRoot，
@@ -317,6 +317,19 @@ export type BuildEngineOpts = {
    *  路径隔离。surface === "ask" 路径不传(SC8 oneshot 剥离,与 memory /
    *  subagent / skill 编排同形态)。 */
   readonly todoDir?: string;
+  /**
+   * ADR-0088(home 项目树):后台任务登记根
+   * (`<poolRoot>/projects/<slug>/tasks/`)的 host 注入缝 —— 与 `todoDir`
+   * 同门:host 显式传入已解析的绝对目录,build-engine 不自派生。缺席时回退
+   * `resolveTasksDir({ dataDir: <userHome>/.iknow, projectIdentityRoot })`,
+   * 即 `resolveServeDataDir()` 的默认池根 —— 保持旧调用方仍可用,且**绝不**
+   * 回退到 workspaceRoot(那正是 ADR-0088 要拆掉的 per-root 分片)。
+   *
+   * 三入口 (cli / hub / TUI deps) 用同一对 `(dataDir, projectIdentityRoot)`
+   * 派生同一根 —— 与 `todoDir` 的 SSOT 形态同构,registry 与会话文件夹挂在
+   * 同一棵 `<slug>` 下不漂移。
+   */
+  readonly tasksDir?: string;
   /**
    * B6 / ADR-0043 §3:溢出治理 countTokens 注入缝(测试用)。生产默认 =
    * undefined → 装配层取 `adapter.countTokens`(由 `createRealAnthropicAdapter`
@@ -823,17 +836,24 @@ export async function buildHarnessEngine(
       : undefined;
   // #502 T3:bash background 任务管理器 — 条件装配（surface !== "ask"）：
   //   - chat/tui/serve 生产自建 createBackgroundTaskManager({
-  //       tasksDir: resolveTasksDir(workspaceRoot), spawn: defaultBackgroundSpawn })
-  //     —— registry 落 <productRoot>/.iknow/tasks（ADR-0021 D1.3）。
+  //       tasksDir: <host 注入 | 池根默认>, spawn: defaultBackgroundSpawn })
+  //     —— registry 落 `<poolRoot>/projects/<slug>/tasks/`（ADR-0088）。
   //   - ask 不创建（SC8 oneshot 即用即抛；T4 bash_output/bash_stop 也缺席）。
-  //   T4 (ADR-0037 §4): 登记表是 per-root 状态，锚与 memoryDir 同一个
-  //   `stateAnchor`（改绑后 = productRoot；未改绑 = workspaceRoot，保住
-  //   `--workspace-root` 重定向）—— 改绑后 bash_output / bash_stop 仍看得见
-  //   改绑前起的任务，树上不另开一份登记。
+  // ADR-0088:登记表跟**会话池**同一项目树,不再锚 workspaceRoot —— 同一
+  // `projectIdentityRoot` 的多份 checkout 共用一份活账本,throwaway
+  // `--workspace-root` 不另开登记。`projectIdentityRoot` 与上方
+  // `sessionRoots` 同值(会话文件夹与任务登记必须落同一个 slug)。
+  const tasksDir = selectBackgroundTasksDir(
+    opts.tasksDir,
+    userHome,
+    projectIdentityRoot
+  );
+  // T4 (ADR-0037 §4) 的 `stateAnchor` 已不再是 tasks 的锚(ADR-0088 拆掉
+  // per-root 分片)——它仍供 memoryDir 使用,见上方定义处。
   const backgroundManager: BackgroundTaskManager | undefined =
     surface !== "ask"
       ? createBackgroundTaskManager({
-          tasksDir: resolveTasksDir(stateAnchor),
+          tasksDir,
           spawn: defaultBackgroundSpawn,
         })
       : undefined;
@@ -844,7 +864,7 @@ export async function buildHarnessEngine(
   if (typeof process !== "undefined") {
     try {
       const summary = await reapStaleTasks({
-        tasksDir: resolveTasksDir(stateAnchor),
+        tasksDir,
       });
       if (summary.reaped.length > 0) {
         console.warn(
@@ -1991,4 +2011,26 @@ function selectCountTokensFn(
       system: input.system,
     });
   };
+}
+
+/**
+ * ADR-0088:tasksDir 来源选择(自 `buildHarnessEngine` 抽出,装配主体只留一次
+ * 调用 —— 与 `selectCountTokensFn` 同门,避免给既有大函数加分支)。
+ *
+ * host 注入优先(三入口显式派生);缺席回退**池根**默认 `~/.iknow`
+ * (`resolveServeDataDir()` 的默认,`userHome` 测试缝沿用)—— 绝不回退
+ * workspaceRoot,那正是 ADR-0087/0088 要拆掉的 per-root 分片。
+ */
+function selectBackgroundTasksDir(
+  injected: string | undefined,
+  userHome: string,
+  projectIdentityRoot: string
+): string {
+  return (
+    injected ??
+    resolveTasksDir({
+      dataDir: path.join(userHome, ".iknow"),
+      projectIdentityRoot,
+    })
+  );
 }

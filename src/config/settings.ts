@@ -236,7 +236,7 @@ export interface IknowSettingsMemory {
  * `cli.ts:318` / `tui/hub-bridge.ts:248`），无跨 root / 跨 dataDir 聚合
  * 入口。跨进程（独立 CLI 会话、不同 PID 的 `iknow serve`）的占用看不见
  * ——同棵树可能被两个进程同时 enter 而本开关只挡得住本进程。强档要
- * "跨进程占用可见"必须扫遍 `<dataDir>/sessions/*` 全部项目命名空间
+ * "跨进程占用可见"必须扫遍 `<dataDir>/projects/*` 全部项目命名空间
  * （M×N 文件 parse），本 spec 不做。打开此开关的 operator 已知此限制。
  */
 export interface IknowSettingsIsolation {

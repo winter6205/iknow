@@ -166,10 +166,13 @@ export async function buildHarnessEngine(
   // review-fix (M1 / H1/H2): CLI entry 层条件 resolve workspaceRoot —— 当
   // explicit flag 或 env SSOT 任一存在时,在 entry 集中走 resolver 拿到
   // typed WorkspaceRootError(打印友好);否则透传 undefined 让 build-engine
-  // 走 cwd fallback(legacy 默认 `~/.iknow` 行为)。条件解析目的:不无条件
-  // 把 cwd 当 workspaceRoot,否则 serve / tui 的 `resolveServeDataDir`
-  // 默认从 `~/.iknow` 漂移到 `<cwd>/.iknow`(回归 ——
-  // 见 plans/workspace-root-launch.md T5 决策:dataDir default 锚点)。
+  // 走 cwd fallback。
+  //
+  // 数据池默认锚点(plan home-project-tree / ADR-0087):会话池默认恒为
+  // `~/.iknow`,**不**再随 cwd / workspaceRoot 分片(`<cwd>/.iknow` 形态已
+  // 退役)。本字段只影响 per-root 状态锚(记忆库 / skill seam / 项目
+  // `AGENTS.md` 发现),与会话池根互不干涉 —— 见
+  // plans/workspace-root-launch.md T5 决策。
   const envWsRoot = bundle.env.workspaceRoot;
   const resolvedWorkspaceRoot =
     opts.workspaceRoot !== undefined || envWsRoot !== undefined

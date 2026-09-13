@@ -20,8 +20,14 @@ _Avoid_: 把 `SessionFileV1.messages[]` 当第二份权威；把 harness trace J
 **rewind head**: 落盘的当前头指针（transcript 某条事件 id）。rewind 只改这个指针，不截断 JSONL。进程内工作副本跟它走。
 _Avoid_: 只在内存里 fork；用 `messagesCount` 当下标 SSOT
 
-**会话文件夹（session folder）**: harness 拥有的按会话记录面——`~/.iknow/projects/<项目 slug>/<conversationId>/`，分组键 = **projectIdentityRoot**（跨 session worktree rebind 不变），叶子 = conversationId 原文；装 session transcript / todos / trace / **内容寻址正文池** / subagents。与「写根 = 模型工作面」对立：这里的东西不是模型交付物，harness 也不把它读进 prompt。ADR-0071。
-_Avoid_: 把模型交付物放进来；当第五个根角色（稳定根清单不活化）；用 session `title` / `goal` / worktree label 当文件夹名；把带锁活状态（后台任务登记表 / worktrees 锚点）搬进来
+**home 项目树（home project tree）**: harness 按项目身份落在池根下的一棵目录——`<dataDir 或 ~/.iknow>/projects/<slug>/`，slug 键 = **projectIdentityRoot**。叶子是 **会话文件夹**；同级 `tasks/` 是 **后台任务登记**。不跟 **workspaceRoot** 分片。ADR-0087 / ADR-0088。
+_Avoid_: 把树建在 `<workspaceRoot>/.iknow`；把 `tasks/` 放进 conversation 叶子；把退役 `sessions/` 当成现行树
+
+**会话文件夹（session folder）**: harness 拥有的按会话记录面——home 项目树下 `<conversationId>/`；装 session transcript / todos / trace / **内容寻址正文池** / subagents。与「写根 = 模型工作面」对立：这里的东西不是模型交付物，harness 也不把它读进 prompt。ADR-0071 / ADR-0087 / ADR-0088。
+_Avoid_: 把模型交付物放进来；当第五个根角色（稳定根清单不活化）；用 session `title` / `goal` / worktree label 当文件夹名；把带锁活状态（后台任务登记表 / worktrees 锚点）搬进叶子
+
+**后台任务登记（background task registry）**: 活账本 `…/projects/<slug>/tasks/<task_id>.{json,log}`，与会话文件夹同 **home 项目树**、不进 conversation 叶子。池根同会话池。ADR-0021 / ADR-0088。
+_Avoid_: `<workspaceRoot>/.iknow/tasks`；按 checkout 分片；写进会话文件夹
 
 **模型实际所见（what the model saw）**: trace `llm_call.messages` 的语义——那一次调用真正送进模型的累计消息集，含 `<agent_status>` 尾部注入、worker prior messages、compaction 后的摘要视图与 mask 形态。与 **session transcript** **故意不相等**（实测同一会话 `agent_status` 在 trace 14 次 / transcript 11 次），故 trace 不得引用 transcript 来重建它：从增量事件流重算累计数组是**重算不是查表**，会漂移。「所见即所填」不变量的 SSOT 是 ADR-0036（它据此否决 delta/off 写侧模式），不是 ADR-0014。ADR-0036 / ADR-0071。
 _Avoid_: 用 transcript 当 trace 正文源；把两者当同一份记录的两种投影；为省空间截断它；把这个不变量溯源到 ADR-0014（那是 subagent spawn 语义，ADR-0036 误引）
@@ -221,8 +227,8 @@ _Avoid_: 把 frontend-only server 当生产路径但不代理 `/api`
 **workspace（serve 主根）**: serve session 的产品项目根，来源可以是 product SPA 选定的已存在绝对目录、显式 flag/env，或当前 serve 的显式默认绑定 `<homedir>/.iknow/default`；绑定后三锚合一。ADR-0023：serve 不把进程 cwd 当作隐式主根。
 _Avoid_: 把 serve 缺省说成 `process.cwd()`；与 `workspaceRoot` 字段、`home`（global 配置锚）、`sandboxRoot` 混同
 
-**workspaceRoot**: session 绑定的 per-root 操作状态锚（memory / sessions / tasks / settings 写回 fallback / serve data）；配置解析器仍可按 ADR-0019 D1.1 以 `process.cwd()` 生成默认值，但 session 创建前必须把解析值校验并明确写入。serve 无 flag/env 时的默认绑定值是 `<homedir>/.iknow/default`。不含用户画像。画像根见 ADR-0025。
-_Avoid_: 用 workspaceRoot 当 `user.md` / `BOOTSTRAP.md` / 用户级 `AGENTS.md` / 用户 `rules/` 的物理根；把 identity seed 跟启动目录绑在一起
+**workspaceRoot**: session 绑定的 per-root 操作状态锚（memory / settings 写回 fallback）；配置解析器仍可按 ADR-0019 D1.1 以 `process.cwd()` 生成默认值，但 session 创建前必须把解析值校验并明确写入。serve 无 flag/env 时的默认绑定值是 `<homedir>/.iknow/default`。不含用户画像，不含 **home 项目树**（会话文件夹与后台任务登记跟 home，ADR-0087 / ADR-0088）。画像根见 ADR-0025。
+_Avoid_: 用 workspaceRoot 当 `user.md` / `BOOTSTRAP.md` / 用户级 `AGENTS.md` / 用户 `rules/` 的物理根；把 identity seed 跟启动目录绑在一起；用它给 transcript / trace / tasks 分片
 
 **required workspaceRoot**: 新 session 创建时必须存在且通过校验的绝对 `workspaceRoot` 绑定；`cli chat`、`tui`、`serve` 都不能写入没有该绑定的 session file。执行阶段若绑定缺失或非法，必须在 engine 之前拒绝。
 _Avoid_: 把 resolver 的默认值当成已写入的 session 绑定；用 `process.cwd()` 回填缺失字段；把 serve 的 `~/.iknow/default` 默认绑定称为 unbound
@@ -308,8 +314,11 @@ _Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 
   **保留机制**: provider = 9router、`baseUrl` 代码默认 `http://localhost:20128/v1` 焊进 `env.ts`（`IKNOW_LLM_BASE_URL` 仍读）；非 LLM 字段（context window / maxTurns / web 端点 / mcp 超时等）的 `process.env > .env.local > .env` 优先级链不变。
   _Avoid_: 在 `.env.local` 重复声明已与代码默认一致的非密项；把 model 切换当「每机配置」而非「项目栈决策」
 
-**项目 settings 允许名单**: 共享项目 `<仓>/.iknow/settings.json` 只采纳 `hooks` / `verify` / `secrets` / `permissions`；其余顶层段丢弃、不覆盖用户层。权限 SSOT = 项目 `settings.permissions`（原 toml rule DSL），用户层不接；toml 与 json 并存 fail-loud。ADR-0084。
+**项目 settings 允许名单**: 共享项目 `<仓>/.iknow/settings.json` 只采纳 `hooks` / `verify` / `secrets` / `permissions`；其余顶层段丢弃、不覆盖用户层。权限 SSOT = 项目 `settings.permissions`，形态见 **声明式权限规则**；用户层不接；toml 与 json 并存 fail-loud。ADR-0084 / ADR-0090。
 _Avoid_: 第三层 local settings；项目文件盖 isolation / llm / memory / subagent；用户 settings 写 permissions；继续读 `permissions.toml` 当并存 SSOT
+
+**声明式权限规则**: 项目 `settings.permissions` 的 `allow` / `ask` / `deny` 字符串列表，每条为 `Tool` 或 `Tool(specifier)`；同层评估 deny → ask → allow；可选 `defaultMode` 仅为 `default` | `plan`。ADR-0090。
+_Avoid_: rule DSL；`match_tool` 谓词；`schema_version` + `rule[]`；项目文件写 `full_auto`
 
 **前景 spawn / 后景 spawn**: `spawn_subagent` 的两种结果契约（#361 裁决，ADR-0014）——前景（`wait:true`，默认）= handler 同步等 worker 到终态、envelope 直接作 tool_result 返回，当回合闭环；后景（`wait:false`，显式选项）= 立即返回 task_id，结果经 host 唤醒/drain 通道回传。worker 恒为独立进程，与前景/后景正交。
 _Avoid_: 把前景/后景与进程隔离混同；泛化的"同步/异步"；把 V1"立即返回 task_id"当默认契约（已被反转）
@@ -577,6 +586,7 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **git 作业 vs worktree isolation mode**: 作业是 bash 上的版本库侧效应；隔离是写路径落点（现行 model-provision，见本表 **worktree isolation mode**）。隔离开时作业在 task 树内做完
 - **git 作业 vs 环境现势**: 现势给人看仓；作业是模型经 bash 改仓。现势不进模型消息
 - **git 作业 vs git 块**: 作业是纪律 SOP（`## Git work`）；git 块是会话级分支/status 快照（`## Git`）。两段并存，不得互替
+- **home 项目树 vs workspaceRoot vs 会话文件夹**: 项目树是池根下按 slug 的一棵目录（会话叶子 + `tasks/`）；`workspaceRoot` 是 memory / settings 写回 / worktrees；会话文件夹只是项目树里的 conversation 叶子，不含登记表。ADR-0088。
 - **worktree isolation mode vs workspaceRoot vs workspace（serve 主根）**: git worktree 是会话级 mutate 物理隔离；`workspaceRoot` 是 per-root 状态锚（ADR-0019）；serve 主根是显式选定锚（ADR-0023）。rebind 只切本会话生效根，不改锚规则本身
 - **session worktree rebind vs taskRoot（活值）**: rebind 是动作（缝成功 resolve 的那一刻），taskRoot 是该动作写入的活 cell；动作对下一波 tool calls 生效（波快照边界），cell 读取面始终回答「当前生效根」
 - **task worktree label vs conversationId**: label 是文件夹名与 enter 定位；conversationId 是归属身份，不写进目录名

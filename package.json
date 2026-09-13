@@ -57,6 +57,7 @@
     "probe:settings-bidir": "tsx scripts/i413-bidirectional-settings-smoke.ts",
     "probe:compact-events": "tsx scripts/probe-compact-events-548-550.ts",
     "worktree:gc": "tsx scripts/task-worktree-gc.ts",
+    "migrate:workspace-iknow": "tsx scripts/workspace-iknow-migrate.ts",
     "probe:t8-popover": "tsx scripts/t8-popover-verify.ts",
     "probe:aci-web-backend": "tsx scripts/aci-web-backend-exa-probe.ts",
     "prepare": "husky"

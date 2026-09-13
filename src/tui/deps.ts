@@ -49,6 +49,7 @@ import {
   resolveSubagentTraceDir,
 } from "../session-api/store/session-store.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
+import { resolveTasksDir } from "../harness/background/paths.js";
 
 /** 工具摘要行事件（postToolUse 投影，observability-only）。 */
 export interface TuiToolEvent {
@@ -125,11 +126,11 @@ export interface BuildTuiDepsOptions {
    * #950 T2 / session-folder-consolidation: session pool root（与
    * `createTuiBridge.dataDir` / `RunTuiOptions.dataDir` 同形）—— todo
    * 会话文件夹根由此 + `workspaceRoot` 派生
-   * (`resolveProjectSessionDir(resolveServeDataDir(dataDir, workspaceRoot),
+   * (`resolveProjectSessionDir(resolveServeDataDir(dataDir),
    * deriveProjectIdentityRoot({ cwd: workspaceRoot }))`)。缺席 →
-   * `resolveServeDataDir` 缺省链(dataDir → `<workspaceRoot>/.iknow` →
-   * `~/.iknow`)。run.tsx 传已 resolve 的 dataDir,保证 bridge 的
-   * SessionStore 与 todo 落点是同一个 projects/<slug>/。
+   * `resolveServeDataDir` 缺省 `~/.iknow`（ADR-0087）。run.tsx 传已 resolve
+   * 的 dataDir,保证 bridge 的 SessionStore 与 todo 落点是同一个
+   * projects/<slug>/。
    */
   readonly dataDir?: string;
   /**
@@ -320,9 +321,16 @@ export async function buildTuiDeps(
   // conversationId 由 hub per-run 注入(hub-bridge → SessionHub),不在本层
   // 拼 —— 本层只给根。
   const todoProjectDir = resolveProjectSessionDir(
-    resolveServeDataDir(opts.dataDir, opts.workspaceRoot),
+    resolveServeDataDir(opts.dataDir),
     deriveProjectIdentityRoot({ cwd: opts.workspaceRoot })
   );
+  // ADR-0088:后台任务登记根 —— 与 todoProjectDir 同一对
+  // `(dataDir, projectIdentityRoot)`,同一 slug 的项目树兄弟 `tasks/`。
+  // 与 workspaceRoot 解耦(throwaway 不另开活账本)。
+  const tasksDir = resolveTasksDir({
+    dataDir: resolveServeDataDir(opts.dataDir),
+    projectIdentityRoot: deriveProjectIdentityRoot({ cwd: opts.workspaceRoot }),
+  });
   // T5 (ADR-0071 / SC8 + L2): 子代理 lifecycle
   // / content trace 改走 per-agent `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
   // TUI 子代理根 = `<projectDir>/<conversationId>/subagents/`。
@@ -353,6 +361,8 @@ export async function buildTuiDeps(
     surface: "tui",
     memory: { enabled: true },
     todoDir: todoProjectDir,
+    // ADR-0088:登记根随会话池,不随 workspaceRoot。
+    tasksDir,
     // #365 T2: 沙箱根保持 TUI 历史语义(启动目录 = process.cwd());
     // build-engine 缺省即 process.cwd(),故不显式传。
     // memoryDir 同理缺省解析自 cwd(与 #146 TUI 启动目录语义一致)。

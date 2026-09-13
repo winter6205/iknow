@@ -33,6 +33,7 @@ import {
 import type { BackgroundTaskManager } from "../../../src/harness/background/manager.js";
 import { renderTaskError } from "../../../src/harness/background/registry.js";
 import { resolveTasksDir } from "../../../src/harness/background/paths.js";
+import { resolveProjectSessionDir } from "../../../src/session-api/store/session-store.js";
 
 // ── fake ChildProcess 工厂(沿用 subagent/manager.test.ts 先例)─────────────────
 
@@ -75,7 +76,9 @@ async function makeManager(opts?: {
   tempRoots.push(root);
   const spawned: FakeChild[] = [];
   const manager = createBackgroundTaskManager({
-    tasksDir: opts?.tasksDir ?? resolveTasksDir(root),
+    tasksDir:
+      opts?.tasksDir ??
+      resolveTasksDir({ dataDir: root, projectIdentityRoot: root }),
     spawn: async (_req) => {
       const child = makeFakeChild();
       child.pid = 12345 + spawned.length;
@@ -146,7 +149,7 @@ describe("BackgroundTaskManager 正常路径", () => {
         }
       | undefined;
     const manager = createBackgroundTaskManager({
-      tasksDir: resolveTasksDir(root),
+      tasksDir: resolveTasksDir({ dataDir: root, projectIdentityRoot: root }),
       spawn: async (req) => {
         capturedRequest = {
           command: req.command,
@@ -425,7 +428,10 @@ describe("BackgroundTaskManager 落盘 IO 失败", () => {
   it("registry load 遇到坏 JSON → 抛 kind=schema_invalid(registry 层职责)", async () => {
     const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-badjson-"));
     tempRoots.push(root);
-    const tasksDir = resolveTasksDir(root);
+    const tasksDir = resolveTasksDir({
+      dataDir: root,
+      projectIdentityRoot: root,
+    });
     await fs.mkdir(tasksDir, { recursive: true });
     await fsWriteFile(join(tasksDir, "bg-0123456789ab.json"), "{bad json");
     const registry = createBackgroundRegistry({ tasksDir });
@@ -468,8 +474,73 @@ describe("typed-error catch 契约(kind 判别)", () => {
 // ── paths.ts 纯函数 ───────────────────────────────────────────────────────────
 
 describe("paths.resolveTasksDir", () => {
-  it("返回 <workspaceRoot>/.iknow/tasks", () => {
-    assert.equal(resolveTasksDir("/w"), "/w/.iknow/tasks");
+  it("返回 <pool>/projects/<slug>/tasks，与 resolveProjectSessionDir 严格同树", () => {
+    // ADR-0088:任务登记跟会话池同一项目树。公式/上限共享
+    // `src/shared/project-slug.ts`;断言改用跨函数等式,任一边漂移即失败
+    // (此前测试独立重算 sha1,公式漂移后两边仍各自"绿")。
+    assert.equal(
+      resolveTasksDir({ dataDir: "/home/x", projectIdentityRoot: "/repo" }),
+      join(resolveProjectSessionDir("/home/x", "/repo"), "tasks")
+    );
+  });
+
+  it("workspaceRoot 不再参与派生（多 checkout 共用一份账本）", () => {
+    // ADR-0088：throwaway checkout 不另开活账本 —— 同一 projectIdentityRoot
+    // 下换个 dataDir 才换池，换工作区不换。
+    const a = resolveTasksDir({
+      dataDir: "/pool-a",
+      projectIdentityRoot: "/repo",
+    });
+    const b = resolveTasksDir({
+      dataDir: "/pool-a",
+      projectIdentityRoot: "/repo",
+    });
+    assert.equal(a, b);
+    assert.ok(!a.includes(".iknow/tasks"));
+  });
+
+  it("边界回归:121–255 字符的 projectIdentityRoot 两边都接受(review 抓到的区间)", () => {
+    // 此前 paths.ts 用 MAX_ROOT_DETAIL_CHARS=120 上限,session-store.ts 用 255。
+    // 121–255 字符的根:会话文件夹已解析,登记表抛错 → 孤儿账本。
+    // 现在两边共享 MAX_PROJECT_IDENTITY_ROOT_BYTES=255,跨函数必须同接受。
+    const longRoot = "/" + "a".repeat(254); // 255 字符整
+    assert.equal(longRoot.length, 255);
+    assert.doesNotThrow(() => resolveProjectSessionDir("/pool", longRoot));
+    assert.doesNotThrow(() =>
+      resolveTasksDir({ dataDir: "/pool", projectIdentityRoot: longRoot })
+    );
+    // 跨函数等式:同一个长根必须落到同一个 slug 兄弟目录。
+    assert.equal(
+      resolveTasksDir({ dataDir: "/pool", projectIdentityRoot: longRoot }),
+      join(resolveProjectSessionDir("/pool", longRoot), "tasks")
+    );
+  });
+
+  it("边界外:256 字符根两边一致拒绝(同一上限派生同一报错)", () => {
+    const tooLong = "/" + "a".repeat(255); // 256 字符
+    assert.equal(tooLong.length, 256);
+    assert.throws(() => resolveProjectSessionDir("/pool", tooLong));
+    assert.throws(() =>
+      resolveTasksDir({ dataDir: "/pool", projectIdentityRoot: tooLong })
+    );
+  });
+
+  it("缺根 / 空白 / 相对 / 超长 projectIdentityRoot → typed SessionRootError", () => {
+    const cases: ReadonlyArray<string> = ["", "   ", "relative/path"];
+    for (const bad of cases) {
+      assert.throws(
+        () => resolveTasksDir({ dataDir: "/pool", projectIdentityRoot: bad }),
+        (err: unknown) => {
+          const e = err as { name?: string; kind?: string };
+          assert.equal(e.name, "SessionRootError");
+          assert.ok(
+            e.kind === "missing_root" || e.kind === "invalid_root",
+            `unexpected kind: ${String(e.kind)}`
+          );
+          return true;
+        }
+      );
+    }
   });
 });
 

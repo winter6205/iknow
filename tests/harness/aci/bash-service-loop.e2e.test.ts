@@ -182,7 +182,10 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
 
       // 3) 装配:manager + bash/bash_output/bash_stop 工具 + 审批 askUser
       const manager = createBackgroundTaskManager({
-        tasksDir: resolveTasksDir(tempRoot),
+        tasksDir: resolveTasksDir({
+          dataDir: tempRoot,
+          projectIdentityRoot: tempRoot,
+        }),
         spawn: defaultBackgroundSpawn,
       });
       lastManager = manager;
@@ -376,7 +379,7 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
         `port ${port} should be released after bash_stop but still accepting connections`
       );
 
-      // 8) registry json 状态收敛 killed(读 .iknow/tasks/<id>.json)
+      // 8) registry json 状态收敛 killed(读 <pool>/projects/<slug>/tasks/<id>.json)
       // status flip 是 exit 事件驱动的异步 settle(manager.stop 毫秒级返回,
       // 不阻塞);端口释放可能先于 settle 的 writeFile 落盘完成 → 端口关闭后
       // 单次读 JSON 会拾到 spawn 时的 "running" 记录(full vitest 并发下偶发,

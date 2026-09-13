@@ -99,7 +99,7 @@ async function makeManager(): Promise<{
   tempRoots.push(root);
   const spawned: FakeChild[] = [];
   const manager = createBackgroundTaskManager({
-    tasksDir: resolveTasksDir(root),
+    tasksDir: resolveTasksDir({ dataDir: root, projectIdentityRoot: root }),
     spawn: async () => {
       const child = makeFakeChild(23456 + spawned.length);
       spawned.push(child);
