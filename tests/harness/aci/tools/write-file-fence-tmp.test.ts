@@ -1,13 +1,23 @@
 /**
- * T2 — write tools may write the current identity's fence `/tmp`
- * (specs/parent-visible-tmp.md SC2 + S2-A; amends mutate-write-contract SC4).
+ * ADR-0092 — write tools target this identity's session tmp HOST dir.
+ *
+ * The session tmp host path is an independent containment root (the
+ * `tmpWriteRoot` mechanism is retained). A model-supplied guest `/tmp/...`
+ * literal is NO longer aliased onto it — it falls through to the containment
+ * error (observable rejection, never a silent double-write).
  */
 import assert from "node:assert/strict";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { access } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtemp } from "node:fs/promises";
 import { afterEach, describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
@@ -42,62 +52,57 @@ afterEach(async () => {
   );
 });
 
-describe("write_file — current-identity /tmp pad (SC2 / S2-A)", () => {
-  it("S2-A empty: /tmp/ is typed-rejected and does not write taskRoot", async () => {
+describe("write_file — session tmp host dir (SC4 / S2)", () => {
+  it("S2 empty: an empty path is typed-rejected and does not write taskRoot", async () => {
     const taskRoot = await makeScratch("wf-tmp-empty-root-");
     const pad = await makeScratch("wf-tmp-empty-pad-");
     const tool = createWriteFileTool(taskRoot, { tmpDir: pad });
 
     await assert.rejects(
-      () => tool.handler({ path: "/tmp/", content: "nope\n" }),
+      () => tool.handler({ path: "", content: "nope\n" }),
       (error: unknown) =>
         error instanceof ToolExecutionError && !error.message.includes("wrote")
     );
     assert.equal(await doesNotExist(join(taskRoot, "nope")), true);
-    const leftover = await readFile(join(taskRoot, "tmp"), "utf8").catch(
-      () => ""
-    );
-    assert.equal(leftover, "");
   });
 
-  it("S2-A negative / SC2: /tmp/ok.txt lands only on the current identity pad", async () => {
+  it("S2 negative / SC4: write_file <pad>/ok.txt lands on the session tmp, not taskRoot", async () => {
     const taskRoot = await makeScratch("wf-tmp-neg-root-");
     const pad = await makeScratch("wf-tmp-neg-pad-");
     const tool = createWriteFileTool(taskRoot, { tmpDir: pad });
 
-    await tool.handler({ path: "/tmp/ok.txt", content: "pad-only\n" });
+    await tool.handler({ path: join(pad, "ok.txt"), content: "pad-only\n" });
 
     assert.equal(await readFile(join(pad, "ok.txt"), "utf8"), "pad-only\n");
     assert.equal(await doesNotExist(join(taskRoot, "ok.txt")), true);
-    assert.equal(await doesNotExist(join(taskRoot, "tmp", "ok.txt")), true);
   });
 
-  it("SC2: write_file /tmp/y does not copy into taskRoot", async () => {
-    const taskRoot = await makeScratch("wf-tmp-sc2-root-");
-    const pad = await makeScratch("wf-tmp-sc2-pad-");
+  it("SC4: model-supplied /tmp/ok.txt is typed-rejected — never aliased onto the pad", async () => {
+    const taskRoot = await makeScratch("wf-tmp-alias-root-");
+    const pad = await makeScratch("wf-tmp-alias-pad-");
     const tool = createWriteFileTool(taskRoot, { tmpDir: pad });
 
-    const result = (await tool.handler({
-      path: "/tmp/y",
-      content: "sc2-body\n",
-    })) as { output: string };
-
-    assert.equal(await readFile(join(pad, "y"), "utf8"), "sc2-body\n");
-    assert.equal(await doesNotExist(join(taskRoot, "y")), true);
-    assert.match(result.output, /wrote/);
+    await assert.rejects(
+      () => tool.handler({ path: "/tmp/ok.txt", content: "must-not-land\n" }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("outside workspace")
+    );
+    assert.equal(await doesNotExist(join(pad, "ok.txt")), true);
+    assert.equal(await doesNotExist(join(taskRoot, "ok.txt")), true);
   });
 
-  it("projectDir + conversationId writes /tmp/y onto that session fence-tmp pad", async () => {
+  it("projectDir + conversationId resolves <sessionFolder>/fence-tmp as the writable root", async () => {
     const taskRoot = await makeScratch("wf-tmp-sess-root-");
     const projectDir = await makeScratch("wf-tmp-sess-proj-");
     const tool = createWriteFileTool(taskRoot, { projectDir });
 
+    const pad = ensureMainSessionFenceTmpForConversation(projectDir, "conv-t4");
     await tool.handler(
-      { path: "/tmp/y", content: "via-session\n" },
-      { conversationId: "conv-t2" }
+      { path: join(pad, "y"), content: "via-session\n" },
+      { conversationId: "conv-t4" }
     );
 
-    const pad = ensureMainSessionFenceTmpForConversation(projectDir, "conv-t2");
     assert.equal(await readFile(join(pad, "y"), "utf8"), "via-session\n");
     assert.equal(await doesNotExist(join(taskRoot, "y")), true);
   });
@@ -116,21 +121,20 @@ describe("write_file — current-identity /tmp pad (SC2 / S2-A)", () => {
     assert.equal(await doesNotExist(join(pad, "kept.txt")), true);
   });
 
-  it("S2-A overflow: a too-long /tmp basename does not land in taskRoot", async () => {
+  it("S2 overflow: a too-long basename under the pad does not fall into taskRoot", async () => {
     const taskRoot = await makeScratch("wf-tmp-ovf-root-");
     const pad = await makeScratch("wf-tmp-ovf-pad-");
     const tool = createWriteFileTool(taskRoot, { tmpDir: pad });
     const longName = `${"n".repeat(400)}.txt`;
 
     await assert.rejects(
-      () => tool.handler({ path: `/tmp/${longName}`, content: "x\n" }),
+      () => tool.handler({ path: join(pad, longName), content: "x\n" }),
       ToolExecutionError
     );
     assert.equal(await doesNotExist(join(taskRoot, longName)), true);
-    assert.equal(await doesNotExist(join(taskRoot, "tmp", longName)), true);
   });
 
-  it("S2-A concurrent: two identities writing /tmp/same.txt do not overwrite each other", async () => {
+  it("S2 concurrent: two identities write the same name to separate pads", async () => {
     const taskRoot = await makeScratch("wf-tmp-conc-root-");
     const parentPad = await makeScratch("wf-tmp-conc-parent-");
     const workerPad = await makeScratch("wf-tmp-conc-worker-");
@@ -138,8 +142,14 @@ describe("write_file — current-identity /tmp pad (SC2 / S2-A)", () => {
     const workerTool = createWriteFileTool(taskRoot, { tmpDir: workerPad });
 
     await Promise.all([
-      parentTool.handler({ path: "/tmp/same.txt", content: "parent\n" }),
-      workerTool.handler({ path: "/tmp/same.txt", content: "worker\n" }),
+      parentTool.handler({
+        path: join(parentPad, "same.txt"),
+        content: "parent\n",
+      }),
+      workerTool.handler({
+        path: join(workerPad, "same.txt"),
+        content: "worker\n",
+      }),
     ]);
 
     assert.equal(
@@ -150,7 +160,6 @@ describe("write_file — current-identity /tmp pad (SC2 / S2-A)", () => {
       await readFile(join(workerPad, "same.txt"), "utf8"),
       "worker\n"
     );
-    assert.equal(await doesNotExist(join(taskRoot, "same.txt")), true);
   });
 
   it("worker identity does not write the parent pad", async () => {
@@ -159,13 +168,16 @@ describe("write_file — current-identity /tmp pad (SC2 / S2-A)", () => {
     const workerPad = await makeScratch("wf-tmp-iso-worker-");
     const workerTool = createWriteFileTool(taskRoot, { tmpDir: workerPad });
 
-    await workerTool.handler({ path: "/tmp/z", content: "worker-only\n" });
+    await workerTool.handler({
+      path: join(workerPad, "z"),
+      content: "worker-only\n",
+    });
 
     assert.equal(await readFile(join(workerPad, "z"), "utf8"), "worker-only\n");
     assert.equal(await doesNotExist(join(parentPad, "z")), true);
   });
 
-  it("S2-A exception: unwritable pad fails typed and does not silently drop", async () => {
+  it("S2 exception: unwritable pad fails typed and does not silently drop", async () => {
     const taskRoot = await makeScratch("wf-tmp-ex-root-");
     const pad = await makeScratch("wf-tmp-ex-pad-");
     await chmod(pad, 0o555);
@@ -173,7 +185,7 @@ describe("write_file — current-identity /tmp pad (SC2 / S2-A)", () => {
 
     try {
       await assert.rejects(
-        () => tool.handler({ path: "/tmp/blocked.txt", content: "x\n" }),
+        () => tool.handler({ path: join(pad, "blocked.txt"), content: "x\n" }),
         ToolExecutionError
       );
       assert.equal(await doesNotExist(join(pad, "blocked.txt")), true);
@@ -184,15 +196,15 @@ describe("write_file — current-identity /tmp pad (SC2 / S2-A)", () => {
   });
 });
 
-describe("edit_file — current-identity /tmp pad (SC2 / S2-A)", () => {
-  it("S2-A negative: edit_file /tmp/ok.txt mutates the current identity pad only", async () => {
+describe("edit_file — session tmp host dir (SC4 / S2)", () => {
+  it("S2 negative: edit_file mutates only the current identity pad", async () => {
     const taskRoot = await makeScratch("ef-tmp-neg-root-");
     const pad = await makeScratch("ef-tmp-neg-pad-");
     await writeFile(join(pad, "ok.txt"), "before\n", "utf8");
     const tool = createEditFileTool(taskRoot, { tmpDir: pad });
 
     await tool.handler({
-      path: "/tmp/ok.txt",
+      path: join(pad, "ok.txt"),
       old_str: "before",
       new_str: "after",
     });
@@ -201,7 +213,27 @@ describe("edit_file — current-identity /tmp pad (SC2 / S2-A)", () => {
     assert.equal(await doesNotExist(join(taskRoot, "ok.txt")), true);
   });
 
-  it("S2-A empty: /tmp/ is typed-rejected and does not write taskRoot", async () => {
+  it("SC4: edit_file /tmp/ok.txt is typed-rejected (no guest /tmp alias)", async () => {
+    const taskRoot = await makeScratch("ef-tmp-alias-root-");
+    const pad = await makeScratch("ef-tmp-alias-pad-");
+    await writeFile(join(pad, "ok.txt"), "before\n", "utf8");
+    const tool = createEditFileTool(taskRoot, { tmpDir: pad });
+
+    await assert.rejects(
+      () =>
+        tool.handler({
+          path: "/tmp/ok.txt",
+          old_str: "before",
+          new_str: "after",
+        }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("outside workspace")
+    );
+    assert.equal(await readFile(join(pad, "ok.txt"), "utf8"), "before\n");
+  });
+
+  it("S2 empty: an empty path is typed-rejected and does not write taskRoot", async () => {
     const taskRoot = await makeScratch("ef-tmp-empty-root-");
     const pad = await makeScratch("ef-tmp-empty-pad-");
     await mkdir(join(taskRoot, "keep"), { recursive: true });
@@ -210,7 +242,7 @@ describe("edit_file — current-identity /tmp pad (SC2 / S2-A)", () => {
     await assert.rejects(
       () =>
         tool.handler({
-          path: "/tmp/",
+          path: "",
           old_str: "a",
           new_str: "b",
         }),

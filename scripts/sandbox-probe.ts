@@ -1,38 +1,40 @@
 /**
- * T6（plans/closed-world-bash-fence.md）— sandbox probe suite，两档模式。
+ * sandbox probe suite — 默认全局档（ADR-0092），两档形态，各自跑同一清单。
  *
- * 消费生产 `createFsPolicy` / `createBwrapFence`（T3 闭世界双轴），对 ADR-0037
- * §9.2 白名单做物理验收。两段模式先后各跑一遍、各自汇总：
+ * 消费生产 `createFsPolicy` / `createBwrapFence`，对 specs/fs-isolation-modes.md
+ * 的 Round 1 默认姿态做物理验收：宿主真路径可见可写、系统前缀只读覆盖、
+ * 会话 tmp 保留宿主真路径（**没有**垫底 bind 到 guest `/tmp`）、网络 / env
+ * 轴不借本改动放开。两档先后各跑一遍、各自汇总：
  *
- *   OFF 档     — cwd = 真实可写目录（主仓 taskRoot 语义），policy 不传
- *                projectIdentityRoot（与 build-engine OFF 分支一致），
- *                installRoot = resolveInstallRoot()。
- *   改绑档     — host 侧造「主仓 + 其内 worktree」git fixture；
- *                policy cwd = worktree（taskRoot），projectIdentityRoot = 主仓
- *                （identity 根恒进读白名单，§9.2 #6 闭世界语义）。
+ *   global    — cwd = 真实可写临时目录（主仓 taskRoot 语义）。
+ *   worktree  — cwd = 「主仓 + 其内 worktree」git fixture 里的 worktree；
+ *               全局档下 gitdir 直接经宿主根可见，不再需要 identity ro-bind。
  *
- * 每档 = 11 旧类 + T6 新类（旧类中 violation counter 两类是 node-side、与
- * fence 档位无关，只在共享节跑一次）。exit code：全绿（skip 视为绿并注明）
- * = 0，否则 1。
+ * 每档 = 全量物理类（旧 11 类中的 fence 类保留语义；闭世界专有类退役，
+ * 换成全局档类）。两个 violation counter 是 node-side、与 fence 档位无关，
+ * 只在共享节跑一次。exit code：全绿（skip 视为绿并注明）= 0，否则 1。
  *
- * 语义注记（实测裁决，T6）：
- *  - bwrap 为 bind 目标在容器根 tmpfs 上创建父目录，故围栏内 `$HOME` 本身
- *    存在且可写——但写入落在随 fence 消亡的容器 tmpfs 上，永不落地 host。
- *    「home 拒写」因此拆成三条更强断言：白名单子树 EROFS、非白名单不可见、
- *    写入非持久（host 侧验证 + 第二次 fence 不可见）。
- *  - `~/.iknow` 同理：不可见（test ! -e）+ 写尝试（mkdir + init.sh）不落地
- *    host（#896 闭合探针，host 侧验证）。
+ * 语义注记：
+ *  - 全局档 argv = `--bind / /` 打底（宿主真路径可见可写）→ 系统前缀
+ *    `/usr /bin /lib /lib64 /etc`（+ 存在性可选 `/opt /snap`）只读覆盖 →
+ *    `--proc` / `--dev-bind`。没有 `--bind <pad> /tmp`、没有 `--tmpfs`、
+ *    没有 per-root 可写白名单。
+ *  - 会话 tmp（identity pad）不是 argv mount 目标；它只作为 `$TMPDIR` 的
+ *    值注入。围栏内写 `$TMPDIR/...` 落宿主 pad；写 guest `/tmp/...` 落
+ *    宿主 `/tmp`（与 pad 是两处，绝不静默双写）。
+ *  - `--size`/`--tmpfs` 退役后 tmp 配额不再是围栏形态的一部分，
+ *    ResourceLimits 仅作未来 hook 的常量面，探针不再做超限物理验收。
  */
 import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
-  mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import {
   BASE_ENV_WHITELIST,
@@ -41,12 +43,10 @@ import {
   createFsPolicy,
   createNetworkPolicy,
   createResourceLimits,
-  defaultOptionalReadRoots,
   type FsPolicy,
 } from "../src/harness/sandbox/index.js";
 import { requireBwrap } from "../src/harness/sandbox/runner.js";
 import { createViolationCounter } from "../src/harness/sandbox/violation-handling.js";
-import { resolveInstallRoot } from "../src/harness/session-roots.js";
 
 type ProbeResult = { ok: boolean; detail: string };
 interface ProbeCheck {
@@ -56,34 +56,35 @@ interface ProbeCheck {
 
 const HOME = homedir();
 const TMP = tmpdir();
-const INSTALL_ROOT = resolveInstallRoot();
-const ENV = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST }).filter(
+const ENV_BASE = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST }).filter(
   process.env
 );
 const NETWORK_POLICY = createNetworkPolicy();
 const RESOURCE_LIMITS = createResourceLimits();
-
-/** 与 fs-policy 内部同语义（私有函数，此处镜像）。 */
-function isWithin(root: string, target: string): boolean {
-  const rel = relative(resolve(root), resolve(target));
-  return (
-    rel === "" ||
-    (rel !== ".." && !rel.startsWith(`..${sep}`) && !rel.startsWith(sep))
-  );
-}
+/** host 侧唯一 token（探针进程级别；避免档间 / 并发跑互相看到标记）。 */
+const TOKEN = `iknow-probe-${process.pid}`;
 
 // ---------------------------------------------------------------------------
-// fence 执行体（每档一份 policy，同一 runner）
+// fence 执行体（每档一份 policy / pad，同一 runner）
 // ---------------------------------------------------------------------------
 
 interface ProbeProfile {
   /** 档位名（输出汇总用）。 */
   readonly name: string;
-  /** taskRoot——fence cwd 与唯一可写工作区根。 */
+  /** taskRoot——fence cwd。 */
   readonly cwd: string;
+  /** 本身份的会话 tmp 宿主路径（`$TMPDIR` 的值；不是 argv mount 目标）。 */
+  readonly pad: string;
+  /** host 侧 sibling 可写靶（证明宿主真路径 / 非 cwd 也可写）。 */
+  readonly extra: string;
   readonly fsPolicy: FsPolicy;
   /** host 侧 fixture 清理。 */
   readonly cleanup: () => void;
+}
+
+/** 每档 fence env：BASE_ENV_WHITELIST + 该档 `$TMPDIR`（镜像 bash.ts）。 */
+function fenceEnv(profile: ProbeProfile): NodeJS.ProcessEnv {
+  return { ...ENV_BASE, TMPDIR: profile.pad };
 }
 
 function spawnFenceSync(
@@ -91,20 +92,21 @@ function spawnFenceSync(
   command: string,
   network = false
 ): ReturnType<typeof spawnSync> {
+  const env = fenceEnv(profile);
   const fence = createBwrapFence({
     command: "bash",
     args: ["-c", command],
     fsPolicy: profile.fsPolicy,
     networkPolicy: NETWORK_POLICY,
     resourceLimits: RESOURCE_LIMITS,
-    env: ENV,
+    env,
     cwd: profile.cwd,
     network,
   });
   return spawnSync(fence.argv[0], fence.argv.slice(1), {
     cwd: profile.cwd,
     encoding: "utf8",
-    env: ENV,
+    env,
   });
 }
 
@@ -116,20 +118,21 @@ function spawnFenceAsync(
   command: string,
   network = false
 ): Promise<string> {
+  const env = fenceEnv(profile);
   const fence = createBwrapFence({
     command: "bash",
     args: ["-c", command],
     fsPolicy: profile.fsPolicy,
     networkPolicy: NETWORK_POLICY,
     resourceLimits: RESOURCE_LIMITS,
-    env: ENV,
+    env,
     cwd: profile.cwd,
     network,
   });
   return new Promise((resolvePromise) => {
     const child = spawn(fence.argv[0], fence.argv.slice(1), {
       cwd: profile.cwd,
-      env: ENV,
+      env,
       stdio: ["ignore", "ignore", "pipe"],
     });
     let stderr = "";
@@ -178,109 +181,47 @@ function skippedCheck(name: string, reason: string): ProbeCheck {
 // ---------------------------------------------------------------------------
 
 interface HostFixtures {
-  /** 其它 project fixture（$HOME 下，围栏内不可见不可写）。 */
-  readonly otherProjectDir: string;
-  /** home 下非白名单且非 bind 目标祖先的真实条目（不可见探针靶子）。 */
-  readonly hiddenHomeEntry?: string;
-  /** node 工具链根（home 之下才可做 EROFS 探针）。 */
-  readonly nodeRootUnderHome?: string;
-  /** installRoot 内可执行靶（存在才跑真实 exec；否则 test -x + 说明）。 */
-  readonly installBin?: string;
   /** host 有 git 全局身份才跑读探针。 */
   readonly hasGitGlobalIdentity: boolean;
 }
 
-function pickHiddenHomeEntry(
-  bindTargets: readonly string[]
-): string | undefined {
-  const candidates = [
-    ".cache",
-    ".local",
-    "Documents",
-    "Downloads",
-    ".vscode",
-    ".cargo",
-    "go",
-    ".bashrc",
-    ".profile",
-  ];
-  for (const entry of candidates) {
-    const abs = join(HOME, entry);
-    if (!existsSync(abs)) continue;
-    // bind 目标本身或其祖先（会被 bwrap 建为挂载点父目录）不能当「不可见」靶。
-    const isBindSurface = bindTargets.some(
-      (t) => isWithin(t, abs) || isWithin(abs, t)
-    );
-    if (!isBindSurface) return abs;
-  }
-  return undefined;
-}
-
-function pickInstallBin(): string | undefined {
-  const binDir = join(INSTALL_ROOT, "node_modules", ".bin");
-  for (const name of ["tsc", "vitest", "eslint"]) {
-    const abs = join(binDir, name);
-    if (existsSync(abs)) return abs;
-  }
-  return undefined;
-}
-
-/**
- * dev worktree 形态的退路：node_modules 为空（依赖解析落在 installRoot 之外、
- * 围栏外），node_modules/.bin 无真实 binary。此时用 package.json bin 产物
- * `scripts/iknow-trace-mcp.cjs` 做真实 exec——它只 require node 内建模块、
- * 再 spawn installRoot 内的 `dist/trace-mcp/main.js`（全部在 installRoot
- * 读白名单内），`--help` 打印 usage 后 exit 0，无副作用。
- */
-function pickStandaloneInstallExec(): string | undefined {
-  const abs = join(INSTALL_ROOT, "scripts", "iknow-trace-mcp.cjs");
-  return existsSync(abs) ? abs : undefined;
-}
-
 function setupHostFixtures(): HostFixtures {
-  const otherProjectDir = mkdtempSync(join(HOME, "iknow-probe-other-project-"));
-  const nodeRoot = dirname(process.execPath);
-  const bindTargets = [
-    ...(isWithin(HOME, nodeRoot) ? [nodeRoot] : []),
-    join(HOME, ".gitconfig"),
-    join(HOME, ".config", "git", "config"),
-  ].filter((t) => existsSync(t));
   const gitIdentity = spawnSync("git", ["config", "--global", "user.name"], {
     encoding: "utf8",
   });
   return {
-    otherProjectDir,
-    hiddenHomeEntry: pickHiddenHomeEntry(bindTargets),
-    nodeRootUnderHome: isWithin(HOME, nodeRoot) ? nodeRoot : undefined,
-    installBin: pickInstallBin(),
     hasGitGlobalIdentity:
       gitIdentity.status === 0 && (gitIdentity.stdout ?? "").trim().length > 0,
   };
 }
 
-/** 改绑档 git fixture：「主仓 + 其内 worktree」。任一步失败 = fail-loud。 */
-function setupRebindFixture(): { main: string; wt: string } {
-  const base = mkdtempSync(join(TMP, "iknow-probe-rebind-"));
+/** worktree 档 git fixture：「主仓 + 其内 worktree」。任一步失败 = fail-loud。 */
+function setupWorktreeFixture(): {
+  base: string;
+  main: string;
+  wt: string;
+} {
+  const base = mkdtempSync(join(TMP, "iknow-probe-wt-"));
   const main = join(base, "main-repo");
-  const wt = join(main, ".iknow", "worktrees", "t6-probe");
+  const wt = join(main, ".iknow", "worktrees", "probe");
   const git = (args: readonly string[]): void => {
     const r = spawnSync("git", args, { encoding: "utf8" });
     if (r.status !== 0) {
       rmSync(base, { recursive: true, force: true });
       throw new Error(
-        `rebind fixture: git ${args.join(" ")} failed: ${(r.stderr ?? "").trim()}`
+        `worktree fixture: git ${args.join(" ")} failed: ${(r.stderr ?? "").trim()}`
       );
     }
   };
   try {
     git(["init", "-q", "-b", "main", main]);
-    git(["-C", main, "config", "user.email", "t6-probe@iknow"]);
-    git(["-C", main, "config", "user.name", "t6-probe"]);
-    writeFileSync(join(main, "marker.txt"), "t6-identity-marker\n");
+    git(["-C", main, "config", "user.email", "probe@iknow"]);
+    git(["-C", main, "config", "user.name", "probe"]);
+    writeFileSync(join(main, "marker.txt"), "identity-marker\n");
     git(["-C", main, "add", "."]);
-    git(["-C", main, "commit", "-qm", "t6 probe fixture"]);
-    git(["-C", main, "worktree", "add", "-q", "-b", "t6-probe", wt]);
-    return { main, wt };
+    git(["-C", main, "commit", "-qm", "probe fixture"]);
+    git(["-C", main, "worktree", "add", "-q", "-b", "probe", wt]);
+    return { base, main, wt };
   } catch (err) {
     rmSync(base, { recursive: true, force: true });
     throw err;
@@ -288,7 +229,7 @@ function setupRebindFixture(): { main: string; wt: string } {
 }
 
 // ---------------------------------------------------------------------------
-// 每档探针清单：11 旧类（9 个 fence 类）+ T6 新类
+// 每档探针清单
 // ---------------------------------------------------------------------------
 
 function buildChecks(
@@ -296,19 +237,57 @@ function buildChecks(
   fixtures: HostFixtures,
   listenerPort: number
 ): ProbeCheck[] {
-  const other = fixtures.otherProjectDir;
   const checks: ProbeCheck[] = [];
 
-  // —— 11 旧类中的 9 个 fence 类（原 sandbox-probe 全量保留，语义不变）——
+  // —— env 隔离（轴未借本改动放开）——
   checks.push(
     syncCheck(profile, "env isolation", 'test -z "$ANTHROPIC_AUTH_TOKEN"')
   );
+
+  // —— SC1：home 可见（宿主真路径，非不可见）——
   checks.push(
-    syncCheck(profile, "fs sensitivity (ssh hidden)", "test ! -e ~/.ssh/id_rsa")
+    syncCheck(
+      profile,
+      "home visible",
+      'test -d "$HOME" && ls "$HOME" >/dev/null'
+    )
+  );
+  checks.push({
+    name: "home write lands on host (global writable)",
+    run: async () => {
+      const hostMarker = join(HOME, `${TOKEN}.home`);
+      if (existsSync(hostMarker)) rmSync(hostMarker, { force: true });
+      const r = spawnFenceSync(
+        profile,
+        `printf global-home > "$HOME/${TOKEN}.home" && test -s "$HOME/${TOKEN}.home"`
+      );
+      const persisted = existsSync(hostMarker);
+      const content = persisted ? readFileSync(hostMarker, "utf8") : "";
+      if (persisted) rmSync(hostMarker, { force: true });
+      return {
+        ok: r.status === 0 && content === "global-home",
+        detail: `fence-exit=${r.status} host-persisted=${persisted} content="${content}"`,
+      };
+    },
+  });
+
+  // —— 系统前缀只读覆盖 + 工具链可见 ——
+  checks.push(
+    syncCheck(profile, "/etc readonly", "touch /etc/iknow-probe-write", true)
   );
   checks.push(
-    syncCheck(profile, "/etc readonly", "touch /etc/sandbox-probe-write", true)
+    syncCheck(
+      profile,
+      "system prefix readable (/usr)",
+      "test -r /usr/bin/env && test -x /usr/bin/env"
+    )
   );
+  checks.push(syncCheck(profile, "node runs", "node -v"));
+  checks.push(
+    syncCheck(profile, "host prefix /opt", "test ! -d /opt -o -r /opt")
+  );
+
+  // —— 全局档：宿主真路径可写（cwd 与非 cwd 两处）——
   checks.push(
     syncCheck(
       profile,
@@ -316,9 +295,82 @@ function buildChecks(
       "touch probe-write && rm probe-write && echo ok"
     )
   );
+  checks.push({
+    name: "host path outside cwd writable (global writable)",
+    run: async () => {
+      const target = join(profile.extra, `${TOKEN}.extra`);
+      if (existsSync(target)) rmSync(target, { force: true });
+      const r = spawnFenceSync(
+        profile,
+        `printf global-extra > "${target}" && test -s "${target}"`
+      );
+      const persisted = existsSync(target);
+      const content = persisted ? readFileSync(target, "utf8") : "";
+      return {
+        ok: r.status === 0 && content === "global-extra",
+        detail: `fence-exit=${r.status} host-persisted=${persisted} content="${content}"`,
+      };
+    },
+  });
   checks.push(
-    syncCheck(profile, "host prefix /opt", "test ! -d /opt -o -r /opt")
+    syncCheck(
+      profile,
+      "guest /tmp writable (host /tmp via / bind)",
+      `touch "/tmp/${TOKEN}.tmp" && rm "/tmp/${TOKEN}.tmp" && echo ok`
+    )
   );
+
+  // —— SC3：无 guest /tmp 别名；$TMPDIR = 会话 tmp 宿主路径 ——
+  checks.push({
+    name: "guest /tmp is host /tmp, not the session pad",
+    run: async () => {
+      const hostTmp = join(TMP, `${TOKEN}.alias`);
+      const padTmp = join(profile.pad, `${TOKEN}.alias`);
+      if (existsSync(hostTmp)) rmSync(hostTmp, { force: true });
+      const r = spawnFenceSync(
+        profile,
+        `printf guest-tmp > "/tmp/${TOKEN}.alias" && test -s "/tmp/${TOKEN}.alias"`
+      );
+      const onHostTmp = existsSync(hostTmp);
+      const inPad = existsSync(padTmp);
+      if (onHostTmp) rmSync(hostTmp, { force: true });
+      return {
+        ok: r.status === 0 && onHostTmp && !inPad,
+        detail: `fence-exit=${r.status} host-/tmp=${onHostTmp} pad=${inPad}`,
+      };
+    },
+  });
+  checks.push(
+    syncCheck(
+      profile,
+      "$TMPDIR equals the session tmp host path",
+      `test "$TMPDIR" = "${profile.pad}" && printf %s "$TMPDIR"`,
+      false
+    )
+  );
+
+  // —— SC2：写会话 tmp 宿主路径落 pad，且不出现在宿主 /tmp ——
+  checks.push({
+    name: "session tmp write lands in the pad, not host /tmp",
+    run: async () => {
+      const padFile = join(profile.pad, `${TOKEN}.pad`);
+      const hostTmpFile = join(TMP, `${TOKEN}.pad`);
+      if (existsSync(padFile)) rmSync(padFile, { force: true });
+      const r = spawnFenceSync(
+        profile,
+        `printf session-tmp > "$TMPDIR/${TOKEN}.pad" && test -s "$TMPDIR/${TOKEN}.pad"`
+      );
+      const inPad = existsSync(padFile);
+      const content = inPad ? readFileSync(padFile, "utf8") : "";
+      const onHostTmp = existsSync(hostTmpFile);
+      return {
+        ok: r.status === 0 && content === "session-tmp" && !onHostTmp,
+        detail: `fence-exit=${r.status} pad="${content}" host-/tmp=${onHostTmp}`,
+      };
+    },
+  });
+
+  // —— 网络轴（默认隔离；opt-in 需宿主回环实测）——
   checks.push(
     syncCheck(
       profile,
@@ -327,7 +379,6 @@ function buildChecks(
       true
     )
   );
-  checks.push(syncCheck(profile, "node runs", "node -v"));
   // T9b (#503): physical validation of `network: true` moves to a host loopback
   // listener. WSL2 drops outbound IPv4 for mount+user-ns combos and the fence's
   // /etc/resolv.conf symlink is dangling (no /mnt bind), so example.com can
@@ -367,88 +418,9 @@ function buildChecks(
     },
   });
 
-  // —— T6 新类：写白名单第三轴 /tmp ——
-  checks.push(
-    syncCheck(
-      profile,
-      "tmp writable (/tmp write axis)",
-      "touch /tmp/t6-probe-write && rm /tmp/t6-probe-write && echo ok"
-    )
-  );
-
-  // —— T6 新类：home 拒写（三态，见文件头语义注记）——
-  checks.push(
-    fixtures.nodeRootUnderHome !== undefined
-      ? syncCheck(
-          profile,
-          "home whitelisted subtree write denied (EROFS)",
-          `touch "${fixtures.nodeRootUnderHome}/t6-ro-probe"`,
-          true
-        )
-      : skippedCheck(
-          "home whitelisted subtree write denied (EROFS)",
-          "node toolchain root not under home (system prefixes covered by /etc readonly)"
-        )
-  );
-  checks.push(
-    fixtures.hiddenHomeEntry !== undefined
-      ? syncCheck(
-          profile,
-          "home non-whitelist invisible",
-          `test ! -e "${fixtures.hiddenHomeEntry}"`
-        )
-      : skippedCheck(
-          "home non-whitelist invisible",
-          "no non-whitelisted home entry found on host"
-        )
-  );
-  checks.push({
-    name: "home writes ephemeral — never persist to host home",
-    run: async () => {
-      const hostMarker = join(HOME, "t6-ephemeral-probe");
-      if (existsSync(hostMarker)) rmSync(hostMarker);
-      const touch = spawnFenceSync(
-        profile,
-        'touch "$HOME/t6-ephemeral-probe" && test -e "$HOME/t6-ephemeral-probe"'
-      );
-      const persisted = existsSync(hostMarker);
-      const secondFence = spawnFenceSync(
-        profile,
-        'test ! -e "$HOME/t6-ephemeral-probe"'
-      );
-      if (existsSync(hostMarker)) rmSync(hostMarker);
-      const ok = touch.status === 0 && !persisted && secondFence.status === 0;
-      return {
-        ok,
-        detail: `fence-touch=${touch.status} host-persisted=${persisted} second-fence-invisible=${secondFence.status === 0}`,
-      };
-    },
-  });
-
-  // —— T6 新类：其它 project 不可写（host 侧 $HOME fixture）——
-  checks.push(
-    syncCheck(
-      profile,
-      "other project not writable",
-      `touch "${other}/t6-denied"`,
-      true
-    )
-  );
-
-  // —— T6 新类：~/.iknow 不可见 + init.sh 写尝试不落地（#896 闭合探针）——
-  checks.push(iknowClosureCheck(profile));
-
-  // —— T6 新类：installRoot 可读可执行（§9.2 #4）——
-  checks.push(
-    syncCheck(
-      profile,
-      "installRoot readable (package.json)",
-      `test -r "${INSTALL_ROOT}/package.json"`
-    )
-  );
-  checks.push(...installExecutableChecks(profile, fixtures));
-
-  // —— T6 新类：git 全局配置读（§9.2 #7 可选成员；host 缺身份 = skip）——
+  // —— git 全局配置读（宿主 home 可见，§9.2 #7 语义在全局档仍成立；
+  //    host 缺身份 = skip。写全局配置在全局档可写，但探针不碰操作员
+  //    ~/.gitconfig —— 不把持久身份面当 scratch。）——
   checks.push(
     fixtures.hasGitGlobalIdentity
       ? syncCheck(
@@ -461,131 +433,44 @@ function buildChecks(
           "host has no git global identity"
         )
   );
-  checks.push(
-    syncCheck(
-      profile,
-      "git global config write denied (read-only member)",
-      "git config --global t6.probe.key value",
-      true
-    )
-  );
 
-  // —— 改绑档专属：identity 根读通道（§9.2 #6，OFF 档不传该根）——
-  if (profile.name === "rebind") {
-    const rebind = rebindFixturePaths;
+  // —— worktree 档专属：全局档下 gitdir 直接经宿主根可见（无 identity ro-bind）——
+  if (profile.name === "worktree") {
+    const wt = worktreeFixturePaths.wt;
+    const main = worktreeFixturePaths.main;
     checks.push(
       syncCheck(
         profile,
-        "identity root (main repo) readable",
-        `grep -q t6-identity-marker "${rebind.main}/marker.txt"`
-      )
-    );
-    checks.push(
-      syncCheck(
-        profile,
-        "main repo non-taskRoot write denied (EROFS)",
-        `touch "${rebind.main}/t6-denied"`,
-        true
-      )
-    );
-    // §7.2 改绑流程探针化：gitdir 经 identity ro-bind 可达。
-    checks.push(
-      syncCheck(
-        profile,
-        "git status in worktree (gitdir via identity ro-bind)",
-        `git -C "${rebind.wt}" status --porcelain`
+        "git status in worktree (gitdir via host root bind)",
+        `git -C "${wt}" status --porcelain`
       )
     );
     checks.push(
       syncCheck(
         profile,
         "git committer ident in worktree",
-        `git -C "${rebind.wt}" var GIT_COMMITTER_IDENT`
+        `git -C "${wt}" var GIT_COMMITTER_IDENT`
       )
     );
+    checks.push({
+      name: "main repo write allowed (global mode)",
+      run: async () => {
+        const target = join(main, `${TOKEN}.main`);
+        if (existsSync(target)) rmSync(target, { force: true });
+        const r = spawnFenceSync(
+          profile,
+          `printf global-main > "${target}" && test -s "${target}"`
+        );
+        const persisted = existsSync(target);
+        const content = persisted ? readFileSync(target, "utf8") : "";
+        return {
+          ok: r.status === 0 && content === "global-main",
+          detail: `fence-exit=${r.status} host-persisted=${persisted} content="${content}"`,
+        };
+      },
+    });
   }
   return checks;
-}
-
-/** #896 闭合探针：不可见 + 写尝试不落地 host（host 侧验证）。 */
-function iknowClosureCheck(profile: ProbeProfile): ProbeCheck {
-  const hostInit = join(HOME, ".iknow", "init.sh");
-  const hostHadInit = existsSync(hostInit);
-  return {
-    name: "~/.iknow invisible + init.sh never persists (#896 closure)",
-    run: async () => {
-      const invisible = spawnFenceSync(profile, 'test ! -e "$HOME/.iknow"');
-      if (hostHadInit) {
-        return {
-          ok: invisible.status === 0,
-          detail:
-            "skipped persistence sub-assert: host already has init.sh; invisibility asserted",
-        };
-      }
-      const wrote = spawnFenceSync(
-        profile,
-        'mkdir -p "$HOME/.iknow" && printf "#!/bin/sh\\necho iknow-init\\n" > "$HOME/.iknow/init.sh" && test -e "$HOME/.iknow/init.sh"'
-      );
-      const persisted = existsSync(hostInit);
-      const secondFence = spawnFenceSync(
-        profile,
-        'test ! -e "$HOME/.iknow/init.sh"'
-      );
-      const ok =
-        invisible.status === 0 &&
-        wrote.status === 0 &&
-        !persisted &&
-        secondFence.status === 0;
-      return {
-        ok,
-        detail: `fence-invisible=${invisible.status === 0} init.sh-host-persisted=${persisted} second-fence-invisible=${secondFence.status === 0}`,
-      };
-    },
-  };
-}
-
-/** installRoot 可执行（§9.2 #4）：.bin binary 真实 exec 优先；dev worktree
- *  形态退化为 exec 链表面断言 + 闭世界负向（dep 解析不得泄漏到白名单外）。 */
-function installExecutableChecks(
-  profile: ProbeProfile,
-  fixtures: HostFixtures
-): ProbeCheck[] {
-  if (fixtures.installBin !== undefined) {
-    return [
-      syncCheck(
-        profile,
-        "installRoot toolchain executable",
-        `"${fixtures.installBin}" --version`
-      ),
-    ];
-  }
-  const standalone = pickStandaloneInstallExec();
-  if (standalone === undefined) {
-    return [
-      skippedCheck(
-        "installRoot toolchain executable",
-        "no .bin binary and no bin artifact in installRoot"
-      ),
-    ];
-  }
-  // dev worktree：node_modules 为空，wrapper → dist/trace-mcp/main.js 的依赖
-  // 解析落在 installRoot 之外（围栏外父仓）。真实 exec 因此不可达——且**必须**
-  // 不可达（白名单只有 installRoot，父仓依赖不得泄漏）。正向断言 exec 位与
-  // spawn 目标可达；负向断言 dep-import exec 被拒（闭世界边界，非回归）。
-  const spawnTarget = join(INSTALL_ROOT, "dist", "trace-mcp", "main.js");
-  return [
-    syncCheck(
-      profile,
-      "installRoot toolchain exec surface (exec-bit + spawn target)",
-      `test -x "${standalone}" && test -r "${spawnTarget}"`
-    ),
-    syncCheck(
-      profile,
-      "installRoot dep-import exec denied (parent node_modules not leaked)",
-      `node "${standalone}" --help`,
-      true
-    ),
-  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -668,47 +553,51 @@ const violationChecks: ReadonlyArray<readonly [string, () => ProbeResult]> = [
 // 两档装配 + 主流程
 // ---------------------------------------------------------------------------
 
-/** 改绑档 fixture 路径（setupRebindFixture 赋值，checks 构建时读取）。 */
-let rebindFixturePaths: { main: string; wt: string } = { main: "", wt: "" };
+/** worktree 档 fixture 路径（setupWorktreeFixture 赋值，checks 构建时读取）。 */
+let worktreeFixturePaths: { main: string; wt: string } = { main: "", wt: "" };
 
-function buildOffProfile(): ProbeProfile {
-  // OFF 档（build-engine OFF 分支对齐）：cwd = 真实可写目录（主仓 taskRoot
-  // 语义），不传 projectIdentityRoot；installRoot = resolveInstallRoot()。
-  const cwd = mkdtempSync(join(TMP, "iknow-probe-off-"));
+function makePad(): string {
+  return mkdtempSync(join(TMP, "iknow-probe-pad-"));
+}
+
+function makeExtra(): string {
+  return mkdtempSync(join(TMP, "iknow-probe-extra-"));
+}
+
+function buildGlobalProfile(): ProbeProfile {
+  const cwd = mkdtempSync(join(TMP, "iknow-probe-global-"));
+  const pad = makePad();
+  const extra = makeExtra();
   return {
-    name: "OFF",
+    name: "global",
     cwd,
-    fsPolicy: createFsPolicy({
-      cwd,
-      home: HOME,
-      tmpDir: TMP,
-      workspaceRoot: cwd,
-      installRoot: INSTALL_ROOT,
-      optionalReadRoots: defaultOptionalReadRoots({ home: HOME }),
-    }),
-    cleanup: () => rmSync(cwd, { recursive: true, force: true }),
+    pad,
+    extra,
+    fsPolicy: createFsPolicy({ home: HOME, tmpDir: pad }),
+    cleanup: () => {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(pad, { recursive: true, force: true });
+      rmSync(extra, { recursive: true, force: true });
+    },
   };
 }
 
-function buildRebindProfile(): ProbeProfile {
-  // 改绑档（§7.2 探针化）：cwd = 主仓内 worktree（taskRoot），主仓 =
-  // projectIdentityRoot（恒进读白名单，§9.2 #6）。
-  const { main, wt } = setupRebindFixture();
-  rebindFixturePaths = { main, wt };
+function buildWorktreeProfile(): ProbeProfile {
+  const { base, main, wt } = setupWorktreeFixture();
+  worktreeFixturePaths = { main, wt };
+  const pad = makePad();
+  const extra = makeExtra();
   return {
-    name: "rebind",
+    name: "worktree",
     cwd: wt,
-    fsPolicy: createFsPolicy({
-      cwd: wt,
-      home: HOME,
-      tmpDir: TMP,
-      workspaceRoot: wt,
-      installRoot: INSTALL_ROOT,
-      projectIdentityRoot: main,
-      optionalReadRoots: defaultOptionalReadRoots({ home: HOME }),
-    }),
-    cleanup: () =>
-      rmSync(resolve(main, ".."), { recursive: true, force: true }),
+    pad,
+    extra,
+    fsPolicy: createFsPolicy({ home: HOME, tmpDir: pad }),
+    cleanup: () => {
+      rmSync(base, { recursive: true, force: true });
+      rmSync(pad, { recursive: true, force: true });
+      rmSync(extra, { recursive: true, force: true });
+    },
   };
 }
 
@@ -787,13 +676,11 @@ async function main(): Promise<void> {
     return;
   }
   const fixtures = setupHostFixtures();
-  const profiles: ProbeProfile[] = [buildOffProfile()];
-  let rebind: ProbeProfile | undefined;
+  const profiles: ProbeProfile[] = [buildGlobalProfile()];
   try {
-    rebind = buildRebindProfile();
-    profiles.push(rebind);
+    profiles.push(buildWorktreeProfile());
   } catch (err) {
-    console.error(`BLOCKER: rebind fixture setup failed: ${String(err)}`);
+    console.error(`BLOCKER: worktree fixture setup failed: ${String(err)}`);
     profiles[0].cleanup();
     process.exitCode = 1;
     return;
@@ -801,7 +688,7 @@ async function main(): Promise<void> {
   const listener = await startProbeListener();
   const stats: ProfileStats[] = [];
   try {
-    console.log("sandbox-probe (T6 two-profile closed-world suite)");
+    console.log("sandbox-probe (ADR-0092 global-mode suite, two profiles)");
     for (const profile of profiles) {
       stats.push(await runProfile(profile, fixtures, listener.port));
     }
@@ -830,7 +717,7 @@ async function main(): Promise<void> {
   } finally {
     listener.stop();
     for (const profile of profiles) profile.cleanup();
-    rmSync(fixtures.otherProjectDir, { recursive: true, force: true });
+    rmSync(join(HOME, `${TOKEN}.home`), { force: true });
   }
 }
 

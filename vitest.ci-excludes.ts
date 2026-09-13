@@ -53,8 +53,8 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/harness/aci/tools/list-sessions.test.ts",
   "tests/harness/aci/tools/get-record.test.ts",
   "tests/harness/aci/bash-live-task-root.test.ts",
-  "tests/harness/aci/bash-closed-world-read-roots.test.ts",
-  "tests/harness/aci/bash-identity-read-whitelist.test.ts",
+  // ADR-0092（全局档）：闭世界读根测试已归档，同族不变式改由本文件认证。
+  "tests/harness/aci/bash-global-mode-visibility.test.ts",
   "tests/harness/aci/bash-main-session-fence-tmp.test.ts",
   "tests/harness/verify/sandbox-run.test.ts",
   "tests/harness/isolation/worktree-gate-live-taskroot-e2e.test.ts",
@@ -88,7 +88,9 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/harness/agent-status-bar.test.ts",
   "tests/harness/identity/agent-status-read-rule.test.ts",
   "tests/harness/identity/system-injection.test.ts",
-  "tests/harness/build-engine-install-root.test.ts",
+  // ADR-0092：installRoot 读根退役（全局档无逐根读白名单），文件已归档；
+  // 同族装配面改由 bash-wiring 认证。
+  "tests/harness/build-engine-bash-wiring.test.ts",
   "tests/harness/build-engine-hooks.test.ts",
   "tests/harness/build-engine-subagent-trace.test.ts",
   // ADR-0088 T2：真 buildHarnessEngine 装配取 tasksDir（host 注入 / 缺省
@@ -108,7 +110,6 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/session-api/hub-worktree-isolation.test.ts",
   // 子代理 worker 装配 → createWorkerDeps → createBashTool → requireBwrap
   "tests/subagent/worker-identity-root.test.ts",
-  "tests/subagent/worker-install-root.test.ts",
   "tests/subagent/worker-session-layout.test.ts",
   "tests/subagent/worker-tool-surface.test.ts",
   "tests/subagent/worker.test.ts",

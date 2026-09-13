@@ -173,11 +173,6 @@ export interface VerifyLoopOptions {
   readonly completionMode?: "hitl" | "auto";
   readonly cwd: string;
   readonly home?: string;
-  /** T4 (ADR-0037 §9.2 #4, plans/closed-world-bash-fence.md): iknow 运行时
-   *  安装根 —— 验证命令的闭世界读白名单合同读根(项目自身工具链读通道)。
-   *  缺省 → makeDefaultRunVerify 内回退 `resolveInstallRoot()` 进程级 SSOT;
-   *  显式传入即覆盖(测试注入缝)。 */
-  readonly installRoot?: string;
 }
 
 export type VerifyLoopOutcome =
@@ -1170,11 +1165,6 @@ export async function runVerifyLoop(
     makeDefaultRunVerify({
       cwd: options.cwd,
       home: options.home ?? homedir(),
-      // T4 (ADR-0037 §9.2 #4): installRoot 透传给缺省 runVerify 装配;
-      // 缺席时 makeDefaultRunVerify 内回退 resolveInstallRoot() SSOT。
-      ...(options.installRoot !== undefined
-        ? { installRoot: options.installRoot }
-        : {}),
     });
   const timeoutSec = options.config.timeoutSec ?? DEFAULT_TIMEOUT_SEC;
   return runVerifyLoopBody({

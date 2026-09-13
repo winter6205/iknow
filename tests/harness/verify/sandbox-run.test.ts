@@ -1,23 +1,18 @@
 /**
- * T4 (plans/closed-world-bash-fence.md) — verify 沙箱装配迁移双轴闭世界 policy。
+ * verify 沙箱装配 (ADR-0092 全局档)。
  *
- * ADR-0037 §9.2 / §9.4:
- *   - #4 installRoot:验证命令同样需要项目自身工具链的读通道。来源裁决:
- *     VerifyLoopOptions 本无 installRoot → 最小接线补齐(新增可选字段,
- *     makeDefaultRunVerify 缺省回退 resolveInstallRoot() 进程级 SSOT,
- *     不静默留空)。显式传入时覆盖 SSOT(测试注入缝,session-roots 刻意
- *     不给进程缓存 reset 缝)。
- *   - #7 git 全局配置:单一 source helper(defaultOptionalReadRoots)。
- *   - verify 不传 projectIdentityRoot(维持现状)。
+ * verify 与 bash 工具共用同一围栏装配语义(spec:64):命令拼 `bash -c`,
+ * bwrap 全局档 argv 由 createBwrapFence 决定。Round 1 后 policy 只承载
+ * 会话 tmp 宿主路径(`$TMPDIR` 来源),不再有闭世界读/写白名单。
  *
- * 手法:module-mock sandbox index(捕获 createBwrapFence 的 fsPolicy,
+ * 手法:module-mock sandbox index(捕获 createBwrapFence 的 opts,
  * stub runInSandbox),与 tests/subagent/bash-mode-channel.test.ts 同款。
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import assert from "node:assert/strict";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../../src/harness/sandbox/index.ts", async (importOriginal) => {
   const actual = await vi.importActual<
@@ -32,7 +27,6 @@ vi.mock("../../../src/harness/sandbox/index.ts", async (importOriginal) => {
 
 import * as sandboxIndex from "../../../src/harness/sandbox/index.ts";
 import { makeDefaultRunVerify } from "../../../src/harness/verify/sandbox-run.ts";
-import { resolveInstallRoot } from "../../../src/harness/session-roots.ts";
 import type { FsPolicy } from "../../../src/harness/sandbox/fs-policy.ts";
 
 interface CapturedFence {
@@ -43,93 +37,68 @@ interface CapturedFence {
 
 const captured: CapturedFence[] = [];
 
+vi.mocked(sandboxIndex.createBwrapFence)
+  .mockReset()
+  .mockImplementation((opts) => {
+    captured.push(opts as unknown as CapturedFence);
+    return { argv: ["bwrap", "--", "bash", "-c", "true"], sealed: true };
+  });
+vi.mocked(sandboxIndex.runInSandbox).mockReset().mockResolvedValue({
+  exitCode: 0,
+  stdout: "",
+  stderr: "",
+});
+
 beforeEach(() => {
   captured.length = 0;
-  vi.mocked(sandboxIndex.createBwrapFence)
-    .mockReset()
-    .mockImplementation((opts) => {
-      captured.push(opts as unknown as CapturedFence);
-      return { argv: ["bwrap", "--", "bash", "-c", "true"], sealed: true };
-    });
-  vi.mocked(sandboxIndex.runInSandbox).mockReset().mockResolvedValue({
-    exitCode: 0,
-    stdout: "",
-    stderr: "",
-  });
+  vi.mocked(sandboxIndex.runInSandbox).mockClear();
 });
 
-const SCRATCH: string[] = [];
-function makeScratch(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  SCRATCH.push(dir);
-  return dir;
-}
-afterAll(() => {
-  for (const dir of SCRATCH) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-describe("makeDefaultRunVerify — closed-world read roots (T4)", () => {
-  it("installRoot omitted → SSOT fallback resolveInstallRoot() enters the read whitelist (no silent empty)", async () => {
-    const cwd = makeScratch("verify-run-cwd-");
+describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
+  it("threads a global fs-policy whose tmpRoot is the session tmp host path", async () => {
+    captured.length = 0;
+    const cwd = tmpdir();
     const runVerify = makeDefaultRunVerify({ cwd, home: "/home/user" });
     await runVerify("true", {});
     expect(captured).toHaveLength(1);
-    const readRoots = captured[0]!.fsPolicy.readRoots();
-    assert.ok(
-      readRoots.includes(resolveInstallRoot()),
-      `verify fence must thread the install root via the SSOT fallback; readRoots=${JSON.stringify(readRoots)}`
-    );
-  });
-
-  it("explicit installRoot option overrides the SSOT fallback (test injection seam)", async () => {
-    const cwd = makeScratch("verify-run-cwd2-");
-    const installRoot = makeScratch("verify-run-install-");
-    const runVerify = makeDefaultRunVerify({
-      cwd,
-      home: "/home/user",
-      installRoot,
-    });
-    await runVerify("true", {});
-    const readRoots = captured[0]!.fsPolicy.readRoots();
-    assert.ok(readRoots.includes(installRoot));
+    const policy = captured[0]!.fsPolicy;
     assert.equal(
-      readRoots.includes(resolveInstallRoot()),
-      installRoot === resolveInstallRoot(),
-      "explicit installRoot replaces the SSOT fallback"
+      policy.tmpRoot(),
+      tmpdir(),
+      "default verify tmpRoot falls back to process tmpdir()"
     );
+    // The retired closed-world surfaces must be gone.
+    assert.equal("readRoots" in policy, false);
+    assert.equal("writeRoots" in policy, false);
+    assert.equal("optionalReadRoots" in policy, false);
   });
 
-  it("git global config pair enters optionalReadRoots when on disk (same helper as bash)", async () => {
-    const cwd = makeScratch("verify-run-cwd3-");
-    const home = makeScratch("verify-run-home-");
-    mkdirSync(join(home, ".config", "git"), { recursive: true });
-    writeFileSync(join(home, ".gitconfig"), "[user]\n");
-    writeFileSync(join(home, ".config", "git", "config"), "[user]\n");
-    const runVerify = makeDefaultRunVerify({ cwd, home });
-    await runVerify("true", {});
-    const optional = captured[0]!.fsPolicy.optionalReadRoots();
-    assert.ok(optional.includes(join(home, ".gitconfig")));
-    assert.ok(optional.includes(join(home, ".config", "git", "config")));
+  it("explicit tmpDir overrides the process tmpdir() fallback", async () => {
+    captured.length = 0;
+    const cwd = tmpdir();
+    const sessionTmp = mkdtempSync(join(tmpdir(), "verify-session-tmp-"));
+    try {
+      const runVerify = makeDefaultRunVerify({
+        cwd,
+        home: "/home/user",
+        tmpDir: sessionTmp,
+      });
+      await runVerify("true", {});
+      assert.equal(captured[0]!.fsPolicy.tmpRoot(), sessionTmp);
+    } finally {
+      rmSync(sessionTmp, { recursive: true, force: true });
+    }
   });
 
-  it("write axis stays taskRoot + tmp; verify never threads projectIdentityRoot", async () => {
-    const cwd = makeScratch("verify-run-cwd4-");
+  it("fence is driven with the verify cwd and command via runInSandbox", async () => {
+    captured.length = 0;
+    const cwd = "/tmp/verify-run-cwd-fixture";
     const runVerify = makeDefaultRunVerify({ cwd, home: "/home/user" });
     await runVerify("true", {});
     const fence = captured[0]!;
-    assert.deepEqual(
-      [...fence.fsPolicy.writeRoots()],
-      [cwd, tmpdir()],
-      "write whitelist = taskRoot(cwd) + tmpDir, nothing else"
-    );
-    assert.equal(
-      "projectIdentityRoot" in fence,
-      false,
-      "verify keeps the projectIdentityRoot unthreaded (pre-existing shape)"
-    );
-    // fence 实际驱动 runInSandbox(cwd 一致)。
+    assert.equal(fence.cwd, cwd);
+    // verify never threads a projectIdentityRoot into the fence options.
+    assert.equal("projectIdentityRoot" in fence, false);
     expect(vi.mocked(sandboxIndex.runInSandbox)).toHaveBeenCalledTimes(1);
     const runArgs = vi.mocked(sandboxIndex.runInSandbox).mock.calls[0]?.[0] as
       { cwd?: string } | undefined;

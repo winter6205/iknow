@@ -1,15 +1,17 @@
 /**
- * T4 (plans/closed-world-bash-fence.md) — build-engine installRoot 透传断言。
+ * build-engine bash factory 接线 (ADR-0092)。
  *
- * ADR-0037 §9.2 #4:installRoot(iknow 运行时安装根)是闭世界读白名单的合同
- * 读根 —— bash 围栏需要它才能读项目自身工具链(node_modules/.bin)。接线链:
- * build-engine 两处 createDefaultAciRegistry(首次构造 + ask 路径)都传
- * `sessionRoots.installRoot`,registry 再 verbatim 透传给 createBashTool。
- * 不新增状态源:installRoot 仍是 resolveSessionRoots 的既有第四角色。
+ * 取代 T4 的 installRoot 透传断言:闭世界读白名单随全局档退役 ——
+ * `--bind / /` 让项目工具链本就可见,引擎两处 createDefaultAciRegistry
+ * 不再把 `sessionRoots.installRoot` 送进 bash 工厂。installRoot 仍保留为
+ * worker bootstrap(tsx loader)的锚,但那不经 bash 工厂。
+ *
+ * 仍然真实的命题:两处构造点(chat 首次 / ask 路径)都向 bash 工厂透传
+ * liveTaskRoot,且不透传任何 installRoot 选项。
  *
  * 手法:module-mock bash.js(registry 的 named import 落到 spy;registry 本体
  * 保持真实,与 tests/harness/aci/registry-workspace-root.test.ts 同款),
- * buildHarnessEngine 走真实装配(chat = 首次构造点,ask = ask 路径构造点)。
+ * buildHarnessEngine 走真实装配。
  */
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -37,7 +39,6 @@ import {
   buildHarnessEngine,
   type BuiltEngine,
 } from "../../src/harness/build-engine.ts";
-import { resolveInstallRoot } from "../../src/harness/session-roots.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { createMcpManager } from "../../src/harness/mcp/manager.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
@@ -111,22 +112,25 @@ const FAKE_CLIENT = (): McpClientHandle => ({
   readResource: async () => ({ contents: [] }),
 });
 
-async function buildChat(opts: { installRoot?: string }): Promise<BuiltEngine> {
-  const productRoot = await mkdtemp(join(tmpdir(), "iknow-t4-install-prod-"));
-  const workspaceRoot = await mkdtemp(join(tmpdir(), "iknow-t4-install-task-"));
+type BuildChatOpts = {
+  installRoot?: string;
+};
+
+async function buildChat(opts: BuildChatOpts): Promise<BuiltEngine> {
+  const productRoot = await mkdtemp(join(tmpdir(), "iknow-bash-wire-prod-"));
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "iknow-bash-wire-task-"));
   roots.push(productRoot, workspaceRoot);
   await plantProjectMcp(productRoot);
   const built = await buildHarnessEngine({
-    env: makeEnv("sk-test-t4-install"),
+    env: makeEnv("sk-test-bash-wire"),
     askUser: createNoAskUser(),
     surface: "chat",
     userHome: join(productRoot, "home"),
     cwd: productRoot,
     workspaceRoot,
     productRoot,
-    // 本文件验 installRoot 透传到 bash 工厂,不验溢出退场 / 索引降档
-    // (专测见 build-engine-tool-overflow.test.ts、disclosure-index-align/)。
-    // 旁路装配期 countTokens:缝语义见 BuildEngineOpts.skipCountTokens 注释。
+    // 本文件验 bash 工厂接线,不验溢出退场 / 索引降档(专测见
+    // build-engine-tool-overflow.test.ts、disclosure-index-align/)。
     skipCountTokens: true,
     ...(opts.installRoot !== undefined
       ? { installRoot: opts.installRoot }
@@ -141,25 +145,26 @@ async function buildChat(opts: { installRoot?: string }): Promise<BuiltEngine> {
   return built;
 }
 
-describe("buildHarnessEngine — installRoot threaded to the bash factory (T4)", () => {
-  it("chat surface (first construction) threads sessionRoots.installRoot verbatim", async () => {
-    const INSTALL = await mkdtemp(join(tmpdir(), "iknow-t4-install-root-"));
+describe("buildHarnessEngine — bash factory wiring (ADR-0092)", () => {
+  it("chat surface threads liveTaskRoot and no installRoot to the bash factory", async () => {
+    const INSTALL = await mkdtemp(join(tmpdir(), "iknow-bash-wire-root-"));
     roots.push(INSTALL);
     await buildChat({ installRoot: INSTALL });
     const calls = engineBashCalls();
     expect(calls.length).toBeGreaterThan(0);
     for (const call of calls) {
-      expect(call.opts.installRoot).toBe(INSTALL);
+      expect(call.opts.liveTaskRoot).toBeDefined();
+      expect("installRoot" in call.opts).toBe(false);
     }
   });
 
-  it("ask surface threads sessionRoots.installRoot verbatim", async () => {
-    const root = await mkdtemp(join(tmpdir(), "iknow-t4-install-ask-"));
+  it("ask surface threads liveTaskRoot and no installRoot to the bash factory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-bash-wire-ask-"));
     roots.push(root);
-    const INSTALL = await mkdtemp(join(tmpdir(), "iknow-t4-install-ask-root-"));
+    const INSTALL = await mkdtemp(join(tmpdir(), "iknow-bash-wire-ask-root-"));
     roots.push(INSTALL);
     await buildHarnessEngine({
-      env: makeEnv("sk-test-t4-install-ask"),
+      env: makeEnv("sk-test-bash-wire-ask"),
       askUser: createNoAskUser(),
       surface: "ask",
       userHome: join(root, "home"),
@@ -167,22 +172,14 @@ describe("buildHarnessEngine — installRoot threaded to the bash factory (T4)",
       workspaceRoot: root,
       productRoot: root,
       installRoot: INSTALL,
-      // 同上:验 installRoot 透传,不验溢出 / 索引降档。
+      // 同上:验 bash 工厂接线,不验溢出 / 索引降档。
       skipCountTokens: true,
     });
     const calls = engineBashCalls();
     expect(calls.length).toBeGreaterThan(0);
     for (const call of calls) {
-      expect(call.opts.installRoot).toBe(INSTALL);
-    }
-  });
-
-  it("installRoot omitted → SSOT fallback resolveInstallRoot() is threaded (no silent empty)", async () => {
-    await buildChat({});
-    const calls = engineBashCalls();
-    expect(calls.length).toBeGreaterThan(0);
-    for (const call of calls) {
-      expect(call.opts.installRoot).toBe(resolveInstallRoot());
+      expect(call.opts.liveTaskRoot).toBeDefined();
+      expect("installRoot" in call.opts).toBe(false);
     }
   });
 });

@@ -10,7 +10,7 @@ import {
 } from "../../../src/harness/sandbox/resource-limits.js";
 
 describe("createResourceLimits", () => {
-  it("uses safe defaults and bwrap fragments", () => {
+  it("uses safe defaults and exposes policy constants (no argv projection)", () => {
     const limits = createResourceLimits();
     assert.deepEqual(
       {
@@ -28,12 +28,9 @@ describe("createResourceLimits", () => {
         fd: MAX_FD,
       }
     );
-    assert.deepEqual(limits.toRlimitFlags(), [
-      "--size",
-      String(TMP_BYTES),
-      "--tmpfs",
-      "/tmp",
-    ]);
+    // ADR-0092 全局档:围栏不再发射 --size / --tmpfs /tmp,`ResourceLimits`
+    // 只保留 v1 hooks(seccomp / cgroup v2)消费的常量面。
+    assert.equal("toRlimitFlags" in limits, false);
     assert.ok(Object.isFrozen(limits));
   });
 

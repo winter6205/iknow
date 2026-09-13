@@ -47,7 +47,6 @@
     "aci:demo": "tsx src/harness/aci/demo.ts",
     "install:search-engine": "tsx scripts/install-search-engine.ts",
     "probe:sandbox": "tsx scripts/sandbox-probe.ts",
-    "probe:sandbox:inventory": "tsx scripts/sandbox-probe-closed-world.ts",
     "probe:sandbox:subagent": "tsx scripts/sandbox-probe-subagent.ts",
     "probe:lsp": "tsx scripts/lsp-probe.ts",
     "probe:tui-binding": "$HOME/.bun/bin/bun run scripts/tui-binding-probe.ts",

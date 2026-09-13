@@ -248,9 +248,9 @@ describe("T7 worker stderr in taskId dir (SC7)", () => {
   });
 });
 
-describe("T3 worker /tmp isolation (SC3)", () => {
+describe("worker session tmp isolation (SC3, ADR-0092)", () => {
   it.skipIf(!hasBwrap())(
-    "worker bash /tmp/z is invisible to parent bash on the main-session pad",
+    "worker bash $TMPDIR writes land in this worker's pad, not the parent pad",
     async () => {
       const { manager, spawned } = makeManager();
       const { taskId } = manager.spawn({ task: "iso" });
@@ -268,20 +268,22 @@ describe("T3 worker /tmp isolation (SC3)", () => {
         home,
       });
       const write = parseBash(
-        await workerBash.handler({ command: "printf worker-z >/tmp/z" })
+        await workerBash.handler({ command: 'printf worker-z >"$TMPDIR/z"' })
       );
       assert.equal(write.code, 0, write.stderr);
       assert.equal(readFileSync(join(workerPad, "z"), "utf8"), "worker-z");
       assert.equal(existsSync(join(parentPad, "z")), false);
 
+      // The parent pad is a distinct host dir; the parent cannot observe the
+      // worker's $TMPDIR write via its own $TMPDIR.
       const parentBash = createBashTool(taskRoot, {
         tmpDir: parentPad,
         home,
       });
       const read = parseBash(
-        await parentBash.handler({ command: "cat /tmp/z" })
+        await parentBash.handler({ command: 'cat "$TMPDIR/z"' })
       );
-      assert.notEqual(read.code, 0, "parent must not see worker /tmp/z");
+      assert.notEqual(read.code, 0, "parent must not see the worker pad file");
       assert.notEqual(read.stdout, "worker-z");
 
       await manager.shutdown();
@@ -289,7 +291,7 @@ describe("T3 worker /tmp isolation (SC3)", () => {
   );
 
   it.skipIf(!hasBwrap())(
-    "createWorkerDeps with nested traceFilePath binds bash /tmp to that task pad",
+    "createWorkerDeps with nested traceFilePath makes $TMPDIR that task pad",
     async () => {
       const taskId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
       const recordPath = workerRecordPath(subagentsDir, taskId);
@@ -315,8 +317,13 @@ describe("T3 worker /tmp isolation (SC3)", () => {
       });
       const bash = deps.registry.get("bash");
       assert.ok(bash, "worker registry must expose bash");
+      const tmpdirOut = parseBash(
+        await bash.handler({ command: 'printf %s "$TMPDIR"' })
+      );
+      assert.equal(tmpdirOut.code, 0, tmpdirOut.stderr);
+      assert.equal(tmpdirOut.stdout, workerPad);
       const write = parseBash(
-        await bash.handler({ command: "printf from-worker >/tmp/z" })
+        await bash.handler({ command: 'printf from-worker >"$TMPDIR/z"' })
       );
       assert.equal(write.code, 0, write.stderr);
       assert.equal(readFileSync(join(workerPad, "z"), "utf8"), "from-worker");

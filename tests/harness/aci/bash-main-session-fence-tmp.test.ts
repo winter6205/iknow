@@ -1,7 +1,9 @@
 /**
- * T1 — 主会话围栏 /tmp 垫底（specs/parent-visible-tmp.md SC1 / SC9 / SC10）。
+ * ADR-0092 — 主会话围栏 tmp(SC2 / SC3)。
  *
- * 垫底目录名钉死为会话文件夹下的 `fence-tmp/`（不与 T3 `subagents/<taskId>/` 碰撞）。
+ * 会话 tmp 保持宿主路径 `<sessionFolder>/fence-tmp/`(方向名不动),但**不再**
+ * bind 到 guest Linux `/tmp`;`$TMPDIR` 必须等于该宿主路径。写盘落在宿主,
+ * 不进 taskRoot。
  */
 
 import assert from "node:assert/strict";
@@ -67,60 +69,101 @@ function makeSessionPad(): { readonly taskRoot: string; readonly pad: string } {
   return { taskRoot, pad };
 }
 
-describe("main-session fence-tmp pad (T1)", () => {
-  it("argv binds the session pad at /tmp and does not mount a per-invocation tmpfs", () => {
+describe("main-session fence-tmp (ADR-0092)", () => {
+  it("argv never binds the session pad at guest /tmp nor mounts a tmpfs", () => {
     const { taskRoot, pad } = makeSessionPad();
     const argv = createBwrapFence({
       command: "bash",
       args: ["-c", "true"],
       fsPolicy: createFsPolicy({
-        cwd: taskRoot,
         home: homedir(),
         tmpDir: pad,
       }),
       networkPolicy: createNetworkPolicy(),
       resourceLimits: createResourceLimits(),
-      env: { PATH: "/bin", TMPDIR: "/tmp" },
+      env: { PATH: "/bin", TMPDIR: pad },
       cwd: taskRoot,
     }).argv;
 
-    const tmpfsAtTmp = argv.some(
-      (arg, i) => arg === "--tmpfs" && argv[i + 1] === "/tmp"
-    );
     assert.equal(
-      tmpfsAtTmp,
+      argv.some((arg, i) => arg === "--tmpfs" && argv[i + 1] === "/tmp"),
       false,
-      "per-invocation --tmpfs /tmp is retired (ADR-0074)"
-    );
-
-    const bindPadAsTmp = argv.some(
-      (arg, i) =>
-        arg === "--bind" && argv[i + 1] === pad && argv[i + 2] === "/tmp"
+      "per-invocation --tmpfs /tmp is retired (ADR-0092)"
     );
     assert.equal(
-      bindPadAsTmp,
-      true,
-      `expected --bind ${pad} /tmp; argv=${JSON.stringify(argv)}`
+      argv.some(
+        (arg, i) =>
+          arg === "--bind" && argv[i + 1] === pad && argv[i + 2] === "/tmp"
+      ),
+      false,
+      "the session pad is no longer aliased onto guest /tmp"
     );
+    assert.equal(
+      argv.some(
+        (arg, i) =>
+          (arg === "--bind" || arg === "--ro-bind" || arg === "--tmpfs") &&
+          (argv[i + 1] === pad || argv[i + 2] === pad)
+      ),
+      false,
+      "session tmp is never a bind/ro-bind/tmpfs target"
+    );
+    // It is still handed to the child as $TMPDIR via --setenv (host path, not
+    // a guest mount), so the literal may appear only as a --setenv value.
+    const setenvPadIdx = argv.findIndex(
+      (arg, i) =>
+        arg === "--setenv" && argv[i + 1] === "TMPDIR" && argv[i + 2] === pad
+    );
+    assert.notEqual(setenvPadIdx, -1, "expected --setenv TMPDIR <pad>");
   });
 
   it.skipIf(!hasBwrap())(
-    "two sequential bash calls in one main session persist /tmp/x (SC1) and do not copy it into taskRoot (SC10)",
+    "$TMPDIR equals the session tmp host path and writes land on the host (SC2 / SC3)",
     async () => {
       const { taskRoot, pad } = makeSessionPad();
       const bash = createBashTool(taskRoot, {
         tmpDir: pad,
         home: makeScratch("home-"),
       });
+      const tmpdirOut = parseBash(
+        await bash.handler({ command: 'printf %s "$TMPDIR"' })
+      );
+      assert.equal(tmpdirOut.code, 0, tmpdirOut.stderr);
+      assert.equal(
+        tmpdirOut.stdout,
+        pad,
+        `$TMPDIR must be the session tmp host path; got ${JSON.stringify(tmpdirOut.stdout)}`
+      );
       const write = parseBash(
-        await bash.handler({ command: "printf persist-sc1 >/tmp/x" })
+        await bash.handler({ command: 'printf persist-sc2 > "$TMPDIR/x"' })
       );
       assert.equal(write.code, 0, write.stderr);
-      const read = parseBash(await bash.handler({ command: "cat /tmp/x" }));
+      const read = parseBash(
+        await bash.handler({ command: 'cat "$TMPDIR/x"' })
+      );
       assert.equal(read.code, 0, read.stderr);
-      assert.equal(read.stdout, "persist-sc1");
-      assert.equal(readFileSync(join(pad, "x"), "utf8"), "persist-sc1");
+      assert.equal(read.stdout, "persist-sc2");
+      assert.equal(readFileSync(join(pad, "x"), "utf8"), "persist-sc2");
       assert.equal(existsSync(join(taskRoot, "x")), false);
+    }
+  );
+
+  it.skipIf(!hasBwrap())(
+    "mktemp lands under $TMPDIR = the session tmp host dir",
+    async () => {
+      const { taskRoot, pad } = makeSessionPad();
+      const bash = createBashTool(taskRoot, {
+        tmpDir: pad,
+        home: makeScratch("home-"),
+      });
+      const mk = parseBash(await bash.handler({ command: "mktemp" }));
+      assert.equal(mk.code, 0, mk.stderr);
+      const created = mk.stdout.trim();
+      assert.ok(
+        created.startsWith(`${pad}/`),
+        `mktemp path ${created} must be under ${pad}`
+      );
+      const rel = created.slice(pad.length + 1);
+      assert.equal(existsSync(join(pad, rel)), true);
     }
   );
 
@@ -134,46 +177,20 @@ describe("main-session fence-tmp pad (T1)", () => {
         projectDir,
         home: makeScratch("home-"),
       });
-      const write = parseBash(
-        await bash.handler(
-          { command: "printf via-project >/tmp/x" },
-          { conversationId }
-        )
-      );
-      assert.equal(write.code, 0, write.stderr);
       const pad = join(
         projectDir,
         sanitizeConversationSegment(conversationId),
         MAIN_SESSION_FENCE_TMP_DIR_NAME
       );
-      assert.equal(readFileSync(join(pad, "x"), "utf8"), "via-project");
-      assert.equal(existsSync(join(projectDir, "escape")), false);
-    }
-  );
-
-  it.skipIf(!hasBwrap())(
-    "TMPDIR and mktemp land on the same main-session fence-tmp pad (SC9)",
-    async () => {
-      const { taskRoot, pad } = makeSessionPad();
-      const bash = createBashTool(taskRoot, {
-        tmpDir: pad,
-        home: makeScratch("home-"),
-      });
       const tmpdirOut = parseBash(
-        await bash.handler({ command: 'printf %s "$TMPDIR"' })
+        await bash.handler(
+          { command: 'printf %s "$TMPDIR"' },
+          { conversationId }
+        )
       );
       assert.equal(tmpdirOut.code, 0, tmpdirOut.stderr);
-      assert.ok(
-        tmpdirOut.stdout === "/tmp" || tmpdirOut.stdout.startsWith("/tmp/"),
-        `TMPDIR must be /tmp or a child; got ${JSON.stringify(tmpdirOut.stdout)}`
-      );
-      const mk = parseBash(await bash.handler({ command: "mktemp" }));
-      assert.equal(mk.code, 0, mk.stderr);
-      const created = mk.stdout.trim();
-      assert.ok(created.startsWith("/tmp"), `mktemp path ${created}`);
-      const rel = created.replace(/^\/tmp\/?/, "");
-      assert.ok(rel.length > 0, "mktemp must create a file under /tmp");
-      assert.equal(existsSync(join(pad, rel)), true);
+      assert.equal(tmpdirOut.stdout, pad);
+      assert.equal(existsSync(join(projectDir, "escape")), false);
     }
   );
 });

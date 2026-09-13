@@ -2,11 +2,14 @@
 
 > 假设门：2026-09-08 操作员确认方案 A（层退休，不是放宽换行补丁）。本文件只覆盖 **本 session 要修的闸与写根合同**。范围外方向见文末「后续」与 [#946](https://github.com/winter6205/iknow/issues/946)。
 >
-> **Amendment 2026-09-09**：SC4「`write_file` 指向 `/tmp` 仍拒绝」由 `specs/parent-visible-tmp.md` **superseded**。`/tmp` 仍不是交付落点；写工具可写当前身份垫底。耐久交付仍只认 `taskRoot`。
+> **Amendment 2026-09-09**：SC4「`write_file` 指向 `/tmp` 仍拒绝」由 `specs/parent-visible-tmp.md` **superseded**。`/tmp` 仍不是交付落点；写工具可写当前身份会话 tmp。耐久交付仍只认 `taskRoot`。
+>
+> **Amended 2026-09-13**（ADR-0092 / `specs/fs-isolation-modes.md`）：默认 FS 姿态改 **全局档**；写工具可写集 = `taskRoot` ∪ **会话 tmp** 宿主真路径。`/tmp` 不再是身份草稿根，故 `write_file("/tmp/…")` 回到 **typed 拒绝**——理由由「非交付」改为「不是身份草稿根」（上面的 2026-09-09 superseded 句就此再 superseded）。
 
 ## Glossary（exact copy from docs/CONTEXT.md）
 
-- **闭世界围栏（closed-world fence）**: bash 围栏的默认姿态——deny-by-default:home 下非白名单不可见，可写集 = taskRoot + /tmp，其余按 ADR-0037 §9.2 读白名单按需 ro-bind；白名单 miss 分配置故障（spawn 前 typed fail-loud）与工具链断链（运行时可观察）两型。OFF 档同样生效（全档位反转）。
+- **闭世界围栏（closed-world fence）**: 已退役的默认 bash FS 姿态（ADR-0037 §9）：home 下非白名单**不可见**，可写集 = taskRoot + `/tmp`。默认改为 **全局档**（ADR-0092）。**工作区档不是闭世界**（home 仍可见）。
+- **会话 tmp**: 每个身份（主会话或一个 worker）在会话文件夹里的宿主目录；模型与 `$TMPDIR` 用这条真路径；不 bind 成 Linux `/tmp`。寿命跟会话文件夹；不是交付落点。ADR-0092（修订 ADR-0074）。
 - **taskRoot**（活值）: 会话当前生效的 task worktree 根——**写与工具 cwd 只问它**（写工具 / 会改工作区的 bash / git / LSP 目录 / 子代理工作目录）。
 - **projectIdentityRoot**: 用户此刻在做的那个项目的身份根……项目身份只问它……
 - **子代理根归属**: 子代理是**父会话的执行臂**，继承父会话当前生效根；不是独立隔离单元。父会话已 rebind 时与父共享同一棵 task worktree……ADR-0040。
@@ -16,14 +19,14 @@
 
 ## Architectural Constraints
 
-- **ADR-0037 §9**：闭世界围栏是 bash **物理**可写边界；`/tmp` 是可写 tmpfs（进程临时面）。
+- **ADR-0037 §9**：bwrap 围栏是 bash **物理**边界；默认 FS 姿态为 **全局档**（ADR-0092，supersedes 该节的闭世界默认）；身份草稿面 = **会话 tmp** 宿主真路径，不再 bind 成 `/tmp`。
 - **ADR-0004**：bash 安全边界以 OS 沙箱为准；allowlist/硬墙不得再充当第二套沙箱。
 - **ADR-0040**：子代理共享父 `taskRoot`，不各自建树、不另开写根。
 - **docs/guides/prompt-development.md**：说明书不是闸；能用代码/schema/轨迹判定的不要只写进 prompt。
 
 ## Objective
 
-**What:** 把「能不能写、写到哪、失败是哪一类」收成一份合同：闭世界围栏继续当唯一物理沙箱；`write_file` / `edit_file` 的耐久写只落 `taskRoot`；hard-wall 只拦围栏看不见的意图；spawn `sandboxRoot` 把「不存在」和「越界」分开。父会话与子代理同一合同。
+**What:** 把「能不能写、写到哪、失败是哪一类」收成一份合同：bwrap 围栏继续当唯一物理沙箱（默认 **全局档**，ADR-0092）；`write_file` / `edit_file` 的耐久写只落 `taskRoot`（会话 tmp 宿主路径是进程临时草稿面，不是耐久交付）；hard-wall 只拦围栏看不见的意图；spawn `sandboxRoot` 把「不存在」和「越界」分开。父会话与子代理同一合同。
 
 **Why:** 2026-09-08 会话（写一份自包含 HTML）失败：`write_file` 拒 `/tmp`、bash 围栏允许 `/tmp`、hard-wall 把换行/`format` 子串当危险、未创建的父根下目录被说成 outside，模型耗尽 maxTurns。根因是层职责错配，不是模型不会写文件。
 
@@ -33,7 +36,7 @@
 
 - **Does:**
   - 耐久 mutate（`write_file` / `edit_file` 及面向模型的写根文案）只认活 `taskRoot`。
-  - bash 的 `/tmp` 保持闭世界 tmpfs：进程临时、跨调用不持久；**不得**作为产品交付落点，也不得引导模型把交付物写到 `/tmp`。
+  - bash 的会话 tmp（宿主真路径）是进程临时草稿：跟身份会话同寿命，但**不得**作为产品交付落点，也不得引导模型把交付物写到会话 tmp。Linux `/tmp` 不再是身份草稿根，`write_file("/tmp/…")` → typed 拒绝（`/tmp` 是 OS 路径，不是草稿面）。
   - hard-wall：换行只作分段符；禁止 `"format"` 子串误伤；危险模式按段扫描（`rm -rf` 等仍 deny）；deny 文案带命中 pattern id。
   - `spawn_subagent` `sandboxRoot`：父根下词法包含且尚未存在 → 不得报 outside；省略字段则继承父写根。
   - 子代理验收面：在父 `taskRoot` 上 `write_file` 能完成简单落盘（与父同一闸）。
@@ -45,7 +48,7 @@
 1. `isDangerousCommand` / hard-wall：含换行的白名单段命令（例如 `mkdir -p ./a` 换行 `ls`）**不**因换行本身 deny；同一套危险子串在换行后的段上仍能命中 `rm -rf`。对应现有 permission 单测扩展，`npm test` 中该文件绿。
 2. 命令正文含 CSS `text-transform`（或其它含 `format` 子串的合法内容）且无真正 `format` 词法命中时，**不** hard-wall deny。
 3. hard-wall deny 的 `reason` 含可机读的命中 id（至少区分：毁灭性 rm 类 / 命令替换 / 敏感路径），不再只有一句笼统 `shell-metachar`。
-4. `write_file` 指向 `/tmp/...` 仍拒绝耐久写；文案写明当前写根 = 活 `taskRoot`，并说明 `/tmp` 不是交付落点（不是只说 outside workspace）。
+4. `write_file` 指向 `/tmp/...` 仍拒绝耐久写（**typed 拒绝**：`/tmp` 不是身份草稿根、也不是交付落点）；文案写明当前写根 = 活 `taskRoot`，并说明 `/tmp` 不是交付落点（不是只说 outside workspace）。草稿应写当前身份 **会话 tmp** 宿主真路径。
 5. `write_file` 相对当前 `taskRoot` 的合法路径（含尚未存在的子目录，若实现选择 mkdir 或不存在则 typed 可执行错误、**禁止** outside）可完成写入；子代理 worker 与父会话同一规则。
 6. `spawn_subagent`：`sandboxRoot` = `join(parentSandboxRoot, "<new-dir>")` 且该目录尚不存在时，错误 **不是** `outside the parent sandbox root`；要么词法放行（worker 侧再处理存在性），要么独立 typed 文案（does not exist / mkdir first / omit to inherit）。
 7. `sandboxRoot` 落在父根之外（含 `/tmp` 作为子代理根）仍拒绝。
@@ -82,11 +85,11 @@
 
 ## Inherits / Changes
 
-**Inherits:** ADR-0037 §9 闭世界可写集（bash：`taskRoot` + tmpfs `/tmp`）；ADR-0040 子代理执行臂；permission 五步链 + `hard-walls.ts`；`SubAgentSandboxRootError`；vitest `npm test`。
+**Inherits:** 默认 FS 姿态 = **全局档**（ADR-0092）；可写集 = `taskRoot` ∪ 会话 tmp 宿主路径（ADR-0037 §9.2 的闭世界默认与 `/tmp` 写法已 superseded）；ADR-0040 子代理执行臂；permission 五步链 + `hard-walls.ts`；`SubAgentSandboxRootError`；vitest `npm test`。
 
 **Changes:**
 
-- ADR-0068：hard-wall 相对闭世界的职责边界；换行/`format` 子串补丁标 superseded。
+- ADR-0068：hard-wall 相对围栏的职责边界；换行/`format` 子串补丁标 superseded。
 - `docs/CONTEXT.md`：补 **hard-wall** 词条（spawn 前意图过滤，不是第二套沙箱）；与「闭世界围栏」互不重叠。
 - `specs/README.md` 活跃表加本文件一行。
 - 代码：`hard-walls.ts` + 单测；`write_file` 越界文案；`manager.ts` sandboxRoot 分类。不改 prompt 正文当主修复。
@@ -108,7 +111,7 @@ minimal-change-verifier: yes — one session 方案 A write-contract (spec Chang
 ## Assumptions（本 session 已确认，不再当作 Open Questions）
 
 1. 修法是层退休，不是只允许换行。
-2. 产品交付物只落 `taskRoot`；bash `/tmp` 保持临时、不持久。
+2. 产品交付物只落 `taskRoot`；身份草稿面（会话 tmp 宿主路径）保持临时、不持久；OS `/tmp` 不是身份 tmp 根。
 3. 子代理不新增独立产物目录；跟父写根。
 4. 本 spec 不修隔离建树认仓、也不做宿主草稿纸。
 
@@ -118,6 +121,6 @@ minimal-change-verifier: yes — one session 方案 A write-contract (spec Chang
 
 1. **隔离写路径** — 改工作区应先创建或进入本会话 task worktree，再在那棵树上写。写根必须说清楚，避免把交付物写到进程临时面，或把「身份根只读」理解成整个项目都不能写。
 2. **建树/认仓失败要可执行** — 隔离 ON 时，创建工作树失败必须是明确 typed 错误（有没有可用 gitdir、为何建不成），不能在错误类型之间空转。
-3. **进程临时面 ≠ 交付目录** — 围栏 `/tmp` 是每次调用的临时文件系统。不要把它升级成正式落盘点。
+3. **进程临时面 ≠ 交付目录** — 会话 tmp（宿主真路径）是身份草稿面，跟会话同寿命但仍是临时面。不要把它升级成正式落盘点。
 4. **子代理** — 继续当父会话执行臂，共享父写根。若以后要工具输出草稿（抓取原文、大段检索），应是宿主侧 gitignore 草稿纸，带会话寿命和给父代理的路径指针；不能代替 `taskRoot`，也不能绕过隔离改身份根。
 5. **明确不做** — 用加长说明书代替闸；用语义级 shell 解析器当本问题的解；把临时面当子代理交接区。

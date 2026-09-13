@@ -29,8 +29,8 @@ import {
   BASE_ENV_WHITELIST,
   applyCwdReadonlyFenceEnv,
   createBwrapFence,
-  createClosedWorldFsPolicy,
   createEnvIsolation,
+  createFsPolicy,
   createNetworkPolicy,
   createResourceLimits,
 } from "../sandbox/index.js";
@@ -129,11 +129,6 @@ export interface BackgroundSpawnRequest {
   readonly recordCommand?: string;
   /** 注入给 defaultBackgroundSpawn 的 fence 装配选项(T4 装配期可选传入)。 */
   readonly workspaceRoot?: string;
-  /** T4 (ADR-0037 §9.2 #4, plans/closed-world-bash-fence.md): iknow 运行时
-   *  安装根 —— 后台 fence 读白名单的合同读根(项目自身工具链读通道)。由
-   *  bash.ts handleBackground 从工厂期捕获的同一 opts.installRoot 透传
-   *  (前台/后台同波同一份,D2);缺席 = policy 不含该读根(fs-policy 可选)。 */
-  readonly installRoot?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly home?: string;
   /** #503 T11:network?: boolean — 透传 defaultBackgroundSpawn 构造 host-net
@@ -146,12 +141,9 @@ export interface BackgroundSpawnRequest {
    *  由 bash.ts handleBackground 派生 opts.bashMode==="readonly" ||
    *  opts.cwdReadonly===true 后传入。 */
   readonly cwdReadonly?: boolean;
-  /** T4 闭世界改写(ADR-0037 §9.2 #6 / §9.3): 主仓身份根 —— **恒进**读白
-   *  名单的合同读根(overlay 形态 superseded,不再有「--ro-bind 后挂覆盖
-   *  writable home」语义)。前台与后台共用同一 token(bash.ts 从工厂期捕获
-   *  的同一选项透传);缺席 = 装配层未提供(isolation OFF),fs-policy 可选。 */
-  readonly projectIdentityRoot?: string;
-  /** T1 (ADR-0074): same main-session pad the foreground bash bind-mounts at `/tmp`. */
+  /** ADR-0092 (amending ADR-0074): this identity's session tmp host path —
+   *  the same path the foreground bash uses as `$TMPDIR`. Never a guest `/tmp`
+   *  bind target. */
   readonly tmpDir?: string;
 }
 
@@ -250,21 +242,13 @@ export async function defaultBackgroundSpawn(
 ): Promise<ChildProcess> {
   const cwd = req.cwd;
   const home = req.home ?? homedir();
-  // T4 闭世界双轴 policy(ADR-0037 §9.2)—— 与前台 bash.ts 同款装配:
-  // 读白名单 = installRoot + projectIdentityRoot(合同根,可选缺席)+ node
-  // 工具链根(缺省推导)+ git 全局配置(createClosedWorldFsPolicy 内折叠,
-  // 存在性跳过);写白名单 = taskRoot + tmp(policy 内定)。身份根经 policy
-  // 进读白名单,不再走 bwrap 层条件 overlay(§9.3 superseded)。装配表达式
-  // 与前台 / verify 同源(code-review M2 装配单源化)。
-  const fsPolicy = createClosedWorldFsPolicy({
-    cwd,
+  // ADR-0092 global posture — same assembly as foreground bash.ts. The policy
+  // only carries the session tmp host path + protected-state predicate; argv
+  // is the fixed host-root/system-ro-bind shape.
+  const fsPolicy = createFsPolicy({
     home,
     tmpDir: req.tmpDir ?? tmpdir(),
     ...(req.workspaceRoot ? { workspaceRoot: req.workspaceRoot } : {}),
-    ...(req.installRoot !== undefined ? { installRoot: req.installRoot } : {}),
-    ...(req.projectIdentityRoot !== undefined
-      ? { projectIdentityRoot: req.projectIdentityRoot }
-      : {}),
   });
   const resources = createResourceLimits();
   const network = createNetworkPolicy();
@@ -274,7 +258,8 @@ export async function defaultBackgroundSpawn(
       envIsolation.filter(req.env ?? process.env),
       req.cwdReadonly === true
     ),
-    TMPDIR: "/tmp",
+    // ADR-0092: `$TMPDIR` is this identity's session tmp host path.
+    TMPDIR: fsPolicy.tmpRoot(),
   };
   const fence = createBwrapFence({
     command: "bash",

@@ -16,9 +16,14 @@ export type {
   SpawnWithStopSignalResult,
 } from "../../sandbox/runner.js";
 
-/** T8: bash / write-tool description pair. Write-root segment stays silent on /tmp (ADR-0069). */
+/**
+ * bash / write-tool description pair (ADR-0092). Scratch work goes to the
+ * session tmp dir — the identity's own host directory, named by the static
+ * `$TMPDIR` reference (the path itself is per-identity dynamic). It is not a
+ * delivery destination, and guest Linux `/tmp` is no longer an alias for it.
+ */
 export const FENCE_WRITE_GUIDANCE =
-  "Write into the project at taskRoot. Write /tmp when it need not enter the repo (same lifetime as the current identity, not a delivery destination).";
+  "Write into the project at taskRoot. Write scratch files that need not enter the repo into the session tmp dir ($TMPDIR — same lifetime as the current identity, not a delivery destination).";
 
 /**
  * Resolve a target through symlinks and require its real location to stay under
@@ -90,18 +95,10 @@ async function resolveAbsoluteTarget(
     tmpWriteRoot !== undefined && tmpWriteRoot.trim().length > 0
       ? tmpWriteRoot
       : undefined;
-  if (pad !== undefined && isGuestTmpLiteral(expandedTarget)) {
-    const realTmpRoot = await realpath(resolve(pad));
-    const remapped = remapGuestTmpOntoPad(resolve(expandedTarget), realTmpRoot);
-    if (remapped === "empty") {
-      throw new ToolExecutionError("empty path under /tmp");
-    }
-    return {
-      absoluteTarget:
-        remapped !== undefined ? remapped : resolve(expandedTarget),
-      realTmpRoot,
-    };
-  }
+  // ADR-0092: the session tmp host path is an independent containment root.
+  // A model-supplied guest `/tmp/...` literal is NOT aliased onto it — it
+  // resolves as the OS `/tmp` path and falls through to the containment
+  // error (observable rejection, never a silent double-write).
   return {
     absoluteTarget: isAbsolute(expandedTarget)
       ? resolve(expandedTarget)
@@ -131,13 +128,14 @@ function assertContained(
   // path 仍是 `projectIdentityRoot`,但写工具失败时如果只回 `<target> not
   // under <root>`,模型很难把这两根区分开去重试一个相对路径。文案必须显式
   // 标 "current write root: <root>" 的引导,让模型能用相对路径重试。
-  // SC4 (specs/mutate-write-contract.md): bash 围栏允许 /tmp(进程临时面),
-  // 写工具拒绝 /tmp 是同一合同的另一面 —— 文案必须把「当前写根 = 活
-  // taskRoot」「/tmp 不是交付落点」都说明,防止模型把交付物写进 /tmp。
+  // SC4 (specs/mutate-write-contract.md): the containment roots are the live
+  // taskRoot plus this identity's session tmp host path. Guest Linux `/tmp`
+  // is NOT aliased onto the session tmp, so a `/tmp/...` target must fail
+  // here — the hint names the session tmp dir as the scratch location.
   // 写根缺席 → 退回原文案 (不崩,文案退化到 base 形态)。
   const writeRootHint =
     realRoot.length > 0
-      ? ` (current write root is the live taskRoot: ${realRoot}; /tmp is the current-identity pad — same lifetime as this identity and not a delivery destination. Retry with a path relative to the taskRoot.)`
+      ? ` (current write root is the live taskRoot: ${realRoot}; scratch files belong in the session tmp dir, $TMPDIR — same lifetime as this identity and not a delivery destination. Retry with a path relative to the taskRoot.)`
       : "";
   throw new ToolExecutionError(
     `path outside workspace: ${resolvedTarget} not under ${realRoot}${writeRootHint}`
@@ -295,34 +293,4 @@ function isWithinRoot(root: string, target: string): boolean {
     pathFromRoot === "" ||
     (!pathFromRoot.startsWith("..") && !isAbsolute(pathFromRoot))
   );
-}
-
-const GUEST_TMP = "/tmp";
-
-/** Model-supplied guest `/tmp` path — not a host path that merely lives under system `/tmp`. */
-function isGuestTmpLiteral(target: string): boolean {
-  return target === GUEST_TMP || target.startsWith(`${GUEST_TMP}/`);
-}
-
-/**
- * Map a guest `/tmp` path onto the identity pad. `empty` = `/tmp` or `/tmp/`
- * with no filename. `undefined` = not a guest `/tmp` path.
- */
-function remapGuestTmpOntoPad(
-  absoluteTarget: string,
-  realTmpRoot: string
-): string | "empty" | undefined {
-  const normalized = resolve(absoluteTarget);
-  if (normalized === GUEST_TMP) return "empty";
-  const prefix = `${GUEST_TMP}/`;
-  if (!normalized.startsWith(prefix)) return undefined;
-  const suffix = normalized.slice(prefix.length);
-  if (suffix.length === 0) return "empty";
-  const remapped = resolve(realTmpRoot, suffix);
-  if (!isWithinRoot(realTmpRoot, remapped)) {
-    throw new ToolExecutionError(
-      `path outside workspace: ${remapped} not under ${realTmpRoot}`
-    );
-  }
-  return remapped;
 }

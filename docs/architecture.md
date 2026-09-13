@@ -26,6 +26,8 @@ user query
  harness (src/harness/)  ──maxTurns──►  Anthropic adapter
     │
     ├── bash (ACI; foreground runInSandbox + background spawn share one bwrap fence;
+    │         default FS posture = global — host real paths, permission + hard-wall intercept (ADR-0092);
+    │         identity draft = 会话 tmp at its host path, not bound to `/tmp`;
     │         background registry → home 项目树 `<池根>/projects/<slug>/tasks/`, ADR-0088)
     ├── read_file / grep / glob (ACI, read-only)
     └── edit_file / write_file (ACI, write)

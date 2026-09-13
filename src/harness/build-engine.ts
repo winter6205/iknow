@@ -1029,10 +1029,6 @@ export async function buildHarnessEngine(
     reg = createDefaultAciRegistry({
       env,
       sandboxRoot,
-      // T4 (ADR-0037 §9.2 #4, plans/closed-world-bash-fence.md): installRoot
-      // 按既有第四角色喂给 bash 工厂 —— 闭世界读白名单的合同读根(项目自身
-      // 工具链读通道)。不新增状态源:复用 resolveSessionRoots 的 installRoot。
-      installRoot: sessionRoots.installRoot,
       // T5 (plans/worktree-live-task-root.md §6): 把活 taskRoot cell 透传给
       // write_file / edit_file 工厂。门禁未翻 ⇒ cell 初值 = sandboxRoot,
       // 行为逐字节同今日；handler 内 cell.read() 取 snapshot。stable 根（D3）
@@ -1185,9 +1181,6 @@ export async function buildHarnessEngine(
     reg = createDefaultAciRegistry({
       env,
       sandboxRoot,
-      // T4 (ADR-0037 §9.2 #4): 同首次构造 —— installRoot 进 bash 闭世界读
-      // 白名单(既有第四角色,不新增状态源)。
-      installRoot: sessionRoots.installRoot,
       liveTaskRoot,
       ...(isolationEnabled ? { projectIdentityRoot } : {}),
       ...(graphAssembly ? { graphAssembly } : {}),

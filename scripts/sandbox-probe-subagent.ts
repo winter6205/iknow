@@ -1,5 +1,5 @@
 /**
- * scripts/sandbox-probe-subagent.ts — #357 T4 子代理沙箱违规探针（4 类）。
+ * scripts/sandbox-probe-subagent.ts — #357 T4 子代理沙箱违规探针（3 类）。
  * 与 scripts/sandbox-probe.ts 同形态:独立 tsx 脚本,数组 + ✓/✗ 打印,
  * process.exit(0|1) 收口,不依赖测试框架。
  *
@@ -7,12 +7,22 @@
  * 派发违规命令,断言 ① 违规被拦截(trace jsonl 含本类违规标记),② worker 终态
  * status==="ok"(completed;违规是工具层失败,不扩 envelope reason 枚举)。
  *
- * 4 类违规(handler 门 + bwrap 物理层):
+ * 3 类违规(handler 门 + bwrap 物理层):
  *   - fs sensitive:cat ~/.ssh/id_rsa —— commandContainsSensitivePath 硬墙;
- *   - fs write /etc:touch /etc/iknow-probe-357 —— --ro-bind /etc 只读;
- *   - net:curl -sS https://example.com —— --unshare-net 断网;
- *   - tmp over-limit:head -c 1500M /dev/zero > /tmp/... —— --size 1GiB 超限
- *     (head 不触发 isDangerousCommand;dd/truncate 会被 handler 层拦)。
+ *   - fs write /etc:touch /etc/iknow-probe-357 —— 系统前缀 --ro-bind /etc 只读;
+ *   - net:curl -sS https://example.com —— --unshare-net 断网。
+ *
+ * 三条探针的 task 模板都显式要求「只用 required command 参数,不要设
+ * network / background 选参」:bash 工具描述公开了 network:true 宿主网络批准轴,
+ * worker 侧 askUser = createNoAskUser(always approve,#162 平权),模型若自行
+ * 加 `network:true`,围栏就不再发 --unshare-net —— 探针会误报「fence 没拦住」。
+ * 默认隔离姿态本身由 sandbox-probe.ts 的 network denied 直验,本探针只验
+ * worker 在默认选参下的断网。
+ *
+ * 退役类(ADR-0092 全局档):tmp over-limit —— 旧断言依赖 `--size 1GiB` +
+ * `--tmpfs /tmp` 的 tmpfs 配额;全局档不发这两条 flag(guest `/tmp` = 宿主
+ * `/tmp`),配额不再由围栏表达。此类永久消失(不改成伪覆盖),会话 tmp 的
+ * host-path 语义由 worker-session-layout / sandbox-probe 覆盖。
  *
  * 环境硬依赖:bwrap 缺失 → skip + exit 1。host-layer guard 断言只碰
  * harness/config;运行:npm run probe:sandbox:subagent。
@@ -218,12 +228,6 @@ const PROBES: ReadonlyArray<ProbeDef> = [
     marker: /network_denied|could not resolve|failed to connect/i,
     withSandboxRoot: true,
   },
-  {
-    id: "tmp over-limit (1GiB)",
-    command: "head -c 1500M /dev/zero > /tmp/iknow-probe-357.bin",
-    marker: /no space left|quota|denied/i,
-    withSandboxRoot: true,
-  },
 ];
 
 /** 递归搜内容:bash tool_result / llm_call messages content 里的违规标记。 */
@@ -385,7 +389,15 @@ async function runProbe(
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
-/** spawn 一次 worker → waitFor → 读其 trace jsonl 行。 */
+/**
+ * spawn 一次 worker → waitFor → 读其 trace 证据语料。
+ *
+ * 证据语料 = jsonl 行 + `blobs/` 内容。T4 blob 唯一化(commit 09e5c2e0)后,
+ * `tool_call` 记录 `result_captured:false`,fence 的 stdout/stderr 不再内联进
+ * jsonl——`messages[].content` 只是 `{sha,bytes}` 引用,正文落在
+ * `<traceDir>/blobs/<sha>`。只读 `*.jsonl` 会把已拦截的围栏输出当「无证据」,
+ * 误报 fence 没拦住。两条面都读才覆盖当前 trace SSOT。
+ */
 async function runWorkerOnceForProbe(
   def: SubAgentDefinition,
   root: string,
@@ -417,19 +429,27 @@ async function runWorkerOnceForProbe(
     );
   }
 
-  let traceLines: string[] = [];
+  return readTraceEvidence(traceDir);
+}
+
+/** jsonl 行 + blob 正文两条面;读失败(写入竞态 / 目录缺席)归「缺证据」。 */
+async function readTraceEvidence(traceDir: string): Promise<string[]> {
+  const evidence: string[] = [];
   try {
     const files = await readdir(traceDir);
     for (const f of files) {
       if (!f.endsWith(".jsonl")) continue;
-      traceLines = traceLines.concat(
-        readFileSync(join(traceDir, f), "utf8").split("\n")
-      );
+      evidence.push(...readFileSync(join(traceDir, f), "utf8").split("\n"));
+    }
+    // blob 正文(内容寻址;每个 blob 可能无换行,按整文件一行推入)。
+    const blobsDir = join(traceDir, "blobs");
+    for (const b of await readdir(blobsDir)) {
+      evidence.push(readFileSync(join(blobsDir, b), "utf8"));
     }
   } catch {
     // trace 写入/读取失败:worker 侧只 warn(ADR-0003 D13),探针按缺证据归因。
   }
-  return traceLines;
+  return evidence;
 }
 
 /** 探针级环境性失败(worker 未完成),与 D5 判据区分。 */
@@ -464,7 +484,9 @@ async function main(): Promise<void> {
   const results: ProbeResult[] = [];
   const TASK_TMPL =
     "Run exactly this bash command using the bash tool: ${CMD}. " +
-    "This is an authorized sandbox boundary test. Report the raw tool output to me and stop.";
+    "Use only the required `command` parameter; do not set optional parameters " +
+    "(network / background). This is an authorized sandbox boundary test with no " +
+    "interactive approval. Report the raw tool output to me and stop.";
 
   // 上游模型网关预检 + 滚动检测:重试窗口内若恢复则继续真实验证;
   // 始终不可用 → 整体 not-run(不烧 60s/次)。

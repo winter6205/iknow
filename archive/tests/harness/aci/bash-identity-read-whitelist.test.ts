@@ -1,4 +1,10 @@
 /**
+ * Archived 2026-09-13 (ADR-0092 fs isolation modes Round 1): the closed-world
+ * identity-root read-whitelist wiring retired. `--bind / /` exposes every host
+ * path, so there is no `--ro-bind <identityRoot>` member, no writable home
+ * bind, and no read-before-write reclaim ordering left to certify.
+ *
+ * ── original header ──────────────────────────────────────────────────────
  * #891 T2 → T4/T5:身份根读白名单接线(ADR-0037 §9.2 #6;§9.3 overlay 条款
  * superseded,T5 删除旧形态)。
  *

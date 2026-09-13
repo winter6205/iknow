@@ -81,11 +81,7 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
     const argv = createBwrapFence({
       command: "bash",
       args: ["-c", "echo hi"],
-      fsPolicy: createFsPolicy({
-        cwd,
-        home: homedir(),
-        tmpDir: tmpdir(),
-      }),
+      fsPolicy: createFsPolicy({ home: homedir(), tmpDir: tmpdir() }),
       networkPolicy: createNetworkPolicy(),
       resourceLimits: createResourceLimits(),
       env: { PATH: "/bin" },
@@ -94,7 +90,13 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
 
     assert.equal(argv[0], "bwrap");
     assert.ok(argv.includes("--unshare-net"));
-    // --ro-bind /etc /etc (三个连续 argv 项)
+    // ADR-0092 全局档:宿主根 `/` 打底 + 系统前缀只读重绑。
+    const rootBindIdx = argv.findIndex(
+      (arg, index) => arg === "--bind" && argv[index + 1] === "/"
+    );
+    assert.notEqual(rootBindIdx, -1, "expected --bind / / in argv");
+    assert.equal(argv[rootBindIdx + 2], "/");
+    // --ro-bind /etc /etc (三个连续 argv 项),位于 `/` 之后。
     const etcIdx = argv.indexOf("/etc");
     assert.notEqual(etcIdx, -1);
     assert.deepEqual(argv.slice(etcIdx - 1, etcIdx + 2), [
@@ -102,24 +104,25 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
       "/etc",
       "/etc",
     ]);
-    // --bind <cwd> <cwd> 出现一次以上
-    const bindCwdIdx = argv.findIndex(
-      (arg, index) => arg === "--bind" && argv[index + 1] === cwd
+    assert.ok(
+      etcIdx > rootBindIdx,
+      "system ro-bind follows the host-root bind"
     );
-    assert.notEqual(bindCwdIdx, -1, "expected --bind <cwd> <cwd> in argv");
-    assert.equal(argv[bindCwdIdx + 2], cwd);
-    // ADR-0074: `--bind <pad> /tmp` after the cwd write bind; no --tmpfs.
+    // 全局档:无 guest /tmp mount、无 tmpfs、无可写 cwd bind。
     assert.equal(argv.includes("--tmpfs"), false);
-    const guestTmpIdx = argv.findIndex(
-      (arg, i) => i > bindCwdIdx && arg === "--bind" && argv[i + 2] === "/tmp"
+    assert.equal(
+      argv.findIndex(
+        (arg, index) => arg === "--bind" && argv[index + 1] === cwd
+      ),
+      -1,
+      "global mode has no per-root writable cwd bind"
     );
-    assert.notEqual(guestTmpIdx, -1, "expected --bind <pad> /tmp in argv");
-    // 闭世界反转:敏感路径 tmpfs 罩发射删除(home 下路径不可见 = 罩自动失效
-    // 为无操作);isSensitive/protected-state 谓词保留在 fs-policy 层。
+    // 敏感路径 tmpfs 罩发射删除;isSensitive/protected-state 谓词保留在
+    // fs-policy 层,不塑形 argv。
     assert.equal(
       argv.includes(`${homedir()}/.ssh`),
       false,
-      "closed world must not emit the sensitive-path tmpfs overlay"
+      "global mode must not emit the sensitive-path tmpfs overlay"
     );
     // --clearenv precedes every --setenv so the fence inherits only the
     // whitelisted entries, never the host env (#225).
@@ -402,7 +405,7 @@ describe("bash.fence.networkOptIn (argv shape, no spawn)", () => {
     } = {
       command: "bash",
       args: ["-c", "echo hi"],
-      fsPolicy: createFsPolicy({ cwd, home: homedir(), tmpDir: tmpdir() }),
+      fsPolicy: createFsPolicy({ home: homedir(), tmpDir: tmpdir() }),
       networkPolicy: createNetworkPolicy(),
       resourceLimits: createResourceLimits(),
       env: { PATH: "/bin" },
@@ -415,7 +418,6 @@ describe("bash.fence.networkOptIn (argv shape, no spawn)", () => {
   }
 
   it("network:true removes --unshare-net but keeps every canonical fence flag", () => {
-    const cwd = ARGV_FIXTURE_CWD;
     const argv = fenceArgv(true);
     assert.equal(argv.includes("--unshare-net"), false);
     // canonical fence flags spot-check (mirrors argvHasUnshareNet style)
@@ -428,10 +430,10 @@ describe("bash.fence.networkOptIn (argv shape, no spawn)", () => {
       "/etc",
       "/etc",
     ]);
-    const bindCwdIdx = argv.findIndex(
-      (arg, index) => arg === "--bind" && argv[index + 1] === cwd
+    const rootBindIdx = argv.findIndex(
+      (arg, index) => arg === "--bind" && argv[index + 1] === "/"
     );
-    assert.notEqual(bindCwdIdx, -1, "expected --bind <cwd> <cwd> in argv");
+    assert.notEqual(rootBindIdx, -1, "expected --bind / / in argv");
     assert.ok(argv.includes("--clearenv"));
     assert.ok(argv.includes("--chdir"));
     assert.deepEqual(argv.slice(argv.indexOf("--"), argv.indexOf("--") + 3), [

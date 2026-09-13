@@ -11,13 +11,12 @@ import type { SandboxRunResult } from "../sandbox/index.js";
 import {
   BASE_ENV_WHITELIST,
   createBwrapFence,
-  createClosedWorldFsPolicy,
   createEnvIsolation,
+  createFsPolicy,
   createNetworkPolicy,
   createResourceLimits,
   runInSandbox,
 } from "../sandbox/index.js";
-import { resolveInstallRoot } from "../session-roots.js";
 
 /**
  * 验证执行体: command → 沙箱执行 → { exitCode, stdout, stderr }。
@@ -30,33 +29,24 @@ export type RunVerifyFn = (
 
 /**
  * 生产缺省 runVerify: 与 bash 工具同款沙箱装配 (spec:64 声明验证命令沿用
- * bash 工具的 fsPolicy / 资源限额, 不单独放宽)。命令拼 `bash -c <command>`,
+ * bash 工具的围栏 / 资源限额, 不单独放宽)。命令拼 `bash -c <command>`,
  * 与 bash.ts 一致。
  *
- * T4 闭世界双轴 (ADR-0037 §9.2): 读白名单 = installRoot(合同根,#4) +
- * node 工具链根(缺省推导,#5) + git 全局配置(可选成员,#7,createClosedWorldFsPolicy
- * 内折叠,与 bash 前台/后台同一装配 helper);写白名单 = cwd(taskRoot) + tmp。
- * verify 不传 projectIdentityRoot(维持现状,#6 由装配层条件决定)。
+ * ADR-0092 全局档: 围栏 argv 固定为宿主根 + 系统前缀只读重绑, verify 不再
+ * 需要读过白名单; policy 只承载验证命令的会话 tmp 宿主路径(`$TMPDIR`)。
  */
 export function makeDefaultRunVerify(opts: {
   readonly cwd: string;
   readonly home: string;
-  /** T4 (ADR-0037 §9.2 #4): iknow 运行时安装根 —— 闭世界读白名单的合同
-   *  读根(项目自身工具链读通道)。缺省回退 `resolveInstallRoot()` 进程级
-   *  SSOT(既有第四角色,不新增状态源),不许静默留空;显式传入即覆盖
-   *  (测试注入缝 —— session-roots 刻意不给进程缓存 reset 缝)。 */
-  readonly installRoot?: string;
+  /** ADR-0092: 验证命令的会话 tmp 宿主路径 —— `$TMPDIR` 的来源。缺省回退
+   *  进程 tmpdir();显式传入即覆盖(测试注入缝)。 */
+  readonly tmpDir?: string;
 }): RunVerifyFn {
-  const installRoot = opts.installRoot ?? resolveInstallRoot();
-  const fsPolicy = createClosedWorldFsPolicy({
-    cwd: opts.cwd,
-    home: opts.home,
-    tmpDir: tmpdir(),
-    installRoot,
-  });
+  const tmpDir = opts.tmpDir ?? tmpdir();
+  const fsPolicy = createFsPolicy({ home: opts.home, tmpDir });
+  const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   const networkPolicy = createNetworkPolicy();
   const resourceLimits = createResourceLimits();
-  const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   return async (command, ctx) => {
     const fenceEnv = envIsolation.filter(process.env);
     const fence = createBwrapFence({

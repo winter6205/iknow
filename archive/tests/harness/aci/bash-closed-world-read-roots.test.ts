@@ -1,4 +1,13 @@
 /**
+ * Archived 2026-09-13 (ADR-0092 fs isolation modes Round 1): the closed-world
+ * default retired — `--bind / /` makes every host path visible, so the
+ * per-root read channels (installRoot / git global config `--ro-bind`) no
+ * longer exist and these assertions certify removed plumbing. The still-true
+ * invariants (host-root bind on both sides, system prefixes stay read-only,
+ * no per-root whitelist) are re-certified in
+ * `tests/harness/aci/bash-global-mode-visibility.test.ts`.
+ *
+ * ── original header ──────────────────────────────────────────────────────
  * T4 (plans/closed-world-bash-fence.md) — 消费方接线:installRoot + git 全局
  * 配置读成员进 bash 围栏(前台 + 后台)。
  *
