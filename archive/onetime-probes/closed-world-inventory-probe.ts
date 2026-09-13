@@ -1,4 +1,12 @@
 /**
+ * Archived 2026-09-13 (ADR-0092 fs isolation modes Round 1): 闭世界不再是默认
+ * FS 姿态。本探针手拼「无 writable home bind」的假设围栏 argv，只为当时裁决
+ * 读白名单产出证据；默认全局档（`--bind / /` 打底）落地后，假设形态与生产
+ * 围栏相反，探针无再跑价值。默认姿态的物理验收改由 `scripts/sandbox-probe.ts`
+ * （`npm run probe:sandbox`）承担。文件保留不 import 生产模块，仅存结论轨迹。
+ * 目录 `archive/` 被 vitest / lint 收集排除。
+ *
+ * ── original header ──────────────────────────────────────────────────────
  * T1（plans/closed-world-bash-fence.md）：闭世界断链盘点探针。
  *
  * 围栏反转（T3）将把 bash 围栏从「writable home 打底 + 黑名单补罩」改为
@@ -28,20 +36,59 @@
  * 本身 exit 0（盘点不是 pass/fail）；bwrap 不可用 = blocker，如实报告
  * 非 0，不伪造证据。
  */
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+// SpawnSyncReturns is used by explainOutcome's parameter types below.
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  BASE_ENV_WHITELIST,
-  createEnvIsolation,
-  createResourceLimits,
-  OPTIONAL_HOST_RO_PREFIXES,
-  READ_ONLY_SYSTEM_PATHS,
-  requireBwrap,
-  type ResourceLimits,
-} from "../src/harness/sandbox/index.js";
+
+/** 闭世界 argv 的系统 ro-bind 前缀（当时与 src 单源一致；src 面已随 ADR-0092 退役）。 */
+const READ_ONLY_SYSTEM_PATHS: readonly string[] = Object.freeze([
+  "/usr",
+  "/bin",
+  "/lib",
+  "/lib64",
+  "/etc",
+]);
+const OPTIONAL_HOST_RO_PREFIXES: readonly string[] = Object.freeze([
+  "/opt",
+  "/snap",
+]);
+/** env 白名单（当时与 src 单源一致）。 */
+const BASE_ENV_WHITELIST: readonly string[] = Object.freeze([
+  "PATH",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+  "USER",
+  "SHELL",
+]);
+interface ResourceLimits {
+  readonly tmp: number;
+}
+function createResourceLimits(): ResourceLimits {
+  return { tmp: 268_435_456 };
+}
+function createEnvIsolation(opts: { readonly allowEnv: readonly string[] }): {
+  filter: (env: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
+} {
+  return {
+    filter: (env) =>
+      Object.fromEntries(
+        opts.allowEnv
+          .filter((k) => env[k] !== undefined)
+          .map((k) => [k, env[k]])
+      ),
+  };
+}
+function requireBwrap(): void {
+  const probe = spawnSync("bwrap", ["--version"], { stdio: "ignore" });
+  if (probe.status !== 0) {
+    throw new Error("bwrap is required");
+  }
+}
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -403,6 +450,54 @@ interface ProbeContext {
   readonly existingOptionalPrefixes: readonly string[];
 }
 
+/**
+ * 主机基线即失败 → 该场景在主机上就不成立，与围栏无关，记 skip（不伪造
+ * 断链证据）。拆出自 `runScenario`，判定语义不变。
+ */
+function skipWhenHostAlreadyFails(
+  scenario: InventoryScenario,
+  host: SpawnSyncReturns<string>,
+  hostExit: number | null
+): InventoryOutcome | null {
+  if (hostExit !== null && hostExit === 0) return null;
+  const why =
+    summarizeText(host.stderr) || summarizeText(host.stdout) || "无输出";
+  return {
+    scenario,
+    status: "skip",
+    exitCode: null,
+    hostExitCode: hostExit,
+    detail: `主机上即失败(exit ${hostExit ?? "null"}),与围栏无关: ${why}`,
+    candidate: false,
+  };
+}
+
+/**
+ * 单场景的 detail 文案（判定与退出码无关，纯解释面）。拆出自
+ * `runScenario`：归档时 s5 复杂度门对「新函数」按硬阈审计，原内联分支
+ * 达 16；拆出后两侧都在阈内，判定语义逐字节不变。
+ */
+function explainOutcome(
+  status: InventoryStatus,
+  host: SpawnSyncReturns<string>,
+  fence: SpawnSyncReturns<string>
+): string {
+  const fenceOutText =
+    summarizeText(fence.stderr) || summarizeText(fence.stdout) || "无输出";
+  const fallback: Partial<Record<InventoryStatus, string>> = {
+    BREAK: fenceOutText,
+    "by-design": fenceOutText === "无输出" ? "不可见" : fenceOutText,
+  };
+  const fixed = fallback[status];
+  if (fixed !== undefined) return fixed;
+  if (status !== "ok") return "";
+  // 退出码相同但输出静默降级（如 config 列表变空）也要暴露给裁决。
+  const hostOut = (host.stdout ?? "").trim();
+  const fenceOut = (fence.stdout ?? "").trim();
+  if (hostOut === fenceOut) return "";
+  return `输出与主机基线不同(host="${summarizeText(hostOut, 80)}" fence="${summarizeText(fenceOut, 80)}")`;
+}
+
 function runScenario(
   scenario: InventoryScenario,
   ctx: ProbeContext
@@ -413,18 +508,8 @@ function runScenario(
     encoding: "utf8",
   });
   const hostExit = host.status;
-  if (hostExit === null || hostExit !== 0) {
-    const why =
-      summarizeText(host.stderr) || summarizeText(host.stdout) || "无输出";
-    return {
-      scenario,
-      status: "skip",
-      exitCode: null,
-      hostExitCode: hostExit,
-      detail: `主机上即失败(exit ${hostExit ?? "null"}),与围栏无关: ${why}`,
-      candidate: false,
-    };
-  }
+  const skip = skipWhenHostAlreadyFails(scenario, host, hostExit);
+  if (skip !== null) return skip;
   const argv = buildClosedWorldArgv({
     cwd: ctx.cwd,
     tmpDir: ctx.tmpDir,
@@ -444,21 +529,7 @@ function runScenario(
     hostExit,
     fence.status
   );
-  const fenceStderr = summarizeText(fence.stderr);
-  const fenceStdout = summarizeText(fence.stdout);
-  let detail = "";
-  if (status === "BREAK") {
-    detail = fenceStderr || fenceStdout || "无输出";
-  } else if (status === "by-design") {
-    detail = fenceStderr || fenceStdout || "不可见";
-  } else if (status === "ok") {
-    // 退出码相同但输出静默降级（如 config 列表变空）也要暴露给裁决。
-    const hostOut = (host.stdout ?? "").trim();
-    const fenceOut = (fence.stdout ?? "").trim();
-    if (hostOut !== fenceOut) {
-      detail = `输出与主机基线不同(host="${summarizeText(hostOut, 80)}" fence="${summarizeText(fenceOut, 80)}")`;
-    }
-  }
+  const detail = explainOutcome(status, host, fence);
   return {
     scenario,
     status,

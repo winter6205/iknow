@@ -8,21 +8,20 @@
  *     bwrap(或测试替身证明调用了与前台同一围栏构造缝);不存在「仅
  *     `nodeSpawn(command)` 无围栏」的产品分支。
  *
+ * ADR-0092:默认档从闭世界换成全局档 —— 宿主 `/` 打底 + 系统前缀只读重绑,
+ * 不再有 guest `/tmp` pad bind;前台后台共用同一 fence 构造缝。
+ *
  * 驱动方式:
  *   - 前台:调 createBwrapFence,env 走产品缝(filter + cwdReadonly 时
- *     GIT_OPTIONAL_LOCKS=0,镜像 bash.ts:126-134,禁止只传 cwdReadonly 旗标
+ *     GIT_OPTIONAL_LOCKS=0,镜像 bash.ts,禁止只传 cwdReadonly 旗标
  *     而漏 fenceEnv)。
  *   - 后台:用模块级 vi.mock("node:child_process", ...) 拦截 spawn,
  *     直接调 defaultBackgroundSpawn 拿真实 fence.argv。
- *
- * 关键约束:#653 / T1 之前此测试必须失败 —— 后台路径不传 cwdReadonly,
- * 集合对比时 cwdReadonly:fg 有 / bg 无,差异落在 cwdReadonly 轴上;
- * #653 / T1 之后绿。
  */
 
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -38,13 +37,12 @@ import {
 
 import {
   BASE_ENV_WHITELIST,
+  READ_ONLY_SYSTEM_PATHS,
   applyCwdReadonlyFenceEnv,
   createBwrapFence,
   createEnvIsolation,
   createFsPolicy,
   createNetworkPolicy,
-  createResourceLimits,
-  defaultOptionalReadRoots,
 } from "../../../src/harness/sandbox/index.ts";
 
 // 必须先于 manager 导入:模块级 vi.mock 会被 vitest hoist,但写在这里
@@ -86,21 +84,17 @@ function makeFakeChild(pid = 99001) {
 }
 
 /**
- * 镜像 bash.ts foreground fence 装配(T4 闭世界双轴形态)。
+ * 镜像 bash.ts foreground fence 装配(ADR-0092 全局档)。
  * - env:envIsolation.filter(...) 后,cwdReadonly 时注入 GIT_OPTIONAL_LOCKS=0
  *   (产品缝 bash.ts,post-filter additive)
  * - fence 选项:network + cwdReadonly 由 opts 透传
- * - fsPolicy:双轴 policy,optionalReadRoots 走单一 source helper(git 全局
- *   配置对),installRoot/projectIdentityRoot 由调用方透传(T4 读白名单)
+ * - fsPolicy:全局档只承载 tmpRoot,不塑形 argv mount
  */
 function foregroundFenceArgv(opts: {
   readonly cwd: string;
   readonly network: boolean;
   readonly cwdReadonly: boolean;
-  readonly home?: string;
-  readonly installRoot?: string;
 }): readonly string[] {
-  const home = opts.home ?? "/home/user";
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   const fenceEnv = applyCwdReadonlyFenceEnv(
     envIsolation.filter({ PATH: "/bin" }),
@@ -109,17 +103,8 @@ function foregroundFenceArgv(opts: {
   return createBwrapFence({
     command: "bash",
     args: ["-c", "echo hi"],
-    fsPolicy: createFsPolicy({
-      cwd: opts.cwd,
-      home,
-      tmpDir: tmpdir(),
-      ...(opts.installRoot !== undefined
-        ? { installRoot: opts.installRoot }
-        : {}),
-      optionalReadRoots: defaultOptionalReadRoots({ home }),
-    }),
+    fsPolicy: createFsPolicy({ tmpDir: tmpdir() }),
     networkPolicy: createNetworkPolicy(),
-    resourceLimits: createResourceLimits(),
     env: fenceEnv,
     cwd: opts.cwd,
     ...(opts.network ? { network: true } : {}),
@@ -141,20 +126,25 @@ function isolationAxisFlags(argv: readonly string[]): Set<string> {
   if (argv.includes("--die-with-parent")) flags.add("die-with-parent");
   // env 隔离轴
   if (argv.includes("--clearenv")) flags.add("clearenv");
-  // guest /tmp pad bind (ADR-0074); --size/--tmpfs retired for bind backing
-  if (argv.some((arg, i) => arg === "--bind" && argv[i + 2] === "/tmp")) {
-    flags.add("guest-tmp-bind");
+  // ADR-0092 全局档:宿主根 `/` 打底 + 系统前缀只读重绑。
+  if (argv.some((arg, i) => arg === "--bind" && argv[i + 2] === "/")) {
+    flags.add("host-root-bind");
   }
-  // cwd 绑定 verb --bind vs --ro-bind
-  const hasCwdRoBind = argv.some(
-    (arg, idx) => arg === "--ro-bind" && argv[idx + 1] === CWD
-  );
-  const hasCwdBind = argv.some(
-    (arg, idx) => arg === "--bind" && argv[idx + 1] === CWD
-  );
-  if (hasCwdRoBind) flags.add("cwd-ro-bind");
-  if (hasCwdBind) flags.add("cwd-bind");
-  // GIT_OPTIONAL_LOCKS=0 (foreground cwdReadonly 注入,bash.ts:132-134)。
+  for (const path of READ_ONLY_SYSTEM_PATHS) {
+    if (
+      argv.some(
+        (arg, i) =>
+          arg === "--ro-bind" && argv[i + 1] === path && argv[i + 2] === path
+      )
+    ) {
+      flags.add(`ro-bind:${path}`);
+    }
+  }
+  // cwd 只读重绑 verb(--ro-bind);全局档无可写 --bind cwd 形态。
+  if (argv.some((arg, idx) => arg === "--ro-bind" && argv[idx + 1] === CWD)) {
+    flags.add("cwd-ro-bind");
+  }
+  // GIT_OPTIONAL_LOCKS=0 (foreground cwdReadonly 注入,bash.ts)。
   // 扫全部 --setenv 三元组:indexOf 会命中 PATH 等先出现的键,漏掉本轴。
   for (let i = 0; i < argv.length; i++) {
     if (
@@ -172,28 +162,17 @@ function isolationAxisFlags(argv: readonly string[]): Set<string> {
 /**
  * 驱动 real defaultBackgroundSpawn,通过 vi.mock 拦截 child_process.spawn
  * 捕获 argv(不真启子进程)。
- *
- * Pre-fix:BackgroundSpawnRequest 不含 cwdReadonly 字段,cwdReadonly 参数无法
- * 传入 → fg argv 含 cwd-ro-bind,bg argv 不含 → 轴集合不等。
- * Post-fix:cwdReadonly 字段已加入,defaultBackgroundSpawn 透传到 fence →
- * bg argv 同样含 cwd-ro-bind → 轴集合相等。
  */
 async function backgroundFenceArgv(opts: {
   readonly cwd: string;
   readonly network: boolean;
   readonly cwdReadonly: boolean;
-  readonly home?: string;
-  readonly installRoot?: string;
 }): Promise<readonly string[]> {
   spawnMock.mockImplementation(() => makeFakeChild());
   await defaultBackgroundSpawn({
     command: "echo hi",
     cwd: opts.cwd,
     env: { PATH: "/bin" },
-    home: opts.home ?? "/home/user",
-    ...(opts.installRoot !== undefined
-      ? { installRoot: opts.installRoot }
-      : {}),
     ...(opts.network ? { network: true } : {}),
     ...(opts.cwdReadonly ? { cwdReadonly: true } : {}),
   });
@@ -216,8 +195,7 @@ afterEach(() => {
 
 // ── SC line 44:argv 隔离轴集合相等 ─────────────────────────────────────────
 
-// T3 闭世界适配:合同根(taskRoot)盘上校验 → fixture 用真实目录,
-// 不再用不存在的 "/workspace" 假路径。tmp 写通道由 manager/tmpdir() 提供。
+// 合同根(cwd)盘上校验 → fixture 用真实目录。
 const CWD = mkdtempSync(join(tmpdir(), "bash-fence-parity-"));
 
 afterAll(() => {
@@ -255,8 +233,7 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
     });
   }
 
-  // 关键单点断言 —— 在 #653 T1 之前,这一组断言会因为 bg 漏 cwdReadonly 而 fail。
-  it("cwdReadonly:true → bg argv contains --ro-bind <cwd>, no --bind <cwd>", async () => {
+  it("cwdReadonly:true → bg argv contains --ro-bind <cwd>", async () => {
     const bg = await backgroundFenceArgv({
       cwd: CWD,
       network: false,
@@ -265,37 +242,25 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
     const hasBgRoBind = bg.some(
       (arg, idx) => arg === "--ro-bind" && bg[idx + 1] === CWD
     );
-    const hasBgBind = bg.some(
-      (arg, idx) => arg === "--bind" && bg[idx + 1] === CWD
-    );
     assert.ok(
       hasBgRoBind,
       `bg argv must have --ro-bind ${CWD}, got ${JSON.stringify(bg)}`
     );
-    assert.equal(
-      hasBgBind,
-      false,
-      `bg argv must drop --bind ${CWD} when readonly`
-    );
   });
 
-  it("cwdReadonly:false → bg argv contains --bind <cwd>, no --ro-bind <cwd>", async () => {
+  it("cwdReadonly:false → bg argv has no cwd ro-bind (covered by host root)", async () => {
     const bg = await backgroundFenceArgv({
       cwd: CWD,
       network: false,
       cwdReadonly: false,
     });
-    const hasBgBind = bg.some(
-      (arg, idx) => arg === "--bind" && bg[idx + 1] === CWD
-    );
     const hasBgRoBind = bg.some(
       (arg, idx) => arg === "--ro-bind" && bg[idx + 1] === CWD
     );
-    assert.ok(hasBgBind, `bg argv must have --bind ${CWD}`);
     assert.equal(
       hasBgRoBind,
       false,
-      `bg argv must drop --ro-bind ${CWD} when not readonly`
+      "global mode must not ro-bind cwd when not readonly"
     );
   });
 
@@ -330,7 +295,7 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
     assert.ok(bg.includes("--unshare-net"), "bg must keep --unshare-net");
   });
 
-  it("cwdReadonly:true → bg argv --setenv GIT_OPTIONAL_LOCKS 0 (mirror bash.ts:132-134)", async () => {
+  it("cwdReadonly:true → bg argv --setenv GIT_OPTIONAL_LOCKS 0 (mirror bash.ts)", async () => {
     const bg = await backgroundFenceArgv({
       cwd: CWD,
       network: false,
@@ -365,29 +330,9 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
   });
 });
 
-// ── T4 闭世界读白名单:installRoot + git 全局配置的前后台 parity ────────────
+// ── ADR-0092 全局档:宿主根 + 系统前缀只读重绑的前后台 parity ──────────────
 
-describe("bash fence parity — T4 read-whitelist members (installRoot / git config)", () => {
-  /** 真实 home fixture:~/.gitconfig 在盘(可选成员存在性跳过的正例)。 */
-  function makeHomeWithGitConfig(): string {
-    const home = mkdtempSync(join(tmpdir(), "bash-parity-home-"));
-    writeFileSync(join(home, ".gitconfig"), "[user]\n");
-    mkdirSync(join(home, ".config", "git"), { recursive: true });
-    writeFileSync(join(home, ".config", "git", "config"), "[user]\n");
-    GIT_HOMES.push(home);
-    return home;
-  }
-
-  const GIT_HOMES: string[] = [];
-  const INSTALL_ROOT = mkdtempSync(join(tmpdir(), "bash-parity-install-"));
-
-  afterAll(() => {
-    for (const home of GIT_HOMES) {
-      rmSync(home, { recursive: true, force: true });
-    }
-    rmSync(INSTALL_ROOT, { recursive: true, force: true });
-  });
-
+describe("bash fence parity — global-mode mounts (host root + system ro-binds)", () => {
   function roBindIndex(argv: readonly string[], root: string): number {
     return argv.findIndex(
       (arg, i) =>
@@ -395,56 +340,66 @@ describe("bash fence parity — T4 read-whitelist members (installRoot / git con
     );
   }
 
-  it("installRoot ro-bind present on BOTH sides (same token)", async () => {
+  it("host-root --bind / / present on BOTH sides (same token)", async () => {
     const fg = foregroundFenceArgv({
       cwd: CWD,
       network: false,
       cwdReadonly: false,
-      installRoot: INSTALL_ROOT,
     });
     const bg = await backgroundFenceArgv({
       cwd: CWD,
       network: false,
       cwdReadonly: false,
-      installRoot: INSTALL_ROOT,
     });
-    assert.notEqual(
-      roBindIndex(fg, INSTALL_ROOT),
-      -1,
-      "fg must ro-bind installRoot"
-    );
-    assert.notEqual(
-      roBindIndex(bg, INSTALL_ROOT),
-      -1,
-      "bg must ro-bind installRoot"
-    );
+    const isRootBind = (argv: readonly string[]): boolean =>
+      argv.some(
+        (arg, i) =>
+          arg === "--bind" && argv[i + 1] === "/" && argv[i + 2] === "/"
+      );
+    assert.ok(isRootBind(fg), "fg must --bind / /");
+    assert.ok(isRootBind(bg), "bg must --bind / /");
   });
 
-  it("git global config ro-bind present on BOTH sides when on disk (same home, same helper)", async () => {
-    const home = makeHomeWithGitConfig();
-    const gitconfig = join(home, ".gitconfig");
+  it("system ro-binds present on BOTH sides (same tokens)", async () => {
     const fg = foregroundFenceArgv({
       cwd: CWD,
       network: false,
       cwdReadonly: false,
-      home,
     });
     const bg = await backgroundFenceArgv({
       cwd: CWD,
       network: false,
       cwdReadonly: false,
-      home,
     });
-    assert.notEqual(
-      roBindIndex(fg, gitconfig),
-      -1,
-      "fg must ro-bind ~/.gitconfig"
-    );
-    assert.notEqual(
-      roBindIndex(bg, gitconfig),
-      -1,
-      "bg must ro-bind ~/.gitconfig"
-    );
+    for (const path of READ_ONLY_SYSTEM_PATHS) {
+      assert.notEqual(roBindIndex(fg, path), -1, `fg must ro-bind ${path}`);
+      assert.notEqual(roBindIndex(bg, path), -1, `bg must ro-bind ${path}`);
+    }
+  });
+
+  it("neither side carries a guest /tmp pad bind or tmpfs", async () => {
+    const fg = foregroundFenceArgv({
+      cwd: CWD,
+      network: false,
+      cwdReadonly: false,
+    });
+    const bg = await backgroundFenceArgv({
+      cwd: CWD,
+      network: false,
+      cwdReadonly: false,
+    });
+    for (const argv of [fg, bg]) {
+      assert.equal(
+        argv.some((arg, i) => arg === "--bind" && argv[i + 2] === "/tmp"),
+        false,
+        "guest /tmp pad bind is retired (ADR-0092)"
+      );
+      assert.equal(
+        argv.includes("--tmpfs"),
+        false,
+        "--tmpfs /tmp is retired (ADR-0092)"
+      );
+    }
   });
 });
 
@@ -457,7 +412,6 @@ describe("defaultBackgroundSpawn negative — drives createBwrapFence seam", () 
       command: "echo hi",
       cwd: CWD,
       env: { PATH: "/bin" },
-      home: "/home/user",
     });
     const call = spawnMock.mock.calls[0];
     expect(call).toBeDefined();
@@ -467,12 +421,12 @@ describe("defaultBackgroundSpawn negative — drives createBwrapFence seam", () 
       "bwrap",
       "spawn cmd must be bwrap, not the raw bash command"
     );
-    // argv 至少包含 cwd bind verb + /tmp + --clearenv(隔离护栏存在)。
+    // argv 至少包含宿主根 bind + --clearenv(隔离护栏存在)。
     const argv = call?.[1] as readonly string[];
     assert.ok(argv.includes(CWD), "argv must include cwd");
     assert.ok(
-      argv.some((arg, i) => arg === "--bind" && argv[i + 2] === "/tmp"),
-      "argv must bind a host pad at /tmp"
+      argv.some((arg, i) => arg === "--bind" && argv[i + 2] === "/"),
+      "argv must bind the host root at /"
     );
     assert.ok(argv.includes("--clearenv"), "argv must include --clearenv");
   });
@@ -483,7 +437,6 @@ describe("defaultBackgroundSpawn negative — drives createBwrapFence seam", () 
       command: "echo hi",
       cwd: CWD,
       env: { PATH: "/bin" },
-      home: "/home/user",
     });
     const argv = (spawnMock.mock.calls[0]?.[1] as readonly string[]) ?? [];
     assert.ok(

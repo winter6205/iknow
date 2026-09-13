@@ -27,7 +27,6 @@ import { waitForPidFile } from "./tools/spawn-test-utils.ts";
 import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.ts";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.ts";
 import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.ts";
-import { createResourceLimits } from "../../../src/harness/sandbox/resource-limits.ts";
 
 const scratchPaths: string[] = [];
 
@@ -81,20 +80,21 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
     const argv = createBwrapFence({
       command: "bash",
       args: ["-c", "echo hi"],
-      fsPolicy: createFsPolicy({
-        cwd,
-        home: homedir(),
-        tmpDir: tmpdir(),
-      }),
+      fsPolicy: createFsPolicy({ tmpDir: tmpdir() }),
       networkPolicy: createNetworkPolicy(),
-      resourceLimits: createResourceLimits(),
       env: { PATH: "/bin" },
       cwd,
     }).argv;
 
     assert.equal(argv[0], "bwrap");
     assert.ok(argv.includes("--unshare-net"));
-    // --ro-bind /etc /etc (三个连续 argv 项)
+    // ADR-0092 全局档:宿主根 `/` 打底 + 系统前缀只读重绑。
+    const rootBindIdx = argv.findIndex(
+      (arg, index) => arg === "--bind" && argv[index + 1] === "/"
+    );
+    assert.notEqual(rootBindIdx, -1, "expected --bind / / in argv");
+    assert.equal(argv[rootBindIdx + 2], "/");
+    // --ro-bind /etc /etc (三个连续 argv 项),位于 `/` 之后。
     const etcIdx = argv.indexOf("/etc");
     assert.notEqual(etcIdx, -1);
     assert.deepEqual(argv.slice(etcIdx - 1, etcIdx + 2), [
@@ -102,24 +102,26 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
       "/etc",
       "/etc",
     ]);
-    // --bind <cwd> <cwd> 出现一次以上
-    const bindCwdIdx = argv.findIndex(
-      (arg, index) => arg === "--bind" && argv[index + 1] === cwd
+    assert.ok(
+      etcIdx > rootBindIdx,
+      "system ro-bind follows the host-root bind"
     );
-    assert.notEqual(bindCwdIdx, -1, "expected --bind <cwd> <cwd> in argv");
-    assert.equal(argv[bindCwdIdx + 2], cwd);
-    // ADR-0074: `--bind <pad> /tmp` after the cwd write bind; no --tmpfs.
+    // 全局档:无 guest /tmp mount、无 tmpfs、无可写 cwd bind。
     assert.equal(argv.includes("--tmpfs"), false);
-    const guestTmpIdx = argv.findIndex(
-      (arg, i) => i > bindCwdIdx && arg === "--bind" && argv[i + 2] === "/tmp"
+    assert.equal(
+      argv.findIndex(
+        (arg, index) => arg === "--bind" && argv[index + 1] === cwd
+      ),
+      -1,
+      "global mode has no per-root writable cwd bind"
     );
-    assert.notEqual(guestTmpIdx, -1, "expected --bind <pad> /tmp in argv");
-    // 闭世界反转:敏感路径 tmpfs 罩发射删除(home 下路径不可见 = 罩自动失效
-    // 为无操作);isSensitive/protected-state 谓词保留在 fs-policy 层。
+    // 敏感路径 tmpfs 罩发射删除;fs-policy 的 isSensitive / protected-state
+    // 谓词随 Round-2 placeholder 一并退役(无人消费),fs-policy 只承载 tmpRoot,
+    // 不塑形 argv。
     assert.equal(
       argv.includes(`${homedir()}/.ssh`),
       false,
-      "closed world must not emit the sensitive-path tmpfs overlay"
+      "global mode must not emit the sensitive-path tmpfs overlay"
     );
     // --clearenv precedes every --setenv so the fence inherits only the
     // whitelisted entries, never the host env (#225).
@@ -287,14 +289,13 @@ describe("bash.readonly 双闸 (real spawn)", () => {
   it.skipIf(!hasBwrap())(
     "PoC 回归:HOME 下的 cwd 中 find -fprint 不得写入目标文件",
     async () => {
-      const home = await makeScratch("bash-ro-poc-home-");
-      const cwd = join(home, "workspace");
+      const homeDir = await makeScratch("bash-ro-poc-home-");
+      const cwd = join(homeDir, "workspace");
       await mkdir(cwd);
       await writeFile(join(cwd, "visible.txt"), "visible\n");
       const target = join(cwd, "package.json");
       const tool = createBashTool(cwd, {
         bashMode: "readonly",
-        home,
       });
 
       let result: unknown;
@@ -323,13 +324,12 @@ describe("bash.readonly 双闸 (real spawn)", () => {
   it.skipIf(!hasBwrap())(
     "PoC 物理兜底:绕过 readonly validator 后 find -fprint 仍不得写入 cwd",
     async () => {
-      const home = await makeScratch("bash-ro-fence-poc-home-");
-      const cwd = join(home, "workspace");
+      const homeDir = await makeScratch("bash-ro-fence-poc-home-");
+      const cwd = join(homeDir, "workspace");
       await mkdir(cwd);
       await writeFile(join(cwd, "visible.txt"), "visible\n");
       const target = join(cwd, "package.json");
       const tool = createBashTool(cwd, {
-        home,
         cwdReadonly: true,
       });
 
@@ -395,16 +395,14 @@ describe("bash.fence.networkOptIn (argv shape, no spawn)", () => {
       args: string[];
       fsPolicy: ReturnType<typeof createFsPolicy>;
       networkPolicy: ReturnType<typeof createNetworkPolicy>;
-      resourceLimits: ReturnType<typeof createResourceLimits>;
       env: NodeJS.ProcessEnv;
       cwd: string;
       network?: boolean;
     } = {
       command: "bash",
       args: ["-c", "echo hi"],
-      fsPolicy: createFsPolicy({ cwd, home: homedir(), tmpDir: tmpdir() }),
+      fsPolicy: createFsPolicy({ tmpDir: tmpdir() }),
       networkPolicy: createNetworkPolicy(),
-      resourceLimits: createResourceLimits(),
       env: { PATH: "/bin" },
       cwd,
     };
@@ -415,7 +413,6 @@ describe("bash.fence.networkOptIn (argv shape, no spawn)", () => {
   }
 
   it("network:true removes --unshare-net but keeps every canonical fence flag", () => {
-    const cwd = ARGV_FIXTURE_CWD;
     const argv = fenceArgv(true);
     assert.equal(argv.includes("--unshare-net"), false);
     // canonical fence flags spot-check (mirrors argvHasUnshareNet style)
@@ -428,10 +425,10 @@ describe("bash.fence.networkOptIn (argv shape, no spawn)", () => {
       "/etc",
       "/etc",
     ]);
-    const bindCwdIdx = argv.findIndex(
-      (arg, index) => arg === "--bind" && argv[index + 1] === cwd
+    const rootBindIdx = argv.findIndex(
+      (arg, index) => arg === "--bind" && argv[index + 1] === "/"
     );
-    assert.notEqual(bindCwdIdx, -1, "expected --bind <cwd> <cwd> in argv");
+    assert.notEqual(rootBindIdx, -1, "expected --bind / / in argv");
     assert.ok(argv.includes("--clearenv"));
     assert.ok(argv.includes("--chdir"));
     assert.deepEqual(argv.slice(argv.indexOf("--"), argv.indexOf("--") + 3), [

@@ -768,11 +768,11 @@ function workerBaseOpts(
 }
 
 /**
- * T8 (plans/parent-visible-tmp.md) — bash + 写工具 description：进项目写
- * taskRoot；不必进仓写 `/tmp`。写根段仍只说交付根（见 envelope-write-situation）。
+ * ADR-0092 — bash + 写工具 description：进项目写 taskRoot；不必进仓的
+ * scratch 写会话 tmp 目录($TMPDIR)。写根段仍只说交付根。
  */
-describe("T8 parent-visible-tmp — bash / write-tool descriptions", () => {
-  it("bash, write_file, and edit_file say write into the project at taskRoot; write /tmp when it need not enter the repo", async () => {
+describe("ADR-0092 — bash / write-tool descriptions name the session tmp", () => {
+  it("bash, write_file, and edit_file point scratch writes at the session tmp dir ($TMPDIR)", async () => {
     const deps = await createWorkerDeps(hermeticOpts());
     const names = ["bash", "write_file", "edit_file"] as const;
     for (const name of names) {
@@ -785,13 +785,13 @@ describe("T8 parent-visible-tmp — bash / write-tool descriptions", () => {
       );
       assert.match(
         tool.description,
-        /write \/tmp when it need not enter the repo/i,
-        `${name} description must name /tmp for files that need not enter the repo`
+        /session tmp dir \(\$TMPDIR/i,
+        `${name} description must name the session tmp dir for scratch files`
       );
     }
   });
 
-  it("symbol mutate tools do not carry fence-write /tmp guidance", async () => {
+  it("symbol mutate tools do not carry the fence-write guidance", async () => {
     const deps = await createWorkerDeps(hermeticOpts());
     for (const name of SYMBOL_MUTATE_TOOL_NAMES) {
       const tool = deps.registry.list().find((t) => t.name === name);
@@ -803,8 +803,8 @@ describe("T8 parent-visible-tmp — bash / write-tool descriptions", () => {
       );
       assert.doesNotMatch(
         tool.description,
-        /write \/tmp when it need not enter the repo/i,
-        `${name} must not tell the model to write /tmp`
+        /session tmp dir \(\$TMPDIR/i,
+        `${name} must not reuse the session-tmp scratch guidance`
       );
     }
   });

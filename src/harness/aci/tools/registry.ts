@@ -262,12 +262,11 @@ export interface CreateDefaultAciRegistryOptions {
    * 对符号工具路径不生效。
    */
   readonly lspCtx?: LspCtx;
-  /** ADR-0019 (T4): per-root state anchor. Threaded into bash + read_file
-   *  factories so the fs-policy fence binds `<workspaceRoot>` and the
-   *  protected-state pathset covers `<workspaceRoot>/.iknow` at parity
-   *  with `<home>/.iknow`. Defaults to `sandboxRoot` (legacy shape) when
-   *  absent — preserves existing registry callers that don't thread
-   *  per-root state. */
+  /** ADR-0019 (T4): per-root state anchor. Threaded into read_file so its
+   *  `extraReadRoots` admit `<workspaceRoot>/.iknow` at parity with the home
+   *  profile (the agent's per-root persona state). ADR-0092 global mode: not a
+   *  bind root; bash no longer threads it (no predicate, no per-root mount).
+   *  Defaults to `sandboxRoot` (legacy shape) when absent. */
   readonly workspaceRoot?: string;
   /** T3 (plans/worktree-session-roots.md / ADR-0037 §4): 项目身份根 —— 会话
    *  隔离开关 ON 时交给 `read_file` / `grep` / `glob` 的稳定只读根。工具在
@@ -275,12 +274,6 @@ export interface CreateDefaultAciRegistryOptions {
    *  rebind 可生效而 OFF 档仍不获得额外读根。**不**透给 bash / write / edit
    *  —— 写不得出沙箱。缺席 / 等于 sandboxRoot → 无额外读根。 */
   readonly projectIdentityRoot?: string;
-  /** T4 (ADR-0037 §9.2 #4, plans/closed-world-bash-fence.md): iknow 运行时
-   *  安装根 —— 闭世界读白名单的合同读根(项目自身工具链 `node_modules/.bin`
-   *  的读通道)。透传给 bash 工厂喂进 fs-policy;build-engine 两处
-   *  createDefaultAciRegistry 都传 `sessionRoots.installRoot`(既有第四角色,
-   *  不新增状态源)。缺席时 bash 围栏不含该读根(fs-policy 里可选)。 */
-  readonly installRoot?: string;
   /** #406 T3:per-engine secret registry。透传给 bash 工具工厂——handler
    *  执行前把占位符还原为真值（见 bash.ts restore 段）。缺席时 bash 命令
    *  原样透传（行为 byte-identical，向后兼容）。 */
@@ -480,10 +473,11 @@ export function createDefaultAciRegistry(
   // #562 T6: bashMode 显式透传到 createBashTool。registry 不读 catalog —
   // spawn-subagent-tool 工厂是 catalog 路由的真正 owner。
   const bashMode = opts.bashMode;
-  // ADR-0019 (T4): per-root state anchor. Threaded to bash + read_file so
-  // the fence protects `<workspaceRoot>/.iknow` the same way it does
-  // `<home>/.iknow`. Falls back to sandboxRoot when absent (legacy shape)
-  // so existing callers without per-root state stay byte-identical.
+  // ADR-0019 (T4): per-root state anchor. Threaded to read_file so its
+  // `extraReadRoots` admit `<workspaceRoot>/.iknow` at parity with the home
+  // profile. ADR-0092 global mode: bash no longer reads it. Falls back to
+  // sandboxRoot when absent (legacy shape) so existing callers without
+  // per-root state stay byte-identical.
   const workspaceRoot = opts.workspaceRoot ?? sandboxRoot;
   // #440 T4 todo_write 条件化装配的开关。host 注入；build-engine 在
   // surface !== "ask" 解析 session 级目录并透传；ask 不传 → tool 不入
@@ -538,12 +532,6 @@ export function createDefaultAciRegistry(
     bash: () =>
       createBashTool(sandboxRoot, {
         secretRegistry,
-        workspaceRoot,
-        // T4 (ADR-0037 §9.2 #4): installRoot verbatim 透传 —— 闭世界读白
-        // 名单的合同读根,build-engine 按 sessionRoots.installRoot 喂入。
-        ...(opts.installRoot !== undefined
-          ? { installRoot: opts.installRoot }
-          : {}),
         ...(backgroundManager ? { backgroundManager } : {}),
         // #562 T6: bashMode 透传 — readonly 模式触发 validator + fence cwdReadonly。
         ...(bashMode !== undefined ? { bashMode } : {}),
@@ -553,13 +541,6 @@ export function createDefaultAciRegistry(
         // （legacy parity,与 V1 字节一致）。
         ...(opts.liveTaskRoot !== undefined
           ? { liveTaskRoot: opts.liveTaskRoot }
-          : {}),
-        // T4 闭世界改写(ADR-0037 §9.2 #6 / §9.3): 身份根不再是条件 overlay
-        // —— bash.ts 内 waveRoot ≠ identityRoot 分支已删,选项提供了就恒进
-        // policy 读白名单(前台/后台同一份 token)。装配层(isolationEnabled)
-        // 仍按既有条件决定是否提供该根。
-        ...(opts.projectIdentityRoot !== undefined
-          ? { projectIdentityRoot: opts.projectIdentityRoot }
           : {}),
         // T1: todoDir is the session project dir; bash resolves
         // `<sessionFolder>/fence-tmp` per conversationId (ADR-0074).

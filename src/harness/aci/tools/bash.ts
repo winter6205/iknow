@@ -1,5 +1,5 @@
 import { mkdtempSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
@@ -11,11 +11,10 @@ import {
   BASE_ENV_WHITELIST,
   applyCwdReadonlyFenceEnv,
   createBwrapFence,
-  createClosedWorldFsPolicy,
   createEnvIsolation,
+  createFsPolicy,
   createNetworkPolicy,
   createOutputMask,
-  createResourceLimits,
   currentSecretValues,
 } from "../../sandbox/index.js";
 import {
@@ -42,15 +41,6 @@ export interface CreateBashToolOptions {
   /** #406 T3:per-engine secret registry。在场时 handler 在构造 bwrap fence 前
    *  对命令做占位符还原（`<<<SECRET_N>>>` → 真值）；缺席时命令原样透传。 */
   readonly secretRegistry?: SecretRegistry;
-  /** ADR-0019 (T4): per-root state anchor. Threaded into `createFsPolicy` so the
-   *  fence binds `<workspaceRoot>` as a root and `<workspaceRoot>/.iknow` is
-   *  covered by the protected-state pathset. Defaults to `cwd` (the legacy
-   *  shape) when absent — preserves the existing bash argv for callers that
-   *  don't thread per-root state (e.g. demo.ts, bash-sandbox.test.ts). */
-  readonly workspaceRoot?: string;
-  /** #337 T8 测试缝:home 覆盖（默认 homedir()）— production 不传 = 真实
-   *  home,单测可注入 tmpdir 隔离真实 user dir。 */
-  readonly home?: string;
   /** #502 T3:后台任务管理器。在场时 `background: true` 分支可用 —— handler
    *  经 manager.spawn 起 detached 子进程后立即返回 {task_id, log_path}，不
    *  阻塞、不占 tier timer（handler 毫秒级返回 ⇒ executor tier 天然不治理
@@ -66,39 +56,22 @@ export interface CreateBashToolOptions {
   readonly bashMode?: "any" | "readonly";
   /** #562 T5:fence cwd 级只读控制 —— true 时 fence 把 cwd bind 为 --ro-bind,
    * 同时把 GIT_OPTIONAL_LOCKS=0 注入 fence env（git ≥2.14 防 `git status` 刷
-   * index）。缺省 / false = V1 路径逐字节不变。bashMode→cwdReadonly 映射由 T6
-   * 在 registry 装配处完成；本字段是 additive 透传缝。 */
+   * index）。缺省 / false = 既有可写 cwd。 */
   readonly cwdReadonly?: boolean;
   /** T7 (plans/worktree-live-task-root.md §6): per-call live root cell. 在场
    * 时 handler 入口读一次冻结为 waveRoot（D2 batch snapshot），前台 /
-   * background 共用同一份；fsPolicy 与 bwrap fence 围绕 waveRoot 重建，argv
-   * 形状与顺序逐字节不变（home / tmpDir / workspaceRoot 等非 cwd 维度由
-   * 工厂期捕获 ⇒ 多次 rebuild 间的差异仅落在 cwd token）。缺省时退回工厂
-   * 捕获 cwd —— 与 V1 路径字节一致（legacy test parity）。 */
+   * background 共用同一份。缺省时退回工厂捕获 cwd。 */
   readonly liveTaskRoot?: LiveTaskRoot;
-  /** T4 (ADR-0037 §9.2 #4, plans/closed-world-bash-fence.md): iknow 运行时
-   *  安装根 —— 闭世界读白名单的合同读根(项目自身工具链 `node_modules/.bin`
-   *  的读通道)。装配链接线:registry ← build-engine 两处 createDefaultAciRegistry
-   *  传 `sessionRoots.installRoot`(复用 resolveSessionRoots 既有第四角色,
-   *  不新增状态源)。缺席时 policy 不含该读根(fs-policy 里可选,不 fail-loud;
-   *  合同输入一旦提供空白/盘上不存在则由 policy fail-loud,§9.4)。 */
-  readonly installRoot?: string;
-  /** #891 T2 → T5 (ADR-0037 §9.2 #6): 主仓身份根 —— **恒进**读白名单的
-   *  合同读根。选项提供了就无条件进 policy 读白名单(闭世界下没有
-   *  「writable 祖先罩住主仓」的病灶,overlay 形态已随 §9.3 superseded 并在
-   *  T5 删除;identity 根单一入口 = policy,bwrap 层选项已不存在),前台
-   *  fence 与 background spawn 消费同一份 token。仅 isolationEnabled 时由
-   *  装配层提供(与既有传递条件一致)。 */
-  readonly projectIdentityRoot?: string;
   /**
-   * T1 (ADR-0074): host pad bound as fence `/tmp`. Tests inject
+   * ADR-0092: this identity's session tmp host path. Tests inject
    * `<sessionFolder>/fence-tmp`. When omitted, per-call resolution uses
-   * `projectDir` + `conversationId`, else a factory-lifetime fallback pad.
+   * `projectDir` + `conversationId`, else a factory-lifetime fallback tmp.
+   * It feeds `$TMPDIR` — it is never a bind target for guest `/tmp`.
    */
   readonly tmpDir?: string;
   /**
    * Session project dir (`resolveProjectSessionDir` output). With
-   * `ctx.conversationId`, bash allocates `<sessionFolder>/fence-tmp`.
+   * `ctx.conversationId`, bash uses `<sessionFolder>/fence-tmp` as `$TMPDIR`.
    */
   readonly projectDir?: string;
 }
@@ -108,20 +81,10 @@ export function createBashTool(
   opts?: CreateBashToolOptions
 ): AciToolDef {
   requireBwrap();
-  // T7 (D3): 工厂期只捕获 fsPolicy 的非 cwd 维度。home / tmpDir / workspaceRoot
-  // 都是 process-stable ⇒ 多次 rebuild 间 argv SHAPE 锁定。cwd 由 handler 入口
-  // 的 waveRoot 注入（见下方 handler）。把 fsPolicy 构造从工厂期移进 handler
-  // —— 这是 D4 的核心：bash handler 必须 per-call rebuild fsPolicy + bwrap
-  // fence,不能闭包到工厂捕获 cwd。
-  const home = opts?.home ?? homedir();
+  // ADR-0092 (D3): 工厂期只捕获 `tmpDir`（process-stable）。fsPolicy 由
+  // handler per-call 重建,不闭包到工厂捕获的 cwd。
   let fallbackFenceTmp: string | undefined;
-  const workspaceRoot = opts?.workspaceRoot;
-  // T4 闭世界:合同读根在工厂期捕获(installRoot / projectIdentityRoot 都是
-  // process-stable,D3 稳定根),handler per-call rebuild 时喂进 policy。
-  const installRoot = opts?.installRoot;
-  const projectIdentityRoot = opts?.projectIdentityRoot;
   const networkPolicy = createNetworkPolicy();
-  const resourceLimits = createResourceLimits();
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   const handler = async (
     input: unknown,
@@ -158,10 +121,6 @@ export function createBashTool(
       }
       return fallbackFenceTmp;
     });
-    // T4 闭世界(ADR-0037 §9.2 #6):身份根是**无条件**读白名单成员 ——
-    // 工厂期捕获的 projectIdentityRoot 直接进 policy 读白名单(T5 后 identity
-    // 根单一入口 = policy),前台 fence 与 background spawn 消费同一 token
-    // (D2 同波同一份)。
     // #502 T3:校验链通过后才决定前台 / 后台 —— 危险命令 / 敏感路径在两侧
     // 都先执行同一闸门（background 不豁免安全检查）。
     if ((input as BashInput | null)?.background === true) {
@@ -199,7 +158,9 @@ export function createBashTool(
         envIsolation.filter(process.env),
         fenceIsReadonly
       ),
-      TMPDIR: "/tmp",
+      // ADR-0092: the session tmp host path is the draft location; guest Linux
+      // `/tmp` is never bound to it, so `$TMPDIR` names the real path.
+      TMPDIR: tmpDir,
     };
     // #406 T3:构造 fence 前还原占位符 —— 还原后的命令才是真正 spawn 进 bwrap
     // 的文本。原始命令（含占位符）只见于工具调用记录 / 模型上下文；模型永不
@@ -212,29 +173,16 @@ export function createBashTool(
     // 权限层（policy.ts code-ask-bash-network）已强制 ask full_auto 不豁免,
     // 此处只判严格 === true;非布尔 / 缺省 / false → 走既有隔离路径。
     const wantsHostNetwork = (input as BashInput | null)?.network === true;
-    // T7 (D4): fsPolicy per-call rebuild —— home/tmpDir/workspaceRoot 是
-    // 工厂期冻结的,只有 cwd 维度跟 waveRoot 联动。argv SHAPE+ORDER 因此
-    // 与 V1 字节等价,差异只落在 --bind / --chdir 的 cwd token 上。
-    // T4 闭世界双轴(ADR-0037 §9.2):读白名单 = installRoot(合同根,#4) +
-    // projectIdentityRoot(合同根,#6,恒进) + node 工具链根(缺省推导,#5)
-    // + git 全局配置(可选成员,#7,createClosedWorldFsPolicy 内折叠,存在性
-    // 跳过);写白名单 = taskRoot + tmp(policy 内定)。per-call rebuild 语义
-    // 不变 —— 每波仍现建 policy,只是装配表达式与后台 spawn / verify 同源
-    // (code-review M2 装配单源化)。
-    const fsPolicy = createClosedWorldFsPolicy({
-      cwd: waveRoot,
-      home,
-      tmpDir,
-      ...(workspaceRoot ? { workspaceRoot } : {}),
-      ...(installRoot !== undefined ? { installRoot } : {}),
-      ...(projectIdentityRoot !== undefined ? { projectIdentityRoot } : {}),
-    });
+    // T7 (D4): fsPolicy per-call rebuild —— `tmpDir` 工厂期冻结,只有 cwd
+    // 维度跟 waveRoot 联动。全局档(ADR-0092)下 fs-policy 不再发射 argv
+    // (fence 固定 host root + 系统前缀 ro-bind),只有 policy 的 per-call
+    // 重建面保留 —— `$TMPDIR` 与写工具可写根共用同一份 identity session tmp。
+    const fsPolicy = createFsPolicy({ tmpDir });
     const fence = createBwrapFence({
       command: "bash",
       args: ["-c", finalCommand],
       fsPolicy,
       networkPolicy,
-      resourceLimits,
       env: fenceEnv,
       cwd: waveRoot,
       ...(wantsHostNetwork ? { network: true } : {}),
@@ -341,19 +289,7 @@ async function handleBackground(
     command: finalCommand,
     recordCommand,
     cwd,
-    workspaceRoot: opts.workspaceRoot,
     env: process.env,
-    home: opts.home,
-    // T4 闭世界:后台与前台消费同一份读白名单 token(D2 同波同一份)——
-    // installRoot(§9.2 #4)与 projectIdentityRoot(§9.2 #6,恒进读白名单)
-    // 都从工厂期捕获的同一选项出发,defaultBackgroundSpawn 据此构造同款
-    // 双轴 policy。
-    ...(opts.installRoot !== undefined
-      ? { installRoot: opts.installRoot }
-      : {}),
-    ...(opts.projectIdentityRoot !== undefined
-      ? { projectIdentityRoot: opts.projectIdentityRoot }
-      : {}),
     ...(ctx?.conversationId !== undefined
       ? { conversationId: ctx.conversationId }
       : {}),

@@ -1,4 +1,10 @@
 /**
+ * Archived 2026-09-13 (ADR-0092 fs isolation modes Round 1): 被测探针随闭世界
+ * 默认姿态退役（见 archive/onetime-probes/closed-world-inventory-probe.ts 头部）。
+ * 本文件与探针一同留在 archive/（vitest 收集排除），仅存判定与 argv 装配的历史
+ * 可复现面。归档时把 import 从已删的 src 路径改指向归档探针。
+ *
+ * ── original header ──────────────────────────────────────────────────────
  * scripts/sandbox-probe-closed-world.ts 的纯逻辑契约（T1，plans/closed-world-bash-fence.md）。
  *
  * 为什么只测纯函数:探针本体是 bwrap 围栏的实测（ground truth = 真跑），
@@ -20,7 +26,7 @@ import {
   summarizeText,
   type InventoryOutcome,
   type InventoryScenario,
-} from "../../scripts/sandbox-probe-closed-world.ts";
+} from "../../onetime-probes/closed-world-inventory-probe.ts";
 
 function scenario(
   overrides: Partial<InventoryScenario> = {}

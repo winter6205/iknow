@@ -165,6 +165,15 @@ node_modules
 archive/*
 !archive/tests-real-llm/
 !archive/tests-real-llm/**
+# 测试规范把「认证目标已永久消失」的测试归档到 archive/tests/（附原因），
+# 归档要随 PR 走 ⇒ 与 tests-real-llm 同款三段式白名单。onetime-probes 同列：
+# 该目录整体已被跟踪，若仍留在 archive/* 忽略态，lint-staged 的备份/恢复
+# 会把「被忽略但含已跟踪文件」的目录当非法路径报错（git add 无 -f 拒绝），
+# 使 pre-commit 结构性无法通过。
+!archive/tests/
+!archive/tests/**
+!archive/onetime-probes/
+!archive/onetime-probes/**
 docs/demos
 # TUI deps-tools 测试残留（tests/tui/deps-tools.test.ts 用 mkdtemp(process.cwd()) 落目录，
 # 时序 flake 时残留 .iknow-tui-hooks-* / .iknow-tui-nohooks-*；根因修复见 tests/tui/deps-tools.test.ts）

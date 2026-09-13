@@ -52,7 +52,7 @@ Status: accepted
 
 - resolver `resolveWorkspaceRoot` 是纯函数（无 I/O），priority chain `[explicit, env, process.cwd()]`；4 种 validation error 抛 `WorkspaceRootError` 判别联合（`empty_explicit` / `empty_env` / `non_absolute` / `not_found`），mirror `IknowIdentityError`。
 - `workspaceRoot` **不**加入 `LoopEngineDeps`（per-root consumers 都在 build-engine / tui-deps 层）。
-- `fs-policy` protected-path 扩展到 `<workspaceRoot>/.iknow` 及其 children —— 与既有 `<home>/.iknow` 同模式保护。
+- `fs-policy` protected-path 扩展到 `<workspaceRoot>/.iknow` 及其 children —— 与既有 `<home>/.iknow` 同模式保护。**2026-09-13（ADR-0092 修复轮）**：fs-policy 的 `isSensitive` 谓词与 `home` / `workspaceRoot` 选项随 ADR-0092 退役（零消费者）；`<home>/.iknow` / `<workspaceRoot>/.iknow`「protected-state」fs-policy 谓词面不再存在，写拦截落到 permission 链 + hard-wall；Round-2 工作区档会按 `specs/fs-isolation-modes.md` SC11 重新引入 write-set 合同。
 - tilde expansion（`~`）仍指向 `home`（global）—— tilde 是用户输入便利，workspace 是状态边界。
 
 ### Reversibility

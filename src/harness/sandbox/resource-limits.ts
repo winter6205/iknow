@@ -13,8 +13,9 @@ export interface ResourceLimitOptions {
 }
 
 /**
- * v0 only the `tmp` value is enforceable (bwrap `--size`); CPU/mem/procs/fd
- * are policy constants exposed for v1 hooks (seccomp, cgroup v2).
+ * Policy constants exposed for v1 hooks (seccomp, cgroup v2). The global-mode
+ * fence (ADR-0092) emits no `--size` / `--tmpfs /tmp` flags, so there is no
+ * argv projection here any more.
  */
 export interface ResourceLimits {
   readonly cpu: number;
@@ -22,7 +23,6 @@ export interface ResourceLimits {
   readonly tmp: number;
   readonly procs: number;
   readonly fd: number;
-  toRlimitFlags(): string[];
 }
 
 interface LimitSpec {
@@ -72,9 +72,6 @@ export function createResourceLimits(
       minimum: 1,
       maximum: MAX_FD,
     }),
-    toRlimitFlags(): string[] {
-      return ["--size", String(limits.tmp), "--tmpfs", "/tmp"];
-    },
   };
   return Object.freeze(limits);
 }

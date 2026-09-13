@@ -1,31 +1,18 @@
 /**
- * T5b (ADR-0037 §9.2 #6, plans/closed-world-bash-fence.md) — worker bash
- * 围栏接 projectIdentityRoot 读白名单成员。
+ * worker bash 围栏可见性 (ADR-0092 全局档)。
  *
- * 查证结论(T5 移交观察的裁决依据):worker 的 bash 是**真实执行面** ——
- * createWorkerRuntime 经 createDefaultAciRegistry 装配真实 registry,bash
- * handler per-call 经 createFsPolicy / createBwrapFence 构造闭世界围栏。
- * worker registry 调用此前不传 projectIdentityRoot → 闭世界读白名单缺
- * §9.2 #6 合同读根(主仓 checkout):worker cwd 是 task worktree 时,
- * worktree 的 `.git` file 指向主仓 gitdir,主仓不可达 → `git status` 等
- * exit 128 `fatal: not a git repository`(T1 盘点实测断链)。
+ * 取代 T5b 的 `projectIdentityRoot` 读白名单接线:worker 的 bash 是真实执行面
+ * (createWorkerRuntime → createDefaultAciRegistry → bash → createFsPolicy →
+ * createBwrapFence)。Round 1 起全局档 `--bind / /` 让宿主真实路径本就可见,
+ * 主仓 checkout / worktree 的 `.git` gitdir 都可达,不再是逐根读白名单——
+ * 因此原本认证的 `--ro-bind <identityRoot>` 断言随闭世界退役。
  *
- * 条件化(与主链 isolationEnabled 对齐,不更宽):worker 进程没有
- * isolationEnabled 信号,但 worker 围栏 taskRoot = sandboxRoot(spawn 期
- * 冻结),主链「rebind 后 identity 根才装载」的谓词在 worker 侧的等价形式
- * = sandboxRoot 是 task-worktree 形状(taskWorktreeOwnerOf,与 build-engine
- * spawn 处 sessionRoot 的判定同源):
- *   - OFF / 未改绑(sandboxRoot = 主仓):不传 —— .git 就在 cwd 内,本不缺
- *     读通道(ADR §9.2 #6 括号理由),字节同今日;
- *   - ON + 已改绑(sandboxRoot = task worktree):传父会话 verbatim 的
- *     sessionRoots.projectIdentityRoot(T3 IKNOW_PRODUCT_ROOT wire 已送达),
- *     缺席(旧 wire)回落 mainCheckoutOf(sandboxRoot) —— 与 build-engine
- *     sessionRoots 派生同一 SSOT 纯路径推导,不新造状态源。
+ * 仍然真实的命题:worker bash 围栏绑定宿主根(主仓可达),系统前缀只读,
+ * 不存在逐根 identity/installRoot 读白名单。
  *
  * 手法:module-mock runner.js(捕获 fence,registry / bash.ts / fs-policy /
- * bwrap.ts 保持真实)—— 断言穿过整条 worker deps → registry → bash 工厂 →
- * createFsPolicy → createBwrapFence 链路落到 argv 的 identity ro-bind,
- * 比 factory-opts 捕获多一轴端到端(policy 读白名单)证据。
+ * bwrap.ts 保持真实),穿整条 worker deps → registry → bash 工厂 →
+ * createBwrapFence 链路拿 argv。
  */
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -47,7 +34,7 @@ vi.mock("../../src/harness/sandbox/runner.js", async (importOriginal) => {
 
 import { runInSandbox } from "../../src/harness/sandbox/runner.ts";
 import { createWorkerDeps } from "../../src/harness/subagent/worker.ts";
-import { mainCheckoutOf } from "../../src/harness/isolation/worktree-gate.ts";
+import { READ_ONLY_SYSTEM_PATHS } from "../../src/harness/sandbox/fs-policy.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
 import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
@@ -107,8 +94,7 @@ async function buildWorkerDeps(opts: {
   });
 }
 
-/** fence.argv 里 `--ro-bind <root> <root>` 三元组的下标;缺席 → -1。 */
-function identityBindIndex(argv: readonly string[], root: string): number {
+function roBindIndex(argv: readonly string[], root: string): number {
   for (let i = 0; i + 2 < argv.length; i++) {
     if (
       argv[i] === "--ro-bind" &&
@@ -119,6 +105,12 @@ function identityBindIndex(argv: readonly string[], root: string): number {
     }
   }
   return -1;
+}
+
+function hasHostRootBind(argv: readonly string[]): boolean {
+  return argv.some(
+    (arg, i) => arg === "--bind" && argv[i + 1] === "/" && argv[i + 2] === "/"
+  );
 }
 
 async function runBashAndGetArgv(
@@ -144,13 +136,11 @@ afterEach(async () => {
   );
 });
 
-describe("createWorkerDeps — projectIdentityRoot threaded into the bash fence read whitelist (T5b)", () => {
-  it("rebound worker (worktree-shaped sandboxRoot) + explicit root → verbatim identity ro-bind in the fence argv", async () => {
+describe("createWorkerDeps — worker bash fence is global mode (ADR-0092)", () => {
+  it("rebound worker exposes the host root (main checkout reachable), no per-root identity ro-bind", async () => {
     const { repo, worktree } = await makeWorktreeFixture(
       "worker-identity-root-verbatim-"
     );
-    // 用独立于 mainCheckoutOf(worktree) 的另一棵盘上树作 opts 值,证明
-    // 透传是 verbatim(不是 worker 侧再派生)。
     const identity = join(await makeScratch("worker-identity-root-src-"), "id");
     await mkdir(identity, { recursive: true });
     const deps = await buildWorkerDeps({
@@ -158,41 +148,25 @@ describe("createWorkerDeps — projectIdentityRoot threaded into the bash fence 
       projectIdentityRoot: identity,
     });
     const argv = await runBashAndGetArgv(deps);
-    expect(identityBindIndex(argv, identity)).toBeGreaterThan(-1);
-    // repo(= mainCheckoutOf(worktree))不因派生而混入 —— 透传值唯一。
-    expect(identityBindIndex(argv, repo)).toBe(-1);
+    expect(hasHostRootBind(argv)).toBe(true);
+    expect(roBindIndex(argv, identity)).toBe(-1);
+    expect(roBindIndex(argv, repo)).toBe(-1);
   });
 
-  it("unbound worker (plain sandboxRoot) → conditional absence: no identity root even when opts.projectIdentityRoot is provided", async () => {
+  it("plain worker sandboxRoot also binds the host root", async () => {
     const sandboxRoot = await makeScratch("worker-identity-root-plain-");
-    const identity = join(await makeScratch("worker-identity-root-src-"), "id");
-    await mkdir(identity, { recursive: true });
-    const deps = await buildWorkerDeps({
-      sandboxRoot,
-      projectIdentityRoot: identity,
-    });
+    const deps = await buildWorkerDeps({ sandboxRoot });
     const argv = await runBashAndGetArgv(deps);
-    expect(identityBindIndex(argv, identity)).toBe(-1);
+    expect(hasHostRootBind(argv)).toBe(true);
+    expect(roBindIndex(argv, sandboxRoot)).toBe(-1);
   });
 
-  it("rebound worker without the T3 wire → mainCheckoutOf(sandboxRoot) SSOT fallback lands in the read whitelist", async () => {
-    const { repo, worktree } = await makeWorktreeFixture(
-      "worker-identity-root-fallback-"
-    );
-    expect(mainCheckoutOf(worktree)).toBe(repo);
-    const deps = await buildWorkerDeps({ sandboxRoot: worktree });
+  it("system prefixes stay read-only in the worker fence", async () => {
+    const sandboxRoot = await makeScratch("worker-identity-root-ro-");
+    const deps = await buildWorkerDeps({ sandboxRoot });
     const argv = await runBashAndGetArgv(deps);
-    expect(identityBindIndex(argv, repo)).toBeGreaterThan(-1);
-  });
-
-  it("identity enters as a READ member (--ro-bind), not a writable bind", async () => {
-    const { repo, worktree } = await makeWorktreeFixture(
-      "worker-identity-root-readonly-"
-    );
-    const deps = await buildWorkerDeps({ sandboxRoot: worktree });
-    const argv = await runBashAndGetArgv(deps);
-    const idx = identityBindIndex(argv, repo);
-    expect(idx).toBeGreaterThan(-1);
-    expect(argv[idx]).toBe("--ro-bind");
+    for (const path of READ_ONLY_SYSTEM_PATHS) {
+      expect(roBindIndex(argv, path)).toBeGreaterThan(-1);
+    }
   });
 });

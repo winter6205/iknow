@@ -3,12 +3,12 @@ import { dirname, join } from "node:path";
 import { sanitizeConversationSegment } from "../session-roots.js";
 import { MAIN_SESSION_FENCE_TMP_DIR_NAME } from "../../shared/session-tree-names.js";
 
-/** Host path of the main-session fence `/tmp` pad under a session folder. */
+/** Host path of the main-session fence tmp dir under a session folder. */
 export function mainSessionFenceTmpPath(sessionFolder: string): string {
   return join(sessionFolder, MAIN_SESSION_FENCE_TMP_DIR_NAME);
 }
 
-/** Create (if needed) and return the main-session fence `/tmp` pad. */
+/** Create (if needed) and return the main-session fence tmp host dir. */
 export function ensureMainSessionFenceTmp(sessionFolder: string): string {
   const pad = mainSessionFenceTmpPath(sessionFolder);
   mkdirSync(pad, { recursive: true });
@@ -29,7 +29,7 @@ export function ensureMainSessionFenceTmpForConversation(
 }
 
 /**
- * Current-identity fence `/tmp` pad: explicit `tmpDir`, else
+ * Current-identity fence tmp host dir: explicit `tmpDir`, else
  * `<projectDir>/<conversationId>/fence-tmp`. Missing inputs → undefined
  * (write tools keep the legacy `/tmp` reject; bash supplies its own fallback).
  */

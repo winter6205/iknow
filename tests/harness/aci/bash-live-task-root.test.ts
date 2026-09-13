@@ -9,10 +9,10 @@
  *      and background branches of the same call read the same value.
  *   3. argv SHAPE+ORDER byte-for-byte unchanged: with a frozen home/tmp the
  *      only mutations across rebind are the cwd tokens themselves
- *      (`--bind <cwd> <cwd>` / `--chdir <cwd>` / `--bind <cwd> <cwd>` post-tmpfs
- *      when applicable). Everything else — system --ro-bind series, optional
- *      /opt /snap, --size/--tmpfs, --proc/--dev-bind, --clearenv, envArgs,
- *      command ordering — is invariant under rebind.
+ *      (`--chdir <cwd>`; `--ro-bind <cwd> <cwd>` when cwdReadonly). Everything
+ *      else — host-root `--bind / /`, system --ro-bind series, optional
+ *      /opt /snap, --proc/--dev-bind, --clearenv, envArgs, command ordering —
+ *      is invariant under rebind (ADR-0092 global mode).
  *
  * Test harness strategy: drive bash.handler with `background: true` so the
  * production chain (bash.handler → handleBackground → manager.spawn →
@@ -93,7 +93,6 @@ function makeTool(opts: {
 }) {
   return createBashTool(opts.cwd, {
     backgroundManager: makeManager(),
-    home: "/home/user",
     ...(opts.liveTaskRoot ? { liveTaskRoot: opts.liveTaskRoot } : {}),
   });
 }
@@ -292,9 +291,10 @@ describe("bash T7: argv SHAPE+ORDER invariant under root rebind", () => {
     }
   });
 
-  it("cwd under /tmp ⇒ cwd rebind after --tmpfs /tmp is preserved (regression #196 T12b)", async () => {
-    // Regression: pre-tmpfs `--bind cwd cwd` + post-tmpfs `--bind cwd cwd`
-    // both reflect the live root, in the same order as the pre-rebuild fence.
+  it("cwd under /tmp is covered by the host-root bind — no guest /tmp mount or rebind (ADR-0092)", async () => {
+    // ADR-0092: the per-invocation `--tmpfs /tmp` + post-tmpfs cwd rebind is
+    // retired. A cwd that is a descendant of host /tmp is now covered by
+    // `--bind / /`, so there is no guest `/tmp` mount to rebind after.
     const cwd = makeRealRoot("tmp-cwd");
     const cell: LiveTaskRoot = createLiveTaskRoot(cwd);
     const tool = makeTool({ cwd, liveTaskRoot: cell });
@@ -302,22 +302,20 @@ describe("bash T7: argv SHAPE+ORDER invariant under root rebind", () => {
       command: "echo tmp",
       background: true,
     });
-    let guestTmpIdx = -1;
-    for (let i = 0; i + 2 < argv.length; i++) {
-      if (argv[i] === "--bind" && argv[i + 2] === "/tmp") guestTmpIdx = i;
-    }
-    assert.notEqual(guestTmpIdx, -1);
-    const postTmpfs = argv.slice(guestTmpIdx + 3);
-    // post-tmpfs must contain a `--bind <cwd> <cwd>` triple (the rebind).
-    const rebindTripleIdx = postTmpfs.findIndex(
-      (arg, i) =>
-        arg === "--bind" && postTmpfs[i + 1] === cwd && postTmpfs[i + 2] === cwd
+    assert.ok(
+      argv.some((arg, i) => arg === "--bind" && argv[i + 1] === "/"),
+      `host root must be bound; argv=${JSON.stringify(argv)}`
     );
-    assert.notEqual(
-      rebindTripleIdx,
-      -1,
-      `cwd descendent of /tmp must have a post-tmpfs rebind for cwd=${cwd}; argv=${JSON.stringify(argv)}`
+    assert.equal(
+      argv.some((arg, i) => arg === "--bind" && argv[i + 2] === "/tmp"),
+      false,
+      "guest /tmp pad bind is retired"
     );
+    assert.equal(argv.includes("--tmpfs"), false, "--tmpfs /tmp is retired");
+    // cwd still travels as the `--chdir` target so the live root is honored.
+    const chdirIdx = argv.indexOf("--chdir");
+    assert.notEqual(chdirIdx, -1);
+    assert.equal(argv[chdirIdx + 1], cwd);
   });
 
   it("argv shape contains the canonical fence markers", async () => {

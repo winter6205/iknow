@@ -10,7 +10,8 @@
 
 - **taskRoot**（活值）: 会话当前生效的 task worktree 根——**写与工具 cwd 只问它**（写工具 / 会改工作区的 bash / git / LSP 目录 / 子代理工作目录）。……装配初值 = `SessionRoots.taskRoot`（未改绑时等于主仓）……改绑后模型经 worker prior messages / path-outside 回执看见当前写根；消费 skill 时只灌技能程序，正文不挂写根 trailer（ADR-0079）；改绑后主会话另给一次（用户消息缝，非每轮、不进 system）；system `## Project path` 仍是身份根（`projectIdentityRoot`）。
 - **hard-wall**: spawn 前意图过滤器——拦围栏看不见或拦不住的命令意图（毁灭性 rm、命令替换、敏感路径、fork-bomb），不可被 session grant 覆盖。不是第二套沙箱；换行只作分段符。耐久写只问 `taskRoot`。ADR-0068。
-- **闭世界围栏（closed-world fence）**: bash 围栏的默认姿态——deny-by-default:home 下非白名单不可见，可写集 = taskRoot + /tmp……OFF 档同样生效（全档位反转）。
+- **闭世界围栏（closed-world fence）**: 已退役的默认 bash FS 姿态（ADR-0037 §9）：home 下非白名单**不可见**，可写集 = taskRoot + `/tmp`。默认改为 **全局档**（ADR-0092）。**工作区档不是闭世界**（home 仍可见）。
+- **会话 tmp**: 每个身份（主会话或一个 worker）在会话文件夹里的宿主目录；模型与 `$TMPDIR` 用这条真路径；不 bind 成 Linux `/tmp`。寿命跟会话文件夹；不是交付落点。ADR-0092（修订 ADR-0074）。
 - **session worktree rebind**: worktree isolation mode ON 下 `create-worktree`（或 enter / exit）ACI 工具成功后，把**当前会话**生效的根锚切到本会话 task worktree 的动作……**生效边界：同一轮（run）内对下一波 tool calls 生效**。（2026-09-10 amended by `create-worktree-tools.md` / ADR-0082：原名 `create-task-worktree`。）
 - **task worktree label**: 给人/模型认树的 kebab 目录名。有合法 label 时叶子就是 `<slug>`，conversationId 不进文件夹（写在 gitdir sidecar；历史 `<slug>--<conversationId>` 仍可反演）。非法或缺席则叶子仍是纯 conversationId。**同名已存在 → 建树失败不覆盖。**
 
@@ -18,10 +19,10 @@
 
 ## Architectural Constraints
 
-- **ADR-0068**：hard-wall 只做 spawn 前意图过滤；耐久 mutate 只落活 `taskRoot`；bash `/tmp` 是围栏 tmpfs 进程临时面，不是产品交付落点。
+- **ADR-0068**：hard-wall 只做 spawn 前意图过滤；耐久 mutate 只落活 `taskRoot`；身份草稿面 = **会话 tmp** 宿主真路径（进程临时，不是产品交付落点；Linux `/tmp` 已不是身份草稿根，ADR-0092）。
 - **ADR-0037 §1 / §3 / §6**：门禁**从不** auto-provision；建树失败 fail-closed，typed、非空、可见；同名树/分支已存在不静默覆盖、不复用归属不明的树。
 - **ADR-0037 §7.1 / §7.2**：活 `taskRoot` 唯一 writer = 装配层对 host `provision`/`enter`/`exit` 缝的包装点；一波一快照，波内逐 call 重读被禁。
-- **ADR-0037 §9.2**：写白名单 = `taskRoot` + `/tmp`，**无第三者**。本 spec 不动围栏。
+- **ADR-0037 §9.2**：原写白名单 = `taskRoot` + `/tmp`，**无第三者**；默认 FS 姿态改为 **全局档** 后，写集 = `taskRoot` ∪ **会话 tmp** 宿主真路径（ADR-0092）。本 spec 不动围栏。
 - **ADR-0037 T9 红线**：活写根**不进 system**、不进 `env_snapshot`。
 - **ADR-0004**：bash 安全边界以 OS 沙箱为准；allowlist / 硬墙不得充当第二套沙箱。
 - **ADR-0040**：子代理是父会话执行臂，继承父写根，不另开产物目录。
@@ -51,7 +52,7 @@
   - `WorktreeIsolationErrorKind` 的**可恢复性穷尽表**；`operator_required` 类自带停止指令。
   - `worktree_exists` 按 sidecar 归属给**唯一**指引；`branch_exists` 分「目标目录在 / 不在」两子况。
   - `enter-worktree` 成功回执告知该树的创建者会话（**恒定开**，零成本一次文件读）。
-  - bash 工具描述补 `/tmp` 进程临时事实，**沿用 ADR-0068 / `helpers.ts` T3 已定词汇**。
+  - bash 工具描述补会话 tmp 进程临时事实（宿主真路径、跟会话寿命、不是交付落点），**沿用 ADR-0068 / `helpers.ts` T3 已定词汇**。
 - **Confirms with human:**（本 session 已确认，不再开口）不恢复 auto-provision；不做宿主草稿纸 / 第 5 个根；不做 `web_fetch` `save_to`；不做装配期 git 预检；不做 `force` / `release` / 活性检测 / 锁文件；网络两条移出本 spec 且**不开 issue**；锁另立 `specs/worktree-exclusive-lock.md`。
 - **Out of this spec:** 见文末「后续（本 spec 不做）」。
 
@@ -67,7 +68,7 @@
 8. **`worktree_exists` 指引唯一**：按 `taskWorktreeOwnerOf(worktreePath)` 分三种，各有测试——owner === 本会话 → 点名 `enter-worktree`；owner !== 本会话 → 点名 `enter-worktree`（显式接手）**或**换 label；owner 读不出（无 sidecar / 历史树）→ 点名 `list-worktrees`。sidecar 读取失败不得 throw，退化到第三种。
 9. **`branch_exists` 分子况**：目标目录**存在** → 与 SC8 同形；目标目录**不存在**（`remove-worktree` 默认不删分支造成的遗留分支）→ 指引换 label 或请操作员删分支，且**不含** `enter-worktree`（此时 enter 必撞 `worktree_not_found`，照抄会造第二次空转）。
 10. **归属告知恒定开**：`enter-worktree` 成功回执含该树 sidecar 记录的创建者会话 id；读不出则**省略该句**（不崩、不占位）。此告知**不受任何设置控制**——零成本、永不阻塞，与 `specs/worktree-exclusive-lock.md` 的拦截档位是两件事。
-11. **bash `/tmp` 事实**：bash 工具描述含「`/tmp` 内文件仅在本命令期间存在、命令结束即无」语义，词汇与 `helpers.ts` T3 文案一致（`process-temporary` / `not a delivery destination`）。**静态**，不进三态函数（该事实与隔离态、绑定态无关）。
+11. **会话 tmp 事实**：bash 工具描述含「**会话 tmp**（宿主真路径）里的文件跟身份会话同寿命、不是交付落点」语义，词汇与 `helpers.ts` T3 文案一致（`process-temporary` / `not a delivery destination`；ADR-0092 后 `/tmp` 不再是身份草稿根）。**静态**，不进三态函数（该事实与隔离态、绑定态无关）。
 12. **绿线**：`npm test` 与 `npm run typecheck` exit 0。
 
 ### 输入五类（S2，实施必须覆盖）
@@ -98,7 +99,7 @@
 
 ## Inherits / Changes
 
-**Inherits:** ADR-0068 可写合同与 `/tmp` 词汇；ADR-0037 §1/§3/§6/§7/§9.2 与 T9 红线；ADR-0004；ADR-0040；`isTaskWorktreePath` / `taskWorktreeOwnerOf` / owner sidecar（`worktree-gate.ts:575` / `:674` / `:589-617`）；`writeRootSegment` 文案 SSOT 与三消费方（`skill-load-write-root`）；`HardRuleSpec.reasonFor` 的机读 id 惯例（PR #947）；SC7 子串禁令与「不按问句分型」；vitest `npm test`。
+**Inherits:** ADR-0068 可写合同与会话 tmp 词汇（ADR-0092）；ADR-0037 §1/§3/§6/§7/§9.2 与 T9 红线；ADR-0004；ADR-0040；`isTaskWorktreePath` / `taskWorktreeOwnerOf` / owner sidecar（`worktree-gate.ts:575` / `:674` / `:589-617`）；`writeRootSegment` 文案 SSOT 与三消费方（`skill-load-write-root`）；`HardRuleSpec.reasonFor` 的机读 id 惯例（PR #947）；SC7 子串禁令与「不按问句分型」；vitest `npm test`。
 
 **Changes:**
 
@@ -160,4 +161,4 @@ OVERALL: PASS — hand to writing-plans
 3. **装配期 git 预检** — SC7 的停止指令已够；预检要每会话一次 git 子进程，且瞬时故障会被误分成「配置故障型」，违反 ADR-0037 §9.4 两型分立。重新考虑的条件：实测到模型仍在 `not_a_git_repo` 上烧回合。
 4. **网络出口加固** — 现状：`bash` 的 `network:true` 是 per-call 开关，默认 `--unshare-net` 断网，永远走显式批准且 `full_auto` 不豁免。缺口两条：(a) 模型可**无限制地**请求联网（批准疲劳风险）；(b) 放行后全网可达，含内网 / LAN / 云 metadata，**无域名或 IP 过滤**（`bwrap.ts:114` 是 `network ? [] : ["--unshare-net"]`，二值无中间档）。候选做法：settings 级资格前置（默认模型无权请求）+ 批准文案明写「完整宿主网络、含内网与 metadata、无过滤」。**不做**代理 / 域名白名单 / TLS 终结 / netns + nftables——那是独立功能独立 ADR。重新考虑的条件：一次真实的内网 / metadata 访问事故，或操作员明确要按域名放行。
 5. **不可信内容经文件系统洗白** — `network-guard` 是 `web_fetch` / `web_search` **共用**的出站防线（`network-guard.ts:2`），**不覆盖 bash**；经 `curl -o` 或 `write_file` 落盘的内容，之后被 `read_file` 读回时不带 untrusted banner（文件系统不记得来源）。属通用注入面，**移交 `specs/security-guardrails.md` 轨**，不进本 spec（否则范围从「告知面」漂到「注入防护」）。
-6. **明确不做** — 用加长说明书代替闸；语义级 shell 解析器（ADR-0068 已拒）；把 `/tmp` 升级成持久落点；把临时面当子代理交接区；恢复 auto-provision。
+6. **明确不做** — 用加长说明书代替闸；语义级 shell 解析器（ADR-0068 已拒）；把会话 tmp 升级成持久落点；把临时面当子代理交接区；恢复 auto-provision。

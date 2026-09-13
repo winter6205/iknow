@@ -1,4 +1,11 @@
 /**
+ * Archived 2026-09-13 (ADR-0092 fs isolation modes Round 1):
+ * `VerifyLoopOptions.installRoot` and its pass-through retired with the
+ * closed-world read channel. The still-true pass-through (cwd / home reach
+ * the default runVerify assembly) is re-certified in
+ * `tests/harness/verify/verify-loop-default-runverify.test.ts`.
+ *
+ * ── original header ──────────────────────────────────────────────────────
  * T4 (plans/closed-world-bash-fence.md) — verify-loop installRoot 最小接线。
  *
  * VerifyLoopOptions 新增可选 installRoot,runVerifyLoop 透传给

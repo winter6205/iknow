@@ -121,10 +121,12 @@ export function createReadFileTool(
   // is added as a second read root so the agent's per-root persona state
   // reaches the same surface as the global home profile. The contract is
   // reachability-only: extraReadRoots grants traversal through
-  // `resolveWithinRoot`, while protected-path enforcement (the fs-policy
-  // `isSensitive` set) is the separate fence that turns `.iknow` state
-  // files into `execution_failed` when touched from the bash channel. Read
-  // and protection are independent and intentionally so — see plan T4.
+  // `resolveWithinRoot`. Write enforcement (the bash channel's `.iknow`
+  // state files becoming `execution_failed`) is the permission chain +
+  // bwrap hard-wall (ADR-0092 global mode binds the host root, system
+  // prefixes read-only; cwd writes are gated by the validator +
+  // `--ro-bind cwd` EROFS). Read and protection are independent and
+  // intentionally so — see plan T4.
   //
   // ADR-0037 §1 (T6 D10 wired): projectIdentityRoot threads the read-only
   // identity-root passthrough so rebind doesn't strand AGENTS.md /

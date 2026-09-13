@@ -3,77 +3,51 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.js";
-import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.js";
+import {
+  createBwrapFence,
+  OPTIONAL_HOST_RO_PREFIXES,
+} from "../../../src/harness/sandbox/bwrap.js";
+import {
+  READ_ONLY_SYSTEM_PATHS,
+  createFsPolicy,
+} from "../../../src/harness/sandbox/fs-policy.js";
 import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.js";
-import { createResourceLimits } from "../../../src/harness/sandbox/resource-limits.js";
 
 /**
- * post-tmpfs 重绑(机制保留,T3 闭世界形态)。
+ * ADR-0092 全局档挂载排序(#196 T12b 病灶退役后的不变式)。
  *
- * `--tmpfs /tmp` 会把此前绑进来的所有 /tmp/* 子树遮蔽(#196 T12b 病灶)。
- * 旧世界重绑对象 = home + cwd(writable 打底)与 identity ro-bind;闭世界
- * 下 home 不再是 bind root(home rebind 随 writable home 打底一起消亡),
- * 重绑对象 = 读白名单根(ro 夺回)+ cwd(可写夺回,最后)。cwdReadonly 时
- * cwd 重绑保持只读(#562 T5)。
- *
- * 合同根盘上校验 → fixtures 真实存在:/tmp 子树用 mkdtemp(tmpdir()),
- * /tmp 子树外用 homedir() 下的 fixture(生产形态)。
+ * 旧闭世界靠 `--tmpfs /tmp` + post-tmpfs 重绑兜底,tmpfs 遮蔽此前绑入的
+ * /tmp/* 子树是病灶本体。全局档没有任何 /tmp 挂载,/tmp 子树里的 cwd
+ * 由 `--bind / /` 一次性覆盖 —— 不存在遮蔽,也就不需要重绑。本文件钉住
+ * 排序不变式:宿主根打底、系统前缀只读覆盖、cwdReadonly 覆盖在其后、
+ * 命令尾部不变;并把 "不再有重绑 token" 作为正命题。
  */
 
-const OUTSIDE_ROOT = mkdtempSync(join(homedir(), ".iknow-bwrap-rebind-"));
+const OUTSIDE_ROOT = mkdtempSync(join(homedir(), ".iknow-bwrap-global-order-"));
 
 afterAll(() => {
   rmSync(OUTSIDE_ROOT, { recursive: true, force: true });
 });
 
-interface RebindSpec {
+interface Spec {
   readonly cwd: string;
-  readonly home: string;
-  readonly tmpDir?: string;
-  readonly installRoot?: string;
-  /** T5:identity 根经 policy 读白名单进围栏(bwrap 层选项已删)。 */
-  readonly identityRoot?: string;
   readonly cwdReadonly?: boolean;
 }
 
-function fenceArgs(spec: RebindSpec): readonly string[] {
+function fenceArgs(spec: Spec): readonly string[] {
   return createBwrapFence({
     command: "bash",
     args: ["-c", "true"],
     fsPolicy: createFsPolicy({
-      cwd: spec.cwd,
-      home: spec.home,
-      ...(spec.tmpDir !== undefined ? { tmpDir: spec.tmpDir } : {}),
-      ...(spec.installRoot !== undefined
-        ? { installRoot: spec.installRoot }
-        : {}),
-      ...(spec.identityRoot !== undefined
-        ? { projectIdentityRoot: spec.identityRoot }
-        : {}),
+      tmpDir: spec.cwd,
     }),
     networkPolicy: createNetworkPolicy(),
-    resourceLimits: createResourceLimits(),
     env: { PATH: "/bin" },
     cwd: spec.cwd,
     ...(spec.cwdReadonly ? { cwdReadonly: true } : {}),
   }).argv;
 }
 
-function guestTmpMountIdx(argv: readonly string[]): number {
-  let idx = -1;
-  for (let i = 0; i + 2 < argv.length; i++) {
-    if (argv[i] === "--bind" && argv[i + 2] === "/tmp") idx = i;
-  }
-  assert.notEqual(idx, -1, "expected `--bind <pad> /tmp` in argv");
-  return idx;
-}
-
-function postTmpfs(argv: readonly string[]): readonly string[] {
-  return argv.slice(guestTmpMountIdx(argv) + 3);
-}
-
-/** `verb <target> <target>` 三元组位置(在给定切片内)。 */
 function tripleIdx(
   slice: readonly string[],
   verb: string,
@@ -85,146 +59,74 @@ function tripleIdx(
   );
 }
 
-describe("bwrap post-tmpfs rebinds (closed world)", () => {
-  it("cwd under /tmp ⇒ writable cwd rebind after --tmpfs /tmp", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "bwrap-rebind-cwd-"));
+describe("createBwrapFence — 全局档挂载排序 (/tmp 子树不再是特例)", () => {
+  it("cwd inside /tmp is covered by the host-root bind — no rebind token exists", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bwrap-global-cwd-"));
     try {
-      const argv = fenceArgs({ cwd, home: "/home/user" });
-      const post = postTmpfs(argv);
-      assert.notEqual(
-        tripleIdx(post, "--bind", cwd),
+      const argv = fenceArgs({ cwd });
+      const rootBindIdx = tripleIdx(argv, "--bind", "/");
+      assert.notEqual(rootBindIdx, -1, "host root bind is present");
+      // cwd 子树不再有独立可写 bind —— `/` 已覆盖。
+      assert.equal(
+        tripleIdx(argv, "--bind", cwd),
         -1,
-        "cwd descendant of /tmp must be re-bound writable after the tmpfs"
+        "no per-cwd writable rebind in global mode"
       );
+      // 系统块仍在 `/` 之后(cwd ∈ /tmp 不影响系统前缀只读覆盖)。
+      const etcIdx = tripleIdx(argv, "--ro-bind", "/etc");
+      assert.ok(etcIdx > rootBindIdx);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
   });
 
-  it("read root under /tmp ⇒ ro rebind after --tmpfs /tmp, before the cwd rebind (write reclaims last)", () => {
-    const home = mkdtempSync(join(tmpdir(), "bwrap-rebind-home-"));
-    const installRoot = join(home, "install");
-    const cwd = join(home, "workspace");
-    mkdirSync(cwd, { recursive: true });
-    mkdirSync(installRoot, { recursive: true });
-    try {
-      const argv = fenceArgs({ cwd, home, installRoot });
-      const post = postTmpfs(argv);
-      const installRebindIdx = tripleIdx(post, "--ro-bind", installRoot);
-      const cwdRebindIdx = tripleIdx(post, "--bind", cwd);
-      assert.notEqual(
-        installRebindIdx,
-        -1,
-        "read root shadowed by the tmpfs must be re-asserted read-only"
-      );
-      assert.notEqual(
-        cwdRebindIdx,
-        -1,
-        "cwd rebind must still reclaim writability"
-      );
-      assert.ok(
-        installRebindIdx < cwdRebindIdx,
-        "read rebinds precede the cwd write reclaim"
-      );
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("identity root under /tmp (main repo inside the tmp home) ⇒ identity ro rebind precedes the cwd rebind", () => {
-    // T5 合并的 #891 泄漏形状用例(主仓 = /tmp home 的子目录,taskRoot 在
-    // 主仓内)。机制对读白名单统一 —— identity 根作为 policy 读成员,与
-    // installRoot 走同一条 post-tmpfs ro 重绑路径;cwd 重绑最后夺回可写。
-    const home = mkdtempSync(join(tmpdir(), "bwrap-rebind-identity-"));
-    const repo = join(home, "projects", "iknow");
-    const cwd = join(repo, ".iknow", "worktrees", "conv-891");
-    mkdirSync(cwd, { recursive: true });
-    try {
-      const argv = fenceArgs({ cwd, home, identityRoot: repo });
-      const post = postTmpfs(argv);
-      const identityRebindIdx = tripleIdx(post, "--ro-bind", repo);
-      const cwdRebindIdx = tripleIdx(post, "--bind", cwd);
-      assert.notEqual(
-        identityRebindIdx,
-        -1,
-        "identity read member shadowed by the tmpfs must be re-asserted read-only"
-      );
-      assert.notEqual(cwdRebindIdx, -1, "cwd rebind reclaims writability");
-      assert.ok(
-        identityRebindIdx < cwdRebindIdx,
-        "identity ro rebind precedes the cwd write reclaim"
-      );
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("home is never bound — under /tmp or not (writable-home base is gone, #196 T12b home rebind dies with it)", () => {
-    // home 在 /tmp 子树内(旧世界必然触发 home rebind 的形状)+ cwd 在 home
-    // 内:闭世界下 argv 不得含任何 home bind/rebind token。
-    const home = mkdtempSync(join(tmpdir(), "bwrap-rebind-homeshadow-"));
-    const cwd = join(home, "workspace");
-    mkdirSync(cwd, { recursive: true });
-    try {
-      const argv = fenceArgs({ cwd, home });
-      assert.equal(
-        tripleIdx(argv, "--bind", home),
-        -1,
-        "no pre-tmpfs home bind in the closed world"
-      );
-      assert.equal(
-        tripleIdx(postTmpfs(argv), "--bind", home),
-        -1,
-        "no post-tmpfs home rebind — home is not a bind root"
-      );
-      // cwd 仍按机制重绑(cwd 在 /tmp 子树内)。
-      assert.notEqual(tripleIdx(postTmpfs(argv), "--bind", cwd), -1);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  it("cwd outside /tmp ⇒ no rebinds at all (production shape)", () => {
+  it("cwd outside /tmp ⇒ identical shape (no /tmp special case at all)", () => {
     const cwd = join(OUTSIDE_ROOT, "task");
     mkdirSync(cwd, { recursive: true });
-    const argv = fenceArgs({ cwd, home: "/home/user" });
-    const post = postTmpfs(argv);
-    assert.equal(
-      tripleIdx(post, "--bind", cwd),
-      -1,
-      "cwd outside /tmp needs no rebind"
-    );
-    assert.equal(
-      tripleIdx(post, "--ro-bind", cwd),
-      -1,
-      "no read-only rebind for a cwd outside /tmp either"
-    );
-    // 无任何重绑 token:post-tmpfs 区只剩 --proc / --dev-bind。
-    assert.deepEqual(post.slice(0, 4), [
-      "--proc",
-      "/proc",
-      "--dev-bind",
-      "/dev",
-    ]);
+    const insideTmp = fenceArgs({ cwd: OUTSIDE_ROOT });
+    const outside = fenceArgs({ cwd });
+    // 两形态只在 cwd token 上不同;mount 骨架逐字节一致。
+    const mountOf = (argv: readonly string[]): readonly string[] =>
+      argv.slice(0, argv.indexOf("--clearenv"));
+    assert.deepEqual([...mountOf(outside)], [...mountOf(insideTmp)]);
+    assert.equal(tripleIdx(outside, "--bind", cwd), -1);
+    assert.equal(tripleIdx(outside, "--ro-bind", cwd), -1);
   });
 
-  it("cwdReadonly + cwd under /tmp ⇒ the post-tmpfs rebind stays read-only", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "bwrap-rebind-ro-"));
+  it("cwdReadonly stays read-only regardless of cwd location and precedes proc/dev", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bwrap-global-ro-"));
     try {
-      const argv = fenceArgs({ cwd, home: "/home/user", cwdReadonly: true });
-      const post = postTmpfs(argv);
+      const argv = fenceArgs({ cwd, cwdReadonly: true });
+      assert.equal(tripleIdx(argv, "--bind", cwd), -1);
+      const roIdx = tripleIdx(argv, "--ro-bind", cwd);
+      assert.notEqual(roIdx, -1, "readonly cwd is ro-bound exactly once");
+      // cwd 恰好出现 3 次 = `--ro-bind cwd cwd` 三元组(2) + `--chdir cwd`(1)。
+      // 任何额外出现即退役的 post-mount 重绑残留。
       assert.equal(
-        tripleIdx(post, "--bind", cwd),
-        -1,
-        "readonly fence must not reclaim writability after the tmpfs"
+        argv.filter((a) => a === cwd).length,
+        3,
+        "cwd appears only as the ro bind triple plus the --chdir arg"
       );
-      assert.notEqual(
-        tripleIdx(post, "--ro-bind", cwd),
-        -1,
-        "readonly cwd rebinds as --ro-bind after the tmpfs"
-      );
+      const rootBindIdx = tripleIdx(argv, "--bind", "/");
+      const procIdx = argv.indexOf("--proc");
+      assert.ok(rootBindIdx < roIdx && roIdx < procIdx);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("system prefixes are always bound after the host root, in list order", () => {
+    const argv = fenceArgs({ cwd: OUTSIDE_ROOT });
+    let cursor = tripleIdx(argv, "--bind", "/");
+    assert.notEqual(cursor, -1);
+    for (const target of [
+      ...READ_ONLY_SYSTEM_PATHS,
+      ...OPTIONAL_HOST_RO_PREFIXES,
+    ]) {
+      const idx = tripleIdx(argv, "--ro-bind", target);
+      if (idx === -1) continue; // optional prefix absent on host
+      assert.ok(idx > cursor, `${target} must follow the previous mount`);
+      cursor = idx;
     }
   });
 });

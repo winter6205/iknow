@@ -72,17 +72,13 @@ describe("createBashTool — schema and metadata", () => {
     assert.equal(tool.exemptFromOutputCap, undefined);
   });
 
-  // T8 (parent-visible-tmp): bash description 两句 —— 进项目写 taskRoot；
-  // 不必进仓写 /tmp（跟当前身份同寿命，不是交付）。写根段仍不提 /tmp。
-  // 取代 write-situation-disclosure SC11 的「一次命令即灭」寿命句（ADR-0074）。
-  it("description documents project writes at taskRoot and /tmp when it need not enter the repo", async () => {
+  // ADR-0092: bash description 两句 —— 进项目写 taskRoot;不必进仓的
+  // scratch 写会话 tmp 目录($TMPDIR,跟当前身份同寿命,不是交付)。
+  it("description documents project writes at taskRoot and the session tmp dir ($TMPDIR)", async () => {
     const cwd = await makeScratch("bash-desc-tmp-");
     const tool = createBashTool(cwd);
     assert.match(tool.description, /write into the project at taskRoot/i);
-    assert.match(
-      tool.description,
-      /write \/tmp when it need not enter the repo/i
-    );
+    assert.match(tool.description, /session tmp dir \(\$TMPDIR/i);
     assert.match(tool.description, /not a delivery destination/);
   });
 });

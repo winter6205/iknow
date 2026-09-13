@@ -1,6 +1,8 @@
 # Spec: ③ 安全护栏（权限三层 · 沙箱 · 中断/超时）
 
 > **Amendment 2026-09-13**（#1004 / ADR-0090）：项目 `permissions` 段的**规则形态**以 `declarative-project-permissions.md` 为准（`allow`/`ask`/`deny` 字符串）。本文件仍是权限**三层链 / 沙箱 / 中断**的权威；下文 `rule[]` 谓词 DSL、toml 示例视为历史。
+>
+> **Amendment 2026-09-13**（ADR-0092 / `specs/fs-isolation-modes.md`）：围栏（网络 / env / rlimit / proc / dev，系统前缀只读）仍在，但默认 **FS 姿态 = 全局档**——宿主真路径可读可写，拦写靠权限三层 + hard-wall；身份草稿面 = **会话 tmp** 宿主真路径，不 bind 成 `/tmp`。下文「FS 白名单减敏感清单」的默认描述视为历史（ADR-0092 superseded）。
 
 > **Lean spec.** 上游权威决议 = wayfinder map [#115](https://github.com/winter6205/iknow/issues/115) + 子票 [#122](https://github.com/winter6205/iknow/issues/122)（权限三层）/ [#123](https://github.com/winter6205/iknow/issues/123)（零信任沙箱）/ [#124](https://github.com/winter6205/iknow/issues/124)（中断/超时）/ [#162](https://github.com/winter6205/iknow/issues/162)（askUser 三入口平权装配）。本 spec 只补充决议未钉死的实施层细节（文件布局 / TS 类型骨架 / 配置格式 / 验收映射）；未重述内容以四票 Resolution 为准。
 >
@@ -32,7 +34,7 @@
 **What**: 在 iknow harness（`src/harness/`）上实施③安全护栏的三块决策：
 
 1. **权限三层**（#122）：独立中间件链（preToolUse hook → checkPermission → askUser → inner → postToolUse hook），三值决策 `allow/deny/ask`，规则三层（代码内置 → 项目设置 → 会话授予）+ 硬墙不可覆盖，askUser 作为装配参数。
-2. **零信任沙箱**（#123）：bash 工具（及未来 execute 类）在 bwrap 围栏内执行——FS 白名单减敏感清单、网络默认 deny + 静态白名单、rlimit + tmpfs 资源限制、违规分级处置、密钥 env 隔离 + 输出 mask 红线。
+2. **零信任沙箱**（#123）：bash 工具（及未来 execute 类）在 bwrap 围栏内执行——默认 FS 姿态 = **全局档**（宿主真路径可读可写；系统前缀只读；拦写靠权限 + hard-wall，ADR-0092）——网络默认 deny + 静态白名单、rlimit + tmpfs 资源限制、违规分级处置、密钥 env 隔离 + 输出 mask 红线。
 3. **中断/超时分级**（#124）：`interruptBehavior`（cancel/block）在 AciExecutor 路由层运行时生效、per-tool 四档超时、bash 超时/取消保留 partial output。v0 不做后台任务管理器。
 
 **Why**: ch05 验收「越权/危险操作被稳定拦截，长任务不阻塞主循环」+ map Destination「密钥永不进入运行生成代码的 sandbox」。原型（`src/harness/aci/`）已验证形态（permission 装饰 + allowlist-first 21/21 对抗结论），毕业进产品路径是既定债务（ADR-0004 bash 沙箱阻塞前置）。
@@ -78,7 +80,7 @@ src/harness/
 │   └── permission-executor.ts  # 装饰 Executor：五步中间件链（D1）
 ├── sandbox/                    # 新增：零信任沙箱（#123）
 │   ├── bwrap.ts                # bwrap argv 构造 + spawn（FS/网络/资源参数合成）
-│   ├── fs-policy.ts            # 白名单（cwd + $HOME + tmpdir）− 敏感清单；只读系统目录
+│   ├── fs-policy.ts            # 默认全局档：宿主真路径可读可写；系统前缀只读；拦写靠 permission + hard-wall（ADR-0092，旧「cwd + $HOME + tmpdir − 敏感清单」白名单已 superseded）
 │   ├── network-policy.ts       # 默认 deny + 静态白名单 + unshare-net
 │   ├── resource-limits.ts      # rlimit + tmpfs 数值（可配）
 │   ├── env-isolation.ts        # env 白名单（拥有层）；密钥名从 env.ts SSOT 取 + 兜底正则
