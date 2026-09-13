@@ -42,7 +42,6 @@ import {
   createEnvIsolation,
   createFsPolicy,
   createNetworkPolicy,
-  createResourceLimits,
   type FsPolicy,
 } from "../src/harness/sandbox/index.js";
 import { requireBwrap } from "../src/harness/sandbox/runner.js";
@@ -60,7 +59,6 @@ const ENV_BASE = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST }).filter(
   process.env
 );
 const NETWORK_POLICY = createNetworkPolicy();
-const RESOURCE_LIMITS = createResourceLimits();
 /** host 侧唯一 token（探针进程级别；避免档间 / 并发跑互相看到标记）。 */
 const TOKEN = `iknow-probe-${process.pid}`;
 
@@ -98,7 +96,6 @@ function spawnFenceSync(
     args: ["-c", command],
     fsPolicy: profile.fsPolicy,
     networkPolicy: NETWORK_POLICY,
-    resourceLimits: RESOURCE_LIMITS,
     env,
     cwd: profile.cwd,
     network,
@@ -124,7 +121,6 @@ function spawnFenceAsync(
     args: ["-c", command],
     fsPolicy: profile.fsPolicy,
     networkPolicy: NETWORK_POLICY,
-    resourceLimits: RESOURCE_LIMITS,
     env,
     cwd: profile.cwd,
     network,
@@ -573,7 +569,7 @@ function buildGlobalProfile(): ProbeProfile {
     cwd,
     pad,
     extra,
-    fsPolicy: createFsPolicy({ home: HOME, tmpDir: pad }),
+    fsPolicy: createFsPolicy({ tmpDir: pad }),
     cleanup: () => {
       rmSync(cwd, { recursive: true, force: true });
       rmSync(pad, { recursive: true, force: true });
@@ -592,7 +588,7 @@ function buildWorktreeProfile(): ProbeProfile {
     cwd: wt,
     pad,
     extra,
-    fsPolicy: createFsPolicy({ home: HOME, tmpDir: pad }),
+    fsPolicy: createFsPolicy({ tmpDir: pad }),
     cleanup: () => {
       rmSync(base, { recursive: true, force: true });
       rmSync(pad, { recursive: true, force: true });

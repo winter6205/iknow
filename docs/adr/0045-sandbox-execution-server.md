@@ -9,7 +9,7 @@ Status: accepted
 
 ## Context
 
-`sandbox/execution` 面今日为 in-process 直调：bash tool（`src/harness/aci/tools/bash.ts:218-224`）经 `runInSandbox` → `spawnWithStopSignal` 同步等子进程退出；background（`src/harness/background/manager.ts:239-291` 的 `defaultBackgroundSpawn`）绕过 `runInSandbox`，**直接** `nodeSpawn(fence.argv[0], …)` 起 detached 进程组，host 侧持 `child.pid` 落 `record.pgid`（`manager.ts:388`），`bash_stop` 在 host 侧经 `process.kill(-pid, …)` 升级（`manager.ts:587-624`）；verify（`src/harness/verify/sandbox-run.ts:60-77` 的 `makeDefaultRunVerify`）经 `runInSandbox` 同步等子进程退出。三处装配虽 fence argv 同源（`createBwrapFence` + `createClosedWorldFsPolicy`），但**执行体裸用 `node:child_process`**——bash 工具经 `runInSandbox`、background 经 `nodeSpawn`、verify 又经 `runInSandbox`，是三条不同的 `child_process.spawn` 接入点。
+`sandbox/execution` 面今日为 in-process 直调：bash tool（`src/harness/aci/tools/bash.ts:218-224`）经 `runInSandbox` → `spawnWithStopSignal` 同步等子进程退出；background（`src/harness/background/manager.ts:239-291` 的 `defaultBackgroundSpawn`）绕过 `runInSandbox`，**直接** `nodeSpawn(fence.argv[0], …)` 起 detached 进程组，host 侧持 `child.pid` 落 `record.pgid`（`manager.ts:388`），`bash_stop` 在 host 侧经 `process.kill(-pid, …)` 升级（`manager.ts:587-624`）；verify（`src/harness/verify/sandbox-run.ts:60-77` 的 `makeDefaultRunVerify`）经 `runInSandbox` 同步等子进程退出。三处装配虽 fence argv 同源（`createBwrapFence` + `createClosedWorldFsPolicy`（**2026-09-13 已随 ADR-0092 退役**，现为 `createFsPolicy`）），但**执行体裸用 `node:child_process`**——bash 工具经 `runInSandbox`、background 经 `nodeSpawn`、verify 又经 `runInSandbox`，是三条不同的 `child_process.spawn` 接入点。
 
 2026-09-06 `plans/closed-world-bash-fence.md` Round 2 ACR（bounded-context-guardian / defensive-contract-validator / error-handling-enforcer）开轨评审的 `unclear/no` 项指出三个缺口：
 

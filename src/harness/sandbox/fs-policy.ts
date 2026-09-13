@@ -1,15 +1,6 @@
 import { existsSync } from "node:fs";
-import { relative, resolve, sep } from "node:path";
+import { resolve } from "node:path";
 import { ToolExecutionError } from "../errors.js";
-
-export const SENSITIVE_PATHS: readonly string[] = Object.freeze([
-  "~/.ssh",
-  "~/.aws",
-  "~/.gnupg",
-  "~/.config/gh",
-  "~/.kube",
-  "~/.docker",
-]);
 
 /**
  * Fixed system prefixes re-bound read-only in the global fence (ADR-0092):
@@ -41,41 +32,12 @@ export interface FsPolicy {
    *  inside the fence `$TMPDIR` points at it and write tools may target it.
    *  It is a host path only — never a bind target for guest Linux `/tmp`. */
   tmpRoot(): string;
-  /** True when the path is operator-sensitive state (`~/.ssh`, …) or the
-   *  protected `<home>/.iknow` / `<workspaceRoot>/.iknow` subtree. Retained
-   *  as the soft-fence predicate surface the Round 2 workspace mode consumes;
-   *  the global fence binds the host root, so permission + hard-wall carry
-   *  the write guard and this predicate does not shape argv. */
-  isSensitive(absPath: string): boolean;
 }
 
 export interface FsPolicyOptions {
-  /** State anchor ONLY (ADR-0019 D1). Drives `~` expansion of the sensitive
-   *  set and the `<home>/.iknow` protected-state path. Never a bind root:
-   *  the global fence makes home visible below the system ro-binds. */
-  readonly home: string;
-  /** ADR-0019 (T4): per-root state anchor. Contributes the protected state
-   *  path `<workspaceRoot>/.iknow` — and nothing else; it is not a bind root. */
-  readonly workspaceRoot?: string;
   /** Session tmp host path for this identity (ADR-0092). Contract input:
    *  blank or missing on disk → typed fail-loud. */
   readonly tmpDir: string;
-}
-
-function isWithin(root: string, target: string): boolean {
-  const rel = relative(root, target);
-  return (
-    rel === "" ||
-    (rel !== ".." && !rel.startsWith(`..${sep}`) && !rel.startsWith(sep))
-  );
-}
-
-function expandHome(path: string, home: string): string {
-  return path === "~"
-    ? home
-    : path.startsWith("~/")
-      ? resolve(home, path.slice(2))
-      : resolve(path);
 }
 
 /**
@@ -98,39 +60,15 @@ function contractRoot(role: string, value: string | undefined): string {
 }
 
 /**
- * Per-root state anchor directories that must NOT be treated as ordinary
- * agent-scratch space, even though `.iknow` is physically inside the workspace
- * root (or home). The whole `<root>/.iknow` subtree is covered — `isWithin`
- * cascades to every child, so listing each file/dir is redundant.
- *
- * Applied to BOTH `<home>/.iknow` and `<workspaceRoot>/.iknow` per D1.4
- * (per-root persona state boundary).
- */
-function makeProtectedStatePaths(opts: FsPolicyOptions): readonly string[] {
-  const bases = [resolve(opts.home)];
-  if (opts.workspaceRoot) bases.push(resolve(opts.workspaceRoot));
-  return Object.freeze(bases.map((base) => resolve(base, ".iknow")));
-}
-
-/**
  * Global fs policy (ADR-0092): the default bash posture is host real paths,
- * visible and writable below the read-only system prefixes. There is no
- * read/write whitelist any more; this policy carries the identity's session
- * tmp host path (`$TMPDIR` source) and the sensitive/protected-state
- * predicate surface retained for the Round 2 workspace mode.
+ * visible and writable below the read-only system prefixes. The policy only
+ * carries the identity's session tmp host path (the `$TMPDIR` source) — no
+ * sensitive-path predicate, no per-root bind roots, no read/write whitelist.
+ * Write enforcement lives in the bwrap mount layer (`--bind / /` + system
+ * `--ro-bind` over `/etc /usr /bin /lib /lib64`) and the permission chain
+ * + hard-walls; a `home` / `workspaceRoot` predicate would not shape argv.
  */
 export function createFsPolicy(opts: FsPolicyOptions): FsPolicy {
   const tmpRoot = contractRoot("tmpDir", opts.tmpDir);
-  const sensitive = Object.freeze(
-    SENSITIVE_PATHS.map((path) => expandHome(path, resolve(opts.home)))
-  );
-  const protectedStates = makeProtectedStatePaths(opts);
-  const isSensitive = (absPath: string): boolean => {
-    const target = resolve(absPath);
-    return (
-      sensitive.some((root) => isWithin(root, target)) ||
-      protectedStates.some((root) => isWithin(root, target))
-    );
-  };
-  return Object.freeze({ tmpRoot: () => tmpRoot, isSensitive });
+  return Object.freeze({ tmpRoot: () => tmpRoot });
 }

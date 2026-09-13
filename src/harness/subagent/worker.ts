@@ -208,9 +208,11 @@ export interface CreateWorkerDepsOptions {
    *  createDefaultAciRegistry 做 def-list 期裁剪 (声明面 = 实际面)。
    *  缺席 / undefined 不裁剪, 向后兼容旧 wire。 */
   readonly disallowedTools?: ReadonlyArray<string>;
-  /** ADR-0019 (review-fix H3): per-root state anchor。透传给
-   *  createDefaultAciRegistry 让 fs-policy 保护 `<workspaceRoot>/.iknow`。
-   *  缺席 → registry 内部 fallback 到 sandboxRoot(legacy 形态)。 */
+  /** ADR-0019 (T4): per-root state anchor. Threaded to `createDefaultAciRegistry`
+   *  → read_file's `extraReadRoots` so `<workspaceRoot>/.iknow` is reachable
+   *  at parity with the home profile. ADR-0092 global mode: not a bind root;
+   *  bash no longer threads it. Absent → registry falls back to sandboxRoot
+   *  (legacy shape). */
   readonly workspaceRoot?: string;
   /**
    * T3 (ADR-0037 §4) + T5b (ADR-0037 §9.2 #6): 项目身份根,双消费面。
@@ -458,8 +460,10 @@ export async function createWorkerRuntime(
     ...(capabilities.disallowedTools !== undefined
       ? { disallowedTools: capabilities.disallowedTools }
       : {}),
-    // ADR-0019 (review-fix H3): spread-guard 透传 —— 缺席时 registry
-    // 内部 fallback sandboxRoot(legacy 字节不变)。
+    // ADR-0019 (T4): per-root state anchor spread-guard — absent →
+    // registry falls back to sandboxRoot (legacy shape byte-identical).
+    // Threaded to read_file's extraReadRoots; bash no longer consumes it
+    // (ADR-0092 global mode has no per-root mount and no policy predicate).
     ...(opts.workspaceRoot !== undefined
       ? { workspaceRoot: opts.workspaceRoot }
       : {}),

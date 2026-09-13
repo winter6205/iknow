@@ -1,45 +1,29 @@
 /**
- * review-fix (H3): registry threads `workspaceRoot` to the bash factory.
+ * registry threads `workspaceRoot` to the read_file factory (review-fix H3).
  *
- * The bash factory closes over `workspaceRoot` to build its `createFsPolicy`
- * so the protected-state pathset covers `<workspaceRoot>/.iknow` at parity
- * with `<home>/.iknow`. Without the spread-guard in registry.ts (and the
- * equivalent one in worker.ts), the registry silently falls back to
- * `sandboxRoot` and the protection never moves to the per-root anchor the
- * user asked for.
+ * ADR-0092 dead-surface review (Round-2 removal): the registry no longer
+ * threads `workspaceRoot` to the bash factory — bash's fs-policy has no
+ * `home` / `workspaceRoot` surface (no predicate, no per-root mount;
+ * global mode binds the host root + system ro-binds). The surviving true
+ * proposition: registry threads `workspaceRoot` to the read_file factory
+ * as its `extraReadRoots` per-root anchor — `<workspaceRoot>/.iknow` stays
+ * reachable at parity with the home profile. `traceReadDir` also resolves
+ * under it for the trace read side.
  *
- * ADR-0092: `workspaceRoot` is a state anchor only — it no longer
- * contributes a bind root or a read whitelist, and the closed-world
- * `installRoot` option retired with the global mode.
- *
- * Verification strategy: module-mock `bash.js` so the registry's named-import
- * of `createBashTool` resolves to a spy we control. A module mock (vs
- * `vi.spyOn` on the namespace) is required here: the registry imports
- * `createBashTool` as an ESM named binding, and spyOn on the namespace only
- * patches the property on the namespace object — the registry's internal
- * binding still points at the real function, so the real factory runs,
- * hits `requireBwrap()`, and `createDefaultAciRegistry` assembly depends on
- * the CI runner having bubblewrap installed. This test must pass regardless
- * of bwrap presence, so the factory is fully replaced by the spy.
+ * Module-mock `bash.js` so the registry's named import of `createBashTool`
+ * resolves to a spy we control. A module mock (vs `vi.spyOn` on the
+ * namespace) is required here: the registry imports `createBashTool` as an
+ * ESM named binding, and spyOn on the namespace only patches the property
+ * on the namespace object — the registry's internal binding still points at
+ * the real function, so the real factory runs, hits `requireBwrap()`, and
+ * `createDefaultAciRegistry` assembly depends on the CI runner having
+ * bubblewrap installed. This test must pass regardless of bwrap presence,
+ * so the factory is fully replaced by the spy.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { beforeEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 
-// Module mock must be registered before the dynamic import of the registry.
-// `createBashTool` becomes a vitest mock fn; registry.ts's `import {
-// createBashTool } from "./bash.js"` resolves to this spy at load time.
-//
-// The mock must return a valid AciToolDef stub: `createDefaultAciRegistry`
-// eagerly assembles all factories into `tools = toolsetNames.map((n) =>
-// factories[n]!())`, then `createAciRegistry` walks `tools` to enforce
-// Gates 1/2 (e.g. `t.aci.lazy === true` for `tool_search`). The real
-// `createBashTool` returns a full AciToolDef; our spy must do likewise or
-// the assembly throws `RegistryConstructionError`. Only the structural
-// fields read during construction are required — `aci.lazy: false` is the
-// minimum (Gate 1 short-circuits when `!== true`).
+// Module mocks must be registered before the dynamic import of the registry.
 vi.mock("../../../src/harness/aci/tools/bash.js", () => ({
   createBashTool: vi.fn(() => ({
     name: "bash",
@@ -55,93 +39,98 @@ vi.mock("../../../src/harness/aci/tools/bash.js", () => ({
   })),
 }));
 
+vi.mock(
+  "../../../src/harness/aci/tools/read-file.ts",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("../../../src/harness/aci/tools/read-file.ts")
+      >();
+    return {
+      ...actual,
+      createReadFileTool: vi.fn(actual.createReadFileTool),
+    };
+  }
+);
+
 import { createDefaultAciRegistry } from "../../../src/harness/aci/tools/registry.ts";
 import { createBashTool } from "../../../src/harness/aci/tools/bash.ts";
-import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.ts";
+import { createReadFileTool } from "../../../src/harness/aci/tools/read-file.ts";
 
 const FAKE = "/fake-root";
 const SANDBOX = "/workspace";
 
 beforeEach(() => {
   vi.mocked(createBashTool).mockClear();
+  vi.mocked(createReadFileTool).mockClear();
 });
 
-describe("createDefaultAciRegistry — workspaceRoot threaded to bash factory (review-fix H3)", () => {
-  it("bash factory receives workspaceRoot verbatim when caller passes it", () => {
+describe("createDefaultAciRegistry — workspaceRoot threaded to read_file factory (review-fix H3)", () => {
+  it("bash factory no longer receives workspaceRoot (Round-2 dead-surface removal)", () => {
+    // ADR-0092: bash's fs-policy has no home/workspaceRoot surface; the
+    // global fence binds the host root + system ro-binds. workspaceRoot
+    // is still live for read_file's extraReadRoots but not for bash.
     createDefaultAciRegistry({
       env: { web: { proxy: undefined, searchUrl: undefined } },
       sandboxRoot: SANDBOX,
       workspaceRoot: FAKE,
     });
-    // bash factory must have been called with workspaceRoot: FAKE.
     const bashCall = vi.mocked(createBashTool).mock.calls[0];
     assert.ok(bashCall, "bash factory should have been invoked");
-    // call args: (cwd, opts). opts.workspaceRoot must equal FAKE.
     const opts = bashCall[1] as { workspaceRoot?: string } | undefined;
-    assert.equal(opts?.workspaceRoot, FAKE);
+    assert.equal(
+      opts?.workspaceRoot,
+      undefined,
+      "bash factory must not receive workspaceRoot (ADR-0092 global mode)"
+    );
   });
 
-  it("bash factory receives sandboxRoot as workspaceRoot fallback when caller omits it", () => {
-    // registry.ts: `workspaceRoot = opts.workspaceRoot ?? sandboxRoot` —
-    // when caller omits, the registry collapses to sandboxRoot, preserving
-    // the legacy single-root shape for the per-root state anchor.
+  it("bash factory still receives sandboxRoot as the primary sandbox cwd", () => {
+    // Legacy shape: bash is rooted at `sandboxRoot` (its `cwd` parameter).
+    // workspaceRoot is unrelated to bash since the dead-surface removal.
+    createDefaultAciRegistry({
+      env: { web: { proxy: undefined, searchUrl: undefined } },
+      sandboxRoot: SANDBOX,
+      workspaceRoot: FAKE,
+    });
+    const bashCall = vi.mocked(createBashTool).mock.calls[0];
+    assert.ok(bashCall, "bash factory should have been invoked");
+    // call args: (cwd, opts). The factory's cwd is sandboxRoot.
+    assert.equal(bashCall[0], SANDBOX);
+  });
+
+  it("workspaceRoot is still threaded to the read_file factory (its surviving consumer)", () => {
+    createDefaultAciRegistry({
+      env: { web: { proxy: undefined, searchUrl: undefined } },
+      sandboxRoot: SANDBOX,
+      workspaceRoot: FAKE,
+    });
+    // read_file factory call: (root, opts). opts.workspaceRoot must equal FAKE.
+    const readCalls = vi.mocked(createReadFileTool).mock.calls;
+    const readCall = readCalls.find((c) => c[0] === SANDBOX);
+    assert.ok(readCall, "read_file factory should have been invoked");
+    const opts = readCall[1] as { workspaceRoot?: string } | undefined;
+    assert.equal(
+      opts?.workspaceRoot,
+      FAKE,
+      "read_file factory must receive workspaceRoot (extraReadRoots anchor)"
+    );
+  });
+
+  it("workspaceRoot falls back to sandboxRoot for read_file when caller omits it", () => {
     createDefaultAciRegistry({
       env: { web: { proxy: undefined, searchUrl: undefined } },
       sandboxRoot: SANDBOX,
       // workspaceRoot intentionally omitted
     });
-    const bashCall = vi.mocked(createBashTool).mock.calls[0];
-    assert.ok(bashCall);
-    const opts = bashCall[1] as { workspaceRoot?: string } | undefined;
-    assert.equal(opts?.workspaceRoot, SANDBOX);
-  });
-
-  it("fs-policy marks <workspaceRoot>/.iknow sensitive at parity with <home>/.iknow", () => {
-    // Mirrors what `createBashTool(sandboxRoot, { workspaceRoot })` does
-    // internally: createFsPolicy({ home, tmpDir, workspaceRoot }). If the
-    // registry correctly threads workspaceRoot, then THIS is exactly the
-    // policy bash enforces — and the protected-state predicate must cover
-    // the per-root anchor. (No real bwrap needed; the policy surface is the
-    // same one exercised by tests/harness/sandbox/fs-policy.test.ts.)
-    //
-    // ADR-0092: workspaceRoot is a state anchor only — its non-.iknow paths
-    // are ordinary host paths (not bind roots) and createFsPolicy no longer
-    // exposes assertWithin/readRoots. The predicate names only sensitive /
-    // protected-state paths.
-    const tmp = mkdtempSync(join(tmpdir(), "registry-ws-root-tmp-"));
-    try {
-      const policy = createFsPolicy({
-        home: "/home/user",
-        tmpDir: tmp,
-        workspaceRoot: FAKE,
-      });
-      assert.equal(
-        policy.isSensitive(`${FAKE}/.iknow/state.json`),
-        true,
-        "workspaceRoot anchor must cover <workspaceRoot>/.iknow"
-      );
-      assert.equal(
-        policy.isSensitive(`${FAKE}/.iknow/user.md`),
-        true,
-        "the whole <workspaceRoot>/.iknow subtree is protected"
-      );
-      assert.equal(
-        policy.isSensitive("/home/user/.iknow/state.json"),
-        true,
-        "home anchor parity"
-      );
-      assert.equal(
-        policy.isSensitive(`${FAKE}/AGENTS.md`),
-        false,
-        "workspaceRoot is a state anchor only — not a bind root / sensitive path"
-      );
-      assert.equal(
-        policy.isSensitive(join(tmp, "scratch.txt")),
-        false,
-        "the session tmp is not sensitive state"
-      );
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
+    const readCalls = vi.mocked(createReadFileTool).mock.calls;
+    const readCall = readCalls.find((c) => c[0] === SANDBOX);
+    assert.ok(readCall, "read_file factory should have been invoked");
+    const opts = readCall[1] as { workspaceRoot?: string } | undefined;
+    assert.equal(
+      opts?.workspaceRoot,
+      SANDBOX,
+      "workspaceRoot must fall back to sandboxRoot (legacy shape) for read_file"
+    );
   });
 });

@@ -262,9 +262,10 @@ export interface CreateDefaultAciRegistryOptions {
    * 对符号工具路径不生效。
    */
   readonly lspCtx?: LspCtx;
-  /** ADR-0019 (T4): per-root state anchor. Threaded into bash + read_file
-   *  factories so the protected-state pathset covers `<workspaceRoot>/.iknow`
-   *  at parity with `<home>/.iknow`. It is not a bind root (ADR-0092).
+  /** ADR-0019 (T4): per-root state anchor. Threaded into read_file so its
+   *  `extraReadRoots` admit `<workspaceRoot>/.iknow` at parity with the home
+   *  profile (the agent's per-root persona state). ADR-0092 global mode: not a
+   *  bind root; bash no longer threads it (no predicate, no per-root mount).
    *  Defaults to `sandboxRoot` (legacy shape) when absent. */
   readonly workspaceRoot?: string;
   /** T3 (plans/worktree-session-roots.md / ADR-0037 §4): 项目身份根 —— 会话
@@ -472,10 +473,11 @@ export function createDefaultAciRegistry(
   // #562 T6: bashMode 显式透传到 createBashTool。registry 不读 catalog —
   // spawn-subagent-tool 工厂是 catalog 路由的真正 owner。
   const bashMode = opts.bashMode;
-  // ADR-0019 (T4): per-root state anchor. Threaded to bash + read_file so
-  // the fence protects `<workspaceRoot>/.iknow` the same way it does
-  // `<home>/.iknow`. Falls back to sandboxRoot when absent (legacy shape)
-  // so existing callers without per-root state stay byte-identical.
+  // ADR-0019 (T4): per-root state anchor. Threaded to read_file so its
+  // `extraReadRoots` admit `<workspaceRoot>/.iknow` at parity with the home
+  // profile. ADR-0092 global mode: bash no longer reads it. Falls back to
+  // sandboxRoot when absent (legacy shape) so existing callers without
+  // per-root state stay byte-identical.
   const workspaceRoot = opts.workspaceRoot ?? sandboxRoot;
   // #440 T4 todo_write 条件化装配的开关。host 注入；build-engine 在
   // surface !== "ask" 解析 session 级目录并透传；ask 不传 → tool 不入
@@ -530,7 +532,6 @@ export function createDefaultAciRegistry(
     bash: () =>
       createBashTool(sandboxRoot, {
         secretRegistry,
-        workspaceRoot,
         ...(backgroundManager ? { backgroundManager } : {}),
         // #562 T6: bashMode 透传 — readonly 模式触发 validator + fence cwdReadonly。
         ...(bashMode !== undefined ? { bashMode } : {}),

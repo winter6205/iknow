@@ -15,7 +15,7 @@ import {
   readFileSync,
   rmSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "vitest";
 
@@ -23,7 +23,6 @@ import { createBashTool } from "../../../src/harness/aci/tools/bash.js";
 import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.js";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.js";
 import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.js";
-import { createResourceLimits } from "../../../src/harness/sandbox/resource-limits.js";
 import { sanitizeConversationSegment } from "../../../src/harness/session-roots.js";
 import { MAIN_SESSION_FENCE_TMP_DIR_NAME } from "../../../src/shared/session-tree-names.js";
 
@@ -76,11 +75,9 @@ describe("main-session fence-tmp (ADR-0092)", () => {
       command: "bash",
       args: ["-c", "true"],
       fsPolicy: createFsPolicy({
-        home: homedir(),
         tmpDir: pad,
       }),
       networkPolicy: createNetworkPolicy(),
-      resourceLimits: createResourceLimits(),
       env: { PATH: "/bin", TMPDIR: pad },
       cwd: taskRoot,
     }).argv;
@@ -122,7 +119,6 @@ describe("main-session fence-tmp (ADR-0092)", () => {
       const { taskRoot, pad } = makeSessionPad();
       const bash = createBashTool(taskRoot, {
         tmpDir: pad,
-        home: makeScratch("home-"),
       });
       const tmpdirOut = parseBash(
         await bash.handler({ command: 'printf %s "$TMPDIR"' })
@@ -153,7 +149,6 @@ describe("main-session fence-tmp (ADR-0092)", () => {
       const { taskRoot, pad } = makeSessionPad();
       const bash = createBashTool(taskRoot, {
         tmpDir: pad,
-        home: makeScratch("home-"),
       });
       const mk = parseBash(await bash.handler({ command: "mktemp" }));
       assert.equal(mk.code, 0, mk.stderr);
@@ -175,7 +170,6 @@ describe("main-session fence-tmp (ADR-0092)", () => {
       const conversationId = "conv/../escape";
       const bash = createBashTool(taskRoot, {
         projectDir,
-        home: makeScratch("home-"),
       });
       const pad = join(
         projectDir,

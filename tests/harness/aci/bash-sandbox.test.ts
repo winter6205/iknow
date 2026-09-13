@@ -27,7 +27,6 @@ import { waitForPidFile } from "./tools/spawn-test-utils.ts";
 import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.ts";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.ts";
 import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.ts";
-import { createResourceLimits } from "../../../src/harness/sandbox/resource-limits.ts";
 
 const scratchPaths: string[] = [];
 
@@ -81,9 +80,8 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
     const argv = createBwrapFence({
       command: "bash",
       args: ["-c", "echo hi"],
-      fsPolicy: createFsPolicy({ home: homedir(), tmpDir: tmpdir() }),
+      fsPolicy: createFsPolicy({ tmpDir: tmpdir() }),
       networkPolicy: createNetworkPolicy(),
-      resourceLimits: createResourceLimits(),
       env: { PATH: "/bin" },
       cwd,
     }).argv;
@@ -117,8 +115,9 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
       -1,
       "global mode has no per-root writable cwd bind"
     );
-    // 敏感路径 tmpfs 罩发射删除;isSensitive/protected-state 谓词保留在
-    // fs-policy 层,不塑形 argv。
+    // 敏感路径 tmpfs 罩发射删除;fs-policy 的 isSensitive / protected-state
+    // 谓词随 Round-2 placeholder 一并退役(无人消费),fs-policy 只承载 tmpRoot,
+    // 不塑形 argv。
     assert.equal(
       argv.includes(`${homedir()}/.ssh`),
       false,
@@ -290,14 +289,13 @@ describe("bash.readonly 双闸 (real spawn)", () => {
   it.skipIf(!hasBwrap())(
     "PoC 回归:HOME 下的 cwd 中 find -fprint 不得写入目标文件",
     async () => {
-      const home = await makeScratch("bash-ro-poc-home-");
-      const cwd = join(home, "workspace");
+      const homeDir = await makeScratch("bash-ro-poc-home-");
+      const cwd = join(homeDir, "workspace");
       await mkdir(cwd);
       await writeFile(join(cwd, "visible.txt"), "visible\n");
       const target = join(cwd, "package.json");
       const tool = createBashTool(cwd, {
         bashMode: "readonly",
-        home,
       });
 
       let result: unknown;
@@ -326,13 +324,12 @@ describe("bash.readonly 双闸 (real spawn)", () => {
   it.skipIf(!hasBwrap())(
     "PoC 物理兜底:绕过 readonly validator 后 find -fprint 仍不得写入 cwd",
     async () => {
-      const home = await makeScratch("bash-ro-fence-poc-home-");
-      const cwd = join(home, "workspace");
+      const homeDir = await makeScratch("bash-ro-fence-poc-home-");
+      const cwd = join(homeDir, "workspace");
       await mkdir(cwd);
       await writeFile(join(cwd, "visible.txt"), "visible\n");
       const target = join(cwd, "package.json");
       const tool = createBashTool(cwd, {
-        home,
         cwdReadonly: true,
       });
 
@@ -398,16 +395,14 @@ describe("bash.fence.networkOptIn (argv shape, no spawn)", () => {
       args: string[];
       fsPolicy: ReturnType<typeof createFsPolicy>;
       networkPolicy: ReturnType<typeof createNetworkPolicy>;
-      resourceLimits: ReturnType<typeof createResourceLimits>;
       env: NodeJS.ProcessEnv;
       cwd: string;
       network?: boolean;
     } = {
       command: "bash",
       args: ["-c", "echo hi"],
-      fsPolicy: createFsPolicy({ home: homedir(), tmpDir: tmpdir() }),
+      fsPolicy: createFsPolicy({ tmpDir: tmpdir() }),
       networkPolicy: createNetworkPolicy(),
-      resourceLimits: createResourceLimits(),
       env: { PATH: "/bin" },
       cwd,
     };

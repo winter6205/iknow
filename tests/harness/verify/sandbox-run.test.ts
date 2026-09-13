@@ -58,7 +58,7 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
   it("threads a global fs-policy whose tmpRoot is the session tmp host path", async () => {
     captured.length = 0;
     const cwd = tmpdir();
-    const runVerify = makeDefaultRunVerify({ cwd, home: "/home/user" });
+    const runVerify = makeDefaultRunVerify({ cwd });
     await runVerify("true", {});
     expect(captured).toHaveLength(1);
     const policy = captured[0]!.fsPolicy;
@@ -80,7 +80,6 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
     try {
       const runVerify = makeDefaultRunVerify({
         cwd,
-        home: "/home/user",
         tmpDir: sessionTmp,
       });
       await runVerify("true", {});
@@ -93,7 +92,7 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
   it("fence is driven with the verify cwd and command via runInSandbox", async () => {
     captured.length = 0;
     const cwd = "/tmp/verify-run-cwd-fixture";
-    const runVerify = makeDefaultRunVerify({ cwd, home: "/home/user" });
+    const runVerify = makeDefaultRunVerify({ cwd });
     await runVerify("true", {});
     const fence = captured[0]!;
     assert.equal(fence.cwd, cwd);

@@ -22,16 +22,16 @@
 
 **支撑证据（read-only explorer，2026-09-08）：**
 
-| 观察 | 结果 | 证据 |
-| --- | --- | --- |
-| web_fetch `url` 参数 | 模型自由填，无 enum/域名约束 | `web-fetch.ts:147-175` |
-| URL → guard 之间是否有 gate | 无 allowlist、无 config 门、直接进 `fetchPublicResponse` | `web-fetch.ts:90-99` |
-| web_fetch permission | `read-only` → 默认 `allow`，无 per-URL ask | `policy.ts:25-32`、`policy.ts:40-41` |
-| 域名/出口 allowlist | **全代码库不存在**（只有无关的 bash 命令 allowlist）；guard 是纯 denylist | grep `allowedDomains\|egress\|trustedHost` 0 命中；`ip-classify.ts` + `network-guard.ts:132-145,417-419` |
-| 重定向放大 | ≤5 跳，每跳 `redirect:"manual"` 跟随 `location`，rebinding 窗口逐跳存在 | `network-guard.ts:44,304-326` |
-| web_search bing（默认后端） | `search_url` 模型可覆写端点 host，仅 SSRF 校验、不 allowlist → 同样开放 | `web-search.ts:250-269,409-412,684` |
-| web_search exa 后端 | 固定 `https://api.exa.ai/search`，模型无 URL 影响，绕过 guard（native fetch）→ 无害 | `web-search.ts:731,802-827` |
-| TOCTOU 自记 | 代码自己记的已知边界，指名「后续工单」= #953 | `network-guard.ts:15-17` |
+| 观察                        | 结果                                                                                | 证据                                                                                                     |
+| --------------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| web_fetch `url` 参数        | 模型自由填，无 enum/域名约束                                                        | `web-fetch.ts:147-175`                                                                                   |
+| URL → guard 之间是否有 gate | 无 allowlist、无 config 门、直接进 `fetchPublicResponse`                            | `web-fetch.ts:90-99`                                                                                     |
+| web_fetch permission        | `read-only` → 默认 `allow`，无 per-URL ask                                          | `policy.ts:25-32`、`policy.ts:40-41`                                                                     |
+| 域名/出口 allowlist         | **全代码库不存在**（只有无关的 bash 命令 allowlist）；guard 是纯 denylist           | grep `allowedDomains\|egress\|trustedHost` 0 命中；`ip-classify.ts` + `network-guard.ts:132-145,417-419` |
+| 重定向放大                  | ≤5 跳，每跳 `redirect:"manual"` 跟随 `location`，rebinding 窗口逐跳存在             | `network-guard.ts:44,304-326`                                                                            |
+| web_search bing（默认后端） | `search_url` 模型可覆写端点 host，仅 SSRF 校验、不 allowlist → 同样开放             | `web-search.ts:250-269,409-412,684`                                                                      |
+| web_search exa 后端         | 固定 `https://api.exa.ai/search`，模型无 URL 影响，绕过 guard（native fetch）→ 无害 | `web-search.ts:731,802-827`                                                                              |
+| TOCTOU 自记                 | 代码自己记的已知边界，指名「后续工单」= #953                                        | `network-guard.ts:15-17`                                                                                 |
 
 **成本驱动（#953 spike 的最大未知）：** guard 走 Node 的 `globalThis.fetch`（Node 自带 undici），**不是** undici@7；已有 ProxyAgent 的 type-incompat bridge（`network-guard.ts:34-41,237-241`）。钉扎能否经现有 bridge 传进去，还是逼着迁到 undici 自己的 `fetch`（迁了就是动默认路径主干行为，量级同 #954 的「子系统」）—— 这条决定 #953 是聚焦补丁还是 defer。undici@7.29.0 可用 API 面：`dns` interceptor 自定义 `lookup`（`lib/interceptor/dns.js:142,151,177`）、`buildConnector`、`Dispatcher.prototype.compose`（`lib/dispatcher/dispatcher.js:20`）。
 
@@ -84,7 +84,7 @@ Each numbered item is one tracer bullet: one vertical-slice outcome, one tag, on
    - **3 条件自检：** hard-to-reverse（弱 —— 是「不做某事」的决策，可后续重开）/ surprising-without-context（**满足** —— 推翻一条已记录的旧判断「不可能」）/ real-trade-off（**满足** —— enforcement vs 子系统成本）。判为**过 ADR bar**（推翻旧信念 + 重开触发条件是决策记录料），不降级为 spec 节。
    - **诚实强度（关键，依 T4）：** 当前替代方案 #951（知情）+ #952（资格）**不是强制过滤**；且 web_fetch 默认路径第 4 层有一个真实可达 TOCTOU —— 若 T4=implement，写明正在修；若 T4=defer，写明这是已知真实但未缓解的洞 + 重开条件。**不能让后来读者以为已有出口管控。**
    - **编号：** `docs/adr/` 最大号 0071 → 本 ADR = **0072**。`0046`/`0055` 各有同号重（并发会话产物）= 预存 hygiene 问题，**操作员单独裁定口径，本 plan 不 renumber**。
-   - **附带观察（明确不并入本 ADR）：** `--dev-bind /dev /dev`（`bwrap.ts:137-139`）是全量绑设备面，而文件面是 deny-by-default 白名单（`createClosedWorldFsPolicy`）—— 两者姿态不一致，userns 下大概率不可利用，落 fog「值得单独看一眼」，不在本 ADR 展开。
+   - **附带观察（明确不并入本 ADR）：** `--dev-bind /dev /dev`（`bwrap.ts:137-139`）是全量绑设备面，而文件面是 deny-by-default 白名单（`createClosedWorldFsPolicy`（**2026-09-13 已随 ADR-0092 退役**））—— 两者姿态不一致，userns 下大概率不可利用，落 fog「值得单独看一眼」，不在本 ADR 展开。
    - **Surface:** `docs/adr/0072-<slug>.md`。
    - **Acceptance:** ADR 落 0072；含三条实测证据 + 不做理由 + 重开触发条件 + 真实强度（反映 T4 结论）+ 点名 #951/#952/#953；附带观察记为不并入；不 renumber 0046/0055。commit 无产品代码。
    - Status: [ ] pending

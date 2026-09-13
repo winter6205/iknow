@@ -23,7 +23,6 @@
  * runInSandbox 构造)。verify-loop 不 import loop-engine 的 deps, 保持可测性。
  */
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
 import type { HarnessStreamEvent } from "../stream.js";
 import type {
   AnthropicContentBlock,
@@ -172,7 +171,6 @@ export interface VerifyLoopOptions {
    */
   readonly completionMode?: "hitl" | "auto";
   readonly cwd: string;
-  readonly home?: string;
 }
 
 export type VerifyLoopOutcome =
@@ -1164,7 +1162,6 @@ export async function runVerifyLoop(
     options.runVerify ??
     makeDefaultRunVerify({
       cwd: options.cwd,
-      home: options.home ?? homedir(),
     });
   const timeoutSec = options.config.timeoutSec ?? DEFAULT_TIMEOUT_SEC;
   return runVerifyLoopBody({

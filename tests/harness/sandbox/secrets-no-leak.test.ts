@@ -7,7 +7,6 @@ import { join } from "node:path";
 import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.js";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.js";
 import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.js";
-import { createResourceLimits } from "../../../src/harness/sandbox/resource-limits.js";
 import {
   BASE_ENV_WHITELIST,
   createEnvIsolation,
@@ -62,12 +61,9 @@ describe("sandbox network:true secret env half", () => {
       command: "bash",
       args: ["-c", "echo hi"],
       fsPolicy: createFsPolicy({
-        cwd: FIXTURE_CWD,
-        home: homedir(),
         tmpDir: tmpdir(),
       }),
       networkPolicy: createNetworkPolicy(),
-      resourceLimits: createResourceLimits(),
       env: filtered,
       cwd: FIXTURE_CWD,
       network,

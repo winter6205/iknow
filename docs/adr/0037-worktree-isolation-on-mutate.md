@@ -34,7 +34,7 @@ Status: accepted
 > (d) **OFF / 未改绑** = 不传 overlay 选项，`createBwrapFence` argv 与今日逐字节一致（`verify/sandbox-run.ts` 本轮不传）。
 > (e) **模型可见面** = 改绑后模型（含子代理）经 worker prior messages / path-outside 回执看见当前写根 = 活 `taskRoot`；system `## Project path` 仍钉 `projectIdentityRoot`（`projectPathSegment` 字节不动），不静默改写 spawn `task` 正文。前台（`bash.ts`）与后台（`defaultBackgroundSpawn`）必须消费**同一** overlay token（CONTEXT 沙箱纪律：前后台共用围栏）。
 >
-> **Reopen 2026-09-06**（issue #896 / `plans/closed-world-bash-fence.md` T2）：bash 围栏物理形态从「writable home 打底 + 黑名单补罩」反转为**闭世界围栏（closed-world fence）**——home 下非白名单路径**不可见**（不是「可见但只读」），可写集 = `taskRoot` + `/tmp`，其余读通道 deny-by-default、按需 ro-bind。反转是**全档位**语义变更：OFF 档围栏同样闭世界（否则其它 project 在 OFF 档仍可写，病灶 1 不闭合；默认 FS 姿态 superseded by ADR-0092——默认全局档，不再闭世界）；§1 OFF 的围栏字节承诺、Amendment 2026-09-05 的 identity overlay 专属条款、Positive「默认 OFF 保证零回归」条目相应 **superseded**。白名单集合逐条裁决与 fail-loud 分型见 §9；Amendment 2026-09-05 的条款存废清单见 §9.3。证据源 = `scripts/sandbox-probe-closed-world.ts` 盘点（commit `d777c050`）实测 16 条 BREAK。
+> **Reopen 2026-09-06**（issue #896 / `plans/closed-world-bash-fence.md` T2）：bash 围栏物理形态从「writable home 打底 + 黑名单补罩」反转为**闭世界围栏（closed-world fence）**——home 下非白名单路径**不可见**（不是「可见但只读」），可写集 = `taskRoot` + `/tmp`，其余读通道 deny-by-default、按需 ro-bind。反转是**全档位**语义变更：OFF 档围栏同样闭世界（否则其它 project 在 OFF 档仍可写，病灶 1 不闭合；默认 FS 姿态 superseded by ADR-0092——默认全局档，不再闭世界）；§1 OFF 的围栏字节承诺、Amendment 2026-09-05 的 identity overlay 专属条款、Positive「默认 OFF 保证零回归」条目相应 **superseded**。白名单集合逐条裁决与 fail-loud 分型见 §9；Amendment 2026-09-05 的条款存废清单见 §9.3。证据源 = `scripts/sandbox-probe-closed-world.ts` 盘点（commit `d777c050`）实测 16 条 BREAK。**2026-09-13**：脚本已归档至 `archive/onetime-probes/closed-world-inventory-probe.ts`，npm 脚本 `probe:sandbox:inventory` 不再存在；§143、§216 同条引用改为内联（已归档）指针。
 
 ## Context
 
@@ -140,7 +140,7 @@ ADR-0019 D1.1 的默认解析（`workspaceRoot` 默认 `process.cwd()`）与 ser
 
 > **Superseded 2026-09-13**（ADR-0092）：本节裁定的**默认 FS 姿态**superseded——默认不再是闭世界围栏（**全局档**：宿主真路径可读可写，home 不藏），会话 tmp 改用宿主路径、不再 bind 成 `/tmp`。围栏仍跑（网络 / env / rlimit / FS 沙箱）。工作区档（后做）可复用 §9.2 的写白名单。
 
-本节由 `plans/closed-world-bash-fence.md` T2 落盘，承接该计划「背景与病灶」三件：writable home 打底下其它 project / home 下任意路径在围栏内可写（黑名单永远枚举不完）、持久执行配置只有 `overlaySensitivePaths` 一层 tmpfs 罩、`~/.iknow/init.sh` 是被执行的持久文件（#896 的核心疑虑）。证据源：`scripts/sandbox-probe-closed-world.ts` 盘点（commit `d777c050`）——在「系统 ro-bind + cwd 可写 + /tmp、无 writable home bind」的假设围栏下逐条实测合法场景，产出 16 条 BREAK（node/npm/npx/bun exit 127 command not found、git 全局 config 读取与 worktree 操作 exit 128、`~/.iknow` / `~/.claude` 不可见 exit 2、login shell rc 不可读、主机 PATH 的 home 条目全部不可达等）。
+本节由 `plans/closed-world-bash-fence.md` T2 落盘，承接该计划「背景与病灶」三件：writable home 打底下其它 project / home 下任意路径在围栏内可写（黑名单永远枚举不完）、持久执行配置只有 `overlaySensitivePaths` 一层 tmpfs 罩、`~/.iknow/init.sh` 是被执行的持久文件（#896 的核心疑虑）。证据源：`scripts/sandbox-probe-closed-world.ts`（**2026-09-13 已归档**至 `archive/onetime-probes/closed-world-inventory-probe.ts`）盘点（commit `d777c050`）——在「系统 ro-bind + cwd 可写 + /tmp、无 writable home bind」的假设围栏下逐条实测合法场景，产出 16 条 BREAK（node/npm/npx/bun exit 127 command not found、git 全局 config 读取与 worktree 操作 exit 128、`~/.iknow` / `~/.claude` 不可见 exit 2、login shell rc 不可读、主机 PATH 的 home 条目全部不可达等）。
 
 **闭世界围栏（closed-world fence）**：home 下非白名单路径**不可见**——不是「可见但只读」，是 mount 面上不存在；可写集 = `taskRoot` + `/tmp`；白名单之外的读通道一律 deny-by-default，按需以 ro-bind 显式放行。（默认 FS 姿态 superseded by ADR-0092：默认全局档。）
 
@@ -213,4 +213,4 @@ ADR-0019 D1.1 的默认解析（`workspaceRoot` 默认 `process.cwd()`）与 ser
 - `plans/worktree-isolation-model-provision.md` ACR 5/5 PASS（2026-08-30）——auto-provision → model-provision amendment 来源（issue #836，地图 #829）。
 - 2026-08-31 amendment（commit `f6137d61`）：rebind 切 `taskRoot` 单字段，ADR-0019 per-root 状态锚不被搬走。
 - 2026-09-02 reopen：实测证据见 `plans/worktree-live-task-root.md` §1（trace MCP 读 `conversation_id = d52e0f28-…`，run `9b69b055`，三条 mutate 被同源门禁拦死）；架构改造 ACR 5/5 **BLOCKED no** 落于 `plans/worktree-live-task-root.md` §4，五条 no 的 discharge 映射见同 plan §5 D1–D11；T2（本文 ADR 改写）为 reopen 的 decision record，无运行时代码。
-- 2026-09-06 reopen：闭世界断链实测见 `scripts/sandbox-probe-closed-world.ts` 盘点（commit `d777c050`）——16 条 BREAK（node/npm/npx/bun exit 127、git 全局 config 读取与 worktree repo 发现 exit 128、`~/.iknow` / `~/.claude` 不可见 exit 2、login shell rc 不可读、PATH home 条目不可达等）；白名单集合裁决与 fail-loud 分型见 §9（`plans/closed-world-bash-fence.md` T2）。
+- 2026-09-06 reopen：闭世界断链实测见 `scripts/sandbox-probe-closed-world.ts`（**2026-09-13 已归档**至 `archive/onetime-probes/closed-world-inventory-probe.ts`）盘点（commit `d777c050`）——16 条 BREAK（node/npm/npx/bun exit 127、git 全局 config 读取与 worktree repo 发现 exit 128、`~/.iknow` / `~/.claude` 不可见 exit 2、login shell rc 不可读、PATH home 条目不可达等）；白名单集合裁决与 fail-loud 分型见 §9（`plans/closed-world-bash-fence.md` T2）。

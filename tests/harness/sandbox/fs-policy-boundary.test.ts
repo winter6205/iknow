@@ -6,29 +6,32 @@ import assert from "node:assert/strict";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.js";
 import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.js";
 import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.js";
-import { createResourceLimits } from "../../../src/harness/sandbox/resource-limits.js";
 import { ToolExecutionError } from "../../../src/harness/errors.js";
 
 /**
- * ADR-0092 全局档 fs-policy 边界 5 类(empty / negative / overflow /
- * concurrent / exception)。
+ * ADR-0092 global-mode fs-policy boundary 5 classes (empty / negative /
+ * overflow / concurrent / exception) — post-Round-2 dead-surface removal.
  *
- * 闭世界白名单退役后,边界面收敛到 policy 的两个合同输入(tmpDir 状态锚 +
- * home/workspaceRoot 状态锚)。这里锁:
- *   - empty:`tmpRoot` 必须是调用方传入的会话 tmp,空轴不产生任何 argv 变化;
- *   - negative:isSensitive 对兄弟/祖先前缀不误伤(`/home/userX` 不是
- *     `/home/user` 的子路径);
- *   - overflow:> PATH_MAX 的超长入参不得抛非 typed 错误;
+ * 闭世界白名单退役后,边界面收敛到 policy 的唯一合同输入(tmpDir 状态锚)。
+ * 这里锁:
+ *   - empty:`tmpRoot` 必须是调用方传入的会话 tmp;argv 在 fence 形态下不读
+ *     policy,同输入下 fence argv 逐字节一致;
+ *   - negative:空白 / 盘上缺席的 tmpDir 不被静默容忍,而是 typed fail-loud;
+ *   - overflow:> PATH_MAX 的超长入参不得抛非 typed 错误(不泄露 ENAMETOOLONG);
  *   - concurrent:同输入的并发构造访问器一致、无跨实例污染;
- *   - exception:tmpDir 缺失 typed fail-loud,fence 构造不可达。
+ *   - exception:缺失 tmpDir typed fail-loud,fence 构造不可达;一次 config
+ *     fault 不污染下一次有效构造。
+ *
+ * The old "negative" class for home-prefix sibling semantics is gone with
+ * `isSensitive`; the write-path negative / 5-class coverage lives in
+ * tests/harness/aci/tools/write-file-fence-tmp.test.ts (already green).
  */
 
 const FIX_ROOT = mkdtempSync(join(tmpdir(), "fs-policy-boundary-global-"));
-const TASK = join(FIX_ROOT, "task");
 const TMP = mkdtempSync(join(tmpdir(), "fs-policy-boundary-global-tmp-"));
 
 beforeAll(() => {
-  mkdirSync(TASK, { recursive: true });
+  mkdirSync(FIX_ROOT, { recursive: true });
 });
 
 afterAll(() => {
@@ -37,7 +40,7 @@ afterAll(() => {
 });
 
 function baseOpts(): Parameters<typeof createFsPolicy>[0] {
-  return { home: "/home/user", tmpDir: TMP };
+  return { tmpDir: TMP };
 }
 
 function fenceArgv(
@@ -48,9 +51,8 @@ function fenceArgv(
     args: ["-c", "true"],
     fsPolicy: policy,
     networkPolicy: createNetworkPolicy(),
-    resourceLimits: createResourceLimits(),
     env: { PATH: "/bin" },
-    cwd: TASK,
+    cwd: FIX_ROOT,
   }).argv;
 }
 
@@ -61,62 +63,66 @@ describe("fs-policy boundary — empty (no per-instance mount axes)", () => {
     assert.notEqual(policy.tmpRoot(), "/tmp");
   });
 
-  it("a policy with no workspaceRoot still builds the global fence (no empty-axis argv drift)", () => {
-    const withWs = createFsPolicy({ ...baseOpts(), workspaceRoot: TASK });
-    const withoutWs = createFsPolicy(baseOpts());
-    // workspaceRoot 只是状态锚(argv 不读 policy) → 两 fence 完全一致。
-    assert.deepEqual([...fenceArgv(withWs)], [...fenceArgv(withoutWs)]);
+  it("two policies built from the same tmpDir produce identical fence argv", () => {
+    // argv 不读 policy;两次构造同输入 → fence argv 逐字节一致(等价于旧的
+    // 「workspaceRoot 不影响 argv」断言,在新合同下变成「tmpDir 不影响 argv」)。
+    const a = createFsPolicy(baseOpts());
+    const b = createFsPolicy(baseOpts());
+    assert.deepEqual([...fenceArgv(a)], [...fenceArgv(b)]);
   });
 });
 
-describe("fs-policy boundary — negative (prefix/sibling semantics)", () => {
-  it("does not treat a sibling home as sensitive", () => {
-    const policy = createFsPolicy({ home: "/home/user", tmpDir: TMP });
-    assert.equal(policy.isSensitive("/home/userX/.ssh/id_ed25519"), false);
-    assert.equal(policy.isSensitive("/home/other/.ssh/id_ed25519"), false);
-  });
-
-  it("does not treat a workspaceRoot sibling as protected state", () => {
-    const policy = createFsPolicy({
-      ...baseOpts(),
-      workspaceRoot: join(FIX_ROOT, "ws"),
-    });
-    assert.equal(
-      policy.isSensitive(join(FIX_ROOT, "ws2", ".iknow", "state.json")),
-      false
+describe("fs-policy boundary — negative (typed fail-loud for config faults)", () => {
+  it("blank tmpDir throws typed (no silent fallback)", () => {
+    assert.throws(
+      () => createFsPolicy({ tmpDir: "" }),
+      (err: unknown) =>
+        err instanceof ToolExecutionError && /tmpDir/.test(err.message)
     );
-    assert.equal(policy.isSensitive("/home/user/.iknow/state.json"), true);
   });
 
-  it("empty-string path resolves to process.cwd() and is not a false positive", () => {
-    const policy = createFsPolicy(baseOpts());
-    // process.cwd()(仓库根)不在任何状态锚下。
-    assert.equal(policy.isSensitive(""), false);
+  it("whitespace-only tmpDir throws typed (no silent fallback)", () => {
+    assert.throws(
+      () => createFsPolicy({ tmpDir: "   " }),
+      (err: unknown) =>
+        err instanceof ToolExecutionError && /tmpDir/.test(err.message)
+    );
+  });
+
+  it("missing tmpDir throws typed (no silent fallback)", () => {
+    assert.throws(
+      () => createFsPolicy({ tmpDir: "/nonexistent-boundary-missing-tmp" }),
+      (err: unknown) =>
+        err instanceof ToolExecutionError && /tmpDir/.test(err.message)
+    );
   });
 });
 
 describe("fs-policy boundary — overflow (super-long paths, > PATH_MAX)", () => {
   const LONG = "a".repeat(5000);
 
-  it("super-long path in isSensitive is judged lexically without crashing", () => {
-    const policy = createFsPolicy(baseOpts());
-    assert.doesNotThrow(() => policy.isSensitive(join("/home/user", LONG)));
-    assert.equal(policy.isSensitive(join("/home/user", LONG)), false);
-    assert.equal(
-      policy.isSensitive(join("/home/user/.ssh", LONG)),
-      true,
-      "a descendant of a sensitive root stays sensitive at any depth"
-    );
-  });
-
-  it("contract root with a super-long nonexistent path fails typed (no raw ENAMETOOLONG)", () => {
+  it("super-long tmpDir with a missing path fails typed (no raw ENAMETOOLONG)", () => {
     // existsSync 对超长路径返回 false(libuv 吞掉 ENAMETOOLONG)→ 走既有
     // config-fault 分型,错误面不变。
     assert.throws(
-      () => createFsPolicy({ ...baseOpts(), tmpDir: `/${LONG}` }),
+      () => createFsPolicy({ tmpDir: `/${LONG}` }),
       (err: unknown) =>
         err instanceof ToolExecutionError && /tmpDir/.test(err.message)
     );
+  });
+
+  it("valid super-long tmpDir survives without error", () => {
+    // 真正超长但盘上存在的目录(由 mkdtemp 衍生)→ 构造成功,tmpRoot 等于
+    // resolve 后的绝对路径,无 ENAMETOOLONG 渗漏。
+    const longDir = mkdtempSync(
+      join(tmpdir(), `fs-policy-boundary-overflow-${LONG.slice(0, 100)}-`)
+    );
+    try {
+      const policy = createFsPolicy({ tmpDir: longDir });
+      assert.equal(policy.tmpRoot(), resolve(longDir));
+    } finally {
+      rmSync(longDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -128,10 +134,6 @@ describe("fs-policy boundary — concurrent (policy / fence construction)", () =
     );
     for (const policy of policies) {
       assert.equal(policy.tmpRoot(), baseline.tmpRoot());
-      assert.equal(
-        policy.isSensitive("/home/user/.ssh/id_ed25519"),
-        baseline.isSensitive("/home/user/.ssh/id_ed25519")
-      );
     }
   });
 
@@ -144,9 +146,8 @@ describe("fs-policy boundary — concurrent (policy / fence construction)", () =
           args: ["-c", "true"],
           fsPolicy: createFsPolicy(baseOpts()),
           networkPolicy: createNetworkPolicy(),
-          resourceLimits: createResourceLimits(),
           env: { PATH: "/bin" },
-          cwd: TASK,
+          cwd: FIX_ROOT,
         });
         return { argv: [...fence.argv], sealed: fence.sealed };
       })
@@ -155,16 +156,6 @@ describe("fs-policy boundary — concurrent (policy / fence construction)", () =
       assert.deepEqual(fence.argv, baseline, "argv must be identical");
       assert.equal(fence.sealed, true);
     }
-  });
-
-  it("interleaved policies with different homes keep separate sensitive sets", async () => {
-    const a = createFsPolicy({ home: "/home/a", tmpDir: TMP });
-    const b = createFsPolicy({ home: "/home/b", tmpDir: TMP });
-    await Promise.all(Array.from({ length: 5 }, async () => undefined));
-    assert.equal(a.isSensitive("/home/a/.ssh/config"), true);
-    assert.equal(a.isSensitive("/home/b/.ssh/config"), false);
-    assert.equal(b.isSensitive("/home/b/.ssh/config"), true);
-    assert.equal(b.isSensitive("/home/a/.ssh/config"), false);
   });
 });
 
@@ -179,15 +170,13 @@ describe("fs-policy boundary — exception (typed fail-loud bubbling)", () => {
         args: ["-c", "true"],
         fsPolicy: policy,
         networkPolicy: createNetworkPolicy(),
-        resourceLimits: createResourceLimits(),
         env: { PATH: "/bin" },
-        cwd: TASK,
+        cwd: FIX_ROOT,
       });
     };
     assert.throws(
       () =>
         buildFence({
-          ...baseOpts(),
           tmpDir: "/nonexistent-global-boundary-tmp",
         }),
       (err: unknown) =>
@@ -205,13 +194,11 @@ describe("fs-policy boundary — exception (typed fail-loud bubbling)", () => {
     assert.throws(
       () =>
         createFsPolicy({
-          ...baseOpts(),
           tmpDir: "/nonexistent-global-boundary-tmp",
         }),
       ToolExecutionError
     );
     const after = createFsPolicy(baseOpts());
     assert.equal(after.tmpRoot(), resolve(TMP));
-    assert.equal(after.isSensitive("/home/user/.ssh/config"), true);
   });
 });

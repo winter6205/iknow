@@ -1,10 +1,12 @@
 /**
  * verify-loop 缺省 runVerify 装配 (ADR-0092)。
  *
- * 锁的是透传那一段:VerifyLoopOptions.cwd / home 到达
- * makeDefaultRunVerify 入参。T4 的 `options.installRoot` 透传随闭世界前端
- * 退役(ADR-0092):全局档 `--bind / /` 让项目工具链根本就可见,不再有
- * installRoot 读白名单需要喂给缺省 runVerify。
+ * 锁的是透传那一段:VerifyLoopOptions.cwd 到达 makeDefaultRunVerify 入参。
+ * Round-2 dead-surface 退役:`home` 选项在 VerifyLoopOptions / runVerify
+ * 都已删除(无人消费,缺省即进程真实 cwd)。
+ * T4 的 `options.installRoot` 透传随闭世界前端退役(ADR-0092):全局档
+ * `--bind / /` 让项目工具链根本就可见,不再有 installRoot 读白名单需要
+ * 喂给缺省 runVerify。
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -75,11 +77,10 @@ const EMPTY_TRACE: LoopTrace = Object.freeze({
   }),
 });
 
-describe("runVerifyLoop — default runVerify assembly threads cwd / home", () => {
-  it("options.cwd / home reach makeDefaultRunVerify", async () => {
+describe("runVerifyLoop — default runVerify assembly threads cwd", () => {
+  it("options.cwd reaches makeDefaultRunVerify", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "verify-loop-cwd-"));
-    const home = mkdtempSync(join(tmpdir(), "verify-loop-home-"));
-    SCRATCH.push(cwd, home);
+    SCRATCH.push(cwd);
 
     const captured: Array<Record<string, unknown>> = [];
     vi.mocked(makeDefaultRunVerify).mockImplementation((opts) => {
@@ -93,12 +94,10 @@ describe("runVerifyLoop — default runVerify assembly threads cwd / home", () =
       config: { command: "true" },
       sessionId: "verify-loop-default-runverify",
       cwd,
-      home,
     });
 
     expect(captured).toHaveLength(1);
     assert.equal(captured[0]!.cwd, cwd);
-    assert.equal(captured[0]!.home, home);
     assert.equal(outcome.outcome, "passed");
   });
 });

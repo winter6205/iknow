@@ -261,11 +261,9 @@ describe("worker session tmp isolation (SC3, ADR-0092)", () => {
       mkdirSync(parentPad, { recursive: true });
       const workerPad = workerFenceTmpPath(subagentsDir, taskId);
       const taskRoot = makeScratch("t3-task-root-");
-      const home = makeScratch("t3-home-");
 
       const workerBash = createBashTool(taskRoot, {
         tmpDir: workerPad,
-        home,
       });
       const write = parseBash(
         await workerBash.handler({ command: 'printf worker-z >"$TMPDIR/z"' })
@@ -278,7 +276,6 @@ describe("worker session tmp isolation (SC3, ADR-0092)", () => {
       // worker's $TMPDIR write via its own $TMPDIR.
       const parentBash = createBashTool(taskRoot, {
         tmpDir: parentPad,
-        home,
       });
       const read = parseBash(
         await parentBash.handler({ command: 'cat "$TMPDIR/z"' })

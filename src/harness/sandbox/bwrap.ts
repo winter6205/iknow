@@ -5,7 +5,6 @@ import {
   READ_ONLY_SYSTEM_PATHS,
 } from "./fs-policy.js";
 import type { NetworkPolicy } from "./network-policy.js";
-import type { ResourceLimits } from "./resource-limits.js";
 
 export interface SeccompProfile {
   readonly fd: number;
@@ -26,7 +25,6 @@ export interface BwrapFenceOptions {
   readonly args: readonly string[];
   readonly fsPolicy: FsPolicy;
   readonly networkPolicy: NetworkPolicy;
-  readonly resourceLimits: ResourceLimits;
   readonly env: NodeJS.ProcessEnv;
   readonly cwd: string;
   // Per-call network opt-in (#503, ADR-0022). Absent/false = isolated
@@ -63,11 +61,9 @@ export interface BwrapFence {
  */
 function baseArgs(
   cwd: string,
-  resources: ResourceLimits,
   network: boolean,
   cwdReadonly: boolean
 ): string[] {
-  void resources;
   return [
     "--unshare-user-try",
     // network:true is the only axis that drops --unshare-net (ADR-0022 #1);
@@ -99,12 +95,7 @@ export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
   );
   const argv = [
     "bwrap",
-    ...baseArgs(
-      opts.cwd,
-      opts.resourceLimits,
-      opts.network === true,
-      opts.cwdReadonly === true
-    ),
+    ...baseArgs(opts.cwd, opts.network === true, opts.cwdReadonly === true),
     // --clearenv must precede every --setenv so the sandbox inherits only the
     // whitelisted entries, never the host env (bwrap otherwise copies the whole
     // environment of the process that launches it). #225.
@@ -121,8 +112,11 @@ export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
   // is the --unshare-net switch driven by the `network` option above; keep
   // networkPolicy as the declared-but-inert contract input (ADR-0022 fog).
   void opts.networkPolicy;
-  // The global policy no longer shapes argv (no whitelist emission); the
-  // session tmp host path is consumed by the bash handlers for `$TMPDIR`.
+  // fsPolicy is a declared-but-inert contract seam — the global policy
+  // (ADR-0092) carries only the session tmp host path consumed by the bash
+  // handlers as `$TMPDIR`; it does not shape argv. Retained for Round 2
+  // workspace mode that may project from the same seam (mirrors the existing
+  // `void opts.networkPolicy` convention above).
   void opts.fsPolicy;
   return Object.freeze({ argv: Object.freeze(argv), sealed: true as const });
 }

@@ -93,7 +93,6 @@ function makeTool(opts: {
 }) {
   return createBashTool(opts.cwd, {
     backgroundManager: makeManager(),
-    home: "/home/user",
     ...(opts.liveTaskRoot ? { liveTaskRoot: opts.liveTaskRoot } : {}),
   });
 }

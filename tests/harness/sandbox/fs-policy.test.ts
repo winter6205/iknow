@@ -1,45 +1,35 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   OPTIONAL_HOST_RO_PREFIXES,
   READ_ONLY_SYSTEM_PATHS,
-  SENSITIVE_PATHS,
   createFsPolicy,
 } from "../../../src/harness/sandbox/fs-policy.js";
 import { ToolExecutionError } from "../../../src/harness/errors.js";
 
 /**
- * ADR-0092 全局档 fs-policy 合同。
+ * ADR-0092 global-mode fs-policy contract (post-Round-2 dead-surface removal).
  *
- * 闭世界(读/写白名单 + assertWithin)退役,policy 只剩两个面:
+ * 闭世界(读/写白名单 + assertWithin / SENSITIVE_PATHS / isSensitive)退役,
+ * policy 只剩一面:
  *   - `tmpRoot()`:本 identity 的会话 tmp 宿主路径(供 `$TMPDIR` 与写工具
- *     可写根用),不是 guest `/tmp` 的 bind 目标;
- *   - `isSensitive()`:状态锚谓词(`~/.ssh` 等 + `<home>/.iknow` /
- *     `<workspaceRoot>/.iknow`),保留给 Round 2 工作区档,不塑形 argv。
+ *     可写根用),不是 guest `/tmp` 的 bind 目标。
  *
- * home 与 workspaceRoot 都只是状态锚,不再是 bind root。合同输入只有
- * `tmpDir`(空白或盘上缺席 → typed fail-loud,不 spawn)。
+ * 没有 home / workspaceRoot 状态锚谓词、没有白名单、没有 isSensitive 表面;
+ * 写保护由 bwrap 挂载层(host root + 系统前缀只读重绑)与权限链 + hard-wall
+ * 共同承担。合同输入只有 `tmpDir`(空白或盘上缺席 → typed fail-loud,不 spawn)。
  */
-function isWithin(root: string, target: string): boolean {
-  const rel = relative(resolve(root), resolve(target));
-  return (
-    rel === "" ||
-    (rel !== ".." && !rel.startsWith(`..${sep}`) && !rel.startsWith(sep))
-  );
-}
 
-describe("createFsPolicy — 全局档状态锚 (ADR-0092)", () => {
+describe("createFsPolicy — global-mode tmpRoot (ADR-0092)", () => {
   let fixtureRoot: string;
-  let taskRoot: string;
   let tmp: string;
 
   beforeAll(() => {
     fixtureRoot = mkdtempSync(join(tmpdir(), "fs-policy-global-"));
-    taskRoot = join(fixtureRoot, "task");
-    mkdirSync(taskRoot, { recursive: true });
+    mkdirSync(fixtureRoot, { recursive: true });
     tmp = mkdtempSync(join(tmpdir(), "fs-policy-global-tmp-"));
   });
 
@@ -52,23 +42,22 @@ describe("createFsPolicy — 全局档状态锚 (ADR-0092)", () => {
     extra: Partial<Parameters<typeof createFsPolicy>[0]> = {}
   ): ReturnType<typeof createFsPolicy> {
     return createFsPolicy({
-      home: "/home/user",
       tmpDir: tmp,
       ...extra,
     });
   }
 
-  it("exposes only tmpRoot/isSensitive — the closed-world root axes and assertWithin are gone", () => {
+  it("exposes only tmpRoot — the closed-world root axes and isSensitive are gone", () => {
     const policy = policyFor();
     assert.equal(policy.tmpRoot(), resolve(tmp));
-    assert.equal(typeof policy.isSensitive, "function");
-    // 角色取根访问器与 assertWithin 随闭世界退役;残留即回归。
+    // 闭世界退役面 + Round-2 placeholder 谓词 must all be gone — 残留即回归。
     const surface = policy as unknown as Record<string, unknown>;
     for (const retired of [
       "writeRoots",
       "readRoots",
       "optionalReadRoots",
       "assertWithin",
+      "isSensitive",
     ]) {
       assert.equal(
         retired in surface,
@@ -76,34 +65,6 @@ describe("createFsPolicy — 全局档状态锚 (ADR-0092)", () => {
         `retired closed-world accessor must not survive: ${retired}`
       );
     }
-  });
-
-  it("isSensitive expands the tilde sensitive set under the given home", () => {
-    const policy = policyFor();
-    assert.equal(policy.isSensitive("/home/user/.ssh/id_ed25519"), true);
-    assert.equal(policy.isSensitive("/home/user/.aws/config"), true);
-    assert.equal(policy.isSensitive("/home/user/.docker/config.json"), true);
-    // 兄弟路径不误伤。
-    assert.equal(policy.isSensitive("/home/user/Documents/notes.txt"), false);
-  });
-
-  it("isSensitive covers both protected-state anchors (<home>/.iknow, <workspaceRoot>/.iknow)", () => {
-    const policy = policyFor({ workspaceRoot: taskRoot });
-    assert.equal(policy.isSensitive("/home/user/.iknow/state.json"), true);
-    assert.equal(
-      policy.isSensitive(`${taskRoot}/.iknow/state.json`),
-      true,
-      "workspaceRoot stays a protected-state anchor"
-    );
-    assert.equal(policy.isSensitive(join(taskRoot, "AGENTS.md")), false);
-    // workspaceRoot 只做状态锚:workspaceRoot 自身不是敏感路径。
-    assert.equal(policy.isSensitive(taskRoot), false);
-  });
-
-  it("workspaceRoot is not required — omitting it keeps only the home anchor", () => {
-    const policy = policyFor();
-    assert.equal(policy.isSensitive("/home/user/.iknow/state.json"), true);
-    assert.equal(policy.isSensitive(`${taskRoot}/.iknow/state.json`), false);
   });
 
   it("fails loud on a blank or missing tmpDir contract root (config-fault class)", () => {
@@ -124,8 +85,7 @@ describe("createFsPolicy — 全局档状态锚 (ADR-0092)", () => {
     );
   });
 
-  it("keeps the frozen host-prefix sources single-source (system + optional + sensitive)", () => {
-    assert.ok(Object.isFrozen(SENSITIVE_PATHS));
+  it("keeps the frozen host-prefix sources single-source (system + optional)", () => {
     assert.ok(Object.isFrozen(READ_ONLY_SYSTEM_PATHS));
     assert.ok(Object.isFrozen(OPTIONAL_HOST_RO_PREFIXES));
     assert.deepEqual(
@@ -133,13 +93,11 @@ describe("createFsPolicy — 全局档状态锚 (ADR-0092)", () => {
       ["/usr", "/bin", "/lib", "/lib64", "/etc"]
     );
     assert.deepEqual([...OPTIONAL_HOST_RO_PREFIXES], ["/opt", "/snap"]);
-    assert.equal(
-      SENSITIVE_PATHS.some((p) => p.startsWith("~/.ssh")),
-      true
-    );
-    assert.equal(
-      SENSITIVE_PATHS.some((p) => isWithin("/home/user", "/home/user/.ssh")),
-      true
-    );
+  });
+
+  it("tmpRoot is the exact host path passed in (never a guest /tmp alias)", () => {
+    const policy = policyFor();
+    assert.equal(policy.tmpRoot(), resolve(tmp));
+    assert.notEqual(policy.tmpRoot(), "/tmp");
   });
 });

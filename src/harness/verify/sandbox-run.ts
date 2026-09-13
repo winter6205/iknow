@@ -5,7 +5,7 @@
  * 超时包裹 → SandboxCmdRecord 落盘"。M6 抽共享工厂 (bash 工具同款装配语义),
  * 消除 makeDefaultRunVerify 在 verify-loop 内部重造 bash 装配。
  */
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import type { SandboxCmdRecord, TraceService } from "../trace/index.js";
 import type { SandboxRunResult } from "../sandbox/index.js";
 import {
@@ -14,7 +14,6 @@ import {
   createEnvIsolation,
   createFsPolicy,
   createNetworkPolicy,
-  createResourceLimits,
   runInSandbox,
 } from "../sandbox/index.js";
 
@@ -37,16 +36,14 @@ export type RunVerifyFn = (
  */
 export function makeDefaultRunVerify(opts: {
   readonly cwd: string;
-  readonly home: string;
   /** ADR-0092: 验证命令的会话 tmp 宿主路径 —— `$TMPDIR` 的来源。缺省回退
    *  进程 tmpdir();显式传入即覆盖(测试注入缝)。 */
   readonly tmpDir?: string;
 }): RunVerifyFn {
   const tmpDir = opts.tmpDir ?? tmpdir();
-  const fsPolicy = createFsPolicy({ home: opts.home, tmpDir });
+  const fsPolicy = createFsPolicy({ tmpDir });
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   const networkPolicy = createNetworkPolicy();
-  const resourceLimits = createResourceLimits();
   return async (command, ctx) => {
     const fenceEnv = envIsolation.filter(process.env);
     const fence = createBwrapFence({
@@ -54,7 +51,6 @@ export function makeDefaultRunVerify(opts: {
       args: ["-c", command],
       fsPolicy,
       networkPolicy,
-      resourceLimits,
       env: fenceEnv,
       cwd: opts.cwd,
     });
@@ -146,9 +142,4 @@ export async function runVerifyOnce(
     clearTimeout(timer);
     opts.signal?.removeEventListener("abort", onUserAbort);
   }
-}
-
-/** 供 verify-loop 缺省装配 home 解析 (对齐 homedir() 缺省)。 */
-export function defaultVerifyHome(home?: string): string {
-  return home ?? homedir();
 }

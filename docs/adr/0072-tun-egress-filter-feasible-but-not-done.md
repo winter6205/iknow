@@ -41,7 +41,7 @@ Status: accepted
 
 ## 附带观察（不并入本 ADR）
 
-`--dev-bind /dev /dev`（`bwrap.ts:137-139`）是全量绑设备面，而文件面是 deny-by-default 白名单（`createClosedWorldFsPolicy`）。两者姿态不一致。userns 下大概率不可利用，值得单独看一眼 —— 不在本 ADR 展开。
+`--dev-bind /dev /dev`（`bwrap.ts:137-139`）是全量绑设备面，而文件面是 deny-by-default 白名单（`createClosedWorldFsPolicy`（**2026-09-13 已随 ADR-0092 退役**））。两者姿态不一致。userns 下大概率不可利用，值得单独看一眼 —— 不在本 ADR 展开。
 
 ## Consequences
 

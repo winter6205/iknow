@@ -1,5 +1,5 @@
 import { mkdtempSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
@@ -15,7 +15,6 @@ import {
   createFsPolicy,
   createNetworkPolicy,
   createOutputMask,
-  createResourceLimits,
   currentSecretValues,
 } from "../../sandbox/index.js";
 import {
@@ -42,14 +41,6 @@ export interface CreateBashToolOptions {
   /** #406 T3:per-engine secret registry。在场时 handler 在构造 bwrap fence 前
    *  对命令做占位符还原（`<<<SECRET_N>>>` → 真值）；缺席时命令原样透传。 */
   readonly secretRegistry?: SecretRegistry;
-  /** ADR-0019 (T4): per-root state anchor. Threaded into `createFsPolicy` so
-   *  `<workspaceRoot>/.iknow` is covered by the protected-state pathset.
-   *  Defaults to `cwd` (the legacy shape) when absent — preserves the existing
-   *  policy surface for callers that don't thread per-root state. */
-  readonly workspaceRoot?: string;
-  /** #337 T8 测试缝:home 覆盖（默认 homedir()）— production 不传 = 真实
-   *  home,单测可注入 tmpdir 隔离真实 user dir。 */
-  readonly home?: string;
   /** #502 T3:后台任务管理器。在场时 `background: true` 分支可用 —— handler
    *  经 manager.spawn 起 detached 子进程后立即返回 {task_id, log_path}，不
    *  阻塞、不占 tier timer（handler 毫秒级返回 ⇒ executor tier 天然不治理
@@ -90,14 +81,10 @@ export function createBashTool(
   opts?: CreateBashToolOptions
 ): AciToolDef {
   requireBwrap();
-  // ADR-0092 (D3): 工厂期只捕获 fsPolicy 的非 cwd 维度。home / tmpDir /
-  // workspaceRoot 都是 process-stable；policy 由 handler per-call 重建，
-  // 不闭包到工厂捕获的 cwd。
-  const home = opts?.home ?? homedir();
+  // ADR-0092 (D3): 工厂期只捕获 `tmpDir`（process-stable）。fsPolicy 由
+  // handler per-call 重建,不闭包到工厂捕获的 cwd。
   let fallbackFenceTmp: string | undefined;
-  const workspaceRoot = opts?.workspaceRoot;
   const networkPolicy = createNetworkPolicy();
-  const resourceLimits = createResourceLimits();
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   const handler = async (
     input: unknown,
@@ -186,22 +173,16 @@ export function createBashTool(
     // 权限层（policy.ts code-ask-bash-network）已强制 ask full_auto 不豁免,
     // 此处只判严格 === true;非布尔 / 缺省 / false → 走既有隔离路径。
     const wantsHostNetwork = (input as BashInput | null)?.network === true;
-    // T7 (D4): fsPolicy per-call rebuild —— home/tmpDir/workspaceRoot 是
-    // 工厂期冻结的,只有 cwd 维度跟 waveRoot 联动。全局档(ADR-0092)下
-    // fs-policy 不再发射 argv(fence 固定 host root + 系统前缀 ro-bind),
-    // 只有 policy 的 per-call 重建面保留 —— `$TMPDIR` 与写工具可写根共用
-    // 同一份 identity session tmp。
-    const fsPolicy = createFsPolicy({
-      home,
-      tmpDir,
-      ...(workspaceRoot ? { workspaceRoot } : {}),
-    });
+    // T7 (D4): fsPolicy per-call rebuild —— `tmpDir` 工厂期冻结,只有 cwd
+    // 维度跟 waveRoot 联动。全局档(ADR-0092)下 fs-policy 不再发射 argv
+    // (fence 固定 host root + 系统前缀 ro-bind),只有 policy 的 per-call
+    // 重建面保留 —— `$TMPDIR` 与写工具可写根共用同一份 identity session tmp。
+    const fsPolicy = createFsPolicy({ tmpDir });
     const fence = createBwrapFence({
       command: "bash",
       args: ["-c", finalCommand],
       fsPolicy,
       networkPolicy,
-      resourceLimits,
       env: fenceEnv,
       cwd: waveRoot,
       ...(wantsHostNetwork ? { network: true } : {}),
@@ -308,9 +289,7 @@ async function handleBackground(
     command: finalCommand,
     recordCommand,
     cwd,
-    workspaceRoot: opts.workspaceRoot,
     env: process.env,
-    home: opts.home,
     ...(ctx?.conversationId !== undefined
       ? { conversationId: ctx.conversationId }
       : {}),

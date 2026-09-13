@@ -12,7 +12,6 @@ import {
   createFsPolicy,
 } from "../../../src/harness/sandbox/fs-policy.js";
 import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.js";
-import { createResourceLimits } from "../../../src/harness/sandbox/resource-limits.js";
 
 /**
  * ADR-0092 全局档 bwrap argv 形态。
@@ -69,9 +68,8 @@ function fenceArgv(
   return createBwrapFence({
     command: "bash",
     args: ["-c", "echo hi"],
-    fsPolicy: createFsPolicy({ home: "/home/user", tmpDir: TMP }),
+    fsPolicy: createFsPolicy({ tmpDir: TMP }),
     networkPolicy: createNetworkPolicy(),
-    resourceLimits: createResourceLimits(),
     env: { PATH: "/bin" },
     cwd: TASK,
     ...(spec.cwdReadonly ? { cwdReadonly: true } : {}),
@@ -192,9 +190,8 @@ describe("createBwrapFence — 全局档 argv 形态 (ADR-0092)", () => {
     const argvFalse = createBwrapFence({
       command: "bash",
       args: ["-c", "echo hi"],
-      fsPolicy: createFsPolicy({ home: "/home/user", tmpDir: TMP }),
+      fsPolicy: createFsPolicy({ tmpDir: TMP }),
       networkPolicy: createNetworkPolicy(),
-      resourceLimits: createResourceLimits(),
       env: { PATH: "/bin" },
       cwd: TASK,
       cwdReadonly: false,

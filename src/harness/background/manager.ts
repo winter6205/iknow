@@ -22,7 +22,7 @@
 import { randomBytes } from "node:crypto";
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { appendFile, readFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -32,7 +32,6 @@ import {
   createEnvIsolation,
   createFsPolicy,
   createNetworkPolicy,
-  createResourceLimits,
 } from "../sandbox/index.js";
 import type { BackgroundTaskRecord, BackgroundTaskStatus } from "./registry.js";
 import { createBackgroundRegistry } from "./registry.js";
@@ -127,10 +126,7 @@ export interface BackgroundSpawnRequest {
    *  command 用此字段（占位符形态,`<<<SECRET_N>>>`),spawn 真值不上盘。
    *  缺省（无 secret registry 场景 / 手写调用方）→ 回退 request.command。 */
   readonly recordCommand?: string;
-  /** 注入给 defaultBackgroundSpawn 的 fence 装配选项(T4 装配期可选传入)。 */
-  readonly workspaceRoot?: string;
   readonly env?: NodeJS.ProcessEnv;
-  readonly home?: string;
   /** #503 T11:network?: boolean — 透传 defaultBackgroundSpawn 构造 host-net
    *  fence（去 --unshare-net）。缺省 / false = 既有隔离路径（与 bwrap 默认
    *  --unshare-net 行为一致）。由 bash.ts handleBackground 透传 input.network。 */
@@ -241,16 +237,10 @@ export async function defaultBackgroundSpawn(
   req: BackgroundSpawnRequest
 ): Promise<ChildProcess> {
   const cwd = req.cwd;
-  const home = req.home ?? homedir();
   // ADR-0092 global posture — same assembly as foreground bash.ts. The policy
-  // only carries the session tmp host path + protected-state predicate; argv
-  // is the fixed host-root/system-ro-bind shape.
-  const fsPolicy = createFsPolicy({
-    home,
-    tmpDir: req.tmpDir ?? tmpdir(),
-    ...(req.workspaceRoot ? { workspaceRoot: req.workspaceRoot } : {}),
-  });
-  const resources = createResourceLimits();
+  // only carries the session tmp host path; argv is the fixed
+  // host-root/system-ro-bind shape.
+  const fsPolicy = createFsPolicy({ tmpDir: req.tmpDir ?? tmpdir() });
   const network = createNetworkPolicy();
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   const fenceEnv = {
@@ -266,7 +256,6 @@ export async function defaultBackgroundSpawn(
     args: ["-c", req.command],
     fsPolicy,
     networkPolicy: network,
-    resourceLimits: resources,
     env: fenceEnv,
     cwd,
     // #503 T11:network:true 透传到 fence —— 去掉 --unshare-net,共享宿主

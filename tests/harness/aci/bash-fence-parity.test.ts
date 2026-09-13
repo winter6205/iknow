@@ -22,7 +22,7 @@
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import {
@@ -43,7 +43,6 @@ import {
   createEnvIsolation,
   createFsPolicy,
   createNetworkPolicy,
-  createResourceLimits,
 } from "../../../src/harness/sandbox/index.ts";
 
 // 必须先于 manager 导入:模块级 vi.mock 会被 vitest hoist,但写在这里
@@ -89,15 +88,13 @@ function makeFakeChild(pid = 99001) {
  * - env:envIsolation.filter(...) 后,cwdReadonly 时注入 GIT_OPTIONAL_LOCKS=0
  *   (产品缝 bash.ts,post-filter additive)
  * - fence 选项:network + cwdReadonly 由 opts 透传
- * - fsPolicy:全局档只承载 tmpRoot / isSensitive,不塑形 argv mount
+ * - fsPolicy:全局档只承载 tmpRoot,不塑形 argv mount
  */
 function foregroundFenceArgv(opts: {
   readonly cwd: string;
   readonly network: boolean;
   readonly cwdReadonly: boolean;
-  readonly home?: string;
 }): readonly string[] {
-  const home = opts.home ?? "/home/user";
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   const fenceEnv = applyCwdReadonlyFenceEnv(
     envIsolation.filter({ PATH: "/bin" }),
@@ -106,9 +103,8 @@ function foregroundFenceArgv(opts: {
   return createBwrapFence({
     command: "bash",
     args: ["-c", "echo hi"],
-    fsPolicy: createFsPolicy({ home, tmpDir: tmpdir() }),
+    fsPolicy: createFsPolicy({ tmpDir: tmpdir() }),
     networkPolicy: createNetworkPolicy(),
-    resourceLimits: createResourceLimits(),
     env: fenceEnv,
     cwd: opts.cwd,
     ...(opts.network ? { network: true } : {}),
@@ -171,14 +167,12 @@ async function backgroundFenceArgv(opts: {
   readonly cwd: string;
   readonly network: boolean;
   readonly cwdReadonly: boolean;
-  readonly home?: string;
 }): Promise<readonly string[]> {
   spawnMock.mockImplementation(() => makeFakeChild());
   await defaultBackgroundSpawn({
     command: "echo hi",
     cwd: opts.cwd,
     env: { PATH: "/bin" },
-    home: opts.home ?? homedir(),
     ...(opts.network ? { network: true } : {}),
     ...(opts.cwdReadonly ? { cwdReadonly: true } : {}),
   });
@@ -418,7 +412,6 @@ describe("defaultBackgroundSpawn negative — drives createBwrapFence seam", () 
       command: "echo hi",
       cwd: CWD,
       env: { PATH: "/bin" },
-      home: homedir(),
     });
     const call = spawnMock.mock.calls[0];
     expect(call).toBeDefined();
@@ -444,7 +437,6 @@ describe("defaultBackgroundSpawn negative — drives createBwrapFence seam", () 
       command: "echo hi",
       cwd: CWD,
       env: { PATH: "/bin" },
-      home: homedir(),
     });
     const argv = (spawnMock.mock.calls[0]?.[1] as readonly string[]) ?? [];
     assert.ok(
