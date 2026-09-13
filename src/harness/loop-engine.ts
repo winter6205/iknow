@@ -1594,27 +1594,52 @@ function toTraceToolCalls(opts: {
 }
 
 /**
+ * 回合/宿主钟 abort 在 signal.reason 上的标记(ADR-0091)。严格 equal 比较,
+ * 严禁任何 substring / prefix 优化 —— "timeout" 是单 call 失败标签同时也是
+ * StopReason 值 ,"timeout:…" 是单 call 的失败前缀 ,"subagent-timeout"
+ * 是子代理 per-task 寿命。值与三者皆不同 ("turn-timeout"), 唯一表达
+ * 回合钟的 abort 原因;复用字符串会让 computeToolStopFlags 的严格 equal
+ * 与单 call result 标签 / StopReason union 失联,与 worker.ts 的
+ * "subagent-timeout" 同构。
+ */
+export const TURN_CLOCK_ABORT_REASON = "turn-timeout";
+
+/**
  * 017 T5:扫描 Executor 结果 + signal,判定本次 tool 阶段是否触发
- * cancelled / timeout。cancelled 优先级高于 timeout(与 stepWithTrace
- * 主路径上的判定顺序一致),signal 已 abort 即视为整体取消,即便
- * results 中同时存在 timeout 标签。
+ * cancelled / timeout。
  *
- * 124/T5:导出供 interrupt-routing 验收套件断言严格 strict-equal
- * 契约(无前缀/后缀宽容,严禁任何 substring / prefix 优化)。
+ * ADR-0091:单 call 工具超时只失败该条 tool_result(该条仍是
+ * execution_failed + "timeout",ADR-0005 不变),不升格为回合 timeout ——
+ * 所以 results 里的 "timeout" 标签对 timedOut 完全无影响。回合 timeout
+ * 只认外层 signal 以 TURN_CLOCK_ABORT_REASON 为 reason 的 abort。
+ *
+ * 时钟 abort 权威:cancelled 不再无条件吸收每一次 abort。理由 —— 现形状
+ * `signal.aborted || tag==="cancelled"` 会把时钟 abort 也读成 cancelled,
+ * 使「timeout 只在 signal 已 abort 且 cancelled 未抢先时成立」永假
+ * (ADR-0091 的 "cancelled 未抢先" 预设一个非 cancelled 的 abort)。
+ * 因此 clockAbort 成立时 cancelled 收敛为 false,即使 executor 对同一次
+ * caller 信号归一出了 "cancelled" result 标签 —— 那只是同一次 abort 的
+ * 派生,不得反向改写回合归因。无 clockAbort 时 cancelled 保持原形状
+ * (plain abort 或 "cancelled" 标签)。
+ *
+ * 无 producer 说明:今日 tool 阶段没有回合钟 — 真正的回合/宿主钟必须以
+ * reason 恰为 TURN_CLOCK_ABORT_REASON 的 abort 才能落到 timedOut(与
+ * modelStop 的 hostCancel 同型:该分支生产不可达,由测试 seam 钉住)。
  */
 export function computeToolStopFlags(opts: {
   readonly results: ReadonlyArray<ToolExecutionResult>;
   readonly signal: AbortSignal | undefined;
 }): { timedOut: boolean; cancelled: boolean } {
-  const timedOut = opts.results.some(
-    (r) => r.kind === "execution_failed" && r.message === "timeout"
-  );
+  const clockAbort =
+    opts.signal?.aborted === true &&
+    opts.signal.reason === TURN_CLOCK_ABORT_REASON;
   const cancelled =
-    opts.signal?.aborted === true ||
-    opts.results.some(
-      (r) => r.kind === "execution_failed" && r.message === "cancelled"
-    );
-  return { timedOut, cancelled };
+    !clockAbort &&
+    (opts.signal?.aborted === true ||
+      opts.results.some(
+        (r) => r.kind === "execution_failed" && r.message === "cancelled"
+      ));
+  return { timedOut: clockAbort, cancelled };
 }
 
 type ToolCallView = { id: string; name: string; input: unknown };

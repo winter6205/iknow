@@ -80,10 +80,11 @@ export interface SpawnSubAgentToolDeps {
  * `execution_failed` 才能让模型把「子代理卡死在墙钟」和「子代理跑完但失败」
  * 区分开。envelope.status 本就是 "failed"，规格说的是 result kind。
  *
- * message **不得**恰好等于 `"cancelled"` / `"timeout"` —— loop-engine 用
- * `execution_failed && message === "cancelled"` 判整回合取消、`=== "timeout"`
- * 判整回合超时（loop-engine.ts:1605-1618）；撞字面量会把单个子任务的墙钟
- * 误升级成整回合停因。
+ * message **不得**恰好等于 `"cancelled"` —— `computeToolStopFlags`
+ * (loop-engine.ts) 仍用 `execution_failed && message === "cancelled"` 判
+ * 整回合取消，撞字面量会把单个子任务的墙钟误升级成整回合停因。`"timeout"`
+ * 标签在 ADR-0091 后对回合停因 inert（只作该条 result 归因），但仍避开，
+ * 免得同波下游按标签做归因时把它读成时钟信号。
  */
 function throwWallClockTimeout(taskId: string, detail: string): never {
   const suffix = detail.length > 0 ? ` (${detail})` : "";
@@ -105,8 +106,8 @@ function throwWallClockTimeout(taskId: string, detail: string): never {
  *     模型能看见的全部归因。若沿用调用侧那句「caller aborted」，强杀会被读成
  *     调用方取消；若沿用墙钟那句，则与 SC13 的超时归因撞脸。
  *
- * 两者的共同点是**绝不**恰好等于 `"cancelled"` / `"timeout"`：撞字面量会把
- * 单个子任务的结局误升级成整回合停因（loop-engine.ts:1605-1618）。
+ * 两者的共同点是**绝不**恰好等于 `"cancelled"`：撞字面量会把单个子任务的
+ * 结局误升级成整回合取消（`computeToolStopFlags` 的 result 标签分支）。
  *
  * 放在 handler 外：整个归因判定（含 `ctx?.signal` 读）不占 handler 的圈复杂度
  * （S5 硬门：handler 已在基线上，任何新分支都会判回归）。

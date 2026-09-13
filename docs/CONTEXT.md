@@ -122,6 +122,12 @@ _Avoid_: 把历史消息 memo 当成同一件事；每个新字整篇重解析�
 **ToolExecutionContext**: Executor 透传给 handler 的执行上下文 `{ signal }`；run 第三参 signal 原样透传、不创建子 signal，超时由 Executor `Promise.race` 外包而非 ctx 携带。
 _Avoid_: 在 ctx 里放 timeoutMs；为每个 handler 建子 AbortController
 
+**per-call tool timeout**: ACI/executor 档位钟到点 → 只该条 `execution_failed` 且 `message` 为 `"timeout"`；loop **不**因此 `StopReason: timeout`。ADR-0091。
+_Avoid_: 一波结果 `some(message==="timeout")` 升格为整回合停
+
+**turn timeout**: 外层 `AbortSignal` 已 abort、且 cancelled 未抢先时的 `StopReason: timeout`。ADR-0091。
+_Avoid_: 与 per-call tool timeout 混名
+
 **in-flight closeout**: abort/timeout/进程死亡时的收尾——live：模型在途则整回合不进历史；工具在途则 assistant 已追加，在途 tool 填 `execution_failed`（`"cancelled"` / `"timeout"`），再编码为 tool_result。signal 优先于 timeout。resume/load：未配对 `tool_use` 填 `"process"`（`InterruptReason` 预留档），**不加** `Interrupted by user.`；mutating 工具须指示先检查副作用再重跑。一律走现有 `encodeToolResults`。
 _Avoid_: 回滚已追加的 assistant 回合；悬空未回填的 tool call；把进程死亡当成 cancelled
 
@@ -648,7 +654,7 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **9router stack probe**: 同 key 可使 `models` 200 而 `chat/completions` 401；agent shell env 与 operator 交互 shell 可能不同（探针 `scripts/i4-probe-nine-endpoints.ts`）
 - **streaming arm vs native SSE**: LLM 默认 SDK 流式臂（`IKNOW_LLM_STREAM`，默认 `on`，`env.ts` SSOT）；原生 SSE 事件不出 adapter 边界，host 只见 `HarnessStreamEvent`；`off` 回退非流式臂，网关响应由 SDK 统一消化，host 不直接解析 wire
 - **turnCount vs harness maxTurns**: `turnCount` 统计每个已完成的 assistant 回合；`maxTurns` 是 run() 入口处的运行上限；二者不要混用
-- **cancelled vs timeout**: 两条独立停止路径——cancelled 由 Loop Engine 检测 `signal.aborted`，timeout 由 adapter/executor 超时结果判定；signal 优先，不在 signal 层合并超时
+- **cancelled vs timeout**: 两条独立停止路径——cancelled 由 Loop Engine 检测 `signal.aborted`；**回合** timeout 只在外层 signal abort 且 cancelled 未抢先（ADR-0091）；单 call 档位钟只失败该条 tool_result。signal 优先，不在 signal 层合并超时
 - **LoopTrace vs messages**: LoopTrace 是非权威 A 层结构元数据（不含 payload），messages 才是 append-only 唯一权威历史；trace 只用于诊断聚合，不得作为第二份权威副本
 - **project stack defaults vs .env.local**: env.ts 代码默认是项目级栈 SSOT（ADR-0001）；`.env.local` 重复声明同值非密项会形成第二源 / drift。`.env.local` 职责 = 密钥值 + 机器级覆盖，不是重新声明栈
 - **secret-roundtrip mask（#406）**: 用户文本中的密钥形态被识别层替换为 `<<<SECRET_N>>>` 占位符（N 从 1 单调递增，per-engine registry 共享，in-memory 不落盘）；bash 工具 spawn 前 `restore()` 回填真值；输出 mask 经 `currentSecretValues(registry.values())` 兜底遮蔽。**session 重启后历史占位符无法还原**（registry 非持久化，占位符原样透传不抛——acceptable limitation）。`settings.secrets.mode` 控制 `roundtrip`（默认）| `block`（#126 deny-only guard 兼容）

@@ -24,6 +24,25 @@ export const MAX_CONTEXT = 50;
 const OUTPUTS: ReadonlyArray<GrepOutput> = ["paths", "content", "count"];
 
 /**
+ * 入参别名（D2）：只换标签，搜法仍是目标出法。schema 枚举接受别名，
+ * `readOutput` 在进引擎前归一 —— `QuerySpec.output` 因此永远只有三种取值，
+ * 别名不会成为第四种出法（SC1）。
+ */
+const OUTPUT_ALIASES: ReadonlyMap<string, GrepOutput> = new Map([
+  ["files_with_matches", "paths"],
+]);
+
+/**
+ * 模型可传的 `output` 值全集（真实出法 + 别名）。SSOT：失败文案与 schema 的
+ * `enum` 都从这里派生（`grep.ts` 引用它）—— 两处各自手写会让「别名只加进
+ * 归一表、schema 忘加」在 ajv 处静默复现（别名到不了 `readOutput`）。
+ */
+export const GREP_OUTPUT_VALUES: ReadonlyArray<string> = [
+  ...OUTPUTS,
+  ...OUTPUT_ALIASES.keys(),
+];
+
+/**
  * 把 handler input 解析为 QuerySpec。
  *
  * 非法输入一律 typed 拒绝（SC10 的两种 typed 错误之一：**输入**类）。
@@ -128,12 +147,14 @@ function readOptionalNonEmptyString(
 
 function readOutput(value: unknown): GrepOutput {
   if (value === undefined) return "paths";
-  if (typeof value !== "string" || !OUTPUTS.includes(value as GrepOutput)) {
-    throw new ToolExecutionError(
-      `grep: output must be one of ${OUTPUTS.join(" / ")}`
-    );
+  if (typeof value === "string") {
+    const alias = OUTPUT_ALIASES.get(value);
+    if (alias !== undefined) return alias;
+    if (OUTPUTS.includes(value as GrepOutput)) return value as GrepOutput;
   }
-  return value as GrepOutput;
+  throw new ToolExecutionError(
+    `grep: output must be one of ${GREP_OUTPUT_VALUES.join(" / ")}`
+  );
 }
 
 /** 整数 flag 的界（一个 flag 一份；比 5 个位置参数更难写反）。 */
