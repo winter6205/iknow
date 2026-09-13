@@ -3,7 +3,8 @@
  *
  * 锁的不变式：
  *   - 只传 pattern → output=paths / offset=0 / head_limit=50 / context=0 /
- *     ignoreCase=false（D2 默认 + D3 默认 50）。
+ *     ignoreCase=false（D2 默认 + D3 默认 50）；别名 `files_with_matches`
+ *     在解析层归一为 paths，不产生第四种出法。
  *   - `head_limit` 硬顶 2000；`limit` 是**退役名**，出现即 typed 拒绝
  *     （D3「不叫 limit」；避免与 read_file 行窗撞名）。
  *   - 空 / 负 / 非法整数的边界一律 typed 拒绝（defensive 五类之空与非法）。
@@ -56,6 +57,27 @@ describe("parseQuerySpec — 默认面", () => {
     assert.equal(
       parseQuerySpec({ pattern: "a", output: "count" }).output,
       "count"
+    );
+  });
+
+  it("`files_with_matches` 是 paths 的入参别名，在解析层归一（D2）", () => {
+    // 别名只换标签、不产生第四种出法：解析产物与 paths 逐字段相同。
+    assert.deepEqual(
+      parseQuerySpec({ pattern: "a", output: "files_with_matches" }),
+      parseQuerySpec({ pattern: "a", output: "paths" })
+    );
+    assert.equal(
+      parseQuerySpec({ pattern: "a", output: "files_with_matches" }).output,
+      "paths"
+    );
+    // paths 的 context 归零规则同样适用于别名（不是 content）。
+    assert.equal(
+      parseQuerySpec({
+        pattern: "a",
+        output: "files_with_matches",
+        context: 3,
+      }).context,
+      0
     );
   });
 
@@ -154,9 +176,18 @@ describe("parseQuerySpec — 空 / 非法输入", () => {
     rejects({ pattern: "a", offset: "1" }, /offset/);
   });
 
-  it("output 非枚举值被 typed 拒绝", () => {
-    rejects({ pattern: "a", output: "lines" }, /output/);
-    rejects({ pattern: "a", output: 3 }, /output/);
+  it("output 未知值被 typed 拒绝，文案列出全部合法值（别名也算合法）", () => {
+    for (const output of ["lines", 3]) {
+      assert.throws(
+        () => parseQuerySpec({ pattern: "a", output }),
+        (error: unknown) =>
+          error instanceof ToolExecutionError &&
+          /output/.test(error.message) &&
+          ["paths", "content", "count", "files_with_matches"].every((legal) =>
+            error.message.includes(legal)
+          )
+      );
+    }
   });
 
   it("context 负 / 超顶处理：负拒绝、超顶夹到 MAX_CONTEXT", () => {

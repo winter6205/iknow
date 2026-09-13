@@ -23,7 +23,8 @@
  *
  * 覆盖契约：
  *   - D2 出法：paths（默认，唯一相对路径）/ content（`path:line:text`）/
- *     count（`path:条数` + `total:` = 切片前总数）。
+ *     count（`path:条数` + `total:` = 切片前总数）；入参别名
+ *     `files_with_matches` 归一为 paths（不是第四种出法）。
  *   - D3 分页：`offset` + `head_limit`（默认 50、硬顶 2000）切**已排序**名单；
  *     排序在切片前；越过末尾且本次有命中 → 精确 `No entries at this offset`；
  *     无匹配 → 空串。`limit` 是退役名（typed 拒绝，文案点名 head_limit）。
@@ -56,9 +57,11 @@ import { afterEach, describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import { createGrepTool } from "../../../../src/harness/aci/tools/grep.ts";
+import { GREP_OUTPUT_VALUES } from "../../../../src/harness/aci/search/options.ts";
 import { createAciRegistry } from "../../../../src/harness/aci/aci-registry.ts";
 import { createExecutor } from "../../../../src/harness/tools/executor.ts";
 import { MAX_EXPLICIT_FILE_BYTES } from "../../../../src/harness/aci/search/file-lines.ts";
+import { GREP_SCOPE_FILE_LIMIT } from "../../../../src/harness/aci/search/scope-guard.ts";
 import { engineBinaryPath } from "../../../../src/harness/aci/search/engine-manifest.ts";
 import { resolveInstallRoot } from "../../../../src/harness/session-roots.ts";
 
@@ -125,7 +128,10 @@ type EngineName = (typeof ENGINES)[number]["name"];
 function toolFor(
   root: string,
   engine: EngineName,
-  extra?: { readonly projectIdentityRoot?: string }
+  extra?: {
+    readonly projectIdentityRoot?: string;
+    readonly scopeFileLimit?: number;
+  }
 ): ReturnType<typeof createGrepTool> {
   const deps =
     engine === "rg"
@@ -208,7 +214,11 @@ describe("createGrepTool — schema/aci shape", () => {
       "paths",
       "content",
       "count",
+      "files_with_matches",
     ]);
+    // SSOT 漂移守卫：enum 必须从 `GREP_OUTPUT_VALUES` 派生。别名只加进归一表
+    // 而漏进 enum 时，ajv 会抢在 `readOutput` 之前拒掉它 —— 这条让漂移 fail loud。
+    assert.deepEqual(schema.properties.output.enum, [...GREP_OUTPUT_VALUES]);
     assert.equal(schema.properties.output.default, "paths");
     assert.equal(schema.properties.glob.type, "string");
     assert.equal(schema.properties.type.type, "string");
@@ -277,6 +287,90 @@ describe("grep — D2 出法", () => {
       }
       assert.ok(lines.length <= 50);
     });
+  });
+
+  it("output=files_with_matches 是 paths 的别名：同一夹具路径名单逐行相同（SC1）", async () => {
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-alias-");
+      await mkdir(join(root, "sub"), { recursive: true });
+      await writeFile(join(root, "a.ts"), "hit one\nhit two\n", "utf8");
+      await writeFile(join(root, "sub", "b.ts"), "hit three\n", "utf8");
+
+      const tool = makeTool(root);
+      const viaPaths = (await tool.handler({
+        pattern: "hit",
+        output: "paths",
+      })) as string;
+      const viaAlias = (await tool.handler({
+        pattern: "hit",
+        output: "files_with_matches",
+      })) as string;
+
+      assert.equal(viaAlias, viaPaths);
+      assert.deepEqual(viaAlias.split("\n"), ["a.ts", "sub/b.ts"]);
+      for (const line of viaAlias.split("\n")) {
+        assert.equal(line.includes(":"), false, `别名出法不得含冒号: ${line}`);
+        assert.equal(line.startsWith("/"), false, `不得是绝对路径: ${line}`);
+      }
+    });
+  });
+
+  it("别名 + head_limit / offset 与 paths 的分页语义一致（D3 / SC1）", async () => {
+    await bothEngines(async (makeTool) => {
+      const root = await makeScratch("grep-alias-page-");
+      for (const name of ["a.ts", "b.ts", "c.ts", "d.ts"]) {
+        await writeFile(join(root, name), "hit\n", "utf8");
+      }
+
+      const tool = makeTool(root);
+      const aliasFirst = (await tool.handler({
+        pattern: "hit",
+        output: "files_with_matches",
+        head_limit: 2,
+      })) as string;
+      const aliasSecond = (await tool.handler({
+        pattern: "hit",
+        output: "files_with_matches",
+        offset: 2,
+        head_limit: 2,
+      })) as string;
+      const pathsSecond = (await tool.handler({
+        pattern: "hit",
+        output: "paths",
+        offset: 2,
+        head_limit: 2,
+      })) as string;
+
+      assert.deepEqual(aliasFirst.split("\n"), ["a.ts", "b.ts"]);
+      assert.equal(aliasSecond, pathsSecond);
+      assert.deepEqual(aliasSecond.split("\n"), ["c.ts", "d.ts"]);
+    });
+  });
+
+  it("别名通过生产校验闸（ajv → executor）后才到 handler 归一（SC1）", async () => {
+    // 反证式：schema 枚举不含别名时，executor 在 handler 之前就回
+    // `validation_failed`，别名永远到不了 `readOutput` 的归一逻辑。这条用例
+    // 走 createAciRegistry + createExecutor 的生产路径，钉住别名真的过了闸。
+    const root = await makeScratch("grep-alias-schema-");
+    await writeFile(join(root, "a.ts"), "hit\n", "utf8");
+
+    const tool = toolFor(root, "node");
+    const registry = createAciRegistry([tool]);
+    const executor = createExecutor(registry.inner);
+    const [result] = await executor.executeAll([
+      {
+        name: "grep",
+        id: "call-1",
+        input: { pattern: "hit", output: "files_with_matches" },
+      },
+    ]);
+
+    assert.equal(result?.kind, "ok", JSON.stringify(result));
+    assert.equal(result?.toolUseId, "call-1");
+    assert.deepEqual(
+      (result as { payload: ReadonlyArray<{ text: string }> }).payload,
+      [{ type: "text", text: "a.ts" }]
+    );
   });
 
   it("output=content → `path:line:text`（SC5）", async () => {
@@ -1684,14 +1778,45 @@ describe("grep — 空 / 非法输入", () => {
     }
   });
 
-  it("output 非枚举值被 typed 拒绝", async () => {
+  it("生产校验闸（ajv → executor）先于 handler 拒掉未知 output（SC1）", async () => {
+    // 两道防线分工：schema 的 `enum` 是 model-visible 合法值清单（executor 在
+    // handler 之前按它拦），handler 里的 `readOutput` 是直呼工具 / schema 缺席
+    // 时仍 fail-closed 的第二道。这条钉住生产路径的失败域是 `validation_failed`
+    // 且带 `/output` 定位，不会静默走到 handler。
+    const root = await makeScratch("grep-executor-bad-output-");
+    const tool = createGrepTool(root, {
+      engineBinaryPath: join(root, "__no_such_engine__", "rg"),
+    });
+    const registry = createAciRegistry([tool]);
+    const executor = createExecutor(registry.inner);
+    const [result] = await executor.executeAll([
+      {
+        name: "grep",
+        id: "call-bad",
+        input: { pattern: "a", output: "lines" },
+      },
+    ]);
+
+    assert.equal(result?.kind, "validation_failed");
+    assert.match(
+      (result as { message: string }).message,
+      /\/output/,
+      "失败文案应定位到 output"
+    );
+  });
+
+  it("output 未知值被 typed 拒绝，文案含全部合法值（别名也在其中）", async () => {
     const root = await makeScratch("grep-bad-output-");
     const tool = createGrepTool(root);
 
     await assert.rejects(
       () => tool.handler({ pattern: "a", output: "lines" }),
       (error: unknown) =>
-        error instanceof ToolExecutionError && /output/.test(error.message)
+        error instanceof ToolExecutionError &&
+        /output/.test(error.message) &&
+        ["paths", "content", "count", "files_with_matches"].every((legal) =>
+          error.message.includes(legal)
+        )
     );
   });
 
@@ -1785,4 +1910,170 @@ describe("grep — abort", () => {
         (error instanceof Error && /aborted/.test(error.message))
     );
   }, 5_000);
+});
+
+// ───────────── SC5 大仓范围闸（两条引擎同判；确定性，不看墙钟） ─────────────
+
+/**
+ * `specs/grep-wave-survive.md` SC5：`path` 指向过大树、且没有缩小 `glob` 时，
+ * grep 在档位钟之前回一条短 typed 错误（范围太大 / 请收窄），该失败是普通
+ * `execution_failed` tool_result，**不是**回合 timeout。
+ *
+ * 产物是「文件数」而不是墙钟：闸必须确定性 —— 见 `scope-guard.ts` 的实测依据
+ * （同一棵 54k 文件的树 rg 用 17.8s，墙钟阈值会随主机速度两头误判）。
+ *
+ * 夹具体量刻意小于生产上限 `GREP_SCOPE_FILE_LIMIT`（10,000）：真的造一万个
+ * 文件只是把测试拖慢，不增加认证力。两条引擎都读同一个 `scopeFileLimit`
+ * 接缝，所以「rg 与 Node 对同一个 `path` 同判」这条**引擎同判**仍然被钉住。
+ */
+describe("grep — SC5 大仓范围闸", () => {
+  /** 闸以下的夹具：远小于生产上限，却大于注入的小闸。 */
+  const FIXTURE_FILES = 8;
+  const SMALL_LIMIT = 4;
+
+  /** 造一棵含 `count` 个文件的树；返回其根。 */
+  async function hugeTree(prefix: string, count: number): Promise<string> {
+    const root = await makeScratch(prefix);
+    await Promise.all(
+      Array.from({ length: count }, (_unused, i) =>
+        writeFile(join(root, `f${String(i)}.txt`), "needle\n", "utf8")
+      )
+    );
+    return root;
+  }
+
+  it("过大 path 且无 glob → 短 typed 错误：文案点名收窄 glob 与上限常数", async () => {
+    const root = await hugeTree("grep-scope-large-", FIXTURE_FILES);
+    for (const engine of ENGINES) {
+      const tool = toolFor(root, engine.name, { scopeFileLimit: SMALL_LIMIT });
+      await assert.rejects(
+        () => tool.handler({ pattern: "needle" }),
+        (error: unknown) =>
+          error instanceof ToolExecutionError &&
+          /too large/.test(error.message) &&
+          /glob/.test(error.message) &&
+          error.message.includes(String(SMALL_LIMIT))
+      );
+    }
+  });
+
+  it("闸先于引擎：拒绝时 rg 根本不被 spawn（确定性「早于档位钟」）", async () => {
+    // 「早于档位钟」的确定性证据不是墙钟 —— 夹具只有 8 个文件，任何时钟比较
+    // 都测不出东西，还会随主机速度抖动。真正的判据是**顺序**：范围闸在
+    // resolveEngineResult 之前，所以被拒时引擎一次都不能起。spawn 间谍把这条
+    // 顺序钉死（rg 路径才有子进程；Node 降级路径本就不 spawn）。
+    const root = await hugeTree("grep-scope-order-", FIXTURE_FILES);
+    let spawnCalls = 0;
+    const tool = createGrepTool(root, {
+      scopeFileLimit: SMALL_LIMIT,
+      spawn: () => {
+        spawnCalls += 1;
+        throw new Error(
+          "engine must not be spawned when the scope gate rejects"
+        );
+      },
+    });
+    await assert.rejects(
+      () => tool.handler({ pattern: "needle" }),
+      (error: unknown) => error instanceof ToolExecutionError
+    );
+    assert.equal(spawnCalls, 0, "范围闸必须在引擎之前拒绝");
+  });
+
+  it("同树 + 收窄 glob → 放行（豁免），能正常搜出命中", async () => {
+    const root = await hugeTree("grep-scope-glob-", FIXTURE_FILES);
+    for (const engine of ENGINES) {
+      const tool = toolFor(root, engine.name, { scopeFileLimit: SMALL_LIMIT });
+      const out = await tool.handler({ pattern: "needle", glob: "f1.txt" });
+      assert.equal(out, "f1.txt", `${engine.name}: 肯定 glob 应豁免范围闸`);
+    }
+  });
+
+  it("显式单文件 path（过大树内）→ 不受闸影响", async () => {
+    const root = await hugeTree("grep-scope-file-", FIXTURE_FILES);
+    for (const engine of ENGINES) {
+      const tool = toolFor(root, engine.name, { scopeFileLimit: SMALL_LIMIT });
+      const out = await tool.handler({ pattern: "needle", path: "f2.txt" });
+      assert.equal(out, "f2.txt", `${engine.name}: 显式文件应豁免`);
+    }
+  });
+
+  it("否定 glob 不豁免（它不缩小遍历范围），仍按范围闸拒绝", async () => {
+    // SC5 只点名**缩小** glob；否定 glob（`!f1.txt`）不缩纳入集，只剔个别文件，
+    // 遍历成本照付 —— 与 `glob-match.ts` 的集合语义一致。
+    const root = await hugeTree("grep-scope-neg-", FIXTURE_FILES);
+    for (const engine of ENGINES) {
+      const tool = toolFor(root, engine.name, { scopeFileLimit: SMALL_LIMIT });
+      await assert.rejects(
+        () => tool.handler({ pattern: "needle", glob: "!f1.txt" }),
+        (error: unknown) =>
+          error instanceof ToolExecutionError && /too large/.test(error.message)
+      );
+    }
+  });
+
+  it("head_limit 小不豁免（只切输出，不减搜索成本；测试名即决策）", async () => {
+    const root = await hugeTree("grep-scope-head-", FIXTURE_FILES);
+    for (const engine of ENGINES) {
+      const tool = toolFor(root, engine.name, { scopeFileLimit: SMALL_LIMIT });
+      await assert.rejects(
+        () => tool.handler({ pattern: "needle", head_limit: 1, offset: 0 }),
+        (error: unknown) =>
+          error instanceof ToolExecutionError && /too large/.test(error.message)
+      );
+    }
+  });
+
+  it("上限之内的树（两条引擎）→ 行为与今天一致（SC5 小夹具不变）", async () => {
+    // SSOT：测试引用导出的常量而不是硬编码数字；这里钉住它确实是个有限上限，
+    // 且远大于回归夹具（否则小夹具会误触闸）。
+    assert.ok(
+      Number.isInteger(GREP_SCOPE_FILE_LIMIT) &&
+        GREP_SCOPE_FILE_LIMIT > FIXTURE_FILES,
+      "生产上限应是有限整数且远大于回归夹具"
+    );
+    const smallFixture = await makeScratch("grep-scope-small-");
+    for (const name of ["a.ts", "b.ts", "c.ts"]) {
+      await writeFile(join(smallFixture, name), "needle\n", "utf8");
+    }
+    for (const engine of ENGINES) {
+      const tool = toolFor(smallFixture, engine.name);
+      assert.equal(
+        await tool.handler({ pattern: "needle" }),
+        "a.ts\nb.ts\nc.ts",
+        `${engine.name}: 小夹具应正常出全量`
+      );
+    }
+  });
+
+  it("闸判定与墙钟无关：同一输入重复跑给出同样的错（确定性）", async () => {
+    // 反证式：若闸是 timer 型（快主机放行、慢主机拒绝），同一夹具不可能稳定
+    // 地两次都抛。注入的小上限让这条在任何主机上都确定。
+    const root = await hugeTree("grep-scope-det-", FIXTURE_FILES);
+    const tool = toolFor(root, "node", { scopeFileLimit: SMALL_LIMIT });
+    for (let i = 0; i < 2; i += 1) {
+      await assert.rejects(
+        () => tool.handler({ pattern: "needle" }),
+        (error: unknown) =>
+          error instanceof ToolExecutionError && /too large/.test(error.message)
+      );
+    }
+  });
+
+  it("闸命中经生产 executor → `execution_failed`（普通 tool_result），不是回合 timeout", async () => {
+    const root = await hugeTree("grep-scope-exec-", FIXTURE_FILES);
+    const tool = toolFor(root, "rg", { scopeFileLimit: SMALL_LIMIT });
+    const registry = createAciRegistry([tool]);
+    const executor = createExecutor(registry.inner);
+    const [result] = await executor.executeAll([
+      { name: "grep", id: "call-1", input: { pattern: "needle" } },
+    ]);
+    assert.equal(result?.kind, "execution_failed");
+    assert.notEqual(
+      (result as { message?: string }).message,
+      "timeout",
+      "范围闸失败不能是超时标签"
+    );
+    assert.match((result as { message: string }).message, /too large/);
+  });
 });

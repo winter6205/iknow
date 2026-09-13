@@ -3,7 +3,8 @@
  *
  * 行为概要：
  *   - 出法（D2）：`paths`（默认，唯一相对路径）/ `content`（`path:line:text`）/
- *     `count`（`path:条数` + 全库 `total:`）。
+ *     `count`（`path:条数` + 全库 `total:`）。入参别名 `files_with_matches`
+ *     在进引擎前归一为 `paths`（搜法仍 paths，不是第四种出法）。
  *   - 分页（D3）：`offset` + `head_limit`（默认 50、硬顶 2000）切**已排序**
  *     名单；排序（path 再行号）发生在切片之前。偏移越过最后一条且本次有命中
  *     → 精确回执 `No entries at this offset`；无匹配 → 空串。
@@ -28,9 +29,14 @@ import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
 import { resolveInstallRoot, type LiveTaskRoot } from "../../session-roots.js";
 import { resolveWithinRoot } from "./helpers.js";
 import { compilePattern } from "../search/pattern.js";
-import { parseQuerySpec, rejectRetiredLimitField } from "../search/options.js";
+import {
+  GREP_OUTPUT_VALUES,
+  parseQuerySpec,
+  rejectRetiredLimitField,
+} from "../search/options.js";
 import { engineSpecFor, renderResult } from "../search/pipeline.js";
 import { readWorkspaceLines } from "../search/file-lines.js";
+import { assertScopeWithinLimit } from "../search/scope-guard.js";
 import { nodeScan, toWorkspaceRelative } from "../search/node-scan.js";
 import {
   engineBinaryPath,
@@ -65,6 +71,12 @@ export interface GrepToolDeps {
    * 测试可指向不存在的路径来驱动「安装根二进制不存在」这一 D6 分支。
    */
   readonly engineBinaryPath?: string;
+  /**
+   * 范围闸的文件数上限覆盖（SC5）。缺席 → `GREP_SCOPE_FILE_LIMIT`（生产值）。
+   * 测试注入小值以构造「过大树」而不必真造上万文件；两条引擎都读它，所以
+   * 同一个 `path` 在 rg / Node 路径上得到同一个判定。
+   */
+  readonly scopeFileLimit?: number;
 }
 
 interface HandlerInput {
@@ -127,6 +139,20 @@ export function createGrepTool(
         allowOversize: path === explicitFileRel,
       });
 
+    // SC5 范围闸：两条引擎**共用**同一道前置判定，因此同一个 `path` 的
+    // 成败不随引擎变。显式单文件 `path` 与肯定 `glob` 豁免（见 scope-guard）。
+    // 抛出的 ToolExecutionError 由 executor 净化后作为该 call 的
+    // `execution_failed` tool_result 回到模型 —— 不是回合级 timeout。
+    await assertScopeWithinLimit({
+      workspaceRoot: compiled.workspaceRoot,
+      searchRoot: compiled.searchRoot,
+      explicitFile: explicitFileRel !== undefined,
+      glob: compiled.spec.glob,
+      ...(deps?.scopeFileLimit !== undefined
+        ? { limit: deps.scopeFileLimit }
+        : {}),
+    });
+
     const result = await resolveEngineResult({
       binaryPath,
       compiled,
@@ -173,7 +199,11 @@ export const GREP_INPUT_SCHEMA = {
     path: { type: "string" },
     output: {
       type: "string",
-      enum: ["paths", "content", "count"],
+      // 出法枚举 + 入参别名（D2），从 options 的 SSOT 派生。ajv 在 handler
+      // 之前校验（registry 构造期编译），别名不进枚举就永远到不了
+      // `readOutput` 的归一逻辑；schema 里带上它，出法仍只有三种（别名归一
+      // 为 paths）。
+      enum: [...GREP_OUTPUT_VALUES],
       default: "paths",
     },
     ignoreCase: { type: "boolean", default: false },

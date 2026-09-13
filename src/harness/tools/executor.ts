@@ -380,9 +380,19 @@ export function createExecutor(registry: RegistryImpl): Executor {
 
 function formatAjvError(errors: unknown): string {
   if (!Array.isArray(errors) || errors.length === 0) return "invalid input";
-  const e = errors[0] as { instancePath?: string; message?: string };
+  const e = errors[0] as {
+    instancePath?: string;
+    message?: string;
+    keyword?: string;
+    params?: { allowedValues?: unknown };
+  };
   const where =
     e.instancePath && e.instancePath.length > 0 ? e.instancePath : "(root)";
+  // SC1/grep-wave-survive: enum violations must name the accepted values so
+  // the model can self-correct. Other keywords keep the prior shape.
+  if (e.keyword === "enum" && Array.isArray(e.params?.allowedValues)) {
+    return `invalid input at ${where}: ${e.message ?? "schema violation"} (${e.params.allowedValues.join(" / ")})`;
+  }
   return `invalid input at ${where}: ${e.message ?? "schema violation"}`;
 }
 

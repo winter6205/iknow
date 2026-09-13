@@ -1274,13 +1274,7 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     assert.equal(last.cancelKind, "timerTimeout");
   });
 
-  it("S15: tool timeout -> stop timeout; tool_result is execution_failed timeout", async () => {
-    const slow = createStubTool({
-      name: "slow",
-      next: () => ({ ok: true }),
-    });
-    const reg = createRegistry([slow]);
-    const exec = createExecutor(reg);
+  it("S15/ADR-0091: 单 call tool timeout 只失败该条 result,回合 continue 而非停 timeout", async () => {
     const model = createStubModel({
       responses: [
         assistantResult({
@@ -1294,13 +1288,9 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
         }),
       ],
     });
-    // Tool handler that resolves slowly -> Executor Promise.race fires first.
-    const slowHandler = createStubTool({
-      name: "slow",
-      next: () => ({ ok: true }),
-    });
-    // Replace the handler with a slow one via a fresh registry with the
-    // custom-slow tool to ensure deterministic delay past toolTimeoutMs.
+    // Handler 慢于 toolTimeoutMs → Executor 的 per-call race 先命中,该条
+    // result 落 execution_failed "timeout"(ADR-0005);signal 未 abort,
+    // 故 loop 不得把回合判 timeout(ADR-0091)。
     const slowToolDef: ToolDef = Object.freeze({
       name: "slow",
       description: "stub slow",
@@ -1310,17 +1300,20 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
         return { ok: true };
       }) as ToolDef["handler"],
     });
-    const reg2 = createRegistry([slowToolDef]);
-    const exec2 = createExecutor(reg2);
+    const reg = createRegistry([slowToolDef]);
+    const exec = createExecutor(reg);
     const { result, trace } = await run("go", {
       adapter: model,
-      executor: exec2,
-      registry: reg2,
+      executor: exec,
+      registry: reg,
       maxTurns: 5,
       toolTimeoutMs: 20,
     });
-    assert.equal(result.stopReason, "timeout");
-    assert.equal(result.messages.length, 3);
+    // 回合继续并消费第二个模型回应 → completed,非 timeout。
+    assert.equal(result.stopReason, "completed");
+    assert.notEqual(result.stopReason, "timeout");
+    assert.equal(result.turnCount, 2);
+    assert.equal(result.messages.length, 4);
     const trBlock = result.messages[2]!.content[0]! as {
       type: "tool_result";
       is_error?: boolean;
@@ -1329,11 +1322,83 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     };
     assert.equal(trBlock.is_error, true);
     assert.equal(trBlock.tool_use_id, "u1");
+    // 工具回合(index 0)的 trace:未按 timeout 停,cancelKind 为 none,
+    // 但该条 toolCalls 仍是 execution_failed "timeout"。
+    const toolTurn = trace.turns.find((t) => t.toolCalls.length > 0)!;
+    assert.ok(toolTurn, "expected a turn trace carrying the tool call");
+    assert.equal(toolTurn.cancelKind, "none");
+    assert.equal(toolTurn.toolCalls.length, 1);
+    assert.equal(toolTurn.toolCalls[0]!.kind, "execution_failed");
+    assert.equal(toolTurn.toolCalls[0]!.message, "timeout");
+    // 末回合 = completed 的纯文本收尾,cancelKind 仍 none。
+    const last = trace.turns[trace.turns.length - 1]!;
+    assert.equal(last.cancelKind, "none");
+    assert.equal(last.toolCalls.length, 0);
+  });
+
+  it("ADR-0091 SC4:工具阶段 caller 以 reason 'turn-timeout' abort → stop timeout / cancelKind timerTimeout", async () => {
+    const sigTool = createStubSignalTool({ name: "slow", delayMs: 100 });
+    const reg = createRegistry([sigTool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "u1", name: "slow", input: {} }],
+        }),
+        assistantResult({ texts: ["done"], toolCalls: [] }),
+      ],
+    });
+    const controller = new AbortController();
+    const p = run(
+      "go",
+      { adapter: model, executor: exec, registry: reg, maxTurns: 5 },
+      controller.signal
+    );
+    // 回合钟以 reason 恰为 "turn-timeout" 的 abort 抵达 → 才落回合 timeout (ADR-0091)。
+    setTimeout(() => controller.abort("turn-timeout"), 10);
+    const { result, trace } = await p;
+    assert.equal(result.stopReason, "timeout");
+    // timeout 不 append system interrupt(仅 cancelled 触发):seed user +
+    // assistant(tool_use) + user(tool_result)。
+    assert.equal(result.messages.length, 3);
     const last = trace.turns[trace.turns.length - 1]!;
     assert.equal(last.cancelKind, "timerTimeout");
     assert.equal(last.toolCalls.length, 1);
     assert.equal(last.toolCalls[0]!.kind, "execution_failed");
-    assert.equal(last.toolCalls[0]!.message, "timeout");
+  });
+
+  it("ADR-0091:工具阶段 plain caller abort 仍归 cancelled / cancelKind callerAbort", async () => {
+    const sigTool = createStubSignalTool({ name: "slow", delayMs: 100 });
+    const reg = createRegistry([sigTool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "u1", name: "slow", input: {} }],
+        }),
+        assistantResult({ texts: ["done"], toolCalls: [] }),
+      ],
+    });
+    const controller = new AbortController();
+    const p = run(
+      "go",
+      { adapter: model, executor: exec, registry: reg, maxTurns: 5 },
+      controller.signal
+    );
+    // 无 reason 的 caller abort(TUI/quit/SIGINT 形状)不得升级为 timeout。
+    setTimeout(() => controller.abort(), 10);
+    const { result, trace } = await p;
+    assert.equal(result.stopReason, "cancelled");
+    assert.notEqual(result.stopReason, "timeout");
+    // cancelled 追加 system interrupt → 4 条。
+    assert.equal(result.messages.length, 4);
+    assert.equal(result.messages[3]!.role, "system");
+    const last = trace.turns[trace.turns.length - 1]!;
+    assert.equal(last.cancelKind, "callerAbort");
+    assert.equal(last.toolCalls.length, 1);
+    assert.equal(last.toolCalls[0]!.kind, "execution_failed");
   });
 
   it("S16: clean multi-turn run — trace shape, totals, no payload leak", async () => {

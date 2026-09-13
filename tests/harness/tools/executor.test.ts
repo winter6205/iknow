@@ -90,6 +90,39 @@ describe("createExecutor (T3)", () => {
     assert.equal(called, false);
   });
 
+  it("SC1/grep-wave-survive: enum validation_failed message names every allowed value", async () => {
+    // SC1/grep-wave-survive:model-facing validation failures for enum
+    // violations must include the accepted values -- `formatAjvError` reads
+    // ajv's `params.allowedValues` when keyword === "enum".
+    const enumTool: ToolDef = {
+      name: "enum-tool",
+      description: "tool with enum output",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          output: { enum: ["paths", "content", "count", "files_with_matches"] },
+        },
+        required: ["output"],
+      },
+      handler: () => ({ ok: true }),
+    };
+    const reg = createRegistry([enumTool]);
+    const exec = createExecutor(reg);
+    const results = await exec.executeAll([
+      { id: "c1", name: "enum-tool", input: { output: "bogus" } },
+    ]);
+    assert.equal(results[0]!.kind, "validation_failed");
+    if (results[0]!.kind !== "validation_failed") return;
+    const text = results[0]!.message;
+    for (const v of ["paths", "content", "count", "files_with_matches"]) {
+      assert.ok(
+        text.includes(v),
+        `expected allowed value "${v}" in enum error message, got: ${text}`
+      );
+    }
+  });
+
   it("returns execution_failed (sanitized) for unexpected throws", async () => {
     const reg = createRegistry([boom]);
     const exec = createExecutor(reg);
