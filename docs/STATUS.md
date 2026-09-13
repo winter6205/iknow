@@ -90,6 +90,7 @@
 | **全量 context 打包**    | history 有字符预算；未从窗口严格扣 system/tools/检索正文                                                                                                                                                                                                                                                                                                                   |
 | **长程图收口**           | 活图 host 已合（`#944`）；`#929` Destination「明确收口（不再 replan / 任务完成）」尚未 spec。effort 8 只熔单次调用空转，不是外环停条件                                                                                                                                                                                                                                     |
 | **ACI 文件/搜索面**      | **已 spec、未实施**（2026-09-12 改口已回写）：last-read 只闸非空 `write_file`（`read_file` + 白名单单文件 bash；内存分桶不落盘）；未入账一律硬拒；`edit_file` 沿用唯一精确 + 显式 `replace_all`；`read_file` 默认整文件、整读页 16000；`grep` 默认只给路径、条数 `head_limit`。契约 `specs/aci-file-search-surface.md`；地图 `docs/wayfinder/aci-file-tool-surface-map.md` |
+| **文件系统隔离两档**     | **已 spec、未实施**（2026-09-13）：默认全局档（真路径读写 + 权限拦截）；会话 tmp 用宿主路径、不 bind `/tmp`。工作区档 + `/config` 为 Round 2。契约 `specs/fs-isolation-modes.md`；plan `plans/fs-isolation-modes.md`；ADR-0092。现行代码仍是闭世界 + 垫底 bind `/tmp`。                                                                                                    |
 
 ### 2.3 协议开放项（设计未决，禁止静默定稿）
 

@@ -293,11 +293,23 @@ _Avoid_: 状态栏；agent-status；把 cwd/git/diff 每跳追加进 `messages`�
 **沙箱纪律**: 同一 `bash` 调用输入下，前台执行与 `background:true` spawn 共用同一套 bwrap 围栏参数（FS / 网络 / env 隔离 / rlimit / cwdReadonly）；产品路径不得提供无围栏的后台裸跑。#653 G3。
 _Avoid_: 把后台当成逃出 bwrap；与 #440 bash 产品面混名；与 spawn_subagent 前景/后景混名
 
-**闭世界围栏（closed-world fence）**: bash 围栏的默认姿态——deny-by-default:home 下非白名单不可见，可写集 = taskRoot + /tmp，其余按 ADR-0037 §9.2 读白名单按需 ro-bind；白名单 miss 分配置故障（spawn 前 typed fail-loud）与工具链断链（运行时可观察）两型。OFF 档同样生效（全档位反转）。
-_Avoid_: writable home 打底 + 黑名单补罩（已反转的旧形态）；identity 只读 overlay（§9 已 superseded，身份根改为读白名单恒进成员）
+**文件系统隔离档（fs isolation mode）**: bash 物理围栏上「能看见 / 能写哪些路径」的档位，与 **PermissionMode** 和 **worktree isolation mode** 正交。默认 **全局档**。ADR-0092。
+_Avoid_: 把权限模式当围栏；把 worktree 门禁当 FS 档；第三种产品「沙箱模式」把两层揉成一档
 
-**围栏 /tmp 垫底**: 每个身份（主会话或一个 worker）在会话文件夹里的宿主目录，bind 成该身份围栏的 `/tmp`；寿命跟会话文件夹；不是交付落点。ADR-0074。
-_Avoid_: 系统 /tmp；一次 bash 一块空 tmpfs；把垫底当仓库；给「按 id 读」另起产品名
+**全局档**: 文件系统隔离关——宿主真路径可读可写；拦写靠权限三层 + **hard-wall**。home 不藏。ADR-0092。
+_Avoid_: 默认闭世界；把全局档当成跳过权限链 / 卸 bwrap
+
+**工作区档**: 读偏宽（home 可见）；写 = 活 **taskRoot** + **会话 tmp**；home 其余默认不能写。ADR-0092。
+_Avoid_: 工作区档再藏 home；把工作区档写成闭世界；工作区档允许写整个 home
+
+**闭世界围栏（closed-world fence）**: 已退役的默认 bash FS 姿态（ADR-0037 §9）：home 下非白名单**不可见**，可写集 = taskRoot + `/tmp`。默认改为 **全局档**（ADR-0092）。**工作区档不是闭世界**（home 仍可见）。
+_Avoid_: 把现行默认说成闭世界；identity 只读 overlay（§9 已 superseded）
+
+**会话 tmp**: 每个身份（主会话或一个 worker）在会话文件夹里的宿主目录；模型与 `$TMPDIR` 用这条真路径；不 bind 成 Linux `/tmp`。寿命跟会话文件夹；不是交付落点。ADR-0092（修订 ADR-0074）。
+_Avoid_: 系统 /tmp；一次 bash 一块空 tmpfs；把垫底当仓库；围栏 /tmp 垫底（旧名）；给「按 id 读」另起产品名
+
+**围栏 /tmp 垫底**: 旧名，见 **会话 tmp**。ADR-0074 原「bind 成 `/tmp`」已被 ADR-0092 superseded。
+_Avoid_: 新产品面继续写这个名字当现行合同
 
 **hard-wall**: spawn 前意图过滤器——拦围栏看不见或拦不住的命令意图（毁灭性 rm、命令替换、敏感路径、fork-bomb），不可被 session grant 覆盖。不是第二套沙箱；换行只作分段符。耐久写只问 `taskRoot`。ADR-0068。
 _Avoid_: 把硬墙当沙箱；用换行/`format` 子串当危险；引导把交付物写到 bash `/tmp` tmpfs
@@ -574,8 +586,12 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **run_graph vs spawn_subagent**: 有依赖的多节点走 `run_graph`；单次派活仍 `spawn_subagent`。图节点内部仍是前景 spawn，不经父代理再调 spawn 工具
 - **run_graph vs 图内绕回**: 绕回仍走同一把 `run_graph`；阶段差在 host 认不认标明的回边，不在工具名（ADR-0061）
 - **run_graph vs 后景 spawn**: 图没有 `wait:false`；跑图时父代理不能并行干别的，最多主进程静默等 settle；mailbox 不进活图（ADR-0065 / ADR-0076）
-- **父可见信封 vs 磁盘产物**: 父读摘要、`task_id` 与 `/tmp` 根；仓库文件以工作区为准；垫底正文按 id 去读，不靠把全文塞进 tool_result
-- **围栏 /tmp 垫底 vs taskRoot**: 垫底是当前身份的 `/tmp`，不是交付；要留下的写 `taskRoot`，不自动从垫底拷进仓库
+- **父可见信封 vs 磁盘产物**: 父读摘要、`task_id` 与会话 tmp 根；仓库文件以工作区为准；垫底正文按 id 去读，不靠把全文塞进 tool_result
+- **会话 tmp vs taskRoot**: 会话 tmp 是当前身份草稿，不是交付；要留下的写 `taskRoot`，不自动从垫底拷进仓库
+- **会话 tmp vs Linux /tmp**: 草稿走会话文件夹宿主路径与 `$TMPDIR`；不把垫底 bind 成 `/tmp`（ADR-0092）
+- **文件系统隔离档 vs PermissionMode**: 前者是进程能碰哪些路径；后者是问不问人。全局档仍走权限链
+- **文件系统隔离档 vs worktree isolation mode**: 前者是 bash FS 围栏档；后者是写主仓门禁 / 建树改绑
+- **全局档 vs 工作区档**: 默认真路径读写；工作区档收紧为写 taskRoot + 会话 tmp，home 其余不能写
 - **子代理并发上限 vs 派发张数**: 上限是帽子；张数由模型按任务拆，说明书写独立才并行
 - **图节点 vs 子代理并发上限**: 活图格子是同一顶上的 worker，不另起每图预算（ADR-0077）
 - **说明书静态层 vs memory_layer 整段开关**: 通用 worker 要说明书、不要记忆工具；禁止再靠 memoryEnabled=false 把 AGENTS.md 一起跳过
@@ -622,6 +638,7 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **用户钩子（user hooks） vs 产品开关（memory / secrets / graph / isolation）**: 正交；`hooks.enabled` 不代管 `/memory` 或 `settings.secrets`
 - **PreWrite vs worktree isolation mode**: PreWrite 是用户 deny 事件；isolation 是写主仓门禁，不是 `settings.hooks` 条目
 - **PreCommit vs session transcript 落盘**: PreCommit 拦 git commit 形态；JSONL append 仍是 host commit hook，不是 user 事件
+- **闭世界围栏 vs 工作区档**: 闭世界是旧默认（home 不可见）；工作区档 home 可见、只收紧写
 
 ## Flagged ambiguities
 
