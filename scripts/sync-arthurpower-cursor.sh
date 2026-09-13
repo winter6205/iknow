@@ -33,6 +33,7 @@ SKILLS=(
   systematic-debugging
   verification-before-completion
   code-review
+  review-report-repair
   boundary-testing
   minimal-change-verifier
   dispatching-parallel-agents

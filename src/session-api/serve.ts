@@ -45,10 +45,10 @@ export type ServeOptions = {
   /** Session pool root; defaults to ~/.iknow (spec #120 SC 1). */
   dataDir?: string;
   /**
-   * ADR-0019 (T2): per-root state anchor — CLI `--workspace-root` flag / env
-   * `IKNOW_WORKSPACE_ROOT` 透传到 serve 入口。`resolveServeDataDir` / hub
-   * 的 build-engine 消费它;persona seed 不跟 workspaceRoot (issue #584)。
-   * host-init 保持 global (D1.2 不位移)。
+   * ADR-0019: per-root state anchor — CLI `--workspace-root` flag / env
+   * `IKNOW_WORKSPACE_ROOT` 透传到 serve 入口。hub / build-engine 消费它;
+   * persona seed 不跟 workspaceRoot (issue #584)。host-init 保持 global
+   * (D1.2)。会话池根不跟它分片（ADR-0087）。
    */
   workspaceRoot?: string;
   hubOptions?: Omit<SessionHubOptions, "store">;
@@ -61,18 +61,11 @@ export type ServeOptions = {
 
 /**
  * Resolve the session pool root: explicit dataDir wins (absolute-pathed);
- * else workspace-rooted `<workspaceRoot>/.iknow`(ADR-0019 T2, per-root state
- * anchor — D1.4 follow-on for serve data directory);
- * else the shared pool root `~/.iknow`(legacy default, spec #120 SC 1 / SC 2,
- * T2 之前唯一行为)。Pure (no IO) and exported so tests can assert the
- * default without ever writing to the real $HOME.
+ * else `~/.iknow` (ADR-0071 / ADR-0087). Does **not** shard on workspaceRoot
+ * — transcripts are not per-checkout state. Pure (no IO).
  */
-export function resolveServeDataDir(
-  dataDir?: string,
-  workspaceRoot?: string
-): string {
+export function resolveServeDataDir(dataDir?: string): string {
   if (dataDir) return path.resolve(dataDir);
-  if (workspaceRoot) return join(workspaceRoot, ".iknow");
   return join(homedir(), ".iknow");
 }
 
@@ -108,7 +101,7 @@ export async function startSessionServe(
   // 与 chat/ask 共用 runHostInitScriptSafe;文件不存在则 skip,失败不阻塞。
   // D1.2:host-init 保持 global —— 不 thread workspaceRoot。
   await runHostInitScriptSafe();
-  const dataDir = resolveServeDataDir(opts?.dataDir, workspaceRoot);
+  const dataDir = resolveServeDataDir(opts?.dataDir);
   // T1 (session-folder-consolidation): store namespace keys by
   // projectIdentityRoot, not cwd. mirror build-engine.ts:523 — derive from
   // the same root the engine will independently validate inside

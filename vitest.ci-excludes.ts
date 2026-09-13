@@ -91,6 +91,9 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/harness/build-engine-install-root.test.ts",
   "tests/harness/build-engine-hooks.test.ts",
   "tests/harness/build-engine-subagent-trace.test.ts",
+  // ADR-0088 T2：真 buildHarnessEngine 装配取 tasksDir（host 注入 / 缺省
+  // 池根两种装配）→ createDefaultAciRegistry → createBashTool → requireBwrap。
+  "tests/harness/build-engine-tasks-dir.test.ts",
   // ADR-0084 Slice B SC5：真 buildHarnessEngine 装配读项目 permissions
   // → createDefaultAciRegistry → createBashTool → requireBwrap。
   "tests/harness/build-engine-permission-project.test.ts",

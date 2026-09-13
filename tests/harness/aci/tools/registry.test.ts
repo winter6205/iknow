@@ -737,8 +737,13 @@ describe("createDefaultAciRegistry — projectIdentityRoot wiring (grep / glob)"
 
     const grep = reg.catalog.get("grep");
     expect(grep).toBeDefined();
+    // D2：默认出法是 paths；本用例锁「identity root 可达」，行内容要显式要。
     const grepOut = String(
-      await grep!.handler({ pattern: "identity guidance", path: repo })
+      await grep!.handler({
+        pattern: "identity guidance",
+        path: repo,
+        output: "content",
+      })
     );
     expect(grepOut).toMatch(/AGENTS\.md:1:identity guidance/);
 

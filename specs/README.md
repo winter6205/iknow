@@ -43,6 +43,7 @@
 
 ### 工具与扩展源
 
+- `aci-file-search-surface.md` — 非空 `write_file` last-read 硬拒 + `edit_file` 沿用 ADR-0004 + `read_file` 默认整文件 + `grep` 默认路径/`head_limit`/行窗过滤/自带引擎（wayfinder 整体升级决策；plan: `plans/aci-file-search-surface.md`）；**amends** ADR-0004 / ADR-0006 / ADR-0084
 - `aci-web-backend.md` — **ACI network surface** 冻结 + **ACI web backend**（一个后端名、缺则回落；本轮厂商只接 Exa + 真出网实测；plan: `plans/aci-web-backend.md`）
 - `960-web-discover-vs-read.md` — 发现 vs 阅读激励（#960；description + 黄金集；不改后端形状；plan: `plans/960-web-discover-vs-read.md`）
 - `224-tool-extension-path.md` — 工具扩展路径（lazy / discover / visibleSchemas + tool_search）

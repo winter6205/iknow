@@ -20,8 +20,14 @@ _Avoid_: 把 `SessionFileV1.messages[]` 当第二份权威；把 harness trace J
 **rewind head**: 落盘的当前头指针（transcript 某条事件 id）。rewind 只改这个指针，不截断 JSONL。进程内工作副本跟它走。
 _Avoid_: 只在内存里 fork；用 `messagesCount` 当下标 SSOT
 
-**会话文件夹（session folder）**: harness 拥有的按会话记录面——`~/.iknow/projects/<项目 slug>/<conversationId>/`，分组键 = **projectIdentityRoot**（跨 session worktree rebind 不变），叶子 = conversationId 原文；装 session transcript / todos / trace / **内容寻址正文池** / subagents。与「写根 = 模型工作面」对立：这里的东西不是模型交付物，harness 也不把它读进 prompt。ADR-0071。
-_Avoid_: 把模型交付物放进来；当第五个根角色（稳定根清单不活化）；用 session `title` / `goal` / worktree label 当文件夹名；把带锁活状态（后台任务登记表 / worktrees 锚点）搬进来
+**home 项目树（home project tree）**: harness 按项目身份落在池根下的一棵目录——`<dataDir 或 ~/.iknow>/projects/<slug>/`，slug 键 = **projectIdentityRoot**。叶子是 **会话文件夹**；同级 `tasks/` 是 **后台任务登记**。不跟 **workspaceRoot** 分片。ADR-0087 / ADR-0088。
+_Avoid_: 把树建在 `<workspaceRoot>/.iknow`；把 `tasks/` 放进 conversation 叶子；把退役 `sessions/` 当成现行树
+
+**会话文件夹（session folder）**: harness 拥有的按会话记录面——home 项目树下 `<conversationId>/`；装 session transcript / todos / trace / **内容寻址正文池** / subagents。与「写根 = 模型工作面」对立：这里的东西不是模型交付物，harness 也不把它读进 prompt。ADR-0071 / ADR-0087 / ADR-0088。
+_Avoid_: 把模型交付物放进来；当第五个根角色（稳定根清单不活化）；用 session `title` / `goal` / worktree label 当文件夹名；把带锁活状态（后台任务登记表 / worktrees 锚点）搬进叶子
+
+**后台任务登记（background task registry）**: 活账本 `…/projects/<slug>/tasks/<task_id>.{json,log}`，与会话文件夹同 **home 项目树**、不进 conversation 叶子。池根同会话池。ADR-0021 / ADR-0088。
+_Avoid_: `<workspaceRoot>/.iknow/tasks`；按 checkout 分片；写进会话文件夹
 
 **模型实际所见（what the model saw）**: trace `llm_call.messages` 的语义——那一次调用真正送进模型的累计消息集，含 `<agent_status>` 尾部注入、worker prior messages、compaction 后的摘要视图与 mask 形态。与 **session transcript** **故意不相等**（实测同一会话 `agent_status` 在 trace 14 次 / transcript 11 次），故 trace 不得引用 transcript 来重建它：从增量事件流重算累计数组是**重算不是查表**，会漂移。「所见即所填」不变量的 SSOT 是 ADR-0036（它据此否决 delta/off 写侧模式），不是 ADR-0014。ADR-0036 / ADR-0071。
 _Avoid_: 用 transcript 当 trace 正文源；把两者当同一份记录的两种投影；为省空间截断它；把这个不变量溯源到 ADR-0014（那是 subagent spawn 语义，ADR-0036 误引）
@@ -134,6 +140,18 @@ _Avoid_: 把 meta 拼入 model tool_result；让 TUI / Web 直接读 handler 原
 **ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；当前 8 件：`bash` / `read_file` / `grep` / `glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`，SSOT 工厂 = `src/harness/aci/tools/registry.ts:createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取，工具数永不同步漂移（#141 / #191 / a277f68）。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。
 _Avoid_: 在 harness 之外另起 tool 注册表；在 entry point 手写工具数组（#228 决议 D4——`memory_recall` / `memory_save` 入 SSOT 8+2=10）；让工具返回结构化 metadata
 
+**last-read ledger**: 本 conversation 内「看过的规范 path」登记表。**进程内存**，键为 conversationId，不落会话文件夹。入账：成功 `read_file`，或成功且可抽单一 path 的白名单 `bash`（`cat` / `nl` / `bat` / `batcat` / `head` / `tail` / `sed -n 'X,Yp'` / `grep` / `egrep` / `fgrep` / `rg`；单文件、无管道、无重定向）。只供已存在且 size>0 的 `write_file` 查表，没有则硬拒不写盘；新建与空文件免检。`edit_file` 不查表。不扫 `ctx.messages`。无 conversationId 则非空覆写 fail-closed。resume 空表。ADR-0084。
+_Avoid_: 用对话字符串判断读过；进程级全局表；落盘当权威；把任意只读 bash（`ls`/`stat`/管道）当入账；复用 `validateReadonlyCommand` 当入账；把 last-read 当作 `edit_file` 前置
+
+**grep output mode**: `grep` 的出法枚举：默认 `paths`（只要相对路径）；`content` 为匹配行；`count` 为每文件条数加全库 total。结果名单条数参数为 `head_limit`（默认 50、顶 2000）。ADR-0084。
+_Avoid_: 默认吐匹配行；把 `limit` 改名为 `grep_limit`
+
+**line window**: `grep` 的 `also` + `within_lines`：主词命中后只在该行窗找第二段。不是裸跨行正则。ADR-0084。
+_Avoid_: multiline 开关；`.*` 吞整文件
+
+**install-rooted rg**: 安装根上钉死版本+校验和的搜引擎二进制；生产 `grep` 只 exec 这一路径。起不来走 Node 全语义扫，不回落 PATH `rg`。ADR-0084。
+_Avoid_: which rg；环境依赖当主路径
+
 **ACI network surface**: 装配层网络三职——发现是 `web_search`，阅读是 `web_fetch`，通话不升第 9 件工具、只走 `bash` 的 `network: true`（ADR-0022）。形状冻结；发现与阅读的后端选择见 **ACI web backend**。
 _Avoid_: curl 工具; http_request; HTTP 原语; 把 method / headers 并进 web_fetch
 
@@ -221,8 +239,8 @@ _Avoid_: 把 frontend-only server 当生产路径但不代理 `/api`
 **workspace（serve 主根）**: serve session 的产品项目根，来源可以是 product SPA 选定的已存在绝对目录、显式 flag/env，或当前 serve 的显式默认绑定 `<homedir>/.iknow/default`；绑定后三锚合一。ADR-0023：serve 不把进程 cwd 当作隐式主根。
 _Avoid_: 把 serve 缺省说成 `process.cwd()`；与 `workspaceRoot` 字段、`home`（global 配置锚）、`sandboxRoot` 混同
 
-**workspaceRoot**: session 绑定的 per-root 操作状态锚（memory / sessions / tasks / settings 写回 fallback / serve data）；配置解析器仍可按 ADR-0019 D1.1 以 `process.cwd()` 生成默认值，但 session 创建前必须把解析值校验并明确写入。serve 无 flag/env 时的默认绑定值是 `<homedir>/.iknow/default`。不含用户画像。画像根见 ADR-0025。
-_Avoid_: 用 workspaceRoot 当 `user.md` / `BOOTSTRAP.md` / 用户级 `AGENTS.md` / 用户 `rules/` 的物理根；把 identity seed 跟启动目录绑在一起
+**workspaceRoot**: session 绑定的 per-root 操作状态锚（memory / settings 写回 fallback）；配置解析器仍可按 ADR-0019 D1.1 以 `process.cwd()` 生成默认值，但 session 创建前必须把解析值校验并明确写入。serve 无 flag/env 时的默认绑定值是 `<homedir>/.iknow/default`。不含用户画像，不含 **home 项目树**（会话文件夹与后台任务登记跟 home，ADR-0087 / ADR-0088）。画像根见 ADR-0025。
+_Avoid_: 用 workspaceRoot 当 `user.md` / `BOOTSTRAP.md` / 用户级 `AGENTS.md` / 用户 `rules/` 的物理根；把 identity seed 跟启动目录绑在一起；用它给 transcript / trace / tasks 分片
 
 **required workspaceRoot**: 新 session 创建时必须存在且通过校验的绝对 `workspaceRoot` 绑定；`cli chat`、`tui`、`serve` 都不能写入没有该绑定的 session file。执行阶段若绑定缺失或非法，必须在 engine 之前拒绝。
 _Avoid_: 把 resolver 的默认值当成已写入的 session 绑定；用 `process.cwd()` 回填缺失字段；把 serve 的 `~/.iknow/default` 默认绑定称为 unbound
@@ -580,6 +598,7 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **git 作业 vs worktree isolation mode**: 作业是 bash 上的版本库侧效应；隔离是写路径落点（现行 model-provision，见本表 **worktree isolation mode**）。隔离开时作业在 task 树内做完
 - **git 作业 vs 环境现势**: 现势给人看仓；作业是模型经 bash 改仓。现势不进模型消息
 - **git 作业 vs git 块**: 作业是纪律 SOP（`## Git work`）；git 块是会话级分支/status 快照（`## Git`）。两段并存，不得互替
+- **home 项目树 vs workspaceRoot vs 会话文件夹**: 项目树是池根下按 slug 的一棵目录（会话叶子 + `tasks/`）；`workspaceRoot` 是 memory / settings 写回 / worktrees；会话文件夹只是项目树里的 conversation 叶子，不含登记表。ADR-0088。
 - **worktree isolation mode vs workspaceRoot vs workspace（serve 主根）**: git worktree 是会话级 mutate 物理隔离；`workspaceRoot` 是 per-root 状态锚（ADR-0019）；serve 主根是显式选定锚（ADR-0023）。rebind 只切本会话生效根，不改锚规则本身
 - **session worktree rebind vs taskRoot（活值）**: rebind 是动作（缝成功 resolve 的那一刻），taskRoot 是该动作写入的活 cell；动作对下一波 tool calls 生效（波快照边界），cell 读取面始终回答「当前生效根」
 - **task worktree label vs conversationId**: label 是文件夹名与 enter 定位；conversationId 是归属身份，不写进目录名

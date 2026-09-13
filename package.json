@@ -45,6 +45,7 @@
     "web:build": "npm run build --prefix web",
     "web:typecheck": "npm run typecheck --prefix web",
     "aci:demo": "tsx src/harness/aci/demo.ts",
+    "install:search-engine": "tsx scripts/install-search-engine.ts",
     "probe:sandbox": "tsx scripts/sandbox-probe.ts",
     "probe:sandbox:inventory": "tsx scripts/sandbox-probe-closed-world.ts",
     "probe:sandbox:subagent": "tsx scripts/sandbox-probe-subagent.ts",
@@ -57,6 +58,7 @@
     "probe:settings-bidir": "tsx scripts/i413-bidirectional-settings-smoke.ts",
     "probe:compact-events": "tsx scripts/probe-compact-events-548-550.ts",
     "worktree:gc": "tsx scripts/task-worktree-gc.ts",
+    "migrate:workspace-iknow": "tsx scripts/workspace-iknow-migrate.ts",
     "probe:t8-popover": "tsx scripts/t8-popover-verify.ts",
     "probe:aci-web-backend": "tsx scripts/aci-web-backend-exa-probe.ts",
     "prepare": "husky"

@@ -4,10 +4,9 @@
  *
  * trace 锚点已迁入会话文件夹,主会话写入由 `resolveConversationTraceFilePath`
  * 经 hub / store 派生;本根承担 ACI 读侧工具(list_sessions / query_trace /
- * get_record)的扫描根与 trace 面板目录。归并后写侧会话池随入口分片
- * (ADR-0019:TUI = `<cwd>/.iknow` cwd 兜底、serve = explicit>env>`~/.iknow`、
- * chat/ask = `~/.iknow`),缺省派生必须复用**调用方自己的写侧 dataDir**,
- * 否则读侧扫描根与写侧会话池分叉(实际回归形态:MCP / 面板恒空)。
+ * get_record)的扫描根与 trace 面板目录。写侧会话池 = 显式 `--data-dir` 否则
+ * `~/.iknow`(ADR-0087,会话池不再按 cwd / workspaceRoot 分片),缺省派生必须
+ * 复用**调用方自己的写侧 dataDir**。
  *
  * 独立成模块的原因:cli.ts 有模块级 `main()` 副作用,不可被 tui/run.tsx
  * 或测试导入;本模块无副作用。
@@ -26,6 +25,9 @@ export function resolveTraceRoot(
     flag ??
       process.env.IKNOW_TRACE_OUT ??
       writeSideDataDir ??
+      // 末位兜底:调用方未传写侧池根(旧调用方 / 测试 seam)→ 缺省 `~/.iknow`。
+      // 三入口 (chat / serve / tui) 都显式传 `resolveServeDataDir(parsed.dataDir)`,
+      // 故本分支只在「无 --data-dir 可透传」的调用点生效(ADR-0087 默认池根)。
       resolveServeDataDir()
   );
 }

@@ -67,11 +67,11 @@ import {
   resolveSubagentTraceDir,
 } from "./session-api/store/index.js";
 import { resolveServeDataDir } from "./session-api/serve.js";
-import { loadWorkspaceRootEnv } from "./config/env.js";
 import { createTaskWorktreeProvisioner } from "./session-api/worktree-rebind.js";
 import type { WorktreeIsolationHostOpts } from "./harness/isolation/worktree-gate.js";
 import { createWorktreeIsolationHost } from "./cli/worktree-host.js";
 import { deriveProjectIdentityRoot } from "./harness/session-roots.js";
+import { resolveTasksDir } from "./harness/background/paths.js";
 // 共享装配 (cli / serve / tui 三入口共用, SSOT): settings.verify → VerifyConfig。
 import { resolveVerifyConfig } from "./config/verify-config.js";
 import { resolveTraceRoot } from "./cli/trace-root.js";
@@ -150,9 +150,12 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
   }
 
   const bundle: RuntimeBundle = await prepareRuntime();
-  // 写侧数据根同源:ask 入口 store 池恒 `resolveServeDataDir()`
-  // (chat-session.ts:2190 同链,与 workspaceRoot 无关),读侧缺省根跟同一池。
-  const tracePath = resolveTraceRoot(parsed.traceOut, resolveServeDataDir());
+  // 写侧数据根同源:ask 入口 store 池 = `resolveServeDataDir(parsed.dataDir)`
+  // (与 workspaceRoot 无关),读侧缺省根跟同一池。
+  // review-fix (M2 / ADR-0087): 显式 `--data-dir` 透传 —— `--data-dir <alt>`
+  // 开启独立池,trace / 未来任何 store 路径同款走 `<alt>`。
+  const dataDir = resolveServeDataDir(parsed.dataDir);
+  const tracePath = resolveTraceRoot(parsed.traceOut, dataDir);
 
   let built: { deps: LoopEngineDeps };
   try {
@@ -297,11 +300,13 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   // buildHarnessEngine(opts.subagentsDir) 派生 per-agent `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
   // 解析顺序保持(traceOut flag > IKNOW_TRACE_OUT env > 默认)只服务于
   // 其余子代理相关形态(stderr pointer 退路)。默认与 chat 写侧数据根同源
-  // (chat-session.ts 的 store 池恒 `resolveServeDataDir()`,与 workspaceRoot
-  // 无关;workspaceRoot 变量只喂 identity 派生)。
-  const tracePath = resolve(
-    resolveTraceRoot(parsed.traceOut, resolveServeDataDir())
-  );
+  // (chat-session.ts 的 store 池 = `resolveServeDataDir(parsed.dataDir)`,与
+  // workspaceRoot 无关;workspaceRoot 变量只喂 identity 派生)。
+  // review-fix (M2 / ADR-0087): 显式 `--data-dir` 透传到 trace / store /
+  // checkpointStore,与 runServe 同款解析 —— 「显式 dataDir = 独立池」对
+  // chat 同样适用(否则 `--data-dir <alt>` 静默写 `~/.iknow`)。
+  const dataDir = resolveServeDataDir(parsed.dataDir);
+  const tracePath = resolve(resolveTraceRoot(parsed.traceOut, dataDir));
 
   let built: import("./harness/build-engine.js").BuiltEngine;
   // Review High-2 (2026-08-29 / 硬要求 9):settings 只在启动加载点读一次，
@@ -331,11 +336,12 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   const liveGraphLedger = createLiveGraphLedgerHost();
   // Review High-1 (2026-08-29):worktree isolation host 缝 —— provision 负责
   // 建 task worktree + 仅本会话根改绑（session-api worktree-rebind SSOT）。
-  // store 与 chat-session 的 checkpointStore 同池（resolveServeDataDir()）。
+  // store 与 chat-session 的 checkpointStore 同池（review-fix M2:`dataDir`
+  // = `resolveServeDataDir(parsed.dataDir)`,显式 `--data-dir` 时落 `<alt>`)。
   // 开关读取在 build-engine 启动加载点（经 startupSettings）；OFF → 不包装。
   const worktreeProvisioner = createTaskWorktreeProvisioner({
     store: new SessionStore(
-      resolveServeDataDir(),
+      dataDir,
       // T1 (session-folder-consolidation): store namespace keys by
       // projectIdentityRoot, not cwd. mirror build-engine.ts:523.
       deriveProjectIdentityRoot({ cwd: workspaceRoot })
@@ -348,14 +354,23 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   // MCP 项目配置根跨 rebuild 保持本值。
   const productRoot = workspaceRoot;
   // #950 T2 / session-folder-consolidation:chat 入口注入「会话项目目录」作
-  // todoDir —— 与上面 SessionStore 用同一对 `(resolveServeDataDir(),
+  // todoDir —— 与上面 SessionStore 用同一对 `(dataDir,
   // deriveProjectIdentityRoot(...))`,保证同一会话在 chat / serve / TUI 三
   // 入口解析到同一 projectDir(`<surface>` 分裂消除)。per-conversationId
   // 文件路径在调用期由 todo-write.ts:resolveConversationTodoPath 派生。
+  // review-fix (M2): `dataDir` 已含显式 `--data-dir`(见上 tracePath 处)。
   const todoProjectDir = resolveProjectSessionDir(
-    resolveServeDataDir(),
+    dataDir,
     deriveProjectIdentityRoot({ cwd: workspaceRoot })
   );
+  // ADR-0088:后台任务登记跟**同一个** `(dataDir, projectIdentityRoot)` 的
+  // 项目树 —— 与会话文件夹同一 slug,与 workspaceRoot 解耦(throwaway
+  // `--workspace-root` 不再另开活账本)。rebuild 复用 chatEngineOpts,故
+  // rebind 后 tasksDir 不变(登记表不是 per-root 状态)。
+  const tasksDir = resolveTasksDir({
+    dataDir,
+    projectIdentityRoot: deriveProjectIdentityRoot({ cwd: workspaceRoot }),
+  });
   // 初始装配与 rebind 重建共用的装配 opts（同一 askUser/holder/settings）。
   const chatEngineOpts = {
     askUser: createTtyAskUser(),
@@ -365,6 +380,8 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     graphMode,
     liveGraphLedger,
     todoDir: todoProjectDir,
+    // ADR-0088:登记根随会话池,不随 workspaceRoot。
+    tasksDir,
     // T5 (ADR-0071 / SC8 + L2): subagentsDir
     // 由 (projectDir, conversationId) 经 `resolveSubagentTraceDir` 派生 —— 与
     // 上面 SessionStore 同源(`todoProjectDir === store.projectDir`,见 #950 T2)。
@@ -462,6 +479,10 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // (resume 时 = resumeId,否则随机生成)并显式传入,checkpoint / 子代理
     // 目录 / trace 锚点从同一值派生。runChatSession 内部不再二次生成。
     conversationId,
+    // review-fix (M2 / ADR-0087): `--data-dir` 透传,使 chat-session 的
+    // checkpointStore 走同一池(否则 resolveServeDataDir() zero-arg 静默回
+    // ~/.iknow,与 runServe 不一致)。`undefined` → 缺省 `~/.iknow` 行为不变。
+    dataDir: parsed.dataDir,
     // #356 T7:host drain — chat 入口每轮 runHarness 前把 completed 子代理
     // 结果拼入 priorMessages。ask 入口无 manager(surface 门控),不传。
     subagentManager: built.subagentManager,
@@ -597,22 +618,20 @@ async function runTui(parsed: ParsedCli): Promise<void> {
     ...(parsed.workspaceRoot !== undefined
       ? { workspaceRoot: parsed.workspaceRoot }
       : {}),
-    // traceOut 缺省派生放 run.tsx(dataDir 已解析处):TUI 写侧 dataDir 有
-    // cwd 兜底(<cwd>/.iknow),cli 层拿不到 env 档,在此预解析会与写侧分叉。
-    traceOut: resolveTraceRoot(parsed.traceOut, undefined),
+    // traceOut 缺省派生放 run.tsx：会话池 = 显式 `--data-dir` 否则 `~/.iknow`
+    // (与 runTui 自己的 `dataDir` 同源,两侧都解析成同一池根,review-fix M2)。
+    traceOut: resolveTraceRoot(
+      parsed.traceOut,
+      resolveServeDataDir(parsed.dataDir)
+    ),
     ...(parsed.autoMode ? { permissionMode: "full_auto" } : {}),
   });
   process.exitCode = exitCode;
 }
 
 async function runServe(parsed: ParsedCli): Promise<void> {
-  // ADR-0019:读侧面板根与写侧数据根同源。serve 写侧链 = explicit workspaceRoot
-  // > env IKNOW_WORKSPACE_ROOT > ~/.iknow(serve 不落 cwd 兜底);缺省派生复刻
-  // 同一链,两侧必须落同一池。
-  const serveDataDir = resolveServeDataDir(
-    parsed.dataDir,
-    parsed.workspaceRoot ?? loadWorkspaceRootEnv()
-  );
+  // ADR-0087:读侧面板根与写侧会话池同源 = 显式 dataDir 否则 ~/.iknow。
+  const serveDataDir = resolveServeDataDir(parsed.dataDir);
   const tracePath = resolveTraceRoot(parsed.traceOut, serveDataDir);
   const { startSessionServe } = await import("./session-api/serve.js");
   const { createSessionGrants } =
@@ -628,9 +647,8 @@ async function runServe(parsed: ParsedCli): Promise<void> {
       port: parsed.port,
       json_mode: parsed.json,
       dataDir: parsed.dataDir,
-      // ADR-0019 (T2):`--workspace-root` flag 透传到 serve 入口 — init /
-      // resolveServeDataDir 消费(详见 session-api/serve.ts)。
-      // review-fix (M1/M5): `!== undefined` 守门 — 空字符串透传触 empty_explicit。
+      // ADR-0019:`--workspace-root` 透传到 serve 入口（memory / bind），
+      // 不改变会话池根（ADR-0087）。
       ...(parsed.workspaceRoot !== undefined
         ? { workspaceRoot: parsed.workspaceRoot }
         : {}),
@@ -670,10 +688,7 @@ async function runTrace(parsed: ParsedCli): Promise<void> {
   // 两级树 discovery 由 T6 承接。
   const traceOut = resolveTraceRoot(
     parsed.traceOut,
-    resolveServeDataDir(
-      parsed.dataDir,
-      parsed.workspaceRoot ?? loadWorkspaceRootEnv()
-    )
+    resolveServeDataDir(parsed.dataDir)
   );
 
   // ADR-0020 D2.1 默认模式：不起进程，探测 iknow serve health 后指向同进程

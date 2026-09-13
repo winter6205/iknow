@@ -11,7 +11,7 @@
  *
  *  - `productRoot`：开会话时的主 checkout，首次装配钉死，跨 rebind 与重启不变。
  *    `mcp.json` 只问它（`mcpConfigRoot`，#828 已落地，行为不变）；per-root 状态
- *    （记忆库 / tasks）的锚由装配层定：`workspaceRoot` 优先，仅当它自身已是
+ *    （记忆库）的锚由装配层定：`workspaceRoot` 优先，仅当它自身已是
  *    task worktree 时退到 `productRoot`（ADR-0037 §4 amended）。
  *  - `projectIdentityRoot`：用户此刻在做的那个项目，宿主启动时钉一次，跨 rebind
  *    不变。**项目身份只问它**——rules / 项目 `AGENTS.md` / `permissions.toml` /

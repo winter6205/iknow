@@ -295,7 +295,11 @@ describe("grep T6: live taskRoot cell drives handler root", () => {
     const cell: LiveTaskRoot = createLiveTaskRoot(rootA);
     const tool = createGrepTool(cell);
 
-    const before = String(await tool.handler({ pattern: "needle-" }));
+    // 两个 root 下的文件名都是 `needle.txt`，只有**内容**能区分走的是哪棵树；
+    // D2 默认出法是 paths，故此处的 snapshot 不变式要用 output=content 观察。
+    const before = String(
+      await tool.handler({ pattern: "needle-", output: "content" })
+    );
     assert.ok(
       before.includes("needle-A"),
       `pre-rebind grep must include A hit; got: ${before}`
@@ -306,7 +310,9 @@ describe("grep T6: live taskRoot cell drives handler root", () => {
     );
 
     writeLiveTaskRoot(cell, rootB);
-    const after = String(await tool.handler({ pattern: "needle-" }));
+    const after = String(
+      await tool.handler({ pattern: "needle-", output: "content" })
+    );
     assert.ok(
       after.includes("needle-B"),
       `post-rebind grep must include B hit; got: ${after}`
@@ -321,7 +327,10 @@ describe("grep T6: live taskRoot cell drives handler root", () => {
     const root = await makeScratch("t6-grep-legacy-");
     await writeFile(join(root, "x.txt"), "needle-x\n");
     const tool = createGrepTool(root); // string legacy
-    const out = String(await tool.handler({ pattern: "needle-x" }));
+    // 同上：`needle-x` 是**行内容**，要 output=content 才可见。
+    const out = String(
+      await tool.handler({ pattern: "needle-x", output: "content" })
+    );
     assert.ok(out.includes("needle-x"));
   });
 });

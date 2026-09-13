@@ -243,7 +243,10 @@ describe("bash background handler（fake manager）", () => {
 
   it("真实 manager：registry json 落盘 command = 占位符形态，真值不上盘（#406 roundtrip 契约锁盘面）", async () => {
     const root = await makeScratch("bash-bg-secret-disk-");
-    const tasksDir = resolveTasksDir(root);
+    const tasksDir = resolveTasksDir({
+      dataDir: root,
+      projectIdentityRoot: root,
+    });
     const fakeChildren: FakeChild[] = [];
     const manager = createBackgroundTaskManager({
       tasksDir,
@@ -404,7 +407,7 @@ describe("bash background 真实进程 e2e（defaultBackgroundSpawn）", () => {
     async () => {
       const root = await makeScratch("bash-bg-real-");
       const manager = createBackgroundTaskManager({
-        tasksDir: resolveTasksDir(root),
+        tasksDir: resolveTasksDir({ dataDir: root, projectIdentityRoot: root }),
         spawn: defaultBackgroundSpawn,
       });
       const tool = createBashTool(root, {
@@ -457,7 +460,7 @@ describe("bash background 真实进程 e2e（defaultBackgroundSpawn）", () => {
     async () => {
       const root = await makeScratch("bash-bg-fresh-");
       const manager = createBackgroundTaskManager({
-        tasksDir: resolveTasksDir(root),
+        tasksDir: resolveTasksDir({ dataDir: root, projectIdentityRoot: root }),
         spawn: defaultBackgroundSpawn,
       });
       const tool = createBashTool(root, {
@@ -557,7 +560,7 @@ describe("bash background tier 对照（timeoutMsOverride seam）", () => {
     async () => {
       const root = await makeScratch("bash-bg-tier-bg-");
       const manager = createBackgroundTaskManager({
-        tasksDir: resolveTasksDir(root),
+        tasksDir: resolveTasksDir({ dataDir: root, projectIdentityRoot: root }),
         spawn: defaultBackgroundSpawn,
       });
       const toolBaz = createBashTool(root, {

@@ -81,13 +81,12 @@ export const TUI_RENDERER_ERROR_PREFIX = "TUI 渲染后端初始化失败";
 export interface RunTuiOptions {
   /** `iknow tui <session-id>` resume；缺省 = 新会话（Q2=C）。 */
   readonly sessionId?: string;
-  /** 会话池根目录（--data-dir）；缺省 <workspaceRoot>/.iknow。 */
+  /** 会话池根目录（--data-dir）；缺省 ~/.iknow（ADR-0087）。 */
   readonly dataDir?: string;
   /**
-   * ADR-0019 (T2): per-root state anchor — CLI `--workspace-root` flag 透传。
-   * 装配期 resolve 一次并透传:resolveServeDataDir(数据落 workspace)+
-   * buildTuiDeps → build-engine。Persona seed 走 userHome/.iknow,不跟
-   * workspaceRoot。缺省 undefined → dataDir 默认 ~/.iknow。
+   * ADR-0019: per-root state anchor — CLI `--workspace-root` flag 透传。
+   * 装配期 resolve 一次并透传到 build-engine。Persona seed 走
+   * userHome/.iknow,不跟 workspaceRoot。会话池不跟它分片（ADR-0087）。
    */
   readonly workspaceRoot?: string;
   /** JSONL trace 输出路径。缺省(经 resolveTraceRoot)落本入口写侧 dataDir ——
@@ -224,9 +223,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // 定义延后到 initialSession / onQuitBridge 就绪（env 变化只发生在装配完成后）。
     let rerenderApp: () => void = () => {};
     const bundle: RuntimeBundle = { env: currentEnv, session: runtime.session };
-    // ADR-0019 (T2): explicit workspaceRoot → resolveServeDataDir 落
-    // `<workspaceRoot>/.iknow`;缺省 → ~/.iknow(spec #120 SC 1 既有默认)。
-    const dataDir = resolveServeDataDir(options.dataDir, workspaceRoot);
+    // ADR-0087: 会话池 = 显式 dataDir 否则 ~/.iknow，不跟 workspaceRoot 分片。
+    const dataDir = resolveServeDataDir(options.dataDir);
     // trace 读侧扫描根(ACI 三工具 + 面板)缺省 = 本入口写侧 dataDir —— 同一
     // 解析结果,读侧不与写侧分叉(flag > IKNOW_TRACE_OUT env > dataDir)。
     const traceOut = resolveTraceRoot(options.traceOut, dataDir);
