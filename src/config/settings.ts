@@ -366,17 +366,26 @@ export interface IknowLspSettings {
 }
 
 /**
- * ADR-0084: 项目层 `permissions` 段（原 `.iknow/permissions.toml` 的 rule DSL
- * 原样迁入项目 settings）。本层只做「普通对象 + 两个顶层键形态」的门禁：
- * `schema_version` 仅 number 透传、`rule` 仅数组透传；**值域 / 谓词语义 /
- * ajv schema 校验的 SSOT 是 `src/harness/permission/project-settings.ts`**
- * （config 层不反向 import harness）。
+ * ADR-0090: 项目层 `permissions` 段改为声明式字符串列表（`allow` / `ask` /
+ * `deny`）+ 可选 `defaultMode`。本层只做形状门禁（普通对象 + 字段类型）；
+ * ajv schema 校验 + 规则解析 / 编译归
+ * `src/harness/permission/project-settings.ts`（SSOT），config 层不反向
+ * import harness。本字段是**值语义透传载体**——运行时不消费，只供权限
+ * 装配层一次性读取（`resolveProjectPermissionSource` 单点读根）。
  */
 export interface IknowSettingsPermissions {
-  /** 规则 schema 版本（只认整数 1 的校验归 permission 层 ajv）。 */
-  schema_version?: number;
-  /** 规则数组（形状 / 谓词校验归 permission 层 ajv）。 */
-  rule?: ReadonlyArray<unknown>;
+  /**
+   * 启动 `PermissionMode` 种子；仅 `"default"` | `"plan"` 合法；
+   * `"full_auto"` 在 project-settings 层 fail-loud
+   * （共享仓库不得自授自动模式，ADR-0090）。
+   */
+  defaultMode?: string;
+  /** allow 规则数组（字符串透传，编译归 permission 层）。 */
+  allow?: ReadonlyArray<unknown>;
+  /** ask 规则数组（字符串透传，编译归 permission 层）。 */
+  ask?: ReadonlyArray<unknown>;
+  /** deny 规则数组（字符串透传，编译归 permission 层）。 */
+  deny?: ReadonlyArray<unknown>;
 }
 
 export interface IknowSettings {
@@ -384,17 +393,17 @@ export interface IknowSettings {
   verify?: IknowSettingsVerify;
   secrets?: IknowSettingsSecrets;
   /**
-   * ADR-0084: 项目层权限规则段（`schema_version` + `rule[]`，原
-   * `.iknow/permissions.toml` 的 rule DSL 原样迁入）。**仅项目层解析**——
-   * 用户层 `permissions` 不接（ADR-0084，见 `loadIknowSettings`）。
-   * 本接口只承载原始 JSON 形状；谓词语义 / ajv 校验归
+   * ADR-0084 / ADR-0090: 项目层权限规则段，声明式 `allow` / `ask` /
+   * `deny` 字符串列表 + 可选 `defaultMode`。**仅项目层解析**——用户层
+   * `permissions` 不接（ADR-0084，见 `loadIknowSettings`）。本接口只承载
+   * 形状门禁；规则解析 / 编译归
    * `src/harness/permission/project-settings.ts`（同一 SSOT）。
    *
    * **运行时不消费本字段**：权限源由装配层经
    * `resolveProjectPermissionSource({ projectIdentityRoot })` 单点读取
    * （build-engine / worker 共用），本层是形状门禁而非第二读者。本层丢弃
    * 非法字段（drop-not-throw），拿它当策略源会把 schema 违规静默降级成
-   * 「无项目规则」，正是 ADR-0084 fail-loud 要排除的形态。
+   * 「无项目规则」，正是 ADR-0084 / ADR-0090 fail-loud 要排除的形态。
    */
   permissions?: IknowSettingsPermissions;
   /** #358 T1: 子代理配置段（per-task wallclock）。 */
@@ -1268,19 +1277,25 @@ function assembleSettings(segments: IknowSettings): IknowSettings {
 }
 
 /**
- * ADR-0084: 项目层 `permissions` 段只做形状门禁（普通对象 / `schema_version`
- * number / `rule` 数组），值域与谓词合法性由
+ * ADR-0090: 项目层 `permissions` 段只做形状门禁（普通对象 / `defaultMode`
+ * 字符串 / `allow` / `ask` / `deny` 数组），值域与规则合法性由
  * `src/harness/permission/project-settings.ts` 的 ajv schema 校验（typed
- * error）。形状不合法的字段丢弃，不抛错。
+ * error）。形状不合法的字段丢弃，不抛错（drop-not-throw）。
  */
 function parsePermissions(raw: unknown): IknowSettingsPermissions | undefined {
   if (!isPlainObject(raw)) return undefined;
-  const out: { schema_version?: number; rule?: ReadonlyArray<unknown> } = {};
-  if (typeof raw.schema_version === "number")
-    out.schema_version = raw.schema_version;
-  if (Array.isArray(raw.rule)) out.rule = raw.rule;
-  // 空段（两个键都非法 / 缺席）→ 不产出 permissions（对齐 parseSecrets 纪律）。
-  if (out.schema_version === undefined && out.rule === undefined)
+  const out: IknowSettingsPermissions = {};
+  if (typeof raw.defaultMode === "string") out.defaultMode = raw.defaultMode;
+  if (Array.isArray(raw.allow)) out.allow = raw.allow;
+  if (Array.isArray(raw.ask)) out.ask = raw.ask;
+  if (Array.isArray(raw.deny)) out.deny = raw.deny;
+  // 空段（全部字段非法 / 缺席）→ 不产出 permissions（对齐 parseSecrets 纪律）。
+  if (
+    out.defaultMode === undefined &&
+    out.allow === undefined &&
+    out.ask === undefined &&
+    out.deny === undefined
+  )
     return undefined;
   return out;
 }

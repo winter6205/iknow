@@ -1,9 +1,9 @@
 /**
- * ADR-0084 / Slice B SC5 — build-engine 装配真实读项目 `permissions` 段。
+ * ADR-0084 / ADR-0090 / Slice B SC5 — build-engine 装配真实读项目 `permissions` 段。
  *
  * 不变式（本文件钉住的东西）：
- *  - 项目 `settings.json` 的 `permissions.rule` 经**真实装配**（build-engine →
- *    createPermissionPolicy → permission-executor）落到工具调用上：命中 deny
+ *  - 项目 `settings.json` 的 `permissions` 声明式列表经**真实装配**（build-engine
+ *    → createPermissionPolicy → permission-executor）落到工具调用上：命中 deny
  *    的调用以 `[permission_denied]` + 规则 reason 返回，未命中的同工具调用
  *    仍按类别默认放行 —— 规则是选择性的，不是整工具封禁。
  *  - 读根是 `projectIdentityRoot`（项目身份锚），不是 `cwd`：改绑后 cwd 是
@@ -52,18 +52,13 @@ function makeEnv(apiKey: string): IknowEnv {
   };
 }
 
-/** 项目 `permissions` 段：deny 命中 path 含 `secret.txt` 的 read_file。 */
+/**
+ * 项目 `permissions` 段（ADR-0090 声明式）：deny 命中任意深度 `secret.txt`
+ * 的读工具调用。deny 的单段路径在工作根下任意深度命中，故 `Read(secret.txt)`
+ * 覆盖工作根顶层的 `<root>/secret.txt`（旧 `path_contains` 语义的等价表达）。
+ */
 const DENY_SECRET_SECTION = {
-  schema_version: 1,
-  rule: [
-    {
-      id: "deny-secret-read",
-      match_tool: "read_file",
-      match_input: { path_contains: "secret.txt" },
-      decision: "deny",
-      reason: "project rule: secret.txt is off-limits",
-    },
-  ],
+  deny: ["Read(secret.txt)"],
 };
 
 /** 铺 `<root>/.iknow/settings.json`（可选带 permissions 段）+ 两个可读文件。 */
@@ -116,7 +111,7 @@ describe("buildHarnessEngine — 项目权限源装配（ADR-0084 / SC5）", () 
     return root;
   }
 
-  it("项目 permissions.rule 的 deny 经真实装配拦下命中调用，未命中的同工具调用仍放行", async () => {
+  it("项目 permissions 的 deny 经真实装配拦下命中调用，未命中的同工具调用仍放行", async () => {
     const root = await scratch();
     await plantProject(root, { permissions: DENY_SECRET_SECTION });
 
@@ -125,7 +120,8 @@ describe("buildHarnessEngine — 项目权限源装配（ADR-0084 / SC5）", () 
       const denied = await readFileResult(built, join(root, "secret.txt"));
       expect(denied.kind).toBe("execution_failed");
       expect(denied.message).toMatch(/\[permission_denied\]/);
-      expect(denied.message).toMatch(/project rule: secret\.txt is off-limits/);
+      // 编译期生成的 reason 回显声明式规则原文（文件里不写 id / reason）。
+      expect(denied.message).toMatch(/Read\(secret\.txt\)/);
 
       // 选择性：同一条规则下未命中的路径仍走 read-only 类别默认 allow。
       const allowed = await readFileResult(built, join(root, "ok.txt"));

@@ -90,6 +90,13 @@ export interface ProjectSettingsPolicySource {
   readonly kind: "project";
   readonly filePath: string;
   readonly rules: ReadonlyArray<NormalRuleSpec>;
+  /**
+   * Optional startup `PermissionMode` seed (ADR-0090). Only `default` /
+   * `plan` are legal here — `full_auto` is rejected at load time as a
+   * shared-repo self-grant. Absent = no seed; CLI / `IKNOW_PERMISSION_MODE`
+   * / `/permissions` / Shift+Tab all still override.
+   */
+  readonly defaultMode?: "default" | "plan";
 }
 
 /** Session grants layer (in-memory, no persistence in v0). */

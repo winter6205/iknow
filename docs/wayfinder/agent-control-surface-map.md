@@ -48,7 +48,7 @@
 - [R2 /quit 与 Ctrl+C 对 wait:true 的真实路径](tickets/r2-quit-ctrlc-wait-true.md) — `/quit` 只等 inflight 不 abort；有选区 Ctrl+C 复制；进程 SIGINT shutdown ≤5s，不是 2h 墙钟。
 - [R3 Trace MCP 扫描根与 Cursor 挂载](tickets/r3-trace-mcp-scan-root.md) — 本会话无 iknow-trace；即便挂上也会扫 `~/.iknow` 而 TUI 写 `<cwd>/.iknow`，`list_sessions` 成功返回错池旧会话。
 - [G1 裸 git worktree add 要不要变成 rebind](tickets/g1-bare-git-worktree-rebind.md) — 工具常在、开关只武装写门禁。
-- [G4 用户层 vs 共享项目层 settings](tickets/g4-settings-user-vs-project.md) — 两层、无第三层；项目允许名单 + 写回落对层；权限 rule DSL 进项目 settings，退役 toml，双文件 fail-loud。
+- [G4 用户层 vs 共享项目层 settings](tickets/g4-settings-user-vs-project.md) — 两层、无第三层；项目允许名单 + 写回落对层；权限进项目 settings，退役 toml，双文件 fail-loud；规则形态 **amended by** ADR-0090 / `declarative-project-permissions.md`。
 - [G2 todo 首次多行：改 schema 还是改回执](tickets/g2-todo-first-write-schema.md) — 目标态：id + 添加/更新/读取；子代理共用父账本；`replace` 降级。跨主会话共用不在本切片。
 - [G3 前景 spawn 墙钟与操作员取消](tickets/g3-foreground-spawn-cancel.md) — A：quit/Ctrl+C 能取消 wait；超时非 ok。消息内 running… + dim 最新；概览 Down 聚焦、Ctrl+X 强杀；无 Enter 进详情。
 

@@ -1,5 +1,7 @@
 # Spec: ③ 安全护栏（权限三层 · 沙箱 · 中断/超时）
 
+> **Amendment 2026-09-13**（#1004 / ADR-0090）：项目 `permissions` 段的**规则形态**以 `declarative-project-permissions.md` 为准（`allow`/`ask`/`deny` 字符串）。本文件仍是权限**三层链 / 沙箱 / 中断**的权威；下文 `rule[]` 谓词 DSL、toml 示例视为历史。
+
 > **Lean spec.** 上游权威决议 = wayfinder map [#115](https://github.com/winter6205/iknow/issues/115) + 子票 [#122](https://github.com/winter6205/iknow/issues/122)（权限三层）/ [#123](https://github.com/winter6205/iknow/issues/123)（零信任沙箱）/ [#124](https://github.com/winter6205/iknow/issues/124)（中断/超时）/ [#162](https://github.com/winter6205/iknow/issues/162)（askUser 三入口平权装配）。本 spec 只补充决议未钉死的实施层细节（文件布局 / TS 类型骨架 / 配置格式 / 验收映射）；未重述内容以四票 Resolution 为准。
 >
 > 假设门：2026-08-04 操作员确认 29 条假设（A1–G28），无修正项。

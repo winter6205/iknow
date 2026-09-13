@@ -32,6 +32,7 @@ import {
   createFailClosedAskUser,
   createServeAskUser,
   createPermissionModeContext,
+  parsePermissionMode,
 } from "./harness/permission/index.js";
 import type { PermissionMode } from "./harness/permission/modes.js";
 import {
@@ -74,6 +75,9 @@ import { resolveTasksDir } from "./harness/background/paths.js";
 // 共享装配 (cli / serve / tui 三入口共用, SSOT): settings.verify → VerifyConfig。
 import { resolveVerifyConfig } from "./config/verify-config.js";
 import { resolveTraceRoot } from "./cli/trace-root.js";
+// T5 / ADR-0090:项目 permissions.defaultMode 启动种子 —— chat 入口从项目身份根读,
+// 缺省 undefined。fail-loud (legacy / full_auto) 原路上抛,启动错误路径呈现。
+import { readProjectDefaultMode } from "./harness/permission/project-settings.js";
 
 /**
  * review-fix (M5): WorkspaceRootError type guard —— resolver 抛的是 plain
@@ -305,17 +309,24 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   const tracePath = resolve(resolveTraceRoot(parsed.traceOut, dataDir));
 
   let built: import("./harness/build-engine.js").BuiltEngine;
-  // W2: chat REPL 持一个可变 PermissionModeContext —— /permissions 命令在
-  // REPL 里就地翻转它,引擎不重建。初始值走 env IKNOW_PERMISSION_MODE(可
-  // 选),缺省 default。
-  const permissionMode = createPermissionModeContext(
-    (process.env.IKNOW_PERMISSION_MODE as PermissionMode | undefined) ??
-      "default"
-  );
   // Review High-2 (2026-08-29 / 硬要求 9):settings 只在启动加载点读一次，
   // 同一对象驱动 graph / verify 装配与引擎构建 —— rebind 后 per-root 重建
   // 复用它，worktree 内 `.iknow/` 缺席（gitignore）也绝不隐式重载 settings。
   const startupSettings = loadIknowSettings();
+  // W2 + T5 (ADR-0090):chat REPL 持一个可变 PermissionModeContext ——
+  // /permissions 命令在 REPL 里就地翻转它,引擎不重建。启动初值优先级
+  // CLI flag(tui only) > env IKNOW_PERMISSION_MODE > 项目 permissions.defaultMode
+  // > "default"。项目 settings 读根 = projectIdentityRoot(不是 cwd):改绑后
+  // cwd 是没有 `.iknow` 的裸 task worktree,项目契约只在身份根上。
+  // fail-loud 原路上抛(legacy 形态 / full_auto)→ 启动错误路径呈现,不吞。
+  const projectDefaultMode = readProjectDefaultMode({
+    cwd: deriveProjectIdentityRoot({ cwd: workspaceRoot }),
+  });
+  const permissionMode = createPermissionModeContext(
+    parsePermissionMode(process.env.IKNOW_PERMISSION_MODE) ??
+      projectDefaultMode ??
+      "default"
+  );
   const graphMode = createGraphModeContext(
     resolveGraphMode({ settings: startupSettings.graph })
   );

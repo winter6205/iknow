@@ -504,8 +504,15 @@ export async function createWorkerRuntime(
   // (cli.ts)转 stderr + exit 2,不静默降级成「无项目规则」。无项目规则 =
   // undefined,由 `createPermissionPolicy` 的 spread-guard 丢弃(与 key 缺席
   // 同形),此处不再叠一层条件分支。
+  // ADR-0090: 声明式规则编译锚 = sandboxRoot(与 build-engine 同款);
+  // knownToolNames 取 worker 内建 registry(无动态 MCP 件)——未知工具名
+  // 的 deny/ask 加载期告警,规则仍保留编译。
   const policy = createPermissionPolicy({
-    project: resolveProjectPermissionSource({ projectIdentityRoot }),
+    project: resolveProjectPermissionSource({
+      projectIdentityRoot,
+      workRoot: sandboxRoot,
+      knownToolNames: new Set(reg.inner.list().map((def) => def.name)),
+    }),
   });
   // user-hook-router（specs/user-hook-router.md / ADR-0055）: 子代理引擎经
   // 同一份 merged settings 装配 user rules（spec Does #6 —— 无第二套后门）。

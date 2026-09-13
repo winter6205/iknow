@@ -9,6 +9,8 @@
 
 在 `settings.json` 里声明 `hooks.rules[]`，iknow 引擎在每次工具调用**执行前**按规则判定是否拦截。deny-only：规则只能**拦**，不能放行或改写——内置安全层（hard-wall、secrets guard）不受影响。**默认关**：`enabled` 缺席或 `false` 时规则完全无效。
 
+团队 allow/ask/deny 政策写项目 `permissions`（`docs/guides/project-permissions.md`），不要用 hooks 代替。
+
 ---
 
 ## 二、settings.json 模板
