@@ -327,8 +327,10 @@ const CALLER_SETTLE_GRACE_MS = 10;
 
 /**
  * T5:单次调用的 tier + interruptBehavior 路由。返回一个与 call 身份匹配的
- * ToolExecutionResult,且与 `message === "timeout"` / `"cancelled"` 的
- * strict-equal 契约兼容(loop-engine.computeToolStopFlags 不需改动)。
+ * ToolExecutionResult;失败标签仍是严格 equal 的 `"timeout"` / `"cancelled"`
+ * (ADR-0005)。ADR-0091 起这些 result 标签不再驱动回合 timeout
+ * (loop-engine.computeToolStopFlags 只认 signal.reason 时钟标记),本层语义
+ * 因此不变:单 call tier 到点只失败该条结果。
  *
  * race 设计:inner.executeAll 与 tierAbort 触发 Promise.race。tier 先命中
  * 时不无限等 handler(防 handler 拒收尾),但给一个有界的 salvage 窗口

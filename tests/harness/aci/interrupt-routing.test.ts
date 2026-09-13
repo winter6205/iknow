@@ -9,8 +9,9 @@
  *       block 工具 → caller signal 不透传;handler 跑完后转 cancelled(无 partial)
  *   - SC13 bash real spawn:partial stdout 在 cancellation 下被保留
  *   - SC15 block 工具完成不被 caller abort 打断;caller abort 后返 cancelled
- *   - SC16 loop proceeds after timeout/cancel:单次 timeout 后下一回合可继续
- *   - computeToolStopFlags 严格 equal("timeout" / "cancelled"),无前缀/后缀宽容
+ *   - SC16 单 call tier timeout 不再停回合(ADR-0091):只失败该条 result,
+ *     回合 continue;回合 timeout 只认 signal.reason==="timeout" 的时钟 abort
+ *   - computeToolStopFlags:结果标签 inert;signal.reason 严格 equal 判定
  *
  * 实现策略：
  *   - tier 测试使用 createAciExecutor 的 `timeoutMsOverride` 测试 seam,
@@ -923,8 +924,10 @@ describe("SC15 — block 工具完成不被 caller abort 打断(已在上文覆�
   });
 });
 
-describe("SC16 — loop proceeds after timeout/cancel (computeToolStopFlags 严格 equal)", () => {
-  it("timedOut flag 严格匹配 'timeout'(无前缀/后缀宽容)", () => {
+describe("SC16 — computeToolStopFlags:回合 timeout 只认 signal 时钟标记(ADR-0091)", () => {
+  it("ADR-0091 SC3:单条 result 标签 'timeout'(无 signal)不再停回合", () => {
+    // 单 call 工具超时(ACI 档位钟)只失败该条 tool_result,不是回合钟 ——
+    // 结果标签对 timedOut 完全无影响,回合必须继续。
     const r: ToolExecutionResult = {
       kind: "execution_failed",
       toolUseId: "u1",
@@ -934,11 +937,11 @@ describe("SC16 — loop proceeds after timeout/cancel (computeToolStopFlags 严�
       results: [r],
       signal: undefined,
     });
-    assert.equal(flags.timedOut, true);
+    assert.equal(flags.timedOut, false);
     assert.equal(flags.cancelled, false);
   });
 
-  it("cancelled flag 严格匹配 'cancelled'(无前缀/后缀宽容)", () => {
+  it("result 标签 'cancelled' 语义保留:仍标 cancelled、不标 timeout", () => {
     const r: ToolExecutionResult = {
       kind: "execution_failed",
       toolUseId: "u1",
@@ -949,7 +952,7 @@ describe("SC16 — loop proceeds after timeout/cancel (computeToolStopFlags 严�
     assert.equal(flags.cancelled, true);
   });
 
-  it("'preempted' / 'timeout:foo' 不应误判为 timeout", () => {
+  it("result 标签 'preempted' / 'timeout:bash'(无 signal)全不误判", () => {
     const r1: ToolExecutionResult = {
       kind: "execution_failed",
       toolUseId: "u1",
@@ -965,6 +968,53 @@ describe("SC16 — loop proceeds after timeout/cancel (computeToolStopFlags 严�
     };
     const f2 = computeToolStopFlags({ results: [r2], signal: undefined });
     assert.equal(f2.timedOut, false, "'timeout:bash' 不应误判为 timeout");
+    assert.equal(f2.cancelled, false);
+  });
+
+  it("ADR-0091 SC4:signal 以 reason 'turn-timeout' abort → timedOut,cancelled 不抢先", () => {
+    const controller = new AbortController();
+    controller.abort("turn-timeout");
+    const flags = computeToolStopFlags({
+      results: [],
+      signal: controller.signal,
+    });
+    assert.equal(flags.timedOut, true);
+    assert.equal(flags.cancelled, false);
+  });
+
+  it("ADR-0091 SC4:reason 'timeout:foo' 严格 equal 不匹配(前缀不误判)", () => {
+    const controller = new AbortController();
+    controller.abort("timeout:foo");
+    const flags = computeToolStopFlags({
+      results: [],
+      signal: controller.signal,
+    });
+    assert.equal(flags.timedOut, false);
+    assert.equal(flags.cancelled, true, "非时钟 abort 仍是 caller 取消");
+  });
+
+  it("plain abort(无 reason)归 caller 取消,不是回合 timeout", () => {
+    const controller = new AbortController();
+    controller.abort();
+    const flags = computeToolStopFlags({
+      results: [],
+      signal: controller.signal,
+    });
+    assert.equal(flags.timedOut, false);
+    assert.equal(flags.cancelled, true);
+  });
+
+  it("reason 'subagent-timeout' 不是回合钟 → cancelled(SIGTERM 收尾不回归)", () => {
+    // worker.ts SIGTERM handler 用 "subagent-timeout" abort;worker 期望该
+    // abort 落 stopReason=cancelled 再走自身收尾信封,绝不升级为 timeout。
+    const controller = new AbortController();
+    controller.abort("subagent-timeout");
+    const flags = computeToolStopFlags({
+      results: [],
+      signal: controller.signal,
+    });
+    assert.equal(flags.timedOut, false);
+    assert.equal(flags.cancelled, true);
   });
 });
 
@@ -1139,11 +1189,12 @@ describe("SC13 — bash tier timeout (via timeoutMsOverride seam)", () => {
   );
 });
 
-describe("SC16 — loop engine integration: tier timeout 后 loop 停在 timeout", () => {
-  it("AciExecutor tier timeout 经 loop engine → stopReason=timeout;下一回合可续跑", async () => {
-    // 真 loop engine + 真 Executor(createExecutor)+ stub model:tier 超时
-    // 的 slow 工具把 stopReason 钉为 timeout,验证 partial 加法字段不破坏
-    // computeToolStopFlags 的 strict-equal 契约(SC16)。
+describe("SC16/ADR-0091 — loop engine integration: 单 call tier timeout 不停回合", () => {
+  it("AciExecutor tier timeout → 该条 result 仍 execution_failed timeout,回合 continue 并消费后续模型回应", async () => {
+    // 真 loop engine + 真 Executor(createExecutor)+ stub model:单 call 撞
+    // ACI fast 档超时,但 signal 未 abort —— 该条 tool_result 仍是
+    // execution_failed "timeout"(ADR-0005),回合不得因此判 timeout(ADR-0091);
+    // stub 的第二个回应被继续消费,run 以 completed 收场。
     const slowToolDef: AciToolDef = Object.freeze({
       name: "slow",
       description: "stub slow tool",
@@ -1182,9 +1233,13 @@ describe("SC16 — loop engine integration: tier timeout 后 loop 停在 timeout
       maxTurns: 5,
       toolTimeoutMs: 50,
     });
-    // tier timeout → loop 停在 timeout;权威历史含 tool_result(execution_failed timeout)。
-    assert.equal(result.stopReason, "timeout");
-    assert.equal(result.messages.length, 3);
+    // 回合继续:第二个模型回应被消费 → completed,turnCount 递增,非 timeout。
+    assert.equal(result.stopReason, "completed");
+    assert.notEqual(result.stopReason, "timeout");
+    assert.equal(result.turnCount, 2);
+    assert.equal(result.finalText, "done");
+    // 权威历史:user / assistant(tool_use) / user(tool_result) / assistant(text)。
+    assert.equal(result.messages.length, 4);
     const trBlock = result.messages[2]!.content[0]! as {
       type: string;
       is_error?: boolean;
@@ -1194,5 +1249,100 @@ describe("SC16 — loop engine integration: tier timeout 后 loop 停在 timeout
     assert.equal(trBlock.is_error, true);
     assert.equal(trBlock.tool_use_id, "u1");
     assert.equal(trBlock.content[0]!.text, "[execution_failed] timeout");
+  }, 10_000);
+
+  it("SC3/grep-wave-survive: 一波 ≥2 tool_use, 单条 execution_failed timeout 仍把 ok 兄弟的 tool_result 交给模型, 回合 continue", async () => {
+    // SC3/grep-wave-survive: 同波两条 tool_use, 其中恰好一条撞档位钟
+    // → execution_failed "timeout", 另一条 ok; signal 未 abort →
+    // 回合 continue, 两个 tool_result 都进权威历史 (模型仍能用 ok 那条
+    // 写终答). 该 invariant 由 ADR-0091 与本测试共同钉死。
+    const slowToolDef: AciToolDef = Object.freeze({
+      name: "slow",
+      description: "stub slow tool",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 500));
+        return { ok: true };
+      },
+      aci: Object.freeze({
+        category: "read-only" as const,
+        isConcurrencySafe: true,
+        interruptBehavior: "cancel" as const,
+        timeoutTier: "fast" as const,
+      }),
+    });
+    const fastToolDef: AciToolDef = Object.freeze({
+      name: "fast",
+      description: "stub fast tool",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: async () => ({ ok: true, payload: "fast-ok" }),
+      aci: Object.freeze({
+        category: "read-only" as const,
+        isConcurrencySafe: true,
+        interruptBehavior: "cancel" as const,
+        timeoutTier: "fast" as const,
+      }),
+    });
+    const reg = createRegistry([slowToolDef, fastToolDef]);
+    const inner = createExecutor(reg);
+    const aciExec = createAciExecutor({
+      inner,
+      registry: reg,
+      timeoutMsOverride: 50, // fast 真值 5s;压到 50ms 让 slow 撞档位钟
+    });
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "u-slow", name: "slow", input: {} },
+            { id: "u-fast", name: "fast", input: {} },
+          ],
+        }),
+        assistantResult({ texts: ["done"], toolCalls: [] }),
+      ],
+    });
+    const { result, trace } = await run("go", {
+      adapter: model,
+      executor: aciExec,
+      registry: reg,
+      maxTurns: 5,
+      toolTimeoutMs: 50,
+    });
+    // (a) 回合 continue → stopReason "completed", turnCount = 2.
+    assert.equal(result.stopReason, "completed");
+    assert.equal(result.turnCount, 2);
+    // (b) tool_result user message 同时含两条结果 —— is_error 必有一条 true,
+    //     另一条 false, 且 ok 那条文本含 fast tool 真实载荷.
+    const trMsg = result.messages[2]!;
+    assert.equal(trMsg.role, "user");
+    const blocks = trMsg.content as ReadonlyArray<{
+      type: string;
+      is_error?: boolean;
+      tool_use_id: string;
+      content: ReadonlyArray<{ type: "text"; text: string }>;
+    }>;
+    assert.equal(blocks.length, 2);
+    const byId = new Map(blocks.map((b) => [b.tool_use_id, b]));
+    const slowBlock = byId.get("u-slow")!;
+    const fastBlock = byId.get("u-fast")!;
+    assert.equal(slowBlock.is_error, true);
+    assert.equal(slowBlock.content[0]!.text, "[execution_failed] timeout");
+    // ok result 不挂 is_error 键 (tool-result.ts:22-27), 故 strict equal
+    // false 不成立; 按 invariant 改为 "not true".
+    assert.notEqual(fastBlock.is_error, true);
+    assert.ok(
+      fastBlock.content[0]!.text.includes("fast-ok"),
+      `expected fast tool payload in ok tool_result, got: ${fastBlock.content[0]!.text}`
+    );
+    // (c) trace: 一回合两个 toolCalls, 一条 execution_failed "timeout", 一条 ok.
+    const toolTurn = trace.turns.find((t) => t.toolCalls.length > 0)!;
+    assert.ok(toolTurn, "expected a turn trace carrying the tool calls");
+    assert.equal(toolTurn.cancelKind, "none");
+    assert.equal(toolTurn.toolCalls.length, 2);
+    const traceById = new Map(toolTurn.toolCalls.map((c) => [c.toolUseId, c]));
+    assert.equal(traceById.get("u-slow")!.kind, "execution_failed");
+    assert.equal(traceById.get("u-slow")!.message, "timeout");
+    assert.equal(traceById.get("u-fast")!.kind, "ok");
   }, 10_000);
 });

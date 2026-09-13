@@ -137,8 +137,14 @@ function collectHits(
   }
 }
 
-/** 递归产出 workspace 相对路径（posix 分隔符），跳过 node_modules / .git。 */
-async function* walkFiles(dir: string): AsyncGenerator<string> {
+/**
+ * 递归产出文件的绝对路径，跳过 node_modules / .git。
+ *
+ * 导出为**范围闸共用**（`scope-guard.ts` 计数用的是同一套遍历纪律）——
+ * 正是为了让「过大的 `path`」在两条引擎上得到同一个判定（D6/SC9 引擎同判），
+ * 而不是闸与扫各写一份、慢慢漂移。
+ */
+export async function* walkFiles(dir: string): AsyncGenerator<string> {
   const entries = await readdir(dir, { withFileTypes: true }).catch(() => null);
   if (entries === null) return;
   for (const entry of entries) {
