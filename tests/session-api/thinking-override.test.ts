@@ -39,6 +39,7 @@ import {
   parseThinkingOverride,
   withThinkingOverride,
 } from "../../src/session-api/thinking-override.ts";
+import { createAdapterFromEnv } from "../../src/harness/build-engine.ts";
 import { ValidationError } from "../../src/shared/errors.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
@@ -343,6 +344,92 @@ describe("withThinkingOverride — request-side thinking fields via local captur
       ),
       false
     );
+  });
+
+  // -- ADR-0094 T1 / SC7: wire-model 只放尾段（与 build-engine 同形） ----
+
+  it("route 含 provider 前缀 → wire model = 尾段（provider id 不上 wire）", async () => {
+    capture = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+    const tool = createStubTool({ name: "noop", next: () => ({}) });
+    const registry = createRegistry([tool]);
+    const executor = createExecutor(registry);
+    const baseDeps: LoopEngineDeps = {
+      adapter: {
+        step: async () => {
+          throw new Error("should be replaced");
+        },
+        encodeUserText: () => ({ role: "user", content: [] }),
+        encodeToolResults: () => [],
+      },
+      executor,
+      registry,
+      maxTurns: 1,
+    };
+    const env = makeTestLlmEnv({
+      baseUrl: capture.origin,
+      model: "9router/Opus4.8",
+    });
+    const result = withThinkingOverride({
+      deps: baseDeps,
+      override: { mode: "off" },
+      env,
+    });
+    await result.adapter.step({ messages: [], turnCount: 0 }, { tools: [] });
+    const body = capture.bodies[0] as { model?: string };
+    assert.equal(body.model, "Opus4.8");
+    assert.equal(body.model?.includes("9router"), false);
+  });
+
+  // -- ADR-0094 SC7: thinking 单工厂（两路径 client 字段表同形） ----------
+  // 覆盖与无覆盖对同一 env 必须解析出同一 client 构造形状（apiKey/baseUrl/
+  // headers 同形），证明 thinking 只改入参、不存在第二套装配抄写。
+
+  it("SC7: 同一 env 下 override / 无 override 的 client 构造 options 同形", () => {
+    const baseEnv = {
+      baseUrl: "http://invalid",
+      headers: { "X-Session": "s1" } as Record<string, string>,
+    };
+    anthropicCtorOpts.length = 0;
+    withThinkingOverride({
+      deps: baseDepsForHeaderProbe(),
+      override: { mode: "adaptive", effort: "high" },
+      env: makeTestLlmEnv(baseEnv),
+    });
+    const withOverride = [...anthropicCtorOpts];
+    anthropicCtorOpts.length = 0;
+    // 无覆盖对照：直接调 createAdapterFromEnv（= build-engine / reloadFromEnv 同一路径）。
+    createAdapterFromEnv(makeTestLlmEnv(baseEnv));
+    const withoutOverride = [...anthropicCtorOpts];
+
+    assert.equal(withOverride.length, 1);
+    assert.equal(withoutOverride.length, 1);
+    assert.deepEqual(withOverride[0], withoutOverride[0]);
+  });
+
+  it("SC7: override thinking 覆盖只改 adapter 入参（capture server 验 thinking 字段形状）", async () => {
+    // 单一 capture server、同一 env 对象：先走无覆盖工厂（= build-engine /
+    // reloadFromEnv 同一路径），再走 thinking 覆盖路径，比较两次 wire 形状。
+    capture = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+    const env = makeTestLlmEnv({ baseUrl: capture.origin });
+    await createAdapterFromEnv(env).adapter.step(
+      { messages: [], turnCount: 0 },
+      { tools: [] }
+    );
+    const baseBody = capture.bodies[0] as Record<string, unknown>;
+
+    const overrideAdapter = withThinkingOverride({
+      deps: baseDepsForHeaderProbe(),
+      override: { mode: "adaptive", effort: "high" },
+      env,
+    }).adapter;
+    await overrideAdapter.step({ messages: [], turnCount: 0 }, { tools: [] });
+    const overrideBody = capture.bodies[1] as Record<string, unknown>;
+
+    // model / client 形状同源（同一 env）；thinking 入参只被覆盖改写。
+    assert.equal(overrideBody.model, baseBody.model);
+    assert.equal("thinking" in baseBody, false); // env 默认 off
+    assert.deepEqual(overrideBody.thinking, { type: "adaptive" });
+    assert.deepEqual(overrideBody.output_config, { effort: "high" });
   });
 });
 

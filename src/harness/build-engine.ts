@@ -24,6 +24,7 @@ import {
   withTransportRetry,
   translateAnthropicTransportFault,
   type LoopEngineDeps,
+  type ThinkingParams,
 } from "./index.js";
 import { createAciExecutor } from "./aci/index.js";
 import {
@@ -72,7 +73,11 @@ import {
   type MutateClass,
   type WorktreeIsolationHostOpts,
 } from "./isolation/worktree-gate.js";
-import type { IknowEnv } from "../config/env.js";
+import {
+  wireModelFromRoute,
+  type IknowEnv,
+  type LlmEnv,
+} from "../config/env.js";
 import {
   createSecretRegistry,
   type SecretRegistry,
@@ -370,10 +375,18 @@ export type BuildEngineOpts = {
  * hub 的 `reloadFromEnv` 也调用它做 adapter 最小面热重建（不重跑
  * buildHarnessEngine / MCP / subagent / skill）。
  *
+ * ADR-0094 SC7（thinking 单工厂）：per-turn thinking 覆盖经 `overrides.thinking`
+ * 并入本函数 —— `withThinkingOverride`（session-api）不再自建 Anthropic client
+ * 字段表，只在此单点改 thinking 入参；同一 env 下 override / 无 override 两路
+ * 解析出同一 client（baseUrl / apiKey / headers）与同一 wire model 形状。
+ *
  * 返回 `{ client, adapter }`：client 保留给调用方统一关闭句柄
  * （SDK 0.115 无 close API，仅作 APIKey/BaseURL 装载）。
  */
-export function createAdapterFromEnv(env: IknowEnv): {
+export function createAdapterFromEnv(
+  env: { readonly llm: LlmEnv },
+  overrides?: { readonly thinking?: ThinkingParams }
+): {
   readonly client: Anthropic;
   readonly adapter: LoopEngineDeps["adapter"];
 } {
@@ -392,11 +405,12 @@ export function createAdapterFromEnv(env: IknowEnv): {
   const adapter = withTransportRetry(
     createRealAnthropicAdapter({
       client,
-      model: env.llm.model,
+      model: wireModelFromRoute(env.llm.model),
       maxTokens: env.llm.maxOutputTokens,
       temperature: env.llm.temperature,
       // SSOT env→adapter params (#151/#156) and stream arm (#179/#147).
-      thinking: buildThinkingParams(env.llm),
+      // ADR-0094 SC7：overrides.thinking 在场 = per-turn 覆盖；缺席 = env 原值。
+      thinking: overrides?.thinking ?? buildThinkingParams(env.llm),
       stream: env.llm.stream === "on",
     }),
     { translate: translateAnthropicTransportFault }

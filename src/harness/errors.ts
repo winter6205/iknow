@@ -297,3 +297,111 @@ export function errorMessage(err: unknown): string {
     return String(err);
   }
 }
+
+/**
+ * ADR-0094 SC4-SC5: viewport API error 摘要——status 可选 + 非空 message。
+ *
+ * 单点类型别名：loop-engine / hub DTO / TUI bridge / app 渲染面共用，禁止
+ * 逐处内联同一匿名形状（code-review Standards Low）。
+ */
+export type ApiErrorSummary = {
+  readonly status?: number;
+  readonly message: string;
+};
+
+/** object（含 Error 实例）→ Record 视图；其它 → undefined。 */
+function asRecord(v: unknown): Record<string, unknown> | undefined {
+  return typeof v === "object" && v !== null
+    ? (v as Record<string, unknown>)
+    : undefined;
+}
+
+/** 非空（trim 后非空）string → 原值；否则 undefined。 */
+function nonEmptyString(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim() !== "" ? v : undefined;
+}
+
+/**
+ * 网关嵌套错误体里的 message：`error.message` 优先，再嵌一层的
+ * `error.error.message` 次之（中转网关常见两层）。缺失/空 → undefined。
+ */
+function extractNestedMessage(
+  record: Record<string, unknown>
+): string | undefined {
+  const body = asRecord(record["error"]);
+  if (body === undefined) return undefined;
+  return (
+    nonEmptyString(body["message"]) ??
+    nonEmptyString(asRecord(body["error"])?.["message"])
+  );
+}
+
+/**
+ * 顶层 message：Error.message / 裸 string / object.message。嵌套网关体
+ * （供应商原文）比 SDK 的 "404 Not Found" HTTP 描述更可行动（ADR-0094），
+ * 故调用方让嵌套体优先、本函数作回落。
+ */
+function extractBaseMessage(cause: unknown): string | undefined {
+  if (cause instanceof Error) return cause.message;
+  if (typeof cause === "string") return cause;
+  const record = asRecord(cause);
+  return typeof record?.["message"] === "string"
+    ? (record["message"] as string)
+    : undefined;
+}
+
+/** cause 的有限 number status（仅 object 形态）；否则 undefined。 */
+function extractCauseStatus(cause: unknown): number | undefined {
+  const status = asRecord(cause)?.["status"];
+  return typeof status === "number" && Number.isFinite(status)
+    ? status
+    : undefined;
+}
+
+/**
+ * ADR-0094 SC4-SC5 (viewport API error): 从 TransportRetryExhaustedError.cause
+ * 提炼「viewport API 错误」摘要 —— SDK-agnostic，不耦合 Anthropic SDK 类型。
+ *
+ * 返回 `{ status?, message }`；message 永远非空（提炼不到 → `String(cause)`
+ * 兜底）。null / undefined cause → undefined，由调用方保留既有通用文案。
+ */
+export function summarizeTransportCause(
+  cause: unknown
+): ApiErrorSummary | undefined {
+  if (cause === null || cause === undefined) return undefined;
+  // SDK APIError 同时是 Error 实例与「带嵌套错误体的 object」——嵌套体提取
+  // 对两种形态都生效（extractBaseMessage 只管回落），服务商原文优先。
+  const record = asRecord(cause);
+  const message =
+    (record !== undefined ? extractNestedMessage(record) : undefined) ??
+    extractBaseMessage(cause) ??
+    "";
+  const status = extractCauseStatus(cause);
+  const nonEmpty = message.trim() || String(cause);
+  return status !== undefined
+    ? { status, message: nonEmpty }
+    : { message: nonEmpty };
+}
+
+/**
+ * ADR-0094 SC4-SC5: throw 路径专用——TransportRetryExhaustedError → cause
+ * 摘要；其它 throwable（含 4xx 裸 SDK APIError 之外的本地错误）→ undefined，
+ * 由调用方保留既有通用文案。
+ */
+export function transportApiErrorOf(err: unknown): ApiErrorSummary | undefined {
+  return err instanceof TransportRetryExhaustedError
+    ? summarizeTransportCause(err.cause)
+    : undefined;
+}
+
+/**
+ * ADR-0094: byte-stable 可选字段挂载 —— `apiError` 定义时才挂 key（缺席
+ * 与 `lastUsage` 同模式的 wire 表面纪律）。复杂装配函数用它代替
+ * `...(x !== undefined ? {x} : {})` 条件 spread，避免每个调用点各加一个分支。
+ */
+export function withApiError<T extends object>(
+  target: T,
+  apiError: ApiErrorSummary | undefined
+): T & { readonly apiError?: ApiErrorSummary } {
+  return apiError !== undefined ? { ...target, apiError } : target;
+}

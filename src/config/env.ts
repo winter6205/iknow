@@ -266,6 +266,31 @@ export function isLlmProviderConfigError(
   return false;
 }
 
+/**
+ * ADR-0094 T1 / spec SC1-SC3, SC7：wire-model SSOT 解析。
+ *
+ * 物理世界 = Anthropic SDK 请求 body 的 `model` 字段 = providers.models[].id
+ * （不含 provider 前缀）。`settings.llm.model` 是路由 ID（`provider/model` 字面），
+ * provider id 仅用来查注册表拿 baseUrl/apiKey/headers，**绝不**上 wire —— 上 wire
+ * 只走 models[].id。
+ *
+ * 行为：
+ *  - 首个 `/` 拆分：左 = provider id（trim）、右 = model id（trim 后含其余 `/`）；
+ *  - 无 `/`、左 / 右 trim 后空 → 原串 identity 返回（bare name 直传；`a/` /
+ *    `/x` 等 miss 形态今日 loadIknowEnv 在装配前 typed 抛，本函数保持
+ *    total，**不**再抛，便于单元测试与未来未配 providers 的回归路径）。
+ *
+ * 三装配点（build-engine / thinking-override / subagent worker）共用本函数，
+ * 严禁各自内联重复。
+ */
+export function wireModelFromRoute(route: string): string {
+  const slash = route.indexOf("/");
+  if (slash === -1) return route;
+  const tail = route.slice(slash + 1).trim();
+  if (tail === "") return route; // `a/` 形态：miss 路径原样返回
+  return tail;
+}
+
 /** ADR-0093：`LlmProviderConfigError` 文本渲染；只出 provider / env 名，绝不出密钥值。 */
 export function formatLlmProviderConfigError(
   err: LlmProviderConfigError

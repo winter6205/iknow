@@ -27,7 +27,11 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { workerFenceTmpBesideRecord } from "../sandbox/fence-tmp.js";
 import Anthropic from "@anthropic-ai/sdk";
-import { loadIknowEnv, type IknowEnv } from "../../config/env.js";
+import {
+  loadIknowEnv,
+  wireModelFromRoute,
+  type IknowEnv,
+} from "../../config/env.js";
 import { loadIknowSettings } from "../../config/settings.js";
 import {
   FS_MODE_ENV_KEY,
@@ -465,7 +469,7 @@ export async function createWorkerRuntime(
         // ADR-0093 / SC9：env.llm.headers → client defaultHeaders，构造见
         // `createWorkerAnthropicClient`（条件 spread，缺席不传键）。
         client: createWorkerAnthropicClient(env),
-        model: env.llm.model,
+        model: wireModelFromRoute(env.llm.model),
         maxTokens: env.llm.maxOutputTokens,
         temperature: env.llm.temperature,
         thinking: buildThinkingParams(env.llm),

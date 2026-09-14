@@ -41,6 +41,9 @@ import {
   SkipAppendEmptyPriorError,
   SkipAppendWithTextError,
   TransportRetryExhaustedError,
+  transportApiErrorOf,
+  withApiError,
+  type ApiErrorSummary,
 } from "./errors.js";
 import {
   isStalledToolLoop,
@@ -1417,18 +1420,28 @@ function modelStop(opts: {
   readonly started: number;
   readonly reason: "cancelled" | "timeout" | "protocolError";
   readonly cancelKind: CancelKind;
-}): { kind: "stop"; transition: Transition; turn: TurnTrace } {
-  return {
-    kind: "stop",
-    transition: { kind: "stop", reason: opts.reason, finalState: opts.state },
-    turn: mkTurn({
-      turnIndex: opts.state.turnCount,
-      supplierStop: "other",
-      toolCalls: [],
-      durationMs: performance.now() - opts.started,
-      cancelKind: opts.cancelKind,
-    }),
-  };
+  /** ADR-0094 SC4-SC5: transport 失败时的网关侧摘要;非 transport 失败 → 不挂。 */
+  readonly apiError?: ApiErrorSummary;
+}): {
+  kind: "stop";
+  transition: Transition;
+  turn: TurnTrace;
+  apiError?: ApiErrorSummary;
+} {
+  return withApiError(
+    {
+      kind: "stop",
+      transition: { kind: "stop", reason: opts.reason, finalState: opts.state },
+      turn: mkTurn({
+        turnIndex: opts.state.turnCount,
+        supplierStop: "other",
+        toolCalls: [],
+        durationMs: performance.now() - opts.started,
+        cancelKind: opts.cancelKind,
+      }),
+    },
+    opts.apiError
+  );
 }
 
 /** 023: await 结构化 race outcome，并保持 SDK-first 错误 catch 契约。 */
@@ -1447,7 +1460,12 @@ async function runModelPhase(opts: {
   readonly reactiveAttemptedRef: { attempted: boolean };
 }): Promise<
   | { kind: "ok"; result: AssistantTurnResult }
-  | { kind: "stop"; transition: Transition; turn: TurnTrace }
+  | {
+      kind: "stop";
+      transition: Transition;
+      turn: TurnTrace;
+      apiError?: ApiErrorSummary;
+    }
   | { kind: "reactive_compact_pending"; state: LoopState }
 > {
   try {
@@ -1544,13 +1562,18 @@ async function runModelPhase(opts: {
     if (
       err instanceof ProtocolError ||
       err instanceof TransportRetryExhaustedError
-    )
+    ) {
+      // ADR-0094 SC4-SC5: 仅 TransportRetryExhaustedError 携带 cause,挂到
+      // RunResult.apiError,供 chat-flow viewport 渲染「API error (status):
+      // message」类提示; ProtocolError 直抛无 cause → 不挂,保留通用 notice。
       return modelStop({
         state: opts.state,
         started: opts.started,
         reason: "protocolError",
         cancelKind: "none",
+        apiError: transportApiErrorOf(err),
       });
+    }
     throw err;
   }
 }
@@ -1851,6 +1874,9 @@ async function stepWithTrace(opts: {
    * 或成功调用 usage 缺席)。run 累 lastUsage 仅在 !== undefined 时更新。
    */
   modelUsage: TokenUsage | undefined;
+  /** ADR-0094 SC4-SC5: modelStop 路径挂在 RunResult.apiError 上的网关侧摘要。
+   *  undefined = 非 transport 失败路径,RunResult 不挂 apiError。 */
+  apiError?: ApiErrorSummary;
 }> {
   // plan T3 / ADR-0011 + plan T5-engine / ADR-0012:maxTurns 超限 → throw。
   // undefined = 无限,永不触发(长程探索不被 turn 计数误杀)。
@@ -1897,7 +1923,12 @@ async function stepWithTrace(opts: {
   // 之前发生,栏天然落在其后。旧栏永不删除 / 改写。
   type OkOrStop =
     | { kind: "ok"; result: AssistantTurnResult }
-    | { kind: "stop"; transition: Transition; turn: TurnTrace };
+    | {
+        kind: "stop";
+        transition: Transition;
+        turn: TurnTrace;
+        apiError?: ApiErrorSummary;
+      };
   // ADR-0041 / ADR-0081:graph 两条缝(change → presence)先于 mcpReconnect
   // / agentStatusBar 调用,保证「graph 翻转提示 → 短现势 → 重连告知 →
   // status bar」的模型可读时序;presence 每 run 至多一句;seam 缺席 → 零追加。
@@ -2086,11 +2117,14 @@ async function stepWithTrace(opts: {
         })
       );
     }
-    return {
-      transition: modelPhase.transition,
-      turn: modelPhase.turn,
-      modelUsage: undefined,
-    };
+    return withApiError(
+      {
+        transition: modelPhase.transition,
+        turn: modelPhase.turn,
+        modelUsage: undefined,
+      },
+      modelPhase.apiError
+    );
   }
   const turnResult = modelPhase.result;
 
@@ -2514,6 +2548,8 @@ export async function run(
       transition: Transition;
       turn: TurnTrace | null;
       modelUsage: TokenUsage | undefined;
+      /** ADR-0094 SC4-SC5: transport 失败时的网关侧摘要;非 transport 失败 → undefined。 */
+      apiError?: ApiErrorSummary;
     };
     try {
       stepResult = await stepWithTrace({
@@ -2541,7 +2577,7 @@ export async function run(
       }
       throw err;
     }
-    const { transition, turn, modelUsage } = stepResult;
+    const { transition, turn, modelUsage, apiError } = stepResult;
     if (turn !== null) {
       // immutable append;禁止 push / 原地修改。
       turns = [...turns, turn];
@@ -2582,13 +2618,19 @@ export async function run(
       }
       const finalText =
         reason === "completed" ? deriveFinalText(finalMessages) : null;
-      const result: RunResult = {
-        finalText,
-        messages: finalMessages,
-        turnCount: finalState.turnCount,
-        stopReason: reason,
-        lastUsage,
-      };
+      // ADR-0094 SC4-SC5: transport 失败时的网关侧摘要(thread from
+      // stepWithTrace / modelStop catch 分支);非 transport 失败 (apiError
+      // undefined) → 字段缺席(byte-stable,wire 表面与 lastUsage 同模式)。
+      const result: RunResult = withApiError(
+        {
+          finalText,
+          messages: finalMessages,
+          turnCount: finalState.turnCount,
+          stopReason: reason,
+          lastUsage,
+        },
+        apiError
+      );
       // plan T4 / ADR-0011:异常停(completed 除外)后跑一轮 best-effort
       // 收尾摘要。不计 maxTurns / 工具预算;失败即跳过,不阻塞原始停因。
       if (reason !== "completed") {

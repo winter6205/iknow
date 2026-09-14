@@ -78,6 +78,14 @@ export interface RunResult {
    * LlmCallRecord 落盘面(Postel,ADR-0008 Decision 3)。
    */
   readonly lastUsage: TokenUsage | null;
+  /**
+   * ADR-0094 SC4-SC5 (viewport API error): transport 失败时的网关侧摘要
+   * (status + 消息文本),由 loop-engine catch TransportRetryExhaustedError
+   * 后提炼 cause 写入;非 transport 失败 → 字段缺席 (byte-stable,与 lastUsage
+   * 不同语义 —— 后者是必填 null)。hub.toTurnDto 透传到 TurnAnswerDto.apiError,
+   * TUI 据此渲染「API error (status): message」提示。
+   */
+  readonly apiError?: { readonly status?: number; readonly message: string };
 }
 
 /** assistant 回合投影:有序 text + 有序 tool call,保持原生顺序(014 投影)。 */

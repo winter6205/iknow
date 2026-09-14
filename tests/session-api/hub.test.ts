@@ -47,6 +47,7 @@ import type { SubAgentTerminalNotice } from "../../src/harness/subagent/mailbox.
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { SubagentWakeError } from "../../src/harness/subagent/host-wake.ts";
 import { ValidationError } from "../../src/shared/errors.ts";
+import { TransportRetryExhaustedError } from "../../src/harness/errors.ts";
 import {
   makeTestLlmEnv,
   startLlmCapture,
@@ -874,6 +875,73 @@ describe("drop-context stop reasons do not save", () => {
     const loaded = await store.load(session.conversation_id);
     assert.equal(loaded.messages.length, 0);
     assert.equal(loaded.turnCount, 0);
+  });
+
+  // ADR-0094 SC4-SC5 (viewport API error): hub 透传 RunResult.apiError 到
+  // TurnAnswerDto.apiError (status + message);非 transport 失败 → 字段
+  // 缺席(byte-stable)。file unchanged (#120) 仍守住。
+  it("TransportRetryExhaustedError → apiError present in DTO + file unchanged", async () => {
+    const apiErrLike = {
+      name: "APIError",
+      status: 404,
+      message:
+        '{"error":{"message":"No active credentials for provider: 9router"}}',
+    };
+    // Build deps whose adapter.step throws TransportRetryExhaustedError.
+    const tool = createStubTool({ name: "noop", next: () => ({}) });
+    const registry = createRegistry([tool]);
+    const executor = createExecutor(registry);
+    const failingAdapter: LoopAdapter = {
+      encodeUserText: (t: string): AnthropicNativeMessage => ({
+        role: "user",
+        content: [{ type: "text", text: t }],
+      }),
+      encodeToolResults: () => [],
+      step: async (): Promise<AssistantTurnResult> => {
+        throw new TransportRetryExhaustedError(3, apiErrLike);
+      },
+    };
+    const hub = makeHub({
+      adapter: failingAdapter,
+      executor,
+      registry,
+      maxTurns: 5,
+    });
+    const { session } = await hub.createSession();
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "trigger transport exhausted",
+    });
+    assert.equal(res.turn.answer.stopReason, "protocolError");
+    // apiError 字段透传 status + message
+    assert.deepEqual(res.turn.answer.apiError, {
+      status: 404,
+      message:
+        '{"error":{"message":"No active credentials for provider: 9router"}}',
+    });
+    // #120 守住: file.messages 仍 0 (protocolError → pending 不落盘)
+    const loaded = await store.load(session.conversation_id);
+    assert.equal(loaded.messages.length, 0);
+    assert.equal(loaded.turnCount, 0);
+  });
+
+  it("completed → apiError field absent (byte-stable)", async () => {
+    const deps = makeDeps([
+      assistantResult({
+        texts: ["ok"],
+        toolCalls: [],
+        supplierStop: "success",
+      }),
+    ]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "ok",
+    });
+    assert.equal(res.turn.answer.stopReason, "completed");
+    // 字段缺席 = key 不在 (byte-stable); 不能用 res.turn.answer.apiError !== undefined
+    assert.equal("apiError" in res.turn.answer, false);
   });
 });
 

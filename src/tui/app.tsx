@@ -48,6 +48,7 @@ import {
   useTerminalDimensions,
 } from "@opentui/react";
 import type { HarnessStreamEvent } from "../harness/stream.js";
+import { summarizeTransportCause } from "../harness/errors.js";
 import {
   BACKGROUND_OPERATION_NOTICE,
   BLOCK_OPERATION_NOTICE,
@@ -1957,6 +1958,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     let stopReason: string | undefined;
     let lastUsage: TokenUsage | null = null;
     let interrupted: boolean | undefined;
+    /** ADR-0094 SC4-SC5: transport 失败时的网关侧摘要;undefined = 非 transport 失败。 */
+    let apiError:
+      { readonly status?: number; readonly message: string } | undefined;
     let uncancellableOperationNotice: string | undefined;
     // transport_retry 过程性 notice 追踪 —— completed/maxTurns 收尾时只清
     // 本轮 retry 落下的 notice,不碰 stop_summary 等其他 notice 来源。
@@ -2110,6 +2114,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       // B1: 打断反馈 —— cancelled 时 bridge 透传 true/false;非 cancelled
       // (completed 等) → undefined,notice 分支只对 cancelled 生效。
       interrupted = resp.interrupted;
+      // ADR-0094 SC4-SC5: 透传 transport 摘要给 notice 渲染分支;undefined →
+      // 走原通用文案。protocolError 命中时供「API error (status): message」用。
+      apiError = resp.apiError;
       // T3 (#458 包2):verify 终态入槽。verifyFromWire 做 runtime boundary
       // 校验(4 outcome + rounds 形状),非法 wire → unavailable(degraded 渲染,
       // 不抛错污染 React 栈);none → 从 map 摘除该会话键(banner 静默)。
@@ -2124,26 +2131,23 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         return { ...prev, [targetId]: next };
       });
     } catch (err) {
-      if (mode === "continue") {
-        const exit = continueExitFromError(err);
-        if (exit !== undefined) {
-          setNotice({ lines: continueNoticeFor(exit) });
-          skipTurnRefresh = true;
-        } else if (isContinueValidationError(err)) {
-          setNotice({ lines: [err.message] });
-          skipTurnRefresh = true;
-        } else {
-          stopReason = "protocolError";
-          setNotice({ lines: [`续跑失败：${describeError(err)}`] });
-        }
-      } else if (mode === "wake") {
-        const wakeError = toSubagentWakeError(err);
-        stopReason = "protocolError";
-        setNotice({ lines: [wakeError.message] });
-      } else {
-        stopReason = "protocolError";
-        setNotice({ lines: [`turn 失败：${describeError(err)}`] });
+      // ADR-0094 SC4-SC5: 4xx 等非瞬态供应商失败不走 TransportRetryExhausted
+      // 正常返回路径，而是从 run() reject 抛到这里。带 HTTP status 的提炼结果
+      // 才渲染「API error (status): 原文」，与正常返回路径同一文案面；无
+      // status（hub 本地校验 ValidationError / NotFoundError 等）不冒充
+      // API error → 沿用既有 describeError 文案。
+      const thrownApiError = transportApiErrorFromThrow(err);
+      if (thrownApiError !== undefined) {
+        apiError = thrownApiError;
       }
+      const outcome = turnFailureOutcome({ mode, err, thrownApiError });
+      if (outcome.stopReason !== undefined) {
+        stopReason = outcome.stopReason;
+      }
+      if (outcome.skipTurnRefresh) {
+        skipTurnRefresh = true;
+      }
+      setNotice({ lines: [...outcome.noticeLines] });
     } finally {
       aborters.current.delete(targetId);
       // compact 面板兜底清扫(plan D3.5):turn 结束仍非终态 = 缺终态事件
@@ -2235,11 +2239,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         // 此前只有 throw 路径与 cancelled 出 notice → 一轮静默结束。异常
         // stopReason 落同一 notice 渲染面，用户至少能看到 turn 未成功。
         // maxTurns 不并入：已有专属完成反馈（验证行）。
-        setNotice({
-          lines: [
-            `⚠ turn 未成功结束（${stopReason}）：可能是连接或模型故障，请重试`,
-          ],
-        });
+        // ADR-0094 SC4-SC5: protocolError + apiError 走专用文案(API error
+        // (status): message),让网关侧信息透出;其它异常停沿用通用文案
+        // （单点 = abnormalStopNoticeLines）。
+        setNotice({ lines: abnormalStopNoticeLines(stopReason, apiError) });
       } else if (retryNoticeShown) {
         // completed / maxTurns 收尾:只清本轮 transport_retry 落下的过程性
         // notice,避免成功回合残留「退避中…」;stop_summary 等 notice 不动
@@ -3770,6 +3773,102 @@ export function bgStatusLine(
 ): string {
   const title = extractTitle(messages);
   return title.length > 0 ? `后台运行中 · ${title}` : "后台运行中";
+}
+
+/**
+ * ADR-0094 SC4-SC5：viewport API error 单点文案构造。
+ *
+ * 输入 = `summarizeTransportCause` 的产出（`{ status?, message }`）。status
+ * 在场 → 「⚠ API error (status): 原文」；缺席 → 「⚠ API error: 原文」。
+ * 三处调用点（continue catch / 默认 catch / 正常返回 notice 分支）共用本
+ * helper，禁止再内联重复三元。
+ */
+function apiErrorNoticeLine(summary: {
+  readonly status?: number;
+  readonly message: string;
+}): string {
+  return summary.status !== undefined
+    ? `⚠ API error (${summary.status}): ${summary.message}`
+    : `⚠ API error: ${summary.message}`;
+}
+
+/**
+ * throw 路径的供应商失败判别：只有带 HTTP status 的提炼结果才视为供应商
+ * /传输层错误（SDK APIError 形状）。hub 侧本地校验错误（ValidationError /
+ * NotFoundError 等无 status 的 Error）→ undefined，沿用既有 describeError
+ * 文案，不冒充 API error。
+ */
+function transportApiErrorFromThrow(
+  err: unknown
+): { readonly status: number; readonly message: string } | undefined {
+  const summary = summarizeTransportCause(err);
+  return summary !== undefined && summary.status !== undefined
+    ? { status: summary.status, message: summary.message }
+    : undefined;
+}
+
+/**
+ * throw 路径整块收口（runTurnOnce catch 的复杂度单点）：按 mode 决定 notice
+ * 行 / 停止因 / 是否跳过刷新。continue 的 EXIT / 校验错误不落 stopReason
+ * （后续按 completed 投影，保持既有语义）。
+ */
+function turnFailureOutcome(opts: {
+  readonly mode: "append" | "continue" | "wake";
+  readonly err: unknown;
+  readonly thrownApiError:
+    { readonly status?: number; readonly message: string } | undefined;
+}): {
+  readonly stopReason?: string;
+  readonly noticeLines: readonly string[];
+  readonly skipTurnRefresh: boolean;
+} {
+  if (opts.mode === "continue") {
+    const exit = continueExitFromError(opts.err);
+    if (exit !== undefined) {
+      return { noticeLines: continueNoticeFor(exit), skipTurnRefresh: true };
+    }
+    if (isContinueValidationError(opts.err)) {
+      return { noticeLines: [opts.err.message], skipTurnRefresh: true };
+    }
+    return {
+      stopReason: "protocolError",
+      noticeLines: [
+        opts.thrownApiError !== undefined
+          ? apiErrorNoticeLine(opts.thrownApiError)
+          : `续跑失败：${describeError(opts.err)}`,
+      ],
+      skipTurnRefresh: false,
+    };
+  }
+  if (opts.mode === "wake") {
+    return {
+      stopReason: "protocolError",
+      noticeLines: [toSubagentWakeError(opts.err).message],
+      skipTurnRefresh: false,
+    };
+  }
+  return {
+    stopReason: "protocolError",
+    noticeLines: [
+      opts.thrownApiError !== undefined
+        ? apiErrorNoticeLine(opts.thrownApiError)
+        : `turn 失败：${describeError(opts.err)}`,
+    ],
+    skipTurnRefresh: false,
+  };
+}
+
+/**
+ * 异常 stopReason 分支的 notice 行：protocolError + apiError → API error
+ * 专用文案；其余异常停 → 通用「turn 未成功结束」。
+ */
+function abnormalStopNoticeLines(
+  stopReason: string,
+  apiError: { readonly status?: number; readonly message: string } | undefined
+): string[] {
+  return stopReason === "protocolError" && apiError !== undefined
+    ? [apiErrorNoticeLine(apiError)]
+    : [`⚠ turn 未成功结束（${stopReason}）：可能是连接或模型故障，请重试`];
 }
 
 function describeError(err: unknown): string {

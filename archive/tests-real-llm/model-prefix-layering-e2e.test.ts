@@ -70,7 +70,11 @@ runOrSkip("model-prefix-layering real-LLM e2e (B8 / SC9)", () => {
     await mkdir(join(root, ".iknow"), { recursive: true });
     await writeFile(join(root, "note.txt"), "layering-e2e-marker-42\n", "utf8");
     if (opts.mcpServers !== undefined) {
-      await writeFile(join(root, ".iknow", "mcp.json"), opts.mcpServers, "utf8");
+      await writeFile(
+        join(root, ".iknow", "mcp.json"),
+        opts.mcpServers,
+        "utf8"
+      );
     }
     const built = await buildHarnessEngine({
       env,
@@ -89,126 +93,115 @@ runOrSkip("model-prefix-layering real-LLM e2e (B8 / SC9)", () => {
     };
   }
 
-  it(
-    "[llm] 真实端点多 turn 会话 + ≥1 次真实 tool_call",
-    async () => {
-      const { deps, root } = await buildChatEngine();
-      const { result } = await run(
-        `Read the file note.txt in the project root using the read_file tool. ` +
-          `Then reply with exactly the file's content and stop. Do not use any other tools.`,
-        { ...deps, maxTurns: 4 }
-      );
-      // 多 turn:turn ≥ 2(text-only 一回合结束的 turnCount = 1;经真实
-      // tool_call 回路至少 2 个 assistant 回合)。
-      expect(result.stopReason).toBe("completed");
-      expect(result.turnCount).toBeGreaterThanOrEqual(2);
-      expect(result.finalText).toContain("layering-e2e-marker-42");
-      // 权威历史含真实 tool_use + tool_result 块(B3 消息追加缝真打通)。
-      const tools = result.messages.flatMap((m) =>
-        Array.isArray((m as { content?: unknown }).content)
-          ? ((m as { content: Array<{ type: string }> }).content ?? [])
-          : []
-      );
-      expect(tools.some((b) => b.type === "tool_use")).toBe(true);
-      expect(tools.some((b) => b.type === "tool_result")).toBe(true);
-      void root;
-    },
-    360_000
-  );
+  it("[llm] 真实端点多 turn 会话 + ≥1 次真实 tool_call", async () => {
+    const { deps, root } = await buildChatEngine();
+    const { result } = await run(
+      `Read the file note.txt in the project root using the read_file tool. ` +
+        `Then reply with exactly the file's content and stop. Do not use any other tools.`,
+      { ...deps, maxTurns: 4 }
+    );
+    // 多 turn:turn ≥ 2(text-only 一回合结束的 turnCount = 1;经真实
+    // tool_call 回路至少 2 个 assistant 回合)。
+    expect(result.stopReason).toBe("completed");
+    expect(result.turnCount).toBeGreaterThanOrEqual(2);
+    expect(result.finalText).toContain("layering-e2e-marker-42");
+    // 权威历史含真实 tool_use + tool_result 块(B3 消息追加缝真打通)。
+    const tools = result.messages.flatMap((m) =>
+      Array.isArray((m as { content?: unknown }).content)
+        ? ((m as { content: Array<{ type: string }> }).content ?? [])
+        : []
+    );
+    expect(tools.some((b) => b.type === "tool_use")).toBe(true);
+    expect(tools.some((b) => b.type === "tool_result")).toBe(true);
+    void root;
+  }, 360_000);
 
-  it(
-    "[mcp] MCP 真连接 + 名字目录 + tool_search 加载回路",
-    async () => {
-      const { deps, catalog, root } = await buildChatEngine({
-        mcpServers: JSON.stringify({
-          mcpServers: {
-            layering: {
-              type: "stdio",
-              command: "node",
-              args: [MCP_SERVER_FIXTURE],
-            },
+  it("[mcp] MCP 真连接 + 名字目录 + tool_search 加载回路", async () => {
+    const { deps, catalog, root } = await buildChatEngine({
+      mcpServers: JSON.stringify({
+        mcpServers: {
+          layering: {
+            type: "stdio",
+            command: "node",
+            args: [MCP_SERVER_FIXTURE],
           },
-        }),
-      });
-      // 1) 首轮 system 含名字目录(裸名,无 schema);visibleSchemas 首轮
-      //    不含 mcp__ schema(lazy 不进 promptTools)。
-      const systemText = await deps.system?.();
-      expect(systemText).toContain("<mcp_name_directory>");
-      expect(systemText).toContain("mcp__layering__echo");
-      expect(systemText).not.toContain("inputSchema");
-      const firstSchemas = deps.promptTools!();
-      expect(
-        firstSchemas.some((t) => t.name.startsWith("mcp__"))
-      ).toBe(false);
-      expect(firstSchemas.some((t) => t.name === "tool_search")).toBe(true);
-      // 2) 模型真实调 tool_search → schema 尾部追加进 tools 双写。
-      //    tool_search 的 discover 副作用打在装配单点 reg 上,下一轮
-      //    promptTools 即含 mcp__ schema(尾部,注册序前缀逐位不变)。
-      const { result } = await run(
-        `Load the tool named "mcp__layering__echo" with the tool_search tool (pass names: ["mcp__layering__echo"]). ` +
-          `Then call it with text "real-mcp-roundtrip". Report its exact output and stop. ` +
-          `Do not use any other tools besides tool_search and that one MCP tool.`,
-        { ...deps, maxTurns: 6 }
-      );
-      expect(result.stopReason).toBe("completed");
-      expect(result.finalText).toContain("echo: real-mcp-roundtrip");
-      // tools 尾部追加:相邻轮 promptTools 相比首轮尾部多出 mcp__ schema,
-      // 注册序前缀逐位不变(#224 / ADR-0043 §2 尾部追加纪律)。
-      const afterSchemas = deps.promptTools!();
-      expect(
-        afterSchemas.some((t) => t.name === "mcp__layering__echo")
-      ).toBe(true);
-      expect(
-        afterSchemas.slice(0, firstSchemas.length).map((t) => t.name)
-      ).toEqual(firstSchemas.map((t) => t.name));
-      expect(afterSchemas.length).toBe(firstSchemas.length + 1);
-      // 真实 MCP 工具调用进了权威历史(tool_use 名 = mcp__layering__echo)。
-      const blocks = result.messages.flatMap((m) =>
-        Array.isArray((m as { content?: unknown }).content)
-          ? ((m as { content: Array<{ type: string; name?: string }> })
-              .content ?? [])
-          : []
-      );
-      expect(
-        blocks.some(
-          (b) => b.type === "tool_use" && b.name === "mcp__layering__echo"
-        )
-      ).toBe(true);
-      // catalog 全量含 MCP 件(registerExternal 打在装配单点)。
-      expect(
-        catalog!.all().some((t) => t.name === "mcp__layering__echo")
-      ).toBe(true);
-      void root;
-    },
-    360_000
-  );
+        },
+      }),
+    });
+    // 1) 首轮 system 含名字目录(裸名,无 schema);visibleSchemas 首轮
+    //    不含 mcp__ schema(lazy 不进 promptTools)。
+    const systemText = await deps.system?.();
+    expect(systemText).toContain("<mcp_name_directory>");
+    expect(systemText).toContain("mcp__layering__echo");
+    expect(systemText).not.toContain("inputSchema");
+    const firstSchemas = deps.promptTools!();
+    expect(firstSchemas.some((t) => t.name.startsWith("mcp__"))).toBe(false);
+    expect(firstSchemas.some((t) => t.name === "tool_search")).toBe(true);
+    // 2) 模型真实调 tool_search → schema 尾部追加进 tools 双写。
+    //    tool_search 的 discover 副作用打在装配单点 reg 上,下一轮
+    //    promptTools 即含 mcp__ schema(尾部,注册序前缀逐位不变)。
+    const { result } = await run(
+      `Load the tool named "mcp__layering__echo" with the tool_search tool (pass names: ["mcp__layering__echo"]). ` +
+        `Then call it with text "real-mcp-roundtrip". Report its exact output and stop. ` +
+        `Do not use any other tools besides tool_search and that one MCP tool.`,
+      { ...deps, maxTurns: 6 }
+    );
+    expect(result.stopReason).toBe("completed");
+    expect(result.finalText).toContain("echo: real-mcp-roundtrip");
+    // tools 尾部追加:相邻轮 promptTools 相比首轮尾部多出 mcp__ schema,
+    // 注册序前缀逐位不变(#224 / ADR-0043 §2 尾部追加纪律)。
+    const afterSchemas = deps.promptTools!();
+    expect(afterSchemas.some((t) => t.name === "mcp__layering__echo")).toBe(
+      true
+    );
+    expect(
+      afterSchemas.slice(0, firstSchemas.length).map((t) => t.name)
+    ).toEqual(firstSchemas.map((t) => t.name));
+    expect(afterSchemas.length).toBe(firstSchemas.length + 1);
+    // 真实 MCP 工具调用进了权威历史(tool_use 名 = mcp__layering__echo)。
+    const blocks = result.messages.flatMap((m) =>
+      Array.isArray((m as { content?: unknown }).content)
+        ? ((m as { content: Array<{ type: string; name?: string }> }).content ??
+          [])
+        : []
+    );
+    expect(
+      blocks.some(
+        (b) => b.type === "tool_use" && b.name === "mcp__layering__echo"
+      )
+    ).toBe(true);
+    // catalog 全量含 MCP 件(registerExternal 打在装配单点)。
+    expect(catalog!.all().some((t) => t.name === "mcp__layering__echo")).toBe(
+      true
+    );
+    void root;
+  }, 360_000);
 
-  it(
-    "[countTokens] B6 — adapter.countTokens 真实冒烟(返正数)",
-    async () => {
-      // 不经 build-engine(装配期溢出治理已各自覆盖);直接取装配同源
-      // adapter(与 build-engine createAdapterFromEnv 同一构造路径)。
-      const { createAdapterFromEnv } = await import(
-        "../../src/harness/build-engine.ts"
-      );
-      const { adapter } = createAdapterFromEnv(env);
-      const res = await adapter.countTokens!({
-        tools: [
-          {
-            name: "bash",
-            description: "Run shell commands.",
-            inputSchema: {
-              type: "object",
-              properties: { cmd: { type: "string" } },
-              required: ["cmd"],
-            },
+  it("[countTokens] B6 — adapter.countTokens 真实冒烟(返正数)", async () => {
+    // 不经 build-engine(装配期溢出治理已各自覆盖);直接取装配同源
+    // adapter(与 build-engine createAdapterFromEnv 同一构造路径)。
+    const { createAdapterFromEnv } =
+      await import("../../src/harness/build-engine.ts");
+    const { adapter } = createAdapterFromEnv(env);
+    const res = await adapter.countTokens!({
+      // 官方 API 容忍空 messages,但 9router 网关后端拒(2013 messages
+      // must not be empty)——夹具补一条最小 user message,走网关同款
+      // 真实请求形状。
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      tools: [
+        {
+          name: "bash",
+          description: "Run shell commands.",
+          inputSchema: {
+            type: "object",
+            properties: { cmd: { type: "string" } },
+            required: ["cmd"],
           },
-        ],
-        system: "You are a harness under test.",
-      });
-      expect(Number.isFinite(res.inputTokens)).toBe(true);
-      expect(res.inputTokens).toBeGreaterThan(0);
-    },
-    120_000
-  );
+        },
+      ],
+      system: "You are a harness under test.",
+    });
+    expect(Number.isFinite(res.inputTokens)).toBe(true);
+    expect(res.inputTokens).toBeGreaterThan(0);
+  }, 120_000);
 });

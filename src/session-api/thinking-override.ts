@@ -7,18 +7,13 @@
  *     ValidationError (wire surface fails loud, no silent fallback).
  *   - `withThinkingOverride`: per-turn one-shot deps rebuild — the override
  *     only replaces `adapter`; registry / executor / maxTurns / timeoutMs
- *     are reused from the cached deps.
+ *     are reused from the cached deps. ADR-0094 SC7：adapter 构造单点委托
+ *     `createAdapterFromEnv`（thinking 只作入参覆盖，不另建 client 字段表）。
  *
  * hub.ts / http.ts stay thin: they call into these functions only.
  */
-import Anthropic from "@anthropic-ai/sdk";
-import {
-  buildThinkingParams,
-  createRealAnthropicAdapter,
-  withTransportRetry,
-  translateAnthropicTransportFault,
-  type LoopEngineDeps,
-} from "../harness/index.js";
+import { createAdapterFromEnv } from "../harness/build-engine.js";
+import type { LoopEngineDeps } from "../harness/index.js";
 import { loadIknowEnv, type LlmEnv } from "../config/env.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import { ValidationError } from "../shared/errors.js";
@@ -85,6 +80,10 @@ export function parseThinkingOverride(
  * The override only replaces `adapter`; executor / registry / maxTurns /
  * timeoutMs are taken from `deps` unchanged. `env` is injected so callers
  * (and tests) can pin the LLM config instead of re-reading process.env.
+ *
+ * ADR-0094 SC7：adapter 构造单点委托 `createAdapterFromEnv` —— thinking
+ * 覆盖只作为 `overrides.thinking` 入参并入，client（apiKey / baseUrl /
+ * headers）与 wire model 解析同无覆盖路径**逐字节同形**，禁止第二套字段表。
  */
 export function withThinkingOverride(opts: {
   readonly deps: LoopEngineDeps;
@@ -95,31 +94,15 @@ export function withThinkingOverride(opts: {
   const env = opts.env ?? loadIknowEnv();
   if (!env.llm.apiKey) {
     // settings-model-extension：key 来源 = settings.llm.apiKey（字面或 ${VAR}）。
+    // fail-fast 守卫与 ensureDeps / reloadFromEnv 对齐（先于 createAdapterFromEnv）。
     throw new ValidationError(LLM_API_KEY_MISSING_MESSAGE);
   }
-  const client = new Anthropic({
-    apiKey: env.llm.apiKey,
-    baseURL: env.llm.baseUrl,
-    // ADR-0093 / spec tui-model-command SC9：headers 透传与 build-engine
-    // `createAdapterFromEnv` 同形。条件 spread —— 缺席时 options 与今日
-    // 逐字节一致（不传 `undefined` / `{}`）。
-    ...(env.llm.headers !== undefined
-      ? { defaultHeaders: env.llm.headers }
-      : {}),
+  const { adapter } = createAdapterFromEnv(env, {
+    thinking: {
+      mode: override.mode,
+      effort: override.effort ?? "",
+    },
   });
-  const adapter = withTransportRetry(
-    createRealAnthropicAdapter({
-      client,
-      model: env.llm.model,
-      maxTokens: env.llm.maxOutputTokens,
-      temperature: env.llm.temperature,
-      thinking: buildThinkingParams({
-        thinking: override.mode,
-        thinkingEffort: override.effort ?? "",
-      }),
-    }),
-    { translate: translateAnthropicTransportFault }
-  );
   return {
     ...deps,
     adapter,

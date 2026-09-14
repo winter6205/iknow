@@ -114,6 +114,7 @@ import {
   MaxTurnsExceeded,
   McpLifecycleError,
   errorMessage,
+  withApiError,
 } from "../harness/errors.js";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -3463,6 +3464,9 @@ export class SessionHub {
         ...(opts.thinkingMs !== undefined && opts.thinkingMs > 0
           ? { thinkingMs: opts.thinkingMs }
           : {}),
+        // ADR-0094 SC4-SC5: transport 失败时的网关侧摘要透传。undefined → 字段
+        // 缺席 (byte-stable);TUI 据此渲染「API error (status): message」。
+        ...withApiError({}, result.apiError),
       },
     };
   }

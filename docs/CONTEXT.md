@@ -56,6 +56,12 @@ _Avoid_: 连续 N=3 简化；verify 趋势停；sandbox violation kill；正文�
 **LOOP_DETECTED envelope**: 环检测 trip 时追加的固定模板 user 消息，写入权威 messages 并落盘，下一问作为 priorMessages 进模型；对人至少经 `stop=fused` 可见。
 _Avoid_: 只 toast 不进历史；下一轮不喂模型；当成 tool_result 吞掉真实失败
 
+**viewport API error**: 供应商/API/连接失败给人看的对话流行：薄外壳 `API error (status):` + 服务商原文；不追加进 **session transcript**，下一轮不喂模型。ADR-0094。
+_Avoid_: 把 `protocolError` / 「可能是连接或模型故障」当 UX 文案；把 API 失败落成 append-only user/assistant
+
+**wire model**: Anthropic SDK 请求体里的 `model` 字段 = 注册表 `models[].id` 原文（路由 `provider/model` 第一个 `/` 之后）。provider `id` 只查 baseUrl / key，不上 wire；需要前缀时把前缀写进模型名。ADR-0094。
+_Avoid_: 把 provider id 自动拼进请求；把路由 ID 整段当网关模型名
+
 **LoopTrace**: `run()` 的第二返回面 `{ result, trace }`（TurnTrace / Totals 两型）—— A 层结构元数据 trace（每回合 supplierStop / toolCall kind / durationMs / cancelKind + 一次性 reduce 的 totals），严格不含 payload；与 append-only messages 唯一权威解耦，immutable 累积。`cancelKind` 是取消来源四值枚举 `"none" | "callerAbort" | "timerTimeout" | "hostCancel"`.
 _Avoid_: 在 trace 里塞 input/output/token/cost（B 层字段）——该禁令仅对 LoopTrace 本体，不外延到 TraceService（`LlmCallRecord` 承载 token usage 是 ADR-0008 裁决的合规落点）
 
@@ -346,13 +352,16 @@ _Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 
 - `settings.llm.model`（字面值，唯一来源，trim 后非空串）: 模型路由 ID 的全局可寻址位；缺失 → `loadIknowEnv` fail-fast 抛「no LLM model configured in settings.llm.model」，不再有 hardcoded 兜底。
 - `settings.llm.apiKey`（字面或 `${VAR}` / `$VAR` 占位符）: 唯一 key 承载。字面 → 原样；占位符 → 经 `expandPlaceholders` 从 `process.env[VAR]` 优先 / `.env.local` / `.env` 兜底解析。解析不到 → undefined（消费点守卫抛「no API key configured」）。
 - `settings.llm.fallback?: string[]`: 用户自配的模型 fallback 列表（代码不预置任何 fallback）。
-- `settings.llm.providers?: LlmProvider[]`: **LLM provider** 注册表——用户层键（项目文件不采纳，沿 ADR-0084）；每条含 `id` / `baseUrl` / `apiKeyEnv` / `headers?` / `models[]`（`id` / `name?` / `contextWindow?` / `maxTokens?`）；**仅 anthropic 格式**，baseUrl + apiKeyEnv 必填；`loadIknowEnv` 按 `settings.llm.model = "<provider>/<model>"` 拆头查表，命中 → `baseUrl = provider.baseUrl` + `apiKey = process.env[provider.apiKeyEnv]`（env 缺席 → 抛「no API key for provider <id>」）；未命中 → fallback `IKNOW_LLM_BASE_URL` + `settings.llm.apiKey`（今日路径逐字节一致，back-compat）。非法字段（id 空串 / baseUrl 非字符串 / apiKeyEnv 非字符串 / models 非数组）整条 drop，不静默。ADR-0093 / `specs/tui-model-command.md`。
+- `settings.llm.providers?: LlmProvider[]`: **LLM provider** 注册表——用户层键（项目文件不采纳，沿 ADR-0084）；每条含 `id` / `baseUrl` / `apiKeyEnv` / `headers?` / `models[]`（`id` / `name?` / `contextWindow?` / `maxTokens?`）；**仅 anthropic 格式**，baseUrl + apiKeyEnv 必填；`loadIknowEnv` 按 `settings.llm.model = "<provider>/<model>"` 拆头查表，命中 → `baseUrl = provider.baseUrl` + `apiKey = process.env[provider.apiKeyEnv]`（env 缺席 → 抛「no API key for provider <id>」）；**wire model** = 尾段 `models[].id`，不是整段路由。未命中 → fallback `IKNOW_LLM_BASE_URL` + `settings.llm.apiKey`（今日路径逐字节一致，back-compat）。非法字段（id 空串 / baseUrl 非字符串 / apiKeyEnv 非字符串 / models 非数组）整条 drop，不静默。ADR-0093 / ADR-0094 / `specs/tui-model-command.md`。
   **退役机制**: `IKNOW_LLM_MODEL`（env 覆盖 model）已不再读取；`IKNOW_LLM_API_KEY_ENV`（env 覆盖 key 变量名）已不再读取；`LlmEnv.apiKeyEnv` 字段已删。`IKNOW_LLM_BASE_URL` 仍读（provider/baseUrl 是 9router 项目级决策，保留为代码默认 fallback）。`.env.local` 退化为「占位符真值源」（`.env.local` 持有 `${VAR}` 指向的变量值本身），不再是 model / key 变量名的配置口。
   **保留机制**: provider = 9router、`baseUrl` 代码默认 `http://localhost:20128/v1` 焊进 `env.ts`（`IKNOW_LLM_BASE_URL` 仍读）；非 LLM 字段（context window / maxTurns / web 端点 / mcp 超时等）的 `process.env > .env.local > .env` 优先级链不变。
   _Avoid_: 在 `.env.local` 重复声明已与代码默认一致的非密项；把 model 切换当「每机配置」而非「项目栈决策」
 
-**`/model`(TUI)**: TUI 斜杠命令——打开 provider 注册表 picker（每项一行 `provider/model` + 当前项游标）；`↑/↓` 移焦点（clamp 首尾）、`Enter` 选定 + 持久化（写回 `~/.iknow/settings.json` 的 `llm.model`）+ env 重载、`Esc` 关闭且不持久化（焦点移动不产生 staged 状态，故 Esc 不构成 cancel 路径，与 `/thinking` `/effort` 同款）；provider 注册表为空 → typed notice（不抛错、不打开 picker）。生效边界 = **下一轮**（当前轮若在跑仍用旧 adapter 跑完，与 thinking 切换同款 round-trip）。`/info` 增 `Model: <provider>/<model>` 行。ADR-0093 / `specs/tui-model-command.md`。
-_Avoid_: 把 `/model` 当 mid-turn 生效（装配期 adapter 不中途替换）；空注册表时打开空面板；Esc 当"放弃选择"（无 staged 状态可放弃）
+**`/model`(TUI)**: TUI 斜杠命令——打开 provider 注册表 picker（每项一行 `provider/model` + 当前项游标）；`↑/↓` 移焦点（clamp 首尾）、`Enter` 选定 + 持久化（写回 `~/.iknow/settings.json` 的 `llm.model` 路由 ID）+ env 重载、`Esc` 关闭且不持久化；provider 注册表为空 → typed notice。下一轮 adapter 用 **wire model**（`models[].id`），不是把路由整段送上网关。`/info` 仍显示路由 `Model: <provider>/<model>`。ADR-0093 / ADR-0094 / `specs/tui-model-command.md`。
+_Avoid_: 把 `/model` 当 mid-turn 生效；空注册表时打开空面板；Esc 当"放弃选择"；把 picker 路由原样当 SDK `model`
+
+**runtime LLM env**: 进程内 LLM 装配的唯一运行时源——一份 EnvLoader（`get` / `reload` / watch）。TUI 与 serve 同挂；`createAdapterFromEnv(loader.get())` 是唯一 adapter 工厂；thinking 覆盖只改入参，不另造 client。ADR-0094。
+_Avoid_: hub 构造期 `overrideEnv` 快照；第二套 thinking client；serve 不挂 loader
 
 **声明式权限规则**: 项目 `<仓>/.iknow/settings.json` 的 `permissions` 段用 `Tool` / `Tool(specifier)` 字符串（`allow` / `ask` / `deny` 三档 + 可选 `defaultMode`，值域 `default` | `plan`）；同项目层评估序 deny → ask → allow；编译为既有 `NormalRuleSpec` 进项目权限层，不新开决策轴。旧形态（`schema_version` + `rule[]` 谓词 DSL）加载 typed fail-loud、错误含新形态示例。模式名到 ACI 工具的映射、glob / param:value / Bash 复合命令分段 / 路径 specifier 形态见 `specs/declarative-project-permissions.md` Does。ADR-0090 / #1004。
 _Avoid_: 沿用 `schema_version` + `rule[]` 谓词 DSL；写 toml 当并存 SSOT；项目层写 `full_auto`（加载 fail-loud）；让用户层接 `permissions`；用 param:value 匹配 Bash `command` / Read/Edit 路径 / WebFetch `url`；给规则手写 `id` / `reason`

@@ -5,8 +5,21 @@
  * SessionHub + listenSessionServer) and the only source-level surface that
  * wires them together. Without this test the file shows 0% coverage and
  * SC21's 80/70 gate fails for src/session-api/.
+ *
+ * SC6 必须走真实装配：占位 adapter 会让 wire model 断言失去意义。装配链会经
+ * bash 工具的沙箱探针，而 CI 的 test-fast 不装 bubblewrap，故此处只把装配期
+ * 探针替换为 no-op，其余（真实 HTTP、EnvLoader、SDK adapter、capture server）
+ * 全部保持真实。物理执行路径在本文件中从未被调用。
  */
-import { afterAll, afterEach, beforeAll, describe, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  it,
+  vi,
+} from "vitest";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -30,6 +43,19 @@ import { deriveProjectIdentityRoot } from "../../src/harness/session-roots.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
+import {
+  MINIMAL_SDK_MESSAGE,
+  startLlmCapture,
+  type LlmCapture,
+} from "./_helpers/llm-capture.ts";
+
+vi.mock("../../src/harness/sandbox/runner.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("../../src/harness/sandbox/runner.js")
+    >();
+  return { ...actual, requireBwrap: () => {} };
+});
 
 // -- per-test cleanup --------------------------------------------------------
 
@@ -528,5 +554,193 @@ describe("startSessionServe — port fallback", () => {
       if (prev === undefined) delete process.env.IKNOW_SERVE_PORT;
       else process.env.IKNOW_SERVE_PORT = prev;
     }
+  });
+});
+
+// -- runtime LLM env wiring (SC6 / ADR-0094) ----------------------------------
+//
+// 验收：serve 入口装配 EnvLoader → envProvider 注入 hub → 改用户层
+// settings.json 的 llm.model 之后，下一条 POST /messages 的 wire 跟着新
+// env 走（不再是启动期一次性 loadIknowEnv）。
+//
+// 形态：本地 LLM capture server 作 SDK 的 baseURL 终点 → capture 收到的
+// 请求体里 `model` 字段 = wire model。设置 provider `prov` 含 m1 / m2 两
+// 个 model id，初始 settings.json = prov/m1，第一条 POST → 命中 m1；改写
+// settings.json = prov/m2，等 EnvLoader watcher 触发 reload + hub.adapter
+// 热重建，第二条 POST → 命中 m2。
+//
+// 注意：本测试假设 T1（wire model 切尾）已合入 —— 路由 `prov/m1` 经
+// provider 注册表命中 → SDK wire = `m1`（ADR-0094）。T1 与 T3 同 PR 落地。
+
+describe("startSessionServe — runtime LLM env wiring (SC6)", () => {
+  let capture: LlmCapture | undefined;
+  let sc6Home: string | undefined;
+  let sc6BaseDir: string | undefined;
+  let sc6PrevHome: string | undefined;
+  let sc6PrevKey: string | undefined;
+  let sc6PrevStream: string | undefined;
+  let sc6PrevMaxTokens: string | undefined;
+
+  /** 在 tmpHome/.iknow/settings.json 写一段：provider `prov` 含 m1/m2 +
+   *  baseUrl 指向 capture server，model = 当前路由。 */
+  async function writeProvSettings(modelRoute: string): Promise<void> {
+    if (!sc6Home) throw new Error("sc6Home missing");
+    const settingsJson = {
+      llm: {
+        model: modelRoute,
+        providers: [
+          {
+            id: "prov",
+            baseUrl: capture!.origin,
+            apiKeyEnv: "IKNOW_SC6_API_KEY",
+            models: [{ id: "m1" }, { id: "m2" }],
+          },
+        ],
+      },
+    };
+    await writeFile(
+      join(sc6Home, ".iknow", "settings.json"),
+      JSON.stringify(settingsJson) + "\n",
+      "utf8"
+    );
+  }
+
+  /** 等待 capture 收到含指定文本 user 消息的 body（envLoader watcher 异步）。
+   *  按 messages 内文过滤,而不是按索引 —— harness 在不同表面下首轮可能
+   *  触发 prefill / 后续 多次 SDK call(同一 postMessage 内 runAutoLoopSteps
+   *  多次迭代 + agentStatus 注入),硬编码 body[N] 易脆。 */
+  async function waitForBodyWithUserText(
+    needle: string,
+    timeoutMs = 3000
+  ): Promise<{ model?: string; messages?: unknown[] }> {
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      const hit = capture?.bodies.find(
+        (raw): raw is { model?: string; messages?: unknown[] } => {
+          if (!raw || typeof raw !== "object") return false;
+          const msgs = (raw as { messages?: unknown[] }).messages;
+          if (!Array.isArray(msgs)) return false;
+          return msgs.some((m) => {
+            if (!m || typeof m !== "object") return false;
+            const content = (m as { content?: unknown }).content;
+            if (!Array.isArray(content)) return false;
+            return content.some((c) => {
+              if (!c || typeof c !== "object") return false;
+              return (
+                (c as { type?: unknown }).type === "text" &&
+                typeof (c as { text?: unknown }).text === "string" &&
+                ((c as { text: string }).text as string).includes(needle)
+              );
+            });
+          });
+        }
+      );
+      if (hit) return hit;
+      if (Date.now() > deadline) {
+        throw new Error(
+          `timeout waiting for capture body containing user text "${needle}" (have ${capture?.bodies.length ?? 0} bodies)`
+        );
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+
+  beforeEach(async () => {
+    // 自己起 tmp home（不依赖 installTestSettingsSource 的硬编码 provider
+    // 形状 —— 本测试要自定义 provider 注册表含两个 model id）。
+    sc6Home = await mkdtemp(join(tmpdir(), "iknow-sc6-home-"));
+    sc6BaseDir = await mkdtemp(join(tmpdir(), "iknow-sc6-base-"));
+    await mkdir(join(sc6Home, ".iknow"), { recursive: true });
+    sc6PrevHome = process.env.HOME;
+    sc6PrevKey = process.env["IKNOW_SC6_API_KEY"];
+    sc6PrevStream = process.env["IKNOW_LLM_STREAM"];
+    sc6PrevMaxTokens = process.env["IKNOW_LLM_MAX_OUTPUT_TOKENS"];
+    process.env.HOME = sc6Home;
+    process.env["IKNOW_SC6_API_KEY"] = "sc6-test-key";
+    // capture server 返回 JSON envelope（非 SSE）—— SDK 走非流式臂才能解。
+    // 默认 stream="on" → SDK 等不到 SSE chunk → 500（与现状一致）。
+    process.env["IKNOW_LLM_STREAM"] = "off";
+    // Anthropic SDK：max_tokens > 8192 时强制要求 streaming。
+    // 测试走非流式臂 → max_tokens 必 <= 8192。
+    process.env["IKNOW_LLM_MAX_OUTPUT_TOKENS"] = "128";
+    capture = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+  });
+
+  afterEach(async () => {
+    // 注：listening 在外层 afterEach 关；这里只关 capture + 还原 env。
+    if (capture) await capture.close();
+    capture = undefined;
+    if (sc6Home) await rm(sc6Home, { recursive: true, force: true });
+    if (sc6BaseDir) await rm(sc6BaseDir, { recursive: true, force: true });
+    sc6Home = undefined;
+    sc6BaseDir = undefined;
+    if (sc6PrevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = sc6PrevHome;
+    if (sc6PrevKey === undefined) delete process.env["IKNOW_SC6_API_KEY"];
+    else process.env["IKNOW_SC6_API_KEY"] = sc6PrevKey;
+    if (sc6PrevStream === undefined) delete process.env["IKNOW_LLM_STREAM"];
+    else process.env["IKNOW_LLM_STREAM"] = sc6PrevStream;
+    if (sc6PrevMaxTokens === undefined)
+      delete process.env["IKNOW_LLM_MAX_OUTPUT_TOKENS"];
+    else process.env["IKNOW_LLM_MAX_OUTPUT_TOKENS"] = sc6PrevMaxTokens;
+  });
+
+  it("改用户层 settings.json 后,下一条 POST /messages 的 wire model 跟 EnvLoader 更新", async () => {
+    // (a) 初始 settings = prov/m1 → 启动 serve。
+    await writeProvSettings("prov/m1");
+    const out = await startSessionServe({
+      dataDir: sc6BaseDir,
+      // home 不传 —— serve 默认走 homedir()，beforeEach 把 process.env.HOME
+      // 改写到 sc6Home（sc6BaseDir 仅承担 SessionStore 路径，与 EnvLoader
+      // 的 settings 来源严格分离）。
+      hubOptions: { askUser: createNoAskUser() },
+      port: 0,
+    });
+    listening = out.listening;
+    const origin = `http://${listening.host}:${listening.port}`;
+
+    // (b) 建会话 → 第一条 POST /messages → 期待 capture 收到 wire model = m1。
+    const created = await fetch(`${origin}/api/v1/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(created.status, 201);
+    const sessionId = (
+      (await created.json()) as { session: { conversation_id: string } }
+    ).session.conversation_id;
+
+    const first = await fetch(
+      `${origin}/api/v1/sessions/${sessionId}/messages`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "first" }),
+      }
+    );
+    assert.equal(first.status, 200);
+
+    const firstBody = await waitForBodyWithUserText("first");
+    assert.equal(firstBody.model, "m1");
+
+    // (c) 改用户层 settings.json → prov/m2 → EnvLoader watcher 触发 →
+    // envProvider 返回新 env → hub.reloadFromEnv 重建 adapter（白名单字段
+    // model 变化触发）。watcher 100ms debounce + writeFile 原子写 + reload
+    // + adapter 重建实测 < 300ms,留 500ms 缓冲。
+    await writeProvSettings("prov/m2");
+    await new Promise((r) => setTimeout(r, 500));
+
+    const second = await fetch(
+      `${origin}/api/v1/sessions/${sessionId}/messages`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "second" }),
+      }
+    );
+    assert.equal(second.status, 200);
+
+    const secondBody = await waitForBodyWithUserText("second");
+    assert.equal(secondBody.model, "m2");
   });
 });

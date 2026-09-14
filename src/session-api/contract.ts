@@ -57,6 +57,19 @@ export interface TurnAnswerDto {
    * UI 消费: web AgentCard thinking 块显示「思考了 N 秒」(spec SC8 / D6)。
    */
   readonly thinkingMs?: number;
+  /**
+   * ADR-0094 SC4-SC5 (viewport API error): transport 失败时的网关侧摘要
+   * (HTTP status + 消息文本)。hub 在 `result.apiError` 存在时透传
+   * (TransportRetryExhaustedError catch 路径);非 transport 失败 / 无 cause
+   * → 字段缺席(byte-stable,与 thinking/toolCalls/lastUsage/thinkingMs 同模式)。
+   *
+   * UI 消费: chat-flow viewport surface(TUI notice / web AgentCard 错误态)
+   * 落"API error (status): message"提示;不带 status 时落"API error: message"。
+   */
+  readonly apiError?: {
+    readonly status?: number;
+    readonly message: string;
+  };
 }
 
 /** #128：验证闭环最终判定的 wire 视图（rounds + outcome，供 UI surface）。

@@ -23,6 +23,7 @@ import {
   formatLlmProviderConfigError,
   isLlmProviderConfigError,
   loadIknowEnv,
+  wireModelFromRoute,
 } from "../../src/config/env.ts";
 import {
   loadIknowSettings,
@@ -1649,5 +1650,43 @@ describe("loadIknowEnv — llm.providers 解析 (ADR-0093 / T3)", () => {
     assert.equal(text.includes("sk-super-secret"), false);
     assert.equal(text.includes("MINIMAX_CN_API_KEY"), true);
     assert.equal(text.includes("minimax-cn"), true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0094 T1 / SC1-SC3 SC7：wire-model 解析 SSOT。
+//
+// wire = models[].id（provider id 只解析 baseUrl/apiKey/headers，不上 wire）。
+// 注册表命中时 wire = tail（首个 `/` 之后，含后续 `/`）;miss 由
+// loadIknowEnv 在装配前 typed 抛，不会进 wire 函数。
+// ---------------------------------------------------------------------------
+
+describe("wireModelFromRoute — wire = models[].id (ADR-0094 T1)", () => {
+  it("a/b → wire=b", () => {
+    assert.equal(wireModelFromRoute("minimax-cn/MiniMax-M3"), "MiniMax-M3");
+  });
+
+  it("a/b/c → wire=b/c（尾段保留其余 /，SC2）", () => {
+    assert.equal(
+      wireModelFromRoute("9router/ocg/deepseek-v4-flash"),
+      "ocg/deepseek-v4-flash"
+    );
+  });
+
+  it("无 / → identity（bare name 透传）", () => {
+    assert.equal(wireModelFromRoute("test-model"), "test-model");
+  });
+
+  it("空尾段 a/ → identity（防御；miss 路径今日不可达，保持 total）", () => {
+    assert.equal(wireModelFromRoute("minimax-cn/"), "minimax-cn/");
+  });
+
+  it("前导空白被 trim；前导 / 形态 → identity", () => {
+    assert.equal(wireModelFromRoute("  minimax-cn/MiniMax-M3"), "MiniMax-M3");
+    assert.equal(wireModelFromRoute("/MiniMax-M3"), "MiniMax-M3");
+  });
+
+  it("纯空串 → identity（总函数；不抛错）", () => {
+    assert.equal(wireModelFromRoute(""), "");
   });
 });

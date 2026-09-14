@@ -9,6 +9,7 @@ import { SessionHub, type SessionHubOptions } from "./hub.js";
 import { listenSessionServer, type ListeningServer } from "./http.js";
 import { SessionStore } from "./store/index.js";
 import { loadIknowEnv } from "../config/env.js";
+import { createEnvLoader, type EnvLoader } from "../config/env-loader.js";
 import {
   WORKSPACE_ROOT_ENV_KEY,
   resolveWorkspaceRoot,
@@ -53,6 +54,12 @@ export type ServeOptions = {
    * (D1.2)。会话池根不跟它分片（ADR-0087）。
    */
   workspaceRoot?: string;
+  /**
+   * SC6 / ADR-0094: 用户层 settings 根（EnvLoader + recents/trust 名单）。
+   * 生产缺省 = homedir()（与既有 loadIknowSettings / recentsHome 同源）。
+   * 测试可注入 tmp 路径以隔离真实 ~/.iknow。
+   */
+  home?: string;
   hubOptions?: Omit<SessionHubOptions, "store">;
   /** Trace output file path; forwarded to SessionHub for per-session JSONL trace (T5, #64). */
   traceOut?: string;
@@ -75,6 +82,18 @@ export function resolveServeDataDir(dataDir?: string): string {
 // serve 保留 re-export 供 tui/run.tsx 复用 (tui → session-api 同向依赖)。
 import { resolveVerifyConfig } from "../config/verify-config.js";
 export { resolveVerifyConfig };
+
+/**
+ * SC6 / ADR-0094：serve 入口 EnvLoader 构造（home 缺省 = homedir()，与
+ * loadIknowSettings / recentsHome 同源；测试可经 `opts.home` 注入 tmp 路径）。
+ * 抽出为单点，避免 startSessionServe 装配函数承担分支复杂度。
+ */
+function createServeEnvLoader(opts?: ServeOptions): EnvLoader {
+  return createEnvLoader({
+    cwd: process.cwd(),
+    home: opts?.home ?? homedir(),
+  });
+}
 
 export async function startSessionServe(
   opts?: ServeOptions
@@ -167,6 +186,12 @@ export async function startSessionServe(
   // 按 conversationId 解析会话账本;resetSession / hub.shutdown 销毁。
   const liveGraphLedger = createLiveGraphLedgerHost();
 
+  // SC6 / ADR-0094：runtime LLM env 单源（serve 入口）—— EnvLoader 注入 hub。
+  // 与 TUI run.tsx 同形：构造 → envProvider 透传 hub → subscribe 触发
+  // hub.reloadFromEnv 热重建（白名单字段 model 变化）。EnvLoader.stop() 在
+  // listening.close() 期间同步释放（mirror TUI combinedShutdown）。
+  const envLoader: EnvLoader = createServeEnvLoader(opts);
+
   const hub = new SessionHub({
     store,
     defaultJsonMode: opts?.json_mode ?? false,
@@ -207,11 +232,30 @@ export async function startSessionServe(
     // 写入 `<homedir>/.iknow/workspaces.json`(规则 3:显式指定 = 显式信任)。
     // 缺席 → hub 保持 T2 语义(无 trust gate、不落 recents),见 hub.ts。
     recentsHome: homedir(),
+    // SC6 / ADR-0094:env 源 — 改造前 serve 一次性 loadIknowEnv(); 改造后
+    // EnvLoader.get() 透传每次 ensureDeps / reloadFromEnv,改 settings.json
+    // 走白名单字段(model / apiKey / headers)→ 下一条 POST /messages 跟新 env。
+    envProvider: () => envLoader.get(),
     // Prefer the full handle when provided so web can resolve asks; fall back
     // to the bare askUser (back-compat for callers that only wire `.ask`).
     ...(opts?.askHandle
       ? { askUser: opts.askHandle.ask, askHandle: opts.askHandle }
       : {}),
+  });
+
+  // SC6 / ADR-0094:订阅 EnvLoader —— settings 文件变化 → 自动 reload env →
+  // 走 hub 的 adapter 热重建通路（不直接碰 build-engine）。reload 抛错
+  // (坏 JSON / apiKey 缺失)→ EnvLoader 内部保留旧 env + onError 通知,
+  // 这里 .catch 吞掉（与 TUI run.tsx:540-546 同款：reloadFromEnv 抛错
+  // 时 cachedDeps 不动,静默保留旧 adapter —— 降级语义对齐)。
+  envLoader.subscribe(() => {
+    void hub.reloadFromEnv().catch((err) => {
+      // reloadFromEnv 抛错（坏 JSON / apiKey 缺失）→ EnvLoader 内部保留旧 env
+      // + onError 通知；这里 .catch 吞掉并打 stderr，与 TUI run.tsx:540-546
+      // 同款（cachedDeps 不动，静默保留旧 adapter —— 降级语义对齐）。
+      // eslint-disable-next-line no-console
+      console.error("[serve] reloadFromEnv failed:", err);
+    });
   });
 
   // serve-workspace T4 / T9a:启动即预绑到 productRoot（显式 flag/env 或
@@ -249,5 +293,19 @@ export async function startSessionServe(
       : {}),
   });
 
-  return { listening, hub };
+  // SC6 / ADR-0094:EnvLoader.stop() 在 listening.close() 期间同步释放
+  // (mirror TUI combinedShutdown) —— 长程 serve 进程退出前释放 fs watcher
+  // 句柄。监听 close() 多次调用幂等(EnvLoader.stop() 内部幂等,wrapped close
+  // 也只触发一次 EnvLoader.stop())。调用方按原 listening.close() 收口,无需
+  // 感知 EnvLoader 存在。
+  const originalClose = listening.close.bind(listening);
+  const wrappedListening: ListeningServer = {
+    ...listening,
+    close: async () => {
+      envLoader.stop();
+      await originalClose();
+    },
+  };
+
+  return { listening: wrappedListening, hub };
 }

@@ -458,6 +458,70 @@ describe("loop engine S9: protocol error turn", () => {
     assert.equal(result.messages.length, 1);
     assert.equal(result.finalText, null);
   });
+
+  // ADR-0094 SC4-SC5 (viewport API error): SDK APIError-like cause →
+  // RunResult.apiError 字段挂上 `{status, message}` 摘要;非 transport
+  // 失败 → 字段缺席(byte-stable)。
+  it("TransportRetryExhaustedError with APIError-like cause surfaces apiError summary on RunResult", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const apiErrLike = {
+      name: "APIError",
+      status: 404,
+      message:
+        '{"error":{"message":"No active credentials for provider: 9router"}}',
+    };
+    const failingModel = Object.freeze({
+      encodeUserText: (t: string) =>
+        ({
+          role: "user",
+          content: [{ type: "text", text: t }],
+        }) as AnthropicNativeMessage,
+      encodeToolResults: () => undefined as never,
+      step: async (): Promise<AssistantTurnResult> => {
+        throw new TransportRetryExhaustedError(3, apiErrLike);
+      },
+    });
+    const { result } = await run("go", {
+      adapter: failingModel,
+      executor: createExecutor(reg),
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "protocolError");
+    assert.equal(result.messages.length, 1);
+    assert.equal(result.finalText, null);
+    // apiError 字段挂上 SDK APIError 的 status + JSON 消息。
+    assert.deepEqual(result.apiError, {
+      status: 404,
+      message:
+        '{"error":{"message":"No active credentials for provider: 9router"}}',
+    });
+  });
+
+  it("TransportRetryExhaustedError with null cause → apiError absent (byte-stable)", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const failingModel = Object.freeze({
+      encodeUserText: (t: string) =>
+        ({
+          role: "user",
+          content: [{ type: "text", text: t }],
+        }) as AnthropicNativeMessage,
+      encodeToolResults: () => undefined as never,
+      step: async (): Promise<AssistantTurnResult> => {
+        throw new TransportRetryExhaustedError(3, null);
+      },
+    });
+    const { result } = await run("go", {
+      adapter: failingModel,
+      executor: createExecutor(reg),
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "protocolError");
+    assert.equal("apiError" in result, false);
+  });
 });
 
 describe("loop engine S10: append-only immutable history", () => {

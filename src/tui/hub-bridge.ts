@@ -111,6 +111,11 @@ export interface TuiPostResult {
    *  disabled → 字段缺席（与 resp.turn.answer.verify byte-stable 同模式）。
    *  TUI 据此判断是否渲染 VerifyBanner，缺席 → 静默不渲染。 */
   readonly verify?: VerifyAnswerView;
+  /** ADR-0094 SC4-SC5: transport 失败时的网关侧摘要 (status + 消息文本)。
+   *  wire 字段 apiError 缺席 → 字段缺席(byte-stable)。TUI notice 渲染
+   *  protocolError + apiError 时落"API error (status): message"提示,
+   *  不带 status 时落"API error: message"。 */
+  readonly apiError?: { readonly status?: number; readonly message: string };
 }
 
 export interface TuiBridge {
@@ -352,6 +357,12 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     interrupted: resp.turn.answer.interrupted,
     ...(resp.turn.answer.verify !== undefined
       ? { verify: resp.turn.answer.verify }
+      : {}),
+    // ADR-0094 SC4-SC5: transport 失败时的网关侧摘要透传;字段缺席 →
+    // 字段缺席 (byte-stable)。TUI notice 据此区分 API error 文案 vs
+    // 原通用 "连接或模型故障" 文案。
+    ...(resp.turn.answer.apiError !== undefined
+      ? { apiError: resp.turn.answer.apiError }
       : {}),
   });
 
