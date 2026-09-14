@@ -46,6 +46,10 @@ import {
   ACI_TOOLSET_NAMES,
 } from "../../../../src/harness/aci/tools/registry.js";
 import { createSkillCatalog } from "../../../../src/harness/skill/catalog.js";
+import {
+  getAgentEntry,
+  resolveAgentCatalog,
+} from "../../../../src/harness/subagent/catalog.js";
 import type { IknowEnv } from "../../../../src/config/env.js";
 import type { SubAgentManager } from "../../../../src/harness/subagent/manager.js";
 import type { McpManager } from "../../../../src/harness/mcp/manager.js";
@@ -152,6 +156,17 @@ const fakeWorktreeRemove: RemoveWorktreeToolDeps["worktreeRemove"] =
   });
 
 describe("#483 D9 — regression guard: every ACI tool description avoids NEGATIVE_PHRASES", () => {
+  // review C1: 默认路径 ledger-aware 后，spawn_subagent 描述会从
+  // createMergedCatalogResolver() 自解析，构造 prose list 时拼上
+  // <home>/.iknow/plugins 下所有插件 agent 的 description。本 guard
+  // 测的是**工具自身的固定文案**（do not / never 等负面祈使），不
+  // 应被本机已装插件 agent 文案污染 —— 显式注入 builtin-only
+  // resolver 让 prose list 只含 builtin，与本机环境解耦（registry
+  // 装配缝的 `agentCatalog` opt，review C1 接线）。
+  const builtinOnlyCatalog = {
+    list: () => resolveAgentCatalog(),
+    get: (id: string) => getAgentEntry(id),
+  };
   // Assemble once for the whole suite. Reusing the same registry across
   // every assertion keeps the test cheap and guarantees a stable tool set.
   const reg = createDefaultAciRegistry({
@@ -171,6 +186,7 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     worktreeExit: fakeWorktreeExit,
     worktreeList: fakeWorktreeList,
     worktreeRemove: fakeWorktreeRemove,
+    agentCatalog: builtinOnlyCatalog,
   });
 
   // Sanity: the registry assembled with every conditional dep present contains

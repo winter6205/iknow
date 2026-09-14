@@ -58,7 +58,12 @@ import {
   createSecretsGuardHook,
   type HookErrorEvent,
 } from "./permission/index.js";
-import { composePreHooks, createUserHookRouter } from "./hooks/index.js";
+import {
+  composePostHooks,
+  composePreHooks,
+  createPluginHooksFromCatalog,
+  createUserHookRouter,
+} from "./hooks/index.js";
 import {
   loadIknowSettings,
   resolveWorktreeExclusive,
@@ -110,9 +115,10 @@ import {
   WORKSPACE_ROOT_ENV_KEY,
   resolveWorkspaceRoot,
 } from "../config/workspace-root.js";
-import { createSkillScanner } from "./skill/scanner.js";
+import { createSkillScanner, type PluginSkillDir } from "./skill/scanner.js";
 import { createSkillCatalog } from "./skill/catalog.js";
 import type { SkillCatalog } from "./skill/catalog.js";
+import { resolvePluginCatalog, resolvePluginRoots } from "./plugin/roots.js";
 import { loadMcpConfig } from "./mcp/config.js";
 import { createMcpManager, type McpManager } from "./mcp/manager.js";
 import { resolveMcpRoots, type McpRoots } from "./mcp/roots.js";
@@ -763,12 +769,33 @@ export async function buildHarnessEngine(
   // 冷启动。不 await:绝不阻塞 build 主路径;warmup 内部全量 catch(ask 同样
   // 装配 lsp 工具,故不做 surface 区分)。
   startLspWarmup(lspCtx);
+  // #global-plugins T1/T2: 解析插件根 + 扫描插件子目录 → catalog（skill
+  // dirs / hooks 文件源两面）。装配期一次解析,同 engine 实例内复用以避免
+  // 每次 scan 重 IO。「解析 → 扫描 → disabled 过滤」走 roots.ts 的共用装
+  // 配 helper（与 worker 同源；disabled 过滤条件化的 branch 数留在 helper），
+  // 消费面用 enabledInstallations（disabled 插件整体跳过，§3.3）。
+  // pluginAgentDirs 走 createMergedCatalogResolver() 自解析（ACR #5: 解析
+  // 面单一来源），不需要 build-engine 注入。
+  const { catalog: pluginCatalog, enabled: enabledInstallations } =
+    await resolvePluginCatalog({
+      roots: resolvePluginRoots({
+        ...(userHome !== undefined ? { userHome } : {}),
+        settings,
+      }),
+      plugins: settings.plugins,
+    });
+  const pluginSkillDirs: PluginSkillDir[] = enabledInstallations.map((p) => ({
+    dir: path.join(p.root, "skills"),
+    plugin: p.name,
+  }));
   const skillCatalog: SkillCatalog = createSkillCatalog(
     await createSkillScanner({
       userHome,
       // T3:项目 skills 是项目身份 → projectIdentityRoot（跨 rebind 不动）。
       projectIdentityRoot,
       env: process.env,
+      // 空数组 = 无插件 skill（scanner 缺省即空数组），无须条件展开。
+      pluginSkillDirs,
     }).scan()
   );
   // #356 T6:subagent manager 条件装配 — 与 MCP 同门(surface !== "ask"):
@@ -1524,10 +1551,34 @@ export async function buildHarnessEngine(
     classify: classifyCall,
     ...(opts.onHookError ? { onHookError: opts.onHookError } : {}),
   });
-  const preToolUse = composePreHooks([
-    ...(secretsGuard ? [secretsGuard] : []),
-    userHook,
-  ]);
+  // #global-plugins T2（plans/global-plugins-loading.md §5.2/§6）:插件
+  // hooks（hook）文件源 —— hooksEntries 来自 T1 catalog（与 skill 装配同一
+  // 次插件解析、同一 disabled 过滤）。链序 = builtin（secrets guard）→
+  // user（settings.hooks）→ plugin（本文件源），先拦先赢不变：插件放最后，
+  // 前两者命中时插件 hook 不 spawn（少一次 I/O，也不改变既有拦截归属）。
+  // 无 hooksFiles → 不构造插件贡献（贡献恒为空对象），pre/post 逐字节与
+  // 今日一致（既有测试零回归）。cwd = taskRoot（§5.6；装配期冻结的
+  // sandboxRoot —— hook 子进程 cwd 不参与会话根 rebind 计算）。
+  // onError 的 spread-guard 收进 opts 对象：缺席 = 键缺席（exactOptional
+  // 语义与逐字段展开一致），少一处条件表达式。
+  const pluginHooksOpts: Parameters<typeof createPluginHooksFromCatalog>[0] = {
+    entries: pluginCatalog.hooksEntries,
+    installations: enabledInstallations,
+    userHome,
+    projectDir: projectIdentityRoot,
+    cwd: sandboxRoot,
+    env: process.env,
+    onError: opts.onHookError,
+  };
+  const pluginHooks = createPluginHooksFromCatalog(pluginHooksOpts);
+  // 组合器跳过 undefined 槽（未配的源），装配层无需条件展开 —— 含插件贡献
+  // 空时的 `.pre` / `.post`（双缺席 = 本源无声明）。
+  const preToolUse = composePreHooks([secretsGuard, userHook, pluginHooks.pre]);
+  // Post: TUI 观测（opts.hooks，Step 5）与插件 Post 并存 —— TUI 在前
+  // （归属顺序：先给宿主观测，再跑插件 hook），两者都 await 完才返回
+  // （permission-executor 已 await + catch → 拒绝不逃逸；插件 post 自身
+  // never-throw）。两者皆缺席 → undefined → postToolUse 字段整体缺席。
+  const postToolUse = composePostHooks([opts.hooks, pluginHooks.post]);
   const executor = createAciExecutor({
     inner: baseExecutor,
     catalog: reg.catalog,
@@ -1535,7 +1586,7 @@ export async function buildHarnessEngine(
     askUser,
     hooks: {
       preToolUse,
-      ...(opts.hooks ? { postToolUse: opts.hooks } : {}),
+      ...(postToolUse ? { postToolUse } : {}),
     },
   });
 

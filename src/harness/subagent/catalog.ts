@@ -44,6 +44,15 @@ export interface AgentCatalogEntry {
   readonly body: string;
   readonly bashMode?: "any" | "readonly";
   readonly disallowedTools?: ReadonlyArray<string>;
+  /**
+   * #global-plugins T1（review C4）：插件 agent 的**裸名别名**
+   * （即去掉 `<plugin>:` 前缀后的 basename）。仅当该裸名未被
+   * builtin / user / 其它插件占时由 catalog 索引 → `resolver.get(bare)`
+   * 命中该 entry。冲突时整字段被 strip（不留字段、不影响 canonical）。
+   * 该字段不参与 spawn enum / prose list 渲染（spawn-subagent-tool
+   * 只用 id + description），因此「type 上多一字段」对外不可见。
+   */
+  readonly bareAlias?: string;
 }
 
 /**

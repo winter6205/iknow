@@ -52,9 +52,19 @@ const CANCELLED_RESULT_MESSAGE = "cancelled";
  *   - "guard-init"：secrets-guard 构造期 pattern 编译失败（T3 消费者）
  *   - "user-rule-init"：用户钩子（user hooks） 规则 pattern 构造期编译失败（hook router
  *     消费者，specs/user-hook-router.md SC6 —— 规则整条剔除 + 告警）
+ *   - "plugin-init"：插件 hooks.json 扫描 / 解析期降级（根不可读、非法
+ *     JSON、缺 hooks 键、未知事件、matcher 编译失败；design §7）
+ *   - "plugin-exec"：插件 hook 执行期降级（spawn 失败、超时、非 0/2 退出码、
+ *     输出截断、Post exit 2 诊断复述；fail-open，design §5.5/§5.6）
  */
 export interface HookErrorEvent {
-  readonly phase: "pre" | "post" | "guard-init" | "user-rule-init";
+  readonly phase:
+    | "pre"
+    | "post"
+    | "guard-init"
+    | "user-rule-init"
+    | "plugin-init"
+    | "plugin-exec";
   readonly tool?: string;
   readonly message: string;
 }
@@ -272,7 +282,9 @@ export function createPermissionRuntime(
 
     let hookDecision: PreHookBlock | undefined;
     try {
-      hookDecision = pre({ tool: def.name, input: call.input });
+      // #global-plugins T2：await 覆盖同步与异步 hook（同步实现 await 无代价）。
+      // 既有 try/catch 同时收 async 拒绝 → fail-closed 语义不变。
+      hookDecision = await pre({ tool: def.name, input: call.input });
     } catch (err) {
       const sanitized = errMsg(err, call.input);
       onHookError?.({ phase: "pre", tool: def.name, message: sanitized });
@@ -400,7 +412,10 @@ export function createPermissionRuntime(
     const payload = r.kind === "ok" ? r.payload : undefined;
     const meta = r.kind === "ok" ? r.meta : undefined;
     try {
-      post({
+      // #global-plugins T2：必须 await —— 异步 post 的 rejected promise 若
+      // 逃出 try 会成 unhandledRejection。结果不变（fire-and-forget 语义；
+      // 仅把拒绝收进既有 catch → onHookError）。
+      await post({
         toolUseId: r.toolUseId,
         name: def.name,
         input: call.input,

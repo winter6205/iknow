@@ -41,7 +41,7 @@
  * import isolation —— isolation 内部 import aci/tools，把它拖进 hooks
  * 的运行时依赖会扩边界；type-only 的 MutateClass 引用无运行时代价。
  */
-import type { PreToolUseHook } from "../permission/types.js";
+import type { PostToolUseHook, PreToolUseHook } from "../permission/types.js";
 import type { HookErrorEvent } from "../permission/permission-executor.js";
 import type { ToolCall } from "../tools/types.js";
 import type { MutateClass } from "../isolation/worktree-gate.js";
@@ -275,15 +275,50 @@ export function createUserHookRouter(
  * T5 用它组合内置钩子（secrets-guard）与用户钩子：builtin 在前、
  * user 在后 —— user deny 时后续 hook 不再被调用，builtin 先命中时 user
  * 规则不评估。
+ *
+ * #global-plugins T2 异步顺序组合：`await` 覆盖同步与异步 hook，短路判定在
+ * await 之后 —— 异步 hook（插件命令钩子）的 block 同样是先拦先赢的事实。
+ * 同步 hook 依次 await 时无并发，链序仍是数组序（不并行评估：先拦先赢要求
+ * 前一个的结论先落地）。返回的 hook 现在是 async 函数，其返回类型
+ * `Promise<PreHookBlock | undefined>` 是放宽后 PreToolUseHook 的成员
+ * （permission/types.ts）。
  */
 export function composePreHooks(
-  hooks: ReadonlyArray<PreToolUseHook>
+  hooks: ReadonlyArray<PreToolUseHook | undefined>
 ): PreToolUseHook {
-  return Object.freeze(({ tool, input }) => {
+  return Object.freeze(async ({ tool, input }) => {
     for (const hook of hooks) {
-      const blocked = hook({ tool, input });
+      // undefined 槽 = 该源缺席（如未配置的插件文件源）—— 跳过而非报错：
+      // 装配层因此不必为每个可选源写条件展开。
+      if (hook === undefined) continue;
+      const blocked = await hook({ tool, input });
       if (blocked !== undefined) return blocked;
     }
     return undefined;
+  });
+}
+
+/**
+ * Post 侧组合器（#global-plugins T2 装配面）：顺序 await 各 Post hook，前一个
+ * 完成才跑下一个（归因顺序：先给宿主观测，再跑插件 hook）。
+ *
+ * 「观测不改变结果」不变量由调用点（permission-executor `runAllowed` /
+ * sandbox/violation-executor `observe`）的 try/catch 承载；本组合器不复刻
+ * catch —— 单个 hook 的拒绝按既有语义收口，不因组合而改变归属。
+ *
+ * 全槽缺席 → 返回 undefined（装配层据此保持 postToolUse 字段缺席，与今日
+ * 字节一致）；undefined 槽跳过，与 composePreHooks 同款。
+ */
+export function composePostHooks(
+  hooks: ReadonlyArray<PostToolUseHook | undefined>
+): PostToolUseHook | undefined {
+  const present = hooks.filter(
+    (hook): hook is PostToolUseHook => hook !== undefined
+  );
+  if (present.length === 0) return undefined;
+  return Object.freeze(async (result: Parameters<PostToolUseHook>[0]) => {
+    for (const hook of present) {
+      await hook(result);
+    }
   });
 }

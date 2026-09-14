@@ -62,12 +62,15 @@ describe("createSecretsGuardHook — 正例（内置模式拦截）", () => {
   ];
 
   for (const c of cases) {
-    it(`拦截：${c.label}`, () => {
-      const block = hook({ tool: "bash", input: c.input });
+    it(`拦截：${c.label}`, async () => {
+      // #global-plugins T2：PreToolUseHook 返回类型放宽为含 Promise 的联合，
+      // 断言前先 await（本 hook 同步返回，await 无代价）。
+      const block = await hook({ tool: "bash", input: c.input });
       assert.ok(block, `expected block for ${c.label}`);
+      assert.equal(typeof block.reason, "string");
       assert.ok(
-        block!.reason.startsWith("secret pattern matched: "),
-        `reason should be prefixed, got: ${block!.reason}`
+        block.reason.startsWith("secret pattern matched: "),
+        `reason should be prefixed, got: ${block.reason}`
       );
     });
   }

@@ -459,6 +459,142 @@ describe("createPermissionExecutor — pre-hook exception → fail-closed", () =
   });
 });
 
+describe("createPermissionExecutor — #global-plugins T2 异步钩子", () => {
+  it("await 覆盖异步 pre：Promise<block> 仍拦下（不被当 truthy Promise 放行）", async () => {
+    const tool = makeAciTool({ name: "grep", category: "read-only" });
+    const reg = makeRegistry([tool]);
+    const { executor: inner, calls } = makeInnerSpy();
+    const ex = createPermissionExecutor({
+      inner,
+      registry: reg,
+      policy: createPermissionPolicy(),
+      askUser: async () => true,
+      preToolUse: async () => {
+        await new Promise((r) => setTimeout(r, 5));
+        return { reason: "async plugin denied" };
+      },
+    });
+    const result = await ex.executeAll([
+      { id: "u1", name: "grep", input: { pattern: "*.ts" } },
+    ]);
+    const r = result[0]!;
+    assert.equal(r.kind, "execution_failed");
+    if (r.kind === "execution_failed") {
+      assert.ok(r.message.startsWith("[hook_blocked]"));
+      assert.ok(r.message.includes("async plugin denied"));
+    }
+    assert.equal(calls.length, 0, "block 后 inner 不得执行");
+  });
+
+  it("异步 pre 拒绝 → fail-closed（既有 try/catch 收 rejected promise）", async () => {
+    const tool = makeAciTool({ name: "grep", category: "read-only" });
+    const reg = makeRegistry([tool]);
+    const { executor: inner, calls } = makeInnerSpy();
+    const fired: HookErrorEvent[] = [];
+    const ex = createPermissionExecutor({
+      inner,
+      registry: reg,
+      policy: createPermissionPolicy(),
+      askUser: async () => true,
+      preToolUse: async () => {
+        throw new Error("async pre exploded");
+      },
+      onHookError: (e) => fired.push(e),
+    });
+    const result = await ex.executeAll([
+      { id: "u1", name: "grep", input: { pattern: "*.ts" } },
+    ]);
+    const r = result[0]!;
+    assert.equal(r.kind, "execution_failed");
+    if (r.kind === "execution_failed") {
+      assert.ok(r.message.startsWith("[hook_error]"));
+      assert.ok(r.message.includes("async pre exploded"));
+    }
+    assert.equal(calls.length, 0, "fail-closed：inner 不得执行");
+    assert.equal(fired.length, 1);
+    assert.equal(fired[0]!.phase, "pre");
+  });
+
+  it("异步 pre 放行（resolve undefined）→ 正常执行", async () => {
+    const tool = makeAciTool({ name: "grep", category: "read-only" });
+    const reg = makeRegistry([tool]);
+    const { executor: inner, calls } = makeInnerSpy();
+    const ex = createPermissionExecutor({
+      inner,
+      registry: reg,
+      policy: createPermissionPolicy(),
+      askUser: async () => true,
+      preToolUse: async () => {
+        await new Promise((r) => setTimeout(r, 5));
+        return undefined;
+      },
+    });
+    const result = await ex.executeAll([
+      { id: "u1", name: "grep", input: { pattern: "*.ts" } },
+    ]);
+    assert.equal(result[0]!.kind, "ok");
+    assert.equal(calls.length, 1);
+  });
+
+  it("异步 post resolve → 结果不变且 post 已 await（顺序可观测）", async () => {
+    const tool = makeAciTool({ name: "grep", category: "read-only" });
+    const reg = makeRegistry([tool]);
+    const { executor: inner } = makeInnerSpy();
+    const observed: string[] = [];
+    const ex = createPermissionExecutor({
+      inner,
+      registry: reg,
+      policy: createPermissionPolicy(),
+      askUser: async () => true,
+      postToolUse: async () => {
+        await new Promise((r) => setTimeout(r, 10));
+        observed.push("post-done");
+      },
+    });
+    const out = await ex.executeAll([
+      { id: "u1", name: "grep", input: { pattern: "*.ts" } },
+    ]);
+    // await 语义：executeAll 返回时 post 已跑完（fire-and-forget 的放宽未改变
+    // 「结果返回前 post 已观测」，只是把拒绝收进 catch）
+    assert.deepEqual(observed, ["post-done"]);
+    assert.equal(out[0]!.kind, "ok");
+  });
+
+  it("异步 post 拒绝 → 结果不变 + onHookError(post)；不产生 unhandledRejection", async () => {
+    const tool = makeAciTool({ name: "edit_file", category: "write" });
+    const reg = makeRegistry([tool]);
+    const { executor: inner } = makeInnerSpy();
+    const fired: HookErrorEvent[] = [];
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      const ex = createPermissionExecutor({
+        inner,
+        registry: reg,
+        policy: createPermissionPolicy(),
+        askUser: async () => true,
+        postToolUse: async () => {
+          throw new Error("async post exploded");
+        },
+        onHookError: (e) => fired.push(e),
+      });
+      const out = await ex.executeAll([
+        { id: "u1", name: "edit_file", input: { path: "a.ts" } },
+      ]);
+      assert.equal(out[0]!.kind, "ok");
+      assert.equal(fired.length, 1);
+      assert.equal(fired[0]!.phase, "post");
+      assert.ok(fired[0]!.message.includes("async post exploded"));
+      // 让 microtask 队列排空后再断言：无逃逸的 rejected promise
+      await new Promise((r) => setTimeout(r, 20));
+      assert.deepEqual(rejections, []);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
+});
+
 describe("createPermissionExecutor — post-hook exception → fire-and-forget", () => {
   it("post throws → result identical to no-throw case; onHookError fired", async () => {
     const tool = makeAciTool({ name: "edit_file", category: "write" });

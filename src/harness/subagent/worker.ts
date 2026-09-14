@@ -24,7 +24,7 @@
  */
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { workerFenceTmpBesideRecord } from "../sandbox/fence-tmp.js";
 import Anthropic from "@anthropic-ai/sdk";
 import {
@@ -61,12 +61,18 @@ import { deriveFileRefs, writeToolNamesFrom } from "./file-refs.js";
 import { createPermissionPolicy } from "../permission/policy.js";
 import { resolveProjectPermissionSource } from "../permission/project-settings.js";
 import { createNoAskUser } from "../permission/ask-user.js";
-import { createUserHookRouter } from "../hooks/index.js";
+import {
+  composePostHooks,
+  composePreHooks,
+  createPluginHooksFromCatalog,
+  createUserHookRouter,
+} from "../hooks/index.js";
 import { classifyCall } from "../isolation/worktree-gate.js";
 import { createIknowSystemResolver } from "../identity/index.js";
 import { createGitSnapshotProvider } from "../identity/git-snapshot.js";
-import { createSkillScanner } from "../skill/scanner.js";
+import { createSkillScanner, type PluginSkillDir } from "../skill/scanner.js";
 import { createSkillCatalog } from "../skill/catalog.js";
+import { resolvePluginCatalog, resolvePluginRoots } from "../plugin/roots.js";
 import { createJsonlTraceService, type TraceService } from "../trace/index.js";
 import { run, epilogueSummary } from "../loop-engine.js";
 import type { HarnessStreamEvent } from "../stream.js";
@@ -480,6 +486,30 @@ export async function createWorkerRuntime(
 
   // skill 索引: worker 自身独立扫描 (spec OQ3 默认 —— 简化通信, 复用父装配
   // 形态); scanner 内部 try/catch + warn, 目录缺失降级, 装配不阻塞。
+  // #global-plugins T1: 插件 skill 同样由 worker 自解析（与父装配同源 = 同一
+  // 插件根解析 + 同一 disabled 过滤）。merged catalog 的 plugin agents 走
+  // createMergedCatalogResolver() 自解析（ACR #5）—— 不需要 worker 注入。
+  const workerSettings = loadIknowSettings({
+    cwd: projectIdentityRoot,
+    home: userHome,
+  });
+  // 「解析根 → 扫描 → disabled 过滤（→ plugin catalog）」一条链走
+  // roots.ts 的共用装配 helper（与 build-engine 同源），worker 不再各写
+  // 一遍 —— disabled 过滤条件化的 branch 数留在 helper 内。
+  const { catalog: pluginCatalog, enabled: enabledInstallations } =
+    await resolvePluginCatalog({
+      roots: resolvePluginRoots({
+        userHome,
+        settings: workerSettings,
+      }),
+      plugins: workerSettings.plugins,
+    });
+  // #global-plugins T2: hooksEntries 是插件 hooks 文件源（见 build-engine
+  // 同款装配注释）；worker 与父引擎从同一份插件解析（同源、同 disabled）。
+  const pluginSkillDirs: PluginSkillDir[] = enabledInstallations.map((p) => ({
+    dir: join(p.root, "skills"),
+    plugin: p.name,
+  }));
   const skillCatalog =
     opts.skillCatalog ??
     createSkillCatalog(
@@ -487,6 +517,8 @@ export async function createWorkerRuntime(
         userHome,
         projectIdentityRoot,
         env: process.env,
+        // 空数组 = 无插件 skill（scanner 缺省即空数组），无须条件展开。
+        pluginSkillDirs,
       }).scan()
     );
 
@@ -592,12 +624,34 @@ export async function createWorkerRuntime(
         process.stderr.write(`[worker user-rule-init] ${e.message}\n`),
     }
   );
+  // #global-plugins T2（design §6/§7）: worker 同构装配插件 hooks 文件源 ——
+  // 与父引擎同一份 catalog（同根解析、同 disabled 过滤），链序 user → plugin
+  // （worker 无 TUI post，无 post 组合面）。onError 落 stderr，与
+  // user-rule-init 同款形态（worker 无 host 观测信道）。cwd = sandboxRoot
+  // （§5.6 taskRoot）；entries 为空 → 贡献双缺席（零行为变化）。
+  const pluginHooksOpts: Parameters<typeof createPluginHooksFromCatalog>[0] = {
+    entries: pluginCatalog.hooksEntries,
+    installations: enabledInstallations,
+    userHome,
+    projectDir: projectIdentityRoot,
+    cwd: sandboxRoot,
+    env: process.env,
+    onError: (e) => process.stderr.write(`[worker ${e.phase}] ${e.message}\n`),
+  };
+  const pluginHooks = createPluginHooksFromCatalog(pluginHooksOpts);
+  // 组合器跳过 undefined 槽（未配的源）；worker 无 TUI post，插件 Post 若在
+  // 场则单独成链。全缺席 → undefined → postToolUse 字段整体缺席（executor
+  // 侧 `?? no-op` 同形，条件展开可省）。
+  const postToolUse = composePostHooks([pluginHooks.post]);
   const executor = createAciExecutor({
     inner: baseExecutor,
     catalog: reg.catalog,
     policy,
     askUser,
-    hooks: { preToolUse: userHook },
+    hooks: {
+      preToolUse: composePreHooks([userHook, pluginHooks.pre]),
+      postToolUse,
+    },
   });
 
   // surface "ask" → shouldIncludeBootstrap false (无 BOOTSTRAP 段); worker

@@ -7,11 +7,25 @@
  */
 
 export {
+  composePostHooks,
   composePreHooks,
   createUserHookRouter,
   isGitCommitCall,
 } from "./user-hooks.js";
 export type { CreateUserHookRouterOpts } from "./user-hooks.js";
+
+export {
+  createPluginHookContribution,
+  createPluginHooksFromCatalog,
+  evaluatePluginHookMatcher,
+  pluginHookTimeoutMs,
+  pluginHookToolNames,
+} from "./plugin-hooks.js";
+export type {
+  CreatePluginHookContributionOpts,
+  PluginHookFile,
+  PluginInstallationRef,
+} from "./plugin-hooks.js";
 
 import type { PreToolUseHook, PostToolUseHook } from "../permission/types.js";
 

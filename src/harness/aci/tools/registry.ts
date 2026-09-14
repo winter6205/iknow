@@ -45,6 +45,7 @@ import {
 import type { SubAgentManager } from "../../subagent/manager.js";
 import type { BackgroundTaskManager } from "../../background/manager.js";
 import type { McpManager } from "../../mcp/manager.js";
+import type { AgentCatalogResolver } from "../../subagent/catalog.js";
 import { createListMcpResourcesTool } from "./list-mcp-resources.js";
 import { createReadMcpResourceTool } from "./read-mcp-resource.js";
 import { createBashOutputTool } from "./bash-output.js";
@@ -250,6 +251,16 @@ export interface CreateDefaultAciRegistryOptions {
   /** #356 T4 主代理本地子代理生命周期管理器。缺席时 spawn_subagent 不入注册表
    * （ask 入口零件场景；chat/tui/serve 由 build-engine 按 surface 条件构造传入）。 */
   readonly subagentManager?: SubAgentManager;
+  /**
+   * #global-plugins T1（review C1 装配接线）：spawn_subagent 工具
+   * 默认走 `createMergedCatalogResolver()`（与 capability 解析面同源），
+   * 该默认路径 ledger-aware —— 读本机 `<home>/.iknow/plugins` ledger
+   * 加载插件 agent。测试 / hub-less 入口若想与本机已装插件解耦，注
+   * 入显式 resolver（d9 描述守卫、ask 装配路径等都是该 seam 的消费
+   * 面）。生产 build-engine 路径**不**注入，走默认与 capability 同
+   * 源 resolver（ACR #5）。
+   */
+  readonly agentCatalog?: AgentCatalogResolver;
   /** #440 T11 MCP 资源通道管理器。缺席时 list_mcp_resources / read_mcp_resource
    *  不入注册表（ask 入口零件场景 + 任务型 worker；chat/tui/serve 由 build-engine
    *  按 surface 条件构造传入）。与 subagentManager / skillCatalog / memoryDir
@@ -713,10 +724,18 @@ export function createDefaultAciRegistry(
       : {}),
     // #356 T4 spawn_subagent 工具集（条件化装配：subagentManager 缺席时
     // 不入注册表——ask 入口零件；与 skillCatalog / memoryDir 同形态）。
+    // review C1：opts.agentCatalog 透传给 spawn 工厂（缺省走
+    // createMergedCatalogResolver() 默认路径，与 capability 解析面同
+    // 源，ACR #5）。
     ...(subagentManager
       ? {
           spawn_subagent: () =>
-            createSpawnSubAgentTool({ manager: subagentManager }),
+            createSpawnSubAgentTool({
+              manager: subagentManager,
+              ...(opts.agentCatalog !== undefined
+                ? { catalog: opts.agentCatalog }
+                : {}),
+            }),
         }
       : {}),
     // #356 T5 subagent_result 工具集（条件化装配：subagentManager 缺席时

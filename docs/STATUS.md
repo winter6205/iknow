@@ -47,6 +47,8 @@
 
 **TUI skill + MCP 扩展源（#337，2026-08-11）**：TUI 入口与 chat/serve 对齐 skill 与 MCP 扩展源装配——`skill` / `skill_search` 工具 + `<available_skills>` 系统段 + MCP manager 连接（`mcp__*` 工具经 tool_search discover）。slash 输入 `/` 混显静态命令 + 动态 skill 候选，Tab 补全；`/skill-name [提示词]` 确定性加载（skill 正文拼入 user message 发送）；`/mcp` 看板查看 server 状态 / 工具详情 / reload。
 
+**全局插件组件加载（ADR-0095，2026-09-14）**：读取本机全局安装插件携带的 skills / agents / hooks。插件根 = `~/.iknow/plugins`（默认）+ `IKNOW_PLUGIN_ROOTS` + 设置 `plugins.roots`（**仅用户层**，不进项目 allowlist——插件贡献 hooks = 任意命令执行，防 clone 即执行的供应链面）；发现 = `<root>/installed_plugins.json` ledger 优先（`<plugin>@<marketplace>` → installPath，命名空间取 key 前段）+ 目录扫描兜底。skill / agent 登记规范名 `<plugin>:<name>` + 裸名别名（冲突丢弃 + warn），进 `<available_skills>` 与 `spawn_subagent` enum；agent `ROLE_ID_PATTERN` 放宽允许 `:`。hooks：`hooks/hooks.json` 经 `HookContribution` 接缝（ADR-0055 第二刀）编译为异步子进程钩子——matcher 精确/正则分流 + iknow 工具名候选集（`write_file`↔`Write`、`edit_file`↔`Edit|MultiEdit`、`todo_write` 不映射）、envelope 通用键别名、`${*_PLUGIN_ROOT}` 等按后缀替换；Pre exit 2 = 拦截，其余 fail-open。钩子链 additive 异步化（`await pre/post`，无 unhandledRejection）。设计 `plans/global-plugins-loading.md`；ADR `docs/adr/0095-global-plugin-components.md`。
+
 **TUI 可见闭环（horizon-653 包1，PR #666，2026-08-24）**：验证终态对人可见（`VerifyBanner`，HITL + 自动模式）；**环境现势**（cwd / git / diff 要点，上限 2000 codepoints）挂在 TUI chrome，与 ADR-0028 状态栏分离。模型侧 verify 长信封仍隐藏。
 
 **内核包2（horizon-653，PR #671，2026-08-25）**：前台 `runInSandbox` 与后台 `bash` spawn 共用同一套 bwrap 围栏参数；同一 tool 阶段连续 `isConcurrencySafe` 调用可重叠执行，unsafe 仍串行，`tool_result` 顺序与 `tool_use` 一致。spec/plan 已归档。

@@ -12,14 +12,24 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
 import {
+  composePostHooks,
   composePreHooks,
   createUserHookRouter,
 } from "../../../src/harness/hooks/user-hooks.js";
-import type { PreToolUseHook } from "../../../src/harness/permission/types.js";
+import type {
+  PostToolUseHook,
+  PreToolUseHook,
+} from "../../../src/harness/permission/types.js";
 import type { IknowSettingsHooks } from "../../../src/config/settings.js";
 import { classifyCall } from "../../../src/harness/isolation/worktree-gate.js";
 
-/** 断言 hook 返回 block 且 reason 含指定片段。 */
+/**
+ * 断言 hook 返回 block 且 reason 含指定片段。
+ *
+ * #global-plugins T2：PreToolUseHook 返回类型放宽为含 Promise 的联合，本
+ * helper 面向同步源（createUserHookRouter）—— 「非 Promise」本身即是该源
+ * 的契约钉子；异步组合（composePreHooks）用 assertBlockedAsync。
+ */
 function assertBlocked(
   hook: PreToolUseHook,
   tool: string,
@@ -28,6 +38,7 @@ function assertBlocked(
 ): void {
   const block = hook({ tool, input });
   assert.ok(block, `expected block for tool=${tool}`);
+  assert.ok(!(block instanceof Promise), "expected a synchronous hook result");
   if (reasonPart !== undefined) {
     assert.ok(
       block.reason.includes(reasonPart),
@@ -41,7 +52,36 @@ function assertPassthrough(
   tool: string,
   input: unknown
 ): void {
-  assert.equal(hook({ tool, input }), undefined);
+  const result = hook({ tool, input });
+  assert.ok(!(result instanceof Promise), "expected a synchronous hook result");
+  assert.equal(result, undefined);
+}
+
+/** 异步版（组合 hook）：await 后再断言「拦下且 reason 含片段」。 */
+async function assertBlockedAsync(
+  hook: PreToolUseHook,
+  tool: string,
+  input: unknown,
+  reasonPart?: string
+): Promise<void> {
+  const block = await hook({ tool, input });
+  assert.ok(block, `expected block for tool=${tool}`);
+  assert.equal(typeof block.reason, "string");
+  if (reasonPart !== undefined) {
+    assert.ok(
+      block.reason.includes(reasonPart),
+      `reason should include ${JSON.stringify(reasonPart)}, got: ${block.reason}`
+    );
+  }
+}
+
+/** 异步版（组合 hook）：await 后断言放行。 */
+async function assertPassthroughAsync(
+  hook: PreToolUseHook,
+  tool: string,
+  input: unknown
+): Promise<void> {
+  assert.equal(await hook({ tool, input }), undefined);
 }
 
 /**
@@ -371,6 +411,7 @@ describe("createUserHookRouter — SC5: 多条规则先拦先赢", () => {
     });
     assertBlocked(hook, "bash", { command: "x" }, "first wins");
     const block = hook({ tool: "bash", input: { command: "x" } });
+    assert.ok(!(block instanceof Promise));
     assert.ok(!block!.reason.includes("second"));
   });
 
@@ -395,6 +436,7 @@ describe("createUserHookRouter — SC5: 多条规则先拦先赢", () => {
     });
     const block = hook({ tool: "write_file", input: { path: "x" } });
     assert.ok(block);
+    assert.ok(!(block instanceof Promise));
     assert.equal(block.reason, "w1");
   });
 });
@@ -503,14 +545,14 @@ describe("composePreHooks — multiplexer 组合", () => {
     ],
   });
 
-  it("builtin 在前、user 在后 → builtin 先拦先赢", () => {
+  it("builtin 在前、user 在后 → builtin 先拦先赢", async () => {
     const composed = composePreHooks([builtin, user]);
-    assertBlocked(composed, "bash", { command: "x" }, "builtin hit");
-    const block = composed({ tool: "bash", input: { command: "x" } });
+    await assertBlockedAsync(composed, "bash", { command: "x" }, "builtin hit");
+    const block = await composed({ tool: "bash", input: { command: "x" } });
     assert.ok(!block!.reason.includes("user hit"));
   });
 
-  it("user deny 时 builtin 之后的 hook 不再被调用（短路）", () => {
+  it("user deny 时 builtin 之后的 hook 不再被调用（短路）", async () => {
     const calls: string[] = [];
     const denyUser: PreToolUseHook = () => {
       calls.push("user");
@@ -521,13 +563,13 @@ describe("composePreHooks — multiplexer 组合", () => {
       return undefined;
     };
     const composed = composePreHooks([denyUser, after]);
-    const block = composed({ tool: "bash", input: {} });
+    const block = await composed({ tool: "bash", input: {} });
     assert.deepEqual(calls, ["user"]);
     assert.ok(block);
     assert.equal(block.reason, "user deny");
   });
 
-  it("全部未命中 → undefined，全部 hook 均被评估", () => {
+  it("全部未命中 → undefined，全部 hook 均被评估", async () => {
     const calls: string[] = [];
     const a: PreToolUseHook = () => {
       calls.push("a");
@@ -538,12 +580,123 @@ describe("composePreHooks — multiplexer 组合", () => {
       return undefined;
     };
     const composed = composePreHooks([a, b]);
-    assert.equal(composed({ tool: "bash", input: {} }), undefined);
+    assert.equal(await composed({ tool: "bash", input: {} }), undefined);
     assert.deepEqual(calls, ["a", "b"]);
   });
 
-  it("空组合 → 恒 undefined", () => {
+  it("空组合 → 恒 undefined", async () => {
     const composed = composePreHooks([]);
-    assertPassthrough(composed, "bash", { command: "git commit -m x" });
+    await assertPassthroughAsync(composed, "bash", {
+      command: "git commit -m x",
+    });
+  });
+
+  it("#global-plugins T2：异步 hook 按声明序 await（前一个 resolve 后才调下一个）", async () => {
+    const calls: string[] = [];
+    const slow: PreToolUseHook = async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      calls.push("slow");
+      return undefined;
+    };
+    const fast: PreToolUseHook = async () => {
+      calls.push("fast");
+      return undefined;
+    };
+    const composed = composePreHooks([slow, fast]);
+    await composed({ tool: "bash", input: {} });
+    assert.deepEqual(calls, ["slow", "fast"], "慢 hook 先完成；顺序非并发");
+  });
+
+  it("#global-plugins T2：异步 hook 返回 block → 短路，后续 hook 不调用", async () => {
+    const calls: string[] = [];
+    const asyncDeny: PreToolUseHook = async () => {
+      calls.push("deny");
+      return { reason: "async deny" };
+    };
+    const after: PreToolUseHook = () => {
+      calls.push("after");
+      return undefined;
+    };
+    const composed = composePreHooks([asyncDeny, after]);
+    const block = await composed({ tool: "bash", input: {} });
+    assert.equal(block!.reason, "async deny");
+    assert.deepEqual(calls, ["deny"]);
+  });
+
+  it("#global-plugins T2：异步 hook 拒绝 → composed 拒绝（fail-closed 由调用点承载）", async () => {
+    const boom: PreToolUseHook = async () => {
+      throw new Error("async hook exploded");
+    };
+    const composed = composePreHooks([boom]);
+    await assert.rejects(
+      () => Promise.resolve(composed({ tool: "bash", input: {} })),
+      /async hook exploded/
+    );
+  });
+});
+
+describe("composePostHooks — Post 侧组合器（#global-plugins T2）", () => {
+  /** Post 钩子收到的最小 result（字段全填；断言只关心调用序与次数）。 */
+  const postResult = {
+    toolUseId: "id-1",
+    name: "read_file",
+    input: {},
+    kind: "ok" as const,
+  };
+
+  it("全槽缺席 → undefined（装配层据此保持 postToolUse 字段整体缺席）", () => {
+    assert.equal(composePostHooks([]), undefined);
+    assert.equal(composePostHooks([undefined, undefined]), undefined);
+  });
+
+  it("undefined 槽跳过，在场的按数组序 await（TUI 观测在前、插件在后）", async () => {
+    const calls: string[] = [];
+    const tui: PostToolUseHook = () => {
+      calls.push("tui");
+    };
+    const plugin: PostToolUseHook = async () => {
+      calls.push("plugin");
+    };
+    const composed = composePostHooks([tui, undefined, plugin]);
+    assert.ok(composed);
+    await composed(postResult);
+    assert.deepEqual(calls, ["tui", "plugin"]);
+  });
+
+  it("顺序 await：慢 hook 完成前不启动下一个（非并发）", async () => {
+    const calls: string[] = [];
+    const slow: PostToolUseHook = async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      calls.push("slow");
+    };
+    const fast: PostToolUseHook = () => {
+      calls.push("fast");
+    };
+    const composed = composePostHooks([slow, fast]);
+    await composed!(postResult);
+    assert.deepEqual(calls, ["slow", "fast"], "慢 hook 先完成；顺序非并发");
+  });
+
+  it("result 透传：每个 hook 收到同一份结果对象", async () => {
+    const seen: unknown[] = [];
+    const a: PostToolUseHook = (r) => {
+      seen.push(r);
+    };
+    const b: PostToolUseHook = (r) => {
+      seen.push(r);
+    };
+    await composePostHooks([a, b])!(postResult);
+    assert.deepEqual(seen, [postResult, postResult]);
+  });
+
+  it("hook 拒绝 → composed 拒绝（catch 归调用点，本组合器不复刻）", async () => {
+    const boom: PostToolUseHook = async () => {
+      throw new Error("post exploded");
+    };
+    const composed = composePostHooks([boom]);
+    await assert.rejects(
+      () => Promise.resolve(composed!(postResult)),
+      /post exploded/
+    );
   });
 });

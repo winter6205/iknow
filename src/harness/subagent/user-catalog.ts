@@ -16,18 +16,25 @@
  * enum 构建时机。目录小（几个文件），readdirSync 代价可忽略。
  *
  * merge 语义（createMergedCatalogResolver）：
- *   - builtin 顺序在前（explore, general-purpose），user 新 id 按扫描序
- *     追加在后；user 同名 id 与 builtin 冲突 → warn + 跳过（保留 builtin
- *     权威 —— explore 的 readonly 隔离等保证不被用户目录静默替换）；
+ *   - builtin 顺序在前（explore, general-purpose），user / plugin 按合并序
+ *     追加在后；与 builtin 同名 id → warn + 跳过（builtin 权威 —— explore
+ *     的 readonly 隔离等保证不被用户/插件目录静默替换）；
  *   - 缓存按 resolved agentsDir 记忆化（进程内一次扫描），测试用
- *     resetUserAgentsCache() 清缓存。
+ *     resetUserAgentsCache() 清缓存（同时清插件目录记忆化）。
+ *
+ * #global-plugins T1（§4.3）扩展：
+ *   - ROLE_ID_PATTERN 放宽为 `^[A-Za-z0-9][A-Za-z0-9_:-]*$`（允许 `:` 命名空间）；
+ *   - 插件 agent 来自 `<pluginRoot>/agents/*.md`，规范 id = `<plugin>:<basename>`；
+ *   - 裸名别名仅在未与 builtin / user / 其他插件裸名冲突时登记，冲突 → 丢 + warn；
+ *   - id 原样传递不变式（§4.3 ACR #6）: enum 由 list() 派生、模型按 enum
+ *     原样传参、handler / capability 原样透传，零 normalize / trim / case-fold。
  *
  * 防御契约：目录缺失（ENOENT）→ 空数组（未配置 = 纯 builtin，字节级
  * 等价既有行为）；空 body / 非法 frontmatter 值 / 非法 id → warn + 降级
  * （description 兜底 / 键视为 undefined / skip 该文件），不 throw ——
  * 用户手写的角色文件不能炸掉 spawn 装配链。
  */
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import {
@@ -36,6 +43,10 @@ import {
   type AgentCatalogEntry,
   type AgentCatalogResolver,
 } from "./catalog.js";
+import {
+  enumeratePluginAgentDirs,
+  resolvePluginRoots,
+} from "../plugin/roots.js";
 
 /** 全局 agents 目录名（`<home>/.iknow/<dirname>`）。 */
 const USER_AGENTS_DIRNAME = "agents";
@@ -43,8 +54,11 @@ const USER_AGENTS_DIRNAME = "agents";
 const ROLE_FILENAME = "AGENTS.md";
 /** description 截断上限（对齐 skill scanner 的 DESCRIPTION_LIMIT）。 */
 const DESCRIPTION_LIMIT = 1536;
-/** 合法角色 id：字母/数字开头，只含字母数字 - _（进 enum + prose list 的面）。 */
-const ROLE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+/**
+ * 合法角色 id：字母/数字开头，只含字母数字 - _（进 enum + prose list 的面）。
+ * #global-plugins T1: 允许 `:` 容纳 `<plugin>:<id>` 命名空间形态。
+ */
+const ROLE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_:-]*$/;
 
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 const MD_SUFFIX = /\.md$/i;
@@ -58,6 +72,21 @@ export interface UserAgentScanOptions {
   readonly agentsDir?: string;
   /** warn 通道，默认 console.warn。 */
   readonly warn?: Warn;
+  /**
+   * #global-plugins T1：插件 agent 目录列表（绝对路径 = `<pluginRoot>/agents`）。
+   * 缺省：createMergedCatalogResolver() 在调用时由 plugin/roots.ts 自解析
+   * （env IKNOW_PLUGIN_ROOTS > settings.plugins.roots > ~/.iknow/plugins），
+   * 保证 spawn 工具面与 capability 解析面同源（ACR #5）—— 测试可显式
+   * 注入以隔离真实插件目录。
+   */
+  readonly pluginAgentDirs?: readonly string[];
+  /**
+   * #global-plugins T1：插件命名空间映射（pluginDir → pluginName），与
+   * pluginAgentDirs 顺序一一对应。缺省时按 pluginAgentDirs[i] 的 basename
+   * 父目录（即 `<pluginRoot>` basename）兜底推断（目录扫描形态）；
+   * 测试注入可解耦（fixture 临时目录的 basename 未必是想要的插件名）。
+   */
+  readonly pluginNames?: readonly string[];
 }
 
 export function resolveUserAgentsDir(opts: UserAgentScanOptions = {}): string {
@@ -266,6 +295,9 @@ const userAgentsCache = new Map<string, ReadonlyArray<AgentCatalogEntry>>();
 
 export function resetUserAgentsCache(): void {
   userAgentsCache.clear();
+  // #global-plugins T1: 同步清插件 agent 缓存,否则 fixture 写入不会被
+  // 同一进程的二次 createMergedCatalogResolver() 看见。
+  pluginAgentsCache.clear();
 }
 
 function cachedUserEntries(
@@ -281,38 +313,265 @@ function cachedUserEntries(
 
 /**
  * builtin + user 合并 resolver（spawn 工具 / capability / worker 共用的
- * 默认 catalog 源）。user 新 id 按扫描序追加；与 builtin 同名 id → warn +
- * 跳过（builtin 权威，防 explore readonly 等保证被静默替换）。返回 frozen
- * resolver；merge 结果按 agentsDir 记忆化。
+ * 默认 catalog 源）。
+ *
+ * merge 顺序（§4.3）：builtin < user < plugins。builtin 权威 —— 任何
+ * builtin 同名 id → warn + 跳过（user 与 plugin 同样规则）。裸名别名
+ * 仅在未与 builtin / 用户 / 其他插件裸名冲突时登记。
+ *
+ * id 原样传递不变式（§4.3 ACR #6）：list() → 模型 → handler / capability
+ * 三段间**零 normalize、零 trim、零大小写折叠**。get(id) 是数组 .find
+ * 的引用比较 + 严格相等 —— id 字符串任何前置/后置空格或大小写差异都会
+ * 命中 AgentCatalogLookupError（fail-fast）。该不变式由测试
+ * `whitespace id not accepted` 钉死。
+ *
+ * 默认解析面：opts 未指定 pluginAgentDirs / pluginNames 时，
+ * createMergedCatalogResolver 自解析插件根（plugin/roots.ts → env >
+ * settings > ~/.iknow/plugins），保证 spawn 工具面与 capability 解析面
+ * 同源（ACR #5）—— 调用方不传 opts 仍看见插件。
+ *
+ * 记忆化：user + plugin 各自按 resolved agentsDir / 插件根集 cache。
+ * resetUserAgentsCache() 同时清两边。
  */
+/**
+ * 按 canonical id 去重追加（user 面）：builtin 占用 → warn + skip（builtin
+ * 权威）；更早的 user / plugin entry 占用 → warn + skip（先到者赢）；
+ * 否则登记 id 并追加。返回追加后的条目（调用方 push 进 merged）。
+ */
+function appendUniqueById(
+  entries: ReadonlyArray<AgentCatalogEntry>,
+  source: "user" | "plugin",
+  builtinIds: ReadonlySet<string>,
+  seenIds: Set<string>,
+  warn: Warn
+): AgentCatalogEntry[] {
+  const appended: AgentCatalogEntry[] = [];
+  for (const entry of entries) {
+    if (builtinIds.has(entry.id)) {
+      warn(
+        `${source} agent '${entry.id}' collides with builtin catalog entry; builtin kept`
+      );
+      continue;
+    }
+    if (seenIds.has(entry.id)) {
+      warn(
+        `${source} agent '${entry.id}' collides with earlier entry; earlier kept`
+      );
+      continue;
+    }
+    seenIds.add(entry.id);
+    appended.push(entry);
+  }
+  return appended;
+}
+
+/**
+ * 插件 agent 追加：canonical id 走 `appendUniqueById` 同款纪律，另加裸名
+ * 别名占用校验 —— 同名裸名已被 builtin / user / 其它插件占用 → 丢别名
+ * （`stripBareAlias` 重构 entry：frozen 状态下不可 delete）；别名可用 →
+ * 登记进 seenIds（先记 alias，后续 canonical 撞库即可直接判冲突）。
+ */
+function appendPluginEntries(
+  entries: ReadonlyArray<AgentCatalogEntry>,
+  builtinIds: ReadonlySet<string>,
+  seenIds: Set<string>,
+  warn: Warn
+): AgentCatalogEntry[] {
+  const appended: AgentCatalogEntry[] = [];
+  for (const entry of entries) {
+    if (builtinIds.has(entry.id)) {
+      warn(
+        `plugin agent '${entry.id}' collides with builtin catalog entry; builtin kept`
+      );
+      continue;
+    }
+    if (seenIds.has(entry.id)) {
+      warn(
+        `plugin agent '${entry.id}' collides with earlier entry; earlier kept`
+      );
+      continue;
+    }
+    seenIds.add(entry.id);
+    appended.push(keepAliasOrStrip(entry, builtinIds, seenIds, warn));
+  }
+  return appended;
+}
+
+/** 单条 plugin entry 的裸名别名占用校验（见 `appendPluginEntries`）。 */
+function keepAliasOrStrip(
+  entry: AgentCatalogEntry,
+  builtinIds: ReadonlySet<string>,
+  seenIds: Set<string>,
+  warn: Warn
+): AgentCatalogEntry {
+  const alias = entry.bareAlias;
+  if (alias === undefined || alias.length === 0) return entry;
+  if (builtinIds.has(alias) || seenIds.has(alias)) {
+    warn(
+      `plugin agent bare alias '${alias}' (canonical '${entry.id}') collides with earlier entry; alias dropped`
+    );
+    return stripBareAlias(entry);
+  }
+  seenIds.add(alias);
+  return entry;
+}
+
 export function createMergedCatalogResolver(
   opts: UserAgentScanOptions = {}
 ): AgentCatalogResolver {
+  const warn = opts.warn ?? console.warn;
   const userEntries = cachedUserEntries(opts);
+  const pluginSources = resolvePluginAgentSources(opts);
+  const pluginEntries = pluginSources.flatMap((source) =>
+    cachedPluginEntries(source, warn)
+  );
   const builtinIds = new Set(resolveAgentCatalog().map((e) => e.id));
-  const appended = userEntries.filter((entry) => {
-    if (!builtinIds.has(entry.id)) return true;
-    (opts.warn ?? console.warn)(
-      `user agent '${entry.id}' collides with builtin catalog entry; builtin kept`
-    );
-    return false;
-  });
-  const merged: ReadonlyArray<AgentCatalogEntry> = Object.freeze([
-    ...resolveAgentCatalog(),
-    ...appended,
-  ]);
+
+  // 冲突消解（builtin 权威 + 裸名别名）：先按规范 id 排除 builtin 撞库，
+  // 然后再对剩余 plugin / user 互相对裸名去重。
+  const seenIds = new Set<string>();
+  const merged: AgentCatalogEntry[] = [...resolveAgentCatalog()];
+
+  merged.push(
+    ...appendUniqueById(userEntries, "user", builtinIds, seenIds, warn)
+  );
+
+  // 插件 agent：每条 pluginEntry 已带 canonical id（"<plugin>:<basename>"）
+  // 和 (可选) bareAlias（typed 字段，AgentCatalogEntry.bareAlias）。
+  merged.push(...appendPluginEntries(pluginEntries, builtinIds, seenIds, warn));
+
+  const frozen: ReadonlyArray<AgentCatalogEntry> = Object.freeze(merged);
   return Object.freeze({
-    list: () => merged,
+    list: () => frozen,
     get: (id: string) => {
-      const entry = merged.find((e) => e.id === id);
-      if (entry === undefined) {
-        throw new AgentCatalogLookupError(id);
-      }
-      return entry;
+      // 严格按规范 id 查：list 已含 canonical + 携带 bareAlias 的 entry。
+      // 若 id 是某 entry 的裸名别名（命中 bareAlias），返回该 entry。
+      // 优先 canonical 命中 → 一次 find 即可；别名命中仅在 canonical 不
+      // 命中时退化到线性扫 —— 顺序按 merge（builtin < user < plugin），
+      // 别名冲突时前者赢。
+      const direct = frozen.find((e) => e.id === id);
+      if (direct !== undefined) return direct;
+      const aliased = frozen.find((e) => e.bareAlias === id);
+      if (aliased !== undefined) return aliased;
+      throw new AgentCatalogLookupError(id);
     },
   });
 }
 
 function isMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+// ─── plugin agent sources ────────────────────────────────────────────────────
+
+/**
+ * 解析 pluginAgentSources —— 测试注入优先；否则委托 plugin/roots.ts 走
+ * env / settings / default-root 链路（ACR #5：两处解析面同源 = 两个
+ * createMergedCatalogResolver() 默认调用都看见同一份插件集）。
+ *
+ * 默认路径走 `enumeratePluginAgentDirs`（sync，**ledger 优先 + 目录扫
+ * 描兜底**，review C1）—— ledger 解析已同步化（`readFileSync` + 同样
+ * 校验），不再依赖 T2 装配期 await 缓存。ledger 在场时直接以 ledger
+ * key 前段（`@` 之前）为命名空间，目录扫描兜底仅在 ledger 缺 / 损坏
+ * 时启用 → spawn enum 与 capability 解析面同源，命名空间不再漂移。
+ */
+function resolvePluginAgentSources(
+  opts: UserAgentScanOptions
+): ReadonlyArray<PluginAgentSource> {
+  if (opts.pluginAgentDirs !== undefined) {
+    return opts.pluginAgentDirs.map((dir, i) => ({
+      dir,
+      plugin: opts.pluginNames?.[i] ?? basename(resolve(dir)),
+    }));
+  }
+  const rootsOpts: Parameters<typeof resolvePluginRoots>[0] = {
+    ...(opts.warn !== undefined ? { warn: opts.warn } : {}),
+    ...(opts.home !== undefined ? { userHome: opts.home } : {}),
+  };
+  const pluginRoots = resolvePluginRoots(rootsOpts);
+  if (pluginRoots.length === 0) return [];
+  return enumeratePluginAgentDirs(pluginRoots, {
+    ...(opts.warn !== undefined ? { warn: opts.warn } : {}),
+  });
+}
+
+/** 插件 agent 来源：pluginDir = <pluginRoot>/agents；plugin = 命名空间。 */
+interface PluginAgentSource {
+  readonly dir: string;
+  readonly plugin: string;
+}
+
+/**
+ * 进程内记忆化：key = resolved pluginDir。resetUserAgentsCache 同时清。
+ */
+const pluginAgentsCache = new Map<string, ReadonlyArray<AgentCatalogEntry>>();
+
+function cachedPluginEntries(
+  source: PluginAgentSource,
+  warn: Warn
+): ReadonlyArray<AgentCatalogEntry> {
+  const cached = pluginAgentsCache.get(source.dir);
+  if (cached !== undefined) return cached;
+  const entries = loadPluginAgentEntries(source, warn);
+  pluginAgentsCache.set(source.dir, entries);
+  return entries;
+}
+
+/**
+ * 扫描 `<pluginDir>`（即 `<pluginRoot>/agents`）下的角色文件：与
+ * loadUserAgentEntries 同形（目录 / 平铺双形态），但只支持**平铺**
+ * `<basename>.md` —— design §4.3 明确插件 agents 是平铺文件，不复用
+ * 用户的目录布局。
+ */
+function loadPluginAgentEntries(
+  source: PluginAgentSource,
+  warn: Warn
+): ReadonlyArray<AgentCatalogEntry> {
+  let children;
+  try {
+    children = readdirSync(source.dir, { withFileTypes: true });
+  } catch (err) {
+    if (isMissing(err)) return Object.freeze([]);
+    warn(`plugin agents scan skipped directory: ${source.dir}`);
+    return Object.freeze([]);
+  }
+
+  const entries: AgentCatalogEntry[] = [];
+  const sorted = [...children].sort((a, b) => a.name.localeCompare(b.name));
+  for (const child of sorted) {
+    // 插件 agents 仅平铺 .md 文件形态（design §4.3），目录布局由用户
+    // agent 路径独占；插件目录下若放目录，silently skip。
+    if (!child.isFile() || !MD_SUFFIX.test(child.name)) continue;
+    const bare = child.name.replace(MD_SUFFIX, "");
+    const canonicalId = `${source.plugin}:${bare}`;
+    if (!ROLE_ID_PATTERN.test(canonicalId)) {
+      warn(`plugin agent skipped invalid role id '${canonicalId}'`);
+      continue;
+    }
+    const filePath = join(source.dir, child.name);
+    const raw = readRoleSource(filePath, false, warn);
+    if (raw === undefined) continue;
+    const entry = parseRoleFile(canonicalId, raw, filePath, warn);
+    if (entry === undefined) continue;
+    // 裸名别名：typed 字段 `AgentCatalogEntry.bareAlias`（review C4），
+    // 取代之前 `as unknown as { __bareAlias?: string }` 私有字段的
+    // 走私形式。冻结前挂上（frozen 后赋值会抛 TypeError）。
+    const withAlias = Object.freeze({
+      ...entry,
+      bareAlias: bare,
+    }) as AgentCatalogEntry;
+    entries.push(withAlias);
+  }
+  return Object.freeze(entries);
+}
+
+/**
+ * 取消裸名别名 —— 通过 Object.freeze 替换为不携带该字段的新 entry。
+ * entry 已 frozen；不能用 delete。spread 解构所有字段后丢掉 bareAlias
+ * 重构。
+ */
+function stripBareAlias(entry: AgentCatalogEntry): AgentCatalogEntry {
+  const { bareAlias: _stripped, ...rest } = entry;
+  void _stripped;
+  return Object.freeze(rest) as AgentCatalogEntry;
 }

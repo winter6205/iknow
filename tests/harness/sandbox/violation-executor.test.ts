@@ -169,6 +169,66 @@ describe("wrapWithViolationHook", () => {
     assert.deepEqual(settled, ["a", "b"]);
     assert.deepEqual(hooked, ["a", "b"]);
   });
+
+  it("#global-plugins T2：异步 post hook 被 await（结果返回前观测已完成）", async () => {
+    const hooked: string[] = [];
+    const inner: Executor = Object.freeze({
+      executeAll: async (
+        calls: ReadonlyArray<ToolCall>
+      ): Promise<ReadonlyArray<ToolExecutionResult>> =>
+        calls.map((c) => ({
+          kind: "ok" as const,
+          toolUseId: c.id,
+          payload: [],
+        })),
+    });
+    const wrapped = wrapWithViolationHook({
+      inner,
+      onKill: () => undefined,
+      postToolUse: async ({ toolUseId }) => {
+        await new Promise((r) => setTimeout(r, 10));
+        hooked.push(toolUseId);
+      },
+    });
+    await wrapped.executeAll([
+      { id: "a", name: "bash", input: {} },
+      { id: "b", name: "bash", input: {} },
+    ]);
+    assert.deepEqual(hooked, ["a", "b"]);
+  });
+
+  it("#global-plugins T2：异步 post hook 拒绝被收口 —— 结果不变、无 unhandledRejection", async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      const inner: Executor = Object.freeze({
+        executeAll: async (
+          calls: ReadonlyArray<ToolCall>
+        ): Promise<ReadonlyArray<ToolExecutionResult>> =>
+          calls.map((c) => ({
+            kind: "ok" as const,
+            toolUseId: c.id,
+            payload: [],
+          })),
+      });
+      const wrapped = wrapWithViolationHook({
+        inner,
+        onKill: () => undefined,
+        postToolUse: async () => {
+          throw new Error("async post exploded");
+        },
+      });
+      const out = await wrapped.executeAll([
+        { id: "a", name: "bash", input: {} },
+      ]);
+      assert.equal(out[0]!.kind, "ok");
+      await new Promise((r) => setTimeout(r, 20));
+      assert.deepEqual(rejections, []);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
 });
 
 describe("buildViolationWiring", () => {

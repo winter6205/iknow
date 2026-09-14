@@ -142,15 +142,27 @@ export interface PreHookBlock {
  * PreToolUse hook (chain step 1)。
  * deny-only：返回 PreHookBlock = 拦截（executor 包装 `[hook_blocked] <reason>`）；
  * 返回 undefined = 放行。异常语义（#126 D3）由 executor 调用点承载（fail-closed）。
+ *
+ * #global-plugins T2 加性放宽：返回类型加 `Promise<PreHookBlock | undefined>`
+ * —— 插件 hook 需异步 spawn 子进程。既有同步实现零改动（同步返回仍是该联合
+ * 的成员，赋值兼容）；调用点必须 await（不 await 会拿到恒 truthy 的 Promise
+ * 而不是 block —— gateOne 已 await）。
  */
 export interface PreToolUseHook {
   (ctx: {
     readonly tool: string;
     readonly input: unknown;
-  }): PreHookBlock | undefined;
+  }): PreHookBlock | undefined | Promise<PreHookBlock | undefined>;
 }
 
-/** PostToolUse hook (chain step 5). Observability only; cannot influence outcome. */
+/**
+ * PostToolUse hook (chain step 5). Observability only; cannot influence outcome.
+ *
+ * #global-plugins T2 加性放宽：返回类型加 `Promise<void>` —— 插件 hook 异步
+ * 执行。异步拒绝由调用点收口（permission-executor `runAllowed` 的
+ * `await post(...)` + try/catch；sandbox/violation-executor `observe` 同款），
+ * 不让 rejected promise 逃逸成 unhandledRejection；「不改变工具结果」不变量不变。
+ */
 export interface PostToolUseHook {
   (result: {
     readonly toolUseId: string;
@@ -163,5 +175,5 @@ export interface PostToolUseHook {
     readonly payload?: unknown;
     /** T4 #298:ok 变体的观测 side-channel；模型不可见。 */
     readonly meta?: ToolResultMeta;
-  }): void | undefined;
+  }): void | Promise<void>;
 }

@@ -501,10 +501,34 @@ export interface IknowSettings {
   hooks?: IknowSettingsHooks;
   /** Web 工具配置段（web_search 后端选择等）。 */
   web?: IknowSettingsWeb;
+  /**
+   * #global-plugins T1: 插件组件加载配置（仅用户层 —— 项目层出现
+   * `plugins` 即被 allowlist 丢弃 + 告警）。消费点 src/harness/plugin/roots.ts
+   * `resolvePluginRoots`（roots 解析）+ `discoverPlugins`（disabled 过滤）。
+   */
+  plugins?: IknowSettingsPlugins;
 }
 
 export interface IknowSettingsLoop {
   detectToolLoop?: boolean;
+}
+
+/**
+ * #global-plugins T1（plans/global-plugins-loading.md §3.3 / §3.4）：
+ * 插件组件加载配置段 —— **仅用户层**。项目层出现 `plugins` 即被
+ * `PROJECT_SETTINGS_ALLOWED_KEYS` 丢弃并告警（ADR-0084 既有 allowlist 机制，
+ * 防「clone 即执行」供应链攻击：plugins 携带 hooks = 任意命令执行）。
+ *
+ * 校验纪律：非普通对象 → 丢弃该层（不抛）；roots 非字符串数组 / 元素非非空
+ * 字符串 → 丢弃该字段；disabled 非字符串数组 / 元素非非空字符串 → 丢弃
+ * 该字段；全部字段非法 → 段缺席（消费方按"无配置"处理）。merge 阶段
+ * 项目层 parsePlugins 永远拿到 {}（项目层 plugins 已被 allowlist 丢弃）。
+ */
+export interface IknowSettingsPlugins {
+  /** 显式插件根列表（绝对路径 / 相对路径均可；解析时 resolve 为绝对路径）。 */
+  roots?: string[];
+  /** 禁用插件名列表 —— 命中即跳过（与 plugin/roots.ts 联动）。 */
+  disabled?: string[];
 }
 
 /**
@@ -1233,6 +1257,41 @@ function parseWeb(raw: unknown): IknowSettingsWeb | undefined {
   return out;
 }
 
+/**
+ * #global-plugins T1: 校验 `plugins` 层 —— 非法字段丢弃（镜像 parseWeb）。
+ * 非普通对象 → undefined；roots 非字符串数组 / 任一元素非非空串 → 丢弃
+ * 该字段；disabled 同款纪律；全部字段非法 → undefined（消费方按"未配"处理）。
+ *
+ * **仅用户层**：mergePlugins 永远只看 user —— 项目层 plugins 已被
+ * PROJECT_SETTINGS_ALLOWED_KEYS 在 `filterProjectSettingsKeys` 阶段丢弃。
+ */
+function parsePlugins(raw: unknown): IknowSettingsPlugins | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const out: IknowSettingsPlugins = {};
+  if (Array.isArray(raw.roots)) {
+    const roots = raw.roots.filter(isNonEmptyString).map((s) => s.trim());
+    if (roots.length > 0) out.roots = roots;
+  }
+  if (Array.isArray(raw.disabled)) {
+    const disabled = raw.disabled.filter(isNonEmptyString).map((s) => s.trim());
+    if (disabled.length > 0) out.disabled = disabled;
+  }
+  if (out.roots === undefined && out.disabled === undefined) return undefined;
+  return out;
+}
+
+/** plugins 段逐层合并 —— user 唯一来源（项目层早已被 allowlist 丢弃）。 */
+function mergePlugins(
+  user: IknowSettingsPlugins | undefined,
+  _project: IknowSettingsPlugins | undefined
+): IknowSettingsPlugins | undefined {
+  if (!user) return undefined;
+  const out: IknowSettingsPlugins = {};
+  if (user.roots !== undefined) out.roots = user.roots;
+  if (user.disabled !== undefined) out.disabled = user.disabled;
+  return out;
+}
+
 /** Web 工具配置段：逐层合并 web —— project 字段优先，未覆盖的 user 字段保留。 */
 function mergeWeb(
   user: IknowSettingsWeb | undefined,
@@ -1471,6 +1530,12 @@ function mergeSettings(
   // ADR-0084: 权限规则段 —— 只从项目层解析（用户层同名键在
   // `loadIknowSettings` 已被丢弃）。`projectRaw` 进来前已过允许名单。
   const permissions = parsePermissions(projectRaw.permissions);
+  // #global-plugins T1: 插件组件加载配置 —— 仅用户层（项目层 plugins 已在
+  // allowlist 阶段丢弃；此处 `parsePlugins(projectRaw.plugins)` 必为 undefined）。
+  const plugins = mergePlugins(
+    parsePlugins(userRaw.plugins),
+    parsePlugins(projectRaw.plugins)
+  );
   return assembleSettings({
     llm,
     verify,
@@ -1484,6 +1549,7 @@ function mergeSettings(
     web,
     hooks,
     permissions,
+    plugins,
   });
 }
 

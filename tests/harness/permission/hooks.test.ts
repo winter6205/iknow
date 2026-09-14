@@ -59,12 +59,17 @@ describe("createHooksPair", () => {
     );
   });
 
-  it("custom preToolUse can short-circuit with a block (executor wraps as [hook_blocked])", () => {
+  it("custom preToolUse can short-circuit with a block (executor wraps as [hook_blocked])", async () => {
     const h = createHooksPair({
       preToolUse: () => ({ reason: "blocked by audit hook" }),
     });
-    const out = h.preToolUse({ tool: "write_file", input: { path: "x" } });
+    // #global-plugins T2：PreToolUseHook 返回类型放宽为含 Promise 的联合，
+    // 断言前先 await（本 hook 同步返回，await 无代价）。
+    const out = await h.preToolUse({
+      tool: "write_file",
+      input: { path: "x" },
+    });
     assert.ok(out);
-    assert.equal(out!.reason, "blocked by audit hook");
+    assert.equal(out.reason, "blocked by audit hook");
   });
 });

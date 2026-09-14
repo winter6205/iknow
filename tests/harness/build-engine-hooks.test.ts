@@ -20,7 +20,8 @@
  * 内实现，不需要 LLM 连接。
  */
 import { afterAll, describe, expect, it } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -266,5 +267,154 @@ describe("buildHarnessEngine — user-hook-router SC9（postToolUse 观测与 us
     expect(postCalls[0]!.toolUseId).toBe("sc9-passed");
     expect(postCalls[0]!.name).toBe("read_file");
     expect(postCalls[0]!.kind).toBe("ok");
+  });
+});
+
+describe("buildHarnessEngine — #global-plugins T2 插件 hooks 装配面", () => {
+  /** 造一个插件目录：`<root>/<name>/hooks/hooks.json`。 */
+  async function makePlugin(
+    base: string,
+    name: string,
+    hooksJson: unknown
+  ): Promise<string> {
+    const dir = join(base, name, "hooks");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "hooks.json"), JSON.stringify(hooksJson), "utf8");
+    return join(base, name);
+  }
+
+  it("插件 Pre hook 经产品 executor 真拦下（exit 2 → [hook_blocked]）", async () => {
+    const root = await makeRoot("iknow-plugins-pre-");
+    const pluginsRoot = join(root, "plugin-roots");
+    const pluginRoot = await makePlugin(pluginsRoot, "gatekeeper", {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Bash",
+            hooks: [
+              {
+                type: "command",
+                command:
+                  "node -e \"process.stdin.resume();process.stdin.on('end',()=>{process.stderr.write('plugin said no');process.exit(2)})\"",
+                timeout: 15,
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const engine = await build({ plugins: { roots: [pluginsRoot] } }, { root });
+    expect(pluginRoot.endsWith("gatekeeper")).toBe(true);
+
+    const [blocked] = await engine.deps.executor.executeAll([
+      { id: "pg-1", name: "bash", input: { command: "echo hi" } },
+    ]);
+    expect(blocked.kind).toBe("execution_failed");
+    if (blocked.kind === "execution_failed") {
+      expect(blocked.message.startsWith("[hook_blocked]")).toBe(true);
+      expect(blocked.message.includes("plugin said no")).toBe(true);
+    }
+  });
+
+  it("插件 Post hook 与 TUI post 并存（TUI 在前、两者都观测到结果）", async () => {
+    const root = await makeRoot("iknow-plugins-post-");
+    const pluginsRoot = join(root, "plugin-roots");
+    // 插件 Post 把观测落到 `${*_PLUGIN_DATA}` —— 一并验占位符替换 + 首引即建
+    // （userHome = root），无需依赖测试进程 env。
+    await makePlugin(pluginsRoot, "observer", {
+      hooks: {
+        PostToolUse: [
+          {
+            matcher: "read_file",
+            hooks: [
+              {
+                type: "command",
+                command:
+                  "node -e \"require('fs').appendFileSync(process.argv[1],'p');process.stdin.resume()\" \"${OBS_PLUGIN_DATA}/post.txt\"",
+                timeout: 15,
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const notePath = join(root, "note.txt");
+    await writeFile(notePath, "hello plugin post\n", "utf8");
+    const pluginDataFile = join(
+      root,
+      ".iknow",
+      "plugin-data",
+      "observer",
+      "post.txt"
+    );
+    // TUI hook 记录「自己被调用时插件文件是否已存在」—— 用于证明 TUI 在前。
+    const tuiSaw: string[] = [];
+    const engine = await build(
+      { plugins: { roots: [pluginsRoot] } },
+      {
+        root,
+        postToolUse: () => {
+          tuiSaw.push(
+            existsSync(pluginDataFile)
+              ? readFileSync(pluginDataFile, "utf8")
+              : "<absent>"
+          );
+        },
+      }
+    );
+    const [result] = await engine.deps.executor.executeAll([
+      { id: "pg-post", name: "read_file", input: { path: notePath } },
+    ]);
+    expect(result.kind).toBe("ok");
+    // 插件 Post 真观测到（文件被写出）
+    expect(existsSync(pluginDataFile)).toBe(true);
+    expect(readFileSync(pluginDataFile, "utf8")).toBe("p");
+    // TUI 在前：TUI hook 跑时插件 hook 尚未执行（文件仍缺席）
+    expect(tuiSaw).toEqual(["<absent>"]);
+  });
+
+  it("disabled 插件的 hooks 不装配（§3.3）", async () => {
+    const root = await makeRoot("iknow-plugins-disabled-");
+    const pluginsRoot = join(root, "plugin-roots");
+    await makePlugin(pluginsRoot, "muted", {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Bash",
+            hooks: [
+              {
+                type: "command",
+                command: 'node -e "process.exit(2)"',
+                timeout: 15,
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const engine = await build(
+      { plugins: { roots: [pluginsRoot], disabled: ["muted"] } },
+      { root }
+    );
+    const [result] = await engine.deps.executor.executeAll([
+      { id: "pg-off", name: "bash", input: { command: "echo hi" } },
+    ]);
+    // disabled → 无插件 hook；bash 走正常权限路径（非 [hook_blocked]）。
+    if (result.kind === "execution_failed") {
+      expect(result.message.includes("plugin")).toBe(false);
+    } else {
+      expect(result.kind).toBe("ok");
+    }
+  });
+
+  it("无插件根 → 装配路径不变（既有无插件行为回归钉子）", async () => {
+    const root = await makeRoot("iknow-plugins-none-");
+    const notePath = join(root, "note.txt");
+    await writeFile(notePath, "no plugins here\n", "utf8");
+    const engine = await build({}, { root });
+    const [result] = await engine.deps.executor.executeAll([
+      { id: "pg-none", name: "read_file", input: { path: notePath } },
+    ]);
+    expect(result.kind).toBe("ok");
   });
 });

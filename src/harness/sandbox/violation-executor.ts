@@ -57,7 +57,14 @@ export function wrapWithViolationHook(
       messages?: ToolExecutionContext["messages"]
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
       const seen = new Set<number>();
-      const observe = (r: ToolExecutionResult, i: number): void => {
+      // #global-plugins T2:observe 变 async —— PostToolUseHook 放宽后可返回
+      // Promise，拒绝无人接会成 unhandledRejection。捕获后忽略（本包装是
+      // observer，不改变结果；诊断已有宿主侧 onHookError 通道），保持
+      // 「wrapper 不影响 inner 行为」的既有契约。
+      const observe = async (
+        r: ToolExecutionResult,
+        i: number
+      ): Promise<void> => {
         if (seen.has(i)) return;
         const call = calls[i];
         if (!call) return;
@@ -67,14 +74,19 @@ export function wrapWithViolationHook(
             ? r.message
             : undefined;
         const payload = r.kind === "ok" ? r.payload : undefined;
-        hook({
-          toolUseId: r.toolUseId,
-          name: call.name,
-          input: call.input,
-          kind: r.kind,
-          message,
-          payload,
-        });
+        try {
+          await hook({
+            toolUseId: r.toolUseId,
+            name: call.name,
+            input: call.input,
+            kind: r.kind,
+            message,
+            payload,
+          });
+        } catch {
+          // EXIT: post hook 异常只影响观测，绝不改变工具结果（与
+          // permission-executor runAllowed 的 fire-and-forget 同判据）。
+        }
       };
       const out = await opts.inner.executeAll(
         calls,
@@ -82,7 +94,7 @@ export function wrapWithViolationHook(
         timeoutMs,
         conversationId,
         async (result, index) => {
-          observe(result, index);
+          await observe(result, index);
           await onSettled?.(result, index);
         },
         turnId,
@@ -91,7 +103,7 @@ export function wrapWithViolationHook(
       );
       for (let i = 0; i < out.length; i += 1) {
         const r = out[i];
-        if (r) observe(r, i);
+        if (r) await observe(r, i);
       }
       return out;
     },
