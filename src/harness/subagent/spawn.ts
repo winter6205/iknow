@@ -20,9 +20,11 @@ import type { ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import {
+  FS_MODE_ENV_KEY,
   PRODUCT_ROOT_ENV_KEY,
   WORKSPACE_ROOT_ENV_KEY,
 } from "../../config/workspace-root.js";
+import type { FsModeContext } from "../sandbox/fs-mode.js";
 import type { SubAgentSpawn } from "./manager.js";
 
 const requireFromSpawn = createRequire(import.meta.url);
@@ -157,18 +159,39 @@ export interface DefaultSubAgentSpawnOpts {
    * 操作员先 symlink。缺席 → 锚回 spawn 模块自身，与生产同值。
    */
   readonly installRoot?: string;
+  /**
+   * ADR-0092 Amendment 2026-09-13 / SC11:父会话的 fs 隔离档 holder →
+   * 子进程 `IKNOW_FS_MODE`(与 `workspaceRoot` / `productIdentityRoot` 同一条
+   * 「父进程设、worker 读」env wire;信封是 untrusted 输入面,不承载本字段)。
+   * 值在**每次 spawn 时**读 holder(同 `sessionRoot` getter 的 spawn-time
+   * 纪律)——装配期把 holder 冻结成字符串,运行期 `/config fs workspace` 就再
+   * 也到不了子进程。holder 在场即写线(值是缺省档也写,父子对「缺省」只有
+   * 一种解释:键缺席 = 这条通道未接);holder 缺席(legacy / 测试路径)→ 不写
+   * 该键,子进程 env 与今日字节一致。
+   */
+  readonly fsMode?: FsModeContext;
 }
 
 export function createDefaultSubAgentSpawn(
   opts: DefaultSubAgentSpawnOpts = {}
 ): SubAgentSpawn {
-  const { workspaceRoot, projectIdentityRoot, sessionRoot, installRoot } = opts;
+  const {
+    workspaceRoot,
+    projectIdentityRoot,
+    sessionRoot,
+    installRoot,
+    fsMode,
+  } = opts;
   const resolvedTraceDir = resolveSubagentTraceDir(opts.traceDir);
   return (_def, _taskId, _stdinPayload) => {
     // T8 (D6): sessionRoot 在 closure 执行时读 --
     // string 时返回值不变;getter 时返回 cell 当前值,
     // 允许 build-engine 把 build-time 决定换成 spawn-time 闭包。
     const cwd = typeof sessionRoot === "function" ? sessionRoot() : sessionRoot;
+    // ADR-0092 Amendment / SC11:fs 档同样在 spawn 期读 holder —— 运行期
+    // `/config` 翻档对下一次 spawn 生效(镜像 sessionRoot 的 spawn-time 读法);
+    // holder 缺席 → 不写该 env 键(legacy 子进程 env 字节不变)。
+    const fsModeToken = fsMode?.get();
     const child = spawn(
       process.execPath,
       resolveSubagentWorkerSpawnArgs({
@@ -186,6 +209,9 @@ export function createDefaultSubAgentSpawn(
             : {}),
           ...(projectIdentityRoot !== undefined
             ? { [PRODUCT_ROOT_ENV_KEY]: projectIdentityRoot }
+            : {}),
+          ...(fsModeToken !== undefined
+            ? { [FS_MODE_ENV_KEY]: fsModeToken }
             : {}),
         },
         ...(cwd !== undefined ? { cwd } : {}),

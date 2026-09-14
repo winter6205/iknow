@@ -57,9 +57,9 @@
 
 ### Round 2（工作区档 + 开关面）— 合同在此，实施另轮
 
-11. **SC11**：工作区档 `bash` 读 home 下普通文件成功；写 home 下非（taskRoot ∪ 会话 tmp）路径失败（围栏拒绝，typed / 非零，不落盘）。
+11. **SC11**：工作区档 `bash` 读 home 下普通文件成功；写 home 下非（taskRoot ∪ 会话 tmp）路径失败（围栏拒绝，typed / 非零，不落盘）。合同细化见 ADR-0092 Amendment 2026-09-13（argv：`--bind / /` + 系统前缀 ro + `--ro-bind <home> <home>` + `--bind <taskRoot>` + `--bind <会话 tmp>`；home 之外如 `/tmp` 不受本档收紧——本档只收紧 home 写）。
 12. **SC12**：工作区档仍能按 **SC2** 写会话 tmp 真路径。
-13. **SC13**：settings 或 TUI `/config` 能把档从全局切到工作区；缺省与新会话为全局档。
+13. **SC13**：settings（`isolation.fsMode`，用户层）或 TUI `/config fs global|workspace` 能把档从全局切到工作区；缺省与新会话为全局档；运行期经 holder（镜像 `GraphModeContext`）就地翻转，权限模式控件不被本开关替换（正交）。
 
 ### 输入五类（S2，Round 1 写路径）
 

@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { ToolExecutionError } from "../errors.js";
+import { parseFsModeFlag, type FsIsolationMode } from "./fs-mode.js";
 
 /**
  * Fixed system prefixes re-bound read-only in the global fence (ADR-0092):
@@ -32,12 +33,25 @@ export interface FsPolicy {
    *  inside the fence `$TMPDIR` points at it and write tools may target it.
    *  It is a host path only — never a bind target for guest Linux `/tmp`. */
   tmpRoot(): string;
+  /**
+   * fs 隔离档(ADR-0092 Amendment 2026-09-13, SC11/SC12):仅 `bwrap` 消费
+   * 该字段决定是否在 mount 层叠 `--ro-bind <home>` + `--bind <workspaceRoot>` +
+   * `--bind <tmpRoot>` 三层(global 档 = 无条件不叠)。缺省 `"global"` —— 与 V1
+   * argv 形态逐字节一致。
+   */
+  readonly mode: FsIsolationMode;
 }
 
 export interface FsPolicyOptions {
   /** Session tmp host path for this identity (ADR-0092). Contract input:
    *  blank or missing on disk → typed fail-loud. */
   readonly tmpDir: string;
+  /**
+   * fs 隔离档(ADR-0092 Amendment 2026-09-13):缺省 / 非法值一律回落
+   * `"global"`(fail-closed,与 settings 段非法值 drop-not-throw 纪律同款)。
+   * 仅 `"workspace"` 才让 bwrap 多叠 home ro-bind + 两处写白名单 bind。
+   */
+  readonly mode?: FsIsolationMode;
 }
 
 /**
@@ -67,8 +81,16 @@ function contractRoot(role: string, value: string | undefined): string {
  * Write enforcement lives in the bwrap mount layer (`--bind / /` + system
  * `--ro-bind` over `/etc /usr /bin /lib /lib64`) and the permission chain
  * + hard-walls; a `home` / `workspaceRoot` predicate would not shape argv.
+ *
+ * Round 2(ADR-0092 Amendment 2026-09-13):policy 增加 `mode` 字段,`bwrap` 据
+ * 此在 mount 层叠工作区档三层(`--ro-bind <home>` + `--bind <workspaceRoot>`
+ * + `--bind <tmpRoot>`)。`mode` 解析走 `parseFsModeFlag` —— 缺省 / 非法值
+ * 回落 `"global"`(fail-closed),与 settings 段 drop-not-throw 纪律同款。
  */
 export function createFsPolicy(opts: FsPolicyOptions): FsPolicy {
   const tmpRoot = contractRoot("tmpDir", opts.tmpDir);
-  return Object.freeze({ tmpRoot: () => tmpRoot });
+  // fail-closed:缺省 / 非法字面 → global。`mode` 暴露给 bwrap(冻结对象
+  // 形,handler per-call 读取与 `tmpRoot()` 同形态)。
+  const mode: FsIsolationMode = parseFsModeFlag(opts.mode) ?? "global";
+  return Object.freeze({ tmpRoot: () => tmpRoot, mode });
 }

@@ -45,8 +45,10 @@ import {
   hashSettingsContent,
   mergeMemoryPatch,
   mergeThinkingPatch,
+  mergeFsModePatch,
   persistMemoryChanges,
   persistThinkingChanges,
+  persistFsModeChanges,
   resolveThinkingSettingsPath,
 } from "../../src/config/persist-settings.ts";
 
@@ -498,5 +500,134 @@ describe("persistMemoryChanges（原子写）", () => {
     });
     expect(res.path).toBe(file);
     expect(res.bytes).toContain("autoExtract");
+  });
+});
+
+// ADR-0092 / SC13：filesystem isolation 档（fsMode）— 反向持久化通道。
+// 镜像 persistMemoryChanges 形态：raw-merge、原子写、非法值 TypeError。
+describe("mergeFsModePatch（纯函数）", () => {
+  test("isolation 缺失 → 创建；其它字段原样保留", () => {
+    expect(
+      mergeFsModePatch({ llm: { model: "m1" } }, { fsMode: "workspace" })
+    ).toEqual({
+      llm: { model: "m1" },
+      isolation: { fsMode: "workspace" },
+    });
+  });
+
+  test("已有 isolation 段 → 仅改 fsMode，其余键原样保留", () => {
+    expect(
+      mergeFsModePatch(
+        {
+          isolation: { worktreeOnMutate: true, fsMode: "global" },
+        },
+        { fsMode: "workspace" }
+      )
+    ).toEqual({
+      isolation: { worktreeOnMutate: true, fsMode: "workspace" },
+    });
+  });
+
+  test("isolation 非普通对象 → 以新对象覆盖，仅保留 patch 字段", () => {
+    expect(
+      mergeFsModePatch({ isolation: "not-an-object" }, { fsMode: "global" })
+    ).toEqual({
+      isolation: { fsMode: "global" },
+    });
+  });
+
+  test("非法 fsMode 值（不在 'global' | 'workspace' 闭集）→ TypeError", () => {
+    expect(() =>
+      mergeFsModePatch({}, { fsMode: "Workspace" as never })
+    ).toThrow(TypeError);
+    expect(() =>
+      mergeFsModePatch({}, { fsMode: "Workspace" as never })
+    ).toThrowError(/fsMode/);
+    expect(() => mergeFsModePatch({}, { fsMode: true as never })).toThrow(
+      TypeError
+    );
+    expect(() => mergeFsModePatch({}, {} as never)).toThrow(TypeError);
+  });
+
+  test("关闭（global）与打开（workspace）对称", () => {
+    expect(mergeFsModePatch({}, { fsMode: "global" })).toEqual({
+      isolation: { fsMode: "global" },
+    });
+    expect(mergeFsModePatch({}, { fsMode: "workspace" })).toEqual({
+      isolation: { fsMode: "workspace" },
+    });
+  });
+});
+
+describe("persistFsModeChanges（原子写）", () => {
+  test("新文件起步：写入 isolation.fsMode，原子写、保留其它键", async () => {
+    const base = makeTmpRoot("iknow-persist-fsmode-new-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    const res = await persistFsModeChanges(file, { fsMode: "workspace" });
+    expect(JSON.parse(res.bytes)).toEqual({
+      isolation: { fsMode: "workspace" },
+    });
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      isolation: { fsMode: "workspace" },
+    });
+    // 原子写无 .tmp 残留、mode 0600。
+    expectAtomicWrite(file);
+  });
+
+  test("已有文件：保留 llm / memory / isolation.worktreeOnMutate 等全部原字段", async () => {
+    const base = makeTmpRoot("iknow-persist-fsmode-keep-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    mkdirSync(join(base, "home", ".iknow"), { recursive: true });
+    writeFileSync(
+      file,
+      JSON.stringify(
+        {
+          llm: {
+            model: "claude-sonnet",
+            apiKey: "${ANTHROPIC_API_KEY}",
+            thinking: "off",
+          },
+          memory: { autoExtract: true, dream: false },
+          isolation: { worktreeOnMutate: true, fsMode: "global" },
+        },
+        null,
+        2
+      )
+    );
+    const res = await persistFsModeChanges(file, { fsMode: "workspace" });
+    expect(JSON.parse(res.bytes)).toEqual({
+      llm: {
+        model: "claude-sonnet",
+        apiKey: "${ANTHROPIC_API_KEY}",
+        thinking: "off",
+      },
+      memory: { autoExtract: true, dream: false },
+      isolation: { worktreeOnMutate: true, fsMode: "workspace" },
+    });
+    expectAtomicWrite(file);
+  });
+
+  test("非法 fsMode 值 → TypeError（不静默吞、不写回）", async () => {
+    const base = makeTmpRoot("iknow-persist-fsmode-illegal-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    mkdirSync(join(base, "home", ".iknow"), { recursive: true });
+    writeFileSync(file, JSON.stringify({ isolation: { fsMode: "global" } }));
+    await expect(
+      persistFsModeChanges(file, { fsMode: "wrong" as never })
+    ).rejects.toThrow(TypeError);
+    // 文件原样保留（写回未发生）。
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      isolation: { fsMode: "global" },
+    });
+  });
+
+  test("父目录缺失 → mkdir -p 后成功", async () => {
+    const base = makeTmpRoot("iknow-persist-fsmode-mkdir-");
+    const file = join(base, "a", "b", ".iknow", "settings.json");
+    await persistFsModeChanges(file, { fsMode: "workspace" });
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      isolation: { fsMode: "workspace" },
+    });
+    expectAtomicWrite(file);
   });
 });

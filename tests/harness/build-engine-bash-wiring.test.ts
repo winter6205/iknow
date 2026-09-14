@@ -40,6 +40,7 @@ import {
   type BuiltEngine,
 } from "../../src/harness/build-engine.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
+import { createFsModeContext } from "../../src/harness/sandbox/fs-mode.ts";
 import { createMcpManager } from "../../src/harness/mcp/manager.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import type {
@@ -180,6 +181,115 @@ describe("buildHarnessEngine — bash factory wiring (ADR-0092)", () => {
     for (const call of calls) {
       expect(call.opts.liveTaskRoot).toBeDefined();
       expect("installRoot" in call.opts).toBe(false);
+    }
+  });
+
+  it("threads the resolved userHome as homeRoot to the bash factory (ADR-0092 SC11)", async () => {
+    // 工作区档 home ro-bind 的源端必须是本层 resolve 的 `userHome`
+    // (opts.userHome ?? homedir())—— 否则 `userHome` 测试缝只改 settings /
+    // persona / state,却改不动围栏的 home ro-bind 源端,围栏会挂到真实用户
+    // home 上。断言:工厂收到的 homeRoot 逐字等于传入的 userHome。
+    const productRoot = await mkdtemp(join(tmpdir(), "iknow-bash-wire-home-"));
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "iknow-bash-wire-home-task-")
+    );
+    roots.push(productRoot, workspaceRoot);
+    await plantProjectMcp(productRoot);
+    const userHome = join(productRoot, "home");
+    const built = await buildHarnessEngine({
+      env: makeEnv("sk-test-bash-wire-home"),
+      askUser: createNoAskUser(),
+      surface: "chat",
+      userHome,
+      cwd: productRoot,
+      workspaceRoot,
+      productRoot,
+      skipCountTokens: true,
+      createMcpManager: (managerOpts: McpManagerOptions) =>
+        createMcpManager(managerOpts),
+      createMcpClient: FAKE_CLIENT,
+    });
+    shutdowns.push(async () => {
+      if (built.shutdown) await built.shutdown();
+    });
+    const calls = engineBashCalls();
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      expect(call.opts.homeRoot).toBe(userHome);
+    }
+  });
+
+  it("threads the fsMode holder by identity, never a frozen snapshot (D2)", async () => {
+    // D2 batch snapshot 纪律:装配层只透传 holder 对象,handler 入口才
+    // `fsMode?.get()` 读一次 —— 运行期 `/config` 翻档必须对下一次 bash 调用
+    // 生效。若装配层在此处 `.get()` 求值成字符串(或另造快照),翻档就再也
+    // 到不了 bash 工厂。断言:工厂收到的 fsMode 是同一个 holder 对象,翻档后
+    // 它自己读到新值。
+    const productRoot = await mkdtemp(
+      join(tmpdir(), "iknow-bash-wire-fsmode-")
+    );
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "iknow-bash-wire-fsmode-task-")
+    );
+    roots.push(productRoot, workspaceRoot);
+    await plantProjectMcp(productRoot);
+    const holder = createFsModeContext("global");
+    const built = await buildHarnessEngine({
+      env: makeEnv("sk-test-bash-wire-fsmode"),
+      askUser: createNoAskUser(),
+      surface: "chat",
+      userHome: join(productRoot, "home"),
+      cwd: productRoot,
+      workspaceRoot,
+      productRoot,
+      skipCountTokens: true,
+      fsMode: holder,
+      createMcpManager: (managerOpts: McpManagerOptions) =>
+        createMcpManager(managerOpts),
+      createMcpClient: FAKE_CLIENT,
+    });
+    shutdowns.push(async () => {
+      if (built.shutdown) await built.shutdown();
+    });
+    const calls = engineBashCalls();
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      expect(call.opts.fsMode).toBe(holder);
+    }
+    holder.set("workspace");
+    for (const call of calls) {
+      const seen = call.opts.fsMode as { get: () => string };
+      expect(seen.get()).toBe("workspace");
+    }
+  });
+
+  it("omits nothing when fsMode is absent (V1 baseline: holder stays undefined)", async () => {
+    const productRoot = await mkdtemp(join(tmpdir(), "iknow-bash-wire-nofs-"));
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "iknow-bash-wire-nofs-task-")
+    );
+    roots.push(productRoot, workspaceRoot);
+    await plantProjectMcp(productRoot);
+    const built = await buildHarnessEngine({
+      env: makeEnv("sk-test-bash-wire-nofs"),
+      askUser: createNoAskUser(),
+      surface: "chat",
+      userHome: join(productRoot, "home"),
+      cwd: productRoot,
+      workspaceRoot,
+      productRoot,
+      skipCountTokens: true,
+      createMcpManager: (managerOpts: McpManagerOptions) =>
+        createMcpManager(managerOpts),
+      createMcpClient: FAKE_CLIENT,
+    });
+    shutdowns.push(async () => {
+      if (built.shutdown) await built.shutdown();
+    });
+    const calls = engineBashCalls();
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      expect(call.opts.fsMode).toBeUndefined();
     }
   });
 });

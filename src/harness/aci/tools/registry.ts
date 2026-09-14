@@ -32,6 +32,7 @@ import { createToolSearchTool } from "./tool-search.js";
 import { createSymbolQueryToolSet } from "./symbol.js";
 import { createSymbolMutateToolSet } from "./symbol-mutate.js";
 import type { LspCtx } from "../../lsp/types.js";
+import type { FsModeContext } from "../../sandbox/fs-mode.js";
 import { createSkillTool } from "./skill.js";
 import { createSpawnSubAgentTool } from "../../subagent/spawn-subagent-tool.js";
 import { createSubAgentResultTool } from "../../subagent/subagent-result-tool.js";
@@ -375,6 +376,19 @@ export interface CreateDefaultAciRegistryOptions {
    * 缺席 → 无消费面受影响。
    */
   readonly isolationOn?: boolean;
+  /**
+   * ADR-0092 Amendment 2026-09-13 / SC11/SC12:fs 隔离档 holder —— bash
+   * 工厂透传,handler per-call `get()` 读取(同 `liveTaskRoot` D2 batch
+   * snapshot 纪律)。holder 在场 → bash fence 据此叠 `--ro-bind <home>` 等
+   * 三层；缺席 → 全局档(V1 baseline)。T8 在 build-engine 装配处把
+   * `resolveFsIsolationMode(settings)` 一次解析,装入 holder 透传。
+   */
+  readonly fsMode?: FsModeContext;
+  /**
+   * ADR-0092 Round 2 / SC11:工作区档 home ro-bind 源端宿主绝对路径。
+   * 缺省 → build-engine 装配层从 `userHome` 派生(测试可注入)。
+   */
+  readonly homeRoot?: string;
 }
 
 /**
@@ -547,6 +561,11 @@ export function createDefaultAciRegistry(
         ...(opts.todoDir !== undefined ? { projectDir: opts.todoDir } : {}),
         // T3: worker identity pad (nested under subagents/<taskId>/).
         ...(opts.tmpDir !== undefined ? { tmpDir: opts.tmpDir } : {}),
+        // ADR-0092 Round 2 / SC11/SC12:fs 隔离档 holder + homeRoot 透传。
+        // holder 在场 → bash handler per-call `get()` 读一次;缺席 → 全局档
+        // (V1 baseline)。homeRoot 装配层从 userHome 派生。
+        ...(opts.fsMode !== undefined ? { fsMode: opts.fsMode } : {}),
+        ...(opts.homeRoot !== undefined ? { homeRoot: opts.homeRoot } : {}),
       }),
     // T6 (plans/worktree-live-task-root.md §6 T6): read 路径工具工厂参数
     // 从冻结 sandboxRoot 扩为 `liveTaskRoot ?? sandboxRoot` (cell 缺席 / 未

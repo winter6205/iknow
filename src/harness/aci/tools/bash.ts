@@ -1,5 +1,5 @@
 import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
@@ -16,7 +16,13 @@ import {
   createNetworkPolicy,
   createOutputMask,
   currentSecretValues,
+  type BwrapFenceOptions,
 } from "../../sandbox/index.js";
+import {
+  FS_ISOLATION_MODE_DEFAULT,
+  type FsIsolationMode,
+  type FsModeContext,
+} from "../../sandbox/fs-mode.js";
 import {
   DEFAULT_MAX_OUTPUT_CODE_POINTS,
   requireBwrap,
@@ -74,6 +80,64 @@ export interface CreateBashToolOptions {
    * `ctx.conversationId`, bash uses `<sessionFolder>/fence-tmp` as `$TMPDIR`.
    */
   readonly projectDir?: string;
+  /**
+   * ADR-0092 Amendment 2026-09-13 / SC11/SC12:fs 隔离档 holder(详见
+   * `sandbox/fs-mode.ts`)。handler 入口 per-call `fsMode?.get() ?? "global"`
+   * 读一次,与 `liveTaskRoot` 的 D2 batch snapshot 纪律同款;前台 fence 与后台
+   * spawn 共用同一份冻结值。缺省 → 全局档(V1 baseline 不变)。
+   */
+  readonly fsMode?: FsModeContext;
+  /**
+   * ADR-0092 Amendment 2026-09-13 / SC11:工作区档 home ro-bind 源端宿主绝对
+   * 路径。缺省 `homedir()` —— 与 `tmpDir` 注入同形态(测试可注入)。生产装配
+   * build-engine 透传 userHome / worker 透传 sessionRoots 的对应字段。
+   */
+  readonly homeRoot?: string;
+}
+
+/**
+ * ADR-0092 Round 2(与 `liveTaskRoot` 的 D2 batch snapshot 同款纪律):fs 隔离档
+ * holder 与 homeRoot 在 handler 入口读一次冻结 —— 前台 fence / background
+ * spawn 共用同一份,handler 内 holder 后续翻转不渗透进本次调用。
+ *
+ * holder 缺席 → 全局档(V1 baseline 不变);homeRoot 缺席 → `homedir()`
+ * (与 opts 注入同形态,测试可注入)。落到非空值是有意的:工作区档下空
+ * homeRoot 在 bwrap 层是 typed fail-loud(不得静默退化成全局档),这里
+ * 给出与生产装配同值的缺省,使该守卫只在装配真漏传时触发。
+ */
+function snapshotFenceInputs(opts: CreateBashToolOptions | undefined): {
+  readonly mode: FsIsolationMode;
+  readonly homeRoot: string;
+} {
+  return {
+    mode: opts?.fsMode?.get() ?? FS_ISOLATION_MODE_DEFAULT,
+    homeRoot: opts?.homeRoot ?? homedir(),
+  };
+}
+
+/**
+ * D2 batch snapshot 的 fence 输入(handler 入口冻结):fs 档 holder / homeRoot /
+ * tmpDir 同 vintage —— 前台 fence 与后台 spawn 共用同一份,handler 内 holder
+ * 或 cell 后续翻转不渗透进本次调用。
+ */
+interface FenceSnapshot {
+  readonly mode: FsIsolationMode;
+  readonly homeRoot: string;
+  readonly tmpDir: string;
+}
+
+/**
+ * ADR-0092 Round 2 / SC11/SC12:工作区档 fence 三层(home ro-bind + 两处写
+ * 白名单)的源端绝对路径。global 档返回空展开 —— bwrap 侧不发射任何一层,
+ * argv 与 V1 baseline 逐字节一致。
+ */
+function fenceWorkspaceMounts(
+  mode: FsIsolationMode,
+  homeRoot: string,
+  workspaceRoot: string,
+  tmpRoot: string
+): Pick<BwrapFenceOptions, "homeRoot" | "workspaceRoot" | "tmpRoot"> {
+  return mode === "workspace" ? { homeRoot, workspaceRoot, tmpRoot } : {};
 }
 
 export function createBashTool(
@@ -115,6 +179,7 @@ export function createBashTool(
     const waveRoot: string = opts?.liveTaskRoot
       ? opts.liveTaskRoot.read()
       : cwd;
+    const { mode: fsMode, homeRoot } = snapshotFenceInputs(opts);
     const tmpDir = resolveBashFenceTmp(opts, ctx?.conversationId, () => {
       if (fallbackFenceTmp === undefined) {
         fallbackFenceTmp = mkdtempSync(join(tmpdir(), "iknow-fence-tmp-"));
@@ -137,14 +202,18 @@ export function createBashTool(
       // T7 (D2): background path 与 foreground path 共用同一份 waveRoot。
       // handleBackground 把 waveRoot 转给 manager.spawn → defaultBackgroundSpawn
       // 内的 createFsPolicy / createBwrapFence 也围绕 waveRoot 构造 fence。
+      // ADR-0092 Round 2:fence snapshot (已冻结) 透传 BackgroundSpawnRequest
+      // —— 前台 / 后台 fence 在 fs 档轴上集合相等（沙箱纪律 G3）。
       return await handleBackground(
-        command,
-        bgCommand,
-        waveRoot,
+        {
+          finalCommand: bgCommand,
+          recordCommand: command,
+          cwd: waveRoot,
+          wantsHostNetwork,
+        },
         opts ?? {},
         ctx,
-        wantsHostNetwork,
-        tmpDir
+        { mode: fsMode, homeRoot, tmpDir }
       );
     }
     // #562 T6: bashMode="readonly" 派生 cwdReadonly:true 传给 fence + env。
@@ -174,10 +243,10 @@ export function createBashTool(
     // 此处只判严格 === true;非布尔 / 缺省 / false → 走既有隔离路径。
     const wantsHostNetwork = (input as BashInput | null)?.network === true;
     // T7 (D4): fsPolicy per-call rebuild —— `tmpDir` 工厂期冻结,只有 cwd
-    // 维度跟 waveRoot 联动。全局档(ADR-0092)下 fs-policy 不再发射 argv
-    // (fence 固定 host root + 系统前缀 ro-bind),只有 policy 的 per-call
-    // 重建面保留 —— `$TMPDIR` 与写工具可写根共用同一份 identity session tmp。
-    const fsPolicy = createFsPolicy({ tmpDir });
+    // 维度跟 waveRoot 联动。Round 2:policy 携带 fs 档(mode 字段),bwrap 据
+    // 此在工作区档 argv 叠三层(ADR-0092 Amendment)。handler 入口 fsMode
+    // 已 D2 snapshot,此处直接消费。
+    const fsPolicy = createFsPolicy({ tmpDir, mode: fsMode });
     const fence = createBwrapFence({
       command: "bash",
       args: ["-c", finalCommand],
@@ -187,6 +256,11 @@ export function createBashTool(
       cwd: waveRoot,
       ...(wantsHostNetwork ? { network: true } : {}),
       ...(fenceIsReadonly ? { cwdReadonly: true } : {}),
+      // ADR-0092 Round 2 / SC11/SC12:工作区档 fence 三层(host root + 系统
+      // 前缀 + home ro-bind + 两处写白名单)的源端绝对路径。global 档下
+      // `fsPolicy.mode === "global"`,bwrap 内部自动不发射,与 V1 baseline
+      // 逐字节一致。
+      ...fenceWorkspaceMounts(fsMode, homeRoot, waveRoot, tmpDir),
     });
     const result = await runInSandbox({
       fence,
@@ -257,27 +331,37 @@ export function createBashTool(
 }
 
 /**
+ * background 分支的逐调用输入(#406 roundtrip secret 还原契约):
+ * `recordCommand` 是原始占位符形态(registry json 落盘用);`finalCommand`
+ * 是还原后真值(只活在 spawn 调用栈,沙箱执行拿真值,不上盘);`cwd` 是
+ * handler 入口冻结的 waveRoot(与前台 fence 同源);`wantsHostNetwork` 是
+ * `input.network === true` 的严格解析结果。
+ */
+interface BackgroundSpawnInput {
+  readonly finalCommand: string;
+  readonly recordCommand: string;
+  readonly cwd: string;
+  readonly wantsHostNetwork: boolean;
+}
+
+/**
  * #502 T3:background 分支 —— 经 backgroundManager.spawn 起 detached 子进程后
  * 立即返回 {task_id, log_path}。不 await 子进程退出、不经 runInSandbox（无 fence
  * 二次构造）。
- *
- * #502 review-repair（#406 roundtrip）:secret 还原在调用方完成 —— command 传
- * 还原后真值（只活在 spawn 调用栈,沙箱执行拿真值）；recordCommand 传原始
- * 占位符形态（registry json 落盘用,占位符在盘上）。
  *
  * #502 T5:ctx.conversationId 透传 spawn request —— 进程由哪个 session 启的就
  * 标哪个 conversationId，bash_output / bash_stop 后续按同字段做 scope 过滤。
  * ctx 缺省 → 记录里 conversation_id 落空串 → 不过滤（向后兼容，与 ADR-0021 D1.4
  * 对齐）。
+ *
+ * fence 输入(holder 档位 / homeRoot / tmpDir)取自 handler 入口的
+ * `FenceSnapshot`,不在本函数内重读 cell 或 holder。
  */
 async function handleBackground(
-  recordCommand: string,
-  finalCommand: string,
-  cwd: string,
+  input: BackgroundSpawnInput,
   opts: CreateBashToolOptions,
   ctx: ToolExecutionContext | undefined,
-  wantsHostNetwork: boolean,
-  tmpDir: string
+  { mode: fsMode, homeRoot, tmpDir }: FenceSnapshot
 ): Promise<{ task_id: string; log_path: string }> {
   const manager = opts.backgroundManager;
   if (!manager) {
@@ -286,16 +370,16 @@ async function handleBackground(
     );
   }
   const result = await manager.spawn({
-    command: finalCommand,
-    recordCommand,
-    cwd,
+    command: input.finalCommand,
+    recordCommand: input.recordCommand,
+    cwd: input.cwd,
     env: process.env,
     ...(ctx?.conversationId !== undefined
       ? { conversationId: ctx.conversationId }
       : {}),
     // #503 T11:background path 的 host-network opt-in —— 透传 spawn request,
     // defaultBackgroundSpawn 据此构造 host-net fence（去 --unshare-net）。
-    ...(wantsHostNetwork ? { network: true } : {}),
+    ...(input.wantsHostNetwork ? { network: true } : {}),
     // #653 T1:background path 的 cwdReadonly 派生 —— 镜像前台
     // bashMode→cwdReadonly 映射(bash.ts fenceIsReadonly),foreground 与
     // background bwrap argv / fence env 在 cwdReadonly 轴上集合相等。
@@ -305,6 +389,11 @@ async function handleBackground(
       ? { cwdReadonly: true }
       : {}),
     tmpDir,
+    // ADR-0092 Round 2 / SC11/SC12:工作区档 fence 三层(前台与后台集合
+    // 相等,沙箱纪律 G3)。fsMode 是已 snapshot 字符串;homeRoot / tmpDir
+    // 由前台 handler 同款闭合传递(同源值,不重读 cell)。
+    fsMode,
+    homeRoot,
   });
   if (result.status === "spawn_error") {
     // 与 bash 既有错误形态一致:typed-error 渲染（${kind}: ${context}）装进

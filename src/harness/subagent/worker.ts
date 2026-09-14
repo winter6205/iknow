@@ -30,9 +30,15 @@ import Anthropic from "@anthropic-ai/sdk";
 import { loadIknowEnv, type IknowEnv } from "../../config/env.js";
 import { loadIknowSettings } from "../../config/settings.js";
 import {
+  FS_MODE_ENV_KEY,
   WORKSPACE_ROOT_ENV_KEY,
   resolveWorkspaceRoot,
 } from "../../config/workspace-root.js";
+import {
+  createFsModeContext,
+  parseFsModeFlag,
+  type FsModeContext,
+} from "../sandbox/fs-mode.js";
 import {
   createRealAnthropicAdapter,
   buildThinkingParams,
@@ -229,6 +235,17 @@ export interface CreateWorkerDepsOptions {
    */
   readonly projectIdentityRoot?: string;
   /**
+   * ADR-0092 Round 2 / SC11/SC12:fs 隔离档 holder(per-call snapshot),
+   * 透传给 worker 的 bash 工厂。holder 缺席 → 全局档(V1 baseline)。
+   * homeRoot 不是独立缝:装配层从本层已 resolve 的 `userHome`
+   * (opts.userHome ?? homedir())派生,与 settings / persona / state 同源。
+   *
+   * 生产入口的 holder 由 `fsModeOptionFromEnv(process.env)` 从父进程写的
+   * `IKNOW_FS_MODE` 造(见 runSubagentWorker)—— worker 是独立进程,拿不到
+   * 父进程的 holder 对象,档位只能以值过界后在本进程重建 holder。
+   */
+  readonly fsMode?: import("../sandbox/fs-mode.js").FsModeContext;
+  /**
    * #556 T2: 来自 envelope.role 的 seam 副本 (runSubagentWorker 透传)。
    * worker 装配期查 catalog 取 body 注入 persona 段; 缺省 / 未知 → 走 V1
    * baseline (不入 persona 段, 不注入额外 deny, 详见 plan T2 防御契约)。
@@ -280,6 +297,29 @@ export interface CreateWorkerDepsOptions {
     readonly projectDir: string;
     readonly conversationId: string;
   };
+}
+
+/**
+ * ADR-0092 Amendment 2026-09-13 / SC11:worker 侧 fs 档读点 —— 父进程经
+ * `IKNOW_FS_MODE` 写来的档位字面 → `createWorkerDeps` 的 `fsMode` holder。
+ *
+ * worker 是独立进程:没有父进程的 holder 对象可共享,档位只能以**值**过
+ * 进程边界,worker 侧新建一个 holder 并把该值当初始值。与「worker 进程内该
+ * 档恒定」的语义一致 —— worker 不提供 `/config` 命令面,没有就地翻档的
+ * 第二入口;holder 形态保留是给 bash 工厂的既有 opt 契约(handler per-call
+ * `get()`),不是给运行期翻转的。
+ *
+ * 归一走 `parseFsModeFlag`(值域 SSOT,与 settings 段 / `/config` 同一份)
+ * 而不是在 worker 里再写一遍字面比较:大小写与首尾空白按同一条规则折叠。
+ * 缺省 / 非法值 → **键缺席**(不显式写 `global`)—— 与 `workspaceRoot` /
+ * `productRoot` 的 spread-guard 同款,让「缺席」在下游只有一种解释,且
+ * legacy 路径(旧父进程不写该键)字节不变。
+ */
+export function fsModeOptionFromEnv(
+  env: Readonly<Record<string, string | undefined>>
+): { readonly fsMode?: FsModeContext } {
+  const mode = parseFsModeFlag(env[FS_MODE_ENV_KEY]);
+  return mode !== undefined ? { fsMode: createFsModeContext(mode) } : {};
 }
 
 function resolveWorkerFenceTmp(
@@ -475,6 +515,13 @@ export async function createWorkerRuntime(
     ...(identityFenceRoot !== undefined
       ? { projectIdentityRoot: identityFenceRoot }
       : {}),
+    // ADR-0092 Round 2 / SC11/SC12:fs 隔离档 holder + homeRoot 透传
+    // 给 worker bash 工厂 —— 与 build-engine 主链同形态。holder 缺席 →
+    // V1 global baseline。homeRoot 取本层已 resolve 的 `userHome`
+    // (opts.userHome 测试缝 ?? homedir(),见上文),不留给 bash 工厂再
+    // `homedir()` 一次 —— 与主链同款:测试缝必须能改到围栏源端。
+    fsMode: opts.fsMode,
+    homeRoot: userHome,
     ...(bashMode !== undefined ? { bashMode } : {}),
     ...(workerFenceTmp !== undefined ? { tmpDir: workerFenceTmp } : {}),
     ...todoLedgerRegistryOpts(opts.todoLedger),
@@ -1067,6 +1114,10 @@ export async function runSubagentWorker(): Promise<void> {
     ...(env.productRoot !== undefined
       ? { projectIdentityRoot: env.productRoot }
       : {}),
+    // ADR-0092 Amendment 2026-09-13 / SC11:父进程经 IKNOW_FS_MODE 写来的
+    // fs 隔离档 → worker 的 bash 工厂 holder。缺席 / 非法 → 键缺席 =
+    // 全局档(bash handler 入口缺省回落),legacy 父进程(不写该键)字节不变。
+    ...fsModeOptionFromEnv(process.env),
     // T5 (ADR-0071 / SC8 + L2): 父 manager
     // 已经在 spawn 期替这个 taskId 建好 `<父会话文件夹>/subagents/agent-<taskId>.jsonl`,
     // 把 traceFilePath + taskId 经 envelope 透传过来 ——

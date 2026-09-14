@@ -90,6 +90,7 @@ import {
   type SessionFileV1,
 } from "../../src/session-api/store/index.ts";
 import { assistantResult, makeCtx } from "./_fixtures.ts";
+import { ensureMainSessionFenceTmpForConversation } from "../../src/harness/sandbox/fence-tmp.ts";
 import type { VerifyConfig } from "../../src/harness/verify/types.ts";
 
 /** Pre-#605 legacy on-disk shape — runtime type was retired in #605 T2; we
@@ -352,5 +353,44 @@ describe("chat-session verify-loop seam: HITL vs auto dispatch (plan T1)", () =>
       "store 缺席 → run uses query; HITL must not treat query as judge task"
     );
     assert.equal(capturedCompletionMode(), "hitl");
+  });
+});
+
+/**
+ * ADR-0092 / SC12：chat 的 verify 调用点必须把会话 tmp 透传进闭环 ——
+ * 否则工作区档下 `$TMPDIR` 缺席且写白名单是进程 tmpdir()，会话 tmp（落在
+ * home 子树内）反被 `--ro-bind <home>` 盖住。
+ *
+ * 解析必须与 bash 工具面同源：`ctx.checkpointStore.getProjectDir()` +
+ * `state.conversationId` 经 `resolveSessionFenceTmp` 派生
+ * `<projectDir>/<sanitized convId>/fence-tmp`。
+ */
+describe("chat-session verify-loop seam: session tmp wiring (ADR-0092 SC12)", () => {
+  it("tmpDir = <projectDir>/<convId>/fence-tmp（与 bash 面同一 helper）", async () => {
+    const id = "chat-fence-tmp";
+    const ctx = makeChatCtx({ id });
+    const r = await processChatLine({ line: "Q", ctx });
+    assert.equal(r.ranQuery, true);
+    const opts = getLastVerifyLoopOpts() as { tmpDir?: unknown } | undefined;
+    assert.ok(opts !== undefined, "runVerifyLoop was not called");
+    assert.equal(
+      opts.tmpDir,
+      ensureMainSessionFenceTmpForConversation(store.getProjectDir(), id),
+      "tmpDir 必须是与 bash 面同源的会话 tmp 宿主真路径"
+    );
+  });
+
+  it("checkpointStore 缺席 → 不产出 tmpDir key（verify-loop 回退进程 tmpdir）", async () => {
+    const id = "chat-fence-tmp-no-store";
+    const ctx = makeChatCtx({ id, withStore: false });
+    const r = await processChatLine({ line: "Q", ctx });
+    assert.equal(r.ranQuery, true);
+    const opts = getLastVerifyLoopOpts() as { tmpDir?: unknown } | undefined;
+    assert.ok(opts !== undefined, "runVerifyLoop was not called");
+    assert.equal(
+      "tmpDir" in opts,
+      false,
+      "store 缺席 → 解析不出会话 tmp → key 不出现（fallback 由 verify-loop 承担）"
+    );
   });
 });

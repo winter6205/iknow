@@ -3,6 +3,7 @@
  * Core line handling is exported for unit tests (no real TTY required).
  */
 import * as readline from "node:readline";
+import { homedir } from "node:os";
 import {
   run as runHarness,
   type AnthropicNativeMessage,
@@ -30,6 +31,7 @@ import type { SessionContext } from "../shared/schema.js";
 import { isIknowError, ValidationError } from "../shared/errors.js";
 import { MaxTurnsExceeded } from "../harness/errors.js";
 import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
+import { resolveSessionFenceTmp } from "../harness/sandbox/fence-tmp.js";
 import { maxTurnsNotice } from "./max-turns.js";
 import {
   clearErrLine,
@@ -85,6 +87,11 @@ import {
   applyShiftTabAgentModeFlip,
   type GraphModeContext,
 } from "../harness/graph/mode.js";
+import {
+  applyFsModeCommand,
+  type FsIsolationMode,
+  type FsModeContext,
+} from "../harness/sandbox/fs-mode.js";
 import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import {
@@ -152,6 +159,13 @@ export type ChatSessionOpts = {
    * `run_graph`。ask 不传（无 overlay）。
    */
   graphMode?: GraphModeContext;
+  /**
+   * ADR-0092 / SC13: filesystem isolation 档 holder（与 GraphModeContext
+   * 平行 —— 三入口一份单点）。`/config` 就地翻它；引擎装配读的也是同一个
+   * 它（`BuildEngineOpts.fsMode` → bash 工厂 per-call 读）。ask 不传
+   * （无 fs 档 → `/config` 提示未接线）。
+   */
+  fsMode?: FsModeContext;
   /**
    * D-α T3: graph 装配快照（`BuiltEngine.graphAssembly`）。chat 的一个
    * round = 一条用户查询行；host 在跑 run() 之前拍一次快照，翻键因此
@@ -272,6 +286,9 @@ export type ChatLineContext = {
   /** D-α: graph 编排 overlay holder(由 runChatSession 透传,/graph 与
    *  Shift+Tab 翻它)。 */
   graphMode?: GraphModeContext;
+  /** ADR-0092 / SC13: filesystem isolation 档 holder(由 runChatSession
+   *  透传,/config 翻它)。 */
+  fsMode?: FsModeContext;
   /** D-α T3: graph 装配快照(由 runChatSession 透传;查询行开跑前拍一次)。 */
   graphAssembly?: GraphAssembly;
   /**
@@ -1078,6 +1095,44 @@ function chatPrefetchExcludeIds(ctx: ChatLineContext): Set<string> {
   return recovered;
 }
 
+/**
+ * ADR-0092 / SC11–SC13: chat 的 verify 调用点与 bash 工具面同档所需的 opts。
+ *
+ * 与 `session-api/hub.ts` 的同名接缝同款：holder **per-call 现读**（`/config`
+ * 翻档对下一次 verify 生效，不是装配期快照）；`homeRoot` 取 `homedir()` ——
+ * chat 的引擎装配（cli.ts 的 `buildHarnessEngine`）不注入 `userHome`，故
+ * build-engine 内的 `opts.userHome ?? homedir()` 落在后者，两处同源。
+ *
+ * holder 缺席（ask 入口 / 未接线）→ `fsMode` / `homeRoot` 两个 key 都不产出，
+ * runVerifyLoop 走全局档 baseline，与今日逐字节一致。
+ *
+ * ADR-0092 / SC12：`tmpDir` 与 holder 正交、**恒**解析 —— 它是两档共用的
+ * `$TMPDIR` 来源（SC2），与 bash 工具面同款（bash handler 也无条件把
+ * `TMPDIR: tmpDir` 注入 fence env）。解析走 bash 面**同一个** helper
+ * （`resolveSessionFenceTmp`），不在本面独立推导第三份：项目根取
+ * `ctx.checkpointStore.getProjectDir()`（cli.ts 的 `todoProjectDir` 同源，
+ * 即 registry 喂给 bash 的 `projectDir`），叶子取 `state.conversationId`。
+ * 宿主是 null/缺失（ask / tests / 未接线）→ 不产出该 key，verify-loop 回退
+ * 进程 `tmpdir()`（fallback 不是目标态）。
+ */
+function chatVerifyFenceOpts(ctx: ChatLineContext): {
+  readonly fsMode?: FsIsolationMode;
+  readonly homeRoot?: string;
+  readonly tmpDir?: string;
+} {
+  const holder = ctx.fsMode;
+  const tmpDir = resolveSessionFenceTmp({
+    projectDir: ctx.checkpointStore?.getProjectDir(),
+    conversationId: ctx.state.conversationId ?? undefined,
+  });
+  return {
+    ...(holder === undefined
+      ? {}
+      : { fsMode: holder.get(), homeRoot: homedir() }),
+    ...(tmpDir !== undefined ? { tmpDir } : {}),
+  };
+}
+
 async function runChatQueryLine(
   opts: ProcessChatLineOpts
 ): Promise<ProcessChatLineResult> {
@@ -1196,6 +1251,9 @@ async function runChatQueryLine(
                 sessionId: ctx.state.conversationId ?? "chat",
                 signal: ctx.abortController?.signal,
                 cwd: process.cwd(),
+                // ADR-0092 / SC11–SC13:verify 命令的围栏与 bash 工具面同档
+                // （holder per-call 现读；缺席 → 全局档 baseline）。
+                ...chatVerifyFenceOpts(ctx),
                 // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
                 // (command 缺失/空串时分类器接管, spec Objective); 缺席 (ask 形态)
                 // → undefined, verify-loop 自然走透明关闭向后兼容 (SC7)。
@@ -1490,23 +1548,28 @@ async function processSlash(opts: {
       };
     }
 
-    case "graph": {
+    case "graph":
       // D-α graph mode: 编排 overlay 查询/切换。语义与文案走
       // harness/graph/mode.ts 单点(TUI / serve 同源);chat 只决定文案落
       // stdout 还是 stderr。holder 缺席(ask 入口不装)→ 提示不可用。
-      const graphCtx = ctx.graphMode;
-      if (!graphCtx) {
-        return {
-          quit: false,
-          output: "",
-          stderr: "/graph: 当前入口不提供 graph 模式上下文（ask）",
-        };
-      }
-      const result = applyGraphCommand(graphCtx, effect.args);
-      return result.ok
-        ? { quit: false, output: result.text }
-        : { quit: false, output: "", stderr: result.text };
-    }
+      return applyHolderSlash(
+        ctx.graphMode,
+        (h) => applyGraphCommand(h, effect.args),
+        "/graph: 当前入口不提供 graph 模式上下文（ask）"
+      );
+
+    case "config":
+      // ADR-0092 / SC13: fs isolation 档查询/切换。语义与文案走
+      // harness/sandbox/fs-mode.ts 单点(TUI / serve 同源);chat 只决定
+      // 文案落 stdout 还是 stderr。holder 缺席(ask 入口不装)→ 提示不可用。
+      // 与 /graph 一致:只翻 holder,不落 settings —— chat 无 settings 写回
+      // 通道(TUI 的持久化面是 onPersistFsMode;SC13 的 settings 路径是启动
+      // 读取面,不是 REPL 命令的职责)。
+      return applyHolderSlash(
+        ctx.fsMode,
+        (h) => applyFsModeCommand(h, effect.args),
+        "/config: 当前入口不提供文件系统隔离档上下文（ask）"
+      );
 
     case "goal": {
       // #458 T6: /goal 三面 —— status / clear / pin(<text>)。
@@ -1553,6 +1616,26 @@ async function processSlash(opts: {
       return { ...started, output };
     }
   }
+}
+
+/**
+ * holder 缺席 → 该入口不提供该控件;否则走 SSOT apply,按 ok 决定文案落
+ * stdout / stderr。`/graph` 与 `/config` 只差 holder + apply + 缺席文案 ——
+ * 语义与字面仍由各自 SSOT(harness/graph/mode.ts、harness/sandbox/fs-mode.ts)
+ * 单点承担,本函数只做 host 侧载体分流。
+ */
+function applyHolderSlash<T>(
+  holder: T | undefined,
+  apply: (h: T) => { ok: boolean; text: string },
+  unavailable: string
+): ProcessChatLineResult {
+  if (!holder) {
+    return { quit: false, output: "", stderr: unavailable };
+  }
+  const result = apply(holder);
+  return result.ok
+    ? { quit: false, output: result.text }
+    : { quit: false, output: "", stderr: result.text };
 }
 
 /** #458 T6: /goal status —— 回显当前 goal.text;not_found =
@@ -2251,6 +2334,7 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     showThinking: opts.showThinking,
     permissionMode: opts.permissionMode,
     graphMode: opts.graphMode,
+    fsMode: opts.fsMode,
     graphAssembly: opts.graphAssembly,
     ...(opts.liveGraphLedger ? { liveGraphLedger: opts.liveGraphLedger } : {}),
     abortController,

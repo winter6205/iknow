@@ -15,6 +15,7 @@ import {
 } from "../config/workspace-root.js";
 import {
   loadIknowSettings,
+  resolveFsIsolationMode,
   resolveWorktreeExclusive,
 } from "../config/settings.js";
 import {
@@ -36,6 +37,7 @@ import {
   createGraphModeContext,
   resolveGraphMode,
 } from "../harness/graph/mode.js";
+import { createFsModeContext } from "../harness/sandbox/fs-mode.js";
 import { createLiveGraphLedgerHost } from "../harness/graph/ledger.js";
 
 export type ServeOptions = {
@@ -147,6 +149,13 @@ export async function startSessionServe(
   const graphModeCtx = createGraphModeContext(
     resolveGraphMode({ settings: startupSettings.graph })
   );
+  // ADR-0092 / SC13:filesystem isolation 档 holder —— 初值走 settings
+  // （缺省 global），运行中由 POST /api/v1/fs-mode（`/config` 的 serve
+  // 对等物）翻。与 permissionModeCtx 同款:hub 与 http 层共用同一实例
+  // （SC3 三入口同 holder）。与 permissionMode / graphMode 正交。
+  const fsModeCtx = createFsModeContext(
+    resolveFsIsolationMode(startupSettings)
+  );
   // T3 / plans/worktree-exclusive-lock.md / ADR-0070: enter-worktree
   // 占用锁档一次性解析。`resolveWorktreeExclusive(settings)` 是单读点
   // （与 `resolveWorktreeOnMutate` 同款形状；缺失 / 非 true 一律 OFF），
@@ -177,6 +186,9 @@ export async function startSessionServe(
     surface: "serve",
     permissionMode: permissionModeCtx,
     graphMode: graphModeCtx,
+    // ADR-0092 / SC13:fs isolation holder —— hub 引擎消费（bash 工厂
+    // per-call 读）。
+    fsMode: fsModeCtx,
     // T3 / plans/worktree-exclusive-lock.md / ADR-0070: 启动加载点一次性
     // 解析的 boolean —— 透传给 hub → provisioner 闭包冻结。OFF 档 →
     // `worktreeExclusive` 不在 opts（缺省 undefined → 透传给 provisioner
@@ -228,6 +240,8 @@ export async function startSessionServe(
     traceWriteFailures: () => hub.getTraceWriteFailures(),
     permissionMode: permissionModeCtx,
     graphMode: graphModeCtx,
+    // ADR-0092 / SC13:fs isolation holder 给 http 层（/api/v1/fs-mode 端点）。
+    fsMode: fsModeCtx,
     // ADR-0020: serve accepts --trace-out and mounts the READ side too —
     // `/api/v1/traces*` + `/trace` SPA live on this same server/port.
     ...(opts?.traceOut !== undefined

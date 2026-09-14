@@ -30,6 +30,18 @@ export const WORKSPACE_ROOT_ENV_KEY = "IKNOW_WORKSPACE_ROOT";
  */
 export const PRODUCT_ROOT_ENV_KEY = "IKNOW_PRODUCT_ROOT";
 
+/**
+ * ADR-0092 Amendment 2026-09-13 / SC11: env var carrying the session's fs
+ * isolation mode across the same process boundary (parent session → subagent
+ * worker). Sits with the other two parent-set / worker-read wires; the role
+ * differs — this one is a posture token (`"global" | "workspace"`, the value
+ * domain of `FsIsolationMode`), not a path. The value domain + parser SSOT is
+ * `harness/sandbox/fs-mode.ts` (`parseFsModeFlag`), which the worker applies
+ * fail-closed; a worker that finds the var absent or unparsable keeps the
+ * default global posture (byte-identical to the pre-wire shape).
+ */
+export const FS_MODE_ENV_KEY = "IKNOW_FS_MODE";
+
 /** SessionFile / PUT path cap (serve-workspace T1). Overflow → schema_invalid. */
 export const MAX_WORKSPACE_ROOT_CHARS = 4096;
 

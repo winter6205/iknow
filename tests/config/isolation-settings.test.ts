@@ -26,6 +26,7 @@ import {
   loadIknowSettings,
   resolveWorktreeOnMutate,
   resolveWorktreeExclusive,
+  resolveFsIsolationMode,
 } from "../../src/config/settings.ts";
 import { persistThinkingChanges } from "../../src/config/persist-settings.ts";
 
@@ -335,24 +336,6 @@ describe("settings.isolation.worktreeExclusive", () => {
 });
 
 describe("isolation persist round-trip", () => {
-  it("survives a persist cycle: isolation survives a thinking patch write-back", async () => {
-    const { home, cwd, userFile } = await makeSettings(
-      {
-        isolation: { worktreeOnMutate: true },
-        llm: { model: "claude-sonnet" },
-      },
-      {}
-    );
-
-    // persist 通道（raw-merge + 原子写）只改 llm.thinking，isolation 原样保留。
-    await persistThinkingChanges(userFile, { thinking: "adaptive" });
-
-    const settings = loadIknowSettings({ home, cwd });
-    assert.equal(resolveWorktreeOnMutate(settings), true);
-    assert.equal(settings.llm?.thinking, "adaptive");
-    assert.equal(settings.llm?.model, "claude-sonnet");
-  });
-
   it("bootstraps isolation into a fresh settings file via persist and reads it back", async () => {
     const { home, cwd, userFile } = await makeSettings({}, {});
 
@@ -375,5 +358,246 @@ describe("isolation persist round-trip", () => {
     const settings = loadIknowSettings({ home, cwd });
     assert.deepEqual(settings.isolation, { worktreeOnMutate: true });
     assert.equal(settings.llm?.thinking, "adaptive");
+  });
+});
+
+// ADR-0092 / SC13：filesystem isolation 档（fsMode）— 用户层 boolean-only
+// 的可写姿态。默认 global；非法值 / 项目文件 isolation 段 → 丢弃并回落 global。
+// 不允许的项目文件 isolation 段被丢弃并告警（与 worktreeOnMutate / worktreeExclusive
+// 同款 ADR-0084 纪律）。
+describe("settings.isolation.fsMode", () => {
+  it("缺省 global：缺席 / 非法值 → 字段不产、resolveFsIsolationMode 回落 global", async () => {
+    const { home, cwd } = await makeSettings({}, {});
+    const settings = loadIknowSettings({ home, cwd });
+    assert.equal(resolveFsIsolationMode(settings), "global");
+    // 字段缺席 → isolation 段不产（与 worktreeOnMutate 同款「字段全非法 / 缺席 → undefined」）。
+    assert.equal(settings.isolation, undefined);
+  });
+
+  it("显式 workspace → 字段透传、resolveFsIsolationMode 解析为 workspace", async () => {
+    const { home, cwd } = await makeSettings(
+      { isolation: { fsMode: "workspace" } },
+      {}
+    );
+    const settings = loadIknowSettings({ home, cwd });
+    assert.deepEqual(settings.isolation, { fsMode: "workspace" });
+    assert.equal(resolveFsIsolationMode(settings), "workspace");
+  });
+
+  it("显式 global → 字段透传（fail-closed 兜底与显式值同效）", async () => {
+    const { home, cwd } = await makeSettings(
+      { isolation: { fsMode: "global" } },
+      {}
+    );
+    const settings = loadIknowSettings({ home, cwd });
+    assert.deepEqual(settings.isolation, { fsMode: "global" });
+    assert.equal(resolveFsIsolationMode(settings), "global");
+  });
+
+  for (const illegal of [
+    "Global",
+    "WORKSPACE",
+    true,
+    1,
+    null,
+    ["global"],
+    { value: "global" },
+  ]) {
+    it(`非法 fsMode 值 ${JSON.stringify(illegal)} → 丢弃字段，回落 global`, async () => {
+      const { home, cwd } = await makeSettings(
+        { isolation: { fsMode: illegal } },
+        {}
+      );
+      const settings = loadIknowSettings({ home, cwd });
+      assert.equal(settings.isolation, undefined);
+      assert.equal(resolveFsIsolationMode(settings), "global");
+    });
+  }
+
+  it("ADR-0084：project 文件的 fsMode 被丢弃并告警 → user 值胜出", async () => {
+    const { home, cwd } = await makeSettings(
+      { isolation: { fsMode: "global" } },
+      { isolation: { fsMode: "workspace" } }
+    );
+    const warnings: string[] = [];
+    assert.equal(
+      resolveFsIsolationMode(
+        loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) })
+      ),
+      "global"
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"isolation"/);
+  });
+
+  it("project 文件无 isolation 段 → user fsMode 原样保留", async () => {
+    const { home, cwd } = await makeSettings(
+      { isolation: { fsMode: "workspace" } },
+      {}
+    );
+    assert.equal(
+      resolveFsIsolationMode(loadIknowSettings({ home, cwd })),
+      "workspace"
+    );
+  });
+
+  it("项目文件 fsMode 非法 → 随段丢弃，不抹掉 user 的 fsMode", async () => {
+    const { home, cwd } = await makeSettings(
+      { isolation: { fsMode: "workspace" } },
+      { isolation: { fsMode: "wrong" } }
+    );
+    const warnings: string[] = [];
+    assert.equal(
+      resolveFsIsolationMode(
+        loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) })
+      ),
+      "workspace"
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"isolation"/);
+  });
+
+  it("fsMode 与 worktreeOnMutate / worktreeExclusive 共存于 isolation 段", async () => {
+    const { home, cwd } = await makeSettings(
+      {
+        isolation: {
+          worktreeOnMutate: true,
+          worktreeExclusive: false,
+          fsMode: "workspace",
+        },
+      },
+      {}
+    );
+    const settings = loadIknowSettings({ home, cwd });
+    assert.equal(resolveWorktreeOnMutate(settings), true);
+    assert.equal(resolveWorktreeExclusive(settings), false);
+    assert.equal(resolveFsIsolationMode(settings), "workspace");
+    assert.deepEqual(settings.isolation, {
+      worktreeOnMutate: true,
+      worktreeExclusive: false,
+      fsMode: "workspace",
+    });
+  });
+
+  it("未知 sibling 字段丢弃，已知字段保留（与 worktreeExclusive 同纪律）", async () => {
+    const { home, cwd } = await makeSettings(
+      { isolation: { fsMode: "workspace", futureFlag: 1 } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }).isolation, {
+      fsMode: "workspace",
+    });
+  });
+
+  it("顶层 fsMode（非 isolation.fsMode）→ 完全不识别", async () => {
+    const { home, cwd } = await makeSettings({ fsMode: "workspace" }, {});
+    const settings = loadIknowSettings({ home, cwd });
+    assert.equal(settings.isolation, undefined);
+    assert.equal(resolveFsIsolationMode(settings), "global");
+  });
+
+  it("freeze：isolation.fsMode 解析后冻结", async () => {
+    const { home, cwd } = await makeSettings(
+      { isolation: { fsMode: "workspace" } },
+      {}
+    );
+    const settings = loadIknowSettings({ home, cwd });
+    assert.ok(Object.isFrozen(settings.isolation));
+    assert.ok(Object.isFrozen(settings.isolation!.fsMode));
+  });
+
+  it("resolveFsIsolationMode：null / undefined 输入 → global", () => {
+    assert.equal(resolveFsIsolationMode(undefined), "global");
+    assert.equal(resolveFsIsolationMode(null), "global");
+    assert.equal(resolveFsIsolationMode({}), "global");
+    assert.equal(
+      resolveFsIsolationMode({ isolation: { fsMode: "workspace" } }),
+      "workspace"
+    );
+  });
+
+  it("persist 往返：fsMode 与 worktreeOnMutate 同时保留", async () => {
+    const { home, cwd, userFile } = await makeSettings(
+      {
+        isolation: { worktreeOnMutate: true, fsMode: "workspace" },
+        llm: { model: "claude-sonnet" },
+      },
+      {}
+    );
+    await persistThinkingChanges(userFile, { thinking: "adaptive" });
+    const settings = loadIknowSettings({ home, cwd });
+    assert.equal(resolveWorktreeOnMutate(settings), true);
+    assert.equal(resolveFsIsolationMode(settings), "workspace");
+    assert.equal(settings.llm?.thinking, "adaptive");
+  });
+
+  it("per-field 独立：任一字段非法不牵连其它字段（三字段各自留 / 丢）", async () => {
+    // parseIsolation / mergeIsolation 的合同核心：三字段独立校验、互不影响。
+    // 每列一个字段非法，断言另两字段仍在场且值不变 —— 覆盖「漏丢」「错丢」
+    // 两种方向的回归。
+    const { home, cwd } = await makeSettings(
+      {
+        isolation: {
+          worktreeOnMutate: true,
+          worktreeExclusive: false,
+          fsMode: "workspace",
+        },
+      },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }).isolation, {
+      worktreeOnMutate: true,
+      worktreeExclusive: false,
+      fsMode: "workspace",
+    });
+
+    const illegalFsMode = await makeSettings(
+      { isolation: { worktreeOnMutate: true, fsMode: "GLOBAL" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings(illegalFsMode).isolation, {
+      worktreeOnMutate: true,
+    });
+
+    const illegalBoolean = await makeSettings(
+      { isolation: { worktreeOnMutate: "yes", fsMode: "global" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings(illegalBoolean).isolation, {
+      fsMode: "global",
+    });
+  });
+
+  it("isolation 段的键集合不含 undefined 值键（`in` 为假，不只是值为 undefined）", async () => {
+    // 回归钉：per-field 合并若写成 `out.x = undefined`，键会真实存在。用户
+    // 配置只给 fsMode 时，另两键必须**不在**（`in` 运算符判否），否则消费方
+    // 的 Object.keys / 深比较看到的是「有键的 undefined」，与段缺席语义漂移。
+    const { home, cwd } = await makeSettings(
+      { isolation: { fsMode: "global" } },
+      {}
+    );
+    const isolation = loadIknowSettings({ home, cwd }).isolation;
+    assert.ok(isolation);
+    assert.equal("worktreeOnMutate" in isolation, false);
+    assert.equal("worktreeExclusive" in isolation, false);
+    assert.deepEqual(Object.keys(isolation), ["fsMode"]);
+  });
+
+  it("字段增删不影响「全空 → 段缺席」判断（结构不变量，不随字段数漂移）", async () => {
+    // parseIsolation / mergeIsolation 收尾用 Object.keys 判空，故下列输入
+    // 一律不得产出 isolation 段。增字段时这条不变量必须继续成立。
+    for (const isolation of [
+      {},
+      { unknownOnly: 1 },
+      { worktreeOnMutate: "yes", worktreeExclusive: "no", fsMode: "WRONG" },
+      { worktreeOnMutate: null, worktreeExclusive: 1, fsMode: ["global"] },
+    ]) {
+      const { home, cwd } = await makeSettings({ isolation }, {});
+      assert.equal(
+        loadIknowSettings({ home, cwd }).isolation,
+        undefined,
+        `isolation=${JSON.stringify(isolation)}`
+      );
+    }
   });
 });

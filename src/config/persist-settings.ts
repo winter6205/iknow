@@ -30,6 +30,8 @@ import { dirname, join } from "node:path";
 
 import {
   THINKING_EFFORT_LEVELS,
+  isFsIsolationMode,
+  type FsIsolationMode,
   type IknowSettingsThinking,
   type IknowSettingsThinkingEffort,
 } from "./settings.js";
@@ -185,6 +187,49 @@ export function mergeMemoryPatch(
 }
 
 /**
+ * ADR-0092 / SC13：fsMode 反向持久化 patch。值域 `"global" | "workspace"`，
+ * 与 `settings.isolation.fsMode` 解析端共用 `isFsIsolationMode` 闭集。
+ */
+export interface FsModePersistPatch {
+  fsMode: FsIsolationMode;
+}
+
+/**
+ * 合并 fsMode patch 到 raw JSON（纯函数，无 fs）。
+ *  - `isolation` 缺失 → 创建；
+ *  - `isolation` 非普通对象 → 以新对象覆盖（原非法 `isolation` 值整体丢弃，
+ *    仍只保留 patch 字段与已知 user-isolation 子键；但本函数**只**写
+ *    `fsMode`，其它 isolation 子键不复刻——这是 drop-not-throw 形态的
+ *    简化：以对象覆盖 isolation 段会丢掉 worktreeOnMutate 等并发键，故
+ *    本实现走 `{ ...raw.isolation }` 浅拷贝再覆盖 fsMode 的形态）；
+ *  - 非法 patch 值（fsMode 不在 `"global" | "workspace"` 闭集）→ 抛
+ *    `TypeError`（调用方边界，不静默丢弃；与 `mergeThinkingPatch` 纪律一致）；
+ *  - 其它顶层键（llm / memory / secrets 等）一律原样保留。
+ *
+ * 已知低效（不修，Spec 轴 review Low #3 已记录）：值未变时仍重写整个文件。
+ * 收口点在调用方（TUI persist 闭包先比对 holder 现值再决定是否落盘），不在
+ * 本纯函数 —— 本函数的返回 `bytes` 是 self-write 哨兵的哈希来源，短路返回
+ * 未合并的 raw 会让该哨兵读到与实际落盘不符的内容。
+ */
+export function mergeFsModePatch(
+  raw: Record<string, unknown>,
+  patch: FsModePersistPatch
+): Record<string, unknown> {
+  if (!isFsIsolationMode(patch.fsMode)) {
+    throw new TypeError(
+      `illegal fsMode patch value: ${JSON.stringify(patch.fsMode)} (expected "global" | "workspace")`
+    );
+  }
+  const next: Record<string, unknown> = { ...raw };
+  const nextIso: Record<string, unknown> = isPlainObject(next.isolation)
+    ? { ...next.isolation }
+    : {};
+  nextIso.fsMode = patch.fsMode;
+  next.isolation = nextIso;
+  return next;
+}
+
+/**
  * 选择写回目标 settings 文件路径（ADR-0084 写回落对层）：
  *  - thinking / memory 是**用户层键**（`llm` / `memory` 段）→ 目标恒为
  *    `<home>/.iknow/settings.json`；`home` 缺省 `homedir()`（与
@@ -241,6 +286,24 @@ export async function persistMemoryChanges(
 ): Promise<{ path: string; bytes: string }> {
   const raw = await readSettingsRaw(filePath);
   return persistMergedSettings(filePath, mergeMemoryPatch(raw, patch));
+}
+
+/**
+ * ADR-0092 / SC13：把 fsMode patch 持久化到 settings.json（原子写）。
+ * 镜像 `persistMemoryChanges` 形态：读 raw JSON（坏 JSON / 文件缺失 → 空对象
+ * 起步）→ 合并 patch → 写 tmp（同目录、rename 前 chmod 0600）→ rename 原子
+ * 替换。返回完整 bytes 字符串供 self-write 哨兵登记（EnvLoader 按内容哈希
+ * 比对，watcher 命中时跳过 reload 防回环）。
+ *
+ * 非法 fsMode 值由 `mergeFsModePatch` 抛 `TypeError`，写回未发生，原文件
+ * 原样保留（不静默吞、不双写）。
+ */
+export async function persistFsModeChanges(
+  filePath: string,
+  patch: FsModePersistPatch
+): Promise<{ path: string; bytes: string }> {
+  const raw = await readSettingsRaw(filePath);
+  return persistMergedSettings(filePath, mergeFsModePatch(raw, patch));
 }
 
 /** sha256 hex —— self-write 哨兵的内容哈希（T2 markSelfWrite 比对用）。 */

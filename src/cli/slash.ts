@@ -79,7 +79,13 @@ export type SlashEffect =
    * `harness/graph/mode.ts` 的 `applyGraphCommand` 单点承担（chat / TUI /
    * serve 三入口共用同一份语义）。host 持有 GraphModeContext。
    */
-  | { type: "graph"; args: string[] };
+  | { type: "graph"; args: string[] }
+  /**
+   * ADR-0092 / SC13: filesystem isolation 档查询/切换。args 原样透传 ——
+   * 解析与文案由 `harness/sandbox/fs-mode.ts` 的 `applyFsModeCommand` 单点
+   * 承担（chat / TUI / serve 三入口共用同一份值域）。host 持有 FsModeContext。
+   */
+  | { type: "config"; args: string[] };
 
 /**
  * Strip C0 control chars (incl. ESC) and DEL so reflected command text
@@ -99,6 +105,7 @@ export const HELP_TEXT = `命令 / Commands:
   /continue                   续跑未完成工具环 · continue pending (no args)
   /permissions [mode]         查看/切换权限模式(default|plan|full_auto)
   /graph [on|off|status]      查看/切换 graph 编排模式(下一次 run() 生效)
+  /config [status|fs global|fs workspace]  查看/切换文件系统隔离档(下一次 bash 调用生效)
   /goal status                查看会话目标 · show session goal
   /goal clear                 清空会话目标 · clear session goal
   /goal [--max-turns <n>] <text>  钉目标（可选轮次上限）· pin goal
@@ -179,35 +186,14 @@ export function applySlashCommand(opts: ApplySlashCommandOpts): SlashEffect {
       // 共享的单点(harness/graph/mode.ts),host 持有 GraphModeContext 并调它。
       return { type: "graph", args };
 
-    case "goal": {
-      // #458 T6: /goal 三面 —— status / clear / pin(<text>)。
-      // status / clear 区分大小写(小写才触发；大写按 <text> pin,因为 <text>
-      // 本身可能以大写开头)。空 args → status(回显)；其它 → pin text = join+trim。
-      // 纯解析:实际 IO(读盘 / 清空 / 持久化)落在 host(chat-session 持有
-      // checkpointStore + validateGoalText)。
-      const sub = args[0] ?? "";
-      if (sub === "status") {
-        return { type: "goal", action: "status", text: "" };
-      }
-      if (sub === "clear") {
-        return { type: "goal", action: "clear", text: "" };
-      }
-      if (args.length === 0) {
-        return { type: "goal", action: "status", text: "" };
-      }
-      const parsed = parseGoalPinInput(args.join(" "));
-      if (!parsed.ok) {
-        return { type: "error", text: parsed.error };
-      }
-      return parsed.maxTurns === undefined
-        ? { type: "goal", action: "pin", text: parsed.text }
-        : {
-            type: "goal",
-            action: "pin",
-            text: parsed.text,
-            maxTurns: parsed.maxTurns,
-          };
-    }
+    case "config":
+      // ADR-0092 / SC13:filesystem isolation 档查询/切换。args 不在此解析
+      // —— 值域与文案是三入口共享的单点(harness/sandbox/fs-mode.ts),host
+      // 持有 FsModeContext 并调 applyFsModeCommand。
+      return { type: "config", args };
+
+    case "goal":
+      return applyGoalCommand(args);
 
     case "":
       return {
@@ -221,6 +207,39 @@ export function applySlashCommand(opts: ApplySlashCommandOpts): SlashEffect {
         text: `Unknown command /${sanitizeCommandForDisplay(command)}. Type /help for commands.`,
       };
   }
+}
+
+/**
+ * #458 T6: /goal 三面 —— status / clear / pin(<text>)。
+ * status / clear 区分大小写(小写才触发；大写按 <text> pin,因为 <text>
+ * 本身可能以大写开头)。空 args → status(回显)；其它 → pin text = join+trim。
+ * 纯解析:实际 IO(读盘 / 清空 / 持久化)落在 host(chat-session 持有
+ * checkpointStore + validateGoalText)。
+ */
+function applyGoalCommand(args: string[]): SlashEffect {
+  const sub = args[0] ?? "";
+  if (sub === "status") {
+    return { type: "goal", action: "status", text: "" };
+  }
+  if (sub === "clear") {
+    return { type: "goal", action: "clear", text: "" };
+  }
+  if (args.length === 0) {
+    return { type: "goal", action: "status", text: "" };
+  }
+  const parsed = parseGoalPinInput(args.join(" "));
+  if (!parsed.ok) {
+    return { type: "error", text: parsed.error };
+  }
+  if (parsed.maxTurns === undefined) {
+    return { type: "goal", action: "pin", text: parsed.text };
+  }
+  return {
+    type: "goal",
+    action: "pin",
+    text: parsed.text,
+    maxTurns: parsed.maxTurns,
+  };
 }
 
 function formatStatus(ctx: SlashContext): string {

@@ -84,7 +84,12 @@ import type { SessionGrants } from "../harness/permission/session-grants.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
 import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { GraphModeContext } from "../harness/graph/mode.js";
+import type {
+  FsIsolationMode,
+  FsModeContext,
+} from "../harness/sandbox/fs-mode.js";
 import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
+import { resolveSessionFenceTmp } from "../harness/sandbox/fence-tmp.js";
 import { createViolationCounter } from "../harness/sandbox/violation-handling.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
 import {
@@ -383,6 +388,37 @@ function isSessionStoreError(err: unknown): err is SessionStoreError {
 }
 
 /**
+ * 可选 opts 字段的缺席/在场壳（tui/deps.ts:presentFields 同款，memory-toggle-live
+ * S5 整改的既有先例）：值在场才产出 `{ [key]: value }`，缺席产出空对象。
+ * 取代 `...(x ? { k: x } : {})` —— 后者两个分支都进 complexity 计数，而
+ * 宿主侧解构语义不变（缺席 = key 不出现）。
+ *
+ * `=== undefined` 是唯一判据：null / false / 0 都算「值在场」。
+ */
+function presentFields<V>(
+  key: string,
+  value: V | undefined
+): { readonly [k: string]: V } {
+  if (value === undefined) return {};
+  return { [key]: value };
+}
+
+/**
+ * 非空文本字段的在场壳 —— `undefined` 与 `""` 都算缺席。
+ *
+ * 与 `presentFields` 分开而不是合并成一个「falsy 即缺席」的松散版：`""`
+ * 是缺席还是合法值属于**调用方的契约**（`stopSummary` 是前者），合并会
+ * 让另一个调用方把 `false` / `0` 这类合法值悄悄丢掉。
+ */
+function presentText<V extends string>(
+  key: string,
+  value: V | undefined
+): { readonly [k: string]: V } {
+  if (value === undefined || value === "") return {};
+  return { [key]: value };
+}
+
+/**
  * Auto-loop persist is best-effort. Typed load faults skip persist without
  * changing T3 continue/stop; unknown throws rethrow (store contract).
  *
@@ -562,6 +598,12 @@ export type SessionHubOptions = {
    * 每条 postMessage 拍下的快照 gate。缺席 = 本入口未接 overlay。
    */
   graphMode?: GraphModeContext;
+  /**
+   * ADR-0092 / SC13: filesystem isolation 档 holder（serve / TUI 与 CLI 共用
+   * 同一形态）。透传给 buildHarnessEngine —— bash 工厂 per-call 读
+   * （`BuildEngineOpts.fsMode`）。缺席 = 本入口未接 fs 档（引擎按全局档）。
+   */
+  fsMode?: FsModeContext;
   /**
    * D-α T5:已建好 engine 的 host（TUI 在 run.tsx 就装配完）把
    * `BuiltEngine.graphAssembly` 直接交进来 —— 这类 host 走注入 deps 路径，
@@ -858,6 +900,9 @@ export class SessionHub {
   /** D-α T3 / ADR-0030: graph 编排 overlay holder（serve / TUI 注入；缺席 =
    *  本入口未接 overlay → run_graph 与编排段都不存在）。 */
   private readonly graphMode: GraphModeContext | undefined;
+  /** ADR-0092 / SC13: fs isolation 档 holder（serve / TUI 注入；缺席 = 本
+   *  入口未接 fs 档 → 引擎按全局档缺省）。 */
+  private readonly fsMode: FsModeContext | undefined;
   /** D-α T5: 注入 deps 的 host（TUI）自带的装配快照句柄（构造 opts 传入）。 */
   private readonly injectedGraphAssembly: GraphAssembly | undefined;
   /** D-α T3: 最近一次 ensureDeps 返回的那台 engine 的装配快照。postMessage
@@ -909,6 +954,7 @@ export class SessionHub {
     this.sessionGrants = opts.sessionGrants;
     this.permissionMode = opts.permissionMode;
     this.graphMode = opts.graphMode;
+    this.fsMode = opts.fsMode;
     this.injectedGraphAssembly = opts.graphAssembly;
     this.liveGraphLedger = opts.liveGraphLedger;
     this.overrideEnv = opts.overrideEnv;
@@ -1689,6 +1735,52 @@ export class SessionHub {
                       signal: opts.signal,
                       trace: runDeps.trace,
                       cwd: boundRoot,
+                      // ADR-0092 Amendment / SC11–SC13:verify 命令的围栏与
+                      // bash 工具同档 —— snapshot 在本次调用现读(翻档下一次
+                      // 调用生效,不重建引擎);缺席 → verify-loop 全局档
+                      // baseline,且 key 不出现。
+                      ...presentFields("fsMode", this.fsModeSnapshot()),
+                      // homeRoot 取本进程 homedir() —— 本调用点独立于
+                      // build-engine,缺省语义 = 那边的 `opts.userHome ??
+                      // homedir()` 的后者。
+                      //
+                      // 已知限制(有意的同源假设,不是巧合):两处仅在
+                      // 「宿主不注入 userHome」时同源。生产三入口(serve /
+                      // chat / TUI)都不注入(session-api/serve.ts、cli 的
+                      // buildHarnessEngine 调用点、tui/run.tsx 的 depsOpts),
+                      // 故今天两处 home ro-bind 源端一致。
+                      //
+                      // 漂移条件:userHome 是 TUI deps 的测试缝
+                      // (src/tui/deps.ts)。一旦某个宿主把这同一个值也注入
+                      // 引擎装配,而本调用点仍取真实 homedir(),工作区档下
+                      // bash 的 home ro-bind 会指向注入 home、verify 指向真
+                      // home —— 两条执行面的 home 可见面分裂。
+                      //
+                      // 为何不在此收口:hub 拿不到引擎 home ——
+                      // SessionHubOptions 没有 userHome(既有 recentsHome /
+                      // mcpHome 分别是信任名单根与 MCP 配置根,不是引擎
+                      // home 缝,不能挪用)。真收口要把同一值经 hub-bridge /
+                      // run.tsx 透传进来,那是 TUI 接线所有权(另有任务在
+                      // 改这两个文件);且当前无生产 caller 注入,先加 option
+                      // 只会是零调用者的死面。接 TUI 的 userHome 缝到 hub
+                      // 路径时,请一并给 SessionHubOptions 加 home 并改本行为
+                      // 现读(或经 fsModeSnapshot 同款 per-call helper 收口),
+                      // 而不是继续靠「生产恰好不注入」。
+                      homeRoot: homedir(),
+                      // ADR-0092 / SC12:会话 tmp 宿主真路径 —— `$TMPDIR`
+                      // 与工作区档 `--bind <tmpRoot>` 同源。经 bash 工具面
+                      // **同一个** helper 解析(不在此独立推导第三份):
+                      // `<projectDir>/<sanitized convId>/fence-tmp`,与
+                      // registry 的 bash `projectDir: opts.todoDir` 同池同叶。
+                      // 缺 projectDir / conversationId → undefined,verify-loop
+                      // 回退进程 tmpdir()(fallback 不是目标态,见 VerifyLoopOptions.tmpDir)。
+                      ...presentFields(
+                        "tmpDir",
+                        resolveSessionFenceTmp({
+                          projectDir: this.store.getProjectDir(),
+                          conversationId,
+                        })
+                      ),
                       // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
                       // (command 缺失/空串时分类器接管, spec Objective);缺席
                       // (ask 形态) → undefined, verify-loop 自然走透明关闭向后兼容。
@@ -1861,10 +1953,7 @@ export class SessionHub {
                   // as conditionalSave — byte-identical shouldPersistCheckpoint verdict
                   // (saved 只在 cancelled 时消费;completed 等 stopReason 不读它)。
                   priorMessages: session.messages,
-                  ...(capturedStopSummary !== undefined &&
-                  capturedStopSummary.length > 0
-                    ? { stopSummary: capturedStopSummary }
-                    : {}),
+                  ...presentText("stopSummary", capturedStopSummary),
                   // #128 M3: 验证最终判定 (failed/unstable/escalated) surface 到 DTO。
                   ...(s.verifyView !== undefined
                     ? { verify: s.verifyView }
@@ -1896,10 +1985,7 @@ export class SessionHub {
                   finalText: "",
                   stopReason: "maxTurns",
                   turnCount: err.turnsRan,
-                  ...(capturedStopSummary !== undefined &&
-                  capturedStopSummary.length > 0
-                    ? { stopSummary: capturedStopSummary }
-                    : {}),
+                  ...presentText("stopSummary", capturedStopSummary),
                 },
               },
             };
@@ -2869,6 +2955,15 @@ export class SessionHub {
     return entry;
   }
 
+  /**
+   * fs 档 holder 当前快照（holder 缺席 → undefined）。**每次调用现读**：
+   * 翻档只影响之后的调用，不重建引擎（ADR-0092 SC11–SC13）。
+   */
+  private fsModeSnapshot(): FsIsolationMode | undefined {
+    if (this.fsMode === undefined) return undefined;
+    return this.fsMode.get();
+  }
+
   private activateSubagentManager(manager: SubAgentManager | undefined): void {
     this.subagentManager = manager;
     this.subagentManagers.register(manager);
@@ -2955,6 +3050,10 @@ export class SessionHub {
       // D-α T3 / ADR-0030:overlay holder 透传 —— serve / TUI 的 `/graph` 与
       // Shift+Tab 翻的是同一个它（SC3 三入口同 holder）。
       ...(this.graphMode ? { graphMode: this.graphMode } : {}),
+      // ADR-0092 / SC13:fs isolation holder 透传 —— `/config` 翻的是同一个
+      // 它（bash 工厂 per-call 读）。holder 缺席 → key 不出现（引擎侧
+      // `opts.fsMode?.get() ?? "global"` 与静态字符串默认同解析）。
+      ...presentFields("fsMode", this.fsMode),
       // #950 T2 / session-folder-consolidation / ADR-0071 Decision 2:
       // todos 落「会话文件夹」—— `todoDir` 改为「会话项目目录」
       // (由 SessionStore.getProjectDir() 暴露的 read-only 投影)。三入口
@@ -3098,6 +3197,10 @@ export class SessionHub {
       // D-α T3 / ADR-0030:overlay holder 透传 —— serve / TUI 的 `/graph` 与
       // Shift+Tab 翻的是同一个它（SC3 三入口同 holder）。
       ...(this.graphMode ? { graphMode: this.graphMode } : {}),
+      // ADR-0092 / SC13:fs isolation holder 透传 —— `/config` 翻的是同一个
+      // 它（bash 工厂 per-call 读）。holder 缺席 → key 不出现（引擎侧
+      // `opts.fsMode?.get() ?? "global"` 与静态字符串默认同解析）。
+      ...presentFields("fsMode", this.fsMode),
       // live-graph-phase1 T1:账本 host 透传 —— 同 production 路径形态。
       ...(this.liveGraphLedger
         ? { liveGraphLedger: this.liveGraphLedger }

@@ -345,6 +345,14 @@ export type BuildEngineOpts = {
     readonly tools?: ReadonlyArray<unknown>;
     readonly system?: string;
   }) => Promise<{ readonly inputTokens: number }>;
+  /**
+   * ADR-0092 Amendment 2026-09-13 / SC11/SC12:fs 隔离档 holder —— bash
+   * 工厂透传,handler per-call `get()` 读一次。生产装配层由 settings 段
+   * `isolation.fsMode` 一次性 resolve 后塞进 holder(T8 在 settings.ts 落地
+   * `resolveFsIsolationMode`);T8 之前的入口(此处)仅接 holder 注入缝。
+   * 缺席 → 全局档(V1 baseline,bash.ts handler 入口 fsMode 缺省回落)。
+   */
+  readonly fsMode?: import("./sandbox/fs-mode.js").FsModeContext;
 };
 
 /**
@@ -789,6 +797,17 @@ export async function buildHarnessEngine(
             ...(isTaskWorktreePath(workspaceRoot)
               ? { sessionRoot: () => liveTaskRoot.read() }
               : {}),
+            // ADR-0092 Amendment 2026-09-13 / SC11:fs 档同样过进程边界 ——
+            // 子代理的 bash 围栏必须与父会话同档,否则工作区档的「home 其余
+            // 不能写」在 subagent→bash 这条臂上被绕开(spec SC11)。透传的是
+            // holder 对象本身(不是 `.get()` 的快照):spawn 工厂在**每次
+            // spawn 时**读它,运行期 `/config fs workspace` 对下一次 spawn
+            // 生效。与主链 registry 的 holder 是同一份(`opts.fsMode`);
+            // 缺席(测试 / 未接入口)→ 子进程不带该 env 键,byte-stable。
+            // 直接赋值(tsconfig 未开 exactOptionalPropertyTypes):spawn 侧
+            // 判据是 `fsMode?.get() !== undefined`(spawn.ts),`undefined` 与
+            // 「key 缺席」同义 —— 省掉一个三元分支(S5 ratchet 零容忍)。
+            fsMode: opts.fsMode,
           }),
           // T8 (D6): manager 的父 sandboxRoot 上界也走活根 —— 同源逻辑,
           // getter 形态让 buildWorkerPayload 入口读 cell current value,
@@ -1034,6 +1053,13 @@ export async function buildHarnessEngine(
       // 行为逐字节同今日；handler 内 cell.read() 取 snapshot。stable 根（D3）
       // 不走这条缝，仍由各工厂按 opts 接各自的稳定根。
       liveTaskRoot,
+      // ADR-0092 Round 2 / SC11/SC12:fs 隔离档 holder + homeRoot 透传给
+      // bash 工厂。holder 缺席 → 全局档(V1 baseline);homeRoot 取本层已
+      // resolve 的 `userHome`(opts.userHome 测试缝 ?? homedir(),见上文)——
+      // 不留给 bash 工厂再 `homedir()` 一次,否则 `userHome` 缝只改 settings /
+      // persona / state 却改不动工作区档围栏的 home ro-bind 源端。
+      fsMode: opts.fsMode,
+      homeRoot: userHome,
       // T3:只读放行项目身份文件所在的主仓（ADR-0037 §1 允许只读主仓）。registry
       // 把它透给 read_file / grep / glob，也传入 bash 工厂作闭世界读白名单成员
       // （ADR-0037 §9.2 #6：registry.ts 的 bash 工厂装配把它接进 createBashTool
@@ -1182,6 +1208,11 @@ export async function buildHarnessEngine(
       env,
       sandboxRoot,
       liveTaskRoot,
+      // ADR-0092 Round 2 / SC11/SC12 (ask 路径):fs 隔离档 holder + homeRoot
+      // 透传给 bash 工厂。holder 缺席 → 全局档(V1 baseline);homeRoot 同主
+      // 构造路径取本层 `userHome`。
+      fsMode: opts.fsMode,
+      homeRoot: userHome,
       ...(isolationEnabled ? { projectIdentityRoot } : {}),
       ...(graphAssembly ? { graphAssembly } : {}),
       ...(opts.liveGraphLedger
@@ -1391,6 +1422,12 @@ export async function buildHarnessEngine(
         skillCatalog,
         lspCtx,
         ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+        // ADR-0092 Round 2 / SC11/SC12 (worker 派生面):fs 隔离档 holder +
+        // homeRoot 透传给 bash 工厂,与父会话同形态。worker surface 派生自
+        // 同一 registry 工厂,assembly 字节一致 —— 仅 deny-list 不同。
+        // homeRoot 同取本层 `userHome`。
+        fsMode: opts.fsMode,
+        homeRoot: userHome,
       }).catalog.all()
     : [];
   // #337:动态 registry 包装 —— 让 inner executor 能解析 registerExternal

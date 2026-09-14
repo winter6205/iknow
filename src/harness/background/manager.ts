@@ -141,6 +141,21 @@ export interface BackgroundSpawnRequest {
    *  the same path the foreground bash uses as `$TMPDIR`. Never a guest `/tmp`
    *  bind target. */
   readonly tmpDir?: string;
+  /**
+   * ADR-0092 Round 2 / SC11/SC12:工作区档 fs 档 snapshot —— 前台 bash handler
+   * per-call D2 batch snapshot 后透传(镜像 waveRoot 的同款纪律);后台 spawn
+   * 共用同一份,确保前台 / 后台 fence 在 fs 档轴上集合相等(沙箱纪律 G3)。
+   * 缺省 / undefined → "global"(V1 baseline)。值已过 `parseFsModeFlag`
+   * 守卫(bash.ts handler 入口读一次)。
+   */
+  readonly fsMode?: import("../sandbox/fs-mode.js").FsIsolationMode;
+  /**
+   * ADR-0092 Round 2 / SC11:工作区档 home ro-bind 源端宿主绝对路径。镜像
+   * `opts.homeRoot`(bash.ts 装配期缺省取 `homedir()`,后台透传同值)。
+   * workspace 档下缺席 → bwrap 抛 typed error(fail-loud,不静默退化成全局
+   * 档);global 档下不消费。
+   */
+  readonly homeRoot?: string;
 }
 
 export type BackgroundSpawnResult =
@@ -237,10 +252,16 @@ export async function defaultBackgroundSpawn(
   req: BackgroundSpawnRequest
 ): Promise<ChildProcess> {
   const cwd = req.cwd;
-  // ADR-0092 global posture — same assembly as foreground bash.ts. The policy
-  // only carries the session tmp host path; argv is the fixed
-  // host-root/system-ro-bind shape.
-  const fsPolicy = createFsPolicy({ tmpDir: req.tmpDir ?? tmpdir() });
+  // ADR-0092 / Round 2:fs 档快照来自 spawn request(bash.ts handler D2 batch
+  // snapshot 后透传)。fsMode 缺省 → global(与前台 opts.fsMode 缺席同形态)。
+  const fsMode = req.fsMode ?? "global";
+  const homeRoot = req.homeRoot;
+  // ADR-0092:fs policy 携带 fs 档(mode 字段)。fsPolicy.tmpRoot() 是 `$TMPDIR`
+  // 的 SSOT(合同根已 require 非空存在)。
+  const fsPolicy = createFsPolicy({
+    tmpDir: req.tmpDir ?? tmpdir(),
+    mode: fsMode,
+  });
   const network = createNetworkPolicy();
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   const fenceEnv = {
@@ -267,6 +288,18 @@ export async function defaultBackgroundSpawn(
     // bwrap argv 隔离轴集合相等(network / cwdReadonly 开与关)。其余 fence
     // 逐字节不变,只动 cwd-bind verb。
     ...(req.cwdReadonly ? { cwdReadonly: true } : {}),
+    // ADR-0092 Round 2 / SC11/SC12:工作区档 fence 三层 —— 前台 / 后台集合
+    // 相等。global 档下 bwrap 不发射该 bind,V1 baseline 不破。home 层源端
+    // 缺席**不**在此预过滤:workspace 档漏传 homeRoot 时 bwrap 抛 typed
+    // error(fail-loud,见 bwrap.ts workspaceHomeRoBindArgs)—— 静默跳过会让
+    // 后台 spawn 的围栏悄悄退回全局档(home 可写)而前台仍是工作区档。
+    ...(fsMode === "workspace"
+      ? {
+          homeRoot,
+          workspaceRoot: cwd,
+          tmpRoot: fsPolicy.tmpRoot(),
+        }
+      : {}),
   });
   // ADR-0045 T8(a): consumer 形态下(manager.spawn 调用方)不再直调
   // node:child_process —— server.spawn 长生命周期 task-handle 协议暴露

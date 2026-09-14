@@ -23,6 +23,7 @@ import { listSubdirectories } from "./browse-workspaces.js";
 import { parseThinkingOverride } from "./thinking-override.js";
 import type {
   ApiErrorBody,
+  FsModeResponse,
   GraphModeResponse,
   HealthResponse,
   PermissionModeResponse,
@@ -40,6 +41,11 @@ import {
   formatGraphStatus,
   type GraphModeContext,
 } from "../harness/graph/mode.js";
+import {
+  applyFsModeCommand,
+  formatFsModeStatus,
+  type FsModeContext,
+} from "../harness/sandbox/fs-mode.js";
 import { createTraceRouter } from "../traceserver/serve.js";
 import {
   resolveDefaultWebRoot,
@@ -71,6 +77,9 @@ export type SessionHttpServerOptions = {
   /** D-α V1 / ADR-0030:可变 graph overlay holder（与 hub 共用同一实例）。
    *  在场 → GET/POST /api/v1/graph-mode 可用；缺席 → 两端点 404。 */
   graphMode?: GraphModeContext;
+  /** ADR-0092 / SC13：可变 fs isolation 档 holder（与 hub 共用同一实例）。
+   *  在场 → GET/POST /api/v1/fs-mode 可用；缺席 → 两端点 404。 */
+  fsMode?: FsModeContext;
   /**
    * ADR-0020: mount the trace inspection read API in-process. When present,
    * `/api/v1/traces*` routes (incl. `/api/v1/traces/sessions`) and the
@@ -122,6 +131,7 @@ export function createSessionHttpServer(
       traceWriteFailures: opts.traceWriteFailures,
       permissionMode: opts.permissionMode,
       graphMode: opts.graphMode,
+      fsMode: opts.fsMode,
       traceRouter,
     });
   });
@@ -169,6 +179,8 @@ interface HandleOpts {
   readonly permissionMode?: PermissionModeContext;
   /** 可变 graph overlay holder（缺席 → graph-mode 端点 404）。 */
   readonly graphMode?: GraphModeContext;
+  /** ADR-0092 / SC13：可变 fs isolation 档 holder（缺席 → fs-mode 端点 404）。 */
+  readonly fsMode?: FsModeContext;
   /** ADR-0020: mounted trace router (undefined = trace not mounted). */
   readonly traceRouter?: (
     req: http.IncomingMessage,
@@ -187,6 +199,7 @@ async function handle(opts: HandleOpts): Promise<void> {
     traceWriteFailures,
     permissionMode,
     graphMode,
+    fsMode,
     traceRouter,
   } = opts;
   try {
@@ -240,19 +253,20 @@ async function handle(opts: HandleOpts): Promise<void> {
       });
     }
 
-    // permission mode 读取 / Shift+Tab 循环切换（web 快捷键；holder 缺席 →
-    // 404，与 trace 未挂载同模式）。
-    if (pathname === "/api/v1/permission-mode") {
-      return handlePermissionModeRoute({ method, req, res, permissionMode });
-    }
-
-    // D-α V1 / SC3:graph overlay 读取 / `/graph` 对等切换（holder 缺席 →
-    // 404,与 permission-mode 未挂载同模式）。
-    if (pathname === "/api/v1/graph-mode") {
-      // `return await`:非法 args 抛 ValidationError,要落进本函数的
-      // catch → sendError(400)。裸 `return promise` 的 rejection 发生在
-      // try 之外,响应就永远不写、请求挂死。
-      return await handleGraphModeRoute({ method, req, res, graphMode });
+    // 三条 holder 路由（permission-mode / graph-mode / fs-mode）同形状：
+    // 一次派发代替三段 if（S5 complexity ratchet：handle 每加一条路由的
+    // 分支都要还债）。handler 自带的 validation 语义（graph 的非法 args、
+    // browse 的 422）不变 —— 它们的 catch 见各自 handler。
+    const holderRoute = matchHolderRoute(pathname);
+    if (holderRoute !== undefined) {
+      return await holderRoute({
+        method,
+        req,
+        res,
+        permissionMode,
+        graphMode,
+        fsMode,
+      });
     }
 
     // serve-workspace T3: picker bind state + recents/trust roster.
@@ -409,13 +423,45 @@ function sendNotFound(opts: SendNotFoundOpts): void {
   });
 }
 
-/** Route context for /api/v1/permission-mode (web Shift+Tab 模式切换)。 */
-type PermissionModeRouteContext = {
+/** Route context for the three holder-backed mode endpoints. */
+type HolderRouteContext = {
   method: string;
   req: http.IncomingMessage;
   res: http.ServerResponse;
   permissionMode?: PermissionModeContext;
+  graphMode?: GraphModeContext;
+  fsMode?: FsModeContext;
 };
+
+/**
+ * 三条 holder 路由的 handler 签名。
+ *
+ * 契约：三者都在 `handle` 的 try 内被 **`await`** 调用，所以 handler 抛出
+ * 的 `ValidationError` 会落进 `handle` 的 catch → `sendError`（非法 args
+ * → 400）。裸 `return promise`（不 await）会让 rejection 发生在 try 之外：
+ * 响应永远不写、请求挂死 —— 派发点必须保持 `return await`。
+ */
+type HolderRoute = (ctx: HolderRouteContext) => Promise<void>;
+
+/**
+ * pathname → holder 路由 handler（无匹配 → undefined）。
+ *
+ * 路由表是数据而非分支：`handle` 每条路由只付一次判空，加第四条 holder
+ * 端点不再增加它的分支数（S5 complexity ratchet）。查询走 `Map.get`：
+ * `in` 也会被 complexity 计一个分支，`get` 不会。
+ */
+const HOLDER_ROUTES: ReadonlyMap<string, HolderRoute> = new Map<
+  string,
+  HolderRoute
+>([
+  ["/api/v1/permission-mode", handlePermissionModeRoute],
+  ["/api/v1/graph-mode", handleGraphModeRoute],
+  ["/api/v1/fs-mode", handleFsModeRoute],
+]);
+
+function matchHolderRoute(pathname: string): HolderRoute | undefined {
+  return HOLDER_ROUTES.get(pathname);
+}
 
 /**
  * GET → 当前 mode；POST（空 body）→ cycle 语义走 SSOT nextShiftTabMode
@@ -423,11 +469,12 @@ type PermissionModeRouteContext = {
  * holder 缺席 / 其它 method → 404。
  */
 async function handlePermissionModeRoute(
-  ctx: PermissionModeRouteContext
+  ctx: HolderRouteContext
 ): Promise<void> {
   const { method, req, res, permissionMode } = ctx;
+  const pathname = "/api/v1/permission-mode";
   if (permissionMode === undefined) {
-    return sendNotFound({ res, method, pathname: "/api/v1/permission-mode" });
+    return sendNotFound({ res, method, pathname });
   }
   if (method === "GET") {
     const body: PermissionModeResponse = { mode: permissionMode.get() };
@@ -440,19 +487,16 @@ async function handlePermissionModeRoute(
     const body: PermissionModeResponse = { mode: next };
     return sendJson({ res, status: 200, body });
   }
-  return sendNotFound({ res, method, pathname: "/api/v1/permission-mode" });
+  return sendNotFound({ res, method, pathname });
 }
 
-/** Route context for /api/v1/graph-mode（serve 侧的 `/graph`）。 */
-type GraphModeRouteContext = {
-  method: string;
-  req: http.IncomingMessage;
-  res: http.ServerResponse;
-  graphMode?: GraphModeContext;
-};
-
-/** POST body 取 args：缺省 = 空数组（等价于裸 `/graph` 查询）。 */
-function parseGraphModeArgs(body: unknown): ReadonlyArray<string> {
+/**
+ * POST body 取 args：缺省 = 空数组（等价于裸 holder 查询）。
+ *
+ * `/graph-mode` 与 `/fs-mode` 两条路由同形共用（两处值域/文案各自走 SSOT，
+ * body 形状是同一套 wire 契约）——不要按路由复制第二份。
+ */
+function parseHolderArgs(body: unknown): ReadonlyArray<string> {
   if (body === undefined || body === null) return [];
   if (typeof body !== "object") {
     throw new ValidationError("body must be a JSON object");
@@ -473,7 +517,7 @@ function parseGraphModeArgs(body: unknown): ReadonlyArray<string> {
  * 非法 args 是 typed 拒绝（ValidationError → 400），holder 不动 —— serve
  * 侧「猜用户意思」比报错更糟。holder 缺席 / 其它 method → 404。
  */
-async function handleGraphModeRoute(ctx: GraphModeRouteContext): Promise<void> {
+async function handleGraphModeRoute(ctx: HolderRouteContext): Promise<void> {
   const { method, req, res, graphMode } = ctx;
   const pathname = "/api/v1/graph-mode";
   if (graphMode === undefined) return sendNotFound({ res, method, pathname });
@@ -485,11 +529,44 @@ async function handleGraphModeRoute(ctx: GraphModeRouteContext): Promise<void> {
     return sendJson({ res, status: 200, body });
   }
   if (method === "POST") {
-    const args = parseGraphModeArgs(await readJsonBody(req));
+    const args = parseHolderArgs(await readJsonBody(req));
     const applied = applyGraphCommand(graphMode, args);
     if (!applied.ok) throw new ValidationError(applied.text, { field: "args" });
     const body: GraphModeResponse = {
       enabled: graphMode.get().enabled,
+      message: applied.text,
+    };
+    return sendJson({ res, status: 200, body });
+  }
+  return sendNotFound({ res, method, pathname });
+}
+
+/**
+ * GET → 当前 fs isolation 档；POST（body `{ args }`）→ 走 SSOT
+ * `applyFsModeCommand`（与 chat / TUI 的 `/config` 同一套值域与文案）。
+ * 非法 args 是 typed 拒绝（ValidationError → 400），holder 不动 —— serve
+ * 侧「猜用户意思」比报错更糟。holder 缺席 / 其它 method → 404。
+ *
+ * 与 graph 同理：本 handler 的 ValidationError 必须落进 `handle` 的
+ * catch（400）—— 派发点保持 `return await`，理由见 HolderRoute。
+ */
+async function handleFsModeRoute(ctx: HolderRouteContext): Promise<void> {
+  const { method, req, res, fsMode } = ctx;
+  const pathname = "/api/v1/fs-mode";
+  if (fsMode === undefined) return sendNotFound({ res, method, pathname });
+  if (method === "GET") {
+    const body: FsModeResponse = {
+      mode: fsMode.get(),
+      message: formatFsModeStatus(fsMode.get()),
+    };
+    return sendJson({ res, status: 200, body });
+  }
+  if (method === "POST") {
+    const args = parseHolderArgs(await readJsonBody(req));
+    const applied = applyFsModeCommand(fsMode, args);
+    if (!applied.ok) throw new ValidationError(applied.text, { field: "args" });
+    const body: FsModeResponse = {
+      mode: fsMode.get(),
       message: applied.text,
     };
     return sendJson({ res, status: 200, body });

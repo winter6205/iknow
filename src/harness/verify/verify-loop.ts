@@ -171,6 +171,26 @@ export interface VerifyLoopOptions {
    */
   readonly completionMode?: "hitl" | "auto";
   readonly cwd: string;
+  /**
+   * ADR-0092 Round 2 / SC11/SC12:验证命令围栏的 fs 隔离档 + home ro-bind
+   * 源端。透传给 `makeDefaultRunVerify`(与 bash 工具同款装配语义);缺席 →
+   * 全局档(V1 baseline)。值域类型用 type-only import 直连
+   * `sandbox/fs-mode.js`(仅类型,运行期无依赖 —— 见上「不 import sandbox 层」
+   * 依赖纪律)。
+   */
+  readonly fsMode?: import("../sandbox/fs-mode.js").FsIsolationMode;
+  readonly homeRoot?: string;
+  /**
+   * ADR-0092 / SC12:验证命令的会话 tmp 宿主路径 —— 既是围栏内 `$TMPDIR` 的
+   * 值,也是工作区档 `--bind <tmpRoot>` 的源端(两者必须同一份)。调用方经
+   * `resolveSessionFenceTmp({ projectDir, conversationId })` 解析 —— 与 bash
+   * 工具面**同一个** helper,不在本面独立推导第三份。
+   *
+   * 缺席 → 缺省执行体回退进程 `tmpdir()`(fallback 不是目标态:未接线 /
+   * 测试注入路径)。真拿不到会话 tmp 时**不抛错** —— 那会让 verify 在
+   * projectDir / conversationId 缺失的宿主上直接失败,超出本面职责。
+   */
+  readonly tmpDir?: string;
 }
 
 export type VerifyLoopOutcome =
@@ -1162,6 +1182,12 @@ export async function runVerifyLoop(
     options.runVerify ??
     makeDefaultRunVerify({
       cwd: options.cwd,
+      // ADR-0092 Round 2 / SC11/SC12:fs 档 + homeRoot + 会话 tmp 透传
+      // (三者缺席 → 全局档 / 进程 tmpdir, V1 baseline 字节不变)。此处每轮
+      // 现造闭包 ⇒ 工厂期快照即本轮快照。
+      ...(options.fsMode !== undefined ? { fsMode: options.fsMode } : {}),
+      ...(options.homeRoot !== undefined ? { homeRoot: options.homeRoot } : {}),
+      ...(options.tmpDir !== undefined ? { tmpDir: options.tmpDir } : {}),
     });
   const timeoutSec = options.config.timeoutSec ?? DEFAULT_TIMEOUT_SEC;
   return runVerifyLoopBody({

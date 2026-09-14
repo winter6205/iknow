@@ -53,10 +53,19 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/harness/aci/tools/list-sessions.test.ts",
   "tests/harness/aci/tools/get-record.test.ts",
   "tests/harness/aci/bash-live-task-root.test.ts",
+  // ADR-0092 Round 2 SC11/SC12：工作区档围栏的真实 bwrap 行为认证
+  // （home 读成功 / home 写 EROFS / 两处白名单可写 + S2 五类越界写）。
+  "tests/harness/aci/bash-workspace-mode-fence.test.ts",
   // ADR-0092（全局档）：闭世界读根测试已归档，同族不变式改由本文件认证。
   "tests/harness/aci/bash-global-mode-visibility.test.ts",
   "tests/harness/aci/bash-main-session-fence-tmp.test.ts",
   "tests/harness/verify/sandbox-run.test.ts",
+  // ADR-0092 SC11/SC12：**verify 命令面**的工作区档真实 bwrap 行为认证
+  // （`$TMPDIR` = 嵌套在 home 之下的会话 tmp、写 home EROFS、读 home 成功）。
+  // 与 bash-workspace-mode-fence.test.ts 平行：那条钉 bash 工具面，这条钉
+  // verify 闭环缺省执行体（同 `it.skipIf(!hasBwrap())` 形态，runner 缺
+  // user-namespace 时物理执行起不来）。
+  "tests/harness/verify/workspace-mode-fence.test.ts",
   "tests/harness/isolation/worktree-gate-live-taskroot-e2e.test.ts",
   "tests/harness/mcp/zero-linkage-guard.test.ts",
   "tests/harness/sandbox/runner.test.ts",
@@ -109,6 +118,10 @@ export const CI_EXCLUDES: readonly string[] = [
   // ADR-0037 / #814 实证：hub executor 真 mutate → runInSandbox → requireBwrap
   "tests/session-api/hub-worktree-isolation.test.ts",
   // 子代理 worker 装配 → createWorkerDeps → createBashTool → requireBwrap
+  // ADR-0092 Round 2 SC11：fs 档跨进程传播（父 spawn env → worker holder）
+  // 经 createWorkerDeps / createDefaultAciRegistry 装配链，runner 上装配期即
+  // fail-loud（spawn 出口与 bwrap 均在测试内被挡，但锚点命中）。
+  "tests/subagent/fs-mode-propagation.test.ts",
   "tests/subagent/worker-identity-root.test.ts",
   "tests/subagent/worker-session-layout.test.ts",
   "tests/subagent/worker-tool-surface.test.ts",

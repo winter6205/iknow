@@ -42,6 +42,7 @@ import type {
 } from "../harness/memory/index.js";
 import type { VerifyConfig } from "../harness/verify/index.js";
 import type { GraphAssembly } from "../harness/graph/assembly.js";
+import type { FsModeContext } from "../harness/sandbox/fs-mode.js";
 import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import type { VerifyAnswerView } from "../session-api/contract.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
@@ -268,6 +269,14 @@ export interface CreateTuiBridgeOptions {
    * 再喂给 `createTaskWorktreeProvisioner` 闭包冻结（ADR-0037 §5 硬要求 9）。
    */
   readonly worktreeExclusive?: boolean;
+  /**
+   * ADR-0092 / SC13: fs isolation 档 holder（与 SessionHubOptions.fsMode 同形）。
+   * 透传给 `SessionHub` —— hub 的 verify 调用点 per-call 读它，TUI 的 `/config`
+   * 翻的是同一个 holder（与 bash 侧经 buildTuiDeps 接线的是同一实例）。
+   * 缺席 = 本入口未接 fs 档 → hub 的 verify 面按全局档（serve 已按同款接线，
+   * 见 session-api/serve.ts）。
+   */
+  readonly fsMode?: FsModeContext;
 }
 
 export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
@@ -324,6 +333,13 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     // OFF（缺席 / 非 true）→ hub 构造时 `worktreeExclusive` 字段缺席，
     // provisioner 完全跳过占用检查，行为与今日逐字节一致（SC2）。
     ...(opts.worktreeExclusive === true ? { worktreeExclusive: true } : {}),
+    // ADR-0092 / SC13: fs 隔离档 holder 透传 —— TUI 的 verify 命令面与 bash
+    // 工具面必须同档（holder 同一实例；hub 的 runVerifyLoop 调用点 per-call
+    // 现读，`/config` 翻档下一次调用生效）。与 serve 侧同款接线。
+    // 直接赋值（tsconfig 未开 exactOptionalPropertyTypes）：`undefined` 与
+    // 「key 缺席」在本仓 opts 解构语义下等价，省掉一个三元分支 —— S5 ratchet
+    // 对 touched function 的复杂度增长零容忍（见 .claude/rules）。
+    fsMode: opts.fsMode,
   });
 
   const toPostResult = (resp: PostMessageResponse): TuiPostResult => ({

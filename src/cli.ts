@@ -40,6 +40,7 @@ import {
   resolveGraphMode,
 } from "./harness/graph/mode.js";
 import { createLiveGraphLedgerHost } from "./harness/graph/ledger.js";
+import { createFsModeContext } from "./harness/sandbox/fs-mode.js";
 import { isIknowError } from "./shared/errors.js";
 import {
   isWorkspaceRootError,
@@ -58,6 +59,7 @@ import type { TraceServeOptions } from "./traceserver/serve.js";
 import {
   loadIknowSettings,
   analyzePlaceholderSyntax,
+  resolveFsIsolationMode,
 } from "./config/settings.js";
 // ADR-0037 review High-1/High-2 (2026-08-29): chat 入口的 worktree isolation
 // host 缝与启动 settings 钉住。
@@ -330,6 +332,11 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   const graphMode = createGraphModeContext(
     resolveGraphMode({ settings: startupSettings.graph })
   );
+  // ADR-0092 / SC13:filesystem isolation 档 holder —— 初值走 settings
+  // （缺省 global），chat REPL 的 `/config` 就地翻。与 graphMode 同款：
+  // 引擎（build-engine 经 opts.fsMode，bash 工厂 per-call 读）与 REPL host
+  // 共用同一实例（SC3 三入口同 holder）。与 permissionMode 正交。
+  const fsMode = createFsModeContext(resolveFsIsolationMode(startupSettings));
   // live-graph-phase1 T1 / ADR-0051:活图账本 host —— 单会话,生命周期与
   // chat REPL 同寿（reset / 进程退出销毁）。CLI 不需要按 conversationId
   // 区分,但仍走同一 host 形状（统一 build-engine 接线,不解分叉类型）。
@@ -378,6 +385,8 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     memory: { enabled: true } as const,
     permissionMode,
     graphMode,
+    // ADR-0092 / SC13:fs isolation holder 进引擎装配（bash 工厂 per-call 读）。
+    fsMode,
     liveGraphLedger,
     todoDir: todoProjectDir,
     // ADR-0088:登记根随会话池,不随 workspaceRoot。
@@ -467,6 +476,10 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // D-α: 同一个 graph holder —— Shift+Tab 三态轮与 /graph 都翻它,
     // build-engine 的装配快照读的也是它（SC3 三入口同 holder）。
     graphMode,
+    // ADR-0092 / SC13: 同一个 fs holder —— chat REPL 的 /config 翻它,
+    // build-engine 的 bash 工厂（经 chatEngineOpts.fsMode）per-call 读的也
+    // 是它（SC3 三入口同 holder）。
+    fsMode,
     // D-α T3: 每条查询行开跑前拍一次快照 —— 翻键「下一次 run() 生效」。
     graphAssembly: built.graphAssembly,
     // live-graph-phase1 T1:账本 host 传给 chat-session —— 与 graphMode

@@ -28,6 +28,7 @@ describe("parseTuiInput: 词表命中", () => {
     ["/sessions", "sessions"],
     ["/new", "new"],
     ["/mcp", "mcp"],
+    ["/config", "config"],
     ["/quit", "quit"],
     ["/exit", "exit"],
     ["/help", "help"],
@@ -105,7 +106,7 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  test("覆盖全部 14 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
+  test("覆盖全部 15 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
@@ -122,6 +123,7 @@ describe("helpLines", () => {
       "/continue",
       "/rewind",
       "/graph",
+      "/config",
     ]) {
       expect(joined).toContain(cmd);
     }
@@ -141,7 +143,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  test('"/" → 全部 14 条静态命令（按词表插入顺序，kind="command"；rewind + mcp + graph，无 /profile）', () => {
+  test('"/" → 全部 15 条静态命令（按词表插入顺序，kind="command"；config 加在 graph 之后，无 /profile）', () => {
     expect(slashSuggestions("/")).toEqual([
       { kind: "command", command: "sessions" },
       { kind: "command", command: "new" },
@@ -157,6 +159,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       { kind: "command", command: "rewind" },
       { kind: "command", command: "mcp" },
       { kind: "command", command: "graph" },
+      { kind: "command", command: "config" },
     ]);
   });
 
@@ -214,6 +217,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       { kind: "command", command: "rewind" },
       { kind: "command", command: "mcp" },
       { kind: "command", command: "graph" },
+      { kind: "command", command: "config" },
     ]);
   });
 
@@ -236,7 +240,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     ).not.toContainEqual({ kind: "skill", name: "echo", description: "回声" });
   });
 
-  test("skill 名前缀过滤大小写不敏感（/CO 同时命中静态 compact + 两个 skill）", () => {
+  test("skill 名前缀过滤大小写不敏感（/CO 同时命中静态 compact/continue/config + 两个 skill）", () => {
     expect(
       slashSuggestions("/CO", [
         { name: "compact-wizard", description: "压缩向导" },
@@ -245,6 +249,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     ).toEqual([
       { kind: "command", command: "compact" },
       { kind: "command", command: "continue" },
+      { kind: "command", command: "config" },
       { kind: "skill", name: "compact-wizard", description: "压缩向导" },
       { kind: "skill", name: "code-review", description: "代码审查" },
     ]);
@@ -256,12 +261,13 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     ]);
   });
 
-  test('"/c" 混合：静态命令（compact/continue）在前 + skill（code-review）在后', () => {
+  test('"/c" 混合：静态命令（compact/continue/config）在前 + skill（code-review）在后', () => {
     expect(
       slashSuggestions("/c", [{ name: "code-review", description: "代码审查" }])
     ).toEqual([
       { kind: "command", command: "compact" },
       { kind: "command", command: "continue" },
+      { kind: "command", command: "config" },
       { kind: "skill", name: "code-review", description: "代码审查" },
     ]);
   });
@@ -703,16 +709,20 @@ describe("#361 Phase D /mcp 词表", () => {
     ]);
   });
 
-  test('"/" 全部候选含 mcp（词表 append-only：/graph 追加后 mcp 退居倒二）', () => {
+  test('"/" 全部候选含 mcp（词表 append-only：/config 追加后 mcp 退居倒三）', () => {
     const all = slashSuggestions("/");
     expect(all).toContainEqual({ kind: "command", command: "mcp" });
-    expect(all[all.length - 2]).toEqual({
+    expect(all[all.length - 3]).toEqual({
       kind: "command",
       command: "mcp",
     });
-    expect(all[all.length - 1]).toEqual({
+    expect(all[all.length - 2]).toEqual({
       kind: "command",
       command: "graph",
+    });
+    expect(all[all.length - 1]).toEqual({
+      kind: "command",
+      command: "config",
     });
   });
 
@@ -852,6 +862,61 @@ describe("#377 系列 /effort 词表", () => {
   });
 });
 
+/**
+ * ADR-0092 / SC13: `/config`（filesystem isolation 档切换） — 词表层断言。
+ * 命令 SSOT 在 `src/harness/sandbox/fs-mode.ts`（T7 持有文件主体；T8 追加
+ * `parseConfigCommand` / `applyFsModeCommand` / `formatFsModeStatus` /
+ * `splitConfigArgs` + `ConfigCommand` / `FsModeCommandResult` / `FS_MODE_USAGE_TEXT`）。
+ * 本 describe 只锁 slash.ts 词表面，与命令 SSOT 单测互补。
+ */
+describe("/config 词表（ADR-0092 / SC13）", () => {
+  test("parseTuiInput 认 /config（带参也命中同一命令）", () => {
+    expect(parseTuiInput("/config")).toEqual({
+      kind: "command",
+      command: "config",
+    });
+    expect(parseTuiInput("/config status")).toEqual({
+      kind: "command",
+      command: "config",
+    });
+    expect(parseTuiInput("/config fs workspace")).toEqual({
+      kind: "command",
+      command: "config",
+    });
+  });
+
+  test('"/c" 前缀命中 config（与 compact / continue / code-review 共存）', () => {
+    const all = slashSuggestions("/c");
+    expect(all).toContainEqual({ kind: "command", command: "config" });
+  });
+
+  test('"/con" 前缀 → continue + config（config 与 continue 共享 /con 前缀）', () => {
+    expect(slashSuggestions("/con")).toEqual([
+      { kind: "command", command: "continue" },
+      { kind: "command", command: "config" },
+    ]);
+  });
+
+  test('/config 唯一匹配 → 补全 "/config "（尾随空格）', () => {
+    expect(slashComplete("/config")).toBe("/config ");
+  });
+
+  test("helpLines 列出 /config（含 status|fs global|fs workspace 提示）", () => {
+    const joined = helpLines().join("\n");
+    expect(joined).toContain("/config");
+    expect(joined).toMatch(/fs/);
+  });
+
+  test("HINT_DESCRIPTIONS.config 含「文件系统隔离档」短描述", () => {
+    expect(slashHintLines(["config"])).toEqual([
+      {
+        command: "config",
+        description: "文件系统隔离档（status|fs global|fs workspace）",
+      },
+    ]);
+  });
+});
+
 /** T4 (#690): /continue — 续跑未完成工具环（skip-append）。 */
 describe("/continue 词表", () => {
   test("/continue → command continue", () => {
@@ -878,9 +943,10 @@ describe("/continue 词表", () => {
     expect(slashHasArg("  /CONTINUE  ")).toBe(false);
   });
 
-  test('"/con" 前缀 → [{command: continue}]（不与 compact 冲突）', () => {
+  test('"/con" 前缀 → [{command: continue}]（不与 compact 冲突；config 见 /config 词表用）', () => {
     expect(slashSuggestions("/con")).toEqual([
       { kind: "command", command: "continue" },
+      { kind: "command", command: "config" },
     ]);
   });
 
@@ -1086,8 +1152,8 @@ describe("Task 4：slashSuggestions 仅显示未消歧的兄弟（disambig-only�
     expect(slashSuggestions("/echo", skills)).toEqual(a);
   });
 
-  test("`/` 空前缀 → 全部 14 条静态命令（Task 4 不影响空前缀契约）", () => {
-    expect(slashSuggestions("/")).toHaveLength(14);
+  test("`/` 空前缀 → 全部 15 条静态命令（Task 4 不影响空前缀契约）", () => {
+    expect(slashSuggestions("/")).toHaveLength(15);
   });
 
   test("裸 `/` + skills → 静态命令全在、skill 不入场（#377 E 不变）", () => {

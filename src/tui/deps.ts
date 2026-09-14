@@ -29,6 +29,7 @@ import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import type { PostToolUseHook } from "../harness/permission/types.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
 import type { GraphModeContext } from "../harness/graph/mode.js";
+import type { FsModeContext } from "../harness/sandbox/fs-mode.js";
 import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
 import { randomUUID } from "node:crypto";
@@ -105,6 +106,13 @@ export interface BuildTuiDepsOptions {
    * `graphAssembly` 每 round 快照 gate。缺席 = 本入口未接 overlay。
    */
   readonly graphMode?: GraphModeContext;
+  /**
+   * ADR-0092 / SC13：filesystem isolation 档 holder（TUI 按 `/config` 翻它）。
+   * 透传给 build-engine —— `BuildEngineOpts.fsMode` → bash 工厂 per-call 读
+   * （前台 fence 与后台 spawn 共用同一份冻结值；沙箱纪律 #653 G3）。缺席 =
+   * 本入口未接 fs 档（引擎按全局档缺省）。
+   */
+  readonly fsMode?: FsModeContext;
   /**
    * live-graph-phase1 T1 / ADR-0051:活图账本 host（run.tsx 自建单例）。
    * 透传给 build-engine —— `run_graph` handler 按 ctx.conversationId 解析
@@ -370,6 +378,9 @@ export async function buildTuiDeps(
     ...(opts.sessionGrants ? { session: opts.sessionGrants } : {}),
     // D-α T5:overlay holder 透传 —— run_graph / 编排段的条件装配缝。
     ...(opts.graphMode ? { graphMode: opts.graphMode } : {}),
+    // ADR-0092 / SC13:fs isolation holder 透传 —— bash 工厂 per-call 读
+    // （build-engine 侧按 `!== undefined` 守卫，缺席与显式 undefined 同义）。
+    fsMode: opts.fsMode,
     // live-graph-phase1 T1:活图账本 host 透传（TUI 装配点自建）。
     ...(liveGraphLedger ? { liveGraphLedger } : {}),
     // T1 观测缝:#175 T4 工具摘要行 — postToolUse 投影为 TuiToolEvent。

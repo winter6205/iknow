@@ -64,6 +64,7 @@ const spawnMock = childProcessMock.spawn as unknown as ReturnType<typeof vi.fn>;
 
 const { defaultBackgroundSpawn } =
   await import("../../../src/harness/background/manager.ts");
+const { ToolExecutionError } = await import("../../../src/harness/errors.ts");
 
 /**
  * fake ChildProcess — EventEmitter + PassThrough streams + fake pid。
@@ -442,6 +443,50 @@ describe("defaultBackgroundSpawn negative — drives createBwrapFence seam", () 
     assert.ok(
       argv.includes("--die-with-parent"),
       "bg argv must include --die-with-parent (ADR-0021 lifecycle)"
+    );
+  });
+
+  it("bg spawn workspace 档漏传 homeRoot → typed fail-loud（不静默退化成全局档）", async () => {
+    // 后台是独立调用点(defaultBackgroundSpawn):workspace 档下 req.homeRoot
+    // 缺席时若跳过 home ro-bind,后台围栏静默退回全局档(home 可写)而前台
+    // 仍是工作区档 —— 违反沙箱纪律 G3(前后台隔离轴集合相等)且无信号。
+    // 判别力:修复前 manager.ts 的 `fsMode === "workspace" && homeRoot !==
+    // undefined` 预过滤让这里静默 spawn(测试红);修复后 bwrap 抛 typed。
+    spawnMock.mockImplementation(() => makeFakeChild());
+    await assert.rejects(
+      () =>
+        defaultBackgroundSpawn({
+          command: "echo hi",
+          cwd: CWD,
+          env: { PATH: "/bin" },
+          fsMode: "workspace",
+          // homeRoot 缺席 —— 缺口本身。
+        }),
+      (err: unknown) =>
+        err instanceof ToolExecutionError && /homeRoot/.test(err.message),
+      "workspace-mode background spawn without homeRoot must fail loud"
+    );
+    assert.equal(
+      spawnMock.mock.calls.length,
+      0,
+      "no child may be spawned from a fence that failed to assemble"
+    );
+
+    // 判别力对照:homeRoot 在场时同一调用点正常 spawn,argv 带 home ro-bind。
+    await defaultBackgroundSpawn({
+      command: "echo hi",
+      cwd: CWD,
+      env: { PATH: "/bin" },
+      fsMode: "workspace",
+      homeRoot: CWD,
+    });
+    const argv = (spawnMock.mock.calls[0]?.[1] as readonly string[]) ?? [];
+    assert.ok(
+      argv.some(
+        (arg, i) =>
+          arg === "--ro-bind" && argv[i + 1] === CWD && argv[i + 2] === CWD
+      ),
+      "control: workspace-mode background argv carries the home ro-bind"
     );
   });
 });

@@ -27,7 +27,12 @@ vi.mock("../../../src/harness/sandbox/index.ts", async (importOriginal) => {
 
 import * as sandboxIndex from "../../../src/harness/sandbox/index.ts";
 import { makeDefaultRunVerify } from "../../../src/harness/verify/sandbox-run.ts";
-import type { FsPolicy } from "../../../src/harness/sandbox/fs-policy.ts";
+import {
+  createFsPolicy,
+  type FsPolicy,
+} from "../../../src/harness/sandbox/fs-policy.ts";
+import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.ts";
+import { ToolExecutionError } from "../../../src/harness/errors.ts";
 
 interface CapturedFence {
   readonly fsPolicy: FsPolicy;
@@ -86,6 +91,105 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
       assert.equal(captured[0]!.fsPolicy.tmpRoot(), sessionTmp);
     } finally {
       rmSync(sessionTmp, { recursive: true, force: true });
+    }
+  });
+
+  it("fenceEnv carries TMPDIR = the session tmp (ADR-0092 SC12)", async () => {
+    // 判别力:修复前 fenceEnv 只过 envIsolation.filter(process.env),宿主未
+    // 导出 TMPDIR 时围栏内 `$TMPDIR` 根本不在场 → 写 `"$TMPDIR/x"` 落到
+    // `/x` 被拒。本用例钉「显式注入且值 = 会话 tmp 宿主真路径」。
+    captured.length = 0;
+    const cwd = tmpdir();
+    const sessionTmp = mkdtempSync(join(tmpdir(), "verify-fence-env-tmp-"));
+    try {
+      const runVerify = makeDefaultRunVerify({ cwd, tmpDir: sessionTmp });
+      await runVerify("true", {});
+      assert.equal(captured[0]!.env["TMPDIR"], sessionTmp);
+      // $TMPDIR 与交给 fence 的 tmpRoot 必须是同一份(工作区档写白名单
+      // 与围栏内看到的路径不能分叉)。
+      const runArgs = vi.mocked(sandboxIndex.runInSandbox).mock
+        .calls[0]?.[0] as { env?: Record<string, string> } | undefined;
+      assert.equal(runArgs?.env?.["TMPDIR"], sessionTmp);
+    } finally {
+      rmSync(sessionTmp, { recursive: true, force: true });
+    }
+  });
+
+  it("workspace mode binds the session tmp as tmpRoot (ADR-0092 SC12)", async () => {
+    captured.length = 0;
+    const cwd = mkdtempSync(join(tmpdir(), "verify-ws-bind-"));
+    const sessionTmp = mkdtempSync(join(tmpdir(), "verify-ws-session-tmp-"));
+    try {
+      const runVerify = makeDefaultRunVerify({
+        cwd,
+        tmpDir: sessionTmp,
+        fsMode: "workspace",
+        homeRoot: "/fixture/home",
+      });
+      await runVerify("true", {});
+      const opts = captured[0]!;
+      assert.equal(
+        opts["tmpRoot"],
+        sessionTmp,
+        "工作区档必须把会话 tmp 作为 --bind <tmpRoot> 源端交给 fence"
+      );
+      assert.equal(opts["workspaceRoot"], cwd);
+      assert.equal(captured[0]!.env["TMPDIR"], sessionTmp);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(sessionTmp, { recursive: true, force: true });
+    }
+  });
+
+  it("workspace mode without homeRoot keeps the key so the fence guard is reachable", async () => {
+    // verify 面是独立调用点:workspace 档漏传 homeRoot 时**不得**在此预过滤
+    // 掉该 key —— 丢弃 = 装配层看不见缺口,静默退化成全局档(home 可写)。
+    // 本用例钉调用点这一段(key 在场、值 undefined);bwrap 对该形态抛 typed
+    // error 由下面 `real createBwrapFence` 一段直接验证 —— 两段合起来才是
+    // 「fail-loud」,单看任一段都不够。
+    // 判别力:修复前是条件展开(`homeRoot !== undefined ? {...} : {}`),
+    // key 不在场 → 本用例红(已实测)。
+    const cwd = mkdtempSync(join(tmpdir(), "verify-ws-nohome-"));
+    try {
+      const runVerify = makeDefaultRunVerify({
+        cwd,
+        tmpDir: cwd,
+        fsMode: "workspace",
+        // homeRoot 缺席 —— 缺口本身。
+      });
+      captured.length = 0;
+      await runVerify("true", {});
+      const opts = captured[0]!;
+      assert.equal(
+        "homeRoot" in opts,
+        true,
+        "workspace-mode verify must not drop the homeRoot key (guard would be unreachable)"
+      );
+      assert.equal(opts["homeRoot"], undefined);
+
+      // 真实(未 mock 的)构造函数对这份 opts 抛 typed error。
+      const realBwrap = await vi.importActual<
+        typeof import("../../../src/harness/sandbox/bwrap.ts")
+      >("../../../src/harness/sandbox/bwrap.ts");
+      assert.throws(
+        () =>
+          realBwrap.createBwrapFence({
+            command: "bash",
+            args: ["-c", "true"],
+            fsPolicy: createFsPolicy({ tmpDir: cwd, mode: "workspace" }),
+            networkPolicy: createNetworkPolicy(),
+            env: { PATH: "/bin" },
+            cwd,
+            homeRoot: undefined,
+            workspaceRoot: cwd,
+            tmpRoot: cwd,
+          }),
+        (err: unknown) =>
+          err instanceof ToolExecutionError && /homeRoot/.test(err.message),
+        "the real fence constructor must fail loud on the opts the verify seam hands over"
+      );
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
     }
   });
 

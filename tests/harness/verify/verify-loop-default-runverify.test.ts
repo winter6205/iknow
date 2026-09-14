@@ -100,4 +100,94 @@ describe("runVerifyLoop — default runVerify assembly threads cwd", () => {
     assert.equal(captured[0]!.cwd, cwd);
     assert.equal(outcome.outcome, "passed");
   });
+
+  it("options.tmpDir reaches makeDefaultRunVerify (ADR-0092 SC12)", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "verify-loop-tmpdir-"));
+    SCRATCH.push(cwd);
+    const sessionTmp = mkdtempSync(join(tmpdir(), "verify-loop-session-tmp-"));
+    SCRATCH.push(sessionTmp);
+
+    const captured: Array<Record<string, unknown>> = [];
+    vi.mocked(makeDefaultRunVerify).mockImplementation((opts) => {
+      captured.push(opts as Record<string, unknown>);
+      return async () => ({ exitCode: 0, stdout: "ok", stderr: "" });
+    });
+
+    const outcome = await runVerifyLoop({
+      runFn: async (text) => stubRun("done", text),
+      userText: "do it",
+      config: { command: "true" },
+      sessionId: "verify-loop-default-runverify-tmpdir",
+      cwd,
+      fsMode: "workspace",
+      homeRoot: "/fixture/home",
+      tmpDir: sessionTmp,
+    });
+
+    expect(captured).toHaveLength(1);
+    assert.equal(
+      captured[0]!.tmpDir,
+      sessionTmp,
+      "会话 tmp 必须到达缺省执行体（$TMPDIR 与 --bind <tmpRoot> 同源）"
+    );
+    assert.equal(outcome.outcome, "passed");
+  });
+
+  it("options.fsMode / options.homeRoot reach makeDefaultRunVerify (ADR-0092 SC11)", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "verify-loop-fsmode-"));
+    SCRATCH.push(cwd);
+
+    const captured: Array<Record<string, unknown>> = [];
+    vi.mocked(makeDefaultRunVerify).mockImplementation((opts) => {
+      captured.push(opts as Record<string, unknown>);
+      return async () => ({ exitCode: 0, stdout: "ok", stderr: "" });
+    });
+
+    const outcome = await runVerifyLoop({
+      runFn: async (text) => stubRun("done", text),
+      userText: "do it",
+      config: { command: "true" },
+      sessionId: "verify-loop-default-runverify-fsmode",
+      cwd,
+      fsMode: "workspace",
+      homeRoot: "/fixture/home",
+    });
+
+    expect(captured).toHaveLength(1);
+    assert.equal(captured[0]!.fsMode, "workspace");
+    assert.equal(captured[0]!.homeRoot, "/fixture/home");
+    assert.equal(outcome.outcome, "passed");
+  });
+
+  it("absent fsMode / homeRoot / tmpDir put no key on the runVerify opts (V1 baseline)", async () => {
+    // 缺席时必须不打这些 key —— 与既有调用方(未接 fs 档)的入参形状逐字节
+    // 一致;「传 undefined」与「不传」在下游 `?? "global"` 下虽等价,但入参
+    // 形状本身是测试缝的契约(见 cwd 同款断言)。
+    const cwd = mkdtempSync(join(tmpdir(), "verify-loop-nofsmode-"));
+    SCRATCH.push(cwd);
+
+    const captured: Array<Record<string, unknown>> = [];
+    vi.mocked(makeDefaultRunVerify).mockImplementation((opts) => {
+      captured.push(opts as Record<string, unknown>);
+      return async () => ({ exitCode: 0, stdout: "ok", stderr: "" });
+    });
+
+    const outcome = await runVerifyLoop({
+      runFn: async (text) => stubRun("done", text),
+      userText: "do it",
+      config: { command: "true" },
+      sessionId: "verify-loop-default-runverify-nofsmode",
+      cwd,
+    });
+
+    expect(captured).toHaveLength(1);
+    assert.equal("fsMode" in captured[0]!, false, "no fsMode key when absent");
+    assert.equal(
+      "homeRoot" in captured[0]!,
+      false,
+      "no homeRoot key when absent"
+    );
+    assert.equal("tmpDir" in captured[0]!, false, "no tmpDir key when absent");
+    assert.equal(outcome.outcome, "passed");
+  });
 });

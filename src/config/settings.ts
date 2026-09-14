@@ -248,7 +248,21 @@ export interface IknowSettingsIsolation {
    * 一致）；OFF 时 enter 行为与今日一致，不引入任何新拒绝路径。
    */
   worktreeExclusive?: boolean;
+  /**
+   * ADR-0092 / SC13：filesystem isolation 档（bash 物理围栏上「能看见 /
+   * 能写哪些路径」的档位）。默认 **全局档**；可选 **工作区档**。与
+   * PermissionMode、worktreeOnMutate 正交。值域 `"global" | "workspace"`；
+   * 非法值（大小写错配 / 其它字符串 / 非字符串）→ 丢弃该字段，回落 global。
+   * 同一 fail-closed 读取点是 `resolveFsIsolationMode`（与
+   * `resolveWorktreeOnMutate` 同款 shape）。**仅用户层键**（ADR-0084）——
+   * 项目文件 isolation 段被丢弃，与 worktreeOnMutate / worktreeExclusive
+   * 同纪律。
+   */
+  fsMode?: FsIsolationMode;
 }
+
+/** ADR-0092 / SC13：filesystem isolation 档值域。 */
+export type FsIsolationMode = "global" | "workspace";
 
 /**
  * user-hook-router（specs/user-hook-router.md）: 用户钩子（user hooks） 规则条目。
@@ -345,6 +359,26 @@ export function resolveWorktreeExclusive(
   settings: IknowSettings | undefined | null
 ): boolean {
   return settings?.isolation?.worktreeExclusive === true;
+}
+
+/**
+ * ADR-0092 / SC13：`isolation.fsMode` 的唯一 fail-closed 读取点（镜像
+ * `resolveWorktreeOnMutate` 形状）。
+ *
+ *  - 缺席 / 非 `"workspace"` → `"global"`（回落至默认全局档；ADR-0092
+ *    「默认全局档」是缺省设计，不是巧合）；
+ *  - 仅当字面量严格 === `"workspace"` 才返回 `"workspace"`；其它（含
+ *    大小写错配 / `"WORKSPACE"` / `"Global"` / 其它字符串 / 非字符串 /
+ *    布尔 / 数字）一律按 `"global"` 兜底——settings 层不抛错，与
+ *    `worktreeOnMutate` / `worktreeExclusive` 的 fail-closed 纪律一致；
+ *  - config 层只承载字符串值域语义，不读会话状态；开关只在启动加载点读
+ *    一次（review High-2 / ADR-0037 §5 硬要求 9），运行中由 `/config` 或
+ *    `FsModeContext` holder 就地翻。
+ */
+export function resolveFsIsolationMode(
+  settings: IknowSettings | undefined | null
+): FsIsolationMode {
+  return settings?.isolation?.fsMode === "workspace" ? "workspace" : "global";
 }
 
 /**
@@ -464,6 +498,32 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/**
+ * ADR-0092: `parseIsolation` / `mergeIsolation` 的收尾 —— 未落下任何键的段
+ * 视为「字段全非法 / 缺席」，返回 undefined（消费方按 OFF / global 处理）。
+ *
+ * 用键数判断而非逐字段 `=== undefined` 链：字段增减不再改变这个判断的代价
+ * （同形先例 `aci-executor.ts` 的 partial-result 收尾）。
+ */
+function undefinedWhenEmpty<T extends object>(out: T): T | undefined {
+  return Object.keys(out).length === 0 ? undefined : out;
+}
+
+/**
+ * ADR-0092: `mergeIsolation` 的 per-field project > user 选择 —— project 已
+ * 定义则用 project，否则回落 user；**两者皆 undefined 时不落键**（写出
+ * `out.x = undefined` 会让消费方的 `Object.keys` 看见一个假存在的键）。
+ */
+function assignPreferred<K extends keyof IknowSettingsIsolation>(
+  out: IknowSettingsIsolation,
+  key: K,
+  fromProject: IknowSettingsIsolation[K],
+  fromUser: IknowSettingsIsolation[K]
+): void {
+  const value = fromProject !== undefined ? fromProject : fromUser;
+  if (value !== undefined) out[key] = value;
+}
+
 /** 有限正数（> 0）：contextWindow / thresholdTokens 的值域。 */
 function isPositiveFinite(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v) && v > 0;
@@ -535,6 +595,16 @@ function isNonEmptyStringArray(v: unknown): v is string[] {
 /** secret mode 值域：仅 "roundtrip" | "block"（缺省由消费方按 roundtrip 处理）。 */
 function isValidSecretMode(v: unknown): v is IknowSettingsSecrets["mode"] {
   return v === "roundtrip" || v === "block";
+}
+
+/**
+ * ADR-0092 / SC13: `isolation.fsMode` 值域守卫（大小写敏感，仅小写字面量）。
+ * 与 `isValidSecretMode` 同款：非字面量 → 调用方丢弃该字段（不转型、不抛）。
+ *
+ * 导出给 `persist-settings.ts` 的写回校验复用（同一闭集，避免两处各自漂移）。
+ */
+export function isFsIsolationMode(value: unknown): value is FsIsolationMode {
+  return value === "global" || value === "workspace";
 }
 
 /**
@@ -869,10 +939,12 @@ function mergeMemory(
 }
 
 /**
- * ADR-0037 / ADR-0070: 校验 `isolation` 层 —— 非法字段丢弃（镜像 parseGraph）。
- * 非普通对象 → undefined（丢弃该层）；worktreeOnMutate / worktreeExclusive
- * 非 boolean → 丢弃该字段（不转型）；字段全非法 / 缺席 → undefined（消费方
- * 按 OFF 处理）。两字段独立校验、互不影响——任一合法即保留段。
+ * ADR-0037 / ADR-0070 / ADR-0092: 校验 `isolation` 层 —— 非法字段丢弃（镜像
+ * parseGraph）。非普通对象 → undefined（丢弃该层）；worktreeOnMutate /
+ * worktreeExclusive 非 boolean → 丢弃该字段（不转型）；fsMode 非
+ * `"global"` | `"workspace"` 字面量 → 丢弃（大小写敏感，与 `worktreeOnMutate`
+ * boolean-only 纪律一致）；字段全非法 / 缺席 → undefined（消费方按 OFF /
+ * global 处理）。三字段独立校验、互不影响——任一合法即保留段。
  */
 function parseIsolation(raw: unknown): IknowSettingsIsolation | undefined {
   if (!isPlainObject(raw)) return undefined;
@@ -883,15 +955,16 @@ function parseIsolation(raw: unknown): IknowSettingsIsolation | undefined {
   if (typeof raw.worktreeExclusive === "boolean") {
     out.worktreeExclusive = raw.worktreeExclusive;
   }
-  if (out.worktreeOnMutate === undefined && out.worktreeExclusive === undefined)
-    return undefined;
-  return out;
+  if (isFsIsolationMode(raw.fsMode)) {
+    out.fsMode = raw.fsMode;
+  }
+  return undefinedWhenEmpty(out);
 }
 
 /**
- * ADR-0037 / ADR-0070: 逐层合并 isolation —— project 字段优先，未覆盖的
- * user 字段保留。两字段独立 per-field project > user 合并（镜像 llm.timeoutMs
- * 形态）；任一字段合并后合法即保留段。
+ * ADR-0037 / ADR-0070 / ADR-0092: 逐层合并 isolation —— project 字段优先，
+ * 未覆盖的 user 字段保留。三字段独立 per-field project > user 合并（镜像
+ * llm.timeoutMs 形态）；任一字段合并后合法即保留段。
  * ADR-0084: `isolation` 是用户层键 —— 生产路径上 `project` 恒为空对象（见
  * `mergeSettings`），项目文件不得卸门禁。
  */
@@ -901,19 +974,20 @@ function mergeIsolation(
 ): IknowSettingsIsolation | undefined {
   if (!user && !project) return undefined;
   const out: IknowSettingsIsolation = {};
-  if (project?.worktreeOnMutate !== undefined) {
-    out.worktreeOnMutate = project.worktreeOnMutate;
-  } else if (user?.worktreeOnMutate !== undefined) {
-    out.worktreeOnMutate = user.worktreeOnMutate;
-  }
-  if (project?.worktreeExclusive !== undefined) {
-    out.worktreeExclusive = project.worktreeExclusive;
-  } else if (user?.worktreeExclusive !== undefined) {
-    out.worktreeExclusive = user.worktreeExclusive;
-  }
-  if (out.worktreeOnMutate === undefined && out.worktreeExclusive === undefined)
-    return undefined;
-  return out;
+  assignPreferred(
+    out,
+    "worktreeOnMutate",
+    project?.worktreeOnMutate,
+    user?.worktreeOnMutate
+  );
+  assignPreferred(
+    out,
+    "worktreeExclusive",
+    project?.worktreeExclusive,
+    user?.worktreeExclusive
+  );
+  assignPreferred(out, "fsMode", project?.fsMode, user?.fsMode);
+  return undefinedWhenEmpty(out);
 }
 
 /**

@@ -74,21 +74,21 @@ minimal-change-verifier: yes — Round 1 默认全局+去 bind；Round 2 工作�
    - **Inherits:** spec SC11–SC13；读白名单可复用 0037 §9.2 的「可见」而不是「不可见」。
    - **Surface:** ADR-0092 amendment 或 0037 §9 工作区条款。
    - **Acceptance:** 写死：读 home；写 = taskRoot ∪ 会话 tmp；越界 typed。开关字段名实施可定，须用户层 settings（项目文件不得自授更宽写）。
-   - Status: [ ] pending
+   - Status: [x] done（`900f042a`） —— ADR-0092 Amendment 2026-09-13 写死围栏 argv 合同；spec SC11–SC13 细化
    - [blocks: T5]
 
 7. **T7 工作区档围栏** — tag: `[implementation]`
    - **Inherits:** T6；spec SC11–SC12。
    - **Surface:** sandbox fs-policy 第二档。
    - **Acceptance:** 工作区档读 home 成功、写 home 非白名单失败且不落盘；会话 tmp 真路径仍可写。S2：empty/negative/overflow/concurrent/exception 覆盖越界写。
-   - Status: [ ] pending
+   - Status: [x] done（本 PR） —— `src/harness/sandbox/fs-mode.ts` 值域 + `bwrap.ts` 挂载序（`--ro-bind home` → `--bind taskRoot` → `--bind 会话 tmp`）；home 缺失 typed fail-loud 不静默降级。MCP 实测：home 读 OK / home 写 EROFS 且宿主不落盘 / `$TMPDIR` 落 `<sessionFolder>/fence-tmp`
    - [blocks: T6]
 
 8. **T8 TUI `/config`（或等价）切档** — tag: `[implementation]`
    - **Inherits:** spec SC13；默认全局。
    - **Surface:** TUI 配置面 + settings 读口。
    - **Acceptance:** 能从全局切到工作区；新会话缺省全局；权限模式控件不被这个开关替换。
-   - Status: [ ] pending
+   - Status: [x] done（本 PR） —— settings `isolation.fsMode`（用户层）+ TUI/chat `/config fs global|workspace`；holder 就地翻转、下一次调用生效。MCP 实测：同会话同命令 workspace 档 EROFS → 切 global 后 `TOUCH_OK`；Shift+Tab 权限轮独立（Default→Auto）；非法参数 usage 且不改档；settings 双向回写
    - [blocks: T7]
 
 ## 收尾

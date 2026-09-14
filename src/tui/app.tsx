@@ -257,6 +257,13 @@ import {
   splitGraphArgs,
   type GraphModeContext,
 } from "../harness/graph/mode.js";
+import {
+  applyFsModeCommand,
+  parseConfigCommand,
+  splitConfigArgs,
+  type FsIsolationMode,
+  type FsModeContext,
+} from "../harness/sandbox/fs-mode.js";
 import { buildSkillLoadText, createSkillBody } from "../harness/skill/body.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import type { LiveTaskRoot } from "../harness/session-roots.js";
@@ -435,6 +442,62 @@ function subagentRowBudget(
   return view === "chat" ? subagentMessageRowCount(subagents) : 0;
 }
 
+/**
+ * `/graph` case 体：翻 graph holder（与 Shift+Tab 同源）并同步 chrome 状态。
+ *
+ * 抽到模块级：case 内的 `if (!holder)` 分支若留在 handleSubmit 内，会把后者
+ * 顶过 S5 ratchet 的 HEAD 基线（既有超阈值函数只许不升）。
+ */
+function runGraphSlashCommand(
+  props: Pick<TuiAppProps, "graphMode">,
+  text: string,
+  setGraphOn: (enabled: boolean) => void,
+  setNotice: (notice: Notice) => void
+): void {
+  // D-α V1 / SC3：`/graph` 是 Shift+Tab 的非 TTY 对等物 —— 翻同一个
+  // holder，解析与文案单点在 harness/graph/mode.ts（三入口同源）。
+  const graphCtx = props.graphMode;
+  if (!graphCtx) {
+    setNotice({ lines: ["图模式未接线（本入口未注入 graph holder）。"] });
+    return;
+  }
+  const res = applyGraphCommand(graphCtx, splitGraphArgs(slashRemainder(text)));
+  setGraphOn(graphCtx.get().enabled);
+  setNotice({ lines: [res.text] });
+}
+
+/**
+ * `/config` case 体：翻 fs isolation holder（与 PermissionMode 正交 ——
+ * Shift+Tab 不动它），切档成功才落盘。抽到模块级的理由同
+ * `runGraphSlashCommand`。
+ */
+function runConfigSlashCommand(
+  props: Pick<TuiAppProps, "fsMode" | "onPersistFsMode">,
+  text: string,
+  setNotice: (notice: Notice) => void
+): void {
+  // ADR-0092 / SC13：解析与文案单点在 harness/sandbox/fs-mode.ts（三入口同源）。
+  const fsCtx = props.fsMode;
+  if (!fsCtx) {
+    setNotice({ lines: ["文件系统隔离档未接线（本入口未注入 fs holder）。"] });
+    return;
+  }
+  const args = splitConfigArgs(slashRemainder(text));
+  // app 侧只解析一次，同一份结果同时驱动 notice 与落盘判定。`applyFsModeCommand`
+  // 内部还会为「改 holder」再解析一次 —— 那是命令 SSOT 的一部分，要合并得让
+  // fs-mode.ts 把 kind 透出返回值（不在本入口的改动范围）。
+  const cmd = parseConfigCommand(args);
+  const res = applyFsModeCommand(fsCtx, args);
+  setNotice({ lines: [res.text] });
+  // 切档成功才落盘（usage / status 不该写文件）。fire-and-forget：
+  // 失败不抛（UI 兜底），成功不阻塞输入。
+  if (res.ok && cmd.kind === "set") {
+    void props.onPersistFsMode?.(fsCtx.get()).catch((err: unknown) => {
+      setNotice({ lines: [`文件系统隔离档保存失败：${describeError(err)}`] });
+    });
+  }
+}
+
 export function chromeReserveRows(opts: {
   readonly noticeRows: number;
   readonly inputHintRows: number;
@@ -556,6 +619,22 @@ export interface TuiAppProps {
    * fixture 兼容；产品路径由 run.tsx 注入）。
    */
   readonly graphMode?: GraphModeContext;
+  /**
+   * ADR-0092 / SC13：filesystem isolation 档的会话 holder。`/config` 就地翻
+   * 它；引擎（build-engine → bash 工厂）per-call 读同一 holder。缺席 →
+   * `/config` 提示未接线（测试 / fixture 兼容；产品路径由 run.tsx 注入）。
+   *
+   * **与 PermissionMode 正交**：Shift+Tab 的三态轮不动本 holder（授权轴 ≠
+   * FS 档轴）。
+   */
+  readonly fsMode?: FsModeContext;
+  /**
+   * ADR-0092 / SC13：`/config` 切换后的落盘回调（fire-and-forget）。
+   * 产品路径由 run.tsx 注入 `persistFsModeChanges(resolveThinkingSettingsPath(), …)`
+   * 的闭包；测试可注入 spy。失败不抛（UI 兜底 setNotice）；成功路径不
+   * 阻塞输入。
+   */
+  readonly onPersistFsMode?: (mode: FsIsolationMode) => Promise<void>;
   /** #279 项3：权限 modal「总是允许」落点 — session 层授权登记表。 */
   readonly sessionGrants?: SessionGrants;
   /** 测试注入口：可选初始视图（缺省 chat）。 */
@@ -2258,19 +2337,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         return;
       }
       case "graph": {
-        // D-α V1 / SC3：`/graph` 是 Shift+Tab 的非 TTY 对等物 —— 翻同一个
-        // holder，解析与文案单点在 harness/graph/mode.ts（三入口同源）。
-        const graphCtx = props.graphMode;
-        if (!graphCtx) {
-          setNotice({ lines: ["图模式未接线（本入口未注入 graph holder）。"] });
-          return;
-        }
-        const res = applyGraphCommand(
-          graphCtx,
-          splitGraphArgs(slashRemainder(text))
-        );
-        setGraphOn(graphCtx.get().enabled);
-        setNotice({ lines: [res.text] });
+        runGraphSlashCommand(props, text, setGraphOn, setNotice);
+        return;
+      }
+      case "config": {
+        runConfigSlashCommand(props, text, setNotice);
         return;
       }
       case "thinking": {

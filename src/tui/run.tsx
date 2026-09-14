@@ -57,8 +57,10 @@ import {
 import { createLiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import {
   loadIknowSettings,
+  resolveFsIsolationMode,
   resolveWorktreeExclusive,
 } from "../config/settings.js";
+import { createFsModeContext } from "../harness/sandbox/fs-mode.js";
 import { createTuiWorktreeIsolationHost } from "./worktree-host.js";
 import { resolveVerifyConfig } from "../session-api/serve.js";
 import { createEnvLoader, type EnvLoader } from "../config/env-loader.js";
@@ -68,6 +70,7 @@ import {
   resolveWorkspaceRoot,
 } from "../config/workspace-root.js";
 import {
+  persistFsModeChanges,
   persistMemoryChanges,
   persistThinkingChanges,
   resolveThinkingSettingsPath,
@@ -277,6 +280,24 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       }
     };
 
+    const persistFsMode: NonNullable<TuiAppProps["onPersistFsMode"]> = async (
+      mode
+    ) => {
+      try {
+        // 同 persistThinking：fsMode 亦用户层键（isolation 段，ADR-0084
+        // 允许名单外） → 恒写 <home>/.iknow/settings.json。
+        const path = resolveThinkingSettingsPath({
+          home: homedir(),
+        });
+        const { bytes } = await persistFsModeChanges(path, { fsMode: mode });
+        activeEnvLoader.markSelfWrite(path, bytes);
+      } catch (err) {
+        // app.tsx 的 onPersistFsMode 契约是 Promise<void>（失败由调用方
+        // 以 notice 呈现）；这里把错误重新抛出，让 app 的 catch 兜底。
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    };
+
     const inflight = createInflightRegistry();
     const toolEventSink = createToolEventSink();
     const askBridge = createTuiAskUserBridge();
@@ -298,6 +319,12 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     const graphMode = createGraphModeContext(
       resolveGraphMode({ settings: startupSettings.graph })
     );
+    // ADR-0092 / SC13:filesystem isolation 档 holder —— 初值走 settings
+    // （缺省 global），运行中由 `/config` 就地翻；holder 同时给引擎
+    // （buildTuiDeps → BuildEngineOpts.fsMode → bash 工厂 per-call 读）与
+    // TuiApp（命令面）。与 permissionMode / graphMode 正交 —— Shift+Tab
+    // 不动它。settings 只在启动加载点读一次（review High-2 / 硬要求 9）。
+    const fsMode = createFsModeContext(resolveFsIsolationMode(startupSettings));
     // live-graph-phase1 T1 / ADR-0051:活图账本 host —— TUI 单例,跨多会话
     // (web 多面板 / 切换会话)按 conversationId 解析;resetSession /
     // hub.shutdown 销毁。
@@ -326,6 +353,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       soleInflightId: () => inflight.soleId(),
       permissionMode,
       graphMode,
+      // ADR-0092 / SC13:fs isolation holder 给引擎(build-engine →
+      // BuildEngineOpts.fsMode → bash 工厂 per-call 读)。
+      fsMode,
       liveGraphLedger,
       sessionGrants,
       // ADR-0019 (T2): workspaceRoot 透传到 build-engine identity /
@@ -459,6 +489,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // bridge → hub → provisioner 闭包贯穿。OFF（缺席 / 非 true）→
       // 完全跳过占用检查（SC2 零回归）。
       worktreeExclusive: resolveWorktreeExclusive(startupSettings),
+      // ADR-0092 / SC13:同一 fs holder 透传给 bridge → hub —— TUI 的 verify
+      // 命令面与 bash 工具面同档（verify 调用点 per-call 现读 holder，`/config`
+      // 翻档下一次调用生效，与 bash 侧同一实例）。serve 已按同款接线。
+      fsMode,
     });
     // Review High-1:bridge 就绪后回填 late-bound hub 引用（见上方 bridgeRef）。
     bridgeRef.hub = bridge.hub;
@@ -510,6 +544,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           dataDir={dataDir}
           permissionMode={permissionMode}
           graphMode={graphMode}
+          // ADR-0092 / SC13:fs isolation holder + 落盘回调给命令面
+          //（引擎那侧的 holder 经 depsOpts.fsMode 走）。
+          fsMode={fsMode}
+          onPersistFsMode={persistFsMode}
           sessionGrants={sessionGrants}
           // #337 Phase C：TuiApp 消费 skillCatalog（slash 候选 + /skill 加载发送）。
           // onExtensions 在 buildTuiDeps 装配期同步注入（Phase B seam）；此处

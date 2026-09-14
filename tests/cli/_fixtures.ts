@@ -160,6 +160,8 @@ export interface MakeCtxOpts {
   readonly workspaceRoot?: string;
   /** T2: abort controller；注入时 processChatLine 把 controller.signal 传 run()。 */
   readonly abortController?: AbortController;
+  /** ADR-0092 / SC13: fs 隔离档 holder；注入时 processChatLine 把它透给 verify 面。 */
+  readonly fsMode?: import("../../src/harness/sandbox/fs-mode.ts").FsModeContext;
 }
 
 export function makeCtx(opts: MakeCtxOpts): ChatLineContext {
@@ -178,5 +180,6 @@ export function makeCtx(opts: MakeCtxOpts): ChatLineContext {
     ...(opts.abortController !== undefined && {
       abortController: opts.abortController,
     }),
+    ...(opts.fsMode !== undefined && { fsMode: opts.fsMode }),
   };
 }

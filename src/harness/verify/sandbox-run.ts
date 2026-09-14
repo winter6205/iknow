@@ -31,21 +31,50 @@ export type RunVerifyFn = (
  * bash 工具的围栏 / 资源限额, 不单独放宽)。命令拼 `bash -c <command>`,
  * 与 bash.ts 一致。
  *
- * ADR-0092 全局档: 围栏 argv 固定为宿主根 + 系统前缀只读重绑, verify 不再
- * 需要读过白名单; policy 只承载验证命令的会话 tmp 宿主路径(`$TMPDIR`)。
+ * ADR-0092 / Round 2:工作区档 fs 档 + homeRoot 透传,bwrap 据此在工作区档
+ * 叠 `--ro-bind <home>` + `--bind <cwd>` + `--bind <tmpDir>` 三层(global 档
+ * 下 bwrap 不发射,V1 baseline 不破)。fsMode 缺省回退与 bash 工具同形态
+ * (`"global"`)。
+ *
+ * homeRoot 缺省**不**再回落成「不发射 home 层」:verify 面若在 workspace 档
+ * 漏传 homeRoot,bwrap 抛 typed error(fail-loud)—— 静默跳过 home ro-bind 会
+ * 让验证命令的围栏悄悄退回全局档,而 bash 工具仍在工作区档,同一会话两条
+ * 执行面档位不一致且无信号。
  */
 export function makeDefaultRunVerify(opts: {
   readonly cwd: string;
-  /** ADR-0092: 验证命令的会话 tmp 宿主路径 —— `$TMPDIR` 的来源。缺省回退
-   *  进程 tmpdir();显式传入即覆盖(测试注入缝)。 */
+  /**
+   * ADR-0092 / SC12: 验证命令的会话 tmp 宿主路径 —— `$TMPDIR` 的来源,
+   * 同时是工作区档 `--bind <tmpRoot>` 的源端(两者必须同一份)。
+   *
+   * 缺省回退进程 `tmpdir()`:**这是 fallback 不是目标态** —— 会话 tmp 的
+   * 权威解析归调用方(`resolveSessionFenceTmp({ projectDir, conversationId })`,
+   * 与 bash 工具面同一 helper)。回退只服务「未接线 / 测试注入」路径:
+   * 在那里报错会让 verify 在拿不到 projectDir / conversationId 时直接失败,
+   * 超出本面职责。生产两个 caller(session-api/hub、cli/chat-session)都显式传。
+   */
   readonly tmpDir?: string;
+  /** ADR-0092 Round 2 / SC11/SC12:工作区档 fs 档。缺省 → global(V1 baseline)。 */
+  readonly fsMode?: import("../sandbox/fs-mode.js").FsIsolationMode;
+  /** ADR-0092 Round 2 / SC11:工作区档 home ro-bind 源端宿主绝对路径。 */
+  readonly homeRoot?: string;
 }): RunVerifyFn {
+  // 注意:调用方(verify-loop.ts)每轮现造本闭包,故此处工厂期快照 == 该轮
+  // 的 per-call 快照 —— 与 bash handler 入口 D2 snapshot 同 vintage。
   const tmpDir = opts.tmpDir ?? tmpdir();
-  const fsPolicy = createFsPolicy({ tmpDir });
+  const fsMode = opts.fsMode ?? "global";
+  const homeRoot = opts.homeRoot;
+  const fsPolicy = createFsPolicy({ tmpDir, mode: fsMode });
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   const networkPolicy = createNetworkPolicy();
   return async (command, ctx) => {
-    const fenceEnv = envIsolation.filter(process.env);
+    // ADR-0092 / SC12:`$TMPDIR` 与交给 createBwrapFence 的 `tmpRoot` 必须
+    // 是**同一份**宿主真路径(与 bash.ts 的 fenceEnv 同形同时机)。
+    // `envIsolation.filter` 只按 BASE_ENV_WHITELIST 放行宿主已有的
+    // `TMPDIR` —— 宿主未导出时它根本不在场,围栏内写 `"$TMPDIR/x"` 会落到
+    // `/x`(guest 根)被拒。显式注入才是本面的目标态;filter 结果里的宿主
+    // 值被有意覆盖(生产装配的会话 tmp 由调用方给,不由宿主 env 决定)。
+    const fenceEnv = { ...envIsolation.filter(process.env), TMPDIR: tmpDir };
     const fence = createBwrapFence({
       command: "bash",
       args: ["-c", command],
@@ -53,6 +82,13 @@ export function makeDefaultRunVerify(opts: {
       networkPolicy,
       env: fenceEnv,
       cwd: opts.cwd,
+      // ADR-0092 Round 2 / SC11:workspace 档三层。**不**按 `homeRoot !==
+      // undefined` 预过滤 —— home 层缺席时 bwrap 抛 typed error(工作区档
+      // 缺 home = 静默退化成全局档,是安全洞不是容错)。此处只表达「哪些层
+      // 的源端是哪些路径」,「缺了该不该发射」由 fence 装配层唯一裁决。
+      ...(fsMode === "workspace"
+        ? { homeRoot, workspaceRoot: opts.cwd, tmpRoot: tmpDir }
+        : {}),
     });
     return runInSandbox({
       fence,

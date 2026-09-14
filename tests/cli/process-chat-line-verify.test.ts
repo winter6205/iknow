@@ -37,10 +37,11 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir as osHomedir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { processChatLine } from "../../src/cli/chat-session.ts";
+import { createFsModeContext } from "../../src/harness/sandbox/fs-mode.ts";
 import { assistantResult, makeCtx } from "./_fixtures.ts";
 import type { VerifyConfig } from "../../src/harness/verify/types.ts";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
@@ -270,4 +271,73 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
     );
     assert.equal(envelopes.length, 1);
   });
+
+  // ADR-0092 / SC11–SC13: chat 的 verify 命令面必须与 bash 工具面同档。
+  // 判别力设计: 验证脚本**尝试写 home**。workspace 档下 home 是 ro-bind,
+  // 写必须 EROFS 失败; 若 holder 没传到 verify 面 (回归), 沙箱是全局档,
+  // 写会成功 —— 两种结果可直接观测, 不是只查 opts 字段。
+  it.skipIf(!hasBwrap())(
+    "fsMode=workspace → verify 命令落在工作区档围栏 (写 home 被 EROFS 拒)",
+    async () => {
+      const homeProbe = join(osHomedir(), ".iknow-verify-fsmode-probe");
+      rmSync(homeProbe, { force: true });
+      const probeScript = join(workDir, "verify-write-home.sh");
+      writeFileSync(
+        probeScript,
+        `#!/bin/sh\necho probe > "${homeProbe}"\nexit 0\n`,
+        { mode: 0o755 }
+      );
+      chmodSync(probeScript, 0o755);
+
+      const ctx = makeCtx({
+        responses: [assistantResult({ texts: ["answer-ws"] })],
+        fsMode: createFsModeContext("workspace"),
+      });
+      Object.assign(ctx, {
+        verifyConfig: { command: probeScript } satisfies VerifyConfig,
+      });
+      const r = await processChatLine({ line: "fix this", ctx });
+      assert.equal(r.ranQuery, true);
+      // 档真的到达了 verify 面 → home 写被内核拒 → 宿主侧无落盘。
+      assert.equal(
+        existsSync(homeProbe),
+        false,
+        "workspace 档下 verify 命令写 home 必须 EROFS 拒绝且宿主侧不落盘"
+      );
+      rmSync(homeProbe, { force: true });
+    }
+  );
+
+  // 反向对照 (排除「写永远失败」的假绿): 同一个脚本在 global 档下写 home
+  // 必须成功。两条一起才证明断言的是**档位差异**, 不是脚本本身写不动。
+  it.skipIf(!hasBwrap())(
+    "fsMode=global（对照）→ 同一 verify 脚本写 home 成功",
+    async () => {
+      const homeProbe = join(osHomedir(), ".iknow-verify-fsmode-probe-global");
+      rmSync(homeProbe, { force: true });
+      const probeScript = join(workDir, "verify-write-home-global.sh");
+      writeFileSync(
+        probeScript,
+        `#!/bin/sh\necho probe > "${homeProbe}"\nexit 0\n`,
+        { mode: 0o755 }
+      );
+      chmodSync(probeScript, 0o755);
+
+      const ctx = makeCtx({
+        responses: [assistantResult({ texts: ["answer-g"] })],
+        fsMode: createFsModeContext("global"),
+      });
+      Object.assign(ctx, {
+        verifyConfig: { command: probeScript } satisfies VerifyConfig,
+      });
+      const r = await processChatLine({ line: "fix this", ctx });
+      assert.equal(r.ranQuery, true);
+      assert.equal(
+        existsSync(homeProbe),
+        true,
+        "global 档下 verify 命令写 home 应成功（对照: 证明确实是档位在起作用）"
+      );
+      rmSync(homeProbe, { force: true });
+    }
+  );
 });

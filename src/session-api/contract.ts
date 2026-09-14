@@ -7,6 +7,7 @@
  * reference the old shapes — they will be rewritten in T4/T5.
  */
 import type { StopReason, TokenUsage } from "../harness/index.js";
+import type { FsIsolationMode } from "../harness/sandbox/fs-mode.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { CompactReason } from "../harness/compress/index.js";
 import type { SessionStoreErrorKind } from "./store/errors.js";
@@ -286,6 +287,24 @@ export type GraphModeResponse = {
 
 /** POST /api/v1/graph-mode 请求体：`/graph` 的 args（已切词）。缺省 = 查询。 */
 export interface GraphModeRequest {
+  readonly args?: ReadonlyArray<string>;
+}
+
+/**
+ * ADR-0092 / SC13：GET/POST /api/v1/fs-mode 响应（serve 侧的 `/config`
+ * 对等物）。`message` 是三入口共用的那一行状态文案（chat 打到 stdout、TUI
+ * 落 notice、web 直接渲染这段）。
+ *
+ * `mode` 复用 `harness/sandbox/fs-mode.ts` 的 `FsIsolationMode`（SSOT）——
+ * 本文件不再自带一份字面量拷贝，避免闭集扩档时两处漂移。
+ */
+export type FsModeResponse = {
+  mode: FsIsolationMode;
+  message: string;
+};
+
+/** POST /api/v1/fs-mode 请求体：`/config` 的 args（已切词）。缺省 = 查询。 */
+export interface FsModeRequest {
   readonly args?: ReadonlyArray<string>;
 }
 
