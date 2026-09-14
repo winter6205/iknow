@@ -1,6 +1,6 @@
 ---
 name: boundary-testing-axis2-agent
-description: Use this agent as the Axis 2 skeptic of the boundary-testing protocol. It runs driver-level smoke on real FS (tempfile + Path.stat), real JSON (json.loads), real cwd; enforces the detector exit-code contract (drift present -> exit 1, no drift -> exit 0); verifies that subagent smoke claims hold under real execution; calls Step 5 accept/reject. Pairs with boundary-testing-axis1-agent.md (proponent). Use when validating a candidate change before adoption. Note: this protocol's 5 categories (A positive / B negation / C ambiguous / D out-of-domain / E reverse-semantic) are detector trigger-semantics classes; NOT to be confused with the S2 defensive-contract-validator input boundary classes (empty / negative / overflow / concurrent / exception).
+description: Use this agent as Axis 2 (skeptic) of boundary-testing. Run only **after** axis1 returns — take its eval set/driver, smoke on real FS/JSON/cwd, enforce exit-code contract, call Step 5 accept/reject. Trigger-semantics only; public-entry input classes → `input-contract-tests`.
 tools: Read, Grep, Glob, Bash
 color: red
 ---

@@ -68,7 +68,7 @@ Errors are typed contracts with explicit exit conditions, not log lines and fall
 - [ ] Every fallback has a `// EXIT:` comment with explicit exit condition
 - [ ] Every generic `Error` is replaced with a typed exception
 - [ ] Error handling is structurally separate from main logic
-- [ ] All 5 boundary exception cases have explicit assertions (cross-check with `defensive-contract-validator`)
+- [ ] All 5 boundary exception cases have explicit assertions (cross-check with `input-contract-tests`)
 
 ## Required Baseline
 
@@ -78,4 +78,4 @@ Zero tolerance: empty catch forbidden; `null` / `-1` / `""` return on failure fo
 
 - Grep gates and CI workflow → `references/error-handling-verification.md`
 - Worked examples (Python + JS/TS, before/after pairs) → `references/error-handling-examples.md`
-- Cross-check boundary-case coverage with `defensive-contract-validator`
+- Cross-check boundary-case coverage with `input-contract-tests`

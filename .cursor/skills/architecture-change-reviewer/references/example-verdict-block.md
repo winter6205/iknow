@@ -14,7 +14,7 @@ Add POST /api/orders endpoint that accepts an order, validates stock, creates th
 ## 2. 5-line verdict block
 
 bounded-context-guardian: yes — orders/ bounded context exists, new code lives in orders/api/, no cross-context import (uses stock-validator via injected interface).
-defensive-contract-validator: yes — place_order() covers empty cart (raise), negative quantity (raise), long cart (1000 items, pagination), concurrent (lock + retry), exception (DB failure → typed OrderPlacementError).
+input-contract-tests: yes — place_order() covers empty cart (raise), negative quantity (raise), long cart (1000 items, pagination), concurrent (lock + retry), exception (DB failure → typed OrderPlacementError).
 error-handling-enforcer: yes — typed exception OrderPlacementError with code: INSUFFICIENT_STOCK, no empty catch, // EXIT: stock not reserved, return error to caller comment on early-return.
 complexity-anti-drift: yes — plan keeps one abstraction level per function: place_order() composes 3 extracted helpers (validate_cart / reserve_stock / persist_order) instead of inlining the flow; no god-file or cross-cutting handler planned.
 minimal-change-verifier: yes — one task (add order endpoint); diff stays in that scope.

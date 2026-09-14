@@ -1,6 +1,6 @@
 ---
 name: architecture-change-reviewer
-description: Use before multi-file changes (>3 files) or cross-module work — emits a 5-line verdict (bounded-context-guardian / defensive-contract-validator / error-handling-enforcer / complexity-anti-drift / minimal-change-verifier) and blocks on no / unclear. Triggers on multi-file change, new module, cross-module refactor, plan before implementation.
+description: Use before multi-file changes (>3 files) or cross-module work — emits a 5-line verdict (bounded-context-guardian / input-contract-tests / error-handling-enforcer / complexity-anti-drift / minimal-change-verifier) and blocks on no / unclear. Triggers on multi-file change, new module, cross-module refactor, plan before implementation.
 bucket: engineering
 disable-model-invocation: false
 ---
@@ -33,7 +33,7 @@ Tracer-bullet tickets and the [decision] / [implementation] tags live in writing
 1. Enumerate the planned files. Stop if fewer than 3.
 2. For each Core Skill, write a one-line verdict:
    - bounded-context-guardian: are module boundaries respected?
-   - defensive-contract-validator: is the change covered by tests for the 5 boundary classes?
+   - input-contract-tests: is the change covered by tests for the 5 boundary classes?
    - error-handling-enforcer: is every failure path typed, non-empty, EXIT-documented?
    - complexity-anti-drift: does the plan's declared structure keep one abstraction level per function/module (no god-function / god-file intent, no planned deep nesting or duplication)? Smell thresholds guide, line counts never decide.
    - minimal-change-verifier: is this one task? Will the diff stay in that scope?

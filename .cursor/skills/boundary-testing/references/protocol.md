@@ -42,13 +42,13 @@
 
 ## 4. 与其他流程关系
 
-| 流程                                              | 关系                                                                                                                          |
-| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| subagent smoke                                    | 快速 sanity, 必要但不充分                                                                                                     |
-| driver-level smoke                                | 严格验收, 必跑不可跳; 出口码 contract 见 §3                                                                                   |
-| Step 5 gate                                       | 改动采纳门槛                                                                                                                  |
-| `defensive-contract-validator` (S2 输入类)        | **互补不冲突** — S2 覆盖 5 类输入边界 (empty/negative/overflow/concurrent/exception); 本协议覆盖 5 类触发语义 (A-E); 不可互替 |
-| 项目 `.claude/rules/boundary-testing-protocol.md` | 项目特定 delta (外科式 edit 纪律 / Case 3 历史), 互补不冲突                                                                   |
+| 流程                                              | 关系                                                                                                                                                                             |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| subagent smoke                                    | 快速 sanity, 必要但不充分                                                                                                                                                        |
+| driver-level smoke                                | 严格验收, 必跑不可跳; 出口码 contract 见 §3                                                                                                                                      |
+| Step 5 gate                                       | 改动采纳门槛                                                                                                                                                                     |
+| `input-contract-tests` (入参契约)                 | **互补不冲突** — 入参契约覆盖 public 入口 5 类输入 (empty/invalid/overflow/concurrent/exception); 本协议覆盖 5 类触发语义 (A-E); 不可互替；编排上本协议 axis1→axis2 **先后**派发 |
+| 项目 `.claude/rules/boundary-testing-protocol.md` | 项目特定 delta (外科式 edit 纪律 / Case 3 历史), 互补不冲突                                                                                                                      |
 
 ## 5. Terminology
 

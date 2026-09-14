@@ -38,7 +38,7 @@ Do not load this skill when:
 
 ## Related Skills
 
-- `defensive-contract-validator` (S2) — for the failing test itself (5-class boundary tests)
+- `input-contract-tests` (S2) — for the failing test itself (5-class boundary tests)
 - `minimal-change-verifier` (S6) — enforce fix scope = task scope
 - `error-handling-enforcer` (S3) — proper try/except, no empty catches
 - `verification-before-completion` — applies after Phase 4 FIX succeeds; the failing test must be observed green before claiming fix verified. Evidence before assertions.

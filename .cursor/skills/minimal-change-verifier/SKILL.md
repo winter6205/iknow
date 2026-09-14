@@ -30,7 +30,7 @@ This step is handled by `arthurpower:minimal-change-verifier-agent`. When the di
 
 1. Run `git status` + `git diff --stat`. Confirm scope matches the task description. Completion: every path is in-scope or explicitly foreign.
 2. Read every hunk: is every change required by the task? Unstage foreign hunks. Completion: no drive-by remains in the landing diff.
-3. If a new dep appears, confirm YAGNI justification is in the PR body (handoff to defensive-contract-validator). Completion: PR body has the note, or no dep changed.
+3. If a new dep appears, confirm YAGNI justification is in the PR body (handoff to input-contract-tests). Completion: PR body has the note, or no dep changed.
 4. Confirm the change includes the tests that prove it. Completion: no "tests later" in the diff.
 5. Run pre-commit tests. If skipped, the change does NOT land. Completion: exit 0; no `--no-verify`.
 6. Confirm lockfile is updated iff a dep changed. Completion: both sides match, or neither changed.

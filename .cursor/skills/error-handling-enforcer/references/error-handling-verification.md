@@ -35,7 +35,7 @@ Before claiming the diff is done, manually confirm:
 - [ ] Each fallback branch has a `// EXIT:` comment naming the exit condition (TTL, age, signal, feature flag, etc.).
 - [ ] Each generic `throw new Error(...)` is replaced with a typed exception class.
 - [ ] Functions where happy path and error path return at different points are split into separate handlers.
-- [ ] All 5 boundary exception cases (empty / negative / oversized / concurrent / exception) have explicit assertions (cross-check with `defensive-contract-validator`).
+- [ ] All 5 boundary exception cases (empty / negative / oversized / concurrent / exception) have explicit assertions (cross-check with `input-contract-tests`).
 
 ---
 
@@ -82,6 +82,6 @@ Pick one `try/catch` in the diff and answer out loud:
 
 ## 5. Related verification skills
 
-- `defensive-contract-validator` — boundary-case test coverage (empty / negative / oversized / concurrent / exception)
+- `input-contract-tests` — boundary-case test coverage (empty / negative / oversized / concurrent / exception)
 - `complexity-anti-drift` — keeps error-handling helpers small (≤60 lines soft review-trigger, ≤10 branches)
 - `minimal-change-verifier` — confirms error-handling change does not smuggle an unrelated refactor into the fix

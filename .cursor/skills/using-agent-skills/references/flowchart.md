@@ -23,13 +23,14 @@ Task arrives
 │
 ├── Implementing code
 │   ├── TDD: failing test first ──────────→ test-driven-development
-│   ├── 5-class boundary contract ────────→ defensive-contract-validator
+│   ├── public entry input classes ──────→ input-contract-tests
 │   ├── Module boundary violation ───────→ bounded-context-guardian
 │   ├── ESLint complexity / fn>60 or file>1000 ───→ complexity-anti-drift
 │   └── Empty catch / null-on-failure ───→ error-handling-enforcer
 │
 ├── Verifying
 │   ├── Bug / something broke ───────────→ systematic-debugging
+│   ├── hook/detector trigger smoke ─────→ boundary-testing (axis1 then axis2)
 │   └── Pre-merge final check ──────────→ verification-before-completion
 │
 ├── Reviewing

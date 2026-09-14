@@ -1,6 +1,6 @@
 # Testing Patterns — Full Code Examples
 
-Companion to SKILL.md "Writing Good Tests" section. Each example shows the principle applied to real code.
+Companion to `references/test-shape.md` (writing rules). Each example shows the principle applied to real code.
 
 ## Test State, Not Interactions
 

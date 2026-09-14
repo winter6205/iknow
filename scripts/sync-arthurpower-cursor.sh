@@ -8,7 +8,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEFAULT_SRC="$HOME/.claude/plugins/cache/arthurpower-local/arthurpower/0.12.1"
+# Prefer marketplace checkout (live); fall back to installed cache pin.
+DEFAULT_SRC="$HOME/.claude/plugins/marketplaces/arthurpower-local/plugins/arthurpower"
+if [ ! -f "$DEFAULT_SRC/.claude-plugin/plugin.json" ]; then
+  DEFAULT_SRC="$HOME/.claude/plugins/cache/arthurpower-local/arthurpower/0.12.1"
+fi
 SRC="${ARTHURPOWER_SRC:-$DEFAULT_SRC}"
 
 SKILLS_DST="$REPO_ROOT/.cursor/skills"
@@ -26,7 +30,7 @@ SKILLS=(
   architecture-change-reviewer
   writing-plans
   test-driven-development
-  defensive-contract-validator
+  input-contract-tests
   bounded-context-guardian
   complexity-anti-drift
   error-handling-enforcer
@@ -42,7 +46,7 @@ SKILLS=(
 
 if [ ! -f "$SRC/.claude-plugin/plugin.json" ]; then
   echo "sync-arthurpower-cursor: missing plugin at $SRC" >&2
-  echo "Set ARTHURPOWER_SRC to a checkout of arthurpower (tag 0.12.1)." >&2
+  echo "Set ARTHURPOWER_SRC to a checkout of arthurpower." >&2
   exit 1
 fi
 
@@ -58,6 +62,8 @@ RSYNC_EXCLUDES=(
   --exclude 'Zone.Identifier'
 )
 
+# Post-impl auditors archived in plugin (TDD-agent, DCV-agent) are intentionally
+# omitted — write-time discipline is skills only.
 AGENTS=(
   architecture-change-reviewer-agent.md
   arthurpower-audit-agent.md
@@ -65,12 +71,10 @@ AGENTS=(
   boundary-testing-axis2-agent.md
   bounded-context-guardian-agent.md
   complexity-anti-drift-agent.md
-  defensive-contract-validator-agent.md
   error-handling-enforcer-agent.md
   minimal-change-verifier-agent.md
   spec-reviewer-agent.md
   standards-reviewer-agent.md
-  test-driven-development-agent.md
 )
 
 for agent in "${AGENTS[@]}"; do
@@ -79,6 +83,14 @@ for agent in "${AGENTS[@]}"; do
     exit 1
   fi
   rsync -a "$SRC/agents/$agent" "$AGENTS_DST/$agent"
+done
+
+# Drop agents no longer vendored (archived in plugin).
+for stale in \
+  defensive-contract-validator-agent.md \
+  test-driven-development-agent.md
+do
+  rm -f "$AGENTS_DST/$stale"
 done
 
 for name in "${SKILLS[@]}"; do
@@ -90,7 +102,10 @@ for name in "${SKILLS[@]}"; do
   rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$SRC/skills/$name/" "$SKILLS_DST/$name/"
 done
 
-find "$AGENTS_DST" "$SKILLS_DST" -name '*Zone.Identifier' -delete
+# Drop skills no longer vendored.
+rm -rf "$SKILLS_DST/defensive-contract-validator"
+
+find "$AGENTS_DST" "$SKILLS_DST" -name '*Zone.Identifier' -delete 2>/dev/null || true
 
 printf '%s\n' "$VERSION" >"$VENDOR_DST/VERSION"
 
@@ -101,4 +116,4 @@ printf '%s\n' "$VERSION" >"$VENDOR_DST/VERSION"
   done
 } >"$VENDOR_DST/MANIFEST.txt"
 
-echo "sync-arthurpower-cursor: pinned $VERSION → .cursor/skills (${#SKILLS[@]} skills) + .cursor/agents"
+echo "sync-arthurpower-cursor: pinned $VERSION from $SRC → .cursor/skills (${#SKILLS[@]} skills) + .cursor/agents (${#AGENTS[@]} agents)"

@@ -39,7 +39,7 @@ Before drafting, ground the contract in **this** workspace:
 
 2. **Write the spec.** Document lives at `specs/<feature>.md`. Required areas: Objective / Boundaries / Success Criteria / Open Questions, plus Inherits/Changes. Vague asks ("make it faster", "be more secure") reframe to binary in Success Criteria; if unreframeable, surface as Open Question. Template and reframing format: [`references/spec-template.md`](references/spec-template.md). Completion: every required area is present, every Success Criterion maps to a measurable yes/no, and Inherits/Changes only records what this contract depends on or adds.
 
-3. **Hand the spec to `architecture-change-reviewer`.** The skill emits a 5-line verdict — bounded-context-guardian / defensive-contract-validator / error-handling-enforcer / complexity-anti-drift / minimal-change-verifier, each `yes` / `no` / `unclear`. Any `no` or `unclear` means unresolved architecture leaks downstream; return to Step 1 or Step 2. Verdict example: [`references/example.md`](references/example.md). Completion: 5-line block present, all `yes` or `N/A with reason`.
+3. **Hand the spec to `architecture-change-reviewer`.** The skill emits a 5-line verdict — bounded-context-guardian / input-contract-tests / error-handling-enforcer / complexity-anti-drift / minimal-change-verifier, each `yes` / `no` / `unclear`. Any `no` or `unclear` means unresolved architecture leaks downstream; return to Step 1 or Step 2. Verdict example: [`references/example.md`](references/example.md). Completion: 5-line block present, all `yes` or `N/A with reason`.
 
 4. **persist.** 待写入清单空则跳过。否则立刻 invoke `domain-modeling`，只写清单上的项。CONTEXT / ADR persist 不另等 human confirm；step 1 仍是非 CONTEXT 假设（tech stack 等）的 gate。Completion: flush 已跑，或因清单为空而 skip。
 

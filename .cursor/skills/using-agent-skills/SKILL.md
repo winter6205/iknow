@@ -30,7 +30,7 @@ Skip when the task already maps to one skill, the user already named a skill, th
 
 4. **Invoke.** State the routing decision in one sentence, then invoke that skill. CONTEXT / ADR writes go through `domain-modeling` when a persist list exists. Completion: the chosen skill started.
 
-Promoted skill add / rename / remove / flow-placement updates this file and [`references/quick-reference.md`](references/quick-reference.md) in the same change. Details: [`references/router-maintenance.md`](references/router-maintenance.md).
+Promoted skill add / rename / remove / flow-placement updates this file and [`references/quick-reference.md`](references/quick-reference.md) in the same change. Default landing sequence: [`references/landing.md`](references/landing.md). Details: [`references/router-maintenance.md`](references/router-maintenance.md).
 
 ## Registered skills (hook mirror)
 
@@ -42,7 +42,7 @@ Promoted skill add / rename / remove / flow-placement updates this file and [`re
 - code-review
 - review-report-repair
 - complexity-anti-drift
-- defensive-contract-validator
+- input-contract-tests
 - dispatching-parallel-agents
 - domain-modeling
 - error-handling-enforcer

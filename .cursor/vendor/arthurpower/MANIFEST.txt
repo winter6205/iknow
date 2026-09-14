@@ -7,7 +7,7 @@ spec-driven-development
 architecture-change-reviewer
 writing-plans
 test-driven-development
-defensive-contract-validator
+input-contract-tests
 bounded-context-guardian
 complexity-anti-drift
 error-handling-enforcer

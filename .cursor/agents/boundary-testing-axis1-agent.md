@@ -1,6 +1,6 @@
 ---
 name: boundary-testing-axis1-agent
-description: Use this agent as the Axis 1 proponent of the boundary-testing protocol. It drafts the 10-30 representative evals (5 categories x >= 2 each), runs subagent smoke (necessary but not sufficient), and prepares the A/B comparison baseline. Use when kicking off a new boundary-testing run for a multi-file / multi-hook / multi-state / multi-platform change. Pairs with boundary-testing-axis2-agent.md (skeptic) for driver-level smoke + exit-code contract. Note: this protocol's 5 categories (A positive / B negation / C ambiguous / D out-of-domain / E reverse-semantic) are detector trigger-semantics classes; NOT to be confused with the S2 defensive-contract-validator input boundary classes (empty / negative / overflow / concurrent / exception).
+description: Use this agent as Axis 1 (proponent) of boundary-testing. Draft 10-30 trigger-semantics evals, run subagent smoke (necessary not sufficient), prepare A/B baseline. Dispatch **before** axis2; axis2 consumes this output. Use for hook/detector/skill trigger drift — not public-entry input classes (`input-contract-tests`).
 tools: Read, Grep, Glob, Bash
 color: green
 ---

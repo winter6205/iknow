@@ -65,7 +65,7 @@ Changes: add display_name + email_prefs columns; GET/PATCH /api/me; profile page
 ## Step 4 — architecture-change-reviewer verdict block
 
 bounded-context-guardian: yes — users/ bounded context exists, new code lives in users/api/, no cross-context import.
-defensive-contract-validator: yes — UserProfileUpdate covers empty display_name (422), too-long (422), invalid email_prefs (422), unauthenticated (401), DB failure (typed ProfileUpdateError).
+input-contract-tests: yes — UserProfileUpdate covers empty display_name (422), too-long (422), invalid email_prefs (422), unauthenticated (401), DB failure (typed ProfileUpdateError).
 error-handling-enforcer: yes — typed exception ProfileUpdateError, no empty catch, // EXIT: validation failed, return 422 documented on early-return.
 complexity-anti-drift: yes — plan keeps one abstraction level per function: update_profile() composes 3 helpers (validate_display_name / coerce_email_prefs / persist) instead of inlining the flow; no god-file planned.
 minimal-change-verifier: yes — one task (user profile page); diff stays in that scope.
@@ -85,7 +85,7 @@ Note: The example shows the full SPECIFY phase loop — Step 1 assumption gate (
 - Architecture gate: `architecture-change-reviewer` (5-verdict frame, runs after SPECIFY)
 - Plan + tasks + implement: `writing-plans` (PLAN / TASKS / IMPLEMENT, consumes the spec)
 - Bounded context ownership: `bounded-context-guardian` (verdict 1 of 5)
-- Defensive contract: `defensive-contract-validator` (verdict 2 of 5, 5 boundary classes)
+- Defensive contract: `input-contract-tests` (verdict 2 of 5, 5 boundary classes)
 - Error handling: `error-handling-enforcer` (verdict 3 of 5, typed exceptions)
 - Complexity: `complexity-anti-drift` (verdict 4 of 5, one abstraction level per function; nesting ≤ 4)
 - Minimal change: `minimal-change-verifier` (verdict 5 of 5, one task / in-scope diff)
