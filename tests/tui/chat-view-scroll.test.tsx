@@ -22,7 +22,7 @@
  * （禁止 setTimeout 裸 sleep 轮询）；React 状态更新用 act 包裹。
  */
 import { expect, test } from "bun:test";
-import { act, useEffect, useRef, useState } from "react";
+import { Profiler, act, useEffect, useRef, useState } from "react";
 import { testRender } from "@opentui/react/test-utils";
 import { ChatView, type ChatViewHandle } from "../../src/tui/chat-view.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
@@ -40,6 +40,7 @@ import {
   SCROLLBAR_THUMB_HOVER_ALPHA,
   SCROLLBAR_THUMB_IDLE_ALPHA,
 } from "../../src/tui/scrollbar-style.js";
+import { resolveScrollCommitStep } from "../../src/tui/transcript-viewport.js";
 
 const COLS = 60;
 const ROWS = 12;
@@ -57,6 +58,7 @@ interface HarnessProps {
   readonly initial: TuiSessionState;
   readonly register: (api: ChatApi) => void;
   readonly bannerLines?: ReadonlyArray<string>;
+  readonly rows?: number;
 }
 
 function Harness(props: HarnessProps): ReturnType<typeof ChatView> {
@@ -124,7 +126,7 @@ function Harness(props: HarnessProps): ReturnType<typeof ChatView> {
       ref={chatRef}
       session={session}
       cols={COLS}
-      rows={ROWS}
+      rows={props.rows ?? ROWS}
       liveToolLines={[]}
       liveToolRuns={
         (session as unknown as { liveToolRuns?: ReadonlyArray<LiveToolRun> })
@@ -162,11 +164,12 @@ function makeMessages(n: number, offset = 0): AnthropicNativeMessage[] {
  *  undefined,折叠行只显示工具计数)。 */
 function sessionWith(
   msgs: ReadonlyArray<AnthropicNativeMessage>,
-  thinkingMs?: ReadonlyArray<number | null>
+  thinkingMs?: ReadonlyArray<number | null>,
+  conversationId = "test"
 ): TuiSessionState {
   const file: SessionFileV1 = {
     schemaVersion: 1,
-    conversation_id: "test",
+    conversation_id: conversationId,
     messages: [...msgs],
     turnCount: msgs.filter((m) => m.role === "assistant").length,
     updatedAt: "2026-08-10T00:00:00.000Z",
@@ -178,12 +181,16 @@ function sessionWith(
 
 async function renderChat(
   initial: TuiSessionState,
-  opts?: { readonly bannerLines?: ReadonlyArray<string> }
+  opts?: {
+    readonly bannerLines?: ReadonlyArray<string>;
+    readonly rows?: number;
+  }
 ): Promise<{
   setup: Awaited<ReturnType<typeof testRender>>;
   api: ChatApi;
 }> {
   const holder: { api: ChatApi | null } = { api: null };
+  const rows = opts?.rows ?? ROWS;
   const setup = await testRender(
     <Harness
       initial={initial}
@@ -191,8 +198,9 @@ async function renderChat(
         holder.api = api;
       }}
       bannerLines={opts?.bannerLines}
+      rows={rows}
     />,
-    { width: COLS, height: ROWS, exitOnCtrlC: false }
+    { width: COLS, height: rows, exitOnCtrlC: false }
   );
   await setup.waitForVisualIdle();
   if (holder.api === null) throw new Error("harness register 未触发");
@@ -213,6 +221,28 @@ test("空会话（0 条消息）渲染收敛不崩", async () => {
   expect(sb!.scrollTop).toBe(0);
   expect(sb!.scrollHeight).toBeLessThanOrEqual(ROWS);
   expect(() => setup.captureCharFrame()).not.toThrow();
+  await setup.renderer.destroy();
+});
+
+test("短会话（内容不足一屏）：全部消息挂载、无尾窗 stub", async () => {
+  // spec invariant 4 / Testing strategy 短会话条：内容全部落在视口（+overscan）
+  // 内时，挂载窗口换算结果与全量 visibleMessages.map 等价 —— 画面含全部
+  // 可见消息，且无「↑ N 条更早的消息」尾窗 stub。
+  const initial = sessionWith(makeMessages(3));
+  const { setup, api } = await renderChat(initial, { rows: 24 });
+  const sb = api.handle!.scrollbox!;
+  // 前提认证：内容总高落在视口内（否则「全部挂上」不可达）。
+  expect(sb.scrollHeight).toBeLessThanOrEqual(sb.viewport.height);
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("msg-000");
+  expect(frame).toContain("reply-001");
+  expect(frame).toContain("msg-002");
+  expect(frame.includes("条更早的消息")).toBe(false);
+  expect(frame.includes("↑ ")).toBe(false);
+  // 窗口覆盖全部 3 条（可见下标 0..2 都在树上）。
+  for (let i = 0; i < 3; i++) {
+    expect(sb.getRenderable(`tmsg-${i}`)).toBeDefined();
+  }
   await setup.renderer.destroy();
 });
 
@@ -326,6 +356,270 @@ test("强制滚底通道：scrollToBottom() 从上滚位置直达底部并恢复
   await setup.renderer.destroy();
 });
 
+test("中长会话（超一屏、不足三屏）：树上只挂视口+overscan，顶/底仍达首末", async () => {
+  // spec invariant 4：挂载窗口只由 scrollTop + 视口 + overscan 决定，与内容
+  // 总高无关（20 条短消息总高超过一屏）—— 树上不出现全部 20 条，窗口本身
+  // 可以短于总条数。断言口径 = 真实渲染树里 MessageRow 的 id 契约
+  // `tmsg-<visibleIndex>`（通过 scrollbox.getRenderable 直查，不由实现细节
+  // 推断条数）。
+  const MESSAGES = 20;
+  const initial = sessionWith(makeMessages(MESSAGES));
+  const { setup, api } = await renderChat(initial);
+  const handle = api.handle!;
+  const sb = handle.scrollbox!;
+  expect(sb.scrollHeight).toBeGreaterThan(ROWS);
+
+  const mountedIndices = (): number[] =>
+    Array.from({ length: MESSAGES }, (_, i) => i).filter(
+      (i) => sb.getRenderable(`tmsg-${i}`) !== undefined
+    );
+  const mountedCount = (): number => mountedIndices().length;
+  // 高度量测经 useLayoutEffect 写回 itemHeights 后才收敛；等一轮视觉
+  // 静止再读树，避免读到「尚未量测」的中间态。
+  await setup.waitForVisualIdle();
+
+  // 树跟视口走：不是全部 20 条。
+  expect(mountedCount()).toBeLessThan(MESSAGES);
+  expect(mountedCount()).toBeGreaterThan(0);
+  // 贴底：末条挂上、首条已滚出（spacer 撑住）。
+  expect(sb.scrollTop).toBe(maxScrollTop(handle));
+  expect(sb.getRenderable(`tmsg-${MESSAGES - 1}`)).toBeDefined();
+
+  // 滚到顶：首条挂上且画面含最早消息。赋值必须 act 包裹 —— scrollbar
+  // change 引发的 setScrollTop 是 React 状态更新，裸赋值会让提交与
+  // waitForVisualIdle（只等 OpenTUI scheduler 空闲）赛跑，读出未提交的树。
+  await act(async () => {
+    sb.scrollTop = 0;
+  });
+  await setup.waitForVisualIdle();
+  expect(sb.getRenderable("tmsg-0")).toBeDefined();
+  expect(setup.captureCharFrame()).toContain("msg-000");
+  // 顶部窗口不含末条（窗口仍短于总条数）。
+  expect(sb.getRenderable(`tmsg-${MESSAGES - 1}`)).toBeUndefined();
+  expect(mountedIndices()[0]).toBe(0);
+
+  await setup.renderer.destroy();
+});
+
+test("滚动提交量化：亚阈值 change 不提交 React，跨步长 / 贴底 / 置顶仍提交", async () => {
+  // spec invariant 8 量化条款：连续亚阈值 `change` 不得各自 setScrollTop
+  // （每次提交都让整棵 ChatView 重算）；跨越量化步长、贴底、置顶必须提交。
+  // 计数口径 = React Profiler 的 onRender 次数（React 侧真值，不断言实现）。
+  const commits: string[] = [];
+  const handleRef = { current: null as ChatViewHandle | null };
+  const initial = sessionWith(makeMessages(100));
+  const setup = await testRender(
+    <Profiler
+      id="chat"
+      onRender={(id, phase) => {
+        commits.push(`${id}:${phase}`);
+      }}
+    >
+      <ChatView
+        ref={handleRef}
+        session={initial}
+        cols={COLS}
+        rows={ROWS}
+        liveToolLines={[]}
+      />
+    </Profiler>,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const handle = handleRef.current;
+  if (handle === null) throw new Error("ChatView ref 未挂载");
+  const sb = handle.scrollbox!;
+  const max = maxScrollTop(handle);
+  // 先落到中段（必然提交），再以亚阈值增量推进。
+  await act(async () => {
+    sb.scrollTop = Math.floor(max / 2);
+  });
+  await setup.waitForVisualIdle();
+  const mid = sb.scrollTop;
+  expect(mid).toBeGreaterThan(0);
+  expect(mid).toBeLessThan(max);
+  expect(commits.length).toBeGreaterThan(0);
+  const step = resolveScrollCommitStep(sb.viewport.height);
+  expect(step).toBeGreaterThan(1); // 步长 1 时本用例退化为「每次都提交」，失去意义
+
+  // 亚阈值 change（+1 行 < step）必须零提交：量化生效的可观测形式。
+  commits.length = 0;
+  await act(async () => {
+    sb.scrollTop = mid + 1;
+  });
+  await setup.waitForVisualIdle();
+  expect(commits).toEqual([]);
+  // scrollbox 自身位置已动（用户看到画面跟随），只是 React 窗口未重算。
+  expect(sb.scrollTop).toBe(mid + 1);
+
+  // 继续亚阈值推进到「已提交位置 + step - 1」仍不提交（位移未达量子）。
+  await act(async () => {
+    sb.scrollTop = mid + step - 1;
+  });
+  await setup.waitForVisualIdle();
+  expect(commits).toEqual([]);
+
+  // 跨越量化步长 → 提交。
+  await act(async () => {
+    sb.scrollTop = mid + step;
+  });
+  await setup.waitForVisualIdle();
+  expect(commits.length).toBeGreaterThan(0);
+
+  // 贴底仍可到达（量化不得挡住 sticky 的落底路径）：滚到 max 后
+  // scrollTop === maxScrollTop，且末条消息在画面里。
+  await act(async () => {
+    sb.scrollTop = maxScrollTop(handle);
+  });
+  await setup.waitForVisualIdle();
+  expect(sb.scrollTop).toBe(maxScrollTop(handle));
+  expect(setup.captureCharFrame()).toContain("reply-099");
+
+  // 置顶：从底部直接回 0 也必须提交，最早气泡要挂上。
+  commits.length = 0;
+  await act(async () => {
+    sb.scrollTop = 0;
+  });
+  await setup.waitForVisualIdle();
+  expect(commits.length).toBeGreaterThan(0);
+  expect(setup.captureCharFrame()).toContain("msg-000");
+
+  await setup.renderer.destroy();
+});
+
+test("滚轮一步即推动窗口：量化不得吞掉单次滚轮", async () => {
+  // T4 步长正当性 (c)：量化步长上限 = 一次滚轮步长
+  // （`CHAT_WHEEL_SCROLL_MULTIPLIER`，见 resolveScrollCommitStep 注释），
+  // 所以单次滚轮必然跨越量子边界并提交 —— 否则用户滚一格看不见画面变化。
+  // 计数口径 = React Profiler onRender（React 侧真值，不断言实现）。
+  const commits: string[] = [];
+  const handleRef = { current: null as ChatViewHandle | null };
+  const initial = sessionWith(makeMessages(100));
+  const setup = await testRender(
+    <Profiler
+      id="chat"
+      onRender={(id, phase) => {
+        commits.push(`${id}:${phase}`);
+      }}
+    >
+      <ChatView
+        ref={handleRef}
+        session={initial}
+        cols={COLS}
+        rows={ROWS}
+        liveToolLines={[]}
+      />
+    </Profiler>,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const handle = handleRef.current;
+  if (handle === null) throw new Error("ChatView ref 未挂载");
+  const sb = handle.scrollbox!;
+  const max = maxScrollTop(handle);
+
+  // 第一次滚轮走「首次提交」通道（prev 未设 → 必提交），不计入本断言。
+  await act(async () => {
+    await setup.mockMouse.scroll(5, 2, "up");
+  });
+  await setup.waitForVisualIdle();
+  expect(sb.scrollTop).toBeLessThan(max); // 离开底部，且未到顶
+  expect(sb.scrollTop).toBeGreaterThan(0);
+
+  // 第二次滚轮走量化通道：位移 = 一滚轮步长 ≥ 量化步长 → 必须提交。
+  commits.length = 0;
+  const before = sb.scrollTop;
+  await act(async () => {
+    await setup.mockMouse.scroll(5, 2, "up");
+  });
+  await setup.waitForVisualIdle();
+  expect(sb.scrollTop).toBeLessThan(before); // 位置确实动了
+  expect(commits.length).toBeGreaterThan(0); // 且窗口跟着重算
+
+  await setup.renderer.destroy();
+});
+
+test("换会话后首次亚阈值 change 提交：量化游标随 conversationId 复位", async () => {
+  // spec invariant 8：首次提交与置顶必须立即生效，不得让新会话窗口停在
+  // 旧会话位置。换会话 = 同一 ChatView 换 session prop（conversationId 变），
+  // 量化游标的生命周期必须与同一处的 itemHeights / scrollTop 复位对齐。
+  // 计数口径 = React Profiler onRender（React 侧真值，不断言实现）。
+  const commits: string[] = [];
+  const handleRef = { current: null as ChatViewHandle | null };
+  const nextRef = {
+    current: sessionWith(makeMessages(100), undefined, "conv-b"),
+  };
+
+  function SwitchHarness(props: { register: (fn: () => void) => void }) {
+    const [session, setSession] = useState(() =>
+      sessionWith(makeMessages(100), undefined, "conv-a")
+    );
+    useEffect(() => {
+      props.register(() => {
+        act(() => {
+          setSession(nextRef.current);
+        });
+      });
+    });
+    return (
+      <ChatView
+        ref={handleRef}
+        session={session}
+        cols={COLS}
+        rows={ROWS}
+        liveToolLines={[]}
+      />
+    );
+  }
+
+  const holder: { fn: null | (() => void) } = { fn: null };
+  const setup = await testRender(
+    <Profiler
+      id="chat"
+      onRender={(id, phase) => {
+        commits.push(`${id}:${phase}`);
+      }}
+    >
+      <SwitchHarness
+        register={(fn) => {
+          holder.fn = fn;
+        }}
+      />
+    </Profiler>,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const handle = handleRef.current;
+  if (handle === null) throw new Error("ChatView ref 未挂载");
+  const sb = handle.scrollbox!;
+  await act(async () => {
+    sb.scrollTop = Math.floor(maxScrollTop(handle) / 2);
+  });
+  await setup.waitForVisualIdle();
+  const step = resolveScrollCommitStep(sb.viewport.height);
+  expect(step).toBeGreaterThan(1);
+  // 换会话前：亚阈值位移不提交（量化已生效，游标非空）。
+  commits.length = 0;
+  await act(async () => {
+    sb.scrollTop = sb.scrollTop + 1;
+  });
+  await setup.waitForVisualIdle();
+  expect(commits).toEqual([]);
+  // 换会话：scrollTop 复位等 React 更新。
+  commits.length = 0;
+  holder.fn!();
+  await setup.waitForVisualIdle();
+  // 换会话后首个 change 只推进 1 行（< step）：游标未复位则被吞掉，
+  // 复位则必须提交（首次提交必生效）。
+  commits.length = 0;
+  await act(async () => {
+    sb.scrollTop = sb.scrollTop + 1;
+  });
+  await setup.waitForVisualIdle();
+  expect(commits.length).toBeGreaterThan(0);
+  await setup.renderer.destroy();
+});
+
 test("长会话（100 条）滚动文档全量：顶见最早、底见最末、无尾窗 stub", async () => {
   const initial = sessionWith(makeMessages(100));
   const { setup, api } = await renderChat(initial);
@@ -333,7 +627,11 @@ test("长会话（100 条）滚动文档全量：顶见最早、底见最末、�
   expect(sb.scrollHeight).toBeGreaterThan(ROWS * 3);
   expect(sb.scrollTop).toBe(maxScrollTop(api.handle!));
   expect(setup.captureCharFrame()).toContain("reply-099");
-  sb.scrollTop = 0;
+  // act 包裹：scrollbar change → setScrollTop 是 React 更新，裸赋值与
+  // waitForVisualIdle（只等 OpenTUI scheduler）赛跑会读到未提交的树。
+  await act(async () => {
+    sb.scrollTop = 0;
+  });
   await setup.waitForVisualIdle();
   const top = setup.captureCharFrame();
   expect(top).toContain("msg-000");

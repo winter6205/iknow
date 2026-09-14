@@ -79,7 +79,9 @@ import { liveToolPreviewBox } from "./live-tool-preview.js";
 import { toolResultStatusMap, toolResultTextMap } from "./tool-summary.js";
 import {
   listenScrollBoxTop,
+  resolveScrollCommitStep,
   selectViewportMountWindow,
+  shouldCommitScrollTop,
   type ViewportMountWindow,
 } from "./transcript-viewport.js";
 import {
@@ -180,6 +182,10 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       setScrollbarHovered,
       setScrollTop,
       ref,
+      // 会话切换时 itemHeights / scrollTop 重置（见上）——提交量化游标
+      // 必须一起重置：旧会话的游标会让新会话首个亚阈值 change 被判为
+      // 「未跨步长」而丢弃，新窗口停在旧位置。
+      conversationId,
     });
     // 并发防御：流式草稿高频更新走低优先级（SC8 — spec 同款）。
     const draftSegments = useMemo((): ReadonlyArray<string> => {
@@ -439,14 +445,44 @@ function useScrollboxBindings(args: {
   readonly setScrollbarHovered: (hovered: boolean) => void;
   readonly setScrollTop: (next: number | ((prev: number) => number)) => void;
   readonly ref: React.Ref<ChatViewHandle>;
+  /** 当前会话 id；变化 = 换会话 → 重订阅并复位量化游标（见调用处）。 */
+  readonly conversationId: string | undefined;
 }): void {
-  const { sbRef, setScrollbarHovered, setScrollTop, ref } = args;
+  const { sbRef, setScrollbarHovered, setScrollTop, ref, conversationId } = args;
   useLayoutEffect(() => {
     const sb = sbRef.current;
     if (sb === null) return; // EXIT: unmounted scrollbox
     // Official OpenTUI path: slider change → scrollbar `change` { position }.
     // Do not patch scrollTop (Feature Envy) or rAF-poll (sticky still 0).
+    //
+    // Quantized commits (spec invariant 8): every `change` used to call
+    // `setScrollTop`, re-rendering the whole ChatView (markdown included) per
+    // pixel. Two details matter here:
+    //  - the gate is evaluated BEFORE the call — a same-value updater still
+    //    schedules a React render, so skipping the *call* is what skips work;
+    //  - the step is resolved per change, not once at effect time, because
+    //    `sb.viewport.height` is still 0 while this layout effect runs (the
+    //    box has not been laid out yet) and the effect does not re-run when
+    //    it settles. Resolving from 0 would pin the step at its 1-row floor.
+    // Crossing the step, hitting bottom, or hitting top still commits.
+    // `resolveScrollCommitStep` keeps step <= overscan, so a skipped change
+    // can never unmount what the viewport shows.
+    //
+    // `committed` lives for one subscription. The effect re-runs on
+    // `conversationId` change, so the cursor starts fresh (null → always
+    // commit) for the first change after a session switch — the same reset the
+    // render body applies to itemHeights / scrollTop.
+    let committed: number | null = null; // null = nothing committed yet → always commit
     const stopTracking = listenScrollBoxTop(sb, (next) => {
+      const maxScrollTop = Math.max(0, sb.scrollHeight - sb.viewport.height);
+      const step = resolveScrollCommitStep(
+        sb.viewport.height > 0 ? sb.viewport.height : sb.height
+      );
+      const base = committed ?? Number.NaN;
+      if (!shouldCommitScrollTop(base, next, { step, maxScrollTop })) {
+        return; // quantized: no React state update for this change
+      }
+      committed = next;
       setScrollTop((prev) => (prev === next ? prev : next));
     });
     // hover 槽挂在 scrollbar renderable 上（Slider 自身只接 down/drag/up）。
@@ -458,7 +494,7 @@ function useScrollboxBindings(args: {
       stopTracking();
       stopHover();
     };
-  }, [sbRef, setScrollTop, setScrollbarHovered]);
+  }, [sbRef, setScrollTop, setScrollbarHovered, conversationId]);
   useImperativeHandle(ref, () => ({
     scrollToBottom() {
       const sb = sbRef.current;
