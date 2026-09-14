@@ -351,17 +351,34 @@ describe("ADR-0083 — S2 empty 类：空正文仍装配两段骨架（经真实
 });
 
 describe("ADR-0083 SC3 — 闸不泄漏（非豁免工具仍截断）", () => {
-  it("内建 read_file：>20000 字符输出仍截到 <= 20000 并带既有标记", async () => {
+  it("内建 read_file：工具层页预算先收束，交付 <= 20000 且无 executor 二次截断标记（ADR-0006 D4）", async () => {
+    // read_file 不豁免（下面断言 def 上无声明）—— 但它的**精度闸**已覆盖
+    // 所有可达输出：显式 limit 与整读路径共用 16000 cp / 19000 单元页预算，
+    // 1MB 单行文件也在工具层截断并显式标注。因此经真实 executor 交付时
+    // executor 兜底闸不再触发 —— 这正是 ADR-0006 Decision 4 要的两层不重叠
+    // （工具级管「读多少」，executor 管「输出不超多少」），不是闸被绕过。
+    // executor 兜底闸咬得住非豁免工具这件事由本 describe 下 MCP 形态用例
+    // 认证（那条的生产者没有工具级预算，输出真能超闸）。
     const dir = await writeSkillDir("plain", "x".repeat(30_000));
     const file = join(dir, "SKILL.md");
     const tool = createReadFileTool(dir);
+    assert.equal(tool.exemptFromOutputCap, undefined, "read_file 不得豁免");
+
     const results = await createExecutor(createRegistry([tool])).executeAll([
       { id: "r1", name: "read_file", input: { path: file, limit: 2000 } },
     ]);
     const text = deliveredText(results[0]);
 
     assert.ok(text.length <= OUTPUT_HARD_CAP, `实际 ${text.length} 超闸`);
-    assert.ok(text.includes(TRUNCATION_MARKER), "既有截断标记必须保留");
+    assert.ok(
+      text.includes("truncated at the page budget"),
+      "工具层必须显式标注截断（ADR-0006 D4 无静默截断）"
+    );
+    assert.equal(
+      text.includes(TRUNCATION_MARKER),
+      false,
+      "工具层已收束的输出不得被 executor 二次截断"
+    );
   });
 
   it("MCP 形态（toAciToolDef 产物）：超长结果仍截断，且经 registerExternal 后声明被剥离", async () => {

@@ -32,7 +32,9 @@ import { restore, type SecretRegistry } from "../../secret-roundtrip/index.js";
 import type { BackgroundTaskManager } from "../../background/manager.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
-import { FENCE_WRITE_GUIDANCE } from "./helpers.js";
+import { FENCE_WRITE_GUIDANCE, resolveWithinRoot } from "./helpers.js";
+import { extractSingleReadPath } from "./bash-read-extract.js";
+import type { LastReadLedgerHost } from "../last-read-ledger.js";
 
 interface BashInput {
   readonly command?: unknown;
@@ -73,6 +75,17 @@ export interface CreateBashToolOptions {
    * `<sessionFolder>/fence-tmp`. When omitted, per-call resolution uses
    * `projectDir` + `conversationId`, else a factory-lifetime fallback tmp.
    * It feeds `$TMPDIR` — it is never a bind target for guest `/tmp`.
+   *
+   * ADR-0084 asymmetry (legacy direct-factory shape only): when neither
+   * `tmpDir` nor `projectDir` is given, bash allocates a fresh
+   * `mkdtempSync` pad here, while `write_file`'s `resolveSessionFenceTmp`
+   * returns `undefined` for the same inputs. A ledger key recorded for
+   * `cat /tmp/x` therefore names a path `write_file` never resolves —
+   * a dead key, so the later non-empty overwrite is refused (fail-closed,
+   * the safe direction). Production assembly passes both tools the same
+   * `tmpDir` / `projectDir` values, which is why this is not plumbed here;
+   * tests that need the shared pad must inject `tmpDir` explicitly on both
+   * sides.
    */
   readonly tmpDir?: string;
   /**
@@ -80,6 +93,14 @@ export interface CreateBashToolOptions {
    * `ctx.conversationId`, bash uses `<sessionFolder>/fence-tmp` as `$TMPDIR`.
    */
   readonly projectDir?: string;
+  /**
+   * ADR-0084 / D1: last-read ledger host. Present → a foreground command that
+   * is exactly one whitelisted single-file read (exit 0) records the resolved
+   * canonical path, so a later non-empty `write_file` on it passes the
+   * freshness gate. Absent → nothing is recorded (legacy callers); reads stay
+   * executable either way — only the ledger entry is optional.
+   */
+  readonly lastReadLedger?: LastReadLedgerHost;
   /**
    * ADR-0092 Amendment 2026-09-13 / SC11/SC12:fs 隔离档 holder(详见
    * `sandbox/fs-mode.ts`)。handler 入口 per-call `fsMode?.get() ?? "global"`
@@ -280,6 +301,16 @@ export function createBashTool(
             currentSecretValues(process.env, opts.secretRegistry.values())
           )
         : undefined;
+    // ADR-0084 / D1:成功的单文件白名单读入账（判定细节见
+    // `recordCompletedRead`）。入账键与 write_file 侧同源，两边才可能命中。
+    await recordCompletedRead(opts, ctx, {
+      command,
+      exitCode: result.exitCode,
+      root: waveRoot,
+      // ADR-0092: session tmp is `$TMPDIR` (host pad), not guest `/tmp`.
+      // Same pad is write_file's extra write root so ledger keys match.
+      tmpWriteRoot: tmpDir,
+    });
     return {
       output: JSON.stringify({
         code: result.exitCode,
@@ -410,6 +441,65 @@ async function handleBackground(
     );
   }
   return { task_id: result.task_id, log_path: result.log_path };
+}
+
+/**
+ * ADR-0084 / D1 的入账调用口（判定链在这里，handler 只转交）。
+ *
+ * `exitCode !== 0` → 什么都没读到，不入账。提取器只认「恰好一个顶层段 +
+ * 无重定向/替换 + 白名单命令 + 恰好一个文件操作数」，抽不出 path 一律不入账
+ * （fail-closed）：漏记只让模型多读一次，错记会让未读的非空文件被放行。
+ */
+async function recordCompletedRead(
+  opts: CreateBashToolOptions | undefined,
+  ctx: ToolExecutionContext | undefined,
+  call: {
+    readonly command: string;
+    readonly exitCode: number;
+    readonly root: string;
+    readonly tmpWriteRoot: string;
+  }
+): Promise<void> {
+  // EXIT: 命令失败（exit != 0）→ 什么都没读到，不入账。
+  if (call.exitCode !== 0) return;
+  await recordSingleReadCommand(opts?.lastReadLedger, ctx, call.command, {
+    root: call.root,
+    tmpWriteRoot: call.tmpWriteRoot,
+  });
+}
+
+/**
+ * ADR-0084 / D1:把「恰好读了一个文件」的成功命令登记进 last-read 账本。
+ *
+ * 提取器（`extractSingleReadPath`）只做字面量判定，path 解析在本函数完成 ——
+ * 与 write_file 侧的 `resolveWithinRoot(rootAtCall, …)` 同一口径，这样账本键
+ * 与写入侧 target 才可能相等。解析失败（越界 / 不存在的 path 形态）→ 静默
+ * 跳过：账本只影响「能不能覆盖非空文件」这一个闸，不该让读命令多出一个失败面。
+ */
+async function recordSingleReadCommand(
+  host: LastReadLedgerHost | undefined,
+  ctx: ToolExecutionContext | undefined,
+  command: string,
+  resolveCtx: { readonly root: string; readonly tmpWriteRoot: string }
+): Promise<void> {
+  // EXIT: host 缺席（legacy 调用方）或无 conversationId（不建匿名桶）→ 不入账。
+  const ledger = host?.ledgerFor(ctx?.conversationId);
+  if (ledger === undefined) return;
+  // EXIT: 非「唯一单文件读」形态（管道 / 重定向 / 抑制输出旗标 / 原地改 /
+  // 递归 / 多文件 / 非白名单）→ 不入账（fail-closed）。
+  const candidate = extractSingleReadPath(command);
+  if (candidate === undefined) return;
+  let resolved: string;
+  try {
+    resolved = await resolveWithinRoot(resolveCtx.root, candidate, {
+      tmpWriteRoot: resolveCtx.tmpWriteRoot,
+    });
+  } catch {
+    // EXIT: path 解析失败（越界 / 不存在形态）→ 静默跳过；账本只影响非空
+    // 覆写这一个闸，不该让读命令多出一个失败面。
+    return;
+  }
+  ledger.record(resolved);
 }
 
 function resolveBashFenceTmp(

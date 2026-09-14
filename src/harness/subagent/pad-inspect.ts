@@ -1,7 +1,8 @@
 /**
  * T5 — list top-level fence-tmp pad names or read one relative file.
- * Sync (subagent_result stays non-blocking). Truncation matches read_file
- * default window (200 lines, numbered). `..` or pad escape → typed reject.
+ * Sync (subagent_result stays non-blocking). The 200-line window below is
+ * this pad roster's own cap, unrelated to `read_file`'s current contract
+ * (ADR-0084 D1c: no default line window). `..` or pad escape → typed reject.
  */
 import {
   existsSync,
@@ -12,10 +13,10 @@ import {
 } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
-/** Same default window as `read_file` (`DEFAULT_LIMIT`). */
-const READ_FILE_DEFAULT_LIMIT = 200;
-/** Short envelope roster cap — same window as `read_file` list length. */
-export const PAD_ROSTER_NAME_LIMIT = READ_FILE_DEFAULT_LIMIT;
+/** The pad roster's own 200-line window (not read_file's contract). */
+const PAD_ROSTER_LINE_LIMIT = 200;
+/** Short envelope roster cap — the pad's own 200-name window. */
+export const PAD_ROSTER_NAME_LIMIT = PAD_ROSTER_LINE_LIMIT;
 const READ_FILE_MAX_FILE_BYTES = 1_048_576;
 
 export type PadInspectRejectReason = "path_escape" | "not_a_file";
@@ -53,8 +54,8 @@ function formatReadFileSlice(text: string): {
   }
   const lines = text.split("\n");
   if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-  const truncated = lines.length > READ_FILE_DEFAULT_LIMIT;
-  const window = lines.slice(0, READ_FILE_DEFAULT_LIMIT);
+  const truncated = lines.length > PAD_ROSTER_LINE_LIMIT;
+  const window = lines.slice(0, PAD_ROSTER_LINE_LIMIT);
   return {
     content: window
       .map((line, idx) => `${String(idx + 1).padStart(6)}\t${line}`)

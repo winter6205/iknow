@@ -40,6 +40,7 @@ import {
   ACI_TOOLSET_NAMES,
 } from "../../../../src/harness/aci/tools/registry.js";
 import { createSkillCatalog } from "../../../../src/harness/skill/catalog.js";
+import { createLastReadLedgerHost } from "../../../../src/harness/aci/last-read-ledger.js";
 import type { IknowEnv } from "../../../../src/config/env.js";
 import type { SubAgentManager } from "../../../../src/harness/subagent/manager.js";
 import type { McpManager } from "../../../../src/harness/mcp/manager.js";
@@ -775,5 +776,114 @@ describe("createDefaultAciRegistry — projectIdentityRoot wiring (grep / glob)"
     await expect(
       glob!.handler({ pattern: "AGENTS.md", path: identity })
     ).rejects.toThrow(/path outside workspace/);
+  });
+});
+
+// ADR-0084 / spec D1：last-read 账本在 registry 层的接线。工具层单测在
+// write-file-last-read / bash-last-read / read-file；这里只钉装配事实 ——
+// 不传 opts.lastReadLedger 时 registry 自建一份（闸随默认装配生效），显式
+// 注入则跨 registry 共享（rebind 重建不丢读记忆），未注入则互不共享。
+describe("createDefaultAciRegistry — last-read ledger 接线 (ADR-0084)", () => {
+  let scratch: string;
+
+  beforeEach(async () => {
+    scratch = await mkdtemp(join(tmpdir(), "aci-reg-last-read-"));
+  });
+
+  afterEach(async () => {
+    await rm(scratch, { recursive: true, force: true });
+  });
+
+  it("默认接线：read_file 成功后 write_file 覆写放行（同一 conversation）", async () => {
+    const file = join(scratch, "a.ts");
+    await writeFile(file, "original\n", "utf8");
+    const reg = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: scratch,
+    });
+
+    await reg.catalog
+      .get("read_file")!
+      .handler({ path: "a.ts" }, { conversationId: "conv-a" });
+    await reg.catalog
+      .get("write_file")!
+      .handler(
+        { path: "a.ts", content: "rewritten\n" },
+        { conversationId: "conv-a" }
+      );
+
+    expect(await readFile(file, "utf8")).toBe("rewritten\n");
+  });
+
+  it("默认接线：未读的非空覆写被拒（闸随默认装配生效，不靠额外注入）", async () => {
+    const file = join(scratch, "a.ts");
+    await writeFile(file, "original\n", "utf8");
+    const reg = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: scratch,
+    });
+
+    await expect(
+      reg.catalog
+        .get("write_file")!
+        .handler(
+          { path: "a.ts", content: "clobbered\n" },
+          { conversationId: "conv-a" }
+        )
+    ).rejects.toThrow(/refusing to overwrite a non-empty file/);
+    expect(await readFile(file, "utf8")).toBe("original\n");
+  });
+
+  it("两次 registry 装配（未注入 host）各自持有一份账本：跨 registry 不隐式共享", async () => {
+    const file = join(scratch, "a.ts");
+    await writeFile(file, "original\n", "utf8");
+    const first = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: scratch,
+    });
+    const second = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: scratch,
+    });
+
+    await first.catalog
+      .get("read_file")!
+      .handler({ path: "a.ts" }, { conversationId: "conv-a" });
+    await expect(
+      second.catalog
+        .get("write_file")!
+        .handler(
+          { path: "a.ts", content: "clobbered\n" },
+          { conversationId: "conv-a" }
+        )
+    ).rejects.toThrow(/refusing to overwrite a non-empty file/);
+  });
+
+  it("显式注入 host → 跨 registry 共享（rebind 重建后读记忆保留）", async () => {
+    const file = join(scratch, "a.ts");
+    await writeFile(file, "original\n", "utf8");
+    const host = createLastReadLedgerHost();
+    const first = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: scratch,
+      lastReadLedger: host,
+    });
+    const second = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: scratch,
+      lastReadLedger: host,
+    });
+
+    await first.catalog
+      .get("read_file")!
+      .handler({ path: "a.ts" }, { conversationId: "conv-a" });
+    await second.catalog
+      .get("write_file")!
+      .handler(
+        { path: "a.ts", content: "rewritten\n" },
+        { conversationId: "conv-a" }
+      );
+
+    expect(await readFile(file, "utf8")).toBe("rewritten\n");
   });
 });

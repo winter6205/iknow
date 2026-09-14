@@ -38,6 +38,10 @@ import { createSpawnSubAgentTool } from "../../subagent/spawn-subagent-tool.js";
 import { createSubAgentResultTool } from "../../subagent/subagent-result-tool.js";
 import { createRunGraphTool } from "../../graph/run-graph-tool.js";
 import type { LiveGraphLedgerHost } from "../../graph/ledger.js";
+import {
+  createLastReadLedgerHost,
+  type LastReadLedgerHost,
+} from "../last-read-ledger.js";
 import type { SubAgentManager } from "../../subagent/manager.js";
 import type { BackgroundTaskManager } from "../../background/manager.js";
 import type { McpManager } from "../../mcp/manager.js";
@@ -324,6 +328,15 @@ export interface CreateDefaultAciRegistryOptions {
    * `run_graph` handler 不建账（V1 零行为变化）。
    */
   readonly liveGraphLedger?: LiveGraphLedgerHost;
+  /**
+   * ADR-0084 / D1: last-read 账本 host（`conversationId → 规范 path 集合`）的
+   * 可选缝。不传则 registry 自建一份（默认接线，写闸即生效）；注入同一实例
+   * 可让跨 registry（rebind 重建 / hub cachedDeps 复用）延续旧读 —— 但当前
+   * 生产装配不注入，per-root 重建的 registry 从空表开始（spec D1 的 lifetime
+   * 规则）。账本只影响「非空 write_file 是否需要先读」这一个闸，缺席时行为
+   * 与 ADR-0084 之前一致（不拒），故不作为 Gate 3 的条件化装配开关。
+   */
+  readonly lastReadLedger?: LastReadLedgerHost;
   /** Trace directory for the read-only query_trace tool. */
   readonly traceDir?: string;
   /**
@@ -468,6 +481,18 @@ function symbolMutateTools(
   return map;
 }
 
+/**
+ * ADR-0084 / D1:last-read 账本 host 的解析口。注入者优先（跨 registry 共享
+ * 的宿主缝），缺席则 registry 自建一份 —— 闸的默认接线在 registry 这一层，
+ * 装配层不必知道它存在（也就没有第四个「必须记得传」的入口）。生产当前走
+ * 自建臂：per-root 重建的 registry 各自从空表开始。
+ */
+function resolveLastReadLedger(
+  opts: CreateDefaultAciRegistryOptions
+): LastReadLedgerHost {
+  return opts.lastReadLedger ?? createLastReadLedgerHost();
+}
+
 export function createDefaultAciRegistry(
   opts: CreateDefaultAciRegistryOptions
 ): AciRegistry {
@@ -484,6 +509,11 @@ export function createDefaultAciRegistry(
   const backgroundManager = opts.backgroundManager;
   const graphAssembly = opts.graphAssembly;
   const liveGraphLedger = opts.liveGraphLedger;
+  // ADR-0084 / D1: last-read 账本。注入缺席 → registry 自建一份（默认接线:
+  // write_file 的闸自本切片起对每个 registry 装配入口生效）；跨 registry
+  // 延续旧读（rebind 重建 / hub cachedDeps 复用）需装配层注入同一实例，
+  // 当前生产不注入。
+  const lastReadLedger = resolveLastReadLedger(opts);
   // #562 T6: bashMode 显式透传到 createBashTool。registry 不读 catalog —
   // spawn-subagent-tool 工厂是 catalog 路由的真正 owner。
   const bashMode = opts.bashMode;
@@ -561,6 +591,8 @@ export function createDefaultAciRegistry(
         ...(opts.todoDir !== undefined ? { projectDir: opts.todoDir } : {}),
         // T3: worker identity pad (nested under subagents/<taskId>/).
         ...(opts.tmpDir !== undefined ? { tmpDir: opts.tmpDir } : {}),
+        // ADR-0084 / D1: 成功白名单单文件读入账（bash 是入账两条源之一）。
+        lastReadLedger,
         // ADR-0092 Round 2 / SC11/SC12:fs 隔离档 holder + homeRoot 透传。
         // holder 在场 → bash handler per-call `get()` 读一次;缺席 → 全局档
         // (V1 baseline)。homeRoot 装配层从 userHome 派生。
@@ -586,6 +618,8 @@ export function createDefaultAciRegistry(
         ...(opts.projectIdentityRoot !== undefined
           ? { allowProjectIdentityRoot: true }
           : {}),
+        // ADR-0084 / D1: 成功读（含空文件与截断页）入账 —— 写闸的入账源。
+        lastReadLedger,
       }),
     grep: () =>
       createGrepTool(opts.liveTaskRoot ?? sandboxRoot, {
@@ -614,6 +648,8 @@ export function createDefaultAciRegistry(
       createWriteFileTool(opts.liveTaskRoot ?? sandboxRoot, {
         ...(opts.todoDir !== undefined ? { projectDir: opts.todoDir } : {}),
         ...(opts.tmpDir !== undefined ? { tmpDir: opts.tmpDir } : {}),
+        // ADR-0084 / D1: 非空覆写查 last-read 表（本切片新增的写闸）。
+        lastReadLedger,
       }),
     web_fetch: () =>
       createWebFetchTool({

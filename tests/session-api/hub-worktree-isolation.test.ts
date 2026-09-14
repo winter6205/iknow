@@ -149,6 +149,21 @@ async function runMutate(
   return result;
 }
 
+/** Drive a single `read_file` call through the same executor as runMutate. */
+async function runRead(
+  deps: LoopEngineDeps,
+  conversationId: string,
+  path: string
+): Promise<ToolExecutionResult> {
+  const [result] = await deps.executor.executeAll(
+    [{ id: "read-1", name: "read_file", input: { path } }],
+    undefined,
+    undefined,
+    conversationId
+  );
+  return result;
+}
+
 /** Extract the text payload of an `ok` tool result (ACI tool success). */
 function resultText(result: ToolExecutionResult): string {
   if (result.kind !== "ok") return result.message ?? "";
@@ -1397,8 +1412,19 @@ describe("worktree isolation wiring (T4 — create-worktree ACI tool)", () => {
     await persistDirtyRoot(hub, conversationId);
     expect((await store.load(conversationId)).workspaceRoot).toBe(reboundRoot);
 
-    // next turn: engine resolves at the worktree root → mutate lands there
+    // next turn: engine resolves at the worktree root → mutate lands there.
+    // ADR-0084 D1: the last-read ledger lives as long as its engine, so the
+    // per-root rebuild hands this conversation a fresh empty ledger. The
+    // overwrite of the now-non-empty hello.txt therefore fails closed first
+    // (the read that justified it happened on the other root's engine), and
+    // the read receipt admits it — the isolation property is unchanged.
     const nextDeps = await ensure(hub, reboundRoot);
+    const refused = await runMutate(nextDeps, conversationId);
+    expect(refused.kind).toBe("execution_failed");
+    expect(refused.message).toContain("refusing to overwrite a non-empty file");
+    expect(await runRead(nextDeps, conversationId, "hello.txt")).toMatchObject({
+      kind: "ok",
+    });
     const next = await runMutate(nextDeps, conversationId);
     expect(next.kind).toBe("ok");
     expect(existsSync(join(reboundRoot, "hello.txt"))).toBe(true);

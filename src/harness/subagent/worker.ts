@@ -278,6 +278,11 @@ export interface CreateWorkerDepsOptions {
    * 生产装配层 (runSubagentWorker 经 manager envelope 透传) 永远会同时传
    * `traceFilePath + taskId` 配对;两键同时在场是 file-mode 装配的前提,
    * traceFilePath 缺席时本字段被忽略(legacy IKNOW_TRACE_OUT 退路)。
+   *
+   * ADR-0084 / D1 (second consumer): 同一 taskId 也喂
+   * `LoopEngineDeps.conversationId` —— 让 worker 的 last-read 账本按
+   * worker 身份分桶（子代理自己的空桶）。trace 无关的 caller（测试缝 /
+   * 只关心账本的装配）也可以只传本字段；缺席 → 无 id，非空覆写 fail-closed。
    */
   readonly taskId?: string;
   /**
@@ -660,6 +665,25 @@ export async function createWorkerRuntime(
       : {}),
     system,
     promptTools: reg.visibleSchemas,
+    // ADR-0084 / D1:子代理是**独立** conversation —— 这个值让它拿到**自己的**
+    // 一件空桶（账本按 conversationId 分桶），不是父会话的 id，也不与父会话
+    // 共享任何条目。spec「子代理新 conversation 空表」要的是**空桶**而不是
+    // **桶缺席**：`ledgerFor(undefined) === undefined` 会让 worker 内刚成功的
+    // `read_file` 无处入账，同回合 read-modify-write 的 `write_file` 因此
+    // **永久**被拒（不可恢复）—— 那是装配漏接线，不是契约。
+    //
+    // 语义关系：下方 trace 分支的 conversationId 也是 `opts.taskId`（manager
+    // 在 spawn 期锁定的 task 身份），两个消费面指向同一身份，不会漂移。
+    //
+    // 缺席（legacy envelope / 跨版本 resume / 测试未传）→ undefined，**不兜底
+    // 造 id**：造 per-process 假 id 等于给未读覆写开后门（比拒更危险）。
+    // read / 白名单 bash 无 id 仍可执行。
+    //
+    // 最小性：其它 conversationId 消费者（backgroundManager / todoDir /
+    // graphAssembly / subagentManager）都不在 worker registry 里，且
+    // `resolveSessionFenceTmp` 的 `projectDir` 缺席 —— worker 的 `/tmp` pad
+    // 仍只由 `tmpDir`(workerFenceTmp) 或 mkdtemp 回落决定。
+    ...(opts.taskId !== undefined ? { conversationId: opts.taskId } : {}),
     // T3 (ADR-0071) 已退役 `./trace/` cwd-relative
     // 退路(SC6)—— 主会话 trace 锚走会话文件夹 (resolveServeDataDir() 同源)。
     // worker 继承父进程 env (ADR-0001),这里再读一次 IKNOW_TRACE_OUT 保持解析

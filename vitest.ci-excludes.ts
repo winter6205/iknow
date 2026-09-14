@@ -48,6 +48,10 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/harness/aci/interrupt-routing.test.ts",
   "tests/harness/aci/tools/bash.test.ts",
   "tests/harness/aci/tools/bash-readonly.test.ts",
+  // ADR-0084 last-read 账本走真实 bash 工具：createBashTool 装配期
+  // requireBwrap，且每条用例真实 spawn bwrap 跑 cat / grep / sed / rg 再断言
+  // 入账 —— 无 user-namespace 的 runner 上装配期即 throw。
+  "tests/harness/aci/tools/bash-last-read.test.ts",
   "tests/harness/aci/tools/grep.test.ts",
   "tests/harness/aci/tools/query-trace.test.ts",
   "tests/harness/aci/tools/list-sessions.test.ts",
@@ -126,6 +130,9 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/subagent/worker-session-layout.test.ts",
   "tests/subagent/worker-tool-surface.test.ts",
   "tests/subagent/worker.test.ts",
+  // ADR-0084 last-read：createWorkerDeps → createDefaultAciRegistry →
+  // createBashTool → requireBwrap（装配期 throw，test-fast 不装 bwrap）。
+  "tests/subagent/worker-last-read-ledger.test.ts",
   // #562：subagent 契约测试同走 createWorkerDeps 装配链
   "tests/subagent/envelope-role.test.ts",
   "tests/subagent/tool-constraints.test.ts",

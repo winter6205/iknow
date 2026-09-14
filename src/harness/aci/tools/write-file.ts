@@ -21,12 +21,46 @@ import {
 } from "./helpers.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
+import type { LastReadLedgerHost } from "../last-read-ledger.js";
+
+/**
+ * ADR-0084 / D1 — last-read 闸的 typed 拒绝（模型可读判据，不只是文案）。
+ *
+ * 与 `ReadonlyViolationError`（bash-readonly.ts）同形：extends
+ * `ToolExecutionError`，executor 的 `sanitizeFailure` 只读 `.message`，
+ * 模型面回执逐字节不变。
+ *
+ * `kind` / `path` 是**测试 / host 接缝**，不在执行器的读取面上：判别「这是
+ * 写闸拒绝」而不是别的写失败，靠的是 `instanceof LastReadRequiredError`
+ * （测试）或 message 文本。加字段不会改变模型所见。
+ *
+ * 文案内嵌**规范绝对 path**，与成功回执的 `displayPath`（相对 root）口径不同 ——
+ * 这是有意的例外：拒绝后模型要拿这个 path 去 `read_file` 解闸，worktree rebind /
+ * 子代理多 root 场景下相对路径会指错树；成功回执只是给人看的短形式，无此风险。
+ */
+export class LastReadRequiredError extends ToolExecutionError {
+  readonly kind = "last_read_required" as const;
+  readonly path: string;
+  constructor(path: string) {
+    super(
+      `[write_file] refusing to overwrite a non-empty file that was not read in this conversation: ${path} — call read_file on it first (or delete the file if the overwrite is intended).`
+    );
+    this.path = path;
+  }
+}
 
 export interface WriteFileOpts {
   /** Explicit host pad (tests / T3 worker pad). */
   readonly tmpDir?: string;
   /** Session project dir; with `ctx.conversationId` → main-session pad. */
   readonly projectDir?: string;
+  /**
+   * ADR-0084 last-read ledger host. Present → an existing non-empty target
+   * must already be on this conversation's ledger, else typed refuse with no
+   * bytes written. Absent → legacy caller (demo / direct factory tests) keeps
+   * the pre-ledger behavior; the gate is a registry-level wiring decision.
+   */
+  readonly lastReadLedger?: LastReadLedgerHost;
 }
 
 const TOOL_NAME = "write_file";
@@ -173,23 +207,19 @@ export function createWriteFileTool(
       oldContent = "";
     }
 
-    try {
-      await writeFile(target, params.content, "utf8");
-    } catch (error) {
-      throw asToolExecutionError(`[write_file] cannot write ${target}`, error);
-    }
+    // ADR-0084 last-read 闸:目标已存在且 size>0、本 conversation 账上没有
+    // → typed 拒绝、不写盘。新建与空文件免检(D1「非空 write 才查表」)。
+    // 判据用 stat 的字节数,不用 oldContent —— oldContent 的读取失败会被
+    // best-effort 降级成空串,拿它判「空」会把不可读的非空文件误放行。
+    await assertLastRead(opts, ctx, target);
 
-    const pathForMessage = displayPath(rootAtCall, target);
-    return {
-      output: `[write_file] wrote ${Buffer.byteLength(params.content, "utf8")} bytes to ${pathForMessage}`,
-      meta: { oldContent, newContent: params.content },
-    };
+    return commitWrite(target, params, { rootAtCall, oldContent });
   };
 
   return Object.freeze({
     name: TOOL_NAME,
     description:
-      "Create a new file or fully overwrite an existing one inside the workspace root; prefer edit_file for surgical changes to an existing file. Writes verbatim UTF-8 (no template processing); parent directories auto-created unless create_directories=false. Writes outside the workspace root are out of scope. " +
+      "Create a new file, or fully overwrite an existing one after read_file has shown its current contents in this conversation; prefer edit_file for surgical changes to an existing file. Overwriting a non-empty existing file requires a prior successful read_file (or a single-file read-only bash such as `cat path`) in the same conversation — an empty or brand-new file needs no prior read. Writes verbatim UTF-8 (no template processing); parent directories auto-created unless create_directories=false. Writes outside the workspace root are out of scope. " +
       FENCE_WRITE_GUIDANCE,
     inputSchema: {
       type: "object",
@@ -209,4 +239,68 @@ export function createWriteFileTool(
       timeoutTier: "default" as const,
     },
   });
+}
+
+/**
+ * ADR-0084 / D1 — 写盘落尾段：写文件、拼回执。抽出来只为让 handler 的
+ * 判定链长度回到闸引入之前的形态（S5 ratchet）；顺序与逐字节文案不变。
+ */
+async function commitWrite(
+  target: string,
+  params: WriteFileInput,
+  ctx: { readonly rootAtCall: string; readonly oldContent: string }
+): Promise<unknown> {
+  try {
+    await writeFile(target, params.content, "utf8");
+  } catch (error) {
+    throw asToolExecutionError(`[write_file] cannot write ${target}`, error);
+  }
+  const pathForMessage = displayPath(ctx.rootAtCall, target);
+  return {
+    output: `[write_file] wrote ${Buffer.byteLength(params.content, "utf8")} bytes to ${pathForMessage}`,
+    meta: { oldContent: ctx.oldContent, newContent: params.content },
+  };
+}
+
+/**
+ * ADR-0084 / D1 — last-read 闸。`target` 已是 containment 通过后的规范绝对
+ * path,直接当账本键(与 read_file / 白名单 bash 的入账口径同源:同一个
+ * `resolveWithinRoot` 解析结果)。
+ *
+ * 四条 EXIT:
+ *   - **host 缺席**(工厂未接账本:demo / 直接调工厂的测试)→ 不查表,行为与
+ *     ADR-0084 之前逐字节一致。闸是否生效是装配层决策,不是工厂的。
+ *   - host 在场但 conversationId 缺席 → 已存在且 size>0 一律拒(fail-closed,
+ *     spec:无 id 的非空覆写拒绝;禁止隐式进程级全局表)。
+ *   - target 不存在 / size==0 → 免检放行。
+ *   - 账上有该 path → 放行。
+ *
+ * stat 失败(EACCES / ELOOP 等)→ 不阻断:只在确知「已存在且非空」时才拒,
+ * 未知态交回既有的写路径报错,不在这里制造新的拒绝面。
+ */
+async function assertLastRead(
+  opts: WriteFileOpts | undefined,
+  ctx: ToolExecutionContext | undefined,
+  target: string
+): Promise<void> {
+  // EXIT: host 缺席（工厂未接账本，demo / 直接调工厂的测试）→ 闸整体不生效。
+  // 与「host 在场但 conversationId 缺席」是两回事 —— 后者 fail-closed。
+  const host = opts?.lastReadLedger;
+  if (host === undefined) return;
+  let info: Awaited<ReturnType<typeof stat>>;
+  try {
+    info = await stat(target);
+  } catch {
+    // EXIT: stat 失败（EACCES / ELOOP 等）→ 未知态不在这里制造新拒绝面，
+    // 交回既有写路径报错。
+    return;
+  }
+  // EXIT: 新建 / 非普通文件 / 空文件（size==0）→ 免检放行（D1「非空 write 才查表」）。
+  if (!info.isFile() || info.size === 0) return;
+  // EXIT: 账上有该 path（本 conversation 已读过）→ 放行。
+  if (host.ledgerFor(ctx?.conversationId)?.has(target)) return;
+  // EXIT: 已存在且非空、账上无读 → typed last_read_required。模型只看到
+  // `.message`（executor 只回传 message）；`kind` 供测试 / host 按 `instanceof`
+  // 判别，不构成模型面判据。
+  throw new LastReadRequiredError(target);
 }

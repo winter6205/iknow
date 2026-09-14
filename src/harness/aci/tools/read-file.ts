@@ -1,8 +1,13 @@
 /**
  * read_file 工具（T5）— 纯无状态文件精读（#141 工具层重写）。
  *
- * 契约（ADR-0004 L14 + T1-5/T1-7 裁定）：
- *   - 输入: path (必填), offset? (默认 0, 0 基), limit? (默认 200, 上限 2000)
+ * 契约（ADR-0084 / D1c，**Amends** ADR-0004 L14 的「默认 200 行」）：
+ *   - 输入: path (必填), offset? (默认 0, 0 基), limit? (**可选**)
+ *   - **不写 `limit` = 从 offset 尽量读到 EOF**：正文整读页硬停 16000 code
+ *     point，未到 EOF 时正文尾部附续读提示（含下次 offset）。不再有
+ *     「默认 200 行」这回事（spec SC13）。
+ *   - 写 `limit` = 仍切行窗，硬顶 2000 行（沿用既有 clamp）；同一对页预算
+ *     也约束行窗，预算先触时正文尾部附续读提示（行窗语义不变）。
  *   - resolve+realpath 限定于 root 之内（symlink 越界拒绝）
  *   - 必须为文件（目录报错）；>1MB 拒绝并引导 grep+offset/limit 精读
  *   - NUL 字节 (0x00) 检测：拒绝二进制文件
@@ -19,11 +24,28 @@ import { ToolExecutionError } from "../../errors.js";
 import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import type { AciToolDef } from "../types.js";
+import type { ToolExecutionContext } from "../../tools/types.js";
+import type { LastReadLedgerHost } from "../last-read-ledger.js";
 import { resolveWithinRoot } from "./helpers.js";
 
-const DEFAULT_LIMIT = 200;
+/** 显式 `limit` 的硬顶（行窗）；不写 `limit` 时改走 `MAX_READ_CODE_POINTS`。 */
 const MAX_LIMIT = 2000;
 const MAX_FILE_BYTES = 1_048_576; // 1 MiB
+/**
+ * 页正文硬停（code point，不含续读提示行）。两条正文路径（不写 `limit` 的
+ * 整读、显式 `limit` 的行窗）共用。executor 的 20000 字符总闸（ADR-0006）
+ * 不动 —— 本常量是工具层的精度闸，让「换更小 offset 续读」这条恢复路径在
+ * 截断前就成立。
+ */
+const MAX_READ_CODE_POINTS = 16_000;
+/**
+ * 页的 UTF-16 单元硬停。executor 的 20000 闸按 `String.length`（UTF-16
+ * 单元）计量，而 astral 字符一个 code point 占两个单元 —— 只按 code point
+ * 计量会产出 ~32000 单元的页，被 executor 二次截断（ADR-0006 Decision 4 禁止
+ * 的双重截断）。19000 给续读提示 / 截断标记留 headroom，两个预算同时约束、
+ * 先触者停。
+ */
+const MAX_READ_UTF16_UNITS = 19_000;
 
 /**
  * Snapshot the live root at handler invocation time. Accepts either a
@@ -65,6 +87,15 @@ export interface CreateReadFileToolOptions {
    * widening the OFF/main-root surface.
    */
   readonly allowProjectIdentityRoot?: boolean;
+  /**
+   * ADR-0084 last-read ledger host. Present → a successful read records the
+   * resolved canonical path on this conversation's ledger, so a later
+   * non-empty `write_file` on it passes the freshness gate. Absent → no
+   * recording (legacy / direct-factory callers); the gate itself lives in
+   * write_file, so a missing host only ever means "extra reads", never a
+   * wrongly-allowed overwrite.
+   */
+  readonly lastReadLedger?: LastReadLedgerHost;
 }
 
 /** `~/.iknow/` — the agent's own profile directory (readUserProfile in the
@@ -134,7 +165,7 @@ export function createReadFileTool(
   return Object.freeze({
     name: "read_file",
     description:
-      "Read a slice of a UTF-8 text file starting at a 0-based offset (default window 200, hard cap 2000); pair with grep to locate the region in large files and with glob to discover candidate paths first. Returns each line as a 1-based line number right-padded to 6 chars, a tab, then the line text; stateless — each call must supply offset to continue. Files >1MB are out of scope (locate with grep and read precisely with offset/limit); binary files (NUL byte) are out of scope.",
+      "Read a UTF-8 text file from a 0-based offset through end of file by default; the whole-file page stops at 16000 code points and the tail carries the next offset when the file continues. A line too long for the page is cut with an inline truncation marker — the rest of that line is not reachable via offset paging, since offset counts lines. Pass `limit` to read a line window instead (hard cap 2000 lines). Pair with grep to locate a region in large files and with glob to discover candidate paths first. Returns each line as a 1-based line number right-padded to 6 chars, a tab, then the line text; stateless — each call reads from the offset you give. Files >1MB are out of scope (locate with grep and read precisely with offset/limit); binary files (NUL byte) are out of scope.",
     inputSchema: {
       type: "object",
       properties: {
@@ -143,8 +174,9 @@ export function createReadFileTool(
         limit: {
           type: "integer",
           minimum: 1,
-          default: DEFAULT_LIMIT,
           maximum: MAX_LIMIT,
+          description:
+            "Read at most this many lines from offset (hard cap 2000). Omit it to read through end of file, with the whole-file page capped at 16000 code points and the next offset reported when more remains.",
         },
       },
       required: ["path"],
@@ -156,7 +188,7 @@ export function createReadFileTool(
       interruptBehavior: "cancel" as const,
       timeoutTier: "fast" as const,
     },
-    handler: async (input: unknown) => {
+    handler: async (input: unknown, ctx?: ToolExecutionContext) => {
       const params = parseInput(input);
       // T6 D9: same wave snapshot — root and extras share the snapshot.
       const rootAtCall = readRoot(root);
@@ -200,9 +232,38 @@ export function createReadFileTool(
         );
       }
       const text = buffer.toString("utf8");
-      return sliceLines(text, params.offset, params.limit);
+      return completeRead(text, params, { opts, ctx, resolved });
     },
   });
+}
+
+/**
+ * ADR-0084 / D1c 的读尾段：选正文口径（整读到 EOF vs 显式行窗）、入账。
+ *
+ * 顺序是契约的一部分 —— **先**构造正文（offset 越界等失败路径在这里
+ * throw），**后**入账。反过来会把「没读到」记成「读过了」，随后 write_file
+ * 的非空覆写闸就被这次失败读放行。
+ *
+ * 入账口径 = `resolved`（`resolveWithinRoot` 的解析结果），与 write_file 侧的
+ * `target` 同源（同一个 resolve 输出），两边才可能命中同一条。
+ */
+function completeRead(
+  text: string,
+  params: ParsedInput,
+  deps: {
+    readonly opts: CreateReadFileToolOptions | undefined;
+    readonly ctx: ToolExecutionContext | undefined;
+    readonly resolved: string;
+  }
+): string {
+  const body =
+    params.limit === undefined
+      ? readToEnd(text, params.offset)
+      : sliceLines(text, params.offset, params.limit);
+  deps.opts?.lastReadLedger
+    ?.ledgerFor(deps.ctx?.conversationId)
+    ?.record(deps.resolved);
+  return body;
 }
 
 function resolveProjectIdentityRoot(
@@ -256,7 +317,11 @@ async function resolveReadTarget(
 interface ParsedInput {
   readonly path: string;
   readonly offset: number;
-  readonly limit: number;
+  /**
+   * 显式行窗；**不写 `limit` → `undefined`**（区别于旧契约的默认 200）。
+   * handler 据此分派「行窗」与「整读到 EOF / 16000 cp」两条路径（D1c）。
+   */
+  readonly limit: number | undefined;
 }
 
 function parseInput(input: unknown): ParsedInput {
@@ -271,15 +336,12 @@ function parseInput(input: unknown): ParsedInput {
     raw.offset === undefined
       ? 0
       : requireNonNegativeInteger(raw.offset, "offset");
+  // 不写 limit → undefined（整读路径）；写了才 clamp 到 2000 行。
   const limit =
     raw.limit === undefined
-      ? DEFAULT_LIMIT
-      : requirePositiveInteger(raw.limit, "limit");
-  return {
-    path: raw.path,
-    offset,
-    limit: Math.min(limit, MAX_LIMIT),
-  };
+      ? undefined
+      : Math.min(requirePositiveInteger(raw.limit, "limit"), MAX_LIMIT);
+  return { path: raw.path, offset, limit };
 }
 
 function requireNonNegativeInteger(value: unknown, name: string): number {
@@ -300,19 +362,186 @@ function requirePositiveInteger(value: unknown, name: string): number {
   return value;
 }
 
-function sliceLines(text: string, offset: number, limit: number): string {
-  if (text.length === 0) return "[read_file] ok (empty file)";
+const EMPTY_FILE_MARKER = "[read_file] ok (empty file)";
+
+function splitNumberedLines(text: string): string[] {
   const lines = text.split("\n");
   // Drop trailing empty element produced by a trailing newline so the
   // "last line" displayed matches the file's last newline position.
   if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-  if (offset >= lines.length) {
+  return lines;
+}
+
+function assertOffsetInRange(offset: number, lineCount: number): void {
+  if (offset >= lineCount) {
     throw new ToolExecutionError(
-      `[read_file] offset ${offset} past end of file (${lines.length} lines); use a smaller offset`
+      `[read_file] offset ${offset} past end of file (${lineCount} lines); use a smaller offset`
     );
   }
-  const window = lines.slice(offset, offset + limit);
-  return window
-    .map((line, idx) => `${String(offset + idx + 1).padStart(6)}\t${line}`)
-    .join("\n");
+}
+
+function renderLine(lineNumber: number, line: string): string {
+  return `${String(lineNumber).padStart(6)}\t${line}`;
+}
+
+/**
+ * 显式 `limit` 路径 —— 行窗，语义与 ADR-0004 时期一致：窗口 = 从 `offset`
+ * 起至多 `limit` 行（硬顶 2000，由 parseInput clamp）。
+ *
+ * 窗口之上叠**与整读路径同一对页预算**（16000 code point / 19000 UTF-16
+ * 单元）：`limit: 2000` 在宽行文件上可产出 ~816000 单元的页，正好落进
+ * ADR-0006 Decision 4 禁止的双重截断 —— 工具层先给足、executor 再砍尾，
+ * 模型拿到无解释的半页。预算先触时窗口提前收尾并发**显式**续读标记；
+ * 窗口自己先到顶（行数约束）则正文与旧契约逐字节一致，无标记。
+ */
+function sliceLines(text: string, offset: number, limit: number): string {
+  if (text.length === 0) return EMPTY_FILE_MARKER;
+  const lines = splitNumberedLines(text);
+  assertOffsetInRange(offset, lines.length);
+  const windowEnd = Math.min(offset + limit, lines.length);
+  const page = collectPage(lines, offset, windowEnd);
+  if (page.nextIndex >= windowEnd) return page.body;
+  return `${page.body}\n${windowCutHint(page.nextIndex, windowEnd, lines.length)}`;
+}
+
+/**
+ * 预算（非 `limit` 行数）切短行窗时的续读标记。与整读路径的
+ * `continuationHint` 分开：这里必须说清「窗口没读完是页预算造成的」，
+ * 否则模型会把短页误当 `limit` 已满足，不再续读。
+ *
+ * 恢复路径是**下一次调用加大 `offset`**（行窗语义不变，`limit` 可原样带
+ * 上）——提示里的 offset 必须是下一次调用接受的合法值。
+ */
+function windowCutHint(
+  nextOffset: number,
+  windowEnd: number,
+  totalLines: number
+): string {
+  return `[read_file] page budget cut this window short at line ${nextOffset + 1} of ${totalLines} (limit window reached line ${windowEnd} of ${totalLines}); call read_file again with offset=${nextOffset} for the rest.`;
+}
+
+/**
+ * 不写 `limit` 路径（D1c）—— 从 `offset` 尽量读到 EOF，正文硬停
+ * `MAX_READ_CODE_POINTS` code point / `MAX_READ_UTF16_UNITS` UTF-16 单元
+ * （先触者停）。未到 EOF 时正文尾部附续读提示（含下次 offset）。**不**回落
+ * 到任何默认行数（spec SC13 明确否决默认 200/2000）。
+ *
+ * 单行自身超预算时正文里附带截断标记：offset 按行翻页，行内余下部分没有
+ * 可达路径 —— 不说清就是静默数据丢失（ADR-0006 Decision 4）。
+ */
+function readToEnd(text: string, offset: number): string {
+  if (text.length === 0) return EMPTY_FILE_MARKER;
+  const lines = splitNumberedLines(text);
+  assertOffsetInRange(offset, lines.length);
+  const page = collectPage(lines, offset, lines.length);
+  if (page.nextIndex >= lines.length) return page.body;
+  return `${page.body}\n${continuationHint(page.nextIndex, lines.length)}`;
+}
+
+interface Page {
+  readonly body: string;
+  readonly nextIndex: number;
+}
+
+/**
+ * 逐行累加到页预算为止（或到 `endIndex` 行窗上界为止，先触者停）。返回
+ * **整行**正文与下一条待读行下标 —— 非末行只截整行，模型不会拿到半行
+ * 内容后误以为完整。
+ *
+ * 单行自身超预算（1MB 单行文件 / astral 长行）时至少发一条截断行 + 显式
+ * 标记，并前进一行，保证续读提示里的 offset 严格增长（否则模型会在同一
+ * offset 上打转）。
+ */
+function collectPage(
+  lines: ReadonlyArray<string>,
+  offset: number,
+  endIndex: number
+): Page {
+  const rendered: string[] = [];
+  let codePoints = 0;
+  let units = 0;
+  let index = offset;
+  for (; index < endIndex; index += 1) {
+    const line = renderLine(index + 1, lines[index]!);
+    const cost = pageCost(line, rendered.length > 0);
+    if (
+      codePoints + cost.codePoints > MAX_READ_CODE_POINTS ||
+      units + cost.units > MAX_READ_UTF16_UNITS
+    ) {
+      break;
+    }
+    rendered.push(line);
+    codePoints += cost.codePoints;
+    units += cost.units;
+  }
+  if (rendered.length > 0) {
+    return { body: rendered.join("\n"), nextIndex: index };
+  }
+  return {
+    body: truncateLine(lines[offset]!, offset),
+    nextIndex: offset + 1,
+  };
+}
+
+/** 一行的页预算开销（含与前一行之间的换行符）。 */
+function pageCost(
+  line: string,
+  hasPrecedingLine: boolean
+): { readonly codePoints: number; readonly units: number } {
+  const separator = hasPrecedingLine ? 1 : 0;
+  return {
+    codePoints: countCodePoints(line) + separator,
+    units: line.length + separator,
+  };
+}
+
+/**
+ * 单行超预算时的兜底渲染：行号 + 截到剩余预算的行文 + **显式截断标记**。
+ * 标记说明两件事：这一行被截断了；余下部分不在 offset 翻页的可达面上
+ * （offset 按行计，行内偏移没有入参）—— 模型据此改用更小的读法（如 bash
+ * 的 `cut`/`sed -n` 行内切片）而不是徒劳地续读。
+ */
+function truncateLine(line: string, offset: number): string {
+  const prefix = `${String(offset + 1).padStart(6)}\t`;
+  const marker = truncationMarker(prefix);
+  return prefix + sliceWithinBudget(line, prefix + marker) + marker;
+}
+
+/** 截断标记文案（正文的一部分，计入页预算）。 */
+function truncationMarker(prefix: string): string {
+  const lineNumber = Number.parseInt(prefix, 10);
+  return ` …[read_file] line ${lineNumber} truncated at the page budget; the rest of this line is not reachable via offset paging (offset counts lines).`;
+}
+
+/**
+ * 在 prefix+marker 已占用的预算之上，取行文的最长前缀，**同时**满足
+ * code point 与 UTF-16 单元两个上限 —— 逐 code point 累加，先触者停
+ * （astral 字符一个 code point 占两个单元，两个度量不能互相换算）。
+ */
+function sliceWithinBudget(line: string, reserved: string): string {
+  const maxCodePoints = MAX_READ_CODE_POINTS - countCodePoints(reserved);
+  const maxUnits = MAX_READ_UTF16_UNITS - reserved.length;
+  const kept: string[] = [];
+  let codePoints = 0;
+  let units = 0;
+  for (const ch of line) {
+    const chUnits = ch.length;
+    if (codePoints + 1 > maxCodePoints || units + chUnits > maxUnits) {
+      break;
+    }
+    kept.push(ch);
+    codePoints += 1;
+    units += chUnits;
+  }
+  return kept.join("");
+}
+
+/** 续读提示行（正文之外；其长度已由页预算的 headroom 覆盖）。 */
+function continuationHint(nextOffset: number, totalLines: number): string {
+  return `[read_file] continued at line ${nextOffset + 1} of ${totalLines}; call read_file again with offset=${nextOffset} for the rest.`;
+}
+
+/** code point 计数（surrogate pair 算一个）—— 与 executor 截断口径一致。 */
+function countCodePoints(text: string): number {
+  return Array.from(text).length;
 }

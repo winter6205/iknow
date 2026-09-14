@@ -36,6 +36,7 @@ import type { PermissionModeContext } from "./permission/modes.js";
 import type { GraphModeContext } from "./graph/mode.js";
 import { createGraphAssembly, type GraphAssembly } from "./graph/assembly.js";
 import type { LiveGraphLedgerHost } from "./graph/ledger.js";
+import type { LastReadLedgerHost } from "./aci/last-read-ledger.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
 import type { AciRegistry } from "./aci/aci-registry.js";
 import { runOverflowJudge } from "./aci/tool-overflow.js";
@@ -167,6 +168,14 @@ export type BuildEngineOpts = {
    * 变化，与 graphMode 缺席同形态）。
    */
   readonly liveGraphLedger?: LiveGraphLedgerHost;
+  /**
+   * ADR-0084 / D1:last-read 账本 host（`conversationId → 规范 path`）的可选缝。
+   * 默认 = 每个 registry 自建一份（进程内存），写闸照常生效。注入同一实例可
+   * 让「本 conversation 读过的 path」跨 rebind 重建的 registry 延续；但当前
+   * 生产装配**不注入**，所以按 root 重建引擎后新 registry 从空表开始
+   * （spec D1 的 lifetime 规则：表随 registry 同寿）。
+   */
+  readonly lastReadLedger?: LastReadLedgerHost;
   /** #337 T8 测试缝:userHome / cwd 覆盖(默认 homedir() / process.cwd())。 */
   readonly userHome?: string;
   readonly cwd?: string;
@@ -1085,6 +1094,9 @@ export async function buildHarnessEngine(
       ...(opts.liveGraphLedger
         ? { liveGraphLedger: opts.liveGraphLedger }
         : {}),
+      // ADR-0084 / D1:last-read 账本跨 rebind 重建共享同一实例（读记忆不因
+      // 换根丢失）；宿主未接（ask / 测试直调）→ registry 自建一份，闸照常。
+      ...lastReadLedgerOption(opts),
       ...(memoryToolsEnabled ? { memoryDir } : undefined),
       skillCatalog,
       ...(subagentManager ? { subagentManager } : undefined),
@@ -1226,6 +1238,10 @@ export async function buildHarnessEngine(
       ...(opts.liveGraphLedger
         ? { liveGraphLedger: opts.liveGraphLedger }
         : {}),
+      // ADR-0084 / D1:同首次构造 —— 共享 last-read 账本（ask 路径无会话
+      // conversationId，闸退化为「非空覆写一律拒」，与 spec 的 fail-closed
+      // 一致；read / bash 仍可执行，只是不入账）。
+      ...lastReadLedgerOption(opts),
       ...(memoryToolsEnabled ? { memoryDir } : undefined),
       skillCatalog,
       ...(subagentManager ? { subagentManager } : undefined),
@@ -1906,6 +1922,20 @@ export async function buildHarnessEngine(
         }
       : {}),
   };
+}
+
+/**
+ * ADR-0084 / D1:last-read 账本 host 的条件透传面（两次 registry 构造共用）。
+ *
+ * 宿主未接（ask / 测试直调）→ 返回空对象 → registry 自建一份，写闸照常生效
+ * （只是读记忆不跨 registry 共享）。单一表达式同时供两处装配，避免两处各写
+ * 一遍 `?( … ) : {}` 的分支（S5 ratchet：buildHarnessEngine 是既有 god
+ * function，只允许等量或更少的分支）。
+ */
+function lastReadLedgerOption(opts: BuildEngineOpts): {
+  readonly lastReadLedger?: LastReadLedgerHost;
+} {
+  return opts.lastReadLedger ? { lastReadLedger: opts.lastReadLedger } : {};
 }
 
 /**

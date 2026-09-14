@@ -1,11 +1,12 @@
 /**
  * read_file 工具（T5）单元测试。
  *
- * 覆盖契约（ADR-0004 L14 + T1-5/T1-7 裁定）：
+ * 覆盖契约（ADR-0004 L14 / T1-5 / T1-7 裁定 + ADR-0084 D1c + ADR-0006 Decision 4）：
  *   - 工厂签名 = createReadFileTool(root): AciToolDef，name === "read_file"
- *   - inputSchema: path 必填 + offset? (默认 0, 0 基) + limit? (默认 200, 上限 2000) + additionalProperties:false
+ *   - inputSchema: path 必填 + offset? (0 基) + limit? (**无默认值**，显式上限 2000) + additionalProperties:false
  *   - 行为：resolve+containment（symlink 越界拒绝）→ stat (必须文件，目录→报错) → >1MB 拒绝 → NUL 二进制拒绝
- *     → offset/limit 窗口 (limit 上限 2000 截断, offset 越界返回空串)
+ *     → 窗口：不传 `limit` = 从 offset 整读到 EOF（页预算 16000 码点，页停给续读提示）；
+ *       显式 `limit` 硬上限 2000（超出截断到 2000）；offset 越过末尾给续读/页停回执，不是空串
  *   - 输出：每行 `${String(lineNo).padStart(6)}\t${line}`，行号 1 起 (即 offset 后第一行 = offset+1)
  *   - aci 元数据: category=read-only, isReadOnly=true, isConcurrencySafe=true, interruptBehavior=cancel
  *   - 错误一律 throw ToolExecutionError
@@ -69,9 +70,15 @@ describe("createReadFileTool — schema/aci shape", () => {
     assert.equal(schema.properties.offset.default, 0);
     assert.equal(schema.properties.offset.minimum, 0);
     assert.equal(schema.properties.limit.type, "integer");
-    assert.equal(schema.properties.limit.default, 200);
     assert.equal(schema.properties.limit.minimum, 1);
     assert.equal(schema.properties.limit.maximum, 2000);
+    // D1c：不写 limit = 整读到 EOF，schema 里**不得**再出现默认行数
+    // （ADR-0004 L14 的「默认 200 行」已被 ADR-0084 Amends）。
+    assert.equal(
+      Object.hasOwn(schema.properties.limit, "default"),
+      false,
+      "limit 不得有 default —— 缺省语义是整读到 EOF，不是任何默认行数"
+    );
   });
 
   it("aci metadata matches the read-only contract", async () => {
@@ -171,7 +178,7 @@ describe("read_file — offset/limit paging", () => {
     assert.equal(result, "     3\tL2\n     4\tL3\n     5\tL4");
   });
 
-  it("uses limit=200 by default", async () => {
+  it("不传 limit → 整读到 EOF，不是任何默认行数（SC13 / D1c）", async () => {
     const root = await makeScratch("read-file-paging-");
     const lines = Array.from({ length: 250 }, (_, i) => `n${i}`).join("\n");
     await writeFile(join(root, "p.txt"), lines + "\n");
@@ -180,26 +187,227 @@ describe("read_file — offset/limit paging", () => {
     const result = (await tool.handler({ path: "p.txt" })) as string;
     const resultLines = result.split("\n");
 
-    assert.equal(resultLines.length, 200);
+    // 250 行全部返回、无续读提示 —— 既不截到 200（旧默认），也不截到 2000。
+    assert.equal(resultLines.length, 250);
     assert.equal(resultLines[0], "     1\tn0");
-    assert.equal(resultLines[199], "   200\tn199");
+    assert.equal(resultLines[249], "   250\tn249");
+    assert.ok(
+      !result.includes("continued at line"),
+      "整读到 EOF 时不得出现续读提示"
+    );
   });
 
-  it("clamps limit values above 2000 down to 2000", async () => {
+  it("不传 limit 且超过整页预算 → 正文停在 16000 code point 以内，尾部带续读 offset", async () => {
     const root = await makeScratch("read-file-paging-");
-    const lines = Array.from({ length: 2500 }, (_, i) => `n${i}`).join("\n");
-    await writeFile(join(root, "p.txt"), lines + "\n");
+    // 每行 100 字符 + 行号前缀 7 字符 = 每行约 108 cp；2000 行远超 16000。
+    const line = "x".repeat(100);
+    const lines = Array.from({ length: 2000 }, () => line).join("\n");
+    await writeFile(join(root, "big.txt"), lines + "\n");
+
+    const tool = createReadFileTool(root);
+    const result = (await tool.handler({ path: "big.txt" })) as string;
+    const hintIndex = result.indexOf("\n[read_file] continued at line ");
+    assert.ok(hintIndex > 0, `期望续读提示，实际尾部: ${result.slice(-120)}`);
+
+    const body = result.slice(0, hintIndex);
+    // 正文（不含提示行）≤ 16000 code point。
+    assert.ok(
+      Array.from(body).length <= 16000,
+      `正文超预算: ${Array.from(body).length}`
+    );
+    // 未到 EOF：文件名与总行数在提示里。
+    assert.match(
+      result.slice(hintIndex),
+      /of 2000; call read_file again with offset=\d+/
+    );
+  });
+
+  it("单行超页预算：正文显式标注截断，不冒充干净 EOF（ADR-0006 D4 无静默截断）", async () => {
+    const root = await makeScratch("read-file-longline-");
+    // 单行 20000 字符 + 行号前缀 → 超 16000 页预算，进入整行截断分支。
+    await writeFile(join(root, "long.txt"), "x".repeat(20000) + "\n");
+
+    const tool = createReadFileTool(root);
+    const result = (await tool.handler({ path: "long.txt" })) as string;
+
+    // 截断必须显式：正文里有「行被截断、其余部分 offset 翻页取不到」的标记。
+    assert.ok(
+      result.includes("[read_file] line 1 truncated at the page budget"),
+      `期望单行截断标记，实际尾部: ${result.slice(-160)}`
+    );
+    assert.ok(
+      result.includes("not reachable via offset paging"),
+      "标记必须说清 offset 按行翻页、行内余下部分取不到"
+    );
+    // 正文首行（含行号前缀）不超 16000 code point 的页预算。
+    const body = result.split("\n")[0]!;
+    assert.ok(
+      Array.from(body).length <= 16000,
+      `正文超预算: ${Array.from(body).length}`
+    );
+    // 单行文件没有「后续行」→ 不应出现续读提示（没有可续的 offset）。
+    assert.ok(!result.includes("continued at line"));
+  });
+
+  it("单行超页预算且有后续行：截断标记与续读提示同时在场", async () => {
+    const root = await makeScratch("read-file-longline-more-");
+    await writeFile(
+      join(root, "long-then.txt"),
+      "y".repeat(20000) + "\ntail-line\n"
+    );
+
+    const tool = createReadFileTool(root);
+    const result = (await tool.handler({ path: "long-then.txt" })) as string;
+
+    assert.ok(result.includes("truncated at the page budget"));
+    // 后续行仍在 → 续读提示把 offset 指向第 2 行。
+    assert.match(
+      result.slice(result.indexOf("truncated at the page budget")),
+      /\[read_file\] continued at line 2 of 2; call read_file again with offset=1/
+    );
+    // 按提示续读确实能拿到被截断行之后的完整内容。
+    const rest = (await tool.handler({
+      path: "long-then.txt",
+      offset: 1,
+    })) as string;
+    assert.equal(rest, "     2\ttail-line");
+  });
+
+  it("astral 字符页：UTF-16 长度低于 executor 20000 闸，不发生二次截断", async () => {
+    const root = await makeScratch("read-file-astral-");
+    // 30000 个 astral code point = 60000 UTF-16 单元；只按 code point 计量
+    // 会产出 ~32000 字符的页，被 executor 兜底闸二次截断（ADR-0006 D4 禁止）。
+    await writeFile(join(root, "astral.txt"), "😀".repeat(30_000) + "\n");
+
+    const tool = createReadFileTool(root);
+    const result = (await tool.handler({ path: "astral.txt" })) as string;
+
+    assert.ok(
+      result.length < 20000,
+      `序列化页不得触达 executor 20000 闸，实际 ${result.length} 单元`
+    );
+    assert.ok(result.includes("truncated at the page budget"));
+  });
+
+  it("显式 limit 的行窗硬顶 2000 行：空白行（渲染后 7 字符，页预算容得下 2000 行）整窗取满", async () => {
+    const root = await makeScratch("read-file-paging-");
+    // 空白行渲染后恰好 7 字符（6 位行号 + tab），是 16000 cp 预算下唯一能
+    // 容纳 2000 行的行宽 —— 用它把「窗口硬顶」与「页预算」两个闸分开验证：
+    // 这里窗口先到顶，预算不得再把它缩到 2000 行以下。
+    await writeFile(join(root, "blank-lines.txt"), "\n".repeat(2500));
 
     const tool = createReadFileTool(root);
     const result = (await tool.handler({
-      path: "p.txt",
+      path: "blank-lines.txt",
       limit: 9999,
     })) as string;
     const resultLines = result.split("\n");
 
     assert.equal(resultLines.length, 2000);
-    assert.equal(resultLines[0], "     1\tn0");
-    assert.equal(resultLines[1999], "  2000\tn1999");
+    assert.equal(resultLines[0], "     1\t");
+    assert.equal(resultLines[1999], "  2000\t");
+    assert.ok(
+      !result.includes("continued at line"),
+      "窗口内 2000 行全部给到，预算未先触顶 → 不得出现续读提示"
+    );
+  });
+
+  it("limit:2000 宽行文件：正文受页预算约束，不触达 executor 20000 闸（无双重截断）", async () => {
+    const root = await makeScratch("read-file-wide-");
+    // 400 字符/行 × 2000 行：整窗不做预算会产出 ~816000 UTF-16 单元的页，
+    // 被 executor 20000 闸砍尾（ADR-0006 Decision 4 禁止的双重截断）。
+    const lines = Array.from({ length: 2000 }, () => "x".repeat(400)).join(
+      "\n"
+    );
+    await writeFile(join(root, "wide.txt"), lines + "\n");
+
+    const tool = createReadFileTool(root);
+    const result = (await tool.handler({
+      path: "wide.txt",
+      limit: 2000,
+    })) as string;
+
+    assert.ok(
+      result.length < 20000,
+      `显式 limit 页不得触达 executor 20000 闸，实际 ${result.length} 单元`
+    );
+    assert.ok(
+      result.includes("call read_file again with offset="),
+      `预算切短行窗时必须给续读指引，实际尾部: ${result.slice(-160)}`
+    );
+  });
+
+  it("limit:50 宽行文件同样受页预算约束（50 行 × 400 字符已超 20000 闸）", async () => {
+    const root = await makeScratch("read-file-wide-small-");
+    const lines = Array.from({ length: 50 }, () => "y".repeat(400)).join("\n");
+    await writeFile(join(root, "wide50.txt"), lines + "\n");
+
+    const tool = createReadFileTool(root);
+    const result = (await tool.handler({
+      path: "wide50.txt",
+      limit: 50,
+    })) as string;
+
+    assert.ok(
+      result.length < 20000,
+      `50 行宽行窗口同样不得触达 executor 闸，实际 ${result.length} 单元`
+    );
+  });
+
+  it("显式 limit 下首行自身超预算：行内截断标记与窗口续读标记同时在场", async () => {
+    const root = await makeScratch("read-file-wide-firstline-");
+    await writeFile(
+      join(root, "long-first.txt"),
+      "y".repeat(20000) + "\ntail-a\ntail-b\n"
+    );
+
+    const tool = createReadFileTool(root);
+    const result = (await tool.handler({
+      path: "long-first.txt",
+      limit: 3,
+    })) as string;
+
+    assert.ok(result.length < 20000, `实际 ${result.length} 单元`);
+    assert.ok(
+      result.includes("not reachable via offset paging"),
+      "首行行内余下部分不可达 → 行内截断标记必须在"
+    );
+    // 窗口内还有后续行 → 窗口续读标记指向第 2 行（offset=1），
+    // 且该 offset 被下一次调用接受（不是「past end of file」）。
+    assert.match(result, /call read_file again with offset=1\b/);
+    const rest = (await tool.handler({
+      path: "long-first.txt",
+      offset: 1,
+    })) as string;
+    assert.equal(rest.split("\n")[0], "     2\ttail-a");
+  });
+
+  it("预算（非行数）切短行窗：提示里的 offset 被下一次调用接受并接着读", async () => {
+    const root = await makeScratch("read-file-wide-resume-");
+    const lines = Array.from({ length: 500 }, () => "z".repeat(400)).join("\n");
+    await writeFile(join(root, "resume.txt"), lines + "\n");
+
+    const tool = createReadFileTool(root);
+    const result = (await tool.handler({
+      path: "resume.txt",
+      limit: 500,
+    })) as string;
+
+    const match = /call read_file again with offset=(\d+)/.exec(result);
+    assert.ok(match, `期望续读提示，实际尾部: ${result.slice(-160)}`);
+    const nextOffset = Number(match[1]);
+
+    // 恢复路径必须真的可用：按提示的 offset 再调一次不得落在
+    // 「offset past end of file」上，且首页行号 = offset + 1。
+    const rest = (await tool.handler({
+      path: "resume.txt",
+      offset: nextOffset,
+    })) as string;
+    const firstLineNumber = Number.parseInt(
+      rest.split("\n")[0]!.split("\t")[0]!,
+      10
+    );
+    assert.equal(firstLineNumber, nextOffset + 1);
   });
 
   it("offset == lines.length throws ToolExecutionError (no silent empty)", async () => {

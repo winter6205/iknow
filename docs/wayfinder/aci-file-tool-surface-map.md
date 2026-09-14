@@ -11,7 +11,7 @@
 
 > 操作员 2026-09-11 改口确认：过程，不是定死一个方向。未走完过程前不改产品代码。
 
-**Handoff（2026-09-12）**：地图到达。契约 [`ACI 文件/搜索工具面升级`](../../specs/aci-file-search-surface.md)；plan [`ACI 文件/搜索工具面升级`](../../plans/aci-file-search-surface.md)。ADR-0084。操作员选 spec → plan。未实施产品代码。
+**Handoff（2026-09-12）**：地图到达。契约 [`ACI 文件/搜索工具面升级`](../../specs/aci-file-search-surface.md)；plan [`ACI 文件/搜索工具面升级`](../../plans/aci-file-search-surface.md)。ADR-0084。操作员选 spec → plan。**Task A（D1/D1b/D1c/D7：last-read 账本、`write_file` 闸、`read_file` 整读窗）已落地**。搜面不在本切片；增量见 #1002 / #1008。
 
 ## Notes
 

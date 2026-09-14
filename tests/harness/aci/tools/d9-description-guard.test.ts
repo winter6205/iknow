@@ -258,6 +258,37 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     expect(reg.catalog.all()).toHaveLength(43);
   });
 
+  // ── ADR-0084 / D7：写闸与 read 窗的说明书义务（无轨迹集时的 STATIC 锁）─
+  // read_file / write_file 本次改了 description 与失败文案，黄金集名册里这两
+  // 件没有轨迹集（见 docs/guides/prompt-development.md 与 commit 正文的缺口
+  // 登记）。轨迹集缺失期间，至少把「模型可见面必须说清的新契约」钉在
+  // STATIC 层：写闸要模型先 read_file、read 窗不得再宣称默认 200 行。
+  it("write_file description names read_file as the freshness precondition — ADR-0084 D7", () => {
+    const writeFile = reg.catalog.all().find((t) => t.name === "write_file");
+    expect(writeFile).toBeDefined();
+    const desc = writeFile!.description.toLowerCase();
+    expect(desc).toContain("read_file");
+    expect(desc).toContain("edit_file");
+    // 空文件 / 新建免检必须写在模型可见面，否则模型会对新建也先做一次无谓读。
+    expect(desc).toContain("brand-new");
+  });
+
+  it("read_file description describes EOF-by-default and the 16000-cp page, not a default line window — ADR-0084 D1c", () => {
+    const readFile = reg.catalog.all().find((t) => t.name === "read_file");
+    expect(readFile).toBeDefined();
+    const desc = readFile!.description.toLowerCase();
+    expect(desc).toContain("end of file");
+    expect(desc).toContain("16000");
+    expect(desc).toContain("offset");
+    // 旧契约的默认 200 行不得再出现在模型可见面。
+    expect(desc).not.toContain("default 200");
+    expect(desc).not.toContain("200 lines");
+    // 单行超页预算时的行内截断没有 offset 续读路径 —— 模型可见面必须说清，
+    // 否则模型会照续读提示在同一 offset 上打转（ADR-0006 D4 无静默截断）。
+    expect(desc).toContain("truncation marker");
+    expect(desc).toContain("not reachable via offset paging");
+  });
+
   // symbol-primary-aci T2：符号查询工具的 description 必须按**符号身份**
   // 行文——出现「line N / character M」类必填措辞即回到坐标主路径，spec
   // 「禁止把第几行第几列当作这些工具的主入参」被破坏。

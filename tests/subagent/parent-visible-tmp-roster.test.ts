@@ -18,8 +18,8 @@ import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 
 const SECRET_BODY = "PAD-BODY-MUST-NOT-ENTER-ENVELOPE";
-/** Align short roster with read_file default window (200 lines). */
-const READ_FILE_DEFAULT_LIMIT = 200;
+/** The pad roster's own 200-name window (not read_file's contract). */
+const PAD_ROSTER_LINE_LIMIT = 200;
 
 interface FakeChild {
   readonly stdin: PassThrough;
@@ -210,26 +210,23 @@ describe("T6 empty handoff pad roster (SC5)", () => {
     await manager.shutdown();
   });
 
-  it("roster length aligns with read_file default window", async () => {
+  it("roster caps at the pad's own 200-name window", async () => {
     const child = makeFakeChild();
     const manager = createSubAgentManager({
       spawn: () => child as unknown as ChildProcess,
       subagentsDir,
     });
     const { taskId } = manager.spawn({ task: "many" });
-    const files = Array.from(
-      { length: READ_FILE_DEFAULT_LIMIT + 1 },
-      (_, i) => ({
-        name: `n${String(i).padStart(3, "0")}.txt`,
-        body: SECRET_BODY,
-      })
-    );
+    const files = Array.from({ length: PAD_ROSTER_LINE_LIMIT + 1 }, (_, i) => ({
+      name: `n${String(i).padStart(3, "0")}.txt`,
+      body: SECRET_BODY,
+    }));
     wirePad(subagentsDir, taskId, files);
     emitEnvelope(child, { status: "ok", summary: "", result: "" });
     await flushTwoTicks();
 
     const env = await manager.waitFor(taskId);
-    assert.equal(env.product_roster?.length, READ_FILE_DEFAULT_LIMIT);
+    assert.equal(env.product_roster?.length, PAD_ROSTER_LINE_LIMIT);
     assert.ok(!JSON.stringify(env).includes(SECRET_BODY));
     await manager.shutdown();
   });

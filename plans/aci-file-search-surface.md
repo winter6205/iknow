@@ -14,14 +14,15 @@
    - **Inherits:** D1：表按 conversationId **内存分桶、不落盘**；入账 = `read_file` 成功或白名单单文件 `bash` 成功；无 id 则已存在且 size>0 的 `write_file` fail-closed；禁止进程全局表。`edit_file` 不查表。不复用只读校验当入账。
    - **Surface:** harness ACI / session 工具上下文 + bash 命令抽 path
    - **Acceptance:** 无 conversationId 时非空文件 `write_file` 失败且字节不变；有 id 时 `read_file` 或白名单 `bash`（如 `cat path`）成功后表含该规范 path。`ls` / 管道不入表。进程重启后表空。`edit_file` 无 id 仍可按自证写入。
-   - Status: [ ] pending
+   - Status: [x] done — `last-read-ledger.ts`（`ledgerFor(undefined) === undefined` 是「无桶」判据本身）+ `bash-read-extract.ts` + `registry.ts` 接线；`9497ae8e` 起，`8d23aa23` / `8415c08b` 收窄假阳性。测：`last-read-ledger.test.ts` 11 / `write-file-last-read.test.ts` 15 / `bash-last-read.test.ts` 13 全绿；`bash-read-extract.test.ts` 39（提交态计）。
+   - **Follow-up（本分支补）:** 子代理侧原本**无桶**（worker 装配漏传 `conversationId`）→ 同回合读后覆写永久被拒。已修 `b322aa6a`（`worker.ts` + `worker-last-read-ledger.test.ts` 8 条），走真实装配路径，非直调 handler。
 
 2. **write_file 非空未读硬拒、新建/空文件免检** — tag: `[implementation]`
    - **Inherits:** SC3；size==0 免检。
    - **Surface:** harness ACI `write_file`
    - **Acceptance:** 已存在 size>0 未读失败；不存在的 path 与空文件写入成功。
    - [blocks: T1]
-   - Status: [ ] pending
+   - Status: [x] done — `write-file.ts:281` `assertLastRead` 四条 EXIT（host 缺席 → 闸整体不生效 / stat 失败不制造新拒绝面 / 新建或 size==0 免检 / 账上有 → 放行），判据用 `stat().size` 不用 best-effort 降级的 `oldContent`。typed `LastReadRequiredError`（`kind = last_read_required`）落 `fb9b2a86`。测：`write-file-last-read.test.ts` 15 条，`write-file.test.ts` / `write-file-iknow.test.ts` 现有套件全绿。
 
 3. **edit_file 无新行为** — tag: `[implementation]`
    - **Inherits:** D1b / SC2；沿用 ADR-0004。否决短锚禁 `replace_all`。
@@ -34,7 +35,7 @@
    - **Inherits:** D1c / SC13。
    - **Surface:** harness ACI `read_file`
    - **Acceptance:** 不传 `limit` 从 offset 起最多 16000 code point，未完则正文续读提示（不得默认 200/2000 行）。显式 `limit` 硬顶 2000。`>1MB` 仍拒。不改 pad roster 的独立 200 窗。
-   - Status: [ ] pending
+   - Status: [x] done — `read-file.ts:40` `MAX_READ_CODE_POINTS = 16_000` / `read-file.ts:32` `MAX_LIMIT = 2000`；不写 `limit` → `undefined` 走整读路径（`read-file.ts:337`）。`133c4364` 补单行截断显式化 + 页预算加 UTF-16 闸，`81f36609` 补显式 `limit` 路径同一对页预算（ADR-0006 Decision 4）。测：`read-file.test.ts` 36 / `read-file-profile.test.ts` 5，全绿。
    - [parallel] with T1
 
 5. **写闸并发** — tag: `[implementation]`
@@ -42,14 +43,15 @@
    - **Surface:** harness ACI `write_file` + 账本
    - **Acceptance:** 同 conversation 同非空 path 未读时并行 write 均失败；有读后并行覆写不丢表、无隐式全局表。
    - [blocks: T2]
-   - Status: [ ] pending
+   - Status: [x] done — 三条在 `write-file-last-read.test.ts:261-355`（未读并行均拒 / 有读并行均执行且表未清空 / 无 id 并行不共享隐式全局表，`ledger.size() === 0`）。
+   - **未结（不在本切片）:** `write_file-last-read.test.ts:321` 的「最终内容必是两次之一」在 2026-09-12 证据跑里失败过一次（实测得 `"first\n\n"`）。直调 handler 放大样本 300 次复现 8 次——两次并发 `writeFile` 的全量覆写会撕裂，**是测试断言在全量覆写语义下的假前提**，不是闸的问题（`write_file` 声明 `isConcurrencySafe: false`，引擎经 `partitionConcurrencyWaves` 串行化，生产面到不了这个交错）。未在本分支修：该文件非本 task 范围。
 
 6. **写/读说明书** — tag: `[implementation]`
    - **Inherits:** D7 / prompt-development：先夹具或登记缺口。
    - **Surface:** `read_file` / `edit_file` / `write_file` description 与失败文案
    - **Acceptance:** D9/description 闸仍绿；本面补轨迹集或该 commit 登记缺口。
    - [blocks: T2, T4]
-   - Status: [ ] pending
+   - Status: [x] done — 走「登记缺口」臂：`3a52f397` 在 `docs/guides/prompt-development.md:46` 登记 `grep` / `read_file` / `edit_file` / `write_file` 四件**不建**轨迹集（D7 一次性结论：contract-statement 确定性，非工具选型分歧，由 D9 STATIC 锁 + schema 断言覆盖）。`write_file` / `read_file` description 已在 `9497ae8e` 随闸改写、`81f36609` 随页预算改写。测：`d9-description-guard.test.ts` 21 条全绿。
 
 ---
 
