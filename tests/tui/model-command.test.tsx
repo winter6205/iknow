@@ -498,11 +498,48 @@ describe("/model 端到端（真实键盘投递）", () => {
     await app.pressEnter();
     const frame = await untilFrame(
       app.setup,
-      (f) => f.includes("写回 settings.json 失败"),
+      (f) => f.includes("failed to write settings.json"),
       8000,
       "persist-fail"
     );
     expect(frame).toContain("EACCES: 只读文件系统");
+    expect(frame).not.toContain("模型选择中");
+
+    app.destroy();
+  }, 30_000);
+
+  test("onPersistModel {ok:false, stage:reload} → English reload-fail notice, not write-fail", async () => {
+    const app = await mountAsync({
+      providers: PROVIDERS,
+      onPersistModel: () =>
+        Promise.resolve({
+          ok: false as const,
+          stage: "reload" as const,
+          reason:
+            "provider_api_key_missing: volcengine-ark (env VOLCENGINE_ARK_API_KEY unset)",
+        }),
+    });
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("/model");
+    await app.pressEnter();
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("minimax-cn/MiniMax-M3"),
+      8000,
+      "picker-open"
+    );
+    await app.pressEnter();
+    const frame = await untilFrame(
+      app.setup,
+      (f) => f.includes("failed to reload runtime"),
+      8000,
+      "persist-reload-fail"
+    );
+    expect(frame).toContain("provider_api_key_missing");
+    expect(frame).toContain("volcengine-ark");
+    expect(frame).toContain("VOLCENGINE_ARK_API_KEY");
+    expect(frame).not.toContain("failed to write settings.json");
     expect(frame).not.toContain("模型选择中");
 
     app.destroy();

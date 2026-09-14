@@ -281,6 +281,7 @@ import {
   formatLlmProviderConfigError,
   isLlmProviderConfigError,
 } from "../config/env.js";
+import { persistModelFailNotice } from "./persist-model-failure.js";
 import type { LiveTaskRoot } from "../harness/session-roots.js";
 import {
   createSubagentWake,
@@ -939,9 +940,14 @@ export interface TuiAppProps {
    * `{ ok: false; reason }` 或抛错 → app 以 notice 呈现；成功不发 notice
    * （写回是后台行为）。缺省 undefined → 选定后只关闭面板（纯 UI，测试兼容）。
    */
-  readonly onPersistModel?: (patch: {
-    readonly model: string;
-  }) => Promise<{ ok: true } | { ok: false; reason: string }>;
+  readonly onPersistModel?: (patch: { readonly model: string }) => Promise<
+    | { ok: true }
+    | {
+        ok: false;
+        reason: string;
+        stage?: "write" | "reload";
+      }
+  >;
 }
 
 interface Notice {
@@ -2871,17 +2877,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       (res) => {
         if (!res.ok) {
           setNotice({
-            lines: [
-              `模型已切换（本次会话），但写回 settings.json 失败：${res.reason}`,
-            ],
+            lines: [persistModelFailNotice(res.stage, res.reason)],
           });
         }
       },
       (err) => {
         setNotice({
-          lines: [
-            `模型已切换（本次会话），但写回 settings.json 失败：${describeError(err)}`,
-          ],
+          lines: [persistModelFailNotice("write", describeError(err))],
         });
       }
     );

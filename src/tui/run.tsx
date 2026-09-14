@@ -64,11 +64,8 @@ import { createFsModeContext } from "../harness/sandbox/fs-mode.js";
 import { createTuiWorktreeIsolationHost } from "./worktree-host.js";
 import { resolveVerifyConfig } from "../session-api/serve.js";
 import { createEnvLoader, type EnvLoader } from "../config/env-loader.js";
-import {
-  formatLlmProviderConfigError,
-  isLlmProviderConfigError,
-  type IknowEnv,
-} from "../config/env.js";
+import type { IknowEnv } from "../config/env.js";
+import { persistModelFailure } from "./persist-model-failure.js";
 import {
   WORKSPACE_ROOT_ENV_KEY,
   resolveWorkspaceRoot,
@@ -318,28 +315,22 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     const persistModel: NonNullable<TuiAppProps["onPersistModel"]> = async (
       patch
     ) => {
+      let wrote = false;
       try {
         // 同 persistThinking：model 亦用户层键 → 恒写 <home>/.iknow/settings.json。
         const path = resolveThinkingSettingsPath({
           home: homedir(),
         });
         const { bytes } = await persistModelChanges(path, patch);
+        wrote = true;
         activeEnvLoader.markSelfWrite(path, bytes);
         activeEnvLoader.reload();
         await bridge.hub.reloadFromEnv();
         return { ok: true as const };
       } catch (err) {
-        // typed **plain object**（provider_api_key_missing）不是 Error：先按
-        // 判别联合识别，否则 String(err) 打成 [object Object]（code-quality.md
-        // typed-error catch 契约）。
-        return {
-          ok: false as const,
-          reason: isLlmProviderConfigError(err)
-            ? formatLlmProviderConfigError(err)
-            : err instanceof Error
-              ? err.message
-              : String(err),
-        };
+        // typed **plain object**（provider_api_key_missing）不是 Error：
+        // persistModelFailure 先按判别联合识别（code-quality.md typed-error）。
+        return persistModelFailure(wrote, err);
       }
     };
 
