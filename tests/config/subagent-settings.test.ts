@@ -16,6 +16,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadIknowSettings } from "../../src/config/settings.ts";
 import { loadIknowEnv } from "../../src/config/env.ts";
+import {
+  installTestProviderApiKey,
+  withTestLlmProvider,
+} from "../_helpers/test-llm-settings.ts";
 
 let workDir: string;
 beforeAll(async () => {
@@ -25,8 +29,8 @@ afterAll(async () => {
   await rm(workDir, { recursive: true, force: true });
 });
 
-/** env loader fail-fast 兜底：model 必须有来源，否则 loader 抛错。 */
-const EMPTY = { llm: { model: "test-model" } };
+/** env loader：须命中 providers 注册表。 */
+const EMPTY = withTestLlmProvider();
 
 /** 写 user / project 各一个 settings 文件，返回隔离的 LoadSettingsOpts。 */
 async function makeSettings(
@@ -196,6 +200,7 @@ describe("subagent settings — env > settings 链 (#358 T1)", () => {
 
   beforeAll(() => {
     for (const k of ENV_KEYS_SUBAGENT) delete process.env[k];
+    installTestProviderApiKey();
   });
   afterAll(() => {
     for (const k of ENV_KEYS_SUBAGENT) delete process.env[k];
@@ -203,7 +208,7 @@ describe("subagent settings — env > settings 链 (#358 T1)", () => {
 
   it("settings 配 llm.timeoutMs + subagent.taskTimeoutMs → env 透传", () => {
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", timeoutMs: 45_000 },
+      ...withTestLlmProvider({ timeoutMs: 45_000 }),
       subagent: { taskTimeoutMs: 3_600_000 },
     });
     assert.equal(env.llm.timeoutMs, 45_000);
@@ -214,7 +219,7 @@ describe("subagent settings — env > settings 链 (#358 T1)", () => {
     process.env.IKNOW_LLM_TIMEOUT_MS = "30000";
     process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "7200000";
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", timeoutMs: 45_000 },
+      ...withTestLlmProvider({ timeoutMs: 45_000 }),
       subagent: { taskTimeoutMs: 3_600_000 },
     });
     assert.equal(env.llm.timeoutMs, 30_000);
@@ -245,6 +250,7 @@ describe("subagent settings — 跨进程继承 (#358 T1, 跨 process boundary)"
 
   beforeAll(() => {
     for (const k of ENV_KEYS_CROSS) delete process.env[k];
+    installTestProviderApiKey();
   });
   afterAll(() => {
     for (const k of ENV_KEYS_CROSS) delete process.env[k];
@@ -263,7 +269,7 @@ describe("subagent settings — 跨进程继承 (#358 T1, 跨 process boundary)"
     await writeFile(
       join(emptyHome, ".iknow", "settings.json"),
       JSON.stringify({
-        llm: { model: "test-model", timeoutMs: 45_000 },
+        ...withTestLlmProvider({ timeoutMs: 45_000 }),
         subagent: { taskTimeoutMs: 7_200_000 },
       })
     );

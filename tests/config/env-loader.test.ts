@@ -21,6 +21,10 @@ import { join } from "node:path";
 import { createEnvLoader } from "../../src/config/env-loader.js";
 import { hashSettingsContent } from "../../src/config/persist-settings.js";
 import type { IknowEnv } from "../../src/config/env.js";
+import {
+  installTestProviderApiKey,
+  llmSettingsJson,
+} from "../_helpers/test-llm-settings.ts";
 
 const TEST_TIMEOUT_MS = 3000;
 /** 等待 watcher 事件送达的稳定窗口。必须 ≥ 750ms（reviewer minor）：主通道
@@ -56,19 +60,21 @@ function makeDirs(): Dirs {
  * 同名字段会被允许名单丢弃。watcher 仍同时监听两个文件，故传 target 可把
  * 内容投到 project 路径（哨兵路径断言用）。
  */
+function routeModel(model: string): string {
+  return model.includes("/") ? model : `test/${model}`;
+}
+
+function settingsBytes(model: string): string {
+  return `${JSON.stringify(llmSettingsJson({ model: routeModel(model) }))}\n`;
+}
+
 function writeSettings(
   dirs: Dirs,
   model: string,
-  apiKey?: string,
   target: string = dirs.userFile
 ): void {
-  writeFileSync(
-    target,
-    JSON.stringify({
-      llm: { model, ...(apiKey !== undefined ? { apiKey } : {}) },
-    }) + "\n",
-    "utf8"
-  );
+  installTestProviderApiKey();
+  writeFileSync(target, settingsBytes(model), "utf8");
 }
 
 /** 等待条件成立（poll），超时抛错。 */
@@ -95,7 +101,7 @@ describe("createEnvLoader", () => {
       const loader = createEnvLoader({ cwd: dirs.cwd, home: dirs.home });
       try {
         const env1: IknowEnv = loader.get();
-        expect(env1.llm.model).toBe("model-a");
+        expect(env1.llm.model).toBe("test/model-a");
         const env2: IknowEnv = loader.get();
         expect(env2).toBe(env1); // 同一引用（缓存命中）
       } finally {
@@ -117,7 +123,7 @@ describe("createEnvLoader", () => {
         writeSettings(dirs, "model-b");
         const env2 = loader.reload();
         expect(env2).not.toBe(env1); // 新引用
-        expect(env2.llm.model).toBe("model-b");
+        expect(env2.llm.model).toBe("test/model-b");
         expect(loader.get()).toBe(env2); // reload 后缓存 = 新 env
       } finally {
         loader.stop();
@@ -140,9 +146,9 @@ describe("createEnvLoader", () => {
         await new Promise((r) => setTimeout(r, 80));
         writeSettings(dirs, "model-b");
         await waitUntil(() => received.length >= 1, "subscriber 收到 model-b");
-        expect(received[0]).toBe("model-b");
+        expect(received[0]).toBe("test/model-b");
         // 缓存也已更新（subscriber 拿到的是 reload 后的新 env）。
-        expect(loader.get().llm.model).toBe("model-b");
+        expect(loader.get().llm.model).toBe("test/model-b");
       } finally {
         loader.stop();
         rmSync(dirs.base, { recursive: true, force: true });
@@ -165,7 +171,7 @@ describe("createEnvLoader", () => {
         writeFileSync(dirs.userFile, "{ not-json", "utf8");
         await waitUntil(() => errors.length >= 1, "onError 收到坏 JSON 错误");
         expect(loader.get()).toBe(env1); // 缓存不变（旧引用）
-        expect(loader.get().llm.model).toBe("model-a");
+        expect(loader.get().llm.model).toBe("test/model-a");
       } finally {
         loader.stop();
         rmSync(dirs.base, { recursive: true, force: true });
@@ -209,8 +215,8 @@ describe("createEnvLoader", () => {
           () => received.length >= 1,
           "第二个 subscriber 收到 model-b"
         );
-        expect(received[0]).toBe("model-b");
-        expect(loader.get().llm.model).toBe("model-b"); // 缓存已更新
+        expect(received[0]).toBe("test/model-b");
+        expect(loader.get().llm.model).toBe("test/model-b"); // 缓存已更新
       } finally {
         loader.stop();
         rmSync(dirs.base, { recursive: true, force: true });
@@ -253,7 +259,7 @@ describe("createEnvLoader", () => {
         await new Promise((r) => setTimeout(r, 80));
         writeFileSync(dirs.userFile, "{ not-json", "utf8"); // 坏 JSON → reload 抛错
         await waitUntil(() => errors.length >= 1, "第二个 onError 收到错误");
-        expect(loader.get().llm.model).toBe("model-a"); // 缓存保持旧值
+        expect(loader.get().llm.model).toBe("test/model-a"); // 缓存保持旧值
       } finally {
         loader.stop();
         rmSync(dirs.base, { recursive: true, force: true });
@@ -303,16 +309,16 @@ describe("createEnvLoader", () => {
         home: dirsB.home,
       });
       try {
-        expect(loaderA.get().llm.model).toBe("model-a");
-        expect(loaderB.get().llm.model).toBe("model-b");
+        expect(loaderA.get().llm.model).toBe("test/model-a");
+        expect(loaderB.get().llm.model).toBe("test/model-b");
         // A 的 watcher 事件不通知 B 的 subscriber。
         const bReceived: string[] = [];
         loaderB.subscribe((env) => bReceived.push(env.llm.model));
         writeSettings(dirsA, "model-a2");
         await new Promise((r) => setTimeout(r, SETTLE_MS));
         expect(bReceived.length).toBe(0);
-        expect(loaderA.get().llm.model).toBe("model-a2");
-        expect(loaderB.get().llm.model).toBe("model-b");
+        expect(loaderA.get().llm.model).toBe("test/model-a2");
+        expect(loaderB.get().llm.model).toBe("test/model-b");
       } finally {
         loaderA.stop();
         loaderB.stop();
@@ -352,14 +358,14 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         await new Promise((r) => setTimeout(r, 80));
         // 模拟一次写回：内容写入文件 + 登记同一 bytes（run.tsx 写回后的接线；
         // ADR-0084：写回目标是用户文件）。
-        const bytes = `${JSON.stringify({ llm: { model: "model-a" } })}\n`;
+        const bytes = settingsBytes("model-a");
         writeFileSync(dirs.userFile, bytes, "utf8");
         loader.markSelfWrite(dirs.userFile, bytes);
         // 同一内容稳定窗口内不得触发 reload（跳过）。
         await new Promise((r) => setTimeout(r, SETTLE_MS));
         expect(received.length).toBe(0);
         expect(loader.get()).toBe(env1); // 缓存引用不变（未 reload）
-        expect(loader.get().llm.model).toBe("model-a");
+        expect(loader.get().llm.model).toBe("test/model-a");
       } finally {
         loader.stop();
         rmSync(dirs.base, { recursive: true, force: true });
@@ -380,8 +386,8 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         loader.subscribe((env) => received.push(env.llm.model));
         await new Promise((r) => setTimeout(r, 80));
         // 同一路径登记两个不同内容（thinking 面板 + effort 面板两次写回）。
-        const bytesX = `${JSON.stringify({ llm: { model: "model-x" } })}\n`;
-        const bytesY = `${JSON.stringify({ llm: { model: "model-y" } })}\n`;
+        const bytesX = settingsBytes("model-x");
+        const bytesY = settingsBytes("model-y");
         loader.markSelfWrite(dirs.userFile, bytesX);
         loader.markSelfWrite(dirs.userFile, bytesY);
         // 写回内容 X → 命中登记（Set 剩 Y）→ 跳过 reload。
@@ -414,15 +420,12 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         loader.subscribe((env) => received.push(env.llm.model));
         await new Promise((r) => setTimeout(r, 80));
         // 登记一个「当前文件」的哨兵，但外部写的内容不同 → 不该被吞。
-        loader.markSelfWrite(
-          dirs.userFile,
-          `${JSON.stringify({ llm: { model: "model-ghost" } })}\n`
-        );
+        loader.markSelfWrite(dirs.userFile, settingsBytes("model-ghost"));
         writeSettings(dirs, "model-b"); // 外部改动：内容 ≠ 登记内容
         await waitUntil(() => received.length >= 1, "subscriber 收到 model-b");
-        expect(received[0]).toBe("model-b");
+        expect(received[0]).toBe("test/model-b");
         expect(loader.get()).not.toBe(env1);
-        expect(loader.get().llm.model).toBe("model-b");
+        expect(loader.get().llm.model).toBe("test/model-b");
       } finally {
         loader.stop();
         rmSync(dirs.base, { recursive: true, force: true });
@@ -442,7 +445,7 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         const received: string[] = [];
         loader.subscribe((env) => received.push(env.llm.model));
         await new Promise((r) => setTimeout(r, 80));
-        const bytes = `${JSON.stringify({ llm: { model: "model-b" } })}\n`;
+        const bytes = settingsBytes("model-b");
         // 第一次写回：写盘后登记（100ms debounce 窗口内登记必先于 onChange 到达，
         // 与 run.tsx 的 persist → markSelfWrite 时序一致）→ 哨兵命中吞掉。
         // 路径 = write-back 目标（ADR-0084：用户层键写用户文件）。
@@ -457,9 +460,9 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
           () => received.length >= 1,
           "第二次同内容被外部 reload"
         );
-        expect(received[0]).toBe("model-b");
+        expect(received[0]).toBe("test/model-b");
         expect(loader.get()).not.toBe(env1);
-        expect(loader.get().llm.model).toBe("model-b");
+        expect(loader.get().llm.model).toBe("test/model-b");
       } finally {
         loader.stop();
         rmSync(dirs.base, { recursive: true, force: true });
@@ -480,8 +483,7 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         loader.subscribe((env) => received.push(env.llm.model));
         await new Promise((r) => setTimeout(r, 80));
         // 登记 9 条不同路径 → 第 1 条（userFile，即写回目标）被 LRU 挤掉。
-        const filler = (i: number): string =>
-          `${JSON.stringify({ llm: { model: `filler-${i}` } })}\n`;
+        const filler = (i: number): string => settingsBytes(`filler-${i}`);
         loader.markSelfWrite(dirs.userFile, filler(0));
         for (let i = 1; i < 9; i++) {
           loader.markSelfWrite(join(dirs.base, `other-${i}.json`), filler(i));
@@ -489,9 +491,9 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         // userFile 是最旧路径 → 被挤掉 → 同内容事件按外部 reload。
         writeFileSync(dirs.userFile, filler(0), "utf8");
         await waitUntil(() => received.length >= 1, "旧路径不再命中 → reload");
-        expect(received[0]).toBe("filler-0");
+        expect(received[0]).toBe("test/filler-0");
         expect(loader.get()).not.toBe(env1);
-        expect(loader.get().llm.model).toBe("filler-0");
+        expect(loader.get().llm.model).toBe("test/filler-0");
       } finally {
         loader.stop();
         rmSync(dirs.base, { recursive: true, force: true });
@@ -513,10 +515,7 @@ describe("createEnvLoader self-write 哨兵 (T2)", () => {
         await new Promise((r) => setTimeout(r, 80));
         // 登记当前内容 → 删除文件（外部操作）→ watcher 事件触发时读失败 →
         // consumeSelfWrite 返回 false → 照常 reload（模型缺失 → onError）。
-        loader.markSelfWrite(
-          dirs.userFile,
-          `${JSON.stringify({ llm: { model: "model-a" } })}\n`
-        );
+        loader.markSelfWrite(dirs.userFile, settingsBytes("model-a"));
         rmSync(dirs.userFile);
         const errors: unknown[] = [];
         loader.onError((err) => errors.push(err));

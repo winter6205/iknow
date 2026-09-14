@@ -108,15 +108,22 @@ function printCliError(err: unknown): void {
     return;
   }
   if (isLlmProviderConfigError(err)) {
-    writeErr(
-      JSON.stringify({
-        error: "llm_provider_api_key_missing",
-        code: err.kind,
-        provider: err.providerId,
-        apiKeyEnv: err.apiKeyEnv,
-        message: formatLlmProviderConfigError(err),
-      })
-    );
+    const payload =
+      err.kind === "provider_model_not_registered"
+        ? {
+            error: "llm_provider_model_not_registered",
+            code: err.kind,
+            model: err.model,
+            message: formatLlmProviderConfigError(err),
+          }
+        : {
+            error: "llm_provider_api_key_missing",
+            code: err.kind,
+            provider: err.providerId,
+            apiKeyEnv: err.apiKeyEnv,
+            message: formatLlmProviderConfigError(err),
+          };
+    writeErr(JSON.stringify(payload));
     return;
   }
   if (isIknowError(err)) {

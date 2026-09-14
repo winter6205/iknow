@@ -22,12 +22,13 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadIknowEnv } from "../../src/config/env.ts";
+import { loadIknowSettings } from "../../src/config/settings.ts";
 import {
-  loadIknowSettings,
-  type IknowSettings,
-} from "../../src/config/settings.ts";
+  installTestProviderApiKey,
+  withTestLlmProvider,
+} from "../_helpers/test-llm-settings.ts";
 
-const EMPTY_SETTINGS: IknowSettings = { llm: { model: "test-model" } };
+const EMPTY_SETTINGS = withTestLlmProvider();
 const ENV_KEYS = [
   "IKNOW_LLM_TIMEOUT_MS",
   "IKNOW_LLM_IDLE_TIMEOUT_MS",
@@ -56,6 +57,7 @@ async function makeSettings(
 describe("#742 T1 env: idle / 硬顶默认值", () => {
   beforeEach(() => {
     for (const k of ENV_KEYS) delete process.env[k];
+    installTestProviderApiKey();
   });
   afterEach(() => {
     for (const k of ENV_KEYS) delete process.env[k];
@@ -83,6 +85,7 @@ describe("#742 T1 env: idle / 硬顶默认值", () => {
 describe("#742 T1 env: idle / 硬顶覆盖链", () => {
   beforeEach(() => {
     for (const k of ENV_KEYS) delete process.env[k];
+    installTestProviderApiKey();
   });
   afterEach(() => {
     for (const k of ENV_KEYS) delete process.env[k];
@@ -97,9 +100,10 @@ describe("#742 T1 env: idle / 硬顶覆盖链", () => {
   });
 
   it("env 不设、settings 设了 → settings 生效", () => {
-    const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", idleTimeoutMs: 30_000, hardCapMs: 400_000 },
-    });
+    const env = loadIknowEnv(
+      process.cwd(),
+      withTestLlmProvider({ idleTimeoutMs: 30_000, hardCapMs: 400_000 })
+    );
     assert.equal(env.llm.idleTimeoutMs, 30_000);
     assert.equal(env.llm.hardCapMs, 400_000);
   });
@@ -107,9 +111,10 @@ describe("#742 T1 env: idle / 硬顶覆盖链", () => {
   it("env > settings", () => {
     process.env.IKNOW_LLM_IDLE_TIMEOUT_MS = "45000";
     process.env.IKNOW_LLM_HARD_CAP_MS = "600000";
-    const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", idleTimeoutMs: 30_000, hardCapMs: 400_000 },
-    });
+    const env = loadIknowEnv(
+      process.cwd(),
+      withTestLlmProvider({ idleTimeoutMs: 30_000, hardCapMs: 400_000 })
+    );
     assert.equal(env.llm.idleTimeoutMs, 45_000);
     assert.equal(env.llm.hardCapMs, 600_000);
   });
@@ -128,9 +133,10 @@ describe("#742 T1 env: idle / 硬顶覆盖链", () => {
     for (const bad of ["0", "-1"]) {
       process.env.IKNOW_LLM_IDLE_TIMEOUT_MS = bad;
       process.env.IKNOW_LLM_HARD_CAP_MS = bad;
-      const fromSettings = loadIknowEnv(process.cwd(), {
-        llm: { model: "test-model", idleTimeoutMs: 30_000, hardCapMs: 400_000 },
-      });
+      const fromSettings = loadIknowEnv(
+        process.cwd(),
+        withTestLlmProvider({ idleTimeoutMs: 30_000, hardCapMs: 400_000 })
+      );
       assert.equal(fromSettings.llm.idleTimeoutMs, 30_000, `idle bad=${bad}`);
       assert.equal(fromSettings.llm.hardCapMs, 400_000, `hardCap bad=${bad}`);
 

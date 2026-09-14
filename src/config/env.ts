@@ -237,33 +237,42 @@ export function isWebEnvConfigError(err: unknown): err is WebEnvConfigError {
  * provider 显式登记 apiKeyEnv 即声明走 env，静默降级会把「配错 env 名」伪装
  * 成「用另一把 key 正常工作」。
  */
-export type LlmProviderConfigError = {
-  kind: "provider_api_key_missing";
-  providerId: string;
-  apiKeyEnv: string;
-};
+export type LlmProviderConfigError =
+  | {
+      kind: "provider_api_key_missing";
+      providerId: string;
+      apiKeyEnv: string;
+    }
+  | {
+      kind: "provider_model_not_registered";
+      model: string;
+    };
 
-/** ADR-0093：provider typed-error 判别守卫（kind + 两个 payload 字段同款判定）。 */
+/** ADR-0093：provider typed-error 判别守卫。 */
 export function isLlmProviderConfigError(
   err: unknown
 ): err is LlmProviderConfigError {
   if (err === null || typeof err !== "object") return false;
   const maybe = err as Record<string, unknown>;
-  return (
-    maybe.kind === "provider_api_key_missing" &&
-    typeof maybe.providerId === "string" &&
-    typeof maybe.apiKeyEnv === "string"
-  );
+  if (maybe.kind === "provider_api_key_missing") {
+    return (
+      typeof maybe.providerId === "string" &&
+      typeof maybe.apiKeyEnv === "string"
+    );
+  }
+  if (maybe.kind === "provider_model_not_registered") {
+    return typeof maybe.model === "string";
+  }
+  return false;
 }
 
-/**
- * ADR-0093：`LlmProviderConfigError` 文本渲染（shape
- * `provider_api_key_missing: <providerId> (env <apiKeyEnv> unset)`）。
- * 只出 provider id 与 env var 名，绝不出密钥值。
- */
+/** ADR-0093：`LlmProviderConfigError` 文本渲染；只出 provider / env 名，绝不出密钥值。 */
 export function formatLlmProviderConfigError(
   err: LlmProviderConfigError
 ): string {
+  if (err.kind === "provider_model_not_registered") {
+    return `provider_model_not_registered: ${err.model} (not in llm.providers)`;
+  }
   return `provider_api_key_missing: ${err.providerId} (env ${err.apiKeyEnv} unset)`;
 }
 
@@ -272,7 +281,7 @@ export function formatLlmProviderConfigError(
  *  - `providerId`：按**第一个** `/` 拆分出的首段（trim 后非空，且尾段也非空，
  *    才算 provider 形态）；
  *  - `provider`：命中的 provider 记录；未命中 / 非 provider 形态 → undefined
- *    （= 旧路径，不是失败）。
+ *    （`resolveLlmTransport` 会抛 `provider_model_not_registered`）。
  *
  * 尾段（modelId）只在形态判定里用一次：本函数把它 trim 后丢弃，不放进结果 ——
  * 消费方 `resolveLlmTransport` 只需要 providerId 查表；model 串本身（含尾段）
@@ -303,9 +312,8 @@ function resolveProviderApiKey(apiKeyEnv: string): string | undefined {
 
 /**
  * ADR-0093 / spec SC2：`settings.llm.model` 的 `provider/model` 拆分与注册表
- * 查找。**未命中 = 走回今日路径**（fallback：`IKNOW_LLM_BASE_URL` +
- * `settings.llm.apiKey`，SC3 back-compat），故消费方在 `provider === undefined`
- * 时直接落旧解析链，这里的 undefined 不是失败。
+ * 查找。**未命中 / providers 缺席 → typed 抛**（`provider_model_not_registered`），
+ * 不再回落 `IKNOW_LLM_BASE_URL` + `settings.llm.apiKey` 旧路径。
  *
  *  - 首个 `/` 拆分，两段 trim 后都非空才算 provider 形态（`/x` / `x/` /
  *    `a//b` 形态 → 尾段为空 → 按未命中处理，不抛错、不拆第二刀）；
@@ -334,14 +342,8 @@ function resolveLlmProvider(
  * 命中（SC2）→ baseUrl = provider.baseUrl 去尾斜杠、apiKey =
  * `process.env[provider.apiKeyEnv]`、headers = provider.headers（缺席则不产出）；
  * apiKeyEnv 缺席 / 空 → 抛 typed `LlmProviderConfigError`（SC4），**绝不**回退
- * `settings.llm.apiKey` 字面。
- * 未命中（SC3）→ 旧路径逐字节不变：baseUrl = `IKNOW_LLM_BASE_URL` 去尾斜杠
- * （默认 `http://localhost:20128/v1`）、apiKey = `expandPlaceholders(...)`、
- * 不产出 headers。
- *
- * 三元组一起返回（而非各自 resolver）避免每个字段各查一次注册表；命中分支
- * 在 apiKeyEnv 缺席时 throw，callers 拿到本函数的返回值即「要么是完整命中
- * 三元组、要么是完整旧路径三元组」。
+ * `settings.llm.apiKey` 字面。providers 缺席 / 空数组 / 未命中 →
+ * `provider_model_not_registered`。
  */
 interface ResolvedLlmTransport {
   readonly baseUrl: string;
@@ -350,24 +352,22 @@ interface ResolvedLlmTransport {
 }
 
 function resolveLlmTransport(
-  file: Record<string, string>,
   mergedSettings: IknowSettings,
   model: string
 ): ResolvedLlmTransport {
-  const { providerId, provider } = resolveLlmProvider(
-    mergedSettings.llm?.providers,
-    model
-  );
+  const providers = mergedSettings.llm?.providers;
+  if (providers === undefined || providers.length === 0) {
+    throw {
+      kind: "provider_model_not_registered",
+      model,
+    } satisfies LlmProviderConfigError;
+  }
+  const { providerId, provider } = resolveLlmProvider(providers, model);
   if (provider === undefined) {
-    return {
-      baseUrl: envGet({
-        file,
-        key: "IKNOW_LLM_BASE_URL",
-        fallback: "http://localhost:20128/v1",
-      }).replace(/\/$/, ""),
-      apiKey: expandPlaceholders(mergedSettings.llm?.apiKey, file),
-      headers: undefined,
-    };
+    throw {
+      kind: "provider_model_not_registered",
+      model,
+    } satisfies LlmProviderConfigError;
   }
   const apiKey = resolveProviderApiKey(provider.apiKeyEnv);
   if (apiKey === undefined) {
@@ -866,10 +866,9 @@ export function loadIknowEnv(
     throw new Error(LLM_MODEL_MISSING_MESSAGE);
   }
 
-  // ADR-0093：model 串命中 providers 注册表 → baseUrl/apiKey/headers 走 provider
-  // 三元组；未命中 → 旧路径（IKNOW_LLM_BASE_URL + settings.llm.apiKey）逐字节
-  // 不变（SC3 back-compat）。apiKeyEnv 缺席 → 本调用内 typed 抛（SC4，消费点守卫）。
-  const transport = resolveLlmTransport(file, mergedSettings, modelRaw);
+  // ADR-0093：model 串必须命中 providers 注册表 → baseUrl/apiKey/headers 走
+  // provider 三元组；未命中 / providers 缺席 → typed 抛。apiKeyEnv 缺席 → SC4。
+  const transport = resolveLlmTransport(mergedSettings, modelRaw);
 
   return {
     llm: {

@@ -128,6 +128,10 @@ vi.mock(
 
 import { runSubagentWorker } from "../../src/harness/subagent/worker.ts";
 import { FS_MODE_ENV_KEY } from "../../src/config/workspace-root.ts";
+import {
+  installTestProviderApiKey,
+  llmSettingsJson,
+} from "../_helpers/test-llm-settings.ts";
 
 /** 本文件改的 ambient env 键（跑完原样恢复）。 */
 const ENV_KEYS = [
@@ -194,7 +198,7 @@ async function runWorkerEntry(opts: {
     if (!savedEnv.has(key)) savedEnv.set(key, process.env[key]);
   }
   process.env.HOME = home;
-  process.env.IKNOW_LLM_BASE_URL = "http://127.0.0.1:9/v1";
+  installTestProviderApiKey();
   process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = "1024";
   process.env.IKNOW_LLM_TIMEOUT_MS = "5000";
   process.env.IKNOW_LLM_STREAM = "off";
@@ -210,7 +214,7 @@ async function runWorkerEntry(opts: {
   mkdirSync(join(home, ".iknow"), { recursive: true });
   writeFileSync(
     join(home, ".iknow", "settings.json"),
-    JSON.stringify({ llm: { model: "stub-model", apiKey: "sk-test-fs-mode" } })
+    JSON.stringify(llmSettingsJson({ model: "test/stub-model" }))
   );
 
   // 3) PATH = bwrap 替身目录 + 真 PATH（bash / echo 等仍可达）。

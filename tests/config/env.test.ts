@@ -9,8 +9,8 @@
  * 不构造真实 .env 文件,直接通过 process.env 控制输入(loadIknowEnv 读
  * process.env > .env.local > .env;此处只设 process.env,无需 .env)。
  *
- * 末尾追加 ADR-0093 provider 解析组（`llm.providers` 命中 / 未命中两档 +
- * apiKeyEnv 缺席 typed 抛）：provider 命中路径的 key **只读 process.env**，
+ * 末尾追加 ADR-0093 provider 解析组（`llm.providers` 唯一 LLM 承载 +
+ * apiKeyEnv 缺席 typed 抛）：provider 路径的 key **只读 process.env**，
  * 不走 fileMap（该组单独写 `.env.local` 负例钉这一点）。
  */
 
@@ -35,7 +35,26 @@ import {
  * 污染导致断言非确定）。loadIknowEnv 传 settings 时跳过文件读取。
  * 含最小 `llm.model`（env loader fail-fast：model 必须有来源，否则 loader 抛错）。
  */
-const EMPTY_SETTINGS: IknowSettings = { llm: { model: "test-model" } };
+const TEST_LLM_PROVIDER = {
+  id: "test",
+  baseUrl: "http://localhost:20128/v1",
+  apiKeyEnv: "IKNOW_TEST_API_KEY",
+  models: [{ id: "model" }],
+};
+
+const EMPTY_SETTINGS: IknowSettings = {
+  llm: {
+    model: "test/model",
+    providers: [TEST_LLM_PROVIDER],
+  },
+};
+
+beforeEach(() => {
+  process.env.IKNOW_TEST_API_KEY = "test-key";
+});
+afterEach(() => {
+  delete process.env.IKNOW_TEST_API_KEY;
+});
 
 const ENV_KEYS = [
   "IKNOW_LLM_THINKING",
@@ -374,14 +393,22 @@ describe("loadIknowEnv — llm.timeoutMs (#358 settings 双字段, per-call)", (
   it("env > settings：settings 设了 45000、env 设了 30000 → env wins", () => {
     process.env.IKNOW_LLM_TIMEOUT_MS = "30000";
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", timeoutMs: 45_000 },
+      llm: {
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
+        timeoutMs: 45_000,
+      },
     });
     assert.equal(env.llm.timeoutMs, 30_000);
   });
 
   it("env 不设、settings 设了 → settings wins（45000）", () => {
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", timeoutMs: 45_000 },
+      llm: {
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
+        timeoutMs: 45_000,
+      },
     });
     assert.equal(env.llm.timeoutMs, 45_000);
   });
@@ -394,7 +421,11 @@ describe("loadIknowEnv — llm.timeoutMs (#358 settings 双字段, per-call)", (
   it("非法 env 值视为未设 → 回退到 settings", () => {
     process.env.IKNOW_LLM_TIMEOUT_MS = "abc";
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", timeoutMs: 45_000 },
+      llm: {
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
+        timeoutMs: 45_000,
+      },
     });
     assert.equal(env.llm.timeoutMs, 45_000);
   });
@@ -404,7 +435,11 @@ describe("loadIknowEnv — llm.timeoutMs (#358 settings 双字段, per-call)", (
       process.env.IKNOW_LLM_TIMEOUT_MS = bad;
       assert.equal(
         loadIknowEnv(process.cwd(), {
-          llm: { model: "test-model", timeoutMs: 45_000 },
+          llm: {
+            model: "test/model",
+            providers: [TEST_LLM_PROVIDER],
+            timeoutMs: 45_000,
+          },
         }).llm.timeoutMs,
         45_000,
         `timeoutMs=${bad} 应回退到 settings`
@@ -421,7 +456,11 @@ describe("loadIknowEnv — llm.timeoutMs (#358 settings 双字段, per-call)", (
     const largeFiniteInteger = Number.MAX_SAFE_INTEGER;
     process.env.IKNOW_LLM_TIMEOUT_MS = String(largeFiniteInteger);
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", timeoutMs: 45_000 },
+      llm: {
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
+        timeoutMs: 45_000,
+      },
     });
     assert.equal(env.llm.timeoutMs, largeFiniteInteger);
   });
@@ -489,7 +528,7 @@ describe("loadIknowEnv — subagent.taskTimeoutMs (#358 settings 双字段, per-
   it("env > settings：settings 设了 3600000、env 设了 7200000 → env wins", () => {
     process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "7200000";
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model" },
+      llm: { model: "test/model", providers: [TEST_LLM_PROVIDER] },
       subagent: { taskTimeoutMs: 3_600_000 },
     });
     assert.equal(env.subagent?.taskTimeoutMs, 7_200_000);
@@ -497,7 +536,7 @@ describe("loadIknowEnv — subagent.taskTimeoutMs (#358 settings 双字段, per-
 
   it("env 不设、settings 设了 → settings wins（3600000）", () => {
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model" },
+      llm: { model: "test/model", providers: [TEST_LLM_PROVIDER] },
       subagent: { taskTimeoutMs: 3_600_000 },
     });
     assert.equal(env.subagent?.taskTimeoutMs, 3_600_000);
@@ -506,7 +545,7 @@ describe("loadIknowEnv — subagent.taskTimeoutMs (#358 settings 双字段, per-
   it("非法 env 值视为未设 → 回退到 settings", () => {
     process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "abc";
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model" },
+      llm: { model: "test/model", providers: [TEST_LLM_PROVIDER] },
       subagent: { taskTimeoutMs: 3_600_000 },
     });
     assert.equal(env.subagent?.taskTimeoutMs, 3_600_000);
@@ -517,7 +556,7 @@ describe("loadIknowEnv — subagent.taskTimeoutMs (#358 settings 双字段, per-
       process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = bad;
       assert.equal(
         loadIknowEnv(process.cwd(), {
-          llm: { model: "test-model" },
+          llm: { model: "test/model", providers: [TEST_LLM_PROVIDER] },
           subagent: { taskTimeoutMs: 3_600_000 },
         }).subagent?.taskTimeoutMs,
         3_600_000,
@@ -570,7 +609,7 @@ describe("loadIknowEnv — subagent.maxConcurrentWorkers (T4)", () => {
   it("合法 env 覆盖 settings", () => {
     process.env.IKNOW_SUBAGENT_MAX_CONCURRENT_WORKERS = "3";
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model" },
+      llm: { model: "test/model", providers: [TEST_LLM_PROVIDER] },
       subagent: { maxConcurrentWorkers: 7 },
     });
     assert.equal(env.subagent.maxConcurrentWorkers, 3);
@@ -578,7 +617,7 @@ describe("loadIknowEnv — subagent.maxConcurrentWorkers (T4)", () => {
 
   it("env 未设时使用合法 settings", () => {
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model" },
+      llm: { model: "test/model", providers: [TEST_LLM_PROVIDER] },
       subagent: { maxConcurrentWorkers: 7 },
     });
     assert.equal(env.subagent.maxConcurrentWorkers, 7);
@@ -589,7 +628,7 @@ describe("loadIknowEnv — subagent.maxConcurrentWorkers (T4)", () => {
       process.env.IKNOW_SUBAGENT_MAX_CONCURRENT_WORKERS = bad;
       assert.equal(
         loadIknowEnv(process.cwd(), {
-          llm: { model: "test-model" },
+          llm: { model: "test/model", providers: [TEST_LLM_PROVIDER] },
           subagent: { maxConcurrentWorkers: 7 },
         }).subagent.maxConcurrentWorkers,
         7,
@@ -654,7 +693,8 @@ describe("loadIknowEnv — settings merge (#353)", () => {
       llm: {
         maxTurns: 25,
         compress: { contextWindow: 300000, thresholdTokens: 200000 },
-        model: "test-model",
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
       },
     });
     assert.equal(env.llm.maxTurns, 25);
@@ -670,7 +710,8 @@ describe("loadIknowEnv — settings merge (#353)", () => {
       llm: {
         maxTurns: 25,
         compress: { contextWindow: 300000, thresholdTokens: 200000 },
-        model: "test-model",
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
       },
     });
     assert.equal(env.llm.maxTurns, 10);
@@ -680,7 +721,11 @@ describe("loadIknowEnv — settings merge (#353)", () => {
 
   it("settings 只提供部分字段，其余保持默认", () => {
     const env = loadIknowEnv(process.cwd(), {
-      llm: { maxTurns: 15, model: "test-model" },
+      llm: {
+        maxTurns: 15,
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
+      },
     });
     assert.equal(env.llm.maxTurns, 15);
     assert.equal(env.compress.contextWindow, 200000);
@@ -690,7 +735,8 @@ describe("loadIknowEnv — settings merge (#353)", () => {
   it("settings 提供 thinking / thinkingEffort（env 未设）→ env 反映", () => {
     const env = loadIknowEnv(process.cwd(), {
       llm: {
-        model: "test-model",
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
         thinking: "adaptive",
         thinkingEffort: "high",
       },
@@ -703,7 +749,8 @@ describe("loadIknowEnv — settings merge (#353)", () => {
     process.env.IKNOW_LLM_THINKING = "off";
     const env = loadIknowEnv(process.cwd(), {
       llm: {
-        model: "test-model",
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
         thinking: "adaptive",
         thinkingEffort: "max",
       },
@@ -714,7 +761,11 @@ describe("loadIknowEnv — settings merge (#353)", () => {
   it("env 覆盖 settings：THINKING=adaptive 压过 settings off", () => {
     process.env.IKNOW_LLM_THINKING = "adaptive";
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", thinking: "off" },
+      llm: {
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
+        thinking: "off",
+      },
     });
     assert.equal(env.llm.thinking, "adaptive");
   });
@@ -723,7 +774,8 @@ describe("loadIknowEnv — settings merge (#353)", () => {
     process.env.IKNOW_LLM_THINKING_EFFORT = "low";
     const env = loadIknowEnv(process.cwd(), {
       llm: {
-        model: "test-model",
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
         thinking: "adaptive",
         thinkingEffort: "high",
       },
@@ -735,7 +787,8 @@ describe("loadIknowEnv — settings merge (#353)", () => {
     process.env.IKNOW_LLM_THINKING_EFFORT = "extreme";
     const env = loadIknowEnv(process.cwd(), {
       llm: {
-        model: "test-model",
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
         thinking: "adaptive",
         thinkingEffort: "max",
       },
@@ -746,7 +799,11 @@ describe("loadIknowEnv — settings merge (#353)", () => {
   it("env THINKING 非法值 = 未设，回退 settings 的 thinking", () => {
     process.env.IKNOW_LLM_THINKING = "garbage";
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", thinking: "adaptive" },
+      llm: {
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
+        thinking: "adaptive",
+      },
     });
     assert.equal(env.llm.thinking, "adaptive");
   });
@@ -760,7 +817,8 @@ describe("loadIknowEnv — settings merge (#353)", () => {
   it("settings 提供 thinking=adaptive + thinkingEffort=max → 两者均派生", () => {
     const env = loadIknowEnv(process.cwd(), {
       llm: {
-        model: "test-model",
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
         thinking: "adaptive",
         thinkingEffort: "max",
       },
@@ -771,7 +829,11 @@ describe("loadIknowEnv — settings merge (#353)", () => {
 
   it("settings 仅 thinking → effort 保持默认空", () => {
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", thinking: "adaptive" },
+      llm: {
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
+        thinking: "adaptive",
+      },
     });
     assert.equal(env.llm.thinking, "adaptive");
     assert.equal(env.llm.thinkingEffort, "");
@@ -779,7 +841,11 @@ describe("loadIknowEnv — settings merge (#353)", () => {
 
   it("settings 仅 thinkingEffort → thinking 保持默认 off", () => {
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", thinkingEffort: "high" },
+      llm: {
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
+        thinkingEffort: "high",
+      },
     });
     assert.equal(env.llm.thinking, "off");
     assert.equal(env.llm.thinkingEffort, "high");
@@ -799,7 +865,8 @@ describe("loadIknowEnv — settings merge (#353)", () => {
         llm: {
           maxTurns: 42,
           compress: { contextWindow: 400000 },
-          model: "test-model",
+          model: "test/model",
+          providers: [TEST_LLM_PROVIDER],
         },
       })
     );
@@ -812,7 +879,7 @@ describe("loadIknowEnv — settings merge (#353)", () => {
 
     try {
       const env = loadIknowEnv(tmpCwd, undefined, tmpHome);
-      assert.equal(env.llm.model, "test-model");
+      assert.equal(env.llm.model, "test/model");
       assert.equal(env.llm.maxTurns, 42);
       assert.equal(env.compress.contextWindow, 400000);
       assert.equal(env.compress.thresholdTokens, undefined);
@@ -830,12 +897,25 @@ describe("loadIknowEnv — settings merge (#353)", () => {
     await mkdir(join(tmpHome, ".iknow"), { recursive: true });
     await writeFile(
       join(tmpHome, ".iknow", "settings.json"),
-      JSON.stringify({ llm: { model: "hy3-combo", maxTurns: 42 } })
+      JSON.stringify({
+        llm: {
+          model: "9router/hy3-combo",
+          maxTurns: 42,
+          providers: [
+            {
+              id: "9router",
+              baseUrl: "http://localhost:20128/v1",
+              apiKeyEnv: "IKNOW_TEST_API_KEY",
+              models: [{ id: "hy3-combo" }],
+            },
+          ],
+        },
+      })
     );
 
     try {
       const env = loadIknowEnv(tmpCwd, undefined, tmpHome);
-      assert.equal(env.llm.model, "hy3-combo");
+      assert.equal(env.llm.model, "9router/hy3-combo");
       assert.equal(env.llm.maxTurns, 42);
     } finally {
       await rm(tmpCwd, { recursive: true, force: true });
@@ -854,14 +934,26 @@ describe("loadIknowEnv — settings merge (#353)", () => {
     await mkdir(join(tmpHome, ".iknow"), { recursive: true });
     await writeFile(
       join(tmpHome, ".iknow", "settings.json"),
-      JSON.stringify({ llm: { model: "user-model" } })
+      JSON.stringify({
+        llm: {
+          model: "test/user-model",
+          providers: [
+            {
+              id: "test",
+              baseUrl: "http://localhost:20128/v1",
+              apiKeyEnv: "IKNOW_TEST_API_KEY",
+              models: [{ id: "user-model" }],
+            },
+          ],
+        },
+      })
     );
 
     try {
       // llm 是用户层键：项目文件不再覆盖 user（旧 ADR-0015 project > user
       // 对 llm 已退役）；显式注入 home 让 user 文件真实参与装配。
       const env = loadIknowEnv(tmpCwd, undefined, tmpHome);
-      assert.equal(env.llm.model, "user-model");
+      assert.equal(env.llm.model, "test/user-model");
     } finally {
       await rm(tmpCwd, { recursive: true, force: true });
       await rm(tmpHome, { recursive: true, force: true });
@@ -876,7 +968,8 @@ describe("loadIknowEnv — settings merge (#353)", () => {
       llm: {
         maxTurns: 33,
         compress: { contextWindow: 330000, thresholdTokens: 220000 },
-        model: "test-model",
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
       },
     });
     // 非法 env = 未设（envOptionalInt/envInt 回退纪律），继续走 settings 回退。
@@ -898,7 +991,8 @@ describe("loadIknowEnv — settings merge (#353)", () => {
         llm: {
           maxTurns: 9,
           compress: { contextWindow: 900000 },
-          model: "test-model",
+          model: "test/model",
+          providers: [TEST_LLM_PROVIDER],
         },
       })
     );
@@ -925,9 +1019,17 @@ describe("loadIknowEnv — model source: settings.llm.model 唯一承载 (settin
 
   it("settings.llm.model 生效（trim 后）", () => {
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "  from-settings  " },
+      llm: {
+        model: "  test/from-settings  ",
+        providers: [
+          {
+            ...TEST_LLM_PROVIDER,
+            models: [{ id: "from-settings" }],
+          },
+        ],
+      },
     });
-    assert.equal(env.llm.model, "from-settings");
+    assert.equal(env.llm.model, "test/from-settings");
   });
 
   it("settings 无 model → fail-fast 抛「no LLM model configured in settings.llm.model」", () => {
@@ -940,9 +1042,17 @@ describe("loadIknowEnv — model source: settings.llm.model 唯一承载 (settin
   it("IKNOW_LLM_MODEL env 已退役：设了也不读（不再覆盖 settings）", () => {
     process.env.IKNOW_LLM_MODEL = "from-env";
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "from-settings" },
+      llm: {
+        model: "test/from-settings",
+        providers: [
+          {
+            ...TEST_LLM_PROVIDER,
+            models: [{ id: "from-settings" }],
+          },
+        ],
+      },
     });
-    assert.equal(env.llm.model, "from-settings");
+    assert.equal(env.llm.model, "test/from-settings");
   });
 });
 
@@ -956,14 +1066,18 @@ describe("loadIknowEnv — llm.fallback (settings-model-extension)", () => {
 
   it("settings.llm.fallback = [x, y] → env.llm.fallback = [x, y]", () => {
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", fallback: ["x", "y"] },
+      llm: {
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
+        fallback: ["x", "y"],
+      },
     });
     assert.deepEqual(env.llm.fallback, ["x", "y"]);
   });
 
   it("settings 未配 fallback → env.llm.fallback = []（无兜底）", () => {
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model" },
+      llm: { model: "test/model", providers: [TEST_LLM_PROVIDER] },
     });
     assert.deepEqual(env.llm.fallback, []);
   });
@@ -981,12 +1095,16 @@ describe("loadIknowEnv — llm.fallback (settings-model-extension)", () => {
     await writeFile(
       join(emptyHome, ".iknow", "settings.json"),
       JSON.stringify({
-        llm: { model: "test-model", fallback: ["x", 5] },
+        llm: {
+          model: "test/model",
+          providers: [TEST_LLM_PROVIDER],
+          fallback: ["x", 5],
+        },
       })
     );
     try {
       const env = loadIknowEnv(tmpCwd, undefined, emptyHome);
-      assert.equal(env.llm.model, "test-model");
+      assert.equal(env.llm.model, "test/model");
       assert.deepEqual(env.llm.fallback, []);
     } finally {
       await rm(tmpCwd, { recursive: true, force: true });
@@ -1021,7 +1139,8 @@ describe("loadIknowEnv — subagent inheritance (#353)", () => {
         llm: {
           maxTurns: 77,
           compress: { contextWindow: 600000 },
-          model: "test-model",
+          model: "test/model",
+          providers: [TEST_LLM_PROVIDER],
         },
       })
     );
@@ -1059,7 +1178,8 @@ describe("loadIknowEnv — subagent inheritance (#353)", () => {
         llm: {
           maxTurns: 77,
           compress: { contextWindow: 600000 },
-          model: "test-model",
+          model: "test/model",
+          providers: [TEST_LLM_PROVIDER],
         },
       })
     );
@@ -1134,141 +1254,40 @@ describe("loadIknowEnv — mcp connect timeout (#378 根因 B)", () => {
   });
 });
 
-describe("loadIknowEnv — apiKey 解析路径 (settings-model-extension)", () => {
-  const API_KEY_VARS = ["ANTHROPIC_AUTH_TOKEN", "IKNOW_TEST_API_KEY"] as const;
+describe("loadIknowEnv — llm.apiKey 旧路径退役", () => {
   beforeEach(() => {
-    for (const k of [...ENV_KEYS, ...API_KEY_VARS]) delete process.env[k];
+    for (const k of ENV_KEYS) delete process.env[k];
   });
   afterEach(() => {
-    for (const k of [...ENV_KEYS, ...API_KEY_VARS]) delete process.env[k];
+    for (const k of ENV_KEYS) delete process.env[k];
   });
 
-  it("settings.llm.apiKey 字面 → env.llm.apiKey 原样", () => {
-    const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", apiKey: "sk-literal-123" },
-    });
-    assert.equal(env.llm.apiKey, "sk-literal-123");
-  });
-
-  it("settings.llm.apiKey 字面前后空白 → trim 后原样", () => {
-    const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", apiKey: "  sk-literal-123  " },
-    });
-    assert.equal(env.llm.apiKey, "sk-literal-123");
-  });
-
-  it("settings.llm.apiKey ${VAR} + process.env → 展开", () => {
-    process.env.IKNOW_TEST_API_KEY = "sk-from-env";
-    const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", apiKey: "${IKNOW_TEST_API_KEY}" },
-    });
-    assert.equal(env.llm.apiKey, "sk-from-env");
-  });
-
-  it("settings.llm.apiKey ${VAR} 缺失（env 无）→ undefined", () => {
-    const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", apiKey: "${IKNOW_TEST_API_KEY}" },
-    });
-    assert.equal(env.llm.apiKey, undefined);
-  });
-
-  it("settings.llm.apiKey ${VAR} + process.env 空 → undefined（消费点守卫触发）", () => {
-    process.env.IKNOW_TEST_API_KEY = "";
-    const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", apiKey: "${IKNOW_TEST_API_KEY}" },
-    });
-    assert.equal(env.llm.apiKey, undefined);
-  });
-
-  it("settings 未配 apiKey → env.llm.apiKey = undefined（不默认、不硬编码）", () => {
-    const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model" },
-    });
-    assert.equal(env.llm.apiKey, undefined);
-  });
-
-  it("settings 未配 apiKey + env ANTHROPIC_AUTH_TOKEN 有值 → 仍 undefined（env 不再直供 key）", () => {
-    // settings-model-extension：key 唯一来源 = settings.llm.apiKey；env key 变量名
-    // 不再被 loader 隐式读取（IKNOW_LLM_API_KEY_ENV 已退役）。
-    process.env.ANTHROPIC_AUTH_TOKEN = "sk-should-not-be-read";
-    const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model" },
-    });
-    assert.equal(env.llm.apiKey, undefined);
-  });
-
-  it("settings.llm.apiKey ${VAR} + .env.local 兜底 → 展开", async () => {
-    // fileMap = <cwd>/.env.local 合并；process.env 无该变量时读 file。
-    const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-apikey-file-"));
-    const tmpHome = await mkdtemp(join(tmpdir(), "iknow-env-apikey-home-"));
-    await mkdir(join(tmpHome, ".iknow"), { recursive: true });
-    // ADR-0084：apiKey 随 llm 段属用户层键 → 承载文件是 user settings。
-    await writeFile(
-      join(tmpHome, ".iknow", "settings.json"),
-      JSON.stringify({
-        llm: { model: "test-model", apiKey: "${IKNOW_TEST_API_KEY}" },
-      })
+  it("settings.llm.apiKey 不再参与 LLM 传输（providers 缺席 → typed 抛）", () => {
+    assert.throws(
+      () =>
+        loadIknowEnv(process.cwd(), {
+          llm: { model: "plain-model", apiKey: "sk-literal-123" },
+        }),
+      isLlmProviderConfigError
     );
-    await writeFile(
-      join(tmpCwd, ".env.local"),
-      "IKNOW_TEST_API_KEY=sk-from-file\n"
-    );
-    try {
-      const env = loadIknowEnv(tmpCwd, undefined, tmpHome);
-      assert.equal(env.llm.apiKey, "sk-from-file");
-    } finally {
-      await rm(tmpCwd, { recursive: true, force: true });
-      await rm(tmpHome, { recursive: true, force: true });
-    }
-  });
-
-  it('.env.local 值 = "yes" → 视同未设 → undefined', async () => {
-    const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-apikey-yes-"));
-    const tmpHome = await mkdtemp(join(tmpdir(), "iknow-env-apikey-yes-home-"));
-    await mkdir(join(tmpHome, ".iknow"), { recursive: true });
-    // ADR-0084：apiKey 随 llm 段属用户层键 → 承载文件是 user settings；
-    // 项目文件里的 llm 会被允许名单丢弃（home 须显式注入，见 loader 注释）。
-    await writeFile(
-      join(tmpHome, ".iknow", "settings.json"),
-      JSON.stringify({
-        llm: { model: "test-model", apiKey: "${IKNOW_TEST_API_KEY}" },
-      })
-    );
-    // .env.local 仍读 <cwd>（fileMap = <cwd>/.env.local 合并）。
-    await writeFile(join(tmpCwd, ".env.local"), "IKNOW_TEST_API_KEY=yes\n");
-    try {
-      const env = loadIknowEnv(tmpCwd, undefined, tmpHome);
-      // model 必须来自 tmpHome fixture（而非真实 ~/.iknow/settings.json）：
-      // 若 home 注入丢失，本断言在开发机上同样失败，不再被本机配置掩蔽。
-      assert.equal(env.llm.model, "test-model");
-      assert.equal(env.llm.apiKey, undefined);
-    } finally {
-      await rm(tmpCwd, { recursive: true, force: true });
-      await rm(tmpHome, { recursive: true, force: true });
-    }
-  });
-
-  it("settings.llm.apiKey 非法 ${ 未闭合 → settings 层丢弃 → env.llm.apiKey undefined", async () => {
-    const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "test-model", apiKey: "${VAR" },
-    });
-    assert.equal(env.llm.apiKey, undefined);
   });
 
   it("IKNOW_LLM_MODEL env 已退役：设了也不读（model 仍来自 settings）", () => {
     process.env.IKNOW_LLM_MODEL = "from-env";
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "from-settings", apiKey: "sk-literal" },
+      llm: {
+        model: "test/model",
+        providers: [TEST_LLM_PROVIDER],
+      },
     });
-    assert.equal(env.llm.model, "from-settings");
+    assert.equal(env.llm.model, "test/model");
   });
 });
 
 describe("loadIknowEnv — llm.providers 解析 (ADR-0093 / T3)", () => {
   // provider 命中路径的 key 只读 process.env（spec 明文），故用独立 var 名，
   // 且测后清理；fileMap 侧刻意不提供任何回退（见「只读 process.env」用例）。
-  // IKNOW_LLM_BASE_URL / IKNOW_TEST_API_KEY 不在 ENV_KEYS 里，也必须在本组
-  // 内清理 —— 否则「未命中 → 回退」用例会泄漏到后续旧路径断言。
+  // IKNOW_LLM_BASE_URL / IKNOW_TEST_API_KEY 不在 ENV_KEYS 里，也必须在本组内清理。
   const PROVIDER_KEYS = [
     "MINIMAX_CN_API_KEY",
     "VOLCENGINE_ARK_API_KEY",
@@ -1447,9 +1466,7 @@ describe("loadIknowEnv — llm.providers 解析 (ADR-0093 / T3)", () => {
       () =>
         loadIknowEnv(
           process.cwd(),
-          settingsWithProviders("minimax-cn/MiniMax-M3", [MINIMAX_PROVIDER], {
-            apiKey: "sk-literal-fallback",
-          })
+          settingsWithProviders("minimax-cn/MiniMax-M3", [MINIMAX_PROVIDER])
         ),
       isLlmProviderConfigError
     );
@@ -1499,90 +1516,67 @@ describe("loadIknowEnv — llm.providers 解析 (ADR-0093 / T3)", () => {
     );
   });
 
-  it("未命中注册表 → 回退 IKNOW_LLM_BASE_URL + settings.llm.apiKey（back-compat）", () => {
-    process.env.IKNOW_LLM_BASE_URL = "https://fallback.example.com/v1/";
-    const env = loadIknowEnv(
-      process.cwd(),
-      settingsWithProviders("unknown-provider/some-model", [MINIMAX_PROVIDER], {
-        apiKey: "sk-fallback",
-      })
+  it("providers 非空且未命中 → 抛 provider_model_not_registered", () => {
+    assert.throws(
+      () =>
+        loadIknowEnv(
+          process.cwd(),
+          settingsWithProviders("unknown-provider/some-model", [
+            MINIMAX_PROVIDER,
+          ])
+        ),
+      isLlmProviderConfigError
     );
-    assert.equal(env.llm.baseUrl, "https://fallback.example.com/v1");
-    assert.equal(env.llm.apiKey, "sk-fallback");
-    assert.equal("headers" in env.llm, false);
-  });
-
-  it("model 无 / → 旧路径逐字节一致（baseUrl 默认值 + apiKey 占位符展开）", () => {
-    process.env.IKNOW_TEST_API_KEY = "sk-from-env";
-    const env = loadIknowEnv(
-      process.cwd(),
-      settingsWithProviders("plain-model", [MINIMAX_PROVIDER], {
-        apiKey: "${IKNOW_TEST_API_KEY}",
-      })
-    );
-    assert.equal(env.llm.baseUrl, "http://localhost:20128/v1");
-    assert.equal(env.llm.apiKey, "sk-from-env");
-    assert.equal(env.llm.model, "plain-model");
-    assert.equal("headers" in env.llm, false);
-  });
-
-  it("providers 段缺席 → 旧路径，且 model 含 / 也不查表（SC3）", () => {
-    process.env.IKNOW_LLM_BASE_URL = "https://legacy.example.com/v1";
-    const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "minimax-cn/MiniMax-M3", apiKey: "sk-legacy" },
-    });
-    assert.equal(env.llm.baseUrl, "https://legacy.example.com/v1");
-    assert.equal(env.llm.apiKey, "sk-legacy");
-    assert.equal(env.llm.model, "minimax-cn/MiniMax-M3");
-    assert.equal("headers" in env.llm, false);
-  });
-
-  it("providers 空数组 → 旧路径（空数组 ≡ 段缺席）", () => {
-    process.env.IKNOW_LLM_BASE_URL = "https://legacy.example.com/v1";
-    const env = loadIknowEnv(
-      process.cwd(),
-      settingsWithProviders("minimax-cn/MiniMax-M3", [], {
-        apiKey: "sk-legacy",
-      })
-    );
-    assert.equal(env.llm.baseUrl, "https://legacy.example.com/v1");
-    assert.equal(env.llm.apiKey, "sk-legacy");
-  });
-
-  it("边界：空 providerId / 空 modelId 一律按未命中走旧路径（不抛错）", () => {
-    process.env.IKNOW_LLM_BASE_URL = "https://legacy.example.com/v1";
-    // 注：model 是字面来源（loader 只 trim 首尾，不改写内容），故
-    // "minimax-cn/   " 落库仍是 "minimax-cn/" —— 尾随空白在 model 层被 trim，
-    // provider 拆分看到的是已 trim 串（modelId 为空 → 未命中）。
-    for (const [model, expectedModel] of [
-      ["/MiniMax-M3", "/MiniMax-M3"],
-      ["minimax-cn/", "minimax-cn/"],
-      ["minimax-cn/   ", "minimax-cn/"],
-    ] as const) {
-      const env = loadIknowEnv(
+    try {
+      loadIknowEnv(
         process.cwd(),
-        settingsWithProviders(model, [MINIMAX_PROVIDER], {
-          apiKey: "sk-legacy",
-        })
+        settingsWithProviders("unknown-provider/some-model", [MINIMAX_PROVIDER])
       );
+      assert.fail("expected loadIknowEnv to throw");
+    } catch (err) {
+      assert.ok(isLlmProviderConfigError(err));
+      assert.equal(err.kind, "provider_model_not_registered");
+      assert.equal(err.model, "unknown-provider/some-model");
       assert.equal(
-        env.llm.baseUrl,
-        "https://legacy.example.com/v1",
-        `model=${JSON.stringify(model)} 应走旧路径`
+        formatLlmProviderConfigError(err),
+        "provider_model_not_registered: unknown-provider/some-model (not in llm.providers)"
       );
-      assert.equal(env.llm.apiKey, "sk-legacy");
-      assert.equal(env.llm.model, expectedModel);
     }
   });
 
-  it("边界：model 为 / 单个字符 → 两段均空 → 旧路径（不抛 typed）", () => {
-    process.env.IKNOW_LLM_BASE_URL = "https://legacy.example.com/v1";
-    const env = loadIknowEnv(
-      process.cwd(),
-      settingsWithProviders("/", [MINIMAX_PROVIDER], { apiKey: "sk-legacy" })
+  it("providers 段缺席 → provider_model_not_registered", () => {
+    assert.throws(
+      () =>
+        loadIknowEnv(process.cwd(), {
+          llm: { model: "minimax-cn/MiniMax-M3", apiKey: "sk-legacy" },
+        }),
+      isLlmProviderConfigError
     );
-    assert.equal(env.llm.baseUrl, "https://legacy.example.com/v1");
-    assert.equal(env.llm.model, "/");
+  });
+
+  it("providers 空数组 → provider_model_not_registered", () => {
+    assert.throws(
+      () =>
+        loadIknowEnv(
+          process.cwd(),
+          settingsWithProviders("minimax-cn/MiniMax-M3", [])
+        ),
+      isLlmProviderConfigError
+    );
+  });
+
+  it("边界：空 providerId / 空 modelId + providers 非空 → provider_model_not_registered", () => {
+    for (const model of ["/MiniMax-M3", "minimax-cn/", "minimax-cn/   ", "/"]) {
+      assert.throws(
+        () =>
+          loadIknowEnv(
+            process.cwd(),
+            settingsWithProviders(model, [MINIMAX_PROVIDER])
+          ),
+        isLlmProviderConfigError,
+        `model=${JSON.stringify(model)} 应抛 typed`
+      );
+    }
   });
 
   it("边界：providerId 两侧空白被 trim 后仍能命中", () => {

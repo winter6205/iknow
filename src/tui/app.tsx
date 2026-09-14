@@ -276,7 +276,10 @@ import {
 import { buildSkillLoadText, createSkillBody } from "../harness/skill/body.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import type { IknowSettingsLlmProvider } from "../config/settings.js";
-import { isLlmProviderConfigError } from "../config/env.js";
+import {
+  formatLlmProviderConfigError,
+  isLlmProviderConfigError,
+} from "../config/env.js";
 import type { LiveTaskRoot } from "../harness/session-roots.js";
 import {
   createSubagentWake,
@@ -3745,7 +3748,7 @@ function describeError(err: unknown): string {
   // `String(err)` 会打成 `[object Object]`，kind / providerId / apiKeyEnv 全
   // 不可见（code-quality.md typed-error catch 契约）。
   if (isLlmProviderConfigError(err)) {
-    return `provider ${err.providerId} 的密钥环境变量 ${err.apiKeyEnv} 未设置`;
+    return formatLlmProviderConfigError(err);
   }
   if (typeof err === "object" && err !== null && "kind" in err) {
     const kind = String((err as { kind: unknown }).kind);

@@ -36,6 +36,10 @@ import {
   SEARCH_BACKEND_VALUES,
 } from "../../src/config/env.ts";
 import { WEB_SEARCH_BACKEND_VALUES } from "../../src/config/settings.ts";
+import {
+  installTestProviderApiKey,
+  withTestLlmProvider,
+} from "../_helpers/test-llm-settings.ts";
 
 let workDir: string;
 
@@ -62,6 +66,7 @@ describe("web.searchBackend 闭集 parity", () => {
 const ENV_KEYS = [SEARCH_BACKEND_ENV_KEY] as const;
 beforeEach(() => {
   for (const key of ENV_KEYS) delete process.env[key];
+  installTestProviderApiKey();
 });
 afterEach(() => {
   for (const key of ENV_KEYS) delete process.env[key];
@@ -93,7 +98,7 @@ async function makeSettings(
 
 /** env.test.ts 同款 fixture：极简 settings（model fail-fast 需 model 来源）。 */
 function withModel(s: Record<string, unknown>): Record<string, unknown> {
-  return { llm: { model: "test-model" }, ...s };
+  return { ...withTestLlmProvider(), ...s };
 }
 
 function loadEnvAt(cwd: string, home: string) {
