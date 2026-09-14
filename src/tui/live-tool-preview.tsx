@@ -177,6 +177,34 @@ export function liveToolPreviewRows(run: LiveToolRun, cols: number): number {
   return liveToolPreviewTextLines(run, cols).length;
 }
 
+/** live 工具 runs 容器：相邻卡之间空一行（plans/tui-tool-rhythm.md T3）。
+ *
+ *  keep class 标题卡的卡间距与历史 MessageBlocks 的 `withBlockSpacing`
+ *  （相邻块间 1 行）同一节奏 —— 历史侧由 message-blocks 的块包裹负责。
+ *  间距只在卡与卡之间插入，首卡不带顶部空行（与历史首块不补顶 margin
+ *  一致）。过程组摘要行不是 keep 卡，不套这条间距（本容器只收 runs，
+ *  摘要行由调用方另画）。
+ *
+ *  `memo` 不适用：runs 为每帧新建数组的调用惯例，容器本身无状态。 */
+export function liveToolRunsBox(
+  runs: ReadonlyArray<LiveToolRun>,
+  cols: number
+): ReactNode {
+  return (
+    <box flexDirection="column" width={cols}>
+      {runs.map((run, i) => (
+        <box
+          key={`${run.id}-card`}
+          flexDirection="column"
+          marginTop={i === 0 ? 0 : 1}
+        >
+          {liveToolPreviewBox(run, cols)}
+        </box>
+      ))}
+    </box>
+  );
+}
+
 /** live 工具 tail box：状态行 + 完成态截断预览。
  *  运行态仅状态行（T5：有 partialInput 增量时含 `· <partial 摘要>`）；
  *  write/edit 运行中不画 content。D5/D6：颜色消费 deriveSlot 的 color

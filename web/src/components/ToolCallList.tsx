@@ -120,9 +120,11 @@ function PreviewBlock({
 }
 
 /**
- * 输出预览（D4 / D6 同规则）：`⎿` 风格 dim 前缀，5 行尾部窗口，超出首行
+ * 输出预览（D4 / D6）：`⎿` 风格 dim 前缀，5 行尾部窗口，超出首行
  * `… +N 行` 标记，空 / 全空白 / ANSI-only 不渲染。失败由 call.isError 决定
  * 是否给 pre 套 danger 颜色（border / text-danger），preview 文本不变。
+ * 5 行只对 web 成立 —— TUI 端已改 3 行，两端同步另立票，见
+ * `result-tool-preview.ts` 头注 / `specs/tui-display-consistency.md` D6 注。
  */
 function OutputBlock({ call }: { call: ToolCallView }) {
   const preview = resultToolPreview(call.name, call.outputPreview);

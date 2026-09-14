@@ -71,7 +71,7 @@ _Avoid_: 固定条数尾窗；行账 / 行窗口；把 LLM `/compact` 当 UI 树
 **fence display cap**: TUI markdown 围栏在 OpenTUI 树上只挂前 32 行，溢出用 `+N more lines`；会话正文仍是全文。与新建文件 10 行预览、编辑 diff 分开。
 _Avoid_: 用只挂最近 N 条消息代替围栏截行；把围栏窗改成写预览帽；为省树而删 session 里的代码
 
-**result preview（结果预览）**: 工具标题下的截断输出窗：先做 **progress tick** 再取 bash 尾部最多 5 行（ANSI 透传）；live 完成态与成功落定的 bash 都画。装饰不用每行 `>`，溢出 `… +N 行` 无箭头；失败走 **failure overlay**；`meta` 旁路不进模型。
+**result preview（结果预览）**: 工具标题下的截断输出窗：先做 **progress tick** 再取 bash 尾部最多 3 行（ANSI 透传）；live 完成态与成功落定的 bash 都画。装饰不用每行 `>`，溢出 `… +N 行` 无箭头；失败走 **failure overlay**；`meta` 旁路不进模型。
 _Avoid_: 每行 `>`；失败或 retract 仍画预览尾巴；把 meta 经 encodeToolResults 带进 model tool_result；与围栏或写预览帽混用；百分比流按行追加进气泡
 
 **progress tick（进度覆盖）**: `Updating files: N%` / `1%`→`100%` 同一过程只占一行，留当前或最后一跳给人看；`\r` 原地覆盖与连续百分比行都折成这一行。落定不留中间轨迹，也不把这类信息整段藏掉。

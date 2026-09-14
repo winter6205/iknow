@@ -20,9 +20,9 @@ TUI 在工具从 live 转为 idle 之后，按类决定可见性：人要核验�
   - **D1 策略核**：在 `src/tui/` 增加纯 TS 策略核（无 React）。先单文件 `tool-settled.ts`。导出 `deriveSlot(name, { running, failed })` → `{ showTitle, showPreview, inFoldCount, color }`，`color` ∈ `default | accent | error`。失败横切在核内最后一步。**核是 per-run 派生**：running 时该件 `showTitle` 真、`inFoldCount` 假（逐条 slot 不提前进计数）——渲染层再把多条 running 件收成 **live activity group**（D9），不是核里逐条摆标题。未知工具缺省 retract、无预览。
   - **D2 注册表一行**：`summary` + `preview?` + `settledClass`（keep / retract / accent）同置。缺 `settledClass` 的声明非法（测试拒绝）。建树四件必须进表：`create-worktree` / `enter-worktree` / `exit-worktree` / `remove-worktree`。
   - **D3 折叠只数成功的收**：折叠计数行只聚合 `inFoldCount === true`（成功且 retract）。留 / 点名着色 / 失败出独立标题行，不进计数。本轮零条收 → 不画工具计数行；思考秒数行可单独在（消费既有 **thinking duration**）。思考秒数与计数分行。retract 必须 `showTitle` 与 `showPreview` 同假。
-  - **D4 留的足迹**：keep 成功：`bash` 留标题（命令）+ **result preview** 五行走 ANSI（行数不重开）；`write_file` / `edit_file` 留标题 + 既有 6 行预览；`bash_stop` / `todo_write` / `memory_save` 只留标题。
-  - **D5 失败横切**：任意类失败 → 标题留、error 色、一行短错误（截断）、不进折叠计数、不画五行走 dim `⎿`。error 色优先于 accent。
-  - **D6 点名着色**：accent 成功走现有 `accent` token + 人读表述（`skill <name>`；建树 / 进入 / 退出 / 删树带 label 或路径叶子）。禁止 dim。不把 skill 正文摊成五行走浅色预览。
+  - **D4 留的足迹**：keep 成功：`bash` 留标题（命令）+ **result preview** 尾巴最多 3 行 ANSI（行数不重开）；`write_file` / `edit_file` 留标题 + 既有 6 行预览；`bash_stop` / `todo_write` / `memory_save` 只留标题。
+  - **D5 失败横切**：任意类失败 → 标题留、error 色、一行短错误（截断）、不进折叠计数、不画结果预览 dim `⎿`。error 色优先于 accent。
+  - **D6 点名着色**：accent 成功走现有 `accent` token + 人读表述（`skill <name>`；建树 / 进入 / 退出 / 删树带 label 或路径叶子）。禁止 dim。不把 skill 正文摊成结果预览浅色预览。
   - **D7 渲染只消费 slot**：`turn-activity` 只按 `inFoldCount` 聚合；`message-blocks` / live 预览只按 `showTitle` / `showPreview` / `color` 画。删除「藏标题、留预览」的组合路径。
   - **D9 live activity group（进行中 chrome）**：turn 仍在 running 时，多条运行中 / 刚完成的 retract 件**不逐条刷标题**，收成一行英文摘要（`Listing` / `Reading` / `Searching` 聚合收类；bash 用 `Running N shell command(s)`）；细节槽**至多一条**（当前 running 件，或最后一条 keep bash 的短预览）。keep 标题（write / edit）逐一保留；**thinking 是独立 panel**，不焊进这行，且有工具 running 时让位。idle 落定仍走 **unit fold** + keep 标题（D3/D4）。本组不是 idle 的替代折叠 —— 不把过程组当 unit fold 画。
   - **D8 分类表（成功态）**：
@@ -40,7 +40,8 @@ TUI 在工具从 live 转为 idle 之后，按类决定可见性：人要核验�
   - `create-worktree` ACI 形状、门禁说明书、worktree isolation 开关
   - 模型上下文、tool_result 编码、meta 进模型
   - live 流式协议；live activity group 的折叠闸派生（**open unit**，`plans/tui-live-activity-fold.md` T3 的范围）。**In spec**：D9「running 收成一行摘要 + 细节槽 ≤1」本身；「running 仍逐条可见」已作废（见 2026-09-14 amendment）
-  - 重开 bash ANSI 透传、五行走行数、`read_file` 内容预览、write/edit 六行窗
+  - 重开 bash ANSI 透传、**result preview** 行数、`read_file` 内容预览、write/edit 六行窗
+  - web 端 **result preview** 行数同步（web 仍 5 行 / TUI 3 行，见 `specs/tui-display-consistency.md` D6 注）
   - 新开仓库级 bounded context；`src/tui/services/` / `utils/` / 预先建 `tool-display/`
 
 ## Success Criteria
@@ -52,9 +53,9 @@ TUI 在工具从 live 转为 idle 之后，按类决定可见性：人要核验�
   - overflow：≥20 条成功 retract → 仍一行计数（各 name × N），不摊成 ≥20 条标题。
   - concurrent：`running: true` 时任意 name 的 `inFoldCount` 假、`showTitle` 真（**核**的 per-run 结果不变；live 渲染层由 D9 把多条收成一行 —— 断言对象是 `deriveSlot`，不是帧上标题条数）；纯函数无共享可变状态，`// N/A: pure deriveSlot`。
   - exception：失败横切见 SC1 第二断言与 SC4。
-- **SC3（收不残留预览）**：idle 一轮含成功 `read_file` + 成功 `bash`：画面有 bash 标题（及成功时五行走），无 read 标题、无 read `⎿`；折叠计数含 `read_file × 1`、不含 `bash`。命令：`bun test tests/tui/chat-view-thinking-tool-fold.test.tsx tests/tui/turn-activity.test.ts`。
-- **SC4（失败不进计数、不 dim 长文）**：idle 一轮含失败 mutate（如 `[worktree_isolation]` 长回执）：有红标题 + 一行短错误；无 dim 五行走 `⎿` 堆该文；折叠计数不含该失败件。命令：同上 + 策略核表测。
-- **SC5（点名非 dim）**：成功 `skill` / `create-worktree` 落定行走 `accent`，有人读表述，无五行走 skill 正文预览。命令：`bun test tests/tui/`。
+- **SC3（收不残留预览）**：idle 一轮含成功 `read_file` + 成功 `bash`：画面有 bash 标题（及成功时 **result preview** 尾窗行），无 read 标题、无 read `⎿`；折叠计数含 `read_file × 1`、不含 `bash`。命令：`bun test tests/tui/chat-view-thinking-tool-fold.test.tsx tests/tui/turn-activity.test.ts`。
+- **SC4（失败不进计数、不 dim 长文）**：idle 一轮含失败 mutate（如 `[worktree_isolation]` 长回执）：有红标题 + 一行短错误；无 dim 结果预览 `⎿` 堆该文；折叠计数不含该失败件。命令：同上 + 策略核表测。
+- **SC5（点名非 dim）**：成功 `skill` / `create-worktree` 落定行走 `accent`，有人读表述，无结果预览 skill 正文预览。命令：`bun test tests/tui/`。
 - **SC6（注册表完备）**：`EXPECTED_TOOLSET_*` 与显示注册表每一件都有 `settledClass`；建树四件在表内。命令：`bun test tests/tui/deps-tools.test.ts tests/tui/tool-summary.test.ts`。
 - **SC7（rg 闸）**：`rg -n "hideToolSummaries" src/tui/` 零命中（组合路径删除，改走 slot）。
 - **SC8（回归）**：`npm test` 全绿。
@@ -68,17 +69,17 @@ TUI 在工具从 live 转为 idle 之后，按类决定可见性：人要核验�
 **Quotes（CONTEXT.md 原文）：**
 
 - **settled appearance（落定态）**: TUI 里工具从 live 转为 idle 之后的可见性策略——按类留下足迹、收回去、或点名着色。不是「有已完成工具就整轮折成计数行」。
-- **keep class（留）**: 落定后仍画出标题行的工具类（bash / write / edit / 会话动作）。bash 成功时标题带命令，并可带结果预览五行走；其它留类默认只留标题。
+- **keep class（留）**: 落定后仍画出标题行的工具类（bash / write / edit / 会话动作）。bash 成功时标题带命令，并可带 **result preview** 尾窗；其它留类默认只留标题。
 - **retract class（收）**: 落定后标题和预览都从屏幕拿掉、只进折叠计数的工具类（读取 / 搜索 / 查询）。未知未注册工具缺省也是收。
 - **accent class（点名着色）**: 落定后以非 dim 的 `accent` 色 + 人读表述留在屏幕上的特定能力（skill、task worktree 生命周期工具）。必须进显示注册表。
 - **failure overlay（失败横切）**: 任意落定类在失败时覆盖成功态分类——留标题、一行短错误、error 色、不进折叠计数、不用 dim `⎿` 堆长文。error 色优先于 accent。
-- **result preview（结果预览）**: 工具调用标题行下方的截断输出块——`⎿` 风格前缀、上限 5 行、bash 取尾部、ANSI 透传。只画在 **keep class** 的成功 bash 上；dim 仅用于装饰元素（`⎿` 前缀、`… +N 行` 溢出），正文行（stdout/stderr）走正文色 token，不藏失败或点名着色。
+- **result preview（结果预览）**: 工具调用标题行下方的截断输出块——`⎿` 风格前缀、**最多 3 行**、bash 取尾部、ANSI 透传。只画在 **keep class** 的成功 bash 上；dim 仅用于装饰元素（`⎿` 前缀、`… +N 行` 溢出），正文行（stdout/stderr）走正文色 token，不藏失败或点名着色。
 - **thinking duration（思考时长）**: assistant 消息的落盘属性——adapter 流式路径测量（首条 `thinking_delta` 至首个非思考增量），`thinkingMs` 经 commit 钩子随事件链落盘；折叠簇时长 = 簇内消息求和。非 UI 测量值。
 
 **Inherits：**
 
 - ADR-0037：本 spec 不改门禁、不改 ACI 形状、不改 `unboundMutateNotice` 文案。
-- `specs/tui-display-consistency.md` D1 外壳、D2 thinkingMs 落盘、D4 五行走/ANSI/`read_file` 无内容预览/write·edit 六行、D7 摘要与预览同置（本 spec 把 `settledClass` 加进同一行）。
+- `specs/tui-display-consistency.md` D1 外壳、D2 thinkingMs 落盘、D4 ANSI 透传/`read_file` 无内容预览/write·edit 六行、D7 摘要与预览同置（本 spec 把 `settledClass` 加进同一行；D4 的结果预览行数由本 spec 的 **result preview** 词条覆盖为 3 行）。
 - 测试栈：bun:test `tests/tui/`；`EXPECTED_TOOLSET_*`；`testRender` / `captureCharFrame`。
 - 色板：`tuiPalette.accent` / `tuiPalette.error` / `tuiPalette.dim`（dim 仅成功 bash 尾巴）。
 

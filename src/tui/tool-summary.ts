@@ -221,7 +221,7 @@ const TOOL_DISPLAYS: Readonly<Record<string, ToolDisplay>> = {
     settledClass: TOOL_SETTLED_CLASS.tool_search!,
   },
   // D6（spec specs/tui-tool-settled-appearance.md）：skill 是 accent 类 ——
-  // 只点名着色（`skill <name>`），不把 skill 正文摊成五行走浅色预览；
+  // 只点名着色（`skill <name>`），不把 skill 正文摊成结果预览浅色预览；
   // 声明无 preview 字段（resultToolPreview 走 empty）。
   skill: {
     summary: TOOL_SUMMARIES.skill!.summary,
@@ -385,8 +385,10 @@ export const WRITE_CREATE_PREVIEW_WINDOW = 10;
  *  编辑 diff 不再共用该帽（D4：diff 全量可见）。 */
 export const TOOL_PREVIEW_WINDOW = WRITE_CREATE_PREVIEW_WINDOW;
 
-/** #693 T4 D4:结果预览（bash / skill）可见窗（尾部 tail，截断即折叠）。 */
-export const RESULT_PREVIEW_WINDOW = 5;
+/** #693 T4 D4:结果预览（bash / skill）可见窗（尾部 tail，截断即折叠）。
+ *  行数 SSOT = docs/CONTEXT.md **result preview**（"取 bash 尾部最多 3 行"）：
+ *  操作员裁定 3 行，write/edit 窗不在本常量管辖（各自独立帽）。 */
+export const RESULT_PREVIEW_WINDOW = 3;
 
 /** 新建预览溢出文案：`+N more lines`（N = 被截去的行数）。人读合同
  *  （spec D3 / docs/CONTEXT.md write create preview / fence display cap）
@@ -416,9 +418,9 @@ export function resultPreviewOverflowLabel(hiddenLineCount: number): string {
  *
  *  边界（spec D4 钉死）：
  *   - 输出为空 / 全空白 / ANSI strip 后为空 → `{ kind: "empty" }`；
- *   - 截取文本「尾部」RESULT_PREVIEW_WINDOW 行（5 行封顶），首行 +N
+ *   - 截取文本「尾部」RESULT_PREVIEW_WINDOW 行（3 行封顶），首行 +N
  *     标记溢出；
- *   - 单行直接显示 1 行（不强制 5 行格式）；
+ *   - 单行直接显示 1 行（不强制 3 行格式）；
  *   - ANSI 序列按剥离后宽度计数（`string-width` 内建 ANSI 处理），
  *     截断不得切断转义序列中间 —— 因行内不再二次裁剪（行级截断只按
  *     行数，不按视觉宽度），该约束天然成立；

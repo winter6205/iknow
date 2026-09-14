@@ -6,8 +6,8 @@
  * live box 与历史 `ToolPreviewRows` 都走这里，避免两处复制 JSX。
  * 数据 SSOT 仍是 `completedToolPreview`；本文件只渲染。
  *
- * #693 T4 D4:扩 resultPreview —— 标题行下方的 dim 5 行尾部预览
- * （bash / skill 等子进程输出）。live + 历史共用同一渲染面（spec D4 同规则）。
+ * #693 T4 D4:扩 resultPreview —— 标题行下方的 dim 尾部预览
+ * （bash / skill 等子进程输出，行数由共享 result preview 合同定）。live + 历史共用同一渲染面。
  * 失败由 caller 在外层包 error 色 token 体现；preview 文本本身不变。
  *
  * 正文 gutter：单条 `│`（装饰 dim）；溢出 `… +N 行` 不加 gutter / 不加 `>`。
@@ -62,7 +62,7 @@ export function completedToolPreviewTextLines(
 export function CompletedToolPreviewView(props: {
   readonly preview: CompletedToolPreview;
   readonly cols: number;
-  /** #693 T4 D4:结果预览（bash / skill 输出,5 行尾部 tail）。缺省 / empty 不渲染。 */
+  /** #693 T4 D4:结果预览（bash / skill 输出,result preview 尾窗）。缺省 / empty 不渲染。 */
   readonly resultPreview?: ResultPreview;
 }): ReactNode {
   const { preview, cols, resultPreview } = props;

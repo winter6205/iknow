@@ -613,6 +613,52 @@ test("idle：无历史 activity 时已完成 live retract 工具收出 tail（ke
   await setup.renderer.destroy();
 });
 
+test("T3 live 尾巴：相邻两张 keep 卡之间空一行", async () => {
+  // plans/tui-tool-rhythm.md T3 / spec D7：相邻 keep class 标题卡（历史
+  // MessageBlocks 与 live 尾巴）之间空一行；此测在 ChatView 整帧上钉住卡间距。
+  const runs: ReadonlyArray<LiveToolRun> = [
+    {
+      id: "t3-live-1",
+      name: "bash",
+      status: "ok",
+      input: { command: "cmd-alpha" },
+      detail: "cmd-alpha",
+      stdout: "ALPHA_OUT",
+    },
+    {
+      id: "t3-live-2",
+      name: "bash",
+      status: "ok",
+      input: { command: "cmd-beta" },
+      detail: "cmd-beta",
+      stdout: "BETA_OUT",
+    },
+  ];
+  const setup = await testRender(
+    <ChatView
+      session={sessionWith([
+        { role: "user", content: [{ type: "text", text: "q" }] },
+      ])}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      liveToolRuns={runs}
+      draftsMasked="草稿"
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const lines = setup.captureCharFrame().split("\n");
+  const first = lines.findIndex((l) => l.includes("bash · cmd-alpha"));
+  const second = lines.findIndex((l) => l.includes("bash · cmd-beta"));
+  expect(first).toBeGreaterThanOrEqual(0);
+  expect(second).toBeGreaterThan(first);
+  // 两卡之间恰 1 行空行（首卡 stdout 行与次卡标题不贴行）。
+  const between = lines.slice(first + 1, second);
+  expect(between.filter((l) => l.trim().length === 0)).toHaveLength(1);
+  await setup.renderer.destroy();
+});
+
 test("idle：SC3 一轮成功 read_file + 成功 bash → bash 标题留、read 收进计数", async () => {
   // spec SC3：成功 read_file（retract）→ 无标题、无预览、进折叠计数
   // `read_file × 1`；成功 bash（keep）→ 标题留 + 折叠结果预览，不进计数。

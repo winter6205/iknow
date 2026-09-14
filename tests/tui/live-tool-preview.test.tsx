@@ -25,6 +25,7 @@ import {
   liveToolPreviewBox,
   liveToolPreviewRows,
   liveToolPreviewTextLines,
+  liveToolRunsBox,
 } from "../../src/tui/live-tool-preview.js";
 import {
   formatRunningToolLine,
@@ -691,7 +692,7 @@ describe("liveToolPreviewTextLines (T5 收类落定后不再占逐条面)", () =
 // -- #693 T4 D4:live 路径 bash / skill 结果预览 ---------------------------
 
 describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览", () => {
-  test("完成态 bash + stdout 旁路：尾部 5 行 dim 预览 + 溢出", () => {
+  test("完成态 bash + stdout 旁路：尾部 result preview 窗 + 溢出", () => {
     const stdout = Array.from({ length: 8 }, (_, i) => `out-${i}`).join("\n");
     const run: LiveToolRun = {
       id: "tu-bash-live",
@@ -705,17 +706,86 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     // 首行：完成态摘要（#tui-render-overhaul T3:无 [完成] 前缀）
     expect(rows[0]).toBe("bash · ls");
     expect(rows[0]?.includes("[完成]")).toBe(false);
-    // 尾 5 行带 │ gutter，不再以 `>` 开头
-    expect(rows).toContain("│ out-3");
+    // 尾 3 行带 │ gutter，不再以 `>` 开头（SSOT = docs/CONTEXT.md
+    // **result preview**：bash 尾部最多 3 行）。
+    expect(rows).toContain("│ out-5");
     expect(rows).toContain("│ out-7");
     expect(rows.some((r) => r.startsWith("> "))).toBe(false);
     // 早于尾窗的不出现
     expect(rows.some((r) => r.includes("│ out-0"))).toBe(false);
+    expect(rows.some((r) => r.includes("│ out-4"))).toBe(false);
     // 溢出 +N 行（无 `>` / `> `）
     const overflow = rows.find((r) => r.includes("… +") && r.includes("行"));
     expect(overflow).toBeDefined();
     expect(overflow!.includes(">")).toBe(false);
     expect(overflow!.startsWith("> ")).toBe(false);
+  });
+
+  test("相邻 live keep 卡之间空一行（卡间距节奏 = 历史 MessageBlocks 同款）", async () => {
+    // spec specs/tui-tool-settled-appearance.md D7 / plans/tui-tool-rhythm.md T3：
+    // 相邻 keep class 标题卡（历史 MessageBlocks 与 live 尾巴）之间空一行。
+    // 历史侧 MessageBlocks 的 withBlockSpacing 已保证；此测钉住 live runs
+    // 容器的卡间距。
+    const runs: ReadonlyArray<LiveToolRun> = [
+      {
+        id: "gap-1",
+        name: "bash",
+        status: "ok",
+        input: { command: "one" },
+        detail: "one",
+        stdout: "GAP_FIRST_OUT",
+      },
+      {
+        id: "gap-2",
+        name: "bash",
+        status: "ok",
+        input: { command: "two" },
+        detail: "two",
+        stdout: "GAP_SECOND_OUT",
+      },
+    ];
+    const setup = await testRender(
+      <box flexDirection="column" width={80}>
+        {liveToolRunsBox(runs, 80)}
+      </box>,
+      { width: 80, height: 12, exitOnCtrlC: false }
+    );
+    await setup.waitForVisualIdle();
+    const frame = setup.captureCharFrame();
+    const lines = frame.split("\n");
+    const firstTitle = lines.findIndex((l) => l.includes("bash · one"));
+    const secondTitle = lines.findIndex((l) => l.includes("bash · two"));
+    expect(firstTitle).toBeGreaterThanOrEqual(0);
+    expect(secondTitle).toBeGreaterThanOrEqual(0);
+    // 两卡之间恰 1 行空行（首卡正文与次卡标题不相邻）。
+    expect(secondTitle - firstTitle).toBeGreaterThanOrEqual(3);
+    const between = lines.slice(firstTitle + 1, secondTitle);
+    expect(between.some((l) => l.trim().length === 0)).toBe(true);
+    expect(
+      between.filter((l) => l.trim().length === 0).length
+    ).toBe(1);
+    await setup.renderer.destroy();
+  });
+
+  test("单张 live keep 卡不因卡间距凭空多出顶部空行（首卡无 gap）", async () => {
+    const run: LiveToolRun = {
+      id: "gap-solo",
+      name: "bash",
+      status: "ok",
+      input: { command: "solo" },
+      detail: "solo",
+      stdout: "SOLO_OUT",
+    };
+    const setup = await testRender(
+      <box flexDirection="column" width={80}>
+        {liveToolRunsBox([run], 80)}
+      </box>,
+      { width: 80, height: 10, exitOnCtrlC: false }
+    );
+    await setup.waitForVisualIdle();
+    const first = setup.captureCharFrame().split("\n")[0] ?? "";
+    expect(first).toContain("bash · solo");
+    await setup.renderer.destroy();
   });
 
   test("完成态 bash 失败（status=failed）:不画 stderr 预览（D5 一行短错误）", () => {

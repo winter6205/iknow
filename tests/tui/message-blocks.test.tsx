@@ -1079,7 +1079,7 @@ test("SC4 失败 mutate：红标题 + 一行短错误（截断长回执）", asy
   await setup.renderer.destroy();
 });
 
-test("SC4 失败件：无 dim 五行走 ⎿ 块堆长文", async () => {
+test("SC4 失败件：无 dim 结果预览块堆长文", async () => {
   const setup = await testRender(
     <MessageBlocks
       message={{
@@ -1149,7 +1149,7 @@ test("SC4 失败标题 error 色 token（ToolSummaryRow fg = palette.error）", 
   await setup.renderer.destroy();
 });
 
-test("SC5 accent 成功：skill 落定行走 accent 色，无 skill 正文五行走预览", async () => {
+test("SC5 accent 成功：skill 落定行走 accent 色，无 skill 正文结果预览", async () => {
   const body = Array.from({ length: 10 }, (_, i) => `body-${i}`).join("\n");
   const setup = await testRender(
     <MessageBlocks
@@ -1174,7 +1174,7 @@ test("SC5 accent 成功：skill 落定行走 accent 色，无 skill 正文五行
   const frame = setup.captureCharFrame();
   // 人读表述：`skill <name>`（D6）。
   expect(frame).toContain("skill playwright-cli");
-  // 不摊 skill 正文（无 ⎿ 五行走预览）。
+  // 不摊 skill 正文（无 ⎿ 结果预览）。
   expect(frame.includes("⎿")).toBe(false);
   expect(frame.includes("body-5")).toBe(false);
   // accent 色 token 落到标题行（非 dim）。
@@ -1464,7 +1464,7 @@ function bashCallMessages(
   ];
 }
 
-test("D4 bash 历史：成功落定画折叠后的 5 行结果预览", async () => {
+test("D4 bash 历史：成功落定画折叠后的 result preview 尾窗", async () => {
   const stdout = Array.from({ length: 10 }, (_, i) => `out-${i}`).join("\n");
   const [assistant, user] = bashCallMessages(
     "tu-bash-r",
@@ -1486,12 +1486,66 @@ test("D4 bash 历史：成功落定画折叠后的 5 行结果预览", async () 
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("bash · ls");
-  expect(frame).toContain("… +5 行");
+  // 10 行取尾部 3（docs/CONTEXT.md **result preview**）→ out-7..out-9，溢出 7。
+  expect(frame).toContain("… +7 行");
   expect(frame).not.toContain("out-0");
-  expect(frame).toContain("out-5");
+  expect(frame).not.toContain("out-6");
+  expect(frame).toContain("out-7");
   expect(frame).toContain("out-9");
   // user 消息不画（user 不在 assistant message 块里,但 testRender 也没传 user 块）
   void user;
+  await setup.renderer.destroy();
+});
+
+test("T3 相邻 keep 卡之间空一行：同消息两条成功 bash 标题不贴行", async () => {
+  // plans/tui-tool-rhythm.md T3 / spec D7：相邻 keep class 标题卡之间空一行
+  // （卡间距节奏 = 消息内块间距 withBlockSpacing）。两条连续成功 bash 的落定
+  // 帧上，第一张卡的正文行与第二张卡的标题行之间必须恰有 1 行空白。
+  const stdout = (n: number): string =>
+    Array.from({ length: n }, (_, i) => `row-${i}`).join("\n");
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-gap-a",
+            name: "bash",
+            input: { command: "cmd-one" },
+          },
+          {
+            type: "tool_use",
+            id: "tu-gap-b",
+            name: "bash",
+            input: { command: "cmd-two" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={
+        new Map([
+          ["tu-gap-a", false],
+          ["tu-gap-b", false],
+        ])
+      }
+      resultTextMap={
+        new Map([
+          ["tu-gap-a", JSON.stringify({ code: 0, stdout: stdout(2), stderr: "" })],
+          ["tu-gap-b", JSON.stringify({ code: 0, stdout: stdout(2), stderr: "" })],
+        ])
+      }
+    />,
+    { width: COLS, height: 20, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const lines = setup.captureCharFrame().split("\n");
+  const first = lines.findIndex((l) => l.includes("bash · cmd-one"));
+  const second = lines.findIndex((l) => l.includes("bash · cmd-two"));
+  expect(first).toBeGreaterThanOrEqual(0);
+  expect(second).toBeGreaterThan(first);
+  const between = lines.slice(first + 1, second);
+  expect(between.filter((l) => l.trim().length === 0)).toHaveLength(1);
   await setup.renderer.destroy();
 });
 

@@ -75,7 +75,7 @@ import {
   isLiveActivityGroupRun,
   splitLiveActivityRuns,
 } from "./live-activity-group.js";
-import { liveToolPreviewBox } from "./live-tool-preview.js";
+import { liveToolRunsBox } from "./live-tool-preview.js";
 import { toolResultStatusMap, toolResultTextMap } from "./tool-summary.js";
 import {
   listenScrollBoxTop,
@@ -219,8 +219,10 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     // 消息内容宽度留出滚动条 / 安全区余量（scrollbox 实测，不做行数估算）。
     const contentWidth = Math.max(1, props.cols - 2);
     const liveToolRuns = props.liveToolRuns ?? [];
+    // T3（plans/tui-tool-rhythm.md）：live 相邻 keep 卡之间空一行 ——
+    // 卡间距收敛在 liveToolRunsBox 内（历史侧 MessageBlocks 各块自带节奏）。
     const renderLiveRuns = (runs: ReadonlyArray<LiveToolRun>) =>
-      runs.map((run) => liveToolPreviewBox(run, contentWidth));
+      liveToolRunsBox(runs, contentWidth);
     const bannerLines = props.bannerLines ?? [];
     // visible 列表会丢掉 agent_status / drain 等隐藏 user 消息，下标比
     // 盘上短。所有 thinkingMs 查找必须映射回 sourceIndex，否则

@@ -67,8 +67,8 @@ export interface TuiToolEvent {
    * 注意与模型面(MCP/Anthropic)的 `payload` 概念无关:此字段只承载 diff 的
    * old/new 内容,绝不进模型 tool_result。仅在 ok 且有 meta 时存在。
    *
-   * #693 T4 D4:扩 stdout / stderr —— bash 子进程输出,5 行尾部预览数据源;
-   * 同样走观测旁路,模型视野不可见。
+   * #693 T4 D4:扩 stdout / stderr —— bash 子进程输出,result preview 尾窗的
+   * 数据源;同样走观测旁路,模型视野不可见。
    */
   readonly payload?: {
     readonly oldContent?: string;

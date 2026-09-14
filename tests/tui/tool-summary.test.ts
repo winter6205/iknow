@@ -875,10 +875,28 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
     expect(p.kind).toBe("result");
     if (p.kind !== "result") return;
     expect(p.lines).toHaveLength(RESULT_PREVIEW_WINDOW);
-    // 尾部 5 行：line-7..line-11
-    expect(p.lines[0]).toBe("line-7");
-    expect(p.lines[4]).toBe("line-11");
-    expect(p.hiddenLineCount).toBe(7);
+    // 尾部 3 行：line-9..line-11（SSOT = docs/CONTEXT.md **result preview**）。
+    expect(p.lines[0]).toBe("line-9");
+    expect(p.lines[2]).toBe("line-11");
+    expect(p.hiddenLineCount).toBe(9);
+  });
+
+  test("RESULT_PREVIEW_WINDOW 字面 = 3（docs/CONTEXT.md **result preview** SSOT）", () => {
+    // 字面钉死：从常量派生的断言在常量被改回 5 时照样绿，起不到闸作用。
+    expect(RESULT_PREVIEW_WINDOW).toBe(3);
+  });
+
+  test("bash 恰好 3 行 → 全量可见，无溢出标记", () => {
+    const stdout = "a\nb\nc";
+    const p = resultToolPreview(
+      "bash",
+      { command: "x" },
+      { resultText: JSON.stringify({ code: 0, stdout, stderr: "" }) }
+    );
+    expect(p.kind).toBe("result");
+    if (p.kind !== "result") return;
+    expect(p.lines).toEqual(["a", "b", "c"]);
+    expect(p.hiddenLineCount).toBe(0);
   });
 
   test("bash stderr 旁路（live 路径）→ 取尾部 + 溢出", () => {
@@ -886,8 +904,9 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
     const p = resultToolPreview("bash", { command: "x" }, { stderr });
     expect(p.kind).toBe("result");
     if (p.kind !== "result") return;
-    expect(p.lines).toEqual(["err-3", "err-4", "err-5", "err-6", "err-7"]);
-    expect(p.hiddenLineCount).toBe(2);
+    // 7 行取尾部 3 → err-5..err-7，hidden = 4。
+    expect(p.lines).toEqual(["err-5", "err-6", "err-7"]);
+    expect(p.hiddenLineCount).toBe(4);
   });
 
   test("bash stdout+stderr 合并（live 路径）→ 头尾拼接", () => {
@@ -953,7 +972,7 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
   });
 
   test("bash stdout 截断按 stripped 长度计数（ANSI 不计列）", () => {
-    // 8 行：line-0..line-7 → 取尾部 5 → line-3..line-7
+    // 8 行：line-0..line-7 → 取尾部 3 → line-5..line-7
     const stdout = Array.from({ length: 8 }, (_, i) =>
       i % 2 === 0 ? `\x1b[31mline-${i}\x1b[0m` : `line-${i}`
     ).join("\n");
@@ -964,10 +983,10 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
     );
     expect(p.kind).toBe("result");
     if (p.kind !== "result") return;
-    expect(p.lines).toHaveLength(5);
-    expect(p.lines[0]).toContain("line-3");
-    expect(p.lines[4]).toContain("line-7");
-    expect(p.hiddenLineCount).toBe(3);
+    expect(p.lines).toHaveLength(3);
+    expect(p.lines[0]).toContain("line-5");
+    expect(p.lines[2]).toContain("line-7");
+    expect(p.hiddenLineCount).toBe(5);
   });
 
   test("bash ANSI 序列不被切断（行级截断不切字符，仅按行数）", () => {
@@ -985,9 +1004,9 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
     expect(p.lines[0]?.endsWith("\x1b[0m")).toBe(true);
   });
 
-  test("skill 无预览声明（D6 accent 点名着色）：多行正文不摊五行走", () => {
+  test("skill 无预览声明（D6 accent 点名着色）：多行正文不摊成 result preview", () => {
     // spec specs/tui-tool-settled-appearance.md D6：skill 是 accent 类 ——
-    // 只点名着色（`skill <name>`），不把 skill 正文摊成五行走浅色预览；
+    // 只点名着色（`skill <name>`），不把 skill 正文摊成浅色结果预览；
     // 注册表不声明 preview，任何 resultText 一律 empty。
     const body = Array.from({ length: 10 }, (_, i) => `body-${i}`).join("\n");
     expect(
@@ -1038,7 +1057,7 @@ describe("resultToolPreview: bash / skill / 兜底", () => {
   });
 });
 
-describe("SC5：bash 进度先折再 5 行窗（旧合同「最后 5 条百分行」作废）", () => {
+describe("SC5：bash 进度先折再 result preview 尾窗（旧合同「最后 5 条百分行」作废）", () => {
   test("Updating files 1%→100% + 两行实况 → 最后一跳与实况，无中间百分比", () => {
     const ticks = Array.from({ length: 20 }, (_, i) => {
       const pct = (i + 1) * 5;
@@ -1110,10 +1129,10 @@ describe("SC5：bash 进度先折再 5 行窗（旧合同「最后 5 条百分�
     );
     expect(p.kind).toBe("result");
     if (p.kind !== "result") return;
-    // 折后 7 行（最后一跳 + L0..L5）→ 尾窗 5 = L1..L5，hidden = 2。
-    // 旧合同若先取尾 5 再谈折：hidden 会是 21（20 百分行 + L0 被窗切掉）。
-    expect(p.lines).toEqual(["L1", "L2", "L3", "L4", "L5"]);
-    expect(p.hiddenLineCount).toBe(2);
+    // 折后 7 行（最后一跳 + L0..L5）→ 尾窗 3 = L3..L5，hidden = 4。
+    // 旧合同若先取尾窗再谈折：hidden 会是 21（20 百分行 + L0 被窗切掉）。
+    expect(p.lines).toEqual(["L3", "L4", "L5"]);
+    expect(p.hiddenLineCount).toBe(4);
     expect(resultPreviewTextLines(p).some((l) => l.includes("5%"))).toBe(false);
   });
 

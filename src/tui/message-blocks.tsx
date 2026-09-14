@@ -158,7 +158,7 @@ function failureTextOf(name: string, resultText: string | undefined): string {
  *  （空预览 / 未配对不产节点 —— 折叠态下空壳 box 会让消息无法收敛为 null，
  *  残留幻影间距）。与 live 完成态同一 `completedToolPreview` +
  *  `resultToolPreview` + WRITE_CREATE_PREVIEW_WINDOW（新建 10 行）/
- *  RESULT_PREVIEW_WINDOW（结果尾窗 5 行）；编辑 diff 不套新建帽。截断即折叠。 */
+ *  RESULT_PREVIEW_WINDOW（result preview 尾窗）；编辑 diff 不套新建帽。截断即折叠。 */
 function ToolPreviewRows(props: {
   readonly preview: CompletedToolPreview;
   readonly resultPreview: ResultPreview;
@@ -425,7 +425,7 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
       const showTitle = slot.showTitle;
       const showPreview = slot.showPreview && hasPreviewContent;
       // D5：失败一行短错误 —— 长回执（如 `[worktree_isolation]`）截成单行,
-      // 不以 dim ⎿ 五行走块堆长文（showPreview 由核置假）。
+      // 不以 dim ⎿ 结果预览块堆长文（showPreview 由核置假）。
       const errorLine =
         failed && showTitle
           ? clipErrorLine(

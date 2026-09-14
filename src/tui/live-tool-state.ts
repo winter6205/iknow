@@ -52,9 +52,9 @@ export interface LiveToolRun {
   readonly oldContent?: string;
   /** 观测 side-channel — 写盘后新内容；运行中无。 */
   readonly newContent?: string;
-  /** #693 T4 D4:bash 输出 stdout 旁路(ToolResultMeta.stdout),5 行预览数据源。 */
+  /** #693 T4 D4:bash 输出 stdout 旁路(ToolResultMeta.stdout),result preview 尾窗数据源。 */
   readonly stdout?: string;
-  /** #693 T4 D4:bash 输出 stderr 旁路(ToolResultMeta.stderr),5 行预览数据源。 */
+  /** #693 T4 D4:bash 输出 stderr 旁路(ToolResultMeta.stderr),result preview 尾窗数据源。 */
   readonly stderr?: string;
 }
 
@@ -87,9 +87,9 @@ export type LiveToolEvent =
       readonly oldContent?: string;
       /** 观测 side-channel — 写盘后新内容。 */
       readonly newContent?: string;
-      /** #693 T4 D4:bash stdout 旁路,完成事件携带,5 行预览数据源。 */
+      /** #693 T4 D4:bash stdout 旁路,完成事件携带,result preview 尾窗数据源。 */
       readonly stdout?: string;
-      /** #693 T4 D4:bash stderr 旁路,完成事件携带,5 行预览数据源。 */
+      /** #693 T4 D4:bash stderr 旁路,完成事件携带,result preview 尾窗数据源。 */
       readonly stderr?: string;
     };
 

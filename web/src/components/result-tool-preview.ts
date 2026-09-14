@@ -1,19 +1,22 @@
 /**
  * web/src/components/result-tool-preview.ts
  *
- * Mirrors `resultToolPreview` in src/tui/tool-summary.ts (T4 D4) — same rule,
- * separate code (web can't import src/). D6 web 一致性: web 端 toolCalls 活动
- * 流消费 D4 同规则 (5 行尾部窗口 + 溢出 `… +N 行` + ANSI 透传 + 空 / 全空白
- * / ANSI-only 不渲染)。
+ * web 端的 result preview 投影，对应 TUI 的 `resultToolPreview`
+ * (src/tui/tool-summary.ts)。两端各自实现（web 不能 import src/），
+ * 边界行为（溢出 `… +N 行` + ANSI 透传 + 空 / 全空白 / ANSI-only 不渲染）
+ * 仍对齐；**可见窗行数是两端的分歧点**：TUI 端已由
+ * `specs/tui-tool-settled-appearance.md` D4（2026-09-14）改为 3 行，web 端
+ * 本文件仍保 `RESULT_PREVIEW_WINDOW`，两端同步另立票
+ * （见 `specs/tui-display-consistency.md` D6 注）。
  *
  * Web 数据来源: wire `ToolCallView.outputPreview`(已 mask + 截断到
  * `MAX_TOOL_OUTPUT_PREVIEW_CHARS` = 1500 chars)。bash 走 JSON envelope →
- * mirror TUI 的 parse-then-extract 逻辑 (`stdout` / `stderr` 字段拼接)。
+ * 与 TUI 同语义的 parse-then-extract 逻辑 (`stdout` / `stderr` 字段拼接)。
  *
- * 边界（与 TUI 一致）：
+ * 边界：
  *   - 输出为空 / 全空白 / ANSI strip 后为空 → `{ kind: "empty" }`；
- *   - 截取尾部 `RESULT_PREVIEW_WINDOW` (5) 行 + 溢出行数；
- *   - 单行直接显示 1 行（不强制 5 行格式）；
+ *   - 截取尾部 `RESULT_PREVIEW_WINDOW` 行 + 溢出行数；
+ *   - 单行直接显示 1 行（不强制撑满窗口）；
  *   - ANSI 序列按剥离后宽度计数，截断不得切断转义序列中间（行级截断天然不切
  *     字符）；
  *   - read_file / write_file / edit_file 等无 preview 需求的工具 → `empty`。
@@ -23,7 +26,7 @@
  */
 import type { ToolCallView } from "../api/types.ts";
 
-/** #693 T4 D4:结果预览可见窗（与 TUI 同值，5 行）。 */
+/** #693 T4 D4:web 端结果预览可见窗（TUI 端已改 3 行,两端同步另立票,见文件头注）。 */
 export const RESULT_PREVIEW_WINDOW = 5;
 
 /** 命名风格上沿用"result-tool-preview",与 TUI 端 `resultToolPreview` 同义。 */
@@ -32,7 +35,7 @@ export type ResultPreview =
   | {
       readonly kind: "result";
       readonly lines: readonly string[];
-      /** 被截掉的行数 = totalLines - visibleLines（visibleLines 始终 = min(5, totalLines)）。 */
+      /** 被截掉的行数 = totalLines - visibleLines（visibleLines 始终 = min(RESULT_PREVIEW_WINDOW, totalLines)）。 */
       readonly hiddenLineCount: number;
     };
 

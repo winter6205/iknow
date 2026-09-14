@@ -21,7 +21,7 @@ TUI 的会话流里，工具调用与其结果的可见性由四条相互独立�
   - **D3 折叠简化**：**SUPERSEDED** by `specs/tui-tool-settled-appearance.md`。下文仅作历史：曾删除 `inLastTurn` 门与「单工具永不折叠」闸，改为任何已完成工具轮次都折叠。该「整轮藏标题」合同已废；活合同是按类留 / 收 / 点名着色。D2 落盘与「running 逐条可见」仍有效，由新 spec 继承。
   - **D4 结果预览**：工具调用标题行下方新增结果预览块——`⎿` 风格 dim 前缀；**上限 5 行**；bash 显示 stdout/stderr **尾部** 5 行（测试摘要、git 结果通常在末尾），超出在首行显示 `… +N 行`；失败时内容照常显示但整体标红；bash 等子进程输出的 ANSI 颜色**透传**（git/npm 自带颜色原样可见），不重新染色。数据来源：handler 返回的 `{ output, meta? }` envelope——`meta` 走观测旁路（`plain-string tool output` 契约 Y1/#298：永不进模型视野），TUI 从旁路取数，模型视野不变。`ToolResultMeta` 扩展一个 bash 输出承载字段（如 `stdout?: string` / `stderr?: string`，PLAN 定具体形态）；该字段是显示层投影，不经 encodeToolResults 进模型 tool_result。边界形态钉死：输出为空 / 全空白 / ANSI strip 后为空 → 不渲染预览块（不是渲染空块）；单行输出直接显示 1 行；ANSI 序列在视觉宽度收口（`visualWidth`）时按已剥离宽度计数，截断不得切断转义序列中间。`read_file` **不显示**内容预览（模型要用、用户未必想看，且与 write/edit 预览重复）；write/edit 维持现有 6 行预览不变；skill 类显示一行结果（如加载成功文案）；无输出工具显示一行摘要或省略。本轮不做展开/折叠交互（ctrl+o 类），截断即最终形态。live 与历史两条路径同规则。
   - **D5 清理**：删除孤儿模块 `src/tui/scrollable-output-region.tsx` 及其单测（唯一引用者是自己）；修正 `chat-view.tsx:44` 过时注释（称历史 preview 走 `ScrollableOutputRegion`，实际已是 `CompletedToolPreviewView`）。
-  - **D6 web 端**：`web/src/components/AgentCard.tsx` 消费同一份落盘数据——thinking 折叠块带上真实秒数；toolCalls 活动流接入结果预览同规则（5 行截断、失败标红）。web 侧的具体视觉方案在 PLAN 阶段细化，本 spec 钉住数据源与规则一致性。
+  - **D6 web 端**：`web/src/components/AgentCard.tsx` 消费同一份落盘数据——thinking 折叠块带上真实秒数；toolCalls 活动流接入结果预览同规则（5 行截断、失败标红）。web 侧的具体视觉方案在 PLAN 阶段细化，本 spec 钉住数据源与规则一致性。**注（2026-09-14）**：TUI 端结果预览行数已被 `specs/tui-tool-settled-appearance.md` 的 **result preview** 词条覆盖为 3 行（D4）；web 端仍 5 行，两端行数同步待独立票。
   - **D7 模块整理**：D1 抽出的共用 assistant 外壳组件落点在 `src/tui/`（如 `components.tsx` 或独立文件，PLAN 定）；**memo 边界必须保持**：外壳组件独立 `memo` 包裹，`MessageBlocks` 现有 `memo`（`message-blocks.tsx:187`）不外移、不被抽壳破坏——`tests/tui/history-rerender-cost.test.tsx` 闸维持通过是 D1 的硬约束。工具状态行文案纯函数与 D4 的结果预览函数**同置一处**，让「新增一种工具的显示」只需要在一个注册表里加声明（摘要 + 结果预览一体声明），而不是散改三处。注册表测试完备性沿用 `EXPECTED_TOOLSET_*` 闸（`tests/tui/deps-tools.test.ts`），新注册表结构必须有对应用例。
 
 - **Confirms with human:** (none — assumption gate 已清)
@@ -42,7 +42,7 @@ TUI 的会话流里，工具调用与其结果的可见性由四条相互独立�
 - **SC5（D4 结果预览上屏）**：bash 成功五行走 / `read_file` 无内容预览仍有效。**失败照显 dim ⎿** 已被新 spec D5 覆盖，不再作为活验收。
 - **SC6（D7 注册表）**：`tests/tui/deps-tools.test.ts` 的 `EXPECTED_TOOLSET_*` 闸通过，且新注册表结构下新增工具的声明点唯一（审计：`rg "summarizeToolCall|completedToolPreview" src/tui/` 命中的调用面收敛到注册表单点）。
 - **SC7（D5 清理）**：`rg -n "scrollable-output-region" src/ tests/` 仅剩 0 命中（文件与单测已删）。
-- **SC8（D6 web 一致）**：web 端 AgentCard 的 thinking 块显示落盘秒数、toolCalls 活动流按同规则截断（用例与 TUI 侧同构）。命令：web 测试套件（`web/` 内既有 runner）。
+- **SC8（D6 web 一致）**：web 端 AgentCard 的 thinking 块显示落盘秒数、toolCalls 活动流按同规则截断（用例与 TUI 侧同构）。命令：web 测试套件（`web/` 内既有 runner）。（截断行数两端现行值不同：web 5 行 / TUI 3 行，见 D6 注。）
 - **SC9（回归闸）**：`npm test` 全绿（husky pre-commit 同闸）。
 
 ## Open Questions
