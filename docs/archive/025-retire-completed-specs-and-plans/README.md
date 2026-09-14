@@ -71,6 +71,10 @@
 - `358-subagent-runtime-observability.md` — 落地完成（PR #517）
 - `model-prefix-layering.md` — 落地完成（PR #883 Bullet B1–B8）
 - `trace-agent-readability.md` — 落地完成（PR #802）
+- `1003-grep-single-engine.md` — 落地完成（PR #1003；决策进 ADR-0089，rg 路径只信 rg、Node 降级不做对齐门）
+- `361-subagent-v1.5-foreground-spawn-contract.md` — 落地完成（契约 C1–C5 全部进 manager / spawn-subagent-tool / host-drain）
+- `467-full-compact-llm-summary.md` — 落地完成（全量压缩走 LLM 结构化摘要；`session.summary` 改名 `title`）
+- `home-project-tree.md` — 落地完成（ADR-0088；工作区 `.iknow` 不再承载会话记录，tasks 登记随会话池落 home 项目树）
 
 ## docs-plans/
 

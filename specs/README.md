@@ -43,7 +43,7 @@
 - `tui-tool-settled-appearance.md` — 工具落定态（留 / 收 / 点名着色 + 失败横切 + `deriveSlot`）；**supersedes** `tui-display-consistency` D3；plan: `plans/tui-tool-settled-appearance.md`；写/改 6 行与 `[运行中]` 过程文案 **amended by** `tui-human-display.md`；显示注册表工具名 **amended by** `create-worktree-tools.md`（ADR-0082）
 - `tui-human-display.md` — 过程标题 / 收类不得蒸发 / 新建 10 行 / 编辑 diff / 进度覆盖 / 位置常驻 / 滤 `<graph_mode>`；plan: `plans/tui-human-display.md`
 - `tui-display-consistency.md` — 外壳统一 / thinkingMs / 结果预览窗（D4 ANSI·五行走·read 无内容预览）；**D3 折叠合同已让位** 给 `tui-tool-settled-appearance.md`
-- `tui-model-command.md` — TUI `/model` + `llm.providers` 注册表（ADR-0093）；wire vs 路由 **amended by** `llm-runtime-env-wire-and-viewport-error.md`
+- `tui-model-command.md` — TUI `/model` + `llm.providers` 注册表（ADR-0093）；状态栏模型名取注册表 `models[].name`（SC13）；wire vs 路由 **amended by** `llm-runtime-env-wire-and-viewport-error.md`
 - `llm-runtime-env-wire-and-viewport-error.md` — **wire model** + **viewport API error** + serve 挂 EnvLoader（ADR-0094；plan: `plans/llm-runtime-env-wire-and-viewport-error.md`）；**amends** `tui-model-command.md` SC2/SC10 与「serve 改 settings 须重启」
 
 ### 工具与扩展源
