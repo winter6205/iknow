@@ -465,13 +465,42 @@ export function modelPickerEntries(
   return out;
 }
 
+/**
+ * 路由 ID → 注册表条目的共享查找（modelDisplayName / modelFocusIndexFor 共用，
+ * 避免 route-id 谓词在两个 helper 里漂移）。
+ */
+function findEntryByRouteId(
+  entries: ReadonlyArray<ModelPickerEntry>,
+  model: string
+): ModelPickerEntry | undefined {
+  return entries.find((e) => modelRouteId(e) === model);
+}
+
+/**
+ * 状态栏模型名投影（纯函数）：当前 model 路由 ID 在注册表里命中条目且该项配了
+ * `name` → 显示 `name`（例如 `MiniMax M3`）；未命中 / 无 name / 注册表缺席 →
+ * 原样回退路由串（`provider/model`），不伪造、不抛错。仅状态栏展示面走本投影；
+ * `/info`（spec SC11）与 `/model` picker 的焦点 seed 仍用原始路由串。label 经
+ * settings 解析层 drop-not-throw 保证非空；此处再挡空串（与 picker 的
+ * `label.length > 0` 渲染守卫同口径），空 label 视同「无 name」回退路由串。
+ */
+export function modelDisplayName(
+  model: string | undefined,
+  providers: ReadonlyArray<IknowSettingsLlmProvider> | undefined
+): string | undefined {
+  if (model === undefined) return undefined;
+  const entry = findEntryByRouteId(modelPickerEntries(providers), model);
+  return entry?.label ? entry.label : model;
+}
+
 /** 当前 model 串在条目列表中的下标（找不到 / 空列表 → 0）。 */
 export function modelFocusIndexFor(
   entries: ReadonlyArray<ModelPickerEntry>,
   model: string | undefined
 ): number {
-  const idx = entries.findIndex((e) => modelRouteId(e) === model);
-  return idx === -1 ? 0 : idx;
+  if (model === undefined) return 0;
+  const entry = findEntryByRouteId(entries, model);
+  return entry === undefined ? 0 : entries.indexOf(entry);
 }
 
 /**
@@ -3638,7 +3667,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             running={active.runState === "running-fg"}
             cols={cols}
             activeToolName={activeToolLabel}
-            model={modelName}
+            // 注册表有 name 时显示 name（如 `MiniMax M3`），否则回退路由串。
+            model={modelDisplayName(modelName, props.providers)}
             effortLabel={
               thinkingEnabled ? formatEffortLabel(thinkingEffort) : "off"
             }

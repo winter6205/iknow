@@ -33,6 +33,7 @@
   - 空集:`/model` 直接 notice「未配置 providers —— 见 spec 例模板」,不打开 picker。
 - persist-settings:`mergeModelPatch` + `persistModelChanges` 镜像 thinking/memory 同款(只改 `llm.model`,原 JSON 其它字段保留;原子写 + self-write hash 不变)。
 - `infoLines`:`/info` 加一行「Model: `provider/model`」(无 providers 段时只显 model 串)。
+- 状态栏(ContextBar)模型段:当前 model 命中注册表条目且该条配了 `models[].name` → 显示 `name`(如 `MiniMax M3`);未命中 / 无 name / 注册表缺席 → 原样回退路由串。
 - Anthropic SDK headers 透传:`provider.headers?` 在 client 构造时一次性写入 `defaultHeaders`;无 headers → SDK 默认。
 
 ### Confirms with human (已确认)
@@ -66,6 +67,7 @@
 10. **SC10(切换下一轮生效):** `/model` 选定后,当前 turn 仍在用旧 adapter 跑完(如有运行中);新 turn / 下一轮起走新 provider/model(`reloadFromEnv` 替换 adapter 与 baseUrl/apiKey)。
 11. **SC11(info 显示):** `/info` 输出含 `Model: <provider>/<model>` 一行;无 providers 段时输出 `Model: <model string>`(原串)。
 12. **SC12(不污染既有用例):** 既有 `settings.test.ts` / `env.test.ts` / `persist-settings.test.ts` / `tui/slash.test.ts` / `tui/app.test.tsx` 用例全部仍绿;`npm test` + `npm run typecheck` 退出 0。
+13. **SC13(状态栏显示名):** 当前 model 命中注册表且有 `name` → 状态栏(ContextBar)显示 `name`;无 `name` / 未命中 / 无注册表 → 回退路由串;`/info` 仍输出原串(SC11 不变)。
 
 ## Open Questions
 

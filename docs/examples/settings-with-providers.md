@@ -144,7 +144,7 @@ export MINIMAX_CN_API_KEY=<minimax key>
 > **生效边界**：与 `/thinking` 同款 —— 当前轮若已在跑，仍用旧 adapter 跑完；下一轮起走新 provider/model。
 > **写回**：只改 `llm.model` 一个字段，文件里其它内容（apiKey / thinking / memory / permissions / 你手写的注释外字段）原样保留；原子写 + self-write 哨兵，不触发回环重载。
 
-`/info` 会显示当前 `Model: <provider>/<model>`。
+`/info` 会显示当前 `Model: <provider>/<model>`。状态栏（ContextBar）的模型段显示注册表里该项的 `name`（如 `MiniMax M3`）；条目没配 `name` 或 model 不在注册表里 → 状态栏回退显示路由串。
 
 ---
 

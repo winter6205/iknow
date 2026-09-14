@@ -18,11 +18,13 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testRender } from "@opentui/react/test-utils";
+import { createRoot } from "@opentui/react";
 import type { TestRendererSetup } from "@opentui/core/testing";
 import {
   TuiApp,
   applyModelPickerKey,
   createToolEventSink,
+  modelDisplayName,
   modelFocusIndexFor,
   modelPickerEntries,
   type TuiAppProps,
@@ -76,6 +78,11 @@ interface Mounted {
   readonly bridge: TuiBridge;
   readonly setup: TestRendererSetup;
   readonly destroy: () => void;
+  /** 模拟宿主 env reload 后的重渲染（run.tsx onEnvChange 形状）。 */
+  readonly rerenderWith: (patch: {
+    model?: string;
+    envVersion?: number;
+  }) => Promise<void>;
   readonly typeText: (text: string) => Promise<void>;
   readonly pressEnter: () => Promise<void>;
   readonly pressEscape: () => Promise<void>;
@@ -88,6 +95,7 @@ const sleep = (ms: number): Promise<void> =>
 async function mountAsync(opts: {
   readonly providers?: ReadonlyArray<IknowSettingsLlmProvider>;
   readonly model?: string;
+  readonly envVersion?: number;
   readonly onPersistModel?: TuiAppProps["onPersistModel"];
 }): Promise<Mounted> {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-model-"));
@@ -98,7 +106,8 @@ async function mountAsync(opts: {
     inflight: createInflightRegistry(),
   });
   let setupRef: TestRendererSetup | undefined;
-  const setup = await testRender(
+  let currentOpts = opts;
+  const appNode = (renderOpts: typeof opts) => (
     <TuiApp
       bridge={bridge}
       askBridge={createTuiAskUserBridge()}
@@ -107,19 +116,32 @@ async function mountAsync(opts: {
       dataDir={dataDir}
       permissionMode={createPermissionModeContext("default")}
       sessionGrants={createSessionGrants()}
-      {...(opts.providers !== undefined ? { providers: opts.providers } : {})}
-      {...(opts.model !== undefined ? { model: opts.model } : {})}
-      {...(opts.onPersistModel !== undefined
-        ? { onPersistModel: opts.onPersistModel }
+      {...(renderOpts.providers !== undefined
+        ? { providers: renderOpts.providers }
+        : {})}
+      {...(renderOpts.model !== undefined ? { model: renderOpts.model } : {})}
+      {...(renderOpts.envVersion !== undefined
+        ? { envVersion: renderOpts.envVersion }
+        : {})}
+      {...(renderOpts.onPersistModel !== undefined
+        ? { onPersistModel: renderOpts.onPersistModel }
         : {})}
       onQuit={() => {
         if (setupRef && !setupRef.renderer.isDestroyed)
           setupRef.renderer.destroy();
       }}
-    />,
-    { width: 90, height: 30, exitOnCtrlC: false, consoleMode: "disabled" }
+    />
   );
+  const setup = await testRender(appNode(currentOpts), {
+    width: 90,
+    height: 30,
+    exitOnCtrlC: false,
+    consoleMode: "disabled",
+  });
   setupRef = setup;
+  // 同一 root 二次 render = re-render（testRender 内部即 createRoot + render，
+  // 这里取公开 createRoot 造一个同 renderer 的 root 供 rerenderWith 使用）。
+  const rootRef = createRoot(setup.renderer);
   await sleep(500);
   await setup.waitForVisualIdle();
   await setup.waitForVisualIdle();
@@ -128,6 +150,14 @@ async function mountAsync(opts: {
     setup,
     destroy: () => {
       if (!setup.renderer.isDestroyed) setup.renderer.destroy();
+    },
+    // 模拟宿主 env reload 后的重渲染（run.tsx onEnvChange 形状）：同一 root
+    // 上以新 props 二次 render（createRoot.render 可重入 = re-render）。
+    rerenderWith: async (patch: { model?: string; envVersion?: number }) => {
+      currentOpts = { ...currentOpts, ...patch };
+      rootRef.render(appNode(currentOpts));
+      await sleep(300);
+      await setup.renderOnce();
     },
     typeText: async (text: string) => {
       setup.mockInput.pressKey("/");
@@ -219,6 +249,28 @@ describe("modelPickerEntries / modelFocusIndexFor（注册表投影）", () => {
     expect(modelFocusIndexFor(entries, "minimax-cn/MiniMax-M2")).toBe(1);
     expect(modelFocusIndexFor(entries, "unknown/model")).toBe(0);
     expect(modelFocusIndexFor(entries, undefined)).toBe(0);
+  });
+});
+
+describe("modelDisplayName（状态栏显示名投影）", () => {
+  test("命中注册表且有 name → 显示 name；无 name → 回退路由串", () => {
+    expect(modelDisplayName("minimax-cn/MiniMax-M3", PROVIDERS)).toBe(
+      "MiniMax M3"
+    );
+    expect(modelDisplayName("minimax-cn/MiniMax-M2", PROVIDERS)).toBe(
+      "minimax-cn/MiniMax-M2"
+    );
+  });
+
+  test("未命中 / 注册表缺席或空 / model 未接线 → 原样回退", () => {
+    expect(modelDisplayName("unknown/model", PROVIDERS)).toBe("unknown/model");
+    expect(modelDisplayName("minimax-cn/MiniMax-M3", undefined)).toBe(
+      "minimax-cn/MiniMax-M3"
+    );
+    expect(modelDisplayName("minimax-cn/MiniMax-M3", [])).toBe(
+      "minimax-cn/MiniMax-M3"
+    );
+    expect(modelDisplayName(undefined, PROVIDERS)).toBeUndefined();
   });
 });
 
@@ -489,6 +541,95 @@ describe("/info 的 Model 行（spec SC11）", () => {
     );
     expect(frame).toContain("Model: minimax/MiniMax-M3");
     expect(frame).not.toContain("Model: undefined");
+
+    app.destroy();
+  }, 30_000);
+});
+
+describe("状态栏模型名（注册表 name → ContextBar）", () => {
+  test("当前 model 命中注册表且有 name → 状态栏显示 name 而非路由串", async () => {
+    const app = await mountAsync({
+      providers: PROVIDERS,
+      model: "minimax-cn/MiniMax-M3",
+    });
+    // 等状态栏渲染出显示名（ContextBar 在 prompt 之下第一行）。
+    const frame = await untilFrame(
+      app.setup,
+      (f) => f.includes("MiniMax M3") && f.includes("ctx"),
+      8000,
+      "contextbar-name"
+    );
+    const bar = frame
+      .split("\n")
+      .find((l) => l.includes("ctx") && l.includes("MiniMax M3"));
+    // 状态栏里出现的应是 name，不是路由串（/info 的 Model 行未打开）。
+    expect(bar).toBeDefined();
+    expect(bar).not.toContain("minimax-cn/MiniMax-M3");
+
+    app.destroy();
+  }, 30_000);
+
+  test("无 name 的条目 → 状态栏回退显示路由串", async () => {
+    const app = await mountAsync({
+      providers: PROVIDERS,
+      model: "minimax-cn/MiniMax-M2",
+    });
+    const frame = await untilFrame(
+      app.setup,
+      (f) => f.includes("minimax-cn/MiniMax-M2") && f.includes("ctx"),
+      8000,
+      "contextbar-fallback"
+    );
+    expect(frame).toContain("minimax-cn/MiniMax-M2");
+
+    app.destroy();
+  }, 30_000);
+
+  test("无注册表 → 状态栏原样显示 model 串", async () => {
+    const app = await mountAsync({ model: "minimax/MiniMax-M3" });
+    const frame = await untilFrame(
+      app.setup,
+      (f) => f.includes("minimax/MiniMax-M3") && f.includes("ctx"),
+      8000,
+      "contextbar-noprov"
+    );
+    expect(frame).toContain("minimax/MiniMax-M3");
+
+    app.destroy();
+  }, 30_000);
+
+  test("settings 热更新切路由 → 状态栏跟随新条目的 name（SC13 重投影）", async () => {
+    const app = await mountAsync({
+      providers: PROVIDERS,
+      model: "minimax-cn/MiniMax-M3",
+      envVersion: 0,
+    });
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("MiniMax M3") && f.includes("ctx"),
+      8000,
+      "contextbar-before-reload"
+    );
+
+    // 模拟宿主 env reload：envVersion 递增 + 新 model prop（run.tsx 的
+    // onEnvChange 接线形状）。`[envVersion]` effect 同步 modelName 后，
+    // ContextBar 必须重投影为新路由的 name。
+    await app.rerenderWith({
+      model: "volcengine-ark/deepseek-v3-250324",
+      envVersion: 1,
+    });
+    const reloaded = await untilFrame(
+      app.setup,
+      (f) => f.includes("DeepSeek V3") && f.includes("ctx"),
+      8000,
+      "contextbar-after-reload"
+    );
+    // 旧 name 不再出现在状态栏行上（同帧 picker 未开，无其他来源）。
+    expect(
+      reloaded
+        .split("\n")
+        .find((l) => l.includes("ctx") && l.includes("DeepSeek V3"))
+    ).not.toContain("MiniMax M3");
 
     app.destroy();
   }, 30_000);
