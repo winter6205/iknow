@@ -203,55 +203,24 @@ function findLastTextSegmentIndex(
 }
 
 /**
- * 当前 turn 折叠行判定 —— fold 行 anchor（segmentIndex 落在
- * lastQueryVisible 之后）已展开 fold 行 → live thinking 面板让位。
+ * live thinking 面板（open unit）让位判定 —— docs/CONTEXT.md `open unit`：
+ * 已画 unit fold **不是**关掉后续思考 panel 的信号；让位的唯一理由是
+ * **簇内仍有工具 running**（CONTEXT `live activity group`「有工具 running
+ * 时 panel 让位」）。
+ *
+ * 「该 burst 尚无已画 `Thought for`」这一条在本判定里是**结构蕴含**而非另
+ * 一条闸门：`thinkingDraft` 非空 ⟺ 思考缓冲仍在累积（`closeThinkingPhase`
+ * 在每条 `text_delta` / `tool_call_start` 清空它），即该 burst 尚未关闭；
+ * 未关闭的 burst 不会有 `thinkingMs` 落盘，因此不可能已有 `Thought for`
+ * 画在它头上。把这条写成独立闸门只会退化回「整轮有折叠就关 panel」的旧
+ * 错误（见 _Avoid_：`currentTurnHasFold` 关后续思考）。
  */
-export function currentTurnHasFoldFor(opts: {
-  readonly activitySegments: ReadonlyArray<TurnActivitySegment>;
-  readonly foldLinesBySegmentIndex: FoldLinesBySegmentIndex;
-  readonly lastQueryVisible: number;
+export function shouldShowLiveThinkingPanel(opts: {
+  readonly running: boolean;
+  readonly thinkingDraft: string;
+  readonly toolRunning: boolean;
 }): boolean {
-  if (opts.lastQueryVisible < 0) return false;
-  return segmentBelongsToCurrentTurn(opts, false);
-}
-
-/**
- * 当前 turn 是否已有带时长的折叠行 —— 用于 live thinking 面板让位判定
- * （按派生值 drawnThinkingForMessageIndex，不反推显示文案）。
- */
-export function currentTurnHasThinkingFoldFor(opts: {
-  readonly activitySegments: ReadonlyArray<TurnActivitySegment>;
-  readonly foldLinesBySegmentIndex: FoldLinesBySegmentIndex;
-  readonly drawnThinkingForMessageIndex: DrawnThinkingForMessageIndex;
-  readonly lastQueryVisible: number;
-}): boolean {
-  if (opts.lastQueryVisible < 0) return false;
-  return segmentBelongsToCurrentTurn(opts, true);
-}
-
-function segmentBelongsToCurrentTurn(
-  opts: {
-    readonly activitySegments: ReadonlyArray<TurnActivitySegment>;
-    readonly foldLinesBySegmentIndex: FoldLinesBySegmentIndex;
-    readonly drawnThinkingForMessageIndex?: DrawnThinkingForMessageIndex;
-    readonly lastQueryVisible: number;
-  },
-  requireDrawn: boolean
-): boolean {
-  for (const segmentIndex of opts.foldLinesBySegmentIndex.keys()) {
-    const seg = opts.activitySegments[segmentIndex];
-    if (seg === undefined || seg.kind !== "tools") continue;
-    if (seg.messageIndex < opts.lastQueryVisible) continue;
-    if (
-      requireDrawn &&
-      opts.drawnThinkingForMessageIndex !== undefined &&
-      !opts.drawnThinkingForMessageIndex.has(seg.messageIndex)
-    ) {
-      continue;
-    }
-    return true;
-  }
-  return false;
+  return opts.running && opts.thinkingDraft.length > 0 && !opts.toolRunning;
 }
 
 /**

@@ -8,20 +8,20 @@
  *    结束态行,不等整 turn 收尾）;
  *  - 已完成 retract 工具的计数行同样不受 running 闸门影响 —— retract
  *    一旦落定就归入折叠（不能从 live tail 消失后无处安放）;
- *  - tail 里已完成 retract 行折叠条件 = 当前轮次有折叠行 + 有 retract
- *    计数,running 不再是「保持展开」的硬理由。
+ *  - tail 折叠不再有 turn 级闸门（plans/tui-live-activity-fold.md T3 删除
+ *    `shouldCollapseTurnToolRows` / `shouldShowTurnActivityFold`）—— 落点
+ *    由 per-segment fold 行与 **live activity group** 承担。
  *
  * 5 类边界:empty / negative / overflow / concurrent / exception。SSOT:
  * src/tui/turn-activity.ts 的 `shouldShowThinkingFold` / `shouldShowRetractFold`
- * / `shouldCollapseTurnToolRows` 三个纯函数;chat-view 的 fold 行计算与
- * tail 折叠都消费这三者。
+ * 两个 per-segment 纯函数（turn 级闸门已删,导出面测试见文末）。
  */
 import { describe, expect, test } from "bun:test";
 import {
-  shouldCollapseTurnToolRows,
   shouldShowRetractFold,
   shouldShowThinkingFold,
 } from "../../src/tui/turn-activity.js";
+import * as turnActivityModule from "../../src/tui/turn-activity.js";
 
 describe("shouldShowThinkingFold（思考秒数折叠行）", () => {
   test("empty:thinkingMs=0 / 无 → false（无秒数就不画）", () => {
@@ -95,30 +95,14 @@ describe("shouldShowRetractFold（retract 计数行）", () => {
   });
 });
 
-describe("shouldCollapseTurnToolRows（tail 折叠判定）", () => {
-  test("empty:无折叠行 → false（不藏 tail）", () => {
-    expect(shouldCollapseTurnToolRows(false, 0, 0)).toBe(false);
-    expect(shouldCollapseTurnToolRows(true, 0, 0)).toBe(false);
-  });
-
-  test("negative:有折叠行但无 retract → false（折叠行非 retract 来源,不必藏 tail）", () => {
-    expect(shouldCollapseTurnToolRows(false, 2, 0)).toBe(false);
-  });
-
-  test("overflow:多 retract + 折叠行在场 → true（无论 running 与否）", () => {
-    expect(shouldCollapseTurnToolRows(true, 2, 5)).toBe(true);
-    expect(shouldCollapseTurnToolRows(false, 2, 5)).toBe(true);
-  });
-
-  test("concurrent:同输入多次稳定", () => {
-    const a = shouldCollapseTurnToolRows(true, 2, 5);
-    const b = shouldCollapseTurnToolRows(true, 2, 5);
-    expect(a).toBe(b);
-  });
-
-  test("exception:running=true + 有折叠行 + 有 retract → true（retract 已落定就藏 tail）", () => {
-    // 不变式 = retract 计数行在场时,即便当前 turn 仍在 running,完成的
-    // retract 不应在尾巴与折叠行同时出现（double-render）。
-    expect(shouldCollapseTurnToolRows(true, 1, 1)).toBe(true);
+describe("shouldCollapseTurnToolRows / shouldShowTurnActivityFold（T3 已删除）", () => {
+  test("两个 turn 级折叠闸不再导出（被 open-unit 派生取代）", () => {
+    // plans/tui-live-activity-fold.md T3：删除把 `foldDisplayLines.length`
+    // 当 collapse 信号、删除整轮 `currentTurnHasFold` 关 panel。这两个
+    // 函数是那条整轮派生链的入口 —— 留着就会有人再接回去。
+    // 判定对象 = 模块导出面（编译期合同），不是运行时行为。
+    const exports = Object.keys(turnActivityModule);
+    expect(exports).not.toContain("shouldCollapseTurnToolRows");
+    expect(exports).not.toContain("shouldShowTurnActivityFold");
   });
 });

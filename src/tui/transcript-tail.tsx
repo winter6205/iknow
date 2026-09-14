@@ -6,13 +6,14 @@
  * thinking 面板、legacy liveToolLines、askLine、Spinner）抽成 sibling
  * 组件。逻辑由纯派生 `decideTailLayout` 计算渲染决策，组件只挂 JSX。
  *
- * 渲染顺序（spec D3/D7，与原 chat-view 一致）：
- *   crunched 行 → tail slots → thinking 面板 → legacy liveToolLines →
- *   askLine → spinner。
+ * 渲染顺序（spec D3/D7 + D9 栈序）：
+ *   crunched 行 → tail slots → **live activity group** → thinking 面板 →
+ *   legacy liveToolLines → askLine → spinner。
  *
- * `currentTurnHasFold` / `currentTurnHasThinkingFold` 由 ChatView 计算
- * 后透传（与消息流 fold 行决策共用 foldLinesBySegmentIndex）；本组件
- * 只决策 JSX，不再做 fold 派生。
+ * D9 栈序（docs/CONTEXT.md `live activity group`）：过程组在上、thinking
+ * 在下（近输入）；有工具 running 时 thinking panel 让位，两个 live panel
+ * 不同屏叠。让位判定由 ChatView 派生（`shouldShowLiveThinkingPanel`）后经
+ * `showThinkingPanel` 透传 —— 本组件只挂 JSX，不做 fold 派生。
  */
 import type { ReactNode } from "react";
 import { Markdown } from "./markdown.js";
@@ -34,19 +35,18 @@ export interface TranscriptTailProps {
   readonly renderLiveRuns: (runs: ReadonlyArray<LiveToolRun>) => ReactNode;
   readonly deferredThinkingDrafts: string;
   readonly thinkingExpanded: boolean;
-  readonly currentTurnHasFold: boolean;
-  readonly currentTurnHasThinkingFold: boolean;
+  /** 进行中一行英文摘要（Listing × N · Running N shell commands）。
+   *  由 ChatView 按 `running` 闸门派生 —— idle 恒 null（D9：idle 落定走
+   *  unit fold + keep 标题，组是**进行中**的 chrome）。 */
+  readonly groupSummary: string | null;
+  /** open-unit 让位判定（`shouldShowLiveThinkingPanel`）由 ChatView 派生。 */
+  readonly showThinkingPanel: boolean;
   readonly liveToolLines: ReadonlyArray<string>;
   readonly askLine: string | undefined;
 }
 
 export function TranscriptTail(props: TranscriptTailProps): ReactNode {
   const pal = tuiPalette;
-  const showThinkingPanel =
-    props.running &&
-    props.deferredThinkingDrafts.length > 0 &&
-    !props.currentTurnHasFold &&
-    !props.currentTurnHasThinkingFold;
   return (
     <>
       {props.crunchedSeconds > 0 && (
@@ -64,7 +64,14 @@ export function TranscriptTail(props: TranscriptTailProps): ReactNode {
           renderLiveRuns={props.renderLiveRuns}
         />
       ))}
-      {showThinkingPanel && (
+      {props.groupSummary !== null && (
+        <LiveActivityGroupLine
+          summary={props.groupSummary}
+          contentWidth={props.contentWidth}
+          hasSlots={props.tailSlots.length > 0}
+        />
+      )}
+      {props.showThinkingPanel && (
         <ThinkingPanel
           contentWidth={props.contentWidth}
           deferredThinkingDrafts={props.deferredThinkingDrafts}
@@ -92,6 +99,31 @@ export function TranscriptTail(props: TranscriptTailProps): ReactNode {
 
 function slotKey(slot: TailSlotDecision, i: number): string {
   return slot.kind === "tools" ? `live-tools-${i}` : `live-draft-${i}`;
+}
+
+/** 过程组摘要行 —— 一行英文、单行不折（`Listing × 1 · Reading × 3`）。
+ *  色 token = `dim`：过程组是**进行中**的次级摘要，落定态由 unit fold 的
+ *  `Thought for` 行接手（失败横切不进本组计数，故不出现 error 色）。 */
+function LiveActivityGroupLine(props: {
+  readonly summary: string;
+  readonly contentWidth: number;
+  readonly hasSlots: boolean;
+}): ReactNode {
+  return (
+    <box
+      flexDirection="column"
+      width={props.contentWidth}
+      marginTop={props.hasSlots ? 1 : 0}
+    >
+      <text
+        fg={tuiPalette.dim}
+        wrapMode="none"
+        width={Math.max(1, props.contentWidth - 2)}
+      >
+        {props.summary}
+      </text>
+    </box>
+  );
 }
 
 /** 单 tail slot：tools 组 → 列容器；draft 段 → 仅 running 渲染 + MessageShell。 */

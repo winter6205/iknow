@@ -692,7 +692,10 @@ test("#589 ChatView tail：20 条 read_file ok + 1 running 不含完成读行", 
   });
   const setup = await testRender(
     <ChatView
-      session={sessionWith([msg("u", "user", "请读一批文件")])}
+      session={{
+        ...sessionWith([msg("u", "user", "请读一批文件")]),
+        runState: "running-fg",
+      }}
       cols={80}
       rows={40}
       liveToolLines={[]}
@@ -707,6 +710,10 @@ test("#589 ChatView tail：20 条 read_file ok + 1 running 不含完成读行", 
   expect(frame.includes("[运行中]")).toBe(false);
   expect(frame).not.toContain("CV_READ_OK_");
   expect(frame).not.toContain("read_file ·");
+  // D9（spec specs/tui-tool-settled-appearance.md）：20 条读完 + 1 条 running
+  // 搜索不逐条刷标题，收成一行过程组摘要 —— 帧上是 `Reading × 20 ·
+  // Searching × 1`（桶序固定），不是 20 行 `read_file × 1`。
+  expect(frame).toContain("Reading × 20 · Searching × 1");
   await setup.renderer.destroy();
 });
 
@@ -1031,26 +1038,20 @@ test("running：第二段草稿画在后续工具之下（tool→text→tool→t
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // plans T1:web_search(已完成 retract)进折叠 → 不再占 tail。本测试
-  // 用 bash(keep)替代;两条 bash 共存,首条出现在第一段草稿之前(epoch 0),
-  // 第二条在两段草稿之间(epoch 1) → 第一段草稿之前 + 第二段草稿之后。
-  // 第一段草稿之前的位置 = epoch 0 bash;epoch 1 bash 在第一段之后、
-  // 第二段之前。但 epoch 1 的 bash 是 status="running",仍占 tail;epoch 0
-  // 的 bash 是 status="ok"(已完成 keep)→ 仍占 tail(keep 不进折叠)。
-  // 因此 epoch 0 bash 在第一段前,epoch 1 bash 在第二段前:
-  // bash(epoch 0) < 第一段 < bash(epoch 1) < 第二段。
-  const iFirstBash = frame.indexOf("bash");
+  // D9(spec specs/tui-tool-settled-appearance.md):两条 bash(epoch 0 完成 +
+  // epoch 1 running)聚合为一行过程组摘要 —— 完成件不再留卡;running 件占
+  // 唯一细节槽。细节槽按 draftEpoch 落在两段草稿之间,后续草稿不把新工具
+  // 顶到它上面(本测原本钉的插入顺序不变,只是 epoch 0 的卡改由组计数承接)。
+  expect(frame).toContain("Running 2 shell commands");
   const iFirstDraft = frame.indexOf("第一段回答");
   // epoch 1 bash 是 status="running" → 渲染为 `Running 1 shell command… · …`
-  // (spec D1 过程行),不能用第二个 "bash" 找。改为查 `Running 1 shell
+  // (spec D1 过程行),不能用 "bash" 找。改为查 `Running 1 shell
   // command…` 前缀,它只会出现在 epoch 1 bash 的位置。
   const iSecondBash = frame.indexOf("Running 1 shell command…");
   const iSecondDraft = frame.indexOf("第二段回答");
-  expect(iFirstBash).toBeGreaterThanOrEqual(0);
   expect(iFirstDraft).toBeGreaterThanOrEqual(0);
   expect(iSecondBash).toBeGreaterThanOrEqual(0);
   expect(iSecondDraft).toBeGreaterThanOrEqual(0);
-  expect(iFirstBash).toBeLessThan(iFirstDraft);
   expect(iFirstDraft).toBeLessThan(iSecondBash);
   expect(iSecondBash).toBeLessThan(iSecondDraft);
   await setup.renderer.destroy();

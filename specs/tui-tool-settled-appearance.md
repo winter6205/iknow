@@ -5,6 +5,8 @@
 > **Supersedes** `specs/tui-display-consistency.md` **D3**（整轮一律折叠、藏全部标题）。D1 外壳 / D2 thinkingMs / D4 窗与 ANSI / D7 注册表同置仍继承。
 >
 > **Amended 2026-09-10** by `specs/create-worktree-tools.md`（ADR-0082）：本文档正文的显示注册表键与 SC5 里的模型面工具名已改为 `create-worktree` / `enter-worktree` / `exit-worktree` / `remove-worktree` / `list-worktrees`（去 `-task`）；原名 `create-task-worktree` / `enter-task-worktree` / `exit-task-worktree` / `remove-task-worktree` / `list-task-worktrees` 只作历史对照，不再进模型面（`src/tui/tool-settled.ts` 消费新键）。D1 策略核 / D3 折叠语义 / D8 留收分类合同本身不变。
+>
+> **Amended 2026-09-14** by `plans/tui-live-activity-fold.md` T2：live 可见性条款从「running 时全部逐条可见」改为 `docs/CONTEXT.md` 的 **live activity group**（进行中一行英文摘要 + 细节槽 ≤1，思考独立 panel 让位）。**`deriveSlot` 合同本身不变** —— 核对外签名与 SC1 / SC2 concurrent 断言的 `{ running: true }` slot 值（`showTitle` 真 / `inFoldCount` 假）逐字保留；变的是渲染层把多条 running 件收进哪一面 chrome，不是核的逐条派生结果。D8 成功/失败表、SC1、D3/D4/D5/D6 不动。
 
 ## Objective
 
@@ -15,13 +17,14 @@ TUI 在工具从 live 转为 idle 之后，按类决定可见性：人要核验�
 ## Boundaries
 
 - **Does:**
-  - **D1 策略核**：在 `src/tui/` 增加纯 TS 策略核（无 React）。先单文件 `tool-settled.ts`。导出 `deriveSlot(name, { running, failed })` → `{ showTitle, showPreview, inFoldCount, color }`，`color` ∈ `default | accent | error`。失败横切在核内最后一步。running 时全部逐条可见（`showTitle` 真、`inFoldCount` 假）。未知工具缺省 retract、无预览。
+  - **D1 策略核**：在 `src/tui/` 增加纯 TS 策略核（无 React）。先单文件 `tool-settled.ts`。导出 `deriveSlot(name, { running, failed })` → `{ showTitle, showPreview, inFoldCount, color }`，`color` ∈ `default | accent | error`。失败横切在核内最后一步。**核是 per-run 派生**：running 时该件 `showTitle` 真、`inFoldCount` 假（逐条 slot 不提前进计数）——渲染层再把多条 running 件收成 **live activity group**（D9），不是核里逐条摆标题。未知工具缺省 retract、无预览。
   - **D2 注册表一行**：`summary` + `preview?` + `settledClass`（keep / retract / accent）同置。缺 `settledClass` 的声明非法（测试拒绝）。建树四件必须进表：`create-worktree` / `enter-worktree` / `exit-worktree` / `remove-worktree`。
   - **D3 折叠只数成功的收**：折叠计数行只聚合 `inFoldCount === true`（成功且 retract）。留 / 点名着色 / 失败出独立标题行，不进计数。本轮零条收 → 不画工具计数行；思考秒数行可单独在（消费既有 **thinking duration**）。思考秒数与计数分行。retract 必须 `showTitle` 与 `showPreview` 同假。
   - **D4 留的足迹**：keep 成功：`bash` 留标题（命令）+ **result preview** 五行走 ANSI（行数不重开）；`write_file` / `edit_file` 留标题 + 既有 6 行预览；`bash_stop` / `todo_write` / `memory_save` 只留标题。
   - **D5 失败横切**：任意类失败 → 标题留、error 色、一行短错误（截断）、不进折叠计数、不画五行走 dim `⎿`。error 色优先于 accent。
   - **D6 点名着色**：accent 成功走现有 `accent` token + 人读表述（`skill <name>`；建树 / 进入 / 退出 / 删树带 label 或路径叶子）。禁止 dim。不把 skill 正文摊成五行走浅色预览。
   - **D7 渲染只消费 slot**：`turn-activity` 只按 `inFoldCount` 聚合；`message-blocks` / live 预览只按 `showTitle` / `showPreview` / `color` 画。删除「藏标题、留预览」的组合路径。
+  - **D9 live activity group（进行中 chrome）**：turn 仍在 running 时，多条运行中 / 刚完成的 retract 件**不逐条刷标题**，收成一行英文摘要（`Listing` / `Reading` / `Searching` 聚合收类；bash 用 `Running N shell command(s)`）；细节槽**至多一条**（当前 running 件，或最后一条 keep bash 的短预览）。keep 标题（write / edit）逐一保留；**thinking 是独立 panel**，不焊进这行，且有工具 running 时让位。idle 落定仍走 **unit fold** + keep 标题（D3/D4）。本组不是 idle 的替代折叠 —— 不把过程组当 unit fold 画。
   - **D8 分类表（成功态）**：
     - keep：`bash`、`write_file`、`edit_file`、`bash_stop`、`todo_write`、`memory_save`
     - retract：`read_file`、`grep`、`glob`、`web_search`、`web_fetch`、`memory_recall`、`tool_search`、`skill_search`、全部 `lsp_*`、`bash_output`、`list_mcp_resources`、`read_mcp_resource`、`query_trace`、`list-worktrees`；未注册工具缺省 retract
@@ -36,7 +39,7 @@ TUI 在工具从 live 转为 idle 之后，按类决定可见性：人要核验�
   - 子代理 glyph 重切
   - `create-worktree` ACI 形状、门禁说明书、worktree isolation 开关
   - 模型上下文、tool_result 编码、meta 进模型
-  - live 流式协议；running 仍逐条可见
+  - live 流式协议；live activity group 的折叠闸派生（**open unit**，`plans/tui-live-activity-fold.md` T3 的范围）。**In spec**：D9「running 收成一行摘要 + 细节槽 ≤1」本身；「running 仍逐条可见」已作废（见 2026-09-14 amendment）
   - 重开 bash ANSI 透传、五行走行数、`read_file` 内容预览、write/edit 六行窗
   - 新开仓库级 bounded context；`src/tui/services/` / `utils/` / 预先建 `tool-display/`
 
@@ -47,7 +50,7 @@ TUI 在工具从 live 转为 idle 之后，按类决定可见性：人要核验�
   - empty：本轮零工具 → 无折叠计数行；`deriveSlot` 不在无 name 时被调用（调用方空列表）。
   - negative：未注册名 → retract、`showPreview` 假、不进 keep/accent。
   - overflow：≥20 条成功 retract → 仍一行计数（各 name × N），不摊成 ≥20 条标题。
-  - concurrent：`running: true` 时任意 name 的 `inFoldCount` 假、`showTitle` 真（live 与 idle 互不串）；纯函数无共享可变状态，`// N/A: pure deriveSlot`。
+  - concurrent：`running: true` 时任意 name 的 `inFoldCount` 假、`showTitle` 真（**核**的 per-run 结果不变；live 渲染层由 D9 把多条收成一行 —— 断言对象是 `deriveSlot`，不是帧上标题条数）；纯函数无共享可变状态，`// N/A: pure deriveSlot`。
   - exception：失败横切见 SC1 第二断言与 SC4。
 - **SC3（收不残留预览）**：idle 一轮含成功 `read_file` + 成功 `bash`：画面有 bash 标题（及成功时五行走），无 read 标题、无 read `⎿`；折叠计数含 `read_file × 1`、不含 `bash`。命令：`bun test tests/tui/chat-view-thinking-tool-fold.test.tsx tests/tui/turn-activity.test.ts`。
 - **SC4（失败不进计数、不 dim 长文）**：idle 一轮含失败 mutate（如 `[worktree_isolation]` 长回执）：有红标题 + 一行短错误；无 dim 五行走 `⎿` 堆该文；折叠计数不含该失败件。命令：同上 + 策略核表测。
@@ -85,6 +88,7 @@ TUI 在工具从 live 转为 idle 之后，按类决定可见性：人要核验�
 - **Supersede** 旧 D3。
 - 建树四件进入显示注册表。
 - 删除 `hideToolSummaries` 组合路径。
+- **2026-09-14**：新增 D9（live activity group）+ out-of-spec 交换 live 条款；`deriveSlot` 签名与取值、D8 表、SC1 不动。
 
 **待写入：** （空 — 词条已在 CONTEXT.md）
 

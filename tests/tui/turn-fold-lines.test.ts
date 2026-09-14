@@ -14,14 +14,13 @@ import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/typ
 import { orderedTurnActivitySegments } from "../../src/tui/turn-activity.js";
 import {
   buildFoldLinesBySegmentIndex,
-  currentTurnHasFoldFor,
-  currentTurnHasThinkingFoldFor,
   findLastToolSegmentIndex,
   firstPartThinkingBlocks,
   makeThinkingMsAtVisibleFromSource,
   pickMessageSegments,
   renderInContentOrder,
   segmentActivityBlocks,
+  shouldShowLiveThinkingPanel,
   type ThinkingMsAtVisible,
 } from "../../src/tui/turn-fold-lines.js";
 
@@ -371,74 +370,58 @@ describe("buildFoldLinesBySegmentIndex（exception）", () => {
   });
 });
 
-// ── currentTurnHasFoldFor / currentTurnHasThinkingFoldFor ──────────
+// ── shouldShowLiveThinkingPanel（open unit 让位判定）───────────────
 
-describe("currentTurnHasFoldFor（boundary：lastQueryVisible < 0）", () => {
-  test("lastQueryVisible < 0 → 永远 false（无 query 不视为当前 turn）", () => {
+describe("shouldShowLiveThinkingPanel（boundary：无草稿 / 非 running）", () => {
+  test("empty：thinkingDraft 空 → 无 panel（无草稿不画）", () => {
     expect(
-      currentTurnHasFoldFor({
-        activitySegments: [],
-        foldLinesBySegmentIndex: new Map(),
-        lastQueryVisible: -1,
-      })
-    ).toBe(false);
-    expect(
-      currentTurnHasThinkingFoldFor({
-        activitySegments: [],
-        foldLinesBySegmentIndex: new Map(),
-        drawnThinkingForMessageIndex: new Set([0]),
-        lastQueryVisible: -1,
+      shouldShowLiveThinkingPanel({
+        running: true,
+        thinkingDraft: "",
+        toolRunning: false,
       })
     ).toBe(false);
   });
 
-  test("fold 行 anchor < lastQueryVisible → 当前 turn 无 fold", () => {
-    const segments = [
-      {
-        kind: "tools" as const,
-        messageIndex: 0,
-        contentBlockIndex: 0,
-        entries: [],
-      },
-    ];
-    const foldMap = new Map<number, ReadonlyArray<string>>([
-      [0, ["read_file × 1"]],
-    ]);
+  test("negative：非 running（idle）→ panel 消失（流式面板只在 turn 进行中）", () => {
     expect(
-      currentTurnHasFoldFor({
-        activitySegments: segments,
-        foldLinesBySegmentIndex: foldMap,
-        lastQueryVisible: 5,
+      shouldShowLiveThinkingPanel({
+        running: false,
+        thinkingDraft: "思考中",
+        toolRunning: false,
       })
     ).toBe(false);
   });
 
-  test("anchor >= lastQueryVisible → 当前 turn 有 fold（按派生 drawn 判定）", () => {
-    const segments = [
-      {
-        kind: "tools" as const,
-        messageIndex: 5,
-        contentBlockIndex: 0,
-        entries: [],
-      },
-    ];
-    const foldMap = new Map<number, ReadonlyArray<string>>([
-      [0, ["read_file × 1"]],
-    ]);
+  test("overflow：长草稿仍 true（判定与文本长度无关）", () => {
     expect(
-      currentTurnHasFoldFor({
-        activitySegments: segments,
-        foldLinesBySegmentIndex: foldMap,
-        lastQueryVisible: 3,
+      shouldShowLiveThinkingPanel({
+        running: true,
+        thinkingDraft: "x".repeat(10_000),
+        toolRunning: false,
       })
     ).toBe(true);
-    // 思考时长 anchor 缺席 → thinking fold 为 false
+  });
+
+  test("concurrent：已画 unit fold 不是关闭信号（有折叠 + 有草稿 + 无工具 running → 仍 true）", () => {
+    // docs/CONTEXT.md open unit _Avoid_：「已画折叠不是关 thinking panel 的
+    // 信号」。本判定不看 foldLinesBySegmentIndex —— 只由草稿非空 + 无工具
+    // running 决定。
     expect(
-      currentTurnHasThinkingFoldFor({
-        activitySegments: segments,
-        foldLinesBySegmentIndex: foldMap,
-        drawnThinkingForMessageIndex: new Set(),
-        lastQueryVisible: 3,
+      shouldShowLiveThinkingPanel({
+        running: true,
+        thinkingDraft: "第二段思考流式进行中",
+        toolRunning: false,
+      })
+    ).toBe(true);
+  });
+
+  test("exception：工具 running → panel 让位（CONTEXT live activity group）", () => {
+    expect(
+      shouldShowLiveThinkingPanel({
+        running: true,
+        thinkingDraft: "思考中",
+        toolRunning: true,
       })
     ).toBe(false);
   });

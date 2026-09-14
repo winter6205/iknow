@@ -4,7 +4,8 @@
  *  - 折叠计数行只聚合成功且 retract 的件（inFoldCount === true）；
  *  - keep（bash / write / edit）标题 + 预览留；accent / 失败出独立标题行；
  *  - 零条收 → 无工具计数行（思考秒数行可单独在）；
- *  - running 态逐条可见（行为不变）；
+ *  - running 态的 live 件由 **live activity group** 承接（D9：收类聚成一行
+ *    摘要、bash ≥2 条聚合、细节槽 ≤1）；keep / accent / 失败件仍逐条留标题；
  *  - 折叠簇思考秒数 = 落盘 thinkingMs（纯函数 sumThinkingMsInRange）。
  *
  * 渲染只消费 deriveSlot 的 slot（D7）——message-blocks 按标题/预览/收三类
@@ -727,17 +728,19 @@ test("idle：SC4 失败 retract 工具 → 标题 + 一行短错误可见，不�
   await setup.renderer.destroy();
 });
 
-test("running-fg：不提前收成 turn 摘要,历史成功 bash 标题仍可见", async () => {
-  // D3:running 态仍逐条工具可见(行为不变);折叠行不出现。
+test("running-fg：live 单条 bash 走细节槽（不聚合），历史成功 bash 标题仍可见", async () => {
+  // D9(spec specs/tui-tool-settled-appearance.md / CONTEXT `live activity
+  // group`):running 面不提前把 live 件收成 turn 计数行(`bash × N` 缺席);
+  // 单条 keep bash 不达 >=2 聚合阈值 → 它自己就是细节槽卡片(命令可见);
+  // settled history 的 keep bash 标题照旧逐条留。
   // spec D3 删除了 `thinkingFrozenSeconds` 副通道 —— running 期间不再有
   // 冻结 `Thought for` 分支,流式面板恒 `Thinking…`(测试 `thinking-peek.test.tsx`)。
   const liveToolRuns: ReadonlyArray<LiveToolRun> = [
     {
       id: "tu-live",
       name: "bash",
-      status: "ok",
+      status: "running",
       input: { command: "memory_recall" },
-      detail: "Recall",
     },
   ];
   const setup = await testRender(
@@ -757,9 +760,13 @@ test("running-fg：不提前收成 turn 摘要,历史成功 bash 标题仍可见
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // running 态:折叠行不出现(running 闸)。
+  // running 面不画 turn 计数行（live 件归过程组 / 细节槽）。
   expect(frame.includes("bash ×")).toBe(false);
-  // 历史消息的成功 bash 标题仍可见(running 态逐条)。
+  // live 单条 running bash = 细节槽：贴底过程行且命令可见（D9）。
+  expect(frame).toContain("Running 1 shell command… · memory_recall");
+  // 不聚合 → live 件不另刷一张完成卡（回收列表里没有它的 `bash · <detail>`）。
+  expect(frame.includes("bash · Recall")).toBe(false);
+  // 历史消息的成功 bash 标题仍逐条可见（settled history 归 unit fold 面）。
   // #tui-render-overhaul T3:成功态无 [完成] 前缀 → 改找 bash · 行。
   expect(frame.split("\n").some((l) => l.includes("bash ·"))).toBe(true);
   await setup.renderer.destroy();

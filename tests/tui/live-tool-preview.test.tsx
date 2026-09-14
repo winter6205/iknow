@@ -31,6 +31,10 @@ import {
   liveToolReduce,
   type LiveToolRun,
 } from "../../src/tui/live-tool-state.js";
+import {
+  formatLiveActivitySummary,
+  splitLiveActivityRuns,
+} from "../../src/tui/live-activity-group.js";
 import { tuiPalette } from "../../src/tui/theme.js";
 
 function rgbaEq(a: RGBA, b: RGBA): boolean {
@@ -585,7 +589,7 @@ describe("formatRunningToolLine: 子代理工具运行行（plans T7 钉死不�
   });
 });
 
-describe("liveToolPreviewTextLines (#589 贴底尾巴不含成功只读完成行)", () => {
+describe("liveToolPreviewTextLines (T5 收类落定后不再占逐条面)", () => {
   function reduceTail(
     events: ReadonlyArray<Parameters<typeof liveToolReduce>[1]>
   ): ReadonlyArray<LiveToolRun> {
@@ -596,13 +600,19 @@ describe("liveToolPreviewTextLines (#589 贴底尾巴不含成功只读完成行
     return runs;
   }
 
+  /** 消费侧（ChatView running 面）的收类可见性闸：组计数 + 逐条面。 */
   function previewLines(runs: ReadonlyArray<LiveToolRun>): string {
-    return runs
-      .flatMap((run) => [...liveToolPreviewTextLines(run, 80)])
+    return splitLiveActivityRuns(runs, { running: true })
+      .tailRuns.flatMap((run) => [...liveToolPreviewTextLines(run, 80)])
       .join("\n");
   }
 
   test("20 条 read_file ok + failed grep + 1 running：无完成读文案，失败行与运行中仍在", () => {
+    // T5（plans/tui-live-activity-fold.md）：reducer **不再删除**完成的
+    // 收类件（直删 + history-id 过滤叠加成双删，帧上无处安放）。可见性
+    // 闸移到消费侧：完成收类只进 **live activity group** 计数，running 的
+    // 收类件作为细节槽留框。因此本测的断言对象 = 消费侧逐条面，而不是
+    // reducer 输出长度。
     const events: Parameters<typeof liveToolReduce>[1][] = [];
     for (let i = 0; i < 20; i++) {
       const id = `tu-rf-${String(i).padStart(2, "0")}`;
@@ -636,13 +646,17 @@ describe("liveToolPreviewTextLines (#589 贴底尾巴不含成功只读完成行
       id: "tu-running",
       name: "read_file",
     });
-    const text = previewLines(reduceTail(events));
-    // spec D1：read_file 的运行过程行（retract 类过程仍在，落定后才收进
-    // 计数），无 `[运行中]` 括号。
+    const runs = reduceTail(events);
+    const text = previewLines(runs);
+    // spec D1：read_file 的运行过程行（细节槽），落定后才只剩计数。
     expect(text).toContain("read_file · Read ?");
+    // 失败横切：错误行仍在逐条面（不进组计数）。
     expect(text).toContain("GREP_FAIL_MARKER");
+    // 20 条完成读只进组计数，不逐条刷标题。
     expect(text).not.toContain("MARKER_READ_OK_");
     expect(text).not.toMatch(/read_file · .* · ok/);
+    // 组计数接住它们：20 条完成读 + 1 条 running 读 = Reading × 21。
+    expect(formatLiveActivitySummary(runs)).toBe("Reading × 21");
   });
 
   test("SC4 live 失败件：一行短错误截断长回执，不堆 dim 预览多行", () => {

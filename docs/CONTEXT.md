@@ -86,8 +86,8 @@ _Avoid_: 编辑只露文件头 6/10 行；把改动当噪音收进计数；用�
 **settled appearance（落定态）**: TUI 里工具从 live 转为 idle 之后的可见性策略——按类留下足迹、收回去、或点名着色。不是「有已完成工具就整轮折成计数行」。
 _Avoid_: 一律折叠；把 live 过程叫落定态；D3 整轮藏标题；过程行加 `[运行中]` / `[完成]`
 
-**live tool line（过程标题）**: 进行中给人看的英文行——思考是 `Thinking…`；命令是 `Running N shell command(s)…` 加可见的 `bash` 命令。工具名加本轮要点（search=query、fetch=url、read=path、grep=pattern）。不要 `[运行中]` / `[完成]`；**retract class** 跑完进折叠计数，不是整段抹掉。
-_Avoid_: `[运行中]` 前缀；思考中藏秒数合同另开；跑着的命令只留工具名不露命令；收类未完成就进计数；读/搜整段隐身
+**live tool line（过程标题）**: 进行中给人看的英文行。收类与聚合 bash 走 **live activity group**；单条 keep bash 的命令可出现在细节槽。思考是独立 panel 的 `Thinking…`，不焊进工具摘要。不要 `[运行中]` / `[完成]`；**retract class** 跑完进折叠计数或过程组，不是整段抹掉无处可去。
+_Avoid_: `[运行中]` 前缀；把思考焊进工具摘要；跑着的 bash 只留工具名不露命令；收类未完成就进 idle 计数；读/搜完成既不进组也不进折叠
 
 **keep class（留）**: 落定后仍画出标题行的工具类（bash / write / edit / 会话动作）。bash 成功留命令 + 折叠后的 **result preview**；新建走 **write create preview**；编辑走 **edit diff preview**；挤档可只留 `Wrote N lines to path`。
 _Avoid_: 成功 bash 只留标题把 Updating files 藏掉；只留 dim 预览尾巴；把标题藏进折叠计数；把本次改动折没
@@ -105,7 +105,13 @@ _Avoid_: 失败跟成功走同一收；把失败当成第四类工具表；失�
 _Avoid_: TUI 墙上时钟副产物（只活当前轮/重启即失/跨会话串味）；挂在 thinking 内容块上（污染 provider replay）；旧会话回填；`thinkingMs <= 0` 或非有限数落盘（字段缺席）
 
 **unit fold**: 结束态**一行**——原先第一行的思考时长（英文 `Thought for <duration>`）接上原先第二行的 `formatToolUseCounts`（`bash × N · read_file × 1` 这类，含收类）。不是两套计数、也不是另造 `ran` 语义。Skill 走 accent，不进这行。无秒数且无计数则不画、不回落 `[思考]`。
-_Avoid_: 结束态两行（秒数一行、计数一行）；`思考了 N 秒`；把第二行计数丢掉只留时长；把 skill 折进这行；流式思考钉在 transcript 顶层摊全文
+_Avoid_: 结束态两行（秒数一行、计数一行）；`思考了 N 秒`；把第二行计数丢掉只留时长；把 skill 折进这行；流式思考钉在 transcript 顶层摊全文；用已画折叠关掉后续 **open unit** 的 thinking panel / **live activity group**
+
+**open unit（未关闭簇）**: 最近一条已画 **unit fold** 之后、尚未关闭的过程簇。有思考则须 `thinkingMs` 已落盘，且簇内无 running 工具，才关闭。已画折叠不是关 thinking panel 或 **live activity group** 的信号。
+_Avoid_: 整轮 idle 当折叠粒；`currentTurnHasFold` 关后续思考；折叠存在即吞 live 标题
+
+**live activity group（过程组）**: 进行中一行英文摘要：Listing / Reading / Searching 聚合收类，bash 用 `Running N shell command(s)`；细节槽最多一条（当前 running 或最后 keep bash 短预览）。思考独立成 panel，不焊进这行；有工具 running 时 panel 让位。idle 仍走 **unit fold** + keep 标题。
+_Avoid_: 把 `Thought for` 焊进过程组；live 刷 `read_file × 1`；write/edit 收进计数；Ctrl+O 本切片；用过程组替换 idle 折叠
 
 **skill-load display projection**: 给人看的 skill-load 是 `loading skill <name>` 芯片，外加用户 remainder（若有）；SKILL 正文只留在进模型的 skill-load 信封里，不画成 user 气泡。
 _Avoid_: 把 `[skill-load name=]` 正文当作用户键入；加载技能；turn 结束后用落盘信封替换显示占位

@@ -12,6 +12,10 @@
  * 行渲染）；`post_tool_use` 完成时用权威完整 input 覆盖并**清除** partialInput，
  * 避免完成态残留 partial。
  *
+ * T5 (tui-live-activity-fold)：完成件**不再被 reducer 删除** —— 成功只读
+ * 探测的去留由消费侧（live activity group / unit fold 计数）决定，见
+ * `liveToolReduce` post_tool_use 分支注释。
+ *
  * 设计：
  *  - 状态按 insert 顺序保留（`ReadonlyArray`），便于 ChatView 按序渲染；
  *  - `toolUseId` 是配对的 anchor — 由流式 `tool_call_start` 提供，postToolUse
@@ -53,13 +57,6 @@ export interface LiveToolRun {
   /** #693 T4 D4:bash 输出 stderr 旁路(ToolResultMeta.stderr),5 行预览数据源。 */
   readonly stderr?: string;
 }
-
-/** #589：成功完成即离开 live 尾巴的只读探测族。 */
-const COMPACT_READONLY_TOOLS: ReadonlySet<string> = new Set([
-  "read_file",
-  "grep",
-  "glob",
-]);
 
 export type LiveToolEvent =
   | {
@@ -139,13 +136,16 @@ export function liveToolReduce(
   // post_tool_use — 配对找到的条目转 ok/failed。未匹配 id（无
   // tool_call_start / race）与 unmatched tool_input_delta 一样忽略：
   // 完成态由 history tool_result 渲染，append 会产生幽灵失败行（#578）。
+  //
+  // plans/tui-live-activity-fold.md T5：**一律 in-place 完成，不删除**。
+  // 旧 #589 的 `COMPACT_READONLY_TOOLS` 直删与 chat-view 的 history-id
+  // 过滤叠加成双删 —— 当该 tool_use id 已在历史里（MessageBlocks 对成功
+  // retract 按 slot 隐去标题与预览），live 数组又被抹掉，帧上没有任何一面
+  // 接住它。落点由消费侧决定（当前 **live activity group** 计数，或已画
+  // **unit fold** 计数），reducer 不再预测渲染面。
   if (event.kind === "post_tool_use") {
     const target = prev.find((r) => r.id === event.id);
     if (target === undefined) return prev;
-    // #589：成功只读探测不占贴底尾巴；失败 / 非只读仍 in-place 完成。
-    if (event.ok && COMPACT_READONLY_TOOLS.has(target.name)) {
-      return Object.freeze(prev.filter((r) => r !== target));
-    }
     return Object.freeze(
       prev.map((r) =>
         r === target

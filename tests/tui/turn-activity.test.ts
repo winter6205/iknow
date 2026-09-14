@@ -14,13 +14,12 @@ import {
   lastTurnQueryIndex,
   mergeToolUseCounts,
   orderedTurnActivitySegments,
-  shouldCollapseTurnToolRows,
-  shouldShowTurnActivityFold,
   sliceTurnFrom,
   sumThinkingMsInRange,
   thinkingMsToSeconds,
   toolUseIdsOf,
 } from "../../src/tui/turn-activity.js";
+import * as turnActivityModule from "../../src/tui/turn-activity.js";
 
 function user(text: string): AnthropicNativeMessage {
   return { role: "user", content: [{ type: "text", text }] };
@@ -480,59 +479,16 @@ describe("toolUseIdsOf / countNamedCalls / mergeToolUseCounts", () => {
   });
 });
 
-describe("shouldShowTurnActivityFold / shouldCollapseTurnToolRows", () => {
-  // plans/tui-chrome-interaction.md T1:折叠按**已完成单元**判定。running
-  // 不再是整轮闸门 —— `shouldShowTurnActivityFold` 只决定当前 turn 折叠
-  // 行是否启用(`foldDisplayLines` / tail 折叠判定),不再压制整轮 fold
-  // 计算;per-segment 闸门 `shouldShowRetractFold` / `shouldShowThinkingFold`
-  // 各自与 running 解耦。`shouldCollapseTurnToolRows` 同样与 running
-  // 解耦:折叠行在场 + 有 retract → 藏 tail。
-  test("running + 有 retract → 当前 turn 折叠行启用(tail 也折叠)", () => {
-    expect(
-      shouldShowTurnActivityFold({
-        running: true,
-        turnToolTotal: 3,
-      })
-    ).toBe(true);
-    expect(shouldCollapseTurnToolRows(true, 2, 3)).toBe(true);
-  });
-
-  test("idle + 多工具 → 折叠（无思考秒数也折叠）", () => {
-    expect(
-      shouldShowTurnActivityFold({
-        running: false,
-        turnToolTotal: 3,
-      })
-    ).toBe(true);
-    expect(shouldCollapseTurnToolRows(false, 2, 3)).toBe(true);
-  });
-
-  test("idle + 单工具无思考 → 也折叠（spec D3：旧「单工具永不折叠」闸已删除）", () => {
-    expect(
-      shouldShowTurnActivityFold({
-        running: false,
-        turnToolTotal: 1,
-      })
-    ).toBe(true);
-    expect(shouldCollapseTurnToolRows(false, 1, 1)).toBe(true);
-  });
-
-  test("idle + 零工具 → 不折叠（无 retract 不启用折叠行）", () => {
-    expect(
-      shouldShowTurnActivityFold({
-        running: false,
-        turnToolTotal: 0,
-      })
-    ).toBe(false);
-  });
-
-  test("running + 零工具 → 折叠行不启用（plan T1:历史 folds 由 per-segment 闸门负责,本闸门只控当前 turn）", () => {
-    expect(
-      shouldShowTurnActivityFold({
-        running: true,
-        turnToolTotal: 0,
-      })
-    ).toBe(false);
+describe("shouldShowTurnActivityFold / shouldCollapseTurnToolRows（T3 已删除）", () => {
+  // plans/tui-live-activity-fold.md T3：删除 `foldDisplayLines.length` 折叠
+  // 信号与整轮 `currentTurnHasFold` 面板闸 —— 这两个 turn 级函数是该派生链
+  // 的入口。落点改由 per-segment fold 行（`shouldShowRetractFold` /
+  // `shouldShowThinkingFold`，见 running-unit-fold.test.ts）与
+  // **live activity group**（live-activity-group.test.ts）承担。
+  test("两个 turn 级闸不再导出（编译期合同：留着就会有人接回整轮闸）", () => {
+    const exports = Object.keys(turnActivityModule);
+    expect(exports).not.toContain("shouldShowTurnActivityFold");
+    expect(exports).not.toContain("shouldCollapseTurnToolRows");
   });
 });
 

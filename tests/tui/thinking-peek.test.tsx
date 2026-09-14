@@ -34,6 +34,7 @@ import {
   formatThinkingLive,
 } from "../../src/tui/think-fold.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
+import type { LiveToolRun } from "../../src/tui/live-tool-state.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 
 const COLS = 60;
@@ -112,6 +113,125 @@ test("turn 结束（非 running-fg）：流式 thinking 面板整体消失，正
   const frame = setup.captureCharFrame();
   expect(frame).toContain("正式回答");
   expect(frame.includes("末行戊-应出现")).toBe(false);
+  expect(frame.includes(formatThinkingLive())).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("T4 running：多条收类 → 一行过程组摘要（不逐条刷标题）+ 思考 panel 在组之下", async () => {
+  // 不变式(plans/tui-live-activity-fold.md T4 + spec D9):进行中的收类
+  // 不逐条刷标题 —— 一行英文摘要聚合;思考是独立 panel,默认栈序为
+  // **过程组在上、thinking 在下**(近输入)。
+  //
+  // 本 fixture 无 running 工具(两条收类都已落定)→ panel 不让位,栈序
+  // 可观测。让位分支见下一条用例。
+  const reads: ReadonlyArray<LiveToolRun> = [
+    { id: "t-r1", name: "read_file", status: "ok", input: { path: "a.ts" } },
+    {
+      id: "t-r2",
+      name: "read_file",
+      status: "ok",
+      input: { path: "b.ts" },
+      detail: "Read b.ts",
+    },
+    {
+      id: "t-g1",
+      name: "grep",
+      status: "ok",
+      input: { pattern: "needle" },
+      detail: "Search needle",
+    },
+  ];
+  const setup = await testRender(
+    <ChatView
+      session={runningSession()}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      liveToolRuns={reads}
+      thinkingExpanded={false}
+      thinkingDraftMasked={THINKING_FIVE_LINES}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 一行摘要，桶序固定 Listing → Reading → Searching。
+  expect(frame).toContain("Reading × 2 · Searching × 1");
+  // 完整件不逐条刷标题（收类落定只剩计数）。
+  expect(frame.includes("read_file ·")).toBe(false);
+  // 思考独立 panel 不与组同行焊死（组行不含 Thinking 文案）。
+  const groupLine = frame.split("\n").find((l) => l.includes("Reading × 2"));
+  expect(groupLine).toBeDefined();
+  expect(groupLine!.includes("Thinking")).toBe(false);
+  // 栈序：组在上、thinking 在下（近输入）。
+  const iGroup = frame.indexOf("Reading × 2 · Searching × 1");
+  const iThinking = frame.indexOf(formatThinkingLive());
+  expect(iGroup).toBeGreaterThanOrEqual(0);
+  expect(iThinking).toBeGreaterThan(iGroup);
+  await setup.renderer.destroy();
+});
+
+test("T4 running：唯一 running 件占细节槽（贴底过程行），且它已进组计数", async () => {
+  // CONTEXT `live activity group`：细节槽最多一条 = 当前 running 件。它
+  // 同时已计入摘要（进行中不换过去时），但**不**因此从逐条面消失 ——
+  // 跑到一半必须看得见在跑什么。
+  const runs: ReadonlyArray<LiveToolRun> = [
+    { id: "t-r1", name: "read_file", status: "ok", input: { path: "a.ts" } },
+    {
+      id: "t-g1",
+      name: "grep",
+      status: "running",
+      input: { pattern: "needle" },
+    },
+  ];
+  const setup = await testRender(
+    <ChatView
+      session={runningSession()}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      liveToolRuns={runs}
+      thinkingExpanded={false}
+      thinkingDraftMasked={THINKING_FIVE_LINES}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("Reading × 1 · Searching × 1");
+  expect(frame).toContain("grep · Search");
+  // 落定的那条不刷标题。
+  expect(frame.includes("read_file ·")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("T4 running：工具 running 时 thinking panel 让位（不同屏叠两个 live panel）", async () => {
+  // CONTEXT `live activity group`：有工具 running 时 panel 让位。让位判定
+  // 只看「当前是否仍有工具 running」，与是否已画 unit fold 无关（T3）。
+  const running: ReadonlyArray<LiveToolRun> = [
+    {
+      id: "t-run",
+      name: "bash",
+      status: "running",
+      input: { command: "pwd" },
+    },
+  ];
+  const setup = await testRender(
+    <ChatView
+      session={runningSession()}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      liveToolRuns={running}
+      thinkingExpanded={false}
+      thinkingDraftMasked={THINKING_FIVE_LINES}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 工具过程行在（细节槽），thinking panel 让位。
+  expect(frame).toContain("Running 1 shell command…");
   expect(frame.includes(formatThinkingLive())).toBe(false);
   await setup.renderer.destroy();
 });

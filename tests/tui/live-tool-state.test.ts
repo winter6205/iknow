@@ -90,8 +90,12 @@ describe("liveToolReduce (#578 unmatched post_tool_use 不 append)", () => {
   });
 });
 
-describe("liveToolReduce (#589 成功只读离开 live 尾巴)", () => {
-  test("start + ok read_file → live 数组为空", () => {
+describe("liveToolReduce (T5 完成件一律 in-place 保留,不再删除)", () => {
+  // plans/tui-live-activity-fold.md T5:旧 #589 的「成功只读直删」与
+  // chat-view 的 history-id 过滤叠加成双删 —— 历史已含该 tool_use 时
+  // MessageBlocks 按 slot 隐去标题,reducer 又抹掉 live 件,帧上空白。
+  // 落点由消费侧决定(group 计数 / unit fold 计数),reducer 只如实转态。
+  test("start + ok read_file → 留在数组,状态 ok(落点由渲染侧决定)", () => {
     const started = liveToolReduce([], {
       kind: "tool_call_start",
       id: "tu-rf-ok",
@@ -105,44 +109,50 @@ describe("liveToolReduce (#589 成功只读离开 live 尾巴)", () => {
       ok: true,
       detail: "读取 a.ts",
     });
-    expect(done).toHaveLength(0);
+    expect(done).toHaveLength(1);
+    expect(done[0]).toMatchObject({
+      id: "tu-rf-ok",
+      name: "read_file",
+      status: "ok",
+    });
   });
 
-  test("start + ok grep → live 数组为空", () => {
-    const started = liveToolReduce([], {
-      kind: "tool_call_start",
-      id: "tu-grep-ok",
-      name: "grep",
-    });
-    const done = liveToolReduce(started, {
-      kind: "post_tool_use",
-      id: "tu-grep-ok",
-      name: "grep",
-      input: { pattern: "foo" },
-      ok: true,
-      detail: "grep foo",
-    });
-    expect(done).toHaveLength(0);
+  test("start + ok grep / glob → 同样留在数组(keep / retract 一视同仁)", () => {
+    const grep = liveToolReduce(
+      liveToolReduce([], {
+        kind: "tool_call_start",
+        id: "tu-grep-ok",
+        name: "grep",
+      }),
+      {
+        kind: "post_tool_use",
+        id: "tu-grep-ok",
+        name: "grep",
+        input: { pattern: "foo" },
+        ok: true,
+        detail: "grep foo",
+      }
+    );
+    const glob = liveToolReduce(
+      liveToolReduce([], {
+        kind: "tool_call_start",
+        id: "tu-glob-ok",
+        name: "glob",
+      }),
+      {
+        kind: "post_tool_use",
+        id: "tu-glob-ok",
+        name: "glob",
+        input: { pattern: "*.ts" },
+        ok: true,
+        detail: "glob *.ts",
+      }
+    );
+    expect(grep.map((r) => r.status)).toEqual(["ok"]);
+    expect(glob.map((r) => r.status)).toEqual(["ok"]);
   });
 
-  test("start + ok glob → live 数组为空", () => {
-    const started = liveToolReduce([], {
-      kind: "tool_call_start",
-      id: "tu-glob-ok",
-      name: "glob",
-    });
-    const done = liveToolReduce(started, {
-      kind: "post_tool_use",
-      id: "tu-glob-ok",
-      name: "glob",
-      input: { pattern: "*.ts" },
-      ok: true,
-      detail: "glob *.ts",
-    });
-    expect(done).toHaveLength(0);
-  });
-
-  test("failed read_file 留下；随后成功 read_file 离开", () => {
+  test("failed read_file 与随后成功 read_file 同在(失败不被成功顶掉)", () => {
     const failStarted = liveToolReduce([], {
       kind: "tool_call_start",
       id: "tu-rf-fail",
@@ -170,16 +180,21 @@ describe("liveToolReduce (#589 成功只读离开 live 尾巴)", () => {
       ok: true,
       detail: "读取 b.ts",
     });
-    expect(afterOk).toHaveLength(1);
+    expect(afterOk).toHaveLength(2);
     expect(afterOk[0]).toMatchObject({
       id: "tu-rf-fail",
       name: "read_file",
       status: "failed",
       message: "ENOENT",
     });
+    expect(afterOk[1]).toMatchObject({
+      id: "tu-rf-ok2",
+      name: "read_file",
+      status: "ok",
+    });
   });
 
-  test("write_file ok 留下；随后成功 read_file 离开", () => {
+  test("write_file ok 与随后成功 read_file 同在(顺序保持)", () => {
     const writeStarted = liveToolReduce([], {
       kind: "tool_call_start",
       id: "tu-wf-ok",
@@ -206,15 +221,10 @@ describe("liveToolReduce (#589 成功只读离开 live 尾巴)", () => {
       ok: true,
       detail: "读取 a.ts",
     });
-    expect(afterRead).toHaveLength(1);
-    expect(afterRead[0]).toMatchObject({
-      id: "tu-wf-ok",
-      name: "write_file",
-      status: "ok",
-    });
+    expect(afterRead.map((r) => r.id)).toEqual(["tu-wf-ok", "tu-rf-after-wf"]);
   });
 
-  test("完成只读不删除夹在中间的 running sibling", () => {
+  test("完成只读不删除夹在中间的 running sibling(两者都在)", () => {
     const readStarted = liveToolReduce([], {
       kind: "tool_call_start",
       id: "tu-rf-sib",
@@ -233,8 +243,8 @@ describe("liveToolReduce (#589 成功只读离开 live 尾巴)", () => {
       ok: true,
       detail: "读取 a.ts",
     });
-    expect(afterReadOk).toHaveLength(1);
-    expect(afterReadOk[0]).toMatchObject({
+    expect(afterReadOk.map((r) => r.id)).toEqual(["tu-rf-sib", "tu-grep-run"]);
+    expect(afterReadOk[1]).toMatchObject({
       id: "tu-grep-run",
       name: "grep",
       status: "running",

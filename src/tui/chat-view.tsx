@@ -70,6 +70,11 @@ import {
   type TuiSessionState,
 } from "./session-state.js";
 import { liveTailSlots, type LiveToolRun } from "./live-tool-state.js";
+import {
+  formatLiveActivitySummary,
+  isLiveActivityGroupRun,
+  splitLiveActivityRuns,
+} from "./live-activity-group.js";
 import { liveToolPreviewBox } from "./live-tool-preview.js";
 import { toolResultStatusMap, toolResultTextMap } from "./tool-summary.js";
 import {
@@ -79,15 +84,9 @@ import {
 } from "./transcript-viewport.js";
 import {
   countNamedCalls,
-  countToolUsesByName,
-  formatTurnActivityFold,
   lastTurnQueryIndex,
-  mergeToolUseCounts,
   orderedTurnActivitySegments,
-  shouldCollapseTurnToolRows,
-  shouldShowTurnActivityFold,
   sliceTurnFrom,
-  thinkingMsToSeconds,
   toolUseIdsOf,
 } from "./turn-activity.js";
 import { deriveSlot } from "./tool-settled.js";
@@ -100,10 +99,9 @@ import {
 } from "./transcript-tail.js";
 import {
   buildFoldLinesBySegmentIndex,
-  currentTurnHasFoldFor,
-  currentTurnHasThinkingFoldFor,
   findLastToolSegmentIndex,
   makeThinkingMsAtVisibleFromSource,
+  shouldShowLiveThinkingPanel,
   type FoldLinesBySegmentIndex,
   type ShownThinkingMsValues,
   type ThinkingMsAtVisible,
@@ -300,36 +298,35 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     // live 已完成件同样只聚合 slot.inFoldCount（retract 收）；keep / accent /
     // failed 件留在 tail 画独立标题行，不进计数。
     const lastTurnSlice = sliceTurnFrom(visibleMessages, lastQueryVisible);
-    const historyToolCounts = useMemo(
-      () => countToolUsesByName(lastTurnSlice, { inFoldCountOf }),
-      [lastTurnSlice, inFoldCountOf]
-    );
+    // plans/tui-live-activity-fold.md T3：**已画 foldLinesBySegmentIndex 是
+    // 唯一折叠存在信号** —— 删除了整轮 `currentTurnHasFold` /
+    // `currentTurnHasThinkingFold` 面板闸与 `foldDisplayLines.length` 折叠闸
+    // （turn 级布尔会把当前 **open unit** 的思考面板与过程组一起吞掉）。
+    //
+    // T3/T5：tail 只剔除**已在历史里**的 tool_use id（同一条只画一次）；不再
+    // 按「本轮已折叠」二次过滤 —— 那是与 reducer 直删叠加的双删。
+    const turnLiveRuns = useMemo(() => {
+      const historyToolUseIds = toolUseIdsOf(visibleMessages);
+      return liveToolRuns.filter((run) => !historyToolUseIds.has(run.id));
+    }, [liveToolRuns, visibleMessages]);
+    // D9 互斥（spec specs/tui-tool-settled-appearance.md）：turn 仍在 running
+    // 时 live 已完成件归 **live activity group** 所有，unit fold 不得再把同
+    // 一批件并进计数（否则同一件既画 `read_file × 3` 又画 `Reading × 2`）。
+    // idle（含 reload 前的空窗）组行不画（见下方 groupSummary 闸门），折叠
+    // 接手合并 live 已完成件，故 idle 路径保持原计数。
     const liveCompletedCounts = useMemo(
       () =>
-        countNamedCalls(
-          liveToolRuns
-            .filter((run) => run.status !== "running")
-            .filter(
-              (run) =>
-                deriveSlot(run.name, {
-                  running: false,
-                  failed: run.status === "failed",
-                }).inFoldCount
-            )
-            .map((run) => ({ id: run.id, name: run.name })),
-          toolUseIdsOf(lastTurnSlice)
-        ),
-      [liveToolRuns, lastTurnSlice]
+        running
+          ? []
+          : countNamedCalls(
+              turnLiveRuns
+                .filter((run) => run.status !== "running")
+                .filter(isLiveActivityGroupRun)
+                .map((run) => ({ id: run.id, name: run.name })),
+              toolUseIdsOf(lastTurnSlice)
+            ),
+      [running, turnLiveRuns, lastTurnSlice]
     );
-    const turnToolCounts = mergeToolUseCounts(
-      historyToolCounts,
-      liveCompletedCounts
-    );
-    const turnToolTotal = turnToolCounts.reduce((n, e) => n + e.count, 0);
-    const showTurnFold = shouldShowTurnActivityFold({
-      running,
-      turnToolTotal,
-    });
     // 折叠行集合（anchor segmentIndex → unit fold 行）由纯模块派生。
     // #986 把 L307–475 的派生逻辑全数迁出；本处只消费结果。
     const foldDerivation = useMemo(
@@ -343,61 +340,34 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         }),
       [activitySegments, thinkingMsAtVisible, running, liveCompletedCounts]
     );
-    const {
-      foldLinesBySegmentIndex,
-      drawnThinkingForMessageIndex,
-      shownThinkingMsValues,
-    } = foldDerivation;
-    // 当前 turn 折叠行是否在场 —— 决定流式 thinking 面板让位。
-    const currentTurnHasFold = currentTurnHasFoldFor({
-      activitySegments,
-      foldLinesBySegmentIndex,
-      lastQueryVisible,
-    });
-    const currentTurnHasThinkingFold = currentTurnHasThinkingFoldFor({
-      activitySegments,
-      foldLinesBySegmentIndex,
-      drawnThinkingForMessageIndex,
-      lastQueryVisible,
-    });
-    // 折叠生效（idle 且计数行在场）→ tail 里已完成的 retract 件（已进折叠
-    // 计数）离开尾巴；keep / accent / failed 件保留独立标题行（D3/D7：渲染
-    // 只消费 slot，成功 retract 的标题与预览同假）。running 件始终在尾巴。
-    const foldDisplayLines = showTurnFold
-      ? formatTurnActivityFold(
-          thinkingMsToSeconds(thinkingMsAtVisible(lastQueryVisible)),
-          turnToolCounts
-        )
-      : [];
-    const collapseToolRows = shouldCollapseTurnToolRows(
+    const { foldLinesBySegmentIndex, shownThinkingMsValues } = foldDerivation;
+    // 细节槽 / 过程组：收类件进过程组计数，running 件占据唯一细节槽，其余逐条。
+    const showThinkingPanel = shouldShowLiveThinkingPanel({
       running,
-      foldDisplayLines.length,
-      turnToolTotal
+      thinkingDraft: deferredThinkingDrafts,
+      toolRunning: turnLiveRuns.some((run) => run.status === "running"),
+    });
+    // T4（spec D9）：进行中的收类不逐条刷标题 —— 收成一行摘要 + ≤1 细节槽；
+    // keep / accent / 失败件仍逐条留标题（失败横切不进组计数）。
+    // `running` 是过程组开关：idle 时聚合必须停（摘要行同门；聚合不停就是
+    // keep 卡被静默吞掉，history/unit fold 只接 retract，接不住 keep）。
+    const activitySplit = useMemo(
+      () => splitLiveActivityRuns(turnLiveRuns, { running }),
+      [turnLiveRuns, running]
     );
-    // T3（plans/tui-display-single-pipeline.md）：同一条工具调用只画一次。
-    // 历史 transcript 已含该 tool_use 块时,MessageBlocks 会按 slot 渲染
-    // 同一件（running 或落定态），tail 不得再叠一份完成标题。
-    const historyToolUseIds = useMemo(
-      () => toolUseIdsOf(visibleMessages),
-      [visibleMessages]
-    );
-    const tailSlots = useMemo(
+    // D9：过程组是**进行中**的 chrome —— idle 落定仍走 unit fold + keep 标题
+    // （CONTEXT `live activity group`「idle 仍走 unit fold + keep 标题」）。
+    const groupSummary = useMemo(
       () =>
-        liveTailSlots(
-          liveToolRuns
-            .filter((run) => !historyToolUseIds.has(run.id))
-            .filter((run) =>
-              collapseToolRows
-                ? run.status === "running" ||
-                  !deriveSlot(run.name, {
-                    running: false,
-                    failed: run.status === "failed",
-                  }).inFoldCount
-                : true
-            ),
-          deferredSegments
-        ),
-      [liveToolRuns, historyToolUseIds, collapseToolRows, deferredSegments]
+        running ? formatLiveActivitySummary(activitySplit.groupRuns) : null,
+      [running, activitySplit]
+    );
+    // 逐条面交 `liveTailSlots` 按 draftEpoch 回到草稿段之间 —— 细节槽
+    // （仍在 running 的收类件）在逐条面里，位置随 epoch 走，不钉在队尾
+    // （钉队尾会破坏 tool→text→tool 的轴）。
+    const tailSlots = useMemo(
+      () => liveTailSlots(activitySplit.tailRuns, deferredSegments),
+      [activitySplit, deferredSegments]
     );
     return (
       <ChatScrollbox
@@ -419,8 +389,8 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         tailSlots={tailSlots}
         renderLiveRuns={renderLiveRuns}
         deferredThinkingDrafts={deferredThinkingDrafts}
-        currentTurnHasFold={currentTurnHasFold}
-        currentTurnHasThinkingFold={currentTurnHasThinkingFold}
+        groupSummary={groupSummary}
+        showThinkingPanel={showThinkingPanel}
         liveToolLines={props.liveToolLines}
         askLine={props.askLine}
         crunchedSeconds={props.crunchedSeconds ?? 0}
@@ -529,8 +499,8 @@ function ChatScrollbox(props: {
   readonly tailSlots: ReadonlyArray<TailSlotDecision>;
   readonly renderLiveRuns: (runs: ReadonlyArray<LiveToolRun>) => ReactNode;
   readonly deferredThinkingDrafts: string;
-  readonly currentTurnHasFold: boolean;
-  readonly currentTurnHasThinkingFold: boolean;
+  readonly groupSummary: string | null;
+  readonly showThinkingPanel: boolean;
   readonly liveToolLines: ReadonlyArray<string>;
   readonly askLine: string | undefined;
   readonly crunchedSeconds: number;
@@ -595,8 +565,8 @@ function ChatScrollbox(props: {
         renderLiveRuns={props.renderLiveRuns}
         deferredThinkingDrafts={props.deferredThinkingDrafts}
         thinkingExpanded={props.thinkingExpanded}
-        currentTurnHasFold={props.currentTurnHasFold}
-        currentTurnHasThinkingFold={props.currentTurnHasThinkingFold}
+        groupSummary={props.groupSummary}
+        showThinkingPanel={props.showThinkingPanel}
         liveToolLines={props.liveToolLines}
         askLine={props.askLine}
       />
