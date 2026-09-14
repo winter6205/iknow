@@ -21,6 +21,7 @@ import { join } from "node:path";
 import {
   loadIknowSettings,
   type IknowSettings,
+  type IknowSettingsLlmProvider,
   DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
 } from "./settings.js";
 import { LLM_MODEL_MISSING_MESSAGE } from "./messages.js";
@@ -36,6 +37,13 @@ export interface LlmEnv {
    * env loader fail-fast 保证有值（settings 唯一来源，无任何代码默认）。
    */
   model: string;
+  /**
+   * ADR-0093 provider 命中时的额外请求头（settings.llm.providers[i].headers）。
+   * 只有 `provider/model` 命中注册表且该 provider 配了非空 headers 才有值；
+   * 其余路径（provider 未命中 / 无 providers 段）**键缺席**，不写空对象 ——
+   * 消费方据此判断是否透传 `defaultHeaders`。
+   */
+  headers?: Readonly<Record<string, string>>;
   /**
    * 模型 fallback 路由 ID 列表（来自 settings.llm.fallback，用户自配）。
    * 未配置 → []（无兜底；fallback 的消费方自行决定是否/如何使用）。
@@ -212,6 +220,170 @@ export function isWebEnvConfigError(err: unknown): err is WebEnvConfigError {
     typeof maybe.value === "string" &&
     Array.isArray(maybe.expected)
   );
+}
+
+/**
+ * ADR-0093 / spec SC4：provider 命中但 `provider.apiKeyEnv` 对应的 env var
+ * 未设（process.env 侧缺席 / 空串）时的 typed-error 判别联合。当前仅
+ * `provider_api_key_missing` 一 kind。
+ *
+ * plain-object `satisfies` 形态（同 `WebEnvConfigError` / `WorkspaceRootError`）：
+ * callers 走 `isLlmProviderConfigError` 守卫，**绝不** `err instanceof Error`
+ * —— 后者会把 plain object 打成 `[object Object]`，kind / providerId /
+ * apiKeyEnv 全不可见（`code-quality.md` typed-error catch 契约）。
+ *
+ * 安全契约：payload 只带 env var **名**（`apiKeyEnv`），不带任何密钥值；本
+ * 模块不打印 / 不落盘任何密钥。**绝不**回退 `settings.llm.apiKey` 字面 ——
+ * provider 显式登记 apiKeyEnv 即声明走 env，静默降级会把「配错 env 名」伪装
+ * 成「用另一把 key 正常工作」。
+ */
+export type LlmProviderConfigError = {
+  kind: "provider_api_key_missing";
+  providerId: string;
+  apiKeyEnv: string;
+};
+
+/** ADR-0093：provider typed-error 判别守卫（kind + 两个 payload 字段同款判定）。 */
+export function isLlmProviderConfigError(
+  err: unknown
+): err is LlmProviderConfigError {
+  if (err === null || typeof err !== "object") return false;
+  const maybe = err as Record<string, unknown>;
+  return (
+    maybe.kind === "provider_api_key_missing" &&
+    typeof maybe.providerId === "string" &&
+    typeof maybe.apiKeyEnv === "string"
+  );
+}
+
+/**
+ * ADR-0093：`LlmProviderConfigError` 文本渲染（shape
+ * `provider_api_key_missing: <providerId> (env <apiKeyEnv> unset)`）。
+ * 只出 provider id 与 env var 名，绝不出密钥值。
+ */
+export function formatLlmProviderConfigError(
+  err: LlmProviderConfigError
+): string {
+  return `provider_api_key_missing: ${err.providerId} (env ${err.apiKeyEnv} unset)`;
+}
+
+/**
+ * ADR-0093：`settings.llm.model` 拆 provider 路由 ID 的解析结果。
+ *  - `providerId`：按**第一个** `/` 拆分出的首段（trim 后非空，且尾段也非空，
+ *    才算 provider 形态）；
+ *  - `provider`：命中的 provider 记录；未命中 / 非 provider 形态 → undefined
+ *    （= 旧路径，不是失败）。
+ *
+ * 尾段（modelId）只在形态判定里用一次：本函数把它 trim 后丢弃，不放进结果 ——
+ * 消费方 `resolveLlmTransport` 只需要 providerId 查表；model 串本身（含尾段）
+ * 由 `loadIknowEnv` 原样透传进 `IknowEnv.llm.model`。
+ */
+interface ResolvedLlmProvider {
+  readonly providerId: string;
+  readonly provider: IknowSettingsLlmProvider | undefined;
+}
+
+/**
+ * ADR-0093：provider 命中时的密钥读取 —— **只读 `process.env[apiKeyEnv]`**，
+ * 沿 spec 明文；**不**回落 `.env` / `.env.local` fileMap（与 apiKey 占位符
+ * 链路刻意分离：provider 声明的 env var 是部署环境契约，不是工作区配置）。
+ * 值 trim 后非空才算有效；未设 / 空串 / 全空白 → undefined。
+ *
+ * `typeof raw === "string"` 是 M2 同族守卫：`apiKeyEnv` 若恰是
+ * Object.prototype 自有键（`constructor` / `__proto__` / `toString` 等），
+ * `process.env[key]` 会命中原型拿到函数 / 对象，直接 `.trim()` 抛 TypeError
+ * 而非 typed 错。非字符串一律按「未设」处理 → 落 typed `provider_api_key_missing`
+ * （fail-safe：绝不拿非 env 值当密钥用）。
+ */
+function resolveProviderApiKey(apiKeyEnv: string): string | undefined {
+  const raw = process.env[apiKeyEnv];
+  if (typeof raw !== "string" || raw.trim() === "") return undefined;
+  return raw.trim();
+}
+
+/**
+ * ADR-0093 / spec SC2：`settings.llm.model` 的 `provider/model` 拆分与注册表
+ * 查找。**未命中 = 走回今日路径**（fallback：`IKNOW_LLM_BASE_URL` +
+ * `settings.llm.apiKey`，SC3 back-compat），故消费方在 `provider === undefined`
+ * 时直接落旧解析链，这里的 undefined 不是失败。
+ *
+ *  - 首个 `/` 拆分，两段 trim 后都非空才算 provider 形态（`/x` / `x/` /
+ *    `a//b` 形态 → 尾段为空 → 按未命中处理，不抛错、不拆第二刀）；
+ *  - 尾段保留其余 `/`（`a/b/c` → 首段 `a`，尾段 `b/c` 参与形态判定后丢弃）；
+ *  - `providers` 缺席 / 空数组 → 直接未命中（0 成本短路）；
+ *  - 查找用 `p.id === providerId`（settings 装载层已 trim provider id）；
+ *    注册表不去重，**首条命中生效**（后定义同 id 不覆盖，见 settings.ts）。
+ */
+function resolveLlmProvider(
+  providers: ReadonlyArray<IknowSettingsLlmProvider> | undefined,
+  model: string
+): ResolvedLlmProvider {
+  const slash = model.indexOf("/");
+  const providerId = slash === -1 ? "" : model.slice(0, slash).trim();
+  const tail = slash === -1 ? "" : model.slice(slash + 1).trim();
+  if (slash === -1 || providerId === "" || tail === "") {
+    return { providerId, provider: undefined };
+  }
+  const provider = providers?.find((p) => p.id === providerId);
+  return { providerId, provider };
+}
+
+/**
+ * ADR-0093：`llm.baseUrl` / `llm.apiKey` / `llm.headers` 的三元装配。
+ *
+ * 命中（SC2）→ baseUrl = provider.baseUrl 去尾斜杠、apiKey =
+ * `process.env[provider.apiKeyEnv]`、headers = provider.headers（缺席则不产出）；
+ * apiKeyEnv 缺席 / 空 → 抛 typed `LlmProviderConfigError`（SC4），**绝不**回退
+ * `settings.llm.apiKey` 字面。
+ * 未命中（SC3）→ 旧路径逐字节不变：baseUrl = `IKNOW_LLM_BASE_URL` 去尾斜杠
+ * （默认 `http://localhost:20128/v1`）、apiKey = `expandPlaceholders(...)`、
+ * 不产出 headers。
+ *
+ * 三元组一起返回（而非各自 resolver）避免每个字段各查一次注册表；命中分支
+ * 在 apiKeyEnv 缺席时 throw，callers 拿到本函数的返回值即「要么是完整命中
+ * 三元组、要么是完整旧路径三元组」。
+ */
+interface ResolvedLlmTransport {
+  readonly baseUrl: string;
+  readonly apiKey: string | undefined;
+  readonly headers: Readonly<Record<string, string>> | undefined;
+}
+
+function resolveLlmTransport(
+  file: Record<string, string>,
+  mergedSettings: IknowSettings,
+  model: string
+): ResolvedLlmTransport {
+  const { providerId, provider } = resolveLlmProvider(
+    mergedSettings.llm?.providers,
+    model
+  );
+  if (provider === undefined) {
+    return {
+      baseUrl: envGet({
+        file,
+        key: "IKNOW_LLM_BASE_URL",
+        fallback: "http://localhost:20128/v1",
+      }).replace(/\/$/, ""),
+      apiKey: expandPlaceholders(mergedSettings.llm?.apiKey, file),
+      headers: undefined,
+    };
+  }
+  const apiKey = resolveProviderApiKey(provider.apiKeyEnv);
+  if (apiKey === undefined) {
+    throw {
+      kind: "provider_api_key_missing",
+      providerId,
+      apiKeyEnv: provider.apiKeyEnv,
+    } satisfies LlmProviderConfigError;
+  }
+  return {
+    baseUrl: provider.baseUrl.replace(/\/$/, ""),
+    apiKey,
+    // headers 缺席（含空对象——settings 装载层已把空映射折叠成字段缺席）→
+    // 保持 undefined，不写 `{}`（spec 行为契约 5）。
+    headers: provider.headers,
+  };
 }
 
 export interface WebEnv {
@@ -694,18 +866,25 @@ export function loadIknowEnv(
     throw new Error(LLM_MODEL_MISSING_MESSAGE);
   }
 
+  // ADR-0093：model 串命中 providers 注册表 → baseUrl/apiKey/headers 走 provider
+  // 三元组；未命中 → 旧路径（IKNOW_LLM_BASE_URL + settings.llm.apiKey）逐字节
+  // 不变（SC3 back-compat）。apiKeyEnv 缺席 → 本调用内 typed 抛（SC4，消费点守卫）。
+  const transport = resolveLlmTransport(file, mergedSettings, modelRaw);
+
   return {
     llm: {
-      baseUrl: envGet({
-        file,
-        key: "IKNOW_LLM_BASE_URL",
-        fallback: "http://localhost:20128/v1",
-      }).replace(/\/$/, ""),
+      baseUrl: transport.baseUrl,
       model: modelRaw,
+      // headers 只在 provider 命中且配了非空 headers 时产出（不写空对象）。
+      ...(transport.headers === undefined
+        ? {}
+        : { headers: transport.headers }),
       fallback: mergedSettings.llm?.fallback ?? [],
       // settings-model-extension：apiKey 来源 = settings.llm.apiKey（字面或 ${VAR}
       // 占位符）经 expandPlaceholders 解析；未配 / 解析不到 → undefined（消费点守卫）。
-      apiKey: expandPlaceholders(mergedSettings.llm?.apiKey, file),
+      // ADR-0093 provider 命中时由 transport.apiKey 接管（provider 显式登记
+      // apiKeyEnv 即声明走 env，绝不回退这里的字面）。
+      apiKey: transport.apiKey,
       maxOutputTokens: envPositiveInt({
         file,
         key: "IKNOW_LLM_MAX_OUTPUT_TOKENS",

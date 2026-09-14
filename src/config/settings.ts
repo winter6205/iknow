@@ -56,6 +56,44 @@ export interface IknowSettingsLlmCompress {
   thresholdTokens?: number;
 }
 
+/**
+ * ADR-0093 / #1010 `llm.providers` 段的单 model 项:
+ *  - `id`: 模型路由 ID 在 provider 内唯一,trim 后非空(沿用 `isNonEmptyString`)；
+ *  - `name?`: 显示名(非空串 trim);
+ *  - `contextWindow?` / `maxTokens?`: 上下文窗 / max output;有限正数,与
+ *    `IknowSettingsLlmCompress` 同款 `isPositiveFinite` 值域。
+ * `id` 为必填;缺 `id` 整条 model drop(provider 仍可保留,空数组 provider 自身
+ * drop——见 `parseLlmProvider`)。
+ */
+export interface IknowSettingsLlmProviderModel {
+  readonly id: string;
+  readonly name?: string;
+  readonly contextWindow?: number;
+  readonly maxTokens?: number;
+}
+
+/**
+ * ADR-0093 / #1010 `llm.providers` 段的单 provider 项:
+ *  - `id`: provider 路由 ID(模型路由串 `provider/model` 拆头第一段),trim 后
+ *    非空;不在 providers 内显式排重(load 层不去重,行为同 user-fallback 数组
+ *    —— 后定义覆盖前定义,首条命中生效;run-time 由 `loadIknowEnv` 的解析序决定);
+ *  - `baseUrl`: Anthropic 兼容 endpoint(非空串 trim,V1 不验 URL 形态);
+ *  - `apiKeyEnv`: env 变量名,运行时由 `process.env[apiKeyEnv]` 取密钥
+ *    (非空串 trim,变量名非法 → 消费点 typed 抛);
+ *  - `headers?`: 可选字典,键值均为字符串(非字符串值 drop 整键);
+ *  - `models`: provider 内 model 数组(非空数组)。
+ *
+ * V1 硬约束:本类型仅描述 anthropic 格式 provider;OpenAI-compatible / Gemini
+ * native 等留后续轮(规格:`specs/tui-model-command.md` / ADR-0093)。
+ */
+export interface IknowSettingsLlmProvider {
+  readonly id: string;
+  readonly baseUrl: string;
+  readonly apiKeyEnv: string;
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly models: ReadonlyArray<IknowSettingsLlmProviderModel>;
+}
+
 /** llm.thinking 值域：与 env.ts IKNOW_LLM_THINKING 一致（大小写敏感小写）。 */
 export type IknowSettingsThinking = "off" | "adaptive";
 
@@ -112,6 +150,13 @@ export interface IknowSettingsLlm {
    * 未配 → undefined（不默认、不硬编码；消费点守卫抛「no API key configured」）。
    */
   apiKey?: string;
+  /** ADR-0093 / #1010 LLM provider 注册表——用户层键（项目文件不采纳，沿 ADR-0084）。
+   *  loadIknowEnv 按 settings.llm.model = "<provider>/<model>" 拆头查表，命中 →
+   *  baseUrl = provider.baseUrl + apiKey = process.env[provider.apiKeyEnv];未命中 →
+   *  fallback 今日路径 IKNOW_LLM_BASE_URL + settings.llm.apiKey(back-compat)。
+   *  非法 provider 整条 drop（详见 parseLlmProvider）；空数组 → 字段缺席。
+   */
+  providers?: ReadonlyArray<IknowSettingsLlmProvider>;
 }
 
 export interface IknowSettingsVerify {
@@ -608,6 +653,110 @@ export function isFsIsolationMode(value: unknown): value is FsIsolationMode {
 }
 
 /**
+ * ADR-0093 / #1010: 单 model 项解析。`id` 非空串为唯一硬要求；`name` 同款；
+ * `contextWindow` / `maxTokens` 走 `isPositiveFinite`（>0 有限正数）。
+ * 非法字段 drop；`id` 非法 → 整条 model drop（返回 undefined）。
+ */
+function parseLlmProviderModel(
+  raw: unknown
+): IknowSettingsLlmProviderModel | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  if (!isNonEmptyString(raw.id)) return undefined;
+  const out: {
+    id: string;
+    name?: string;
+    contextWindow?: number;
+    maxTokens?: number;
+  } = {
+    id: raw.id.trim(),
+  };
+  if (isNonEmptyString(raw.name)) out.name = raw.name.trim();
+  if (isPositiveFinite(raw.contextWindow))
+    out.contextWindow = raw.contextWindow;
+  if (isPositiveFinite(raw.maxTokens)) out.maxTokens = raw.maxTokens;
+  return out;
+}
+
+/**
+ * ADR-0093 / #1010: 单 provider 项解析。`id` / `baseUrl` / `apiKeyEnv` 三者
+ * 任一非空串缺失 → 整条 provider drop。`headers` 仅接受字符串→字符串映射，
+ * 非字符串值 drop 整键。`models` 非空数组,逐项 `parseLlmProviderModel`,
+ * 过滤后仍为空 → provider 自身 drop。
+ */
+function parseLlmProviderHeaders(
+  raw: unknown
+): Record<string, string> | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === "string") headers[k] = v;
+  }
+  return Object.keys(headers).length > 0 ? headers : undefined;
+}
+
+function parseLlmProviders(raw: unknown): IknowSettingsLlmProvider[] {
+  if (!Array.isArray(raw)) return [];
+  const out: IknowSettingsLlmProvider[] = [];
+  for (const p of raw) {
+    const parsed = parseLlmProvider(p);
+    if (parsed !== undefined) out.push(parsed);
+  }
+  return out;
+}
+
+/** ADR-0093: 将合法 providers 数组写入 out;空数组 / 非数组 → 不写。 */
+function applyLlmProviders(out: IknowSettingsLlm, raw: unknown): void {
+  const providers = parseLlmProviders(raw);
+  if (providers.length > 0) out.providers = providers;
+}
+
+/** ADR-0093: providers 是用户层键 → merge 直接透传 user 值。 */
+function mergeLlmProviders(
+  out: IknowSettingsLlm,
+  user: IknowSettingsLlm | undefined
+): void {
+  if (user?.providers !== undefined) out.providers = user.providers;
+}
+
+function parseLlmProviderModels(raw: unknown): IknowSettingsLlmProviderModel[] {
+  if (!Array.isArray(raw)) return [];
+  const out: IknowSettingsLlmProviderModel[] = [];
+  for (const m of raw) {
+    const parsed = parseLlmProviderModel(m);
+    if (parsed !== undefined) out.push(parsed);
+  }
+  return out;
+}
+
+function parseLlmProvider(raw: unknown): IknowSettingsLlmProvider | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  if (
+    !isNonEmptyString(raw.id) ||
+    !isNonEmptyString(raw.baseUrl) ||
+    !isNonEmptyString(raw.apiKeyEnv)
+  ) {
+    return undefined;
+  }
+  const models = parseLlmProviderModels(raw.models);
+  if (models.length === 0) return undefined;
+  const headers = parseLlmProviderHeaders(raw.headers);
+  const out: {
+    id: string;
+    baseUrl: string;
+    apiKeyEnv: string;
+    models: IknowSettingsLlmProviderModel[];
+    headers?: Record<string, string>;
+  } = {
+    id: raw.id.trim(),
+    baseUrl: raw.baseUrl.trim(),
+    apiKeyEnv: raw.apiKeyEnv.trim(),
+    models,
+  };
+  if (headers !== undefined) out.headers = headers;
+  return out;
+}
+
+/**
  * 占位符形态：`${VAR}` 或 `$VAR`。与 env.ts `expandPlaceholders` 共用同一
  * VAR 名字符集（`[A-Za-z_][A-Za-z0-9_]*`）。settings.ts 独立持有一份扫描
  * 实现（避免 settings.ts 依赖 env.ts），用同一正则源防 drift（M7 对齐）。
@@ -710,6 +859,8 @@ function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
     out.fallback = raw.fallback.map((s) => s.trim());
   }
   if (isApiKeyOrPlaceholder(raw.apiKey)) out.apiKey = raw.apiKey.trim();
+  // ADR-0093 / #1010: providers 数组解析——非数组 / 空数组 → 字段缺席。
+  applyLlmProviders(out, raw.providers);
   if (isPlainObject(raw.compress)) {
     const compress: IknowSettingsLlmCompress = {};
     if (isPositiveFinite(raw.compress.contextWindow)) {
@@ -725,7 +876,13 @@ function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
       out.compress = compress;
     }
   }
-  if (
+  if (isEmptyLlm(out)) return undefined;
+  return out;
+}
+
+/** ADR-0093: IknowSettingsLlm 全字段 undefined 判定 —— 整段 drop 时使用。 */
+function isEmptyLlm(out: IknowSettingsLlm): boolean {
+  return (
     out.maxTurns === undefined &&
     out.timeoutMs === undefined &&
     out.idleTimeoutMs === undefined &&
@@ -735,10 +892,9 @@ function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
     out.thinkingEffort === undefined &&
     out.model === undefined &&
     out.fallback === undefined &&
-    out.apiKey === undefined
-  )
-    return undefined;
-  return out;
+    out.apiKey === undefined &&
+    out.providers === undefined
+  );
 }
 
 /**
@@ -1188,6 +1344,8 @@ function mergeLlm(
   else if (user?.fallback !== undefined) out.fallback = user.fallback;
   if (project?.apiKey !== undefined) out.apiKey = project.apiKey;
   else if (user?.apiKey !== undefined) out.apiKey = user.apiKey;
+  // ADR-0093 / #1010: providers 用户层键 → 直接 user 透传。
+  mergeLlmProviders(out, user);
   if (project?.compress !== undefined || user?.compress !== undefined) {
     const compress: IknowSettingsLlmCompress = {};
     if (project?.compress?.contextWindow !== undefined) {
@@ -1207,19 +1365,7 @@ function mergeLlm(
       out.compress = compress;
     }
   }
-  if (
-    out.maxTurns === undefined &&
-    out.timeoutMs === undefined &&
-    out.idleTimeoutMs === undefined &&
-    out.hardCapMs === undefined &&
-    out.compress === undefined &&
-    out.thinking === undefined &&
-    out.thinkingEffort === undefined &&
-    out.model === undefined &&
-    out.fallback === undefined &&
-    out.apiKey === undefined
-  )
-    return undefined;
+  if (isEmptyLlm(out)) return undefined;
   return out;
 }
 

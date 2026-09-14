@@ -10,8 +10,31 @@
  *   - overflow: long inputs are not affected (validator only)
  *   - exception: env without apiKey → ValidationError (mirrors ensureDeps)
  */
-import { afterEach, describe, it } from "vitest";
+import { afterEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
+
+/**
+ * specs/tui-model-command SC9：`withThinkingOverride` 的 client 构造与
+ * build-engine `createAdapterFromEnv` 同形（provider.headers →
+ * `defaultHeaders`，缺席不传该键）。本文件其余用例走真实 SDK + 本地
+ * capture server（验 wire 上的 thinking 字段），这里只在 SDK 构造点包一层
+ * 记录器 —— 子类化真实 Anthropic（不是替身），既有用例行为不变；而
+ * `withThinkingOverride` 不把 client 交回调用方，构造参数是唯一可观察面。
+ */
+const anthropicCtorOpts = vi.hoisted(
+  () => [] as Array<Record<string, unknown>>
+);
+vi.mock("@anthropic-ai/sdk", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@anthropic-ai/sdk")>();
+  class CapturingAnthropic extends actual.default {
+    constructor(opts?: Record<string, unknown>) {
+      super(opts as never);
+      anthropicCtorOpts.push(opts ?? {});
+    }
+  }
+  return { ...actual, default: CapturingAnthropic };
+});
+
 import {
   parseThinkingOverride,
   withThinkingOverride,
@@ -286,4 +309,57 @@ describe("withThinkingOverride — request-side thinking fields via local captur
     assert.equal("thinking" in body, false);
     assert.equal("output_config" in body, false);
   });
+
+  // -- SC9 (tui-model-command): provider.headers 透传 ------------------
+
+  it("env.llm.headers 在场 → client 构造收到 defaultHeaders（与 build-engine 同形）", () => {
+    anthropicCtorOpts.length = 0;
+    withThinkingOverride({
+      deps: baseDepsForHeaderProbe(),
+      override: { mode: "off" },
+      env: makeTestLlmEnv({
+        baseUrl: "http://invalid",
+        headers: { "X-Foo": "bar" },
+      }),
+    });
+    assert.equal(anthropicCtorOpts.length, 1);
+    assert.deepEqual(anthropicCtorOpts[0]!["defaultHeaders"], {
+      "X-Foo": "bar",
+    });
+  });
+
+  it("env.llm.headers 缺席 → 构造 options 不含 defaultHeaders 键", () => {
+    anthropicCtorOpts.length = 0;
+    withThinkingOverride({
+      deps: baseDepsForHeaderProbe(),
+      override: { mode: "off" },
+      env: makeTestLlmEnv({ baseUrl: "http://invalid" }),
+    });
+    assert.equal(anthropicCtorOpts.length, 1);
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(
+        anthropicCtorOpts[0]!,
+        "defaultHeaders"
+      ),
+      false
+    );
+  });
 });
+
+/** SC9 用例的 deps：override 只换 adapter，executor / registry 不参与。 */
+function baseDepsForHeaderProbe(): LoopEngineDeps {
+  const tool = createStubTool({ name: "noop", next: () => ({}) });
+  const registry = createRegistry([tool]);
+  return {
+    adapter: {
+      step: async () => {
+        throw new Error("should be replaced by override adapter");
+      },
+      encodeUserText: () => ({ role: "user", content: [] }),
+      encodeToolResults: () => [],
+    },
+    executor: createExecutor(registry),
+    registry,
+    maxTurns: 1,
+  };
+}

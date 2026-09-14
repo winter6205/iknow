@@ -113,6 +113,10 @@ export function makeTestLlmEnv(overrides: Partial<TestLlmEnv> = {}): {
  * independent of the live `LlmEnv` type's evolution while still being
  * assignable (each field's value type matches). settings-model-extension
  * (i164 第二阶段)：LlmEnv 退役 `apiKeyEnv` 字段，本 type 不再包含。
+ *
+ * tui-model-command SC9 加可选 `headers`：provider.headers 透传面
+ * （settings.llm.providers[i].headers）默认缺席 —— 与生产 env 的「有值才有
+ * 该键」同形；要在场必须显式 override。
  */
 export type TestLlmEnv = {
   readonly baseUrl: string;
@@ -125,4 +129,5 @@ export type TestLlmEnv = {
   readonly thinking: "off" | "adaptive";
   readonly thinkingEffort: "" | "low" | "medium" | "high" | "xhigh" | "max";
   readonly stream: "on" | "off";
+  readonly headers?: Readonly<Record<string, string>>;
 };

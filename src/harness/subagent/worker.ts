@@ -365,6 +365,26 @@ function todoLedgerRegistryOpts(
 }
 
 /**
+ * SC9:worker 子进程的 Anthropic client。headers 透传与 build-engine
+ * `createAdapterFromEnv` 同形 —— `env.llm.headers` 有值时作 SDK
+ * `defaultHeaders`;缺席时**不传该键**(条件 spread),client options 与今日
+ * 逐字节一致(不会多出显式 `undefined` / `{}`)。
+ *
+ * 独立成挂载点而非内联:装配函数已超 S5 复杂度阈值,新增分支必须落在
+ * 新函数里(ratchet 只允许持平 / 下降),且这里本来就是「env → client」的
+ * 单一职责边界。
+ */
+function createWorkerAnthropicClient(env: IknowEnv): Anthropic {
+  return new Anthropic({
+    apiKey: env.llm.apiKey,
+    baseURL: env.llm.baseUrl,
+    ...(env.llm.headers !== undefined
+      ? { defaultHeaders: env.llm.headers }
+      : {}),
+  });
+}
+
+/**
  * 装配 worker 进程的 LoopEngineDeps。真实路径 (spec T1):
  *   - adapter = createRealAnthropicAdapter (build-engine 同款参数);
  *   - registry = createDefaultAciRegistry (不传 subagentManager → 无 spawn_subagent);
@@ -437,10 +457,9 @@ export async function createWorkerRuntime(
     opts.model ??
     withTransportRetry(
       createRealAnthropicAdapter({
-        client: new Anthropic({
-          apiKey: env.llm.apiKey,
-          baseURL: env.llm.baseUrl,
-        }),
+        // ADR-0093 / SC9：env.llm.headers → client defaultHeaders，构造见
+        // `createWorkerAnthropicClient`（条件 spread，缺席不传键）。
+        client: createWorkerAnthropicClient(env),
         model: env.llm.model,
         maxTokens: env.llm.maxOutputTokens,
         temperature: env.llm.temperature,

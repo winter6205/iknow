@@ -7,7 +7,7 @@
  *   - **merge 基于原始 raw JSON，不是解析后的 IknowSettings**：IknowSettings
  *     深 frozen 且丢弃非法字段，写回必须保留用户文件里的一切字段。thinking
  *     只改 `llm.thinking` / `llm.thinkingEffort`；memory 只改 `memory.autoExtract`
- *     / `memory.dream`。
+ *     / `memory.dream`；model 只改 `llm.model`。
  *   - **字段语义**：`llm.thinking` 仅 `"off" | "adaptive"`；
  *     `llm.thinkingEffort` 仅五档或 `null`（null = auto → 删除键，缺省 =
  *     自适应，与 env 缺省语义一致）。`memory.autoExtract` / `dream` 仅
@@ -55,6 +55,15 @@ export interface ThinkingPersistPatch {
 export interface MemoryPersistPatch {
   autoExtract: boolean;
   dream: boolean;
+}
+
+/**
+ * /model picker 可持久化 patch：只改 `llm.model`（模型路由 ID 形如
+ * `"<provider>/<model>"`）。provider 段门禁（SC6：未知 provider 抛 TypeError）
+ * 见 `mergeModelPatch`。
+ */
+export interface ModelPersistPatch {
+  model: string;
 }
 
 /**
@@ -230,6 +239,80 @@ export function mergeFsModePatch(
 }
 
 /**
+ * 读取 raw `llm.providers` 登记的 provider id 集合（SC6 门禁数据源）。
+ * 沿 settings.ts `parseLlmProvider` 同款纪律：仅「普通对象且 `.id` 为 trim 后
+ * 非空字符串」的项计入；`providers` 缺失 / 非数组 / 项非法 → 不计入（该
+ * provider 视为未知，由调用方抛错，不静默放行）。
+ */
+function collectProviderIds(rawLlm: unknown): Set<string> {
+  const ids = new Set<string>();
+  if (!isPlainObject(rawLlm)) return ids;
+  const providers = rawLlm.providers;
+  if (!Array.isArray(providers)) return ids;
+  for (const p of providers) {
+    if (
+      isPlainObject(p) &&
+      typeof p.id === "string" &&
+      p.id.trim().length > 0
+    ) {
+      ids.add(p.id.trim());
+    }
+  }
+  return ids;
+}
+
+/**
+ * 合并 model patch 到 raw JSON（纯函数，无 fs），只改 `llm.model`。
+ *
+ * 值域门禁（SC6：任一不满足 → 抛带具体非法值与期望形态的 TypeError，由调用方
+ * 边界 catch 后走 notice；不静默丢弃、不静默写入）：
+ *   - `patch.model` 非字符串 / trim 后为空；
+ *   - 不含 "/"（模型路由 ID 形如 `"<provider>/<model>"`）；
+ *   - 按**第一个** "/" 拆出的 provider / model 段 trim 后任一为空
+ *     （如 `"/foo"`、`"foo/"`）；
+ *   - provider 段不在 **raw** `llm.providers`（数组，逐项 `.id`）里 —— 未知
+ *     provider 不落盘：写进去只会落到 env 层 fallback 路径，与用户所选不符。
+ *
+ * 通过后：`llm` 非普通对象 → 以新对象覆盖（同 mergeThinkingPatch）；`llm` 其余
+ * 字段与其它顶层段（apiKey / thinking / memory / isolation / permissions /
+ * providers …）一律原样保留。写回值 = patch.model 的 trim 结果（与 settings.ts
+ * `parseLlm` 对 model 的 trim 纪律一致）。
+ */
+export function mergeModelPatch(
+  raw: Record<string, unknown>,
+  patch: ModelPersistPatch
+): Record<string, unknown> {
+  const rawValue = patch.model;
+  const expected = 'expected "<provider>/<model>"';
+  if (typeof rawValue !== "string" || rawValue.trim().length === 0) {
+    throw new TypeError(
+      `illegal model patch value: ${JSON.stringify(rawValue)} (${expected})`
+    );
+  }
+  const model = rawValue.trim();
+  const slash = model.indexOf("/");
+  const providerId = slash < 0 ? "" : model.slice(0, slash).trim();
+  const modelId = slash < 0 ? "" : model.slice(slash + 1).trim();
+  if (slash < 0 || providerId.length === 0 || modelId.length === 0) {
+    throw new TypeError(
+      `illegal model patch value: ${JSON.stringify(rawValue)} (${expected}, with non-empty provider and model segments)`
+    );
+  }
+  if (!collectProviderIds(raw.llm).has(providerId)) {
+    throw new TypeError(
+      `unknown provider in model patch value: ${JSON.stringify(rawValue)} (provider ${JSON.stringify(providerId)} not in llm.providers)`
+    );
+  }
+  const next: Record<string, unknown> = { ...raw };
+  const nextLlm: Record<string, unknown> = isPlainObject(next.llm)
+    ? { ...next.llm }
+    : {};
+  nextLlm.model = model;
+  next.llm = nextLlm;
+  return next;
+}
+
+/**
  * 选择写回目标 settings 文件路径（ADR-0084 写回落对层）：
  *  - thinking / memory 是**用户层键**（`llm` / `memory` 段）→ 目标恒为
  *    `<home>/.iknow/settings.json`；`home` 缺省 `homedir()`（与
@@ -304,6 +387,21 @@ export async function persistFsModeChanges(
 ): Promise<{ path: string; bytes: string }> {
   const raw = await readSettingsRaw(filePath);
   return persistMergedSettings(filePath, mergeFsModePatch(raw, patch));
+}
+
+/**
+ * 把 model patch 持久化到指定 settings 文件（原子写，复用 persistMergedSettings）。
+ * 读 raw JSON（文件不存在 / 坏 JSON → 空对象起步）→ mergeModelPatch → 同目录
+ * tmp + chmod 0600 + rename。非法 model / 未知 provider → merge 抛 TypeError，
+ * 文件不被触碰。返回完整 bytes 字符串供 self-write 哨兵登记（与 thinking /
+ * memory 同款内容哈希契约）。
+ */
+export async function persistModelChanges(
+  filePath: string,
+  patch: ModelPersistPatch
+): Promise<{ path: string; bytes: string }> {
+  const raw = await readSettingsRaw(filePath);
+  return persistMergedSettings(filePath, mergeModelPatch(raw, patch));
 }
 
 /** sha256 hex —— self-write 哨兵的内容哈希（T2 markSelfWrite 比对用）。 */

@@ -27,8 +27,13 @@ import { createNoAskUser } from "../../src/harness/permission/ask-user.js";
 import { makeDeps, assistantResult } from "../cli/_fixtures.ts";
 import {
   MINIMAL_SDK_MESSAGE,
+  makeTestLlmEnv,
   startLlmCapture,
 } from "./_helpers/llm-capture.ts";
+import {
+  MINIMAL_MESSAGE_RESPONSE,
+  startHttpCapture,
+} from "../_helpers/http-capture.ts";
 
 // -- helpers -----------------------------------------------------------------
 
@@ -55,11 +60,16 @@ function makeFullEnv(overrides: {
   readonly stream?: "on" | "off";
   readonly maxOutputTokens?: number;
   readonly temperature?: number;
+  readonly headers?: Readonly<Record<string, string>>;
 }): IknowEnv {
   return {
     llm: {
       baseUrl: overrides.baseUrl ?? "http://invalid",
       model: overrides.model ?? "test-model",
+      // headers 缺席 ⇔ 键不产出（与生产 env 的「有值才有该键」同形）。
+      ...(overrides.headers !== undefined
+        ? { headers: overrides.headers }
+        : {}),
       fallback: [],
       // apiKey 缺省 "test-key"；仅在显式传 undefined 时透传 undefined（测试
       // apiKey 解析失败降级路径）。用 `in` 判断「显式传了 key」，避免与「未传
@@ -428,6 +438,151 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       await hub.postMessage({ conversationId: id, text: "warm" });
       expect(cap.bodies.length).toBe(2);
       expect((cap.bodies[1] as { temperature?: number }).temperature).toBe(0.7);
+    } finally {
+      await cap.close();
+    }
+  });
+});
+
+// -- thinking override 路径的 env 新鲜度 + headers 热重载比较 ------------------
+//
+// 观测手段（为什么这样选）：
+//   - override 一侧走 **wire**：withThinkingOverride 不把 client 交回调用方，
+//     baseUrl/model 是唯二可观察面，而 capture server 记录的正是「SDK 实际把
+//     请求发去了哪里、带了什么 model」——比 stub/spy 更黑盒，且能顺带证明
+//     请求真的发出去了。
+//   - headers 一侧必须留在 **真实 adapter 的构造面**：SDK 把 defaultHeaders
+//     冻结在 client._options 上；wire 上也看得到头，但「仅 headers 变化」的
+//     断言要先证明 client 是新造的（同一 client 不会改头），故先取 client
+//     引用再比对。两处引用都可从 hub 的 cachedDeps 读到，无需注入新缝。
+describe("hub override 路径取最新 env（SC10）+ headers 热重载（SC9）", () => {
+  test("thinking override 路径用 envProvider 的最新 env（新 baseUrl + model），不用构造期快照", async () => {
+    const capOld = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+    const capNew = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+    const store0 = makeStore();
+    // 构造期快照 = capOld；envProvider（生产 TUI 的 EnvLoader.get）返回新 env。
+    const initial = makeFullEnv({
+      model: "snapshot-model",
+      apiKey: "test-key",
+      baseUrl: capOld.origin,
+    });
+    let latest = makeFullEnv({
+      model: "snapshot-model",
+      apiKey: "test-key",
+      baseUrl: capOld.origin,
+    });
+    const hub = new SessionHub({
+      store: store0,
+      askUser: createNoAskUser(),
+      deps: baseDeps(),
+      overrideEnv: { llm: initial.llm },
+      envProvider: () => latest,
+    });
+    try {
+      const id = await createSessionId(hub);
+      // /model 切换后的状态：envProvider 返回新 provider 的 baseUrl + model。
+      latest = makeFullEnv({
+        model: "switched-model",
+        apiKey: "test-key",
+        baseUrl: capNew.origin,
+      });
+      await hub.postMessage({
+        conversationId: id,
+        text: "think hard",
+        thinking: { mode: "adaptive", effort: "high" },
+      });
+      // 修复前：override 分支读 overrideEnv（构造期快照）→ 请求命中 capOld。
+      expect(capOld.bodies.length).toBe(0);
+      expect(capNew.bodies.length).toBe(1);
+      expect((capNew.bodies[0] as { model?: string }).model).toBe(
+        "switched-model"
+      );
+    } finally {
+      await capOld.close();
+      await capNew.close();
+    }
+  });
+
+  test("只传 overrideEnv（无 envProvider）时 override 路径仍用该快照（测试缝语义不变）", async () => {
+    const cap = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+    const store0 = makeStore();
+    const hub = new SessionHub({
+      store: store0,
+      askUser: createNoAskUser(),
+      deps: baseDeps(),
+      overrideEnv: makeTestLlmEnv({ baseUrl: cap.origin }),
+    });
+    try {
+      const id = await createSessionId(hub);
+      await hub.postMessage({
+        conversationId: id,
+        text: "think hard",
+        thinking: { mode: "off" },
+      });
+      expect(cap.bodies.length).toBe(1);
+    } finally {
+      await cap.close();
+    }
+  });
+
+  test("仅 headers 变化 → reloadFromEnv 重建 adapter；headers 相同 → 不重建", async () => {
+    const cap = await startHttpCapture(MINIMAL_MESSAGE_RESPONSE);
+    const store0 = makeStore();
+    let currentHeaders: Readonly<Record<string, string>> = {
+      "X-Foo": "bar",
+    };
+    const envProvider = () =>
+      makeFullEnv({
+        model: "headers-test",
+        apiKey: "test-key",
+        baseUrl: cap.origin,
+        headers: currentHeaders,
+      });
+    const hub = new SessionHub({
+      store: store0,
+      askUser: createNoAskUser(),
+      envProvider,
+      deps: baseDeps(),
+    });
+    // adapter 引用 = 「是否重建」的可观察面；wire 上的请求头 = headers 真透传
+    // 的黑盒面（同一个 client 不会改头，所以头值变化 ⟺ 新 client）。
+    const readAdapter = async () => {
+      const deps = await (
+        hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
+      ).ensureDeps();
+      return deps.adapter;
+    };
+    try {
+      const id = await createSessionId(hub);
+      // 首次 reload（headers 在场）→ adapter 重建。
+      await hub.reloadFromEnv();
+      const adapterA = await readAdapter();
+      expect(adapterA).not.toBe(stubAdapter);
+
+      // 同值（新对象、逐键相同）→ 判定「内容未变」→ 不重建，adapter 引用不变。
+      currentHeaders = { "X-Foo": "bar" };
+      await hub.reloadFromEnv();
+      const adapterB = await readAdapter();
+      expect(adapterB).toBe(adapterA);
+
+      // 仅 headers 变化 → 关键字段比较必须察觉 → adapter 重建；wire 带新头。
+      currentHeaders = { "X-Foo": "baz" };
+      await hub.reloadFromEnv();
+      const adapterC = await readAdapter();
+      expect(adapterC).not.toBe(adapterB);
+      await hub.postMessage({ conversationId: id, text: "h1" });
+      expect(cap.headers.length).toBe(1);
+      expect(cap.headers[0]!["x-foo"]).toBe("baz");
+
+      // headers 整体消失（provider 换到无 headers 的档）也算变化 → 再重建，
+      // wire 不再带该头。
+      currentHeaders = undefined as unknown as Readonly<Record<string, string>>;
+      await hub.reloadFromEnv();
+      const adapterE = await readAdapter();
+      expect(adapterE).not.toBe(adapterC);
+      await hub.postMessage({ conversationId: id, text: "h2" });
+      expect(cap.headers.length).toBe(2);
+      expect("x-foo" in cap.headers[1]!).toBe(false);
     } finally {
       await cap.close();
     }

@@ -371,6 +371,14 @@ export function createAdapterFromEnv(env: IknowEnv): {
   const client = new Anthropic({
     apiKey: env.llm.apiKey,
     baseURL: env.llm.baseUrl,
+    // ADR-0093 / spec tui-model-command SC9：provider.headers 透传为 SDK
+    // `defaultHeaders`。条件 spread 而非 `defaultHeaders: env.llm.headers` ——
+    // 字段缺席（未命中 provider / provider 无 headers）时 SDK 收到的 options
+    // 与今日逐字节一致，不会多出一个显式 `undefined` 键；env 层已保证
+    // 「有值 ⇔ 非空映射」，此处不再二次判空。
+    ...(env.llm.headers !== undefined
+      ? { defaultHeaders: env.llm.headers }
+      : {}),
   });
   const adapter = withTransportRetry(
     createRealAnthropicAdapter({

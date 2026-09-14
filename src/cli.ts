@@ -49,6 +49,13 @@ import {
   resolveWorkspaceRoot,
 } from "./config/workspace-root.js";
 export { isWorkspaceRootError, renderWorkspaceRootError };
+// ADR-0093 / SC4：provider 命中但 apiKeyEnv 未设 → `loadIknowEnv` 抛 plain
+// object。与上方 WorkspaceRootError 同款：必须走判别守卫 + typed 渲染，
+// `String(err)` 会打成 `[object Object]`（providerId / env 名全不可见）。
+import {
+  formatLlmProviderConfigError,
+  isLlmProviderConfigError,
+} from "./config/env.js";
 import { MaxTurnsExceeded } from "./harness/errors.js";
 import { maxTurnsEnvelope } from "./cli/max-turns.js";
 import { randomUUID } from "node:crypto";
@@ -100,6 +107,18 @@ function printCliError(err: unknown): void {
     );
     return;
   }
+  if (isLlmProviderConfigError(err)) {
+    writeErr(
+      JSON.stringify({
+        error: "llm_provider_api_key_missing",
+        code: err.kind,
+        provider: err.providerId,
+        apiKeyEnv: err.apiKeyEnv,
+        message: formatLlmProviderConfigError(err),
+      })
+    );
+    return;
+  }
   if (isIknowError(err)) {
     writeErr(
       JSON.stringify({
@@ -131,6 +150,10 @@ function printCliError(err: unknown): void {
 function printChatError(err: unknown): void {
   if (isWorkspaceRootError(err)) {
     writeErr(`错误 ${renderWorkspaceRootError(err)}`);
+    return;
+  }
+  if (isLlmProviderConfigError(err)) {
+    writeErr(`错误 [${err.kind}]: ${formatLlmProviderConfigError(err)}`);
     return;
   }
   if (isIknowError(err)) {

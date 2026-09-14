@@ -105,27 +105,22 @@ describe("parseTuiInput: 普通消息与边界", () => {
   });
 });
 
+/**
+ * 词表 SSOT：`slashSuggestions("/")` 是词表的完整投影（空前缀 → 全部静态命令，
+ * 保持插入顺序）。测试据此派生「有几条命令」「末位是哪条」，而非硬编码条数 /
+ * 下标 —— 词表追加新命令时只有这一处推导跟着走，断言不需逐个手改。
+ */
+function vocabularyCommands(): ReadonlyArray<string> {
+  return slashSuggestions("/").map((c) =>
+    c.kind === "command" ? c.command : c.name
+  );
+}
+
 describe("helpLines", () => {
-  test("覆盖全部 15 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
+  test("覆盖全部词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
     const joined = helpLines().join("\n");
-    for (const cmd of [
-      "/sessions",
-      "/new",
-      "/mcp",
-      "/info",
-      "/help",
-      "/thinking",
-      "/effort",
-      "/memory",
-      "/quit",
-      "/exit",
-      "/compact",
-      "/continue",
-      "/rewind",
-      "/graph",
-      "/config",
-    ]) {
-      expect(joined).toContain(cmd);
+    for (const command of vocabularyCommands()) {
+      expect(joined).toContain(`/${command}`);
     }
     expect(joined).toContain("Ctrl+C");
     // #321 B1 fix-session：Ctrl+Y 已移除（拖选仅高亮，右键才复制）。
@@ -143,24 +138,29 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  test('"/" → 全部 15 条静态命令（按词表插入顺序，kind="command"；config 加在 graph 之后，无 /profile）', () => {
-    expect(slashSuggestions("/")).toEqual([
-      { kind: "command", command: "sessions" },
-      { kind: "command", command: "new" },
-      { kind: "command", command: "quit" },
-      { kind: "command", command: "exit" },
-      { kind: "command", command: "help" },
-      { kind: "command", command: "info" },
-      { kind: "command", command: "thinking" },
-      { kind: "command", command: "effort" },
-      { kind: "command", command: "memory" },
-      { kind: "command", command: "compact" },
-      { kind: "command", command: "continue" },
-      { kind: "command", command: "rewind" },
-      { kind: "command", command: "mcp" },
-      { kind: "command", command: "graph" },
-      { kind: "command", command: "config" },
+  test('"/" → 全部静态命令（按词表插入顺序；graph 后追加 config、再追加 model，无 /profile）', () => {
+    const commands = vocabularyCommands();
+    expect(commands.slice(0, 14)).toEqual([
+      "sessions",
+      "new",
+      "quit",
+      "exit",
+      "help",
+      "info",
+      "thinking",
+      "effort",
+      "memory",
+      "compact",
+      "continue",
+      "rewind",
+      "mcp",
+      "graph",
     ]);
+    expect(commands.slice(14)).toEqual(["config", "model"]);
+    expect(slashSuggestions("/")).toEqual(
+      commands.map((command) => ({ kind: "command" as const, command }))
+    );
+    expect(commands).not.toContain("profile");
   });
 
   test('"/q" → [{command: quit}]', () => {
@@ -202,23 +202,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
         { name: "echo", description: "回声" },
         { name: "code-review", description: "代码审查" },
       ])
-    ).toEqual([
-      { kind: "command", command: "sessions" },
-      { kind: "command", command: "new" },
-      { kind: "command", command: "quit" },
-      { kind: "command", command: "exit" },
-      { kind: "command", command: "help" },
-      { kind: "command", command: "info" },
-      { kind: "command", command: "thinking" },
-      { kind: "command", command: "effort" },
-      { kind: "command", command: "memory" },
-      { kind: "command", command: "compact" },
-      { kind: "command", command: "continue" },
-      { kind: "command", command: "rewind" },
-      { kind: "command", command: "mcp" },
-      { kind: "command", command: "graph" },
-      { kind: "command", command: "config" },
-    ]);
+    ).toEqual(slashSuggestions("/"));
   });
 
   test('"/" + 1 字符前缀（如 /c）→ skill 才入场（#377 E）', () => {
@@ -702,28 +686,27 @@ describe("#361 Phase D /mcp 词表", () => {
     });
   });
 
-  test('"/m" 前缀 → mcp 与 memory 两个候选', () => {
-    expect(slashSuggestions("/m")).toEqual([
-      { kind: "command", command: "memory" },
-      { kind: "command", command: "mcp" },
+  test('"/m" 前缀 → memory / mcp / model 三个候选（按词表插入顺序）', () => {
+    // /m 是三个命令的共享前缀：memory 与 mcp 在词表中相邻，model 追加在尾。
+    const commands = slashSuggestions("/m").map((c) =>
+      c.kind === "command" ? c.command : c.name
+    );
+    expect(commands).toEqual(["memory", "mcp", "model"]);
+  });
+
+  test('"/mo" 前缀 → 只剩 model（消歧收敛）', () => {
+    expect(slashSuggestions("/mo")).toEqual([
+      { kind: "command", command: "model" },
     ]);
   });
 
-  test('"/" 全部候选含 mcp（词表 append-only：/config 追加后 mcp 退居倒三）', () => {
+  test('"/" 全部候选含 mcp；尾部 append-only 为 graph, config, model', () => {
     const all = slashSuggestions("/");
     expect(all).toContainEqual({ kind: "command", command: "mcp" });
-    expect(all[all.length - 3]).toEqual({
-      kind: "command",
-      command: "mcp",
-    });
-    expect(all[all.length - 2]).toEqual({
-      kind: "command",
-      command: "graph",
-    });
-    expect(all[all.length - 1]).toEqual({
-      kind: "command",
-      command: "config",
-    });
+    const tail = all
+      .slice(-3)
+      .map((c) => (c.kind === "command" ? c.command : c.name));
+    expect(tail).toEqual(["graph", "config", "model"]);
   });
 
   test('/mcp 唯一匹配 → 补全 "/mcp "（尾随空格）', () => {
@@ -998,6 +981,88 @@ describe("/memory 词表", () => {
 });
 
 /**
+ * /model 词表（ADR-0093 / specs/tui-model-command.md SC7）：新增命令必须走
+ * 词表原路（parse → 候选 → 补全 → help / hint），不另开旁路。
+ */
+describe("/model 词表", () => {
+  test("/model → command model", () => {
+    expect(parseTuiInput("/model")).toEqual({
+      kind: "command",
+      command: "model",
+    });
+  });
+
+  test("大小写不敏感：/MODEL、/Model → 同一命令", () => {
+    expect(parseTuiInput("/MODEL")).toEqual({
+      kind: "command",
+      command: "model",
+    });
+    expect(parseTuiInput("/Model")).toEqual({
+      kind: "command",
+      command: "model",
+    });
+  });
+
+  test("带参数仍命中命令（/model foo 由宿主判定，不落 unknown）", () => {
+    expect(parseTuiInput("/model foo")).toEqual({
+      kind: "command",
+      command: "model",
+    });
+  });
+
+  test('"/mod" 前缀命中 model；"/mode" 同（model 是唯一 /mod* 命令）', () => {
+    expect(slashSuggestions("/mod")).toEqual([
+      { kind: "command", command: "model" },
+    ]);
+    expect(slashSuggestions("/mode")).toEqual([
+      { kind: "command", command: "model" },
+    ]);
+  });
+
+  test("拼错前缀不误命中：/models → 空数组（无前缀兄弟）", () => {
+    expect(slashSuggestions("/models")).toEqual([]);
+  });
+
+  test('唯一匹配 → 补全 "/model "（尾随空格）', () => {
+    expect(slashComplete("/mod")).toBe("/model ");
+    expect(slashComplete("/mode")).toBe("/model ");
+  });
+
+  test("hint 描述：切换模型", () => {
+    expect(slashHintLines(["model"])).toEqual([
+      { command: "model", description: "切换模型" },
+    ]);
+  });
+
+  test("/help 含 /model 行与描述，且无 emoji", () => {
+    const joined = helpLines().join("\n");
+    expect(joined).toContain("/model");
+    expect(joined).toContain("切换模型");
+    expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
+  });
+
+  test("/model 是词表最末追加项（append-only 纪律，既有命令顺序不动）", () => {
+    const all = slashSuggestions("/");
+    expect(all[all.length - 1]).toEqual({
+      kind: "command",
+      command: "model",
+    });
+  });
+
+  test("命中静态命令 → undefined（/model 不抢 skill-load）", () => {
+    expect(
+      parseSkillLoad("/model", [{ name: "model-router", description: "x" }])
+    ).toBeUndefined();
+  });
+
+  test("精确命中 /model 且有更长 skill 兄弟 → 只显示 skill（消歧契约不变）", () => {
+    expect(
+      slashSuggestions("/model", [{ name: "model-router", description: "x" }])
+    ).toEqual([{ kind: "skill", name: "model-router", description: "x" }]);
+  });
+});
+
+/**
  * Task 4（plans/tui-chrome-interaction.md）：slash hint 仅作**消歧**。
  *  - 唯一精确命中（skill 或静态命令）→ 空列表（即便没有更长兄弟）。
  *  - 精确命中 + 空格/remainder → 空列表（即便有更长兄弟）。
@@ -1152,8 +1217,15 @@ describe("Task 4：slashSuggestions 仅显示未消歧的兄弟（disambig-only�
     expect(slashSuggestions("/echo", skills)).toEqual(a);
   });
 
-  test("`/` 空前缀 → 全部 15 条静态命令（Task 4 不影响空前缀契约）", () => {
-    expect(slashSuggestions("/")).toHaveLength(15);
+  test("`/` 空前缀 → 全部静态命令（条数 = /help 词表覆盖面，Task 4 不影响空前缀契约）", () => {
+    const all = slashSuggestions("/");
+    expect(all.length).toBeGreaterThan(0);
+    for (const candidate of all) {
+      expect(candidate.kind).toBe("command");
+      expect(helpLines().join("\n")).toContain(
+        `/${candidate.kind === "command" ? candidate.command : ""}`
+      );
+    }
   });
 
   test("裸 `/` + skills → 静态命令全在、skill 不入场（#377 E 不变）", () => {

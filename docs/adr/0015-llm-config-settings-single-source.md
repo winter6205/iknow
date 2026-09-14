@@ -4,6 +4,8 @@ Date: 2026-08-12
 Status: accepted
 
 > **Amendment 2026-09-12**（ADR-0084 / `specs/agent-control-surface.md` Slice B）：§1 与 §2 引用的守卫文案中指向 `<cwd>/.iknow/settings.json` 的尾句 **superseded**——`llm` 是用户层键，项目文件只采纳 `hooks` / `verify` / `secrets` / `permissions`，文案只指向 `~/.iknow/settings.json`（`src/config/messages.ts`）。§1 model 字面唯一来源、§2 apiKey 单字段与占位符语义、§5 不动范围均不变。
+>
+> **Amendment 2026-09-13**（ADR-0093 / #1010）：§2「取代 `apiKeyEnv` 间接寻址」**重开**——`settings.llm.providers[i].apiKeyEnv` 在**用户层注册表内**重新引入 per-provider 变量名（只直读 `process.env[apiKeyEnv]`，不回落 `.env.local` / `.env` fileMap；env 缺席 → typed 抛错，不回退字面 `apiKey`）。§2 其余条款不变：全局 `IKNOW_LLM_API_KEY_ENV`、`LlmEnv.apiKeyEnv` 字段、未命中 provider 路径的 `settings.llm.apiKey` 占位符链路均仍如原文。§1 model 字面唯一来源与缺失 fail-fast 不变，该字面现可读作 `provider/model` 路由 ID。
 
 ## Context
 

@@ -6,10 +6,11 @@
  * 更新为本次迁移说明。纯 TS 模块，无 ink / OpenTUI 依赖。
  *
  * 词表 15 条：/sessions /new /quit /exit /help /info /thinking /effort
- * /memory /compact /continue /rewind /mcp /graph /config。/reset 不在词表内
+ * /memory /compact /continue /rewind /mcp /graph /config /model。/reset 不在词表内
  * 即天然不可达（Q5c 废除）。
  * rev 2026-09-13:ADR-0092 / SC13 加 /config（文件系统隔离档切换;值域与
  * 文案单点在 harness/sandbox/fs-mode.ts;三入口 chat / TUI / serve 同语义）。
+ * rev 2026-09-14:#1010 加 /model（provider/model picker）。
  * rev 2026-08-11:删 /profile（首启引导由 agent 自己 rm BOOTSTRAP.md 完成,
  * 不再需要宿主斜杠钩子）；#366 加 /rewind；#337/#361 加 /mcp。
  * rev 2026-08-12:#377 系列加 /effort（思考强度调整）。
@@ -56,7 +57,8 @@ export type TuiSlashCommand =
   | "rewind"
   | "mcp"
   | "graph"
-  | "config";
+  | "config"
+  | "model";
 
 export type SlashParseResult =
   | { kind: "command"; command: TuiSlashCommand }
@@ -92,6 +94,7 @@ const VOCABULARY: ReadonlySet<string> = new Set<TuiSlashCommand>([
   "mcp",
   "graph",
   "config",
+  "model",
 ]);
 
 /** 解析输入框内容；空/纯空白 → message（调用方按空输入忽略）。 */
@@ -131,6 +134,7 @@ export function helpLines(
     "/rewind    回退到更早的回合（选择锚点后确认）",
     "/graph     图模式开关（on|off|status；下一次 run() 装配生效）",
     "/config    文件系统隔离档（status|fs global|fs workspace；下一次 bash 调用生效）",
+    "/model     切换模型（provider/model；下一轮生效）",
     "/quit      退出（别名 /exit）",
     ...skillLines,
     "Ctrl+C     打断前台运行中的 turn",
@@ -154,6 +158,7 @@ const HINT_DESCRIPTIONS: Record<TuiSlashCommand, string> = {
   rewind: "回退到更早的回合",
   graph: "图模式开关（on|off|status）",
   config: "文件系统隔离档（status|fs global|fs workspace）",
+  model: "切换模型",
   quit: "退出（别名 /exit）",
   exit: "同 /quit",
 };

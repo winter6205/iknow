@@ -8,6 +8,10 @@
  *
  * 不构造真实 .env 文件,直接通过 process.env 控制输入(loadIknowEnv 读
  * process.env > .env.local > .env;此处只设 process.env,无需 .env)。
+ *
+ * 末尾追加 ADR-0093 provider 解析组（`llm.providers` 命中 / 未命中两档 +
+ * apiKeyEnv 缺席 typed 抛）：provider 命中路径的 key **只读 process.env**，
+ * 不走 fileMap（该组单独写 `.env.local` 负例钉这一点）。
  */
 
 import { afterEach, beforeEach, describe, it } from "vitest";
@@ -15,7 +19,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadIknowEnv } from "../../src/config/env.ts";
+import {
+  formatLlmProviderConfigError,
+  isLlmProviderConfigError,
+  loadIknowEnv,
+} from "../../src/config/env.ts";
 import {
   loadIknowSettings,
   type IknowSettings,
@@ -1253,5 +1261,399 @@ describe("loadIknowEnv — apiKey 解析路径 (settings-model-extension)", () =
       llm: { model: "from-settings", apiKey: "sk-literal" },
     });
     assert.equal(env.llm.model, "from-settings");
+  });
+});
+
+describe("loadIknowEnv — llm.providers 解析 (ADR-0093 / T3)", () => {
+  // provider 命中路径的 key 只读 process.env（spec 明文），故用独立 var 名，
+  // 且测后清理；fileMap 侧刻意不提供任何回退（见「只读 process.env」用例）。
+  // IKNOW_LLM_BASE_URL / IKNOW_TEST_API_KEY 不在 ENV_KEYS 里，也必须在本组
+  // 内清理 —— 否则「未命中 → 回退」用例会泄漏到后续旧路径断言。
+  const PROVIDER_KEYS = [
+    "MINIMAX_CN_API_KEY",
+    "VOLCENGINE_ARK_API_KEY",
+    "PROVIDER_UNSET_KEY",
+    "PROVIDER_DOTENV_ONLY_KEY",
+    "IKNOW_LLM_BASE_URL",
+    "IKNOW_TEST_API_KEY",
+  ] as const;
+
+  beforeEach(() => {
+    for (const k of [...ENV_KEYS, ...PROVIDER_KEYS]) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of [...ENV_KEYS, ...PROVIDER_KEYS]) delete process.env[k];
+  });
+
+  const MINIMAX_PROVIDER = {
+    id: "minimax-cn",
+    baseUrl: "https://api.minimax.chat/v1",
+    apiKeyEnv: "MINIMAX_CN_API_KEY",
+    models: [{ id: "MiniMax-M3" }],
+  };
+
+  /** 注册表最小夹具：providers 段合法（models 非空）才不被 settings 层 drop。 */
+  function settingsWithProviders(
+    model: string,
+    providers: ReadonlyArray<Record<string, unknown>>,
+    extra?: { apiKey?: string }
+  ): IknowSettings {
+    return {
+      llm: {
+        model,
+        ...(extra?.apiKey === undefined ? {} : { apiKey: extra.apiKey }),
+        providers,
+      },
+    } as IknowSettings;
+  }
+
+  it("命中注册表 → baseUrl = provider.baseUrl 去尾斜杠，apiKey = process.env[apiKeyEnv]", () => {
+    process.env.MINIMAX_CN_API_KEY = "sk-xxx";
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithProviders("minimax-cn/MiniMax-M3", [MINIMAX_PROVIDER])
+    );
+    assert.equal(env.llm.baseUrl, "https://api.minimax.chat/v1");
+    assert.equal(env.llm.apiKey, "sk-xxx");
+  });
+
+  it("baseUrl 尾斜杠被去掉（与 IKNOW_LLM_BASE_URL 同款 normalize）", () => {
+    process.env.MINIMAX_CN_API_KEY = "sk-xxx";
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithProviders("minimax-cn/MiniMax-M3", [
+        { ...MINIMAX_PROVIDER, baseUrl: "https://api.minimax.chat/v1/" },
+      ])
+    );
+    assert.equal(env.llm.baseUrl, "https://api.minimax.chat/v1");
+  });
+
+  it("hit 时忽略 IKNOW_LLM_BASE_URL（provider baseUrl 胜出）", () => {
+    process.env.MINIMAX_CN_API_KEY = "sk-xxx";
+    process.env.IKNOW_LLM_BASE_URL = "http://localhost:9999/v1";
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithProviders("minimax-cn/MiniMax-M3", [MINIMAX_PROVIDER])
+    );
+    assert.equal(env.llm.baseUrl, "https://api.minimax.chat/v1");
+  });
+
+  it("hit 时忽略 settings.llm.apiKey 字面（provider 声明走 env）", () => {
+    process.env.MINIMAX_CN_API_KEY = "sk-from-provider-env";
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithProviders("minimax-cn/MiniMax-M3", [MINIMAX_PROVIDER], {
+        apiKey: "sk-literal-fallback",
+      })
+    );
+    assert.equal(env.llm.apiKey, "sk-from-provider-env");
+  });
+
+  it("provider 命中且配了 headers → env.llm.headers 原样透传", () => {
+    process.env.MINIMAX_CN_API_KEY = "sk-xxx";
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithProviders("minimax-cn/MiniMax-M3", [
+        { ...MINIMAX_PROVIDER, headers: { "X-Session": "iknow-dev" } },
+      ])
+    );
+    assert.deepEqual(env.llm.headers, { "X-Session": "iknow-dev" });
+  });
+
+  it("provider 命中但无 headers → env.llm.headers 键缺席（不写空对象）", () => {
+    process.env.MINIMAX_CN_API_KEY = "sk-xxx";
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithProviders("minimax-cn/MiniMax-M3", [MINIMAX_PROVIDER])
+    );
+    assert.equal("headers" in env.llm, false);
+  });
+
+  it("model 拆第一个 /：modelId 保留其余 /（a/b/c → provider a）", () => {
+    process.env.PROVIDER_UNSET_KEY = "sk-slash";
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithProviders("volcengine-ark/deep/deeper", [
+        {
+          id: "volcengine-ark",
+          baseUrl: "https://ark.example.com/api/v3",
+          apiKeyEnv: "PROVIDER_UNSET_KEY",
+          models: [{ id: "deep/deeper" }],
+        },
+      ])
+    );
+    assert.equal(env.llm.baseUrl, "https://ark.example.com/api/v3");
+    assert.equal(env.llm.model, "volcengine-ark/deep/deeper");
+  });
+
+  it("model 字段原样保留（含 provider/ 前缀，不改写）", () => {
+    process.env.MINIMAX_CN_API_KEY = "sk-xxx";
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithProviders("minimax-cn/MiniMax-M3", [MINIMAX_PROVIDER])
+    );
+    assert.equal(env.llm.model, "minimax-cn/MiniMax-M3");
+  });
+
+  it("注册表不去重：同 id 两条 → 首条命中生效", () => {
+    process.env.MINIMAX_CN_API_KEY = "sk-xxx";
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithProviders("minimax-cn/MiniMax-M3", [
+        MINIMAX_PROVIDER,
+        {
+          id: "minimax-cn",
+          baseUrl: "https://second.example.com/v1",
+          apiKeyEnv: "MINIMAX_CN_API_KEY",
+          models: [{ id: "MiniMax-M3" }],
+        },
+      ])
+    );
+    assert.equal(env.llm.baseUrl, "https://api.minimax.chat/v1");
+  });
+
+  it("apiKeyEnv 未设 → 抛 typed provider_api_key_missing（不是 Error 实例）", () => {
+    assert.throws(
+      () =>
+        loadIknowEnv(
+          process.cwd(),
+          settingsWithProviders("minimax-cn/MiniMax-M3", [MINIMAX_PROVIDER])
+        ),
+      isLlmProviderConfigError
+    );
+    try {
+      loadIknowEnv(
+        process.cwd(),
+        settingsWithProviders("minimax-cn/MiniMax-M3", [MINIMAX_PROVIDER])
+      );
+      assert.fail("expected loadIknowEnv to throw");
+    } catch (err) {
+      assert.ok(isLlmProviderConfigError(err));
+      // payload 承重字段齐备（否则渲染侧拿不到 provider / env 名）。
+      assert.equal(err.providerId, "minimax-cn");
+      assert.equal(err.apiKeyEnv, "MINIMAX_CN_API_KEY");
+      assert.equal(
+        formatLlmProviderConfigError(err),
+        "provider_api_key_missing: minimax-cn (env MINIMAX_CN_API_KEY unset)"
+      );
+      // plain object 形态：callers 必须走守卫，instanceof Error 会打成 [object Object]。
+      assert.equal(err instanceof Error, false);
+      assert.equal(Object.prototype.toString.call(err), "[object Object]");
+    }
+  });
+
+  it("apiKeyEnv 未设时不回退 settings.llm.apiKey 字面（SC4：不静默降级）", () => {
+    assert.throws(
+      () =>
+        loadIknowEnv(
+          process.cwd(),
+          settingsWithProviders("minimax-cn/MiniMax-M3", [MINIMAX_PROVIDER], {
+            apiKey: "sk-literal-fallback",
+          })
+        ),
+      isLlmProviderConfigError
+    );
+  });
+
+  it("env 值为空串 / 全空白 → 视同未设（抛 typed）", () => {
+    for (const bad of ["", "   "]) {
+      process.env.MINIMAX_CN_API_KEY = bad;
+      assert.throws(
+        () =>
+          loadIknowEnv(
+            process.cwd(),
+            settingsWithProviders("minimax-cn/MiniMax-M3", [MINIMAX_PROVIDER])
+          ),
+        isLlmProviderConfigError,
+        `apiKeyEnv=${JSON.stringify(bad)} 应视同缺席`
+      );
+    }
+  });
+
+  it("apiKey 两侧空白被 trim 后透传（不把空白带进 Authorization）", () => {
+    process.env.MINIMAX_CN_API_KEY = "  sk-padded  ";
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithProviders("minimax-cn/MiniMax-M3", [MINIMAX_PROVIDER])
+    );
+    assert.equal(env.llm.apiKey, "sk-padded");
+  });
+
+  it("apiKeyEnv 是 Object.prototype 自有键（constructor）→ typed 抛（不 TypeError）", () => {
+    // process.env.constructor 命中 Object.prototype → 函数而非 string；
+    // 若不收窄会 raw.trim is not a function（M2 同族原型注入）。
+    assert.throws(
+      () =>
+        loadIknowEnv(
+          process.cwd(),
+          settingsWithProviders("p-proto/m1", [
+            {
+              id: "p-proto",
+              baseUrl: "https://p-proto.example.com/v1",
+              apiKeyEnv: "constructor",
+              models: [{ id: "m1" }],
+            },
+          ])
+        ),
+      isLlmProviderConfigError
+    );
+  });
+
+  it("未命中注册表 → 回退 IKNOW_LLM_BASE_URL + settings.llm.apiKey（back-compat）", () => {
+    process.env.IKNOW_LLM_BASE_URL = "https://fallback.example.com/v1/";
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithProviders("unknown-provider/some-model", [MINIMAX_PROVIDER], {
+        apiKey: "sk-fallback",
+      })
+    );
+    assert.equal(env.llm.baseUrl, "https://fallback.example.com/v1");
+    assert.equal(env.llm.apiKey, "sk-fallback");
+    assert.equal("headers" in env.llm, false);
+  });
+
+  it("model 无 / → 旧路径逐字节一致（baseUrl 默认值 + apiKey 占位符展开）", () => {
+    process.env.IKNOW_TEST_API_KEY = "sk-from-env";
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithProviders("plain-model", [MINIMAX_PROVIDER], {
+        apiKey: "${IKNOW_TEST_API_KEY}",
+      })
+    );
+    assert.equal(env.llm.baseUrl, "http://localhost:20128/v1");
+    assert.equal(env.llm.apiKey, "sk-from-env");
+    assert.equal(env.llm.model, "plain-model");
+    assert.equal("headers" in env.llm, false);
+  });
+
+  it("providers 段缺席 → 旧路径，且 model 含 / 也不查表（SC3）", () => {
+    process.env.IKNOW_LLM_BASE_URL = "https://legacy.example.com/v1";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "minimax-cn/MiniMax-M3", apiKey: "sk-legacy" },
+    });
+    assert.equal(env.llm.baseUrl, "https://legacy.example.com/v1");
+    assert.equal(env.llm.apiKey, "sk-legacy");
+    assert.equal(env.llm.model, "minimax-cn/MiniMax-M3");
+    assert.equal("headers" in env.llm, false);
+  });
+
+  it("providers 空数组 → 旧路径（空数组 ≡ 段缺席）", () => {
+    process.env.IKNOW_LLM_BASE_URL = "https://legacy.example.com/v1";
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithProviders("minimax-cn/MiniMax-M3", [], {
+        apiKey: "sk-legacy",
+      })
+    );
+    assert.equal(env.llm.baseUrl, "https://legacy.example.com/v1");
+    assert.equal(env.llm.apiKey, "sk-legacy");
+  });
+
+  it("边界：空 providerId / 空 modelId 一律按未命中走旧路径（不抛错）", () => {
+    process.env.IKNOW_LLM_BASE_URL = "https://legacy.example.com/v1";
+    // 注：model 是字面来源（loader 只 trim 首尾，不改写内容），故
+    // "minimax-cn/   " 落库仍是 "minimax-cn/" —— 尾随空白在 model 层被 trim，
+    // provider 拆分看到的是已 trim 串（modelId 为空 → 未命中）。
+    for (const [model, expectedModel] of [
+      ["/MiniMax-M3", "/MiniMax-M3"],
+      ["minimax-cn/", "minimax-cn/"],
+      ["minimax-cn/   ", "minimax-cn/"],
+    ] as const) {
+      const env = loadIknowEnv(
+        process.cwd(),
+        settingsWithProviders(model, [MINIMAX_PROVIDER], {
+          apiKey: "sk-legacy",
+        })
+      );
+      assert.equal(
+        env.llm.baseUrl,
+        "https://legacy.example.com/v1",
+        `model=${JSON.stringify(model)} 应走旧路径`
+      );
+      assert.equal(env.llm.apiKey, "sk-legacy");
+      assert.equal(env.llm.model, expectedModel);
+    }
+  });
+
+  it("边界：model 为 / 单个字符 → 两段均空 → 旧路径（不抛 typed）", () => {
+    process.env.IKNOW_LLM_BASE_URL = "https://legacy.example.com/v1";
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithProviders("/", [MINIMAX_PROVIDER], { apiKey: "sk-legacy" })
+    );
+    assert.equal(env.llm.baseUrl, "https://legacy.example.com/v1");
+    assert.equal(env.llm.model, "/");
+  });
+
+  it("边界：providerId 两侧空白被 trim 后仍能命中", () => {
+    process.env.MINIMAX_CN_API_KEY = "sk-xxx";
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithProviders("  minimax-cn / MiniMax-M3", [MINIMAX_PROVIDER])
+    );
+    assert.equal(env.llm.baseUrl, "https://api.minimax.chat/v1");
+    assert.equal(env.llm.model, "minimax-cn / MiniMax-M3");
+  });
+
+  it("只读 process.env：.env 文件里的同名 key 不参与 provider 解析（抛 typed）", async () => {
+    const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-provider-env-only-"));
+    await writeFile(
+      join(tmpCwd, ".env.local"),
+      "PROVIDER_DOTENV_ONLY_KEY=sk-from-dotenv\n"
+    );
+    try {
+      assert.throws(
+        () =>
+          loadIknowEnv(
+            tmpCwd,
+            settingsWithProviders("p1/m1", [
+              {
+                id: "p1",
+                baseUrl: "https://p1.example.com/v1",
+                apiKeyEnv: "PROVIDER_DOTENV_ONLY_KEY",
+                models: [{ id: "m1" }],
+              },
+            ])
+          ),
+        isLlmProviderConfigError
+      );
+    } finally {
+      await rm(tmpCwd, { recursive: true, force: true });
+    }
+  });
+
+  it("isLlmProviderConfigError 负例：Error / null / kind 或 payload 缺字段均不命中", () => {
+    assert.equal(isLlmProviderConfigError(new Error("boom")), false);
+    assert.equal(isLlmProviderConfigError(null), false);
+    assert.equal(isLlmProviderConfigError(undefined), false);
+    assert.equal(isLlmProviderConfigError("x"), false);
+    assert.equal(isLlmProviderConfigError({ kind: "other" }), false);
+    assert.equal(
+      isLlmProviderConfigError({
+        kind: "provider_api_key_missing",
+        providerId: "p1",
+      }),
+      false
+    );
+    assert.equal(
+      isLlmProviderConfigError({
+        kind: "provider_api_key_missing",
+        providerId: "p1",
+        apiKeyEnv: "K",
+      }),
+      true
+    );
+  });
+
+  it("formatLlmProviderConfigError 只出 provider id 与 env 名，不带任何 key 值", () => {
+    process.env.MINIMAX_CN_API_KEY = "sk-super-secret";
+    const text = formatLlmProviderConfigError({
+      kind: "provider_api_key_missing",
+      providerId: "minimax-cn",
+      apiKeyEnv: "MINIMAX_CN_API_KEY",
+    });
+    assert.equal(text.includes("sk-super-secret"), false);
+    assert.equal(text.includes("MINIMAX_CN_API_KEY"), true);
+    assert.equal(text.includes("minimax-cn"), true);
   });
 });

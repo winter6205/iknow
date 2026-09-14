@@ -64,7 +64,11 @@ import { createFsModeContext } from "../harness/sandbox/fs-mode.js";
 import { createTuiWorktreeIsolationHost } from "./worktree-host.js";
 import { resolveVerifyConfig } from "../session-api/serve.js";
 import { createEnvLoader, type EnvLoader } from "../config/env-loader.js";
-import type { IknowEnv } from "../config/env.js";
+import {
+  formatLlmProviderConfigError,
+  isLlmProviderConfigError,
+  type IknowEnv,
+} from "../config/env.js";
 import {
   WORKSPACE_ROOT_ENV_KEY,
   resolveWorkspaceRoot,
@@ -72,6 +76,7 @@ import {
 import {
   persistFsModeChanges,
   persistMemoryChanges,
+  persistModelChanges,
   persistThinkingChanges,
   resolveThinkingSettingsPath,
 } from "../config/persist-settings.js";
@@ -295,6 +300,46 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         // app.tsx 的 onPersistFsMode 契约是 Promise<void>（失败由调用方
         // 以 notice 呈现）；这里把错误重新抛出，让 app 的 catch 兜底。
         throw err instanceof Error ? err : new Error(String(err));
+      }
+    };
+
+    // /model 面板 Enter 的持久化（ADR-0093 / spec SC5 + SC10）。与 thinking /
+    // memory 的差异：**必须显式刷新 env 并重建 adapter** —— 模型是下一轮
+    // 装配参数，写文件本身不会让 adapter 换模型。链路：
+    //   1) persistModelChanges 原子写 <home>/.iknow/settings.json；
+    //   2) markSelfWrite 登记内容哈希 → 自身写回触发的 watcher 事件被吞
+    //      （否则会和下面的显式 reload 抢一次 reload）；
+    //   3) activeEnvLoader.reload()：EnvLoader.get() 有缓存，`get()` 拿到的
+    //      仍是旧 env —— 显式 reload 才把新 model 读进缓存；
+    //   4) bridge.hub.reloadFromEnv()：hub 经 envProvider = () => get() 取这份
+    //      新 env 重建 adapter（T4 既有通路），并在成功后触发 onEnvChange →
+    //      envVersion++ → TUI 显示层同步（ContextBar / /info 的 Model 行）。
+    // 任一步失败 → { ok:false, reason }，由 app 以 notice 呈现，不 crash TUI。
+    const persistModel: NonNullable<TuiAppProps["onPersistModel"]> = async (
+      patch
+    ) => {
+      try {
+        // 同 persistThinking：model 亦用户层键 → 恒写 <home>/.iknow/settings.json。
+        const path = resolveThinkingSettingsPath({
+          home: homedir(),
+        });
+        const { bytes } = await persistModelChanges(path, patch);
+        activeEnvLoader.markSelfWrite(path, bytes);
+        activeEnvLoader.reload();
+        await bridge.hub.reloadFromEnv();
+        return { ok: true as const };
+      } catch (err) {
+        // typed **plain object**（provider_api_key_missing）不是 Error：先按
+        // 判别联合识别，否则 String(err) 打成 [object Object]（code-quality.md
+        // typed-error catch 契约）。
+        return {
+          ok: false as const,
+          reason: isLlmProviderConfigError(err)
+            ? formatLlmProviderConfigError(err)
+            : err instanceof Error
+              ? err.message
+              : String(err),
+        };
       }
     };
 
@@ -588,6 +633,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           // settings.json（失败以 notice 呈现，不 crash TUI）。
           onPersistThinking={persistThinking}
           onPersistMemory={persistMemory}
+          // /model 面板（ADR-0093 / spec SC8）：providers 取**同一启动 settings
+          // 对象**（不重读 settings 文件，与 graph / verify 同纪律）；注册表
+          // 为空 → app 层 /model 走 notice 不打开面板。
+          providers={startupSettings.llm?.providers ?? []}
+          onPersistModel={persistModel}
           defaultMemory={loadIknowSettings().memory}
           memoryFlags={memoryFlags}
           invalidateMemorySystem={invalidateMemorySystem}

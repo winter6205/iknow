@@ -278,9 +278,10 @@ export function parseGoalCommand(text: string): string | null {
  *
  * EnvLoader.get() 每次 reload 都返回**新对象**（loadIknowEnv 每次全新构造），
  * 对象身份比较不可用。判定「settings 文件 touch 但内容没变」必须以字段值比较：
- * 全部 createAdapterFromEnv 入参：model / apiKey / baseUrl / maxOutputTokens /
- * temperature / stream + thinking 控制器 thinking / thinkingEffort。fallback
- * 与 adapter 无关但反映配置变更，也纳入比较（数组逐元素、顺序敏感）。
+ * 全部 createAdapterFromEnv 入参：model / apiKey / baseUrl / headers /
+ * maxOutputTokens / temperature / stream + thinking 控制器 thinking /
+ * thinkingEffort。fallback 与 adapter 无关但反映配置变更，也纳入比较
+ * （数组逐元素、顺序敏感）。
  */
 function sameHotReloadKeyFields(a: LlmEnv, b: LlmEnv): boolean {
   if (a.model !== b.model) return false;
@@ -291,11 +292,33 @@ function sameHotReloadKeyFields(a: LlmEnv, b: LlmEnv): boolean {
   if (a.stream !== b.stream) return false;
   if (a.thinking !== b.thinking) return false;
   if (a.thinkingEffort !== b.thinkingEffort) return false;
-  if (a.fallback.length !== b.fallback.length) return false;
-  for (let i = 0; i < a.fallback.length; i++) {
-    if (a.fallback[i] !== b.fallback[i]) return false;
-  }
-  return true;
+  if (!sameHotReloadHeaders(a.headers, b.headers)) return false;
+  return sameStringArray(a.fallback, b.fallback);
+}
+
+/**
+ * headers 逐键比较（两轴 review Medium：headers 已是 createAdapterFromEnv
+ * 入参，漏比较会让「只改 provider.headers」被判成 touch 未变内容 → adapter
+ * 不重建 → 新头不上 wire）。
+ *
+ * 缺席 ⇔ 无键（env 层保证「有值才有该键」，见 LlmEnv.headers 注释），故
+ * `undefined` 与 `undefined` 相等、`undefined` 与任何映射不等；键集合与每个
+ * 键的值都比较（顺序无关）。
+ */
+function sameHotReloadHeaders(
+  a: Readonly<Record<string, string>> | undefined,
+  b: Readonly<Record<string, string>> | undefined
+): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  const aKeys = Object.keys(a);
+  if (aKeys.length !== Object.keys(b).length) return false;
+  return aKeys.every((key) => a[key] === b[key]);
+}
+
+/** 字符串数组逐元素、顺序敏感比较（fallback 与 headers 同一判定形态）。 */
+function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((value, i) => value === b[i]);
 }
 
 // -- error mapping (裁决#10: pure function, http.ts T5 consumes) ---------------
@@ -1227,6 +1250,22 @@ export class SessionHub {
   }
 
   /**
+   * SC10 / spec tui-model-command：per-turn thinking override 重建 adapter 时
+   * 用的 env —— **最新值优先**。
+   *
+   * `overrideEnv` 是 bridge 构造期的启动快照（run.tsx 透传），一次赋值后再不
+   * 刷新；`/model` 切换只经 `envProvider`（EnvLoader.get）反映。override 分支
+   * 用快照会让带 thinking 的轮次悄悄退回切换前的 baseUrl/apiKey/model
+   * （headers 同理），与「新 turn 走新 provider/model」的验收相悖。
+   * envProvider 缺席（只传 overrideEnv 的测试缝）→ 保持快照语义。
+   *
+   * 只在 override 分支被调用：无 thinking 的轮次不因本方法多读一次 env。
+   */
+  private overrideEnvForTurn(): { readonly llm: LlmEnv } | undefined {
+    return this.envProvider ? this.envProvider() : this.overrideEnv;
+  }
+
+  /**
    * settings-hot-reload（T3）:env 源热重建 —— 用最新 env（envProvider()）走
    * createAdapterFromEnv 重建 adapter 替换 `cachedDeps.adapter`。**不重跑**
    * buildHarnessEngine 整条装配链（MCP / subagent / skill 都跳过，见
@@ -1523,12 +1562,14 @@ export class SessionHub {
         // T2: per-turn override — rebuild deps with a one-shot adapter only;
         // executor / registry / maxTurns / timeoutMs are reused from the
         // cached deps. When absent, the cached path is unchanged.
+        // SC10：override 分支经 overrideEnvForTurn 取**最新** env（切换后的
+        // provider/model 下一轮生效；构造期快照只作 envProvider 缺席时的缝）。
         const deps =
           opts.thinking !== undefined
             ? withThinkingOverride({
                 deps: baseDeps,
                 override: opts.thinking,
-                env: this.overrideEnv,
+                env: this.overrideEnvForTurn(),
               })
             : baseDeps;
         // #622 T5: 懒提交 user query。engine 自己不 commit query（只 commit

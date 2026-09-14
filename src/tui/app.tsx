@@ -70,6 +70,7 @@ import {
   permissionModalRows,
   reduceModalKey,
   wrapModalLines,
+  type ModalKeyEvent,
   type PermissionAnswer,
 } from "./modal.js";
 import { abortForegroundTurnOnQuit } from "./quit-abort.js";
@@ -146,6 +147,14 @@ import {
   seedMemoryPreview,
   type CommittedMemoryPatch,
 } from "./memory-picker.js";
+import {
+  ModelPicker,
+  modelPickerRows,
+  modelRouteId,
+  reduceModelPickerKey,
+  type ModelPickerEntry,
+  type ModelPickerState,
+} from "./model-picker.js";
 import { computeThinkingOverride, formatEffortLabel } from "./thinking-gate.js";
 import {
   continueExitFromError,
@@ -266,6 +275,8 @@ import {
 } from "../harness/sandbox/fs-mode.js";
 import { buildSkillLoadText, createSkillBody } from "../harness/skill/body.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
+import type { IknowSettingsLlmProvider } from "../config/settings.js";
+import { isLlmProviderConfigError } from "../config/env.js";
 import type { LiveTaskRoot } from "../harness/session-roots.js";
 import {
   createSubagentWake,
@@ -428,6 +439,174 @@ function zeroDefaultRows(rows: ReadonlyArray<number | undefined>): number {
   let total = 0;
   for (const n of rows) total += n ?? 0;
   return total;
+}
+
+/**
+ * /model 面板条目投影（纯函数）：provider 注册表 → 扁平 `provider × models`
+ * 条目列表（面板每项一行的 SSOT）。注册表为空 / 缺席 → 空数组（调用方据此走
+ * notice，不打开面板）。抽出为模块级函数而非 TuiApp 内联，避免给组件增分支。
+ */
+export function modelPickerEntries(
+  providers: ReadonlyArray<IknowSettingsLlmProvider> | undefined
+): ReadonlyArray<ModelPickerEntry> {
+  const out: ModelPickerEntry[] = [];
+  for (const provider of providers ?? []) {
+    for (const model of provider.models) {
+      out.push({
+        providerId: provider.id,
+        modelId: model.id,
+        ...(model.name !== undefined ? { label: model.name } : {}),
+      });
+    }
+  }
+  return out;
+}
+
+/** 当前 model 串在条目列表中的下标（找不到 / 空列表 → 0）。 */
+export function modelFocusIndexFor(
+  entries: ReadonlyArray<ModelPickerEntry>,
+  model: string | undefined
+): number {
+  const idx = entries.findIndex((e) => modelRouteId(e) === model);
+  return idx === -1 ? 0 : idx;
+}
+
+/**
+ * picker 行账（chrome 预算槽）：非 chat 视图 / 面板未开 → 0；打开 → 按当前
+ * 注册表条目数取 `modelPickerRows`。三元从 TuiApp 内联折进 helper，新增面板
+ * 只加一行调用、不给组件加分支（与 `modelPickerEntries` 同款动机）。
+ * **不含 marginBottom=1**（由 chromeReserveRows 的 +1 入账，见 modelPickerRows）。
+ */
+export function modelPickerRowsFor(
+  open: boolean,
+  view: TuiView,
+  providers: ReadonlyArray<IknowSettingsLlmProvider> | undefined
+): number {
+  if (!open || view !== "chat") return 0;
+  return modelPickerRows(modelPickerEntries(providers).length);
+}
+
+/**
+ * 面板渲染态（`ModelPickerState | null`）：非 chat / 未打开 → null（组件不
+ * 渲染）。构造与判别折进 helper，避免组件内联三元+对象字面量各占一个分支。
+ */
+export function modelPickerStateFor(
+  open: boolean,
+  view: TuiView,
+  providers: ReadonlyArray<IknowSettingsLlmProvider> | undefined,
+  focusedIndex: number
+): ModelPickerState | null {
+  if (!open || view !== "chat") return null;
+  return { entries: modelPickerEntries(providers), focusedIndex };
+}
+
+/**
+ * 输入框占位符的 picker 文案（判别顺序 = 面板互斥优先级：回退 > model >
+ * memory > thinking）。任一 picker 打开 → 对应键位提示，否则 undefined（调用
+ * 方落回默认文案 / ask 分支）。文案链折进本函数，组件只做取值（S5：分支体在
+ * helper 内；文案 SSOT 在此，测试断言的中文串不散落在 JSX）。
+ */
+export function pickerPlaceholderFor(opts: {
+  readonly rewindOpen: boolean;
+  readonly modelPickerOpen: boolean;
+  readonly memoryPickerOpen: boolean;
+  readonly thinkingPickerOpen: null | "thinking" | "effort";
+}): string | undefined {
+  if (opts.rewindOpen) {
+    return "回退选择器中（↑↓ 选择 · Enter 确认 · Esc 关闭）";
+  }
+  if (opts.modelPickerOpen) {
+    return "模型选择中（↑↓ 选择 · Enter 切换 · Esc 关闭）";
+  }
+  if (opts.memoryPickerOpen) {
+    return "记忆开关中（↑↓ 选择 · Space 切换 · Enter 固定 · Esc 保存退出）";
+  }
+  if (opts.thinkingPickerOpen === "thinking") {
+    return "思考开关中（Space 切换 · Enter 固定 · Esc 保存退出）";
+  }
+  if (opts.thinkingPickerOpen === "effort") {
+    return "思考强度中（←/→ 选档 · Tab 自动 · Enter 固定 · Esc 保存退出）";
+  }
+  return undefined;
+}
+
+/**
+ * /help 的 skill 名入参：有 skill → 名字列表，无 → undefined（`helpLines`
+ * 据此整段退场，不渲染空 skills 段）。判空折进 helper，`case "help"` 只留
+ * 一行（S5：分支体在 helper 内）。
+ */
+export function skillNamesForHelp(
+  skillList: ReadonlyArray<{ readonly name: string }>
+): ReadonlyArray<string> | undefined {
+  if (skillList.length === 0) return undefined;
+  return skillList.map((entry) => entry.name);
+}
+
+/** /model 注册表为空时的 typed notice（测试断言的中文串 SSOT）。 */
+export const MODEL_PICKER_EMPTY_NOTICE =
+  "未配置 providers —— 在 ~/.iknow/settings.json 的 llm.providers 里登记（含 id / baseUrl / apiKeyEnv / models）。";
+
+/**
+ * /model 命令的落地：注册表空 / 缺席 → 走 onEmpty（typed notice，**不打开
+ * 面板**）；非空 → onOpen(焦点初值 = 当前 model 对应条目，找不到 → 0)，调用
+ * 方在 onOpen 内完成面板互斥（收起 thinking / memory）。判定从 handleSubmit
+ * 的 case 分支体折进本函数，case 只留一行派发（S5：分支体在 helper 内）。
+ */
+export function openModelPickerCommand(opts: {
+  readonly providers: ReadonlyArray<IknowSettingsLlmProvider> | undefined;
+  readonly model: string | undefined;
+  readonly onEmpty: (lines: ReadonlyArray<string>) => void;
+  readonly onOpen: (focusIndex: number) => void;
+}): void {
+  const entries = modelPickerEntries(opts.providers);
+  if (entries.length === 0) {
+    opts.onEmpty([MODEL_PICKER_EMPTY_NOTICE]);
+    return;
+  }
+  opts.onOpen(modelFocusIndexFor(entries, opts.model));
+}
+
+/**
+ * /model 面板的键位落地（宿主 useKeyboard 的 `if (modelPickerOpen)` 分支体）。
+ * 纯路由在 `reduceModelPickerKey`，本函数只把 action 接到回调上，保留面板
+ * 交互语义（spec SC8）：
+ *  - move → onMove（面板保持打开）；
+ *  - fix（Enter）→ onSelect(路由 ID) + onClose（选定 + 持久化 + 关闭）；
+ *  - commit（Esc）→ 仅 onClose（**不持久化**）；焦点移动不产生 staged 状态，
+ *    故无回滚 —— 详见 model-picker.tsx 的 cancel 语义说明；
+ *  - ignore → no-op。
+ * 焦点条目缺失（条目被重载清空）仍关闭，与内联版本同语义。
+ */
+export function applyModelPickerKey(
+  event: ModalKeyEvent,
+  opts: {
+    readonly entries: ReadonlyArray<ModelPickerEntry>;
+    readonly focusedIndex: number;
+    readonly onMove: (index: number) => void;
+    readonly onSelect: (routeId: string) => void;
+    readonly onClose: () => void;
+  }
+): void {
+  const action = reduceModelPickerKey(event, {
+    focusedIndex: opts.focusedIndex,
+    entryCount: opts.entries.length,
+  });
+  switch (action.kind) {
+    case "move":
+      opts.onMove(action.index);
+      break;
+    case "fix": {
+      const chosen = opts.entries[opts.focusedIndex];
+      if (chosen !== undefined) opts.onSelect(modelRouteId(chosen));
+      opts.onClose();
+      break;
+    }
+    case "commit":
+      opts.onClose();
+      break;
+    case "ignore":
+      break;
+  }
 }
 
 /**
@@ -713,6 +892,23 @@ export interface TuiAppProps {
    * 下一轮生效。缺省（测试 / 旧宿主）→ 不调用。
    */
   readonly invalidateMemorySystem?: () => void;
+  /**
+   * ADR-0093 / specs/tui-model-command.md：provider 注册表（settings
+   * `llm.providers` 的启动快照）。`/model` 面板的数据源 —— 展开为
+   * provider × models 的扁平条目。缺省 / 空数组 → `/model` 走 notice
+   * 「未配置 providers」，不打开面板（测试 / fixture 兼容，行为与今日一致）。
+   */
+  readonly providers?: ReadonlyArray<IknowSettingsLlmProvider>;
+  /**
+   * ADR-0093 / spec SC5：`/model` 面板 Enter 选定后的持久化通道。宿主写回
+   * settings.json 后必须**显式刷新 env 并重建 adapter**（self-write 哨兵会吞掉
+   * 自身写回触发的 watcher 事件，故 reloadFromEnv 不会被自动触发）。返回
+   * `{ ok: false; reason }` 或抛错 → app 以 notice 呈现；成功不发 notice
+   * （写回是后台行为）。缺省 undefined → 选定后只关闭面板（纯 UI，测试兼容）。
+   */
+  readonly onPersistModel?: (patch: {
+    readonly model: string;
+  }) => Promise<{ ok: true } | { ok: false; reason: string }>;
 }
 
 interface Notice {
@@ -856,6 +1052,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   );
   const [memoryPickerOpen, setMemoryPickerOpen] = useState(false);
   const [memoryFocusIndex, setMemoryFocusIndex] = useState<0 | 1>(0);
+  // /model 面板（spec SC8）：open = 面板可见；focusIndex = 焦点条目下标（面板内
+  // 唯一的暂存态）。**焦点移动不产生 staged 状态** —— 没有「未提交的模型选择」
+  // 这种东西（唯一的写操作是 Enter），故 Esc 既非保存退出也非放弃修改，见
+  // model-picker.tsx 的 cancel 语义说明。
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [modelFocusIndex, setModelFocusIndex] = useState(0);
   const [memoryCommitted, setMemoryCommitted] = useState(() =>
     seedMemoryPreview(props.defaultMemory)
   );
@@ -1541,6 +1743,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     setRewindIndex(0);
     setThinkingPickerOpen(null);
     setMemoryPickerOpen(false);
+    setModelPickerOpen(false);
   }
   async function openSessionAt(index: number): Promise<void> {
     if (index === 0) {
@@ -1590,6 +1793,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     setRewindIndex(0);
     setThinkingPickerOpen(null);
     setMemoryPickerOpen(false);
+    setModelPickerOpen(false);
   }
 
   // ── turn 发送 ───────────────────────────────────────────────────
@@ -2319,20 +2523,20 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         await quit();
         return;
       case "help":
-        setNotice({
-          lines: helpLines(
-            skillList.length > 0
-              ? skillList.map((entry) => entry.name)
-              : undefined
-          ),
-        });
+        setNotice({ lines: helpLines(skillNamesForHelp(skillList)) });
         return;
       case "info": {
         setNotice({
-          lines: infoLines(active, activeKey, props.bridge.contextWindow, {
-            enabled: thinkingEnabled,
-            effort: thinkingEffort,
-          }),
+          lines: infoLines(
+            active,
+            activeKey,
+            props.bridge.contextWindow,
+            {
+              enabled: thinkingEnabled,
+              effort: thinkingEffort,
+            },
+            modelName
+          ),
         });
         return;
       }
@@ -2390,6 +2594,23 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         setMemoryPreview(memoryCommitted);
         return;
       }
+      case "model":
+        // ADR-0093 / spec SC8：注册表空 / 缺席 → typed notice（不抛错、不打开
+        // picker）；非空 → 打开，焦点初值 = 当前 model 对应条目（找不到 → 0）。
+        // 判定在 openModelPickerCommand 内（S5：case 只做一行派发）。
+        openModelPickerCommand({
+          providers: props.providers,
+          model: modelName,
+          onEmpty: (lines) => setNotice({ lines }),
+          onOpen: (focusIndex) => {
+            // 面板互斥：model picker 打开即收起同族面板（与 /memory 同款）。
+            setThinkingPickerOpen(null);
+            setMemoryPickerOpen(false);
+            setModelFocusIndex(focusIndex);
+            setModelPickerOpen(true);
+          },
+        });
+        return;
       case "compact": {
         if (active.runState !== "idle") {
           setNotice({
@@ -2601,6 +2822,36 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     );
   }
 
+  /**
+   * /model 面板 Enter 选定的持久化接线（spec SC5 + SC10）。与 thinking /
+   * memory 的 fire-and-forget 不同，这里**必须 await 宿主返回**：宿主要在写回
+   * 之后显式刷新 env 并重建 adapter（self-write 哨兵会吞掉自身写回触发的
+   * watcher 事件，reloadFromEnv 不会被自动触发），失败以 notice 呈现。
+   * 面板已先关闭（选定动作已完成，写回是后台行为）。
+   */
+  function persistModelFromCommit(model: string): Promise<void> {
+    const cb = props.onPersistModel;
+    if (cb === undefined) return Promise.resolve();
+    return cb({ model }).then(
+      (res) => {
+        if (!res.ok) {
+          setNotice({
+            lines: [
+              `模型已切换（本次会话），但写回 settings.json 失败：${res.reason}`,
+            ],
+          });
+        }
+      },
+      (err) => {
+        setNotice({
+          lines: [
+            `模型已切换（本次会话），但写回 settings.json 失败：${describeError(err)}`,
+          ],
+        });
+      }
+    );
+  }
+
   // ── 全局键位（Ctrl+C / Shift+Tab / Ctrl+O / modal） ────
   useKeyboard((e) => {
     if (e.eventType !== "press") return;
@@ -2729,8 +2980,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     ) {
       return;
     }
-    // Ctrl+C：打断 running-fg；否则提示。
-    if (e.ctrl && e.name === "c") {
+    // Ctrl+C：打断 running-fg；否则提示。判键复用上方 isCtrlC（同一表达式，
+    // 不重复计一个分支）。
+    if (isCtrlC) {
       // #548:压缩进行中 → 走压缩取消通道(runState 仍 idle,既有
       // canInterrupt 拦不住);return 后不再进 turn/notice 分支。
       if (compactingControllerRef.current !== null) {
@@ -2764,6 +3016,20 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     // 与 /thinking 的开关（thinkingEnabled）解耦。
     if (e.ctrl && e.name === "o") {
       toggleThinkingFold();
+      return;
+    }
+    // /model 面板：活跃时独占键位（与 memory / thinking 面板同款插入点 ——
+    // Ctrl 分支之后）。交互语义（spec SC8：↑/↓ 移焦点、Enter 选定 + 持久化 +
+    // 关闭、Esc 直接关闭**不持久化**）与键路由在 applyModelPickerKey 内
+    // （S5：handler 只做判键 + 派发，分支体在 helper 内）。
+    if (modelPickerOpen) {
+      applyModelPickerKey(modalKeyEventOf(e), {
+        entries: modelPickerEntries(props.providers),
+        focusedIndex: modelFocusIndex,
+        onMove: setModelFocusIndex,
+        onSelect: (routeId) => void persistModelFromCommit(routeId),
+        onClose: () => setModelPickerOpen(false),
+      });
       return;
     }
     if (memoryPickerOpen) {
@@ -2990,12 +3256,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         : 0;
   // design-25 thinking-picker 行账：picker 打开 → thinking 5 行 / effort 7 行
   // + marginBottom 1 并入 chrome 预算（与 modalRows 同款），否则 viewport 高度被挤。
-  const pickerRowsForBudget =
+  const pickerRowsForBudget: number =
     view === "chat" && thinkingPickerOpen !== null
       ? thinkingPickerRows(thinkingPickerOpen)
       : view === "chat" && memoryPickerOpen
         ? memoryPickerRows()
-        : 0;
+        : modelPickerRowsFor(modelPickerOpen, view, props.providers);
   // compact 进度面板:只取 active 会话的条目(与 crunchedOf / verifySlots 同款
   // 归属校验,切走会话不残留别的会话的压缩面板)。
   const activeCompact: CompactProgressState | undefined =
@@ -3014,6 +3280,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             autoOn: effortAutoOn,
           }
       : null;
+  // /model 面板渲染态（与 pickerState 同款判别：open 时构造，否则 null）。
+  const modelState: ModelPickerState | null = modelPickerStateFor(
+    modelPickerOpen,
+    view,
+    props.providers,
+    modelFocusIndex
+  );
   // T9：输入框行账动态化 —— wrap-aware 视觉折行行数（修 2026-08-14 用户反馈
   // 「输入多少都是一行」：长文本无 `\n` 时按 cols 折行计视觉行数）。封顶由
   // chromeReserveRows 内部做（SSOT 防误传）；超出部分 textarea 内部滚动。
@@ -3183,6 +3456,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           }}
         />
       )}
+      {modelState !== null && <ModelPicker state={modelState} />}
       {view === "chat" && (
         <ModalHost
           modal={
@@ -3255,19 +3529,19 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           cols={cols}
           maxLines={MAX_INPUT_LINES}
           placeholder={
-            rewindTargets !== undefined
-              ? "回退选择器中（↑↓ 选择 · Enter 确认 · Esc 关闭）"
-              : memoryPickerOpen
-                ? "记忆开关中（↑↓ 选择 · Space 切换 · Enter 固定 · Esc 保存退出）"
-                : thinkingPickerOpen === "thinking"
-                  ? "思考开关中（Space 切换 · Enter 固定 · Esc 保存退出）"
-                  : thinkingPickerOpen === "effort"
-                    ? "思考强度中（←/→ 选档 · Tab 自动 · Enter 固定 · Esc 保存退出）"
-                    : askPending
-                      ? askModalActive
-                        ? "modal 键位接管中（Esc 退回输入）"
-                        : "y/a/n 确认工具授权（a=总是允许）"
-                      : "输入消息或 /help"
+            // picker 文案（含 /model）折进 pickerPlaceholderFor；未开面板 →
+            // undefined，落回 ask / 默认文案（S5：分支体在 helper 内）。
+            pickerPlaceholderFor({
+              rewindOpen: rewindTargets !== undefined,
+              modelPickerOpen,
+              memoryPickerOpen,
+              thinkingPickerOpen,
+            }) ??
+            (askPending
+              ? askModalActive
+                ? "modal 键位接管中（Esc 退回输入）"
+                : "y/a/n 确认工具授权（a=总是允许）"
+              : "输入消息或 /help")
           }
           active={active.runState === "running-fg"}
           disabled={
@@ -3275,6 +3549,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             rewindTargets !== undefined ||
             thinkingPickerOpen !== null ||
             memoryPickerOpen ||
+            modelPickerOpen ||
             // plans T7：input 失活条件由 chrome-focus 三态 reducer 接管
             // —— focus 在 subagent 或 graph 时禁用输入框。
             chromeFocus.kind !== "input" ||
@@ -3414,11 +3689,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   );
 }
 
-function infoLines(
+export function infoLines(
   session: TuiSessionState,
   key: string,
   contextWindow: number,
-  thinking: { readonly enabled: boolean; readonly effort: ThinkingEffortWire }
+  thinking: { readonly enabled: boolean; readonly effort: ThinkingEffortWire },
+  /** 当前模型串（spec SC11：`Model: <provider>/<model>`）。**原样**透出：
+   *  无 providers 段时也走同一行，不伪造 provider 前缀。 */
+  model: string | undefined
 ): ReadonlyArray<string> {
   const lu = session.lastUsage;
   const tokenLines =
@@ -3435,6 +3713,9 @@ function infoLines(
   const thinkingLine = thinking.enabled
     ? `thinking: adaptive (${formatEffortLabel(thinking.effort)})`
     : "thinking: off";
+  // spec SC11：`Model: <provider>/<model>` 一行。model 未接线（props.model 缺省）
+  // → 整行退场，不渲染 `Model: undefined`。
+  const modelLine = model !== undefined ? [`Model: ${model}`] : [];
   return [
     `conversation_id: ${session.conversationId ?? key}（${
       session.conversationId ? "已建档" : "draft，首条消息后建档"
@@ -3445,6 +3726,7 @@ function infoLines(
     `runState: ${session.runState}`,
     ...tokenLines,
     thinkingLine,
+    ...modelLine,
   ];
 }
 
@@ -3458,6 +3740,13 @@ export function bgStatusLine(
 }
 
 function describeError(err: unknown): string {
+  // ADR-0093 / specs/tui-model-command.md SC4：provider 命中但 apiKeyEnv 未设
+  // 是 typed **plain object**（非 Error）。必须先按判别联合识别，否则
+  // `String(err)` 会打成 `[object Object]`，kind / providerId / apiKeyEnv 全
+  // 不可见（code-quality.md typed-error catch 契约）。
+  if (isLlmProviderConfigError(err)) {
+    return `provider ${err.providerId} 的密钥环境变量 ${err.apiKeyEnv} 未设置`;
+  }
   if (typeof err === "object" && err !== null && "kind" in err) {
     const kind = String((err as { kind: unknown }).kind);
     return `会话存储错误 [${kind}]`;

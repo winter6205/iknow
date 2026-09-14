@@ -21,6 +21,11 @@
  *    （分别用真实 fs 错误 EISDIR 与 JSON.parse spy 注入）。
  * 14. T3 acceptance #2：并行双写 → atomic rename 保证最终文件可 parse 且
  *     thinking ∈ 两个 patch 之一（NOT merge disaster），保留字段全在。
+ * 15. /model（specs/tui-model-command.md SC5 / SC6）：mergeModelPatch 值域门禁
+ *     （非字符串 / 空串 / 无斜杠 / 段空 / 未知 provider → TypeError）、只改
+ *     `llm.model` 且 providers 等字段原样、跨 provider 往返、与 thinking patch
+ *     共存、raw 缺 llm 段 / llm 非对象起点、persistModelChanges 原子写 +
+ *     bytes sha256 稳定、非法 patch 不落盘。
  *
  * 纪律：
  *  - mkdtempSync + afterAll rmSync（tmp 隔离，绝不碰真实 ~/.iknow）；
@@ -44,9 +49,11 @@ import { dirname, join } from "node:path";
 import {
   hashSettingsContent,
   mergeMemoryPatch,
+  mergeModelPatch,
   mergeThinkingPatch,
   mergeFsModePatch,
   persistMemoryChanges,
+  persistModelChanges,
   persistThinkingChanges,
   persistFsModeChanges,
   resolveThinkingSettingsPath,
@@ -629,5 +636,269 @@ describe("persistFsModeChanges（原子写）", () => {
       isolation: { fsMode: "workspace" },
     });
     expectAtomicWrite(file);
+  });
+});
+
+/** T4: 含 volcengine-ark / minimax-cn 两 provider 的 raw settings（spec 例模板形状）。 */
+function rawWithProviders(): Record<string, unknown> {
+  return {
+    llm: {
+      model: "minimax-cn/MiniMax-M3",
+      apiKey: "${ANTHROPIC_AUTH_TOKEN}",
+      thinking: "adaptive",
+      fallback: ["minimax-cn/MiniMax-M3"],
+      compress: { contextWindow: 200_000, thresholdTokens: 150_000 },
+      providers: [
+        {
+          id: "volcengine-ark",
+          baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+          apiKeyEnv: "VOLCENGINE_ARK_API_KEY",
+          models: [{ id: "deepseek-v3-250324", name: "DeepSeek V3" }],
+        },
+        {
+          id: "minimax-cn",
+          baseUrl: "https://api.minimax.chat/v1",
+          apiKeyEnv: "MINIMAX_CN_API_KEY",
+          headers: { "X-Session": "iknow-dev" },
+          models: [{ id: "MiniMax-M3", name: "MiniMax-M3" }],
+        },
+      ],
+    },
+    isolation: { worktreeOnMutate: true },
+    permissions: { defaultMode: "ask" },
+    memory: { autoExtract: true },
+    secrets: { enabled: true, patterns: ["token"] },
+  };
+}
+
+/** raw.llm.providers 注册表（断言复用，避免硬编码副本漂移）。 */
+function providersOf(raw: Record<string, unknown>): unknown {
+  return (raw.llm as Record<string, unknown>).providers;
+}
+
+describe("mergeModelPatch（纯函数：/model 切换，SC5 只改 llm.model）", () => {
+  test("有效切换：只改 llm.model；providers / apiKey / thinking / isolation / permissions / memory 原样", () => {
+    const raw = rawWithProviders();
+    const merged = mergeModelPatch(raw, {
+      model: "volcengine-ark/deepseek-v3-250324",
+    });
+    const expected = rawWithProviders();
+    (expected.llm as Record<string, unknown>).model =
+      "volcengine-ark/deepseek-v3-250324";
+    // 整个 merged 与「raw 仅换 model」深度相等 —— 无任何其它 delta。
+    expect(merged).toEqual(expected);
+    // providers 注册表整段保留（不裁剪成只剩被选 provider）。
+    expect((merged.llm as Record<string, unknown>).providers).toEqual(
+      providersOf(raw)
+    );
+    // 纯函数：raw 未被就地修改。
+    expect((raw.llm as Record<string, unknown>).model).toBe(
+      "minimax-cn/MiniMax-M3"
+    );
+  });
+
+  test('trim / 第一个 "/" 语义：外层空白被 trim，model 段允许再含 "/"', () => {
+    const raw = {
+      llm: {
+        model: "old",
+        providers: [
+          {
+            id: "p",
+            baseUrl: "https://x",
+            apiKeyEnv: "K",
+            models: [{ id: "m" }],
+          },
+        ],
+      },
+    };
+    const merged = mergeModelPatch(raw, { model: "  p/m/n  " });
+    expect((merged.llm as Record<string, unknown>).model).toBe("p/m/n");
+  });
+
+  test("非法值防御：非字符串 / 空串 / 纯空白 → TypeError，消息含非法值与期望形态", () => {
+    const raw = rawWithProviders();
+    for (const bad of [undefined, 42, null, "", "   "] as never[]) {
+      expect(() => mergeModelPatch(raw, { model: bad })).toThrow(TypeError);
+    }
+    expect(() => mergeModelPatch(raw, { model: "   " })).toThrowError(
+      /illegal model patch value/
+    );
+    expect(() => mergeModelPatch(raw, { model: "   " })).toThrowError(
+      /expected "<provider>\/<model>"/
+    );
+  });
+
+  test('无斜杠 / provider 段空 / model 段空 → TypeError（含 "/foo" 与 "foo/"）', () => {
+    const raw = rawWithProviders();
+    for (const bad of [
+      "no-slash",
+      "/foo",
+      "minimax-cn/",
+      " / ",
+      "minimax-cn",
+    ]) {
+      expect(() => mergeModelPatch(raw, { model: bad })).toThrow(TypeError);
+      expect(() => mergeModelPatch(raw, { model: bad })).toThrowError(
+        /illegal model patch value/
+      );
+    }
+  });
+
+  test("未知 provider（SC6）：注册表未命中 → TypeError；providers 缺失 / 非数组 / 项 id 非法同样不登记", () => {
+    expect(() =>
+      mergeModelPatch(rawWithProviders(), { model: "unknown/foo" })
+    ).toThrow(TypeError);
+    expect(() =>
+      mergeModelPatch(rawWithProviders(), { model: "unknown/foo" })
+    ).toThrowError(/unknown provider/);
+    // 注册表缺席 / 非数组 / 项 id 非字符串 → 该 provider 不构成合法目标。
+    expect(() =>
+      mergeModelPatch({ llm: { model: "p/m" } }, { model: "p/m" })
+    ).toThrow(TypeError);
+    expect(() =>
+      mergeModelPatch({ llm: { providers: "nope" } }, { model: "p/m" })
+    ).toThrow(TypeError);
+    expect(() =>
+      mergeModelPatch({ llm: { providers: [{ id: 7 }] } }, { model: "7/m" })
+    ).toThrow(TypeError);
+  });
+
+  test("raw 缺 llm 段 / llm 非对象 → TypeError（无注册表即未知 provider，不静默写入）", () => {
+    expect(() =>
+      mergeModelPatch({}, { model: "minimax-cn/MiniMax-M3" })
+    ).toThrow(TypeError);
+    expect(() =>
+      mergeModelPatch(
+        { llm: "not-an-object" },
+        { model: "minimax-cn/MiniMax-M3" }
+      )
+    ).toThrow(TypeError);
+    expect(() =>
+      mergeModelPatch({ llm: null }, { model: "minimax-cn/MiniMax-M3" })
+    ).toThrowError(/unknown provider/);
+  });
+
+  test("跨 provider 切回原 provider：往返后与原始 raw 深度相等，注册表全程保留", () => {
+    const raw = rawWithProviders();
+    const toArk = mergeModelPatch(raw, {
+      model: "volcengine-ark/deepseek-v3-250324",
+    });
+    expect((toArk.llm as Record<string, unknown>).model).toBe(
+      "volcengine-ark/deepseek-v3-250324"
+    );
+    const back = mergeModelPatch(toArk, { model: "minimax-cn/MiniMax-M3" });
+    expect(back).toEqual(rawWithProviders());
+  });
+
+  test("与既有 thinking patch 共存：先 thinking 后 model，两者互不破坏", () => {
+    const raw = rawWithProviders();
+    const afterThinking = mergeThinkingPatch(raw, {
+      thinking: "off",
+      thinkingEffort: "max",
+    });
+    const afterModel = mergeModelPatch(afterThinking, {
+      model: "volcengine-ark/deepseek-v3-250324",
+    });
+    const llm = afterModel.llm as Record<string, unknown>;
+    expect(llm.thinking).toBe("off");
+    expect(llm.thinkingEffort).toBe("max");
+    expect(llm.model).toBe("volcengine-ark/deepseek-v3-250324");
+    expect(llm.apiKey).toBe("${ANTHROPIC_AUTH_TOKEN}");
+    expect(llm.providers).toEqual(providersOf(raw));
+    expect(afterModel.isolation).toEqual({ worktreeOnMutate: true });
+    expect(afterModel.permissions).toEqual({ defaultMode: "ask" });
+    expect(afterModel.memory).toEqual({ autoExtract: true });
+    expect(afterModel.secrets).toEqual({ enabled: true, patterns: ["token"] });
+    // 反向顺序（先 model 后 thinking）同样互不破坏。
+    const reverse = mergeThinkingPatch(
+      mergeModelPatch(raw, { model: "volcengine-ark/deepseek-v3-250324" }),
+      { thinking: "off", thinkingEffort: "low" }
+    );
+    const rllm = reverse.llm as Record<string, unknown>;
+    expect(rllm.model).toBe("volcengine-ark/deepseek-v3-250324");
+    expect(rllm.thinking).toBe("off");
+    expect(rllm.thinkingEffort).toBe("low");
+    expect(rllm.providers).toEqual(providersOf(raw));
+  });
+});
+
+describe("persistModelChanges（原子写 + self-write hash，SC5）", () => {
+  test("有效切换落盘：只改 llm.model，返回 path / bytes 且 sha256 与落盘一致", async () => {
+    const base = makeTmpRoot("iknow-persist-model-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    mkdirSync(dirname(file), { recursive: true });
+    const raw = rawWithProviders();
+    writeFileSync(file, JSON.stringify(raw, null, 2));
+    const res = await persistModelChanges(file, {
+      model: "volcengine-ark/deepseek-v3-250324",
+    });
+    expect(res.path).toBe(file);
+    // self-write 哨兵：bytes 即落盘内容，内容哈希可比对（语义未改）。
+    expect(hashSettingsContent(res.bytes)).toBe(
+      hashSettingsContent(readFileSync(file, "utf8"))
+    );
+    expect(JSON.parse(res.bytes)).toEqual(
+      JSON.parse(readFileSync(file, "utf8"))
+    );
+    const parsed = expectAtomicWrite(file);
+    const llm = parsed.llm as Record<string, unknown>;
+    expect(llm.model).toBe("volcengine-ark/deepseek-v3-250324");
+    expect(llm.apiKey).toBe("${ANTHROPIC_AUTH_TOKEN}");
+    expect(llm.thinking).toBe("adaptive");
+    expect(llm.providers).toEqual(providersOf(raw));
+    expect(parsed.isolation).toEqual({ worktreeOnMutate: true });
+    expect(parsed.permissions).toEqual({ defaultMode: "ask" });
+    expect(parsed.memory).toEqual({ autoExtract: true });
+  });
+
+  test("连续两次 persist（切走再切回）：最终 = 原始 raw，注册表与保留字段全程在", async () => {
+    const base = makeTmpRoot("iknow-persist-model-roundtrip-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(rawWithProviders(), null, 2));
+    await persistModelChanges(file, {
+      model: "volcengine-ark/deepseek-v3-250324",
+    });
+    await persistModelChanges(file, { model: "minimax-cn/MiniMax-M3" });
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(rawWithProviders());
+    expectAtomicWrite(file);
+  });
+
+  test("非法 patch 不落盘：文件逐字节不变、不创建新文件、无 .tmp 残留（含 {} / llm 非对象起点）", async () => {
+    const base = makeTmpRoot("iknow-persist-model-invalid-");
+    const dir = join(base, "home", ".iknow");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "settings.json");
+    const before = JSON.stringify(rawWithProviders(), null, 2);
+    writeFileSync(file, before);
+    await expect(
+      persistModelChanges(file, { model: "unknown/x" })
+    ).rejects.toThrow(TypeError);
+    expect(readFileSync(file, "utf8")).toBe(before);
+
+    // raw 缺 llm 段 → 无注册表 → TypeError，文件不被写。
+    const noLlm = join(dir, "settings-nollm.json");
+    writeFileSync(noLlm, "{}\n");
+    await expect(
+      persistModelChanges(noLlm, { model: "minimax-cn/MiniMax-M3" })
+    ).rejects.toThrow(TypeError);
+    expect(readFileSync(noLlm, "utf8")).toBe("{}\n");
+
+    // llm 非普通对象 → 同款拒绝。
+    const badLlm = join(dir, "settings-badllm.json");
+    writeFileSync(badLlm, JSON.stringify({ llm: "nope" }));
+    await expect(
+      persistModelChanges(badLlm, { model: "minimax-cn/MiniMax-M3" })
+    ).rejects.toThrow(TypeError);
+    expect(readFileSync(badLlm, "utf8")).toBe(JSON.stringify({ llm: "nope" }));
+
+    // 文件不存在 + 非法 patch → 不创建文件、无 tmp 残留。
+    const missing = join(dir, "settings-missing.json");
+    await expect(
+      persistModelChanges(missing, { model: "no-slash" })
+    ).rejects.toThrow(TypeError);
+    const entries = readdirSync(dir);
+    expect(entries).not.toContain("settings-missing.json");
+    expect(entries.some((e) => e.endsWith(".tmp"))).toBe(false);
   });
 });

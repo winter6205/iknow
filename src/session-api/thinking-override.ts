@@ -100,6 +100,12 @@ export function withThinkingOverride(opts: {
   const client = new Anthropic({
     apiKey: env.llm.apiKey,
     baseURL: env.llm.baseUrl,
+    // ADR-0093 / spec tui-model-command SC9：headers 透传与 build-engine
+    // `createAdapterFromEnv` 同形。条件 spread —— 缺席时 options 与今日
+    // 逐字节一致（不传 `undefined` / `{}`）。
+    ...(env.llm.headers !== undefined
+      ? { defaultHeaders: env.llm.headers }
+      : {}),
   });
   const adapter = withTransportRetry(
     createRealAnthropicAdapter({

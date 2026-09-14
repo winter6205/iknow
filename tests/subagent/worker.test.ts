@@ -3,6 +3,30 @@ import { describe, it, vi } from "vitest";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+/**
+ * specs/tui-model-command SC9：worker 的 client 构造（未注入 `model` 时的
+ * 默认分支）把 `env.llm.headers` 透传为 SDK `defaultHeaders`，缺席不传该键。
+ *
+ * 观测手段 = 子类化真实 Anthropic（不是替身）：`createWorkerDeps` 不把 client
+ * 交回调用方，构造参数是唯一可观察面；继承真类保证 `new Anthropic(...)` 的
+ * 其余行为（含 key/baseURL）不受影响。默认 `opts.model` 注入的用例走 stub，
+ * 不经过本记录器 —— 既有装配语义不变。
+ */
+const anthropicCtorOpts = vi.hoisted(
+  () => [] as Array<Record<string, unknown>>
+);
+vi.mock("@anthropic-ai/sdk", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@anthropic-ai/sdk")>();
+  class CapturingAnthropic extends actual.default {
+    constructor(opts?: Record<string, unknown>) {
+      super(opts as never);
+      anthropicCtorOpts.push(opts ?? {});
+    }
+  }
+  return { ...actual, default: CapturingAnthropic };
+});
+
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
@@ -767,5 +791,51 @@ describe("subagent worker: traceFilePath file-mode 接线 (T5 H1 review-fix)", (
     } finally {
       await rm(subagentsDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G. specs/tui-model-command SC9: provider.headers → SDK defaultHeaders
+//    (worker 侧 client 构造, 未注入 model 的默认分支)
+// ---------------------------------------------------------------------------
+
+describe("subagent worker: env.llm.headers → client defaultHeaders (SC9)", () => {
+  /** 裸装配选项: 不传 model → 走默认分支真构造 Anthropic client。 */
+  function headerProbeOpts(env: IknowEnv): CreateWorkerDepsOptions {
+    return {
+      env,
+      sandboxRoot: "/tmp/sb-headers",
+      cwd: "/tmp/sb-headers",
+      userHome: "/tmp/sb-headers",
+      skillCatalog: createSkillCatalog([]),
+      system: async () => undefined,
+      trace: createNoopTraceService(),
+    };
+  }
+
+  it("headers 在场 → defaultHeaders 键值透传", async () => {
+    anthropicCtorOpts.length = 0;
+    const env = {
+      ...TEST_ENV,
+      llm: { ...TEST_ENV.llm, headers: { "X-Foo": "bar" } },
+    };
+    await createWorkerDeps(headerProbeOpts(env));
+    assert.equal(anthropicCtorOpts.length, 1);
+    assert.deepEqual(anthropicCtorOpts[0]!.defaultHeaders, {
+      "X-Foo": "bar",
+    });
+  });
+
+  it("headers 缺席 → 构造 options 不含 defaultHeaders 键 (与今日逐字节一致)", async () => {
+    anthropicCtorOpts.length = 0;
+    await createWorkerDeps(headerProbeOpts(TEST_ENV));
+    assert.equal(anthropicCtorOpts.length, 1);
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(
+        anthropicCtorOpts[0]!,
+        "defaultHeaders"
+      ),
+      false
+    );
   });
 });
