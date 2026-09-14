@@ -42,6 +42,7 @@ import {
   MAX_ITEM_CODEPOINTS,
   codepointLength,
   resolveConversationTodoPath,
+  TODO_WRITE_MODES,
   TODO_WRITE_SKIP_CLAUSE,
 } from "../../../../src/harness/aci/tools/todo-write.ts";
 import {
@@ -1659,5 +1660,148 @@ describe("createTodoWriteTool — #440 T6 D9 正面引导式 description (无负
       );
     }
     assert.ok(!clause.includes("simple task"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// specs/todo-write-mode-copy.md SC1–SC7:
+// tool description 与 schema 必须按 mode 分述,字段 description 钉住绑定关系。
+// 钉住的目标不变式(SSOT = spec SC1–SC7,源自 ADR-0085 / ADR-0046 / G2 / D9):
+//   - description 分句把 read/add/update/replace 各说一遍;update 句点名
+//     delete:true + id(ADR-0085:删除是 update 族);add 句点名 item 与
+//     items(G2);replace 句点名 items 而非单数 item(ADR-0046)。
+//   - schema 每个字段都挂 description,且 description 内文把字段钉到对应
+//     mode(add ↔ item / items;update ↔ id / subject / status / delete;
+//     replace ↔ items)。
+//   - handler 层 typed 拒绝文案逐字节不变(SC3)。
+// ---------------------------------------------------------------------------
+
+describe("createTodoWriteTool — todo-write-mode-copy: 四 mode 分述说明书 (SC1–SC7)", () => {
+  function readTool() {
+    return createTodoWriteTool({ todoDir });
+  }
+
+  // SC2: 删除绑定 update,不是第五 mode。
+  it("SC2 description 同段同时点出 update / delete:true / id(删除属 update 族,非独立 mode)", () => {
+    const description = readTool().description;
+    // normalize 空格后,按 `.` 拆句。
+    const sentences = description
+      .replace(/\s+/g, " ")
+      .split(".")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    const found = sentences.some(
+      (s) =>
+        s.includes("update") && s.includes("delete:true") && s.includes("id")
+    );
+    assert.ok(
+      found,
+      `description 应有某句同时含 update / delete:true / id,got sentences:\n${sentences.join("\n----\n")}`
+    );
+  });
+
+  it("SC2 description 不把 delete 写成独立 mode (mode=delete / delete mode)", () => {
+    const description = readTool().description;
+    assert.ok(
+      !/mode\s*=?\s*["'`]?delete/i.test(description),
+      `description 不应出现 mode=delete,got: ${description}`
+    );
+    assert.ok(
+      !/delete\s+mode/i.test(description),
+      `description 不应出现 "delete mode",got: ${description}`
+    );
+  });
+
+  // SC3: replace 句点名 items(整张表),不得提及单数 item。
+  it("SC3 replace 句点名 items(整张新表),不出现单数 item", () => {
+    const description = readTool().description;
+    assert.match(
+      description,
+      /replace[^.]*\bitems\b/,
+      `replace 所在句应点名 items,got: ${description}`
+    );
+    assert.ok(
+      !/\breplace\b[^.]*\bitem\b(?!s)/.test(description),
+      `replace 句不得出现单数 item,got: ${description}`
+    );
+  });
+
+  // add 分述写明 item/items(单条 / 多条两种形态)。
+  it("add 分述句同时点名 item 与 items", () => {
+    const description = readTool().description;
+    const sentences = description
+      .split(".")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    const found = sentences.some(
+      (s) => s.includes("add") && /\bitem\b/.test(s) && /\bitems\b/.test(s)
+    );
+    assert.ok(
+      found,
+      `add 分述句应同时含 item 与 items,got sentences:\n${sentences.join("\n----\n")}`
+    );
+  });
+
+  // SC4: schema 字段 description 非空,且与对应 mode 绑定。
+  it("SC4 schema 字段 description 非空且绑定到对应 mode", () => {
+    const schema = readTool().inputSchema;
+    const props = schema.properties as Record<string, { description?: string }>;
+    const fields = ["item", "items", "id", "subject", "status", "delete"];
+    for (const f of fields) {
+      assert.ok(
+        typeof props[f].description === "string" &&
+          (props[f].description as string).length > 0,
+        `${f} 必须挂非空 description`
+      );
+    }
+    // 绑定关系(case-insensitive):
+    assert.ok(
+      props.item.description!.toLowerCase().includes("add"),
+      `item.description 应绑定 add,got: ${props.item.description}`
+    );
+    assert.ok(
+      props.delete.description!.toLowerCase().includes("update"),
+      `delete.description 应绑定 update,got: ${props.delete.description}`
+    );
+    assert.ok(
+      props.items.description!.toLowerCase().includes("add") &&
+        props.items.description!.toLowerCase().includes("replace"),
+      `items.description 应同时绑定 add 与 replace,got: ${props.items.description}`
+    );
+    assert.ok(
+      !props.item.description!.toLowerCase().includes("replace"),
+      `item.description 不应绑定 replace,got: ${props.item.description}`
+    );
+  });
+
+  // SC1: mode 枚举 SSOT 不因说明书改写漂移(仍是四值)。
+  it("SC1 regression guard: mode 枚举仍为 read/add/update/replace 四值", () => {
+    assert.deepEqual(
+      [...TODO_WRITE_MODES],
+      ["read", "add", "update", "replace"]
+    );
+  });
+
+  // SC3 handler 层 typed 拒绝:replace 不接受 item。
+  it("SC3 handler: mode=replace 携带 item 字段 → typed 拒绝", async () => {
+    const tool = readTool();
+    let caught: unknown;
+    try {
+      await tool.handler({ mode: "replace", item: "x" } as never, {
+        conversationId: "test-sc3-replace-item",
+      });
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught instanceof ToolExecutionError, "应抛 ToolExecutionError");
+    assert.equal(
+      (caught as Error).message,
+      "[todo_write] mode replace does not accept item"
+    );
+  });
+
+  // SC5: 重写的 description 仍守 D9 正面引导(无负面禁令),正向关键词在场。
+  it("SC5 regression guard: description 仍含 multi-step", () => {
+    assert.ok(readTool().description.includes("multi-step"));
   });
 });

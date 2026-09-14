@@ -180,7 +180,10 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
   return Object.freeze({
     name: "todo_write",
     description:
-      "Maintain a session-scoped todo ledger at <session>/todos.md for tracking progress on multi-step, multi-turn complex tasks. Use mode=read to list every current item as `- [status] [id] subject`, mode=add to append one `item` or several `items` (the receipt names the new ids), mode=update to change one item's `subject` and/or `status` (pending | in_progress | completed) by `id`, or to delete it with `delete:true`, and mode=replace to swap the whole table for a new list (old ledger is renamed to a same-directory snapshot). Update by id keeps the table stable across rounds. Designed for tasks across multiple turns where progress needs to persist between rounds. " +
+      // ADR-0085:四 mode 各自一句分述 —— 删除是 update 族(update + delete:true +
+      // id),不立第五 mode;replace 只收 items(ADR-0046 / G2),无单数 item 别名。
+      // D9 正面引导:无 "do not" / "never" / "simple task" 等负面措辞。
+      "Maintain a session-scoped todo ledger at <session>/todos.md for tracking progress on multi-step, multi-turn complex tasks. The ledger supports four modes. mode=read lists every current item as `- [status] [id] subject`. mode=add appends one `item` or several `items` at once; the receipt names the new ids. mode=update changes an item's subject and/or status by id, and removes that item by passing id with delete:true. mode=replace swaps the whole table for a new `items` array; the previous ledger is renamed to a same-directory snapshot. Update by id keeps the table stable across rounds. Designed for tasks across multiple turns where progress needs to persist between rounds. " +
       TODO_WRITE_SKIP_CLAUSE,
     inputSchema: {
       type: "object",
@@ -188,13 +191,38 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
         mode: { type: "string", enum: [...TODO_WRITE_MODES] },
         // add: 单条 item 或一次多条 items(ADR-0085 / G2:多步计划一次写完)。
         // 二者互斥,per-mode 字段互斥在 parseInput 阶段报错。
-        item: { type: "string" },
-        items: { type: "array", items: { type: "string" } },
+        item: {
+          type: "string",
+          description:
+            "Subject text for one new todo item; pair with mode=add.",
+        },
+        items: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Array of subject texts; mode=add appends them, mode=replace swaps the whole table for them.",
+        },
         // update: 目标条目 id + 至少一个改动字段。
-        id: { type: "string" },
-        subject: { type: "string" },
-        status: { type: "string", enum: [...TODO_ITEM_STATUSES] },
-        delete: { type: "boolean" },
+        id: {
+          type: "string",
+          description:
+            "Id of the item to change with mode=update (taken from the mode=read listing).",
+        },
+        subject: {
+          type: "string",
+          description: "Replacement subject text for mode=update.",
+        },
+        status: {
+          type: "string",
+          enum: [...TODO_ITEM_STATUSES],
+          description:
+            "New status for mode=update: pending | in_progress | completed.",
+        },
+        delete: {
+          type: "boolean",
+          description:
+            "Pass true with mode=update and id to remove that item; deletion is an update operation.",
+        },
       },
       required: ["mode"],
       additionalProperties: false,

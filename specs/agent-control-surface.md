@@ -2,6 +2,7 @@
 
 > 图：`docs/wayfinder/agent-control-surface-map.md`（G1–G4 + R1–R3）。
 > 下游 plan：`plans/agent-control-surface.md`。
+> `todo_write` 模型面 mode 说明书 **amended by** `todo-write-mode-copy.md`（不改三件事语义）。
 > 本文件不写 CONTEXT / ADR 正文；待写入见文末。
 > **Amends** `create-worktree-tools.md`（工具在场条件）；`todo-ledger-replace.md` / ADR-0046（账本形状与 mode）；`358-subagent-runtime-observability.md`（TUI 显示面 + 取消；该 spec 已落地，归档见 `docs/archive/025-retire-completed-specs-and-plans/specs/`）；`146-tui.md`（chrome 强杀）；设置通道（ADR-0015）加项目允许名单。项目 `permissions` 规则形态 **amended by** `declarative-project-permissions.md`（ADR-0090）。
 
