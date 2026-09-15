@@ -37,7 +37,11 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { errorMessage } from "../errors.js";
 import { validateSegmentPolicy } from "../aci/tools/bash-readonly.js";
-import { splitShellSegments } from "../permission/hard-walls.js";
+import {
+  firstToken,
+  splitShellSegments,
+  stripQuoteLayer,
+} from "../permission/hard-walls.js";
 import { FILE_WRITE_TOOL_NAMES } from "../aci/tools/symbol-mutate.js";
 import type { LiveTaskRoot } from "../session-roots.js";
 import type {
@@ -391,11 +395,11 @@ const ROOT_FLIP_TOOLS: ReadonlySet<string> = new Set([
 
 /**
  * Classify one bash command by whether it writes the workspace. A command is
- * `read` only if EVERY top-level segment (split on `;`, `&&`, `||`, `|` by
- * `splitShellSegments`) passes the readonly command policy AND its redirects
- * write nothing to the filesystem AND it spawns no bare-`&` background job.
- * Fail-closed: unknown commands, mutating commands, any `>` / `>>` redirect
- * to a real file, and any bare `&` classify `mutate`.
+ * `read` only if EVERY top-level segment (split on newlines, `;`, `&&`, `||`,
+ * `|`) passes the readonly command policy AND its redirects write nothing to
+ * the filesystem AND it spawns no bare-`&` background job. Fail-closed:
+ * unknown commands, mutating commands, any `>` / `>>` redirect to a real
+ * file, and any bare `&` classify `mutate`.
  *
  * Redirect rules (the delta vs the readonly bash-mode table, which rejects
  * ALL `>`): stderr→stdout merges and /dev/null sinks are pure stream plumbing
@@ -413,11 +417,13 @@ const ROOT_FLIP_TOOLS: ReadonlySet<string> = new Set([
  * composition — a much stricter question ("is this provably side-effect-free
  * in readonly mode") than the gate's ("does this call write the workspace").
  * Complexity guard (ACR): the two semantics stay in separate functions; the
- * gate only borrows the segment splitter and the readonly command policy via
- * `validateSegmentPolicy` so the command whitelist cannot drift.
+ * gate borrows the segment splitter and the readonly command policy via
+ * `segmentIsPolicyReadonly` so the shared whitelist cannot drift, and puts
+ * its own `cd` / `sed` read arms in `segmentIsGateReadonly` in front of it so
+ * those widenings never reach readonly mode.
  */
 export function classifyBashWorkspaceWrite(command: string): "read" | "mutate" {
-  const segments = splitShellSegments(command);
+  const segments = splitBashSegments(command);
   if (segments.length === 0) return "mutate";
   return segments.every(
     (segment) =>
@@ -430,20 +436,270 @@ export function classifyBashWorkspaceWrite(command: string): "read" | "mutate" {
 }
 
 /**
+ * Segment splitter for the workspace-write question: newlines first (per
+ * ADR-0068 「换行只作分段符」), then `splitShellSegments` for `;` / `&&` /
+ * `||` / `|`.
+ *
+ * Why the gate splits newlines even though `splitShellSegments` does not:
+ * without it `head a\nrm -rf b` is ONE segment whose first token is `head`,
+ * so a mutating second line rides out on the first line's read verdict —
+ * the same fail-open shape the bare-`&` rule closes, with a newline instead
+ * of `&`. `splitForDangerousScan` (hard-walls.ts) already splits this way for
+ * the hard-wall scan; the readonly-mode validator keeps newline-as-metachar
+ * semantics so its existing assertions stay green, and this gate does not
+ * widen that table.
+ */
+function splitBashSegments(command: string): string[] {
+  const normalized = command.replace(/\r\n?/g, "\n");
+  return normalized.split("\n").flatMap((line) => splitShellSegments(line));
+}
+
+/**
  * Reuse the readonly-mode command policy (allowlist + find/sort/git flag
  * tables) for a single segment: true when the segment's command would be
  * accepted by `validateSegmentPolicy`, false when it throws (execution
  * agents, non-allowlisted commands, mutating git subcommands / flags).
  * Unknown commands → false → fail-closed mutate upstream.
+ *
+ * Two gate-only widenings sit in front of the shared lookup — `cd` and
+ * provably-read `sed` — because both are read paths an unbound session needs
+ * on the main checkout (ADR-0037 §1) that the readonly-MODE table refuses
+ * outright. They are NOT pushed into that table: `validateReadonlyCommand`
+ * answers a different, stricter question, and widening it would relax
+ * readonly mode (see the SC6 guard in the gate tests). Gate-only rules live
+ * in `segmentIsGateReadonly` so the two consumers cannot drift into each
+ * other by accident.
  */
 function segmentIsPolicyReadonly(segment: string): boolean {
+  if (segmentIsGateReadonly(segment)) return true;
   try {
     validateSegmentPolicy(segment, segment);
     return true;
   } catch {
+    // EXIT: segment is not provably read-only for the policy tables (unknown
+    // command, execution agent, mutating git form) → false → mutate upstream.
     return false;
   }
 }
+
+/**
+ * Gate-only read rules, checked before the shared policy lookup. Every arm
+ * must be provably non-writing on its own; anything the rule cannot read
+ * falls through to the shared (deny-by-default) lookup rather than guessing.
+ *
+ *   - `cd <one operand>`: writes nothing. A bare allow is sound for THIS
+ *     classifier because the segment is never the whole story — every later
+ *     segment is classified on its own first token, so `cd <main> && rm -rf
+ *     <main>` still fails closed on the `rm`. What a bare allow does NOT
+ *     prove is path confinement: `cd /elsewhere` re-points later RELATIVE
+ *     operands. That question belongs to the bwrap fence / permission layer,
+ *     not to "does this command write the workspace", so admitting it here
+ *     does not widen the write yes/no. `cd` with zero operands, `cd -`,
+ *     `cd --`, `cd ~`, `cd --help` all fall through (unknown/multi token) and
+ *     stay mutate.
+ *   - `sed` read forms: see `isSedReadSegment`.
+ */
+function segmentIsGateReadonly(segment: string): boolean {
+  const tokens = segment.trim().split(/\s+/);
+  const token = firstToken(segment);
+  if (token.length === 0) return false;
+  if (token === "cd") return isCdReadSegment(tokens);
+  // EXIT: every other command goes through the shared policy tables below.
+  if (token === "sed") return isSedReadSegment(tokens);
+  return false;
+}
+
+/**
+ * `cd` is a read when it carries exactly one operand that is not a shell
+ * identity marker: `cd /main`, `cd ..`, `cd src`. Everything else
+ * (`cd`, `cd; ls`, `cd -`, `cd --`, `cd ~`) is not a command this classifier
+ * has read → mutate. The token check is textual, exactly like the rest of the
+ * policy tables: quoted operands (`cd 'a b'`) are over-split by whitespace and
+ * therefore fail CLOSED, which is the safe direction.
+ */
+function isCdReadSegment(tokens: ReadonlyArray<string>): boolean {
+  if (tokens.length !== 2) return false;
+  const operand = tokens[1]!;
+  if (operand.length === 0) return false;
+  if (/^[-~]/u.test(operand)) return false;
+  // EXIT: `$VAR` would need expansion to know the target; the gate does not
+  // expand, so an unreadable operand is a mutate.
+  return !operand.includes("$");
+}
+
+/**
+ * `sed` read rule: quiet mode (`-n` / `--quiet` / `--silent`), script given
+ * inline (positionally, `-e`, or `--expression=`), and EVERY command in that
+ * script a line-range print (`Xp` / `X,Yp` / `$p` / combinations).
+ *
+ * Why the grammar has to be this narrow: `-i` is not the only way sed writes.
+ * Verified against GNU sed 4.9 — `sed -n '1w out.txt' f` creates a file,
+ * `sed -n '1e touch p' f` spawns a command, and `sed -n 's/a/b/w out.txt' f`
+ * does both from inside a substitution. None of those contain `-i`, so an
+ * `-i`-only ban (plus the two obvious flags) would classify real writes as
+ * reads. Everything the grammar cannot parse — pattern addresses, `w` / `e` /
+ * `r` commands, `-f` script files, `-i` in any spelling, substitution
+ * previews — is denied and falls through to mutate.
+ */
+function isSedReadSegment(tokens: ReadonlyArray<string>): boolean {
+  return hasSedNoWriteFlag(tokens) && hasSedReadScript(tokens);
+}
+
+/** True when no `-i` / `--in-place` spelling appears among a `sed` segment's flags. */
+function hasSedNoWriteFlag(tokens: ReadonlyArray<string>): boolean {
+  return !tokens.slice(1).some(isSedInPlaceToken);
+}
+
+/**
+ * `-i` in every spelling sed accepts, tested on one FLAG token: `-i`, `-i.bak`
+ * (glued suffix — a character walk is what catches this, a token-prefix table
+ * cannot), clustered `-ni` / `-in`, `--in-place`, `--in-place=.bak`, and the
+ * unambiguous long abbreviations GNU sed resolves to `--in-place` (`--in-pl=…`).
+ * Only tokens that start with `-` are inspected, so a script operand that
+ * merely contains the letter (`sed -n 'i' f`) is not mistaken for the flag.
+ */
+function isSedInPlaceToken(token: string): boolean {
+  if (token.startsWith("--")) {
+    return /^--(?:i|in|in-|in-p|in-pl|in-pla|in-plac|in-place)(?:=|$)/u.test(
+      token
+    );
+  }
+  if (!token.startsWith("-")) return false;
+  return [...token.slice(1)].some((ch) => ch === "i");
+}
+
+/**
+ * The script half of the sed read rule: obtain the inline script from its
+ * flag or positional slot, then require every `;`-separated item to be a
+ * line-range print. Quiet mode is required — without `-n` the script's other
+ * effects still run and every line is echoed anyway, so a print item proves
+ * nothing. Scripts arriving via `-f` / `--file` are not inspectable → false,
+ * and so is a bare `sed -n` with no script at all.
+ */
+function hasSedReadScript(tokens: ReadonlyArray<string>): boolean {
+  const scan = scanSedTokens(tokens);
+  if (!scan.quiet || scan.scriptFromFile || scan.failedScript) return false;
+  const script = scan.flagScript ?? scan.positional[0];
+  // EXIT: no inline script at all (bare `sed -n`) → nothing is provably read.
+  if (script === undefined) return false;
+  return script.length > 0 && scriptCoversOnlyPrints(script);
+}
+
+interface SedTokenScan {
+  readonly quiet: boolean;
+  /** A script that already failed the print grammar — decision stays false. */
+  readonly failedScript: boolean;
+  /** `-f` / `--file` present: the script lives in a file we cannot read. */
+  readonly scriptFromFile: boolean;
+  /** Script supplied through `-e` / `--expression[=]`. */
+  readonly flagScript: string | undefined;
+  /** Non-flag operands, in order (the first is the script when no flag gave one). */
+  readonly positional: ReadonlyArray<string>;
+}
+
+/** Single pass over a `sed` segment's tokens, resolving where the script came from. */
+function scanSedTokens(tokens: ReadonlyArray<string>): SedTokenScan {
+  const positional: string[] = [];
+  let quiet = false;
+  let scriptFromFile = false;
+  let failedScript = false;
+  let flagScript: string | undefined;
+  for (let i = 1; i < tokens.length; i += 1) {
+    const token = tokens[i]!;
+    if (!token.startsWith("-")) {
+      positional.push(token);
+      continue;
+    }
+    if (SED_QUIET_FLAGS.has(token)) quiet = true;
+    if (isSedScriptFileFlag(token)) scriptFromFile = true;
+    const hit = sedInlineScriptOf(token, tokens[i + 1]);
+    if (hit.script !== undefined) {
+      flagScript = hit.script;
+      if (!scriptCoversOnlyPrints(hit.script)) failedScript = true;
+      // Separate-token form (`-e <script>`): the value was the NEXT token, so
+      // consume it as well — otherwise it would land in `positional` and be
+      // read as the file operand.
+      if (hit.consumesNext) i += 1;
+    }
+  }
+  return { quiet, failedScript, scriptFromFile, flagScript, positional };
+}
+
+/**
+ * `-f` / `--file[=]`: the script is a file this classifier cannot read, so the
+ * segment is fail-closed to `mutate`.
+ *
+ * Glued and stdin spellings count too: GNU sed accepts `-fFILE` and `-f-`
+ * (script from stdin), and a piped `w <path>` script executed through them
+ * writes without any `-i` — the exact fail-open this grammar exists to stop.
+ * Mirrors `hasSedNoWriteFlag`'s glued-suffix handling, with the `-` case kept
+ * separate so `-n` / `-e` are not swept up by the `-f` prefix.
+ */
+function isSedScriptFileFlag(token: string): boolean {
+  if (token === "-f" || token === "--file") return true;
+  if (token.startsWith("--file=")) return true;
+  // Glued short form `-fFILE` / `-f-`. No other sed flag begins with `-f`, so
+  // the prefix test cannot sweep up a different flag.
+  return token.startsWith("-f") && token.length > 2;
+}
+
+/** Inline script carried by one `sed` flag token, and whether it ate the next token. */
+interface SedInlineScriptHit {
+  /** The inline script, or `undefined` when this flag carries none. */
+  readonly script: string | undefined;
+  /** True when the script was the NEXT token (`-e <script>`) and is now consumed. */
+  readonly consumesNext: boolean;
+}
+
+/**
+ * Resolve the inline script a `sed` flag token carries, if any:
+ * `-e <script>` / `--expression <script>` take their value from the next token
+ * (`consumesNext`), while `--expression=<script>` is already fully consumed.
+ * Any other flag carries no script, and a value-taking flag with a missing
+ * value yields no script rather than an empty one — the caller then falls back
+ * to the positional slot, exactly as a bare `sed -n` would.
+ */
+function sedInlineScriptOf(
+  token: string,
+  next: string | undefined
+): SedInlineScriptHit {
+  if (token === "-e" || token === "--expression") {
+    return { script: next, consumesNext: next !== undefined };
+  }
+  if (token.startsWith("--expression=")) {
+    return {
+      script: token.slice("--expression=".length),
+      consumesNext: false,
+    };
+  }
+  return { script: undefined, consumesNext: false };
+}
+
+/** `sed` flags that select quiet mode (`-n` / long spellings). */
+const SED_QUIET_FLAGS: ReadonlySet<string> = Object.freeze(
+  new Set(["-n", "--quiet", "--silent"])
+);
+
+/**
+ * True when every `;`-separated item of an inline sed script is a line-range
+ * print: `3p`, `1,20p`, `$p`, `2,$p`. The trailing `p` is REQUIRED — a bare
+ * address (`sed -n 5 f`, `sed -n $ f`) is a sed syntax error (verified GNU
+ * sed 4.9: `missing command`), so accepting it would admit a form that never
+ * reads anything. Anything else (`d`, `w`, `e`, `s///`, pattern addresses,
+ * `/re/p`) → false, and the caller falls through to mutate.
+ */
+function scriptCoversOnlyPrints(script: string): boolean {
+  const items = script.split(";");
+  return (
+    items.length > 0 &&
+    items.every((item) =>
+      SED_LINE_RANGE_PRINT_RE.test(stripQuoteLayer(item.trim()))
+    )
+  );
+}
+
+/** `Xp` / `X,Yp` with `X` / `Y` a line number or `$`. */
+const SED_LINE_RANGE_PRINT_RE = /^(?:\d+|\$)(?:,(?:\d+|\$))?p$/u;
 
 /**
  * Redirect analysis for one policy-passing segment: false when the segment

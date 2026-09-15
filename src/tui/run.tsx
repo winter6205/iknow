@@ -17,11 +17,25 @@
  *    sessionGrants info initialSession onQuit/>`，onQuit 触发 renderer.destroy。
  *
  * 错误路径（specs/321 Error Paths E1/E2）：渲染器构造 / 运行抛错 → 类型化
- * stderr 消息 + 退出码 1。runTui 有且仅有一个 catch 点，全部清理（destroy
- * 渲染器）收口于该点。createRenderer 注入口保留供测试诱导。
+ * stderr 消息 + 退出码 1。runTui 有且仅有一个 catch 点，全部清理（终端
+ * teardown + destroy 渲染器）收口于该点。createRenderer 注入口保留供测试诱导。
  * 另有第三条错误路径（catch 之外）：非 TTY fail-fast —— 生产路径（未注入
  * createRenderer）且 stdin/stdout 非交互终端时，装配前直接类型化 stderr +
  * 退出码 1（新版 OpenTUI 非 TTY 可建 renderer，无此守卫会挂死）。
+ *
+ * T2 顺序不变式（2026-09-14 事故）：渲染器工厂在**装配之后**才调用 —— 装配
+ * 链（prepareRuntime / workspaceRoot / permissionMode / buildTuiDeps）会抛
+ * typed plain object（provider_api_key_missing / WorkspaceRootError），此前
+ * 建渲染器等于先探测终端（OSC 10/11 能力查询 + alternate screen），抛错后
+ * 终端残留能力应答。非 TTY fail-fast 仍在任何装配与渲染器之前。
+ * 错误体渲染走 cli.ts 同款判别联合（`isLlmProviderConfigError` /
+ * `isWorkspaceRootError`），绝不 `String(plain object)` → `[object Object]`。
+ *
+ * T6 终端收口：catch / /quit / 正常退出三路都经 `teardownTerminal` 闭包调
+ * 同一个 `teardownTuiTerminal` —— 关鼠标追踪（raw mode 仍开，OpenTUI
+ * #904 类：先恢复 cooked mode 会把在途鼠标报告回显到 shell prompt）→
+ * destroy（内部恢复 cooked mode）→ 丢弃 stdin 缓冲的能力应答（OSC 10/11
+ * `rgb:` / DECRQM `$y`）→ raw mode 兜底。顺序理由见该函数头注。
  */
 import {
   CliRenderEvents,
@@ -65,9 +79,15 @@ import { createTuiWorktreeIsolationHost } from "./worktree-host.js";
 import { resolveVerifyConfig } from "../session-api/serve.js";
 import { createEnvLoader, type EnvLoader } from "../config/env-loader.js";
 import type { IknowEnv } from "../config/env.js";
+import {
+  formatLlmProviderConfigError,
+  isLlmProviderConfigError,
+} from "../config/env.js";
 import { persistModelFailure } from "./persist-model-failure.js";
 import {
   WORKSPACE_ROOT_ENV_KEY,
+  isWorkspaceRootError,
+  renderWorkspaceRootError,
   resolveWorkspaceRoot,
 } from "../config/workspace-root.js";
 import {
@@ -114,6 +134,113 @@ const RENDERER_CONFIG: CliRendererConfig = {
   exitOnCtrlC: false,
   screenMode: "alternate-screen",
 };
+
+/**
+ * T2 / code-quality.md typed-error catch 契约：启动失败的错误体渲染。
+ *
+ * LLM provider / workspace-root 是 typed **plain object**（`satisfies` 形态，
+ * 非 Error 实例）—— 此前 catch 的 `String(err)` 把它打成 `[object Object]`，
+ * kind / providerId / apiKeyEnv 全不可见（2026-09-14 事故的 TUI 侧症状）。
+ * 分支顺序对齐 cli.ts `printCliError`：判别联合优先，Error 次之，其余对象
+ * 走 JSON（非有损；循环引用退构造器名），**绝不**产出 `[object Object]`。
+ */
+export function describeTuiStartError(err: unknown): string {
+  if (isLlmProviderConfigError(err)) return formatLlmProviderConfigError(err);
+  if (isWorkspaceRootError(err)) return renderWorkspaceRootError(err);
+  if (err instanceof Error) return err.message;
+  if (typeof err === "object" && err !== null) {
+    try {
+      return JSON.stringify(err);
+    } catch {
+      // 循环引用 / BigInt 无法 JSON 化：退构造器名，仍不产生 [object Object]。
+      return `[${err.constructor?.name ?? "object"}]`;
+    }
+  }
+  return String(err);
+}
+
+/** 终端收口所需的最小 stdin 面（结构类型：测试注入 fake，生产 = process.stdin）。 */
+export interface TuiTerminalStdin {
+  readonly isRaw?: boolean;
+  read: () => unknown;
+  setRawMode?: (mode: boolean) => unknown;
+}
+
+/** 丢弃 stdin 里已到达但未消费的字节（能力查询应答）。
+ *
+ *  `read()` 循环与 OpenTUI `resume()` 的清缓冲同款：渲染器写出的 OSC 10/11
+ *  `rgb:` / DECRQM `$y` 应答在退出窗口内到达时，若留在缓冲里，进程退出后
+ *  shell 会把它当键盘输入回显到下一个 prompt（2026-09-14 事故的残留形态，
+ *  同族还有鼠标追踪的 `M` 报告）。这里主动消费掉；流已 close / 不可读时
+ *  read 抛错按无可清理处理。
+ *
+ *  只消费**已进入用户态缓冲**的字节（同 OpenTUI resume() 的同步 drain），
+ *  仍在内核 tty 队列里的字节本函数看不到 —— 见 teardownTuiTerminal 头注。 */
+function drainTuiStdin(stdin: TuiTerminalStdin): void {
+  for (;;) {
+    let chunk: unknown;
+    try {
+      chunk = stdin.read();
+    } catch {
+      // EXIT: 流已 close / 不可读 —— 没有可丢弃的缓冲，收口继续。
+      return;
+    }
+    // EXIT: 缓冲已空（null = EOF，undefined = 无更多数据）。
+    if (chunk === null || chunk === undefined) return;
+    // discard：这些字节是本进程发出查询的应答，不属于任何调用方。
+  }
+}
+
+/**
+ * T6 终端收口唯一实现（catch / `/quit` / 正常退出三路共用）。
+ *
+ * 顺序即契约，四步各自补 OpenTUI 0.5.1 `renderer.destroy()` **不覆盖**的面：
+ *  1. `useMouse = false`（raw mode 仍开时先发鼠标关闭序列）。destroy 内部先
+ *     恢复 cooked mode、鼠标关闭序列由原生层在后面才发 —— 中间窗口里在途
+ *     鼠标报告会被 shell 回显成 `35;83;40M` 类垃圾（OpenTUI #904 类）。
+ *  2. `destroy()`：恢复 cooked mode / 退出 alternate screen / 移除 stdin
+ *     监听 / 释放 native 指针。这些交给 OpenTUI，本函数不重复实现。
+ *  3. `drainTuiStdin`：丢弃缓冲里的能力应答。放在 destroy **之后** ——
+ *     收下 destroy 窗口期到达的字节；此刻 OpenTUI 的 stdin 监听已摘除、
+ *     流已 pause，本函数读取不与解析器抢数据。仍在内核 tty 队列、尚未被
+ *     用户态读到的字节省略（同步 API 不可见；那条腿靠 T2 顺序不变式
+ *     —— 装配失败时根本不发查询，从源头不产生应答）。
+ *  4. raw mode 兜底：destroy 抛错 / 未曾跑成（外部已 destroy 但 raw 仍开）时
+ *     恢复 cooked。`isRaw === true` 才调，正常路径下是 no-op。
+ *
+ * 幂等：已 destroy 的 renderer 跳过 1–2，3–4 仍执行 —— `/quit` 上 app.tsx
+ * 的 `if (!renderer.isDestroyed)` 守卫与 whenDestroyed 收口路径都会二次进入。
+ * 失败一律不上抛：收口异常不能覆盖调用方正在呈现的原始错误。
+ */
+export function teardownTuiTerminal(
+  renderer?: CliRenderer,
+  stdin: TuiTerminalStdin = process.stdin
+): void {
+  // EXIT: 从未创建 renderer（T2 顺序不变式下的装配失败）= 从未探测终端，
+  // 无需收口。
+  if (renderer === undefined) return;
+  if (!renderer.isDestroyed) {
+    try {
+      renderer.useMouse = false;
+    } catch {
+      // EXIT: 渲染循环已坏（native 已释放等）—— 本步放弃，但 destroy / drain
+      // 仍然必须继续，收口不能半途而废。
+    }
+    try {
+      renderer.destroy();
+    } catch {
+      // EXIT: destroy 失败不得上抛（覆盖调用方原始错误）；raw mode 由下方兜底。
+    }
+  }
+  drainTuiStdin(stdin);
+  if (stdin.isRaw === true && typeof stdin.setRawMode === "function") {
+    try {
+      stdin.setRawMode(false);
+    } catch {
+      // EXIT: 流已 close —— 终端随进程退出复位，无进一步动作。
+    }
+  }
+}
 
 /**
  * 启动 TUI 渲染循环，返回进程退出码（0 = 正常退出，1 = E1/E2 类型化失败）。
@@ -195,8 +322,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     }
     return shutdownPromise;
   };
+  // T6：三条退出路径（catch / /quit onQuitBridge / whenDestroyed 正常收口）
+  // 共用唯一终端收口闭包 —— 顺序契约见 teardownTuiTerminal。renderer 未创建
+  // （T2 顺序不变式下的装配期抛错）时为 no-op。
+  const teardownTerminal = (): void => teardownTuiTerminal(renderer);
   try {
-    renderer = await factory(RENDERER_CONFIG);
     const runtime = await prepareRuntime();
     // T1: resolve the root before any lazy session create. The resolver's
     // final cwd fallback is an entry-level binding, never a SessionHub
@@ -558,11 +688,20 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         // 完成后 destroy 渲染器。fire-and-forget:app 接着自己 destroy(见
         // app.tsx quit() 末尾),不会挂起;whenDestroyed 兜底 await 同一 shutdown。
         quitResumeConversationId = conversationId;
-        void shutdownExtensions().finally(() => {
-          if (!renderer!.isDestroyed) renderer!.destroy();
-        });
+        // T6：唯一收口必须在 app.tsx quit() 同 tick 的 renderer.destroy()
+        // **之前**跑完「关鼠标 + drain」（顺序契约见 teardownTuiTerminal）；
+        // 本函数自己 destroy 后，app.tsx 的 `if (!renderer.isDestroyed)` 守卫
+        // 自然跳过（幂等，不重复释放 native）。
+        teardownTerminal();
+        void shutdownExtensions();
       },
     };
+
+    // T2 顺序不变式：渲染器工厂在**装配链之后**才调用 —— 上面 prepareRuntime
+    // / resolveWorkspaceRoot / resolvePermissionMode / buildTuiDeps 会抛 typed
+    // plain object（provider_api_key_missing 等）；此前建渲染器等于先探测终端
+    // （OSC 10/11 能力查询 + alternate screen），抛错后终端残留能力应答。
+    renderer = await factory(RENDERER_CONFIG);
 
     const root = createRoot(renderer);
     // settings-hot-reload（T4）:envVersion 变化时重渲染 —— currentEnv / envVersion
@@ -638,6 +777,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     };
     rerenderApp();
     await whenDestroyed(renderer);
+    // T6：正常退出（信号收口 / E4 直接 destroy 后本 await 返回）也在返回前
+    // 补收口 —— app.tsx /quit 已提前 destroy（renderer 不再重复 destroy），
+    // 此处只补 drain + raw mode 兜底。
+    teardownTerminal();
     // #337 Phase B:兜底 —— onQuit 未接管的退出路径(信号 / E4 直接 destroy),
     // shutdownExtensions 已启动则 no-op,未启动则确保 MCP 关闭在 runTui 返回
     // 前完成,避免 stdio 子孙泄漏。
@@ -650,14 +793,14 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     }
     return 0;
   } catch (err) {
-    // 唯一 catch 点（E1/E2）：类型化消息写 stderr，destroy 收口于此。
-    const cause = err instanceof Error ? err.message : String(err);
+    // 唯一 catch 点（E1/E2）：类型化消息写 stderr，终端收口于此。
+    // describeTuiStartError：判别联合优先（provider / workspace-root 是
+    // plain object，`String(err)` 会打成 [object Object]，见 code-quality.md）。
+    const cause = describeTuiStartError(err);
     process.stderr.write(
       `${TUI_RENDERER_ERROR_PREFIX}：${cause}。请重新安装依赖（npm ci）后重试\n`
     );
-    if (renderer && !renderer.isDestroyed) {
-      renderer.destroy();
-    }
+    teardownTerminal();
     // #337 Phase B:错误路径也尽力收口 MCP(若 buildTuiDeps 完成后才抛错,
     // tuiExtensions 已注入;若 buildTuiDeps 自身抛错则 no-op)。不阻塞退出码。
     await shutdownExtensions();

@@ -41,7 +41,10 @@ import {
 } from "../../../src/harness/isolation/worktree-gate.ts";
 import type { GitRunner } from "../../../src/harness/isolation/worktree-gate.ts";
 // SC6 guard: the readonly-mode SSOT must stay untouched by the gate split.
-import { validateReadonlyCommand } from "../../../src/harness/aci/tools/bash-readonly.ts";
+import {
+  ReadonlyViolationError,
+  validateReadonlyCommand,
+} from "../../../src/harness/aci/tools/bash-readonly.ts";
 import { createLiveTaskRoot } from "../../../src/harness/session-roots.ts";
 import type {
   Executor,
@@ -535,6 +538,43 @@ describe("classifyCall", () => {
     expect(read("ls -la src")).toBe("read");
     expect(read("cat a.txt")).toBe("read");
     expect(read("ls && cat b.txt; echo done")).toBe("read");
+    // T3 (plans/tui-durable-open.md sentence 3): `cd` + a read-only rest is a
+    // read. `cd` writes nothing itself, and every segment after it is still
+    // adjudicated on its own first token, so a write behind the cd
+    // (`cd <main> && rm -rf <main>`) stays a mutate. What a bare allow does
+    // NOT prove is path CONFINEMENT — after `cd /elsewhere` a later relative
+    // operand resolves outside the workspace. That is the bwrap fence's and
+    // the permission layer's question, not this classifier's.
+    expect(read("cd /main && head -5 README.md")).toBe("read");
+    expect(read("cd /main && grep -n export README.md | head -3")).toBe("read");
+    expect(read("cd .. && head -5 README.md")).toBe("read");
+    expect(read("cd src && head -5 index.ts")).toBe("read");
+    // `sed` read forms: a quiet-mode script made only of line-range print
+    // items. The grammar is deliberately narrow — an unparsed sed script is
+    // not provably non-writing, because `sed -n '1w out.txt' f` writes a file
+    // with no `-i` in sight and `sed -n '1e cmd' f` spawns a command (both
+    // verified against GNU sed 4.9). Pattern-addressed reads (`/re/p`) and
+    // substitution previews are therefore mutate; `grep` / `head` remain the
+    // read paths for those.
+    expect(read("sed -n '1,20p' README.md")).toBe("read");
+    expect(read("cd /main && sed -n '1,20p' README.md")).toBe("read");
+    expect(read("cd /main && sed -n -e '1,20p' README.md")).toBe("read");
+    expect(read("sed -n --expression=1,20p README.md")).toBe("read");
+    expect(read("sed -n --expression 1,20p README.md")).toBe("read");
+    expect(read("sed -n -e '1,20p' -e '2,3p' README.md")).toBe("read");
+    expect(read("cd /main && sed -n '$p' README.md")).toBe("read");
+    expect(read("cd /main && sed -n '2,$p' README.md")).toBe("read");
+    expect(read("cd /main && sed -n '1,20p' README.md 2>/dev/null")).toBe(
+      "read"
+    );
+    // KNOWN LIMITATION (pinned, not widened): `splitShellSegments` is not
+    // quote-aware, so a `;` INSIDE a quoted sed script splits the segment and
+    // the script's tail becomes an unknown command. `sed -n '1,20p;30,40p' f`
+    // therefore fails closed to mutate. Deny-by-default direction, and the
+    // model can split it into two `-e` scripts instead.
+    expect(mutate("cd /main && sed -n '1,20p;30,40p' README.md")).toBe(
+      "mutate"
+    );
 
     // workspace writes → mutate
     expect(mutate("echo x > f.txt")).toBe("mutate");
@@ -555,6 +595,66 @@ describe("classifyCall", () => {
     expect(mutate("ls & npm install")).toBe("mutate");
     // unknown command → fail-closed mutate
     expect(mutate("somecustomtool --flag")).toBe("mutate");
+    // T3 fail-closed arm: every in-place / file-writing sed form stays mutate.
+    // `-i` is refused in all its spellings (glued `.bak` suffix included), and
+    // a script carrying sed's `w` (write) / `e` (execute) commands is refused
+    // even without `-i` — both were verified against GNU sed 4.9 to touch the
+    // filesystem / spawn a command from a `-n` read form.
+    expect(mutate("cd /main && sed -i 's/a/b/' README.md")).toBe("mutate");
+    expect(mutate("cd /main && sed -i.bak 's/a/b/' README.md")).toBe("mutate");
+    expect(mutate("sed --in-place 's/a/b/' README.md")).toBe("mutate");
+    expect(mutate("sed --in-place=.bak 's/a/b/' README.md")).toBe("mutate");
+    expect(mutate("sed -ni '1,2p' README.md")).toBe("mutate");
+    expect(mutate("sed -in '1,2p' README.md")).toBe("mutate");
+    expect(mutate("sed -n '1w out.txt' README.md")).toBe("mutate");
+    expect(mutate("sed -n '1e echo pwned' README.md")).toBe("mutate");
+    expect(mutate("sed -n 's/a/b/w out.txt' README.md")).toBe("mutate");
+    expect(mutate("sed -n 's/a/b/e' README.md")).toBe("mutate");
+    // Everything the narrow grammar cannot parse is denied, not guessed at:
+    // pattern addressing, substitution previews, `-f` script files, `--version`
+    // (prints usage without touching the operand), and a script token that is
+    // really a typo'd command would all run with semantics this classifier
+    // has not read.
+    expect(mutate("cd /main && sed -n '/export/p' README.md")).toBe("mutate");
+    expect(mutate("cd /main && sed 's/old/new/' README.md")).toBe("mutate");
+    expect(mutate("cd /main && sed -n 's/old/new/p' README.md")).toBe("mutate");
+    expect(mutate("sed -n 'gp' README.md")).toBe("mutate");
+    expect(mutate("sed -n grep -n x README.md")).toBe("mutate");
+    expect(mutate("sed -n -f script.sed README.md")).toBe("mutate");
+    // Glued and stdin `-f` spellings are the same script-from-file: GNU sed
+    // tolerates `-fFILE` and `-f-`, and a piped `w <path>` script reached
+    // through them writes with no `-i` — reading them as a print grammar would
+    // be the fail-open this clause exists to close.
+    expect(mutate("sed -n -f- 1,2p README.md")).toBe("mutate");
+    expect(mutate("sed -n -f/tmp/scr.sed 1,2p README.md")).toBe("mutate");
+    expect(mutate("printf 'w /tmp/x' | sed -n -f- 1,2p README.md")).toBe(
+      "mutate"
+    );
+    expect(mutate("sed --version")).toBe("mutate");
+    expect(mutate("sed -n")).toBe("mutate");
+    // `cd` changes the meaning of later RELATIVE operands, so it is a read
+    // only when this classifier can still see the whole command; a redirect
+    // on the cd segment itself, or a write in any later segment, fails closed.
+    expect(mutate("cd /main > out.txt")).toBe("mutate");
+    expect(mutate("cd /main && rm -rf /main")).toBe("mutate");
+    expect(mutate("cd /main && tee out.txt")).toBe("mutate");
+    expect(mutate("cd /main && npm install")).toBe("mutate");
+    expect(mutate("cd /main && echo x > f.txt")).toBe("mutate");
+    // `cd` without an operand is shell-noise, not a read: fail closed
+    // (`cd; ls` gives an empty operand segment).
+    expect(mutate("cd; ls")).toBe("mutate");
+    expect(mutate("cd && ls")).toBe("mutate");
+    // Fence identity markers are still unknown tokens → mutate.
+    expect(mutate("cd -- /main && head -5 README.md")).toBe("mutate");
+    expect(mutate("cd --help")).toBe("mutate");
+    expect(mutate("cd -")).toBe("mutate");
+    expect(mutate("cd ~ && head -5 README.md")).toBe("mutate");
+    // Newlines are separators for this classifier (the same split the hard-wall
+    // scan uses): `head a\nrm -rf b` is two segments, and the second one is an
+    // unknown command, so the compound fails closed instead of riding out on
+    // the first segment's read verdict.
+    expect(mutate("head -5 README.md\nrm -rf /main")).toBe("mutate");
+    expect(read("head -5 README.md\ncat package.json")).toBe("read");
     // empty / non-string command → fail-closed mutate
     expect(
       classifyCall({ id: "e", name: "bash", input: { command: "" } })
@@ -569,6 +669,22 @@ describe("classifyCall", () => {
   // gate's workspace-write classifier must not relax that table.
   it("validateReadonlyCommand still rejects 'ls 2>&1' (bash readonly mode unchanged)", () => {
     expect(() => validateReadonlyCommand("ls 2>&1")).toThrow();
+  });
+
+  // The gate reuses `validateSegmentPolicy` (the shared allowlist + flag
+  // tables) but NOT `validateReadonlyCommand`. Widening the gate's own
+  // read-classification must therefore leave readonly MODE's stricter
+  // semantics — no `>` at all, no bare `&`, no `cd` — byte-identical.
+  it("readonly mode is not widened by the gate's cd/sed read forms", () => {
+    for (const command of [
+      "cd /main && head -5 README.md",
+      "cd /main && sed -n '1,20p' README.md",
+      "cd ..; pwd",
+    ]) {
+      expect(() => validateReadonlyCommand(command)).toThrow(
+        ReadonlyViolationError
+      );
+    }
   });
 
   it("classifies other tools (read_file / grep / glob / web_fetch …) as read", () => {
@@ -811,6 +927,55 @@ describe("createWorktreeIsolationExecutor", () => {
     expect(second[0]!.message).toContain(CREATE_WORKTREE_TOOL_HINT);
     expect(provisioned).toBe(0);
     expect(calls).toHaveLength(0);
+  });
+
+  // T3 acceptance (plans/tui-durable-open.md, T1 sentence 3): with isolation
+  // ON and the session still unbound, reading the main checkout through
+  // `cd <main> && <read>` must reach the tool — ADR-0037 §1 keeps read paths
+  // on the main checkout — while any write behind the same `cd`, and any
+  // unknown first token, still hits the unbound-mutate notice verbatim.
+  it("T3 acceptance — unbound session runs `cd <main> && head/sed -n …` but still blocks `cd <main> && sed -i …` and unknown tokens", async () => {
+    const bashCall = (id: string, command: string): ToolCall => ({
+      id,
+      name: "bash",
+      input: { command },
+    });
+    const { inner, calls } = fakeInner();
+    const gate = createWorktreeIsolationExecutor({
+      enabled: true,
+      liveTaskRoot: createLiveTaskRoot("/main"),
+      provision: async () => {
+        throw new Error("must not provision for reads");
+      },
+      inner,
+    });
+
+    const reads = await gate.executeAll([
+      bashCall("r1", "cd /main && head -5 README.md"),
+      bashCall("r2", "cd /main && sed -n '1,20p' README.md"),
+    ]);
+    expect(reads.map((r) => r.kind)).toEqual(["ok", "ok"]);
+    // the read calls reached the tools — they are not isolation-blocked
+    expect(calls.flatMap((c) => c.calls.map((x) => x.id))).toEqual([
+      "r1",
+      "r2",
+    ]);
+
+    const blocked = await gate.executeAll([
+      bashCall("m1", "cd /main && sed -i 's/a/b/' README.md"),
+      bashCall("m2", "cd /main && frobnicate --now"),
+    ]);
+    for (const result of blocked) {
+      expect(result.kind).toBe("execution_failed");
+    }
+    // existing unbound-mutate notice, verbatim (pinned by the text test above)
+    expect(blocked[0]!.message).toBe(unboundMutateNotice());
+    expect(blocked[1]!.message).toBe(unboundMutateNotice());
+    // no write behind the cd reached the tools
+    expect(calls.flatMap((c) => c.calls.map((x) => x.id))).toEqual([
+      "r1",
+      "r2",
+    ]);
   });
 
   it("unboundMutateNotice is actionable: conditional + re-issue-this-call semantics, plus the SC7 substring bans (spec casual-ask-context-hygiene SC7, amended 2026-09-08)", () => {

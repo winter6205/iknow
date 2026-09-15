@@ -18,6 +18,15 @@ export const DEFAULT_MAX_OUTPUT_CODE_POINTS = 12_000;
 
 const DEFAULT_KILL_GRACE_MS = 2_000;
 
+/**
+ * SIGKILL 之后等进程组消失的额外窗口。组拆除是 best-effort：等不到就
+ * 放手，否则一个不可杀的组会把调用方永久挂住。
+ */
+const GROUP_SETTLE_MS = 250;
+
+/** 进程组消失轮询间隔。 */
+const GROUP_POLL_MS = 20;
+
 /** 信号→退出码映射：shell 约定 = 128 + signal number。 */
 export const SIGNAL_EXIT_CODES: Readonly<Record<string, number>> =
   Object.freeze({
@@ -90,6 +99,106 @@ export function truncateByCodePoint(text: string, max: number): string {
 }
 
 /**
+ * 拆除序列：SIGTERM → 宽限 → SIGKILL → 等组清空。
+ *
+ * Why close 不再解除升级：`close` 只在直系 child 退出且它的 stdio 管道关闭
+ * 时到达。后代可能既不持有管道（`> /dev/null` / stdio:"ignore"）又对 SIGTERM
+ * 免疫（`trap '' TERM` / 自带 handler / 不可中断的系统调用）—— 这种形状下
+ * close 到达时同组后代仍在跑。旧实现一 close 就 clearTimeout，把 SIGKILL
+ * 兜底连同调用方的等待一起撤掉，后代于是继续走完整棵树（2026-09-14 事故：
+ * `find /` 在工具调用返回 cancelled 后仍走了约 232s）。拆除既已请求，就必须
+ * 等组真的空了再交付 cancelled。
+ *
+ * 快路径：可被 TERM 带走的树在宽限期内就清空，立即结算（不白等 2s）。
+ */
+function createTreeTeardown(
+  child: ChildProcess,
+  graceMs: number,
+  settle: (outcome: SpawnResult) => void,
+  killedOutcome: () => SpawnResult
+): {
+  stop: () => void;
+  close: (outcome: SpawnResult) => void;
+  failed: () => void;
+} {
+  let killTimer: NodeJS.Timeout | undefined;
+  let settled = false;
+  /** 直系 child 的 close 回执；进程组清空前不据此结算（见 finish）。 */
+  let closeOutcome: SpawnResult | undefined;
+  /** 拆除请求已发出（abort → SIGTERM 已发）。 */
+  let teardownRequested = false;
+  /** 进程组已确认清空（或已判定不可再治理）—— 拆除链到此收口。 */
+  let groupClear = false;
+
+  /**
+   * 单点结算（single-wins）：直系 child 已回执即兑现。调用方只在「拆除链
+   * 已收口」时进入这里 —— 组是否清空的判断留在调用点，本函数不重复判定。
+   */
+  const finish = (): void => {
+    // EXIT: 已结算，或直系 child 尚未回执（无 close 可兑现）。
+    if (settled || closeOutcome === undefined) return;
+    settled = true;
+    if (killTimer !== undefined) clearTimeout(killTimer);
+    settle(closeOutcome);
+  };
+
+  /**
+   * close 到达时的收口：未请求拆除（自然退出）、拆除链已收口、或组当场
+   * 已空 → 结算；否则把等待交给已 armed 的 SIGKILL 升级链。
+   */
+  const close = (outcome: SpawnResult): void => {
+    closeOutcome = outcome;
+    const pid = child.pid;
+    // EXIT: 无拆除在飞 → 自然退出；拆除已收口 / 组当场已空 / pid 不可得
+    // → 无升级链需要等待，直接结算。
+    if (
+      !teardownRequested ||
+      groupClear ||
+      pid === undefined ||
+      !groupAlive(pid)
+    ) {
+      finish();
+    }
+  };
+
+  const stop = (): void => {
+    const pid = child.pid;
+    // EXIT: 幂等 —— 已结算或拆除已在飞，或 pid 不可得（无处可杀）。
+    if (settled || teardownRequested || pid === undefined) return;
+    teardownRequested = true;
+    killProcessGroupLocal(pid, "SIGTERM");
+    killTimer = setTimeout(() => {
+      killProcessGroupLocal(pid, "SIGKILL");
+      // SIGKILL 免疫不了，但落到组上要一拍；窗口耗尽即无条件收口 —— 不可杀
+      // 的组（D 态）不该把调用方挂死。
+      void waitForGroupGone(pid, GROUP_SETTLE_MS).then(() => {
+        groupClear = true;
+        // close 尚未到达（不可中断的 child）→ 用 SIGKILL 结果兜底，否则
+        // promise 永远悬着。
+        closeOutcome ??= killedOutcome();
+        finish();
+      });
+    }, graceMs);
+    // 刻意不 unref：close 早于组清空时（正是事故形状），这根 timer 是唯一的
+    // 结算路径 —— unref 掉会让调用方的 promise 永远悬着。
+    void waitForGroupGone(pid, graceMs).then((gone) => {
+      // EXIT: 宽限期内组未清空 → 升级链（killTimer）接手结算。
+      if (!gone) return; // 升级链接手
+      groupClear = true;
+      finish();
+    });
+  };
+
+  /** spawn 失败：撤掉在飞的 timer，让调用方走 reject 而不是被结算路径抢先。 */
+  const failed = (): void => {
+    settled = true;
+    if (killTimer !== undefined) clearTimeout(killTimer);
+  };
+
+  return { stop, close, failed };
+}
+
+/**
  * Spawn in a detached process group so cancellation can stop the whole tree.
  * The returned promise centralizes output collection and the TERM-to-KILL
  * escalation shared by sandbox consumers.
@@ -107,8 +216,7 @@ export function spawnWithStopSignal(
   });
   let stdout = "";
   let stderr = "";
-  let killTimer: NodeJS.Timeout | undefined;
-  let settled = false;
+  let resolveDone: (r: SpawnResult) => void = () => undefined;
 
   child.stdout?.setEncoding("utf8");
   child.stderr?.setEncoding("utf8");
@@ -119,35 +227,61 @@ export function spawnWithStopSignal(
     stderr += chunk;
   });
 
-  const stopTree = (): void => {
-    const pid = child.pid;
-    if (settled || pid === undefined) return;
-    killProcessGroupLocal(pid, "SIGTERM");
-    killTimer = setTimeout(() => {
-      if (!settled) killProcessGroupLocal(pid, "SIGKILL");
-    }, options.killGraceMs ?? DEFAULT_KILL_GRACE_MS);
-    killTimer.unref();
-  };
+  // 拆除序列收在一处：**仅本前台 exec 路径**（abort / tier timeout / 自然退出）
+  // 共用，两边不会各自漂移。后台 bash_stop 走另一条实现
+  // （background/manager.ts + sandbox/server/spawn.ts 的 createStopHandle），
+  // 不在本函数覆盖范围内。
+  const teardown = createTreeTeardown(
+    child,
+    options.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
+    (outcome) => {
+      options.signal?.removeEventListener("abort", teardown.stop);
+      resolveDone(outcome);
+    },
+    () => ({ code: null, signal: "SIGKILL", stdout, stderr })
+  );
 
-  if (options.signal?.aborted) stopTree();
-  else options.signal?.addEventListener("abort", stopTree, { once: true });
-
-  const done = new Promise<SpawnResult>((resolveDone, rejectDone) => {
+  const done = new Promise<SpawnResult>((resolve, reject) => {
+    resolveDone = resolve;
     child.once("error", (error) => {
-      settled = true;
-      if (killTimer !== undefined) clearTimeout(killTimer);
-      options.signal?.removeEventListener("abort", stopTree);
-      rejectDone(error);
+      teardown.failed();
+      options.signal?.removeEventListener("abort", teardown.stop);
+      reject(error);
     });
     child.once("close", (code, signal) => {
-      settled = true;
-      if (killTimer !== undefined) clearTimeout(killTimer);
-      options.signal?.removeEventListener("abort", stopTree);
-      resolveDone({ code, signal, stdout, stderr });
+      teardown.close({ code, signal, stdout, stderr });
     });
   });
 
+  if (options.signal?.aborted) teardown.stop();
+  else options.signal?.addEventListener("abort", teardown.stop, { once: true });
+
   return { child, done };
+}
+
+/** 进程组探活：任一组员在场即 true（EPERM 无法判定 → 保守视为在场）。 */
+function groupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    // EXIT: ESRCH = 组已不存在 → false；其余 errno（EPERM 等）无法判定 →
+    // 保守视为在场，让升级链继续持有结算权。
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/**
+ * 有界轮询到进程组消失：窗口内清空 → true；窗口耗尽 → 以最后一次探活为准。
+ * 组拆除是 best-effort，永远有界，不把调用方挂死在一个不可杀的组上。
+ */
+async function waitForGroupGone(pgid: number, capMs: number): Promise<boolean> {
+  const deadline = Date.now() + capMs;
+  while (Date.now() < deadline) {
+    if (!groupAlive(pgid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, GROUP_POLL_MS));
+  }
+  return !groupAlive(pgid);
 }
 
 export function signalExitCode(signal: NodeJS.Signals | null): number {

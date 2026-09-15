@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -191,7 +192,84 @@ describe("bash — cancellation", () => {
 
     await waitForProcessExit(childPid);
   }, 5_000);
+
+  /**
+   * 钉住的不变式：pipe-free + SIGTERM-immune 的后代不得活过一次已取消的调用。
+   *
+   * 理由：`close` 是「直系 child 及其 stdio 管道关闭」的事件，不是「进程组清空」
+   * 的事件。后代既不持有管道（`> /dev/null` / stdio:"ignore"）又对 SIGTERM 免疫
+   * （`trap '' TERM`、自带 handler、不可中断的系统调用）时，直系 child 一退
+   * `close` 立即到达，而同一进程组里的后代仍在跑。断言面因此必须是「工具调用
+   * 交付之后，后代进程本身消失」，而不是「直系 child 消失」—— 后者在这类形状下
+   * 本来就成立，钉不住本不变式。
+   *
+   * 确定性：shell 阻塞在 `wait`，后代不停就不会退出，所以 abort 一定落在
+   * 调用真正在飞的时候；后代先装好 SIGTERM handler 再写 pid 文件，故
+   * waitForPidFile 同时是「handler 已就位」的屏障（不用固定 sleep）。
+   */
+  it("leaves no surviving descendant after an abort, when the descendant ignores SIGTERM and holds no pipe", async () => {
+    const cwd = await makeScratch("bash-cancel-escapee-");
+    const pidFile = join(cwd, "desc.pid");
+    const controller = new AbortController();
+    const tool = createBashTool(cwd);
+    const execution = tool.handler(
+      {
+        command: [
+          // 免疫 SIGTERM + 不持有 stdio 管道 + 先装 handler 再落 pid。
+          'node -e \'process.on("SIGTERM",()=>{});require("fs").writeFileSync("desc.pid",String(process.pid));setInterval(()=>{},1000)\' > /dev/null 2>&1 &',
+          "wait",
+        ].join("\n"),
+      },
+      { signal: controller.signal }
+    );
+    const descendantPid = await waitForPidFile(pidFile);
+    assert.equal(
+      await descendantRunning(descendantPid),
+      true,
+      "fixture must have a live, SIGTERM-immune descendant before the abort"
+    );
+
+    controller.abort();
+    await execution;
+
+    // 调用已交付 —— 后代必须已经（或即将）消失。轮询上限内仍为活态即判失败；
+    // Z（zombie，内核已终止只差收割）算已死。
+    assert.equal(
+      await waitForDescendantGone(descendantPid),
+      true,
+      `descendant ${descendantPid} survived the cancelled call`
+    );
+  }, 15_000);
 });
+
+/** 活态判定：Z（zombie）与 ESRCH / 无 /proc 条目都算「不在运行」。 */
+async function descendantRunning(pid: number): Promise<boolean> {
+  const state = readProcState(pid);
+  return state !== undefined && state !== "Z";
+}
+
+/**
+ * 有界轮询后代消失（每 20ms 一次，上限 5s）。不用固定 sleep：进程组信号
+ * 与收割是异步的，固定等待要么伪绿（等待过长）要么 flaky（等待过短）。
+ */
+async function waitForDescendantGone(pid: number): Promise<boolean> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (!(await descendantRunning(pid))) return true;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return false;
+}
+
+/** /proc/<pid>/stat 的 state 字段（第 3 字段；comm 可能含空格故先跳过括号）。 */
+function readProcState(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
+  } catch {
+    return undefined;
+  }
+}
 
 interface BashResult {
   readonly code: number;
