@@ -35,7 +35,11 @@ import type { ValidateFunction } from "ajv";
 import { CancellationTokenSource } from "vscode-jsonrpc/node";
 import type { CancellationToken } from "vscode-jsonrpc/node";
 
-import { getClientDetailed } from "../../lsp/client.js";
+import {
+  getClientDetailed,
+  isMethodNotFoundError,
+  serverDeclaresUnsupported,
+} from "../../lsp/client.js";
 import type { LspClient, LspClientFailure } from "../../lsp/client.js";
 import { SERVERS } from "../../lsp/server.js";
 import type { LspCtx } from "../../lsp/types.js";
@@ -197,12 +201,38 @@ export function renderNoServer(
 }
 
 /**
+ * server 未实现该 method 的哨兵（spec 251「缺方法哨兵」）。**不是**失败哨兵：
+ * 能力缺口是 server 的固有特性（yaml/json 缺 references、callHierarchy 等），
+ * 模型据此改用别的工具即可。契约 Y1：纯字符串。
+ *
+ * 且**不算 spawn 失败** —— 与 renderNoServer 的 spawn-failed 分层不同：
+ * 连接与子进程都活着，同类其它 method 照常可用，故不写 broken、不逐出 client。
+ */
+export function renderMethodNotFound(
+  method: string,
+  serverId?: string
+): string {
+  const who = serverId !== undefined ? ` ${serverId}` : "";
+  return `(LSP server${who} does not implement ${method}; use another tool for this query)`;
+}
+
+/** 缺方法哨兵的判定（probe 视为 skip，不计 FAIL）。 */
+export function isMethodNotFoundSentinel(result: unknown): boolean {
+  return (
+    typeof result === "string" &&
+    result.startsWith("(LSP server") &&
+    result.includes(" does not implement ")
+  );
+}
+
+/**
  * probe / 工具层共用：分层哨兵是否表示「本次 LSP 调用失败」。
  * no-server / no-root / spawn-failed 三条文案前缀都算 FAIL（B3 closeout）。
- * 成功 hover JSON、diagnostics XML、空串不算。
+ * 成功 hover JSON、diagnostics XML、空串不算；缺方法哨兵**不算**（见上）。
  */
 export function isLspFailureSentinel(result: unknown): result is string {
   if (typeof result !== "string" || result.length === 0) return false;
+  if (isMethodNotFoundSentinel(result)) return false;
   if (result.startsWith("(no LSP server configured")) return true;
   if (result.startsWith("(no LSP project root found")) return true;
   return result.startsWith("(LSP server ") && result.includes(" unavailable");
@@ -324,6 +354,33 @@ interface OperationSpec {
 }
 
 /**
+ * 发一次 LSP request，把「server 未实现该方法」（`-32601`）转成缺方法哨兵
+ * （spec 251「缺方法哨兵」）：不算 spawn 失败、不抛错 —— 能力缺口是 server
+ * 的固有特性，模型据此改用别的工具即可。其余错误原样上抛（含超时，由调用
+ * 方的 `cancel.timedOut()` 分流）。
+ */
+export async function requestOrMethodNotFoundSentinel(
+  client: LspClient,
+  method: string,
+  params: unknown,
+  token: CancellationToken,
+  serverId?: string
+): Promise<unknown> {
+  // server 在 initialize 里显式声明 `provider: false` → 确定没有，不必发。
+  // 声明**缺席**不在此列（缺席 ≠ 不支持，见 client.ts serverDeclaresUnsupported）。
+  if (serverDeclaresUnsupported(client.getServerCapabilities(), method)) {
+    return renderMethodNotFound(method, serverId);
+  }
+  try {
+    return await client.sendRequest(method, params, token);
+  } catch (err) {
+    if (isMethodNotFoundError(err))
+      return renderMethodNotFound(method, serverId);
+    throw err;
+  }
+}
+
+/**
  * per-request 取消/超时控制（lsp-optimization plan T1 + 二期 B7）：
  *   - **超时**：timer 到 `timeoutMs`（ctx.requestTimeoutMs，缺省
  *     DEFAULT_LSP_REQUEST_TIMEOUT_MS）后 `source.cancel()`。
@@ -435,31 +492,37 @@ function makeOperationTool(ctx: LspCtx, spec: OperationSpec): AciToolDef {
           params.file
         );
       }
-      // tsserver 对未打开文件不建 project → 符号类操作返空。先 ensureOpen
-      // 把目标文件加进 server 的 project，再发请求（per-connection 幂等）。
-      // file 缺省的工作区级查询无文件可打开，跳过。
-      if (params.file !== undefined) await client.ensureOpen(params.file);
+      // tsserver 对未打开文件不建 project → 符号类操作返空。请求级作用域把
+      // didOpen 窗口罩住整次请求（进入开、退出关，含抛错路径）。file 缺省的
+      // 工作区级查询无文件可打开，跳过。
       // interruptBehavior="cancel" + per-request 超时（plan T1 + 二期 B7）：
       // 统一经 CancellationTokenSource 桥接，abort / 超时都走 $/cancelRequest，
       // 不杀 tsserver（Q2/A9）。超时上限来自 ctx.requestTimeoutMs（缺省 20s）。
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
-      let result: unknown;
-      try {
-        result = await client.sendRequest(
-          spec.method,
-          spec.buildParams(params),
-          cancel.token
-        );
-      } catch (err) {
-        // 超时路径：token cancel 已让 sendRequest reject（RequestCancelled），
-        // 转译成模型可读的 ToolExecutionError；abort / 业务错误原样上抛。
-        if (cancel.timedOut())
-          throw timeoutError(spec.name, spec.method, timeoutMs);
-        throw err;
-      } finally {
-        cancel.dispose();
-      }
+      const run = async (): Promise<unknown> => {
+        try {
+          // 缺方法（-32601）→ 哨兵字符串（能力缺口，非失败）；超时 → 下方转译。
+          return await requestOrMethodNotFoundSentinel(
+            client,
+            spec.method,
+            spec.buildParams(params),
+            cancel.token
+          );
+        } catch (err) {
+          // 超时路径：token cancel 已让 sendRequest reject（RequestCancelled），
+          // 转译成模型可读的 ToolExecutionError；abort / 业务错误原样上抛。
+          if (cancel.timedOut())
+            throw timeoutError(spec.name, spec.method, timeoutMs);
+          throw err;
+        } finally {
+          cancel.dispose();
+        }
+      };
+      const result =
+        params.file !== undefined
+          ? await client.withDocumentOpen(params.file, run)
+          : await run();
       return stringifyResult(result);
     },
   });
@@ -498,29 +561,40 @@ function makeCallHierarchyCallTool(
           params.file
         );
       }
-      // 同 makeOperationTool：先 ensureOpen 建 project，再 prepare + forward。
-      await client.ensureOpen(params.file);
+      // 同 makeOperationTool：请求级作用域罩住 prepare + forward 两步（didOpen
+      // 窗口覆盖整次请求，退出即关）。
       // per-request 超时 + abort 桥接（plan T1 + 二期 B7，同 makeOperationTool）。
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       let timedOutMethod = "textDocument/prepareCallHierarchy";
       try {
-        const prepared = await client.sendRequest(
-          "textDocument/prepareCallHierarchy",
-          positionParams(params.file, params.line, params.character),
-          cancel.token
-        );
-        if (cancel.timedOut()) {
-          throw timeoutError(name, timedOutMethod, timeoutMs);
-        }
-        const items = extractCallHierarchyItems(prepared);
-        const item = items[0];
-        if (!item) return stringifyResult([]);
-        timedOutMethod = method;
-        const result = await client.sendRequest(method, { item }, cancel.token);
-        if (cancel.timedOut())
-          throw timeoutError(name, timedOutMethod, timeoutMs);
-        return stringifyResult(result);
+        return await client.withDocumentOpen(params.file, async () => {
+          const prepared = await requestOrMethodNotFoundSentinel(
+            client,
+            "textDocument/prepareCallHierarchy",
+            positionParams(params.file, params.line, params.character),
+            cancel.token
+          );
+          if (cancel.timedOut()) {
+            throw timeoutError(name, timedOutMethod, timeoutMs);
+          }
+          // 缺方法哨兵：server 没有 call hierarchy —— 直接透传（不再 forward）。
+          if (isMethodNotFoundSentinel(prepared)) return prepared;
+          const items = extractCallHierarchyItems(prepared);
+          const item = items[0];
+          if (!item) return stringifyResult([]);
+          timedOutMethod = method;
+          const result = await requestOrMethodNotFoundSentinel(
+            client,
+            method,
+            { item },
+            cancel.token
+          );
+          if (cancel.timedOut())
+            throw timeoutError(name, timedOutMethod, timeoutMs);
+          // stringifyResult 对字符串原样透传（哨兵与正常字符串响应同路）。
+          return stringifyResult(result);
+        });
       } catch (err) {
         if (cancel.timedOut()) {
           throw timeoutError(name, timedOutMethod, timeoutMs);
@@ -621,15 +695,17 @@ export function makeDiagnosticsTool(
           );
           continue;
         }
-        // push diagnostics 只在文件打开后才到达 → 必须先 ensureOpen,否则
-        // getDiagnosticsEntry 永远取到 undefined、render 出空 <diagnostics/> 标签。
-        await client.ensureOpen(file);
+        // push diagnostics 只在文件打开后才到达 → 整个「打开 + 等待 + 读取」
+        // 必须在同一个请求级作用域内，否则 didClose 会先丢掉诊断缓存、
+        // getDiagnosticsEntry 永远取到 undefined、render 出空标签。
         const uri = pathToFileURL(file).href;
-        const items = await waitForDiagnostics(
-          client,
-          uri,
-          ctx.diagnosticsWaitMs ?? DIAGNOSTICS_WAIT_MS,
-          execCtx?.signal
+        const items = await client.withDocumentOpen(file, () =>
+          waitForDiagnostics(
+            client,
+            uri,
+            ctx.diagnosticsWaitMs ?? DIAGNOSTICS_WAIT_MS,
+            execCtx?.signal
+          )
         );
         segments.push(renderDiagnostics(file, items ?? []));
       }

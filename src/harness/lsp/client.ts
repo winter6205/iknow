@@ -16,12 +16,14 @@
  * InstanceContext：ctx 由调用方（handler 层）持有 `{ directory }`。
  *
  * **取消语义（Q2/A9）**：中断走 JSON-RPC `$/cancelRequest`，**绝不终止
- * tsserver 子进程**。工具路径不存在任何进程终止调用；唯一终止点是
- * `LspClientPool.shutdownAll()`，且只允许在**宿主进程退出缝**调用
- * （run.tsx shutdownExtensions / combinedShutdown、cli.ts chatProcessShutdown
- * —— 引擎 shutdown 不在其列：chat rebind 收口旧引擎发生在进程中途，一旦
- * latch 共享池，重建引擎的 LSP 将永久 spawn-failed）。常规工具操作只做
- * `connection.dispose()`（释放连接，不涉子进程信号）。
+ * tsserver 子进程**。工具路径不存在任何进程终止调用。进程终止点分两类，
+ * 都在池上：回收缝（`sweepIdleClients` / worktree rebind stale sweep /
+ * `disposeAll`）终结被回收 entry 的子进程，可在进程中途调用；`shutdownAll()`
+ * 额外 latch，只允许在**宿主进程退出缝**调用（run.tsx shutdownExtensions /
+ * combinedShutdown、cli.ts chatProcessShutdown —— 引擎 shutdown 不在其列：
+ * chat rebind 收口旧引擎发生在进程中途，一旦 latch 共享池，重建引擎的 LSP
+ * 将永久 spawn-failed）。常规工具操作只做 `connection.dispose()`（释放连接，
+ * 不涉子进程信号）。
  *
  * **编辑同步 + 自愈（lsp-optimization plan T1）**：`notifyChange(file)` 把
  * edit_file 写盘后的最新文本经标准 `textDocument/didChange`（full sync）同步
@@ -31,7 +33,8 @@
  * 距离 abort 桥接与错误转译更近，比在 sendRequest 内包 race 更可控。
  */
 import { pathToFileURL } from "node:url";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 
 import {
@@ -56,7 +59,7 @@ export const DEFAULT_LSP_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 export interface LspClient {
   /** 底层 vscode-jsonrpc `MessageConnection`（cancel 等进阶用法可直达）。 */
   readonly connection: MessageConnection;
-  /** tsserver 子进程句柄（仅诊断/生命周期观测用；终止走 pool.shutdownAll）。 */
+  /** tsserver 子进程句柄（仅诊断/生命周期观测用；终止走池的回收/退出缝）。 */
   readonly process: ChildProcess;
   /**
    * JSON-RPC request：透传 method/params，返回未知 payload。
@@ -74,9 +77,22 @@ export interface LspClient {
   /**
    * 幂等打开文件（textDocument/didOpen）：tsserver 对未打开文件不建 project，
    * 符号类操作全返空。同一文件重复调用只发一次 didOpen（per-connection 缓存）。
-   * handler 层在每次请求前调用本方法，保证目标文件已建 project。
+   *
+   * **低层 API —— 裸 ensureOpen 不释放打开**：调用后该 uri 保持打开直到
+   * connection 结束。请求路径请用 `withDocumentOpen`（两次调用之间不对
+   * server 保持打开，见 spec 251「打开文档生命周期」）。本方法保留给
+   * 「打开即目的」的用途（warmup 预热 project 加载）。
    */
   ensureOpen(file: string): Promise<void>;
+  /**
+   * 请求级文档作用域（spec 251「打开文档生命周期」）：进入时按需
+   * `didOpen`（refcount++），退出时 refcount-- 归零则 `didClose` 并丢弃该
+   * uri 的打开记录与诊断缓存。`fn` 抛错也走归零（try/finally）——
+   * timeout / RPC error / ToolExecutionError 都不泄漏打开状态。
+   *
+   * 并发：同一 uri 的重叠作用域共享一次 didOpen，最后一个退出者发 didClose。
+   */
+  withDocumentOpen<T>(file: string, fn: () => Promise<T>): Promise<T>;
   /**
    * 把磁盘上的最新文本同步给 server（lsp-optimization plan T1）：
    *   - uri 未打开过 → 等价 `ensureOpen(file)`（didOpen 读到的即最新文本）；
@@ -105,7 +121,24 @@ export interface LspClient {
    * pushVersion 追平 openVersion。
    */
   getOpenVersion(uri: string): number | undefined;
-  /** 释放连接（不杀进程；进程生命周期由 pool.shutdownAll 收口）。 */
+  /**
+   * 该 uri 最近一次同步给 server 的文本指纹（内容身份，未打开 → undefined）。
+   * 请求级打开下 LSP version 每次 didOpen 都从 1 起重来，版本号无法区分
+   * 「同一文件的两次打开」；跨请求的缓存键（符号树）要用指纹而非版本号。
+   */
+  getDocumentFingerprint(uri: string): string | undefined;
+  /**
+   * `initialize` 响应里的 server capabilities（原样快照）。
+   *
+   * **缺席 ≠ 不支持**：typescript-language-server 实测不声明
+   * `callHierarchyProvider` 却实现了 call hierarchy —— 据此裁剪会误伤。
+   * 只有 server **显式声明 `false`** 才算「不支持，不发 RPC」。
+   */
+  getServerCapabilities(): Record<string, unknown>;
+  /**
+   * 释放连接（不杀进程）。进程生命周期由池的回收缝与退出缝收口 ——
+   * 「关连接」与「终结子进程」是两件事，client 只承担前者。
+   */
   dispose(): void;
 }
 
@@ -128,9 +161,11 @@ export type LspClientFailure = {
  * 入 pool → `poolOf` 落 defaultPool；warmup spawn 缓存同源，进程内一份 ——
  * per-engine 池会让多引擎/测试场景每次装配重新 spawn language server）；
  * `ctx.pool` 注入位供测试隔离（createLspClientPool）。
- * 终止语义：`shutdownAll()` 会单向 latch（此后 getClient 一律 spawn-failed），
- * **只允许宿主进程退出缝调用**（shutdownDefaultLspPool 消费方，见文件头
- * 取消语义注）——引擎 shutdown / 池重建路径不得调用。
+ * 终止语义：回收缝（idle sweep / rebind stale sweep / `disposeAll`）终结被
+ * 回收 entry 的子进程，可在进程中途调用；`shutdownAll()` 在此基础上单向
+ * latch（此后 getClient 一律 spawn-failed），**只允许宿主进程退出缝调用**
+ * （shutdownDefaultLspPool 消费方，见文件头取消语义注）——引擎 shutdown /
+ * 池重建路径不得调用。
  */
 export class LspClientPool {
   /** key = `${root}:${server.id}` → 已建立并复用的客户端。 */
@@ -138,14 +173,71 @@ export class LspClientPool {
   readonly broken = new Map<string, "spawn-failed">();
   readonly inflight = new Map<string, Promise<LspClient | undefined>>();
   readonly lastUsedAt = new Map<string, number>();
+
   /**
    * T8（D5）: 上次见到的 `directoryCell` 读值。`getClient` 入口若 cell
    * 当前值 ≠ 该值，视为发生过 rebind —— 把所有 root 等于旧 taskRoot 的
-   * 同 server entry 视为 stale，显式 `dispose()` 并逐出。
+   * entry 视为 stale，终结子进程并逐出（`sweepStaleForRebind`）。
    *
    * `undefined` ≡ 首调（未跟踪），不做 sweep —— 与「未发生过 flip」等价。
    */
   lastSeenTaskRoot: string | undefined = undefined;
+
+  /**
+   * 终结一个 entry：关连接 + SIGTERM 子进程 + 逐出缓存。三条回收缝与
+   * `shutdownAll` 共用，避免逐处复制。
+   *
+   * 关连接不释放子进程的 stdio 管道句柄，事件循环因此排不空 —— 被回收的
+   * 子进程必须显式 SIGTERM，否则活到宿主退出（长 session / rebind 下即
+   * 进程泄漏）。
+   */
+  private terminate(key: string, client: LspClient): void {
+    client.dispose();
+    // 进程已死时 kill 返回 false，无害。
+    client.process.kill("SIGTERM");
+    this.evictCachedClient(key, client);
+  }
+
+  /**
+   * T8（D5）: rebind 检测 —— 当 `directoryCell` 在场且本次读到的值与上次
+   * 记录的 `lastSeenTaskRoot` 不一致时，视为 taskRoot 翻动。把所有 root
+   * 等于**旧** taskRoot 的 entry 终结（关连接 + SIGTERM 子进程）并逐出；
+   * 同步更新 `lastSeenTaskRoot` 为当前值。
+   *
+   * 选择 lazy sweep（vs flip event handler）原因（plan §6 T8 收口时机决议）：
+   *  - 不需要订阅基础设施，单点 `getClient` 内处理；
+   *  - 无活动调用 → 无 sweep 开销（un-rebind 路径零副作用，与 byte-identical
+   *    守门对齐 —— `lastSeenTaskRoot === currentValue` 早返）；
+   *  - rebind 后第一次跨根调用就触发收口，旧根 client 在调用栈内被终结，
+   *    与「不写旧根」合约自然耦合（写路径必先过 `getClient`）。
+   *
+   * 扫描按 **root === 旧 taskRoot** 全量进行，不带 serverId 过滤：cell 一翻
+   * `lastSeenTaskRoot` 即更新，被过滤掉的 server 在旧根下的 client 从此再也
+   * 不会被扫到 —— 多语言会话里就是子进程泄漏。本次 dispatch 命中的 server 是
+   * 请求路由目标，不是回收范围。
+   *
+   * 注意：sweep 比对的是**旧 taskRoot**，不是 `ctx.directory` 上界 —— `server.root()`
+   * 返回的最近项目根 marker（`/root`）天然可以与 taskRoot（`/work`）不同，错误地
+   * 以 snapshot 上界 sweep 会清掉同 tree 下不同 LSP server root 的合法 client。
+   */
+  sweepStaleForRebind(currentTaskRoot: string): void {
+    const previous = this.lastSeenTaskRoot;
+    if (previous === undefined) {
+      this.lastSeenTaskRoot = currentTaskRoot;
+      return;
+    }
+    if (previous === currentTaskRoot) return;
+    // key = `${root}:${server.id}`；server.id 不含 ":"，故按最后一个分隔符
+    // 切出的 root 段与拼接侧同源，`/work` 不会误伤 `/work-2` 或
+    // 名字里带 ":" 的兄弟根。
+    for (const [key, client] of [...this.clients]) {
+      const sep = key.lastIndexOf(":");
+      if (sep === -1 || key.slice(0, sep) !== previous) continue;
+      this.terminate(key, client);
+      this.broken.delete(key);
+    }
+    this.lastSeenTaskRoot = currentTaskRoot;
+  }
 
   evictCachedClient(key: string, expected?: LspClient): void {
     if (expected !== undefined && this.clients.get(key) !== expected) return;
@@ -162,40 +254,39 @@ export class LspClientPool {
     )
       return;
     const now = Date.now();
-    for (const [key, client] of this.clients) {
+    for (const [key, client] of [...this.clients]) {
       if (now - (this.lastUsedAt.get(key) ?? 0) > idleTimeoutMs) {
-        client.dispose();
-        this.evictCachedClient(key, client);
+        this.terminate(key, client);
       }
     }
   }
 
+  /**
+   * 回收全部 entry 并清空失败记忆 / in-flight 表。**不 latch**：之后
+   * getClient 仍会重新 spawn（池仍可用，只是没有常驻子进程）。
+   */
   async disposeAll(): Promise<void> {
     for (const [key, client] of [...this.clients]) {
-      client.dispose();
-      this.evictCachedClient(key, client);
+      this.terminate(key, client);
     }
     this.broken.clear();
     this.inflight.clear();
   }
 
   /**
-   * 生命周期终态（引擎 shutdown / 退出路径专用）：dispose 连接 + SIGTERM
-   * 全部已 spawn 子进程 + 清空池。此后本池 getClientDetailed 一律
-   * spawn-failed，不再重建子进程（防退出路径 re-spawn 泄漏）。
+   * 生命周期终态（引擎 shutdown / 退出路径专用）：终结全部已 spawn 子进程
+   * + 清空池。此后本池 getClientDetailed 一律 spawn-failed，不再重建子进程
+   * （防退出路径 re-spawn 泄漏）。
    *
-   * 与 disposeAll 的差别：disposeAll 只关连接（idle sweep / rebind 收口用），
-   * 子进程存活 —— 而 stdio 管道句柄不随连接关闭释放，宿主事件循环排不空，
-   * 进程（如 TUI /quit 后）永远退不出去。必须显式 SIGTERM 终结子进程。
+   * 与 disposeAll 的差别只在这个 latch：disposeAll 回收后可再 spawn，
+   * 本方法之后不可。
    */
   shutDown = false;
 
   async shutdownAll(): Promise<void> {
     this.shutDown = true;
-    for (const client of [...this.clients.values()]) {
-      client.dispose();
-      // 进程已死时 kill 返回 false，无害。
-      client.process.kill("SIGTERM");
+    for (const [key, client] of [...this.clients]) {
+      this.terminate(key, client);
     }
     this.clients.clear();
     this.lastUsedAt.clear();
@@ -233,51 +324,6 @@ function poolOf(ctx: LspCtx): LspClientPool {
  */
 export function resolveDirectorySnapshot(ctx: LspCtx): string {
   return ctx.directoryCell ? ctx.directoryCell.read() : ctx.directory;
-}
-
-/**
- * T8（D5）: rebind 检测 —— 当 `directoryCell` 在场且本次读到的值与 pool
- * 上次记录的 `lastSeenTaskRoot` 不一致时，视为 taskRoot 翻动。把所有 root
- * 等于**旧** taskRoot 的同 server entry 显式 `dispose()` 并逐出；同步更新
- * `lastSeenTaskRoot` 为当前值。
- *
- * 选择 lazy sweep（vs flip event handler）原因（plan §6 T8 收口时机决议）：
- *  - 不需要订阅基础设施，单点 `getClient` 内处理；
- *  - 无活动调用 → 无 sweep 开销（un-rebind 路径零副作用，与 byte-identical
- *    守门对齐 —— `lastSeenTaskRoot === currentValue` 早返）；
- *  - rebind 后第一次跨根调用就触发收口，旧根 client 在调用栈内被 dispose，
- *    与「不写旧根」合约自然耦合（写路径必先过 `getClient`）。
- *
- * 注意：sweep 比对的是**旧 taskRoot**，不是 `ctx.directory` 上界 —— `server.root()`
- * 返回的最近项目根 marker（`/root`）天然可以与 taskRoot（`/work`）不同，错误地
- * 以 snapshot 上界 sweep 会清掉同 tree 下不同 LSP server root 的合法 client。
- */
-function sweepStaleClientsForRebind(
-  pool: LspClientPool,
-  serverId: string,
-  currentTaskRoot: string
-): void {
-  const previous = pool.lastSeenTaskRoot;
-  if (previous === undefined) {
-    pool.lastSeenTaskRoot = currentTaskRoot;
-    return;
-  }
-  if (previous === currentTaskRoot) return;
-  for (const [key, client] of [...pool.clients]) {
-    const sep = key.lastIndexOf(":");
-    if (sep === -1) continue;
-    const entryRoot = key.slice(0, sep);
-    const entryServerId = key.slice(sep + 1);
-    if (entryServerId !== serverId) continue;
-    if (entryRoot !== previous) continue;
-    // Stale: server process belongs to an older rebind root. dispose() 释放
-    // connection（不杀进程 — 与 lsp-optimization 二期 B7 注释同源；后续若有
-    // 需要可加 child.kill，但本批次不引入）。
-    client.dispose();
-    pool.evictCachedClient(key, client);
-    pool.broken.delete(key);
-  }
-  pool.lastSeenTaskRoot = currentTaskRoot;
 }
 
 /**
@@ -327,7 +373,7 @@ export async function getClientDetailed(
       ? { ...ctx, directory: directorySnapshot }
       : ctx;
   if (ctx.directoryCell !== undefined) {
-    sweepStaleClientsForRebind(pool, server.id, directorySnapshot);
+    pool.sweepStaleForRebind(directorySnapshot);
   }
   const root = await server.root(file, ctxForRoot);
   if (!root) return { failure: { reason: "no-root", serverId: server.id } };
@@ -412,12 +458,24 @@ async function spawnClient(
   // 必须先 connection.listen() 启动 reader 环，否则 sendRequest 抛
   // "Call listen() first."（vscode-jsonrpc 要求）。
   connection.listen();
-  await connection.sendRequest("initialize", {
+  const initializeResult = (await connection.sendRequest("initialize", {
     processId: child.pid ?? null,
     rootUri: pathToFileURL(root).href,
-    capabilities: {},
+    // 只广告 harness 实际会发的 method（spec 251「initialize 能力广告」）：
+    // 声明 textDocument 文本同步 + 诊断推送订阅；符号能力是 **server** 的
+    // 能力（走其 capabilities 响应），不在 client 侧声明。
+    capabilities: {
+      textDocument: {
+        synchronization: { dynamicRegistration: false },
+        publishDiagnostics: { relatedInformation: true },
+      },
+      workspace: { symbol: { dynamicRegistration: false } },
+    },
     initializationOptions: initialization,
-  });
+  })) as { capabilities?: Record<string, unknown> } | undefined;
+  // server 声明的能力快照：仅用于「显式 false → 不发」判定（缺席 ≠ 不支持，
+  // 见 getServerCapabilities 注释）。
+  const serverCapabilities = initializeResult?.capabilities ?? {};
 
   // LSP initialized 通知（生产正确性，spec 302-lsp-multilang § T6）：initialize
   // 响应后必须补发 `initialized` 通知，server 才算进入 ready 态。pyright 实测
@@ -451,51 +509,193 @@ async function spawnClient(
     }
   );
 
-  // opened URIs cache：同一 connection 内 ensureOpen(file) 幂等。
-  // tsserver per-project 维护打开文件表；重复 didOpen 同 uri 会触发版本断言，
-  // 因此本地缓存去重。仅作为同连接内的短缓存，进程退出即释放。
-  // 二期 B1：Set 升级 Map<uri, version>——didOpen 置 1，didChange 每次 +1，
-  // 与 versionCounters 合并（同源计数，避免双 Map 漂移）。
-  const openedUris = new Map<string, number>();
+  // 打开文档状态：同一 connection 内以 uri 为键的**单一**记录（version /
+  // refcount / pinned 同源，避免多 Map 漂移 —— 与二期 B1 合并 versionCounters
+  // 的纪律同源）。tsserver per-project 维护打开文件表，重复 didOpen 同 uri 会
+  // 触发版本断言，因此本地去重。
+  //
+  //   - `version`：didOpen 置 1，`didChange` 每次 +1（getOpenVersion 消费方：
+  //     符号缓存的版本键、诊断等待的新旧判定）；
+  //   - `refs`：请求级作用域持有数（withDocumentOpen 进出）；
+  //   - `pinned`：裸 `ensureOpen` 的永久持有（warmup 预热用）——被 pin 的 uri
+  //     不随作用域归零关闭（见 LspClient.ensureOpen doc）。
+  interface OpenDoc {
+    version: number;
+    refs: number;
+    pinned: boolean;
+    /** 最近一次同步给 server 的文本指纹（内容身份，见 getDocumentFingerprint）。 */
+    fingerprint: string;
+    /** 最近一次同步时磁盘 mtime（ms）。请求前据此判断盘外变更。 */
+    mtimeMs: number;
+  }
+  const openDocs = new Map<string, OpenDoc>();
 
-  const ensureOpen = async (file: string): Promise<void> => {
+  /**
+   * 文本指纹 = 内容身份（sha1）。用内容而非版本号作跨请求缓存键：
+   * didClose 后重新 didOpen 会把 LSP version 归 1，版本号无法区分「同一文件
+   * 的两次打开」；内容变了指纹才变 —— 消费方（符号树缓存）据此判定陈旧。
+   */
+  const fingerprintOf = (text: string): string =>
+    createHash("sha1").update(text, "utf8").digest("hex");
+
+  /** 文件 mtime（ms）；stat 失败（文件已删）→ NaN 表示「无法比对」。 */
+  const mtimeOf = async (file: string): Promise<number> => {
+    try {
+      return (await stat(file)).mtimeMs;
+    } catch {
+      // EXIT: stat 失败（文件已删 / 不可读）→ NaN 表示「无法比对」。调用方
+      // 据此跳过对齐：宁可少发一次 didChange，不可按空内容误发。
+      return Number.NaN;
+    }
+  };
+
+  /**
+   * 盘外变更对齐（spec 251「盘外变更对齐」）：无 watcher，在**发请求前**对
+   * 仍打开的 uri 比对 mtime —— 变了就重读全文发 full-sync didChange。
+   *
+   * 预热（裸 ensureOpen）pin 住的文档需要这条：它会跨多次请求保持打开，盘上
+   * 被外部改过（未经 edit_file / notifier）后 server 侧文本就陈旧了。请求级
+   * 作用域打开的文档刚读过盘，mtime 相同 → 跳过（不产生冗余 didChange）。
+   */
+  const alignToDisk = async (file: string): Promise<void> => {
     const uri = pathToFileURL(file).href;
-    if (openedUris.has(uri)) return;
-    // 先占位再加 await 再读文件：防止并发调用同文件时都通过 has 检查、
-    // 各发一次 didOpen(version:1 重复 → tsserver 版本断言)。readFile 失败
-    // 时回滚占位,保留"失败可重试"语义;didOpen 发送失败 → 仍认为已告知
-    // server,下次 sendRequest 由 tsserver 以"未打开"状态回退。
-    openedUris.set(uri, 1);
+    const entry = openDocs.get(uri);
+    if (!entry) return;
+    const current = await mtimeOf(file);
+    // NaN（读不到 mtime）不比对：宁可少发一次 didChange，不可误发空内容。
+    if (Number.isNaN(current) || current === entry.mtimeMs) return;
     let text: string;
     try {
       text = await readFile(file, "utf8");
-    } catch (err) {
-      openedUris.delete(uri);
-      throw err;
+    } catch {
+      // EXIT: 文件已被删 / 不可读 → 不发 didChange，保持 server 侧现状（旧文本
+      // 仍可服务），等下次打开或下次对齐再同步。
+      return;
     }
-    await connection.sendNotification("textDocument/didOpen", {
-      textDocument: {
-        uri,
-        languageId: languageIdFor(file),
-        version: 1,
-        text,
-      },
+    const latest = openDocs.get(uri);
+    if (!latest) return; // 读盘期间被并发归零关闭
+    const nextVersion = latest.version + 1;
+    latest.version = nextVersion;
+    latest.fingerprint = fingerprintOf(text);
+    latest.mtimeMs = current;
+    await connection.sendNotification("textDocument/didChange", {
+      textDocument: { uri, version: nextVersion },
+      contentChanges: [{ text }],
     });
+  };
+
+  /** 归零：didClose + 丢弃打开记录与该 uri 的诊断缓存（spec 251 生命周期合同）。 */
+  const closeDocument = async (uri: string): Promise<void> => {
+    openDocs.delete(uri);
+    // 诊断缓存同步丢弃：留着会让下一次请求读到上一轮（可能已过期）的推送。
+    diagStore.delete(uri);
+    await connection.sendNotification("textDocument/didClose", {
+      textDocument: { uri },
+    });
+  };
+
+  // in-flight 打开去重（与池的 inflight 三件套同形）：并发调用同文件共享
+  // 一次「读盘 + didOpen」。只在 openDocs 落**已建立**的记录，半成品不进
+  // ——readFile 失败即整条作废，下次调用重新来过（失败可重试）。
+  const opening = new Map<string, Promise<void>>();
+
+  const openDocument = async (file: string): Promise<void> => {
+    const uri = pathToFileURL(file).href;
+    if (openDocs.has(uri)) return;
+    const pending = opening.get(uri);
+    if (pending) return pending;
+    const task = (async () => {
+      const text = await readFile(file, "utf8");
+      const mtimeMs = await mtimeOf(file);
+      openDocs.set(uri, {
+        version: 1,
+        refs: 0,
+        pinned: false,
+        fingerprint: fingerprintOf(text),
+        mtimeMs,
+      });
+      await connection.sendNotification("textDocument/didOpen", {
+        textDocument: {
+          uri,
+          languageId: languageIdFor(file),
+          version: 1,
+          text,
+        },
+      });
+    })().finally(() => {
+      opening.delete(uri);
+    });
+    opening.set(uri, task);
+    return task;
+  };
+
+  const ensureOpen = async (file: string): Promise<void> => {
+    const uri = pathToFileURL(file).href;
+    const existing = openDocs.get(uri);
+    if (existing) {
+      // 已打开 → 只标 pin（warmup 语义：打开即目的，不随作用域关闭）。
+      existing.pinned = true;
+      return;
+    }
+    await openDocument(file);
+    const opened = openDocs.get(uri);
+    if (opened) opened.pinned = true;
+  };
+
+  const withDocumentOpen = async <T>(
+    file: string,
+    fn: () => Promise<T>
+  ): Promise<T> => {
+    const uri = pathToFileURL(file).href;
+    // 占位（refs++）与在册判定必须落在同一 tick：`await openDocument` 让出
+    // 期间条目可能被 last-exit 关闭（closeDocument 在同步段 delete），此后再
+    // `get` 会拿到 undefined。循环重开直到真正持有一个 ref 才进 fn —— S16
+    // 「重叠作用域内文档始终处于打开态」是结构性保证，不靠单点 if 兜底。
+    let entry = openDocs.get(uri);
+    while (!entry) {
+      await openDocument(file);
+      entry = openDocs.get(uri);
+    }
+    entry.refs += 1;
+    try {
+      // 请求前对齐（spec 251）：openDocument 现读盘时 mtime 已同步，对齐
+      // 只在「复用一个更早打开、期间被盘外改过」的文档时才真发 didChange。
+      // 放在占位之后：对齐自身的 await 不再给 last-exit 关闭我们持有的文档
+      // 的机会，对齐抛错也走 finally 归零（不泄漏打开状态）。
+      await alignToDisk(file);
+      return await fn();
+    } finally {
+      // fn 抛错也归零（try/finally）：timeout / RPC error / ToolExecutionError
+      // 都不得泄漏打开状态。释放按**捕获的 entry 身份**（而非重新 get）：
+      // 条目若已被别的 scope 重开成新对象，身份不符则不误关。
+      entry.refs = Math.max(0, entry.refs - 1);
+      if (entry.refs === 0 && !entry.pinned && openDocs.get(uri) === entry) {
+        await closeDocument(uri);
+      }
+    }
   };
 
   const notifyChange = async (file: string): Promise<void> => {
     const uri = pathToFileURL(file).href;
-    if (!openedUris.has(uri)) {
-      // 未打开过 → 等价 ensureOpen：didOpen 现读文件，读到的即最新文本，
-      // 无需再补 didChange（避免 version:1 didOpen + version:2 didChange 冗余）。
-      await ensureOpen(file);
+    if (!openDocs.has(uri)) {
+      // 未打开 → didOpen 等价路径：现读文件即最新文本，随后立即关闭
+      // （请求级语义：两次调用之间不对 server 保持打开）。server 已从
+      // didOpen 拿到新内容，无需再补 didChange。
+      await withDocumentOpen(file, async () => undefined);
       return;
     }
     // 已打开 → 读文件全文走 full sync didChange。readFile 失败直接 reject：
     // notifier 层已 catch（best-effort），此处保留错误原文便于 stderr 归因。
     const text = await readFile(file, "utf8");
-    const nextVersion = (openedUris.get(uri) ?? 1) + 1;
-    openedUris.set(uri, nextVersion);
+    const mtimeMs = await mtimeOf(file);
+    const current = openDocs.get(uri);
+    if (!current) return; // 读盘期间被并发归零关闭 → 不再对已关闭文档发变更
+    const nextVersion = current.version + 1;
+    current.version = nextVersion;
+    // 同步记账：server 侧文本已等于刚读到的盘上文本，指纹/mtime 一起更新，
+    // 否则下一次请求的对齐会重复发同一次 didChange。
+    current.fingerprint = fingerprintOf(text);
+    current.mtimeMs = mtimeMs;
     await connection.sendNotification("textDocument/didChange", {
       textDocument: { uri, version: nextVersion },
       contentChanges: [{ text }],
@@ -520,8 +720,11 @@ async function spawnClient(
       connection.sendNotification(method, params),
     getDiagnostics: (uri: string) => diagStore.get(uri)?.items,
     getDiagnosticsEntry: (uri: string) => diagStore.get(uri),
-    getOpenVersion: (uri: string) => openedUris.get(uri),
+    getOpenVersion: (uri: string) => openDocs.get(uri)?.version,
+    getDocumentFingerprint: (uri: string) => openDocs.get(uri)?.fingerprint,
+    getServerCapabilities: () => serverCapabilities,
     ensureOpen,
+    withDocumentOpen,
     notifyChange,
     dispose: () => connection.dispose(),
   };
@@ -568,6 +771,72 @@ export function signalToCancellationToken(signal: AbortSignal): {
     token: source.token,
     dispose: () => signal.removeEventListener("abort", onAbort),
   };
+}
+
+/**
+ * JSON-RPC 的 `-32601 MethodNotFound` 码。各语言 server 对未实现的 provider
+ * 返回该码（vscode-languageserver 框架兜底文案 `Unhandled method <m>`）。
+ */
+export const METHOD_NOT_FOUND = -32601;
+
+/**
+ * method → `initialize` capabilities 里的 provider 字段名（spec 251
+ * 「initialize 能力广告」）。挂载点不限 textDocument 前缀：`workspace/symbol`
+ * 打在 `workspaceSymbolProvider`，按 method 全名查表即可。表外的 method
+ * （如 `callHierarchy/incomingCalls` —— provider 只在 prepareCallHierarchy
+ * 一步声明）一律照发。
+ */
+const METHOD_CAPABILITY_KEYS: Record<string, string> = {
+  "textDocument/definition": "definitionProvider",
+  "textDocument/references": "referencesProvider",
+  "textDocument/hover": "hoverProvider",
+  "textDocument/documentSymbol": "documentSymbolProvider",
+  "textDocument/implementation": "implementationProvider",
+  "textDocument/rename": "renameProvider",
+  "textDocument/prepareCallHierarchy": "callHierarchyProvider",
+  "textDocument/typeDefinition": "typeDefinitionProvider",
+  "textDocument/declaration": "declarationProvider",
+  "textDocument/signatureHelp": "signatureHelpProvider",
+  "textDocument/codeAction": "codeActionProvider",
+  "textDocument/foldingRange": "foldingRangeProvider",
+  "textDocument/selectionRange": "selectionRangeProvider",
+  "textDocument/documentHighlight": "documentHighlightProvider",
+  "textDocument/semanticTokens/full": "semanticTokensProvider",
+  "textDocument/inlayHint": "inlayHintProvider",
+  "textDocument/inlineValue": "inlineValueProvider",
+  "textDocument/diagnostic": "diagnosticProvider",
+  "workspace/symbol": "workspaceSymbolProvider",
+};
+
+/**
+ * server 是否**显式声明**不支持该 method（capabilities 里对应 provider 为
+ * `false`）。**缺席 ≠ 不支持** —— typescript-language-server 实测不声明
+ * `callHierarchyProvider` 却实现了 call hierarchy；据此裁剪会误伤 TS 的
+ * 10/10 保真面（probe 亦以 MethodNotFound-skip 而非声明裁剪为纪律）。
+ * 只有显式 `false` 才是「确定没有，不必发」。
+ */
+export function serverDeclaresUnsupported(
+  capabilities: Record<string, unknown>,
+  method: string
+): boolean {
+  const key = METHOD_CAPABILITY_KEYS[method];
+  if (key === undefined) return false;
+  return capabilities[key] === false;
+}
+
+/**
+ * 判定 RPC 错误是否为「server 未实现该方法」—— 即能力缺口，而非请求失败、
+ * 更不是 spawn 失败。命中后调用方转 Y1 哨兵（模型可读纯字符串），
+ * **不得**写 broken / 逐出 client（连接与进程都好好的，别的 method 照样用）。
+ *
+ * 主判据是数字码（稳定）；文案前缀是给不经 vscode-jsonrpc 包装的错误兜底。
+ */
+export function isMethodNotFoundError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: unknown }).code;
+  if (code === METHOD_NOT_FOUND) return true;
+  const message = (err as { message?: unknown }).message;
+  return typeof message === "string" && message.startsWith("Unhandled method ");
 }
 
 /**

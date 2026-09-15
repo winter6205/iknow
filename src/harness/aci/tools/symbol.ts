@@ -32,8 +32,11 @@ import {
   createRequestCancellation,
   extractCallHierarchyItems,
   getClientForWorkspaceDetailed,
+  isMethodNotFoundSentinel,
   makeDiagnosticsTool,
+  renderMethodNotFound,
   renderNoServer,
+  requestOrMethodNotFoundSentinel,
   stringifyResult,
   timeoutError,
 } from "./lsp.js";
@@ -111,6 +114,9 @@ function symbolPositionParams(
 /**
  * 符号解析失败 → 模型可读字符串（契约 Y1）。
  * 每条都带可行动的下一步：候选路径 / 消歧提示 / 大纲工具名。
+ *
+ * `method_not_found` 复用 `lsp.ts` 的哨兵渲染（SSOT，不复制文案字面量）——
+ * 符号族的缺方法语义与坐标族逐字一致，probe 的 skip 判定才认得出。
  */
 function renderResolution(
   file: string,
@@ -126,45 +132,47 @@ function renderResolution(
       return `(symbol "${symbolPath}" matches ${res.candidates.length} symbols in ${file}: ${candidates(res.candidates)} — pass one of these as symbol_path)`;
     case "no_position":
       return `(symbol "${res.path}" was found in ${file} but the language server reported no source range for it)`;
+    case "method_not_found":
+      return renderMethodNotFound(res.method);
     case "found":
       // 调用方在 kind === "found" 时不会走到这里；保留穷尽分支让编译期兜底。
       return `(symbol "${res.path}" resolved in ${file})`;
   }
 }
 
-type SymbolTarget =
-  | {
-      readonly ok: true;
-      readonly client: LspClient;
-      readonly position: LspPosition;
-    }
-  | { readonly ok: false; readonly message: string };
-
 /**
- * 符号身份 → 可发请求的 (client, position)。
- * 三段：解析语言服务器 → `ensureOpen` 建 project → documentSymbol 树定位。
- * 任一段失败都归一成 `{ ok: false, message }`（纯字符串，非空失败路径）。
+ * 符号身份 → 已解析的 position，并在**请求级打开窗口**内执行 `run`。
+ *
+ * 窗口必须罩住解析与随后的业务请求：解析要 didOpen 才建得起来 project，
+ * 业务请求要同一份 server 侧文本；退出窗口即 didClose（spec 251「打开文档
+ * 生命周期」—— 两次调用之间文件不对 server 保持打开）。
+ *
+ * 三段：解析语言服务器 → `withDocumentOpen` + documentSymbol 树定位 → `run`。
+ * 失败路径归一成模型可读字符串（契约 Y1），与成功路径的 stringify 同形。
  */
-async function resolveSymbolTarget(
+async function withResolvedSymbol<T>(
   ctx: LspCtx,
   file: string,
   symbolPath: string,
-  token: CancellationToken
-): Promise<SymbolTarget> {
+  token: CancellationToken,
+  run: (client: LspClient, position: LspPosition) => Promise<T>
+): Promise<T | string> {
   const { client, failure } = await getClientDetailed(ctx, file);
   if (!client) {
-    return {
-      ok: false,
-      message: renderNoServer(ctx, failure ?? { reason: "no-server" }, file),
-    };
+    return renderNoServer(ctx, failure ?? { reason: "no-server" }, file);
   }
-  // tsserver 对未打开文件不建 project → documentSymbol 返空。先 didOpen。
-  await client.ensureOpen(file);
-  const resolved = await resolveSymbolPosition(client, file, symbolPath, token);
-  if (resolved.kind !== "found") {
-    return { ok: false, message: renderResolution(file, symbolPath, resolved) };
-  }
-  return { ok: true, client, position: resolved.position };
+  return client.withDocumentOpen(file, async () => {
+    const resolved = await resolveSymbolPosition(
+      client,
+      file,
+      symbolPath,
+      token
+    );
+    if (resolved.kind !== "found") {
+      return renderResolution(file, symbolPath, resolved);
+    }
+    return run(client, resolved.position);
+  });
 }
 
 interface SymbolOperationSpec {
@@ -198,21 +206,23 @@ function makeSymbolOperationTool(
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       try {
-        const target = await resolveSymbolTarget(
+        return await withResolvedSymbol(
           ctx,
           params.file,
           params.symbol_path,
-          cancel.token
+          cancel.token,
+          async (client, position) => {
+            const result = await requestOrMethodNotFoundSentinel(
+              client,
+              spec.method,
+              spec.buildParams(params.file, position),
+              cancel.token
+            );
+            if (cancel.timedOut())
+              throw timeoutError(spec.name, spec.method, timeoutMs);
+            return stringifyResult(result);
+          }
         );
-        if (!target.ok) return target.message;
-        const result = await target.client.sendRequest(
-          spec.method,
-          spec.buildParams(params.file, target.position),
-          cancel.token
-        );
-        if (cancel.timedOut())
-          throw timeoutError(spec.name, spec.method, timeoutMs);
-        return stringifyResult(result);
       } catch (err) {
         if (cancel.timedOut())
           throw timeoutError(spec.name, spec.method, timeoutMs);
@@ -250,32 +260,37 @@ function makeSymbolCallHierarchyTool(
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       let timedOutMethod = "textDocument/prepareCallHierarchy";
       try {
-        const target = await resolveSymbolTarget(
+        return await withResolvedSymbol(
           ctx,
           params.file,
           params.symbol_path,
-          cancel.token
+          cancel.token,
+          async (client, position) => {
+            const prepared = await requestOrMethodNotFoundSentinel(
+              client,
+              "textDocument/prepareCallHierarchy",
+              symbolPositionParams(params.file, position),
+              cancel.token
+            );
+            if (cancel.timedOut())
+              throw timeoutError(name, timedOutMethod, timeoutMs);
+            // 缺方法哨兵：server 没有 call hierarchy —— 透传（不再 forward）。
+            if (isMethodNotFoundSentinel(prepared)) return prepared;
+            const items = extractCallHierarchyItems(prepared);
+            const item = items[0];
+            if (!item) return stringifyResult([]);
+            timedOutMethod = method;
+            const result = await requestOrMethodNotFoundSentinel(
+              client,
+              method,
+              { item },
+              cancel.token
+            );
+            if (cancel.timedOut())
+              throw timeoutError(name, timedOutMethod, timeoutMs);
+            return stringifyResult(result);
+          }
         );
-        if (!target.ok) return target.message;
-        const prepared = await target.client.sendRequest(
-          "textDocument/prepareCallHierarchy",
-          symbolPositionParams(params.file, target.position),
-          cancel.token
-        );
-        if (cancel.timedOut())
-          throw timeoutError(name, timedOutMethod, timeoutMs);
-        const items = extractCallHierarchyItems(prepared);
-        const item = items[0];
-        if (!item) return stringifyResult([]);
-        timedOutMethod = method;
-        const result = await target.client.sendRequest(
-          method,
-          { item },
-          cancel.token
-        );
-        if (cancel.timedOut())
-          throw timeoutError(name, timedOutMethod, timeoutMs);
-        return stringifyResult(result);
       } catch (err) {
         if (cancel.timedOut())
           throw timeoutError(name, timedOutMethod, timeoutMs);
@@ -317,23 +332,28 @@ function makeFindSymbolTool(ctx: LspCtx, description: string): AciToolDef {
           params.file
         );
       }
-      if (params.file !== undefined) await client.ensureOpen(params.file);
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
-      try {
-        const result = await client.sendRequest(
-          method,
-          { query: params.query },
-          cancel.token
-        );
-        if (cancel.timedOut()) throw timeoutError(name, method, timeoutMs);
-        return stringifyResult(result);
-      } catch (err) {
-        if (cancel.timedOut()) throw timeoutError(name, method, timeoutMs);
-        throw err;
-      } finally {
-        cancel.dispose();
-      }
+      const run = async (): Promise<unknown> => {
+        try {
+          const result = await requestOrMethodNotFoundSentinel(
+            client,
+            method,
+            { query: params.query },
+            cancel.token
+          );
+          if (cancel.timedOut()) throw timeoutError(name, method, timeoutMs);
+          return stringifyResult(result);
+        } catch (err) {
+          if (cancel.timedOut()) throw timeoutError(name, method, timeoutMs);
+          throw err;
+        } finally {
+          cancel.dispose();
+        }
+      };
+      return params.file !== undefined
+        ? client.withDocumentOpen(params.file, run)
+        : run();
     },
   });
 }
@@ -366,25 +386,27 @@ function makeSymbolsOverviewTool(ctx: LspCtx, description: string): AciToolDef {
           params.file
         );
       }
-      await client.ensureOpen(params.file);
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
-      try {
-        const result = await client.sendRequest(
-          method,
-          {
-            textDocument: { uri: pathToFileURL(params.file).href },
-          },
-          cancel.token
-        );
-        if (cancel.timedOut()) throw timeoutError(name, method, timeoutMs);
-        return stringifyResult(result);
-      } catch (err) {
-        if (cancel.timedOut()) throw timeoutError(name, method, timeoutMs);
-        throw err;
-      } finally {
-        cancel.dispose();
-      }
+      return client.withDocumentOpen(params.file, async () => {
+        try {
+          const result = await requestOrMethodNotFoundSentinel(
+            client,
+            method,
+            {
+              textDocument: { uri: pathToFileURL(params.file).href },
+            },
+            cancel.token
+          );
+          if (cancel.timedOut()) throw timeoutError(name, method, timeoutMs);
+          return stringifyResult(result);
+        } catch (err) {
+          if (cancel.timedOut()) throw timeoutError(name, method, timeoutMs);
+          throw err;
+        } finally {
+          cancel.dispose();
+        }
+      });
     },
   });
 }

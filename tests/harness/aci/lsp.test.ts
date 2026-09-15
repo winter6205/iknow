@@ -46,25 +46,57 @@ import {
   DIAGNOSTICS_WAIT_MS,
   MAX_RESULT_BYTES,
   isLspFailureSentinel,
+  isMethodNotFoundSentinel,
+  renderMethodNotFound,
 } from "../../../src/harness/aci/tools/lsp.ts";
+import {
+  createSymbolQueryToolSet,
+  SYMBOL_QUERY_TOOL_NAMES,
+} from "../../../src/harness/aci/tools/symbol.ts";
+import {
+  createSymbolMutateToolSet,
+  SYMBOL_MUTATE_TOOL_NAMES,
+} from "../../../src/harness/aci/tools/symbol-mutate.ts";
+import { classifyProbeResult } from "../../../scripts/lsp-probe.ts";
 import type { AciToolDef } from "../../../src/harness/aci/types.ts";
 import { ToolExecutionError } from "../../../src/harness/errors.ts";
 
 function makeFakeClient(
-  responder: (method: string, params: unknown) => unknown
+  responder: (method: string, params: unknown) => unknown,
+  capabilities: Record<string, unknown> = {}
 ) {
   const calls: Array<{ method: string; params: unknown }> = [];
   const opened: string[] = [];
+  // 请求级作用域（spec 251 生命周期合同）：fake 记录开/关事件，供
+  // 「didOpen 窗口罩住整次请求」断言使用；`opened` 保留为该窗口的进入侧。
+  const closed: string[] = [];
   return {
     calls,
     opened,
+    closed,
     client: {
       connection: {} as never,
       process: {} as never,
+      // spec 251「initialize 能力广告 + 缺方法哨兵」：工具层在发 RPC 前查
+      // server capabilities 是否**显式** `provider: false`。默认空对象 =
+      // 全部缺席 → 照发（缺席 ≠ 不支持）。
+      getServerCapabilities: () => capabilities,
       // #251:handler 层在每次请求前先 ensureOpen(发 didOpen) 建 tsserver
       // project。fake 记录打开的文件,供「先打开再请求」断言使用。
       ensureOpen: async (file: string) => {
         opened.push(file);
+      },
+      // spec 251：请求级作用域 —— 打开窗口覆盖 fn 全程（含抛错路径）。
+      withDocumentOpen: async <T>(
+        file: string,
+        fn: () => Promise<T>
+      ): Promise<T> => {
+        opened.push(file);
+        try {
+          return await fn();
+        } finally {
+          closed.push(file);
+        }
       },
       sendRequest: async (method: string, params: unknown) => {
         calls.push({ method, params });
@@ -84,6 +116,10 @@ function makeFakeClient(
             }
           | undefined,
       getOpenVersion: (_uri: string) => 1,
+      // 符号解析层的缓存键：同步给 server 的文本内容指纹（client.ts
+      // LspClient.getDocumentFingerprint）。默认恒定 → 两次解析命中同一快照；
+      // 需要模拟盘外改写时由测试覆写本函数。
+      getDocumentFingerprint: (_uri: string): string | undefined => "fp-1",
       dispose: () => undefined,
     },
   };
@@ -579,7 +615,13 @@ describe("handler cancel token wiring", () => {
     const fakeClient = {
       connection: {} as never,
       process: {} as never,
+      // 能力缺席 → 照发（缺席 ≠ 不支持）。
+      getServerCapabilities: () => ({}),
       ensureOpen: async () => undefined,
+      withDocumentOpen: async <T>(
+        _file: string,
+        fn: () => Promise<T>
+      ): Promise<T> => fn(),
       sendRequest: async (method: string, params: unknown, token?: unknown) => {
         gotMethod.push(method);
         sentArgs.push(token);
@@ -616,7 +658,13 @@ describe("handler cancel token wiring", () => {
     const fakeClient = {
       connection: {} as never,
       process: {} as never,
+      // 能力缺席 → 照发（缺席 ≠ 不支持）。
+      getServerCapabilities: () => ({}),
       ensureOpen: async () => undefined,
+      withDocumentOpen: async <T>(
+        _file: string,
+        fn: () => Promise<T>
+      ): Promise<T> => fn(),
       sendRequest: async (
         method: string,
         _params: unknown,
@@ -897,13 +945,29 @@ describe("handler ensureOpen before request (textDocument/didOpen)", () => {
     expect(opened).toEqual(["/work/src/a.ts", "/work/src/a.ts"]);
   });
 
-  it("ensureOpen runs before sendRequest (sequence)", async () => {
+  it("didOpen window covers the request (open → request → close)", async () => {
+    // spec 251 生命周期合同：handler 不再裸 ensureOpen，而走请求级作用域 —
+    // didOpen 窗口必须罩住 sendRequest 全程，退出即 didClose（两次调用之间
+    // 文件不对 server 保持打开）。
     const sequence: string[] = [];
     const fakeClient = {
       connection: {} as never,
       process: {} as never,
+      // 能力缺席 → 照发（缺席 ≠ 不支持）。
+      getServerCapabilities: () => ({}),
       ensureOpen: async (_file: string) => {
         sequence.push("didOpen");
+      },
+      withDocumentOpen: async <T>(
+        _file: string,
+        fn: () => Promise<T>
+      ): Promise<T> => {
+        sequence.push("didOpen");
+        try {
+          return await fn();
+        } finally {
+          sequence.push("didClose");
+        }
       },
       sendRequest: async (_method: string, _params: unknown) => {
         sequence.push("sendRequest");
@@ -920,7 +984,7 @@ describe("handler ensureOpen before request (textDocument/didOpen)", () => {
       line: 1,
       character: 0,
     });
-    expect(sequence).toEqual(["didOpen", "sendRequest"]);
+    expect(sequence).toEqual(["didOpen", "sendRequest", "didClose"]);
   });
 });
 
@@ -1538,5 +1602,580 @@ describe("isLspFailureSentinel (probe FAIL detection, B3 closeout)", () => {
     ).toBe(false);
     expect(isLspFailureSentinel("")).toBe(false);
     expect(isLspFailureSentinel(undefined)).toBe(false);
+  });
+
+  it("does not treat the method-not-found sentinel as a failure (capability gap ≠ call failure)", () => {
+    // spec 251：-32601 是 server 能力缺口（该 method 没有实现），不是调用
+    // 失败、更不是 spawn 失败 —— probe 据此 skip，故不得计入 FAIL。
+    const sentinel = renderMethodNotFound("textDocument/references", "yaml");
+    expect(isMethodNotFoundSentinel(sentinel)).toBe(true);
+    expect(isLspFailureSentinel(sentinel)).toBe(false);
+  });
+});
+
+describe("method-not-found sentinel (-32601 capability gap)", () => {
+  it("renders method + serverId and stays a plain string (contract Y1)", () => {
+    const out = renderMethodNotFound(
+      "workspace/symbol",
+      "json-language-server"
+    );
+    expect(typeof out).toBe("string");
+    expect(out).toContain("json-language-server");
+    expect(out).toContain("workspace/symbol");
+    expect(isMethodNotFoundSentinel(out)).toBe(true);
+  });
+
+  it("omits the server id when unknown", () => {
+    expect(
+      isMethodNotFoundSentinel(renderMethodNotFound("workspace/symbol"))
+    ).toBe(true);
+  });
+
+  it("does not match a successful payload or another sentinel family", () => {
+    expect(isMethodNotFoundSentinel("[]")).toBe(false);
+    expect(
+      isMethodNotFoundSentinel("(LSP server pyright unavailable; hint: x)")
+    ).toBe(false);
+    expect(isMethodNotFoundSentinel(undefined)).toBe(false);
+  });
+
+  it("position tool returns the sentinel instead of throwing when the server lacks the method", async () => {
+    // -32601 → 哨兵（不算 spawn 失败）；不是 ToolExecutionError。
+    const err = Object.assign(
+      new Error("Unhandled method textDocument/definition"),
+      {
+        code: -32601,
+      }
+    );
+    const { client, calls } = makeFakeClient(() => {
+      throw err;
+    });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = await byName(tools, "lsp_definition").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    });
+    expect(typeof out).toBe("string");
+    expect(isMethodNotFoundSentinel(out)).toBe(true);
+    expect(isLspFailureSentinel(out)).toBe(false);
+    expect(calls[0].method).toBe("textDocument/definition");
+  });
+
+  it("call-hierarchy tool does not forward after a prepareCallHierarchy capability gap", async () => {
+    const err = Object.assign(
+      new Error("Unhandled method textDocument/prepareCallHierarchy"),
+      { code: -32601 }
+    );
+    const { client, calls } = makeFakeClient(() => {
+      throw err;
+    });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = await byName(tools, "lsp_outgoing_calls").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    });
+    expect(isMethodNotFoundSentinel(out)).toBe(true);
+    // prepare 就缺能力 → 不该再发第二个请求（缺席 ≠ 不支持，但显式缺口就此收手）。
+    expect(calls.map((c) => c.method)).toEqual([
+      "textDocument/prepareCallHierarchy",
+    ]);
+  });
+
+  it("other RPC errors still propagate (capability gap detection is narrow)", async () => {
+    // -32602（参数错）等**参数层**错误不是能力缺口：必须照旧抛，不得被哨兵吞。
+    const err = Object.assign(new Error("invalid params"), { code: -32602 });
+    const { client } = makeFakeClient(() => {
+      throw err;
+    });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    await expect(
+      byName(tools, "lsp_definition").handler({
+        file: "/work/src/a.ts",
+        line: 1,
+        character: 0,
+      })
+    ).rejects.toThrow("invalid params");
+  });
+});
+
+// ── initialize 能力声明闸门（spec 251 § initialize 能力广告）─────────────────
+//
+// 契约（S18 / plan T4）：server 在 initialize 结果里**显式**声明 provider
+// `false` → 确定没有该能力，不发 RPC，直接返回缺方法哨兵；声明**缺席**
+// （undefined）或 `true` → 照发 —— typescript-language-server 实测不声明
+// `callHierarchyProvider` 却实现了 call hierarchy，把缺席当不支持会误伤
+// TS 的 call hierarchy（probe 10/10 保底面）。
+//
+// 「发没发 RPC」用 calls 长度断言（fake 记录每次 sendRequest）。
+
+describe("initialize capability gate (explicit false → no RPC)", () => {
+  it("returns the sentinel without sending RPC when the provider is explicitly false", async () => {
+    const { client, calls } = makeFakeClient(
+      () => {
+        throw new Error(
+          "RPC must not be sent for an explicitly false provider"
+        );
+      },
+      { referencesProvider: false }
+    );
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = await byName(tools, "lsp_references").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    });
+    expect(isMethodNotFoundSentinel(out)).toBe(true);
+    // 显式 false → 连 RPC 都不发（不是发了等 -32601）。
+    expect(calls).toHaveLength(0);
+  });
+
+  it("still sends RPC when the provider key is absent (absence ≠ unsupported)", async () => {
+    // TS call hierarchy 的回归保护：typescript-language-server 不声明
+    // callHierarchyProvider 却实现了 call hierarchy。
+    const { client, calls } = makeFakeClient(
+      () => [{ name: "foo" }],
+      {} // 能力全缺席
+    );
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = await byName(tools, "lsp_prepare_call_hierarchy").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    });
+    expect(calls.map((c) => c.method)).toEqual([
+      "textDocument/prepareCallHierarchy",
+    ]);
+    expect(out).toContain("foo");
+  });
+
+  it("still sends RPC when the provider is explicitly true", async () => {
+    const { client, calls } = makeFakeClient(() => [], {
+      referencesProvider: true,
+    });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    await byName(tools, "lsp_references").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    });
+    expect(calls.map((c) => c.method)).toEqual(["textDocument/references"]);
+  });
+
+  it("call-hierarchy tool short-circuits prepare on an explicit false provider", async () => {
+    const { client, calls } = makeFakeClient(
+      () => {
+        throw new Error(
+          "RPC must not be sent for an explicitly false provider"
+        );
+      },
+      { callHierarchyProvider: false }
+    );
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = await byName(tools, "lsp_incoming_calls").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    });
+    expect(isMethodNotFoundSentinel(out)).toBe(true);
+    // prepare 被闸门挡下 → 后段 incomingCalls 更不会发。
+    expect(calls).toHaveLength(0);
+  });
+});
+
+// ── probe 判定（scripts/lsp-probe.ts）对哨兵 = skip ─────────────────────────
+//
+// spec 251「initialize 能力广告 + 缺方法哨兵」：工具层把 -32601 / 显式 false
+// 转成哨兵**返回**后，probe 的 safeCall 看到的是 ok + 哨兵（不再是 error
+// detail）。probe 的判定核心 classifyProbeResult 必须把这条路径与逃逸的
+// MethodNotFound RPC error 合流成同一 skip 语义 —— 否则哨兵被当普通非空
+// 字符串误报 ✓（#265 类假阳性），能力缺口就不再被承认。
+
+describe("probe verdict: method-not-found sentinel skips like a MethodNotFound error", () => {
+  it("treats the tool-level sentinel result as a skip (not a pass, not a failure)", () => {
+    const verdict = classifyProbeResult({
+      kind: "ok",
+      value: renderMethodNotFound("textDocument/references", "yaml"),
+    });
+    expect(verdict.kind).toBe("skip");
+  });
+
+  it("treats a MethodNotFound RPC error as a skip (both paths converge)", () => {
+    const err = Object.assign(
+      new Error("Unhandled method textDocument/references"),
+      { code: -32601 }
+    );
+    expect(
+      classifyProbeResult({ kind: "err", detail: err.message, error: err }).kind
+    ).toBe("skip");
+  });
+
+  it("treats a non-Error 'Unhandled method' detail as a skip (code may be absent)", () => {
+    expect(
+      classifyProbeResult({
+        kind: "err",
+        detail: "Unhandled method workspace/symbol",
+        error: "Unhandled method workspace/symbol",
+      }).kind
+    ).toBe("skip");
+  });
+
+  it("still fails other RPC errors (capability detection stays narrow)", () => {
+    const err = Object.assign(new Error("invalid params"), { code: -32602 });
+    const verdict = classifyProbeResult({
+      kind: "err",
+      detail: err.message,
+      error: err,
+    });
+    expect(verdict.kind).toBe("fail");
+    if (verdict.kind === "fail")
+      expect(verdict.detail).toContain("invalid params");
+  });
+
+  it("passes a plain non-empty result and fails the empty / no-server ones", () => {
+    expect(
+      classifyProbeResult({ kind: "ok", value: '[{"uri":"a.ts"}]' }).kind
+    ).toBe("pass");
+    expect(classifyProbeResult({ kind: "ok", value: "" }).kind).toBe("fail");
+    // 分层失败哨兵（B3）：no-server / no-root / spawn-failed 三条文案都必须
+    // 判 FAIL，否则 no-server 文件被当成有结果。
+    for (const value of [
+      "(no LSP server configured for /work/a.yml; supported extensions: .ts, .yml)",
+      "(no LSP project root found above /work/a.ts within /work; missing root marker for typescript)",
+      "(LSP server pyright unavailable; hint: npm i -g pyright)",
+    ]) {
+      expect(classifyProbeResult({ kind: "ok", value }).kind).toBe("fail");
+    }
+  });
+
+  it("fails non-string results (contract Y1 would be broken)", () => {
+    expect(classifyProbeResult({ kind: "ok", value: 42 }).kind).toBe("fail");
+    expect(classifyProbeResult({ kind: "ok", value: undefined }).kind).toBe(
+      "fail"
+    );
+  });
+});
+
+// ── 符号族走同一道门控入口（spec 251 § initialize 能力广告 + 缺方法哨兵）─────
+//
+// 背景（review M1）：符号解析层（symbol-resolver.ts）曾直连
+// `client.sendRequest("textDocument/documentSymbol")`，绕过 lsp.ts 的能力
+// 闸门与 -32601 哨兵 —— server 显式声明 `documentSymbolProvider: false` 时
+// 照发 RPC，回 -32601 则抛错被 executor 记 `execution_failed`，而 spec 251
+// 要求两条路径都收敛到同一哨兵、**不算** spawn 失败。documentSymbol 是
+// 所有 symbol-* 工具（含 symbol-mutate）的入口，故影响面是整个符号族。
+//
+// 下面每条都以「符号工具 handler 的真实输出」为断言面（而非 resolver 内部
+// 函数），锁的是契约：显式 false 零 RPC + 哨兵串；-32601 → 哨兵串不抛；
+// 其余 RPC 错误仍上抛（门控是窄的）。
+
+/** symbol 工具的统一调用面：handler 入参 `{ file, symbol_path }`。 */
+const SYMBOL_INPUT = { file: "/work/src/a.ts", symbol_path: "Foo/bar" };
+
+function createSymbolQueryToolSetForTest(): ReadonlyArray<AciToolDef> {
+  return createSymbolQueryToolSet(ctx);
+}
+
+function createSymbolMutateToolSetForTest(): ReadonlyArray<AciToolDef> {
+  return createSymbolMutateToolSet({ ctx });
+}
+
+/** 改工具各有特化必填字段；本组测试只关心「是否发 RPC / 是否返哨兵」。 */
+function mutateInput(name: string): Record<string, unknown> {
+  switch (name) {
+    case "rename_symbol":
+      return { ...SYMBOL_INPUT, new_name: "baz" };
+    case "replace_symbol_body":
+      return { ...SYMBOL_INPUT, new_body: "function bar() {}" };
+    case "insert_before_symbol":
+    case "insert_after_symbol":
+      return { ...SYMBOL_INPUT, code: "// note" };
+    default:
+      return SYMBOL_INPUT;
+  }
+}
+
+/**
+ * 走 `resolveSymbolPosition`（= 经 resolver 发 documentSymbol 解析符号树）的
+ * 符号工具 —— M1 的失守面正在这条链路上。
+ */
+const SYMBOL_RESOLVER_TOOL_NAMES = [
+  "find_declaration",
+  "find_referencing_symbols",
+  "find_implementations",
+  "get_hover",
+  "prepare_call_hierarchy",
+  "list_incoming_calls",
+  "list_outgoing_calls",
+] as const;
+
+/** 不走 resolver 的三个符号查询工具，排除理由必须逐条可查（不能整体略过）。 */
+const SYMBOL_NON_RESOLVER_TOOL_NAMES = [
+  { name: "find_symbol", why: "workspace/symbol 直接提问，不解析符号身份" },
+  {
+    name: "get_symbols_overview",
+    why: "自己经门控入口发 documentSymbol（下方单列其闸门断言）",
+  },
+  {
+    name: "get_diagnostics_for_file",
+    why: "按文件读诊断，与符号身份无关",
+  },
+] as const;
+
+const SAMPLE_SYMBOL_TREE = [
+  {
+    name: "Foo",
+    kind: 5,
+    range: { start: { line: 0, character: 0 } },
+    selectionRange: { start: { line: 0, character: 6 } },
+    children: [
+      {
+        name: "bar",
+        kind: 6,
+        range: { start: { line: 2, character: 2 } },
+        selectionRange: { start: { line: 2, character: 8 } },
+      },
+    ],
+  },
+];
+
+/** resolver 与 get_symbols_overview 都只认这一条 method 作为符号树来源。 */
+const DOCUMENT_SYMBOL = "textDocument/documentSymbol";
+
+function methodNotFoundError(method: string): Error {
+  return Object.assign(new Error(`Unhandled method ${method}`), {
+    code: -32601,
+  });
+}
+
+/**
+ * 符号树响应 + 一次业务请求响应的复合 responder。
+ * 业务 method 一律回空数组（工具只要走通即可，断言点在哨兵/RPC 面上）。
+ */
+function symbolResponder(
+  tree: unknown = SAMPLE_SYMBOL_TREE
+): (method: string, params: unknown) => unknown {
+  return (method: string) => (method === DOCUMENT_SYMBOL ? tree : []);
+}
+
+describe("symbol tools share the initialize capability gate (explicit false → no RPC)", () => {
+  it("classifies every symbol query tool as resolver or non-resolver (no silent gaps)", () => {
+    // SSOT：新符号工具若既不进 resolver 组也不进排除组，本断言先红 —— 否则
+    // 新增工具会悄悄漏出「能力闸门」覆盖，正是 M1 的失守形态。
+    const classified = [
+      ...SYMBOL_RESOLVER_TOOL_NAMES,
+      ...SYMBOL_NON_RESOLVER_TOOL_NAMES.map((e) => e.name),
+    ];
+    expect([...classified].sort()).toEqual([...SYMBOL_QUERY_TOOL_NAMES].sort());
+  });
+
+  it("every symbol query tool returns the sentinel without sending documentSymbol RPC", async () => {
+    for (const name of SYMBOL_RESOLVER_TOOL_NAMES) {
+      const { client, calls } = makeFakeClient(
+        () => {
+          throw new Error(
+            "RPC must not be sent for an explicitly false documentSymbolProvider"
+          );
+        },
+        { documentSymbolProvider: false }
+      );
+      mockGetClient.mockResolvedValue(client);
+      const tools = createSymbolQueryToolSetForTest();
+      const out = (await byName(tools, name).handler(SYMBOL_INPUT)) as string;
+      expect(isMethodNotFoundSentinel(out), `${name} sentinel`).toBe(true);
+      expect(calls, `${name} RPC count`).toHaveLength(0);
+    }
+  });
+
+  it("every symbol mutate tool returns the sentinel without sending documentSymbol RPC", async () => {
+    for (const name of SYMBOL_MUTATE_TOOL_NAMES) {
+      const { client, calls } = makeFakeClient(
+        () => {
+          throw new Error(
+            "RPC must not be sent for an explicitly false documentSymbolProvider"
+          );
+        },
+        { documentSymbolProvider: false }
+      );
+      mockGetClient.mockResolvedValue(client);
+      const tools = createSymbolMutateToolSetForTest();
+      const out = (await byName(tools, name).handler(
+        mutateInput(name)
+      )) as string;
+      expect(isMethodNotFoundSentinel(out), `${name} sentinel`).toBe(true);
+      expect(calls, `${name} RPC count`).toHaveLength(0);
+    }
+  });
+
+  it("get_symbols_overview returns the sentinel without sending documentSymbol RPC", async () => {
+    const { client, calls } = makeFakeClient(
+      () => {
+        throw new Error(
+          "RPC must not be sent for an explicitly false documentSymbolProvider"
+        );
+      },
+      { documentSymbolProvider: false }
+    );
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = (await byName(tools, "get_symbols_overview").handler({
+      file: "/work/src/a.ts",
+    })) as string;
+    expect(isMethodNotFoundSentinel(out)).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("still sends the RPC when documentSymbolProvider is absent (absence ≠ unsupported)", async () => {
+    // TS 实测不声明部分 provider 却实现了对应能力：缺席必须照发。
+    const { client, calls } = makeFakeClient(symbolResponder(), {});
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = (await byName(tools, "find_declaration").handler(
+      SYMBOL_INPUT
+    )) as string;
+    expect(calls.map((c) => c.method)).toEqual([
+      DOCUMENT_SYMBOL,
+      "textDocument/definition",
+    ]);
+    expect(isMethodNotFoundSentinel(out)).toBe(false);
+  });
+});
+
+describe("symbol tools convert -32601 into the sentinel (no ToolExecutionError)", () => {
+  it("find_declaration returns the sentinel when documentSymbol is unimplemented", async () => {
+    const { client, calls } = makeFakeClient(() => {
+      throw methodNotFoundError(DOCUMENT_SYMBOL);
+    });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = (await byName(tools, "find_declaration").handler(
+      SYMBOL_INPUT
+    )) as string;
+    expect(typeof out).toBe("string");
+    expect(isMethodNotFoundSentinel(out)).toBe(true);
+    expect(isLspFailureSentinel(out)).toBe(false);
+    expect(out).toContain(DOCUMENT_SYMBOL);
+    // 解析就缺能力 → 业务请求不再发（fail-fast，不再撞第二个缺口）。
+    expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
+  });
+
+  it("get_symbols_overview returns the sentinel when documentSymbol is unimplemented", async () => {
+    const { client } = makeFakeClient(() => {
+      throw methodNotFoundError(DOCUMENT_SYMBOL);
+    });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = (await byName(tools, "get_symbols_overview").handler({
+      file: "/work/src/a.ts",
+    })) as string;
+    expect(isMethodNotFoundSentinel(out)).toBe(true);
+  });
+
+  it("rename_symbol returns the sentinel instead of throwing", async () => {
+    const { client, calls } = makeFakeClient(() => {
+      throw methodNotFoundError(DOCUMENT_SYMBOL);
+    });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolMutateToolSetForTest();
+    const out = (await byName(tools, "rename_symbol").handler({
+      ...SYMBOL_INPUT,
+      new_name: "baz",
+    })) as string;
+    expect(isMethodNotFoundSentinel(out)).toBe(true);
+    expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
+  });
+
+  it("safe_delete_symbol does not enter the delete path on a capability gap", async () => {
+    const { client, calls } = makeFakeClient(() => {
+      throw methodNotFoundError(DOCUMENT_SYMBOL);
+    });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolMutateToolSetForTest();
+    const out = (await byName(tools, "safe_delete_symbol").handler(
+      SYMBOL_INPUT
+    )) as string;
+    expect(isMethodNotFoundSentinel(out)).toBe(true);
+    expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
+  });
+
+  it("keeps other RPC errors propagating (gate is narrow)", async () => {
+    // -32602（参数错）不是能力缺口：不得被哨兵吞成"成功"。
+    const err = Object.assign(new Error("invalid params"), { code: -32602 });
+    const { client } = makeFakeClient(() => {
+      throw err;
+    });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    await expect(
+      byName(tools, "find_declaration").handler(SYMBOL_INPUT)
+    ).rejects.toThrow("invalid params");
+  });
+
+  it("keeps transport errors propagating on the uncached path", async () => {
+    const { client } = makeFakeClient(() => {
+      throw new Error("initialize handshake failed");
+    });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    await expect(
+      byName(tools, "find_declaration").handler({
+        file: "/work/src/transport.ts",
+        symbol_path: "Foo/bar",
+      })
+    ).rejects.toThrow("initialize handshake failed");
+  });
+});
+
+// ── 符号树快照缓存键 = 内容指纹（review L5）──────────────────────────────────
+//
+// fetchDocumentSymbols 的缓存键从 getOpenVersion 改为
+// getDocumentFingerprint（请求级打开下 version 每次从 1 起重来，无法区分
+// 「同一文件的两次打开」）。下面两条锁住语义：内容变 → 重取；内容不变 →
+// 同一个 client 上只发一次 documentSymbol。
+
+describe("symbol snapshot cache keyed by document fingerprint", () => {
+  it("re-fetches documentSymbol when the content fingerprint changes", async () => {
+    const { client, calls } = makeFakeClient(symbolResponder());
+    let fingerprint = "fp-1";
+    (
+      client as unknown as {
+        getDocumentFingerprint: (uri: string) => string | undefined;
+      }
+    ).getDocumentFingerprint = () => fingerprint;
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+
+    await byName(tools, "find_declaration").handler(SYMBOL_INPUT);
+    expect(calls.filter((c) => c.method === DOCUMENT_SYMBOL)).toHaveLength(1);
+
+    // 盘外改写：解析窗口外文件内容变了 → 指纹变 → 必须重取符号树。
+    fingerprint = "fp-2";
+    await byName(tools, "find_declaration").handler(SYMBOL_INPUT);
+    expect(calls.filter((c) => c.method === DOCUMENT_SYMBOL)).toHaveLength(2);
+  });
+
+  it("serves the cached snapshot without a second RPC when the fingerprint is unchanged", async () => {
+    const { client, calls } = makeFakeClient(symbolResponder());
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+
+    await byName(tools, "find_declaration").handler(SYMBOL_INPUT);
+    await byName(tools, "get_hover").handler(SYMBOL_INPUT);
+
+    // 两次解析、同一份文本 → documentSymbol 只发一次；业务请求各发一次。
+    expect(calls.filter((c) => c.method === DOCUMENT_SYMBOL)).toHaveLength(1);
+    expect(calls.map((c) => c.method)).toEqual([
+      DOCUMENT_SYMBOL,
+      "textDocument/definition",
+      "textDocument/hover",
+    ]);
   });
 });

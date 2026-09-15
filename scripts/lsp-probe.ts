@@ -21,11 +21,17 @@
  *
  * **能力裁剪（spec 302 § probe，T6）**：非 TS 语言各有 provider 能力缺口，
  * 直接跑会以 MethodNotFound（`Unhandled method <method>`）失败。本探针用
- * **MethodNotFound-skip** 自适应：每件 op 照常执行；仅当 RPC error 是
- * MethodNotFound 类（server 未实现该方法，如 yaml-language-server 的
- * references / workspaceSymbol / implementation / callHierarchy）时按
- * 「server 能力缺口」跳过（打印 `skipped`，不计入 passed/total），其余
- * 失败（空返回 / no-server 哨兵 / 其他 RPC error）仍判 FAIL。
+ * **MethodNotFound-skip** 自适应：每件 op 照常执行；仅当结果是 MethodNotFound
+ * 类（server 未实现该方法，如 yaml-language-server 的 references /
+ * workspaceSymbol / implementation / callHierarchy）时按「server 能力缺口」
+ * 跳过（打印 `skipped`，不计入 passed/total），其余失败（空返回 / no-server
+ * 哨兵 / 其他 RPC error）仍判 FAIL。
+ *
+ * 两条 MethodNotFound 路径同判（spec 251「initialize 能力广告 + 缺方法哨兵」）：
+ * 工具层已把 `-32601` / 显式 `false` 转成缺方法哨兵字符串**返回**，safeCall
+ * 看到的是 `ok` + 哨兵而非 error detail；探针侧对哨兵（`ok` 分支）与逃逸的
+ * `Unhandled method` RPC error（`err` 分支）走同一 skip 语义。判定从 src 侧
+ * import（`isMethodNotFoundSentinel` / `isMethodNotFoundError`），不复制文案。
  *
  * 不采用硬编码 skipOps 表（server 升级补实现后失配），也不采用
  * `initialize` capabilities 声明裁剪 —— typescript-language-server 实测
@@ -39,13 +45,17 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path, { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createLspToolSet } from "../src/harness/aci/tools/lsp.js";
+import {
+  createLspToolSet,
+  isLspFailureSentinel,
+  isMethodNotFoundSentinel,
+} from "../src/harness/aci/tools/lsp.js";
 import type { AciToolDef } from "../src/harness/aci/types.js";
+import { isMethodNotFoundError } from "../src/harness/lsp/client.js";
 import { SERVERS } from "../src/harness/lsp/server.js";
 import { PROBE_TARGETS } from "./lsp-probe-targets.js";
 
-/** 无可用 LSP server 时 handler 返回的哨兵纯字符串（探针据此判 FAIL）。 */
-const NO_SERVER = "(no LSP server available for file)";
+const __filename = fileURLToPath(import.meta.url);
 
 /** `--lang` 可选值 → PROBE_TARGETS key。 */
 const LANGS = ["typescript", "python", "yaml", "json", "dockerfile"] as const;
@@ -100,88 +110,122 @@ async function resolveTargetFile(
 let passed = 0;
 let total = 0;
 
-/** 断言 helper：handler 返回字符串、非空、非无-server 哨兵。 */
-function checkString(name: string, result: unknown, extra?: string): void {
+/** 断言 helper：classifyProbeResult 判 pass 的结果 → 计入 passed/total 并打印 ✓。 */
+function reportPass(name: string, extra?: string): void {
   total++;
-  const ok =
-    typeof result === "string" && result.length > 0 && result !== NO_SERVER;
-  if (ok) passed++;
-  const detail =
-    typeof result !== "string"
-      ? `type=${typeof result}`
-      : result === NO_SERVER
-        ? "no LSP server available"
-        : (extra ?? "");
-  console.log(`${ok ? "✓" : "✗"} ${name}${detail ? ` (${detail})` : ""}`);
+  passed++;
+  console.log(`✓ ${name}${extra ? ` (${extra})` : ""}`);
 }
 
 /**
- * 断言 helper：RPC error 归一化的 detail 字符串 → **恒 FAIL**。
+ * 断言 helper：判 FAIL 的结果 → 计入 total 并打印 ✗ + 原因。
  *
- * 修复探针假阳性（#265 回归）：此前 `else checkString(name, def.detail)` 把
- * safeCall 包出来的错误消息当普通字符串判，而 checkString 只认「非空 + 非
- * 哨兵」即 pass → 真实返回 -32602 等错误被误报为 ✓。RPC error 必须显式判
- * FAIL，否则探针无法捕获「请求实际失败」。
+ * err 分支的 detail 已由 classifyProbeResult 带上 `ERROR: ` 前缀（修复探针
+ * 假阳性，#265 回归）：此前 safeCall 包出来的错误消息被当普通字符串判，只要
+ * 非空即 ✓ → 真实返回 -32602 等错误被误报为通过。RPC error 必须显式判 FAIL。
  */
-function checkError(name: string, detail: string): void {
+function reportFail(name: string, detail: string): void {
   total++;
-  console.log(`✗ ${name} (ERROR: ${detail})`);
+  console.log(`✗ ${name}${detail ? ` (${detail})` : ""}`);
 }
 
+/** safeCall 归一化结果：ok 值 / err detail + 原始 error（能力缺口判定要用）。 */
+export type ProbeCallResult =
+  | { readonly kind: "ok"; readonly value: unknown }
+  | {
+      readonly kind: "err";
+      readonly detail: string;
+      readonly error: unknown;
+    };
+
+/** 单件 op 的判定：pass（计入 passed/total）/ skip（能力缺口）/ fail。 */
+export type ProbeVerdict =
+  | { readonly kind: "pass"; readonly value: unknown }
+  | { readonly kind: "skip"; readonly reason: string }
+  | { readonly kind: "fail"; readonly detail: string };
+
 /**
- * 判断 RPC error 是否为 server「未实现该方法」的 MethodNotFound 类缺口。
+ * 单件 op 的判定核心（纯函数，可单测）—— spec 251「initialize 能力广告 +
+ * 缺方法哨兵」的两条 MethodNotFound 路径在此合流：
  *
- * 各语言 server 实测：pyright / yaml-language-server / vscode-json-languageserver
- * / dockerfile-language-server-nodejs 对未实现 provider 返回
- * `Unhandled method <method>`（vscode-languageserver 框架兜底），该错误表示
- * server 能力缺口而非请求参数错误。探针据此跳过该 op（不计入 passed/total）。
+ *   - **ok + 缺方法哨兵**：工具层已把 `-32601` / 显式 `false` 转成哨兵字符串
+ *     **返回**（不再抛错），safeCall 因此把它当成功结果看到 → 同样 skip。
+ *   - **err + MethodNotFound**：未走 requestOrMethodNotFoundSentinel 的路径
+ *     （或哨兵判定外的逃逸错误）仍以 RPC error 形态出现 → skip。
  *
- * 反之 -32601 / -32602 等**参数层**错误不在此列 → 判 FAIL（探针要抓住
- * 请求真实失败，如 #265 回归）。
+ * 其余判定不变：ok 需非空字符串且非 no-server 哨兵才是 pass；err 恒 fail。
+ * 哨兵判定从 src 侧复用（`isMethodNotFoundSentinel` / `isMethodNotFoundError`），
+ * 不复制文案字面量 —— 文案改了探针不会悄悄失配。
  */
-function isMethodNotFound(detail: string): boolean {
-  return detail.startsWith("Unhandled method ");
+export function classifyProbeResult(result: ProbeCallResult): ProbeVerdict {
+  if (result.kind === "ok") {
+    if (isMethodNotFoundSentinel(result.value)) {
+      return {
+        kind: "skip",
+        reason: "MethodNotFound sentinel — server 未实现该方法",
+      };
+    }
+    if (typeof result.value !== "string") {
+      return { kind: "fail", detail: `type=${typeof result.value}` };
+    }
+    if (result.value.length === 0) {
+      return { kind: "fail", detail: "empty result" };
+    }
+    // 分层失败哨兵（no-server / no-root / spawn-failed，B3）—— 判定从 src 侧
+    // 复用，不硬编码单一文案（分层文案演进过，旧字面量会静默漏判成 ✓）。
+    if (isLspFailureSentinel(result.value)) {
+      return { kind: "fail", detail: "LSP server unavailable" };
+    }
+    return { kind: "pass", value: result.value };
+  }
+  // 数字码（-32601）与框架兜底文案（`Unhandled method <m>`）双判；detail 的
+  // 前缀检查兜住非 Error 抛出（isMethodNotFoundError 只认对象）。
+  if (
+    isMethodNotFoundError(result.error) ||
+    result.detail.startsWith("Unhandled method ")
+  ) {
+    return { kind: "skip", reason: "MethodNotFound — server 未实现该方法" };
+  }
+  return { kind: "fail", detail: `ERROR: ${result.detail}` };
 }
 
 /**
- * 统一 report 分发：safeCall 的 ok/err 结果 → checkString / checkError /
- * MethodNotFound-skip。
+ * 统一 report 分发：safeCall 的 ok/err 结果 → pass / fail / MethodNotFound-skip。
  *
- * 每件 op 先**真实执行**再按结果分派：
- *   - ok：checkString（非空 / 非 no-server 哨兵判 ✓，否则 ✗）。
- *   - err 且是 MethodNotFound：server 能力缺口 → 跳过（`skipped`，不计入
- *     passed/total）。
- *   - err 其他：checkError 恒 FAIL。
+ * 每件 op 先**真实执行**再按 classifyProbeResult 分派；skip 不计入 total：
+ * 不是检查失败，也不减少应过项数 —— server 能力缺口的 op 不属于探针断言
+ * 范围，passed === total 只对**实际检查过的** op 判定。
  *
  * 注：lsp_definition / lsp_hover 的 `extra` 命中断言（含目标文件名）仅在
- * `ok` 分支生效；MethodNotFound-skip 的 op 不会走到 extra。
+ * pass 分支生效；skip 的 op 不会走到 extra。
  */
 function maybeReport(
   name: string,
-  result: { kind: "ok"; value: unknown } | { kind: "err"; detail: string },
+  result: ProbeCallResult,
   extra?: (value: unknown) => string | undefined
 ): void {
-  if (result.kind === "ok") {
-    checkString(name, result.value, extra?.(result.value));
-    return;
+  const verdict = classifyProbeResult(result);
+  switch (verdict.kind) {
+    case "pass":
+      reportPass(name, extra?.(verdict.value));
+      return;
+    case "skip":
+      console.log(`- ${name} (skipped: ${verdict.reason})`);
+      return;
+    case "fail":
+      reportFail(name, verdict.detail);
   }
-  if (isMethodNotFound(result.detail)) {
-    // 跳过不计入 total：不是检查失败，也不减少应过项数 —— server 能力缺口的
-    // op 不属于探针断言范围，passed === total 只对**实际检查过的** op 判定。
-    console.log(`- ${name} (skipped: MethodNotFound — server 未实现该方法)`);
-    return;
-  }
-  checkError(name, result.detail);
 }
 
 /**
- * 包一层 try/catch 把单件操作的 RPC error 归一化为哨兵字符串，
- * 让后续 checkString 判 FAIL 并打印原因（避免 ResponseError 把探针整进程打挂）。
+ * 包一层 try/catch 把单件操作的 RPC error 归一化为 `{detail, error}`，
+ * 让后续判定打印原因（避免 ResponseError 把探针整进程打挂）；原始 error
+ * 随结果返回，供能力缺口判定读 `code`（-32601）。
  */
 async function safeCall(
   name: string,
   call: () => Promise<unknown>
-): Promise<{ kind: "ok"; value: unknown } | { kind: "err"; detail: string }> {
+): Promise<ProbeCallResult> {
   try {
     const v = await call();
     return { kind: "ok", value: v };
@@ -190,6 +234,7 @@ async function safeCall(
     return {
       kind: "err",
       detail: msg.split("\n")[0].slice(0, 160),
+      error: err,
     };
   }
 }
@@ -334,7 +379,11 @@ async function run(): Promise<void> {
   process.exit(passed === total ? 0 : 1);
 }
 
-run().catch((err) => {
-  console.error("lsp-probe crashed:", err);
-  process.exit(1);
-});
+// 只有被当作入口跑时才执行探针 —— 单测 import 本模块取纯函数
+// （classifyProbeResult）时不得 spawn 真实 language server。
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === __filename) {
+  run().catch((err) => {
+    console.error("lsp-probe crashed:", err);
+    process.exit(1);
+  });
+}

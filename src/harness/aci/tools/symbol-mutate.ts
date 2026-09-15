@@ -33,8 +33,9 @@
  *     （schema `additionalProperties: false` 守住）。
  *   - **永不** 在无效化前静默吞失败 —— invalidate 失败 stderr 留痕
  *     （fire-and-forget 但 best-effort 必须有可观测面）。
- *   - 写盘前必须在 server 端 ensureOpen（tsserver 对未打开文件不建
- *     project，rename/documentSymbol 全返空 / 错）。
+ *   - 解析与写盘都必须在请求级打开窗口（`withDocumentOpen`）内完成 ——
+ *     tsserver 对未打开文件不建 project，rename/documentSymbol 全返空 / 错；
+ *     窗口退出即 didClose（spec 251 生命周期）。
  */
 import { fileURLToPath } from "node:url";
 import { readFile, writeFile } from "node:fs/promises";
@@ -50,7 +51,10 @@ import {
   DEFAULT_LSP_REQUEST_TIMEOUT_MS,
   compileValidator,
   createRequestCancellation,
+  isMethodNotFoundSentinel,
+  renderMethodNotFound,
   renderNoServer,
+  requestOrMethodNotFoundSentinel,
   stringifyResult,
   timeoutError,
 } from "./lsp.js";
@@ -358,59 +362,62 @@ function fullRangeOf(node: DocumentSymbolNode): LspRange | undefined {
   return assembleFullRange(r.start, r.end);
 }
 
-type ResolveResult =
-  | {
-      readonly ok: true;
-      readonly client: LspClient;
-      readonly symbol: DocumentSymbolNode;
-      readonly path: string;
-    }
-  | { readonly ok: false; readonly message: string };
+interface ResolvedSymbol {
+  readonly client: LspClient;
+  readonly symbol: DocumentSymbolNode;
+  readonly path: string;
+}
 
-/** 解析符号身份 + ensureOpen；任一失败 → 纯字符串失败串（与查询工具同语义）。 */
-async function resolveSymbolForMutate(
+/**
+ * 解析符号身份并在**请求级打开窗口**内执行 `run`；任一失败 → 纯字符串
+ * 失败串（与查询工具同语义）。
+ *
+ * 窗口必须罩住解析与随后的改动/查询请求：解析要 didOpen 才建得起来
+ * project，`textDocument/rename` / `references` 要同一份 server 侧文本；
+ * 退出窗口即 didClose（spec 251「打开文档生命周期」—— 两次调用之间文件
+ * 不对 server 保持打开）。落盘（applyWorkspaceEdit）仍在窗口内完成，
+ * 随后 notifier 的 didChange 才会命中「已打开」分支。
+ */
+async function withResolvedSymbolForMutate<T>(
   ctx: LspCtx,
   file: string,
   symbolPath: string,
-  token: CancellationToken
-): Promise<ResolveResult> {
+  token: CancellationToken,
+  run: (target: ResolvedSymbol) => Promise<T>
+): Promise<T | string> {
   const { client, failure } = await getClientDetailed(ctx, file);
   if (!client) {
-    return {
-      ok: false,
-      message: renderNoServer(ctx, failure ?? { reason: "no-server" }, file),
-    };
+    return renderNoServer(ctx, failure ?? { reason: "no-server" }, file);
   }
-  await client.ensureOpen(file);
-  const resolved = await resolveSymbolPosition(client, file, symbolPath, token);
-  if (resolved.kind !== "found") {
-    // 复用 symbol.ts 的渲染语义（一致失败串形态）：not_found / ambiguous / no_position
-    const candidates = (list: ReadonlyArray<string>): string =>
-      list.length > 0 ? list.join(", ") : "(none)";
-    switch (resolved.kind) {
-      case "not_found":
-        return {
-          ok: false,
-          message: `(symbol "${symbolPath}" not found in ${file}; symbols in this file: ${candidates(resolved.candidates)} — get_symbols_overview lists the full outline)`,
-        };
-      case "ambiguous":
-        return {
-          ok: false,
-          message: `(symbol "${symbolPath}" matches ${resolved.candidates.length} symbols in ${file}: ${candidates(resolved.candidates)} — pass one of these as symbol_path)`,
-        };
-      case "no_position":
-        return {
-          ok: false,
-          message: `(symbol "${resolved.path}" was found in ${file} but the language server reported no source range for it)`,
-        };
+  return client.withDocumentOpen(file, async () => {
+    const resolved = await resolveSymbolPosition(
+      client,
+      file,
+      symbolPath,
+      token
+    );
+    if (resolved.kind !== "found") {
+      // 复用 symbol.ts 的渲染语义（一致失败串形态）：not_found / ambiguous /
+      // no_position；method_not_found 同样复用 lsp.ts 的哨兵渲染（SSOT）。
+      const candidates = (list: ReadonlyArray<string>): string =>
+        list.length > 0 ? list.join(", ") : "(none)";
+      switch (resolved.kind) {
+        case "not_found":
+          return `(symbol "${symbolPath}" not found in ${file}; symbols in this file: ${candidates(resolved.candidates)} — get_symbols_overview lists the full outline)`;
+        case "ambiguous":
+          return `(symbol "${symbolPath}" matches ${resolved.candidates.length} symbols in ${file}: ${candidates(resolved.candidates)} — pass one of these as symbol_path)`;
+        case "no_position":
+          return `(symbol "${resolved.path}" was found in ${file} but the language server reported no source range for it)`;
+        case "method_not_found":
+          return renderMethodNotFound(resolved.method);
+      }
     }
-  }
-  return {
-    ok: true,
-    client,
-    symbol: resolved.symbol,
-    path: resolved.path,
-  };
+    return run({
+      client,
+      symbol: resolved.symbol,
+      path: resolved.path,
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -445,53 +452,57 @@ function makeRenameSymbolTool(
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       try {
-        const target = await resolveSymbolForMutate(
+        return await withResolvedSymbolForMutate(
           ctx,
           params.file,
           params.symbol_path,
-          cancel.token
+          cancel.token,
+          async (target) => {
+            const uri = fileURLFromPath(params.file);
+            const result = await requestOrMethodNotFoundSentinel(
+              target.client,
+              "textDocument/rename",
+              {
+                textDocument: { uri },
+                position:
+                  target.symbol.selectionRange?.start ??
+                  target.symbol.range?.start ??
+                  target.symbol.location?.range?.start,
+                newName: params.new_name,
+              },
+              cancel.token
+            );
+            if (cancel.timedOut())
+              throw timeoutError(name, "textDocument/rename", timeoutMs);
+            // 缺方法哨兵：server 没有 rename —— 透传（不再当 WorkspaceEdit 解析）。
+            if (isMethodNotFoundSentinel(result)) return result;
+            // tsserver 返回 null → 改名冲突（与同作用域现有标识符同名 / 跨
+            // 文件类型不允许等）。typed 失败串：明确告诉模型 rename 失败，
+            // 不留空 catch。
+            if (result === null || result === undefined) {
+              throw new ToolExecutionError(
+                `[${name}] cannot rename ${params.symbol_path} to "${params.new_name}" in ${params.file}: existing declarations would conflict (the language server rejected the rename)`
+              );
+            }
+            const docEdits = normalizeWorkspaceEdit(result);
+            if (docEdits.length === 0) {
+              return stringifyResult({
+                renamed: true,
+                files: [],
+                editCount: 0,
+                message: `rename produced no edits (symbol already named "${params.new_name}")`,
+              });
+            }
+            const applied = await applyWorkspaceEdit(docEdits, onEdit);
+            return stringifyResult({
+              renamed: true,
+              symbol_path: target.path,
+              new_name: params.new_name,
+              files: applied.writtenFiles,
+              editCount: applied.editCount,
+            });
+          }
         );
-        if (!target.ok) return target.message;
-        const uri = fileURLFromPath(params.file);
-        const result = await target.client.sendRequest(
-          "textDocument/rename",
-          {
-            textDocument: { uri },
-            position:
-              target.symbol.selectionRange?.start ??
-              target.symbol.range?.start ??
-              target.symbol.location?.range?.start,
-            newName: params.new_name,
-          },
-          cancel.token
-        );
-        if (cancel.timedOut())
-          throw timeoutError(name, "textDocument/rename", timeoutMs);
-        // tsserver 返回 null → 改名冲突（与同作用域现有标识符同名 / 跨
-        // 文件类型不允许等）。typed 失败串：明确告诉模型 rename 失败，
-        // 不留空 catch。
-        if (result === null || result === undefined) {
-          throw new ToolExecutionError(
-            `[${name}] cannot rename ${params.symbol_path} to "${params.new_name}" in ${params.file}: existing declarations would conflict (the language server rejected the rename)`
-          );
-        }
-        const docEdits = normalizeWorkspaceEdit(result);
-        if (docEdits.length === 0) {
-          return stringifyResult({
-            renamed: true,
-            files: [],
-            editCount: 0,
-            message: `rename produced no edits (symbol already named "${params.new_name}")`,
-          });
-        }
-        const applied = await applyWorkspaceEdit(docEdits, onEdit);
-        return stringifyResult({
-          renamed: true,
-          symbol_path: target.path,
-          new_name: params.new_name,
-          files: applied.writtenFiles,
-          editCount: applied.editCount,
-        });
       } catch (err) {
         if (cancel.timedOut())
           throw timeoutError(name, "textDocument/rename", timeoutMs);
@@ -534,30 +545,31 @@ function makeReplaceSymbolBodyTool(
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       try {
-        const target = await resolveSymbolForMutate(
+        return await withResolvedSymbolForMutate(
           ctx,
           params.file,
           params.symbol_path,
-          cancel.token
+          cancel.token,
+          async (target) => {
+            const range = fullRangeOf(target.symbol);
+            if (!range) {
+              throw new ToolExecutionError(
+                `[${name}] symbol "${target.path}" in ${params.file} has no source range (cannot replace body)`
+              );
+            }
+            const edit: TextDocumentEdit = {
+              textDocument: { uri: fileURLFromPath(params.file) },
+              edits: [{ range, newText: params.new_body }],
+            };
+            const applied = await applyWorkspaceEdit([edit], onEdit);
+            return stringifyResult({
+              replaced: true,
+              symbol_path: target.path,
+              files: applied.writtenFiles,
+              editCount: applied.editCount,
+            });
+          }
         );
-        if (!target.ok) return target.message;
-        const range = fullRangeOf(target.symbol);
-        if (!range) {
-          throw new ToolExecutionError(
-            `[${name}] symbol "${target.path}" in ${params.file} has no source range (cannot replace body)`
-          );
-        }
-        const edit: TextDocumentEdit = {
-          textDocument: { uri: fileURLFromPath(params.file) },
-          edits: [{ range, newText: params.new_body }],
-        };
-        const applied = await applyWorkspaceEdit([edit], onEdit);
-        return stringifyResult({
-          replaced: true,
-          symbol_path: target.path,
-          files: applied.writtenFiles,
-          editCount: applied.editCount,
-        });
       } catch (err) {
         if (cancel.timedOut())
           throw timeoutError(
@@ -608,36 +620,40 @@ function makeInsertSymbolTool(
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       try {
-        const target = await resolveSymbolForMutate(
+        return await withResolvedSymbolForMutate(
           ctx,
           params.file,
           params.symbol_path,
-          cancel.token
+          cancel.token,
+          async (target) => {
+            const range = fullRangeOf(target.symbol);
+            if (!range) {
+              throw new ToolExecutionError(
+                `[${spec.name}] symbol "${target.path}" in ${params.file} has no source range (cannot determine insertion anchor)`
+              );
+            }
+            // 在 range.start/end 位置上 splice：before → 在 start 之前插入 `code + "\n"`；
+            // after → 在 end 之后插入 `"\n" + code`（自动补换行保插入块独立成段）。
+            const anchor =
+              spec.direction === "before" ? range.start : range.end;
+            const newText =
+              spec.direction === "before"
+                ? params.code + "\n"
+                : "\n" + params.code;
+            const edit: TextDocumentEdit = {
+              textDocument: { uri: fileURLFromPath(params.file) },
+              edits: [{ range: { start: anchor, end: anchor }, newText }],
+            };
+            const applied = await applyWorkspaceEdit([edit], onEdit);
+            return stringifyResult({
+              inserted: true,
+              direction: spec.direction,
+              symbol_path: target.path,
+              files: applied.writtenFiles,
+              editCount: applied.editCount,
+            });
+          }
         );
-        if (!target.ok) return target.message;
-        const range = fullRangeOf(target.symbol);
-        if (!range) {
-          throw new ToolExecutionError(
-            `[${spec.name}] symbol "${target.path}" in ${params.file} has no source range (cannot determine insertion anchor)`
-          );
-        }
-        // 在 range.start/end 位置上 splice：before → 在 start 之前插入 `code + "\n"`；
-        // after → 在 end 之后插入 `"\n" + code`（自动补换行保插入块独立成段）。
-        const anchor = spec.direction === "before" ? range.start : range.end;
-        const newText =
-          spec.direction === "before" ? params.code + "\n" : "\n" + params.code;
-        const edit: TextDocumentEdit = {
-          textDocument: { uri: fileURLFromPath(params.file) },
-          edits: [{ range: { start: anchor, end: anchor }, newText }],
-        };
-        const applied = await applyWorkspaceEdit([edit], onEdit);
-        return stringifyResult({
-          inserted: true,
-          direction: spec.direction,
-          symbol_path: target.path,
-          files: applied.writtenFiles,
-          editCount: applied.editCount,
-        });
       } catch (err) {
         if (cancel.timedOut())
           throw timeoutError(
@@ -678,66 +694,72 @@ function makeSafeDeleteSymbolTool(
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       try {
-        const target = await resolveSymbolForMutate(
+        return await withResolvedSymbolForMutate(
           ctx,
           params.file,
           params.symbol_path,
-          cancel.token
+          cancel.token,
+          async (target) => {
+            const position =
+              target.symbol.selectionRange?.start ??
+              target.symbol.range?.start ??
+              target.symbol.location?.range?.start;
+            if (!position) {
+              throw new ToolExecutionError(
+                `[${name}] symbol "${target.path}" in ${params.file} has no position (cannot check references)`
+              );
+            }
+            const uri = fileURLFromPath(params.file);
+            // 第一步：references（includeDeclaration:true）→ 判空。
+            const refsRaw = await requestOrMethodNotFoundSentinel(
+              target.client,
+              "textDocument/references",
+              {
+                textDocument: { uri },
+                position,
+                context: { includeDeclaration: true },
+              },
+              cancel.token
+            );
+            if (cancel.timedOut())
+              throw timeoutError(name, "textDocument/references", timeoutMs);
+            // 缺方法哨兵：server 没有 references —— 无法证明「无引用」，
+            // fail-closed：透传哨兵、不进入删除路径（与 extractReferences
+            // 拒删同源纪律）。
+            if (isMethodNotFoundSentinel(refsRaw)) return refsRaw;
+            const references = extractReferences(refsRaw);
+            if (references.length > 0) {
+              // typed 失败路径：返回引用列表 + 明确「不删」。模型见此结果
+              // 应决定是否改方案（先迁移引用），绝不静默当删除成功。
+              return stringifyResult({
+                deleted: false,
+                symbol_path: target.path,
+                references,
+                message:
+                  `refusing to delete ${target.path} in ${params.file}: ${references.length} reference(s) exist. ` +
+                  `Resolve them first (find_referencing_symbols) before deleting.`,
+              });
+            }
+            // 第二步：无引用 → 删。range = 全范围（删除符号体，连签名带 body）。
+            const range = fullRangeOf(target.symbol);
+            if (!range) {
+              throw new ToolExecutionError(
+                `[${name}] symbol "${target.path}" in ${params.file} has no source range (cannot delete)`
+              );
+            }
+            const edit: TextDocumentEdit = {
+              textDocument: { uri },
+              edits: [{ range, newText: "" }],
+            };
+            const applied = await applyWorkspaceEdit([edit], onEdit);
+            return stringifyResult({
+              deleted: true,
+              symbol_path: target.path,
+              files: applied.writtenFiles,
+              editCount: applied.editCount,
+            });
+          }
         );
-        if (!target.ok) return target.message;
-        const position =
-          target.symbol.selectionRange?.start ??
-          target.symbol.range?.start ??
-          target.symbol.location?.range?.start;
-        if (!position) {
-          throw new ToolExecutionError(
-            `[${name}] symbol "${target.path}" in ${params.file} has no position (cannot check references)`
-          );
-        }
-        const uri = fileURLFromPath(params.file);
-        // 第一步：references（includeDeclaration:true）→ 判空。
-        const refsRaw = await target.client.sendRequest(
-          "textDocument/references",
-          {
-            textDocument: { uri },
-            position,
-            context: { includeDeclaration: true },
-          },
-          cancel.token
-        );
-        if (cancel.timedOut())
-          throw timeoutError(name, "textDocument/references", timeoutMs);
-        const references = extractReferences(refsRaw);
-        if (references.length > 0) {
-          // typed 失败路径：返回引用列表 + 明确「不删」。模型见此结果
-          // 应决定是否改方案（先迁移引用），绝不静默当删除成功。
-          return stringifyResult({
-            deleted: false,
-            symbol_path: target.path,
-            references,
-            message:
-              `refusing to delete ${target.path} in ${params.file}: ${references.length} reference(s) exist. ` +
-              `Resolve them first (find_referencing_symbols) before deleting.`,
-          });
-        }
-        // 第二步：无引用 → 删。range = 全范围（删除符号体，连签名带 body）。
-        const range = fullRangeOf(target.symbol);
-        if (!range) {
-          throw new ToolExecutionError(
-            `[${name}] symbol "${target.path}" in ${params.file} has no source range (cannot delete)`
-          );
-        }
-        const edit: TextDocumentEdit = {
-          textDocument: { uri },
-          edits: [{ range, newText: "" }],
-        };
-        const applied = await applyWorkspaceEdit([edit], onEdit);
-        return stringifyResult({
-          deleted: true,
-          symbol_path: target.path,
-          files: applied.writtenFiles,
-          editCount: applied.editCount,
-        });
       } catch (err) {
         if (cancel.timedOut())
           throw timeoutError(name, "textDocument/references", timeoutMs);

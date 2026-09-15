@@ -19,9 +19,10 @@ import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
 
 import type { LspServerInfo } from "../../../src/harness/lsp/types.ts";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   Pyright,
   YamlLS,
@@ -35,6 +36,7 @@ import {
 const {
   mockSendRequest,
   mockSendNotification,
+  mockOnNotification,
   mockListen,
   mockDispose,
   mockCreateConnection,
@@ -42,13 +44,14 @@ const {
 } = vi.hoisted(() => ({
   mockSendRequest: vi.fn(),
   mockSendNotification: vi.fn(),
+  mockOnNotification: vi.fn(),
   mockListen: vi.fn(),
   mockDispose: vi.fn(),
   mockCreateConnection: vi.fn(() => ({
     sendRequest: mockSendRequest,
     sendNotification: mockSendNotification,
     onRequest: vi.fn(),
-    onNotification: vi.fn(),
+    onNotification: mockOnNotification,
     listen: mockListen,
     dispose: mockDispose,
   })),
@@ -129,6 +132,7 @@ const ctx = { directory: "/work" };
 beforeEach(() => {
   mockSendRequest.mockReset();
   mockSendNotification.mockReset();
+  mockOnNotification.mockReset();
   mockListen.mockReset();
   mockDispose.mockReset();
   mockCreateConnection.mockClear();
@@ -795,6 +799,492 @@ describe("ensureOpen idempotency", () => {
         (c) => c[0] === "textDocument/didOpen"
       );
       expect(didOpens).toHaveLength(1); // 回滚后真的发了一次
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── 17b. withDocumentOpen：请求级 refcount 打开/关闭 ────────────────────────
+//
+// 锚点 spec 251-lsp-tool.md「生命周期 / EXIT 合同 § 打开文档生命周期」+
+// client.ts:LspClient.withDocumentOpen：
+//   - 请求级 refcount：同 uri 重叠请求共享一次 didOpen，归零发 didClose；
+//   - 归零同时丢弃打开记录（version）与该 uri 的诊断缓存；
+//   - 两次调用之间文件不对 server 保持打开，下次请求重新 didOpen（读到最新文本）。
+// 复用 ensureOpen section 的真实文件 + fakeServer 手法；notification 序列是
+// 断言面（didOpen → fn → didClose），fn 内置探针记录调用时是否已打开。
+
+describe("withDocumentOpen (request-scoped didOpen/didClose)", () => {
+  function makeScopedFixture(id: string, fileName = "a.ts") {
+    const dir = mkdtempSync(join(tmpdir(), `iknow-lsp-scoped-${id}-`));
+    const file = join(dir, fileName);
+    writeFileSync(file, "export const a = 1;\n", "utf8");
+    const { server } = makeFakeServer(`scoped-${id}`, {
+      spawn: async (_root) => {
+        const stdin = new PassThrough();
+        const stdout = new PassThrough();
+        const child = Object.assign(new EventEmitter(), {
+          stdin,
+          stdout,
+          stderr: new PassThrough(),
+          pid: 7,
+          kill: () => true,
+        });
+        return {
+          process:
+            child as unknown as import("node:child_process").ChildProcess,
+          initialization: { tsserver: { path: "/tsserver.js" } },
+        };
+      },
+    });
+    return { dir, file, server };
+  }
+
+  /** 已发出的 notification 序列（method 名数组，按发送顺序）。 */
+  function notificationSeq(): string[] {
+    return mockSendNotification.mock.calls.map((c) => String(c[0]));
+  }
+
+  function callsOf(method: string): unknown[][] {
+    return mockSendNotification.mock.calls.filter((c) => c[0] === method);
+  }
+
+  /** 手动放行的 gate（不用 sleep：交错点全部由测试显式控制）。 */
+  function deferred(): { promise: Promise<void>; resolve: () => void } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it("opens, runs fn, then closes (didOpen → fn → didClose)", async () => {
+    const { dir, file, server } = makeScopedFixture("order");
+    try {
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+      mockSendNotification.mockReset();
+      mockSendNotification.mockResolvedValue(undefined);
+
+      const observed: string[] = [];
+      const result = await client.withDocumentOpen(file, async () => {
+        observed.push(...notificationSeq());
+        return 42;
+      });
+
+      expect(result).toBe(42);
+      expect(observed).toEqual(["textDocument/didOpen"]);
+      expect(notificationSeq()).toEqual([
+        "textDocument/didOpen",
+        "textDocument/didClose",
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("closes even when fn throws (exception safety)", async () => {
+    // 现有 handler 全有 throw 路径（超时 / RPC error / ToolExecutionError）——
+    // fn 抛错必须走 finally 归零，否则打开记录与 server 侧文档永久泄漏。
+    const { dir, file, server } = makeScopedFixture("throw");
+    try {
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+      mockSendNotification.mockReset();
+      mockSendNotification.mockResolvedValue(undefined);
+
+      await expect(
+        client.withDocumentOpen(file, async () => {
+          throw new Error("handler blew up");
+        })
+      ).rejects.toThrow("handler blew up");
+
+      expect(notificationSeq()).toEqual([
+        "textDocument/didOpen",
+        "textDocument/didClose",
+      ]);
+      // 归零后打开记录已丢弃 → 下次请求重新 didOpen（非假阳性复用）。
+      expect(client.getOpenVersion(pathToFileURL(file).href)).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("two concurrent same-file scopes share one didOpen and close once (last exit)", async () => {
+    const { dir, file, server } = makeScopedFixture("concurrent");
+    try {
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+      mockSendNotification.mockReset();
+      mockSendNotification.mockResolvedValue(undefined);
+
+      let releaseFirst: (() => void) | undefined;
+      let releaseSecond: (() => void) | undefined;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const secondGate = new Promise<void>((resolve) => {
+        releaseSecond = resolve;
+      });
+      let bothEnteredResolve: (() => void) | undefined;
+      const bothEntered = new Promise<void>((resolve) => {
+        bothEnteredResolve = resolve;
+      });
+      let entered = 0;
+      const mark = (): void => {
+        entered += 1;
+        if (entered === 2) bothEnteredResolve?.();
+      };
+
+      const first = client.withDocumentOpen(file, async () => {
+        mark();
+        await firstGate;
+        return "first";
+      });
+      const second = client.withDocumentOpen(file, async () => {
+        mark();
+        await secondGate;
+        return "second";
+      });
+
+      // 两者都已进入作用域：共享一次 didOpen。
+      await bothEntered;
+      expect(callsOf("textDocument/didOpen")).toHaveLength(1);
+      // 第二位先退出（refcount 2→1，不应 didClose），再放第一位（1→0，恰好一次）。
+      releaseSecond?.();
+      await expect(second).resolves.toBe("second");
+      expect(callsOf("textDocument/didClose")).toHaveLength(0);
+      releaseFirst?.();
+      await expect(first).resolves.toBe("first");
+      expect(callsOf("textDocument/didOpen")).toHaveLength(1);
+      expect(callsOf("textDocument/didClose")).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("second scope entering while the first is suspended in pre-body alignment still sees the document open", async () => {
+    // 回归（S16「重叠作用域内文档始终处于打开态」）：修复前 withDocumentOpen 在
+    // `await openDocument` / `await alignToDisk` 两个 await 之后才 refs++，于是
+    // 第一个作用域在请求前对齐（alignToDisk 的 didChange）挂起时尚未占位 ——
+    // 第二个作用域看到条目、自行占位、跑完 body 并在归零时同步 delete；第一个
+    // resume 后 `openDocs.get` 已 undefined，**空手进 body**（文档已关窗口，
+    // getDocumentFingerprint 返回 undefined）。
+    //
+    // 交错全部由显式 gate 控制（不用 sleep）：didOpen 回执里把盘上 mtime 推后，
+    // 让第一个作用域的 alignToDisk 必然发 didChange 并挂在 gate 上；等第二个
+    // 作用域完整跑完再放行，断言两个 body 都看到文档在册，且 didOpen /
+    // didClose 各恰好一次。
+    const { dir, file, server } = makeScopedFixture("align-race");
+    const uri = pathToFileURL(file).href;
+    try {
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+      mockSendNotification.mockReset();
+
+      const didChangeGate = deferred();
+      let mtimeBumped = false;
+      mockSendNotification.mockImplementation(async (method: string) => {
+        if (method === "textDocument/didOpen" && !mtimeBumped) {
+          // 条目已登记（mtime 已记旧值），在其返回前推后盘上 mtime ——
+          // 使第一个作用域紧接着的 alignToDisk 必须发 didChange（可控挂起点）。
+          mtimeBumped = true;
+          const later = new Date(Date.now() + 5000);
+          utimesSync(file, later, later);
+        }
+        if (method === "textDocument/didChange") await didChangeGate.promise;
+      });
+
+      const openedInBody: boolean[] = [];
+      const first = client.withDocumentOpen(file, async () => {
+        openedInBody.push(client.getDocumentFingerprint(uri) !== undefined);
+        return "first";
+      });
+      // 等对齐的 didChange 发出（挂起中）——此刻第一个作用域尚未进 body。
+      await vi.waitFor(() =>
+        expect(callsOf("textDocument/didChange")).toHaveLength(1)
+      );
+
+      const second = client.withDocumentOpen(file, async () => {
+        openedInBody.push(client.getDocumentFingerprint(uri) !== undefined);
+        return "second";
+      });
+      await expect(second).resolves.toBe("second");
+
+      didChangeGate.resolve();
+      await expect(first).resolves.toBe("first");
+
+      expect(openedInBody).toEqual([true, true]);
+      expect(callsOf("textDocument/didOpen")).toHaveLength(1);
+      expect(callsOf("textDocument/didClose")).toHaveLength(1);
+      // 归零后无残留：下次作用域重新 didOpen。
+      expect(client.getDocumentFingerprint(uri)).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("scope whose fresh open is closed by a last exit reopens instead of entering empty-handed", async () => {
+    // H1 修复形状的另一半：占位判定与「重新 open」必须闭环。第一个作用域挂在
+    // didOpen 上（尚未占位）时，第二个作用域占位、跑完并归零 —— 归零关闭是
+    // 合法的（此刻确实无 ref 持有者）；第一个 resume 后必须**重开**并重新占位，
+    // 而不是空手进 body。didOpen / didClose 各两次即该交错的正确结果。
+    const { dir, file, server } = makeScopedFixture("inflight-scope");
+    const uri = pathToFileURL(file).href;
+    try {
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+      mockSendNotification.mockReset();
+
+      const didOpenGate = deferred();
+      mockSendNotification.mockImplementation(async (method: string) => {
+        if (method === "textDocument/didOpen") await didOpenGate.promise;
+      });
+
+      const openedInBody: boolean[] = [];
+      const first = client.withDocumentOpen(file, async () => {
+        openedInBody.push(client.getDocumentFingerprint(uri) !== undefined);
+        return "first";
+      });
+      // 等第一次 didOpen 发出（挂起中）——此刻条目已在册，但尚无 ref。
+      await vi.waitFor(() =>
+        expect(callsOf("textDocument/didOpen")).toHaveLength(1)
+      );
+
+      const second = client.withDocumentOpen(file, async () => {
+        openedInBody.push(client.getDocumentFingerprint(uri) !== undefined);
+        return "second";
+      });
+      await expect(second).resolves.toBe("second");
+
+      didOpenGate.resolve();
+      await expect(first).resolves.toBe("first");
+
+      expect(openedInBody).toEqual([true, true]);
+      expect(callsOf("textDocument/didOpen")).toHaveLength(2);
+      expect(callsOf("textDocument/didClose")).toHaveLength(2);
+      expect(client.getDocumentFingerprint(uri)).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reopens on the next scope and reads the latest text from disk", async () => {
+    const { dir, file, server } = makeScopedFixture("reopen");
+    try {
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+      mockSendNotification.mockReset();
+      mockSendNotification.mockResolvedValue(undefined);
+
+      await client.withDocumentOpen(file, async () => undefined);
+      writeFileSync(file, "export const a = 2;\n", "utf8");
+      await client.withDocumentOpen(file, async () => undefined);
+
+      const opens = callsOf("textDocument/didOpen");
+      expect(opens).toHaveLength(2);
+      // 第二次 didOpen 携带的是**盘上最新文本**（不是首次的陈旧缓冲）。
+      const second = opens[1][1] as {
+        textDocument: { text: string; version: number };
+      };
+      expect(second.textDocument.text).toBe("export const a = 2;\n");
+      expect(second.textDocument.version).toBe(1); // 重新打开，version 重新计数
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("drops the uri diagnostics entry when refcount reaches zero", async () => {
+    // spec：归零时同时丢弃该 uri 的打开记录与该 uri 的诊断缓存 —— 否则下次
+    // 请求会用上一轮（可能已过期）的 push diagnostics 假阳性返回。
+    const { dir, file, server } = makeScopedFixture("diag-drop");
+    try {
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+      const uri = pathToFileURL(file).href;
+      const publish = mockOnNotification.mock.calls.find(
+        (c) => c[0] === "textDocument/publishDiagnostics"
+      )?.[1] as ((params: unknown) => void) | undefined;
+      if (!publish)
+        throw new Error("publishDiagnostics handler not registered");
+
+      await client.withDocumentOpen(file, async () => {
+        publish({
+          uri,
+          diagnostics: [{ severity: 1, message: "stale err" }],
+          version: 1,
+        });
+        expect(client.getDiagnosticsEntry(uri)?.items).toHaveLength(1);
+      });
+
+      expect(client.getDiagnosticsEntry(uri)).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("nested scopes on distinct files keep each open until its own exit", async () => {
+    // 多文件批量（lsp_diagnostics files）逐文件嵌套时 refcount 按 uri 独立：
+    // 内层归零不得关掉外层的文件。
+    const { dir, file, server } = makeScopedFixture("nested");
+    const fileB = join(dir, "b.ts");
+    writeFileSync(fileB, "export const b = 1;\n", "utf8");
+    try {
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+      mockSendNotification.mockReset();
+      mockSendNotification.mockResolvedValue(undefined);
+
+      await client.withDocumentOpen(file, async () => {
+        await client.withDocumentOpen(fileB, async () => undefined);
+        // 内层退出后 fileB 已 didClose，但外层 file 仍打开（无 didClose）。
+        expect(callsOf("textDocument/didClose")).toHaveLength(1);
+      });
+      expect(callsOf("textDocument/didClose")).toHaveLength(2);
+      expect(callsOf("textDocument/didOpen")).toHaveLength(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("aligns an already-open document to disk before the next request (mtime change → didChange)", async () => {
+    // spec 251「盘外变更对齐」：无 watcher；仍打开的 uri 在下次请求前 stat
+    // mtime，变了就重读全文发 full-sync didChange —— 否则预热 pin 住的文档
+    // 会用旧文本服务后续请求。
+    const { dir, file, server } = makeScopedFixture("mtime");
+    try {
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+      await client.ensureOpen(file); // pin：保持打开
+      mockSendNotification.mockReset();
+      mockSendNotification.mockResolvedValue(undefined);
+
+      // 未变更 → 不对齐（不产生冗余 didChange）。
+      await client.withDocumentOpen(file, async () => undefined);
+      expect(callsOf("textDocument/didChange")).toHaveLength(0);
+
+      // 盘外变更（不经 edit_file / notifier）：内容 + mtime 都变。
+      writeFileSync(file, "export const a = 9;\n", "utf8");
+      utimesSync(
+        file,
+        new Date(Date.now() + 5000),
+        new Date(Date.now() + 5000)
+      );
+      await client.withDocumentOpen(file, async () => undefined);
+
+      const changes = callsOf("textDocument/didChange");
+      expect(changes).toHaveLength(1);
+      const payload = changes[0][1] as {
+        textDocument: { version: number };
+        contentChanges: { text: string }[];
+      };
+      expect(payload.contentChanges[0].text).toBe("export const a = 9;\n");
+      expect(payload.textDocument.version).toBe(2); // didOpen=1 → 对齐后 +1
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not align a freshly opened document (didOpen already read disk)", async () => {
+    const { dir, file, server } = makeScopedFixture("noalign");
+    try {
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+      mockSendNotification.mockReset();
+      mockSendNotification.mockResolvedValue(undefined);
+
+      await client.withDocumentOpen(file, async () => undefined);
+
+      // 请求级打开每次都现读盘 → 无需（也不应）多发一次 didChange。
+      expect(callsOf("textDocument/didOpen")).toHaveLength(1);
+      expect(callsOf("textDocument/didChange")).toHaveLength(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ensureOpen concurrency placeholder still holds under refcount", async () => {
+    // 回归（沿用 17 节的两个已有断言面）：refcount 化后 ensureOpen 的
+    // 「先占位再 await readFile」语义与 readFile 失败回滚必须原样成立 ——
+    // 100 并发同文件只发一次 didOpen；读失败回滚后下次真发。
+    const { dir, file, server } = makeScopedFixture("ensure-regress");
+    try {
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+      mockSendNotification.mockReset();
+      mockSendNotification.mockResolvedValue(undefined);
+
+      await Promise.all(
+        Array.from({ length: 100 }, () => client.ensureOpen(file))
+      );
+      expect(callsOf("textDocument/didOpen")).toHaveLength(1);
+
+      // 裸 ensureOpen 不释放：打开记录在场（预热用途，见 client.ts doc comment）。
+      expect(client.getOpenVersion(pathToFileURL(file).href)).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // notifyChange 与 withDocumentOpen 共用同一套打开记录 / fixture：未打开分支
+  // 直接复用请求级作用域语义（didOpen → 立即 didClose），已打开分支只发
+  // full-sync didChange。两者是「编辑同步」的两条腿，放同一 describe 复用
+  // fixture 与 notification 断言面。
+
+  it("notifyChange on a never-opened file opens then immediately closes (didOpen → didClose)", async () => {
+    const { dir, file, server } = makeScopedFixture("notify-fresh");
+    const uri = pathToFileURL(file).href;
+    try {
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+      mockSendNotification.mockReset();
+      mockSendNotification.mockResolvedValue(undefined);
+
+      await client.notifyChange(file);
+
+      expect(notificationSeq()).toEqual([
+        "textDocument/didOpen",
+        "textDocument/didClose",
+      ]);
+      expect(callsOf("textDocument/didOpen")).toHaveLength(1);
+      expect(callsOf("textDocument/didClose")).toHaveLength(1);
+      expect(callsOf("textDocument/didChange")).toHaveLength(0);
+      // 两次调用之间不对 server 保持打开：无残留打开记录。
+      expect(client.getDocumentFingerprint(uri)).toBeUndefined();
+      expect(client.getOpenVersion(uri)).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("notifyChange on an already-open file sends exactly one full-sync didChange", async () => {
+    const { dir, file, server } = makeScopedFixture("notify-open");
+    const uri = pathToFileURL(file).href;
+    try {
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+      await client.ensureOpen(file); // pin：保持打开
+      mockSendNotification.mockReset();
+      mockSendNotification.mockResolvedValue(undefined);
+
+      writeFileSync(file, "export const a = 7;\n", "utf8");
+      await client.notifyChange(file);
+
+      const changes = callsOf("textDocument/didChange");
+      expect(changes).toHaveLength(1);
+      const payload = changes[0][1] as {
+        textDocument: { uri: string; version: number };
+        contentChanges: { text: string }[];
+      };
+      expect(payload.textDocument.version).toBe(2); // didOpen=1 → +1
+      expect(payload.contentChanges).toEqual([
+        { text: "export const a = 7;\n" },
+      ]);
+      // 已打开分支不重开也不关闭。
+      expect(callsOf("textDocument/didOpen")).toHaveLength(0);
+      expect(callsOf("textDocument/didClose")).toHaveLength(0);
+      expect(client.getOpenVersion(uri)).toBe(2);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

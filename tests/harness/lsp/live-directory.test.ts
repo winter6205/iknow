@@ -88,7 +88,7 @@ function makeFakeChild(pid = 9001) {
     stdout,
     stderr,
     pid,
-    kill: () => true,
+    kill: vi.fn(() => true),
   }) as unknown as import("node:child_process").ChildProcess;
 }
 
@@ -192,7 +192,7 @@ describe("LspCtx.directory follows live taskRoot cell", () => {
     expect(c2).not.toBe(c1);
   });
 
-  it("after rebind, the OLD-root client is disposed (no leak, no reuse)", async () => {
+  it("after rebind, the OLD-root client is terminated (no leak, no reuse)", async () => {
     const oldDir = freshDir("iknow-lsp-live-old2-");
     const newDir = freshDir("iknow-lsp-live-new2-");
     const oldFile = join(oldDir, "x.ts");
@@ -222,26 +222,70 @@ describe("LspCtx.directory follows live taskRoot cell", () => {
     // rebind
     writeLiveTaskRoot(cell, newDir);
 
-    // 触发新根上的 getClient —— 旧 client 必须被 dispose。
+    // 触发新根上的 getClient —— 旧 client 必须被终结。
     await getClient(ctx, newFile, { server });
 
-    // 断言:mockDispose 必须至少调用一次 (旧 client.connection.dispose)。
-    // 与 lsp.ts 二期 B7 注释保持一致:dispose() 只释放连接,不动进程;
-    // 关键可观测面 = dispose() 被调到 + 旧 client 不再被复用。
+    // 断言:连接先释放 + 子进程 SIGTERM。关连接不释放 stdio 管道句柄,
+    // 只 dispose() 会让旧 server 活到宿主退出 —— 池回收缝的职责是两者都做。
     expect(mockDispose).toHaveBeenCalled();
+    expect(vi.mocked(oldClient.process.kill)).toHaveBeenCalledWith("SIGTERM");
+    // 池不再持有旧 key:后续同 root 调用必然重新 spawn,不复用已终结实例。
+    expect(pool.clients.has(`${oldDir}:live-dir-leak`)).toBe(false);
 
-    // 旧 client 的 dispose 已被外部触发 (pool evict);后续再以 oldDir 调一次,
-    // 必须重新 spawn (不复用旧的、已 dispose 的实例)。
+    // 旧 client 已被池逐出;后续再以 oldDir 调一次,必须重新 spawn
+    // (不复用旧的、已终结的实例),且第二次不触发任何 dispose。
     mockDispose.mockClear();
     const oldAgain = await getClient(ctx, oldFile, { server });
     expect(oldAgain).toBeDefined();
-    // 若旧 client 被复用,oldAgain 引用会等于 oldClient;但旧 client 已被 dispose,
-    // 它的内部 connection.dispose 已生效,任何复用语义都不应继续。
-    // 关键判定:pool 不会保留已被 dispose 的 entry 当作 "复用" 的 client。
-    // (这里不强求 oldAgain !== oldClient,因为旧根没再被 rebind 切走,
-    // pool 自然 spawn 新实例;关键是 mockDispose 在第二次不该被再次调用 —— 已 dispose 的
-    // 旧 client 不在 pool。)
+    expect(oldAgain).not.toBe(oldClient);
     expect(mockDispose).not.toHaveBeenCalled();
+  });
+
+  it("after rebind, stale sweep reclaims every server's old-root client (not just the dispatched one)", async () => {
+    const oldDir = freshDir("iknow-lsp-live-old3-");
+    const newDir = freshDir("iknow-lsp-live-new3-");
+    const oldTs = join(oldDir, "a.ts");
+    const oldYaml = join(oldDir, "b.yaml");
+    const newTs = join(newDir, "a.ts");
+    for (const f of [oldTs, oldYaml, newTs]) {
+      writeFileSync(f, "x\n", "utf8");
+    }
+
+    const tsServer = makeFakeServer({
+      id: "multi-ts",
+      rootFor: (_file, directory) => directory,
+      spawnCalls: [],
+    });
+    const yamlServer = makeFakeServer({
+      id: "multi-yaml",
+      rootFor: (_file, directory) => directory,
+      spawnCalls: [],
+    });
+
+    const cell: LiveTaskRoot = createLiveTaskRoot(oldDir);
+    const pool: LspClientPool = createLspClientPool();
+    const ctx: LspCtx = {
+      directory: cell.read(),
+      directoryCell: cell,
+      pool,
+    };
+
+    const tsClient = await getClient(ctx, oldTs, { server: tsServer });
+    const yamlClient = await getClient(ctx, oldYaml, { server: yamlServer });
+    expect(tsClient).toBeDefined();
+    expect(yamlClient).toBeDefined();
+    expect(pool.clients.size).toBe(2);
+
+    writeLiveTaskRoot(cell, newDir);
+    // 只 dispatch TS —— yaml 的旧根 client 不因「本次未命中」而漏回收:
+    // rebind 后 lastSeenTaskRoot 即更新,再过滤 serverId 就永远扫不到它。
+    await getClient(ctx, newTs, { server: tsServer });
+
+    expect(vi.mocked(yamlClient!.process.kill)).toHaveBeenCalledWith("SIGTERM");
+    expect(vi.mocked(tsClient!.process.kill)).toHaveBeenCalledWith("SIGTERM");
+    expect(pool.clients.has(`${oldDir}:multi-yaml`)).toBe(false);
+    expect(pool.clients.has(`${oldDir}:multi-ts`)).toBe(false);
+    expect(pool.clients.has(`${newDir}:multi-ts`)).toBe(true);
   });
 
   it("before rebind, behavior is byte-identical to a frozen-directory ctx (legacy parity)", async () => {
