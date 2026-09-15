@@ -35,8 +35,8 @@ _Avoid_: 用 transcript 当 trace 正文源；把两者当同一份记录的两�
 **内容寻址正文池（blobs）**: 会话文件夹内的 `blobs/<sha256>`——正文 mask 后另存**一份**、定长 sha256 当文件名、`flag:"wx"` write-if-missing，读侧按 sha 取回原文。哈希在这里是**命名用法不是摘要用法**：原文一字不少地存着，没有压缩也没有丢失；寿命 = 会话文件夹，删文件夹即回收（承接 ADR-0036 悬置未细化的 rotation orphans 规则）。ADR-0036 / ADR-0071。
 _Avoid_: 当全局共享池（那要自造引用计数 / GC）；当压缩或摘要；让 trace 引用 transcript 正文来代替它
 
-**continue_pending**: 截断后在**同一会话**把未完成的工具环接着跑完——先对人停住；用户再用 `/continue` 或（有 pending 时）续跑意图自然语言触发；不追加新任务 user message，先 sanitize 悬空 `tool_use`，再对已有 append-only messages 调用 `run`（#277）。匹配词表/策略属 spec；**不是** ACI 工具。
-_Avoid_: continue 工具；把续跑口令一律当普通新 user 任务句；新建 session 挂旧历史；无确认自动续跑
+**continue_pending**: 截断后在**同一会话**把未完成的工具环接着跑完——人对齐路径是 **`/continue`**（skip-append：不追加新任务 user）；有 pending 时的 NL 白名单是次入口。先对人停住（典型 **Ctrl+C**）；`run` 前可对盘上 closeout 投影补悬空 `tool_use`。**本次**进模型的 prior 可去掉末尾 **interrupt system message**，盘上那句仍保留。空 Enter 不是续跑；忙着续跑只提示、不顺带 abort。**不是** ACI 工具。
+_Avoid_: continue 工具；把空回车当续跑；续跑时从盘上删掉 interrupt；忙着 `/continue` 自动 abort；把续跑当传输重试；新建 session 挂旧历史；无确认自动续跑
 
 **turnCount**: Foundation 运行时回合计数，每完成一个 assistant 回合（包括纯文本完成）加一；`maxTurns` 是在调用模型前检查的运行时上限。
 _Avoid_: steps、retries
@@ -47,8 +47,8 @@ _Avoid_: 声称已接入产品路径；mock agent、stub brain
 **StopReason**: Loop Engine 的停止判别联合——016 五类（completed / maxTurns / nonSuccessStop / protocolError / emptyFinalResponse）末尾追加 017 的 `cancelled` 与 `timeout`，再追加 `fused`（本 run 工具环停滞，ADR-0029）；追加不重排，Transition 形状随之自动扩展。
 _Avoid_: 把 cancelled 与 timeout 混为一条；把总耗时当作独立 stop 触发器；把 FaultClass 写进 StopReason；子代理把 fused 当成功
 
-**FaultClass**: 并行于 StopReason 的失败策略闭集 `retry` | `fuse` | `none`（轴：API / 工具 / 上下文 / 控制流）；只决定传输重试与是否计入工具环，不回答 run 为何停。ADR-0029。
-_Avoid_: 与 verify 失败签名混名；与工具四 kind 混名；塞进 StopReason
+**FaultClass**: 并行于 StopReason 的失败策略闭集 `retry` | `fuse` | `none`（轴：API / 工具 / 上下文 / 控制流）；只决定传输重试与是否计入工具环，不回答 run 为何停。ADR-0029。尚无可见输出的 **model-call idle** / 请求超时与明确网络错、429/5xx 可落 `retry`；已有可见输出或已发出 `tool_use` 后的同类失败不自动重打。钟触发的 abort 不得标成 `user_cancel`。
+_Avoid_: 与 verify 失败签名混名；与工具四 kind 混名；塞进 StopReason；把 idle 钟 abort 当用户取消
 
 **tool-call loop detection**: 本 `run()` 内，工具阶段结果已追加进 append-only messages 之后、下一次 adapter.step 之前，用调用键与结果键做周期（k=1..5）重复 R=5 且停滞则 trip。ADR-0029。
 _Avoid_: 连续 N=3 简化；verify 趋势停；sandbox violation kill；正文复读检测；settle 前取消同波 tool_use
@@ -56,8 +56,8 @@ _Avoid_: 连续 N=3 简化；verify 趋势停；sandbox violation kill；正文�
 **LOOP_DETECTED envelope**: 环检测 trip 时追加的固定模板 user 消息，写入权威 messages 并落盘，下一问作为 priorMessages 进模型；对人至少经 `stop=fused` 可见。
 _Avoid_: 只 toast 不进历史；下一轮不喂模型；当成 tool_result 吞掉真实失败
 
-**viewport API error**: 供应商/API/连接失败给人看的对话流行：薄外壳 `API error (status):` + 服务商原文；不追加进 **session transcript**，下一轮不喂模型。ADR-0094。
-_Avoid_: 把 `protocolError` / 「可能是连接或模型故障」当 UX 文案；把 API 失败落成 append-only user/assistant
+**viewport API error**: 供应商/API/连接失败给人看的对话流行：薄外壳 `API error (status):` + 服务商原文；不追加进 **session transcript**，下一轮不喂模型。ADR-0094。异常停的底栏提示见 **sticky notice**。
+_Avoid_: 把 `protocolError` / 「可能是连接或模型故障」当 UX 文案；把 API 失败落成 append-only assistant；与 sticky notice 混成同一条消息气泡
 
 **wire model**: Anthropic SDK 请求体里的 `model` 字段 = 注册表 `models[].id` 原文（路由 `provider/model` 第一个 `/` 之后）。provider `id` 只查 baseUrl / key，不上 wire；需要前缀时把前缀写进模型名。ADR-0094。
 _Avoid_: 把 provider id 自动拼进请求；把路由 ID 整段当网关模型名
@@ -311,7 +311,10 @@ _Avoid_: 状态栏；agent-status；把 cwd/git/diff 每跳追加进 `messages`�
 **沙箱纪律**: 同一 `bash` 调用输入下，前台执行与 `background:true` spawn 共用同一套 bwrap 围栏参数（FS / 网络 / env 隔离 / rlimit / cwdReadonly）；产品路径不得提供无围栏的后台裸跑。#653 G3。
 _Avoid_: 把后台当成逃出 bwrap；与 #440 bash 产品面混名；与 spawn_subagent 前景/后景混名
 
-**文件系统隔离档（fs isolation mode）**: bash 物理围栏上「能看见 / 能写哪些路径」的档位，与 **PermissionMode** 和 **worktree isolation mode** 正交。默认 **全局档**。ADR-0092。
+**config 面板**: TUI 无参 `/config` 打开的设置浮层，交互同 `/model`（选行改值、Esc 落盘）。首版行：文件系统隔离档、worktree isolation mode、子代理并发上限预设。有参 `/config` 仍走 chat/serve。后续设置只加行。ADR-0096。
+_Avoid_: 每个开关一个 slash；把面板当 loop-engine 热替换；把上限写进 system 前缀
+
+**文件系统隔离档（fs isolation mode）**: bash 物理围栏上「能看见 / 能写哪些路径」的档位，与 **PermissionMode** 和 **worktree isolation mode** 正交。默认 **全局档**。ADR-0092 / ADR-0096。
 _Avoid_: 把权限模式当围栏；把 worktree 门禁当 FS 档；第三种产品「沙箱模式」把两层揉成一档
 
 **全局档**: 文件系统隔离关——宿主真路径可读可写；拦写靠权限三层 + **hard-wall**。home 不藏。ADR-0092。
@@ -381,8 +384,8 @@ _Avoid_: 进度流；swarm / 子代理互投；把 mailbox 当 D-δ 低层 messa
 **父可见信封**: 子代理交差给父模型看的那一层——短摘要、改过的路径、成败与停因、`task_id` 与该 worker 的 `/tmp` 根；不是终稿全文，也不是垫底里的文件正文。
 _Avoid_: 把完整 result 当任务产物；把汇报截断当成任务失败；默认交差附带产物名单
 
-**子代理并发上限**: 同时处于 starting/running 的 worker 硬顶，可配、默认 15；图节点计入同一顶。发几张由模型决定，超限立即失败、不排队。ADR-0014 / ADR-0077。
-_Avoid_: 静默排队；让用户每次填写要派几个；per-graph inflight 第二顶（ADR-0077）
+**子代理并发上限**: 同时处于 starting/running 的 worker 硬顶；图节点计入同一顶。发几张由模型决定，超限立即失败、不排队。面板预设 `3 | 5 | 9 | 15 | unlimited`（`unlimited` = manager 不拒绝）。默认 15。现势给模型：工具 description 的当前 N + 超限 `SubAgentCapacityError`。ADR-0014 / ADR-0077 / ADR-0096。
+_Avoid_: 静默排队；让用户每次填写要派几个；per-graph inflight 第二顶（ADR-0077）；把上限写进 system 前缀当唯一告知
 
 **子代理根归属**: 子代理是**父会话的执行臂**，继承父会话当前生效根；不是独立隔离单元。父会话已 rebind 时与父共享同一棵 task worktree；manager 层用父 `conversationId`，worker/LoopEngine 层用自己的 `conversationId`。父会话尚未 rebind 时，满足只读门禁的子代理可留在主仓，但不创建独立 worktree。ADR-0040。
 _Avoid_: 每个子代理单独建 worktree；把子代理的 worker `conversationId` 当成父会话路由 ID；把主仓只读放行误读成独立根
@@ -546,8 +549,8 @@ _Avoid_: `create-task-worktree` / `enter-task-worktree` 等旧注册名当模型
 **占用（worktree claim）**: 一棵 task worktree 被某会话占用，判据 = **现存会话记录里有别人的 `workspaceRoot` 指着它**；零新持久状态（不写锁文件、不加 sidecar 字段、不建注册表、不加跨调用内存 Map）。释放是 `exit-worktree` 的自动后果（该字段改回主仓根），或删除该会话记录；崩溃未 exit 的僵尸占用靠「恢复该会话让它自己 exit」解开（restart-safe adoption）。owner sidecar **只负责告知，不负责授权**。拦截仅在 `isolation.worktreeExclusive` ON 档生效，默认 OFF 且 OFF 档 enter 行为逐字节不变。ADR-0070。
 _Avoid_: 用 sidecar 归属当授权或当锁；活性检测（PID 探活 / 心跳 TTL）；`release` 命令；`force` 覆盖参数；把排他当默认档；把占用与「写处境」告知耦成同一个开关
 
-**worktreeinclude**: 位于 **projectIdentityRoot** 的 `.iknow/worktreeinclude`（gitignore 语法）。`create-worktree` 成功后只把「匹配且已被 gitignore」的文件拷进新树；文件缺席不失败建树。
-_Avoid_: 拷 tracked 文件；把 include 当第二份身份根；include 失败阻断 provision
+**worktreeinclude**: 位于 **projectIdentityRoot** 的 `.iknow/worktreeinclude`（gitignore 语法）。`create-worktree` 成功后只把「匹配且已被 gitignore」的**普通文件**拷进新树；目录跳过；文件缺席不失败建树。项目依赖不靠 include 拷 `node_modules`，见 **project dependency provision**。
+_Avoid_: 拷 tracked 文件；递归拷 `node_modules`；把 include 当第二份身份根；include 失败阻断 provision；把 symlink 共享依赖树写成 include 语义
 
 **taskRoot**（活值）: 会话当前生效的 task worktree 根——**写与工具 cwd 只问它**（写工具 / 会改工作区的 bash / git / LSP 目录 / 子代理工作目录）。活性语义（`src/harness/session-roots.ts` 的 `LiveTaskRoot` cell）：**调用时读取**——所有消费点（门禁 shape 判定、写工具 resolve、bash 围栏、LSP directory、子代理 spawn 取根、环境现势）在 handler 调用时机读 cell 快照，不再闭包冻结装配期根；**唯一 writer = 装配层对 host `provision` / `enter` / `exit` 缝的包装点**（`withLiveTaskRootWrite`，缝成功 resolve 才写，失败不写不回滚、typed error 原样冒泡）；**batch 快照（一波一根）**——一次 `executeAll`（= 一波 tool calls）只在入口读一次，整波共用该快照，波内建树不把一次逻辑改动劈进两棵树。装配初值 = `SessionRoots.taskRoot`（未改绑时等于主仓）；`productRoot` / `projectIdentityRoot` / `installRoot` / mcpConfigRoot / stateAnchor 等稳定根**不**随它走。改绑后模型经 worker prior messages / path-outside 回执看见当前写根；消费 skill 时（slash 信封 / `skill()` tool_result / Web `getSkillBody`）只灌技能程序，正文不挂写根 trailer（ADR-0079）；告知面为 worker prior 与改绑后主会话一次，均按「写处境」三态渲染，`no_writable_root` 态只陈述事实、不点名 `create-worktree`（ADR-0069）；改绑后主会话经用户消息缝再给一次（非每轮、不进 system）；system `## Project path` 仍是身份根（`projectIdentityRoot`），bash 围栏把身份根恒进读白名单（closed-world fence）以保证「写仍不得进主仓」（ADR-0037 §9）。
 _Avoid_: 闭包冻结装配期根（rebind 只在 run 边界重解析的旧实现）；第二写入口；一波内逐 call 重读（中途翻转劈两树）；把活 taskRoot 当 `productRoot` / 身份根 / per-root 状态锚（D3 稳定根清单不活化）；把「下一波生效」误述为「下一 turn」或要求 `/continue`；告知面无条件宣告「突变写该根」（隔离 ON 且未绑树时与门禁真值相反，见「写处境」）
@@ -570,6 +573,30 @@ _Avoid_: productRoot；workspaceRoot；cwd；task worktree（身份根不可以�
 **installRoot**: iknow 运行时自身的安装位置（子代理 worker bootstrap 解析 tsx 与自身依赖），锚 `import.meta.url` 向上找最近 `package.json`，**不**锚任何会话根或 `process.cwd()`；进程级缓存、刻意不给 reset 缝（测试换安装根走 `opts.installRoot` 注入）。≠ 用户项目的 `node_modules`，故裸 task worktree 上 worker 仍能起。
 _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()` 相对解析
 
+**project dependency provision**: `create-worktree`（及需要 ensure 的 enter）成功后，harness 在新树 cwd 按锁文件静默装**项目内**依赖（认 `pnpm-lock.yaml` / `bun.lock(b)` / `package-lock.json` 选安装器）；不装全局 runtime/CLI；不整树 symlink 主仓 `node_modules`。缺管理器、无 `package.json`、或安装失败 → fail-open（树仍在）并在回执写明。`specs/subagent-layers-worktree-deps.md`。
+_Avoid_: 让模型猜包管理器再装；`npm i -g`；默认 `ln -s` 主仓依赖树；安装失败回滚 git worktree；与 **worktreeinclude** 混名
+
+**dispatch lesson**: 给主代理的短英文调度课（explore 优先、并发上限由操作员工作流约束、隔离下先建树再写、技能走 catalog）；落在 `spawn_subagent` description 和/或小段默认注入，**不是**第二份项目说明书，也不焊外来 home 指令文件。改文案走 `docs/guides/prompt-development.md`。
+_Avoid_: 第二份 CLAUDE.md；把整份 arthurpower 路由贴进 system；用课代替 capacity 闸
+
+**model-call idle**: 单次流式 `adapter.step` 上「无模型输出增量」的静默上限；认 thinking/text/tool 增量则重置。默认分钟级。尚无可见输出到期 → 可走传输 `retry`；已有可见输出或已发出 `tool_use` → 不自动重打。约 20s 无字节只更新 **sticky notice** 文案，不结算。
+_Avoid_: 与 **model-call hardCap** 混名；与 LSP `idleTimeoutMs` 混名；120s 当产品默认真值；把 idle abort 标成用户取消
+
+**model-call hardCap**: 同一次 `adapter.step` 从开始起算的有限墙钟；有增量也会到期。与 idle 到点在引擎侧可同收 `StopReason: timeout`，但归因仍是硬顶。
+_Avoid_: 无限硬顶当验收；与 per-call tool timeout / turn timeout 混名
+
+**sticky notice**: TUI 底栏/提示槽里异常停或传输过程的英文（或既有）提示框；默认不自动收回——人关掉、或主动开下一轮等明确动作才清。可在同一框内改文案（等待 → 退避 → 失败因）。
+_Avoid_: TTL 自动消失；与 **viewport API error** 气泡混名；重试成功后偷偷清掉未读失败框
+
+**interrupt system message**: cancelled（典型 Ctrl+C）收尾写入权威历史末尾的固定 system 文案 `Interrupted by user.`。普通下一句人话进模型时带着它；`/continue` 的本次 prior 可去掉末尾这一句，盘上仍保留。timeout 不加此句。
+_Avoid_: 把 interrupt 当 closeout 的 tool_result；从盘上删除再续跑；timeout 复用同一句
+
+**skill bare alias**: 插件技能规范名 `<plugin>:<name>` 之外，catalog 在无冲突时登记的裸名别名；`SkillCatalog.get` 先 canonical 再 bare。TUI 斜杠技能解析必须问 catalog，不在宿主再拆 `:`。展示与 help 优先 canonical。agents 不进斜杠。
+_Avoid_: 在 `slash.ts` 自写第二套命名空间匹配；把 agent id 当 slash 技能；冲突时仍保留双份 bare
+
+**user-turn keep on protocol failure**: `protocolError` / `emptyFinalResponse` 时仍落下本轮**用户句**，不落下失败的 assistant。与「整轮不落盘」旧读法相对；`timeout` 落盘行为不变。
+_Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与 viewport API error「不进 transcript」混成「用户句也不留」
+
 ## Relationships
 
 - **run() messages -> adapter streaming arm -> interpretMessage**: harness LLM path（流事件以 `HarnessStreamEvent` 经 `onStream` 暴露）
@@ -582,6 +609,16 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **continue_pending vs goal 功能**: continue 是 HITL 同一会话 skip-append；`/goal` 钉着则拒绝（`goal_active`），禁止把 continue 当 goal 续跑的下一跳
 - **自动模式 vs goal 功能**: 自动模式是权限；goal 功能是斜杠钉使命后的续跑。正交，可同时开
 - **continue_pending vs in-flight closeout**: continue 只消费 `store.load` 的 closeout 投影补悬空 `tool_use`；不另写 sanitize 去删改 tool 对，也不把 closeout 本身当续跑口令
+- **continue_pending vs interrupt system message**: 续跑可从**本次 prior**去掉末尾 interrupt；盘上仍有；普通打字带着 interrupt
+- **continue_pending vs FaultClass retry**: 续跑不是传输重试；看不见输出的 idle/网络错才走 retry
+- **sticky notice vs viewport API error**: 前者是底栏粘滞提示；后者是对话流行、不进 transcript
+- **model-call idle vs model-call hardCap**: 静默窗 vs 整次 step 墙钟；到点都可收 timeout，归因分开
+- **model-call idle vs LSP idleTimeoutMs**: 前者是模型流；后者是语言服务器连接池回收
+- **project dependency provision vs worktreeinclude**: 前者装锁文件依赖；后者只拷小文件 allowlist
+- **project dependency provision vs installRoot**: 前者是用户项目树依赖；后者是 iknow 自身安装根
+- **dispatch lesson vs 说明书静态层**: 课是短调度；说明书是 AGENTS/rules，不是第二份路由全书
+- **skill bare alias vs skill-load display projection**: get/匹配认 bare；给人看的芯片与 help 仍优先 canonical
+- **user-turn keep on protocol failure vs viewport API error**: 用户句可留盘；失败 API 壳仍不喂模型当 assistant
 - **状态栏 vs context usage (display)**: 状态栏是给模型的现势快照；context usage (display) 是给人看的 token 用量条
 - **状态栏 vs 环境现势**: 状态栏给模型（`last_tool` + open todos）；环境现势给人（cwd/git/diff），不进状态栏 user 消息（#655）
 - **会话位置行 vs 环境现势**: 位置行是常驻身份（主仓/分支/树）；环境现势可以更宽，本轮位置行不带 dirty/diff
@@ -617,7 +654,9 @@ _Avoid_: workspaceRoot；taskRoot；用户项目 `node_modules`；`process.cwd()
 - **文件系统隔离档 vs PermissionMode**: 前者是进程能碰哪些路径；后者是问不问人。全局档仍走权限链
 - **文件系统隔离档 vs worktree isolation mode**: 前者是 bash FS 围栏档；后者是写主仓门禁 / 建树改绑
 - **全局档 vs 工作区档**: 默认真路径读写；工作区档收紧为写 taskRoot + 会话 tmp，home 其余不能写
+- **config 面板 vs `/model`**: 同族浮层；`/config` 管隔离与并发等运行档，`/model` 管路由
 - **子代理并发上限 vs 派发张数**: 上限是帽子；张数由模型按任务拆，说明书写独立才并行
+- **子代理并发上限 vs system 前缀**: N 会变，不进稳前缀；description 插值 + 超限回执是模型通道
 - **图节点 vs 子代理并发上限**: 活图格子是同一顶上的 worker，不另起每图预算（ADR-0077）
 - **说明书静态层 vs memory_layer 整段开关**: 通用 worker 要说明书、不要记忆工具；禁止再靠 memoryEnabled=false 把 AGENTS.md 一起跳过
 - **状态栏 vs 任务摘录**: 摘录只在 compact 时贴用户原话；状态栏每轮由代码现算并追加
