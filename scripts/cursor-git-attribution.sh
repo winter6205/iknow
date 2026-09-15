@@ -11,7 +11,7 @@
 set -euo pipefail
 
 GIT_IDENTITY_NAME="winter6205"
-GIT_IDENTITY_EMAIL="winter6205@users.noreply.github.com"
+GIT_IDENTITY_EMAIL="136674824+winter6205@users.noreply.github.com"
 
 MODE="apply"
 if [ "${1:-}" = "--check" ]; then
