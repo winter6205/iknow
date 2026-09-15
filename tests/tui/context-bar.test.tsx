@@ -10,7 +10,9 @@
  *  - lastUsage null（首轮前）→ 完整 0% 框；窄列 cols<40 降级仅 `ctx NN%`；
  *  - activeToolName 尾缀指示器（[tool] name，不新增 chrome 行）；
  *  - 组件本身按 flex-start 左对齐渲染（父容器 justifyContent 由 app.tsx
- *    控制，组件内不右对齐）。
+ *    控制，组件内不右对齐）；
+ *  - model 前段来自 envDisplay store 订阅（#1021）：host publish 即刷新，
+ *    不需要换 props（回归钉——/model 切换只动本行，不触发全树 repaint）。
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -24,13 +26,19 @@ import {
   toolIndicator,
   valueBand,
 } from "../../src/tui/context-bar.js";
+import { modelDisplayName } from "../../src/tui/model-picker.js";
 import {
   activeToolNameOf,
   shortenMcpToolName,
 } from "../../src/tui/live-tool-state.js";
+import {
+  createEnvDisplayStore,
+  type EnvDisplayStore,
+} from "../../src/tui/env-display-store.js";
 import { tuiPalette } from "../../src/tui/theme.js";
 import { TuiHarness } from "./_fixtures.js";
 import type { TokenUsage } from "../../src/harness/model-adapter/types.js";
+import type { IknowSettingsLlmProvider } from "../../src/config/settings.js";
 import stringWidth from "string-width";
 
 function makeUsage(input: number): TokenUsage {
@@ -71,7 +79,8 @@ async function renderBar(props: {
   running: boolean;
   cols: number;
   activeToolName?: string;
-  model?: string;
+  envDisplay?: EnvDisplayStore;
+  providers?: ReadonlyArray<IknowSettingsLlmProvider>;
   effortLabel?: string;
 }) {
   const setup = await testRender(<ContextBar {...props} />, {
@@ -81,6 +90,27 @@ async function renderBar(props: {
   await setup.renderOnce();
   return setup;
 }
+
+/** 单 model 的 env store：`model` 为路由串，显示名由 providers 注册表投影。 */
+function storeWithModel(model: string | undefined): EnvDisplayStore {
+  return createEnvDisplayStore({ model, defaultThinking: undefined });
+}
+
+/** 模型注册表（路由串 → 显示名投影的 SSOT；与 /model picker 同源形状）。 */
+const PROVIDERS: ReadonlyArray<IknowSettingsLlmProvider> = [
+  {
+    id: "minimax-cn",
+    baseUrl: "https://api.minimax.chat/v1",
+    apiKeyEnv: "MINIMAX_API_KEY",
+    models: [{ id: "MiniMax-M3", name: "MiniMax M3" }, { id: "MiniMax-M2" }],
+  },
+  {
+    id: "volcengine-ark",
+    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+    apiKeyEnv: "ARK_API_KEY",
+    models: [{ id: "deepseek-v3-250324", name: "DeepSeek V3" }],
+  },
+];
 
 describe("纯函数（数值语义 SSOT）", () => {
   test("valueBand：pct 0/50/100 → 全空/半填/全填；越界截断", () => {
@@ -140,6 +170,26 @@ describe("纯函数（数值语义 SSOT）", () => {
     // 预算能放单字符时仍截断。
     const tiny = modelPrefix(long, 2);
     expect(stringWidth(tiny)).toBeLessThanOrEqual(2);
+  });
+
+  test("modelDisplayName：命中注册表且有 name → name；未命中 / 无 name / 注册表缺席 → 回退路由串", () => {
+    expect(modelDisplayName("minimax-cn/MiniMax-M3", PROVIDERS)).toBe(
+      "MiniMax M3"
+    );
+    // 条目存在但未配 name → 回退路由串，不伪造空串。
+    expect(modelDisplayName("minimax-cn/MiniMax-M2", PROVIDERS)).toBe(
+      "minimax-cn/MiniMax-M2"
+    );
+    expect(modelDisplayName("unknown/model", PROVIDERS)).toBe("unknown/model");
+    // 注册表缺席 / 空 → 无从投影，回退路由串本身。
+    expect(modelDisplayName("minimax-cn/MiniMax-M3", undefined)).toBe(
+      "minimax-cn/MiniMax-M3"
+    );
+    expect(modelDisplayName("minimax-cn/MiniMax-M3", [])).toBe(
+      "minimax-cn/MiniMax-M3"
+    );
+    // model 未接线 → undefined（渲染侧据此不渲染 model 段）。
+    expect(modelDisplayName(undefined, PROVIDERS)).toBeUndefined();
   });
 
   test("toolIndicator：内嵌空白折叠为单空格（防止换行/多空格导致底栏变形）", () => {
@@ -319,7 +369,9 @@ describe("渲染（只读 lastUsage）", () => {
       contextWindow: 10000,
       running: false,
       cols: 80,
-      model: "Qwen3.8-Max Model",
+      // 未传 providers → 无注册表可查，显示名回退路由串本身（本用例钉的是
+      // 前缀拼接与预算，与显示名投影无关）。
+      envDisplay: storeWithModel("Qwen3.8-Max Model"),
       effortLabel: "medium",
     });
     const frame = setup.captureCharFrame();
@@ -340,7 +392,7 @@ describe("渲染（只读 lastUsage）", () => {
       contextWindow: 10000,
       running: false,
       cols,
-      model: "Qwen3.8-Max-Exp-1234567890-abcdefghijklmnop",
+      envDisplay: storeWithModel("Qwen3.8-Max-Exp-1234567890-abcdefghijklmnop"),
       effortLabel: "high",
     });
     const lines = setup
@@ -363,7 +415,7 @@ describe("渲染（只读 lastUsage）", () => {
       contextWindow: 10000,
       running: true,
       cols,
-      model: "Qwen3.8-Max Model",
+      envDisplay: storeWithModel("Qwen3.8-Max Model"),
       effortLabel: "high",
       activeToolName: "读写文件工具名字特别特别长",
     });
@@ -384,7 +436,7 @@ describe("渲染（只读 lastUsage）", () => {
       contextWindow: 10000,
       running: true,
       cols,
-      model: "Qwen3.8-Max Model",
+      envDisplay: storeWithModel("Qwen3.8-Max Model"),
       effortLabel: "medium",
     });
     const lines = setup
@@ -395,6 +447,54 @@ describe("渲染（只读 lastUsage）", () => {
     expect(stringWidth((lines[0] ?? "").trimEnd())).toBeLessThanOrEqual(cols);
     expect(lines[0] ?? "").toContain("medium");
     expect(lines[0] ?? "").toContain("ctx");
+    await setup.renderer.destroy();
+  });
+
+  test("model 显示名：路由串经 providers 命中 name → 渲染 name 而非路由串", async () => {
+    const setup = await renderBar({
+      lastUsage: makeUsage(5000),
+      contextWindow: 10000,
+      running: false,
+      cols: 80,
+      envDisplay: storeWithModel("minimax-cn/MiniMax-M3"),
+      providers: PROVIDERS,
+      effortLabel: "medium",
+    });
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("MiniMax M3 · medium ·");
+    expect(frame).not.toContain("minimax-cn/MiniMax-M3");
+    await setup.renderer.destroy();
+  });
+
+  test("model 切换只经 store.publish：props 不变，本行自行重渲染到新显示名", async () => {
+    // #1021 回归钉：/model 改写路由后 host 只 publish（不重渲染 TuiApp、不换
+    // 组件 props）。若 model 退回 props 传递，本用例在 props 不变时不会更新。
+    const store = storeWithModel("minimax-cn/MiniMax-M3");
+    const setup = await renderBar({
+      lastUsage: makeUsage(5000),
+      contextWindow: 10000,
+      running: false,
+      cols: 80,
+      envDisplay: store,
+      providers: PROVIDERS,
+      effortLabel: "medium",
+    });
+    expect(setup.captureCharFrame()).toContain("MiniMax M3 · medium ·");
+
+    store.publish({
+      model: "volcengine-ark/deepseek-v3-250324",
+      defaultThinking: undefined,
+    });
+    // store.publish 是 React 树外的事件源：手动 flush 一次即模拟宿主渲染循环
+    // （同 stream-draft 集成测试的 store 推送口径）。
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("DeepSeek V3 · medium ·");
+    expect(frame).not.toContain("MiniMax M3");
+    // 单行不变（model 段换名不新增行）。
+    expect(frame.split("\n").filter((l) => l.trim().length > 0)).toHaveLength(
+      1
+    );
     await setup.renderer.destroy();
   });
 

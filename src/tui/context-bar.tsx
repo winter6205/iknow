@@ -19,10 +19,22 @@
  * 始终显示框：lastUsage === null（首轮前）也渲染完整 band + `0% ok` +
  * `0.0k/window`。窄列（cols < 40）降级仅 `ctx NN%`。activeToolName 尾缀
  * `⚙ name`（不新增 chrome 行，行账不变）。
+ *
+ * model 来源：前缀里的模型名**不经 props 传递**，而是直接订阅 envDisplay
+ * store —— env 变化不进 React 树（不靠 host 重渲染传导 props），本组件
+ * 自行重投影模型名，其余 chrome / 消息区不随之重算。effortLabel 仍由 host
+ * 预计算（thinking 不在此 store 的订阅面内）。模型路由串 → 显示名的投影
+ * `modelDisplayName` 在 model-picker.tsx（与注册表展平同宿主，见该处）。
  */
-import { useEffect, useState } from "react";
+import { useSyncExternalStore, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { TokenUsage } from "../harness/model-adapter/types.js";
+import type { IknowSettingsLlmProvider } from "../config/settings.js";
+import { modelDisplayName } from "./model-picker.js";
+import {
+  EMPTY_ENV_DISPLAY_STORE,
+  type EnvDisplayStore,
+} from "./env-display-store.js";
 import { visualWidth } from "./tool-summary.js";
 import { tuiPalette } from "./theme.js";
 
@@ -35,10 +47,25 @@ export interface ContextBarProps {
   /** 当前运行中工具名（app 从 liveToolRuns 派生）。undefined = 无工具运行
    *  → 不渲染指示器。渲染在本行尾缀（不新增 chrome 行）。 */
   readonly activeToolName?: string;
-  /** 当前模型名（前缀展示，可截断）。缺省 "" → 不渲染 model 段。 */
-  readonly model?: string;
+  /**
+   * env 显示 store：model 前段的**唯一**来源，组件内部订阅 —— env publish
+   * 后本组件自行重渲染，不需要 host 换 props，故不触发 TuiApp 全树 repaint。
+   * 缺省（未接线 / 无 env）→ EMPTY_ENV_DISPLAY_STORE：快照 model 恒
+   * undefined，与「不传 model」同一条渲染路径（model 段退场）。
+   */
+  readonly envDisplay?: EnvDisplayStore;
+  /** 模型注册表（provider × models，路由串 → 显示名投影用）。
+   *  缺省 → 无 name 可查，显示名回退路由串本身。 */
+  readonly providers?: ReadonlyArray<IknowSettingsLlmProvider>;
   /** 思考档位标签（"off"/"auto"/"low"/... 已由 host 预计算）。缺省 "" → 不渲染档位段。 */
   readonly effortLabel?: string;
+}
+
+/** envDisplay 缺省解析（挪出组件体：组件体不加分支，S5 复杂度门保持基线）。 */
+function resolveEnvDisplayStore(
+  store: EnvDisplayStore | undefined
+): EnvDisplayStore {
+  return store ?? EMPTY_ENV_DISPLAY_STORE;
 }
 
 /** 淡蓝安全档；与 Web UsageChip COLOR_SAFE 镜像同值。
@@ -123,6 +150,13 @@ export function modelPrefix(model: string, budgetCols: number): string {
 export function ContextBar(props: ContextBarProps): ReactNode {
   const pal = tuiPalette;
   const { lastUsage, contextWindow, running, cols } = props;
+  // 无条件下发 hook（React 规则）：envDisplay 缺省改用模块级 inert store，
+  // 未接线时 getSnapshot 返回恒定的空快照，永不触发重渲染。
+  const envDisplay = resolveEnvDisplayStore(props.envDisplay);
+  const envSnapshot = useSyncExternalStore(
+    envDisplay.subscribe,
+    envDisplay.get
+  );
   // 分母 ≤ 0（envInt 返回 0 / 负数）→ 视为无效，used/pct 按 0 兜底，防 NaN。
   const denomOk = contextWindow > 0;
   const used = lastUsage === null || !denomOk ? 0 : ctxUsed(lastUsage);
@@ -148,7 +182,10 @@ export function ContextBar(props: ContextBarProps): ReactNode {
   // model 截断预算 = cols − border(1) − 前导空格(1) − SEP(3) − bodyW − 安全
   // 边际(1) − [effort 段 ` · `(3) + effortW]。预算 ≤1 → model 段退场。
   const SEP = 3; // ` · `
-  const model = (props.model ?? "").trim();
+  // 快照里的路由串经注册表投影成显示名，再 trim 归一（同 effortLabel 口径）。
+  const model = (
+    modelDisplayName(envSnapshot.model, props.providers) ?? ""
+  ).trim();
   const effortLabel = (props.effortLabel ?? "").trim();
   const effW = visualWidth(effortLabel);
   const statusWord = pct > 80 ? "alert" : pct >= 50 ? "warn" : "ok";

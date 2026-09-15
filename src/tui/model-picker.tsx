@@ -30,6 +30,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { TextAttributes } from "@opentui/core";
 import { useTimeline } from "@opentui/react";
+import type { IknowSettingsLlmProvider } from "../config/settings.js";
 import type { ModalKeyEvent } from "./modal.js";
 import { PICKER_WIDTH } from "./thinking-picker.js";
 import { tuiPalette } from "./theme.js";
@@ -55,6 +56,62 @@ export interface ModelPickerState {
 /** 路由 ID 串（持久化值 + 列表主标签）：`${provider}/${model}`。 */
 export function modelRouteId(entry: ModelPickerEntry): string {
   return `${entry.providerId}/${entry.modelId}`;
+}
+
+/**
+ * provider 注册表 → 扁平 `provider × models` 条目（展开语义的唯一实现面）。
+ *
+ * 宿主（app 的 /model 面板）与显示面（context-bar 的模型名前缀）都要这份
+ * 投影，但两者互为上下游（app → context-bar），任一方持有都会让另一方反向
+ * import 成环 —— 故下沉到本叶子模块（它已持有 `ModelPickerEntry` 与路由 ID
+ * 谓词，展平与路由判定是同一份语义的两个部分）。注册表为空 / 缺席 → 空数组
+ * （调用方据此走 notice / 回退路由串）。
+ */
+export function modelPickerEntries(
+  providers: ReadonlyArray<IknowSettingsLlmProvider> | undefined
+): ReadonlyArray<ModelPickerEntry> {
+  const out: ModelPickerEntry[] = [];
+  for (const provider of providers ?? []) {
+    for (const model of provider.models) {
+      out.push({
+        providerId: provider.id,
+        modelId: model.id,
+        ...(model.name !== undefined ? { label: model.name } : {}),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * 路由 ID → 条目的查找（谓词只此一处：`modelRouteId`，不在各调用点内联
+ * 模板串 —— 内联会让 `${provider}/${model}` 的分隔约定在多个文件漂移）。
+ */
+export function findEntryByRouteId(
+  entries: ReadonlyArray<ModelPickerEntry>,
+  model: string
+): ModelPickerEntry | undefined {
+  return entries.find((e) => modelRouteId(e) === model);
+}
+
+/**
+ * 状态栏模型名投影（纯函数）：当前 model 路由 ID 在注册表里命中条目且该项配了
+ * `name` → 显示 `name`（例如 `MiniMax M3`）；未命中 / 无 name / 注册表缺席 →
+ * 原样回退路由串（`provider/model`），不伪造、不抛错。仅状态栏展示面走本投影；
+ * `/info`（spec SC11）与 `/model` picker 的焦点 seed 仍用原始路由串。label 经
+ * settings 解析层 drop-not-throw 保证非空；此处再挡空串（与 picker 的
+ * `label.length > 0` 渲染守卫同口径），空 label 视同「无 name」回退路由串。
+ *
+ * 与展平 / 路由判定同宿主：三者是同一份「注册表 → 条目 → 显示名」投影语义
+ * 的三段，拆开会让 `${provider}/${model}` 约定与回退口径在调用点间漂移。
+ */
+export function modelDisplayName(
+  model: string | undefined,
+  providers: ReadonlyArray<IknowSettingsLlmProvider> | undefined
+): string | undefined {
+  if (model === undefined) return undefined;
+  const entry = findEntryByRouteId(modelPickerEntries(providers), model);
+  return entry?.label ? entry.label : model;
 }
 
 export type ModelPickerAction =

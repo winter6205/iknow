@@ -2,6 +2,10 @@
 
 ## 0.1.0 (unreleased)
 
+### Fix
+
+- **TUI `/model` 切换不再整树重渲染、不再复位 thinking/effort 手动覆盖（#1021，2026-09-15）**: env 派生的显示快照（模型路由串 + thinking 基线）改经框架无关 store 下发（`src/tui/env-display-store.ts`，`useSyncExternalStore` 消费）——`hub.reloadFromEnv` 成功后的 `onEnvChange` 只 publish 快照，不再 `root.render(<TuiApp/>)`；ContextBar 的模型段自行订阅重投影，`/model` 切换只动该行（回归测试以逐行 frame-diff 钉住）。thinking/effort 引入接管分层：`/thinking` / `/effort` 面板提交置位对应字段标记，此后会话内 settings 基线变化不再改写该字段（旧实现每次 env 变化都把三个 state 无条件拖回新基线）；未接管的字段仍跟随基线，外部 settings 热更新显示同步保留。`/info` 的 Model 行与 per-turn thinking override 基线改为调用时读 store 最新快照（避免渲染期过期基线发出错误 override）。`modelDisplayName` 与注册表展平下沉到 `src/tui/model-picker.tsx`（叶子模块，避免 app ↔ context-bar 成环的重复实现）。
+
 ### Breaking
 
 - **会话文件夹归并（session folder consolidation，T1–T7，2026-09-09）**: 会话存储统一为两级树 `~/.iknow/projects/<slug>/<conversationId>/`——叶子是会话文件夹，`<id>.jsonl`（历史权威）、`todos.md`、`trace.jsonl`（trace 锚点，T3 起不再写仓库根 `./trace/`）、`blobs/`（content 级 blob，整条 message 替换退役 → `last_assistant_preview` 等 role 投影在 blob 模式下恢复）、`subagents/agent-<taskId>.jsonl`（per-agent 子代理 trace，随机 UUID 聚合文件退役）、`stderr/` 全部锚进叶子。同一 `(projectIdentityRoot, conversationId)` 派生唯一稳定路径，跨 cwd / 跨 worktree 启动同一会话不再漂移（SC6）。读侧三工具（`list_sessions` / `query_trace` / `get_record`，ACI 与 stdio MCP 两张皮）走两级树；`query_trace` 的 message preview 在 blob 模式下解引用为正文。**旧布局存量全部失效，无自动迁移**: 旧会话（`~/.iknow/sessions/` 旧锚 + 仓库根 `trace/` + 根级 todos）`--resume` 全部续跑不了、TUI 会话列表清空（旧条目不进两级树枚举）；旧 trace 锚点（81 jsonl / 337M）已归档至 `~/.iknow/archive/trace-legacy/`，恢复需手动移回并按旧代码读。归档 spec/plan `docs/archive/025-retire-completed-specs-and-plans/{specs,plans}/session-folder-consolidation.md`；handoff `docs/handoff/2026-09-09-session-folder-consolidation-t1-t7.md`。

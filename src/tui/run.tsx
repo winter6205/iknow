@@ -84,6 +84,7 @@ import {
   isLlmProviderConfigError,
 } from "../config/env.js";
 import { persistModelFailure } from "./persist-model-failure.js";
+import { createEnvDisplayStore } from "./env-display-store.js";
 import {
   WORKSPACE_ROOT_ENV_KEY,
   isWorkspaceRootError,
@@ -352,11 +353,17 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     });
     const activeEnvLoader = envLoader;
     let currentEnv: IknowEnv = activeEnvLoader.get();
-    // envVersion 递增 counter：驱动 TuiApp 显示层刷新（[envVersion] useEffect）。
-    let envVersion = 0;
-    // 渲染函数（env reload 后重渲染用）；在 bridge.onEnvChange 闭包中引用，
-    // 定义延后到 initialSession / onQuitBridge 就绪（env 变化只发生在装配完成后）。
-    let rerenderApp: () => void = () => {};
+    // env 派生显示快照的唯一发布口：hub 的 reloadFromEnv 成功后经 onEnvChange
+    // 发布，订阅方（ContextBar 的 model 段 / TuiApp 的 thinking 基线）各自按需
+    // 刷新。**不**重渲染 TuiApp —— 整树重绘是用户可见的闪烁（#1021），且旧的
+    // props 基线会无条件覆盖用户手改的 thinking / effort。
+    const envDisplay = createEnvDisplayStore({
+      model: currentEnv.llm.model,
+      defaultThinking: {
+        mode: currentEnv.llm.thinking,
+        effort: currentEnv.llm.thinkingEffort,
+      },
+    });
     const bundle: RuntimeBundle = { env: currentEnv, session: runtime.session };
     // ADR-0087: 会话池 = 显式 dataDir 否则 ~/.iknow，不跟 workspaceRoot 分片。
     const dataDir = resolveServeDataDir(options.dataDir);
@@ -440,7 +447,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     //      仍是旧 env —— 显式 reload 才把新 model 读进缓存；
     //   4) bridge.hub.reloadFromEnv()：hub 经 envProvider = () => get() 取这份
     //      新 env 重建 adapter（T4 既有通路），并在成功后触发 onEnvChange →
-    //      envVersion++ → TUI 显示层同步（ContextBar / /info 的 Model 行）。
+    //      envDisplay.publish → 显示层就地同步（ContextBar / /info 的 Model 行）。
     // 任一步失败 → { ok:false, reason }，由 app 以 notice 呈现，不 crash TUI。
     const persistModel: NonNullable<TuiAppProps["onPersistModel"]> = async (
       patch
@@ -644,11 +651,17 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // settings-hot-reload（T3/T4）:env 源透传给 hub —— ensureDeps /
       // reloadFromEnv 用 activeEnvLoader.get() 拿最新 env（T2 EnvLoader.get 天然实现）。
       envProvider: () => activeEnvLoader.get(),
-      // env 变化（reloadFromEnv 成功后）→ 驱动 TUI 显示层刷新 + envVersion 递增。
+      // env 变化（reloadFromEnv 成功后）→ 只发布显示快照。订阅方就地刷新；
+      // TuiApp 整树**不**重渲染（本回调不再触发 root.render）。
       onEnvChange: (env) => {
         currentEnv = env;
-        envVersion++;
-        rerenderApp();
+        envDisplay.publish({
+          model: env.llm.model,
+          defaultThinking: {
+            mode: env.llm.thinking,
+            effort: env.llm.thinkingEffort,
+          },
+        });
       },
       // T3 / plans/worktree-exclusive-lock.md / ADR-0070: enter 占用锁档
       // 一次性透传 —— 启动加载点解析后冻结（ADR-0037 §5 硬要求 9），
@@ -704,11 +717,12 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     renderer = await factory(RENDERER_CONFIG);
 
     const root = createRoot(renderer);
-    // settings-hot-reload（T4）:envVersion 变化时重渲染 —— currentEnv / envVersion
-    // 每次 env reload 后更新，React reconciliation 仅更新 model / defaultThinking /
-    // envVersion 三个 prop，组件内部状态（thinkingEnabled 等）由 app.tsx 的
-    // [envVersion] useEffect 跟随新基线刷新（不清用户会话状态）。
-    rerenderApp = (): void => {
+    // 本函数是 <TuiApp> 的**唯一** root.render 调用点（启动挂载一次）：env 的
+    // 后续变化一律经 envDisplay.publish 下发（见上面 onEnvChange），订阅方各自
+    // 就地刷新 —— root.render 再入会让整棵树重算（用户可见闪烁），且渲染期
+    // props 快照会覆盖用户手改的 thinking / effort。TuiApp 只收 envDisplay 订阅
+    // 口，不收 model / defaultThinking 值 prop。
+    const mountApp = (): void => {
       root.render(
         <TuiApp
           bridge={bridge}
@@ -747,18 +761,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
                 }
               : undefined
           }
-          // thinking 初始基线 = env（adapter 已走 buildThinkingParams，这里只给
-          // app 知道初始状态；用户 /thinking /effort 改动后经 bridge.postMessage
-          // 的 thinking override 透传）。settings-hot-reload 后随 currentEnv 更新。
-          defaultThinking={{
-            mode: currentEnv.llm.thinking,
-            effort: currentEnv.llm.thinkingEffort,
-          }}
-          // 当前模型名 → ContextBar 前置展示（env.llm.model SSOT）。
-          model={currentEnv.llm.model}
-          // envVersion 递增 counter：app.tsx [envVersion] useEffect 驱动显示层刷新
-          // （ContextBar model / thinking 基线跟随热更新）。
-          envVersion={envVersion}
+          // env 派生显示快照（模型路由串 + thinking 基线）—— app 与 ContextBar
+          // 都经它读当前值并订阅变化，取代逐层 props 透传。
+          envDisplay={envDisplay}
           // settings 双向持久化（T4）：面板 Esc → persistThinking 闭包写回
           // settings.json（失败以 notice 呈现，不 crash TUI）。
           onPersistThinking={persistThinking}
@@ -775,7 +780,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         />
       );
     };
-    rerenderApp();
+    mountApp();
     await whenDestroyed(renderer);
     // T6：正常退出（信号收口 / E4 直接 destroy 后本 await 返回）也在返回前
     // 补收口 —— app.tsx /quit 已提前 destroy（renderer 不再重复 destroy），

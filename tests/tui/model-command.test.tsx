@@ -14,21 +14,26 @@
  * 经真实按键投递验证（纯函数测试覆盖不到 app 层键路由）。
  */
 import { describe, expect, test } from "bun:test";
+import { act } from "react";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testRender } from "@opentui/react/test-utils";
-import { createRoot } from "@opentui/react";
 import type { TestRendererSetup } from "@opentui/core/testing";
 import {
   TuiApp,
   applyModelPickerKey,
   createToolEventSink,
-  modelDisplayName,
   modelFocusIndexFor,
   modelPickerEntries,
   type TuiAppProps,
 } from "../../src/tui/app.js";
+import { modelDisplayName } from "../../src/tui/model-picker.js";
+import {
+  createEnvDisplayStore,
+  type EnvDisplaySeed,
+} from "../../src/tui/env-display-store.js";
+import type { DefaultThinkingShape } from "../../src/tui/thinking-gate.js";
 import {
   createInflightRegistry,
   createTuiBridge,
@@ -78,24 +83,28 @@ interface Mounted {
   readonly bridge: TuiBridge;
   readonly setup: TestRendererSetup;
   readonly destroy: () => void;
-  /** 模拟宿主 env reload 后的重渲染（run.tsx onEnvChange 形状）。 */
-  readonly rerenderWith: (patch: {
-    model?: string;
-    envVersion?: number;
-  }) => Promise<void>;
+  /** 宿主 env 派生显示快照的发布口（run.tsx onEnvChange 的等价物）。 */
+  readonly store: ReturnType<typeof createEnvDisplayStore>;
+  /** 模拟宿主 env reload：只 publish，**不**重渲染 React 树（#1021 的核心
+   *  回归钉 —— 旧接线正是靠重渲染整树把新 model 传下去的）。 */
+  readonly publish: (seed: EnvDisplaySeed) => Promise<void>;
   readonly typeText: (text: string) => Promise<void>;
   readonly pressEnter: () => Promise<void>;
   readonly pressEscape: () => Promise<void>;
+  readonly pressSpace: () => Promise<void>;
   readonly pressArrow: (dir: "up" | "down") => Promise<void>;
 }
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((r) => setTimeout(r, ms));
 
+/** thinking 基线：off + 无档位（与旧 `props.defaultThinking` 缺省同形）。 */
+const BASELINE_OFF: DefaultThinkingShape = { mode: "off", effort: "" };
+
 async function mountAsync(opts: {
   readonly providers?: ReadonlyArray<IknowSettingsLlmProvider>;
-  readonly model?: string;
-  readonly envVersion?: number;
+  /** envDisplay 初始快照（等价旧 `model` / `defaultThinking` prop）。 */
+  readonly env?: EnvDisplaySeed;
   readonly onPersistModel?: TuiAppProps["onPersistModel"];
 }): Promise<Mounted> {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-model-"));
@@ -105,9 +114,11 @@ async function mountAsync(opts: {
     deps: makeDeps([]),
     inflight: createInflightRegistry(),
   });
+  const store = createEnvDisplayStore(
+    opts.env ?? { model: undefined, defaultThinking: undefined }
+  );
   let setupRef: TestRendererSetup | undefined;
-  let currentOpts = opts;
-  const appNode = (renderOpts: typeof opts) => (
+  const setup = await testRender(
     <TuiApp
       bridge={bridge}
       askBridge={createTuiAskUserBridge()}
@@ -116,47 +127,38 @@ async function mountAsync(opts: {
       dataDir={dataDir}
       permissionMode={createPermissionModeContext("default")}
       sessionGrants={createSessionGrants()}
-      {...(renderOpts.providers !== undefined
-        ? { providers: renderOpts.providers }
-        : {})}
-      {...(renderOpts.model !== undefined ? { model: renderOpts.model } : {})}
-      {...(renderOpts.envVersion !== undefined
-        ? { envVersion: renderOpts.envVersion }
-        : {})}
-      {...(renderOpts.onPersistModel !== undefined
-        ? { onPersistModel: renderOpts.onPersistModel }
+      envDisplay={store}
+      {...(opts.providers !== undefined ? { providers: opts.providers } : {})}
+      {...(opts.onPersistModel !== undefined
+        ? { onPersistModel: opts.onPersistModel }
         : {})}
       onQuit={() => {
         if (setupRef && !setupRef.renderer.isDestroyed)
           setupRef.renderer.destroy();
       }}
-    />
+    />,
+    {
+      width: 90,
+      height: 30,
+      exitOnCtrlC: false,
+      consoleMode: "disabled",
+    }
   );
-  const setup = await testRender(appNode(currentOpts), {
-    width: 90,
-    height: 30,
-    exitOnCtrlC: false,
-    consoleMode: "disabled",
-  });
   setupRef = setup;
-  // 同一 root 二次 render = re-render（testRender 内部即 createRoot + render，
-  // 这里取公开 createRoot 造一个同 renderer 的 root 供 rerenderWith 使用）。
-  const rootRef = createRoot(setup.renderer);
   await sleep(500);
   await setup.waitForVisualIdle();
   await setup.waitForVisualIdle();
   return {
     bridge,
     setup,
+    store,
     destroy: () => {
       if (!setup.renderer.isDestroyed) setup.renderer.destroy();
     },
-    // 模拟宿主 env reload 后的重渲染（run.tsx onEnvChange 形状）：同一 root
-    // 上以新 props 二次 render（createRoot.render 可重入 = re-render）。
-    rerenderWith: async (patch: { model?: string; envVersion?: number }) => {
-      currentOpts = { ...currentOpts, ...patch };
-      rootRef.render(appNode(currentOpts));
-      await sleep(300);
+    publish: async (seed) => {
+      await act(async () => {
+        store.publish(seed);
+      });
       await setup.renderOnce();
     },
     typeText: async (text: string) => {
@@ -181,6 +183,11 @@ async function mountAsync(opts: {
     },
     pressEscape: async () => {
       setup.mockInput.pressEscape();
+      await sleep(100);
+      await setup.renderOnce();
+    },
+    pressSpace: async () => {
+      setup.mockInput.pressKey(" ");
       await sleep(100);
       await setup.renderOnce();
     },
@@ -220,6 +227,21 @@ async function until(
     if (Date.now() - start > ms) throw new Error(`until timeout: ${label}`);
     await sleep(50);
   }
+}
+
+/** 抹掉 pty 光标渲染块（U+2588）。光标闪烁与 env publish 无关，逐行 diff 前
+ *  必须中和它，否则会造出与本次变更无关的「变化行」。 */
+function stripCursor(frame: string): string {
+  return frame.replaceAll("█", " ");
+}
+
+/** 两帧间**发生变化的行**（按行下标配对；长度不等 → 全部视为变化）。
+ *  captureCharFrame 只取字符面（不含颜色），脉动色不会制造假差异。 */
+function diffLines(before: string, after: string): ReadonlyArray<string> {
+  const a = before.split("\n");
+  const b = after.split("\n");
+  if (a.length !== b.length) return b;
+  return b.filter((line, i) => line !== a[i]);
 }
 
 describe("modelPickerEntries / modelFocusIndexFor（注册表投影）", () => {
@@ -353,7 +375,7 @@ describe("/model 端到端（真实键盘投递）", () => {
     const calls: Array<{ model: string }> = [];
     const app = await mountAsync({
       providers: PROVIDERS,
-      model: "minimax-cn/MiniMax-M3",
+      env: { model: "minimax-cn/MiniMax-M3", defaultThinking: BASELINE_OFF },
       onPersistModel: (patch) => {
         calls.push(patch);
         return Promise.resolve({ ok: true as const });
@@ -412,7 +434,7 @@ describe("/model 端到端（真实键盘投递）", () => {
     const calls: Array<{ model: string }> = [];
     const app = await mountAsync({
       providers: PROVIDERS,
-      model: "minimax-cn/MiniMax-M3",
+      env: { model: "minimax-cn/MiniMax-M3", defaultThinking: BASELINE_OFF },
       onPersistModel: (patch) => {
         calls.push(patch);
         return Promise.resolve({ ok: true as const });
@@ -548,7 +570,9 @@ describe("/model 端到端（真实键盘投递）", () => {
 
 describe("/info 的 Model 行（spec SC11）", () => {
   test("有 model prop → 输出 `Model: <provider>/<model>`，原样不改写", async () => {
-    const app = await mountAsync({ model: "minimax-cn/MiniMax-M3" });
+    const app = await mountAsync({
+      env: { model: "minimax-cn/MiniMax-M3", defaultThinking: BASELINE_OFF },
+    });
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
     await app.typeText("/info");
@@ -565,7 +589,9 @@ describe("/info 的 Model 行（spec SC11）", () => {
   }, 30_000);
 
   test("无 providers 段（只有裸 model 串）→ 同一行原样输出，不伪造 provider 前缀", async () => {
-    const app = await mountAsync({ model: "minimax/MiniMax-M3" });
+    const app = await mountAsync({
+      env: { model: "minimax/MiniMax-M3", defaultThinking: BASELINE_OFF },
+    });
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
     await app.typeText("/info");
@@ -587,7 +613,7 @@ describe("状态栏模型名（注册表 name → ContextBar）", () => {
   test("当前 model 命中注册表且有 name → 状态栏显示 name 而非路由串", async () => {
     const app = await mountAsync({
       providers: PROVIDERS,
-      model: "minimax-cn/MiniMax-M3",
+      env: { model: "minimax-cn/MiniMax-M3", defaultThinking: BASELINE_OFF },
     });
     // 等状态栏渲染出显示名（ContextBar 在 prompt 之下第一行）。
     const frame = await untilFrame(
@@ -609,7 +635,7 @@ describe("状态栏模型名（注册表 name → ContextBar）", () => {
   test("无 name 的条目 → 状态栏回退显示路由串", async () => {
     const app = await mountAsync({
       providers: PROVIDERS,
-      model: "minimax-cn/MiniMax-M2",
+      env: { model: "minimax-cn/MiniMax-M2", defaultThinking: BASELINE_OFF },
     });
     const frame = await untilFrame(
       app.setup,
@@ -623,7 +649,9 @@ describe("状态栏模型名（注册表 name → ContextBar）", () => {
   }, 30_000);
 
   test("无注册表 → 状态栏原样显示 model 串", async () => {
-    const app = await mountAsync({ model: "minimax/MiniMax-M3" });
+    const app = await mountAsync({
+      env: { model: "minimax/MiniMax-M3", defaultThinking: BASELINE_OFF },
+    });
     const frame = await untilFrame(
       app.setup,
       (f) => f.includes("minimax/MiniMax-M3") && f.includes("ctx"),
@@ -635,25 +663,23 @@ describe("状态栏模型名（注册表 name → ContextBar）", () => {
     app.destroy();
   }, 30_000);
 
-  test("settings 热更新切路由 → 状态栏跟随新条目的 name（SC13 重投影）", async () => {
+  test("env store 切路由 → 状态栏跟随新条目的 name（重投影），且只有 model 行变化", async () => {
     const app = await mountAsync({
       providers: PROVIDERS,
-      model: "minimax-cn/MiniMax-M3",
-      envVersion: 0,
+      env: { model: "minimax-cn/MiniMax-M3", defaultThinking: BASELINE_OFF },
     });
-    await untilFrame(
+    const before = await untilFrame(
       app.setup,
       (f) => f.includes("MiniMax M3") && f.includes("ctx"),
       8000,
       "contextbar-before-reload"
     );
 
-    // 模拟宿主 env reload：envVersion 递增 + 新 model prop（run.tsx 的
-    // onEnvChange 接线形状）。`[envVersion]` effect 同步 modelName 后，
-    // ContextBar 必须重投影为新路由的 name。
-    await app.rerenderWith({
+    // 模拟宿主 env reload（run.tsx onEnvChange 接线）：只 publish 新快照，
+    // **不**重渲染 React 树 —— 订阅方（ContextBar）自行重投影为新路由的 name。
+    await app.publish({
       model: "volcengine-ark/deepseek-v3-250324",
-      envVersion: 1,
+      defaultThinking: BASELINE_OFF,
     });
     const reloaded = await untilFrame(
       app.setup,
@@ -667,6 +693,78 @@ describe("状态栏模型名（注册表 name → ContextBar）", () => {
         .split("\n")
         .find((l) => l.includes("ctx") && l.includes("DeepSeek V3"))
     ).not.toContain("MiniMax M3");
+
+    // #1021 (c)：model 切换只允许影响「显示模型名的那一行」—— 逐行 diff，
+    // 其余行必须逐字节不变。走到全树重绘（React 树 remount / 消息区重算）时
+    // 这里会先失败，是「没有用户可见闪烁」最直接的回归钉（比较前抹掉输入框
+    // 光标列：光标闪烁与本次 publish 无关，且 captureCharFrame 不含颜色面，
+    // 无法把它从字符里区分出来）。
+    const changedLines = diffLines(stripCursor(before), stripCursor(reloaded));
+    expect(changedLines).toHaveLength(1);
+    expect(changedLines[0]).toContain("DeepSeek V3");
+
+    app.destroy();
+  }, 30_000);
+
+  test("用户碰过 thinking 后 model-only publish 不覆盖覆盖值；未碰过的字段仍跟随基线", async () => {
+    const app = await mountAsync({
+      providers: PROVIDERS,
+      env: { model: "minimax-cn/MiniMax-M3", defaultThinking: BASELINE_OFF },
+    });
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    // 基线 off → /thinking 面板 Esc 提交 ON（用户手改，effort 未碰）。
+    await app.typeText("/thinking");
+    await app.pressEnter();
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("思考开关"),
+      8000,
+      "picker-open"
+    );
+    await app.pressSpace();
+    await app.pressEscape();
+    await untilFrame(
+      app.setup,
+      (f) => !f.includes("思考开关"),
+      8000,
+      "picker-saved"
+    );
+
+    // 只换模型的 env 快照：thinking 基线仍为 off，但用户已手改为 ON。
+    await app.publish({
+      model: "volcengine-ark/deepseek-v3-250324",
+      defaultThinking: BASELINE_OFF,
+    });
+
+    await app.typeText("/info");
+    await app.pressEnter();
+    const frame = await untilFrame(
+      app.setup,
+      (f) => f.includes("runState"),
+      8000,
+      "info-after-model-publish"
+    );
+    // (a) 手改的 thinking 覆盖存活（旧实现会被基线 off 拽回去）。
+    expect(frame).toContain("thinking: adaptive (auto)");
+    // 模型本身确实跟着新快照走了。
+    expect(frame).toContain("Model: volcengine-ark/deepseek-v3-250324");
+
+    // (b) 未碰过的 effort 字段仍跟随基线变化：新基线 adaptive/high →
+    // thinking 已被用户占住，effort 无覆盖 → 取新值 high。
+    await app.publish({
+      model: "volcengine-ark/deepseek-v3-250324",
+      defaultThinking: { mode: "adaptive", effort: "high" },
+    });
+    await app.typeText("/info");
+    await app.pressEnter();
+    const followed = await untilFrame(
+      app.setup,
+      (f) => f.includes("thinking: adaptive (high)"),
+      8000,
+      "info-after-baseline-publish"
+    );
+    expect(followed).toContain("Model: volcengine-ark/deepseek-v3-250324");
 
     app.destroy();
   }, 30_000);

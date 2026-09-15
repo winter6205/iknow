@@ -150,6 +150,8 @@ import {
 } from "./memory-picker.js";
 import {
   ModelPicker,
+  findEntryByRouteId,
+  modelPickerEntries,
   modelPickerRows,
   modelRouteId,
   reduceModelPickerKey,
@@ -175,6 +177,10 @@ import { createStreamDraft } from "../cli/stream-draft.js";
 import { ListView, relativeTime, type TuiListEntry } from "./list-view.js";
 import { McpView, type McpToolEntry } from "./mcp-view.js";
 import { ContextBar } from "./context-bar.js";
+import {
+  EMPTY_ENV_DISPLAY_STORE,
+  type EnvDisplayStore,
+} from "./env-display-store.js";
 // plans/tui-chrome-interaction.md T7：chrome-focus reducer 接线 ——
 // `reduceChromeFocus` 拥有 input/subagent(row)/graph 三环焦点（src/tui/
 // chrome-focus.ts），reducer 是纯函数，本文件只做组合（T7 验收：wiring
@@ -447,53 +453,13 @@ function zeroDefaultRows(rows: ReadonlyArray<number | undefined>): number {
 }
 
 /**
- * /model 面板条目投影（纯函数）：provider 注册表 → 扁平 `provider × models`
- * 条目列表（面板每项一行的 SSOT）。注册表为空 / 缺席 → 空数组（调用方据此走
- * notice，不打开面板）。抽出为模块级函数而非 TuiApp 内联，避免给组件增分支。
+ * /model 面板条目投影：实现下沉到 model-picker.tsx 并从本文件再导出。
+ * app 与 context-bar 都消费这份「注册表 → 条目」投影，任一方持有实现都会
+ * 逼另一方反向 import 成环 —— 投影族（展平 / 路由判定 / 显示名）因此全部
+ * 落在两者的共同下游叶子模块。再导出保持既有调用点
+ * （app 内部 + tests/tui/model-command.test.tsx）import 路径不变。
  */
-export function modelPickerEntries(
-  providers: ReadonlyArray<IknowSettingsLlmProvider> | undefined
-): ReadonlyArray<ModelPickerEntry> {
-  const out: ModelPickerEntry[] = [];
-  for (const provider of providers ?? []) {
-    for (const model of provider.models) {
-      out.push({
-        providerId: provider.id,
-        modelId: model.id,
-        ...(model.name !== undefined ? { label: model.name } : {}),
-      });
-    }
-  }
-  return out;
-}
-
-/**
- * 路由 ID → 注册表条目的共享查找（modelDisplayName / modelFocusIndexFor 共用，
- * 避免 route-id 谓词在两个 helper 里漂移）。
- */
-function findEntryByRouteId(
-  entries: ReadonlyArray<ModelPickerEntry>,
-  model: string
-): ModelPickerEntry | undefined {
-  return entries.find((e) => modelRouteId(e) === model);
-}
-
-/**
- * 状态栏模型名投影（纯函数）：当前 model 路由 ID 在注册表里命中条目且该项配了
- * `name` → 显示 `name`（例如 `MiniMax M3`）；未命中 / 无 name / 注册表缺席 →
- * 原样回退路由串（`provider/model`），不伪造、不抛错。仅状态栏展示面走本投影；
- * `/info`（spec SC11）与 `/model` picker 的焦点 seed 仍用原始路由串。label 经
- * settings 解析层 drop-not-throw 保证非空；此处再挡空串（与 picker 的
- * `label.length > 0` 渲染守卫同口径），空 label 视同「无 name」回退路由串。
- */
-export function modelDisplayName(
-  model: string | undefined,
-  providers: ReadonlyArray<IknowSettingsLlmProvider> | undefined
-): string | undefined {
-  if (model === undefined) return undefined;
-  const entry = findEntryByRouteId(modelPickerEntries(providers), model);
-  return entry?.label ? entry.label : model;
-}
+export { modelPickerEntries } from "./model-picker.js";
 
 /** 当前 model 串在条目列表中的下标（找不到 / 空列表 → 0）。 */
 export function modelFocusIndexFor(
@@ -874,25 +840,15 @@ export interface TuiAppProps {
    *  undefined → /mcp 切 view 时提示「MCP 未装配」。产品路径由 run.tsx 经
    *  TuiExtensions 注入；fixture / 测试可选 stub。 */
   readonly mcp?: TuiMcpViewExt;
-  /** thinking 控制臂初始基线（env `thinking` + `thinkingEffort` 形状）。
-   *  仅作为 TUI 内 thinkingEnabled / thinkingEffort state 的初始值；用户
-   *  /thinking /effort 改动后经 bridge.postMessage 的 thinking override 透传
-   *  （gate：仅当用户实际改了状态才透传）。缺省 → off + ""（与 env 默认一致）。 */
-  readonly defaultThinking?: {
-    readonly mode: "off" | "adaptive";
-    readonly effort: ThinkingEffortWire;
-  };
-  /** 当前模型名（ContextBar 前置展示）。缺省 "" → 不渲染前缀 model 段
-   *  （测试兼容）。product 路径由 run.tsx 传 env.llm.model。 */
-  readonly model?: string;
   /**
-   * settings-hot-reload（T4）:env 版本递增 counter。run.tsx 在 env reload
-   * 成功后递增并重渲染本组件；本组件以 [envVersion] useEffect 把新的
-   * model / defaultThinking 基线同步进内部 state（ContextBar model 显示 +
-   * thinkingEnabled / thinkingEffort 基线），实现文件级热更新的显示层刷新。
-   * 缺省 0 → 首次 mount 无副作用（基线由 props 初值决定，行为零变化）。
+   * env 派生显示快照（当前模型路由串 + thinking 基线）的订阅口。product
+   * 路径由 run.tsx 装配并传入（`env.llm` 投影的单一发布口）。
+   *
+   * 未接线（fixture / 大批直挂 TuiApp 的测试）→ 用模块级惰性空 store：读值
+   * 恒 undefined（/info 不打 `Model:` 行、ContextBar 不渲染 model 段），
+   * 订阅永不触发 —— 与「env 从未变化」等价，行为与旧缺省 prop 一致。
    */
-  readonly envVersion?: number;
+  readonly envDisplay?: EnvDisplayStore;
   /**
    * 反向持久化（T4，settings 双向通道）：/thinking /effort 面板 Esc 保存退出
    * 时把面板 commit 结果投影成可持久化 payload 交给宿主写回 settings.json
@@ -1040,32 +996,42 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   );
   // T6 (D5): thinking 折叠面板展开态；Ctrl+O 折叠/展开，/thinking 为开关（思考Enabled）。
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  // env 派生显示快照的读取口：未接线 → 模块级惰性空 store（读值恒空）。
+  const envDisplay = props.envDisplay ?? EMPTY_ENV_DISPLAY_STORE;
   // thinking 控制臂开关（/thinking 切换，与折叠态解耦）。初始基线 =
   // env defaultThinking.mode === "adaptive"；用户 /effort 也会 setEnabled(true)。
   const [thinkingEnabled, setThinkingEnabled] = useState<boolean>(
-    () => props.defaultThinking?.mode === "adaptive"
+    () => envDisplay.get().defaultThinking?.mode === "adaptive"
   );
   // thinking 档位（/effort 设置；"" 表示未指定 → 不附加 effort）。初始 =
   // env defaultThinking.effort。
   const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffortWire>(
-    () => props.defaultThinking?.effort ?? ""
+    () => envDisplay.get().defaultThinking?.effort ?? ""
   );
-  // settings-hot-reload（T4）:当前模型名（ContextBar 前置展示）。初始 = props.model；
-  // env reload 后经 [envVersion] useEffect 同步（不直接改 props.model 以免
-  // 跨 env 版本串态）。
-  const [modelName, setModelName] = useState<string | undefined>(
-    () => props.model
-  );
-  // settings-hot-reload（T4）:envVersion 变化 → 把新 env 的 model / thinking
-  // 基线同步进内部 state（ContextBar model + thinkingEnabled / thinkingEffort
-  // 基线刷新）。用户 /thinking /effort 的手动覆盖会被 env reload 复位到新基线
-  // （计划决策：settings 是运行时配置的事实源，env 变化即覆盖）。
-  const envVersion = props.envVersion ?? 0;
+  // 用户是否**亲手**改过 thinking / effort（ref 而非 state：只影响「env 新
+  // 基线要不要覆盖」的判定，本身不驱动渲染）。一旦置位即本会话不再复位 ——
+  // /model 切换同样**不**复位它们，这正是 #1021 要修的行为（旧实现每次 env
+  // 变化都把这两个 state 拖回新基线，用户手改的覆盖被静默丢弃）。
+  const thinkingTouchedRef = useRef(false);
+  const effortTouchedRef = useRef(false);
+  // env 新基线到达 → 只回填用户**没碰过**的字段。未碰过的字段写入相同值会被
+  // React 判为无变化（bailout）不重渲染 —— 于是「只换模型」的 publish 是零
+  // 渲染事件，只有 /thinking /effort 留下的覆盖需要显式让位给新基线时才渲染。
+  // 语义取舍（有意为之）：用户一旦碰过某字段，本会话后续的 env 基线变化都不
+  // 再改写它 —— 显示层与 per-turn override 因此始终一致（override 相对基线
+  // 计算，而基线取自 store；若这里被拽回新基线，用户的手改会被静默吞掉）。
   useEffect(() => {
-    setModelName(props.model);
-    setThinkingEnabled(props.defaultThinking?.mode === "adaptive");
-    setThinkingEffort(props.defaultThinking?.effort ?? "");
-  }, [envVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+    const unsubscribe = envDisplay.subscribe(() => {
+      const snap = envDisplay.get();
+      if (!thinkingTouchedRef.current) {
+        setThinkingEnabled(snap.defaultThinking?.mode === "adaptive");
+      }
+      if (!effortTouchedRef.current) {
+        setThinkingEffort(snap.defaultThinking?.effort ?? "");
+      }
+    });
+    return unsubscribe;
+  }, [envDisplay]);
   // ── thinking-picker 面板态（/thinking /effort 打开；null = 未打开）────
   // design-25 picker（用户定案双面板版）：/thinking /effort 不再立即生效 +
   // notice，改为弹出浮层面板。Enter 固定（面板保持打开）、Esc 保存退出（写入
@@ -2090,9 +2056,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       // 默认 → 不透传，走 stub-model 测试的 cached deps 路径；用户 /thinking
       // /effort 改了 → 透传 per-turn override）。决策逻辑见 thinking-gate.ts
       // computeThinkingOverride（纯函数，已单测）。
+      //
+      // 基线在**回合发起时**从 store 现读，不用渲染期快照：hub 已按新 env 重建
+      // 了 adapter，若这里还按过期基线比对，会相对真实默认值发出错误的
+      // per-turn override（把 adapter 刚拿到的基线又覆盖回去）。
       const thinkingOverride: WireThinkingOverride | undefined =
         computeThinkingOverride(
-          props.defaultThinking,
+          envDisplay.get().defaultThinking,
           thinkingEnabled,
           thinkingEffort
         );
@@ -2576,7 +2546,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
               enabled: thinkingEnabled,
               effort: thinkingEffort,
             },
-            modelName
+            // 调用时读当前快照（不是渲染期捕获）—— env 变化只经 store 发布，
+            // 本闭包不随 store 重渲染，读 props/state 会拿到过期值。
+            envDisplay.get().model
           ),
         });
         return;
@@ -2641,7 +2613,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         // 判定在 openModelPickerCommand 内（S5：case 只做一行派发）。
         openModelPickerCommand({
           providers: props.providers,
-          model: modelName,
+          // 焦点 seed 取当前快照：picker 打开时用户看到的焦点行 = 此刻生效的
+          // 模型（闭包不订阅 store，必须调用时读）。
+          model: envDisplay.get().model,
           onEmpty: (lines) => setNotice({ lines }),
           onOpen: (focusIndex) => {
             // 面板互斥：model picker 打开即收起同族面板（与 /memory 同款）。
@@ -3118,6 +3092,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         case "commit":
           // Esc：把面板内已固定值写真实 thinkingEnabled，然后关闭。
           setThinkingEnabled(switchPreview);
+          // 用户亲手改过 → 之后的 env 新基线不再改写本字段（见订阅 effect）。
+          thinkingTouchedRef.current = true;
           setThinkingPickerOpen(null);
           // 反向持久化（T4）：fire-and-forget —— 不阻塞面板 state 更新，
           // 失败以 notice 呈现（in-memory override 已生效，本次会话仍有效）。
@@ -3157,6 +3133,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             effortAutoOn ? "" : indexToEffort(effortFixedIndex)
           );
           setThinkingEnabled(true); // 隐式开思考（选档即开，spec §0 语义）
+          // 一次 /effort 提交同时动了两个字段 → 两者都算「用户亲手改过」，
+          // 后续 env 基线变化都不得再把它们拽回去。
+          thinkingTouchedRef.current = true;
+          effortTouchedRef.current = true;
           setThinkingPickerOpen(null);
           // 反向持久化（T4）：fire-and-forget —— 不阻塞面板 state 更新，
           // 失败以 notice 呈现（in-memory override 已生效，本次会话仍有效）。
@@ -3672,8 +3652,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             running={active.runState === "running-fg"}
             cols={cols}
             activeToolName={activeToolLabel}
-            // 注册表有 name 时显示 name（如 `MiniMax M3`），否则回退路由串。
-            model={modelDisplayName(modelName, props.providers)}
+            // model 段由 ContextBar 直接订阅 envDisplay —— env 变化不进 React
+            // 树，本组件不重渲染、也不必经 props 把模型名传导下去。providers
+            // 是启动期常量注册表，仍走 props。
+            envDisplay={envDisplay}
+            providers={props.providers}
             effortLabel={
               thinkingEnabled ? formatEffortLabel(thinkingEffort) : "off"
             }
@@ -3751,8 +3734,8 @@ export function infoLines(
   const thinkingLine = thinking.enabled
     ? `thinking: adaptive (${formatEffortLabel(thinking.effort)})`
     : "thinking: off";
-  // spec SC11：`Model: <provider>/<model>` 一行。model 未接线（props.model 缺省）
-  // → 整行退场，不渲染 `Model: undefined`。
+  // spec SC11：`Model: <provider>/<model>` 一行。model 未接线（envDisplay 快照
+  // 里没有模型路由串）→ 整行退场，不渲染 `Model: undefined`。
   const modelLine = model !== undefined ? [`Model: ${model}`] : [];
   return [
     `conversation_id: ${session.conversationId ?? key}（${
