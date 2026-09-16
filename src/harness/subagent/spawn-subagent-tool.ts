@@ -51,6 +51,35 @@ import { createMergedCatalogResolver } from "./user-catalog.js";
 import { resolveSubagentCapabilities } from "./capability.js";
 
 /**
+ * Spec Layer 1 item 1 / SC4 — the dispatch lesson is one SSOT string: the
+ * description embeds it verbatim and the guards read this same constant, so a
+ * guard reds when a discipline clause (or the whole lesson) is dropped without
+ * pinning the wording of any single clause.
+ *
+ * Clauses: start with an `explore` sub-agent before dispatching any work that
+ * writes; keep the operator concurrency discipline — an explicit numeric
+ * ceiling plus the concurrent/workers vocabulary, below the enforced cap;
+ * build the isolation tree via `create-worktree` before dispatching mutating
+ * work; check the skill catalog before improvising a procedure.
+ */
+export const SPAWN_DISPATCH_LESSON =
+  "\n\nDispatch lesson: start with an `explore` sub-agent before dispatching any work that writes; " +
+  "keep at most 3 sub-agents in flight for operator workflows (a working discipline, not the enforced cap); " +
+  "when the task mutates files under isolation, run `create-worktree` first so the workers land in the isolated tree; " +
+  "check the skill catalog before improvising a procedure.";
+
+/**
+ * Mechanical form of the lesson's concurrency-discipline clause: a numeric
+ * ceiling followed, in the same clause, by the concurrent/workers vocabulary.
+ * Digit and spelled-out numerals both count, and the noun may be `workers`,
+ * `sub-agents`, or `in flight` — the invariant is "the ceiling is written
+ * out", not one phrasing of it. The window after the ceiling is bounded so an
+ * unrelated lone digit elsewhere in the lesson cannot satisfy the clause.
+ */
+export const SPAWN_DISPATCH_LESSON_CONCURRENCY_PATTERN =
+  /\b(?:at most|up to|no more than|max(?:imum)?(?: of)?)\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b[^.;]{0,60}\b(?:concurrent(?:ly)?|in flight|workers?|sub-?agents?)\b/i;
+
+/**
  * 依赖注入：`manager` 父代理侧子代理生命周期 / 状态机 / buffer / shutdown 链
  * （T2 createSubAgentManager 的输出）。本工具消费 `spawn(def)` 同步入口 +
  * `waitFor(taskId, timeoutMs, signal)` 前景阻塞入口；drain 由 host 侧独占
@@ -203,8 +232,9 @@ export function createSpawnSubAgentTool(
   return Object.freeze({
     name: "spawn_subagent",
     description:
-      `Delegate a self-contained task when it needs multi-step exploration, independent verification, or parallelizable work. The default subagent type is \`general-purpose\`; use \`explore\` for read-only work. Keep every task self-contained. Default \`wait:true\` — the call blocks until the sub-agent finishes and returns the parent-visible short handoff with summary, changed paths, status, and stop_reason when available (timeout 2 hours default; override via \`timeoutMs\`). Issue multiple \`spawn_subagent\` calls in one turn only for independent tasks. Pass \`wait:false\` for fire-and-forget: returns \`{task_id}\` immediately. In chat/tui/serve, terminal completion wakes the host through the mailbox/subscribe path and starts a silent run; this is the primary completion path. Use \`subagent_result\` only for an explicit status query. At most ${DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS} workers run simultaneously by default; when at capacity, reduce concurrency and retry after a worker completes — requests are rejected rather than queued.\n\nAvailable subagent types (set \`subagent_type\` to route):\n` +
-      proseLines,
+      `Delegate a self-contained task when it needs multi-step exploration, independent verification, or parallelizable work. Omit \`subagent_type\` and the sub-agent runs as \`general-purpose\` — the writable, full-tool-surface default; \`explore\` is the read-only type, request it explicitly. Keep every task self-contained. Default \`wait:true\` — the call blocks until the sub-agent finishes and returns the parent-visible short handoff with summary, changed paths, status, and stop_reason when available (timeout 2 hours default; override via \`timeoutMs\`). Issue multiple \`spawn_subagent\` calls in one turn only for independent tasks. Pass \`wait:false\` for fire-and-forget: returns \`{task_id}\` immediately. In chat/tui/serve, terminal completion wakes the host through the mailbox/subscribe path and starts a silent run; this is the primary completion path. Use \`subagent_result\` only for an explicit status query. At most ${DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS} workers run simultaneously by default; when at capacity, reduce concurrency and retry after a worker completes — requests are rejected rather than queued.\n\nAvailable subagent types (set \`subagent_type\` to route):\n` +
+      proseLines +
+      SPAWN_DISPATCH_LESSON,
     inputSchema: {
       type: "object",
       properties: {
@@ -219,7 +249,7 @@ export function createSpawnSubAgentTool(
           // handler 路径, 见 plan T3 防御契约)。
           enum: catalogIds,
           description:
-            "Optional (#556 T3): route the sub-agent through a builtin persona. Pick one of the available subagent types listed above. Omit to keep V1 default behavior (no persona segment, general tool surface).",
+            "Optional (#556 T3): route the sub-agent through one of the available subagent types listed above. Omit it and the sub-agent runs as `general-purpose` — the writable, full-tool-surface default. `explore` is the read-only type: ask for it explicitly when the task only reads.",
         },
         systemPrompt: {
           type: "string",

@@ -136,6 +136,48 @@ describe("SubAgentManager concurrency capacity", () => {
     );
   });
 
+  // Spec Layer 3 item 7 + SC3: the rejection is observable as the exact
+  // active/max pair, and the surplus request starts NOTHING — no child is
+  // spawned for the rejected call (no queue, no silent backlog).
+  it("rejecting at capacity spawns no extra child", () => {
+    const { manager, spawned } = makeHarness({ maxConcurrentWorkers: 2 });
+
+    manager.spawn({ task: "first" });
+    manager.spawn({ task: "second" });
+    const before = spawned.length;
+
+    assert.throws(
+      () => manager.spawn({ task: "third" }),
+      SubAgentCapacityError
+    );
+    assert.equal(spawned.length, before);
+  });
+
+  it("same-turn batch up to max all start, and the (max+1)-th is the only failure", () => {
+    // Spec Layer 3 item 8 + input-contract row "same-turn multi-spawn ≤ max":
+    // dispatching a whole batch in one turn is the supported shape — every
+    // call up to the cap is admitted, and the boundary is exactly one over.
+    const cap = 4;
+    const { manager, spawned } = makeHarness({ maxConcurrentWorkers: cap });
+
+    for (let i = 0; i < cap; i++) {
+      assert.doesNotThrow(() => manager.spawn({ task: `batch-${i}` }));
+    }
+    assert.equal(spawned.length, cap);
+
+    assert.throws(
+      () => manager.spawn({ task: "batch-over" }),
+      (error: unknown) => {
+        assert.ok(error instanceof SubAgentCapacityError);
+        assert.equal(error.active, cap);
+        assert.equal(error.maxConcurrentWorkers, cap);
+        assert.match(error.message, new RegExp(`${cap}/${cap}`));
+        return true;
+      }
+    );
+    assert.equal(spawned.length, cap);
+  });
+
   it("falls back to the default for an illegal injected capacity", () => {
     const { manager } = makeHarness({ maxConcurrentWorkers: 0 });
     for (let i = 0; i < MAX_CONCURRENT_WORKERS; i++) {

@@ -50,6 +50,10 @@ import {
   getAgentEntry,
   resolveAgentCatalog,
 } from "../../../../src/harness/subagent/catalog.js";
+import {
+  SPAWN_DISPATCH_LESSON,
+  SPAWN_DISPATCH_LESSON_CONCURRENCY_PATTERN,
+} from "../../../../src/harness/subagent/spawn-subagent-tool.js";
 import type { IknowEnv } from "../../../../src/config/env.js";
 import type { SubAgentManager } from "../../../../src/harness/subagent/manager.js";
 import type { McpManager } from "../../../../src/harness/mcp/manager.js";
@@ -215,6 +219,30 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
       ).toEqual([]);
     }
   );
+
+  // ── Spec Layer 1 item 1 / SC4：dispatch lesson 的 STATIC 锁 ──────────────
+  // spawn_subagent description 内的 dispatch lesson 以模块常量
+  // SPAWN_DISPATCH_LESSON 为唯一 SSOT：此处断言 description 逐字嵌入该常量
+  // （重新手打的副本会漂移），并逐条钉住「模型可见面必须说清的四条纪律」的
+  // 语义 —— 删句即 RED，措辞本身不受约束。黄金集名册里 subagent 行只有
+  // STATIC/SEAM 档（见 docs/guides/prompt-development.md 与 commit 正文的
+  // 缺口登记），本 STATIC 锁即该档的全部覆盖。
+  it("spawn_subagent description carries the four dispatch disciplines — Layer 1 item 1", () => {
+    const spawn = reg.catalog.all().find((t) => t.name === "spawn_subagent");
+    expect(spawn).toBeDefined();
+    const desc = spawn!.description;
+    const lessonStart = desc.indexOf(SPAWN_DISPATCH_LESSON);
+    expect(lessonStart).toBeGreaterThan(-1);
+    const lesson = desc.slice(lessonStart);
+
+    expect(lesson).toMatch(/explore/i); // 先探后写
+    // operator 工作流并发纪律：数字上限 + concurrent/workers 语义，按语义判
+    expect(lesson).toMatch(SPAWN_DISPATCH_LESSON_CONCURRENCY_PATTERN);
+    expect(lesson).toContain("create-worktree"); // 隔离先建树
+    expect(lesson).toMatch(/skill catalog/i); // 先查 skill catalog
+    // 纪律句不得退化成硬闸承诺：15 的硬上限仍只由既有段落声明一次。
+    expect(desc.match(/at capacity/gi) ?? []).toHaveLength(1);
+  });
 
   it("every tool has a non-empty description (sanity baseline)", () => {
     const empty = reg.catalog.all().filter((t) => t.description.length === 0);

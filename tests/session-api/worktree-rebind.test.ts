@@ -753,6 +753,149 @@ describe("createTaskWorktreeProvisioner", () => {
     expect(existsSync(join(worktree, "not-ignored.txt"))).toBe(false);
   });
 
+  // Layer 1 (specs/subagent-layers-worktree-deps.md items 2–3): the new tree
+  // is deprecated into a worktree whose project deps are resolvable without
+  // the model running an install. The runner is injected — these cases never
+  // shell out to a real installer; the REAL argv/cwd wiring is asserted on
+  // the runner seam (`worktree-deps.test.ts` owns the argv table).
+  it("runs the injected project-dep installer in the new tree and reports it in the provision result", async () => {
+    const repo = makeGitRepo();
+    await writeFile(join(repo, "package.json"), "{}", "utf8");
+    await writeFile(join(repo, "package-lock.json"), "{}\n", "utf8");
+    git(repo, "add", "package.json", "package-lock.json");
+    git(
+      repo,
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "-qm",
+      "lockfile"
+    );
+
+    const { store } = await makeStoreWithSessions(repo, ["conv-a"]);
+    const installed: string[] = [];
+    const prov = createTaskWorktreeProvisioner({
+      store,
+      projectDepProvisioner: async (worktreePath) => {
+        installed.push(worktreePath);
+        return {
+          status: "installed",
+          manager: "npm",
+          line: "project deps installed with `npm ci` in the worktree",
+        };
+      },
+    });
+    const worktree = await prov.provision({
+      conversationId: "conv-a",
+      root: repo,
+    });
+
+    // the installer ran on the NEW tree, not on the main checkout
+    expect(installed).toEqual([worktree]);
+    expect(worktree).not.toBe(repo);
+  });
+
+  it("a failing project-dep installer is fail-open: the tree still exists and the session was rebound", async () => {
+    const repo = makeGitRepo();
+    await writeFile(join(repo, "package.json"), "{}", "utf8");
+    await writeFile(join(repo, "bun.lock"), "\n", "utf8");
+    git(repo, "add", "package.json", "bun.lock");
+    git(
+      repo,
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "-qm",
+      "lockfile"
+    );
+
+    const { store } = await makeStoreWithSessions(repo, ["conv-a"]);
+    const prov = createTaskWorktreeProvisioner({
+      store,
+      projectDepProvisioner: async () => ({
+        status: "failed",
+        manager: "bun",
+        line: "project deps install failed: `bun install --frozen-lockfile` could not run (spawn bun ENOENT)",
+      }),
+    });
+
+    const worktree = await prov.provision({
+      conversationId: "conv-a",
+      root: repo,
+    });
+
+    // fail-open: no rollback of the git worktree, no rollback of the rebind
+    expect(existsSync(worktree)).toBe(true);
+    expect(git(repo, "worktree", "list")).toContain(worktree);
+    expect((await store.load("conv-a")).workspaceRoot).toBe(worktree);
+  });
+
+  it("a project-dep installer that throws is swallowed: git worktree and rebind survive", async () => {
+    const repo = makeGitRepo();
+    await writeFile(join(repo, "package.json"), "{}", "utf8");
+    await writeFile(
+      join(repo, "pnpm-lock.yaml"),
+      "lockfileVersion: 9\n",
+      "utf8"
+    );
+    git(repo, "add", "package.json", "pnpm-lock.yaml");
+    git(
+      repo,
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "-qm",
+      "lockfile"
+    );
+
+    const { store } = await makeStoreWithSessions(repo, ["conv-a"]);
+    const prov = createTaskWorktreeProvisioner({
+      store,
+      projectDepProvisioner: async () => {
+        throw new Error("boom: installer exploded");
+      },
+    });
+
+    const worktree = await prov.provision({
+      conversationId: "conv-a",
+      root: repo,
+    });
+
+    expect(existsSync(worktree)).toBe(true);
+    expect((await store.load("conv-a")).workspaceRoot).toBe(worktree);
+  });
+
+  it("second provision of the same conversation does not run the installer twice", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, ["conv-a"]);
+    let installs = 0;
+    const prov = createTaskWorktreeProvisioner({
+      store,
+      projectDepProvisioner: async () => {
+        installs += 1;
+        return { status: "skipped", line: "project deps skipped: test" };
+      },
+    });
+
+    const first = await prov.provision({
+      conversationId: "conv-a",
+      root: repo,
+    });
+    const second = await prov.provision({
+      conversationId: "conv-a",
+      root: repo,
+    });
+
+    expect(second).toBe(first);
+    expect(installs).toBe(1);
+  });
+
   // Review Medium: a leading `/` anchors the pattern to the include root.
   // Before the fix, `/.env` was stripped to `env`-anywhere matching, so a
   // nested `sub/.env` was mirrored into the new tree as well.
@@ -862,6 +1005,307 @@ describe("createTaskWorktreeProvisioner", () => {
       // (the leaf has no `--<id>` suffix either) contributes nothing.
       expect(entered.receipt).toContain(`entered task worktree: ${legacyTree}`);
       expect(entered.receipt).not.toContain("conv-owner");
+    });
+  });
+
+  // Layer 1 (specs/subagent-layers-worktree-deps.md items 2–3) — the enter
+  // path carries the same idempotent ensure: entering a tree whose project
+  // deps are not resolvable yet installs them, and the receipt says so. The
+  // ensure must never touch a real destination directory the tree already has
+  // (no removal, no relink) — the installer's own resolved-marker skip is what
+  // makes a second enter a no-op, not a destructive "reset" here.
+  describe("enter project-dep ensure (Layer 1)", () => {
+    it("runs the injected installer when entering a tree without node_modules and reports it in the receipt", async () => {
+      const repo = makeGitRepo();
+      const { store } = await makeStoreWithSessions(repo, ["conv-owner"]);
+      const ownerProv = createTaskWorktreeProvisioner({ store });
+      const tree = await ownerProv.provision({
+        conversationId: "conv-owner",
+        root: repo,
+      });
+
+      const ensured: string[] = [];
+      const guestProv = createTaskWorktreeProvisioner({
+        store,
+        projectDepProvisioner: async (worktreePath) => {
+          ensured.push(worktreePath);
+          return {
+            status: "installed",
+            manager: "npm",
+            line: "project deps installed with `npm ci` in the worktree",
+          };
+        },
+      });
+      const entered = await guestProv.enter({
+        conversationId: "conv-owner",
+        root: repo,
+        targetConversationId: "conv-owner",
+      });
+
+      expect(ensured).toEqual([tree]);
+      expect(entered.path).toBe(tree);
+      expect(entered.receipt).toContain("npm ci");
+    });
+
+    it("keeps the enter receipt free of an install line when the tree is already resolvable", async () => {
+      const repo = makeGitRepo();
+      const { store } = await makeStoreWithSessions(repo, ["conv-owner"]);
+      const ownerProv = createTaskWorktreeProvisioner({ store });
+      const tree = await ownerProv.provision({
+        conversationId: "conv-owner",
+        root: repo,
+      });
+      await mkdir(join(tree, "node_modules"), { recursive: true });
+
+      const guestProv = createTaskWorktreeProvisioner({
+        store,
+        projectDepProvisioner: async () => ({
+          status: "skipped",
+          reason: "already_resolved",
+          manager: "npm",
+          line: "project deps already resolvable in the worktree (node_modules present) — skipped `npm ci`",
+        }),
+      });
+      const entered = await guestProv.enter({
+        conversationId: "conv-owner",
+        root: repo,
+        targetConversationId: "conv-owner",
+      });
+
+      expect(entered.path).toBe(tree);
+      // A no-op ensure contributes no install sentence to the receipt.
+      expect(entered.receipt).not.toContain("npm ci");
+      // The installer did not remove the destination directory the tree had.
+      expect(existsSync(join(tree, "node_modules"))).toBe(true);
+    });
+
+    it("an idempotent re-enter (same session, same tree) keeps the receipt free of placeholder text", async () => {
+      // The receipt is built by a shared formatter; its optional dep suffix
+      // must stay absent (not stringify) when there is nothing to report —
+      // `"...disclosure" + undefined` would render the literal "undefined".
+      const repo = makeGitRepo();
+      const { store } = await makeStoreWithSessions(repo, ["conv-owner"]);
+      const prov = createTaskWorktreeProvisioner({ store });
+      const tree = await prov.provision({
+        conversationId: "conv-owner",
+        root: repo,
+      });
+
+      const entered = await prov.enter({
+        conversationId: "conv-owner",
+        root: repo,
+        targetConversationId: "conv-owner",
+      });
+
+      expect(entered.path).toBe(tree);
+      expect(entered.receipt).not.toContain("undefined");
+    });
+
+    // D4 — the enter receipt and the provision report are the SAME rendering
+    // path (`collectProjectDepsLine`), so the skip/failure wording the model
+    // sees cannot drift between the two seams. These cases pin the enter-side
+    // receipt for the two actionable SKIP reasons, which had zero coverage.
+    it("puts the no_package_json skip line in the enter receipt", async () => {
+      const repo = makeGitRepo();
+      const { store } = await makeStoreWithSessions(repo, ["conv-owner"]);
+      const ownerProv = createTaskWorktreeProvisioner({ store });
+      const tree = await ownerProv.provision({
+        conversationId: "conv-owner",
+        root: repo,
+      });
+
+      const guestProv = createTaskWorktreeProvisioner({
+        store,
+        projectDepProvisioner: async () => ({
+          status: "skipped",
+          reason: "no_package_json",
+          line: "project deps skipped: no package.json in the worktree (nothing to install)",
+        }),
+      });
+      const entered = await guestProv.enter({
+        conversationId: "conv-owner",
+        root: repo,
+        targetConversationId: "conv-owner",
+      });
+
+      expect(entered.path).toBe(tree);
+      // verbatim: the same `line` the provision path would hand to ctx.report
+      expect(entered.receipt).toContain(
+        "project deps skipped: no package.json in the worktree (nothing to install)"
+      );
+    });
+
+    it("puts the no_lockfile skip line in the enter receipt", async () => {
+      const repo = makeGitRepo();
+      const { store } = await makeStoreWithSessions(repo, ["conv-owner"]);
+      const ownerProv = createTaskWorktreeProvisioner({ store });
+      const tree = await ownerProv.provision({
+        conversationId: "conv-owner",
+        root: repo,
+      });
+
+      const line =
+        "project deps skipped: package.json present but no supported lockfile (pnpm-lock.yaml / bun.lock / bun.lockb / package-lock.json)";
+      const guestProv = createTaskWorktreeProvisioner({
+        store,
+        projectDepProvisioner: async () => ({
+          status: "skipped",
+          reason: "no_lockfile",
+          line,
+        }),
+      });
+      const entered = await guestProv.enter({
+        conversationId: "conv-owner",
+        root: repo,
+        targetConversationId: "conv-owner",
+      });
+
+      expect(entered.path).toBe(tree);
+      expect(entered.receipt).toContain(line);
+    });
+
+    it("puts a failed-install line in the enter receipt (fail-open, rebind still happens)", async () => {
+      const repo = makeGitRepo();
+      const { store } = await makeStoreWithSessions(repo, ["conv-owner"]);
+      const ownerProv = createTaskWorktreeProvisioner({ store });
+      const tree = await ownerProv.provision({
+        conversationId: "conv-owner",
+        root: repo,
+      });
+
+      const line =
+        "project deps install failed: `npm ci` timed out after 120s (killed) — the worktree still exists; install manually in it if the task needs node_modules";
+      const guestProv = createTaskWorktreeProvisioner({
+        store,
+        projectDepProvisioner: async () => ({
+          status: "failed",
+          manager: "npm",
+          line,
+        }),
+      });
+      const entered = await guestProv.enter({
+        conversationId: "conv-owner",
+        root: repo,
+        targetConversationId: "conv-owner",
+      });
+
+      expect(entered.path).toBe(tree);
+      expect(entered.receipt).toContain(line);
+      expect((await store.load("conv-owner")).workspaceRoot).toBe(tree);
+    });
+
+    // D5 — `enter` registers the boundary BEFORE running the ensure, so a
+    // concurrent / repeated enter cannot race a second installer into the same
+    // tree. Before the fix the guard (`bound.get(...) === target`) sat behind
+    // the install, so both callers missed it and both installed.
+    it("coalesces concurrent enters of the same tree into one install (boundary registered before ensure)", async () => {
+      const repo = makeGitRepo();
+      const { store } = await makeStoreWithSessions(repo, ["conv-owner"]);
+      const ownerProv = createTaskWorktreeProvisioner({ store });
+      const tree = await ownerProv.provision({
+        conversationId: "conv-owner",
+        root: repo,
+      });
+
+      let installs = 0;
+      let releaseFirstInstall: () => void = () => undefined;
+      const holdFirstInstall = new Promise<void>((resolve) => {
+        releaseFirstInstall = resolve;
+      });
+      // Resolves once the FIRST install is actually running, so the second
+      // enter provably arrives while the first is still in flight.
+      let noteFirstInstall: () => void = () => undefined;
+      const firstInstallRunning = new Promise<void>((resolve) => {
+        noteFirstInstall = resolve;
+      });
+      const guestProv = createTaskWorktreeProvisioner({
+        store,
+        projectDepProvisioner: async () => {
+          installs += 1;
+          if (installs === 1) {
+            noteFirstInstall();
+            await holdFirstInstall;
+          }
+          return { status: "installed", manager: "npm", line: "deps" };
+        },
+      });
+
+      const first = guestProv.enter({
+        conversationId: "conv-owner",
+        root: repo,
+        targetConversationId: "conv-owner",
+      });
+      await firstInstallRunning;
+      const second = await guestProv.enter({
+        conversationId: "conv-owner",
+        root: repo,
+        targetConversationId: "conv-owner",
+      });
+      releaseFirstInstall();
+      const firstEntered = await first;
+
+      expect(second.path).toBe(tree);
+      expect(firstEntered.path).toBe(tree);
+      // exactly ONE install reached the seam: the second call took the
+      // idempotent re-enter early return instead of racing a second install
+      expect(installs).toBe(1);
+    });
+
+    it("re-entering the same tree does not install twice across sequential calls", async () => {
+      const repo = makeGitRepo();
+      const { store } = await makeStoreWithSessions(repo, ["conv-owner"]);
+      const ownerProv = createTaskWorktreeProvisioner({ store });
+      const tree = await ownerProv.provision({
+        conversationId: "conv-owner",
+        root: repo,
+      });
+
+      let installs = 0;
+      const guestProv = createTaskWorktreeProvisioner({
+        store,
+        projectDepProvisioner: async () => {
+          installs += 1;
+          return { status: "installed", manager: "npm", line: "deps" };
+        },
+      });
+      await guestProv.enter({
+        conversationId: "conv-owner",
+        root: repo,
+        targetConversationId: "conv-owner",
+      });
+      await guestProv.enter({
+        conversationId: "conv-owner",
+        root: repo,
+        targetConversationId: "conv-owner",
+      });
+
+      expect(installs).toBe(1);
+      expect(tree).toBe((await store.load("conv-owner")).workspaceRoot);
+    });
+
+    it("a throwing installer does not fail the enter: rebind still happens", async () => {
+      const repo = makeGitRepo();
+      const { store } = await makeStoreWithSessions(repo, ["conv-owner"]);
+      const ownerProv = createTaskWorktreeProvisioner({ store });
+      const tree = await ownerProv.provision({
+        conversationId: "conv-owner",
+        root: repo,
+      });
+
+      const guestProv = createTaskWorktreeProvisioner({
+        store,
+        projectDepProvisioner: async () => {
+          throw new Error("installer exploded");
+        },
+      });
+      const entered = await guestProv.enter({
+        conversationId: "conv-owner",
+        root: repo,
+        targetConversationId: "conv-owner",
+      });
+
+      expect(entered.path).toBe(tree);
+      expect((await store.load("conv-owner")).workspaceRoot).toBe(tree);
     });
   });
 });

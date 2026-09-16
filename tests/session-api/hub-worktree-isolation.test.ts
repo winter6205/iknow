@@ -35,6 +35,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { SessionHub } from "../../src/session-api/hub.ts";
+import type { ProjectDepProvisioner } from "../../src/session-api/worktree-deps.ts";
 import { SessionStore } from "../../src/session-api/store/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type {
@@ -114,9 +115,16 @@ afterAll(async () => {
 });
 
 async function makeHubWithSession(
-  repo: string
+  repo: string,
+  opts: { projectDepProvisioner?: ProjectDepProvisioner } = {}
 ): Promise<{ hub: SessionHub; conversationId: string }> {
-  const hub = new SessionHub({ store, askUser: createNoAskUser() });
+  const hub = new SessionHub({
+    store,
+    askUser: createNoAskUser(),
+    ...(opts.projectDepProvisioner !== undefined
+      ? { projectDepProvisioner: opts.projectDepProvisioner }
+      : {}),
+  });
   await hub.bindWorkspace(repo);
   const { session } = await hub.createSession();
   return { hub, conversationId: session.conversation_id };
@@ -1367,6 +1375,57 @@ describe("worktree isolation wiring (T4 — create-worktree ACI tool)", () => {
     expect(deps2.registry.get("exit-worktree")).toBeDefined();
     expect(deps2.registry.get("remove-worktree")).toBeDefined();
     void conversationId;
+  });
+
+  // Layer 1 (specs/subagent-layers-worktree-deps.md items 2–3, SC1): a
+  // Node project with a lockfile gets its PROJECT deps installed into the new
+  // tree, end to end through the real chain (hub → build-engine → provisioner
+  // → tool result). The runner is stubbed at the provisioner seam so the
+  // assertion is about WIRING (which tree, which manager, what the model is
+  // told) — the argv table and skip/fail-open matrix live in
+  // `worktree-deps.test.ts`.
+  it("installs the new tree's project deps from its lockfile and reports the outcome in the tool result", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    writeFileSync(join(repo, "package.json"), "{}", "utf8");
+    writeFileSync(join(repo, "package-lock.json"), "{}\n", "utf8");
+    git(repo, "add", "package.json", "package-lock.json");
+    git(
+      repo,
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
+      "commit",
+      "-qm",
+      "lockfile"
+    );
+
+    const calls: Array<{ manager: string; cwd: string }> = [];
+    const { hub, conversationId } = await makeHubWithSession(repo, {
+      projectDepProvisioner: async (worktreePath) => {
+        calls.push({ manager: "npm", cwd: worktreePath });
+        return {
+          status: "installed",
+          manager: "npm",
+          line: "project deps installed with `npm ci` in the worktree",
+        };
+      },
+    });
+    const deps = await ensure(hub, repo);
+
+    const result = await runTool(deps, conversationId);
+    expect(result.kind).toBe("ok");
+    const reboundRoot = join(repo, ".iknow", "worktrees", conversationId);
+    const resultText = (result.payload as Array<{ text?: string }>)
+      .map((b) => b.text ?? "")
+      .join("");
+
+    // the installer ran on the NEW tree, and the model was told the outcome
+    expect(calls).toEqual([{ manager: "npm", cwd: reboundRoot }]);
+    expect(resultText).toContain("project deps installed with `npm ci`");
+    // nothing was installed into the main checkout
+    expect(existsSync(join(repo, "node_modules"))).toBe(false);
   });
 
   it("model calls the tool: tree created + session rebound; next turn's mutate lands in the worktree, main repo zero-write", async () => {

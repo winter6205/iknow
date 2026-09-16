@@ -12,8 +12,8 @@ After `create-worktree`, a Node project task tree can run tests without the mode
 ### Layer 1 — dispatch + tree readiness
 
 1. Short **English** dispatch lesson (not a second project instruction file). May live in spawn tool description and/or a small default injection; follow `docs/guides/prompt-development.md` when editing prompts. Golden-set gaps for soul/usage noted, not invented mid-flight.
-2. After successful `git worktree add` (and alongside existing `worktreeinclude` copy), harness **silently installs project dependencies** from the new tree's lockfile when present: prefer `pnpm-lock.yaml` → `pnpm install`; `bun.lock`/`bun.lockb` → `bun install`; `package-lock.json` → `npm ci` (else skip or documented fallback). **Never** install global CLIs / runtimes. **No** whole-tree `node_modules` symlink to the identity root.
-3. Missing package manager binary, missing `package.json`, or install failure → **fail-open**: worktree still created; reply reports linked/skipped/failed reason. Do not roll back the git worktree.
+2. After successful `git worktree add` (and alongside existing `worktreeinclude` copy), harness **silently installs project dependencies** from the new tree's lockfile when present: prefer `pnpm-lock.yaml` → `pnpm install`; `bun.lock`/`bun.lockb` → `bun install`; `package-lock.json` → `npm ci` (else skip or documented fallback). **Never** install global CLIs / runtimes. **No** whole-tree `node_modules` symlink to the identity root. When a tree carries **several** lockfiles the decision order is fixed: `pnpm` → `bun` → `npm` (first match wins, array order is the SSOT in `worktree-deps.ts`). A **completed** install is recognized by manager-specific evidence — npm `node_modules/.package-lock.json`, pnpm `node_modules/.modules.yaml`, bun a non-empty `node_modules` (bun writes no marker of its own) — never by the bare `node_modules` directory: a half-written tree from a failed install must **not** be treated as ready.
+3. Missing package manager binary, missing `package.json`, or install failure → **fail-open**: worktree still created; reply reports linked/skipped/failed reason. Do not roll back the git worktree. The three outcomes are distinct and must not be collapsed: `no_package_json` / `no_lockfile` / `already_resolved` are **skips** (`status: "skipped"` + reason — there was nothing to do), whereas a manager that ran and did not finish is a **failure** (`status: "failed"` — a missing binary, a non-zero exit, or an install that outran its own bound). The install carries its own bound (`PACKAGE_MANAGER_INSTALL_TIMEOUT_MS`, 120 s) and `create-worktree` sits at `timeoutTier: "build"` (5 min), so a slow install reports a typed failure line **inside** the tool result instead of the ACI tier killing the call with a bare `timeout` that discards the receipt. `enter-worktree` runs the same ensure but is **still at the 30 s `default` tier** — see Known risks.
 4. Do **not** hard-reject bash-as-reader globally.
 
 ### Layer 2 — tool + types
@@ -28,9 +28,14 @@ After `create-worktree`, a Node project task tree can run tests without the mode
 9. `wait` default **true**.
 10. Workers **cannot** nest-spawn.
 
+## Known risks
+
+- **`enter-worktree` still carries the 30 s `default` tier while running the same bounded install.** The install bound is 120 s and a real `npm ci` was measured at 53 s, so an `enter` that has to install deps in a large tree can be killed by its tier first: the model gets a bare `timeout` and the install line is dropped — the exact failure `create-worktree` was raised to `build` to avoid. Registered rather than fixed because `enter-worktree.ts` is outside this repair's write scope; the remedy is the same one-line tier raise, and until it lands the `enter` receipt is only reliable for trees whose install fits in 30 s (a tree whose deps were already installed always fits — the ensure is a marker check).
+- **The ≤3-worker discipline has no code gate.** The dispatch lesson ("keep at most 3 sub-agents in flight for operator workflows") is a _working discipline_, not the enforced cap: `DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS` is 15 and the runtime rejects only past 15 (`SubAgentCapacityError`). A model that ignores the lesson can therefore run up to 15 workers; nothing in this feature detects or penalizes that. Deliberately registered here rather than fixed — the cap is out of scope for this spec, and inventing a second gate for the discipline would make the lesson and the enforcement disagree in a new way.
+
 ## Out of scope
 
-- Changing default concurrent cap from 15 to 3 (operator prompt enforces ≤3 for measured workflow)
+- Changing default concurrent cap from 15 to 3 (operator prompt enforces ≤3 for measured workflow; see Known risks — the discipline is untested by design)
 - Config panel ADR-0096 implementation
 - Transport idle/retry (other spec)
 - Plugin `commands/` discovery

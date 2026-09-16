@@ -34,6 +34,61 @@ describe("task worktree lifecycle ACI tools", () => {
     );
   });
 
+  // Layer 1 (specs/subagent-layers-worktree-deps.md items 2–3): the host
+  // installs the new tree's project deps and reports the outcome through the
+  // provision context's `report` callback. The tool result must carry that
+  // line so the model learns linked/skipped/failed instead of inventing an
+  // install; the seam itself stays `Promise<string>`.
+  it("surfaces the host's project-dep outcome line in the tool result", async () => {
+    const provision: CreateWorktreeProvisionFn = async (ctx) => {
+      // The host reports through the context channel the tool supplies.
+      ctx.report?.("project deps installed with `npm ci` in the worktree");
+      return "/repo/.iknow/worktrees/conv-deps";
+    };
+    const tool = createCreateWorktreeTool({ provision, root: "/repo" });
+
+    const result = String(
+      await tool.handler({}, { conversationId: "conv-deps" })
+    );
+
+    assert.match(result, /task worktree ready:/);
+    assert.match(result, /\/repo\/\.iknow\/worktrees\/conv-deps/);
+    assert.match(result, /project deps installed with `npm ci`/);
+  });
+
+  it("omits the project-dep line when the host reports nothing", async () => {
+    const provision: CreateWorktreeProvisionFn = async () =>
+      "/repo/.iknow/worktrees/conv-quiet";
+    const tool = createCreateWorktreeTool({ provision, root: "/repo" });
+
+    const result = String(
+      await tool.handler({}, { conversationId: "conv-quiet" })
+    );
+
+    assert.match(result, /task worktree ready:/);
+    assert.doesNotMatch(result, /project deps/);
+  });
+
+  it("still fails typed when provision rejects after reporting a dep line", async () => {
+    const provision: CreateWorktreeProvisionFn = async (ctx) => {
+      ctx.report?.("project deps installed with `npm ci` in the worktree");
+      throw new WorktreeIsolationError("worktree_add_failed", "git said no");
+    };
+    const tool = createCreateWorktreeTool({ provision, root: "/repo" });
+
+    await assert.rejects(
+      () => tool.handler({}, { conversationId: "conv-fail" }),
+      (error: unknown) => {
+        assert.ok(error instanceof ToolExecutionError);
+        assert.match(
+          String((error as Error).message),
+          /kind=worktree_add_failed/
+        );
+        return true;
+      }
+    );
+  });
+
   it("lists worktrees as JSON and preserves the read-only ACI category", async () => {
     const tool = createListWorktreesTool({
       root: "/repo",

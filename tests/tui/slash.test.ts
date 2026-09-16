@@ -22,6 +22,7 @@ import {
   slashSuggestions,
   type SlashCandidate,
 } from "../../src/tui/slash.js";
+import { resolveAgentCatalog } from "../../src/harness/subagent/catalog.js";
 
 describe("parseTuiInput: 词表命中", () => {
   for (const [input, command] of [
@@ -243,6 +244,22 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     expect(slashSuggestions("/ba", [{ name: "bash-doc" }])).toEqual([
       { kind: "skill", name: "bash-doc", description: undefined },
     ]);
+  });
+
+  // Spec Layer 2 item 6 (SC2 companion): the TUI slash vocabulary stays the
+  // static command list — no `/general-purpose`, no `/explore`, no
+  // `/<agent-id>` of any kind. Agents are reached only through the
+  // `spawn_subagent` tool, so the agent catalog must never leak into this
+  // vocabulary. Derived from the catalog SSOT rather than a hardcoded pair,
+  // so adding a builtin agent leaves this pin meaningful.
+  test("词表不含任何 agent id（agent 只经 spawn_subagent 触达，不进 slash）", () => {
+    const agentIds = resolveAgentCatalog().map((e) => e.id);
+    const commands = vocabularyCommands();
+    expect(agentIds.length).toBeGreaterThan(0);
+    for (const id of agentIds) {
+      expect(commands).not.toContain(id);
+      expect(slashSuggestions(`/${id}`)).toEqual([]);
+    }
   });
 
   test('"/c" 混合：静态命令（compact/continue/config）在前 + skill（code-review）在后', () => {

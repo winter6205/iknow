@@ -31,6 +31,12 @@
  * Idempotency (hard req 7): the same conversation may call the tool again —
  * the host provision seam is idempotent (own tree → same-root no-op), so a
  * repeat call returns the same root without a second `git worktree add`.
+ *
+ * Layer 1 (specs/subagent-layers-worktree-deps.md items 2–3): the host also
+ * installs the new tree's PROJECT deps (lockfile-driven, fail-open, never a
+ * global CLI, never a whole-tree `node_modules` symlink). The outcome is
+ * reported through the provision context's optional `report` callback, so the
+ * tool result carries linked/skipped/failed alongside the tree path.
  */
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
@@ -94,18 +100,36 @@ export function createCreateWorktreeTool(
       category: "write",
       isConcurrencySafe: false,
       interruptBehavior: "block",
-      timeoutTier: "default",
+      // D2 — `build` (5 min), not `default` (30 s). This tool call now carries
+      // a synchronous project-dep install, and a Node install routinely
+      // exceeds 30 s (measured on this repo: 53 s for one `npm ci`). At
+      // `default` the tier timer fires mid-install and the executor returns a
+      // bare `timeout`, silently discarding the install receipt AND leaving
+      // the install running detached — the receipt is the entire point of
+      // this feature (spec item 3), so the tier has to outlive the work.
+      // `build` is the tier bash takes for the same class of work (builds /
+      // installs run through it today); the install's own
+      // `PACKAGE_MANAGER_INSTALL_TIMEOUT_MS` (120 s) is what actually bounds
+      // it, so this raise only guarantees the bound reports first.
+      timeoutTier: "build",
     } as const,
     handler: async (input: unknown, ctx?: ToolExecutionContext) => {
       const conversationId = ctx?.conversationId;
       const name = (input as { name?: unknown } | null)?.name;
       const label = resolveTaskWorktreeLabel(name);
       const root = typeof deps.root === "string" ? deps.root : deps.root.read();
+      // Layer 1 (specs/subagent-layers-worktree-deps.md items 2–3): the host
+      // provisioner installs the new tree's project deps and reports the
+      // outcome through this channel. The seam stays `Promise<string>` — the
+      // gate / hub / live-taskRoot wrapper keep consuming a plain root — and
+      // the model still learns linked/skipped/failed for its new tree.
+      const depLines: string[] = [];
       try {
         const worktreePath = await deps.provision({
           conversationId,
           root,
           ...(name !== undefined ? { name } : {}),
+          report: (line) => depLines.push(line),
         });
         const labelNotice =
           label.reason === undefined
@@ -114,7 +138,8 @@ export function createCreateWorktreeTool(
         return (
           `task worktree ready:${labelNotice} ${worktreePath} (session root rebound; ` +
           `the next wave of tool calls in this run will land in the new root, ` +
-          `re-issue the blocked write then)`
+          `re-issue the blocked write then)` +
+          (depLines.length > 0 ? ` ${depLines.join(" ")}` : "")
         );
       } catch (err) {
         if (err instanceof WorktreeIsolationError) {

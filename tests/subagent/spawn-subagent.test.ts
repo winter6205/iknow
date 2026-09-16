@@ -36,7 +36,11 @@ import { join } from "node:path";
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
 
-import { createSpawnSubAgentTool } from "../../src/harness/subagent/spawn-subagent-tool.ts";
+import {
+  createSpawnSubAgentTool,
+  SPAWN_DISPATCH_LESSON,
+  SPAWN_DISPATCH_LESSON_CONCURRENCY_PATTERN,
+} from "../../src/harness/subagent/spawn-subagent-tool.ts";
 import type { SubAgentDefinition } from "../../src/harness/subagent/manager.ts";
 import type {
   QueryBufferResult,
@@ -45,6 +49,7 @@ import type {
 import {
   PER_TASK_TIMEOUT_MS,
   SubAgentAbortError,
+  SubAgentCapacityError,
   SubAgentWaitTimeoutError,
 } from "../../src/harness/subagent/manager.ts";
 import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../src/config/settings.ts";
@@ -472,9 +477,35 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
     expect(description).toMatch(/reduce concurrency/i);
     expect(description).toMatch(/not queued|rather than queued/i);
     expect(description).toMatch(/general-purpose/);
+    // T2 / spec Layer 2 item 5 (SC2): the omit arm must say outright that
+    // omitting routes to general-purpose (the writable default) and that
+    // `explore` is the read-only type you must ask for explicitly. A model
+    // that reads only the tool description must not infer "no type = minimal
+    // capability" — that inverts the contract.
+    expect(description).toMatch(/omit/i);
+    expect(description).toMatch(/general-purpose/);
+    expect(description).toMatch(/explore/i);
+    expect(description).toMatch(/read-only|readonly/i);
     expect(description).not.toMatch(/sole ground truth|ground truth/i);
     expect(description).not.toMatch(/full result envelope/i);
-    expect(description).not.toMatch(/Fork|worktree/i);
+    // 不变式：description 不得把「fork 会话」或「每个 worker 各自 worktree」当作
+    // spawn 的能力来宣传 —— 工具没有 fork 模式、没有 worktree 参数、也没有逐
+    // worker 选树（schema 断言见下）。`create-worktree` 是另一个工具的名字
+    // （dispatch lesson 要求改文件前先建树），是唯一放行的提及形态：词形按
+    // 词边界整体封禁，任何其它 fork/worktree 用法都算宣传。
+    expect(description).not.toMatch(
+      /(?<!create-)\b(?:fork(?:s|ed|ing)?|worktrees?)\b/i
+    );
+    // No fork-style routing parameter exists in the schema either.
+    const lessonTool = createSpawnSubAgentTool({
+      manager: fixtureManager(),
+    });
+    expect(
+      Object.keys(
+        (lessonTool.inputSchema as { properties: Record<string, unknown> })
+          .properties
+      )
+    ).not.toContain("fork");
   });
 
   it("wait:false → chat/tui/serve rely on terminal wake, not polling, while wait:true wording stays blocking", () => {
@@ -491,6 +522,29 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
     expect(description).toContain(
       "Default `wait:true` — the call blocks until the sub-agent finishes"
     );
+  });
+
+  it("携带 dispatch lesson：explore 先行 / 并发纪律 / 隔离先 create-worktree / 查 skill catalog", () => {
+    // Spec Layer 1 item 1 + SC4: the lesson lives on THIS description — the
+    // surface the model reads at the moment it decides whether to dispatch —
+    // and carries the four operator disciplines. The SSOT is the module
+    // constant: the description must embed it verbatim (a re-typed copy can
+    // drift), and the concurrency clause is judged on its semantics below.
+    const lessonStart = description.indexOf(SPAWN_DISPATCH_LESSON);
+    expect(lessonStart).toBeGreaterThan(-1);
+    const lesson = description.slice(lessonStart);
+
+    // 1. explore first — read-only reconnaissance before any edit
+    expect(lesson).toMatch(/explore/i);
+    expect(lesson).toMatch(/before/i);
+    // 2. operator concurrency discipline: an explicit ceiling stated together
+    //    with concurrent/workers semantics (the enforced cap above is a
+    //    separate sentence and is untouched by the lesson)
+    expect(lesson).toMatch(SPAWN_DISPATCH_LESSON_CONCURRENCY_PATTERN);
+    // 3. isolation: create the tree before dispatching mutating work
+    expect(lesson).toContain("create-worktree");
+    // 4. skills come from the catalog rather than improvised procedure
+    expect(lesson).toMatch(/skill catalog/i);
   });
 
   it("不写入嵌套政策(nested / one level / caps at 等措辞)", () => {
@@ -520,7 +574,7 @@ describe("spawn_subagent — #556 T3 subagent_type 参数 + ajv enum", () => {
     const schema = tool.inputSchema as {
       properties: Record<
         string,
-        { type: string; enum?: ReadonlyArray<string> }
+        { type: string; enum?: ReadonlyArray<string>; description?: string }
       >;
       required: string[];
     };
@@ -531,6 +585,13 @@ describe("spawn_subagent — #556 T3 subagent_type 参数 + ajv enum", () => {
     const expected = resolveAgentCatalog().map((e) => e.id);
     expect(subagentType.enum).toBeDefined();
     expect([...subagentType.enum!]).toEqual(expected);
+    // T2 / spec Layer 2 item 5: the per-field description repeats the omit
+    // contract where the model actually reads it (schema), not only in the
+    // long prose above.
+    expect(subagentType.description).toMatch(/omit/i);
+    expect(subagentType.description).toMatch(/general-purpose/);
+    expect(subagentType.description).toMatch(/explore/i);
+    expect(subagentType.description).toMatch(/read-only|readonly/i);
   });
 
   it("subagent_type 不进 required (可选参数)", () => {
@@ -678,6 +739,26 @@ describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () =>
         sandboxRoot: "/tmp/work",
       })
     );
+  });
+});
+
+describe("spawn_subagent — capacity reject reaches the model as a typed tool error", () => {
+  it("manager throwing SubAgentCapacityError → ToolExecutionError carrying active/max", async () => {
+    // Spec Layer 3 item 7 / SC3: the model-visible failure must name the
+    // active/max pair so the next attempt can lower concurrency instead of
+    // retrying blindly. The mapping lives here (manager → tool boundary).
+    const { manager, spawn } = makeFakeManager();
+    spawn.mockImplementation(() => {
+      throw new SubAgentCapacityError(3, 3);
+    });
+    const tool = createSpawnSubAgentTool({ manager });
+
+    const error: unknown = await tool
+      .handler({ task: "t", wait: false })
+      .then(() => undefined)
+      .catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(ToolExecutionError);
+    expect((error as Error).message).toMatch(/3\/3/);
   });
 });
 

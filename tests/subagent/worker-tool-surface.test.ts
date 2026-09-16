@@ -285,6 +285,22 @@ describe("worker tool surface: 边界 — undefined / 空 / deny-all", () => {
     );
   });
 
+  // T2 / spec Layer 3 item 10 (input-contract row: nested spawn from worker
+  // → reject): the worker registry is built without a subagentManager, so
+  // `spawn_subagent` / `subagent_result` are structurally absent from both
+  // faces — a grandchild spawn cannot even be expressed as a tool call.
+  // Asserting the ABSENCE (not a runtime error message) is the stronger pin:
+  // it holds no matter what the manager would have decided.
+  it("worker 双面都不含 spawn_subagent / subagent_result（嵌套派发结构性不可达）", async () => {
+    const deps = await createWorkerDeps(hermeticOpts());
+    const inner = deps.registry.list().map((t) => t.name);
+    const prompt = deps.promptTools().map((t) => t.name);
+    assert.equal(inner.includes("spawn_subagent"), false);
+    assert.equal(prompt.includes("spawn_subagent"), false);
+    assert.equal(inner.includes("subagent_result"), false);
+    assert.equal(prompt.includes("subagent_result"), false);
+  });
+
   it("空数组 → 双面 = WORKER_BASE_SURFACE 全量面（与 undefined byte-identical）", async () => {
     const deps = await createWorkerDeps(hermeticOpts({ disallowedTools: [] }));
     assert.deepEqual(

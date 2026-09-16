@@ -66,6 +66,11 @@ import type {
   WorktreeExitContext,
 } from "../harness/isolation/worktree-gate.js";
 import { errorMessage } from "../harness/errors.js";
+import {
+  createProjectDepProvisioner,
+  type ProjectDepProvisionResult,
+  type ProjectDepProvisioner,
+} from "./worktree-deps.js";
 import type { SessionFileV1, SessionListEntry } from "./store/index.js";
 
 /** Minimal store surface the provisioner needs (SessionStore satisfies it). */
@@ -114,6 +119,20 @@ export interface TaskWorktreeProvisionerOpts {
    * spec 三处同时在场（spec Changes 段）。
    */
   readonly listSessions?: () => Promise<ReadonlyArray<SessionListEntry>>;
+  /**
+   * Layer 1 (specs/subagent-layers-worktree-deps.md items 2–3) — project
+   * dependency install seam. Default = `createProjectDepProvisioner()`
+   * (lockfile-driven, fail-open, async). Tests inject a scripted provisioner
+   * so no case shells out to a real installer.
+   *
+   * The install runs on TWO paths, both fail-open:
+   *   - `provision` right after the tree exists (beside the worktreeinclude
+   *     mirror) — the create-worktree tool result then carries the outcome;
+   *   - `enter` as an idempotent ensure — a tree provisioned by another
+   *     session (or before this feature) gets the same treatment; the
+   *     resolved-marker skip keeps a second enter a no-op.
+   */
+  readonly projectDepProvisioner?: ProjectDepProvisioner;
 }
 
 export interface TaskWorktreeProvisioner {
@@ -683,7 +702,16 @@ function escapeRegExpChar(ch: string): string {
  * Constant-on: this path reads no setting (specs/worktree-exclusive-lock.md
  * SC10 — the exclusive-lock gate is a separate PR and must not gate this).
  */
-function enterResultOf(path: string): WorktreeEnterResult {
+function enterResultOf(
+  path: string,
+  /**
+   * Layer 1 project-dep outcome, already rendered by `projectDepsLine` (the
+   * one place that turns an install attempt into text); a no-op skip
+   * contributes no line. The separator lives here so the caller never has to
+   * know whether the line exists.
+   */
+  depLine?: string
+): WorktreeEnterResult {
   const owner = taskWorktreeOwnerOf(path);
   const disclosure =
     owner !== undefined
@@ -694,7 +722,8 @@ function enterResultOf(path: string): WorktreeEnterResult {
     receipt:
       `entered task worktree: ${path} (session root rebound; ` +
       `re-issue pending writes in the entered tree in the next wave of tool calls in this run)` +
-      disclosure,
+      disclosure +
+      (depLine === undefined ? "" : ` ${depLine}`),
   };
 }
 
@@ -704,6 +733,53 @@ export function createTaskWorktreeProvisioner(
   const runGit = opts.runGit ?? defaultGitRunner;
   const now = opts.now ?? (() => new Date().toISOString());
   const projectIdentityRoot = opts.projectIdentityRoot;
+  /**
+   * Layer 1 project-dep seam. Frozen at assembly time (same discipline as
+   * `worktreeExclusive`): `provision` / `enter` never re-read opts.
+   */
+  const installProjectDeps: ProjectDepProvisioner =
+    opts.projectDepProvisioner ?? createProjectDepProvisioner();
+  /**
+   * Layer 1 — the SINGLE point where an install attempt becomes model-facing
+   * TEXT. Both seams consume this one function and differ only in what they do
+   * with the string (`provision` reports it, `enter` appends it to a receipt),
+   * so the skip/failure wording cannot drift between the two.
+   *
+   * Returns `undefined` when there is nothing to say: a tree whose deps are
+   * already resolvable is the routine idempotent case (second provision /
+   * enter ensure), and narrating that non-event in every receipt is noise.
+   * `no_package_json` / `no_lockfile` / a failure are actionable and returned.
+   *
+   * Fail-open by construction: the seam is documented never to throw, but a
+   * host-supplied provisioner must not be able to turn a successfully created
+   * tree into a failed provision by throwing, so the throw is caught here and
+   * converted into the same kind of line.
+   */
+  async function projectDepsLine(
+    worktreePath: string
+  ): Promise<string | undefined> {
+    let result: ProjectDepProvisionResult;
+    try {
+      result = await installProjectDeps(worktreePath);
+    } catch (err) {
+      return `project deps install failed: ${errorMessage(err)} — the worktree still exists; install manually if the task needs node_modules`;
+    }
+    if (result.reason === "already_resolved") return undefined;
+    return result.line;
+  }
+
+  /**
+   * `projectDepsLine` routed through the optional report channel. Kept apart
+   * from the producer so the (linear) `provisionOnce` body does not have to
+   * carry the undefined check itself.
+   */
+  async function reportProjectDeps(
+    report: WorktreeProvisionContext["report"],
+    worktreePath: string
+  ): Promise<void> {
+    const line = await projectDepsLine(worktreePath);
+    if (line !== undefined) report?.(line);
+  }
   /**
    * T3 / ADR-0070 — enter-worktree 占用锁档。装配期一次性读取
    * （ADR-0037 §5 硬要求 9 / `resolveWorktreeExclusive` 单读点同款形状）：
@@ -850,7 +926,7 @@ export function createTaskWorktreeProvisioner(
 
     const existing = bound.get(conversationId);
     if (existing !== undefined) {
-      return existing; // idempotent rebind (no second `worktree add`)
+      return existing; // idempotent rebind (no second `worktree add`, no second install)
     }
 
     // T7 — adoption via the durable enter record: a session whose PERSISTED
@@ -931,6 +1007,14 @@ export function createTaskWorktreeProvisioner(
       projectIdentityRoot: projectIdentityRoot ?? mainCheckoutOf(ctx.root),
       runGit,
     });
+
+    // Layer 1 (spec items 2–3): make the new tree runnable without the model
+    // inventing an install. Best-effort and fail-open — the tree is already
+    // created, so a missing manager / lockfile only changes the reported line
+    // (never the outcome). The line reaches the model through `ctx.report`
+    // (the create-worktree tool supplies it); absence of the seam — the gate,
+    // the hub, every other caller — changes nothing.
+    await reportProjectDeps(ctx.report, worktreePath);
 
     // 2. Preserve the historical standalone persistence hook when supplied.
     // SessionHub omits it so the host can observe this returned root and
@@ -1092,9 +1176,27 @@ export function createTaskWorktreeProvisioner(
     // store and persists the returned root through conditionalSave.
     await persistWorkspaceRoot(conversationId, target, "enter rebind");
 
+    // D5 — register the boundary BEFORE the (bounded but slow) install. `enter`
+    // has no in-flight map of its own (unlike `provision`'s `pending`), so the
+    // re-enter guard above is the only coalescing point: with the ensure still
+    // ahead of `bound.set`, two concurrent enters of the same tree both missed
+    // that guard and raced two installers into one `node_modules`. Moving the
+    // registration up makes the second call take the idempotent early return.
+    //
+    // Tradeoff, stated rather than hidden: the second (racing) call returns the
+    // same path with the plain receipt, WITHOUT a dep line — the install is
+    // still in flight for the first call, and the outcome belongs to that
+    // call's receipt. Duplicate installs are the failure that matters; a
+    // receipt line is not worth a second writer.
     bound.set(conversationId, target);
     taskRoots.add(target);
-    return enterResultOf(target);
+
+    // Layer 1 idempotent ensure: entering a tree created before this feature
+    // (or created by a session whose install failed) still ends with resolvable
+    // project deps. Same fail-open contract as `provision` — the enter itself
+    // has already succeeded and no outcome depends on this. The receipt carries
+    // the line because enter's model-facing text comes from this seam.
+    return enterResultOf(target, await projectDepsLine(target));
   }
 
   async function exit(req: WorktreeExitRequest): Promise<string> {

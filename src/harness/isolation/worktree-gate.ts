@@ -1090,6 +1090,22 @@ export interface WorktreeProvisionContext {
    * than turning a recoverable tool call into a protocol failure.
    */
   readonly name?: unknown;
+  /**
+   * Layer 1 (specs/subagent-layers-worktree-deps.md items 2–3) — optional
+   * result channel for side effects that happen WHILE provisioning but must
+   * reach the model-facing tool result.
+   *
+   * Why a callback instead of a wider return type: the provision seam
+   * resolves with a plain root string, and its result is consumed as a root
+   * by the gate (`gateMutate`), the live-taskRoot wrapper, the hub dirty-root
+   * protocol, and ~50 test doubles across 8 files (counted: 52
+   * `provision:`-shaped fixtures). Widening the resolved value would ripple
+   * through all of them for a line that only ONE caller (the `create-worktree`
+   * tool) can even display. The hosting tool supplies this callback; the
+   * provisioner calls it at most once with a human-readable line. Absence is
+   * the normal case for every other caller and must change nothing.
+   */
+  readonly report?: (line: string) => void;
 }
 
 /**

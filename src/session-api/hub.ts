@@ -68,6 +68,7 @@ import {
   mainCheckoutOf,
   type TaskWorktreeProvisioner,
 } from "./worktree-rebind.js";
+import type { ProjectDepProvisioner } from "./worktree-deps.js";
 import type {
   TaskWorktreeInfo,
   WorktreeProvisionContext,
@@ -777,6 +778,16 @@ export type SessionHubOptions = {
    * 一次解析后传入。
    */
   readonly worktreeExclusive?: boolean;
+  /**
+   * Layer 1 (specs/subagent-layers-worktree-deps.md items 2–3) — 建树后的
+   * project 依赖安装缝。hub 把它透传给 `createTaskWorktreeProvisioner`，
+   * 后者在 `provision`（建树后）与 `enter`（幂等 ensure）两条路径上调用，
+   * 结果以一行文字进 tool 回执。
+   *
+   * 生产省略 → provisioner 内建默认（lockfile 驱动、fail-open、async）；
+   * 测试注入脚本化实现，保证没有用例真的 shell out 到安装器。
+   */
+  readonly projectDepProvisioner?: ProjectDepProvisioner;
 };
 
 /**
@@ -1027,6 +1038,9 @@ export class SessionHub {
     this.worktreeProvisioner = createTaskWorktreeProvisioner({
       ...(this.projectIdentityRoot !== undefined
         ? { projectIdentityRoot: this.projectIdentityRoot }
+        : {}),
+      ...(opts.projectDepProvisioner !== undefined
+        ? { projectDepProvisioner: opts.projectDepProvisioner }
         : {}),
       ...(opts.worktreeExclusive === true
         ? {
