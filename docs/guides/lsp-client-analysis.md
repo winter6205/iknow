@@ -21,11 +21,15 @@ agent 符号工具（15 件）
 ```
 
 - **模型面是符号身份，不是坐标**：工具收 `{ file, symbol_path }`，行列译码封在
-  20| `symbol-resolver.ts`。#251 的 10 件坐标面 `lsp_*` 已在 symbol-primary-aci T5
-  退役——`createLspToolSet`（`aci/tools/lsp.ts:857`）**零生产调用方**，只有
-  `tests/harness/aci/lsp.test.ts` 在调。但 `getClientForWorkspaceDetailed` 与
-  `renderNoServer` / `stringifyResult` 等共享件仍住在该文件里，被活的
-  `symbol.ts` import——文件已死、其中的函数还活着。
+  `symbol-resolver.ts`。#251 的 10 件坐标面 `lsp_*` 已在 symbol-primary-aci T5
+  从**模型面**退役，但**没有退役出代码库**——`createLspToolSet`
+  （`aci/tools/lsp.ts:857`）是 `scripts/lsp-probe.ts:266` 的真实栈烟测仪器
+  （经 `package.json` 的 `probe:lsp` 接线）。共享件（`getClientForWorkspaceDetailed` /
+  `renderNoServer` / `stringifyResult` / `isLspFailureSentinel` 等）仍被活的
+  `symbol.ts` / `symbol-mutate.ts` / `symbol-resolver.ts` import。该文件是
+  **名字起错**，不是死了；删掉它会砸掉 `probe:lsp`。
+  注意：probe 调的是 `lsp_workspace_symbol({ file })`（永远带 `file`），
+  **从不**走 `find_symbol` 无 `file` 分岔——所以 probe 矩阵不是该路径的覆盖。
 - **传输层**：依赖 `vscode-jsonrpc`（`dependencies`）。
 - **客户端逻辑**：自研薄封装（`client.ts`），不用完整 LSP client SDK。
 - **翻译层**：各语言 npm wrapper / PATH 二进制，不自写 tsserver 桥。

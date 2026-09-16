@@ -95,20 +95,26 @@ _Avoid_: 一律折叠；把 live 过程叫落定态；D3 整轮藏标题；过�
 **activity block（过程块）**: TUI 对齐一条 assistant 消息的过程 chrome——一行标题加一个 **body slot**，live 与 settled 两态。块按消息追加，不把整轮收成一行。
 _Avoid_: 整轮一行 stub；思考摘要与过程组两套时态叠画；Ctrl+O 当本切片
 
-**body slot（正文槽）**: 过程块里唯一给正文的位置。思考仍在流时归思考；安静工具接手后归一行 dim `⎿` 当前预览。二者不同时占槽。
-_Avoid_: 思考字里刷工具消息；思考与 `⎿` 混排；第二套现在时摘要行当第二槽
+**body slot（正文槽）**: 过程块里唯一给正文的位置。思考仍在流时归思考；**live noise** 接手后归一行 dim 当前预览。有语义工具不占此槽。
+_Avoid_: 思考字里刷工具消息；思考与 `⎿` 混排；web_search 预览塞进思考槽
 
-**adjacent weld（相邻焊接）**: 仅当思考与安静工具之间没有正文、keep、accent、失败时，标题才写成 `Thought for …, calling/called …`。
-_Avoid_: 中间有字仍焊回上一行；把 keep 计数焊进思考行
+**live noise（实时噪音）**: live 才进过程块的侦察（`grep` / `glob` / `read_file` / 列举 / 内部查询）。不是整张 retract，也不含 `web_search` / `web_fetch`。
+_Avoid_: 把网络搜索当噪音；live 把所有 retract 折进 `calling`
 
-**live tool line（过程标题）**: 过程块的标题行。思考阶段是 `Thinking…`；相邻安静工具可焊 `calling` / `called`。脚印卡不走这行。
-_Avoid_: `[运行中]` 前缀；工具还在跑就关仍在流的思考槽；跑着的 bash 只留工具名不露命令
+**live signal（实时有语义）**: live 必须实卡的动作——keep / accent / 失败，以及 `web_search` / `web_fetch`（查询或 URL 一行 dim，不摊长文）。
+_Avoid_: 有语义工具进 `calling`；search 只留计数不留查询
+
+**adjacent weld（相邻焊接）**: 仅当思考与 **live noise** 之间没有正文、有语义工具、失败时，标题才写成 `Thought for …, calling/called …`。
+_Avoid_: 中间有字仍焊回上一行；把 `web_search` 计数焊进思考行
+
+**live tool line（过程标题）**: 过程块的标题行。思考阶段是 `Thinking…`；相邻噪音可焊 `calling` / `called`。有语义卡不走这行。
+_Avoid_: `[运行中]` 前缀；工具还在跑就关仍在流的思考槽；思考跳到工具下面或 tail panel
 
 **keep class（留）**: 落定后仍画出标题行的工具类（bash / write / edit / 会话动作）。bash 成功留命令 + 折叠后的 **result preview**；新建走 **write create preview**；编辑走 **edit diff preview**；挤档可只留 `Wrote N lines to path`。
 _Avoid_: 成功 bash 只留标题把 Updating files 藏掉；只留 dim 预览尾巴；把标题藏进折叠计数；把本次改动折没
 
-**retract class（收 / 安静工具）**: 不占脚印卡的工具类（读取 / 搜索 / 查询，含 `read_file` / `grep` / `web_search` / `web_fetch`）。live 只进过程块正文槽；settled 只进该块 `called` 计数。未知未注册缺省也是收。
-_Avoid_: 独立标题刷屏；给 `read_file` 加内容预览；失败收类折进计数；收成完全不出现
+**retract class（收）**: 落定后不摊正文预览的工具类（读 / 多数搜 / 查询）。live 是否进过程块改问 **live noise**，不是本表整表折进 `calling`。`read_file` 仍不摊文件内容；`web_search` / `web_fetch` 走 **live signal**。
+_Avoid_: 给 `read_file` 加内容预览；失败折进计数；把 retract 等同于 live 全折
 
 **accent class（点名着色）**: 落定后以非 dim 的 `accent` 色 + 人读表述留在屏幕上的特定能力（skill、task worktree 生命周期工具）。必须进显示注册表。
 _Avoid_: 浅色隐藏；只进计数；用 error 红当点名色
@@ -119,14 +125,14 @@ _Avoid_: 失败跟成功走同一收；把失败当成第四类工具表；失�
 **thinking duration（思考时长）**: assistant 消息的落盘属性——adapter 流式路径测量（首条 `thinking_delta` 至首个非思考增量），`thinkingMs` 经 commit 钩子随事件链落盘，`SessionFileV1` 上照 `messageCreatedAt` 模式重建并行数组（additive，schema 版本不升）。过程块时长 = 该条消息的 thinkingMs，不跨消息求和。
 _Avoid_: TUI 墙上时钟副产物（只活当前轮/重启即失/跨会话串味）；挂在 thinking 内容块上（污染 provider replay）；旧会话回填；`thinkingMs <= 0` 或非有限数落盘（字段缺席）；整轮累加冒充一块
 
-**unit fold**: 过程块的 settled 标题：`Thought for <duration>`，相邻时才接 `called` 安静计数。不是整轮焊行，也不是另造 `ran`。无秒数且无计数则不画、不回落 `[思考]`。
-_Avoid_: 结束态两套现在时/过去时叠画；`思考了 N 秒`；把 keep / skill 折进这行；中间有正文仍焊工具计数
+**unit fold**: 过程块的 settled 标题：`Thought for <duration>`，相邻**噪音**才接 `called` 计数。不是整轮焊行。无秒数且无噪音计数则不画、不回落 `[思考]`。
+_Avoid_: 结束态两套时态叠画；把 web_search / keep / skill 折进这行；中间有正文仍焊工具计数
 
-**open unit（未关闭簇）**: 当前仍 live 的那一块过程块——思考还在流，或安静工具仍 `calling`。已冻 stub 不是关掉下一块思考的信号。
+**open unit（未关闭簇）**: 当前仍 live 的那一块过程块——思考还在流，或噪音仍 `calling`。已冻 stub 不是关掉下一块思考的信号。
 _Avoid_: 整轮 idle 当折叠粒；`currentTurnHasFold` 关后续思考；折叠存在即吞 live 标题
 
-**live activity group（过程组）**: 已退役的进行中摘要形态（Listing / Reading / Searching 独立行）。安静工具改走过程块正文槽，不再与 unit fold 并行。
-_Avoid_: 恢复 Listing 现在时行与 Thought for 同时画同一批 retract；write/edit 收进计数；Ctrl+O 本切片
+**live activity group（过程组）**: 已退役的进行中摘要形态（Listing / Reading / Searching 独立行）。噪音走过程块正文槽，有语义工具走实卡。
+_Avoid_: 恢复 Listing 行；把 web_search 折进 `calling`；Ctrl+O 本切片
 
 **skill-load display projection**: 给人看的 skill-load 是 `loading skill <name>` 芯片，外加用户 remainder（若有）；SKILL 正文只留在进模型的 skill-load 信封里，不画成 user 气泡。
 _Avoid_: 把 `[skill-load name=]` 正文当作用户键入；加载技能；turn 结束后用落盘信封替换显示占位
@@ -167,8 +173,8 @@ _Avoid_: 把 meta 拼入 model tool_result；让 TUI / Web 直接读 handler 原
 **ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；**基线 8 件**（`bash` / `read_file` / `grep` / `glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`）之后按 append-only 批次增长（memory 2 / skill / subagent / todo / mcp / bg / run_graph / trace 读侧 / **符号工具面** 15 / worktree 5 …）。**当前件数以 `src/harness/aci/tools/registry.ts:ACI_TOOLSET_NAMES` 数组长度为唯一 SSOT，本词条不复述数字**（该文件自己声明「本表长度以数组为 source of truth」）。SSOT 工厂 = 同文件 `createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取（#141 / #191 / a277f68）。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。
 _Avoid_: 在词条或文档里写死「当前 N 件」（必漂——曾写「当前 8 件 / 8+2=10」而数组早已 40+）；在 harness 之外另起 tool 注册表；在 entry point 手写工具数组；让工具返回结构化 metadata
 
-**符号工具面（symbol tool surface）**: 模型面的 15 件 LSP 支撑工具——10 件查（`find_symbol` / `find_declaration` / `find_referencing_symbols` / `find_implementations` / `get_symbols_overview` / `get_hover` / `get_diagnostics_for_file` / `prepare_call_hierarchy` / `list_incoming_calls` / `list_outgoing_calls`）+ 5 件改（`rename_symbol` / `replace_symbol_body` / `insert_before_symbol` / `insert_after_symbol` / `safe_delete_symbol`）；以符号身份 `{ file, symbol_path }` 提问，行列译码封在 `symbol-resolver.ts`。#251 的 10 件坐标面 `lsp_*` 已在 symbol-primary-aci T5 从模型面退役——`createLspToolSet` **零生产调用方**（只有 `tests/harness/aci/lsp.test.ts` 在调），但 `getClientForWorkspaceDetailed` 仍住在那个文件里被活的 `symbol.ts` import。
-_Avoid_: 把 `lsp_*` 当现行模型面（也不要把只测 `lsp_*` 的断言当活路径的覆盖）；让空数组兼任失败值（取不到 project 锚点应返分层哨兵，见 **请求级打开窗口**）；在 `symbol-resolver.ts` 外自写行列译码；grep 猜代码结构
+**符号工具面（symbol tool surface）**: 模型面的 15 件 LSP 支撑工具——10 件查（`find_symbol` / `find_declaration` / `find_referencing_symbols` / `find_implementations` / `get_symbols_overview` / `get_hover` / `get_diagnostics_for_file` / `prepare_call_hierarchy` / `list_incoming_calls` / `list_outgoing_calls`）+ 5 件改（`rename_symbol` / `replace_symbol_body` / `insert_before_symbol` / `insert_after_symbol` / `safe_delete_symbol`）；以符号身份 `{ file, symbol_path }` 提问，行列译码封在 `symbol-resolver.ts`。#251 的 10 件坐标面 `lsp_*` 已在 symbol-primary-aci T5 从**模型面**退役，但**没有退役出代码库**——`createLspToolSet` 是 `scripts/lsp-probe.ts:266` 的真实栈烟测仪器（经 `package.json` 的 `probe:lsp` 接线），且 `renderNoServer` / `stringifyResult` / `isLspFailureSentinel` / `getClientForWorkspaceDetailed` 等共享件仍被活的 `symbol.ts` / `symbol-mutate.ts` / `symbol-resolver.ts` import。该文件是**名字起错**，不是死了。
+_Avoid_: 把 `lsp_*` 当现行模型面；把 `createLspToolSet` 当死代码删掉（会砸掉 `probe:lsp`）；把只测 `lsp_*` 的断言当 `find_symbol` 等活路径的覆盖；让空数组兼任失败值（取不到 project 锚点应返分层哨兵，见 **请求级打开窗口**）；在 `symbol-resolver.ts` 外自写行列译码；grep 猜代码结构
 
 **请求级打开窗口（request-scoped didOpen）**: tsserver 对未打开文件**不建 project**，所以符号类 RPC 必须罩在 `client.withDocumentOpen(file, run)` 里（进入开、退出关，含抛错与超时路径）——**这是 project 上下文的前提，不是性能优化**；请求间不对 server 保持打开，故 version 每次从 1 起算（`symbol-resolver` 缓存键改内容指纹即此推论）。例外只有装配期 warmup：裸 `ensureOpen` 置 `pinned = true` 永久持有一个**真实样本文件**，理由与本条同（`warmup.ts` / `client.ts:632-642`、`520-521`）。已知豁免口：`find_symbol` 的 `file` 缺省分岔用伪路径 `<directory>/iknow-workspace.ts` 仅为 spawn，随后裸发请求、不开窗口（`lsp.ts:447-459` / `symbol.ts:354-356`）。
 _Avoid_: 把 didOpen 当可省的优化；跨请求保持打开（`pinned` 预热除外）；用伪路径当 project 锚点；把无锚点查询的空结果读成「真没这个符号」；用请求级 version 号当跨请求缓存键
@@ -718,7 +724,7 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **PreWrite vs worktree isolation mode**: PreWrite 是用户 deny 事件；isolation 是写主仓门禁，不是 `settings.hooks` 条目
 - **PreCommit vs session transcript 落盘**: PreCommit 拦 git commit 形态；JSONL append 仍是 host commit hook，不是 user 事件
 - **闭世界围栏 vs 工作区档**: 闭世界是旧默认（home 不可见）；工作区档 home 可见、只收紧写
-- **符号工具面 vs 坐标面 `lsp_*`**: 前者是现行模型面（符号身份提问）；后者已退役、`createLspToolSet` 零生产调用方，故测它的断言不构成活路径覆盖
+- **符号工具面 vs 坐标面 `lsp_*`**: 前者是现行模型面（符号身份提问）；后者已从模型面退役，但仍是 `probe:lsp` 的仪器（`createLspToolSet`），故测 `lsp_*` 的断言不构成 `find_symbol` 等活路径的覆盖
 - **请求级打开窗口 vs warmup pinned open**: 前者随请求开关（退出即关）；后者是装配期裸 `ensureOpen` 对真实样本的永久持有，两者理由同一条（tsserver 不为未打开文件建 project）
 - **分层哨兵 vs 空数组**: 拿不到 server / 根 / project 锚点是**失败**，返 `(…)` 纯字符串哨兵并被 `isLspFailureSentinel` 认出；`[]` 只许表示「查到了、真没这个符号」。缺方法哨兵不算失败（能力缺口）
 
