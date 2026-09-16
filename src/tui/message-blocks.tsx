@@ -79,8 +79,9 @@ type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
  *  工具只画 detail（身份由 identity strip / SubagentPanel 承担）。
  *  文案拼装统一委托 `formatToolStatusLine`（tool-summary SSOT，#693 T1 D7），
  *  历史 + live 两侧字节一致。
- *  工具计数不在本行：它只由 turn 级 `formatTurnActivityFold` 的
- *  `Thought for … · name × N` 一行承担（spec D2 / CONTEXT `unit fold`）。
+ *  工具计数不在本行：retract 计数由活动块标题承担（`deriveActivityBlocks` +
+ *  `formatToolUseCounts`，specs/tui-activity-block.md S2–S4）；keep 的
+ *  计数没有 —— keep 是块外实卡。
  *  cols 收口：单行不折（tool-summary 视觉宽度）。 */
 function ToolSummaryRow(props: {
   readonly tu: ToolUseBlock;
@@ -179,8 +180,9 @@ function ToolPreviewRows(props: {
 }
 
 /** 折叠态 thinking 摘要：结束态恒 1 行 `Thought for <duration>`。
- *  spec D2 / CONTEXT `unit fold`：工具计数不再是本块的第二行 —— 它焊在
- *  turn 级 `formatTurnActivityFold` 的同一行（`Thought for … · name × N`）。
+ *  spec S2–S4 / CONTEXT `unit fold`：工具计数不再是本块的第二行 —— 它焊在
+ *  活动块标题的同一行（`Thought for …, calling/called name × N`，
+ *  `deriveActivityBlocks` 单源）。
  *  这里不重复计数。 */
 function ThinkingSummary(props: {
   readonly message: AnthropicNativeMessage;

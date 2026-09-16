@@ -1,4 +1,14 @@
+// ARCHIVED (2026-09-15, T7 specs/tui-activity-block.md Superseded)：本文件认证的旧合同 = live activity group + unit fold 双时态；该不变式已随活动块单时态（deriveActivityBlocks 单源）永久消失，替代覆盖见 tests/tui/{activity-block,t4-thinking-only-live-then-fold,t5-quiet-tools-body-slot,t6-text-splits-weld}.test.*。
+
 /**
+ * Archived 2026-09-15 (plans/tui-activity-block.md T7)：T7 退役 per-segment
+ * 折叠闸门 `shouldShowThinkingFold` / `shouldShowRetractFold` —— 折叠整
+ * 体退役,活动块标题由 `deriveActivityBlocks` 单源派生。per-segment 闸门
+ * 不再被生产代码调用;新合同下 hideThinking 门由活动块 `shownThinkingMsValues`
+ * 单源提供（见 `t4-thinking-only-live-then-fold.test.tsx` 的
+ * `shouldShowLiveThinkingPanel` 验收）。
+ *
+ * ── original header ──────────────────────────────────────────────────────
  * tests/tui/running-unit-fold.test.ts
  *
  * 不变式:折叠按**已完成单元**收,不等整 turn idle。

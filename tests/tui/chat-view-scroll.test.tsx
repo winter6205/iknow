@@ -995,23 +995,96 @@ test("#589 ChatView tail：20 条 read_file ok + 1 running 不含完成读行", 
         runState: "running-fg",
       }}
       cols={80}
-      rows={40}
+      rows={80}
       liveToolLines={[]}
       liveToolRuns={runs}
     />,
-    { width: 80, height: 40, exitOnCtrlC: false }
+    { width: 80, height: 80, exitOnCtrlC: false }
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // spec D1：running 过程行 = 英文 `grep · Search <pattern>`，无 `[运行中]`。
+  // T7（specs/tui-activity-block.md）：retract 落定（post_tool_use ok）→ 收
+  // 入 unanchored 块（块计数 + tail 过程行）。同批 retract 只在块 called 计
+  // 数出现一次；tail 过程行逐条画，不画完整「[完成]」前缀。
+  // - running 过程行 = 英文 `grep · Search`，无 `[运行中]`。
   expect(frame).toContain("grep · Search");
   expect(frame.includes("[运行中]")).toBe(false);
-  expect(frame).not.toContain("CV_READ_OK_");
-  expect(frame).not.toContain("read_file ·");
-  // D9（spec specs/tui-tool-settled-appearance.md）：20 条读完 + 1 条 running
-  // 搜索不逐条刷标题，收成一行过程组摘要 —— 帧上是 `Reading × 20 ·
-  // Searching × 1`（桶序固定），不是 20 行 `read_file × 1`。
-  expect(frame).toContain("Reading × 20 · Searching × 1");
+  // - 未画错（grep 还 running），所以无 `[失败]` / `ENOENT` 残留。
+  expect(frame.includes("[失败]")).toBe(false);
+  expect(frame.includes("GREP_FAIL_MARKER")).toBe(false);
+  // - 块聚合标题（首现顺序）：read_file × 20 · grep × 1 → 落 tail。
+  //   视口较小，块在 tail 之后，扩 rows 让断言可见。
+  expect(frame).toContain("read_file × 20");
+  expect(frame).toContain("grep × 1");
+  await setup.renderer.destroy();
+});
+
+test("#589 ChatView tail：20 条 read_file ok + 1 failed grep + 1 running 不含完成读行", async () => {
+  // 同 #589，但把 grep 中途标失败、再补一条 running search：覆
+  // 盖「失败横切 + 同批 retract 双计数」不出现于块标题、不画 OK / ERROR
+  // 行尾的合同。Tail 视口需要足够高以容纳 20 条 read_file 详情行 + 块标题。
+  let runs: ReadonlyArray<LiveToolRun> = [];
+  for (let i = 0; i < 20; i++) {
+    const id = `cv-rf-${String(i).padStart(2, "0")}`;
+    const marker = `CV_READ_OK_${i}`;
+    runs = liveToolReduce(runs, {
+      kind: "tool_call_start",
+      id,
+      name: "read_file",
+    });
+    runs = liveToolReduce(runs, {
+      kind: "post_tool_use",
+      id,
+      name: "read_file",
+      input: { path: `${marker}.ts` },
+      ok: true,
+      detail: `读取 ${marker}.ts`,
+    });
+  }
+  runs = liveToolReduce(runs, {
+    kind: "tool_call_start",
+    id: "cv-failed-grep",
+    name: "grep",
+    input: { pattern: "GREP_FAIL_MARKER" },
+  });
+  runs = liveToolReduce(runs, {
+    kind: "post_tool_use",
+    id: "cv-failed-grep",
+    name: "grep",
+    input: { pattern: "GREP_FAIL_MARKER" },
+    ok: false,
+    detail: "no matches",
+  });
+  runs = liveToolReduce(runs, {
+    kind: "tool_call_start",
+    id: "cv-running-grep",
+    name: "grep",
+  });
+  const setup = await testRender(
+    <ChatView
+      session={{
+        ...sessionWith([msg("u", "user", "请读一批文件")]),
+        runState: "running-fg",
+      }}
+      cols={80}
+      rows={80}
+      liveToolLines={[]}
+      liveToolRuns={runs}
+    />,
+    { width: 80, height: 80, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 失败件横切：不进块计数（块标题里没有 `grep × 1` 之外的失败 grep）。
+  expect(frame).toContain("read_file × 20");
+  // 失败件仍以 `[失败] grep · no matches` 形式贴在 tail（live-tool-preview
+  // 的失败行），不双画一张完成卡。
+  expect(frame).toContain("[失败] grep");
+  expect(frame).toContain("no matches");
+  // 仍在运行的 grep → 预览槽 `grep · Search ?`。
+  expect(frame).toContain("grep · Search");
+  // 同批 retract 只在块 called 计数出现一次。
+  expect(frame.includes("read_file × 20 · grep × 1")).toBe(true);
   await setup.renderer.destroy();
 });
 
@@ -1185,13 +1258,17 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("Thought for 12s");
-  expect(frame).toContain("web_search × 2");
+  // T4–T7（specs/tui-activity-block.md S5）：跨消息不合并 —— 两个
+  // web_search 分别在两条 assistant 消息（index 1 / 3），按新合同各自
+  // 落块标题 `called web_search × 1`，不聚成 `web_search × 2`。
+  expect(frame).toContain("called web_search × 1");
+  expect(frame).not.toContain("web_search × 2");
   expect(frame).not.toContain("Thought for 12s · web_search × 2");
   // assistant 文本经 Markdown 渲染 + 盘古之白：今天的AI → 今天的 AI。
   expect(frame).toContain("以下是今天的 AI 新闻摘要");
   expect(frame.includes("[完成] web_search")).toBe(false);
   const lines = frame.split("\n");
-  const iFold = lines.findIndex((l) => l.includes("web_search × 2"));
+  const iFold = lines.findIndex((l) => l.includes("called web_search × 1"));
   const iText = lines.findIndex((l) => l.includes("以下是今天的 AI 新闻摘要"));
   expect(iFold).toBeGreaterThanOrEqual(0);
   expect(iText).toBeGreaterThanOrEqual(0);
@@ -1252,10 +1329,10 @@ test("running：先于草稿的工具（无 draftEpoch 标记）显示在流式�
 
 test("running：draftEpoch 混排 —— 草稿前工具在上、草稿后工具在下", async () => {
   // 场景：keep 工具（epoch 0）→ 流式回答 → write 工具（epoch 1）。
-  // 拆分按 draftEpoch（位置无关 filter）。#589 只读工具中途移除不错位
-  // 由结构保证（filter 不依赖下标）。
-  // plans T1:web_search(已完成)属 retract → 进折叠,不再占 tail;本
-  // 测试改用 bash(keep)以验证 draftEpoch 位置与插入顺序。
+  // 拆分按 draftEpoch（位置无关 filter）。T7 之后：keep 类（bash /
+  // write_file）不进 unanchored 块，由 tail 工具卡 + draft 段交错渲染；
+  // 不变式 = epoch 0 工具的 keep 标题在草稿之前，epoch 1 工具的 keep
+  // 标题在草稿之后（不被 draft 顶到上面）。
   const session: TuiSessionState = {
     ...sessionWith([msg("m-1", "user", "搜索并写入")]),
     runState: "running-fg",
@@ -1289,20 +1366,27 @@ test("running：draftEpoch 混排 —— 草稿前工具在上、草稿后工具
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  const iSearch = frame.indexOf("bash");
-  const iDraft = frame.indexOf("正在整理结果");
-  const iWrite = frame.indexOf("write_file");
-  expect(iSearch).toBeGreaterThanOrEqual(0);
+  const lines = frame.split("\n");
+  const iBashKeep = lines.findIndex(
+    (l) => l.includes("bash · bash · ls") || l.trim() === "bash"
+  );
+  const iDraft = lines.findIndex((l) => l.includes("正在整理结果"));
+  const iWriteKeep = lines.findIndex((l) => /^write_file\b/.test(l.trim()));
+  expect(iBashKeep).toBeGreaterThanOrEqual(0);
   expect(iDraft).toBeGreaterThanOrEqual(0);
-  expect(iWrite).toBeGreaterThanOrEqual(0);
-  expect(iSearch).toBeLessThan(iDraft);
-  expect(iDraft).toBeLessThan(iWrite);
+  expect(iWriteKeep).toBeGreaterThanOrEqual(0);
+  expect(iBashKeep).toBeLessThan(iDraft);
+  expect(iDraft).toBeLessThan(iWriteKeep);
   await setup.renderer.destroy();
 });
 
 test("running：第二段草稿画在后续工具之下（tool→text→tool→text 不把新工具顶下去）", async () => {
   // plans T1:web_search(已完成 retract)进折叠,不再占 tail —— 改用
   // bash(keep)以验证 draftEpoch 与两段草稿的插入顺序。
+  // T7 后：bash 是 keep 类，**不**进 unanchored 块（避免双画），由
+  // tail 工具卡（live-tool-preview 的 `Running 1 shell command…`）承接；
+  // 不变式 = epoch 1 工具的细节槽按 draftEpoch 落在两段草稿之间（不被
+  // 第二段草稿顶到上面）。
   const session: TuiSessionState = {
     ...sessionWith([msg("m-1", "user", "搜完再写")]),
     runState: "running-fg",
@@ -1327,26 +1411,29 @@ test("running：第二段草稿画在后续工具之下（tool→text→tool→t
     <ChatView
       session={session}
       cols={COLS}
-      rows={24}
+      rows={36}
       liveToolLines={[]}
       liveToolRuns={liveToolRuns}
       draftSegments={["第一段回答", "第二段回答"]}
     />,
-    { width: COLS, height: 24, exitOnCtrlC: false }
+    { width: COLS, height: 36, exitOnCtrlC: false }
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // D9(spec specs/tui-tool-settled-appearance.md):两条 bash(epoch 0 完成 +
-  // epoch 1 running)聚合为一行过程组摘要 —— 完成件不再留卡;running 件占
-  // 唯一细节槽。细节槽按 draftEpoch 落在两段草稿之间,后续草稿不把新工具
-  // 顶到它上面(本测原本钉的插入顺序不变,只是 epoch 0 的卡改由组计数承接)。
-  expect(frame).toContain("Running 2 shell commands");
-  const iFirstDraft = frame.indexOf("第一段回答");
-  // epoch 1 bash 是 status="running" → 渲染为 `Running 1 shell command… · …`
-  // (spec D1 过程行),不能用 "bash" 找。改为查 `Running 1 shell
-  // command…` 前缀,它只会出现在 epoch 1 bash 的位置。
-  const iSecondBash = frame.indexOf("Running 1 shell command…");
-  const iSecondDraft = frame.indexOf("第二段回答");
+  // bash keep 类不进 unanchored 块 → 不画 `calling bash × 2` / `bash × N`。
+  expect(frame.includes("bash ×")).toBe(false);
+  expect(frame.includes("calling bash ×")).toBe(false);
+  // epoch 1 running 件 → tail 卡 `Running 1 shell command…`。
+  expect(frame).toContain("Running 1 shell command…");
+  const lines = frame.split("\n");
+  const iFirstDraft = lines.findIndex((l) => l.includes("第一段回答"));
+  const runningIdxs = lines
+    .map((l, i) => ({ l, i }))
+    .filter(({ l }) => l.includes("Running 1 shell command…"))
+    .map(({ i }) => i);
+  expect(runningIdxs.length).toBeGreaterThanOrEqual(1);
+  const iSecondBash = runningIdxs[0] ?? -1;
+  const iSecondDraft = lines.findIndex((l) => l.includes("第二段回答"));
   expect(iFirstDraft).toBeGreaterThanOrEqual(0);
   expect(iSecondBash).toBeGreaterThanOrEqual(0);
   expect(iSecondDraft).toBeGreaterThanOrEqual(0);

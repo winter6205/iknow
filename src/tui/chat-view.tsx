@@ -70,11 +70,6 @@ import {
   type TuiSessionState,
 } from "./session-state.js";
 import { liveTailSlots, type LiveToolRun } from "./live-tool-state.js";
-import {
-  formatLiveActivitySummary,
-  isLiveActivityGroupRun,
-  splitLiveActivityRuns,
-} from "./live-activity-group.js";
 import { liveToolRunsBox } from "./live-tool-preview.js";
 import { toolResultStatusMap, toolResultTextMap } from "./tool-summary.js";
 import {
@@ -84,13 +79,7 @@ import {
   shouldCommitScrollTop,
   type ViewportMountWindow,
 } from "./transcript-viewport.js";
-import {
-  countNamedCalls,
-  lastTurnQueryIndex,
-  orderedTurnActivitySegments,
-  sliceTurnFrom,
-  toolUseIdsOf,
-} from "./turn-activity.js";
+import { orderedTurnActivitySegments, toolUseIdsOf } from "./turn-activity.js";
 import { deriveSlot } from "./tool-settled.js";
 import { TranscriptBanner } from "./transcript-banner.js";
 import { MessageRow, messageSegmentsOfVisible } from "./message-row.js";
@@ -100,8 +89,7 @@ import {
   type TailSlotDecision,
 } from "./transcript-tail.js";
 import {
-  buildFoldLinesBySegmentIndex,
-  findLastToolSegmentIndex,
+  buildActivityBlockFoldLines,
   makeThinkingMsAtVisibleFromSource,
   shouldShowLiveThinkingPanel,
   type FoldLinesBySegmentIndex,
@@ -277,12 +265,11 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       visibleMessages,
       itemHeights,
     ]);
-    const lastQueryVisible = lastTurnQueryIndex(visibleMessages);
     // D3（spec specs/tui-tool-settled-appearance.md）：折叠计数只聚合成功且
     // retract 的件 —— resolver 从 statusMap（tool_use_id → 是否失败）派生每件
     // 的 slot；未配对（live running / cancelled）不进计数。
-    // `useMemo` 包裹：闭包每 render 都是新引用，下面 `activitySegments` /
-    // `historyToolCounts` 的 useMemo 依赖它，没稳定就每次 render 都重算。
+    // `useMemo` 包裹：闭包每 render 都是新引用，下面 `activitySegments` 的
+    // useMemo 依赖它，没稳定就每次 render 都重算。
     const inFoldCountOf = useMemo(
       () =>
         (
@@ -297,15 +284,11 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     );
     // D3 (tui-display-consistency):折叠作用于每一轮历史 —— 不再切片到
     // lastTurnSlice;`activitySegments` 从 0 起构建(0 = 首条 user query 之前的
-    // assistant 起步;lastQueryVisible < 0 → 全历史)。
+    // assistant 起步;无 query → 全历史)。
     const activitySegments = useMemo(
       () => orderedTurnActivitySegments(visibleMessages, 0, { inFoldCountOf }),
       [visibleMessages, inFoldCountOf]
     );
-    // last-turn live 计数(工具运行中状态接棒 / 合并最后一段折叠用)。
-    // live 已完成件同样只聚合 slot.inFoldCount（retract 收）；keep / accent /
-    // failed 件留在 tail 画独立标题行，不进计数。
-    const lastTurnSlice = sliceTurnFrom(visibleMessages, lastQueryVisible);
     // plans/tui-live-activity-fold.md T3：**已画 foldLinesBySegmentIndex 是
     // 唯一折叠存在信号** —— 删除了整轮 `currentTurnHasFold` /
     // `currentTurnHasThinkingFold` 面板闸与 `foldDisplayLines.length` 折叠闸
@@ -317,65 +300,68 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       const historyToolUseIds = toolUseIdsOf(visibleMessages);
       return liveToolRuns.filter((run) => !historyToolUseIds.has(run.id));
     }, [liveToolRuns, visibleMessages]);
-    // D9 互斥（spec specs/tui-tool-settled-appearance.md）：turn 仍在 running
-    // 时 live 已完成件归 **live activity group** 所有，unit fold 不得再把同
-    // 一批件并进计数（否则同一件既画 `read_file × 3` 又画 `Reading × 2`）。
-    // idle（含 reload 前的空窗）组行不画（见下方 groupSummary 闸门），折叠
-    // 接手合并 live 已完成件，故 idle 路径保持原计数。
-    const liveCompletedCounts = useMemo(
+    // T7（specs/tui-activity-block.md / plans T7）：退役 `formatLiveActivitySummary`
+    // / `splitLiveActivityRuns` 的生产调用面 —— 过程块（unanchoredBlocks）
+    // 是进行中**收类**与 keep / 聚合 bash 的唯一时态（spec S4/S6）。idle
+    // 落定仍走块计数（活动块 settled 态），unit fold 旧路径不再叠画。
+    // T4–T7 (specs/tui-activity-block.md)：过程块 = 块标题 + 正文槽；块列表
+    // 走 `deriveActivityBlocks` 派生，结果按 messageIndex 分组直接喂 MessageRow。
+    // `visibleStart` 之前的历史 assistant 不参与活动投影；本切片以 visibleStart=0
+    // 起算（与 activitySegments 同源）。
+    const activityBlockFoldLines = useMemo(
       () =>
-        running
-          ? []
-          : countNamedCalls(
-              turnLiveRuns
-                .filter((run) => run.status !== "running")
-                .filter(isLiveActivityGroupRun)
-                .map((run) => ({ id: run.id, name: run.name })),
-              toolUseIdsOf(lastTurnSlice)
-            ),
-      [running, turnLiveRuns, lastTurnSlice]
-    );
-    // 折叠行集合（anchor segmentIndex → unit fold 行）由纯模块派生。
-    // #986 把 L307–475 的派生逻辑全数迁出；本处只消费结果。
-    const foldDerivation = useMemo(
-      () =>
-        buildFoldLinesBySegmentIndex({
-          activitySegments,
+        buildActivityBlockFoldLines({
+          messages: visibleMessages,
+          visibleStart: 0,
+          visibleCount: visibleMessages.length,
           thinkingMsAtVisible,
-          running,
-          lastToolSegmentIndex: findLastToolSegmentIndex(activitySegments),
-          liveCompletedCounts,
+          liveRuns: turnLiveRuns,
+          // T7（specs/tui-activity-block.md / plans T7）：live 思考块只在
+          // 真正 running 时落入 unanchored —— 旧 unit fold / live activity
+          // group 双时态下 idle + thinkingDraft 会触面板整体不消失（活动
+          // 块 spec 下统一行为：idle 后 thinkingMs 由历史消息落盘接手，
+          // 不留 live 思考槽）。
+          liveThinking:
+            running &&
+            props.thinkingDraftMasked !== undefined &&
+            props.thinkingDraftMasked.length > 0,
+          inFoldCountOf,
         }),
-      [activitySegments, thinkingMsAtVisible, running, liveCompletedCounts]
+      [
+        visibleMessages,
+        thinkingMsAtVisible,
+        turnLiveRuns,
+        props.thinkingDraftMasked,
+        inFoldCountOf,
+      ]
     );
-    const { foldLinesBySegmentIndex, shownThinkingMsValues } = foldDerivation;
+    // 块覆盖的 ms 值集合（hideThinking 双门用）。T7：旧 `foldLinesBySegmentIndex`
+    // 路径整体退役 —— hideThinking 的 `shownThinkingMsValues` 双门只剩块列表
+    // 一路，不再需要并集。
+    const mergedShownThinkingMsValues =
+      activityBlockFoldLines.shownThinkingMsValues;
+    // T4–T7：旧 `foldLinesBySegmentIndex`（unit fold 行）整体退役 —— 块列表
+    // （`buildActivityBlockFoldLines`）是折叠的唯一来源；这里传空 map 让
+    // ChatScrollbox 走「块列表 → MessageRow → renderBlockTitles」单一路径，
+    // 不再画双行（`Thought for Ns · read_file × 1` 旧行 + `Thought for Ns` 新行）。
+    const foldLinesBySegmentIndex: FoldLinesBySegmentIndex = useMemo(
+      () => new Map(),
+      []
+    );
     // 细节槽 / 过程组：收类件进过程组计数，running 件占据唯一细节槽，其余逐条。
     const showThinkingPanel = shouldShowLiveThinkingPanel({
       running,
       thinkingDraft: deferredThinkingDrafts,
       toolRunning: turnLiveRuns.some((run) => run.status === "running"),
     });
-    // T4（spec D9）：进行中的收类不逐条刷标题 —— 收成一行摘要 + ≤1 细节槽；
-    // keep / accent / 失败件仍逐条留标题（失败横切不进组计数）。
-    // `running` 是过程组开关：idle 时聚合必须停（摘要行同门；聚合不停就是
-    // keep 卡被静默吞掉，history/unit fold 只接 retract，接不住 keep）。
-    const activitySplit = useMemo(
-      () => splitLiveActivityRuns(turnLiveRuns, { running }),
-      [turnLiveRuns, running]
-    );
-    // D9：过程组是**进行中**的 chrome —— idle 落定仍走 unit fold + keep 标题
-    // （CONTEXT `live activity group`「idle 仍走 unit fold + keep 标题」）。
-    const groupSummary = useMemo(
-      () =>
-        running ? formatLiveActivitySummary(activitySplit.groupRuns) : null,
-      [running, activitySplit]
-    );
-    // 逐条面交 `liveTailSlots` 按 draftEpoch 回到草稿段之间 —— 细节槽
-    // （仍在 running 的收类件）在逐条面里，位置随 epoch 走，不钉在队尾
-    // （钉队尾会破坏 tool→text→tool 的轴）。
+    // T7（specs/tui-activity-block.md / plans T7）：过程块（unanchoredBlocks）
+    // 取代旧 `live activity group` 双时态 —— `formatLiveActivitySummary` /
+    // `splitLiveActivityRuns` 不再被生产代码调用；同批 retract 只在块 called
+    // 计数出现一次。`liveTailSlots` 仍承担**逐条面**（draftEpoch 错开工具组
+    // 与草稿段，详情见 transcript-tail.tsx）。
     const tailSlots = useMemo(
-      () => liveTailSlots(activitySplit.tailRuns, deferredSegments),
-      [activitySplit, deferredSegments]
+      () => liveTailSlots(turnLiveRuns, deferredSegments),
+      [turnLiveRuns, deferredSegments]
     );
     return (
       <ChatScrollbox
@@ -388,7 +374,9 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         contentWidth={contentWidth}
         activitySegments={activitySegments}
         foldLinesBySegmentIndex={foldLinesBySegmentIndex}
-        shownThinkingMsValues={shownThinkingMsValues}
+        blockTitlesByMessage={activityBlockFoldLines.foldLineMapByMessage}
+        slotPreviewsByMessage={activityBlockFoldLines.slotPreviewsByMessage}
+        shownThinkingMsValues={mergedShownThinkingMsValues}
         statusMap={statusMap}
         resultTextMap={resultTextMap}
         thinkingExpanded={thinkingExpanded}
@@ -397,11 +385,11 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         tailSlots={tailSlots}
         renderLiveRuns={renderLiveRuns}
         deferredThinkingDrafts={deferredThinkingDrafts}
-        groupSummary={groupSummary}
         showThinkingPanel={showThinkingPanel}
         liveToolLines={props.liveToolLines}
         askLine={props.askLine}
         crunchedSeconds={props.crunchedSeconds ?? 0}
+        unanchoredBlocks={activityBlockFoldLines.unanchoredBlocks}
       />
     );
   }
@@ -450,7 +438,8 @@ function useScrollboxBindings(args: {
   /** 当前会话 id；变化 = 换会话 → 重订阅并复位量化游标（见调用处）。 */
   readonly conversationId: string | undefined;
 }): void {
-  const { sbRef, setScrollbarHovered, setScrollTop, ref, conversationId } = args;
+  const { sbRef, setScrollbarHovered, setScrollTop, ref, conversationId } =
+    args;
   useLayoutEffect(() => {
     const sb = sbRef.current;
     if (sb === null) return; // EXIT: unmounted scrollbox
@@ -528,6 +517,17 @@ function ChatScrollbox(props: {
   readonly contentWidth: number;
   readonly activitySegments: ReadonlyArray<TurnActivitySegment>;
   readonly foldLinesBySegmentIndex: FoldLinesBySegmentIndex;
+  /** T4–T7：活动块标题按 messageIndex 分组。MessageRow 据此在 message 末尾
+   *  渲染块标题（取代旧 unit fold 行的位置 —— 跨消息不合并合同）。 */
+  readonly blockTitlesByMessage: ReadonlyMap<number, ReadonlyArray<string>>;
+  /** T5（spec S2–S4）：messageIndex → 块预览文本数组（null = 跳过）。每条
+   *  预览文本对应一个块；与 blockTitlesByMessage 同序，按 contentBlockIndex
+   *  升序。settled 块（slot.kind === "none"）→ null；running 安静工具 →
+   *  `formatRunningToolLine` 的文本。 */
+  readonly slotPreviewsByMessage: ReadonlyMap<
+    number,
+    ReadonlyArray<string | null>
+  >;
   readonly shownThinkingMsValues: ShownThinkingMsValues;
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly resultTextMap: ReadonlyMap<string, string>;
@@ -537,11 +537,13 @@ function ChatScrollbox(props: {
   readonly tailSlots: ReadonlyArray<TailSlotDecision>;
   readonly renderLiveRuns: (runs: ReadonlyArray<LiveToolRun>) => ReactNode;
   readonly deferredThinkingDrafts: string;
-  readonly groupSummary: string | null;
   readonly showThinkingPanel: boolean;
   readonly liveToolLines: ReadonlyArray<string>;
   readonly askLine: string | undefined;
   readonly crunchedSeconds: number;
+  readonly unanchoredBlocks: ReadonlyArray<
+    import("./activity-block.js").ActivityBlock
+  >;
 }): ReactNode {
   return (
     <scrollbox
@@ -584,6 +586,8 @@ function ChatScrollbox(props: {
               visibleIndex
             )}
             foldLinesBySegmentIndex={props.foldLinesBySegmentIndex}
+            blockTitles={props.blockTitlesByMessage.get(visibleIndex) ?? []}
+            slotPreviews={props.slotPreviewsByMessage.get(visibleIndex) ?? []}
             shownThinkingMsValues={props.shownThinkingMsValues}
             statusMap={props.statusMap}
             resultTextMap={props.resultTextMap}
@@ -603,10 +607,10 @@ function ChatScrollbox(props: {
         renderLiveRuns={props.renderLiveRuns}
         deferredThinkingDrafts={props.deferredThinkingDrafts}
         thinkingExpanded={props.thinkingExpanded}
-        groupSummary={props.groupSummary}
         showThinkingPanel={props.showThinkingPanel}
         liveToolLines={props.liveToolLines}
         askLine={props.askLine}
+        unanchoredBlocks={props.unanchoredBlocks}
       />
     </scrollbox>
   );

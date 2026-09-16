@@ -1,4 +1,17 @@
+// ARCHIVED (2026-09-15, T7 specs/tui-activity-block.md Superseded)：本文件认证的旧合同 = live activity group + unit fold 双时态；该不变式已随活动块单时态（deriveActivityBlocks 单源）永久消失，替代覆盖见 tests/tui/{activity-block,t4-thinking-only-live-then-fold,t5-quiet-tools-body-slot,t6-text-splits-weld}.test.*。
+
 /**
+ * Archived 2026-09-15 (plans/tui-activity-block.md T7): T7 退役过程块 spec 旧
+ * 「unit fold + live activity group 双时态」 —— `src/tui/live-activity-group.ts`
+ * 已删除，`formatLiveActivitySummary` / `splitLiveActivityRuns` /
+ * `liveActivityVerbOf` / `isLiveActivityGroupRun` 不再被生产代码调用。过程块
+ * spec 重新锚定：进行中收类与 keep / bash 都走 `deriveActivityBlocks`
+ * → unanchored blocks（同 messageIndex 落 tail 标题）；同批 retract 只在块
+ * called 计数出现一次（spec S7），不再画 `Listing × N · Running N shell
+ * commands` 一行英文摘要。新的活动块派生覆盖在本目录 `t5-*.test.tsx` /
+ * `activity-block.test.ts` / `chat-view-thinking-tool-fold.test.tsx`。
+ *
+ * ── original header ──────────────────────────────────────────────────────
  * tests/tui/live-activity-group.test.ts
  *
  * 不变式(docs/CONTEXT.md live activity group + specs/tui-tool-settled-appearance.md D9):

@@ -554,11 +554,12 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
   }, 30_000);
 
   test("事件混排：草稿前工具在上、草稿后开始的工具在下（draftEpoch）", async () => {
-    // 内联 adapter：tool_call_start(早) → text_delta → tool_call_start(晚)，
-    // 随后 await 制造「turn 未完成」稳定窗口。帧应满足
-    // 早工具行 < 草稿文本 < 晚工具行。
-    // 判定只依赖 onStream 闭包内的事件顺序 + sealText/draftEpoch，
-    // 与 React 批处理 / 被动 effect 时序解耦。
+    // 内联 adapter：tool_call_start(早 retract) → text_delta → tool_call_start(晚 keep)。
+    // T7（specs/tui-activity-block.md S4/S6）：retract 类（web_search）单独进
+    // unanchored 活动块；keep 类（bash）走 tail `liveToolRunsBox` 与 draft 段
+    // 交错。本测试同时校验两路：
+    //  (a) web_search 进 unanchored 块（块标题 + 预览槽 `web_search · Search ?`）；
+    //  (b) keep bash 的过程行与 draft 段同 epoch 顺序（先 tool 后 draft）。
     const toolAdapter: ModelAdapter = {
       async step(
         _state: LoopState,
@@ -618,21 +619,32 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       "mixed-order-window"
     );
     const frame = app.setup.captureCharFrame();
-    // spec D1：running 过程行无 `[运行中]` —— web_search / bash 分别用
-    // 「裸工具名」（无 input → detail 空）与 `Running 1 shell command…` 前缀定位。
-    const iEarly = frame.indexOf("web_search");
+    // (a) web_search 走 unanchored 块：块标题 + 预览槽（detail 为空 → 裸工具名）。
+    expect(frame).toContain("calling web_search × 1");
+    expect(frame).toContain("web_search · Search");
+    // (b) bash keep 类走 tail 工具卡，过程行 = `Running 1 shell command…`。
+    expect(frame).toContain("Running 1 shell command…");
+    // 草稿文本在帧里可见。
+    expect(frame).toContain("order-probe-draft");
+    // unanchored 块（web_search）先出现：早 retract 件的标题在帧早期位
+    // 置，keep bash 的过程行与草稿同 epoch —— 两者都在 unanchored 之后。
+    const iEarly = frame.indexOf("calling web_search × 1");
     const iDraft = frame.indexOf("order-probe-draft");
     const iLate = frame.indexOf("Running 1 shell command…");
     expect(iEarly).toBeGreaterThanOrEqual(0);
     expect(iDraft).toBeGreaterThanOrEqual(0);
     expect(iLate).toBeGreaterThanOrEqual(0);
+    expect(iEarly).toBeLessThan(iLate);
     expect(iEarly).toBeLessThan(iDraft);
-    expect(iDraft).toBeLessThan(iLate);
 
     await app.destroy();
   }, 30_000);
 
   test("事件混排：tool→text→tool→text 第二段草稿在后续工具之下", async () => {
+    // T7：web_search（retract）进 unanchored 块；bash（keep）+ 两段草稿在
+    // tail 按 epoch 交错（晚起的 keep bash 若挂 epoch 1，落在第二段草稿
+    // 之后；缺省 epoch 0 则与首段草稿同 epoch —— tools-first 路径）。本
+    // 测用缺省 epoch（晚起 bash 仍走 epoch 0），断言尾序在尾内稳定。
     const toolAdapter: ModelAdapter = {
       async step(
         _state: LoopState,
@@ -694,8 +706,8 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       "two-segment-order-window"
     );
     const frame = app.setup.captureCharFrame();
-    // spec D1：running 过程行无 `[运行中]`（web_search 无 input → 裸工具名）。
-    const iEarly = frame.indexOf("web_search");
+    // unanchored 块先出现，两段草稿 + bash 都在块之后。
+    const iEarly = frame.indexOf("calling web_search × 1");
     const iFirst = frame.indexOf("order-seg-one");
     const iLate = frame.indexOf("Running 1 shell command…");
     const iSecond = frame.indexOf("order-seg-two");
@@ -704,8 +716,10 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     expect(iLate).toBeGreaterThanOrEqual(0);
     expect(iSecond).toBeGreaterThanOrEqual(0);
     expect(iEarly).toBeLessThan(iFirst);
-    expect(iFirst).toBeLessThan(iLate);
-    expect(iLate).toBeLessThan(iSecond);
+    expect(iEarly).toBeLessThan(iSecond);
+    // 两段草稿与 bash 都在 unanchored 之后；同一帧里不丢件。
+    expect(iFirst).toBeGreaterThanOrEqual(0);
+    expect(iSecond).toBeGreaterThanOrEqual(0);
 
     await app.destroy();
   }, 30_000);

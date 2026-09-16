@@ -2,27 +2,31 @@
 /**
  * src/tui/transcript-tail.tsx
  *
- * #986：把 ChatView 末尾段（spacerAfter、crunched、tailSlots、流式
- * thinking 面板、legacy liveToolLines、askLine、Spinner）抽成 sibling
- * 组件。逻辑由纯派生 `decideTailLayout` 计算渲染决策，组件只挂 JSX。
+ * #986：把 ChatView 末尾段（spacerAfter、crunched、unanchoredBlocks、
+ * tailSlots、流式 thinking 面板、legacy liveToolLines、askLine、Spinner）
+ * 抽成 sibling 组件。逻辑由纯派生（`buildActivityBlockFoldLines` 提
+ * `unanchoredBlocks`、`liveTailSlots` 提 `tailSlots`、`shouldShowLiveThinkingPanel`
+ * 判定 thinking panel 是否让位）下放 ChatView，本组件只挂 JSX。
  *
- * 渲染顺序（spec D3/D7 + D9 栈序）：
- *   crunched 行 → tail slots → **live activity group** → thinking 面板 →
+ * 渲染顺序（spec D7 + 过程块 spec）：
+ *   crunched 行 → 未锚定块（unanchoredBlocks）→ tail slots → thinking 面板 →
  *   legacy liveToolLines → askLine → spinner。
  *
- * D9 栈序（docs/CONTEXT.md `live activity group`）：过程组在上、thinking
- * 在下（近输入）；有工具 running 时 thinking panel 让位，两个 live panel
- * 不同屏叠。让位判定由 ChatView 派生（`shouldShowLiveThinkingPanel`）后经
- * `showThinkingPanel` 透传 —— 本组件只挂 JSX，不做 fold 派生。
+ * 过程块 spec：块列表（`buildActivityBlockFoldLines`）是折叠 / 预览的唯一
+ * 来源；旧 `live activity group` 一行英文摘要（`Listing × N · Reading × M`）
+ * 与 `unit fold`（`Thought for Ns · name × M`）互斥闸整体退役 —— 同批
+ * retract 只在块 called 计数出现一次（spec S7）。
  */
 import type { ReactNode } from "react";
 import { Markdown } from "./markdown.js";
 import { MessageShell } from "./message-shell.js";
+import { renderActivityBlockRows } from "./message-row.js";
 import { Spinner } from "./components.js";
 import { formatCrunched } from "./run-stats.js";
 import { formatThinkingLive, thinkingPeekLines } from "./think-fold.js";
 import type { LiveTailSlot, LiveToolRun } from "./live-tool-state.js";
 import { tuiPalette } from "./theme.js";
+import type { ActivityBlock } from "./activity-block.js";
 
 /** 复用 `live-tool-state` 的 `LiveTailSlot` 联合 —— 同源消费侧不重定义。 */
 export type TailSlotDecision = LiveTailSlot;
@@ -35,14 +39,14 @@ export interface TranscriptTailProps {
   readonly renderLiveRuns: (runs: ReadonlyArray<LiveToolRun>) => ReactNode;
   readonly deferredThinkingDrafts: string;
   readonly thinkingExpanded: boolean;
-  /** 进行中一行英文摘要（Listing × N · Running N shell commands）。
-   *  由 ChatView 按 `running` 闸门派生 —— idle 恒 null（D9：idle 落定走
-   *  unit fold + keep 标题，组是**进行中**的 chrome）。 */
-  readonly groupSummary: string | null;
   /** open-unit 让位判定（`shouldShowLiveThinkingPanel`）由 ChatView 派生。 */
   readonly showThinkingPanel: boolean;
   readonly liveToolLines: ReadonlyArray<string>;
   readonly askLine: string | undefined;
+  /** T5（spec S2–S4 / plans T5）：未锚定到 messageIndex 的活动块 —— live
+   *  块（未提交的思考 / 安静工具）必须出现在 tail。每块按「标题 + 预览
+   *  一行」形态渲染，与 MessageRow 内块同形态。空 → 不画。 */
+  readonly unanchoredBlocks: ReadonlyArray<ActivityBlock>;
 }
 
 export function TranscriptTail(props: TranscriptTailProps): ReactNode {
@@ -54,6 +58,12 @@ export function TranscriptTail(props: TranscriptTailProps): ReactNode {
           {formatCrunched(props.crunchedSeconds)}
         </text>
       )}
+      {props.unanchoredBlocks.length > 0 && (
+        <UnanchoredActivityBlocks
+          blocks={props.unanchoredBlocks}
+          contentWidth={props.contentWidth}
+        />
+      )}
       {props.tailSlots.map((slot, i) => (
         <TailSlotBox
           key={slotKey(slot, i)}
@@ -64,13 +74,6 @@ export function TranscriptTail(props: TranscriptTailProps): ReactNode {
           renderLiveRuns={props.renderLiveRuns}
         />
       ))}
-      {props.groupSummary !== null && (
-        <LiveActivityGroupLine
-          summary={props.groupSummary}
-          contentWidth={props.contentWidth}
-          hasSlots={props.tailSlots.length > 0}
-        />
-      )}
       {props.showThinkingPanel && (
         <ThinkingPanel
           contentWidth={props.contentWidth}
@@ -99,31 +102,6 @@ export function TranscriptTail(props: TranscriptTailProps): ReactNode {
 
 function slotKey(slot: TailSlotDecision, i: number): string {
   return slot.kind === "tools" ? `live-tools-${i}` : `live-draft-${i}`;
-}
-
-/** 过程组摘要行 —— 一行英文、单行不折（`Listing × 1 · Reading × 3`）。
- *  色 token = `dim`：过程组是**进行中**的次级摘要，落定态由 unit fold 的
- *  `Thought for` 行接手（失败横切不进本组计数，故不出现 error 色）。 */
-function LiveActivityGroupLine(props: {
-  readonly summary: string;
-  readonly contentWidth: number;
-  readonly hasSlots: boolean;
-}): ReactNode {
-  return (
-    <box
-      flexDirection="column"
-      width={props.contentWidth}
-      marginTop={props.hasSlots ? 1 : 0}
-    >
-      <text
-        fg={tuiPalette.dim}
-        wrapMode="none"
-        width={Math.max(1, props.contentWidth - 2)}
-      >
-        {props.summary}
-      </text>
-    </box>
-  );
 }
 
 /** 单 tail slot：tools 组 → 列容器；draft 段 → 仅 running 渲染 + MessageShell。 */
@@ -209,5 +187,28 @@ export function TailSpacer(props: {
       height={props.height}
       flexShrink={0}
     />
+  );
+}
+
+/**
+ * T5（spec S2–S4 / plans T5）：未锚定到 messageIndex 的活动块（live 块）
+ * 在 tail 渲染 —— 块标题 + 预览行（settled → 仅标题，running → 标题 + 预览）。
+ * 与 MessageRow 的 renderBlockTitles 形态对齐，但全部块装在同一 MessageShell 里。
+ */
+function UnanchoredActivityBlocks(props: {
+  readonly blocks: ReadonlyArray<ActivityBlock>;
+  readonly contentWidth: number;
+}): ReactNode {
+  return (
+    <MessageShell key="unanchored-activity-blocks" cols={props.contentWidth}>
+      {renderActivityBlockRows(
+        props.blocks.map((block) => block.title),
+        props.blocks.map((block) =>
+          block.slot.kind === "tool-preview" ? block.slot.text : null
+        ),
+        props.contentWidth,
+        (blockIdx) => `unanchored-block-${blockIdx}`
+      )}
+    </MessageShell>
   );
 }

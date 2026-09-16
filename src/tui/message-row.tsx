@@ -20,6 +20,7 @@
  * 把原内层 60 行 cc=12 闭包切成多个 ≤60 行组件。
  */
 import type { ReactNode } from "react";
+import * as React from "react";
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
 import { MessageBlocks } from "./message-blocks.js";
 import { MessageShell } from "./message-shell.js";
@@ -49,6 +50,14 @@ export interface MessageRowProps {
   readonly messageThinkingMs: number;
   readonly messageSegments: ReadonlyArray<SegmentWithIndex>;
   readonly foldLinesBySegmentIndex: FoldLinesBySegmentIndex;
+  /** T4–T7（specs/tui-activity-block.md）：本消息的活动块标题（按 contentBlockIndex 升序）。
+   *  块标题按新合同取代旧 unit fold 行 —— 跨消息不合并；同 messageIndex 多块时
+   *  按 contentBlockIndex 顺序排列。 */
+  readonly blockTitles: ReadonlyArray<string>;
+  /** T5（spec S2–S4）：每个块对应的预览文本（与 blockTitles 同序、同长）。
+   *  null = 该块 settled（不画预览行）；非空 = `formatRunningToolLine` 输出，
+   *  渲染在块标题之下一行 dim。 */
+  readonly slotPreviews: ReadonlyArray<string | null>;
   readonly shownThinkingMsValues: ShownThinkingMsValues;
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly resultTextMap: ReadonlyMap<string, string>;
@@ -63,6 +72,8 @@ export function MessageRow(props: MessageRowProps): ReactNode {
     messageThinkingMs,
     messageSegments,
     foldLinesBySegmentIndex,
+    blockTitles,
+    slotPreviews,
     shownThinkingMsValues,
     statusMap,
     resultTextMap,
@@ -121,6 +132,12 @@ export function MessageRow(props: MessageRowProps): ReactNode {
               contentWidth,
               "turn-fold"
             )
+          )}
+          {renderBlockTitles(
+            blockTitles,
+            slotPreviews,
+            contentWidth,
+            visibleIndex
           )}
         </>
       )}
@@ -280,4 +297,75 @@ export function messageSegmentsOfVisible(
   visibleIndex: number
 ): ReadonlyArray<SegmentWithIndex> {
   return pickMessageSegments(activitySegments, visibleIndex);
+}
+
+/**
+ * 活动块标题 + 预览槽渲染（T4–T7 / specs/tui-activity-block.md）。
+ *
+ * 每个块按顺序画：标题一行 + 预览一行（仅当 slotPreviews[i] !== null；
+ * settled 块 → null → 跳过预览行）。所有标题 / 预览都包在同一个
+ * MessageShell 里（同 fold 行同形态），空数组 → 返回 null。
+ *
+ * T5（spec S2–S4）：预览槽只在 running 安静工具块下出现；settled / keep
+ * / 失败 / 思考 only → null。预览文本 = `formatRunningToolLine` 输出（与
+ * tail 预览同一来源，不另造模板）。
+ *
+ * 模板单源：具体 <text> 装配抽为 `renderActivityBlockRows`（本文件导出），
+ * transcript-tail 的 `UnanchoredActivityBlocks` 复用同一 helper —— 两处
+ * 面板宽距 / 颜色 token 不再各自漂移。
+ */
+export function renderBlockTitles(
+  blockTitles: ReadonlyArray<string>,
+  slotPreviews: ReadonlyArray<string | null>,
+  contentWidth: number,
+  visibleIndex: number
+): ReactNode {
+  if (blockTitles.length === 0) return null;
+  return (
+    <MessageShell
+      key={`activity-block-shell-${visibleIndex}`}
+      cols={contentWidth}
+    >
+      {renderActivityBlockRows(
+        blockTitles,
+        slotPreviews,
+        contentWidth,
+        (blockIdx) => `activity-block-${visibleIndex}-${blockIdx}`
+      )}
+    </MessageShell>
+  );
+}
+
+/** 块标题 / 预览行的共享装配（renderBlockTitles 与 tail 的
+ *  UnanchoredActivityBlocks 的单一模板来源）。keys 由调用方给（两侧的
+ *  React key 前缀不同，模板本身一致）。 */
+export function renderActivityBlockRows(
+  blockTitles: ReadonlyArray<string>,
+  slotPreviews: ReadonlyArray<string | null>,
+  contentWidth: number,
+  keyOf: (blockIdx: number) => string
+): ReactNode {
+  return blockTitles.map((title, blockIdx) => {
+    const preview = slotPreviews[blockIdx] ?? null;
+    return (
+      <React.Fragment key={keyOf(blockIdx)}>
+        <text
+          fg={tuiPalette.dim}
+          wrapMode="none"
+          width={Math.max(1, contentWidth - 2)}
+        >
+          {title}
+        </text>
+        {preview !== null ? (
+          <text
+            fg={tuiPalette.dim}
+            wrapMode="none"
+            width={Math.max(1, contentWidth - 2)}
+          >
+            {preview}
+          </text>
+        ) : null}
+      </React.Fragment>
+    );
+  });
 }

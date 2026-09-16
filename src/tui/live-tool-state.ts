@@ -13,8 +13,8 @@
  * 避免完成态残留 partial。
  *
  * T5 (tui-live-activity-fold)：完成件**不再被 reducer 删除** —— 成功只读
- * 探测的去留由消费侧（live activity group / unit fold 计数）决定，见
- * `liveToolReduce` post_tool_use 分支注释。
+ * 探测的去留由消费侧决定（retract → unanchored 活动块计数；keep →
+ * tail 工具卡），见 `liveToolReduce` post_tool_use 分支注释。
  *
  * 设计：
  *  - 状态按 insert 顺序保留（`ReadonlyArray`），便于 ChatView 按序渲染；
@@ -28,6 +28,7 @@
  *    展示层事件不应破坏权威状态）。
  *  - 纯函数 + Object.freeze 纪律，与 session-state.ts 同源。
  */
+import { settledClassOf } from "./tool-settled.js";
 import { formatLiveToolEvent, formatToolStatusLine } from "./tool-summary.js";
 
 export type LiveToolStatus = "running" | "ok" | "failed";
@@ -141,8 +142,8 @@ export function liveToolReduce(
   // 旧 #589 的 `COMPACT_READONLY_TOOLS` 直删与 chat-view 的 history-id
   // 过滤叠加成双删 —— 当该 tool_use id 已在历史里（MessageBlocks 对成功
   // retract 按 slot 隐去标题与预览），live 数组又被抹掉，帧上没有任何一面
-  // 接住它。落点由消费侧决定（当前 **live activity group** 计数，或已画
-  // **unit fold** 计数），reducer 不再预测渲染面。
+  // 接住它。落点由消费侧决定（retract → unanchored 活动块的 `called`
+  // 计数；keep / 失败 → tail 工具卡），reducer 不再预测渲染面。
   if (event.kind === "post_tool_use") {
     const target = prev.find((r) => r.id === event.id);
     if (target === undefined) return prev;
@@ -176,19 +177,34 @@ export type LiveTailSlot =
   | { readonly kind: "tools"; readonly runs: ReadonlyArray<LiveToolRun> }
   | { readonly kind: "draft"; readonly text: string };
 
-/** 按 draftEpoch 交错工具组与草稿段。空草稿跳过；epoch 超出段数的工具挂末尾。 */
+/** 按 draftEpoch 交错工具组与草稿段。空草稿跳过；epoch 超出段数的工具挂末尾。
+ *
+ * T7（specs/tui-activity-block.md）：retract 类（read_file / grep / web_search …）
+ * 已**全部**收进 unanchored 活动块（块标题 + 预览槽），不再追加 tail 工具
+ * 卡 —— 否则会与块预览槽双画。keep / accent / 失败仍走 tail 过程行
+ * （live-tool-preview），由 draftEpoch 与草稿段交错。
+ */
 export function liveTailSlots(
   runs: ReadonlyArray<LiveToolRun>,
   segments: ReadonlyArray<string>
 ): ReadonlyArray<LiveTailSlot> {
+  // 先剥掉非失败的 retract 类（读 / 搜索）—— 它们由 unanchored 块承接。
+  // 失败件不进块（spec S4「失败横切」），仍走 tail `liveToolRunsBox` 的
+  // `[失败]` 行。判定必须走 `settledClassOf` 单一来源（specs/tui-activity-block.md
+  // Never「不另造第二套分类表」；与 `appendLiveBlocks` 同一 SSOT）：固定名
+  // Set 会漏掉表外 retract 名（web_fetch / memory_recall / lsp_* …）导致
+  // 块与 tail 双画。见 spec S6「同批 retract 只在块 called 计数出现一次」。
+  const tailRuns = runs.filter(
+    (r) => r.status === "failed" || settledClassOf(r.name) !== "retract"
+  );
   const maxEpoch = Math.max(
     0,
-    ...runs.map((r) => r.draftEpoch ?? 0),
+    ...tailRuns.map((r) => r.draftEpoch ?? 0),
     Math.max(0, segments.length - 1)
   );
   const slots: LiveTailSlot[] = [];
   for (let i = 0; i <= maxEpoch; i++) {
-    const group = runs.filter((r) => (r.draftEpoch ?? 0) === i);
+    const group = tailRuns.filter((r) => (r.draftEpoch ?? 0) === i);
     if (group.length > 0) slots.push({ kind: "tools", runs: group });
     const text = segments[i];
     if (typeof text === "string" && text.length > 0) {

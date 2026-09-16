@@ -4,31 +4,29 @@
  * #986 + plans/issue-986-chatview-split.md：把 ChatView 内联的 turn /
  * fold 派生（行 307–504）抽成纯模块，渲染由 ChatView 仍负责。
  *
- * SSOT = plans/tui-chrome-interaction.md T1 + spec
- * specs/tui-tool-settled-appearance.md D3：
- *  - 折叠按**已完成单元**判定，不再被 running 整轮压制；
- *  - 折叠簇思考秒数 = anchor 消息的 thinkingMs（per-message 并行数组），
- *    不跨段归并；
- *  - 同一 assistant messageIndex 拆出的多簇共享 thinkingMs，重复展示
- *    时后续簇按 0 计；
- *  - 上一段折叠后无折叠行但有已完成 live 工具 → 把折叠行挂到最近 text 段尾。
+ * T7（specs/tui-activity-block.md / plans T7）：旧 `buildFoldLinesBySegmentIndex`
+ * 路径（unit fold 行）整体退役 —— 块列表（`buildActivityBlockFoldLines`）
+ * 是折叠的唯一来源；本模块只保留：
+ *  - `pickMessageSegments` / `renderInContentOrder`（MessageRow 渲染切分用）
+ *  - `makeThinkingMsAtVisibleFromSource`（visibleIndex → sourceIndex 映射）
+ *  - `segmentActivityBlocks` / `firstPartThinkingBlocks`（段渲染切片）
+ *  - `shouldShowLiveThinkingPanel`（live thinking 让位判定）
+ *  - `buildActivityBlockFoldLines`（活动块标题 / 预览 / hideThinking 派生）
  *
  * 本模块纯函数、无 React / IO 依赖；调用方（ChatView）把结果 Map 喂回
- * 渲染层。`turn-fold-lines.test.ts` 五类边界（empty / negative /
- * overflow / concurrent / exception）。
+ * 渲染层。
  */
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
+import type { LiveToolRun } from "./live-tool-state.js";
+import type { TurnActivitySegment } from "./turn-activity.js";
 import {
-  formatTurnActivityFold,
-  mergeToolUseCounts,
-  shouldShowRetractFold,
-  shouldShowThinkingFold,
-  thinkingMsToSeconds,
-  type ToolUseCount,
-  type TurnActivitySegment,
-} from "./turn-activity.js";
+  deriveActivityBlocks,
+  type ActivityBlock,
+  type ActivityBlockInput,
+} from "./activity-block.js";
 
-/** anchor 消息下标 → 折叠行（unit fold，0 或 1 行）。 */
+/** anchor 消息下标 → 折叠行（unit fold，0 或 1 行）—— T7 后保留类型以
+ *  兼容 MessageRow / ChatScrollbox 调用面，但本模块不再填充；传恒空 map。 */
 export type FoldLinesBySegmentIndex = ReadonlyMap<
   number,
   ReadonlyArray<string>
@@ -37,183 +35,22 @@ export type FoldLinesBySegmentIndex = ReadonlyMap<
 /** 已被折叠行覆盖的 ms 值集合（hideThinking 用，按派生值不反推显示文案）。 */
 export type ShownThinkingMsValues = ReadonlySet<number>;
 
-/** 每条 anchor 消息是否已画过带时长段折叠行（同消息去重用）。 */
-export type DrawnThinkingForMessageIndex = ReadonlySet<number>;
-
 /** `thinkingMsAtVisible(visibleIndex)` 的注入形态 —— 渲染层做 sourceIndex →
  *  visibleIndex 映射，本模块只看 visible 下标。 */
 export type ThinkingMsAtVisible = (visibleIndex: number) => number;
 
-export interface FoldDerivationContext {
-  readonly activitySegments: ReadonlyArray<TurnActivitySegment>;
-  readonly thinkingMsAtVisible: ThinkingMsAtVisible;
-  readonly running: boolean;
-  /** 最后一条 tool 段的 segmentIndex；-1 = 没有任何 tools 段。 */
-  readonly lastToolSegmentIndex: number;
-  /** live 已完成工具计数（fold-fallback 用）。 */
-  readonly liveCompletedCounts: ReadonlyArray<ToolUseCount>;
-}
-
-export interface FoldDerivationResult {
-  readonly foldLinesBySegmentIndex: FoldLinesBySegmentIndex;
-  readonly drawnThinkingForMessageIndex: DrawnThinkingForMessageIndex;
-  readonly shownThinkingMsValues: ShownThinkingMsValues;
-  /** fold-fallback 实际写入了行（即使 fallback 命中 last text 段）。 */
-  readonly fallbackApplied: boolean;
-}
-
-/** 内部 scratch 集合（foldMap + 两组去重 set）—— 单次 build 调用内共享。 */
-interface FoldSets {
-  readonly foldLinesBySegmentIndex: Map<number, ReadonlyArray<string>>;
-  readonly drawnThinkingForMessageIndex: Set<number>;
-  readonly shownThinkingMsValues: Set<number>;
-}
-
-/** 内部 per-segment 上下文：tools 段 + 数组下标（foldMap key）。 */
-interface ToolSegmentSlot {
-  readonly segment: TurnActivitySegment & { readonly kind: "tools" };
-  readonly segmentIndex: number;
-}
-
-/**
- * 计算 anchor 消息对应的折叠行集合。plans T1：fold-fallback 路径与
- * running 解耦 —— 已完成单元照折。
- */
-export function buildFoldLinesBySegmentIndex(
-  ctx: FoldDerivationContext
-): FoldDerivationResult {
-  const sets: FoldSets = {
-    foldLinesBySegmentIndex: new Map(),
-    drawnThinkingForMessageIndex: new Set(),
-    shownThinkingMsValues: new Set(),
-  };
-  for (let i = 0; i < ctx.activitySegments.length; i++) {
-    const segment = ctx.activitySegments[i];
-    if (segment === undefined || segment.kind !== "tools") continue;
-    const entries =
-      i === ctx.lastToolSegmentIndex
-        ? mergeToolUseCounts(segment.entries, ctx.liveCompletedCounts)
-        : segment.entries;
-    pushFoldLineForSegment({ segment, segmentIndex: i }, entries, ctx, sets);
-  }
-  const fallbackApplied =
-    sets.foldLinesBySegmentIndex.size === 0 &&
-    ctx.liveCompletedCounts.length > 0
-      ? pushFallbackFoldLine(ctx, sets)
-      : false;
-  return {
-    foldLinesBySegmentIndex: sets.foldLinesBySegmentIndex,
-    drawnThinkingForMessageIndex: sets.drawnThinkingForMessageIndex,
-    shownThinkingMsValues: sets.shownThinkingMsValues,
-    fallbackApplied,
-  };
-}
-
-/**
- * per-segment 循环体（clean as own function —— ACR 实测）。plans T1：
- * per-segment 闸门与 running 解耦 —— retract 完成即入折叠；thinkingMs
- * 冻结即显示秒数。
- */
-function pushFoldLineForSegment(
-  slot: ToolSegmentSlot,
-  entries: ReadonlyArray<ToolUseCount>,
-  ctx: FoldDerivationContext,
-  sets: FoldSets
-): void {
-  let clusterMs = ctx.thinkingMsAtVisible(slot.segment.messageIndex);
-  // 同消息去重：同一 assistant 拆出多簇（tool→text→tool）共享
-  // thinkingMs，重复展示时后续簇按 0 计（只画工具计数）。
-  if (
-    clusterMs > 0 &&
-    sets.drawnThinkingForMessageIndex.has(slot.segment.messageIndex)
-  ) {
-    clusterMs = 0;
-  }
-  const clusterSeconds = thinkingMsToSeconds(clusterMs);
-  const segmentRetractTotal = entries.reduce((n, e) => n + e.count, 0);
-  if (
-    !shouldShowRetractFold({
-      running: ctx.running,
-      segmentRetractTotal,
-    }) &&
-    !shouldShowThinkingFold({
-      running: ctx.running,
-      hasThinkingMs: clusterSeconds > 0,
-    })
-  ) {
-    return; // EXIT: 双闸门拒绝 → 本段不渲染折叠行。
-  }
-  const lines = formatTurnActivityFold(clusterSeconds, entries);
-  if (lines.length === 0) return; // EXIT: 闸门过但格式产出空行（无秒数无计数）。
-  sets.foldLinesBySegmentIndex.set(slot.segmentIndex, lines);
-  if (clusterSeconds > 0) {
-    sets.drawnThinkingForMessageIndex.add(slot.segment.messageIndex);
-    sets.shownThinkingMsValues.add(clusterMs);
-  }
-}
-
-/**
- * fallback 路径：无 tools 段但有 liveCompletedCounts → 把折叠行挂到最近
- * text 段尾（invert 原 `if (!A && !B) {} else {}` 嵌套为 early-return）。
- */
-function pushFallbackFoldLine(
-  ctx: FoldDerivationContext,
-  sets: FoldSets
-): boolean {
-  const lastTextIndex = findLastTextSegmentIndex(ctx.activitySegments);
-  if (lastTextIndex < 0) return false;
-  const lastText = ctx.activitySegments[lastTextIndex];
-  if (lastText === undefined || lastText.kind !== "text") return false;
-  const clusterMs = ctx.thinkingMsAtVisible(lastText.messageIndex);
-  const clusterSeconds = thinkingMsToSeconds(clusterMs);
-  const segmentRetractTotal = ctx.liveCompletedCounts.reduce(
-    (n, e) => n + e.count,
-    0
-  );
-  if (
-    !shouldShowRetractFold({
-      running: ctx.running,
-      segmentRetractTotal,
-    }) &&
-    !shouldShowThinkingFold({
-      running: ctx.running,
-      hasThinkingMs: clusterSeconds > 0,
-    })
-  ) {
-    return false; // EXIT: 双闸门拒绝 → 保留空 foldLinesBySegmentIndex。
-  }
-  const lines = formatTurnActivityFold(clusterSeconds, ctx.liveCompletedCounts);
-  if (lines.length === 0) return false;
-  sets.foldLinesBySegmentIndex.set(lastTextIndex, lines);
-  if (clusterSeconds > 0) {
-    sets.shownThinkingMsValues.add(clusterMs);
-  }
-  return true;
-}
-
-/** `findLastTextSegment` 的位置版本 —— 内部 fallback 用，避免 caller 重新扫一遍。 */
-function findLastTextSegmentIndex(
-  segments: ReadonlyArray<TurnActivitySegment>
-): number {
-  for (let i = segments.length - 1; i >= 0; i--) {
-    const seg = segments[i];
-    if (seg !== undefined && seg.kind === "text") return i;
-  }
-  return -1;
-}
-
 /**
  * live thinking 面板（open unit）让位判定 —— docs/CONTEXT.md `open unit`：
- * 已画 unit fold **不是**关掉后续思考 panel 的信号；让位的唯一理由是
- * **簇内仍有工具 running**（CONTEXT `live activity group`「有工具 running
- * 时 panel 让位」）。
+ * 已画活动块（`Thought for` / `calling / called`）**不是**关掉后续思考
+ * panel 的信号；让位的唯一理由是**簇内仍有工具 running**（CONTEXT `live
+ * tool line`「有工具 running 时 panel 让位」）。
  *
  * 「该 burst 尚无已画 `Thought for`」这一条在本判定里是**结构蕴含**而非另
  * 一条闸门：`thinkingDraft` 非空 ⟺ 思考缓冲仍在累积（`closeThinkingPhase`
  * 在每条 `text_delta` / `tool_call_start` 清空它），即该 burst 尚未关闭；
  * 未关闭的 burst 不会有 `thinkingMs` 落盘，因此不可能已有 `Thought for`
  * 画在它头上。把这条写成独立闸门只会退化回「整轮有折叠就关 panel」的旧
- * 错误（见 _Avoid_：`currentTurnHasFold` 关后续思考）。
+ * 错误（见 _Avoid_：`currentTurnHasFold` 关后续思考 —— T7 退役）。
  */
 export function shouldShowLiveThinkingPanel(opts: {
   readonly running: boolean;
@@ -266,8 +103,7 @@ export function renderInContentOrder(
 
 /**
  * 把 `visibleMessages` / `thinkingMs` 拍平成 `thinkingMsAtVisible`：映射
- * `visibleIndex → sourceIndex` 后查表。sourceIndex 缺席时按 0 兜底
- * （与 `sumThinkingMsInRange` 的同款越界防御）。
+ * `visibleIndex → sourceIndex` 后查表。sourceIndex 缺席时按 0 兜底。
  */
 export function makeThinkingMsAtVisibleFromSource(
   thinkingMs: ReadonlyArray<number | null> | undefined,
@@ -281,17 +117,6 @@ export function makeThinkingMsAtVisibleFromSource(
     if (!Number.isFinite(value) || value <= 0) return 0;
     return value;
   };
-}
-
-/** `activitySegments` 中最后一个 tools 段的下标；无 → -1。 */
-export function findLastToolSegmentIndex(
-  segments: ReadonlyArray<TurnActivitySegment>
-): number {
-  for (let i = segments.length - 1; i >= 0; i--) {
-    const seg = segments[i];
-    if (seg !== undefined && seg.kind === "tools") return i;
-  }
-  return -1;
 }
 
 /**
@@ -322,4 +147,115 @@ export function firstPartThinkingBlocks(
   return message.content.filter(
     (b) => b.type === "thinking" || b.type === "redacted_thinking"
   );
+}
+
+/**
+ * 活动块 fold-line 派生（specs/tui-activity-block.md）：把
+ * `deriveActivityBlocks` 的块标题按 messageIndex 路由到 MessageRow，
+ * 同一 messageIndex 多块按 contentBlockIndex 升序消费。
+ *
+ * 关键映射（per-message，**不**跨消息合并 — spec S5）：
+ *  - 块锚点 (messageIndex, contentBlockIndex) → messageIndex 直接匹配，
+ *    不再走 `orderedTurnActivitySegments` 的跨消息合并（那是旧 unit fold 合同）。
+ *  - 同 messageIndex 拆出多块时按 contentBlockIndex 升序配对 fold-line 行号。
+ *  - 没有匹配 messageIndex 的块（live 思考块、live 工具簇块）落入
+ *    `unanchoredBlocks`，由 ChatView 转给 TranscriptTail 渲染。
+ *
+ * 不变式：
+ *  - 块标题文本 = `ActivityBlock.title`（`formatToolUseCounts` 单源，不另拼）；
+ *  - 块覆盖的 thinkingMs 进 `shownThinkingMsValues`，hideThinking 双门用之；
+ *  - 旧 `foldLinesBySegmentIndex`（unit fold 行）由 caller 单独合并使用。
+ */
+export interface ActivityBlockFoldDerivation {
+  /** messageIndex（visible）→ 块标题行（多块时多行，按 contentBlockIndex 升序）。 */
+  readonly foldLineMapByMessage: ReadonlyMap<number, ReadonlyArray<string>>;
+  /** 块覆盖的 thinkingMs 值集合（hideThinking 用）。 */
+  readonly shownThinkingMsValues: ReadonlySet<number>;
+  /** 未匹配到任何 messageIndex 的块（live 块）—— tail 用。 */
+  readonly unanchoredBlocks: ReadonlyArray<ActivityBlock>;
+  /** T5（spec S2–S4）：messageIndex（visible）→ 槽预览文本数组（多块时多
+   *  行，按 contentBlockIndex 升序）。`null` = 该块无预览行（settled 块
+   *  slot.kind === "none"、或思考槽），renderer 跳过该块不画预览；非 null
+   *  才在块标题下画一行 dim 当前预览。 */
+  readonly slotPreviewsByMessage: ReadonlyMap<
+    number,
+    ReadonlyArray<string | null>
+  >;
+}
+
+/**
+ * 主函数：纯派生 —— 见模块头注释。
+ *
+ * 入参 = `deriveActivityBlocks` 同形态。返回的 `foldLineMapByMessage`
+ * 按 messageIndex（visible 平铺下标）索引，每个 messageIndex 多块按
+ * contentBlockIndex 升序消费，每块一行标题。
+ */
+export function buildActivityBlockFoldLines(args: {
+  readonly messages: ReadonlyArray<AnthropicNativeMessage>;
+  readonly visibleStart?: number;
+  readonly visibleCount: number;
+  readonly thinkingMsAtVisible: (visibleIndex: number) => number;
+  readonly liveRuns?: ReadonlyArray<LiveToolRun>;
+  readonly liveThinking?: boolean;
+  readonly inFoldCountOf?: ActivityBlockInput["inFoldCountOf"];
+}): ActivityBlockFoldDerivation {
+  const { messages } = args;
+  const blocks = deriveActivityBlocks({
+    messages,
+    start: args.visibleStart,
+    thinkingMsAtVisible: args.thinkingMsAtVisible,
+    liveRuns: args.liveRuns,
+    liveThinking: args.liveThinking,
+    inFoldCountOf: args.inFoldCountOf,
+  });
+  // 按 messageIndex 分组，按 contentBlockIndex 升序排（活动块的 contentBlockIndex
+  // = cluster 首块的下标）。
+  const byMessage = new Map<
+    number,
+    Array<{
+      readonly contentBlockIndex: number;
+      readonly title: string;
+      readonly slotText: string | null;
+    }>
+  >();
+  const shownThinkingMsValues = new Set<number>();
+  const unanchoredBlocks: ActivityBlock[] = [];
+
+  for (const block of blocks) {
+    if (block.anchor.messageIndex >= args.visibleCount) {
+      // EXIT: 盘上下标 ≥ visibleCount → live 块（未提交相），落 tail。
+      unanchoredBlocks.push(block);
+      continue;
+    }
+    const arr = byMessage.get(block.anchor.messageIndex) ?? [];
+    arr.push({
+      contentBlockIndex: block.anchor.contentBlockIndex,
+      title: block.title,
+      slotText: block.slot.kind === "tool-preview" ? block.slot.text : null,
+    });
+    byMessage.set(block.anchor.messageIndex, arr);
+    const ms = args.thinkingMsAtVisible(block.anchor.messageIndex);
+    if (ms > 0) shownThinkingMsValues.add(ms);
+  }
+  // 排序 + 转只读。
+  const foldLineMapByMessage = new Map<number, ReadonlyArray<string>>();
+  const slotPreviewsByMessage = new Map<number, ReadonlyArray<string | null>>();
+  for (const [mi, list] of byMessage) {
+    list.sort((a, b) => a.contentBlockIndex - b.contentBlockIndex);
+    foldLineMapByMessage.set(
+      mi,
+      list.map((entry) => entry.title)
+    );
+    slotPreviewsByMessage.set(
+      mi,
+      list.map((entry) => entry.slotText)
+    );
+  }
+
+  return {
+    foldLineMapByMessage,
+    shownThinkingMsValues,
+    unanchoredBlocks,
+    slotPreviewsByMessage,
+  };
 }

@@ -1,18 +1,16 @@
 /**
  * src/tui/turn-activity.ts
  *
- * 当前 turn 的工具折叠摘要（纯函数）。ChatView 把「本 turn 里每个工具
- * 调用了几次」收成一行（idle 与 running 在已有完成工具时共用），避免
- * 旧的逐条 `[思考]` / `[完成] bash` 与 turn 级折叠叠在一起。
- * 结束态**一行**（`unit fold`）：`Thought for <duration>` 与工具计数
- * `bash × N` 焊在同一行 —— retract 计数不蒸发、不另起第二行。
+ * 当前 turn 的活动段派生（纯函数）。给 `deriveActivityBlocks` 与 MessageRow
+ * 提供 segment / count 形态 —— T7 后 `unit fold`（`Thought for … · name × N`
+ * 一行）的派生从本模块移除，由 `activity-block.ts` 单独承担（活动块列表
+ * 是折叠 / 预览的唯一来源）。
  *
  * turn 边界与 `isTurnQuery` 同源：最后一条无 tool_result 的 user query
  * 起到会话末尾（含中间 tool_result user 消息）。
  */
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
 import { isTurnQuery } from "../session-api/turn-projection.js";
-import { formatThinkingFold } from "./think-fold.js";
 
 export interface ToolUseCount {
   readonly name: string;
@@ -221,26 +219,6 @@ export function countNamedCalls(
   }));
 }
 
-/** primary 名顺序优先，extra 新名接在后面；count 相加。 */
-export function mergeToolUseCounts(
-  primary: ReadonlyArray<ToolUseCount>,
-  extra: ReadonlyArray<ToolUseCount>
-): ReadonlyArray<ToolUseCount> {
-  const order: string[] = [];
-  const map = new Map<string, number>();
-  for (const group of [primary, extra]) {
-    for (const entry of group) {
-      if (entry.count <= 0) continue;
-      if (!map.has(entry.name)) order.push(entry.name);
-      map.set(entry.name, (map.get(entry.name) ?? 0) + entry.count);
-    }
-  }
-  return order.map((name) => ({
-    name,
-    count: map.get(name) ?? 0,
-  }));
-}
-
 /** `bash × 2 · write_file × 1`；空列表 → 空串（无前导分隔符）。 */
 export function formatToolUseCounts(
   entries: ReadonlyArray<ToolUseCount>
@@ -252,93 +230,8 @@ export function formatToolUseCounts(
     .join(" · ");
 }
 
-/**
- * idle 折叠行（D2 `unit fold`）：至多 1 行 —— 结束态时长段
- * （`Thought for <duration>`）与原第二行计数 `formatToolUseCounts`
- * （`bash × N · read_file × 1`）焊在同一行，中间 ` · ` 分隔。
- *
- * 收类（retract）计数不得蒸发，也不得另起第二行；无秒数 → 只计数行；
- * 无计数 → 只时长行；两者皆无 → 空数组（不回落 `[思考]`）。
- */
-export function formatTurnActivityFold(
-  seconds: number | undefined,
-  entries: ReadonlyArray<ToolUseCount>
-): ReadonlyArray<string> {
-  const counts = formatToolUseCounts(entries);
-  const think = formatThinkingFold(seconds);
-  if (think.length === 0 && counts.length === 0) return [];
-  const line =
-    think.length === 0
-      ? counts
-      : counts.length === 0
-        ? think
-        : `${think} · ${counts}`;
-  return [line];
-}
-
-/**
- * D3 (tui-display-consistency):折叠簇内 assistant 消息的 thinkingMs 求和（ms）。
- *
- * 输入：落盘的 thinkingMs 并行数组 + 折叠簇要计入的 messageIndex 列表
- * （有序、可重复 —— 与 `orderedTurnActivitySegments` 的 anchor messageIndex
- * 配套使用）。
- *
- * 边界形态（spec D2/D3 钉死）：
- *  - `null` 元素按 0 计入（非流式回合 / 该事件无 thinkingMs）；
- *  - `thinkingMs` undefined（整个 key 缺席 = 整链无 thinkingMs / 旧会话）→ 全 0；
- *  - 索引越界（数组长度 < max(indices)+1）→ 该位置按 0 计入；
- *  - 非有限数 / `<= 0`（理论上 appendEvents 已过滤，但 consumer 再做防御）→ 0。
- *
- * 输出：簇内 assistant 消息的 thinkingMs 累加值（毫秒）。调用方除以 1000 取秒。
- */
-export function sumThinkingMsInRange(
-  thinkingMs: ReadonlyArray<number | null> | undefined,
-  messageIndices: ReadonlyArray<number>
-): number {
-  if (thinkingMs === undefined) return 0;
-  if (messageIndices.length === 0) return 0;
-  let total = 0;
-  for (const index of messageIndices) {
-    if (!Number.isInteger(index) || index < 0) continue;
-    const value = thinkingMs[index];
-    if (value === null || value === undefined) continue;
-    if (!Number.isFinite(value) || value <= 0) continue;
-    total += value;
-  }
-  return total;
-}
-
 /** ms → 秒（向上取整，确保 250ms 显示成 1 秒）。 */
 export function thinkingMsToSeconds(ms: number): number {
   if (!Number.isFinite(ms) || ms <= 0) return 0;
   return Math.ceil(ms / 1000);
-}
-
-/**
- * 思考秒数折叠行（`Thought for <duration>`）显示判定 —— plans/tui-chrome-interaction.md T1：
- * running 态不阻止冻结的思考秒数渲染。fold by **completed unit**，不等整
- * turn idle：live thinking 一旦结束（final commit 写入落盘 thinkingMs），
- * 时长段立刻可见，即便 tools 仍在 running。
- *
- * 不变式 = 决策只看 frozen thinkingMs（hasThinkingMs 派生自
- * session.thinkingMs[anchor] > 0），与 running 解耦 —— running 只用于
- * 渲染层决定是否同时显示 live thinking 面板，**不**用于压住已冻结行。
- */
-export function shouldShowThinkingFold(opts: {
-  readonly running: boolean;
-  readonly hasThinkingMs: boolean;
-}): boolean {
-  return opts.hasThinkingMs;
-}
-
-/**
- * retract 计数行（`read_file × N` 等）显示判定 —— 同 T1：retract 一旦
- * 落定（live 已完成 或历史 tool_result 已配对），立刻进入折叠行，不等
- * 整 turn idle；turn 仍在 running 也不阻止渲染。
- */
-export function shouldShowRetractFold(opts: {
-  readonly running: boolean;
-  readonly segmentRetractTotal: number;
-}): boolean {
-  return opts.segmentRetractTotal > 0;
 }

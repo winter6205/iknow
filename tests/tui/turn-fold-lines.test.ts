@@ -1,27 +1,23 @@
 /**
  * tests/tui/turn-fold-lines.test.ts
  *
- * #986 + plans/issue-986-chatview-split.md：turn/fold 派生纯函数模块
- * （src/tui/turn-fold-lines.ts）5 类边界：empty / negative / overflow /
- * concurrent / exception。
+ * T7（specs/tui-activity-block.md）：旧 unit fold 派生（`buildFoldLinesBySegmentIndex`
+ * 等）随活动块单时态退役，其穷尽用例归档在 `archive/tests/tui/turn-fold-lines.test.ts`。
+ * 本文件只保留**仍存活导出**的覆盖 —— 这些函数仍有生产调用
+ * （`message-row.tsx` / `chat-view.tsx`），不得随旧形态一起失去测试。
  *
- * 同 `tests/tui/turn-activity.test.ts` 体例（describe / expect / test，
- * bun:test），数据构造助手与 turn-activity.test.ts 对齐（user /
- * assistantTools / assistantText / toolResult）。
+ * 体例同 `tests/tui/turn-activity.test.ts`（bun:test，数据构造助手对齐）。
  */
 import { describe, expect, test } from "bun:test";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 import { orderedTurnActivitySegments } from "../../src/tui/turn-activity.js";
 import {
-  buildFoldLinesBySegmentIndex,
-  findLastToolSegmentIndex,
   firstPartThinkingBlocks,
   makeThinkingMsAtVisibleFromSource,
   pickMessageSegments,
   renderInContentOrder,
   segmentActivityBlocks,
   shouldShowLiveThinkingPanel,
-  type ThinkingMsAtVisible,
 } from "../../src/tui/turn-fold-lines.js";
 
 // ── 数据构造（与 tests/tui/turn-activity.test.ts 对齐）─────────────
@@ -41,12 +37,14 @@ function assistantTools(
   names: ReadonlyArray<string>,
   text?: string
 ): AnthropicNativeMessage {
-  const content: AnthropicNativeMessage["content"] = names.map((name, i) => ({
-    type: "tool_use" as const,
-    id: `tu-${name}-${String(i)}`,
-    name,
-    input: {},
-  }));
+  const content: Array<AnthropicNativeMessage["content"][number]> = names.map(
+    (name, i) => ({
+      type: "tool_use" as const,
+      id: `tu-${name}-${String(i)}`,
+      name,
+      input: {},
+    })
+  );
   if (text !== undefined) content.push({ type: "text", text });
   return { role: "assistant", content };
 }
@@ -55,322 +53,7 @@ function assistantText(text: string): AnthropicNativeMessage {
   return { role: "assistant", content: [{ type: "text", text }] };
 }
 
-function segmentsOf(
-  messages: ReadonlyArray<AnthropicNativeMessage>,
-  visibleMsgs = messages
-): ReturnType<typeof orderedTurnActivitySegments> {
-  return orderedTurnActivitySegments(visibleMsgs, 0);
-}
-
-const emptyMsAt: ThinkingMsAtVisible = () => 0;
-const passThroughMsAt: ThinkingMsAtVisible = (i) => i * 1000;
-
-// ── buildFoldLinesBySegmentIndex（empty） ───────────────────────────
-
-describe("buildFoldLinesBySegmentIndex（empty）", () => {
-  test("空 messages / 空 activitySegments → 全空 + fallbackApplied false", () => {
-    const result = buildFoldLinesBySegmentIndex({
-      activitySegments: [],
-      thinkingMsAtVisible: emptyMsAt,
-      running: false,
-      lastToolSegmentIndex: -1,
-      liveCompletedCounts: [],
-    });
-    expect(result.foldLinesBySegmentIndex.size).toBe(0);
-    expect(result.drawnThinkingForMessageIndex.size).toBe(0);
-    expect(result.shownThinkingMsValues.size).toBe(0);
-    expect(result.fallbackApplied).toBe(false);
-  });
-
-  test("只有 user 消息（无 assistant 活动）→ 空 fold", () => {
-    const result = buildFoldLinesBySegmentIndex({
-      activitySegments: segmentsOf([user("hi")]),
-      thinkingMsAtVisible: emptyMsAt,
-      running: true,
-      lastToolSegmentIndex: -1,
-      liveCompletedCounts: [],
-    });
-    expect(result.foldLinesBySegmentIndex.size).toBe(0);
-    expect(result.fallbackApplied).toBe(false);
-  });
-});
-
-// ── buildFoldLinesBySegmentIndex（negative / 缺席 thinkingMs）────
-
-describe("buildFoldLinesBySegmentIndex（negative）", () => {
-  test("thinkingMs 缺席（undefined）→ 折叠行只有计数段、无时长段", () => {
-    const msgs = [user("q"), assistantTools(["read_file", "read_file"])];
-    const segs = segmentsOf(msgs);
-    const result = buildFoldLinesBySegmentIndex({
-      activitySegments: segs,
-      thinkingMsAtVisible: emptyMsAt, // 无 ms
-      running: false,
-      lastToolSegmentIndex: findLastToolSegmentIndex(segs),
-      liveCompletedCounts: [],
-    });
-    expect(result.foldLinesBySegmentIndex.size).toBe(1);
-    const lines = result.foldLinesBySegmentIndex.get(0) ?? [];
-    expect(lines.length).toBeGreaterThan(0);
-    expect(lines[0]).toBe("read_file × 2");
-    // 无秒数 → drawnThinkingForMessageIndex 不含此 message
-    expect(result.drawnThinkingForMessageIndex.has(1)).toBe(false);
-    expect(result.shownThinkingMsValues.size).toBe(0);
-  });
-
-  test("索引越界（thinkingMs 长度不够）→ 安全兜底 0，不抛", () => {
-    const msgs = [user("q"), assistantTools(["read_file"])];
-    const segs = segmentsOf(msgs);
-    // passThroughMsAt(99) 会读 sourceIndex 99（thinkingMs[99]）→ 越界。
-    const thinkingMsAt: ThinkingMsAtVisible = (i) => {
-      // 只 anchor 在 messageIndex 1，强制给一个越界查询：thinkingMs.length=1
-      const safeArr = [1234];
-      return safeArr[i] ?? 0;
-    };
-    expect(() =>
-      buildFoldLinesBySegmentIndex({
-        activitySegments: segs,
-        thinkingMsAtVisible: thinkingMsAt,
-        running: false,
-        lastToolSegmentIndex: findLastToolSegmentIndex(segs),
-        liveCompletedCounts: [],
-      })
-    ).not.toThrow();
-  });
-
-  test("负数 / NaN / 非有限 thinkingMs → 按 0 计入，不入 shownThinkingMsValues", () => {
-    const msgs = [user("q"), assistantTools(["read_file"])];
-    const segs = segmentsOf(msgs);
-    const result = buildFoldLinesBySegmentIndex({
-      activitySegments: segs,
-      thinkingMsAtVisible: () => -500, // 负数
-      running: false,
-      lastToolSegmentIndex: findLastToolSegmentIndex(segs),
-      liveCompletedCounts: [],
-    });
-    expect(result.shownThinkingMsValues.size).toBe(0);
-    expect(result.drawnThinkingForMessageIndex.has(1)).toBe(false);
-    // 折叠行只画计数（无秒数）
-    expect(result.foldLinesBySegmentIndex.get(0)?.[0]).toBe("read_file × 1");
-  });
-});
-
-// ── buildFoldLinesBySegmentIndex（overflow） ──────────────────────
-
-describe("buildFoldLinesBySegmentIndex（overflow）", () => {
-  test("40 个工具名 + 200 个 bash：折叠行包含计数、不抛", () => {
-    const names = Array.from({ length: 40 }, (_, i) => `tool_${String(i)}`);
-    const extra = Array.from({ length: 200 }, () => "bash");
-    const msgs = [user("q"), assistantTools([...names, ...extra])];
-    const segs = segmentsOf(msgs);
-    const result = buildFoldLinesBySegmentIndex({
-      activitySegments: segs,
-      thinkingMsAtVisible: emptyMsAt,
-      running: false,
-      lastToolSegmentIndex: findLastToolSegmentIndex(segs),
-      liveCompletedCounts: [],
-    });
-    expect(result.foldLinesBySegmentIndex.size).toBe(1);
-    const lines = result.foldLinesBySegmentIndex.get(0) ?? [];
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toBeDefined();
-    expect(lines[0]!.length).toBeGreaterThan(0);
-    expect(lines[0]).toContain("bash × 200");
-    expect(lines[0]).toContain("tool_0 × 1");
-  });
-
-  test("同一 assistant 拆出多簇（tool → text → tool）：第一簇 12s、后续簇按 0", () => {
-    const msgs: AnthropicNativeMessage[] = [
-      user("q"),
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "thinking",
-            thinking: "先想",
-            signature: "s",
-          },
-          { type: "tool_use", id: "tu-1", name: "read_file", input: {} },
-          { type: "text", text: "中间总结" },
-          { type: "tool_use", id: "tu-2", name: "read_file", input: {} },
-        ],
-      },
-      toolResult("tu-1"),
-      toolResult("tu-2"),
-    ];
-    const segs = segmentsOf(msgs);
-    const lastToolIndex = findLastToolSegmentIndex(segs);
-    const result = buildFoldLinesBySegmentIndex({
-      activitySegments: segs,
-      // anchor 1：12s；第二簇（anchor 同 1）去重后按 0 计
-      thinkingMsAtVisible: () => 12_000,
-      running: false,
-      lastToolSegmentIndex: lastToolIndex,
-      liveCompletedCounts: [],
-    });
-    expect(result.foldLinesBySegmentIndex.size).toBeGreaterThanOrEqual(2);
-    const firstLine = result.foldLinesBySegmentIndex.get(0)?.[0];
-    const secondLine = result.foldLinesBySegmentIndex.get(lastToolIndex)?.[0];
-    expect(firstLine).toContain("Thought for 12s");
-    expect(firstLine).toContain("read_file × 1");
-    // 第二簇同 anchor → 去重后只剩计数行
-    expect(secondLine).toBe("read_file × 1");
-    // drawnThinkingForMessageIndex 只记一次
-    expect(result.drawnThinkingForMessageIndex.size).toBe(1);
-  });
-
-  test("overflow anchorMsgs 越界 + length 0 → drawnThinkingForMessageIndex 空", () => {
-    const msgs = [user("q"), assistantTools(["read_file", "grep"])];
-    const segs = segmentsOf(msgs);
-    const result = buildFoldLinesBySegmentIndex({
-      activitySegments: segs,
-      thinkingMsAtVisible: () => 30_000,
-      running: false,
-      lastToolSegmentIndex: findLastToolSegmentIndex(segs),
-      liveCompletedCounts: [],
-    });
-    // anchor messageIndex 1 在 visible 索引内，正常计秒
-    expect(result.foldLinesBySegmentIndex.get(0)?.[0]).toContain(
-      "Thought for 30s"
-    );
-    expect(result.drawnThinkingForMessageIndex.has(1)).toBe(true);
-    expect(result.shownThinkingMsValues.has(30_000)).toBe(true);
-  });
-});
-
-// ── buildFoldLinesBySegmentIndex（concurrent：多次独立调用无共享） ──
-
-describe("buildFoldLinesBySegmentIndex（concurrent：多次独立调用无共享状态）", () => {
-  test("两次独立调用返回独立 Map/Set（无 mutable 共享）", () => {
-    const msgs = [user("q"), assistantTools(["read_file"])];
-    const segs = segmentsOf(msgs);
-    const base = {
-      activitySegments: segs,
-      thinkingMsAtVisible: () => 5_000 as number,
-      running: false,
-      lastToolSegmentIndex: findLastToolSegmentIndex(segs),
-      liveCompletedCounts: [],
-    };
-    const a = buildFoldLinesBySegmentIndex(base);
-    const b = buildFoldLinesBySegmentIndex(base);
-    // 各自有完整 fold 行
-    expect(a.foldLinesBySegmentIndex.size).toBe(1);
-    expect(b.foldLinesBySegmentIndex.size).toBe(1);
-    // 改 a 不影响 b（不同 Map 实例）
-    a.foldLinesBySegmentIndex.set(99, ["INJECTED"]);
-    expect(b.foldLinesBySegmentIndex.has(99)).toBe(false);
-    // 改 a.drawnThinkingForMessageIndex 不影响 b
-    a.drawnThinkingForMessageIndex.add(123);
-    expect(b.drawnThinkingForMessageIndex.has(123)).toBe(false);
-  });
-
-  test("同 inputs 多次调用返回等价 fold 行", () => {
-    const msgs = [user("q"), assistantTools(["read_file", "grep"])];
-    const segs = segmentsOf(msgs);
-    const base = {
-      activitySegments: segs,
-      thinkingMsAtVisible: () => 7_500 as number,
-      running: false,
-      lastToolSegmentIndex: findLastToolSegmentIndex(segs),
-      liveCompletedCounts: [],
-    };
-    const a = buildFoldLinesBySegmentIndex(base);
-    const b = buildFoldLinesBySegmentIndex(base);
-    expect([...a.foldLinesBySegmentIndex]).toEqual([
-      ...b.foldLinesBySegmentIndex,
-    ]);
-    expect([...a.shownThinkingMsValues]).toEqual([...b.shownThinkingMsValues]);
-  });
-});
-
-// ── buildFoldLinesBySegmentIndex（exception / 异常形态）────────────
-
-describe("buildFoldLinesBySegmentIndex（exception）", () => {
-  test("thinkingMsAtVisible 抛错 → 向上传播，不静默吞掉（fail-closed）", () => {
-    // 直接构造一个非空 segments（合法的 tools 段，使函数进入 pushFoldLineForSegment
-    // 体并真实调用 thinkingMsAtVisible —— 即真正的异常源，不是 dead malformed）。
-    const segs = [
-      {
-        kind: "tools" as const,
-        messageIndex: 0,
-        contentBlockIndex: 0,
-        entries: [{ name: "read_file", count: 1 }],
-      },
-    ];
-    const throwing: ThinkingMsAtVisible = () => {
-      throw new Error("downstream failure");
-    };
-    expect(() =>
-      buildFoldLinesBySegmentIndex({
-        activitySegments: segs,
-        thinkingMsAtVisible: throwing,
-        running: false,
-        lastToolSegmentIndex: 0,
-        liveCompletedCounts: [],
-      })
-    ).toThrow();
-  });
-
-  test("orderedTurnActivitySegments 兜底：非法 assistant content getter 抛错 → 不抛错（segmentsOf 兜底）", () => {
-    // 兜底点在 orderedTurnActivitySegments（turn-activity.ts 内部 try/catch），
-    // 非法形态不应污染 buildFoldLinesBySegmentIndex 的入参；这是 fail-closed 的
-    // 上一层保护，本测试独立验证。
-    const malformed = {
-      role: "assistant",
-      get content(): never {
-        throw new Error("malformed content");
-      },
-    } as unknown as AnthropicNativeMessage;
-    expect(() => segmentsOf([malformed])).not.toThrow();
-  });
-
-  test("liveCompletedCounts 触发 fallback：把折叠行挂到 last text 段", () => {
-    const msgs = [user("q"), assistantText("先回答一下")];
-    const segs = segmentsOf(msgs);
-    const result = buildFoldLinesBySegmentIndex({
-      activitySegments: segs,
-      thinkingMsAtVisible: () => 8_000,
-      running: true, // running 不压 fallback（per-segment 闸门解耦）
-      lastToolSegmentIndex: -1,
-      liveCompletedCounts: [{ name: "read_file", count: 2 }],
-    });
-    expect(result.fallbackApplied).toBe(true);
-    // fallback 挂在 text 段（segmentIndex 0）
-    expect(result.foldLinesBySegmentIndex.size).toBe(1);
-    const line = result.foldLinesBySegmentIndex.get(0)?.[0];
-    expect(line).toContain("read_file × 2");
-  });
-
-  test("无 text 段 + liveCompletedCounts → fallback 不命中（返回 false）", () => {
-    // 无 assistant 消息 → activitySegments 空
-    const msgs = [user("q")];
-    const segs = segmentsOf(msgs);
-    const result = buildFoldLinesBySegmentIndex({
-      activitySegments: segs,
-      thinkingMsAtVisible: emptyMsAt,
-      running: true,
-      lastToolSegmentIndex: -1,
-      liveCompletedCounts: [{ name: "read_file", count: 1 }],
-    });
-    expect(result.fallbackApplied).toBe(false);
-    expect(result.foldLinesBySegmentIndex.size).toBe(0);
-  });
-
-  test("fallback 闸门拒绝（counts==0）→ 不写行", () => {
-    const msgs = [user("q"), assistantText("hello")];
-    const segs = segmentsOf(msgs);
-    const result = buildFoldLinesBySegmentIndex({
-      activitySegments: segs,
-      thinkingMsAtVisible: () => 0, // 无秒数
-      running: false,
-      lastToolSegmentIndex: -1,
-      liveCompletedCounts: [{ name: "read_file", count: 0 }], // 0 件 → 闸门拒
-    });
-    expect(result.fallbackApplied).toBe(false);
-    expect(result.foldLinesBySegmentIndex.size).toBe(0);
-  });
-});
-
-// ── shouldShowLiveThinkingPanel（open unit 让位判定）───────────────
+// ── 仍存活导出的覆盖（T7 后） ───────────────────────────────────
 
 describe("shouldShowLiveThinkingPanel（boundary：无草稿 / 非 running）", () => {
   test("empty：thinkingDraft 空 → 无 panel（无草稿不画）", () => {
@@ -478,28 +161,7 @@ describe("pickMessageSegments / renderInContentOrder", () => {
   });
 });
 
-// ── findLastToolSegmentIndex ─────────────────
-
-describe("findLastToolSegmentIndex", () => {
-  test("空 segments → -1", () => {
-    expect(findLastToolSegmentIndex([])).toBe(-1);
-  });
-
-  test("倒序：tools 段在前", () => {
-    const segs = orderedTurnActivitySegments(
-      [
-        user("q"),
-        assistantTools(["read_file"]),
-        toolResult("tu-read_file-0"),
-        assistantText("总结"),
-      ],
-      0
-    );
-    expect(findLastToolSegmentIndex(segs)).toBe(0);
-  });
-});
-
-// ── makeThinkingMsAtVisibleFromSource ──────────────────────────────
+// ── makeThinkingMsAtVisibleFromSource ─────────────────
 
 describe("makeThinkingMsAtVisibleFromSource", () => {
   test("thinkingMs undefined → 全 0", () => {
@@ -508,7 +170,7 @@ describe("makeThinkingMsAtVisibleFromSource", () => {
     expect(fn(5)).toBe(0);
   });
 
-  test("thinkingMs 含 null / 越界 → 0（与 sumThinkingMsInRange 兜底一致）", () => {
+  test("thinkingMs 含 null / 越界 → 0（越界 / 非法值兜底一致）", () => {
     const fn = makeThinkingMsAtVisibleFromSource([null, 1500], [0, 1]);
     expect(fn(0)).toBe(0);
     expect(fn(1)).toBe(1500);

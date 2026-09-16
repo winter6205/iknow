@@ -57,11 +57,11 @@ function sessionWith(
     : { ...attachSession(file), runState };
 }
 
-test("两轮思考→工具:有秒数的段各画各的 `Thought for`,无秒数段只画工具计数行", async () => {
-  // 不变式 (a)(b) + D2(unit fold 一行):asst-1 无落盘 thinkingMs → 其
-  // 计数不借用 final 的 30s;asst-final(bash keep + text)有 30s → 时长段
-  // 挂它自己的簇。跨度工具簇 anchor 移到最新 assistant,therefore 时长与
-  // read_file 计数焊在**同一行**(`Thought for 30s · read_file × 1`)。
+test("两轮思考→工具:跨消息不合并,每条 assistant 自有块 + 各自 Thought for <自己的 ms>", async () => {
+  // 不变式（specs/tui-activity-block.md S5「下一条 assistant 新块」+ 决策表
+  // 重写条目）：跨消息工具簇不再合并 —— 每条 assistant 自有过程块，asst-1
+  // 自己的 thinkingMs 留在自己的块标题；asst-final 的 thinkingMs 不串位到
+  // asst-1；bash keep 仍不进折叠（反命题：keep 不计数）。
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "多步任务" }] },
     {
@@ -101,9 +101,9 @@ test("两轮思考→工具:有秒数的段各画各的 `Thought for`,无秒数�
   // messages: user(0) asst-1(1) tool_result(2) asst-final(3) tool_result(4)
   const thinkingMs: ReadonlyArray<number | null> = [
     null,
+    12000, // asst-1 自己的 12s
     null,
-    null,
-    30000,
+    30000, // asst-final 自己的 30s
     null,
   ];
   const setup = await testRender(
@@ -119,32 +119,26 @@ test("两轮思考→工具:有秒数的段各画各的 `Thought for`,无秒数�
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
-  // (1) `Thought for 30s` 恰好出现一次 —— 新合同下 asst-final 自己的
-  //     秒数原位落到其折叠行(没有跨段归并到 asst-1,也没有被吞)。
-  const thinkLineIndices = lines
-    .map((line, idx) => (line.includes("Thought for 30s") ? idx : -1))
-    .filter((idx) => idx >= 0);
-  expect(thinkLineIndices).toHaveLength(1);
-  const thinkLineIdx = thinkLineIndices[0] ?? -1;
-  // (2) asst-1 的 read_file retract 不得蒸发:orderedTurnActivitySegments
-  //     把跨消息 tool_use 合并到末段簇(anchor = final assistant),因此
-  //     read_file × 1 与 Thought for 30s **同一行**(D2 收类焊进结束态
-  //     第一行,不是第二行)。
-  const readCountIdx = lines.findIndex((line) =>
-    line.includes("read_file × 1")
-  );
-  expect(readCountIdx).toBeGreaterThanOrEqual(0);
-  expect(lines[readCountIdx]).toContain("Thought for 30s");
-  // (3) bash keep 不进折叠 → 不得出现 `bash × 1` 计数行。
+  // (1) asst-1 的块 = `Thought for 12s, called read_file × 1`（焊：思考 +
+  //     相邻 read_file retract，中间无 text / keep / 失败）。
+  const think12Idx = lines.findIndex((l) => l.includes("Thought for 12s"));
+  expect(think12Idx).toBeGreaterThanOrEqual(0);
+  expect(lines[think12Idx]).toContain("read_file × 1");
+  // (2) asst-final 的块 = `Thought for 30s`（思考后是 bash keep，keep 不
+  //     焊入；只时长段）。
+  const think30Idx = lines.findIndex((l) => l.includes("Thought for 30s"));
+  expect(think30Idx).toBeGreaterThanOrEqual(0);
+  expect(think30Idx).toBeGreaterThan(think12Idx);
+  // (3) bash keep 不进折叠计数 → 不得出现 `bash × N` 行。
   expect(lines.findIndex((line) => line.includes("bash × "))).toBe(-1);
-  // (4) 「完成总结」出现在秒数行附近(text block 在 fold 后渲染;
-  //     若秒数行与 read_file 计数行同 fold row,顺序 = think → count →
-  //     text;若两者分属不同 row,顺序仍 think 在前)。
+  // (4) 「完成总结」出现在 asst-final 附近（asst-final 自己的正文）；块标题
+  //     按 spec 钉在消息末尾（MessageBlocks 之后），因此 summary 行可在 30s
+  //     行之前或之后，但必须与 30s 行同处 asst-final 段（think12 之后）。
   const summaryIdx = lines.findIndex((line) => line.includes("完成总结"));
-  expect(summaryIdx).toBeGreaterThan(thinkLineIdx);
-  // (5) 不重复:同一时长不得既在 fold 行又在 per-message ThinkingSummary。
-  const allThinkSeconds = lines.filter((line) => /Thought for \d+s/.test(line));
-  expect(allThinkSeconds).toHaveLength(1);
+  expect(summaryIdx).toBeGreaterThan(think12Idx);
+  expect(summaryIdx).not.toBe(-1);
+  // (5) 各段秒数互不串位：12s 只在 asst-1 出现一次，30s 只在 asst-final 出现一次。
+  expect(lines.filter((l) => /Thought for \d+s/.test(l))).toHaveLength(2);
   await setup.renderer.destroy();
 });
 
@@ -210,6 +204,7 @@ test("多段各自持有 thinkingMs:时长按各自 anchor 严格归属,不串�
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
   // (1) `Thought for 12s` 与 `Thought for 25s` 各出现一次、按消息顺序。
+  //     新合同：每条 assistant 自有块，跨消息不合并。
   const think12Idx = lines.findIndex((line) =>
     line.includes("Thought for 12s")
   );
@@ -219,13 +214,14 @@ test("多段各自持有 thinkingMs:时长按各自 anchor 严格归属,不串�
   expect(think12Idx).toBeGreaterThanOrEqual(0);
   expect(think25Idx).toBeGreaterThanOrEqual(0);
   expect(think12Idx).toBeLessThan(think25Idx);
-  // (2) 恰好两行时长(各段一次,无重复;无中文残留)。
+  // (2) 恰好两行时长（各段一次，无重复；无中文残留）。
   expect(lines.filter((l) => /Thought for \d+s/.test(l))).toHaveLength(2);
   expect(frame.includes("思考了")).toBe(false);
-  // (3) read_file retract 进折叠计数并焊在进行中簇时长同一行;bash keep 不进。
+  // (3) asst-1 的 read_file retract 焊在 asst-1 自己的块标题
+  //     （`Thought for 12s, called read_file × 1`）；bash keep 不进块。
   const readIdx = lines.findIndex((line) => line.includes("read_file × 1"));
   expect(readIdx).toBeGreaterThanOrEqual(0);
-  expect(lines[readIdx]).toContain("Thought for 25s");
+  expect(lines[readIdx]).toContain("Thought for 12s");
   expect(lines.findIndex((line) => line.includes("bash × "))).toBe(-1);
   await setup.renderer.destroy();
 });

@@ -10,16 +10,12 @@ import {
   countNamedCalls,
   countToolUsesByName,
   formatToolUseCounts,
-  formatTurnActivityFold,
   lastTurnQueryIndex,
-  mergeToolUseCounts,
   orderedTurnActivitySegments,
   sliceTurnFrom,
-  sumThinkingMsInRange,
   thinkingMsToSeconds,
   toolUseIdsOf,
 } from "../../src/tui/turn-activity.js";
-import * as turnActivityModule from "../../src/tui/turn-activity.js";
 
 function user(text: string): AnthropicNativeMessage {
   return { role: "user", content: [{ type: "text", text }] };
@@ -346,7 +342,7 @@ describe("countToolUsesByName / format（exception / 非法形态）", () => {
   });
 });
 
-describe("formatToolUseCounts / formatTurnActivityFold", () => {
+describe("formatToolUseCounts", () => {
   test("空计数 → 空串", () => {
     expect(formatToolUseCounts([])).toBe("");
   });
@@ -356,66 +352,24 @@ describe("formatToolUseCounts / formatTurnActivityFold", () => {
     expect(formatToolUseCounts([{ name: "bash", count: -3 }])).toBe("");
   });
 
-  test("有秒数 + 工具 → 至多 1 行：`Thought for` 与计数焊在同一行（D2 收类不蒸发）", () => {
-    const lines = formatTurnActivityFold(29, [
-      { name: "bash", count: 18 },
-      { name: "write_file", count: 8 },
-    ]);
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toBe("Thought for 29s · bash × 18 · write_file × 8");
-  });
-
-  test("retract 类（read_file）落定后计数仍在同一行，不是第二行、不是隐身", () => {
-    const lines = formatTurnActivityFold(5, [
-      { name: "read_file", count: 3 },
-      { name: "grep", count: 1 },
-    ]);
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain("Thought for 5s");
-    expect(lines[0]).toContain("read_file × 3");
-    expect(lines[0]).toContain("grep × 1");
-  });
-
-  test("无秒数有工具 → 只计数一行（不换 [思考]、不造 0 秒）", () => {
-    expect(formatTurnActivityFold(0, [{ name: "bash", count: 2 }])).toEqual([
-      "bash × 2",
-    ]);
+  test("多条目按 primary 顺序 + count 拼接", () => {
     expect(
-      formatTurnActivityFold(undefined, [{ name: "bash", count: 1 }])
-    ).toEqual(["bash × 1"]);
+      formatToolUseCounts([
+        { name: "bash", count: 2 },
+        { name: "write_file", count: 1 },
+      ])
+    ).toBe("bash × 2 · write_file × 1");
   });
 
-  test("无秒数无工具 → 空数组", () => {
-    expect(formatTurnActivityFold(0, [])).toEqual([]);
-    expect(formatTurnActivityFold(undefined, [])).toEqual([]);
-  });
-
-  test("只有秒数无工具 → 仅结束态一行", () => {
-    expect(formatTurnActivityFold(6, [])).toEqual(["Thought for 6s"]);
-  });
-
-  test("恒 ≤1 行的硬合同：任意秒数 × 任意计数组合", () => {
-    const combos: ReadonlyArray<number | undefined> = [0, 1, 30, undefined];
-    for (const seconds of combos) {
-      for (const entries of [[], [{ name: "read_file", count: 2 }]]) {
-        expect(
-          formatTurnActivityFold(seconds, entries).length
-        ).toBeLessThanOrEqual(1);
-      }
-    }
-  });
-
-  test("旧中文 `思考了` 文案不再出现在折叠行", () => {
-    const line = formatTurnActivityFold(9, [
-      { name: "read_file", count: 1 },
-    ])[0];
-    expect(line).toBeDefined();
-    expect(line).not.toContain("思考了");
-    expect(line).not.toContain("秒");
+  test("恒 ≤1 行硬合同不存在（活动块把多行收成单行由 deriveActivityBlocks 保证）", () => {
+    // plans/tui-activity-block.md T7：旧 `formatTurnActivityFold` 的硬合同
+    // 已退役 —— 活动块标题由 `deriveActivityBlocks` 单源派生，本函数只
+    // 负责行内拼接，不再承接 ≤1 行的整形。
+    expect(formatToolUseCounts([])).toBe("");
   });
 });
 
-describe("toolUseIdsOf / countNamedCalls / mergeToolUseCounts", () => {
+describe("toolUseIdsOf / countNamedCalls", () => {
   test("empty：无 tool_use → 空 id 集", () => {
     expect(toolUseIdsOf([])).toEqual(new Set());
     expect(toolUseIdsOf([user("q")])).toEqual(new Set());
@@ -435,25 +389,6 @@ describe("toolUseIdsOf / countNamedCalls / mergeToolUseCounts", () => {
     ).toEqual([{ name: "bash", count: 1 }]);
   });
 
-  test("overflow：extra 新名接到 primary 后，count 相加", () => {
-    expect(
-      mergeToolUseCounts(
-        [
-          { name: "bash", count: 18 },
-          { name: "write_file", count: 8 },
-        ],
-        [
-          { name: "bash", count: 2 },
-          { name: "grep", count: 1 },
-        ]
-      )
-    ).toEqual([
-      { name: "bash", count: 20 },
-      { name: "write_file", count: 8 },
-      { name: "grep", count: 1 },
-    ]);
-  });
-
   test("concurrent：同 id 不因重复调用双计（exclude 已覆盖）", () => {
     expect(
       countNamedCalls(
@@ -464,83 +399,6 @@ describe("toolUseIdsOf / countNamedCalls / mergeToolUseCounts", () => {
         new Set()
       )
     ).toEqual([{ name: "bash", count: 2 }]);
-  });
-
-  test("exception：count≤0 的 extra 不进 merge", () => {
-    expect(
-      mergeToolUseCounts(
-        [{ name: "bash", count: 1 }],
-        [
-          { name: "bash", count: 0 },
-          { name: "x", count: -1 },
-        ]
-      )
-    ).toEqual([{ name: "bash", count: 1 }]);
-  });
-});
-
-describe("shouldShowTurnActivityFold / shouldCollapseTurnToolRows（T3 已删除）", () => {
-  // plans/tui-live-activity-fold.md T3：删除 `foldDisplayLines.length` 折叠
-  // 信号与整轮 `currentTurnHasFold` 面板闸 —— 这两个 turn 级函数是该派生链
-  // 的入口。落点改由 per-segment fold 行（`shouldShowRetractFold` /
-  // `shouldShowThinkingFold`，见 running-unit-fold.test.ts）与
-  // **live activity group**（live-activity-group.test.ts）承担。
-  test("两个 turn 级闸不再导出（编译期合同：留着就会有人接回整轮闸）", () => {
-    const exports = Object.keys(turnActivityModule);
-    expect(exports).not.toContain("shouldShowTurnActivityFold");
-    expect(exports).not.toContain("shouldCollapseTurnToolRows");
-  });
-});
-
-describe("sumThinkingMsInRange（折叠簇内 thinkingMs 求和纯函数）", () => {
-  test("empty：thinkingMs undefined → 全 0（旧会话/无落盘数据）", () => {
-    expect(sumThinkingMsInRange(undefined, [0, 1, 2])).toBe(0);
-    expect(sumThinkingMsInRange(undefined, [])).toBe(0);
-  });
-
-  test("empty：indices 空数组 → 全 0（无簇）", () => {
-    expect(sumThinkingMsInRange([1500, 2000], [])).toBe(0);
-  });
-
-  test("null 元素按 0 计入（非流式回合 / 该事件无 thinkingMs）", () => {
-    expect(sumThinkingMsInRange([null, null, null], [0, 1, 2])).toBe(0);
-    expect(sumThinkingMsInRange([1500, null, 2000], [0, 1, 2])).toBe(
-      1500 + 2000
-    );
-  });
-
-  test("混合：合法 number + null + 缺席按 0 计入", () => {
-    expect(sumThinkingMsInRange([1500, null, 2000], [0, 1, 2, 3])).toBe(
-      1500 + 2000
-    );
-    expect(sumThinkingMsInRange([1500, null, 2000], [1])).toBe(0);
-  });
-
-  test("全 null：合法求和 → 0（折叠行只显示工具计数，不显示 0 秒）", () => {
-    expect(sumThinkingMsInRange([null, null], [0, 1])).toBe(0);
-  });
-
-  test("全 number 求和", () => {
-    expect(sumThinkingMsInRange([1000, 2000, 3000], [0, 1, 2])).toBe(6000);
-    expect(sumThinkingMsInRange([250, 750, 1500], [2])).toBe(1500);
-  });
-
-  test("越界索引按 0 计入（数组长度 < max(indices)+1）", () => {
-    expect(sumThinkingMsInRange([1500], [0, 5])).toBe(1500);
-    expect(sumThinkingMsInRange([], [0, 1])).toBe(0);
-  });
-
-  test("exception：非有限 / <= 0 数字按 0 计入（appendEvents 已过滤，consumer 再防御）", () => {
-    expect(
-      sumThinkingMsInRange([1500, Number.NaN, 2000, 0, -1], [0, 1, 2, 3, 4])
-    ).toBe(3500);
-    expect(sumThinkingMsInRange([Number.POSITIVE_INFINITY, 1500], [0, 1])).toBe(
-      1500
-    );
-  });
-
-  test("exception：非整数 / 负索引跳过", () => {
-    expect(sumThinkingMsInRange([1500, 2000], [0.5, -1, 0])).toBe(1500);
   });
 });
 

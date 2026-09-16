@@ -293,6 +293,11 @@ describe("liveToolReduce draftEpoch（工具插在第 N 段草稿之后）", () 
 });
 
 describe("liveTailSlots 按 epoch 交错工具与草稿段", () => {
+  // T7（specs/tui-activity-block.md）：`liveTailSlots` 只承接 **keep / 失
+  // 败** 的 live 工具 —— retract 类（read_file / grep / web_search / 等）
+  // 由 unanchored 活动块（`appendLiveBlocks`）承接，不进 tail。失败件
+  // 仍走 tail `[失败]` 行。本 describe 改用 keep 名（bash / write_file）
+  // 验证 tail 的 epoch 交错。
   const run = (id: string, name: string, draftEpoch?: number): LiveToolRun => ({
     id,
     name,
@@ -306,16 +311,16 @@ describe("liveTailSlots 按 epoch 交错工具与草稿段", () => {
   });
 
   test("缺省 epoch 0 的工具在第一段草稿之上", () => {
-    const slots = liveTailSlots([run("a", "web_search")], ["hello"]);
+    const slots = liveTailSlots([run("a", "bash")], ["hello"]);
     expect(slots).toEqual([
-      { kind: "tools", runs: [run("a", "web_search")] },
+      { kind: "tools", runs: [run("a", "bash")] },
       { kind: "draft", text: "hello" },
     ]);
   });
 
   test("tool→text→tool→text：早工具 / 段0 / 晚工具 / 段1", () => {
-    const early = run("a", "web_search");
-    const late = run("b", "bash", 1);
+    const early = run("a", "bash");
+    const late = run("b", "write_file", 1);
     const slots = liveTailSlots([early, late], ["first", "second"]);
     expect(slots.map((s) => s.kind)).toEqual([
       "tools",
@@ -339,12 +344,44 @@ describe("liveTailSlots 按 epoch 交错工具与草稿段", () => {
   });
 
   test("exception：空草稿段跳过、缺字段不抛", () => {
-    const early = run("a", "grep");
+    const early = run("a", "bash");
     expect(() => liveTailSlots([early], ["", "kept"])).not.toThrow();
     const slots = liveTailSlots([early], ["", "kept"]);
     expect(slots).toEqual([
       { kind: "tools", runs: [early] },
       { kind: "draft", text: "kept" },
     ]);
+  });
+
+  test("retract 名被剥掉 → 不进 tail（由 unanchored 块承接）", () => {
+    // T7：read_file / web_search / grep 等 retract 类**只**进 unanchored
+    // 块，不进 tail 工具卡。失败件（status=failed）作为例外仍走 tail
+    // `[失败]` 行。
+    const retract = run("r", "web_search");
+    const failedRetract: LiveToolRun = {
+      id: "fr",
+      name: "grep",
+      status: "failed",
+      input: undefined,
+    };
+    const slots = liveTailSlots([retract, failedRetract], ["hi"]);
+    expect(slots).toEqual([
+      { kind: "tools", runs: [failedRetract] },
+      { kind: "draft", text: "hi" },
+    ]);
+  });
+
+  test("表外 retract 名同样被剥 —— 判定走 settledClassOf 单一来源", () => {
+    // T7 修复（review H1）：剥除判定不得用固定名 Set —— TOOL_SETTLED_CLASS
+    // 的 retract 类含 web_fetch / memory_recall / glob / lsp_* 等表外名，
+    // 若按名硬编码会漏剥 → 块与 tail 双画（specs/tui-activity-block.md
+    // Never「不另造第二套分类表」）。本用例钉住：任意 settledClassOf ===
+    // "retract" 的名（含注册表内非著名成员与未注册兜底名）都进块不进 tail。
+    const offRegistry = run("o1", "web_fetch");
+    const unregistered = run("o2", "some_unregistered_tool");
+    const lsp = run("o3", "lsp_references");
+    const keepBash = run("k", "bash");
+    const slots = liveTailSlots([offRegistry, unregistered, lsp, keepBash], []);
+    expect(slots).toEqual([{ kind: "tools", runs: [keepBash] }]);
   });
 });

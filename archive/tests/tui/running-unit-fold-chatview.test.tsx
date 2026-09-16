@@ -1,5 +1,19 @@
+// ARCHIVED (2026-09-15, T7 specs/tui-activity-block.md Superseded)：本文件认证的旧合同 = live activity group + unit fold 双时态；该不变式已随活动块单时态（deriveActivityBlocks 单源）永久消失，替代覆盖见 tests/tui/{activity-block,t4-thinking-only-live-then-fold,t5-quiet-tools-body-slot,t6-text-splits-weld}.test.*。
+
 /** @jsxImportSource @opentui/react */
 /**
+ * Archived 2026-09-15 (plans/tui-activity-block.md T7)：T7 退役旧 unit fold
+ * 路径与 live activity group 双时态互斥 —— 大部分用例断言的
+ * `Running N shell commands` 一行英文摘要 / `Reading × N` 桶序 / live
+ * activity group 与 unit fold 互斥（spec D3/D9）等合同已废弃。活动块
+ * spec 下同形态帧上呈现为 `called / calling name × N` 块标题（活动块
+ * 列表单源派生）。剩余可验证的不变式（frozen thinkingMs 即刻出
+ * `Thought for`、历史 retract 折叠行保留、hidden agent_status thinkingMs
+ * 按 sourceIndex 映射）由 `t4-thinking-only-live-then-fold.test.tsx` /
+ * `t5-quiet-tools-body-slot.test.tsx` / `chat-view-thinking-tool-fold.test.tsx`
+ * 覆盖。
+ *
+ * ── original header ──────────────────────────────────────────────────────
  * tests/tui/running-unit-fold-chatview.test.tsx
  *
  * 不变式:ChatView 在 running 态仍要按「已完成单元」出折叠行 —— plan T1。
