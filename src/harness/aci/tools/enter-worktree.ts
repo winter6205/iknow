@@ -7,8 +7,9 @@
  * at the MAIN repo can adopt an EXISTING task worktree of THIS repository —
  * including the tree another conversation owns — by passing the owner's
  * conversationId or a unique label returned by list-worktrees. The target
- * path is SSOT-derived (`<repoRoot>/.iknow/worktrees/<label>--<conversationId>`
- * or the historical UUID-only leaf); the tool NEVER takes a free-form path.
+ * path is SSOT-derived (`<repoRoot>/.iknow/worktrees/<leaf>` — a valid
+ * kebab-case label IS the leaf, otherwise the conversation id is; see
+ * `taskWorktreePath`); the tool NEVER takes a free-form path.
  *
  * Module boundary (ACR bounded-context-guardian):
  *   - the tool owns NOTHING but the model-facing shape: input validation
@@ -89,7 +90,15 @@ export function createEnterWorktreeTool(
       category: "write",
       isConcurrencySafe: false,
       interruptBehavior: "block",
-      timeoutTier: "default",
+      // D2 — `build` (5 min), not `default` (30 s). enter also runs the same
+      // bounded project-dep ensure/install path as create, so the same race
+      // applies: at `default` the tier timer can fire mid-install and the
+      // executor returns a bare `timeout`, silently discarding the install
+      // receipt. `build` matches create-worktree (see
+      // tests/session-api/worktree-deps.test.ts D2); the install's own
+      // `PACKAGE_MANAGER_INSTALL_TIMEOUT_MS` (120 s) is what actually bounds
+      // the work, so this raise only guarantees the bound reports first.
+      timeoutTier: "build",
     } as const,
     handler: async (input: unknown, ctx?: ToolExecutionContext) => {
       const conversationId = ctx?.conversationId;

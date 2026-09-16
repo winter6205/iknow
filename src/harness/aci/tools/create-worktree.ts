@@ -6,8 +6,9 @@
  * worktree isolation is ON and a workspace mutate was blocked by the
  * `[worktree_isolation]` gate, the model calls THIS tool to create the
  * conversation's task worktree and rebind the session root to it. Tool
- * success = the tree exists at `<repoRoot>/.iknow/worktrees/<label>--<conversationId>`
- * (or the historical UUID-only leaf) AND the session root has moved there.
+ * success = the tree exists at `<repoRoot>/.iknow/worktrees/<leaf>` (a valid
+ * kebab-case label IS the leaf; without one the conversation id is the leaf)
+ * AND the session root has moved there.
  *
  * Module boundary (ACR bounded-context-guardian):
  *   - the tool owns NOTHING but the model-facing shape: it takes no
@@ -76,13 +77,13 @@ export function createCreateWorktreeTool(
     name: "create-worktree",
     description:
       "Create this conversation's isolated git task worktree, rebind the session root to it, and return the tree path. " +
-      "An optional lowercase kebab-case name (2-40 characters) adds a human-facing label while the conversation id " +
-      "remains the identity suffix. On success the tree exists at " +
-      "<repoRoot>/.iknow/worktrees/<label>--<conversationId> (or the historical UUID-only leaf) on its task branch, " +
-      "and the next wave of tool calls in this run lands in the new root, so re-issue the pending workspace write then. " +
-      "Calling it again for the same conversation returns the same root. Failures exit typed as kind=branch_exists | " +
-      "worktree_exists | worktree_add_failed | rebind_failed | foreign_worktree | not_a_git_repo | git_unavailable; " +
-      "resolve the reported leftover tree or branch, then retry.",
+      "An optional lowercase kebab-case name (2-40 characters) becomes the tree's leaf name; without a valid name " +
+      "the conversation id is the leaf, and identity lives in the gitdir sidecar (not the folder name). On success " +
+      "the tree exists at <repoRoot>/.iknow/worktrees/<leaf name> on its task branch, and the next wave of tool calls " +
+      "in this run lands in the new root, so re-issue the pending workspace write then. Calling it again for the same " +
+      "conversation returns the same root. Failures exit typed as kind=branch_exists | worktree_exists | " +
+      "worktree_add_failed | rebind_failed | foreign_worktree | not_a_git_repo | git_unavailable; resolve the reported " +
+      "leftover tree or branch, then retry.",
     inputSchema: {
       type: "object",
       properties: {

@@ -333,6 +333,27 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     expect(desc).toContain("not reachable via offset paging");
   });
 
+  // ── #1030: create-worktree description matches the taskWorktreePath SSOT.
+  // A valid kebab-case label IS the leaf; without one the leaf is the
+  // conversation id. Identity (gitdir sidecar) is decoupled from the folder
+  // name. The description must NOT promise a `<label>--<conversationId>`
+  // template, and it must state the actual rule so the model doesn't ask for
+  // a free-form path or build expectations off the legacy `--` shape.
+  it("create-worktree description matches taskWorktreePath naming SSOT — #1030", () => {
+    const createWorktree = reg.catalog
+      .all()
+      .find((t) => t.name === "create-worktree");
+    expect(createWorktree).toBeDefined();
+    const desc = createWorktree!.description;
+    // negative: the old `<label>--<conversationId>` template is not what the
+    // provisioner builds — see `taskWorktreePath` (worktree-gate.ts).
+    expect(desc).not.toContain("<label>--<conversationId>");
+    // positive: the description states the actual rule the SSOT enforces.
+    expect(desc).toContain("leaf name");
+    expect(desc).toContain("conversation id");
+    expect(desc).toContain("identity");
+  });
+
   // symbol-primary-aci T2：符号查询工具的 description 必须按**符号身份**
   // 行文——出现「line N / character M」类必填措辞即回到坐标主路径，spec
   // 「禁止把第几行第几列当作这些工具的主入参」被破坏。

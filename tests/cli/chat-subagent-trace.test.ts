@@ -22,6 +22,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { afterEach, describe, it } from "vitest";
+import {
+  TEST_LLM_PROVIDER,
+  TEST_LLM_PROVIDER_API_KEY_ENV,
+} from "../_helpers/test-llm-settings.ts";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -114,12 +118,6 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
     // ADR-0084：llm 是用户层键 → fixture 必须落在子进程 HOME 解析到的用户层
     // （childEnv.HOME = <scratch>/home）；项目文件里的 llm 会被允许名单丢弃。
     mkdirSync(join(home, ".iknow"), { recursive: true });
-    writeFileSync(
-      join(home, ".iknow", "settings.json"),
-      JSON.stringify({
-        llm: { model: "test-model", apiKey: "sk-test-chat-trace" },
-      })
-    );
 
     let requestCount = 0;
     server = createServer((req, res) => {
@@ -144,11 +142,31 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
     );
     const address = server.address();
     assert.ok(address && typeof address === "object");
+    // #1029: provider route must exist in llm.providers — legacy
+    // { model: "test-model", apiKey } shape no longer resolves post-ADR-0093
+    // (typed `provider_model_not_registered`)。监听端口动态分配,
+    // 所以在 server.address() 拿到端口后,把 baseUrl 拼到 settings 落盘。
+    // llmSettingsJson 自身不接受 baseUrl 覆盖,此处沿用 TEST_LLM_PROVIDER
+    // 的 id/apiKeyEnv/models 形态,只改 baseUrl 指向本测试自建的 stub listener。
+    writeFileSync(
+      join(home, ".iknow", "settings.json"),
+      JSON.stringify({
+        llm: {
+          model: "test/model",
+          providers: [
+            {
+              ...TEST_LLM_PROVIDER,
+              baseUrl: `http://127.0.0.1:${address.port}/v1`,
+            },
+          ],
+        },
+      })
+    );
 
-    const childEnv = {
+    const childEnv: Record<string, string | undefined> = {
       ...process.env,
       HOME: home,
-      IKNOW_LLM_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+      [TEST_LLM_PROVIDER_API_KEY_ENV]: "test-key",
       IKNOW_LLM_STREAM: "off",
       IKNOW_PERMISSION_MODE: "full_auto",
       IKNOW_LLM_TIMEOUT_MS: "5000",

@@ -24,6 +24,7 @@ import { join } from "node:path";
 
 import { TIMEOUT_TIER_MS } from "../../src/harness/aci/types.ts";
 import { createCreateWorktreeTool } from "../../src/harness/aci/tools/create-worktree.ts";
+import { createEnterWorktreeTool } from "../../src/harness/aci/tools/enter-worktree.ts";
 import {
   PACKAGE_MANAGER_COMPLETION_MARKERS,
   PACKAGE_MANAGER_INSTALL_ARGS,
@@ -131,6 +132,24 @@ describe("install bound vs ACI tier (D2 — the receipt must land)", () => {
     expect(tierMs).toBeGreaterThan(PACKAGE_MANAGER_INSTALL_TIMEOUT_MS);
     // and the bound must clear a real install (measured: 53 s for one `npm ci`)
     expect(PACKAGE_MANAGER_INSTALL_TIMEOUT_MS).toBeGreaterThan(60_000);
+  });
+
+  // enter also runs the same ensure/install path as create, so its tier has to
+  // outlive the install bound for the same reason: the executor's bare
+  // `timeout` discards the install receipt while the install keeps running.
+  // Mirrors the create assertion above as a sibling invariant.
+  it("the enter-worktree tier outlives the install's own bound", () => {
+    const tool = createEnterWorktreeTool({
+      worktreeEnter: async () => ({
+        path: "/repo/.iknow/worktrees/conv-1",
+        receipt: "entered task worktree: /repo/.iknow/worktrees/conv-1",
+      }),
+      root: "/repo",
+    });
+    const tierMs = TIMEOUT_TIER_MS[tool.aci.timeoutTier];
+
+    expect(tool.aci.timeoutTier).toBe("build");
+    expect(tierMs).toBeGreaterThan(PACKAGE_MANAGER_INSTALL_TIMEOUT_MS);
   });
 });
 
