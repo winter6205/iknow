@@ -92,7 +92,13 @@ function isPinnedUserGoal(goal: GoalState | undefined): boolean {
   );
 }
 
-function stripTrailingInterrupt(
+/**
+ * View-only slice that drops a trailing `Interrupted by user.` system message.
+ * Disk and the caller's `priorMessages` array stay untouched; callers in the
+ * `/continue` path (hub.runContinuePending) pass the result to `run()` so the
+ * model prior omits the interrupt, while the store keeps it for rewind / display.
+ */
+export function stripTrailingInterrupt(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): ReadonlyArray<AnthropicNativeMessage> {
   const last = messages[messages.length - 1];

@@ -85,6 +85,25 @@ describe("classifyFault G2 table", () => {
     assert.equal(classifyFault({ kind: "llm_http", status: 401 }), "none");
   });
 
+  it("clock_timeout: 不可见 → retry;可见 → none(已出字不重试)", () => {
+    assert.equal(
+      classifyFault({ kind: "clock_timeout", source: "idle", visible: false }),
+      "retry"
+    );
+    assert.equal(
+      classifyFault({
+        kind: "clock_timeout",
+        source: "hardCap",
+        visible: false,
+      }),
+      "retry"
+    );
+    assert.equal(
+      classifyFault({ kind: "clock_timeout", source: "idle", visible: true }),
+      "none"
+    );
+  });
+
   it("concurrent classify calls are isolated", async () => {
     const events: FaultEvent[] = [
       { kind: "llm_http", status: 429 },

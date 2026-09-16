@@ -22,12 +22,14 @@ export {
 } from "./schema.js";
 export {
   appendCheckpoint,
+  decideCheckpointPersist,
   resolveRewindAnchor,
   shouldPersistCheckpoint,
   splitTurns,
   toInterruptReason,
   turnSliceEnd,
   withCheckpointAnchors,
+  type CheckpointPersistDecision,
   type TurnSlice,
 } from "./checkpoint.js";
 export { closeoutOrphanToolUses } from "./closeout-projection.js";

@@ -694,6 +694,99 @@ describe("postMessage answer wire fields — interrupted (B1)", () => {
   });
 });
 
+// -- invariant 7: normal typed input keeps the interrupt in the model prior --
+// Spec invariant 7 (transport-continue-persist): after Ctrl+C, a NORMALLY
+// typed user message must reach the model with the interrupt still in prior.
+// Only `/continue` strips a trailing interrupt (invariant 6 / SC3), and that
+// strip lives on the continueSession path — this pins the postMessage path so
+// a future refactor cannot hoist the strip into shared prior assembly.
+
+describe("invariant 7 — typed input after interrupt keeps the interrupt in prior", () => {
+  it("postMessage after an interrupted turn hands adapter.step the interrupt + new text", async () => {
+    const interrupt: AnthropicNativeMessage = {
+      role: "system",
+      content: [{ type: "text", text: "Interrupted by user." }],
+    };
+    const seeded: AnthropicNativeMessage[] = [
+      userMsg("do the thing"),
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "t1", name: "noop", input: {} }],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }],
+      },
+      interrupt,
+    ];
+    const inner = makeDeps([assistantResult({ texts: ["resumed"] })]);
+    const stepMessages: AnthropicNativeMessage[][] = [];
+    const deps: LoopEngineDeps = {
+      ...inner,
+      adapter: {
+        ...inner.adapter,
+        step: async (state, request, signal) => {
+          stepMessages.push([...state.messages]);
+          return inner.adapter.step(state, request, signal);
+        },
+      },
+    };
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    await store.save({
+      id: session.conversation_id,
+      file: sampleFile({
+        id: session.conversation_id,
+        overrides: { messages: seeded, turnCount: 1 },
+      }),
+    });
+
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "carry on",
+    });
+    assert.equal(res.turn.answer.stopReason, "completed");
+    const prior = stepMessages[0] ?? [];
+    // The interrupt survives into the model prior — the typed query is not a
+    // /continue, so nothing strips it. Ordering matters too: the interrupt
+    // precedes the new user text (it is the last thing that happened before).
+    const interruptIndex = prior.findIndex(
+      (m) =>
+        m.role === "system" &&
+        m.content.some(
+          (b) => b.type === "text" && b.text === "Interrupted by user."
+        )
+    );
+    assert.notEqual(
+      interruptIndex,
+      -1,
+      "interrupt must stay in the typed-input prior"
+    );
+    const tail = prior[prior.length - 1];
+    assert.equal(tail?.role, "user");
+    assert.equal(
+      tail?.content[0]?.type === "text" ? tail.content[0].text : "",
+      "carry on"
+    );
+    assert.ok(
+      interruptIndex < prior.length - 1,
+      "interrupt must precede the new typed user message"
+    );
+    // Disk keeps both the interrupt and the new exchange.
+    const loaded = await store.load(session.conversation_id);
+    assert.ok(
+      loaded.messages.some(
+        (m) =>
+          m.role === "system" &&
+          m.content.some(
+            (b) => b.type === "text" && b.text === "Interrupted by user."
+          )
+      ),
+      "disk must keep the interrupt system message"
+    );
+  });
+});
+
 describe("boundary: exception — run-level timeout", () => {
   it("timeoutMs fires → stopReason=timeout (strict, no disjunction)", async () => {
     // Never-resolving adapter + timeoutMs: 1 → loop engine races the model
@@ -718,6 +811,19 @@ describe("boundary: exception — run-level timeout", () => {
       text: "trigger timeout",
     });
     assert.equal(res.turn.answer.stopReason, "timeout");
+    // T4 (transport-continue-persist): timeout path is UNCHANGED — full
+    // persist. The user message from this turn reaches disk (unlike
+    // protocolError/emptyFinalResponse, which keep the user but drop the
+    // failed assistant).
+    const loaded = await store.load(session.conversation_id);
+    assert.equal(loaded.messages.length, 1);
+    assert.equal(loaded.messages[0]?.role, "user");
+    assert.equal(
+      loaded.messages[0]?.content[0]?.type === "text"
+        ? loaded.messages[0]?.content[0]?.text
+        : "",
+      "trigger timeout"
+    );
   });
 });
 
@@ -843,10 +949,14 @@ describe("turnCount accumulation across multiple postMessage calls", () => {
   });
 });
 
-// -- protocolError / emptyFinalResponse → no save ----------------------------
+// -- protocolError / emptyFinalResponse → user kept, assistant dropped ------
+// Spec invariant 8 / SC4 (transport-continue-persist): the user message from
+// a turn that ends in protocolError/emptyFinalResponse is persisted; the
+// failed assistant turn is dropped. This block enforces that rule end-to-end
+// at the hub boundary.
 
-describe("drop-context stop reasons do not save", () => {
-  it("protocolError → file unchanged", async () => {
+describe("drop-context stop reasons keep user message only", () => {
+  it("protocolError → user message on disk, no assistant turn; checkpoint anchors the kept user message", async () => {
     // Exhaust stub responses → ProtocolError → stopReason=protocolError
     const deps = makeDeps([]); // no responses → first step throws ProtocolError
     const hub = makeHub(deps);
@@ -857,11 +967,96 @@ describe("drop-context stop reasons do not save", () => {
     });
     assert.equal(res.turn.answer.stopReason, "protocolError");
     const loaded = await store.load(session.conversation_id);
-    assert.equal(loaded.messages.length, 0);
+    // New invariant: user message is on disk (the failed assistant is not).
+    assert.equal(loaded.messages.length, 1);
+    assert.equal(loaded.messages[0]?.role, "user");
+    assert.equal(
+      loaded.messages[0]?.content[0]?.type === "text"
+        ? loaded.messages[0]?.content[0]?.text
+        : "",
+      "trigger protocol error"
+    );
+    // No assistant turn on disk — only the user message from this turn.
+    assert.ok(
+      !loaded.messages.some((m) => m.role === "assistant"),
+      "failed assistant turn must not reach disk"
+    );
     assert.equal(loaded.turnCount, 0);
+    // The checkpoint record is deliberate, not incidental: rewind-targets.ts
+    // joins `checkpoints` by turnIndex to stamp the picker's anchoredAt, so
+    // the kept user message becomes a rewind anchor carrying WHY the turn
+    // ended (protocolError) instead of a bare createdAt. `anchorEventId` is
+    // derived from messagesCount against the head chain (T5 D3) — it must
+    // resolve, or the picker entry would fall back to the raw timestamp.
+    assert.equal(loaded.checkpoints?.length, 1);
+    const cp = loaded.checkpoints?.[0];
+    assert.equal(cp?.interruptReason, "protocolError");
+    assert.equal(cp?.messagesCount, 1);
+    assert.equal(cp?.turnIndex, 0);
+    assert.equal(cp?.anchorEventId, "e0");
+    assert.equal(typeof cp?.interruptedAt, "string");
   });
 
-  it("emptyFinalResponse → file unchanged", async () => {
+  it("protocolError mid tool loop → tool_result-only continuation is not persisted as an orphan", async () => {
+    // The discriminating shape for conditionalSave's partial_user_only arm
+    // (hub.ts: `[...diskPrior, ...delta.filter(isTurnQuery)]`): a protocol
+    // error that lands AFTER one tool round-trip leaves a delta containing
+    // BOTH a genuine user query and a tool_result-only user message. The SSOT
+    // predicate (turn-projection.isTurnQuery) keeps only the query; a bare
+    // `role === "user"` filter would also keep the tool_result-only message —
+    // whose paired assistant tool_use is dropped on this path — and orphan it
+    // on disk.
+    //
+    // Exactly one scripted response (a tool_call) → step 1 appends
+    // [assistant(tool_use), user(tool_result)]; step 2 finds the queue empty
+    // and throws ProtocolError.
+    const deps = makeDeps([
+      assistantResult({
+        texts: [],
+        toolCalls: [{ id: "t1", name: "noop", input: {} }],
+      }),
+    ]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "keep my sentence",
+    });
+    assert.equal(res.turn.answer.stopReason, "protocolError");
+    const loaded = await store.load(session.conversation_id);
+    // Exactly the user query — neither the failed assistant tool_use nor the
+    // tool_result-only continuation message.
+    assert.equal(loaded.messages.length, 1);
+    assert.equal(loaded.messages[0]?.role, "user");
+    assert.equal(
+      loaded.messages[0]?.content[0]?.type === "text"
+        ? loaded.messages[0].content[0].text
+        : "",
+      "keep my sentence"
+    );
+    assert.ok(
+      !loaded.messages.some((m) =>
+        m.content.some((b) => b.type === "tool_result")
+      ),
+      "a tool_result-only user message must not be spliced onto disk as an orphan"
+    );
+    assert.ok(
+      !loaded.messages.some(
+        (m) =>
+          m.role === "assistant" && m.content.some((b) => b.type === "tool_use")
+      ),
+      "the failed assistant tool_use must not reach disk"
+    );
+    // The completed tool round-trip advanced finalState.turnCount; only the
+    // failed assistant TEXT turn never entered history.
+    assert.equal(loaded.turnCount, 1);
+    assert.deepEqual(
+      loaded.checkpoints?.map((c) => c.interruptReason),
+      ["protocolError"]
+    );
+  });
+
+  it("emptyFinalResponse → user message on disk, no assistant turn", async () => {
     const deps = makeDeps([
       assistantResult({ texts: [], toolCalls: [], supplierStop: "success" }),
     ]); // empty → emptyFinalResponse
@@ -873,14 +1068,22 @@ describe("drop-context stop reasons do not save", () => {
     });
     assert.equal(res.turn.answer.stopReason, "emptyFinalResponse");
     const loaded = await store.load(session.conversation_id);
-    assert.equal(loaded.messages.length, 0);
+    assert.equal(loaded.messages.length, 1);
+    assert.equal(loaded.messages[0]?.role, "user");
+    assert.equal(
+      loaded.messages[0]?.content[0]?.type === "text"
+        ? loaded.messages[0]?.content[0]?.text
+        : "",
+      "trigger empty"
+    );
     assert.equal(loaded.turnCount, 0);
   });
 
   // ADR-0094 SC4-SC5 (viewport API error): hub 透传 RunResult.apiError 到
   // TurnAnswerDto.apiError (status + message);非 transport 失败 → 字段
-  // 缺席(byte-stable)。file unchanged (#120) 仍守住。
-  it("TransportRetryExhaustedError → apiError present in DTO + file unchanged", async () => {
+  // 缺席(byte-stable)。SC4 (transport-continue-persist) keeps the user
+  // message on disk for protocolError.
+  it("TransportRetryExhaustedError → apiError present in DTO + user message on disk", async () => {
     const apiErrLike = {
       name: "APIError",
       status: 404,
@@ -919,9 +1122,16 @@ describe("drop-context stop reasons do not save", () => {
       message:
         '{"error":{"message":"No active credentials for provider: 9router"}}',
     });
-    // #120 守住: file.messages 仍 0 (protocolError → pending 不落盘)
+    // SC4 (transport-continue-persist): user message kept, assistant dropped.
     const loaded = await store.load(session.conversation_id);
-    assert.equal(loaded.messages.length, 0);
+    assert.equal(loaded.messages.length, 1);
+    assert.equal(loaded.messages[0]?.role, "user");
+    assert.equal(
+      loaded.messages[0]?.content[0]?.type === "text"
+        ? loaded.messages[0]?.content[0]?.text
+        : "",
+      "trigger transport exhausted"
+    );
     assert.equal(loaded.turnCount, 0);
   });
 

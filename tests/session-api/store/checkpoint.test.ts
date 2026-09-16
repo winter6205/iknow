@@ -29,6 +29,7 @@ import {
 } from "../../../src/session-api/store/index.ts";
 import {
   appendCheckpoint,
+  decideCheckpointPersist,
   resolveRewindAnchor,
   shouldPersistCheckpoint,
   splitTurns,
@@ -351,6 +352,150 @@ describe("shouldPersistCheckpoint — predicate matrix", () => {
       messages: [userMsg("q"), assistantMsg([text("truncated")])],
     });
     assert.equal(shouldPersistCheckpoint(result, prior), true);
+  });
+});
+
+// -- decideCheckpointPersist (T4 tri-state predicate) --------------------------
+//
+// Spec invariant 8 / SC4 (transport-continue-persist): protocolError /
+// emptyFinalResponse persist the USER message(s) from this turn; the failed
+// assistant turn is dropped. Replaces the boolean `shouldPersistCheckpoint`
+// (#120 裁决 amended). Cancelled / timeout / completed / maxTurns /
+// nonSuccessStop behavior is byte-stable.
+
+describe("decideCheckpointPersist — tri-state predicate (T4)", () => {
+  it("cancelled + delta>0 → full", () => {
+    const result = buildResult({
+      stopReason: "cancelled",
+      messages: [userMsg("will be cancelled")], // delta 1 vs prior []
+    });
+    assert.deepEqual(decideCheckpointPersist(result, []), { kind: "full" });
+  });
+
+  it("cancelled + delta==0 → none", () => {
+    const result = buildResult({
+      stopReason: "cancelled",
+      messages: [], // delta 0 vs prior []
+      turnCount: 0,
+    });
+    assert.deepEqual(decideCheckpointPersist(result, []), { kind: "none" });
+  });
+
+  it("protocolError with no user delta → none (continue-mode zero delta)", () => {
+    // /continue path: model prior starts from priorMessages, appendUserText=false,
+    // engine fails before any commit → result.messages === priorMessages.
+    const prior: AnthropicNativeMessage[] = [
+      userMsg("q"),
+      assistantMsg([text("a")]),
+    ];
+    const result = buildResult({
+      stopReason: "protocolError",
+      messages: prior, // delta 0
+    });
+    assert.deepEqual(decideCheckpointPersist(result, prior), { kind: "none" });
+  });
+
+  it("protocolError with user delta → partial_user_only (SC4)", () => {
+    // postMessage path: engine encoded the user query into state before
+    // failing. delta includes the user message; we keep it, drop assistant.
+    const prior: AnthropicNativeMessage[] = [];
+    const result = buildResult({
+      stopReason: "protocolError",
+      messages: [userMsg("hello")], // delta 1, user role
+    });
+    assert.deepEqual(decideCheckpointPersist(result, prior), {
+      kind: "partial_user_only",
+    });
+  });
+
+  it("emptyFinalResponse with user delta → partial_user_only (SC4)", () => {
+    const prior: AnthropicNativeMessage[] = [];
+    const result = buildResult({
+      stopReason: "emptyFinalResponse",
+      messages: [userMsg("hi")], // delta 1, user role
+    });
+    assert.deepEqual(decideCheckpointPersist(result, prior), {
+      kind: "partial_user_only",
+    });
+  });
+
+  it("protocolError with mixed user + assistant delta → partial_user_only (assistant dropped)", () => {
+    // Defensive: if for any reason the engine appended an assistant turn
+    // alongside the user delta before failing (rare; engine normally omits
+    // the failed assistant per "整回合不进历史"), the predicate still picks
+    // partial_user_only and the hub's splice filters out non-user roles.
+    const prior: AnthropicNativeMessage[] = [];
+    const result = buildResult({
+      stopReason: "protocolError",
+      messages: [userMsg("q"), assistantMsg([text("partial")])],
+    });
+    assert.deepEqual(decideCheckpointPersist(result, prior), {
+      kind: "partial_user_only",
+    });
+  });
+
+  it("protocolError with only a tool_result delta → none (no orphan tool_result)", () => {
+    // A tool_result-only user message is a continuation, not a query. Writing
+    // it without its assistant tool_use would orphan the pair on disk, so the
+    // predicate (SSOT isTurnQuery) must not classify it as user delta.
+    const prior: AnthropicNativeMessage[] = [userMsg("q")];
+    const result = buildResult({
+      stopReason: "protocolError",
+      messages: [userMsg("q"), userToolResult("t1")],
+    });
+    assert.deepEqual(decideCheckpointPersist(result, prior), {
+      kind: "none",
+    });
+  });
+
+  it("protocolError with only a subagent drain delta → none (not a user query)", () => {
+    // Drain summaries are user-role but not turn queries (isTurnQuery
+    // excludes them). Persisting one alone would not be a user sentence.
+    const prior: AnthropicNativeMessage[] = [userMsg("q")];
+    const result = buildResult({
+      stopReason: "protocolError",
+      messages: [
+        userMsg("q"),
+        userMsg("## Sub-agent task_1 result: sum\n\nresult body"),
+      ],
+    });
+    assert.deepEqual(decideCheckpointPersist(result, prior), {
+      kind: "none",
+    });
+  });
+
+  it("completed → full", () => {
+    const result = buildResult({
+      stopReason: "completed",
+      messages: [userMsg("q"), assistantMsg([text("a")])],
+    });
+    assert.deepEqual(decideCheckpointPersist(result, []), { kind: "full" });
+  });
+
+  it("timeout → full (unchanged path)", () => {
+    const result = buildResult({
+      stopReason: "timeout",
+      messages: [userMsg("q")],
+      turnCount: 0,
+    });
+    assert.deepEqual(decideCheckpointPersist(result, []), { kind: "full" });
+  });
+
+  it("maxTurns → full", () => {
+    const result = buildResult({
+      stopReason: "maxTurns",
+      messages: [],
+      turnCount: 0,
+    });
+    assert.deepEqual(decideCheckpointPersist(result, []), { kind: "full" });
+  });
+
+  it("nonSuccessStop → full", () => {
+    const result = buildResult({
+      stopReason: "nonSuccessStop",
+      messages: [userMsg("q"), assistantMsg([text("truncated")])],
+    });
+    assert.deepEqual(decideCheckpointPersist(result, []), { kind: "full" });
   });
 });
 

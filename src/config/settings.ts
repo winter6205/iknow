@@ -121,7 +121,10 @@ export interface IknowSettingsLlm {
   /**
    * #742 T1: 流式臂上「模型输出增量静默」的上限（毫秒）。镜像 timeoutMs 校验
    * 纪律：有限正整数才合法，其余丢弃。
-   * env 链：`envOptionalInt("IKNOW_LLM_IDLE_TIMEOUT_MS") ?? settings.llm.idleTimeoutMs ?? 120_000`。
+   * T2 (#transport-continue-persist)：默认 idle 从 120s 升到 minute-scale
+   * 300s（~5 min），避免长 thinking / 大输出被误杀；spec 不变式 idle 在
+   * `[60s, 600s]` 区间由 tests/harness/model-idle-hardcap-config.test.ts 钉。
+   * env 链：`envOptionalInt("IKNOW_LLM_IDLE_TIMEOUT_MS") ?? settings.llm.idleTimeoutMs ?? 300_000`。
    */
   idleTimeoutMs?: number;
   /**

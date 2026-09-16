@@ -63,9 +63,12 @@ describe("#742 T1 env: idle / 硬顶默认值", () => {
     for (const k of ENV_KEYS) delete process.env[k];
   });
 
-  it("默认 idle=120000、硬顶=900000", () => {
+  // T2 (#transport-continue-persist): 流式臂默认 idle 升到 minute-scale (~5 min)。
+  // 不变式:idle 仍严格 < 硬顶、硬顶有限,且硬顶仍远大于 timeoutMs 默认 5 min —
+  // 任何一处跌破都视为 spec 漂移。
+  it("默认 idle=300000(5 min)、硬顶=900000(15 min)", () => {
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-    assert.equal(env.llm.idleTimeoutMs, 120_000);
+    assert.equal(env.llm.idleTimeoutMs, 300_000);
     assert.equal(env.llm.hardCapMs, 900_000);
   });
 
@@ -79,6 +82,15 @@ describe("#742 T1 env: idle / 硬顶默认值", () => {
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.timeoutMs, 300_000);
     assert.ok(env.llm.hardCapMs! > env.llm.timeoutMs);
+  });
+
+  // T2 (#transport-continue-persist): 默认 idle 在 minute-scale 区间 [60s, 600s]
+  // — spec invariant 3 的强钉：从原 120s(短、长思维任务易被误杀)升到 5 min,
+  // 防 spec 漂移回落。
+  it("默认 idle 落在 minute-scale 区间 [60s, 600s](spec 不变式)", () => {
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    const idle = env.llm.idleTimeoutMs!;
+    assert.ok(idle >= 60_000 && idle <= 600_000, `idle=${idle} 越界`);
   });
 });
 
@@ -124,7 +136,7 @@ describe("#742 T1 env: idle / 硬顶覆盖链", () => {
       process.env.IKNOW_LLM_IDLE_TIMEOUT_MS = bad;
       process.env.IKNOW_LLM_HARD_CAP_MS = bad;
       const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-      assert.equal(env.llm.idleTimeoutMs, 120_000, `idle bad=${bad}`);
+      assert.equal(env.llm.idleTimeoutMs, 300_000, `idle bad=${bad}`);
       assert.equal(env.llm.hardCapMs, 900_000, `hardCap bad=${bad}`);
     }
   });
@@ -141,7 +153,7 @@ describe("#742 T1 env: idle / 硬顶覆盖链", () => {
       assert.equal(fromSettings.llm.hardCapMs, 400_000, `hardCap bad=${bad}`);
 
       const fromDefaults = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-      assert.equal(fromDefaults.llm.idleTimeoutMs, 120_000, `idle bad=${bad}`);
+      assert.equal(fromDefaults.llm.idleTimeoutMs, 300_000, `idle bad=${bad}`);
       assert.equal(fromDefaults.llm.hardCapMs, 900_000, `hardCap bad=${bad}`);
     }
   });

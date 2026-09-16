@@ -97,10 +97,12 @@ export interface LlmEnv {
    * 静默上限(毫秒)。到点落既有 `StopReason: timeout`,不新增停因;
    * `stream=off` 无增量可重置它,harness 侧按缺席处理。
    *
-   * env 链:`envOptionalPositiveInt("IKNOW_LLM_IDLE_TIMEOUT_MS") ?? settings.llm.idleTimeoutMs ?? 120_000`。
-   * 第三层 2 分钟:正常出字时供应商 delta 是亚秒级间隔,连续两分钟一个增量
-   * 都没有 = 这条连接已经废了,不是"还在想";取 2 分钟而非更短,是给首个
-   * delta 之前的排队 / 上游限流留余量(idle 钟从 step 起就在跑)。
+   * env 链:`envOptionalPositiveInt("IKNOW_LLM_IDLE_TIMEOUT_MS") ?? settings.llm.idleTimeoutMs ?? 300_000`。
+   * 第三层 5 分钟(T2 #transport-continue-persist 从 2 分钟上调):正常出字时
+   * 供应商 delta 是亚秒级间隔,连续数分钟一个增量都没有 = 这条连接大概率已废;
+   * 但长 thinking / 32k 生成前的排队与上游限流经常超过 2 分钟,旧值会把
+   * 「还在想」误判成断流。idle 钟从 step 起就在跑,取值必须给首 delta 前的
+   * 排队留足余量;UI 侧 ~20s 静默只改 notice 文案(不等待、不打断)。
    *
    * 可选而非必填:`IknowEnv` 字面量在测试 / 脚本里有几十处手写点,新增必填
    * 字段会把 T1 的改动摊到这些无关文件上(minimal-change)。生产装配一律走
@@ -929,13 +931,17 @@ export function loadIknowEnv(
         300_000,
       // #742 T1: 流式臂双钟(env > settings > 默认)。默认值理由见 LlmEnv 字段注释;
       // 不变式 idle < 硬顶、硬顶有限由 tests/harness/model-idle-hardcap-config.test.ts 钉。
+      // T2 (#transport-continue-persist):默认 idle 从 120s 升到 minute-scale
+      // 300s(~5 min)——长 thinking / 32k 生成常见超过 60s,旧值易误杀。env /
+      // settings 覆盖优先级不变;hardCapMs 默认仍 900s,idle < hardCap 不变式
+      // 仍由测试钉(300_000 < 900_000)。
       idleTimeoutMs:
         envOptionalPositiveInt({
           file,
           key: "IKNOW_LLM_IDLE_TIMEOUT_MS",
         }) ??
         mergedSettings.llm?.idleTimeoutMs ??
-        120_000,
+        300_000,
       hardCapMs:
         envOptionalPositiveInt({
           file,

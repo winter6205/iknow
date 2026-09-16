@@ -4,7 +4,8 @@
  *
  * Pure functions, no IO. Shared by:
  *   - checkpoint (interrupt persist): hub.conditionalSave asks
- *     `shouldPersistCheckpoint(result, priorMessages)` and appends a
+ *     `decideCheckpointPersist(result, priorMessages)` for one of three
+ *     outcomes (none / full / partial_user_only) and appends a
  *     CheckpointRecord when a cancelled/interrupt turn made progress.
  *   - TUI rewind (rollback): T5 (#622 / spec session-jsonl-resume) retired
  *     `rewindFile`'s disk truncation — rewind now MOVES the persisted head
@@ -72,19 +73,92 @@ export function splitTurns(
 }
 
 /**
- * Persistence predicate (replaces the DROP_REASONS set in hub.ts 裁决#8):
+ * Tri-state persistence decision returned by `decideCheckpointPersist`
+ * (spec invariant 8 / SC4 — protocolError/emptyFinalResponse persist the user
+ * message from this turn, not the failed assistant):
  *
- *   - `cancelled` with delta>0 → persist (progress was made before abort;
- *     write a checkpoint so the interrupted turn is recoverable).
- *   - `cancelled` with delta==0 → no-op (no new authoritative messages).
- *   - `protocolError` / `emptyFinalResponse` → false (维持 #120 裁决: these
- *     turns never persist, they are dropped-context stops).
+ *   - `kind: "none"` — skip save entirely. Covers zero-delta cancels and
+ *     protocolError/emptyFinalResponse with no user message this turn
+ *     (e.g. /continue mode).
+ *   - `kind: "full"` — save the full result.messages (current behavior for
+ *     completed / maxTurns / timeout / nonSuccessStop / cancelled-with-delta).
+ *   - `kind: "partial_user_only"` — splice ONLY the genuine user queries from
+ *     this run's delta onto disk (SSOT `isTurnQuery`: tool_result-only and
+ *     subagent-drain user messages are continuation, not queries). The failed
+ *     assistant turn is dropped. Used when protocolError/emptyFinalResponse
+ *     lands after the engine encoded the user message (postMessage path) but
+ *     before / without an assistant reply.
+ *
+ * Replaces the boolean `shouldPersistCheckpoint` (#120 裁决 amended — user
+ * is now kept on protocolError/emptyFinalResponse).
+ */
+export type CheckpointPersistDecision =
+  | { readonly kind: "none" }
+  | { readonly kind: "full" }
+  | { readonly kind: "partial_user_only" };
+
+/**
+ * Compute the persistence decision for a finished run. `delta` is
+ * (result.messages.length - priorMessages.length): only messages THIS run
+ * appended count as progress (run() starts from priorMessages and always
+ * returns a history that begins with them).
+ *
+ * Rules:
+ *   - cancelled + delta>0 → full persist (progress was made; record a
+ *     checkpoint so the interrupted turn is recoverable).
+ *   - cancelled + delta==0 → none (no new authoritative messages).
+ *   - protocolError / emptyFinalResponse:
+ *       * zero user delta (continue-mode or other zero-input path) → none.
+ *       * non-zero user delta (postMessage) → partial_user_only; the
+ *         assistant turn never enters history; the user message does.
  *   - every other stopReason (completed / maxTurns / timeout / nonSuccessStop)
- *     → true (现状全量落盘).
+ *     → full.
+ */
+export function decideCheckpointPersist(
+  result: RunResult,
+  priorMessages: ReadonlyArray<AnthropicNativeMessage>
+): CheckpointPersistDecision {
+  if (result.stopReason === "cancelled") {
+    return result.messages.length - priorMessages.length > 0
+      ? { kind: "full" }
+      : { kind: "none" };
+  }
+  if (
+    result.stopReason === "protocolError" ||
+    result.stopReason === "emptyFinalResponse"
+  ) {
+    const newMessages = result.messages.slice(priorMessages.length);
+    // `isTurnQuery` (SSOT, shared with hub projectMessagesToTurns) keeps only
+    // genuine user queries: a tool_result-only user message is a continuation,
+    // and persisting it alone (its assistant tool_use is dropped) would leave
+    // a malformed orphan pair on disk.
+    const userDelta = newMessages.filter((m) => isTurnQuery(m));
+    return userDelta.length > 0
+      ? { kind: "partial_user_only" }
+      : { kind: "none" };
+  }
+  return { kind: "full" };
+}
+
+/**
+ * Boolean persistence predicate. Still authoritative for two consumers that
+ * only need a yes/no verdict and do NOT want the user-kept rule:
  *
- * `delta` is (result.messages.length - priorMessages.length): only messages
- * THIS run appended count as progress (run() starts from priorMessages and
- * always returns a history that begins with them).
+ *   - `toTurnDto`'s `interrupted` flag (cancelled-only — the DTO field is
+ *     defined against this boolean, so widening it to the tri-state would
+ *     change the wire contract for no benefit).
+ *   - the `cancelled`-only notice sites in `src/cli/chat-session.ts`, where
+ *     this boolean and the tri-state agree by construction.
+ *
+ * New callers deciding what to write should use `decideCheckpointPersist`
+ * (tri-state), which is what both hub.conditionalSave and the chat REPL save
+ * path consume.
+ *
+ *   cancelled + delta>0 → true (unchanged)
+ *   protocolError / emptyFinalResponse → false (#120 verdict — this predicate
+ *     does NOT encode the user-kept rule; callers that need it must use
+ *     decideCheckpointPersist).
+ *   every other stopReason → true (unchanged)
  */
 export function shouldPersistCheckpoint(
   result: RunResult,

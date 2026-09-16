@@ -36,6 +36,7 @@ import type {
   LoopEngineDeps,
   RunResult,
 } from "../../src/harness/index.ts";
+import { SUBAGENT_DRAIN_PREFIX } from "../../src/harness/subagent/host-drain.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
@@ -140,6 +141,209 @@ describe("persistChatSessionCheckpoint", () => {
     assert.equal(file.checkpoints?.[0]?.messagesCount, 2);
     assert.equal(file.workspaceRoot, workspaceRoot);
     assert.equal(file.cwd, workspaceRoot);
+  });
+
+  it("protocolError(delta=user)→ 只落 user 消息;失败的 assistant 不进历史 (spec invariant 8)", async () => {
+    // chat 与 hub 共用 decideCheckpointPersist 的 partial_user_only 分支:
+    // protocolError 后用户那句话留在盘上,失败的 assistant 不进历史。
+    const s = await storeFor();
+    const id = "protocol-partial";
+    await persistChatSessionCheckpoint({
+      store: s,
+      conversationId: id,
+      jsonMode: false,
+      // 引擎在失败前已编码 user query(末条是 dangling user,无 assistant)。
+      result: buildResult({
+        stopReason: "protocolError",
+        messages: [userMsg("keep my sentence")],
+        turnCount: 0,
+      }),
+      priorMessages: [],
+      workspaceRoot: process.cwd(),
+    });
+    const file = await s.load(id);
+    assert.equal(file.messages.length, 1);
+    assert.equal(file.messages[0]?.role, "user");
+    assert.equal(
+      file.messages[0]?.content[0]?.type === "text"
+        ? file.messages[0].content[0].text
+        : "",
+      "keep my sentence"
+    );
+    assert.ok(
+      !file.messages.some((m) => m.role === "assistant"),
+      "failed assistant turn must not reach disk"
+    );
+    assert.equal(file.turnCount, 0);
+    // 该 user 消息是可回退锚点(rewind picker 消费 checkpoints 的 interruptedAt;
+    // toInterruptReason 对 protocolError 有 label,故记录被 append)。
+    assert.deepEqual(
+      file.checkpoints?.map((c) => c.interruptReason),
+      ["protocolError"]
+    );
+    assert.equal(file.checkpoints?.[0]?.messagesCount, 1);
+  });
+
+  it("protocolError(仅 tool_result delta)→ 不写文件(orphan 不进盘)", async () => {
+    // tool_result-only user 消息是续跑不是 query(isTurnQuery SSOT);单独落盘
+    // 会留下无 assistant tool_use 配对的孤儿。
+    const s = await storeFor();
+    const id = "protocol-tool-result-only";
+    const prior = [userMsg("q"), assistantMsg("a")];
+    await persistChatSessionCheckpoint({
+      store: s,
+      conversationId: id,
+      jsonMode: false,
+      result: buildResult({
+        stopReason: "protocolError",
+        messages: [
+          ...prior,
+          {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "t1", content: "ok" },
+            ],
+          },
+        ],
+        turnCount: 0,
+      }),
+      priorMessages: prior,
+      workspaceRoot: process.cwd(),
+    });
+    await assert.rejects(
+      () => s.load(id),
+      (err: unknown) => (err as { kind?: string }).kind === "not_found",
+      "零 user query 增量 → 不得落盘"
+    );
+  });
+
+  it("protocolError(delta 混合 query + tool_result-only)→ 只落 query,不落 tool_result 孤儿", async () => {
+    // mid-tool-loop 的 protocolError:delta 同时含真 user query、它触发的
+    // assistant tool_use、以及只带 tool_result 的续跑 user 消息。tool_result
+    // 是 continuation 不是 query(isTurnQuery SSOT),其配对的 assistant
+    // tool_use 在 partial 路径被丢弃 —— 落盘它会留下畸形孤儿。role === "user"
+    // 裸判会把它一起写盘,本用例钉住两者分歧。
+    const s = await storeFor();
+    const id = "protocol-mixed-delta";
+    const prior = [userMsg("earlier turn"), assistantMsg("earlier answer")];
+    await persistChatSessionCheckpoint({
+      store: s,
+      conversationId: id,
+      jsonMode: false,
+      result: buildResult({
+        stopReason: "completed",
+        messages: prior,
+        turnCount: 1,
+      }),
+      priorMessages: [],
+      workspaceRoot: process.cwd(),
+    });
+    await persistChatSessionCheckpoint({
+      store: s,
+      conversationId: id,
+      jsonMode: false,
+      result: buildResult({
+        stopReason: "protocolError",
+        messages: [
+          ...prior,
+          userMsg("keep my sentence"),
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "t1", name: "noop", input: {} }],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "t1", content: "ok" },
+            ],
+          },
+        ],
+        turnCount: 0,
+      }),
+      priorMessages: prior,
+    });
+    const file = await s.load(id);
+    assert.equal(file.messages.length, 3, "prior 2 条 + 本轮 query 1 条");
+    assert.equal(file.messages[2]?.role, "user");
+    assert.equal(
+      file.messages[2]?.content[0]?.type === "text"
+        ? file.messages[2].content[0].text
+        : "",
+      "keep my sentence"
+    );
+    assert.ok(
+      !file.messages.some(
+        (m) =>
+          m.role === "assistant" && m.content.some((b) => b.type === "tool_use")
+      ),
+      "本轮失败的 assistant tool_use 不进历史"
+    );
+    assert.ok(
+      !file.messages.some((m) =>
+        m.content.some((b) => b.type === "tool_result")
+      ),
+      "tool_result-only 续跑消息不得作为孤儿进盘"
+    );
+  });
+
+  it("protocolError(delta 末尾是 drain 摘要)→ 无 query 增量 → 不写文件", async () => {
+    // subagent drain 摘要也是 SSOT 排除的 user 消息(host 注入,不是用户
+    // query)。整个 delta 只有它 → 零 query 增量 → 不落盘。
+    const s = await storeFor();
+    const id = "protocol-drain-only";
+    const prior = [userMsg("q"), assistantMsg("a")];
+    await persistChatSessionCheckpoint({
+      store: s,
+      conversationId: id,
+      jsonMode: false,
+      result: buildResult({
+        stopReason: "protocolError",
+        messages: [
+          ...prior,
+          userMsg(`${SUBAGENT_DRAIN_PREFIX}worker-1\n\ndone`),
+        ],
+        turnCount: 0,
+      }),
+      priorMessages: prior,
+    });
+    await assert.rejects(
+      () => s.load(id),
+      (err: unknown) => (err as { kind?: string }).kind === "not_found",
+      "drain 摘要不是 query,不得触发落盘"
+    );
+  });
+
+  it("partial 落盘保留盘上既有历史(不与 delta 拼接丢失)", async () => {
+    const s = await storeFor();
+    const id = "protocol-partial-append";
+    const first = [userMsg("q1"), assistantMsg("a1")];
+    await persistChatSessionCheckpoint({
+      store: s,
+      conversationId: id,
+      jsonMode: false,
+      result: buildResult({
+        stopReason: "completed",
+        messages: first,
+        turnCount: 1,
+      }),
+      priorMessages: [],
+      workspaceRoot: process.cwd(),
+    });
+    await persistChatSessionCheckpoint({
+      store: s,
+      conversationId: id,
+      jsonMode: false,
+      result: buildResult({
+        stopReason: "emptyFinalResponse",
+        messages: [...first, userMsg("q2")],
+        turnCount: 0,
+      }),
+      priorMessages: first,
+    });
+    const file = await s.load(id);
+    assert.equal(file.messages.length, 3);
+    assert.equal(file.messages[2]?.role, "user");
+    assert.equal(file.turnCount, 1, "失败回合不增 turnCount");
   });
 
   it("completed → 落盘但无 checkpoint 记录(interruptReason=null 不 append)", async () => {

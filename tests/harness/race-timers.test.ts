@@ -178,6 +178,120 @@ describe("#742 T1 race-timers: 两根钟", () => {
   });
 });
 
+/**
+ * transport-continue-persist T1 / spec inv 1:`hadVisibleDelta` 是「到点后
+ * 还能不能自动重发整次调用」的唯一判据 —— 到点时刻它必须是**到点前**的
+ * 累积值,且只被模型输出增量闭集置位。
+ */
+describe("transport-continue-persist T1: hadVisibleDelta", () => {
+  it("起表即为 false(还没出字)", () => {
+    const timers = startRaceTimers({
+      hardCapMs: 5_000,
+      idleTimeoutMs: 150,
+      onExpire: () => undefined,
+    });
+    assert.equal(timers.hadVisibleDelta, false);
+    timers.cancel();
+  });
+
+  it("idle 关闭(非流式臂)也照记增量 — 判据与 idle 是否启用无关", () => {
+    const timers = startRaceTimers({
+      hardCapMs: 5_000,
+      idleTimeoutMs: undefined,
+      onExpire: () => undefined,
+    });
+    assert.equal(timers.hadVisibleDelta, false);
+    timers.noteStreamEvent(THINKING);
+    assert.equal(timers.hadVisibleDelta, true);
+    timers.cancel();
+  });
+
+  it("四类输出增量任一都置位(与 resetsModelIdle 同闭集)", () => {
+    const events: ReadonlyArray<HarnessStreamEvent> = [
+      { type: "thinking_delta", text: "t" },
+      { type: "text_delta", text: "a" },
+      { type: "tool_call_start", name: "bash", id: "u1" },
+      { type: "tool_input_delta", id: "u1", partialJson: "{" },
+    ];
+    for (const event of events) {
+      const timers = startRaceTimers({
+        hardCapMs: 5_000,
+        idleTimeoutMs: 150,
+        onExpire: () => undefined,
+      });
+      timers.noteStreamEvent(event);
+      assert.equal(timers.hadVisibleDelta, true, `${event.type} 必须置位`);
+      timers.cancel();
+    }
+  });
+
+  it("闭集外事件(compaction_* / stop_summary / agent_status)不置位", () => {
+    const timers = startRaceTimers({
+      hardCapMs: 5_000,
+      idleTimeoutMs: 150,
+      onExpire: () => undefined,
+    });
+    const nonVisible: ReadonlyArray<HarnessStreamEvent> = [
+      { type: "compaction_started", droppedCount: 3 },
+      { type: "compaction_completed", summaryLen: 10, durationMs: 5 },
+      { type: "compaction_failed", reason: "empty_response", durationMs: 5 },
+      { type: "compaction_cancelled" },
+      { type: "compaction_text_delta", text: "summary" },
+      { type: "stop_summary", text: "done" },
+      { type: "agent_status", lastTool: "idle", openTodoLines: [] },
+    ];
+    for (const event of nonVisible) {
+      timers.noteStreamEvent(event);
+      assert.equal(timers.hadVisibleDelta, false, `${event.type} 不得算作出字`);
+    }
+    timers.cancel();
+  });
+
+  it("到点回调里读到的是到点前的累积值(可见)", async () => {
+    let snapshot: boolean | undefined;
+    const timers = startRaceTimers({
+      hardCapMs: 5_000,
+      idleTimeoutMs: 40,
+      onExpire: () => {
+        snapshot = timers.hadVisibleDelta;
+      },
+    });
+    timers.noteStreamEvent(THINKING);
+    await sleep(90);
+    assert.equal(snapshot, true);
+    timers.cancel();
+  });
+
+  it("到点回调里读到的是到点前的累积值(不可见)", async () => {
+    let snapshot: boolean | undefined;
+    const timers = startRaceTimers({
+      hardCapMs: 5_000,
+      idleTimeoutMs: 40,
+      onExpire: () => {
+        snapshot = timers.hadVisibleDelta;
+      },
+    });
+    await sleep(90);
+    assert.equal(snapshot, false);
+    timers.cancel();
+  });
+
+  it("cancel 之后照记但不复活 idle — 判据已无裁决力(回合已定)", async () => {
+    const fired: string[] = [];
+    const timers = startRaceTimers({
+      hardCapMs: 5_000,
+      idleTimeoutMs: 150,
+      onExpire: (source) => fired.push(source),
+    });
+    timers.cancel();
+    timers.noteStreamEvent(THINKING);
+    // 标记照记(noteStreamEvent 不因 stopped 改变语义),但钟不复活、不再到点。
+    assert.equal(timers.hadVisibleDelta, true);
+    await sleep(200);
+    assert.deepEqual(fired, []);
+  });
+});
+
 describe("#742 T1 observeModelIdle: 包装观察者", () => {
   it("原样转发宿主回调(顺序 + 载荷),并重置 idle", async () => {
     const fired: string[] = [];

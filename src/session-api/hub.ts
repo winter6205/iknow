@@ -133,6 +133,7 @@ import { resolveConversationTraceFilePath } from "./store/index.js";
 import {
   appendCheckpoint,
   CURRENT_SCHEMA_VERSION,
+  decideCheckpointPersist,
   extractTitle,
   pinGoal,
   shouldPersistCheckpoint,
@@ -153,6 +154,7 @@ import {
   continuePredicateError,
   evaluateContinuePending,
   mapSkipAppendToContinueError,
+  stripTrailingInterrupt,
 } from "./continue-pending.js";
 import type {
   ApiErrorBody,
@@ -800,17 +802,21 @@ type HubEngineEntry = EngineBundle & {
   catalog?: AciCatalog;
 };
 
-// -- stop-reason persistence decision (T1: replaced DROP_REASONS set) ---------
+// -- stop-reason persistence decision (decideCheckpointPersist) --------------
 //
 // The previous design used a static DROP_REASONS set to skip certain stop
-// reasons (cancelled / protocolError / emptyFinalResponse). T1 replaces that
-// with `shouldPersistCheckpoint(result, priorMessages)` from
-// ./store/checkpoint.ts. Nuance preserved:
-//   - `cancelled` WITH delta>0 now persists (the user query landed; record a
-//     checkpoint so the interrupted turn is recoverable / rewind-able).
-//   - `protocolError` / `emptyFinalResponse` never persist (维持 #120 裁决).
+// reasons (cancelled / protocolError / emptyFinalResponse); T1 replaced that
+// with a boolean `shouldPersistCheckpoint`, and T4 (transport-continue-persist
+// spec invariant 8 / SC4) raised it to the tri-state
+// `decideCheckpointPersist(result, priorMessages)` in ./store/checkpoint.ts:
+//   - `cancelled` WITH delta>0 persists the full result (the user query
+//     landed; record a checkpoint so the interrupted turn is recoverable /
+//     rewind-able).
+//   - `protocolError` / `emptyFinalResponse` persist ONLY the genuine user
+//     query from this run's delta (partial_user_only); the failed assistant
+//     turn never reaches disk. Zero user delta (e.g. /continue) → no save.
 //   - every other stopReason (completed / maxTurns / timeout / nonSuccessStop)
-//     persists as-is.
+//     persists the full result as-is.
 
 // -- SessionHub ----------------------------------------------------------------
 
@@ -1592,8 +1598,11 @@ export class SessionHub {
         // 每次 post-turn save 都被迫走 re-root fork（rewind 后新链也无法
         // parent 在 rewind 锚点上）。改为把 query 前缀进本 postMessage 的
         // 第一次 engine commit：链与投影对齐（save 走 identical /
-        // extension），且零进展 turn（protocolError / emptyFinalResponse
-        // 在首次 commit 前停止）永不落 query —— 维持 #120 丢弃裁决。
+        // extension）。
+        // T4 (transport-continue-persist): 零进展 turn（protocolError /
+        // emptyFinalResponse 在首次 commit 前停止）本 commit 钩子不触发,
+        // 但收尾的 conditionalSave 会以 partial_user_only 把本 turn 的 user
+        // query 落盘（drop 失败的 assistant）— spec invariant 8 / SC4。
         // queryMessage 必须与 engine 的构造逐字节一致（secrets 占位符替换
         // + adapter.encodeUserText，loop-engine.ts run() 同款逻辑），否则
         // save 的 LCP 对齐会在 query 处分叉。
@@ -1886,9 +1895,9 @@ export class SessionHub {
                     })
                   : undefined;
               // Violation kill → surface protocolError so the SPA client can
-              // attribute the stop; shouldPersistCheckpoint still drops
-              // protocolError context on save (mirrors the chat-session drop
-              // semantics, 维持 #120 裁决).
+              // attribute the stop; decideCheckpointPersist then persists only
+              // the turn's user query (partial_user_only) and drops the failed
+              // assistant turn — spec invariant 8 / SC4.
               finalResult = killed
                 ? { ...result, stopReason: "protocolError" }
                 : result;
@@ -2006,7 +2015,7 @@ export class SessionHub {
                   result: s.finalResult,
                   turnMessages: turnMs,
                   // B1: rendered interrupted is decided against the SAME priorMessages
-                  // as conditionalSave — byte-identical shouldPersistCheckpoint verdict
+                  // as conditionalSave — byte-identical boolean verdict
                   // (saved 只在 cancelled 时消费;completed 等 stopReason 不读它)。
                   priorMessages: session.messages,
                   ...presentText("stopSummary", capturedStopSummary),
@@ -2360,8 +2369,15 @@ export class SessionHub {
       opts?.onStream?.(event);
     };
     try {
+      // /continue (spec invariant 5–7, SC3): the model prior for THIS run omits
+      // a trailing `Interrupted by user.` system message. Disk still contains
+      // it — the persist predicate's prior is the ORIGINAL `session.messages`
+      // so `conditionalSave` keeps the interrupt on disk, and the loaded file
+      // round-trips back to `loaded.messages` for the TUI. View-only slice:
+      // stripTrailingInterrupt does not mutate `session.messages`.
+      const modelPrior = stripTrailingInterrupt(session.messages);
       const { result } = await run("", runDeps, opts?.signal, {
-        priorMessages: session.messages,
+        priorMessages: modelPrior,
         appendUserText: false,
         onStream: wrappedOnStream,
       });
@@ -2369,10 +2385,16 @@ export class SessionHub {
         conversationId,
         session,
         result,
-        priorMessages: session.messages,
+        priorMessages: modelPrior,
+        diskPrior: session.messages,
       });
       const loaded = await this.store.load(conversationId);
-      const turnMs = result.messages.slice(session.messages.length);
+      // Slice the on-disk array (conditionalSave spliced this run's delta
+      // after the ORIGINAL prior, keeping the interrupt). result.messages is
+      // NOT usable here: it starts from the interrupt-stripped model prior,
+      // so slicing it by session.messages.length would drop the first new
+      // assistant message whenever a trailing interrupt was stripped.
+      const turnMs = loaded.messages.slice(session.messages.length);
       // D2 (tui-display-consistency): per-turn thinkingMs from disk-SSOT
       // parallel array. continue_pending 路径直接读到 loadedFile.thinkingMs
       // (本轮新增 = session.messages.length 起点);与 buildStop 路径同模式。
@@ -2867,13 +2889,29 @@ export class SessionHub {
     }
   }
 
-  /** 裁决#8 + T1: save condition based on stopReason and progress delta.
-   *  `priorMessages` = session.messages BEFORE this run (postMessage already
-   *  holds it); shouldPersistCheckpoint decides whether to save. Interrupting
-   *  stops (cancelled with delta>0) also append a checkpoint record so the
-   *  interrupted turn is recoverable / rewind-able.
+  /** 裁决#8 + T1 + T4: save condition based on stopReason and progress delta.
+   *  `priorMessages` = messages the model saw at the start of THIS run
+   *  (delta = result.messages.length - priorMessages.length drives the
+   *  cancelled-delta check and the appendCheckpoint messagesCount). Disk
+   *  persistence uses `diskPrior` (defaults to priorMessages for the
+   *  postMessage path; /continue sets it to session.messages so the trailing
+   *  interrupt system message stays on disk even though the model prior
+   *  omitted it — spec invariant 5–7 / SC3).
    *
-   *  B1: 返回值 = true 实际落盘 / false 未落盘(shouldPersistCheckpoint 拒绝
+   *  decideCheckpointPersist picks one of three outcomes:
+   *    "none"              — skip save entirely
+   *    "full"              — save result.messages wholesale (completed /
+   *                          maxTurns / timeout / nonSuccessStop /
+   *                          cancelled-with-delta)
+   *    "partial_user_only" — splice ONLY user-role messages from this run's
+   *                          delta onto disk (spec invariant 8 / SC4 —
+   *                          protocolError / emptyFinalResponse keep the
+   *                          user message, drop the failed assistant).
+   *
+   *  Interrupting stops (cancelled with delta>0) also append a checkpoint
+   *  record so the interrupted turn is recoverable / rewind-able.
+   *
+   *  B1: 返回值 = true 实际落盘 / false 未落盘(decideCheckpointPersist 拒绝
    *  或 store.save 抛错)。错误处理语义与改前一致 —— save 失败向上传播,
    *  由 postMessage 的 serialize 队列收口,不在此处 warn。*/
   private async conditionalSave(opts: {
@@ -2881,41 +2919,71 @@ export class SessionHub {
     readonly session: SessionFileV1;
     readonly result: RunResult;
     readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
+    /** /continue only: messages to splice the new delta onto for disk. When
+     *  omitted, defaults to priorMessages (postMessage path — model prior ==
+     *  disk prior). */
+    readonly diskPrior?: ReadonlyArray<AnthropicNativeMessage>;
   }): Promise<boolean> {
     const { conversationId, session, result, priorMessages } = opts;
-    const shouldPersist = shouldPersistCheckpoint(result, priorMessages);
+    const diskPrior = opts.diskPrior ?? priorMessages;
+    const decision = decideCheckpointPersist(result, priorMessages);
     const dirtyRoot = this.dirtyWorktreeRoots.get(conversationId);
-    if (!shouldPersist && dirtyRoot === undefined) return false;
+    if (decision.kind === "none" && dirtyRoot === undefined) return false;
     const now = new Date().toISOString();
-    const updated = shouldPersist
-      ? (() => {
-          const turnCount = session.turnCount + result.turnCount;
-          const interruptReason = toInterruptReason(result.stopReason);
-          // appendCheckpoint compares record.messagesCount to
-          // session.messages.length for its delta=0 guard, so it must receive
-          // the session BEFORE new messages are merged in.
-          const withCheckpoint =
-            interruptReason === null
-              ? session
-              : appendCheckpoint(session, {
-                  turnIndex: turnCount,
-                  messagesCount: result.messages.length,
-                  interruptedAt: now,
-                  interruptReason,
-                  ...(result.lastUsage !== null
-                    ? { lastUsage: result.lastUsage }
-                    : {}),
-                });
-          return {
-            ...withCheckpoint,
-            messages: result.messages,
-            turnCount,
-            updatedAt: now,
-            schemaVersion: CURRENT_SCHEMA_VERSION,
-            title: extractTitle(result.messages),
-          };
-        })()
-      : session;
+    const updated =
+      decision.kind === "none"
+        ? session
+        : (() => {
+            const turnCount = session.turnCount + result.turnCount;
+            const interruptReason = toInterruptReason(result.stopReason);
+            // Resolve the messages we want on disk for this decision.
+            // - "full": result.messages (or diskPrior + delta for /continue).
+            // - "partial_user_only": diskPrior + genuine user queries from this
+            //   run's delta (SSOT `isTurnQuery` — same predicate
+            //   decideCheckpointPersist used to pick this outcome; a bare
+            //   `role === "user"` check would also match tool_result-only
+            //   continuation messages and orphan them). The failed assistant
+            //   turn never reaches disk.
+            const persistedMessages =
+              decision.kind === "full"
+                ? diskPrior === priorMessages
+                  ? result.messages
+                  : [
+                      ...diskPrior,
+                      ...result.messages.slice(priorMessages.length),
+                    ]
+                : decision.kind === "partial_user_only"
+                  ? [
+                      ...diskPrior,
+                      ...result.messages
+                        .slice(priorMessages.length)
+                        .filter((m) => isTurnQuery(m)),
+                    ]
+                  : (session.messages as ReadonlyArray<AnthropicNativeMessage>);
+            // appendCheckpoint compares record.messagesCount to
+            // session.messages.length for its delta=0 guard, so it must
+            // receive the session BEFORE new messages are merged in.
+            const withCheckpoint =
+              interruptReason === null
+                ? session
+                : appendCheckpoint(session, {
+                    turnIndex: turnCount,
+                    messagesCount: persistedMessages.length,
+                    interruptedAt: now,
+                    interruptReason,
+                    ...(result.lastUsage !== null
+                      ? { lastUsage: result.lastUsage }
+                      : {}),
+                  });
+            return {
+              ...withCheckpoint,
+              messages: persistedMessages,
+              turnCount,
+              updatedAt: now,
+              schemaVersion: CURRENT_SCHEMA_VERSION,
+              title: extractTitle(persistedMessages),
+            };
+          })();
     await this.consumeDirtyRootOnSave(conversationId, async (root) => {
       // EXIT: report-save-failure-and-retain-dirty-root — SessionStore's
       // typed error propagates; consumeDirtyRootOnSave clears only after this

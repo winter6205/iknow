@@ -45,6 +45,14 @@ export interface RaceTimers {
    * 决定是否要包装 `onStream` —— 不启用时原样透传,行为与改前逐字节一致。
    */
   readonly idleEnabled: boolean;
+  /**
+   * transport-continue-persist T1 / spec inv 1:本次调用至今是否出现过
+   * **模型可见输出增量**(`resetsModelIdle` 闭集内的事件)。到点时刻它是
+   * 「还能不能自动重发整次调用」的唯一判据 —— 已出字再重试等于把模型
+   * 已写出的内容作废,故只有 false 才允许重试;由调用方(loop-engine 的
+   * onExpire)读,不在本模块决策。
+   */
+  readonly hadVisibleDelta: boolean;
   /** 流事件到达时喂给本函数;仅闭集内事件重置 idle,其余忽略。 */
   readonly noteStreamEvent: (event: HarnessStreamEvent) => void;
   /** settle 时调用,清掉两根钟;之后 `noteStreamEvent` 不再复活 idle。 */
@@ -66,6 +74,7 @@ export function startRaceTimers(opts: {
   const idleEnabled =
     opts.idleTimeoutMs !== undefined && opts.idleTimeoutMs > 0;
   let stopped = false;
+  let hadVisibleDelta = false;
   let hardCapTimer: ReturnType<typeof setTimeout> | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -93,13 +102,23 @@ export function startRaceTimers(opts: {
   };
   armIdle();
 
-  return Object.freeze({
-    idleEnabled,
+  const timers: RaceTimers = {
+    get idleEnabled(): boolean {
+      return idleEnabled;
+    },
+    get hadVisibleDelta(): boolean {
+      return hadVisibleDelta;
+    },
     noteStreamEvent: (event: HarnessStreamEvent): void => {
-      if (resetsModelIdle(event)) armIdle();
+      if (!resetsModelIdle(event)) return;
+      // 先置位再重置 idle:到点回调读 `hadVisibleDelta` 时不依赖事件与
+      // 定时器的先后(闭集事件本身也意味着这次输出已被宿主看见)。
+      hadVisibleDelta = true;
+      armIdle();
     },
     cancel,
-  });
+  };
+  return Object.freeze(timers);
 }
 
 /**

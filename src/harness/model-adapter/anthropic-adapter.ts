@@ -20,8 +20,16 @@
  */
 
 import { ProtocolError, PromptTooLongError } from "../errors.js";
-import type { FaultEvent } from "../fault-class.js";
-import Anthropic, { APIError } from "@anthropic-ai/sdk";
+import {
+  clockAbortOf,
+  parseRetryAfterMs,
+  type FaultEvent,
+} from "../fault-class.js";
+import Anthropic, {
+  APIConnectionError,
+  APIError,
+  APIUserAbortError,
+} from "@anthropic-ai/sdk";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
@@ -842,21 +850,129 @@ export function buildThinkingParams(env: {
 /**
  * #672 T2: 供应商只翻译瞬态 HTTP / 网络 vs PromptTooLong vs 其它。
  * 重试循环在 withTransportRetry，不进本文件。
+ *
+ * transport-continue-persist T1 / spec inv 2（SC2）:**时钟 abort 绝不翻成
+ * `user_cancel`**。判据只能读 `signal.reason` 上的 `clock_abort` 标记 ——
+ * SDK 的 `APIUserAbortError` 不转发 `signal.reason`（fetch 不转发），且它连
+ * `.name` 都不改（恒为 `"Error"`），单看 thrown error 与宿主 Ctrl+C 完全同形。
+ *
+ * 标记在场时按 `visible` 分流：不可见 → `clock_timeout`（可重试，spec inv 1）；
+ * 可见 → `timeout`（已出字，不重试，落既有非重试类）。
  */
-export function translateAnthropicTransportFault(err: unknown): FaultEvent {
-  if (err instanceof PromptTooLongError) return { kind: "prompt_too_long" };
-  if (err instanceof APIError) {
-    return { kind: "llm_http", status: err.status ?? 0 };
+export function translateAnthropicTransportFault(
+  err: unknown,
+  signal?: AbortSignal
+): FaultEvent {
+  const clock = clockAbortOf(signal);
+  if (clock !== undefined) {
+    return clock.visible
+      ? { kind: "timeout" }
+      : { kind: "clock_timeout", source: clock.source, visible: false };
   }
-  if (err instanceof Error && err.name === "AbortError") {
+  return nonClockFaultOf(err);
+}
+
+/** cause 链遍历上限：SDK 埋一层 fetch 失败，再下一层才是原生 TLS / socket 错误。 */
+const CAUSE_CHAIN_MAX_DEPTH = 5;
+
+/**
+ * 非时钟分支：供应商侧 thrown error → FaultEvent。
+ *
+ * 判别顺序是契约的一部分：
+ *   1. `prompt_too_long` —— 输入超限已可判定，重发同一 prompt 只会再超限一次；
+ *   2. abort —— `APIUserAbortError extends APIError<T, T, T>` 且 `status ===
+ *      undefined`，落到 HTTP 支会把宿主 Ctrl+C 翻成 `llm_http: 0` 这个假状态码
+ *      （typed-error 契约的一条推论：不许把「非 HTTP 故障」伪装成 0 号 HTTP）；
+ *   3. `llm_http` —— **只认带数值 status 的真 HTTP 响应**；
+ *   4. cert / TLS 校验失败 —— 确定性失败，显式落 `protocol_error`（spec inv 4 的
+ *      cert 格），不得冒充可重试的 `llm_network`；
+ *   5. `llm_network` —— 连接类故障（含 SDK 类 `cause` 链里的原生网络错误），
+ *      归 retry 类（spec inv 4:explicit network faults）。
+ *
+ * 第 4 / 5 步都在 HTTP 支之后：`APIConnectionError` /
+ * `APIConnectionTimeoutError` 同样 extends `APIError` 而 `status === undefined`，
+ * 被 HTTP 支先接走就会翻成 `llm_http: 0`（classifyFault → none），使网络重试格
+ * 永远不可达——所以 HTTP 支带上 `status` 数值判据，把它们让给连接支。反过来，
+ * 真 HTTP 语义优先：4xx 的确定性失败不因 `cause` 里挂着连接错误就变成可重试。
+ */
+function nonClockFaultOf(err: unknown): FaultEvent {
+  if (err instanceof PromptTooLongError) return { kind: "prompt_too_long" };
+  if (err instanceof APIUserAbortError || isAbortErrorShape(err)) {
     return { kind: "user_cancel" };
   }
-  if (
-    err instanceof Error &&
-    (err.name.includes("Connection") ||
-      /ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|network/i.test(err.message))
-  ) {
-    return { kind: "llm_network" };
+  if (err instanceof APIError && typeof err.status === "number") {
+    // 429 / 5xx 的 `retry-after` 由本层翻成毫秒（spec inv 4:honor retry-after），
+    // 退避策略仍在 withTransportRetry —— 本层只给 FaultEvent 填形状。
+    return {
+      kind: "llm_http",
+      status: err.status,
+      ...withRetryAfter(err.headers),
+    };
   }
+  if (someCause(err, isCertFailure)) return { kind: "protocol_error" };
+  if (someCause(err, isConnectionFault)) return { kind: "llm_network" };
   return { kind: "protocol_error" };
+}
+
+/**
+ * `cause` 链（含自身）上是否存在满足 `predicate` 的一层。深度有界，自环即止：
+ * SDK 的 `APIConnectionError.cause` 是 `TypeError("fetch failed")`，真正的判据
+ * （socket 错误码 / 证书错误）在其下一层，只看最外层等于什么都没看。
+ */
+function someCause(
+  err: unknown,
+  predicate: (candidate: unknown) => boolean
+): boolean {
+  let current: unknown = err;
+  for (
+    let depth = 0;
+    depth < CAUSE_CHAIN_MAX_DEPTH && current !== undefined;
+    depth += 1
+  ) {
+    if (predicate(current)) return true;
+    const next: unknown =
+      current instanceof Error ? (current as Error).cause : undefined;
+    if (next === current) return false;
+    current = next;
+  }
+  return false;
+}
+
+/** 证书 / TLS 校验失败：code（`DEPTH_ZERO_SELF_SIGNED_CERT` 类）或文案。 */
+const CERT_FAILURE_CODE = /CERT|_SSL_/i;
+const CERT_FAILURE_MESSAGE = /certificate|self[-_ ]signed|\bTLS\b|\bSSL\b/i;
+
+function isCertFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const code: unknown = (err as { readonly code?: unknown }).code;
+  if (typeof code === "string" && CERT_FAILURE_CODE.test(code)) return true;
+  return CERT_FAILURE_MESSAGE.test(err.message);
+}
+
+/** 连接类故障（单层判别，链式遍历由 `someCause` 负责）。 */
+function isConnectionFault(err: unknown): boolean {
+  if (err instanceof APIConnectionError) return true;
+  if (!(err instanceof Error)) return false;
+  return (
+    err.name.includes("Connection") ||
+    /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|fetch failed|network/i.test(
+      err.message
+    )
+  );
+}
+
+/** `retry-after` 头 → `retryAfterMs` 字段;缺席 / 畸形 → 字段不挂。 */
+function withRetryAfter(headers: Headers | undefined): {
+  readonly retryAfterMs?: number;
+} {
+  const retryAfterMs = parseRetryAfterMs(headers?.get("retry-after"));
+  return retryAfterMs !== undefined ? { retryAfterMs } : {};
+}
+
+/** 裸 DOMException / Error 形态的 abort（离线替身与既有测试的 AbortError）。 */
+function isAbortErrorShape(err: unknown): boolean {
+  if (typeof DOMException !== "undefined" && err instanceof DOMException) {
+    return err.name === "AbortError";
+  }
+  return err instanceof Error && err.name === "AbortError";
 }

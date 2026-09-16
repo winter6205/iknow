@@ -22,6 +22,7 @@ import type {
   LoopState,
 } from "../../src/harness/index.ts";
 import { ValidationError } from "../../src/shared/errors.ts";
+import { ProtocolError } from "../../src/harness/errors.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 import { LOOP_DETECTED_TEXT } from "../../src/harness/tool-loop-detect.ts";
 
@@ -206,7 +207,9 @@ describe("continueSession skip-append + reload_before_continue", () => {
     assert.equal(res.turn.answer.finalText, "continued");
   });
 
-  it("trailing interrupt stays in priorMessages passed to run", async () => {
+  it("trailing interrupt dropped from model prior only, kept on disk", async () => {
+    // Spec invariant 5–7 (SC3): /continue omits trailing interrupt from
+    // MODEL prior only. Disk still has the interrupt after the run.
     const interrupt: AnthropicNativeMessage = {
       role: "system",
       content: [{ type: "text", text: "Interrupted by user." }],
@@ -216,7 +219,8 @@ describe("continueSession skip-append + reload_before_continue", () => {
     ]);
     const hub = new SessionHub({ store, deps, workspaceRoot: process.cwd() });
     const { session } = await hub.createSession();
-    await seed(session.conversation_id, {
+    const id = session.conversation_id;
+    await seed(id, {
       messages: [
         userText("do"),
         assistantToolUse("t1"),
@@ -224,16 +228,189 @@ describe("continueSession skip-append + reload_before_continue", () => {
         interrupt,
       ],
     });
-    await hub.continueSession(session.conversation_id);
+    await hub.continueSession(id);
     assert.equal(encodeCount.n, 0);
     const prior = stepMessages[0] ?? [];
+    // Model prior omits the trailing interrupt.
+    assert.ok(
+      !prior.some(
+        (m) =>
+          m.role === "system" &&
+          m.content[0]?.type === "text" &&
+          m.content[0].text === "Interrupted by user."
+      ),
+      "model prior must NOT include trailing interrupt system message"
+    );
+    // Last entry of model prior is the prior tool_result (not the interrupt).
     const last = prior[prior.length - 1];
-    assert.equal(last?.role, "system");
+    assert.equal(last?.role, "user");
+    assert.equal(last?.content[0]?.type, "tool_result");
+    // Disk still retains the interrupt somewhere after the run — it stays
+    // in the committed history even though the assistant's "after interrupt"
+    // reply now follows it.
+    const loaded = await store.load(id);
+    assert.ok(
+      loaded.messages.some(
+        (m) =>
+          m.role === "system" &&
+          m.content[0]?.type === "text" &&
+          m.content[0].text === "Interrupted by user."
+      ),
+      "disk must keep the interrupt system message after continue"
+    );
+  });
+
+  it("turn projection surfaces the new assistant reply when the model prior was stripped", async () => {
+    // Regression guard for the stripped-prior off-by-one: the model prior is
+    // the interrupt-stripped view, so result.messages is one element shorter
+    // than the on-disk chain at every aligned position. The turn slice must
+    // come from the on-disk array (sliced by the ORIGINAL prior length) —
+    // slicing result.messages by session.messages.length drops the first new
+    // assistant message entirely.
+    const interrupt: AnthropicNativeMessage = {
+      role: "system",
+      content: [{ type: "text", text: "Interrupted by user." }],
+    };
+    const { deps } = spyDeps([
+      assistantResult({
+        texts: ["reply one"],
+        thinkingBlocks: [
+          { type: "thinking", thinking: "pondering", signature: "sig-1" },
+        ],
+      }),
+      assistantResult({ texts: ["reply two"] }),
+    ]);
+    const hub = new SessionHub({ store, deps, workspaceRoot: process.cwd() });
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    await seed(id, {
+      messages: [
+        userText("do"),
+        assistantToolUse("t1"),
+        toolResultOnly("t1"),
+        interrupt,
+      ],
+      turnCount: 1,
+    });
+    const res = await hub.continueSession(id);
+    assert.equal(res.turn.answer.stopReason, "completed");
+    assert.equal(res.turn.answer.finalText, "reply one");
+    // turnMessages drives the thinking projection. With a stripped model prior
+    // the slice is off by one, which drops the reply (and its thinking block)
+    // from the projection — the non-empty entries assertion below is what
+    // catches that.
+    assert.ok(
+      res.turn.answer.thinking !== undefined &&
+        res.turn.answer.thinking.entries.length > 0,
+      "this turn's thinking must be projected (turn slice must not be empty)"
+    );
+    assert.equal(res.turn.answer.thinking.entries[0]?.text, "pondering");
+    const loaded = await store.load(id);
+    const diskTail = loaded.messages[loaded.messages.length - 1];
+    assert.equal(diskTail?.role, "assistant");
+    // Thinking blocks precede the text block in the assistant message, so
+    // scan for the text block rather than assuming content[0].
+    const diskTailText = (diskTail?.content ?? [])
+      .filter((b) => b.type === "text")
+      .map((b) => (b.type === "text" ? b.text : ""))
+      .join(" ");
+    assert.equal(diskTailText, "reply one");
+  });
+
+  it("continue-mode protocolError with zero user delta → store untouched (no orphan assistant, no checkpoint)", async () => {
+    // Adapter.step throws ProtocolError → loop-engine stops with
+    // stopReason=protocolError and result.messages == the (stripped) prior.
+    // decideCheckpointPersist sees zero user delta → "none" → no save.
+    const interrupt: AnthropicNativeMessage = {
+      role: "system",
+      content: [{ type: "text", text: "Interrupted by user." }],
+    };
+    const inner = makeDeps([assistantResult({ texts: ["never-run"] })]);
+    const seenPriors: AnthropicNativeMessage[][] = [];
+    const protocolErrorDeps: LoopEngineDeps = {
+      ...inner,
+      adapter: {
+        ...inner.adapter,
+        step: async (state) => {
+          // Capture the prior as it reached the model, then fail the turn.
+          seenPriors.push([...state.messages]);
+          throw new ProtocolError("synthetic protocol failure");
+        },
+      },
+    };
+    const hub = new SessionHub({
+      store,
+      deps: protocolErrorDeps,
+      workspaceRoot: process.cwd(),
+    });
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    const seeded: AnthropicNativeMessage[] = [
+      userText("do"),
+      assistantToolUse("t1"),
+      toolResultOnly("t1"),
+      interrupt,
+    ];
+    await seed(id, { messages: seeded, turnCount: 1 });
+    const res = await hub.continueSession(id);
+    assert.equal(res.turn.answer.stopReason, "protocolError");
+    // The FIRST step call (the real turn; a later call is the epilogue
+    // summary round) received the interrupt-stripped view (T3 invariant).
+    assert.ok(seenPriors.length >= 1);
+    assert.deepEqual(seenPriors[0], seeded.slice(0, -1));
+    const loaded = await store.load(id);
+    // Zero user delta → nothing saved: disk messages are byte-identical to
+    // the seeded array (no orphan assistant, no shrink from the stripped
+    // model prior).
+    assert.deepEqual(loaded.messages, seeded);
+    assert.deepEqual(loaded.checkpoints, []);
+  });
+
+  it("mid-chain interrupt is a no-op for strip: model prior keeps it and the typed tail", async () => {
+    // stripTrailingInterrupt ONLY drops a trailing interrupt. Here the disk
+    // tail is a typed query, so the strip is a no-op: the model prior is the
+    // seeded chain verbatim — interrupt included (it reads as the prior typed
+    // input that was interrupted) and the new query as the final entry.
+    const interrupt: AnthropicNativeMessage = {
+      role: "system",
+      content: [{ type: "text", text: "Interrupted by user." }],
+    };
+    const { deps, stepMessages } = spyDeps([
+      assistantResult({ texts: ["continue"] }),
+    ]);
+    const hub = new SessionHub({ store, deps, workspaceRoot: process.cwd() });
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    const seeded: AnthropicNativeMessage[] = [
+      userText("do"),
+      assistantToolUse("t1"),
+      toolResultOnly("t1"),
+      interrupt,
+      userText("continue please"),
+    ];
+    await seed(id, { messages: seeded });
+    await hub.continueSession(id);
+    const prior = stepMessages[0] ?? [];
+    // The interrupt the strip passes through on the model wire (its pairing
+    // with the last entry is asserted separately below).
+    assert.ok(
+      prior.some(
+        (m) =>
+          m.role === "system" &&
+          m.content[0]?.type === "text" &&
+          m.content[0].text === "Interrupted by user."
+      ),
+      "mid-chain interrupt must survive into the model prior (strip is a no-op here)"
+    );
+    // No element was dropped: the prior is the seeded chain unchanged.
+    assert.deepEqual(prior, seeded);
+    const tail = prior[prior.length - 1];
+    assert.equal(tail?.role, "user");
     assert.equal(
-      last?.content[0] && last.content[0].type === "text"
-        ? last.content[0].text
+      tail?.content[0] && tail.content[0].type === "text"
+        ? tail.content[0].text
         : "",
-      "Interrupted by user."
+      "continue please"
     );
   });
 

@@ -904,11 +904,42 @@ export interface TuiAppProps {
         stage?: "write" | "reload";
       }
   >;
+  /**
+   * T2 (#transport-continue-persist): 流式臂上「连续多久没 onStream 事件
+   * → 把 notice 改成「仍在等待」」的阈值（毫秒）。缺省 = 20_000（spec
+   * invariant 3：~20s 静默只更新 sticky notice copy，**不**自动消失）。
+   * 测试可注入小值避开真实 20s 睡眠。注：这是 UI 反馈节流，**不**等同于
+   * harness 侧 idle / hardCap（harness 仍按 settings.llm.idleTimeoutMs
+   * 默认 300_000 ~ 5 min 决策 fault class）。
+   */
+  readonly streamingSilenceNoticeMs?: number;
 }
 
 interface Notice {
   readonly lines: ReadonlyArray<string>;
 }
+
+/**
+ * T2 (#transport-continue-persist) UI 反馈节流:流式臂连续无 onStream 事件
+ * 多久 → 改 notice 文案为「仍在等待模型输出」(spec invariant 3)。~20s
+ * 只是 UI 反馈阈值,**不**影响 harness 侧 idle / hardCap 决策 —— 后者
+ * 走 settings.llm.idleTimeoutMs(env > settings > 默认 300_000,见 env.ts)。
+ * 改文案而非新增 notice;notice box 仍是 sticky(无 TTL 自动消失,与
+ * spec invariant 3 / SC5 同款)。
+ */
+const DEFAULT_STREAMING_SILENCE_NOTICE_MS = 20_000;
+
+/**
+ * 静默阈值解析（S5：`??` 若写在 `runTurnOnce` 内会计入它的圈复杂度，
+ * 把已顶到 23 的函数再 +1 —— 解析下沉到本叶子函数）。
+ */
+function resolveStreamingSilenceNoticeMs(override: number | undefined): number {
+  return override ?? DEFAULT_STREAMING_SILENCE_NOTICE_MS;
+}
+
+/** 流式静默时把现有 notice 改写为单行「仍在等待」文案(spec 不变式 3)。 */
+const STREAMING_SILENCE_NOTICE_LINE =
+  "⠿ 仍在等待模型输出（~20s 无新流字节）；如长时间未恢复，建议检查网络连接。";
 
 export function TuiApp(props: TuiAppProps): ReactNode {
   const pal = tuiPalette;
@@ -1940,6 +1971,37 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     // Predicate / continue ValidationError is not a turn: keep EXIT notice,
     // restore idle, do not reload (reload overwrite → 刷新会话失败).
     let skipTurnRefresh = false;
+    // T2 (#transport-continue-persist) UI 反馈节流:流式静默 ~20s 后把
+    // notice 文案改成「仍在等待」。注意:这是 UI 反馈,不影响 harness idle
+    // 决策(harness 仍按 settings.llm.idleTimeoutMs 走)。闭包变量,不进
+    // React state —— setTimeout handle 跨 render 无意义,且每次 onStream
+    // 触发都要重置,React 状态语义不对。
+    const silenceThresholdMs = resolveStreamingSilenceNoticeMs(
+      props.streamingSilenceNoticeMs
+    );
+    let silenceTimerId: ReturnType<typeof setTimeout> | undefined;
+    let silenceNoticeShown = false;
+    const clearSilenceTimer = (): void => {
+      if (silenceTimerId !== undefined) {
+        clearTimeout(silenceTimerId);
+        silenceTimerId = undefined;
+      }
+    };
+    const armSilenceTimer = (): void => {
+      clearSilenceTimer();
+      silenceNoticeShown = false;
+      if (silenceThresholdMs <= 0) return;
+      silenceTimerId = setTimeout(() => {
+        silenceTimerId = undefined;
+        // 每次静默 episode 仅触发一次更新(sticky notice 已设过同样文案
+        // → 同一回合内再 fire 只是覆盖同一字符串,避免 timer churn 与
+        // setState 噪音);流式字节恢复时 onStream 重置 silenceNoticeShown
+        // → 下一次 silence 可重新落 notice。
+        if (silenceNoticeShown) return;
+        silenceNoticeShown = true;
+        setNotice({ lines: [STREAMING_SILENCE_NOTICE_LINE] });
+      }, silenceThresholdMs);
+    };
     const draft = createStreamDraft();
     setStreamDraft(draft);
     // 运行时长打点：turn 起始时刻（mode 行统计段「运行中」实时递增用）。
@@ -1958,6 +2020,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     // draftEpoch。ChatView 按 epoch 交错渲染，与历史 content 块顺序一致。
     // 判定只依赖本闭包事件顺序（#616），不经过 React state / ref 镜像。
     const onStream = (event: HarnessStreamEvent): void => {
+      // T2 (#transport-continue-persist): 任何 onStream 事件(增量 / 工具 /
+      // 状态快照,凡是流式臂产出的事件)都视作「流式字节到达」→ 重置静默
+      // 计时器与 silenceNoticeShown。下一次 silence episode 仍能重新触发
+      // 一次 notice 改写(不 spam,见 armSilenceTimer 注释)。
+      armSilenceTimer();
       draft.append(event);
       if (event.type === "tool_call_start") {
         // 先 seal 再读 sealedCount：setState updater 延迟到 render 才执行，
@@ -2052,6 +2119,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       }
     };
     try {
+      // T2 (#transport-continue-persist): 回合发起即启动静默计时器 —— 即使
+      // 第一个流式字节 20s+ 还没到,UI 也应进入「仍在等待」反馈路径(典型
+      // 场景:流建立中,首个 text_delta 卡在 backpressure / TLS handshake)。
+      // armSilenceTimer() 内部已重置 silenceNoticeShown → 下一次 onStream
+      // 不会被既有「仍在等待」streak 吞掉(同一回合内重置文案无害)。
+      armSilenceTimer();
       // thinking override gate：仅当用户实际改了状态才透传（初始化即 env
       // 默认 → 不透传，走 stub-model 测试的 cached deps 路径；用户 /thinking
       // /effort 改了 → 透传 per-turn override）。决策逻辑见 thinking-gate.ts
@@ -2126,6 +2199,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       setNotice({ lines: [...outcome.noticeLines] });
     } finally {
       aborters.current.delete(targetId);
+      // T2 (#transport-continue-persist): turn 结束(成功 / cancelled /
+      // throw)清掉静默计时器,避免 stuck 在「仍在等待」timer 后续误触 setNotice
+      // 与 React 重渲染。**不**清 notice 文案:sticky 纪律(spec SC5)由 turn
+      // 收尾的 setNotice(undefined / 异常 stopReason)分支决定,本 finally 不
+      // 接管。
+      clearSilenceTimer();
       // compact 面板兜底清扫(plan D3.5):turn 结束仍非终态 = 缺终态事件
       // (reactive compact 早返回 / 事件被吞咽)→ 立即清除,不留 95% 伪在途
       // 面板。已终态 → 交给 HOLD_MS timer 自然卸载(不抢它的停留时间)。

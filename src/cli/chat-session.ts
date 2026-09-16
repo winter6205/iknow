@@ -101,12 +101,14 @@ import {
   CURRENT_SCHEMA_VERSION,
   extractTitle,
   appendCheckpoint,
+  decideCheckpointPersist,
   pinGoal,
   shouldPersistCheckpoint,
   toInterruptReason,
   validateGoalText,
   type GoalState,
 } from "../session-api/store/index.js";
+import { isTurnQuery } from "../session-api/turn-projection.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import {
   applyGoalAutoContinue,
@@ -305,7 +307,7 @@ export type ChatLineContext = {
   /**
    * T2: checkpoint 落盘的 SessionStore(默认 ~/.iknow 池,与 serve/TUI 同池
    * — #120 Q6 精神)。与 `state.conversationId` 同时存在时,post-run 走
-   * shouldPersistCheckpoint → appendCheckpoint → 原子写。缺省(ask/tests)→
+   * decideCheckpointPersist → appendCheckpoint → 原子写。缺省(ask/tests)→
    * 跳过持久化,行为零变化。
    */
   checkpointStore?: SessionStore;
@@ -1284,7 +1286,7 @@ async function runChatQueryLine(
               });
         const { result, trace } = runOutcome;
         // B1: Ctrl+C 打断反馈 —— 仅 cancelled 时提示 checkpoint 是否已保存。
-        // 与下方 persistChatSessionCheckpoint 同源判定(shouldPersistCheckpoint),
+        // cancelled 判定与 decideCheckpointPersist 一致(delta>0 → "已保存"),
         // 保证「状态行文案」与「实际落盘」一致;非 cancelled → undefined(无前缀)。
         const interruptNote =
           result.stopReason === "cancelled"
@@ -1907,18 +1909,21 @@ export async function seedResumeMessages(opts: {
 
 /**
  * T2: chat REPL 的 post-run checkpoint 落盘 —— `src/session-api/hub.ts`
- * conditionalSave(#120 T1)的 chat 侧镜像。纯 IO(load/save 原子写),决策全权
- * 委托 T1 纯函数:
+ * conditionalSave 的 chat 侧镜像。纯 IO(load/save 原子写),决策全权委托
+ * `session-api/store/checkpoint.ts` 的纯函数(tri-state SSOT,不在本文件
+ * 复制规则):
  *
- *   - `shouldPersistCheckpoint(result, priorMessages)` 决定本次 run 是否值得
- *     落盘(cancelled+delta>0 / timeout / completed 等 → true;protocolError /
- *     emptyFinalResponse / turn-0 空 cancelled → false 返回,不写文件)。
+ *   - `decideCheckpointPersist(result, priorMessages)` 给出三种结果:
+ *     "none"(零增量 cancelled / 无 user 增量的 protocolError 等)→ 早退不写;
+ *     "full" → 落 result.messages 全量;"partial_user_only" → 只把本 run delta
+ *     里真正的 user query(isTurnQuery,与 hub 同源)接到盘上,失败的 assistant
+ *     不进历史(spec invariant 8 / SC4)。
  *   - `toInterruptReason` 把 StopReason 映射为 checkpoint label(cancelled /
  *     timeout / protocolError / maxTurns;completed 等 → null,不 append 记录)。
  *   - `appendCheckpoint` 内建 delta=0/负值 no-op 守门(records.messagesCount >
  *     session.messages.length 才 append)。
  *
- * **累计 turnCount**:镜像 hub.ts:739 的 `session.turnCount + result.turnCount`
+ * **累计 turnCount**:镜像 hub 的 `session.turnCount + result.turnCount`
  * 约定 —— 若该 conversationId 已有盘上文件,新记录从既有 turnCount 继续编号,
  * T4 --resume 才能读到连续的快照序列。
  *
@@ -1926,8 +1931,6 @@ export async function seedResumeMessages(opts: {
  * not_found / parse_failed / schema_invalid),绝不新造 kind;失败经
  * `opts.warn?.(line)` 到 stderr 并 continue,绝不 crash REPL、绝不阻塞退出
  * (第二次 Ctrl+C 只 bounded-wait 1s)。
- *
- * 空 messages 的 turn-0 cancelled → shouldPersist 返回 false,本函数早退不写盘。
  */
 export async function persistChatSessionCheckpoint(opts: {
   readonly store: SessionStore;
@@ -1950,7 +1953,8 @@ export async function persistChatSessionCheckpoint(opts: {
     workspaceRoot,
   } = opts;
   try {
-    if (!shouldPersistCheckpoint(result, priorMessages)) return;
+    const decision = decideCheckpointPersist(result, priorMessages);
+    if (decision.kind === "none") return;
     let session: SessionFileV1;
     try {
       session = await store.load(conversationId);
@@ -1975,15 +1979,28 @@ export async function persistChatSessionCheckpoint(opts: {
     const now = new Date().toISOString();
     const turnCount = session.turnCount + result.turnCount;
     const interruptReason = toInterruptReason(result.stopReason);
+    // "partial_user_only" 的落盘内容:盘上既有历史 + 本 run delta 里真正的 user
+    // query。isTurnQuery 是 turn 边界 SSOT(tool_result-only / drain / status
+    // 消息不是 query),逐字镜像 hub.conditionalSave 的同名 splice —— 复制规则
+    // 会让两入口在下次规则变动时漂移。失败的 assistant 永不进盘。
+    const persistedMessages =
+      decision.kind === "partial_user_only"
+        ? [
+            ...session.messages,
+            ...result.messages
+              .slice(priorMessages.length)
+              .filter((m) => isTurnQuery(m)),
+          ]
+        : result.messages;
     // appendCheckpoint 的 delta=0 守门比较 record.messagesCount 与
     // session.messages.length —— 必须在把 post-run messages 合入**之前**计算
-    // (否则 delta=0 永远 false、守门永不触发;镜像 hub.ts:758-782 同序)。
+    // (否则 delta=0 永远 false、守门永不触发;镜像 hub.conditionalSave 同序)。
     const withCheckpoint =
       interruptReason === null
         ? session
         : appendCheckpoint(session, {
             turnIndex: turnCount,
-            messagesCount: result.messages.length,
+            messagesCount: persistedMessages.length,
             interruptedAt: now,
             interruptReason,
             ...(result.lastUsage !== null
@@ -1992,11 +2009,11 @@ export async function persistChatSessionCheckpoint(opts: {
           });
     const updated: SessionFileV1 = {
       ...withCheckpoint,
-      messages: result.messages,
+      messages: persistedMessages,
       turnCount,
       updatedAt: now,
       schemaVersion: CURRENT_SCHEMA_VERSION,
-      title: extractTitle(result.messages),
+      title: extractTitle(persistedMessages),
     };
     await store.save({ id: conversationId, file: updated });
   } catch (err) {

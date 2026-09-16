@@ -83,6 +83,18 @@ import { safeEmitStream } from "./stream.js";
 import type { RaceTimers } from "./race-timers.js";
 import { lastNonEmptyAssistant } from "./last-nonempty-assistant.js";
 import {
+  classifyFault,
+  clockAbortReasonOf,
+  type ClockAbortReason,
+  type FaultClass,
+  type FaultEvent,
+} from "./fault-class.js";
+import {
+  backoffDelayMs,
+  sleepWithAbort,
+  TRANSPORT_MAX_ATTEMPTS,
+} from "./model-adapter/with-transport-retry.js";
+import {
   observeModelIdle,
   resolveModelClocks,
   startRaceTimers,
@@ -231,6 +243,15 @@ export interface LoopEngineDeps {
    * 正是 T1 要修的误杀源;想在流式臂上收紧墙钟请调本字段而非 `timeoutMs`。
    */
   readonly modelHardCapMs?: number;
+  /**
+   * transport-continue-persist T1 / spec inv 4 测试缝:不可见时钟到点后重发
+   * 整次调用前的退避时长(ms)。缺席 → 走生产秒级指数表(1s / 2s / 4s / 8s,
+   * 上限 16s)。只在测试里压小,生产装配不传。
+   *
+   * 与 `withTransportRetry` 的 `sleep` 注入同型的「时间缝」纪律:退避表本身
+   * 由 transport-retry.test.ts 直接钉死,这里只让 loop 级集成用例不必真等秒。
+   */
+  readonly transportRetryDelayMs?: (attempt: number) => number;
   /** 017: 工具侧覆盖;生效 = toolTimeoutMs ?? timeoutMs ?? DEFAULT_TIMEOUT_MS */
   readonly toolTimeoutMs?: number;
   /**
@@ -1270,10 +1291,38 @@ export async function epilogueSummary(opts: {
 export type RaceOutcomeSource =
   "adapter" | "timerTimeout" | "hostCancel" | "callerAbort";
 
-export interface RaceModelOutcome {
+/**
+ * transport-continue-persist T1:`timerTimeout` 支**必带** `clockAbort` ——
+ * 就是 `onExpire` 里刻进 abort reason 的那一枚 `clock_abort` 标记本身
+ * (`ClockAbortReason`)。不另读 `childSignal`、不做字段解包:重发判定
+ * (`classifyClockRetry`)直接消费它,与翻译层(SC2)读的是同一个值。
+ *
+ * 判别联合而非可选字段:`onExpire` 先 abort 再 settle,标记在 timerTimeout
+ * 上不可能缺席,类型就不该给「缺席」留位置(也就没有 `?? "idle"` 一类
+ * 看似合理的兜底值)。`visible === false` = 整次调用可以安全重发
+ * (spec inv 1);`true` = 已出字,不重发,按既有 timeout 收场。
+ */
+type RaceOutcomeOf<S extends RaceOutcomeSource> = {
   readonly result: AssistantTurnResult | undefined;
-  readonly source: RaceOutcomeSource;
-}
+  readonly source: S;
+};
+
+/**
+ * 每个 source 各自一个成员(而非把三个非钟 source 并成一个)—— 消费侧才能
+ * 靠**逐个排除**收窄:`runModelAttempt` 先排掉 adapter / callerAbort /
+ * hostCancel,末尾剩下的必是 timerTimeout,`clockAbort` 直接可读。并成一个
+ * 成员会挡住这个收窄(排除 "adapter" 不会消掉成员本身)。
+ *
+ * 收窄同时是穷尽性检查:未来新增 source 时,末尾那一支会因读不到
+ * `clockAbort` 而编译失败,不会静默落进某个既有臂。
+ */
+export type RaceModelOutcome =
+  | RaceOutcomeOf<"adapter">
+  | RaceOutcomeOf<"hostCancel">
+  | RaceOutcomeOf<"callerAbort">
+  | (RaceOutcomeOf<"timerTimeout"> & {
+      readonly clockAbort: ClockAbortReason;
+    });
 
 export interface RaceModelHandle {
   readonly outcome: Promise<RaceModelOutcome>;
@@ -1298,6 +1347,19 @@ export interface RaceModelOpts {
   readonly idleTimeoutMs?: number;
 }
 
+/**
+ * settle 的入参:两条臂 —— 钟到点必须自带标记(timerTimeout 上「标记缺席」
+ * 不可表达,consumer 无需兜底值);其余 source 沿用 result / err 两个位置参数
+ * 的原语义。
+ */
+type RaceSettleSpec =
+  | {
+      readonly source: "adapter" | "hostCancel" | "callerAbort";
+      readonly result?: AssistantTurnResult;
+      readonly err?: unknown;
+    }
+  | { readonly source: "timerTimeout"; readonly clock: ClockAbortReason };
+
 /** 023: settle 共址于 helper，统一 single-wins 与 cleanup。 */
 function createRaceOutcome(opts: {
   readonly raceOpts: RaceModelOpts;
@@ -1309,35 +1371,48 @@ function createRaceOutcome(opts: {
     let settled = false;
     let timers: RaceTimers | undefined;
     let abortListener: (() => void) | undefined;
-    const settle = (
-      source: RaceOutcomeSource,
-      result?: AssistantTurnResult,
-      err?: unknown
-    ): void => {
+    const settle = (spec: RaceSettleSpec): void => {
       if (settled) return; // post-settle SDK error / abort 均丢弃。
       settled = true;
       timers?.cancel();
       if (opts.raceOpts.signal && abortListener)
         opts.raceOpts.signal.removeEventListener("abort", abortListener);
       opts.child.abort();
-      if (err !== undefined) reject(err);
-      else resolve(Object.freeze({ result, source }));
+      if (spec.source === "timerTimeout") {
+        resolve(
+          Object.freeze({
+            result: undefined,
+            source: spec.source,
+            clockAbort: spec.clock,
+          })
+        );
+      } else if (spec.err !== undefined) reject(spec.err);
+      else resolve(Object.freeze({ result: spec.result, source: spec.source }));
     };
-    opts.setChildAbort(() => settle("hostCancel"));
+    opts.setChildAbort(() => settle({ source: "hostCancel" }));
     // #742 T1:idle 与硬顶两根钟由 race-timers 起,胜出仲裁仍只在 settle 一处;
     // 两根钟到点都落同一个 timerTimeout(不新增 StopReason)。
+    // transport-continue-persist T1 / spec inv 1–2:到点前的可见性同一枚标记
+    // 走两条路 —— ① abort 的 reason(`clock_abort`,translate 层据此不误标
+    // user_cancel,SC2);② outcome 的 `clockAbort`,runModelPhase 据此决定
+    // 能否重发整次调用(spec inv 1)。两路是**同一个值**(先 abort 再 settle),
+    // 胜出仲裁仍只在本 settle 一处。
     timers = startRaceTimers({
       hardCapMs: opts.raceOpts.timeoutMs,
       idleTimeoutMs: opts.raceOpts.idleTimeoutMs,
-      onExpire: () => {
-        opts.child.abort(); // L1': 必须先取消 HTTP，再记录 timer 胜出。
-        settle("timerTimeout");
+      onExpire: (source) => {
+        const reason = clockAbortReasonOf(
+          source,
+          timers?.hadVisibleDelta === true
+        );
+        opts.child.abort(reason); // L1': 必须先取消 HTTP，再记录 timer 胜出。
+        settle({ source: "timerTimeout", clock: reason });
       },
     });
     // #742 T1:idle 在场时观察者被包一层(先记增量再原样转发);不在场则原样
     // 透传宿主回调。转发 / 吞咽纪律见 observeModelIdle。
     const onStream = observeModelIdle(timers, opts.raceOpts.onStream);
-    abortListener = (): void => settle("callerAbort");
+    abortListener = (): void => settle({ source: "callerAbort" });
     if (opts.raceOpts.signal?.aborted) abortListener();
     else
       opts.raceOpts.signal?.addEventListener("abort", abortListener, {
@@ -1360,8 +1435,8 @@ function createRaceOutcome(opts: {
         opts.compositeSignal
       )
       .then(
-        (result) => settle("adapter", result),
-        (err) => settle("adapter", undefined, err)
+        (result) => settle({ source: "adapter", result }),
+        (err) => settle({ source: "adapter", err })
       );
   });
 }
@@ -1444,6 +1519,161 @@ function modelStop(opts: {
   );
 }
 
+/**
+ * timerTimeout 的唯一消费面:判断「能不能把整次调用重发」。
+ *
+ * 两道门,都在这里而非重试循环体内(后者会把分支记进 `runModelPhase` 的
+ * 圈复杂度,S5 叶子函数纪律 —— 同 `resolveStreamingSilenceNoticeMs`):
+ *   1. **只在流式臂重发**(idle 在场)。非流式臂今日的单钟是「请求墙钟」,
+ *      其超时语义(spec inv 4 的 request timeout)不在本 ticket 的验收面
+ *      (ticket 只点名 idle);保持改前逐字节行为,也不把非流式臂的失败收场
+ *      一并改掉(blast radius 越界)。
+ *   2. **走与传输重试同一张 FaultClass 表**:钟到点且本次 attempt 一个增量
+ *      都没有 = `retry`(spec inv 1);已出字 → `none`,落既有 timeout 收场,
+ *      不作废模型已写出的内容。
+ *
+ * `clock` = 本次到点的 `clock_abort` 标记(`onExpire` 一次调用产出、先 abort
+ * 再 settle,故 timerTimeout 路径上必然在场)。`attempt` = 本次已是第几次
+ * 尝试(1-based),预算与传输重试共用 `TRANSPORT_MAX_ATTEMPTS`。
+ */
+function classifyClockRetry(
+  clock: ClockAbortReason,
+  attempt: number,
+  idleEnabled: boolean
+): FaultClass {
+  if (!idleEnabled) return "none";
+  const fault: FaultEvent = {
+    kind: "clock_timeout",
+    source: clock.source,
+    visible: clock.visible,
+  };
+  if (classifyFault(fault) !== "retry") return "none";
+  return attempt >= TRANSPORT_MAX_ATTEMPTS ? "none" : "retry";
+}
+
+/** `modelStop` 的产物(既有 stop 返回形状)。 */
+type StopResult = ReturnType<typeof modelStop>;
+
+/**
+ * 一次 attempt 的收场。三态 discriminated union,`stop` 里再分两支:
+ *
+ * - `ok`:adapter 胜出,带回回合结果。
+ * - `clock_timeout`:timerTimeout —— `clock` 是**必填**,即 `onExpire` 里
+ *   刻进 abort reason 的那一枚 `clock_abort` 标记本身。它是「这次收场还
+ *   有机会被重发丢弃」的唯一信号(见 `attemptVerdict`),也是 `?.` + `??`
+ *   默认值的替代:标记缺席在类型上不可表达,不必再读 `childSignal` 回捞。
+ * - `stop`:callerAbort / hostCancel 的既有收场,终局,无可丢弃。
+ */
+type ModelAttemptConclusion =
+  | { readonly kind: "ok"; readonly result: AssistantTurnResult }
+  | {
+      readonly kind: "clock_timeout";
+      readonly stop: StopResult;
+      readonly clock: ClockAbortReason;
+    }
+  | { readonly kind: "stop"; readonly stop: StopResult };
+
+async function runModelAttempt(opts: {
+  readonly state: LoopState;
+  readonly deps: LoopEngineDeps;
+  readonly signal: AbortSignal | undefined;
+  readonly started: number;
+  readonly modelHardCapMs: number;
+  readonly modelIdleTimeoutMs: number | undefined;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
+  readonly systemText: string | undefined;
+}): Promise<ModelAttemptConclusion> {
+  const handle = raceModel({
+    adapter: opts.deps.adapter,
+    state: opts.state,
+    deps: opts.deps,
+    signal: opts.signal,
+    timeoutMs: opts.modelHardCapMs,
+    ...(opts.modelIdleTimeoutMs !== undefined
+      ? { idleTimeoutMs: opts.modelIdleTimeoutMs }
+      : {}),
+    onStream: opts.onStream,
+    systemText: opts.systemText,
+  });
+  const outcome = await handle.outcome;
+  const stopAt = (
+    reason: "cancelled" | "timeout",
+    cancelKind: CancelKind
+  ): StopResult =>
+    modelStop({
+      state: opts.state,
+      started: opts.started,
+      reason,
+      cancelKind,
+    });
+  if (outcome.source === "adapter") {
+    return { kind: "ok", result: outcome.result! };
+  }
+  if (outcome.source === "callerAbort") {
+    return { kind: "stop", stop: stopAt("cancelled", "callerAbort") };
+  }
+  if (outcome.source === "hostCancel") {
+    // hostCancel 保留 stopReason "timeout" 以维持控制流;trace 由 cancelKind
+    // 独立记录真实来源。覆盖说明见本文件 `hostCancel` 注释。
+    return { kind: "stop", stop: stopAt("timeout", "hostCancel") };
+  }
+  // 三个非钟 source 已排除,只剩 timerTimeout —— 到点标记是它的必填字段,
+  // 这里直读,不设兜底值(见 `RaceModelOutcome`)。先落既有 timeout 收场,
+  // 是否真重发由调用方按 `attemptVerdict` 决定:重发就丢弃这次 stop。
+  return {
+    kind: "clock_timeout",
+    stop: stopAt("timeout", "timerTimeout"),
+    clock: outcome.clockAbort,
+  };
+}
+
+/**
+ * 重发收场判定:把一次 attempt 的收场与本轮 attempt 序号 + idle 开关合到
+ * 一处,`runModelPhase` 的循环体只问一件事 —— 「这次要不要重发」。
+ *
+ * `"retry"` = 本次收场是 timerTimeout 且 `classifyClockRetry` 放行,即它是
+ * 可丢弃的临时失败;其余任何情况都返回既有 `stop`,终局不变。
+ *
+ * `ok` 不接受:成功臂由调用方在 `attempt.kind` 上先分派(它带的是回合结果,
+ * 与 stop 不同形),这里只处理两条 stop 臂。
+ */
+function attemptVerdict(
+  attempt: Exclude<ModelAttemptConclusion, { kind: "ok" }>,
+  clockAttempt: number,
+  idleEnabled: boolean
+): "retry" | StopResult {
+  if (
+    attempt.kind === "clock_timeout" &&
+    classifyClockRetry(attempt.clock, clockAttempt, idleEnabled) === "retry"
+  ) {
+    return "retry";
+  }
+  return attempt.stop;
+}
+
+/**
+ * 重发前的退避等待;本函数只在 `runModelPhase` 的重试臂里被调用。
+ *
+ * abort during backoff → `"cancelled"`(spec 输入契约:不再发起下一次
+ * attempt);其余 sleep 异常原样上抛,不吞。返回 `"retrying"` = 等待走完,
+ * 调用方继续下一次 attempt。
+ */
+async function awaitRetryBackoff(
+  attempt: number,
+  deps: LoopEngineDeps,
+  signal: AbortSignal | undefined
+): Promise<"retrying" | "cancelled"> {
+  const delayMs =
+    deps.transportRetryDelayMs?.(attempt) ?? backoffDelayMs(attempt);
+  try {
+    await sleepWithAbort(delayMs, signal);
+  } catch (err) {
+    if (signal?.aborted !== true) throw err;
+    return "cancelled";
+  }
+  return "retrying";
+}
+
 /** 023: await 结构化 race outcome，并保持 SDK-first 错误 catch 契约。 */
 async function runModelPhase(opts: {
   readonly state: LoopState;
@@ -1472,52 +1702,50 @@ async function runModelPhase(opts: {
     // #196 IKNOW T1:每 turn 解析 deps.system?.();undefined → 字段缺席,
     // adapter 端条件 spread 不发 system 字段 → KV cache prefix 字节级零变化。
     const systemText = await opts.deps.system?.();
-    const handle = raceModel({
-      adapter: opts.deps.adapter,
-      state: opts.state,
-      deps: opts.deps,
-      signal: opts.signal,
-      timeoutMs: opts.modelHardCapMs,
-      ...(opts.modelIdleTimeoutMs !== undefined
-        ? { idleTimeoutMs: opts.modelIdleTimeoutMs }
-        : {}),
-      onStream: opts.onStream,
-      systemText,
-    });
-    const outcome = await handle.outcome;
-    if (outcome.source === "adapter") {
-      return { kind: "ok", result: outcome.result! };
-    }
-    if (outcome.source === "callerAbort") {
-      return modelStop({
+    // transport-continue-persist T1 / spec inv 1–2:时钟到点且**本次 attempt
+    // 无任何模型输出增量**时,整次调用重发(秒级指数退避、有界尝试),而不是
+    // 把回合判成 timeout —— 卡死的连接不是「回合已失败」。可见性与钟的来源
+    // 由 race 从同一次 `onExpire` 带出(`RaceModelOutcome.clock`,即刻进
+    // abort reason 的那枚标记);本循环只留「发一次 / 收场 / 退避后重发」三步,
+    // 重发判定见 `classifyClockRetry`,退避见 `awaitRetryBackoff`。
+    let clockAttempt = 1;
+    for (;;) {
+      const attempt = await runModelAttempt({
         state: opts.state,
+        deps: opts.deps,
+        signal: opts.signal,
         started: opts.started,
-        reason: "cancelled",
-        cancelKind: "callerAbort",
+        modelHardCapMs: opts.modelHardCapMs,
+        modelIdleTimeoutMs: opts.modelIdleTimeoutMs,
+        onStream: opts.onStream,
+        systemText,
       });
-    }
-    if (outcome.source === "hostCancel") {
-      // hostCancel 保留 stopReason "timeout" 以维持控制流;trace 由 cancelKind
-      // 独立记录真实来源。
-      // 覆盖说明:hostCancel 无公共触发点 — RaceModelHandle 封装于
-      // runModelPhase 内部,run/step/createLoopEngine 均不暴露 childAbort。
-      // 覆盖天花板为 raceModel 层 T2-new-5(直接调 handle.childAbort());
-      // 本映射由 (a) TypeScript 对 4 值 source union 的穷尽性检查 与
-      // (b) callerAbort/timerTimeout 集成测试 S12/S14(走同一 modelStop
-      // 路径)共同钉死。
-      return modelStop({
-        state: opts.state,
-        started: opts.started,
-        reason: "timeout",
-        cancelKind: "hostCancel",
+      if (attempt.kind === "ok") return attempt;
+      const verdict = attemptVerdict(
+        attempt,
+        clockAttempt,
+        opts.modelIdleTimeoutMs !== undefined
+      );
+      if (verdict !== "retry") return verdict;
+      safeEmitStream(opts.onStream, {
+        type: "transport_retry",
+        attempt: clockAttempt,
+        maxAttempts: TRANSPORT_MAX_ATTEMPTS,
+        detail: "invisible_timeout",
       });
+      if (
+        (await awaitRetryBackoff(clockAttempt, opts.deps, opts.signal)) ===
+        "cancelled"
+      ) {
+        return modelStop({
+          state: opts.state,
+          started: opts.started,
+          reason: "cancelled",
+          cancelKind: "callerAbort",
+        });
+      }
+      clockAttempt += 1;
     }
-    return modelStop({
-      state: opts.state,
-      started: opts.started,
-      reason: "timeout",
-      cancelKind: "timerTimeout",
-    });
   } catch (err) {
     // plan T3 / ADR-0013:reactive compact 兜底 — 每 run 限 1 次。
     // PromptTooLongError extends ProtocolError,必须先于 ProtocolError 分支判定;
