@@ -8,6 +8,9 @@
  * 11 命令 + 未知 /xxx + 普通消息 + 空输入 + /reset 天然不可达。
  */
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   effortHasArg,
   helpLines,
@@ -23,6 +26,12 @@ import {
   type SlashCandidate,
 } from "../../src/tui/slash.js";
 import { resolveAgentCatalog } from "../../src/harness/subagent/catalog.js";
+import { skillNamesForHelp, toSlashEntries } from "../../src/tui/app.js";
+import {
+  createSkillCatalog,
+  type SkillEntry,
+} from "../../src/harness/skill/catalog.js";
+import { createSkillScanner } from "../../src/harness/skill/scanner.js";
 
 describe("parseTuiInput: 词表命中", () => {
   for (const [input, command] of [
@@ -599,6 +608,19 @@ describe("parseSkillLoad: /skill-name [提示词] 解析", () => {
     { name: "code-review", description: "代码审查" },
   ];
 
+  /** spec tui-skill-slash-catalog SC1：插件技能规范名之外，slash 还要认
+   *  catalog 登记的唯一裸名别名（`SkillEntryLike.aliases` = app.tsx 的
+   *  catalog 投影）。canonical / bare 命中同一 entry，返回的 name 恒为规范
+   *  名（invariant 2：展示与加载都优先 canonical）。 */
+  const PLUGIN_SKILLS = [
+    {
+      name: "arthurpower:using-agent-skills",
+      description: "调度技能",
+      aliases: ["using-agent-skills"],
+    },
+    { name: "echo", description: "回声" },
+  ];
+
   test('"/echo" 精确命中 → { name: "echo", remainder: "" }', () => {
     expect(parseSkillLoad("/echo", SKILLS)).toEqual({
       name: "echo",
@@ -655,8 +677,222 @@ describe("parseSkillLoad: /skill-name [提示词] 解析", () => {
     expect(parseSkillLoad("   ", SKILLS)).toBeUndefined();
   });
 
+  test("字面量单斜杠 `/` → undefined（spec 入参契约：空 token 不成技能）", () => {
+    // `/` trim 后首 token 是空串，不是任何技能名；也不能被当成静态命令。
+    expect(parseSkillLoad("/", SKILLS)).toBeUndefined();
+    expect(parseTuiInput("/")).toEqual({ kind: "unknown", raw: "/" });
+  });
+
   test("空 skills 数组 → undefined", () => {
     expect(parseSkillLoad("/echo", [])).toBeUndefined();
+  });
+
+  test("SC1：裸名别名精确命中 → 返回规范名（canonical 优先展示，invariant 2）", () => {
+    expect(parseSkillLoad("/using-agent-skills", PLUGIN_SKILLS)).toEqual({
+      name: "arthurpower:using-agent-skills",
+      remainder: "",
+    });
+  });
+
+  test("SC1：规范名命中与裸名命中返回同一 entry 名", () => {
+    expect(
+      parseSkillLoad("/arthurpower:using-agent-skills", PLUGIN_SKILLS)
+    ).toEqual({
+      name: "arthurpower:using-agent-skills",
+      remainder: "",
+    });
+  });
+
+  test("invariant 5：裸名 token 后的 remainder 按**输入 token 长度**切，不按 canonical 长度", () => {
+    // `using-agent-skills` = 18 字符（+`/` = 19），canonical token 31 ——
+    // 用 skill.name.length 切会吃掉 remainder 前缀。
+    expect(parseSkillLoad("/using-agent-skills do X", PLUGIN_SKILLS)).toEqual({
+      name: "arthurpower:using-agent-skills",
+      remainder: "do X",
+    });
+    expect(
+      parseSkillLoad("/arthurpower:using-agent-skills do X", PLUGIN_SKILLS)
+    ).toEqual({
+      name: "arthurpower:using-agent-skills",
+      remainder: "do X",
+    });
+  });
+
+  test("裸名别名大小写不敏感命中（/USING-Agent-Skills → 规范名）", () => {
+    expect(parseSkillLoad("/USING-Agent-Skills", PLUGIN_SKILLS)).toEqual({
+      name: "arthurpower:using-agent-skills",
+      remainder: "",
+    });
+  });
+
+  test("SC2 静态优先：skill 裸名撞上静态命令 → undefined（/help 仍是宿主 help）", () => {
+    expect(
+      parseSkillLoad("/help", [
+        { name: "plug:help", description: "撞车", aliases: ["help"] },
+      ])
+    ).toBeUndefined();
+    expect(
+      parseSkillLoad("/compact 现在", [
+        { name: "plug:compact", description: "撞车", aliases: ["compact"] },
+      ])
+    ).toBeUndefined();
+  });
+
+  test("未知裸名 / 未登记的别名前缀 → undefined（不误命中 canonical）", () => {
+    expect(parseSkillLoad("/using-agent", PLUGIN_SKILLS)).toBeUndefined();
+    expect(parseSkillLoad("/arthurpower", PLUGIN_SKILLS)).toBeUndefined();
+    expect(parseSkillLoad("/nope", PLUGIN_SKILLS)).toBeUndefined();
+  });
+
+  test("无 aliases 字段的 skill（catalog 未登记裸名 / 冲突被丢）→ 只有规范名可达", () => {
+    const collided = [
+      {
+        name: "plugA:shared",
+        description: "先到者",
+        aliases: [],
+      },
+      { name: "plugB:shared", description: "撞车被丢别名" },
+    ];
+    expect(parseSkillLoad("/shared", collided)).toBeUndefined();
+    expect(parseSkillLoad("/plugA:shared", collided)).toEqual({
+      name: "plugA:shared",
+      remainder: "",
+    });
+    expect(parseSkillLoad("/plugB:shared", collided)).toEqual({
+      name: "plugB:shared",
+      remainder: "",
+    });
+  });
+});
+
+/**
+ * spec tui-skill-slash-catalog invariant 2：/help 名册只列 canonical 名 ——
+ * 投影带上唯一裸名别名后，helpLines 的 `/<name>  加载技能` 段仍不出现裸名
+ * （给人看的一律 `plugin:skill`）。
+ */
+describe("skillNamesForHelp: 带别名的 catalog 投影只吐 canonical 名", () => {
+  test("aliases 不进 /help 名册", () => {
+    // 真组合：真实 catalog → 投影（真的带上裸名别名）→ 名册。手写字面量
+    // 喂不进投影，若投影哪天把裸名当 name 发出去（违反 invariant 2），
+    // 手工 fixture 的写法仍然绿。
+    const catalog = createSkillCatalog([
+      {
+        name: "arthurpower:using-agent-skills",
+        description: "调度技能",
+        dir: "/tmp/skill-fixture",
+        disabled: false,
+        namespace: "arthurpower",
+      },
+      {
+        name: "echo",
+        description: "回声",
+        dir: "/tmp/skill-fixture",
+        disabled: false,
+      },
+    ]);
+    const projected = toSlashEntries(catalog);
+    expect(projected.map((e) => e.aliases)).toEqual([
+      ["using-agent-skills"],
+      undefined,
+    ]);
+    const names = skillNamesForHelp(projected);
+    expect(names).toEqual(["arthurpower:using-agent-skills", "echo"]);
+    // helpLines 消费该名册：整行是 canonical 形态，裸名不成行。
+    const joined = helpLines(names!).join("\n");
+    expect(joined).toContain("/arthurpower:using-agent-skills  加载技能");
+    expect(joined).not.toContain("\n/using-agent-skills  加载技能");
+  });
+
+  test("空投影 → undefined（help 的 skill 段整体退场）", () => {
+    expect(skillNamesForHelp([])).toBeUndefined();
+  });
+});
+
+/**
+ * spec tui-skill-slash-catalog：route A 的别名投影落在 app.tsx（不动 harness
+ * catalog 接口）。契约 = 别名集合在 `slash.ts` 的 `skillHeadLowers` 所用的
+ * 同一 case-folding 下唯一 —— 撞车整组丢弃（宁可不可用，不可歧义）；判据与
+ * 匹配若分歧，同一次按键在两种输入大小写下会落到两个条目。
+ */
+describe("toSlashEntries: 裸名别名投影只在唯一时登记", () => {
+  const entry = (
+    name: string,
+    namespace?: string,
+    description = "描述"
+  ): SkillEntry => ({
+    name,
+    description,
+    dir: "/tmp/skill-fixture",
+    disabled: false,
+    ...(namespace !== undefined ? { namespace } : {}),
+  });
+
+  test("唯一裸名 → 带 aliases；canonical 名不改写", () => {
+    const catalog = createSkillCatalog([
+      entry("arthurpower:using-agent-skills", "arthurpower"),
+    ]);
+    expect(toSlashEntries(catalog)).toEqual([
+      {
+        name: "arthurpower:using-agent-skills",
+        description: "描述",
+        aliases: ["using-agent-skills"],
+      },
+    ]);
+  });
+
+  test("裸名撞车 → 先到者赢拿别名，后者不拿（无第二套索引语义）", () => {
+    const catalog = createSkillCatalog([
+      entry("plugA:shared", "plugA"),
+      entry("plugB:shared", "plugB"),
+    ]);
+    expect(toSlashEntries(catalog)).toEqual([
+      { name: "plugA:shared", description: "描述", aliases: ["shared"] },
+      // 撞车方只有 canonical 可达：别名缺席，不是空数组。
+      { name: "plugB:shared", description: "描述" },
+    ]);
+    expect(catalog.get("shared")?.name).toBe("plugA:shared");
+  });
+
+  describe("D1: 别名集合必须在 slash 的 case-folding 语义下唯一（大小写不敏感）", () => {
+    test("裸名撞车（大小写不同）→ 两条都不登记别名（宁可不可用，不可歧义）", () => {
+      const catalog = createSkillCatalog([
+        entry("plugA:Shared", "plugA"),
+        entry("plugB:shared", "plugB"),
+      ]);
+      // catalog 侧：裸名 Map 大小写敏感 → 两个大小写不同的裸名各占一槽。
+      expect(catalog.get("Shared")?.name).toBe("plugA:Shared");
+      expect(catalog.get("shared")?.name).toBe("plugB:shared");
+      // 但 slash 匹配把两边都折成 "shared"（skillHeadLowers）→ 若投影只
+      // 登记「大小写精确唯一」的那条，用户输入 /shared 会落到 plugB:shared，
+      // 而 /Shared 落到 plugA:Shared —— 同一 case-folding 下两种答案。
+      // 契约：整组丢弃。
+      expect(toSlashEntries(catalog)).toEqual([
+        { name: "plugA:Shared", description: "描述" },
+        { name: "plugB:shared", description: "描述" },
+      ]);
+    });
+
+    test("改名撞车（非插件 skill 的规范名折成同形）→ 两侧都不登记别名", () => {
+      const catalog = createSkillCatalog([
+        entry("Echo"),
+        entry("plug:echo", "plug"),
+      ]);
+      expect(catalog.get("plug:echo")?.name).toBe("plug:echo");
+      // catalog 的裸名 Map 容忍 "Echo" 与 "echo" 共存 → 旧判据会把
+      // plug:echo 的裸名别名登记成 "echo"，与无 namespace 的 "Echo" 在
+      // slash 侧折成同一 token。
+      expect(toSlashEntries(catalog)).toEqual([
+        { name: "Echo", description: "描述" },
+        { name: "plug:echo", description: "描述" },
+      ]);
+    });
+  });
+
+  test("常规 skill（无 namespace）→ 不产别名", () => {
+    const catalog = createSkillCatalog([entry("echo")]);
+    expect(toSlashEntries(catalog)).toEqual([
+      { name: "echo", description: "描述" },
+    ]);
   });
 });
 
@@ -1264,6 +1500,203 @@ describe("Task 4：slashSuggestions 仅显示未消歧的兄弟（disambig-only�
       name: "echo",
       description: "回声",
     });
+  });
+});
+
+/**
+ * spec tui-skill-slash-catalog SC1 / SC3：裸名别名进候选 + Tab 补全。
+ *  - 前缀过滤同时看 canonical 与 aliases（大小写不敏感）；
+ *  - **只**发规范名候选（同一 skill 不因裸名多出一条 —— 否则唯一命中会
+ *    退化成 ≥2 匹配的 LCP 分支，Tab 补不出尾随空格）；
+ *  - Tab（slashComplete）唯一裸名匹配 → 补出规范名 + 尾随空格。
+ */
+describe("SC1/SC3：裸名别名进候选（canonical 展示）与 Tab 补全", () => {
+  const PLUGIN_SKILLS = [
+    {
+      name: "arthurpower:using-agent-skills",
+      description: "调度技能",
+      aliases: ["using-agent-skills"],
+    },
+    {
+      name: "arthurpower:boundary-testing",
+      description: "边界测试",
+      aliases: ["boundary-testing"],
+    },
+  ];
+
+  test("裸名前缀过滤命中；候选 name 是规范名（SC3 展示 canonical）", () => {
+    expect(slashSuggestions("/us", PLUGIN_SKILLS)).toMatchObject([
+      {
+        kind: "skill",
+        name: "arthurpower:using-agent-skills",
+        description: "调度技能",
+      },
+    ]);
+    expect(slashSuggestions("/using-agent", PLUGIN_SKILLS)).toMatchObject([
+      {
+        kind: "skill",
+        name: "arthurpower:using-agent-skills",
+        description: "调度技能",
+      },
+    ]);
+  });
+
+  test("canonical 前缀过滤同样命中（新旧入口一致）", () => {
+    expect(slashSuggestions("/arthurpower:usi", PLUGIN_SKILLS)).toMatchObject([
+      {
+        kind: "skill",
+        name: "arthurpower:using-agent-skills",
+        description: "调度技能",
+      },
+    ]);
+  });
+
+  test("裸名大小写不敏感（/USING → 规范名候选）", () => {
+    expect(slashSuggestions("/USING", PLUGIN_SKILLS)).toMatchObject([
+      {
+        kind: "skill",
+        name: "arthurpower:using-agent-skills",
+        description: "调度技能",
+      },
+    ]);
+  });
+
+  test("canonical 与裸名同时前缀命中 → 只发一条候选（重复条会把唯一匹配退化成 LCP）", () => {
+    // 插件名与裸名共享前缀（code:code-review / code-review）：若按「名字命中
+    // 一次 push 一条」，同一 skill 会出两条候选 → matches.length = 2 → Tab
+    // 走 LCP 分支，补不出尾随空格。
+    const overlapping = [
+      {
+        name: "code:code-review",
+        description: "审查",
+        aliases: ["code-review"],
+      },
+    ];
+    // toMatchObject 对数组同时钉条数（多一条即 fail）。
+    expect(slashSuggestions("/code", overlapping)).toMatchObject([
+      { kind: "skill", name: "code:code-review", description: "审查" },
+    ]);
+    expect(slashComplete("/code", overlapping)).toBe("/code:code-review ");
+  });
+
+  test("唯一裸名 Tab → 规范名 + 尾随空格（SC1 同一 entry）", () => {
+    expect(slashComplete("/using-agent-sk", PLUGIN_SKILLS)).toBe(
+      "/arthurpower:using-agent-skills "
+    );
+    expect(slashComplete("/us", PLUGIN_SKILLS)).toBe(
+      "/arthurpower:using-agent-skills "
+    );
+  });
+
+  test("唯一规范名 Tab → 规范名 + 尾随空格（canonical 路径不变）", () => {
+    expect(slashComplete("/arthurpower:usi", PLUGIN_SKILLS)).toBe(
+      "/arthurpower:using-agent-skills "
+    );
+  });
+
+  test("裸名精确命中 + 更长兄弟 → Tab 补精确那条规范名（exact 分支，不退回 LCP）", () => {
+    const siblings = [
+      { name: "plug:alpha", description: "a", aliases: ["alpha"] },
+      { name: "plug:alphabeta", description: "b", aliases: ["alphabeta"] },
+    ];
+    expect(slashComplete("/alpha", siblings)).toBe("/plug:alpha ");
+  });
+
+  test("≥2 裸名兄弟无精确命中 → LCP 取 canonical 补全形（三态语义不放宽）", () => {
+    expect(slashComplete("/", PLUGIN_SKILLS)).toBeNull();
+    expect(
+      slashComplete("/alph", [
+        { name: "plug:alpha", description: "a", aliases: ["alpha"] },
+        { name: "plug:alphabeta", description: "b", aliases: ["alphabeta"] },
+      ])
+    ).toBe("/plug:alpha");
+  });
+
+  test("裸名精确命中 + 更长兄弟 → 消歧只留兄弟（exactness 认裸名）", () => {
+    const siblings = [
+      { name: "plug:alpha", description: "a", aliases: ["alpha"] },
+      { name: "plug:alphabeta", description: "b", aliases: ["alphabeta"] },
+    ];
+    expect(slashSuggestions("/alpha", siblings)).toMatchObject([
+      { kind: "skill", name: "plug:alphabeta", description: "b" },
+    ]);
+  });
+
+  test("裸名精确命中且无兄弟 → 候选清空（消歧完成）", () => {
+    expect(slashSuggestions("/using-agent-skills", PLUGIN_SKILLS)).toEqual([]);
+    expect(slashSuggestions("/boundary-testing", PLUGIN_SKILLS)).toEqual([]);
+  });
+
+  test("裸名精确命中 + remainder → 候选清空（已提交，消歧不再有意义）", () => {
+    expect(slashSuggestions("/using-agent-skills do X", PLUGIN_SKILLS)).toEqual(
+      []
+    );
+  });
+
+  test("SC2：裸名撞静态命令 → Tab 补静态命令（静态优先），技能只能走规范名", () => {
+    const colliding = [
+      { name: "plug:help", description: "撞车技能", aliases: ["help"] },
+    ];
+    expect(slashComplete("/help", colliding)).toBe("/help ");
+    expect(slashComplete("/plug:help", colliding)).toBe("/plug:help ");
+  });
+
+  test("0 匹配 → null（未登记裸名不补全）", () => {
+    expect(slashComplete("/zzz", PLUGIN_SKILLS)).toBeNull();
+    expect(slashComplete("/using-agent-x", PLUGIN_SKILLS)).toBeNull();
+  });
+
+  test("agents 不进斜杠：真实插件布局里 agents 目录不进 skill catalog", async () => {
+    // spec invariant 6 / CONTEXT 「agents 不进斜杠」。装配 = 真实插件布局：
+    // 同一插件下 skills/ 与 agents/ 并列，scanner 只吃 skills 根 —— 若哪天
+    // 扫描把 agents 目录一起收进 catalog（或 slash 侧另开一条 agent 路径），
+    // 下面的断言即失败。
+    const root = await mkdtemp(join(tmpdir(), "iknow-tui-agents-"));
+    const skillsRoot = join(root, "arthurpower", "skills");
+    await mkdir(join(skillsRoot, "using-agent-skills"), { recursive: true });
+    await writeFile(
+      join(skillsRoot, "using-agent-skills", "SKILL.md"),
+      "---\nname: using-agent-skills\ndescription: 调度技能\n---\nbody",
+      "utf8"
+    );
+    const agentsRoot = join(root, "arthurpower", "agents");
+    await mkdir(agentsRoot, { recursive: true });
+    await writeFile(
+      join(agentsRoot, "code-reviewer-agent.md"),
+      "---\nname: code-reviewer-agent\ndescription: 审代码\n---\nbody",
+      "utf8"
+    );
+    try {
+      const entries = await createSkillScanner({
+        userHome: join(root, "home"),
+        projectIdentityRoot: join(root, "project"),
+        env: {},
+        pluginSkillDirs: [{ dir: skillsRoot, plugin: "arthurpower" }],
+      }).scan();
+      const catalog = createSkillCatalog(entries);
+      const projected = toSlashEntries(catalog);
+      // agent 名不在投影：canonical 或裸名都进不了候选/补全。
+      // catalog 本身不含 agent：agents/ 是另一条发现路径，不进 skill 扫描。
+      expect(catalog.all().map((e) => e.name)).toEqual([
+        "arthurpower:using-agent-skills",
+      ]);
+      expect(catalog.get("code-reviewer-agent")).toBeUndefined();
+      expect(catalog.get("arthurpower:code-reviewer-agent")).toBeUndefined();
+      const heads = projected.flatMap((e) => [e.name, ...(e.aliases ?? [])]);
+      expect(heads).toEqual([
+        "arthurpower:using-agent-skills",
+        "using-agent-skills",
+      ]);
+      expect(slashSuggestions("/code-reviewer", projected)).toEqual([]);
+      expect(slashComplete("/code-reviewer-agent", projected)).toBeNull();
+      expect(slashComplete("/arthurpower:code-reviewer-agent")).toBeNull();
+      expect(parseSkillLoad("/code-reviewer-agent", projected)).toBeUndefined();
+      expect(
+        parseSkillLoad("/arthurpower:code-reviewer-agent", projected)
+      ).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -21,13 +21,13 @@ minimal-change-verifier: yes — TUI skill slash only; CLI and commands/ deferre
    - **Inherits:** spec invariants 1–5; SC1–SC2; input-contract table
    - **Surface:** tests/tui (slash)
    - **Acceptance:** failing tests exist for unique bare load, canonical load, unknown bare, static `/help` winning over skill bare, remainder after bare token
-   - Status: [ ] pending
+   - Status: [x] done (RED `8003992d`)
 
 2. **GREEN: parseSkillLoad / suggestions / complete use catalog get semantics** — tag: `[implementation]`
    - **Inherits:** T1; spec SC1–SC4
    - **Surface:** tui slash (+ app only if wiring must pass catalog into match helpers)
    - **Acceptance:** T1 tests green; Tab still unique / LCP / null tri-state; help lists canonical skill names; no agent slash candidates; no `split(':')` skill matcher reintroduced
-   - Status: [ ] pending
+   - Status: [x] done (GREEN `27904577`；review 修复见本轮 commit)
    - [blocks: T1]
 
 ## Code review phase

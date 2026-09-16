@@ -108,6 +108,7 @@ import {
   slashPrefix,
   slashRemainder,
   slashSuggestions,
+  type SkillEntryLike,
   type SlashCandidate,
 } from "./slash.js";
 import { activeToolNameOf, liveToolReduce } from "./live-tool-state.js";
@@ -281,6 +282,7 @@ import {
   type FsModeContext,
 } from "../harness/sandbox/fs-mode.js";
 import { buildSkillLoadText, createSkillBody } from "../harness/skill/body.js";
+import { stripNamespace } from "../harness/skill/catalog.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import type { IknowSettingsLlmProvider } from "../config/settings.js";
 import {
@@ -940,6 +942,58 @@ function resolveStreamingSilenceNoticeMs(override: number | undefined): number {
 /** 流式静默时把现有 notice 改写为单行「仍在等待」文案(spec 不变式 3)。 */
 const STREAMING_SILENCE_NOTICE_LINE =
   "⠿ 仍在等待模型输出（~20s 无新流字节）；如长时间未恢复，建议检查网络连接。";
+
+// spec tui-skill-slash-catalog（skill bare alias）：slash 匹配认 catalog 的
+// 唯一裸名别名，展示/加载仍用规范名。别名不新增 catalog 接口 —— 只用公开的
+// `available()` / `get()` 推导（invariant 1：不在此处重写 `:` 拆名规则）。
+// S5 门：放在 TuiApp 之外，避免 god component 的复杂度随投影逻辑再涨。
+//
+// 唯一性判据必须与 slash 的匹配语义同一 case-folding：`slash.ts` 的
+// `skillHeadLowers` 把首 token 折成小写后做**精确命中**，而 catalog 的裸名
+// 索引是大小写敏感的裸 Map。只认 `catalog.get(bare) === entry` 会让裸名仅在
+// 大小写上不同的两条（`plugA:Shared` / `plugB:shared`）各拿一个别名，同一
+// `/shared` 与 `/Shared` 落到不同条目 —— 歧义。故：
+//   1. 候选裸名先过 catalog 侧登记语义：`catalog.get(bare) === entry` ——
+//      `get` **先查 canonical index**，所以「裸名被另一条 skill 的规范名占
+//      着」的形态（`Echo` 与 `plug:echo`）在此被挡下；
+//   2. 候选裸名 + 全部规范名一起按小写折叠进占用表；某个折叠 token 的占用者
+//      不唯一（占用者恒是规范名，两条候选裸名只在大小写上不同即此形态）→
+//      整组不发别名（宁可不可用，不可歧义）。占用者以**名字**去重，故某条
+//      自己的规范名折成自己的裸名时仍算唯一，不会被误伤。
+export function toSlashEntries(
+  catalog: SkillCatalog
+): ReadonlyArray<SkillEntryLike> {
+  const entries = catalog.available();
+  const bares = entries.map((entry) => {
+    if (entry.namespace === undefined) return undefined;
+    const bare = stripNamespace(entry.name, entry.namespace);
+    return bare !== undefined && catalog.get(bare) === entry ? bare : undefined;
+  });
+  const claimants = new Map<string, ReadonlyArray<string>>();
+  const claim = (name: string, owner: string): void => {
+    const key = name.toLowerCase();
+    const owners = claimants.get(key) ?? [];
+    claimants.set(key, owners.includes(owner) ? owners : [...owners, owner]);
+  };
+  for (const entry of entries) claim(entry.name, entry.name);
+  entries.forEach((entry, i) => {
+    const bare = bares[i];
+    if (bare !== undefined) claim(bare, entry.name);
+  });
+  return entries.map((entry, i) => {
+    const bare = bares[i];
+    const owners =
+      bare === undefined ? undefined : claimants.get(bare.toLowerCase());
+    if (owners?.length !== 1 || owners[0] !== entry.name) {
+      return { name: entry.name, description: entry.description };
+    }
+    return {
+      name: entry.name,
+      description: entry.description,
+      aliases: [bare!],
+    };
+  });
+}
 
 export function TuiApp(props: TuiAppProps): ReactNode {
   const pal = tuiPalette;
@@ -1611,7 +1665,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // #337 Phase C：skillCatalog 可选（缺省 = 空清单）；available() = 非 disabled
   // + 有 description、名字序。slash 候选混显「静态命令 + skill」。
   const skillCatalog = props.skillCatalog ?? emptySkillCatalog;
-  const skillList = useMemo(() => skillCatalog.available(), [skillCatalog]);
+  const skillList = useMemo(() => toSlashEntries(skillCatalog), [skillCatalog]);
   // 活 taskRoot cell（specs/skill-load-write-root.md）：slash 装配以外的
   // chrome 渲染面（sessionLocationLines 经 resolveWorktreeChromeRoot）也
   // 消费。ADR-0079 后 slash 装配不再读此 cell（正文不再挂写根 trailer），

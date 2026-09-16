@@ -4,10 +4,15 @@
  *
  * #337 Phase C：/skill-name [提示词] 加载发送 — TuiApp 端到端。
  *
- * 装配：stub bridge（makeDeps + 真实 inflight registry，hub 不发真实网络
- * 请求）+ stub skillCatalog（1 个 skill `echo`，dir 指向 tmp fixture 目录，
- * SKILL.md = frontmatter + 正文）。createSkillBody 走真实 harness 装配
- * （app.tsx 同款调用路径），断言「发送文本 = [skill-load name="echo"]\n<正文>」。
+ * 装配（两种）：
+ *   - stub bridge（makeDeps + 真实 inflight registry，hub 不发真实网络请求）
+ *     + stub skillCatalog（1 个 skill `echo`，dir 指向 tmp fixture 目录，
+ *     SKILL.md = frontmatter + 正文）—— 验 skill-load 信封与渲染投影；
+ *   - 真实 scanner + `createSkillCatalog`（`plantPluginSkillFixture`，
+ *     pluginSkillDirs 命名空间）—— 验 spec tui-skill-slash-catalog 的裸名
+ *     别名投影在 TUI 端到端（裸名/规范名两条路径同一 envelope）。
+ * createSkillBody 走真实 harness 装配（app.tsx 同款调用路径），断言
+ * 「发送文本 = [skill-load name="..."]\n<正文>」。
  *
  * 发送文本经 bridge.postMessage → run() encodeUserText 整段成为 user message；
  * 测试直接读落盘会话文件断言模型历史文本（确定性注入，不依赖模型主动性）。
@@ -31,7 +36,11 @@ import {
 import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
 import { createPermissionModeContext } from "../../src/harness/permission/index.js";
 import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
-import type { SkillCatalog } from "../../src/harness/skill/catalog.js";
+import {
+  createSkillCatalog,
+  type SkillCatalog,
+} from "../../src/harness/skill/catalog.js";
+import { createSkillScanner } from "../../src/harness/skill/scanner.js";
 import { createSkillTool } from "../../src/harness/aci/tools/skill.js";
 import { createRegistry } from "../../src/harness/tools/registry.js";
 import { createExecutor } from "../../src/harness/tools/executor.js";
@@ -109,6 +118,48 @@ async function plantSkillFixture(): Promise<SkillFixture> {
     available: () => [entry],
     getBodyPath: () => join(skillDir, "SKILL.md"),
   };
+  return {
+    root,
+    skillDir,
+    catalog,
+    cleanup: async () => {
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
+/**
+ * spec tui-skill-slash-catalog SC1/SC2（route A）：插件技能 fixture —— 走
+ * **真实** scanner + catalog（`pluginSkillDirs` 命名空间 → canonical
+ * `<plugin>:<name>` + bareIndex 裸名别名），而不是手写 stub catalog。这样
+ * app.tsx 的别名投影（`stripNamespace` + `catalog.get(bare) === entry` 唯一性
+ * 判据）被端到端点到：裸名能加载、规范名能加载、展示仍 canonical。
+ */
+async function plantPluginSkillFixture(): Promise<SkillFixture> {
+  const root = await mkdtemp(join(tmpdir(), "iknow-tui-skill-bare-"));
+  const skillsRoot = join(root, "arthurpower", "skills");
+  const skillDir = join(skillsRoot, "using-agent-skills");
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(
+    join(skillDir, "SKILL.md"),
+    [
+      "---",
+      "name: using-agent-skills",
+      "description: 技能调度（dispatch skills）",
+      "---",
+      "# 技能调度",
+      "",
+      "按任务派发合适技能。",
+    ].join("\n"),
+    "utf8"
+  );
+  const entries = await createSkillScanner({
+    userHome: join(root, "home"),
+    projectIdentityRoot: join(root, "project"),
+    env: {},
+    pluginSkillDirs: [{ dir: skillsRoot, plugin: "arthurpower" }],
+  }).scan();
+  const catalog = createSkillCatalog(entries);
   return {
     root,
     skillDir,
@@ -213,6 +264,31 @@ async function mountAppAsync(
       await setup.renderOnce();
     },
   };
+}
+
+/**
+ * 等本次 skill-load turn 落盘（首条 user 信封 + 模型回复齐）后回读首条 user
+ * 文本。inflight 空判有竞态（提交尚未进 registry 时就读到 0），落盘是权威
+ * 信号。
+ */
+async function awaitSkillLoadEnvelope(app: DrivenApp): Promise<string> {
+  await until(
+    async () => {
+      const list = await app.bridge.listSessions();
+      if (list.length === 0) return false;
+      const f = await app.bridge.loadSessionFile(list[0]!.conversation_id);
+      return f.messages.some((m) => m.role === "assistant");
+    },
+    8000,
+    "skill-load-persisted"
+  );
+  const list = await app.bridge.listSessions();
+  const file = await app.bridge.loadSessionFile(list[0]!.conversation_id);
+  const first = file.messages[0]!;
+  return first.content
+    .filter((b): b is { type: "text"; text: string } => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
 }
 
 describe("Phase C: /skill-name 加载发送", () => {
@@ -475,6 +551,82 @@ describe("Phase C: /skill-name 加载发送", () => {
     await untilFrame(app.setup, (f) => f.includes("未知命令"), 8000, "unknown");
 
     // 未建档：skill-load 不触发，也无 turn。
+    expect((await app.bridge.listSessions()).length).toBe(0);
+
+    await app.destroy();
+    await fx.cleanup();
+  }, 30_000);
+
+  test("SC1：裸名 /using-agent-skills 与规范名加载**同一条目**（落盘信封恒 canonical，两臂逐字节相同）", async () => {
+    const fx = await plantPluginSkillFixture();
+    // 真实 catalog 侧先自证：canonical + bare 命中同一 entry（唯一别名成立）。
+    expect(fx.catalog.get("using-agent-skills")).toBe(
+      fx.catalog.get("arthurpower:using-agent-skills")
+    );
+
+    // 裸名臂：typed 裸名 → 信封 canonical，remainder 不被 canonical 长度吃掉。
+    const app = await mountAppAsync(fx.catalog, [
+      assistantResult({ texts: ["技能已加载"] }),
+    ]);
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+    await untilFrame(app.setup, (f) => f.includes("输入消息"));
+
+    await app.typeText("/using-agent-skills 帮我调度");
+    await app.pressEnter();
+    const bareText = await awaitSkillLoadEnvelope(app);
+    expect((await app.bridge.listSessions()).length).toBe(1);
+    // 信封的 name 是规范名（不是用户 typed 的裸名）—— catalog.get 拿得到。
+    expect(
+      bareText.startsWith(
+        '[skill-load name="arthurpower:using-agent-skills"]\n'
+      )
+    ).toBe(true);
+    expect(bareText).toContain("# 技能调度");
+    expect(bareText.endsWith("帮我调度")).toBe(true);
+    // 屏上 chip 同样 canonical。
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("loading skill arthurpower:using-agent-skills"),
+      8000,
+      "bare-chip"
+    );
+    await app.destroy();
+
+    // canonical 臂：同一 fixture（同一 skill 目录）再跑一次，信封逐字节相同
+    // —— 两条输入路径必须收敛到同一装配 + 同一 remainder 切法。
+    const canonicalApp = await mountAppAsync(fx.catalog, [
+      assistantResult({ texts: ["技能已加载"] }),
+    ]);
+    await untilFrame(canonicalApp.setup, (f) => f.includes("Version"));
+    await untilFrame(canonicalApp.setup, (f) => f.includes("输入消息"));
+    await canonicalApp.typeText("/arthurpower:using-agent-skills 帮我调度");
+    await canonicalApp.pressEnter();
+    const canonicalText = await awaitSkillLoadEnvelope(canonicalApp);
+    await canonicalApp.destroy();
+
+    expect(canonicalText).toBe(bareText);
+
+    await fx.cleanup();
+  }, 30_000);
+
+  test("SC2：/help 仍开宿主帮助（裸名与 canonical 都不抢），且不建档", async () => {
+    const fx = await plantPluginSkillFixture();
+    const app = await mountAppAsync(fx.catalog, []);
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+    await untilFrame(app.setup, (f) => f.includes("输入消息"));
+
+    await app.typeText("/help");
+    await app.pressEnter();
+    const frame = await untilFrame(
+      app.setup,
+      (f) => f.includes("Ctrl+C"),
+      8000,
+      "host-help"
+    );
+    // 宿主词表在屏：/compact 行与 Ctrl+C 尾注。
+    expect(frame).toContain("/compact");
+    // 不是 skill 加载：无 chip、无建档。
+    expect(frame.includes("loading skill")).toBe(false);
     expect((await app.bridge.listSessions()).length).toBe(0);
 
     await app.destroy();

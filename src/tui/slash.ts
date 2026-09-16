@@ -5,9 +5,10 @@
  * 一致（#146 TUI 自建 slash 词表 + 解析 + Tab 补全 + hint 行）；仅文件头注释
  * 更新为本次迁移说明。纯 TS 模块，无 ink / OpenTUI 依赖。
  *
- * 词表 15 条：/sessions /new /quit /exit /help /info /thinking /effort
- * /memory /compact /continue /rewind /mcp /graph /config /model。/reset 不在词表内
- * 即天然不可达（Q5c 废除）。
+ * 词表：/sessions /new /quit /exit /help /info /thinking /effort /memory
+ * /compact /continue /rewind /mcp /graph /config /model（以 VOCABULARY 为准
+ * —— 不在此重复条数，条数是漂移源）。/reset 不在词表内即天然不可达（Q5c
+ * 废除）。
  * rev 2026-09-13:ADR-0092 / SC13 加 /config（文件系统隔离档切换;值域与
  * 文案单点在 harness/sandbox/fs-mode.ts;三入口 chat / TUI / serve 同语义）。
  * rev 2026-09-14:#1010 加 /model（provider/model picker）。
@@ -35,8 +36,15 @@
  *  - `slashComplete(input, skills?)` 跨「静态命令 + skill」唯一匹配补全；
  *  - `parseSkillLoad(raw, skills)` 精确命中 skill 名 → {name, remainder}，
  *    命中静态命令 / 不匹配 → undefined（静态命令优先）。发送语义见 app.tsx。
- *    SkillEntryLike = {name, description?} 最小投影，slash.ts 不依赖 harness
- *    catalog 类型（解耦，便于单测注入扁平对象）。
+ *    SkillEntryLike = {name, description?, aliases?} 最小投影，slash.ts 不依赖
+ *    harness catalog 类型（解耦，便于单测注入扁平对象）。
+ *
+ * spec tui-skill-slash-catalog（skill bare alias）：
+ *  - 匹配认**规范名或唯一裸名别名**（大小写不敏感），出条/展示/补全恒用规范名
+ *    （invariant 2）；别名由调用方从 catalog 投影（app.tsx：`stripNamespace`
+ *    + `get(bare) === entry` 唯一性判据），slash.ts 不自行拆 `:`（invariant 1）。
+ *  - 静态词表在精确碰撞时优先（invariant 4）；remainder 按输入 token 长度切
+ *    （invariant 5，复用 slashRemainder）。
  */
 
 import { THINKING_EFFORT_VALUES } from "../session-api/contract.js";
@@ -66,17 +74,30 @@ export type SlashParseResult =
   | { kind: "message"; text: string };
 
 /** skill 最小投影（避免 slash.ts 强依赖 harness catalog 类型；调用方传入
- *  skillCatalog.available() 同形扁平对象即可）。 */
+ *  skillCatalog.available() 同形扁平对象即可）。
+ *
+ *  `aliases`（spec tui-skill-slash-catalog）：插件技能的**唯一**裸名别名
+ *  —— 调用方从 catalog 投影（`stripNamespace` + `get(bare) === entry` 唯一
+ *  性判据）后塞入；slash.ts 只消费，不自行拆 `:`（spec invariant 1）。缺省 /
+ *  空数组 = 无别名（catalog 未登记或冲突被丢）。 */
 export interface SkillEntryLike {
   readonly name: string;
   readonly description?: string;
+  readonly aliases?: ReadonlyArray<string>;
 }
 
 /** slash 候选判别联合：静态命令 | skill（Phase C 引入，Phase D 复用）。
- *  顺序约定：静态命令在前、skill 在后（slashSuggestions 确定性输出）。 */
+ *  顺序约定：静态命令在前、skill 在后（slashSuggestions 确定性输出）。
+ *  skill 臂的 `name` 恒为**规范名**（invariant 2：展示与补全都用
+ *  `plugin:skill`）；`aliases` 只参与匹配与 exactness 判定，不出条、不显示。 */
 export type SlashCandidate =
   | { kind: "command"; command: TuiSlashCommand }
-  | { kind: "skill"; name: string; description?: string };
+  | {
+      kind: "skill";
+      name: string;
+      description?: string;
+      aliases?: ReadonlyArray<string>;
+    };
 
 const VOCABULARY: ReadonlySet<string> = new Set<TuiSlashCommand>([
   "sessions",
@@ -205,11 +226,14 @@ function enumerateSlashCandidates(
   // 空前缀 → skill 不入场；用户至少打 1 字符前缀才混入。
   if (skills !== undefined && prefix.length > 0) {
     for (const skill of skills) {
-      if (skill.name.toLowerCase().startsWith(prefix)) {
+      // 规范名或任一裸名别名命中前缀即入场，但**只发一条** canonical 候选
+      // —— 别名不是第二条候选（重复条会把唯一匹配退化成 ≥2 的 LCP 分支）。
+      if (skillHeadLowers(skill).some((head) => head.startsWith(prefix))) {
         out.push({
           kind: "skill",
           name: skill.name,
           description: skill.description,
+          aliases: skill.aliases,
         });
       }
     }
@@ -217,9 +241,19 @@ function enumerateSlashCandidates(
   return out;
 }
 
-/** Task 4：从 SlashCandidate 求其规范化的「首 token 小写名」（统一判定接口）。 */
-function candidateHeadLower(c: SlashCandidate): string {
-  return c.kind === "command" ? c.command : c.name.toLowerCase();
+/** skill 的全部可匹配首 token 小写形：规范名 + 唯一裸名别名（spec
+ *  invariant 3 —— 冲突别名已由 catalog 侧丢弃，这里只消费投影）。 */
+function skillHeadLowers(skill: SkillEntryLike): ReadonlyArray<string> {
+  return [skill.name, ...(skill.aliases ?? [])].map((head) =>
+    head.toLowerCase()
+  );
+}
+
+/** Task 4：从 SlashCandidate 求其规范化的「首 token 小写名」集合（统一判定
+ *  接口）。skill 臂含别名 —— typed 裸名 token 也必须被认成精确命中
+ *  （invariant 2/3：exactness 认 bare，展示仍 canonical）。 */
+function candidateHeadLowers(c: SlashCandidate): ReadonlyArray<string> {
+  return c.kind === "command" ? [c.command] : skillHeadLowers(c);
 }
 
 /**
@@ -254,8 +288,10 @@ export function slashSuggestions(
   const matches = enumerateSlashCandidates(text, skills);
   if (matches.length === 0) return [];
   const prefixLower = slashPrefix(text);
-  // 候选中是否包含 typed 前缀的精确命中（大小写不敏感）。
-  const hasExact = matches.some((m) => candidateHeadLower(m) === prefixLower);
+  // 候选首 token 小写集合逐条算一次（每候选两个消费点：exactness + 兄弟过滤）。
+  const headLowers = matches.map((m) => candidateHeadLowers(m));
+  // 候选中是否包含 typed 前缀的精确命中（大小写不敏感，skill 臂含裸名别名）。
+  const hasExact = headLowers.some((heads) => heads.includes(prefixLower));
   // 1) 精确命中 + remainder → 用户已「提交」（typed `/skillname` 后追加更多
   //    内容）；候选不再有消歧意义，全部隐藏。非 exact 前缀 + remainder 不受
   //    此条影响（前缀歧义仍是消歧场景，列表保留 —— plan T4 只授权 exact
@@ -264,8 +300,8 @@ export function slashSuggestions(
   if (!hasExact) return matches;
   // 3) 存在精确命中 → 过滤掉该精确候选，保留仅「更长兄弟」（仍可消歧）。
   const out: SlashCandidate[] = [];
-  for (const m of matches) {
-    if (candidateHeadLower(m) === prefixLower) continue;
+  for (const [i, m] of matches.entries()) {
+    if (headLowers[i]!.includes(prefixLower)) continue;
     out.push(m);
   }
   return out;
@@ -322,12 +358,13 @@ export function slashComplete(
     m.kind === "command" ? `/${m.command}` : `/${m.name}`
   );
   if (matches.length === 1) return `${forms[0]!} `;
-  // Task 4：typed 首 token 是某候选的**精确命中**（大小写不敏感）+ 还存在
-  // 更长兄弟（matches.length >= 2）→ Tab 补全该精确候选（带尾随空格），
-  // 而非 LCP（LCP === typedForm 无进展）。
+  // Task 4：typed 首 token 是某候选的**精确命中**（大小写不敏感，skill 臂
+  // 含裸名别名）+ 还存在更长兄弟（matches.length >= 2）→ Tab 补全该精确候选
+  // 的**规范名**（带尾随空格），而非 LCP（LCP === typedForm 无进展）。
   const typedForm = `/${slashPrefix(text)}`;
-  const exactIndex = forms.findIndex(
-    (f) => f.toLowerCase() === typedForm.toLowerCase()
+  const typedLower = slashPrefix(text);
+  const exactIndex = matches.findIndex((m) =>
+    candidateHeadLowers(m).includes(typedLower)
   );
   if (exactIndex !== -1) return `${forms[exactIndex]!} `;
   const lcp = longestCommonPrefix(forms);
@@ -343,12 +380,13 @@ export function slashComplete(
 
 /**
  * #337 Phase C：`/skill-name [提示词]` 解析。
- * 输入 trim 后以 "/" 开头，首 token `/xxx` 中 `xxx` **精确命中** skill 名 →
- * 返回 `{ name, remainder }`（remainder = 去掉首 token 后的剩余部分，可能
- * 为空）。命中静态 slash 命令 / 不匹配 → undefined（静态命令优先，C1 语义）。
- * 与 parseTuiInput 的 command/unknown/message 判别正交：skill 名不属于静态
- * 词表，parseTuiInput 只会把它判为 unknown——调用方在 parseTuiInput **之前**
- * 先调本函数分流。
+ * 输入 trim 后以 "/" 开头，首 token `/xxx` 中 `xxx` **精确命中** skill 的
+ * 规范名或唯一裸名别名（spec tui-skill-slash-catalog invariant 3）→ 返回
+ * `{ name, remainder }`（`name` 恒为**规范名**，invariant 2；remainder = 去掉
+ * 首 token 后的剩余部分，可能为空）。命中静态 slash 命令 / 不匹配 →
+ * undefined（静态命令优先，invariant 4 / C1 语义）。与 parseTuiInput 的
+ * command/unknown/message 判别正交：skill 名不属于静态词表，parseTuiInput 只
+ * 会把它判为 unknown——调用方在 parseTuiInput **之前**先调本函数分流。
  */
 export function parseSkillLoad(
   raw: string,
@@ -359,11 +397,13 @@ export function parseSkillLoad(
   if (prefix === "") return undefined;
   if (VOCABULARY.has(prefix)) return undefined;
   for (const skill of skills) {
-    // 精确命中 skill 名（大小写不敏感，与 slashSuggestions 前缀过滤同语义；
-    // 返回原始 skill.name 作为 name，保留声明大小写）。
-    if (skill.name.toLowerCase() === prefix) {
-      const rest = text.slice(text.indexOf("/") + 1 + skill.name.length).trim();
-      return { name: skill.name, remainder: rest };
+    // 精确命中规范名或裸名别名（大小写不敏感，与 slashSuggestions 前缀过滤
+    // 同语义；返回原始 skill.name 作为 name，保留声明大小写并确保后续
+    // catalog.get 拿到的是规范名而非用户 typed 的裸名）。
+    if (skillHeadLowers(skill).includes(prefix)) {
+      // invariant 5：remainder 按**输入 token 长度**切（slashRemainder 即该
+      // 单一实现）—— 用 skill.name.length 会在裸名输入里吃掉 remainder 前缀。
+      return { name: skill.name, remainder: slashRemainder(text) };
     }
   }
   return undefined;
