@@ -164,8 +164,14 @@ _Avoid_: 工具自填 structured metadata 进 model tool_result；把 bash 例�
 **observability side-channel**: (#298) 工具观测旁路——handler 返 envelope `{ output, meta? }`；executor 拆分后仅 `output` 字符串化进 model-facing tool_result，`meta`（典型如 edit_file/write_file 的 `oldContent`/`newContent`）经 `PostToolUseHook.payload` → `TuiToolEvent.payload` → `LiveToolRun` 字段供 TUI diff 预览等观测消费者，永不进模型视野。ADR-0004（supersede Y1）。
 _Avoid_: 把 meta 拼入 model tool_result；让 TUI / Web 直接读 handler 原始返回对象
 
-**ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；当前 8 件：`bash` / `read_file` / `grep` / `glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`，SSOT 工厂 = `src/harness/aci/tools/registry.ts:createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取，工具数永不同步漂移（#141 / #191 / a277f68）。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。
-_Avoid_: 在 harness 之外另起 tool 注册表；在 entry point 手写工具数组（#228 决议 D4——`memory_recall` / `memory_save` 入 SSOT 8+2=10）；让工具返回结构化 metadata
+**ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；**基线 8 件**（`bash` / `read_file` / `grep` / `glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`）之后按 append-only 批次增长（memory 2 / skill / subagent / todo / mcp / bg / run_graph / trace 读侧 / **符号工具面** 15 / worktree 5 …）。**当前件数以 `src/harness/aci/tools/registry.ts:ACI_TOOLSET_NAMES` 数组长度为唯一 SSOT，本词条不复述数字**（该文件自己声明「本表长度以数组为 source of truth」）。SSOT 工厂 = 同文件 `createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取（#141 / #191 / a277f68）。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。
+_Avoid_: 在词条或文档里写死「当前 N 件」（必漂——曾写「当前 8 件 / 8+2=10」而数组早已 40+）；在 harness 之外另起 tool 注册表；在 entry point 手写工具数组；让工具返回结构化 metadata
+
+**符号工具面（symbol tool surface）**: 模型面的 15 件 LSP 支撑工具——10 件查（`find_symbol` / `find_declaration` / `find_referencing_symbols` / `find_implementations` / `get_symbols_overview` / `get_hover` / `get_diagnostics_for_file` / `prepare_call_hierarchy` / `list_incoming_calls` / `list_outgoing_calls`）+ 5 件改（`rename_symbol` / `replace_symbol_body` / `insert_before_symbol` / `insert_after_symbol` / `safe_delete_symbol`）；以符号身份 `{ file, symbol_path }` 提问，行列译码封在 `symbol-resolver.ts`。#251 的 10 件坐标面 `lsp_*` 已在 symbol-primary-aci T5 从模型面退役——`createLspToolSet` **零生产调用方**（只有 `tests/harness/aci/lsp.test.ts` 在调），但 `getClientForWorkspaceDetailed` 仍住在那个文件里被活的 `symbol.ts` import。
+_Avoid_: 把 `lsp_*` 当现行模型面（也不要把只测 `lsp_*` 的断言当活路径的覆盖）；让空数组兼任失败值（取不到 project 锚点应返分层哨兵，见 **请求级打开窗口**）；在 `symbol-resolver.ts` 外自写行列译码；grep 猜代码结构
+
+**请求级打开窗口（request-scoped didOpen）**: tsserver 对未打开文件**不建 project**，所以符号类 RPC 必须罩在 `client.withDocumentOpen(file, run)` 里（进入开、退出关，含抛错与超时路径）——**这是 project 上下文的前提，不是性能优化**；请求间不对 server 保持打开，故 version 每次从 1 起算（`symbol-resolver` 缓存键改内容指纹即此推论）。例外只有装配期 warmup：裸 `ensureOpen` 置 `pinned = true` 永久持有一个**真实样本文件**，理由与本条同（`warmup.ts` / `client.ts:632-642`、`520-521`）。已知豁免口：`find_symbol` 的 `file` 缺省分岔用伪路径 `<directory>/iknow-workspace.ts` 仅为 spawn，随后裸发请求、不开窗口（`lsp.ts:447-459` / `symbol.ts:354-356`）。
+_Avoid_: 把 didOpen 当可省的优化；跨请求保持打开（`pinned` 预热除外）；用伪路径当 project 锚点；把无锚点查询的空结果读成「真没这个符号」；用请求级 version 号当跨请求缓存键
 
 **last-read ledger**: 本 conversation 内「看过的规范 path」登记表。**进程内存**，键为 conversationId，不落会话文件夹。入账：成功 `read_file`，或成功且可抽单一 path 的白名单 `bash`（`cat` / `nl` / `bat` / `batcat` / `head` / `tail` / `sed -n 'X,Yp'` / `grep` / `egrep` / `fgrep` / `rg`；单文件、无管道、无重定向）。只供已存在且 size>0 的 `write_file` 查表，没有则硬拒不写盘；新建与空文件免检。`edit_file` 不查表。不扫 `ctx.messages`。无 conversationId 则非空覆写 fail-closed。resume 空表。ADR-0084。
 _Avoid_: 用对话字符串判断读过；进程级全局表；落盘当权威；把任意只读 bash（`ls`/`stat`/管道）当入账；复用 `validateReadonlyCommand` 当入账；把 last-read 当作 `edit_file` 前置
@@ -712,6 +718,9 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **PreWrite vs worktree isolation mode**: PreWrite 是用户 deny 事件；isolation 是写主仓门禁，不是 `settings.hooks` 条目
 - **PreCommit vs session transcript 落盘**: PreCommit 拦 git commit 形态；JSONL append 仍是 host commit hook，不是 user 事件
 - **闭世界围栏 vs 工作区档**: 闭世界是旧默认（home 不可见）；工作区档 home 可见、只收紧写
+- **符号工具面 vs 坐标面 `lsp_*`**: 前者是现行模型面（符号身份提问）；后者已退役、`createLspToolSet` 零生产调用方，故测它的断言不构成活路径覆盖
+- **请求级打开窗口 vs warmup pinned open**: 前者随请求开关（退出即关）；后者是装配期裸 `ensureOpen` 对真实样本的永久持有，两者理由同一条（tsserver 不为未打开文件建 project）
+- **分层哨兵 vs 空数组**: 拿不到 server / 根 / project 锚点是**失败**，返 `(…)` 纯字符串哨兵并被 `isLspFailureSentinel` 认出；`[]` 只许表示「查到了、真没这个符号」。缺方法哨兵不算失败（能力缺口）
 
 ## Flagged ambiguities
 
