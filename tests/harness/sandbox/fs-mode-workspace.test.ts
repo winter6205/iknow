@@ -41,7 +41,6 @@ import {
   parseFsModeFlag,
   type FsIsolationMode,
 } from "../../../src/harness/sandbox/fs-mode.js";
-import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.js";
 
 const FIX_ROOT = mkdtempSync(join(homedir(), ".iknow-bwrap-workspace-"));
 const TASK = join(FIX_ROOT, "task");
@@ -99,7 +98,6 @@ function workspaceFenceArgv(spec: FenceSpec): readonly string[] {
     command: "bash",
     args: ["-c", "true"],
     fsPolicy,
-    networkPolicy: createNetworkPolicy(),
     env: { PATH: "/bin" },
     cwd: TASK,
     ...(spec.homeRoot !== undefined ? { homeRoot: spec.homeRoot } : {}),
@@ -311,7 +309,6 @@ describe("createBwrapFence — 工作区档 argv 形态 (ADR-0092 SC11/SC12)", (
       command: "bash",
       args: ["-c", "true"],
       fsPolicy: policy,
-      networkPolicy: createNetworkPolicy(),
       env: { PATH: "/bin" },
       cwd: TASK,
       homeRoot: HOME_FIX,

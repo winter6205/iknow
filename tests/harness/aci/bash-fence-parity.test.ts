@@ -1,15 +1,19 @@
 /**
  * #653 / T1 — 前台 / 后台 bash 沙箱纪律对齐 (argv 隔离轴集合相等)。
  *
- * 覆盖 spec SC lines 44-45 (positive + negative)：
+ * 覆盖 spec SC lines 44-45 (positive + negative):
  *   - SC44 positive:同一 fixture 输入下，前台与后台 bwrap argv 在隔离轴上
- *     集合相等(network / cwdReadonly 开与关各至少一例)。
+ *     集合相等(cwdReadonly 开与关各至少一例)。
  *   - SC45 negative:产品 `bash` `background:true` 路径的 spawn argv 包含
  *     bwrap(或测试替身证明调用了与前台同一围栏构造缝);不存在「仅
  *     `nodeSpawn(command)` 无围栏」的产品分支。
  *
  * ADR-0092:默认档从闭世界换成全局档 —— 宿主 `/` 打底 + 系统前缀只读重绑,
  * 不再有 guest `/tmp` pad bind;前台后台共用同一 fence 构造缝。
+ *
+ * ADR-0097:网络轴在 fence 层是**常量**(netns 恒断,无 per-call opt-in),
+ * 出口由 egress 缝 unix socket 代理。网络轴不是 argv 集合的可变维度 ——
+ * 前后台 `--unshare-net` 都恒在。
  *
  * 驱动方式:
  *   - 前台:调 createBwrapFence,env 走产品缝(filter + cwdReadonly 时
@@ -42,7 +46,6 @@ import {
   createBwrapFence,
   createEnvIsolation,
   createFsPolicy,
-  createNetworkPolicy,
 } from "../../../src/harness/sandbox/index.ts";
 
 // 必须先于 manager 导入:模块级 vi.mock 会被 vitest hoist,但写在这里
@@ -88,12 +91,12 @@ function makeFakeChild(pid = 99001) {
  * 镜像 bash.ts foreground fence 装配(ADR-0092 全局档)。
  * - env:envIsolation.filter(...) 后,cwdReadonly 时注入 GIT_OPTIONAL_LOCKS=0
  *   (产品缝 bash.ts,post-filter additive)
- * - fence 选项:network + cwdReadonly 由 opts 透传
+ * - fence 选项:cwdReadonly 由 opts 透传;网络轴无 opt-in(`--unshare-net`
+ *   是常量)
  * - fsPolicy:全局档只承载 tmpRoot,不塑形 argv mount
  */
 function foregroundFenceArgv(opts: {
   readonly cwd: string;
-  readonly network: boolean;
   readonly cwdReadonly: boolean;
 }): readonly string[] {
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
@@ -105,10 +108,8 @@ function foregroundFenceArgv(opts: {
     command: "bash",
     args: ["-c", "echo hi"],
     fsPolicy: createFsPolicy({ tmpDir: tmpdir() }),
-    networkPolicy: createNetworkPolicy(),
     env: fenceEnv,
     cwd: opts.cwd,
-    ...(opts.network ? { network: true } : {}),
     ...(opts.cwdReadonly ? { cwdReadonly: true } : {}),
   }).argv;
 }
@@ -116,12 +117,14 @@ function foregroundFenceArgv(opts: {
 /**
  * 关键隔离旗标集合(spec SC line 44):从 argv 投影成集合,确保比较的是隔离
  * 维度而非 argv 顺序 / 拼写差异。
+ *
+ * ADR-0097:网络轴不在集合里——`--unshare-net` 是常量,既为 fg 又为 bg,
+ * 加入集合也恒等,不参与差异比较。函数保留以备未来轴扩展时复用。
  */
 function isolationAxisFlags(argv: readonly string[]): Set<string> {
   const flags = new Set<string>();
-  // 网络轴:--unshare-net 存在 = 隔离,否则 = host-net
+  // 网络轴 `--unshare-net` 恒在(不参与对称性比较,与下文各轴独立)。
   if (argv.includes("--unshare-net")) flags.add("unshare-net");
-  else flags.add("host-net");
   // ADR-0021 生命周期轴
   if (argv.includes("--unshare-user-try")) flags.add("unshare-user-try");
   if (argv.includes("--die-with-parent")) flags.add("die-with-parent");
@@ -163,10 +166,11 @@ function isolationAxisFlags(argv: readonly string[]): Set<string> {
 /**
  * 驱动 real defaultBackgroundSpawn,通过 vi.mock 拦截 child_process.spawn
  * 捕获 argv(不真启子进程)。
+ *
+ * ADR-0097:后台 fence 无网络入参 —— `--unshare-net` 恒在。
  */
 async function backgroundFenceArgv(opts: {
   readonly cwd: string;
-  readonly network: boolean;
   readonly cwdReadonly: boolean;
 }): Promise<readonly string[]> {
   spawnMock.mockImplementation(() => makeFakeChild());
@@ -174,7 +178,6 @@ async function backgroundFenceArgv(opts: {
     command: "echo hi",
     cwd: opts.cwd,
     env: { PATH: "/bin" },
-    ...(opts.network ? { network: true } : {}),
     ...(opts.cwdReadonly ? { cwdReadonly: true } : {}),
   });
   // spawn 被调一次 —— 第一次参数(argv)就是 fence.argv 的展开形式。
@@ -204,24 +207,22 @@ afterAll(() => {
 });
 
 describe("bash fence parity (foreground vs background argv isolation axis SETS)", () => {
-  // 4 个 fixture:network × cwdReadonly 全笛卡尔积
+  // ADR-0097:网络轴不在隔离维度里 —— `--unshare-net` 恒在,fg / bg 不存在
+  // 网络输入差异。fixture 矩阵即 cwdReadonly 的两种取值,二者各自钉住
+  // 「前后台隔离轴集合逐条相等」。
   const fixtures = [
-    { network: true, cwdReadonly: true, label: "net:true,ro:true" },
-    { network: true, cwdReadonly: false, label: "net:true,ro:false" },
-    { network: false, cwdReadonly: true, label: "net:false,ro:true" },
-    { network: false, cwdReadonly: false, label: "net:false,ro:false" },
+    { cwdReadonly: true, label: "ro:true" },
+    { cwdReadonly: false, label: "ro:false" },
   ] as const;
 
   for (const fx of fixtures) {
     it(`axis SETS equal: ${fx.label}`, async () => {
       const fg = foregroundFenceArgv({
         cwd: CWD,
-        network: fx.network,
         cwdReadonly: fx.cwdReadonly,
       });
       const bg = await backgroundFenceArgv({
         cwd: CWD,
-        network: fx.network,
         cwdReadonly: fx.cwdReadonly,
       });
       const fgFlags = [...isolationAxisFlags(fg)].sort();
@@ -237,7 +238,6 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
   it("cwdReadonly:true → bg argv contains --ro-bind <cwd>", async () => {
     const bg = await backgroundFenceArgv({
       cwd: CWD,
-      network: false,
       cwdReadonly: true,
     });
     const hasBgRoBind = bg.some(
@@ -252,7 +252,6 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
   it("cwdReadonly:false → bg argv has no cwd ro-bind (covered by host root)", async () => {
     const bg = await backgroundFenceArgv({
       cwd: CWD,
-      network: false,
       cwdReadonly: false,
     });
     const hasBgRoBind = bg.some(
@@ -265,41 +264,32 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
     );
   });
 
-  it("network:true → bg argv drops --unshare-net, fg keeps --die-with-parent", async () => {
-    const bg = await backgroundFenceArgv({
+  it("ADR-0097: both fg and bg argv carry --unshare-net (constant netns isolation)", async () => {
+    // 钉住 SC1(--unshare-net 恒在)的 fg / bg 形态;fg / bg 同步恒等。
+    const fg = foregroundFenceArgv({
       cwd: CWD,
-      network: true,
       cwdReadonly: false,
     });
-    assert.equal(
-      bg.includes("--unshare-net"),
-      false,
-      `bg must drop --unshare-net when network:true`
+    const bg = await backgroundFenceArgv({
+      cwd: CWD,
+      cwdReadonly: false,
+    });
+    assert.ok(fg.includes("--unshare-net"), "fg must carry --unshare-net");
+    assert.ok(bg.includes("--unshare-net"), "bg must carry --unshare-net");
+    assert.ok(
+      fg.includes("--die-with-parent"),
+      "fg must keep --die-with-parent"
     );
     assert.ok(
       bg.includes("--die-with-parent"),
       "bg must keep --die-with-parent"
     );
-    assert.ok(
-      bg.includes("--unshare-user-try"),
-      "bg must keep --unshare-user-try"
-    );
     assert.ok(bg.includes("--clearenv"), "bg must keep --clearenv");
-  });
-
-  it("network:false → bg argv keeps --unshare-net (default isolation)", async () => {
-    const bg = await backgroundFenceArgv({
-      cwd: CWD,
-      network: false,
-      cwdReadonly: false,
-    });
-    assert.ok(bg.includes("--unshare-net"), "bg must keep --unshare-net");
   });
 
   it("cwdReadonly:true → bg argv --setenv GIT_OPTIONAL_LOCKS 0 (mirror bash.ts)", async () => {
     const bg = await backgroundFenceArgv({
       cwd: CWD,
-      network: false,
       cwdReadonly: true,
     });
     const injected = bg.some(
@@ -317,7 +307,6 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
   it("cwdReadonly:false → bg argv does not inject GIT_OPTIONAL_LOCKS", async () => {
     const bg = await backgroundFenceArgv({
       cwd: CWD,
-      network: false,
       cwdReadonly: false,
     });
     const injected = bg.some(
@@ -344,12 +333,10 @@ describe("bash fence parity — global-mode mounts (host root + system ro-binds)
   it("host-root --bind / / present on BOTH sides (same token)", async () => {
     const fg = foregroundFenceArgv({
       cwd: CWD,
-      network: false,
       cwdReadonly: false,
     });
     const bg = await backgroundFenceArgv({
       cwd: CWD,
-      network: false,
       cwdReadonly: false,
     });
     const isRootBind = (argv: readonly string[]): boolean =>
@@ -364,12 +351,10 @@ describe("bash fence parity — global-mode mounts (host root + system ro-binds)
   it("system ro-binds present on BOTH sides (same tokens)", async () => {
     const fg = foregroundFenceArgv({
       cwd: CWD,
-      network: false,
       cwdReadonly: false,
     });
     const bg = await backgroundFenceArgv({
       cwd: CWD,
-      network: false,
       cwdReadonly: false,
     });
     for (const path of READ_ONLY_SYSTEM_PATHS) {
@@ -381,12 +366,10 @@ describe("bash fence parity — global-mode mounts (host root + system ro-binds)
   it("neither side carries a guest /tmp pad bind or tmpfs", async () => {
     const fg = foregroundFenceArgv({
       cwd: CWD,
-      network: false,
       cwdReadonly: false,
     });
     const bg = await backgroundFenceArgv({
       cwd: CWD,
-      network: false,
       cwdReadonly: false,
     });
     for (const argv of [fg, bg]) {

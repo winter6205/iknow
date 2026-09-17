@@ -62,9 +62,6 @@ export type TuiModal =
       readonly tool: string;
       readonly summaryHint: string;
       readonly selectedIndex: number;
-      /** #503 T10 / ADR-0022:bash network:true 时由 executor 透传 —— 权限
-       *  modal 标题前缀追加「[宿主网络]」标记。 */
-      readonly network?: boolean;
     }
   | ({ readonly kind: "select" } & SelectModalContent & {
         readonly selectedIndex: number;
@@ -74,11 +71,9 @@ export type TuiModal =
 export function permissionModalContent(ask: {
   readonly tool: string;
   readonly summaryHint: string;
-  readonly network?: boolean;
 }): SelectModalContent {
-  const titlePrefix = ask.network === true ? "[宿主网络] " : "";
   return {
-    title: `${titlePrefix}允许执行 ${ask.tool}？`,
+    title: `允许执行 ${ask.tool}？`,
     ...(ask.summaryHint.length > 0 ? { description: ask.summaryHint } : {}),
     options: PERMISSION_ANSWERS,
     hint: PERMISSION_MODAL_HINT,
@@ -138,7 +133,6 @@ export function permissionModalRows(
   ask: {
     readonly tool: string;
     readonly summaryHint: string;
-    readonly network?: boolean;
   },
   cols: number,
   selectedIndex = 0

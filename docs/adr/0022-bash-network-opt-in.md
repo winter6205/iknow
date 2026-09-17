@@ -2,7 +2,9 @@
 
 Date: 2026-08-18
 
-Status: accepted
+Status: superseded by 0097
+
+> **Superseded（2026-09-16，ADR-0097）**：per-call `network:true` 字段与其 ask 规则（`code-ask-bash-network`）整体废除，不留新旧并存；`--unshare-net` 改为恒定项，出口 = **出口代理缝**（域白名单代理）。本 ADR 的历史论证保留供追溯。
 
 ## Context
 

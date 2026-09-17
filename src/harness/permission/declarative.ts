@@ -26,12 +26,6 @@
  *    `command`, Read/Edit path, WebFetch `url`) and path-style specifiers on
  *    non-family tools are rejected at compile time with a warning.
  *
- * `Bash(network:true|false|*)` is a `param:value` rule on a non-primary
- * scalar field (the Bash family shares the deny/ask-only contract above):
- * it is the declarative equivalent of the code-layer
- * `code-ask-bash-network` eligibility gate, inherited from the retired
- * `network_equals` predicate. `allow` is rejected for it per the spec.
- *
  * Match closures are pure: they never throw and return `false` on malformed
  * runtime input (schema violations are already fail-loud at load time).
  */
@@ -203,7 +197,7 @@ function buildMatcher(
     return makeToolMatcher(familyName, decision);
   }
   if (familyName === "bash") {
-    return buildBashMatcher(rule.specifier, decision, ctx);
+    return buildBashMatcher(rule.specifier, ctx);
   }
   if (familyName === "read" || familyName === "edit") {
     return buildPathMatcher(familyName, rule.specifier, decision, ctx);
@@ -383,10 +377,9 @@ function buildParamValueMatcher(
  * Scalar comparison for `param:value`:
  *  - `*` → the field exists and is a scalar (string | number | boolean)
  *  - the literals `true` / `false` address a **boolean** field; a string
- *    field holding `"true"` deliberately does not match, mirroring the
- *    strict `=== true` semantics of the bash network gate (a rule meant as
- *    a typed eligibility gate must not fire on a differently-typed value
- *    the code layer treats as absent)
+ *    field holding `"true"` deliberately does not match — a rule meant as a
+ *    typed eligibility gate must not fire on a differently-typed value the
+ *    typed consumers treat as absent
  *  - string field → strict string equality
  *  - number field → `String(n) === value`
  *  - missing / non-scalar field → false
@@ -413,34 +406,8 @@ function scalarEquals(actual: unknown, expected: string): boolean {
 
 function buildBashMatcher(
   specifier: string,
-  decision: PermissionDecision,
   ctx: CompileCtx
 ): NormalRuleSpec["match"] | undefined {
-  if (specifier.startsWith("network:")) {
-    // Spec Does: "allow 不走 param:value". The Bash family takes the same
-    // rule; `network:true|false|*` is the legacy eligibility gate for
-    // code-ask-bash-network, expressed here so existing project-side
-    // denials migrate without losing the ask fence.
-    if (decision === "allow") {
-      ctx.onWarn(
-        `[permissions] ignore allow rule ${JSON.stringify(`Bash(${specifier})`)}: param:value is deny/ask only`
-      );
-      return undefined;
-    }
-    const expected = specifier.slice("network:".length);
-    if (expected !== "true" && expected !== "false" && expected !== "*") {
-      ctx.onWarn(
-        `[permissions] ignore bash rule ${JSON.stringify(specifier)}: network value must be true|false|*`
-      );
-      return undefined;
-    }
-    return ({ tool, input }) => {
-      if (tool !== "bash") return false;
-      const obj = asRecord(input);
-      if (obj === null) return false;
-      return scalarEquals(obj["network"], expected);
-    };
-  }
   if (specifier.startsWith("command:")) {
     ctx.onWarn(
       `[permissions] ignore bash rule ${JSON.stringify(specifier)}: "command" is a primary content field; write the command glob directly`

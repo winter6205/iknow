@@ -6,7 +6,7 @@
  * 做物理验收：
  *   - global / worktree 档跑 Round 1 默认姿态（SC1–SC3）：宿主真路径可见可写、
  *     系统前缀只读覆盖、会话 tmp 保留宿主真路径（**没有**垫底 bind 到 guest
- *     `/tmp`）、网络 / env 轴不借本改动放开。
+ *     `/tmp`）、env 轴不借本改动放开。
  *   - workspace 档跑 Round 2 的 SC11/SC12（ADR-0092 Amendment 2026-09-13）：
  *     home 可见但只读、写 = 活 taskRoot ∪ 会话 tmp、home 之外不收紧。
  * 三档先后各跑一遍、各自汇总：
@@ -37,6 +37,9 @@
  *    `/tmp/...` 落宿主 `/tmp`（与 pad 是两处，绝不静默双写）。
  *  - `--size`/`--tmpfs` 退役后 tmp 配额不再是围栏形态的一部分，
  *    ResourceLimits 仅作未来 hook 的常量面，探针不再做超限物理验收。
+ *  - **ADR-0097**：`--unshare-net` 是常量；网路轴探针由「opt-in 共享宿主
+ *    netns」转为「egress 缝可达」。`spawnFenceSync` / `spawnFenceAsync`
+ *    无 `network` 参数 —— 出网能力只经 egress 缝，无 per-call opt-in 面。
  */
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -55,7 +58,6 @@ import {
   createBwrapFence,
   createEnvIsolation,
   createFsPolicy,
-  createNetworkPolicy,
   type FsIsolationMode,
   type FsPolicy,
 } from "../src/harness/sandbox/index.js";
@@ -73,7 +75,6 @@ const TMP = tmpdir();
 const ENV_BASE = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST }).filter(
   process.env
 );
-const NETWORK_POLICY = createNetworkPolicy();
 /** host 侧唯一 token（探针进程级别；避免档间 / 并发跑互相看到标记）。 */
 const TOKEN = `iknow-probe-${process.pid}`;
 
@@ -123,18 +124,15 @@ function fenceEnv(profile: ProbeProfile): NodeJS.ProcessEnv {
 
 function spawnFenceSync(
   profile: ProbeProfile,
-  command: string,
-  network = false
+  command: string
 ): ReturnType<typeof spawnSync> {
   const env = fenceEnv(profile);
   const fence = createBwrapFence({
     command: "bash",
     args: ["-c", command],
     fsPolicy: profile.fsPolicy,
-    networkPolicy: NETWORK_POLICY,
     env,
     cwd: profile.cwd,
-    network,
     // workspace 档三层 mount 的源端绝对路径（ADR-0092 Amendment / SC11/SC12）；
     // global 档传了也不发射 —— 与生产 bash.ts 装配同款（只判 fsMode）,
     // 顺带把 bwrap 的 global 档 byte-identical 回归钉带进物理验收。
@@ -153,23 +151,20 @@ function spawnFenceSync(
   });
 }
 
-// Async spawn (NOT spawnSync) for the two netns-sensitive checks. The loopback
+// Async spawn (NOT spawnSync) for the netns-sensitive checks. The loopback
 // listener below lives in THIS process; while spawnSync blocks the event loop
 // no callback can run, so curl inside the fence could never reach it.
 function spawnFenceAsync(
   profile: ProbeProfile,
-  command: string,
-  network = false
+  command: string
 ): Promise<string> {
   const env = fenceEnv(profile);
   const fence = createBwrapFence({
     command: "bash",
     args: ["-c", command],
     fsPolicy: profile.fsPolicy,
-    networkPolicy: NETWORK_POLICY,
     env,
     cwd: profile.cwd,
-    network,
     ...(profile.fsMode === "workspace"
       ? {
           homeRoot: profile.home,
@@ -287,6 +282,126 @@ function setupWorktreeFixture(): {
   } catch (err) {
     rmSync(base, { recursive: true, force: true });
     throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Egress seam 检查分支（socat 缺失 / 在场 两路）。
+// 抽成命名 helper 是为了让 buildChecks 的箭头函数本身落在 complexity ≤ 10
+// (S5 硬门)。两路都钉 SC2 + SC13:egress seam 是出网唯一通路。
+// ---------------------------------------------------------------------------
+
+/**
+ * socat 缺失分支:验证 `createEgressSession` 抛 `SocatUnavailableError`
+ * (fail-closed typed error,非静默降级)。这是「边界语义正确」的硬证 —
+ * 即使宿主没有 socat,探针仍能验证 fence 的网络闭合不依赖 socat 在场。
+ */
+async function runEgressSocatAbsentCheck(): Promise<ProbeResult> {
+  const { createEgressSession, SocatUnavailableError } =
+    await import("../src/harness/sandbox/egress/session.js");
+  try {
+    await createEgressSession({
+      policy: {
+        allowedDomains: [],
+        deniedDomains: [],
+        commandLabel: "probe-socat-absent",
+      },
+      socatCommand: "socat",
+    });
+    return {
+      ok: false,
+      detail:
+        "socat missing branch FAILED: createEgressSession returned without throwing",
+    };
+  } catch (err) {
+    if (err instanceof SocatUnavailableError) {
+      return {
+        ok: true,
+        detail: `socat absent branch: fail-closed typed error raised (${err.socatCommand})`,
+      };
+    }
+    return {
+      ok: false,
+      detail: `socat missing branch: wrong error type: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    };
+  }
+}
+
+/**
+ * socat 在场分支:真起 egress session + 起宿主 loopback listener + 沙箱内
+ * curl 经 HTTP_PROXY 出口代理 → 命中允许集(IP 字面量)→ 回包。
+ *
+ * listener 复用 `startProbeListener`(已钉住 127.0.0.1 绑定 + close 清理);
+ * egress spec 的 allowedDomains 含 IP 字面量 → 地址守卫显式放行,无域名
+ * 解析、无私网拒判(SC4)。
+ */
+async function runEgressSocatPresentCheck(
+  profile: ProbeProfile
+): Promise<ProbeResult> {
+  const { createEgressSession } =
+    await import("../src/harness/sandbox/egress/session.js");
+  const listener = await startProbeListener();
+  const port = listener.port;
+  const listenerIp = "127.0.0.1";
+  let session: Awaited<ReturnType<typeof createEgressSession>> | undefined;
+  try {
+    session = await createEgressSession({
+      policy: {
+        allowedDomains: [`${listenerIp}:${port}`],
+        deniedDomains: [],
+        commandLabel: "probe-socat-present",
+      },
+      socatCommand: "socat",
+    });
+    const fence = createBwrapFence({
+      command: "bash",
+      args: [
+        "-c",
+        `curl -sS --max-time 5 http://${listenerIp}:${port} | grep -q probe-listener-ok`,
+      ],
+      fsPolicy: profile.fsPolicy,
+      env: fenceEnv(profile),
+      cwd: profile.cwd,
+      egress: session.spec,
+      ...(profile.fsMode === "workspace"
+        ? {
+            homeRoot: profile.home,
+            workspaceRoot: profile.cwd,
+            tmpRoot: profile.pad,
+          }
+        : {}),
+    });
+    const child = spawn(fence.argv[0], fence.argv.slice(1), {
+      cwd: profile.cwd,
+      env: fenceEnv(profile),
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (c: Buffer) => {
+      stderr += c.toString("utf8");
+    });
+    const exitCode: number | null = await new Promise((resolve) => {
+      child.on("close", (code) => resolve(code));
+      child.on("error", () => resolve(null));
+    });
+    return {
+      ok: exitCode === 0,
+      detail: `exit=${exitCode} stderr="${stderr.trim()}"`,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      detail: `socat present branch threw: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    };
+  } finally {
+    if (session !== undefined) {
+      await session.dispose().catch(() => undefined);
+    }
+    listener.stop();
   }
 }
 
@@ -481,7 +596,9 @@ function buildChecks(
     },
   });
 
-  // —— 网络轴（默认隔离；opt-in 需宿主回环实测）——
+  // —— 网络轴（ADR-0097：`--unshare-net` 恒在,egress 缝是唯一出网通路）——
+
+  // SC1:默认隔离的硬底 —— example.com 永远拿不到响应(默认断网 + 无 egress)。
   push(
     "both",
     syncCheck(
@@ -491,42 +608,39 @@ function buildChecks(
       true
     )
   );
-  // T9b (#503): physical validation of `network: true` moves to a host loopback
-  // listener. WSL2 drops outbound IPv4 for mount+user-ns combos and the fence's
-  // /etc/resolv.conf symlink is dangling (no /mnt bind), so example.com can
-  // never be reached even though the opt-in netns shape is correct. Loopback
-  // inbound is not subject to the WSL2 egress penalty: the opt-in branch shares
-  // the host netns and MUST reach the listener, while the default branch runs in
-  // its own netns whose lo is not up and MUST NOT — a stronger netns-shape
-  // signal than an external target.
-  push("both", {
-    name: "network opt-in reachable",
-    run: async () => {
-      const raw = await spawnFenceAsync(
-        profile,
-        `curl -sS --max-time 5 http://127.0.0.1:${listenerPort} | grep -q probe-listener-ok`,
-        true
-      );
-      const [status, ...rest] = raw.split("|");
-      return {
-        ok: status.trim() === "0",
-        detail: rest.join("|").trim(),
-      };
-    },
-  });
+  // SC1 (`--unshare-net` 恒在, ADR-0097):默认 netns 与宿主 loopback 隔断。
+  // probe PASSES when curl FAILS:沙箱内 netns 不能直达宿主 loopback。
+  // 不再需要 listener —— 既然 fence 恒断网,curl 必然连不上任何宿主端口。
   push("both", {
     name: "network default isolated from host loopback",
     run: async () => {
-      // This probe PASSES when curl FAILS: the default branch's own netns
-      // must not reach the host loopback listener.
+      // 用 netns 隔离后不可达的事实作硬证 —— curl 任意 host:port 都该断。
       const raw = await spawnFenceAsync(
         profile,
-        `curl -sS --max-time 5 http://127.0.0.1:${listenerPort}`,
-        false
+        `curl -sS --max-time 5 http://127.0.0.1:${listenerPort}`
       );
       const [status, ...rest] = raw.split("|");
       const ok = status.trim() !== "0";
       return { ok, detail: rest.join("|").trim() };
+    },
+  });
+  // SC2 + SC13 (ADR-0097 §T4 egress 缝):socat 在场 → 起 egress session,
+  // 沙箱内 curl 经代理打宿主 NIC listener;允许集含 IP 字面量 → 命中并回包。
+  // socat 缺失 → `createEgressSession` 抛 `SocatUnavailableError`(fail-closed)
+  // —— 这条路径同样报绿,证明「边界语义正确」(非静默降级)。两类分支都钉住
+  // SC1 + SC13 的不变式。
+  push("both", {
+    name: "egress seam reachable (socat present = full integration; absent = fail-closed)",
+    run: async () => {
+      // 动态 import 避免探针启动期就加载 egress 模块,且能拿到 typed 错误
+      // 的实际类(socat 缺失分支必依赖此处的 import)。
+      const { defaultProbeSocat } =
+        await import("../src/harness/sandbox/egress/session.js");
+      const socatCommand = "socat";
+      if (!defaultProbeSocat(socatCommand)) {
+        return runEgressSocatAbsentCheck();
+      }
+      return runEgressSocatPresentCheck(profile);
     },
   });
 

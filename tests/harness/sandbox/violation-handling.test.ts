@@ -266,13 +266,16 @@ describe("categorizeResult", () => {
     );
   });
 
+  // `[network_denied] → mid` 的端到端走读由
+  // `tests/harness/aci/bash-egress-typed-failure.test.ts` 承担(真实
+  // egress 违例 → typed failure → categorizeResult),此处不再另造字符串。
   it("[network_denied] → mid", () => {
     assert.equal(
       categorizeResult({
         name: "bash",
         input: {},
         kind: "execution_failed",
-        message: "[network_denied] domain not in whitelist: evil.com",
+        message: "[network_denied] evil.com: not in allowlist",
       }).tier,
       "mid"
     );
@@ -302,15 +305,13 @@ describe("categorizeResult", () => {
     );
   });
 
-  it("[user_denied] network ask 被拒 → low,无新分类(#503 T11)", () => {
-    // T11 闭环:network:true 的 host-net opt-in 在 permission 层强制 ask
-    // (T10),用户拒绝走既有 [user_denied] 路径 → categorizer 落在 low tier,
-    // 不需要为 network 引入新拒绝分类 —— 分类面与动作拒绝轴解耦,只认前缀。
-    // 这条用例把该形态钉死:input.network 不参与 categorize,分类只读 message。
+  it("categorizeResult reads only the message, never the tool input", () => {
+    // 分类面与输入面解耦:同一 [user_denied] message 在任意 input 形状下都落
+    // low tier,不存在按 input 字段改判的隐藏分支。
     assert.equal(
       categorizeResult({
         name: "bash",
-        input: { command: "curl -sS http://127.0.0.1:3000", network: true },
+        input: { command: "curl -sS http://127.0.0.1:3000" },
         kind: "execution_failed",
         message: "[user_denied] user declined tool call: bash",
       }).tier,

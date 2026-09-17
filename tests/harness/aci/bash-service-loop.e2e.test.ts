@@ -2,28 +2,29 @@
  * #503 T11 — bash-service-loop 闭环集成 e2e（两轨汇合点）。
  *
  * 全流程：
- *   1. bash({command: 起 http server, background: true, network: true}) 经
+ *   1. bash({command: 起 http server on unix socket, background: true}) 经
  *      permission-executor ask 批准 → manager.spawn 立即返 task_id
  *   2. handler 毫秒级返回 {task_id, log_path}（不阻塞、不占 tier）
  *   3. bash_output 轮询读到 server LISTENING 证据
- *   4. host 侧真实 client 连上 127.0.0.1:<port> 收到响应体
- *   5. bash_stop(task_id) → 端口释放：host client 再连失败（ECONNREFUSED）
+ *   4. host 侧真实 client 经同一 unix socket 收到响应体
+ *   5. bash_stop(task_id) → 监听资源释放：host client 再连失败
  *   6. registry json 状态收敛 killed
  *
- * 物理事实：network:true 是闭环必要条件 —— 默认 fence(--unshare-net) 下
- * 沙箱有自己的 netns，host client 连不进沙箱 listener；network:true 共享宿主
- * netns，沙箱内起的 http server 绑 127.0.0.1:<port> 对 host 可见可连。
+ * 传输选型（ADR-0097：`--unshare-net` 恒在）：沙箱有独立 netns，TCP
+ * loopback listener 只活在该 netns 内，host 侧既连不进也观测不到端口
+ * 生命周期。unix domain socket 的可见性由**文件系统**决定、与 netns 正交，
+ * 经 `--bind / /` 的同一条宿主路径两侧同物 —— 故本 e2e 用 UDS 保持
+ * 「沙箱内服务对 host 真实可见 → bash_stop 后真实释放」闭环，且不依赖
+ * 出网通路（egress 缝只承载出向 CONNECT，不承载 inbound 连接）。
  *
- * 端口策略：先 host 侧 listen(0) 拿空闲高端口再关掉，沙箱内用该端口；竞态
- * 容忍 ~2s 连接重试。WSL2 出站丢弃只影响 outbound，不影响 loopback inbound。
+ * 端口策略：host 侧 mkdtemp 目录内的 socket 路径（UDS 无端口概念）；连接
+ * 重试窗口容忍 ~2s 的进程启动 / 回收延迟。
  *
  * 沙箱内起服务用 node 单行 http server（沙箱里 /usr/bin 有 node；probe
  * 「node runs」证实 v22）—— 比 nc 循环稳：node 进程自然保持 event loop。
  *
- * Permission 形态：bash network:true 在 policy 层强制 ask，full_auto 不豁免
- * （T10 + ADR-0022）。permission ask 本身由 tests/harness/permission/
- * bash-network-ask.test.ts 覆盖。本期 e2e 聚焦「批准后闭环」，askUser 注入
- * always-true + assert ask ctx 含 [请求宿主网络] +  network:true 字段透传。
+ * Permission 形态：bash 的 category 默认 ask，askUser 注入 always-true 聚焦
+ * 「批准后闭环」；hint 走 summarizeInput 的 JSON 形态。
  *
  * fresh workspaceRoot（test.md 命令 handler 契约）：mkdtemp temp dir，不预存
  * session/tasks 文件。fresh conversationId：ctx.conversationId 透传 spawn，
@@ -34,9 +35,8 @@
  */
 
 import assert from "node:assert/strict";
-import { createServer as createHttpServer, get as httpGet } from "node:http";
+import { get as httpGet } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import type { AddressInfo } from "node:net";
 import { connect as netConnect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -72,7 +72,7 @@ function hasBwrap(): boolean {
   return probe.status === 0;
 }
 
-// ── Registry 适配器(本地 mini 版,镜像 bash-network-ask.test.ts) ────────────────
+// ── Registry 适配器(本地 mini 版) ────────────────────────────────────────────
 // 保留 aci 元数据 —— permission-executor 的 createAciCatalog 投影依赖
 // def.aci；把 aci 丢掉会让 catalog 为空 → Step 0 直接 delegate inner,
 // 绕过权限层(askUser 永不被调)。
@@ -91,22 +91,15 @@ function makeRegistry(defs: AciToolDef[]): Registry {
   });
 }
 
-// ── 端口 + 连接辅助 ───────────────────────────────────────────────────────────
+// ── unix socket 连接 / HTTP 辅助 ─────────────────────────────────────────────
 
-async function getFreePort(): Promise<number> {
-  const server = createHttpServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve());
-  });
-  const port = (server.address() as AddressInfo).port;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  return port;
-}
-
-function canConnect(port: number, timeoutMs = 500): Promise<boolean> {
+/** socket 可连接 = 监听进程活着（stale socket 文件 → ECONNREFUSED）。 */
+function canConnectSocket(
+  socketPath: string,
+  timeoutMs = 500
+): Promise<boolean> {
   return new Promise((resolve) => {
-    const sock = netConnect({ host: "127.0.0.1", port });
+    const sock = netConnect({ path: socketPath });
     sock.setTimeout(timeoutMs);
     const settle = (ok: boolean): void => {
       sock.removeAllListeners();
@@ -119,14 +112,13 @@ function canConnect(port: number, timeoutMs = 500): Promise<boolean> {
   });
 }
 
-async function httpGetBody(
-  port: number,
+function httpGetBodyOverSocket(
+  socketPath: string,
   path: string,
   timeoutMs = 1_000
 ): Promise<string> {
-  return await new Promise<string>((resolve, reject) => {
-    // 直接用 node:http 的 get(fetch 依赖 DNS 解析,fence 中 node 自带 http 更稳)。
-    const r = httpGet({ host: "127.0.0.1", port, path }, (res) => {
+  return new Promise<string>((resolve, reject) => {
+    const r = httpGet({ socketPath, path }, (res) => {
       let data = "";
       res.setEncoding("utf8");
       res.on("data", (c) => (data += c));
@@ -134,7 +126,7 @@ async function httpGetBody(
     });
     r.on("error", reject);
     r.setTimeout(timeoutMs, () => {
-      r.destroy(new Error(`http timeout on ${port}${path}`));
+      r.destroy(new Error(`http timeout on ${socketPath}${path}`));
     });
   });
 }
@@ -170,17 +162,16 @@ afterEach(async () => {
 
 describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
   it.skipIf(!hasBwrap())(
-    "起服务 → host 验证 → bash_stop 端口释放 + registry 状态收敛 killed",
+    "起服务 → host 验证 → bash_stop 监听释放 + registry 状态收敛 killed",
     async () => {
       // 1) 准备:fresh workspaceRoot temp dir + fresh conversationId
       const tempRoot = await mkdtemp(join(tmpdir(), "iknow-svc-loop-"));
       lastTempDir = tempRoot;
       const conversationId = `conv-svc-${randomBytes(6).toString("hex")}`;
+      // socket 落在同一 temp dir（host / 沙箱同路径；UDS 与 netns 正交）。
+      const socketPath = join(tempRoot, "svc.sock");
 
-      // 2) 拿空闲端口(host listen(0) → 关闭,沙箱内复用该端口)
-      const port = await getFreePort();
-
-      // 3) 装配:manager + bash/bash_output/bash_stop 工具 + 审批 askUser
+      // 2) 装配:manager + bash/bash_output/bash_stop 工具 + 审批 askUser
       const manager = createBackgroundTaskManager({
         tasksDir: resolveTasksDir({
           dataDir: tempRoot,
@@ -191,7 +182,6 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
       lastManager = manager;
       const bashTool = createBashTool(tempRoot, {
         backgroundManager: manager,
-        workspaceRoot: tempRoot,
       });
       const bashOutputTool = createBashOutputTool({
         backgroundManager: manager,
@@ -245,8 +235,8 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
         askUser,
       });
 
-      // 4) 起服务:bash background:true + network:true → 沙箱内 node 起 http server
-      const nodeCmd = `node -e 'const s=require("http").createServer((q,r)=>{r.end("iknow-svc-ok")});s.listen(${port},"127.0.0.1",()=>{console.log("listening on 127.0.0.1:${port}")})'`;
+      // 3) 起服务:bash background:true → 沙箱内 node 在 host 可见路径上起 UDS http server
+      const nodeCmd = `node -e 'const s=require("http").createServer((q,r)=>{r.end("iknow-svc-ok")});s.listen(${JSON.stringify(socketPath)},()=>{console.log("listening on ${socketPath}")})'`;
       const t0 = Date.now();
       const [spawnResult] = await executor.executeAll(
         [
@@ -256,7 +246,6 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
             input: {
               command: nodeCmd,
               background: true,
-              network: true,
             },
           },
         ],
@@ -266,18 +255,14 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
       );
       const elapsedMs = Date.now() - t0;
 
-      // ask ctx 断言:network:true 强制 ask + summaryHint + ctx.network 透传
-      // (T10 bash-network-ask.test.ts 锁定该形态;这里再断言一次以锁闭环)
+      // ask ctx 断言:bash 类别默认 ask,hint 走 summarizeInput 的 JSON 形态
+      // —— 单条 summaryHint,无第二套网络批准轴标记。
       assert.equal(askCalls.length, 1);
-      assert.equal(askCalls[0]?.network, true);
-      // #951:marker 强化披露 —— 必须含「不经 network-guard」与「link-local 元数据」两项事实
-      assert.match(
-        askCalls[0]?.summaryHint ?? "",
-        /\[请求宿主网络·不经 network-guard\]/
-      );
-      assert.match(
-        askCalls[0]?.summaryHint ?? "",
-        /link-local 元数据 169\.254\.169\.254/
+      assert.equal(askCalls[0]?.tool, "bash");
+      assert.match(askCalls[0]?.summaryHint ?? "", /^\{"command":/);
+      assert.equal(
+        (askCalls[0]?.summaryHint ?? "").includes("network-guard"),
+        false
       );
 
       // handler 毫秒级返回 ok(不阻塞、不占 tier)
@@ -294,7 +279,7 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
       assert.ok(spawnPayload.log_path.endsWith(`${spawnPayload.task_id}.log`));
       const { task_id: taskId, log_path: logPath } = spawnPayload;
 
-      // 5) bash_output 轮询读到 server LISTENING 证据(沙箱内 stdout → log)
+      // 4) bash_output 轮询读到 server LISTENING 证据(沙箱内 stdout → log)
       let listeningSeen = false;
       const outputDeadline = Date.now() + 5_000;
       while (Date.now() < outputDeadline) {
@@ -315,7 +300,7 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
             (outResult as Extract<ToolExecutionResult, { kind: "ok" }>)
               .payload[0]!.text
           ) as { text: string; status: string };
-          if (/listening on 127\.0\.0\.1:\d+/.test(out.text)) {
+          if (out.text.includes(`listening on ${socketPath}`)) {
             listeningSeen = true;
             break;
           }
@@ -329,14 +314,13 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
         )}`
       );
 
-      // 6) host 侧真实 client 连上 127.0.0.1:<port> 收到响应体
-      //    沙箱 fence 已经过 bwrap argv 形状(network:true 去 unshare-net),沙箱内
-      //    http server 绑的是 host netns 的 127.0.0.1:port;host client 自然连得上。
+      // 5) host 侧真实 client 经同一 socket 收到响应体 —— 沙箱内进程持有
+      //    的监听资源在宿主视角真实存在（UDS 可见性由文件系统承载）。
       let bodySeen: string | null = null;
       const connectDeadline = Date.now() + 3_000;
       while (Date.now() < connectDeadline) {
         try {
-          const body = await httpGetBody(port, "/");
+          const body = await httpGetBodyOverSocket(socketPath, "/");
           if (body === "iknow-svc-ok") {
             bodySeen = body;
             break;
@@ -348,7 +332,7 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
       }
       assert.equal(bodySeen, "iknow-svc-ok");
 
-      // 7) bash_stop(task_id) → 端口释放 + registry json 状态收敛
+      // 6) bash_stop(task_id) → 监听释放 + registry json 状态收敛
       const [stopResult] = await executor.executeAll(
         [{ id: "u3", name: "bash_stop", input: { task_id: taskId } }],
         undefined,
@@ -363,27 +347,27 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
       assert.equal(stopPayload.task_id, taskId);
       assert.equal(stopPayload.status, "stopped");
 
-      // host client 再连应该失败(进程组已死 + 监听 socket 已释放)
+      // host client 再连应该失败(进程组已死 → socket 不再 accept)
       // 重试窗口 ~2s 容忍 SIGTERM→SIGKILL 升级与 OS socket 回收
-      let portClosed = false;
+      let listenerReleased = false;
       const closeDeadline = Date.now() + 3_000;
       while (Date.now() < closeDeadline) {
-        if (!(await canConnect(port, 200))) {
-          portClosed = true;
+        if (!(await canConnectSocket(socketPath, 200))) {
+          listenerReleased = true;
           break;
         }
         await sleep(50);
       }
       assert.ok(
-        portClosed,
-        `port ${port} should be released after bash_stop but still accepting connections`
+        listenerReleased,
+        `socket ${socketPath} should be released after bash_stop but still accepting connections`
       );
 
-      // 8) registry json 状态收敛 killed(读 <pool>/projects/<slug>/tasks/<id>.json)
+      // 7) registry json 状态收敛 killed(读 <pool>/projects/<slug>/tasks/<id>.json)
       // status flip 是 exit 事件驱动的异步 settle(manager.stop 毫秒级返回,
-      // 不阻塞);端口释放可能先于 settle 的 writeFile 落盘完成 → 端口关闭后
+      // 不阻塞);监听释放可能先于 settle 的 writeFile 落盘完成 → 监听关闭后
       // 单次读 JSON 会拾到 spawn 时的 "running" 记录(full vitest 并发下偶发,
-      // 单跑通过)。与上方端口轮询同型(3s 上限 / 50ms 间隔)等待收敛。
+      // 单跑通过)。与上方连接轮询同型(3s 上限 / 50ms 间隔)等待收敛。
       const jsonPath = logPath.replace(/\.log$/, ".json");
       let rec:
         | { status: string; task_id: string; conversation_id: string }

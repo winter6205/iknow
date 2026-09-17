@@ -11,7 +11,6 @@ import {
   READ_ONLY_SYSTEM_PATHS,
   createFsPolicy,
 } from "../../../src/harness/sandbox/fs-policy.js";
-import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.js";
 
 /**
  * ADR-0092 全局档 bwrap argv 形态。
@@ -63,17 +62,15 @@ function assertTriple(
 }
 
 function fenceArgv(
-  spec: { readonly cwdReadonly?: boolean; readonly network?: boolean } = {}
+  spec: { readonly cwdReadonly?: boolean } = {}
 ): readonly string[] {
   return createBwrapFence({
     command: "bash",
     args: ["-c", "echo hi"],
     fsPolicy: createFsPolicy({ tmpDir: TMP }),
-    networkPolicy: createNetworkPolicy(),
     env: { PATH: "/bin" },
     cwd: TASK,
     ...(spec.cwdReadonly ? { cwdReadonly: true } : {}),
-    ...(spec.network ? { network: true } : {}),
   }).argv;
 }
 
@@ -191,7 +188,6 @@ describe("createBwrapFence — 全局档 argv 形态 (ADR-0092)", () => {
       command: "bash",
       args: ["-c", "echo hi"],
       fsPolicy: createFsPolicy({ tmpDir: TMP }),
-      networkPolicy: createNetworkPolicy(),
       env: { PATH: "/bin" },
       cwd: TASK,
       cwdReadonly: false,
@@ -199,10 +195,22 @@ describe("createBwrapFence — 全局档 argv 形态 (ADR-0092)", () => {
     assert.deepEqual([...argvFalse], [...argvDefault]);
   });
 
-  it("network:true drops --unshare-net and changes nothing else", () => {
-    const argv = fenceArgv({ network: true });
-    assert.equal(argv.includes("--unshare-net"), false);
+  // ADR-0097: netns isolation is constant. There is no per-call network
+  // input left on the fence API — `--unshare-net` is emitted for every
+  // caller, and egress leaves only through the unix-socket seam.
+  it("--unshare-net is always emitted (no per-call network input exists)", () => {
+    const argv = createBwrapFence({
+      command: "bash",
+      args: ["-c", "echo hi"],
+      fsPolicy: createFsPolicy({ tmpDir: TMP }),
+      env: { PATH: "/bin" },
+      cwd: TASK,
+    }).argv;
+    assert.ok(
+      argv.includes("--unshare-net"),
+      "constant netns isolation; spec SC1"
+    );
     assert.ok(argv.includes("--die-with-parent"));
-    assert.equal(assertTriple(argv, "--bind", "/", "host root bind"), 3);
+    assert.equal(assertTriple(argv, "--bind", "/", "host root bind"), 4);
   });
 });

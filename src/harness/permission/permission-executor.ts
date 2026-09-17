@@ -24,11 +24,7 @@ import type {
 } from "../tools/types.js";
 import type { HarnessStreamEvent } from "../stream.js";
 import type { AciCatalog, AciToolDef } from "../aci/types.js";
-import {
-  checkPermission,
-  isBashNetworkTrue,
-  type PermissionPolicy,
-} from "./policy.js";
+import { checkPermission, type PermissionPolicy } from "./policy.js";
 import { VIOLATION_PREFIXES } from "./prefixes.js";
 import type {
   AskUser,
@@ -328,10 +324,7 @@ export function createPermissionRuntime(
           },
         };
       }
-      const networkRequested = isNetworkBash(def.name, call.input);
-      const hint = networkRequested
-        ? summarizeNetworkBash(call.input)
-        : summarizeInput(call.input);
+      const hint = summarizeInput(call.input);
       let approved = false;
       try {
         approved = await askUser({
@@ -339,7 +332,6 @@ export function createPermissionRuntime(
           input: call.input,
           summaryHint: hint,
           ...(signal !== undefined ? { signal } : {}),
-          ...(networkRequested ? { network: true } : {}),
         });
       } catch {
         // EXIT: an unavailable approval inlet must deny the call; never allow
@@ -493,61 +485,8 @@ function summarizeInput(input: unknown): string {
   }
 }
 
-/**
- * #503 T10 / ADR-0022:bash network:true 是宿主网络批准轴。判定条件委托给
- * policy.ts 的 `isBashNetworkTrue` SSOT —— 决策来源与 hint 形态一一对应，
- * review-repair #502/#503 收敛两处逐字同形谓词。
- */
-function isNetworkBash(tool: string, input: unknown): boolean {
-  return isBashNetworkTrue(tool, input);
-}
-
 function isAborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
-}
-
-/** `<<<SECRET_N>>>` 占位符（#406 roundtrip 产物，#503 出站警告触发器）。 */
-const SECRET_PLACEHOLDER_RE = /<<<SECRET_\d+>>>/;
-
-/** 命令摘要截断基数（与 summarizeInput 同级 80 字符封顶 + "..."）。 */
-const NETWORK_HINT_BASE_MAX = 80;
-const NETWORK_HINT_MARKER = "[请求宿主网络·不经 network-guard] ";
-const SECRET_WARNING =
-  " [secret 警告] 命令含 secret 占位符，批准后真值可能随命令出站";
-/** #951:常驻披露 tail —— host netns 下可达面全量公开（80 封顶之外追加）。 */
-const NETWORK_HINT_TAIL =
-  "（宿主 netns 全量可见：localhost 服务 / 局域网 / link-local 元数据 169.254.169.254；无 IP 过滤、无域名过滤）";
-
-/**
- * bash network:true 的 ask hint：`[请求宿主网络·不经 network-guard] <命令摘要>`
- * + 常驻 tail。命令摘要沿用 summarizeInput 的 80 字符 + "..." 截断风格
- * （截断基数按 markerLen 动态预留：80 - markerLen - 3，新 marker 26 字符
- * → 预留 51，markerLen + 3 = 29 ≤ 80，slice 不会为负退化）；命令含
- * `<<<SECRET_N>>>` 占位符时追加 [secret 警告]（只 mark warning，不读出
- * 真值 —— 视图无权读取 registry 内容，ADR-0022 Decision 3）。tail 与
- * secret 警告都叠加在 80 封顶之外（#951：批准轴诚实化，两段披露不可被
- * 截断吃掉）。非字符串命令兜底走原 JSON 路径。
- */
-function summarizeNetworkBash(input: unknown): string {
-  const command = (input as { command?: unknown } | null)?.command;
-  let hint: string;
-  if (typeof command === "string" && command.length > 0) {
-    const markerLen = NETWORK_HINT_MARKER.length;
-    if (command.length + markerLen <= NETWORK_HINT_BASE_MAX) {
-      hint = `${NETWORK_HINT_MARKER}${command}`;
-    } else {
-      hint =
-        NETWORK_HINT_MARKER +
-        command.slice(0, NETWORK_HINT_BASE_MAX - markerLen - 3) +
-        "...";
-    }
-    if (SECRET_PLACEHOLDER_RE.test(command)) {
-      hint += SECRET_WARNING;
-    }
-    return hint + NETWORK_HINT_TAIL;
-  }
-  // command 缺失 / 非字符串（规则已命中 network:true）→ 兜底走原 JSON 路径。
-  return summarizeInput(input);
 }
 
 /**

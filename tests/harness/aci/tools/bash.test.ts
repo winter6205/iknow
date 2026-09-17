@@ -27,7 +27,7 @@ afterEach(async () => {
 });
 
 describe("createBashTool — schema and metadata", () => {
-  it("exposes command + optional background + optional network, no model-facing timeout", async () => {
+  it("exposes command + optional background only, no model-facing timeout", async () => {
     const cwd = await makeScratch("bash-schema-");
     const tool = createBashTool(cwd);
     const schema = tool.inputSchema as {
@@ -39,6 +39,7 @@ describe("createBashTool — schema and metadata", () => {
 
     assert.equal(tool.name, "bash");
     assert.equal(schema.type, "object");
+    // ADR-0097:出网经 egress 缝,无按调用 opt-in 字段 —— 输入面只有这两个。
     assert.deepEqual(schema.properties, {
       command: { type: "string" },
       // #502 T3:background?: boolean(缺省 false = 前台,行为不变)
@@ -46,13 +47,6 @@ describe("createBashTool — schema and metadata", () => {
         type: "boolean",
         description:
           "When true, run the command in the background: returns {task_id, log_path} immediately and the process keeps running after the call, managed by the task registry. Use for long-lived servers or daemons; pair with bash_output (read the log) and bash_stop (terminate). Defaults to false (foreground).",
-      },
-      // #503 T10 / ADR-0022:network?: boolean(宿主网络批准轴 — fence 去掉
-      // --unshare-net；上层 rule 强制 ask,full_auto 不豁免)。
-      network: {
-        type: "boolean",
-        description:
-          "When true, this command gets host network access (the fence skips --unshare-net) so it can reach the LAN or the internet. Network opt-in is a separate approval axis: calls with network:true always go through explicit permission and full_auto mode does not exempt them. Defaults to false (network-isolated).",
       },
     });
     assert.deepEqual(schema.required, ["command"]);

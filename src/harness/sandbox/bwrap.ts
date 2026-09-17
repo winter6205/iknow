@@ -5,7 +5,7 @@ import {
   OPTIONAL_HOST_RO_PREFIXES,
   READ_ONLY_SYSTEM_PATHS,
 } from "./fs-policy.js";
-import type { NetworkPolicy } from "./network-policy.js";
+import type { EgressFenceSpec } from "./egress/session.js";
 
 export interface SeccompProfile {
   readonly fd: number;
@@ -25,15 +25,8 @@ export interface BwrapFenceOptions {
   readonly command: string;
   readonly args: readonly string[];
   readonly fsPolicy: FsPolicy;
-  readonly networkPolicy: NetworkPolicy;
   readonly env: NodeJS.ProcessEnv;
   readonly cwd: string;
-  // Per-call network opt-in (#503, ADR-0022). Absent/false = isolated
-  // (keep --unshare-net); true = drop --unshare-net so the sandboxed
-  // process has host-network visibility. The rest of the fence (user ns /
-  // die-with-parent / system ro-binds / clearenv / chdir / command) is
-  // unchanged — this is the only approval axis this option touches.
-  readonly network?: boolean;
   // #562 T5 / ADR-0092: cwdReadonly — absent/false = the host root bind
   // already makes cwd writable; true = additionally `--ro-bind cwd cwd` so a
   // validator hole still gets EROFS at the kernel layer.
@@ -62,6 +55,20 @@ export interface BwrapFenceOptions {
    * 根保证非空存在);缺席 → 不发射该 bind。**仅** workspace 档消费。
    */
   readonly tmpRoot?: string;
+  /**
+   * ADR-0097 / T4:出口代理缝 —— 宿主 socket → 沙箱内代理端口的可选装配。
+   *
+   * 缺席 → 不发射 unix socket `--bind`、不注入代理 env（`--unshare-net`
+   * 仍恒在,无 host-net 直连分支）。fence 装配期注入 socket bind 与
+   * 代理 env（HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY），沙箱
+   * 内命令链（host bwrap 内部拉起的 socat）转 unix socket 回本地端口，
+   * 见 `src/harness/sandbox/egress/session.ts`。
+   *
+   * **mount 序**：socket bind 落在 workspaceMounts 之后、cwdReadonly 之前
+   * —— 与既有 mount 块同段（last-mount-wins）。`--setenv` 走既有
+   * envArgs 机制（与 `--clearenv` 共用：clearenv 在前、setenv 在后）。
+   */
+  readonly egress?: EgressFenceSpec;
 }
 
 export interface BwrapFence {
@@ -138,6 +145,10 @@ function workspaceMountArgs(
  * visible and writable), then re-bind the system prefixes read-only, then the
  * read-only cwd override, then proc/dev.
  *
+ * ADR-0097:`--unshare-net` 是常量 —— 任何输入都不再摘除。`network` 已从
+ * `BwrapFenceOptions` 退役;出网能力由 `egress` 缝 unix socket 代理承载,
+ * 沙箱内 netns 恒隔离。Settled invariant #1 在 fence 装配层钉死。
+ *
  * bwrap's last-mount-wins semantics drive the ordering contract:
  *  - `--bind / /` is the base token; every later `--ro-bind` is a narrower
  *    mount that reclaims only its own subtree;
@@ -146,20 +157,24 @@ function workspaceMountArgs(
  *  - `--ro-bind <cwd> <cwd>` (cwdReadonly) must come AFTER the `/` bind;
  *  - the workspace-mode block (`workspaceMounts`) sits between the system
  *    block and the cwd override — see `workspaceMountArgs` for its order;
+ *  - the egress socket bind (`--bind <unixSocket> <unixSocket>`) sits
+ *    between workspaceMounts and cwdReadonly/proc/dev — it is the last
+ *    writable mount in the chain (ADR-0097 / T4);
  *  - there is no session-tmp bind at guest `/tmp` and no per-root writable
  *    bind list — the session tmp keeps its host path (ADR-0092).
  */
 function baseArgs(
   cwd: string,
-  network: boolean,
   cwdReadonly: boolean,
-  workspaceMounts: readonly string[]
+  workspaceMounts: readonly string[],
+  egressBind: readonly string[]
 ): string[] {
   return [
     "--unshare-user-try",
-    // network:true is the only axis that drops --unshare-net (ADR-0022 #1);
-    // every line below stays unchanged either way.
-    ...(network ? [] : ["--unshare-net"]),
+    // ADR-0097:`--unshare-net` is constant. No conditional, no escape
+    // hatch. The only path to the host network is the egress unix socket
+    // seam — netns isolation is the sole fence-layer control axis.
+    "--unshare-net",
     "--die-with-parent",
     // Host root: real paths visible and writable.
     "--bind",
@@ -173,6 +188,11 @@ function baseArgs(
     // 工作区档三层由调用方算好后整段插入:系统块之后、cwdReadonly 与 proc/dev
     // 之前(mount 序在此处是最末一段可写 bind)。
     ...workspaceMounts,
+    // ADR-0097 / T4:出口代理缝 unix socket `--bind` —— 在 workspaceMounts
+    // 之后、cwdReadonly 之前;source=dest 同值 (host 路径 → 沙箱内同路径)。
+    // 沙箱内 socat (在 fence 内部命令链拉起) 读该 socket → 把流量转回
+    // 本地 TCP 端口 → 走 HTTP_PROXY 出口。
+    ...egressBind,
     // cwdReadonly: EROFS override after the `/` bind (与工作区档三层正交,
     // 即使工作区档三层叠加,cwdReadonly 仍在最末;后者按字面是 mount 序最末)。
     ...(cwdReadonly ? ["--ro-bind", cwd, cwd] : []),
@@ -184,15 +204,43 @@ function baseArgs(
   ];
 }
 
+/**
+ * ADR-0097 / T4:egress 缝 unix socket `--bind` argv 段。
+ *
+ * `unixSocketPath` 为空 / 缺席 → 不发射任何 argv(`--unshare-net` 仍恒在,
+ * 无 host-net 直连分支)。三元组形态 `--bind <src> <dest>` ——
+ * `src=dest=unixSocketPath`,与既有工作区档两层写白名单(`bindArgs`)同形态,
+ * 但不并入 `bindArgs`(后者语义是「工作区写白名单的省略是收紧方向」,本函数
+ * 语义是「出口代理缝的省略是 fail-closed 但**不**回退到 host-net」—— 两者不混)。
+ */
+function egressBindArgs(spec: EgressFenceSpec | undefined): string[] {
+  if (spec === undefined) return [];
+  const { unixSocketPath } = spec;
+  if (typeof unixSocketPath !== "string" || unixSocketPath.length === 0)
+    return [];
+  return ["--bind", unixSocketPath, unixSocketPath];
+}
+
 export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
-  const envArgs = Object.entries(opts.env).flatMap(([name, value]) =>
+  // ADR-0097 / T4:egress env 注入 —— spec.env 是 session 已算好的代理
+  // 三键 + NO_PROXY;fence 把它拼进自己的 envArgs(与既有 whitelisted
+  // env 同形态),`--clearenv` 仍在 setenv 之前。
+  const mergedEnv: Record<string, string> = {};
+  for (const [k, v] of Object.entries(opts.env)) {
+    if (typeof v === "string") mergedEnv[k] = v;
+  }
+  if (opts.egress !== undefined) {
+    for (const [k, v] of Object.entries(opts.egress.env)) {
+      if (typeof v === "string") mergedEnv[k] = v;
+    }
+  }
+  const envArgs = Object.entries(mergedEnv).flatMap(([name, value]) =>
     value === undefined ? [] : ["--setenv", name, value]
   );
   const argv = [
     "bwrap",
     ...baseArgs(
       opts.cwd,
-      opts.network === true,
       opts.cwdReadonly === true,
       // 工作区档会话 tmp bind 源端由调用方显式透传(opts.tmpRoot)。`fsPolicy.tmpRoot()`
       // 不在 bwrap 这层隐式回退 —— 否则 opts.tmpRoot === undefined 的「缺席」
@@ -204,7 +252,8 @@ export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
         opts.homeRoot,
         opts.workspaceRoot,
         opts.tmpRoot
-      )
+      ),
+      egressBindArgs(opts.egress)
     ),
     // --clearenv must precede every --setenv so the sandbox inherits only the
     // whitelisted entries, never the host env (bwrap otherwise copies the whole
@@ -217,11 +266,9 @@ export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
     opts.command,
     ...opts.args,
   ];
-  // networkPolicy has no enforcement in the fence layer (STATIC_NETWORK_WHITELIST
-  // is not executed here, see network-policy.ts). The real network control axis
-  // is the --unshare-net switch driven by the `network` option above; keep
-  // networkPolicy as the declared-but-inert contract input (ADR-0022 fog).
-  void opts.networkPolicy;
+  // ADR-0097:`--unshare-net` 恒定,本层不保留任何可摘除它的参数面(退役的
+  // 网络策略参数是旧 fence 唯一的摘除依赖,见 spec Deletion surface);出口能力
+  // 由 `egress` 缝 unix socket 代理承担(Spec §Ownership / dispose contract)。
   return Object.freeze({ argv: Object.freeze(argv), sealed: true as const });
 }
 

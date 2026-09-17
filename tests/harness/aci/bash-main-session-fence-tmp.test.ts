@@ -22,7 +22,6 @@ import { afterEach, describe, it } from "vitest";
 import { createBashTool } from "../../../src/harness/aci/tools/bash.js";
 import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.js";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.js";
-import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.js";
 import { sanitizeConversationSegment } from "../../../src/harness/session-roots.js";
 import { MAIN_SESSION_FENCE_TMP_DIR_NAME } from "../../../src/shared/session-tree-names.js";
 
@@ -77,7 +76,6 @@ describe("main-session fence-tmp (ADR-0092)", () => {
       fsPolicy: createFsPolicy({
         tmpDir: pad,
       }),
-      networkPolicy: createNetworkPolicy(),
       env: { PATH: "/bin", TMPDIR: pad },
       cwd: taskRoot,
     }).argv;

@@ -5,7 +5,6 @@ import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.js";
 import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.js";
-import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.js";
 import { ToolExecutionError } from "../../../src/harness/errors.js";
 
 /**
@@ -50,7 +49,6 @@ function fenceArgv(
     command: "bash",
     args: ["-c", "true"],
     fsPolicy: policy,
-    networkPolicy: createNetworkPolicy(),
     env: { PATH: "/bin" },
     cwd: FIX_ROOT,
   }).argv;
@@ -145,7 +143,6 @@ describe("fs-policy boundary — concurrent (policy / fence construction)", () =
           command: "bash",
           args: ["-c", "true"],
           fsPolicy: createFsPolicy(baseOpts()),
-          networkPolicy: createNetworkPolicy(),
           env: { PATH: "/bin" },
           cwd: FIX_ROOT,
         });
@@ -169,7 +166,6 @@ describe("fs-policy boundary — exception (typed fail-loud bubbling)", () => {
         command: "bash",
         args: ["-c", "true"],
         fsPolicy: policy,
-        networkPolicy: createNetworkPolicy(),
         env: { PATH: "/bin" },
         cwd: FIX_ROOT,
       });

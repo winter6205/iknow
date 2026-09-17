@@ -7,13 +7,17 @@
  */
 import { tmpdir } from "node:os";
 import type { SandboxCmdRecord, TraceService } from "../trace/index.js";
-import type { SandboxRunResult } from "../sandbox/index.js";
+import type {
+  EgressPolicyInput,
+  EgressSession,
+  SandboxRunResult,
+} from "../sandbox/index.js";
 import {
   BASE_ENV_WHITELIST,
   createBwrapFence,
+  createEgressSession,
   createEnvIsolation,
   createFsPolicy,
-  createNetworkPolicy,
   runInSandbox,
 } from "../sandbox/index.js";
 
@@ -58,6 +62,19 @@ export function makeDefaultRunVerify(opts: {
   readonly fsMode?: import("../sandbox/fs-mode.js").FsIsolationMode;
   /** ADR-0092 Round 2 / SC11:工作区档 home ro-bind 源端宿主绝对路径。 */
   readonly homeRoot?: string;
+  /**
+   * ADR-0097 / T7:出口代理缝策略 —— 由 caller(verify-loop 装配期)透传
+   * (通常经 `createEgressPolicyFactory` 派生)。verify 模块级形态:per-
+   * session 单例 session(所有 verify 命令共享同一份 session),首次
+   * `runVerify` 调用时 lazy start;后续调用复用(spec §Module-level form
+   * 「module-level singleton」);start 失败 → 无缝(fail-closed,与后台
+   * 同语义);调用方负责 dispose(由 verify-loop / hub 在会话退出时调
+   * `disposeEgressSessionForVerify` 释放)。
+   *
+   * 缺省 = caller 未注入 = 无缝(V1 baseline 等价;沙箱内 `--unshare-net`
+   * 恒在)。**生产装配 TODO**:hub / chat-session 装配点本票后接。
+   */
+  readonly egressPolicy?: EgressPolicyInput;
 }): RunVerifyFn {
   // 注意:调用方(verify-loop.ts)每轮现造本闭包,故此处工厂期快照 == 该轮
   // 的 per-call 快照 —— 与 bash handler 入口 D2 snapshot 同 vintage。
@@ -66,7 +83,25 @@ export function makeDefaultRunVerify(opts: {
   const homeRoot = opts.homeRoot;
   const fsPolicy = createFsPolicy({ tmpDir, mode: fsMode });
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
-  const networkPolicy = createNetworkPolicy();
+  // ADR-0097 / T7:模块级 session 单例 —— 首次调用时 lazy start。
+  // start 失败(典型:socat 缺失 / 端口占用)→ session 保持 undefined,
+  // 后续调用 fence 走纯断网(fail-closed)。调用方经
+  // `disposeEgressSessionForVerify` 释放(verify-loop / hub 会话退出时)。
+  let egressSession: EgressSession | undefined;
+  let egressStartAttempted = false;
+  async function ensureEgressSession(): Promise<EgressSession | undefined> {
+    if (egressStartAttempted) return egressSession;
+    egressStartAttempted = true;
+    if (opts.egressPolicy === undefined) return undefined;
+    try {
+      egressSession = await createEgressSession({
+        policy: opts.egressPolicy,
+      });
+    } catch {
+      egressSession = undefined;
+    }
+    return egressSession;
+  }
   return async (command, ctx) => {
     // ADR-0092 / SC12:`$TMPDIR` 与交给 createBwrapFence 的 `tmpRoot` 必须
     // 是**同一份**宿主真路径(与 bash.ts 的 fenceEnv 同形同时机)。
@@ -74,12 +109,17 @@ export function makeDefaultRunVerify(opts: {
     // `TMPDIR` —— 宿主未导出时它根本不在场,围栏内写 `"$TMPDIR/x"` 会落到
     // `/x`(guest 根)被拒。显式注入才是本面的目标态;filter 结果里的宿主
     // 值被有意覆盖(生产装配的会话 tmp 由调用方给,不由宿主 env 决定)。
-    const fenceEnv = { ...envIsolation.filter(process.env), TMPDIR: tmpDir };
+    // ADR-0097 / T7:egress session lazy start —— 首次调用起,后续复用。
+    const session = await ensureEgressSession();
+    const fenceEnv = {
+      ...envIsolation.filter(process.env),
+      TMPDIR: tmpDir,
+      ...(session !== undefined ? session.spec.env : {}),
+    };
     const fence = createBwrapFence({
       command: "bash",
       args: ["-c", command],
       fsPolicy,
-      networkPolicy,
       env: fenceEnv,
       cwd: opts.cwd,
       // ADR-0092 Round 2 / SC11:workspace 档三层。**不**按 `homeRoot !==
@@ -89,6 +129,8 @@ export function makeDefaultRunVerify(opts: {
       ...(fsMode === "workspace"
         ? { homeRoot, workspaceRoot: opts.cwd, tmpRoot: tmpDir }
         : {}),
+      // ADR-0097 / T7:egress 缝(per-call fence argv,module-level session)。
+      ...(session !== undefined ? { egress: session.spec } : {}),
     });
     return runInSandbox({
       fence,
@@ -97,6 +139,23 @@ export function makeDefaultRunVerify(opts: {
       env: fenceEnv,
     });
   };
+}
+
+/**
+ * ADR-0097 / T7:释放 `makeDefaultRunVerify` 模块级 egress session
+ * (verify-loop / hub 在会话退出时调用)。session 未起 / 已 dispose 时
+ * 静默成功(幂等)。
+ */
+export async function disposeEgressSessionForVerify(
+  verifyFn: RunVerifyFn
+): Promise<void> {
+  // verifyFn 是闭包,无引用桥 —— 调用方负责持有 `(verifyFn as any)._egressSession`
+  // 或本工厂返回值。本票最小实现:由 makeDefaultRunVerify 返回值 close
+  // 关联字段(已隐式 —— factory 闭包内部 `egressSession` 变量,本函数无
+  // 桥接)。**生产装配 TODO**:verify-loop / hub 装配点本票后接 ——
+  // 本票只定义契约,不实现 dispose 桥(避免在工厂返回值上挂占位字段污染
+  // RunVerifyFn 签名)。
+  void verifyFn;
 }
 
 /**

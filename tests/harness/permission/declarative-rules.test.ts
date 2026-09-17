@@ -662,40 +662,42 @@ describe("Order: deny group precedes allow; first match in same group wins", () 
     );
   });
 
-  it("Bash(network:true|false|*) allow is dropped (param:value is deny/ask only)", () => {
-    // Spec Does: "allow 不走 param:value". The Bash family takes the same
-    // rule, but `network:` is the legacy eligibility gate for
-    // code-ask-bash-network (declared to remain addressable from a project
-    // permissions section so existing denials migrate). Invariant: allow
-    // rules with a `bash(network:*)` specifier are dropped with a warning;
-    // the corresponding deny/ask rules still compile.
-    for (const netValue of ["true", "false", "*"] as const) {
-      const warnings: string[] = [];
-      const rules = compileDeclarativePermissions(
-        {
-          allow: [`Bash(network:${netValue})`],
-          deny: [`Bash(network:${netValue})`],
-          ask: [`Bash(network:${netValue})`],
-        },
-        { workRoot: "/w", onWarn: (m) => warnings.push(m) }
-      );
-      assert.equal(
-        rules.length,
-        2,
-        `deny + ask kept, allow dropped for network:${netValue}`
-      );
-      assert.equal(rules[0]?.decision, "deny");
-      assert.equal(rules[1]?.decision, "ask");
-      assert.ok(
-        warnings.some(
-          (w) =>
-            w.includes("Bash(network:") &&
-            w.includes("allow") &&
-            w.includes("network")
-        ),
-        `warning must mention network + allow for ${netValue}; got ${JSON.stringify(warnings)}`
-      );
-    }
+  it("Bash(network:…) specifier → compiled as a command glob (no field-rule family left)", () => {
+    // ADR-0097: `network:` per-call opt-in retired, so the Bash family has no
+    // `param:value` form any more. `Bash(network:true)` now falls through to
+    // the command-glob path: it compiles to a rule matching commands that
+    // literally read `network:true` — harmless, and no allow rule is dropped
+    // because `allow` is a legal decision for a command glob.
+    const warnings: string[] = [];
+    const rules = compileDeclarativePermissions(
+      {
+        allow: ["Bash(network:true)"],
+        deny: ["Bash(network:true)"],
+        ask: ["Bash(network:true)"],
+      },
+      { workRoot: "/w", onWarn: (m) => warnings.push(m) }
+    );
+    assert.deepEqual(
+      rules.map((r) => r.decision),
+      ["deny", "ask", "allow"],
+      "all three decisions compile as command globs"
+    );
+    // 命令 glob 语义:匹配命令文本,而非 input 的 network 字段。
+    assert.equal(
+      rules[0]!.match(makeInput("bash", { command: "network:true" })),
+      true,
+      "command glob matches the literal command text"
+    );
+    assert.equal(
+      rules[0]!.match(makeInput("bash", { command: "curl x", network: true })),
+      false,
+      "input field alone does not match a command glob"
+    );
+    assert.equal(
+      warnings.some((w) => w.includes("network")),
+      false,
+      `no network-specific warning path remains; got ${JSON.stringify(warnings)}`
+    );
   });
 
   it("ask group sits between deny and allow", () => {

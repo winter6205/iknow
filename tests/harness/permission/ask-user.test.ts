@@ -240,37 +240,26 @@ describe("ServeAskUserHandle.pendingAll (commit B: web ask UI)", () => {
     await p;
   });
 
-  it("#503 T10 — pendingAll 透传 network 字段（bash network:true ask 标记）", async () => {
+  it("pendingAll 视图字段集 = {id, tool, summaryHint}（输入侧额外 key 不外泄到视图）", async () => {
+    // ADR-0097:批准面只有一条链,视图不携带任何按输入改写的审批轴字段。
+    // 即便 input 里带了未知 key(如遗留 network),视图字段集保持不变 ——
+    // 前端渲染面因此不存在第二套标记分支。
     const h = createServeAskUser({ timeoutMs: 1_000 });
     const p = h.ask({
       tool: "bash",
       input: { command: "curl localhost", network: true },
-      // #951:hint 文案升级；测试只锁透传,不锁文案形状
-      summaryHint:
-        '[请求宿主网络·不经 network-guard] "curl localhost"（宿主 netns 全量可见：localhost 服务 / 局域网 / link-local 元数据 169.254.169.254；无 IP 过滤、无域名过滤）',
-      network: true,
+      summaryHint: '{"command":"curl localhost"}',
     });
     await Promise.resolve();
     const list = h.pendingAll();
     assert.equal(list.length, 1);
-    assert.equal(list[0]!.network, true);
+    assert.deepEqual(Object.keys(list[0]!).sort(), [
+      "id",
+      "summaryHint",
+      "tool",
+    ]);
     assert.equal(list[0]!.tool, "bash");
     h.resolveAsk(list[0]!.id, true);
-    await p;
-  });
-
-  it("#503 T10 — pendingAll 缺省 network 时不残留 network 字段（key absent）", async () => {
-    const h = createServeAskUser({ timeoutMs: 1_000 });
-    const p = h.ask({
-      tool: "edit_file",
-      input: { path: "x.ts" },
-      summaryHint: "edit x.ts",
-    });
-    await Promise.resolve();
-    const first = h.pendingAll()[0]!;
-    assert.equal(first.network, undefined);
-    assert.equal("network" in first, false);
-    h.resolveAsk(first.id, true);
     await p;
   });
 

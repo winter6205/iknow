@@ -714,147 +714,54 @@ describe("policy integration", () => {
 });
 
 /* -----------------------------------------------------------------------------
- * #952 network opt-in — expressed through the declarative form
+ * #952 network opt-in — retired by ADR-0097
  * -------------------------------------------------------------------------- */
 
 /**
- * bash `network:true` eligibility gate.
+ * The per-call network opt-in axis is gone: `bash(network:true)` is no longer
+ * a `param:value` gate, so the same specifier now compiles through the
+ * ordinary command-glob path (`Bash` family specifiers that are not the
+ * primary content field). Invariant pinned here: the specifier still loads
+ * and still yields exactly one project rule — a project that wrote it keeps a
+ * structurally valid source rather than a loader error — while its match
+ * semantics are command-text, not the retired `input.network` field.
  *
- * Invariant (SSOT = `policy.ts` `isBashNetworkInput`, strict `=== true`):
- *  - match ⇔ tool === "bash" AND `input.network` is exactly the boolean true.
- *    A string `"true"`, an absent field, `false`, and a non-object input all
- *    miss.
- *  - This is a request-eligibility gate, not an SSRF boundary: traffic
- *    content is unfiltered either way, and without a matching rule the
- *    default `code-ask-bash-network` ask still stands.
- *  - The declarative form expresses the gate as `bash(network:true)`
- *    (`param:value` on a non-primary scalar field); `bash(network:*)`
- *    generalises it to "any explicit network value".
+ * The ask/deny outcome for bash calls is unaffected: bash is `execute` →
+ * category default ask (see `policy integration` above).
  */
-describe("bash network gate via declarative form", () => {
-  const NETWORK_SECTION = { deny: ["bash(network:true)"] };
-
-  function loadNetworkRule(dir: string) {
-    const path = writePermissions(dir, NETWORK_SECTION);
-    const src = loadProjectSettings({ filePath: path, workRoot: "/w" });
-    assert.ok(src);
-    assert.equal(src.rules.length, 1);
-    return src.rules[0]!;
-  }
-
-  it("network:true matches {command, network: true} on bash", () => {
+describe("bash network specifier compiles as a command glob (opt-in axis retired)", () => {
+  it("loads one rule and matches command text, not an input field", () => {
     const dir = scratchDir();
     try {
-      const rule = loadNetworkRule(dir);
-      assert.equal(
-        rule.match({
-          tool: "bash",
-          input: { command: "curl https://example.com", network: true },
-        }),
-        true
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("does not match network:false / missing / string 'true' (strict boolean)", () => {
-    const dir = scratchDir();
-    try {
-      const rule = loadNetworkRule(dir);
-      assert.equal(
-        rule.match({
-          tool: "bash",
-          input: { command: "curl https://example.com", network: false },
-        }),
-        false
-      );
-      assert.equal(
-        rule.match({ tool: "bash", input: { command: "curl" } }),
-        false
-      );
-      assert.equal(
-        rule.match({
-          tool: "bash",
-          input: { command: "curl", network: "true" },
-        }),
-        false
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("non-bash tool with a same-named network:true field does not match", () => {
-    const dir = scratchDir();
-    try {
-      const rule = loadNetworkRule(dir);
-      assert.equal(
-        rule.match({
-          tool: "web_fetch",
-          input: { url: "https://example.com", network: true },
-        }),
-        false
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("network:* matches any scalar network value on bash", () => {
-    const dir = scratchDir();
-    try {
-      const path = writePermissions(dir, { deny: ["bash(network:*)"] });
+      const path = writePermissions(dir, { deny: ["bash(network:true)"] });
       const src = loadProjectSettings({ filePath: path, workRoot: "/w" });
       assert.ok(src);
+      assert.equal(src.rules.length, 1);
       const rule = src.rules[0]!;
+      assert.equal(
+        rule.match({ tool: "bash", input: { command: "network:true" } }),
+        true,
+        "command glob matches the literal command text"
+      );
       assert.equal(
         rule.match({
           tool: "bash",
           input: { command: "curl", network: true },
         }),
-        true
+        false,
+        "the retired input field no longer drives the rule"
       );
       assert.equal(
-        rule.match({
-          tool: "bash",
-          input: { command: "curl", network: false },
-        }),
-        true
-      );
-      assert.equal(
-        rule.match({ tool: "bash", input: { command: "curl" } }),
-        false
+        rule.match({ tool: "read_file", input: { command: "network:true" } }),
+        false,
+        "rule stays bash-scoped"
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("integration: project-layer deny fires before the code-layer ask", () => {
-    const dir = scratchDir();
-    try {
-      const project = loadProjectSettings({
-        filePath: writePermissions(dir, NETWORK_SECTION),
-        workRoot: "/w",
-      });
-      assert.ok(project);
-      const policy = createPermissionPolicy({ project });
-      const out = checkPermission({
-        def: makeTool("bash", "execute"),
-        input: { command: "curl https://example.com", network: true },
-        sources: policy.sources,
-        hardWalls: policy.hardWalls,
-        defaultByCategory: policy.defaultByCategory,
-      });
-      assert.equal(out.decision, "deny");
-      assert.match(out.reason, /project settings: deny/);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("default behavior unchanged: without a network rule, bash network:true still asks via code-ask-bash-network", () => {
+  it("without any project rule, bash still asks via the category default", () => {
     const dir = scratchDir();
     try {
       const project = loadProjectSettings({
@@ -865,13 +772,13 @@ describe("bash network gate via declarative form", () => {
       const policy = createPermissionPolicy({ project });
       const out = checkPermission({
         def: makeTool("bash", "execute"),
-        input: { command: "curl https://example.com", network: true },
+        input: { command: "curl https://example.com" },
         sources: policy.sources,
         hardWalls: policy.hardWalls,
         defaultByCategory: policy.defaultByCategory,
       });
       assert.equal(out.decision, "ask");
-      assert.match(out.reason, /code-ask-bash-network|network/);
+      assert.match(out.reason, /category default/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

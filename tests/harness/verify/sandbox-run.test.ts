@@ -22,6 +22,7 @@ vi.mock("../../../src/harness/sandbox/index.ts", async (importOriginal) => {
     ...actual,
     createBwrapFence: vi.fn(),
     runInSandbox: vi.fn(),
+    createEgressSession: vi.fn(),
   };
 });
 
@@ -31,7 +32,6 @@ import {
   createFsPolicy,
   type FsPolicy,
 } from "../../../src/harness/sandbox/fs-policy.ts";
-import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.ts";
 import { ToolExecutionError } from "../../../src/harness/errors.ts";
 
 interface CapturedFence {
@@ -177,7 +177,6 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
             command: "bash",
             args: ["-c", "true"],
             fsPolicy: createFsPolicy({ tmpDir: cwd, mode: "workspace" }),
-            networkPolicy: createNetworkPolicy(),
             env: { PATH: "/bin" },
             cwd,
             homeRoot: undefined,
@@ -206,5 +205,73 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
     const runArgs = vi.mocked(sandboxIndex.runInSandbox).mock.calls[0]?.[0] as
       { cwd?: string } | undefined;
     assert.equal(runArgs?.cwd, cwd);
+  });
+});
+
+// ── ADR-0097 / T7:egress 缝装配单测 ────────────────────────────────────────
+//
+// 验证 verify 模块级 session 形态:policy 缺省 = 无缝;policy 在场 → 首次
+// 调用 lazy start,session 起成功 → fence args 带 egress spec;start 失败
+// → 无缝(fail-closed,任务仍起)。
+
+describe("makeDefaultRunVerify — egress 缝装配 (ADR-0097 / T7)", () => {
+  it("egressPolicy 缺省 → 不起 session,fence 不带 egress spec", async () => {
+    captured.length = 0;
+    const cwd = "/tmp/verify-egress-none";
+    const runVerify = makeDefaultRunVerify({ cwd });
+    await runVerify("true", {});
+    const fence = captured[0]!;
+    assert.equal(fence.egress, undefined);
+  });
+
+  it("egressPolicy 在场 + createEgressSession 成功 → fence 带 egress spec,spec.env 注入 fenceEnv", async () => {
+    // 透过 mock 返回 fake session;fake spec.env 应出现在 fence.env。
+    const fakeSpec = {
+      unixSocketPath: "/tmp/iknow-verify-egress.sock",
+      sandboxLocalPort: 19090,
+      env: { HTTP_PROXY: "http://127.0.0.1:19090" },
+    };
+    vi.mocked(sandboxIndex.createEgressSession).mockReset();
+    vi.mocked(sandboxIndex.createEgressSession).mockResolvedValue({
+      spec: fakeSpec,
+      dispose: async () => undefined,
+    });
+    captured.length = 0;
+    const cwd = "/tmp/verify-egress-ok";
+    const runVerify = makeDefaultRunVerify({
+      cwd,
+      egressPolicy: {
+        allowedDomains: ["example.com"],
+        deniedDomains: [],
+        commandLabel: "verify",
+        allowlistSource: "preset",
+      },
+    });
+    await runVerify("true", {});
+    const fence = captured[0]!;
+    assert.deepEqual(fence.egress, fakeSpec);
+    assert.equal(fence.env.HTTP_PROXY, "http://127.0.0.1:19090");
+  });
+
+  it("createEgressSession 抛错 → fence 不带 egress spec,verify 仍能执行 (fail-closed)", async () => {
+    vi.mocked(sandboxIndex.createEgressSession).mockReset();
+    vi.mocked(sandboxIndex.createEgressSession).mockRejectedValue(
+      new Error("socat missing")
+    );
+    captured.length = 0;
+    const cwd = "/tmp/verify-egress-fail";
+    const runVerify = makeDefaultRunVerify({
+      cwd,
+      egressPolicy: {
+        allowedDomains: ["example.com"],
+        deniedDomains: [],
+        commandLabel: "verify",
+        allowlistSource: "preset",
+      },
+    });
+    await runVerify("true", {});
+    const fence = captured[0]!;
+    assert.equal(fence.egress, undefined);
+    expect(vi.mocked(sandboxIndex.runInSandbox)).toHaveBeenCalledTimes(1);
   });
 });

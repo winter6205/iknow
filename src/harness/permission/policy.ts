@@ -31,40 +31,6 @@ export const DEFAULT_BY_CATEGORY: Readonly<
   collaborate: "ask",
 });
 
-/**
- * #503 T10 / ADR-0022 — bash network:true 命中判定的 input 侧 shape check
- * （不含 tool gate）。isBashNetworkTrue（规则/permission-executor 共用 SSOT）
- * 与 project-settings.ts 的 `network_equals` 谓词共用这一个函数，保证
- * 「决策来源」「hint 形态」「项目层谓词」三处严格 === true 语义不再漂移。
- * 命中条件：input.network 严格 === true（非布尔 "true" / 缺省 / false →
- * 不命中）。tool gate（tool === "bash"）由各调用方承担：isBashNetworkTrue
- * 显式检查 tool；project-settings 的 buildRuleMatcher 已先检查
- * `ctx.tool === toolName`（match_tool = "bash" 规则），故进入谓词的
- * inputObj 必然来自 bash 调用，此处 shape check 与全谓词等价。
- */
-export function isBashNetworkInput(input: unknown): boolean {
-  return (
-    typeof input === "object" &&
-    input !== null &&
-    !Array.isArray(input) &&
-    (input as { network?: unknown }).network === true
-  );
-}
-
-/**
- * #503 T10 / ADR-0022 — bash network:true 命中判定（SSOT，review-repair
- * #502/#503）。规则 `code-ask-bash-network`（policy.ts）与
- * permission-executor.ts 的 hint 判定（isNetworkBash）共用同一函数：
- * 两处逐字同形谓词收敛，保证「决策来源」与「hint 形态」一一对应不再漂移。
- * 命中条件：tool === "bash" 且 input.network 严格 === true（非布尔 "true" /
- * 缺省 / false → 不命中）。非 bash 工具同名字段不受影响（web_fetch 等走
- * 既有类别默认）。#952 起与 project-settings.ts 的 `network_equals` 谓词
- * 共享 isBashNetworkInput 的 shape check。
- */
-export function isBashNetworkTrue(tool: string, input: unknown): boolean {
-  return tool === "bash" && isBashNetworkInput(input);
-}
-
 function codeBuiltInRules(): ReadonlyArray<NormalRuleSpec> {
   return Object.freeze([
     {
@@ -97,19 +63,6 @@ function codeBuiltInRules(): ReadonlyArray<NormalRuleSpec> {
         (input as { mode?: unknown }).mode === "read",
       decision: "allow",
       reason: "code built-in: todo_write read mode is read-only (bypass ask)",
-    },
-    {
-      // #503 T10 / ADR-0022:bash network:true 强制 ask — 命中 rule 先于 mode
-      // 解析(见 checkPermission 分层循环),故 full_auto 分支永远到不了这条
-      // 调用,fence 形状变化(去 --unshare-net、获得宿主网络可见性)是新的
-      // 批准轴,与动作批准轴正交。匹配条件:tool === "bash" 且 input.network
-      // <b>严格等于 true</b>(非布尔 "true" / 缺省 / false → 不命中,走既有
-      // 分类默认路径)。非 bash 工具同名字段不受影响。硬墙仍先于本规则。
-      id: "code-ask-bash-network",
-      match: ({ tool, input }) => isBashNetworkTrue(tool, input),
-      decision: "ask",
-      reason:
-        "code built-in: bash network:true — host network 不经 network-guard，宿主 netns 全量可见（无 IP 过滤、无域名过滤）— explicit approval required, full_auto does not exempt network opt-in",
     },
   ]);
 }

@@ -12,13 +12,6 @@ export {
 export type { FsIsolationMode, FsModeContext } from "./fs-mode.js";
 
 export {
-  STATIC_NETWORK_WHITELIST,
-  NetworkViolationError,
-  createNetworkPolicy,
-} from "./network-policy.js";
-export type { NetworkPolicy } from "./network-policy.js";
-
-export {
   CPU_SEC,
   MEM_BYTES,
   TMP_BYTES,
@@ -45,6 +38,28 @@ export type { EnvIsolation, EnvIsolationOptions } from "./env-isolation.js";
 
 export { createOutputMask } from "./output-mask.js";
 export type { OutputMask } from "./output-mask.js";
+
+export {
+  buildProxyEnv,
+  createEgressSession,
+  defaultProbeSocat,
+  createEgressViolationSink,
+  renderEgressViolations,
+  renderEgressFailureMessage,
+  SocatUnavailableError,
+  createEgressApprovalGate,
+  type AskApproval,
+  type CreateEgressApprovalGateOptions,
+  type EgressAllowlistSource,
+  type EgressApprovalGate,
+  type EgressFenceSpec,
+  type EgressPolicyInput,
+  type EgressSession,
+  type EgressSessionOptions,
+  type EgressViolation,
+  type EgressViolationReason,
+  type EgressViolationSink,
+} from "./egress/index.js";
 
 export { createBwrapFence, OPTIONAL_HOST_RO_PREFIXES } from "./bwrap.js";
 export type { BwrapFence, BwrapFenceOptions, SeccompProfile } from "./bwrap.js";

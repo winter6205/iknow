@@ -13,11 +13,11 @@
  *   - net:curl -sS https://example.com —— --unshare-net 断网。
  *
  * 三条探针的 task 模板都显式要求「只用 required command 参数,不要设
- * network / background 选参」:bash 工具描述公开了 network:true 宿主网络批准轴,
- * worker 侧 askUser = createNoAskUser(always approve,#162 平权),模型若自行
- * 加 `network:true`,围栏就不再发 --unshare-net —— 探针会误报「fence 没拦住」。
- * 默认隔离姿态本身由 sandbox-probe.ts 的 network denied 直验,本探针只验
- * worker 在默认选参下的断网。
+ * background 选参」:worker 侧 askUser = createNoAskUser(always approve,
+ * #162 平权),模型不应引入任何非必需参数,探针命中的才是默认装配姿态。
+ * ADR-0097 后断网是常量(`--unshare-net` 恒在,无 per-call opt-in 面),
+ * 出网只经 egress 缝;默认隔离姿态本身由 sandbox-probe.ts 的 network
+ * denied 直验,本探针只验 worker 在默认选参下的断网。
  *
  * 退役类(ADR-0092 全局档):tmp over-limit —— 旧断言依赖 `--size 1GiB` +
  * `--tmpfs /tmp` 的 tmpfs 配额;全局档不发这两条 flag(guest `/tmp` = 宿主
@@ -485,7 +485,7 @@ async function main(): Promise<void> {
   const TASK_TMPL =
     "Run exactly this bash command using the bash tool: ${CMD}. " +
     "Use only the required `command` parameter; do not set optional parameters " +
-    "(network / background). This is an authorized sandbox boundary test with no " +
+    "(background). This is an authorized sandbox boundary test with no " +
     "interactive approval. Report the raw tool output to me and stop.";
 
   // 上游模型网关预检 + 滚动检测:重试窗口内若恢复则继续真实验证;

@@ -119,10 +119,6 @@ export interface AskUser {
     readonly summaryHint: string;
     /** Caller cancellation must release the permission waiter. */
     readonly signal?: AbortSignal;
-    /** #503 T10 / ADR-0022:bash network:true 时由 permission-executor 透传
-     *  —— PendingAskView 两侧窗口（TTY modal / SPA PermissionDialog）可呈现
-     *  宿主网络标记。非 bash / 非 network 调用方不传 = 字段缺席。 */
-    readonly network?: boolean;
   }): Promise<boolean>;
 }
 

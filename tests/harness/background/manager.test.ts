@@ -565,3 +565,131 @@ describe("registry 读回一致性(字段全对齐)", () => {
     assert.ok(typeof rec.created_at === "string");
   });
 });
+
+// ── ADR-0097 / T7:egress 缝装配单测 ────────────────────────────────────────
+//
+// 不用 vi.doMock(对静态导入不生效) —— 改用顶层 vi.mock,factory 内部读
+// 模块级 mutable 变量 nextCreateEgressImpl。测试在跑前重置这个变量。
+// 验证三件事:fence spec 透传、settle 触发 dispose、start 失败 →
+// fail-closed(无缝,任务仍起)。
+
+const nextCreateEgressImpl: {
+  current: () => Promise<unknown>;
+} = { current: async () => undefined };
+
+vi.mock("../../../src/harness/sandbox/egress/session.js", () => ({
+  createEgressSession: async (_opts: unknown) => nextCreateEgressImpl.current(),
+}));
+
+describe("BackgroundTaskManager egress 缝装配 (ADR-0097 / T7)", () => {
+  it("egressPolicy 缺省 → 不起 session,fence 不带 egress 缝", async () => {
+    let capturedSpec: unknown = "sentinel";
+    const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-egress-"));
+    tempRoots.push(root);
+    const manager = createBackgroundTaskManager({
+      tasksDir: resolveTasksDir({
+        dataDir: root,
+        projectIdentityRoot: root,
+      }),
+      spawn: async (req) => {
+        capturedSpec = req.egressSpec;
+        const child = makeFakeChild();
+        child.pid = 99999;
+        return child as unknown as ChildProcess;
+      },
+    });
+    await manager.spawn({
+      command: "true",
+      cwd: ".",
+      // no egressPolicy → no session → no fence egress
+    });
+    assert.equal(capturedSpec, undefined);
+  });
+
+  it("egressPolicy 在场 + session.start 成功 → fence 带 egressSpec,settle 触发 dispose", async () => {
+    const dispose = vi.fn(async () => undefined);
+    const fakeSession = {
+      spec: {
+        unixSocketPath: "/tmp/iknow-egress-test.sock",
+        sandboxLocalPort: 18080,
+        env: { HTTP_PROXY: "http://127.0.0.1:18080" },
+      },
+      dispose,
+    };
+    nextCreateEgressImpl.current = async () => fakeSession;
+    const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-egress-ok-"));
+    tempRoots.push(root);
+    const capturedSpec: unknown[] = [];
+    const spawnedChildren: FakeChild[] = [];
+    const manager = createBackgroundTaskManager({
+      tasksDir: resolveTasksDir({
+        dataDir: root,
+        projectIdentityRoot: root,
+      }),
+      spawn: async (req) => {
+        capturedSpec.push(req.egressSpec);
+        const child = makeFakeChild();
+        child.pid = 88888;
+        spawnedChildren.push(child);
+        return child as unknown as ChildProcess;
+      },
+    });
+    await manager.spawn({
+      command: "true",
+      cwd: ".",
+      egressPolicy: {
+        allowedDomains: ["example.com"],
+        deniedDomains: [],
+        commandLabel: "bash:test",
+        allowlistSource: "preset",
+      },
+    });
+    // fence request 收到 spec(spec shape 透传,非 deep clone)
+    assert.equal(capturedSpec.length, 1);
+    assert.equal(capturedSpec[0], fakeSession.spec);
+    assert.equal(dispose.mock.calls.length, 0);
+    // child exit → settle → dispose 触发一次
+    const child = spawnedChildren[0]!;
+    child.emit("exit", 0, null);
+    await new Promise<void>((r) => setImmediate(r));
+    assert.equal(dispose.mock.calls.length, 1);
+  });
+
+  it("session.start 抛错 → 无 egressSpec 注入 fence,task 仍能正常 spawn (fail-closed)", async () => {
+    // fail-closed:createEgressSession 抛错(e.g. socat missing) → manager
+    // 不挂 spec 到 fence request,fence 走纯断网(V1 baseline),任务仍
+    // 正常起。
+    nextCreateEgressImpl.current = async () => {
+      throw new Error("socat not found");
+    };
+    const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-egress-fail-"));
+    tempRoots.push(root);
+    const capturedSpec: unknown[] = [];
+    const manager = createBackgroundTaskManager({
+      tasksDir: resolveTasksDir({
+        dataDir: root,
+        projectIdentityRoot: root,
+      }),
+      spawn: async (req) => {
+        capturedSpec.push(req.egressSpec);
+        const child = makeFakeChild();
+        child.pid = 77777;
+        return child as unknown as ChildProcess;
+      },
+    });
+    const res = await manager.spawn({
+      command: "true",
+      cwd: ".",
+      egressPolicy: {
+        allowedDomains: ["example.com"],
+        deniedDomains: [],
+        commandLabel: "bash:test",
+        allowlistSource: "preset",
+      },
+    });
+    assert.equal(res.status, "ok");
+    assert.equal(capturedSpec.length, 1);
+    // start 失败 → manager 不挂 spec 到 fence request
+    assert.equal(capturedSpec[0], undefined);
+  });
+});

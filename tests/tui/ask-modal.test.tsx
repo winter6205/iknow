@@ -401,21 +401,13 @@ describe("createTuiAskUserBridge（queue-based + fail-closed）", () => {
     expect(calls).toBe(2);
   });
 
-  test("#503 T10 — pending() 透传 network 字段（bash network:true ask 标记）", async () => {
-    const bridge = createTuiAskUserBridge();
-    const promise = bridge.ask({ ...askCtx, network: true });
-    expect(bridge.pending()?.network).toBe(true);
-    expect(bridge.pending()?.tool).toBe("bash");
-    bridge.resolveAsk(bridge.pending()!.id, true);
-    await promise;
-  });
-
-  test("#503 T10 — 缺省 network 时不残留 network 字段（key absent）", async () => {
+  test("pending() 视图字段集 = {id, tool, summaryHint}（ADR-0097 单链批准面）", async () => {
     const bridge = createTuiAskUserBridge();
     const promise = bridge.ask(askCtx);
     const info = bridge.pending()!;
-    expect(info.network).toBeUndefined();
-    expect("network" in info).toBe(false);
+    // 无按输入改写的第二套审批轴字段 —— TUI 渲染面因此只有一条标记分支。
+    expect(Object.keys(info).sort()).toEqual(["id", "summaryHint", "tool"]);
+    expect(info.tool).toBe("bash");
     bridge.resolveAsk(info.id, true);
     await promise;
   });

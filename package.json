@@ -85,6 +85,7 @@
   },
   "private": true,
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "^0.0.76",
     "@anthropic-ai/sdk": "^0.115.0",
     "@modelcontextprotocol/client": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",

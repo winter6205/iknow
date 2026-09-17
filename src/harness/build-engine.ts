@@ -70,6 +70,7 @@ import {
   resolveWorktreeOnMutate,
   type IknowSettings,
 } from "../config/settings.js";
+import { createEgressPolicyFactory } from "./sandbox/egress/assembly.js";
 import {
   createWorktreeIsolationExecutor,
   createWorktreeOnMutateHolder,
@@ -1144,6 +1145,22 @@ export async function buildHarnessEngine(
     reg = createDefaultAciRegistry({
       env,
       sandboxRoot,
+      // ADR-0097 / T7:egress 允许集数据面 —— settings.isolation.network
+      // 段经 createEgressPolicyFactory 收口;无配置 → 工厂恒返 undefined
+      // = 无缝断网(fail-closed 合法态,--unshare-net 恒在)。askApproval
+      // 把既有 AskUser 转写为 `(host) => Promise<boolean>`:交互入口首见
+      // 新域名走 ask 面问一次(T6 批准流);worker / hub-less 入口不构造
+      // 本入口,保持 fail-closed。
+      egressPolicyFactory: createEgressPolicyFactory({
+        settings,
+        commandLabel: "bash",
+      }),
+      askApproval: (host) =>
+        askUser({
+          tool: "egress-domain-approval",
+          input: { host },
+          summaryHint: `允许沙箱内访问域 ${host}?`,
+        }),
       // T5 (plans/worktree-live-task-root.md §6): 把活 taskRoot cell 透传给
       // write_file / edit_file 工厂。门禁未翻 ⇒ cell 初值 = sandboxRoot,
       // 行为逐字节同今日；handler 内 cell.read() 取 snapshot。stable 根（D3）

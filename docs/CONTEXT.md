@@ -191,14 +191,20 @@ _Avoid_: multiline 开关；`.*` 吞整文件
 **install-rooted rg**: 安装根上钉死版本+校验和的搜引擎二进制；生产 `grep` 只 exec 这一路径。起不来走 Node 全语义扫，不回落 PATH `rg`。ADR-0084。
 _Avoid_: which rg；环境依赖当主路径
 
-**ACI network surface**: 装配层网络三职——发现是 `web_search`，阅读是 `web_fetch`，通话不升第 9 件工具、只走 `bash` 的 `network: true`（ADR-0022）。形状冻结；发现与阅读的后端选择见 **ACI web backend**。
+**ACI network surface**: 装配层网络三职——发现是 `web_search`，阅读是 `web_fetch`，通话不升第 9 件工具、只走 `bash`（经 **出口代理缝**）。形状冻结；发现与阅读的后端选择见 **ACI web backend**。
 _Avoid_: curl 工具; http_request; HTTP 原语; 把 method / headers 并进 web_fetch
 
 **ACI web backend**: 发现与阅读共用一个后端名；该后端缺搜索或缺抓取时，缺的那一头回落到内建默认（搜索走现行默认检索，阅读走本机 `web_fetch` + `network-guard`）。
 _Avoid_: 分设 search_backend 与 fetch_backend; 把缺的能力当成已接通; 缺抓取时改走 bash curl
 
-**host-net amplify**: `bash` 带 `network: true` 且 ask 被同意后，该次调用宿主网零过滤；不是按域名的小开，也不另注册 curl 工具（ADR-0022；出口过滤见 ADR-0072）。
-_Avoid_: 批完再滤; 沙箱代理当默认; 一等 curl 工具
+**host-net amplify**: 已退役的出口语义（旧 ADR-0022）——`bash` 带 `network: true` 且 ask 被同意后，该次调用宿主网零过滤。终态 = **出口代理缝**：`--unshare-net` 恒在，唯一出网通路是域白名单代理（ADR-0097）。
+_Avoid_: 把 `network: true` 当现行输入字段；批完再滤; 一等 curl 工具
+
+**出口代理缝（egress proxy seam）**: bash 围栏恒 `--unshare-net` 之下唯一的出网通路——宿主出口代理的 unix socket bind 进沙箱、沙箱内 socat 转成本地端口，`HTTP_PROXY` 系环境变量指过去；域判定在宿主代理做（HTTPS 只看 CONNECT host，不解密）。ADR-0097。
+_Avoid_: 把 `--unshare-net` 当可摘除项；per-call 全开放行当逃生门；沙箱内自建 DNS / 路由
+
+**域名允许集（domain allowlist）**: **出口代理缝**的放行判据——CONNECT host 命中才转发；`*.x` 严格子域（不含 apex）、可选 `:port` 后缀、deny 优先；只认**用户层** settings，项目文件不采纳（ADR-0084 纪律）。地址守卫（拒 loopback / 私网 / link-local / metadata）与域名集正交。ADR-0097。
+_Avoid_: 内核 IP 白名单当域名白名单；项目仓自授允许集；把 domain fronting 当已防住
 
 **声明工具面 vs 实际工具面**: `SubAgentDefinition.disallowedTools` 写进 `WorkerEnvelope` 的是声明面；worker 进程装配后真正可被模型调用的工具集是实际面，二者必须相等——裁剪发生在 `createAciRegistry(tools)` **之前**的 def-list 期（`createDefaultAciRegistry` 工厂内），由构造期快照保证，不事后修补（`AciRegistry.inner` 是冻结快照）。
 _Avoid_: 给 `AciRegistry` 加 `.tools` 字段在产物上事后裁剪；声明 deny-list 但 worker 不消费（#468 修复对象）
@@ -673,6 +679,9 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **会话 tmp vs taskRoot**: 会话 tmp 是当前身份草稿，不是交付；要留下的写 `taskRoot`，不自动从垫底拷进仓库
 - **会话 tmp vs Linux /tmp**: 草稿走会话文件夹宿主路径与 `$TMPDIR`；不把垫底 bind 成 `/tmp`（ADR-0092）
 - **文件系统隔离档 vs PermissionMode**: 前者是进程能碰哪些路径；后者是问不问人。全局档仍走权限链
+- **出口代理缝 vs 文件系统隔离档**: 正交两轴。FS 档决定围栏内能读写哪些路径；出口代理缝决定能否出网、能连哪些域。两档 FS 的网络行为相同
+- **出口代理缝 vs host-net amplify**: 前者是现行唯一出网通路（域白名单代理）；后者是已退役的 per-call 全放行语义
+- **域名允许集 vs network-guard**: 前者管 bash 出网（代理层判定）；后者是 `web_fetch` / `web_search` 的六层 SSRF 防线，两条栈互不替代
 - **文件系统隔离档 vs worktree isolation mode**: 前者是 bash FS 围栏档；后者是写主仓门禁 / 建树改绑
 - **全局档 vs 工作区档**: 默认真路径读写；工作区档收紧为写 taskRoot + 会话 tmp，home 其余不能写
 - **config 面板 vs `/model`**: 同族浮层；`/config` 管隔离与并发等运行档，`/model` 管路由

@@ -1,3 +1,8 @@
+/**
+ * archived: per-call network:true 轴退役（ADR-0097 accepted）——原断言钉住的旧语义已由 tests/harness/aci/bash-egress-typed-failure.test.ts / egress-domain-matcher.test.ts 承接
+ *
+ * ── original header ──────────────────────────────────────────────────────
+ */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {

@@ -11,7 +11,6 @@ import {
   READ_ONLY_SYSTEM_PATHS,
   createFsPolicy,
 } from "../../../src/harness/sandbox/fs-policy.js";
-import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.js";
 
 /**
  * ADR-0092 全局档挂载排序(#196 T12b 病灶退役后的不变式)。
@@ -41,7 +40,6 @@ function fenceArgs(spec: Spec): readonly string[] {
     fsPolicy: createFsPolicy({
       tmpDir: spec.cwd,
     }),
-    networkPolicy: createNetworkPolicy(),
     env: { PATH: "/bin" },
     cwd: spec.cwd,
     ...(spec.cwdReadonly ? { cwdReadonly: true } : {}),

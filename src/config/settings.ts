@@ -51,6 +51,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import {
+  parseIsolationNetwork,
+  mergeIsolationNetwork,
+  type IknowSettingsIsolationNetwork,
+} from "./isolation-network.js";
+
+export type { IknowSettingsIsolationNetwork } from "./isolation-network.js";
+
 export interface IknowSettingsLlmCompress {
   contextWindow?: number;
   thresholdTokens?: number;
@@ -319,6 +327,16 @@ export interface IknowSettingsIsolation {
    * 同纪律。
    */
   fsMode?: FsIsolationMode;
+  /**
+   * ADR-0097 / SC12：出口代理缝的域白名单配置 —— 仅用户层键（ADR-0084）。
+   * 承载 `allowedDomains` / `deniedDomains` 形态合法判定；`*.x` 通配语义、
+   * 大小写归一留给语义层（T3）。空数组 = 全拒（fail-closed 合法态）；
+   * 非字符串条目 / trim 后为空 / 裸 `*` / `:port` 越界 → 丢弃该条目 +
+   * onWarn 留痕（不抛）。项目文件出现本段即随 isolation 整段被丢弃（现有
+   * `filterProjectSettingsKeys` 行为），不在此处重复警告。详见
+   * `src/config/isolation-network.ts`。
+   */
+  network?: IknowSettingsIsolationNetwork;
 }
 
 /** ADR-0092 / SC13：filesystem isolation 档值域。 */
@@ -1138,15 +1156,37 @@ function mergeMemory(
 }
 
 /**
- * ADR-0037 / ADR-0070 / ADR-0092: 校验 `isolation` 层 —— 非法字段丢弃（镜像
- * parseGraph）。非普通对象 → undefined（丢弃该层）；worktreeOnMutate /
+ * ADR-0037 / ADR-0070 / ADR-0092 / ADR-0097: 校验 `isolation` 层 —— 非法字段
+ * 丢弃（镜像 parseGraph）。非普通对象 → undefined（丢弃该层）；worktreeOnMutate /
  * worktreeExclusive 非 boolean → 丢弃该字段（不转型）；fsMode 非
  * `"global"` | `"workspace"` 字面量 → 丢弃（大小写敏感，与 `worktreeOnMutate`
- * boolean-only 纪律一致）；字段全非法 / 缺席 → undefined（消费方按 OFF /
- * global 处理）。三字段独立校验、互不影响——任一合法即保留段。
+ * boolean-only 纪律一致）；network 段走 `parseIsolationNetwork` 独立解析
+ * （SC12 配置层契约）。四字段独立校验、互不影响——任一合法即保留段。
+ *
+ * onWarn 透传给 `parseIsolationNetwork`，让非法网络条目留痕（与文件加载
+ * 阶段 `[settings] ...` 警告通道共用一份 caller-supplied sink）。
  */
-function parseIsolation(raw: unknown): IknowSettingsIsolation | undefined {
+function parseIsolation(
+  raw: unknown,
+  onWarn?: (message: string) => void
+): IknowSettingsIsolation | undefined {
   if (!isPlainObject(raw)) return undefined;
+  const out = parseIsolationLegacyFields(raw);
+  const network = parseIsolationNetwork(raw.network, onWarn);
+  if (network !== undefined) {
+    out.network = network;
+  }
+  return undefinedWhenEmpty(out);
+}
+
+/**
+ * worktreeOnMutate / worktreeExclusive / fsMode 三字段的既有校验
+ * （ADR-0037 / ADR-0070 / ADR-0092）——独立成函数，parseIsolation 只做
+ * 「旧三字段 + network 子段」两级编排（S5 complexity 门）。
+ */
+function parseIsolationLegacyFields(
+  raw: Record<string, unknown>
+): IknowSettingsIsolation {
   const out: IknowSettingsIsolation = {};
   if (typeof raw.worktreeOnMutate === "boolean") {
     out.worktreeOnMutate = raw.worktreeOnMutate;
@@ -1157,21 +1197,39 @@ function parseIsolation(raw: unknown): IknowSettingsIsolation | undefined {
   if (isFsIsolationMode(raw.fsMode)) {
     out.fsMode = raw.fsMode;
   }
-  return undefinedWhenEmpty(out);
+  return out;
 }
 
 /**
- * ADR-0037 / ADR-0070 / ADR-0092: 逐层合并 isolation —— project 字段优先，
- * 未覆盖的 user 字段保留。三字段独立 per-field project > user 合并（镜像
- * llm.timeoutMs 形态）；任一字段合并后合法即保留段。
+ * ADR-0037 / ADR-0070 / ADR-0092 / ADR-0097: 逐层合并 isolation —— project
+ * 字段优先，未覆盖的 user 字段保留。四字段独立 per-field project > user 合并
+ * （镜像 llm.timeoutMs 形态）；任一字段合并后合法即保留段。
  * ADR-0084: `isolation` 是用户层键 —— 生产路径上 `project` 恒为空对象（见
- * `mergeSettings`），项目文件不得卸门禁。
+ * `mergeSettings`），项目文件不得卸门禁。network 段虽理论可走 project > user
+ * 分支（`mergeIsolationNetwork` 对齐同形态），但生产上不可达（filter 阶段
+ * 已丢），保留分支是为对称 + 将来调整层归属时只改一处。
  */
 function mergeIsolation(
   user: IknowSettingsIsolation | undefined,
   project: IknowSettingsIsolation | undefined
 ): IknowSettingsIsolation | undefined {
   if (!user && !project) return undefined;
+  const out = mergeIsolationLegacyFields(user, project);
+  const network = mergeIsolationNetwork(user?.network, project?.network);
+  if (network !== undefined) out.network = network;
+  return undefinedWhenEmpty(out);
+}
+
+/**
+ * worktreeOnMutate / worktreeExclusive / fsMode 三字段的 per-field
+ * project > user 合并（ADR-0037 / ADR-0070 / ADR-0092 既有语义）——
+ * 独立成函数，mergeIsolation 只做「旧三字段 + network 子段」两级编排
+ * （S5 complexity 门）。
+ */
+function mergeIsolationLegacyFields(
+  user: IknowSettingsIsolation | undefined,
+  project: IknowSettingsIsolation | undefined
+): IknowSettingsIsolation {
   const out: IknowSettingsIsolation = {};
   assignPreferred(
     out,
@@ -1186,7 +1244,7 @@ function mergeIsolation(
     user?.worktreeExclusive
   );
   assignPreferred(out, "fsMode", project?.fsMode, user?.fsMode);
-  return undefinedWhenEmpty(out);
+  return out;
 }
 
 /**
@@ -1505,7 +1563,8 @@ function mergeSecrets(
  */
 function mergeSettings(
   userRaw: Record<string, unknown>,
-  projectRaw: Record<string, unknown>
+  projectRaw: Record<string, unknown>,
+  onWarn?: (message: string) => void
 ): IknowSettings {
   const userLlm = parseLlm(userRaw.llm);
   const projectLlm = parseLlm(projectRaw.llm);
@@ -1533,9 +1592,11 @@ function mergeSettings(
     parseMemory(projectRaw.memory)
   );
   // ADR-0037: 会话级 git worktree 隔离开关（默认 OFF —— 段缺席即关）。
+  // ADR-0097 / SC12: isolation.network 解析用同一 onWarn 通道（与
+  // filterProjectSettingsKeys 同前缀 `[settings] ...`），让非法条目留痕。
   const isolation = mergeIsolation(
-    parseIsolation(userRaw.isolation),
-    parseIsolation(projectRaw.isolation)
+    parseIsolation(userRaw.isolation, onWarn),
+    parseIsolation(projectRaw.isolation, onWarn)
   );
   // lsp-optimization 二期 B7: LSP 配置段（全部可选，缺省走消费方默认值）。
   const lsp = mergeLsp(parseLsp(userRaw.lsp), parseLsp(projectRaw.lsp));
@@ -1650,6 +1711,10 @@ export function loadIknowSettings(opts?: LoadSettingsOpts): IknowSettings {
     );
 
   return deepFreeze(
-    mergeSettings(userRaw, filterProjectSettingsKeys(projectRaw, onWarn))
+    mergeSettings(
+      userRaw,
+      filterProjectSettingsKeys(projectRaw, onWarn),
+      onWarn
+    )
   );
 }

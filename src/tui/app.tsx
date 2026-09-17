@@ -3903,7 +3903,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
               }
               askLine={
                 askPending !== undefined && !askModalActive
-                  ? `[ask]${askPending.network === true ? " [宿主网络]" : ""} 允许 ${askPending.tool}？${
+                  ? `[ask] 允许 ${askPending.tool}？${
                       askPending.summaryHint ? ` ${askPending.summaryHint}` : ""
                     } 输入 y/a/n（a=总是允许）`
                   : undefined
@@ -3980,7 +3980,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
                     tool: askPending.tool,
                     summaryHint: askPending.summaryHint,
                     selectedIndex: permissionIndex,
-                    network: askPending.network,
                   }
                 : undefined
           }

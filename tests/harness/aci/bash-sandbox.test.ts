@@ -26,7 +26,6 @@ import { ReadonlyViolationError } from "../../../src/harness/aci/tools/bash-read
 import { waitForPidFile } from "./tools/spawn-test-utils.ts";
 import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.ts";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.ts";
-import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.ts";
 
 const scratchPaths: string[] = [];
 
@@ -81,7 +80,6 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
       command: "bash",
       args: ["-c", "echo hi"],
       fsPolicy: createFsPolicy({ tmpDir: tmpdir() }),
-      networkPolicy: createNetworkPolicy(),
       env: { PATH: "/bin" },
       cwd,
     }).argv;
@@ -383,39 +381,27 @@ describe("bash.readonly 双闸 (real spawn)", () => {
   );
 });
 
-describe("bash.fence.networkOptIn (argv shape, no spawn)", () => {
-  // T9: network:true drops --unshare-net; every other fence flag stays.
-  // Written at the fence-construction layer (createBwrapFence direct call)
-  // because the bash tool's inputSchema network param lands in T10 — this
-  // ticket owns only the bwrap argv branch, not the bash.ts schema.
-  function fenceArgv(network?: boolean): string[] {
+describe("bash.fence.networkIsolation (argv shape, no spawn)", () => {
+  // ADR-0097: fence 层不存在按调用的网络开关 —— `--unshare-net` 是常量,
+  // netns 隔离是唯一网络控制轴(出口由 egress 缝 unix socket 代理)。
+  function fenceArgv(): readonly string[] {
     const cwd = ARGV_FIXTURE_CWD;
-    const opts: {
-      command: string;
-      args: string[];
-      fsPolicy: ReturnType<typeof createFsPolicy>;
-      networkPolicy: ReturnType<typeof createNetworkPolicy>;
-      env: NodeJS.ProcessEnv;
-      cwd: string;
-      network?: boolean;
-    } = {
+    return createBwrapFence({
       command: "bash",
       args: ["-c", "echo hi"],
       fsPolicy: createFsPolicy({ tmpDir: tmpdir() }),
-      networkPolicy: createNetworkPolicy(),
       env: { PATH: "/bin" },
       cwd,
-    };
-    if (network !== undefined) {
-      opts.network = network;
-    }
-    return createBwrapFence(opts).argv;
+    }).argv;
   }
 
-  it("network:true removes --unshare-net but keeps every canonical fence flag", () => {
-    const argv = fenceArgv(true);
-    assert.equal(argv.includes("--unshare-net"), false);
-    // canonical fence flags spot-check (mirrors argvHasUnshareNet style)
+  it("--unshare-net is always present in argv (constant netns isolation)", () => {
+    const argv = fenceArgv();
+    assert.ok(
+      argv.includes("--unshare-net"),
+      "--unshare-net is constant (spec SC1)"
+    );
+    // canonical fence flags spot-check
     assert.equal(argv[0], "bwrap");
     assert.equal(argv[1], "--unshare-user-try");
     assert.ok(argv.includes("--die-with-parent"));
@@ -436,10 +422,5 @@ describe("bash.fence.networkOptIn (argv shape, no spawn)", () => {
       "bash",
       "-c",
     ]);
-  });
-
-  it("network:false and absent network keep --unshare-net (default isolation)", () => {
-    assert.ok(fenceArgv(false).includes("--unshare-net"));
-    assert.ok(fenceArgv().includes("--unshare-net"));
   });
 });

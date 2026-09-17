@@ -417,6 +417,24 @@ export interface CreateDefaultAciRegistryOptions {
    * 缺省 → build-engine 装配层从 `userHome` 派生(测试可注入)。
    */
   readonly homeRoot?: string;
+  /**
+   * ADR-0097 / T7:egress 允许集策略工厂 —— 透传给 bash 工厂
+   * (`createBashTool({ egressPolicyFactory })`)。生产由 build-engine 经
+   * `createEgressPolicyFactory({ settings })` 构造;缺席 = 本次装配无
+   * egress 数据面 → bash handler 内 `policyInput === undefined` → 不起
+   * session,fence 走纯断网(`--unshare-net` 恒在,fail-closed 合法态)。
+   * worker / hub-less 入口不传,与「非交互入口只能走预置配置」语义一致。
+   */
+  readonly egressPolicyFactory?: () =>
+    import("../../sandbox/egress/session.js").EgressPolicyInput | undefined;
+  /**
+   * ADR-0097 / T6:首次域名批准 ask inlet —— 透传给 bash 工厂,由工厂闭包
+   * 期包成 `EgressApprovalGate`(allowed/denied 会话级集 + in-flight 合并)。
+   * 缺省(无交互入口)→ gate 内部 fail-closed:首见新域名直接记
+   * `no-approval-inlet` 违例。生产由 build-engine 把既有 `AskUser` 转写
+   * 为 `(host) => Promise<boolean>`(见 bash.ts askApproval 装配纪律注释)。
+   */
+  readonly askApproval?: import("../../sandbox/egress/approval.js").AskApproval;
 }
 
 /**
@@ -613,6 +631,15 @@ export function createDefaultAciRegistry(
         // (V1 baseline)。homeRoot 装配层从 userHome 派生。
         ...(opts.fsMode !== undefined ? { fsMode: opts.fsMode } : {}),
         ...(opts.homeRoot !== undefined ? { homeRoot: opts.homeRoot } : {}),
+        // ADR-0097 / T7:egress 数据面 + 批准 ask 面。二者都由装配层
+        // (build-engine)注入;缺席 = 无缝断网 / 无 ask 面 fail-closed,
+        // 与 worker / hub-less 入口的「非交互 = 拒绝」语义一致。
+        ...(opts.egressPolicyFactory !== undefined
+          ? { egressPolicyFactory: opts.egressPolicyFactory }
+          : {}),
+        ...(opts.askApproval !== undefined
+          ? { askApproval: opts.askApproval }
+          : {}),
       }),
     // T6 (plans/worktree-live-task-root.md §6 T6): read 路径工具工厂参数
     // 从冻结 sandboxRoot 扩为 `liveTaskRoot ?? sandboxRoot` (cell 缺席 / 未

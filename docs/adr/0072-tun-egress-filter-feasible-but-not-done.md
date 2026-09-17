@@ -3,6 +3,8 @@
 Date: 2026-09-09
 Status: accepted
 
+> **Amended（2026-09-16，ADR-0097）**：重开触发条件 3（对外承诺域名级白名单）命中。但实现路线**不是**本文评估的 TUN 形态——域白名单走**代理路线**（netns 全断 + unix-socket 缝 + 宿主代理判 CONNECT host），绕开本文列的 TUN / 用户态 TCP/IP 栈 / TLS 终止 / 自建 CA 四个组件。本文对「内核级出口强制 + 内容检查」的「不做」判断仍成立；代理路线不做内容检查，domain fronting 不可防（见 ADR-0097 Trade-offs）。
+
 ## Context
 
 本文修正一条已记录的旧判断：**「非特权环境下做强制出口过滤不可能」对 TUN 不成立**。

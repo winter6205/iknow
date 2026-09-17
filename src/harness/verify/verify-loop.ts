@@ -191,6 +191,16 @@ export interface VerifyLoopOptions {
    * projectDir / conversationId 缺失的宿主上直接失败,超出本面职责。
    */
   readonly tmpDir?: string;
+  /**
+   * ADR-0097 / T7:出口代理缝策略 —— 由 caller(verify-loop 调用方:
+   * hub / chat-session)注入(通常经 `createEgressPolicyFactory` 派生)。
+   * 透传给 `makeDefaultRunVerify`(模块级 session 单例,首次 verify
+   * 命令执行时 lazy start)。缺省 = 无 session = 无缝(V1 baseline)。
+   *
+   * **生产装配 TODO**:hub / chat-session 装配点本票后接 —— 详见
+   * ADR-0097 / T7 装配接线表。本票只定义契约,不实现装配点。
+   */
+  readonly egressPolicy?: import("../sandbox/index.js").EgressPolicyInput;
 }
 
 export type VerifyLoopOutcome =
@@ -1148,6 +1158,34 @@ function runClassifierLoop(
   });
 }
 
+/**
+ * makeDefaultRunVerify 的装配参数构造 —— fs 档三件 + egress 缝选项集中
+ * 一处（S5 complexity 门：runVerifyLoop 只做编排）。
+ *
+ * ADR-0092 Round 2 / SC11/SC12:fs 档 + homeRoot + 会话 tmp 透传（三者
+ * 缺席 → 全局档 / 进程 tmpdir, V1 baseline 字节不变）。
+ * ADR-0097 / T7:egress 缝（模块级 session 单例,首次 verify 调用 lazy
+ * start）。**生产装配 TODO**:hub / chat-session 装配点后续接 —— 本票
+ * 只定义契约,不实现装配点。
+ */
+function buildVerifyRunnerArgs(options: VerifyLoopOptions): {
+  cwd: string;
+  fsMode?: VerifyLoopOptions["fsMode"];
+  homeRoot?: string;
+  tmpDir?: string;
+  egressPolicy?: VerifyLoopOptions["egressPolicy"];
+} {
+  return {
+    cwd: options.cwd,
+    ...(options.fsMode !== undefined ? { fsMode: options.fsMode } : {}),
+    ...(options.homeRoot !== undefined ? { homeRoot: options.homeRoot } : {}),
+    ...(options.tmpDir !== undefined ? { tmpDir: options.tmpDir } : {}),
+    ...(options.egressPolicy !== undefined
+      ? { egressPolicy: options.egressPolicy }
+      : {}),
+  };
+}
+
 export async function runVerifyLoop(
   options: VerifyLoopOptions
 ): Promise<VerifyLoopResult> {
@@ -1179,16 +1217,7 @@ export async function runVerifyLoop(
   }
 
   const runVerify =
-    options.runVerify ??
-    makeDefaultRunVerify({
-      cwd: options.cwd,
-      // ADR-0092 Round 2 / SC11/SC12:fs 档 + homeRoot + 会话 tmp 透传
-      // (三者缺席 → 全局档 / 进程 tmpdir, V1 baseline 字节不变)。此处每轮
-      // 现造闭包 ⇒ 工厂期快照即本轮快照。
-      ...(options.fsMode !== undefined ? { fsMode: options.fsMode } : {}),
-      ...(options.homeRoot !== undefined ? { homeRoot: options.homeRoot } : {}),
-      ...(options.tmpDir !== undefined ? { tmpDir: options.tmpDir } : {}),
-    });
+    options.runVerify ?? makeDefaultRunVerify(buildVerifyRunnerArgs(options));
   const timeoutSec = options.config.timeoutSec ?? DEFAULT_TIMEOUT_SEC;
   return runVerifyLoopBody({
     options,
