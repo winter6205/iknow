@@ -31,6 +31,7 @@ function makeManager(label: string): {
     drainCompleted: () => completed,
     listActive: () => [],
     abortTask: () => false,
+    getCapacity: () => 15,
     listSubagents: () => [],
     subscribe: mailbox.subscribe,
   };
@@ -182,6 +183,7 @@ describe("SessionHub subagent manager aggregation across rebind", () => {
     const manager: SubAgentManager = {
       spawn: () => ({ taskId: "unused" }),
       queryBuffer: () => ({ status: "not_found" }),
+      getCapacity: () => 15,
       waitFor: async () => {
         throw new Error("unused");
       },

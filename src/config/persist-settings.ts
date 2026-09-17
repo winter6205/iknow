@@ -67,6 +67,22 @@ export interface ModelPersistPatch {
 }
 
 /**
+ * ADR-0096 T2：TUI /config 面板「子代理并发上限」行可持久化 patch。值域
+ * `3 | 5 | 9 | 15 | "unlimited"`（面板 Enter 闭集；env.ts 不接受
+ * `"unlimited"`，此处面板独有）。settings 层存 / 读语义：
+ *   - 数字 3 / 5 / 9 / 15 → JSON 写为数字；
+ *   - `"unlimited"` → JSON 写为字符串字面 `"unlimited"`（与 `settings.ts`
+ *     `SubagentCapValue` 同形态，settings 解析层无需新加分支）；
+ *   - 非法值 → merge 抛 TypeError（与 fsMode / thinking 同步）。
+ *
+ * 持久化层（用户层；ADR-0084）与 fsMode patch 同形态（`isolation` 子键）。
+ * 「unlimited 在场」与「字段缺失（默认 15）」可区分：写时 vs 不写。
+ */
+export interface SubagentCapPersistPatch {
+  maxConcurrentWorkers: number | "unlimited";
+}
+
+/**
  * resolveThinkingSettingsPath 的注入选项（ADR-0084 写回落对层）。
  *
  * ADR-0084：thinking / memory 是**用户层键**（`llm` / `memory` 段），项目文件
@@ -204,6 +220,17 @@ export interface FsModePersistPatch {
 }
 
 /**
+ * ADR-0096 T3 ── worktree 门禁反向持久化 patch。值域闭集 `true | false`
+ * （TUI 展示层渲染为 `ON | OFF`，与 `resolveWorktreeOnMutate` 解析端同源）。
+ *
+ * 用户层键：写 `<home>/.iknow/settings.json` 的 `isolation.worktreeOnMutate`
+ * （与 fsMode 同段；ADR-0037「开关属用户层」）。
+ */
+export interface WorktreeOnMutatePersistPatch {
+  worktreeOnMutate: boolean;
+}
+
+/**
  * 合并 fsMode patch 到 raw JSON（纯函数，无 fs）。
  *  - `isolation` 缺失 → 创建；
  *  - `isolation` 非普通对象 → 以新对象覆盖（原非法 `isolation` 值整体丢弃，
@@ -235,6 +262,84 @@ export function mergeFsModePatch(
     : {};
   nextIso.fsMode = patch.fsMode;
   next.isolation = nextIso;
+  return next;
+}
+
+/**
+ * ADR-0096 T3 ── 合并 worktree 门禁 patch 到 raw JSON（纯函数，无 fs）。
+ *
+ * 形态与 `mergeFsModePatch` 逐条对齐（同段同纪律）：
+ *  - `isolation` 缺失 → 创建；
+ *  - `isolation` 非普通对象 → 以新对象覆盖（原非法值整体丢弃）；
+ *  - 已有 `isolation` 段一律**浅拷贝**后只覆盖 `worktreeOnMutate` ——
+ *    `fsMode` / `worktreeExclusive` 等邻键原样保留（round-trip 断言钉死）；
+ *  - 非法 patch 值（非 boolean，如 `"ON"` / `1` / `undefined`）→ 抛
+ *    `TypeError`（不静默丢弃，与 fsMode / thinking / cap 同步）；
+ *  - 其它顶层键（llm / memory / secrets / subagent 等）一律原样保留。
+ */
+export function mergeWorktreeOnMutatePatch(
+  raw: Record<string, unknown>,
+  patch: WorktreeOnMutatePersistPatch
+): Record<string, unknown> {
+  if (typeof patch.worktreeOnMutate !== "boolean") {
+    throw new TypeError(
+      `illegal worktreeOnMutate patch value: ${JSON.stringify(patch.worktreeOnMutate)} (expected boolean)`
+    );
+  }
+  const next: Record<string, unknown> = { ...raw };
+  const nextIso: Record<string, unknown> = isPlainObject(next.isolation)
+    ? { ...next.isolation }
+    : {};
+  nextIso.worktreeOnMutate = patch.worktreeOnMutate;
+  next.isolation = nextIso;
+  return next;
+}
+
+/**
+ * ADR-0096 T2 ── 合并 subagent cap patch 到 raw JSON（纯函数，无 fs）。
+ *
+ * 形态镜像 `mergeFsModePatch`：subagent 缺失 → 创建；subagent 非普通对象
+ * → 以新对象覆盖（浅拷贝原 subagent 段保留 taskTimeoutMs 等未来并发键，但
+ * 当前 subagent 段只 maxConcurrentWorkers 一键，未来扩字段时同 drop-not-
+ * throw 简化 —— 与 fsMode 一致，避免以新对象整体覆盖丢用户已有字段）。
+ *
+ * 值域门禁（与面板 Enter 闭集对齐 1:1：3 | 5 | 9 | 15 | "unlimited"）：
+ *   - 其它任何数字 / 字符串字面 / null / undefined → 抛 TypeError（不静默
+ *     落盘；与 fsMode / thinking 同步）；
+ *   - 数字字面必须是有限正整数（NaN / Infinity / 浮点都拒）。
+ *
+ * 不看 project 文件是否存在 —— `subagent` 是用户层键（与 thinking /
+ * fsMode 同形态），走 `persistSubagentCapChanges` 写回用户层。
+ */
+export function mergeSubagentCapPatch(
+  raw: Record<string, unknown>,
+  patch: SubagentCapPersistPatch
+): Record<string, unknown> {
+  const value = patch.maxConcurrentWorkers;
+  const allowed: ReadonlyArray<number | "unlimited"> = [
+    3,
+    5,
+    9,
+    15,
+    "unlimited",
+  ];
+  const ok =
+    value === "unlimited" ||
+    (typeof value === "number" &&
+      Number.isInteger(value) &&
+      value >= 1 &&
+      (allowed as ReadonlyArray<unknown>).includes(value));
+  if (!ok) {
+    throw new TypeError(
+      `illegal subagent cap patch value: ${JSON.stringify(value)} (expected one of 3, 5, 9, 15, or "unlimited")`
+    );
+  }
+  const next: Record<string, unknown> = { ...raw };
+  const nextSub: Record<string, unknown> = isPlainObject(next.subagent)
+    ? { ...next.subagent }
+    : {};
+  nextSub.maxConcurrentWorkers = value;
+  next.subagent = nextSub;
   return next;
 }
 
@@ -387,6 +492,47 @@ export async function persistFsModeChanges(
 ): Promise<{ path: string; bytes: string }> {
   const raw = await readSettingsRaw(filePath);
   return persistMergedSettings(filePath, mergeFsModePatch(raw, patch));
+}
+
+/**
+ * ADR-0096 T2 ── 把 subagent cap patch 持久化到 settings.json（原子写）。
+ *
+ * 镜像 `persistFsModeChanges` 形态：读 raw JSON（坏 JSON / 文件缺失 → 空对象
+ * 起步）→ merge patch → 写 tmp（同目录、rename 前 chmod 0600）→ rename 原子
+ * 替换。返回完整 bytes 字符串供 self-write 哨兵登记（EnvLoader 按内容哈希
+ * 比对，watcher 命中时跳过 reload 防回环，与 fsMode patch 同形态）。
+ *
+ * 非法 cap 值由 `mergeSubagentCapPatch` 抛 TypeError，写回未发生，原文件
+ * 原样保留（不静默吞、不双写）。
+ */
+export async function persistSubagentCapChanges(
+  filePath: string,
+  patch: SubagentCapPersistPatch
+): Promise<{ path: string; bytes: string }> {
+  const raw = await readSettingsRaw(filePath);
+  return persistMergedSettings(filePath, mergeSubagentCapPatch(raw, patch));
+}
+
+/**
+ * ADR-0096 T3 ── 把 worktree 门禁 patch 持久化到 settings.json（原子写）。
+ *
+ * 镜像 `persistFsModeChanges` / `persistSubagentCapChanges` 形态：读 raw JSON
+ * （坏 JSON / 文件缺失 → 空对象起步）→ merge patch → 写同目录 tmp（rename 前
+ * chmod 0600）→ rename 原子替换。返回完整 bytes 供 self-write 哨兵登记
+ * （EnvLoader 按内容哈希比对，watcher 命中即跳过 reload 防回环）。
+ *
+ * 非法值由 `mergeWorktreeOnMutatePatch` 抛 TypeError，写回未发生，原文件原样
+ * 保留（不静默吞、不双写）。
+ */
+export async function persistWorktreeOnMutateChanges(
+  filePath: string,
+  patch: WorktreeOnMutatePersistPatch
+): Promise<{ path: string; bytes: string }> {
+  const raw = await readSettingsRaw(filePath);
+  return persistMergedSettings(
+    filePath,
+    mergeWorktreeOnMutatePatch(raw, patch)
+  );
 }
 
 /**

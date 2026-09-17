@@ -112,6 +112,7 @@ const fakeSubagentManager = {
   listActive: () => [],
   abortTask: () => false,
   // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+  getCapacity: () => 15,
   listSubagents: () => [],
   // master SubAgentManager 接口扩展:subscribe (mailbox 契约 #361)
   subscribe: () => () => {},

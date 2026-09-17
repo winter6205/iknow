@@ -188,7 +188,7 @@ describe("gateBlockNotice — 门禁接渲染点（pending → catch 路径）",
   it("provision 抛 not_a_git_repo 时，executor 回执含停止指令 + 机读 kind", async () => {
     const { inner, calls } = fakeInner();
     const gate = createWorktreeIsolationExecutor({
-      enabled: true,
+      enabled: { get: () => true },
       liveTaskRoot: createLiveTaskRoot("/repo/.iknow/worktrees/conv-1"),
       provision: async () => {
         throw new WorktreeIsolationError(

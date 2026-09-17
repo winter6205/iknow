@@ -103,6 +103,7 @@ const fakeSubagentManager = {
   drainCompleted: () => [],
   listActive: () => [],
   abortTask: () => false,
+  getCapacity: () => 15,
   listSubagents: () => [],
   subscribe: () => () => {},
 } as unknown as SubAgentManager;

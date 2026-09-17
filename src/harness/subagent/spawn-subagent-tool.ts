@@ -42,10 +42,13 @@ import {
   SubAgentCapacityError,
   SubAgentWaitTimeoutError,
 } from "./manager.js";
+import type {
+  SubagentCapacityHolder,
+  SubagentCapacityValue,
+} from "./manager.js";
 import type { SubAgentEnvelope } from "./envelope.js";
 import { projectParentVisibleEnvelope } from "./envelope.js";
 import { ToolExecutionError, SubAgentSandboxRootError } from "../errors.js";
-import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../config/settings.js";
 import type { AgentCatalogResolver } from "./catalog.js";
 import { createMergedCatalogResolver } from "./user-catalog.js";
 import { resolveSubagentCapabilities } from "./capability.js";
@@ -99,6 +102,14 @@ export interface SpawnSubAgentToolDeps {
    * list() 供 enum + prose list 派生；get(id) 供 handler 单 id 校验。
    */
   readonly catalog?: AgentCatalogResolver;
+  /**
+   * ADR-0096 T2：并发上限 holder —— description N 与 SubAgentCapacityError
+   * 同源（同一 holder.get() 现读，闸值变化即时反映给模型）。manager 自身已
+   * 持有一份 holder（spawn 闸读同一处），本字段是描述层镜像，避免 description
+   * 与回执数字漂移。缺席 → 退回 `manager.getCapacity()`（manager 内部
+   * 暴露的等价 getter；fallback 路径与既有静态描述 N=15 字节级一致）。
+   */
+  readonly capacityHolder?: SubagentCapacityHolder;
 }
 
 /**
@@ -229,12 +240,39 @@ export function createSpawnSubAgentTool(
     .list()
     .map((e) => `- ${e.id}: ${e.description}`)
     .join("\n");
+  // ADR-0096 T2：description N 与 SubAgentCapacityError 同源（同一
+  // holder.get() 现读；回执数字与 description 永同步）。闸值变化 →
+  // 下一次模型拉取工具描述即看到新 N，无需重启。holder 缺席时退化到
+  // `manager.getCapacity()` —— manager 自身持有同一 holder 副本，
+  // 闸值形态等价；唯一缺 holder 的场景 = 装配期 manager 直造（如
+  // 既有 manager.test.ts makeHarness 路径），fallback 与既有静态 N=15
+  // 字节级一致。
+  const readCapacity = (): SubagentCapacityValue => {
+    if (deps.capacityHolder !== undefined) return deps.capacityHolder.get();
+    return deps.manager.getCapacity();
+  };
+  // description 拆成两段拼接模板：固定前缀 + 闸值描述 + 闸值文案 + 固定后缀。
+  // 拼接闭包每次重读 holder；模型读 description 时即看到当前 N。
+  const descriptionPrefix = `Delegate a self-contained task when it needs multi-step exploration, independent verification, or parallelizable work. Omit \`subagent_type\` and the sub-agent runs as \`general-purpose\` — the writable, full-tool-surface default; \`explore\` is the read-only type, request it explicitly. Keep every task self-contained. Default \`wait:true\` — the call blocks until the sub-agent finishes and returns the parent-visible short handoff with summary, changed paths, status, and stop_reason when available (timeout 2 hours default; override via \`timeoutMs\`). Issue multiple \`spawn_subagent\` calls in one turn only for independent tasks. Pass \`wait:false\` for fire-and-forget: returns \`{task_id}\` immediately. In chat/tui/serve, terminal completion wakes the host through the mailbox/subscribe path and starts a silent run; this is the primary completion path. Use \`subagent_result\` only for an explicit status query. `;
+  const descriptionSuffix =
+    `\n\nAvailable subagent types (set \`subagent_type\` to route):\n` +
+    proseLines +
+    SPAWN_DISPATCH_LESSON;
+  const capClause = (cap: SubagentCapacityValue): string => {
+    if (cap === "unlimited") {
+      return "Concurrency cap is unlimited in this session; the OS / memory budget is still the practical limit. When a spawn would clearly overload the host, reduce parallelism.";
+    }
+    return `At most ${cap} workers run simultaneously in this session; when at capacity, reduce concurrency and retry after a worker completes — requests are rejected rather than queued.`;
+  };
   return Object.freeze({
     name: "spawn_subagent",
-    description:
-      `Delegate a self-contained task when it needs multi-step exploration, independent verification, or parallelizable work. Omit \`subagent_type\` and the sub-agent runs as \`general-purpose\` — the writable, full-tool-surface default; \`explore\` is the read-only type, request it explicitly. Keep every task self-contained. Default \`wait:true\` — the call blocks until the sub-agent finishes and returns the parent-visible short handoff with summary, changed paths, status, and stop_reason when available (timeout 2 hours default; override via \`timeoutMs\`). Issue multiple \`spawn_subagent\` calls in one turn only for independent tasks. Pass \`wait:false\` for fire-and-forget: returns \`{task_id}\` immediately. In chat/tui/serve, terminal completion wakes the host through the mailbox/subscribe path and starts a silent run; this is the primary completion path. Use \`subagent_result\` only for an explicit status query. At most ${DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS} workers run simultaneously by default; when at capacity, reduce concurrency and retry after a worker completes — requests are rejected rather than queued.\n\nAvailable subagent types (set \`subagent_type\` to route):\n` +
-      proseLines +
-      SPAWN_DISPATCH_LESSON,
+    // ADR-0096 T2：description = getter — Object.freeze 锁住 accessor，调用方
+    // 每次 `.description` 现读 `readCapacity()`，闸值变化立即反映（不动
+    // handler / schema / aci 元数据）。
+    get description(): string {
+      const cap = readCapacity();
+      return descriptionPrefix + capClause(cap) + descriptionSuffix;
+    },
     inputSchema: {
       type: "object",
       properties: {

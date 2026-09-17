@@ -39,7 +39,7 @@ import {
 } from "react";
 import type { ReactNode } from "react";
 import { decodePasteBytes, MouseButton } from "@opentui/core";
-import type { MouseEvent, Selection } from "@opentui/core";
+import type { KeyEvent, MouseEvent, Selection } from "@opentui/core";
 import {
   useKeyboard,
   usePaste,
@@ -159,6 +159,17 @@ import {
   type ModelPickerEntry,
   type ModelPickerState,
 } from "./model-picker.js";
+import {
+  ConfigPicker,
+  configRowKindFor,
+  configPickerRows,
+  nextSubagentCap,
+  reduceConfigPickerKey,
+  toggleFsMode,
+  toggleWorktreeOnMutate,
+  type ConfigPickerState,
+  type SubagentCapDisplay,
+} from "./config-panel.js";
 import { computeThinkingOverride, formatEffortLabel } from "./thinking-gate.js";
 import {
   continueExitFromError,
@@ -264,6 +275,12 @@ import {
   DONE_FADE_WINDOW_S,
 } from "./subagent-panel.js";
 import type { SubagentInfo } from "../harness/subagent/manager.js";
+import type {
+  SubagentCapacityHolder,
+  SubagentCapacityValue,
+} from "../harness/subagent/manager.js";
+import type { SubagentCapPersistPatch } from "../config/persist-settings.js";
+import type { WorktreeOnMutateHolder } from "../harness/isolation/worktree-gate.js";
 import { formatRunDuration } from "./run-stats.js";
 import { tuiPalette } from "./theme.js";
 import { createPermissionModeContext } from "../harness/permission/index.js";
@@ -503,6 +520,43 @@ export function modelPickerStateFor(
 }
 
 /**
+ * 面板渲染态（`ConfigPickerState | null`）：非 chat / 未打开 → null（组件不
+ * 渲染）。构造与判别折进 helper，避免组件内联三元+对象字面量各占一个分支
+ * （同 `modelPickerStateFor`）。
+ */
+function configPickerStateFor(
+  open: boolean,
+  view: TuiView,
+  focusedIndex: 0 | 1 | 2
+): ConfigPickerState | null {
+  if (!open || view !== "chat") return null;
+  return { focusedIndex };
+}
+
+/**
+ * picker 家族行账总入口（chrome 预算槽，ADR-0096 T1 起并入 config 面板）：
+ * 依次判 config → thinking → memory → model，命中即返回对应行数（互斥由开
+ * 面板路径保证，此处只按 open 标志取值）。三元从 TuiApp 内联折进 helper，
+ * 新增面板只加一行判别、不给组件加分支（S5 硬门，与 `subagentRowBudget`
+ * 同款动机）。**不含 marginBottom=1**（由 chromeReserveRows 的 +1 入账）。
+ */
+function pickerRowsForBudget(opts: {
+  readonly view: TuiView;
+  readonly configPickerOpen: boolean;
+  readonly thinkingPickerOpen: null | "thinking" | "effort";
+  readonly memoryPickerOpen: boolean;
+  readonly modelPickerOpen: boolean;
+  readonly providers: ReadonlyArray<IknowSettingsLlmProvider> | undefined;
+}): number {
+  if (opts.view !== "chat") return 0;
+  if (opts.configPickerOpen) return configPickerRows();
+  if (opts.thinkingPickerOpen !== null)
+    return thinkingPickerRows(opts.thinkingPickerOpen);
+  if (opts.memoryPickerOpen) return memoryPickerRows();
+  return modelPickerRowsFor(opts.modelPickerOpen, opts.view, opts.providers);
+}
+
+/**
  * 输入框占位符的 picker 文案（判别顺序 = 面板互斥优先级：回退 > model >
  * memory > thinking）。任一 picker 打开 → 对应键位提示，否则 undefined（调用
  * 方落回默认文案 / ask 分支）。文案链折进本函数，组件只做取值（S5：分支体在
@@ -510,12 +564,16 @@ export function modelPickerStateFor(
  */
 export function pickerPlaceholderFor(opts: {
   readonly rewindOpen: boolean;
+  readonly configPickerOpen: boolean;
   readonly modelPickerOpen: boolean;
   readonly memoryPickerOpen: boolean;
   readonly thinkingPickerOpen: null | "thinking" | "effort";
 }): string | undefined {
   if (opts.rewindOpen) {
     return "回退选择器中（↑↓ 选择 · Enter 确认 · Esc 关闭）";
+  }
+  if (opts.configPickerOpen) {
+    return "设置面板中（↑↓ 选择 · Enter 切换 · Esc 关闭）";
   }
   if (opts.modelPickerOpen) {
     return "模型选择中（↑↓ 选择 · Enter 切换 · Esc 关闭）";
@@ -566,6 +624,161 @@ export function openModelPickerCommand(opts: {
     return;
   }
   opts.onOpen(modelFocusIndexFor(entries, opts.model));
+}
+
+/**
+ * /config 面板的键位落地（宿主 useKeyboard 的 `if (configPickerOpen)` 分支体）。
+ * 纯路由在 `reduceConfigPickerKey`，本函数只把 action 接到回调上，保留面板
+ * 交互语义（ADR-0096 T1+T2）：
+ *  - move → onMove（面板保持打开）；
+ *  - fix（Enter）→ 按行分发：FS 行 onToggleFsMode（翻 fs holder + 落盘），
+ *    cap 行 onToggleSubagentCap（循环 cap holder + 落盘；holder 缺席时宿主
+ *    回调自身 no-op）；worktree 行 no-op（T3 才接 isolation holder）。面板
+ *    保持打开（多档连续切换）。
+ *  - commit（Esc）→ 仅 onClose（无 staged 状态可保存 —— Enter 即落盘）；
+ *  - ignore → no-op。
+ * 抽到模块级的理由同 `applyModelPickerKey`（宿主 useKeyboard 的分支体在
+ * helper 内，S5 硬门：handler 只判键 + 派发）。
+ */
+export function applyConfigPickerKey(
+  event: ModalKeyEvent,
+  opts: {
+    readonly focusedIndex: 0 | 1 | 2;
+    readonly onMove: (index: 0 | 1 | 2) => void;
+    readonly onToggleFsMode: () => void;
+    readonly onToggleWorktreeOnMutate: () => void;
+    readonly onToggleSubagentCap: () => void;
+    /**
+     * fix 之后的强制重渲染（实测缺陷修复：holder 是普通对象，`get()` 不订阅
+     * —— 不显式触发的话屏上值会停在下一次焦点移动才更新，用户按 Enter 后
+     * 看不到任何反馈）。宿主接一个 state 计数器即可。
+     */
+    readonly onRerender: () => void;
+    readonly onClose: () => void;
+  }
+): void {
+  const action = reduceConfigPickerKey(event, {
+    focusedIndex: opts.focusedIndex,
+  });
+  switch (action.kind) {
+    case "move":
+      opts.onMove(action.index);
+      break;
+    case "fix":
+      // 按 focusedIndex 判行：FS 行 → 翻 fsMode；worktree 行 → 翻门禁 holder；
+      // cap 行 → 循环 cap（三行均已激活；holder 缺席时对应回调自身 no-op）。
+      {
+        const row = configRowKindFor(opts.focusedIndex);
+        if (row === "fsMode") opts.onToggleFsMode();
+        else if (row === "worktreeOnMutate") opts.onToggleWorktreeOnMutate();
+        else if (row === "subagentCap") opts.onToggleSubagentCap();
+      }
+      opts.onRerender();
+      break;
+    case "commit":
+      opts.onClose();
+      break;
+    case "ignore":
+      break;
+  }
+}
+
+/**
+ * Ctrl+O 判键（思考折叠切换）：从宿主 useKeyboard 内联折进 helper（S5 硬门
+ * —— T1 给 config 面板加守卫时抵回分支预算）。
+ */
+function isThinkingFoldKey(e: KeyEvent): boolean {
+  return e.ctrl && e.name === "o";
+}
+
+/**
+ * FS 行 Enter 的行为体（fix action → 真正的 holder 翻转 + fire-and-forget
+ * 落盘）。从 TuiApp 的 useKeyboard 内联折进模块级 helper（S5 硬门）：holder
+ * 缺席 → no-op（面板仍开可关，与无参 /config 开面板不要求 holder 同源）。
+ * 失败兜底契约与 `runConfigSlashCommand` 有参路径同款：UI 不抛、notice 呈现，
+ * holder 值不回滚（运行期已生效，文件态以下次读盘为准）。
+ */
+function toggleFsModeAndPersist(
+  props: Pick<TuiAppProps, "fsMode" | "onPersistFsMode">,
+  setNotice: (notice: Notice) => void
+): void {
+  const fsCtx = props.fsMode;
+  if (fsCtx === undefined) return;
+  const next = toggleFsMode(fsCtx.get());
+  fsCtx.set(next);
+  void props.onPersistFsMode?.(next).catch((err: unknown) => {
+    setNotice({ lines: [`文件系统隔离档保存失败：${describeError(err)}`] });
+  });
+}
+
+/**
+ * ADR-0096 T2 ── cap 行 Enter 的行为体（fix action → 循环 cap holder +
+ * fire-and-forget 落盘）。从 TuiApp 的 useKeyboard 内联折进模块级 helper
+ * （S5 硬门）：holder 缺席 → no-op（与 FS 行 `fsMode` 缺席同形态）。落盘
+ * 失败兜底与 `toggleFsModeAndPersist` 同款（UI 不抛、notice 呈现，holder
+ * 已生效不撤回）。`nextSubagentCap` 是闭集循环（3→5→9→15→unlimited→3）；
+ * holder.set 内部 `isValidSubagentCapacityValue` 兜底拒非法字面。
+ */
+function toggleSubagentCapAndPersist(
+  props: Pick<
+    TuiAppProps,
+    "subagentCapHolder" | "subagentCapDisplay" | "onPersistSubagentCap"
+  >,
+  setNotice: (notice: Notice) => void
+): void {
+  const holder = props.subagentCapHolder;
+  if (holder === undefined) return;
+  // 起点读 holder 现值（与显示同源：避免面板 subagentCapDisplay 滞后时的
+  // 视觉跳变）。subagentCapDisplay 与 holder.get() 偶尔分裂的场景（外部
+  // 写 settings.json 让另一进程 reload）下也以 holder 为准 —— display
+  // 只是面板快照，runtime 真相在 holder。
+  const current: SubagentCapacityValue = holder.get();
+  const next = nextSubagentCap(current);
+  holder.set(next);
+  // fire-and-forget：holder 已生效（manager 下一次 spawn 即按新闸）；落盘
+  // 失败由宿主 notice 兜底，**不**把 holder 回滚（与 FS 行同款）。失败双通道：
+  // ① persist 返回结构化 `{ok:false, reason}`（persistSubagentCapImpl 捕获
+  // 后返回、不 rethrow）→ 同步分支 notice；② promise reject → .catch。
+  // code-review High 修复：只接 .catch 会把 ① 静默吞掉（resolved 值被
+  // `void` 丢弃），用户看不出「已保存」与「保存失败」的差别。
+  void props
+    .onPersistSubagentCap?.({ maxConcurrentWorkers: next })
+    .then((res) => {
+      if (res.ok === false) {
+        setNotice({
+          lines: [`子代理并发上限保存失败：${res.reason}`],
+        });
+      }
+    })
+    .catch((err: unknown) => {
+      setNotice({
+        lines: [`子代理并发上限保存失败：${describeError(err)}`],
+      });
+    });
+}
+
+/**
+ * ADR-0096 T3 ── worktree 门禁行 Enter 的行为体（fix action → 翻
+ * worktree holder + fire-and-forget 落盘）。从 TuiApp 的 useKeyboard 内联
+ * 折进模块级 helper（S5 硬门）：holder 缺席 → no-op（与 FS / cap 行同形态）。
+ * 落盘失败兜底同款：UI 不抛、notice 呈现，holder 已翻不撤回 —— 门禁拦截与否
+ * 已在下一次 wave 生效，文件态以下次读盘为准。**从不 auto-provision**：
+ * 翻 ON 只恢复「拦下未绑树 mutate」这一条反应（ADR-0037 §1 保留）。
+ */
+function toggleWorktreeOnMutateAndPersist(
+  props: Pick<
+    TuiAppProps,
+    "worktreeOnMutateHolder" | "onPersistWorktreeOnMutate"
+  >,
+  setNotice: (notice: Notice) => void
+): void {
+  const holder = props.worktreeOnMutateHolder;
+  if (holder === undefined) return;
+  const next = toggleWorktreeOnMutate(holder.get());
+  holder.set(next);
+  void props.onPersistWorktreeOnMutate?.(next).catch((err: unknown) => {
+    setNotice({ lines: [`worktree 门禁保存失败：${describeError(err)}`] });
+  });
 }
 
 /**
@@ -648,22 +861,43 @@ function runGraphSlashCommand(
 }
 
 /**
- * `/config` case 体：翻 fs isolation holder（与 PermissionMode 正交 ——
- * Shift+Tab 不动它），切档成功才落盘。抽到模块级的理由同
- * `runGraphSlashCommand`。
+ * `/config` case 体：ADR-0096 T1 ——
+ *  - 无参（args 为空）→ 打开面板（互斥关闭 thinking / memory / model picker）；
+ *  - 有参 → 走既有 `applyFsModeCommand` 路径，status / set / usage 行为不变。
+ *
+ * 抽到模块级的理由同 `runGraphSlashCommand`（case 体内分支在 helper 内，S5）。
  */
 function runConfigSlashCommand(
   props: Pick<TuiAppProps, "fsMode" | "onPersistFsMode">,
   text: string,
-  setNotice: (notice: Notice) => void
+  setNotice: (notice: Notice) => void,
+  setConfigPickerOpen: (open: boolean) => void,
+  setConfigFocusIndex: (index: 0 | 1 | 2) => void,
+  setThinkingPickerOpen: (open: null | "thinking" | "effort") => void,
+  setMemoryPickerOpen: (open: boolean) => void,
+  setModelPickerOpen: (open: boolean) => void
 ): void {
-  // ADR-0092 / SC13：解析与文案单点在 harness/sandbox/fs-mode.ts（三入口同源）。
+  const args = splitConfigArgs(slashRemainder(text));
+  // T1：空 args → 开面板（与 model-picker 的 openModelPickerCommand 同源
+  // 设计 —— 打开前不要求 holder 接入；holder 缺席时面板仍显示，但 FS 行 Enter
+  // 不会翻动）。
+  if (args.length === 0) {
+    // 面板互斥：开 config 时收起其余 picker（与 model / memory picker 同款）。
+    setThinkingPickerOpen(null);
+    setMemoryPickerOpen(false);
+    setModelPickerOpen(false);
+    setConfigPickerOpen(true);
+    setConfigFocusIndex(0);
+    return;
+  }
+  // ADR-0092 / SC13：有参路径翻 fs isolation holder（与 PermissionMode
+  // 正交 —— Shift+Tab 不动它），切档成功才落盘。解析与文案单点在
+  // harness/sandbox/fs-mode.ts（三入口同源）。
   const fsCtx = props.fsMode;
   if (!fsCtx) {
     setNotice({ lines: ["文件系统隔离档未接线（本入口未注入 fs holder）。"] });
     return;
   }
-  const args = splitConfigArgs(slashRemainder(text));
   // app 侧只解析一次，同一份结果同时驱动 notice 与落盘判定。`applyFsModeCommand`
   // 内部还会为「改 holder」再解析一次 —— 那是命令 SSOT 的一部分，要合并得让
   // fs-mode.ts 把 kind 透出返回值（不在本入口的改动范围）。
@@ -836,8 +1070,55 @@ export interface TuiAppProps {
    *  engine `isolationEnabled` 单一读取点的透出）。ADR-0079 后 slash 装配
    *  skill 正文不再消费 `isolationOn`（正文不再挂写根 trailer）；字段保留
    *  以维持 TuiAppProps 装配面兼容 build-engine 透传，未来若有其它渲染面
-   *  需要隔离档可继续使用。 */
+   *  需要隔离档可继续使用。
+   *
+   *  config 面板（ADR-0096 T1）复用本字段显示 worktree 门禁行（仅展示，不可改；
+   *  T3 接 isolation holder 后由 props.fsMode 同族 holder 驱动翻转）。 */
   readonly isolationOn?: boolean;
+  /**
+   * ADR-0096 T1：子代理并发上限现值的 display-only 投影（启动期一次性读
+   * 取）。undefined → 面板显示「—」占位。本票不接 holder，不持久化，不触发
+   * 任何 manager 行为；T2 接入 cap holder 后由 runtime cap snapshot 替换。
+   * 严禁本字段去主动调 `SubAgentCapacityError` / 修改 `SubagentManager` —
+   * T1 任务边界外（plans/tui-config-panel.md §3）。
+   */
+  readonly subagentCapDisplay?: SubagentCapDisplay;
+  /**
+   * ADR-0096 T2 ── 子代理并发上限运行时 holder（与 fsMode / graphMode 同形态）。
+   * 在场时面板 cap 行 Enter 即循环调 holder.set(...)（3→5→9→15→unlimited→3），
+   * 并 fire-and-forget `onPersistSubagentCap` 落盘（与 FS 行 onPersistFsMode
+   * 同款失败兜底契约）；缺席时面板 cap 行保持 display-only（T1 行为兼容）。
+   *
+   * 仅持有 holder 不会让面板可见 —— `subagentCapDisplay`（由调用方传 holder
+   * .get()）仍控制行显示串；本 prop 只决定 cap 行是否可改。
+   */
+  readonly subagentCapHolder?: SubagentCapacityHolder;
+  /**
+   * ADR-0096 T2 ── 子代理并发上限落盘通道。失败**双通道**：persist 实现可
+   * 返回结构化 `{ ok: false; reason }`（如 persistSubagentCapImpl 内部捕获
+   * 后不 rethrow），也可直接 reject —— 两种都由 app 侧 notice 呈现（High1
+   * 修复后两者等价兜底）。缺席 → 仅会话内翻转（holder 已生效），不写文件
+   * （测试 / 旧宿主兼容）。
+   */
+  readonly onPersistSubagentCap?: (
+    patch: SubagentCapPersistPatch
+  ) => Promise<{ ok: true } | { ok: false; reason: string }>;
+  /**
+   * ADR-0096 T3 ── worktree 门禁运行时 holder（与 fsMode / subagentCapHolder
+   * 同形态）。在场时面板 worktree 行 Enter 即翻 holder.set(...)，并
+   * fire-and-forget `onPersistWorktreeOnMutate` 落盘；缺席时退回
+   * `isolationOn` 静态快照 + 行保持 display-only（T1/T2 行为兼容）。
+   *
+   * 门禁本身从不 auto-provision（ADR-0037 §1 保留）：翻 ON 只让未绑树的
+   * mutate 在下一次 wave 被拦并指向 create-worktree ACI 工具。
+   */
+  readonly worktreeOnMutateHolder?: WorktreeOnMutateHolder;
+  /**
+   * ADR-0096 T3 ── worktree 门禁落盘通道（isolation.worktreeOnMutate，用户层）。
+   * 与 onPersistFsMode 同款：返回 promise，失败 catch 后以 notice 呈现，
+   * holder 已生效不撤回。缺席 → 仅会话内翻转，不写文件（测试 / 旧宿主兼容）。
+   */
+  readonly onPersistWorktreeOnMutate?: (on: boolean) => Promise<void>;
   /** #361 Phase D：MCP 看板扩展面（TuiMcpViewExt 最小依赖）。缺省 =
    *  undefined → /mcp 切 view 时提示「MCP 未装配」。产品路径由 run.tsx 经
    *  TuiExtensions 注入；fixture / 测试可选 stub。 */
@@ -1148,6 +1429,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // model-picker.tsx 的 cancel 语义说明。
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [modelFocusIndex, setModelFocusIndex] = useState(0);
+  // /config 面板（ADR-0096，T1）：无参 `/config` 打开。FS 行 Enter 即落盘；
+  // worktree / cap 行本票 display-only（T2/T3 接 holder 后激活）。
+  const [configPickerOpen, setConfigPickerOpen] = useState(false);
+  const [configFocusIndex, setConfigFocusIndex] = useState<0 | 1 | 2>(0);
+  // 三行（FS / worktree / cap）的 holder 是普通对象 —— `get()` 不订阅，
+  // 翻完不会触发 re-render，屏上值会停到下一次焦点移动（实测缺陷）。
+  // 本计数器只作 fix 后的重渲染触发器，不参与任何判定（值本身仍读 holder）。
+  const [configRenderTick, setConfigRenderTick] = useState(0);
   const [memoryCommitted, setMemoryCommitted] = useState(() =>
     seedMemoryPreview(props.defaultMemory)
   );
@@ -1834,6 +2123,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     setThinkingPickerOpen(null);
     setMemoryPickerOpen(false);
     setModelPickerOpen(false);
+    setConfigPickerOpen(false);
   }
   async function openSessionAt(index: number): Promise<void> {
     if (index === 0) {
@@ -1884,6 +2174,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     setThinkingPickerOpen(null);
     setMemoryPickerOpen(false);
     setModelPickerOpen(false);
+    setConfigPickerOpen(false);
   }
 
   // ── turn 发送 ───────────────────────────────────────────────────
@@ -2691,7 +2982,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         return;
       }
       case "config": {
-        runConfigSlashCommand(props, text, setNotice);
+        runConfigSlashCommand(
+          props,
+          text,
+          setNotice,
+          setConfigPickerOpen,
+          setConfigFocusIndex,
+          setThinkingPickerOpen,
+          setMemoryPickerOpen,
+          setModelPickerOpen
+        );
         return;
       }
       case "thinking": {
@@ -2701,6 +3001,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         setThinkingPickerOpen("thinking");
         setSwitchPreview(thinkingEnabled);
         setMemoryPickerOpen(false);
+        setConfigPickerOpen(false);
         return;
       }
       case "effort": {
@@ -2731,6 +3032,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         setEffortFocusIndex(effortToDisplayIndex(seed));
         setEffortFixedIndex(effortToDisplayIndex(seed)); // /effort <level> 直接固定该档
         setMemoryPickerOpen(false);
+        setConfigPickerOpen(false);
         return;
       }
       case "memory": {
@@ -2738,6 +3040,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         setMemoryPickerOpen(true);
         setMemoryFocusIndex(0);
         setMemoryPreview(memoryCommitted);
+        setConfigPickerOpen(false);
         return;
       }
       case "model":
@@ -2754,6 +3057,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             // 面板互斥：model picker 打开即收起同族面板（与 /memory 同款）。
             setThinkingPickerOpen(null);
             setMemoryPickerOpen(false);
+            setConfigPickerOpen(false);
             setModelFocusIndex(focusIndex);
             setModelPickerOpen(true);
           },
@@ -3157,9 +3461,29 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
     if (view !== "chat") return;
     // Ctrl+O：切换思考面板折叠态（展开/折叠）。toggleThinkingFold 只翻折叠，
-    // 与 /thinking 的开关（thinkingEnabled）解耦。
-    if (e.ctrl && e.name === "o") {
+    // 与 /thinking 的开关（thinkingEnabled）解耦。判键折进 isThinkingFoldKey
+    // （S5：T1 给 config 面板加守卫，判键 helper 抵回分支预算）。
+    if (isThinkingFoldKey(e)) {
       toggleThinkingFold();
+      return;
+    }
+    // /config 面板（ADR-0096 T1+T2）：活跃时独占键位。优先级置于 model /
+    // memory / thinking 之前 —— 同族面板最近打开的优先消费键位。键路由 +
+    // 行为体在 applyConfigPickerKey / toggleFsModeAndPersist /
+    // toggleWorktreeOnMutateAndPersist / toggleSubagentCapAndPersist
+    // （S5：handler 只判键派发）。
+    if (configPickerOpen) {
+      applyConfigPickerKey(modalKeyEventOf(e), {
+        focusedIndex: configFocusIndex,
+        onMove: setConfigFocusIndex,
+        onToggleFsMode: () => toggleFsModeAndPersist(props, setNotice),
+        onToggleWorktreeOnMutate: () =>
+          toggleWorktreeOnMutateAndPersist(props, setNotice),
+        onToggleSubagentCap: () =>
+          toggleSubagentCapAndPersist(props, setNotice),
+        onRerender: () => setConfigRenderTick((tick) => tick + 1),
+        onClose: () => setConfigPickerOpen(false),
+      });
       return;
     }
     // /model 面板：活跃时独占键位（与 memory / thinking 面板同款插入点 ——
@@ -3406,12 +3730,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         : 0;
   // design-25 thinking-picker 行账：picker 打开 → thinking 5 行 / effort 7 行
   // + marginBottom 1 并入 chrome 预算（与 modalRows 同款），否则 viewport 高度被挤。
-  const pickerRowsForBudget: number =
-    view === "chat" && thinkingPickerOpen !== null
-      ? thinkingPickerRows(thinkingPickerOpen)
-      : view === "chat" && memoryPickerOpen
-        ? memoryPickerRows()
-        : modelPickerRowsFor(modelPickerOpen, view, props.providers);
+  // config / thinking / memory / model 的判别折进模块级 helper（S5 硬门）。
+  const pickerRows: number = pickerRowsForBudget({
+    view,
+    configPickerOpen,
+    thinkingPickerOpen,
+    memoryPickerOpen,
+    modelPickerOpen,
+    providers: props.providers,
+  });
   // compact 进度面板:只取 active 会话的条目(与 crunchedOf / verifySlots 同款
   // 归属校验,切走会话不残留别的会话的压缩面板)。
   const activeCompact: CompactProgressState | undefined =
@@ -3436,6 +3763,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     view,
     props.providers,
     modelFocusIndex
+  );
+  // /config 面板渲染态（同款判别折进 helper：open 时构造，否则 null）。
+  const configState: ConfigPickerState | null = configPickerStateFor(
+    configPickerOpen,
+    view,
+    configFocusIndex
   );
   // T9：输入框行账动态化 —— wrap-aware 视觉折行行数（修 2026-08-14 用户反馈
   // 「输入多少都是一行」：长文本无 `\n` 时按 cols 折行计视觉行数）。封顶由
@@ -3489,7 +3822,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         bgLine,
         inputRows: inputContentRows,
         modalRows: modalRowsForBudget,
-        pickerRows: pickerRowsForBudget,
+        pickerRows: pickerRows,
         compactRows:
           view === "chat" && activeCompact !== undefined
             ? compactProgressRows()
@@ -3607,6 +3940,27 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         />
       )}
       {modelState !== null && <ModelPicker state={modelState} />}
+      {/* ADR-0096 T1+T2+T3 /config 面板：三行均可改（Enter 翻各自 holder +
+          落盘）。worktree 行 T3 接 worktreeOnMutateHolder 后激活；holder
+          缺席时退回 isolationOn 静态快照 + display-only。fsMode /
+          subagentCapHolder / worktreeOnMutateHolder 缺席时对应行 Enter
+          no-op，面板仍可开可关（与 model-picker 在 providers 缺失时不打开
+          是不同决策 —— config 面板开 open 不要求 holder 存在）。 */}
+      {configState !== null && (
+        <ConfigPicker
+          // 重渲染计数器作 prop：Enter 翻 holder 后父组件重渲染，本组件随之
+          // 重新现读 holder.get()（holder 非订阅源，见 configRenderTick 注释）。
+          // 传 prop 而非 key —— key 会重挂载并重播边框动画，视觉上闪一下。
+          renderTick={configRenderTick}
+          state={configState}
+          fsMode={props.fsMode}
+          worktreeOnMutateHolder={props.worktreeOnMutateHolder}
+          worktreeOn={props.isolationOn}
+          subagentCapHolder={props.subagentCapHolder}
+          subagentCapDisplay={props.subagentCapDisplay}
+          capRowInteractive={props.subagentCapHolder !== undefined}
+        />
+      )}
       {view === "chat" && (
         <ModalHost
           modal={
@@ -3683,6 +4037,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             // undefined，落回 ask / 默认文案（S5：分支体在 helper 内）。
             pickerPlaceholderFor({
               rewindOpen: rewindTargets !== undefined,
+              configPickerOpen,
               modelPickerOpen,
               memoryPickerOpen,
               thinkingPickerOpen,
@@ -3700,6 +4055,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             thinkingPickerOpen !== null ||
             memoryPickerOpen ||
             modelPickerOpen ||
+            configPickerOpen ||
             // plans T7：input 失活条件由 chrome-focus 三态 reducer 接管
             // —— focus 在 subagent 或 graph 时禁用输入框。
             chromeFocus.kind !== "input" ||

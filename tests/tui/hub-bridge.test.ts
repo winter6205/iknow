@@ -505,6 +505,7 @@ describe("hub-bridge subagentManager 透传（#365 T3）", () => {
         },
       ],
       // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+      getCapacity: () => 15,
       listSubagents: () => [],
       subscribe: () => () => {},
     };
@@ -573,6 +574,7 @@ describe("hub-bridge subagentManager 透传（#365 T3）", () => {
           subscriber = undefined;
         };
       },
+      getCapacity: () => 15,
     } as SubAgentManager;
     const bridge = createTuiBridge({
       dataDir: baseDir,
@@ -889,12 +891,14 @@ describe("hub-bridge listSubagents 投影（#358 T7）", () => {
     const fakeMgr: SubAgentManager = {
       spawn: () => ({ taskId: "x" }),
       queryBuffer: () => ({ status: "not_found" }),
+      getCapacity: () => 15,
       waitFor: () => Promise.reject(new Error("not used")),
       shutdown: () => Promise.resolve(),
       abortTask: () => false,
       listActive: () => [],
       drainCompleted: () => [],
       listSubagents: () => projection,
+      subscribe: () => () => {},
     };
     const bridge = createTuiBridge({
       deps: makeDeps([]),
@@ -921,6 +925,7 @@ describe("hub-bridge listSubagents 投影（#358 T7）", () => {
     const manager: SubAgentManager = {
       spawn: () => ({ taskId: "unused" }),
       queryBuffer: () => ({ status: "not_found" }),
+      getCapacity: () => 15,
       waitFor: async () => {
         throw new Error("unused");
       },
@@ -1034,6 +1039,7 @@ describe("hub-bridge subagent manager aggregation across rebind", () => {
     const manager: SubAgentManager = {
       spawn: () => ({ taskId: `${label}-spawned` }),
       queryBuffer: () => ({ status: "not_found" }),
+      getCapacity: () => 15,
       waitFor: async () => {
         throw new Error("unused");
       },

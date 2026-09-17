@@ -73,8 +73,11 @@ import {
   loadIknowSettings,
   resolveFsIsolationMode,
   resolveWorktreeExclusive,
+  resolveWorktreeOnMutate,
 } from "../config/settings.js";
 import { createFsModeContext } from "../harness/sandbox/fs-mode.js";
+import { createSubagentCapacityHolder } from "../harness/subagent/manager.js";
+import { createWorktreeOnMutateHolder } from "../harness/isolation/worktree-gate.js";
 import { createTuiWorktreeIsolationHost } from "./worktree-host.js";
 import { resolveVerifyConfig } from "../session-api/serve.js";
 import { createEnvLoader, type EnvLoader } from "../config/env-loader.js";
@@ -95,8 +98,11 @@ import {
   persistFsModeChanges,
   persistMemoryChanges,
   persistModelChanges,
+  persistSubagentCapChanges,
   persistThinkingChanges,
+  persistWorktreeOnMutateChanges,
   resolveThinkingSettingsPath,
+  type SubagentCapPersistPatch,
 } from "../config/persist-settings.js";
 import { homedir } from "node:os";
 import { shutdownDefaultLspPool } from "../harness/lsp/client.js";
@@ -177,6 +183,53 @@ export interface TuiTerminalStdin {
  *
  *  只消费**已进入用户态缓冲**的字节（同 OpenTUI resume() 的同步 drain），
  *  仍在内核 tty 队列里的字节本函数看不到 —— 见 teardownTuiTerminal 头注。 */
+/** ADR-0096 T2 ── 子代理并发上限落盘通道（fire-and-forget，失败由 app.tsx
+ *  notice 兜底）。与 `persistFsMode` 同形态但返回 `{ok, reason}` 而非 throw：
+ *  TuiAppProps.onPersistSubagentCap 契约如此 —— 模型描述 getter 反映的是
+ *  holder 现值，文件层失败不撤回 holder。`activeEnvLoader.markSelfWrite`
+ *  与 `persistThinking` / `persistFsMode` 同步防 self-write 回路。 */
+async function persistSubagentCapImpl(
+  patch: SubagentCapPersistPatch,
+  activeEnvLoader: EnvLoader
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  try {
+    const path = resolveThinkingSettingsPath({
+      home: homedir(),
+    });
+    const { bytes } = await persistSubagentCapChanges(path, patch);
+    activeEnvLoader.markSelfWrite(path, bytes);
+    return { ok: true as const };
+  } catch (err) {
+    return {
+      ok: false as const,
+      reason: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/** ADR-0096 T3 ── worktree 门禁落盘通道（fire-and-forget，失败由 app.tsx
+ *  notice 兜底）。与 `persistFsMode` 逐条同形：用户层键 `isolation.
+ *  worktreeOnMutate`，`activeEnvLoader.markSelfWrite` 防 self-write 回路，
+ *  错误重新抛出（TuiAppProps.onPersistWorktreeOnMutate 契约 = Promise<void>，
+ *  由 app 的 catch 落 notice），holder 已翻不撤回 —— 门禁下一次 wave 即按
+ *  新值裁决（ADR-0037 §1：翻 ON 只拦未绑树 mutate，从不 auto-provision）。 */
+async function persistWorktreeOnMutateImpl(
+  on: boolean,
+  activeEnvLoader: EnvLoader
+): Promise<void> {
+  try {
+    const path = resolveThinkingSettingsPath({
+      home: homedir(),
+    });
+    const { bytes } = await persistWorktreeOnMutateChanges(path, {
+      worktreeOnMutate: on,
+    });
+    activeEnvLoader.markSelfWrite(path, bytes);
+  } catch (err) {
+    throw err instanceof Error ? err : new Error(String(err));
+  }
+}
+
 function drainTuiStdin(stdin: TuiTerminalStdin): void {
   for (;;) {
     let chunk: unknown;
@@ -498,6 +551,50 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // TuiApp（命令面）。与 permissionMode / graphMode 正交 —— Shift+Tab
     // 不动它。settings 只在启动加载点读一次（review High-2 / 硬要求 9）。
     const fsMode = createFsModeContext(resolveFsIsolationMode(startupSettings));
+    // ADR-0096 T2:子代理并发上限 holder（与 fsMode 同形态）—— 初值走
+    // env.subagent.maxConcurrentWorkers（env > settings > 默认 15 链已
+    // 在 env.ts 钉死）。运行期由 TUI /config 面板 Enter 循环翻
+    // (3→5→9→15→unlimited→3)；holder 同时给引擎（BuildEngineOpts.
+    // subagentCapacityHolder → createSubAgentManager → spawn 闸）与
+    // TuiApp（命令面）以及 registry → spawn_subagent 工具 description
+    // （getter 现读 holder）。三入口同源 → 闸值与 description N 与
+    // SubAgentCapacityError.maxConcurrentWorkers 永远一致。
+    // ADR-0096 T2:子代理并发上限 holder（与 fsMode 同形态），三入口同源：
+    // 引擎 spawn 闸 + 工具 description + TUI 命令面共享同一 holder 引用。
+    // cap 行 Enter 落盘通道（与 persistFsMode 同形态：闭包持有
+    // `activeEnvLoader` 防 settings.json self-write 回路；失败由 app.tsx
+    // 兜底 notice，holder 已生效不撤回）。`subagentCapBindings` IIFE
+    // 一次性返回元组，让 runTui 不背 +2 复杂度（S5 硬门）。
+    const [subagentCapHolder, persistSubagentCap] = (() => {
+      // M1（code-review 修复）：初值走 `currentEnv`（env > settings > 默认 15
+      // 链已在 env.ts 钉死）而非 `startupSettings.subagent?.…` —— 否则 env
+      // `IKNOW_SUBAGENT_MAX_CONCURRENT_WORKERS` 在场而 settings 未写该键时，
+      // manager 闸用 env 值、面板却显示 settings/默认值，同一时刻两个真相。
+      // 面板显示语义（plan §3 T2 open issue，票内决议）：**显示 effective
+      // 值（holder.get() = env 链解出值）**，与 manager 闸同源；不另发
+      // 「env 覆盖 settings」notice —— holder.get() 本身就是 effective 值，
+      // 会话内 Enter 翻转后写 user 层（env 优先级更高时下次 env reload 仍
+      // 由 env 胜，与 /model 显示语义同向）。注意：写 user 层不反向覆盖 env。
+      const initial = currentEnv.subagent.maxConcurrentWorkers;
+      const holder = createSubagentCapacityHolder(initial);
+      const persist = (p: SubagentCapPersistPatch) =>
+        persistSubagentCapImpl(p, activeEnvLoader);
+      return [holder, persist] as const;
+    })();
+    // ADR-0096 T3:worktree 门禁 holder（与 fsMode / cap 同形态）—— 初值走
+    // 启动读数 `resolveWorktreeOnMutate(startupSettings)`（硬要求 9：settings
+    // 仍只读一次）。运行期由 /config 面板 worktree 行 Enter 翻；holder 同时
+    // 给引擎（buildTuiDeps → BuildEngineOpts.worktreeOnMutateHolder → mutate
+    // 门禁每波入口现读）与 TuiApp（命令面/显示）。同款 IIFE 收口，让 runTui
+    // 不背 +2 复杂度（S5 硬门）。
+    const [worktreeOnMutateHolder, persistWorktreeOnMutate] = (() => {
+      const holder = createWorktreeOnMutateHolder(
+        resolveWorktreeOnMutate(startupSettings)
+      );
+      const persist = (on: boolean) =>
+        persistWorktreeOnMutateImpl(on, activeEnvLoader);
+      return [holder, persist] as const;
+    })();
     // live-graph-phase1 T1 / ADR-0051:活图账本 host —— TUI 单例,跨多会话
     // (web 多面板 / 切换会话)按 conversationId 解析;resetSession /
     // hub.shutdown 销毁。
@@ -529,6 +626,15 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // ADR-0092 / SC13:fs isolation holder 给引擎(build-engine →
       // BuildEngineOpts.fsMode → bash 工厂 per-call 读)。
       fsMode,
+      // ADR-0096 T2:子代理并发上限 holder —— buildTuiDeps → BuildEngineOpts.
+      // subagentCapacityHolder → createSubAgentManager(spawn 闸每次现读) +
+      // registry → spawn_subagent 工具 description（getter 同源）。
+      // 三入口同一冻结引用,TUI /config 面板翻一次全局生效。
+      subagentCapHolder,
+      // ADR-0096 T3:worktree 门禁 holder —— buildTuiDeps → BuildEngineOpts.
+      // worktreeOnMutateHolder → mutate 门禁每波入口现读。面板翻一次即对下
+      // 一波 tool call 生效；**从不 auto-provision**（ADR-0037 §1 保留）。
+      worktreeOnMutateHolder,
       liveGraphLedger,
       sessionGrants,
       // ADR-0019 (T2): workspaceRoot 透传到 build-engine identity /
@@ -737,6 +843,18 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           //（引擎那侧的 holder 经 depsOpts.fsMode 走）。
           fsMode={fsMode}
           onPersistFsMode={persistFsMode}
+          // ADR-0096 T2:cap holder + 落盘回调给命令面（与 fsMode 同形态）;
+          // 引擎那侧 holder 经 depsOpts.subagentCapHolder 走。两者同引用,
+          // /config 面板翻一次全局生效。holder 在场时面板优先用 holder.get()，
+          // `subagentCapDisplay` 仅在 holder 缺席时作为 fallback snapshot 透
+          // 传（保持 T1 兼容）。
+          subagentCapHolder={subagentCapHolder}
+          onPersistSubagentCap={persistSubagentCap}
+          // ADR-0096 T3:worktree 门禁 holder + 落盘回调给命令面（与 fsMode /
+          // cap 同形态）；引擎那侧同引用经 depsOpts.worktreeOnMutateHolder 走。
+          // `isolationOn` 仍透传作为 holder 缺席时的 fallback snapshot（T1 兼容）。
+          worktreeOnMutateHolder={worktreeOnMutateHolder}
+          onPersistWorktreeOnMutate={persistWorktreeOnMutate}
           sessionGrants={sessionGrants}
           // #337 Phase C：TuiApp 消费 skillCatalog（slash 候选 + /skill 加载发送）。
           // onExtensions 在 buildTuiDeps 装配期同步注入（Phase B seam）；此处

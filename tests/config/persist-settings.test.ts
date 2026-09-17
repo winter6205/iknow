@@ -50,12 +50,16 @@ import {
   hashSettingsContent,
   mergeMemoryPatch,
   mergeModelPatch,
+  mergeSubagentCapPatch,
   mergeThinkingPatch,
   mergeFsModePatch,
+  mergeWorktreeOnMutatePatch,
   persistMemoryChanges,
   persistModelChanges,
+  persistSubagentCapChanges,
   persistThinkingChanges,
   persistFsModeChanges,
+  persistWorktreeOnMutateChanges,
   resolveThinkingSettingsPath,
 } from "../../src/config/persist-settings.ts";
 
@@ -636,6 +640,421 @@ describe("persistFsModeChanges（原子写）", () => {
       isolation: { fsMode: "workspace" },
     });
     expectAtomicWrite(file);
+  });
+});
+
+// ── ADR-0096 T2: subagent 并发上限 patch（cap 3|5|9|15|unlimited） ──────────
+
+describe("mergeSubagentCapPatch（纯函数）", () => {
+  test("subagent 缺失 → 创建 subagent.maxConcurrentWorkers", () => {
+    expect(mergeSubagentCapPatch({}, { maxConcurrentWorkers: 9 })).toEqual({
+      subagent: { maxConcurrentWorkers: 9 },
+    });
+  });
+
+  test("已有 subagent 段 → 仅改 maxConcurrentWorkers，其余键原样保留", () => {
+    expect(
+      mergeSubagentCapPatch(
+        { subagent: { taskTimeoutMs: 30000, maxConcurrentWorkers: 9 } },
+        { maxConcurrentWorkers: 15 }
+      )
+    ).toEqual({
+      subagent: { taskTimeoutMs: 30000, maxConcurrentWorkers: 15 },
+    });
+  });
+
+  test("subagent 非普通对象 → 以新对象覆盖，仅保留 patch 字段", () => {
+    expect(
+      mergeSubagentCapPatch(
+        { subagent: "not-an-object" },
+        { maxConcurrentWorkers: 5 }
+      )
+    ).toEqual({
+      subagent: { maxConcurrentWorkers: 5 },
+    });
+  });
+
+  test('"unlimited" 字面 → 写为字符串字面（与 settings 解析层同形态）', () => {
+    expect(
+      mergeSubagentCapPatch({}, { maxConcurrentWorkers: "unlimited" })
+    ).toEqual({
+      subagent: { maxConcurrentWorkers: "unlimited" },
+    });
+  });
+
+  test("数字字面 3 / 5 / 9 / 15 全部接受", () => {
+    for (const v of [3, 5, 9, 15]) {
+      expect(mergeSubagentCapPatch({}, { maxConcurrentWorkers: v })).toEqual({
+        subagent: { maxConcurrentWorkers: v },
+      });
+    }
+  });
+
+  // 闭集外数字 → TypeError（与 fsMode / thinking 同步；TUI 面板永远不会
+  // 传这种值 —— 边界 5 类之一，捕获异常防止污染磁盘）。
+  test("闭集外数字（0 / 1 / 2 / 4 / 7 / 99） → TypeError", () => {
+    for (const v of [0, 1, 2, 4, 7, 99]) {
+      expect(() =>
+        mergeSubagentCapPatch({}, { maxConcurrentWorkers: v })
+      ).toThrow(TypeError);
+      expect(() =>
+        mergeSubagentCapPatch({}, { maxConcurrentWorkers: v })
+      ).toThrowError(/cap/);
+    }
+  });
+
+  test("非整数 / 负数 / NaN / Infinity → TypeError", () => {
+    for (const v of [1.5, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() =>
+        mergeSubagentCapPatch({}, { maxConcurrentWorkers: v })
+      ).toThrow(TypeError);
+    }
+  });
+
+  test('非数字非 "unlimited" 字面（null / true / "3" / 对象）→ TypeError', () => {
+    for (const v of [null, true, "3", {}, []]) {
+      expect(() =>
+        mergeSubagentCapPatch(
+          {},
+          { maxConcurrentWorkers: v as unknown as number }
+        )
+      ).toThrow(TypeError);
+    }
+  });
+
+  test("纯函数：raw 未被就地修改", () => {
+    const raw = { subagent: { taskTimeoutMs: 30000 } };
+    const before = JSON.stringify(raw);
+    mergeSubagentCapPatch(raw, { maxConcurrentWorkers: 9 });
+    expect(JSON.stringify(raw)).toBe(before);
+  });
+
+  test("其它顶层键（llm / isolation / memory / permissions）原样保留", () => {
+    const raw = {
+      llm: { model: "claude-sonnet" },
+      isolation: { fsMode: "global" },
+      memory: { autoExtract: true },
+      permissions: { defaultMode: "ask" },
+    };
+    expect(mergeSubagentCapPatch(raw, { maxConcurrentWorkers: 5 })).toEqual({
+      llm: { model: "claude-sonnet" },
+      isolation: { fsMode: "global" },
+      memory: { autoExtract: true },
+      permissions: { defaultMode: "ask" },
+      subagent: { maxConcurrentWorkers: 5 },
+    });
+  });
+});
+
+describe("persistSubagentCapChanges（原子写）", () => {
+  test("新文件起步：写入 subagent.maxConcurrentWorkers，原子写", async () => {
+    const base = makeTmpRoot("iknow-persist-subcap-new-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    const res = await persistSubagentCapChanges(file, {
+      maxConcurrentWorkers: 9,
+    });
+    expect(JSON.parse(res.bytes)).toEqual({
+      subagent: { maxConcurrentWorkers: 9 },
+    });
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      subagent: { maxConcurrentWorkers: 9 },
+    });
+    expectAtomicWrite(file);
+    // self-write 哨兵：bytes 哈希与文件内容哈希同源
+    expect(hashSettingsContent(res.bytes)).toBe(
+      hashSettingsContent(readFileSync(file, "utf8"))
+    );
+  });
+
+  test('"unlimited" → JSON 字面字符串（与 settings 解析同形态）', async () => {
+    const base = makeTmpRoot("iknow-persist-subcap-unlim-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    const res = await persistSubagentCapChanges(file, {
+      maxConcurrentWorkers: "unlimited",
+    });
+    expect(JSON.parse(res.bytes)).toEqual({
+      subagent: { maxConcurrentWorkers: "unlimited" },
+    });
+  });
+
+  test("已有文件：保留 llm / isolation / memory 等全部原字段", async () => {
+    const base = makeTmpRoot("iknow-persist-subcap-keep-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    mkdirSync(join(base, "home", ".iknow"), { recursive: true });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        llm: { model: "claude-sonnet", apiKey: "${ANTHROPIC_API_KEY}" },
+        isolation: { worktreeOnMutate: true, fsMode: "global" },
+        memory: { autoExtract: true, dream: false },
+        subagent: { taskTimeoutMs: 60000 },
+      })
+    );
+    const res = await persistSubagentCapChanges(file, {
+      maxConcurrentWorkers: "unlimited",
+    });
+    expect(JSON.parse(res.bytes)).toEqual({
+      llm: { model: "claude-sonnet", apiKey: "${ANTHROPIC_API_KEY}" },
+      isolation: { worktreeOnMutate: true, fsMode: "global" },
+      memory: { autoExtract: true, dream: false },
+      subagent: { taskTimeoutMs: 60000, maxConcurrentWorkers: "unlimited" },
+    });
+    expectAtomicWrite(file);
+  });
+
+  test("非法 cap 值 → TypeError（不静默吞、不写回）", async () => {
+    const base = makeTmpRoot("iknow-persist-subcap-illegal-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    mkdirSync(join(base, "home", ".iknow"), { recursive: true });
+    writeFileSync(
+      file,
+      JSON.stringify({ subagent: { maxConcurrentWorkers: 9 } })
+    );
+    await expect(
+      persistSubagentCapChanges(file, { maxConcurrentWorkers: 7 as never })
+    ).rejects.toThrow(TypeError);
+    // 文件原样保留（写回未发生）
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      subagent: { maxConcurrentWorkers: 9 },
+    });
+  });
+
+  test("文件不存在 → 视为空对象起步（与其它 patch 一致）", async () => {
+    const base = makeTmpRoot("iknow-persist-subcap-empty-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    await persistSubagentCapChanges(file, { maxConcurrentWorkers: 15 });
+    expectAtomicWrite(file);
+  });
+});
+
+// ── ADR-0096 T3: worktree 门禁 patch（ON | OFF） ────────────────────────────
+
+describe("mergeWorktreeOnMutatePatch（纯函数）", () => {
+  test("isolation 缺失 → 创建；其它顶层键原样保留", () => {
+    expect(
+      mergeWorktreeOnMutatePatch(
+        { llm: { model: "m1" } },
+        { worktreeOnMutate: true }
+      )
+    ).toEqual({
+      llm: { model: "m1" },
+      isolation: { worktreeOnMutate: true },
+    });
+  });
+
+  test("已有 isolation 段 → 仅改 worktreeOnMutate，fsMode / worktreeExclusive 等邻键不丢", () => {
+    expect(
+      mergeWorktreeOnMutatePatch(
+        {
+          isolation: {
+            fsMode: "workspace",
+            worktreeOnMutate: true,
+            worktreeExclusive: false,
+          },
+        },
+        { worktreeOnMutate: false }
+      )
+    ).toEqual({
+      isolation: {
+        fsMode: "workspace",
+        worktreeOnMutate: false,
+        worktreeExclusive: false,
+      },
+    });
+  });
+
+  test("isolation 非普通对象 → 以新对象覆盖，仅保留 patch 字段", () => {
+    expect(
+      mergeWorktreeOnMutatePatch(
+        { isolation: "not-an-object" },
+        { worktreeOnMutate: true }
+      )
+    ).toEqual({
+      isolation: { worktreeOnMutate: true },
+    });
+  });
+
+  test("非法 patch 值（非 boolean）→ TypeError，错误信息含字段名", () => {
+    for (const bad of ["ON", "OFF", 1, 0, null, undefined, {}, []]) {
+      expect(() =>
+        mergeWorktreeOnMutatePatch({}, { worktreeOnMutate: bad as never })
+      ).toThrow(TypeError);
+      expect(() =>
+        mergeWorktreeOnMutatePatch({}, { worktreeOnMutate: bad as never })
+      ).toThrowError(/worktreeOnMutate/);
+    }
+    // 字段整体缺失同拒（边界 5 类：空 patch 不落盘）
+    expect(() => mergeWorktreeOnMutatePatch({}, {} as never)).toThrow(
+      TypeError
+    );
+  });
+
+  test("ON / OFF 对称：true ⇄ false 往返回到原 raw", () => {
+    const raw = { isolation: { fsMode: "global", worktreeOnMutate: true } };
+    const off = mergeWorktreeOnMutatePatch(raw, { worktreeOnMutate: false });
+    expect(off).toEqual({
+      isolation: { fsMode: "global", worktreeOnMutate: false },
+    });
+    expect(mergeWorktreeOnMutatePatch(off, { worktreeOnMutate: true })).toEqual(
+      raw
+    );
+  });
+
+  test("纯函数：不修改入参 raw（浅拷贝纪律）", () => {
+    const raw: Record<string, unknown> = {
+      isolation: { fsMode: "global", worktreeOnMutate: true },
+    };
+    mergeWorktreeOnMutatePatch(raw, { worktreeOnMutate: false });
+    expect(raw).toEqual({
+      isolation: { fsMode: "global", worktreeOnMutate: true },
+    });
+  });
+});
+
+describe("persistWorktreeOnMutateChanges（原子写）", () => {
+  test("新文件起步：写入 isolation.worktreeOnMutate，原子写 + self-write 哈希同源", async () => {
+    const base = makeTmpRoot("iknow-persist-wtom-new-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    const res = await persistWorktreeOnMutateChanges(file, {
+      worktreeOnMutate: true,
+    });
+    expect(JSON.parse(res.bytes)).toEqual({
+      isolation: { worktreeOnMutate: true },
+    });
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      isolation: { worktreeOnMutate: true },
+    });
+    expectAtomicWrite(file);
+    expect(hashSettingsContent(res.bytes)).toBe(
+      hashSettingsContent(readFileSync(file, "utf8"))
+    );
+  });
+
+  test("已有文件：isolation.fsMode 邻键与 llm / memory / subagent 全部原样保留", async () => {
+    const base = makeTmpRoot("iknow-persist-wtom-keep-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    mkdirSync(join(base, "home", ".iknow"), { recursive: true });
+    writeFileSync(
+      file,
+      JSON.stringify(
+        {
+          llm: {
+            model: "claude-sonnet",
+            apiKey: "${ANTHROPIC_API_KEY}",
+            thinking: "off",
+          },
+          isolation: {
+            fsMode: "workspace",
+            worktreeOnMutate: true,
+            worktreeExclusive: false,
+          },
+          memory: { autoExtract: true, dream: false },
+          subagent: { maxConcurrentWorkers: "unlimited" },
+        },
+        null,
+        2
+      )
+    );
+    const res = await persistWorktreeOnMutateChanges(file, {
+      worktreeOnMutate: false,
+    });
+    expect(JSON.parse(res.bytes)).toEqual({
+      llm: {
+        model: "claude-sonnet",
+        apiKey: "${ANTHROPIC_API_KEY}",
+        thinking: "off",
+      },
+      isolation: {
+        fsMode: "workspace",
+        worktreeOnMutate: false,
+        worktreeExclusive: false,
+      },
+      memory: { autoExtract: true, dream: false },
+      subagent: { maxConcurrentWorkers: "unlimited" },
+    });
+    expectAtomicWrite(file);
+  });
+
+  test("ON → OFF → ON round-trip：两次落盘后文件与原始 raw 逐键相等（邻键零漂移）", async () => {
+    const base = makeTmpRoot("iknow-persist-wtom-roundtrip-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    mkdirSync(join(base, "home", ".iknow"), { recursive: true });
+    const raw = {
+      llm: { model: "claude-sonnet" },
+      isolation: { fsMode: "global", worktreeOnMutate: true },
+    };
+    writeFileSync(file, JSON.stringify(raw, null, 2));
+    await persistWorktreeOnMutateChanges(file, { worktreeOnMutate: false });
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      llm: { model: "claude-sonnet" },
+      isolation: { fsMode: "global", worktreeOnMutate: false },
+    });
+    await persistWorktreeOnMutateChanges(file, { worktreeOnMutate: true });
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(raw);
+    expectAtomicWrite(file);
+  });
+
+  test("非法值 → TypeError 且文件逐字节不变（不静默吞、不写回、无 tmp 残留）", async () => {
+    const base = makeTmpRoot("iknow-persist-wtom-illegal-");
+    const dir = join(base, "home", ".iknow");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "settings.json");
+    const before = JSON.stringify({ isolation: { worktreeOnMutate: true } });
+    writeFileSync(file, before);
+    await expect(
+      persistWorktreeOnMutateChanges(file, { worktreeOnMutate: "ON" as never })
+    ).rejects.toThrow(TypeError);
+    expect(readFileSync(file, "utf8")).toBe(before);
+    expect(readdirSync(dir).some((e) => e.endsWith(".tmp"))).toBe(false);
+  });
+
+  test("坏 JSON 起步 → 空对象起步后落盘（不覆盖用户文件原内容之外的东西）", async () => {
+    const base = makeTmpRoot("iknow-persist-wtom-badjson-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    mkdirSync(join(base, "home", ".iknow"), { recursive: true });
+    writeFileSync(file, "{ not json");
+    const res = await persistWorktreeOnMutateChanges(file, {
+      worktreeOnMutate: true,
+    });
+    expect(JSON.parse(res.bytes)).toEqual({
+      isolation: { worktreeOnMutate: true },
+    });
+    expectAtomicWrite(file);
+  });
+
+  test("文件不存在 → 视为空对象起步（与其它 patch 一致）", async () => {
+    const base = makeTmpRoot("iknow-persist-wtom-empty-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    await persistWorktreeOnMutateChanges(file, { worktreeOnMutate: false });
+    expectAtomicWrite(file);
+  });
+
+  test("父目录缺失 → mkdir -p 后成功（与其它 patch 一致）", async () => {
+    const base = makeTmpRoot("iknow-persist-wtom-mkdir-");
+    const file = join(base, "a", "b", ".iknow", "settings.json");
+    await persistWorktreeOnMutateChanges(file, { worktreeOnMutate: true });
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      isolation: { worktreeOnMutate: true },
+    });
+    expectAtomicWrite(file);
+  });
+
+  test("并发双写（不同值）：最终 = 某次完整写入的快照，可 parse 且邻键在", async () => {
+    const base = makeTmpRoot("iknow-persist-wtom-concurrent-");
+    const file = join(base, "home", ".iknow", "settings.json");
+    mkdirSync(join(base, "home", ".iknow"), { recursive: true });
+    writeFileSync(
+      file,
+      JSON.stringify({ isolation: { fsMode: "global" } }, null, 2)
+    );
+    await Promise.all([
+      persistWorktreeOnMutateChanges(file, { worktreeOnMutate: true }),
+      persistWorktreeOnMutateChanges(file, { worktreeOnMutate: false }),
+    ]);
+    const parsed = expectAtomicWrite(file);
+    const iso = parsed.isolation as Record<string, unknown>;
+    expect([true, false]).toContain(iso.worktreeOnMutate);
+    expect(iso.fsMode).toBe("global");
   });
 });
 

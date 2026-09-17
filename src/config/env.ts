@@ -479,12 +479,15 @@ export interface McpEnv {
  *
  * `maxConcurrentWorkers` = 同时处于 starting/running 的 worker 并发上限。
  * 未设 / 空 / 非数字 / 非正 → 默认 `DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS`(15)。
+ *
+ * ADR-0096 T2：值域扩到 `number | "unlimited"`；`"unlimited"` 仅 settings 来源
+ * 产出（env 不接 unlimited 字面），由面板 / persist 反向通道落盘。
  */
 export interface IknowSubagentEnv {
   /** 子代理整任务寿命上限(毫秒);env 不设 + settings 未配 → undefined。 */
   taskTimeoutMs: number | undefined;
-  /** 子代理并发上限；loadIknowEnv 总会填入正整数默认值。 */
-  maxConcurrentWorkers?: number;
+  /** 子代理并发上限；loadIknowEnv 总会填入正整数默认值或 `"unlimited"`。 */
+  maxConcurrentWorkers?: number | "unlimited";
 }
 
 export interface IknowEnv {
@@ -621,15 +624,6 @@ function envOptionalInt(opts: EnvOptionalIntOpts): number | undefined {
 function envOptionalPositiveInt(opts: EnvOptionalIntOpts): number | undefined {
   const n = envOptionalInt(opts);
   return n !== undefined && n > 0 ? n : undefined;
-}
-
-function isPositiveInteger(value: unknown): value is number {
-  return (
-    typeof value === "number" &&
-    Number.isFinite(value) &&
-    Number.isInteger(value) &&
-    value > 0
-  );
 }
 
 interface EnvNumberOpts {
@@ -1063,15 +1057,16 @@ export function loadIknowEnv(
           key: "IKNOW_SUBAGENT_TASK_TIMEOUT_MS",
         }) ?? mergedSettings.subagent?.taskTimeoutMs,
       // T4: 并发上限(env > settings > manager default 15)。settings 可能
-      // 来自测试注入而未经过 parse，故此处再次 fail-safe 校验。
+      // 来自测试注入而未经过 parse，故此处再次 fail-safe 校验。T2：值域扩到
+      // `number | "unlimited"` —— env 仍只认正整数（不接受 unlimited 字面）；
+      // settings 接受正整数或字面 `"unlimited"`；两条链会合后类型 = `number |
+      // "unlimited"`，manager 透传为同型（见 harness/subagent/manager.ts）。
       maxConcurrentWorkers:
         envOptionalPositiveInt({
           file,
           key: "IKNOW_SUBAGENT_MAX_CONCURRENT_WORKERS",
         }) ??
-        (isPositiveInteger(mergedSettings.subagent?.maxConcurrentWorkers)
-          ? mergedSettings.subagent.maxConcurrentWorkers
-          : undefined) ??
+        mergedSettings.subagent?.maxConcurrentWorkers ??
         DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
     },
     // ADR-0019 (T1): workspace-root per-root state anchor (D1.5 register at

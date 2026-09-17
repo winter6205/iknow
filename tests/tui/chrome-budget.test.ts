@@ -28,6 +28,7 @@ import {
 } from "../../src/tui/app.js";
 import { thinkingPickerRows } from "../../src/tui/thinking-picker.js";
 import { memoryPickerRows } from "../../src/tui/memory-picker.js";
+import { configPickerRows } from "../../src/tui/config-panel.js";
 import { compactProgressRows } from "../../src/tui/compact-progress.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 
@@ -607,5 +608,40 @@ describe("compactProgressRows（compact 进度面板行账）", () => {
       compactRows: undefined,
     });
     expect(explicit).toBe(base);
+  });
+});
+
+/**
+ * ADR-0096 T1 — configPickerRows 行账（design-25 设置面板）。
+ *
+ * 7 行 = 边框 2 + 标题 1 + 内容 3（FS 隔离档 / worktree 门禁 / 子代理并发上限）
+ * + 键位提示 1。**不含 marginBottom=1** —— 与 modelPickerRows / thinkingPickerRows
+ * / memoryPickerRows 同约定，由 chromeReserveRows 的 +1 入账。
+ */
+describe("configPickerRows（/config 设置面板行账）", () => {
+  test("7 行 = 边框 2 + 标题 1 + 内容 3 + 键位提示 1", () => {
+    expect(configPickerRows()).toBe(7);
+  });
+
+  test("有 config picker：pickerRows + 1 marginBottom = 8 行 delta", () => {
+    const base = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+    });
+    const withConfig = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+      pickerRows: configPickerRows(),
+    });
+    expect(base).toBe(7);
+    expect(withConfig - base).toBe(8);
+  });
+
+  test("与 memory picker 对比：config 多 1 行（多 1 内容行）", () => {
+    expect(configPickerRows() - memoryPickerRows()).toBe(1);
   });
 });

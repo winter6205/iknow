@@ -30,6 +30,8 @@ import type { PostToolUseHook } from "../harness/permission/types.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
 import type { GraphModeContext } from "../harness/graph/mode.js";
 import type { FsModeContext } from "../harness/sandbox/fs-mode.js";
+import type { SubagentCapacityHolder } from "../harness/subagent/manager.js";
+import type { WorktreeOnMutateHolder } from "../harness/isolation/worktree-gate.js";
 import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
 import { randomUUID } from "node:crypto";
@@ -113,6 +115,22 @@ export interface BuildTuiDepsOptions {
    * 本入口未接 fs 档（引擎按全局档缺省）。
    */
   readonly fsMode?: FsModeContext;
+  /**
+   * ADR-0096 T2：运行期子代理并发上限 holder（与 fsMode 同形态）。透传给
+   * build-engine —— `BuildEngineOpts.subagentCapacityHolder` →
+   * `createSubAgentManager`（spawn 闸每次现读）+ registry → spawn_subagent
+   * 工具 description（getter 同源）。缺席 = 引擎与工具面走 env/subagent
+   * 静态值（与既有行为 byte-equal）。
+   */
+  readonly subagentCapHolder?: SubagentCapacityHolder;
+  /**
+   * ADR-0096 T3：worktree 门禁运行期开关 holder（与 fsMode / cap 同形态）。
+   * 透传给 build-engine —— `BuildEngineOpts.worktreeOnMutateHolder` → mutate
+   * 门禁每波入口现读（D2 一波一读；面板翻转对下一波 tool call 生效）。
+   * 缺席 = 门禁退回启动期冻结读数（`resolveWorktreeOnMutate(settings)`），与
+   * 既有行为 byte-equal。
+   */
+  readonly worktreeOnMutateHolder?: WorktreeOnMutateHolder;
   /**
    * live-graph-phase1 T1 / ADR-0051:活图账本 host（run.tsx 自建单例）。
    * 透传给 build-engine —— `run_graph` handler 按 ctx.conversationId 解析
@@ -381,6 +399,17 @@ export async function buildTuiDeps(
     // ADR-0092 / SC13:fs isolation holder 透传 —— bash 工厂 per-call 读
     // （build-engine 侧按 `!== undefined` 守卫，缺席与显式 undefined 同义）。
     fsMode: opts.fsMode,
+    // ADR-0096 T2：cap holder 透传 —— build-engine 用它取代
+    // env.subagent.maxConcurrentWorkers 的启动期一次性快照（spawn 闸每次
+    // 现读 holder.get()）；同源透传给 registry → spawn_subagent 工具
+    // description getter。两路合一：TUI /config 面板翻一次全局生效。
+    // 直接 passthrough —— BuildEngineOpts.subagentCapacityHolder 是可选,
+    // 缺席 = undefined,build-engine 侧 `!== undefined` 守卫无需 ternary 包装。
+    subagentCapacityHolder: opts.subagentCapHolder,
+    // ADR-0096 T3：worktree 门禁 holder 透传 —— build-engine 用它取代启动
+    // 期一次性读数（门禁每波入口现读 holder.get()）。同上，直接 passthrough
+    // （BuildEngineOpts 侧可选 + `!== undefined` 守卫）。
+    worktreeOnMutateHolder: opts.worktreeOnMutateHolder,
     // live-graph-phase1 T1:活图账本 host 透传（TUI 装配点自建）。
     ...(liveGraphLedger ? { liveGraphLedger } : {}),
     // T1 观测缝:#175 T4 工具摘要行 — postToolUse 投影为 TuiToolEvent。

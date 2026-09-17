@@ -80,6 +80,7 @@ import { readEnvSnapshot } from "../../src/harness/env-snapshot.ts";
 import type { EnvSnapshotSeam } from "../../src/harness/loop-engine.ts";
 import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
 import { assessSubagentIsolation } from "../../src/harness/subagent/capability.ts";
+import { createWorktreeOnMutateHolder } from "../../src/harness/isolation/worktree-gate.ts";
 import {
   FILE_WRITE_TOOL_NAMES,
   SYMBOL_MUTATE_TOOL_NAMES,
@@ -343,6 +344,7 @@ function makeTestSubagentManager(): {
     drainCompleted: () => [],
     listActive: () => [],
     abortTask: () => false,
+    getCapacity: () => 15,
     listSubagents: () => [],
     subscribe: () => () => {},
   };
@@ -872,8 +874,12 @@ describe("buildHarnessEngine — #356 T6 subagent manager 装配", () => {
     drainCompleted: () => [],
     listActive: () => [],
     abortTask: () => false,
+    // ADR-0096 T2：spawn_subagent tool description getter 退化路径走
+    // manager.getCapacity()，这里给静态 15 与既有形态对齐。
+    getCapacity: () => 15,
     // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
     listSubagents: () => [],
+    subscribe: () => () => {},
   };
 
   it("chat surface：注入 fake subagentManager → registry 含两件 + 透出注入对象", async () => {
@@ -2091,6 +2097,202 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
       expect(built.sessionRoots.taskRoot).toBe(initialTask);
       expect(built.sessionRoots.taskRoot).not.toBe(seamResolved);
 
+      await built.shutdown?.();
+    } finally {
+      await removeTmpTree(root);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0096 T3 (amends ADR-0037) — the mutate switch is a live holder, not an
+// assembly-time boolean. The /config panel flips it in-session; the gate reads
+// it once per wave, so a flip lands on the NEXT wave and never auto-provisions.
+// ---------------------------------------------------------------------------
+
+describe("buildHarnessEngine — ADR-0096 T3 live worktree switch holder", () => {
+  it("holder absent + switch ON → gate armed from the startup read (byte-equal to today)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t3-holder-default-"));
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t3-holder-default"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        worktreeIsolation: { provision: async () => root },
+      });
+      const [blocked] = await built.deps.executor.executeAll(
+        [
+          {
+            id: "t3-default-write",
+            name: "write_file",
+            input: { path: "t3-default.txt", content: "x" },
+          },
+        ],
+        undefined,
+        undefined,
+        "conv-1"
+      );
+      expect(blocked.kind).toBe("execution_failed");
+      expect(blocked.message ?? "").toContain("[worktree_isolation]");
+      await built.shutdown?.();
+    } finally {
+      await removeTmpTree(root);
+    }
+  });
+
+  it("panel flip OFF → ON arms the gate on the next wave, without auto-provision", async () => {
+    // The acceptance sentence for T3: with the panel flipping ON mid-session
+    // and the session still unbound, the next mutate is blocked and NO
+    // `git worktree add` happens (provision seam never called).
+    const root = await mkdtemp(join(tmpdir(), "iknow-t3-flip-on-"));
+    try {
+      let provisionCalls = 0;
+      const holder = createWorktreeOnMutateHolder(false);
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t3-flip-on"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: false } },
+        worktreeIsolation: {
+          provision: async () => {
+            provisionCalls++;
+            return root;
+          },
+        },
+        worktreeOnMutateHolder: holder,
+      });
+      // (a) holder off + settings off → gate transparent (main repo writable).
+      const [before] = await built.deps.executor.executeAll(
+        [
+          {
+            id: "t3-off-write",
+            name: "write_file",
+            input: { path: "t3-off.txt", content: "off" },
+          },
+        ],
+        undefined,
+        undefined,
+        "conv-1"
+      );
+      expect(before.kind).toBe("ok");
+      expect(provisionCalls).toBe(0);
+
+      // (b) the /config panel flip.
+      holder.set(true);
+
+      // (c) next wave: blocked, and still no provisioning on the block path.
+      const [after] = await built.deps.executor.executeAll(
+        [
+          {
+            id: "t3-on-write",
+            name: "write_file",
+            input: { path: "t3-on.txt", content: "on" },
+          },
+        ],
+        undefined,
+        undefined,
+        "conv-1"
+      );
+      expect(after.kind).toBe("execution_failed");
+      expect(after.message ?? "").toContain("[worktree_isolation]");
+      expect(after.message ?? "").toContain("create-worktree");
+      expect(provisionCalls).toBe(0);
+
+      // (d) BuiltEngine.isolationOn stays the startup value (assembly-time
+      //     consumers are NOT re-derived by a panel flip — T3 scope).
+      expect(built.isolationOn).toBe(false);
+
+      await built.shutdown?.();
+    } finally {
+      await removeTmpTree(root);
+    }
+  });
+
+  it("panel flip ON → OFF restores main-repo writes on the next wave", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t3-flip-off-"));
+    try {
+      const holder = createWorktreeOnMutateHolder(true);
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t3-flip-off"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        worktreeIsolation: { provision: async () => root },
+        worktreeOnMutateHolder: holder,
+      });
+      const [blocked] = await built.deps.executor.executeAll(
+        [
+          {
+            id: "t3-first-write",
+            name: "write_file",
+            input: { path: "t3-first.txt", content: "first" },
+          },
+        ],
+        undefined,
+        undefined,
+        "conv-1"
+      );
+      expect(blocked.kind).toBe("execution_failed");
+
+      holder.set(false);
+
+      const [through] = await built.deps.executor.executeAll(
+        [
+          {
+            id: "t3-second-write",
+            name: "write_file",
+            input: { path: "t3-second.txt", content: "second" },
+          },
+        ],
+        undefined,
+        undefined,
+        "conv-1"
+      );
+      expect(through.kind).toBe("ok");
+      expect(built.isolationOn).toBe(true);
+
+      await built.shutdown?.();
+    } finally {
+      await removeTmpTree(root);
+    }
+  });
+
+  it("no host seam → no wrap even with a holder injected (OFF byte-stable)", async () => {
+    // Without a provision seam the gate has no adjudication path, so the
+    // assembly stays transparent regardless of the holder value — today's
+    // behavior for hub-less inlets, unchanged.
+    const root = await mkdtemp(join(tmpdir(), "iknow-t3-nohost-"));
+    try {
+      const holder = createWorktreeOnMutateHolder(true);
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t3-nohost"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        worktreeOnMutateHolder: holder,
+      });
+      const [result] = await built.deps.executor.executeAll(
+        [
+          {
+            id: "t3-nohost-write",
+            name: "write_file",
+            input: { path: "t3-nohost.txt", content: "x" },
+          },
+        ],
+        undefined,
+        undefined,
+        "conv-1"
+      );
+      expect(result.kind).toBe("ok");
       await built.shutdown?.();
     } finally {
       await removeTmpTree(root);

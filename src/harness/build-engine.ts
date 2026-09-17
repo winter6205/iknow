@@ -72,11 +72,13 @@ import {
 } from "../config/settings.js";
 import {
   createWorktreeIsolationExecutor,
+  createWorktreeOnMutateHolder,
   classifyCall,
   mainCheckoutOf,
   isTaskWorktreePath,
   type MutateClass,
   type WorktreeIsolationHostOpts,
+  type WorktreeOnMutateHolder,
 } from "./isolation/worktree-gate.js";
 import {
   wireModelFromRoute,
@@ -373,6 +375,37 @@ export type BuildEngineOpts = {
    * 缺席 → 全局档(V1 baseline,bash.ts handler 入口 fsMode 缺省回落)。
    */
   readonly fsMode?: import("./sandbox/fs-mode.js").FsModeContext;
+  /**
+   * ADR-0096 T2：运行期子代理并发上限 holder —— `BuildEngineOpts` 在场时
+   * `createSubAgentManager` 透传给 manager(替代 `env.subagent.maxConcurrentWorkers`
+   * 的启动期一次性快照)。在场 = TUI /config 面板 Enter 循环调 `holder.set(...)`
+   * 对下一次 spawn 闸值即时生效；缺席 = 走 env/subagent opts 静态值（与既有
+   * 行为 byte-equal）。与 `fsMode` 同形态：装配期构造一次、运行期持有、命令
+   * 面与引擎面读同一份冻结值。
+   *
+   * 互斥优先：holder 在场 → 完全使用 holder（spawn 闸每次现读），env 值仅作
+   * holder 缺席时的初值兜底；都缺 → 默认 15（既有行为）。
+   */
+  readonly subagentCapacityHolder?: import("./subagent/manager.js").SubagentCapacityHolder;
+  /**
+   * ADR-0096 T3 ── `isolation.worktreeOnMutate` 运行期开关 cell。装配期把
+   * 启动读数（`resolveWorktreeOnMutate(settings)`）注入 holder 初值，运行期由
+   * TUI /config 面板 `set` —— mutate 门禁每次 wave 入口现读 `get()`，翻转对
+   * 下一波 tool call 生效（D2 一波一读，波内不重读）。
+   *
+   * 缺席 → 退回启动期冻结值（`createWorktreeOnMutateHolder(启动读数)`）：门禁
+   * 形态与今日逐字节一致，OFF 档零回归。
+   *
+   * 非对称（有意）：门禁的**拦截与否**跟 holder 走（可 ON→OFF→ON 往复）；
+   * 而同一 setting 派生的其它装配期消费点 —— worker write-situation
+   * (`isolationOn`)、git 作业纪律段、projectIdentityRoot 读栅、T4 create-
+   * worktree 工具装配 —— 仍读启动期冻结值（`isolationOnStartup` / `opts.
+   * worktreeIsolation` 在场性）。理由：门禁本身恒被装配（见 loopExecutor
+   * 注释），OFF 档拦截读数为假即透明；而 worker 面 / 工具面是装配期结构
+   * （registry 成员表），运行期改会动摇「无写入工具 = 只读」的静态面判定。
+   * ADR-0096 amends 只授权门禁拦截这一件事。
+   */
+  readonly worktreeOnMutateHolder?: WorktreeOnMutateHolder;
 };
 
 /**
@@ -909,6 +942,11 @@ export async function buildHarnessEngine(
             resolveSubagentTraceDir(),
           taskTimeoutMs: env.subagent.taskTimeoutMs,
           maxConcurrentWorkers: env.subagent.maxConcurrentWorkers,
+          // ADR-0096 T2：闸值 holder 透传。holder 在场 → manager.spawn 闸每
+          // 次现读 holder.get()（命令面与引擎面同源），env 值仅作 holder 缺
+          // 席时的兜底初值；opts.maxConcurrentWorkers 仍传是兼容既有 assemble
+          // 路径（manager 在 holder 缺席时把它作 fail-closed 初值）。
+          subagentCapacityHolder: opts.subagentCapacityHolder,
         }))
       : undefined;
   // #502 T3:bash background 任务管理器 — 条件装配（surface !== "ask"）：
@@ -1141,6 +1179,12 @@ export async function buildHarnessEngine(
       ...(memoryToolsEnabled ? { memoryDir } : undefined),
       skillCatalog,
       ...(subagentManager ? { subagentManager } : undefined),
+      // ADR-0096 T2：闸值 holder 透传给 registry → 工具工厂
+      // （`createSpawnSubAgentTool` 在场时把 holder 透给工具 description
+      // getter —— description 与 manager 闸值同源，TUI /config 面板翻转立即
+      // 反映在模型拉取的工具描述上）。与 subagentManager 同形态：缺席时
+      // 工厂走 manager.getCapacity() 退化路径，与既有装配行为一致。
+      subagentCapacityHolder: opts.subagentCapacityHolder,
       // #502 T3:bash background 任务管理器透传（同门条件装配）——bash 工具
       // `background: true` 分支可用（立即返 task_id，不占 tier timer）。
       ...(backgroundManager ? { backgroundManager } : {}),
@@ -1627,10 +1671,22 @@ export async function buildHarnessEngine(
     return decision.conclusion === "readonly" ? "read" : "mutate";
   };
 
-  // ADR-0037 T3:mutate 门禁（harness executor 缝）。开关判定已上移（同一
-  // isolationEnabled 同时驱动 T4 create-worktree 工具的条件化装配，
-  // 见上方 registry 调用）；host 缝（provision / initiallyBound）由
-  // session-api hub 注入。OFF / host 缺席 → 不包装，行为与今日逐字节一致。
+  // ADR-0037 T3:mutate 门禁（harness executor 缝）。host 缝（provision /
+  // enter / exit）由 session-api hub / TUI / CLI 注入。**host 缺席 → 不包装**
+  // （无 provision 可裁决，门禁拦下也无出路）—— 行为与今日逐字节一致。
+  //
+  // ADR-0096 T3（开关判定从 isolationEnabled 解耦）：包装条件改为「host 在场」
+  // 而非「启动期 isolationEnabled」。理由：面板可把开关从 OFF 翻到 ON，若装配
+  // 期就按 OFF 不包装，翻 ON 后没有任何东西拦得住未绑树 mutate —— 验收句
+  // 「面板翻转 ON → 未绑树 mutate 被拦且不自动建树」将无法成立。门禁拦截与否
+  // 交给 holder 在每波入口现读（D2 一波一读）；**OFF 档拦截读数为假即透明**
+  // （runAll 直接透传，逐字节等于不包装）。**从不 auto-provision 不变**：
+  // 翻 ON 只恢复「拦下未绑树 mutate + 指向 create-worktree ACI 工具」这一条
+  // 反应（ADR-0037 §1 原文保留）。
+  //
+  // 与门禁解耦后保持启动期冻结的其它消费点（worker write-situation /
+  // git 作业纪律段 / projectIdentityRoot 读栅 / T4 工具装配）仍读
+  // `isolationEnabled` —— 见 BuildEngineOpts.worktreeOnMutateHolder 注释。
   //
   // T10 (plans/worktree-live-task-root.md §6 T10 / D1/D2): 门禁读活根 —
   // 把 `root: sandboxRoot`（装配期冻结）换成活 `liveTaskRoot` cell（也是
@@ -1638,19 +1694,20 @@ export async function buildHarnessEngine(
   // 在 executeAll 入口 snapshot 一次活根 — D2 一波一个根，D11 门禁裁决
   // 根等于消费者写根。未 rebind 时 cell 初值 = sandboxRoot，行为逐字节
   // 等于原 T3 装配期冻结字段。
-  const loopExecutor = isolationEnabled
-    ? createWorktreeIsolationExecutor({
-        enabled: true,
-        liveTaskRoot,
-        provision: wrappedProvision!,
-        // T4: passthrough 锚定交给 provision 按会话裁决（own task tree →
-        // 同根 no-op;外来根 → typed foreign_worktree）——host 缝不再携带
-        // conversation-agnostic 的 initiallyBound（per-root 引擎可服务多个
-        // 会话，引擎级 bound 标记会把别会话的 mutate 一并放行）。
-        classify: classifyWithSubagentIsolation,
-        inner: executor,
-      })
-    : executor;
+  const loopExecutor =
+    isolationHost !== undefined
+      ? createWorktreeIsolationExecutor({
+          enabled: resolveWorktreeOnMutateSource(opts, settings),
+          liveTaskRoot,
+          provision: wrappedProvision!,
+          // T4: passthrough 锚定交给 provision 按会话裁决（own task tree →
+          // 同根 no-op;外来根 → typed foreign_worktree）——host 缝不再携带
+          // conversation-agnostic 的 initiallyBound（per-root 引擎可服务多个
+          // 会话，引擎级 bound 标记会把别会话的 mutate 一并放行）。
+          classify: classifyWithSubagentIsolation,
+          inner: executor,
+        })
+      : executor;
 
   // registry 单源:reg.inner 已是按 memoryEnabled 条件化的最终视图(8 或 10 件)。
   // deps.registry / executor / catalog 三方一致 — ask 入口自然不含 memory 工具。
@@ -2001,6 +2058,25 @@ function lastReadLedgerOption(opts: BuildEngineOpts): {
   readonly lastReadLedger?: LastReadLedgerHost;
 } {
   return opts.lastReadLedger ? { lastReadLedger: opts.lastReadLedger } : {};
+}
+
+/**
+ * ADR-0096 T3 ── 门禁开关来源解析（holder 在场 → 用注入的活 cell；缺席 →
+ * 以启动读数现场建一个冻结 holder）。
+ *
+ * 抽到模块级的理由同 `lastReadLedgerOption`（S5 ratchet：`buildHarnessEngine`
+ * 是既有 god function，只允许等量或更少的分支）：holder 缺席路径必须与今日
+ * 逐字节一致 —— `resolveWorktreeOnMutate` 仍是唯一 fail-closed 读取点，仍在
+ * settings 加载后读一次（硬要求 9），只是包进 holder 供门禁 `get()`。
+ */
+function resolveWorktreeOnMutateSource(
+  opts: BuildEngineOpts,
+  settings: IknowSettings
+): { readonly get: () => boolean } {
+  return (
+    opts.worktreeOnMutateHolder ??
+    createWorktreeOnMutateHolder(resolveWorktreeOnMutate(settings))
+  );
 }
 
 /**

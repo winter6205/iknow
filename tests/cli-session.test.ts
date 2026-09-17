@@ -535,6 +535,7 @@ describe("chat subagent wake", () => {
       ],
       listActive: () => [],
       abortTask: () => false,
+      getCapacity: () => 15,
       listSubagents: () => [],
       subscribe:
         (_subscriber: (notice: SubAgentTerminalNotice) => void) => () => {},
@@ -605,6 +606,7 @@ describe("chat subagent wake", () => {
       ],
       listActive: () => [],
       abortTask: () => false,
+      getCapacity: () => 15,
       listSubagents: () => [],
       subscribe:
         (_subscriber: (notice: SubAgentTerminalNotice) => void) => () => {},
@@ -647,6 +649,7 @@ describe("chat subagent wake", () => {
       drainCompleted: () => [],
       listActive: () => [],
       abortTask: () => false,
+      getCapacity: () => 15,
       listSubagents: () => [],
       subscribe:
         (_subscriber: (notice: SubAgentTerminalNotice) => void) => () => {},

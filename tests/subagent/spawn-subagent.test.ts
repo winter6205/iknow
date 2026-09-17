@@ -51,6 +51,7 @@ import {
   SubAgentAbortError,
   SubAgentCapacityError,
   SubAgentWaitTimeoutError,
+  createSubagentCapacityHolder,
 } from "../../src/harness/subagent/manager.ts";
 import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../src/config/settings.ts";
 import { TIMEOUT_TIER_MS } from "../../src/harness/aci/types.ts";
@@ -125,6 +126,10 @@ function makeFakeManager() {
     abortTask: () => false,
     // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
     listSubagents: () => [],
+    // ADR-0096 T2: spawn_subagent tool description getter 读 capacity。
+    // 测试 fake 不接 holder → 退化到 manager.getCapacity()，这里给静态 15
+    // 与 DEFAULT 同源，让 description 断言对齐既有形态。
+    getCapacity: () => DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
   };
   return { manager, spawn, waitFor };
 }
@@ -552,6 +557,69 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
     expect(description).not.toMatch(/nested/i);
     expect(description).not.toMatch(/one level/i);
     expect(description).not.toMatch(/caps at/i);
+  });
+
+  // ADR-0096 T2 ── description 动态反映当前 cap（holder.get() 现读）。
+  // 与既有「5 主题」描述 SSOT 不变 —— 只是 N 那段从静态字面量改 getter；
+  // 5 主题逐项断言 + dispatch lesson + omit → general-purpose 路径仍命中
+  // （这些固定段不依赖 N）。这里只断言 N 那段动态。
+  it('description 段含当前 holder N：holder.set(7) → description 含 "At most 7"', () => {
+    const fixtureManager = (): SubAgentManager => makeFakeManager().manager;
+    const holder = createSubagentCapacityHolder(7);
+    const desc = createSpawnSubAgentTool({
+      manager: fixtureManager(),
+      capacityHolder: holder,
+    }).description;
+    expect(desc).toMatch(/At most 7 workers run simultaneously/);
+    // 既有 5 主题断言全部仍命中（5 min 禁用 + 2 hours 缺省 + 等）—— 锁定
+    // 「N 动态 vs 其它段静态」分界。
+    expect(desc).toMatch(/multi-step exploration/);
+    expect(desc).toMatch(/summary/i);
+    expect(desc).not.toMatch(/5\s*min/i);
+    expect(desc).toMatch(/2\s*h/i);
+  });
+
+  it('description 段含当前 holder N：holder.set("unlimited") → description 含 unlimited 文案', () => {
+    const fixtureManager = (): SubAgentManager => makeFakeManager().manager;
+    const holder = createSubagentCapacityHolder("unlimited");
+    const desc = createSpawnSubAgentTool({
+      manager: fixtureManager(),
+      capacityHolder: holder,
+    }).description;
+    // unlimited 形态 → 不出现 "At most N"；出现 unlimited 文案
+    expect(desc).toMatch(/Concurrency cap is unlimited/);
+    expect(desc).toMatch(/OS \/ memory budget/);
+    expect(desc).not.toMatch(/At most \d+ workers/);
+    // 5 主题不变 + dispatch lesson 仍在
+    expect(desc).toMatch(/multi-step exploration/);
+    expect(desc.indexOf(SPAWN_DISPATCH_LESSON)).toBeGreaterThan(-1);
+  });
+
+  it("description holder.set 后即时反映（不冻结旧值）", () => {
+    const fixtureManager = (): SubAgentManager => makeFakeManager().manager;
+    const holder = createSubagentCapacityHolder(3);
+    const tool = createSpawnSubAgentTool({
+      manager: fixtureManager(),
+      capacityHolder: holder,
+    });
+    const beforeFlip = tool.description;
+    expect(beforeFlip).toMatch(/At most 3 workers/);
+    holder.set(11);
+    const afterFlip = tool.description;
+    expect(afterFlip).toMatch(/At most 11 workers/);
+    // Object.freeze 仍生效（accessor 被锁住，无法整体替换）
+    expect(Object.isFrozen(tool)).toBe(true);
+  });
+
+  it("holder 缺席 → 退化到 manager.getCapacity()（既有装配路径）", () => {
+    // 装配期 manager 直造（manager.test.ts 等 makeHarness 形态）路径；
+    // 工厂不接 holder，readCapacity() 走 manager.getCapacity() 分支。
+    const { manager } = makeFakeManager();
+    const desc = createSpawnSubAgentTool({ manager }).description;
+    // fake manager.getCapacity() = DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS
+    expect(desc).toMatch(
+      new RegExp(`At most ${DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS} workers`)
+    );
   });
 });
 

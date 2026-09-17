@@ -1299,6 +1299,12 @@ describe("SC9 只读判官集成层复断言 (#449b B9)", () => {
       listSubagents() {
         return [];
       },
+      getCapacity() {
+        return 15;
+      },
+      subscribe() {
+        return () => {};
+      },
     };
     return { manager, captured: () => captured };
   }

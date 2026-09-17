@@ -68,6 +68,9 @@ function makeFakeManager() {
     listActive: () => [],
     abortTask: () => false,
     listSubagents: () => [],
+    // ADR-0096 T2: spawn_subagent tool description getter 读 capacity。
+    // 退化路径：测试 fake 不接 holder → 走 manager.getCapacity()。
+    getCapacity: () => 15,
   };
   return { manager, spawn };
 }

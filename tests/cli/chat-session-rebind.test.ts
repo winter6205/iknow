@@ -94,6 +94,7 @@ function makeManagerStub(
     drainCompleted: () => opts.drain ?? [],
     listActive: () => [],
     abortTask: () => false,
+    getCapacity: () => 15,
     listSubagents: () => [],
   };
 }

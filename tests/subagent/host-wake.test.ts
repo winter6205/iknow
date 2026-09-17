@@ -23,6 +23,7 @@ function fakeManager(): {
     drainCompleted: () => [],
     listActive: () => [],
     abortTask: () => false,
+    getCapacity: () => 15,
     listSubagents: () => [],
     subscribe: (subscriber: (notice: SubAgentTerminalNotice) => void) => {
       subscribers.add(subscriber);

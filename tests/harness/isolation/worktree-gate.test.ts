@@ -29,6 +29,7 @@ import {
   classifyCall,
   createTaskWorktree,
   createWorktreeIsolationExecutor,
+  createWorktreeOnMutateHolder,
   isTaskWorktreePath,
   mainCheckoutOf,
   resolveTaskWorktreeLabel,
@@ -860,7 +861,7 @@ describe("createWorktreeIsolationExecutor", () => {
     const { inner, calls } = fakeInner();
     let provisioned = 0;
     const gate = createWorktreeIsolationExecutor({
-      enabled: false,
+      enabled: { get: () => false },
       liveTaskRoot: createLiveTaskRoot("/main"),
       provision: async () => {
         provisioned += 1;
@@ -878,7 +879,7 @@ describe("createWorktreeIsolationExecutor", () => {
   it("read calls pass through without provisioning", async () => {
     const { inner, calls } = fakeInner();
     const gate = createWorktreeIsolationExecutor({
-      enabled: true,
+      enabled: { get: () => true },
       liveTaskRoot: createLiveTaskRoot("/main"),
       provision: async () => {
         throw new Error("must not provision");
@@ -896,7 +897,7 @@ describe("createWorktreeIsolationExecutor", () => {
     const { inner, calls } = fakeInner();
     let provisioned = 0;
     const gate = createWorktreeIsolationExecutor({
-      enabled: true,
+      enabled: { get: () => true },
       liveTaskRoot: createLiveTaskRoot("/main"),
       provision: async () => {
         provisioned += 1;
@@ -942,7 +943,7 @@ describe("createWorktreeIsolationExecutor", () => {
     });
     const { inner, calls } = fakeInner();
     const gate = createWorktreeIsolationExecutor({
-      enabled: true,
+      enabled: { get: () => true },
       liveTaskRoot: createLiveTaskRoot("/main"),
       provision: async () => {
         throw new Error("must not provision for reads");
@@ -1023,7 +1024,7 @@ describe("createWorktreeIsolationExecutor", () => {
     let provisioned = 0;
     const ownTreeRoot = "/repo/.iknow/worktrees/conv-1";
     const gate = createWorktreeIsolationExecutor({
-      enabled: true,
+      enabled: { get: () => true },
       liveTaskRoot: createLiveTaskRoot(ownTreeRoot),
       provision: async () => {
         provisioned += 1;
@@ -1037,7 +1038,7 @@ describe("createWorktreeIsolationExecutor", () => {
     expect(out[0]!.kind).toBe("ok");
 
     const gate2 = createWorktreeIsolationExecutor({
-      enabled: true,
+      enabled: { get: () => true },
       liveTaskRoot: createLiveTaskRoot("/wt"),
       initiallyBound: true,
       provision: async () => {
@@ -1052,7 +1053,7 @@ describe("createWorktreeIsolationExecutor", () => {
   it("stale-root defensive branch — provision resolving elsewhere still blocks with the rebind notice", async () => {
     const { inner, calls } = fakeInner();
     const gate = createWorktreeIsolationExecutor({
-      enabled: true,
+      enabled: { get: () => true },
       liveTaskRoot: createLiveTaskRoot("/repo/.iknow/worktrees/conv-1"),
       provision: async () => "/other-wt",
       inner,
@@ -1068,7 +1069,7 @@ describe("createWorktreeIsolationExecutor", () => {
     let provisioned = 0;
     let resolveProvision!: (root: string) => void;
     const gate = createWorktreeIsolationExecutor({
-      enabled: true,
+      enabled: { get: () => true },
       liveTaskRoot: createLiveTaskRoot("/repo/.iknow/worktrees/conv-1"),
       provision: async () => {
         provisioned += 1;
@@ -1096,7 +1097,7 @@ describe("createWorktreeIsolationExecutor", () => {
     const { inner, calls } = fakeInner();
     const provisionedFor: (string | undefined)[] = [];
     const gate = createWorktreeIsolationExecutor({
-      enabled: true,
+      enabled: { get: () => true },
       liveTaskRoot: createLiveTaskRoot("/repo/.iknow/worktrees/conv-1"),
       provision: async ({ conversationId }) => {
         provisionedFor.push(conversationId);
@@ -1120,7 +1121,7 @@ describe("createWorktreeIsolationExecutor", () => {
     let attempts = 0;
     const observed: WorktreeIsolationError[] = [];
     const gate = createWorktreeIsolationExecutor({
-      enabled: true,
+      enabled: { get: () => true },
       liveTaskRoot: createLiveTaskRoot("/repo/.iknow/worktrees/conv-1"),
       provision: async () => {
         attempts += 1;
@@ -1152,7 +1153,7 @@ describe("createWorktreeIsolationExecutor", () => {
   it("non-Error adjudication throw is wrapped into a typed rebind_failed error", async () => {
     const { inner } = fakeInner();
     const gate = createWorktreeIsolationExecutor({
-      enabled: true,
+      enabled: { get: () => true },
       liveTaskRoot: createLiveTaskRoot("/repo/.iknow/worktrees/conv-1"),
       provision: async () => {
         throw "boom"; // eslint-disable-line no-throw-literal
@@ -1167,7 +1168,7 @@ describe("createWorktreeIsolationExecutor", () => {
   it("forwards executor args (signal/timeout/conversationId/turnId/onStream/onSettled) to inner on passthrough", async () => {
     const { inner, calls } = fakeInner();
     const gate = createWorktreeIsolationExecutor({
-      enabled: true,
+      enabled: { get: () => true },
       liveTaskRoot: createLiveTaskRoot("/wt"),
       initiallyBound: true,
       provision: async () => "/wt",
@@ -1190,5 +1191,142 @@ describe("createWorktreeIsolationExecutor", () => {
     expect(calls[0]!.args[4]).toBe("turn-9");
     expect(calls[0]!.args[5]).toBeTypeOf("function");
     expect(settled).toHaveLength(1);
+  });
+});
+
+// -- ADR-0096 T3 — live switch holder -----------------------------------------
+
+describe("createWorktreeOnMutateHolder (ADR-0096 T3)", () => {
+  it("get() returns the injected initial value", () => {
+    expect(createWorktreeOnMutateHolder(true).get()).toBe(true);
+    expect(createWorktreeOnMutateHolder(false).get()).toBe(false);
+  });
+
+  it("defaults to OFF when constructed without an initial value", () => {
+    expect(createWorktreeOnMutateHolder().get()).toBe(false);
+  });
+
+  it("set() flips the value ON → OFF → ON", () => {
+    const holder = createWorktreeOnMutateHolder(false);
+    holder.set(true);
+    expect(holder.get()).toBe(true);
+    holder.set(false);
+    expect(holder.get()).toBe(false);
+    holder.set(true);
+    expect(holder.get()).toBe(true);
+  });
+
+  it("set() is fail-closed for non-boolean input (value unchanged, no throw)", () => {
+    const holder = createWorktreeOnMutateHolder(true);
+    for (const bad of [undefined, null, 0, 1, "", "ON", {}, []]) {
+      expect(() => (holder.set as (v: unknown) => void)(bad)).not.toThrow();
+      expect(holder.get()).toBe(true);
+    }
+  });
+
+  it("is frozen — no instance property can be reassigned", () => {
+    const holder = createWorktreeOnMutateHolder(false);
+    expect(Object.isFrozen(holder)).toBe(true);
+  });
+});
+
+describe("createWorktreeIsolationExecutor — live switch holder", () => {
+  it("flip OFF → ON blocks the next wave's unbound mutate WITHOUT provisioning", async () => {
+    const { inner, calls } = fakeInner();
+    let provisioned = 0;
+    const holder = createWorktreeOnMutateHolder(false);
+    const gate = createWorktreeIsolationExecutor({
+      enabled: holder,
+      liveTaskRoot: createLiveTaskRoot("/main"),
+      provision: async () => {
+        provisioned += 1;
+        return "/wt";
+      },
+      inner,
+    });
+
+    // OFF: main repo writable, gate transparent
+    const before = await gate.executeAll([writeCall("c0")]);
+    expect(before[0]!.kind).toBe("ok");
+    expect(calls).toHaveLength(1);
+
+    holder.set(true); // the /config panel flip
+
+    const after = await gate.executeAll([writeCall("c1")]);
+    expect(after[0]!.kind).toBe("execution_failed");
+    expect(after[0]!.message).toContain(CREATE_WORKTREE_TOOL_HINT);
+    // never auto-provision (ADR-0037 §1 preserved): no provision(), no write
+    expect(provisioned).toBe(0);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("flip ON → OFF restores main-repo writes on the next wave", async () => {
+    const { inner, calls } = fakeInner();
+    let provisioned = 0;
+    const holder = createWorktreeOnMutateHolder(true);
+    const gate = createWorktreeIsolationExecutor({
+      enabled: holder,
+      liveTaskRoot: createLiveTaskRoot("/main"),
+      provision: async () => {
+        provisioned += 1;
+        return "/wt";
+      },
+      inner,
+    });
+
+    const blocked = await gate.executeAll([writeCall("c1")]);
+    expect(blocked[0]!.kind).toBe("execution_failed");
+
+    holder.set(false); // the /config panel flip
+
+    const through = await gate.executeAll([writeCall("c2")]);
+    expect(through[0]!.kind).toBe("ok");
+    expect(calls.map((c) => c.calls.map((x) => x.id))).toEqual([["c2"]]);
+    expect(provisioned).toBe(0);
+  });
+
+  it("D2 — the switch is read exactly ONCE per wave (mid-wave flip cannot split a wave)", async () => {
+    const { inner } = fakeInner();
+    let value = false;
+    let reads = 0;
+    const holder = {
+      get: () => {
+        reads += 1;
+        return value;
+      },
+    };
+    const gate = createWorktreeIsolationExecutor({
+      enabled: holder,
+      liveTaskRoot: createLiveTaskRoot("/main"),
+      provision: async () => "/wt",
+      inner,
+    });
+
+    await gate.executeAll([writeCall("c1")]);
+    expect(reads).toBe(1);
+
+    value = true;
+    await gate.executeAll([writeCall("c2")]);
+    expect(reads).toBe(2);
+
+    // a wave containing several calls still costs exactly one read
+    await gate.executeAll([writeCall("c3"), writeCall("c4"), writeCall("c5")]);
+    expect(reads).toBe(3);
+  });
+
+  it("flip ON does not disturb an already-bound session's passthrough", async () => {
+    const { inner, calls } = fakeInner();
+    const holder = createWorktreeOnMutateHolder(false);
+    const gate = createWorktreeIsolationExecutor({
+      enabled: holder,
+      liveTaskRoot: createLiveTaskRoot("/repo/.iknow/worktrees/conv-1"),
+      initiallyBound: true,
+      provision: async () => "/repo/.iknow/worktrees/conv-1",
+      inner,
+    });
+    holder.set(true);
+    const out = await gate.executeAll([writeCall("c1")]);
+    expect(out[0]!.kind).toBe("ok");
+    expect(calls).toHaveLength(1);
   });
 });

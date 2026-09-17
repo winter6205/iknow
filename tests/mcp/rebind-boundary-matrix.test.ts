@@ -538,7 +538,7 @@ describe("T8 matrix — concurrent", () => {
       },
     };
     const gate = createWorktreeIsolationExecutor({
-      enabled: true,
+      enabled: { get: () => true },
       // T3 model-provision 合同：provision 裁决只在 task-worktree 形状的根上
       // 触发（改绑后 per-root 重建引擎的形态）；主仓根一律拦下不建树。
       // T10：门禁读活根（cell 由装配层通过 createLiveTaskRoot 持有）—— 此处

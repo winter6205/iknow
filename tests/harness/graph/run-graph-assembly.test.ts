@@ -68,6 +68,7 @@ const fakeSubagentManager = {
   drainCompleted: () => [],
   listActive: () => [],
   abortTask: () => false,
+  getCapacity: () => 15,
   listSubagents: () => [],
   // master SubAgentManager 接口扩展:subscribe (mailbox 契约 #361)
   subscribe: () => () => {},

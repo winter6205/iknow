@@ -53,6 +53,12 @@ function makeStubManager(opts: StubManagerOpts = {}): {
     queryBuffer() {
       return { status: "not_found" };
     },
+    getCapacity() {
+      return 15;
+    },
+    subscribe() {
+      return () => {};
+    },
     async waitFor(
       _taskId: string,
       _timeoutMs?: number,

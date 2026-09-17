@@ -142,6 +142,12 @@ export interface SubAgentManager {
     subscriber: SubAgentTerminalSubscriber,
     conversationId?: string
   ) => () => void;
+  /**
+   * ADR-0096 T2：当前并发上限（`number` 或 `"unlimited"`）—— spawn 闸单点
+   * SSOT。spawn_subagent 工具 description 派生同此，确保 N 与回执同数字。
+   * TUI /config 面板 Enter 调 holder.set 改值后立即在 get 反射。
+   */
+  readonly getCapacity: () => SubagentCapacityValue;
 }
 
 /** spawn DI 工厂签名:由调用方注入(fake 测试 / 生产 defaultSubAgentSpawn)。 */
@@ -163,6 +169,96 @@ export class SubAgentWaitTimeoutError extends Error {
  * 立即抛 SubAgentCapacityError(显式失败,模型可降并发重试;不 queue 不静默)。
  */
 export const MAX_CONCURRENT_WORKERS = DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS;
+
+/**
+ * ADR-0096 T2：子代理并发上限值域。`number` = 闸值（active+starting ≥ 此值抛
+ * `SubAgentCapacityError`）；`"unlimited"` = 不做并发拒绝（OS / 内存仍是事实顶）。
+ *
+ * holder `get()` 在 `createSubAgentManager` 的 spawn 闸内每次都现读，描述
+ * 子代理工具 description 与回执 `SubAgentCapacityError.maxConcurrentWorkers`
+ * 都从同一处派生，ADR-0096 「description N 与错误回执同一数字」直接落地。
+ */
+export type SubagentCapacityValue = number | "unlimited";
+
+/**
+ * ADR-0096 T2：运行期并发上限 holder（镜像 `FsModeContext` /
+ * `PermissionModeContext` / `GraphModeContext` —— 三入口同源）。`set` 兜底过
+ * `coerceSubagentCapacityValue`：正整数 / `"unlimited"` 才生效，其它一律忽略，
+ * 维持 holder 当前态（fail-closed，与 fs-mode.ts 同款纪律）。
+ *
+ * 装配期初值 = `env.subagent.maxConcurrentWorkers`（env > settings > 15 链已
+ * 在 env.ts:1067 钉死），TUI /config 面板 Enter 在 `3|5|9|15|unlimited` 闭集内
+ * 循环调 `set(...)`，manager 立即按新闸生效。
+ */
+export interface SubagentCapacityHolder {
+  readonly get: () => SubagentCapacityValue;
+  readonly set: (value: SubagentCapacityValue) => void;
+}
+
+/**
+ * 装配期兜底（mirror `parseFsModeFlag` 的「合法字面优先 / 非法回默认」）：
+ * 正整数或字面 `"unlimited"` 才接受，其它一律回落
+ * `DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS`。调用方（env.ts:1067 链）几乎
+ * 不会传非法值；本函数在装配期作为最后一道 fail-back（注意：与 holder 的
+ * set 不同——set 用 `isValidSubagentCapacityValue` 严格校验，非法就 skip，
+ * 不会把 holder 拍回默认 15）。
+ */
+export function coerceSubagentCapacityValue(
+  value: unknown
+): SubagentCapacityValue {
+  if (value === "unlimited") return "unlimited";
+  if (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value >= 1
+  ) {
+    return value;
+  }
+  return DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS;
+}
+
+export function createSubagentCapacityHolder(
+  initial: SubagentCapacityValue = DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS
+): SubagentCapacityHolder {
+  const starting = coerceSubagentCapacityValue(initial);
+  let current: SubagentCapacityValue = starting;
+  /** 严格合法闸值：正整数或字面 `"unlimited"`。不合法返 false（与 `coerceSubagentCapacityValue` 区别：后者兜底回默认）。 */
+  function isValidSubagentCapacityValue(
+    v: unknown
+  ): v is SubagentCapacityValue {
+    return (
+      v === "unlimited" ||
+      (typeof v === "number" && Number.isInteger(v) && v >= 1)
+    );
+  }
+
+  return Object.freeze({
+    get: () => current,
+    set: (value: SubagentCapacityValue) => {
+      // fail-closed：与 fs-mode.ts:67-73 同款纪律。`coerceSubagentCapacityValue`
+      // 把非法字面拍回默认 15，会让 set(0) 这类调用把 holder 静默改回默认；
+      // 这里用严格合法校验，非法 → 跳过，holder 维持当前态。这样 spawn 闸始终
+      // 不会从非法 set 收到无效值（typed-error 契约的硬门）。
+      if (isValidSubagentCapacityValue(value)) current = value;
+    },
+  });
+}
+
+/** 内部 helper：闸值以 `number` 入参时校验 running+starting 数，否则抛 typed 拒绝。
+ *  从 `spawn()` 抽出来保 S5 复杂度（嵌套 for/if 不再计入 spawn 的分支）。 */
+function assertCapacityAvailable(
+  cap: number,
+  tasks: ReadonlyMap<string, Task>
+): void {
+  let activeCount = 0;
+  for (const t of tasks.values()) {
+    if (t.state === "starting" || t.state === "running") activeCount++;
+  }
+  if (activeCount >= cap) {
+    throw new SubAgentCapacityError(activeCount, cap);
+  }
+}
 
 /**
  * #361 C1: spawn 并发超限 typed 拒绝。字段 `{ status:"failed", reason:"capacity",
@@ -451,10 +547,23 @@ export function createSubAgentManager(opts: {
    */
   readonly taskTimeoutMs?: number;
   /**
-   * #361 C1 / T4: 可选并发上限。仅正整数生效；缺席或非法值回退
-   * `MAX_CONCURRENT_WORKERS`(15)。超限立即抛错，不排队。
+   * #361 C1 / T4 + ADR-0096 T2: 并发上限。`number` 仅正整数生效（缺席或非法
+   * 值回退 `MAX_CONCURRENT_WORKERS`，即 15）；`"unlimited"` = 不做并发拒绝
+   * （OS / 内存仍是事实顶）；`SubagentCapacityHolder` = 运行期就地翻转（装配
+   * 期 / TUI /config 面板同款）。超限立即抛错，不排队。
+   *
+   * 与 `subagentCapacityHolder` 互斥优先：holder 在场时 **完全** 用 holder 当前值
+   * （spawn 入口每次现读），`maxConcurrentWorkers` 仅作 holder 缺席时的初值兜底；
+   * 都缺 → 默认 15（与既有行为逐字节相等）。
    */
-  readonly maxConcurrentWorkers?: number;
+  readonly maxConcurrentWorkers?: SubagentCapacityValue;
+  /**
+   * ADR-0096 T2：运行期并发上限 holder —— 镜像 `FsModeContext` /
+   * `PermissionModeContext` 同形态。在场时 spawn 闸每次 `holder.get()` 现读；
+   * TUI /config 面板 Enter 循环 `holder.set(...)`，manager 立即按新闸生效
+   * （与图节点同顶：run-graph-executor 既有断言不回归）。
+   */
+  readonly subagentCapacityHolder?: SubagentCapacityHolder;
   /**
    * T6 (plans/write-situation-disclosure.md): 可选 worktree 隔离档
    * (build-engine `isolationEnabled` 单一读取点的透出)。`buildWorkerPayload`
@@ -646,14 +755,22 @@ export function createSubAgentManager(opts: {
    * 没传 subagentsDir,沿用 #358 T4 形态——所有 task 共用单实例 trace
    * (走 `subagent.jsonl` 目录模式聚合落盘),行为同改造前。
    * 显式传了 subagentsDir 后,opts.trace 失效(per-agent 形态优先)。
+   *
+   * ADR-0096 T2：闸值持有 = holder 优先；holder 缺席 → 一次性
+   * `maxConcurrentWorkers`（与既有行为逐字节相等，仍由 `opts.maxConcurrentWorkers`
+   * 经 fail-closed 校验）。spawn 闸读 `currentCapacity()`：holder 形态每次现读，
+   * 静态形态直接返 opts 初值。
    */
-  const maxConcurrentWorkers =
-    typeof opts.maxConcurrentWorkers === "number" &&
-    Number.isFinite(opts.maxConcurrentWorkers) &&
-    Number.isInteger(opts.maxConcurrentWorkers) &&
-    opts.maxConcurrentWorkers > 0
-      ? opts.maxConcurrentWorkers
-      : MAX_CONCURRENT_WORKERS;
+  const capacityHolder: SubagentCapacityHolder =
+    opts.subagentCapacityHolder ??
+    createSubagentCapacityHolder(
+      opts.maxConcurrentWorkers ?? DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS
+    );
+
+  /** spawn 闸读 holder 当前值（`number` 或 `"unlimited"`）。 */
+  function currentCapacity(): SubagentCapacityValue {
+    return capacityHolder.get();
+  }
 
   /**
    * #358 T4: emitStateChange — 任何 task.state 迁移点必经此处。
@@ -850,15 +967,16 @@ export function createSubAgentManager(opts: {
   }
 
   function spawn(def: SubAgentDefinition): { readonly taskId: string } {
-    // #361 C1 / T4: running+starting ≥ configured cap 立即抛
-    // SubAgentCapacityError。
-    // 显式失败 > 静默排队(handler 接住后抛 ToolExecutionError,模型降并发重试)。
-    let activeCount = 0;
-    for (const t of tasks.values()) {
-      if (t.state === "starting" || t.state === "running") activeCount++;
-    }
-    if (activeCount >= maxConcurrentWorkers) {
-      throw new SubAgentCapacityError(activeCount, maxConcurrentWorkers);
+    // #361 C1 / T4 + ADR-0096 T2: running+starting ≥ configured cap 立即抛
+    // SubAgentCapacityError。显式失败 > 静默排队(handler 接住后抛
+    // ToolExecutionError,模型降并发重试)。
+    //
+    // T2 / holder：闸值每次现读 holder.get()，让 TUI /config 面板 Enter 翻转
+    // 立即对下一次 spawn 生效。`"unlimited"` → 不做并发拒绝（OS / 内存仍是
+    // 事实顶，ADR-0096 主条款），分支跳过整段计数 + 抛错路径。
+    const cap = currentCapacity();
+    if (cap !== "unlimited") {
+      assertCapacityAvailable(cap, tasks);
     }
 
     // #357 T1: 校验必须在 opts.spawn 之前(否则 line 205 既有 try/catch 会把
@@ -1649,5 +1767,8 @@ export function createSubAgentManager(opts: {
     abortTask,
     listSubagents,
     subscribe,
+    // ADR-0096 T2: 并发上限只读 getter — description N 与 SubAgentCapacityError
+    // 同源,持有方 = spawn 闸同 holder。
+    getCapacity: currentCapacity,
   });
 }

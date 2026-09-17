@@ -143,6 +143,7 @@ describe("SessionHub subagent wake", () => {
       drainCompleted: () => completed,
       listActive: () => [],
       abortTask: () => false,
+      getCapacity: () => 15,
       listSubagents: () => [],
       subscribe: (subscriber: (notice: SubAgentTerminalNotice) => void) => {
         subscribers.add(subscriber);
@@ -230,6 +231,7 @@ describe("SessionHub subagent wake", () => {
       ],
       listActive: () => [],
       abortTask: () => false,
+      getCapacity: () => 15,
       listSubagents: () => [],
       subscribe: () => () => {},
     } as SubAgentManager;
@@ -278,6 +280,7 @@ describe("SessionHub subagent wake", () => {
       drainCompleted: () => [],
       listActive: () => [],
       abortTask: () => false,
+      getCapacity: () => 15,
       listSubagents: () => [],
       subscribe: () => () => {},
     } as SubAgentManager;

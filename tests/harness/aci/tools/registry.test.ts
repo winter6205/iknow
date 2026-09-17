@@ -72,6 +72,7 @@ const fakeSubagentManager: SubAgentManager = {
   listActive: () => [],
   abortTask: () => false,
   // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+  getCapacity: () => 15,
   listSubagents: () => [],
   // master SubAgentManager 接口扩展:subscribe 用于父代监听子代理状态变更
   // (mailbox 契约 #361)。fake 不实现回调机制,返回 noop unsubscribe。

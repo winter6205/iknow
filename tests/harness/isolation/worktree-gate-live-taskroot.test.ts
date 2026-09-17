@@ -93,7 +93,7 @@ function makeGate(opts: {
   readonly initiallyBound?: boolean;
 }): Executor {
   return createWorktreeIsolationExecutor({
-    enabled: true,
+    enabled: { get: () => true },
     liveTaskRoot: opts.liveTaskRoot,
     provision: opts.provision,
     ...(opts.initiallyBound !== undefined

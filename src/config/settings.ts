@@ -223,10 +223,22 @@ export interface IknowSettingsSecrets {
  * `envOptionalInt("IKNOW_SUBAGENT_TASK_TIMEOUT_MS") ?? mergedSettings.subagent?.taskTimeoutMs`，
  * env 层不预填 7200s 默认值（缺省值在 T2 的 manager 消费点声明，避免两处声明）。
  */
+/**
+ * 子代理并发上限值域（ADR-0096，T2）：正整数 `3|5|9|15` 或 `"unlimited"`。
+ *  - 正整数 → 闸值（active+starting ≥ 此值即抛 SubAgentCapacityError）；
+ *  - `"unlimited"` → 不做并发拒绝（OS / 内存仍是事实顶）；
+ *  - settings 缺省 → env 缺省 → 默认 15（与既有行为逐字节相等）。
+ *
+ * 落盘表示：settings.json 的 `subagent.maxConcurrentWorkers` 字段允许正整数
+ * 或字面字符串 `"unlimited"`；其它值（字符串如 `"off"`、负数、浮点、boolean）
+ * 一律丢弃（fail-closed，对齐 `IknowSettingsSubagent` 既有值域纪律）。
+ */
+export type SubagentCapValue = number | "unlimited";
+
 export interface IknowSettingsSubagent {
   taskTimeoutMs?: number;
-  /** 子代理同时处于 starting/running 的并发上限；正整数才生效。 */
-  maxConcurrentWorkers?: number;
+  /** 子代理同时处于 starting/running 的并发上限；正整数或 `"unlimited"` 才生效。 */
+  maxConcurrentWorkers?: SubagentCapValue;
 }
 
 /**
@@ -635,10 +647,14 @@ function isValidTaskTimeoutMs(v: unknown): v is number {
   );
 }
 
-/** 子代理并发上限的值域：有限正整数才合法。 */
-function isValidMaxConcurrentWorkers(v: unknown): v is number {
+/** 子代理并发上限的值域：有限正整数或字面字符串 `"unlimited"`。 */
+function isValidMaxConcurrentWorkers(v: unknown): v is SubagentCapValue {
   return (
-    typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 1
+    (typeof v === "number" &&
+      Number.isFinite(v) &&
+      Number.isInteger(v) &&
+      v >= 1) ||
+    v === "unlimited"
   );
 }
 

@@ -169,6 +169,7 @@ async function mount(opts: {
     listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,
+    getCapacity: () => 15,
     listSubagents: () => [],
   };
   const askBridge = createTuiAskUserBridge();

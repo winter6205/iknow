@@ -43,6 +43,7 @@ import {
   type LastReadLedgerHost,
 } from "../last-read-ledger.js";
 import type { SubAgentManager } from "../../subagent/manager.js";
+import type { SubagentCapacityHolder } from "../../subagent/manager.js";
 import type { BackgroundTaskManager } from "../../background/manager.js";
 import type { McpManager } from "../../mcp/manager.js";
 import type { AgentCatalogResolver } from "../../subagent/catalog.js";
@@ -251,6 +252,9 @@ export interface CreateDefaultAciRegistryOptions {
   /** #356 T4 主代理本地子代理生命周期管理器。缺席时 spawn_subagent 不入注册表
    * （ask 入口零件场景；chat/tui/serve 由 build-engine 按 surface 条件构造传入）。 */
   readonly subagentManager?: SubAgentManager;
+  /** ADR-0096 T2：闸值 holder —— 与 subagentManager 配对传入工具工厂，
+   * description getter 现读 holder；缺席时退化到 manager.getCapacity()。 */
+  readonly subagentCapacityHolder?: SubagentCapacityHolder;
   /**
    * #global-plugins T1（review C1 装配接线）：spawn_subagent 工具
    * 默认走 `createMergedCatalogResolver()`（与 capability 解析面同源），
@@ -727,6 +731,12 @@ export function createDefaultAciRegistry(
     // review C1：opts.agentCatalog 透传给 spawn 工厂（缺省走
     // createMergedCatalogResolver() 默认路径，与 capability 解析面同
     // 源，ACR #5）。
+    // ADR-0096 T2：opts.subagentCapacityHolder 同步透传（最小注入 —
+    // 不参与 Gate 3 镜像过滤，与 subagentManager 同门条件）。缺席时的
+    // 语义：spawn 工厂内部退化到 `manager.getCapacity()`（manager 自己
+    // 持有同一闸值，spawn-subagent-tool.ts readCapacity）—— 闸值真相
+    // 单一在 manager/holder 链上，此处条件透传只是「有 holder 就优先
+    // 用 holder 现读」的运行期选择，两条路径产出等价 description N。
     ...(subagentManager
       ? {
           spawn_subagent: () =>
@@ -734,6 +744,9 @@ export function createDefaultAciRegistry(
               manager: subagentManager,
               ...(opts.agentCatalog !== undefined
                 ? { catalog: opts.agentCatalog }
+                : {}),
+              ...(opts.subagentCapacityHolder !== undefined
+                ? { capacityHolder: opts.subagentCapacityHolder }
                 : {}),
             }),
         }

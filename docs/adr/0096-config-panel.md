@@ -1,7 +1,7 @@
 # 0096. `/config` 升为设置面板；FS / worktree 门禁 / 子代理并发上限同屏
 
 Date: 2026-09-15
-Status: proposed
+Status: accepted
 
 TUI 无参 `/config` 打开与 `/model` 同族的浮层面板（↑↓ 选行、Enter 改值、Esc 保存退出并落盘用户层 settings），不再只靠命令行参数翻文件系统隔离档。首版三行：文件系统隔离档（全局 / 工作区）、worktree isolation mode（ON/OFF）、子代理并发上限预设 `3 | 5 | 9 | 15 | unlimited`。有参 `/config …` 仍留给 chat/serve 与脚本，语义与面板同一 holder + 同一持久化。后续设置只加行，不加新 slash。规格后续 `specs/` 承接，本 ADR 只锁形状与上限告知策略。
 

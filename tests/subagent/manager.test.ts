@@ -25,6 +25,8 @@ import type { ChildProcess } from "node:child_process";
 
 import {
   createSubAgentManager,
+  coerceSubagentCapacityValue,
+  createSubagentCapacityHolder,
   MAX_CONCURRENT_WORKERS,
   SubAgentAbortError,
   SubAgentCapacityError,
@@ -184,6 +186,218 @@ describe("SubAgentManager concurrency capacity", () => {
       assert.doesNotThrow(() => manager.spawn({ task: `fallback-${i}` }));
     }
     assert.throws(() => manager.spawn({ task: "fallback-overflow" }));
+  });
+
+  // ADR-0096 T2 ── capacity holder（运行期翻转）+ unlimited 语义。
+  it("subagentCapacityHolder 缺席 → 回退到 opts.maxConcurrentWorkers（既有行为）", () => {
+    const holder = createSubagentCapacityHolder(2);
+    const manager = createSubAgentManager({
+      spawn: () => makeFakeChild() as unknown as ChildProcess,
+      maxConcurrentWorkers: 2,
+      subagentCapacityHolder: holder,
+    });
+    assert.equal(manager.getCapacity(), 2);
+  });
+});
+
+describe("SubagentCapacityHolder（ADR-0096 T2）", () => {
+  // holder 是纯函数工厂（不读任何全局），TDD 把契约钉成单测。
+  it("初始值正整数 → get() 返同值", () => {
+    const h = createSubagentCapacityHolder(7);
+    assert.equal(h.get(), 7);
+  });
+  it("初始值缺省 → 默认 15", () => {
+    const h = createSubagentCapacityHolder();
+    assert.equal(h.get(), MAX_CONCURRENT_WORKERS);
+  });
+  it('初始值 "unlimited" → get() 返 "unlimited"', () => {
+    const h = createSubagentCapacityHolder("unlimited");
+    assert.equal(h.get(), "unlimited");
+  });
+  it("set(正整数) → get() 返新值", () => {
+    const h = createSubagentCapacityHolder(3);
+    h.set(9);
+    assert.equal(h.get(), 9);
+  });
+  it('set("unlimited") → get() 返 "unlimited"', () => {
+    const h = createSubagentCapacityHolder(3);
+    h.set("unlimited");
+    assert.equal(h.get(), "unlimited");
+  });
+  it("set(0 / 非法) → get() 维持当前值（fail-closed）", () => {
+    const h = createSubagentCapacityHolder(5);
+    h.set(0);
+    assert.equal(h.get(), 5);
+    h.set(-1);
+    assert.equal(h.get(), 5);
+    h.set(1.5); // 非整数
+    assert.equal(h.get(), 5);
+    h.set("garbage" as unknown as number);
+    assert.equal(h.get(), 5);
+  });
+  it("holder 冻结（外部无法 set 引用替换）", () => {
+    const h = createSubagentCapacityHolder(3);
+    assert.equal(Object.isFrozen(h), true);
+  });
+});
+
+describe("coerceSubagentCapacityValue（ADR-0096 T2）", () => {
+  it('"unlimited" → "unlimited"', () => {
+    assert.equal(coerceSubagentCapacityValue("unlimited"), "unlimited");
+  });
+  it("正整数 → 同值", () => {
+    assert.equal(coerceSubagentCapacityValue(1), 1);
+    assert.equal(coerceSubagentCapacityValue(99), 99);
+  });
+  it("0 / 负数 / 非整数 / NaN / null / undefined / 字面 → 默认 15", () => {
+    assert.equal(coerceSubagentCapacityValue(0), MAX_CONCURRENT_WORKERS);
+    assert.equal(coerceSubagentCapacityValue(-1), MAX_CONCURRENT_WORKERS);
+    assert.equal(coerceSubagentCapacityValue(1.5), MAX_CONCURRENT_WORKERS);
+    assert.equal(coerceSubagentCapacityValue(NaN), MAX_CONCURRENT_WORKERS);
+    assert.equal(coerceSubagentCapacityValue(Infinity), MAX_CONCURRENT_WORKERS);
+    assert.equal(coerceSubagentCapacityValue(null), MAX_CONCURRENT_WORKERS);
+    assert.equal(
+      coerceSubagentCapacityValue(undefined),
+      MAX_CONCURRENT_WORKERS
+    );
+    assert.equal(coerceSubagentCapacityValue("3"), MAX_CONCURRENT_WORKERS);
+    assert.equal(coerceSubagentCapacityValue({}), MAX_CONCURRENT_WORKERS);
+  });
+});
+
+describe("SubAgentManager concurrency capacity — ADR-0096 T2（holder + unlimited）", () => {
+  it("holder 缺席 → opts.maxConcurrentWorkers 作初值（fallback chain）", () => {
+    const manager = createSubAgentManager({
+      spawn: () => makeFakeChild() as unknown as ChildProcess,
+      maxConcurrentWorkers: 4,
+    });
+    assert.equal(manager.getCapacity(), 4);
+  });
+
+  it("holder 缺席 → opts.maxConcurrentWorkers 也缺席 → 默认 15", () => {
+    const manager = createSubAgentManager({
+      spawn: () => makeFakeChild() as unknown as ChildProcess,
+    });
+    assert.equal(manager.getCapacity(), MAX_CONCURRENT_WORKERS);
+  });
+
+  it("holder 在场时 → manager.getCapacity() 反映 holder 当前值（opts 失效）", () => {
+    const holder = createSubagentCapacityHolder(7);
+    const manager = createSubAgentManager({
+      spawn: () => makeFakeChild() as unknown as ChildProcess,
+      // opts.maxConcurrentWorkers 在场会被 holder 覆盖（ADR-0096 T2 决议）：
+      // holder 在场 → 闸值每次现读 holder.get()，opts 仅作 holder 缺席时初值。
+      maxConcurrentWorkers: 999,
+      subagentCapacityHolder: holder,
+    });
+    assert.equal(manager.getCapacity(), 7);
+    holder.set(11);
+    assert.equal(manager.getCapacity(), 11);
+  });
+
+  it("运行时 holder.set(N) → 下一次 spawn 闸值即时反映", () => {
+    const holder = createSubagentCapacityHolder(2);
+    const manager = createSubAgentManager({
+      spawn: () => makeFakeChild() as unknown as ChildProcess,
+      subagentCapacityHolder: holder,
+    });
+
+    // 闸 = 2 时：3 次 spawn 第 3 次抛 SubAgentCapacityError
+    manager.spawn({ task: "t1" });
+    manager.spawn({ task: "t2" });
+    assert.throws(() => manager.spawn({ task: "t3" }), SubAgentCapacityError);
+
+    // 运行时调到 5 → 3 个新 spawn 全过（既有 2 个仍占位，第 5 个填满，第 6 个溢出）
+    holder.set(5);
+    manager.spawn({ task: "t4" }); // active=3
+    manager.spawn({ task: "t5" }); // active=4
+    manager.spawn({ task: "t6" }); // active=5, 闸=5 → 命中边界（active < cap 通过，= cap 拒）
+    assert.throws(
+      () => manager.spawn({ task: "t7" }),
+      (error: unknown) => {
+        assert.ok(error instanceof SubAgentCapacityError);
+        // active = 5 个 running/starting；max = 5（holder 现读，与 check-time 一致）
+        assert.equal(error.active, 5);
+        assert.equal(error.maxConcurrentWorkers, 5);
+        assert.match(error.message, /5\/5/);
+        return true;
+      }
+    );
+  });
+
+  it('holder.set("unlimited") → 远超 15 个 spawn 全过（OS / 内存是事实顶）', () => {
+    const holder = createSubagentCapacityHolder("unlimited");
+    const manager = createSubAgentManager({
+      spawn: () => makeFakeChild() as unknown as ChildProcess,
+      subagentCapacityHolder: holder,
+    });
+
+    // 远超默认 15 —— unlimited 闸下不抛。
+    for (let i = 0; i < 20; i++) {
+      assert.doesNotThrow(() => manager.spawn({ task: `u-${i}` }));
+    }
+    assert.equal(manager.getCapacity(), "unlimited");
+  });
+
+  it('holder initial "unlimited" → 装配即不抛（与 set 后语义一致）', () => {
+    const manager = createSubAgentManager({
+      spawn: () => makeFakeChild() as unknown as ChildProcess,
+      subagentCapacityHolder: createSubagentCapacityHolder("unlimited"),
+    });
+    assert.equal(manager.getCapacity(), "unlimited");
+    for (let i = 0; i < 20; i++) {
+      assert.doesNotThrow(() => manager.spawn({ task: `u-${i}` }));
+    }
+  });
+
+  it("SubAgentCapacityError.maxConcurrentWorkers = 闸 check-time 数值（holder 翻转亦同）", () => {
+    const holder = createSubagentCapacityHolder(3);
+    const manager = createSubAgentManager({
+      spawn: () => makeFakeChild() as unknown as ChildProcess,
+      subagentCapacityHolder: holder,
+    });
+    manager.spawn({ task: "a" });
+    manager.spawn({ task: "b" });
+    manager.spawn({ task: "c" });
+    assert.throws(
+      () => manager.spawn({ task: "d" }),
+      (error: unknown) => {
+        assert.ok(error instanceof SubAgentCapacityError);
+        assert.equal(error.maxConcurrentWorkers, 3);
+        assert.match(error.message, /3\/3/);
+        return true;
+      }
+    );
+
+    // holder 翻转 → 闸值即下次抛错里的 maxConcurrentWorkers
+    holder.set(9);
+    for (let i = 0; i < 6; i++) manager.spawn({ task: `flip-${i}` });
+    assert.throws(
+      () => manager.spawn({ task: "flip-over" }),
+      (error: unknown) => {
+        assert.ok(error instanceof SubAgentCapacityError);
+        assert.equal(error.maxConcurrentWorkers, 9);
+        assert.match(error.message, /9\/9/);
+        return true;
+      }
+    );
+  });
+
+  it("opts.maxConcurrentWorkers 非法（0 / -1） + holder 在场 → 闸值 = holder 初值", () => {
+    // holder 在场时 opts.maxConcurrentWorkers 不会回退默认值 —— 它的角色
+    // 仅是 holder 缺席时的初值兜底。这是 ADR-0096 T2 的明确决议（opts 一旦
+    // 失效即归零语义，不与 holder 互校验）。
+    const holder = createSubagentCapacityHolder(4);
+    const manager = createSubAgentManager({
+      spawn: () => makeFakeChild() as unknown as ChildProcess,
+      maxConcurrentWorkers: 0,
+      subagentCapacityHolder: holder,
+    });
+    assert.equal(manager.getCapacity(), 4);
+    for (let i = 0; i < 4; i++) {
+      assert.doesNotThrow(() => manager.spawn({ task: `t-${i}` }));
+    }
+    assert.throws(() => manager.spawn({ task: "over" }), SubAgentCapacityError);
   });
 });
 

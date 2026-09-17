@@ -31,6 +31,12 @@
  *
  * Switch OFF → `createWorktreeIsolationExecutor` is not wired by the
  * assembly (build-engine), i.e. byte-identical to today's behavior.
+ *
+ * ADR-0096 T3 (amends ADR-0037): the switch is a live holder. The TUI /config
+ * panel flips it in-session and persists it to the user layer; the gate reads
+ * it once per wave. Flipping ON does NOT auto-provision — the unbound-mutate
+ * block (and its create-worktree hint) is still the only reaction. Flipping
+ * OFF restores main-repo writes on the next wave.
  */
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -1276,9 +1282,59 @@ export interface WorktreeIsolationHostOpts {
   readonly worktreeRemove?: WorktreeRemoveFn;
 }
 
+/**
+ * ADR-0096 T3 — the `isolation.worktreeOnMutate` switch as a live cell.
+ *
+ * Mirrors `FsModeContext` / `SubagentCapacityHolder`: the assembly seeds it
+ * once from `resolveWorktreeOnMutate(settings)` (hard req 9 — settings are
+ * still read exactly once at startup) and the TUI /config panel flips the
+ * SAME instance in-session. Consumers read `get()` at their own decision
+ * boundary; the gate reads it once per wave.
+ *
+ * Flipping this holder does NOT change any assembly-time derivation that
+ * other consumers snapshot from the same setting (worker write-situation,
+ * git-work-discipline prompt segment, project-identity read fence): those
+ * stay frozen at the startup value. Only the mutate gate is live (T3 scope).
+ */
+export interface WorktreeOnMutateHolder {
+  readonly get: () => boolean;
+  readonly set: (on: boolean) => void;
+}
+
+/**
+ * Construct the switch holder. `initial` is the startup read; non-boolean
+ * input falls back to `false` (fail-closed = today's default), and `set`
+ * ignores non-boolean input so no caller can push the gate into a
+ * non-boolean "armed" state.
+ */
+export function createWorktreeOnMutateHolder(
+  initial: boolean = false
+): WorktreeOnMutateHolder {
+  let current = initial === true;
+  return Object.freeze({
+    get: () => current,
+    set: (on: boolean) => {
+      if (typeof on === "boolean") current = on;
+    },
+  });
+}
+
 export interface WorktreeIsolationGateOpts {
-  /** Startup read (hard req 9): assembly passes `resolveWorktreeOnMutate(settings)`. */
-  readonly enabled: boolean;
+  /**
+   * Startup read (hard req 9): assembly passes `resolveWorktreeOnMutate(settings)`.
+   *
+   * ADR-0096 T3 — this is now a HOLDER (`get()`), not a frozen boolean. The
+   * assembly injects the session's live switch cell (the same instance the
+   * TUI /config panel flips); the gate reads it ONCE per wave (D2 snapshot
+   * discipline — one wave, one switch value), so a panel flip takes effect on
+   * the NEXT wave of tool calls, never mid-wave. The gate still NEVER
+   * auto-provisions: flipping ON only re-arms the block on unbound mutates
+   * (ADR-0037 §1 preserved verbatim).
+   *
+   * Typed as a read-only view (not `WorktreeOnMutateHolder`): the gate is a
+   * consumer, never the setter — the panel / assembly own the write side.
+   */
+  readonly enabled: { readonly get: () => boolean };
   /**
    * T10 (plans/worktree-live-task-root.md §6 T10 / D1/D2) — live `taskRoot`
    * cell (T4 SSOT). The gate snapshots `cell.read()` ONCE at `executeAll`
@@ -1362,6 +1418,9 @@ export function createWorktreeIsolationExecutor(
   opts: WorktreeIsolationGateOpts & { readonly inner: Executor }
 ): Executor {
   const { enabled, liveTaskRoot, provision, initiallyBound, inner } = opts;
+  // ADR-0096 T3: `enabled` is a holder — every read goes through `.get()` at
+  // the wave boundary (below); the gate never mutates it (the config panel /
+  // assembly own the setter).
   const classify = opts.classify ?? classifyCall;
   const states = new Map<string, GateSessionState>();
 
@@ -1459,7 +1518,11 @@ export function createWorktreeIsolationExecutor(
     onStream?: (event: import("../stream.js").HarnessStreamEvent) => void,
     messages?: import("../tools/types.js").ToolExecutionContext["messages"]
   ): Promise<ReadonlyArray<ToolExecutionResult>> => {
-    if (!enabled) {
+    // ADR-0096 T3 — D2 wave snapshot for the SWITCH as well: read the holder
+    // ONCE at wave entry. A panel flip (ON→OFF / OFF→ON) therefore applies to
+    // the next wave, never mid-wave — same one-wave-one-value rule the live
+    // taskRoot snapshot below follows.
+    if (!enabled.get()) {
       return inner.executeAll(
         calls,
         signal,

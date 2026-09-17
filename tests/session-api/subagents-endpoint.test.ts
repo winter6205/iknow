@@ -77,12 +77,14 @@ function makeFakeManager(
   const manager: SubAgentManager = {
     spawn,
     queryBuffer,
+    getCapacity: () => 15,
     waitFor,
     shutdown,
     drainCompleted,
     listActive,
     abortTask,
     listSubagents,
+    subscribe: () => () => {},
   };
   return {
     manager,

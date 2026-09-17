@@ -104,6 +104,7 @@ function fakeBridge(opts: FakeBridgeOptions): TuiBridge {
     listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,
+    getCapacity: () => 15,
     listSubagents: () => [],
   };
   return bridge;

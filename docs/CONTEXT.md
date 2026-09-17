@@ -555,7 +555,7 @@ _Avoid_: 改 `last_message_preview` 语义（它仍是逐字最后一条消息�
 **crash 取证无条件**: `subagent_spawn`/`subagent_state_change`/`subagent_stop` 生命周期事件与 stderr 指针文件在所有产品入口（含 chat REPL）落盘，与主循环 content trace 的入口开关解耦。ADR-0035（对 ADR-0003 D10 的范围修正）。
 _Avoid_: 把生命周期事件绑回 `--trace-out`；把该扩张理解为 content trace 进 chat REPL
 
-**worktree isolation mode**（`settings.isolation.worktreeOnMutate`，默认 OFF）: **用户层**写门禁开关——ON 时未绑树的 mutate 被拦（门禁从不自动建树）；OFF 时无门禁、主仓可写。工作树 ACI（create/enter/exit/list/remove）在 host 缝在场时**常注册**，不跟本开关捆死。`create-worktree` / enter / exit 成功才 **session worktree rebind**；bash `git worktree add` 不是 rebind。只在启动加载点读取一次。ADR-0037（amended `specs/agent-control-surface.md`）。
+**worktree isolation mode**（`settings.isolation.worktreeOnMutate`，默认 OFF）: **用户层**写门禁开关——ON 时未绑树的 mutate 被拦（门禁从不自动建树）；OFF 时无门禁、主仓可写。工作树 ACI（create/enter/exit/list/remove）在 host 缝在场时**常注册**，不跟本开关捆死。`create-worktree` / enter / exit 成功才 **session worktree rebind**；bash `git worktree add` 不是 rebind。启动读取一次为初值；会话内可经 **config 面板**就地翻转并落盘（门禁每波读一次，翻转对下一次 tool call 生效——仍不 auto-provision）。ADR-0037（amended `specs/agent-control-surface.md`）／ADR-0096。
 _Avoid_: 默认 ON；门禁自动建树（auto-provision）；把工具在场等同门禁已武装；把建树当 host 职责而非模型调工具；把 git worktree 混成 serve 主根或 `workspaceRoot` 多根；config 层读 git 或持会话状态；改绑后隐式重载 settings；建树失败静默写主仓；只建树不改绑会话；同名树静默覆盖；项目文件覆盖 isolation
 
 **session worktree rebind**: `create-worktree`（或 enter / exit）ACI 成功后，把**当前会话**的活 `taskRoot` 切到该树（exit 切回主仓）。与 isolation ON/OFF 无关：OFF 也可改绑；ON 只决定未绑树时写是否被门禁拦。bash `git worktree add` 不是本动作。只影响本会话。同一轮内对下一波 tool calls 生效。
