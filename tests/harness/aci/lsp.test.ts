@@ -2179,3 +2179,212 @@ describe("symbol snapshot cache keyed by document fingerprint", () => {
     ]);
   });
 });
+
+// ── find_symbol 无 `file`：无 project 锚点返分层哨兵（plan T3）─────────────────
+//
+// 根因（实测，docs/guides/lsp-client-analysis.md §8）：`workspace/symbol` 的搜索
+// 集合由 server 当前 project graph 决定，graph 又由它最后触碰的那个文件决定
+// ——锚点落在 tsconfig `include` 外时 tsserver 只建 inferred project（该文件 +
+// import closure）。无 `file` 的调用方拿不到锚点（生产形状实测 40s 全程 `[]`，
+// 同查询带 `file` 锚点 ~7s 出 4 命中），于是 `[]` 同时表示「真没这个符号」与
+// 「查询链路没有 project 上下文」——正是本 plan 要杀的那一类静默退化。
+//
+// 契约：`[]` 只表示「查到了、真没这个符号」；无锚点的可观测形态
+// （tsserver 抛 `No Project.` / 无 project 上下文下返空数组）收敛到同一条哨兵。
+// 哨兵**不**进 `isLspFailureSentinel` 三前缀家族（§8.7 决定）：那三条的语义是
+// 「这次调用没打成」，本条调用打成了（RPC 有响应），把它记成 probe FAIL 是
+// 错误分类，且 probe 从不进这条分岔（§7.1）。消费者是模型，它需要的是
+// 「结论不可信，换条路」，不是「LSP 坏了」。
+
+/** §8.7 定稿文案 1 —— 无 project 锚点（`ctx.directory` 按家族惯例插值）。 */
+const NO_ANCHOR_SENTINEL =
+  "(LSP workspace/symbol has no project anchor under /work; an empty result from this path is not trustworthy — pass file=<a file inside the project to search> or use get_symbols_overview on a known file)";
+
+/** tsserver 的 `No Project.` 抛出形态（typescript.js ThrowNoProject，实测）。 */
+function noProjectError(): Error {
+  return Object.assign(
+    new Error(
+      "<syntax> TypeScript Server Error (5.9.3)\nNo Project.\nError: No Project.\n    at Object.ThrowNoProject (typescript.js:186170:11)"
+    ),
+    { code: 1 }
+  );
+}
+
+describe("find_symbol without `file`: no project anchor returns the layered sentinel (T3)", () => {
+  it("converts the tsserver `No Project.` throw into the sentinel instead of propagating", async () => {
+    const { client, calls } = makeFakeClient(() => {
+      throw noProjectError();
+    });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = (await byName(tools, "find_symbol").handler({
+      query: "createAciRegistry",
+    })) as string;
+
+    expect(out).toBe(NO_ANCHOR_SENTINEL);
+    expect(calls.map((c) => c.method)).toEqual(["workspace/symbol"]);
+  });
+
+  it("converts an empty no-anchor result into the sentinel (`[]` no longer means two things)", async () => {
+    const { client } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = await byName(tools, "find_symbol").handler({
+      query: "createAciRegistry",
+    });
+    expect(out).toBe(NO_ANCHOR_SENTINEL);
+  });
+
+  it("classifies the sentinel as neither failure nor method-not-found (probe verdict = pass)", async () => {
+    // §8.7 决定：家族不加第四条前缀分支。三条失败前缀的语义是「调用没打成」，
+    // 本条调用打成了 —— 记 FAIL 是错误分类；probe 也从不进这条分岔（§7.1）。
+    const { client } = makeFakeClient(() => {
+      throw noProjectError();
+    });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = (await byName(tools, "find_symbol").handler({
+      query: "createAciRegistry",
+    })) as string;
+
+    expect(isLspFailureSentinel(out)).toBe(false);
+    expect(isMethodNotFoundSentinel(out)).toBe(false);
+    expect(classifyProbeResult({ kind: "ok", value: out }).kind).toBe("pass");
+  });
+
+  it("keeps a non-empty no-anchor result as data (coverage caveat lives in the description, not the result)", async () => {
+    const hits = [{ name: "createAciRegistry", kind: 12 }];
+    const { client } = makeFakeClient(() => hits);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = await byName(tools, "find_symbol").handler({
+      query: "createAciRegistry",
+    });
+    expect(out).toBe(JSON.stringify(hits, null, 2));
+    expect(isLspFailureSentinel(out)).toBe(false);
+  });
+
+  it("names the coverage caveat in the tool description (the always-on model-visible surface)", () => {
+    const tools = createSymbolQueryToolSetForTest();
+    const desc = byName(tools, "find_symbol").description;
+    // description 是模型可见装配面（黄金集名册 tool description 行）：无 `file`
+    // 的搜索只覆盖 server 已加载的 project，`file` 才是锚点 —— 该警示常驻
+    // description（在选择工具之前就送达），否则模型会把部分结果当全量结果。
+    expect(desc).toContain("without `file`");
+    expect(desc).toContain(
+      "only covers the project the server has already loaded"
+    );
+    expect(desc).toContain("pass `file` to anchor the search");
+  });
+});
+
+// ── find_symbol 无 `file`：锚点有效时 `[]` 仍是「真没这个符号」（plan T3）──────
+//
+// 本组是上组的对照面：哨兵不得吞掉健康路径。`[]` 的新契约 = searched-and-absent；
+// 带 `file` 的路径（含 `file` 在场时的 `[]`）逐字节不变。
+
+describe("find_symbol: `[]` means searched-and-absent once an anchor is in play (T3)", () => {
+  it("keeps the empty array when `file` is present and the symbol is genuinely absent", async () => {
+    const { client, calls, opened } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = await byName(tools, "find_symbol").handler({
+      query: "zzzNoSuchSymbolZzz",
+      file: "/work/src/a.ts",
+    });
+    expect(out).toBe("[]");
+    expect(calls[0].method).toBe("workspace/symbol");
+    // file 在场 → 请求级打开窗口罩住整次请求（行为不变）。
+    expect(opened).toEqual(["/work/src/a.ts"]);
+  });
+
+  it("keeps non-empty `file`-anchored results byte-identical", async () => {
+    const hits = [{ name: "Foo", kind: 5, location: { uri: "file:///a.ts" } }];
+    const { client } = makeFakeClient(() => hits);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = await byName(tools, "find_symbol").handler({
+      query: "Foo",
+      file: "/work/src/a.ts",
+    });
+    expect(out).toBe(JSON.stringify(hits, null, 2));
+  });
+
+  it("still surfaces method-not-found when the workspace dispatch lands on a server without workspace/symbol", async () => {
+    // 缺方法不是无锚点：server 明确说「我不实现」时透传缺方法哨兵
+    // （能力缺口是 server 的固有特性，模型据此改用别的工具）。
+    const { client } = makeFakeClient(() => {
+      throw methodNotFoundError("workspace/symbol");
+    });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = (await byName(tools, "find_symbol").handler({
+      query: "anything",
+    })) as string;
+    expect(isMethodNotFoundSentinel(out)).toBe(true);
+  });
+
+  it("keeps the no-server sentinel when the workspace dispatch finds no client", async () => {
+    // 无 server ≠ 无锚点：一条都探不到时仍是失败哨兵（probe 记 FAIL），
+    // 不得被降级成「结论不可信」的软提示。
+    mockGetClient.mockResolvedValue(undefined);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = (await byName(tools, "find_symbol").handler({
+      query: "Foo",
+    })) as string;
+    expect(out.startsWith("(no LSP server configured")).toBe(true);
+    expect(isLspFailureSentinel(out)).toBe(true);
+  });
+
+  it("still propagates unrelated RPC errors (the no-anchor rescue is narrow)", async () => {
+    const { client } = makeFakeClient(() => {
+      throw Object.assign(new Error("invalid params"), { code: -32602 });
+    });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    await expect(
+      byName(tools, "find_symbol").handler({ query: "Foo" })
+    ).rejects.toThrow("invalid params");
+  });
+
+  it("escalates a deadline hit to the timeout error instead of rescuing it", async () => {
+    const { client } = makeFakeClient(() => undefined);
+    (client as unknown as { sendRequest: unknown }).sendRequest = (
+      _method: string,
+      _params: unknown,
+      token: { onCancellationRequested(cb: () => void): unknown }
+    ) =>
+      new Promise((_resolve, reject) => {
+        token.onCancellationRequested(() =>
+          reject(new Error("Request cancelled"))
+        );
+      });
+    mockGetClient.mockResolvedValue(client);
+    const ctxCustom = { ...ctx, requestTimeoutMs: 1_000 };
+    const tools = createSymbolQueryToolSet(ctxCustom);
+
+    vi.useFakeTimers();
+    try {
+      const p = byName(tools, "find_symbol").handler({ query: "Foo" });
+      const expectation = expect(p).rejects.toThrow(
+        "[find_symbol] LSP request workspace/symbol timed out after 1s (cancelled)"
+      );
+      await vi.advanceTimersByTimeAsync(1_001);
+      await expectation;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not swallow a cancellation-flavoured error when no deadline fired", async () => {
+    // 无超时 → RequestCancelled（executor abort 等）照旧上抛，不被救成哨兵。
+    const { client } = makeFakeClient(() => {
+      throw new Error("Request cancelled");
+    });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    await expect(
+      byName(tools, "find_symbol").handler({ query: "Foo" })
+    ).rejects.toThrow("Request cancelled");
+  });
+});

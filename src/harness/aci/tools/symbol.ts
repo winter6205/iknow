@@ -33,8 +33,10 @@ import {
   extractCallHierarchyItems,
   getClientForWorkspaceDetailed,
   isMethodNotFoundSentinel,
+  isNoProjectAnchorError,
   makeDiagnosticsTool,
   renderMethodNotFound,
+  renderNoProjectAnchor,
   renderNoServer,
   requestOrMethodNotFoundSentinel,
   stringifyResult,
@@ -303,6 +305,29 @@ function makeSymbolCallHierarchyTool(
 }
 
 /**
+ * 无 `file` 分岔的「无 project 锚点」判别（plan T3）：命中 → 分层哨兵字符串。
+ *
+ * 两种可观测形态收敛到同一条哨兵（根因见 lsp.ts `renderNoProjectAnchor`）：
+ *   - tsserver 抛 `No Project.`（锚点文件不属于任何 project）；
+ *   - 无 project 上下文下 RPC 正常返回 `[]`。
+ *
+ * **`[]` 的新契约**：只有「查到了、真没这个符号」才返 `[]`；无锚点的空结果
+ * 不再冒充查询结果。返回 `undefined` = 不是无锚点形态（正常数据 / 缺方法哨兵 /
+ * 其它错误），由调用方按既有语义处理。
+ *
+ * 非空结果原样透传（§8.4：正确锚点下覆盖也可能不完整，但那属于 description
+ * 的常驻警示面，不是本判别的事）。
+ */
+function noAnchorSentinelOrUndefined(
+  ctx: LspCtx,
+  result: unknown
+): string | undefined {
+  return Array.isArray(result) && result.length === 0
+    ? renderNoProjectAnchor(ctx)
+    : undefined;
+}
+
+/**
  * `find_symbol`：按名字/模式在工作区里找符号（`workspace/symbol`）。
  * `file` 缺省时按 `SERVERS` 声明序试探可用语言服务器（继承 `lsp.ts` 的
  * 工作区级 dispatch）；空 query 由 schema `minLength: 1` 在校验期拒绝。
@@ -343,9 +368,22 @@ function makeFindSymbolTool(ctx: LspCtx, description: string): AciToolDef {
             cancel.token
           );
           if (cancel.timedOut()) throw timeoutError(name, method, timeoutMs);
+          if (params.file === undefined) {
+            // EXIT: 无 `file` = 无 project 锚点，空结果不可信 → 分层哨兵
+            // （`[]` 从今只表示「查到了、真没这个符号」）。带 `file` 的路径
+            // 不走这里，行为逐字节不变。
+            const sentinel = noAnchorSentinelOrUndefined(ctx, result);
+            if (sentinel !== undefined) return sentinel;
+          }
           return stringifyResult(result);
         } catch (err) {
           if (cancel.timedOut()) throw timeoutError(name, method, timeoutMs);
+          if (params.file === undefined) {
+            // EXIT: tsserver 的 `No Project.`（锚点不属于任何 project）同样
+            // 是无锚点形态 —— 收敛到同一哨兵，不让它冒充 RPC 故障。判定窄：
+            // 只认这一条 message，其余错误照旧上抛。
+            if (isNoProjectAnchorError(err)) return renderNoProjectAnchor(ctx);
+          }
           throw err;
         } finally {
           cancel.dispose();
@@ -537,7 +575,7 @@ export function createSymbolQueryToolSet(
     "find_symbol",
     makeFindSymbolTool(
       ctx,
-      "Search the whole workspace for symbols whose name matches a query string (a name or a substring / pattern the server accepts). Use it as the entry point when the defining file is still unknown; pair with get_symbols_overview once a file is identified, and with find_declaration to jump to a specific symbol. Returns the language-server response as a JSON string."
+      "Search the whole workspace for symbols whose name matches a query string (a name or a substring / pattern the server accepts). Use it as the entry point when the defining file is still unknown; pass `file` to anchor the search to that file's project, because searching without `file` only covers the project the server has already loaded — results can be partial even when non-empty, and an empty result may mean the query found no project rather than no such symbol. Pair with get_symbols_overview once a file is identified, and with find_declaration to jump to a specific symbol. Returns the language-server response as a JSON string."
     )
   );
   byName.set(

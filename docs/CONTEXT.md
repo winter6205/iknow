@@ -726,7 +726,7 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **闭世界围栏 vs 工作区档**: 闭世界是旧默认（home 不可见）；工作区档 home 可见、只收紧写
 - **符号工具面 vs 坐标面 `lsp_*`**: 前者是现行模型面（符号身份提问）；后者已从模型面退役，但仍是 `probe:lsp` 的仪器（`createLspToolSet`），故测 `lsp_*` 的断言不构成 `find_symbol` 等活路径的覆盖
 - **请求级打开窗口 vs warmup pinned open**: 前者随请求开关（退出即关）；后者是装配期裸 `ensureOpen` 对真实样本的永久持有，两者理由同一条（tsserver 不为未打开文件建 project）
-- **分层哨兵 vs 空数组**: 拿不到 server / 根 / project 锚点是**失败**，返 `(…)` 纯字符串哨兵并被 `isLspFailureSentinel` 认出；`[]` 只许表示「查到了、真没这个符号」。缺方法哨兵不算失败（能力缺口）
+- **分层哨兵 vs 空数组**: 拿不到 server / 根是**失败**，返 `(…)` 前缀哨兵并被 `isLspFailureSentinel` 认出；无 project 锚点返 `renderNoProjectAnchor` 哨兵——**不进**三前缀家族（调用打成了，消费者是模型：「结论不可信，换条路」）；`[]` 只许表示「查到了、真没这个符号」。缺方法哨兵不算失败（能力缺口）
 
 ## Flagged ambiguities
 

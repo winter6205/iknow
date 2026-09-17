@@ -216,6 +216,46 @@ export function renderMethodNotFound(
   return `(LSP server${who} does not implement ${method}; use another tool for this query)`;
 }
 
+/**
+ * 无 project 锚点的分层哨兵（plan `lsp-silent-degradation` T3，措辞见
+ * `docs/guides/lsp-client-analysis.md` §8.7）。
+ *
+ * `workspace/symbol` 的搜索集合由 server 当前已加载的 project graph 决定，
+ * graph 又由它最后触碰的那个文件决定（tsserver 侧实测：锚点落在 tsconfig
+ * `include` 外 → 只建 inferred project，该文件 + import closure）。无 `file`
+ * 的调用方拿不到锚点，于是结果既能是「真没这个符号」，也能是「查询链路没有
+ * project 上下文」——后者在生产形状实测 40s 全程 `[]`。
+ *
+ * **刻意不进 `isLspFailureSentinel` 家族**（§8.7）：三条失败前缀的语义是
+ * 「这次调用没打成」，本条调用打成了（RPC 有响应）。记 FAIL 是错误分类，
+ * 且 probe 从不进这条分岔（§7.1 已写死）。消费者是模型 —— 它需要的是
+ * 「结论不可信，换条路」，不是「LSP 坏了」。
+ */
+/**
+ * 按家族惯例接 `ctx: LspCtx`（与 `renderNoServer` 同形），实际只读 `ctx.directory`
+ * —— 哨兵文案只需 directory 插值，统一签名让调用方（`symbol.ts` `find_symbol`
+ * handler）无需为单字段拆包 ctx。
+ */
+export function renderNoProjectAnchor(ctx: LspCtx): string {
+  return `(LSP workspace/symbol has no project anchor under ${ctx.directory}; an empty result from this path is not trustworthy — pass file=<a file inside the project to search> or use get_symbols_overview on a known file)`;
+}
+
+/**
+ * 判定 RPC 错误是否为 tsserver 的 `No Project.`（`ThrowNoProject`，
+ * typescript.js）—— 锚点文件不属于任何 project 时 `workspace/symbol` 的
+ * navto 抛出。实测形态是 vscode-jsonrpc 的 ResponseError，message 为
+ * `<syntax> TypeScript Server Error (5.9.3)\nNo Project.\n<tsserver 栈>`。
+ *
+ * 只认 message 子串：实测 `name` 是通用 `"Error"`、`code` 是 `1`，两者都
+ * 会与业务错误撞，不可作判据。判定窄是有意的 —— 只有这条形态被救成
+ * `renderNoProjectAnchor`，其余 RPC 错误照旧上抛。
+ */
+export function isNoProjectAnchorError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const message = (err as { message?: unknown }).message;
+  return typeof message === "string" && message.includes("No Project.");
+}
+
 /** 缺方法哨兵的判定（probe 视为 skip，不计 FAIL）。 */
 export function isMethodNotFoundSentinel(result: unknown): boolean {
   return (

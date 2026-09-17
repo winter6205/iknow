@@ -173,45 +173,203 @@ interface TextDocumentEdit {
   readonly edits: ReadonlyArray<TextEdit>;
 }
 
-function normalizeWorkspaceEdit(raw: unknown): ReadonlyArray<TextDocumentEdit> {
-  if (!raw || typeof raw !== "object") return [];
+/**
+ * WorkspaceEdit 归一化不可用片段（plan `lsp-silent-degradation` T4）：
+ * server 送回了本工具集应用不了的东西 → typed 拒绝，**不部分应用**。
+ *
+ * 为什么必须拒绝而不是跳过：applier 是「读文件 → 文本替换 → 写文件」，跳过
+ * 一条 file operation 仍然会把其它 TextEdit 落盘 —— 半套 rename 比整体失败
+ * 更坏，workspace 停在「改了一半」。旧实现用 `continue` / `flatMap` 把三种
+ * 损坏都吞成「这条不存在」，最坏的表现是 server 只回 file operation 时返回
+ * `renamed: true, editCount: 0`：失败看起来像成功。
+ *
+ * `kind` 是**测试 / host 接缝**（与 write-file.ts `LastReadRequiredError.kind`
+ * 同形），不在执行器的读取面上；模型面只读 `.message`，而 message 已含 kind
+ * 与具体是哪一种 op。
+ */
+export type WorkspaceEditUnsupportedKind =
+  "file-operation" | "malformed-entry" | "malformed-edit" | "unresolvable-uri";
+
+export class WorkspaceEditUnsupportedError extends ToolExecutionError {
+  override readonly name: string = "WorkspaceEditUnsupportedError";
+  readonly kind: WorkspaceEditUnsupportedKind;
+  /** 具体是哪一种：`create` / `rename` / `delete`，或形状问题的一句话描述。 */
+  readonly detail: string;
+
+  constructor(kind: WorkspaceEditUnsupportedKind, detail: string) {
+    super(
+      `[symbol-mutate] cannot apply the workspace edit returned by the language server: ` +
+        `${kind} (${detail}); no edits were applied.`
+    );
+    this.kind = kind;
+    this.detail = detail;
+  }
+}
+
+/**
+ * server 侧 `documentChanges` 里的 file operation（LSP 3.16 `ResourceOp`）。
+ * 含未知 `kind` 字面量 —— 同样应用不了，不能当「不认识就跳过」。
+ */
+const RESOURCE_OP_KINDS: ReadonlySet<string> = new Set([
+  "create",
+  "rename",
+  "delete",
+]);
+
+export function normalizeWorkspaceEdit(
+  raw: unknown
+): ReadonlyArray<TextDocumentEdit> {
+  // `null` / `undefined` 是「server 拒绝了这次 rename」的合法语义（handler 层
+  // 已在前置检查里译成同作用域冲突的 typed 失败，见 makeRenameSymbolTool），
+  // 不是损坏 —— 故这两态仍归一为空，交由调用方按既有语义处置。
+  if (raw === null || raw === undefined) return [];
+  // 其余非对象（字符串 / 数字 / 数组）读不出任何条目：不能当作「零条目」静默
+  // 放过 —— 那是「失败看起来像成功」在信封层的同一形态（handler 会把
+  // `renamed: true, editCount: 0` 报成成功）。
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new WorkspaceEditUnsupportedError(
+      "malformed-entry",
+      `WorkspaceEdit is not an object (${Array.isArray(raw) ? "array" : typeof raw})`
+    );
+  }
   const edit = raw as {
     changes?: unknown;
     documentChanges?: unknown;
   };
-  const out: TextDocumentEdit[] = [];
-  // 旧 `changes` 形态：`{ uri: TextEdit[] }`
-  if (edit.changes && typeof edit.changes === "object") {
-    for (const [uri, edits] of Object.entries(
-      edit.changes as Record<string, unknown>
-    )) {
-      if (!Array.isArray(edits)) continue;
-      const textEdits = edits.flatMap((e) => normalizeTextEdit(e));
-      if (textEdits.length === 0) continue;
-      out.push({ textDocument: { uri }, edits: textEdits });
-    }
+  return [
+    ...normalizeChangesForm(edit.changes),
+    ...normalizeDocumentChangesForm(edit.documentChanges),
+  ];
+}
+
+/** 旧 `changes` 形态：`{ uri: TextEdit[] }`。在场的非法形状同样 typed 失败 */
+/**（`changes: []` / `changes: "..."` 都读不出 uri 映射，不是「没有 changes」）。 */
+function normalizeChangesForm(changes: unknown): TextDocumentEdit[] {
+  if (changes === undefined) return [];
+  if (!changes || typeof changes !== "object" || Array.isArray(changes)) {
+    throw new WorkspaceEditUnsupportedError(
+      "malformed-entry",
+      `changes is not a { uri: TextEdit[] } object (${Array.isArray(changes) ? "array" : typeof changes})`
+    );
   }
-  // LSP 3.13+ `documentChanges` 形态
-  if (Array.isArray(edit.documentChanges)) {
-    for (const change of edit.documentChanges) {
-      if (!change || typeof change !== "object") continue;
-      const doc = change as {
-        textDocument?: { uri?: unknown };
-        edits?: unknown;
-      };
-      const uri = doc.textDocument?.uri;
-      if (typeof uri !== "string") continue;
-      if (!Array.isArray(doc.edits)) continue;
-      const textEdits = doc.edits.flatMap((e) => normalizeTextEdit(e));
-      if (textEdits.length === 0) continue;
-      out.push({ textDocument: { uri }, edits: textEdits });
-    }
+  const out: TextDocumentEdit[] = [];
+  for (const [uri, edits] of Object.entries(
+    changes as Record<string, unknown>
+  )) {
+    out.push(...docEditsFor(uri, edits));
   }
   return out;
 }
 
-function normalizeTextEdit(raw: unknown): TextEdit[] {
-  if (!raw || typeof raw !== "object") return [];
+/**
+ * LSP 3.13+ `documentChanges` 形态。同样：在场就必须是数组，单个
+ * `TextDocumentEdit` 对象也是非法（协议要求数组），不能降级成「零条目」。
+ */
+function normalizeDocumentChangesForm(
+  documentChanges: unknown
+): TextDocumentEdit[] {
+  if (documentChanges === undefined) return [];
+  if (!Array.isArray(documentChanges)) {
+    throw new WorkspaceEditUnsupportedError(
+      "malformed-entry",
+      `documentChanges is not an array (${typeof documentChanges})`
+    );
+  }
+  const out: TextDocumentEdit[] = [];
+  for (const change of documentChanges) {
+    out.push(...normalizeDocumentChange(change));
+  }
+  return out;
+}
+
+/**
+ * 单条 `documentChanges` 条目 → `TextDocumentEdit[]`（0 或 1 条）。
+ *
+ * 与本文件其它归一化函数一样：**能应用就返回，应用不了就抛**
+ * （`WorkspaceEditUnsupportedError`），没有第三种「静默跳过」的出口。
+ */
+function normalizeDocumentChange(change: unknown): TextDocumentEdit[] {
+  if (!change || typeof change !== "object") {
+    throw new WorkspaceEditUnsupportedError(
+      "malformed-entry",
+      "documentChanges entry is not an object"
+    );
+  }
+  // file operation 先判：`CreateFile` / `RenameFile` / `DeleteFile` 都带
+  // `kind`，而 `TextDocumentEdit` 协议上不带 `kind`。未知 `kind` 字面量同样
+  // 过滤不掉，一并拒绝（不认识 ≠ 可以跳过）。
+  const maybeOp = change as { kind?: unknown };
+  if (typeof maybeOp.kind === "string") {
+    if (!RESOURCE_OP_KINDS.has(maybeOp.kind)) {
+      throw new WorkspaceEditUnsupportedError(
+        "file-operation",
+        `unknown ResourceOp kind "${maybeOp.kind}"`
+      );
+    }
+    throw new WorkspaceEditUnsupportedError(
+      "file-operation",
+      `ResourceOp ${maybeOp.kind} (this tool set does not create, rename or delete files)`
+    );
+  }
+  const doc = change as {
+    textDocument?: { uri?: unknown };
+    edits?: unknown;
+  };
+  const uri = doc.textDocument?.uri;
+  if (typeof uri !== "string") {
+    throw new WorkspaceEditUnsupportedError(
+      "malformed-entry",
+      "documentChanges entry has no textDocument.uri"
+    );
+  }
+  return docEditsFor(uri, doc.edits);
+}
+
+/**
+ * 单 uri 的 edits 数组 → `TextDocumentEdit[]`（0 或 1 条）。`edits` 不是数组
+ * 或某条 `TextEdit` 形状非法 → typed 失败；**长度为 0 除外** —— 那是 server
+ * 的合法「没有可改的地方」，返回空列表（与「N 条全被丢弃」分道扬镳，后者
+ * 在丢弃点就抛了）。
+ */
+function docEditsFor(uri: string, edits: unknown): TextDocumentEdit[] {
+  if (!Array.isArray(edits)) {
+    throw new WorkspaceEditUnsupportedError(
+      "malformed-entry",
+      `edits for ${uri} is not a TextEdit array`
+    );
+  }
+  const textEdits = normalizeTextEdits(edits, uri);
+  return textEdits.length > 0
+    ? [{ textDocument: { uri }, edits: textEdits }]
+    : [];
+}
+
+/**
+ * 单文件 edits 归一。空数组是合法响应（server 可以说「没有可改的地方」），
+ * 返回空列表；任一条归一不了则整批 typed 失败 —— 抛在**吞点原地**，不让
+ * 坏 payload 继续旅行后被含糊报错。
+ */
+function normalizeTextEdits(
+  raw: ReadonlyArray<unknown>,
+  uri: string
+): ReadonlyArray<TextEdit> {
+  const out: TextEdit[] = [];
+  for (const item of raw) {
+    const textEdit = normalizeTextEdit(item);
+    if (!textEdit) {
+      throw new WorkspaceEditUnsupportedError(
+        "malformed-edit",
+        `TextEdit for ${uri} is not { range: {start,end}, newText: string }`
+      );
+    }
+    out.push(textEdit);
+  }
+  return out;
+}
+
+/** 单条 TextEdit 归一；形状非法 → `undefined`（由调用方转 typed 失败）。 */
+function normalizeTextEdit(raw: unknown): TextEdit | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
   const e = raw as {
     range?: { start?: LspPosition; end?: LspPosition };
     newText?: unknown;
@@ -222,16 +380,29 @@ function normalizeTextEdit(raw: unknown): TextEdit[] {
     !e.range.end ||
     typeof e.newText !== "string"
   ) {
-    return [];
+    return undefined;
   }
-  return [{ range: e.range as LspRange, newText: e.newText }];
+  const { start, end } = e.range;
+  // range 坐标形状也要守住：`{ line: "3" }` 之类会让 offsetFor 静默错位
+  //（NaN 下标 → 空串拼接），改名结果静默丢字符。
+  if (!isLspPosition(start) || !isLspPosition(end)) {
+    return undefined;
+  }
+  return { range: { start, end }, newText: e.newText };
+}
+
+function isLspPosition(v: unknown): v is LspPosition {
+  if (!v || typeof v !== "object") return false;
+  const p = v as { line?: unknown; character?: unknown };
+  return typeof p.line === "number" && typeof p.character === "number";
 }
 
 /** `DocumentSymbolNode.range` 的源类型只承诺 `start`；改工具需要 `end`
  *  构造完整 range。`SymbolInformation.location.range` 与 `DocumentSymbol.range`
  *  协议上都有 `start` + `end`，但 symbol-resolver.ts 用窄类型避免泄露给
  *  查询层（查询只要 selectionRange）。本工厂按协议信任 server payload，
- *  失败时由 normalizeTextEdit 那层兜底（缺 end → 丢弃）。 */
+ *  失败时由 normalizeTextEdit 那层兜底（缺 end → 该条形状非法，整批 typed
+ *  失败，见 WorkspaceEditUnsupportedError）。 */
 type NodeRange = { start?: LspPosition; end?: LspPosition };
 
 /** 把节点的全范围按协议组装。LSP DocumentSymbol.range 与
@@ -244,8 +415,9 @@ function assembleFullRange(
   return { start, end: end ?? start };
 }
 
-/** 按 uri 分组（同一文件多 edits 合并）。`fileURLToPath` 解不出 → 丢弃
- *  并记一条 stderr（best-effort；写盘失败再统一抛）。 */
+/** 按 uri 分组（同一文件多 edits 合并）。`fileURLToPath` 解不出 → typed
+ *  失败：那条 uri 的 edits 应用不了，跳过会让 workspace 停在「改了一半」，
+ *  与 T4 拒 file operation 同一条纪律（不部分应用）。 */
 function groupEditsByPath(
   edits: ReadonlyArray<TextDocumentEdit>
 ): Map<string, TextEdit[]> {
@@ -255,11 +427,14 @@ function groupEditsByPath(
     try {
       path = fileURLToPath(doc.textDocument.uri);
     } catch (err) {
+      // uri 形状合法、只是落不成文件路径（非 `file:` scheme 等）——归因与
+      // payload 损坏不同，单独一类：模型据此知道 server 给了它不认的 uri，
+      // 而不是这次响应坏了。
       const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(
-        `[symbol-mutate] invalid uri in WorkspaceEdit: ${doc.textDocument.uri} (${msg})\n`
+      throw new WorkspaceEditUnsupportedError(
+        "unresolvable-uri",
+        `${doc.textDocument.uri} is not a usable file URL: ${msg}`
       );
-      continue;
     }
     const list = grouped.get(path) ?? [];
     list.push(...doc.edits);
@@ -431,7 +606,12 @@ async function withResolvedSymbolForMutate<T>(
  * 失效 → 通过 `onEdit` 触发 notifier。
  *
  * **rename 冲突**：tsserver 返 `null` 表示存在冲突（如与同作用域已有
- * 标识符同名）；typed 失败串明确给模型可行动提示。 */
+ * 标识符同名）；typed 失败串明确给模型可行动提示。
+ *
+ * **不可应用的 WorkspaceEdit 片段**（plan `lsp-silent-degradation` T4）：
+ * file operation / 归一不了 `documentChanges` 条目 / 形状非法 `TextEdit` →
+ * `WorkspaceEditUnsupportedError` 上抛，**整体不应用**（旧实现静默 `continue`
+ * 加 `flatMap` 丢条目，能落成半套 rename 或空 `editCount` 的「成功」）。 */
 function makeRenameSymbolTool(
   ctx: LspCtx,
   onEdit: ((file: string) => void) | undefined,
@@ -484,8 +664,16 @@ function makeRenameSymbolTool(
                 `[${name}] cannot rename ${params.symbol_path} to "${params.new_name}" in ${params.file}: existing declarations would conflict (the language server rejected the rename)`
               );
             }
+            // 归一化在**吞点原地**抛 WorkspaceEditUnsupportedError（typed，
+            // 指出 file-operation / malformed-entry / malformed-edit）——
+            // 不部分应用，盘上零写入。**不上抛前转成成功回执**：executor 的
+            // 冒泡面才是「这次调用失败」的信号，转成字符串会让损坏响应读成
+            // 改名成功（本票要消灭的正是这种「失败看起来像成功」）。
             const docEdits = normalizeWorkspaceEdit(result);
             if (docEdits.length === 0) {
+              // 空 edits 是 LSP 合法响应（server 说「没有可改的地方」）：
+              // 成功 no-op，不是错误。损坏条目不会走到这里 —— 它们在归一化
+              // 里 typed 失败，不会与「server 说零条」合流。
               return stringifyResult({
                 renamed: true,
                 files: [],
