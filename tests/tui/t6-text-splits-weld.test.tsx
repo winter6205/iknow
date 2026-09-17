@@ -114,6 +114,145 @@ describe("T6 同消息内正文切开：思考 + 正文 + 安静工具 = 三段"
   });
 });
 
+describe("T6 思考 + 正文 + 噪音（grep）切开：grep 计数不写回 Thought for 标题", () => {
+  test("思考 → 正文 → grep（noise）：grep 走独立 called 行，不与思考焊接", async () => {
+    const messages: AnthropicNativeMessage[] = [
+      { role: "user", content: [{ type: "text", text: "查一下" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先想", signature: "s1" },
+          { type: "text", text: "中间正文" },
+          {
+            type: "tool_use",
+            id: "tu-g1",
+            name: "grep",
+            input: { path: "src", pattern: "TODO" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tu-g1",
+            content: "found 3 matches",
+            is_error: false,
+          },
+        ],
+      },
+    ];
+    const setup = await testRender(
+      <ChatView
+        session={sessionWith(messages, {
+          thinkingMs: [null, 9000, null],
+        })}
+        cols={COLS}
+        rows={ROWS}
+        liveToolLines={[]}
+        liveToolRuns={[]}
+        thinkingExpanded={false}
+      />,
+      { width: COLS, height: ROWS, exitOnCtrlC: false }
+    );
+    await setup.waitForVisualIdle();
+    const frame = setup.captureCharFrame();
+    const lines = frame.split("\n").map((l) => l.trim());
+    // 思考段：`Thought for 9s`（独立标题，不含 grep）
+    const thinkIdx = lines.findIndex((l) => l === "Thought for 9s");
+    expect(thinkIdx).toBeGreaterThanOrEqual(0);
+    expect(lines[thinkIdx]).not.toContain("grep");
+    // 正文存在
+    expect(frame).toContain("中间正文");
+    // grep 段：`called grep × 1`（独立、不与思考行合并）
+    const grepIdx = lines.findIndex((l) => l.includes("called grep × 1"));
+    expect(grepIdx).toBeGreaterThanOrEqual(0);
+    expect(grepIdx).toBeGreaterThan(thinkIdx);
+    // 不存在合并形 `Thought for 9s · grep × 1`
+    expect(frame).not.toContain("Thought for 9s · grep × 1");
+    expect(frame).not.toContain("Thought for 9s, called grep");
+    await setup.renderer.destroy();
+  });
+
+  test("思考 → web_search（signal）→ grep（noise）：web 不焊上思考标题，web 走 Search 实卡", async () => {
+    const messages: AnthropicNativeMessage[] = [
+      { role: "user", content: [{ type: "text", text: "查一下" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先想", signature: "s1" },
+          {
+            type: "tool_use",
+            id: "tu-w1",
+            name: "web_search",
+            input: { query: "iknow tui" },
+          },
+          {
+            type: "tool_use",
+            id: "tu-g1",
+            name: "grep",
+            input: { path: "src", pattern: "TODO" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tu-w1",
+            content: "search results",
+            is_error: false,
+          },
+          {
+            type: "tool_result",
+            tool_use_id: "tu-g1",
+            content: "found 3 matches",
+            is_error: false,
+          },
+        ],
+      },
+    ];
+    const setup = await testRender(
+      <ChatView
+        session={sessionWith(messages, {
+          thinkingMs: [null, 6500, null],
+        })}
+        cols={COLS}
+        rows={ROWS}
+        liveToolLines={[]}
+        liveToolRuns={[]}
+        thinkingExpanded={false}
+      />,
+      { width: COLS, height: ROWS, exitOnCtrlC: false }
+    );
+    await setup.waitForVisualIdle();
+    const frame = setup.captureCharFrame();
+    const lines = frame.split("\n").map((l) => l.trim());
+    // 思考段：`Thought for Ns`（独立标题，**绝不**含 web_search）
+    const thinkIdx = lines.findIndex((l) => /^Thought for \d+s$/.test(l));
+    expect(thinkIdx).toBeGreaterThanOrEqual(0);
+    // 标题纯度：`Thought for` 行不含 web_search
+    expect(lines[thinkIdx]).not.toContain("web_search");
+    // web_search 走实卡（`Search <query>`），独立成行
+    expect(frame).toContain("Search iknow tui");
+    const searchIdx = lines.findIndex((l) => l.includes("Search iknow tui"));
+    expect(searchIdx).toBeGreaterThanOrEqual(0);
+    expect(searchIdx).toBeLessThan(thinkIdx);
+    // 不存在把 web_search 焊上思考标题的合并形
+    const thinkLine = lines[thinkIdx];
+    expect(thinkLine).not.toContain("web_search");
+    expect(thinkLine).not.toContain("grep");
+    expect(frame).not.toContain("called web_search");
+    // grep 仍走独立 called 行
+    const grepIdx = lines.findIndex((l) => l.includes("called grep × 1"));
+    expect(grepIdx).toBeGreaterThanOrEqual(0);
+    expect(grepIdx).toBeGreaterThan(thinkIdx);
+    await setup.renderer.destroy();
+  });
+});
+
 describe("T6 跨消息：下一条 assistant 的思考流出现在已冻 stub 之下", () => {
   test("asst-1 settled + asst-2 live 思考：asst-2 的 Thinking… 在 asst-1 块标题之下", async () => {
     const messages: AnthropicNativeMessage[] = [

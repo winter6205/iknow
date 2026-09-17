@@ -60,7 +60,12 @@ import {
 } from "./tool-summary.js";
 import { clipOneLineVisual } from "./tool-summary.js";
 import { CompletedToolPreviewView } from "./completed-tool-preview-view.js";
-import { deriveSlot, settledColorToFg } from "./tool-settled.js";
+import {
+  deriveSlot,
+  isLiveNoise,
+  isLiveSignal,
+  settledColorToFg,
+} from "./tool-settled.js";
 import { MessageShell } from "./message-shell.js";
 import { Markdown } from "./markdown.js";
 import {
@@ -206,6 +211,109 @@ const SYSTEM_INTERRUPT_TEXT = "Interrupted by user.";
 /** 中断警示前缀（橙 running 色 + 方括号；人读过程行已废 `[思考]`/`[运行中]` 文案，
  *  本标记只服务中断警示自身，不随过程行改名）。 */
 const SYSTEM_INTERRUPT_MARK = "[已打断]";
+
+/** tool_use 块渲染（live-signal revision #3/#4）：
+ *  - live noise（isLiveNoise 且未失败）→ 不渲染（活动块承接，过程块锁句 6）
+ *  - 失败 → 走 failure overlay（保留标题 + 单行短错误）
+ *  - web_search / web_fetch → 实卡：settled 后仍渲标题（`Search <q>` /
+ *    `Fetch <url>`），TOOL_SETTLED_CLASS 仍归 retract 但 slot.showTitle 假 →
+ *    用 `isWebTool && !failed` 兜底放开
+ *  - 其余 retract / keep → 消费 deriveSlot
+ *  返回 null 时 ChatView 不挂节点。
+ */
+type ToolUseView = {
+  readonly showTitle: boolean;
+  readonly showPreview: boolean;
+  readonly errorLine: string;
+  readonly preview: CompletedToolPreview;
+  readonly resultPreview: ResultPreview;
+};
+
+/** 派生 tool_use 渲染决策（纯数据，无 React）。
+ *  EXIT: live noise 非失败 → 整块不挂（活动块独占）。 */
+function resolveToolUseView(
+  block: ToolUseBlock,
+  statusMap: ReadonlyMap<string, boolean>,
+  resultTextMap: ReadonlyMap<string, string> | undefined,
+  innerCols: number
+): ToolUseView | null {
+  const failed = statusMap.get(block.id) === true;
+  if (!failed && isLiveNoise(block.name)) {
+    return null;
+  }
+  const settled = statusMap.has(block.id);
+  const slot = deriveSlot(block.name, { running: !settled, failed });
+  // live signal 的 web 子集落定也留标题（查询 / URL 一行）；名单引用
+  // `isLiveSignal` 单源，不在此再列工具名。
+  const showTitle = slot.showTitle || (isLiveSignal(block.name) && !failed);
+  const { preview, resultPreview, hasPreviewContent } = resolveToolUsePreviews(
+    block,
+    settled,
+    resultTextMap
+  );
+  const showPreview = slot.showPreview && hasPreviewContent;
+  const errorLine =
+    failed && showTitle
+      ? clipErrorLine(
+          failureTextOf(block.name, resultTextMap?.get(block.id)),
+          innerCols
+        )
+      : "";
+  return { showTitle, showPreview, errorLine, preview, resultPreview };
+}
+
+function resolveToolUsePreviews(
+  block: ToolUseBlock,
+  settled: boolean,
+  resultTextMap: ReadonlyMap<string, string> | undefined
+): {
+  readonly preview: CompletedToolPreview;
+  readonly resultPreview: ResultPreview;
+  readonly hasPreviewContent: boolean;
+} {
+  const preview: CompletedToolPreview = settled
+    ? completedToolPreview(block.name, block.input)
+    : { kind: "empty" };
+  const resultPreview: ResultPreview = settled
+    ? resultToolPreview(block.name, block.input, {
+        resultText: resultTextMap?.get(block.id),
+      })
+    : { kind: "empty" };
+  const hasPreviewContent =
+    preview.kind !== "empty" || resultPreview.kind !== "empty";
+  return { preview, resultPreview, hasPreviewContent };
+}
+
+function renderToolUseBlock(args: {
+  readonly block: ToolUseBlock;
+  readonly statusMap: ReadonlyMap<string, boolean>;
+  readonly resultTextMap?: ReadonlyMap<string, string>;
+  readonly innerCols: number;
+}): ReactNode {
+  const { block, statusMap, resultTextMap, innerCols } = args;
+  const view = resolveToolUseView(block, statusMap, resultTextMap, innerCols);
+  if (view === null) return null;
+  if (!view.showTitle && !view.showPreview) return null;
+  return (
+    <box flexDirection="column">
+      {view.showTitle && (
+        <ToolSummaryRow tu={block} statusMap={statusMap} cols={innerCols} />
+      )}
+      {view.errorLine !== "" && (
+        <text fg={tuiPalette.error} wrapMode="none">
+          {view.errorLine}
+        </text>
+      )}
+      {view.showPreview && (
+        <ToolPreviewRows
+          preview={view.preview}
+          resultPreview={view.resultPreview}
+          cols={innerCols}
+        />
+      )}
+    </box>
+  );
+}
 
 /** 完整消息渲染（保留 Markdown 全功能 + tool_use 摘要 + thinking 折叠面板）。
  *
@@ -406,62 +514,15 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
         )
       );
     } else if (block.type === "tool_use") {
-      // D7（spec specs/tui-tool-settled-appearance.md）：渲染只消费 slot。
-      // 落定态（statusMap 已配对 = idle 历史）：标题 iff showTitle、预览 iff
-      // showPreview —— retract 标题与预览同假（核保证，渲染不再复活）；
-      // 未配对（running 态 / cancelled）沿用 live 行为：标题行可见。
-      const failed = statusMap.get(block.id) === true;
-      const slot = statusMap.has(block.id)
-        ? deriveSlot(block.name, { running: false, failed })
-        : deriveSlot(block.name, { running: true, failed: false });
-      const preview: CompletedToolPreview = statusMap.has(block.id)
-        ? completedToolPreview(block.name, block.input)
-        : { kind: "empty" };
-      const resultPreview: ResultPreview = statusMap.has(block.id)
-        ? resultToolPreview(block.name, block.input, {
-            resultText: props.resultTextMap?.get(block.id),
-          })
-        : { kind: "empty" };
-      const hasPreviewContent =
-        preview.kind !== "empty" || resultPreview.kind !== "empty";
-      const showTitle = slot.showTitle;
-      const showPreview = slot.showPreview && hasPreviewContent;
-      // D5：失败一行短错误 —— 长回执（如 `[worktree_isolation]`）截成单行,
-      // 不以 dim ⎿ 结果预览块堆长文（showPreview 由核置假）。
-      const errorLine =
-        failed && showTitle
-          ? clipErrorLine(
-              failureTextOf(block.name, props.resultTextMap?.get(block.id)),
-              innerCols
-            )
-          : "";
-      if (!showTitle && !showPreview) return;
-      nodes.push(
-        withBlockSpacing(
-          `u${i}`,
-          <box key={`u${i}-inner`} flexDirection="column">
-            {showTitle && (
-              <ToolSummaryRow
-                tu={block}
-                statusMap={statusMap}
-                cols={innerCols}
-              />
-            )}
-            {errorLine !== "" && (
-              <text fg={pal.error} wrapMode="none">
-                {errorLine}
-              </text>
-            )}
-            {showPreview && (
-              <ToolPreviewRows
-                preview={preview}
-                resultPreview={resultPreview}
-                cols={innerCols}
-              />
-            )}
-          </box>
-        )
-      );
+      const node = renderToolUseBlock({
+        block,
+        statusMap,
+        resultTextMap: props.resultTextMap,
+        innerCols,
+      });
+      if (node !== null) {
+        nodes.push(withBlockSpacing(`u${i}`, node));
+      }
     }
   });
   if (nodes.length === 0) return null;

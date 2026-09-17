@@ -1531,8 +1531,14 @@ test("T3 相邻 keep 卡之间空一行：同消息两条成功 bash 标题不�
       }
       resultTextMap={
         new Map([
-          ["tu-gap-a", JSON.stringify({ code: 0, stdout: stdout(2), stderr: "" })],
-          ["tu-gap-b", JSON.stringify({ code: 0, stdout: stdout(2), stderr: "" })],
+          [
+            "tu-gap-a",
+            JSON.stringify({ code: 0, stdout: stdout(2), stderr: "" }),
+          ],
+          [
+            "tu-gap-b",
+            JSON.stringify({ code: 0, stdout: stdout(2), stderr: "" }),
+          ],
         ])
       }
     />,
@@ -1614,6 +1620,95 @@ test("D7 成功 retract：read_file 落定后标题与预览同假（内容不�
   expect(frame.includes("⎿")).toBe(false);
   // 也不应泄露模型面 tool_result 文本
   expect(frame.includes("x".repeat(50))).toBe(false);
+  await setup.renderer.destroy();
+});
+
+// live-signal revision：web_search / web_fetch 落定后走实卡 —— MessageBlocks
+// 抽出标题行 `Search <query>` / `Fetch <url>`。已注册 retract 其它名（read_file）
+// 仍按 D7 走「标题与预览同假」。
+
+test("live-signal revision: web_search 落定 → 标题 'Search <query>' 可见", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-ws",
+            name: "web_search",
+            input: { query: "今天的AI新闻" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-ws", false]])}
+      resultTextMap={new Map([["tu-ws", "结果一 / 结果二"]])}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 实卡：标题 = `Search <query>` 可见（formatToolStatusLine 单源）。
+  expect(frame).toContain("Search");
+  expect(frame).toContain("今天的AI新闻");
+  // 落定后 preview 槽 = empty（不摊长文，specs revision #4）。
+  expect(frame.includes("⎿")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("live-signal revision: web_fetch 落定 → 标题 'Fetch <url>' 可见", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-wf",
+            name: "web_fetch",
+            input: { url: "https://example.com" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-wf", false]])}
+      resultTextMap={new Map([["tu-wf", "page body"]])}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("Fetch");
+  expect(frame).toContain("https://example.com");
+  expect(frame.includes("⎿")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("live-signal revision: 已注册 retract (read_file) 仍被抽掉，不出标题", async () => {
+  // 守住 D7 合同：除 web_search / web_fetch 外的 retract 名仍走
+  // 「标题与预览同假」路径（不被 live-signal revision 改写）。
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-rf2",
+            name: "read_file",
+            input: { path: "a.ts" },
+          },
+        ],
+      }}
+      cols={COLS}
+      statusMap={new Map([["tu-rf2", false]])}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame.includes("read_file")).toBe(false);
   await setup.renderer.destroy();
 });
 

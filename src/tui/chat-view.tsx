@@ -80,7 +80,7 @@ import {
   type ViewportMountWindow,
 } from "./transcript-viewport.js";
 import { orderedTurnActivitySegments, toolUseIdsOf } from "./turn-activity.js";
-import { deriveSlot } from "./tool-settled.js";
+import { isLiveNoise } from "./tool-settled.js";
 import { TranscriptBanner } from "./transcript-banner.js";
 import { MessageRow, messageSegmentsOfVisible } from "./message-row.js";
 import {
@@ -91,7 +91,6 @@ import {
 import {
   buildActivityBlockFoldLines,
   makeThinkingMsAtVisibleFromSource,
-  shouldShowLiveThinkingPanel,
   type FoldLinesBySegmentIndex,
   type ShownThinkingMsValues,
   type ThinkingMsAtVisible,
@@ -270,16 +269,29 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     // 的 slot；未配对（live running / cancelled）不进计数。
     // `useMemo` 包裹：闭包每 render 都是新引用，下面 `activitySegments` 的
     // useMemo 依赖它，没稳定就每次 render 都重算。
+    // 有意不复用 `deriveSlot(...).inFoldCount`（SSOT 分叉声明）：本 resolver
+    // 消费的是**块计数口径** —— live-signal revision #3/#8 把「未配对 =
+    // 仍 running 的 noise」也算入（history 里仍在跑的噪音要 calling），
+    // 而 `deriveSlot` 是**卡片 slot 口径**（未配对 = running 卡）。两口径
+    // 在未配对上不同是合同要求，不是漂移；`isLiveNoise` 是两边共享的
+    // 类判定单源。
     const inFoldCountOf = useMemo(
       () =>
         (
           call: Readonly<{ readonly id: string; readonly name: string }>
-        ): boolean =>
-          statusMap.has(call.id) &&
-          deriveSlot(call.name, {
-            running: false,
-            failed: statusMap.get(call.id) === true,
-          }).inFoldCount,
+        ): boolean => {
+          // live-signal revision #3/#4：只数 live noise（spec Never「不另
+          // 造第二套分类表」）。web_search / web_fetch 永不进 `calling`/
+          // `called`：TOOL_SETTLED_CLASS 仍归 retract（计数口径不变），
+          // 但 live signal 实卡路径不走块计数。
+          if (isLiveNoise(call.name)) {
+            if (!statusMap.has(call.id)) return true; // 未配对 = running
+            return (
+              statusMap.get(call.id) !== true // 失败横切
+            );
+          }
+          return false;
+        },
       [statusMap]
     );
     // D3 (tui-display-consistency):折叠作用于每一轮历史 —— 不再切片到
@@ -308,6 +320,15 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     // 走 `deriveActivityBlocks` 派生，结果按 messageIndex 分组直接喂 MessageRow。
     // `visibleStart` 之前的历史 assistant 不参与活动投影；本切片以 visibleStart=0
     // 起算（与 activitySegments 同源）。
+    //
+    // T4 live-signal revision：思考正文活在 unanchored 活动块的正文槽里 —
+    // — ThinkingPanel 组件已退役；liveThinking 闸恢复「draft 非空」语义。
+    // 任意 tool running（含同一 burst 内后续工具）不再关思考 —— 锁句 7。
+    // 抽到函数外：父组件 cc 由 11 → 9（避免触碰 s5 hard gate）。
+    const liveThinking = liveThinkingFromDraft(
+      running,
+      props.thinkingDraftMasked
+    );
     const activityBlockFoldLines = useMemo(
       () =>
         buildActivityBlockFoldLines({
@@ -315,24 +336,19 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           visibleStart: 0,
           visibleCount: visibleMessages.length,
           thinkingMsAtVisible,
-          liveRuns: turnLiveRuns,
-          // T7（specs/tui-activity-block.md / plans T7）：live 思考块只在
-          // 真正 running 时落入 unanchored —— 旧 unit fold / live activity
-          // group 双时态下 idle + thinkingDraft 会触面板整体不消失（活动
-          // 块 spec 下统一行为：idle 后 thinkingMs 由历史消息落盘接手，
-          // 不留 live 思考槽）。
-          liveThinking:
-            running &&
-            props.thinkingDraftMasked !== undefined &&
-            props.thinkingDraftMasked.length > 0,
+          // 已进 transcript 的 tool_use 仍可能 running：必须把完整 liveRuns
+          // 交给派生（resolveLiveRunning）。unanchored 追加在 derive 内排除
+          // 历史 id，避免 calling 双画。tail 卡仍用 turnLiveRuns。
+          liveRuns: liveToolRuns,
+          liveThinking,
           inFoldCountOf,
         }),
       [
         visibleMessages,
         thinkingMsAtVisible,
-        turnLiveRuns,
-        props.thinkingDraftMasked,
+        liveToolRuns,
         inFoldCountOf,
+        liveThinking,
       ]
     );
     // 块覆盖的 ms 值集合（hideThinking 双门用）。T7：旧 `foldLinesBySegmentIndex`
@@ -349,11 +365,8 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       []
     );
     // 细节槽 / 过程组：收类件进过程组计数，running 件占据唯一细节槽，其余逐条。
-    const showThinkingPanel = shouldShowLiveThinkingPanel({
-      running,
-      thinkingDraft: deferredThinkingDrafts,
-      toolRunning: turnLiveRuns.some((run) => run.status === "running"),
-    });
+    // T4 live-signal：ThinkingPanel 已退役（思考活在 unanchored 块正文槽）。
+    // 此处不再派生 `showThinkingPanel`，TranscriptTail 也不再接受该 prop。
     // T7（specs/tui-activity-block.md / plans T7）：过程块（unanchoredBlocks）
     // 取代旧 `live activity group` 双时态 —— `formatLiveActivitySummary` /
     // `splitLiveActivityRuns` 不再被生产代码调用；同批 retract 只在块 called
@@ -385,7 +398,6 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         tailSlots={tailSlots}
         renderLiveRuns={renderLiveRuns}
         deferredThinkingDrafts={deferredThinkingDrafts}
-        showThinkingPanel={showThinkingPanel}
         liveToolLines={props.liveToolLines}
         askLine={props.askLine}
         crunchedSeconds={props.crunchedSeconds ?? 0}
@@ -537,7 +549,6 @@ function ChatScrollbox(props: {
   readonly tailSlots: ReadonlyArray<TailSlotDecision>;
   readonly renderLiveRuns: (runs: ReadonlyArray<LiveToolRun>) => ReactNode;
   readonly deferredThinkingDrafts: string;
-  readonly showThinkingPanel: boolean;
   readonly liveToolLines: ReadonlyArray<string>;
   readonly askLine: string | undefined;
   readonly crunchedSeconds: number;
@@ -607,11 +618,23 @@ function ChatScrollbox(props: {
         renderLiveRuns={props.renderLiveRuns}
         deferredThinkingDrafts={props.deferredThinkingDrafts}
         thinkingExpanded={props.thinkingExpanded}
-        showThinkingPanel={props.showThinkingPanel}
         liveToolLines={props.liveToolLines}
         askLine={props.askLine}
         unanchoredBlocks={props.unanchoredBlocks}
       />
     </scrollbox>
+  );
+}
+
+/** 思考在流判定：draft 非空 + turn 进行中 —— 锁句 7 之后该闸不再受
+ *  tool running 影响，迁到纯函数避免父组件 cc 越过 s5 hard gate。 */
+function liveThinkingFromDraft(
+  running: boolean,
+  thinkingDraftMasked: string | undefined
+): boolean {
+  return (
+    running &&
+    thinkingDraftMasked !== undefined &&
+    thinkingDraftMasked.length > 0
   );
 }

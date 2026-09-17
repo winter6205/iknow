@@ -619,16 +619,17 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       "mixed-order-window"
     );
     const frame = app.setup.captureCharFrame();
-    // (a) web_search 走 unanchored 块：块标题 + 预览槽（detail 为空 → 裸工具名）。
-    expect(frame).toContain("calling web_search × 1");
+    // live-signal revision #4：web_search 走 live signal 实卡 —— 不再
+    // 出 `calling web_search × 1` 块标题；tail 卡 = `web_search · Search …`。
+    expect(frame.includes("calling web_search × 1")).toBe(false);
     expect(frame).toContain("web_search · Search");
     // (b) bash keep 类走 tail 工具卡，过程行 = `Running 1 shell command…`。
     expect(frame).toContain("Running 1 shell command…");
     // 草稿文本在帧里可见。
     expect(frame).toContain("order-probe-draft");
-    // unanchored 块（web_search）先出现：早 retract 件的标题在帧早期位
-    // 置，keep bash 的过程行与草稿同 epoch —— 两者都在 unanchored 之后。
-    const iEarly = frame.indexOf("calling web_search × 1");
+    // tail 卡（web_search）先出现：live signal 件的过程行在帧早期位置，
+    // keep bash 的过程行与草稿同 epoch —— 两者都在 tail 卡之后。
+    const iEarly = frame.indexOf("web_search · Search");
     const iDraft = frame.indexOf("order-probe-draft");
     const iLate = frame.indexOf("Running 1 shell command…");
     expect(iEarly).toBeGreaterThanOrEqual(0);
@@ -706,8 +707,9 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       "two-segment-order-window"
     );
     const frame = app.setup.captureCharFrame();
-    // unanchored 块先出现，两段草稿 + bash 都在块之后。
-    const iEarly = frame.indexOf("calling web_search × 1");
+    // live-signal revision #4：web_search tail 卡先出现（`web_search · Search`），
+    // 两段草稿 + bash 都在 tail 卡之后。
+    const iEarly = frame.indexOf("web_search · Search");
     const iFirst = frame.indexOf("order-seg-one");
     const iLate = frame.indexOf("Running 1 shell command…");
     const iSecond = frame.indexOf("order-seg-two");
@@ -717,9 +719,11 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     expect(iSecond).toBeGreaterThanOrEqual(0);
     expect(iEarly).toBeLessThan(iFirst);
     expect(iEarly).toBeLessThan(iSecond);
-    // 两段草稿与 bash 都在 unanchored 之后；同一帧里不丢件。
+    // 两段草稿与 bash 都在 tail 卡之后；同一帧里不丢件。
     expect(iFirst).toBeGreaterThanOrEqual(0);
     expect(iSecond).toBeGreaterThanOrEqual(0);
+    // web_search 不进块标题。
+    expect(frame.includes("calling web_search × 1")).toBe(false);
 
     await app.destroy();
   }, 30_000);

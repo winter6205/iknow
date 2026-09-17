@@ -1,5 +1,7 @@
 # Plan: TUI activity block
 
+**Successor:** live「安静 = 全 retract」已由 `plans/tui-activity-block-live-signal.md` supersede；块两态 / 正文槽 / 切开仍以本文件 + spec 为准。
+
 **Goal:** TUI 过程 chrome 按模型消息切成过程块：思考实时占正文槽，安静工具接手后改占同一槽的浅色预览，中间正文切开焊接，块与块只追加不合。
 **Approach:** 先把访谈锁句写入 spec 与 CONTEXT（替换现行「unit fold + live activity group 双时态」）。再做一个纯派生（消息 + live runs → 块列表），用垂直切片接上思考-only、安静工具接手、中间正文切开、下一条消息新块；最后拆掉旧双摘要器互斥。Ctrl+O 展开、改 keep/accent/失败分类表、改 thinkingMs 落盘算法，均不在本计划。
 **Spec link:** `specs/tui-activity-block.md`（T1 产出；落地前本计划的 Locked sentences 为 Inherits 源）

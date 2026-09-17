@@ -28,7 +28,7 @@
  *    展示层事件不应破坏权威状态）。
  *  - 纯函数 + Object.freeze 纪律，与 session-state.ts 同源。
  */
-import { settledClassOf } from "./tool-settled.js";
+import { isLiveNoise } from "./tool-settled.js";
 import { formatLiveToolEvent, formatToolStatusLine } from "./tool-summary.js";
 
 export type LiveToolStatus = "running" | "ok" | "failed";
@@ -188,14 +188,14 @@ export function liveTailSlots(
   runs: ReadonlyArray<LiveToolRun>,
   segments: ReadonlyArray<string>
 ): ReadonlyArray<LiveTailSlot> {
-  // 先剥掉非失败的 retract 类（读 / 搜索）—— 它们由 unanchored 块承接。
+  // 先剥掉 live noise —— 它们由 unanchored 块承接（specs live-signal
+  // revision #3）。web_search / web_fetch 不再算 noise，所以这里**保留**到
+  // tail（它们走实卡，running 时由 live-tool-preview 画出标题行）。
   // 失败件不进块（spec S4「失败横切」），仍走 tail `liveToolRunsBox` 的
-  // `[失败]` 行。判定必须走 `settledClassOf` 单一来源（specs/tui-activity-block.md
-  // Never「不另造第二套分类表」；与 `appendLiveBlocks` 同一 SSOT）：固定名
-  // Set 会漏掉表外 retract 名（web_fetch / memory_recall / lsp_* …）导致
-  // 块与 tail 双画。见 spec S6「同批 retract 只在块 called 计数出现一次」。
+  // `[失败]` 行。判定走 `isLiveNoise` 单一来源（specs/tui-activity-block.md
+  // Never「不另造第二套分类表」；与 `appendLiveBlocks` 同一 SSOT）。
   const tailRuns = runs.filter(
-    (r) => r.status === "failed" || settledClassOf(r.name) !== "retract"
+    (r) => r.status === "failed" || !isLiveNoise(r.name)
   );
   const maxEpoch = Math.max(
     0,

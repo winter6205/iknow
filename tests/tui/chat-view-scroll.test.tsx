@@ -1258,17 +1258,21 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("Thought for 12s");
-  // T4–T7（specs/tui-activity-block.md S5）：跨消息不合并 —— 两个
-  // web_search 分别在两条 assistant 消息（index 1 / 3），按新合同各自
-  // 落块标题 `called web_search × 1`，不聚成 `web_search × 2`。
-  expect(frame).toContain("called web_search × 1");
-  expect(frame).not.toContain("web_search × 2");
-  expect(frame).not.toContain("Thought for 12s · web_search × 2");
+  // live-signal revision #4：web_search / web_fetch 走实卡 —— 块标题
+  // 不出现 `called web_search × 1` 计数；实卡 `Search <query>` 在 MessageBlocks
+  // 抽出（formatToolStatusLine 单源）。该断言替换旧「called web_search × 1」。
+  expect(frame.includes("called web_search × 1")).toBe(false);
+  expect(frame.includes("calling web_search × 1")).toBe(false);
+  expect(frame).toContain("Search");
+  expect(frame).toContain("今天的AI新闻");
   // assistant 文本经 Markdown 渲染 + 盘古之白：今天的AI → 今天的 AI。
   expect(frame).toContain("以下是今天的 AI 新闻摘要");
   expect(frame.includes("[完成] web_search")).toBe(false);
   const lines = frame.split("\n");
-  const iFold = lines.findIndex((l) => l.includes("called web_search × 1"));
+  // live-signal revision：折叠锚点从 `called web_search × 1` 改为
+  // 实卡标题 `Search` —— web_search 不进计数，折叠行无 web_* 子项，
+  // 块标题只剩 `Thought for 12s` 一行（末条 assistant 的 thinkingMs）。
+  const iFold = lines.findIndex((l) => l.includes("Thought for 12s"));
   const iText = lines.findIndex((l) => l.includes("以下是今天的 AI 新闻摘要"));
   expect(iFold).toBeGreaterThanOrEqual(0);
   expect(iText).toBeGreaterThanOrEqual(0);

@@ -1,6 +1,7 @@
 # Spec: tui-activity-block — TUI 过程块（思考与安静工具共用正文槽）
 
 > 输入 = `plans/tui-activity-block.md`（ACR 5/5 yes；访谈锁句 8 条；本 worktree 随 plan persist flush 落 `docs/CONTEXT.md`）。
+> 修订 = `plans/tui-activity-block-live-signal.md`（锁句 1–9；supersede「live 安静 = 全 retract」，锁定 **live noise vs live signal** 划分与 `web_search` / `web_fetch` 实卡；本文件 Locked sentences 为现行合同，Live-signal revision 章为修订层）。
 > 范围 = TUI 过程 chrome 按 assistant 消息切成**过程块**；纯派生模块产出块列表，ChatView 只消费；不改 Ctrl+O、不改 `thinkingMs` 落盘、不改 harness 工具形状、不改 web。
 > 落地 = T1 本 spec → T3–T7 实施（TDD）→ code-review → verification-before-completion。
 
@@ -42,6 +43,28 @@
 | 工具 running 即关思考 panel，且思考行仍可提前出现         | ChatView 互斥闸（`hideThinking` / 整轮 running） | `hideThinking` 只跟**过程块槽位主人**走；已冻 stub 不关下一块的思考槽   |
 
 **不授权**（本切片明确排除）：Ctrl+O 展开、改 `thinkingMs` 落盘算法、改 keep / accent / 失败分类表、改 CLI 非 TUI 面、改 web。
+
+## Live-signal revision（plans/tui-activity-block-live-signal.md 锁句 1–9）
+
+修订层取代「live 安静 = 现 retract 整表折进过程块」：**live 谁进过程块** 改问 live noise / live signal 划分（settled 面的 retract 计数不变）。锁定句如下，与上文八句冲突时以本节为准：
+
+1. 思考永远画在它驱动的那批动作**上面**；该段思考结束（`text_delta` 或任何 `tool_call_start`）后，**原位**变成 `Thought for Ns`，不跳到 tail panel。
+2. 过程块正文槽同一时刻只归：仍在流的思考，或当前一次**噪音**的 dim 预览。有语义工具不占这个槽。
+3. **live noise（实时噪音）** 才进过程块：`grep` / `glob` / `read_file` / 列举与内部查询（`tool_search`、list MCP、多数 LSP 扫、`memory_recall`、`bash_output` 等既有 retract 侦察）。未注册名缺省仍当噪音。
+4. **live signal（实时有语义）** 永不进 `calling`/`called`：既有 keep / accent / 失败，外加 **`web_search` / `web_fetch`**。live 与落定都留一行标题；search/fetch 的查询或 URL 用一行 dim 预览，不摊长文。
+5. 相邻焊接只发生在「思考 + 噪音」之间（中间无正文、无有语义工具、无失败）。`Thought for` 不准焊上 `web_search` 计数。
+6. 仅噪音、无思考：可以只有 `calling`/`called` 行。仅有语义工具、无噪音：只有 `Thought for`（若有秒数）+ 实卡，**不出现**空的 `calling`。
+7. `hideThinking` 只藏已不当槽主的思考正文；不准掐 assistant 正文，不准用「任意 tool running」关下一块思考。
+8. 保留未提交漏计：噪音已进 transcript 但仍 running → 块为 `calling` + 预览；unanchored 按 id 去重。MessageBlocks 只抽掉**噪音**的独立标题，不抽 web_* / keep。
+9. Ctrl+O、思考 peek 行数、改 `thinkingMs` 落盘，本切片不做。
+
+| 被取代行为                                             | 现行落点                                 | 取代后                                                      |
+| ------------------------------------------------------ | ---------------------------------------- | ----------------------------------------------------------- |
+| 「live 安静 = 现 retract」整表折进过程块               | 派生把全部 retract 进 `calling`/`called` | 只有 live noise 进块；`web_search` / `web_fetch` 实卡       |
+| `web_search` / `web_fetch` 当 retract 整体收           | `TOOL_SETTLED_CLASS` 内 web_* = retract  | settled 仍 retract 计数口径；live 实卡 + 查询/URL 一行 dim  |
+| `liveThinking: false` / 任意 tool running 关思考 panel | chat-view.tsx（hotfix 临时态）           | 思考槽位主权：只有正文或工具出现才原位收秒；stub 不关下一段 |
+
+**不授权**（修订层排除）：Ctrl+O、思考 peek 行数、改 `thinkingMs` 落盘、给 `read_file` 摊正文、恢复 `web_search` 计数焊进思考标题。
 
 ## Tech Stack
 

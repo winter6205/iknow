@@ -353,35 +353,46 @@ describe("liveTailSlots 按 epoch 交错工具与草稿段", () => {
     ]);
   });
 
-  test("retract 名被剥掉 → 不进 tail（由 unanchored 块承接）", () => {
-    // T7：read_file / web_search / grep 等 retract 类**只**进 unanchored
-    // 块，不进 tail 工具卡。失败件（status=failed）作为例外仍走 tail
-    // `[失败]` 行。
-    const retract = run("r", "web_search");
+  test("live noise 名被剥掉 → 不进 tail（由 unanchored 块承接）", () => {
+    // live-signal revision #3：只有 live noise（grep / read_file / glob /
+    // memory_recall / lsp_* / 未注册名）由 unanchored 块承接。web_search /
+    // web_fetch 不再算 noise → 走 tail 实卡（live signal）。失败件
+    // （status=failed）作为例外仍走 tail `[失败]` 行。
+    const noise = run("n", "grep");
+    const liveSignal: LiveToolRun = {
+      id: "ls",
+      name: "web_search",
+      status: "running",
+      input: undefined,
+    };
     const failedRetract: LiveToolRun = {
       id: "fr",
       name: "grep",
       status: "failed",
       input: undefined,
     };
-    const slots = liveTailSlots([retract, failedRetract], ["hi"]);
+    const slots = liveTailSlots([noise, liveSignal, failedRetract], ["hi"]);
     expect(slots).toEqual([
-      { kind: "tools", runs: [failedRetract] },
+      { kind: "tools", runs: [liveSignal, failedRetract] },
       { kind: "draft", text: "hi" },
     ]);
   });
 
-  test("表外 retract 名同样被剥 —— 判定走 settledClassOf 单一来源", () => {
-    // T7 修复（review H1）：剥除判定不得用固定名 Set —— TOOL_SETTLED_CLASS
-    // 的 retract 类含 web_fetch / memory_recall / glob / lsp_* 等表外名，
-    // 若按名硬编码会漏剥 → 块与 tail 双画（specs/tui-activity-block.md
-    // Never「不另造第二套分类表」）。本用例钉住：任意 settledClassOf ===
-    // "retract" 的名（含注册表内非著名成员与未注册兜底名）都进块不进 tail。
-    const offRegistry = run("o1", "web_fetch");
+  test("表外 noise 名同样被剥 —— 判定走 isLiveNoise 单一来源", () => {
+    // live-signal revision：剥除判定走 `isLiveNoise` 单一来源，不
+    // 用固定名 Set —— TOOL_SETTLED_CLASS 的 retract 类含 memory_recall /
+    // glob / lsp_* / 未注册兜底名都属 live noise，按名硬编码会漏剥 →
+    // 块与 tail 双画（specs/tui-activity-block.md Never「不另造第二套
+    // 分类表」）。web_fetch 算 live signal，不被剥。
+    const offRegistry = run("o1", "memory_recall");
     const unregistered = run("o2", "some_unregistered_tool");
     const lsp = run("o3", "lsp_references");
+    const webFetch = run("o4", "web_fetch");
     const keepBash = run("k", "bash");
-    const slots = liveTailSlots([offRegistry, unregistered, lsp, keepBash], []);
-    expect(slots).toEqual([{ kind: "tools", runs: [keepBash] }]);
+    const slots = liveTailSlots(
+      [offRegistry, unregistered, lsp, webFetch, keepBash],
+      []
+    );
+    expect(slots).toEqual([{ kind: "tools", runs: [webFetch, keepBash] }]);
   });
 });

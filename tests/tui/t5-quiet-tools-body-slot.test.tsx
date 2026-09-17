@@ -31,7 +31,8 @@ const ROWS = 36;
 
 function sessionWith(
   msgs: ReadonlyArray<AnthropicNativeMessage>,
-  thinkingMs: ReadonlyArray<number | null>
+  thinkingMs: ReadonlyArray<number | null>,
+  runState: TuiSessionState["runState"] = "idle"
 ): TuiSessionState {
   const file: SessionFileV1 = {
     schemaVersion: 1,
@@ -45,7 +46,7 @@ function sessionWith(
     sanitized_at: "2026-09-15T00:00:00.000Z",
     thinkingMs,
   };
-  return attachSession(file);
+  return { ...attachSession(file), runState };
 }
 
 describe("T5 安静工具 settled：called + 预览消失", () => {
@@ -104,12 +105,44 @@ describe("T5 安静工具 settled：called + 预览消失", () => {
 });
 
 describe("T5 live running 安静工具：calling + 一行 dim 预览", () => {
-  test("live run.status=running → 标题 `calling name × N` + 预览槽 formatRunningToolLine", async () => {
-    // 已落定的 history（read_file 完成）+ live 阶段的 running web_search
-    // → 第二块为 live 块：标题 `called read_file × 1`（历史已 settle），
-    // 第三块（live anchor 在 messages.length 处）以 unanchoredBlocks 进 tail
-    // 路径 —— 本测试只验证 unanchored 渲染路径（tail 不在本切片范围）。
-    // 改为：纯 live 场景（messages 全 settled，liveToolRuns 给一个 running）。
+  test("live run.status=running noise (grep) → 标题 `calling grep × 1` + 预览槽", async () => {
+    // specs live-signal revision #3：grep 仍属 live noise → 进 unanchored
+    // 块（块标题 + 预览槽）。本测试钉「noise 仍走原 calling 路径」。
+    const messages: AnthropicNativeMessage[] = [
+      { role: "user", content: [{ type: "text", text: "搜一下" }] },
+    ];
+    const liveRuns: ReadonlyArray<LiveToolRun> = [
+      {
+        id: "tu-g1",
+        name: "grep",
+        status: "running",
+        input: { pattern: "foo" },
+      },
+    ];
+    const setup = await testRender(
+      <ChatView
+        session={sessionWith(messages, [null])}
+        cols={COLS}
+        rows={ROWS}
+        liveToolLines={[]}
+        liveToolRuns={liveRuns}
+        thinkingExpanded={false}
+      />,
+      { width: COLS, height: ROWS, exitOnCtrlC: false }
+    );
+    await setup.waitForVisualIdle();
+    const frame = setup.captureCharFrame();
+    // noise 仍走 calling 路径。
+    expect(frame).toContain("calling grep × 1");
+    const expectedPreview = formatRunningToolLine(liveRuns[0]!);
+    expect(frame).toContain(expectedPreview);
+    await setup.renderer.destroy();
+  });
+
+  test("live run.status=running web_search → 'Search' 实卡一行 dim，NOT 在块标题里", async () => {
+    // specs live-signal revision #4：web_search / web_fetch 走实卡 —
+    // 块标题不出现 `calling web_search`，但 `formatRunningToolLine` 产出的
+    // tail 卡行（含 `Search <query>`）应可见。
     const messages: AnthropicNativeMessage[] = [
       { role: "user", content: [{ type: "text", text: "搜一下" }] },
     ];
@@ -135,11 +168,13 @@ describe("T5 live running 安静工具：calling + 一行 dim 预览", () => {
     );
     await setup.waitForVisualIdle();
     const frame = setup.captureCharFrame();
-    // live 块标题 = `calling web_search × 1`
-    expect(frame).toContain("calling web_search × 1");
-    // 一行 dim 预览（formatRunningToolLine 输出含 `⎿` 或 `Searching`）
+    // 块标题不出现 web_search 计数（spec live-signal #4）。
+    expect(frame.includes("calling web_search")).toBe(false);
+    expect(frame.includes("called web_search")).toBe(false);
+    // tail 卡 = `formatRunningToolLine` 输出（含 `Search <query>` 一行 dim）。
     const expectedPreview = formatRunningToolLine(liveRuns[0]!);
     expect(frame).toContain(expectedPreview);
+    expect(frame).toContain("Search");
     await setup.renderer.destroy();
   });
 });
@@ -191,6 +226,66 @@ describe("T5 keep 工具块外实卡：不进块计数", () => {
     expect(frame).not.toContain("bash × ");
     expect(frame.includes("called bash")).toBe(false);
     expect(frame.includes("calling bash")).toBe(false);
+    await setup.renderer.destroy();
+  });
+});
+
+describe("live 收类已进 history 仍须 calling + 细节行", () => {
+  test("assistant 已含 tool_use、live 仍 running → 不是 called、有预览、Thinking… 唯一一份在噪音之上", async () => {
+    // T4 live-signal revision：thinking 槽永远画在驱动它的噪音工具之上
+    // （文档顺序）；ThinkingPanel 已退役，`Thinking…` 只在 unanchored
+    // 块壳里出现一次。`THINK-DRAFT` 文本走块壳的 `thinkingPeekLines`
+    // 折叠预览 —— 仍可见（与 fold 合同一致），但 `THINK-DRAFT` 标
+    // 记是用于验证「正文不在外露 slot 里残留」的哨兵。
+    const messages: AnthropicNativeMessage[] = [
+      { role: "user", content: [{ type: "text", text: "读 a.ts" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先读文件", signature: "s1" },
+          {
+            type: "tool_use",
+            id: "tu-r-live",
+            name: "read_file",
+            input: { path: "a.ts" },
+          },
+        ],
+      },
+    ];
+    const liveRuns: ReadonlyArray<LiveToolRun> = [
+      {
+        id: "tu-r-live",
+        name: "read_file",
+        status: "running",
+        input: { path: "a.ts" },
+      },
+    ];
+    const setup = await testRender(
+      <ChatView
+        session={sessionWith(messages, [null, 8000], "running-fg")}
+        cols={COLS}
+        rows={ROWS}
+        liveToolLines={[]}
+        liveToolRuns={liveRuns}
+        thinkingExpanded={false}
+        thinkingDraftMasked={"THINK-DRAFT-PEEK-WINDOW"}
+      />,
+      { width: COLS, height: ROWS, exitOnCtrlC: false }
+    );
+    await setup.waitForVisualIdle();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("calling read_file × 1");
+    expect(frame.includes("called read_file")).toBe(false);
+    expect(frame).toContain(formatRunningToolLine(liveRuns[0]!));
+    // T4 live-signal：唯一一份 `Thinking…` 在 unanchored 块壳内。本测试
+    // 场景里 noise 已经在 history 里（live run id 命中历史 tool_use →
+    // `appendLiveBlocks` 内 dedupe 排除）—— 故「thinking 唯一一份」即
+    // 文档顺序合同；与「noise 在 unanchored」的版本断言
+    // `thinkingIdx < noiseIdx` 不重叠（见 t4 的 burst-only 用例）。
+    const thinkingCount = frame.split("Thinking…").length - 1;
+    expect(thinkingCount).toBe(1);
+    // 草稿走 `thinkingPeekLines` 折叠预览窗口 —— 哨兵文本可见。
+    expect(frame).toContain("THINK-DRAFT-PEEK-WINDOW");
     await setup.renderer.destroy();
   });
 });

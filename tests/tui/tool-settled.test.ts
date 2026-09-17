@@ -15,6 +15,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   deriveSlot,
+  isLiveNoise,
   settledClassOf,
   type SettledSlot,
 } from "../../src/tui/tool-settled.js";
@@ -210,5 +211,39 @@ describe("deriveSlot: SC2 五类边界", () => {
       failed: true,
     });
     expect(accentFailed.color).toBe("error");
+  });
+});
+
+describe("isLiveNoise（live 块入场判据，specs live-signal revision #3）", () => {
+  // settled 计数口径不变：web_search / web_fetch 仍归 retract（spec table row
+  // 2 锁）。live 块入场只走 isLiveNoise —— web_* 在 live 阶段不算 noise，进
+  // 实卡不进 unanchored 块；其余 retract 名一律进块。
+
+  test("read_file / grep / glob / memory_recall → true（进 unanchored 块）", () => {
+    for (const name of ["read_file", "grep", "glob", "memory_recall"]) {
+      expect(isLiveNoise(name)).toBe(true);
+    }
+  });
+
+  test("web_search / web_fetch → false（live signal 实卡）", () => {
+    expect(isLiveNoise("web_search")).toBe(false);
+    expect(isLiveNoise("web_fetch")).toBe(false);
+  });
+
+  test("未注册名 → true（spec「未注册名缺省仍当噪音」）", () => {
+    expect(isLiveNoise("mystery_tool")).toBe(true);
+  });
+
+  test("keep / accent / subagent → false（不进 unanchored 块）", () => {
+    for (const name of ["bash", "write_file", "skill", "spawn_subagent"]) {
+      expect(isLiveNoise(name)).toBe(false);
+    }
+  });
+
+  test("web_search / web_fetch 在 settledClassOf 上仍归 retract（计数口径不变）", () => {
+    // 守住 spec table row 2 锁：web_* 仍属 retract，进 settled 计数 ——
+    // live-signal revision 仅改 live 块入场判据，不动 settled 计数。
+    expect(settledClassOf("web_search")).toBe("retract");
+    expect(settledClassOf("web_fetch")).toBe("retract");
   });
 });

@@ -120,6 +120,25 @@ export function settledClassOf(name: string): SettledClass {
   return TOOL_SETTLED_CLASS[name] ?? "retract";
 }
 
+/** live noise 判定（specs/tui-activity-block.md live-signal revision #3/#4）。
+ *  真 = 该工具运行阶段该进过程块 `calling`/`called` / 槽预览 —— 即 retract
+ *  工具减掉 web_search / web_fetch（这两个属 live signal，走实卡）。
+ *  settled 计数口径不变：TOOL_SETTLED_CLASS 仍把 web_* 记为 retract，本谓
+ *  词只服务 live 块入场判据；任何消费方都不应把 web_* live 算入
+ *  `calling`/`called` 计数或 unanchored 块。 */
+export function isLiveNoise(name: string): boolean {
+  if (isLiveSignal(name)) return false;
+  return settledClassOf(name) === "retract";
+}
+
+/** live signal 的 web 子集（live-signal revision #4）：web_search /
+ *  web_fetch live 与落定都留一行实卡（查询 / URL 已含在标题里）。
+ *  carve-out 名单以本谓词为单一来源 —— isLiveNoise 的排除项与渲染面的
+ *  「落定也留标题」兜底都引用这里，不再各自硬编码工具名。 */
+export function isLiveSignal(name: string): boolean {
+  return name === "web_search" || name === "web_fetch";
+}
+
 /** 成功态按 class 分派的 slot。 */
 function slotForClass(cls: SettledClass): SettledSlot {
   switch (cls) {

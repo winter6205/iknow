@@ -25,7 +25,9 @@ import {
   type LiveToolRun,
   type LiveToolStatus,
 } from "../../src/tui/live-tool-state.js";
-import { deriveSlot } from "../../src/tui/tool-settled.js";
+import { deriveSlot, isLiveNoise } from "../../src/tui/tool-settled.js";
+// 注：未直接用 deriveSlot，保留 import 仅为该文件原有调用；下面已用
+// isLiveNoise 统一走 live-signal revision #3/#4 入口。
 import { toolResultStatusMap } from "../../src/tui/tool-summary.js";
 
 // ── 数据构造（与 tests/tui/turn-activity.test.ts 对齐）─────────────
@@ -79,17 +81,16 @@ function liveRun(
   return { id, name, status, input };
 }
 
-/** ChatView `inFoldCountOf` 的同源复刻：只数成功且 retract 的件。 */
+/** ChatView `inFoldCountOf` 的同源复刻：只数 live noise；失败 / web_* 排除。 */
 function chatViewResolver(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): (call: Readonly<{ id: string; name: string }>) => boolean {
   const statusMap = toolResultStatusMap(messages);
-  return (call) =>
-    statusMap.has(call.id) &&
-    deriveSlot(call.name, {
-      running: false,
-      failed: statusMap.get(call.id) === true,
-    }).inFoldCount;
+  return (call) => {
+    if (!isLiveNoise(call.name)) return false;
+    if (!statusMap.has(call.id)) return true; // 未配对 = running
+    return statusMap.get(call.id) !== true; // 失败横切
+  };
 }
 
 interface Fixture {
@@ -292,7 +293,9 @@ describe("S4 calling → called 转移", () => {
       inFoldCountOf: () => true,
       liveRuns: [liveRun("t1", "read_file", "running", { path: "a.ts" })],
     });
-    expect(blocks[0]?.title).toBe("Thought for 5s, calling read_file × 1");
+    expect(blocks.map((block) => block.title)).toEqual([
+      "Thought for 5s, calling read_file × 1",
+    ]);
     expect(blocks[0]?.slot.kind).toBe("tool-preview");
     expect(blocks[0]?.live).toBe(true);
   });
@@ -411,6 +414,106 @@ describe("S6 失败件不进块计数", () => {
       liveRuns: [liveRun("t1", "read_file", "failed")],
     });
     expect(blocks).toEqual([]);
+  });
+});
+
+// ── live-signal revision：live noise / live signal 划分（specs/tui-activity-block.md
+//  live-signal revision #3/#4/#5/#8）───────────────────────────────────────
+
+describe("live-signal revision：weldable = live noise only", () => {
+  test("live web_search running → 不画 'calling web_search × 1' 块（live signal 实卡）", () => {
+    // spec revision #4：web_search / web_fetch 永不进 `calling`/`called`。
+    const blocks = derive({
+      messages: [user("q")],
+      liveRuns: [liveRun("t1", "web_search", "running", { query: "hi" })],
+    });
+    expect(titles(blocks)).toEqual([]);
+  });
+
+  test("live grep running → 'calling grep × 1' 块 + tool-preview 槽", () => {
+    // spec revision #3：grep 是 live noise，进 unanchored 块。
+    const run = liveRun("t1", "grep", "running", { pattern: "foo" });
+    const blocks = derive({ messages: [user("q")], liveRuns: [run] });
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.title).toBe("calling grep × 1");
+    expect(blocks[0]?.slot).toEqual({
+      kind: "tool-preview",
+      text: formatRunningToolLine(run),
+    });
+  });
+
+  test("live 簇 grep + web_search 同段 → web_search 不在 title 计数", () => {
+    // spec revision #4：web_search 不进计数 → 块标题只列 noise 名。
+    const blocks = derive({
+      messages: [user("q")],
+      liveRuns: [
+        liveRun("t1", "grep", "running"),
+        liveRun("t2", "web_search", "running", { query: "hi" }),
+      ],
+    });
+    expect(titles(blocks)).toEqual(["calling grep × 1"]);
+  });
+
+  test("history 已落 grep（tool_result 配对）+ 仍 running → 'calling grep' 进块", () => {
+    // 历史 tool_use 已进 transcript，但 liveRuns 同 id 仍 running →
+    // 块由 history 累积 + resolveLiveRunning 命中（id 匹配）→ calling。
+    // 用 `inFoldCountOf: () => true` 复刻 ChatView 生产解析器在 unpaired
+    // 路径下走 `isLiveNoise`（grep 仍属 noise → 真）的语义。
+    const messages = [
+      user("q"),
+      assistant([thinkingBlock(), toolUseBlock("t1", "grep")]),
+    ];
+    const blocks = derive({
+      messages,
+      thinkingMs: [0, MS_5S],
+      liveRuns: [liveRun("t1", "grep", "running", { pattern: "foo" })],
+      inFoldCountOf: (call) => isLiveNoise(call.name),
+    });
+    expect(titles(blocks)).toEqual(["Thought for 5s, calling grep × 1"]);
+    expect(blocks[0]?.live).toBe(true);
+  });
+
+  test("history 失败 grep（tool_result is_error）→ 不进块计数（仍走 failure overlay）", () => {
+    // 失败件 = 横切，spec S4 / failure overlay。S6 已锁「失败安静工具不计数」。
+    const messages = [
+      user("q"),
+      assistant([thinkingBlock(), toolUseBlock("t1", "grep")]),
+      toolResult("t1", true),
+    ];
+    const blocks = derive({ messages, thinkingMs: [0, MS_5S, 0] });
+    expect(titles(blocks)).toEqual(["Thought for 5s"]);
+  });
+
+  test("history web_search 落定 → 不进块计数（live-signal 实卡路径）", () => {
+    // live-signal revision #4：web_search 永不进 `calling`/`called` ——
+    // 即使已配对（settled）也走实卡。块由 thinking 撑起，标题仅时长；
+    // 实卡标题 `Search <query>` 在 MessageBlocks 抽出（不属块）。
+    const messages = [
+      user("q"),
+      assistant([thinkingBlock(), toolUseBlock("t1", "web_search")]),
+      toolResult("t1"),
+    ];
+    const blocks = derive({ messages, thinkingMs: [0, MS_5S, 0] });
+    expect(titles(blocks)).toEqual(["Thought for 5s"]);
+  });
+
+  test("history unpaired web_search 仍在跑 → 不进块（live noise 谓词挡 live）", () => {
+    // live noise 谓词在 ChatView `inFoldCountOf` 端只服务「unpaired」
+    // 分支：statusMap 没该 id → 走 `isLiveNoise` → web_search 假 →
+    // 不进 `calling`。本测试用 `inFoldCountOf` 走 `isLiveNoise` 同源
+    // （不复刻 `chatViewResolver`，否则仍走旧 `settledClassOf`）。
+    const messages = [
+      user("q"),
+      assistant([thinkingBlock(), toolUseBlock("t1", "web_search")]),
+    ];
+    const blocks = derive({
+      messages,
+      thinkingMs: [0, MS_5S],
+      liveRuns: [liveRun("t1", "web_search", "running", { query: "hi" })],
+      inFoldCountOf: (call) => isLiveNoise(call.name),
+    });
+    // 无 noise 工具 → 块由 thinking 段撑起，标题仅时长；无 calling 计数。
+    expect(titles(blocks)).toEqual(["Thought for 5s"]);
   });
 });
 

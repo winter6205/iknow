@@ -61,7 +61,6 @@ describe("shouldShowLiveThinkingPanel（boundary：无草稿 / 非 running）", 
       shouldShowLiveThinkingPanel({
         running: true,
         thinkingDraft: "",
-        toolRunning: false,
       })
     ).toBe(false);
   });
@@ -71,7 +70,6 @@ describe("shouldShowLiveThinkingPanel（boundary：无草稿 / 非 running）", 
       shouldShowLiveThinkingPanel({
         running: false,
         thinkingDraft: "思考中",
-        toolRunning: false,
       })
     ).toBe(false);
   });
@@ -81,32 +79,33 @@ describe("shouldShowLiveThinkingPanel（boundary：无草稿 / 非 running）", 
       shouldShowLiveThinkingPanel({
         running: true,
         thinkingDraft: "x".repeat(10_000),
-        toolRunning: false,
       })
     ).toBe(true);
   });
 
-  test("concurrent：已画 unit fold 不是关闭信号（有折叠 + 有草稿 + 无工具 running → 仍 true）", () => {
+  test("concurrent：已画 unit fold 不是关闭信号（有折叠 + 有草稿 → 仍 true）", () => {
     // docs/CONTEXT.md open unit _Avoid_：「已画折叠不是关 thinking panel 的
-    // 信号」。本判定不看 foldLinesBySegmentIndex —— 只由草稿非空 + 无工具
-    // running 决定。
+    // 信号」。T4 live-signal revision：toolRunning 闸已退役（锁句 7）——
+    // 该判定只看 running + draft 长度，与 tool running 无关。
     expect(
       shouldShowLiveThinkingPanel({
         running: true,
         thinkingDraft: "第二段思考流式进行中",
-        toolRunning: false,
       })
     ).toBe(true);
   });
 
-  test("exception：工具 running → panel 让位（CONTEXT live activity group）", () => {
+  test("locked-sentence-7：tool running 不再让位思考", () => {
+    // T4 live-signal revision 锁句 7：删「任意 tool running 关思考」闸。
+    // 思考槽位主权 = 该 burst 尚未关闭（draft 非空）；tool running 不再
+    // 影响本判定。生产路径改走 `liveThinking` 字段（`draftMasked.length
+    // > 0`），本函数只承担纯函数语义文档。
     expect(
       shouldShowLiveThinkingPanel({
         running: true,
         thinkingDraft: "思考中",
-        toolRunning: true,
       })
-    ).toBe(false);
+    ).toBe(true);
   });
 });
 

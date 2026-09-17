@@ -42,22 +42,21 @@ export type ThinkingMsAtVisible = (visibleIndex: number) => number;
 /**
  * live thinking 面板（open unit）让位判定 —— docs/CONTEXT.md `open unit`：
  * 已画活动块（`Thought for` / `calling / called`）**不是**关掉后续思考
- * panel 的信号；让位的唯一理由是**簇内仍有工具 running**（CONTEXT `live
- * tool line`「有工具 running 时 panel 让位」）。
+ * panel 的信号；让位的唯一理由是**该 burst 已关闭**（draft 缓冲在每条
+ * `text_delta` / `tool_call_start` 清空 — `closeThinkingPhase`）。任何 tool
+ * running（包括同一 burst 内后续调起的工具）都不再关闭 panel —— 这正是
+ * live-signal 锁句 7：不准用「任意 tool running」关下一块思考。
  *
- * 「该 burst 尚无已画 `Thought for`」这一条在本判定里是**结构蕴含**而非另
- * 一条闸门：`thinkingDraft` 非空 ⟺ 思考缓冲仍在累积（`closeThinkingPhase`
- * 在每条 `text_delta` / `tool_call_start` 清空它），即该 burst 尚未关闭；
- * 未关闭的 burst 不会有 `thinkingMs` 落盘，因此不可能已有 `Thought for`
- * 画在它头上。把这条写成独立闸门只会退化回「整轮有折叠就关 panel」的旧
- * 错误（见 _Avoid_：`currentTurnHasFold` 关后续思考 —— T7 退役）。
+ * 注意：本函数在 T4 live-signal 之后仅保留**纯函数出口**（盖子 + 测
+ * 试覆盖），不再被任何生产代码调用 —— ChatView 经 `liveThinking` 字段
+ * 直接驱动 unanchored 活动块、ThinkingPanel 组件已退役。保留导出只
+ * 为历史夹具与 `thinkingDraftMasked` 闸子的语义文档。
  */
 export function shouldShowLiveThinkingPanel(opts: {
   readonly running: boolean;
   readonly thinkingDraft: string;
-  readonly toolRunning: boolean;
 }): boolean {
-  return opts.running && opts.thinkingDraft.length > 0 && !opts.toolRunning;
+  return opts.running && opts.thinkingDraft.length > 0;
 }
 
 /**

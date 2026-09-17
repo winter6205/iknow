@@ -29,12 +29,13 @@ import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
 import {
   formatToolUseCounts,
   thinkingMsToSeconds,
+  toolUseIdsOf,
   type ToolUseCount,
 } from "./turn-activity.js";
 import { formatThinkingFold, formatThinkingLive } from "./think-fold.js";
 import type { LiveToolRun } from "./live-tool-state.js";
 import { formatRunningToolLine } from "./live-tool-state.js";
-import { settledClassOf } from "./tool-settled.js";
+import { isLiveNoise } from "./tool-settled.js";
 
 /** 锚点：插入位的 messageIndex + contentBlockIndex。 */
 export interface ActivityBlockAnchor {
@@ -178,7 +179,7 @@ export function deriveActivityBlocks(
   appendLiveBlocks(blocks, {
     messageIndex: messages.length,
     contentBlockIndex: 0,
-    liveRuns,
+    liveRuns: liveRuns.filter((run) => !toolUseIdsOf(messages).has(run.id)),
     liveThinking,
   });
 
@@ -197,11 +198,24 @@ function appendLiveBlocks(
 ): void {
   const { messageIndex, contentBlockIndex, liveRuns, liveThinking } = args;
   const list = blocks as ActivityBlock[];
-  // live 安静簇：仅 retract 类进 unanchored 块。失败 / keep / accent
-  // 仍走原 tail / 历史路径，避免双画。判据 = `settledClassOf` 拿工具
-  // 名落定后的类（live 阶段没有 statusMap 可查）。
+  // T4 live-signal revision（plans 锁句 1）：思考块**先**画在该 burst 内
+  // 后续安静工具簇之前 —— 思考永远画在它驱动的那批动作上面（文档顺序）。
+  // 此前实现顺序相反，hotfix 又把 `liveThinking` 关掉；本任务恢复真信号，
+  // 并把「思考在前 / 噪音在后」的文档顺序钉死。
+  if (liveThinking) {
+    list.push({
+      anchor: { messageIndex, contentBlockIndex },
+      title: formatThinkingLive(),
+      slot: { kind: "thinking" },
+      live: true,
+    });
+  }
+  // live 安静簇：仅 live noise 类进 unanchored 块（specs live-signal
+  // revision #3/#4）。web_search / web_fetch 走实卡（live signal），不进
+  // 块计数 / 槽预览。失败 / keep / accent 仍走原 tail / 历史路径，避免
+  // 双画。判据走 `isLiveNoise`（settled 计数口径不变；web_* 仍 retract）。
   const retractRuns = liveRuns.filter(
-    (run) => run.status !== "failed" && settledClassOf(run.name) === "retract"
+    (run) => run.status !== "failed" && isLiveNoise(run.name)
   );
   const counts = liveToolCounts(retractRuns);
   if (counts.length > 0) {
@@ -219,14 +233,6 @@ function appendLiveBlocks(
           ? { kind: "tool-preview", text: formatRunningToolLine(lastRunning) }
           : { kind: "none" },
       live: verb === "calling",
-    });
-  }
-  if (liveThinking) {
-    list.push({
-      anchor: { messageIndex, contentBlockIndex },
-      title: formatThinkingLive(),
-      slot: { kind: "thinking" },
-      live: true,
     });
   }
 }
