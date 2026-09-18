@@ -410,6 +410,21 @@ _Avoid_: 第三层 local settings；项目文件盖 isolation / llm / memory / s
 **前景 spawn / 后景 spawn**: `spawn_subagent` 的两种结果契约（#361 裁决，ADR-0014）——前景（`wait:true`，默认）= handler 同步等 worker 到终态、envelope 直接作 tool_result 返回，当回合闭环；后景（`wait:false`，显式选项）= 立即返回 task_id，结果经 host 唤醒/drain 通道回传。worker 恒为独立进程，与前景/后景正交。
 _Avoid_: 把前景/后景与进程隔离混同；泛化的"同步/异步"；把 V1"立即返回 task_id"当默认契约（已被反转）
 
+**同轮多 spawn**: 并行工人 = 同一 assistant 消息里 N 次 `spawn_subagent`（`isConcurrencySafe`，同 wave 启动）。跨回合的 `wait:true` 会串行，这是前景契约。ADR-0101。
+_Avoid_: 把跨回合单卡当成 TUI 丢卡；把默认改 `wait:false` 当并行定义；靠说明书逼模型跨回合先后景
+
+**subagent_stop**: 父模型停本会话一名工人的工具；入参 `task_id`，内部 `abortTask`，与 Ctrl+X 同一杀进程路径。已终态/找不到返回结构化说明。ADR-0101（工具尚未落地）。
+_Avoid_: 复用 `bash_stop`；让模型直接碰 manager；把停当成续跑
+
+**工人 transcript**: 工人自己的 session transcript——形状与主会话同一套 JSONL；落在父会话文件夹 `subagents/` 下，键 `(父 conversationId, task_id)`；工人 loop 边跑边 append。`listSessions` 不收录。不是 `agent-<taskId>.jsonl`（那是 per-agent **trace**）。本切片之前的派出没有这份文件。ADR-0102。
+_Avoid_: 用 trace 当 resume 源；从 trace 倒灌旧工人；在项目池另开工人会话叶子；覆盖 `agent-<taskId>.jsonl`
+
+**subagent_continue**: 父模型在工人**进程已死**且存在 **工人 transcript** 时，同一 `task_id` 再拉起（load rewind head + 下一句 user + `run()`）。`running` 拒。`completed` / `failed` / `aborted` 一视同仁。等待契约与 `spawn_subagent` 相同。ADR-0102（工具尚未落地）。
+_Avoid_: 往正在跑的 loop 里塞；用 TUI 有没有 `✓ Done` 当闸；新 spawn 一个失忆工人当续跑；保活旧 pid；只许成功交差后续
+
+**子代理 task_id**: 这一次派出的 manager 句柄（`randomUUID()`）。父可见信封、`subagent_result`、mailbox、tmp、人停、`subagent_stop`、`subagent_continue` 都用它。worker `conversationId` 仍按 ADR-0040 管子侧。ADR-0101 / ADR-0102。
+_Avoid_: 把 `task_id` 当父会话 id；用 worker `conversationId` 当父工具入参；续跑另发明一套父可见 id
+
 **host drain**: host 把 completed 子代理的父可见信封浓缩成一条带固定前缀的消息、拼进下一次 `run()` 的 priorMessages；只读 buffer、不改状态。后景臂下：已有终态则立刻浓缩；仅 running 则立刻空返。叫醒主模型靠 mailbox，不靠用户再打一行，也不靠在 `run()` 边界空转等待。
 _Avoid_: 把 drain 与"结果获取"混同（前景 spawn 不经 drain）；`wait:true` 已 tool_result 交差后再 silent wake 同一信封；让 agent 侧直接消费 manager buffer；把 drain 被动挂"下一轮用户输入"或阻塞轮询当作可靠唤醒源
 
@@ -694,6 +709,12 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **plan/实施/replan vs 活图状态**: 前者是主代理认知循环；后者是有依赖、要冻结时的落地，不是规划的超集（ADR-0049）
 - **沙箱纪律 vs 前景/后景 spawn**: 沙箱纪律约束 `bash` 前台/后台围栏；前景/后景 spawn 是 `spawn_subagent` 的等待契约（ADR-0014）
 - **空跑 vs 前景卡住**: 空跑是等结果时的轮询/sleep/假状态；前景卡住是省略 `wait`（默认 true）时父这一跳绑到终态。后景完成靠 mailbox，不靠计时器（ADR-0014）
+- **同轮多 spawn vs 后景 wait:false**: 真并行工人是同一消息里 N 次 spawn；后景是父不绑这一跳、结果走 mailbox（ADR-0101）
+- **subagent_stop vs bash_stop**: 前者停子代理 worker（`task_id` / `abortTask`）；后者停 bash 后台进程组（`bg-` task_id）（ADR-0101 / ADR-0021）
+- **subagent_continue vs 再 spawn**: 续跑装入同一 `task_id` 的工人 transcript；再 spawn 是另一个工人（ADR-0102）
+- **subagent_continue vs subagent_stop**: 停杀 running；continue 只接已死且有 transcript 的（ADR-0101 / ADR-0102）
+- **工人 transcript vs 工人 trace**: transcript 给 continue 的 `load`；`agent-<taskId>.jsonl` 是取证，不当会话历史（ADR-0071 / ADR-0102）
+- **子代理 task_id vs worker conversationId**: `task_id` 是父侧派出句柄；worker `conversationId` 是子侧执行与 trace（ADR-0040 / ADR-0101）
 - **graph mode vs PermissionMode**: graph mode 是编排 overlay；PermissionMode 是 mutating 问/拒/放行。进 Graph 冻结当时 permission，不把 Graph 写入 `PERMISSION_MODES`
 - **开图提示 vs run 首短现势**: 翻转当拍可留一条长 ON/OFF；开着期间每个 `run()` 开头贴一次短「仍开着」，同一轮内环不再贴（ADR-0041 / ADR-0081）
 - **图现势 vs system 前缀**: 开着/关着会变，不进 system；现势走用户侧每个 `run()` 一句，不靠抖 tools/system，也不单靠 compact 特补或每跳追加（ADR-0081）
