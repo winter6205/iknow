@@ -175,7 +175,12 @@ describe("T6 思考 + 正文 + 噪音（grep）切开：grep 计数不写回 Tho
     await setup.renderer.destroy();
   });
 
-  test("思考 → web_search（signal）→ grep（noise）：web 不焊上思考标题，web 走 Search 实卡", async () => {
+  test("思考 → web_search（signal）→ grep（noise）：标题按锚点插进内容顺序", async () => {
+    // Thinking-at-bottom revision 锁句 4：落定后的上下顺序与时间线一致
+    // （`Thought for` → 该段工具 → 正文 / 下一块），标题按过程块锚点
+    // （contentBlockIndex）插进内容顺序，不整包甩在消息尾巴。web_search
+    // 是 live signal 实卡（specs live-signal revision #4），落定卡画在
+    // 思考标题之下；grep 仍走独立 called 行且在 search 卡之后。
     const messages: AnthropicNativeMessage[] = [
       { role: "user", content: [{ type: "text", text: "查一下" }] },
       {
@@ -235,20 +240,21 @@ describe("T6 思考 + 正文 + 噪音（grep）切开：grep 计数不写回 Tho
     expect(thinkIdx).toBeGreaterThanOrEqual(0);
     // 标题纯度：`Thought for` 行不含 web_search
     expect(lines[thinkIdx]).not.toContain("web_search");
-    // web_search 走实卡（`Search <query>`），独立成行
+    // web_search 走实卡（`Search <query>`），独立成行；按锚点顺序画在
+    // 思考标题之下（锁句 4：标题插在内容锚点，不甩到消息尾）。
     expect(frame).toContain("Search iknow tui");
     const searchIdx = lines.findIndex((l) => l.includes("Search iknow tui"));
     expect(searchIdx).toBeGreaterThanOrEqual(0);
-    expect(searchIdx).toBeLessThan(thinkIdx);
+    expect(searchIdx).toBeGreaterThan(thinkIdx);
     // 不存在把 web_search 焊上思考标题的合并形
     const thinkLine = lines[thinkIdx];
     expect(thinkLine).not.toContain("web_search");
     expect(thinkLine).not.toContain("grep");
     expect(frame).not.toContain("called web_search");
-    // grep 仍走独立 called 行
+    // grep 仍走独立 called 行，在 search 卡之后（内容顺序）
     const grepIdx = lines.findIndex((l) => l.includes("called grep × 1"));
     expect(grepIdx).toBeGreaterThanOrEqual(0);
-    expect(grepIdx).toBeGreaterThan(thinkIdx);
+    expect(grepIdx).toBeGreaterThan(searchIdx);
     await setup.renderer.destroy();
   });
 });

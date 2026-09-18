@@ -1,21 +1,23 @@
 /** @jsxImportSource @opentui/react */
 /**
  * plans/session-fg-handoff-interrupt Locked sentence 3 / T5 的 app 层接线测：
- * Ctrl+C = 当前会话**前台一切**（父 `running-fg` turn + 本会话所有前景子
- * 代理），前台仍在跑时有选区也先打断；后景 `wait:false` 与其它会话不动。
+ * Esc = 当前会话**前台一切**（父 `running-fg` turn + 本会话所有前景子代理），
+ * 前台有活时打断赢过双 Esc 回退判定；后景 `wait:false` 与其它会话不动。
+ * 2026-09-18 键位迁移：打断自 Ctrl+C 迁入 Esc（Ctrl+C 只剩选区复制，复制
+ * 用例保留在本文件作对照）。
  *
  * 分层：
  *   - 扇出语义（conversationId / foreground / live / 返回值）的 SSOT 层归
  *     tests/session-api/hub-abort-session-foreground.test.ts（真 SessionHub +
  *     fake manager）；
- *   - 本文件钉 app 的**键位→调用**与**顺序**：Ctrl+C 必须调到
+ *   - 本文件钉 app 的**键位→调用**与**顺序**：Esc 必须调到
  *     `bridge.abortSessionForegroundWork(本会话)` 且父 aborter 同时 abort；
- *     有选区 + 前台活时不得只复制；无前台活时选区复制行为逐字节不变。
- *   - 「不得复制」的观测面是**复制通道调用点**（mountApp 的 OSC52/fallback
+ *     前台活时打断不落双 Esc picker；无前台活时 Ctrl+C 选区复制行为不变。
+ *   - 「不复制」的观测面是**复制通道调用点**（mountApp 的 OSC52/fallback
  *     seam，同 tests/tui/copy-osc52-gate.test.tsx），不是 notice 文案：前台
  *     在跑时 turn 收尾会用「已打断…」覆盖复制 notice，帧上恒无「已复制」，
  *     拿它当判据等于没判（复制真的发生也绿）。seam 的可证伪性由阳性对照
- *     用例（无前台活 + 有选区 → 计数 = 1）钉住。
+ *     用例（Ctrl+C + 有选区 → 计数 = 1）钉住。
  *   - 「abort 真的抵达 wait 链」的下游一半（SubAgentAbortError 拒绝 waitFor）
  *     归 tests/tui/wait-cancel-abort.test.tsx。
  *
@@ -251,7 +253,7 @@ async function settle(setup: TestRendererSetup): Promise<void> {
  *  1. postMessage 被调 = turn 已启动（输入落地 / 建档都过了）；
  *  2. 帧上出现 mode 行的实时秒数段（` · Xs`，runState 由 turnStarted 置
  *     running-fg 后 1Hz tick 递增）—— 只有 runState 真的进了 React 态，
- *     Ctrl+C 才落到 canInterrupt 臂；不等这一格，按键可能赶在 commit 前
+ *     Esc 才落到前台打断臂；不等这一格，按键可能赶在 commit 前
  *     发出而走 idle 分支（abort 永不发出 = 空洞绿灯）。
  */
 async function startPendingTurn(app: ForegroundRig): Promise<void> {
@@ -268,12 +270,12 @@ async function startPendingTurn(app: ForegroundRig): Promise<void> {
   );
 }
 
-describe("Ctrl+C = 当前会话前台一切（Locked sentence 3 / T5）", () => {
+describe("Esc = 当前会话前台一切（Locked sentence 3 / T5，2026-09-18 键位迁移）", () => {
   test("running-fg：父 aborter 触发 + 本会话扇出被调用一次", async () => {
     const app = await mountApp({ session: session(), fanOutResult: ["t-fg"] });
     try {
       await startPendingTurn(app);
-      app.setup.mockInput.pressCtrlC();
+      app.setup.mockInput.pressEscape();
       await until(() => app.abortCalls.length > 0, 8000, "父 turn 未被 abort");
 
       expect(app.abortSessionCalls).toEqual([CONVERSATION_ID]);
@@ -283,21 +285,22 @@ describe("Ctrl+C = 当前会话前台一切（Locked sentence 3 / T5）", () => 
     }
   }, 30_000);
 
-  test("父 idle + 前景子代理 live：扇出被调用，且不发「无前台运行」notice", async () => {
+  test("父 idle + 前景子代理 live：扇出被调用，且不落双 Esc picker", async () => {
     const app = await mountApp({
       session: session(),
       fanOutResult: ["t-late"],
     });
     try {
       // 不跑 turn：父 runState 停在 idle，只有 hub 侧有在飞前景子代理。
-      app.setup.mockInput.pressCtrlC();
+      app.setup.mockInput.pressEscape();
       await until(() => app.abortSessionCalls.length > 0, 8000, "扇出未被调用");
 
       expect(app.abortSessionCalls).toEqual([CONVERSATION_ID]);
       // 父无 aborter（无 in-flight postMessage）→ 不崩、不误报。
       expect(app.abortCalls).toEqual([]);
       await settle(app.setup);
-      expect(app.setup.captureCharFrame()).not.toContain("Ctrl+C：无前台");
+      // 打断臂赢过双 Esc 回退判定：picker 没被打开（无标题行）。
+      expect(app.setup.captureCharFrame()).not.toContain("回退到更早的回合");
     } finally {
       await app.dispose();
     }
@@ -305,7 +308,7 @@ describe("Ctrl+C = 当前会话前台一切（Locked sentence 3 / T5）", () => 
 
   test("父 idle + 前景子代理 live + 有选区：仍然打断，不复制", async () => {
     // Locked sentence 3 的顺序条款在**父已 idle** 时同样成立：前台活在子代
-    // 理身上，Ctrl+C 的意图仍是打断。判据必须来自扇出的新鲜账（hub 现拉），
+    // 理身上，Esc 的意图仍是打断。判据必须来自扇出的新鲜账（hub 现拉），
     // 不能是 TUI 1Hz 投影 —— 本测用 fanOutResult 模拟 hub 的新鲜回答。
     const app = await mountApp({
       session: session(),
@@ -319,21 +322,19 @@ describe("Ctrl+C = 当前会话前台一切（Locked sentence 3 / T5）", () => 
       app.setup.renderer.emit("selection", fakeSelection(selectedText));
       await settle(app.setup);
 
-      app.setup.mockInput.pressCtrlC();
+      app.setup.mockInput.pressEscape();
       await until(() => app.abortSessionCalls.length > 0, 8000, "扇出未被调用");
 
       expect(app.abortSessionCalls).toEqual([CONVERSATION_ID]);
       await settle(app.setup);
-      // 复制通道零调用才是「不复制」的判据（notice 在 idle 用例里也可观测，
-      // 但这里只用调用点，与 running-fg 用例同一条 seam）。
+      // 复制通道零调用 = Esc 无复制语义（复制只归 Ctrl+C）。
       expect(app.copyCalls()).toBe(0);
-      expect(app.setup.captureCharFrame()).not.toContain("Ctrl+C：无前台");
     } finally {
       await app.dispose();
     }
   }, 30_000);
 
-  test("running-fg + 有选区：打断优先，不复制、不发「已复制」", async () => {
+  test("running-fg + 有选区：打断优先（Esc 无复制臂），不复制", async () => {
     const app = await mountApp({ session: session(), fanOutResult: ["t-fg"] });
     try {
       await startPendingTurn(app);
@@ -344,52 +345,41 @@ describe("Ctrl+C = 当前会话前台一切（Locked sentence 3 / T5）", () => 
       app.setup.renderer.emit("selection", fakeSelection(selectedText));
       await settle(app.setup);
 
-      app.setup.mockInput.pressCtrlC();
+      app.setup.mockInput.pressEscape();
       await until(() => app.abortCalls.length > 0, 8000, "父 turn 未被 abort");
 
       expect(app.abortCalls).toEqual([CONVERSATION_ID]);
       expect(app.abortSessionCalls).toEqual([CONVERSATION_ID]);
       await settle(app.setup);
-      // 复制通道零调用 = 打断赢过复制臂。notice 判据在这里不可用：turn 收尾
-      // 的「已打断…」会覆盖复制 notice，复制真的发生也看不出（空洞绿灯）。
+      // 复制通道零调用 = Esc 无复制臂（与旧 Ctrl+C「打断优先」同判据面）。
       expect(app.copyCalls()).toBe(0);
     } finally {
       await app.dispose();
     }
   }, 30_000);
 
-  test("running-fg + 扇出空返回 + 有选区：仍以父 turn 为前台活 → 打断，不复制", async () => {
+  test("running-fg + 扇出空返回：仍以父 turn 为前台活 → 打断", async () => {
     // 顺序判据必须是「canInterrupt(父) OR 扇出非空」，不是只看扇出。本测把
     // 扇出压成空（无子代理可停）+ running-fg —— 若实现只信扇出返回值，
-    // 这里会落进复制臂。判据 = 复制通道调用点计数（见 mountApp seam），
-    // 不用渲染文案：turn 收尾的「已打断…」会覆盖复制 notice，帧上无论如何
-    // 都看不到「已复制」，「不复制」在那里不可证伪。
+    // 这里会落进双 Esc 回退判定而漏 abort 父 turn。
     const app = await mountApp({ session: session(), fanOutResult: [] });
     try {
       await startPendingTurn(app);
-      const selectedText = "父在跑但无子代理时的选区";
-      (
-        app.setup.renderer as unknown as { currentSelection: unknown }
-      ).currentSelection = fakeSelection(selectedText);
-      app.setup.renderer.emit("selection", fakeSelection(selectedText));
-      await settle(app.setup);
-
-      app.setup.mockInput.pressCtrlC();
+      app.setup.mockInput.pressEscape();
       await until(() => app.abortCalls.length > 0, 8000, "父 turn 未被 abort");
 
       expect(app.abortCalls).toEqual([CONVERSATION_ID]);
       await settle(app.setup);
       expect(app.copyCalls()).toBe(0);
-      expect(app.setup.captureCharFrame()).not.toContain("Ctrl+C：无前台");
     } finally {
       await app.dispose();
     }
   }, 30_000);
 
-  test("有选区但无前台活：Ctrl+C 走复制（seam 阳性对照）", async () => {
-    // 上一条「不复制」断言的可证伪性前提：同一 seam 在复制真的发生时必须
-    // 计数 > 0。无前台活 + 有选区 → 落 #343 v3 复制臂；若不架这条阳性对
-    // 照，seam 本身失效（比如 doCopy 换了出口）会让「零调用」永远绿。
+  test("Ctrl+C 复制臂保留：有选区复制（seam 阳性对照），打断不误触", async () => {
+    // 2026-09-18 键位迁移后 Ctrl+C 只剩复制：有选区 → 复制，不打断。
+    // 同一 seam 在复制真的发生时必须计数 > 0；若不架这条阳性对照，seam
+    // 本身失效（比如 doCopy 换了出口）会让「零调用」永远绿。
     const app = await mountApp({ session: session(), fanOutResult: [] });
     try {
       const selectedText = "阳性对照：这段必须被复制";
@@ -404,13 +394,13 @@ describe("Ctrl+C = 当前会话前台一切（Locked sentence 3 / T5）", () => 
 
       expect(app.copyCalls()).toBe(1);
       expect(app.abortCalls).toEqual([]);
-      expect(app.abortSessionCalls).toEqual([CONVERSATION_ID]);
+      expect(app.abortSessionCalls).toEqual([]);
     } finally {
       await app.dispose();
     }
   }, 30_000);
 
-  test("idle + 无前景子代理 + 有选区：复制行为不变（回归）", async () => {
+  test("idle + 无前景子代理 + 有选区：Ctrl+C 复制行为不变（回归）", async () => {
     const app = await mountApp({ session: session(), fanOutResult: [] });
     try {
       const selectedText = "idle 会话的选区";
@@ -425,32 +415,53 @@ describe("Ctrl+C = 当前会话前台一切（Locked sentence 3 / T5）", () => 
 
       const frame = app.setup.captureCharFrame();
       expect(frame).toMatch(/已复制|已写入/);
-      expect(frame).not.toContain("Ctrl+C：无前台");
       expect(app.copyCalls()).toBe(1);
       expect(app.abortCalls).toEqual([]);
+      expect(app.abortSessionCalls).toEqual([]);
     } finally {
       await app.dispose();
     }
   }, 30_000);
 
-  test("其它会话的 live 前景 worker 不在本会话账上：扇出按本会话 id 问 hub", async () => {
-    // hub 侧作用域（conversationId 过滤）归
-    // tests/session-api/hub-abort-session-foreground.test.ts；app 侧钉的是
-    // 扇出永远问**本会话** id —— 别的会话的 worker 不会被本题面误杀。
+  test("idle + 无选区 + Ctrl+C：提示复制用法（不再指向打断）", async () => {
     const app = await mountApp({ session: session(), fanOutResult: [] });
     try {
       app.setup.mockInput.pressCtrlC();
-      // 扇出返回空 → 无前台活 → 落既有 idle notice（文案由
-      // tests/tui/keyboard.test.tsx 钉；此处只钉「走到那条分支」）。
       await until(
-        () => app.setup.captureCharFrame().includes("Ctrl+C：无前台"),
+        () => app.setup.captureCharFrame().includes("无选区"),
         8000,
-        "idle notice 未出现"
+        "复制提示未出现"
       );
 
-      expect(app.abortSessionCalls).toEqual([CONVERSATION_ID]);
+      expect(app.abortSessionCalls).toEqual([]);
       expect(app.abortCalls).toEqual([]);
       expect(app.stderr.lines.join("")).toBe("");
+    } finally {
+      await app.dispose();
+    }
+  }, 30_000);
+
+  test("双 Esc 回退（idle）：第二击在窗口内 → 走到 openRewindPicker", async () => {
+    // 门禁 input-contract 缺口：app 层「双 Esc → picker」此前只有
+    // isDoubleEsc 纯函数覆盖（tests/tui/rewind.test.ts），无端到端接线用例。
+    // 本测钉：两击都落 idle 臂（记时间戳 / 命中窗口）→ openRewindPicker 被调。
+    // fake bridge 无锚点（listRewindTargets → []）→ L0 空态 notice 上屏，
+    // 它是 openRewindPicker 的独有出口，足以证明双 Esc 路径被走到。
+    // 每击 Esc 都先空转一趟扇出（hub 只读枚举，空闲返回空无副作用）。
+    const app = await mountApp({ session: session(), fanOutResult: [] });
+    try {
+      app.setup.mockInput.pressEscape();
+      await new Promise((r) => setTimeout(r, 100));
+      app.setup.mockInput.pressEscape();
+      await until(
+        () =>
+          app.setup.captureCharFrame().includes("Nothing to rewind to yet."),
+        8000,
+        "rewind 空态 notice 未出现"
+      );
+
+      expect(app.abortCalls).toEqual([]);
+      expect(app.abortSessionCalls).toEqual([CONVERSATION_ID, CONVERSATION_ID]);
     } finally {
       await app.dispose();
     }

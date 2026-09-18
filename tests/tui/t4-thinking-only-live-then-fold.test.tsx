@@ -2,15 +2,15 @@
 /**
  * tests/tui/t4-thinking-only-live-then-fold.test.tsx
  *
- * T4 (plans/tui-activity-block-live-signal.md 锁句 1/2/7 + specs/tui-activity-block.md
- * live-signal revision)：thinking-only live then fold —— 思考在流时正文槽
- * 流思考（落在 unanchored 块壳的正文槽里）；出现正文或工具后思考正文离开
- * 槽位、标题留 `Thought for Ns`（历史路径不变）；任意 tool running 不再关
- * 思考槽（live-signal 锁句 7）；`shouldShowLiveThinkingPanel` 移除 `toolRunning`
- * 维度，仅 `running + draft 非空` 即开思考（顶层 panel 已退役，仅供纯函数
- * 语义文档与历史夹具）。
+ * Thinking-at-bottom revision（plans/tui-thinking-at-bottom.md 锁句 1–3 +
+ * specs/tui-activity-block.md Thinking-at-bottom 锁句）：思考在流期间是
+ * transcript 最底（unanchored thinking 壳）；同一 burst 内 live 安静簇
+ * （已冒出来的动作）画在思考上面；下一段思考作为新的最底进入 unanchored
+ * —— 已经可见的工具卡 / tail 槽卡 都不被「钉在思考下面」（旧 Live-signal
+ * 锁句 1 行为）。
  *
- * 这是 plans T4 验收。
+ * `shouldShowLiveThinkingPanel` 仅作纯函数语义文档（顶层 panel 已退役，
+ * 思考活在 unanchored 思考壳）。
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -54,10 +54,11 @@ function sessionWith(
 }
 
 describe("T4 思考 only 流思考（unanchored 块槽路径）", () => {
-  test("running + 仅有思考流 → 摘要 Thinking… 与正文末行可见（活在 unanchored 块壳）", async () => {
-    // T4 live-signal revision：思考活在 unanchored 活动块的正文槽里 —
-    // — ThinkingPanel 已退役，但视觉合同不变：`Thinking…` 标题 + 正文末
-    // ≤3 行 dim 预览，全部装在 unanchored 块的 MessageShell 中。
+  test("running + 仅思考流（无工具）→ `Thinking…` 是 transcript 最底", async () => {
+    // Thinking-at-bottom revision 锁句 1：仅思考流时 `Thinking…` 必须是
+    // transcript 最底元素（unanchored thinking 壳 + askLine 之后、Spinner 之
+    // 前）；屏上 `Thinking…` 仅出现一次；折叠态 preview 由 thinkingPeekLines
+    // 露出末 3 行。
     const setup = await testRender(
       <ChatView
         session={sessionWith(
@@ -75,21 +76,28 @@ describe("T4 思考 only 流思考（unanchored 块槽路径）", () => {
     );
     await setup.waitForVisualIdle();
     const frame = setup.captureCharFrame();
-    // 唯一一份 `Thinking…`（unanchored 块壳内的思考块标题）。
+    const lines = frame.split("\n").map((l) => l.trim());
+    // 唯一一份 `Thinking…`（unanchored thinking 壳）。
     expect(frame.split("Thinking…").length - 1).toBe(1);
     expect(frame).toContain(formatThinkingLive());
-    // 正文末 3 行通过 `thinkingPeekLines` 在 unanchored 块壳内可见。
+    // 正文末 3 行通过 `thinkingPeekLines` 可见。
     expect(frame).toContain("末行戊-应出现");
+    // 锁句 1：`Thinking…` 出现在 Spinner / 「Running …」之前，且是本帧
+    // 最底（屏上行序 = running state + crunched + 未锚定非思考 + tailSlots +
+    // askLine + 思考 + Spinner）。
+    const thinkingIdx = lines.findIndex((l) => l.startsWith("Thinking"));
+    const spinnerIdx = lines.findIndex((l) => l.includes("运行中"));
+    expect(thinkingIdx).toBeGreaterThanOrEqual(0);
+    expect(spinnerIdx).toBeGreaterThanOrEqual(0);
+    expect(thinkingIdx).toBeLessThan(spinnerIdx);
     await setup.renderer.destroy();
   });
 
-  test("running + 流思考 + 噪音 live run（id 不在 history）→ 文档顺序思考在噪音之上", async () => {
-    // T4 锁句 1：思考永远画在它驱动的那批动作之上（文档顺序）。
-    // 真实 burst-only 场景：live run id 不在 messages 里 → `appendLiveBlocks`
-    // 同时落 thinking 块 + noise 块，顺序 = thinking 先、noise 后。两者
-    // 都在 unanchored 块壳里（同 MessageShell 渲染），所以思考应在噪音
-    // 之上。带「同一 burst 内后续工具不再让位思考」语义（锁句 7）的
-    // 真信号验证。
+  test("running + 流思考 + 非 history noise run → noise 标题在 `Thinking…` 之上", async () => {
+    // Thinking-at-bottom revision 锁句 1：同一 burst 内 live 安静簇（已
+    // 冒出来的动作）画在前，思考块画在最后 —— 还在流的思考是本批最底；
+    // 它驱动的那批动作若已出现则在它上面。noise 标题必须在 `Thinking…`
+    // 之上（屏序）。
     const liveRuns: ReadonlyArray<LiveToolRun> = [
       {
         id: "tu-g-burst",
@@ -115,12 +123,70 @@ describe("T4 思考 only 流思考（unanchored 块槽路径）", () => {
     );
     await setup.waitForVisualIdle();
     const frame = setup.captureCharFrame();
-    // 文档顺序：思考标题在 noise 标题之上。
-    const thinkingIdx = frame.indexOf("Thinking…");
+    // 屏序：noise 标题在 `Thinking…` 之上（noise 命中早于思考）。
     const noiseIdx = frame.indexOf("calling grep × 1");
-    expect(thinkingIdx).toBeGreaterThanOrEqual(0);
+    const thinkingIdx = frame.indexOf("Thinking…");
     expect(noiseIdx).toBeGreaterThanOrEqual(0);
-    expect(thinkingIdx).toBeLessThan(noiseIdx);
+    expect(thinkingIdx).toBeGreaterThanOrEqual(0);
+    expect(noiseIdx).toBeLessThan(thinkingIdx);
+    await setup.renderer.destroy();
+  });
+
+  test("running + 流思考 + 已可见 tail 工具卡（live signal）→ `Thinking…` 在 tail 卡之下", async () => {
+    // Thinking-at-bottom revision 锁句 3：下一段思考（工具结果回来后的下一
+    // 条 assistant）出现在新的最底，低于已经可见的工具（live signal 实卡）。
+    // 本用例 live signal 工具 = web_search tail 卡（不被块消费 → 走 tail
+    // `LiveTailSlot`），第二段思考流必须挂到该卡之下 —— 屏上 `Thinking…`
+    // 的索引晚于「Search <query>」卡行。
+    const messages: AnthropicNativeMessage[] = [
+      { role: "user", content: [{ type: "text", text: "搜一下" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先想", signature: "s1" },
+          {
+            type: "tool_use",
+            id: "tu-w-tail",
+            name: "web_search",
+            input: { query: "今天的AI" },
+          },
+        ],
+      },
+    ];
+    const liveRuns: ReadonlyArray<LiveToolRun> = [
+      {
+        id: "tu-w-tail",
+        name: "web_search",
+        status: "running",
+        input: { query: "今天的AI" },
+        detail: "Search 今天的AI",
+      },
+    ];
+    const setup = await testRender(
+      <ChatView
+        session={sessionWith(messages, {
+          thinkingMs: [null, 5000],
+          runState: "running-fg",
+        })}
+        cols={COLS}
+        rows={ROWS}
+        liveToolLines={[]}
+        liveToolRuns={liveRuns}
+        thinkingExpanded={false}
+        thinkingDraftMasked={"第二段思考-应出现"}
+      />,
+      { width: COLS, height: ROWS, exitOnCtrlC: false }
+    );
+    await setup.waitForVisualIdle();
+    const frame = setup.captureCharFrame();
+    // tail 卡可见（live signal 实卡）。
+    expect(frame).toContain("Search 今天的AI");
+    // `Thinking…` 在 tail 卡行之下。
+    const cardIdx = frame.indexOf("Search 今天的AI");
+    const thinkingIdx = frame.indexOf("Thinking…");
+    expect(cardIdx).toBeGreaterThanOrEqual(0);
+    expect(thinkingIdx).toBeGreaterThanOrEqual(0);
+    expect(thinkingIdx).toBeGreaterThan(cardIdx);
     await setup.renderer.destroy();
   });
 });

@@ -1,12 +1,13 @@
 /** @jsxImportSource @opentui/react */
 /**
  * Slice D / plan task 7 —— 「打断必须抵达子代理 wait 链」的两条出口的真链路回归：
- *   - SC15：Ctrl+C（无选区 + running-fg）打断前台 `spawn_subagent(wait:true)`；
+ *   - SC15：Esc（running-fg）打断前台 `spawn_subagent(wait:true)`
+ *     （2026-09-18 键位迁移：打断自 Ctrl+C 迁入 Esc）；
  *   - SC12：`/quit` 先 abort 当前前台 turn 再收尾，不等子代理 per-task 墙钟
  *     （缺省 7200s）。
  *
  * 已核实的出口链路（R2 票面；本测逐段走到 ground truth）：
- *   app.tsx（Ctrl+C handler / quit() 的 `abortForegroundTurnOnQuit`）
+ *   app.tsx（Esc handler / quit() 的 `abortForegroundTurnOnQuit`）
  *   → `aborters.get(id).abort()` → bridge.postMessage({signal}）→ SessionHub
  *   → loop-engine `run(…, signal)` → `executeWaveAndCommit` →
  *   `deps.executor.executeAll(wave, signal, …)` → ACI 中间件（spawn_subagent
@@ -20,7 +21,7 @@
  *   `createAciExecutor`（双层 executor 与 build-engine 同形），manager 走
  *   `createSubAgentManager` 的真实 waitFor 轮询 / abort 分支，`spawn` 缝只注入
  *   一个永不 emit 的 fake child。若换 fake manager，waitFor 的 abort 分支就成了
- *   测试自己写的，命题退化为同义反复（本文件的变异探针已实测：把 Ctrl+C 分支的
+ *   测试自己写的，命题退化为同义反复（本文件的变异探针已实测：把 Esc 分支的
  *   `controller.abort()` 去掉，SC15 用例转红 —— 非空洞测试）。
  *
  * 深度诚实声明：模型步进是 `createStubModel`（不接真实 LLM），worker 子进程是
@@ -189,7 +190,7 @@ async function mountWaitingApp(): Promise<WaitingApp> {
   };
 
   // 发一条消息 → 等 spawn 发生 → 等会话真的进入 running-fg。后者是必须的：
-  // Ctrl+C / quit 的 abort 只在 running-fg 生效，与 React commit 竞态时按键
+  // Esc / quit 的 abort 只在 running-fg 生效，与 React commit 竞态时按键
   // 会落进 idle 分支，abort 永不发出（测试变成空洞绿灯）。
   await typeText("hi");
   await until(() => events.includes("spawn"), 8000, "spawn 未发生");
@@ -212,12 +213,12 @@ async function mountWaitingApp(): Promise<WaitingApp> {
   };
 }
 
-describe("打断抵达子代理 wait 链（SC15 Ctrl+C / SC12 /quit）", () => {
-  test("SC15: running-fg + Ctrl+C → waitFor 以 SubAgentAbortError 拒绝", async () => {
+describe("打断抵达子代理 wait 链（SC15 Esc / SC12 /quit）", () => {
+  test("SC15: running-fg + Esc → waitFor 以 SubAgentAbortError 拒绝", async () => {
     const app = await mountWaitingApp();
     try {
-      // 无选区 + running-fg → Ctrl+C 走 canInterrupt 分支 abort 该会话。
-      app.setup.mockInput.pressCtrlC();
+      // running-fg → Esc 走前台打断臂 abort 该会话。
+      app.setup.mockInput.pressEscape();
       await until(
         () => app.events.includes("waitFor-rejected"),
         8000,

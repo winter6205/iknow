@@ -98,6 +98,7 @@ interface DrivenApp {
   readonly destroy: () => Promise<void>;
   readonly typeText: (text: string) => Promise<void>;
   readonly pressEnter: () => Promise<void>;
+  readonly pressEscape: () => Promise<void>;
   readonly pressCtrlC: () => Promise<void>;
 }
 
@@ -215,6 +216,11 @@ async function mountContinueApp(opts: {
     },
     pressEnter: async () => {
       setup.mockInput.pressEnter();
+      await new Promise((r) => setTimeout(r, 100));
+      await setup.renderOnce();
+    },
+    pressEscape: async () => {
+      setup.mockInput.pressEscape();
       await new Promise((r) => setTimeout(r, 100));
       await setup.renderOnce();
     },
@@ -603,8 +609,8 @@ describe("TUI /continue busy-guard + Ctrl+C", () => {
     await app.destroy();
   }, 30_000);
 
-  test("Ctrl+C 仍打断前台 turn（continue 不是 abort 通道）", async () => {
-    const traceDir = mkdtempSync(join(tmpdir(), "iknow-tui-ctrl-c-trace-"));
+  test("Esc 仍打断前台 turn（continue 不是 abort 通道）", async () => {
+    const traceDir = mkdtempSync(join(tmpdir(), "iknow-tui-esc-trace-"));
     const traceOut = join(traceDir, "trace.jsonl");
     const app = await mountContinueApp({
       responses: [assistantResult({ texts: ["never"] })],
@@ -618,7 +624,7 @@ describe("TUI /continue busy-guard + Ctrl+C", () => {
       await app.typeText("go");
       await app.pressEnter();
       await until(() => app.bridge.inflight.ids().size === 1, 8000, "running");
-      await app.pressCtrlC();
+      await app.pressEscape();
       await until(() => app.bridge.inflight.ids().size === 0, 8000, "aborted");
       await untilFrame(
         app.setup,

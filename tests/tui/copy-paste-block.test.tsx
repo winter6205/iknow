@@ -146,7 +146,7 @@ describe("right-click 复制与 paste 互斥（#343 v3）", () => {
     setup.renderer.destroy();
   });
 
-  test("Ctrl+C：有选区时复制、不打断、无 Ctrl+C notice", async () => {
+  test("Ctrl+C：有选区时复制（打断已迁 Esc，无打断副作用）", async () => {
     const setup = await renderApp();
     const selectedText = "ctrl+c 复制的文本";
     (
@@ -160,7 +160,7 @@ describe("right-click 复制与 paste 互斥（#343 v3）", () => {
     setup.renderer.emit("selection", fakeSelection(selectedText));
     await setup.waitForVisualIdle();
 
-    // 按 Ctrl+C：选区非空 → 复制，不打断，不发 "Ctrl+C：无前台运行..." notice
+    // 按 Ctrl+C：选区非空 → 复制（Ctrl+C 纯复制语义，不触发打断）
     setup.mockInput.pressCtrlC();
     await setup.waitForVisualIdle();
     await new Promise((r) => setTimeout(r, 50));
@@ -168,12 +168,11 @@ describe("right-click 复制与 paste 互斥（#343 v3）", () => {
 
     const frame = setup.captureCharFrame();
     expect(frame).toMatch(/已复制|已写入/);
-    expect(frame).not.toContain("Ctrl+C：无前台");
 
     setup.renderer.destroy();
   });
 
-  test("Ctrl+C：无选区时维持原行为（idle → Ctrl+C notice）", async () => {
+  test("Ctrl+C：无选区时提示复制用法（不再指向打断）", async () => {
     const setup = await renderApp();
     // 显式置空 currentSelection + cachedSelectionTextRef（默认就是空）
     (
@@ -186,8 +185,8 @@ describe("right-click 复制与 paste 互斥（#343 v3）", () => {
     await setup.waitForVisualIdle();
 
     const frame = setup.captureCharFrame();
+    expect(frame).toContain("无选区");
     expect(frame).toContain("Ctrl+C");
-    expect(frame).toContain("/quit");
 
     setup.renderer.destroy();
   });

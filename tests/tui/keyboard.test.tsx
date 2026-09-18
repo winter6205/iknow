@@ -274,19 +274,18 @@ test("普通键（pressKey 'a'）：T6 PromptInput 消费，渲染仍稳定不�
   await setup.renderer.destroy();
 });
 
-test("修饰键 ctrl+c：useKeyboard handler 分流到 Ctrl+C 分支（notice 显示，stderr 零输出）", async () => {
+test("修饰键 ctrl+c：useKeyboard handler 分流到复制分支（无选区 → 复制提示，stderr 零输出）", async () => {
   // stderr 零输出是防回归核心：处置日志曾是裸 process.stderr.write，会以
-  // 裸字节画进 alternate-screen 的输入框区域，看起来像「打断词注入输入框」。
+  // 裸字节画进 alternate-screen 的输入框区域，看起来像「提示词注入输入框」。
   const stderr = captureStderr();
   const setup = await renderApp();
   try {
     setup.mockInput.pressCtrlC();
     await settle(setup);
     const frame = setup.captureCharFrame();
-    // notice 触发「Ctrl+C：无前台运行中的 turn；/quit 退出。」
-    expect(frame).toContain("Ctrl+C");
-    expect(frame).toContain("/quit");
-    // 空闲打断 = 无副作用：不向 stderr 写任何东西（含 OpenTUI 的诊断流）。
+    // 无选区 → 复制提示「无选区：先按住鼠标左键拖选文本，再按 Ctrl+C 复制。」
+    expect(frame).toContain("无选区");
+    // 空闲复制 = 无副作用：不向 stderr 写任何东西（含 OpenTUI 的诊断流）。
     expect(stderr.lines.join("")).toBe("");
   } finally {
     await setup.renderer.destroy();
@@ -294,7 +293,7 @@ test("修饰键 ctrl+c：useKeyboard handler 分流到 Ctrl+C 分支（notice �
   }
 });
 
-test("Ctrl+C：canInterrupt 为真但 controller 缺席时静默无副作用", async () => {
+test("Esc：canInterrupt 为真但 controller 缺席时静默无副作用", async () => {
   // 不变式：running-fg 但 aborter 已摘（turn finally 收尾竞态）→ 不崩、
   // 不误伤、无输出。观测面 = 帧 + stderr（controller_missing 处置日志已删）。
   const stderr = captureStderr();
@@ -304,7 +303,7 @@ test("Ctrl+C：canInterrupt 为真但 controller 缺席时静默无副作用", a
   });
   const setup = await renderAppWithInitialSession(initialSession);
   try {
-    setup.mockInput.pressCtrlC();
+    setup.mockInput.pressEscape();
     await settle(setup);
     expect(() => setup.captureCharFrame()).not.toThrow();
     expect(stderr.lines.join("")).toBe("");
@@ -314,14 +313,13 @@ test("Ctrl+C：canInterrupt 为真但 controller 缺席时静默无副作用", a
   }
 });
 
-test("其他修饰键（shift+tab、meta+c）：不触发 Ctrl+C/Y 分支，无 notice", async () => {
+test("其他修饰键（shift+tab、meta+c）：不触发复制/打断分支，无 notice", async () => {
   const setup = await renderApp();
   // shift+tab：测试 T5 状态机外键被吞、不产生 notice（完整状态机归 T6）。
   setup.mockInput.pressTab({ shift: true });
   await settle(setup);
   const frame = setup.captureCharFrame();
-  // 不应出现 Ctrl+C notice（Ctrl+Y 已移除）
-  expect(frame).not.toContain("Ctrl+C：无前台");
+  // 不应出现复制提示或打断 notice
   expect(frame).not.toContain("无选区");
   await setup.renderer.destroy();
 });

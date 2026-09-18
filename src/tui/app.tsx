@@ -10,7 +10,8 @@
  *
  * 状态机纪律（specs/146-tui.md Q1/Q1a）：
  *  - 会话三态 idle / running-fg / running-bg，由 session-state.ts 纯
- *    函数驱动；turn 切走 → running-bg，Ctrl+C 仅打断 running-fg。
+ *    函数驱动；turn 切走 → running-bg，Esc 仅打断 running-fg
+ *    （2026-09-18 键位迁移：打断由 Ctrl+C 改绑 Esc；Ctrl+C 只剩选区复制）。
  *  - 视图二态 chat / list。
  *  - 消息 ReadonlyArray + Object.freeze 整体替换。
  *
@@ -2970,7 +2971,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   }
 
   /**
-   * Ctrl+C 打断本体（Locked sentence 3 / T5）：「当前会话前台一切」——
+   * 前台打断本体（Locked sentence 3 / T5；2026-09-18 起由 Esc 消费）：
+   * 「当前会话前台一切」——
    *   - 子代理：`bridge.abortSessionForegroundWork(本会话)` 一趟枚举 + abort
    *     本会话**新鲜**的前景账（父 idle 但在途的 `wait:true` 只有 hub 侧看
    *     得到；TUI 的 1Hz 投影最多陈旧 1s，不拿它当判据）。无 manager
@@ -2980,8 +2982,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
    *     → 静默，不伪造打断。
    *
    * 返回「本会话前台真的有活」（判据是这趟动作本身，不另读会陈旧的 React
-   * 态）：调用方据此让打断赢过选区复制臂，并在无活时落既有提示 / 复制分支。
-   * 两臂无活时零副作用（扇出空转、无 aborter 可 abort）→ 返回 false。
+   * 态）：调用方据此决定是否继续走双 Esc 回退判定。两臂无活时零副作用
+   * （扇出空转、无 aborter 可 abort）→ 返回 false。
    */
   function interruptForegroundTurn(): boolean {
     const id = active.conversationId;
@@ -2995,21 +2997,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   }
 
   /**
-   * Ctrl+C 的第二段分支体（Locked sentence 3 的顺序条款）：**前台有活先打断，
-   * 无活才轮到选区复制**。
+   * 选区复制臂（Ctrl+C 唯一职责，2026-09-18 键位迁移；打断已整体移交给
+   * Esc 分支，经 interruptForegroundTurn 含前景子代理扇出）。
    *
-   * 顺序不能反：#343 v3 的选区优先复制是「idle 时按 Ctrl+C 想复制」的语义；
-   * 前台在跑时同一按键的意图是打断（spec 原文「前台仍在跑时有选区也先打
-   * 断」）。判据是 interruptForegroundTurn() 的返回值 —— 动作本身的结果
-   * （hub 现拉的新鲜前景账 + aborter 登记簿），不是 TUI 1Hz 投影：后者会漏
-   * 掉刚 spawn / 父已 idle 的 `wait:true` 子代理。
-   *
-   * 无前台活 → 回到 #343 v3 原样：有选区复制（清 ref 走 handleMouseUp 同款
-   * 尾清理）+ return；无选区 → 既有「无前台运行」提示。
+   * 有选区 → 复制（清 ref 走 handleMouseUp 同款尾清理）；无选区 → 提示复制
+   * 用法（Ctrl+C 不再指向打断，文案随语义改）。
    */
-  function handleCtrlCInterrupt(): void {
-    const sessionForegroundLive = interruptForegroundTurn();
-    if (sessionForegroundLive) return;
+  function handleCtrlCCopy(): void {
     const selectedText = cachedSelectionTextRef.current;
     if (selectedText.length > 0) {
       cachedSelectionTextRef.current = "";
@@ -3019,7 +3013,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       return;
     }
     setNotice({
-      lines: ["Ctrl+C：无前台运行中的 turn；/quit 退出。"],
+      lines: ["无选区：先按住鼠标左键拖选文本，再按 Ctrl+C 复制。"],
     });
   }
 
@@ -3653,18 +3647,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     ) {
       return;
     }
-    // Ctrl+C：打断 running-fg；否则提示。判键复用上方 isCtrlC（同一表达式，
-    // 不重复计一个分支）。
+    // Ctrl+C：选区复制（唯一职责）。打断已整体移交给 Esc 分支
+    // （interruptForegroundTurn，含前景子代理扇出）—— 2026-09-18 键位迁移：
+    // Ctrl+C 不再打断，避免「想复制误触发打断」。
     if (isCtrlC) {
-      // #548:压缩进行中 → 走压缩取消通道(runState 仍 idle,既有
-      // canInterrupt 拦不住);return 后不再进 turn/notice 分支。
-      if (compactingControllerRef.current !== null) {
-        compactingControllerRef.current.abort();
-        return;
-      }
-      // Locked sentence 3 的回合适配（打断 vs 选区复制的顺序）在 helper，
-      // 与 interruptForegroundTurn 同址 —— handler 只做键位分派（S5）。
-      handleCtrlCInterrupt();
+      // Locked sentence 3 的复制臂在 helper —— handler 只做键位分派（S5）。
+      handleCtrlCCopy();
       return;
     }
     // Ctrl+X：强杀 chrome-focus 聚焦的 live 子代理（spec Slice D / SC14）。
@@ -3861,26 +3849,27 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       }
       return;
     }
-    // T6 双 Esc：running-fg 第一下 Esc 打断 in-flight turn（对标 baseline
-    // §1：先打断，第二下 idle 才开 picker），等效 Ctrl+C 分支；idle 首次 Esc
-    // 只记时间戳不动作；间隔 ≤ REWIND_DOUBLE_ESC_WINDOW_MS → 打开 L3 picker。
-    // askModalActive 时下方块处理 Esc dismiss，re-path 不拦截（避免吞掉
-    // dismiss）。
+    // T6 双 Esc（2026-09-18 键位迁移后 Esc 是打断唯一入口）：前台有活 →
+    // interruptForegroundTurn（父 running-fg turn + 本会话全部前景子代理，
+    // 「前台一切」，与 /quit 的 canInterrupt 同一判据）赢过双 Esc 回退判定，
+    // 只记时间戳；idle 首次 Esc 只记时间戳不动作；间隔 ≤
+    // REWIND_DOUBLE_ESC_WINDOW_MS → 打开 L3 picker。askModalActive 时下方
+    // 块处理 Esc dismiss，re-path 不拦截（避免吞掉 dismiss）。
     if (e.name === "escape" && !askModalActive) {
-      // #548:压缩进行中 → 走压缩取消通道(等同 Ctrl+C 行为);
-      // 此分支优先于 running-fg 打断,因为压缩期间 runState 仍 idle,
-      // canInterrupt 会落进 double-Esc rewind picker 路径,语义错误。
+      // #548:压缩进行中 → 走压缩取消通道(Esc 是压缩取消唯一键位);
+      // 此分支优先于前台打断,因为压缩期间 runState 仍 idle,
+      // interruptForegroundTurn 会落进 double-Esc rewind picker 路径,语义错误。
       if (compactingControllerRef.current !== null) {
         compactingControllerRef.current.abort();
         return;
       }
       const nowMs = Date.now();
       const last = lastEscAtRef.current;
-      if (canInterrupt(active)) {
-        const id = active.conversationId;
-        if (id !== undefined) {
-          aborters.current.get(id)?.abort();
-        }
+      // 前台有活先打断（Locked sentence 3 的顺序条款，自 Ctrl+C 迁入）：
+      // 判据是 interruptForegroundTurn() 的返回值 —— 动作本身的结果（hub
+      // 现拉的新鲜前景账 + aborter 登记簿），不是 TUI 1Hz 投影：后者会漏
+      // 掉刚 spawn / 父已 idle 的 `wait:true` 子代理。
+      if (interruptForegroundTurn()) {
         lastEscAtRef.current = nowMs;
         return;
       }

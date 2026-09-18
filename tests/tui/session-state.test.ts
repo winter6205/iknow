@@ -7,7 +7,7 @@
  * #146 状态机转换表（Q1a 裁决）全组合：
  *  - 任何会话态可自由切换；running-fg 被切走 → running-bg；
  *  - 切回 running-bg → running-fg；idle 不变；
- *  - Ctrl+C 仅 running-fg 可打断（canInterrupt）；
+ *  - Esc 仅 running-fg 可打断（canInterrupt；2026-09-18 键位迁移自 Ctrl+C）；
  *  - turnFinished 落回 idle + 消息整体冻结替换（ReadonlyArray 纪律）。
  *
  * T3：TuiSessionState / TurnFinishedInput 增 lastUsage 字段（上下文用量显示）。
@@ -122,7 +122,7 @@ describe("session-state: 三态转换表（Q1a）", () => {
     expect(switchedTo(idle)).toBe(idle);
   });
 
-  test("canInterrupt：仅 running-fg 可打断（Ctrl+C 作用域 Q1a）", () => {
+  test("canInterrupt：仅 running-fg 可打断（Esc 作用域 Q1a）", () => {
     const draft = createDraftSession();
     expect(canInterrupt(draft)).toBe(false);
     const fg = turnStarted(draft);
