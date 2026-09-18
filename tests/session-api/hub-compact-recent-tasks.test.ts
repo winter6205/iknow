@@ -220,11 +220,12 @@ function makeCompactDeps(opts: {
 
 describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1 SC1-SC5)", () => {
   /**
-   * Multi-turn stub responses: 20 tool-call turns + 1 completed turn.
-   * Proactive compact check fires when `state.turnCount > lastCompactTurn`,
-   * so the run must have at least one continuing turn (tool call) before
-   * the threshold check can run on iteration 2+. The 50 prior messages
-   * (~2200 estimated tokens) easily exceed the 1000-token threshold.
+   * Stub responses: n 条占位续跑拍 + 1 条 completed 收尾。proactive check 在
+   * 每次模型调用前都跑，含本 run 首步（锚点初值 -1），所以超阈 prior 本身
+   * 就让压缩在 run 入口、第一次模型调用之前开火——不需要任何 tool 续跑拍
+   * 来"到达"该检查。50 条 prior（~2200 estimated tokens > 1000 阈值）足以
+   * 证明这一点。stub model 不区分 no-tools 摘要步，入口压缩的摘要步消耗第
+   * 一条脚本响应，completed 收尾消费第二条，故 n=1 即最短可跑几何。
    */
   function buildResponses(n: number) {
     const BIG_TEXT = "payload ".repeat(40);
@@ -250,17 +251,16 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
   it("HITL + ≥3 合格用户任务 → attachment 含 3 句原文(trim 后相等),最新在最后", async () => {
     const id = "long-with-tasks";
     // 50 条合格用户任务(每条 ~33 tokens → estimate 总 ~2200 tokens > 1000 阈值),
-    // 配合 buildResponses(20) 触发 proactive compact;extractRecentUserTasks 截
-    // 最近 3 句 — 即 last 3 条 prior-msg-X。
+    // 超阈 prior 让 proactive compact 在 run 入口首呼前开火,短 run 即可;
+    // extractRecentUserTasks 截最近 3 句 — 即 last 3 条 prior-msg-X。
     const prior: AnthropicNativeMessage[] = Array.from({ length: 50 }, (_, i) =>
       longUserMessage(i)
     );
     await seedSession({ id, messages: prior });
 
-    const baseDeps = makeDeps(buildResponses(20));
+    const baseDeps = makeDeps(buildResponses(1));
     const deps = {
       ...baseDeps,
-      maxTurns: 30,
       compress: { contextWindow: 200_000, thresholdTokens: 1000 },
     };
     const verifyConfig: VerifyConfig = { command: "/bin/true" };
@@ -306,7 +306,8 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
     const id = "no-qualifying-tasks";
     // 50 条 tool_result-only user 消息 → isTurnQuery = false → extract 返回
     // [] → renderRecentUserTasksBoundary return undefined → boundaryAttachment
-    // 注入文本为 undefined,no-op。
+    // 注入文本为 undefined,no-op。tool_result 正文撑到每条 ~210 chars
+    // (estimate 总 ~3500 tokens > 1000 阈值),让压缩在 run 入口首呼前开火。
     const prior: AnthropicNativeMessage[] = Array.from(
       { length: 50 },
       (_, i) => ({
@@ -315,17 +316,16 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
           {
             type: "tool_result",
             tool_use_id: `t-${i}`,
-            content: [{ type: "text", text: `result-${i}` }],
+            content: [{ type: "text", text: `result-${i} ${"z".repeat(200)}` }],
           },
         ],
       })
     );
     await seedSession({ id, messages: prior });
 
-    const baseDeps = makeDeps(buildResponses(20));
+    const baseDeps = makeDeps(buildResponses(1));
     const deps = {
       ...baseDeps,
-      maxTurns: 30,
       compress: { contextWindow: 200_000, thresholdTokens: 1000 },
     };
     const hub = new SessionHub({ store, deps });
@@ -335,7 +335,7 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
 
     const loaded = await store.load(id);
     const serialized = JSON.stringify(loaded.messages);
-    // compact 仍触发(因 50 条 tool_result user 消息长 ~3300 tokens)。
+    // compact 仍触发(超阈 prior 在 run 入口首呼前即开火)。
     assert.ok(
       serialized.includes("[compaction boundary — earlier messages cleared]") ||
         // #467 step 2:full-compact 摘要成功的 LLM 摘要路径同样以 SUMMARY 开头。
@@ -363,10 +363,9 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
         now: "2026-01-01T00:00:00.000Z",
       }),
     });
-    const baseDeps = makeDeps(buildResponses(20));
+    const baseDeps = makeDeps(buildResponses(1));
     const deps = {
       ...baseDeps,
-      maxTurns: 30,
       compress: { contextWindow: 200_000, thresholdTokens: 1000 },
     };
     const hub = new SessionHub({
@@ -416,10 +415,9 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
     ];
     await seedSession({ id, messages: prior });
 
-    const baseDeps = makeDeps(buildResponses(20));
+    const baseDeps = makeDeps(buildResponses(1));
     const deps = {
       ...baseDeps,
-      maxTurns: 30,
       compress: { contextWindow: 200_000, thresholdTokens: 1000 },
     };
     const hub = new SessionHub({ store, deps });
@@ -506,10 +504,9 @@ describe("hub boundaryAttachment 接线 — 任务摘录 compact 边界 (#604 T1
     ];
     await seedSession({ id, messages: prior });
 
-    const baseDeps = makeDeps(buildResponses(20));
+    const baseDeps = makeDeps(buildResponses(1));
     const deps = {
       ...baseDeps,
-      maxTurns: 30,
       compress: { contextWindow: 200_000, thresholdTokens: 1000 },
     };
     const hub = new SessionHub({ store, deps });
