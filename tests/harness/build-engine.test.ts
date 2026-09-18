@@ -175,6 +175,13 @@ const EXPECTED_TOOLS = [
   // trace-mcp-read-side-split T6 get_record append-only:36→37,末位再加 1 件常驻
   //（读侧内容轴,与目录轴同样不条件化;三轴顺序 = append 顺序,不重排既有件）。
   "get_record",
+  // plan subagent-stop-and-continue T2 (ADR-0101) subagent_stop append-only:
+  // 与 spawn_subagent / subagent_result 同门（chat 全装配自建 subagentManager
+  // → 在场；ask 缺 manager → 缺席）。
+  "subagent_stop",
+  // plan subagent-stop-and-continue T4 (ADR-0102) subagent_continue append-only:
+  // 同门条件、stop 之后末位。
+  "subagent_continue",
 ];
 
 /** #440 T4 / #502 T3 条件化缺席视图:todoDir 未透传的 chat surface(默认行为)。
@@ -745,6 +752,8 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
           n !== "memory_save" &&
           n !== "spawn_subagent" &&
           n !== "subagent_result" &&
+          n !== "subagent_stop" &&
+          n !== "subagent_continue" &&
           n !== "list_mcp_resources" &&
           n !== "read_mcp_resource" &&
           n !== "bash_output" &&
@@ -1224,6 +1233,8 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
           n !== "memory_save" &&
           n !== "spawn_subagent" &&
           n !== "subagent_result" &&
+          n !== "subagent_stop" &&
+          n !== "subagent_continue" &&
           n !== "list_mcp_resources" &&
           n !== "read_mcp_resource" &&
           n !== "todo_write" &&

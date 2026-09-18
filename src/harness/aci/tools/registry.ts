@@ -36,6 +36,8 @@ import type { FsModeContext } from "../../sandbox/fs-mode.js";
 import { createSkillTool } from "./skill.js";
 import { createSpawnSubAgentTool } from "../../subagent/spawn-subagent-tool.js";
 import { createSubAgentResultTool } from "../../subagent/subagent-result-tool.js";
+import { createSubAgentStopTool } from "../../subagent/subagent-stop-tool.js";
+import { createSubAgentContinueTool } from "../../subagent/subagent-continue-tool.js";
 import { createRunGraphTool } from "../../graph/run-graph-tool.js";
 import type { LiveGraphLedgerHost } from "../../graph/ledger.js";
 import {
@@ -234,6 +236,15 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // the existing ACI surface. Both host seams are independently conditional.
   "list-worktrees",
   "remove-worktree",
+  // plan subagent-stop-and-continue T2 (ADR-0101) subagent_stop append-only:
+  // 43→44。条件化装配（subagentManager 缺席时不入注册表 —— 与
+  // spawn_subagent / subagent_result 同门条件；Gate 3 在 toolsetNames 端
+  // 镜像过滤）。父模型停工人 = 操作员 Ctrl+X 的模型面对称臂。
+  "subagent_stop",
+  // plan subagent-stop-and-continue T4 (ADR-0102) subagent_continue append-only:
+  // 44→45。同门条件（subagentManager）；死工人 + 有账才再拉起，闸在
+  // manager.resumeTask，等待契约与 spawn 相同。
+  "subagent_continue",
 ] as const);
 
 /**
@@ -920,6 +931,20 @@ export function createDefaultAciRegistry(
             }),
         }
       : {}),
+    // plan subagent-stop-and-continue T2 (ADR-0101)：本键曾是 factories 字面量
+    // 的最后一个键（Gate 3 顺序契约，见 ACI_TOOLSET_NAMES 尾部注释）。
+    // 条件化装配与 spawn_subagent / subagent_result 同门（subagentManager
+    // 缺席 → 工具不入注册表）。
+    ...(subagentManager
+      ? {
+          subagent_stop: () =>
+            createSubAgentStopTool({ manager: subagentManager }),
+          // plan subagent-stop-and-continue T4 (ADR-0102)：现在是字面量
+          // 最后一个键。同门条件、尾部追加。
+          subagent_continue: () =>
+            createSubAgentContinueTool({ manager: subagentManager }),
+        }
+      : {}),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。
@@ -934,6 +959,9 @@ export function createDefaultAciRegistry(
     ...(memoryDir ? [] : ["memory_recall", "memory_save"]),
     ...(skillCatalog ? [] : ["skill"]),
     ...(subagentManager ? [] : ["spawn_subagent", "subagent_result"]),
+    // plan subagent-stop-and-continue T2/T4：subagent_stop / subagent_continue
+    // 与 spawn / result 同门条件（尾部追加名单顺序 = ACI_TOOLSET_NAMES 末位）。
+    ...(subagentManager ? [] : ["subagent_stop", "subagent_continue"]),
     ...(todoDir ? [] : ["todo_write"]),
     ...(mcpManager ? [] : ["list_mcp_resources", "read_mcp_resource"]),
     ...(backgroundManager ? [] : ["bash_output", "bash_stop"]),

@@ -47,6 +47,7 @@ import {
   workerFenceTmpPath,
   workerMetaPath,
   workerStderrPath,
+  workerTranscriptPath,
 } from "../sandbox/fence-tmp.js";
 import { inspectWorkerPad, listPadTopLevelNames } from "./pad-inspect.js";
 import type { PadQueryResult } from "./pad-inspect.js";
@@ -149,6 +150,22 @@ export interface SubAgentManager {
    */
   readonly abortTask: (taskId: string) => boolean;
   /**
+   * ADR-0102 T4: 续跑已死工人 —— 新进程、同 `task_id` 对外句柄。闸全部
+   * 在 manager 内判（工具只做 typed kind → ToolExecutionError 映射，不在
+   * 工具侧重算寿命）：未知 id → `not_found`；starting/running → `running`
+   * （不往 in-flight loop 塞话）；缺工人 transcript（含无装配目录的 legacy
+   * 落点）→ `no_transcript`，**不从 per-agent trace 倒灌**。并发顶与 spawn
+   * 同源（超限仍 SubAgentCapacityError，锁句 5）。
+   * `def` 只带本次调用的回合字段（task 下一句 / parentTurnId / toolUseId /
+   * 前景排除位）；身份与能力字段（role / model / maxTurns / sandboxRoot /
+   * disallowedTools …）沿用原 def —— 原 catalog 角色再 run()。
+   * Optional on the interface so poll-only fakes stay structural.
+   */
+  readonly resumeTask?: (
+    taskId: string,
+    def: SubAgentDefinition
+  ) => { readonly taskId: string };
+  /**
    * #358 T7: 只读全量枚举(starting/running/completed/failed 合一) — Session
    * API GET /sessions/:id/subagents 端点消费。数据源 = 内存 map + 终态
    * envelope(与 queryBuffer/drainCompleted 同真值),不在端点侧做任务寿命
@@ -185,6 +202,22 @@ export class SubAgentWaitTimeoutError extends Error {
   override readonly name = "SubAgentWaitTimeoutError";
   readonly status = "failed" as const;
   readonly reason = "timeout" as const;
+}
+
+/**
+ * ADR-0102 T4 — resumeTask 的 typed 拒绝。`kind` 是判别联合，消费方
+ * （subagent_continue handler）按 kind 映射模型可见文案，禁止
+ * `err instanceof Error ? err.message : …` 式的语义丢失。
+ */
+export class SubAgentResumeError extends Error {
+  override readonly name = "SubAgentResumeError";
+  readonly kind: "not_found" | "running" | "no_transcript" | "missing_task";
+  readonly taskId: string;
+  constructor(taskId: string, kind: SubAgentResumeError["kind"]) {
+    super(`subagent resume refused: ${kind} (task ${taskId})`);
+    this.taskId = taskId;
+    this.kind = kind;
+  }
 }
 
 /**
@@ -581,6 +614,73 @@ function skillIndexSnapshotField(
   if (entries === undefined) return {};
   return {
     skillIndexSnapshot: entries.map((entry) => ({ ...entry })),
+  };
+}
+
+/**
+ * ADR-0102 T3 / T5 (ADR-0071):per-worker 磁盘账三键折叠 —— taskId /
+ * traceFilePath / transcriptPath 同门派生自同一 `subagentsDir`（键
+ * `(父 conversationId, task_id)` 的目录段已由 `resolveSubagentsDirForDef`
+ * 解出）。目录缺席 → 三键整个省略（legacy envelope byte-stable）；在场则
+ * 懒建 `subagents/<taskId>/` 布局（trace record + fence-tmp pad + 工人
+ * transcript 路径）。
+ *
+ * 独立成模块级函数而非内联条件：`buildWorkerPayload` 的圈复杂度是逐函数
+ * 棘轮（同 spawn-subagent-tool 的 foregroundDrainExclusion 先例）。
+ */
+function workerLedgerFields(
+  subagentsDir: string | undefined,
+  taskId: string
+): {
+  readonly taskId?: string;
+  readonly traceFilePath?: string;
+  readonly transcriptPath?: string;
+} {
+  if (subagentsDir === undefined) return {};
+  const layout = ensureWorkerSessionLayout(subagentsDir, taskId);
+  return {
+    taskId,
+    traceFilePath: layout.recordPath,
+    transcriptPath: layout.transcriptPath,
+  };
+}
+
+/**
+ * ADR-0102 T4 — 续跑 def 合并：**身份与能力字段沿用原 def**（原 catalog
+ * 角色再 run()、同 model / maxTurns / timeoutMs / sandboxRoot /
+ * disallowedTools / systemPrompt / conversationId 归属），**回合与交付通道
+ * 字段按本次调用重算**（task 下一句 / parentTurnId / toolUseId / 前景排除
+ * 位）。排除与回合字段必须先摘再挂：留着 base 的值会把上一轮的归属错接到
+ * 这一跳，`excludeFromHostDrain` 留着会让后景续跑的终态丢掉 mailbox 叫醒。
+ * `task` 是这一跳的输入本体：缺失 / 空串 → typed 拒绝（`missing_task`），
+ * 不静默空串起工 —— 空 task 的工人会立刻交出无意义结果，比拒绝更难归因。
+ */
+function resumeDefinition(
+  base: SubAgentDefinition,
+  next: SubAgentDefinition,
+  taskId: string
+): SubAgentDefinition {
+  const task = next.task;
+  if (task === undefined || task.length === 0) {
+    throw new SubAgentResumeError(taskId, "missing_task");
+  }
+  // rest 解构 = 强类型 omit：摘掉上一跳的回合归属字段，再按本次调用重挂。
+  const {
+    parentTurnId: _baseTurnId,
+    toolUseId: _baseToolUseId,
+    excludeFromHostDrain: _baseDrain,
+    ...identity
+  } = base;
+  return {
+    ...identity,
+    task,
+    ...(next.parentTurnId !== undefined
+      ? { parentTurnId: next.parentTurnId }
+      : {}),
+    ...(next.toolUseId !== undefined ? { toolUseId: next.toolUseId } : {}),
+    ...(next.excludeFromHostDrain === true
+      ? { excludeFromHostDrain: true }
+      : {}),
   };
 }
 
@@ -1170,7 +1270,20 @@ export function createSubAgentManager(opts: {
     // 现在接收 taskId —— 父侧 manager 已经锁定 taskId 才能算出对应的 traceFilePath
     // (per-agent 形态: `<父会话文件夹>/subagents/agent-<taskId>.jsonl`),写到
     // envelope 让 worker file-mode 落该路径,代替 L2 假 scope `randomUUID()`(已退役)。
-    const id = randomUUID();
+    return launchWorker(def, randomUUID());
+  }
+
+  /**
+   * ADR-0102 T4 — spawn 的机械臂：以给定 task_id 起一个新 worker 进程并
+   * 入账（capacity / 入参校验在调用点完成后进入本函数）。fresh spawn 传
+   * randomUUID()；resumeTask 传**同一个** task_id（对外句柄不变、进程是
+   * 新的）。meta 已存在则 writeMetaOnce 天然跳过；per-agent trace 按
+   * taskId 缓存复用，续跑的 lifecycle 记录接在同一份 trace 之后。
+   */
+  function launchWorker(
+    def: SubAgentDefinition,
+    id: string
+  ): { readonly taskId: string } {
     const payload = buildWorkerPayload(def, id);
     const startedAt = new Date().toISOString();
     const task: Task = {
@@ -1614,15 +1727,12 @@ export function createSubAgentManager(opts: {
       // projectDir + def.conversationId 两段式缝)。任一在场即按派生结果发;
       // 双缺 → 不写这两个加性字段 → worker 退化到既有 IKNOW_TRACE_OUT /
       // defaultTraceDir 形态 (legacy envelope byte-stable)。
-      ...(resolveSubagentsDirForDef(def) !== undefined
-        ? {
-            taskId,
-            traceFilePath: ensureWorkerSessionLayout(
-              resolveSubagentsDirForDef(def) as string,
-              taskId
-            ).recordPath,
-          }
-        : {}),
+      //
+      // ADR-0102 T3:同一目录派生下再发 `transcriptPath` —— 工人 transcript
+      // (SessionFileV1 形态的对话账,`<subagents>/<taskId>/<taskId>.jsonl`,
+      // 与 per-agent trace `agent-<taskId>.jsonl` 分家)。落点与 trace 同门:
+      // 目录派生缺席 → 三个键整个省略,worker 不写账(旧形态逐字节不变)。
+      ...workerLedgerFields(resolveSubagentsDirForDef(def), taskId),
       ...todoLedgerAnchor(opts.todoDir, def.conversationId),
       // T7 (spec SC10):父会话「当时」的完整模型索引快照 —— 每次 spawn 现读
       // getter（`sandboxRootCell` 同形态），值落线后才增长父侧不会回流。
@@ -1774,6 +1884,41 @@ export function createSubAgentManager(opts: {
       armKillFallback(task, true);
     }
     return true;
+  }
+
+  /**
+   * ADR-0102 T4 — 续跑闸（进程已死 + 本切片起写下的工人 transcript）。
+   * `completed` / `failed` / `aborted` 一视同仁（机械同一条路径）；闸序：
+   * 存在 → 寿命 → transcript → 并发顶，前序不满足即 typed 拒绝、不占额度。
+   * 成功 = `launchWorker(merged, 同 taskId)` —— 新进程、同对外句柄；旧 Task
+   * 记录整体被新记录替换（终态信封 / endedAt 是上一轮的真值，随替换出账，
+   * 交差本身已在当跳 tool_result / mailbox 交付过）。
+   */
+  function resumeTask(
+    taskId: string,
+    def: SubAgentDefinition
+  ): { readonly taskId: string } {
+    const old = tasks.get(taskId);
+    if (old === undefined) {
+      throw new SubAgentResumeError(taskId, "not_found");
+    }
+    if (old.state === "starting" || old.state === "running") {
+      throw new SubAgentResumeError(taskId, "running");
+    }
+    const dir = resolveSubagentsDirForDef(old.def);
+    const transcriptPath =
+      dir === undefined ? undefined : workerTranscriptPath(dir, taskId);
+    // 锁句 6：只认 T3 工人账；per-agent trace（agent-<taskId>.jsonl）在场
+    // 但账缺席 = 切片前的旧工人，不从 trace 倒灌造账。
+    if (transcriptPath === undefined || !existsSync(transcriptPath)) {
+      throw new SubAgentResumeError(taskId, "no_transcript");
+    }
+    // 锁句 5：续跑占用同一子代理并发顶（超限 → SubAgentCapacityError）。
+    const cap = currentCapacity();
+    if (cap !== "unlimited") {
+      assertCapacityAvailable(cap, tasks);
+    }
+    return launchWorker(resumeDefinition(old.def, def, taskId), taskId);
   }
 
   /** #361 C2: host-drain 阻塞轮询所需的非终态任务 ID 列表(starting + running)。 */
@@ -1956,6 +2101,8 @@ export function createSubAgentManager(opts: {
     drainCompleted,
     listActive,
     abortTask,
+    // ADR-0102 T4: 死工人续跑入口（闸在 resumeTask 内判，subagent_continue 只做映射）。
+    resumeTask,
     listSubagents,
     subscribe,
     // ADR-0096 T2: 并发上限只读 getter — description N 与 SubAgentCapacityError

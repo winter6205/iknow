@@ -12,6 +12,7 @@ import { parseArgs, type ParsedCli } from "./cli/parse-args.js";
 import { runChatSession } from "./cli/chat-session.js";
 // #356 subagent worker headless 重入: 子代理进程 main dispatch 早返回。
 import { runSubagentWorker } from "./harness/subagent/worker.js";
+import { storeWorkerTranscriptIo } from "./cli/worker-transcript.js";
 import { shutdownDefaultLspPool } from "./harness/lsp/client.js";
 import {
   buildHarnessEngine,
@@ -613,7 +614,9 @@ async function main(): Promise<void> {
   // 形态错误 → exit 1, worker 必须自己 exit 2 区分协议错误与产品错误。
   if (parsed.command === "__subagent_worker__") {
     try {
-      await runSubagentWorker();
+      // ADR-0102 T3: 工人 transcript IO 在此注入（Gate B: codec 归
+      // session-api，harness 只见窄接口）。
+      await runSubagentWorker(storeWorkerTranscriptIo);
     } catch (err) {
       const msg =
         err instanceof Error ? (err.stack ?? err.message) : String(err);

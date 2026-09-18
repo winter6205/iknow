@@ -83,12 +83,25 @@ export function workerStderrPath(subagentsDir: string, taskId: string): string {
   return join(workerTaskDir(subagentsDir, taskId), "stderr.log");
 }
 
+/**
+ * ADR-0102 T3 — 工人 transcript 落点：`<subagents>/<taskId>/<taskId>.jsonl`。
+ * 与 per-agent trace (`agent-<taskId>.jsonl`) 同目录不同文件 —— 命名刻意不带
+ * `agent-` 前缀：`listSubagentRecordPaths` 的 trace 枚举（`agent-*.jsonl`）
+ * 因此不会把 transcript 收进 trace 名单（trace 与账分家，锁句 6）。
+ */
+export function workerTranscriptPath(
+  subagentsDir: string,
+  taskId: string
+): string {
+  return join(workerTaskDir(subagentsDir, taskId), `${taskId}.jsonl`);
+}
+
 /** Pad sibling of a worker record file (`…/<taskId>/fence-tmp`). */
 export function workerFenceTmpBesideRecord(traceFilePath: string): string {
   return join(dirname(traceFilePath), MAIN_SESSION_FENCE_TMP_DIR_NAME);
 }
 
-/** Create `subagents/<taskId>/` and its fence-tmp pad; return record + pad paths. */
+/** Create `subagents/<taskId>/` and its fence-tmp pad; return record + pad + transcript paths. */
 export function ensureWorkerSessionLayout(
   subagentsDir: string,
   taskId: string
@@ -96,6 +109,7 @@ export function ensureWorkerSessionLayout(
   readonly taskDir: string;
   readonly recordPath: string;
   readonly pad: string;
+  readonly transcriptPath: string;
 } {
   const taskDir = workerTaskDir(subagentsDir, taskId);
   const pad = workerFenceTmpPath(subagentsDir, taskId);
@@ -104,6 +118,7 @@ export function ensureWorkerSessionLayout(
     taskDir,
     recordPath: workerRecordPath(subagentsDir, taskId),
     pad,
+    transcriptPath: workerTranscriptPath(subagentsDir, taskId),
   };
 }
 

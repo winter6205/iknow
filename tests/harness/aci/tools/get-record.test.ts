@@ -268,12 +268,22 @@ describe("get_record ACI tool", () => {
       validator!({ conversation_id: "c1", record_id: "r", byte_window: 1 }),
       false
     );
-    // append-only SSOT 纪律:内容轴之后还能 append,但只能是 host 缝条件化件。
-    // 此断言让「之后还能 append 但不得插队」成为可测不变式。
+    // append-only SSOT 纪律:内容轴之后还能 append,但只能是条件化装配件
+    // （host 缝 / subagentManager 缝）。此断言让「之后还能 append 但不得插队」
+    // 成为可测不变式。
+    const conditionalTailNames = new Set([
+      "list-worktrees",
+      "remove-worktree",
+      // plan subagent-stop-and-continue T2/T4:stop / continue 与 spawn / result
+      // 同门（subagentManager 条件化装配）—— 本 registry 未供 manager，尾段
+      // 收敛为空的下一条断言仍认证「条件化件全数缺席」。
+      "subagent_stop",
+      "subagent_continue",
+    ]);
     for (const name of afterContentAxis) {
       assert.ok(
-        name === "list-worktrees" || name === "remove-worktree",
-        `get_record 后只能 append host 缝条件化件,unexpected "${name}"`
+        conditionalTailNames.has(name),
+        `get_record 后只能 append 条件化装配件,unexpected "${name}"`
       );
     }
   });

@@ -79,7 +79,7 @@ trace 为 ground truth）实测发现两个叠加问题：
 
 ## Amendment (2026-09-18)
 
-省略 `wait` 仍 = 前景；后景只由模型显式 `wait:false`。后景完成只靠 mailbox，禁止把 sleep / 轮询 / 假查当完成协议。否决：schema 必填 `wait`、省略改后景（含对齐 Claude Code 2.1.198+ Agent 默认后景）、靠加长 description 修「忘传 wait:false」。理由：前景当回合闭环仍是要的模式；何时后景跟模型能力挂钩，不由 harness 代选；`docs/guides/prompt-development.md` 说明书不是闸，且现有 description 已写 `wait:false` + mailbox。空跑 ≠ 前景把父绑在这一跳上。
+省略 `wait` 仍 = 前景；后景只由模型显式 `wait:false`。后景完成只靠 mailbox，禁止把 sleep / 轮询 / 假查当完成协议。否决：schema 必填 `wait`、省略改后景（含对齐 Claude Code 2.1.198+ Agent 默认后景）、靠加长 description 修「忘传 wait:false」。理由：前景当回合闭环仍是要的模式；何时后景跟模型能力挂钩，不由 harness 代选；`docs/guides/prompt-development.md` 说明书不是闸，且现有 description 已写 `wait:false` + mailbox。空跑 ≠ 前景把父绑在这一跳上。同轮多 spawn 与父模型 `subagent_stop` 见 ADR-0101，不在本篇展开。
 
 ## Evidence pointers
 

@@ -1036,6 +1036,102 @@ export function priorMessagesFromEnvelope(
 }
 
 /**
+ * ADR-0102 T3 — 工人 transcript IO 缝（harness 侧契约面）。
+ *
+ * Gate B（tests/harness/public-exports.test.ts）禁止 src/harness 可执行面
+ * import session-api —— 工人账的 codec 住在 session-api/store/worker-transcript，
+ * 生产实现在 cli 入口（`runSubagentWorker` 唯一调用方）注入；worker 内核
+ * 只见这个窄接口。not_found 折叠成 `absent`（合法态：新工人没有账 ≠ 错误），
+ * 真实故障（io / parse / schema）原样上抛 —— 调用方不得把损坏的账读成无账。
+ */
+export interface WorkerTranscriptIO {
+  readonly loadMessages: () => Promise<
+    | { readonly status: "present"; readonly messages: ReadonlyArray<AnthropicNativeMessage> }
+    | { readonly status: "absent" }
+  >;
+  readonly appendMessages: (
+    events: ReadonlyArray<AnthropicNativeMessage>,
+    thinkingMs?: number
+  ) => Promise<void>;
+}
+
+/**
+ * 按 envelope 落点构造一本账的 IO（cli 注入形态；测试直接传闭包）。
+ * `cwd` = 建批 header 的工作根（envelope.sandboxRoot 快照），实现方只在
+ * 首批建账时消费。
+ */
+export type WorkerTranscriptIOFactory = (loc: {
+  readonly transcriptPath: string;
+  readonly taskId: string;
+  readonly cwd: string;
+}) => WorkerTranscriptIO;
+
+/**
+ * ADR-0102 T3 — transcript 接线判定点（一次 await 完成「读账 → 定 prefix →
+ * 落 seed 批」）。返回 undefined = 不接线（旧 envelope 无 transcriptPath /
+ * 生产入口未注入 IO），调用方走改造前的逐字节旧形态。
+ *
+ * 两态 prefix：
+ *   - absent（新工人）→ envelope prior 段作前缀，seed 批 = [prior 段?, task]
+ *     一次落账（loop-engine 的 commit 点只覆盖 run 期新消息，初始 user/
+ *     prior 不经 commit，seed 在此补上）；
+ *   - present（续跑，ADR-0102 的 continue 臂）→ 盘上 head 链投影作前缀，
+ *     seed 批 = 本轮新 user 一句（continue 不重放 prior 段，写处境披露等
+ *     已在账上）。
+ * IO 抛出的真实故障（io / parse / schema）**原样上抛** —— 损坏的账不能
+ * 被读成无账；commit 失败按 loop-engine 契约包 MessageCommitError 中止 run。
+ */
+async function wireWorkerTranscript(opts: {
+  readonly env: WorkerEnvelope;
+  readonly deps: LoopEngineDeps;
+  readonly ioFactory: WorkerTranscriptIOFactory | undefined;
+  readonly segments: ReadonlyArray<AnthropicNativeMessage>;
+}): Promise<{
+  readonly deps: LoopEngineDeps;
+  readonly priorMessages: ReadonlyArray<AnthropicNativeMessage> | undefined;
+} | undefined> {
+  const transcriptPath = opts.env.transcriptPath;
+  if (transcriptPath === undefined || transcriptPath.length === 0) {
+    return undefined;
+  }
+  if (opts.ioFactory === undefined) {
+    // 装配漏接线（测试直调 / 旧 cli）：账不写，任务照跑 —— 与旧形态一致，
+    // 但留一行 stderr 观测，不静默丢「该写没写」。
+    log("envelope carries transcriptPath but no transcript IO injected; worker transcript disabled");
+    return undefined;
+  }
+  const io = opts.ioFactory({
+    transcriptPath,
+    taskId: opts.env.taskId ?? "",
+    cwd: opts.env.sandboxRoot,
+  });
+  const encode = opts.deps.adapter.encodeUserText;
+  const taskEvent = encode(opts.env.task);
+  const baseCommit = opts.deps.commitMessages;
+  const deps: LoopEngineDeps = {
+    ...opts.deps,
+    commitMessages: async (events, thinkingMs) => {
+      await io.appendMessages(events, thinkingMs);
+      if (baseCommit !== undefined) await baseCommit(events, thinkingMs);
+    },
+  };
+  const loaded = await io.loadMessages();
+  if (loaded.status === "present") {
+    await io.appendMessages([taskEvent]);
+    return { deps, priorMessages: loaded.messages };
+  }
+  const seed =
+    opts.segments.length > 0
+      ? [...opts.segments, taskEvent]
+      : [taskEvent];
+  await io.appendMessages(seed);
+  return {
+    deps,
+    priorMessages: opts.segments.length > 0 ? opts.segments : undefined,
+  };
+}
+
+/**
  * 测试 seam (导出仅供测试): envelope → run → truncateEnvelopeResult。
  *
  * 把 readStdin → parseWorkerEnvelope → run → 派生 envelope → 截断这一段
@@ -1073,6 +1169,12 @@ export async function runWorkerOnce(opts: {
    * 缺席 → 不派生 fileRefs (stop_reason 不受影响, 恒填)。
    */
   readonly writeToolNames?: ReadonlySet<string>;
+  /**
+   * ADR-0102 T3: 工人 transcript IO 注入（生产由 runSubagentWorker 透传
+   * cli 传入的真实缝；测试直接注入闭包）。envelope.transcriptPath 缺席时
+   * 本参数不被消费 —— 行为与改造前逐字节一致。
+   */
+  readonly transcriptIo?: WorkerTranscriptIOFactory;
 }): Promise<SubAgentEnvelope> {
   const { workerEnvelope: env, deps } = opts;
   const observability: EnvelopeObservabilityOpts =
@@ -1080,7 +1182,7 @@ export async function runWorkerOnce(opts: {
       ? { writeToolNames: opts.writeToolNames }
       : {};
   // #358 T2 / D8: 只应用 maxTurns 覆盖, timeoutMs 不进 deps (per-call 语义)。
-  const runDeps = applyEnvelopeOverrides(env, deps);
+  const baseRunDeps = applyEnvelopeOverrides(env, deps);
   // #358 T3: SIGTERM → abort("subagent-timeout")。worker 由父 manager per-task
   // 超时计时驱动, 收到 SIGTERM = 任务寿命到点, 走优雅收尾而非立即退出。
   const controller = new AbortController();
@@ -1090,10 +1192,21 @@ export async function runWorkerOnce(opts: {
     // 运行期透传 signal。onStream 不传: (a) text_delta 等热路径事件 worker
     // 无展示消费方; (b) signal 已 abort 时 run() 内部不跑收尾摘要, 不会 emit
     // stop_summary —— 摘要捕获只在下方自跑收尾轮 (runTimeoutEpilogue) 完成。
-    const priorMessages = priorMessagesFromEnvelope(
+    const envelopePrior = priorMessagesFromEnvelope(
       env,
-      runDeps.adapter.encodeUserText
+      baseRunDeps.adapter.encodeUserText
     );
+    // ADR-0102 T3 — 工人账接线（缺席 = 零变化）。
+    const wired = await wireWorkerTranscript({
+      env,
+      deps: baseRunDeps,
+      ioFactory: opts.transcriptIo,
+      segments: envelopePrior ?? [],
+    });
+    const runDeps = wired?.deps ?? baseRunDeps;
+    const priorMessages = wired
+      ? wired.priorMessages
+      : envelopePrior;
     const { result } = await run(
       env.task,
       runDeps,
@@ -1245,7 +1358,9 @@ function readStdin(): Promise<string> {
  * 顶层不 try/catch: 调用方 (cli.ts) 用 .catch → exit 2 兜底
  * (协议层崩溃 —— assumption 16: JSON parse / 信封字段缺失)。
  */
-export async function runSubagentWorker(): Promise<void> {
+export async function runSubagentWorker(
+  transcriptIo?: WorkerTranscriptIOFactory
+): Promise<void> {
   const input = await readStdin();
   const workerEnvelope = parseWorkerEnvelope(input);
   const env = loadIknowEnv();
@@ -1316,6 +1431,7 @@ export async function runSubagentWorker(): Promise<void> {
     workerEnvelope,
     deps,
     writeToolNames: writeToolNamesFrom(catalog),
+    transcriptIo,
   });
   process.stdout.write(JSON.stringify(result) + "\n");
   process.exit(0);
