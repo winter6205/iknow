@@ -887,13 +887,14 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
     await app.pressEnter();
     await untilFrame(app.setup, (f) => f.includes("思考开关"), 8000, "open");
 
-    // Ctrl+C：idle 无前台 turn → notice「无前台运行中的 turn」，且面板不关。
+    // Ctrl+C：无选区 → 复制提示「无选区：先按住鼠标左键拖选文本…」，且面板
+    // 不关（Ctrl+C 已是纯复制，2026-09-18 键位迁移）。
     await app.pressCtrlC();
     const frame = await untilFrame(
       app.setup,
-      (f) => f.includes("Ctrl+C"),
+      (f) => f.includes("无选区"),
       8000,
-      "ctrl-c"
+      "copy-hint"
     );
     expect(frame).toContain("思考开关"); // picker 分支不吞 ctrl 组合键
     await app.destroy();

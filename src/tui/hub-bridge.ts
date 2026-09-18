@@ -103,7 +103,7 @@ export interface TuiPostResult {
   readonly jsonMode: boolean;
   /** T3: 最近一次成功模型调用的 token usage（wire 字段缺席 → null，与 RunResult 同语义）。 */
   readonly lastUsage: TokenUsage | null;
-  /** B1: Ctrl+C 打断反馈 —— cancelled 时存在（true=checkpoint 已保存 /
+  /** B1: 用户打断反馈（Esc）—— cancelled 时存在（true=checkpoint 已保存 /
    *  false=无新内容未落盘）；非 cancelled 缺席（undefined）。 */
   readonly interrupted?: boolean;
   /** T3 (#458 包2): 本回合 verify 闭环终态
@@ -125,7 +125,7 @@ export interface TuiBridge {
   readonly ensureSession: (
     conversationId: string | undefined
   ) => Promise<string>;
-  /** 发一条消息跑一个 turn（透传 signal 支持 Ctrl+C 打断前台）。
+  /** 发一条消息跑一个 turn（透传 signal 支持 Esc 打断前台）。
    *  thinking: T2 每回合覆盖 harness 的 thinking 控制臂（与 SessionHub.postMessage
    *  的 wire 字段同形；缺省 → 沿用 ensureDeps 的缓存配置）。 */
   readonly postMessage: (opts: {

@@ -46,10 +46,8 @@ export function createSystemResolver(
   ctx: AssemblyContext,
   opts?: { readonly flags?: SystemResolverFlags }
 ): SystemResolver {
-  // ADR-0019 (T2): per-root memory store — 装配期 eager mkdir
-  // `<workspaceRoot>/.iknow/memory`(递归;project namespace 子目录由
-  // memory_save / memory_recall 按需 mkdir)。幂等 + 失败静默,
-  // 不阻塞装配(降级契约对齐 createSystemResolver 的 catch-all)。
+  // ADR-0099:项目记忆库落 home 项目树 `projects/<slug>/memory`
+  // （装配期 eager mkdir；失败静默,不阻塞装配）。
   void mkdir(ctx.memoryDir, { recursive: true }).catch(() => {});
   // per-flag-value 快照：flags 在场时最多两个槽位（true/false）各冻结一份，
   // 无 flags 时就是原有单快照。装配失败不毒化对应槽位。

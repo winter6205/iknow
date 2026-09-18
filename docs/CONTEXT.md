@@ -20,8 +20,8 @@ _Avoid_: 把 `SessionFileV1.messages[]` 当第二份权威；把 harness trace J
 **rewind head**: 落盘的当前头指针（transcript 某条事件 id）。rewind 只改这个指针，不截断 JSONL。进程内工作副本跟它走。
 _Avoid_: 只在内存里 fork；用 `messagesCount` 当下标 SSOT
 
-**home 项目树（home project tree）**: harness 按项目身份落在池根下的一棵目录——`<dataDir 或 ~/.iknow>/projects/<slug>/`，slug 键 = **projectIdentityRoot**。叶子是 **会话文件夹**；同级 `tasks/` 是 **后台任务登记**。不跟 **workspaceRoot** 分片。ADR-0087 / ADR-0088。
-_Avoid_: 把树建在 `<workspaceRoot>/.iknow`；把 `tasks/` 放进 conversation 叶子；把退役 `sessions/` 当成现行树
+**home 项目树（home project tree）**: harness 按项目身份落在池根下的一棵目录——`<dataDir 或 ~/.iknow>/projects/<slug>/`，slug 键 = **projectIdentityRoot**。叶子是 **会话文件夹**；同级 `tasks/` 是 **后台任务登记**；同级 `memory/` 是 **项目记忆库**。不跟 **workspaceRoot** 分片。ADR-0087 / ADR-0088 / ADR-0099。
+_Avoid_: 把树建在 `<workspaceRoot>/.iknow`；把 `tasks/` 或 `memory/` 放进 conversation 叶子；把退役 `sessions/` 当成现行树
 
 **会话文件夹（session folder）**: harness 拥有的按会话记录面——home 项目树下 `<conversationId>/`；装 session transcript / todos / trace / **内容寻址正文池** / subagents。与「写根 = 模型工作面」对立：这里的东西不是模型交付物，harness 也不把它读进 prompt。ADR-0071 / ADR-0087 / ADR-0088。
 _Avoid_: 把模型交付物放进来；当第五个根角色（稳定根清单不活化）；用 session `title` / `goal` / worktree label 当文件夹名；把带锁活状态（后台任务登记表 / worktrees 锚点）搬进叶子
@@ -35,7 +35,7 @@ _Avoid_: 用 transcript 当 trace 正文源；把两者当同一份记录的两�
 **内容寻址正文池（blobs）**: 会话文件夹内的 `blobs/<sha256>`——正文 mask 后另存**一份**、定长 sha256 当文件名、`flag:"wx"` write-if-missing，读侧按 sha 取回原文。哈希在这里是**命名用法不是摘要用法**：原文一字不少地存着，没有压缩也没有丢失；寿命 = 会话文件夹，删文件夹即回收（承接 ADR-0036 悬置未细化的 rotation orphans 规则）。ADR-0036 / ADR-0071。
 _Avoid_: 当全局共享池（那要自造引用计数 / GC）；当压缩或摘要；让 trace 引用 transcript 正文来代替它
 
-**continue_pending**: 截断后在**同一会话**把未完成的工具环接着跑完——人对齐路径是 **`/continue`**（skip-append：不追加新任务 user）；有 pending 时的 NL 白名单是次入口。先对人停住（典型 **Ctrl+C**）；`run` 前可对盘上 closeout 投影补悬空 `tool_use`。**本次**进模型的 prior 可去掉末尾 **interrupt system message**，盘上那句仍保留。空 Enter 不是续跑；忙着续跑只提示、不顺带 abort。**不是** ACI 工具。
+**continue_pending**: 截断后在**同一会话**把未完成的工具环接着跑完——人对齐路径是 **`/continue`**（skip-append：不追加新任务 user）；有 pending 时的 NL 白名单是次入口。先对人停住（TUI 典型 **Esc**，2026-09-18 键位迁移前是 Ctrl+C）；`run` 前可对盘上 closeout 投影补悬空 `tool_use`。**本次**进模型的 prior 可去掉末尾 **interrupt system message**，盘上那句仍保留。空 Enter 不是续跑；忙着续跑只提示、不顺带 abort。**不是** ACI 工具。
 _Avoid_: continue 工具；把空回车当续跑；续跑时从盘上删掉 interrupt；忙着 `/continue` 自动 abort；把续跑当传输重试；新建 session 挂旧历史；无确认自动续跑
 
 **turnCount**: Foundation 运行时回合计数，每完成一个 assistant 回合（包括纯文本完成）加一；`maxTurns` 是在调用模型前检查的运行时上限。
@@ -68,8 +68,8 @@ _Avoid_: 在 trace 里塞 input/output/token/cost（B 层字段）——该禁�
 **usage (token accounting)**: LLM API 每次成功调用回传的 token 计费（`inputTokens`/`outputTokens` 必填 + `cacheCreationInputTokens`/`cacheReadInputTokens` nullable，对齐 SDK `Usage`）；权威落点 = TraceService `LlmCallRecord`（观测真值，错误分支整条缺席），运行时暴露面仅 `RunResult.lastUsage`（TUI 显示读者，017:67 的有记录例外）。chars/N 估算只供压缩决策，永不进核算 / 显示（ADR-0008）。
 _Avoid_: 用估算值顶替 trace 真值；为无读者的账本建运行时承载面；把 usage 塞进 LoopTrace
 
-**context usage (display)**: 上下文用量显示 = TUI `ContextBar`（`src/tui/context-bar.tsx`）+ Web `UsageChip`（`web/src/components/UsageChip.tsx`，挂在 Composer）共同消费 `RunResult.lastUsage`（ADR-0008 D5）；wire 字段 = `TurnAnswerDto.lastUsage?` + `HealthResponse.contextWindow`（`src/session-api/` 投影，web 镜像于 `web/src/api/types.ts`）。百分比分子 = `inputTokens + cacheReadInputTokens + cacheCreationInputTokens`（Anthropic 三类 token 互不相交）；分母 = `contextWindow`（来源 `env.compress.contextWindow`，env var `IKNOW_MODEL_CONTEXT_WINDOW`，默认 200000）；Running 时显示上一次已完成的 lastUsage（one-beat lag）。
-_Avoid_: ContextUsageStrip；用 chars/N 估算顶替 lastUsage 真值；为显示引入第二份 token 账本；让 contextWindow 走 `deps.compress`（避免触发 auto-compaction 行为变化）
+**context usage (display)**: 上下文用量显示 = TUI `ContextBar`（`src/tui/context-bar.tsx`）+ Web `UsageChip`（`web/src/components/UsageChip.tsx`，挂在 Composer）共同消费 `RunResult.lastUsage`（ADR-0008 D5）；wire 字段 = `TurnAnswerDto.lastUsage?` + `HealthResponse.contextWindow`（`src/session-api/` 投影，web 镜像于 `web/src/api/types.ts`）。百分比分子 = `inputTokens + cacheReadInputTokens + cacheCreationInputTokens`（Anthropic 三类 token 互不相交）；分母 = **策略预算窗口**（来源 `env.compress.contextWindow`，env var `IKNOW_MODEL_CONTEXT_WINDOW`，默认 256000）；Running 时显示上一次已完成的 lastUsage（one-beat lag）。
+_Avoid_: ContextUsageStrip；用 chars/N 估算顶替 lastUsage 真值；为显示引入第二份 token 账本；让 contextWindow 走 `deps.compress`（避免触发 auto-compaction 行为变化）；用供应商 1M 卡当分母
 
 **viewport mount**: ChatView 只把 scrollbox 当前视口加 overscan 内的 transcript 条目挂进 OpenTUI 树；滚动文档仍覆盖全量 `session.messages` 与方案 B banner，高度来自布局实测。
 _Avoid_: 固定条数尾窗；行账 / 行窗口；把 LLM `/compact` 当 UI 树裁剪
@@ -140,11 +140,10 @@ _Avoid_: 把 `[skill-load name=]` 正文当作用户键入；加载技能；turn
 **chrome focus**: TUI 底栏焦点环 `input` | 子代理行 | `graph` 的单一 reducer；有子代理行时 Down 先入该列，再 graph；Up 反向回到输入框。子代理行聚焦时 **Ctrl+X** 强杀该子代理（父 turn 收到 cancelled）；无聚焦则空操作。
 _Avoid_: 只有 graph 抢 Down；焦点落在 ContextBar；子代理面板不可聚焦；位置行进焦点环；Enter 钻进子代理会话；第二套 picker 文案
 
-**subagent card live（子代理会话卡实时行）**: `spawn_subagent` 在会话 transcript 里占两行——`{role} running...` 加一行 dim 最新流；该 worker 完成后第二行原位变绿 `done`。位置在那张会话消息下，不在输入框上方。
-_Avoid_: identity strip above prompt；把最新流只挂在 prompt 边上；完成态 done 跟底栏面板一起淡出
+**subagent card live（子代理会话卡实时行）**: `spawn_subagent` 画在会话那张卡上：live 为角色行加一行 dim 任务概述（`taskPreview`）；**completed** 后概述留下，其下绿 `✓ Done`，不再写 `running...`。位置在该消息下，不在输入框上方。failed 走该卡 **failure overlay**。
+_Avoid_: identity strip above prompt；完成后用 `done` 替换概述；完成后仍 `running...`；绿 Done 走 failed；完成态 done 跟底栏面板一起淡出
 
-**前台打断**: TUI **Ctrl+C** 停当前会话全部前台——父 `running-fg` turn，以及本会话所有前景（`wait:true`）子代理，包括父已 idle 但仍 live 的；后景 `wait:false` 与其它会话 `running-bg` 不停。前台仍在跑时有选区也先打断。Ctrl+X 仍可单杀焦点行（含后景）。
-_Avoid_: 只 abort 父 signal 留下前景子代理；idle 夹缝让前景子代理继续转圈；running-fg 有选区只复制不 abort
+**前台打断**: TUI **Esc** 停当前会话全部前台——父 `running-fg` turn，以及本会话所有前景（`wait:true`）子代理，包括父已 idle 但仍 live 的；后景 `wait:false` 与其它会话 `running-bg` 不停。双击 Esc（≤1000ms）是回退选择器，前台有活时第一击先打断（2026-09-18 键位迁移：打断自 Ctrl+C 迁入，Ctrl+C 只剩选区复制；chat 视图外 Esc 由 list/mcp/graph 视图与各面板先消费）。Ctrl+X 仍可单杀焦点行（含后景）。_Avoid_: 只 abort 父 signal 留下前景子代理；idle 夹缝让前景子代理继续转圈；把 Ctrl+C 复制臂与打断绑回同一键；面板内重载 Esc 的返回/保存语义
 
 **session location chrome（会话位置行）**: TUI 底栏在 ContextBar 之下**常驻一行** `路径 · 分支`；绑 task worktree 只换同一行的路径。子代理与 Graph 在它下面（两者都有时子代理在上）；不进焦点环、不进模型消息、不带 dirty/diff。
 _Avoid_: 绑树才出现；未绑树 0 行；用显隐当「在不在树上」；常驻第二行 dirty/diff；子代理画在位置行上面
@@ -231,7 +230,7 @@ _Avoid_: 把默认改成 ON；开抽取却不要梦境；把记忆正文装进 s
 _Avoid_: 抽取再用低词重叠当矛盾作废；把四态压成 upsert；绕开 `memory_save` 写纪律；把三段合成一个函数
 
 **memory_gc**: 可重复、幂等的机械清理，三条规则、**零 LLM**——`ttl_days > 0` 且已过期 → `disabled: true`；被别的条目 `supersedes` 指名 → `disabled: true`；活跃条目超 store cap → 按效用分 `importance × recency × (1 + recall_count)`（recall 次数取自既有 `usage.json` sidecar）从低到高软禁。与抽取共用默认 3 个 `completed` 闸，并可在进程退出 best-effort；同趟可跑 **capability memory sweep**。GC **只软禁不删文件**。ADR-0031 D4；`specs/runtime-capability-memory-gate.md`。
-_Avoid_: 硬删文件；把 LLM 离线合并 / 摘要塞进 GC（合并走 **dream**，ADR-0033）；让 GC 依赖 frontmatter + usage sidecar 之外的运行时状态；会话开局同步全量 GC 挡首包；只靠 Ctrl+C 当唯一闸
+_Avoid_: 硬删文件；把 LLM 离线合并 / 摘要塞进 GC（合并走 **dream**，ADR-0033）；让 GC 依赖 frontmatter + usage sidecar 之外的运行时状态；会话开局同步全量 GC 挡首包；只靠人工打断（Esc）当唯一闸
 
 **promote**: `usage.json` 里一条记忆被 ≥2 个不同 session 召回后的资格。资格只进入 **memory_gc** 效用，**不再**把正文装进 `system`；常驻说明书只在 `AGENTS.md`。ADR-0044。
 _Avoid_: 用召回次数买 system 席位；auto-promote；把晋升当记忆进说明书的通道
@@ -290,8 +289,8 @@ _Avoid_: 把 frontend-only server 当生产路径但不代理 `/api`
 **workspace（serve 主根）**: serve session 的产品项目根，来源可以是 product SPA 选定的已存在绝对目录、显式 flag/env，或当前 serve 的显式默认绑定 `<homedir>/.iknow/default`；绑定后三锚合一。ADR-0023：serve 不把进程 cwd 当作隐式主根。
 _Avoid_: 把 serve 缺省说成 `process.cwd()`；与 `workspaceRoot` 字段、`home`（global 配置锚）、`sandboxRoot` 混同
 
-**workspaceRoot**: session 绑定的 per-root 操作状态锚（memory / settings 写回 fallback）；配置解析器仍可按 ADR-0019 D1.1 以 `process.cwd()` 生成默认值，但 session 创建前必须把解析值校验并明确写入。serve 无 flag/env 时的默认绑定值是 `<homedir>/.iknow/default`。不含用户画像，不含 **home 项目树**（会话文件夹与后台任务登记跟 home，ADR-0087 / ADR-0088）。画像根见 ADR-0025。
-_Avoid_: 用 workspaceRoot 当 `user.md` / `BOOTSTRAP.md` / 用户级 `AGENTS.md` / 用户 `rules/` 的物理根；把 identity seed 跟启动目录绑在一起；用它给 transcript / trace / tasks 分片
+**workspaceRoot**: session 绑定的 per-root 操作状态锚（settings 写回 fallback / worktrees）；配置解析器仍可按 ADR-0019 D1.1 以 `process.cwd()` 生成默认值，但 session 创建前必须把解析值校验并明确写入。serve 无 flag/env 时的默认绑定值是 `<homedir>/.iknow/default`。不含用户画像，不含 **home 项目树**（会话文件夹、后台任务登记与项目记忆跟 home，ADR-0087 / ADR-0088 / ADR-0099）。画像根见 ADR-0025。
+_Avoid_: 用 workspaceRoot 当 `user.md` / `BOOTSTRAP.md` / 用户级 `AGENTS.md` / 用户 `rules/` 的物理根；把 identity seed 跟启动目录绑在一起；用它给 transcript / trace / tasks / 项目记忆 分片
 
 **required workspaceRoot**: 新 session 创建时必须存在且通过校验的绝对 `workspaceRoot` 绑定；`cli chat`、`tui`、`serve` 都不能写入没有该绑定的 session file。执行阶段若绑定缺失或非法，必须在 engine 之前拒绝。
 _Avoid_: 把 resolver 的默认值当成已写入的 session 绑定；用 `process.cwd()` 回填缺失字段；把 serve 的 `~/.iknow/default` 默认绑定称为 unbound
@@ -371,8 +370,11 @@ _Avoid_: 把硬墙当沙箱；用换行/`format` 子串当危险；引导把交�
 **compact reason**: 压缩路径分类，闭集 `below_token_threshold` | `messages_too_few` | `windowed` | `full_summary`，写入 `CompactSessionResponse.reason` 并驱动 UI 文案。`below_token_threshold` 只表示 proactive 未过 auto-compact token gate。
 _Avoid_: 把手动 `/compact` 的 noop 写成「未达自动阈值」；UI 字面当业务码；reason 当 `LoopTrace` / `LlmCallRecord` 字段
 
-**auto-compact token gate**: loop-engine 每轮 step 前是否 **proactive** 压缩的阈值，公式 `contextWindow − MAX_OUTPUT_TOKENS_FOR_SUMMARY − AUTOCOMPACT_BUFFER_TOKENS`（`src/harness/compress/threshold.ts`），`IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` 可覆盖。不约束手动 `/compact`。估算只做自动路径判据，不进 trace / `RunResult.lastUsage`（ADR-0008 D6）。
-_Avoid_: 把该门当 `/compact` 许可；把字符估算当真实 token；gate 决策绕开 `evaluateCompactTrigger` 直接调 `shouldAutoCompact`
+**策略预算窗口**: `env.compress.contextWindow`——用量显示分母与 auto-compact 闸的同一数字；默认 256000。不是供应商模型上下文上限。ADR-0100。
+_Avoid_: 显示一套窗口、压缩一套；把 `providers[].contextWindow` 或 1M 卡当默认分母
+
+**auto-compact token gate**: loop-engine 每轮 step 前是否 **proactive** 压缩的阈值；未设覆盖时为 `floor(0.95 × 策略预算窗口)`（`src/harness/compress/threshold.ts`），`IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` 可覆盖且必须 `< contextWindow`。不约束手动 `/compact`。估算只做自动路径判据，不进 trace / `RunResult.lastUsage`（ADR-0008 D6 / ADR-0100）。
+_Avoid_: 把该门当 `/compact` 许可；把字符估算当真实 token；gate 决策绕开 `evaluateCompactTrigger` 直接调 `shouldAutoCompact`；用 `window − 33k` 当策略预算缺省闸
 
 **manual compact**: TUI `/compact` 与 web 压缩按钮触发的一次压缩；执行体与 proactive auto-compact **已开火之后**相同（窗口或 full_summary）。空会话幂等 no-op。
 _Avoid_: 等到自动阈值才允许手动压；为手动另写一套压缩器
@@ -413,6 +415,9 @@ _Avoid_: 把 drain 与"结果获取"混同（前景 spawn 不经 drain）；`wai
 
 **mailbox**: 后景 spawn 的子→父终态回传通道。只投终态浓缩结果，不承载运行中消息，也不是子↔子协议。
 _Avoid_: 进度流；swarm / 子代理互投；把 mailbox 当 D-δ 低层 messaging；接到 run_graph 或图节点（ADR-0076）
+
+**空跑**: 父模型在等子代理交差时自己 sleep、轮询 `subagent_result`、或编造状态。mailbox 叫醒主模型不是空跑。
+_Avoid_: 把前景 spawn 把父绑在这一跳上当成空跑；用 bash 计时器当完成协议
 
 **父可见信封**: 子代理交差给父模型看的那一层——短摘要、改过的路径、成败与停因、`task_id`、该 worker 的 `/tmp` 根，以及 host 在终态写入 pad 的终稿相对路径 `output_path`；短信封不是全文，`truncated` 不是任务失败。
 _Avoid_: 把完整 result 当任务产物；把汇报截断当成任务失败；默认交差附带产物名单；靠子模型自己 write_file 才留终稿
@@ -618,10 +623,10 @@ _Avoid_: 与 **model-call hardCap** 混名；与 LSP `idleTimeoutMs` 混名；12
 **model-call hardCap**: 同一次 `adapter.step` 从开始起算的有限墙钟；有增量也会到期。与 idle 到点在引擎侧可同收 `StopReason: timeout`，但归因仍是硬顶。
 _Avoid_: 无限硬顶当验收；与 per-call tool timeout / turn timeout 混名
 
-**sticky notice**: TUI 底栏/提示槽里异常停或传输过程的英文（或既有）提示框；默认不自动收回——人关掉、或主动开下一轮等明确动作才清。可在同一框内改文案（等待 → 退避 → 失败因）。其中「等待模型」这一条是**过程性**的：只在**模型相位**静默时给出（工具执行期含权限 / ask 等待按设计无流事件，不给出），并在成功收尾时清除；异常停 sticky 不受此影响。
-_Avoid_: TTL 自动消失；与 **viewport API error** 气泡混名；重试成功后偷偷清掉未读失败框；把工具执行期算进模型静默
+**sticky notice**: TUI 底栏/提示槽里异常停或传输过程的英文（或既有）提示框；默认不自动收回——人关掉、或主动开下一轮等明确动作才清。可在同一框内改文案（等待 → 退避 → 失败因）。其中「等待模型」这一条是**过程性**的：只在**模型相位**静默时给出；**离开模型相位**（`tool_call_start`，含 `spawn_subagent` / bash / 权限与 ask 等待）立即清除，成功收尾也清除；工具期既不新写也不继续显示。异常停 sticky 不受此影响。
+_Avoid_: TTL 自动消失；与 **viewport API error** 气泡混名；重试成功后偷偷清掉未读失败框；把工具执行期算进模型静默；工具相位仍留着「等待模型」文案
 
-**interrupt system message**: cancelled（典型 Ctrl+C）收尾写入权威历史末尾的固定 system 文案 `Interrupted by user.`。普通下一句人话进模型时带着它；`/continue` 的本次 prior 可去掉末尾这一句，盘上仍保留。timeout 不加此句。
+**interrupt system message**: cancelled（TUI 典型 Esc，2026-09-18 键位迁移前是 Ctrl+C）收尾写入权威历史末尾的固定 system 文案 `Interrupted by user.`。普通下一句人话进模型时带着它；`/continue` 的本次 prior 可去掉末尾这一句，盘上仍保留。timeout 不加此句。
 _Avoid_: 把 interrupt 当 closeout 的 tool_result；从盘上删除再续跑；timeout 复用同一句
 
 **skill bare alias**: 插件技能规范名 `<plugin>:<name>` 之外，catalog 在无冲突时登记的裸名别名；`SkillCatalog.get` 先 canonical 再 bare。斜杠技能解析必须问 catalog，不在宿主再拆 `:`。展示与 help 优先 canonical。agents 不进斜杠。
@@ -665,6 +670,7 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **skill bare alias vs skill-load display projection**: get/匹配认 bare；给人看的芯片与 help 仍优先 canonical
 - **user-turn keep on protocol failure vs viewport API error**: 用户句可留盘；失败 API 壳仍不喂模型当 assistant
 - **状态栏 vs context usage (display)**: 状态栏是给模型的现势快照；context usage (display) 是给人看的 token 用量条
+- **策略预算窗口 vs 供应商上下文**: 分母和 auto-compact 闸问 256k 策略预算；1M 真窗口只解释余量，不进百分比（ADR-0100）
 - **状态栏 vs 环境现势**: 状态栏给模型（`last_tool` + open todos）；环境现势给人（cwd/git/diff），不进状态栏 user 消息（#655）
 - **会话位置行 vs 环境现势**: 位置行是常驻身份（主仓/分支/树）；环境现势可以更宽，本轮位置行不带 dirty/diff
 - **todo 账本 vs 状态栏**: 账本是磁盘现行 `todos.md`；栏只投影未完成项。replace 当跳不另灌列表；后续回合靠栏，不靠把快照拼进 messages（ADR-0085）
@@ -687,6 +693,7 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **剩余子图 vs 活图状态**: 剩余子图是这一次还要跑的；活图是含已完成在内的全账本（ADR-0050）
 - **plan/实施/replan vs 活图状态**: 前者是主代理认知循环；后者是有依赖、要冻结时的落地，不是规划的超集（ADR-0049）
 - **沙箱纪律 vs 前景/后景 spawn**: 沙箱纪律约束 `bash` 前台/后台围栏；前景/后景 spawn 是 `spawn_subagent` 的等待契约（ADR-0014）
+- **空跑 vs 前景卡住**: 空跑是等结果时的轮询/sleep/假状态；前景卡住是省略 `wait`（默认 true）时父这一跳绑到终态。后景完成靠 mailbox，不靠计时器（ADR-0014）
 - **graph mode vs PermissionMode**: graph mode 是编排 overlay；PermissionMode 是 mutating 问/拒/放行。进 Graph 冻结当时 permission，不把 Graph 写入 `PERMISSION_MODES`
 - **开图提示 vs run 首短现势**: 翻转当拍可留一条长 ON/OFF；开着期间每个 `run()` 开头贴一次短「仍开着」，同一轮内环不再贴（ADR-0041 / ADR-0081）
 - **图现势 vs system 前缀**: 开着/关着会变，不进 system；现势走用户侧每个 `run()` 一句，不靠抖 tools/system，也不单靠 compact 特补或每跳追加（ADR-0081）
@@ -726,13 +733,14 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **git 作业 vs worktree isolation mode**: 作业是 bash 上的版本库侧效应；隔离是写路径落点（现行 model-provision，见本表 **worktree isolation mode**）。隔离开时作业在 task 树内做完
 - **git 作业 vs 环境现势**: 现势给人看仓；作业是模型经 bash 改仓。现势不进模型消息
 - **git 作业 vs git 块**: 作业是纪律 SOP（`## Git work`）；git 块是会话级分支/status 快照（`## Git`）。两段并存，不得互替
-- **home 项目树 vs workspaceRoot vs 会话文件夹**: 项目树是池根下按 slug 的一棵目录（会话叶子 + `tasks/`）；`workspaceRoot` 是 memory / settings 写回 / worktrees；会话文件夹只是项目树里的 conversation 叶子，不含登记表。ADR-0088。
+- **home 项目树 vs workspaceRoot vs 会话文件夹**: 项目树是池根下按 slug 的一棵目录（会话叶子 + `tasks/` + `memory/`）；`workspaceRoot` 是 settings 写回 / worktrees；会话文件夹只是项目树里的 conversation 叶子，不含登记表与记忆库。ADR-0088 / ADR-0099。
 - **worktree isolation mode vs workspaceRoot vs workspace（serve 主根）**: git worktree 是会话级 mutate 物理隔离；`workspaceRoot` 是 per-root 状态锚（ADR-0019）；serve 主根是显式选定锚（ADR-0023）。rebind 只切本会话生效根，不改锚规则本身
 - **session worktree rebind vs taskRoot（活值）**: rebind 是动作（缝成功 resolve 的那一刻），taskRoot 是该动作写入的活 cell；动作对下一波 tool calls 生效（波快照边界），cell 读取面始终回答「当前生效根」
 - **task worktree label vs conversationId**: label 是文件夹名与 enter 定位；conversationId 是归属身份，不写进目录名
 - **工作树说明书 vs 闸 vs 提示词**: description 先回答 agent 能不能调、做什么；写被拦点名是 harness；人喊创建是 usage/夹具
 - **create-worktree vs create-task-worktree**: 模型面用前者；后者是旧注册名，不再给模型
-- **前台打断 vs chrome focus**: Ctrl+C 停本会话全部前景子代理与父 turn；Ctrl+X 只杀焦点那一行（可含后景）
+- **前台打断 vs chrome focus**: Esc 停本会话全部前景子代理与父 turn；Ctrl+X 只杀焦点那一行（可含后景）
+- **完成态 ✓ Done vs 替换概述**: 子代理卡 completed 后概述留下、其下 `✓ Done`；不是把第 2 行换成字面 `done`
 - **父可见信封 vs host drain**: 前景交差是 tool_result 上的信封；drain 只服务后景 mailbox 叫醒
 - **settled appearance vs result preview**: 落定三类决定谁还上屏；成功 bash 的结果预览是折叠后的尾窗，不是百分比轨迹
 - **必须看见 vs 噪音**: 本次改动 diff、新建 10 行预览、进行中命令、位置行、进度最后一跳必须看见；中间百分比轨迹、`[运行中]`、收类正文、`<graph_mode>` 气泡是噪音

@@ -34,7 +34,8 @@ export const DEFAULT_BY_CATEGORY: Readonly<
 function codeBuiltInRules(): ReadonlyArray<NormalRuleSpec> {
   return Object.freeze([
     {
-      // `memory_save` writes into `~/.iknow/memory/<id>.md` — the agent's own
+      // `memory_save` writes into the project memory library on the home
+      // project tree (`…/projects/<slug>/memory/`), not the user's workspace.
       // memory library, not the user's workspace. Treating it like a generic
       // write tool caused the agent to be fail-closed at every non-interactive
       // inlet (ask / serve, or chat TTY with no prompt available), producing

@@ -1,10 +1,11 @@
 /**
  * review-fix (M1/M2/M3):home 项目树分组键 SSOT。
  *
- * ADR-0071 / ADR-0088:`<poolRoot>/projects/<basename(projectIdentityRoot)>-<sha1[:12]>/`
- * 是会话文件夹与后台任务登记表共用的分组锚。两处消费者
+ * ADR-0071 / ADR-0088 / ADR-0099:`<poolRoot>/projects/<basename(projectIdentityRoot)>-<sha1[:12]>/`
+ * 是会话文件夹、后台任务登记与项目记忆库共用的分组锚。消费者
  * (`src/session-api/store/session-store.ts` 的 `resolveProjectSessionDir`,
- *  `src/harness/background/paths.ts` 的 `resolveTasksDir`)历史上各算一份
+ *  `src/harness/background/paths.ts` 的 `resolveTasksDir`,
+ *  `src/harness/memory/paths.ts` 的 `resolveProjectMemoryDir`)历史上各算一份
  * 公式并各自定长度上限 —— 漂移会让任务登记落入与同名会话文件夹不同
  * 的 slug,造成登记表孤儿(无对话的活账本 / 反之)。本模块把公式与上限
  * 收成单一字面量:`computeProjectSlug` 出 slug,`MAX_PROJECT_IDENTITY_ROOT_BYTES`

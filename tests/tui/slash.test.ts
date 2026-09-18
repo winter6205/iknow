@@ -127,12 +127,16 @@ function vocabularyCommands(): ReadonlyArray<string> {
 }
 
 describe("helpLines", () => {
-  test("覆盖全部词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
+  test("覆盖全部词表命令 + Esc 打断/Ctrl+C 复制说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
     const joined = helpLines().join("\n");
     for (const command of vocabularyCommands()) {
       expect(joined).toContain(`/${command}`);
     }
+    // 2026-09-18 键位迁移：Esc = 打断（双击回退），Ctrl+C = 复制选中。
+    expect(joined).toContain("Esc");
+    expect(joined).toContain("打断前台运行中的 turn");
     expect(joined).toContain("Ctrl+C");
+    expect(joined).toContain("复制选中文本");
     // #321 B1 fix-session：Ctrl+Y 已移除（拖选仅高亮，右键才复制）。
     expect(joined).not.toContain("Ctrl+Y");
     // #321 B1 鼠标拖选提示（拖选高亮 → 右键复制到剪贴板）。

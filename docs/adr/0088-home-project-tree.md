@@ -9,7 +9,7 @@ Status: accepted
 
 ## Decision
 
-**home 项目树** = 显式 `--data-dir` 否则 `~/.iknow`，其下 `projects/<slug>/`：会话文件夹叶子 + 同级 `tasks/`。slug 仍按 `projectIdentityRoot`（ADR-0071）。退役 `sessions/`：产品零写入，不自动迁成会话文件夹（L3）。工作区 `.iknow` 只留必须贴仓的锚（worktrees / 项目 settings / mcp / skills / rules / memory）。冲突叶子不覆盖。不靠 grep 排除整棵 `.iknow`。
+**home 项目树** = 显式 `--data-dir` 否则 `~/.iknow`，其下 `projects/<slug>/`：会话文件夹叶子 + 同级 `tasks/` + 同级 `memory/`。slug 仍按 `projectIdentityRoot`（ADR-0071）。退役 `sessions/`：产品零写入，不自动迁成会话文件夹（L3）。工作区 `.iknow` 只留必须贴仓的锚（worktrees / 项目 settings / mcp / skills / rules）。冲突叶子不覆盖。不靠 grep 排除整棵 `.iknow`。
 
 ## Why not
 

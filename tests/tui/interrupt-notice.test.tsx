@@ -2,15 +2,16 @@
 /**
  * tests/tui/interrupt-notice.test.tsx
  *
- * B1: Ctrl+C 打断反馈 —— app.tsx runTurnOnce 的 notice 双分支断言。
+ * B1: 用户打断（2026-09-18 键位迁移后为 Esc）反馈 —— app.tsx runTurnOnce 的
+ * notice 双分支断言。
  *
  * 用 fake bridge 注入已解析的 TuiPostResult(interrupted=true/false),直接驱动
  * runTurnOnce 的 notice 呈现:
  *   - interrupted === true  → notice「已打断，checkpoint 已保存」
  *   - interrupted === false → notice「已打断（无新内容，未落 checkpoint）」
  *
- * 为什么 fake bridge 而非真实 bridge + Ctrl+C 键序列:
- *   TUI 的打断键序列(提交 turn → Ctrl+C → abort → cancelled 落盘)涉及时序
+ * 为什么 fake bridge 而非真实 bridge + 打断键序列:
+ *   TUI 的打断键序列(提交 turn → Esc → abort → cancelled 落盘)涉及时序
  *   (delayMs / abort 竞态),用真实 bridge 断言「interrupted 双分支文案」会把
  *   时序噪声带进通知文案测试;而 `interrupted` 的 wire 产生已在 hub 层
  *   (tests/session-api/hub.test.ts B1 用例)与 hub-bridge 透传(既有

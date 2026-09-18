@@ -3,10 +3,11 @@
 Date: 2026-08-05
 Status: accepted
 
+> **Amendment 2026-09-18**（ADR-0099）：Decision 1 的 auto memory 落点 **superseded** —— 项目记忆库 = `<dataDir 或 ~/.iknow>/projects/<slug>/memory/`（home 项目树，与会话叶子 / `tasks/` 同 slug）。用户层 `AGENTS.md` 仍 `~/.iknow/AGENTS.md`。
 > **Decision 5 只**（auto-extraction 延期项）superseded by `0031-auto-memory-extract-and-mechanical-gc.md`。
 > **Decision 3** 中「`system` 仅一句 existence pointer、nothing more」由 ADR-0034 放宽为：抽取开启且库非空时可追加 **memory_catalog** + 英文纪律句。
 > **Decision 3** 中「跨 session 核实后可把 body 装进 system」由 ADR-0044 废止：任何 provenance 的记忆 body 都不得进 `system`；常驻说明书只在 `AGENTS.md`。
-> D1 / D2 / D4 / D6 不受影响，仍为现行决策。
+> D2 / D4 / D6 不受影响，仍为现行决策。D1 落点见 ADR-0099。
 
 ## Context
 

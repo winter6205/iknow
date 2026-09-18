@@ -18,6 +18,8 @@
  * rev 2026-08-26:D-α V1 加 /graph（图模式 overlay 的非 TTY 对等物,值域与
  * 文案单点在 harness/graph/mode.ts;三入口 chat / TUI / serve 同语义）。
  * /effort help 文案由 ADJUSTABLE_EFFORT_LEVELS 派生（不硬编码第二份列表）。
+ * rev 2026-09-18:键位迁移 —— Esc = 打断前台（双击回退），Ctrl+C = 复制选中；
+ * help 尾注三行随语义改写（打断不再绑 Ctrl+C）。
  *
  * 解析规则：输入 trim 后以 "/" 开头先过词表；未命中 → unknown（UI 提示）；
  * 不以 "/" 开头 → message（普通消息）。
@@ -162,7 +164,8 @@ export function helpLines(
     "/model     切换模型（provider/model；下一轮生效）",
     "/quit      退出（别名 /exit）",
     ...skillLines,
-    "Ctrl+C     打断前台运行中的 turn",
+    "Esc        打断前台运行中的 turn（双击回退到更早的回合）",
+    "Ctrl+C     复制选中文本",
     "Ctrl+O     折叠/展开思考面板",
     "鼠标拖选    选中文本 → 右键复制到剪贴板",
   ];

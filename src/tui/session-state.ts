@@ -172,7 +172,7 @@ export function turnFinished(
   });
 }
 
-/** Ctrl+C 语义护栏（Q1a）：仅 running-fg 可被打断。 */
+/** 前台打断护栏（Q1a；Esc 消费，2026-09-18 自 Ctrl+C 迁入）：仅 running-fg 可被打断。 */
 export function canInterrupt(session: TuiSessionState): boolean {
   return session.runState === "running-fg";
 }

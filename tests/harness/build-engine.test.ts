@@ -241,7 +241,7 @@ afterAll(async () => {
  * 为什么不是裸 `rm(root, { recursive: true, force: true })`:`force` 只压
  * ENOENT,压不住「rm 走到最后一步 rmdir(root) 时,root 里**刚好**又长出一个
  * 目录」。而本文件的根确实会这样长:装配期 `createSystemResolver`
- * (src/harness/memory/refresh.ts:53)对 `<root>/.iknow/memory/<ns>` 走的是
+ * (src/harness/memory/refresh.ts)对 `memoryDir` 走的是
  * **fire-and-forget** `void mkdir(..., { recursive: true }).catch(() => {})`
  * —— ADR-0019 明确「不阻塞装配」。实测该 mkdir 落在 buildHarnessEngine
  * 返回后 0–28ms(40 次采样:median 2ms / p90 17ms / max 28ms),而 T2 矩阵
