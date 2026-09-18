@@ -30,6 +30,7 @@ import { describe, it, vi } from "vitest";
 import type { ChildProcess } from "node:child_process";
 
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
+import { SubAgentResumeError } from "../../src/harness/subagent/manager.ts";
 import type {
   SubAgentDefinition,
   SubAgentManager,
@@ -299,6 +300,29 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
       ToolExecutionError
     );
     assert.equal(invocations.length, 1);
+  });
+
+  it("manager 闸防御面：task 缺失 / 空串 → missing_task typed 抛，不起新进程", async () => {
+    const harness = makeManagerHarness();
+    const taskId = await spawnCompleted(
+      harness,
+      { task: "gate", conversationId: "c1" } as SubAgentDefinition
+    );
+    harness.writeTranscript(taskId);
+    const resume = harness.manager.resumeTask!;
+    for (const next of [{}, { task: "" }] as SubAgentDefinition[]) {
+      assert.throws(
+        () => resume(taskId, next),
+        (err: unknown) => {
+          assert.ok(err instanceof SubAgentResumeError);
+          assert.equal(err.kind, "missing_task");
+          assert.equal(err.taskId, taskId);
+          return true;
+        }
+      );
+    }
+    // 拒绝路径不消费额度、不起进程。
+    assert.equal(harness.invocations.length, 1);
   });
 
   it("并发顶与 spawn 同源：满 → capacity 拒，不起新进程（锁句 5）", async () => {

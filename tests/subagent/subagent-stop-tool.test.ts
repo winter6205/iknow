@@ -21,6 +21,7 @@ import type { ChildProcess } from "node:child_process";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type {
   SubAgentDefinition,
+  SubagentInfo,
   SubAgentManager,
 } from "../../src/harness/subagent/manager.ts";
 import { createSubAgentStopTool } from "../../src/harness/subagent/subagent-stop-tool.ts";
@@ -203,6 +204,36 @@ describe("subagent_stop — running 走既有 abortTask（与 Ctrl+X 同路径�
       () => waiting,
       (err: unknown) => (err as Error).name === "SubAgentAbortError"
     );
+  });
+});
+
+describe("subagent_stop — 中止快照竞态（不伪造终态）", () => {
+  it("abortTask 返回 false 且任务已出账 → not_found 结构化说明，无伪造 state", async () => {
+    // fake manager 精确造竞态窗口：首查 running（过所有权 + 终态闸），
+    // abortTask 时对 manager 已不可见返回 false，重查列表已空 —— 真实
+    // manager 里这是「TTL 清出恰在两次枚举之间」的形态。
+    const running: SubagentInfo = {
+      taskId: "t-gone",
+      state: "running",
+      taskPreview: "racing",
+      startedAt: new Date().toISOString(),
+      conversationId: "c1",
+    };
+    let listed: ReadonlyArray<SubagentInfo> = [running];
+    const manager = {
+      listSubagents: () => listed,
+      abortTask: () => {
+        listed = [];
+        return false;
+      },
+    } as unknown as SubAgentManager;
+    const tool = createSubAgentStopTool({ manager });
+    const out = parse(
+      await tool.handler({ task_id: "t-gone" }, { conversationId: "c1" })
+    );
+    assert.equal(out.status, "not_found");
+    // 关键钉：消失态不得兜底伪造任何 state（旧实现写 state:"failed" 是幻觉）。
+    assert.ok(!("state" in out), "vanished task must not carry a fabricated state");
   });
 });
 

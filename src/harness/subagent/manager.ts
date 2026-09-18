@@ -211,7 +211,7 @@ export class SubAgentWaitTimeoutError extends Error {
  */
 export class SubAgentResumeError extends Error {
   override readonly name = "SubAgentResumeError";
-  readonly kind: "not_found" | "running" | "no_transcript";
+  readonly kind: "not_found" | "running" | "no_transcript" | "missing_task";
   readonly taskId: string;
   constructor(taskId: string, kind: SubAgentResumeError["kind"]) {
     super(`subagent resume refused: ${kind} (task ${taskId})`);
@@ -652,20 +652,36 @@ function workerLedgerFields(
  * 字段按本次调用重算**（task 下一句 / parentTurnId / toolUseId / 前景排除
  * 位）。排除与回合字段必须先摘再挂：留着 base 的值会把上一轮的归属错接到
  * 这一跳，`excludeFromHostDrain` 留着会让后景续跑的终态丢掉 mailbox 叫醒。
+ * `task` 是这一跳的输入本体：缺失 / 空串 → typed 拒绝（`missing_task`），
+ * 不静默空串起工 —— 空 task 的工人会立刻交出无意义结果，比拒绝更难归因。
  */
 function resumeDefinition(
   base: SubAgentDefinition,
-  next: SubAgentDefinition
+  next: SubAgentDefinition,
+  taskId: string
 ): SubAgentDefinition {
-  const merged: Record<string, unknown> = { ...base };
-  delete merged.parentTurnId;
-  delete merged.toolUseId;
-  delete merged.excludeFromHostDrain;
-  merged.task = next.task ?? "";
-  if (next.parentTurnId !== undefined) merged.parentTurnId = next.parentTurnId;
-  if (next.toolUseId !== undefined) merged.toolUseId = next.toolUseId;
-  if (next.excludeFromHostDrain === true) merged.excludeFromHostDrain = true;
-  return merged as SubAgentDefinition;
+  const task = next.task;
+  if (task === undefined || task.length === 0) {
+    throw new SubAgentResumeError(taskId, "missing_task");
+  }
+  // rest 解构 = 强类型 omit：摘掉上一跳的回合归属字段，再按本次调用重挂。
+  const {
+    parentTurnId: _baseTurnId,
+    toolUseId: _baseToolUseId,
+    excludeFromHostDrain: _baseDrain,
+    ...identity
+  } = base;
+  return {
+    ...identity,
+    task,
+    ...(next.parentTurnId !== undefined
+      ? { parentTurnId: next.parentTurnId }
+      : {}),
+    ...(next.toolUseId !== undefined ? { toolUseId: next.toolUseId } : {}),
+    ...(next.excludeFromHostDrain === true
+      ? { excludeFromHostDrain: true }
+      : {}),
+  };
 }
 
 export function createSubAgentManager(opts: {
@@ -1902,7 +1918,7 @@ export function createSubAgentManager(opts: {
     if (cap !== "unlimited") {
       assertCapacityAvailable(cap, tasks);
     }
-    return launchWorker(resumeDefinition(old.def, def), taskId);
+    return launchWorker(resumeDefinition(old.def, def, taskId), taskId);
   }
 
   /** #361 C2: host-drain 阻塞轮询所需的非终态任务 ID 列表(starting + running)。 */

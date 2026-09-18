@@ -22,17 +22,10 @@ import type { AciToolDef } from "../aci/types.js";
 import type { ToolExecutionContext } from "../tools/types.js";
 import type { SubAgentManager } from "./manager.js";
 import { ToolExecutionError } from "../errors.js";
+import { assertSubagentOwnership, findSubagentTask } from "./subagent-tool-shared.js";
 
 export interface SubAgentStopToolDeps {
   readonly manager: SubAgentManager;
-}
-
-/** manager 全量枚举里按 task_id 反查（含归属会话，Postel 缺席即无归属）。 */
-function findTask(
-  manager: SubAgentManager,
-  taskId: string
-): ReturnType<SubAgentManager["listSubagents"]>[number] | undefined {
-  return manager.listSubagents().find((info) => info.taskId === taskId);
 }
 
 export function createSubAgentStopTool(
@@ -71,7 +64,7 @@ export function createSubAgentStopTool(
           "subagent_stop: missing or invalid `task_id`"
         );
       }
-      const info = findTask(deps.manager, taskId);
+      const info = findSubagentTask(deps.manager, taskId);
       if (info === undefined) {
         // 结构化说明：未知 id 不是「停失败」，是没有这个任务（ADR-0101 幂等）。
         return JSON.stringify({
@@ -80,12 +73,7 @@ export function createSubAgentStopTool(
           note: "no such task in this manager (unknown or already expired)",
         });
       }
-      if (info.conversationId !== ctx?.conversationId) {
-        // 跨会话拒：所有权判定先于任何信号（范围对齐 bash_stop 的 scope 过滤）。
-        throw new ToolExecutionError(
-          "subagent_stop: out_of_scope — task belongs to another conversation"
-        );
-      }
+      assertSubagentOwnership(info, ctx, "subagent_stop");
       if (info.state === "completed" || info.state === "failed") {
         return JSON.stringify({
           task_id: taskId,
@@ -97,11 +85,20 @@ export function createSubAgentStopTool(
       if (!dispatched) {
         // starting/running → 终态的竞态：abortTask 对已终态任务返回 false，
         // 重查一次按幂等语义回报，不伪造「stopped」。
-        const latest = findTask(deps.manager, taskId);
+        const latest = findSubagentTask(deps.manager, taskId);
+        if (latest === undefined) {
+          // 两次查询之间任务整个出账（TTL 清出）：终态真值已不可知，
+          // 回报 not_found 结构化说明，不兜底伪造 state。
+          return JSON.stringify({
+            task_id: taskId,
+            status: "not_found",
+            note: "task disappeared between lookup and abort (evicted from the manager before any signal)",
+          });
+        }
         return JSON.stringify({
           task_id: taskId,
           status: "already_terminal",
-          state: latest?.state ?? "failed",
+          state: latest.state,
         });
       }
       return JSON.stringify({ task_id: taskId, status: "stopped" });

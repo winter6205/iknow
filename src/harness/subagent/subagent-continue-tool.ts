@@ -30,6 +30,7 @@ import {
   SubAgentWaitTimeoutError,
 } from "./manager.js";
 import { ToolExecutionError } from "../errors.js";
+import { assertSubagentOwnership, findSubagentTask } from "./subagent-tool-shared.js";
 import {
   envelopeFromWaitTimeout,
   foregroundDrainExclusion,
@@ -43,20 +44,13 @@ export interface SubAgentContinueToolDeps {
 
 const LABEL = "subagent_continue";
 
-/** manager 全量枚举里按 task_id 反查（含归属会话，与 subagent_stop 同形态）。 */
-function findTask(
-  manager: SubAgentManager,
-  taskId: string
-): ReturnType<SubAgentManager["listSubagents"]>[number] | undefined {
-  return manager.listSubagents().find((info) => info.taskId === taskId);
-}
-
 /**
  * SubAgentResumeError 的 kind → 模型可见文案。渲染形态 `${kind} — ${出路}`：
- * kind 词面上可见（typed-error catch 契约），三条都给出路 —— running 指回
+ * kind 词面上可见（typed-error catch 契约），每条都给出路 —— running 指回
  * stop-then-continue 的纠偏路径（中途注入不授权）；no_transcript 说明旧工人
- * 没有账、改走新 spawn；not_found 是调用面错误。放模块级：handler 圈复杂度
- * 棘轮（spawn 工具 foregroundDrainExclusion 同款先例）。
+ * 没有账、改走新 spawn；not_found 是调用面错误；missing_task 是 manager 直连
+ * 面的空 task 兜底（本工具入参校验已挡空 message，触发即调用面缺陷）。
+ * 放模块级：handler 圈复杂度棘轮（spawn 工具 foregroundDrainExclusion 同款先例）。
  */
 function resumeRefusalMessage(err: SubAgentResumeError): string {
   switch (err.kind) {
@@ -64,26 +58,27 @@ function resumeRefusalMessage(err: SubAgentResumeError): string {
       return `${LABEL}: ${err.kind} — task ${err.taskId} is still running; to correct its course, use subagent_stop first, then continue once it reaches a terminal state`;
     case "no_transcript":
       return `${LABEL}: ${err.kind} — task ${err.taskId} has no worker transcript on disk, so its dialogue cannot be replayed; dispatch a fresh spawn_subagent with the full context instead`;
+    case "missing_task":
+      return `${LABEL}: ${err.kind} — the resume request carried no task text; retry with a non-empty message`;
     case "not_found":
       return `${LABEL}: ${err.kind} — no task ${err.taskId} is known to this session's sub-agent manager`;
   }
 }
 
 /**
- * 所有权闸（与 subagent_stop 同一道）：跨会话拒，且判定先于再拉起。
- * 未知 id 不在这里挡 —— 让它流到 manager.resumeTask 拿 not_found，
- * 寿命/账/额度的真值只在 manager 一处判（工具侧重算会漂移）。
+ * 所有权闸（与 subagent_stop 同一道，共享判定见 subagent-tool-shared.ts）：
+ * 跨会话拒，且判定先于再拉起。未知 id 不在这里挡 —— 让它流到
+ * manager.resumeTask 拿 not_found，寿命/账/额度的真值只在 manager 一处判
+ * （工具侧重算会漂移）。
  */
 function assertOwnership(
   manager: SubAgentManager,
   taskId: string,
   ctx: ToolExecutionContext | undefined
 ): void {
-  const info = findTask(manager, taskId);
-  if (info !== undefined && info.conversationId !== ctx?.conversationId) {
-    throw new ToolExecutionError(
-      `${LABEL}: out_of_scope — task belongs to another conversation`
-    );
+  const info = findSubagentTask(manager, taskId);
+  if (info !== undefined) {
+    assertSubagentOwnership(info, ctx, LABEL);
   }
 }
 
