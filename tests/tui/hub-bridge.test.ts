@@ -10,7 +10,8 @@
  *  - in-flight 登记簿：soleId 归因语义（0/1/N）；postMessage 进出登记、
  *    失败路径也 unmark；
  *  - postMessage 回执投影（finalText / stopReason / turnCount）；
- *  - T3 上下文用量：bridge.contextWindow 默认 200000、可 override；postMessage
+ *  - T3 上下文用量：bridge.contextWindow 默认与策略预算窗口 SSOT
+ *    （`DEFAULT_STRATEGY_CONTEXT_WINDOW`）同源、可 override；postMessage
  *    回执的 lastUsage 透传（wire 有 → state 有；wire 无 → null）。
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -21,6 +22,7 @@ import {
   createInflightRegistry,
   createTuiBridge,
 } from "../../src/tui/hub-bridge.js";
+import { DEFAULT_STRATEGY_CONTEXT_WINDOW } from "../../src/config/env.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.js";
 import { ValidationError } from "../../src/shared/errors.js";
 import { CURRENT_SCHEMA_VERSION } from "../../src/session-api/store/schema.js";
@@ -193,12 +195,12 @@ describe("hub-bridge postMessage", () => {
 });
 
 describe("hub-bridge contextWindow（T3）", () => {
-  test("默认 200000（与 loop-engine compress 默认同源）", () => {
+  test("默认与策略预算窗口 SSOT 同源（不从本测重新钉数字）", () => {
     const bridge = createTuiBridge({
       deps: makeDeps([]),
       inflight: createInflightRegistry(),
     });
-    expect(bridge.contextWindow).toBe(200_000);
+    expect(bridge.contextWindow).toBe(DEFAULT_STRATEGY_CONTEXT_WINDOW);
   });
 
   test("override 生效", () => {

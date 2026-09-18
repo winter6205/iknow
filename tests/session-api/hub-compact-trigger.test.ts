@@ -162,7 +162,7 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
     const hub = new SessionHub({
       store,
       // thresholdTokens 故意缺席 → getAutoCompactThreshold 缺省 =
-      // contextWindow - 20000 - 13000 = 167000。manual /compact 视作已过门,
+      // floor(0.95 × contextWindow) = 190000。manual /compact 视作已过门,
       // 不调 evaluateCompactTrigger,直接走 splitForCompaction → windowed 支
       // (8 > 6 keepRecent → dropped=2, kept=6)。
       deps: {

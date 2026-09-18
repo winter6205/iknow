@@ -47,13 +47,14 @@ import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import type { VerifyAnswerView } from "../session-api/contract.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import type { IknowEnv, LlmEnv } from "../config/env.js";
+import { DEFAULT_STRATEGY_CONTEXT_WINDOW } from "../config/env.js";
 
 /**
- * T3: TUI contextWindow 显示配置默认值（与 loop-engine.ts:152 的
- * `deps.compress.contextWindow` 默认 200000 同源；env var
- * `IKNOW_MODEL_CONTEXT_WINDOW`）。仅作显示，不启用压缩（本计划裁决 5）。
+ * T3: TUI 用量显示的 **策略预算窗口**缺省（ADR-0100）。分母与 proactive 闸问
+ * 同一数字，故引用 env 层的 `DEFAULT_STRATEGY_CONTEXT_WINDOW`（`IKNOW_MODEL_CONTEXT_WINDOW`
+ * 覆盖），不在此另立一份常量。仅作显示，不启用压缩（本计划裁决 5）。
  */
-export const DEFAULT_CONTEXT_WINDOW = 200_000;
+export const DEFAULT_CONTEXT_WINDOW = DEFAULT_STRATEGY_CONTEXT_WINDOW;
 
 /**
  * T6 (checkpoint-rewind): 双 Esc 回退的 debounce 窗口（间隔 ≤ 此值视为双击，
@@ -247,7 +248,8 @@ export interface CreateTuiBridgeOptions {
    * hub.shutdown 销毁）。缺席 = 本入口未接活图。
    */
   readonly liveGraphLedger?: LiveGraphLedgerHost;
-  /** T3: 上下文窗口容量（tokens）。缺省 `DEFAULT_CONTEXT_WINDOW = 200_000`。 */
+  /** T3: 上下文用量显示分母（**策略预算窗口**，token）。缺省
+   *  `DEFAULT_CONTEXT_WINDOW = DEFAULT_STRATEGY_CONTEXT_WINDOW = 256_000`（ADR-0100）。 */
   readonly contextWindow?: number;
   /** T2: LLM env 覆盖源，透传给 SessionHub（override 路径重建 adapter 时用，
    *  不回退 process.env）。与 SessionHub 构造 opts 的 overrideEnv 同形。 */

@@ -12,6 +12,9 @@
  * 末尾追加 ADR-0093 provider 解析组（`llm.providers` 唯一 LLM 承载 +
  * apiKeyEnv 缺席 typed 抛）：provider 路径的 key **只读 process.env**，
  * 不走 fileMap（该组单独写 `.env.local` 负例钉这一点）。
+ *
+ * compress 组另钉 ADR-0100：缺省 **策略预算窗口** = 256000，且 TUI 与 health
+ * 的显示分母缺省引用同一常量（不得各写一份数字）。
  */
 
 import { afterEach, beforeEach, describe, it } from "vitest";
@@ -20,11 +23,15 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  DEFAULT_STRATEGY_CONTEXT_WINDOW,
   formatLlmProviderConfigError,
   isLlmProviderConfigError,
   loadIknowEnv,
   wireModelFromRoute,
 } from "../../src/config/env.ts";
+import { DEFAULT_CONTEXT_WINDOW as TUI_DEFAULT_CONTEXT_WINDOW } from "../../src/tui/hub-bridge.ts";
+import { DEFAULT_CONTEXT_WINDOW as HEALTH_DEFAULT_CONTEXT_WINDOW } from "../../src/session-api/http.ts";
+import { getAutoCompactThreshold } from "../../src/harness/compress/threshold.ts";
 import {
   loadIknowSettings,
   type IknowSettings,
@@ -249,10 +256,27 @@ describe("loadIknowEnv — compress config (#119 T1)", () => {
     for (const k of ENV_KEYS) delete process.env[k];
   });
 
-  it("default: contextWindow=200000, thresholdTokens=undefined(均未设 env)", () => {
+  it("default: contextWindow=256000(策略预算缺省), thresholdTokens=undefined(均未设 env/settings)", () => {
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-    assert.equal(env.compress.contextWindow, 200000);
+    assert.equal(env.compress.contextWindow, 256_000);
     assert.equal(env.compress.thresholdTokens, undefined);
+  });
+
+  it("缺省分母与 auto-compact 闸同源 (ADR-0100):未设 env/settings → 256000 与 floor(0.95×256000)", () => {
+    // CONTEXT **策略预算窗口** / **auto-compact token gate**:显示分母与闸问同一
+    // 数字。三处缺省（env 派生值 / TUI ContextBar / health 投影）各写一份字面量
+    // 时，任何一处漂移都会让「显示 95% 却还没压缩」这类不一致重新出现。
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.compress.contextWindow, DEFAULT_STRATEGY_CONTEXT_WINDOW);
+    assert.equal(TUI_DEFAULT_CONTEXT_WINDOW, DEFAULT_STRATEGY_CONTEXT_WINDOW);
+    assert.equal(
+      HEALTH_DEFAULT_CONTEXT_WINDOW,
+      DEFAULT_STRATEGY_CONTEXT_WINDOW
+    );
+    assert.equal(
+      getAutoCompactThreshold(env.compress.contextWindow, undefined),
+      243_200
+    );
   });
 
   it("显式 IKNOW_MODEL_CONTEXT_WINDOW=300000 → env.compress.contextWindow=300000", () => {
@@ -267,10 +291,10 @@ describe("loadIknowEnv — compress config (#119 T1)", () => {
     assert.equal(env.compress.thresholdTokens, 150000);
   });
 
-  it("非数字字符串（如 'abc'）→ contextWindow 回退 200000（对齐 envInt 既有纪律）", () => {
+  it("非数字字符串（如 'abc'）→ contextWindow 回退缺省策略预算窗口（对齐 envInt 既有纪律）", () => {
     process.env.IKNOW_MODEL_CONTEXT_WINDOW = "abc";
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-    assert.equal(env.compress.contextWindow, 200000);
+    assert.equal(env.compress.contextWindow, 256_000);
   });
 
   it("IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS 非数字 → undefined（可选 int 非法回退）", () => {
@@ -729,7 +753,7 @@ describe("loadIknowEnv — settings merge (#353)", () => {
       },
     });
     assert.equal(env.llm.maxTurns, 15);
-    assert.equal(env.compress.contextWindow, 200000);
+    assert.equal(env.compress.contextWindow, 256_000);
     assert.equal(env.compress.thresholdTokens, undefined);
   });
 

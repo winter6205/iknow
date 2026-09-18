@@ -105,20 +105,33 @@ describe("MessageBlocks 历史卡宿主 — subagentCards 链接通（锁句 1/2
     await setup.renderer.destroy();
   });
 
-  test("命中 completed 卡 → 第 2 行绿 `done`（锁句 2：turn 落定后仍在卡上）", async () => {
+  test("命中 completed 卡 → 概述留下 + 其下绿 `✓ Done`（锁句 2 reopen：turn 落定后概述不丢）", async () => {
     const cards = new Map<string, SubagentCardLines>([
       [
         SPAWN_ID,
-        { roleLine: "explore running...", detailLine: "done", done: true },
+        {
+          roleLine: "explore",
+          detailLine: "查找文档",
+          doneLine: "✓ Done",
+          done: true,
+        },
       ],
     ]);
     const setup = await renderWithCards(cards, new Map([[SPAWN_ID, false]]));
     const lines = frameLines(setup);
-    expect(lines).toContain("explore running...");
-    expect(lines).toContain("done");
-    const doneFg = spanFg(setup, "done");
+    // 概述被完成标记顶掉是 reopen 的直接动因 —— 两行都必须在场且有序。
+    expect(lines).toContain("explore");
+    expect(lines).toContain("查找文档");
+    expect(lines).toContain("✓ Done");
+    expect(lines.indexOf("✓ Done")).toBe(lines.indexOf("查找文档") + 1);
+    expect(lines.some((l) => l.includes("running..."))).toBe(false);
+    const doneFg = spanFg(setup, "✓ Done");
     expect(doneFg).toBeDefined();
     expect(rgbaEq(doneFg!, RGBA.fromHex(tuiPalette.add))).toBe(true);
+    // 绿只属于完成标记：概述仍是 dim。
+    const detailFg = spanFg(setup, "查找文档");
+    expect(detailFg).toBeDefined();
+    expect(rgbaEq(detailFg!, RGBA.fromHex(tuiPalette.dim))).toBe(true);
     await setup.renderer.destroy();
   });
 });
@@ -169,17 +182,23 @@ describe("MessageBlocks 历史卡宿主 — 回落面（锁句 5/6/7）", () => 
     const cards = new Map<string, SubagentCardLines>([
       [
         SPAWN_ID,
-        { roleLine: "explore running...", detailLine: "done", done: true },
+        {
+          roleLine: "explore",
+          detailLine: "查找文档",
+          doneLine: "✓ Done",
+          done: true,
+        },
       ],
     ]);
     const setup = await renderWithCards(cards, new Map([[SPAWN_ID, true]]));
     const lines = frameLines(setup);
-    // 失败横切优先：两行形态（身份行 + 绿 done）整体让位给既有失败形态
+    // 失败横切优先：卡形态（概述 + 绿 `✓ Done`）整体让位给既有失败形态
     // `explore`（error 色，detail-only）。子代理工具的成功与失败都走
-    // detail-only，`[失败]` 前缀只属于普通工具 —— 故断「两行不在 + 颜色
-    // 不是绿」而非断某个失败字面。
+    // detail-only，`[失败]` 前缀只属于普通工具 —— 故断「概述与完成标记
+    // 不在 + 颜色不是绿」而非断某个失败字面。
     expect(lines.some((l) => l.includes("running..."))).toBe(false);
-    expect(lines).not.toContain("done");
+    expect(lines).not.toContain("✓ Done");
+    expect(lines).not.toContain("查找文档");
     const fg = spanFg(setup, "explore");
     expect(fg).toBeDefined();
     expect(rgbaEq(fg!, RGBA.fromHex(tuiPalette.add))).toBe(false);

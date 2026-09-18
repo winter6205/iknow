@@ -16,6 +16,7 @@ import {
   renderWorkspaceRootError,
   type WorkspaceRootError,
 } from "../config/workspace-root.js";
+import { DEFAULT_STRATEGY_CONTEXT_WINDOW } from "../config/env.js";
 import { isWorkspacesRecentsError } from "../config/workspaces-recents.js";
 import { mapStoreError, type SessionHub } from "./hub.js";
 import type { SessionStoreError } from "./store/index.js";
@@ -54,8 +55,8 @@ import {
 
 export { resolveDefaultWebRoot };
 
-/** 上下文窗口缺省（token）：与 loop-engine 默认同源（200000）。 */
-export const DEFAULT_CONTEXT_WINDOW = 200_000;
+/** **策略预算窗口**缺省（ADR-0100）：health 显示分母引用 env 层的同一常量。 */
+export const DEFAULT_CONTEXT_WINDOW = DEFAULT_STRATEGY_CONTEXT_WINDOW;
 
 export type SessionHttpServerOptions = {
   hub: SessionHub;
@@ -63,7 +64,8 @@ export type SessionHttpServerOptions = {
   webRoot?: string;
   host?: string;
   port?: number;
-  /** 上下文窗口大小（token）。缺省 200000（与 loop-engine 默认同源）。
+  /** **策略预算窗口**大小（token），用量显示分母。缺省
+   *  `DEFAULT_STRATEGY_CONTEXT_WINDOW = 256_000`（ADR-0100）。
    *  HealthResponse 字段；由 serve.ts 从 loadIknowEnv().compress.contextWindow 透传。 */
   contextWindow?: number;
   /** 模型路由 ID（settings.llm.model）。HealthResponse 字段；

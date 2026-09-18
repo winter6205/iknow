@@ -140,8 +140,8 @@ _Avoid_: 把 `[skill-load name=]` 正文当作用户键入；加载技能；turn
 **chrome focus**: TUI 底栏焦点环 `input` | 子代理行 | `graph` 的单一 reducer；有子代理行时 Down 先入该列，再 graph；Up 反向回到输入框。子代理行聚焦时 **Ctrl+X** 强杀该子代理（父 turn 收到 cancelled）；无聚焦则空操作。
 _Avoid_: 只有 graph 抢 Down；焦点落在 ContextBar；子代理面板不可聚焦；位置行进焦点环；Enter 钻进子代理会话；第二套 picker 文案
 
-**subagent card live（子代理会话卡实时行）**: `spawn_subagent` 画在会话那张卡上：live 为角色行加一行 dim 任务概述（`taskPreview`）；**completed** 后概述留下，其下绿 `✓ Done`，不再写 `running...`。位置在该消息下，不在输入框上方。failed 走该卡 **failure overlay**。
-_Avoid_: identity strip above prompt；完成后用 `done` 替换概述；完成后仍 `running...`；绿 Done 走 failed；完成态 done 跟底栏面板一起淡出
+**subagent card live（子代理会话卡实时行）**: `spawn_subagent` 画在会话那张卡上：live 为角色行加一行 dim 任务概述（`taskPreview`）；**completed** 后概述留下，其下绿 `✓ Done`，不再写 `running...`。位置在该消息下，不在输入框上方。failed 走该卡 **failure overlay**。角色行 = catalog id（`subagent_type` / `SubagentInfo.role`，缺省 `general-purpose`）；task 正文里的 `ROLE: implementation worker` 不是角色。同一 worker 不得再并排一张未 join 的 `general-purpose running`。
+_Avoid_: identity strip above prompt；完成后用 `done` 替换概述；完成后仍 `running...`；绿 Done 走 failed；完成态 done 跟底栏面板一起淡出；把 task 里的 ROLE 文案当 catalog；已 join 的卡旁边再画一条 fallback 运行行
 
 **前台打断**: TUI **Esc** 停当前会话全部前台——父 `running-fg` turn，以及本会话所有前景（`wait:true`）子代理，包括父已 idle 但仍 live 的；后景 `wait:false` 与其它会话 `running-bg` 不停。双击 Esc（≤1000ms）是回退选择器，前台有活时第一击先打断（2026-09-18 键位迁移：打断自 Ctrl+C 迁入，Ctrl+C 只剩选区复制；chat 视图外 Esc 由 list/mcp/graph 视图与各面板先消费）。Ctrl+X 仍可单杀焦点行（含后景）。_Avoid_: 只 abort 父 signal 留下前景子代理；idle 夹缝让前景子代理继续转圈；把 Ctrl+C 复制臂与打断绑回同一键；面板内重载 Esc 的返回/保存语义
 
@@ -617,14 +617,14 @@ _Avoid_: 让模型猜包管理器再装；`npm i -g`；默认 `ln -s` 主仓依�
 **dispatch lesson**: 给主代理的短英文调度课（explore 优先、并发上限由操作员工作流约束、隔离下先建树再写、技能走 catalog）；落在 `spawn_subagent` description 和/或小段默认注入，**不是**第二份项目说明书，也不焊外来 home 指令文件。改文案走 `docs/guides/prompt-development.md`。
 _Avoid_: 第二份 CLAUDE.md；把整份 arthurpower 路由贴进 system；用课代替 capacity 闸
 
-**model-call idle**: 单次流式 `adapter.step` 上「无模型输出增量」的静默上限；认 thinking/text/tool 增量则重置。默认分钟级。尚无可见输出到期 → 可走传输 `retry`；已有可见输出或已发出 `tool_use` → 不自动重打。约 20s 无字节只更新 **sticky notice** 文案，不结算。
-_Avoid_: 与 **model-call hardCap** 混名；与 LSP `idleTimeoutMs` 混名；120s 当产品默认真值；把 idle abort 标成用户取消
+**model-call idle**: 单次流式 `adapter.step` 上「无模型输出增量」的静默上限；认 thinking/text/tool 增量则重置。默认分钟级。尚无可见输出到期 → 可走传输 `retry`；已有可见输出或已发出 `tool_use` → 不自动重打。约 20s 无字节只更新 **sticky notice** 的过程性「仍在等模型流」文案，不结算、不指控网络。
+_Avoid_: 与 **model-call hardCap** 混名；与 LSP `idleTimeoutMs` 混名；120s 当产品默认真值；把 idle abort 标成用户取消；把 20s 当网络诊断
 
 **model-call hardCap**: 同一次 `adapter.step` 从开始起算的有限墙钟；有增量也会到期。与 idle 到点在引擎侧可同收 `StopReason: timeout`，但归因仍是硬顶。
 _Avoid_: 无限硬顶当验收；与 per-call tool timeout / turn timeout 混名
 
-**sticky notice**: TUI 底栏/提示槽里异常停或传输过程的英文（或既有）提示框；默认不自动收回——人关掉、或主动开下一轮等明确动作才清。可在同一框内改文案（等待 → 退避 → 失败因）。其中「等待模型」这一条是**过程性**的：只在**模型相位**静默时给出；**离开模型相位**（`tool_call_start`，含 `spawn_subagent` / bash / 权限与 ask 等待）立即清除，成功收尾也清除；工具期既不新写也不继续显示。异常停 sticky 不受此影响。
-_Avoid_: TTL 自动消失；与 **viewport API error** 气泡混名；重试成功后偷偷清掉未读失败框；把工具执行期算进模型静默；工具相位仍留着「等待模型」文案
+**sticky notice**: TUI 底栏/提示槽里异常停或传输过程的英文（或既有）提示框；默认不自动收回——人关掉、或主动开下一轮等明确动作才清。可在同一框内改文案（等待 → 退避 → 失败因）。其中「等待模型」这一条是**过程性心跳**：只表示模型相位还在、流上暂时没字节，不诊断网络。只在**模型相位**静默时给出；**离开模型相位**（`tool_call_start`，含 `spawn_subagent` / bash / 权限与 ask 等待）立即清除，成功收尾也清除；工具期既不新写也不继续显示。异常停 sticky 不受此影响。
+_Avoid_: TTL 自动消失；与 **viewport API error** 气泡混名；重试成功后偷偷清掉未读失败框；把工具执行期算进模型静默；工具相位仍留着「等待模型」文案；20s 文案写 Check your network
 
 **interrupt system message**: cancelled（TUI 典型 Esc，2026-09-18 键位迁移前是 Ctrl+C）收尾写入权威历史末尾的固定 system 文案 `Interrupted by user.`。普通下一句人话进模型时带着它；`/continue` 的本次 prior 可去掉末尾这一句，盘上仍保留。timeout 不加此句。
 _Avoid_: 把 interrupt 当 closeout 的 tool_result；从盘上删除再续跑；timeout 复用同一句

@@ -160,6 +160,23 @@ function cardIfLive(
 }
 
 /**
+ * 会话里已经有任一 spawn join 卡时，live tail 不再画未 join 的
+ * `spawn_subagent` 运行行（CONTEXT **subagent card live**：不得并排
+ * `running...` 与 fallback `general-purpose running`）。
+ * 无 join 卡 → 原样保留，第一条运行行仍可见。
+ */
+export function filterLiveToolRunsAgainstSpawnCards(
+  runs: ReadonlyArray<LiveToolRun>,
+  cards: ReadonlyMap<string, SubagentCardLines> | undefined
+): ReadonlyArray<LiveToolRun> {
+  if (cards === undefined || cards.size === 0) return runs;
+  return runs.filter((run) => {
+    if (run.name !== "spawn_subagent" || run.status !== "running") return true;
+    return cards.has(run.id);
+  });
+}
+
+/**
  * live 工具 box 的纯文本行（[状态行, ...预览行]），供行账 + flat 投影共用。
  * 完成态预览与 `completedToolPreview` 同源（代码或截断 diff）；结果预览
  * 走 `resultToolPreview`（bash stdout/stderr 尾部 tail）。
@@ -169,13 +186,15 @@ export function liveToolPreviewTextLines(
   cols: number,
   /** specs/tui-subagent-transcript-live.md：本 run 是 spawn 卡且 join 上了子代理
    *  时，卡的文本行改由卡级投影提供（第 1 行 `{role} running...`、第 2 行 dim
-   *  预览 / 绿 `done`）。缺席 → 与改前逐字节一致（非 spawn 工具、轮询卡、未
+   *  预览；completed 概述下再加绿 `✓ Done`）。缺席 → 与改前逐字节一致（非 spawn 工具、轮询卡、未
    *  join 的 spawn 卡都走既有路径）。 */
   card?: SubagentCardLines | null
 ): ReadonlyArray<string> {
   const live = cardIfLive(run, card);
   if (live !== null) {
-    return [live.roleLine, live.detailLine];
+    return live.doneLine === undefined
+      ? [live.roleLine, live.detailLine]
+      : [live.roleLine, live.detailLine, live.doneLine];
   }
   if (run.status === "running") {
     return [runningLine(run, cols)];
@@ -204,7 +223,7 @@ export function liveToolPreviewTextLines(
 }
 
 /** live 工具 box 占用的物理行数（状态 1 行 + 可见预览行）。
- *  card 命中 → 2 行（第 1 行身份 + 第 2 行预览 / `done`），行账与
+ *  card 命中 → live 2 行（身份 + 概述）、completed 3 行（概述下加 `✓ Done`），行账与
  *  `liveToolPreviewTextLines` 同源（两行路径同样由它产出，parity 不破）。 */
 export function liveToolPreviewRows(
   run: LiveToolRun,
@@ -232,9 +251,10 @@ export function liveToolRunsBox(
   cols: number,
   cards?: ReadonlyMap<string, SubagentCardLines>
 ): ReactNode {
+  const visible = filterLiveToolRunsAgainstSpawnCards(runs, cards);
   return (
     <box flexDirection="column" width={cols}>
-      {runs.map((run, i) => (
+      {visible.map((run, i) => (
         <box
           key={`${run.id}-card`}
           flexDirection="column"
@@ -254,7 +274,7 @@ export function liveToolRunsBox(
  *
  *  `card`（specs/tui-subagent-transcript-live.md）：命中时该 spawn 卡画
  *  `SubagentCardView` 两行（第 1 行 `{role} running...`、第 2 行 dim 预览 /
- *  绿 `done`），整卡不再走既有标题 + 预览组合；failed 卡不吃 card（锁句 5
+ *  绿 `✓ Done`），整卡不再走既有标题 + 预览组合；failed 卡不吃 card（锁句 5
  *  的失败横切在 box 这一层同样成立）。 */
 export function liveToolPreviewBox(
   run: LiveToolRun,

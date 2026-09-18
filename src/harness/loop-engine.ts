@@ -278,8 +278,8 @@ export interface LoopEngineDeps {
   readonly promptTools?: () => ReadonlyArray<ToolDef>;
   /**
    * #119 T7:压缩配置缝。字段缺席 = 压缩关闭(行为零变化,守 byte-identical 纪律)。
-   * contextWindow 默认 200000,thresholdTokens 缺省推导 `window - 33000`
-   * (见 harness/compress/threshold.ts)。
+   * contextWindow 是 **策略预算窗口**(默认 256000),thresholdTokens 缺省推导
+   * `floor(0.95 × window)` (见 harness/compress/threshold.ts, ADR-0100)。
    */
   readonly compress?: {
     readonly contextWindow: number;

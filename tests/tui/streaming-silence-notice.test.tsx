@@ -406,6 +406,52 @@ describe("TUI 流式静默 notice（T2）", () => {
     await app.destroy();
   }, 30_000);
 
+  test("等待文案不指控网络", async () => {
+    const app = await mount({
+      bridgeOpts: { stopReason: "completed" },
+      streamingSilenceNoticeMs: 150,
+    });
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("go");
+    await app.pressEnter();
+    await app.control.started;
+    const frame = await untilFrame(
+      app.setup,
+      (f) => f.includes(SILENCE_NOTICE_LINE),
+      8000
+    );
+    expect(frame).not.toContain("Check your network");
+
+    expect(rejections).toHaveLength(0);
+    app.control.release();
+    await app.setup.renderOnce();
+    await app.destroy();
+  }, 30_000);
+
+  test("模型相位已上屏的等待文案在 tool_call_start 后立即消失", async () => {
+    const app = await mount({
+      bridgeOpts: { stopReason: "completed" },
+      streamingSilenceNoticeMs: 150,
+    });
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("go");
+    await app.pressEnter();
+    await app.control.started;
+    await untilFrame(app.setup, (f) => f.includes(SILENCE_NOTICE_LINE), 8000);
+
+    app.control.toolStart();
+    await untilFrame(app.setup, (f) => !f.includes(SILENCE_NOTICE_LINE), 8000);
+    expect(app.setup.captureCharFrame()).not.toContain(SILENCE_NOTICE_LINE);
+
+    expect(rejections).toHaveLength(0);
+
+    app.control.release();
+    await app.setup.renderOnce();
+    await app.destroy();
+  }, 30_000);
+
   test("清理: 移除 unhandledRejection 监听", () => {
     process.off("unhandledRejection", listener);
   });

@@ -607,7 +607,7 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
   readonly resultTextMap?: ReadonlyMap<string, string>;
   /** specs/tui-subagent-transcript-live.md：toolUseId → 子代理卡两行投影
    *  （`subagentCardLinesMap` 产出）。命中且非失败 → 该 spawn 卡改画两行
-   *  （`{role} running...` + dim 流 / 绿 `done`）；缺省 → 与改前逐字节一致。 */
+   *  （`{role} running...` + dim 概述；completed 概述下加绿 `✓ Done`）；缺省 → 与改前逐字节一致。 */
   readonly subagentCards?: ReadonlyMap<string, SubagentCardLines>;
   readonly thinkingExpanded?: boolean;
   /** 折叠态 thinking 行附带 `Thought for <N>s`。仅末条 / 流式面板传入；

@@ -278,8 +278,8 @@ export type HealthResponse = {
   ok: true;
   service: "iknow-session-api";
   version: string;
-  /** 上下文窗口大小（token）。来源 env.compress.contextWindow（IKNOW_MODEL_CONTEXT_WINDOW），
-   *  默认 200000。上下文用量显示的百分比分母。 */
+  /** **策略预算窗口**大小（token）。来源 env.compress.contextWindow（IKNOW_MODEL_CONTEXT_WINDOW），
+   *  默认 256000（ADR-0100）。上下文用量显示的百分比分母，与 auto-compact 闸同一数字。 */
   contextWindow: number;
   /** 模型路由 ID（settings.llm.model）。未配置 → 字段缺席（byte-stable，
    *  与 lastUsage 同模式）。web 输入框下方状态条显示用。 */

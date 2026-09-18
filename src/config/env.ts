@@ -443,18 +443,28 @@ export interface WebEnv {
 /**
  * #119 T1: 自动压缩配置臂(env SSOT, 透传至 harness/compress/)。
  *
- * `IKNOW_MODEL_CONTEXT_WINDOW`:模型上下文窗口大小(整数)。默认 200000,
- * 非数字 → 回退 200000(对齐 envInt 既有纪律, 不抛错)。
+ * `IKNOW_MODEL_CONTEXT_WINDOW`:**策略预算窗口**(整数, ADR-0100)—— 用量显示
+ * 分母与 proactive auto-compact 闸共用的同一个数字,不是供应商模型上限。
+ * 默认 256000(`DEFAULT_STRATEGY_CONTEXT_WINDOW`),非数字 → 回退同一默认
+ * (对齐 envInt 既有纪律, 不抛错)。
  *
  * `IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS`:proactive auto-compact 阈值(可选整数)。
  * 未设 / 空串 / 非数字 → undefined(由 threshold.ts 在 derive 时缺省推导
- * `window - 33000`, 硬校验 `threshold < window`)。提前校验归 T4 不归 env loader。
+ * `floor(0.95 × contextWindow)`, 硬校验 `threshold < window`)。提前校验归 T4
+ * 不归 env loader。把分母设成供应商真上限的人自己压低本 env。
  */
 export interface IknowCompressEnv {
   // 字段访问形如 `env.compress.contextWindow` / `env.compress.thresholdTokens`。
   contextWindow: number;
   thresholdTokens: number | undefined;
 }
+
+/**
+ * 缺省 **策略预算窗口**（ADR-0100）：env 派生缺省、TUI `ContextBar` 分母与
+ * health 投影分母三处共用本常量 —— 各写一份字面量时任何一处漂移都会让
+ * 「显示快满了却还没压缩」重新出现。
+ */
+export const DEFAULT_STRATEGY_CONTEXT_WINDOW = 256_000;
 
 /**
  * #378 根因 B: MCP 连接超时配置臂(env SSOT, 透传至 createMcpManager.timeoutMsOverride)。
@@ -1028,11 +1038,13 @@ export function loadIknowEnv(
     // thresholdTokens 阈值合理性校验(threshold >= window 拒绝)归 T4 threshold.ts,
     // 本 loader 仅承载 raw env 解析, 不抛错。
     compress: {
-      // #353: settings.llm.compress.contextWindow 回退（env > settings > 200000 默认）。
+      // #353: settings.llm.compress.contextWindow 回退（env > settings > 缺省策略预算窗口）。
       contextWindow: envInt({
         file,
         key: "IKNOW_MODEL_CONTEXT_WINDOW",
-        fallback: mergedSettings.llm?.compress?.contextWindow ?? 200000,
+        fallback:
+          mergedSettings.llm?.compress?.contextWindow ??
+          DEFAULT_STRATEGY_CONTEXT_WINDOW,
       }),
       // #353: settings.llm.compress.thresholdTokens 回退（env > settings）。
       thresholdTokens:

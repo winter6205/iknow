@@ -26,6 +26,7 @@ import {
   liveToolPreviewRows,
   liveToolPreviewTextLines,
   liveToolRunsBox,
+  filterLiveToolRunsAgainstSpawnCards,
 } from "../../src/tui/live-tool-preview.js";
 import {
   formatRunningToolLine,
@@ -583,6 +584,44 @@ describe("formatRunningToolLine: 子代理工具运行行（plans T7 钉死不�
       input: undefined,
     };
     expect(formatRunningToolLine(run)).toBe("Running 1 shell command…");
+  });
+});
+
+describe("filterLiveToolRunsAgainstSpawnCards", () => {
+  test("已有 join 卡时丢掉未 join 的 spawn running 行", () => {
+    const joined: LiveToolRun = {
+      id: "tu-w3",
+      name: "spawn_subagent",
+      status: "running",
+    };
+    const ghost: LiveToolRun = {
+      id: "tu-ghost",
+      name: "spawn_subagent",
+      status: "running",
+    };
+    const cards = new Map([
+      [
+        "tu-w3",
+        {
+          roleLine: "general-purpose running...",
+          detailLine: "ROLE: implementation worker W3",
+          done: false,
+        },
+      ],
+    ]);
+    const visible = filterLiveToolRunsAgainstSpawnCards([joined, ghost], cards);
+    expect(visible.map((r) => r.id)).toEqual(["tu-w3"]);
+  });
+
+  test("没有任何 join 卡时仍保留第一条 spawn running 行", () => {
+    const first: LiveToolRun = {
+      id: "tu-only",
+      name: "spawn_subagent",
+      status: "running",
+    };
+    expect(
+      filterLiveToolRunsAgainstSpawnCards([first], new Map()).map((r) => r.id)
+    ).toEqual(["tu-only"]);
   });
 });
 
