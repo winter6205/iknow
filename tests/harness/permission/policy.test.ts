@@ -175,7 +175,7 @@ describe("SC2: category defaults", () => {
 /* -----------------------------------------------------------------------------
  * SC2.5 — code-layer allow for memory_save (self-write to agent memory lib)
  *
- * Why: `memory_save` writes into `~/.iknow/memory/<id>.md` — the agent's own
+ * Why: `memory_save` writes into the home-project-tree memory library — the agent's own
  * memory library, not the user's workspace. Treating it like `edit_file` /
  * `write_file` (write → ask) caused the agent to be fail-closed at every
  * non-interactive inlet (ask / serve, or chat TTY with no prompt available),

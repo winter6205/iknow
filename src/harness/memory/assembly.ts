@@ -90,11 +90,10 @@ const FILE_CAP = 12000;
  *     NOT the cwd. A worktree rebind moves the cwd onto a gitignored task
  *     worktree; the project's instructions must not move with it (and must not
  *     be seeded onto the tree either).
- *   workspaceRoot: ADR-0019 (T2) per-root state anchor — memoryDir and the
- *     other per-root state live under it, but the user static layer does not
- *     (a project-local `.iknow/AGENTS.md` must not become user-level).
- *   memoryDir: project-namespaced memory root (<workspaceRoot>/.iknow/memory/
- *     <base>-<hash>, per-root memory decision).
+ *   workspaceRoot: ADR-0019 (T2) per-root state anchor — settings 写回 /
+ *     worktrees 仍跟它;项目记忆库不跟它（ADR-0099，home 项目树）。
+ *   memoryDir: project-namespaced memory root
+ *     (`<pool>/projects/<slug>/memory/`, ADR-0099)。
  *   autoExtract: when true, append memory_catalog after EXISTENCE_POINTER.
  *     Absent / non-true → no catalog; AGENTS layers + EXISTENCE_POINTER are
  *     unaffected (specs/auto-memory-layering.md).

@@ -1,84 +1,121 @@
 /**
- * #121 T2 + ADR-0019 (T2): resolveProjectMemoryDir / resolveUserMemoryDir
- * pure-function tests.
- *
- * Spec: specs/121-memory-injection.md (Testing Strategy paths half, SC 6/7,
- * Boundaries Always — user-level root decoupled from --data-dir).
- * Naming rule reuses session-store.ts:42-45 `<basename(cwd)>-<sha1(cwd)[:12]>`
- * under `<workspaceRoot>/.iknow/memory/` (per-root memory, ADR-0019 T2 D1.4
- * follow-on). Pure: no IO；接受显式 workspaceRoot 缝，缺省落
- * `resolveWorkspaceRoot({cwd})`(=process.cwd())。
+ * resolveProjectMemoryDir — home 项目树兄弟 `memory/`（ADR-0099）。
+ * 跨函数等式钉死与会话文件夹同 slug；fail-closed 同 resolveTasksDir。
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import {
   resolveProjectMemoryDir,
   resolveUserMemoryDir,
 } from "../../../src/harness/memory/paths.ts";
+import { resolveProjectSessionDir } from "../../../src/session-api/store/session-store.ts";
 
-const TEST_WORKSPACE_ROOT = "/tmp/iknow-paths-workspace";
+const TEST_POOL = "/tmp/iknow-memory-pool";
 
 describe("resolveProjectMemoryDir", () => {
-  it("is stable for the same cwd across repeated calls", () => {
-    const a = resolveProjectMemoryDir("/tmp/alpha/proj", TEST_WORKSPACE_ROOT);
-    const b = resolveProjectMemoryDir("/tmp/alpha/proj", TEST_WORKSPACE_ROOT);
+  it("is the session project dir plus memory/", () => {
+    assert.equal(
+      resolveProjectMemoryDir({
+        dataDir: TEST_POOL,
+        projectIdentityRoot: "/tmp/alpha/proj",
+      }),
+      join(resolveProjectSessionDir(TEST_POOL, "/tmp/alpha/proj"), "memory")
+    );
+  });
+
+  it("is stable for the same identity across repeated calls", () => {
+    const a = resolveProjectMemoryDir({
+      dataDir: TEST_POOL,
+      projectIdentityRoot: "/tmp/alpha/proj",
+    });
+    const b = resolveProjectMemoryDir({
+      dataDir: TEST_POOL,
+      projectIdentityRoot: "/tmp/alpha/proj",
+    });
     assert.equal(a, b);
   });
 
   it("does not collide for same-basename projects at different paths", () => {
-    const a = resolveProjectMemoryDir("/home/u/A/proj", TEST_WORKSPACE_ROOT);
-    const b = resolveProjectMemoryDir("/home/u/B/proj", TEST_WORKSPACE_ROOT);
+    const a = resolveProjectMemoryDir({
+      dataDir: TEST_POOL,
+      projectIdentityRoot: "/home/u/A/proj",
+    });
+    const b = resolveProjectMemoryDir({
+      dataDir: TEST_POOL,
+      projectIdentityRoot: "/home/u/B/proj",
+    });
     assert.notEqual(a, b);
-    assert.equal(basename(a).startsWith("proj-"), true);
-    assert.equal(basename(b).startsWith("proj-"), true);
   });
 
-  it("extracts the basename of the cwd into the directory name", () => {
-    const dir = resolveProjectMemoryDir(
-      "/opt/workspaces/my-agent",
-      TEST_WORKSPACE_ROOT
+  it("does not use workspaceRoot as the parent (throwaway does not fork the store)", () => {
+    const dir = resolveProjectMemoryDir({
+      dataDir: TEST_POOL,
+      projectIdentityRoot: "/tmp/alpha/proj",
+    });
+    assert.equal(dir.startsWith(join(TEST_POOL, "projects")), true);
+    assert.equal(dir.includes(".iknow/memory"), false);
+  });
+
+  it("121–255 char identity roots are accepted on both sides of the tree", () => {
+    const longRoot = "/" + "a".repeat(254);
+    assert.equal(longRoot.length, 255);
+    assert.doesNotThrow(() => resolveProjectSessionDir("/pool", longRoot));
+    assert.doesNotThrow(() =>
+      resolveProjectMemoryDir({
+        dataDir: "/pool",
+        projectIdentityRoot: longRoot,
+      })
     );
-    assert.equal(basename(dir).startsWith("my-agent-"), true);
-  });
-
-  it("normalizes relative cwd to an absolute path", () => {
-    const abs = resolveProjectMemoryDir("/tmp/foo/rel", TEST_WORKSPACE_ROOT);
-    const rel = resolveProjectMemoryDir(
-      "/tmp/foo/rel/../rel",
-      TEST_WORKSPACE_ROOT
-    );
-    assert.equal(abs, rel);
-  });
-
-  it("lives under the per-root <workspaceRoot>/.iknow/memory root (ADR-0019 T2)", () => {
-    const dir = resolveProjectMemoryDir("/tmp/alpha/proj", TEST_WORKSPACE_ROOT);
     assert.equal(
-      dir.startsWith(join(TEST_WORKSPACE_ROOT, ".iknow", "memory")),
-      true
+      resolveProjectMemoryDir({
+        dataDir: "/pool",
+        projectIdentityRoot: longRoot,
+      }),
+      join(resolveProjectSessionDir("/pool", longRoot), "memory")
     );
+  });
+
+  it("rejects empty / blank / relative / overlong identity with SessionRootError", () => {
+    const cases: ReadonlyArray<string> = [
+      "",
+      "   ",
+      "relative/path",
+      "/" + "a".repeat(255),
+    ];
+    for (const bad of cases) {
+      assert.throws(
+        () =>
+          resolveProjectMemoryDir({
+            dataDir: "/pool",
+            projectIdentityRoot: bad,
+          }),
+        (err: unknown) => {
+          const e = err as { name?: string; kind?: string };
+          assert.equal(e.name, "SessionRootError");
+          assert.ok(
+            e.kind === "missing_root" || e.kind === "invalid_root",
+            `unexpected kind: ${String(e.kind)}`
+          );
+          return true;
+        }
+      );
+    }
   });
 });
 
 describe("resolveUserMemoryDir", () => {
-  it("is per-root <workspaceRoot>/.iknow/memory (ADR-0019 T2; was ~/.iknow/memory)", () => {
+  it("is per-root <workspaceRoot>/.iknow/memory (user-level parent, not the project store)", () => {
     assert.equal(
-      resolveUserMemoryDir(TEST_WORKSPACE_ROOT),
-      join(TEST_WORKSPACE_ROOT, ".iknow", "memory")
+      resolveUserMemoryDir(TEST_POOL),
+      join(TEST_POOL, ".iknow", "memory")
     );
   });
 
-  it("is independent of cwd (decoupled from --data-dir)", () => {
-    // Takes no cwd input; repeated calls must be identical regardless of the
-    // caller's working directory context.
+  it("is independent of projectIdentityRoot", () => {
     assert.equal(
-      resolveUserMemoryDir(TEST_WORKSPACE_ROOT),
-      resolveUserMemoryDir(TEST_WORKSPACE_ROOT)
+      resolveUserMemoryDir(TEST_POOL),
+      resolveUserMemoryDir(TEST_POOL)
     );
-  });
-
-  it("does not contain a project-namespace suffix", () => {
-    const dir = resolveUserMemoryDir(TEST_WORKSPACE_ROOT);
-    assert.equal(dir, join(TEST_WORKSPACE_ROOT, ".iknow", "memory"));
   });
 });

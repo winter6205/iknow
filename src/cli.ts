@@ -59,7 +59,7 @@ import {
 import { MaxTurnsExceeded } from "./harness/errors.js";
 import { maxTurnsEnvelope } from "./cli/max-turns.js";
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { buildViolationWiring } from "./harness/sandbox/violation-executor.js";
 import { openBrowser } from "./cli/open-browser.js";
 import type { TraceServeOptions } from "./traceserver/serve.js";
@@ -81,6 +81,7 @@ import type { WorktreeIsolationHostOpts } from "./harness/isolation/worktree-gat
 import { createWorktreeIsolationHost } from "./cli/worktree-host.js";
 import { deriveProjectIdentityRoot } from "./harness/session-roots.js";
 import { resolveTasksDir } from "./harness/background/paths.js";
+import { MEMORY_DIR_NAME } from "./shared/session-tree-names.js";
 // 共享装配 (cli / serve / tui 三入口共用, SSOT): settings.verify → VerifyConfig。
 import { resolveVerifyConfig } from "./config/verify-config.js";
 import { resolveTraceRoot } from "./cli/trace-root.js";
@@ -408,6 +409,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     dataDir,
     projectIdentityRoot: deriveProjectIdentityRoot({ cwd: workspaceRoot }),
   });
+  const memoryDir = join(todoProjectDir, MEMORY_DIR_NAME);
   // 初始装配与 rebind 重建共用的装配 opts（同一 askUser/holder/settings）。
   const chatEngineOpts = {
     askUser: createTtyAskUser(),
@@ -421,6 +423,8 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     todoDir: todoProjectDir,
     // ADR-0088:登记根随会话池,不随 workspaceRoot。
     tasksDir,
+    // ADR-0099:项目记忆同棵,不随 workspaceRoot。
+    memoryDir,
     // T5 (ADR-0071 / SC8 + L2): subagentsDir
     // 由 (projectDir, conversationId) 经 `resolveSubagentTraceDir` 派生 —— 与
     // 上面 SessionStore 同源(`todoProjectDir === store.projectDir`,见 #950 T2)。

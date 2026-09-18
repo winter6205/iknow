@@ -360,6 +360,13 @@ export type BuildEngineOpts = {
    */
   readonly tasksDir?: string;
   /**
+   * ADR-0099(home 项目树 memory):项目记忆库根
+   * (`<poolRoot>/projects/<slug>/memory/`)的 host 注入缝 —— 与 `tasksDir`
+   * 同门。缺席时回退 `resolveProjectMemoryDir({ dataDir: <userHome>/.iknow,
+   * projectIdentityRoot })`。绝不回退 workspaceRoot。
+   */
+  readonly memoryDir?: string;
+  /**
    * B6 / ADR-0043 §3:溢出治理 countTokens 注入缝(测试用)。生产默认 =
    * undefined → 装配层取 `adapter.countTokens`(由 `createRealAnthropicAdapter`
    * 实现,透传 SDK `client.messages.countTokens`)。测试用 stub 覆盖:
@@ -714,21 +721,12 @@ export async function buildHarnessEngine(
   // skills / 子代理继承）与记忆库命名空间共用它，**不**用 `productRoot`：后者
   // 取自 `workspaceRoot`，在 `--workspace-root <dir>` 重定向档下不是项目本身。
   const projectIdentityRoot = sessionRoots.projectIdentityRoot;
-  // ADR-0019 (T2): memory root 落 `<anchor>/.iknow/memory/<namespace>`。
-  // T4 review High-1: 「落哪个根」(anchor) 与「叫什么名」(namespace) 是两个
-  // 决策，必须分开推。
-  //   anchor    = workspaceRoot，除非它已经是 task worktree（改绑后宿主把
-  //               workspaceRoot 也切到树上）—— 那时退回 productRoot。这样
-  //               ADR-0019 D1.3 的 `--workspace-root <dir>` 重定向仍然生效，
-  //               同时状态永不落进 gitignored 的树。
-  //   namespace = `projectIdentityRoot`（宿主启动时钉下的项目身份），未改绑时
-  //               逐字节等于今日的 `resolveProjectMemoryDir(cwd, workspaceRoot)`。
-  // 反例（回归来源）：两者都取 productRoot 时，`--workspace-root $HOME` 档下
-  // productRoot 缺省 = $HOME，同锚下多个项目会塌进同一个命名空间。
-  const stateAnchor = isTaskWorktreePath(workspaceRoot)
-    ? sessionRoots.productRoot
-    : workspaceRoot;
-  const memoryDir = resolveProjectMemoryDir(projectIdentityRoot, stateAnchor);
+  // ADR-0099:项目记忆跟会话池同一项目树,不再锚 workspaceRoot。
+  const memoryDir = selectProjectMemoryDir(
+    opts.memoryDir,
+    userHome,
+    projectIdentityRoot
+  );
   // 10 件工具集 SSOT 工厂(append-only 顺序;env.web 透传 IKNOW_WEB_PROXY /
   // IKNOW_WEB_SEARCH_URL)。proxyUrl 非法 → 装配期同步抛(见 registry.ts)。
   // #194 T6:reg 按 memoryEnabled 条件化构造 — enabled 时传 memoryDir(reg.inner 10
@@ -1010,8 +1008,8 @@ export async function buildHarnessEngine(
     userHome,
     projectIdentityRoot
   );
-  // T4 (ADR-0037 §4) 的 `stateAnchor` 已不再是 tasks 的锚(ADR-0088 拆掉
-  // per-root 分片)——它仍供 memoryDir 使用,见上方定义处。
+  // T4 (ADR-0037 §4) 的 `stateAnchor` 已不再是 tasks / memory 的锚
+  // (ADR-0088 / ADR-0099 拆掉 per-root 分片)。
   const backgroundManager: BackgroundTaskManager | undefined =
     surface !== "ask"
       ? createBackgroundTaskManager({
@@ -2451,6 +2449,24 @@ function selectBackgroundTasksDir(
   return (
     injected ??
     resolveTasksDir({
+      dataDir: path.join(userHome, ".iknow"),
+      projectIdentityRoot,
+    })
+  );
+}
+
+/**
+ * ADR-0099:memoryDir 来源选择 —— host 注入优先;缺席回退池根默认
+ * `~/.iknow`。绝不回退 workspaceRoot。
+ */
+function selectProjectMemoryDir(
+  injected: string | undefined,
+  userHome: string,
+  projectIdentityRoot: string
+): string {
+  return (
+    injected ??
+    resolveProjectMemoryDir({
       dataDir: path.join(userHome, ".iknow"),
       projectIdentityRoot,
     })

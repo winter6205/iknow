@@ -11,7 +11,7 @@ ADR-0071 Decision 1 把会话文件夹钉在 `~/.iknow/projects/<slug>/<conversa
 
 **会话池根 = 显式 `--data-dir` / `dataDir`，否则 `~/.iknow`。不跟 `workspaceRoot` 分片。**
 
-`resolveServeDataDir` 不再读第二参。TUI / serve / chat / trace 读写侧同一公式。`--workspace-root` 仍锚 memory / settings 写回 / worktrees（ADR-0019 其余条款），不锚会话记录。**tasks 落点见 ADR-0088**（不再 per-root）。throwaway 隔离目录因此不再自带一份 transcript；同一 `projectIdentityRoot` 共用全局那一格。
+`resolveServeDataDir` 不再读第二参。TUI / serve / chat / trace 读写侧同一公式。`--workspace-root` 仍锚 settings 写回 / worktrees（ADR-0019 其余条款），不锚会话记录。**tasks 落点见 ADR-0088**；**项目记忆落点见 ADR-0099**（均不再 per-root）。throwaway 隔离目录因此不再自带一份 transcript；同一 `projectIdentityRoot` 共用全局那一格。
 
 存量：把误写在 `<workspace>/.iknow/projects/` 的会话文件夹迁到 `~/.iknow/projects/`；目标已存在的 conversation 叶子不覆盖。
 

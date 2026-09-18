@@ -27,3 +27,6 @@ export const MAIN_SESSION_FENCE_TMP_DIR_NAME = "fence-tmp";
 
 /** `<projectDir>/tasks/` —— 后台任务登记根(ADR-0088)。与会话文件夹叶子同级。 */
 export const TASKS_DIR_NAME = "tasks";
+
+/** `<projectDir>/memory/` —— 项目记忆库根(ADR-0099)。与会话叶子、`tasks/` 同级。 */
+export const MEMORY_DIR_NAME = "memory";
