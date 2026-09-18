@@ -123,7 +123,7 @@ function displayPath(root: string, target: string): string {
  * 链、模型抄回 read_file/edit_file 时指错路径 → 改用 canonical 绝对宿主
  * 路径（= resolveWithinRoot 的返回值本身，与 last-read 拒绝内嵌的绝对
  * path 同口径）。垫底比较用 realpath，与 resolveWithinRoot 内部把
- * tmpWriteRoot realpath 后再做 containment 的口径一致；realpath 失败
+ * sessionTmpRoot realpath 后再做 containment 的口径一致；realpath 失败
  * （垫底异常态）→ 退回既有相对形态，不在回执面制造新故障。
  */
 async function receiptDisplayPath(
@@ -176,7 +176,7 @@ export function createWriteFileTool(
     const params = parseInput(input);
     // T5 D2: per-call snapshot. resolve 与写入必须共用同一个根值。
     const rootAtCall = readRoot(root);
-    const tmpWriteRoot = resolveSessionFenceTmp({
+    const sessionTmpRoot = resolveSessionFenceTmp({
       tmpDir: opts?.tmpDir,
       projectDir: opts?.projectDir,
       conversationId: ctx?.conversationId,
@@ -185,7 +185,7 @@ export function createWriteFileTool(
     let target: string;
     try {
       target = await resolveWithinRoot(rootAtCall, params.path, {
-        tmpWriteRoot,
+        sessionTmpRoot,
       });
     } catch (error) {
       throw asToolExecutionError("[write_file] cannot resolve path", error);
@@ -243,7 +243,7 @@ export function createWriteFileTool(
     return commitWrite(target, params, {
       rootAtCall,
       oldContent,
-      tmpWriteRoot,
+      sessionTmpRoot,
     });
   };
 
@@ -283,7 +283,7 @@ async function commitWrite(
   ctx: {
     readonly rootAtCall: string;
     readonly oldContent: string;
-    readonly tmpWriteRoot: string | undefined;
+    readonly sessionTmpRoot: string | undefined;
   }
 ): Promise<unknown> {
   try {
@@ -293,7 +293,7 @@ async function commitWrite(
   }
   const pathForMessage = await receiptDisplayPath(
     ctx.rootAtCall,
-    ctx.tmpWriteRoot,
+    ctx.sessionTmpRoot,
     target
   );
   return {

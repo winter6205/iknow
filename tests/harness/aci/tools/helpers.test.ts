@@ -167,56 +167,58 @@ describe("resolveWithinRoot", () => {
     );
   });
 
-  it("tmpWriteRoot: an absolute path inside the session tmp host dir is allowed", async () => {
+  it("sessionTmpRoot: an absolute path inside the session tmp host dir is allowed", async () => {
     const root = await makeScratch("aci-helper-tmp-root-");
     const pad = await makeScratch("aci-helper-tmp-pad-");
 
     assert.equal(
-      await resolveWithinRoot(root, join(pad, "ok.txt"), { tmpWriteRoot: pad }),
+      await resolveWithinRoot(root, join(pad, "ok.txt"), {
+        sessionTmpRoot: pad,
+      }),
       join(pad, "ok.txt")
     );
     // 会话 tmp 目录自身也是一个合法的写目标(独立 containment root)。
     assert.equal(
-      await resolveWithinRoot(root, pad, { tmpWriteRoot: pad }),
+      await resolveWithinRoot(root, pad, { sessionTmpRoot: pad }),
       pad
     );
   });
 
-  it("tmpWriteRoot: a model-supplied guest /tmp/... is typed-rejected (no alias to the pad)", async () => {
+  it("sessionTmpRoot: a model-supplied guest /tmp/... is typed-rejected (no alias to the pad)", async () => {
     const root = await makeScratch("aci-helper-tmp-neg-root-");
     const pad = await makeScratch("aci-helper-tmp-neg-pad-");
 
     await assert.rejects(
-      resolveWithinRoot(root, "/tmp/ok.txt", { tmpWriteRoot: pad }),
+      resolveWithinRoot(root, "/tmp/ok.txt", { sessionTmpRoot: pad }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("outside workspace")
     );
     await assert.rejects(
-      resolveWithinRoot(root, "/tmp/", { tmpWriteRoot: pad }),
+      resolveWithinRoot(root, "/tmp/", { sessionTmpRoot: pad }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("outside workspace")
     );
   });
 
-  it("tmpWriteRoot: relative path under taskRoot is not remapped", async () => {
+  it("sessionTmpRoot: relative path under taskRoot is not remapped", async () => {
     const root = await makeScratch("aci-helper-tmp-rel-root-");
     const pad = await makeScratch("aci-helper-tmp-rel-pad-");
     await writeFile(join(root, "kept.txt"), "in-root\n");
 
     assert.equal(
-      await resolveWithinRoot(root, "kept.txt", { tmpWriteRoot: pad }),
+      await resolveWithinRoot(root, "kept.txt", { sessionTmpRoot: pad }),
       join(root, "kept.txt")
     );
   });
 
-  it("tmpWriteRoot: /tmp/../ escape leaving guest /tmp still fails containment", async () => {
+  it("sessionTmpRoot: /tmp/../ escape leaving guest /tmp still fails containment", async () => {
     const root = await makeScratch("aci-helper-tmp-esc-root-");
     const pad = await makeScratch("aci-helper-tmp-esc-pad-");
 
     await assert.rejects(
-      resolveWithinRoot(root, "/tmp/../etc/passwd", { tmpWriteRoot: pad }),
+      resolveWithinRoot(root, "/tmp/../etc/passwd", { sessionTmpRoot: pad }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("outside workspace")
@@ -357,7 +359,7 @@ describe("resolveWithinRoot — T2 path-outside 文案按目标劈 EXIT (ADR-009
     const realPad = await realpath(pad);
 
     await assert.rejects(
-      resolveWithinRoot(root, "/tmp/draft.txt", { tmpWriteRoot: pad }),
+      resolveWithinRoot(root, "/tmp/draft.txt", { sessionTmpRoot: pad }),
       (error: unknown) => {
         if (!(error instanceof ToolExecutionError)) return false;
         return (
@@ -383,7 +385,7 @@ describe("resolveWithinRoot — T2 path-outside 文案按目标劈 EXIT (ADR-009
     const outside = "/etc/iknow-t2-delivery-miss.txt";
 
     await assert.rejects(
-      resolveWithinRoot(root, outside, { tmpWriteRoot: pad }),
+      resolveWithinRoot(root, outside, { sessionTmpRoot: pad }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("current write root") &&
@@ -414,7 +416,7 @@ describe("resolveWithinRoot — T3 拒 /tmp/X 且垫底已有 X 时给近邻路�
 
     let captured = "";
     await assert.rejects(
-      resolveWithinRoot(root, "/tmp/ok.txt", { tmpWriteRoot: pad }),
+      resolveWithinRoot(root, "/tmp/ok.txt", { sessionTmpRoot: pad }),
       (error: unknown) => {
         if (!(error instanceof ToolExecutionError)) return false;
         captured = error.message;
@@ -440,7 +442,7 @@ describe("resolveWithinRoot — T3 拒 /tmp/X 且垫底已有 X 时给近邻路�
 
     let captured = "";
     await assert.rejects(
-      resolveWithinRoot(root, "/tmp/absent.txt", { tmpWriteRoot: pad }),
+      resolveWithinRoot(root, "/tmp/absent.txt", { sessionTmpRoot: pad }),
       (error: unknown) => {
         if (!(error instanceof ToolExecutionError)) return false;
         captured = error.message;
@@ -462,7 +464,7 @@ describe("resolveWithinRoot — T3 拒 /tmp/X 且垫底已有 X 时给近邻路�
     await writeFile(join(pad, "ok.txt"), "pad-content\n");
 
     await assert.rejects(
-      resolveWithinRoot(root, "/tmp/", { tmpWriteRoot: pad }),
+      resolveWithinRoot(root, "/tmp/", { sessionTmpRoot: pad }),
       (error: unknown) => {
         if (!(error instanceof ToolExecutionError)) return false;
         // 近邻存在性只针对被拒路径自身的相对段；"/tmp/" 无段 → 不得把

@@ -1,7 +1,7 @@
 /**
  * read_file — 会话 tmp 是一等读根（ADR-0092 同一身份解析）。
  *
- * 与 write_file 的 `tmpWriteRoot` 走同一条 `resolveSessionFenceTmp` 身份：
+ * 与 write_file 的 `sessionTmpRoot` 走同一条 `resolveSessionFenceTmp` 身份：
  * 垫底（显式 tmpDir 或 projectDir+conversationId 解析出的
  * `<sessionFolder>/fence-tmp`）上的文件可读，即使垫底不在 `~/.iknow`
  * extraReadRoots 下。guest `/tmp/...` 字面量仍 typed 拒绝、不 alias（SC4）。

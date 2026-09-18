@@ -108,13 +108,13 @@ function stripTaskWorktreeLeafEcho(
  * write tools can use `extraWriteRoots` without exposing any read roots.
  *
  * Extra containment roots plus optional identity pad. Prefer this object
- * over a fifth positional `tmpWriteRoot` so `resolveWithinRoot` stays ≤4
+ * over a fifth positional `sessionTmpRoot` so `resolveWithinRoot` stays ≤4
  * parameters. A third-arg array still means `extraReadRoots` (legacy).
  */
 export type ResolveWithinRootOptions = {
   readonly extraReadRoots?: readonly string[];
   readonly extraWriteRoots?: readonly string[];
-  readonly tmpWriteRoot?: string;
+  readonly sessionTmpRoot?: string;
 };
 
 function isResolveOptions(
@@ -139,11 +139,11 @@ function normalizeResolveOptions(
 async function resolveAbsoluteTarget(
   realRoot: string,
   expandedTarget: string,
-  tmpWriteRoot?: string
+  sessionTmpRoot?: string
 ): Promise<{ absoluteTarget: string; realTmpRoot?: string }> {
   const pad =
-    tmpWriteRoot !== undefined && tmpWriteRoot.trim().length > 0
-      ? tmpWriteRoot
+    sessionTmpRoot !== undefined && sessionTmpRoot.trim().length > 0
+      ? sessionTmpRoot
       : undefined;
   // ADR-0092: the session tmp host path is an independent containment root.
   // A model-supplied guest `/tmp/...` literal is NOT aliased onto it — it
@@ -183,7 +183,7 @@ function assertContained(
   // alias 到会话 tmp，`/tmp/...` 目标必须在这里可观察地失败——但草稿越界
   // 不是交付越界，重试引导指向本身份展开 `$TMPDIR` 垫底绝对路径，而非
   // 「relative to the taskRoot」(plans/session-scratch-path-space.md T2)。
-  // EXIT: 无垫底解析结果（read 面未接 tmpWriteRoot / legacy 调用）→ 落到
+  // EXIT: 无垫底解析结果（read 面未接 sessionTmpRoot / legacy 调用）→ 落到
   // 下方交付越界文案，与劈分前的可观察行为逐字一致。
   if (scratchRel !== undefined && roots.realTmpRoot !== undefined) {
     throw new ToolExecutionError(
@@ -248,7 +248,7 @@ export async function resolveWithinRoot(
   const { absoluteTarget, realTmpRoot } = await resolveAbsoluteTarget(
     realRoot,
     stripTaskWorktreeLeafEcho(realRoot, expandHome(target)),
-    options.tmpWriteRoot
+    options.sessionTmpRoot
   );
   const resolvedTarget = await realpathWithMissingSuffix(absoluteTarget);
   assertContained(resolvedTarget, realRoot, {

@@ -207,7 +207,7 @@ export function createReadFileTool(
         opts?.workspaceRoot,
         projectIdentityRoot
       );
-      // ADR-0092: same identity as the write tools' tmpWriteRoot — the
+      // ADR-0092: same identity as the write tools' sessionTmpRoot — the
       // session tmp pad is a first-class containment root for reads too.
       const sessionTmpRoot = resolveSessionFenceTmp({
         tmpDir: opts?.tmpDir,
@@ -302,7 +302,7 @@ function resolveProjectIdentityRoot(
  * directly.
  *
  * `sessionTmpRoot` (ADR-0092) rides into containment through the same
- * `resolveWithinRoot` options as the write tools' `tmpWriteRoot` — one
+ * `resolveWithinRoot` options as the write tools' `sessionTmpRoot` — one
  * identity path, no separate aliasing. The identity-root fallback arm stays
  * pad-free: the pad is anchored to conversationId, not to projectIdentityRoot.
  */
@@ -318,7 +318,7 @@ async function resolveReadTarget(
   const { extraReadRoots, projectIdentityRoot } = roots;
   const primary = await resolveWithinRoot(root, target, {
     extraReadRoots,
-    tmpWriteRoot: roots.sessionTmpRoot,
+    sessionTmpRoot: roots.sessionTmpRoot,
   });
   if (
     projectIdentityRoot === undefined ||
