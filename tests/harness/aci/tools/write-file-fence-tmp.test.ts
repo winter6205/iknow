@@ -2,7 +2,7 @@
  * ADR-0092 — write tools target this identity's session tmp HOST dir.
  *
  * The session tmp host path is an independent containment root (the
- * `tmpWriteRoot` mechanism is retained). A model-supplied guest `/tmp/...`
+ * `sessionTmpRoot` mechanism is retained). A model-supplied guest `/tmp/...`
  * literal is NO longer aliased onto it — it falls through to the containment
  * error (observable rejection, never a silent double-write).
  */

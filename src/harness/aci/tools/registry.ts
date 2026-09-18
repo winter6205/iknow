@@ -671,6 +671,10 @@ export function createDefaultAciRegistry(
         ...(opts.projectIdentityRoot !== undefined
           ? { allowProjectIdentityRoot: true }
           : {}),
+        // ADR-0092: read 面与 write/edit 共用同一会话 tmp 身份（透传形态
+        // 与下方 write_file / edit_file 逐项一致）。
+        ...(opts.todoDir !== undefined ? { projectDir: opts.todoDir } : {}),
+        ...(opts.tmpDir !== undefined ? { tmpDir: opts.tmpDir } : {}),
         // ADR-0084 / D1: 成功读（含空文件与截断页）入账 —— 写闸的入账源。
         lastReadLedger,
       }),

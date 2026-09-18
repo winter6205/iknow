@@ -26,6 +26,7 @@ import type { LiveTaskRoot } from "../../session-roots.js";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import type { LastReadLedgerHost } from "../last-read-ledger.js";
+import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
 import { resolveWithinRoot } from "./helpers.js";
 
 /** 显式 `limit` 的硬顶（行窗）；不写 `limit` 时改走 `MAX_READ_CODE_POINTS`。 */
@@ -96,6 +97,14 @@ export interface CreateReadFileToolOptions {
    * wrongly-allowed overwrite.
    */
   readonly lastReadLedger?: LastReadLedgerHost;
+  /**
+   * ADR-0092 会话 tmp 身份（与 WriteFileOpts.tmpDir 同语义）：显式宿主垫底
+   * （测试 / T3 worker pad）。在场 → 该垫底成为 read_file 的独立 containment
+   * 读根，不再依赖 `~/.iknow` extraReadRoots 碰巧放行；缺席 → 无额外读根。
+   */
+  readonly tmpDir?: string;
+  /** 会话 project dir；与 `ctx.conversationId` 同现 → `<sessionFolder>/fence-tmp` 垫底。 */
+  readonly projectDir?: string;
 }
 
 /** `~/.iknow/` — the agent's own profile directory (readUserProfile in the
@@ -198,12 +207,18 @@ export function createReadFileTool(
         opts?.workspaceRoot,
         projectIdentityRoot
       );
-      const resolved = await resolveReadTarget(
-        rootAtCall,
-        params.path,
+      // ADR-0092: same identity as the write tools' sessionTmpRoot — the
+      // session tmp pad is a first-class containment root for reads too.
+      const sessionTmpRoot = resolveSessionFenceTmp({
+        tmpDir: opts?.tmpDir,
+        projectDir: opts?.projectDir,
+        conversationId: ctx?.conversationId,
+      });
+      const resolved = await resolveReadTarget(rootAtCall, params.path, {
         extraReadRoots,
-        projectIdentityRoot
-      );
+        projectIdentityRoot,
+        sessionTmpRoot,
+      });
       let info;
       try {
         info = await stat(resolved);
@@ -285,14 +300,26 @@ function resolveProjectIdentityRoot(
  * absent there, try the explicitly supplied extra read roots as a
  * convenience. Absolute paths continue to use the shared containment helper
  * directly.
+ *
+ * `sessionTmpRoot` (ADR-0092) rides into containment through the same
+ * `resolveWithinRoot` options as the write tools' `sessionTmpRoot` — one
+ * identity path, no separate aliasing. The identity-root fallback arm stays
+ * pad-free: the pad is anchored to conversationId, not to projectIdentityRoot.
  */
 async function resolveReadTarget(
   root: string,
   target: string,
-  extraReadRoots: readonly string[],
-  projectIdentityRoot: string | undefined
+  roots: {
+    readonly extraReadRoots: readonly string[];
+    readonly projectIdentityRoot: string | undefined;
+    readonly sessionTmpRoot: string | undefined;
+  }
 ): Promise<string> {
-  const primary = await resolveWithinRoot(root, target, extraReadRoots);
+  const { extraReadRoots, projectIdentityRoot } = roots;
+  const primary = await resolveWithinRoot(root, target, {
+    extraReadRoots,
+    sessionTmpRoot: roots.sessionTmpRoot,
+  });
   if (
     projectIdentityRoot === undefined ||
     extraReadRoots.length === 0 ||

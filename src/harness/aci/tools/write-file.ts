@@ -8,7 +8,7 @@
  * comments/strings is accepted.
  */
 
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
@@ -17,6 +17,7 @@ import type { ToolExecutionContext } from "../../tools/types.js";
 import {
   asToolExecutionError,
   FENCE_WRITE_GUIDANCE,
+  isWithinRoot,
   resolveWithinRoot,
 } from "./helpers.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
@@ -115,6 +116,32 @@ function displayPath(root: string, target: string): string {
 }
 
 /**
+ * Task 4 (plans/session-scratch-path-space.md) — 成功回执的路径口径。
+ *
+ * 交付写（target 在 taskRoot 下）保持既有的相对 taskRoot 短形式，逐字节
+ * 不回退。写在会话 tmp 垫底（taskRoot 之外）时，displayPath 会得到 `../`
+ * 链、模型抄回 read_file/edit_file 时指错路径 → 改用 canonical 绝对宿主
+ * 路径（= resolveWithinRoot 的返回值本身，与 last-read 拒绝内嵌的绝对
+ * path 同口径）。垫底比较用 realpath，与 resolveWithinRoot 内部把
+ * sessionTmpRoot realpath 后再做 containment 的口径一致；realpath 失败
+ * （垫底异常态）→ 退回既有相对形态，不在回执面制造新故障。
+ */
+async function receiptDisplayPath(
+  root: string,
+  pad: string | undefined,
+  target: string
+): Promise<string> {
+  if (!isWithinRoot(resolve(root), target) && pad !== undefined) {
+    try {
+      if (isWithinRoot(await realpath(resolve(pad)), target)) return target;
+    } catch {
+      // EXIT: 垫底不可 realpath（未知态）→ 不改回执形态。
+    }
+  }
+  return displayPath(root, target);
+}
+
+/**
  * Snapshot the live root at handler invocation time. Accepts either a literal
  * path (legacy / forward-compat shape — tests and other one-shot callers pass
  * `string`) or a `LiveTaskRoot` cell (T5: registry threads the cell so that
@@ -149,7 +176,7 @@ export function createWriteFileTool(
     const params = parseInput(input);
     // T5 D2: per-call snapshot. resolve 与写入必须共用同一个根值。
     const rootAtCall = readRoot(root);
-    const tmpWriteRoot = resolveSessionFenceTmp({
+    const sessionTmpRoot = resolveSessionFenceTmp({
       tmpDir: opts?.tmpDir,
       projectDir: opts?.projectDir,
       conversationId: ctx?.conversationId,
@@ -158,7 +185,7 @@ export function createWriteFileTool(
     let target: string;
     try {
       target = await resolveWithinRoot(rootAtCall, params.path, {
-        tmpWriteRoot,
+        sessionTmpRoot,
       });
     } catch (error) {
       throw asToolExecutionError("[write_file] cannot resolve path", error);
@@ -213,7 +240,11 @@ export function createWriteFileTool(
     // best-effort 降级成空串,拿它判「空」会把不可读的非空文件误放行。
     await assertLastRead(opts, ctx, target);
 
-    return commitWrite(target, params, { rootAtCall, oldContent });
+    return commitWrite(target, params, {
+      rootAtCall,
+      oldContent,
+      sessionTmpRoot,
+    });
   };
 
   return Object.freeze({
@@ -243,19 +274,28 @@ export function createWriteFileTool(
 
 /**
  * ADR-0084 / D1 — 写盘落尾段：写文件、拼回执。抽出来只为让 handler 的
- * 判定链长度回到闸引入之前的形态（S5 ratchet）；顺序与逐字节文案不变。
+ * 判定链长度回到闸引入之前的形态（S5 ratchet）；顺序与文案形态不变
+ * （Task 4 起垫底写的路径口径见 receiptDisplayPath）。
  */
 async function commitWrite(
   target: string,
   params: WriteFileInput,
-  ctx: { readonly rootAtCall: string; readonly oldContent: string }
+  ctx: {
+    readonly rootAtCall: string;
+    readonly oldContent: string;
+    readonly sessionTmpRoot: string | undefined;
+  }
 ): Promise<unknown> {
   try {
     await writeFile(target, params.content, "utf8");
   } catch (error) {
     throw asToolExecutionError(`[write_file] cannot write ${target}`, error);
   }
-  const pathForMessage = displayPath(ctx.rootAtCall, target);
+  const pathForMessage = await receiptDisplayPath(
+    ctx.rootAtCall,
+    ctx.sessionTmpRoot,
+    target
+  );
   return {
     output: `[write_file] wrote ${Buffer.byteLength(params.content, "utf8")} bytes to ${pathForMessage}`,
     meta: { oldContent: ctx.oldContent, newContent: params.content },

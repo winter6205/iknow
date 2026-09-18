@@ -390,7 +390,7 @@ async function recordForegroundRead(
     command: args.command,
     exitCode: args.exitCode,
     root: args.waveRoot,
-    tmpWriteRoot: args.tmpDir,
+    sessionTmpRoot: args.tmpDir,
   });
 }
 
@@ -895,14 +895,14 @@ async function recordCompletedRead(
     readonly command: string;
     readonly exitCode: number;
     readonly root: string;
-    readonly tmpWriteRoot: string;
+    readonly sessionTmpRoot: string;
   }
 ): Promise<void> {
   // EXIT: 命令失败（exit != 0）→ 什么都没读到，不入账。
   if (call.exitCode !== 0) return;
   await recordSingleReadCommand(opts?.lastReadLedger, ctx, call.command, {
     root: call.root,
-    tmpWriteRoot: call.tmpWriteRoot,
+    sessionTmpRoot: call.sessionTmpRoot,
   });
 }
 
@@ -918,7 +918,7 @@ async function recordSingleReadCommand(
   host: LastReadLedgerHost | undefined,
   ctx: ToolExecutionContext | undefined,
   command: string,
-  resolveCtx: { readonly root: string; readonly tmpWriteRoot: string }
+  resolveCtx: { readonly root: string; readonly sessionTmpRoot: string }
 ): Promise<void> {
   // EXIT: host 缺席（legacy 调用方）或无 conversationId（不建匿名桶）→ 不入账。
   const ledger = host?.ledgerFor(ctx?.conversationId);
@@ -930,7 +930,7 @@ async function recordSingleReadCommand(
   let resolved: string;
   try {
     resolved = await resolveWithinRoot(resolveCtx.root, candidate, {
-      tmpWriteRoot: resolveCtx.tmpWriteRoot,
+      sessionTmpRoot: resolveCtx.sessionTmpRoot,
     });
   } catch {
     // EXIT: path 解析失败（越界 / 不存在形态）→ 静默跳过；账本只影响非空

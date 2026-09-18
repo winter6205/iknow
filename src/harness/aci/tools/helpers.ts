@@ -1,9 +1,11 @@
+import { existsSync } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
   basename,
   dirname,
   isAbsolute,
+  join,
   normalize,
   relative,
   resolve,
@@ -106,13 +108,13 @@ function stripTaskWorktreeLeafEcho(
  * write tools can use `extraWriteRoots` without exposing any read roots.
  *
  * Extra containment roots plus optional identity pad. Prefer this object
- * over a fifth positional `tmpWriteRoot` so `resolveWithinRoot` stays ≤4
+ * over a fifth positional `sessionTmpRoot` so `resolveWithinRoot` stays ≤4
  * parameters. A third-arg array still means `extraReadRoots` (legacy).
  */
 export type ResolveWithinRootOptions = {
   readonly extraReadRoots?: readonly string[];
   readonly extraWriteRoots?: readonly string[];
-  readonly tmpWriteRoot?: string;
+  readonly sessionTmpRoot?: string;
 };
 
 function isResolveOptions(
@@ -137,11 +139,11 @@ function normalizeResolveOptions(
 async function resolveAbsoluteTarget(
   realRoot: string,
   expandedTarget: string,
-  tmpWriteRoot?: string
+  sessionTmpRoot?: string
 ): Promise<{ absoluteTarget: string; realTmpRoot?: string }> {
   const pad =
-    tmpWriteRoot !== undefined && tmpWriteRoot.trim().length > 0
-      ? tmpWriteRoot
+    sessionTmpRoot !== undefined && sessionTmpRoot.trim().length > 0
+      ? sessionTmpRoot
       : undefined;
   // ADR-0092: the session tmp host path is an independent containment root.
   // A model-supplied guest `/tmp/...` literal is NOT aliased onto it — it
@@ -158,36 +160,78 @@ async function resolveAbsoluteTarget(
 function assertContained(
   resolvedTarget: string,
   realRoot: string,
-  extras: {
+  roots: {
     readonly extraReadRoots?: readonly string[];
     readonly extraWriteRoots?: readonly string[];
+    /** ADR-0092 会话 tmp 垫底（realpath 后）：既作放行写根，也作 /tmp 拒绝
+     * 文案的数据源——单一通道，避免同一值经 extras 与独立参数双份传递。 */
+    readonly realTmpRoot?: string;
   }
 ): void {
   const withinPrimary = isWithinRoot(realRoot, resolvedTarget);
-  const withinReadExtras = (extras.extraReadRoots ?? []).some((r) =>
+  const withinReadExtras = (roots.extraReadRoots ?? []).some((r) =>
     isWithinRoot(resolve(r), resolvedTarget)
   );
-  const withinWriteExtras = (extras.extraWriteRoots ?? []).some((r) =>
-    isWithinRoot(resolve(r), resolvedTarget)
-  );
+  const withinWriteExtras = [
+    ...(roots.extraWriteRoots ?? []),
+    ...(roots.realTmpRoot !== undefined ? [roots.realTmpRoot] : []),
+  ].some((r) => isWithinRoot(resolve(r), resolvedTarget));
   if (withinPrimary || withinReadExtras || withinWriteExtras) return;
-  // T3 (plans/891-taskroot-remaining-consumers.md Task 3 / ADR-0037 §4 (e)):
-  // 改绑后 `root` 即活 `taskRoot` (= 写根)。模型看见的 system ## Project
-  // path 仍是 `projectIdentityRoot`,但写工具失败时如果只回 `<target> not
-  // under <root>`,模型很难把这两根区分开去重试一个相对路径。文案必须显式
-  // 标 "current write root: <root>" 的引导,让模型能用相对路径重试。
-  // SC4 (specs/mutate-write-contract.md): the containment roots are the live
-  // taskRoot plus this identity's session tmp host path. Guest Linux `/tmp`
-  // is NOT aliased onto the session tmp, so a `/tmp/...` target must fail
-  // here — the hint names the session tmp dir as the scratch location.
-  // 写根缺席 → 退回原文案 (不崩,文案退化到 base 形态)。
-  const writeRootHint =
+  const prefix = `path outside workspace: ${resolvedTarget} not under ${realRoot}`;
+  const scratchRel = relativeToOsTmpIfUnder(resolvedTarget);
+  // SC4 (specs/mutate-write-contract.md / ADR-0092): guest Linux `/tmp` 不
+  // alias 到会话 tmp，`/tmp/...` 目标必须在这里可观察地失败——但草稿越界
+  // 不是交付越界，重试引导指向本身份展开 `$TMPDIR` 垫底绝对路径，而非
+  // 「relative to the taskRoot」(plans/session-scratch-path-space.md T2)。
+  // EXIT: 无垫底解析结果（read 面未接 sessionTmpRoot / legacy 调用）→ 落到
+  // 下方交付越界文案，与劈分前的可观察行为逐字一致。
+  if (scratchRel !== undefined && roots.realTmpRoot !== undefined) {
+    throw new ToolExecutionError(
+      scratchRejectionMessage(prefix, scratchRel, roots.realTmpRoot)
+    );
+  }
+  // EXIT: 非 OS /tmp 的越界 = 交付越界 → 保持 ADR-0037 §4 (e) 的 taskRoot
+  // 重试引导；写根缺席 → 退回原文案 (不崩,文案退化到 base 形态)。
+  const deliveryHint =
     realRoot.length > 0
       ? ` (current write root is the live taskRoot: ${realRoot}; scratch files belong in the session tmp dir, $TMPDIR — same lifetime as this identity and not a delivery destination. Retry with a path relative to the taskRoot.)`
       : "";
-  throw new ToolExecutionError(
-    `path outside workspace: ${resolvedTarget} not under ${realRoot}${writeRootHint}`
-  );
+  throw new ToolExecutionError(`${prefix}${deliveryHint}`);
+}
+
+/**
+ * 草稿（OS `/tmp`）越界的拒绝文案。T3 (plans/session-scratch-path-space.md):
+ * 仅当 `<sessionScratch>/X` 已存在时补那条 canonical 宿主路径——仍不
+ * alias：不读、不写、不重定向，只是文案提示，垫底内容不变。
+ */
+function scratchRejectionMessage(
+  prefix: string,
+  scratchRel: string,
+  pad: string
+): string {
+  const nearMiss = scratchRel.length > 0 ? join(pad, scratchRel) : undefined;
+  // EXIT: 近邻存在性检查失败（existsSync 吞 EACCES/ENOENT 等）按不存在处理
+  // ——绝不把不存在的路径写成「去读这个」式指引。
+  if (nearMiss !== undefined && existsSync(nearMiss)) {
+    return `${prefix} (guest /tmp is not aliased onto this identity's scratch area; ${nearMiss} already exists under the session tmp dir: expanded $TMPDIR is ${pad} — retry with that absolute path there.)`;
+  }
+  // EXIT: 有垫底但无近邻文件 → 只给展开的 $TMPDIR 绝对路径，不暗示任何
+  // 具体文件存在。
+  return `${prefix} (guest /tmp is not aliased onto this identity's scratch area; scratch files belong in the session tmp dir: expanded $TMPDIR is ${pad} — same lifetime as this identity and not a delivery destination.)`;
+}
+
+/**
+ * T2 (plans/session-scratch-path-space.md): 判定被拒目标是否落在真实 OS tmp
+ * 之下（`/tmp` 或 `tmpdir()` 展开位）。只用于拒绝文案劈分支——绝不用于放行，
+ * 否则会把不 alias 的 guest `/tmp` 重新变成访问面。返回相对该 tmp 根的路径
+ * （可能为空串，表示目标就是 tmp 根本身）。
+ */
+function relativeToOsTmpIfUnder(resolvedTarget: string): string | undefined {
+  for (const osTmp of ["/tmp", resolve(tmpdir())]) {
+    if (isWithinRoot(osTmp, resolvedTarget))
+      return relative(osTmp, resolvedTarget);
+  }
+  return undefined;
 }
 
 export async function resolveWithinRoot(
@@ -204,15 +248,13 @@ export async function resolveWithinRoot(
   const { absoluteTarget, realTmpRoot } = await resolveAbsoluteTarget(
     realRoot,
     stripTaskWorktreeLeafEcho(realRoot, expandHome(target)),
-    options.tmpWriteRoot
+    options.sessionTmpRoot
   );
   const resolvedTarget = await realpathWithMissingSuffix(absoluteTarget);
   assertContained(resolvedTarget, realRoot, {
     extraReadRoots: options.extraReadRoots,
-    extraWriteRoots: [
-      ...(options.extraWriteRoots ?? []),
-      ...(realTmpRoot !== undefined ? [realTmpRoot] : []),
-    ],
+    extraWriteRoots: options.extraWriteRoots,
+    realTmpRoot,
   });
   return resolvedTarget;
 }
@@ -335,7 +377,7 @@ async function realpathWithMissingSuffix(target: string): Promise<string> {
   }
 }
 
-function isWithinRoot(root: string, target: string): boolean {
+export function isWithinRoot(root: string, target: string): boolean {
   const pathFromRoot = relative(root, target);
   return (
     pathFromRoot === "" ||

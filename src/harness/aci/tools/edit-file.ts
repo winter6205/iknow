@@ -143,13 +143,13 @@ export function createEditFileTool(
     const validated = asEditFileInput(input);
     // T5 D2: per-call snapshot. resolve 与写入必须共用同一个根值。
     const rootAtCall = readRoot(root);
-    const tmpWriteRoot = resolveSessionFenceTmp({
+    const sessionTmpRoot = resolveSessionFenceTmp({
       tmpDir: opts?.tmpDir,
       projectDir: opts?.projectDir,
       conversationId: ctx?.conversationId,
     });
     const absPath = await resolveWithinRoot(rootAtCall, validated.path, {
-      tmpWriteRoot,
+      sessionTmpRoot,
     });
 
     let content: string;
