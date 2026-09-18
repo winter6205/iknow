@@ -43,14 +43,14 @@ Affected files (enumerate, not freeze): `src/config/env.ts`, `src/harness/compre
    - **Inherits:** ADR-0100；Locked sentences 1–2；显式阈值覆盖与 `< window` 硬校验不变
    - **Surface:** config env 与 compress 阈值推导；TUI/health 显示分母同源
    - **Acceptance:** 未设 env/settings 时 `contextWindow === 256000` 且未设阈值时闸为 `floor(0.95 × 256000)`；显式阈值仍优先；`threshold >= window` throw。夹具里写死 200000 的测试不改产品缺省。`npm test` 覆盖推导与默认值的用例绿
-   - Status: [ ] pending
+   - Status: [x] done
    - [parallel]
 
 3. **Card keeps overview and prints ✓ Done** — tag: `[implementation]`
    - **Inherits:** T1 锁句 4–5；failed / join miss / `subagent_result` 不改
    - **Surface:** tui 子代理卡纯派生与两宿主消费
    - **Acceptance:** live 仍 running + dim 概述；completed 可见同一概述且其下绿 `✓ Done`；无 `running...`；failed 仍 overlay。既有卡投影单测按新合同改绿
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T1]
    - [parallel]
 

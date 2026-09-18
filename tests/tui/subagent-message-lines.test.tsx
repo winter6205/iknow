@@ -100,15 +100,24 @@ describe("resolveIdentityRole — negative 边界（永不输出「子代理」�
 });
 
 describe("第 1 行后缀 — 锁句的逐字形态（三个点）", () => {
-  test("投影产出的第 1 行以逐字 ` running...` 收尾（live 与 completed 共用）", () => {
+  test("live 第 1 行以逐字 ` running...` 收尾；completed 只作身份不带后缀", () => {
     // 断言投影的**输出字节**而非模块内的常量：常量重新导出只是把
     // 实现照抄一遍（同义反复），输出侧才是 spec 锁句「三个点」的落点。
-    for (const state of ["starting", "running", "completed"] as const) {
+    // 锁句 2 reopen：completed 第 1 行去 running（角色标题只作身份）。
+    for (const state of ["starting", "running"] as const) {
       const info = makeSubagent({ role: "explore", state, toolUseId: "t-sfx" });
       expect(projectSubagentCardLines([info], "t-sfx", 80)!.roleLine).toBe(
         "explore running..."
       );
     }
+    const done = makeSubagent({
+      role: "explore",
+      state: "completed",
+      toolUseId: "t-sfx",
+    });
+    const doneCard = projectSubagentCardLines([done], "t-sfx", 80)!;
+    expect(doneCard.roleLine).toBe("explore");
+    expect(doneCard.roleLine).not.toContain("running");
   });
 });
 
@@ -149,7 +158,7 @@ describe("卡级投影的组合面 — role 行与 join 键（锁句 1/2/6）", 
     expect(projectSubagentCardLines([other], "toolu_nobody", 80)).toBeNull();
   });
 
-  test("completed：第 1 行不动、第 2 行逐字 `done`（锁句 2 的宿主可见形态）", () => {
+  test("completed：概述留下 + doneLine 逐字 `✓ Done`（锁句 2 reopen 的宿主可见形态）", () => {
     const card = projectSubagentCardLines(
       [
         makeSubagent({
@@ -161,8 +170,9 @@ describe("卡级投影的组合面 — role 行与 join 键（锁句 1/2/6）", 
       "toolu_d",
       80
     );
-    expect(card!.roleLine).toBe("explore running...");
-    expect(card!.detailLine).toBe("done");
+    expect(card!.roleLine).toBe("explore");
+    expect(card!.detailLine).toBe("查找文档");
+    expect(card!.doneLine).toBe("✓ Done");
     expect(card!.done).toBe(true);
   });
 

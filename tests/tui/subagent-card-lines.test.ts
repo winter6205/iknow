@@ -4,10 +4,11 @@
  * specs/tui-subagent-transcript-live.md（锁句 1/2/5/6）—— 卡级两行投影的
  * 纯函数单测（无 OpenTUI / 无 React，直接 import 纯函数模块）。
  *
- * 不变式：一个活着的 `spawn_subagent` 在**会话 transcript 那张卡**占两行 ——
- * 第 1 行 `{role} running...`（三点），第 2 行 live 为 dim `taskPreview`、
- * completed 后原位变绿 `done`。join 键 = `SubagentInfo.toolUseId`，缺关联键
- * 既不产生卡行、也不借用别的 worker 的预览（锁句 6）。
+ * 不变式：一个活着的 `spawn_subagent` 在**会话 transcript 那张卡**上第 1 行
+ * `{role} running...`（三点）、第 2 行 dim `taskPreview`；该 worker **completed**
+ * 后概述留下、其下绿 `✓ Done`，且第 1 行不再带 `running...`（身份行只作身份）。
+ * join 键 = `SubagentInfo.toolUseId`，缺关联键既不产生卡行、也不借用别的 worker
+ * 的预览（锁句 6）。
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -130,14 +131,14 @@ describe("projectSubagentCardLines — live 与 completed 的卡形状", () => {
     });
   });
 
-  test("completed：锁句 2 —— 第 1 行逐字不变，第 2 行 literally `done`，done=true", () => {
+  test("completed：概述留下 + 其下绿 `✓ Done`，第 1 行不再带 running...（锁句 2 reopen）", () => {
     const card = projectSubagentCardLines(
       [
         makeSubagent({
           state: "completed",
           role: "explore",
           toolUseId: "toolu_done",
-          taskPreview: "已完成的预览（不再显示）",
+          taskPreview: "已完成的概述",
           endedAt: iso(-100),
           summary: "收尾摘要",
         }),
@@ -146,28 +147,44 @@ describe("projectSubagentCardLines — live 与 completed 的卡形状", () => {
       80
     );
     expect(card).not.toBeNull();
-    expect(card!.roleLine).toBe("explore running...");
-    expect(card!.detailLine).toBe("done");
+    expect(card!.roleLine).toBe("explore");
+    expect(card!.roleLine).not.toContain("running");
+    expect(card!.detailLine).toBe("已完成的概述");
+    expect(card!.doneLine).toBe("✓ Done");
     expect(card!.done).toBe(true);
-    expect(card!.detailLine).not.toContain("✓");
+    // 概述不得被字面 `done` 顶掉（完成态丢任务概述是 reopen 的直接动因）。
+    expect(card!.detailLine).not.toBe("done");
   });
 
-  test("completed 的 detailLine 恒为 `done`，即使 taskPreview 非空", () => {
-    const card = projectSubagentCardLines(
+  test("completed 的概述就是 taskPreview，缺省 / 空串同样保留该行", () => {
+    const withPreview = projectSubagentCardLines(
       [
         makeSubagent({
           state: "completed",
-          taskPreview: "旧预览",
+          taskPreview: "旧概述",
           toolUseId: "toolu_c",
         }),
       ],
       "toolu_c",
       80
     );
-    expect(card!.detailLine).toBe("done");
+    expect(withPreview!.detailLine).toBe("旧概述");
+    const empty = projectSubagentCardLines(
+      [
+        makeSubagent({
+          state: "completed",
+          taskPreview: "",
+          toolUseId: "toolu_c_empty",
+        }),
+      ],
+      "toolu_c_empty",
+      80
+    );
+    expect(empty!.detailLine).toBe("");
+    expect(empty!.doneLine).toBe("✓ Done");
   });
 
-  test("只有 completed 产 done：starting / running 的 detailLine 不是 `done`", () => {
+  test("只有 completed 产 doneLine：starting / running 无该行", () => {
     for (const state of ["starting", "running"] as const) {
       const card = projectSubagentCardLines(
         [makeSubagent({ state, toolUseId: "toolu_l" })],
@@ -175,7 +192,8 @@ describe("projectSubagentCardLines — live 与 completed 的卡形状", () => {
         80
       );
       expect(card!.done).toBe(false);
-      expect(card!.detailLine).not.toBe("done");
+      expect(card!.doneLine).toBeUndefined();
+      expect(card!.roleLine).toBe("general-purpose running...");
     }
   });
 });
@@ -313,6 +331,27 @@ describe("projectSubagentCardLines — overflow（视觉宽度 ≤ cols，永不
       expect(visualWidth(card!.detailLine)).toBeLessThanOrEqual(1);
     }
   });
+
+  test("completed 的概述同样按 cols 截断；`✓ Done` 逐字优先于列宽", () => {
+    // 旧合同里 completed 的第 2 行是免截断的字面 `done`，概述整行消失；
+    // reopen 后概述回到页面上，就必须和 live 一样受列宽收口。完成标记本身
+    // 仍是固定字面（宿主 wrapMode="none" 裁边），与旧 `done` 同纪律。
+    const card = projectSubagentCardLines(
+      [
+        makeSubagent({
+          state: "completed",
+          role: "explore",
+          taskPreview: "b".repeat(100),
+          toolUseId: "toolu_done_clip",
+        }),
+      ],
+      "toolu_done_clip",
+      20
+    );
+    expect(visualWidth(card!.roleLine)).toBeLessThanOrEqual(20);
+    expect(visualWidth(card!.detailLine)).toBeLessThanOrEqual(20);
+    expect(card!.doneLine).toBe("✓ Done");
+  });
 });
 
 describe("projectSubagentCardLines — concurrent / exception", () => {
@@ -394,7 +433,8 @@ describe("projectSubagentCardLines — concurrent / exception", () => {
     );
     expect(missing!.done).toBe(true);
     expect(illegal!.done).toBe(true);
-    expect(illegal!.detailLine).toBe("done");
+    expect(illegal!.detailLine).toBe("查找文档");
+    expect(illegal!.doneLine).toBe("✓ Done");
   });
 });
 
@@ -430,8 +470,9 @@ describe("subagentCardLinesMap — 逐卡 map（key = toolUseId）", () => {
       done: false,
     });
     expect(map.get("toolu_done")).toEqual({
-      roleLine: "general-purpose running...",
-      detailLine: "done",
+      roleLine: "general-purpose",
+      detailLine: "查找文档",
+      doneLine: "✓ Done",
       done: true,
     });
   });
@@ -567,8 +608,9 @@ describe("subagentCardLinesMap — 逐卡 map（key = toolUseId）", () => {
       80
     );
     expect(map.get("toolu_iso2")).toEqual({
-      roleLine: "general-purpose running...",
-      detailLine: "done",
+      roleLine: "general-purpose",
+      detailLine: "查找文档",
+      doneLine: "✓ Done",
       done: true,
     });
   });

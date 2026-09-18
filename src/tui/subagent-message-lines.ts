@@ -2,11 +2,12 @@
  * src/tui/subagent-message-lines.ts
  *
  * specs/tui-subagent-transcript-live.md（实施源；计划 = plans/tui-subagent-
- * transcript-live.md）—— **卡级两行投影**：把一个子代理 join 回会话 transcript
- * 里派它的那张 `spawn_subagent` 卡。第 1 行 `{role} running...`；第 2 行
- * live 为 dim `taskPreview`，该 worker **completed** 后原位变绿 `done`
- * （锁句 1/2）。join 键 = `SubagentInfo.toolUseId`（= 那次 spawn 的 tool_use
- * id，与卡侧同一 id 空间）。
+ * transcript-live.md，完成态修订 = plans/strategy-window-and-subagent-card.md
+ * T3）—— **卡级两行投影**：把一个子代理 join 回会话 transcript 里派它的那张
+ * `spawn_subagent` 卡。live 第 1 行 `{role} running...`、第 2 行 dim
+ * `taskPreview`；该 worker **completed** 后概述留下、第 1 行去 running 只作
+ * 身份、其下加逐字绿 `✓ Done`（锁句 2 reopen）。join 键 =
+ * `SubagentInfo.toolUseId`（= 那次 spawn 的 tool_use id，与卡侧同一 id 空间）。
  *
  * 取代 = Slice D / SC14 的「live 列表整体铺开」投影（`projectSubagentMessageLines`
  * / `subagentMessageRowCount`）与 prompt 上方身份条 —— 位置改判给会话卡后，
@@ -20,16 +21,18 @@
  *   - empty：空数组 / `toolUseId` 缺省或空串或纯空白 → `null`（无关联键，
  *     不借用别的 worker 的预览 —— 锁句 6 的 `// EXIT:` 面）；
  *   - negative：无匹配 / 匹配到 `failed` → `null`（锁句 5：failed 走该卡既有
- *     failure overlay，不走绿 `done`）；role 缺省 / 空串 / 纯空白 →
+ *     failure overlay，不走绿 `✓ Done`）；role 缺省 / 空串 / 纯空白 →
  *     catalog fallback（永不输出「子代理」字面值）；
  *   - overflow：live 两行各自按 cols 视觉宽度截断（CJK-safe），永不换行；
- *     `cols <= 0` → 1 列预算。completed 的第 2 行是逐字 `done`（锁句 2），
- *     不做宽度收口 —— 字面文本优先于列宽美学，宿主 `wrapMode="none"` 裁边；
+ *     `cols <= 0` → 1 列预算。completed 的概述行同样受列宽收口（概述回到
+ *     页面上就必须和 live 一样不越列）；完成标记 `✓ Done` 是逐字固定面
+ *     （锁句 2 reopen），不做宽度收口 —— 字面文本优先于列宽美学，宿主
+ *     `wrapMode="none"` 裁边；
  *   - concurrent：纯函数，每次投影取调用时刻入参，无历史残留；两个 live
  *     worker 各取自己 join 的 `taskPreview`，互不串；重复 `toolUseId` 时
  *     列表序首个胜（确定性）；
  *   - exception：不读 `startedAt` / `endedAt` / `summary`（非法 ISO 不影响
- *     投影）；缺 / 空 `taskPreview` → 第 2 行空串占位，行账仍 2 行。
+ *     投影）；缺 / 空 `taskPreview` → 概述行以空串占位，行账不塌陷。
  */
 import type { SubagentInfo } from "../harness/subagent/manager.js";
 import { clipOneLineVisual } from "./tool-summary.js";
@@ -42,10 +45,14 @@ import { SUBAGENT_ROLE_FALLBACK } from "../shared/tool-line.js";
  */
 export const IDENTITY_FALLBACK_ROLE = SUBAGENT_ROLE_FALLBACK;
 
-/** 第 1 行固定后缀（spec 原文 `running...`，三个点）。live 与 completed
- *  共用同一第 1 行（锁句 2 只改第 2 行）。join 不上的 spawn 卡不走本后缀
- *  —— 它落 `formatToolStatusLine` 的无点形态（`explore running`）。 */
+/** live 第 1 行固定后缀（spec 原文 `running...`，三个点）。completed 不带
+ *  该后缀 —— 锁句 2 reopen 后第 1 行只作身份。join 不上的 spawn 卡不走本
+ *  后缀 —— 它落 `formatToolStatusLine` 的无点形态（`explore running`）。 */
 const RUNNING_SUFFIX = " running...";
+
+/** completed 的完成标记（锁句 2 reopen：概述保留、其下逐字绿 `✓ Done`）。
+ *  与面板 `●` / `✓` 同为几何字形（spec #146:86 纪律），不用 emoji。 */
+const DONE_MARKER = "✓ Done";
 
 /**
  * live 子代理的**唯一判据**：`starting` + `running`（SC14 / SC15 行序合同）。
@@ -59,7 +66,7 @@ const RUNNING_SUFFIX = " running...";
  * 投影都能 import 它而不把 OpenTUI 拖进各自的依赖图。
  *
  * 注：卡级投影不看本谓词 —— 它按 `state` 三分类（live / completed / failed），
- * 因为 completed 的卡仍要写第 2 行 `done`（锁句 2）。
+ * 因为 completed 的卡仍要画概述 + 绿 `✓ Done`（锁句 2 reopen）。
  */
 export function isLiveSubagent(info: SubagentInfo): boolean {
   return info.state === "starting" || info.state === "running";
@@ -78,14 +85,17 @@ export function resolveIdentityRole(info: SubagentInfo): string {
   return trimmed.length > 0 ? trimmed : IDENTITY_FALLBACK_ROLE;
 }
 
-/** 卡级两行（spec「Card contract」的单一形状）。 */
+/** 卡级投影（spec「Card contract」的单一形状）。 */
 export interface SubagentCardLines {
-  /** 第 1 行：`{role} running...`。live 与 completed 同形（锁句 2）。 */
+  /** 第 1 行：live → `{role} running...`；completed → 仅身份，不含
+   *  `running...`（锁句 2 reopen）。 */
   readonly roleLine: string;
-  /** 第 2 行：live → 按 cols 截断的 `taskPreview`（空串 = 空行占位）；
-   *  completed → 逐字 `done`。 */
+  /** 第 2 行：live 与 completed 均为按 cols 截断的 `taskPreview`
+   *  （空串 = 空行占位）。completed 不得用它顶替概述。 */
   readonly detailLine: string;
-  /** 第 2 行着色：true → `tuiPalette.add`（绿）；false → `tuiPalette.dim`。 */
+  /** 第 3 行（仅 completed）：逐字 `✓ Done`；live 缺席（undefined）。 */
+  readonly doneLine?: string;
+  /** 完成态标志：true → `doneLine` 在场，宿主以 `tuiPalette.add`（绿）画它。 */
   readonly done: boolean;
 }
 
@@ -99,18 +109,21 @@ function normalizeCorrelator(toolUseId: string | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-/** 单卡两行拼装（live / completed）。调用方保证 `state !== "failed"`。 */
+/** 单卡拼装（live / completed）。调用方保证 `state !== "failed"`。 */
 function buildCard(info: SubagentInfo, budget: number): SubagentCardLines {
-  const roleLine = clipOneLineVisual(
-    `${resolveIdentityRole(info)}${RUNNING_SUFFIX}`,
-    budget
-  );
+  const role = resolveIdentityRole(info);
   if (info.state === "completed") {
-    // 锁句 2：第 2 行逐字 `done`（无字形、无 ✓），不做宽度收口。
-    return { roleLine, detailLine: "done", done: true };
+    // 锁句 2 reopen：概述留下（与 live 同口径按 cols 截断），第 1 行去
+    // running 只作身份，其下追加逐字 `✓ Done`（不做宽度收口）。
+    return {
+      roleLine: clipOneLineVisual(role, budget),
+      detailLine: clipOneLineVisual(info.taskPreview, budget),
+      doneLine: DONE_MARKER,
+      done: true,
+    };
   }
   return {
-    roleLine,
+    roleLine: clipOneLineVisual(`${role}${RUNNING_SUFFIX}`, budget),
     detailLine: clipOneLineVisual(info.taskPreview, budget),
     done: false,
   };
@@ -175,7 +188,7 @@ export function subagentCardsKey(
  * 跳过规则与单卡投影同源：缺 / 空 `toolUseId` 的条目整体跳过（不入 map，
  * 不占任何 key），`failed` 条目整体跳过（锁句 5），重复键列表序首个胜
  * （确定性 —— 后到者不覆盖）。live 与 completed 都入 map（completed 的卡
- * 仍要画绿 `done`）。
+ * 仍要画概述 + 绿 `✓ Done`）。
  */
 export function subagentCardLinesMap(
   subagents: ReadonlyArray<SubagentInfo>,

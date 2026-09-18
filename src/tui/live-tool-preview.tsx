@@ -186,13 +186,15 @@ export function liveToolPreviewTextLines(
   cols: number,
   /** specs/tui-subagent-transcript-live.md：本 run 是 spawn 卡且 join 上了子代理
    *  时，卡的文本行改由卡级投影提供（第 1 行 `{role} running...`、第 2 行 dim
-   *  预览 / 绿 `done`）。缺席 → 与改前逐字节一致（非 spawn 工具、轮询卡、未
+   *  预览；completed 概述下再加绿 `✓ Done`）。缺席 → 与改前逐字节一致（非 spawn 工具、轮询卡、未
    *  join 的 spawn 卡都走既有路径）。 */
   card?: SubagentCardLines | null
 ): ReadonlyArray<string> {
   const live = cardIfLive(run, card);
   if (live !== null) {
-    return [live.roleLine, live.detailLine];
+    return live.doneLine === undefined
+      ? [live.roleLine, live.detailLine]
+      : [live.roleLine, live.detailLine, live.doneLine];
   }
   if (run.status === "running") {
     return [runningLine(run, cols)];
@@ -221,7 +223,7 @@ export function liveToolPreviewTextLines(
 }
 
 /** live 工具 box 占用的物理行数（状态 1 行 + 可见预览行）。
- *  card 命中 → 2 行（第 1 行身份 + 第 2 行预览 / `done`），行账与
+ *  card 命中 → live 2 行（身份 + 概述）、completed 3 行（概述下加 `✓ Done`），行账与
  *  `liveToolPreviewTextLines` 同源（两行路径同样由它产出，parity 不破）。 */
 export function liveToolPreviewRows(
   run: LiveToolRun,
@@ -272,7 +274,7 @@ export function liveToolRunsBox(
  *
  *  `card`（specs/tui-subagent-transcript-live.md）：命中时该 spawn 卡画
  *  `SubagentCardView` 两行（第 1 行 `{role} running...`、第 2 行 dim 预览 /
- *  绿 `done`），整卡不再走既有标题 + 预览组合；failed 卡不吃 card（锁句 5
+ *  绿 `✓ Done`），整卡不再走既有标题 + 预览组合；failed 卡不吃 card（锁句 5
  *  的失败横切在 box 这一层同样成立）。 */
 export function liveToolPreviewBox(
   run: LiveToolRun,

@@ -125,11 +125,12 @@ describe("subagentRows 行账（锁句 3：prompt 上方不再占行）", () => 
 async function renderCard(card: {
   readonly roleLine: string;
   readonly detailLine: string;
+  readonly doneLine?: string;
   readonly done: boolean;
 }): Promise<TestRendererSetup> {
   const setup = await testRender(<SubagentCardView card={card} />, {
     width: 80,
-    height: 4,
+    height: 5,
   });
   await setup.renderOnce();
   return setup;
@@ -179,7 +180,7 @@ describe("SubagentCardView（两行渲染面）", () => {
     await setup.renderer.destroy();
   });
 
-  test("completed：第 2 行变绿 `done`，第 1 行不变（锁句 2 原位）", async () => {
+  test("completed：概述留下 + 其下绿 `✓ Done`，第 1 行不再带 running...", async () => {
     const card = subagentCardLinesMap(
       [
         makeSubagent({
@@ -198,20 +199,27 @@ describe("SubagentCardView（两行渲染面）", () => {
       .captureCharFrame()
       .split("\n")
       .map((l) => l.trim());
-    expect(lines).toContain("explore running...");
-    expect(lines).toContain("done");
-    expect(lines).not.toContain("查找文档");
-    const doneSpan = spanWithText(setup, "done");
+    // 概述必须在场（被字面 `done` 顶掉是 reopen 的直接动因）。
+    expect(lines).toContain("查找文档");
+    expect(lines).toContain("✓ Done");
+    expect(lines).toContain("explore");
+    expect(lines.some((l) => l.includes("running..."))).toBe(false);
+    // 顺序：概述在前，完成标记紧随其下。
+    expect(lines.indexOf("✓ Done")).toBe(lines.indexOf("查找文档") + 1);
+    const doneSpan = spanWithText(setup, "✓ Done");
     expect(doneSpan).toBeDefined();
     expect(rgbaEq(doneSpan!.fg, RGBA.fromHex(tuiPalette.add))).toBe(true);
+    // 概述行仍是 dim（完成态不改它的着色，绿只属于完成标记）。
+    const previewSpan = spanWithText(setup, "查找文档");
+    expect(rgbaEq(previewSpan!.fg, RGBA.fromHex(tuiPalette.dim))).toBe(true);
     await setup.renderer.destroy();
   });
 
-  test("无 emoji 断言：两行渲染文本不含 U+1F300–U+1FAFF（几何字形纪律）", async () => {
+  test("无 emoji 断言：卡渲染文本不含 U+1F300–U+1FAFF（几何字形纪律）", async () => {
     // 旧身份条测试（已归档）在宿主上钉过这条；两行换了宿主后由本测接棒 ——
     // 渲染面不得**自行引入** emoji 装饰（spec #146:86 几何字形：面板用
-    // ● / ✓，卡用文字）。输入取纯文本，故帧里任何 emoji 都只可能来自
-    // 渲染面自己加的字形。
+    // ● / ✓，卡的完成标记 `✓ Done` 同用几何 ✓，落在这个区间之外）。输入取
+    // 纯文本，故帧里任何 emoji 都只可能来自渲染面自己加的字形。
     const card = subagentCardLinesMap(
       [
         makeSubagent({
