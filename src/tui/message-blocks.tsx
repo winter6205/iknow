@@ -70,6 +70,8 @@ import {
 } from "./tool-settled.js";
 import { MessageShell } from "./message-shell.js";
 import { Markdown } from "./markdown.js";
+import { renderActivityBlockRows } from "./activity-block-rows.js";
+import type { ActivityBlockLine } from "./turn-fold-lines.js";
 import {
   REDACTED_PLACEHOLDER,
   summarizeThinkingContent,
@@ -205,6 +207,164 @@ function ThinkingSummary(props: {
   );
 }
 
+/** 活动块行节点：走共享模板 `renderActivityBlockRows`（与 tail 的未锚定
+ *  块同一装配，宽度 / 颜色 token 不各自漂移）。块标题 / 预览恒 dim 单行。 */
+function activityRowsNode(
+  rows: ReadonlyArray<ActivityBlockLine>,
+  cols: number,
+  keyPrefix: string
+): ReactNode {
+  return (
+    <box flexDirection="column">
+      {renderActivityBlockRows(
+        rows.map((row) => row.title),
+        rows.map((row) => row.preview),
+        cols,
+        (idx) => `${keyPrefix}-${idx}`
+      )}
+    </box>
+  );
+}
+
+/** assistant 内容体装配（纯函数，从 MessageBlocks 抽出以控复杂度）：
+ *  思考摘要 / 展开态思考正文 / 活动块标题锚点插入 / 正文与工具卡。
+ *  返回 null = 消息无任何可见节点（调用方不挂载，不留幻影间距）。
+ *
+ * Thinking-at-bottom revision 锁句 4：活动块标题按锚点插进内容顺序 ——
+ * 锚点 = 该块所在内容块下标，标题画在该内容块之前。锚点落在渲染为 null
+ * 的内容块（如整块不画的噪音 tool_use）也照样在该位置出标题 —— 标题的
+ * 存在不依赖内容块是否可见，只依赖它在时间线上的位置。锚点越界（下标 ≥
+ * content.length）的残留块画在正文之后（`deriveActivityBlocks` 的锚点恒
+ * 是合法下标，此分支只在畸形 / 退化输入下命中）。 */
+function assistantBodyNode(args: {
+  readonly message: AnthropicNativeMessage;
+  readonly cols: number;
+  readonly statusMap: ReadonlyMap<string, boolean>;
+  readonly resultTextMap?: ReadonlyMap<string, string>;
+  readonly subagentCards?: ReadonlyMap<string, SubagentCardLines>;
+  readonly thinkingSeconds?: number;
+  readonly hideThinking?: boolean;
+  readonly thinkingExpanded: boolean;
+  readonly activityBlocks?: ReadonlyArray<ActivityBlockLine>;
+}): ReactNode {
+  const { message, cols } = args;
+  const pal = tuiPalette;
+  const summary = summarizeThinkingContent(message.content);
+  // Task 2 (plans/tui-chrome-interaction.md T2)：MessageShell 透传,不再
+  // 加 paddingX → 内部内容宽度 = cols（不再 -2）。Markdown / 工具行 /
+  // 思考摘要全部按 cols 满宽排版,与 chat-view 透传的 contentWidth 对齐。
+  const innerCols = Math.max(1, cols);
+  const nodes: ReactNode[] = [];
+  // #tui-render-overhaul T4:assistant 内部块间 1 行节奏 —— 相邻节点（折叠行 /
+  // thinking 明文 / 文本 / 工具行 / 错误行）之间补 1 行空白,首块不补顶 margin。
+  // OpenTUI `marginTop` 在父 column 容器里换行实现（父级为 MessageShell 内
+  // 的 `<box flexDirection="column">`）。Task 2：MessageShell 透传（无
+  // paddingX、无 backgroundColor），marginTop 即在父 column 中起换行作用。
+  const withBlockSpacing = (key: string, node: ReactNode): ReactNode =>
+    nodes.length === 0 ? (
+      node
+    ) : (
+      <box key={`${key}-gap`} flexDirection="column" marginTop={1}>
+        {node}
+      </box>
+    );
+  // hideThinking 只藏 MessageBlocks 内不当槽主的思考正文（折叠摘要 + 展开
+  // 明文）；下方锚点插入的活动块标题不受它管辖（锁句 5 继承项）。
+  const showThinking = summary !== "" && args.hideThinking !== true;
+  if (showThinking) {
+    if (formatThinkingFold(args.thinkingSeconds).length > 0) {
+      nodes.push(
+        withBlockSpacing(
+          "tk-sum",
+          <ThinkingSummary
+            key="tk-sum-inner"
+            message={message}
+            cols={innerCols}
+            thinkingSeconds={args.thinkingSeconds}
+          />
+        )
+      );
+    }
+  }
+  if (showThinking && args.thinkingExpanded) {
+    message.content.forEach((block, i) => {
+      if (block.type === "thinking") {
+        nodes.push(
+          withBlockSpacing(
+            `tk-b${i}`,
+            <text key={`tk-b${i}-inner`} wrapMode="word" width={innerCols}>
+              {block.thinking}
+            </text>
+          )
+        );
+      } else if (block.type === "redacted_thinking") {
+        nodes.push(
+          withBlockSpacing(
+            `tk-r${i}`,
+            <text
+              key={`tk-r${i}-inner`}
+              fg={pal.dim}
+              wrapMode="word"
+              width={innerCols}
+            >
+              {REDACTED_PLACEHOLDER}
+            </text>
+          )
+        );
+      }
+    });
+  }
+  const activityLines = args.activityBlocks ?? [];
+  message.content.forEach((block, i) => {
+    const anchorRows = activityLines.filter(
+      (line) => line.contentBlockIndex === i
+    );
+    if (anchorRows.length > 0) {
+      nodes.push(
+        withBlockSpacing(
+          `ab${i}`,
+          activityRowsNode(anchorRows, innerCols, `ab-${i}`)
+        )
+      );
+    }
+    if (block.type === "text" && block.text.trim().length > 0) {
+      nodes.push(
+        withBlockSpacing(
+          `t${i}`,
+          <box key={`t${i}-inner`}>
+            <Markdown text={block.text} width={innerCols} />
+          </box>
+        )
+      );
+    } else if (block.type === "tool_use") {
+      const node = renderToolUseBlock({
+        block,
+        statusMap: args.statusMap,
+        resultTextMap: args.resultTextMap,
+        innerCols,
+        subagentCards: args.subagentCards,
+      });
+      if (node !== null) {
+        nodes.push(withBlockSpacing(`u${i}`, node));
+      }
+    }
+  });
+  const tailRows = activityLines.filter(
+    (line) => line.contentBlockIndex >= message.content.length
+  );
+  if (tailRows.length > 0) {
+    nodes.push(
+      withBlockSpacing(
+        "ab-tail",
+        activityRowsNode(tailRows, innerCols, "ab-tail")
+      )
+    );
+  }
+  if (nodes.length === 0) return null;
+  // 裸数组返回：MessageShell 已提供 column 容器，包 fragment 无增益。
+  return nodes;
+}
+
 /** system 中断消息固定文案 SSOT（#392 T3）。TUI 侧独立分支直接渲染，不走
  *  Markdown 解析；`Interrupted by user.` 来自 loop 中断时注入的 system
  *  content，无 text block 时 fallback 该文案。 */
@@ -330,6 +490,92 @@ function renderToolUseBlock(args: {
   );
 }
 
+/** system 中断消息渲染（#392 T3）：警示色 + 固定文案，不进 Markdown /
+ *  thinking 逻辑。文案取首个 text block（trim），空则 fallback 固定文案。
+ *  从 MessageBlocks 抽出以控复杂度（S5 hard gate）。 */
+function systemInterruptNode(
+  message: AnthropicNativeMessage,
+  cols: number,
+  marginTop: number | undefined
+): ReactNode {
+  const texts = message.content
+    .filter((b): b is { type: "text"; text: string } => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+  const body = texts.trim() !== "" ? texts.trim() : SYSTEM_INTERRUPT_TEXT;
+  return (
+    <box flexDirection="column" marginTop={marginTop ?? 0}>
+      <text fg={tuiPalette.running} wrapMode="word" width={cols}>
+        {`${SYSTEM_INTERRUPT_MARK} ${body}`}
+      </text>
+    </box>
+  );
+}
+
+/** user ❯ 气泡内盒（skill-load chip 与普通输入共用）：userBg 底 + paddingX=1
+ *  水平缩进 + cols-2 内宽。palette token 缺失时跳过底色回归终端默认。 */
+function userBubble(cols: number, text: string): ReactNode {
+  const pal = tuiPalette;
+  const userFill = pal.userBg.length > 0 ? pal.userBg : undefined;
+  return (
+    <box
+      flexDirection="column"
+      backgroundColor={userFill}
+      paddingX={1}
+      paddingY={0}
+    >
+      <text fg={pal.accent} wrapMode="word" width={Math.max(1, cols - 2)}>
+        {`❯ ${text}`}
+      </text>
+    </box>
+  );
+}
+
+/** user 消息渲染：skill-load chip 投影命中 → 芯片 + remainder；普通输入 →
+ *  ❯ 气泡。纯 tool_result（无 text）与 hidden agent_status → null（摘要行
+ *  已覆盖）。从 MessageBlocks 抽出以控复杂度（S5 hard gate）。 */
+function userMessageNode(
+  message: AnthropicNativeMessage,
+  cols: number,
+  marginTop: number | undefined
+): ReactNode {
+  const pal = tuiPalette;
+  const texts = message.content
+    .filter((b): b is { type: "text"; text: string } => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+  if (texts.trim() === "") return null; // 纯 tool_result：摘要行已覆盖。
+  if (isTuiHiddenUserMessage(message)) return null;
+  // plans/tui-chrome-interaction.md Task 5：skill-load chip 投影 ——
+  // 命中闭合形态的 `[skill-load name="X"]\n<body>[+\n\n<remainder>]`
+  // 信封时，正文永进 ❯ 气泡。可见形态：`loading skill <name>` 芯片 +
+  // remainder（若有）。模型历史仍收 `buildSkillLoadText` 信封（session-api
+  // 侧不动），TUI 在 render 层剥 body；reload 后落盘全文同样投影为 chip。
+  // 拒绝形态（短前缀命中但 name 没闭合 / 不以 `[skill-load ` 开头）→
+  // 走现有 user 文本路径（视为普通 user 输入）。
+  const projection = projectSkillLoadUserText(texts);
+  if (projection !== null) {
+    const { name, remainder } = projection;
+    return (
+      <box flexDirection="column" marginTop={marginTop ?? 0}>
+        <text fg={pal.dim} wrapMode="none">
+          {`loading skill ${name}`}
+        </text>
+        {remainder.length > 0 && (
+          <box flexDirection="column" marginTop={1}>
+            {userBubble(cols, remainder)}
+          </box>
+        )}
+      </box>
+    );
+  }
+  return (
+    <box flexDirection="column" marginTop={marginTop ?? 0}>
+      {userBubble(cols, stripPrefetchOverlay(texts))}
+    </box>
+  );
+}
+
 /** 完整消息渲染（保留 Markdown 全功能 + tool_use 摘要 + thinking 折叠面板）。
  *
  *  props：
@@ -374,178 +620,35 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
    *  tool_result user）不留幻影间距。缺省无间距。 */
   readonly marginTop?: number;
   readonly noTrailingSelfMargin?: boolean;
+  /** Thinking-at-bottom revision 锁句 4：本消息的已锚定活动块行（按
+   *  contentBlockIndex 升序，`turn-fold-lines.ts` 单源派生）。渲染时按
+   *  锚点插进内容顺序 —— 标题画在该锚点的内容块之前，不整包甩在消息
+   *  尾巴。缺省 = 无活动块（与改前渲染逐字节一致）。 */
+  readonly activityBlocks?: ReadonlyArray<ActivityBlockLine>;
 }): ReactNode {
   const { message, cols, statusMap, thinkingExpanded = false } = props;
-  const pal = tuiPalette;
   // noTrailingSelfMargin：scrollbox 全内容滚动场景不再需要（行账已废除）；
   // 对外 API 兼容保留字段，不抛错，渲染层无需差异化。
   void props.noTrailingSelfMargin;
   if (message.role === "system") {
-    // #392 T3：中断 system 消息走独立渲染分支——警示色 + 固定文案，不进
-    // Markdown / thinking 逻辑。文案取首个 text block（trim），空则 fallback。
-    const texts = message.content
-      .filter((b): b is { type: "text"; text: string } => b.type === "text")
-      .map((b) => b.text)
-      .join("\n");
-    const body = texts.trim() !== "" ? texts.trim() : SYSTEM_INTERRUPT_TEXT;
-    return (
-      <box flexDirection="column" marginTop={props.marginTop ?? 0}>
-        <text fg={pal.running} wrapMode="word" width={cols}>
-          {`${SYSTEM_INTERRUPT_MARK} ${body}`}
-        </text>
-      </box>
-    );
+    return systemInterruptNode(message, cols, props.marginTop);
   }
   if (message.role === "user") {
-    const texts = message.content
-      .filter((b): b is { type: "text"; text: string } => b.type === "text")
-      .map((b) => b.text)
-      .join("\n");
-    if (texts.trim() === "") return null; // 纯 tool_result：摘要行已覆盖。
-    if (isTuiHiddenUserMessage(message)) return null;
-    // plans/tui-chrome-interaction.md Task 5：skill-load chip 投影 ——
-    // 命中闭合形态的 `[skill-load name="X"]\n<body>[+\n\n<remainder>]`
-    // 信封时，正文永进 ❯ 气泡。可见形态：`loading skill <name>` 芯片 +
-    // remainder（若有）。模型历史仍收 `buildSkillLoadText` 信封（session-api
-    // 侧不动），TUI 在 render 层剥 body；reload 后落盘全文同样投影为 chip。
-    // 拒绝形态（短前缀命中但 name 没闭合 / 不以 `[skill-load ` 开头）→
-    // 走现有 user 文本路径（视为普通 user 输入）。
-    const projection = projectSkillLoadUserText(texts);
-    if (projection !== null) {
-      const { name, remainder } = projection;
-      return (
-        <box flexDirection="column" marginTop={props.marginTop ?? 0}>
-          <text fg={pal.dim} wrapMode="none">
-            {`loading skill ${name}`}
-          </text>
-          {remainder.length > 0 && (
-            <box
-              flexDirection="column"
-              backgroundColor={pal.userBg}
-              paddingX={1}
-              paddingY={0}
-            >
-              <text
-                fg={pal.accent}
-                wrapMode="word"
-                width={Math.max(1, cols - 2)}
-              >
-                {`❯ ${remainder}`}
-              </text>
-            </box>
-          )}
-        </box>
-      );
-    }
-    const visible = stripPrefetchOverlay(texts);
-    // T7 + Task 2：user 底色块（pal.userBg + paddingX=1 水平缩进，无
-    // paddingY 贴内容）。内部宽度 = cols-2（paddingX=1 两侧），text
-    // width 同步收窄避免溢出。
-    // Task 2 acceptance 6:缺 palette token 不许把 transcript 刷白 ——
-    // userBg 缺/空串时跳过 backgroundColor，回归终端默认。
-    const userFill = pal.userBg.length > 0 ? pal.userBg : undefined;
-    return (
-      <box flexDirection="column" marginTop={props.marginTop ?? 0}>
-        <box
-          flexDirection="column"
-          backgroundColor={userFill}
-          paddingX={1}
-          paddingY={0}
-        >
-          <text fg={pal.accent} wrapMode="word" width={Math.max(1, cols - 2)}>
-            {`❯ ${visible}`}
-          </text>
-        </box>
-      </box>
-    );
+    return userMessageNode(message, cols, props.marginTop);
   }
   // assistant
-  const summary = summarizeThinkingContent(message.content);
-  // Task 2 (plans/tui-chrome-interaction.md T2)：MessageShell 透传,不再
-  // 加 paddingX → 内部内容宽度 = cols（不再 -2）。Markdown / 工具行 /
-  // 思考摘要全部按 cols 满宽排版,与 chat-view 透传的 contentWidth 对齐。
-  const innerCols = Math.max(1, cols);
-  const nodes: ReactNode[] = [];
-  // #tui-render-overhaul T4:assistant 内部块间 1 行节奏 —— 相邻节点（折叠行 /
-  // thinking 明文 / 文本 / 工具行 / 错误行）之间补 1 行空白,首块不补顶 margin。
-  // OpenTUI `marginTop` 在父 column 容器里换行实现（父级为 MessageShell 内
-  // 的 `<box flexDirection="column">`）。Task 2：MessageShell 透传（无
-  // paddingX、无 backgroundColor），marginTop 即在父 column 中起换行作用。
-  const withBlockSpacing = (key: string, node: ReactNode): ReactNode =>
-    nodes.length === 0 ? (
-      node
-    ) : (
-      <box key={`${key}-gap`} flexDirection="column" marginTop={1}>
-        {node}
-      </box>
-    );
-  if (summary !== "" && props.hideThinking !== true) {
-    if (formatThinkingFold(props.thinkingSeconds).length > 0) {
-      nodes.push(
-        withBlockSpacing(
-          "tk-sum",
-          <ThinkingSummary
-            key="tk-sum-inner"
-            message={message}
-            cols={innerCols}
-            thinkingSeconds={props.thinkingSeconds}
-          />
-        )
-      );
-    }
-  }
-  if (summary !== "" && thinkingExpanded && props.hideThinking !== true) {
-    message.content.forEach((block, i) => {
-      if (block.type === "thinking") {
-        nodes.push(
-          withBlockSpacing(
-            `tk-b${i}`,
-            <text key={`tk-b${i}-inner`} wrapMode="word" width={innerCols}>
-              {block.thinking}
-            </text>
-          )
-        );
-      } else if (block.type === "redacted_thinking") {
-        nodes.push(
-          withBlockSpacing(
-            `tk-r${i}`,
-            <text
-              key={`tk-r${i}-inner`}
-              fg={pal.dim}
-              wrapMode="word"
-              width={innerCols}
-            >
-              {REDACTED_PLACEHOLDER}
-            </text>
-          )
-        );
-      }
-    });
-  }
-  message.content.forEach((block, i) => {
-    if (block.type === "text" && block.text.trim().length > 0) {
-      nodes.push(
-        withBlockSpacing(
-          `t${i}`,
-          <box key={`t${i}-inner`}>
-            <Markdown text={block.text} width={innerCols} />
-          </box>
-        )
-      );
-    } else if (block.type === "tool_use") {
-      const node = renderToolUseBlock({
-        block,
-        statusMap,
-        resultTextMap: props.resultTextMap,
-        innerCols,
-        subagentCards: props.subagentCards,
-      });
-      if (node !== null) {
-        nodes.push(withBlockSpacing(`u${i}`, node));
-      }
-    }
+  const body = assistantBodyNode({
+    message,
+    cols,
+    statusMap,
+    resultTextMap: props.resultTextMap,
+    subagentCards: props.subagentCards,
+    thinkingSeconds: props.thinkingSeconds,
+    hideThinking: props.hideThinking,
+    thinkingExpanded,
+    activityBlocks: props.activityBlocks,
   });
-  if (nodes.length === 0) return null;
+  if (body === null) return null;
   // Task 2 (plans/tui-chrome-interaction.md T2)：assistant 不再带 panel
   // 填充 —— MessageShell 透传（无 backgroundColor、无 paddingX），仅
   // `marginTop` 节奏容器。Markdown 格式化保留（子树自带 width / wrap）。
@@ -553,7 +656,7 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
   // 与 chat-view 流式草稿 / 折叠行共用同一组件 —— 消除「外壳跳变」不一致。
   return (
     <MessageShell cols={cols} marginTop={props.marginTop ?? 0}>
-      {nodes}
+      {body}
     </MessageShell>
   );
 });

@@ -198,18 +198,10 @@ function appendLiveBlocks(
 ): void {
   const { messageIndex, contentBlockIndex, liveRuns, liveThinking } = args;
   const list = blocks as ActivityBlock[];
-  // T4 live-signal revision（plans 锁句 1）：思考块**先**画在该 burst 内
-  // 后续安静工具簇之前 —— 思考永远画在它驱动的那批动作上面（文档顺序）。
-  // 此前实现顺序相反，hotfix 又把 `liveThinking` 关掉；本任务恢复真信号，
-  // 并把「思考在前 / 噪音在后」的文档顺序钉死。
-  if (liveThinking) {
-    list.push({
-      anchor: { messageIndex, contentBlockIndex },
-      title: formatThinkingLive(),
-      slot: { kind: "thinking" },
-      live: true,
-    });
-  }
+  // Thinking-at-bottom revision（plans/tui-thinking-at-bottom.md 锁句 1–3）：
+  // 同一 burst 内思考块后置 —— 还在流的思考段是本批最底（文档顺序），
+  // 它驱动的动作若已出现则位于它上面。
+  //
   // live 安静簇：仅 live noise 类进 unanchored 块（specs live-signal
   // revision #3/#4）。web_search / web_fetch 走实卡（live signal），不进
   // 块计数 / 槽预览。失败 / keep / accent 仍走原 tail / 历史路径，避免
@@ -233,6 +225,14 @@ function appendLiveBlocks(
           ? { kind: "tool-preview", text: formatRunningToolLine(lastRunning) }
           : { kind: "none" },
       live: verb === "calling",
+    });
+  }
+  if (liveThinking) {
+    list.push({
+      anchor: { messageIndex, contentBlockIndex },
+      title: formatThinkingLive(),
+      slot: { kind: "thinking" },
+      live: true,
     });
   }
 }

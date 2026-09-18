@@ -108,7 +108,7 @@ _Avoid_: 有语义工具进 `calling`；search 只留计数不留查询
 _Avoid_: 中间有字仍焊回上一行；把 `web_search` 计数焊进思考行
 
 **live tool line（过程标题）**: 过程块的标题行。思考阶段是 `Thinking…`；相邻噪音可焊 `calling` / `called`。有语义卡不走这行。
-_Avoid_: `[运行中]` 前缀；工具还在跑就关仍在流的思考槽；思考跳到工具下面或 tail panel
+_Avoid_: `[运行中]` 前缀；工具还在跑就关仍在流的思考槽；把仍在流的思考钉在已出现的工具卡上面；把 `Thought for` 甩到消息尾巴当第二套摘要
 
 **keep class（留）**: 落定后仍画出标题行的工具类（bash / write / edit / 会话动作）。bash 成功留命令 + 折叠后的 **result preview**；新建走 **write create preview**；编辑走 **edit diff preview**；挤档可只留 `Wrote N lines to path`。
 _Avoid_: 成功 bash 只留标题把 Updating files 藏掉；只留 dim 预览尾巴；把标题藏进折叠计数；把本次改动折没
@@ -125,8 +125,8 @@ _Avoid_: 失败跟成功走同一收；把失败当成第四类工具表；失�
 **thinking duration（思考时长）**: assistant 消息的落盘属性——adapter 流式路径测量（首条 `thinking_delta` 至首个非思考增量），`thinkingMs` 经 commit 钩子随事件链落盘，`SessionFileV1` 上照 `messageCreatedAt` 模式重建并行数组（additive，schema 版本不升）。过程块时长 = 该条消息的 thinkingMs，不跨消息求和。
 _Avoid_: TUI 墙上时钟副产物（只活当前轮/重启即失/跨会话串味）；挂在 thinking 内容块上（污染 provider replay）；旧会话回填；`thinkingMs <= 0` 或非有限数落盘（字段缺席）；整轮累加冒充一块
 
-**unit fold**: 过程块的 settled 标题：`Thought for <duration>`，相邻**噪音**才接 `called` 计数。不是整轮焊行。无秒数且无噪音计数则不画、不回落 `[思考]`。
-_Avoid_: 结束态两套时态叠画；把 web_search / keep / skill 折进这行；中间有正文仍焊工具计数
+**unit fold**: 过程块落定标题 `Thought for <duration>`，相邻噪音才接 `called` 计数；无秒数且无噪音则不画、不回落 `[思考]`。思考结束就在当时那一行变成这条标题，后面的工具或正文接在它下面。
+_Avoid_: 结束态两套时态叠画；把 web_search / keep / skill 折进这行；中间有正文仍焊工具计数；多段思考并成一条秒数；整轮焊成一行
 
 **open unit（未关闭簇）**: 当前仍 live 的那一块过程块——思考还在流，或噪音仍 `calling`。已冻 stub 不是关掉下一块思考的信号。
 _Avoid_: 整轮 idle 当折叠粒；`currentTurnHasFold` 关后续思考；折叠存在即吞 live 标题

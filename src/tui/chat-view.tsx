@@ -97,6 +97,7 @@ import {
 import {
   buildActivityBlockFoldLines,
   makeThinkingMsAtVisibleFromSource,
+  type ActivityBlockLine,
   type FoldLinesBySegmentIndex,
   type ShownThinkingMsValues,
   type ThinkingMsAtVisible,
@@ -410,8 +411,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         contentWidth={contentWidth}
         activitySegments={activitySegments}
         foldLinesBySegmentIndex={foldLinesBySegmentIndex}
-        blockTitlesByMessage={activityBlockFoldLines.foldLineMapByMessage}
-        slotPreviewsByMessage={activityBlockFoldLines.slotPreviewsByMessage}
+        blockLinesByMessage={activityBlockFoldLines.blockLinesByMessage}
         shownThinkingMsValues={mergedShownThinkingMsValues}
         statusMap={statusMap}
         resultTextMap={resultTextMap}
@@ -553,16 +553,12 @@ function ChatScrollbox(props: {
   readonly contentWidth: number;
   readonly activitySegments: ReadonlyArray<TurnActivitySegment>;
   readonly foldLinesBySegmentIndex: FoldLinesBySegmentIndex;
-  /** T4–T7：活动块标题按 messageIndex 分组。MessageRow 据此在 message 末尾
-   *  渲染块标题（取代旧 unit fold 行的位置 —— 跨消息不合并合同）。 */
-  readonly blockTitlesByMessage: ReadonlyMap<number, ReadonlyArray<string>>;
-  /** T5（spec S2–S4）：messageIndex → 块预览文本数组（null = 跳过）。每条
-   *  预览文本对应一个块；与 blockTitlesByMessage 同序，按 contentBlockIndex
-   *  升序。settled 块（slot.kind === "none"）→ null；running 安静工具 →
-   *  `formatRunningToolLine` 的文本。 */
-  readonly slotPreviewsByMessage: ReadonlyMap<
+  /** T4–T7 + Thinking-at-bottom revision 锁句 4：活动块行按 messageIndex
+   *  分组（含锚点）。MessageBlocks 据此把标题按锚点插进内容顺序（跨消息
+   *  不合并合同）。 */
+  readonly blockLinesByMessage: ReadonlyMap<
     number,
-    ReadonlyArray<string | null>
+    ReadonlyArray<ActivityBlockLine>
   >;
   readonly shownThinkingMsValues: ShownThinkingMsValues;
   readonly statusMap: ReadonlyMap<string, boolean>;
@@ -624,8 +620,7 @@ function ChatScrollbox(props: {
               visibleIndex
             )}
             foldLinesBySegmentIndex={props.foldLinesBySegmentIndex}
-            blockTitles={props.blockTitlesByMessage.get(visibleIndex) ?? []}
-            slotPreviews={props.slotPreviewsByMessage.get(visibleIndex) ?? []}
+            activityBlocks={props.blockLinesByMessage.get(visibleIndex) ?? []}
             shownThinkingMsValues={props.shownThinkingMsValues}
             statusMap={props.statusMap}
             resultTextMap={props.resultTextMap}

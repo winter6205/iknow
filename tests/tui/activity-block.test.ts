@@ -580,6 +580,25 @@ describe("S9 槽位交接：思考让位", () => {
     expect(blocks[0]?.slot).toEqual({ kind: "none" });
     expect(blocks[0]?.live).toBe(false);
   });
+
+  test("liveThinking + 非 history noise run → 本批顺序 noise 在前、思考块在后", () => {
+    // Thinking-at-bottom revision（plans/tui-thinking-at-bottom.md 锁句 1–2）：
+    // 同一 burst 内 `appendLiveBlocks` 把 noise 簇先 push、思考块后 push。
+    // 还在流的思考段是本批最底；它驱动的那批动作若已出现则位于它上面。
+    const run = liveRun("tu-g-burst", "grep", "running", { pattern: "foo" });
+    const blocks = derive({
+      messages: [user("q")],
+      liveRuns: [run],
+      liveThinking: true,
+    });
+    // 思考块 LAST：noise（calling grep × 1）在前，Thinking… 在后。
+    expect(blocks.map((block) => block.title)).toEqual([
+      "calling grep × 1",
+      "Thinking…",
+    ]);
+    expect(blocks[1]?.slot).toEqual({ kind: "thinking" });
+    expect(blocks[1]?.live).toBe(true);
+  });
 });
 
 // ── S10 边界四类 ──────────────────────────────────────────────────

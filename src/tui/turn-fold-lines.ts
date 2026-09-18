@@ -149,37 +149,44 @@ export function firstPartThinkingBlocks(
 }
 
 /**
- * 活动块 fold-line 派生（specs/tui-activity-block.md）：把
- * `deriveActivityBlocks` 的块标题按 messageIndex 路由到 MessageRow，
- * 同一 messageIndex 多块按 contentBlockIndex 升序消费。
+ * 活动块行派生（specs/tui-activity-block.md Thinking-at-bottom revision
+ * 锁句 4）：把 `deriveActivityBlocks` 的块按 messageIndex 路由到 MessageRow，
+ * 并**保留锚点**（contentBlockIndex）—— 落定标题由 MessageBlocks 按锚点
+ * 插进消息内容顺序，不整包甩在消息尾巴。
  *
  * 关键映射（per-message，**不**跨消息合并 — spec S5）：
  *  - 块锚点 (messageIndex, contentBlockIndex) → messageIndex 直接匹配，
  *    不再走 `orderedTurnActivitySegments` 的跨消息合并（那是旧 unit fold 合同）。
- *  - 同 messageIndex 拆出多块时按 contentBlockIndex 升序配对 fold-line 行号。
+ *  - 同 messageIndex 拆出多块时按 contentBlockIndex 升序消费。
  *  - 没有匹配 messageIndex 的块（live 思考块、live 工具簇块）落入
  *    `unanchoredBlocks`，由 ChatView 转给 TranscriptTail 渲染。
  *
  * 不变式：
  *  - 块标题文本 = `ActivityBlock.title`（`formatToolUseCounts` 单源，不另拼）；
  *  - 块覆盖的 thinkingMs 进 `shownThinkingMsValues`，hideThinking 双门用之；
- *  - 旧 `foldLinesBySegmentIndex`（unit fold 行）由 caller 单独合并使用。
+ *  - `hideThinking` 只藏 MessageBlocks 内不当槽主的思考正文路径，不动这里
+ *    的锚点标题（锁句 5 继承项）。
  */
+/** 一条已锚定活动块的渲染行：锚点 + 标题 + 可选预览。 */
+export interface ActivityBlockLine {
+  readonly contentBlockIndex: number;
+  readonly title: string;
+  /** `null` = 该块无预览行（settled 块 slot.kind === "none"、或思考槽）；
+   *  非 null 才在块标题下画一行 dim 当前预览（spec S2–S4）。 */
+  readonly preview: string | null;
+}
+
 export interface ActivityBlockFoldDerivation {
-  /** messageIndex（visible）→ 块标题行（多块时多行，按 contentBlockIndex 升序）。 */
-  readonly foldLineMapByMessage: ReadonlyMap<number, ReadonlyArray<string>>;
+  /** messageIndex（visible）→ 该消息的活动块行（按 contentBlockIndex 升序，
+   *  保留锚点供 MessageBlocks 原位插入）。 */
+  readonly blockLinesByMessage: ReadonlyMap<
+    number,
+    ReadonlyArray<ActivityBlockLine>
+  >;
   /** 块覆盖的 thinkingMs 值集合（hideThinking 用）。 */
   readonly shownThinkingMsValues: ReadonlySet<number>;
   /** 未匹配到任何 messageIndex 的块（live 块）—— tail 用。 */
   readonly unanchoredBlocks: ReadonlyArray<ActivityBlock>;
-  /** T5（spec S2–S4）：messageIndex（visible）→ 槽预览文本数组（多块时多
-   *  行，按 contentBlockIndex 升序）。`null` = 该块无预览行（settled 块
-   *  slot.kind === "none"、或思考槽），renderer 跳过该块不画预览；非 null
-   *  才在块标题下画一行 dim 当前预览。 */
-  readonly slotPreviewsByMessage: ReadonlyMap<
-    number,
-    ReadonlyArray<string | null>
-  >;
 }
 
 /**
@@ -207,16 +214,9 @@ export function buildActivityBlockFoldLines(args: {
     liveThinking: args.liveThinking,
     inFoldCountOf: args.inFoldCountOf,
   });
-  // 按 messageIndex 分组，按 contentBlockIndex 升序排（活动块的 contentBlockIndex
-  // = cluster 首块的下标）。
-  const byMessage = new Map<
-    number,
-    Array<{
-      readonly contentBlockIndex: number;
-      readonly title: string;
-      readonly slotText: string | null;
-    }>
-  >();
+  // 按 messageIndex 分组，保留锚点；同消息多块按 contentBlockIndex 升序排
+  // （活动块的 contentBlockIndex = cluster 首块的下标）。
+  const byMessage = new Map<number, Array<ActivityBlockLine>>();
   const shownThinkingMsValues = new Set<number>();
   const unanchoredBlocks: ActivityBlock[] = [];
 
@@ -230,31 +230,25 @@ export function buildActivityBlockFoldLines(args: {
     arr.push({
       contentBlockIndex: block.anchor.contentBlockIndex,
       title: block.title,
-      slotText: block.slot.kind === "tool-preview" ? block.slot.text : null,
+      preview: block.slot.kind === "tool-preview" ? block.slot.text : null,
     });
     byMessage.set(block.anchor.messageIndex, arr);
     const ms = args.thinkingMsAtVisible(block.anchor.messageIndex);
     if (ms > 0) shownThinkingMsValues.add(ms);
   }
   // 排序 + 转只读。
-  const foldLineMapByMessage = new Map<number, ReadonlyArray<string>>();
-  const slotPreviewsByMessage = new Map<number, ReadonlyArray<string | null>>();
+  const blockLinesByMessage = new Map<
+    number,
+    ReadonlyArray<ActivityBlockLine>
+  >();
   for (const [mi, list] of byMessage) {
     list.sort((a, b) => a.contentBlockIndex - b.contentBlockIndex);
-    foldLineMapByMessage.set(
-      mi,
-      list.map((entry) => entry.title)
-    );
-    slotPreviewsByMessage.set(
-      mi,
-      list.map((entry) => entry.slotText)
-    );
+    blockLinesByMessage.set(mi, list);
   }
 
   return {
-    foldLineMapByMessage,
+    blockLinesByMessage,
     shownThinkingMsValues,
     unanchoredBlocks,
-    slotPreviewsByMessage,
   };
 }
