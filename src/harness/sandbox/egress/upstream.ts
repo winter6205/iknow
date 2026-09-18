@@ -36,3 +36,26 @@ export {
   type ResolvedAddressGuard,
   type ResolvedAddressGuardOptions,
 } from "@anthropic-ai/sandbox-runtime/dist/sandbox/resolved-address-guard.js";
+
+/**
+ * egress-credential-sentinel T4（Assumption 3 收口纪律）：MITM CA 件 ——
+ * `createMitmCA({caCertPath, caKeyPath})` 装载持久 CA 并**顺带现写 trust
+ * bundle**（`trustBundlePath` = 包内 writeTrustBundle 的产物，每次调用新
+ * temp 文件；只含 CERTIFICATE 块的 PEM 过滤在包内，mitm-ca.js:166-175，
+ * 本仓不复刻）。`generateCa` 是纯生成原语（无 FS 副作用），持久层落盘
+ * 归本仓 `ca-store.ts`。`disposeMitmCA` 归 T3 dispose 接线时再收口。
+ */
+export {
+  createMitmCA,
+  generateCa,
+  validateCaPair,
+  type CaPairValidation,
+  type GeneratedCa,
+  type MitmCA,
+} from "@anthropic-ai/sandbox-runtime/dist/sandbox/mitm-ca.js";
+
+/**
+ * 信任注入名册全集（Assumption 11：env 注入面 = 该 roster 全量，值指向
+ * trust bundle）。逐客户端三臂常量在 `ca-store.ts` 另行钉死。
+ */
+export { CA_TRUST_VARS } from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";

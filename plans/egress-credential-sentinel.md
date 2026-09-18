@@ -35,7 +35,7 @@ OVERALL: PASS（rev 2，返工点已按审查方清单落实）
    - **Inherits:** spec T4（持久 CA `~/.config/iknow/egress-mitm-ca/`，目录 0700 / key 0600，「权限不符 = 拒用 + 重生成前告警」；启动 `validateCaPair` 失败 → 重生成；trust bundle 每次 session 现写、CA 证书 + 常规根拼接、「**只含 CERTIFICATE 块**（防把 key 拷进 world-readable bundle）」）；Assumption 4（宿主级持久单例、key 0600 / 目录 0700，不走 per-call ephemeral——冷路径性能）；Assumption 11（`CA_TRUST_VARS` 名册全量注入、bundle 与 masked store 须经 EgressFenceSpec 扩段 ro-bind——bind 落位本身在 T2）；invariant 7（「CA 不可用 = 不起 mitm session……降级必须留 infra 违例痕」）；F7（拒用 → 重生成；旧 leaf 缓存随 session 自然失效）；SC8（「CA 私钥路径不进 bind 表（测试钉）」）。
    - **Surface:** `src/harness/sandbox/egress/`（持久 CA 模块，新文件名留实现定）、`src/harness/sandbox/egress/upstream.ts`（`createMitmCA` / `validateCaPair` / trust bundle 写件经 re-export 收口，Assumption 3）。
    - **Acceptance:** 注入临时目录单测：权限过宽 / 坏 pair → 拒用 + 告警 + 重生成，重生成后 session 可装载；bundle 内容 assert = 含代理 CA、含常规根、不含 PRIVATE KEY 块；CA key 路径不出现在任何 bind 表输出（SC8 测试钉）；逐客户端信任名册常量（gh/Go → `SSL_CERT_FILE`、git → `GIT_SSL_CAINFO`、curl → `CURL_CA_BUNDLE`）就位供 T2/T7 消费——三臂屏上成功证据归 T7，本弹不提前 claim；`npm test` 绿。
-   - Status: [ ] pending
+   - Status: [x] pending
    - [parallel]（与 T1 无相互依赖）
 
 3. **T2 启动期铸造与围栏装配（假值进围栏）** — tag: `[implementation]`
