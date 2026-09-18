@@ -77,6 +77,10 @@ trace 为 ground truth）实测发现两个叠加问题：
 
 事件驱动唤醒不再是本 ADR 的暂缓项。默认契约仍是前景 spawn；后景臂在 chat / tui / serve 经 mailbox 终态投递，由 host 自发起 `run()` 注入 host drain 浓缩结果。ask 不装配该通道。`run()` 边界不再为「至少一个终态」阻塞轮询。范围与切片见 `plans/subagent-cancel-wait.md`。
 
+## Amendment (2026-09-18)
+
+省略 `wait` 仍 = 前景；后景只由模型显式 `wait:false`。后景完成只靠 mailbox，禁止把 sleep / 轮询 / 假查当完成协议。否决：schema 必填 `wait`、省略改后景（含对齐 Claude Code 2.1.198+ Agent 默认后景）、靠加长 description 修「忘传 wait:false」。理由：前景当回合闭环仍是要的模式；何时后景跟模型能力挂钩，不由 harness 代选；`docs/guides/prompt-development.md` 说明书不是闸，且现有 description 已写 `wait:false` + mailbox。空跑 ≠ 前景把父绑在这一跳上。
+
 ## Evidence pointers
 
 - issue #361 — 实测证据（4 次 e2e trace 0 spawn、幻觉报告）与根因分析。
