@@ -21,7 +21,8 @@ describe("getAutoCompactThreshold", () => {
 
   it("缺省闸不得再是旧余量公式 window − 20000 − 13000 (ADR-0100 否决)", () => {
     // 反例钉住:余量公式只在分母≈供应商真上限时合理;策略预算上会过早压缩。
-    // 常量本身仍在 constant.ts 供 full-compact 摘要预算使用,只是不进这条闸。
+    // 两常量仍留在 constant.ts(Q6b-D4 的常量照搬集,由 constant.test.ts 钉值
+    // 防漂移),ADR-0100 后缺省闸改 floor(0.95×window),生产侧无消费者。
     assert.notEqual(
       getAutoCompactThreshold(200_000, undefined),
       200_000 - MAX_OUTPUT_TOKENS_FOR_SUMMARY - AUTOCOMPACT_BUFFER_TOKENS
