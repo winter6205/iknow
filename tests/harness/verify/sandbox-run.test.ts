@@ -246,7 +246,7 @@ describe("makeDefaultRunVerify — egress 缝装配 (ADR-0097 / T7)", () => {
         allowedDomains: ["example.com"],
         deniedDomains: [],
         commandLabel: "verify",
-        allowlistSource: "preset",
+        allowlistSource: "persisted",
       },
     });
     await runVerify("true", {});
@@ -268,7 +268,7 @@ describe("makeDefaultRunVerify — egress 缝装配 (ADR-0097 / T7)", () => {
         allowedDomains: ["example.com"],
         deniedDomains: [],
         commandLabel: "verify",
-        allowlistSource: "preset",
+        allowlistSource: "persisted",
       },
     });
     await runVerify("true", {});

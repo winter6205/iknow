@@ -31,7 +31,7 @@ OVERALL: PASS — hand to writing-plans
    - **Inherits:** spec invariant 4（封闭三档 `"builtin" | "persisted" | "session"`，全链一次改齐、不留旧值别名）、invariant 6（纯 infra 文案不掺配置指引，source 标签只出现在域判定段）、T2 钉死表（三档生产者归属与 `SOURCE_LABEL` 渲染行不变格式）、SC4、联动点 grep 实证全集（`violations.ts` 类型与标签、`session.ts` inline union 收敛为引用消双处漂移、`assembly.ts` 注释+赋值、`bash.ts` 工厂包装层 fallback）
    - **Surface:** `src/harness/sandbox/egress`（`violations.ts`、`session.ts`、`assembly.ts`）、`src/harness/aci/tools/bash.ts`（source fallback 接线）、既有 egress 测试面
    - **Acceptance:** 三档各有真生产者与消费渲染测试（`persisted` 档自始有真生产者，消灭零生产者占位）；grep 断言全仓无字符串 `"preset"` 残留在 source 语义位（渲染文案 `"built-in preset allowlist (github / npm / playwright defaults)"` 除外）；`not-in-allowlist` / `no-approval-inlet` / `denied-by-user` 行文案结构不变、配置键指引仍指 `isolation.network.allowedDomains`；`bash-egress-typed-failure.test.ts` / `egress-violations.test.ts` 迁移后 source 标注逐字钉子绿；`npm test` 绿
-   - Status: [ ] pending
+   - Status: [x]
    - [blocks: T1]
 
 3. **批准门恢复在岗 + 生命周期落差闭合的测试钉** — tag: `[implementation]`

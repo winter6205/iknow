@@ -643,7 +643,7 @@ describe("BackgroundTaskManager egress 缝装配 (ADR-0097 / T7)", () => {
         allowedDomains: ["example.com"],
         deniedDomains: [],
         commandLabel: "bash:test",
-        allowlistSource: "preset",
+        allowlistSource: "persisted",
       },
     });
     // fence request 收到 spec(spec shape 透传,非 deep clone)
@@ -686,7 +686,7 @@ describe("BackgroundTaskManager egress 缝装配 (ADR-0097 / T7)", () => {
         allowedDomains: ["example.com"],
         deniedDomains: [],
         commandLabel: "bash:test",
-        allowlistSource: "preset",
+        allowlistSource: "persisted",
       },
     });
     assert.equal(res.status, "ok");

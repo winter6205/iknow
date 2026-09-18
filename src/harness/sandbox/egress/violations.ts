@@ -22,17 +22,14 @@
 import { VIOLATION_PREFIXES } from "../../permission/prefixes.js";
 
 /**
- * 允许集来源 —— 装配面（bash handler / T6 用户层 settings reader）注入，
- * 缺省 = 不注明来源（不伪造「会话级 / 已持久化 / 预置配置」三种来源之一）。
- * T6 才填真值；本任务阶段（T5）只透传，不参与判定。
- * "builtin" = ADR-0104 代码承载预放行档（egress-preset-allowlist T1 引入；
- * 三档撞名清算见 spec T2，旧 "preset" 值待子弹 2 清零）。
+ * 允许集来源 —— 装配面注入的封闭三档（spec egress-preset-allowlist T2 /
+ * invariant 4，全链一次改齐、不留旧值别名）：
+ *   - "builtin"   = ADR-0104 代码承载预放行档（assembly 段缺席路径）；
+ *   - "persisted" = 用户持久化 settings 增量并入档（assembly 段在场路径）；
+ *   - "session"   = 会话级批准放行（bash 工厂包装层 fallback）。
+ * 缺省 = 不注明来源（不伪造三档之一）。仅作观测面，不参与判定。
  */
-export type EgressAllowlistSource =
-  | "builtin"
-  | "session"
-  | "persisted"
-  | "preset";
+export type EgressAllowlistSource = "builtin" | "session" | "persisted";
 
 export type EgressViolationReason =
   /** CONNECT host 未命中允许集（denied 集或 pattern 也算这里 → 重定向）。 */
@@ -232,7 +229,6 @@ const SOURCE_LABEL: Record<EgressAllowlistSource, string> = {
   builtin: "built-in preset allowlist (github / npm / playwright defaults)",
   session: "session-level allowlist",
   persisted: "user-settings persisted allowlist",
-  preset: "preset allowlist",
 };
 
 /**

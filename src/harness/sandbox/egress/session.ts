@@ -62,6 +62,7 @@ import {
 } from "./upstream.js";
 import {
   createEgressViolationSink,
+  type EgressAllowlistSource,
   type EgressViolationSink,
 } from "./violations.js";
 import type { EgressApprovalGate } from "./approval.js";
@@ -100,11 +101,12 @@ export interface EgressPolicyInput {
    */
   readonly commandLabel: string;
   /**
-   * T5:允许集来源 —— 透传给 typed failure message 渲染。仅作观测面,
-   * 不参与判定。T6 用户层 settings reader 注入真值；T5 阶段缺省 = 不
-   * 标注（不伪造「会话级 / 已持久化 / 预置配置」三种来源之一）。
+   * 允许集来源 —— 封闭三档（引用 `EgressAllowlistSource`，消 inline union
+   * 双处漂移，spec T2 / invariant 4）。透传给 typed failure message 渲染，
+   * 仅作观测面，不参与判定。生产者：assembly = builtin / persisted 两档，
+   * bash 工厂包装层 fallback = session 档；缺省 = 不注明来源（不伪造）。
    */
-  readonly allowlistSource?: "builtin" | "session" | "persisted" | "preset";
+  readonly allowlistSource?: EgressAllowlistSource;
   /**
    * T6:首次域名批准门件（specs §首次域名批准流 + SC10）—— 当
    * `decideEgress` 命中 `not-in-allowlist` 且 host 不在

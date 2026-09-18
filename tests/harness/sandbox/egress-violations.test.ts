@@ -17,6 +17,9 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   createEgressViolationSink,
   renderEgressViolations,
@@ -243,21 +246,68 @@ describe("renderEgressFailureMessage (T5 typed failure, spec §Violation feedbac
     expect(out).not.toContain("Current allowlist source");
   });
 
-  it("allowlistSource 'persisted' / 'preset' → 不同 label", () => {
-    const persisted = renderEgressFailureMessage({
+  it("allowlistSource 'builtin' → 逐字渲染 built-in preset 文案 (T2 钉死表)", () => {
+    const out = renderEgressFailureMessage({
+      violations: [
+        v({ host: "a.example", port: 443, reason: "not-in-allowlist" }),
+      ],
+      allowlistSource: "builtin",
+    });
+    expect(out).toContain(
+      "Current allowlist source: built-in preset allowlist (github / npm / playwright defaults)."
+    );
+  });
+
+  it("allowlistSource 'persisted' → 逐字渲染 user-settings 文案 (T2 钉死表)", () => {
+    const out = renderEgressFailureMessage({
       violations: [
         v({ host: "a.example", port: 443, reason: "not-in-allowlist" }),
       ],
       allowlistSource: "persisted",
     });
-    const preset = renderEgressFailureMessage({
+    expect(out).toContain(
+      "Current allowlist source: user-settings persisted allowlist."
+    );
+  });
+
+  it("allowlistSource 'session' → 逐字渲染 session-level 文案 (T2 钉死表)", () => {
+    const out = renderEgressFailureMessage({
       violations: [
         v({ host: "a.example", port: 443, reason: "not-in-allowlist" }),
       ],
-      allowlistSource: "preset",
+      allowlistSource: "session",
     });
-    expect(persisted).toContain("user-settings persisted allowlist");
-    expect(preset).toContain("preset allowlist");
+    expect(out).toContain(
+      "Current allowlist source: session-level allowlist."
+    );
+  });
+});
+
+/**
+ * spec invariant 4 / SC4：封闭三档清算后，旧值 pres[e]t（带引号字面值）
+ * 不得在任何 source 语义位残留（grep 断言）。渲染文案 "built-in preset
+ * allowlist (...)" 是 label 内容不是 source 值，不含引号紧邻的 pres[e]t，
+ * 故不被本断言命中；needle 与本文件正文都用 pres[e]t 写法避免自匹配。
+ */
+describe("T2 三档清算 grep 钉子：全仓代码面无 pres[e]t 值残留", () => {
+  it("src / tests / scripts 的 .ts 文件零 pres[e]t 带引号字面值", () => {
+    const root = fileURLToPath(new URL("../../../", import.meta.url));
+    const quotedPreset = /["']pres[e]t["']/;
+    const offenders: string[] = [];
+    const scan = (dir: string): void => {
+      for (const ent of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, ent.name);
+        if (ent.isDirectory()) scan(p);
+        else if (ent.name.endsWith(".ts")) {
+          if (quotedPreset.test(readFileSync(p, "utf8"))) offenders.push(p);
+        }
+      }
+    };
+    for (const d of ["src", "tests", "scripts"]) {
+      const p = join(root, d);
+      if (existsSync(p)) scan(p);
+    }
+    expect(offenders).toEqual([]);
   });
 });
 
