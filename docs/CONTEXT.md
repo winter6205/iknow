@@ -373,8 +373,8 @@ _Avoid_: 把手动 `/compact` 的 noop 写成「未达自动阈值」；UI 字�
 **策略预算窗口**: `env.compress.contextWindow`——用量显示分母与 auto-compact 闸的同一数字；默认 256000。不是供应商模型上下文上限。ADR-0100。
 _Avoid_: 显示一套窗口、压缩一套；把 `providers[].contextWindow` 或 1M 卡当默认分母
 
-**auto-compact token gate**: loop-engine 每轮 step 前是否 **proactive** 压缩的阈值；未设覆盖时为 `floor(0.95 × 策略预算窗口)`（`src/harness/compress/threshold.ts`），`IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` 可覆盖且必须 `< contextWindow`。不约束手动 `/compact`。估算只做自动路径判据，不进 trace / `RunResult.lastUsage`（ADR-0008 D6 / ADR-0100）。
-_Avoid_: 把该门当 `/compact` 许可；把字符估算当真实 token；gate 决策绕开 `evaluateCompactTrigger` 直接调 `shouldAutoCompact`；用 `window − 33k` 当策略预算缺省闸
+**auto-compact token gate**: loop-engine 在每次 `stepWithTrace` 前是否 **proactive** 压缩的阈值，含每个 `run()` 的第一次（prior 续传、`turnCount === 0` 不是豁免）；未设覆盖时为 `floor(0.95 × 策略预算窗口)`（`src/harness/compress/threshold.ts`），`IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` 可覆盖且必须 `< contextWindow`。不约束手动 `/compact`。估算只做自动路径判据，不进 trace / `RunResult.lastUsage`（ADR-0008 D6 / ADR-0100）。
+_Avoid_: 把该门当 `/compact` 许可；把字符估算当真实 token；gate 决策绕开 `evaluateCompactTrigger` 直接调 `shouldAutoCompact`；用 `window − 33k` 当策略预算缺省闸；用 `turnCount === 0` 跳过 proactive
 
 **manual compact**: TUI `/compact` 与 web 压缩按钮触发的一次压缩；执行体与 proactive auto-compact **已开火之后**相同（窗口或 full_summary）。空会话幂等 no-op。
 _Avoid_: 等到自动阈值才允许手动压；为手动另写一套压缩器

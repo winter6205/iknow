@@ -2689,25 +2689,201 @@ function makeFullSummaryAdapter(opts: {
   });
 }
 
+/** plan proactive-compact-run-entry T2 夹具:包住 makeFullSummaryAdapter,
+ * 记录每次「普通 step」(request.tools 在场)看到的 state.messages,
+ * 用于断言首呼前 proactive 压缩是否已生效。摘要步不带 tools,不计入。 */
+function makeRunEntryCapturingAdapter(opts: {
+  readonly stepScripts: ReadonlyArray<AssistantTurnResult>;
+  readonly compactOutcomes: ReadonlyArray<"summarized" | "adapter_failed">;
+}): LoopAdapter & {
+  readonly compactCalls: { value: number };
+  readonly normalStepMessages: AnthropicNativeMessage[][];
+} {
+  const inner = makeFullSummaryAdapter(opts);
+  const normalStepMessages: AnthropicNativeMessage[][] = [];
+  return Object.freeze({
+    encodeUserText: inner.encodeUserText,
+    encodeToolResults: inner.encodeToolResults,
+    compactCalls: inner.compactCalls,
+    normalStepMessages,
+    step: (
+      state: LoopState,
+      request: Parameters<LoopAdapter["step"]>[1]
+    ): Promise<AssistantTurnResult> => {
+      if (request.tools !== undefined) {
+        normalStepMessages.push([...state.messages]);
+      }
+      return inner.step(state, request);
+    },
+  });
+}
+
+function messageText(m: AnthropicNativeMessage): string {
+  return m.content
+    .filter((b): b is { type: "text"; text: string } => b.type === "text")
+    .map((b) => b.text)
+    .join("");
+}
+
+describe("loop engine proactive-compact-run-entry T2: run 首步前即检 proactive", () => {
+  it("prior 估量超闸 + 本 run 首次回复即 completed → 第一次 step 看到的已是压缩后历史", async () => {
+    // 锁句1/2 + plan T2 Acceptance:run() 起始 turnCount=0 不是豁免。
+    // 2 条 50000-char prior → estimate ≈ 33334 ≥ threshold 10000,
+    // 且 3 messages ≤ DEFAULT_KEEP_RECENT → compact_via_full_summary。
+    // 若首步前已压,普通 step 只会看到摘要产物(1 条 SUMMARY_PREAMBLE 消息),
+    // 而不是超闸 prior 原样。
+    const longPrior = Array.from({ length: 2 }, (_, i) =>
+      makeNative({ role: "user", text: `prior-${i} ${"x".repeat(50_000)}` })
+    );
+    const adapter = makeRunEntryCapturingAdapter({
+      stepScripts: [
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+      compactOutcomes: ["summarized"],
+    });
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+
+    const { result } = await run(
+      "Q",
+      {
+        adapter,
+        executor: exec,
+        registry: reg,
+        maxTurns: 3,
+        compress: { contextWindow: 100_000, thresholdTokens: 10_000 },
+      },
+      undefined,
+      { priorMessages: longPrior }
+    );
+    assert.equal(result.stopReason, "completed");
+    assert.equal(adapter.normalStepMessages.length, 1, "本 run 只跑一次普通 step");
+    const firstCall = adapter.normalStepMessages[0]!;
+    assert.equal(
+      firstCall.length,
+      1,
+      `首呼 messages 必须已是压缩产物(1 条摘要消息),实际 ${firstCall.length} 条`
+    );
+    const firstText = messageText(firstCall[0]!);
+    assert.ok(
+      firstText.startsWith("This session is being continued"),
+      `首呼 messages[0] 必须是 SUMMARY_PREAMBLE 摘要轮,实际 "${firstText.slice(0, 120)}"`
+    );
+    assert.equal(adapter.compactCalls.value, 1);
+  });
+
+  it("prior 未超阈 → 首呼 messages 条数与内容与压缩前完全一致(不压)", async () => {
+    // 锁句3:未过 token 闸 → noop,本步照常调模型。首呼必须原样看到
+    // 3 条 prior + 1 条 user("Q"),无任何 compact 注入。
+    const shortPrior = Array.from({ length: 3 }, (_, i) =>
+      makeNative({ role: "user", text: `prior-${i} short` })
+    );
+    const adapter = makeRunEntryCapturingAdapter({
+      stepScripts: [
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+      compactOutcomes: [],
+    });
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+
+    const { result } = await run(
+      "Q",
+      {
+        adapter,
+        executor: exec,
+        registry: reg,
+        maxTurns: 3,
+        compress: { contextWindow: 200_000, thresholdTokens: 10_000 },
+      },
+      undefined,
+      { priorMessages: shortPrior }
+    );
+    assert.equal(result.stopReason, "completed");
+    assert.equal(adapter.normalStepMessages.length, 1);
+    assert.deepEqual(
+      adapter.normalStepMessages[0]!.map(messageText),
+      [...shortPrior.map(messageText), "Q"],
+      "未超阈时首呼 messages 必须与压缩前逐条一致"
+    );
+    assert.equal(adapter.compactCalls.value, 0, "未超阈不得调用任何 compact 步骤");
+  });
+
+  it("首步压缩成功后同一 turnCount 不重复扫描 → 有限 step 完成,compact 恰 1 次", async () => {
+    // 锁句2:成功压缩后锚点=当时 turnCount,防「同一 turnCount 上已成功压过」
+    // 的重复扫描;后续每步 gate 因 estimate 已低于闸走 noop。
+    // 若锚点更新或 noop 早退失效,compactOutcomes 队列耗尽后仍会被再次调用
+    // 计入 compactCalls — 断言恰 1 次即钉住不死循环。
+    const longPrior = Array.from({ length: 2 }, (_, i) =>
+      makeNative({ role: "user", text: `prior-${i} ${"x".repeat(50_000)}` })
+    );
+    const adapter = makeRunEntryCapturingAdapter({
+      stepScripts: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "noop", input: {} }],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+      compactOutcomes: ["summarized"],
+    });
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+
+    const { result } = await run(
+      "Q",
+      {
+        adapter,
+        executor: exec,
+        registry: reg,
+        maxTurns: 5,
+        compress: { contextWindow: 100_000, thresholdTokens: 10_000 },
+      },
+      undefined,
+      { priorMessages: longPrior }
+    );
+    assert.equal(result.stopReason, "completed");
+    assert.equal(adapter.compactCalls.value, 1, "compact 恰一次 — 成功后不重复扫描");
+    assert.equal(adapter.normalStepMessages.length, 2, "有限 2 次普通 step 即完成");
+  });
+});
+
 describe("loop engine T3 compress-trigger-gate: proactive full-summary fallback", () => {
   it("messages.length=5 + 高 token 估算 → proactive 触发 full summary 路径,无死循环", async () => {
     // 2 条 prior:每条 50000 chars → 单条 estimate = floor((50000+3)/4) = 12500;
     // 2 条 raw total ≈ 25000;estimateMessagesTokens = ceil(25000 * 4/3) ≈ 33334。
     // threshold=10000 远低于 estimate → evaluateCompactTrigger 必返回 full_summary。
-    // 关键路径推导:run() 初始 state = 2 prior + 1 user("Q") = 3 messages。
-    // Iter 1:turnCount=0,gate skip;step 1(tool call)→ state 增至 5 messages,
-    // turnCount=1。Iter 2:gate 进入,evaluateCompactTrigger(5 messages):
-    //   - token 估 ≈ 50000 + 小尾巴 ≫ 10000 → 阈值超;
-    //   - preserveToolPairs(5,6)→ slicedFrom=0(≤ keepRecent)→ compact_via_full_summary。
-    // 旧 `shouldAutoCompact` 路径会调 applyCompactAttachment,但 splitForCompaction
-    // 在 ≤ keepRecent 时返 undefined → 返回 state 不变 → lastCompactTurn 不更新,
-    // 进入死循环。T3 修复后改走 applyFullCompactSummary 整段视为 dropped。
+    // 关键路径推导(plans/proactive-compact-run-entry.md 锁句1:run 首步也检):
+    // run() 初始 state = 2 prior + 1 user("Q") = 3 messages。
+    // Iter 1:turnCount=0 > 锚点初值(-1)→ gate 进入,3 messages ≤ keepRecent
+    //   → compact_via_full_summary 成功 → state = [摘要 1 条],锚点=0;
+    //   step 1(tool call)→ state=3,turnCount=1。
+    // Iter 2:gate(1>0)→ 摘要+tool 尾巴 estimate ≪ 10000 → noop;
+    //   step 2(tool call)→ state=5,turnCount=2。
+    // Iter 3:gate(2>1)→ 5 ≤ 6 但 estimate 已低 → noop;step 3 completion → stop。
+    // 钉住的不变式:full_summary 成功一次后锚点更新、后续 gate 走 noop,
+    // 绝不出现「每次都重新触发又无效」的死循环。
     const longPrior = Array.from({ length: 2 }, (_, i) =>
       makeNative({ role: "user", text: `prior-${i} ${"x".repeat(50_000)}` })
     );
     const adapter = makeFullSummaryAdapter({
-      // step 1: tool call(before first compact attempt)
-      // step 2: tool call(after first compact SUCCESS — state = [summary user])
+      // step 1: tool call(compact 成功后首个普通 step)
+      // step 2: tool call(gate noop)
       // step 3: completion(final turn)
       stepScripts: [
         assistantResult({
@@ -2767,31 +2943,26 @@ describe("loop engine T3 compress-trigger-gate: proactive full-summary fallback"
   });
 
   it("连续 2 轮 token 超阈值 + 条数不足 → 摘要失败不更新锚点,下一轮再尝试(不死循环)", async () => {
-    // Setup:1 条 LONG prior(50000 chars)+ 1 条 SHORT prior + 1 user("Q")
-    // = 3 初始 messages。token 估 ≈ 12500(long prior)远 > 10000 阈值。
-    // 关键设计:把 LONG 放在 prior[0],SHORT 在 prior[1]。这样 iter 3 的
-    // windowed compact dropped = [prior-0 LONG],kept = [prior-1 SHORT, ...5 small]
-    // → 摘要后 state token 骤降至 < 10000 → iter 4 gate 走 noop → 跳出死循环。
-    // 路径推导:
-    //   Iter 1:turnCount=0,gate skip;step 1(tool call)→ state = 5,turnCount=1。
-    //   Iter 2:gate(1 > 0)→ 5 ≤ 6 → full_summary。applyFullCompactSummary 第 1 次失败
-    //     (adapter_failed outcome)→ state 不变 → lastCompactTurn 保持 0。
-    //   step 2(tool call)→ state = 7,turnCount=2。
-    //   Iter 3:gate(2 > 0)→ 7 > 6 → windowed。applyCompactAttachment 摘要 dropped=[LONG]
-    //     → 成功(state = [placeholder, ...6 kept])→ lastCompactTurn = 2。
-    //   step 3(tool call)→ state = 9,turnCount=3。
-    //   Iter 4:gate(3 > 2)→ 9 > 6 → windowed,但 token < 10000 → noop。step 4 completion → stop。
-    // 关键断言:第二轮(iter 3)必须再次进 gate(而非"上一轮调过就不重检"的死循环死锁)。
-    // compactCalls = 2(第一次 full_summary fail + 第二次 windowed success)。
+    // Setup:2 条 prior(1 LONG 50000 chars + 1 SHORT)+ 1 user("Q") = 3 初始
+    // messages,estimate ≫ 10000 阈值且 3 ≤ keepRecent → gate 判 full_summary。
+    // 关键路径推导(plans/proactive-compact-run-entry.md 锁句1-2:run 首步也检,
+    // 锚点只在成功压缩时更新):
+    //   Iter 1:turnCount=0 > 锚点(-1)→ full_summary 第 1 次失败
+    //     (adapter_failed)→ applyFullCompactSummary 返回 state 不变 → 锚点保持 -1;
+    //     step 1(tool call)→ state=5,turnCount=1。
+    //   Iter 2:gate(1 > -1)→ 5 ≤ 6 → full_summary 第 2 次成功 → state=[摘要],
+    //     锚点=1;step 2(tool call)→ state=3,turnCount=2。
+    //   Iter 3:gate(2 > 1)→ estimate 已低 → noop;step 3 completion → stop。
+    // 钉住的不变式:压缩失败绝不更新锚点 — 下一拍必须重新进 gate 再尝试,
+    // 既不吞失败成成功 step,也不因锚点误更新而永不重试。
     const longPrior = [
       makeNative({ role: "user", text: `prior-0 ${"x".repeat(50_000)}` }),
       makeNative({ role: "user", text: "prior-1 short" }),
     ];
     const adapter = makeFullSummaryAdapter({
-      // step 1: tool call(before first compact attempt)
-      // step 2: tool call(after first compact FAILED — state unchanged at 5 msgs)
-      // step 3: tool call(after second compact SUCCEEDED — state = [placeholder, ...6 short kept])
-      // step 4: completion(final turn)
+      // step 1: tool call(第 1 次 compact 失败后,state 原样)
+      // step 2: tool call(第 2 次 compact 成功后,state=[摘要])
+      // step 3: completion(final turn)
       stepScripts: [
         assistantResult({
           texts: [],
@@ -2800,10 +2971,6 @@ describe("loop engine T3 compress-trigger-gate: proactive full-summary fallback"
         assistantResult({
           texts: [],
           toolCalls: [{ id: "t2", name: "noop", input: {} }],
-        }),
-        assistantResult({
-          texts: [],
-          toolCalls: [{ id: "t3", name: "noop", input: {} }],
         }),
         assistantResult({
           texts: ["done after retry"],
@@ -2830,9 +2997,8 @@ describe("loop engine T3 compress-trigger-gate: proactive full-summary fallback"
       { priorMessages: longPrior }
     );
     assert.equal(result.stopReason, "completed");
-    // T3 acceptance:compact 被调 2 次(第一次失败 → 锚点不更新 → 第二次成功)。
-    // 若死循环实现(成功才更新,但旧代码根本进不去 summary 路径),此处会 =1;
-    // 若新路径锚点更新逻辑被破坏成"调过就跳过",此处会 =1;正确实现 =2。
+    // compact 被调 2 次:第 1 次失败 → 锚点不更新 → 下一拍重检成功。
+    // 若失败也更新锚点("调过就跳过"),此处会 =1;正确实现 =2。
     assert.equal(
       adapter.compactCalls.value,
       2,

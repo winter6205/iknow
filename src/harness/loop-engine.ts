@@ -2821,9 +2821,12 @@ export async function run(
   // 必须写在整个 run 末尾(Never-do:"用估算值顶替 trace 真值"红线)。
   const sessionStartedAt = new Date().toISOString();
   const sessionStartMono = performance.now();
-  // #119 T7:proactive auto-compact check(Q3 决议)。闭包变量 lastCompactTurn
-  // 不入 LoopState(Q4 决议),仅作 turnCount 锚点防止重复扫描。
-  let lastCompactTurn: number = 0;
+  // plans/proactive-compact-run-entry.md 锁句2:proactive auto-compact check 的
+  // turnCount 锚点。初值 -1 = 「本 run 尚未成功压过任何一轮」——run() 起始
+  // turnCount=0 也要进 gate(prior 续传超闸不把超闸上下文先送给模型,锁句1)。
+  // 锚点只禁止「本 turnCount 上已成功压过」的重复扫描,不禁止首步。
+  // 闭包变量不入 LoopState(#119 Q4 决议)。
+  let lastCompactTurn: number = -1;
   // plan T3 / ADR-0013:reactive-compact 已尝试标记(每 run 限 1 次,闭包变量)。
   const reactiveAttemptedRef = { attempted: false };
   // #645 T1 / ADR-0028:状态栏 last_tool 回合作用域状态 —— 一个 run = 一个
@@ -2837,7 +2840,9 @@ export async function run(
   resetGraphPresenceLatch(deps);
   while (true) {
     // #119 T7:compress 缝缺省(字段缺席)→ 跳过检查,行为零变化(byte-identical)。
-    // 仅 turnCount 自增(>lastCompactTurn)后扫一次,避免每轮重复 estimate。
+    // plans/proactive-compact-run-entry.md 锁句1-2:每次进入 step 前都检,
+    // 含本 run 首步(turnCount=0,prior 续传超闸不豁免);锚点仅防「同一
+    // turnCount 已成功压过」的重复 estimate。
     //
     // plan compress-trigger-gate T3:proactive gate 改为统一判据
     // `evaluateCompactTrigger`(token 阈值 + 窗口守门 + full summary 降级三段)。

@@ -587,13 +587,15 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
   // -- #467 step 2:proactive compact → LLM 摘要成功注入 -------------------------
 
   it("proactive compact → 摘要成功 → messages[0] 为 SUMMARY_PREAMBLE + 摘要内容,attachment 紧随", async () => {
-    // 12 条 prior:proactive 阈值拉低(1000)让首轮即触发 compact。adapter 在
-    // compact 摘要步(tools === undefined)返回结构化摘要;其余按脚本消费。
+    // 12 条 prior 每条撑到 ~360 chars → estimate 总估量 > 1000 阈值，proactive
+    // 在 run 入口第一次模型调用前即触发压缩（不需要任何 tool 续跑拍到达
+    // gate）。adapter 在 compact 摘要步(tools === undefined)返回结构化摘要；
+    // 模型步只消费 completed 收尾脚本。
     const longPrior = Array.from({ length: 12 }, (_, i) =>
-      text(`prior-${i} ${"z".repeat(20)}`)
+      text(`prior-${i} ${"z".repeat(350)}`)
     );
     const adapter = makeCompactSummaryAdapter({
-      responses: buildResponses(TURNS),
+      responses: buildResponses(0),
     });
     const { result } = await run(
       "hello",
@@ -601,7 +603,7 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
         adapter,
         executor,
         registry,
-        maxTurns: TURNS + 1,
+        maxTurns: 5,
         compress: { contextWindow: 200_000, thresholdTokens: 1000 },
         boundaryAttachment: () => "focus@now\n---\nhist1",
       },
@@ -609,9 +611,8 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       { priorMessages: longPrior }
     );
     assert.equal(result.stopReason, "completed");
-    // 摘要轮确实跑了 ≥1 次(runFullCompact summarized 分支多次级联触发,
-    // lastCompactTurn 锚点不抑制 cascade)。该断言钉住"摘要成功路径被真实接通",
-    // 旧 placeholder 路径仅 fallback 会跑 0 次。
+    // 摘要轮 ≥1 次 → 钉住"摘要成功路径被真实接通"。成功压缩把 lastCompactTurn
+    // 记为当时 turnCount，同一轮不再重复扫描。
     assert.ok(
       adapter.compactSteps.value >= 1,
       "摘要轮至少 1 次,否则 LLM 摘要成功路径未被触发"
@@ -639,6 +640,7 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
   it("plan compress-trigger-gate T5: messages ≤ DEFAULT_KEEP_RECENT 但 token 超阈值 → 触发 full summary 路径,不静默 no-op", async () => {
     // 5 条 prior(≤ keepRecent=6)各 50k chars → estimate ≈ 100k tokens >> threshold=1000
     // → evaluateCompactTrigger 应返回 action: 'compact_via_full_summary'。
+    // 超阈 prior 在 run 入口首呼前即开火，无需 tool 续跑拍。
     // 旧 splitForCompaction-only 路径在这场景下会 no-op(slicedFrom=0) +
     // lastCompactTurn 不更新 → 形成"每轮重检但不压缩"死循环;
     // 本 case 钉住新路径会真触发 runFullCompact 走 LLM 摘要。
@@ -646,7 +648,7 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       text(`prior-${i} ${"x".repeat(50_000)}`)
     );
     const adapter = makeCompactSummaryAdapter({
-      responses: buildResponses(TURNS),
+      responses: buildResponses(0),
     });
     const { result } = await run(
       "hello",
@@ -654,7 +656,7 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
         adapter,
         executor,
         registry,
-        maxTurns: TURNS + 1,
+        maxTurns: 5,
         compress: { contextWindow: 200_000, thresholdTokens: 1_000 },
       },
       undefined,
