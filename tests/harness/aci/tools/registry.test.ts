@@ -2,7 +2,7 @@
  * tests/harness/aci/tools/registry.test.ts
  *
  * `createDefaultAciRegistry` — SSOT 工具注册层单元测试。装配形态与
- * ACI_TOOLSET_NAMES 同源；具体件数 = 全条件在场 44、缺席子集后 filter
+ * ACI_TOOLSET_NAMES 同源；具体件数 = 全条件在场 45、缺席子集后 filter
  * 推导。本测试不在注释里枚举加法（count 易漂），每条用例以 `.filter(...)`
  * 表达式为 source of truth，对照 `ACI_TOOLSET_NAMES.length` 与 Gate 3 镜像。
  *
@@ -14,11 +14,9 @@
  * 单一装配函数返回注册表,所有入口共享。本测试锁 5 边界类:
  *
  *   - 正常路径:返回 AciRegistry,list() 工具名 = `ACI_TOOLSET_NAMES` 全集
- *     （全条件在场 + subagentManager + worktree host seams → 44），顺序 append-only
- *     注:ADR-0041 起 run_graph 常驻(仅 subagentManager 同门),graphAssembly
+ *     （全条件在场 + subagentManager + worktree host seams → 45），顺序 append-only
+ *     注:run_graph 常驻(与 subagentManager 同门,ADR-0041),graphAssembly
  *     缺席不影响注册表成员(handler isEnabled 缺省恒关守门)
- *     注:disclosure-index-align T2 删 skill_search,#337 原 2 件 → 1 件,
- *     长度由 44 → 43
  *   - 空输入:env.web 全空(undefined)→ 直连不抛;sandboxRoot:"" → 不抛
  *   - 非法输入:proxy 非 http/https / 含凭据 → 装配期同步抛 ToolExecutionError
  *   - 溢出/边界:sandboxRoot 指向不存在路径 → 装配期不抛(执行期由 fs 工具越界逻辑拒绝)

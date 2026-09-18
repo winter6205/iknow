@@ -413,13 +413,13 @@ _Avoid_: 把前景/后景与进程隔离混同；泛化的"同步/异步"；把 
 **同轮多 spawn**: 并行工人 = 同一 assistant 消息里 N 次 `spawn_subagent`（`isConcurrencySafe`，同 wave 启动）。跨回合的 `wait:true` 会串行，这是前景契约。ADR-0101。
 _Avoid_: 把跨回合单卡当成 TUI 丢卡；把默认改 `wait:false` 当并行定义；靠说明书逼模型跨回合先后景
 
-**subagent_stop**: 父模型停本会话一名工人的工具；入参 `task_id`，内部 `abortTask`，与 Ctrl+X 同一杀进程路径。已终态/找不到返回结构化说明。ADR-0101（工具尚未落地）。
+**subagent_stop**: 父模型停本会话一名工人的工具；入参 `task_id`，内部 `abortTask`，与 Ctrl+X 同一杀进程路径。已终态/找不到返回结构化说明。ADR-0101。
 _Avoid_: 复用 `bash_stop`；让模型直接碰 manager；把停当成续跑
 
 **工人 transcript**: 工人自己的 session transcript——形状与主会话同一套 JSONL；落在父会话文件夹 `subagents/` 下，键 `(父 conversationId, task_id)`；工人 loop 边跑边 append。`listSessions` 不收录。不是 `agent-<taskId>.jsonl`（那是 per-agent **trace**）。本切片之前的派出没有这份文件。ADR-0102。
 _Avoid_: 用 trace 当 resume 源；从 trace 倒灌旧工人；在项目池另开工人会话叶子；覆盖 `agent-<taskId>.jsonl`
 
-**subagent_continue**: 父模型在工人**进程已死**且存在 **工人 transcript** 时，同一 `task_id` 再拉起（load rewind head + 下一句 user + `run()`）。`running` 拒。`completed` / `failed` / `aborted` 一视同仁。等待契约与 `spawn_subagent` 相同。ADR-0102（工具尚未落地）。
+**subagent_continue**: 父模型在工人**进程已死**且存在 **工人 transcript** 时，同一 `task_id` 再拉起（load rewind head + 下一句 user + `run()`）。`running` 拒。`completed` / `failed` / `aborted` 一视同仁。等待契约与 `spawn_subagent` 相同。ADR-0102。
 _Avoid_: 往正在跑的 loop 里塞；用 TUI 有没有 `✓ Done` 当闸；新 spawn 一个失忆工人当续跑；保活旧 pid；只许成功交差后续
 
 **子代理 task_id**: 这一次派出的 manager 句柄（`randomUUID()`）。父可见信封、`subagent_result`、mailbox、tmp、人停、`subagent_stop`、`subagent_continue` 都用它。worker `conversationId` 仍按 ADR-0040 管子侧。ADR-0101 / ADR-0102。
