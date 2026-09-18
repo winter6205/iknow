@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import {
   access,
-  mkdtemp,
   mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -336,6 +338,143 @@ describe("resolveWithinRoot — T3 path-outside 文案含当前写根 (ADR-0037 
         error.message.includes("current write root") &&
         error.message.includes(root)
     );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T2 / T3 (plans/session-scratch-path-space.md / 加强版 A / ADR-0092 SC4):
+// path-outside 拒绝文案按目标形态劈 EXIT —— 交付越界保持 taskRoot 重试引导
+// (ADR-0037 §4 (e))；OS `/tmp` 被拒时改指本身份会话 tmp 的展开 `$TMPDIR`
+// 绝对路径、不再要求「相对 taskRoot 重试」（草稿越界不是交付问题）。仅当
+// 垫底上 `<sessionScratch>/X` 已存在时补近邻 canonical 路径 —— 仍不 alias：
+// 不读不写不重定向，只是文案提示，垫底内容必须不变。
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("resolveWithinRoot — T2 path-outside 文案按目标劈 EXIT (ADR-0092 SC4 / 加强版 A)", () => {
+  it("/tmp 被拒且有垫底: 文案含展开的垫底绝对路径，不含 taskRoot 重试引导，文件不落垫底", async () => {
+    const root = await makeScratch("aci-helper-t2-tmp-root-");
+    const pad = await makeScratch("aci-helper-t2-tmp-pad-");
+    const realPad = await realpath(pad);
+
+    await assert.rejects(
+      resolveWithinRoot(root, "/tmp/draft.txt", { tmpWriteRoot: pad }),
+      (error: unknown) => {
+        if (!(error instanceof ToolExecutionError)) return false;
+        return (
+          error.message.includes("outside workspace") &&
+          error.message.includes(realPad) &&
+          !error.message.includes("Retry with a path relative to the taskRoot")
+        );
+      }
+    );
+    // SC4 不 alias：拒绝本身不得在垫底制造该文件。
+    assert.equal(await exists(join(pad, "draft.txt")), false);
+  });
+
+  it("非 /tmp 交付越界且有垫底: 文案仍含 current write root + taskRoot 重试引导", async () => {
+    const parent = await makeScratch("aci-helper-t2-deliv-");
+    const root = join(parent, "root");
+    await mkdir(root);
+    // 文案嵌入的是 realpath 后的写根 —— 断言用同一 canonical 口径
+    // （tmpdir 含 symlink 的宿主上不假失败）。
+    const realRoot = await realpath(root);
+    const pad = await makeScratch("aci-helper-t2-deliv-pad-");
+    // 目标真实存在父目录（/etc）且落在 OS /tmp 与会话 tmp 之外 → 交付越界面。
+    const outside = "/etc/iknow-t2-delivery-miss.txt";
+
+    await assert.rejects(
+      resolveWithinRoot(root, outside, { tmpWriteRoot: pad }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("current write root") &&
+        error.message.includes(realRoot) &&
+        error.message.includes("Retry with a path relative to the taskRoot")
+    );
+  });
+
+  it("无垫底解析结果时 /tmp 拒绝退化为既有交付越界文案（可观察，legacy 调用面不变）", async () => {
+    const root = await makeScratch("aci-helper-t2-nopad-root-");
+
+    await assert.rejects(
+      resolveWithinRoot(root, "/tmp/draft.txt"),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("current write root") &&
+        error.message.includes("Retry with a path relative to the taskRoot")
+    );
+  });
+});
+
+describe("resolveWithinRoot — T3 拒 /tmp/X 且垫底已有 X 时给近邻路径", () => {
+  it("垫底有 ok.txt: 文案含垫底上该文件的 canonical 绝对路径，且不动垫底内容", async () => {
+    const root = await makeScratch("aci-helper-t3-nm-root-");
+    const pad = await makeScratch("aci-helper-t3-nm-pad-");
+    const realPad = await realpath(pad);
+    await writeFile(join(pad, "ok.txt"), "pad-content\n");
+
+    let captured = "";
+    await assert.rejects(
+      resolveWithinRoot(root, "/tmp/ok.txt", { tmpWriteRoot: pad }),
+      (error: unknown) => {
+        if (!(error instanceof ToolExecutionError)) return false;
+        captured = error.message;
+        return true;
+      }
+    );
+    assert.ok(
+      captured.includes(join(realPad, "ok.txt")),
+      "近邻提示必须给垫底上该文件的 canonical 宿主绝对路径"
+    );
+    assert.ok(
+      !captured.includes("Retry with a path relative to the taskRoot"),
+      "草稿越界不许再引导相对 taskRoot 重试"
+    );
+    // 只是文案提示：不读不写不重定向，垫底内容逐字节不变。
+    assert.equal(await readFile(join(pad, "ok.txt"), "utf8"), "pad-content\n");
+  });
+
+  it("垫底无该文件: 只给展开 $TMPDIR，不得把不存在路径写成近邻指引", async () => {
+    const root = await makeScratch("aci-helper-t3-abs-root-");
+    const pad = await makeScratch("aci-helper-t3-abs-pad-");
+    const realPad = await realpath(pad);
+
+    let captured = "";
+    await assert.rejects(
+      resolveWithinRoot(root, "/tmp/absent.txt", { tmpWriteRoot: pad }),
+      (error: unknown) => {
+        if (!(error instanceof ToolExecutionError)) return false;
+        captured = error.message;
+        return true;
+      }
+    );
+    assert.ok(captured.includes(realPad));
+    assert.ok(
+      !captured.includes(join(realPad, "absent.txt")),
+      "垫底不存在的文件不得以路径形式指引模型去读"
+    );
+    assert.ok(!captured.includes("Retry with a path relative to the taskRoot"));
+  });
+
+  it("被拒目标是 /tmp 本身（无 X 段）: 只指垫底根，不出现近邻文件指引", async () => {
+    const root = await makeScratch("aci-helper-t3-dir-root-");
+    const pad = await makeScratch("aci-helper-t3-dir-pad-");
+    const realPad = await realpath(pad);
+    await writeFile(join(pad, "ok.txt"), "pad-content\n");
+
+    await assert.rejects(
+      resolveWithinRoot(root, "/tmp/", { tmpWriteRoot: pad }),
+      (error: unknown) => {
+        if (!(error instanceof ToolExecutionError)) return false;
+        // 近邻存在性只针对被拒路径自身的相对段；"/tmp/" 无段 → 不得把
+        // 垫底里碰巧存在的 ok.txt 当近邻提示出去。
+        return (
+          error.message.includes(realPad) &&
+          !error.message.includes(join(realPad, "ok.txt")) &&
+          !error.message.includes("Retry with a path relative to the taskRoot")
+        );
+      }
+    );
+    assert.equal(await readFile(join(pad, "ok.txt"), "utf8"), "pad-content\n");
   });
 });
 
