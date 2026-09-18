@@ -51,7 +51,7 @@ OVERALL: PASS（rev 2，返工点已按审查方清单落实）
    - **Inherits:** spec T4 四态表（`github.com:22` allow / `ssh.github.com:443` allow / `example.com:22` deny `not-in-allowlist` / deny 优先含 :22）；invariant 5 逐字「批准 / 违例 / 地址守卫的判定输入恒为 `(host, port)` 纯数据；`:22` 不引入新配置形态」；assumption 6 引文「A pattern without a port matches every port」；「若上游 `matchesDomainPatternWithPort` 升版改语义，`upstream.ts` 适配层唯一改动点」。
    - **Surface:** `src/harness/sandbox/egress/domain-matcher.ts` 判定层（测试钉子，零生产码改动）。
    - **Acceptance:** 表驱动单测全绿 + 一条显式命名的「ssh-port-inherits-bare-host-entry」回归钉子（SC4）；grep 断言本 spec 未产生任何 preset 清单 / `specs/egress-preset-allowlist.md` diff；`npm test` 绿。
-   - Status: [ ] pending
+   - Status: [x] done
    - [parallel]
 
 5. **三形态生命周期 + yolo no-op 接线** — tag: `[implementation]`
