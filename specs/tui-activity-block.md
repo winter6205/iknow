@@ -2,6 +2,7 @@
 
 > 输入 = `plans/tui-activity-block.md`（ACR 5/5 yes；访谈锁句 8 条；本 worktree 随 plan persist flush 落 `docs/CONTEXT.md`）。
 > 修订 = `plans/tui-activity-block-live-signal.md`（锁句 1–9；supersede「live 安静 = 全 retract」，锁定 **live noise vs live signal** 划分与 `web_search` / `web_fetch` 实卡；本文件 Locked sentences 为现行合同，Live-signal revision 章为修订层）。
+> 修订 2 = `plans/tui-thinking-at-bottom.md`（锁句 1–6；supersede Live-signal revision 锁句 1 的「思考永远画在动作**上面**」，改钉 **live 思考在最底下 / 原地变 `Thought for` / 下沉顺序与时间线一致**）。
 > 范围 = TUI 过程 chrome 按 assistant 消息切成**过程块**；纯派生模块产出块列表，ChatView 只消费；不改 Ctrl+O、不改 `thinkingMs` 落盘、不改 harness 工具形状、不改 web。
 > 落地 = T1 本 spec → T3–T7 实施（TDD）→ code-review → verification-before-completion。
 
@@ -66,6 +67,24 @@
 
 **不授权**（修订层排除）：Ctrl+O、思考 peek 行数、改 `thinkingMs` 落盘、给 `read_file` 摊正文、恢复 `web_search` 计数焊进思考标题。
 
+## Thinking-at-bottom revision（plans/tui-thinking-at-bottom.md 锁句 1–6）
+
+修订层的修订层：**位置合同**改钉「最底下」，其余（live noise / signal 划分、相邻焊接、`hideThinking` 口径、`thinkingMs` 落盘算法）全部继承 Live-signal revision。与上文冲突时以本节为准 —— 唯一被取代的现行锁句是 Live-signal revision 锁句 1 的「思考永远画在它驱动的那批动作**上面**」。
+
+1. 思考还在流、后面还没有本段已经结束的内容时，`Thinking…` 画在 transcript **最底下**，用户能看见正在流的思考。
+2. 该段思考结束（既有切点：`text_delta` 或任何 `tool_call_start`）后，**就在那一行**变成 `Thought for Ns`；新出现的工具卡或正文追加在它**下面**。不准把还在流的 `Thinking…` 钉在已经画出的工具卡上面。
+3. 下一段思考（通常是工具结果回来后的下一条 assistant）出现在**新的最底下**，低于已经可见的工具。
+4. 落定后的上下顺序与这条时间线相同：`Thought for` → 该段工具 → 下一行 `Thought for` → 下一批工具 → 正文。标题按过程块锚点插进内容顺序，禁止整包甩在消息尾巴。
+5. live noise / live signal、相邻焊接、`hideThinking` 只藏不当槽主的思考正文、`thinkingMs` 仍 per-message 第一段爆发 —— 均继承 Live-signal revision；本切片不改落盘算法。
+6. Ctrl+O、思考 peek 行数产品变更、harness 工具形状、web、CLI 非 TUI，本切片不做。
+
+| 被取代行为                                         | 现行落点                                                        | 取代后                                                                        |
+| -------------------------------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| 「live 思考钉在它驱动的那批动作上面」作为钉死题头  | `src/tui/activity-block.ts` `appendLiveBlocks`（思考块先 push） | live 思考画在 transcript 最底下；出现工具后该段原地转 `Thought for`，卡在其下 |
+| 落定标题整包甩在消息尾巴（或全消息块共用一个锚点） | `src/tui/turn-fold-lines.ts` 按 messageIndex 分组               | 标题按过程块锚点（`contentBlockIndex`）插进内容顺序                           |
+
+**不授权**（本节排除）：Ctrl+O 展开、思考 peek 行数、改 `thinkingMs` 落盘、改 keep / accent / 失败分类表、改 CLI 非 TUI 面、改 web。
+
 ## Tech Stack
 
 | 项     | 取值                                                   | 备注                            |
@@ -100,13 +119,14 @@ npm run dev:tui                             # 真实 TUI（MCP pty 实测面）
 
 ## Testing Strategy
 
-| 等级 | 范围                                                                                                 | 工具                                     |
-| ---- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| Unit | 纯派生块列表：焊 / 切开 / 新消息新块 / `calling` vs `called` / 失败件不进块计数 / keep / accent 块外 | vitest                                   |
-| Unit | 槽位交接：思考流→思考正文、安静工具接手→dim 预览、全结束→预览收掉                                    | vitest                                   |
-| Unit | 互斥闸：同一批 retract 不同时出现现在时行与结束态行；已冻 stub 不关下一块思考槽                      | vitest                                   |
-| Unit | 边界：无思考无工具 / 思考后无工具直接正文 / 思考后直接安静工具（无正文）/ 正文夹在思考与安静工具之间 | vitest                                   |
-| TUI  | 真实会话：思考→安静工具→正文→安静工具 的屏上序列                                                     | `mcp__aiterm__pty_*` + `npm run dev:tui` |
+| 等级 | 范围                                                                                                                                               | 工具                                     |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| Unit | 纯派生块列表：焊 / 切开 / 新消息新块 / `calling` vs `called` / 失败件不进块计数 / keep / accent 块外                                               | vitest                                   |
+| Unit | 槽位交接：思考流→思考正文、安静工具接手→dim 预览、全结束→预览收掉                                                                                  | vitest                                   |
+| Unit | 互斥闸：同一批 retract 不同时出现现在时行与结束态行；已冻 stub 不关下一块思考槽                                                                    | vitest                                   |
+| Unit | 边界：无思考无工具 / 思考后无工具直接正文 / 思考后直接安静工具（无正文）/ 正文夹在思考与安静工具之间                                               | vitest                                   |
+| Unit | 位置合同：仅思考时 live `Thinking…` 在最底下 / 段结束原地转 `Thought for` 且工具在其下 / 第二段思考在已可见工具之下 / 落定标题按锚点插入不进消息尾 | vitest                                   |
+| TUI  | 真实会话：思考→安静工具→正文→安静工具 的屏上序列                                                                                                   | `mcp__aiterm__pty_*` + `npm run dev:tui` |
 
 **`npm test` = 唯一门**：交付门槛 = `npm test` 退出 0 + `npm run typecheck` 退出 0 + `npm run lint:s5` 退出 0。
 
@@ -133,21 +153,25 @@ npm run dev:tui                             # 真实 TUI（MCP pty 实测面）
 
 ## Success Criteria
 
-| #   | Criterion                     | Check                                                                                 |
-| --- | ----------------------------- | ------------------------------------------------------------------------------------- |
-| S1  | 块列表纯派生可单测            | 无 React import 的派生模块导出块列表函数；vitest 直接调                               |
-| S2  | 焊成立（思考 + 相邻安静工具） | 夹具：思考后直接安静工具 → 标题含 `Thought for` + `calling`                           |
-| S3  | 切开成立（中间有正文）        | 夹具：思考→正文→安静工具 → `Thought for` / 正文 / `called name × N` 三段分离          |
-| S4  | `calling` → `called` 转移     | 夹具：安静工具 running → 标题 `calling`；全结束 → `called` 且预览收掉                 |
-| S5  | 新消息开新块                  | 夹具：两条 assistant → 两块；第二条不改第一块计数                                     |
-| S6  | 失败件不进块计数              | 夹具：失败安静工具 → 块计数不含它；仍走 failure overlay                               |
-| S7  | keep / accent 仍块外实卡      | 夹具：keep 工具 → 不焊进块标题；accent 同理                                           |
-| S8  | 双摘要器不再叠画              | 夹具：同一批 retract 不同时产出「现在时行」与「结束态行」                             |
-| S9  | 槽位交接：思考让位            | 夹具：思考流中出现 `text_delta` / `tool_call_start` → 思考正文离开槽位、时长留标题    |
-| S10 | 边界四类覆盖                  | 夹具：无思考无工具 / 思考后直接正文 / 思考后直接安静工具 / 正文夹在思考与安静工具之间 |
-| S11 | `hideThinking` 只跟槽位主人   | 夹具：已冻 stub 不影响下一块思考槽开合                                                |
-| S12 | 主路径全绿                    | `npm test` 退出 0；`npm run typecheck` 退出 0；`npm run lint:s5` 退出 0               |
-| S13 | 真实 TUI 实测                 | MCP pty 起 `npm run dev:tui`，注入 prompt，读屏验证过程块序列                         |
+| #   | Criterion                     | Check                                                                                    |
+| --- | ----------------------------- | ---------------------------------------------------------------------------------------- |
+| S1  | 块列表纯派生可单测            | 无 React import 的派生模块导出块列表函数；vitest 直接调                                  |
+| S2  | 焊成立（思考 + 相邻安静工具） | 夹具：思考后直接安静工具 → 标题含 `Thought for` + `calling`                              |
+| S3  | 切开成立（中间有正文）        | 夹具：思考→正文→安静工具 → `Thought for` / 正文 / `called name × N` 三段分离             |
+| S4  | `calling` → `called` 转移     | 夹具：安静工具 running → 标题 `calling`；全结束 → `called` 且预览收掉                    |
+| S5  | 新消息开新块                  | 夹具：两条 assistant → 两块；第二条不改第一块计数                                        |
+| S6  | 失败件不进块计数              | 夹具：失败安静工具 → 块计数不含它；仍走 failure overlay                                  |
+| S7  | keep / accent 仍块外实卡      | 夹具：keep 工具 → 不焊进块标题；accent 同理                                              |
+| S8  | 双摘要器不再叠画              | 夹具：同一批 retract 不同时产出「现在时行」与「结束态行」                                |
+| S9  | 槽位交接：思考让位            | 夹具：思考流中出现 `text_delta` / `tool_call_start` → 思考正文离开槽位、时长留标题       |
+| S10 | 边界四类覆盖                  | 夹具：无思考无工具 / 思考后直接正文 / 思考后直接安静工具 / 正文夹在思考与安静工具之间    |
+| S11 | `hideThinking` 只跟槽位主人   | 夹具：已冻 stub 不影响下一块思考槽开合                                                   |
+| S12 | 主路径全绿                    | `npm test` 退出 0；`npm run typecheck` 退出 0；`npm run lint:s5` 退出 0                  |
+| S13 | 真实 TUI 实测                 | MCP pty 起 `npm run dev:tui`，注入 prompt，读屏验证过程块序列                            |
+| S14 | live 思考在最底下             | 夹具：仅思考在流 → `Thinking…` 是 tail 的最末块，其后无已画工具卡                        |
+| S15 | 落定原地转 `Thought for`      | 夹具：该段出现 `tool_call_start` → 同一锚点变 `Thought for Ns`，工具卡在其下             |
+| S16 | 第二段思考在新底              | 夹具：第一条 assistant 的工具卡已可见 → 第二条的 live 思考排在这些卡之后                 |
+| S17 | 标题按锚点插入                | 夹具：一封消息思考→`web_search`→正文 → 屏序 `Thought for` → search 卡 → 正文，无尾部折行 |
 
 ## Open Questions
 

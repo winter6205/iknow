@@ -8,11 +8,12 @@
  * 的 text）；全结束 → 预览消失、标题 `called name × N`；keep / 失败不进
  * 块计数。
  *
- * 验收点：
- *  1. settled 块（运行中已结束）→ 标题 `called name × N`、预览消失。
- *  2. live 块（仍有 run.status === "running"）→ 标题 `calling name × N`、
- *     一行 dim 预览（`formatRunningToolLine` 输出）出现在标题之下。
- *  3. keep 工具（bash）不焊入块计数 → 标题里不出现 `bash`。
+ * Thinking-at-bottom revision（plans/tui-thinking-at-bottom.md 锁句 1–3）：
+ * 跨段用例（live noise 已进 history）里 `calling read_file × 1` 是历史
+ * 消息块（`renderBlockTitles` 路径），`Thinking…` 走 unanchored thinking
+ * 壳（askLine 之后、Spinner 之前）—— 屏序 = `calling ` 行之上、`Thinking…`
+ * 在它之下。屏上 `Thinking…` 仍仅出现一次（旧合同要求思考不被钉在工具
+ * 卡上方的现象不复存在）。
  */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
@@ -231,12 +232,14 @@ describe("T5 keep 工具块外实卡：不进块计数", () => {
 });
 
 describe("live 收类已进 history 仍须 calling + 细节行", () => {
-  test("assistant 已含 tool_use、live 仍 running → 不是 called、有预览、Thinking… 唯一一份在噪音之上", async () => {
-    // T4 live-signal revision：thinking 槽永远画在驱动它的噪音工具之上
-    // （文档顺序）；ThinkingPanel 已退役，`Thinking…` 只在 unanchored
-    // 块壳里出现一次。`THINK-DRAFT` 文本走块壳的 `thinkingPeekLines`
-    // 折叠预览 —— 仍可见（与 fold 合同一致），但 `THINK-DRAFT` 标
-    // 记是用于验证「正文不在外露 slot 里残留」的哨兵。
+  test("assistant 已含 tool_use、live 仍 running → calling + 预览、`Thinking…` 唯一一份且在历史块之下", async () => {
+    // Thinking-at-bottom revision：本场景 noise 已进 history（live run
+    // id 命中历史 tool_use → `appendLiveBlocks` dedupe 排除）—— `calling
+    // read_file × 1` 是历史消息块（`renderBlockTitles` 路径），`Thinking…`
+    // 走 unanchored thinking 壳（askLine 之后、Spinner 之前）。屏上
+    // `Thinking…` 仅一份且不在 `calling read_file × 1` 之上（已被
+    // TranscriptTail 拆开）：屏序 = 历史块标题之上、`Thinking…` 在下。
+    // 草稿 `THINK-DRAFT-PEEK-WINDOW` 走 `thinkingPeekLines` 折叠预览窗口。
     const messages: AnthropicNativeMessage[] = [
       { role: "user", content: [{ type: "text", text: "读 a.ts" }] },
       {
@@ -277,13 +280,13 @@ describe("live 收类已进 history 仍须 calling + 细节行", () => {
     expect(frame).toContain("calling read_file × 1");
     expect(frame.includes("called read_file")).toBe(false);
     expect(frame).toContain(formatRunningToolLine(liveRuns[0]!));
-    // T4 live-signal：唯一一份 `Thinking…` 在 unanchored 块壳内。本测试
-    // 场景里 noise 已经在 history 里（live run id 命中历史 tool_use →
-    // `appendLiveBlocks` 内 dedupe 排除）—— 故「thinking 唯一一份」即
-    // 文档顺序合同；与「noise 在 unanchored」的版本断言
-    // `thinkingIdx < noiseIdx` 不重叠（见 t4 的 burst-only 用例）。
+    // Thinking-at-bottom revision：`Thinking…` 唯一一份，且不在历史块
+    // 标题之上 —— 屏序合同（call 块 → askLine → 思考 → Spinner）。
     const thinkingCount = frame.split("Thinking…").length - 1;
     expect(thinkingCount).toBe(1);
+    expect(frame.indexOf("Thinking…")).toBeGreaterThan(
+      frame.indexOf("calling read_file × 1")
+    );
     // 草稿走 `thinkingPeekLines` 折叠预览窗口 —— 哨兵文本可见。
     expect(frame).toContain("THINK-DRAFT-PEEK-WINDOW");
     await setup.renderer.destroy();

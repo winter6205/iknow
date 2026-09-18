@@ -8,24 +8,26 @@
  * `liveTailSlots` 提 `tailSlots`）下放 ChatView，本组件只挂 JSX。
  *
  * 渲染顺序（spec D7 + 过程块 spec）：
- *   crunched 行 → 未锚定块（unanchoredBlocks）→ tail slots → legacy liveToolLines
- *   → askLine → spinner。
+ *   crunched 行 → 未锚定非思考块（unanchoredBlocks 中非 thinking）→ tail slots
+ *   → legacy liveToolLines → askLine → 未锚定思考块（unanchoredBlocks 中 thinking）
+ *   → spinner。
  *
  * 过程块 spec：块列表（`buildActivityBlockFoldLines`）是折叠 / 预览的唯一
  * 来源；旧 `live activity group` 一行英文摘要（`Listing × N · Reading × M`）
  * 与 `unit fold`（`Thought for Ns · name × M`）互斥闸整体退役 —— 同批
  * retract 只在块 called 计数出现一次（spec S7）。
  *
- * T4 live-signal revision（plans/tui-activity-block-live-signal.md 锁句 1）：
- * 思考始终活在它驱动的那块过程块的正文槽里 —— ThinkingPanel（独立 tail
- * 单元）已退役；`thinkingPeekLines` 改成在 UnanchoredActivityBlocks 内
- * 渲染思考块的预览行；展开态走 `thinkingExpanded` 全 Markdown（与原路径
- * 同形态）。本组件不再持有 `showThinkingPanel` / `ThinkingPanel` 装配。
+ * Thinking-at-bottom revision（plans/tui-thinking-at-bottom.md 锁句 1–3）：
+ * 还在流的思考段是 transcript 最底 —— 思考块（`slot.kind === "thinking"`）
+ * 从 unanchoredBlocks 拆分出来，单独挂在 askLine 之后、Spinner 之前；非
+ * 思考块（live noise / signal 已落定计数行）走原路径（crunched 之后、
+ * tail slots 之前）。`Thinking…` 标题 + 预览/展开 只画一次。ThinkingPanel
+ * 已退役，`ThinkingBlockSlot` 仍承担思考块的视觉（peek / Markdown 展开）。
  */
 import type { ReactNode } from "react";
 import { Markdown } from "./markdown.js";
 import { MessageShell } from "./message-shell.js";
-import { renderActivityBlockRows } from "./message-row.js";
+import { renderActivityBlockRows } from "./activity-block-rows.js";
 import { Spinner } from "./components.js";
 import { formatCrunched } from "./run-stats.js";
 import { formatThinkingLive, thinkingPeekLines } from "./think-fold.js";
@@ -54,6 +56,18 @@ export interface TranscriptTailProps {
 
 export function TranscriptTail(props: TranscriptTailProps): ReactNode {
   const pal = tuiPalette;
+  // Thinking-at-bottom revision：unanchoredBlocks 拆成两组 —— 非思考块
+  // 走原路径（crunched → tail slots 之前），思考块挂到 askLine 之后、
+  // Spinner 之前；同一帧内 `Thinking…` 仅出现一次（位置合同）。
+  const nonThinkingBlocks: ActivityBlock[] = [];
+  const thinkingBlocks: ActivityBlock[] = [];
+  for (const block of props.unanchoredBlocks) {
+    if (block.slot.kind === "thinking") {
+      thinkingBlocks.push(block);
+    } else {
+      nonThinkingBlocks.push(block);
+    }
+  }
   return (
     <>
       {props.crunchedSeconds > 0 && (
@@ -61,12 +75,10 @@ export function TranscriptTail(props: TranscriptTailProps): ReactNode {
           {formatCrunched(props.crunchedSeconds)}
         </text>
       )}
-      {props.unanchoredBlocks.length > 0 && (
+      {nonThinkingBlocks.length > 0 && (
         <UnanchoredActivityBlocks
-          blocks={props.unanchoredBlocks}
+          blocks={nonThinkingBlocks}
           contentWidth={props.contentWidth}
-          deferredThinkingDrafts={props.deferredThinkingDrafts}
-          thinkingExpanded={props.thinkingExpanded}
         />
       )}
       {props.tailSlots.map((slot, i) => (
@@ -92,6 +104,14 @@ export function TranscriptTail(props: TranscriptTailProps): ReactNode {
         <text fg={pal.running} wrapMode="word" width={props.contentWidth}>
           {props.askLine}
         </text>
+      )}
+      {thinkingBlocks.length > 0 && (
+        <UnanchoredThinkingBlocks
+          blocks={thinkingBlocks}
+          contentWidth={props.contentWidth}
+          deferredThinkingDrafts={props.deferredThinkingDrafts}
+          thinkingExpanded={props.thinkingExpanded}
+        />
       )}
       {props.running && <Spinner />}
     </>
@@ -157,61 +177,72 @@ export function TailSpacer(props: {
 /**
  * T5（spec S2–S4 / plans T5）：未锚定到 messageIndex 的活动块（live 块）
  * 在 tail 渲染 —— 块标题 + 预览行（settled → 仅标题，running → 标题 + 预览）。
- * 与 MessageRow 的 renderBlockTitles 形态对齐，但全部块装在同一 MessageShell 里。
+ * 与 MessageRow 的 renderBlockTitles 形态对齐。
  *
- * T4 live-signal revision：思考槽块（`slot.kind === "thinking"`）的预览行
- * 走 `thinkingPeekLines(deferredThinkingDrafts)`（≤3 行 dim 折叠态）；
- * 展开态（`thinkingExpanded`）走 Markdown 全文 —— 与原 ThinkingPanel 同形态，
- * 现在挂进块槽位（与块标题同行视觉，而非独立 tail 单元）。
+ * Thinking-at-bottom revision（plans/tui-thinking-at-bottom.md 锁句 1–3）：
+ * 思考块（`slot.kind === "thinking"`）从本壳里剥离，挂到 `UnanchoredThinkingBlocks`，
+ * 独立绘制在 askLine 之后、Spinner 之前 —— 同一 burst 内思考是 transcript 最底。
+ * 思考块的视觉（peek / Markdown 展开）由 `ThinkingBlockSlot` 单源承担，
+ * `Thinking…` 标题在屏上**恰好一次**。
  */
 function UnanchoredActivityBlocks(props: {
+  readonly blocks: ReadonlyArray<ActivityBlock>;
+  readonly contentWidth: number;
+}): ReactNode {
+  // 行装配单源：非思考块的「标题 + 可选预览」模板走
+  // `renderActivityBlockRows`（与 MessageRow 同源，不再各自漂移）。
+  // 块按数组序渲染 —— 连续段合成一次 rows 调用，保持文档顺序与「连续的非
+  // 思考段合成一行模板」的合并行为（spec / message-blocks 同款）。
+  const titles: string[] = [];
+  const previews: Array<string | null> = [];
+  for (const block of props.blocks) {
+    titles.push(block.title);
+    previews.push(block.slot.kind === "tool-preview" ? block.slot.text : null);
+  }
+  return (
+    <MessageShell key="unanchored-activity-blocks" cols={props.contentWidth}>
+      {renderActivityBlockRows(
+        titles,
+        previews,
+        props.contentWidth,
+        (i) => `unanchored-block-${i}`
+      )}
+    </MessageShell>
+  );
+}
+
+/**
+ * Thinking-at-bottom revision（plans/tui-thinking-at-bottom.md 锁句 1–3）：
+ * 还在流的思考段作为 transcript 最底元素 —— 单独挂载在 askLine 之后、
+ * Spinner 之前。视觉与原 ThinkingPanel 同形态（dim `Thinking…` 标题 + peek
+ * 预览或 Markdown 展开）；思考标题在屏上仅出现一次（与 unanchored noise
+ * 计数行物理隔离，避免「思考钉在工具卡上方」旧行为）。
+ */
+function UnanchoredThinkingBlocks(props: {
   readonly blocks: ReadonlyArray<ActivityBlock>;
   readonly contentWidth: number;
   readonly deferredThinkingDrafts: string;
   readonly thinkingExpanded: boolean;
 }): ReactNode {
-  // 行装配单源：非思考块的「标题 + 可选预览」模板走
-  // `renderActivityBlockRows`（与 MessageRow 同源，不再各自漂移）；
-  // 思考块走 ThinkingBlockSlot（peek / 展开是 tail 特有形态）。
-  // 块按数组序渲染 —— 连续的非思考段合成一次 rows 调用，保持文档顺序。
-  const rows: ReactNode[] = [];
-  let run: { titles: string[]; previews: Array<string | null> } | null = null;
-  const flushRun = (startIdx: number) => {
-    if (run === null) return;
-    const runStart = startIdx;
-    rows.push(
-      renderActivityBlockRows(
-        run.titles,
-        run.previews,
-        props.contentWidth,
-        (i) => `unanchored-block-${runStart + i}`
-      )
-    );
-    run = null;
-  };
-  props.blocks.forEach((block, blockIdx) => {
-    if (block.slot.kind === "thinking") {
-      flushRun(blockIdx);
-      rows.push(
-        <ThinkingBlockSlot
-          key={`unanchored-thinking-${blockIdx}`}
-          contentWidth={props.contentWidth}
-          draft={props.deferredThinkingDrafts}
-          expanded={props.thinkingExpanded}
-        />
-      );
-      return;
-    }
-    if (run === null) run = { titles: [], previews: [] };
-    run.titles.push(block.title);
-    run.previews.push(
-      block.slot.kind === "tool-preview" ? block.slot.text : null
-    );
-  });
-  flushRun(props.blocks.length);
+  // 单一思考块（thinking 是位置合同的「一个」主语 —— `appendLiveBlocks`
+  // 只产一个 thinking 块；多思考块场景由下一段思考另起一个 anchor 进入
+  // unanchoredBlocks）。`Thinking…` 仍由 activity-block 单源产出，本组件
+  // 不复制文案。
   return (
-    <MessageShell key="unanchored-activity-blocks" cols={props.contentWidth}>
-      {rows}
+    <MessageShell key="unanchored-thinking-blocks" cols={props.contentWidth}>
+      {props.blocks.map((block, idx) => {
+        // 非思考块不应出现在本壳里 —— 直接渲染会丢可视槽位、且破坏最底
+        // 位置合同；早退兜底（防御性，调用方已拆分）。
+        if (block.slot.kind !== "thinking") return null;
+        return (
+          <ThinkingBlockSlot
+            key={`unanchored-thinking-${idx}`}
+            contentWidth={props.contentWidth}
+            draft={props.deferredThinkingDrafts}
+            expanded={props.thinkingExpanded}
+          />
+        );
+      })}
     </MessageShell>
   );
 }

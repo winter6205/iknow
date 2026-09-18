@@ -4,6 +4,7 @@
 **Approach:** `#1025` 的块列表留下。未提交补丁只保留「history 里仍 running 的噪音要进 `calling` + 预览、unanchored 去重」。拿掉 `liveThinking: false` 和「任意工具 running 关思考 panel」。live 谁进块不再等于整张 retract：噪音才焊，有语义的工具（含网络搜索）块外实卡。Ctrl+O、改 `thinkingMs` 落盘、改 CLI/web，仍不做。
 **Spec link:** `specs/tui-activity-block.md`（T1 修订锁句；本计划 Locked sentences 在 spec 落地前为 Inherits 源）
 **Predecessor:** `plans/tui-activity-block.md` — 块两态 / 正文槽 / 切开仍成立；「安静 = 现 retract、live 全折进块」由本计划 supersede。
+**Successor:** live「思考钉在动作题头」已由 `plans/tui-thinking-at-bottom.md` supersede；噪音/有语义与 web_* 实卡仍以本文件为准。
 **ACR:** all-yes（block below）
 **待写入:** 已 flush：live noise / live signal；修订 body slot / adjacent weld / live tool line / retract class / unit fold。无新 ADR。
 **Per-ticket loop (all bullets):** tdd → typecheck+tests → code-review → (GATE BLOCKED → review-report-repair) → verification-before-completion (landing grain: operator global commit section)
