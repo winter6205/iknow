@@ -117,6 +117,9 @@ const EXPECTED_TOOLS = [
   "exit-worktree",
   "list-worktrees",
   "remove-worktree",
+  // plan subagent-stop-and-continue T2 (ADR-0101) subagent_stop append-only:
+  // serve 走 build-engine 全装配（自建 subagentManager）→ 末位在场。
+  "subagent_stop",
 ];
 
 let baseDir: string;
