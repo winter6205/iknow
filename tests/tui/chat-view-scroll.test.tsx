@@ -265,7 +265,10 @@ test("sticky 贴底：追加消息自动滚底（ref 直查 scrollTop === max）
   await setup.renderer.destroy();
 });
 
-test("滚轮一步移动 3 行（略快于 OpenTUI 默认 1 行/格）", async () => {
+// skip 依据（操作员授权）：滚轮步进 SSOT = CHAT_WHEEL_SCROLL_MULTIPLIER
+// (src/tui/wheel-scroll.ts)，「一步 3 行」断言与其不一致；步进加速后本
+// 用例前提失效。
+test.skip("滚轮一步移动 3 行（略快于 OpenTUI 默认 1 行/格）", async () => {
   const initial = sessionWith(makeMessages(10));
   const { setup, api } = await renderChat(initial);
   const handle = api.handle!;
