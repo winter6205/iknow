@@ -133,7 +133,8 @@ export interface RunTuiOptions {
   readonly createRenderer?: (config: CliRendererConfig) => Promise<CliRenderer>;
 }
 
-/** Ctrl+C 语义自管：打断前台 turn 而非退出（#146 Q1a）。
+/** Ctrl+C 语义自管：不退出进程，打断走 app 层 Esc 分支（#146 Q1a；
+ *  2026-09-18 键位迁移后 Ctrl+C 只剩选区复制，进程级 SIGINT 仍兜底）。
  *  alternate-screen：scrollback 收口（#321 问题 1）。
  *  不 freeze：OpenTUI 0.5.1 的 CliRenderer 构造器在 Linux 下会写
  *  config.useThread 默认值，冻结对象抛 "not extensible"（实测）。 */
@@ -674,8 +675,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // `{ shutdown?: }`(DRIFT-1),TUI 只透 shutdown 句柄 — deps / engine /
     // subagentManager 形态与钩子无关,不再用 undefined as never 占位。
     // shutdown 缺席(防御,ask 形态不可能) → registerShutdown 内部 no-op。
-    // TUI exitOnCtrlC=false 是 renderer 层打断前台 turn,SIGINT 到 Node
-    // 进程层 handler 仍响应。
+    // TUI exitOnCtrlC=false 是 renderer 不吃 Ctrl+C 退出（app 层 Ctrl+C 只做
+    // 选区复制），SIGINT 到 Node 进程层 handler 仍响应。
     // settings-hot-reload（T4）:envLoader.stop() 也必须接到 shutdown —— 长程
     // 进程退出前释放 fs watcher 句柄（计划风险清单：避免 serve 类进程泄漏）。
     // 信号路径（registerShutdown）不经过 onQuitBridge，需在此释放 watcher；

@@ -264,7 +264,7 @@ describe("TUI `/graph` 与 Shift+Tab 翻同一 holder（SC3）", () => {
     }
   }, 30_000);
 
-  test("graph 状态按 Ctrl+C：chrome focus 与 view open 都显示标准空闲提示", async () => {
+  test("graph 状态按 Ctrl+C：chrome focus 与 view open 都显示标准复制提示", async () => {
     const permissionMode = createPermissionModeContext("default");
     const graphMode = createGraphModeContext();
     const snapshot = {
@@ -291,13 +291,13 @@ describe("TUI `/graph` 与 Shift+Tab 翻同一 holder（SC3）", () => {
       await app.pressTab();
       expect(app.setup.captureCharFrame()).toContain("> graph");
       await app.pressCtrlC();
-      expect(app.setup.captureCharFrame()).toContain("/quit");
+      expect(app.setup.captureCharFrame()).toContain("无选区");
 
       await app.pressEnter();
       expect(app.setup.captureCharFrame()).toContain("node-a");
       await app.pressCtrlC();
       await app.pressEscape();
-      expect(app.setup.captureCharFrame()).toContain("/quit");
+      expect(app.setup.captureCharFrame()).toContain("无选区");
     } finally {
       app.destroy();
     }

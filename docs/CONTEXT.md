@@ -35,7 +35,7 @@ _Avoid_: 用 transcript 当 trace 正文源；把两者当同一份记录的两�
 **内容寻址正文池（blobs）**: 会话文件夹内的 `blobs/<sha256>`——正文 mask 后另存**一份**、定长 sha256 当文件名、`flag:"wx"` write-if-missing，读侧按 sha 取回原文。哈希在这里是**命名用法不是摘要用法**：原文一字不少地存着，没有压缩也没有丢失；寿命 = 会话文件夹，删文件夹即回收（承接 ADR-0036 悬置未细化的 rotation orphans 规则）。ADR-0036 / ADR-0071。
 _Avoid_: 当全局共享池（那要自造引用计数 / GC）；当压缩或摘要；让 trace 引用 transcript 正文来代替它
 
-**continue_pending**: 截断后在**同一会话**把未完成的工具环接着跑完——人对齐路径是 **`/continue`**（skip-append：不追加新任务 user）；有 pending 时的 NL 白名单是次入口。先对人停住（典型 **Ctrl+C**）；`run` 前可对盘上 closeout 投影补悬空 `tool_use`。**本次**进模型的 prior 可去掉末尾 **interrupt system message**，盘上那句仍保留。空 Enter 不是续跑；忙着续跑只提示、不顺带 abort。**不是** ACI 工具。
+**continue_pending**: 截断后在**同一会话**把未完成的工具环接着跑完——人对齐路径是 **`/continue`**（skip-append：不追加新任务 user）；有 pending 时的 NL 白名单是次入口。先对人停住（TUI 典型 **Esc**，2026-09-18 键位迁移前是 Ctrl+C）；`run` 前可对盘上 closeout 投影补悬空 `tool_use`。**本次**进模型的 prior 可去掉末尾 **interrupt system message**，盘上那句仍保留。空 Enter 不是续跑；忙着续跑只提示、不顺带 abort。**不是** ACI 工具。
 _Avoid_: continue 工具；把空回车当续跑；续跑时从盘上删掉 interrupt；忙着 `/continue` 自动 abort；把续跑当传输重试；新建 session 挂旧历史；无确认自动续跑
 
 **turnCount**: Foundation 运行时回合计数，每完成一个 assistant 回合（包括纯文本完成）加一；`maxTurns` 是在调用模型前检查的运行时上限。
@@ -143,8 +143,7 @@ _Avoid_: 只有 graph 抢 Down；焦点落在 ContextBar；子代理面板不可
 **subagent card live（子代理会话卡实时行）**: `spawn_subagent` 画在会话那张卡上：live 为角色行加一行 dim 任务概述（`taskPreview`）；**completed** 后概述留下，其下绿 `✓ Done`，不再写 `running...`。位置在该消息下，不在输入框上方。failed 走该卡 **failure overlay**。
 _Avoid_: identity strip above prompt；完成后用 `done` 替换概述；完成后仍 `running...`；绿 Done 走 failed；完成态 done 跟底栏面板一起淡出
 
-**前台打断**: TUI **Ctrl+C** 停当前会话全部前台——父 `running-fg` turn，以及本会话所有前景（`wait:true`）子代理，包括父已 idle 但仍 live 的；后景 `wait:false` 与其它会话 `running-bg` 不停。前台仍在跑时有选区也先打断。Ctrl+X 仍可单杀焦点行（含后景）。
-_Avoid_: 只 abort 父 signal 留下前景子代理；idle 夹缝让前景子代理继续转圈；running-fg 有选区只复制不 abort
+**前台打断**: TUI **Esc** 停当前会话全部前台——父 `running-fg` turn，以及本会话所有前景（`wait:true`）子代理，包括父已 idle 但仍 live 的；后景 `wait:false` 与其它会话 `running-bg` 不停。双击 Esc（≤1000ms）是回退选择器，前台有活时第一击先打断（2026-09-18 键位迁移：打断自 Ctrl+C 迁入，Ctrl+C 只剩选区复制；chat 视图外 Esc 由 list/mcp/graph 视图与各面板先消费）。Ctrl+X 仍可单杀焦点行（含后景）。_Avoid_: 只 abort 父 signal 留下前景子代理；idle 夹缝让前景子代理继续转圈；把 Ctrl+C 复制臂与打断绑回同一键；面板内重载 Esc 的返回/保存语义
 
 **session location chrome（会话位置行）**: TUI 底栏在 ContextBar 之下**常驻一行** `路径 · 分支`；绑 task worktree 只换同一行的路径。子代理与 Graph 在它下面（两者都有时子代理在上）；不进焦点环、不进模型消息、不带 dirty/diff。
 _Avoid_: 绑树才出现；未绑树 0 行；用显隐当「在不在树上」；常驻第二行 dirty/diff；子代理画在位置行上面
@@ -231,7 +230,7 @@ _Avoid_: 把默认改成 ON；开抽取却不要梦境；把记忆正文装进 s
 _Avoid_: 抽取再用低词重叠当矛盾作废；把四态压成 upsert；绕开 `memory_save` 写纪律；把三段合成一个函数
 
 **memory_gc**: 可重复、幂等的机械清理，三条规则、**零 LLM**——`ttl_days > 0` 且已过期 → `disabled: true`；被别的条目 `supersedes` 指名 → `disabled: true`；活跃条目超 store cap → 按效用分 `importance × recency × (1 + recall_count)`（recall 次数取自既有 `usage.json` sidecar）从低到高软禁。与抽取共用默认 3 个 `completed` 闸，并可在进程退出 best-effort；同趟可跑 **capability memory sweep**。GC **只软禁不删文件**。ADR-0031 D4；`specs/runtime-capability-memory-gate.md`。
-_Avoid_: 硬删文件；把 LLM 离线合并 / 摘要塞进 GC（合并走 **dream**，ADR-0033）；让 GC 依赖 frontmatter + usage sidecar 之外的运行时状态；会话开局同步全量 GC 挡首包；只靠 Ctrl+C 当唯一闸
+_Avoid_: 硬删文件；把 LLM 离线合并 / 摘要塞进 GC（合并走 **dream**，ADR-0033）；让 GC 依赖 frontmatter + usage sidecar 之外的运行时状态；会话开局同步全量 GC 挡首包；只靠人工打断（Esc）当唯一闸
 
 **promote**: `usage.json` 里一条记忆被 ≥2 个不同 session 召回后的资格。资格只进入 **memory_gc** 效用，**不再**把正文装进 `system`；常驻说明书只在 `AGENTS.md`。ADR-0044。
 _Avoid_: 用召回次数买 system 席位；auto-promote；把晋升当记忆进说明书的通道
@@ -627,7 +626,7 @@ _Avoid_: 无限硬顶当验收；与 per-call tool timeout / turn timeout 混名
 **sticky notice**: TUI 底栏/提示槽里异常停或传输过程的英文（或既有）提示框；默认不自动收回——人关掉、或主动开下一轮等明确动作才清。可在同一框内改文案（等待 → 退避 → 失败因）。其中「等待模型」这一条是**过程性**的：只在**模型相位**静默时给出（工具执行期含权限 / ask 等待按设计无流事件，不给出），并在成功收尾时清除；异常停 sticky 不受此影响。
 _Avoid_: TTL 自动消失；与 **viewport API error** 气泡混名；重试成功后偷偷清掉未读失败框；把工具执行期算进模型静默
 
-**interrupt system message**: cancelled（典型 Ctrl+C）收尾写入权威历史末尾的固定 system 文案 `Interrupted by user.`。普通下一句人话进模型时带着它；`/continue` 的本次 prior 可去掉末尾这一句，盘上仍保留。timeout 不加此句。
+**interrupt system message**: cancelled（TUI 典型 Esc，2026-09-18 键位迁移前是 Ctrl+C）收尾写入权威历史末尾的固定 system 文案 `Interrupted by user.`。普通下一句人话进模型时带着它；`/continue` 的本次 prior 可去掉末尾这一句，盘上仍保留。timeout 不加此句。
 _Avoid_: 把 interrupt 当 closeout 的 tool_result；从盘上删除再续跑；timeout 复用同一句
 
 **skill bare alias**: 插件技能规范名 `<plugin>:<name>` 之外，catalog 在无冲突时登记的裸名别名；`SkillCatalog.get` 先 canonical 再 bare。斜杠技能解析必须问 catalog，不在宿主再拆 `:`。展示与 help 优先 canonical。agents 不进斜杠。
@@ -740,7 +739,7 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **task worktree label vs conversationId**: label 是文件夹名与 enter 定位；conversationId 是归属身份，不写进目录名
 - **工作树说明书 vs 闸 vs 提示词**: description 先回答 agent 能不能调、做什么；写被拦点名是 harness；人喊创建是 usage/夹具
 - **create-worktree vs create-task-worktree**: 模型面用前者；后者是旧注册名，不再给模型
-- **前台打断 vs chrome focus**: Ctrl+C 停本会话全部前景子代理与父 turn；Ctrl+X 只杀焦点那一行（可含后景）
+- **前台打断 vs chrome focus**: Esc 停本会话全部前景子代理与父 turn；Ctrl+X 只杀焦点那一行（可含后景）
 - **完成态 ✓ Done vs 替换概述**: 子代理卡 completed 后概述留下、其下 `✓ Done`；不是把第 2 行换成字面 `done`
 - **父可见信封 vs host drain**: 前景交差是 tool_result 上的信封；drain 只服务后景 mailbox 叫醒
 - **settled appearance vs result preview**: 落定三类决定谁还上屏；成功 bash 的结果预览是折叠后的尾窗，不是百分比轨迹

@@ -41,7 +41,7 @@ export interface QuitAbortInput {
  */
 export function abortForegroundTurnOnQuit(input: QuitAbortInput): boolean {
   const { session, aborters } = input;
-  // canInterrupt 是 `running-fg` 的单一判据（Ctrl+C / Esc 同源消费）——
+  // canInterrupt 是 `running-fg` 的单一判据（Esc / /quit 同源消费）——
   // 不在此复写 `runState === "running-fg"` 字面量。
   if (!canInterrupt(session)) return false;
   const id = session.conversationId;

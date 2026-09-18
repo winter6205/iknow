@@ -257,7 +257,7 @@ thinkingPickerRows(cols) 恒返回 5：
 | 17  | 输入 `/effort` Enter                       | 面板打开（同 /thinking 面板）；初始 focusedIndex = 当前档                                                                         |
 | 18  | `/effort` 打开后直接 Enter（autoOn=false） | 效果等同 `/effort <当前档>`：写 thinkingEffort=当前档 + thinkingEnabled=true（与现网 notice 语义等价）                            |
 | 19  | 打开面板时按 Ctrl+O                        | Ctrl+O 不被吞：折叠态切换仍生效（picker 分支只拦无 ctrl 键）                                                                      |
-| 20  | 打开面板时按 Ctrl+C                        | 打断逻辑不因 picker 破坏（ctrl 分支在 picker 前）                                                                                 |
+| 20  | 打开面板时按 Ctrl+C                        | 复制逻辑不因 picker 破坏（ctrl 分支在 picker 前；打断已迁 Esc，见 2026-09-18 键位迁移）                                           |
 
 **行账单测（`tests/tui/chrome-budget.test.ts` 增补）**：
 
