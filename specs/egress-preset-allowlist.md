@@ -125,3 +125,14 @@
 - 消费面：`bash.ts:636-657`（工厂包装 + session fallback）、`background/manager.ts:171`、`verify/sandbox-run.ts:67`、`build-engine.ts:1193-1200`。
 - 判定与文案件：`domain-matcher.ts`（`decideEgress` 次序、`DEFAULT_PRIVATE_DENIED_RANGES`）、`violations.ts:29/:173-177`（source 类型与标签）。
 - 实测语义前提：`*.x` 不含 apex / 后缀锚定 / 大小写不敏感（ADR-0097 §Evidence pointers）。
+
+## ACR Verdict（architecture-change-reviewer · 5-verdict gate）
+
+```text
+bounded-context-guardian: yes — SSOT 单点：preset 清单仅 preset-domains.ts（Boundaries Does#1「仅此一处」）、合并仅 assembly（invariant 2）；settings schema 不改（Out#3）；grep 实证 domain-matcher.ts/approval.ts 零 "preset" 引用，egress 不反向 import config（assembly.ts:8-9 DI 纪律保持）
+defensive-contract-validator: yes — 合并五边界各有钉：去重+次序（T1）、deny 优先砍 preset 且 F1 钉住 `*.github.com` 不含 apex 不对称、用户空列表不缩档（T1 皆空路径+SC3）、非法条目由 settings 层 parseIsolationNetwork+onWarn 留痕后 F3 退 preset-only、批准门单问（T3 交互/非交互双臂）
+error-handling-enforcer: yes — F1-F6 全部 typed（denied-by-user / no-approval-inlet / address-denied / SocatUnavailableError / allowlist-empty 保留于直喂路径 F2），T3 明确「静默 DNS 失败 → 有名字的可行动违例」，三档 source 为封闭联合且「不留旧值别名」
+complexity-anti-drift: yes — 复用 decideEgress/approval 缝不新造匹配器（Inherits「不动」+ T3「复用 T6 注入 filter 驱动 seam」）；allowlistSource 波及面经 grep 实证枚举（violations.ts:29/173-177、session.ts:78、assembly.ts:19/119、bash.ts:643-644）
+minimal-change-verifier: yes — 范围严格对应 ADR-0104 §Decision 1-4；SSH/SOCKS、web_fetch 栈、settings 写回（OQ1 显式不阻塞）、schema 变更均列 Out-of-scope；T2 撞名清算系必要清算非夹带
+OVERALL: PASS — hand to writing-plans
+```

@@ -157,3 +157,14 @@ todos:
 - 甄别名册现件：`isAgentStatusText`（agent-status.ts:62）、`isGraphModeText`（graph/notification.ts:37）、`isSubagentDrainText`（subagent/host-drain.ts:38）、`isVerifyInjectedText`（verify/inject.ts:17）、`isSkillIndexDeltaText`（skill/index-delta.ts:67）；prefetch marker：`memory/prefetch.ts:30`（`MEMORY_PREFETCH_END`，「Splits overlay (model-only) from the typed query」）。
 - TUI 消费面：`src/tui/agent-status-line.tsx:27-57`、`src/tui/session-state.ts:302-312`、`src/tui/app.tsx:1506 / :2342`（hydrate `agentStatusFromMessages`）。
 - 名册登记：`docs/guides/prompt-development.md` 表 `<agent_status>` 行（STATIC + SEAM，缺口）。
+
+## ACR Verdict（architecture-change-reviewer · 5-verdict gate）
+
+```text
+bounded-context-guardian: yes — 改动全留 harness 栏缝（spec Surface 行、T2 不反向 import TUI、T4 显示面不动、Out-of-scope 排除 TUI chrome/taskFocus）
+defensive-contract-validator: yes — F1-F7 + Input-contract 表覆盖空/畸形/溢出（100 码点 CJK+emoji 截断 T2）/异常；并发由 run 作用域装箱天然隔离（T3 两处调用点同形接线，loop-engine.ts:2276/:2328 实测存在）
+error-handling-enforcer: yes — F7 todos 读失败=既有 EXIT 静默收敛（agent-status.ts:147 实证）；F3/F4/F6 畸形→null 不 throw；提取面「零抛错」（invariant 7、T1）
+complexity-anti-drift: yes — 复用 lastToolRef 装箱形态（loop-engine.ts:2185-2192 实证）与 pendingInjected 纪律（invariant 6），扩纯函数对不造子系统（T1/T3）
+minimal-change-verifier: yes — 与 ADR-0103 决策 1-4 一一对应；T5/T6 系仓规强制面非 creep；名册锚点全部实测命中
+OVERALL: PASS — hand to writing-plans
+```

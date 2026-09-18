@@ -11,12 +11,14 @@
 ### 运行时核心 / 沙箱
 
 - `network-egress-allowlist.md` — 出口代理缝：`--unshare-net` 恒在 + 域白名单代理 + 首见批准流 + 违例回灌（ADR-0097）
-- `egress-preset-allowlist.md` — 默认预放行档（builtin preset 六域，代码承载）+ 配置段缺席也起 session + `allowlistSource` 三档重定（ADR-0104；draft）
+- `egress-preset-allowlist.md` — 默认预放行档（builtin preset 六域，代码承载）+ 配置段缺席也起 session + `allowlistSource` 三档重定（ADR-0104；ACR PASS）
+- `egress-ssh-bridge.md` — 出口 ssh 桥（传输面）：宿主 SOCKS5 面 + 沙箱内 socat 监听 + `GIT_SSH_COMMAND` 注入 + `:22` 域判定 + SSH 凭据可用性分支；清偿 O1/O2/O3 现有缝缺陷（ADR-0097 T7/T8 挂账、ADR-0105 §Decision 5；rev 2 ACR PASS，assumptions 待确认）
+- `egress-credential-sentinel.md` — 凭据 sentinel 层（凭据面）：假值进围栏、真值只在宿主代理对放行域假换真（TLS 终止 + fake→real 单向）；与 secret-roundtrip mask 并存（ADR-0105；rev 2 ACR PASS，assumptions 待确认）
 - `subagent-layers-worktree-deps.md` — subagent 三层 + worktree 项目依赖
 
 ### harness / 状态与传输
 
-- `agent-status-instruction-echo.md` — 状态栏复诵升级：`instruction:` 逐字回显段 + pivot reconcile 一次性标记（ADR-0103 修订 ADR-0028；draft）
+- `agent-status-instruction-echo.md` — 状态栏复诵升级：`instruction:` 逐字回显段 + pivot reconcile 一次性标记（ADR-0103 修订 ADR-0028；ACR PASS）
 - `transport-continue-persist.md` — transport retry / continue / failure persist
 
 ### TUI
