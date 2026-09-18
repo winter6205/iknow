@@ -160,6 +160,23 @@ function cardIfLive(
 }
 
 /**
+ * 会话里已经有任一 spawn join 卡时，live tail 不再画未 join 的
+ * `spawn_subagent` 运行行（CONTEXT **subagent card live**：不得并排
+ * `running...` 与 fallback `general-purpose running`）。
+ * 无 join 卡 → 原样保留，第一条运行行仍可见。
+ */
+export function filterLiveToolRunsAgainstSpawnCards(
+  runs: ReadonlyArray<LiveToolRun>,
+  cards: ReadonlyMap<string, SubagentCardLines> | undefined
+): ReadonlyArray<LiveToolRun> {
+  if (cards === undefined || cards.size === 0) return runs;
+  return runs.filter((run) => {
+    if (run.name !== "spawn_subagent" || run.status !== "running") return true;
+    return cards.has(run.id);
+  });
+}
+
+/**
  * live 工具 box 的纯文本行（[状态行, ...预览行]），供行账 + flat 投影共用。
  * 完成态预览与 `completedToolPreview` 同源（代码或截断 diff）；结果预览
  * 走 `resultToolPreview`（bash stdout/stderr 尾部 tail）。
@@ -232,9 +249,10 @@ export function liveToolRunsBox(
   cols: number,
   cards?: ReadonlyMap<string, SubagentCardLines>
 ): ReactNode {
+  const visible = filterLiveToolRunsAgainstSpawnCards(runs, cards);
   return (
     <box flexDirection="column" width={cols}>
-      {runs.map((run, i) => (
+      {visible.map((run, i) => (
         <box
           key={`${run.id}-card`}
           flexDirection="column"
