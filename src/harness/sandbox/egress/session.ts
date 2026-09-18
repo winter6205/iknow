@@ -46,6 +46,7 @@ import {
   type EgressViolationSink,
 } from "./violations.js";
 import type { EgressApprovalGate } from "./approval.js";
+import type { EgressCredentialRoster } from "./credential-assembly.js";
 
 /**
  * 判定器输入 —— 由 bash handler 从 settings 读出后注入（依赖注入，
@@ -91,6 +92,13 @@ export interface EgressPolicyInput {
    * allowed/denied 集在闭包期内累积。
    */
   readonly approvalGate?: EgressApprovalGate;
+  /**
+   * egress-credential-sentinel T1：凭据名册（内置 github 两条目 + 用户层
+   * `isolation.credentials` 收窄/追加后的全集）—— 纯数据形状注入，由装配层
+   * （assembly.ts → credential-assembly.ts）构造，铸造消费归 T2。
+   * T1 阶段 session 不参与判定；缺席 = 无名册（不铸造）。
+   */
+  readonly credentials?: EgressCredentialRoster;
 }
 
 /**

@@ -28,7 +28,7 @@ OVERALL: PASS（rev 2，返工点已按审查方清单落实）
    - **Inherits:** spec T1（代码内置 github 名册表列两条目、SSOT 单文件；`EgressPolicyInput` 扩 `credentials` 字段为数据形状注入，「egress 域不反向 import config——`session.ts:50-56` 同款纪律」；`injectHosts` 缺省策略「条目未声明 → **不铸造**……留 warn 痕」）；invariant 3（「条目名单是配置/代码常量，批准门新批域**不**并入任何条目的 `injectHosts`（洗出防护）」）；Assumption 2（用户层 settings 新段 `isolation.credentials`，项目文件不采纳——ADR-0084 纪律；github 两条目代码内置，用户段只做收窄/追加）；Assumption 6（「本仓适配层必须显式传条目自带值，不吃该缺省」）；凭据名册与配置形态表（github.com / `*.github.com` / `*.githubusercontent.com` 逐字）；Input-contract 表 settings 行五类。
    - **Surface:** `src/config/settings.ts`（新段 `isolation.credentials`，不动既有段语义）、`src/harness/sandbox/egress/credential-assembly.ts`（新文件，名册 SSOT）、`src/harness/sandbox/egress/assembly.ts`（接线）。
    - **Acceptance:** spec 交由 plan 定形的 schema 在此钉死：`isolation.credentials.files[]`（`path` / 可选 `extract`（须含捕获组 1）/ 可选 `decode: "jwt"` / `injectHosts` **必填**）与 `isolation.credentials.envVars[]`（`name` / `injectHosts` **必填**）；frozen 语义与非法处置对齐 `settings.ts:34-43` 既有纪律——非对象段、非法条目（缺 `injectHosts` / extract 无捕获组）丢该条目 + 警告不抛；条目上限 = 用户层条目总数 16，超出丢尾 + 警告（Input-contract overflow 档）。内置 github 两条目逐字单测（名册 SSOT）；项目层同段出现即丢弃 + 留痕测试（前 spec SC9 同族）；无 `injectHosts` 条目被拒铸 + warn 痕测试；`EgressPolicyInput` 扩字段的编译连锁——background/verify 消费面零改动或显式透传；`npm test` 绿。
-   - Status: [ ] pending
+   - Status: [x] pending
    - [parallel]（与 T4 无相互依赖）
 
 2. **T4 CA 持久层与信任链装配面** — tag: `[implementation]`

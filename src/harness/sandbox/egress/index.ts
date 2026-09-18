@@ -40,3 +40,12 @@ export {
   type CreateEgressApprovalGateOptions,
   type EgressApprovalGate,
 } from "./approval.js";
+
+export {
+  assembleEgressCredentials,
+  BUILTIN_GITHUB_CREDENTIAL_ROSTER,
+  type EgressCredentialEnvVarEntry,
+  type EgressCredentialFileEntry,
+  type EgressCredentialRoster,
+  type UserCredentialSection,
+} from "./credential-assembly.js";
