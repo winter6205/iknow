@@ -3,6 +3,8 @@
 Date: 2026-09-16
 Status: accepted
 
+> **Amended clause（ADR-0104 / 2026-09-19）**：Decision 段「**不做**『预置常用域兜底集』」已被推翻，「允许集只认**用户层** settings」修订为「**预放行档**（代码承载 preset）∪ 用户层增量」——项目文件仍不采纳（ADR-0084 纪律不变）。其余条款（`--unshare-net` 恒在、代理缝结构、首次批准流、地址守卫、违例回灌、生命周期表）逐字不变。
+
 ## Context
 
 bash 围栏的出口语义长期是二值的：`--unshare-net` 默认断网（`src/harness/sandbox/bwrap.ts:162`），`network:true` per-call opt-in 摘除它 = 宿主网**零过滤**全放行（ADR-0022）；中间没有任何可表达「允许这几个域」的档位。与此同时 `STATIC_NETWORK_WHITELIST` / `NetworkPolicy.assertDomain`（`src/harness/sandbox/network-policy.ts:4`）是**声明了但从未实施**的死码（`bwrap.ts:224` 直接 `void opts.networkPolicy`）——仓库里挂着一个不存在的机制的名字。

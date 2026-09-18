@@ -5,6 +5,8 @@ Status: accepted
 
 > **Superseded clause（ADR-0085 / 2026-09-11）**：本文正文两处「`todo_write` 的 add/check/list 不变」已过时 —— 主路径改为 **add / update / read** 三件事（`check` 并入 update，`replace` 降为整表逃生口），条目带稳定 id。栏的投影纪律（只投影未完成项、追加不替换）不变；正文该半句按 ADR-0085 读。
 
+> **Amended clause（ADR-0103 / 2026-09-19）**：Consequences 的「现势字段仅 `last_tool` + 有未勾项时才出现的 todo 段」已修订 —— 字段集新增 `instruction:` 段（最新用户指令首行逐字回显、截断，代码计算不摘要）与新用户消息进场后的一次性 pivot reconcile 标记；「不把任务摘录抄进栏」的禁令不变（instruction 回显是逐字回显，不是语义抽取）。注入纪律（每跳追加、append-only、不替换）逐字不变。
+
 ## Context
 
 给模型看的状态栏（代码现算的现势快照）要进请求。候选是每轮替换最后一条栏，或像普通消息一样只追加。替换看起来「永远只有最新现势」，但会改已经发出过的前缀，KV cache 不友好，也违反 append-only messages（错了也是再写一条，不把旧条剔掉）。

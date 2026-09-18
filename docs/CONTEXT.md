@@ -208,8 +208,11 @@ _Avoid_: 把 `network: true` 当现行输入字段；批完再滤; 一等 curl �
 **出口代理缝（egress proxy seam）**: bash 围栏恒 `--unshare-net` 之下唯一的出网通路——宿主出口代理的 unix socket bind 进沙箱、沙箱内 socat 转成本地端口，`HTTP_PROXY` 系环境变量指过去；域判定在宿主代理做（HTTPS 只看 CONNECT host，不解密）。ADR-0097。
 _Avoid_: 把 `--unshare-net` 当可摘除项；per-call 全开放行当逃生门；沙箱内自建 DNS / 路由
 
-**域名允许集（domain allowlist）**: **出口代理缝**的放行判据——CONNECT host 命中才转发；`*.x` 严格子域（不含 apex）、可选 `:port` 后缀、deny 优先；只认**用户层** settings，项目文件不采纳（ADR-0084 纪律）。地址守卫（拒 loopback / 私网 / link-local / metadata）与域名集正交。ADR-0097。
-_Avoid_: 内核 IP 白名单当域名白名单；项目仓自授允许集；把 domain fronting 当已防住
+**域名允许集（domain allowlist）**: **出口代理缝**的放行判据——CONNECT host 命中才转发；`*.x` 严格子域（不含 apex）、可选 `:port` 后缀、deny 优先；全集 = **预放行档**（代码承载）∪ 用户层 `allowedDomains` 增量，项目文件不采纳（ADR-0084 纪律不变）。地址守卫（拒 loopback / 私网 / link-local / metadata）与域名集正交。ADR-0097 / ADR-0104。
+_Avoid_: 内核 IP 白名单当域名白名单；项目仓自授允许集；把 domain fronting 当已防住；预放行模型供应商 API 域
+
+**预放行档（builtin preset）**: 域名允许集的代码承载默认域清单，收口在可重复构建/交付流的高频域（`github.com` 与 `*.github.com` / `*.githubusercontent.com`、`registry.npmjs.org`、playwright 下载面）；模型供应商 API 域显式不入档（围栏内有 key，预放行 = secret 直传通道），走首见域名批准门。ADR-0104。
+_Avoid_: 预置兜底集（0097 旧表述已废，勿复用）；把文档推荐配置当 preset；preset 取代批准门；脱离「构建/交付流」收口原则新增 preset 域
 
 **声明工具面 vs 实际工具面**: `SubAgentDefinition.disallowedTools` 写进 `WorkerEnvelope` 的是声明面；worker 进程装配后真正可被模型调用的工具集是实际面，二者必须相等——裁剪发生在 `createAciRegistry(tools)` **之前**的 def-list 期（`createDefaultAciRegistry` 工厂内），由构造期快照保证，不事后修补（`AciRegistry.inner` 是冻结快照）。
 _Avoid_: 给 `AciRegistry` 加 `.tools` 字段在产物上事后裁剪；声明 deny-list 但 worker 不消费（#468 修复对象）
@@ -331,8 +334,8 @@ _Avoid_: 按 token 或字数切窗；拆开一对 `tool_use`/`tool_result`
 **任务摘录**: 仅 compact 发生时从当时 `messages` 现抽现贴的最近至多 3 句合格用户任务原话；不进会话字段；goal 功能续跑时不贴。
 _Avoid_: taskFocus；当前任务卡；每回合或压缩时让 LLM 填卡；把摘录自己再抽成用户任务句
 
-**状态栏**: 每次即将调模型前由 harness 算出的现势，以 **user** 消息追加在 `messages` 末尾（含同一用户回合内 tool loop）；旧栏留在历史上，不替换、不写 `deps.system`；UI 只读同一份，in-flight 只给 TUI。字段仅 `last_tool`（本回合尚未跑过工具则为 idle）以及有未勾项时才出现的 todo 段（只投影现行 todo 账本的未完成项，带 id 的 `- [ ]` / `- [~]` 行；文件缺席 / 空 / 全勾则整段缺席）。ADR-0028；todo 账本见 ADR-0085。
-_Avoid_: 每轮替换/删除旧栏；写进 system；把 TUI 当主物；与 context usage (display) 混名；让 LLM 维护栏；把栏接入 verify；每跳塞任务摘录/cwd/技能清单；把调模型时的 in-flight 写进栏；taskFocus / 当前任务卡；空清单仍印 todo 段；全勾后栏里带 `- [x]`；用「本跳是否调用过 todo_write」当在场条件；政策散文进栏；把 **环境现势**（cwd/git/diff）塞进本栏；replace 当跳把新列表再灌进 messages
+**状态栏**: 每次即将调模型前由 harness 算出的现势，以 **user** 消息追加在 `messages` 末尾（含同一用户回合内 tool loop）；旧栏留在历史上，不替换、不写 `deps.system`；UI 只读同一份，in-flight 只给 TUI。字段：`last_tool`（本回合尚未跑过工具则为 idle）、`instruction:`（最新用户指令首行逐字回显，截断约 100 字符，代码计算不摘要）、有未勾项时才出现的 todo 段（只投影现行 todo 账本的未完成项，带 id 的 `- [ ]` / `- [~]` 行；文件缺席 / 空 / 全勾则整段缺席）、以及新用户消息进场后的一次性 reconcile 标记（提示模型先经 todo_write 对齐账本，仅该跳出现）。ADR-0028 / ADR-0103；todo 账本见 ADR-0085。
+_Avoid_: 每轮替换/删除旧栏；写进 system；把 TUI 当主物；与 context usage (display) 混名；让 LLM 维护栏；把栏接入 verify；每跳塞任务摘录/cwd/技能清单；把用户指令摘要/改写进栏；reconcile 标记每跳重复；把调模型时的 in-flight 写进栏；taskFocus / 当前任务卡；空清单仍印 todo 段；全勾后栏里带 `- [x]`；用「本跳是否调用过 todo_write」当在场条件；政策散文进栏；把 **环境现势**（cwd/git/diff）塞进本栏；replace 当跳把新列表再灌进 messages
 
 **todo 账本**: 同一**主会话**里可修订的任务清单；每条有稳定 id，状态 `pending` | `in_progress` | `completed`。三件事：批量添加、按 id 更新（含完成与删除）、读取现行。子代理与父共用这份账本（worker 可读取/更新，添加仅父会话）。`replace` 只是整表逃生口。现行文件仍是会话目录 `todos.md`。ADR-0085（修正 `0046-todo-ledger-replace-and-snapshots` 主路径）。
 _Avoid_: 把清单并进 `run_graph`；进 plan 相位写计划再执行；同一文件里两套未勾项并存；换表当跳把全文追加进 messages；删掉旧账本文件；跨主会话共用账本；worker 静默丢弃 add
@@ -728,6 +731,7 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **出口代理缝 vs 文件系统隔离档**: 正交两轴。FS 档决定围栏内能读写哪些路径；出口代理缝决定能否出网、能连哪些域。两档 FS 的网络行为相同
 - **出口代理缝 vs host-net amplify**: 前者是现行唯一出网通路（域白名单代理）；后者是已退役的 per-call 全放行语义
 - **域名允许集 vs network-guard**: 前者管 bash 出网（代理层判定）；后者是 `web_fetch` / `web_search` 的六层 SSRF 防线，两条栈互不替代
+- **预放行档 vs 域名允许集**: preset 是代码承载的默认底档；允许集是判定全集（preset ∪ 用户层增量，deny 优先）；批准门只管档外首见域
 - **文件系统隔离档 vs worktree isolation mode**: 前者是 bash FS 围栏档；后者是写主仓门禁 / 建树改绑
 - **全局档 vs 工作区档**: 默认真路径读写；工作区档收紧为写 taskRoot + 会话 tmp，home 其余不能写
 - **config 面板 vs `/model`**: 同族浮层；`/config` 管隔离与并发等运行档，`/model` 管路由
@@ -735,7 +739,7 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **子代理并发上限 vs system 前缀**: N 会变，不进稳前缀；description 插值 + 超限回执是模型通道
 - **图节点 vs 子代理并发上限**: 活图格子是同一顶上的 worker，不另起每图预算（ADR-0077）
 - **说明书静态层 vs memory_layer 整段开关**: 通用 worker 要说明书、不要记忆工具；禁止再靠 memoryEnabled=false 把 AGENTS.md 一起跳过
-- **状态栏 vs 任务摘录**: 摘录只在 compact 时贴用户原话；状态栏每轮由代码现算并追加
+- **状态栏 vs 任务摘录**: 摘录只在 compact 发生时现抽现贴至多 3 句用户原话；状态栏每跳由代码现算并追加，instruction 段只回显最新指令首行（截断）——两者都贴用户原话，但触发面与量级不同，均不经 LLM 改写（ADR-0103）
 - **状态栏 vs append-only messages**: 栏走同一条追加纪律；纠错靠新栏，不靠从历史上抠掉旧栏
 - **`memory_save`（显式写） vs auto_extract（自动写）**: 两条写路径共用同一套肯定句门禁、**runtime capability persist gate** 与 tmp+rename 原子写；显式写是模型当场决定的一次工具调用，自动写是 host 在 turn 完成后异步跑的一趟 ingest。差别只在触发方式与 `source: auto` 标记，不在信任通道——两者都只经 tool_result / prefetch 回到模型
 - **runtime capability persist gate vs capability memory sweep**: 闸挡新写；sweep 软禁已有条；读滤在两步之间让模型当下看不见
