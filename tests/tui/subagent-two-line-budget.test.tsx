@@ -2,43 +2,49 @@
 /**
  * tests/tui/subagent-two-line-budget.test.tsx
  *
- * spec Slice D / SC14（`specs/agent-control-surface.md`）/ plan task 8 的行账
- * 回归：会话消息内的两行投影（`SubagentIdentityStrip`）画在输入框**上方**，
- * 其行数必须进 `chromeReserveRows` 预算；不入账时 chrome 总高超出 rows，
- * Yoga 会把每个两行块压成一行 —— 表现为同一行内文本重叠
- * （实测帧：`查找文档running...` / `第二件事purpose running...`），
- * 且 `SubagentPanel` 的聚焦行被挤出帧外，导致 Ctrl+X 打到错误的行。
+ * specs/tui-subagent-transcript-live.md 锁句 1–3 的行账 + 渲染回归：两行改画
+ * 在会话 transcript 里的 `spawn_subagent` 卡上（滚动区），prompt 上方身份条
+ * 拆除 —— **live 子代理存在与否都不再进 chrome 行账**（`subagentRowBudget`
+ * 恒 0，`chromeReserveRows.subagentRows` 缺省即不占行）。
  *
- * 本测钉两件事：
- *   1) 行账 delta = live 子代理数 × 2（纯函数，无渲染）；
- *   2) app 帧内每个 live 子代理恰好占两行、块内两行文本不重叠（渲染，
- *      即 1) 的回归守卫 —— 只改 1) 不改渲染也会红）。
+ * 此前本测钉的是相反命题（strip 画在输入框上方、每 live 子代理入账 2 行）；
+ * 位置合同被取代后主体消失，本测重写为「不再占 prompt 行账 + 卡上两行不
+ * 粘连」。粘连是这个回归的原始指纹（Yoga 把两行块压成一行 →
+ * `查找文档explore running...`），与承载位置无关，故保留该断言并钉在两个
+ * 真实宿主上：
+ *   - `SubagentCardView`（历史卡 + live 卡共用的渲染面）；
+ *   - `liveToolPreviewBox`（live tail 宿主，带 card 投影）。
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { testRender } from "@opentui/react/test-utils";
+import type { TestRendererSetup } from "@opentui/core/testing";
+import { RGBA } from "@opentui/core";
+import { chromeReserveRows, subagentRowBudget } from "../../src/tui/app.js";
+import { SubagentCardView } from "../../src/tui/subagent-card-view.js";
+import { liveToolPreviewBox } from "../../src/tui/live-tool-preview.js";
+import type { LiveToolRun } from "../../src/tui/live-tool-state.js";
 import {
-  TuiApp,
-  chromeReserveRows,
-  createToolEventSink,
-} from "../../src/tui/app.js";
-import type { TuiBridge, TuiPostResult } from "../../src/tui/hub-bridge.js";
-import { createInflightRegistry } from "../../src/tui/hub-bridge.js";
-import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
-import { createPermissionModeContext } from "../../src/harness/permission/index.js";
-import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
-import { subagentMessageRowCount } from "../../src/tui/subagent-message-lines.js";
-import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
+  projectSubagentCardLines,
+  subagentCardLinesMap,
+} from "../../src/tui/subagent-message-lines.js";
+import { tuiPalette } from "../../src/tui/theme.js";
 import type { SubagentInfo } from "../../src/harness/subagent/manager.js";
 
-function makeSubagent(overrides: Partial<SubagentInfo>): SubagentInfo {
+const T0 = Date.parse("2026-09-07T12:00:00.000Z");
+
+function iso(offsetMs: number): string {
+  return new Date(T0 + offsetMs).toISOString();
+}
+
+let fixtureCounter = 0;
+function makeSubagent(overrides: Partial<SubagentInfo> = {}): SubagentInfo {
+  fixtureCounter += 1;
   return {
-    taskId: "task-a",
+    taskId: `t-budget-${fixtureCounter}`,
     state: "running",
     taskPreview: "查找文档",
-    startedAt: new Date().toISOString(),
+    startedAt: iso(-1000),
+    toolUseId: `toolu_budget_${fixtureCounter}`,
     ...overrides,
   };
 }
@@ -52,7 +58,27 @@ function baseBudget(): number {
   });
 }
 
-describe("subagentRows 行账（chromeReserveRows 入账）", () => {
+function spanWithText(
+  setup: TestRendererSetup,
+  text: string
+): { text: string; fg: RGBA } | undefined {
+  for (const line of setup.captureSpans().lines) {
+    for (const span of line.spans) {
+      if (span.text.includes(text)) return { text: span.text, fg: span.fg };
+    }
+  }
+  return undefined;
+}
+
+function rgbaEq(a: RGBA, b: RGBA): boolean {
+  return a.r === b.r && a.g === b.g && a.b === b.b && a.a === b.a;
+}
+
+// ============================================================================
+// 1) 行账：prompt 上方不再为子代理预留行（锁句 3）
+// ============================================================================
+
+describe("subagentRows 行账（锁句 3：prompt 上方不再占行）", () => {
   test("case 1：无 live → 缺省 0，预算与 baseline 相同", () => {
     const base = baseBudget();
     const explicitZero = chromeReserveRows({
@@ -65,115 +91,215 @@ describe("subagentRows 行账（chromeReserveRows 入账）", () => {
     expect(explicitZero).toBe(base);
   });
 
-  test("case 2：1 个 live → delta 2（两行/块，SSOT 派生不写死数字）", () => {
-    const rows = subagentMessageRowCount([makeSubagent({ state: "running" })]);
-    expect(rows).toBe(2);
-    const withSub = chromeReserveRows({
-      noticeRows: 0,
-      inputHintRows: 0,
-      bgLine: false,
-      inputRows: 1,
-      subagentRows: rows,
-    });
-    expect(withSub - baseBudget()).toBe(rows);
+  test("case 2：live 数不改变 chrome 预算（行账与 live 解耦，恒 0）", () => {
+    // 两行已画在 transcript 卡上（滚动区）——chrome 预算不得随 live 数增长，
+    // 否则 prompt 上方会凭空多出空行（旧合同的反向回归闸）。
+    for (const subagents of [
+      [makeSubagent({ state: "starting" })],
+      [makeSubagent({ state: "running" }), makeSubagent()],
+    ]) {
+      const rows = subagentRowBudget("chat", subagents);
+      expect(rows).toBe(0);
+      const withSub = chromeReserveRows({
+        noticeRows: 0,
+        inputHintRows: 0,
+        bgLine: false,
+        inputRows: 1,
+        subagentRows: rows,
+      });
+      expect(withSub - baseBudget()).toBe(0);
+    }
   });
 
-  test("case 3：终态子代理不入账（与投影同源口径）", () => {
-    const rows = subagentMessageRowCount([
-      makeSubagent({ state: "completed", endedAt: new Date().toISOString() }),
-      makeSubagent({ state: "failed", endedAt: new Date().toISOString() }),
-    ]);
-    expect(rows).toBe(0);
+  test("case 3：非 chat 视图同样 0（列表 / MCP / 图视图无该条）", () => {
+    const live = [makeSubagent({ state: "running" })];
+    expect(subagentRowBudget("list", live)).toBe(0);
+    expect(subagentRowBudget("mcp", live)).toBe(0);
   });
 });
 
-describe("两行投影在 app 帧内不被压行（渲染回归）", () => {
-  async function mountApp(): Promise<string> {
-    const current: ReadonlyArray<SubagentInfo> = [
-      makeSubagent({ taskId: "task-a", role: "explore" }),
-      makeSubagent({
-        taskId: "task-b",
-        role: "general-purpose",
-        taskPreview: "第二件事",
-      }),
-    ];
-    const inflight = createInflightRegistry();
-    const file: SessionFileV1 = {
-      schemaVersion: 3,
-      conversation_id: "conv-budget",
-      title: "",
-      cwd: "/tmp/proj",
-      sanitized_at: new Date().toISOString(),
-      messages: [],
-      jsonMode: false,
-      turnCount: 0,
-      updatedAt: new Date().toISOString(),
-      checkpoints: [],
-    };
-    const reply: TuiPostResult = {
-      conversationId: "conv-budget",
-      finalText: "",
-      stopReason: "completed",
-      turnCount: 0,
-      jsonMode: false,
-      lastUsage: null,
-    };
-    const bridge: TuiBridge = {
-      hub: undefined as never,
-      store: undefined as never,
-      ensureSession: async (id) => id ?? "conv-budget",
-      postMessage: async () => reply,
-      listSessions: async () => [],
-      loadSessionFile: async () => file,
-      compactSession: async () => ({
-        compacted: false,
-        reason: "below_token_threshold" as const,
-      }),
-      continueSession: async () => {
-        throw new Error("unused");
-      },
-      rewindSession: async () => file,
-      listRewindTargets: async () => [],
-      inflight,
-      contextWindow: 200_000,
-      listSubagents: () => current,
-      abortSubagentTask: () => true,
-      subscribeSubagentTerminal: () => () => undefined,
-      wakeFromSubagent: async () => undefined,
-    };
-    const dataDir = mkdtempSync(join(tmpdir(), "iknow-two-line-budget-"));
-    const setup = await testRender(
-      <TuiApp
-        bridge={bridge}
-        askBridge={createTuiAskUserBridge()}
-        toolEventSink={createToolEventSink()}
-        cwd="/tmp/proj"
-        dataDir={dataDir}
-        permissionMode={createPermissionModeContext("default")}
-        sessionGrants={createSessionGrants()}
-      />,
-      { width: 80, height: 30, exitOnCtrlC: false, consoleMode: "disabled" }
-    );
-    await setup.waitForVisualIdle();
-    await setup.renderOnce();
-    const frame = setup.captureCharFrame();
-    setup.renderer.destroy();
-    return frame;
-  }
+// ============================================================================
+// 2) 卡上两行：形状、颜色、不粘连（锁句 1–2）
+// ============================================================================
 
-  test("2 live → 帧内 4 行，role 行与 preview 行互不重叠", async () => {
-    const lines = (await mountApp()).split("\n").map((l) => l.trim());
-    // 每个 live 子代理两行；被压行时帧里只会出现 2 行且文本粘连
-    // （`查找文档running...`）。
+async function renderCard(card: {
+  readonly roleLine: string;
+  readonly detailLine: string;
+  readonly done: boolean;
+}): Promise<TestRendererSetup> {
+  const setup = await testRender(<SubagentCardView card={card} />, {
+    width: 80,
+    height: 4,
+  });
+  await setup.renderOnce();
+  return setup;
+}
+
+describe("SubagentCardView（两行渲染面）", () => {
+  test("live：两行逐字、第 2 行紧随第 1 行、互不粘连", async () => {
+    const card = projectSubagentCardLines(
+      [makeSubagent({ role: "explore", toolUseId: "toolu_live" })],
+      "toolu_live",
+      80
+    );
+    expect(card).not.toBeNull();
+    const setup = await renderCard(card!);
+    const lines = setup
+      .captureCharFrame()
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
     expect(lines).toContain("explore running...");
     expect(lines).toContain("查找文档");
-    expect(lines).toContain("general-purpose running...");
-    expect(lines).toContain("第二件事");
-    // 粘连形态必须不存在（压行的直接指纹）。
+    expect(lines.indexOf("查找文档")).toBe(
+      lines.indexOf("explore running...") + 1
+    );
+    // 粘连形态必须不存在（压行的直接指纹）：身份行不得与任何其它文本同排。
     expect(
       lines.some(
-        (l) => l.includes("running...") && !/^[^\s]+ running\.\.\.$/.test(l)
+        (l) => l.includes("running...") && !/^\S+( \S+)* running\.\.\.$/.test(l)
       )
     ).toBe(false);
-  }, 30_000);
+    await setup.renderer.destroy();
+  });
+
+  test("live：第 2 行 fg = palette.dim，且 ≠ 第 1 行 fg", async () => {
+    const card = projectSubagentCardLines(
+      [makeSubagent({ role: "explore", toolUseId: "toolu_dim" })],
+      "toolu_dim",
+      80
+    );
+    const setup = await renderCard(card!);
+    const roleSpan = spanWithText(setup, "explore running...");
+    const detailSpan = spanWithText(setup, "查找文档");
+    expect(roleSpan).toBeDefined();
+    expect(detailSpan).toBeDefined();
+    expect(rgbaEq(detailSpan!.fg, RGBA.fromHex(tuiPalette.dim))).toBe(true);
+    expect(rgbaEq(roleSpan!.fg, RGBA.fromHex(tuiPalette.dim))).toBe(false);
+    await setup.renderer.destroy();
+  });
+
+  test("completed：第 2 行变绿 `done`，第 1 行不变（锁句 2 原位）", async () => {
+    const card = subagentCardLinesMap(
+      [
+        makeSubagent({
+          state: "completed",
+          role: "explore",
+          taskPreview: "查找文档",
+          toolUseId: "toolu_done",
+          endedAt: iso(500),
+        }),
+      ],
+      80
+    ).get("toolu_done");
+    expect(card).toBeDefined();
+    const setup = await renderCard(card!);
+    const lines = setup
+      .captureCharFrame()
+      .split("\n")
+      .map((l) => l.trim());
+    expect(lines).toContain("explore running...");
+    expect(lines).toContain("done");
+    expect(lines).not.toContain("查找文档");
+    const doneSpan = spanWithText(setup, "done");
+    expect(doneSpan).toBeDefined();
+    expect(rgbaEq(doneSpan!.fg, RGBA.fromHex(tuiPalette.add))).toBe(true);
+    await setup.renderer.destroy();
+  });
+
+  test("无 emoji 断言：两行渲染文本不含 U+1F300–U+1FAFF（几何字形纪律）", async () => {
+    // 旧身份条测试（已归档）在宿主上钉过这条；两行换了宿主后由本测接棒 ——
+    // 渲染面不得**自行引入** emoji 装饰（spec #146:86 几何字形：面板用
+    // ● / ✓，卡用文字）。输入取纯文本，故帧里任何 emoji 都只可能来自
+    // 渲染面自己加的字形。
+    const card = subagentCardLinesMap(
+      [
+        makeSubagent({
+          role: "explore",
+          taskPreview: "查找文档并整理结果",
+          toolUseId: "toolu_emoji",
+        }),
+      ],
+      80
+    ).get("toolu_emoji");
+    expect(card).toBeDefined();
+    const setup = await renderCard(card!);
+    const frame = setup.captureCharFrame();
+    expect(/[\u{1F300}-\u{1FAFF}]/u.test(frame)).toBe(false);
+    await setup.renderer.destroy();
+  });
+});
+
+// ============================================================================
+// 3) live tail 宿主：card 命中 → 走两行；失败 → 走既有 failure overlay
+// ============================================================================
+
+function spawnRun(overrides: Partial<LiveToolRun> = {}): LiveToolRun {
+  return {
+    id: "toolu_tail",
+    name: "spawn_subagent",
+    status: "running",
+    input: { task: "查一下", subagent_type: "explore" },
+    ...overrides,
+  };
+}
+
+async function renderLiveBox(
+  run: LiveToolRun,
+  card?: Parameters<typeof liveToolPreviewBox>[2]
+): Promise<TestRendererSetup> {
+  const setup = await testRender(<>{liveToolPreviewBox(run, 80, card)}</>, {
+    width: 80,
+    height: 6,
+  });
+  await setup.renderOnce();
+  return setup;
+}
+
+describe("liveToolPreviewBox — spawn 卡的两行宿主", () => {
+  test("card 命中 → 卡上两行（身份 + dim 预览），不再走单行标题", async () => {
+    const card = projectSubagentCardLines(
+      [makeSubagent({ role: "explore", toolUseId: "toolu_tail" })],
+      "toolu_tail",
+      80
+    );
+    const setup = await renderLiveBox(spawnRun(), card);
+    const lines = setup
+      .captureCharFrame()
+      .split("\n")
+      .map((l) => l.trim());
+    expect(lines).toContain("explore running...");
+    expect(lines).toContain("查找文档");
+    await setup.renderer.destroy();
+  });
+
+  test("card 缺省（无关联键）→ 回落既有单行标题（不改 tool-line 模板）", async () => {
+    const setup = await renderLiveBox(spawnRun());
+    const lines = setup
+      .captureCharFrame()
+      .split("\n")
+      .map((l) => l.trim());
+    // 既有 detail-only 文案（dotless，来自 formatToolStatusLine）仍在。
+    expect(
+      lines.some((l) => l.includes("explore running") && !l.includes("..."))
+    ).toBe(true);
+    await setup.renderer.destroy();
+  });
+
+  test("failed 卡不吃 card 投影：走既有 failure overlay（锁句 5）", async () => {
+    const card = projectSubagentCardLines(
+      [makeSubagent({ role: "explore", toolUseId: "toolu_tail" })],
+      "toolu_tail",
+      80
+    );
+    const setup = await renderLiveBox(
+      spawnRun({ status: "failed", detail: "boom" }),
+      card
+    );
+    const frame = setup.captureCharFrame();
+    // 失败横切优先：不画绿 done / dim 预览行。
+    expect(frame.includes("done")).toBe(false);
+    expect(frame).toBeDefined();
+    await setup.renderer.destroy();
+  });
 });

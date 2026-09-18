@@ -23,6 +23,7 @@ import type { ReactNode } from "react";
 import * as React from "react";
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
 import { MessageBlocks } from "./message-blocks.js";
+import type { SubagentCardLines } from "./subagent-message-lines.js";
 import { MessageShell } from "./message-shell.js";
 import {
   firstPartThinkingBlocks,
@@ -61,6 +62,9 @@ export interface MessageRowProps {
   readonly shownThinkingMsValues: ShownThinkingMsValues;
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly resultTextMap: ReadonlyMap<string, string>;
+  /** specs/tui-subagent-transcript-live.md：toolUseId → 子代理卡两行投影
+   *  （ChatView 单次投影，历史卡与 live 卡共用）。缺省 → 与改前逐字节一致。 */
+  readonly subagentCards?: ReadonlyMap<string, SubagentCardLines>;
   readonly thinkingExpanded: boolean;
 }
 
@@ -77,6 +81,7 @@ export function MessageRow(props: MessageRowProps): ReactNode {
     shownThinkingMsValues,
     statusMap,
     resultTextMap,
+    subagentCards,
     thinkingExpanded,
   } = props;
   const messageThinkingSeconds = thinkingMsToSeconds(messageThinkingMs);
@@ -109,6 +114,7 @@ export function MessageRow(props: MessageRowProps): ReactNode {
           shownThinkingMsValues={shownThinkingMsValues}
           statusMap={statusMap}
           resultTextMap={resultTextMap}
+          subagentCards={subagentCards}
           thinkingExpanded={thinkingExpanded}
           messageThinkingMs={messageThinkingMs}
           messageThinkingSeconds={messageThinkingSeconds}
@@ -120,6 +126,7 @@ export function MessageRow(props: MessageRowProps): ReactNode {
             cols={contentWidth}
             statusMap={statusMap}
             resultTextMap={resultTextMap}
+            subagentCards={subagentCards}
             thinkingExpanded={thinkingExpanded}
             thinkingSeconds={messageThinkingSeconds}
             hideThinking={hideThinkingForThisMessage}
@@ -159,6 +166,7 @@ function TurnFoldSegments(props: {
   readonly shownThinkingMsValues: ShownThinkingMsValues;
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly resultTextMap: ReadonlyMap<string, string>;
+  readonly subagentCards?: ReadonlyMap<string, SubagentCardLines>;
   readonly thinkingExpanded: boolean;
   readonly messageThinkingMs: number;
   readonly messageThinkingSeconds: number;
@@ -195,6 +203,7 @@ function TurnFoldSegments(props: {
         shownThinkingMsValues={props.shownThinkingMsValues}
         statusMap={props.statusMap}
         resultTextMap={props.resultTextMap}
+        subagentCards={props.subagentCards}
         thinkingExpanded={props.thinkingExpanded}
         messageThinkingSeconds={props.messageThinkingSeconds}
         messageThinkingMs={props.messageThinkingMs}
@@ -219,6 +228,7 @@ function TurnFoldSegment(props: {
   readonly shownThinkingMsValues: ShownThinkingMsValues;
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly resultTextMap: ReadonlyMap<string, string>;
+  readonly subagentCards?: ReadonlyMap<string, SubagentCardLines>;
   readonly thinkingExpanded: boolean;
   readonly messageThinkingSeconds: number;
   readonly messageThinkingMs: number;
@@ -242,6 +252,7 @@ function TurnFoldSegment(props: {
         cols={props.contentWidth}
         statusMap={props.statusMap}
         resultTextMap={props.resultTextMap}
+        subagentCards={props.subagentCards}
         thinkingExpanded={props.thinkingExpanded}
         thinkingSeconds={
           props.partIndex === 0 ? props.messageThinkingSeconds : undefined

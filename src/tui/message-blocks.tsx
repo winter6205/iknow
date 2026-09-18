@@ -60,6 +60,8 @@ import {
 } from "./tool-summary.js";
 import { clipOneLineVisual } from "./tool-summary.js";
 import { CompletedToolPreviewView } from "./completed-tool-preview-view.js";
+import type { SubagentCardLines } from "./subagent-message-lines.js";
+import { SubagentCardView } from "./subagent-card-view.js";
 import {
   deriveSlot,
   isLiveNoise,
@@ -81,7 +83,7 @@ type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
 
 /** tool_use 摘要行：运行中走英文过程行 `name · detail`（spec D1，无状态
  *  括号），落定走 `name · detail`，失败走 `[失败] name · detail`；子代理
- *  工具只画 detail（身份由 identity strip / SubagentPanel 承担）。
+ *  工具只画 detail（身份由 spawn 卡两行投影 / SubagentPanel 承担）。
  *  文案拼装统一委托 `formatToolStatusLine`（tool-summary SSOT，#693 T1 D7），
  *  历史 + live 两侧字节一致。
  *  工具计数不在本行：retract 计数由活动块标题承担（`deriveActivityBlocks` +
@@ -289,10 +291,23 @@ function renderToolUseBlock(args: {
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly resultTextMap?: ReadonlyMap<string, string>;
   readonly innerCols: number;
+  /** specs/tui-subagent-transcript-live.md：toolUseId → 卡级两行投影。
+   *  命中且非失败 → 该 spawn 卡画 `SubagentCardView`（锁句 1–2）；缺席 / 未
+   *  命中 / 失败 → 与改前逐字节一致（锁句 5/6/7 的落点）。 */
+  readonly subagentCards?: ReadonlyMap<string, SubagentCardLines>;
 }): ReactNode {
   const { block, statusMap, resultTextMap, innerCols } = args;
   const view = resolveToolUseView(block, statusMap, resultTextMap, innerCols);
   if (view === null) return null;
+  const card = args.subagentCards?.get(block.id);
+  const failed = statusMap.get(block.id) === true;
+  if (card !== undefined && !failed) {
+    return (
+      <box flexDirection="column">
+        <SubagentCardView card={card} />
+      </box>
+    );
+  }
   if (!view.showTitle && !view.showPreview) return null;
   return (
     <box flexDirection="column">
@@ -344,6 +359,10 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
   /** #693 T4 D4:tool_use_id → tool_result 文本映射（历史结果预览数据源）。
    *  缺省 / 无匹配 → 该 tool_use 不画结果预览（与 spec D4「未配对不渲染」对齐）。 */
   readonly resultTextMap?: ReadonlyMap<string, string>;
+  /** specs/tui-subagent-transcript-live.md：toolUseId → 子代理卡两行投影
+   *  （`subagentCardLinesMap` 产出）。命中且非失败 → 该 spawn 卡改画两行
+   *  （`{role} running...` + dim 流 / 绿 `done`）；缺省 → 与改前逐字节一致。 */
+  readonly subagentCards?: ReadonlyMap<string, SubagentCardLines>;
   readonly thinkingExpanded?: boolean;
   /** 折叠态 thinking 行附带 `Thought for <N>s`。仅末条 / 流式面板传入；
    *  缺省或非正 → 不画思考摘要行（不回落 `[思考]`）。 */
@@ -519,6 +538,7 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
         statusMap,
         resultTextMap: props.resultTextMap,
         innerCols,
+        subagentCards: props.subagentCards,
       });
       if (node !== null) {
         nodes.push(withBlockSpacing(`u${i}`, node));

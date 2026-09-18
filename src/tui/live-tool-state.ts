@@ -253,7 +253,7 @@ export function shortenMcpToolName(name: string): string {
  *  `name`（如 `read_file`；有 input 时带要点）或 bash 的
  *  `Running 1 shell command…`；子代理工具（spawn_subagent /
  *  subagent_result，plans/tui-chrome-interaction.md T7）不再以 `▣ 子代理`
- *  形态出现 —— 子代理状态由 identity strip + SubagentPanel 单独表达，
+ *  形态出现 —— 子代理状态由 spawn 卡上的两行投影 + SubagentPanel 单独表达，
  *  formatToolStatusLine 内只返 `detail`（如 `explore running` / `general-purpose`），避免
  *  dual render。 */
 export function formatRunningToolLine(run: LiveToolRun): string {

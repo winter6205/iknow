@@ -1,4 +1,10 @@
 /** @jsxImportSource @opentui/react */
+// ARCHIVED (2026-09-17, T3 plans/tui-subagent-transcript-live.md Superseded)：
+// 本文件认证的旧合同 = 身份条必须紧贴 prompt 上方（T7 回归）；该不变式随
+// `SubagentIdentityStrip` 拆除永久消失 —— 两行已改画在会话 transcript 里
+// 派它的那张 spawn 卡上，prompt 上方不再有该条。替代覆盖见
+// tests/tui/subagent-card-lines.test.ts（卡级两行投影）+
+// tests/tui/subagent-two-line-budget.test.tsx（prompt 侧行账归零、两行在两宿主）。
 /**
  * tests/tui/identity-strip-position.test.tsx
  *

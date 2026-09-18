@@ -200,14 +200,10 @@ import {
 // 二态 reducer）只保留 openView 视图层（full-screen GraphGroupView 的
 // Open/Close 仍是它的职责；不与三环焦点切换混）。
 import { type ChromeFocus, reduceChromeFocus } from "./chrome-focus.js";
-import { SubagentIdentityStrip } from "./subagent-identity-strip.js";
 // Slice D / SC14: Ctrl+X 强杀聚焦子代理 —— 纯分派模块（行序与面板同源）。
 import { dispatchKillFocusedSubagent } from "./subagent-kill.js";
-// Slice D / SC14: 两行投影行账（chrome 预算入账，SSOT 与 strip 渲染同源）。
-import {
-  isLiveSubagent,
-  subagentMessageRowCount,
-} from "./subagent-message-lines.js";
+// live 判据（Ctrl+X 分派 / 面板 / 焦点计数同源）。
+import { isLiveSubagent } from "./subagent-message-lines.js";
 // #647 T3 / ADR-0028:agent 现势显示(与 ContextBar 的 context usage 显示是
 // 两回事,命名刻意区分)—— 只读 agent_status 流事件的最新一份快照。
 import {
@@ -825,15 +821,20 @@ export function applyModelPickerKey(
 }
 
 /**
- * Slice D / SC14：会话消息内两行投影的 chrome 行账（SSOT 派生自投影）。
- * 非 chat 视图不渲染该条 → 0；无 live 子代理 → 0（组件渲染 null）。
- * 抽成模块级函数而非 TuiApp 内联三元，避免给 TuiApp 增分支（S5 硬门）。
+ * specs/tui-subagent-transcript-live.md：子代理两行已改画在会话消息内的
+ * spawn 卡上（transcript 滚动区），prompt 上方不再有身份条 —— chrome 行账
+ * 归零（锁句 3）。保留函数名与签名，让「不再入账」成为显式声明而非删掉
+ * 调用点后的隐式缺省（`chromeReserveRows.subagentRows` 缺省即 0）。
+ *
+ * 两个入参**有意不使用**：签名的形状是「这条预算曾是 view/subagents 的
+ * 函数」的存档，调用点传真实值也让将来若恢复入账时改动面留在本函数内。
+ * 返回值恒 0 是合同本身（测试逐 view / 逐 live 数钉住），不是待填的桩。
  */
-function subagentRowBudget(
-  view: TuiView,
-  subagents: ReadonlyArray<SubagentInfo>
+export function subagentRowBudget(
+  _view: TuiView,
+  _subagents: ReadonlyArray<SubagentInfo>
 ): number {
-  return view === "chat" ? subagentMessageRowCount(subagents) : 0;
+  return 0;
 }
 
 /**
@@ -926,11 +927,10 @@ export function chromeReserveRows(opts: {
    *   不把输入框往上顶。函数仍接受显式值（单测 / 旧调用兼容）。 */
   readonly panelRows?: number;
   /**
-   * Slice D / SC14：会话消息内子代理两行投影的实际行数
-   * （`subagentMessageRowCount(subagents)`，每 live 子代理 2 行）。产品路径
-   * 必须入账：该条画在输入框上方，行数随 live 子代理数增长；不入账时
-   * chrome 总高超出 rows，Yoga 会把两行块压成一行（文本重叠，实测
-   * tests/tui/subagent-kill-key.test.tsx）。缺省 0 → 无 live 不占行。
+   * specs/tui-subagent-transcript-live.md：prompt 上方身份条已拆除 —— 两行
+   * 改画在会话 transcript 的 spawn 卡上（滚动区内，不吃 chrome 预留）。
+   * 产品路径恒 0（`subagentRowBudget` 返回值）；与 `panelRows` 同款约定，
+   * 显式值只留给单测 / 旧调用兼容。缺省 0 → 不占行。
    */
   readonly subagentRows?: number;
   /** agent 现势显示行数（agentStatusLines 实际产出，0-1）。缺省 0 →
@@ -1983,7 +1983,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // chat 视图下面板需要最新 subagents 投影（runElapsed/ageSec 每秒跳变），
   // list/mcp 视图下面板不渲染但轮询开销 1Hz 且仅 watch=true 时承担。
   // 挂载时先同步拉一次：idle 会话若已有 live 子代理（如上一 turn 遗留 /
-  // 外部 spawn），初始帧就能渲染 identity strip / panel，而不是等下一个
+  // 外部 spawn），初始帧就能渲染 spawn 卡两行 / panel，而不是等下一个
   // tick 且 watch=false 永不启动。
   useEffect(() => {
     setSubagents(props.bridge.listSubagents());
@@ -2042,8 +2042,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // #358 T7: 子代理工具对称 —— activeToolName 若是子代理工具（spawn_subagent /
   // plans/tui-chrome-interaction.md T7：ContextBar 不得有 `▣ 子代理` 后缀
   // （acceptance 钉死）。子代理工具（spawn_subagent / subagent_result）
-  // activeToolName → undefined；子代理状态由 identity strip（prompt 正上方
-  // `{role} running...`）+ SubagentPanel（输入框下方 task list）单独表达。
+  // activeToolName → undefined；子代理状态由 spawn 卡上的两行（`{role}
+  // running...` + 预览 / done）+ SubagentPanel（输入框下方 task list）表达。
   // 普通工具 activeToolName 不变；缺 activeToolName 仍为 undefined。
   const activeToolLabel =
     activeToolName !== undefined && !isSubagentTool(activeToolName)
@@ -3900,8 +3900,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             ? compactProgressRows()
             : 0,
         panelRows: 0,
-        // Slice D / SC14：两行投影画在输入框上方 → 必须入账，否则 chrome
-        // 溢出把每个 2 行块压成 1 行（行内文本重叠）。
+        // specs/tui-subagent-transcript-live.md：两行已改画在会话 transcript
+        // 的 spawn 卡上（滚动区内）—— 不再吃 chrome 预留，`subagentRowBudget`
+        // 恒 0。调用点保留：入参形状是「这条预算曾是 view/subagents 的函数」
+        // 的存档，也避免将来恢复入账时要动本行。
         subagentRows: subagentRowBudget(view, subagents),
         agentStatusRows: agentStatusRowBudget,
         envPaneRows: envPaneRowBudget,
@@ -3973,6 +3975,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
                   ? (liveToolRuns[active.conversationId] ?? [])
                   : []
               }
+              subagents={subagents}
               askLine={
                 askPending !== undefined && !askModalActive
                   ? `[ask] 允许 ${askPending.tool}？${
@@ -4086,17 +4089,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       {view === "chat" && (
         <VerifyBannerStrip slot={verifySlot} mode={verifyMode} cols={cols} />
       )}
-      {/* plans/tui-chrome-interaction.md T7 + Slice D / SC14 —— 子代理身份条
-          （immediately above the prompt）。每个 live 子代理两行（role 行 +
-          dim taskPreview 行），live === 0 → 不渲染。行数**入 chrome 行账**
-          （`subagentRowBudget` → `chromeReserveRows.subagentRows`，
-          每 live 子代理 2 行）—— 不入账时两行块会被 Yoga 压成一行。
-          activeToolLabel 已剥除 `▣ 子代理`（dual render 移除）；identity strip
-          + SubagentPanel 双轨表达 live 子代理状态。JSX 顺序 = 视觉顺序：
-          本条必须在 <PromptInput> 之前。 */}
-      {view === "chat" && (
-        <SubagentIdentityStrip subagents={subagents} cols={cols} />
-      )}
+      {/* specs/tui-subagent-transcript-live.md 锁句 3：prompt 上方的身份条已
+          拆除 —— 两行改画在会话 transcript 里那张 spawn 卡上（`subagents` 经
+          ChatView → 卡级投影 join）。此处不再有子代理 chrome 行，行账归零
+          （`subagentRowBudget` 恒 0）。 */}
       {view === "chat" && (
         <PromptInput
           ref={promptInputRef}

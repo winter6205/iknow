@@ -841,7 +841,7 @@ test("T7 纯 tool_use 消息：底色 box 包裹后渲染不崩，摘要行可�
 
 // -- 子代理工具专属显示（plans/tui-chrome-interaction.md T7） ---------------
 // 不变式：子代理工具不再以 `▣ 子代理` 形态作为 live/history 工具卡（dual
-// render 移除）——状态由 identity strip（prompt 上方）+ SubagentPanel 表达，
+// render 移除）——状态由 spawn 卡两行投影 + SubagentPanel 表达，
 // 工具卡仅显示 detail。
 
 test("spawn_subagent 运行中 → 仅 detail（无 `▣` glyph，无 `[运行中] spawn_subagent` 残留）", async () => {

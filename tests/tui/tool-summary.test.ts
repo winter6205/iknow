@@ -559,8 +559,8 @@ describe("子代理工具专属显示（isSubagentTool / subagentDisplayMark / S
       kind: "ok",
     });
     // plans/tui-chrome-interaction.md T7：子代理工具不再以 `▣ 子代理` 形态
-    // 渲染 live / history 工具卡 —— 子代理状态由 identity strip + SubagentPanel
-    // 单独表达，避免 dual render。formatToolStatusLine 内仅返 detail。
+    // 渲染 live / history 工具卡 —— 子代理状态由 spawn 卡两行投影 +
+    // SubagentPanel 单独表达，避免 dual render。formatToolStatusLine 内仅返 detail。
     expect(line).toBe("general-purpose");
     // 钉死无 `▣` glyph、无 `✓` 状态前缀；task 正文不进 transcript
     expect(line.includes("调查渲染层")).toBe(false);

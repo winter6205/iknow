@@ -140,6 +140,9 @@ _Avoid_: 把 `[skill-load name=]` 正文当作用户键入；加载技能；turn
 **chrome focus**: TUI 底栏焦点环 `input` | 子代理行 | `graph` 的单一 reducer；有子代理行时 Down 先入该列，再 graph；Up 反向回到输入框。子代理行聚焦时 **Ctrl+X** 强杀该子代理（父 turn 收到 cancelled）；无聚焦则空操作。
 _Avoid_: 只有 graph 抢 Down；焦点落在 ContextBar；子代理面板不可聚焦；位置行进焦点环；Enter 钻进子代理会话；第二套 picker 文案
 
+**subagent card live（子代理会话卡实时行）**: `spawn_subagent` 在会话 transcript 里占两行——`{role} running...` 加一行 dim 最新流；该 worker 完成后第二行原位变绿 `done`。位置在那张会话消息下，不在输入框上方。
+_Avoid_: identity strip above prompt；把最新流只挂在 prompt 边上；完成态 done 跟底栏面板一起淡出
+
 **session location chrome（会话位置行）**: TUI 底栏在 ContextBar 之下**常驻一行** `路径 · 分支`；绑 task worktree 只换同一行的路径。子代理与 Graph 在它下面（两者都有时子代理在上）；不进焦点环、不进模型消息、不带 dirty/diff。
 _Avoid_: 绑树才出现；未绑树 0 行；用显隐当「在不在树上」；常驻第二行 dirty/diff；子代理画在位置行上面
 

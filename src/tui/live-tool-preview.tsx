@@ -7,6 +7,10 @@
  * 渲染（liveToolPreviewBox）与行账（liveToolPreviewRows）共用，行账与渲染
  * 不漂移（parity）。
  *
+ * 例外 = 子代理卡路径（specs/tui-subagent-transcript-live.md）：card 命中时
+ * 渲染与文本行都改由 `SubagentCardView`/卡级投影承担，本模块两者都只做
+ * 分流（`cardIfLive`）—— 该分支的行数恒 2，两处仍同源。
+ *
  * T5 (tui-render-optimization)：running 态若有 `partialInput`（tool_input_delta
  * 累积），渲染英文过程行 `name · <partial 摘要>`（bash 为
  * `Running 1 shell command… · <command>`；parse 成功走 summarizeToolCall，
@@ -21,6 +25,8 @@
  * 可见的行）。`liveToolPreviewRows` 返回 box 实际占用的物理行数。
  */
 import type { ReactNode } from "react";
+import type { SubagentCardLines } from "./subagent-message-lines.js";
+import { SubagentCardView } from "./subagent-card-view.js";
 import type { LiveToolRun } from "./live-tool-state.js";
 import {
   formatCompletedToolLine,
@@ -138,14 +144,39 @@ function resultPreviewOf(run: LiveToolRun) {
 }
 
 /**
+ * 锁句 5 的失败横切：**失败的 run 不吃 card 投影**（走既有 failure
+ * overlay），其余情形下非空 card 才是本 run 的卡级两行。
+ *
+ * 单一函数而非两处 `&&` 链：渲染面（`liveToolPreviewBox`）与文本面
+ * （`liveToolPreviewTextLines`）都要这条判据，两处各写一遍时任何一处漂移
+ * 都会让「行账说 2 行、渲染画 3 行」这类不一致重新出现。
+ */
+function cardIfLive(
+  run: LiveToolRun,
+  card: SubagentCardLines | null | undefined
+): SubagentCardLines | null {
+  if (run.status === "failed") return null;
+  return card ?? null;
+}
+
+/**
  * live 工具 box 的纯文本行（[状态行, ...预览行]），供行账 + flat 投影共用。
  * 完成态预览与 `completedToolPreview` 同源（代码或截断 diff）；结果预览
  * 走 `resultToolPreview`（bash stdout/stderr 尾部 tail）。
  */
 export function liveToolPreviewTextLines(
   run: LiveToolRun,
-  cols: number
+  cols: number,
+  /** specs/tui-subagent-transcript-live.md：本 run 是 spawn 卡且 join 上了子代理
+   *  时，卡的文本行改由卡级投影提供（第 1 行 `{role} running...`、第 2 行 dim
+   *  预览 / 绿 `done`）。缺席 → 与改前逐字节一致（非 spawn 工具、轮询卡、未
+   *  join 的 spawn 卡都走既有路径）。 */
+  card?: SubagentCardLines | null
 ): ReadonlyArray<string> {
+  const live = cardIfLive(run, card);
+  if (live !== null) {
+    return [live.roleLine, live.detailLine];
+  }
   if (run.status === "running") {
     return [runningLine(run, cols)];
   }
@@ -172,9 +203,15 @@ export function liveToolPreviewTextLines(
   return out;
 }
 
-/** live 工具 box 占用的物理行数（状态 1 行 + 可见预览行）。 */
-export function liveToolPreviewRows(run: LiveToolRun, cols: number): number {
-  return liveToolPreviewTextLines(run, cols).length;
+/** live 工具 box 占用的物理行数（状态 1 行 + 可见预览行）。
+ *  card 命中 → 2 行（第 1 行身份 + 第 2 行预览 / `done`），行账与
+ *  `liveToolPreviewTextLines` 同源（两行路径同样由它产出，parity 不破）。 */
+export function liveToolPreviewRows(
+  run: LiveToolRun,
+  cols: number,
+  card?: SubagentCardLines | null
+): number {
+  return liveToolPreviewTextLines(run, cols, card).length;
 }
 
 /** live 工具 runs 容器：相邻卡之间空一行（plans/tui-tool-rhythm.md T3）。
@@ -185,10 +222,15 @@ export function liveToolPreviewRows(run: LiveToolRun, cols: number): number {
  *  一致）。过程组摘要行不是 keep 卡，不套这条间距（本容器只收 runs，
  *  摘要行由调用方另画）。
  *
- *  `memo` 不适用：runs 为每帧新建数组的调用惯例，容器本身无状态。 */
+ *  `memo` 不适用：runs 为每帧新建数组的调用惯例，容器本身无状态。
+ *
+ *  `cards`（specs/tui-subagent-transcript-live.md）：toolUseId → 卡级两行投影
+ *  （`subagentCardLinesMap` 产出）。按 `run.id` 精确查表 —— 缺表 / 缺项 →
+ *  该卡走既有形态，不借用别的 worker 的预览（锁句 6）。 */
 export function liveToolRunsBox(
   runs: ReadonlyArray<LiveToolRun>,
-  cols: number
+  cols: number,
+  cards?: ReadonlyMap<string, SubagentCardLines>
 ): ReactNode {
   return (
     <box flexDirection="column" width={cols}>
@@ -198,7 +240,7 @@ export function liveToolRunsBox(
           flexDirection="column"
           marginTop={i === 0 ? 0 : 1}
         >
-          {liveToolPreviewBox(run, cols)}
+          {liveToolPreviewBox(run, cols, cards?.get(run.id))}
         </box>
       ))}
     </box>
@@ -208,8 +250,25 @@ export function liveToolRunsBox(
 /** live 工具 tail box：状态行 + 完成态截断预览。
  *  运行态仅状态行（T5：有 partialInput 增量时含 `· <partial 摘要>`）；
  *  write/edit 运行中不画 content。D5/D6：颜色消费 deriveSlot 的 color
- *  token —— 失败 error、accent 类成功 accent，dim 不再染所有完成行。 */
-export function liveToolPreviewBox(run: LiveToolRun, cols: number): ReactNode {
+ *  token —— 失败 error、accent 类成功 accent，dim 不再染所有完成行。
+ *
+ *  `card`（specs/tui-subagent-transcript-live.md）：命中时该 spawn 卡画
+ *  `SubagentCardView` 两行（第 1 行 `{role} running...`、第 2 行 dim 预览 /
+ *  绿 `done`），整卡不再走既有标题 + 预览组合；failed 卡不吃 card（锁句 5
+ *  的失败横切在 box 这一层同样成立）。 */
+export function liveToolPreviewBox(
+  run: LiveToolRun,
+  cols: number,
+  card?: SubagentCardLines | null
+): ReactNode {
+  const live = cardIfLive(run, card);
+  if (live !== null) {
+    return (
+      <box key={run.id} flexDirection="column">
+        <SubagentCardView card={live} />
+      </box>
+    );
+  }
   const running = run.status === "running";
   const status = running
     ? runningLine(run, cols)

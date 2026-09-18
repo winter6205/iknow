@@ -1,4 +1,11 @@
 /** @jsxImportSource @opentui/react */
+// ARCHIVED (2026-09-17, T3 plans/tui-subagent-transcript-live.md Superseded)：
+// 本文件认证的旧合同 = 身份条作为两行的渲染宿主（prompt 上方，live 列表整体
+// 铺开）。该不变式随 `SubagentIdentityStrip` 拆除永久消失 —— 两行改画在会话
+// 里派它的那张 spawn 卡上，按 `toolUseId` join 逐卡。替代覆盖见
+// tests/tui/subagent-card-lines.test.ts（投影边界 5 类）+
+// tests/tui/subagent-two-line-budget.test.tsx（两宿主渲染：live dim / completed
+// 绿 done）。role fallback / 无 emoji / 行账等约束在新宿主上重新钉住。
 /**
  * tests/tui/subagent-identity-strip.test.tsx
  *

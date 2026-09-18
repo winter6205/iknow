@@ -115,7 +115,7 @@ export function subagentDisplayMark(kind: "running" | "ok" | "failed"): string {
   return "▣";
 }
 
-/** spawn 工具 input 的 catalog role 投影（与 SubagentIdentityStrip 同源 fallback）。 */
+/** spawn 工具 input 的 catalog role 投影（与卡级两行投影同源 fallback）。 */
 export const SUBAGENT_ROLE_FALLBACK = "general-purpose";
 
 /** 从 spawn_subagent tool_use input 解析 catalog id（`subagent_type` → `role` → fallback）。 */
@@ -355,7 +355,7 @@ export const BASH_RUNNING_PREFIX = "Running 1 shell command…";
  *    bash 命令前的 `Running N shell command(s)…` 段，命令本身可见；
  *  - 失败：`[失败] name · detail`（failure overlay 不在本票改动面）。
  *  - 子代理工具（spawn_subagent / subagent_result）独立形态：只画 detail
- *    （glyph / 身份行由 identity strip + SubagentPanel 承担）。
+ *    （glyph / 身份行由 spawn 卡两行投影 + SubagentPanel 承担）。
  *
  * `[运行中]` / `[完成]` 前缀整体作废（D1）—— 进行中由英文过程行表达，
  * 落定由颜色/glyph 表达。cols 透传（与 `summarizeToolCall(cols)` 同纪律）：
@@ -377,7 +377,7 @@ export function formatToolStatusLine(opts: {
     }).detail;
   // plans/tui-chrome-interaction.md T7：子代理工具（spawn_subagent /
   // subagent_result）不再以 `▣ 子代理 · detail` 形态作为 live / history 工具
-  // 卡 —— 子代理状态由 identity strip（prompt 正上方 `{role} running...`）
+  // 卡 —— 子代理状态由 spawn 卡两行投影（`{role} running...` + 预览 / done）
   // + SubagentPanel（输入框下方 task list）单独表达，避免 dual render。
   // 工具卡仅保留 `detail`（spawn → `{role} running` / `{role}`；task 正文
   // 只在 SubagentPanel；subagent_result → `Poll <task_id>`）。

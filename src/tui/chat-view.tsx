@@ -59,6 +59,7 @@ import {
 } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
+import type { SubagentInfo } from "../harness/subagent/manager.js";
 import { chatWheelScrollAccel } from "./wheel-scroll.js";
 import {
   attachScrollbarHover,
@@ -71,6 +72,11 @@ import {
 } from "./session-state.js";
 import { liveTailSlots, type LiveToolRun } from "./live-tool-state.js";
 import { liveToolRunsBox } from "./live-tool-preview.js";
+import {
+  subagentCardLinesMap,
+  subagentCardsKey,
+  type SubagentCardLines,
+} from "./subagent-message-lines.js";
 import { toolResultStatusMap, toolResultTextMap } from "./tool-summary.js";
 import {
   listenScrollBoxTop,
@@ -113,6 +119,10 @@ export interface ChatViewHandle {
 export interface ChatViewProps {
   /** 会话状态机（T6-A 已迁入）。消息 + runState + 流式边界。 */
   readonly session: TuiSessionState;
+  /** specs/tui-subagent-transcript-live.md：子代理只读投影（app 层 1Hz 轮询
+   *  的 `bridge.listSubagents()`）。本组件按 `toolUseId` join 到 spawn 卡；
+   *  缺省 / 空 → 卡片与改前逐字节一致（历史卡单行摘要、live 卡既有形态）。 */
+  readonly subagents?: ReadonlyArray<SubagentInfo>;
   /** 滚动区宽度（终端列宽）。 */
   readonly cols: number;
   /** 滚动区高度预算（输入框 / 状态栏在 app 层另行固定挂载）。 */
@@ -206,10 +216,23 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     // 消息内容宽度留出滚动条 / 安全区余量（scrollbox 实测，不做行数估算）。
     const contentWidth = Math.max(1, props.cols - 2);
     const liveToolRuns = props.liveToolRuns ?? [];
+    // specs/tui-subagent-transcript-live.md：卡级两行投影（toolUseId → 两行）。
+    // 一次投影喂两个宿主（历史卡 MessageRow→MessageBlocks 与 live tail
+    // liveToolRunsBox），四条消费规则同源不漂移。
+    //
+    // 依赖是**内容签名**（不是数组引用）：app 层 1Hz 轮询每次 setSubagents 都
+    // 产新数组，用引用做依赖会每秒产新 Map → 下游 memo 化的历史消息块
+    // （MessageBlocks 浅比较 subagentCards）每秒全量重建元素树。
+    const subagentsKey = subagentCardsKey(props.subagents ?? []);
+    const subagentCards = useMemo(
+      () => subagentCardLinesMap(props.subagents ?? [], contentWidth),
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- 见上：签名即内容
+      [subagentsKey, contentWidth]
+    );
     // T3（plans/tui-tool-rhythm.md）：live 相邻 keep 卡之间空一行 ——
     // 卡间距收敛在 liveToolRunsBox 内（历史侧 MessageBlocks 各块自带节奏）。
     const renderLiveRuns = (runs: ReadonlyArray<LiveToolRun>) =>
-      liveToolRunsBox(runs, contentWidth);
+      liveToolRunsBox(runs, contentWidth, subagentCards);
     const bannerLines = props.bannerLines ?? [];
     // visible 列表会丢掉 agent_status / drain 等隐藏 user 消息，下标比
     // 盘上短。所有 thinkingMs 查找必须映射回 sourceIndex，否则
@@ -392,6 +415,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         shownThinkingMsValues={mergedShownThinkingMsValues}
         statusMap={statusMap}
         resultTextMap={resultTextMap}
+        subagentCards={subagentCards}
         thinkingExpanded={thinkingExpanded}
         thinkingMsAtVisible={thinkingMsAtVisible}
         running={running}
@@ -543,6 +567,9 @@ function ChatScrollbox(props: {
   readonly shownThinkingMsValues: ShownThinkingMsValues;
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly resultTextMap: ReadonlyMap<string, string>;
+  /** specs/tui-subagent-transcript-live.md：toolUseId → 子代理卡两行投影
+   *  （ChatView 单次 `subagentCardLinesMap` 产出，历史卡与 live 卡共用）。 */
+  readonly subagentCards: ReadonlyMap<string, SubagentCardLines>;
   readonly thinkingExpanded: boolean;
   readonly thinkingMsAtVisible: ThinkingMsAtVisible;
   readonly running: boolean;
@@ -602,6 +629,7 @@ function ChatScrollbox(props: {
             shownThinkingMsValues={props.shownThinkingMsValues}
             statusMap={props.statusMap}
             resultTextMap={props.resultTextMap}
+            subagentCards={props.subagentCards}
             thinkingExpanded={props.thinkingExpanded}
           />
         );

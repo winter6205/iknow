@@ -344,6 +344,12 @@ async function mountRealKillApp(): Promise<{
           ],
         }),
       ],
+      // 真实 adapter 对每个 tool_use 恒发 `tool_call_start`（live tail 据此
+      // 建卡）；stub 须补同一事件，否则 spawn 执行期间屏上没有承载两行的卡
+      // —— 该 e2e 的 Down 聚焦目标就无从谈起。
+      streamEventsByStep: [
+        [{ type: "tool_call_start", id: "spawn-1", name: "spawn_subagent" }],
+      ],
     }),
     executor: createAciExecutor({
       inner: createExecutor(reg.inner),
@@ -390,11 +396,14 @@ async function mountRealKillApp(): Promise<{
   };
   await typeText("hi");
   await until(() => events.includes("spawn"), 8000, "spawn 未发生");
-  // 子代理行必须出现在 chrome 里，Down 才有聚焦目标。
+  // specs/tui-subagent-transcript-live.md：两行画在 spawn 卡上（live tail），
+  // 卡由 `tool_call_start` 流事件建条（真实 adapter 对每个 tool_use 恒发；
+  // 本测的 stub 由 setUp 的 streamEventsByStep 补齐同一事件）。子代理行
+  // 出现 = 该卡已 join 到子代理投影，Down / Ctrl+X 的目标行已就位。
   await until(
     () => /running\.\.\./.test(setup.captureCharFrame()),
     8000,
-    "子代理行未出现在会话消息区"
+    "子代理两行未出现在 spawn 卡上"
   );
   await settleAfterKey();
   return {

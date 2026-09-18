@@ -1242,6 +1242,53 @@ describe("SubAgentManager listSubagents (#358 T7)", () => {
     assert.equal(items[0]!.role, "explore");
   });
 
+  it("spawn 带 toolUseId → listSubagents 投影 toolUseId（spawn 卡 join 键）", () => {
+    const { manager } = makeHarness();
+    manager.spawn({ task: "look around", toolUseId: "toolu_x" });
+    const items = manager.listSubagents();
+    assert.equal(items.length, 1);
+    assert.equal(items[0]!.toolUseId, "toolu_x");
+  });
+
+  it("toolUseId 缺席或空串 → 字段整个省略（Postel：缺席即不在场，不是 undefined 值）", () => {
+    const { manager } = makeHarness();
+    manager.spawn({ task: "no id" });
+    manager.spawn({ task: "empty id", toolUseId: "" });
+    const items = manager.listSubagents();
+    assert.equal(items.length, 2);
+    // ask / direct-handler / 测试注入的 spawn 不带 toolUseId：键缺席而非值 undefined。
+    assert.equal("toolUseId" in items[0]!, false);
+    assert.equal("toolUseId" in items[1]!, false);
+  });
+
+  it("conversationId 过滤后 toolUseId 随各自任务透出（不串台）", () => {
+    const { manager } = makeHarness();
+    const sessionATask = manager.spawn({
+      task: "session A",
+      conversationId: "session-a",
+      toolUseId: "toolu_a",
+    }).taskId;
+    const sessionBTask = manager.spawn({
+      task: "session B",
+      conversationId: "session-b",
+      toolUseId: "toolu_b",
+    }).taskId;
+
+    const a = manager.listSubagents("session-a");
+    assert.deepEqual(
+      a.map(({ taskId }) => taskId),
+      [sessionATask]
+    );
+    assert.equal(a[0]!.toolUseId, "toolu_a");
+
+    const b = manager.listSubagents("session-b");
+    assert.deepEqual(
+      b.map(({ taskId }) => taskId),
+      [sessionBTask]
+    );
+    assert.equal(b[0]!.toolUseId, "toolu_b");
+  });
+
   it("task 缺席 → taskPreview 为空串 (回退不落全文)", () => {
     const { manager } = makeHarness();
     manager.spawn({ model: "opus" });

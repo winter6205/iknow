@@ -78,6 +78,13 @@ export interface SubagentInfo {
   readonly reason?: string;
   /** catalog persona id（`explore` / `general-purpose`）；缺省不在场。 */
   readonly role?: string;
+  /**
+   * 派出该子代理的那次 `spawn_subagent` 调用的 tool_use id —— 会话卡按它
+   * 把 live 行 join 回派发卡。
+   * 可选：ask / direct-handler / 测试注入的 spawn 不带此键，缺席即整个
+   * 字段不在场(Postel)，不在场 ≠ 值为 undefined。
+   */
+  readonly toolUseId?: string;
 }
 
 export interface SubAgentManager {
@@ -400,6 +407,14 @@ const SHUTDOWN_SIGKILL_GRACE_MS = 5000;
 const MAX_STDERR_TAIL_CHARS = SUMMARY_LIMIT;
 const STDERR_DRAIN_GRACE_MS = 500;
 const MAX_STDERR_DIAGNOSTICS_BYTES = 1024 * 1024;
+
+/** Postel 在场判据：非空串才在场，缺席 ≠ 值为 undefined。
+ *  `writeMetaOnce`（落盘 meta）与 `listSubagents`（对外投影）对同一字段
+ *  必须同判据 —— 两处各写一遍时，任一处漂移都会让「meta 里有、投影里没有」
+ *  （或反之）的字段成为静默不一致。 */
+function presentString(v: string | undefined): boolean {
+  return typeof v === "string" && v.length > 0;
+}
 
 function waitForStderrClose(stderr: ChildProcess["stderr"]): Promise<void> {
   if (!stderr || stderr.readableEnded || stderr.destroyed) {
@@ -734,7 +749,7 @@ export function createSubAgentManager(opts: {
     if (typeof def.role === "string" && def.role.length > 0) {
       meta.agentType = def.role;
     }
-    if (typeof def.toolUseId === "string" && def.toolUseId.length > 0) {
+    if (presentString(def.toolUseId)) {
       meta.toolUseId = def.toolUseId;
     }
     // M6: v1 禁嵌套 → 普通 spawn 恒为 1;def.spawnDepth 显式值优先。
@@ -1631,6 +1646,10 @@ export function createSubAgentManager(opts: {
           : {}),
         ...(task.def.role !== undefined && task.def.role.trim() !== ""
           ? { role: task.def.role.trim() }
+          : {}),
+        // presentString = 与 writeMetaOnce 同判据（同一 helper，见模块顶）。
+        ...(presentString(task.def.toolUseId)
+          ? { toolUseId: task.def.toolUseId }
           : {}),
       };
       out.push(item);
