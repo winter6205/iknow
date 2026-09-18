@@ -2,8 +2,9 @@
  * build-engine egress 装配接线（ADR-0097 / T7）。
  *
  * 钉住的不变式：交互入口（chat）的 bash 工厂必须拿到
- *   - `egressPolicyFactory`（settings.isolation.network 段 → EgressPolicyInput；
- *     无配置段 → 工厂恒返 undefined = 无缝断网）；
+ *   - `egressPolicyFactory`（允许集全集 = preset ∪ settings.isolation.network
+ *     用户增量，ADR-0104；段缺席 → preset-only builtin 档，工厂恒返
+ *     policy = egress session 必起，闭合 0097 生命周期表落差）；
  *   - `askApproval`（既有 AskUser 转写为 `(host) => Promise<boolean>`，T6
  *     批准流的 ask inlet）。
  *
@@ -41,6 +42,7 @@ import {
   type BuiltEngine,
 } from "../../src/harness/build-engine.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
+import { BUILTIN_PRESET_ALLOWED_DOMAINS } from "../../src/harness/sandbox/egress/preset-domains.ts";
 import { createMcpManager } from "../../src/harness/mcp/manager.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import type {
@@ -156,7 +158,7 @@ describe("buildHarnessEngine — egress 装配接线 (ADR-0097 / T7)", () => {
     }
   });
 
-  it("settings.isolation.network 在场 → factory 返回 preset policy 形状", async () => {
+  it("settings.isolation.network 在场 → factory 返回 preset ∪ 用户增量 policy 形状 (source persisted)", async () => {
     await buildChat({
       settings: {
         isolation: {
@@ -175,17 +177,28 @@ describe("buildHarnessEngine — egress 装配接线 (ADR-0097 / T7)", () => {
       allowlistSource?: string;
       commandLabel: string;
     };
-    expect(policy.allowedDomains).toEqual(["example.com"]);
-    expect(policy.allowlistSource).toBe("preset");
+    expect(policy.allowedDomains).toEqual([
+      ...BUILTIN_PRESET_ALLOWED_DOMAINS,
+      "example.com",
+    ]);
+    expect(policy.allowlistSource).toBe("persisted");
     expect(typeof policy.commandLabel).toBe("string");
   });
 
-  it("settings.isolation.network 缺省 → factory 恒返 undefined（无缝断网 fail-closed）", async () => {
+  it("settings.isolation.network 缺省 → factory 恒返 preset-only policy（断言反转：旧行为 undefined；ADR-0104 生命周期落差闭合）", async () => {
     await buildChat({});
     const calls = engineBashCallOpts();
     expect(calls.length).toBeGreaterThan(0);
     const factory = calls[0]!.egressPolicyFactory as () => unknown;
-    expect(factory()).toBeUndefined();
+    const policy = factory() as {
+      allowedDomains: string[];
+      deniedDomains: string[];
+      allowlistSource?: string;
+    };
+    expect(policy).toBeDefined();
+    expect(policy.allowedDomains).toEqual([...BUILTIN_PRESET_ALLOWED_DOMAINS]);
+    expect(policy.deniedDomains).toEqual([]);
+    expect(policy.allowlistSource).toBe("builtin");
   });
 
   it("askApproval 转写 AskUser：host 进 ctx.tool=egress-domain-approval，结果透传", async () => {

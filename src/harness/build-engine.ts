@@ -1189,9 +1189,10 @@ export async function buildHarnessEngine(
     reg = createDefaultAciRegistry({
       env,
       sandboxRoot,
-      // ADR-0097 / T7:egress 允许集数据面 —— settings.isolation.network
-      // 段经 createEgressPolicyFactory 收口;无配置 → 工厂恒返 undefined
-      // = 无缝断网(fail-closed 合法态,--unshare-net 恒在)。askApproval
+      // ADR-0097 / T7 + ADR-0104:egress 允许集数据面 —— 全集 = 代码承载
+      // preset ∪ settings.isolation.network 用户增量,经
+      // createEgressPolicyFactory 收口;无配置段 → preset-only,工厂恒返
+      // policy = egress session 必起(--unshare-net 恒在)。askApproval
       // 把既有 AskUser 转写为 `(host) => Promise<boolean>`:交互入口首见
       // 新域名走 ask 面问一次(T6 批准流);worker / hub-less 入口不构造
       // 本入口,保持 fail-closed。

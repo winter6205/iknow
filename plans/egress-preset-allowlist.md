@@ -25,7 +25,7 @@ OVERALL: PASS — hand to writing-plans
    - **Inherits:** spec invariant 1（preset 是代码常量不是配置，无「关档」开关）、invariant 2（判定输入构造只发生在 assembly 一处，SSOT）、invariant 3（生产装配恒返 policy，`undefined` 分支仅留给测试/yolo 显式豁免路径）、T1（`BUILTIN_PRESET_ALLOWED_DOMAINS` frozen 6 条目逐字 = Boundaries 清单；段缺席 → preset-only；段在场 → 去重(preset ∪ 用户 `allowedDomains`)、`deniedDomains` 只取用户层；在场但两列表皆空 → 同「在场」路径不缩档）、SC1/SC2/SC3、F2（`allowlist-empty` 经工厂路径不可达但判定/渲染件不删）、F3（settings 段非法被丢弃 → preset-only）、ADR-0104 §Decision 1–2
    - **Surface:** `src/harness/sandbox/egress`（新增 `preset-domains.ts`——spec 已冻结此文件名，清单 SSOT 仅此一处；改既有 `assembly.ts`）
    - **Acceptance:** `egress-assembly.test.ts` 断言反转——旧「段缺席 → undefined」改为「段缺席 → preset-only policy，source 为 builtin 档」；合并去重且 preset 前置次序可测；`decideEgress` 直喂合并结果：`github.com` apex 与 `*.github.com` 子域双命中、`registry.npmjs.org` 命中而 `npmjs.org` apex 不命中（钉住不误扩）、`evil-github.com` / `github.com.evil.io` 不命中（后缀锚定回归）；preset 清单不含已知模型供应商域的反向断言；F1 不对称单测（用户 deny `*.github.com` 砍子域后 apex 仍在）；工厂返回类型保持 `() => EgressPolicyInput | undefined` 不缩（background/verify 消费面类型零改动）；`npm test` 绿
-   - Status: [ ] pending
+   - Status: [x]
 
 2. **`allowlistSource` 三档清算 + 违例文案联动** — tag: `[implementation]`
    - **Inherits:** spec invariant 4（封闭三档 `"builtin" | "persisted" | "session"`，全链一次改齐、不留旧值别名）、invariant 6（纯 infra 文案不掺配置指引，source 标签只出现在域判定段）、T2 钉死表（三档生产者归属与 `SOURCE_LABEL` 渲染行不变格式）、SC4、联动点 grep 实证全集（`violations.ts` 类型与标签、`session.ts` inline union 收敛为引用消双处漂移、`assembly.ts` 注释+赋值、`bash.ts` 工厂包装层 fallback）

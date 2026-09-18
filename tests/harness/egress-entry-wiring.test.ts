@@ -229,20 +229,26 @@ describe("T6 凭据装配入口姿态分支", () => {
   });
 });
 
-// ── 2. isolation OFF（assembly.ts）姿态留痕 ────────────────────────────────
+// ── 2. network 段缺席 = builtin preset 在岗（assembly.ts）────────────────────
 
-describe("T6 isolation OFF（network 段缺席）显式 skipped 痕", () => {
-  it("settings.isolation.network 缺席 → 工厂恒返 undefined + onWarn 收到 no-fence 痕", () => {
+describe("T6 network 段缺席 → builtin preset 在岗（不再 no-fence）", () => {
+  it("settings.isolation.network 缺席 → 工厂恒返 builtin preset policy，无 no-fence 痕（fence 在场）", () => {
     const warns: string[] = [];
     const factory = createEgressPolicyFactory({
       settings: {} as unknown as IknowSettings,
       commandLabel: "bash",
       onWarn: (m) => warns.push(m),
     });
-    assert.equal(factory(), undefined);
-    assert.ok(
-      warns.some((w) => /skipped: no-fence/.test(w)),
-      `expected no-fence trace, got: ${JSON.stringify(warns.map((w) => w.slice(0, 60)))}`
+    // preset spec invariant 3：段缺席不再返 undefined —— builtin 窄集
+    // fence 在场，「无存在面保护」姿态只剩 yolo / isolation OFF 接线方
+    // （第 1 节钉子），本分支无 no-fence 痕可登。
+    const policy = factory() as EgressPolicyInput;
+    assert.ok(policy);
+    assert.equal(policy.allowlistSource, "builtin");
+    assert.ok(policy.allowedDomains.includes("github.com"));
+    assert.equal(
+      warns.filter((w) => /no-fence/.test(w)).length,
+      0
     );
   });
 

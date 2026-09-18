@@ -104,7 +104,7 @@ export interface EgressPolicyInput {
    * 不参与判定。T6 用户层 settings reader 注入真值；T5 阶段缺省 = 不
    * 标注（不伪造「会话级 / 已持久化 / 预置配置」三种来源之一）。
    */
-  readonly allowlistSource?: "session" | "persisted" | "preset";
+  readonly allowlistSource?: "builtin" | "session" | "persisted" | "preset";
   /**
    * T6:首次域名批准门件（specs §首次域名批准流 + SC10）—— 当
    * `decideEgress` 命中 `not-in-allowlist` 且 host 不在

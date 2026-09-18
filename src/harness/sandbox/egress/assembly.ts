@@ -1,23 +1,27 @@
 /**
  * src/harness/sandbox/egress/assembly.ts
  *
- * ADR-0097 / T7 生产装配 helper —— 从 `loadIknowSettings()` 读
- * `isolation.network.{allowedDomains,deniedDomains}` 装配 `EgressPolicyInput`。
+ * ADR-0097 / T7 生产装配 helper + ADR-0104 预放行档合并语义 ——
+ * 从 `loadIknowSettings()` 读 `isolation.network.{allowedDomains,deniedDomains}`
+ * 并与代码承载 preset（preset-domains.ts，清单 SSOT）装配 `EgressPolicyInput`。
  *
- * 单一职责：装配层一处把「settings → EgressPolicyInput」收口,所有调用
+ * 单一职责：判定输入构造只发生在 assembly 一处（spec invariant 2），所有调用
  * 面（bash 工厂 / background / verify）共用同一形状。egress 域自身不
- * 反向 import config（依赖注入形态,egress/session.ts 同款纪律）。
+ * 反向 import config（依赖注入形态，egress/session.ts 同款纪律）。
  *
  * 设计要点:
  *   - 工厂返回 `() => EgressPolicyInput | undefined`:bash handler 内部
  *     每次调用取一次最新 settings（settings 不变即可;hot-reload 由
- *     loadIknowSettings 的读根决定）;undefined = 本次调用不起 session
- *     （spec §fail-closed,纯断网）;
+ *     loadIknowSettings 的读根决定）;生产装配路径**恒返 policy**
+ *     （preset 非空 ⇒「允许集非空」恒真，闭合 ADR-0097 §生命周期表与
+ *     实现的既有落差，ADR-0104 §Consequences）;`undefined` 分支仅保留给
+ *     调用方显式不装配 egress 的测试 / yolo 类豁免路径，不再由
+ *     「settings 段缺席」触发（spec invariant 3）;
  *   - `commandLabel` 由调用方传（bash / background / verify 各自有
  *     自己的语义上下文,如 `bash:foreground` / `background:<taskId>`
  *     / `verify:<round>`）;
- *   - `allowlistSource` 仅当 settings 段在场 = `"preset"`(用户层预置
- *     配置);无 network 段 = undefined(不伪造来源);
+ *   - `allowlistSource`:settings 段缺席 = `"builtin"`（仅出厂预放行档
+ *     在场）;段在场 = `"persisted"`（用户持久化 settings 增量并入档）;
  *   - `askApproval` **不**在这里注入 gate（`approvalGate` 由 bash 工
  *     厂闭包期构造,跨调用共享同一会话级集,见 bash.ts:523-556）;
  *     helper 只透传数据,装配链 `build-engine → registry → createBashTool`
@@ -29,10 +33,10 @@ import type {
 } from "../../../config/settings.js";
 import {
   assembleEgressCredentials,
-  noFenceCredentialTrace,
   type EgressCredentialRoster,
 } from "./credential-assembly.js";
 import type { EgressPolicyInput } from "./session.js";
+import { BUILTIN_PRESET_ALLOWED_DOMAINS } from "./preset-domains.js";
 
 /**
  * 工厂入参 —— 由调用面(build-engine / 装配层)按需注入。
@@ -62,22 +66,19 @@ export interface CreateEgressPolicyFactoryOptions {
  *
  * 返回形态:`() => EgressPolicyInput | undefined`,每次调用读一次
  * `settings.isolation.network`(若 settings 不可变则等价于闭包常量)。
+ * 签名保持 `| undefined` 不缩 —— background / verify 消费面类型零改动。
  *
- * fail-closed 语义:
- *   - settings.isolation.network 缺席 → 返回 undefined = 本次调用不起
- *     session,沙箱内 `--unshare-net` 照旧在,等同纯断网;
- *   - settings.isolation.network 在场但 allow/deny 均为空数组(合法
- *     fail-closed 态,经 settings 层判定层全拒)→ 返回 policy 形态,
- *     由 domain-matcher 决定全拒(不让工厂吞掉);
- *   - settings.isolation.network 段 shape 非法(非普通对象 / 数组形态
- *     错误)→ 由 settings 层丢弃,settings.isolation.network = undefined,
- *     回到「无配置 = 无 session」路径。
- *
- * allowlistSource 语义(对齐 T6 EgressPolicyInput.allowlistSource 透传):
- *   - 有 network 配置 = "preset"(用户层预置,持久化于 user settings);
- *     「会话级放行」(批准流产物)与「持久化」(写回 user settings)是不同
- *     来源;前者由 bash 工厂的 approvalGate 决定(`allowlistSource: "session"`),
- *     不在本 helper 出现。本 helper 只反映「settings 段在场」这一事实。
+ * 合并语义(ADR-0104 §Decision 2, spec T1):
+ *   - 段缺席 → preset-only policy(`allowlistSource: "builtin"`,
+ *     deniedDomains 空)—— session 必起,首见批准门在岗;
+ *   - 段在场 → `allowedDomains = 去重(preset ∪ 用户 allowedDomains)`
+ *     (preset 前置、用户增量在后),`deniedDomains` 只取用户层,
+ *     `allowlistSource: "persisted"`;deny 优先不变(用户可用 denied
+ *     精确砍掉任一 preset 域);
+ *   - 段在场但两列表皆空 → 同「在场」路径(preset 仍在场,不缩档;
+ *     `allowlist-empty` 经工厂路径不可达,spec F2);
+ *   - 段 shape 非法被 settings 层丢弃 → `network = undefined`,回到
+ *     「段缺席」路径 = preset-only(spec F3,丢弃留痕纪律在 settings 层)。
  *
  * 独立成文件(s5 complexity 门):装配 helper 后续可能扩(读 host /
  * 校验 allowlist 与 deny 集互斥等),独立承载便于改动只影响一处。
@@ -87,31 +88,30 @@ export function createEgressPolicyFactory(
 ): () => EgressPolicyInput | undefined {
   const { settings, commandLabel, onWarn } = opts;
   // 读 settings 一次（settings 在 build-engine 主链是 module-load 期
-  // resolve 的 freeze 对象,跨调用安全;hot-reload 由调用方重造工厂）
-  // —— 此处取一次网络段缓存到闭包,fail-closed 缺省 = 直接返 undefined。
+  // resolve 的 freeze 对象,跨调用安全;hot-reload 由调用方重造工厂）。
+  // 段缺席 / 被 parse 层丢弃 → preset-only,不再返 undefined
+  // （ADR-0104:preset 非空 ⇒ 生产装配路径恒起 egress session）。
   const network = settings.isolation?.network;
   // egress-credential-sentinel T1：凭据名册装配（内置 github 两条目 + 用户段
-  // 收窄/追加）。凭据段**不**开启 session —— network 缺席仍是 fail-closed
-  // 纯断网（下方 undefined 分支优先），credentials 只随 policy 数据形状走。
+  // 收窄/追加）。凭据段自身不决定 session 起停 —— preset 非空使生产装配
+  // 恒起 session（ADR-0104 / ADR-0107），credentials 只随 policy 数据形状走。
   const credentials = assembleEgressCredentials(
     settings.isolation?.credentials,
     onWarn
   );
 
   if (network === undefined) {
-    // 无 network 配置 → 本次调用不起 session,fence 走纯断网。
-    // 这是 spec 要求的 fail-closed 合法态,不是缺陷:settings 段缺席
-    // = 用户未声明出网边界 = 默认拒绝。
-    // T6 / F9（Assumption 9）：出网缝与凭据层整体缺席的姿态显式登记 ——
-    // canonical `skipped: no-fence` 痕进诊断/日志（invariant 7 禁静默，
-    // 离线可查证「无存在面保护」），SC9 反命门闭合。
-    const onDiagnostic =
-      onWarn ??
-      ((m: string): void => {
-        console.warn(m);
-      });
-    onDiagnostic(noFenceCredentialTrace());
-    return () => undefined;
+    // 段缺席 → preset-only policy（spec invariant 3：不再返 undefined）。
+    // fence 在场（preset 窄集），凭据铸造随 session 走 fenced 档；
+    // no-fence 痕只归 yolo / isolation OFF 接线方（credential-assembly T6
+    // 姿态分支），本分支不再登记。
+    return (): EgressPolicyInput => ({
+      allowedDomains: [...BUILTIN_PRESET_ALLOWED_DOMAINS],
+      deniedDomains: [],
+      commandLabel,
+      allowlistSource: "builtin",
+      credentials,
+    });
   }
 
   // 构造 policy —— 用 freeze 后的 settings 段直接派发（settings.ts
@@ -123,13 +123,14 @@ export function createEgressPolicyFactory(
 }
 
 /**
- * 把 `IknowSettingsIsolationNetwork` 段映射成 `EgressPolicyInput`。
+ * 把 `IknowSettingsIsolationNetwork` 段映射成 `EgressPolicyInput`
+ * （段在场路径）。
  *
  * 独立成函数(s5 complexity 门):settings 段在场 → policy 形状构造逻辑
- * 收敛,工厂主体只剩「无配置 = undefined」一支,复杂度低。
+ * 收敛,工厂主体只剩「无配置 = preset-only」一支,复杂度低。
  *
- * `allowlistSource = "preset"`(用户层 settings 段在场即视为 preset,
- * 与 T6 spec 语义对齐)。bash 工厂侧在批准后会改写为 `"session"`
+ * `allowlistSource = "persisted"`(用户持久化 settings 增量并入档,
+ * spec T2 钉死表)。bash 工厂侧在批准后会改写为 `"session"`
  * (bash.ts:540-543)。
  */
 function buildEgressPolicy(
@@ -138,14 +139,29 @@ function buildEgressPolicy(
   credentials: EgressCredentialRoster
 ): EgressPolicyInput {
   return {
-    allowedDomains: network.allowedDomains ?? [],
+    allowedDomains: mergeWithPreset(network.allowedDomains ?? []),
+    // deny 只取用户层 —— preset 不贡献 deny,deny 优先是用户砍 preset
+    // 域的逃生通道(spec Boundaries「不可被用户配置关闭整个档」的对偶)。
     deniedDomains: network.deniedDomains ?? [],
     commandLabel,
-    // settings 段在场 → 允许集来源 = 预置配置(spec §批准持久化粒度:
-    // 用户层 settings 是"预置配置"路径;会话级批准由 bash 工厂的
-    // approvalGate 决定,不在本 helper 范围内)。
-    allowlistSource: "preset",
+    allowlistSource: "persisted",
     // T1 数据形状注入：铸造消费归 T2，本层不参与判定。
     credentials,
   };
+}
+
+/**
+ * 去重合并:preset 前置、用户增量在后(便于人读;顺序即语义,ADR-0104
+ * §Decision 2)。字面精确去重 —— settings 层已做 trim/形态清洗,此处不
+ * 再做大小写归一(判定层 decideEgress 对 host 归一,entry 形态保持原样)。
+ */
+function mergeWithPreset(userAllowed: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const entry of [...BUILTIN_PRESET_ALLOWED_DOMAINS, ...userAllowed]) {
+    if (seen.has(entry)) continue;
+    seen.add(entry);
+    merged.push(entry);
+  }
+  return merged;
 }
