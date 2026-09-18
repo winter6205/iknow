@@ -4,6 +4,8 @@
 
 ### Fix
 
+- **TUI 静默提示不再在工具执行期误报，文案改英文（2026-09-17）**: 「~20s 无新流字节」的等待提示此前只认 `onStream` 事件重置，而 harness 在**工具执行期**（bash 长命令、前台子代理、权限 / ask 弹窗等待）按设计不发任何流事件——任何跑过 20s 的工具都会误报「仍在等待模型输出……检查网络连接」。新增**工具相位门**：`tool_call_start`（模型交出 tool_use）→ 下一次模型调用边界（`agent_status` / `env_snapshot`）之间为工具相位，该相位内计时器到期只重排满窗、不落文案（回到模型相位后若确实静默，仍会给出提示）。判据取事件语义而非展示态 `liveToolRuns`：被权限拦下的调用不发 postToolUse，展示态会整轮卡在 running。另修：**成功收尾**现在会清掉仍在屏的等待文案（原只清 transport_retry 进度，成功回合会残留过期网络提示）。文案改英文（`Waiting for model output — ~20s with no new stream bytes.`），对齐 `docs/CONTEXT.md` 的 sticky notice 英文约定。spec `specs/transport-continue-persist.md` 不变式 3 / SC6 / SC7；`nextToolPhaseActive` 纯函数 + 相位门回归用例钉承重性。测试侧：`streaming-silence-notice.test.tsx` 的 fake bridge 改为 **release 闩驱动**（事件时序与回合收尾由测试显式控制，不再按固定 `waitMs` 圈观察窗）——旧写法在机器有并发负载时会被 mount + 输入开销吃掉窗口，把收尾塞进两步断言之间（本文件此前 flaky 的根因）。
+
 - **TUI `/model` 切换不再整树重渲染、不再复位 thinking/effort 手动覆盖（#1021，2026-09-15）**: env 派生的显示快照（模型路由串 + thinking 基线）改经框架无关 store 下发（`src/tui/env-display-store.ts`，`useSyncExternalStore` 消费）——`hub.reloadFromEnv` 成功后的 `onEnvChange` 只 publish 快照，不再 `root.render(<TuiApp/>)`；ContextBar 的模型段自行订阅重投影，`/model` 切换只动该行（回归测试以逐行 frame-diff 钉住）。thinking/effort 引入接管分层：`/thinking` / `/effort` 面板提交置位对应字段标记，此后会话内 settings 基线变化不再改写该字段（旧实现每次 env 变化都把三个 state 无条件拖回新基线）；未接管的字段仍跟随基线，外部 settings 热更新显示同步保留。`/info` 的 Model 行与 per-turn thinking override 基线改为调用时读 store 最新快照（避免渲染期过期基线发出错误 override）。`modelDisplayName` 与注册表展平下沉到 `src/tui/model-picker.tsx`（叶子模块，避免 app ↔ context-bar 成环的重复实现）。
 
 ### Breaking

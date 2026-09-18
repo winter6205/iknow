@@ -1204,11 +1204,15 @@ interface Notice {
 
 /**
  * T2 (#transport-continue-persist) UI 反馈节流:流式臂连续无 onStream 事件
- * 多久 → 改 notice 文案为「仍在等待模型输出」(spec invariant 3)。~20s
- * 只是 UI 反馈阈值,**不**影响 harness 侧 idle / hardCap 决策 —— 后者
- * 走 settings.llm.idleTimeoutMs(env > settings > 默认 300_000,见 env.ts)。
+ * 多久 → 改 notice 文案为「等待模型输出」(spec invariant 3)。~20s 只是 UI
+ * 反馈阈值,**不**影响 harness 侧 idle / hardCap 决策 —— 后者走
+ * settings.llm.idleTimeoutMs(env > settings > 默认 300_000,见 env.ts)。
  * 改文案而非新增 notice;notice box 仍是 sticky(无 TTL 自动消失,与
  * spec invariant 3 / SC5 同款)。
+ *
+ * 相位门:工具执行期(含权限 / ask 等待)harness 设计上不发任何流事件,
+ * 「无流字节」不代表模型卡死 —— 该相位由 `toolPhaseActive` 闸住
+ * (见 nextToolPhaseActive / armSilenceTimer),不落 notice。
  */
 const DEFAULT_STREAMING_SILENCE_NOTICE_MS = 20_000;
 
@@ -1220,9 +1224,56 @@ function resolveStreamingSilenceNoticeMs(override: number | undefined): number {
   return override ?? DEFAULT_STREAMING_SILENCE_NOTICE_MS;
 }
 
-/** 流式静默时把现有 notice 改写为单行「仍在等待」文案(spec 不变式 3)。 */
-const STREAMING_SILENCE_NOTICE_LINE =
-  "⠿ 仍在等待模型输出（~20s 无新流字节）；如长时间未恢复，建议检查网络连接。";
+/**
+ * 工具相位跟踪（S5：叶子函数，分支不记进 onStream 的圈复杂度）。
+ *
+ * 「无流字节」只在**模型相位**才是异常信号：工具执行期（含权限 / ask 等待）
+ * harness 按设计不发任何流事件，把它算进静默窗就会在长工具上误报「等模型」。
+ *
+ * 相位判据取事件语义而非展示态 `liveToolRuns`：后者只由 postToolUse 收缩，
+ * 而被权限拦下（denied / hook blocked）的调用**不**发 postToolUse
+ * （permission-executor 的 blocked 分支直接返回），展示态会整轮卡在 running
+ * → 相位门若读它会漏报到回合结束。事件面判据无此洞：
+ *   - `tool_call_start` = 模型流已交出 tool_use，接下来是工具执行 → 进工具相位；
+ *   - `agent_status` / `env_snapshot` = 每次模型调用前的边界事件（工具批已收
+ *     口、下一轮模型调用将起）→ 出工具相位，此后静默就是模型静默。
+ * 工具执行期唯一会来的事件是 graph_progress（run_graph 内部进度），不落在
+ * 上述两侧，相位保持不变。
+ */
+export function nextToolPhaseActive(
+  active: boolean,
+  event: HarnessStreamEvent
+): boolean {
+  if (event.type === "agent_status" || event.type === "env_snapshot") {
+    return false;
+  }
+  if (event.type === "tool_call_start") return true;
+  return active;
+}
+
+/**
+ * 流式静默时把现有 notice 改写为「等待模型」文案(spec 不变式 3)。英文是
+ * sticky notice 的既有约定(docs/CONTEXT.md「sticky notice」:异常停或传输
+ * 过程的英文提示框),与 init / 中断 / API error 等既有英文面一致。两行
+ * 各自短于 notice 盒内宽,不触发折行。
+ */
+const STREAMING_SILENCE_NOTICE_LINES: ReadonlyArray<string> = [
+  "⠿ Waiting for model output — ~20s with no new stream bytes.",
+  "Check your network connection if this persists.",
+];
+
+/**
+ * 当前 notice 是否就是流式静默文案。成功收尾只清这一条过程性提示，
+ * stop_summary / 异常停等更明确的来源按 identity 原样保留。
+ */
+function isStreamingSilenceNotice(notice: Notice | undefined): boolean {
+  const lines = notice?.lines;
+  return (
+    lines !== undefined &&
+    lines.length === STREAMING_SILENCE_NOTICE_LINES.length &&
+    lines.every((line, i) => line === STREAMING_SILENCE_NOTICE_LINES[i])
+  );
+}
 
 // spec tui-skill-slash-catalog（skill bare alias）：slash 匹配认 catalog 的
 // 唯一裸名别名，展示/加载仍用规范名。别名不新增 catalog 接口 —— 只用公开的
@@ -2326,6 +2377,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     );
     let silenceTimerId: ReturnType<typeof setTimeout> | undefined;
     let silenceNoticeShown = false;
+    // 相位态见 nextToolPhaseActive 注释。回合以模型相位开局(尚未交出
+    // tool_use),事件到达时推进。
+    let toolPhaseActive = false;
     const clearSilenceTimer = (): void => {
       if (silenceTimerId !== undefined) {
         clearTimeout(silenceTimerId);
@@ -2343,8 +2397,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         // setState 噪音);流式字节恢复时 onStream 重置 silenceNoticeShown
         // → 下一次 silence 可重新落 notice。
         if (silenceNoticeShown) return;
+        // 相位门:工具执行期(含权限 / ask 等待)harness 不发流事件是设计
+        // 使然,不是模型卡死。重排一个满窗而不落 notice —— 回到模型相位
+        // 后若确实静默,下一个完整窗仍会给出提示。
+        if (toolPhaseActive) {
+          armSilenceTimer();
+          return;
+        }
         silenceNoticeShown = true;
-        setNotice({ lines: [STREAMING_SILENCE_NOTICE_LINE] });
+        setNotice({ lines: [...STREAMING_SILENCE_NOTICE_LINES] });
       }, silenceThresholdMs);
     };
     const draft = createStreamDraft();
@@ -2365,6 +2426,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     // draftEpoch。ChatView 按 epoch 交错渲染，与历史 content 块顺序一致。
     // 判定只依赖本闭包事件顺序（#616），不经过 React state / ref 镜像。
     const onStream = (event: HarnessStreamEvent): void => {
+      // 相位推进先于重置:agent_status / env_snapshot(每次模型调用前的
+      // 边界事件)把回合带回模型相位,tool_call_start 进入工具相位。见
+      // nextToolPhaseActive。
+      toolPhaseActive = nextToolPhaseActive(toolPhaseActive, event);
       // T2 (#transport-continue-persist): 任何 onStream 事件(增量 / 工具 /
       // 状态快照,凡是流式臂产出的事件)都视作「流式字节到达」→ 重置静默
       // 计时器与 silenceNoticeShown。下一次 silence episode 仍能重新触发
@@ -2648,6 +2713,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         // notice,避免成功回合残留「退避中…」;stop_summary 等 notice 不动
         // (它们在 maxTurns 收尾后仍需呈现,见 max-turns/stream-draft 测试)。
         setNotice(undefined);
+      } else {
+        // 静默等待文案同属过程性提示:成功收尾若它仍在屏(未被 stop_summary
+        // 等更明确的来源覆盖)→ 清掉,不留过期「等待模型」;其它来源经
+        // identity 判定原样返回,零额外渲染。
+        setNotice((prev) =>
+          isStreamingSilenceNotice(prev) ? undefined : prev
+        );
       }
     } catch (err) {
       // 刷新失败也要落回 idle，否则会话卡在 running-fg。

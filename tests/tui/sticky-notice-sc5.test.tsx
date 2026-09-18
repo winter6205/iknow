@@ -36,8 +36,8 @@ import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 
 /** 异常停 notice 的稳定子串（abnormalStopNoticeLines → apiErrorNoticeLine）。 */
 const ABNORMAL_NOTICE_NEEDLE = "API error (404)";
-/** 流式静默 notice 的稳定子串（STREAMING_SILENCE_NOTICE_LINE）。 */
-const SILENCE_NOTICE_NEEDLE = "仍在等待模型输出";
+/** 流式静默 notice 的稳定子串（STREAMING_SILENCE_NOTICE_LINES）。 */
+const SILENCE_NOTICE_NEEDLE = "Waiting for model output";
 /**
  * 注入的静默阈值：~1/133 于默认 20s。turn 结束后仍可能触碰 notice 的定时源
  * 只有它，周期压到 150ms 才能用亚秒级观察窗覆盖多个计时周期。
@@ -276,7 +276,7 @@ describe("TUI sticky 异常停 notice（spec SC5）", () => {
 
     await app.typeText("go");
     await app.pressEnter();
-    // 阳性对照：注入的静默阈值确实在跑（turn 在飞时先落「仍在等待」）。
+    // 阳性对照：注入的静默阈值确实在跑（turn 在飞时先落等待文案）。
     // 没有这一步，下面的存活窗可能因计时器根本没武装而空过。
     await untilFrame(app.setup, (f) => f.includes(SILENCE_NOTICE_NEEDLE), 4000);
     // 收尾通知（processChatLine 尾段的 turn 结算）完成后 notice 才落定。

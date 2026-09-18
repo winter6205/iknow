@@ -11,7 +11,7 @@ Model transport failures and human continue behave so a long turn can recover wi
 
 1. **Idle expiry is retryable** only when the attempt produced **no visible output** (no text/thinking/tool deltas that count as visible for this contract). After visible output or an emitted `tool_use`, do **not** auto-retry the same step.
 2. **Clock abort ≠ user cancel.** Idle/hardCap abort must classify as timeout (retry path when still invisible), never `user_cancel`.
-3. **Idle default** moves to minute-scale (~5 minutes). ~20s with no stream bytes only updates sticky notice copy; the notice box does **not** auto-dismiss.
+3. **Idle default** moves to minute-scale (~5 minutes). ~20s with no stream bytes only updates sticky notice copy; the notice box does **not** auto-dismiss. This silence window is **model-phase only**: while a tool is running (including permission / ask waits) the harness emits no stream events by design, so that phase must not raise the waiting copy. The copy is English, matching the sticky-notice convention (`docs/CONTEXT.md`).
 4. **Transport retry** uses second-scale exponential backoff, bounded attempts (implementer picks within 5–10 unless settings already expose a knob). Honor `retry-after` when present. Cover: 429, 5xx, explicit network faults, invisible idle/request timeout.
 5. **Ctrl+C** aborts the foreground turn and **immediately** appends system `Interrupted by user.` (existing cancelled path).
 6. **`/continue`** = skip-append continue of a pending tool loop. For that `run` only, strip a **trailing** interrupt system message from the model prior; **disk keeps** the interrupt. Empty Enter is **not** continue. Busy → `busy_stop_first` (no auto-abort).
@@ -33,6 +33,7 @@ Model transport failures and human continue behave so a long turn can recover wi
 | Transport retry                 | N/A                                               | non-retryable 4xx / cert → no retry                      | max attempts → `protocolError` + sticky English cause | abort during backoff → cancel, no further attempt                                  | translate miss → protocol_error not user_cancel |
 | Persist predicate               | emptyFinalResponse → user kept, assistant dropped | protocolError with zero user delta → no orphan assistant | N/A                                                   | N/A                                                                                | save failure bubbles (existing)                 |
 | Sticky notice                   | N/A                                               | N/A                                                      | N/A                                                   | new turn does not auto-clear sticky error until user acts (spec: no timer dismiss) | N/A                                             |
+| Silence notice (model phase)    | N/A                                               | tool running → suppressed (not model silence)            | N/A                                                   | successful turn end clears the waiting copy (process notice, like retry progress)  | N/A                                             |
 
 ## Success criteria
 
@@ -41,6 +42,8 @@ Model transport failures and human continue behave so a long turn can recover wi
 - SC3: After Ctrl+C, transcript ends with interrupt system text; `/continue` step prior omits that trailing interrupt while file still has it.
 - SC4: protocolError after a user query leaves that user message on disk and no failed assistant.
 - SC5: Sticky abnormal-stop notice remains until user dismisses or starts a deliberate next action (no TTL auto-hide).
+- SC6: A turn whose tool runs (no stream events by design) past the silence threshold raises no waiting copy; once the tool settles, a fresh full silence window still raises it (suppression is phase-scoped, not turn-wide). Phase state is per-turn: it starts in model phase for every `runTurnOnce` closure and is not carried across turns.
+- SC7: A successful turn end clears the waiting copy if it is still on screen, without touching notices from other sources (stop_summary / abnormal stop).
 
 ## Measured / out-of-band
 
