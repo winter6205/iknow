@@ -24,7 +24,7 @@ minimal-change-verifier: yes — 与 ADR-0103 决策 1-4 一一对应；T5/T6 �
    - **Inherits:** spec invariant 5「所有标量字段行排在 `todos:` 头之前，todo 行永远占据栏末段」+ invariant 7「空槽不广告」+ F3/F4/F5（旧栏解析得 `instruction: null, reconcile: false`；新栏被旧解析器得正确子集；含 `</agent_status>` 子串不破坏行级校验）。
    - **Surface:** `src/harness/agent-status.ts`（`buildAgentStatusText` / `parseAgentStatusText` 纯函数对，文件名已由 spec 冻结；reconcile 常量导出）
    - **Acceptance:** 单测覆盖——新构新解 round-trip；旧格式栏解析为合法缺省；`todos:` 头之前的未知标量行不吞进 todo 列表；畸形 → `null` 不 throw（既有契约）；reconcile 常量为导出件（供测试与名册锁引用）。`npm test` 相关路径绿。复杂度门槛走 complexity-anti-drift thresholds，不在本 bullet 复制数字。
-   - Status: [ ] pending
+   - Status: [x]
 
 2. **真实用户消息甄别谓词 + 名册完备性锁** — tag: `[implementation]`
    - **Inherits:** spec invariant 2「instruction 来源 = messages 尾部最新一条真实用户消息：排除栏注入本身 + 全部宿主注入 + 剥 memory prefetch overlay」+ T2 注入名册全集 + skill-load remainder 规则 + F2（首行空前扫）+ F6（取最后一个 marker 之后段）+ SC2「无任何 LLM 参与」+ SC5。

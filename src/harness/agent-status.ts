@@ -35,12 +35,30 @@ import { resolveConversationTodoPath } from "./aci/tools/todo-write.js";
  */
 export const AGENT_STATUS_IDLE_TOOL = "idle";
 
+/**
+ * reconcile 行的固定文本(spec invariant 4:它是栏内行不是 system,
+ * 跨回合 / 跨会话字节恒定)。导出为常量件供测试与注入名册完备性锁引用。
+ */
+export const AGENT_STATUS_RECONCILE_LINE =
+  "reconcile: A new user instruction has arrived; if it conflicts with the current todo ledger, reconcile the ledger via todo_write first, then continue.";
+
 /** 现势快照数据(栏文本的单一真源;T3 从同一份数据发 TUI 事件)。 */
 export interface AgentStatusSnapshot {
   /** 上一跳刚完成的工具名(run 作用域);本回合尚未跑过工具 = "idle"。 */
   readonly lastTool: string;
   /** 未完成条目的规范账本行(pending + in_progress,带 id);无 = 空列表。 */
   readonly openTodoLines: ReadonlyArray<string>;
+  /**
+   * 最新真实用户指令首行逐字回显(spec ADR-0103);null / 缺席 → 整行缺席
+   * (空槽不广告)。可选是为了让 T3 接线前的旧装配点(compute / TUI 事件)
+   * 原样编译,parse 侧总是显式给出 null。
+   */
+  readonly instruction?: string | null;
+  /**
+   * 本栏是否携带 pivot reconcile 标记(进场后首跳一次性);false / 缺席 →
+   * 整行缺席。结算算法归 T3,这里只承载字段。
+   */
+  readonly reconcile?: boolean;
 }
 
 /**
@@ -51,12 +69,15 @@ export interface AgentStatusSnapshot {
  * ```
  * <agent_status>
  * last_tool: <name>
+ * instruction: <最新真实用户指令首行逐字>(null / 缺席 → 整行缺席)
+ * reconcile: <固定标记句>(false / 缺席 → 整行缺席)
  * todos:
  * - [ ] <item>
  * </agent_status>
  * ```
  *
- * todo 段(`todos:` 头 + 未勾行)仅在存在未勾项时出现 —— 空槽不广告。
+ * instruction / reconcile / todo 段都是「空槽不广告」的可选段;标量段
+ * (instruction / reconcile)与 last_tool 一律排在 `todos:` 头之前(次序纪律)。
  */
 /** 栏文本形态检测（TUI 隐藏注入气泡、turn 边界、测试夹具共用）。 */
 export function isAgentStatusText(text: string): boolean {
@@ -64,7 +85,15 @@ export function isAgentStatusText(text: string): boolean {
 }
 
 export function buildAgentStatusText(snapshot: AgentStatusSnapshot): string {
+  // 次序纪律(spec invariant 5):标量字段行全部先于 `todos:` 头,todo 行
+  // 永远占栏末段 —— 这是旧解析器吃新栏仍得正确子集(回滚安全)的根。
   const lines: string[] = ["<agent_status>", `last_tool: ${snapshot.lastTool}`];
+  if (snapshot.instruction !== null && snapshot.instruction !== undefined) {
+    lines.push(`instruction: ${snapshot.instruction}`);
+  }
+  if (snapshot.reconcile === true) {
+    lines.push(AGENT_STATUS_RECONCILE_LINE);
+  }
   if (snapshot.openTodoLines.length > 0) {
     lines.push("todos:");
     lines.push(...snapshot.openTodoLines);
@@ -74,9 +103,13 @@ export function buildAgentStatusText(snapshot: AgentStatusSnapshot): string {
 }
 
 const LAST_TOOL_PREFIX = "last_tool: ";
+const INSTRUCTION_PREFIX = "instruction: ";
+const RECONCILE_PREFIX = "reconcile: ";
 
 /**
  * 栏文本 → 现势快照(TUI resume hydrate / 测试直驱)。畸形输入 → null,不 throw。
+ * 旧格式栏(无 instruction / reconcile 行)是合法输入 → 显式缺省
+ * `instruction: null, reconcile: false`(spec F4,不判畸形)。
  */
 export function parseAgentStatusText(text: string): AgentStatusSnapshot | null {
   if (!isAgentStatusText(text)) return null;
@@ -87,12 +120,20 @@ export function parseAgentStatusText(text: string): AgentStatusSnapshot | null {
   const body = lines.slice(1, -1);
   const lastToolLine = body.find((l) => l.startsWith(LAST_TOOL_PREFIX));
   if (lastToolLine === undefined) return null;
+  const instructionLine = body.find((l) => l.startsWith(INSTRUCTION_PREFIX));
+  const reconcile = body.some((l) => l.startsWith(RECONCILE_PREFIX));
   const todoHeaderIndex = body.findIndex((l) => l === "todos:");
+  // `todos:` 头之前的未知标量行(前向兼容)不进 todo 列表:头后才是 todo 段。
   const openTodoLines =
     todoHeaderIndex >= 0 ? body.slice(todoHeaderIndex + 1) : [];
   return Object.freeze({
     lastTool: lastToolLine.slice(LAST_TOOL_PREFIX.length),
     openTodoLines: Object.freeze([...openTodoLines]),
+    instruction:
+      instructionLine === undefined
+        ? null
+        : instructionLine.slice(INSTRUCTION_PREFIX.length),
+    reconcile,
   });
 }
 
