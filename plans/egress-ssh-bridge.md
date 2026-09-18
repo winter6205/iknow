@@ -44,7 +44,7 @@ OVERALL: PASS（rev 2，返工点已按审查方清单落实）
    - **Inherits:** spec T3 钉死注入串（Surface 引用）；invariant 3 逐字「egress session 缺席（任何原因）时 `GIT_SSH_COMMAND` 不注入——git-over-SSH 与全部非代理感知程序同态 fail-closed（纯断网），杜绝『有注入无桥』的半开形态」；invariant 4「代理 env（三键 + `GIT_SSH_COMMAND` + NO_PROXY 族）只在 `buildProxyEnv`/`assembleFenceSpec` 一处构造……三消费面零复制」；assumption 4（注入形态必含 `-F /dev/null`，本子弹含围栏内复验探针）。
    - **Surface:** `src/harness/sandbox/egress/session.ts`（注入经 `spec.env` → `mergedEnv`）；`env-isolation.ts` 面为**确认不改**（`GIT_SSH_COMMAND` 不入 `BASE_ENV_WHITELIST`，宿主值恒不进围栏）；TUI pty 实测面。
    - **Acceptance:** 注入串形态 = `ssh -F /dev/null -o ControlMaster=no -o ControlPath=none -o ProxyCommand='socat - PROXY:127.0.0.1:%h:%p,proxyport=3128,proxyauth=<user>:<token>'`（spec 冻结形态），单测逐字符断言（token 位以注入 seam 固定值）；围栏内复验 `ssh -G github.com` 不报 `Bad owner or permissions`；session 缺席时该 env 在围栏 env 中不存在；围栏内用户命令显式内联 `GIT_SSH_COMMAND=...` 时后者胜（shell 语义，不加防御）；`npm test` 绿 + TUI 实测 `echo $GIT_SSH_COMMAND` 屏上值可见。
-   - Status: [ ] pending
+   - Status: [x] done（逐字符注入串 + token 同源 + 缺席不注入 + 白名单钉 + 后者胜注释全落；围栏内 `ssh -G github.com` 复验与 TUI `echo $GIT_SSH_COMMAND` deferred 到子弹 7——实现机无 socat 起不了真围栏，仓内无先例可自动化）
    - [blocks: T1]
 
 4. **SSH 域判定语义钉子（preset 零改动）** — tag: `[implementation]`

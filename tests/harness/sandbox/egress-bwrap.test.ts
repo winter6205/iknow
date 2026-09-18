@@ -44,6 +44,12 @@ function egressSpec(): EgressFenceSpec {
       HTTPS_PROXY: "http://127.0.0.1:3128",
       ALL_PROXY: "http://127.0.0.1:3128",
       NO_PROXY: "127.0.0.1,localhost",
+      // T3：GIT_SSH_COMMAND 与代理 env 同经 spec.env → mergedEnv →
+      // --setenv 单通道（invariant 4），fence 层零复制。
+      GIT_SSH_COMMAND:
+        "ssh -F /dev/null -o ControlMaster=no -o ControlPath=none " +
+        "-o ProxyCommand='socat - PROXY:127.0.0.1:%h:%p," +
+        "proxyport=3128,proxyauth=iknow:testtoken'",
     },
     // bwrap 层不消费 innerBridgeScript（消费面是 bash.ts 命令链）；
     // 这里只需满足 spec 形状。
@@ -72,6 +78,9 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
       true,
       "--unshare-net remains the default"
     );
+    // T3 invariant 3：session 缺席（任何原因）→ 围栏 env 中不存在
+    // GIT_SSH_COMMAND（无缝 = 无注入 = git-over-SSH 纯断网同态）。
+    assert.ok(!argv.includes("GIT_SSH_COMMAND"));
     // 无 --bind /tmp/iknow-egress-test.sock
     for (let i = 0; i + 2 < argv.length; i++) {
       if (argv[i] === "--bind" && argv[i + 1] === argv[i + 2]) {
@@ -104,6 +113,7 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
     let sawHttps = false;
     let sawAll = false;
     let sawNo = false;
+    let sawGitSsh = false;
     for (let i = 0; i + 1 < argv.length; i++) {
       if (argv[i] !== "--setenv") continue;
       const name = argv[i + 1];
@@ -112,6 +122,11 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
       if (name === "HTTPS_PROXY") sawHttps = true;
       if (name === "ALL_PROXY") sawAll = true;
       if (name === "NO_PROXY") sawNo = true;
+      if (name === "GIT_SSH_COMMAND") {
+        sawGitSsh = true;
+        // T3：值 = spec.env 逐字透传（fence 层不改造注入串）。
+        assert.equal(value, egressSpec().env.GIT_SSH_COMMAND);
+      }
       // env value matches spec
       if (
         name === "HTTP_PROXY" ||
@@ -125,6 +140,9 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
       sawHttp && sawHttps && sawAll && sawNo,
       "all 4 proxy env keys set"
     );
+    // T3：GIT_SSH_COMMAND 经 spec.env → mergedEnv → --setenv 单通道注入
+    // （invariant 4：三消费面零复制，fence 只透传）。
+    assert.ok(sawGitSsh, "GIT_SSH_COMMAND set via spec.env channel");
 
     // --unshare-net 仍在（egress ≠ host network）
     assert.ok(argv.includes("--unshare-net"));

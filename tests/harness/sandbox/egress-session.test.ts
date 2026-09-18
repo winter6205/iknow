@@ -144,6 +144,18 @@ describe("createEgressSession — lifecycle", () => {
       expect(env.https_proxy).toBe(env.HTTPS_PROXY);
       expect(env.no_proxy).toBe(env.NO_PROXY);
 
+      // T3：spec.env 同时带 GIT_SSH_COMMAND，且 token 与代理 URL userinfo
+      // 同源（invariant 4 注入面 SSOT 单点：buildProxyEnv 一处构造，
+      // 三键与 GIT_SSH_COMMAND 必共享同一 session token）。
+      expect(env.GIT_SSH_COMMAND).toMatch(
+        /^ssh -F \/dev\/null -o ControlMaster=no -o ControlPath=none -o ProxyCommand='socat - PROXY:127\.0\.0\.1:%h:%p,proxyport=3128,proxyauth=iknow:[0-9a-f]{64}'$/
+      );
+      const urlToken = new URL(env.HTTP_PROXY).password;
+      const sshToken = /proxyauth=iknow:([^']+)'$/.exec(
+        env.GIT_SSH_COMMAND
+      )?.[1];
+      expect(sshToken).toBe(urlToken);
+
       // 内层桥前导逐字形状：单桥（3128 → unix socket）+ trap kill EXIT。
       // 不断言真监听（测试用假 spawn）。
       expect(session.spec.innerBridgeScript).toBe(
@@ -274,6 +286,24 @@ describe("buildProxyEnv", () => {
     ]);
     expect(env.NO_PROXY).toContain("internal.example");
     expect(env.NO_PROXY).toContain("10.0.0.0/8");
+  });
+
+  it("injects GIT_SSH_COMMAND verbatim per spec T3 frozen form (ssh-bridge 子弹3)", () => {
+    // 逐字符 = specs/egress-ssh-bridge.md §T3 钉死形态：`-F /dev/null`
+    // （assumption 4：围栏内 /etc/ssh/ssh_config.d 报 Bad owner or
+    // permissions）、mux 中和、ProxyCommand 经沙箱内 3128 半桥走 HTTP
+    // CONNECT。token 位以注入 seam 固定值断言。
+    const env = buildProxyEnv(3128, "t0k3n");
+    expect(env.GIT_SSH_COMMAND).toBe(
+      "ssh -F /dev/null -o ControlMaster=no -o ControlPath=none " +
+        "-o ProxyCommand='socat - PROXY:127.0.0.1:%h:%p," +
+        "proxyport=3128,proxyauth=iknow:t0k3n'"
+    );
+  });
+
+  it("GIT_SSH_COMMAND proxyport tracks sandboxLocalPort (no hardcoded port drift)", () => {
+    const env = buildProxyEnv(3129, "t0k3n");
+    expect(env.GIT_SSH_COMMAND).toContain("proxyport=3129");
   });
 });
 

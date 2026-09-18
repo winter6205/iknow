@@ -168,7 +168,7 @@ export interface EgressFenceSpec {
    * `HTTP_PROXY=http://<user>:<token>@127.0.0.1:<port>` 等 env。
    */
   readonly sandboxLocalPort: number;
-  /** 已含代理三键（嵌 auth userinfo，O1）+ NO_PROXY 的 env 增量 —— fence 拼到自己的 envArgs。 */
+  /** 已含代理三键（嵌 auth userinfo，O1）+ NO_PROXY 族 + `GIT_SSH_COMMAND`（T3）的 env 增量 —— fence 拼到自己的 envArgs。 */
   readonly env: Readonly<Record<string, string>>;
   /**
    * 沙箱内侧半桥的前导脚本（session 装配期算好）：沙箱内 socat 把
@@ -296,7 +296,8 @@ export function buildInnerBridgeScript(
 
 /**
  * 构造 fence env 增量 —— HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY
- * （含小写别名，覆盖 curl / wget / npm 等工具读取差异）。
+ * （含小写别名，覆盖 curl / wget / npm 等工具读取差异）+ GIT_SSH_COMMAND
+ * （egress-ssh-bridge T3，见下方形态说明）。
  *
  * - 三键统一指向 `http://<PROXY_AUTH_USER>:<token>@127.0.0.1:<sandboxLocalPort>`：
  *   沙箱内 socat 监听该端口并把流量转回 unix socket → 宿主代理；URL 嵌
@@ -308,6 +309,18 @@ export function buildInnerBridgeScript(
  *   代价（O2）：目标是 loopback 字面的请求会绕代理直连（沙箱 netns 内
  *   必败）—— 出口可达性探针的正样本因此必须用**非 loopback** 可寻址
  *   fixture（scripts/sandbox-probe.ts present 分支注释）。
+ * - T3：同处注入 `GIT_SSH_COMMAND`（invariant 4 注入面 SSOT 单点 —— 与
+ *   代理三键共享同一 session token，bash / background / verify 三消费面
+ *   零复制）。形态逐字冻结于 specs/egress-ssh-bridge.md §T3：ssh 经沙箱
+ *   内 3128 半桥走 HTTP CONNECT 隧道（`socat - PROXY:` 是依赖包
+ *   sandbox-utils.js:536-540 的 Linux 跨版本可移植选型）；`-F /dev/null`
+ *   依 assumption 4（围栏内 /etc/ssh/ssh_config.d/* 报 Bad owner or
+ *   permissions）；ControlMaster/ControlPath=none 中和 mux（沙箱内用户
+ *   ControlPath 不可 bind，auth 后即退）。ProxyCommand 单引号对内无
+ *   quoting 风险：token 是内部生成的 hex（randomBytes，同 URL userinfo
+ *   纪律）。围栏内用户命令**显式内联** `GIT_SSH_COMMAND=... git ...` 时
+ *   后者胜 —— POSIX env 前缀赋值优先于继承值（shell 语义，按 spec T3
+ *   合并策略不加防御）。
  */
 export function buildProxyEnv(
   sandboxLocalPort: number,
@@ -316,6 +329,10 @@ export function buildProxyEnv(
 ): Record<string, string> {
   const proxyUrl = `http://${PROXY_AUTH_USER}:${proxyAuthToken}@127.0.0.1:${sandboxLocalPort}`;
   const noProxy = ["127.0.0.1", "localhost", ...extraNoProxy].join(",");
+  const gitSshCommand =
+    `ssh -F /dev/null -o ControlMaster=no -o ControlPath=none ` +
+    `-o ProxyCommand='socat - PROXY:127.0.0.1:%h:%p,` +
+    `proxyport=${sandboxLocalPort},proxyauth=${PROXY_AUTH_USER}:${proxyAuthToken}'`;
   return {
     HTTP_PROXY: proxyUrl,
     HTTPS_PROXY: proxyUrl,
@@ -325,6 +342,7 @@ export function buildProxyEnv(
     https_proxy: proxyUrl,
     all_proxy: proxyUrl,
     no_proxy: noProxy,
+    GIT_SSH_COMMAND: gitSshCommand,
   };
 }
 
