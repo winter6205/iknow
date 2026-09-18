@@ -2826,17 +2826,52 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   }
 
   /**
-   * Ctrl+C 打断分支体：running-fg → abort 该会话前台 turn（canInterrupt
-   * 是唯一判据，与 /quit / Esc 同源）；否则只出提示，不伪造打断。
+   * Ctrl+C 打断本体（Locked sentence 3 / T5）：「当前会话前台一切」——
+   *   - 子代理：`bridge.abortSessionForegroundWork(本会话)` 一趟枚举 + abort
+   *     本会话**新鲜**的前景账（父 idle 但在途的 `wait:true` 只有 hub 侧看
+   *     得到；TUI 的 1Hz 投影最多陈旧 1s，不拿它当判据）。无 manager
+   *     （ask 形态）→ 空数组；
+   *   - 父 turn：既有 `aborters`（canInterrupt 唯一判据，与 /quit / Esc 同
+   *     源，无第二条 abort 通道）。controller 竞态缺席（turn finally 收尾）
+   *     → 静默，不伪造打断。
+   *
+   * 返回「本会话前台真的有活」（判据是这趟动作本身，不另读会陈旧的 React
+   * 态）：调用方据此让打断赢过选区复制臂，并在无活时落既有提示 / 复制分支。
+   * 两臂无活时零副作用（扇出空转、无 aborter 可 abort）→ 返回 false。
    */
-  function interruptForegroundTurn(): void {
-    if (canInterrupt(active)) {
-      const id = active.conversationId;
-      const controller =
-        id === undefined ? undefined : aborters.current.get(id);
-      if (controller !== undefined) {
-        controller.abort();
-      }
+  function interruptForegroundTurn(): boolean {
+    const id = active.conversationId;
+    const abortedSubagents =
+      id === undefined ? [] : props.bridge.abortSessionForegroundWork(id);
+    if (!canInterrupt(active)) return abortedSubagents.length > 0;
+    if (id !== undefined) {
+      aborters.current.get(id)?.abort();
+    }
+    return true;
+  }
+
+  /**
+   * Ctrl+C 的第二段分支体（Locked sentence 3 的顺序条款）：**前台有活先打断，
+   * 无活才轮到选区复制**。
+   *
+   * 顺序不能反：#343 v3 的选区优先复制是「idle 时按 Ctrl+C 想复制」的语义；
+   * 前台在跑时同一按键的意图是打断（spec 原文「前台仍在跑时有选区也先打
+   * 断」）。判据是 interruptForegroundTurn() 的返回值 —— 动作本身的结果
+   * （hub 现拉的新鲜前景账 + aborter 登记簿），不是 TUI 1Hz 投影：后者会漏
+   * 掉刚 spawn / 父已 idle 的 `wait:true` 子代理。
+   *
+   * 无前台活 → 回到 #343 v3 原样：有选区复制（清 ref 走 handleMouseUp 同款
+   * 尾清理）+ return；无选区 → 既有「无前台运行」提示。
+   */
+  function handleCtrlCInterrupt(): void {
+    const sessionForegroundLive = interruptForegroundTurn();
+    if (sessionForegroundLive) return;
+    const selectedText = cachedSelectionTextRef.current;
+    if (selectedText.length > 0) {
+      cachedSelectionTextRef.current = "";
+      void doCopy(selectedText).then((result) =>
+        setNoticeFromCopyResult(selectedText, result)
+      );
       return;
     }
     setNotice({
@@ -3509,20 +3544,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         compactingControllerRef.current.abort();
         return;
       }
-      // #343 v3 follow-up：选区优先复制 —— 用户在拖选后按 Ctrl+C，意图是
-      // 复制当前选区（与右键复制同源语义），而不是打断 turn。压缩取消保持
-      // 最高优先级（用户主动 /compact 的明确意图），其他场景下有选区 →
-      // 复制 + return（不打断 turn、不发"无前台运行"notice）；清 ref 走
-      // handleMouseUp 同款尾清理。text 为空 → 走原打断/notice 路径。
-      const selectedText = cachedSelectionTextRef.current;
-      if (selectedText.length > 0) {
-        cachedSelectionTextRef.current = "";
-        void doCopy(selectedText).then((result) =>
-          setNoticeFromCopyResult(selectedText, result)
-        );
-        return;
-      }
-      interruptForegroundTurn();
+      // Locked sentence 3 的回合适配（打断 vs 选区复制的顺序）在 helper，
+      // 与 interruptForegroundTurn 同址 —— handler 只做键位分派（S5）。
+      handleCtrlCInterrupt();
       return;
     }
     // Ctrl+X：强杀 chrome-focus 聚焦的 live 子代理（spec Slice D / SC14）。

@@ -195,6 +195,16 @@ export interface TuiBridge {
    * cancelled」），再中止 worker 子进程。见 `src/tui/subagent-kill.ts` 头注。
    */
   readonly abortSubagentTask: (taskId: string) => boolean;
+  /**
+   * plans/session-fg-handoff-interrupt Locked sentence 3 / T5：Ctrl+C 扇出
+   * 本会话**全部前景子代理**（`foreground === true` ∧ live）。父 `running-fg`
+   * turn 的 aborter 仍归 app 层（同一 registry，不新开第二条通道）。
+   * `wait:false` 后景与其它会话不在集合内 —— 作用域由 conversationId 定。
+   * 返回真正被 abort 的 taskId；无 manager → 空数组（不抛错）。
+   */
+  readonly abortSessionForegroundWork: (
+    conversationId: string
+  ) => ReadonlyArray<string>;
 }
 
 export interface CreateTuiBridgeOptions {
@@ -462,6 +472,10 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     listSubagents: (conversationId) => hub.listSubagents(conversationId),
     // Slice D / SC14: 强杀出口（Ctrl+X）。hub 侧 no-op 语义 → false。
     abortSubagentTask: (taskId) => hub.abortSubagentTask(taskId),
+    // Locked sentence 3 / T5: Ctrl+C 扇出（本会话前景子代理）。hub 侧无
+    // manager → 空数组。
+    abortSessionForegroundWork: (conversationId) =>
+      hub.abortSessionForegroundWork(conversationId),
   };
   return Object.freeze(bridge);
 }

@@ -172,6 +172,7 @@ function fakeBridge(opts: FakeBridgeOptions): {
     contextWindow: 200_000,
     getCapacity: () => 15,
     listSubagents: () => [],
+    abortSessionForegroundWork: () => [],
   };
   return { bridge, control };
 }

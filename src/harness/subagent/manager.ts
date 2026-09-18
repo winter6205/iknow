@@ -16,6 +16,7 @@ import {
   shouldAttachProductRoster,
   parseParentEnvelope,
   truncateEnvelopeResult,
+  FINAL_TEXT_PAD_NAME,
   SUMMARY_LIMIT,
 } from "./envelope.js";
 import type { SubAgentEnvelope, WorkerEnvelope } from "./envelope.js";
@@ -85,6 +86,17 @@ export interface SubagentInfo {
    * 字段不在场(Postel)，不在场 ≠ 值为 undefined。
    */
   readonly toolUseId?: string;
+  /** 归属会话（`def.conversationId`）；直调 manager / judge 等无会话场景缺席。 */
+  readonly conversationId?: string;
+  /**
+   * 前景标志 —— **等价于** `def.excludeFromHostDrain === true`，即父侧
+   * in-band 等待（`wait:true` 的 spawn_subagent）与 judge / graph-node 同一
+   * population：信封已由调用方当跳取走。前台打断（Ctrl+C 扇出本会话全部
+   * 前景子代理）按此字段选目标，故它**不能**在此重算「态是否 running」——
+   * 语义是交付通道，不是寿命。
+   * Postel:仅 true 在场；后景 / 未知缺席（消费方必须按 `=== true` 判断）。
+   */
+  readonly foreground?: boolean;
 }
 
 export interface SubAgentManager {
@@ -356,6 +368,26 @@ function parentTurnFields(def: SubAgentDefinition): {
   return def.parentTurnId !== undefined
     ? { parentTurnId: def.parentTurnId }
     : {};
+}
+
+/**
+ * T7 投影的 Postel 增量：归属会话 + 前景标志（见 SubagentInfo 两字段注释）。
+ * 单点展开而不是塞进 listSubagents 的字段字面量 —— 每加一个可选字段就给
+ * 投影函数加一段分支，复杂度阈值会先于语义漂移报警。
+ */
+function ownershipInfoFields(def: SubAgentDefinition): {
+  readonly conversationId?: string;
+  readonly foreground?: boolean;
+} {
+  return {
+    ...(def.conversationId !== undefined
+      ? { conversationId: def.conversationId }
+      : {}),
+    // Foreground == parent awaits in-band == excludeFromHostDrain（同一
+    // population：wait:true 的 spawn_subagent / judge / graph-node）。
+    // 下游 Ctrl+C 扇出按此字段选本会话前景子代理。
+    ...(def.excludeFromHostDrain === true ? { foreground: true } : {}),
+  };
 }
 
 type TaskState = "starting" | "running" | "completed" | "failed";
@@ -714,11 +746,69 @@ export function createSubAgentManager(opts: {
     return join(opts.projectDir, SUBAGENT_TRACE_DIR_NAME);
   }
 
+  /**
+   * Locked sentence 2: host-side final-text landing. Writes the terminal
+   * assistant text (the `result` the host holds — already wire-folded by the
+   * worker when it exceeded 20000 chars) to the worker pad's stable relative
+   * path, and returns that pad-relative path for the envelope.
+   *
+   * Failure modes (all degrade, never throw):
+   *   - no padRoot / empty-or-whitespace-only `result` → `undefined` (no file,
+   *     no `output_path`; the timeout fallback envelope lands here);
+   *   - pad write failure (ENOTDIR / EACCES / ENOSPC / …) → `undefined` +
+   *     warn-once. A pad write is bookkeeping: it must not fail the task and
+   *     must not abort the terminal path.
+   *
+   * The `finalTextWriteWarned` latch is load-bearing and deliberately NOT
+   * shared with `writeMetaOnce` (which has no latch): this function is reached
+   * from `locateEnvelope`, and one task can land an envelope **more than
+   * once** — a timeout fallback (below, `timeoutTimer`) is documented to be
+   * replaced by the worker's richer SIGTERM-turn envelope when the stdout
+   * handler fires, and crash / spawn-failure / clean-exit-without-envelope
+   * are separate terminal paths on the same task. Every such landing retries
+   * the pad write, so without the latch a single broken padRoot would spam
+   * one warn per landing. `writeMetaOnce` needs no latch because it has a
+   * single call site (before the spawn try) plus an `existsSync` early
+   * return — one warn per task is structural there, not latched.
+   *
+   * Truncation is NOT a failure here — a `truncated: true` envelope still
+   * lands its (folded) text and keeps `status: "ok"`.
+   */
+  const finalTextWriteWarned = new Set<string>();
+  function writeFinalTextToPad(
+    task: Task,
+    env: SubAgentEnvelope
+  ): string | undefined {
+    if (task.padRoot === undefined) return undefined;
+    // Postel: empty / whitespace-only is "no final text", not an empty file.
+    if (env.result.trim().length === 0) return undefined;
+    try {
+      mkdirSync(task.padRoot, { recursive: true });
+      writeFileSync(join(task.padRoot, FINAL_TEXT_PAD_NAME), env.result);
+    } catch (err) {
+      // EXIT: pad writing is a best-effort delivery channel; the short handoff
+      // in the envelope remains the authoritative parent-visible result.
+      if (!finalTextWriteWarned.has(task.id)) {
+        finalTextWriteWarned.add(task.id);
+        const detail = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[subagent] final text pad write skipped for ${task.id}: ${detail}`
+        );
+      }
+      return undefined;
+    }
+    return FINAL_TEXT_PAD_NAME;
+  }
+
   function locateEnvelope(task: Task, env: SubAgentEnvelope): SubAgentEnvelope {
     if (task.padRoot === undefined) return env;
+    // The host is the writer: an `output_path` echoed by the worker is not
+    // trusted, and the stamp always names a file this call actually wrote.
+    const outputPath = writeFinalTextToPad(task, env);
     const located = attachParentVisibleTmp(env, {
       task_id: task.id,
       tmp_root: task.padRoot,
+      ...(outputPath !== undefined ? { output_path: outputPath } : {}),
     });
     if (!shouldAttachProductRoster(located)) return located;
     return {
@@ -737,7 +827,13 @@ export function createSubAgentManager(opts: {
    *
    * review-fix (M6):`spawnDepth` 默认 1 —— 顶层 spawn 恒为 1(v1 禁嵌套);
    * `def.spawnDepth` 显式值优先(seam 留给将来嵌套派发场景)。
-   * 失败时 console.warn 一次(同 recordXxx warn-once 语义),不阻塞 spawn。
+   * 失败时 console.warn,不阻塞 spawn。
+   *
+   * 「一次」是**结构性**的,不靠 latch:`writeMetaOnce` 只有一个调用点,且
+   * 开头 `existsSync(metaPath)` 早返回 —— 同一任务第二次进来不会走到 warn。
+   * 与之对照,`writeFinalTextToPad` 会随同一任务的多次信封落地重入(见其头注),
+   * 故那里必须用 `finalTextWriteWarned` 锁存。两者形态不同是各自的调用基数
+   * 决定的,不是遗漏。
    */
   function writeMetaOnce(taskId: string, def: SubAgentDefinition): void {
     const subagentsDir = resolveSubagentsDirForDef(def);
@@ -834,6 +930,43 @@ export function createSubAgentManager(opts: {
   }
 
   /**
+   * 终态信封 → mailbox notice 的 Postel 投影：可选字段逐项条件展开。
+   * 单点收拢而不是让 emitStop 自己长出一串 `...(x !== undefined ? …)`——
+   * 每加一个 locator 字段就给 emitStop 加一段分支，复杂度阈值会先于语义
+   * 漂移报警（同 ownershipInfoFields 的收拢理由）。
+   */
+  function terminalNoticeOf(task: Task, envelope: SubAgentEnvelope) {
+    return {
+      taskId: task.id,
+      ...(task.def.conversationId !== undefined
+        ? { conversationId: task.def.conversationId }
+        : {}),
+      status: envelope.status,
+      summary: envelope.summary,
+      result: envelope.result,
+      ...(envelope.fileRefs !== undefined
+        ? { fileRefs: envelope.fileRefs }
+        : {}),
+      ...(envelope.reason !== undefined ? { reason: envelope.reason } : {}),
+      ...(envelope.stop_reason !== undefined
+        ? { stop_reason: envelope.stop_reason }
+        : {}),
+      ...(envelope.truncated !== undefined
+        ? { truncated: envelope.truncated }
+        : {}),
+      ...(envelope.totalLength !== undefined
+        ? { totalLength: envelope.totalLength }
+        : {}),
+      ...(envelope.tmp_root !== undefined
+        ? { tmp_root: envelope.tmp_root }
+        : {}),
+      ...(envelope.output_path !== undefined
+        ? { output_path: envelope.output_path }
+        : {}),
+    };
+  }
+
+  /**
    * #358 T4: emitStop — 任务终态时落 subagent_stop; stoppedEmitted flag 守门
    * 保证 single-emit (exit handler + timeout-fire + child.on("error") 多路径
    * 都可能触发终态); 已发则 no-op。
@@ -855,32 +988,9 @@ export function createSubAgentManager(opts: {
     if (task.stoppedEmitted) return;
     task.stoppedEmitted = true;
     if (task.envelope !== undefined && task.def.excludeFromHostDrain !== true) {
-      const envelope = task.envelope;
-      terminalMailbox.publish({
-        taskId: task.id,
-        ...(task.def.conversationId !== undefined
-          ? { conversationId: task.def.conversationId }
-          : {}),
-        status: envelope.status,
-        summary: envelope.summary,
-        result: envelope.result,
-        ...(envelope.fileRefs !== undefined
-          ? { fileRefs: envelope.fileRefs }
-          : {}),
-        ...(envelope.reason !== undefined ? { reason: envelope.reason } : {}),
-        ...(envelope.stop_reason !== undefined
-          ? { stop_reason: envelope.stop_reason }
-          : {}),
-        ...(envelope.truncated !== undefined
-          ? { truncated: envelope.truncated }
-          : {}),
-        ...(envelope.totalLength !== undefined
-          ? { totalLength: envelope.totalLength }
-          : {}),
-        ...(envelope.tmp_root !== undefined
-          ? { tmp_root: envelope.tmp_root }
-          : {}),
-      });
+      // Locked sentence 2: 发布在 locateEnvelope 之后，故 drain/wake 收到的
+      // 信封同样带 output_path（写盘先于 publish）。
+      terminalMailbox.publish(terminalNoticeOf(task, task.envelope));
     }
     const endedAt = new Date().toISOString();
     // #358 T7: 终态 ISO 随 single-emit 锁存一次 (listSubagents 读它当 endedAt)。
@@ -1651,6 +1761,7 @@ export function createSubAgentManager(opts: {
         ...(presentString(task.def.toolUseId)
           ? { toolUseId: task.def.toolUseId }
           : {}),
+        ...ownershipInfoFields(task.def),
       };
       out.push(item);
     }

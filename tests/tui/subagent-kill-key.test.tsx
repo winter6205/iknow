@@ -152,6 +152,7 @@ async function mountApp(subagents: ReadonlyArray<SubagentInfo>): Promise<{
       killed.push({ taskId });
       return true;
     },
+    abortSessionForegroundWork: () => [],
     subscribeSubagentTerminal: () => () => undefined,
     wakeFromSubagent: async () => undefined,
   };

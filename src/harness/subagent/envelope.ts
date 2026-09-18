@@ -8,7 +8,7 @@
  *   - 子→父 result (parseParentEnvelope / truncateEnvelopeResult):
  *       { status: "ok"|"failed", summary, result, fileRefs?, usage?, reason?,
  *         stop_reason?, truncated?, totalLength?, task_id?, tmp_root?,
- *         product_roster? }
+ *         output_path?, product_roster? }
  *
  * 校验规则 (SC13 / plan D1 acceptance 3):
  *   - 缺必填字段 / wrong type / 非对象 → throw ProtocolError (协议错误);
@@ -143,11 +143,32 @@ export interface SubAgentEnvelope {
    */
   readonly tmp_root?: string;
   /**
+   * Locked sentence 2 (plans/session-fg-handoff-interrupt.md): pad-relative
+   * path of the file the **host** wrote the worker's terminal assistant text
+   * to (`FINAL_TEXT_PAD_NAME`, sibling of the pad's other products). The
+   * parent-visible envelope stays a short summary — this field is the full-text
+   * channel, read back with `subagent_result(tmp_path)`.
+   *
+   * Postel: present only when a file was actually written. A failed pad write
+   * or an empty/whitespace-only `result` (e.g. the timeout fallback envelope)
+   * omits the key rather than pointing at a file that does not exist.
+   *
+   * Wire additive + optional — legacy envelopes without it still parse; the
+   * host's own stamp is in `attachParentVisibleTmp`.
+   */
+  readonly output_path?: string;
+  /**
    * SC5 short roster of pad top-level names. SC4 success path omits it
    * or leaves it empty — T4 does not populate this field.
    */
   readonly product_roster?: readonly string[];
 }
+
+/**
+ * SSOT name of the host-written final-text file inside a worker's pad.
+ * Pad-relative (what `subagent_result(tmp_path)` consumes), never absolute.
+ */
+export const FINAL_TEXT_PAD_NAME = "final.md";
 
 const TRUNCATION_LIMIT = 20000;
 /** Parent-visible summary cap (handoff + crashed stderr tail). */
@@ -243,6 +264,11 @@ export const PARENT_SCHEMA: Record<string, unknown> = {
     // still parses. minLength:1 so empty strings are protocol errors.
     task_id: { type: "string", minLength: 1 },
     tmp_root: { type: "string", minLength: 1 },
+    // Locked sentence 2 (additive, optional): pad-relative path of the
+    // host-written final text. `additionalProperties: false` means an
+    // undeclared key here would make every stamped envelope a ProtocolError.
+    // minLength:1 — an empty string is a protocol error, not "no file".
+    output_path: { type: "string", minLength: 1 },
     product_roster: { type: "array", items: { type: "string" } },
   },
   required: ["status", "summary", "result"],
@@ -358,12 +384,22 @@ function shortHandoff(
  */
 export function attachParentVisibleTmp(
   env: SubAgentEnvelope,
-  loc: { readonly task_id: string; readonly tmp_root?: string }
+  loc: {
+    readonly task_id: string;
+    readonly tmp_root?: string;
+    /**
+     * Locked sentence 2: pad-relative path of the host-written final text.
+     * Absent when no file was written (Postel) — never point at a file that
+     * does not exist.
+     */
+    readonly output_path?: string;
+  }
 ): SubAgentEnvelope {
   return {
     ...env,
     task_id: loc.task_id,
     ...(loc.tmp_root !== undefined ? { tmp_root: loc.tmp_root } : {}),
+    ...(loc.output_path !== undefined ? { output_path: loc.output_path } : {}),
   };
 }
 

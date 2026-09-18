@@ -339,6 +339,152 @@ describe("resolveWithinRoot — T3 path-outside 文案含当前写根 (ADR-0037 
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// T4 (plans/session-fg-handoff-interrupt.md Locked sentence 4 / ADR-0037 §4):
+// 写/读/改/搜 的 workspace 解析相对活 taskRoot。相对路径第一段、或绝对前缀，
+// 等于当前树 leaf / 树路径 → 剥掉再解析；已在 taskRoot 下的绝对路径不再 join。
+// 判定只在根是 task worktree 形状时生效（主 checkout 逐字节不变），且剥完仍要
+// 过既有 containment —— 不为同名套娃留逃生口（树内真有同名目录时同一结果）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("resolveWithinRoot — task worktree leaf echo (Locked sentence 4)", () => {
+  const LEAF = "ai-news-digest";
+
+  /** 活 taskRoot 形状：`<repo>/.iknow/worktrees/<leaf>`（isTaskWorktreePath SSOT）。 */
+  async function makeTree(): Promise<string> {
+    const repo = await makeScratch("aci-helper-tree-");
+    const tree = join(repo, ".iknow", "worktrees", LEAF);
+    await mkdir(tree, { recursive: true });
+    return tree;
+  }
+
+  it("relative leaf-prefixed path and the bare path resolve to the same tree-root file", async () => {
+    const tree = await makeTree();
+    await writeFile(join(tree, "index.html"), "tree root\n");
+    // 同名套娃目录真的存在（内含不同正文）：leaf 回显仍指树根，无逃生口。
+    await mkdir(join(tree, LEAF), { recursive: true });
+    await writeFile(join(tree, LEAF, "index.html"), "nested decoy\n");
+
+    assert.equal(
+      await resolveWithinRoot(tree, `${LEAF}/index.html`),
+      join(tree, "index.html")
+    );
+    assert.equal(
+      await resolveWithinRoot(tree, "index.html"),
+      join(tree, "index.html")
+    );
+  });
+
+  it("the absolute form of a leaf-prefixed path resolves to the same tree-root file", async () => {
+    const tree = await makeTree();
+    await writeFile(join(tree, "index.html"), "tree root\n");
+
+    // 绝对形态 = 树路径前缀 + leaf 回显（相对剥叶形态的绝对写法）。
+    assert.equal(
+      await resolveWithinRoot(tree, join(tree, LEAF, "index.html")),
+      join(tree, "index.html")
+    );
+  });
+
+  it("an absolute path already inside the tree is returned unchanged (no re-join, no rewrite)", async () => {
+    const tree = await makeTree();
+    await mkdir(join(tree, "src"), { recursive: true });
+    await writeFile(join(tree, "src", "page.ts"), "export {};\n");
+    const kept = join(tree, "src", "page.ts");
+
+    assert.equal(await resolveWithinRoot(tree, kept), kept);
+    // 缺失写目标（最近存在祖先 = 树根）同样逐字节不变。
+    assert.equal(
+      await resolveWithinRoot(tree, join(tree, "assets", "new.css")),
+      join(tree, "assets", "new.css")
+    );
+  });
+
+  it("a ./ prefixed leaf echo is stripped too (no decoy escape hatch)", async () => {
+    const tree = await makeTree();
+    await writeFile(join(tree, "index.html"), "tree root\n");
+    await mkdir(join(tree, LEAF), { recursive: true });
+    await writeFile(join(tree, LEAF, "index.html"), "nested decoy\n");
+
+    // 已归一化路径不得因 `./` 前缀绕过剥叶而落进同名套娃目录。
+    assert.equal(
+      await resolveWithinRoot(tree, `./${LEAF}/index.html`),
+      join(tree, "index.html")
+    );
+  });
+
+  it("a lexically equivalent spelling of the echo is stripped (normalize-then-judge)", async () => {
+    const tree = await makeTree();
+    await writeFile(join(tree, "index.html"), "tree root\n");
+    await mkdir(join(tree, LEAF), { recursive: true });
+    await writeFile(join(tree, LEAF, "index.html"), "nested decoy\n");
+
+    // 判据是「词法归一化后第一段等于 leaf」：任何等价写法都不许落回套娃目录，
+    // 否则一个字符的前缀就能绕过剥叶。
+    assert.equal(
+      await resolveWithinRoot(tree, `sub/../${LEAF}/index.html`),
+      join(tree, "index.html")
+    );
+  });
+
+  it("the bare leaf itself is left alone (prefix form only)", async () => {
+    const tree = await makeTree();
+    // `ai-news-digest` 单独一段不是回显：树内真有同名目录时照旧解析到它，
+    // 缺失则按既有规则拼到树根下 —— 两者都不是「剥成空路径」。
+    await mkdir(join(tree, LEAF), { recursive: true });
+    assert.equal(await resolveWithinRoot(tree, LEAF), join(tree, LEAF));
+    assert.equal(
+      await resolveWithinRoot(tree, `${LEAF}/new.html`),
+      join(tree, "new.html")
+    );
+  });
+
+  it("an empty path still resolves to the tree root itself", async () => {
+    const tree = await makeTree();
+
+    assert.equal(await resolveWithinRoot(tree, ""), tree);
+  });
+
+  it("a non-worktree root does not strip a same-named first segment", async () => {
+    const repo = await makeScratch("aci-helper-main-");
+    // 主 checkout 里同名目录：根不是 task worktree 形状 → 不剥。
+    const root = join(repo, LEAF);
+    await mkdir(join(root, LEAF), { recursive: true });
+    await writeFile(join(root, LEAF, "index.html"), "real subdir\n");
+
+    assert.equal(
+      await resolveWithinRoot(root, `${LEAF}/index.html`),
+      join(root, LEAF, "index.html")
+    );
+  });
+
+  it("strip-then-escape is still typed-rejected with the existing outside-root message", async () => {
+    const tree = await makeTree();
+
+    await assert.rejects(
+      resolveWithinRoot(tree, `${LEAF}/../..`),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("outside workspace") &&
+        error.message.includes("current write root")
+    );
+  });
+
+  it("~/... is still expanded to home, never rewritten into the tree", async () => {
+    const tree = await makeTree();
+
+    // $HOME 不在树内 → 无论 ~/foo.ts 是否存在，都必须按既有越界文案拒绝，
+    // 不得因剥前缀被改写成树内相对路径。
+    await assert.rejects(
+      resolveWithinRoot(tree, "~/foo.ts"),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("outside workspace") &&
+        error.message.includes("current write root")
+    );
+  });
+});
+
 describe("truncateByCodePoint", () => {
   it("truncates ASCII by character count", () => {
     assert.equal(truncateByCodePoint("abcdef", 3), "abc");

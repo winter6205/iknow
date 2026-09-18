@@ -88,6 +88,10 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/harness/build-engine-mcp-roots.test.ts",
   "tests/harness/build-engine-tool-overflow.test.ts",
   "tests/harness/build-engine-auto-memory.test.ts",
+  // Locked sentence 5：装配期不得 warmup —— 验收面就是「真 buildHarnessEngine
+  // / createWorkerDeps 装配后零 spawn」，装配链 → createBashTool → requireBwrap，
+  // runner 上装配期即 fail-loud。本地 WSL 全量验证。
+  "tests/harness/lsp/lazy-warmup.test.ts",
   "tests/harness/graph/run-graph-assembly.test.ts",
   "tests/harness/prefix-stability/assertion2-matrix.test.ts",
   "tests/harness/disclosure-index-align/sc7-index-demotion.test.ts",

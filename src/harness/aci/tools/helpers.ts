@@ -1,8 +1,17 @@
 import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  normalize,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
+import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
 // spawnWithStopSignal / truncateByCodePoint 迁至 sandbox/runner（#128 T2）：
 // sandbox 是基础层，这里 re-export 保持 grep / glob / 既有测试的 import 路径不变。
 export {
@@ -34,6 +43,45 @@ export const FENCE_WRITE_GUIDANCE =
 function expandHome(p: string): string {
   if (p === "~" || p.startsWith("~/")) return homedir() + p.slice(1);
   return p;
+}
+
+/**
+ * T4 (plans/session-fg-handoff-interrupt.md Locked sentence 4): the model
+ * sometimes echoes the live tree's own leaf prefix onto a workspace-relative
+ * path — `ai-news-digest/index.html` while the tree root already IS
+ * `<…>/.iknow/worktrees/ai-news-digest` — which resolves to a matryoshka
+ * `ai-news-digest/` directory (the exact _Avoid_ in CONTEXT's taskRoot entry).
+ * Strip that echo before resolution so both arms land on the tree root.
+ *
+ * Only for task-worktree-shaped roots (`isTaskWorktreePath`, shape SSOT):
+ * a main checkout — or any non-worktree root — keeps today's byte-identical
+ * resolution. The strip is unconditional for a leaf-prefixed path; a real
+ * same-named nested directory gets no escape hatch. Only the prefix form
+ * (`<leaf><sep>…`, or an absolute `<realRoot><sep><leaf><sep>…`) is stripped;
+ * the bare leaf stays untouched. The relative arm normalizes first so a
+ * `./<leaf>/…` echo cannot reach the nested decoy either; every non-matching
+ * target is returned byte-identical.
+ */
+function stripTaskWorktreeLeafEcho(
+  realRoot: string,
+  expandedTarget: string
+): string {
+  if (!isTaskWorktreePath(realRoot)) return expandedTarget;
+  const leaf = basename(realRoot);
+  if (leaf.length === 0) return expandedTarget;
+  // 归一化后再判前缀：`./<leaf>/…` 与 `<root>/./<leaf>/…` 都是同一句回显，
+  // 归一化不许成为绕过剥叶的旁门。不匹配的目标原样返回（逐字节不变）。
+  const normalized = normalize(expandedTarget);
+  const echo = `${leaf}${sep}`;
+  if (isAbsolute(expandedTarget)) {
+    const rootEcho = `${realRoot}${sep}${echo}`;
+    return normalized.startsWith(rootEcho)
+      ? `${realRoot}${sep}${normalized.slice(rootEcho.length)}`
+      : expandedTarget;
+  }
+  return normalized.startsWith(echo)
+    ? normalized.slice(echo.length)
+    : expandedTarget;
 }
 
 /**
@@ -155,7 +203,7 @@ export async function resolveWithinRoot(
   const realRoot = await realpath(resolve(root));
   const { absoluteTarget, realTmpRoot } = await resolveAbsoluteTarget(
     realRoot,
-    expandHome(target),
+    stripTaskWorktreeLeafEcho(realRoot, expandHome(target)),
     options.tmpWriteRoot
   );
   const resolvedTarget = await realpathWithMissingSuffix(absoluteTarget);

@@ -143,6 +143,9 @@ _Avoid_: 只有 graph 抢 Down；焦点落在 ContextBar；子代理面板不可
 **subagent card live（子代理会话卡实时行）**: `spawn_subagent` 在会话 transcript 里占两行——`{role} running...` 加一行 dim 最新流；该 worker 完成后第二行原位变绿 `done`。位置在那张会话消息下，不在输入框上方。
 _Avoid_: identity strip above prompt；把最新流只挂在 prompt 边上；完成态 done 跟底栏面板一起淡出
 
+**前台打断**: TUI **Ctrl+C** 停当前会话全部前台——父 `running-fg` turn，以及本会话所有前景（`wait:true`）子代理，包括父已 idle 但仍 live 的；后景 `wait:false` 与其它会话 `running-bg` 不停。前台仍在跑时有选区也先打断。Ctrl+X 仍可单杀焦点行（含后景）。
+_Avoid_: 只 abort 父 signal 留下前景子代理；idle 夹缝让前景子代理继续转圈；running-fg 有选区只复制不 abort
+
 **session location chrome（会话位置行）**: TUI 底栏在 ContextBar 之下**常驻一行** `路径 · 分支`；绑 task worktree 只换同一行的路径。子代理与 Graph 在它下面（两者都有时子代理在上）；不进焦点环、不进模型消息、不带 dirty/diff。
 _Avoid_: 绑树才出现；未绑树 0 行；用显隐当「在不在树上」；常驻第二行 dirty/diff；子代理画在位置行上面
 
@@ -179,7 +182,7 @@ _Avoid_: 在词条或文档里写死「当前 N 件」（必漂——曾写「�
 **符号工具面（symbol tool surface）**: 模型面的 15 件 LSP 支撑工具——10 件查（`find_symbol` / `find_declaration` / `find_referencing_symbols` / `find_implementations` / `get_symbols_overview` / `get_hover` / `get_diagnostics_for_file` / `prepare_call_hierarchy` / `list_incoming_calls` / `list_outgoing_calls`）+ 5 件改（`rename_symbol` / `replace_symbol_body` / `insert_before_symbol` / `insert_after_symbol` / `safe_delete_symbol`）；以符号身份 `{ file, symbol_path }` 提问，行列译码封在 `symbol-resolver.ts`。#251 的 10 件坐标面 `lsp_*` 已在 symbol-primary-aci T5 从**模型面**退役，但**没有退役出代码库**——`createLspToolSet` 是 `scripts/lsp-probe.ts:266` 的真实栈烟测仪器（经 `package.json` 的 `probe:lsp` 接线），且 `renderNoServer` / `stringifyResult` / `isLspFailureSentinel` / `getClientForWorkspaceDetailed` 等共享件仍被活的 `symbol.ts` / `symbol-mutate.ts` / `symbol-resolver.ts` import。该文件是**名字起错**，不是死了。
 _Avoid_: 把 `lsp_*` 当现行模型面；把 `createLspToolSet` 当死代码删掉（会砸掉 `probe:lsp`）；把只测 `lsp_*` 的断言当 `find_symbol` 等活路径的覆盖；让空数组兼任失败值（取不到 project 锚点应返分层哨兵，见 **请求级打开窗口**）；在 `symbol-resolver.ts` 外自写行列译码；grep 猜代码结构
 
-**请求级打开窗口（request-scoped didOpen）**: tsserver 对未打开文件**不建 project**，所以符号类 RPC 必须罩在 `client.withDocumentOpen(file, run)` 里（进入开、退出关，含抛错与超时路径）——**这是 project 上下文的前提，不是性能优化**；请求间不对 server 保持打开，故 version 每次从 1 起算（`symbol-resolver` 缓存键改内容指纹即此推论）。例外只有装配期 warmup：裸 `ensureOpen` 置 `pinned = true` 永久持有一个**真实样本文件**，理由与本条同（`warmup.ts` / `client.ts:632-642`、`520-521`）。已知豁免口：`find_symbol` 的 `file` 缺省分岔用伪路径 `<directory>/iknow-workspace.ts` 仅为 spawn，随后裸发请求、不开窗口（`lsp.ts:447-459` / `symbol.ts:354-356`）。
+**请求级打开窗口（request-scoped didOpen）**: tsserver 对未打开文件**不建 project**，所以符号类 RPC 必须罩在 `client.withDocumentOpen(file, run)` 里（进入开、退出关，含抛错与超时路径）——**这是 project 上下文的前提，不是性能优化**；请求间不对 server 保持打开，故 version 每次从 1 起算（`symbol-resolver` 缓存键改内容指纹即此推论）。例外只有**首次** `lsp_*` 同族调用触发的 warmup：裸 `ensureOpen` 置 `pinned = true` 永久持有一个**真实样本文件**，理由与本条同（`warmup.ts` / `client.ts`）；装配完成且从未调用这类工具则不起 language server。已知豁免口：`find_symbol` 的 `file` 缺省分岔用伪路径 `<directory>/iknow-workspace.ts` 仅为 spawn，随后裸发请求、不开窗口（`lsp.ts` / `symbol.ts`）。
 _Avoid_: 把 didOpen 当可省的优化；跨请求保持打开（`pinned` 预热除外）；用伪路径当 project 锚点；把无锚点查询的空结果读成「真没这个符号」；用请求级 version 号当跨请求缓存键
 
 **last-read ledger**: 本 conversation 内「看过的规范 path」登记表。**进程内存**，键为 conversationId，不落会话文件夹。入账：成功 `read_file`，或成功且可抽单一 path 的白名单 `bash`（`cat` / `nl` / `bat` / `batcat` / `head` / `tail` / `sed -n 'X,Yp'` / `grep` / `egrep` / `fgrep` / `rg`；单文件、无管道、无重定向）。只供已存在且 size>0 的 `write_file` 查表，没有则硬拒不写盘；新建与空文件免检。`edit_file` 不查表。不扫 `ctx.messages`。无 conversationId 则非空覆写 fail-closed。resume 空表。ADR-0084。
@@ -406,13 +409,13 @@ _Avoid_: 第三层 local settings；项目文件盖 isolation / llm / memory / s
 _Avoid_: 把前景/后景与进程隔离混同；泛化的"同步/异步"；把 V1"立即返回 task_id"当默认契约（已被反转）
 
 **host drain**: host 把 completed 子代理的父可见信封浓缩成一条带固定前缀的消息、拼进下一次 `run()` 的 priorMessages；只读 buffer、不改状态。后景臂下：已有终态则立刻浓缩；仅 running 则立刻空返。叫醒主模型靠 mailbox，不靠用户再打一行，也不靠在 `run()` 边界空转等待。
-_Avoid_: 把 drain 与"结果获取"混同（前景 spawn 不经 drain）；让 agent 侧直接消费 manager buffer；把 drain 被动挂"下一轮用户输入"或阻塞轮询当作可靠唤醒源
+_Avoid_: 把 drain 与"结果获取"混同（前景 spawn 不经 drain）；`wait:true` 已 tool_result 交差后再 silent wake 同一信封；让 agent 侧直接消费 manager buffer；把 drain 被动挂"下一轮用户输入"或阻塞轮询当作可靠唤醒源
 
 **mailbox**: 后景 spawn 的子→父终态回传通道。只投终态浓缩结果，不承载运行中消息，也不是子↔子协议。
 _Avoid_: 进度流；swarm / 子代理互投；把 mailbox 当 D-δ 低层 messaging；接到 run_graph 或图节点（ADR-0076）
 
-**父可见信封**: 子代理交差给父模型看的那一层——短摘要、改过的路径、成败与停因、`task_id` 与该 worker 的 `/tmp` 根；不是终稿全文，也不是垫底里的文件正文。
-_Avoid_: 把完整 result 当任务产物；把汇报截断当成任务失败；默认交差附带产物名单
+**父可见信封**: 子代理交差给父模型看的那一层——短摘要、改过的路径、成败与停因、`task_id`、该 worker 的 `/tmp` 根，以及 host 在终态写入 pad 的终稿相对路径 `output_path`；短信封不是全文，`truncated` 不是任务失败。
+_Avoid_: 把完整 result 当任务产物；把汇报截断当成任务失败；默认交差附带产物名单；靠子模型自己 write_file 才留终稿
 
 **子代理并发上限**: 同时处于 starting/running 的 worker 硬顶；图节点计入同一顶。发几张由模型决定，超限立即失败、不排队。面板预设 `3 | 5 | 9 | 15 | unlimited`（`unlimited` = manager 不拒绝）。默认 15。现势给模型：工具 description 的当前 N + 超限 `SubAgentCapacityError`。ADR-0014 / ADR-0077 / ADR-0096。
 _Avoid_: 静默排队；让用户每次填写要派几个；per-graph inflight 第二顶（ADR-0077）；把上限写进 system 前缀当唯一告知
@@ -582,8 +585,8 @@ _Avoid_: 用 sidecar 归属当授权或当锁；活性检测（PID 探活 / 心�
 **worktreeinclude**: 位于 **projectIdentityRoot** 的 `.iknow/worktreeinclude`（gitignore 语法）。`create-worktree` 成功后只把「匹配且已被 gitignore」的**普通文件**拷进新树；目录跳过；文件缺席不失败建树。项目依赖不靠 include 拷 `node_modules`，见 **project dependency provision**。
 _Avoid_: 拷 tracked 文件；递归拷 `node_modules`；把 include 当第二份身份根；include 失败阻断 provision；把 symlink 共享依赖树写成 include 语义
 
-**taskRoot**（活值）: 会话当前生效的 task worktree 根——**写与工具 cwd 只问它**（写工具 / 会改工作区的 bash / git / LSP 目录 / 子代理工作目录）。活性语义（`src/harness/session-roots.ts` 的 `LiveTaskRoot` cell）：**调用时读取**——所有消费点（门禁 shape 判定、写工具 resolve、bash 围栏、LSP directory、子代理 spawn 取根、环境现势）在 handler 调用时机读 cell 快照，不再闭包冻结装配期根；**唯一 writer = 装配层对 host `provision` / `enter` / `exit` 缝的包装点**（`withLiveTaskRootWrite`，缝成功 resolve 才写，失败不写不回滚、typed error 原样冒泡）；**batch 快照（一波一根）**——一次 `executeAll`（= 一波 tool calls）只在入口读一次，整波共用该快照，波内建树不把一次逻辑改动劈进两棵树。装配初值 = `SessionRoots.taskRoot`（未改绑时等于主仓）；`productRoot` / `projectIdentityRoot` / `installRoot` / mcpConfigRoot / stateAnchor 等稳定根**不**随它走。改绑后模型经 worker prior messages / path-outside 回执看见当前写根；消费 skill 时（slash 信封 / `skill()` tool_result / Web `getSkillBody`）只灌技能程序，正文不挂写根 trailer（ADR-0079）；告知面为 worker prior 与改绑后主会话一次，均按「写处境」三态渲染，`no_writable_root` 态只陈述事实、不点名 `create-worktree`（ADR-0069）；改绑后主会话经用户消息缝再给一次（非每轮、不进 system）；system `## Project path` 仍是身份根（`projectIdentityRoot`），bash 围栏把身份根恒进读白名单（closed-world fence）以保证「写仍不得进主仓」（ADR-0037 §9）。
-_Avoid_: 闭包冻结装配期根（rebind 只在 run 边界重解析的旧实现）；第二写入口；一波内逐 call 重读（中途翻转劈两树）；把活 taskRoot 当 `productRoot` / 身份根 / per-root 状态锚（D3 稳定根清单不活化）；把「下一波生效」误述为「下一 turn」或要求 `/continue`；告知面无条件宣告「突变写该根」（隔离 ON 且未绑树时与门禁真值相反，见「写处境」）
+**taskRoot**（活值）: 会话当前生效的 task worktree 根——**写与工具 cwd 只问它**（写工具 / 会改工作区的 bash / git / LSP 目录 / 子代理工作目录）。活性语义（`src/harness/session-roots.ts` 的 `LiveTaskRoot` cell）：**调用时读取**——所有消费点（门禁 shape 判定、写工具 resolve、bash 围栏、LSP directory、子代理 spawn 取根、环境现势）在 handler 调用时机读 cell 快照，不再闭包冻结装配期根；**唯一 writer = 装配层对 host `provision` / `enter` / `exit` 缝的包装点**（`withLiveTaskRootWrite`，缝成功 resolve 才写，失败不写不回滚、typed error 原样冒泡）；**batch 快照（一波一根）**——一次 `executeAll`（= 一波 tool calls）只在入口读一次，整波共用该快照，波内建树不把一次逻辑改动劈进两棵树。装配初值 = `SessionRoots.taskRoot`（未改绑时等于主仓）；`productRoot` / `projectIdentityRoot` / `installRoot` / mcpConfigRoot / stateAnchor 等稳定根**不**随它走。改绑后模型经 worker prior messages / path-outside 回执看见当前写根；消费 skill 时（slash 信封 / `skill()` tool_result / Web `getSkillBody`）只灌技能程序，正文不挂写根 trailer（ADR-0079）；告知面为 worker prior 与改绑后主会话一次，均按「写处境」三态渲染，`no_writable_root` 态只陈述事实、不点名 `create-worktree`（ADR-0069）；改绑后主会话经用户消息缝再给一次（非每轮、不进 system）；system `## Project path` 仍是身份根（`projectIdentityRoot`），bash 围栏把身份根恒进读白名单（closed-world fence）以保证「写仍不得进主仓」（ADR-0037 §9）。**叶子回显剥除**：根是树形时，写/读/改/搜的目标解析**先剥掉开头的叶子回显再解析**——模型常把树自己的 leaf 名当相对路径第一段回显（`ai-news-digest/index.html`），而树根已经是 `…/worktrees/ai-news-digest`；resolve 内一处谓词只认 `<leaf><sep>…` 与绝对 `<realRoot><sep><leaf><sep>…` 两种前缀（先归一化再判），裸 `<leaf>` 与非树形根逐字节不变。
+_Avoid_: 闭包冻结装配期根（rebind 只在 run 边界重解析的旧实现）；第二写入口；一波内逐 call 重读（中途翻转劈两树）；把活 taskRoot 当 `productRoot` / 身份根 / per-root 状态锚（D3 稳定根清单不活化）；把「下一波生效」误述为「下一 turn」或要求 `/continue`；告知面无条件宣告「突变写该根」（隔离 ON 且未绑树时与门禁真值相反，见「写处境」）；相对路径再叠当前树 leaf 造成套娃目录；只在写工具里剥叶（读/改/搜重新套娃）；把裸 `<leaf>` 也剥掉；非树形根跟着剥；归一化后不重判前缀（`./<leaf>/…` 成为旁门）；剥完不再过 outside-root 拒绝
 
 **写处境（write situation）**: 「此刻能不能写、写哪」的三态纯函数判定——`writable_main`（隔离 OFF，主仓可写）/ `writable_tree`（隔离 ON 且活 `taskRoot` 是树形）/ `no_writable_root`（隔离 ON 且非树形，无处可写）；判据 = 隔离开关 + **复用** `isTaskWorktreePath`，**不是**归属 sidecar（`enter-worktree` 四道检查无归属，会话可合法 adopt 外来树并被门禁放行）。告知面（worker prior / 改绑后注入）**共享此判定但不共享措辞**：`no_writable_root` 只陈述事实、不点名 `create-worktree`，点名留在门禁回执（意图已证）。skill 正文不挂写根 trailer。ADR-0069；告知面组成见 ADR-0079。
 _Avoid_: 用 owner sidecar 当可写判据（会对 adopt 外来树的会话造反向谎）；重写第二份形状判断（shadow copy）；告知面与回执共用一份措辞；把 `no_writable_root` 写成祈使句；把 `/tmp` 短命事实塞进写根段（属 bash 面）；把写处境绑回 `skill()` 正文
@@ -678,7 +681,7 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **run_graph vs spawn_subagent**: 有依赖的多节点走 `run_graph`；单次派活仍 `spawn_subagent`。图节点内部仍是前景 spawn，不经父代理再调 spawn 工具
 - **run_graph vs 图内绕回**: 绕回仍走同一把 `run_graph`；阶段差在 host 认不认标明的回边，不在工具名（ADR-0061）
 - **run_graph vs 后景 spawn**: 图没有 `wait:false`；跑图时父代理不能并行干别的，最多主进程静默等 settle；mailbox 不进活图（ADR-0065 / ADR-0076）
-- **父可见信封 vs 磁盘产物**: 父读摘要、`task_id` 与会话 tmp 根；仓库文件以工作区为准；垫底正文按 id 去读，不靠把全文塞进 tool_result
+- **父可见信封 vs 磁盘产物**: 父读摘要、`task_id`、tmp 根与 `output_path`；终稿在 pad 上由 host 落；仓库文件仍以工作区为准，不靠把全文塞进 tool_result
 - **会话 tmp vs taskRoot**: 会话 tmp 是当前身份草稿，不是交付；要留下的写 `taskRoot`，不自动从垫底拷进仓库
 - **会话 tmp vs Linux /tmp**: 草稿走会话文件夹宿主路径与 `$TMPDIR`；不把垫底 bind 成 `/tmp`（ADR-0092）
 - **文件系统隔离档 vs PermissionMode**: 前者是进程能碰哪些路径；后者是问不问人。全局档仍走权限链
@@ -717,6 +720,8 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **task worktree label vs conversationId**: label 是文件夹名与 enter 定位；conversationId 是归属身份，不写进目录名
 - **工作树说明书 vs 闸 vs 提示词**: description 先回答 agent 能不能调、做什么；写被拦点名是 harness；人喊创建是 usage/夹具
 - **create-worktree vs create-task-worktree**: 模型面用前者；后者是旧注册名，不再给模型
+- **前台打断 vs chrome focus**: Ctrl+C 停本会话全部前景子代理与父 turn；Ctrl+X 只杀焦点那一行（可含后景）
+- **父可见信封 vs host drain**: 前景交差是 tool_result 上的信封；drain 只服务后景 mailbox 叫醒
 - **settled appearance vs result preview**: 落定三类决定谁还上屏；成功 bash 的结果预览是折叠后的尾窗，不是百分比轨迹
 - **必须看见 vs 噪音**: 本次改动 diff、新建 10 行预览、进行中命令、位置行、进度最后一跳必须看见；中间百分比轨迹、`[运行中]`、收类正文、`<graph_mode>` 气泡是噪音
 - **本轮人读合同 vs 旧显示数字**: 一行 `Thought for …` + 原第二行计数 / 进行中 `Thinking…` 与可见命令 / 新建 10 行 / 编辑 diff / 位置常驻 / 图每个 `run()` 一次 —— 与旧两行折叠、`思考了`、6 行帽、`[运行中]`、仅绑树才显示冲突时以本轮词条为准
@@ -737,7 +742,7 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **PreCommit vs session transcript 落盘**: PreCommit 拦 git commit 形态；JSONL append 仍是 host commit hook，不是 user 事件
 - **闭世界围栏 vs 工作区档**: 闭世界是旧默认（home 不可见）；工作区档 home 可见、只收紧写
 - **符号工具面 vs 坐标面 `lsp_*`**: 前者是现行模型面（符号身份提问）；后者已从模型面退役，但仍是 `probe:lsp` 的仪器（`createLspToolSet`），故测 `lsp_*` 的断言不构成 `find_symbol` 等活路径的覆盖
-- **请求级打开窗口 vs warmup pinned open**: 前者随请求开关（退出即关）；后者是装配期裸 `ensureOpen` 对真实样本的永久持有，两者理由同一条（tsserver 不为未打开文件建 project）
+- **请求级打开窗口 vs warmup pinned open**: 前者随请求开关（退出即关）；后者是**首次** `lsp_*` 同族调用才裸 `ensureOpen` 对真实样本的永久持有，装配期不拉起 server；两者理由同一条（tsserver 不为未打开文件建 project）
 - **分层哨兵 vs 空数组**: 拿不到 server / 根是**失败**，返 `(…)` 前缀哨兵并被 `isLspFailureSentinel` 认出；无 project 锚点返 `renderNoProjectAnchor` 哨兵——**不进**三前缀家族（调用打成了，消费者是模型：「结论不可信，换条路」）；`[]` 只许表示「查到了、真没这个符号」。缺方法哨兵不算失败（能力缺口）
 
 ## Flagged ambiguities

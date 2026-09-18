@@ -3,8 +3,8 @@
  *
  * 链路同 tests/e2e/subagent-acceptance.test.ts:buildHarnessEngine (surface=chat)
  * + 注入 fake subagent manager + JsonlTraceService。stub-model turn 1 给
- * tool_use(spawn_subagent) → 真实 tool handler → fake manager 同步返 task_id
- * → 关闭。turn 2 stub model final。解析 JSONL 断言:
+ * tool_use(spawn_subagent, wait:false) → 真实 tool handler → fake manager 同步
+ * 返 task_id → 关闭。turn 2 stub model final。解析 JSONL 断言:
  *   1. 出现 tool_call 行,tool_name === "spawn_subagent";
  *   2. 出现 llm_call 行,messages_captured=true,messages 数组非空。
  *
@@ -21,9 +21,11 @@ import { readFileSync, mkdtempSync } from "node:fs";
 import { buildHarnessEngine } from "../../src/harness/build-engine.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
+import { awaitAllTasksTerminal } from "../_helpers/await-terminal.ts";
 import { run } from "../../src/harness/loop-engine.ts";
 import { drainPendingSubagents } from "../../src/harness/subagent/host-drain.ts";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
+import type { LoopState } from "../../src/harness/model-adapter/types.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { createJsonlTraceService } from "../../src/harness/trace/jsonl.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
@@ -70,7 +72,7 @@ function parseJsonlFile(filePath: string): Array<Record<string, unknown>> {
 }
 
 describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
-  it("stub-model run spawn_subagent → JSONL contains tool_call(tool_name=spawn_subagent) and llm_call(messages_captured=true)", async () => {
+  it("stub-model run spawn_subagent (wait:false, host drain) → JSONL contains tool_call(tool_name=spawn_subagent) and llm_call(messages_captured=true)", async () => {
     root = await mkdtemp(join(tmpdir(), "iknow-t12-e2e-"));
     const traceDir = mkdtempSync(join(tmpdir(), "iknow-t12-trace-"));
     cleanup.push(async () => {
@@ -118,7 +120,8 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
     });
     const deps: LoopEngineDeps = { ...built.deps, trace };
 
-    // stub-model: turn1 给 tool_use(spawn_subagent);turn2 给 final text。
+    // stub-model: turn1 给 tool_use(spawn_subagent, wait:false);turn2 给 final
+    // text。后景臂 = 信封仍走 host drain(前景 wait:true 的通道互斥另测)。
     const innerStub = createStubModel({
       responses: [
         assistantResult({
@@ -127,7 +130,7 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
             {
               id: "call-spawn-1",
               name: "spawn_subagent",
-              input: { task: "echo hello" },
+              input: { task: "echo hello", wait: false },
             },
           ],
         }),
@@ -146,10 +149,13 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
     assert.equal(t1.stopReason, "completed");
     assert.equal(t1.finalText, "drained result seen by model");
 
-    // 等 fake binary 完全退出 + buffer 收敛
-    await new Promise((r) => setTimeout(r, 100));
+    // wait:false 立即返 {task_id},run() 可能在 fake binary 吐信封之前就收尾。
+    // 同步契约见 tests/_helpers/await-terminal.ts（不拿 drain 读侧当同步,
+    // 那是本 file 的断言对象）。
+    await awaitAllTasksTerminal(fakeMgr);
+
     const drained = await drainPendingSubagents(fakeMgr);
-    assert.ok(drained.length > 0, "fake binary should complete >=1 task");
+    assert.ok(drained.length > 0, "background task should be drained");
 
     // 解析 JSONL
     const jsonlPath = join(traceDir, "subagent-foreground-trace.jsonl");
@@ -171,7 +177,7 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
     }
   }, 30_000);
 
-  it("stub-model run spawn_subagent (no second turn) — host drain 仍写入 priorMessages,tool_name 仍落 trace", async () => {
+  it("stub-model run spawn_subagent (wait:false, no second turn) — host drain 仍写入 priorMessages,tool_name 仍落 trace", async () => {
     root = await mkdtemp(join(tmpdir(), "iknow-t12-drain-"));
     const traceDir = mkdtempSync(join(tmpdir(), "iknow-t12-trace-drain-"));
     cleanup.push(async () => {
@@ -220,7 +226,7 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
             {
               id: "call-spawn-2",
               name: "spawn_subagent",
-              input: { task: "explore" },
+              input: { task: "explore", wait: false },
             },
           ],
         }),
@@ -236,14 +242,34 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
 
     const { result } = await run("go", { ...deps, adapter });
     assert.equal(result.stopReason, "completed");
-    await new Promise((r) => setTimeout(r, 100));
+
+    // wait:false 不阻塞 run;等 fake binary emit 完成再读 drain。
+    // 同步契约见 tests/_helpers/await-terminal.ts。
+    await awaitAllTasksTerminal(fakeMgr);
 
     const drained = await drainPendingSubagents(fakeMgr);
-    assert.ok(drained.length > 0);
+    // 本行钉的是**后景臂**(wait:false):host drain 仍把浓缩信封交出、并写进
+    // 下一轮 run() 的 priorMessages(chat-session.ts 同款拼法)。前景臂
+    // (wait:true) 当跳 tool_result 交付、不进 drain,由
+    // tests/subagent/foreground-drain-exclusion.test.ts 覆盖,此处不重复。
+    assert.ok(drained.length > 0, "background task should still be drained");
 
     // 模拟 chat-session.ts 在下一轮 run() 之前把 drained 拼入 priorMessages。
     // 不再发模型调用 —— 仅断言 priorMessages 流经 host drain 后仍可被
     // 下一次 run() 消费。tool_name 落 trace 在前一个测试已覆盖。
+    const priorMessages: LoopState["messages"] = [
+      { role: "user", content: [{ type: "text", text: drained }] },
+    ];
+    const joined = priorMessages
+      .map((m) =>
+        m.content
+          .filter((b): b is { type: "text"; text: string } => b.type === "text")
+          .map((b) => b.text)
+          .join(" ")
+      )
+      .join("\n");
+    assert.match(joined, /## Sub-agent .+ result: drain body/);
+
     const jsonlPath = join(traceDir, "drain-trace.jsonl");
     const lines = parseJsonlFile(jsonlPath);
     const toolCalls = lines.filter((l) => l["record_type"] === "tool_call");

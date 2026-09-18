@@ -55,7 +55,7 @@ import { createDefaultAciRegistry } from "../aci/tools/registry.js";
 import { createAciExecutor } from "../aci/index.js";
 import type { AciCatalog } from "../aci/types.js";
 import { createLspNotifier } from "../lsp/notifier.js";
-import { startLspWarmup } from "../lsp/warmup.js";
+import { withLazyLspWarmup } from "../lsp/warmup.js";
 import { DEFAULT_LSP_IDLE_TIMEOUT_MS } from "../lsp/client.js";
 import { deriveFileRefs, writeToolNamesFrom } from "./file-refs.js";
 import { createPermissionPolicy } from "../permission/policy.js";
@@ -544,12 +544,13 @@ export async function createWorkerRuntime(
   // warmup（与 build-engine 同缝）。SSOT: LspCtx.directory ≡ sandboxRoot。
   // lsp idleTimeoutMs 走常量缺省（10min），不读 settings.lsp（worker 仅
   // 在下方 user-hook 装配处读 settings.hooks 段）；超时/等待仍走工具层常量。
+  // Locked sentence 5:warmup 不在装配期起,改由 deps.registry 视图惰性 arm
+  // （第一次 language server 工具名解析），见下方 withLazyLspWarmup 调用。
   const lspCtx = {
     directory: sandboxRoot,
     idleTimeoutMs: DEFAULT_LSP_IDLE_TIMEOUT_MS,
   };
   const lspNotifier = createLspNotifier(lspCtx);
-  startLspWarmup(lspCtx);
   const workerFenceTmp = resolveWorkerFenceTmp(opts);
   const reg = createDefaultAciRegistry({
     env,
@@ -709,7 +710,9 @@ export async function createWorkerRuntime(
   const deps: LoopEngineDeps = {
     adapter,
     executor,
-    registry: reg.inner,
+    // Locked sentence 5:worker 面同缝 —— 装配期不 warmup,第一次 language
+    // server 工具名解析才 arm(与 build-engine 共用 lsp/warmup.ts 的视图)。
+    registry: withLazyLspWarmup(reg.inner, lspCtx),
     // #353 settings 回退已在 loadIknowEnv 内合并; envelope.maxTurns 由
     // runWorkerOnce 优先覆写。
     maxTurns: env.llm.maxTurns,

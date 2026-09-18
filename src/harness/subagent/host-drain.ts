@@ -69,7 +69,12 @@ export interface DrainPendingSubagentsBeforeShutdownOpts {
   readonly onError?: (error: unknown) => void;
 }
 
-function formatDrainedResults(
+/**
+ * 终态条目 → 父可见浓缩文本。导出只为让「终态通道互斥」的测试能构造
+ * **落盘态**（订阅者在发布前注册会被 mailbox 立即重放历史，见
+ * tests/subagent/foreground-drain-exclusion.test.ts 的 late-subscriber 用法）。
+ */
+export function formatDrainedResults(
   entries: ReadonlyArray<{
     readonly taskId: string;
     readonly envelope: SubAgentEnvelope;

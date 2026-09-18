@@ -1244,6 +1244,48 @@ export class SessionHub {
   }
 
   /**
+   * plans/session-fg-handoff-interrupt Locked sentence 3 / T5: Ctrl+C 的
+   * 本会话前台扇出 —— 父 turn 由 app 层的 aborter 停,本方法停「本会话所有
+   * 前景子代理」。判据 = `SubagentInfo.foreground === true`(即父侧 in-band
+   * 等待 / judge / graph-node 同一 population;见 manager.ts 的 Postel 注释)
+   * ∧ live(starting|running)。
+   *
+   * 为什么读 manager 的**新鲜**投影而不是 TUI 的 React 态:app 的 subagents
+   * 来自 1Hz 轮询,最多陈旧 1s —— 刚 spawn 的子代理会被漏杀。这里在按下
+   * Ctrl+C 的一刻现拉,枚举与 abort 同一趟,消除那个窗口。
+   *
+   * 作用域:按 conversationId 过滤,故 `wait:false` 后景(foreground 缺席)与
+   * 其它会话的 `running-bg` 天然不在集合内(调用方传本会话 id)。
+   *
+   * 返回真正被 abort 的 taskId(abortTask 返回 false 的竞态终态不列入),
+   * 便于调用方/log 归因;无 manager(ask 形态)→ 空数组,不抛错。
+   *
+   * **已知缺口(后续切片,不在此修)**:上面那句「judge / graph-node 同一
+   * population」指的是 `foreground === true` 这个**判据**,不是本方法**可达**
+   * 的集合 —— 本方法按 `listSubagents(conversationId)` 取账,只看得见会话
+   * 可归属的任务。而 `judge`(`verify/run-classifier-adapter.ts`)与
+   * graph-node(`graph/node-executor.ts`)的 def 都置了
+   * `excludeFromHostDrain: true`,却**从未设 `conversationId`** → 它们是前景
+   * population 的成员,却不在任何会话账上,会话作用域的这次扫描扫不到,
+   * Ctrl+C 停不掉这两个正在跑的 judge / graph-node。
+   * 归属信息今天不存在(不是本方法漏读),故这里不做 carve-out、不改行为 ——
+   * 修法是让这两个 def 带上 conversationId(或另开一条会话无关的前台停法),
+   * 属独立切片,不在 plans/session-fg-handoff-interrupt.md Locked sentence 3
+   * 的验收面内。
+   */
+  abortSessionForegroundWork(conversationId: string): ReadonlyArray<string> {
+    const aborted: string[] = [];
+    for (const info of this.subagentManagers.listSubagents(conversationId)) {
+      if (info.foreground !== true) continue;
+      if (info.state !== "starting" && info.state !== "running") continue;
+      if (this.subagentManagers.abortTask(info.taskId)) {
+        aborted.push(info.taskId);
+      }
+    }
+    return aborted;
+  }
+
+  /**
    * #356 High#4 (SC12/SC3):serve 长程入口的清理句柄 —— 转发 ensureDeps 缓存
    * 的 built.shutdown（组合句柄 mcpManager first → subagentManager second）。
    * cli.ts runServe 用 registerShutdown(hub) 把本方法挂到 SIGINT/SIGTERM,

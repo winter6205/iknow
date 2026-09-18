@@ -5,7 +5,11 @@
  * (测试缝 BuildEngineOpts.subagentManager) → 真实 spawn_subagent tool
  * handler 调 fakeMgr.spawn → fake binary (node -e console.log envelope)
  * 异步 emit 合法 envelope → buffer completed。父 run turn 1: stub-model
- * 给 tool_use(spawn_subagent) → tool handler 返 {task_id} → turn 1 收尾。
+ * 给 tool_use(spawn_subagent, wait:false) → tool handler 返 {task_id} → turn 1
+ * 收尾。
+ *
+ * 本用例走 **后景 (wait:false)** 臂:只有后景信封进 host drain(前景臂的
+ * 终态通道互斥见 tests/subagent/foreground-drain-exclusion.test.ts)。
  *
  * turn 间 host drain = drainPendingSubagents(fakeMgr) → 非空浓缩串。
  * 第二次 run (turn 2) 之前把 drained 拼入 priorMessages — 断言 stub-model
@@ -25,6 +29,7 @@ import { spawn } from "node:child_process";
 import { buildHarnessEngine } from "../../src/harness/build-engine.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
+import { awaitAllTasksTerminal } from "../_helpers/await-terminal.ts";
 import { run } from "../../src/harness/loop-engine.ts";
 import { drainPendingSubagents } from "../../src/harness/subagent/host-drain.ts";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
@@ -67,7 +72,7 @@ afterAll(async () => {
 });
 
 describe("#356 T7 E2E A: stub-model host drain 全链路 (SC14)", () => {
-  it("turn1 spawn_subagent → fake binary emit envelope → turn2 priorMessages 含 drained 浓缩结果", async () => {
+  it("turn1 spawn_subagent (wait:false) → fake binary emit envelope → host drain → turn2 priorMessages 含 drained 浓缩结果", async () => {
     root = await mkdtemp(join(tmpdir(), "iknow-t7-e2e-"));
 
     // fake spawn 工厂: node -e 用 process.stdout.write 精确输出 newline-JSON
@@ -113,7 +118,9 @@ describe("#356 T7 E2E A: stub-model host drain 全链路 (SC14)", () => {
     assert.ok(built.deps.registry.get("subagent_result"));
     assert.equal(built.subagentManager, fakeMgr);
 
-    // stub-model 脚本: turn1 给 tool_use(spawn_subagent) → turn2 给 final text。
+    // stub-model 脚本: turn1 给 tool_use(spawn_subagent, wait:false) → turn2 给
+    // final text。wait:false = 后景臂,信封仍进 host drain(前景 wait:true 的
+    // 终态通道互斥另测,见 tests/subagent/foreground-drain-exclusion.test.ts)。
     const innerStub = createStubModel({
       responses: [
         assistantResult({
@@ -122,7 +129,7 @@ describe("#356 T7 E2E A: stub-model host drain 全链路 (SC14)", () => {
             {
               id: "call-spawn-1",
               name: "spawn_subagent",
-              input: { task: "echo hello" },
+              input: { task: "echo hello", wait: false },
             },
           ],
         }),
@@ -141,16 +148,19 @@ describe("#356 T7 E2E A: stub-model host drain 全链路 (SC14)", () => {
 
     const deps: LoopEngineDeps = { ...built.deps, adapter };
 
-    // ── turn 1: 父 run → stub 给 tool_use(spawn_subagent) → fakeMgr.spawn →
-    // fake binary 异步 emit → turn 1 tool_result 收尾 → turn 2 stub final text。
+    // ── turn 1: 父 run → stub 给 tool_use(spawn_subagent, wait:false) →
+    // fakeMgr.spawn → fake binary 异步 emit → turn 1 tool_result 收尾 → turn 2
+    // stub final text。
     const { result: t1 } = await run("please spawn a subagent", deps);
     assert.equal(t1.stopReason, "completed");
     assert.equal(t1.finalText, "drained result seen by model");
 
-    // 等 fake binary 完全退出 + buffer 收敛 (exit 后 stdout 已 parse)。
-    await new Promise((r) => setTimeout(r, 100));
+    // wait:false 立即返 {task_id},run() 可能在 fake binary 吐信封之前就收尾。
+    // 同步契约见 tests/_helpers/await-terminal.ts（不拿 drain 读侧当同步）。
+    await awaitAllTasksTerminal(fakeMgr);
+
     const drained = await drainPendingSubagents(fakeMgr);
-    assert.ok(drained.length > 0, "fake binary 应至少完成 1 个 subagent 任务");
+    assert.ok(drained.length > 0, "后景任务应被 host drain 收走");
     assert.match(
       drained,
       /^## Sub-agent .+ result: hello from fake subagent(?:\n\nhello from fake subagent)?$/

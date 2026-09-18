@@ -44,7 +44,7 @@ import { runOverflowJudge } from "./aci/tool-overflow.js";
 import { errorMessage } from "./errors.js";
 import type { AciCatalog } from "./aci/types.js";
 import { createLspNotifier } from "./lsp/notifier.js";
-import { startLspWarmup } from "./lsp/warmup.js";
+import { withLazyLspWarmup } from "./lsp/warmup.js";
 import { DEFAULT_LSP_IDLE_TIMEOUT_MS } from "./lsp/client.js";
 import type { LspCtx } from "./lsp/types.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
@@ -798,11 +798,6 @@ export async function buildHarnessEngine(
       : {}),
   };
   const lspNotifier = createLspNotifier(lspCtx);
-  // lsp-optimization plan T4:fire-and-forget 预热 —— 装配完成即按 sandboxRoot
-  // 内文件扩展名探测预 spawn LSP server,消掉首次 lsp_* 调用的 initialize
-  // 冷启动。不 await:绝不阻塞 build 主路径;warmup 内部全量 catch(ask 同样
-  // 装配 lsp 工具,故不做 surface 区分)。
-  startLspWarmup(lspCtx);
   // #global-plugins T1/T2: 解析插件根 + 扫描插件子目录 → catalog（skill
   // dirs / hooks 文件源两面）。装配期一次解析,同 engine 实例内复用以避免
   // 每次 scan 重 IO。「解析 → 扫描 → disabled 过滤」走 roots.ts 的共用装
@@ -1728,7 +1723,9 @@ export async function buildHarnessEngine(
 
   // registry 单源:reg.inner 已是按 memoryEnabled 条件化的最终视图(8 或 10 件)。
   // deps.registry / executor / catalog 三方一致 — ask 入口自然不含 memory 工具。
-  const registryTools: Registry = reg.inner;
+  // Locked sentence 5:warmup 不在装配期起,改由该视图惰性 arm —— 装配期只读
+  // list();第一次 language server 工具名解析才触发(SSOT 见 lsp/warmup.ts)。
+  const registryTools: Registry = withLazyLspWarmup(reg.inner, lspCtx);
 
   // #196 IKNOW T4 + issue #584: eager + idempotent 初始化全局 identity
   // workspace(initIknowWorkspaceSafe 内部 try/catch + warn,失败不阻塞装配)。

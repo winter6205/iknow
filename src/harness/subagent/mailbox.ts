@@ -19,6 +19,12 @@ export interface SubAgentTerminalNotice {
   readonly truncated?: boolean;
   readonly totalLength?: number;
   readonly tmp_root?: string;
+  /**
+   * Locked sentence 2: pad-relative path of the host-written final text.
+   * Absent when no file was written (Postel) — a woken parent must not be
+   * pointed at a file that does not exist.
+   */
+  readonly output_path?: string;
 }
 
 export type SubAgentTerminalSubscriber = (
@@ -68,6 +74,9 @@ function snapshotNotice(
       ? { totalLength: notice.totalLength }
       : {}),
     ...(notice.tmp_root !== undefined ? { tmp_root: notice.tmp_root } : {}),
+    ...(notice.output_path !== undefined
+      ? { output_path: notice.output_path }
+      : {}),
   });
 }
 

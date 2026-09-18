@@ -39,6 +39,7 @@ import {
   type SubAgentManager,
 } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
+import { FINAL_TEXT_PAD_NAME } from "../../src/harness/subagent/envelope.ts";
 import { ToolExecutionError } from "../../src/harness/errors.ts";
 import { workerFenceTmpPath } from "../../src/harness/sandbox/fence-tmp.ts";
 
@@ -327,7 +328,10 @@ describe("subagent_result — T5 pad list/read (SC3 / SC6 / S2-B)", () => {
     return { manager, tool, taskId, pad };
   }
 
-  it("S2-B empty: 合法 task_id + 空垫底 → tmp_names 空列表，不是错误", async () => {
+  it("S2-B empty: 合法 task_id + 垫底只有 host 落稿 → 不报错，名单只含 final.md", async () => {
+    // Locked sentence 2 之后，任何带终稿的 pad 都至少含 host 写下的 final.md；
+    // 不变式仍是「合法 task_id + 无 worker 产物 → 非错误」，名单从 SSOT 常量
+    // 派生，不留硬编码。
     const { tool, taskId } = await spawnSettled();
     const parsed = JSON.parse(tool.handler({ task_id: taskId })) as {
       status: string;
@@ -335,7 +339,7 @@ describe("subagent_result — T5 pad list/read (SC3 / SC6 / S2-B)", () => {
     };
     expect(parsed.status).not.toBe("not_found");
     expect(parsed.status).not.toBe("rejected");
-    expect(parsed.tmp_names).toEqual([]);
+    expect(parsed.tmp_names).toEqual([FINAL_TEXT_PAD_NAME]);
   });
 
   it("SC3: 只传 task_id → 顶层名字含 worker 写下的文件", async () => {

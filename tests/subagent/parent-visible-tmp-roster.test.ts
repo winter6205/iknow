@@ -16,6 +16,7 @@ import { workerFenceTmpPath } from "../../src/harness/sandbox/fence-tmp.ts";
 import { drainPendingSubagents } from "../../src/harness/subagent/host-drain.ts";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
+import { FINAL_TEXT_PAD_NAME } from "../../src/harness/subagent/envelope.ts";
 
 const SECRET_BODY = "PAD-BODY-MUST-NOT-ENTER-ENVELOPE";
 /** The pad roster's own 200-name window (not read_file's contract). */
@@ -206,7 +207,8 @@ describe("T6 empty handoff pad roster (SC5)", () => {
 
     const env = await manager.waitFor(taskId);
     assert.equal(env.truncated, true);
-    assertRosterNamesOnly(env, ["huge.md"]);
+    // host 落稿（Locked sentence 2）也在这个 pad 上，名单断言从 SSOT 常量派生。
+    assertRosterNamesOnly(env, ["huge.md", FINAL_TEXT_PAD_NAME]);
     await manager.shutdown();
   });
 

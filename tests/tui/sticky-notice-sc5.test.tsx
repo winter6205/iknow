@@ -171,6 +171,7 @@ async function mount(opts: {
     contextWindow: 200_000,
     getCapacity: () => 15,
     listSubagents: () => [],
+    abortSessionForegroundWork: () => [],
   };
   const askBridge = createTuiAskUserBridge();
   const toolEventSink = createToolEventSink();

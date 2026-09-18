@@ -225,6 +225,28 @@ function envelopeFromWaitTimeout(
   return projectEnvelopeOrThrow(buffer, taskId);
 }
 
+/**
+ * 前景臂的终态通道互斥（plans/session-fg-handoff-interrupt.md Locked
+ * sentence 1）：`wait:true` 时 handler 正阻塞在 waitFor 上，同一份信封**由
+ * 这一次 tool_result 当跳交付**；若再让 host drain 收走或 mailbox silent
+ * wake 叫醒父回合，同一交差会二次进父 messages（被画成一条 user message /
+ * 重复一份）。故 fg 任务一律排除出 host drain；`wait:false` 的异步臂才需要
+ * 那两条通道，不设此位（Postel：非 true 时字段整个省略）。
+ *
+ * 两条理由放在模块级而不是 handler 的 def 字面量里：
+ *   - **给这个位一个名字**：`excludeFromHostDrain` 是「交付通道」语义（见
+ *     `SubagentInfo.foreground` 头注），不是「还在跑」；spread 进 def 字面
+ *     量后它只剩一个无名布尔，接线点读不出这一位为什么在这；
+ *   - **handler 的圈复杂度是逐函数棘轮**（`lint:s5` 对 HEAD 比同函数基线）：
+ *     handler 是 `spawn-subagent-tool.ts` 里的 ArrowFunctionExpression，
+ *     基线 41，内联这个三元会把它推到 42 判回归（实测）。
+ */
+function foregroundDrainExclusion(wait: boolean): {
+  readonly excludeFromHostDrain?: boolean;
+} {
+  return wait ? { excludeFromHostDrain: true } : {};
+}
+
 export function createSpawnSubAgentTool(
   deps: SpawnSubAgentToolDeps
 ): AciToolDef {
@@ -455,6 +477,8 @@ export function createSpawnSubAgentTool(
         ...(typeof obj.sandboxRoot === "string"
           ? { sandboxRoot: obj.sandboxRoot }
           : {}),
+        // 前景臂的终态通道互斥 —— 见 foregroundDrainExclusion 头注。
+        ...foregroundDrainExclusion(wait),
       };
       let taskId: string;
       try {

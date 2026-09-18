@@ -1103,3 +1103,72 @@ describe("hub-bridge subagent manager aggregation across rebind", () => {
     unsubscribe();
   });
 });
+
+// -- abortSessionForegroundWork 扇出（Locked sentence 3 / T5）------------------------
+
+describe("hub-bridge abortSessionForegroundWork（本会话前景扇出）", () => {
+  test("无 subagentManager → 空数组（不抛错）", () => {
+    const bridge = createTuiBridge({
+      deps: makeDeps([]),
+      inflight: createInflightRegistry(),
+    });
+    expect(bridge.abortSessionForegroundWork("conv-a")).toEqual([]);
+  });
+
+  test("透传 hub：只 abort 本会话 live 前景行，后景 / 其它会话不动", () => {
+    const rows = [
+      {
+        taskId: "fg",
+        state: "running" as const,
+        taskPreview: "前景",
+        startedAt: "2026-09-17T00:00:00.000Z",
+        conversationId: "conv-a",
+        foreground: true,
+      },
+      {
+        taskId: "bg",
+        state: "running" as const,
+        taskPreview: "后景",
+        startedAt: "2026-09-17T00:00:00.000Z",
+        conversationId: "conv-a",
+      },
+      {
+        taskId: "other-session",
+        state: "running" as const,
+        taskPreview: "别的会话",
+        startedAt: "2026-09-17T00:00:00.000Z",
+        conversationId: "conv-b",
+        foreground: true,
+      },
+    ];
+    const killed: string[] = [];
+    const manager: SubAgentManager = {
+      spawn: () => ({ taskId: "unused" }),
+      queryBuffer: () => ({ status: "not_found" }),
+      getCapacity: () => 15,
+      waitFor: async () => {
+        throw new Error("unused");
+      },
+      shutdown: async () => {},
+      drainCompleted: () => [],
+      listActive: () => [],
+      abortTask: (taskId) => {
+        killed.push(taskId);
+        return true;
+      },
+      listSubagents: (conversationId) =>
+        conversationId === undefined
+          ? rows
+          : rows.filter((row) => row.conversationId === conversationId),
+      subscribe: () => () => {},
+    };
+    const bridge = createTuiBridge({
+      deps: makeDeps([]),
+      inflight: createInflightRegistry(),
+      subagentManager: manager,
+    });
+
+    expect(bridge.abortSessionForegroundWork("conv-a")).toEqual(["fg"]);
+    expect(killed).toEqual(["fg"]);
+  });
+});

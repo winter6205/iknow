@@ -1,10 +1,17 @@
 /**
  * LSP warmup 预热层 — lsp-optimization plan T4。
  *
- * **职责**：build-engine 装配完成后 fire-and-forget 预热——按 `ctx.directory`
- * （≡ sandboxRoot，SSOT 见 build-engine.ts 装配注释）内的文件扩展名探测首个
- * 命中的 LSP server 并预 spawn，消掉首次 `lsp_*` 工具调用的 spawn + initialize
- * 冷启动（tsserver 可达数秒）。
+ * **职责**：**首次** language server 工具调用时 fire-and-forget 预热——按
+ * `ctx.directory`（≡ sandboxRoot，SSOT 见 build-engine.ts 装配注释）内的文件
+ * 扩展名探测首个命中的 LSP server 并预 spawn，消掉后续 `lsp_*` 同族调用的
+ * spawn + initialize 冷启动（tsserver 可达数秒）。
+ *
+ * **触发时机（Locked sentence 5）**：装配期不 warmup / 不 spawn；触发缝是
+ * `withLazyLspWarmup` 包的 `LoopEngineDeps.registry` 视图 —— 装配期只消费
+ * `list()`，而每个模型工具调用必按名走一次 `registry.get(name)`（engine 侧
+ * `loop-engine.ts` 的 wave 分类 + executor 侧 `validateCall`）。取「第一次
+ * 命中 language server 工具名」为准，命中即 arm（一次性 latch，同一装配
+ * 只触发一次），fire-and-forget 不阻塞该次调用。
  *
  * **设计约束**：
  *   - **fire-and-forget**：`startLspWarmup` 同步返回，预热在后台串行进行；
@@ -31,8 +38,11 @@ import type { Dirent } from "node:fs";
 import path from "node:path";
 
 import type { LspCtx, LspServerInfo } from "./types.js";
+import type { RegistryImpl } from "../tools/registry.js";
 import { SERVERS } from "./server.js";
 import { getClient } from "./client.js";
+import { SYMBOL_QUERY_TOOL_NAMES } from "../aci/tools/symbol.js";
+import { SYMBOL_MUTATE_TOOL_NAMES } from "../aci/tools/symbol-mutate.js";
 
 /** 预热扫描跳过的目录名（依赖 / 构建产物 / 元数据，不可能承载项目源码样本）。 */
 const WARMUP_SKIP_DIRS = new Set([
@@ -82,11 +92,76 @@ export function getWarmupOutcome(): WarmupOutcome | undefined {
 }
 
 /**
- * 启动 LSP warmup（fire-and-forget）。装配层（build-engine.ts）在创建
- * lspNotifier 后调用；同步返回，内部异步执行且全量 catch。
+ * 启动 LSP warmup（fire-and-forget）。由 `withLazyLspWarmup` 在第一次
+ * language server 工具名解析时 arm，不在装配期调用；同步返回，内部异步
+ * 执行且全量 catch。
  */
 export function startLspWarmup(ctx: LspCtx): void {
   void warmup(ctx);
+}
+
+/**
+ * language server 工具名族：直接取工具层 SSOT（10 件符号查询 + 5 件符号改），
+ * 不再本地重列 —— 名字清单多一处副本就是一处漂移点（新增第 16 件符号工具
+ * 时，本地副本会静默漏掉，arm 永不触发而调用照常走冷启动）。
+ *
+ * 无循环依赖（实测，非推断）：本模块的运行时出边只有 `./server.js` 与
+ * `./client.js`（`./types.js` / `../tools/registry.js` 都是 `import type`，
+ * 不进运行时图）；`symbol.ts` / `symbol-mutate.ts` 的运行时闭包只到
+ * `aci/tools/lsp.js` / `symbol-resolver.js` / `lsp/client.js` / `lsp/server.js`
+ * / `errors.js` / `lsp/language.js`，**不含本模块**。两个方向都无环，故本
+ * import 不引入循环。`lsp_` 前缀族（坐标面 `lsp.ts`，`probe:lsp` 的仪器）
+ * 由 `isLanguageServerToolName` 另行前缀命中，不在这两份数组里。
+ */
+const LANGUAGE_SERVER_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ...SYMBOL_QUERY_TOOL_NAMES,
+  ...SYMBOL_MUTATE_TOOL_NAMES,
+]);
+
+/**
+ * 名字是否属于 language server 工具族：15 件模型面符号工具（精确名）+
+ * `lsp_*` 前缀（坐标面已从模型面退役，`lsp.ts` 仍是 `probe:lsp` 的真实栈
+ * 仪器 —— 前缀命中即 arm，多覆盖零风险）。
+ */
+function isLanguageServerToolName(name: string): boolean {
+  return LANGUAGE_SERVER_TOOL_NAMES.has(name) || name.startsWith("lsp_");
+}
+
+/**
+ * 惰性 warmup 触发缝（Locked sentence 5）：包一层 Registry 视图交给
+ * `LoopEngineDeps.registry`，**第一次** `get(name)` 命中 language server
+ * 工具族时 arm 一次 warmup。
+ *
+ * 为什么是这里（最小缝）：
+ *   - 装配期只消费 `list()`（prompt 工具表 / knownToolNames），不经过本
+ *     函数的 `get` —— 装配完成不 arm；
+ *   - 每个模型工具调用必按名解析一次（`loop-engine.ts` wave 分类 +
+ *     `executor.ts` `validateCall`），`get` 是「这类工具调用真的发生了」的
+ *     唯一必经点，且天然带工具名，无需从 handler / 注册表反推可达集；
+ *   - 不放在 `client.ts` 的 `getClientDetailed`：warmup 自身就经 `getClient`
+ *     走该入口（递归），且 notifier 的 `invalidate` 也走 `getClient` ——
+ *     普通 `edit_file` 写盘会误 arm，那不是 language server 工具调用。
+ *
+ * `get` 每个调用会被解析多次（分类 + 校验），故 latch 一次性：同一装配
+ * 只 arm 一次。`getValidator` 照原样透传（`RegistryImpl` 结构兼容）。
+ */
+export function withLazyLspWarmup(
+  inner: RegistryImpl,
+  ctx: LspCtx
+): RegistryImpl {
+  let armed = false;
+  return Object.freeze({
+    list: () => inner.list(),
+    get: (name: string) => {
+      if (!armed && isLanguageServerToolName(name)) {
+        armed = true;
+        startLspWarmup(ctx);
+      }
+      return inner.get(name);
+    },
+    // 结构兼容：`RegistryImpl` 的第三方法照原样透传（本缝只关心 `get`）。
+    getValidator: (name: string) => inner.getValidator(name),
+  });
 }
 
 async function warmup(ctx: LspCtx): Promise<void> {
