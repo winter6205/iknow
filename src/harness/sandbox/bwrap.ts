@@ -188,10 +188,12 @@ function baseArgs(
     // 工作区档三层由调用方算好后整段插入:系统块之后、cwdReadonly 与 proc/dev
     // 之前(mount 序在此处是最末一段可写 bind)。
     ...workspaceMounts,
-    // ADR-0097 / T4:出口代理缝 unix socket `--bind` —— 在 workspaceMounts
-    // 之后、cwdReadonly 之前;source=dest 同值 (host 路径 → 沙箱内同路径)。
-    // 沙箱内 socat (在 fence 内部命令链拉起) 读该 socket → 把流量转回
-    // 本地 TCP 端口 → 走 HTTP_PROXY 出口。
+    // ADR-0097 / T4 + credential-sentinel T2（invariant 9）:出口代理缝 unix
+    // socket `--bind` 与凭据围栏 binds（masked store / trust bundle /
+    // masked-file 盖真路径 / deny 盖 /dev/null）—— 在 workspaceMounts
+    // 之后、cwdReadonly 之前;socket 段 source=dest 同值 (host 路径 → 沙箱内
+    // 同路径)。沙箱内 socat (在 fence 内部命令链拉起) 读该 socket → 把流量
+    // 转回 本地 TCP 端口 → 走 HTTP_PROXY 出口。
     ...egressBind,
     // cwdReadonly: EROFS override after the `/` bind (与工作区档三层正交,
     // 即使工作区档三层叠加,cwdReadonly 仍在最末;后者按字面是 mount 序最末)。
@@ -205,20 +207,31 @@ function baseArgs(
 }
 
 /**
- * ADR-0097 / T4:egress 缝 unix socket `--bind` argv 段。
+ * ADR-0097 / T4:egress 缝 unix socket `--bind` argv 段 +
+ * egress-credential-sentinel T2 / invariant 9:凭据围栏 bind 表
+ * （masked-file 盖 bind、masked store 目录、trust bundle、F3 deny 的
+ * `/dev/null` 盖 bind）—— 全部落本段，位置不变：workspaceMounts 之后、
+ * cwdReadonly 之前，last-mount-wins 盖过根 bind / home ro-bind 下的真路径。
  *
- * `unixSocketPath` 为空 / 缺席 → 不发射任何 argv(`--unshare-net` 仍恒在,
- * 无 host-net 直连分支)。三元组形态 `--bind <src> <dest>` ——
- * `src=dest=unixSocketPath`,与既有工作区档两层写白名单(`bindArgs`)同形态,
- * 但不并入 `bindArgs`(后者语义是「工作区写白名单的省略是收紧方向」,本函数
- * 语义是「出口代理缝的省略是 fail-closed 但**不**回退到 host-net」—— 两者不混)。
+ * `unixSocketPath` 为空 / 缺席 → 不发射 socket 三元组（`--unshare-net`
+ * 仍恒在,无 host-net 直连分支）。`binds` 缺席 / 空 → 不发射额外 bind。
+ * 三元组形态 `--bind <src> <dest>` —— `src=dest=unixSocketPath`,与既有
+ * 工作区档两层写白名单(`bindArgs`)同形态,但不并入 `bindArgs`(后者语义是
+ * 「工作区写白名单的省略是收紧方向」,本函数语义是「出口代理缝的省略是
+ * fail-closed 但**不**回退到 host-net」—— 两者不混)。
+ * 凭据 binds 恒 `--ro-bind`(read-only:store 目录 INVARIANT = 围栏内不可写)。
  */
 function egressBindArgs(spec: EgressFenceSpec | undefined): string[] {
   if (spec === undefined) return [];
-  const { unixSocketPath } = spec;
-  if (typeof unixSocketPath !== "string" || unixSocketPath.length === 0)
-    return [];
-  return ["--bind", unixSocketPath, unixSocketPath];
+  const out: string[] = [];
+  const { unixSocketPath, binds } = spec;
+  if (typeof unixSocketPath === "string" && unixSocketPath.length > 0) {
+    out.push("--bind", unixSocketPath, unixSocketPath);
+  }
+  for (const bind of binds ?? []) {
+    out.push("--ro-bind", bind.src, bind.dest);
+  }
+  return out;
 }
 
 export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {

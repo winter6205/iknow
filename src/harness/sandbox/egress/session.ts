@@ -46,7 +46,13 @@ import {
   type EgressViolationSink,
 } from "./violations.js";
 import type { EgressApprovalGate } from "./approval.js";
-import type { EgressCredentialRoster } from "./credential-assembly.js";
+import {
+  mintEgressCredentials,
+  type EgressCredentialMint,
+  type EgressCredentialRoster,
+  type EgressFenceBind,
+} from "./credential-assembly.js";
+import { loadEgressCa, type EgressCaLoad } from "./ca-store.js";
 
 /**
  * 判定器输入 —— 由 bash handler 从 settings 读出后注入（依赖注入，
@@ -93,10 +99,10 @@ export interface EgressPolicyInput {
    */
   readonly approvalGate?: EgressApprovalGate;
   /**
-   * egress-credential-sentinel T1：凭据名册（内置 github 两条目 + 用户层
+   * egress-credential-sentinel T1/T2：凭据名册（内置 github 两条目 + 用户层
    * `isolation.credentials` 收窄/追加后的全集）—— 纯数据形状注入，由装配层
-   * （assembly.ts → credential-assembly.ts）构造，铸造消费归 T2。
-   * T1 阶段 session 不参与判定；缺席 = 无名册（不铸造）。
+   * （assembly.ts → credential-assembly.ts）构造。T2 起 session 消费：在场 =
+   * 铸造假值进围栏（Step 1.5）；缺席 = 无名册（不铸造、不装载 CA）。
    */
   readonly credentials?: EgressCredentialRoster;
 }
@@ -152,6 +158,22 @@ export interface EgressSessionOptions {
   readonly createHttpProxyServer?: (
     opts: Parameters<typeof createHttpProxyServer>[0]
   ) => Server;
+  /**
+   * egress-credential-sentinel T2 测试 seam：注入持久 CA 装载
+   * （默认 `ca-store.loadEgressCa` —— RSA-2048 生成在冷路径，单测
+   * 不真造 CA）。`policy.credentials` 缺席时不会被调用。
+   */
+  readonly loadEgressCa?: (opts?: {
+    readonly caDir?: string;
+    readonly onWarn?: (message: string) => void;
+  }) => EgressCaLoad;
+  /** 持久 CA 目录（测试注入点，透传给 loadEgressCa）。缺省 = 宿主默认。 */
+  readonly caDir?: string;
+  /**
+   * 铸造读真值用的宿主 env 源（默认 `process.env`）—— 测试 seam：
+   * 假凭据 fixture 从此注入，真值 / `.env*` 不经测试面。
+   */
+  readonly hostEnv?: Record<string, string | undefined>;
 }
 
 /**
@@ -170,8 +192,20 @@ export interface EgressFenceSpec {
    * `HTTP_PROXY=http://127.0.0.1:<port>` 等 env。
    */
   readonly sandboxLocalPort: number;
-  /** 已含代理三键 + NO_PROXY 的 env 增量 —— fence 拼到自己的 envArgs。 */
+  /**
+   * 已含代理三键 + NO_PROXY（credential-sentinel T2 起并含凭据假值 env 与
+   * `CA_TRUST_VARS`）的 env 增量 —— fence 拼到自己的 envArgs。
+   */
   readonly env: Readonly<Record<string, string>>;
+  /**
+   * egress-credential-sentinel T2 / invariant 9：masked-file 盖 bind +
+   * masked store 目录 ro-bind + trust bundle ro-bind + F3 deny 的
+   * `/dev/null` 盖 bind。fence 全部发射进 egressBind 段（workspaceMounts
+   * 之后、cwdReadonly 之前，last-mount-wins 盖过根 bind 真路径）；缺席 /
+   * 空 = 不发射额外 bind。宿主 tmpdir 被 `--tmpfs /tmp` 盖掉，漏这条即
+   * 围栏内不可达（F8）。
+   */
+  readonly binds?: readonly EgressFenceBind[];
 }
 
 /**
@@ -443,16 +477,45 @@ function startSocatBridgeStep(
  * = 沙箱内 socat 监听端口。本仓固定 = httpListen.port（与宿主代理 TCP
  * 端口同号）；沙箱内命令链通过 `buildSandboxInnerCommand` 把 unix socket
  * 转回该本地端口。
+ *
+ * credential-sentinel T2：env 增量 = `buildProxyEnv` 之上追加凭据假值与
+ * `CA_TRUST_VARS`（mint.envVars）；binds = masked store / trust bundle /
+ * masked-file 盖 bind / deny 盖 bind（fence 侧落 egressBind 段，invariant 9）。
  */
 function assembleFenceSpec(
   socketPath: string,
-  httpPort: number
+  httpPort: number,
+  mint: EgressCredentialMint | undefined
 ): EgressFenceSpec {
   return {
     unixSocketPath: socketPath,
     sandboxLocalPort: httpPort,
-    env: buildProxyEnv(httpPort),
+    env: { ...buildProxyEnv(httpPort), ...(mint?.envVars ?? {}) },
+    ...(mint !== undefined && mint.binds.length > 0
+      ? { binds: mint.binds }
+      : {}),
   };
+}
+
+/**
+ * Step 1.5 (credential-sentinel T2): 启动期铸造 —— 抽离以控制
+ * `createEgressSession` 复杂度（S5 门）。名册在场 → 装载持久 CA（T4）+
+ * 铸造假值（registry / masked store / bind 表 / env 增量）；缺席 →
+ * undefined（不装载、不铸造，yolo/skipped 姿态显式归 T6）。
+ * 装配期防线（invariant 1 / F4）失败 = typed 错误向上抛，调用方在此步
+ * 之后不得起代理（「不起带部分代换的 session」）。
+ */
+function mintCredentialsStep(
+  opts: EgressSessionOptions
+): EgressCredentialMint | undefined {
+  if (opts.policy.credentials === undefined) return undefined;
+  const loadCa = opts.loadEgressCa ?? loadEgressCa;
+  const caLoad = loadCa({ caDir: opts.caDir });
+  return mintEgressCredentials({
+    roster: opts.policy.credentials,
+    ca: caLoad.ca,
+    env: opts.hostEnv ?? process.env,
+  });
 }
 
 /**
@@ -460,6 +523,9 @@ function assembleFenceSpec(
  *
  * 步骤（异常路径与正常路径同一释放通道）：
  *   1) 探测 socat（注入探测函数决定成败）；
+ *   1.5) credential-sentinel T2：名册在场 → 装载持久 CA + 铸造假值
+ *        （registry / masked store / bind 表 / env 增量）；装配期防线
+ *        （invariant 1 / F4）失败 = 不起代理直接 throw；
  *   2) 启动 HTTP 代理 server（filter = decideEgress 域判定；
  *      lookupFor = 上游 ResolvedAddressGuard 做 DNS 解析守卫）；
  *   3) 起 socat 桥（unix socket → 127.0.0.1:proxyPort）；
@@ -500,6 +566,11 @@ export async function createEgressSession(
   const { decideEgress, DEFAULT_PRIVATE_DENIED_RANGES } =
     await import("./domain-matcher.js");
 
+  // Step 1.5 (credential-sentinel T2): 启动期铸造 —— 必须在起代理（Step 2）
+  // 之前：F4 子串契约 / invariant 1 假值空间 assert 失败 = typed 错误直接
+  // throw，代理未起、session 不存在（「不起带部分代换的 session」）。
+  const credentialMint = mintCredentialsStep(opts);
+
   // Step 2: 起 HTTP 代理 server。T6 测试 seam:createHttpProxyServer 注入
   // 让单测捕获 filter 回调直接驱动;生产走默认 createHttpProxyServer。
   const httpServer = startHttpProxyStep(opts.policy, token, sink, {
@@ -529,7 +600,7 @@ export async function createEgressSession(
   }
 
   // Step 4: 构造 fence spec。
-  const spec = assembleFenceSpec(socketPath, httpListen.port);
+  const spec = assembleFenceSpec(socketPath, httpListen.port, credentialMint);
 
   let disposed = false;
   const dispose = async (): Promise<void> => {
