@@ -140,8 +140,8 @@ _Avoid_: 把 `[skill-load name=]` 正文当作用户键入；加载技能；turn
 **chrome focus**: TUI 底栏焦点环 `input` | 子代理行 | `graph` 的单一 reducer；有子代理行时 Down 先入该列，再 graph；Up 反向回到输入框。子代理行聚焦时 **Ctrl+X** 强杀该子代理（父 turn 收到 cancelled）；无聚焦则空操作。
 _Avoid_: 只有 graph 抢 Down；焦点落在 ContextBar；子代理面板不可聚焦；位置行进焦点环；Enter 钻进子代理会话；第二套 picker 文案
 
-**subagent card live（子代理会话卡实时行）**: `spawn_subagent` 画在会话那张卡上：live 为角色行加一行 dim 任务概述（`taskPreview`）；**completed** 后概述留下，其下绿 `✓ Done`，不再写 `running...`。位置在该消息下，不在输入框上方。failed 走该卡 **failure overlay**。
-_Avoid_: identity strip above prompt；完成后用 `done` 替换概述；完成后仍 `running...`；绿 Done 走 failed；完成态 done 跟底栏面板一起淡出
+**subagent card live（子代理会话卡实时行）**: `spawn_subagent` 画在会话那张卡上：live 为角色行加一行 dim 任务概述（`taskPreview`）；**completed** 后概述留下，其下绿 `✓ Done`，不再写 `running...`。位置在该消息下，不在输入框上方。failed 走该卡 **failure overlay**。角色行 = catalog id（`subagent_type` / `SubagentInfo.role`，缺省 `general-purpose`）；task 正文里的 `ROLE: implementation worker` 不是角色。同一 worker 不得再并排一张未 join 的 `general-purpose running`。
+_Avoid_: identity strip above prompt；完成后用 `done` 替换概述；完成后仍 `running...`；绿 Done 走 failed；完成态 done 跟底栏面板一起淡出；把 task 里的 ROLE 文案当 catalog；已 join 的卡旁边再画一条 fallback 运行行
 
 **前台打断**: TUI **Ctrl+C** 停当前会话全部前台——父 `running-fg` turn，以及本会话所有前景（`wait:true`）子代理，包括父已 idle 但仍 live 的；后景 `wait:false` 与其它会话 `running-bg` 不停。前台仍在跑时有选区也先打断。Ctrl+X 仍可单杀焦点行（含后景）。
 _Avoid_: 只 abort 父 signal 留下前景子代理；idle 夹缝让前景子代理继续转圈；running-fg 有选区只复制不 abort

@@ -5,12 +5,13 @@
 
 > 输入 = `plans/tui-subagent-transcript-live.md`（ACR 5/5 yes；九句锁句；`docs/CONTEXT.md` 词条 `subagent card live` 已 flush）。
 > 取代 = Slice D / SC14 把两行做成 prompt 上方 chrome（`SubagentIdentityStrip`）——本 spec 把位置改判给**会话 transcript 里那张 `spawn_subagent` 卡**。
-> 范围 = 位置搬家 + 完成态 `done` + `toolUseId` 只读 join；不改 SubagentPanel、harness spawn/abort、web、Ctrl+X、activity-block live-signal。
+> **Reopen（`plans/strategy-window-and-subagent-card.md` T1）**：锁句 2 / 完成态表 / SC2 —— completed 后概述留下并加 `✓ Done`，不再把第 2 行换成字面 `done`，也不再保留 `running...`。
+> 范围 = 位置搬家 + 完成态 + `toolUseId` 只读 join；不改 SubagentPanel、harness spawn/abort、web、Ctrl+X、activity-block live-signal。
 > 落地 = T1 本 spec → T2 投影（含 `listSubagents` 只读 `toolUseId`）→ T3 卡承载两行、拆条 → code-review → verification-before-completion。
 
 ## Goal
 
-活着的子代理不再画在输入框正上方，而是画在**会话里派它的那张 `spawn_subagent` 卡**下面：第 1 行 `{role} running...`，第 2 行 dim 为该 worker 最新内容（`taskPreview`）；该 worker 完成后第 2 行**原位**变绿 `done`。输入框上方的身份条拆除，其 chrome 行账归零。
+活着的子代理不再画在输入框正上方，而是画在**会话里派它的那张 `spawn_subagent` 卡**下面：live 第 1 行 `{role} running...`，第 2 行 dim 为该 worker 任务概述（`taskPreview`）；完成后概述留下，其下绿 `✓ Done`，不再写 `running...`。输入框上方的身份条拆除，其 chrome 行账归零。
 
 **用户**：iknow 单用户单项目本机产品；TUI 是主验收面（`npm run dev:tui`）。
 
@@ -25,11 +26,11 @@
 
 九句锁句（继承 `plans/tui-subagent-transcript-live.md`；实施与 review 均以此为准）：
 
-1. 每个活着的 `spawn_subagent` 在**会话 transcript 那张卡**占两行：第 1 行 `{role} running...`（三点），第 2 行 dim 为该 worker 最新内容（`taskPreview`）。
-2. 该 worker **completed** 后，第 2 行**原位**变成绿色 `done`，不挪到输入框边上，不随底栏面板淡出而消失。
+1. 每个活着的 `spawn_subagent` 在**会话 transcript 那张卡**占两行：第 1 行 `{role} running...`（三点），第 2 行 dim 为该 worker 任务概述（`taskPreview`）。
+2. 该 worker **completed** 后，任务概述留下，其下绿 `✓ Done`；不得把概述换成字面 `done`；不得再写 `running...`。不挪到输入框边上，不随底栏面板淡出而消失。
 3. 输入框**正上方**的身份条（`SubagentIdentityStrip`）拆除；其 chrome 行账归零。
 4. 输入框**下方** `SubagentPanel`（`●` / 时长 / 完成淡出 / Ctrl+X 行序）本票不改。
-5. **failed** 不走绿 `done`：沿用该工具卡既有 **failure overlay**。
+5. **failed** 不走绿 `✓ Done`：沿用该工具卡既有 **failure overlay**。
 6. 实时流只挂在对得上 `toolUseId` 的那张 spawn 卡上；投影缺 `toolUseId` 则只画第 1 行、不借用别的 worker 的预览（`// EXIT:`）。
 7. `subagent_result` 仍是轮询卡，不套这两行。
 8. 不再为「避免 dual render」把 spawn 标题剥成不含 `running...` 的残句；身份以会话卡为准，底栏面板仍是任务列表。
@@ -37,11 +38,11 @@
 
 ### 锁句的落地解释（防 review 漂移）
 
-- 锁句 1 的「最新内容」**就是** `SubagentInfo.taskPreview`（manager 已截断 ≤120）以 1Hz 只读轮询刷新，**不是**逐 token 流；本切片不新增流式通道。
-- 锁句 2 只改第 2 行：完成态第 1 行仍是 `{role} running...`（逐字合同），第 2 行由 dim 预览变绿 `done`（文本逐字 `done`，无字形、无 ✓）。
+- 锁句 1 的「任务概述」**就是** `SubagentInfo.taskPreview`（manager 已截断 ≤120）以 1Hz 只读轮询刷新，**不是**逐 token 流；本切片不新增流式通道。
+- 锁句 2：completed 后概述仍在；其下绿 `✓ Done`（含 ✓）。第 1 行不得再带 `running...`。角色标题若仍在，只作身份、不含 running。
 - 锁句 6 的「缺 `toolUseId`」= **子代理侧投影缺关联键**（无关联键的 def / 非 spawn 来源）。此时卡照画第 1 行（角色从该卡自身 input 的 `subagent_type` → `role` → catalog fallback 派生），**不**拿任何别的 worker 的 `taskPreview` 顶替。
-- 锁句 5 与 6 的关系：failed 的 worker 不进 join map，卡回到既有 failure overlay（标题 + 单行短错误），不画两行。
-- **完成态依赖进程内投影**：`done` 行需要 `subagents` 列表里仍有该 worker（进程内）。应用重启后没有 join 源 → 该历史卡回既有单行落定摘要；本切片不引入落盘关联（不写第二套持久化）。
+- 锁句 5 与 6 的关系：failed 的 worker 不进 join map，卡回到既有 failure overlay（标题 + 单行短错误），不画完成态绿勾。
+- **完成态依赖进程内投影**：`✓ Done` 需要 `subagents` 列表里仍有该 worker（进程内）。应用重启后没有 join 源 → 该历史卡回既有单行落定摘要；本切片不引入落盘关联（不写第二套持久化）。
 - **`wait:false` 的卡**：spawn 立即返回 `{task_id}`（工具卡已落定），worker 仍在跑 —— 两行照画在卡上（join 只问 worker 状态，不问工具卡是否落定）。这不是漏洞，是本切片的正确形态。
 - **未 join 的 live spawn 卡**（无 `toolUseId`：ask / 直调 handler / 测试注入）：第 1 行仍画 `{role} running...`（角色由该卡自身 input 的 `subagent_type` → `role` → catalog fallback 派生），无第 2 行 —— 不借用任何别的 worker 预览。该形态与「join 上但仍是 live」在屏上都以 `{role} running...` 开头，区别只在有没有 dim 流那行。
 
@@ -49,24 +50,25 @@
 
 ```ts
 export interface SubagentCardLines {
-  readonly roleLine: string; // `{role} running...`（角色 = join 到的 role，缺省 catalog fallback）
-  readonly detailLine: string; // live → dim taskPreview（已按 cols 截断）；completed → "done"
-  readonly done: boolean; // 第 2 行着色：true → tuiPalette.add（绿）；false → tuiPalette.dim
+  readonly roleLine: string; // live：`{role} running...`；completed：身份行，不含 `running...`
+  readonly detailLine: string; // live 与 completed 均为 taskPreview（按 cols 截断）
+  readonly doneLine?: string; // completed → `✓ Done`；live 缺席
+  readonly done: boolean; // 完成态着色：true → tuiPalette.add（绿）
 }
 ```
 
 | 卡状态                                  | 画面                                                                                            |
 | --------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| live（`starting` / `running`，join 上） | 第 1 行 `{role} running...`；第 2 行 dim 预览                                                   |
-| completed（join 上）                    | 第 1 行 `{role} running...`；第 2 行绿 `done`                                                   |
-| failed（join 上）                       | 不套两行 —— 走该卡 failure overlay（锁句 5）                                                    |
+| live（`starting` / `running`，join 上） | 第 1 行 `{role} running...`；第 2 行 dim 概述                                                   |
+| completed（join 上）                    | 概述留下；其下绿 `✓ Done`；不得 `running...`                                                    |
+| failed（join 上）                       | 不套完成态绿勾 —— 走该卡 failure overlay（锁句 5）                                              |
 | spawn 卡（running，join 不上）          | 只画第 1 行；文案 = 既有 `formatToolStatusLine` 的 dotless `{role} running`（不改模板，锁句 6） |
 | spawn 卡（ok，join 不上）               | 既有单行标题（`{role}` 落定摘要），本切片不改                                                   |
 | 非 spawn（含 `subagent_result`）        | 本切片完全不改（锁句 7）                                                                        |
 
 两宿主共用的「第 1 行」文案来源分两路，**不得各写模板**：
 
-- spawn 卡（`spawn_subagent`）且能投影 → 走 `SubagentCardView`（`{role} running...` 带三点 + 第 2 行 `taskPreview` / 绿 `done`）；
+- spawn 卡（`spawn_subagent`）且能投影 → 走 `SubagentCardView`（live：`{role} running...` + 概述；completed：概述 + 绿 `✓ Done`）；
 - 其余任何工具卡（含 `subagent_result`）→ 完全走既有 `formatToolStatusLine` 路径，字节与改前一致。
 
 即：两行形态只挂在 `spawn_subagent` 上，`isSubagentTool` 的另一半（轮询卡）保持既有 detail-only 形态。
@@ -97,7 +99,7 @@ export interface SubagentCardLines {
 ## Success criteria
 
 - **SC1**: 真实会话里，前台 `spawn_subagent` 执行期间，该卡在 transcript 显示 `{role} running...` + 一行 dim `taskPreview`；输入框上方不再出现任何 `{role} running...` 行。
-- **SC2**: 该 worker 完成后，同一张卡第 2 行原位变绿 `done`（`fg = tuiPalette.add`），第 1 行不变。
+- **SC2**: 该 worker 完成后，同一张卡仍能看见任务概述，其下绿 `✓ Done`（`fg = tuiPalette.add`），不得再写 `running...`，不得只剩字面 `done`。
 - **SC3**: 两个并发 live worker 各占自己的卡，预览不串（A 卡不出现 B 的 `taskPreview`）。
 - **SC4**: 缺 `toolUseId` 的子代理条目：卡只画第 1 行，不借用他人预览（`// EXIT:` 在拒绝分支上）。
 - **SC5**: `chromeReserveRows` 的产品调用不再为子代理预留 prompt 上方行数；live 子代理存在与否不改变 chrome 预算。
@@ -112,7 +114,7 @@ export interface SubagentCardLines {
 
 ## Evidence pointers
 
-- 计划：`plans/tui-subagent-transcript-live.md`（ACR 5/5 yes、九句锁句、T1–T3）。
+- 计划：`plans/tui-subagent-transcript-live.md`（位置搬家）；完成态修订：`plans/strategy-window-and-subagent-card.md`。
 - 前身：Slice D / SC14（`specs/agent-control-surface.md` 已归档）把两行落成 prompt 上方 chrome。
 - 领域词：`docs/CONTEXT.md` 词条 **subagent card live（子代理会话卡实时行）**（已 flush，本切片落地）。
 - join 键上游：`SubAgentDefinition.toolUseId`（`src/harness/subagent/role.ts`）← `ToolExecutionContext.toolUseId`（executor `call.id`）← `spawn-subagent-tool` 写入 def。
