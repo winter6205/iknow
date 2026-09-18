@@ -55,6 +55,12 @@ export {
   type LedgerRewindTarget,
 } from "./rewind-targets.js";
 export {
+  appendWorkerTranscript,
+  isWorkerTranscriptPathSafe,
+  loadWorkerTranscript,
+  type WorkerTranscriptLocation,
+} from "./worker-transcript.js";
+export {
   resolveConversationDir,
   resolveConversationTraceFilePath,
   resolveProjectSessionDir,

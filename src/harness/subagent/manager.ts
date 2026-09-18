@@ -584,6 +584,34 @@ function skillIndexSnapshotField(
   };
 }
 
+/**
+ * ADR-0102 T3 / T5 (ADR-0071):per-worker 磁盘账三键折叠 —— taskId /
+ * traceFilePath / transcriptPath 同门派生自同一 `subagentsDir`（键
+ * `(父 conversationId, task_id)` 的目录段已由 `resolveSubagentsDirForDef`
+ * 解出）。目录缺席 → 三键整个省略（legacy envelope byte-stable）；在场则
+ * 懒建 `subagents/<taskId>/` 布局（trace record + fence-tmp pad + 工人
+ * transcript 路径）。
+ *
+ * 独立成模块级函数而非内联条件：`buildWorkerPayload` 的圈复杂度是逐函数
+ * 棘轮（同 spawn-subagent-tool 的 foregroundDrainExclusion 先例）。
+ */
+function workerLedgerFields(
+  subagentsDir: string | undefined,
+  taskId: string
+): {
+  readonly taskId?: string;
+  readonly traceFilePath?: string;
+  readonly transcriptPath?: string;
+} {
+  if (subagentsDir === undefined) return {};
+  const layout = ensureWorkerSessionLayout(subagentsDir, taskId);
+  return {
+    taskId,
+    traceFilePath: layout.recordPath,
+    transcriptPath: layout.transcriptPath,
+  };
+}
+
 export function createSubAgentManager(opts: {
   readonly spawn: SubAgentSpawn;
   /**
@@ -1614,15 +1642,12 @@ export function createSubAgentManager(opts: {
       // projectDir + def.conversationId 两段式缝)。任一在场即按派生结果发;
       // 双缺 → 不写这两个加性字段 → worker 退化到既有 IKNOW_TRACE_OUT /
       // defaultTraceDir 形态 (legacy envelope byte-stable)。
-      ...(resolveSubagentsDirForDef(def) !== undefined
-        ? {
-            taskId,
-            traceFilePath: ensureWorkerSessionLayout(
-              resolveSubagentsDirForDef(def) as string,
-              taskId
-            ).recordPath,
-          }
-        : {}),
+      //
+      // ADR-0102 T3:同一目录派生下再发 `transcriptPath` —— 工人 transcript
+      // (SessionFileV1 形态的对话账,`<subagents>/<taskId>/<taskId>.jsonl`,
+      // 与 per-agent trace `agent-<taskId>.jsonl` 分家)。落点与 trace 同门:
+      // 目录派生缺席 → 三个键整个省略,worker 不写账(旧形态逐字节不变)。
+      ...workerLedgerFields(resolveSubagentsDirForDef(def), taskId),
       ...todoLedgerAnchor(opts.todoDir, def.conversationId),
       // T7 (spec SC10):父会话「当时」的完整模型索引快照 —— 每次 spawn 现读
       // getter（`sandboxRootCell` 同形态），值落线后才增长父侧不会回流。

@@ -105,6 +105,15 @@ export interface WorkerEnvelope {
    */
   readonly traceFilePath?: string;
   /**
+   * ADR-0102 T3: 工人 transcript 落点 —— `<父会话文件夹>/subagents/<taskId>/
+   * <taskId>.jsonl`（与 `agent-<taskId>.jsonl` per-agent trace 分家，不是第二
+   * 份 trace，也不是 continue 源的替代品 —— trace 语义不动）。worker loop 边跑
+   * 边把消息 append 进这条账（SessionFileV1 读路径可吃）；subagent_continue
+   * 的闸认它存在与否。Wire additive + optional —— 与 `traceFilePath` 同形态;
+   * 旧 envelope（无此字段）→ ajv 接受 → worker 零 transcript 写（byte-stable）。
+   */
+  readonly transcriptPath?: string;
+  /**
    * ADR-0085 / SC9:父会话账本锚点 —— worker 与父共用**同一本** todos.md,
    * `projectDir` = 父会话项目目录(`TodoWriteToolDeps.todoDir` 的同一值),
    * `conversationId` = 父会话 id。worker 装配期把它透传给 todo_write 工厂,
@@ -257,6 +266,9 @@ export const WORKER_SCHEMA: Record<string, unknown> = {
     // 字符串路径，不锁 enum（路径形态由调用方决定，无 SSOT 枚举）。
     // 旧 envelope / 跨版本 resume → 缺省 → worker 走 IKNOW_TRACE_OUT 退路。
     traceFilePath: { type: "string" },
+    // ADR-0102 T3: transcriptPath —— 与 traceFilePath 同形态（wire additive,
+    // optional）。路径字符串不锁格式；旧 envelope 缺省 → worker 不写工人账。
+    transcriptPath: { type: "string" },
     // ADR-0085 / SC9: 父会话账本锚点 —— 与 role 同形态（wire additive,
     // optional）。两个子字段都必填(锚点不完整即 repudiate,让装配层
     // 收到 ProtocolError 而不是一个残缺的 ledger 缝);旧 envelope 缺此
