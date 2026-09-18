@@ -217,6 +217,9 @@ _Avoid_: 预置兜底集（0097 旧表述已废，勿复用）；把文档推荐
 **凭据 sentinel（credential sentinel）**: 围栏内替代真凭据的同形假值（`[a-z0-9_-]` 精确匹配字节串，可原样穿过 JSON / form / multipart 等编码）；真值仅在宿主出口代理，出口处仅对放行域假换真（需 TLS 终止），代换方向恒 fake→real——漏代换 = 认证失败而非真值泄露。ADR-0105。
 _Avoid_: 掩码 / mask（那是可见面的 secret-roundtrip mask）；把 sentinel 当加密或 tokenization；期待压缩 / 编码体内还能代换；让真值凭据文件进围栏
 
+**yolo 模式**: 用户显式确认进入的无沙箱姿态（TUI-only 入口 `--yolo` / 会话内 `/yolo` + 危险确认）——fence 产出 bare argv（无 bwrap / netns / mount / env 隔离），权限面 `full_auto`，fsMode 暂 `global`（进入快照、退出即恢复）；是**沙箱纪律**与**出口代理缝**的唯一具名豁免面：无 fence 即无 egress 缝，凭据 sentinel 层随之跳过并留痕（真值直达属声明姿态非缺陷）。#1035。
+_Avoid_: 把 yolo 理解成仅「免审批」（消失的不只 ask 面，是物理隔离）；把 yolo 下 egress / 凭据层缺席写成 fail-open 缺陷；给非 TUI 公开命令开 yolo 入口
+
 **声明工具面 vs 实际工具面**: `SubAgentDefinition.disallowedTools` 写进 `WorkerEnvelope` 的是声明面；worker 进程装配后真正可被模型调用的工具集是实际面，二者必须相等——裁剪发生在 `createAciRegistry(tools)` **之前**的 def-list 期（`createDefaultAciRegistry` 工厂内），由构造期快照保证，不事后修补（`AciRegistry.inner` 是冻结快照）。
 _Avoid_: 给 `AciRegistry` 加 `.tools` 字段在产物上事后裁剪；声明 deny-list 但 worker 不消费（#468 修复对象）
 
