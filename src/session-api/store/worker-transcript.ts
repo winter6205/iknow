@@ -62,7 +62,7 @@ export async function loadWorkerTranscript(
     throw {
       kind: "io_error",
       conversation_id: taskId,
-      cause: errMsg(err),
+      cause: fsErrMsg(err),
     } satisfies SessionStoreError;
   }
   try {
@@ -72,19 +72,7 @@ export async function loadWorkerTranscript(
       messages: closeoutOrphanToolUses(file.messages),
     };
   } catch (err) {
-    const e = err as { kind?: string; reason?: unknown; field?: unknown };
-    if (e.kind === "parse_failed") {
-      throw {
-        kind: "parse_failed",
-        conversation_id: taskId,
-        reason: typeof e.reason === "string" ? e.reason : "unknown",
-      } satisfies SessionStoreError;
-    }
-    throw {
-      kind: "schema_invalid",
-      conversation_id: taskId,
-      field: typeof e.field === "string" ? e.field : "root",
-    } satisfies SessionStoreError;
+    throw attachTaskId(taskId, err);
   }
 }
 
@@ -115,7 +103,7 @@ export async function appendWorkerTranscript(opts: {
       throw {
         kind: "io_error",
         conversation_id: taskId,
-        cause: errMsg(err),
+        cause: fsErrMsg(err),
       } satisfies SessionStoreError;
     }
     raw = null;
@@ -176,7 +164,7 @@ export async function appendWorkerTranscript(opts: {
     throw {
       kind: "write_failed",
       conversation_id: taskId,
-      cause: errMsg(err),
+      cause: fsErrMsg(err),
     } satisfies SessionStoreError;
   }
 }
@@ -205,7 +193,8 @@ function isEnoent(err: unknown): boolean {
   );
 }
 
-function errMsg(err: unknown): string {
+/** 仅用于原生 fs 错误；typed 错误（判别联合）须先按 kind 分流再消费本 helper。 */
+function fsErrMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
