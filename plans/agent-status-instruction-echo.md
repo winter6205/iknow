@@ -38,7 +38,7 @@ minimal-change-verifier: yes — 与 ADR-0103 决策 1-4 一一对应；T5/T6 �
    - **Surface:** `src/harness/loop-engine.ts`（`appendAgentStatusBar` 消费 T2 提取器）+ `src/harness/stream.ts`（事件字段随快照加性扩）
    - **Acceptance:** harness 集成测试按仓规双轨 assert（trace event sequence + NoopTrace-vs-no-trace deepEqual 基线）——prior 含真实指令时该指令首行在每条栏的 `instruction:` 行、同回合多跳每跳在场且不进 `deps.system`；无真实用户消息时段整段缺席（F1）；todo 读取路径零变化；流事件与栏文本同一 snapshot 派生断言。
    - [blocks: T1, T2]
-   - Status: [ ] pending
+   - Status: [x]
 
 4. **reconcile run 作用域一次性结算** — tag: `[implementation]`
    - **Inherits:** spec invariant 3「reconcile 在场条件只有一个：新用户消息进场后的下一条栏；禁止用 todo_write 调用史 / todo 段在场 / 栏变化当条件」+ invariant 4「标记文本字节稳定」+ T3 装箱纪律（复用 `lastToolRef` 形态，消息对象同一性即相关号；不落盘、不进 deps 装配面）+ 冷启动 `stamped = undefined` 合法性 + F7。

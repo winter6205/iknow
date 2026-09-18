@@ -8,8 +8,9 @@
  *      一致(同一份现势,同 run 内交叉断言);
  *   ② 无未勾项 → 事件仍发(openTodoLines 空 + lastTool),与栏一致;
  *   ③ deps.agentStatus 缺席(ask / worker 形状)→ 无栏也无事件;
- *   ④ 栏纯度:事件恰带栏的数据字段(lastTool / openTodoLines,无 text、无
- *      in-flight),栏文本与 T1 构造器 buildAgentStatusText 逐字节一致;
+ *   ④ 栏纯度:事件恰带栏的数据字段(lastTool / openTodoLines / 条件在场
+ *      instruction,无 text、无 in-flight),栏文本与 T1 构造器
+ *      buildAgentStatusText 逐字节一致;
  *   ⑤ 观察者 throw 不反流(safeEmitStream 契约),回合照常完成、栏照常注入;
  *   ⑥ reactive compact 后的重试调用前同样发事件(栏在 compact 后落位的
  *      同一计算点)。
@@ -232,7 +233,7 @@ describe("agent_status stream event T3: gating follows the bar", () => {
 // ---------------------------------------------------------------------------
 
 describe("agent_status stream event T3: bar purity", () => {
-  it("④ 事件恰带 {type,lastTool,openTodoLines}(无 text / in-flight);栏文本 === buildAgentStatusText(事件字段)", async () => {
+  it("④ 事件恰带 {type,lastTool,openTodoLines,instruction}(无 text / in-flight);栏文本 === buildAgentStatusText(事件字段)", async () => {
     const todoDir = await makeTodoDir("- [ ] only open task\n");
     const echo = okEchoTool();
     const reg = createRegistry([echo]);
@@ -269,16 +270,19 @@ describe("agent_status stream event T3: bar purity", () => {
     assert.equal(probe.agentStatusEvents.length, 2);
     for (let i = 0; i < probe.agentStatusEvents.length; i++) {
       const ev = probe.agentStatusEvents[i]!;
-      // 事件字段恰为栏的数据字段(不含栏 text、不含任何 in-flight 字段)。
+      // run("go") 的 prompt 即最新真实用户消息 → spec T3 后事件加性带
+      // instruction 字段;字段恰为栏的数据字段(不含栏 text、不含 in-flight)。
+      assert.equal(ev.instruction, "go");
       assert.deepEqual(
         Object.keys(ev).sort(),
-        ["lastTool", "openTodoLines", "type"],
+        ["instruction", "lastTool", "openTodoLines", "type"],
         "event carries exactly the bar's data fields"
       );
       // 栏文本逐字节 === T1 构造器对同一份事件字段的重放输出。
       const rebuilt = buildAgentStatusText({
         lastTool: ev.lastTool,
         openTodoLines: ev.openTodoLines,
+        instruction: ev.instruction,
       });
       assert.equal(
         tailBar(captured[i]!),

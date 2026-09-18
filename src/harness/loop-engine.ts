@@ -117,6 +117,7 @@ import {
   AGENT_STATUS_IDLE_TOOL,
   computeAgentStatusSnapshot,
 } from "./agent-status.js";
+import { extractLatestRealUserInstruction } from "./agent-status-instruction.js";
 import { readEnvSnapshot } from "./env-snapshot.js";
 import type { GraphAssembly } from "./graph/assembly.js";
 import {
@@ -596,6 +597,13 @@ function appendMessage(opts: {
  *
  * #888:注入消息同时 record 进 pending 缓冲 —— 下一次 assistant / tool_result
  * commit 时随批 flush 上盘,消除 save-fork。
+ *
+ * spec agent-status-instruction-echo T3:同一计算点经 T2 提取器
+ * (`extractLatestRealUserInstruction`)从 `state.messages` 现读最新真实用户
+ * 指令首行,随同一份 snapshot 进栏 `instruction:` 行与 `agent_status` 事件
+ * (SC1 / SC6 同源;逐字回显非摘要,invariant 1)。无真实用户消息 → 段整
+ * 段缺席(F1)。提取纯读取零抛错;append-only / pendingInjected 纪律不变
+ * (invariant 6)。reconcile 结算归子弹 4,本处只透传快照字段不结算。
  */
 async function appendAgentStatusBar(
   state: LoopState,
@@ -613,11 +621,20 @@ async function appendAgentStatusBar(
     // per-session by the surface layer (#502 T5); absent (ask / worker) →
     // legacy shared-root read.
     conversationId: deps.conversationId,
+    instruction:
+      extractLatestRealUserInstruction(state.messages)?.instruction ?? null,
   });
   safeEmitStream(onStream, {
     type: "agent_status",
     lastTool: snapshot.lastTool,
     openTodoLines: snapshot.openTodoLines,
+    // 条件在场:缺席 → key 不出现(与栏文本"空槽不广告"同一形态)。
+    ...(snapshot.instruction !== undefined
+      ? { instruction: snapshot.instruction }
+      : {}),
+    ...(snapshot.reconcile !== undefined
+      ? { reconcile: snapshot.reconcile }
+      : {}),
   });
   const msg = deps.adapter.encodeUserText(snapshot.text);
   pendingInjected.record(msg);

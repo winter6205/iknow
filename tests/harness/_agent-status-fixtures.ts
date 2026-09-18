@@ -78,10 +78,13 @@ export function makeSpyAdapter<TSample = unknown>(
   readonly adapter: LoopAdapter;
   /** 每次带 tools 的模型调用看到的 messages(按调用序)。 */
   readonly captured: ReadonlyArray<ReadonlyArray<AnthropicNativeMessage>>;
+  /** 每次带 tools 的模型调用看到的 request.system(缺席 = undefined;守「注入不进 system」)。 */
+  readonly systemsCaptured: ReadonlyArray<string | undefined>;
   /** hooks.sampleAtEntry 按调用序的返回值;未传 hooks → 恒空数组。 */
   readonly entrySamples: ReadonlyArray<TSample>;
 } {
   const captured: ReadonlyArray<AnthropicNativeMessage>[] = [];
+  const systemsCaptured: (string | undefined)[] = [];
   const entrySamples: TSample[] = [];
   let next = 0;
   const adapter: LoopAdapter = Object.freeze({
@@ -108,7 +111,7 @@ export function makeSpyAdapter<TSample = unknown>(
       })),
     step: async (
       state: { readonly messages: ReadonlyArray<AnthropicNativeMessage> },
-      request: { readonly tools?: unknown }
+      request: { readonly tools?: unknown; readonly system?: string }
     ): Promise<AssistantTurnResult> => {
       if (request.tools === undefined) {
         return assistantResult({
@@ -118,6 +121,7 @@ export function makeSpyAdapter<TSample = unknown>(
         });
       }
       captured.push(state.messages);
+      systemsCaptured.push(request.system);
       if (hooks?.sampleAtEntry !== undefined) {
         entrySamples.push(hooks.sampleAtEntry());
       }
@@ -132,7 +136,7 @@ export function makeSpyAdapter<TSample = unknown>(
       return action.result;
     },
   });
-  return { adapter, captured, entrySamples };
+  return { adapter, captured, systemsCaptured, entrySamples };
 }
 
 // -- tools ----------------------------------------------------------------------

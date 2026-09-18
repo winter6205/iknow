@@ -192,19 +192,26 @@ export async function readOpenTodoLines(
 }
 
 /**
- * 组合计算:读 todos.md 投影未勾行 + last_tool → 快照数据与栏文本。
- * T3(TUI 只读订阅)从同一份数据 / 文本派生 UI,不另建账本。
- * 永不 throw(读取失败由 readOpenTodoLines 收敛为空列表)。
+ * 组合计算:读 todos.md 投影未勾行 + last_tool (+ T3 instruction 透传) →
+ * 快照数据与栏文本。T3(TUI 只读订阅)从同一份数据 / 文本派生 UI,不另建
+ * 账本。instruction 由调用侧(loop-engine 经 T2 提取器)传入;null / 缺席 →
+ * 字段不落 key(事件面保持 F1 的旧字段集形态)。永不 throw(读取失败由
+ * readOpenTodoLines 收敛为空列表)。
  */
 export async function computeAgentStatusSnapshot(opts: {
   readonly lastTool: string;
   readonly todoDir: string;
   /** 在场 → 投影该会话自己的账本(SSOT 与 todo_write 写入侧同源)。 */
   readonly conversationId?: string;
+  /** spec T3:最新真实用户指令首行(T2 提取器产物);null → 段缺席。 */
+  readonly instruction?: string | null;
 }): Promise<AgentStatusSnapshot & { readonly text: string }> {
   const snapshot: AgentStatusSnapshot = {
     lastTool: opts.lastTool,
     openTodoLines: await readOpenTodoLines(opts.todoDir, opts.conversationId),
+    ...(opts.instruction !== undefined && opts.instruction !== null
+      ? { instruction: opts.instruction }
+      : {}),
   };
   return { ...snapshot, text: buildAgentStatusText(snapshot) };
 }
