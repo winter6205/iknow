@@ -77,6 +77,8 @@ function makeStubEgressSessionFactory(args: {
       unixSocketPath: "/tmp/iknow-egress-stub.sock",
       sandboxLocalPort: 0,
       env: {},
+      // T1 起 EgressFenceSpec 必含内层桥前导；stub 不真监听，前导置空。
+      innerBridgeScript: "",
     };
     return Object.freeze({
       id,
@@ -220,6 +222,7 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
           unixSocketPath: "/tmp/iknow-egress-empty.sock",
           sandboxLocalPort: 0,
           env: {},
+          innerBridgeScript: "",
         },
         violationSink: sink,
         dispose: async () => undefined,

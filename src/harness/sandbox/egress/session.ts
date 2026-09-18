@@ -13,8 +13,11 @@
  * 的 `initializeLinuxNetworkBridge`。
  *
  * 本仓前台形态最小可用面：HTTP 代理 + address guard lookupFor（DNS 解析
- * 守卫先于 dial）。SOCKS5 / git-over-SOCKS 不在 T4 范围（spec §Settled
- * invariants 不要求 git 走 SOCKS；T7/T8 形态扩展时按 mux 形态补）。
+ * 守卫先于 dial）。egress-ssh-bridge T1 已把「沙箱内侧半桥」补齐为宿主
+ * session 装配期算好的 `innerBridgeScript`（沙箱内 socat TCP-LISTEN:3128 →
+ * unix socket 的前导命令，消费面在 bash.ts 前台命令链）；SOCKS5 /
+ * git-over-SOCKS 面（1080 段）已被操作员裁定摘出当前分支（plans/
+ * egress-ssh-bridge.md 子弹 2），按 mux 形态补时在此追加第二段监听。
  *
  * T6：filter 回调与 approvalGate 接线（specs §首次域名批准流 + SC10 +
  * ADR-0097 §批准持久化粒度）—— `decideEgress` 返回 `not-in-allowlist` 且
@@ -158,12 +161,22 @@ export interface EgressFenceSpec {
   /** 宿主 socket 绝对路径（fence 用作 `--bind src dest`，dest = 同值）。 */
   readonly unixSocketPath: string;
   /**
-   * 沙箱内 socat 暴露的代理端口。fence 注入
-   * `HTTP_PROXY=http://127.0.0.1:<port>` 等 env。
+   * **沙箱内固定监听号**（= `SANDBOX_HTTP_PROXY_PORT`）。egress-ssh-bridge
+   * T1 起语义从「与宿主代理 TCP 端口同号」改为固定值 —— 宿主/沙箱同号是
+   * 巧合式耦合（O3），固定端口让 env 与后续 `GIT_SSH_COMMAND` 可预先拼装
+   * （specs/egress-ssh-bridge.md assumption 3）。fence 注入
+   * `HTTP_PROXY=http://<user>:<token>@127.0.0.1:<port>` 等 env。
    */
   readonly sandboxLocalPort: number;
-  /** 已含代理三键 + NO_PROXY 的 env 增量 —— fence 拼到自己的 envArgs。 */
+  /** 已含代理三键（嵌 auth userinfo，O1）+ NO_PROXY 的 env 增量 —— fence 拼到自己的 envArgs。 */
   readonly env: Readonly<Record<string, string>>;
+  /**
+   * 沙箱内侧半桥的前导脚本（session 装配期算好）：沙箱内 socat 把
+   * `127.0.0.1:<sandboxLocalPort>` 转到 `unixSocketPath` + trap 收尾。
+   * 消费面 = bash.ts 前台命令链（`bash -c "<script>\n<command>"`）；
+   * background / verify 两形态的接线归子弹 5。
+   */
+  readonly innerBridgeScript: string;
 }
 
 /**
@@ -232,19 +245,76 @@ function newSessionId(): string {
 }
 
 /**
+ * 沙箱内代理固定监听号（HTTP 面）。why 固定：沙箱 netns 号段私有，固定
+ * 端口使代理 env 与后续 `GIT_SSH_COMMAND` 能在装配期预拼装，解除
+ * 「宿主/沙箱同号」的巧合式耦合（specs/egress-ssh-bridge.md T1 /
+ * assumption 3；依赖包同款：linux-sandbox-utils.js `buildSandboxCommand`
+ * 的 TCP-LISTEN:3128）。宿主侧代理 TCP 端口维持 OS 分配，由宿主 socat
+ * 桥完成 <固定内端口> → <宿主随机端口> 的转接。
+ */
+export const SANDBOX_HTTP_PROXY_PORT = 3128;
+
+/**
+ * 代理 auth 用户名 —— 纯 label，credential 是 token（密码位）。上游
+ * `checkAuth`（http-proxy.js）只校验密码 == proxyAuthToken 且用户名非空。
+ * 依赖包同款形态是 `PROXY_AUTH_USER = 'srt'`（+可选 encodedCommand 后缀
+ * 做归因）；本仓归因已有 `commandLabel` sink 通道，故取不带后缀的固定名。
+ */
+export const PROXY_AUTH_USER = "iknow";
+
+/**
+ * POSIX 单引号包裹 —— 内嵌 `'` 以 `'\''` 断开重开。内层前导脚本会整段
+ * 进 `bash -c` 的双引号 payload，宿主 socket 路径 / socat 命令名必须
+ * 经此 escape 才不破坏命令链（上游 `quote()` 同款语义）。
+ */
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * 构造沙箱内侧半桥前导脚本（O3 清偿：此前全仓无 TCP-LISTEN/UNIX-CONNECT
+ * 装配，注释引用的 `buildSandboxInnerCommand` 不存在，端到端从未闭合）。
+ *
+ * 形态 = 依赖包 `linux-sandbox-utils.js` `buildSandboxCommand` 的**单桥
+ * 裁剪版**：1080/SOCKS 段已被操作员裁定摘出当前分支（plans 子弹 2），
+ * 只留 3128 → unix socket 一段监听 + trap kill EXIT 收尾。前导与用户
+ * 命令以 `\n` 拼接进同一 `bash -c` payload（消费面 bash.ts；background /
+ * verify 接线归子弹 5）。
+ */
+export function buildInnerBridgeScript(
+  socatCommand: string,
+  socketPath: string,
+  sandboxPort: number = SANDBOX_HTTP_PROXY_PORT
+): string {
+  const socat = shellSingleQuote(socatCommand);
+  const unix = shellSingleQuote(socketPath);
+  return [
+    `${socat} TCP-LISTEN:${sandboxPort},fork,reuseaddr UNIX-CONNECT:${unix} >/dev/null 2>&1 &`,
+    `trap "kill %1 2>/dev/null; exit" EXIT`,
+  ].join("\n");
+}
+
+/**
  * 构造 fence env 增量 —— HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY
  * （含小写别名，覆盖 curl / wget / npm 等工具读取差异）。
  *
- * - 三键统一指向 `http://127.0.0.1:<sandboxLocalPort>`，原因：sandbox
- *   内 socat 监听该端口并把流量转回 unix socket → 宿主代理。
+ * - 三键统一指向 `http://<PROXY_AUTH_USER>:<token>@127.0.0.1:<sandboxLocalPort>`：
+ *   沙箱内 socat 监听该端口并把流量转回 unix socket → 宿主代理；URL 嵌
+ *   auth userinfo 是 O1（407 死路）的清偿 —— 宿主代理配了 proxyAuthToken
+ *   后无条件校验 Proxy-Authorization，无凭据的 URL 让全部出网请求 407。
+ *   token 是 hex，URL-safe，无需 percent-encode。
  * - NO_PROXY 默认包含 `127.0.0.1,localhost`（代理自指回环不应绕自己），
  *   不覆盖用户既有 NO_PROXY —— 调用方可自行扩，本仓只设最低限。
+ *   代价（O2）：目标是 loopback 字面的请求会绕代理直连（沙箱 netns 内
+ *   必败）—— 出口可达性探针的正样本因此必须用**非 loopback** 可寻址
+ *   fixture（scripts/sandbox-probe.ts present 分支注释）。
  */
 export function buildProxyEnv(
   sandboxLocalPort: number,
+  proxyAuthToken: string,
   extraNoProxy: readonly string[] = []
 ): Record<string, string> {
-  const proxyUrl = `http://127.0.0.1:${sandboxLocalPort}`;
+  const proxyUrl = `http://${PROXY_AUTH_USER}:${proxyAuthToken}@127.0.0.1:${sandboxLocalPort}`;
   const noProxy = ["127.0.0.1", "localhost", ...extraNoProxy].join(",");
   return {
     HTTP_PROXY: proxyUrl,
@@ -431,19 +501,21 @@ function startSocatBridgeStep(
 /**
  * Step 4:装配 bwrap fence spec。
  *
- * 抽离以控制 `createEgressSession` 复杂度（S5 门）。sandbox 内的代理端口
- * = 沙箱内 socat 监听端口。本仓固定 = httpListen.port（与宿主代理 TCP
- * 端口同号）；沙箱内命令链通过 `buildSandboxInnerCommand` 把 unix socket
- * 转回该本地端口。
+ * 抽离以控制 `createEgressSession` 复杂度（S5 门）。沙箱内监听号 = 固定
+ * `SANDBOX_HTTP_PROXY_PORT`（宿主 OS 分配端口不出现在 spec —— 它只活在
+ * 宿主 socat 桥的 `TCP:127.0.0.1:<hostPort>` 一端，同号耦合已解除）；
+ * 沙箱内侧半桥由 `innerBridgeScript` 前导承载（消费面 bash.ts 命令链）。
  */
 function assembleFenceSpec(
   socketPath: string,
-  httpPort: number
+  socatCommand: string,
+  token: string
 ): EgressFenceSpec {
   return {
     unixSocketPath: socketPath,
-    sandboxLocalPort: httpPort,
-    env: buildProxyEnv(httpPort),
+    sandboxLocalPort: SANDBOX_HTTP_PROXY_PORT,
+    env: buildProxyEnv(SANDBOX_HTTP_PROXY_PORT, token),
+    innerBridgeScript: buildInnerBridgeScript(socatCommand, socketPath),
   };
 }
 
@@ -520,8 +592,8 @@ export async function createEgressSession(
     );
   }
 
-  // Step 4: 构造 fence spec。
-  const spec = assembleFenceSpec(socketPath, httpListen.port);
+  // Step 4: 构造 fence spec（沙箱内固定端口 + auth env + 内层桥前导）。
+  const spec = assembleFenceSpec(socketPath, socatCommand, token);
 
   let disposed = false;
   const dispose = async (): Promise<void> => {

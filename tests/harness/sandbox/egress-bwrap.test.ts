@@ -45,6 +45,9 @@ function egressSpec(): EgressFenceSpec {
       ALL_PROXY: "http://127.0.0.1:3128",
       NO_PROXY: "127.0.0.1,localhost",
     },
+    // bwrap 层不消费 innerBridgeScript（消费面是 bash.ts 命令链）；
+    // 这里只需满足 spec 形状。
+    innerBridgeScript: "",
   };
 }
 
@@ -163,6 +166,7 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
         unixSocketPath: "",
         sandboxLocalPort: 3128,
         env: { HTTP_PROXY: "http://127.0.0.1:3128" },
+        innerBridgeScript: "",
       },
     });
     // 空 socketPath → 不发射 --bind

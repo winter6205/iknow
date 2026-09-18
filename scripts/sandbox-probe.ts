@@ -50,7 +50,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir, networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import {
@@ -330,37 +330,64 @@ async function runEgressSocatAbsentCheck(): Promise<ProbeResult> {
 }
 
 /**
- * socat 在场分支:真起 egress session + 起宿主 loopback listener + 沙箱内
- * curl 经 HTTP_PROXY 出口代理 → 命中允许集(IP 字面量)→ 回包。
+ * socat 在场分支:经**真内层桥**的端到端正探针（egress-ssh-bridge T1 重写,
+ * 清偿 O2/O3——旧形态 `curl http://127.0.0.1:<port>` 在 NO_PROXY 含
+ * `127.0.0.1` 时绕代理直连、netns 内必败,从未真正走通过这条缝;且旧代码
+ * 只把 HTTP_PROXY 交给沙箱,而代理配了 proxyAuthToken、注入 URL 无
+ * userinfo → 必 407,即 O1）。
  *
- * listener 复用 `startProbeListener`(已钉住 127.0.0.1 绑定 + close 清理);
- * egress spec 的 allowedDomains 含 IP 字面量 → 地址守卫显式放行,无域名
- * 解析、无私网拒判(SC4)。
+ * 现形态:
+ *   1. 正探针 target = 宿主**非 loopback** NIC IPv4 上的真 listener
+ *      （O2:loopback 字面会命中 NO_PROXY;地址守卫对「allowlist 上的 IP
+ *      字面」不再复核——upstream resolved-address-guard.js:14-18 "An IP
+ *      literal on the allowlist is an explicit choice and is never
+ *      re-judged here"——所以私网 NIC 地址字面进 allowedDomains 即可达）;
+ *   2. fence 命令链前导 = `session.spec.innerBridgeScript`（沙箱内 socat
+ *      TCP-LISTEN:3128 → unix socket + trap 收尾）——与 bash.ts 前台装配
+ *      同款拼接;
+ *   3. curl 读注入的 `HTTP_PROXY=http://iknow:<token>@127.0.0.1:3128`
+ *      （auth userinfo,O1 闭环）→ 内层桥 → 宿主代理 → filter 放行 →
+ *      dial NIC listener → 200 body 匹配才算绿;
+ *   4. 附加 assert:sink drain 为空（放行路径不得留违例）。
+ *
+ * 实测状态注记:本探针 present 分支要求宿主装有 socat。起草/实现环境
+ * （WSL,`which socat` = 无）走的是 absent 分支——present 分支的形态以
+ * 依赖包 linux-sandbox-utils.js `buildSandboxCommand` 实证为据,首次
+ * 真机全绿由带 socat 的操作机承担（specs/egress-ssh-bridge.md O3:
+ * 「本机无 socat → absent 分支报绿掩盖缺口」正是本次重写要消除的假绿面;
+ * 无 NIC 地址时本分支 fail-loud 不报绿）。
  */
 async function runEgressSocatPresentCheck(
   profile: ProbeProfile
 ): Promise<ProbeResult> {
   const { createEgressSession } =
     await import("../src/harness/sandbox/egress/session.js");
-  const listener = await startProbeListener();
+  const targetIp = pickNonLoopbackNicIPv4();
+  if (targetIp === null) {
+    return {
+      ok: false,
+      detail:
+        "socat present branch: no non-loopback NIC IPv4 for the positive fixture (O2: loopback literal bypasses proxy via NO_PROXY)",
+    };
+  }
+  const listener = await startProbeListener(targetIp);
   const port = listener.port;
-  const listenerIp = "127.0.0.1";
   let session: Awaited<ReturnType<typeof createEgressSession>> | undefined;
   try {
     session = await createEgressSession({
       policy: {
-        allowedDomains: [`${listenerIp}:${port}`],
+        allowedDomains: [`${targetIp}:${port}`],
         deniedDomains: [],
         commandLabel: "probe-socat-present",
       },
       socatCommand: "socat",
     });
+    // 与 bash.ts 前台装配同款:前导内层桥 + 用户命令同一 `bash -c` payload。
+    // --retry-connrefused 消化前导 socat 与 curl 之间的启动竞态。
+    const userCommand = `curl -sS --max-time 8 --retry 3 --retry-connrefused http://${targetIp}:${port} | grep -q probe-listener-ok`;
     const fence = createBwrapFence({
       command: "bash",
-      args: [
-        "-c",
-        `curl -sS --max-time 5 http://${listenerIp}:${port} | grep -q probe-listener-ok`,
-      ],
+      args: ["-c", `${session.spec.innerBridgeScript}\n${userCommand}`],
       fsPolicy: profile.fsPolicy,
       env: fenceEnv(profile),
       cwd: profile.cwd,
@@ -386,9 +413,10 @@ async function runEgressSocatPresentCheck(
       child.on("close", (code) => resolve(code));
       child.on("error", () => resolve(null));
     });
+    const violations = session.violationSink.drain();
     return {
-      ok: exitCode === 0,
-      detail: `exit=${exitCode} stderr="${stderr.trim()}"`,
+      ok: exitCode === 0 && violations.length === 0,
+      detail: `exit=${exitCode} violations=${violations.length} stderr="${stderr.trim()}"`,
     };
   } catch (err) {
     return {
@@ -403,6 +431,16 @@ async function runEgressSocatPresentCheck(
     }
     listener.stop();
   }
+}
+
+/** 取宿主第一个非 internal 的 IPv4 NIC 地址;无 → null（fail-loud 交给调用方）。 */
+function pickNonLoopbackNicIPv4(): string | null {
+  for (const addrs of Object.values(networkInterfaces())) {
+    for (const a of addrs ?? []) {
+      if (a.family === "IPv4" && !a.internal) return a.address;
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -902,7 +940,9 @@ function loadProfiles(): ProbeProfile[] | null {
   return profiles;
 }
 
-async function startProbeListener(): Promise<{
+async function startProbeListener(
+  host = "127.0.0.1"
+): Promise<{
   port: number;
   stop: () => void;
 }> {
@@ -913,7 +953,7 @@ async function startProbeListener(): Promise<{
   });
   await new Promise<void>((resolvePromise, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolvePromise());
+    server.listen(0, host, () => resolvePromise());
   });
   const { port } = server.address() as AddressInfo;
   return {

@@ -30,7 +30,7 @@ OVERALL: PASS（rev 2，返工点已按审查方清单落实）
    - **Inherits:** spec T1「沙箱内侧半桥补齐（本 spec 的前提性欠账）」：fence 命令链前导 `socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:<httpSocket>` + `trap kill EXIT` 形态、代理 env 三键改指沙箱固定端口、`HTTP_PROXY` URL 嵌 auth userinfo；invariant 7 逐字「所有新增 bind 落 egress bind 段、新增 env 落 `--clearenv` 后 `--setenv` 段；改 `bwrap.ts` 前后必跑 `npm run probe:sandbox` 全类别全绿」；清偿对象 = O1「注入的代理 URL 不含 userinfo——沙箱内 CONNECT 必 407」、O2「正探针目标形态须避开 loopback 字面目标」、O3「全仓 src 无 `TCP-LISTEN`/`UNIX-CONNECT` 装配……本 spec 的 T1 即清偿」。
    - **Surface:** `src/harness/sandbox/egress`（session.ts 的 `buildProxyEnv` / `assembleFenceSpec` / `EgressFenceSpec` 扩字段）、`src/harness/sandbox/bwrap.ts`（`sandboxLocalPort` 语义改「沙箱内固定监听号」）、`src/harness/aci/tools/bash.ts`（前台命令链前导）、`scripts/sandbox-probe.ts`（egress「socat present」分支重写）。
    - **Acceptance:** 单测经注入 `spawn` / `socketPathFactory` seam 钉 spec 形状 + 前导脚本字符串（不断言真监听）；probe「socat present」分支改为经真链路的端到端——正探针以**非 loopback** 可寻址 fixture 落地并拿到响应（O2 纪律），实现期实测结论钉进测试注释；无 egress 时命令链 byte-identical 回归基线（零改动）；`npm test` 绿 + `npm run probe:sandbox` 全类别全绿。本子弹改 `session.ts`，与 credential-sentinel plan 的 `session.ts` 子弹串行落地，合并冲突主会话裁。
-   - Status: [ ] pending
+   - Status: [x] done（实现机无 socat → probe present 分支 Not run，absent 分支全绿；单测 + typecheck 绿）
 
 2. **宿主 SOCKS 面 + 第二桥（可整体裁剪）** — tag: `[implementation]`
    - **裁剪判定点（assumption 2，待人类确认，本子弹唯一门）:** 若裁定「git 不用的面先不建」，本子弹**整颗摘除**——git 路径不依赖它（子弹 3 走 HTTP CONNECT），摘除后子弹 5/7 的 SOCKS 相关断言按 spec SC5 条件形态自动退化为单桥不判红；未裁定前本子弹不进实施。

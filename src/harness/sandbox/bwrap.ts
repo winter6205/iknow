@@ -60,9 +60,11 @@ export interface BwrapFenceOptions {
    *
    * 缺席 → 不发射 unix socket `--bind`、不注入代理 env（`--unshare-net`
    * 仍恒在,无 host-net 直连分支）。fence 装配期注入 socket bind 与
-   * 代理 env（HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY），沙箱
-   * 内命令链（host bwrap 内部拉起的 socat）转 unix socket 回本地端口，
-   * 见 `src/harness/sandbox/egress/session.ts`。
+   * 代理 env（HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY——URL 嵌
+   * auth userinfo,指沙箱**固定监听号** `SANDBOX_HTTP_PROXY_PORT`=3128,
+   * 不再是宿主 OS 分配端口），沙箱内侧半桥 = 命令链前导的
+   * `spec.innerBridgeScript`（bash.ts 前台接线；socat 把 127.0.0.1:3128
+   * 转回该 socket → 宿主代理），见 `src/harness/sandbox/egress/session.ts`。
    *
    * **mount 序**：socket bind 落在 workspaceMounts 之后、cwdReadonly 之前
    * —— 与既有 mount 块同段（last-mount-wins）。`--setenv` 走既有
@@ -190,8 +192,9 @@ function baseArgs(
     ...workspaceMounts,
     // ADR-0097 / T4:出口代理缝 unix socket `--bind` —— 在 workspaceMounts
     // 之后、cwdReadonly 之前;source=dest 同值 (host 路径 → 沙箱内同路径)。
-    // 沙箱内 socat (在 fence 内部命令链拉起) 读该 socket → 把流量转回
-    // 本地 TCP 端口 → 走 HTTP_PROXY 出口。
+    // 沙箱内侧半桥 (命令链前导的 socat TCP-LISTEN:3128 → UNIX-CONNECT,
+    // 见 egress/session.ts buildInnerBridgeScript) 读该 socket → 把
+    // 127.0.0.1:3128 的流量转回宿主代理。
     ...egressBind,
     // cwdReadonly: EROFS override after the `/` bind (与工作区档三层正交,
     // 即使工作区档三层叠加,cwdReadonly 仍在最末;后者按字面是 mount 序最末)。

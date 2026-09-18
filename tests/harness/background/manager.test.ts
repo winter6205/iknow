@@ -613,6 +613,7 @@ describe("BackgroundTaskManager egress 缝装配 (ADR-0097 / T7)", () => {
         unixSocketPath: "/tmp/iknow-egress-test.sock",
         sandboxLocalPort: 18080,
         env: { HTTP_PROXY: "http://127.0.0.1:18080" },
+        innerBridgeScript: "",
       },
       dispose,
     };

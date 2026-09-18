@@ -315,6 +315,12 @@ interface RunForegroundBashArgs {
  *
  * 抽离以控制 `runForegroundBash` 复杂度（S5 门）。workspaceMounts 与
  * egress 字段的填充规则见其注释；本函数仅做组装，不引入逻辑。
+ *
+ * egress-ssh-bridge T1：egress 在场时命令链前导 `spec.innerBridgeScript`
+ * （沙箱内 socat 监听 127.0.0.1:3128 → unix socket + trap 收尾，形态见
+ * session.ts `buildInnerBridgeScript`）——代理 env 指到的是沙箱内这个监听，
+ * 没有前导则整条缝只有宿主半场（O3）。无 egress = payload 逐字节不变
+ * （byte-identical 回归基线，invariant 3「无缝 = 无桥」）。
  */
 function buildForegroundFence(args: {
   readonly finalCommand: string;
@@ -327,9 +333,13 @@ function buildForegroundFence(args: {
   readonly tmpDir: string;
   readonly egressSession: EgressSession | undefined;
 }): ReturnType<typeof createBwrapFence> {
+  const payload =
+    args.egressSession !== undefined
+      ? `${args.egressSession.spec.innerBridgeScript}\n${args.finalCommand}`
+      : args.finalCommand;
   return createBwrapFence({
     command: "bash",
-    args: ["-c", args.finalCommand],
+    args: ["-c", payload],
     fsPolicy: args.fsPolicy,
     env: args.fenceEnv,
     cwd: args.waveRoot,

@@ -230,6 +230,7 @@ describe("makeDefaultRunVerify — egress 缝装配 (ADR-0097 / T7)", () => {
       unixSocketPath: "/tmp/iknow-verify-egress.sock",
       sandboxLocalPort: 19090,
       env: { HTTP_PROXY: "http://127.0.0.1:19090" },
+      innerBridgeScript: "",
     };
     vi.mocked(sandboxIndex.createEgressSession).mockReset();
     vi.mocked(sandboxIndex.createEgressSession).mockResolvedValue({
