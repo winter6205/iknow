@@ -461,22 +461,23 @@ describe("bash_output 真实物理截断（real manager）", () => {
 // ── 5. 装配一致性（registry + Gate 3 镜像过滤）───────────────────────────────
 
 describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
-  it("全条件装配（含 backgroundManager + graph overlay）→ 43 件，顺序 = ACI_TOOLSET_NAMES", () => {
+  it("全条件装配（含 backgroundManager + graph overlay）→ 45 件，顺序 = ACI_TOOLSET_NAMES", () => {
     const reg = createDefaultAciRegistry(fullAssemblyOpts());
     const names = reg.inner.list().map((d) => d.name);
-    assert.equal(names.length, 43);
+    assert.equal(names.length, 45);
     assert.deepEqual(names, [...ACI_TOOLSET_NAMES]);
     assert.ok(reg.catalog.get("bash_output"));
     assert.ok(reg.catalog.get("bash_stop"));
   });
 
-  it("backgroundManager 缺席 → bash_output / bash_stop 排除（36 件），bash 保留（T3 常驻）", () => {
+  it("backgroundManager 缺席 → bash_output / bash_stop 排除（38 件），bash 保留（T3 常驻）", () => {
     // ADR-0041 / plans/model-prefix-layering.md B3:`run_graph` 常驻 —
     // 仅 subagentManager 缺席才不在注册表(graphAssembly 缺席由 handler
     // isEnabled 缺省恒关守门,工具面成员不变)。本测试传 subagentManager →
     // run_graph 在场;不传 worktree host seams → 5 件缺席;读侧三轴
     // (query_trace / list_sessions / get_record) 无装配条件仍在场。
-    // 43 - 2(bg) - 5(worktree) = 36。
+    // plan subagent-stop-and-continue T2/T4 后全长 45：
+    // 45 - 2(bg) - 5(worktree) = 38。
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -487,7 +488,7 @@ describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
       mcpManager: fakeMcpManager,
     });
     const names = reg.inner.list().map((d) => d.name);
-    assert.equal(names.length, 36);
+    assert.equal(names.length, 38);
     assert.equal(names.includes("bash_output"), false);
     assert.equal(names.includes("bash_stop"), false);
     // bash 常驻：backgroundManager 缺席时参数级能力由 handler 运行时决策。

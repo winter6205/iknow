@@ -115,7 +115,8 @@ describe("createGraphAssembly — per-round 装配快照", () => {
 
 describe("run_graph — ACI 常驻注册(ADR-0041 关键边界)", () => {
   it("ACI_TOOLSET_NAMES 在 run_graph 之后 append-only(worktree 3 件 + 10 件符号查询 + 5 件符号改 + 目录轴读 + 内容轴读 + 任务树 lifecycle 2 件,不重排既有件)", () => {
-    // 长度 44(plan subagent-stop-and-continue T2 append subagent_stop 后;
+    // 长度 45(plan subagent-stop-and-continue T2/T4 append subagent_stop +
+    // subagent_continue 后;
     // disclosure-index-align T2 删 skill_search,前移一位);
     // 实际 idx(基线实测):
     //   idx 19 = run_graph(ADR-0041 起常驻)
@@ -126,7 +127,7 @@ describe("run_graph — ACI 常驻注册(ADR-0041 关键边界)", () => {
     //   idx 39 = list_sessions(T5b 目录轴读)
     //   idx 40 = get_record(T6 内容轴读)
     //   idx 41 = list-worktrees, idx 42 = remove-worktree
-    //   idx 43 = subagent_stop(ADR-0101)
+    //   idx 43 = subagent_stop(ADR-0101), idx 44 = subagent_continue(ADR-0102)
     expect(ACI_TOOLSET_NAMES[19]).toBe("run_graph");
     expect(ACI_TOOLSET_NAMES[20]).toBe("query_trace");
     expect(ACI_TOOLSET_NAMES[21]).toBe("create-worktree");
@@ -139,7 +140,7 @@ describe("run_graph — ACI 常驻注册(ADR-0041 关键边界)", () => {
     expect(ACI_TOOLSET_NAMES[41]).toBe("list-worktrees");
     expect(ACI_TOOLSET_NAMES[42]).toBe("remove-worktree");
     expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 1]).toBe(
-      "subagent_stop"
+      "subagent_continue"
     );
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",

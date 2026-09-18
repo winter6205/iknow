@@ -129,7 +129,7 @@ const fakeBackgroundManager: BackgroundTaskManager = {
 describe("createDefaultAciRegistry — 正常路径", () => {
   // symbol-primary-aci T5 全条件装配：memoryDir + skillCatalog + subagentManager +
   // todoDir + mcpManager + backgroundManager + graphAssembly 同时在场 → list()
-  // 全量 = ACI_TOOLSET_NAMES 全长（plan subagent-stop-and-continue T2 后 44 件），顺序 append-only。10 件 lsp_*
+  // 全量 = ACI_TOOLSET_NAMES 全长（plan subagent-stop-and-continue T2/T4 后 45 件），顺序 append-only。10 件 lsp_*
   // 已退役（坐标面 → 符号面接班），lsp.ts 实现的 SSOT 不变。
   it("memoryDir + skillCatalog + subagentManager + todoDir + mcpManager + backgroundManager + graphAssembly 同时在场 → list() 全量 = ACI_TOOLSET_NAMES 全长,顺序 append-only", () => {
     const reg = createDefaultAciRegistry({
@@ -189,6 +189,7 @@ describe("createDefaultAciRegistry — 正常路径", () => {
           n !== "spawn_subagent" &&
           n !== "subagent_result" &&
           n !== "subagent_stop" &&
+          n !== "subagent_continue" &&
           n !== "todo_write" &&
           n !== "list_mcp_resources" &&
           n !== "read_mcp_resource" &&
@@ -214,8 +215,9 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("skill_search")).toBeUndefined();
     expect(reg.catalog.get("spawn_subagent")).toBeUndefined();
     expect(reg.catalog.get("subagent_result")).toBeUndefined();
-    // plan subagent-stop-and-continue T2:subagent_stop 同门缺席。
+    // plan subagent-stop-and-continue T2/T4:subagent_stop / subagent_continue 同门缺席。
     expect(reg.catalog.get("subagent_stop")).toBeUndefined();
+    expect(reg.catalog.get("subagent_continue")).toBeUndefined();
     // #440 T4:todoDir 缺席 → todo_write 缺席。
     expect(reg.catalog.get("todo_write")).toBeUndefined();
     // #440 T11:mcpManager 缺席 → list/read 缺席。
@@ -227,13 +229,13 @@ describe("createDefaultAciRegistry — 正常路径", () => {
   });
 
   // task-worktree-lifecycle 后 ACI_TOOLSET_NAMES 长度 43；plan
-  // subagent-stop-and-continue T2 append subagent_stop → 44。
+  // subagent-stop-and-continue T2/T4 append subagent_stop + subagent_continue → 45。
   // (T2+T4 末态 31 + 5 件 T4 符号改 - 10 件退役 lsp_* + 1 件 disclosure-index-align
   //  T2 删 skill_search -1)。
   // append-only 纪律保留 22 件既有 + 末位 14 件符号面 / 改工具。
   // 旧 10 件 lsp_* 已退役（spec symbol-primary-aci.md §37-53 + SC2 + SC7）。
-  it("Gate 3:ACI_TOOLSET_NAMES 长度 44,前 8 原序 + memory_* + tool_search + skill + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop + run_graph + query_trace + 10 符号查询 + 5 符号改 + worktree 3 件 + list_sessions + get_record + list/remove worktree + subagent_stop", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(44);
+  it("Gate 3:ACI_TOOLSET_NAMES 长度 45,前 8 原序 + memory_* + tool_search + skill + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop + run_graph + query_trace + 10 符号查询 + 5 符号改 + worktree 3 件 + list_sessions + get_record + list/remove worktree + subagent_stop + subagent_continue", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(45);
     // 前 8 件原序不变(append-only 纪律)。
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -316,9 +318,12 @@ describe("createDefaultAciRegistry — 正常路径", () => {
       "list-worktrees",
       "remove-worktree",
     ]);
-    // plan subagent-stop-and-continue T2 (ADR-0101) subagent_stop append-only:
-    // 43→44，末位 1 件，不重排既有 43 件。
-    expect(ACI_TOOLSET_NAMES.slice(43, 44)).toEqual(["subagent_stop"]);
+    // plan subagent-stop-and-continue T2/T4 (ADR-0101/0102) append-only:
+    // 43→45，末位 2 件（stop 先、continue 后），不重排既有 43 件。
+    expect(ACI_TOOLSET_NAMES.slice(43, 45)).toEqual([
+      "subagent_stop",
+      "subagent_continue",
+    ]);
   });
 });
 
@@ -456,8 +461,8 @@ function expectedSurface(
     ...(opts.memory ? [] : ["memory_recall", "memory_save"]),
     ...(opts.skill ? [] : ["skill"]),
     ...(opts.subagent ? [] : ["spawn_subagent", "subagent_result"]),
-    // plan subagent-stop-and-continue T2：subagent_stop 与 spawn / result 同门。
-    ...(opts.subagent ? [] : ["subagent_stop"]),
+    // plan subagent-stop-and-continue T2/T4：stop / continue 与 spawn / result 同门。
+    ...(opts.subagent ? [] : ["subagent_stop", "subagent_continue"]),
     ...(opts.todo ? [] : ["todo_write"]),
     ...(opts.mcp ? [] : ["list_mcp_resources", "read_mcp_resource"]),
     ...(opts.bg ? [] : ["bash_output", "bash_stop"]),

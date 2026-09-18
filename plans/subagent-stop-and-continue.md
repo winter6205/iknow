@@ -36,28 +36,28 @@ Affected files (enumerate, not freeze): `src/harness/aci/tools/registry.ts`, `sr
    - **Inherits:** 锁句 1；ADR-0101；现有 `isConcurrencySafe`
    - **Surface:** spawn 工具 description / ACI 并发测或 subagent 轨迹夹具
    - **Acceptance:** 同一 assistant 消息两条 `spawn_subagent` 起两个 `task_id`、两进程；跨回合第二条在第一条 `wait:true` 终态之后才出现。不改默认 `wait`
-   - Status: [ ] pending
+   - Status: [x] done
    - [parallel]
 
 2. **Parent `subagent_stop`** — tag: `[implementation]`
    - **Inherits:** 锁句 2；ADR-0101；与 Ctrl+X 同一 `abortTask`
    - **Surface:** ACI registry append-only + stop handler
    - **Acceptance:** running → 进程结束、可查 failed/aborted；终态再 stop 结构化说明非抛错；跨会话拒。`npm test` 覆盖空 id / 未知 id / 本会话 running / 终态幂等
-   - Status: [ ] pending
+   - Status: [x] done
    - [parallel]
 
 3. **Worker transcript on every new spawn** — tag: `[implementation]`
    - **Inherits:** 锁句 3、6；ADR-0102；ADR-0027 JSONL；不得当第二份 trace
    - **Surface:** worker loop 写盘 + session store 嵌套键；envelope 带路径
    - **Acceptance:** 新 spawn 跑过之后父会话 `subagents/` 下有独立于 `agent-<taskId>.jsonl` 的 transcript，load 投影含该次对话事件；`listSessions` 条目数不因工人增加；旧布局工人无此文件。`npm test` 覆盖空父 id / 与 trace 文件分家
-   - Status: [ ] pending
+   - Status: [x] done
    - [parallel]
 
 4. **`subagent_continue` when process is dead** — tag: `[implementation]`
    - **Inherits:** 锁句 4–5；ADR-0102；T3 文件已在
    - **Surface:** continue 工具 + manager 再拉起
    - **Acceptance:** failed/aborted/completed + 下一句 → 新进程、原 `task_id`、prior 含续跑前 transcript；running 拒；无文件拒；跨会话/未知 id 拒。前景 continue 当跳返回信封。`npm test` 覆盖上述入参类
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T2, T3]
 
 ## Code review phase

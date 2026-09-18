@@ -126,10 +126,19 @@ export interface SpawnSubAgentToolDeps {
  * 标签在 ADR-0091 后对回合停因 inert（只作该条 result 归因），但仍避开，
  * 免得同波下游按标签做归因时把它读成时钟信号。
  */
-function throwWallClockTimeout(taskId: string, detail: string): never {
+/**
+ * ADR-0102 T4 — label 参数化：前景 continue 的超时归因若仍署
+ * "spawn_subagent:"，模型会把一次续跑读成一次新派发。缺省标签保持
+ * spawn 臂既有文案逐字节不变；continue 工具传自己的标签。
+ */
+export function throwWallClockTimeout(
+  taskId: string,
+  detail: string,
+  label = "spawn_subagent"
+): never {
   const suffix = detail.length > 0 ? ` (${detail})` : "";
   throw new ToolExecutionError(
-    `spawn_subagent: task ${taskId} hit its wall-clock timeout${suffix}; ` +
+    `${label}: task ${taskId} hit its wall-clock timeout${suffix}; ` +
       `the sub-agent has no completed result to hand back`
   );
 }
@@ -152,38 +161,41 @@ function throwWallClockTimeout(taskId: string, detail: string): never {
  * 放在 handler 外：整个归因判定（含 `ctx?.signal` 读）不占 handler 的圈复杂度
  * （S5 硬门：handler 已在基线上，任何新分支都会判回归）。
  */
-function throwAbortAttribution(
+export function throwAbortAttribution(
   err: SubAgentAbortError,
-  ctx: ToolExecutionContext | undefined
+  ctx: ToolExecutionContext | undefined,
+  label = "spawn_subagent"
 ): never {
   if (ctx?.signal?.aborted === true) {
     throw new ToolExecutionError(
-      `spawn_subagent: cancelled (caller aborted while waiting for task ${err.taskId})`
+      `${label}: cancelled (caller aborted while waiting for task ${err.taskId})`
     );
   }
   throw new ToolExecutionError(
-    `spawn_subagent: cancelled (the operator killed task ${err.taskId}; ` +
+    `${label}: cancelled (the operator killed task ${err.taskId}; ` +
       `it returned no completed result)`
   );
 }
 
 /** 已带 timeout 终态的信封 → 非 ok（详见 throwWallClockTimeout）。 */
-function assertNotWallClockTimeout(
+export function assertNotWallClockTimeout(
   env: SubAgentEnvelope,
-  taskId: string
+  taskId: string,
+  label = "spawn_subagent"
 ): void {
   if (env.status === "failed" && env.reason === "timeout") {
-    throwWallClockTimeout(taskId, env.summary);
+    throwWallClockTimeout(taskId, env.summary, label);
   }
 }
 
 /** 父可见投影 + SC13 超时闸（终态信封交回模型的唯一出口）。 */
-function projectEnvelopeOrThrow(
+export function projectEnvelopeOrThrow(
   env: SubAgentEnvelope,
-  taskId: string
+  taskId: string,
+  label = "spawn_subagent"
 ): SubAgentEnvelope {
   const projected = projectParentVisibleEnvelope(env);
-  assertNotWallClockTimeout(projected, taskId);
+  assertNotWallClockTimeout(projected, taskId, label);
   return projected;
 }
 
@@ -191,27 +203,32 @@ function projectEnvelopeOrThrow(
  * waitFor 墙钟拒绝后按 queryBuffer 分流。SubAgentWaitTimeoutError 复用于
  * unknown task / shutdown 清 map / failed-without-envelope / 真墙钟，不能一律合成 timeout。
  */
-function envelopeFromWaitTimeout(
+export function envelopeFromWaitTimeout(
   buffer: QueryBufferResult,
-  taskId: string
+  taskId: string,
+  label = "spawn_subagent"
 ): SubAgentEnvelope {
   // EXIT: not_found — 任务从未存在或 shutdown 已清 map；对模型是调用错误，不是 timeout 数据。
   if (buffer.status === "not_found") {
     throw new ToolExecutionError(
-      `spawn_subagent: task ${taskId} not found after wait timeout`
+      `${label}: task ${taskId} not found after wait timeout`
     );
   }
   // EXIT: running — 墙钟到但 worker 未终态（真墙钟；SC13 非 ok）。
   if (buffer.status === "running") {
-    throwWallClockTimeout(taskId, "worker still running when the wait expired");
+    throwWallClockTimeout(
+      taskId,
+      "worker still running when the wait expired",
+      label
+    );
   }
   if (buffer.status === "failed") {
     // EXIT: buffer 已是失败投影（含 protocolError / crashed / timeout envelope）。
     if ("result" in buffer && typeof buffer.result === "string") {
-      return projectEnvelopeOrThrow(buffer, taskId);
+      return projectEnvelopeOrThrow(buffer, taskId, label);
     }
     if (buffer.reason === "timeout") {
-      throwWallClockTimeout(taskId, buffer.summary);
+      throwWallClockTimeout(taskId, buffer.summary, label);
     }
     return {
       status: "failed",
@@ -222,7 +239,7 @@ function envelopeFromWaitTimeout(
   }
   // EXIT: completed ok envelope 已在 buffer（status=failed 的终态信封也走这里，
   // 由 SC13 闸按 reason 分流）。
-  return projectEnvelopeOrThrow(buffer, taskId);
+  return projectEnvelopeOrThrow(buffer, taskId, label);
 }
 
 /**
@@ -241,7 +258,7 @@ function envelopeFromWaitTimeout(
  *     handler 是 `spawn-subagent-tool.ts` 里的 ArrowFunctionExpression，
  *     基线 41，内联这个三元会把它推到 42 判回归（实测）。
  */
-function foregroundDrainExclusion(wait: boolean): {
+export function foregroundDrainExclusion(wait: boolean): {
   readonly excludeFromHostDrain?: boolean;
 } {
   return wait ? { excludeFromHostDrain: true } : {};
