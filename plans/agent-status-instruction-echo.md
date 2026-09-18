@@ -31,7 +31,7 @@ minimal-change-verifier: yes — 与 ADR-0103 决策 1-4 一一对应；T5/T6 �
    - **Surface:** `src/harness`（提取谓词落 agent-status 同域单文件，具体命名留实现者）
    - **Acceptance:** 单测——尾栏在场跳过取真消息；drain / graph / MCP 重连 / skill delta / verify / LOOP_DETECTED / compact 提示各注入形态在场均被跳过；prefetch overlay 剥净取原文、marker 出现在原文内部取末段；skill-load 信封取 remainder 首行、空 remainder 前扫；CJK + emoji 混合 100 码点截断不劈半字符且不加省略号；SEAM 测试枚举 loop-engine 全部 `encodeUserText` 注入产出、assert 每条命中名册（新缝不挂名册即红）；grep 断言本模块零 adapter import。
    - [parallel]（与 T1 无产物相交）
-   - Status: [ ] pending
+   - Status: [x]
 
 3. **instruction 回显打通栏与流事件** — tag: `[implementation]`
    - **Inherits:** spec invariant 1「栏只承载代码算出的现势，逐字回显非摘要」+ invariant 6「append-only 不动，`pendingInjected` record 纪律照常覆盖新注入形态」+ SC1 / SC6「`agent_status` 流事件与栏文本同源（同一 snapshot 派生）」。
