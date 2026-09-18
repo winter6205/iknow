@@ -1272,7 +1272,7 @@ export function nextToolPhaseActive(
  */
 const STREAMING_SILENCE_NOTICE_LINES: ReadonlyArray<string> = [
   "⠿ Waiting for model output — ~20s with no new stream bytes.",
-  "Check your network connection if this persists.",
+  "Still in the model phase — no new stream bytes yet.",
 ];
 
 /**
@@ -2576,6 +2576,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       armSilenceTimer();
       draft.append(event);
       if (event.type === "tool_call_start") {
+        // 过程性「等待模型」只在模型相位有效：交出 tool_use 后立刻清掉
+        // 已上屏文案（相位门原先只禁止新写）。异常停 sticky 不匹配 identity。
+        setNotice((prev) =>
+          isStreamingSilenceNotice(prev) ? undefined : prev
+        );
         // 先 seal 再读 sealedCount：setState updater 延迟到 render 才执行，
         // 禁止在 updater 内重读（#616 同类陷阱）。
         draft.sealText();
