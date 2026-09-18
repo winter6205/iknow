@@ -11,8 +11,8 @@
  *   c. 压缩后 tool_use↔tool_result 配对完整(SC11);
  *   d. turnCount 锚点:同一轮不重复触发,lastCompactTurn 守锚
  *      (极端长对话 + 低阈值 → 压缩 ≥1 次 ≤ N/2 次);
- *   e. deps.compress.thresholdTokens = undefined → 缺省推导 window-33000;
- *      极大 contextWindow → 不触发;极小 contextWindow → 触发。
+ *   e. deps.compress.thresholdTokens = undefined → 缺省推导 floor(0.95 × window)
+ *      (ADR-0100);极大 contextWindow → 不触发;极小 contextWindow → 触发。
  *
  * 不硬编码真实 LLM token value;只用 estimate 函数语义(constant 层) +
  * 自定义 threshold 模拟触发。
@@ -43,6 +43,7 @@ import {
   COMPACTION_BOUNDARY_PLACEHOLDER,
   DEFAULT_KEEP_RECENT,
   estimateMessagesTokens,
+  getAutoCompactThreshold,
 } from "../../../src/harness/compress/index.ts";
 import { PromptTooLongError } from "../../../src/harness/errors.ts";
 
@@ -271,7 +272,7 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
     }
   });
 
-  it("thresholdTokens=undefined → 缺省推导(window-33000);极大 window 不触发,极小 window 触发", async () => {
+  it("thresholdTokens=undefined → 缺省推导 floor(0.95×window);极大 window 不触发,极小 window 触发", async () => {
     // (a) 极大 contextWindow → 缺省阈值巨大 → 不触发。
     const bigModel = createStubModel({ responses: buildResponses(5) });
     const big = await run("hello", {
@@ -289,7 +290,8 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
       "极大 contextWindow + 缺省阈值不得触发压缩"
     );
 
-    // (b) 极小 contextWindow → 缺省阈值 window-33000 为负 → estimate ≥ 负恒真 → 触发。
+    // (b) 极小 contextWindow → 缺省闸 = floor(0.95 × 2000) = 1900,夹具的 5 轮
+    // 对话 estimate 远大于它 → 触发。95% 比例不因 window 小而把闸抬到不触发。
     const smallModel = createStubModel({ responses: buildResponses(5) });
     const small = await run("hello", {
       adapter: smallModel,
@@ -304,8 +306,15 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
       "极小 contextWindow + 缺省阈值必须触发压缩 (placeholder 或 summary)"
     );
 
-    // (c) 语义自检:estimate + 缺省阈值关系(纯函数,不依赖 LLM)。
-    // 极小 window 的缺省阈值 window-33000 < 0,estimateMessagesTokens ≥ 1 恒 ≥ 阈值。
+    // (c) 语义自检:缺省闸是**正比例**,不是旧余量公式的负数巧合 —— 极小
+    // window 的触发来自 estimate 越过 floor(0.95 × window)。
+    assert.equal(getAutoCompactThreshold(2000, undefined), 1_900);
+    assert.ok(getAutoCompactThreshold(2000, undefined) > 0);
+    // 极大 window 的缺省闸仍在估算之上 → 与 (a) 的「不触发」同源。
+    assert.ok(
+      getAutoCompactThreshold(10_000_000, undefined) >
+        estimateMessagesTokens(big.result.messages)
+    );
     const probe = estimateMessagesTokens([
       { role: "user", content: [{ type: "text", text: "x" }] },
     ]);
@@ -499,7 +508,7 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       executor,
       registry,
       maxTurns: 10,
-      // 极大 contextWindow → 缺省阈值 window-33000 远超 estimate → 不触发。
+      // 极大 contextWindow → 缺省闸 floor(0.95 × 1e7) 远超 estimate → 不触发。
       compress: { contextWindow: 10_000_000, thresholdTokens: undefined },
       boundaryAttachment: () => {
         calls++;

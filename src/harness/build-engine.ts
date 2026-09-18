@@ -1932,7 +1932,7 @@ export async function buildHarnessEngine(
     }),
     // #119 T7:env.compress 透传 → deps.compress(LoopEngineDeps.compress 可选缝)。
     // IknowCompressEnv 必填(contextWindow / thresholdTokens),缺失即压缩关闭由
-    // loop-engine 字段缺席兜底;此处无条件透传,类型安全(window 默认 200000 由 env 层兜底)。
+    // loop-engine 字段缺席兜底;此处无条件透传,类型安全(策略预算窗口缺省 256000 由 env 层兜底)。
     compress: {
       contextWindow: env.compress.contextWindow,
       thresholdTokens: env.compress.thresholdTokens,

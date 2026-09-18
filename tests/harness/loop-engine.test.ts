@@ -2531,8 +2531,8 @@ describe("loop engine T3 #252: reactive compact (ADR-0013)", () => {
     });
 
     // 12 条 prior → state.messages = 13 条 → reactive compactMessages 裁到
-    // 边界占位 + 6 末尾。proactive 不触发:estimate << threshold(window 默认
-    // 推导 200000-20000-13000=167000,显式阈值 10000 更保险 < window)。
+    // 边界占位 + 6 末尾。proactive 不触发:estimate << threshold(window 200000
+    // 的缺省闸 floor(0.95×)=190000,显式阈值 10000 更保险 < window)。
     const longPrior = Array.from({ length: 12 }, (_, i) =>
       makeNative({ role: "user", text: `prior-${i}` })
     );
@@ -2885,7 +2885,7 @@ describe("loop engine manual-compact-trigger T1: 短历史 + 缺省阈值下 pro
         registry: reg,
         maxTurns: 3,
         // thresholdTokens 故意缺席 → getAutoCompactThreshold 走
-        // 200000 - 20000 - 13000 = 167000,远高于 3 条 prior + 1 user 的估算。
+        // floor(0.95 × 200000) = 190000,远高于 3 条 prior + 1 user 的估算。
         compress: { contextWindow: 200_000 },
       },
       undefined,

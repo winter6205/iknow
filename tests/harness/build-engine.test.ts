@@ -316,8 +316,9 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     chat: { showThinking: false },
     web: { searchUrl: undefined, proxy: undefined },
     // #119 T7: IknowCompressEnv 必填(T1 接入),build-engine 透传给
-    // LoopEngineDeps.compress。test fixture 默认值:contextWindow=200000,
-    // thresholdTokens=undefined(由 threshold.ts 推 window-33000)。
+    // LoopEngineDeps.compress。夹具**显式**写死 200_000（不是产品缺省，
+    // 产品缺省见 DEFAULT_STRATEGY_CONTEXT_WINDOW），thresholdTokens=undefined
+    // → 由 threshold.ts 推 floor(0.95 × window)。
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     // #378 根因 B: MCP 连接超时(默认 60_000)。
     mcp: { connectTimeoutMs: 60_000 },
