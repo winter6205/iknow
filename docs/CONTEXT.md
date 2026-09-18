@@ -214,6 +214,9 @@ _Avoid_: 内核 IP 白名单当域名白名单；项目仓自授允许集；把 
 **预放行档（builtin preset）**: 域名允许集的代码承载默认域清单，收口在可重复构建/交付流的高频域（`github.com` 与 `*.github.com` / `*.githubusercontent.com`、`registry.npmjs.org`、playwright 下载面）；模型供应商 API 域显式不入档（围栏内有 key，预放行 = secret 直传通道），走首见域名批准门。ADR-0104。
 _Avoid_: 预置兜底集（0097 旧表述已废，勿复用）；把文档推荐配置当 preset；preset 取代批准门；脱离「构建/交付流」收口原则新增 preset 域
 
+**凭据 sentinel（credential sentinel）**: 围栏内替代真凭据的同形假值（`[a-z0-9_-]` 精确匹配字节串，可原样穿过 JSON / form / multipart 等编码）；真值仅在宿主出口代理，出口处仅对放行域假换真（需 TLS 终止），代换方向恒 fake→real——漏代换 = 认证失败而非真值泄露。ADR-0105。
+_Avoid_: 掩码 / mask（那是可见面的 secret-roundtrip mask）；把 sentinel 当加密或 tokenization；期待压缩 / 编码体内还能代换；让真值凭据文件进围栏
+
 **声明工具面 vs 实际工具面**: `SubAgentDefinition.disallowedTools` 写进 `WorkerEnvelope` 的是声明面；worker 进程装配后真正可被模型调用的工具集是实际面，二者必须相等——裁剪发生在 `createAciRegistry(tools)` **之前**的 def-list 期（`createDefaultAciRegistry` 工厂内），由构造期快照保证，不事后修补（`AciRegistry.inner` 是冻结快照）。
 _Avoid_: 给 `AciRegistry` 加 `.tools` 字段在产物上事后裁剪；声明 deny-list 但 worker 不消费（#468 修复对象）
 
@@ -732,6 +735,7 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **出口代理缝 vs host-net amplify**: 前者是现行唯一出网通路（域白名单代理）；后者是已退役的 per-call 全放行语义
 - **域名允许集 vs network-guard**: 前者管 bash 出网（代理层判定）；后者是 `web_fetch` / `web_search` 的六层 SSRF 防线，两条栈互不替代
 - **预放行档 vs 域名允许集**: preset 是代码承载的默认底档；允许集是判定全集（preset ∪ 用户层增量，deny 优先）；批准门只管档外首见域
+- **凭据 sentinel vs secret-roundtrip mask**: sentinel 管存在面（真值不进围栏，代理出口假换真，ADR-0105）；mask 管可见面（真值在围栏内但不进模型上下文 / trace，#406）。两层并存不互替；sentinel 假值不得触发 mask 识别
 - **文件系统隔离档 vs worktree isolation mode**: 前者是 bash FS 围栏档；后者是写主仓门禁 / 建树改绑
 - **全局档 vs 工作区档**: 默认真路径读写；工作区档收紧为写 taskRoot + 会话 tmp，home 其余不能写
 - **config 面板 vs `/model`**: 同族浮层；`/config` 管隔离与并发等运行档，`/model` 管路由
