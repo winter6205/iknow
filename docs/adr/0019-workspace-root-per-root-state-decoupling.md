@@ -4,6 +4,7 @@ Date: 2026-08-17
 
 Status: accepted
 
+> **Amendment 2026-09-18**（ADR-0099）：**memory** 也不跟 `workspaceRoot` 分片，落 home 项目树 `projects/<slug>/memory/`。D1 其余 per-root 仍是 settings 写回 / worktrees。Positive 里 throwaway 隔离对 **serve / 会话记录 / tasks / 项目记忆** 均不成立。
 > **Amendment 2026-09-13**（ADR-0088）：**tasks** 也不跟 `workspaceRoot` 分片，落 home 项目树 `projects/<slug>/tasks/`。D1 其余 per-root 仍是 memory / settings 写回 / worktrees。Positive 里 throwaway 隔离对 **serve / 会话记录 / tasks** 均不成立。
 >
 > **Amendment 2026-09-13**（ADR-0087 / #1000）：会话池（transcript / todos / trace / blobs）**不**跟 `workspaceRoot` 分片，落 `~/.iknow/projects/…`（显式 `--data-dir` 除外）。T2 把 serve data 写成 `<workspaceRoot>/.iknow` 的读法 **superseded**（仅就会话记录）。memory / settings 写回 / worktrees 仍 per-root（tasks 见上条 0088）。Positive 里「throwaway dir 完全隔离 identity / memory / serve / settings」对 **serve/会话记录** 不再成立。

@@ -1,51 +1,72 @@
 /**
- * #121 T2 + ADR-0019 (T2): memory dir path resolvers (Paths bounded context).
+ * 项目记忆库路径派生（纯函数，无 IO）。
  *
- * Spec: specs/121-memory-injection.md (Project Structure paths.ts, SC 6,
- * Boundaries Always — user-level root decoupled from --data-dir).
+ * ADR-0099 / ADR-0088:项目记忆落在 **home 项目树** 兄弟目录 ——
+ * `<poolRoot>/projects/<slug>/memory/`，与会话文件夹、`tasks/` 同 slug。
+ * `poolRoot` = 显式 `--data-dir` 否则 `~/.iknow`；slug =
+ * `<basename(projectIdentityRoot)>-<sha1(projectIdentityRoot)[:12]>`。
  *
- * Naming rule reuses session-store.ts:42-45
- * `<basename(cwd)>-<sha1(cwd)[:12]>` and lives under
- * `<workspaceRoot>/.iknow/memory/` (per-root, ADR-0019 D1.4 follow-on).
- * Pure: no IO. Both resolvers accept an explicit `workspaceRoot`; when
- * omitted they fall back to `resolveWorkspaceRoot()` (T1 SSOT) which
- * defaults to `process.cwd()`.
+ * 与 ADR-0019 T2 的旧形态（`<workspaceRoot>/.iknow/memory/<slug>`）差别 =
+ * 分组键:同一 `projectIdentityRoot` 的多份 checkout 共用一份记忆库，
+ * throwaway `--workspace-root` 不再隔离项目记忆。
  *
- * T2 在保留 `cwd` 作为 hash 输入的同时把磁盘根切到 workspaceRoot,实现
- * "per-root memory" 决策(ADR-0019 plan T2 列项)。`~` tilde 仍指向
- * `homedir()`(全局),与 workspaceRoot 解耦(ADR-0019 Quiddity)。
+ * `resolveUserMemoryDir` 仍是 per-root 用户层父目录（说明书装配不走本路径）。
  */
-import { createHash } from "node:crypto";
-import { basename, join, resolve } from "node:path";
+import { isAbsolute, join } from "node:path";
+
+import { SessionRootError } from "../errors.js";
+import { MAX_ROOT_DETAIL_CHARS } from "../session-roots.js";
+import {
+  computeProjectSlug,
+  MAX_PROJECT_IDENTITY_ROOT_BYTES,
+} from "../../shared/project-slug.js";
+import {
+  MEMORY_DIR_NAME,
+  PROJECTS_DIR_NAME,
+} from "../../shared/session-tree-names.js";
 import { resolveWorkspaceRoot } from "../../config/workspace-root.js";
 
 /**
- * Project namespace under the per-root memory root. Normalize cwd first
- * (path.resolve) so `foo` and `./foo` collapse to the same hash, and so the
- * digest is stable across calls. `workspaceRoot` defaults to the resolver's
- * default (priority chain `[explicit, env, cwd]`).
+ * 项目记忆库根:`<dataDir>/projects/<basename>-<sha1[:12]>/memory`。
  *
- * review-fix (H1/H2): 接受可选 env 透传给 resolver —— 当调用方没有
- * 显式 workspaceRoot 时,仍能读 env SSOT(IknowEnv.workspaceRoot)而非
- * 裸 process.env(否则 .env / .env.local 加载的 IKNOW_WORKSPACE_ROOT
- * 会被丢掉,与 env SSOT fidelity 契约冲突)。
+ * fail-closed 语义同 `resolveTasksDir`:缺根 / 空白 / 相对 / 超长
+ * `projectIdentityRoot` 一律抛 typed `SessionRootError`。
  */
-export function resolveProjectMemoryDir(
-  cwd: string,
-  workspaceRoot?: string,
-  env?: Readonly<Record<string, string | undefined>>
-): string {
-  const normalized = resolve(cwd);
-  const hash = createHash("sha1").update(normalized).digest("hex").slice(0, 12);
-  const root = workspaceRoot ?? resolveWorkspaceRoot({ cwd: normalized, env });
-  return join(root, ".iknow", "memory", `${basename(normalized)}-${hash}`);
+export function resolveProjectMemoryDir(opts: {
+  readonly dataDir: string;
+  readonly projectIdentityRoot: string;
+}): string {
+  const root = opts.projectIdentityRoot;
+  if (typeof root !== "string") {
+    throw new SessionRootError(
+      "missing_root",
+      "projectIdentityRoot is required and was not provided"
+    );
+  }
+  const trimmed = root.trim();
+  if (trimmed === "" || trimmed.length > MAX_PROJECT_IDENTITY_ROOT_BYTES) {
+    throw new SessionRootError(
+      "missing_root",
+      "projectIdentityRoot is required and must be non-empty"
+    );
+  }
+  if (!isAbsolute(trimmed)) {
+    throw new SessionRootError(
+      "invalid_root",
+      `projectIdentityRoot must be an absolute path, got '${trimmed.slice(0, MAX_ROOT_DETAIL_CHARS)}'`
+    );
+  }
+  return join(
+    opts.dataDir,
+    PROJECTS_DIR_NAME,
+    computeProjectSlug(trimmed),
+    MEMORY_DIR_NAME
+  );
 }
 
 /**
- * Per-root user-level memory root (`<workspaceRoot>/.iknow/memory`).
- * Independent of cwd and --data-dir.
- *
- * review-fix (H1/H2): 接受可选 env 透传(与 resolveProjectMemoryDir 同形态)。
+ * Per-root user-level memory parent (`<workspaceRoot>/.iknow/memory`).
+ * Independent of cwd and --data-dir. Not the project store (ADR-0099).
  */
 export function resolveUserMemoryDir(
   workspaceRoot?: string,

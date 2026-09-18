@@ -220,8 +220,14 @@ describe("dual-entry assembly consistency (chat vs serve)", () => {
     );
     // Namespace proof: resolveProjectMemoryDir is the canonical seam.
     assert.notEqual(
-      resolveProjectMemoryDir(projA.projectIdentityRoot),
-      resolveProjectMemoryDir(projB.projectIdentityRoot),
+      resolveProjectMemoryDir({
+        dataDir: join(projA.userHome, ".iknow"),
+        projectIdentityRoot: projA.projectIdentityRoot,
+      }),
+      resolveProjectMemoryDir({
+        dataDir: join(projB.userHome, ".iknow"),
+        projectIdentityRoot: projB.projectIdentityRoot,
+      }),
       "project memory dirs must differ per projectIdentityRoot"
     );
   });

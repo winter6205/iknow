@@ -36,8 +36,8 @@ export function usageText(): string {
   --host <addr>                 serve/trace 绑定地址，默认 127.0.0.1
                                 / serve/trace host (default 127.0.0.1)
   --data-dir <dir>              会话池根目录，默认 ~/.iknow / session pool root (default ~/.iknow)
-  --workspace-root <dir>        per-root 状态根目录（identity/memory/serve），默认 process.cwd()
-                                / per-root state root (identity/memory/serve), default process.cwd()
+  --workspace-root <dir>        per-root 状态根目录（settings 写回 / worktrees），默认 process.cwd()
+                                / per-root state root (settings writeback / worktrees), default process.cwd()
   --max-bytes <n>               trace 单次读取字节上限，默认 8 MiB / trace read cap (default 8 MiB)
   --no-open                     trace 不自动打开浏览器（CI/headless）/ trace: do not auto-open browser (CI/headless)
   --separate                    trace 保留独立检测进程（#183 旧行为，端口 24881）

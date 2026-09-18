@@ -4,6 +4,7 @@ Date: 2026-08-29
 
 Status: accepted
 
+> **Amendment 2026-09-18**（ADR-0099）：项目记忆库也不跟 `workspaceRoot` 分片，落 `projects/<slug>/memory/`。
 > **Amendment 2026-09-13**（ADR-0088）：§4「per-root 状态（记忆库落盘根 / tasks 登记）的锚是 `workspaceRoot`」对 **tasks** **superseded**——登记跟 home 项目树。记忆库仍 per-root。改绑仍只切 `taskRoot`，树上仍不另开一份登记。
 >
 > **Amendment 2026-09-11**（`specs/agent-control-surface.md`）：撤销「工具在场 ⇔ 门禁已武装」。工作树 ACI（create / enter / exit / list / remove）在 isolation host 缝在场时**常注册**，不再要求 `isolationEnabled`。`worktreeOnMutate` **只**武装 mutate 门禁（ON 拦未绑树的写、从不 auto-provision；OFF 主仓可写）。OFF 时模型仍可用 create/enter **session worktree rebind**。bash `git worktree add` 仍不是 rebind。本开关属**用户层** settings（项目文件出现 isolation 段则丢弃，ADR-0084）。§1 OFF「会话行为与今日完全一致、不新增任何拦截点」在**门禁**面上仍成立；**工具面**改为常在，不再随 OFF 卸掉。
@@ -109,7 +110,8 @@ ADR-0019 D1.1 的默认解析（`workspaceRoot` 默认 `process.cwd()`）与 ser
 
 - `productRoot`、`projectIdentityRoot`、`installRoot` —— 三者跨 rebind 不变（理由见 §4）。
 - `mcpConfigRoot` —— 由 `productRoot` 派生，跨 rebind 保持稳定。
-- `stateAnchor` + `memoryDir` —— per-root 状态锚，状态永不落进 gitignored 的树。
+- `stateAnchor` —— per-root 状态锚（settings 写回 / worktrees），状态永不落进 gitignored 的树。
+- `memoryDir` —— home 项目树 `projects/<slug>/memory/`（ADR-0099），跨 rebind 冻结，不跟 `taskRoot`。
 - `todoDir`、`traceDir` —— 同源稳定根。
 
 特别是 ADR-0037 §4 已有约束：per-root 状态**永不**落进 gitignored 的树，活 `taskRoot` 不得拖动 `stateAnchor`。

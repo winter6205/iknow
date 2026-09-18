@@ -109,7 +109,10 @@ import {
   upsertWorkspaceRecent,
 } from "../config/workspaces-recents.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
-import { TASKS_DIR_NAME } from "../shared/session-tree-names.js";
+import {
+  MEMORY_DIR_NAME,
+  TASKS_DIR_NAME,
+} from "../shared/session-tree-names.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import {
   MaxTurnsExceeded,
@@ -3383,6 +3386,7 @@ export class SessionHub {
       // projectDir 已是 `<poolRoot>/projects/<slug>`(ADR-0071 公式),故
       // 任务登记与会话文件夹同 slug,不锚 workspaceRoot。
       tasksDir: join(this.store.getProjectDir(), TASKS_DIR_NAME),
+      memoryDir: join(this.store.getProjectDir(), MEMORY_DIR_NAME),
       // review-fix (M5): 两段式缝 —— 装配期只传 projectDir
       // (`<baseDir>/projects/<slug>`),manager spawn 期按 def.conversationId
       // 派生 per-conversation 叶子 `<projectDir>/<convId>/subagents/`
@@ -3537,6 +3541,7 @@ export class SessionHub {
       // ADR-0088:同 `buildProductionEngine` 路径 —— 登记根 = 项目树兄弟
       // `tasks/`(store 投影同一 slug)。
       tasksDir: join(this.store.getProjectDir(), TASKS_DIR_NAME),
+      memoryDir: join(this.store.getProjectDir(), MEMORY_DIR_NAME),
       // review-fix (M5): 同 buildProductionEngine 路径 —— 两段式缝,装配期
       // 传 projectDir,manager spawn 期按 def.conversationId 派生
       // per-conversation 叶子(见 resolveSubagentTraceDirShared 退役注释)。

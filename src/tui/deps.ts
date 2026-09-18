@@ -43,6 +43,7 @@ import type { IknowSettings } from "../config/settings.js";
 import type { LiveTaskRoot } from "../harness/session-roots.js";
 import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import type { SkillRescanner } from "../harness/skill/rescan.js";
 import type { McpServerStatus } from "../harness/mcp/manager.js";
@@ -54,6 +55,7 @@ import {
 } from "../session-api/store/session-store.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import { resolveTasksDir } from "../harness/background/paths.js";
+import { MEMORY_DIR_NAME } from "../shared/session-tree-names.js";
 
 /** 工具摘要行事件（postToolUse 投影，observability-only）。 */
 export interface TuiToolEvent {
@@ -366,6 +368,7 @@ export async function buildTuiDeps(
     dataDir: resolveServeDataDir(opts.dataDir),
     projectIdentityRoot: deriveProjectIdentityRoot({ cwd: opts.workspaceRoot }),
   });
+  const memoryDir = join(todoProjectDir, MEMORY_DIR_NAME);
   // T5 (ADR-0071 / SC8 + L2): 子代理 lifecycle
   // / content trace 改走 per-agent `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
   // TUI 子代理根 = `<projectDir>/<conversationId>/subagents/`。
@@ -398,9 +401,10 @@ export async function buildTuiDeps(
     todoDir: todoProjectDir,
     // ADR-0088:登记根随会话池,不随 workspaceRoot。
     tasksDir,
+    // ADR-0099:项目记忆同棵,不随 workspaceRoot。
+    memoryDir,
     // #365 T2: 沙箱根保持 TUI 历史语义(启动目录 = process.cwd());
     // build-engine 缺省即 process.cwd(),故不显式传。
-    // memoryDir 同理缺省解析自 cwd(与 #146 TUI 启动目录语义一致)。
     ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
     ...(opts.sessionGrants ? { session: opts.sessionGrants } : {}),
     // D-α T5:overlay holder 透传 —— run_graph / 编排段的条件装配缝。

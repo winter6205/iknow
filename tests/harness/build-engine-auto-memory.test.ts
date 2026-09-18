@@ -136,7 +136,10 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
     expect(engine.overlayMemoryPrefetch).toBeUndefined();
     expect(engine.memoryFlags).toBeUndefined();
     // SC2/SC8: below the gate and on an empty store nothing is written at all.
-    const memoryDir = resolveProjectMemoryDir(cwd, cwd);
+    const memoryDir = resolveProjectMemoryDir({
+      dataDir: join(userHome, ".iknow"),
+      projectIdentityRoot: cwd,
+    });
     for (let n = 1; n < DEFAULT_COMPLETED_TURN_GATE; n++) {
       engine.autoMemory!.onTurnComplete({
         stopReason: "completed",
@@ -153,7 +156,10 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
     // from the exit seam — so building the engine must leave the pre-existing
     // capability row untouched, however many times it is built.
     const { cwd, userHome } = await isolate();
-    const memoryDir = resolveProjectMemoryDir(cwd, cwd);
+    const memoryDir = resolveProjectMemoryDir({
+      dataDir: join(userHome, ".iknow"),
+      projectIdentityRoot: cwd,
+    });
     await mkdir(memoryDir, { recursive: true });
     await writeFile(
       join(memoryDir, "cap.md"),
@@ -201,7 +207,10 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
 
     // A capability row written straight to disk, bypassing the persist gate,
     // is swept on the gated turn — the whole point of keeping the hook around.
-    const memoryDir = resolveProjectMemoryDir(cwd, cwd);
+    const memoryDir = resolveProjectMemoryDir({
+      dataDir: join(userHome, ".iknow"),
+      projectIdentityRoot: cwd,
+    });
     await mkdir(memoryDir, { recursive: true });
     await writeFile(
       join(memoryDir, "cap.md"),

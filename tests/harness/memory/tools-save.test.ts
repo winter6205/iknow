@@ -5,7 +5,7 @@
  * Testing Strategy tools-save half, SC 6/7/9).
  *
  * Contract (SC 6/7/9):
- *   - first save creates `~/.iknow/memory/<basename>-<sha1(cwd)[:12]>/MEMORY.md`
+ *   - first save creates `<pool>/projects/<slug>/memory/MEMORY.md`
  *     + `<slug>.md`
  *   - input `{ title, body, type?, importance? }`
  *   - affirmative phrasing rejection (spec SC 9): `don't` / `never` / `禁止` /
@@ -387,7 +387,10 @@ describe("memory_save — runtime capability persist gate", () => {
 
   it("leaves an existing MEMORY.md byte-identical after a rejected save", async () => {
     const tool = createMemorySaveTool({ memoryDir });
-    await tool.handler({ title: "Use bar()", body: "bar() is the entry point." });
+    await tool.handler({
+      title: "Use bar()",
+      body: "bar() is the entry point.",
+    });
     const indexPath = join(memoryDir, "MEMORY.md");
     const before = await readFile(indexPath, "utf8");
     const filesBefore = await readdir(memoryDir);
@@ -439,7 +442,8 @@ describe("memory_save — runtime capability persist gate", () => {
       (err: unknown) => {
         const e = err as MemoryError;
         return (
-          e.name === "MemoryError" && /title must be a non-empty/.test(e.message)
+          e.name === "MemoryError" &&
+          /title must be a non-empty/.test(e.message)
         );
       }
     );
