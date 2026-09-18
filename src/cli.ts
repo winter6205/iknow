@@ -529,6 +529,16 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // #356 T7:host drain — chat 入口每轮 runHarness 前把 completed 子代理
     // 结果拼入 priorMessages。ask 入口无 manager(surface 门控),不传。
     subagentManager: built.subagentManager,
+    // spec skill-index-increment T3：可加载技能面 —— CLI 与 TUI / Web
+    // 同一 slash 入口。`/skill-name [remainder]` 走 skill-load 信封装配
+    // （buildSkillLoadText + createSkillBody，与 TUI 同源）。
+    skillCatalog: built.skillCatalog,
+    // spec skill-index-increment SC8：可加载面「当场热」的重扫缝 —— 每条
+    // 非空 slash 行以现行技能根重扫一次，装配后新装的技能当场进 `/` 候选
+    // （不必等下一个 turn）。ask 面不装配该缝（`built.skillRescanner` 缺席）。
+    ...(built.skillRescanner !== undefined
+      ? { skillRescanner: built.skillRescanner }
+      : {}),
     // auto-memory T4 / ADR-0031 D1:自动记忆钩子。仅
     // `settings.memory.autoExtract === true` 时 build-engine 才装配;
     // 缺席(默认 OFF)→ chat host 不调,行为逐字节不变。
@@ -570,6 +580,12 @@ async function runChat(parsed: ParsedCli): Promise<void> {
         graphAssembly: rebuilt.graphAssembly,
         autoMemory: rebuilt.autoMemory,
         overlayMemoryPrefetch: rebuilt.overlayMemoryPrefetch,
+        // spec skill-index-increment T3：slash 技能面随活跃引擎换血 ——
+        // rebind 到 task worktree 后技能候选 / 正文读的是新根的 catalog。
+        skillCatalog: rebuilt.skillCatalog,
+        // spec skill-index-increment SC8：重扫台与 catalog **同台**换血 ——
+        // 只换 catalog 会让「当场热」的候选来自旧根的扫描台。
+        skillRescanner: rebuilt.skillRescanner,
       };
     },
   });

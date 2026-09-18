@@ -303,12 +303,9 @@ describe("Phase C: /skill-name 加载发送", () => {
     await app.typeText("/echo 帮我做 X");
     await app.pressEnter();
 
-    // turn 完成 → inflight 清空
-    await until(
-      () => app.bridge.inflight.ids().size === 0,
-      8000,
-      "skill-turn-done"
-    );
+    // 落盘是权威信号：inflight 空判有竞态（postMessage 才 mark，提交尚未进
+    // registry 时就读到 0）。本文件既有 helper 已按此纪律写，此处同源。
+    const userText = await awaitSkillLoadEnvelope(app);
 
     // 落盘会话文件：模型历史第一条 user 消息 = 完整 skill-load 发送文本。
     const list = await app.bridge.listSessions();
@@ -318,11 +315,6 @@ describe("Phase C: /skill-name 加载发送", () => {
     expect(file.messages.length).toBeGreaterThan(0);
     const first = file.messages[0]!;
     expect(first.role).toBe("user");
-    const userText =
-      first.content
-        .filter((b): b is { type: "text"; text: string } => b.type === "text")
-        .map((b) => b.text)
-        .join("\n") ?? "";
     expect(userText.startsWith('[skill-load name="echo"]\n')).toBe(true);
     expect(userText).toContain("# 回声技能");
     expect(userText).toContain("Base directory: " + fx.skillDir);
@@ -379,12 +371,10 @@ describe("Phase C: /skill-name 加载发送", () => {
     expect(runFrame.includes("回声技能")).toBe(false); // 正文 frontmatter description 不泄漏
     expect(runFrame.includes("<skill_files>")).toBe(false);
 
-    // 等 turn 完成 → inflight 清空。
-    await until(
-      () => app.bridge.inflight.ids().size === 0,
-      8000,
-      "skill-turn-done"
-    );
+    // 等 turn 完成 → 落盘是权威信号（inflight 空判有竞态：postMessage 才
+    // mark，提交尚未进 registry 时就读到 0）。本文件既有 helper 已按此纪律
+    // 写，此处同源；读回的第一个 user 文本本轮不用，故不接返回值。
+    await awaitSkillLoadEnvelope(app);
 
     // 完成态：落盘 envelope 替换 echo；render 同一投影 → 屏上仍只 chip +
     // remainder，正文永进 ❯ 气泡。
@@ -533,8 +523,14 @@ describe("Phase C: /skill-name 加载发送", () => {
 
     await app.typeText("/ec");
     await app.pressTab();
-    const frame = app.setup.captureCharFrame();
-    expect(frame).toContain("/echo");
+    // 补全经 React 状态落地，立即 capture 会读到补全前的帧（既有 flaky 根因）。
+    // 改为轮询到补全出现 —— 断言不变，只去掉读帧竞态。
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("/echo"),
+      8000,
+      "tab-complete"
+    );
 
     await app.destroy();
     await fx.cleanup();
@@ -632,4 +628,83 @@ describe("Phase C: /skill-name 加载发送", () => {
     await app.destroy();
     await fx.cleanup();
   }, 30_000);
+
+  // spec skill-index-increment SC5/SC6（T3）：无 description 与
+  // `disable-model-invocation` 的条目走同一人侧 slash 信封路径 —— 屏幕芯片、
+  // 落盘 envelope 与有描述技能逐字节同形（只差 name/正文），装配正文不再
+  // 因资格拒。fixture 手搓 catalog：两条款目由 scanner 之外的路径构造不会
+  // 有 disabled/无描述的分叉，此处直接按语义构造（与 product 装配同形）。
+  test("SC5/SC6：无 description 与 disable 的条目同一条 slash 路径信封加载", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-tui-skill-loadable-"));
+    const bodies = [
+      { name: "no-desc", matter: "name: no-desc", text: "# 无描述技能" },
+      {
+        name: "manual-only",
+        matter:
+          "name: manual-only\ndescription: 仅人侧\ndisable-model-invocation: true",
+        text: "# 手动技能",
+      },
+    ] as const;
+    const entries = [] as Array<{
+      name: string;
+      description?: string;
+      dir: string;
+      disabled: boolean;
+    }>;
+    for (const spec of bodies) {
+      const dir = join(root, spec.name);
+      await mkdir(dir, { recursive: true });
+      await writeFile(
+        join(dir, "SKILL.md"),
+        `---\n${spec.matter}\n---\n${spec.text}\n`,
+        "utf8"
+      );
+    }
+    // 走真实 scanner：无 description → entry.description undefined；
+    // `disable-model-invocation: true` → entry.disabled true。手搓 entry
+    // 会把这两个语义位绕过。
+    entries.push(
+      ...(await createSkillScanner({
+        userHome: join(root, "home"),
+        projectIdentityRoot: join(root, "project"),
+        env: { IKNOW_SKILL_DIRS: root },
+      }).scan())
+    );
+    expect(entries.map((e) => e.name).sort()).toEqual([
+      "manual-only",
+      "no-desc",
+    ]);
+    const byName = new Map(entries.map((e) => [e.name, e]));
+    expect(byName.get("no-desc")!.description).toBeUndefined();
+    expect(byName.get("manual-only")!.disabled).toBe(true);
+    const catalog = createSkillCatalog(entries);
+
+    try {
+      for (const spec of bodies) {
+        const app = await mountAppAsync(catalog, [
+          assistantResult({ texts: ["完成"] }),
+        ]);
+        await untilFrame(app.setup, (f) => f.includes("Version"));
+        await untilFrame(app.setup, (f) => f.includes("输入消息"));
+
+        await app.typeText(`/${spec.name}`);
+        await app.pressEnter();
+        // 落盘是权威信号：inflight 空判会在提交尚未进 registry 时读到 0。
+        const userText = await awaitSkillLoadEnvelope(app);
+        expect((await app.bridge.listSessions()).length).toBe(1);
+        // 信封恒 canonical 形态 + 装配正文（createSkillBody 产物）。
+        expect(userText.startsWith(`[skill-load name="${spec.name}"]\n`)).toBe(
+          true
+        );
+        expect(userText).toContain(spec.text);
+        expect(userText).toContain(`Base directory: ${join(root, spec.name)}`);
+        // 屏幕不画正文（与既有 chip 投影同纪律）。
+        expect(app.setup.captureCharFrame().includes(spec.text)).toBe(false);
+
+        await app.destroy();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

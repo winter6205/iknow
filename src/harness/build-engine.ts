@@ -120,7 +120,12 @@ import {
 } from "../config/workspace-root.js";
 import { createSkillScanner, type PluginSkillDir } from "./skill/scanner.js";
 import { createSkillCatalog } from "./skill/catalog.js";
-import type { SkillCatalog } from "./skill/catalog.js";
+import type { SkillCatalog, SkillCatalogFaces } from "./skill/catalog.js";
+import { createSkillRescanner, type SkillRescanner } from "./skill/rescan.js";
+import {
+  createSkillIndexDeltaSeam,
+  type SkillIndexSnapshotEntryShape,
+} from "./skill/index-delta.js";
 import { resolvePluginCatalog, resolvePluginRoots } from "./plugin/roots.js";
 import { loadMcpConfig } from "./mcp/config.js";
 import { createMcpManager, type McpManager } from "./mcp/manager.js";
@@ -138,6 +143,7 @@ import {
   type SubAgentManager,
 } from "./subagent/manager.js";
 import { assessSubagentIsolation } from "./subagent/capability.js";
+import type { SkillIndexSnapshotEntry } from "./subagent/envelope.js";
 import { buildWorkerToolSurface } from "./subagent/role.js";
 import {
   createDefaultSubAgentSpawn,
@@ -506,6 +512,13 @@ export type BuiltEngine = EngineBundle & {
    */
   readonly skillCatalog?: SkillCatalog;
   /**
+   * T5 / ADR-0098:技能 rescan 缝(T6)—— 与 `deps.skillIndexDelta` **同一个**
+   * 持有者(装配期一次,跨会话共用)。透出给 host 的显式 reload 面:plugin
+   * skill 根的换血(`setPluginSkillDirs`)必须落在同一台上,下一次 rescan 才
+   * 看得到新根。`surface === "ask"` 时缺席(ask 不装配增量缝)。
+   */
+  readonly skillRescanner?: SkillRescanner;
+  /**
    * #337 T8 / #361 Phase D:MCP manager 句柄(surface === "ask" 时缺席)。
    * TUI deps 消费 status()/reload() 构建 /mcp 看板扩展面;ask 零 mcp__*。
    */
@@ -817,7 +830,7 @@ export async function buildHarnessEngine(
     dir: path.join(p.root, "skills"),
     plugin: p.name,
   }));
-  const skillCatalog: SkillCatalog = createSkillCatalog(
+  const skillCatalog: SkillCatalogFaces = createSkillCatalog(
     await createSkillScanner({
       userHome,
       // T3:项目 skills 是项目身份 → projectIdentityRoot（跨 rebind 不动）。
@@ -827,6 +840,28 @@ export async function buildHarnessEngine(
       pluginSkillDirs,
     }).scan()
   );
+  // T5 / ADR-0098:技能索引进场增量缝 —— 与冻表（上面 skillCatalog）同一份
+  // 装配期扫描结果的 rescan 缝：`rescan()` 用**当时**根列表重扫，冻表不被
+  // 它改写（那是 `skillIndexList` holder 的事，见下方 system 段）。
+  // 会话锚（conversationId）/ 进场史叶子根（projectDir）都是**调用期**参数
+  // —— serve 的引擎跨会话共享，装配期拿不到 conversationId（与 todoDir /
+  // agentStatus 同款「装配期常量 + 调用期叶子」形状）。
+  // 抽到模块级构造（S5 ratchet，理由同上）。
+  const skillRescanner = createEngineSkillRescanner({
+    surface,
+    userHome,
+    projectIdentityRoot,
+    pluginSkillDirs,
+  });
+  // T5 / T7 / ADR-0098:增量缝 —— loop 增量（T5）与 worker 快照（T7）共用
+  // 同一台：两处的「已进场」必须是同一份史（建两台会各自记账，worker 快照
+  // 里的「已进场」与 loop 贴的「已进场」漂移）。
+  //
+  // 声明在前、赋值在后：manager 构造点在本行之下、而 seam 的两个入参
+  // （`agentStatusTodoDir` / `skillIndexList`）在更下方才定稿。getter 只在
+  // spawn 期读，故调用期一定已赋值；`let` 而非 const 正是为这条 declarative
+  // 顺序让路（同 `skillIndexList` 自己的 let 形态）。
+  let skillIndexSeam: ReturnType<typeof createSkillIndexDeltaSeam> | undefined;
   // #356 T6:subagent manager 条件装配 — 与 MCP 同门(surface !== "ask"):
   //   - chat/tui/serve 自建 createSubAgentManager({ spawn: defaultSubAgentSpawn });
   //     opts.subagentManager 测试缝覆盖注入。
@@ -943,6 +978,22 @@ export async function buildHarnessEngine(
           // 席时的兜底初值；opts.maxConcurrentWorkers 仍传是兼容既有 assemble
           // 路径（manager 在 holder 缺席时把它作 fail-closed 初值）。
           subagentCapacityHolder: opts.subagentCapacityHolder,
+          // T7 / SC10:父会话「当时」模型索引快照 —— 每次 spawn 现读。
+          // **per spawn 的 def.conversationId 是入参**：进场史是会话级叶子
+          // （`<projectDir>/<sanitize(convId)>/skill-index.json`），一次
+          // build-engine 实例跨会话共享，故不能把 conversationId 钉进装配期。
+          // 冻表名那一半与会话无关（system 冻表对所有会话相同），由 seam 的
+          // ledger 以 `initialNames` 承载；这里只并上「该会话已进场」的条目。
+          // seam 缺席（todoDir / rescanner 不在场 / ask）→ getter 缺席 →
+          // envelope 省键 → worker 走自有 rescan（旧形态 byte-stable）。
+          // 门条件在此可静态判定（todoDir / rescanner 在 manager 构造点都已
+          // 定稿；ask 已在上一层的三元里排除，故不再重复判表面）；缝本体走
+          // lazy 读取（它在冻表定稿后才建）。
+          ...skillIndexSnapshotOption({
+            todoDir: opts.todoDir,
+            rescanner: skillRescanner,
+            readSeam: () => skillIndexSeam,
+          }),
         }))
       : undefined;
   // #502 T3:bash background 任务管理器 — 条件装配（surface !== "ask"）：
@@ -1754,6 +1805,19 @@ export async function buildHarnessEngine(
   // 都缺席。(同语义表达式还在上方 registry todoDir seam 内联一次,改动需同步。)
   const agentStatusTodoDir: string | undefined =
     surface !== "ask" && opts.todoDir ? opts.todoDir : undefined;
+  // T5 / T7 / ADR-0098：两个入参都已定稿（`skillIndexList` 是降档后的冻表，
+  // `agentStatusTodoDir` 是本段表达式）—— 到这里才建缝。manager 的 spawn
+  // getter 只读闭包引用，故构造顺序（manager 在上、赋值在此）安全。
+  skillIndexSeam = buildSkillIndexSeamOrUndefined({
+    todoDir: agentStatusTodoDir,
+    rescanner: skillRescanner,
+    frozenNames: skillIndexList.map((skill) => skill.name),
+    frozenEntries: skillIndexList.map((skill) =>
+      skill.description === undefined
+        ? { name: skill.name }
+        : { name: skill.name, description: skill.description }
+    ),
+  });
   // memory-toggle-live: memory_layer resolver 提前构造 —— deps.system 注入缝
   // 与 BuiltEngine.invalidateMemorySystem 消费同一实例。TUI 表面挂 live flags
   // （catalog 装配档随 /memory 翻转），其余表面维持原快照形态。
@@ -1886,6 +1950,7 @@ export async function buildHarnessEngine(
     ...(agentStatusTodoDir
       ? { agentStatus: { todoDir: agentStatusTodoDir } }
       : {}),
+    ...skillIndexDeltaOption(skillIndexSeam),
     // #653 G1 T5 / DESIGN-ENVIRONMENT-PRESENT + T9 / ADR-0037 §4:环境现势事件缝
     // —— 仅 tui surface 注入(人读 chrome 的数据源;cwd 来源 =
     // liveTaskRoot.read —— 装配层活持有者,每次即将调模型前现读)。rebind
@@ -2009,6 +2074,12 @@ export async function buildHarnessEngine(
     // TUI deps 构建扩展面(TuiExtensions.skillCatalog / mcp.status / mcp.reload /
     // listMcpTools)。全 surface 通用装配件,非 TUI 专用 — 不改变既有消费方。
     skillCatalog,
+    // T5 / ADR-0098:rescan 缝透出 —— 它是**跨入口共享**的那个可变持有者
+    // (plugin skill 根列表在显式 reload 时换血,SC11):serve hub 的
+    // skill reload 端点在 **同一台引擎** 上调 setPluginSkillDirs,冻表 holder
+    // 与索引进场增量缝的下一次 rescan 才看得到新根。host 未注入 todoDir /
+    // ask 表面 → 缺席(与 deps.skillIndexDelta 同门,行为零变化)。
+    ...skillRescannerOption(skillRescanner),
     ...(mcpManager ? { mcpManager } : {}),
     ...(mcpRoots ? { mcpRoots } : {}),
     sessionRoots,
@@ -2072,6 +2143,127 @@ function lastReadLedgerOption(opts: BuildEngineOpts): {
   readonly lastReadLedger?: LastReadLedgerHost;
 } {
   return opts.lastReadLedger ? { lastReadLedger: opts.lastReadLedger } : {};
+}
+
+/** T5 / ADR-0098:rescan 缝的条件透出（理由同 `lastReadLedgerOption`）。 */
+function skillRescannerOption(rescanner: SkillRescanner | undefined): {
+  readonly skillRescanner?: SkillRescanner;
+} {
+  return rescanner ? { skillRescanner: rescanner } : {};
+}
+
+/**
+ * T5 / ADR-0098:技能索引进场增量缝 —— 与 agentStatus 同门（同一 todoDir
+ * 表达式 = 「会话文件夹在场 + 非 ask」）且同一形态：装配期给常量缝
+ * （rescanner + projectDir + 冻表名集），loop-engine 在每次即将调模型前调用，
+ * 会话锚（`deps.conversationId`）由缝在调用期解析成
+ * `<projectDir>/<sanitize(convId)>/skill-index.json` 进场史叶子。
+ *
+ * 冻表名集取本层 holder（降档后的定稿形态）—— 冻表里已有的名一律不算新建
+ * （SC3）。host 未注入 todoDir / ask 表面 / 无 rescan 缝 → 缝缺席，零注入
+ * （既有装配与测试 byte-identical）。
+ *
+ * 抽到模块级的理由同 `lastReadLedgerOption` / `resolveWorktreeOnMutateSource`
+ * （S5 ratchet：`buildHarnessEngine` 是既有 god function，只允许等量或更少的
+ * 分支）。
+ */
+function skillIndexDeltaOption(
+  seam: ReturnType<typeof createSkillIndexDeltaSeam> | undefined
+): {
+  readonly skillIndexDelta?: ReturnType<typeof createSkillIndexDeltaSeam>;
+} {
+  return seam === undefined ? {} : { skillIndexDelta: seam };
+}
+
+/**
+ * T7 / SC10:worker 快照 getter 的条件透出面（缝缺席 → 键都省，与
+ * `lastReadLedgerOption` 同款）。
+ *
+ * **缝缺席时返回 `{}`（不是「传一个恒返回 undefined 的 getter」）**：manager
+ * 侧「getter 缺席」与「getter 返回 undefined」虽同归省键，但前者是声明式的
+ * 「本装配没有这条线」，后者要读进函数体才知道 —— 也让接线测试能直接断言
+ * 「装配传没传」。
+ *
+ * getter 内层仍**原样透传 `undefined`**（不是空数组）：envelope 的三态里
+ * 「省略键」= worker 退回自有 rescan，「空数组」= 父确定无技能。把「该会话
+ * 还没加载过」说成空数组会让 worker 渲染空清单句、丢掉它本来能自扫到的技能。
+ */
+function skillIndexSnapshotOption(input: {
+  /** 装配期即可判定的门（与 `agentStatusTodoDir` 同一条：非 ask + 有落点）。 */
+  readonly todoDir: string | undefined;
+  readonly rescanner: SkillRescanner | undefined;
+  /** 缝的**调用期**读取 —— 缝本体在冻表定稿后才建（见赋值点注释）。 */
+  readonly readSeam: () =>
+    ReturnType<typeof createSkillIndexDeltaSeam> | undefined;
+}): {
+  readonly skillIndexSnapshot?: (
+    conversationId: string | undefined
+  ) => readonly SkillIndexSnapshotEntry[] | undefined;
+} {
+  // 门的分支数留在 helper（S5 ratchet：buildHarnessEngine 只允许等量或更少
+  // 的分支）；与 `buildSkillIndexSeamOrUndefined` 同一对条件。
+  if (input.todoDir === undefined || input.rescanner === undefined) return {};
+  return {
+    skillIndexSnapshot: (conversationId) =>
+      input.readSeam()?.enteredEntries(conversationId),
+  };
+}
+
+/**
+ * T7 / SC10：增量缝本体（或缺席）—— 与 `buildSkillIndexDeltaSeam` 同门同源，
+ * 单独抽出是因为 **worker 快照 getter 也要它**（`enteredEntries` 是同一台缝
+ * 上的同步面）。两条消费线共用一个实例：worker 快照里的「已进场」与 loop
+ * 增量贴的「已进场」必须是同一份史，建两台会各自记账。
+ *
+ * 缺席（todoDir / rescanner 任一不在场）→ undefined：worker 快照 getter 随之
+ * 缺席，worker 退回自有 rescan（旧形态 byte-stable）。
+ */
+function buildSkillIndexSeamOrUndefined(input: {
+  readonly todoDir: string | undefined;
+  readonly rescanner: SkillRescanner | undefined;
+  readonly frozenNames: readonly string[];
+  readonly frozenEntries?: readonly SkillIndexSnapshotEntryShape[];
+}): ReturnType<typeof createSkillIndexDeltaSeam> | undefined {
+  if (input.todoDir === undefined || input.rescanner === undefined)
+    return undefined;
+  return createSkillIndexDeltaSeam({
+    rescanner: input.rescanner,
+    projectDir: input.todoDir,
+    initialNames: input.frozenNames,
+    ...(input.frozenEntries !== undefined
+      ? { initialEntries: input.frozenEntries }
+      : {}),
+    // 不传 `isIndexedName`（缺省全收）：写入名单已经由
+    // `computeSkillIndexDelta` 从 **rescan 面**的 `modelIndex()` 产出 ——
+    // 资格判定在那一拍完成。若在此再拿装配期 catalog 过一道闸，会话内
+    // **新建**的技能名（装配期还不存在）会被判非法，正是 SC2 要贴的那种
+    // 增量被自己丢掉。
+  });
+}
+
+/**
+ * T5 / ADR-0098:rescan 缝的装配期构造 —— `ask` 表面不装配（oneshot 即用即抛，
+ * 增量缝与冻表 holder 都缺席）；其余表面建一台持有者，
+ * `pluginSkillDirs` 只是**初始**值，之后只由显式 reload 经
+ * `setPluginSkillDirs()` 换血（SC11）。
+ *
+ * 抽到模块级的理由同 `lastReadLedgerOption` / `buildSkillIndexDeltaSeam`
+ * （S5 ratchet：`buildHarnessEngine` 是既有 god function，只允许等量或更少的
+ * 分支）。
+ */
+function createEngineSkillRescanner(input: {
+  readonly surface: "chat" | "tui" | "ask" | "serve";
+  readonly userHome: string;
+  readonly projectIdentityRoot: string;
+  readonly pluginSkillDirs: readonly PluginSkillDir[];
+}): SkillRescanner | undefined {
+  if (input.surface === "ask") return undefined;
+  return createSkillRescanner({
+    userHome: input.userHome,
+    projectIdentityRoot: input.projectIdentityRoot,
+    env: process.env,
+    pluginSkillDirs: input.pluginSkillDirs,
+  });
 }
 
 /**

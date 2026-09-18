@@ -51,10 +51,44 @@ export interface SkillScannerOptions {
    * 缺省：空数组 —— 行为与今日逐字节一致（既有测试不变）。
    */
   pluginSkillDirs?: readonly PluginSkillDir[];
+  /**
+   * `skill-index-increment` T6：真 IO 故障（非 ENOENT）的观察缝。每次故障
+   * 回调一次，**在 warn 之后**（warn 面不变）。缺席 = 既有行为逐字节不变：
+   * 故障只 warn + 跳过，扫描不抛（装配期纪律）。
+   *
+   * 注入者（`skill/rescan.ts`）据此把残缺扫描升级成 typed 错误 —— 「贴给
+   * 模型前」的容错取舍与「装配期不阻塞」相反，两条纪律靠本缝共存。
+   */
+  onIoFailure?: (failure: SkillIoFailure) => void;
 }
 
 export interface SkillScanner {
   scan(): Promise<SkillEntry[]>;
+}
+
+/**
+ * `skill-index-increment` T6：真 IO 故障（非 ENOENT）的观察通道。
+ *
+ * scanner 既有纪律是「坏根/坏文件 → warn + 跳过，扫描不阻塞」（装配期
+ * 不能让一个不可读目录掀掉整次 build）。rescan 缝需要相反的取舍：把
+ * **当时热**的结果贴给模型前，残缺的扫描结果会被误读成「这些技能被删了」，
+ * 所以故障必须能被调用方看见并按 typed 错误处置。两条纪律共存的办法是
+ * 把「记一笔」与「怎么处置」分开：scanner 照旧包住 IO 故障（不抛），
+ * 但把每次故障经本回调**原样**报给注入的观察者；不注入 = 既有 warn 行为
+ * 逐字节不变（`SkillScannerOptions.onIoFailure` 缺省 absent）。
+ */
+export interface SkillIoFailure {
+  /**
+   * `root_unreadable` = 技能根目录本身 readdir 失败（整根缺席）；
+   * `file_unreadable` = 单个 SKILL.md readFile 失败（该技能缺席）。
+   */
+  readonly kind: "root_unreadable" | "file_unreadable";
+  /** 故障路径：根目录，或 `<dir>/SKILL.md`。 */
+  readonly path: string;
+  /** 底层 errno（`EACCES` / `EIO` …）；非 errno 故障退化为 `undefined`。 */
+  readonly code: string | undefined;
+  /** `Error#message`（非 Error 抛出物退化 `String(err)`）。 */
+  readonly cause: string;
 }
 
 export function createSkillScanner(options: SkillScannerOptions): SkillScanner {
@@ -65,6 +99,15 @@ export async function scanSkillDirs(
   options: SkillScannerOptions
 ): Promise<SkillEntry[]> {
   const warn = options.warn ?? console.warn;
+  /**
+   * 唯一把 IO 故障转成观察事件的出口：先按既有纪律 warn + 跳过，再把
+   * 事实原样交给可选观察者。两件事都做 —— warn 是既有装配期观测面
+   * （测试与 log 都依赖），回调是 rescan 缝的 typed 出口。
+   */
+  const reportIoFailure: ReportIoFailure = (failure, message) => {
+    warn(message);
+    options.onIoFailure?.(failure);
+  };
   const index = new Map<string, SkillEntry>();
   // 裸名别名 → 首次占据该裸名的 entry（design §4.2：裸名冲突 → 只
   // 留规范名 + warn）。review C5：scanner 在建 entry 时负责 warn（既
@@ -73,14 +116,19 @@ export async function scanSkillDirs(
   const bareOwner = new Map<string, SkillEntry>();
   // 第一轮：user / project / plugin → 写入 index（同名后者赢，即 plugin 覆盖 user/project）
   for (const root of scanRoots(options)) {
-    for (const entry of await scanRoot(root.dir, root.namespace, warn)) {
+    for (const entry of await scanRoot(
+      root.dir,
+      root.namespace,
+      warn,
+      reportIoFailure
+    )) {
       registerBareAlias(entry, bareOwner, warn);
       index.set(entry.name, entry);
     }
   }
   // 第二轮：IKNOW_SKILL_DIRS（最高优先级，最后写入覆盖插件）
   for (const dir of extrasDirs(options.env)) {
-    for (const entry of await scanRoot(dir, undefined, warn))
+    for (const entry of await scanRoot(dir, undefined, warn, reportIoFailure))
       index.set(entry.name, entry);
   }
   return [...index.values()];
@@ -156,14 +204,18 @@ function extrasDirs(env: SkillEnv): string[] {
 async function scanRoot(
   root: string,
   namespace: string | undefined,
-  warn: Warn
+  warn: Warn,
+  reportIoFailure: ReportIoFailure
 ): Promise<SkillEntry[]> {
   let children;
   try {
     children = await readdir(root, { withFileTypes: true });
   } catch (error) {
     if (isMissing(error)) return [];
-    warn(`skill scan skipped directory: ${root}`);
+    reportIoFailure(
+      toIoFailure("root_unreadable", root, error),
+      `skill scan skipped directory: ${root}`
+    );
     return [];
   }
 
@@ -171,7 +223,7 @@ async function scanRoot(
   for (const child of children) {
     if (!child.isDirectory()) continue;
     const dir = join(root, child.name);
-    const parsed = await readSkill(dir, warn);
+    const parsed = await readSkill(dir, warn, reportIoFailure);
     if (parsed === undefined) continue;
     if (namespace !== undefined) {
       // 插件 skill：entry.name 取自 frontmatter（首选）或目录 basename 作
@@ -195,14 +247,19 @@ async function scanRoot(
 
 async function readSkill(
   dir: string,
-  warn: Warn
+  warn: Warn,
+  reportIoFailure: ReportIoFailure
 ): Promise<{ entry: SkillEntry; frontmatter: SkillFrontmatter } | undefined> {
   let raw: string;
   try {
     raw = await readFile(join(dir, "SKILL.md"), "utf8");
   } catch (error) {
     if (isMissing(error)) return undefined;
-    warn(`skill skipped unreadable file: ${join(dir, "SKILL.md")}`);
+    const file = join(dir, "SKILL.md");
+    reportIoFailure(
+      toIoFailure("file_unreadable", file, error),
+      `skill skipped unreadable file: ${file}`
+    );
     return undefined;
   }
 
@@ -272,6 +329,30 @@ function scalar(raw: string): string | number | boolean | null {
   if (raw === "null") return null;
   const number = Number(raw);
   return raw !== "" && Number.isFinite(number) ? number : raw;
+}
+
+/** 故障观察缝的内部签名：一次故障同时给出结构化事实与既有 warn 文案。 */
+type ReportIoFailure = (failure: SkillIoFailure, message: string) => void;
+
+/**
+ * 原始抛出物 → `SkillIoFailure`。`code` 只在抛出物是真 Error 且带
+ * `code` 字段时取值（errno 形态）；其余（非 Error / 无 code）退化为
+ * `undefined` —— 调用方按 `kind` + `path` 分型，不依赖 code 必然在场。
+ */
+function toIoFailure(
+  kind: SkillIoFailure["kind"],
+  path: string,
+  error: unknown
+): SkillIoFailure {
+  return {
+    kind,
+    path,
+    code:
+      error instanceof Error && "code" in error
+        ? String((error as { code: unknown }).code)
+        : undefined,
+    cause: error instanceof Error ? error.message : String(error),
+  };
 }
 
 function isMissing(error: unknown): boolean {

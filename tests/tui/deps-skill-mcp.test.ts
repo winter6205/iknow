@@ -128,6 +128,13 @@ describe("buildTuiDeps — #337 Phase B skill + MCP 装配", () => {
     const available = captured!.skillCatalog.available();
     expect(available.length).toBeGreaterThan(0);
     expect(available.find((e) => e.name === "echo")).toBeDefined();
+    // T6 / SC8：rescan 缝必须透出 —— TuiApp 的斜杠候选面靠它「当场热」。
+    // 这是生产接线断言（缝在 build-engine 里造出来，若 deps 不透传则 TUI
+    // 永远拿不到刷新路径 → SC8 在生产不成立，与本切片前的缺陷同形）。
+    expect(captured!.skillRescanner).toBeDefined();
+    // 缝是活的：rescan() 交出可加载面（含 planted echo）。
+    const rescanned = await captured!.skillRescanner!.rescan();
+    expect(rescanned.loadable().find((e) => e.name === "echo")).toBeDefined();
     // mcp.status()：返回数组（即使 servers 空 → []）。
     const status = captured!.mcp.status();
     expect(Array.isArray(status)).toBe(true);

@@ -29,7 +29,7 @@ import {
 } from "./slash.js";
 import type { SessionContext } from "../shared/schema.js";
 import { isIknowError, ValidationError } from "../shared/errors.js";
-import { MaxTurnsExceeded } from "../harness/errors.js";
+import { MaxTurnsExceeded, errorMessage } from "../harness/errors.js";
 import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
 import { resolveSessionFenceTmp } from "../harness/sandbox/fence-tmp.js";
 import { maxTurnsNotice } from "./max-turns.js";
@@ -128,6 +128,18 @@ import {
   exceedsUserInputCap,
   writeRootSegment,
 } from "../harness/skill/body.js";
+import type { SkillCatalog } from "../harness/skill/catalog.js";
+import {
+  SkillRescanError,
+  type SkillRescanner,
+} from "../harness/skill/rescan.js";
+import {
+  CLI_STATIC_COMMANDS,
+  buildCliSkillLoad,
+  parseSkillLoad,
+  slashPrefix,
+  toCliSkillEntries,
+} from "./skill-load.js";
 import { randomUUID } from "node:crypto";
 
 /** Visual separator after a completed answer on TTY only. */
@@ -268,6 +280,23 @@ export type ChatSessionOpts = {
    * ask 入口不接本缝）。
    */
   readonly isolationOn?: boolean;
+  /**
+   * spec skill-index-increment T3：可加载技能面 catalog（cli.ts runChat
+   * 传 `built.skillCatalog`）。在场 → `/skill-name [remainder]` 走
+   * skill-load 信封装配（CLI 与 TUI / Web 同一入口）。缺席（ask / 旧测试）
+   * → 技能名落回未知命令分支，行为逐字节不变。
+   */
+  readonly skillCatalog?: SkillCatalog;
+  /**
+   * spec skill-index-increment SC8：可加载面「当时热」的重扫缝（cli.ts
+   * runChat 传 `built.skillRescanner`）。在场 → 每条**非空 slash 行**解析
+   * 技能名前用现行根重扫一次，装配之后新装的技能当场可见（不必等下一个
+   * turn）；缺席（ask / 旧测试）→ 候选恒为装配期快照，行为逐字节不变。
+   *
+   * 与 `skillCatalog` 同时在场才有意义（无 catalog 则技能名一律落未知命令
+   * 分支，重扫无用）；缺席 catalog 时本缝被忽略。
+   */
+  readonly skillRescanner?: SkillRescanner;
 };
 
 /**
@@ -276,7 +305,22 @@ export type ChatSessionOpts = {
  * T11 收敛：原 6 字段私有同形拷贝改为 `EngineBundle` SSOT 别名，三个 host
  * 共用同一类型,语义漂移消失。
  */
-export type RebuiltChatEngine = EngineBundle;
+export type RebuiltChatEngine = EngineBundle & {
+  /**
+   * spec skill-index-increment T3：重建引擎的 skillCatalog（`BuiltEngine`
+   * 的超集字段，`EngineBundle` 本身不透出——那层是六字段 host 句柄面）。
+   * 可选：旧缝（只回 EngineBundle 的调用方）不提供 → refresh 保持 ctx 上
+   * 的原 catalog（旧根的技能集，可见降级而非静默切换）。
+   */
+  readonly skillCatalog?: SkillCatalog;
+  /**
+   * spec skill-index-increment SC8：重建引擎的 rescan 缝（`BuiltEngine`
+   * 同源字段）。与 `skillCatalog` 必须**同台换血** —— 只换 catalog 会让
+   * 「当场热」的候选来自旧根的扫描台。可选：旧缝不提供 → 保持原 rescanner
+   * （与 catalog 同款可见降级；不会静默变成「无重扫」）。
+   */
+  readonly skillRescanner?: SkillRescanner;
+};
 
 export type ChatLineContext = {
   deps: LoopEngineDeps;
@@ -395,6 +439,25 @@ export type ChatLineContext = {
    * （旧形态 = `writable_main`；tests / ask 不接本缝）。
    */
   isolationOn?: boolean;
+  /**
+   * spec skill-index-increment T3：可加载技能面 catalog（`BuiltEngine`
+   * 的 skillCatalog）。在场时 `/skill-name [remainder]` 走 skill-load 信封
+   * 装配（与 TUI / Web 同一入口语义）；缺席（ask / 旧测试）→ 技能名落回
+   * 未知命令分支，行为与今日逐字节一致。
+   *
+   * 可变 —— rebind 重建后由 `refreshChatDepsForRebind` 换血到重建引擎的
+   * catalog（否则 slash 面停留在旧根的技能集 = split-brain）。
+   */
+  skillCatalog?: SkillCatalog;
+  /**
+   * spec skill-index-increment SC8：可加载面「当时热」的重扫缝（同
+   * `ChatSessionOpts.skillRescanner`，runChatSession 透传）。在场 → 每条
+   * 非空 slash 行解析技能名前以现行根重扫一次，装配后新装的技能当场可见。
+   *
+   * 可变 —— rebind 重建后与 `skillCatalog` **同台**换血（只换其一 = 新根的
+   * 候选配旧根的重扫台，split-brain）。
+   */
+  skillRescanner?: SkillRescanner;
 };
 
 /**
@@ -414,6 +477,38 @@ export type ChatLineContext = {
  * 其终态结果，交给下一次主模型 run；等待失败的 task id 会在 shutdown
  * 前以 stderr 明确告知，随后仍按既有生命周期收口旧引擎。
  */
+/**
+ * split-brain 修复：重建引擎接管后，把 host 侧句柄全部指向它 —— drain /
+ * `/graph` 快照 / auto-memory / overlay prefetch / 技能面随活跃引擎走。
+ *
+ * 单职责抽出自 `refreshChatDepsForRebind`（S5 门：该函数已 long，再加分支
+ * 即越线）；每项都是「重建产物 → ctx 槽位」的搬运，判据一致 —— 提供者
+ * 缺席时保持原值。
+ */
+function swapHostHandlesToRebuiltEngine(
+  ctx: ChatLineContext,
+  rebuilt: RebuiltChatEngine
+): void {
+  ctx.subagentManager = rebuilt.subagentManager;
+  ctx.graphAssembly = rebuilt.graphAssembly;
+  ctx.autoMemory = rebuilt.autoMemory;
+  ctx.overlayMemoryPrefetch = rebuilt.overlayMemoryPrefetch;
+  // spec skill-index-increment T3：slash 技能面随活跃引擎走 —— 换血后
+  // `/skill` 候选 / 正文读取用的是新根的技能集（旧缝不提供该字段时保持
+  // 原 catalog，见 RebuiltChatEngine.skillCatalog 注释）。
+  if (rebuilt.skillCatalog !== undefined) {
+    ctx.skillCatalog = rebuilt.skillCatalog;
+  }
+  // spec skill-index-increment SC8：rebind 后「当场热」的缝也必须指向**新台**
+  // —— catalog 换了新的、重扫却还留在旧根的 rescan 台上，「新根装的技能」
+  // 与「旧根的重扫结果」会在下一次 `/` 行上互相打架（catalog 热了但候选来自
+  // 旧根）。缺席（旧缝不提供该字段）→ 保持原 rescanner（与 catalog 同款
+  // 可见降级，不静默切成无重扫）。
+  if (rebuilt.skillRescanner !== undefined) {
+    ctx.skillRescanner = rebuilt.skillRescanner;
+  }
+}
+
 export async function refreshChatDepsForRebind(
   ctx: ChatLineContext
 ): Promise<void> {
@@ -505,12 +600,7 @@ export async function refreshChatDepsForRebind(
     : { ...base, conversationId };
   ctx.engineRoot = newRoot;
   ctx.engineShutdown && (ctx.engineShutdown.current = rebuilt.shutdown);
-  // split-brain 修复：host 句柄全部指向重建引擎 —— drain / /graph 快照 /
-  // auto-memory / overlay prefetch 随活跃引擎走。
-  ctx.subagentManager = rebuilt.subagentManager;
-  ctx.graphAssembly = rebuilt.graphAssembly;
-  ctx.autoMemory = rebuilt.autoMemory;
-  ctx.overlayMemoryPrefetch = rebuilt.overlayMemoryPrefetch;
+  swapHostHandlesToRebuiltEngine(ctx, rebuilt);
   try {
     ctx.onSubagentManagerRebound?.();
   } catch (err) {
@@ -1019,6 +1109,103 @@ async function maybeContinueFromPendingNl(opts: {
 }
 
 /**
+ * spec skill-index-increment SC8：slash 候选的**现行** catalog。
+ *
+ * 装配期 catalog 是冻结快照（`ctx.skillCatalog` 只在 rebind 换血），技能装
+ * 上去后要等下一次 rebind 才进候选 —— SC8 要求「安装 / reload 当下 `/` 已含
+ * 新条目」。重扫缝在场时现场重扫取现行 `loadable()`；缝缺席（ask / 旧测试）
+ * 或重扫失败 → 缓存快照（人侧 slash 不因一次 IO 故障变空，EXIT：可见降级）。
+ *
+ * 刷新点选在 **非静态 slash 行**（`trySkillLoadLine`），不是每次按键：CLI 的
+ * 候选是「输入 `/name` + Enter 后解析」形态（无逐键补全），逐键重扫只会引入
+ * 输入延迟而不改变任何可观察结果；「当场」= 下一行 slash 生效，正是 SC8 要的
+ * 「不必等下一 turn」。静态词表行（`/help` 等）在 `parseSkillLoad` 里就短路，
+ * 重扫对它们没有可观察作用，故调用方先判静态再进来 —— 不为一条 `/quit` 扫盘。
+ *
+ * 降级只报**非 ENOENT** 那类真故障（`SkillRescanError`）—— 技能根重扫时
+ * 正好缺席是合法空态（scanner 的既有纪律），不该刷屏。
+ */
+async function slashCandidateCatalog(
+  ctx: ChatLineContext,
+  cached: SkillCatalog
+): Promise<SkillCatalog> {
+  const rescanner = ctx.skillRescanner;
+  if (rescanner === undefined) return cached;
+  try {
+    return await rescanner.rescan();
+  } catch (err) {
+    if (!(err instanceof SkillRescanError)) throw err;
+    // EXIT: typed rescan 失败 → 退回缓存 catalog（不抛给 REPL：一次 IO
+    // 故障不该让已装技能变成 unknown command），但降级必须可见。
+    // 渲染归 `errorMessage`（code-quality.md typed-error catch 契约禁止
+    // `instanceof Error ? … : String(…)`）。
+    writeErr(
+      `[skill] slash 候选刷新失败，沿用装配期快照: ${errorMessage(err)}\n`
+    );
+    return cached;
+  }
+}
+
+/**
+ * spec skill-index-increment T3：slash 行上的技能名解析与信封装配（单一职责
+ * 抽出自 `processChatLine`，S5 门）。
+ *
+ * 静态词表优先由 `parseSkillLoad` 内部保证（命中 `CLI_STATIC_COMMANDS` →
+ * undefined，调用方落回 `processSlash`）。返回 `undefined` 表示「这行不是
+ * skill-load」——调用方继续走 slash 分派；返回结果对象表示本行已被消费。
+ *
+ * catalog 缺席（ask / 旧测试）→ 恒 `undefined`，行为与今日逐字节一致。
+ */
+async function trySkillLoadLine(
+  line: string,
+  ctx: ChatLineContext,
+  onStream: ProcessChatLineOpts["onStream"]
+): Promise<ProcessChatLineResult | undefined> {
+  const cached = ctx.skillCatalog;
+  if (cached === undefined) return undefined;
+  // SC8：静态词表行（/help /quit …）在 parseSkillLoad 里就短路，重扫对它们
+  // 没有任何可观察作用 —— 不为一条 /quit 扫一遍盘。
+  const prefix = slashPrefix(line);
+  if (prefix === "" || CLI_STATIC_COMMANDS.has(prefix)) return undefined;
+  // SC8：候选取自**现行** catalog（rescan 缝在场时现场重扫；缺席 / 失败 →
+  // 缓存快照）。解析与取正文用同一份 —— 否则会出现「候选命中但 get 落空」
+  // 的假 unknown。
+  const catalog = await slashCandidateCatalog(ctx, cached);
+  // 热 catalog 内存续（正文读 / 后续行）：换血只在成功那一支发生。
+  ctx.skillCatalog = catalog;
+  const skillLoad = parseSkillLoad(line, toCliSkillEntries(catalog));
+  if (skillLoad === undefined) return undefined;
+  const entry = catalog.get(skillLoad.name);
+  // catalog 里没有（parseSkillLoad 命中的是投影条目但 get 失败）—— 与 TUI
+  // 同档：明确提示，不静默落回未知命令。
+  if (entry === undefined) {
+    return { quit: false, output: `技能 ${skillLoad.name} 不可用（不存在）。` };
+  }
+  try {
+    // 信封与 TUI / Web 同源（buildSkillLoadText）；正文读失败向上抛到 REPL
+    // 的错误面，不伪装成成功。
+    const sendText = await buildCliSkillLoad({
+      name: skillLoad.name,
+      remainder: skillLoad.remainder,
+      entry,
+    });
+    // 复用查询行路径：turn 落盘 / 持久化 / 中断语义全部与普通提问一致
+    // （skill-load 就是一条机器装配的 user 消息）。line 换成信封 ——
+    // runChatQueryLine 内部再 parseChatLine 一次，信封不以 "/" 开头故走
+    // query 分支，正是我们要的语义。
+    return await runChatQueryLine({
+      line: sendText,
+      ctx,
+      ...(onStream !== undefined ? { onStream } : {}),
+    });
+  } catch (err) {
+    // 读盘 / 装配失败是真实故障（与 TUI / hub 同档：不伪装成成功）。
+    // 复用 formatChatError（IknowError → `错误 [code]: msg`）。
+    return { quit: false, output: formatChatError(err) };
+  }
+}
+
+/**
  * Pure-ish one-line handler for tests and both I/O paths.
  * Mutates ctx (state) as needed.
  */
@@ -1033,6 +1220,10 @@ export async function processChatLine(
   }
 
   if (parsedLine.kind === "slash") {
+    // spec skill-index-increment T3：技能名先于静态分派试解析（helper 内
+    // 保证静态词表优先）。undefined = 不是 skill-load，继续 slash 分派。
+    const skillLoadLine = await trySkillLoadLine(line, ctx, opts.onStream);
+    if (skillLoadLine !== undefined) return skillLoadLine;
     // 收敛修复（2026-08-29）：slash 行不跑引擎 → 跳过 rebind 检测，省掉
     // 每条 slash 行的 store.load IO。检测挪到引擎行路径（含 continue 行）。
     return processSlash({
@@ -2254,6 +2445,75 @@ export function createStreamPreviewSink(opts: {
 }
 
 /**
+ * `ChatLineContext` 的装配（单职责抽出自 `runChatSession`，S5 门：主函数
+ * 只保留会话生命周期编排，逐项搬运留在这里）。
+ *
+ * 条件展开（`...(x !== undefined ? {k: x} : {})`）是既有纪律：可选缝缺席时
+ * 键不出现，下游 `"k" in ctx` 判定与 byte-equal 断言才成立。
+ */
+function assembleChatSessionContext(input: {
+  readonly opts: ChatSessionOpts;
+  readonly state: CliChatState;
+  readonly abortController: AbortController;
+  readonly checkpointStore: SessionStore;
+  readonly wrappedDeps: LoopEngineDeps;
+  readonly wrapChatDeps: (base: LoopEngineDeps) => LoopEngineDeps;
+}): ChatLineContext {
+  const { opts, state, abortController, checkpointStore, wrappedDeps } = input;
+  return {
+    deps: wrappedDeps,
+    state,
+    showThinking: opts.showThinking,
+    permissionMode: opts.permissionMode,
+    graphMode: opts.graphMode,
+    fsMode: opts.fsMode,
+    graphAssembly: opts.graphAssembly,
+    ...(opts.liveGraphLedger ? { liveGraphLedger: opts.liveGraphLedger } : {}),
+    abortController,
+    checkpointStore,
+    ...(opts.workspaceRoot !== undefined
+      ? { workspaceRoot: opts.workspaceRoot }
+      : {}),
+    subagentManager: opts.subagentManager,
+    verifyConfig: opts.verifyConfig,
+    autoMemory: opts.autoMemory,
+    overlayMemoryPrefetch: opts.overlayMemoryPrefetch,
+    // T4 (write-situation-disclosure)：写处境判定用的隔离档，refresh
+    // 算 rebind 一次性写根段的处境枚举。缺席 → 默认 false（旧形态 =
+    // writable_main，与改造前 byte-equal）。
+    ...(opts.isolationOn !== undefined
+      ? { isolationOn: opts.isolationOn }
+      : {}),
+    // spec skill-index-increment T3：可加载技能面 —— 缺席（ask / 旧测试）
+    // → slash 技能名落未知命令，行为逐字节不变。可变：rebind 换血见
+    // refreshChatDepsForRebind。
+    ...(opts.skillCatalog !== undefined
+      ? { skillCatalog: opts.skillCatalog }
+      : {}),
+    // spec skill-index-increment SC8：可加载面「当场热」的缝 —— 缺席
+    // （ask / 旧测试）→ 候选恒为装配期快照，行为逐字节不变。
+    ...(opts.skillRescanner !== undefined
+      ? { skillRescanner: opts.skillRescanner }
+      : {}),
+    // Review High-1 (2026-08-29):rebind 检测缝 —— 会话文件 workspaceRoot 偏离
+    // engineRoot 时以新根重建 deps（包装语义与初始装配同源，见 wrapChatDeps）。
+    ...(opts.rebuildDeps
+      ? {
+          rebuildDeps: opts.rebuildDeps,
+          engineRoot: opts.engineRoot,
+          wrapRebuiltDeps: input.wrapChatDeps,
+          // 收敛修复（2026-08-29）：活跃引擎 shutdown 句柄盒 —— refresh 在
+          // 切换点收口旧引擎 + 把重建引擎 shutdown 写入 current（cli.ts 的
+          // registerShutdown 闭包读 current）。
+          ...(opts.engineShutdown
+            ? { engineShutdown: opts.engineShutdown }
+            : {}),
+        }
+      : {}),
+  };
+}
+
+/**
  * Run a product chat session (TTY REPL or non-interactive pipe).
  */
 export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
@@ -2344,47 +2604,14 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     commitMessages: base.commitMessages ?? commitHook,
   });
   const wrappedDeps: LoopEngineDeps = wrapChatDeps(opts.deps);
-
-  const ctx: ChatLineContext = {
-    deps: wrappedDeps,
+  const ctx = assembleChatSessionContext({
+    opts,
     state,
-    showThinking: opts.showThinking,
-    permissionMode: opts.permissionMode,
-    graphMode: opts.graphMode,
-    fsMode: opts.fsMode,
-    graphAssembly: opts.graphAssembly,
-    ...(opts.liveGraphLedger ? { liveGraphLedger: opts.liveGraphLedger } : {}),
     abortController,
     checkpointStore,
-    ...(opts.workspaceRoot !== undefined
-      ? { workspaceRoot: opts.workspaceRoot }
-      : {}),
-    subagentManager: opts.subagentManager,
-    verifyConfig: opts.verifyConfig,
-    autoMemory: opts.autoMemory,
-    overlayMemoryPrefetch: opts.overlayMemoryPrefetch,
-    // T4 (write-situation-disclosure)：写处境判定用的隔离档，refresh
-    // 算 rebind 一次性写根段的处境枚举。缺席 → 默认 false（旧形态 =
-    // writable_main，与改造前 byte-equal）。
-    ...(opts.isolationOn !== undefined
-      ? { isolationOn: opts.isolationOn }
-      : {}),
-    // Review High-1 (2026-08-29):rebind 检测缝 —— 会话文件 workspaceRoot 偏离
-    // engineRoot 时以新根重建 deps（包装语义与初始装配同源，见 wrapChatDeps）。
-    ...(opts.rebuildDeps
-      ? {
-          rebuildDeps: opts.rebuildDeps,
-          engineRoot: opts.engineRoot,
-          wrapRebuiltDeps: wrapChatDeps,
-          // 收敛修复（2026-08-29）：活跃引擎 shutdown 句柄盒 —— refresh 在
-          // 切换点收口旧引擎 + 把重建引擎 shutdown 写入 current（cli.ts 的
-          // registerShutdown 闭包读 current）。
-          ...(opts.engineShutdown
-            ? { engineShutdown: opts.engineShutdown }
-            : {}),
-        }
-      : {}),
-  };
+    wrappedDeps,
+    wrapChatDeps,
+  });
 
   const interactive = isInteractive();
 

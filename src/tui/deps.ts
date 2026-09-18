@@ -44,6 +44,7 @@ import type { LiveTaskRoot } from "../harness/session-roots.js";
 import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
 import { homedir } from "node:os";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
+import type { SkillRescanner } from "../harness/skill/rescan.js";
 import type { McpServerStatus } from "../harness/mcp/manager.js";
 import { loadMcpConfig } from "../harness/mcp/config.js";
 import type { AciToolDef } from "../harness/aci/types.js";
@@ -227,6 +228,14 @@ export interface BuildTuiDepsOptions {
  */
 export interface TuiExtensions {
   readonly skillCatalog: SkillCatalog;
+  /**
+   * T6 (`specs/skill-index-increment.md` SC8)：现行可加载面重扫缝。TUI 斜杠
+   * 候选面打开时经它换血（会话中途落盘的 SKILL.md 立刻进候选，不等下一
+   * turn）。与 `BuiltEngine.skillRescanner` / `deps.skillIndexDelta` 是**同一
+   * 台**持有者。缺席（ask 表面 / 未注入 todoDir / fixture）→ 候选恒为
+   * `skillCatalog` 装配期快照。
+   */
+  readonly skillRescanner?: SkillRescanner;
   /**
    * 活 taskRoot cell（specs/skill-load-write-root.md）：TUI chrome 渲染面
    * （worktreeIsolationLines / resolveWorktreeChromeRoot）消费。ADR-0079 后
@@ -446,6 +455,7 @@ export async function buildTuiDeps(
   // (surface="tui" 全装配;mcpManager 仅在 manager 缺席时缺省防御)。
   const mcpManager = built.mcpManager;
   const skillCatalog = built.skillCatalog;
+  const skillRescanner = built.skillRescanner;
   const catalog = built.catalog;
 
   // reload 实现：重读两级 config（可被用户改 ~/.iknow/mcp.json 或项目级
@@ -486,6 +496,12 @@ export async function buildTuiDeps(
   // 收窄类型;极端防御缺省(空 catalog / no-op shutdown)保证回调不抛。
   opts.onExtensions?.({
     skillCatalog: skillCatalog!,
+    // T6 (`specs/skill-index-increment.md` SC8)：rescan 缝透出给 TUI 斜杠
+    // 候选面 —— 与引擎 `deps.skillIndexDelta` 同一台持有者（plugin 根换血
+    // 只在这一台上做）。缺席（ask 表面 / 未注入 todoDir）→ TuiApp 退化为
+    // 缓存快照，行为与旧形态逐字节一致。走 `presentFields` 而非内联三元：
+    // 同文件既有的可选字段纪律（且 S5 ratchet 不认新增分支）。
+    ...presentFields("skillRescanner", skillRescanner),
     // specs/skill-load-write-root.md：活 taskRoot cell 透出，TUI chrome 渲染
     // 面消费。ADR-0079 后 slash 装配 skill 正文不再读此 cell（正文不再挂
     // 写根 trailer）。

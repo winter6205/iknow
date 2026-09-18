@@ -236,3 +236,101 @@ describe("SessionHub.loadSkillBody — 正文不挂写根（ADR-0079 / SC2）", 
     }
   });
 });
+
+// spec skill-index-increment SC5/SC6/SC9：人侧 slash 走**可加载技能面**。
+// listSkills 必须含无 description 与 disable-model-invocation 条目，且
+// description 缺席保持 undefined（不补 "" 伪装成空描述）；loadSkillBody
+// 只拒 `get` miss —— disable 只闸模型索引与 skill()，不闸读盘。
+// fixture 走真实 scanner（手搓 entry 会把 description/disabled 两个语义位
+// 绕过），与上一条 describe 同一注入通道。
+describe("SessionHub skills 面 — 可加载面含无描述/disable（SC5/SC6/SC9）", () => {
+  const plant = async (
+    base: string,
+    spec: { name: string; matter: string; text: string }
+  ): Promise<void> => {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const dir = join(base, spec.name);
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "SKILL.md"),
+      `---\n${spec.matter}\n---\n${spec.text}\n`,
+      "utf8"
+    );
+  };
+
+  it("listSkills 含无 description 条目（description 缺席非空串）与 disable 条目；loadSkillBody 对 disable 条目仍交付正文", async () => {
+    const skillRoot = join(baseDir, "skills-loadable");
+    await plant(skillRoot, {
+      name: "no-desc",
+      matter: "name: no-desc",
+      text: "# 无描述技能",
+    });
+    await plant(skillRoot, {
+      name: "manual-only",
+      matter:
+        "name: manual-only\ndescription: 仅人侧\ndisable-model-invocation: true",
+      text: "# 手动技能",
+    });
+    const prevSkillDirs = process.env.IKNOW_SKILL_DIRS;
+    process.env.IKNOW_SKILL_DIRS = skillRoot;
+    try {
+      const hub = new SessionHub({ store, askUser: createNoAskUser() });
+      const api = hub as unknown as {
+        ensureDeps: () => Promise<LoopEngineDeps>;
+        listSkills: () => Promise<
+          readonly { name: string; description?: string }[]
+        >;
+        loadSkillBody: (
+          name: string
+        ) => Promise<{ name: string; body: string }>;
+      };
+      await api.ensureDeps();
+
+      const skills = await api.listSkills();
+      const byName = new Map(skills.map((s) => [s.name, s]));
+      // SC9：两面之差在 DTO 上可见 —— 两条都在可加载面。
+      assert.ok(
+        byName.has("no-desc"),
+        "无 description 条目必须进可加载面（SC9）"
+      );
+      assert.ok(byName.has("manual-only"), "disable 条目必须进可加载面（SC6）");
+      // SC5：缺席保持缺席，不得强转 ""（"" 会被宿主渲染成「空描述」）。
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(
+          byName.get("no-desc"),
+          "description"
+        ),
+        false,
+        '无 description 条目不得携带 description 键（不补 ""）'
+      );
+      assert.equal(byName.get("manual-only")?.description, "仅人侧");
+      // 模型索引面必须**不**含这两条（与可加载面分叉是可加载面的存在理由）。
+      const catalog = (
+        hub as unknown as {
+          skillCatalog?: { modelIndex(): readonly { name: string }[] };
+        }
+      ).skillCatalog;
+      const indexed = (catalog?.modelIndex() ?? []).map((e) => e.name);
+      assert.ok(!indexed.includes("no-desc"), "无描述条目不得进模型索引");
+      assert.ok(!indexed.includes("manual-only"), "disable 条目不得进模型索引");
+
+      // SC6：disable 只闸模型索引与 skill()，人侧读盘不拦。
+      const { body } = await api.loadSkillBody("manual-only");
+      assert.ok(body.includes("# 手动技能"), "disable 技能正文必须可读");
+      // SC5：无描述条目同样可读。
+      const noDesc = await api.loadSkillBody("no-desc");
+      assert.ok(noDesc.body.includes("# 无描述技能"));
+      await assert.rejects(
+        () => api.loadSkillBody("no-such-skill"),
+        /skill not found/,
+        "get miss 仍必须拒绝"
+      );
+    } finally {
+      if (prevSkillDirs === undefined) {
+        delete process.env.IKNOW_SKILL_DIRS;
+      } else {
+        process.env.IKNOW_SKILL_DIRS = prevSkillDirs;
+      }
+    }
+  });
+});

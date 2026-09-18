@@ -860,6 +860,13 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           // onExtensions 在 buildTuiDeps 装配期同步注入（Phase B seam）；此处
           // 可选缺省 = 空清单（测试 / 装配异常路径安全降级）。
           skillCatalog={tuiExtensions?.skillCatalog}
+          // T6 / SC8：斜杠候选面「当场热」的 rescan 缝（与引擎 `deps.
+          // skillIndexDelta` 同一台）。mountApp 是唯一 root.render 点（启动
+          // 挂载一次），故本 props 是**装配期快照** —— 与同处的 skillCatalog
+          // 同形。SC8 的主场景（user / project 根中途落盘 SKILL.md）由
+          // projectIdentityRoot 跨 rebind 稳定覆盖；rebind 换引擎后的 plugin
+          // 根换血面是已知限制（handoff「SC8 剩余面」）。
+          skillRescanner={tuiExtensions?.skillRescanner}
           // specs/skill-load-write-root.md：slash 装配 skill 正文时读活
           // taskRoot 快照（TuiExtensions 透传；缺省 = undefined → 无 trailer）。
           liveTaskRoot={tuiExtensions?.liveTaskRoot}

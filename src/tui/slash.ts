@@ -49,6 +49,10 @@
 
 import { THINKING_EFFORT_VALUES } from "../session-api/contract.js";
 import type { ThinkingEffortWire } from "../session-api/contract.js";
+import {
+  slashHeadPrefix,
+  slashTailRemainder,
+} from "../harness/skill/catalog.js";
 
 export type TuiSlashCommand =
   | "sessions"
@@ -190,10 +194,10 @@ export interface SlashHintLine {
 }
 
 /** 首 token 的小写前缀（`/xxx...` → `xxx`；空 / 非 "/" 开头 → ""）。
- *  导出供 app.tsx onSelectHint 复用（reviewer Medium#3：内联 trim/slice/split 收敛）。 */
+ *  算法 SSOT 在 harness（`slashHeadPrefix`，plan T3 slash 投影收敛）；本名
+ *  是 TUI 宿主的既有出口（app.tsx onSelectHint / tests 消费）。 */
 export function slashPrefix(text: string): string {
-  if (!text.startsWith("/")) return "";
-  return (text.slice(1).split(/\s+/, 1)[0] ?? "").toLowerCase();
+  return slashHeadPrefix(text);
 }
 
 /**
@@ -440,12 +444,10 @@ export function parseEffortLevel(raw: string): ThinkingEffortWire | undefined {
 
 /**
  * 首 token 之后的剩余段（trim 后）。`/effort <level>` / `/continue` /
- * `/graph on` 共用同一个切法 —— 三处各写一遍 trim/split 必然漂移。
+ * `/graph on` 共用同一个切法。算法 SSOT 在 harness（`slashTailRemainder`）。
  */
 export function slashRemainder(raw: string): string {
-  const text = raw.trim();
-  const firstTok = text.split(/\s+/, 1)[0] ?? text;
-  return text.slice(firstTok.length).trim();
+  return slashTailRemainder(raw);
 }
 
 /**

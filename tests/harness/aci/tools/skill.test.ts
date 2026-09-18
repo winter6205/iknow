@@ -23,8 +23,16 @@ import {
   createSkillCatalog,
   type SkillEntry,
 } from "../../../../src/harness/skill/catalog.js";
-import { createSkillTool } from "../../../../src/harness/aci/tools/skill.js";
+import {
+  createSkillTool,
+  SkillBodyReadError,
+  SkillNotModelIndexedError,
+} from "../../../../src/harness/aci/tools/skill.js";
 import type { AciToolDef } from "../../../../src/harness/aci/types.js";
+import { createRegistry } from "../../../../src/harness/tools/registry.js";
+import { createExecutor } from "../../../../src/harness/tools/executor.js";
+import type { ToolExecutionContext } from "../../../../src/harness/tools/types.js";
+import type { AnthropicNativeMessage } from "../../../../src/harness/model-adapter/types.js";
 import {
   createLiveTaskRoot,
   writeLiveTaskRoot,
@@ -41,11 +49,16 @@ function entry(
 }
 
 /** 直呼 handler(同步,返回 string;async handler 内部 await 后 resolve)。 */
-async function invokeSkill(tool: AciToolDef, input: unknown): Promise<string> {
+async function invokeSkill(
+  tool: AciToolDef,
+  input: unknown,
+  ctx?: ToolExecutionContext
+): Promise<string> {
   const handler = tool.handler as (
-    input: unknown
+    input: unknown,
+    ctx?: ToolExecutionContext
   ) => Promise<unknown> | unknown;
-  return (await handler(input)) as string;
+  return (await handler(input, ctx)) as string;
 }
 
 describe("skill — 元数据 (G1 Q1 / T5 acceptance 3)", () => {
@@ -193,11 +206,12 @@ describe("skill — 叫错名返回引导回 <available_skills> / read_file 的�
     expect(out).toMatch(/available_skills|read_file/);
   });
 
-  it("disabled skill 直呼 → 同样按未注册处理(索引层过滤;get 不返回)", async () => {
-    // disabled 入口在 catalog.index 中仍在(可 get / getBodyPath 返回 entry),
-    // 但 available/search 排除。本测试聚焦 disabled 仍 get 到的情况 —— 当前
-    // contract 是直呼命中 entry 即返回正文,disabled 在 T6 <available_skills>
-    // / skill_search 排除;此处仅锁"已知名 = 返回正文"。
+  it("disabled skill 直呼 → 按模型索引资格拒（SC6），不灌正文", async () => {
+    // 旧锁（「disabled 仍灌正文」）按 spec skill-index-increment SC6 改写：
+    // `skill()` 只服务模型索引资格（CONTEXT：有 description 且未
+    // disable-model-invocation），disabled 名字只走人侧 slash —— 拒、且输出
+    // 不含正文任何片段。catalog.get 仍按名返回含 disabled 的条目（可加载
+    // 技能面），闸落在本工具 handler。
     const dir = join(scratch, "secret");
     await mkdir(dir, { recursive: true });
     await writeFile(
@@ -214,8 +228,306 @@ describe("skill — 叫错名返回引导回 <available_skills> / read_file 的�
       }),
     ]);
     const tool = createSkillTool({ catalog });
-    const out = await invokeSkill(tool, { name: "secret" });
-    expect(out).toContain("hidden body");
+    const thrown = await invokeSkill(tool, { name: "secret" }).catch((e) => e);
+    expect(thrown).toBeInstanceOf(SkillNotModelIndexedError);
+    expect((thrown as Error).message).toContain("disable-model-invocation");
+    expect((thrown as Error).message).not.toContain("hidden body");
+  });
+});
+
+// spec skill-index-increment.md SC5/SC6 + Input-contract 表 `skill()` 行：
+// 「非模型索引 → 拒、不灌正文」「读盘失败 typed，与『资格拒』分型」。
+//
+// 模型索引资格（docs/CONTEXT.md「技能模型索引」）= 有 description 且未
+// `disable-model-invocation`。本 describe 钉三件事：
+//   1. 两类不合格名（无 description / disabled）都拒，且输出不含正文任何片段；
+//   2. 资格拒与读盘失败是**不同型**的 typed error（调用方可分辨下一步）；
+//   3. 闸只罩 ACI `skill()` —— 文件工具读同一份 SKILL.md 不因本闸失败
+//      （SC5 末句：不禁止 `read_file`；read-file.ts 与本闸无代码耦合）。
+describe("skill — 模型索引资格闸（SC5/SC6：资格拒 vs 读盘失败分型）", () => {
+  let scratch: string;
+
+  beforeEach(async () => {
+    scratch = await mkdtemp(join(tmpdir(), "aci-skill-elig-"));
+  });
+
+  afterEach(async () => {
+    await rm(scratch, { recursive: true, force: true });
+  });
+
+  /** 写一份带唯一正文标记的 SKILL.md，返回其 dir。 */
+  async function writeSkill(
+    name: string,
+    frontmatter: string,
+    bodyMarker: string
+  ): Promise<string> {
+    const dir = join(scratch, name);
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "SKILL.md"),
+      `---\nname: ${name}\n${frontmatter}---\n${bodyMarker}\n`,
+      "utf8"
+    );
+    return dir;
+  }
+
+  it("①无 description → 拒（typed），输出不含正文任何片段、不含装配双标记", async () => {
+    // 无 description 只从模型索引面隐去（SC5）；人侧仍可 slash 信封加载。
+    // 直呼该名是「模型不知道怎么用它对」的调用，必须拒而不是灌正文。
+    const bodyMarker = "SECRET_BODY_MARKER_NO_DESCRIPTION";
+    const dir = await writeSkill("nodesc", "", bodyMarker);
+    const tool = createSkillTool({
+      catalog: createSkillCatalog([
+        entry({ name: "nodesc", dir, description: undefined }),
+      ]),
+    });
+
+    const thrown = await invokeSkill(tool, { name: "nodesc" }).catch((e) => e);
+
+    expect(thrown).toBeInstanceOf(SkillNotModelIndexedError);
+    const message = (thrown as Error).message;
+    expect(message).not.toContain(bodyMarker);
+    expect(message).not.toContain("Base directory:");
+    expect(message).not.toContain("</skill_files>");
+    // 出路必须写明：该名是人力 slash 专用，或作者补 description。
+    expect(message).toMatch(/description/);
+  });
+
+  it("②disabled（有 description）→ 拒（typed），输出不含正文任何片段", async () => {
+    const bodyMarker = "SECRET_BODY_MARKER_DISABLED";
+    const dir = await writeSkill(
+      "secret2",
+      "description: hidden\ndisable-model-invocation: true\n",
+      bodyMarker
+    );
+    const tool = createSkillTool({
+      catalog: createSkillCatalog([
+        entry({
+          name: "secret2",
+          dir,
+          description: "hidden",
+          disabled: true,
+        }),
+      ]),
+    });
+
+    const thrown = await invokeSkill(tool, { name: "secret2" }).catch((e) => e);
+
+    expect(thrown).toBeInstanceOf(SkillNotModelIndexedError);
+    const message = (thrown as Error).message;
+    expect(message).not.toContain(bodyMarker);
+    expect(message).not.toContain("Base directory:");
+    expect(message).not.toContain("</skill_files>");
+    // 出路必须写明：人力 slash 专用。
+    expect(message).toMatch(/slash|disable-model-invocation/);
+  });
+
+  it("③合格名（有 description 且未 disable）→ 仍返回正文，末段 </skill_files>", async () => {
+    const dir = await writeSkill(
+      "qualified",
+      "description: Echo a value\n",
+      "# qualified body\nstep"
+    );
+    const tool = createSkillTool({
+      catalog: createSkillCatalog([
+        entry({ name: "qualified", dir, description: "Echo a value" }),
+      ]),
+    });
+
+    const out = await invokeSkill(tool, { name: "qualified" });
+
+    expect(out).toContain("# qualified body");
+    expect(out).toContain("Base directory:");
+    expect(out.trimEnd().endsWith("</skill_files>")).toBe(true);
+  });
+
+  it("④未知名 → 既有 guidance 串逐字节不变（资格闸不吞未知名路径）", async () => {
+    const dir = await writeSkill(
+      "echo4",
+      "description: Echo a value\n",
+      "body"
+    );
+    const tool = createSkillTool({
+      catalog: createSkillCatalog([
+        entry({ name: "echo4", dir, description: "Echo a value" }),
+      ]),
+    });
+
+    const out = await invokeSkill(tool, { name: "not-installed" });
+
+    expect(out).toBe(
+      "skill 'not-installed' not found. Pick the name from the `<available_skills>` list in the system prompt, or — if the operator pointed at a file path outside the scan root — use `read_file`."
+    );
+  });
+
+  it("⑤空 name → 走既有未知名校验（不因资格闸改道）", async () => {
+    const dir = await writeSkill(
+      "nodesc5",
+      "",
+      "SECRET_BODY_MARKER_EMPTY_NAME"
+    );
+    const tool = createSkillTool({
+      catalog: createSkillCatalog([
+        entry({ name: "nodesc5", dir, description: undefined }),
+      ]),
+    });
+
+    for (const badInput of [{}, { name: "" }, { name: 42 }, null]) {
+      const out = await invokeSkill(tool, badInput);
+      expect(out).toMatch(/available_skills|read_file/);
+      expect(out).not.toContain("SECRET_BODY_MARKER_EMPTY_NAME");
+    }
+  });
+
+  it("⑥读盘失败（SKILL.md 不可读）→ 与资格拒不同型：SkillBodyReadError，cause 保留读盘故障", async () => {
+    // 合格名 + dir 在但 SKILL.md 缺席：资格闸放行、装配期读盘失败。
+    // 两类失败必须先分型：资格拒是「这条路对你不开放」，读盘失败是
+    // 「本该开放但现在读不到」—— 调用方下一步不同（换名 vs 重试 / 报障）。
+    const dir = join(scratch, "broken");
+    await mkdir(dir, { recursive: true });
+    const tool = createSkillTool({
+      catalog: createSkillCatalog([
+        entry({ name: "broken", dir, description: "Echo a value" }),
+      ]),
+    });
+
+    const thrown = await invokeSkill(tool, { name: "broken" }).catch((e) => e);
+
+    expect(thrown).toBeInstanceOf(SkillBodyReadError);
+    expect(thrown).not.toBeInstanceOf(SkillNotModelIndexedError);
+    expect((thrown as SkillBodyReadError).name).toBe("SkillBodyReadError");
+    expect((thrown as Error).message).toContain("broken");
+    // ENOENT 的原始故障保留在 cause 上，不吞。
+    expect((thrown as SkillBodyReadError).cause).toBeDefined();
+  });
+
+  it("⑦闸只罩 skill()：read_file 读同一份 disabled SKILL.md 不因本闸失败", async () => {
+    // SC5 末句 / spec Boundaries：「`skill()`：非模型索引资格 → 拒、不灌正文；
+    // 不禁止 `read_file`」。read-file.ts 与本闸无代码耦合 —— 本用例钉住
+    // 这一点，防止后人把资格闸上移成跨模块拦截。
+    const dir = await writeSkill(
+      "secret7",
+      "description: hidden\ndisable-model-invocation: true\n",
+      "# readable by file tools\n"
+    );
+    const tool = createSkillTool({
+      catalog: createSkillCatalog([
+        entry({ name: "secret7", dir, description: "hidden", disabled: true }),
+      ]),
+    });
+    await expect(invokeSkill(tool, { name: "secret7" })).rejects.toBeInstanceOf(
+      SkillNotModelIndexedError
+    );
+
+    const { createReadFileTool } =
+      await import("../../../../src/harness/aci/tools/read-file.js");
+    const readTool = createReadFileTool(dir);
+    const out = (await readTool.handler({
+      path: join(dir, "SKILL.md"),
+    })) as string;
+    expect(out).toContain("readable by file tools");
+  });
+
+  it("⑧资格闸先于二次短路：全文在史也不放行不合格名（拒不是回执）", async () => {
+    // 顺序钉死：资格检查先于短路 / wave 预记 / 装配 —— 不合格名不该进任何
+    // 路径，否则历史里恰好存在的同名旧全文会把它「洗白」成已加载。本用例
+    // 用「可见历史已有该名成功全文」的构造认证：闸若在短路之后，这里会
+    // 拿到短回执而不是拒。
+    const bodyMarker = "SECRET_BODY_MARKER_SHORTCIRCUIT";
+    const dir = await writeSkill(
+      "secret8",
+      "description: hidden\ndisable-model-invocation: true\n",
+      bodyMarker
+    );
+    const tool = createSkillTool({
+      catalog: createSkillCatalog([
+        entry({ name: "secret8", dir, description: "hidden", disabled: true }),
+      ]),
+    });
+    const fullBody = [
+      "# secret8",
+      "",
+      "Base directory: /tmp/somewhere/secret8",
+      "",
+      "<skill_files>",
+      "</skill_files>",
+    ].join("\n");
+    const messages: ReadonlyArray<AnthropicNativeMessage> = [
+      { role: "user", content: [{ type: "text", text: "go" }] },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "t1",
+            name: "skill",
+            input: { name: "secret8" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "t1",
+            content: [{ type: "text", text: fullBody }],
+          },
+        ],
+      },
+    ];
+    const ctx: ToolExecutionContext = { turnId: "turn-1", messages };
+
+    const thrown = await invokeSkill(tool, { name: "secret8" }, ctx).catch(
+      (e) => e
+    );
+
+    expect(thrown).toBeInstanceOf(SkillNotModelIndexedError);
+    expect((thrown as Error).message).not.toContain("already in context");
+    expect((thrown as Error).message).not.toContain(bodyMarker);
+  });
+});
+
+describe("skill — 资格拒经真实 executor 到模型面（execution_failed + is_error）", () => {
+  let scratch: string;
+
+  beforeEach(async () => {
+    scratch = await mkdtemp(join(tmpdir(), "aci-skill-elig-exec-"));
+  });
+
+  afterEach(async () => {
+    await rm(scratch, { recursive: true, force: true });
+  });
+
+  it("不合格名：execution_failed，message 是资格拒文案（不被 executor 净化成通用串）", async () => {
+    // 文案必须到达模型：executor 的 sanitizeFailure 只放行
+    // ToolExecutionError（含子类）的 message，其余塌成 "tool execution
+    // failed"。本用例钉住「拒绝原因可见」这一环（与 memory_save 的
+    // 端到端同法）。
+    const dir = join(scratch, "secret");
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "SKILL.md"),
+      "---\nname: secret\ndescription: hidden\ndisable-model-invocation: true\n---\nSECRET_BODY\n",
+      "utf8"
+    );
+    const tool = createSkillTool({
+      catalog: createSkillCatalog([
+        entry({ name: "secret", dir, description: "hidden", disabled: true }),
+      ]),
+    });
+    const executor = createExecutor(createRegistry([tool]));
+
+    const results = await executor.executeAll([
+      { id: "s1", name: "skill", input: { name: "secret" } },
+    ]);
+
+    const result = results[0];
+    expect(result?.kind).toBe("execution_failed");
+    if (result?.kind !== "execution_failed") throw new Error("unreachable");
+    expect(result.message).not.toBe("tool execution failed");
+    expect(result.message).not.toContain("SECRET_BODY");
+    expect(result.message).toMatch(/slash|disable-model-invocation/);
   });
 });
 

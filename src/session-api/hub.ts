@@ -121,7 +121,15 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { AciCatalog } from "../harness/aci/types.js";
-import type { SkillCatalog } from "../harness/skill/catalog.js";
+import {
+  loadableOf as loadableOfShared,
+  type SkillCatalog,
+  type SkillEntry,
+} from "../harness/skill/catalog.js";
+import {
+  SkillRescanError,
+  type SkillRescanner,
+} from "../harness/skill/rescan.js";
 import { createSkillBody, exceedsUserInputCap } from "../harness/skill/body.js";
 import type { McpManager } from "../harness/mcp/manager.js";
 import { loadMcpConfig } from "../harness/mcp/config.js";
@@ -760,6 +768,13 @@ export type SessionHubOptions = {
       mcpManager?: McpManager;
       /** T7：与 mcpManager 同源的 ACI catalog（listMcpTools 可见面）。 */
       catalog?: AciCatalog;
+      /**
+       * SC8（slash 侧当场热）：装配期 skill catalog + rescan 缝。生产
+       * `buildHarnessEngine` 的 `BuiltEngine` 两者都在场；测试缝可省略
+       * （缺席 → listSkills 退缓存 catalog / 空清单，旧行为逐字节不变）。
+       */
+      skillCatalog?: SkillCatalog;
+      skillRescanner?: SkillRescanner;
     }
   >;
   /**
@@ -800,6 +815,9 @@ type HubEngineEntry = EngineBundle & {
   mcpRoots?: McpRoots;
   mcpManager?: McpManager;
   catalog?: AciCatalog;
+  /** SC8（slash 侧当场热）：装配期 skill catalog + rescan 缝（见 buildEngine）。 */
+  skillCatalog?: SkillCatalog;
+  skillRescanner?: SkillRescanner;
 };
 
 // -- stop-reason persistence decision (decideCheckpointPersist) --------------
@@ -819,6 +837,53 @@ type HubEngineEntry = EngineBundle & {
 //     persists the full result as-is.
 
 // -- SessionHub ----------------------------------------------------------------
+
+/**
+ * 可加载技能面（含无 description、含 disable）—— 算法 SSOT 收敛在 harness
+ * `loadableOf`（plan T3「harness 可复用的 slash 投影」）；本包装只补 hub 的
+ * `catalog === undefined` 态（测试注入 deps 路径）。**不再**用
+ * `available()`（模型索引的 deprecated 别名）。
+ */
+function loadableOf(
+  catalog: SkillCatalog | undefined
+): ReadonlyArray<SkillEntry> | undefined {
+  if (catalog === undefined) return undefined;
+  return loadableOfShared(catalog);
+}
+
+/**
+ * 可加载面条目 → `SkillSummaryDto`（SC5/SC8/SC9 同一投影）：无描述条目保留
+ * undefined（不补 ""）—— DTO 允许缺席，宿主据此渲染「无描述」而非空描述。
+ * `listSkills` 的两条出口（现行 rescan 面 / 缓存面）共用，避免两条路径各写
+ * 一遍投影后漂移。
+ */
+function toSkillSummaries(
+  entries: ReadonlyArray<SkillEntry>
+): readonly SkillSummaryDto[] {
+  return entries.map((entry) => ({
+    name: entry.name,
+    ...(entry.description !== undefined
+      ? { description: entry.description }
+      : {}),
+  }));
+}
+
+/**
+ * SC8（slash 侧）：装配结果的 skill 面（catalog + rescan 缝）→
+ * `HubEngineEntry` 的可选字段投影；缺席不落键（测试注入的 buildEngine 缝
+ * 通常只回 deps，旧行为逐字节不变）。两条装配路径（per-root / 兜底 lazy）
+ * 同源发布 —— 此前 per-root 路径整体丢掉 skill 面，serve 绑根后
+ * `listSkills` 恒空且无 rescan 缝，SC8 在人侧不可达。
+ */
+function skillFaceOf(built: {
+  readonly skillCatalog?: SkillCatalog;
+  readonly skillRescanner?: SkillRescanner;
+}): Pick<HubEngineEntry, "skillCatalog" | "skillRescanner"> {
+  return {
+    ...(built.skillCatalog ? { skillCatalog: built.skillCatalog } : {}),
+    ...(built.skillRescanner ? { skillRescanner: built.skillRescanner } : {}),
+  };
+}
 
 export class SessionHub {
   private readonly store: SessionStore;
@@ -872,6 +937,17 @@ export class SessionHub {
   private cachedShutdown: (() => Promise<void>) | undefined;
   /** TUI TuiExtensions 同源：lazy ensureDeps 后才有；deps 注入测试路径保持缺席。 */
   private skillCatalog: SkillCatalog | undefined;
+  /**
+   * SC8（slash 侧「当场热」）：装配期 rescan 缝 —— 与引擎
+   * `deps.skillIndexDelta` **同一个**持有者（build-engine 透出的
+   * `BuiltEngine.skillRescanner`）。`listSkills` 用它重扫现行技能根，
+   * 会话中途落盘的 SKILL.md 不必等下一 turn 就进可加载面。
+   *
+   * 两处一起写（与 `skillCatalog` 同源）：per-root 引擎路径
+   * （`getOrBuildEngine`）与兜底 lazy 路径（`ensureDeps`）；ask / 测试注入
+   * deps 路径缺席 → `listSkills` 退缓存 catalog（旧行为逐字节不变）。
+   */
+  private skillRescanner: SkillRescanner | undefined;
   private mcpManager: McpManager | undefined;
   private aciCatalog: AciCatalog | undefined;
   private mcpHome: string | undefined;
@@ -928,6 +1004,9 @@ export class SessionHub {
           mcpRoots?: McpRoots;
           mcpManager?: McpManager;
           catalog?: AciCatalog;
+          /** SC8：装配期 skill 面（catalog + rescan 缝）透出。 */
+          skillCatalog?: SkillCatalog;
+          skillRescanner?: SkillRescanner;
         }
       >)
     | undefined;
@@ -2532,21 +2611,66 @@ export class SessionHub {
     });
   }
 
-  /** GET /api/v1/skills — catalog 缺席（测试注入 deps）→ 空清单。 */
+  /**
+   * GET /api/v1/skills — 可加载技能面（spec skill-index-increment SC5/SC8/
+   * SC9）：含无 description 与 `disable-model-invocation` 条目，人侧 `/`
+   * 必须都能进候选。catalog 缺席（测试注入 deps）→ 空清单。
+   *
+   * SC8（「安装 / reload 当下 slash 候选已含可加载新条目，不必等下一
+   * turn」）：装配期缓存的 catalog 是**当时快照**，调用期先用 rescan 缝重扫
+   * 现行技能根，取这一拍的 `loadable()`。rescan 失败（typed
+   * `SkillRescanError`）→ 退回缓存 catalog 的可加载面 —— 人侧 slash 是宽松
+   * 面，一次 IO 故障不该让候选变空（与模型侧 `computeSkillIndexDelta` 必须
+   * 上抛的取舍刻意相反，见 rescan.ts 文件头）。缝缺席（测试注入 deps /
+   * ask）→ 用缓存 catalog，旧行为逐字节不变。
+   */
   async listSkills(): Promise<readonly SkillSummaryDto[]> {
     await this.ensureDeps();
-    return (
-      this.skillCatalog?.available().map((entry) => ({
-        name: entry.name,
-        description: entry.description ?? "",
-      })) ?? []
-    );
+    const catalog = await this.currentSkillCatalog();
+    return toSkillSummaries(loadableOf(catalog) ?? []);
   }
 
+  /**
+   * SC8：**现行**可加载技能面（读取调用期的那一拍）。rescan 缝在场 →
+   * 重扫现行技能根（装配期缓存的 catalog 是当时快照，会话中途落盘的
+   * SKILL.md / 插件根换血都不在里面）；失败 → 退回缓存 catalog —— 人侧是
+   * 宽松面：一次 IO 故障不清空候选，也不让候选里看得见的名字点下去 404
+   * （与模型侧 `computeSkillIndexDelta` 必须上抛的取舍刻意相反，见
+   * rescan.ts 文件头「读的人是谁」）。缝缺席（测试注入 deps / ask）→ 缓存
+   * catalog，旧行为逐字节不变。
+   */
+  private async currentSkillCatalog(): Promise<SkillCatalog | undefined> {
+    if (this.skillRescanner !== undefined) {
+      try {
+        // 现行面（含插件根换血后 / 会话中途新落的 SKILL.md）。
+        return await this.skillRescanner.rescan();
+      } catch (err) {
+        // EXIT: 只吞 typed rescan 失败 —— 编程错误（非 SkillRescanError）
+        // 继续上抛，不静默降级成过期目录。判别走 `instanceof`
+        // （SkillRescanError 是类，`kind` 同时在场供跨进程面使用）。
+        if (!(err instanceof SkillRescanError)) throw err;
+        // 渲染归 `errorMessage`（code-quality typed-error catch 契约禁止
+        // `instanceof Error ? … : String(…)`）。
+        const reason = errorMessage(err);
+        console.warn(
+          `[serve] skill rescan failed, falling back to cached catalog: ${reason}`
+        );
+      }
+    }
+    return this.skillCatalog;
+  }
+
+  /**
+   * 读取技能正文。SC6：`disable-model-invocation` 只闸模型索引与 `skill()`，
+   * **不**闸人侧 slash 读盘 —— 只有 `get` miss 才算未找到。
+   */
   async loadSkillBody(name: string): Promise<{ name: string; body: string }> {
     await this.ensureDeps();
-    const entry = this.skillCatalog?.get(name);
-    if (entry === undefined || entry.disabled) {
+    // SC8：候选面「当场热」的另一半 —— 新进候选的名字必须点得动。取同一
+    // 个现行面（rescan 失败退缓存），否则 listSkills 刚给出的条目会在
+    // loadSkillBody 上 404（候选可见 / 正文不可达的分裂）。
+    const entry = (await this.currentSkillCatalog())?.get(name);
+    if (entry === undefined) {
       throw new NotFoundError(`skill not found: ${name}`);
     }
     // ADR-0079 — skill 正文不再挂写根 trailer（与 #337 SC6 逐字节一致）。
@@ -3054,6 +3178,27 @@ export class SessionHub {
   }
 
   /**
+   * SC8（slash 侧）：切换对外可见的 skill 面。与 `activateMcpFace` 同形
+   * （per-root 引擎切换时活跃面跟着走），但**不**收口任何东西 —— catalog /
+   * rescanner 无资源句柄，纯引用替换。旧引擎的 rescan 缝被换下后不再对外
+   * 可见（它仍可被其它持有者引用，但不经本 hub）。
+   *
+   * 缺席字段不覆盖（沿用旧面）：测试注入的 `buildEngine` 缝通常只回 deps，
+   * 旧行为逐字节不变。
+   */
+  private activateSkillFace(entry: {
+    readonly skillCatalog?: SkillCatalog;
+    readonly skillRescanner?: SkillRescanner;
+  }): void {
+    if (entry.skillCatalog !== undefined) {
+      this.skillCatalog = entry.skillCatalog;
+    }
+    if (entry.skillRescanner !== undefined) {
+      this.skillRescanner = entry.skillRescanner;
+    }
+  }
+
+  /**
    * T7：切换对外可见的 MCP face。旧 manager 先 shutdown（或保持为唯一失败面），
    * 再公开新 manager / roots / catalog——禁止旧+新同时成功。
    */
@@ -3091,6 +3236,7 @@ export class SessionHub {
     const hit = this.engineByRoot.get(root);
     if (hit) {
       this.activeEngineRoot = root;
+      this.activateSkillFace(hit);
       await this.activateMcpFace(hit);
       this.activateSubagentManager(hit.subagentManager);
       return hit;
@@ -3110,9 +3256,14 @@ export class SessionHub {
       ...("catalog" in built && built.catalog
         ? { catalog: built.catalog }
         : {}),
+      // SC8（slash 侧）：per-root 引擎路径此前丢掉 skill 面（catalog 只在
+      // 兜底路径发布）→ serve 绑根后 `listSkills` 恒空且无 rescan 缝。
+      // `EngineBundle` 之外的可选面，经 structural assignability 透传。
+      ...skillFaceOf(built),
     };
     this.engineByRoot.set(root, entry);
     this.activeEngineRoot = root;
+    this.activateSkillFace(entry);
     await this.activateMcpFace(entry);
     this.activateSubagentManager(entry.subagentManager);
     this.autoMemory = this.autoMemory ?? built.autoMemory;
@@ -3140,6 +3291,8 @@ export class SessionHub {
       mcpRoots?: McpRoots;
       mcpManager?: McpManager;
       catalog?: AciCatalog;
+      skillCatalog?: SkillCatalog;
+      skillRescanner?: SkillRescanner;
     }
   > {
     if (!this.askUser) {
@@ -3395,7 +3548,9 @@ export class SessionHub {
     this.cachedDeps = built.deps;
     // D-α T3:单引擎（未 bind 根）路径的活跃快照。
     this.activeGraphAssembly = built.graphAssembly;
-    this.skillCatalog = built.skillCatalog;
+    // SC8：catalog 与 rescan 缝同源发布（不可只是 catalog —— 缝缺席则
+    // `listSkills` 永远读装配期快照，slash 面不会「当场热」）。
+    this.activateSkillFace(built);
     this.mcpHome = homedir();
     await this.activateMcpFace({
       ...(built.mcpManager ? { mcpManager: built.mcpManager } : {}),

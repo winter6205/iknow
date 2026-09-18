@@ -91,10 +91,13 @@ import {
 import {
   parseWorkerEnvelope,
   truncateEnvelopeResult,
+  type SkillIndexSnapshotEntry,
   type SubAgentEnvelope,
   type WorkerEnvelope,
 } from "./envelope.js";
 import { toolConstraintsSegment } from "../identity/assemble.js";
+import type { SkillSummary } from "../identity/assemble.js";
+import type { SkillCatalogFaces } from "../skill/catalog.js";
 import { writeRootSegment } from "../skill/body.js";
 
 /** stderr 日志前缀 (spec Code Style: warn 一行不泄露 env 值)。 */
@@ -312,6 +315,63 @@ export interface CreateWorkerDepsOptions {
     readonly projectDir: string;
     readonly conversationId: string;
   };
+  /**
+   * T7 (`specs/skill-index-increment.md` / SC10 + assumption 7):父会话 spawn
+   * **当时**的完整模型索引快照(由 envelope.skillIndexSnapshot 透传)。
+   *
+   * 在场(含空数组) → worker 的 `<available_skills>` 冻表以它为**唯一来源**
+   * —— 父已追加进场的名不在 worker 的扫描里,靠 rescan 拿不到;且父与 worker
+   * 的技能根可以不同(插件根随 reload / 工作目录差异),按名回查会丢条目,
+   * 故按名 + description 直出(渲染仍走 `skillsSegment`,SSOT 不变)。
+   * 缺席(旧 wire / 跨版本 resume / 直连装配) → 退回 worker 自己的独立 rescan
+   * (`createSkillScanner`,与今日逐字节一致)。
+   */
+  readonly skillIndexSnapshot?: readonly SkillIndexSnapshotEntry[];
+}
+
+/**
+ * T7:worker 索引面的**唯一裁决点** —— 父快照在场就用父快照,否则用 worker
+ * 自己的 catalog(退回既有行为,逐字节不变)。
+ *
+ * 两条路径都产 `SkillSummary[]`,渲染仍归 `skillsSegment`(identity 层
+ * SSOT)—— worker 不留第二套渲染,也不预渲染段文本(段的位置 / 排序 /
+ * 空清单句全由那一个函数决定)。
+ *
+ * 冻表纪律:快照路径在**装配期**投影一次并冻结(快照是值,worker 进程内不
+ * 再变;与 git 快照缝同款 —— 相邻两次求值 byte-stable 是 KV 缓存契约的
+ * 前提)。catalog 路径保持既有形态(每次现读 —— 集合本身装配期已定)。
+ *
+ * 快照条目带的是**父的** name + description:父与 worker 的技能根可以不同
+ * (插件根随 reload / 工作目录差异),按名在 worker catalog 里回查会丢条目
+ * —— spec 的判据是「完整」,故直出(该名在 worker 里可能无正文可加载,
+ * 见 CreateWorkerDepsOptions.skillIndexSnapshot 注释)。
+ */
+function systemSkillsGetter(opts: {
+  readonly snapshot: readonly SkillIndexSnapshotEntry[] | undefined;
+  readonly catalog: SkillCatalogFaces;
+}): () => ReadonlyArray<SkillSummary> {
+  if (opts.snapshot === undefined) {
+    return () =>
+      opts.catalog.available().map((entry) => ({
+        name: entry.name,
+        description: entry.description ?? "",
+        ...(entry.disabled ? { disabled: true } : {}),
+      }));
+  }
+  // 投影只搬 name / description —— 不带 `disabled`:模型索引面本就不含
+  // disabled 条目,快照里不存在「disabled 为真」的合法输入(envelope schema
+  // 也不收该键)。
+  const frozen: ReadonlyArray<SkillSummary> = Object.freeze(
+    opts.snapshot.map((entry) =>
+      Object.freeze({
+        name: entry.name,
+        ...(entry.description !== undefined
+          ? { description: entry.description }
+          : {}),
+      })
+    )
+  );
+  return () => frozen;
 }
 
 /**
@@ -677,12 +737,12 @@ export async function createWorkerRuntime(
         surface: "ask",
         memoryEnabled: false,
         staticInstructions: opts.role !== "explore",
-        skills: () =>
-          skillCatalog.available().map((entry) => ({
-            name: entry.name,
-            description: entry.description ?? "",
-            ...(entry.disabled ? { disabled: true } : {}),
-          })),
+        // T7 (spec SC10):索引面 = 父会话当时快照(在场时)或 worker 自己的
+        // catalog rescan(缺席时,既有行为逐字节不变)。裁决点见 systemSkillsGetter。
+        skills: systemSkillsGetter({
+          snapshot: opts.skillIndexSnapshot,
+          catalog: skillCatalog,
+        }),
         git: createGitSnapshotProvider({ cwd: projectIdentityRoot }),
       }));
 
@@ -1241,6 +1301,13 @@ export async function runSubagentWorker(): Promise<void> {
     // worker 工具面维持旧形态。
     ...(workerEnvelope.todoLedger !== undefined
       ? { todoLedger: workerEnvelope.todoLedger }
+      : {}),
+    // T7 (spec SC10):父会话当时完整模型索引快照 —— 在场(含空数组) → worker
+    // 的 `<available_skills>` 冻表以它为唯一来源;缺席(旧 wire / 跨版本
+    // resume)→ 退回 worker 自己的独立 rescan(byte-stable)。空数组刻意不做
+    // 缺席折叠:它是「父确实没有模型索引」的确定事实,见 envelope 字段注释。
+    ...(workerEnvelope.skillIndexSnapshot !== undefined
+      ? { skillIndexSnapshot: workerEnvelope.skillIndexSnapshot }
       : {}),
   });
   // D-α 观测地板: fileRefs 的派生源 = 本 worker 实际装配出的 ACI catalog

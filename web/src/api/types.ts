@@ -153,9 +153,14 @@ export type RewindTargetsResponse = {
   readonly targets: ReadonlyArray<RewindTargetDto>;
 };
 
+/**
+ * 可加载技能面条目（对齐服务端 `SkillSummaryDto`）。`description` 允许
+ * 缺席：人侧技能可以没有 description（spec skill-index-increment SC5/SC9），
+ * 缺席 ≠ 空串 —— 渲染走「无描述」形态而不是空串。
+ */
 export type SkillSummary = {
   readonly name: string;
-  readonly description: string;
+  readonly description?: string;
 };
 
 export type SkillsResponse = {

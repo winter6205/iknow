@@ -19,7 +19,11 @@ import {
   FINAL_TEXT_PAD_NAME,
   SUMMARY_LIMIT,
 } from "./envelope.js";
-import type { SubAgentEnvelope, WorkerEnvelope } from "./envelope.js";
+import type {
+  SkillIndexSnapshotEntry,
+  SubAgentEnvelope,
+  WorkerEnvelope,
+} from "./envelope.js";
 import type { SubAgentDefinition } from "./role.js";
 import { createSubAgentMailbox } from "./mailbox.js";
 import type { SubAgentTerminalSubscriber } from "./mailbox.js";
@@ -554,6 +558,32 @@ function todoLedgerAnchor(
   return { todoLedger: { projectDir: todoDir, conversationId } };
 }
 
+/**
+ * T7 (spec SC10):父会话模型索引快照 → envelope 字段（三态折叠）。
+ *
+ *   - getter 缺席 / 返回 undefined → `{}`（键省略 = worker 走自有退路）;
+ *   - 返回 `[]` → 键在场 + 空数组（「父无模型索引」是确定事实，不是缺席）;
+ *   - 返回条目 → 逐条浅拷贝（交付点拷贝：父侧数组后续 push / 改写不回流
+ *     已落线的信封，worker 侧拿到的也是当时那一段）。
+ *
+ * getter 抛错原样上抛（不吞成空快照）—— 装配期故障显形优于静默错冻表。
+ */
+function skillIndexSnapshotField(
+  read:
+    | ((
+        conversationId: string | undefined
+      ) => readonly SkillIndexSnapshotEntry[] | undefined)
+    | undefined,
+  conversationId: string | undefined
+): { readonly skillIndexSnapshot?: readonly SkillIndexSnapshotEntry[] } {
+  if (read === undefined) return {};
+  const entries = read(conversationId);
+  if (entries === undefined) return {};
+  return {
+    skillIndexSnapshot: entries.map((entry) => ({ ...entry })),
+  };
+}
+
 export function createSubAgentManager(opts: {
   readonly spawn: SubAgentSpawn;
   /**
@@ -658,6 +688,33 @@ export function createSubAgentManager(opts: {
    * (todo-write.ts SSOT)同一对 (projectDir, conversationId)。
    */
   readonly todoDir?: string;
+  /**
+   * T7 (`specs/skill-index-increment.md` / SC10)—— 父会话**当时**的完整模型
+   * 索引条目 getter（= 父冻表模型索引 ∪ 父索引进场史，见 ADR-0098）。
+   *
+   * **每次 spawn 现读**（与 `sandboxRootCell` 同形态，构造期取值不叫「当时」）：
+   * 父会话中途有新技能名进场后，下一次 spawn 的 worker 快照才含它们。
+   * 返回值落进 `WorkerEnvelope.skillIndexSnapshot`，worker 侧据它渲染自己的
+   * `<available_skills>` 冻表，不再自做 diff / 不再依赖 worker 自己的扫描根。
+   *
+   * **入参是该 spawn 的父会话锚**（`def.conversationId`）：进场史是 per-session
+   * 叶子（`<projectDir>/<sanitize(convId)>/skill-index.json`），而一台
+   * subagent manager 随 build-engine 跨会话共享（serve 尤其）—— 把
+   * conversationId 钉进装配期会让所有会话拿到同一份史。冻表名那一半与会话
+   * 无关，由 getter 的实现方在缝里以 `initialNames` 承载。
+   *
+   * 三态语义（父侧的「不知道」与「确实是空」不同义）：
+   *   - getter 缺席 / 返回 `undefined` → envelope **省略该键**，worker 退回
+   *     自己的独立 rescan（旧 wire / manager 直造路径逐字节不变）;
+   *   - 返回 `[]` → 键在场且为空数组，worker 渲染空清单句（父确实没有模型
+   *     索引，不拿 worker 自扫结果顶替）。
+   *
+   * getter 抛错 → 原样上抛（不吞成空快照）：装配期故障显形，好过静默给
+   * worker 一张错的冻表。
+   */
+  readonly skillIndexSnapshot?: (
+    conversationId: string | undefined
+  ) => readonly SkillIndexSnapshotEntry[] | undefined;
   /**
    * T5:可选 override — 用外部注入的 TraceService 工厂(每个 taskId 一份)
    * 取代默认 `createJsonlTraceService` 文件实例。仅供测试/特殊注入;
@@ -1567,6 +1624,10 @@ export function createSubAgentManager(opts: {
           }
         : {}),
       ...todoLedgerAnchor(opts.todoDir, def.conversationId),
+      // T7 (spec SC10):父会话「当时」的完整模型索引快照 —— 每次 spawn 现读
+      // getter（`sandboxRootCell` 同形态），值落线后才增长父侧不会回流。
+      // 三态折叠进 helper（getter 缺席 / undefined → 键省略;`[]` → 键在场）。
+      ...skillIndexSnapshotField(opts.skillIndexSnapshot, def.conversationId),
     };
   }
 

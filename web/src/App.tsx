@@ -26,7 +26,6 @@
  * 分支的路由）。T4-T6 行为契约不变。
  */
 import { useCallback, useEffect, useState } from "react";
-import * as api from "./api/client";
 import { AppShell } from "./components/AppShell";
 import { ChatFooter } from "./components/ChatFooter";
 import { ChatHeader } from "./components/ChatHeader";
@@ -41,12 +40,13 @@ import { usePermissionMode } from "./hooks/usePermissionMode";
 import { usePermissionModeToggle } from "./hooks/use-permission-mode-toggle";
 import { useRewindConfirm } from "./hooks/use-rewind-confirm";
 import { useSessionChat } from "./hooks/useSessionChat";
+import { useSkills } from "./hooks/use-skills";
 import { useSlashCommands } from "./hooks/use-slash-commands";
 import { useSubagentsPolling } from "./hooks/useSubagentsPolling";
 import { useWorkspace } from "./hooks/useWorkspace";
 import { useWorkspaceActions } from "./hooks/use-workspace-actions";
 import { useWorkspacePopover } from "./hooks/use-workspace-popover";
-import type { McpServerStatus, McpTool, SkillSummary } from "./api/types";
+import type { McpServerStatus, McpTool } from "./api/types";
 import type { WebRewindTarget } from "./lib/rewind-targets";
 import { permissionModeLabel } from "./lib/permission-mode";
 import {
@@ -71,6 +71,9 @@ function ChatApp() {
     handleCreateInWorkspace,
     handleSelect,
   } = useWorkspaceActions(chat, ws);
+  // SC8：可加载技能面「当场热」—— 挂载拉一次 + 窗口重新获得焦点时重取
+  // （切走期间装的技能回来即进 `/` 候选）。见 hooks/use-skills.ts 的取舍说明。
+  const skills = useSkills();
   const [collapsed, setCollapsed] = useState(
     () => window.matchMedia(NARROW_QUERY).matches
   );
@@ -81,7 +84,6 @@ function ChatApp() {
     setThinkingSettings(next);
     saveThinkingSettings(next);
   }, []);
-  const [skills, setSkills] = useState<readonly SkillSummary[]>([]);
   const [mcpOpen, setMcpOpen] = useState(false);
   const [mcpServers, setMcpServers] = useState<readonly McpServerStatus[]>([]);
   const [mcpTools, setMcpTools] = useState<readonly McpTool[]>([]);
@@ -103,13 +105,6 @@ function ChatApp() {
     chat,
     ws
   );
-
-  useEffect(() => {
-    void api
-      .listSkills()
-      .then((res) => setSkills(res.skills))
-      .catch(() => setSkills([]));
-  }, []);
 
   const { compacting, handleCompact } = useChatCompact(chat);
   const handleSend = useCallback(

@@ -30,7 +30,16 @@ export type SlashCommand = {
 
 export interface SkillEntryLike {
   readonly name: string;
+  /**
+   * 人侧技能可以没有 description（spec skill-index-increment SC5/SC9）。
+   * 缺席 ≠ 空串：候选渲染据此走「无描述」形态。
+   */
   readonly description?: string;
+  /**
+   * 裸名别名（catalog 只保留唯一别名，冲突者已被 catalog 丢弃）。
+   * `parseSkillLoad` 用它解析 typed 裸名，并据此取 **typed token 长度**。
+   */
+  readonly aliases?: ReadonlyArray<string>;
 }
 
 export type SlashCandidate =
@@ -40,7 +49,7 @@ export type SlashCandidate =
       description: string;
       hint: string;
     }
-  | { kind: "skill"; name: string; description: string; hint: string };
+  | { kind: "skill"; name: string; description?: string; hint: string };
 
 export const SLASH_COMMANDS: ReadonlyArray<SlashCommand> = [
   { name: "sessions", description: "打开会话列表", hint: "/sessions" },
@@ -122,17 +131,44 @@ export function slashCandidates(
   }
   if (skills !== undefined && prefix.length > 0) {
     for (const skill of skills) {
-      if (skill.name.toLowerCase().startsWith(prefix)) {
+      // 规范名或任一裸名别名命中前缀即入场，但只发一条 canonical 候选
+      // （别名不是第二条候选）。
+      if (skillHeadLowers(skill).some((head) => head.startsWith(prefix))) {
         out.push({
           kind: "skill",
           name: skill.name,
-          description: skill.description ?? "加载技能",
+          // 无 description 的条目**仍进候选**（SC9）：缺席保留 undefined，
+          // 不补占位文案 —— 占位文案会把「无描述」伪装成有描述。
+          ...(skill.description !== undefined
+            ? { description: skill.description }
+            : {}),
           hint: `/${skill.name}`,
         });
       }
     }
   }
   return out;
+}
+
+/** skill 的全部可匹配首 token 小写形：规范名 + 唯一裸名别名。
+ *  SSOT 语义对齐 TUI `skillHeadLowers`（src/tui/slash.ts）—— web 与
+ *  `../src/` 之间有 tsconfig 边界（include 仅 `src`，无 path map），
+ *  故本地镜像；改 TUI 侧时同步此处。 */
+function skillHeadLowers(skill: SkillEntryLike): ReadonlyArray<string> {
+  return [skill.name, ...(skill.aliases ?? [])].map((head) =>
+    head.toLowerCase()
+  );
+}
+
+/**
+ * remainder 按 **typed 首 token 长度** 切，SSOT 对齐 TUI `slashRemainder`
+ * （src/tui/slash.ts:445）。**禁止**用 `skill.name.length` /
+ * `text.indexOf("/")` 组合：裸名输入（typed `/echo` 命中 canonical
+ * `plugin:echo`）会按 canonical 长度多吃/少吃字符（SC9 明确禁止）。
+ */
+function slashRemainder(text: string): string {
+  const firstTok = text.split(/\s+/, 1)[0] ?? text;
+  return text.slice(firstTok.length).trim();
 }
 
 export function parseSkillLoad(
@@ -144,9 +180,10 @@ export function parseSkillLoad(
   if (prefix === "") return undefined;
   if (BY_NAME.has(prefix as SlashCommandName)) return undefined;
   for (const skill of skills) {
-    if (skill.name.toLowerCase() === prefix) {
-      const rest = text.slice(text.indexOf("/") + 1 + skill.name.length).trim();
-      return { name: skill.name, remainder: rest };
+    // 精确命中规范名或裸名别名（大小写不敏感）；返回 canonical
+    // `skill.name`，保证落盘信封恒 canonical。
+    if (skillHeadLowers(skill).includes(prefix)) {
+      return { name: skill.name, remainder: slashRemainder(text) };
     }
   }
   return undefined;

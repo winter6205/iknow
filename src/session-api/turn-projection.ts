@@ -18,6 +18,7 @@ import type {
 import { isAgentStatusText } from "../harness/agent-status.js";
 import { isGraphModeText } from "../harness/graph/notification.js";
 import { isSubagentDrainText } from "../harness/subagent/host-drain.js";
+import { isSkillIndexDeltaText } from "../harness/skill/index-delta.js";
 import type { ActivityItem, ThinkingView, ToolCallView } from "./contract.js";
 
 /**
@@ -84,15 +85,17 @@ export function messageText(msg: AnthropicNativeMessage): string {
  * store/checkpoint.ts splitTurns 共用；原 hub `isQueryMessage` / checkpoint
  * `isQuery` 三条件收敛于此): a turn starts at a user message that carries NO
  * tool_result block and is NOT a subagent drain summary, an agent_status
- * bar injection, nor a graph_mode notification (切换 ON/OFF + ADR-0081 每
- * run() 一条短现势); user messages with only tool_result blocks are
- * continuation, not queries. Drain / agent_status / graph_mode messages are
- * host-injected — they neither surface as a turn nor bound the preceding
- * turn's slice.
+ * bar injection, a graph_mode notification (切换 ON/OFF + ADR-0081 每
+ * run() 一条短现势), nor a skill-index delta listing (ADR-0098 的
+ * `<available_skills>` 增量); user messages with only tool_result blocks are
+ * continuation, not queries. Drain / agent_status / graph_mode /
+ * skill-index-delta messages are host-injected — they neither surface as a
+ * turn nor bound the preceding turn's slice.
  *
- * 四类注入信封与 TUI `isTuiHiddenUserMessage` 同一份名单（spec D8 / SC7：
+ * 五类注入信封与 TUI `isTuiHiddenUserMessage` 同一份名单（spec D8 / SC7：
  * 「hidden 注入」两条消费面不得各自漂移）；谓词一律取自生产者本家
- * (`isSubagentDrainText` / `isAgentStatusText` / `isGraphModeText`)。
+ * (`isSubagentDrainText` / `isAgentStatusText` / `isGraphModeText` /
+ * `isSkillIndexDeltaText`)。
  */
 export function isTurnQuery(msg: AnthropicNativeMessage): boolean {
   const text = messageText(msg);
@@ -101,7 +104,8 @@ export function isTurnQuery(msg: AnthropicNativeMessage): boolean {
     !msg.content.some((b) => b.type === "tool_result") &&
     !isSubagentDrainText(text) &&
     !isAgentStatusText(text) &&
-    !isGraphModeText(text)
+    !isGraphModeText(text) &&
+    !isSkillIndexDeltaText(text)
   );
 }
 

@@ -23,6 +23,10 @@ import {
   isGraphModeText,
 } from "../../src/harness/graph/notification.ts";
 import {
+  SKILL_INDEX_DELTA_PREFIX,
+  isSkillIndexDeltaText,
+} from "../../src/harness/skill/index-delta.ts";
+import {
   MAX_THINKING_TEXT_CHARS,
   MAX_TOOL_INPUT_PREVIEW_CHARS,
   MAX_TOOL_OUTPUT_PREVIEW_CHARS,
@@ -626,6 +630,48 @@ describe("isTurnQuery — turn 边界判定（共享 helper）", () => {
       isTurnQuery(
         assistant("user", [
           { type: "text", text: "为什么 transcript 里有 <graph_mode> 标签？" },
+        ])
+      ),
+      true
+    );
+  });
+
+  // spec SC1–SC4 / ADR-0098：增量 listing 是 host 注入信封（第五类），不是
+  // 操作员键入 —— Web 用户气泡 / turn 边界同上。谓词来源必须是生产者本家
+  // （isSkillIndexDeltaText），消费侧不得再写一份前缀检查（与 graph_mode
+  // 用例同款：先钉生产者谓词命中自家常量，再钉消费侧返回 false）。
+  it("skill-index delta listing user 消息 → false（host 注入非 query）", () => {
+    const listing = `${SKILL_INDEX_DELTA_PREFIX}\nalpha: Alpha skill\n</available_skills>`;
+    assert.equal(
+      isSkillIndexDeltaText(listing),
+      true,
+      "生产者谓词必须命中自家产物"
+    );
+    assert.equal(
+      isTurnQuery(assistant("user", [{ type: "text", text: listing }])),
+      false
+    );
+  });
+
+  it("delta listing 前导空白 / 多行 → 仍 false（trimStart 同款）", () => {
+    assert.equal(
+      isTurnQuery(
+        assistant("user", [
+          {
+            type: "text",
+            text: `\n  ${SKILL_INDEX_DELTA_PREFIX}\nalpha: A\nzulu: Z\n</available_skills>`,
+          },
+        ])
+      ),
+      false
+    );
+  });
+
+  it("正文里提到 <available_skills> 但非行首 → 仍是 query（不误伤用户话）", () => {
+    assert.equal(
+      isTurnQuery(
+        assistant("user", [
+          { type: "text", text: "为什么 transcript 里有 <available_skills>？" },
         ])
       ),
       true

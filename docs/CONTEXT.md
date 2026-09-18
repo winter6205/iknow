@@ -624,8 +624,20 @@ _Avoid_: TTL 自动消失；与 **viewport API error** 气泡混名；重试成�
 **interrupt system message**: cancelled（典型 Ctrl+C）收尾写入权威历史末尾的固定 system 文案 `Interrupted by user.`。普通下一句人话进模型时带着它；`/continue` 的本次 prior 可去掉末尾这一句，盘上仍保留。timeout 不加此句。
 _Avoid_: 把 interrupt 当 closeout 的 tool_result；从盘上删除再续跑；timeout 复用同一句
 
-**skill bare alias**: 插件技能规范名 `<plugin>:<name>` 之外，catalog 在无冲突时登记的裸名别名；`SkillCatalog.get` 先 canonical 再 bare。TUI 斜杠技能解析必须问 catalog，不在宿主再拆 `:`。展示与 help 优先 canonical。agents 不进斜杠。
+**skill bare alias**: 插件技能规范名 `<plugin>:<name>` 之外，catalog 在无冲突时登记的裸名别名；`SkillCatalog.get` 先 canonical 再 bare。斜杠技能解析必须问 catalog，不在宿主再拆 `:`。展示与 help 优先 canonical。agents 不进斜杠。
 _Avoid_: 在 `slash.ts` 自写第二套命名空间匹配；把 agent id 当 slash 技能；冲突时仍保留双份 bare
+
+**技能模型索引**: 允许进入 `<available_skills>`（开场冻表或会话内增量）并允许 `skill()` 灌正文的资格集——有 description 且未 `disable-model-invocation`。开场投影冻在 system；新建名走 **技能索引增量**。ADR-0098。
+_Avoid_: 用 `available()` 同时当 slash 候选；把无描述技能列进模型表
+
+**可加载技能面**: 人 slash 能信封加载的全集——磁盘上有可加载 SKILL.md 的 catalog 条目，含无 description、含 disable。TUI / Web / CLI **同一个入口**。ADR-0098 / `specs/skill-index-increment.md`。
+_Avoid_: 三宿主各滤一套；没描述就不能 `/`；用模型索引当 slash 列表
+
+**索引进场史**: 本会话已经进入模型索引的 skill name 集（开场冻表 ∪ 已追加增量），跟 session 落盘。slash 信封不写入。compact 不删这份集合。ADR-0098。
+_Avoid_: 只从当前 transcript 回放；把 skill-load 当进场；压缩后当没进过场再贴 listing
+
+**技能索引增量**: 调用模型前接到 messages 最末的隐藏 user 消息，正文为 `<available_skills>` 且只含索引进场史尚未收录的模型索引行。ADR-0098。
+_Avoid_: 整表刷新；插进本轮用户消息前面；画成用户气泡；改 system 冻表
 
 **user-turn keep on protocol failure**: `protocolError` / `emptyFinalResponse` 时仍落下本轮**用户句**，不落下失败的 assistant。与「整轮不落盘」旧读法相对；`timeout` 落盘行为不变。
 _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与 viewport API error「不进 transcript」混成「用户句也不留」
@@ -734,6 +746,10 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **skill vs tool_search**: skill 按名取正文；工具/MCP 定义走直呼 `discover` 或无描述时的 `tool_search`；无 `skill_search`
 - **skill() 二次短路 vs 渐进式披露**: 披露管索引常驻、正文按需进 messages；二次短路管同名 `skill()` 不再灌第二份全文
 - **skill() 二次短路 vs skill-load 信封**: 闸只罩模型 `skill()`；用户 slash 再装信封仍灌全文
+- **技能模型索引 vs 可加载技能面**: 索引给模型看/调 `skill()`；可加载面给人 `/`；无描述或 disable 只进人侧
+- **技能索引增量 vs 前缀资格线**: 增量只许 messages 尾；开场表仍冻在 system
+- **索引进场史 vs skill-load 信封**: 进场史只记模型索引名；信封灌正文不算进场
+- **技能索引增量 vs 索引降档**: 降档只剥开场冻表；增量行带完整 description
 - **写处境告知面 vs skill 正文**: 告知走 worker prior / 改绑一次；技能程序不附 trailer；写工具成功路径不另注写处境
 - **hook router vs sandbox server**: 都是同进程 router；sandbox 管围栏执行，hook router 管声明式拦截组合，不共用一个 server
 - **内置钩子（builtin hooks） vs 用户钩子（user hooks）**: 代码装配 vs `settings.hooks`；用户总闸卸不掉 builtin

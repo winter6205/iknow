@@ -7,6 +7,11 @@
 //     叫错名返回引导文本，引导回 `<available_skills>` 清单
 //     （system 段）或（操作员指路径时）`read_file`；**禁止**再提到
 //     已删除的 `skill_search`（spec ADR-0046 / disclosure-index-align T2）。
+//   - **模型索引资格闸**（spec skill-index-increment.md SC5/SC6）：有
+//     description 且未 `disable-model-invocation` 的名字才装配正文；不合格
+//     名抛 `SkillNotModelIndexedError`（typed，理由到达模型），读盘失败抛
+//     `SkillBodyReadError`（与资格拒分型）。闸只罩本工具 —— 读同一份
+//     SKILL.md 的文件工具不因本闸失败（SC5 末句）。
 //   - output：装配正文（T6 起，frontmatter 剥离 + `Base directory` 行 +
 //     `<skill_files>` 段（采样 ≤10 / 绝对路径 / sampled 提示；references/ 不递归））。
 //     T5 阶段返回 SKILL.md 原文；T6 改走 `src/harness/skill/body.ts` 的
@@ -35,7 +40,9 @@ import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import type { AnthropicNativeMessage } from "../../model-adapter/types.js";
 import type { SkillCatalog, SkillEntry } from "../../skill/catalog.js";
+import { modelIndexIneligibility } from "../../skill/catalog.js";
 import { createSkillBody, SKILL_BODY_MARKERS } from "../../skill/body.js";
+import { ToolExecutionError } from "../../errors.js";
 
 /**
  * 依赖注入：`catalog` 索引层（T2 提供），本工具经其
@@ -43,6 +50,77 @@ import { createSkillBody, SKILL_BODY_MARKERS } from "../../skill/body.js";
  */
 export interface SkillToolDeps {
   readonly catalog: SkillCatalog;
+}
+
+/**
+ * spec skill-index-increment.md SC5/SC6 + Input-contract 表 `skill()` 行：
+ * 「非模型索引 → 拒、不灌正文」，「读盘失败 typed，与『资格拒』分型」。
+ *
+ * 模型索引资格（docs/CONTEXT.md「技能模型索引」）= 有 description 且未
+ * `disable-model-invocation`。`skill()` 只服务这份资格；人侧 slash 走
+ * **可加载技能面**（含无 description、含 disable），不经本 handler。
+ *
+ * 继承 `ToolExecutionError` 的理由：executor 的 `sanitizeFailure` 只放行
+ * 该类型（或自报 `modelFacing`）的 message，其余塌成常量
+ * `"tool execution failed"`。拒绝理由必须到达模型 —— 模型据此改用
+ * `<available_skills>` 里的合格名，而不是盲目重试。
+ */
+export class SkillNotModelIndexedError extends ToolExecutionError {
+  override readonly name: string = "SkillNotModelIndexedError";
+  readonly kind = "not_model_indexed" as const;
+  readonly skillName: string;
+  /** 与 `disabled` 正交地说明是哪一侧不合格（两类出路不同）。 */
+  readonly reason: "disabled" | "no_description";
+
+  constructor(skillName: string, reason: "disabled" | "no_description") {
+    super(
+      reason === "disabled"
+        ? `skill '${skillName}' is human-slash-only: its frontmatter sets \`disable-model-invocation: true\`, so it is not in the model index and its body is not loaded through this tool. Use the operator's \`/${skillName}\` slash command instead, or pick a model-indexed name from the \`<available_skills>\` list.`
+        : `skill '${skillName}' has no \`description\` in its frontmatter, so it is not in the model index and its body is not loaded through this tool. It stays available via the operator's \`/${skillName}\` slash command; ask the skill author to add a \`description\` to index it for the model.`
+    );
+    this.skillName = skillName;
+    this.reason = reason;
+  }
+}
+
+/**
+ * 装配期读盘失败（SKILL.md 不可读 / skill 目录不可达）。与
+ * `SkillNotModelIndexedError` **分型**（spec Input-contract `skill()` 行
+ * exception 列）：资格拒是「这条路对你不开放」，读盘失败是「本该开放、
+ * 此刻读不到」—— 调用方下一步不同。
+ *
+ * 读盘故障要点：`createSkillBody` 抛的 ENOENT / EACCES 原文里带绝对路径，
+ * 直接透出会把 skill 安装根的路径布局写进模型可见文本（且 executor 只认
+ * `ToolExecutionError` 的 message）。故本类**不搬运** cause 的 message ——
+ * `message` 只说「哪个 skill 读不到 + 让模型改走 read_file」，原始故障留在
+ * `cause` 上给测试与 host 分支用。
+ */
+export class SkillBodyReadError extends ToolExecutionError {
+  override readonly name: string = "SkillBodyReadError";
+  readonly kind = "body_read_failed" as const;
+  readonly skillName: string;
+  override readonly cause: unknown;
+
+  constructor(skillName: string, cause: unknown) {
+    super(
+      `skill '${skillName}' is model-indexed but its SKILL.md could not be read (${errorSummary(cause)}). Use \`read_file\` on the path if you have it, or retry once the file is available.`
+    );
+    this.skillName = skillName;
+    this.cause = cause;
+  }
+}
+
+/**
+ * 读盘故障 → 安全短摘要（errno code 一类；不打路径）。cause 形态不定
+ * （Error / plain object），故与 `errorMessage` 同一纪律：不写
+ * `err.message` 的裸取值，也不 `String(err)` 打 `[object Object]`。
+ */
+function errorSummary(cause: unknown): string {
+  if (cause !== null && typeof cause === "object" && "code" in cause) {
+    const code = (cause as { code?: unknown }).code;
+    if (typeof code === "string" && code.length > 0) return code;
+  }
+  return "read error";
 }
 
 /**
@@ -172,7 +250,9 @@ async function assembleWithRollback(
     return await createSkillBody({ entry, dir: entry.dir });
   } catch (err) {
     waveSet?.delete(name);
-    throw err;
+    // 读盘失败与资格拒分型（spec Input-contract `skill()` 行 exception 列）。
+    // 预记回滚在此完成：正文从未入史就不得谎称已加载。
+    throw new SkillBodyReadError(name, err);
   }
 }
 
@@ -184,6 +264,10 @@ async function assembleWithRollback(
  * 未命中：返回引导文本（不抛，向模型传达"看 `<available_skills>` 清单
  * 或（操作员指路径时）用 `read_file`"）—— spec ADR-0046 删 `skill_search`
  * 后唯一的回退入口。
+ *
+ * 命中后先过模型索引资格闸（SC5/SC6）：不合格 → `SkillNotModelIndexedError`，
+ * 不装配正文、不进 wave map。顺序是**闸先于短路**：不合格名本就不该出现在
+ * 模型的调用面上，历史里恰好有同名旧全文也不能把它「洗白」成已加载。
  *
  * Wave map 权衡：keyed by turnId，跨 turn 残留无害（判据仍以 messages
  * 快照为准，map 只覆盖「同波 tool_result 未入史」窗口）；factory 闭包
@@ -221,6 +305,15 @@ export function createSkillTool(deps: SkillToolDeps): AciToolDef {
       if (!entry) {
         // 引导句不算已加载：不进 wave map，再调仍引导（SC5）。
         return `skill '${name}' not found. Pick the name from the \`<available_skills>\` list in the system prompt, or — if the operator pointed at a file path outside the scan root — use \`read_file\`.`;
+      }
+      // 模型索引资格闸（SC5/SC6）——**先于**任何短路 / wave 预记 / 装配。
+      // 不合格名不该进任何路径：既不装配正文，也不该被标成「已加载」而
+      // 让第二次同名调用拿到短回执（拒必须压过短路，否则不合格名会被
+      // 历史里的旧全文「洗白」）。catalog.get 仍按名返回含 disabled 的
+      // 条目（可加载技能面），闸只落在本 handler。
+      const ineligibility = modelIndexIneligibility(entry);
+      if (ineligibility !== undefined) {
+        throw new SkillNotModelIndexedError(name, ineligibility);
       }
       const messages = ctx?.messages;
       if (messages !== undefined && hasVisibleFullSkillBody(messages, name)) {

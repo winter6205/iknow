@@ -124,11 +124,19 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/harness/build-engine-permission-project.test.ts",
   "tests/harness/mcp/build-engine-mcp-overview.test.ts",
   "tests/harness/mcp/build-engine-mcp-startwire.test.ts",
+  // ADR-0098 T5/T7：增量注入 / worker 快照走真 buildHarnessEngine 装配
+  // （ACI 注册表 → createBashTool → requireBwrap），装配期即 throw。
+  "tests/harness/skill-index-delta-inject.test.ts",
+  "tests/harness/skill-index-snapshot-wiring.test.ts",
+  "tests/subagent/worker-skill-index-snapshot.test.ts",
   "tests/build-engine-hooks.test.ts",
   // session-api 路径 → 真实 store + ACI 装配
   "tests/session-api/max-turns-serve.test.ts",
   "tests/session-api/workspace-bind.test.ts",
   "tests/session-api/ensure-deps-aci-tools.test.ts",
+  // ADR-0098 SC8：绑根 hub 走 buildProductionEngine → buildHarnessEngine
+  // → requireBwrap（传递链，测试文件本体不命中守卫 pattern）。
+  "tests/session-api/skills-hot.test.ts",
   // ADR-0037 / #814 实证：hub executor 真 mutate → runInSandbox → requireBwrap
   "tests/session-api/hub-worktree-isolation.test.ts",
   // 子代理 worker 装配 → createWorkerDeps → createBashTool → requireBwrap

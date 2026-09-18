@@ -896,6 +896,70 @@ describe("toSlashEntries: 裸名别名投影只在唯一时登记", () => {
   });
 });
 
+/**
+ * spec skill-index-increment SC5/SC6（T3）：人侧 slash 走**可加载技能面**
+ * （`catalog.loadable()`）—— 无 description 与 `disable-model-invocation` 的
+ * 条目都进候选；投影取自 loadable 面而非模型索引面（后者只含有 description
+ * 且未 disable 的条目）。本 describe 钉投影这一环（app.tsx:toSlashEntries）。
+ */
+describe("toSlashEntries: 可加载技能面（含无 description / disable）", () => {
+  const entry = (over: Partial<SkillEntry> & { name: string }): SkillEntry => ({
+    dir: "/tmp/skill-fixture",
+    disabled: false,
+    ...over,
+  });
+
+  test("无 description 的条目进 slash 投影（description 保持 undefined）", () => {
+    const catalog = createSkillCatalog([entry({ name: "no-desc" })]);
+    // 模型索引面不含它（无 description），可加载面含它 —— 两面的分叉正是
+    // SC5 的语义：进 slash、不进模型索引。
+    expect(catalog.available().map((e) => e.name)).toEqual([]);
+    expect(catalog.loadable().map((e) => e.name)).toEqual(["no-desc"]);
+    expect(toSlashEntries(catalog)).toEqual([{ name: "no-desc" }]);
+  });
+
+  test("disable-model-invocation 的条目进 slash 投影（SC6：有 description 也走人侧）", () => {
+    const catalog = createSkillCatalog([
+      entry({
+        name: "manual-only",
+        description: "仅人侧",
+        disabled: true,
+      }),
+    ]);
+    expect(catalog.available().map((e) => e.name)).toEqual([]);
+    expect(toSlashEntries(catalog)).toEqual([
+      { name: "manual-only", description: "仅人侧" },
+    ]);
+  });
+
+  test("无 description 的插件条目仍登记唯一裸名别名（别名投影不依赖 description）", () => {
+    const catalog = createSkillCatalog([
+      entry({ name: "plug:no-desc", namespace: "plug" }),
+    ]);
+    expect(toSlashEntries(catalog)).toEqual([
+      { name: "plug:no-desc", aliases: ["no-desc"] },
+    ]);
+    const projected = toSlashEntries(catalog);
+    expect(parseSkillLoad("/no-desc", projected)).toEqual({
+      name: "plug:no-desc",
+      remainder: "",
+    });
+  });
+
+  test("loadable 面排序确定（name 升序），投影沿用同一序", () => {
+    const catalog = createSkillCatalog([
+      entry({ name: "zeta" }),
+      entry({ name: "alpha", disabled: true }),
+      entry({ name: "mid", description: "有描述" }),
+    ]);
+    expect(toSlashEntries(catalog).map((e) => e.name)).toEqual([
+      "alpha",
+      "mid",
+      "zeta",
+    ]);
+  });
+});
+
 /** #337 Phase C：SlashCandidate 版按 cursor 补全（静态命令 | skill 通用）。 */
 describe("slashCompleteFromCandidates: 按 cursor 补全 SlashCandidate", () => {
   const MIXED: ReadonlyArray<SlashCandidate> = [

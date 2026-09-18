@@ -295,7 +295,12 @@ import {
   type FsModeContext,
 } from "../harness/sandbox/fs-mode.js";
 import { buildSkillLoadText, createSkillBody } from "../harness/skill/body.js";
-import { stripNamespace } from "../harness/skill/catalog.js";
+import type { SkillRescanner } from "../harness/skill/rescan.js";
+import {
+  formatSkillRescanFailure,
+  useLiveSkillCatalog,
+} from "./skill-catalog-live.js";
+import { projectSlashEntries } from "../harness/skill/catalog.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import type { IknowSettingsLlmProvider } from "../config/settings.js";
 import {
@@ -1060,8 +1065,16 @@ export interface TuiAppProps {
   readonly onQuit?: (conversationId?: string) => void;
   /** #337 Phase C：skill 清单（slash 候选混显 + /skill-name 加载发送）。
    *  可选：缺省 = 空清单（兼容 fixture / 测试；产品路径由 run.tsx 经
-   *  TuiExtensions.skillCatalog 注入）。 */
+   *  TuiExtensions.skillCatalog 注入）。本值是**装配期缓存**，斜杠面板打开
+   *  时经 `skillRescanner` 重扫换新（spec skill-index-increment SC8）。 */
   readonly skillCatalog?: SkillCatalog;
+  /**
+   * T6 (`specs/skill-index-increment.md` SC8)：rescan 缝 —— 与引擎的
+   * `deps.skillIndexDelta` 同一个持有者（装配期一次，跨会话共用）。
+   * 打开斜杠面板时重扫现行可加载面，让会话中途落盘的 SKILL.md 立刻进候选。
+   * 缺席（fixture / 测试）→ 候选恒为 `skillCatalog` 快照（旧行为逐字节一致）。
+   */
+  readonly skillRescanner?: SkillRescanner;
   /** 活 taskRoot cell（specs/skill-load-write-root.md）：slash 装配 skill
    *  正文时调用时机读快照 —— 与 ACI skill() / hub loadSkillBody 同一装配口。
    *  缺省 = undefined → 无 trailer（兼容 fixture / 测试）。 */
@@ -1278,53 +1291,168 @@ function isStreamingSilenceNotice(notice: Notice | undefined): boolean {
 // spec tui-skill-slash-catalog（skill bare alias）：slash 匹配认 catalog 的
 // 唯一裸名别名，展示/加载仍用规范名。别名不新增 catalog 接口 —— 只用公开的
 // `available()` / `get()` 推导（invariant 1：不在此处重写 `:` 拆名规则）。
-// S5 门：放在 TuiApp 之外，避免 god component 的复杂度随投影逻辑再涨。
-//
-// 唯一性判据必须与 slash 的匹配语义同一 case-folding：`slash.ts` 的
-// `skillHeadLowers` 把首 token 折成小写后做**精确命中**，而 catalog 的裸名
-// 索引是大小写敏感的裸 Map。只认 `catalog.get(bare) === entry` 会让裸名仅在
-// 大小写上不同的两条（`plugA:Shared` / `plugB:shared`）各拿一个别名，同一
-// `/shared` 与 `/Shared` 落到不同条目 —— 歧义。故：
-//   1. 候选裸名先过 catalog 侧登记语义：`catalog.get(bare) === entry` ——
-//      `get` **先查 canonical index**，所以「裸名被另一条 skill 的规范名占
-//      着」的形态（`Echo` 与 `plug:echo`）在此被挡下；
-//   2. 候选裸名 + 全部规范名一起按小写折叠进占用表；某个折叠 token 的占用者
-//      不唯一（占用者恒是规范名，两条候选裸名只在大小写上不同即此形态）→
-//      整组不发别名（宁可不可用，不可歧义）。占用者以**名字**去重，故某条
-//      自己的规范名折成自己的裸名时仍算唯一，不会被误伤。
+// 取面 / 投影算法收敛在 harness（`loadableOf` / `projectSlashEntries`），
+// 本文件不再持本地副本。
+
+/**
+ * SC8（slash 侧）—— **提交期**的 skill-load 解析结果（判别联合）。
+ *
+ * `error` 与 `miss` 必须分开：扫描失败时「不是技能」是**不知道**，谎报成
+ * miss 会让操作员看到「未知命令」（暗示技能不存在），而真实原因是根目录
+ * 一时读不到（`SkillRescanError`）。
+ */
+export type SkillLoadResolution =
+  | {
+      readonly kind: "hit";
+      /** 命中用的那份 catalog —— 与下文 `get(name)` 同台，避免 split-brain。 */
+      readonly catalog: SkillCatalog;
+      readonly name: string;
+      readonly remainder: string;
+    }
+  | { readonly kind: "miss" }
+  | { readonly kind: "error"; readonly error: unknown };
+
+/**
+ * SC8（slash 侧）—— 提交 `/name` 时的 skill-load 解析（miss → 当场重扫一次）。
+ *
+ * 打开斜杠面板的那次 rescan 是**异步**的：快速键入 / 粘贴 `/zz-live` 后立刻
+ * Enter，提交会赶在它落地之前，只看缓存列表就把刚装的技能报成「未知命令」
+ * （真实 TUI 实测坐实）。故提交路径自己兜一次 —— 命中就走，未命中才重扫
+ * （常见情形零额外 IO）。
+ *
+ * 静态词表行与普通消息在**扫描之前**短路：`/help` / `/quit` 不该为一次
+ * skill-load 判定白扫全根。
+ */
+export async function resolveSkillLoadAtSubmit(input: {
+  readonly text: string;
+  /** 当前（可能已刷新过的）catalog。 */
+  readonly catalog: SkillCatalog;
+  readonly rescanner: SkillRescanner | undefined;
+}): Promise<SkillLoadResolution> {
+  // 只有「/ 开头且未命中静态词表」的行才可能是 skill-load（parseSkillLoad
+  // 同纪律：静态命令优先）。message / command 直接 miss，不扫盘。
+  if (parseTuiInput(input.text).kind !== "unknown") return { kind: "miss" };
+  const attempt = (catalog: SkillCatalog): SkillLoadResolution | undefined => {
+    const load = parseSkillLoad(input.text, toSlashEntries(catalog));
+    if (load === undefined) return undefined;
+    // hit ⟹ `get` 必有值（toSlashEntries 派生自同一 catalog），但残缺实现
+    // 下退化为 miss 比让调用方拿到 undefined 再崩更诚实。
+    if (catalog.get(load.name) === undefined) return undefined;
+    return { kind: "hit", catalog, name: load.name, remainder: load.remainder };
+  };
+  const cached = attempt(input.catalog);
+  if (cached !== undefined || input.rescanner === undefined) {
+    return cached ?? { kind: "miss" };
+  }
+  let fresh: SkillCatalog;
+  try {
+    fresh = await input.rescanner.rescan();
+  } catch (error) {
+    return { kind: "error", error };
+  }
+  return attempt(fresh) ?? { kind: "miss" };
+}
+
+/**
+ * SC8（slash 侧）—— 提交期 skill-load 的**处置**（`resolveSkillLoadAtSubmit`
+ * 的调用方契约）。
+ *
+ *   - `not-skill`：不是 skill-load（普通消息 / 静态命令 / 未命中）→ 调用方
+ *     落回既有分流；
+ *   - `notice`：给操作员一条提示（不存在 / 扫描失败 / 正文装配失败），不发送；
+ *   - `send`：命中且正文已装配 → 调用方 `sendTurn`。
+ *
+ * 抽成模块级纯函数（S5 ratchet：把分支挪出 god component 的 `handleSubmit`）。
+ */
+export type SkillLoadOutcome =
+  | { readonly kind: "not-skill" }
+  | { readonly kind: "notice"; readonly lines: readonly string[] }
+  | {
+      readonly kind: "send";
+      readonly sendText: string;
+      readonly displayText: string;
+    };
+
+/**
+ * 判定并装配一次提交期 skill-load（见 `SkillLoadOutcome`）。
+ *
+ * 三条「不是技能」的路径在这里合流，让 `handleSubmit` 只需两个分支：静态
+ * 命令 / 普通消息短路、解析未命中、`get` 落空。
+ */
+export async function resolveSkillLoadSubmit(input: {
+  readonly text: string;
+  readonly catalog: SkillCatalog;
+  readonly rescanner: SkillRescanner | undefined;
+}): Promise<SkillLoadOutcome> {
+  const resolved = await resolveSkillLoadAtSubmit(input);
+  if (resolved.kind === "error") {
+    return {
+      kind: "notice",
+      lines: [formatSkillRescanFailure(resolved.error)],
+    };
+  }
+  if (resolved.kind === "miss") return { kind: "not-skill" };
+  const entry = resolved.catalog.get(resolved.name);
+  // spec skill-index-increment SC6：`disable-model-invocation` 只罩模型索引
+  // 与 `skill()`，**不**罩人侧 slash —— 禁用条目仍可 `/` 加载（与无
+  // description 同档）。这里的 gate 只剩「catalog 里没有」。
+  if (entry === undefined) {
+    return {
+      kind: "notice",
+      lines: [`技能 ${resolved.name} 不可用（不存在）。`],
+    };
+  }
+  try {
+    // ADR-0079 — skill 正文不再挂写根 trailer（与 #337 SC6 形态逐字节一致）。
+    // 写处境披露由 worker prior + chat-session rebind 一次性通知承担。slash
+    // 装配只走 entry + dir 单形态；liveTaskRoot / isolationOn 在本组件仍由
+    // chrome 渲染（sessionLocationLines 经 resolveWorktreeChromeRoot）持有，
+    // 本路径不消费。
+    const body = await createSkillBody({ entry, dir: entry.dir });
+    // plans/tui-chrome-interaction.md Task 5：displayText 也走闭合信封形态
+    // （empty body + 同样 remainder），让 render 层
+    // `projectSkillLoadUserText` 抽到同样的 `{name, remainder}` —— 运行中的
+    // echo 与落盘后的 transcript 显示一致（chip-only 或 chip+ remainder），
+    // 不再用中文「[加载技能 X]」占位。turn 完成后落盘权威消息原子替换。
+    return {
+      kind: "send",
+      sendText: buildSkillLoadText(resolved.name, body, resolved.remainder),
+      displayText: buildSkillLoadText(
+        resolved.name,
+        "",
+        resolved.remainder.length > 0 ? resolved.remainder : undefined
+      ),
+    };
+  } catch (err) {
+    return { kind: "notice", lines: [`加载技能失败：${describeError(err)}`] };
+  }
+}
+
+/**
+ * 斜杠面板是否打开（`useLiveSkillCatalog` 的上升沿信号）。
+ *
+ * 抽成模块级纯函数（S5：god component 里多一个判据就让复杂度再涨一格），
+ * 同时把「面板打开」的判据**单点化**：`inputHintSuggestions` 与 `hintRows`
+ * 各自内联过同一判据，本 hook 是第三个消费点 —— 三处若各写各的，将来改
+ * 「打开」语义（如支持 `/` 后带空格）必然漂移。
+ */
+function slashPaletteOpen(inputValue: string): boolean {
+  return inputValue.trim().startsWith("/");
+}
+
+/**
+ * slash 候选投影（spec skill-index-increment SC5/SC6：人侧 slash 走
+ * **可加载技能面** —— 含无 description、含 `disable-model-invocation`，
+ * 不是模型索引面）。
+ *
+ * 算法本体在 harness（`projectSlashEntries`，plan T3「harness 可复用的
+ * slash 投影」）—— TUI / CLI / hub 同一实现，不再各持镜像。本函数只保留
+ * TUI 宿主的名字与形状（既有测试 / slash.ts 消费面不变）。
+ */
 export function toSlashEntries(
   catalog: SkillCatalog
 ): ReadonlyArray<SkillEntryLike> {
-  const entries = catalog.available();
-  const bares = entries.map((entry) => {
-    if (entry.namespace === undefined) return undefined;
-    const bare = stripNamespace(entry.name, entry.namespace);
-    return bare !== undefined && catalog.get(bare) === entry ? bare : undefined;
-  });
-  const claimants = new Map<string, ReadonlyArray<string>>();
-  const claim = (name: string, owner: string): void => {
-    const key = name.toLowerCase();
-    const owners = claimants.get(key) ?? [];
-    claimants.set(key, owners.includes(owner) ? owners : [...owners, owner]);
-  };
-  for (const entry of entries) claim(entry.name, entry.name);
-  entries.forEach((entry, i) => {
-    const bare = bares[i];
-    if (bare !== undefined) claim(bare, entry.name);
-  });
-  return entries.map((entry, i) => {
-    const bare = bares[i];
-    const owners =
-      bare === undefined ? undefined : claimants.get(bare.toLowerCase());
-    if (owners?.length !== 1 || owners[0] !== entry.name) {
-      return { name: entry.name, description: entry.description };
-    }
-    return {
-      name: entry.name,
-      description: entry.description,
-      aliases: [bare!],
-    };
-  });
+  return projectSlashEntries(catalog);
 }
 
 export function TuiApp(props: TuiAppProps): ReactNode {
@@ -2004,7 +2132,18 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 分支 setGraphChromeFocus("input") 兜底（T3 既有），此处不重复。
   // #337 Phase C：skillCatalog 可选（缺省 = 空清单）；available() = 非 disabled
   // + 有 description、名字序。slash 候选混显「静态命令 + skill」。
-  const skillCatalog = props.skillCatalog ?? emptySkillCatalog;
+  const cachedSkillCatalog = props.skillCatalog ?? emptySkillCatalog;
+  // spec skill-index-increment SC8（slash 侧）：候选面「当场热」—— 打开斜杠
+  // 面板时经 T6 rescan 缝重扫一次现行可加载面（会话中途落盘的 SKILL.md /
+  // 插件目录换血立刻可见，不必等下一 turn）。缝缺席（测试 / fixture）→ 恒等
+  // 透传缓存；rescan 失败 → 保留缓存 + notice 一条（不阻断输入）。
+  const skillCatalog = useLiveSkillCatalog({
+    catalog: cachedSkillCatalog,
+    rescanner: props.skillRescanner,
+    paletteOpen: slashPaletteOpen(inputValue),
+    onRescanError: (err) =>
+      setNotice({ lines: [formatSkillRescanFailure(err)] }),
+  });
   const skillList = useMemo(() => toSlashEntries(skillCatalog), [skillCatalog]);
   // 活 taskRoot cell（specs/skill-load-write-root.md）：slash 装配以外的
   // chrome 渲染面（sessionLocationLines 经 resolveWorktreeChromeRoot）也
@@ -2974,47 +3113,21 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
     // #337 Phase C：/skill-name [提示词] 精确命中 → 确定性 skill-load 发送
     // （静态命令优先：parseSkillLoad 命中词表返回 undefined，落回原分流）。
-    if (skillList.length > 0) {
-      const skillLoad = parseSkillLoad(text, skillList);
-      if (skillLoad !== undefined) {
-        const entry = skillCatalog.get(skillLoad.name);
-        if (entry === undefined || entry.disabled) {
-          setNotice({
-            lines: [`技能 ${skillLoad.name} 不可用（已禁用或不存在）。`],
-          });
-          return;
-        }
-        try {
-          // ADR-0079 — skill 正文不再挂写根 trailer（与 #337 SC6 形态逐字节
-          // 一致）。写处境披露由 worker prior + chat-session rebind 一次性
-          // 通知承担，共用 writeRootSegment helper。slash 装配只走 entry +
-          // dir 单形态；liveTaskRoot / isolationOn 在本组件仍由 chrome 渲染
-          // （sessionLocationLines 经 resolveWorktreeChromeRoot）持有，本
-          // 路径不再消费。
-          const body = await createSkillBody({ entry, dir: entry.dir });
-          const sendText = buildSkillLoadText(
-            skillLoad.name,
-            body,
-            skillLoad.remainder
-          );
-          // plans/tui-chrome-interaction.md Task 5：displayText 也走闭合
-          // 信封形态（empty body + 同样 remainder），让 render 层
-          // `projectSkillLoadUserText` 抽到同样的 `{name, remainder}` —— 运行
-          // 中的 echo 与落盘后的 transcript 显示一致（chip-only 或 chip+
-          // remainder），不再用中文「[加载技能 X]」占位。turn 完成后落盘权威
-          // 消息原子替换（render 同样路径投影，正文永进 ❯ 气泡）。
-          const displayText = buildSkillLoadText(
-            skillLoad.name,
-            "",
-            skillLoad.remainder.length > 0 ? skillLoad.remainder : undefined
-          );
-          setNotice(undefined);
-          await sendTurn(sendText, displayText);
-        } catch (err) {
-          setNotice({ lines: [`加载技能失败：${describeError(err)}`] });
-        }
-        return;
-      }
+    // SC8：提交期自兜一次 —— 面板打开时那次异步 rescan 可能还没落地，快速
+    // 键入/粘贴后立刻 Enter 会赶在它之前（真实 TUI 实测坐实）。
+    const skillOutcome = await resolveSkillLoadSubmit({
+      text,
+      catalog: skillCatalog,
+      rescanner: props.skillRescanner,
+    });
+    if (skillOutcome.kind === "notice") {
+      setNotice({ lines: [...skillOutcome.lines] });
+      return;
+    }
+    if (skillOutcome.kind === "send") {
+      setNotice(undefined);
+      await sendTurn(skillOutcome.sendText, skillOutcome.displayText);
+      return;
     }
     const parsed = parseTuiInput(text);
     if (parsed.kind === "message") {

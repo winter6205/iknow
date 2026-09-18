@@ -34,6 +34,7 @@
 
 import { randomUUID } from "node:crypto";
 import {
+  errorMessage,
   MaxTurnsExceeded,
   MessageCommitError,
   ProtocolError,
@@ -318,6 +319,21 @@ export interface LoopEngineDeps {
    */
   readonly conversationId?: string;
   /**
+   * T5 (spec `skill-index-increment` / ADR-0098 / SC1–SC4、SC7):技能模型
+   * 索引进场缝。字段在场 = stepWithTrace 每次即将调用模型前(首次调用 +
+   * reactive-compact 压缩后的重试两处)拿一次 `computeSkillIndexDelta` ——
+   * rescan 现行技能根 → `模型索引 − 索引进场史` → **只含新建行**的
+   * `<available_skills>` 文本,经 `pendingInjected.record` 同形(appendMcp
+   * Reconnect / appendAgentStatusBar)接到当时 `messages` 尾;无新建 → 零
+   * 追加(SC1)。进场史落盘在 delta 内部先于返回,落盘失败 → 不追加
+   * (spec Input-contract exception 列)。字段缺席 = 零行为变化(ask /
+   * worker / 既有测试 byte-identical;AB1 同款可选缝纪律)。
+   *
+   * 判定次序:在 agentStatusBar / envSnapshot 之后 —— 增量是本轮**最后**
+   * 一条模型可见消息(spec Assumption 8「delta 接在 messages 最末」)。
+   */
+  readonly skillIndexDelta?: SkillIndexDeltaSeam;
+  /**
    * #620 T3 (spec session-jsonl-resume D4):turn 内 commit 钩子(可选)。
    * host(hub / chat-session)注入纯 async 闭包,把已进权威历史的消息立即
    * 上盘;loop-engine 自身零 IO —— 不感知 store / 文件 / 会话格式,钩子
@@ -521,6 +537,40 @@ function createPendingInjected() {
 }
 
 type PendingInjected = ReturnType<typeof createPendingInjected>;
+
+/**
+ * T5 / ADR-0098:技能索引进场缝的**传输形态**。loop-engine 只认识「拿一次
+ * 增量,拿到非空就贴」这一件事,并不知道 rescan / ledger / 渲染 —— 那些全
+ * 在 `harness/skill/index-delta.ts`(缝的**生产者**)。
+ *
+ * 为什么是**闭包**而不是 `(rescanner, ledger)` 两个对象:宿主(三入口 +
+ * 测试)在装配期已经能建出 rescanner / ledger,包成闭包后 loop-engine 对
+ * `harness/skill/*` 零 import —— 与 `boundaryAttachment` / `agentStatus`
+ * 同款「宿主注入纯闭包,引擎不反向依赖」纪律(Gate B:无 session-api /
+ * skill 子系统类型入内核)。
+ *
+ * 失败语义:`delta()` 抛 typed 错(`SkillRescanError` / `SkillIndexLedger
+ * Error` / 未来任何)时 loop-engine **吞咽 + console.warn 一行**,不注入、
+ * 不中断回合 —— spec Input-contract exception 列要的是「不贴残缺 delta、
+ * 不改冻表、保留进场史」,而回合本身不该因一次索引扫描失败而中止(与既有
+ * 降级契约同形:栏读失败 → 无 todo 段,模型回合不受影响)。落盘失败时
+ * `computeSkillIndexDelta` 已保证不返回文本,故这里「吞咽」等价于「不把
+ * messages 追加当成已进场」。
+ *
+ * 会话锚(**调用参数**,不是装配参数):形态照抄 `agentStatus` —— 装配期
+ * (尤其 serve)拿不到 conversationId,per-session 叶子在调用期才定。宿主
+ * 把它收到的 `deps.conversationId` 原样转给缝;`undefined`(ask / worker /
+ * 未锚装配)→ 缝返回空增量(无会话锚 = 无可持久化进场史)。
+ */
+export interface SkillIndexDeltaSeam {
+  /**
+   * 拿本轮增量。返回空文本 = 无新建 = 零追加。抛错 = 本轮不贴(吞咽)。
+   */
+  delta(conversationId: string | undefined): Promise<{
+    readonly added: readonly string[];
+    readonly text: string;
+  }>;
+}
 
 function appendMessage(opts: {
   readonly state: LoopState;
@@ -781,6 +831,56 @@ function appendMcpReconnect(
     next = appendMessage({ state: next, msg });
   }
   return next;
+}
+
+/**
+ * T5 (spec `skill-index-increment` / ADR-0098 / SC1–SC4、SC7):技能模型索引
+ * 增量追加缝。每次即将调用模型前取一次 `deps.skillIndexDelta` 的增量,非空
+ * 则以 user 消息 immutable 追加到当时 `messages` 尾(spec Assumption 8:
+ * delta 是本轮最后一条消息 —— 本轮 user 原文 / skill-load 信封 / graph 提示
+ * / 重连通知 / 现势栏都在它前面)。
+ *
+ * 形态镜像 appendMcpReconnect(seam 缺席 → 零注入,行为 byte-identical):
+ *   - `deps.skillIndexDelta` 缺席 → return state(ask / worker / 既有装配);
+ *   - `delta()` 返回空文本 → 零追加(SC1「无新建则不贴」);
+ *   - `delta()` 抛错 → 吞咽 + console.warn(不中断回合,spec exception 列
+ *     「不贴残缺 delta、保留进场史」由生产者保证 —— 落盘失败时它不返回文本)。
+ *
+ * 进场史**不从这里**写:落盘在 `computeSkillIndexDelta` 内部先于返回
+ * (Input-contract「落盘失败 → 不把 messages 追加当成已进场」)。
+ *
+ * #888:注入消息同样 record 进 pending 缓冲,随下一批 commit flush ——
+ * 落盘史与 messages 双写,若只落盘不 commit 会让 save 判 fork。
+ */
+async function appendSkillIndexDelta(
+  state: LoopState,
+  deps: LoopEngineDeps,
+  pendingInjected: PendingInjected
+): Promise<LoopState> {
+  const seam = deps.skillIndexDelta;
+  if (seam === undefined) return state;
+  let text: string;
+  try {
+    // 会话锚从 deps 现读（与 appendAgentStatusBar 的 `deps.conversationId`
+    // 同一拍）—— serve 的 per-run runDeps 在调用前注入它。
+    const delta = await seam.delta(deps.conversationId);
+    if (delta.added.length === 0 || delta.text.length === 0) return state;
+    text = delta.text;
+  } catch (err) {
+    // EXIT: typed 错(rescan_failed / write_failed / ...)→ 本轮不贴。
+    // 冻表字节不在本函数手上(装配期 holder),故「不改冻表」结构性成立;
+    // 「保留进场史」由生产者的先落盘后返回顺序保证。
+    // 渲染归 `errorMessage`（errors.ts 单点）：`instanceof Error ? … : String(…)`
+    // 是 code-quality.md typed-error catch 契约明文禁止的形态（plain object 会
+    // 打成 `[object Object]`，kind/context 全丢）。
+    console.warn(
+      `[loop-engine] skill index delta skipped: ${errorMessage(err)}`
+    );
+    return state;
+  }
+  const msg = deps.adapter.encodeUserText(text);
+  pendingInjected.record(msg);
+  return appendMessage({ state, msg });
 }
 
 /** Ctrl+C / signal abort 触发的中断 system 消息固定文案（#392 T4 / G3 #388）。
@@ -2187,8 +2287,15 @@ async function stepWithTrace(opts: {
     opts.deps,
     opts.onStream
   );
+  // T5 / ADR-0098:技能索引进场增量 —— 本回合**最后**一次 messages 尾追加
+  // (spec Assumption 8)。seam 缺席 / 无新建 / 取增量失败 → 零追加。
+  const deltaState = await appendSkillIndexDelta(
+    barStateWithEnv,
+    opts.deps,
+    opts.pendingInjected
+  );
   const firstPhase = await runModelPhase({
-    state: barStateWithEnv,
+    state: deltaState,
     deps: opts.deps,
     signal: opts.signal,
     started,
@@ -2197,7 +2304,8 @@ async function stepWithTrace(opts: {
     onStream: opts.onStream,
     reactiveAttemptedRef: opts.reactiveAttemptedRef,
   });
-  let effectiveState: LoopState = barState;
+  // 非 reactive 路径:模型看到的最后一条即 deltaState(含增量注入)。
+  let effectiveState: LoopState = deltaState;
   const modelPhase: OkOrStop =
     firstPhase.kind === "reactive_compact_pending"
       ? await (async (): Promise<OkOrStop> => {
@@ -2230,9 +2338,17 @@ async function stepWithTrace(opts: {
             opts.deps,
             opts.onStream
           );
-          effectiveState = compactedWithEnv;
+          // T5 / ADR-0098 / SC4:compact 后的重试同样过增量缝 —— 但判定只读
+          // 落盘史,「messages 里的增量被 compact 吃掉」不会让它再贴一遍
+          // (生产者 `computeSkillIndexDelta` 不读 messages)。
+          const compactedWithDelta = await appendSkillIndexDelta(
+            compactedWithEnv,
+            opts.deps,
+            opts.pendingInjected
+          );
+          effectiveState = compactedWithDelta;
           const compressedAttempt = await runModelPhase({
-            state: compactedWithEnv,
+            state: compactedWithDelta,
             deps: opts.deps,
             signal: opts.signal,
             started,

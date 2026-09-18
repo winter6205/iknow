@@ -27,6 +27,24 @@ import { ProtocolError } from "../errors.js";
 import type { StopReason } from "../model-adapter/types.js";
 import type { WriteSituation } from "../session-roots.js";
 
+/**
+ * T7 (`specs/skill-index-increment.md` / SC10 + assumption 7) — 父会话 spawn
+ * **当时**的模型索引条目（= 父冻表 ∪ 父索引进场史，按模型索引资格过滤后的
+ * 那些），随 envelope 过进程边界。
+ *
+ * 形态 = `SkillSummary`（`identity/assemble.ts`）的 wire 子集：name 必有、
+ * description 可选（降档后的裸名行，ADR-0046 Decision 2）。刻意**不带**
+ * `disabled`：模型索引面本就不含 disabled 条目，多带一个字段等于给 wire
+ * 开第二条语义。
+ *
+ * 这不是第二套渲染：worker 侧照旧把条目交给 `skillsSegment`（渲染 SSOT），
+ * 本结构只是数据。
+ */
+export interface SkillIndexSnapshotEntry {
+  readonly name: string;
+  readonly description?: string;
+}
+
 /** 父→子 worker 请求信封。schema 冻结形态见 WORKER_SCHEMA。 */
 export interface WorkerEnvelope {
   readonly task: string;
@@ -104,6 +122,29 @@ export interface WorkerEnvelope {
     readonly projectDir: string;
     readonly conversationId: string;
   };
+  /**
+   * T7 (`specs/skill-index-increment.md` / SC10 + assumption 7) — 父会话
+   * spawn **当时**的完整模型索引快照（= 父冻表模型索引名 ∪ 父索引进场史名，
+   * 见 ADR-0098）。在场 → worker 的 `<available_skills>` 冻表以它为**唯一
+   * 来源**（worker 装配期现算一次，进 resolver 闭包后进程内恒定）；缺席
+   * （旧 envelope / 跨版本 resume / manager 直造路径）→ worker 退回自己的
+   * 独立 rescan（`createSkillScanner`），行为逐字节不变。
+   *
+   * **空数组 ≠ 缺席**：`[]` = 父确实没有模型索引（worker 渲染空清单句），
+   * 键缺席 = 没人给快照（worker 自扫）。两者在 JSON 里可分辨，故父侧只在
+   * getter 缺席 / 返回 undefined 时省略键，返回 `[]` 照样落线。
+   *
+   * 为什么传**条目**而不是只传 name 名单：spec 的判据是「完整」。父与 worker
+   * 的技能根可以不同（插件根随 reload / 工作目录差异），按 name 在 worker
+   * catalog 里回查会**丢条目**；直出条目还省掉 worker 侧的一次解析。代价是
+   * 该名在 worker 里可能无正文可加载（`skill()` 报 not found）—— 索引可见、
+   * 正文取不到是已知退化，好过静默少一行。
+   *
+   * Wire additive + optional —— 与 `role` 同形态;旧 envelope（无此字段）
+   * 仍可被 ajv 接受，**不破现有契约**（`additionalProperties:false` 下需
+   * 在 WORKER_SCHEMA.properties 显式声明）。
+   */
+  readonly skillIndexSnapshot?: readonly SkillIndexSnapshotEntry[];
 }
 
 /** 子→父 result 信封。schema 冻结形态见 PARENT_SCHEMA。 */
@@ -228,6 +269,23 @@ export const WORKER_SCHEMA: Record<string, unknown> = {
       },
       required: ["projectDir", "conversationId"],
       additionalProperties: false,
+    },
+    // T7: 父会话当时完整模型索引快照 —— 与 role 同形态（wire additive,
+    // optional）。条目锁 `{name, description?}`：name 必有且非空（裸名行
+    // 也必须有名字），description 可选（降档形态），不收额外键（不给 wire
+    // 开第二套字段）。空数组合法且**与键缺席不同义**（见接口注释）。
+    // 旧 envelope（缺此字段）→ ajv 接受 → worker 走自己的独立 rescan。
+    skillIndexSnapshot: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          name: { type: "string", minLength: 1 },
+          description: { type: "string" },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
     },
   },
   required: ["task", "sandboxRoot"],

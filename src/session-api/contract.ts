@@ -232,10 +232,15 @@ export type RewindTargetsResponse = {
   readonly targets: ReadonlyArray<RewindTargetDto>;
 };
 
-/** GET /api/v1/skills — TUI skillCatalog.available() 投影。 */
+/**
+ * GET /api/v1/skills — TUI `skillCatalog.loadable()` 投影（可加载技能面）。
+ * `description` 允许缺席：人侧技能可以没有 description（spec
+ * skill-index-increment SC5/SC9），强转 `""` 会把「无描述」与「空描述」
+ * 混为一谈，宿主也就无法把它渲染成「无描述」形态。
+ */
 export type SkillSummaryDto = {
   readonly name: string;
-  readonly description: string;
+  readonly description?: string;
 };
 
 export type SkillsResponse = {

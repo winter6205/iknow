@@ -46,7 +46,9 @@
 
 **TUI 渲染后端平台声明（#321/#343，2026-08-10）**：TUI 已从 ink 迁移到 @opentui/react 0.5.1（Zig 原生渲染器，仅 bun 可驱动 FFI）。**Linux（含 WSL2）实测验收通过；macOS / Windows 未验证**（原生二进制跨平台行为属上游责任）。旧 ink 实现归档 `archive/tui-ink/`（只读参考）。
 
-**TUI skill + MCP 扩展源（#337，2026-08-11）**：TUI 入口与 chat/serve 对齐 skill 与 MCP 扩展源装配——`skill` / `skill_search` 工具 + `<available_skills>` 系统段 + MCP manager 连接（`mcp__*` 工具经 tool_search discover）。slash 输入 `/` 混显静态命令 + 动态 skill 候选，Tab 补全；`/skill-name [提示词]` 确定性加载（skill 正文拼入 user message 发送）；`/mcp` 看板查看 server 状态 / 工具详情 / reload。
+**TUI skill + MCP 扩展源（#337，2026-08-11）**：TUI 入口与 chat/serve 对齐 skill 与 MCP 扩展源装配——`skill` 工具 + `<available_skills>` 系统段 + MCP manager 连接（`mcp__*` 工具经 tool_search discover）。slash 输入 `/` 混显静态命令 + 动态 skill 候选，Tab 补全；`/skill-name [提示词]` 确定性加载（skill 正文拼入 user message 发送）；`/mcp` 看板查看 server 状态 / 工具详情 / reload。
+
+**技能模型索引增量（ADR-0098，spec `specs/skill-index-increment.md`）**：开场 `<available_skills>` 仍冻在 system；现行 scan 根下新建的 **技能模型索引** 名在下一轮调用前以隐藏 user 消息贴 messages 最末（只含新建）。**可加载技能面**（含无 description）给人 slash，TUI/Web/CLI 同一入口；`skill()` 拒人侧技能、不拦读文件。Plugin/MCP 整包靠 reload 或新会话。计划 `plans/skill-index-increment.md`。
 
 **全局插件组件加载（ADR-0095，2026-09-14）**：读取本机全局安装插件携带的 skills / agents / hooks。插件根 = `~/.iknow/plugins`（默认）+ `IKNOW_PLUGIN_ROOTS` + 设置 `plugins.roots`（**仅用户层**，不进项目 allowlist——插件贡献 hooks = 任意命令执行，防 clone 即执行的供应链面）；发现 = `<root>/installed_plugins.json` ledger 优先（`<plugin>@<marketplace>` → installPath，命名空间取 key 前段）+ 目录扫描兜底。skill / agent 登记规范名 `<plugin>:<name>` + 裸名别名（冲突丢弃 + warn），进 `<available_skills>` 与 `spawn_subagent` enum；agent `ROLE_ID_PATTERN` 放宽允许 `:`。hooks：`hooks/hooks.json` 经 `HookContribution` 接缝（ADR-0055 第二刀）编译为异步子进程钩子——matcher 精确/正则分流 + iknow 工具名候选集（`write_file`↔`Write`、`edit_file`↔`Edit|MultiEdit`、`todo_write` 不映射）、envelope 通用键别名、`${*_PLUGIN_ROOT}` 等按后缀替换；Pre exit 2 = 拦截，其余 fail-open。钩子链 additive 异步化（`await pre/post`，无 unhandledRejection）。设计 `plans/global-plugins-loading.md`；ADR `docs/adr/0095-global-plugin-components.md`。
 

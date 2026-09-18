@@ -42,13 +42,15 @@ description: 一句话说清「什么时候该用它」 # 决定它是否出现�
 ```
 
 - `description` 超过 1536 字符会被截断并 warn——**写一句话**，别在 description 里做正文。
-- 只有「有 `description` 且未 `disable-model-invocation: true`」的 skill 会出现在 `<available_skills>` 清单与 Web 的 skill 列表（`GET /api/v1/skills`）里。按名加载的拒绝面比清单窄：`disable-model-invocation: true` 在 TUI slash 与 Web `GET /api/v1/skills/:name` 都会被拒，而**缺 `description` 只在清单侧隐去**——TUI `/name` 的候选即该清单，故命中不了；但 Web 按名取正文只拒「不存在 / 已禁用」，缺 `description` 的 skill 仍能取到。注意 ACI `skill({name})` 同样不做这项过滤：模型若已知名字仍可直呼命中。
+- 只有「有 `description` 且未 `disable-model-invocation: true`」的 skill 会进入 **技能模型索引**——`<available_skills>` 清单（开场冻表 + 会话内新建增量）与模型侧 `skill({name})` 都只认这份资格。
+- **人侧 slash 走「可加载技能面」，比模型索引宽**：TUI `/` 候选、Web `GET /api/v1/skills`、CLI `/` 候选都含**无 `description`** 与 **`disable-model-invocation: true`** 的条目（三宿主同一入口），按名取正文也只拒「不存在」。所以缺 `description` 或标了 disable 的技能，人仍能 `/name` 加载。ADR-0098 / `specs/skill-index-increment.md`。
+- 两条闸互不越界：模型侧 `skill({name})` 对不合格名返回 typed 拒绝（文案写明改走 `/name`），**不**拦 `read_file` 读同一份 SKILL.md（SC5 末句）。
 
 ---
 
 ## 二、模型加载时实际看到什么（装配形态）
 
-三条加载路径（TUI slash / Web `GET /api/v1/skills/:name` / ACI `skill({name})`）交付**同一份** `createSkillBody` 产物，形态固定为三段，用空行连接：
+四条加载路径（TUI slash / Web `GET /api/v1/skills/:name` / CLI `/name` / ACI `skill({name})`）交付**同一份** `createSkillBody` 产物，形态固定为三段，用空行连接：
 
 1. **frontmatter 剥离后的正文**（正文为空则整段省略）
 2. **`Base directory: <skill 目录绝对路径>`**

@@ -35,6 +35,10 @@ import {
   IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION,
   isGraphModeText,
 } from "../../src/harness/graph/notification.js";
+import {
+  SKILL_INDEX_DELTA_PREFIX,
+  isSkillIndexDeltaText,
+} from "../../src/harness/skill/index-delta.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 
@@ -458,6 +462,51 @@ describe("session-state: isTuiHiddenUserMessage（host 注入不进 ❯ 气泡�
     ).toBe(true);
     expect(isTuiHiddenUserMessage(msg("真实问题"))).toBe(false);
     expect(isTuiHiddenUserMessage(msg("答", "assistant"))).toBe(false);
+  });
+
+  test("skill-index delta listing 为 hidden（ADR-0098 第五类注入信封）；普通 query 否", () => {
+    // spec SC1–SC4 / ADR-0098：增量 listing 是 host 注入的模型历史，不是
+    // 操作员键入 —— TUI 不画 ❯ 气泡。生产者本家谓词（src/harness/skill/
+    // index-delta.ts 的 isSkillIndexDeltaText）必须命中自己的常量，消费侧
+    // 只调谓词、不自己写前缀检查（与 graph_mode 用例同款双断言）。
+    expect(isSkillIndexDeltaText(SKILL_INDEX_DELTA_PREFIX)).toBe(true);
+    expect(
+      isTuiHiddenUserMessage(
+        msg(
+          `${SKILL_INDEX_DELTA_PREFIX}\nalpha: Alpha skill\n</available_skills>`
+        )
+      )
+    ).toBe(true);
+    // 前导空白容忍（同款 trimStart 纪律；经 loop-engine 追加时无前导空白，
+    // 但 seedInputHistory 走 stripPrefetchOverlay + trim 后仍是同一形态）。
+    expect(
+      isTuiHiddenUserMessage(
+        msg(
+          `\n  ${SKILL_INDEX_DELTA_PREFIX}\nalpha: Alpha skill\n</available_skills>`
+        )
+      )
+    ).toBe(true);
+    // 伪造形态：正文里提到 `<available_skills>`（非行首）不算信封 —— 不误伤
+    // 用户话（与 agent_status / graph_mode 同款边界）。
+    expect(
+      isTuiHiddenUserMessage(
+        msg("为什么 transcript 里有 <available_skills> 这段？")
+      )
+    ).toBe(false);
+    expect(isTuiHiddenUserMessage(msg("真实问题"))).toBe(false);
+  });
+
+  test("delta listing 不进 ↑ 历史（seedInputHistory 跳过第五类注入）", () => {
+    // ↑ recall 只回放操作员真键入的 query：恢复会话后 listing 不得变成可
+    // 回放条目（spec Boundaries「不进 ❯ 气泡 / CLI ↑ 历史」）。
+    const messages: ReadonlyArray<AnthropicNativeMessage> = [
+      msg("真实问题"),
+      msg(
+        `${SKILL_INDEX_DELTA_PREFIX}\nalpha: Alpha skill\n</available_skills>`
+      ),
+      msg("下一问"),
+    ];
+    expect(seedInputHistory(messages)).toEqual(["真实问题", "下一问"]);
   });
 
   test("prefetch overlay 进 history 时只留键入 query", () => {

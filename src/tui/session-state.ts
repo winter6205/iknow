@@ -30,6 +30,7 @@ import {
   SKILL_LOAD_PREFIX,
   SKILL_LOAD_PREFIX_SHORT,
 } from "../harness/skill/body.js";
+import { isSkillIndexDeltaText } from "../harness/skill/index-delta.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
 
 export type SessionRunState = "idle" | "running-fg" | "running-bg";
@@ -294,8 +295,8 @@ export function joinedUserText(message: AnthropicNativeMessage): string {
 /**
  * Host-injected user messages that must not render as typed bubbles
  * (agent_status bar + graph_mode notifications + drain summaries + verify
- * envelopes). Model history still holds them; TUI status/todo footer reads
- * agent_status stream events.
+ * envelopes + skill-index delta listings). Model history still holds them;
+ * TUI status/todo footer reads agent_status stream events.
  */
 export function isTuiHiddenUserMessage(
   message: AnthropicNativeMessage
@@ -307,7 +308,8 @@ export function isTuiHiddenUserMessage(
     isAgentStatusText(text) ||
     isGraphModeText(text) ||
     isSubagentDrainText(text) ||
-    isVerifyInjectedText(text)
+    isVerifyInjectedText(text) ||
+    isSkillIndexDeltaText(text)
   );
 }
 

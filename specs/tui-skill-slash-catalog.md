@@ -15,13 +15,13 @@ Typing `/<skill>` in TUI resolves the same way harness catalog does: canonical n
 4. Static vocabulary (`/continue`, `/help`, …) **wins** over skill names on exact collision.
 5. Remainder after the skill token uses **typed token length**, not `skill.name.length` alone when bare matched.
 6. Agents are **not** slash-loadable. Plugin `commands/` is **out of this spec**.
-7. CLI slash is **out of scope**.
+7. CLI slash 与 TUI/Web **同一入口** 的收口见 `specs/skill-index-increment.md`（本文件仍锁 catalog.get / remainder / 静态优先 / agents 不进 slash）。
 
 ## Out of scope
 
 - Plugin `commands/` discovery + `$ARGUMENTS`
 - Changing static Tab tri-state semantics beyond including catalog-backed skill candidates
-- Symlinking Claude plugin cache
+- 会话中途模型索引增量、可加载面无 description、CLI/Web 统一入口（`specs/skill-index-increment.md`）
 
 ## Input-contract classes
 

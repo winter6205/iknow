@@ -397,4 +397,72 @@ describe("parseSkillLoad", () => {
   it("静态命令优先 → undefined", () => {
     assert.equal(parseSkillLoad("/help", skills), undefined);
   });
+
+  // SC9：remainder 按 typed token 长度切，不按 canonical 名长度。
+  it("裸名命中 canonical → remainder 不被 canonical 长度吃掉（SC9）", () => {
+    const plugin = [
+      {
+        name: "arthurpower:using-agent-skills",
+        aliases: ["using-agent-skills"],
+      },
+    ];
+    assert.deepEqual(parseSkillLoad("/using-agent-skills 帮我调度", plugin), {
+      name: "arthurpower:using-agent-skills",
+      remainder: "帮我调度",
+    });
+    // canonical typed 与裸名 typed 必须收敛到同一 name + 同一 remainder。
+    assert.deepEqual(
+      parseSkillLoad("/arthurpower:using-agent-skills 帮我调度", plugin),
+      parseSkillLoad("/using-agent-skills 帮我调度", plugin)
+    );
+  });
+
+  it("remainder 为空 / 无 remainder → 空串（不切进名字里）", () => {
+    const plugin = [
+      {
+        name: "arthurpower:using-agent-skills",
+        aliases: ["using-agent-skills"],
+      },
+    ];
+    assert.deepEqual(parseSkillLoad("/using-agent-skills", plugin), {
+      name: "arthurpower:using-agent-skills",
+      remainder: "",
+    });
+  });
+});
+
+describe("slashCandidates — 可加载技能面（含无 description，SC9）", () => {
+  it("无 description 条目仍进候选，且 description 保持缺席（不补占位文案）", () => {
+    const skills = [
+      { name: "no-desc" },
+      { name: "with-desc", description: "有描述" },
+    ];
+    // 前缀至少 1 字符才混入 skill（空前缀只出静态命令）。
+    const out = slashCandidates("/n", skills).filter((c) => c.kind === "skill");
+    assert.equal(out.length, 1);
+    const noDesc = out[0];
+    assert.equal(noDesc?.name, "no-desc");
+    assert.equal(
+      noDesc?.kind === "skill" ? noDesc.description : "sentinel",
+      undefined
+    );
+    const withDesc = slashCandidates("/w", skills).filter(
+      (c) => c.kind === "skill"
+    );
+    assert.equal(
+      withDesc[0]?.kind === "skill" ? withDesc[0].description : "sentinel",
+      "有描述"
+    );
+  });
+
+  it("裸名别名参与前缀过滤，但只发一条 canonical 候选", () => {
+    const skills = [{ name: "arthurpower:use", aliases: ["use"] }];
+    const out = slashCandidates("/us", skills).filter(
+      (c) => c.kind === "skill"
+    );
+    assert.deepEqual(
+      out.map((c) => c.name),
+      ["arthurpower:use"]
+    );
+  });
 });

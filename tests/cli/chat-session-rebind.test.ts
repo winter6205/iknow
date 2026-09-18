@@ -144,13 +144,17 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
   });
 
   it("runChatSession 为重建装配 wrapRebuiltDeps（violation/commit 包装与初始装配同源）", () => {
-    // 结构性钉子：runChatSession 必须把 wrapChatDeps 交给重建缝，否则
-    // rebuilt 引擎会丢 violation counter 与 commitMessages 钩子。
+    // 结构性钉子：装配必须把**同一个** wrapChatDeps 同时用在初始 deps 与
+    // 重建缝（rebuildDeps.wrapRebuiltDeps），否则 rebuilt 引擎会丢 violation
+    // counter 与 commitMessages 钩子，或与初始装配漂移成两套包装语义。
+    // S5 抽出 assembleChatSessionContext 后接线移到 helper，故断言两半各自
+    // 成立：调用点把闭包传进装配，装配把它绑到重建缝。
     const src = readFileSync(
       join(import.meta.dirname, "..", "..", "src", "cli", "chat-session.ts"),
       "utf8"
     );
-    expect(src.includes("wrapRebuiltDeps: wrapChatDeps")).toBe(true);
+    expect(src.includes("wrappedDeps,\n    wrapChatDeps,")).toBe(true);
+    expect(src.includes("wrapRebuiltDeps: input.wrapChatDeps")).toBe(true);
   });
 
   it("根未变化 / 无 workspaceRoot / 会话文件缺席 → 不重建（not_found 保持静默）", async () => {
