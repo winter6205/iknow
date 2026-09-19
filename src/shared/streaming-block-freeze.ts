@@ -1,5 +1,5 @@
 /**
- * src/tui/streaming-block-freeze.ts
+ * src/shared/streaming-block-freeze.ts
  *
  * 会变长的 markdown：钉住除最后一个顶层非空块以外的前缀。
  * 纯函数、无模块级可变边界；调用方（Markdown）保存 boundary。

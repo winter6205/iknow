@@ -1,11 +1,11 @@
 /**
- * tests/tui/streaming-block-freeze.test.ts — 流式顶层块冻结纯函数。
+ * tests/shared/streaming-block-freeze.test.ts — 流式顶层块冻结纯函数。
  *
  * spec EXIT：empty；单块无前缀；多块时后缀变长前缀 raw 稳定且边界单调增；
  * 非字符串 TypeError；两次计算无共享可变边界。
  */
-import { describe, expect, test } from "bun:test";
-import { splitStreamingMarkdown } from "../../src/tui/streaming-block-freeze.js";
+import { describe, expect, test } from "vitest";
+import { splitStreamingMarkdown } from "../../src/shared/streaming-block-freeze.js";
 
 describe("splitStreamingMarkdown", () => {
   test("empty：空串无前缀可钉", () => {

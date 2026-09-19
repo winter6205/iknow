@@ -36,7 +36,7 @@ import { marked, type MarkedToken, type Token, type Tokens } from "marked";
 import { tuiPalette } from "./theme.js";
 import { clipFenceDisplayLines } from "./fence-display-cap.js";
 import { previewOverflowLabel } from "./tool-summary.js";
-import { splitStreamingMarkdown } from "./streaming-block-freeze.js";
+import { splitStreamingMarkdown } from "../shared/streaming-block-freeze.js";
 
 // -- 视觉宽度工具（表格压缩 / 截断专用；SSOT = string-width） ---------
 

@@ -20,6 +20,7 @@
 
 - `agent-status-instruction-echo.md` — 状态栏复诵升级：`instruction:` 逐字回显段 + pivot reconcile 一次性标记（ADR-0103 修订 ADR-0028；ACR PASS）
 - `transport-continue-persist.md` — transport retry / continue / failure persist
+- `interrupt-frozen-prefix-keep.md` — 模型在途打断留下 freeze 前缀（ADR-0108）
 
 ### TUI
 

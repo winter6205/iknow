@@ -39,6 +39,11 @@ import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createStubSignalTool } from "../../src/harness/stubs/stub-signal-tool.ts";
 import { assistantResult } from "../cli/_fixtures.ts";
 import {
+  makeStreamKeepAdapter,
+  textOf,
+  type StreamKeepStep,
+} from "../_helpers/stream-keep-fixtures.ts";
+import {
   createCompiledPatterns,
   createSecretRegistry,
   recognize,
@@ -1165,7 +1170,7 @@ describe("run() opts.priorMessages", () => {
 });
 
 describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
-  it("S12: signal abort during model in-flight -> cancelled; whole turn NOT in history", async () => {
+  it("S12: signal abort during model in-flight with no frozen prefix -> cancelled; history = user + interrupt", async () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -1195,9 +1200,8 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     const { result, trace } = await p;
     assert.equal(result.stopReason, "cancelled");
     assert.equal(result.turnCount, 0);
-    // Only the seed user message is in history; whole turn not appended.
-    // #392 T4:cancelled 时 system 中断消息 append 到末尾(transcript 一等公民),
-    // 所以 messages 长度 = 1(seed user) + 1(system interrupt)。
+    // ADR-0108 无 prefix 分支：本步没有任何可钉住的流式块 → 不落 assistant，
+    // cancelled 仍写 user + interrupt system message（钉住块留史由 keep 面测试认证）。
     assert.equal(result.messages.length, 2);
     assert.equal(result.messages[0]!.role, "user");
     assert.equal(result.messages[1]!.role, "system");
@@ -4327,5 +4331,348 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
     );
     // 不丢批次且按 tool_use 顺序。
     assert.deepEqual(committedToolResults, ["a", "b"]);
+  });
+});
+
+/**
+ * ADR-0108 interrupt frozen prefix keep —— 模型在途 cancelled closeout keep 面。
+ *
+ * 夹具适配器（tests/_helpers/stream-keep-fixtures.ts 共享）按脚本 step 依次:
+ * 先同步 emit text_delta(与墙上 draft 同源字节),
+ * 再返回脚本结果或悬挂至 signal abort(模拟模型在途永不交付)。悬挂由 raceModel
+ * 的 callerAbort 胜出收场,不等待完整 model step。脚本耗尽后的调用(收尾摘要轮)
+ * 立即返回空结果,避免测试挂起。
+ */
+const makeStreamingAdapter = (
+  steps: ReadonlyArray<StreamKeepStep>
+): LoopAdapter => makeStreamKeepAdapter(steps).adapter;
+
+describe("ADR-0108 model-in-flight cancelled keeps frozen prefix", () => {
+  it("SC1: cancelled with frozen prefix -> assistant(prefix) enters history before Interrupted by user.", async () => {
+    const reg = createRegistry([
+      createStubTool({ name: "noop", next: () => ({}) }),
+    ]);
+    const adapter = makeStreamingAdapter([
+      {
+        deltas: ["## Head\n\n", "First paragraph.\n\n", "Second parag"],
+      },
+    ]);
+    const batches: AnthropicNativeMessage[][] = [];
+    const controller = new AbortController();
+    const p = run(
+      "x",
+      {
+        adapter,
+        executor: createExecutor(reg),
+        registry: reg,
+        maxTurns: 5,
+        commitMessages: async (msgs) => {
+          batches.push([...msgs]);
+        },
+      },
+      controller.signal
+    );
+    setTimeout(() => controller.abort(), 10);
+    const { result } = await p;
+    assert.equal(result.stopReason, "cancelled");
+    assert.equal(result.messages.length, 3);
+    assert.equal(result.messages[0]!.role, "user");
+    assert.equal(result.messages[1]!.role, "assistant");
+    assert.equal(textOf(result.messages[1]!), "## Head\n\nFirst paragraph.\n\n");
+    assert.equal(result.messages[2]!.role, "system");
+    assert.equal(textOf(result.messages[2]!), "Interrupted by user.");
+    // invariant 7 顺序:先 assistant(可带 pending 注入)commit,再 interrupt。
+    assert.deepEqual(
+      batches.map((b) => b.map((m) => m.role)),
+      [
+        ["assistant"],
+        ["system"],
+      ]
+    );
+  });
+
+  it("SC2: cancelled with only a growing tail (no prefix) -> no assistant, still user + interrupt", async () => {
+    const reg = createRegistry([
+      createStubTool({ name: "noop", next: () => ({}) }),
+    ]);
+    const adapter = makeStreamingAdapter([{ deltas: ["Single growing block"] }]);
+    const batches: AnthropicNativeMessage[][] = [];
+    const controller = new AbortController();
+    const p = run(
+      "x",
+      {
+        adapter,
+        executor: createExecutor(reg),
+        registry: reg,
+        maxTurns: 5,
+        commitMessages: async (msgs) => {
+          batches.push([...msgs]);
+        },
+      },
+      controller.signal
+    );
+    setTimeout(() => controller.abort(), 10);
+    const { result } = await p;
+    assert.equal(result.stopReason, "cancelled");
+    assert.equal(result.messages.length, 2);
+    assert.equal(result.messages[0]!.role, "user");
+    assert.equal(result.messages[1]!.role, "system");
+    assert.deepEqual(
+      batches.map((b) => b.map((m) => m.role)),
+      [["system"]]
+    );
+  });
+
+  it("overflow class: a long multi-block prefix enters assistant in full; only the last block drops", async () => {
+    const reg = createRegistry([
+      createStubTool({ name: "noop", next: () => ({}) }),
+    ]);
+    const blocks = ["## Title\n\n"];
+    for (let i = 1; i <= 50; i++) {
+      blocks.push(`Paragraph number ${i} with content.\n\n`);
+    }
+    const expectedPrefix = blocks.join("");
+    const adapter = makeStreamingAdapter([
+      { deltas: [...blocks, "tail still gro"] },
+    ]);
+    const controller = new AbortController();
+    const p = run(
+      "x",
+      {
+        adapter,
+        executor: createExecutor(reg),
+        registry: reg,
+        maxTurns: 5,
+      },
+      controller.signal
+    );
+    setTimeout(() => controller.abort(), 10);
+    const { result } = await p;
+    assert.equal(result.stopReason, "cancelled");
+    assert.equal(result.messages.length, 3);
+    assert.equal(textOf(result.messages[1]!), expectedPrefix);
+    assert.ok(!textOf(result.messages[1]!).includes("tail still gro"));
+  });
+
+  it("concurrent class: abort after a completed earlier turn keeps only the in-flight prefix once (no double assistant)", async () => {
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([echo]);
+    const adapter = makeStreamingAdapter([
+      {
+        deltas: ["## A\n\n", "body a\n\n"],
+        result: assistantResult({
+          texts: ["## A\n\nbody a\n\n"],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "p" } }],
+        }),
+      },
+      { deltas: ["## B\n\n", "body b\n\n", "tail ta"] },
+    ]);
+    const controller = new AbortController();
+    const p = run(
+      "go",
+      {
+        adapter,
+        executor: createExecutor(reg),
+        registry: reg,
+        maxTurns: 5,
+      },
+      controller.signal
+    );
+    setTimeout(() => controller.abort(), 10);
+    const { result } = await p;
+    assert.equal(result.stopReason, "cancelled");
+    // user, assistant(## A + tool_use), user(tool_result), assistant(## B 前缀), system
+    assert.deepEqual(
+      result.messages.map((m) => m.role),
+      ["user", "assistant", "user", "assistant", "system"]
+    );
+    const turnOne = result.messages.filter(
+      (m) => m.role === "assistant" && textOf(m).includes("## A")
+    );
+    assert.equal(turnOne.length, 1); // 已完成回合不重复 keep
+    assert.equal(textOf(result.messages[3]!), "## B\n\nbody b\n\n");
+    assert.equal(textOf(result.messages[4]!), "Interrupted by user.");
+  });
+
+  it("SC7 / invariant 4: abort while tool in flight after delivered turn -> guard blocks re-keep (four-message shape)", async () => {
+    // 钉住 closeoutInFlightStop 的 modelInFlight 守卫:模型已交付带 tool_call
+    // 的回合(流式 text_delta 已随正常路径 append 为 assistant)后,工具在途
+    // 取消时 closeout 不得再把缓冲里同一段文本二次 keep 成重复 assistant,
+    // 否则 SC7 四条消息形状(user/assistant(tool_use)/user(tool_result)/
+    // system)静默回退成五条。
+    const slowTool = createStubSignalTool({ name: "slow", delayMs: 100 });
+    const reg = createRegistry([slowTool]);
+    const adapter = makeStreamingAdapter([
+      {
+        deltas: ["## Head\n\n", "First paragraph.\n\n"],
+        result: assistantResult({
+          texts: ["## Head\n\nFirst paragraph.\n\n"],
+          toolCalls: [{ id: "u1", name: "slow", input: { v: 1 } }],
+        }),
+      },
+    ]);
+    const controller = new AbortController();
+    const p = run(
+      "go",
+      {
+        adapter,
+        executor: createExecutor(reg),
+        registry: reg,
+        maxTurns: 5,
+      },
+      controller.signal
+    );
+    // 模型步瞬时完成,10ms 时落在 slow 工具(100ms)在途窗口内。
+    setTimeout(() => controller.abort(), 10);
+    const { result } = await p;
+    assert.equal(result.stopReason, "cancelled");
+    assert.deepEqual(
+      result.messages.map((m) => m.role),
+      ["user", "assistant", "user", "system"]
+    );
+    // 已交付回合只有一份:无第二个 assistant、无 keep 前缀文本泄漏。
+    assert.equal(
+      result.messages.filter((m) => m.role === "assistant").length,
+      1
+    );
+    assert.equal(textOf(result.messages[3]!), "Interrupted by user.");
+  });
+
+  it("exception class: assistant commit failure throws MessageCommitError and never leaves an orphan interrupt", async () => {
+    const reg = createRegistry([
+      createStubTool({ name: "noop", next: () => ({}) }),
+    ]);
+    const adapter = makeStreamingAdapter([
+      { deltas: ["## Head\n\n", "First paragraph.\n\n", "Second parag"] },
+    ]);
+    const attempted: AnthropicNativeMessage[][] = [];
+    const controller = new AbortController();
+    const p = run(
+      "x",
+      {
+        adapter,
+        executor: createExecutor(reg),
+        registry: reg,
+        maxTurns: 5,
+        commitMessages: async (msgs) => {
+          attempted.push([...msgs]);
+          throw new Error("commit hook down");
+        },
+      },
+      controller.signal
+    );
+    setTimeout(() => controller.abort(), 10);
+    await assert.rejects(p, (err: unknown) => {
+      assert.ok(err instanceof MessageCommitError);
+      return true;
+    });
+    // 只尝试过 prefix commit;不得再 commit interrupt(孤儿 interrupt 禁止)。
+    assert.deepEqual(
+      attempted.map((b) => b.map((m) => m.role)),
+      [["assistant"]]
+    );
+  });
+});
+
+describe("ADR-0108 model-in-flight timeout keeps frozen prefix, never user-cancel copy", () => {
+  it("SC5: model timeout with frozen prefix -> assistant(prefix) kept; no Interrupted by user.", async () => {
+    const reg = createRegistry([
+      createStubTool({ name: "noop", next: () => ({}) }),
+    ]);
+    const adapter = makeStreamingAdapter([
+      {
+        deltas: ["## Head\n\n", "First paragraph.\n\n", "Second parag"],
+      },
+    ]);
+    const batches: AnthropicNativeMessage[][] = [];
+    const { result, trace } = await run("x", {
+      adapter,
+      executor: createExecutor(reg),
+      registry: reg,
+      maxTurns: 5,
+      modelTimeoutMs: 20,
+      commitMessages: async (msgs) => {
+        batches.push([...msgs]);
+      },
+    });
+    assert.equal(result.stopReason, "timeout");
+    assert.equal(result.messages.length, 2);
+    assert.equal(result.messages[0]!.role, "user");
+    assert.equal(textOf(result.messages[1]!), "## Head\n\nFirst paragraph.\n\n");
+    // ADR-0091:钟 abort ≠ user cancel —— 不得出现 interrupt system 消息。
+    assert.ok(!result.messages.some((m) => m.role === "system"));
+    assert.ok(
+      !result.messages.some((m) => textOf(m) === "Interrupted by user."),
+      "timeout must not carry the user-cancel copy"
+    );
+    // keep 刀只 commit assistant;interrupt 批次不存在。
+    assert.deepEqual(
+      batches.map((b) => b.map((m) => m.role)),
+      [["assistant"]]
+    );
+    const last = trace.turns[trace.turns.length - 1]!;
+    assert.equal(last.cancelKind, "timerTimeout");
+  });
+
+  it("SC5 tail-only: model timeout with only a growing block -> no assistant, no interrupt", async () => {
+    const reg = createRegistry([
+      createStubTool({ name: "noop", next: () => ({}) }),
+    ]);
+    const adapter = makeStreamingAdapter([{ deltas: ["Single growing block"] }]);
+    const batches: AnthropicNativeMessage[][] = [];
+    const { result } = await run("x", {
+      adapter,
+      executor: createExecutor(reg),
+      registry: reg,
+      maxTurns: 5,
+      modelTimeoutMs: 20,
+      commitMessages: async (msgs) => {
+        batches.push([...msgs]);
+      },
+    });
+    assert.equal(result.stopReason, "timeout");
+    assert.equal(result.messages.length, 1);
+    assert.equal(result.messages[0]!.role, "user");
+    assert.equal(batches.length, 0);
+  });
+
+  it("SC5 exception class: prefix commit failure throws MessageCommitError; timeout never commits an interrupt", async () => {
+    const reg = createRegistry([
+      createStubTool({ name: "noop", next: () => ({}) }),
+    ]);
+    const adapter = makeStreamingAdapter([
+      { deltas: ["## Head\n\n", "First paragraph.\n\n", "tail gr"] },
+    ]);
+    const attempted: AnthropicNativeMessage[][] = [];
+    await assert.rejects(
+      run("x", {
+        adapter,
+        executor: createExecutor(reg),
+        registry: reg,
+        maxTurns: 5,
+        modelTimeoutMs: 20,
+        commitMessages: async (msgs) => {
+          attempted.push([...msgs]);
+          throw new Error("commit hook down");
+        },
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof MessageCommitError);
+        return true;
+      }
+    );
+    assert.deepEqual(
+      attempted.map((b) => b.map((m) => m.role)),
+      [["assistant"]]
+    );
   });
 });

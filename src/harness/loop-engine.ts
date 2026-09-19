@@ -60,6 +60,7 @@ import type {
   CountTokensResult,
   LoopState,
   RunResult,
+  StopReason,
   TokenUsage,
   Transition,
 } from "./model-adapter/types.js";
@@ -81,6 +82,7 @@ import type {
 import { safeTrace } from "./trace/index.js";
 import type { HarnessStreamEvent } from "./stream.js";
 import { safeEmitStream } from "./stream.js";
+import { splitStreamingMarkdown } from "../shared/streaming-block-freeze.js";
 import type { RaceTimers } from "./race-timers.js";
 import { lastNonEmptyAssistant } from "./last-nonempty-assistant.js";
 import {
@@ -962,6 +964,69 @@ function appendSystemInterrupt(state: LoopState): LoopState {
     ]),
     turnCount: state.turnCount,
   };
+}
+
+/**
+ * ADR-0108:模型在途观察窗缓冲 —— `text` 累积与墙上 draft 同源字节的
+ * text_delta;`modelInFlight` 标记本步输出是否尚未定稿(已交付回合的文本
+ * 留在缓冲里但不在途,closeout 不得二次 keep,SC7 守卫)。单点声明,
+ * closeout / 开窗 / 关窗 / stepWithTrace 装配面共用。
+ */
+type ModelStreamWindow = { text: string; modelInFlight: boolean };
+
+/**
+ * ADR-0108 in-flight closeout keep(与墙上同一把 freeze 刀):模型在途取消 /
+ * 超时时,已钉住的流式前缀 prefixRaw 作为本轮 assistant 进权威历史,tailRaw
+ * (还在长的块)丢弃;无 prefix → 不落 assistant,仍写 user + interrupt(SC2)。
+ * 顺序 invariant 7:split →(有 prefix)assistant 随批 commit(顺带 flush
+ * pending 注入)→(cancelled)interrupt append 并单独 commit。assistant commit
+ * 失败即抛 MessageCommitError,绝不带着「前缀未进史」的假史继续写 interrupt。
+ * 工具在途停因 modelInFlight=false —— assistant 已随正常路径 append,本函数
+ * 直通(SC7 四条消息形状不回退)。
+ */
+async function closeoutInFlightStop(opts: {
+  readonly deps: LoopEngineDeps;
+  readonly reason: StopReason;
+  readonly finalState: LoopState;
+  readonly modelStreamRef: ModelStreamWindow;
+  readonly pendingInjected: PendingInjected;
+}): Promise<LoopState> {
+  const { deps, reason, finalState, modelStreamRef, pendingInjected } = opts;
+  // ADR-0108 invariant 5:timeout 与 cancelled 用同一把 keep 刀(ADR-0091 的
+  // 钟 abort 只改停因归属,不改 keep 语义);interrupt 文案仍只属于 cancelled。
+  const keptPrefix =
+    (reason === "cancelled" || reason === "timeout") &&
+    modelStreamRef.modelInFlight
+      ? splitStreamingMarkdown(modelStreamRef.text).prefixRaw
+      : "";
+  let keptState = finalState;
+  if (keptPrefix !== "") {
+    const keptMsg: AnthropicNativeMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: keptPrefix }],
+    };
+    keptState = appendMessage({ state: finalState, msg: keptMsg });
+    await commitMessagesOrThrow(deps, [...pendingInjected.take(), keptMsg]);
+  }
+  if (reason !== "cancelled") return keptState;
+  // #392 T4 / G3 #388:cancelled 把 system 中断消息 append 到权威历史末尾
+  // (transcript 一等公民)。timeout 不在此面:钟 abort ≠ 用户中断,固定文案
+  // "Interrupted by user." 不适用(ADR-0091)。
+  const interrupted = appendSystemInterrupt(keptState);
+  const interruptMsg: AnthropicNativeMessage = {
+    role: "system",
+    content: [{ type: "text", text: SYSTEM_INTERRUPT_TEXT }],
+  };
+  // #888:cancelled 收尾把残留 pending 注入与 interrupt 一起 flush(keep prefix
+  // 在场时 pending 已随 assistant 批 flush,interrupt 单独成批)——不 flush 则
+  // 宿主收尾 save 在此处 LCP 失配 fork。无 commitMessages 钩子时 no-op。
+  await commitMessagesOrThrow(
+    deps,
+    keptPrefix === ""
+      ? [...pendingInjected.take(), interruptMsg]
+      : [interruptMsg]
+  );
+  return interrupted;
 }
 
 /**
@@ -2228,6 +2293,33 @@ async function runToolPhase(opts: {
 }
 
 /**
+ * ADR-0108:开一段模型在途观察窗 —— 返回包一层的 onStream(只累积 text_delta
+ * 原文进 ref,与墙上 draft 同源字节;其余事件原样转发)并重置缓冲、置
+ * modelInFlight=true。reactive-compact 重试用同一 helper 重开窗口(半截输出
+ * 不属于重试轮的 keep 面)。ref 缺席(public step)→ 零包装,原样转发。
+ */
+function openModelInFlightWindow(
+  ref: ModelStreamWindow | undefined,
+  onStream: ((event: HarnessStreamEvent) => void) | undefined
+): ((event: HarnessStreamEvent) => void) | undefined {
+  if (ref === undefined) return onStream;
+  ref.text = "";
+  ref.modelInFlight = true;
+  return (event) => {
+    if (event.type === "text_delta") ref.text += event.text;
+    safeEmitStream(onStream, event);
+  };
+}
+
+/**
+ * ADR-0108:模型已交付整回合 —— 离开在途窗口。此后 assistant 走正常 append
+ * 路径入史,工具在途 / 后续停因不再进 keep 面(SC7 四条消息形状不回退)。
+ */
+function closeModelInFlightWindow(ref: ModelStreamWindow | undefined): void {
+  if (ref !== undefined) ref.modelInFlight = false;
+}
+
+/**
  * 017 T5:stepWithTrace 在原 step 逻辑上叠加:
  *   - step 入口记 started = performance.now(),出口算 durationMs;
  *   - 调用 runModelPhase 包 adapter.step + 超时 + abort + 协议错误;
@@ -2273,6 +2365,12 @@ async function stepWithTrace(opts: {
   readonly toolLoopRef: { events: ToolLoopEvent[]; nextPhase: number };
   /** #888:run 作用域注入消息 pending 缓冲(public step 每次新建)。 */
   readonly pendingInjected: PendingInjected;
+  /**
+   * ADR-0108:模型在途流式正文缓冲 —— 与墙上 draft 同源字节(text_delta 逐段
+   * 累积),供 run() closeout 在 cancelled / timeout 时用同一把 freeze 刀 keep
+   * 前缀。仅 run() 传入;public step() 不传 = 不累积、零包装(单步无 closeout)。
+   */
+  readonly modelStreamRef?: ModelStreamWindow;
 }): Promise<{
   transition: Transition;
   turn: TurnTrace | null;
@@ -2374,6 +2472,13 @@ async function stepWithTrace(opts: {
     opts.deps,
     opts.pendingInjected
   );
+  // ADR-0108:模型在途观察窗 —— 每 step 入口重置缓冲,keep 只针对本步未定稿
+  // 输出;已完成回合已随正常路径 append 的 assistant 不会被二次写入。
+  const modelStreamRef = opts.modelStreamRef;
+  const modelOnStream = openModelInFlightWindow(
+    modelStreamRef,
+    opts.onStream
+  );
   const firstPhase = await runModelPhase({
     state: deltaState,
     deps: opts.deps,
@@ -2381,7 +2486,7 @@ async function stepWithTrace(opts: {
     started,
     modelHardCapMs: modelClocks.hardCapMs,
     modelIdleTimeoutMs: modelClocks.idleTimeoutMs,
-    onStream: opts.onStream,
+    onStream: modelOnStream,
     reactiveAttemptedRef: opts.reactiveAttemptedRef,
   });
   // 非 reactive 路径:模型看到的最后一条即 deltaState(含增量注入)。
@@ -2430,6 +2535,15 @@ async function stepWithTrace(opts: {
             opts.pendingInjected
           );
           effectiveState = compactedWithDelta;
+          // ADR-0108:reactive 重试是一次全新的模型生成 —— 重开观察窗(重置
+          // 缓冲),前一次抛 PromptTooLongError 前的半截输出不属于重试轮 keep 面。
+          // 重试的 runModelPhase 消费本次开窗的返回值,不复用首次包装闭包:
+          // 两者今天写到同一个 ref、当前等价,但依赖「返回值恰好相同」是隐性
+          // stale-closure 契约,窗口一旦改为每次新建装箱就会静默错位。
+          const retryOnStream = openModelInFlightWindow(
+            modelStreamRef,
+            opts.onStream
+          );
           const compressedAttempt = await runModelPhase({
             state: compactedWithDelta,
             deps: opts.deps,
@@ -2437,7 +2551,7 @@ async function stepWithTrace(opts: {
             started,
             modelHardCapMs: modelClocks.hardCapMs,
             modelIdleTimeoutMs: modelClocks.idleTimeoutMs,
-            onStream: opts.onStream,
+            onStream: retryOnStream,
             reactiveAttemptedRef: opts.reactiveAttemptedRef,
           });
           if (compressedAttempt.kind === "reactive_compact_pending") {
@@ -2554,6 +2668,8 @@ async function stepWithTrace(opts: {
     );
   }
   const turnResult = modelPhase.result;
+  // ADR-0108:整回合已交付 —— 关闭在途窗口,后续停因不再进 keep 面。
+  closeModelInFlightWindow(modelStreamRef);
 
   if (
     turnResult.projection.toolCalls.length === 0 &&
@@ -2927,6 +3043,10 @@ export async function run(
   const toolLoopRef = { events: [] as ToolLoopEvent[], nextPhase: 0 };
   // #888:run 作用域注入消息 pending 缓冲(见 createPendingInjected)。
   const pendingInjected = createPendingInjected();
+  // ADR-0108:模型在途流式正文缓冲 —— stepWithTrace 在模型在途窗口内累积
+  // text_delta(与墙上 draft 同源字节),cancelled closeout 用同一把 freeze
+  // 刀把已钉住前缀 keep 进权威历史。
+  const modelStreamRef = { text: "", modelInFlight: false };
   // ADR-0081:每个 run() 重新结算短现势(同 deps 跨 run 不沿用旧 latch)。
   resetGraphPresenceLatch(deps);
   while (true) {
@@ -3002,6 +3122,7 @@ export async function run(
         reconcileRef,
         toolLoopRef,
         pendingInjected,
+        modelStreamRef,
       });
     } catch (err) {
       if (err instanceof MaxTurnsExceeded) {
@@ -3029,34 +3150,17 @@ export async function run(
     }
     if (transition.kind === "stop") {
       const { reason, finalState } = transition;
-      // #392 T4 / G3 #388:signal abort 取消时把 system 中断消息 append
-      // 到权威历史末尾(transcript 一等公民)。在 epilogueSummary 之前完成,
-      // 让收尾摘要事件看到完整历史(若它消费 messages 派生 stop_summary 文案)。
-      // Assistant 回合在 cancelled 时不进历史(raceModel / cancelled 归因),
-      // 所以 system 直接 append 到 finalState 末尾即可,不会与半截 assistant
-      // 重复或错位。timeout 不在此分支处理:timeout 是模型层超时而非用户中断,
-      // 固定文案 "Interrupted by user." 不适用;后续若需要可在 toInterruptReason
-      // 引入新 label 时再扩。
-      const finalMessages =
-        reason === "cancelled"
-          ? appendSystemInterrupt(finalState).messages
-          : finalState.messages;
-      // #888:cancelled 收尾把 system interrupt(以及任何残留 pending 注入)
-      // 一起 flush —— system interrupt 与状态栏同属「进内存不进 commit 流」
-      // 的注入类消息,不 flush 则宿主收尾 save 在此处 LCP 失配 fork。
-      // 无 commitMessages 钩子时 no-op(零 IO 语义不变)。其余停因
-      // (protocolError / emptyFinalResponse = #120 裁决 turn 不进历史;
-      // completed / timeout / fused / nonSuccessStop 的 pending 已随最后
-      // commit flush)均无残留或按裁决丢弃。
-      if (reason === "cancelled") {
-        await commitMessagesOrThrow(deps, [
-          ...pendingInjected.take(),
-          {
-            role: "system",
-            content: [{ type: "text", text: SYSTEM_INTERRUPT_TEXT }],
-          },
-        ]);
-      }
+      // ADR-0108 / #392 T4 / #888:模型在途 cancelled 的 freeze 前缀 keep、
+      // interrupt append 与 commit flush 顺序收敛在 closeoutInFlightStop
+      // (见该函数文档);在 epilogueSummary 之前完成,收尾摘要看到完整历史。
+      const keptState = await closeoutInFlightStop({
+        deps,
+        reason,
+        finalState,
+        modelStreamRef,
+        pendingInjected,
+      });
+      const finalMessages = keptState.messages;
       const finalText =
         reason === "completed" ? deriveFinalText(finalMessages) : null;
       // ADR-0094 SC4-SC5: transport 失败时的网关侧摘要(thread from

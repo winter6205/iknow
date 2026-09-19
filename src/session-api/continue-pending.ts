@@ -83,7 +83,13 @@ export function evaluateContinuePending(opts: {
   if (classified.length === 0) {
     return { ok: false, exit: "nothing_pending" };
   }
-  return classifyLastMessage(classified[classified.length - 1]!);
+  // stripTrailingInterrupt 只在末尾确实是 interrupt system 消息时切片,
+  // 长度差即「本次分类是否削掉了 interrupt」的判据。
+  const strippedTrailingInterrupt = classified.length !== messages.length;
+  return classifyLastMessage(
+    classified[classified.length - 1]!,
+    strippedTrailingInterrupt
+  );
 }
 
 function isPinnedUserGoal(goal: GoalState | undefined): boolean {
@@ -115,7 +121,8 @@ function isInterruptSystem(msg: AnthropicNativeMessage): boolean {
 }
 
 function classifyLastMessage(
-  last: AnthropicNativeMessage
+  last: AnthropicNativeMessage,
+  strippedTrailingInterrupt: boolean
 ): ContinuePendingVerdict {
   if (last.role === "user") {
     if (isToolResultOnlyUser(last)) return { ok: true };
@@ -127,7 +134,13 @@ function classifyLastMessage(
   if (last.role === "assistant") {
     if (hasToolUse(last)) return { ok: true };
     if (hasNonEmptyText(last)) {
-      return { ok: false, exit: "nothing_pending" };
+      // ADR-0108：文本 assistant 紧跟 interrupt = 模型在途被打断、盘上留着
+      // freeze 前缀 —— 终答后不会再有 interrupt，所以这不是完整终答，本轮仍
+      // pending，/continue 得以从前缀续跑（transport-continue-persist SC3）。
+      // 无 interrupt 的文本终答维持 nothing_pending（P3 合同不变）。
+      return strippedTrailingInterrupt
+        ? { ok: true }
+        : { ok: false, exit: "nothing_pending" };
     }
     return { ok: true };
   }

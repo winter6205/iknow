@@ -156,12 +156,15 @@ describe("evaluateContinuePending cancelled_keep_interrupt", () => {
     assert.equal(messages[messages.length - 1]?.role, "system");
   });
 
-  it("trailing interrupt after completed assistant → nothing_pending", () => {
+  it("trailing interrupt after text assistant = ADR-0108 kept frozen prefix → pending", () => {
+    // 钉住的不变式：interrupt 只在 cancelled 时写入，终答后不会再生成它。
+    // ADR-0108 后「文本 assistant + interrupt」= 模型在途被打断留下的 freeze
+    // 前缀，不是完整终答 —— /continue 必须放行从前缀续跑。无 interrupt 的
+    // 文本终答仍是 nothing_pending（上方 P3 用例覆盖）。
     const v = evaluateContinuePending({
       messages: [userText("hi"), assistantText("done"), INTERRUPT],
     });
-    assert.equal(v.ok, false);
-    if (!v.ok) assert.equal(v.exit, "nothing_pending");
+    assert.equal(v.ok, true);
   });
 });
 

@@ -148,8 +148,8 @@ _Avoid_: identity strip above prompt；完成后用 `done` 替换概述；完成
 **session location chrome（会话位置行）**: TUI 底栏在 ContextBar 之下**常驻一行** `路径 · 分支`；绑 task worktree 只换同一行的路径。子代理与 Graph 在它下面（两者都有时子代理在上）；不进焦点环、不进模型消息、不带 dirty/diff。
 _Avoid_: 绑树才出现；未绑树 0 行；用显隐当「在不在树上」；常驻第二行 dirty/diff；子代理画在位置行上面
 
-**streaming block freeze**: 会变长的那串 markdown 里，除最后一个顶层块外钉住，后续增量不再 lexer、不再重建前缀子树；边界只前进。
-_Avoid_: 把历史消息 memo 当成同一件事；每个新字整篇重解析；冻结时放开围栏 32 行窗
+**streaming block freeze**: 会变长的那串 markdown 里，除最后一个顶层块外钉住，后续增量不再 lexer、不再重建前缀子树；边界只前进。cancelled 模型在途 keep 与墙上同一刀：`prefixRaw` 进权威历史，`tailRaw` 丢掉。切刀落在 harness 可 import 的模块，不是 TUI 私有。ADR-0108。
+_Avoid_: 把历史消息 memo 当成同一件事；每个新字整篇重解析；冻结时放开围栏 32 行窗；只给 TUI lexer 用、closeout 另按整步丢 assistant；harness import `src/tui`
 
 **ToolExecutionContext**: Executor 透传给 handler 的执行上下文 `{ signal }`；run 第三参 signal 原样透传、不创建子 signal，超时由 Executor `Promise.race` 外包而非 ctx 携带。
 _Avoid_: 在 ctx 里放 timeoutMs；为每个 handler 建子 AbortController
@@ -160,8 +160,8 @@ _Avoid_: 一波结果 `some(message==="timeout")` 升格为整回合停
 **turn timeout**: 外层 `AbortSignal` 已 abort、且 cancelled 未抢先时的 `StopReason: timeout`。ADR-0091。
 _Avoid_: 与 per-call tool timeout 混名
 
-**in-flight closeout**: abort/timeout/进程死亡时的收尾——live：模型在途则整回合不进历史；工具在途则 assistant 已追加，在途 tool 填 `execution_failed`（`"cancelled"` / `"timeout"`），再编码为 tool_result。signal 优先于 timeout。resume/load：未配对 `tool_use` 填 `"process"`（`InterruptReason` 预留档），**不加** `Interrupted by user.`；mutating 工具须指示先检查副作用再重跑。一律走现有 `encodeToolResults`。
-_Avoid_: 回滚已追加的 assistant 回合；悬空未回填的 tool call；把进程死亡当成 cancelled
+**in-flight closeout**: abort/timeout/进程死亡时的收尾。live：模型在途按 **streaming block freeze** 留下 `prefixRaw` 作本轮 assistant，丢掉还在长的 `tailRaw`（无 prefix 则不落 assistant）；工具在途则 assistant 已追加，在途 tool 填 `execution_failed`（`"cancelled"` / `"timeout"`），再编码为 tool_result。已闭合 `tool_use` 留下，未执行的走 cancelled 回填。signal 优先于 timeout。cancelled 另写 **interrupt system message**；resume/load 进程死亡未配对 `tool_use` 填 `"process"`，**不加** `Interrupted by user.`。mutating 工具须指示先检查副作用再重跑。一律走现有 `encodeToolResults`。ADR-0108。
+_Avoid_: 模型在途把已钉住前缀整条丢掉；回滚已追加的 assistant 回合；悬空未回填的 tool call；把进程死亡当成 cancelled；只在墙上留前缀、盘上没有
 
 **required runtime layer / conditional remediation layer**: 017 的两层对仗边界——required runtime layer（signal / timeout / trace / cancelled-timeout 停止 / in-flight closeout）已实施；conditional remediation layer（自动重试、checkpoint 落盘、token-cost 护栏、trace B 层字段、工具分类超时、错误分类细化、总耗时独立 stop、OTel 导出）017 显式禁止，推迟到 018 真实接通后按 013 条件式修复原则补。
 _Avoid_: 把 conditional remediation layer 提前带入 Foundation 内核；用禁词扫描注释/JSDoc 代替可执行面能力边界（checkpoint 落盘在 session-api）
@@ -685,7 +685,8 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **声称位置 vs verify round**: 窗口右端是 messages 下标（与 `finalText` 同源回扫）；`round` 只记验证第几轮（ADR-0073）
 - **continue_pending vs goal 功能**: continue 是 HITL 同一会话 skip-append；`/goal` 钉着则拒绝（`goal_active`），禁止把 continue 当 goal 续跑的下一跳
 - **自动模式 vs goal 功能**: 自动模式是权限；goal 功能是斜杠钉使命后的续跑。正交，可同时开
-- **continue_pending vs in-flight closeout**: continue 只消费 `store.load` 的 closeout 投影补悬空 `tool_use`；不另写 sanitize 去删改 tool 对，也不把 closeout 本身当续跑口令
+- **streaming block freeze vs in-flight closeout**: 同一刀切 prefix/tail；freeze 不是纯渲染优化（ADR-0108）
+- **continue_pending vs in-flight closeout**: continue 只消费 `store.load` 的 closeout 投影补悬空 `tool_use`；不另写 sanitize 去删改 tool 对，也不把 closeout 本身当续跑口令；留下的 freeze 前缀仍在 prior 里
 - **continue_pending vs interrupt system message**: 续跑可从**本次 prior**去掉末尾 interrupt；盘上仍有；普通打字带着 interrupt
 - **continue_pending vs FaultClass retry**: 续跑不是传输重试；看不见输出的 idle/网络错才走 retry
 - **sticky notice vs viewport API error**: 前者是底栏粘滞提示；后者是对话流行、不进 transcript
