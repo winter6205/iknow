@@ -147,6 +147,114 @@ describe("agentStatusFromEvent: 事件是快照的唯一来源", () => {
 });
 
 // ---------------------------------------------------------------------------
+// spec agent-status-instruction-echo 子弹5 / T4：显示面不动 —— 事件映射扩
+// （容忍并透传 instruction/reconcile），AgentStatusLine 消费面零变化。
+// ---------------------------------------------------------------------------
+
+describe("agentStatusFromEvent: instruction/reconcile 透传（事件映射扩）", () => {
+  test("带 instruction/reconcile 段的事件 → 快照逐字透传两字段", () => {
+    const snapshot = agentStatusFromEvent({
+      type: "agent_status",
+      lastTool: "bash",
+      openTodoLines: ["- [ ] alpha"],
+      instruction: "先别查新闻，改查天气",
+      reconcile: true,
+    });
+    expect(snapshot).not.toBeNull();
+    expect(snapshot!.instruction).toBe("先别查新闻，改查天气");
+    expect(snapshot!.reconcile).toBe(true);
+  });
+
+  test("旧事件（无新槽）→ 快照退回旧字段集形态，key 缺席（F1）", () => {
+    const snapshot = agentStatusFromEvent(
+      agentStatusEvent("echo", ["- [ ] alpha"])
+    )!;
+    expect("instruction" in snapshot).toBe(false);
+    expect("reconcile" in snapshot).toBe(false);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+  });
+
+  test("instruction=false/reconcile 在场等混合形态只透传事件实际值，不造默认", () => {
+    const s1 = agentStatusFromEvent({
+      type: "agent_status",
+      lastTool: "echo",
+      openTodoLines: [],
+      instruction: null,
+      reconcile: false,
+    })!;
+    expect(s1.instruction).toBeNull();
+    expect(s1.reconcile).toBe(false);
+    const s2 = agentStatusFromEvent({
+      type: "agent_status",
+      lastTool: "echo",
+      openTodoLines: [],
+      reconcile: true,
+    })!;
+    expect("instruction" in s2).toBe(false);
+    expect(s2.reconcile).toBe(true);
+  });
+});
+
+describe("T4 显示面不动: 带新段事件的渲染与旧事件逐字节相同", () => {
+  test("agentStatusLines(新段快照) 与 agentStatusLines(旧快照) 逐字节相同", () => {
+    const lines = ["- [ ] [t1] alpha task", "- [ ] [t2] beta 任务"];
+    const legacy = agentStatusFromEvent(agentStatusEvent("bash", lines))!;
+    const extended = agentStatusFromEvent({
+      type: "agent_status",
+      lastTool: "bash",
+      openTodoLines: lines,
+      instruction: "pivot 指令首行",
+      reconcile: true,
+    })!;
+    for (const cols of [80, 40, 12]) {
+      expect(JSON.stringify(agentStatusLines(extended, cols))).toBe(
+        JSON.stringify(agentStatusLines(legacy, cols))
+      );
+    }
+  });
+
+  test("chrome 不加 instruction/reconcile 行（Out-of-scope 钉子）", () => {
+    const snapshot = agentStatusFromEvent({
+      type: "agent_status",
+      lastTool: "bash",
+      openTodoLines: ["- [ ] alpha task"],
+      instruction: "pivot 指令首行",
+      reconcile: true,
+    })!;
+    const rendered = agentStatusLines(snapshot, 80)
+      .map((l) => l.text)
+      .join("\n");
+    expect(rendered).not.toContain("pivot 指令首行");
+    expect(rendered.toLowerCase()).not.toContain("reconcile");
+    expect(rendered).toContain("alpha task");
+  });
+});
+
+describe("agentStatusFromMessages: 新格式栏冷启动 hydrate（TUI 消费面）", () => {
+  test("含 instruction/reconcile 段的栏 hydrate 得合法快照，todo 段不被标量行污染", () => {
+    const bar = buildAgentStatusText({
+      lastTool: "todo_write",
+      openTodoLines: ["- [ ] [t1] keep going"],
+      instruction: "换方向",
+      reconcile: true,
+    });
+    const messages: AnthropicNativeMessage[] = [
+      { role: "user", content: [{ type: "text", text: bar }] },
+    ];
+    const snapshot = agentStatusFromMessages(messages);
+    expect(snapshot).not.toBeNull();
+    expect(snapshot!.lastTool).toBe("todo_write");
+    expect(snapshot!.instruction).toBe("换方向");
+    expect(snapshot!.reconcile).toBe(true);
+    expect([...snapshot!.openTodoLines]).toEqual(["- [ ] [t1] keep going"]);
+    // 显示面不动:hydrate 出来的新字段照样只投影 todo 行
+    const lines = agentStatusLines(snapshot, 80);
+    expect(lines.length).toBe(1);
+    expect(lines[0]!.text).toContain("keep going");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 投影:快照 → 显示行
 // ---------------------------------------------------------------------------
 

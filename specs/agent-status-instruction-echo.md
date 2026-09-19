@@ -1,6 +1,6 @@
 # Spec: 状态栏复诵升级 —— instruction 回显字段与 pivot reconcile 标记
 
-**Status:** draft (rev 1, 待 review)
+**Status:** draft (rev 2 —— end-of-round review 裁定落盘：T3 相关号补「re-freeze 同内容克隆判同」第二条款及成立前提，防实现按 rev 1 纯对象同一性算法回退；OQ1/OQ2 关闭登记见 `docs/STATUS.md`)
 **Basis:** ADR-0103（修订 ADR-0028 Consequences 两处半句；注入纪律逐字不变）；`docs/CONTEXT.md`「状态栏」词条 + _Avoid_ 清单
 **Surface:** `src/harness/agent-status.ts`（字段集 + 甄别谓词）、`src/harness/loop-engine.ts`（`appendAgentStatusBar` 注入点 + run 作用域 reconcile 装箱）、`src/harness/stream.ts`（`agent_status` 事件字段）、`src/tui/agent-status-line.tsx`（事件映射，渲染面不动）、`src/tui/session-state.ts`（隐藏谓词不动，验证性回归）
 
@@ -77,8 +77,9 @@ todos:
 
 - **instruction 来源**：`appendAgentStatusBar` 增加 `state.messages` 消费（T2 提取器），传入 `computeAgentStatusSnapshot`（opts 扩 `instruction: string | null`）。todo 读取路径零变化。
 - **reconcile 状态落点 = run 作用域装箱**（照抄 `lastToolRef` 形态，`run()` 创建、跨 step 共享；`public step()` 单步语义各自新建）。**不**做快照持久字段、**不**落 JSONL、**不**进 deps 装配面：
-  - 装箱内容：`reconcileRef: { stamped: AnthropicNativeMessage | undefined }`——最近一次已随栏结算的「真实用户消息」对象引用（消息 frozen + immutable append，对象同一性即相关号，无需 id）。
-  - 结算算法（每次 `appendAgentStatusBar` 调用内）：取 T2 命中的真实用户消息 `L`（对象引用）；`L !== undefined && L !== reconcileRef.stamped` → 本栏 `reconcile: true` 并置 `stamped = L`；否则 `reconcile: false`。**标记只出现一跳**由此算法天然保证。
+  - 装箱内容：`reconcileRef: { stamped: AnthropicNativeMessage | undefined }`——最近一次已随栏结算的「真实用户消息」对象引用（消息 frozen + immutable append，无需 id；判同条款见下）。
+  - **相关号 = 判同，双条款（rev 2）**：① 对象同一性（`L === stamped`）；② 同 role + 逐块同内容 → 判为同一条（re-freeze 克隆）。②成立的**前提**：单 run 内真实用户消息仅 `run()` 入口追加的一条，其后 user 消息全是 T2 名册滤除的宿主注入——故内容判同在结算面等价于同一性，不存在内容相同的第二条真实消息可混淆。**实证动机（为何 ① 不够）**：compact 的 `applyCompactAttachment` 经 `freezeMessage` 逐条克隆 kept 消息，reactive-compact 重试后同一条消息引用变而内容不变；纯 ① 会把克隆误判成新消息进场、对同一指令重复标记，违反 invariant 3「标记只在该跳出现一次」。落点：`loop-engine.ts` `isSameRealUserMessage`。
+  - 结算算法（每次 `appendAgentStatusBar` 调用内）：取 T2 命中的真实用户消息 `L`（对象引用）；`L !== undefined && !判同(L, reconcileRef.stamped)` → 本栏 `reconcile: true` 并置 `stamped = L`；否则 `reconcile: false`。**标记只出现一跳**由此算法天然保证。
   - compaction / reactive-compact 重试路径共用同一装箱与算法（两处 `appendAgentStatusBar` 调用点同形接线）。
   - 冷启动 / resume：装箱以 `stamped = undefined` 起步 → 本 run 第一条栏带标记一次（合法：进程重启后模型恰需一次对齐提示；不算违背「一次性」，一次性 = 每次进场结算一次）。
 - **`agent_status` 流事件**字段随 snapshot 扩（`instruction` / `reconcile` 两字段），仍从同一计算点的同一份 snapshot 发出（单一真源，TUI 与栏不可能分叉）。
@@ -124,7 +125,7 @@ todos:
 | ---------------------- | ------------------------------- | ------------------------------------------- | --------------------------------------- |
 | instruction 提取       | prior 中无真实用户消息 → 段缺席 | 首行空 → 前扫                               | 纯读取，零抛错面                        |
 | `parseAgentStatusText` | 旧栏（新段缺失）合法            | 缺 `last_tool:` / 包装行不等 → null（既有） | 新段缺失 ≠ 畸形                         |
-| reconcile 装箱         | run 首跳 `stamped = undefined`  | N/A                                         | 对象同一性相关号，frozen 消息无别名风险 |
+| reconcile 装箱         | run 首跳 `stamped = undefined`  | N/A                                         | 相关号双条款判同（对象同一性 ∨ re-freeze 同内容克隆，前提见 T3 rev 2），frozen 消息无别名风险 |
 
 ## Success criteria
 
@@ -145,8 +146,8 @@ todos:
 
 ## Open questions
 
-- OQ1：`LOOP_DETECTED_TEXT` 与 compact 提示文本在当前 prior 形态下是否持久进跨 run 历史未实测确认——甄别谓词按「命中即注入」写，两缝即使不持久也先进名册（保守多滤，代价为零）；实现时以 trace 实测确认，无分歧则关闭。
-- OQ2：skill-load remainder 为纯空格时按「无有效行前扫」处理已定，但 **`/compact` 等 slash 产物**是否以 user 消息形态留在 prior 需实现时以真实 transcript 复核；若存在未列名册注入形态，纳入 T2 名册（完备性 SEAM 测试会自动暴露）。
+- OQ1（**rev 2 关闭**，end-of-round review 裁定，登记见 `docs/STATUS.md`）：`LOOP_DETECTED_TEXT` 与 compact 提示文本在当前 prior 形态下是否持久进跨 run 历史未实测确认——甄别谓词按「命中即注入」写，两缝即使不持久也先进名册（保守多滤，代价为零）；SEAM 完备性锁兜底新注入缝。裁决：保守多滤 + SEAM 锁即足够，OQ 关闭。
+- OQ2（**rev 2 关闭**，end-of-round review 裁定，登记见 `docs/STATUS.md`）：skill-load remainder 为纯空格时按「无有效行前扫」处理已定，但 **`/compact` 等 slash 产物**是否以 user 消息形态留在 prior 需实现时以真实 transcript 复核；若存在未列名册注入形态，纳入 T2 名册（完备性 SEAM 测试会自动暴露）。裁决：T7 TUI pty + trace 实测无未列名册分歧，OQ 关闭。
 
 ## Evidence pointers
 

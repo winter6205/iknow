@@ -12,6 +12,7 @@
  */
 import type { ReactNode } from "react";
 import type { AgentStatusSnapshot } from "../harness/agent-status.js";
+import { pickPresentAgentStatusSlots } from "../harness/agent-status.js";
 import { parseLedger } from "../harness/aci/tools/todo-ledger.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import { clipOneLineVisual, visualWidth } from "./tool-summary.js";
@@ -28,9 +29,14 @@ export function agentStatusFromEvent(
   event: HarnessStreamEvent
 ): AgentStatusSnapshot | null {
   if (event.type !== "agent_status") return null;
+  // spec agent-status-instruction-echo T4:instruction / reconcile 槽随事件
+  // 透传(与栏同源);投影规则 = pickPresentAgentStatusSlots SSOT(与快照装配、
+  // 事件发射同源;缺席 → key 不落,退回旧字段集形态(F1))。显示面不动 ——
+  // agentStatusLines 仍只投影 openTodoLines。
   return Object.freeze({
     lastTool: event.lastTool,
     openTodoLines: Object.freeze([...event.openTodoLines]),
+    ...pickPresentAgentStatusSlots(event),
   });
 }
 

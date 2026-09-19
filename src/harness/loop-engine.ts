@@ -116,7 +116,9 @@ import type { SecretRegistry } from "./secret-roundtrip/index.js";
 import {
   AGENT_STATUS_IDLE_TOOL,
   computeAgentStatusSnapshot,
+  pickPresentAgentStatusSlots,
 } from "./agent-status.js";
+import { extractLatestRealUserInstruction } from "./agent-status-instruction.js";
 import { readEnvSnapshot } from "./env-snapshot.js";
 import type { GraphAssembly } from "./graph/assembly.js";
 import {
@@ -583,6 +585,33 @@ function appendMessage(opts: {
 }
 
 /**
+ * 子弹 4 / invariant 3:reconcile 相关号判定 —— 同一「真实用户消息」= 对象
+ * 同一性,或 reactive/proactive compact 的 re-freeze 克隆(`freezeMessage`
+ * 逐条 clone,compact 后 kept 尾引用变而内容不变;纯引用比较会把克隆误判成
+ * 新消息进场,同一指令被重复标记,违反「标记只在该跳出现一次」)。单 run 内
+ * 真实用户消息只在 run() 入口追加一条,其后 user 消息全是宿主注入(被 T2
+ * 名册滤掉),故「同 role + 逐块同内容」在结算面等价于同一性,无第二条款式
+ * 相同的真实消息可混淆。
+ */
+function isSameRealUserMessage(
+  a: AnthropicNativeMessage,
+  b: AnthropicNativeMessage | undefined
+): boolean {
+  if (b === undefined) return false;
+  if (a === b) return true;
+  if (a.role !== b.role || a.content.length !== b.content.length) return false;
+  for (let i = 0; i < a.content.length; i++) {
+    const ca = a.content[i]!;
+    const cb = b.content[i]!;
+    if (ca.type !== cb.type) return false;
+    if (ca.type === "text" && cb.type === "text" && ca.text !== cb.text) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * #645 T1 / ADR-0028:把现势栏以 user 消息 immutable 追加到 `messages` 尾
  * (经 adapter.encodeUserText 编码,与首条用户文本同一缝)。
  * `deps.agentStatus` 缺席 → 原样返回 state(零注入);在场 → 现算快照
@@ -596,15 +625,40 @@ function appendMessage(opts: {
  *
  * #888:注入消息同时 record 进 pending 缓冲 —— 下一次 assistant / tool_result
  * commit 时随批 flush 上盘,消除 save-fork。
+ *
+ * spec agent-status-instruction-echo T3:同一计算点经 T2 提取器
+ * (`extractLatestRealUserInstruction`)从 `state.messages` 现读最新真实用户
+ * 指令首行,随同一份 snapshot 进栏 `instruction:` 行与 `agent_status` 事件
+ * (SC1 / SC6 同源;逐字回显非摘要,invariant 1)。无真实用户消息 → 段整
+ * 段缺席(F1)。提取纯读取零抛错;append-only / pendingInjected 纪律不变
+ * (invariant 6)。
+ *
+ * 子弹 4 / invariant 3:reconcile 经 run 作用域装箱 `reconcileRef` 一次性
+ * 结算 —— 提取命中的真实用户消息与已结算引用不同 → 本栏标记并写盒;相同
+ * (含 compact re-freeze 克隆,见 `isSameRealUserMessage`)→ 本栏
+ * `reconcile: false`(行缺席、事件 key 在场)。无判定对象(F1)→ 字段整
+ * 槽缺席、装箱不清(冷启动 `stamped = undefined` 合法)。两处调用点(正常
+ * step 与 reactive-compact 重试)共享同一装箱,结算同形。
  */
 async function appendAgentStatusBar(
   state: LoopState,
   deps: LoopEngineDeps,
   lastTool: string,
+  reconcileRef: { stamped: AnthropicNativeMessage | undefined },
   pendingInjected: PendingInjected,
   onStream?: (event: HarnessStreamEvent) => void
 ): Promise<LoopState> {
   if (deps.agentStatus === undefined) return state;
+  const extracted = extractLatestRealUserInstruction(state.messages);
+  let reconcile: boolean | undefined;
+  if (extracted !== null) {
+    const settled = isSameRealUserMessage(
+      extracted.message,
+      reconcileRef.stamped
+    );
+    reconcile = !settled;
+    if (!settled) reconcileRef.stamped = extracted.message;
+  }
   const snapshot = await computeAgentStatusSnapshot({
     lastTool,
     todoDir: deps.agentStatus.todoDir,
@@ -613,11 +667,16 @@ async function appendAgentStatusBar(
     // per-session by the surface layer (#502 T5); absent (ask / worker) →
     // legacy shared-root read.
     conversationId: deps.conversationId,
+    instruction: extracted?.instruction ?? null,
+    ...(reconcile !== undefined ? { reconcile } : {}),
   });
   safeEmitStream(onStream, {
     type: "agent_status",
     lastTool: snapshot.lastTool,
     openTodoLines: snapshot.openTodoLines,
+    // 条件在场:投影规则 = pickPresentAgentStatusSlots SSOT(与快照装配、
+    // TUI 事件映射同源;缺席 → key 不出现,与栏文本"空槽不广告"同一形态)。
+    ...pickPresentAgentStatusSlots(snapshot),
   });
   const msg = deps.adapter.encodeUserText(snapshot.text);
   pendingInjected.record(msg);
@@ -2190,6 +2249,15 @@ async function stepWithTrace(opts: {
    * 更新零可观察行为。
    */
   readonly lastToolRef: { lastTool: string };
+  /**
+   * spec agent-status-instruction-echo 子弹 4:reconcile 结算的 run 作用域
+   * 可变引用 —— 照 `lastToolRef` 形态,run() 创建跨 step 共享,public step()
+   * 每次新建(单步语义,冷启动 stamped=undefined 合法)。装箱内容 = 最近一次
+   * 已随栏结算的真实用户消息对象引用(消息 frozen + immutable append;
+   * compact re-freeze 克隆由 `isSameRealUserMessage` 判同)。不落盘、不进
+   * deps 装配面;仅 deps.agentStatus 在场时被消费。
+   */
+  readonly reconcileRef: { stamped: AnthropicNativeMessage | undefined };
   /** #672 T3:本 run 工具环事件（跨 step 累积；public step 每次新建）。 */
   readonly toolLoopRef: { events: ToolLoopEvent[]; nextPhase: number };
   /** #888:run 作用域注入消息 pending 缓冲(public step 每次新建)。 */
@@ -2277,6 +2345,7 @@ async function stepWithTrace(opts: {
     mcpReconnectState,
     opts.deps,
     opts.lastToolRef.lastTool,
+    opts.reconcileRef,
     opts.pendingInjected,
     opts.onStream
   );
@@ -2325,10 +2394,13 @@ async function stepWithTrace(opts: {
             opts.pendingInjected
           );
           // 栏追加在 compact 之后(压缩产物尾部),重试请求的末尾即最新一条栏。
+          // 子弹 4:与正常 step 调用点共享同一 reconcileRef 装箱 —— compact
+          // 的 kept 尾 re-freeze 克隆不伪造进场,结算行为同形。
           const compactedWithBar = await appendAgentStatusBar(
             compactedWithReconnect,
             opts.deps,
             opts.lastToolRef.lastTool,
+            opts.reconcileRef,
             opts.pendingInjected,
             opts.onStream
           );
@@ -2742,13 +2814,15 @@ export async function step(
 ): Promise<Transition> {
   // #645 T1:单步语义 —— 每次调用新建 lastToolRef(初值 idle,单步内工具批
   // 后更新,与 run 的回合作用域状态互不共享)。#888:pendingInjected 同理
-  // 每次新建(单步的注入随本步 commit flush,跨 step 不残留)。
+  // 每次新建(单步的注入随本步 commit flush,跨 step 不残留)。子弹 4:
+  // reconcileRef 同理每次新建(单步各自冷启动 stamped=undefined)。
   const { transition } = await stepWithTrace({
     state,
     deps,
     signal,
     reactiveAttemptedRef: { attempted: false },
     lastToolRef: { lastTool: AGENT_STATUS_IDLE_TOOL },
+    reconcileRef: { stamped: undefined },
     toolLoopRef: { events: [], nextPhase: 0 },
     pendingInjected: createPendingInjected(),
   });
@@ -2833,6 +2907,12 @@ export async function run(
   // 用户回合,初值 idle(本回合尚未跑过工具),每个工具批后更新为批内最后
   // 一个成功工具名;跨 step 共享,run 结束即弃。
   const lastToolRef = { lastTool: AGENT_STATUS_IDLE_TOOL };
+  // spec agent-status-instruction-echo 子弹 4:reconcile 结算装箱 —— 同
+  // lastToolRef 形态,一个 run = 一次「新消息进场」观察窗:首跳栏标记、其后
+  // 各跳/各 step 不再标记;run 结束即弃(下一 run 新建 → 第二波再标记)。
+  const reconcileRef: { stamped: AnthropicNativeMessage | undefined } = {
+    stamped: undefined,
+  };
   const toolLoopRef = { events: [] as ToolLoopEvent[], nextPhase: 0 };
   // #888:run 作用域注入消息 pending 缓冲(见 createPendingInjected)。
   const pendingInjected = createPendingInjected();
@@ -2908,6 +2988,7 @@ export async function run(
         onStream: opts?.onStream,
         reactiveAttemptedRef,
         lastToolRef,
+        reconcileRef,
         toolLoopRef,
         pendingInjected,
       });
