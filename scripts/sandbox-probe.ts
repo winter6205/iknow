@@ -420,6 +420,178 @@ function pickNonLoopbackNicIPv4(): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// SSH 出口探针（egress-ssh-bridge 子弹 7 / spec T7 + SC1/SC2，新增 2 类）
+//
+// 正探针 = 放行域 github.com:22 **真网**握手拿到 SSH banner 即算通（O2 纪律：
+//   非 loopback 字面目标）；违例探针 = 未放行域 gitlab.com:22 沙箱内失败
+//   **且** 框架侧 drain 到该 host:22 的域判定拒绝，两信号可区分。
+// 两路都走 GIT_SSH_COMMAND 同款 CONNECT 路径：直接以 ssh ProxyCommand 展开后
+// 的逐字 argv（`<node> egress-http-connect.mjs <host> 22`）调用随仓隧道件，
+// 经内层 3128 中继 → 宿主 unix socket 代理（同一 filter / 同一 token /
+// 同一 sink），不开第二出网面（invariant 1）。
+//
+// SC2 文字注记：spec/plan 的 drain reason:"not-in-allowlist" 是 T6 批准流
+// 细分前的措辞。生产 filter 对 not-in-allowlist 判定按入口面细分——本探针
+// 为非交互面（不注入 approvalGate）→ 记录 `no-approval-inlet`；交互面拒绝
+// 才记 `denied-by-user`（session.ts createFilterCallback）。两者都是
+// 域判定拒绝家族，与 infra（infra-unavailable）和正探针（零违例）可区分。
+// 该文字漂移与类别数 11→13 一并登记 plan OQ3，主会话裁。
+// ---------------------------------------------------------------------------
+
+const SSH_PROBE_ALLOWED_DOMAINS = ["github.com", "*.github.com"];
+/** 正探针目标：出厂放行域 + 真网 ssh banner 源。 */
+const SSH_PROBE_ALLOWED_HOST = "github.com";
+/** 违例探针目标：允许集外域（filter 在 CONNECT 头即拒，不触 DNS / 真网）。 */
+const SSH_PROBE_DENIED_HOST = "gitlab.com";
+
+function shQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * 共享执行体：起 egress session → fence 内「等内层中继就绪 → CONNECT 目标
+ * host:22 → 看首行是否 SSH banner」。返回 fence exit / stdout / stderr /
+ * drain 快照。exit 语义：0 = 拿到 banner；1 = 无 banner（CONNECT 被拒或
+ * 隧道无响应）；9 = 内层中继未就绪（infra，两路都判红）。
+ */
+async function runSshEgressProbe(
+  profile: ProbeProfile,
+  host: string,
+  label: string
+): Promise<{
+  exit: number | null;
+  stdout: string;
+  stderr: string;
+  violations: readonly { host: string; port: number; reason: string }[];
+}> {
+  const { createEgressSession } =
+    await import("../src/harness/sandbox/egress/session.js");
+  const { resolveEgressRelay } =
+    await import("../src/harness/sandbox/egress/relay-assets.js");
+  const relay = resolveEgressRelay();
+  if (relay === undefined) {
+    throw new Error(
+      "ssh probe: bundled egress relay unresolvable on this install"
+    );
+  }
+  const session = await createEgressSession({
+    policy: {
+      allowedDomains: SSH_PROBE_ALLOWED_DOMAINS,
+      deniedDomains: [],
+      commandLabel: label,
+    },
+  });
+  try {
+    // 内层中继（innerBridgeScript 前导）与隧道件之间有启动竞态：先用
+    // bash /dev/tcp 轮询 3128 就绪（上限 ~10s），就绪后 CONNECT 只发一次，
+    // 使「被域拒」与「中继没起来（infra）」在 exit 码上可区分。
+    // stdin 用 `<(sleep …)`  Held-open：隧道件 stdin 接 /dev/null 会在
+    // CONNECT 后立刻 FIN——上游 http-proxy 把「CONNECT+FIN」按弃连处理、
+    // 建立后的隧道也会被对端 close→destroy 吞掉 banner；真实 ssh 作
+    // ProxyCommand 时 stdin 是常开 socketpair，不存在该形态，探针必须
+    // 同款（围栏实测：/dev/null stdin 下 200 后零字节）。banner 落同步
+    // 文件再轮询读取，避免 node 管道 stdout 异步写在 exit 时截断。
+    const userCommand = [
+      "ready=0",
+      "for i in $(seq 1 40); do",
+      "  if (exec 3<>/dev/tcp/127.0.0.1/3128) 2>/dev/null; then ready=1; break; fi",
+      "  sleep 0.25",
+      "done",
+      '[ "$ready" = 1 ] || { echo "inner-relay-not-ready" >&2; exit 9; }',
+      `out=$(mktemp) || exit 9`,
+      `err=$(mktemp) || exit 9`,
+      `timeout 15 ${shQuote(relay.nodePath)} ${shQuote(relay.connectScriptPath)} ${host} 22 < <(sleep 18) >"$out" 2>"$err" &`,
+      "pid=$!",
+      "got=0",
+      "for i in $(seq 1 35); do",
+      "  if grep -q '^SSH-' \"$out\" 2>/dev/null; then got=1; break; fi",
+      "  kill -0 $pid 2>/dev/null || break",
+      "  sleep 0.3",
+      "done",
+      "kill $pid 2>/dev/null; wait $pid 2>/dev/null",
+      `printf 'banner=%s\\n' "$(head -n 1 "$out" | tr -d '\\r')"`,
+      `printf 'tunnel-stderr=%s\\n' "$(head -c 240 "$err" | tr '\\n' ' ')"`,
+      `rm -f "$out" "$err"`,
+      `[ "$got" = 1 ] && exit 0`,
+      `exit 1`,
+    ].join("\n");
+    const fence = createBwrapFence({
+      command: "bash",
+      args: ["-c", `${session.spec.innerBridgeScript}\n${userCommand}`],
+      fsPolicy: profile.fsPolicy,
+      env: fenceEnv(profile),
+      cwd: profile.cwd,
+      egress: session.spec,
+      ...(profile.fsMode === "workspace"
+        ? {
+            homeRoot: profile.home,
+            workspaceRoot: profile.cwd,
+            tmpRoot: profile.pad,
+          }
+        : {}),
+    });
+    const child = spawn(fence.argv[0], fence.argv.slice(1), {
+      cwd: profile.cwd,
+      env: fenceEnv(profile),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c: Buffer) => {
+      stdout += c.toString("utf8");
+    });
+    child.stderr.on("data", (c: Buffer) => {
+      stderr += c.toString("utf8");
+    });
+    const exit = await newPromiseResolveChild(child);
+    return {
+      exit,
+      stdout: stdout.trim(),
+      stderr: stderr.trim(),
+      violations: session.violationSink.drain().map((v) => ({
+        host: v.host,
+        port: v.port,
+        reason: v.reason,
+      })),
+    };
+  } finally {
+    await session.dispose().catch(() => undefined);
+  }
+}
+
+async function runSshAllowedProbe(profile: ProbeProfile): Promise<ProbeResult> {
+  const r = await runSshEgressProbe(
+    profile,
+    SSH_PROBE_ALLOWED_HOST,
+    "probe-ssh-allowed"
+  );
+  return {
+    ok: r.exit === 0 && r.violations.length === 0,
+    detail: `exit=${r.exit} violations=${r.violations.length} ${r.stdout.replace(/\n/g, " / ")}${r.stderr ? ` stderr="${r.stderr.split("\n")[0]}"` : ""}`,
+  };
+}
+
+async function runSshDeniedProbe(profile: ProbeProfile): Promise<ProbeResult> {
+  const r = await runSshEgressProbe(
+    profile,
+    SSH_PROBE_DENIED_HOST,
+    "probe-ssh-denied"
+  );
+  const hit = r.violations.find(
+    (v) => v.host === SSH_PROBE_DENIED_HOST && v.port === 22
+  );
+  // 沙箱内失败信号（exit≠0 且拿不到 banner）与框架 drain 信号必须**同时**
+  // 在场且相互区分：只有命令失败没有 drain 记录 = 归因缺口；只有 drain 没有
+  // 失败 = 假拒。drain reason 取域判定拒绝家族（本探针无 gate → 具体为
+  // `no-approval-inlet`），infra-unavailable 不算通过。
+  const ok = r.exit !== 0 && hit !== undefined && hit.reason !== "infra-unavailable";
+  return {
+    ok,
+    detail: `exit=${r.exit} drain=${JSON.stringify(hit ?? null)} cmd_out="${r.stdout.split("\n").slice(0, 2).join(" / ")}"`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 每档探针清单
 // ---------------------------------------------------------------------------
 
@@ -646,6 +818,18 @@ function buildChecks(
   push("both", {
     name: "egress seam reachable (bundled relay e2e; relay deps absent = fail-closed)",
     run: () => runEgressSeamCheck(profile),
+  });
+  // egress-ssh-bridge 子弹 7（spec T7 新增 2 类）：GIT_SSH_COMMAND 同款
+  // CONNECT 路径的 :22 隧道面。正探针拿放行域真网 SSH banner（SC1），违例
+  // 探针钉「沙箱内失败 + 框架 drain 域拒绝」双信号（SC2，reason 文字注记见
+  // runSshEgressProbe 头注释）。
+  push("both", {
+    name: "egress ssh allowed (github.com:22 CONNECT tunnel → SSH banner)",
+    run: () => runSshAllowedProbe(profile),
+  });
+  push("both", {
+    name: "egress ssh denied (not-in-allowlist :22 → sandbox fail + drain violation)",
+    run: () => runSshDeniedProbe(profile),
   });
 
   // —— git 全局配置读（宿主 home 可见，§9.2 #7 语义在全局档仍成立；
