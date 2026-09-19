@@ -677,6 +677,18 @@ _Avoid_: 整表刷新；插进本轮用户消息前面；画成用户气泡；�
 **user-turn keep on protocol failure**: `protocolError` / `emptyFinalResponse` 时仍落下本轮**用户句**，不落下失败的 assistant。与「整轮不落盘」旧读法相对；`timeout` 落盘行为不变。
 _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与 viewport API error「不进 transcript」混成「用户句也不留」
 
+**stream_incomplete (fault kind)**: (ADR-0111) `FaultEvent` 词汇表格——上游流结束但未产出完整 assistant message（空流/断流）的瞬时传输故障，**不是**协议损坏。带 `visible` 位（`clock_timeout` 同判据：本次 attempt 是否已有非空模型输出增量）：不可见 → 整 step 重试安全（D8 整回合不提交）；已出字 → 不自动重试，落 typed 失败。`nonClockFaultOf` default 支（protocol_error 压平）不删除只收窄，且命中时发 console.warn 诊断。
+_Avoid_: 把断流归类为 protocol_error / crashed；对已出字的断流自动重试；删 default 支造成新形态静默逃逸；给 withTransportRetry 加第二套重试机（预算/退避全走既有机器）
+
+**ModelStreamIncompleteError**: (ADR-0111) adapter 流臂把 SDK 断流裸 Error（`stream ended without producing a Message…`，按 message 形态 + 非 APIError + cause 链无网络错误识别）翻译成的 typed 错误；extends `ProtocolError` 故被 loop-engine 既有 `instanceof ProtocolError` 支干净收口（先例 `PromptTooLongError`），携 `visible` 与原 SDK 错误 `cause`。`transportApiErrorOf` 对它也提炼 apiError 摘要——不变式「apiError 在场 ⇔ 带 cause 的瞬时模型流/传输失败」。映射判据测试是 SDK 升级哨兵。
+_Avoid_: 让裸 SDK Error 出 adapter 边界；本类子类支排在 `instanceof ProtocolError` 通用支**之后**（顺序惯例先子类，同 loop :1912）；把 apiError 当 UX 文案源（仍按 ADR-0094 薄外壳）
+
+**modelTransient (envelope reason)**: (ADR-0111) 子代理 `SubAgentEnvelope.reason` 第五值（SC9 冻结四值的本 ADR 显式修订，freeze 测试期望 4→5）：上游瞬时可续失败（断流重试耗尽 / 已出字断流），区别于 `protocolError`（真协议损坏）与 `crashed`（进程级异常死亡）。发射点：worker 正常返回 stopReason=protocolError 时按 `RunResult.apiError` 在场分流 + run() 逃逸 catch 的本类 instanceof 支。failed + transcript 即可走 ADR-0102 `subagent_continue` 闸。
+_Avoid_: 复用 protocolError+cause 字符串做父侧归因判定；把 exit≠0 无信封的崩溃改标 modelTransient；旧父跨版本收新值（ajv 拒 → 按现状 crashed）
+
+**worker exit-2 专码**: (ADR-0111 成文化归档 spec 356 assumption 16/SC13) worker 进程 exit 2 **仅** = 信封协议错误（`parseWorkerEnvelope` 抛 ProtocolError，无信封可写）；run 阶段逃逸错误 → best-effort failed 信封 + exit 1；exit 0 + failed 信封 = 结构化失败按 reason 归因。父侧对 exit≠0 无信封标 `crashed`（SC16 支），契约原文只钉「exit ≠ 0」、2 是实现专码。SC13「父标 crashed」与 assumption 16「reason=protocolError」的微差按**分层**消解：无信封→crashed，有信封→按 reason。
+_Avoid_: 任何产品/模型错误冒用 exit 2；把「exit 2 归还 SC13」读成契约钉死了码值 2；删改 envelope-freeze 断言代替显式修订授权
+
 ## Relationships
 
 - **run() messages -> adapter streaming arm -> interpretMessage**: harness LLM path（流事件以 `HarnessStreamEvent` 经 `onStream` 暴露）

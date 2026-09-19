@@ -68,6 +68,7 @@ import type { PostToolUseHook } from "../src/harness/permission/types.js";
 import type { LoopEngineDeps } from "../src/harness/index.js";
 import { createLoopEngine, run } from "../src/harness/index.js";
 import { createSubAgentManager } from "../src/harness/subagent/manager.js";
+import { ACI_TOOLSET_NAMES } from "../src/harness/aci/tools/registry.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const HERE = dirname(__filename);
@@ -117,6 +118,27 @@ function record(name: string, pass: boolean, detail?: string): void {
   checks.push({ name, pass, detail });
   console.log(
     `${pass ? "[PASS]" : "[FAIL]"} ${name}${detail ? `: ${detail}` : ""}`
+  );
+}
+
+/** T2 工具面完整性不变式(从 SSOT ACI_TOOLSET_NAMES,Gate 3 append-only 名单
+ *  派生):chat 表面装配结果必须是名单子集(条件化缺席合法,名单外多余即装配
+ *  漂移),且关键工具在场。不硬编码件数 —— 名单演进不使本探针过时。
+ *  提取为顶层 helper:main() 复杂度守在 s5 基线内。 */
+function recordToolSurface(names: ReadonlyArray<string>): void {
+  const extra = names.filter((n) => !ACI_TOOLSET_NAMES.includes(n));
+  record(
+    "T2 工具面 ⊆ ACI_TOOLSET_NAMES(buildHarnessEngine chat)",
+    extra.length === 0 && names.length > 0,
+    `count=${names.length} extra=[${extra.join(",")}]`
+  );
+  record("T2 含 spawn_subagent", names.includes("spawn_subagent"));
+  record("T2 含 subagent_result", names.includes("subagent_result"));
+  // disclosure-index-align T2(spec ADR-0046 / SC5)删 skill_search:钉住在场
+  // 的 skill 与已删的 skill_search 两侧,防止索引工具复活。
+  record(
+    "T2 含 skill 且 skill_search 已删(ADR-0046)",
+    names.includes("skill") && !names.includes("skill_search")
   );
 }
 
@@ -223,6 +245,16 @@ async function main(): Promise<void> {
     // 清掉挂在进程上的 SIGINT/SIGTERM listener,避免污染后续装配。
     process.removeAllListeners("SIGINT");
     process.removeAllListeners("SIGTERM");
+    // registerShutdown 的 re-kill one-shot(runtime.ts onSignal → dispose 完成后
+    // setImmediate process.kill(pid, sig))在 removeAllListeners 之后才落地——
+    // 真实信号无 listener 时按默认处置直接终止进程,后续真实 LLM 检查全部不跑
+    // (exit 143)。一次性吸收位吞掉在途 re-kill,吸收后即摘除,不留常驻 handler。
+    const absorbReKill = (): void => {};
+    process.once("SIGINT", absorbReKill);
+    process.once("SIGTERM", absorbReKill);
+    await new Promise((r) => setTimeout(r, 50));
+    process.removeListener("SIGINT", absorbReKill);
+    process.removeListener("SIGTERM", absorbReKill);
   }
 
   // ── 装配:真实 build-engine,chat surface(与 TUI 同一份 25 件工具集)────
@@ -260,18 +292,8 @@ async function main(): Promise<void> {
     sandboxRoot,
   });
 
-  record(
-    "T2 25 件工具面完整(buildHarnessEngine chat)",
-    built.deps.registry.list().length === 25,
-    `count=${built.deps.registry.list().length}`
-  );
-  const names = built.deps.registry.list().map((d) => d.name);
-  record("T2 含 spawn_subagent", names.includes("spawn_subagent"));
-  record("T2 含 subagent_result", names.includes("subagent_result"));
-  record(
-    "T2 含 skill + skill_search",
-    names.includes("skill") && names.includes("skill_search")
-  );
+  // T2 工具面不变式(判据见 recordToolSurface doc)。
+  recordToolSurface(built.deps.registry.list().map((d) => d.name));
   record(
     "T5 subagentManager 真实存在",
     typeof built.subagentManager === "object" && built.subagentManager !== null

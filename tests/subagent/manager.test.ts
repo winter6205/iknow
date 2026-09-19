@@ -597,6 +597,50 @@ describe("SubAgentManager spawn → crashed", () => {
   });
 });
 
+// ── ADR-0111 T5:modelTransient 归因(上游瞬时失败 ≠ 进程级崩溃) ──────────────
+
+describe("SubAgentManager spawn → modelTransient (ADR-0111 attribution)", () => {
+  it("failed envelope reason=modelTransient + exit 0 → failed modelTransient + 续跑引导文案", () => {
+    const { manager, spawned } = makeHarness();
+    const { taskId } = manager.spawn({});
+    emitEnvelope(spawned[0]!, {
+      status: "failed",
+      reason: "modelTransient",
+      summary: "",
+      result: "",
+    });
+    const q = manager.queryBuffer(taskId);
+    assert.equal(q.status, "failed");
+    if (q.status === "failed") {
+      // 归因走信封, 不冒用 crashed(SC16 只属非 0/信号杀且无已消费信封)。
+      assert.equal(q.reason, "modelTransient");
+      // 空 summary 由 failedSummary 投影填父可见引导 (ADR-0102 Decision 1 出路)。
+      assert.match(q.summary, /modelTransient/);
+      assert.match(q.summary, /subagent_continue/);
+    }
+  });
+
+  it("failed envelope reason=modelTransient + exit 1 (run 阶段逃逸, ADR-0111 不变式 (b)) → 保持 modelTransient 不被 crashed 覆盖", async () => {
+    const { manager, spawned } = makeHarness();
+    const { taskId } = manager.spawn({});
+    spawned[0]!.stdout.write(
+      JSON.stringify({
+        status: "failed",
+        reason: "modelTransient",
+        summary: "",
+        result: "",
+      }) + "\n"
+    );
+    spawned[0]!.stderr.end();
+    spawned[0]!.emit("exit", 1, null);
+    const q = await manager.waitFor(taskId, 1000);
+    assert.equal(q.status, "failed");
+    if (q.status === "failed") {
+      assert.equal(q.reason, "modelTransient");
+    }
+  });
+});
+
 // ── fixture 3:protocolError ───────────────────────────────────────────────────
 
 describe("SubAgentManager clean exit without envelope", () => {

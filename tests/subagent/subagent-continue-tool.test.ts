@@ -412,6 +412,43 @@ describe("subagent_continue — 死工人续跑（新进程、同句柄）", () 
     assert.equal(harness.invocations[1]!.taskId, taskId);
   });
 
+  it("failed(modelTransient) + transcript 在场 → 闸放行续跑（ADR-0102 Decision 1：闸只认寿命与账，不看 reason）", async () => {
+    // ADR-0111 Consequences：modelTransient 落 failed 态即走 ADR-0102 通道，
+    // 无需新机制 —— 本测试钉住闸产品码天然放行的行为（不改闸）。
+    const harness = makeManagerHarness();
+    const tool = createSubAgentContinueTool({ manager: harness.manager });
+    const { taskId } = harness.manager.spawn({
+      task: "transient victim",
+      conversationId: "c1",
+    } as SubAgentDefinition);
+    const first = harness.invocations[0]!.child;
+    first.stdout.write(
+      JSON.stringify({
+        status: "failed",
+        reason: "modelTransient",
+        summary: "",
+        result: "",
+      }) + "\n"
+    );
+    first.emit("exit", 0, null);
+    await waitForTerminal(harness.manager, taskId);
+    const q = harness.manager.queryBuffer(taskId);
+    assert.equal(q.status, "failed");
+    if (q.status === "failed") assert.equal(q.reason, "modelTransient");
+    harness.writeTranscript(taskId);
+
+    await tool.handler(
+      { task_id: taskId, message: "carry on after the blip", wait: false },
+      { conversationId: "c1" }
+    );
+    assert.equal(harness.invocations.length, 2);
+    assert.equal(harness.invocations[1]!.taskId, taskId);
+    assert.equal(
+      harness.invocations[1]!.payload.task,
+      "carry on after the blip"
+    );
+  });
+
   it("身份沿用原 def，回合字段按本跳重算", async () => {
     const harness = makeManagerHarness();
     const tool = createSubAgentContinueTool({ manager: harness.manager });

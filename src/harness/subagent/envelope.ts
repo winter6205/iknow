@@ -156,6 +156,20 @@ export interface WorkerEnvelope {
   readonly skillIndexSnapshot?: readonly SkillIndexSnapshotEntry[];
 }
 
+/**
+ * 子代理失败归因词汇表（SSOT）。封闭枚举：值域变更须走 ADR
+ * （第五值 modelTransient 由 ADR-0111 Decision 2 显式修订 SC9 冻结追加；
+ * wire 侧同步格 = PARENT_SCHEMA.properties.reason.enum）。
+ * 消费点（manager QueryBufferResult / verify ClassifierEnvelope）按名复用；
+ * trace / traceserver 层按各自「不跨域 import」纪律保留字面联合镜像，注释互指。
+ */
+export type SubagentFailureReason =
+  | "crashed"
+  | "maxTurnsExceeded"
+  | "timeout"
+  | "protocolError"
+  | "modelTransient";
+
 /** 子→父 result 信封。schema 冻结形态见 PARENT_SCHEMA。 */
 export interface SubAgentEnvelope {
   readonly status: "ok" | "failed";
@@ -164,16 +178,17 @@ export interface SubAgentEnvelope {
   readonly fileRefs?: readonly string[];
   /** 子代理 run 的 usage 快照 (TokenUsage 形态, JSON 可序列化; 与 schema `usage?: object` 对齐)。 */
   readonly usage?: object;
-  readonly reason?:
-    "crashed" | "maxTurnsExceeded" | "timeout" | "protocolError";
+  readonly reason?: SubagentFailureReason;
   /**
    * D-α 观测地板 (additive):子代理 run() 的实际停因,来源
    * `RunResult.stopReason`(loop-engine 八值 append-only 联合)。
    *
-   * 与 `reason` 语义不同,**不合并**:`reason` 是父代理侧的失败归因四值枚举
-   * (crashed / maxTurnsExceeded / timeout / protocolError),`stop_reason` 是
-   * 子代理循环自身的停止原因(含 completed 等成功停因)。status / reason 两个
-   * 枚举维持 V1 冻结形态(envelope-freeze.test.ts 锁定)。
+   * 与 `reason` 语义不同,**不合并**:`reason` 是父代理侧的失败归因枚举
+   * (crashed / maxTurnsExceeded / timeout / protocolError,ADR-0111 显式修订
+   * SC9 冻结追加第五值 modelTransient = 上游瞬时模型流/传输失败),`stop_reason`
+   * 是子代理循环自身的停止原因(含 completed 等成功停因)。status 枚举与
+   * reason 封闭枚举判定面维持冻结形态(envelope-freeze.test.ts 锁定;
+   * 封闭性 = enum 外值拒收,值域变更须走 ADR,见 ADR-0111)。
    *
    * TS 侧直接复用 `StopReason`(唯一声明点,联合追加值时零漂移);wire schema
    * 侧刻意**不冻 enum**(见 PARENT_SCHEMA 注释)。缺席 = 该信封不是从一次
@@ -315,7 +330,16 @@ export const PARENT_SCHEMA: Record<string, unknown> = {
     usage: { type: "object" },
     reason: {
       type: "string",
-      enum: ["crashed", "maxTurnsExceeded", "timeout", "protocolError"],
+      // ADR-0111 Decision 2: 第五值 modelTransient = 带 cause 的瞬时模型流/
+      // 传输失败(loop 收口 protocolError + RunResult.apiError 在场派生)。
+      // 封闭枚举判定面不变: enum 外值仍拒收(envelope-freeze 钉住)。
+      enum: [
+        "crashed",
+        "maxTurnsExceeded",
+        "timeout",
+        "protocolError",
+        "modelTransient",
+      ],
     },
     // D-α 观测地板 (additive): 子代理 run() 的实际停因。
     // `additionalProperties: false` 下新字段必须显式声明, 否则 ajv 直接把带
@@ -407,6 +431,16 @@ function shortSummary(summary: string, result: string): string {
 }
 
 function failedSummary(env: SubAgentEnvelope): string {
+  // ADR-0111 Decision 2: modelTransient 与 crashed(进程级异常死亡) /
+  // protocolError(协议损坏) 在父可见文案面必须可分辨 —— 专属提示带
+  // ADR-0102 Decision 1 续跑出路 (闸天然放行, 文案给引导)。其他 reason 文案不动。
+  if (env.reason === "modelTransient") {
+    return (
+      "subagent failed: modelTransient — transient upstream model-stream/" +
+      "transport failure, not a task verdict; the worker process is dead, so " +
+      "subagent_continue with this task_id resumes the dialogue from its transcript"
+    );
+  }
   return env.reason === undefined
     ? "subagent failed"
     : `subagent failed: ${env.reason}`;

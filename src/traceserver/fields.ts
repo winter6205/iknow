@@ -69,6 +69,8 @@ const SUBAGENT_STOP_REASON_OPTIONS: ReadonlyArray<string> = [
   "maxTurnsExceeded",
   "timeout",
   "protocolError",
+  // ADR-0111 Decision 2: envelope reason 联合第五值，筛选词汇表对齐同步。
+  "modelTransient",
   "cancelled",
 ] as const;
 

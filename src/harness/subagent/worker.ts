@@ -12,8 +12,10 @@
  *   - stdout 严格单 wire: 所有非 envelope 输出走 process.stderr.write,
  *     禁止 console.log 到 stdout;
  *   - SIGTERM 友好收尾 (runSubagentWorker 由 cli.ts 调度, 当前实现
- *     显式 process.exit(0) 保证 stdout flush);
- *   - 未捕获错误 → exit 2 (协议层崩溃, 由 cli.ts 顶层 catch 兜底);
+ *     显式 process.exit(WORKER_EXIT_OK) 保证 stdout flush);
+ *   - exit-code 语义按 ADR-0111 不变式 (b) 成文化 (常量 WORKER_EXIT_*):
+ *     exit 2 仅信封协议错误 (parse ProtocolError 上抛, cli.ts 捕获);
+ *     run 阶段逃逸 → best-effort failed envelope + exit 1;
  *   - env 继承父进程 (ADR-0001, 不发明第二条 env 协议);
  *   - worker 子进程不含 spawn_subagent (SC9, v1 嵌套禁派发 ——
  *     createDefaultAciRegistry 不传 subagentManager, 该工具 T2 才落地)。
@@ -77,7 +79,12 @@ import { resolvePluginCatalog, resolvePluginRoots } from "../plugin/roots.js";
 import { createJsonlTraceService, type TraceService } from "../trace/index.js";
 import { run, epilogueSummary } from "../loop-engine.js";
 import type { HarnessStreamEvent } from "../stream.js";
-import { MaxTurnsExceeded, ProtocolError } from "../errors.js";
+import {
+  errorMessage,
+  MaxTurnsExceeded,
+  ModelStreamIncompleteError,
+  ProtocolError,
+} from "../errors.js";
 import type { AnthropicNativeMessage } from "../model-adapter/types.js";
 import {
   AgentCatalogLookupError,
@@ -933,8 +940,10 @@ export function toOkEnvelope(
   };
 }
 
-/** 失败路径 envelope (SC6 reason enum: crashed/maxTurnsExceeded/timeout/protocolError)。
- *  导出: 测试 seam — 直接验证 reason 四值各自的 envelope 形态。
+/** 失败路径 envelope (SC6 reason enum 五值: crashed/maxTurnsExceeded/timeout/
+ *  protocolError/modelTransient —— 第五值由 ADR-0111 Decision 2 显式修订 SC9
+ *  冻结追加, 承载「带 cause 的瞬时模型流/传输失败」)。
+ *  导出: 测试 seam — 直接验证 reason 五值各自的 envelope 形态。
  *  #358 T3 (additive): 第二参 summary 可选 — SIGTERM 优雅收尾时携带
  *  worker 自跑收尾摘要轮的 stop_summary 文本;不传时行为与旧签名逐位一致
  *  (空串), 不 breaking 既有 callers。
@@ -1156,20 +1165,60 @@ async function wireWorkerTranscript(opts: {
 }
 
 /**
+ * ADR-0111 不变式 (b) — worker 逃逸 throw 类型 → failed envelope reason 映射
+ * SSOT (runWorkerOnce 逃逸 catch 与 runSubagentWorker/cli 最后防线共用, 不分叉)。
+ * 子类支 (ModelStreamIncompleteError) 排在 ProtocolError 通用支之前
+ * (loop :1912 分支顺序惯例)。
+ * undefined = 非结构化失败类 (调用面决定上抛或归 crashed)。
+ */
+function escapeFailureReason(
+  err: unknown
+): SubAgentEnvelope["reason"] | undefined {
+  if (err instanceof MaxTurnsExceeded) return "maxTurnsExceeded";
+  if (err instanceof ModelStreamIncompleteError) return "modelTransient";
+  if (err instanceof ProtocolError) return "protocolError";
+  return undefined;
+}
+
+/**
+ * protocolError/emptyFinalResponse 收口派生支 (ADR-0111 Decision 2(a)):
+ * RunResult.apiError 在场 ⇔ 带 cause 的瞬时模型流/传输失败 (loop 收口唯一
+ * 挂载点是 transportApiErrorOf) → modelTransient; 缺席 = 真协议损坏 →
+ * 维持 protocolError。
+ */
+function stopFailureEnvelope(
+  result: import("../model-adapter/types.js").RunResult,
+  observability: EnvelopeObservabilityOpts
+): SubAgentEnvelope {
+  return toFailedEnvelope(
+    result.apiError !== undefined ? "modelTransient" : "protocolError",
+    "",
+    observabilityFields(result, observability)
+  );
+}
+
+/**
  * 测试 seam (导出仅供测试): envelope → run → truncateEnvelopeResult。
  *
  * 把 readStdin → parseWorkerEnvelope → run → 派生 envelope → 截断这一段
  * 拆出来, 让单测直接调 runWorkerOnce({ workerEnvelope, deps }) 注入 stub
  * deps, 不 spawn 真 worker 子进程 (避免依赖真 LLM key)。
  *
- * 失败路径 (spec SC6 / assumption 16):
+ * 失败路径 (spec SC6 / assumption 16, exit-code 语义成文化于 ADR-0111 不变式 (b)):
  *   - parseWorkerEnvelope 抛 ProtocolError → 不在这里处理 (调用方
- *     runSubagentWorker 捕获, exit 2 —— "协议层崩溃 → 父管理 reason:protocolError");
+ *     runSubagentWorker 让该错误原样上抛 —— exit 2 专码仅属这条信封协议崩溃路径);
  *   - run() 抛 MaxTurnsExceeded → status:failed, reason:maxTurnsExceeded
  *     (plan T3 / ADR-0011: maxTurns 超限 = throw, worker emit failed envelope);
+ *   - run() 抛 ModelStreamIncompleteError → status:failed, reason:modelTransient
+ *     (ADR-0111 Decision 2(b): 子类支排在 ProtocolError 通用支之前; loop
+ *     收口面之外的逃逸防御支);
  *   - run() 抛 ProtocolError → status:failed, reason:protocolError
  *     (harness 模型协议错误, 不是 envelope 协议 —— 区别于 exit 2 路径);
- *   - 其他 run() 错误 → 抛出 (runSubagentWorker 兜底 → exit 2 → crashed)。
+ *   - run() 正常返回 stopReason=protocolError 且 RunResult.apiError 在场
+ *     → reason:modelTransient, 缺席 → protocolError (ADR-0111 Decision 2(a),
+ *     不变式: apiError 在场 ⇔ 带 cause 的瞬时模型流/传输失败);
+ *   - 其他 run() 错误 → 抛出 (runSubagentWorker run 阶段收口 →
+ *     best-effort failed envelope + exit 1, 不再冒用 exit 2)。
  *
  * #358 T3 SIGTERM 优雅收尾 (spec Code Style "catch 侧跑 epilogueSummary 一轮"):
  *   - 进程收 SIGTERM (父 manager 超时计时到) → 同步前奏注册的 handler 用
@@ -1253,13 +1302,7 @@ export async function runWorkerOnce(opts: {
       result.stopReason === "emptyFinalResponse"
     ) {
       log(`run() stopReason=${result.stopReason}`);
-      return truncateEnvelopeResult(
-        toFailedEnvelope(
-          "protocolError",
-          "",
-          observabilityFields(result, observability)
-        )
-      );
+      return truncateEnvelopeResult(stopFailureEnvelope(result, observability));
     }
     // #358 T3 超时收尾: stopReason=cancelled 且确系本 worker 的 SIGTERM
     // abort (signal.reason === "subagent-timeout"; 工具侧 cancelled 不误标)。
@@ -1305,14 +1348,15 @@ export async function runWorkerOnce(opts: {
     }
     return truncateEnvelopeResult(toOkEnvelope(result, observability));
   } catch (err) {
-    if (err instanceof MaxTurnsExceeded) {
-      return truncateEnvelopeResult(toFailedEnvelope("maxTurnsExceeded"));
-    }
-    if (err instanceof ProtocolError) {
-      log(`run() protocolError: ${err.message}`);
-      return truncateEnvelopeResult(toFailedEnvelope("protocolError"));
-    }
-    throw err;
+    // 逃逸 throw 类型 → reason 映射走 SSOT (escapeFailureReason)。经 Decision 5
+    // 核实: 经 step 的正常路径被 loop 收口、不达此支; 本 catch 服务 loop 收口面
+    // 之外的逃逸 (如 epilogue / worker 收尾调用面抛出的本类错误)。
+    // unknown 逃逸上抛, 由 runSubagentWorker run 阶段收口
+    // (best-effort failed envelope + exit 1, ADR-0111 不变式 (b))。
+    const reason = escapeFailureReason(err);
+    if (reason === undefined) throw err;
+    log(`run() escape ${reason}: ${errorMessage(err)}`);
+    return truncateEnvelopeResult(toFailedEnvelope(reason));
   } finally {
     // 任务结束（无论成败）即移除 SIGTERM 监听, 避免 worker 长驻阶段
     // 残留 listener（runSubagentWorker 随后 process.exit(0)）。
@@ -1373,18 +1417,99 @@ function readStdin(): Promise<string> {
 }
 
 /**
+ * ADR-0111 不变式 (b) — run 阶段逃逸 → failed envelope 派生 SSOT
+ * (runSubagentWorker 收口与 cli.ts 最后防线共用同一判据, 不分叉)。
+ * 结构化逃逸走 escapeFailureReason; 其余归 crashed (进程以错误结束 =
+ * ADR-0111 收窄后的「进程级异常死亡」词汇; 父侧 SC16 对 exit≠0 本就标
+ * crashed, 信封派生不与之矛盾)。
+ */
+export function runEscapeEnvelope(err: unknown): SubAgentEnvelope {
+  const reason = escapeFailureReason(err);
+  if (reason !== undefined) return toFailedEnvelope(reason);
+  return toFailedEnvelope(
+    "crashed",
+    `subagent worker run-phase error: ${errorMessage(err)}`
+  );
+}
+
+/**
+ * 逃逸错误渲染 (stderr 诊断面): Error 保 stack; plain-object typed error
+ * 走 errorMessage SSOT, 不塌缩成 `[object Object]` (code-quality
+ * typed-error catch 契约)。
+ */
+export function renderWorkerError(err: unknown): string {
+  if (err instanceof Error) return err.stack ?? err.message;
+  return errorMessage(err);
+}
+
+/**
+ * ADR-0111 不变式 (b) — worker exit-code 语义常量 (命名单点, cli.ts 消费;
+ * 语义正文见 runSubagentWorker doc, 不在此复述):
+ *   - OK(0): 信封已写 stdout (status ok/failed 均是, 结构化失败按 reason 归因);
+ *   - RUN_PHASE(1): run 阶段逃逸 → best-effort failed envelope + exit 1;
+ *   - ENVELOPE_PROTOCOL(2): 仅信封协议错误 (parseWorkerEnvelope ProtocolError,
+ *     无信封可写; assumption 16 / SC13 协议层崩溃专码)。
+ */
+export const WORKER_EXIT_OK = 0;
+export const WORKER_EXIT_RUN_PHASE = 1;
+export const WORKER_EXIT_ENVELOPE_PROTOCOL = 2;
+
+/**
  * worker 进程主入口 (cli.ts dispatch):
  *   stdin 一次性读全部 → parseWorkerEnvelope → createWorkerDeps →
  *   runWorkerOnce → stdout newline-JSON → exit 0。
  *
- * 顶层不 try/catch: 调用方 (cli.ts) 用 .catch → exit 2 兜底
- * (协议层崩溃 —— assumption 16: JSON parse / 信封字段缺失)。
+ * exit-code 语义 (ADR-0111 不变式 (b), 成文化 assumption 16 / SC13):
+ *   - **exit 2 = 仅信封协议错误** —— parseWorkerEnvelope 抛 ProtocolError
+ *     (stdin JSON parse 失败 / WorkerEnvelope 字段缺失) 原样上抛, 无信封
+ *     可写, 由调用方 cli.ts 捕获 → `[subagent-worker] fatal` + exit 2;
+ *     本函数内 parse 之后不再有任何 ProtocolError 逃逸通道 (run 阶段收口)。
+ *   - run 阶段逃逸 (装配 / 收尾 / loop 收口面之外的 typed 逃逸) →
+ *     best-effort failed envelope 写 stdout + exit 1, 不再冒用 2。
+ *   - exit 0 + failed envelope = run() 派生的结构化失败
+ *     (reason ∈ 五值枚举, ADR-0111 Decision 2), 父侧按信封归因。
  */
 export async function runSubagentWorker(
   transcriptIo?: WorkerTranscriptIOFactory
 ): Promise<void> {
   const input = await readStdin();
   const workerEnvelope = parseWorkerEnvelope(input);
+  const phase = await runWorkerPhase(workerEnvelope, transcriptIo);
+  // stdout 单 wire: 成功与 run 阶段逃逸共用同一落笔点, exit code 由阶段收口决定。
+  process.stdout.write(JSON.stringify(phase.envelope) + "\n");
+  process.exit(phase.exitCode);
+}
+
+/** parse 之后的完整 run 阶段: 错误一律收口为 (envelope, exitCode), 不上抛。 */
+async function runWorkerPhase(
+  workerEnvelope: WorkerEnvelope,
+  transcriptIo?: WorkerTranscriptIOFactory
+): Promise<{
+  readonly envelope: SubAgentEnvelope;
+  readonly exitCode: number;
+}> {
+  try {
+    return {
+      envelope: await assembleAndRunWorker(workerEnvelope, transcriptIo),
+      exitCode: WORKER_EXIT_OK,
+    };
+  } catch (err) {
+    // run 阶段逃逸: 诊断走 stderr (stdout 是信封协议单 wire), 信封照写, exit 1。
+    process.stderr.write(
+      `[subagent-worker] run-phase error: ${renderWorkerError(err)}\n`
+    );
+    return {
+      envelope: truncateEnvelopeResult(runEscapeEnvelope(err)),
+      exitCode: WORKER_EXIT_RUN_PHASE,
+    };
+  }
+}
+
+/** 装配 → runWorkerOnce (信封 = 返回值的进程级形态)。 */
+async function assembleAndRunWorker(
+  workerEnvelope: WorkerEnvelope,
+  transcriptIo?: WorkerTranscriptIOFactory
+): Promise<SubAgentEnvelope> {
   const env = loadIknowEnv();
   const { deps, catalog } = await createWorkerRuntime({
     env,
@@ -1451,12 +1576,10 @@ export async function runSubagentWorker(
   });
   // D-α 观测地板: fileRefs 的派生源 = 本 worker 实际装配出的 ACI catalog
   // 里 category:"write" 的工具名 (def-list 期裁剪后的真实工具面)。
-  const result = await runWorkerOnce({
+  return runWorkerOnce({
     workerEnvelope,
     deps,
     writeToolNames: writeToolNamesFrom(catalog),
     transcriptIo,
   });
-  process.stdout.write(JSON.stringify(result) + "\n");
-  process.exit(0);
 }

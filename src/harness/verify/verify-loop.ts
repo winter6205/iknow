@@ -30,6 +30,7 @@ import type {
   AnthropicNativeMessage,
   RunResult,
 } from "../model-adapter/types.js";
+import type { SubagentFailureReason } from "../subagent/envelope.js";
 import type { LoopTrace } from "../loop-trace.js";
 import type { TraceService } from "../trace/index.js";
 import { deriveClaimIndex } from "../last-nonempty-assistant.js";
@@ -106,8 +107,10 @@ export interface ClassifierEnvelope {
   readonly status: "ok" | "failed";
   /** status:"ok" 时 = 判官 JSON; status:"failed" 时为空串。 */
   readonly result: string;
-  readonly reason?:
-    "crashed" | "maxTurnsExceeded" | "timeout" | "protocolError";
+  /** envelope reason 联合按名对齐 envelope SSOT (ADR-0111 第五值
+   *  modelTransient；failed 一律按 transport 错 fail-open 收敛为 unstable，
+   *  值域扩宽不改本文件消费语义)。 */
+  readonly reason?: SubagentFailureReason;
   readonly summary: string;
 }
 

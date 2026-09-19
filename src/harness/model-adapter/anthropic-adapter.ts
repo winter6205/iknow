@@ -19,7 +19,12 @@
  * 7 类样例全过。
  */
 
-import { ProtocolError, PromptTooLongError } from "../errors.js";
+import {
+  ProtocolError,
+  PromptTooLongError,
+  ModelStreamIncompleteError,
+  errorMessage,
+} from "../errors.js";
 import {
   clockAbortOf,
   parseRetryAfterMs,
@@ -524,6 +529,39 @@ function translatePromptTooLong(e: unknown): never {
   throw e;
 }
 
+/**
+ * ADR-0111 Decision 1: SDK「流结束但未产出 Message」裸 Error 的形态判据。
+ * SDK 无 typed 类可 instanceof,按 message 形态匹配,三条件缺一不可:
+ *   1. `/stream ended without producing a Message/i`（哨兵测试钉住形态与
+ *      SDK 版本,升级换形态即 RED 人工复核）;
+ *   2. 非 APIError —— 真 HTTP 语义错误不许被抢翻;
+ *   3. cause 链无网络错误 —— 真网络断开属可重试的 `llm_network` 格,
+ *      不双标签（判据复用 `someCause` / `isConnectionFault` 单点）。
+ */
+const STREAM_INCOMPLETE_MESSAGE = /stream ended without producing a Message/i;
+
+function isStreamIncompleteShape(e: unknown): boolean {
+  return (
+    e instanceof Error &&
+    STREAM_INCOMPLETE_MESSAGE.test(e.message) &&
+    !(e instanceof APIError) &&
+    !someCause(e, isConnectionFault)
+  );
+}
+
+/**
+ * D2 thinkingMs 测量闭包 + ADR-0111 D1 可见增量标志（单点声明——
+ * stepStreamArm 与 wireStreamEvents 共用同一形态，防两处内联漂移）。
+ * `sawVisibleDelta` = 本次 attempt 见过非空可见增量（text / thinking /
+ * input_json 任一），置位点与 measurement 打点同址、空 delta 不置位；
+ * 断流翻译 ModelStreamIncompleteError 时作 `visible` 携带。
+ */
+type StreamMeasurement = {
+  start?: number;
+  end?: number;
+  sawVisibleDelta?: boolean;
+};
+
 async function stepStreamArm(deps: {
   readonly client: Anthropic;
   readonly params: MessageCreateParamsNonStreaming;
@@ -538,7 +576,8 @@ async function stepStreamArm(deps: {
   // (text_delta / input_json_delta / tool_call_start) 收点。`onStream` 缺席
   // 也挂(只为测时长,零 emit),measurement 与 emit 完全解耦 —— 不污染
   // host 观察者契约。`end` 已记 → 后续不再覆盖(只记首个非思考点)。
-  const measurement: { start?: number; end?: number } = {};
+  // sawVisibleDelta 语义见 StreamMeasurement doc（ADR-0111 Decision 1）。
+  const measurement: StreamMeasurement = {};
   wireStreamEvents(stream, deps.onStream, measurement);
   // D8:断流 / abort → finalMessage() reject → 不构造 AssistantTurnResult。
   try {
@@ -561,6 +600,15 @@ async function stepStreamArm(deps: {
   } catch (e) {
     // wireStreamEvents 已 emit 的部分不受影响 — D8 整回合不提交语义由 step
     // reject 不构造 AssistantTurnResult 保证,翻译只是改变异常类。
+    // ADR-0111 Decision 1:SDK 断流形态 → ModelStreamIncompleteError(visible
+    // 从 measurement 取)。与 prompt-too-long 判据互斥(断流判据要求非 APIError),
+    // 先后顺序不构成行为差。
+    if (isStreamIncompleteShape(e)) {
+      throw new ModelStreamIncompleteError(
+        measurement.sawVisibleDelta === true,
+        e
+      );
+    }
     translatePromptTooLong(e);
   }
 }
@@ -590,8 +638,9 @@ function wireStreamEvents(
    *  - 首条非思考增量(text_delta / input_json_delta / tool_call_start)
    *    → `end` 记 `performance.now()`
    *  仅记首个端点,后续不覆盖;两端都有 → stepStreamArm 计算 elapsed,
-   *  边界形态合法(> 0 且有限数)→ 挂 `thinkingMs`,否则字段缺席。 */
-  measurement?: { start?: number; end?: number }
+   *  边界形态合法(> 0 且有限数)→ 挂 `thinkingMs`,否则字段缺席。
+   *  - `sawVisibleDelta` 语义见 StreamMeasurement doc（ADR-0111 D1）。 */
+  measurement?: StreamMeasurement
 ): void {
   // D2:测量是否在场决定 listener 是否挂。`onStream` 与 measurement 是
   // 独立维度 —— measurement 在场 + onStream 缺席 = 静默测量(只测不 emit),
@@ -612,12 +661,20 @@ function wireStreamEvents(
       measurement.end = performance.now();
     }
   };
+  // ADR-0111 Decision 1:可见增量置位 —— 与打点同址,只在**非空** delta 上调用
+  // (对齐 empty-delta 纪律);断流翻译 ModelStreamIncompleteError 从此读 `visible`。
+  const markVisible = (): void => {
+    if (measurement !== undefined) {
+      measurement.sawVisibleDelta = true;
+    }
+  };
   // T1:content_block_start 登记 index → block.id,供 content_block_delta
   // (input_json_delta) 配对;函数返回即自然清理(每回合一次装配)。
   const indexToBlockId = new Map<number, string>();
   stream.on("text", (textDelta) => {
     if (textDelta === "") return; // empty delta:不 emit(见上方 empty-class 决策注释)
     markEnd(); // D2 — text_delta 视为首个非思考增量 → 收点
+    markVisible(); // ADR-0111 D1 — 非空 text 增量 = 可见输出
     safeEmit({ type: "text_delta", text: textDelta });
   });
   stream.on("streamEvent", (event: MessageStreamEvent) => {
@@ -635,6 +692,7 @@ function wireStreamEvents(
         const text = delta.thinking ?? "";
         if (text === "") return; // empty delta 不 emit — 对齐 text_delta 纪律
         markStart(); // D2 — 首条 thinking_delta 打起点
+        markVisible(); // ADR-0111 D1 — 非空 thinking 增量 = 可见输出
         safeEmit({ type: "thinking_delta", text });
         return;
       }
@@ -644,6 +702,7 @@ function wireStreamEvents(
         const partialJson = delta.partial_json ?? "";
         if (partialJson === "") return; // empty delta 不 emit — 对齐 text_delta 纪律
         markEnd(); // D2 — input_json_delta 视为首个非思考增量 → 收点
+        markVisible(); // ADR-0111 D1 — 非空 tool input 增量 = 可见输出
         const id = indexToBlockId.get(event.index);
         // 未登记 / 空串 id 均无 id 可配对 → 不 emit(空串 = tool_use block.id
         // 缺失的 legacy 回退,无法与 tool_call_start / postToolUse 配对)。
@@ -880,23 +939,33 @@ const CAUSE_CHAIN_MAX_DEPTH = 5;
  *
  * 判别顺序是契约的一部分：
  *   1. `prompt_too_long` —— 输入超限已可判定，重发同一 prompt 只会再超限一次；
- *   2. abort —— `APIUserAbortError extends APIError<T, T, T>` 且 `status ===
+ *   2. `stream_incomplete` —— ADR-0111 Decision 3：`ModelStreamIncompleteError`
+ *      instanceof 直判（extends `ProtocolError`，若落到后续支会被 default 压成
+ *      `protocol_error`，丢掉 visible 重试判据），先于一切形态猜测；
+ *   3. abort —— `APIUserAbortError extends APIError<T, T, T>` 且 `status ===
  *      undefined`，落到 HTTP 支会把宿主 Ctrl+C 翻成 `llm_http: 0` 这个假状态码
  *      （typed-error 契约的一条推论：不许把「非 HTTP 故障」伪装成 0 号 HTTP）；
- *   3. `llm_http` —— **只认带数值 status 的真 HTTP 响应**；
- *   4. cert / TLS 校验失败 —— 确定性失败，显式落 `protocol_error`（spec inv 4 的
+ *   4. `llm_http` —— **只认带数值 status 的真 HTTP 响应**；
+ *   5. cert / TLS 校验失败 —— 确定性失败，显式落 `protocol_error`（spec inv 4 的
  *      cert 格），不得冒充可重试的 `llm_network`；
- *   5. `llm_network` —— 连接类故障（含 SDK 类 `cause` 链里的原生网络错误），
+ *   6. `llm_network` —— 连接类故障（含 SDK 类 `cause` 链里的原生网络错误），
  *      归 retry 类（spec inv 4:explicit network faults）。
  *
- * 第 4 / 5 步都在 HTTP 支之后：`APIConnectionError` /
+ * 第 5 / 6 步都在 HTTP 支之后：`APIConnectionError` /
  * `APIConnectionTimeoutError` 同样 extends `APIError` 而 `status === undefined`，
  * 被 HTTP 支先接走就会翻成 `llm_http: 0`（classifyFault → none），使网络重试格
  * 永远不可达——所以 HTTP 支带上 `status` 数值判据，把它们让给连接支。反过来，
  * 真 HTTP 语义优先：4xx 的确定性失败不因 `cause` 里挂着连接错误就变成可重试。
+ *
+ * default 支只剩真·未知形态（ADR-0111 Decision 4）：return 前 console.warn
+ * 一条诊断（name + message 截断 ≤200 字符，不打 stack / 请求体），分类结果
+ * 仍 `protocol_error` —— 不再静默压平，SDK 升级换形态有线上信号。
  */
 function nonClockFaultOf(err: unknown): FaultEvent {
   if (err instanceof PromptTooLongError) return { kind: "prompt_too_long" };
+  if (err instanceof ModelStreamIncompleteError) {
+    return { kind: "stream_incomplete", visible: err.visible };
+  }
   if (err instanceof APIUserAbortError || isAbortErrorShape(err)) {
     return { kind: "user_cancel" };
   }
@@ -911,6 +980,15 @@ function nonClockFaultOf(err: unknown): FaultEvent {
   }
   if (someCause(err, isCertFailure)) return { kind: "protocol_error" };
   if (someCause(err, isConnectionFault)) return { kind: "llm_network" };
+  // ADR-0111 Decision 4:default 只剩真·未知形态 —— 不静默压平,留一条诊断
+  // （name + message 截断 ≤200 字符,不打 stack / 请求体）,分类结果不变。
+  // worker stdout 是信封协议面,warn 走 stderr 不污染(ADR-0111 D4)。
+  const name = err instanceof Error ? err.name : typeof err;
+  console.warn(
+    `[anthropic-adapter] unclassified model fault: ${name}: ${errorMessage(
+      err
+    ).slice(0, 200)}`
+  );
   return { kind: "protocol_error" };
 }
 

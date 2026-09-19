@@ -104,6 +104,19 @@ describe("classifyFault G2 table", () => {
     );
   });
 
+  // ADR-0111 不变式 (a):stream_incomplete 与 clock_timeout 同判据 —— 不可见 =
+  // 本次 attempt 无任何模型输出增量,整 step 重试安全;已出字不自动重试。
+  it("stream_incomplete: 不可见 → retry;可见 → none(已出字不重试)", () => {
+    assert.equal(
+      classifyFault({ kind: "stream_incomplete", visible: false }),
+      "retry"
+    );
+    assert.equal(
+      classifyFault({ kind: "stream_incomplete", visible: true }),
+      "none"
+    );
+  });
+
   it("concurrent classify calls are isolated", async () => {
     const events: FaultEvent[] = [
       { kind: "llm_http", status: 429 },

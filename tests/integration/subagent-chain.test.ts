@@ -17,6 +17,8 @@
  *   4. exit 0 + 无 envelope → failed protocolError 并释放槽位
  *   5. shutdown 后 buffer 清空 → not_found
  *   6. 非法 envelope (缺 result) → failed reason=protocolError
+ *   7. (plan T5) 断流 e2e: failed(modelTransient)+transcript → 真闸放行
+ *      continue → 第二 stub 成功 → 父侧 completed
  *
  * 真 worker 子进程链路 (node <iknow-bin> --subagent-worker) 的 stdout-wire 行为
  * 已由 cli.ts dispatch + worker.test.ts 的 runWorkerOnce 覆盖;本测试专注
@@ -37,6 +39,7 @@ import { join } from "node:path";
 
 import { workerStderrPath } from "../../src/harness/sandbox/fence-tmp.ts";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
+import { createSubAgentContinueTool } from "../../src/harness/subagent/subagent-continue-tool.ts";
 import {
   clearActiveExtraSecrets,
   setActiveExtraSecrets,
@@ -115,6 +118,29 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
     );
     assert.equal(env.status, "ok");
     assert.equal(env.result, "r");
+  });
+
+  it("fake 二进制 emit failed envelope reason=modelTransient + exit 0 → queryBuffer failed reason=modelTransient (ADR-0111 第五值透传)", async () => {
+    const failed = JSON.stringify({
+      status: "failed",
+      reason: "modelTransient",
+      summary: "model stream transient",
+      result: "",
+      stop_reason: "protocolError",
+    });
+    const fake = spawn(process.execPath, ["-e", printJsonScript(failed)], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const mgr = createSubAgentManager({ spawn: () => fake });
+    const { taskId } = mgr.spawn({});
+    await waitExit(fake);
+    const q = mgr.queryBuffer(taskId);
+    assert.equal(q.status, "failed");
+    if (q.status === "failed") {
+      assert.equal(q.reason, "modelTransient");
+      assert.equal(q.summary, "model stream transient");
+    }
+    await mgr.shutdown();
   });
 
   it("fake 二进制立即 exit 2 (无 stdout envelope) → queryBuffer crashed", async () => {
@@ -303,5 +329,81 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
     assert.equal(q.status, "failed");
     if (q.status === "failed") assert.equal(q.reason, "protocolError");
     await mgr.shutdown();
+  });
+
+  // plan T5 demo:整链走真实 manager + 真实 ADR-0102 续跑闸 + 真实子进程,
+  // 不 mock 闸。stub-1 = T4 产物 (边跑边 append 工人 transcript → 交
+  // failed(modelTransient) 信封 + exit 0, 上游瞬时可续);stub-2 = 续跑成功。
+  it("断流 e2e:modelTransient+transcript → 闸放行 continue → 第二 stub 成功 → 父侧 completed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "iknow-transient-e2e-"));
+    const subagentsDir = join(root, "subagents");
+    const transientEnvelope = JSON.stringify({
+      status: "failed",
+      reason: "modelTransient",
+      summary: "",
+      result: "",
+    });
+    const okEnv = JSON.stringify({
+      status: "ok",
+      summary: "resumed done",
+      result: "resumed answer",
+    });
+    let launches = 0;
+    const mgr = createSubAgentManager({
+      subagentsDir,
+      spawn: (_def, _taskId) => {
+        launches += 1;
+        if (launches === 1) {
+          // 断流 stub:收 stdin payload → 按 ADR-0102 Decision 3 落工人
+          // transcript(append) → 发射 T4 的 failed(modelTransient) 信封。
+          // 不调 process.exit:自然退出保 stdout flush (本文件 fake 先例)。
+          const script =
+            `let d="";` +
+            `process.stdin.on("data",(c)=>{d+=c});` +
+            `process.stdin.on("end",()=>{` +
+            `const p=JSON.parse(d);const fs=require("fs");const path=require("path");` +
+            `fs.mkdirSync(path.dirname(p.transcriptPath),{recursive:true});` +
+            `fs.appendFileSync(p.transcriptPath,JSON.stringify({type:"message",role:"user",text:p.task})+"\\n");` +
+            `process.stdout.write(${JSON.stringify(transientEnvelope + "\n")});` +
+            `});`;
+          return spawn(process.execPath, ["-e", script], {
+            stdio: ["pipe", "pipe", "pipe"],
+          });
+        }
+        // 续跑 stub:成功交差 (transcript head 加载真值由 worker 侧测试认证)。
+        return spawn(process.execPath, ["-e", printJsonScript(okEnv)], {
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      },
+    });
+    const tool = createSubAgentContinueTool({ manager: mgr });
+    try {
+      const { taskId } = mgr.spawn({
+        task: "work interrupted by upstream",
+        conversationId: "c1",
+      });
+      const first = await mgr.waitFor(taskId, 10000);
+      assert.equal(first.status, "failed");
+      if (first.status === "failed") {
+        assert.equal(first.reason, "modelTransient");
+      }
+      // 工人账由 stub-1 真实落盘 —— 闸的存在性判据吃真文件。
+      assert.equal(
+        existsSync(join(subagentsDir, taskId, `${taskId}.jsonl`)),
+        true
+      );
+
+      const resumed = (await tool.handler(
+        { task_id: taskId, message: "carry on after the blip" },
+        { conversationId: "c1" }
+      )) as { status: string; result: string };
+      assert.equal(launches, 2);
+      assert.equal(resumed.status, "ok");
+      // 父可见面 = projectParentVisibleEnvelope 短交差 (summary 派生 handoff)。
+      assert.match(resumed.result, /resumed done/);
+    } finally {
+      await mgr.shutdown();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

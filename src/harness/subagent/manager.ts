@@ -22,6 +22,7 @@ import {
 import type {
   SkillIndexSnapshotEntry,
   SubAgentEnvelope,
+  SubagentFailureReason,
   WorkerEnvelope,
 } from "./envelope.js";
 import type { SubAgentDefinition } from "./role.js";
@@ -64,7 +65,8 @@ export type QueryBufferResult =
   | SubAgentEnvelope // completed
   | {
       status: "failed";
-      reason: "crashed" | "maxTurnsExceeded" | "timeout" | "protocolError";
+      // ADR-0111 Decision 2: reason 词汇表按名复用 envelope SSOT。
+      reason: SubagentFailureReason;
       summary: string;
     };
 
@@ -1463,20 +1465,10 @@ export function createSubAgentManager(opts: {
             emitStop(task, "completed", { summary: env.summary });
           } else {
             emitStateChange(task, "failed", {
-              reason: (env.reason ?? "protocolError") as
-                | "crashed"
-                | "maxTurnsExceeded"
-                | "timeout"
-                | "protocolError"
-                | "cancelled",
+              reason: env.reason ?? "protocolError",
             });
             emitStop(task, "failed", {
-              reason: (env.reason ?? "protocolError") as
-                | "crashed"
-                | "maxTurnsExceeded"
-                | "timeout"
-                | "protocolError"
-                | "cancelled",
+              reason: env.reason ?? "protocolError",
               summary: env.summary,
             });
           }

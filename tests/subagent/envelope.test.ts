@@ -322,6 +322,38 @@ describe("subagent envelope truncation (SC10)", () => {
     assert.ok(out.summary.length > 0);
   });
 
+  // ADR-0111 Decision 2: modelTransient = 上游瞬时可续失败,与 protocolError
+  // (真协议损坏)、crashed(进程级异常死亡)在父可见文案面上必须可分辨,
+  // 且给出 ADR-0102 Decision 1 的续跑出路(闸天然放行,文案引导)。
+  it("empty-summary failed reason=modelTransient → 父可见文案含续跑引导 (ADR-0111/0102)", () => {
+    const out = truncateEnvelopeResult({
+      status: "failed",
+      reason: "modelTransient",
+      summary: "",
+      result: "",
+    });
+    assert.equal(out.reason, "modelTransient");
+    assert.match(out.summary, /modelTransient/);
+    assert.match(out.summary, /subagent_continue/);
+  });
+
+  it("其它 reason 的父可见文案 byte-stable (只给 modelTransient 加引导)", () => {
+    const protocol = truncateEnvelopeResult({
+      status: "failed",
+      reason: "protocolError",
+      summary: "",
+      result: "",
+    });
+    assert.equal(protocol.summary, "subagent failed: protocolError");
+    const maxTurns = truncateEnvelopeResult({
+      status: "failed",
+      reason: "maxTurnsExceeded",
+      summary: "",
+      result: "",
+    });
+    assert.equal(maxTurns.summary, "subagent failed: maxTurnsExceeded");
+  });
+
   it("exactly-20000 draft is still a short handoff, not the full body", () => {
     const env: SubAgentEnvelope = {
       status: "ok",

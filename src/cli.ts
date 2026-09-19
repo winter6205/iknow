@@ -11,7 +11,13 @@
 import { parseArgs, type ParsedCli } from "./cli/parse-args.js";
 import { runChatSession } from "./cli/chat-session.js";
 // #356 subagent worker headless 重入: 子代理进程 main dispatch 早返回。
-import { runSubagentWorker } from "./harness/subagent/worker.js";
+import {
+  renderWorkerError,
+  runEscapeEnvelope,
+  runSubagentWorker,
+  WORKER_EXIT_ENVELOPE_PROTOCOL,
+  WORKER_EXIT_RUN_PHASE,
+} from "./harness/subagent/worker.js";
 import { storeWorkerTranscriptIo } from "./cli/worker-transcript.js";
 import { shutdownDefaultLspPool } from "./harness/lsp/client.js";
 import {
@@ -57,7 +63,7 @@ import {
   formatLlmProviderConfigError,
   isLlmProviderConfigError,
 } from "./config/env.js";
-import { MaxTurnsExceeded } from "./harness/errors.js";
+import { MaxTurnsExceeded, ProtocolError } from "./harness/errors.js";
 import { maxTurnsEnvelope } from "./cli/max-turns.js";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -604,30 +610,52 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   await chatProcessShutdown();
 }
 
+/**
+ * #356 subagent worker dispatch (cli main 早分支) —— 子代理进程 headless 重入：
+ * stdin 信封 → run() → stdout envelope。早于产品形态 dispatch (chat/ask/serve/
+ * tui/oneshot)，该命令只由父代理 child_process.spawn 触发,operator 不直调。
+ *
+ * exit-code 语义成文化 (ADR-0111 不变式 (b), 裁决 assumption 16 / SC13 微差):
+ *   - exit 2 = **仅**信封协议错误 —— parseWorkerEnvelope 的 ProtocolError
+ *     (stdin JSON 失败 / 信封字段缺失), 无信封可写, 协议层崩溃专码;
+ *   - run 阶段逃逸 (runSubagentWorker 内已收口为 failed envelope + exit 1;
+ *     此处是 stdin/stdout 缝等进程级最后防线) → best-effort envelope + exit 1,
+ *     不冒用 2;
+ *   - 模块级 main().catch 兜所有产品形态错误 → exit 1, 与 worker 专码区分。
+ */
+async function runSubagentWorkerCommand(): Promise<void> {
+  try {
+    // ADR-0102 T3: 工人 transcript IO 在此注入（Gate B: codec 归
+    // session-api，harness 只见窄接口）。
+    await runSubagentWorker(storeWorkerTranscriptIo);
+  } catch (err) {
+    if (err instanceof ProtocolError) {
+      const msg = err.stack ?? err.message;
+      process.stderr.write(`[subagent-worker] fatal: ${msg}\n`);
+      process.exit(WORKER_EXIT_ENVELOPE_PROTOCOL);
+    }
+    // 最后防线 (信封协议面之外的进程级异常): 同样不冒用 exit 2。
+    process.stderr.write(
+      `[subagent-worker] run-phase error: ${renderWorkerError(err)}\n`
+    );
+    try {
+      process.stdout.write(JSON.stringify(runEscapeEnvelope(err)) + "\n");
+    } catch {
+      // EXIT: stdout 已不可写 → 无信封可落, 按 run 阶段逃逸退 exit 1
+      // (ADR-0111 不变式 b: best-effort 信封缺席不改变 exit-code 语义)。
+    }
+    process.exit(WORKER_EXIT_RUN_PHASE);
+  }
+}
+
 async function main(): Promise<void> {
   const parsed = parseArgs({
     argv: process.argv.slice(2),
     interactive: isInteractive(),
   });
 
-  // #356 subagent worker: 子代理进程 headless 重入 —— stdin 信封 → run() →
-  // stdout envelope。早于产品形态 dispatch (chat/ask/serve/tui/oneshot)，
-  // 该命令只由父代理 child_process.spawn 触发,operator 不直调。
-  //
-  // 协议层崩溃 → exit 2 (assumption 16 / SC13: JSON parse 失败 / 信封字段
-  // 缺失, reason=protocolError at 父代理)。模块级 main().catch 兜所有产品
-  // 形态错误 → exit 1, worker 必须自己 exit 2 区分协议错误与产品错误。
   if (parsed.command === "__subagent_worker__") {
-    try {
-      // ADR-0102 T3: 工人 transcript IO 在此注入（Gate B: codec 归
-      // session-api，harness 只见窄接口）。
-      await runSubagentWorker(storeWorkerTranscriptIo);
-    } catch (err) {
-      const msg =
-        err instanceof Error ? (err.stack ?? err.message) : String(err);
-      process.stderr.write(`[subagent-worker] fatal: ${msg}\n`);
-      process.exit(2);
-    }
+    await runSubagentWorkerCommand();
     return;
   }
 

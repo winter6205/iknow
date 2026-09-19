@@ -268,7 +268,8 @@ export interface SubagentSpawnRecord {
 /**
  * SubagentStopRecord — 任务终态（含 completed / failed）时落盘一次。
  * durationMs = endedAt − startedAt（ms）；finalState ∈ {"completed","failed"}。
- * reason 域对齐 envelope reason union + "cancelled"（waitFor abort 路径延伸）。
+ * reason 域对齐 envelope reason union + "cancelled"（waitFor abort 路径延伸）；
+ * ADR-0111 Decision 2：envelope 联合追加第五值 modelTransient，此处对齐同步。
  */
 export interface SubagentStopRecord {
   readonly id: string;
@@ -284,7 +285,12 @@ export interface SubagentStopRecord {
   readonly exitCode?: number;
   readonly signal?: NodeJS.Signals | string;
   readonly reason?:
-    "crashed" | "maxTurnsExceeded" | "timeout" | "protocolError" | "cancelled";
+    | "crashed"
+    | "maxTurnsExceeded"
+    | "timeout"
+    | "protocolError"
+    | "modelTransient"
+    | "cancelled";
   readonly summary?: string;
   readonly error?: TraceError;
   readonly stderrPath?: string;
@@ -306,7 +312,12 @@ export interface SubagentStateChangeRecord {
   readonly fromState: SubagentState;
   readonly toState: SubagentState;
   readonly reason?:
-    "crashed" | "maxTurnsExceeded" | "timeout" | "protocolError" | "cancelled";
+    | "crashed"
+    | "maxTurnsExceeded"
+    | "timeout"
+    | "protocolError"
+    | "modelTransient"
+    | "cancelled";
   readonly error?: TraceError;
 }
 

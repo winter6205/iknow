@@ -69,13 +69,14 @@ describe("envelope wire schema freeze (#358 SC9)", () => {
     assert.deepEqual([...status!.enum], ["ok", "failed"]);
   });
 
-  it("PARENT_SCHEMA.reason enum 冻结（4 值, 无 cancelled/timeout 等扩展）", () => {
+  it("PARENT_SCHEMA.reason enum 冻结（5 值, ADR-0111 显式修订 SC9 追加 modelTransient；封闭性不破）", () => {
     const enums = collectEnumConstraints(PARENT_SCHEMA);
     const reason = enums.find((e) => e.path === "$.properties.reason");
     assert.ok(reason, "reason enum 存在");
     assert.deepEqual([...reason!.enum].sort(), [
       "crashed",
       "maxTurnsExceeded",
+      "modelTransient",
       "protocolError",
       "timeout",
     ]);
@@ -161,6 +162,18 @@ describe("envelope wire schema freeze (#358 SC9)", () => {
       result: "",
     });
     assert.throws(() => parseParentEnvelope(json), /reason/);
+  });
+
+  it('reason 枚举内值 ["modelTransient"] 被接受（ADR-0111 第五值）', () => {
+    const env = parseParentEnvelope(
+      JSON.stringify({
+        status: "failed",
+        reason: "modelTransient",
+        summary: "x",
+        result: "",
+      })
+    );
+    assert.equal(env.reason, "modelTransient");
   });
 });
 

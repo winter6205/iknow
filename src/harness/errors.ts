@@ -60,6 +60,28 @@ export class TransportRetryExhaustedError extends Error {
 }
 
 /**
+ * ADR-0111 Decision 1: 上游流结束但未产出完整 assistant Message（空流 / 断流，
+ * 瞬时形态）。继承 `ProtocolError` —— loop-engine `instanceof ProtocolError`
+ * 支干净收口（先例 `PromptTooLongError`，子类支排在通用支之前）。
+ *
+ * - `visible` = 本次 attempt 是否见过非空可见增量（判据同 `clock_timeout`：
+ *   不可见 → 整 step 重试安全；已出字 → 不自动重试，落 typed 失败）。
+ * - `cause` = 原 SDK 错误（仿 `TransportRetryExhaustedError` 的 cause 形态）；
+ *   apiError 摘要经 `transportApiErrorOf` 走 `summarizeTransportCause`
+ *   （ADR-0111 Decision 2(c)）。
+ */
+export class ModelStreamIncompleteError extends ProtocolError {
+  override readonly name = "ModelStreamIncompleteError";
+  readonly visible: boolean;
+  readonly cause: unknown;
+  constructor(visible: boolean, cause: unknown) {
+    super("model stream ended without producing a complete assistant message");
+    this.visible = visible;
+    this.cause = cause;
+  }
+}
+
+/**
  * plan T3 + ADR-0011: maxTurns 超限的强制感知信号。
  *
  * 不携带 messages / usage 快照(SSOT 守门:权威历史留在 session,
@@ -384,14 +406,21 @@ export function summarizeTransportCause(
 }
 
 /**
- * ADR-0094 SC4-SC5: throw 路径专用——TransportRetryExhaustedError → cause
- * 摘要；其它 throwable（含 4xx 裸 SDK APIError 之外的本地错误）→ undefined，
- * 由调用方保留既有通用文案。
+ * ADR-0094 SC4-SC5 + ADR-0111 Decision 2(c): throw 路径专用——
+ * `TransportRetryExhaustedError` / `ModelStreamIncompleteError`（带 cause 的
+ * 瞬时模型流/传输失败）→ cause `{ message, status? }` 摘要；其它 throwable
+ * （含 4xx 裸 SDK APIError 之外的本地错误、无 cause 的 ProtocolError 直抛）
+ * → undefined，由调用方保留既有通用文案。不变式：apiError 在场 ⇔ 带 cause
+ * 的瞬时模型流/传输失败。
  */
 export function transportApiErrorOf(err: unknown): ApiErrorSummary | undefined {
-  return err instanceof TransportRetryExhaustedError
-    ? summarizeTransportCause(err.cause)
-    : undefined;
+  if (err instanceof TransportRetryExhaustedError) {
+    return summarizeTransportCause(err.cause);
+  }
+  if (err instanceof ModelStreamIncompleteError) {
+    return summarizeTransportCause(err.cause);
+  }
+  return undefined;
 }
 
 /**

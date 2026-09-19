@@ -83,6 +83,13 @@ export type FaultEvent =
       readonly source: ClockAbortSource;
       readonly visible: boolean;
     }
+  /**
+   * ADR-0111 不变式 (a)：上游流结束但未产出完整 assistant Message（空流 /
+   * 断流，`ModelStreamIncompleteError` 的 fault 格）。`visible` 判据同
+   * `clock_timeout`：不可见 = 本次 attempt 无任何模型输出增量，整 step 重试
+   * 安全；已出字 = 不自动重试，落 typed 失败。
+   */
+  | { readonly kind: "stream_incomplete"; readonly visible: boolean }
   | { readonly kind: "llm_network" }
   | { readonly kind: "prompt_too_long" }
   | { readonly kind: "permission_deny" }
@@ -142,6 +149,10 @@ function isTransientHttpStatus(status: number): boolean {
  * 输出增量）→ retry —— 卡死的连接不是「回合已失败」,重发整次调用是安全的
  * （spec inv 1）;已出字则不得自动重试,落 none 由 loop-engine 走既有 timeout
  * 收场。可见与否是 race-timers 从流事件推出的 `hadVisibleDelta`,不在本层判断。
+ *
+ * ADR-0111 不变式 (a):上游流未完成（`stream_incomplete`）与 `clock_timeout`
+ * 同判据 —— 不可见 → retry（整 step 重试安全,由 withTransportRetry 既有预算
+ * 承载）;已出字 → none（不自动重试,typed 错误直抛落 loop 收口）。
  */
 export function classifyFault(
   event: FaultEvent | null | undefined
@@ -152,7 +163,10 @@ export function classifyFault(
       return isTransientHttpStatus(event.status) ? "retry" : "none";
     case "llm_network":
       return "retry";
+    // visible 纪律单实现（两格同判据，出处见上方 doc：clock_timeout =
+    // transport-continue-persist inv 1；stream_incomplete = ADR-0111 不变式 a）。
     case "clock_timeout":
+    case "stream_incomplete":
       return event.visible ? "none" : "retry";
     case "execution_failed":
       return event.occurrenceCount >= FUSE_MIN_OCCURRENCES ? "fuse" : "none";

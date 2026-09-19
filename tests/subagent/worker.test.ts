@@ -35,7 +35,12 @@ import {
   buildThinkingParams,
   createRealAnthropicAdapter,
 } from "../../src/harness/model-adapter/anthropic-adapter.ts";
-import { ProtocolError } from "../../src/harness/errors.ts";
+import {
+  MaxTurnsExceeded,
+  ModelStreamIncompleteError,
+  ProtocolError,
+  TransportRetryExhaustedError,
+} from "../../src/harness/errors.ts";
 import {
   applyEnvelopeOverrides,
   createWorkerDeps,
@@ -153,7 +158,7 @@ describe("subagent worker: toOkEnvelope (envelope 派生 / SC2 / SC10)", () => {
   });
 });
 
-describe("subagent worker: toFailedEnvelope (SC6 reason 四值)", () => {
+describe("subagent worker: toFailedEnvelope (SC6 reason 五值, ADR-0111 修订 SC9)", () => {
   it("reason = crashed → status=failed, summary/result 空", () => {
     const env = toFailedEnvelope("crashed");
     assert.equal(env.status, "failed");
@@ -175,6 +180,12 @@ describe("subagent worker: toFailedEnvelope (SC6 reason 四值)", () => {
   it("reason = protocolError", () => {
     const env = toFailedEnvelope("protocolError");
     assert.equal(env.reason, "protocolError");
+  });
+
+  it("reason = modelTransient (ADR-0111 Decision 2 第五值)", () => {
+    const env = toFailedEnvelope("modelTransient");
+    assert.equal(env.status, "failed");
+    assert.equal(env.reason, "modelTransient");
   });
 });
 
@@ -283,6 +294,175 @@ describe("subagent worker: runWorkerOnce 端到端 (stub-model + 全 deps)", () 
     });
     assert.equal(env.status, "ok");
     assert.equal(env.result, "ok");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B2. ADR-0111 T4 — protocolError 收口支的 apiError 分流 (Decision 2(a)) 与
+//     run() 逃逸 catch 的子类排序 (Decision 2(b))。
+//     不变式 (Decision 2(c)): RunResult.apiError 在场 ⇔ 带 cause 的瞬时模型
+//     流/传输失败 → 父侧拿到 modelTransient 而非 protocolError。
+// ---------------------------------------------------------------------------
+
+function adapterStepThrowing(err: unknown): LoopEngineDeps["adapter"] {
+  const stub = createStubModel({ responses: [] });
+  return {
+    ...stub,
+    step: (async () => {
+      throw err;
+    }) as typeof stub.step,
+  } as unknown as LoopEngineDeps["adapter"];
+}
+
+function adapterEncodeUserTextThrowing(
+  err: unknown
+): LoopEngineDeps["adapter"] {
+  const stub = createStubModel({
+    responses: [assistantResult({ texts: ["never reached"] })],
+  });
+  return {
+    ...stub,
+    encodeUserText: (() => {
+      throw err;
+    }) as typeof stub.encodeUserText,
+  } as unknown as LoopEngineDeps["adapter"];
+}
+
+const SDK_STREAM_SHAPE = new Error(
+  "stream ended without producing a Message with role=assistant"
+);
+
+describe("subagent worker: runWorkerOnce protocolError 收口 apiError 分流 (ADR-0111 Decision 2(a))", () => {
+  const baseEnvelope: WorkerEnvelope = {
+    task: "investigate X",
+    sandboxRoot: "/tmp/sb",
+  };
+
+  it("step 抛 ModelStreamIncompleteError (不可见断流) → failed envelope reason=modelTransient", async () => {
+    const env = await runWorkerOnce({
+      workerEnvelope: baseEnvelope,
+      deps: makeDeps(
+        adapterStepThrowing(
+          new ModelStreamIncompleteError(false, SDK_STREAM_SHAPE)
+        )
+      ),
+    });
+    assert.equal(env.status, "failed");
+    assert.equal(env.reason, "modelTransient");
+    assert.equal(env.stop_reason, "protocolError");
+  });
+
+  it("step 抛 TransportRetryExhaustedError (重试耗尽) → failed envelope reason=modelTransient", async () => {
+    const env = await runWorkerOnce({
+      workerEnvelope: baseEnvelope,
+      deps: makeDeps(
+        adapterStepThrowing(
+          new TransportRetryExhaustedError(5, SDK_STREAM_SHAPE)
+        )
+      ),
+    });
+    assert.equal(env.status, "failed");
+    assert.equal(env.reason, "modelTransient");
+    assert.equal(env.stop_reason, "protocolError");
+  });
+
+  it("step 抛无 cause 裸 ProtocolError → apiError 缺席 → 维持 reason=protocolError", async () => {
+    const env = await runWorkerOnce({
+      workerEnvelope: baseEnvelope,
+      deps: makeDeps(adapterStepThrowing(new ProtocolError("bad wire shape"))),
+    });
+    assert.equal(env.status, "failed");
+    assert.equal(env.reason, "protocolError");
+    assert.equal(env.stop_reason, "protocolError");
+  });
+
+  it("stopReason=emptyFinalResponse (无 apiError) → 维持 reason=protocolError", async () => {
+    const adapter = createStubModel({
+      responses: [assistantResult({ texts: [] })],
+    });
+    const env = await runWorkerOnce({
+      workerEnvelope: baseEnvelope,
+      deps: makeDeps(adapter),
+    });
+    assert.equal(env.status, "failed");
+    assert.equal(env.stop_reason, "emptyFinalResponse");
+    assert.equal(env.reason, "protocolError");
+  });
+
+  it("run() 逃逸 catch: ModelStreamIncompleteError 支排在 ProtocolError 通用支之前 → modelTransient (Decision 2(b))", async () => {
+    // encodeUserText 在 step 收口面之外抛出本类错误 (loop 收口面之外的逃逸形态)。
+    const env = await runWorkerOnce({
+      workerEnvelope: { ...baseEnvelope, finalText: "host dialogue" },
+      deps: makeDeps(
+        adapterEncodeUserTextThrowing(
+          new ModelStreamIncompleteError(true, SDK_STREAM_SHAPE)
+        )
+      ),
+    });
+    assert.equal(env.status, "failed");
+    assert.equal(env.reason, "modelTransient");
+  });
+
+  it("run() 逃逸 catch: 非子类的 ProtocolError → 仍 protocolError (排序不破既有语义)", async () => {
+    const env = await runWorkerOnce({
+      workerEnvelope: { ...baseEnvelope, finalText: "host dialogue" },
+      deps: makeDeps(
+        adapterEncodeUserTextThrowing(new ProtocolError("escape proto"))
+      ),
+    });
+    assert.equal(env.status, "failed");
+    assert.equal(env.reason, "protocolError");
+  });
+
+  it("run() 逃逸 catch: MaxTurnsExceeded 不变 → maxTurnsExceeded", async () => {
+    const env = await runWorkerOnce({
+      workerEnvelope: { ...baseEnvelope, finalText: "host dialogue" },
+      deps: makeDeps(
+        adapterEncodeUserTextThrowing(new MaxTurnsExceeded(0, "test"))
+      ),
+    });
+    assert.equal(env.status, "failed");
+    assert.equal(env.reason, "maxTurnsExceeded");
+  });
+});
+
+describe("subagent worker: runEscapeEnvelope (ADR-0111 不变式 (b) run 阶段派生 SSOT)", () => {
+  it("分类: ModelStreamIncompleteError→modelTransient / MaxTurnsExceeded→maxTurnsExceeded / ProtocolError→protocolError / 其他→crashed", async () => {
+    const { runEscapeEnvelope } = (await import(
+      "../../src/harness/subagent/worker.ts"
+    )) as unknown as {
+      runEscapeEnvelope: (err: unknown) => SubAgentEnvelope;
+    };
+    assert.equal(
+      runEscapeEnvelope(new ModelStreamIncompleteError(true, "x")).reason,
+      "modelTransient"
+    );
+    assert.equal(
+      runEscapeEnvelope(new MaxTurnsExceeded(3, "loop")).reason,
+      "maxTurnsExceeded"
+    );
+    assert.equal(
+      runEscapeEnvelope(new ProtocolError("proto")).reason,
+      "protocolError"
+    );
+    assert.equal(runEscapeEnvelope(new Error("boom")).reason, "crashed");
+    assert.match(runEscapeEnvelope(new Error("boom")).summary, /boom/);
+  });
+
+  it("plain-object typed error 渲染不塌缩成 [object Object] (code-quality typed-error catch 契约)", async () => {
+    const { runEscapeEnvelope } = (await import(
+      "../../src/harness/subagent/worker.ts"
+    )) as unknown as {
+      runEscapeEnvelope: (err: unknown) => SubAgentEnvelope;
+    };
+    const env = runEscapeEnvelope({
+      kind: "llm_provider_config",
+      providerId: "acme",
+    });
+    assert.equal(env.reason, "crashed");
+    assert.equal(env.summary.includes("[object Object]"), false);
+    assert.match(env.summary, /acme/);
+    assert.match(env.summary, /llm_provider_config/);
   });
 });
 

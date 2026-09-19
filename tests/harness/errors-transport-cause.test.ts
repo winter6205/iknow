@@ -7,7 +7,14 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { summarizeTransportCause } from "../../src/harness/errors.ts";
+import { AnthropicError } from "@anthropic-ai/sdk";
+import {
+  ModelStreamIncompleteError,
+  ProtocolError,
+  TransportRetryExhaustedError,
+  summarizeTransportCause,
+  transportApiErrorOf,
+} from "../../src/harness/errors.ts";
 
 describe("summarizeTransportCause (ADR-0094 SC4)", () => {
   it("APIError-like object → { status, message }", () => {
@@ -129,6 +136,59 @@ describe("summarizeTransportCause (ADR-0094 SC4)", () => {
     assert.deepEqual(summary, {
       status: 500,
       message: "500 Internal Server Error",
+    });
+  });
+});
+
+/**
+ * ADR-0111 Decision 2(c): `transportApiErrorOf` 覆盖面扩到
+ * ModelStreamIncompleteError —— 兑现不变式「apiError 在场 ⇔ 带 cause 的
+ * 瞬时模型流/传输失败」。cause 摘要复用 summarizeTransportCause（同一提取面）。
+ */
+describe("transportApiErrorOf (ADR-0111 D2c)", () => {
+  it("ModelStreamIncompleteError with Error cause → { message } 摘要（cause 原文）", () => {
+    const sdkErr = new AnthropicError(
+      "stream ended without producing a Message with role=assistant"
+    );
+    const err = new ModelStreamIncompleteError(true, sdkErr);
+    assert.deepEqual(transportApiErrorOf(err), { message: sdkErr.message });
+  });
+
+  it("ModelStreamIncompleteError with status-bearing cause → { status, message }", () => {
+    const cause = { name: "APIError", status: 529, message: "Overloaded" };
+    const err = new ModelStreamIncompleteError(false, cause);
+    assert.deepEqual(transportApiErrorOf(err), {
+      status: 529,
+      message: "Overloaded",
+    });
+  });
+
+  it("null / undefined cause → undefined（无 cause 不挂 apiError，通用文案保留）", () => {
+    assert.equal(
+      transportApiErrorOf(new ModelStreamIncompleteError(false, null)),
+      undefined
+    );
+    assert.equal(
+      transportApiErrorOf(new ModelStreamIncompleteError(false, undefined)),
+      undefined
+    );
+  });
+
+  it("无 cause 的其它 throwable（裸 ProtocolError 等）→ undefined（不变式反方向）", () => {
+    assert.equal(transportApiErrorOf(new ProtocolError("broken")), undefined);
+    assert.equal(transportApiErrorOf(new Error("boom")), undefined);
+    assert.equal(transportApiErrorOf(null), undefined);
+    assert.equal(transportApiErrorOf(undefined), undefined);
+  });
+
+  it("TransportRetryExhaustedError 既有行为不变：cause → 摘要", () => {
+    const err = new TransportRetryExhaustedError(3, {
+      status: 503,
+      message: "unavailable",
+    });
+    assert.deepEqual(transportApiErrorOf(err), {
+      status: 503,
+      message: "unavailable",
     });
   });
 });
