@@ -12,8 +12,9 @@
  *   4. F1:用户 deny `*.github.com` 砍掉 preset 子域后 apex 仍在(deny 优先
  *      与 `*.x` 不含 apex 的不对称)。
  *   5. F3:settings 段 shape 非法被 parse 层丢弃 → preset-only(builtin)。
- *   6. preset 清单逐字 = ADR-0104 §Decision 1 六条目(SSOT 单文件 frozen),
- *      且不含已知模型供应商域(§Decision 3 反向断言)。
+ *   6. preset 清单逐字 = ADR-0107 §Decision 2 十四条目(源自 ADR-0104 §Decision 1
+ *      六条目扩表; SSOT 单文件 frozen), 且不含已知模型供应商域 / 容器镜像仓库 /
+ *      GitLab·Bitbucket(§Decision 3 反向断言)。
  *   7. 工厂返回类型保持 `() => EgressPolicyInput | undefined` 不缩
  *      (background / verify 消费面类型零改动)。
  */
@@ -38,21 +39,30 @@ function makeSettings(
   } as unknown as IknowSettings;
 }
 
-describe("BUILTIN_PRESET_ALLOWED_DOMAINS (ADR-0104 §Decision 1 清单 SSOT)", () => {
-  it("frozen 数组,6 条目逐字 = spec Boundaries 清单", () => {
+describe("BUILTIN_PRESET_ALLOWED_DOMAINS (ADR-0107 §Decision 2 清单 SSOT)", () => {
+  it("frozen 数组,14 条目逐字 = ADR-0107 §Decision 2 清单", () => {
     assert.ok(Object.isFrozen(BUILTIN_PRESET_ALLOWED_DOMAINS));
     assert.deepEqual([...BUILTIN_PRESET_ALLOWED_DOMAINS], [
       "github.com",
       "*.github.com",
       "*.githubusercontent.com",
       "registry.npmjs.org",
+      "registry.yarnpkg.com",
+      "pypi.org",
+      "files.pythonhosted.org",
+      "crates.io",
+      "static.crates.io",
+      "index.crates.io",
+      "proxy.golang.org",
+      "sum.golang.org",
       "playwright.download.prss.microsoft.com",
       "cdn.playwright.dev",
     ]);
   });
 
-  it("不含已知模型供应商域 (ADR-0104 §Decision 3 反向断言, SC2)", () => {
-    // 围栏内有 provider key,预放行 = secret 直传通道 —— 显式不入档。
+  it("不含已知模型供应商域 / 容器镜像仓库 / GitLab·Bitbucket (ADR-0107 §Decision 2 不进档反向断言, SC2)", () => {
+    // 围栏内有 provider key,预放行 = secret 直传通道 —— 显式不入档;
+    // 容器镜像仓库与 GitLab/Bitbucket 走用户增量或批准门,同样不入档。
     const providerDomains = [
       "anthropic.com",
       "openai.com",
@@ -60,9 +70,18 @@ describe("BUILTIN_PRESET_ALLOWED_DOMAINS (ADR-0104 §Decision 1 清单 SSOT)", (
       "api.x.ai",
       "api.deepseek.com",
     ];
+    const outOfScopeDomains = [
+      "docker.io",
+      "registry-1.docker.io",
+      "ghcr.io",
+      "quay.io",
+      "mcr.microsoft.com",
+      "gitlab.com",
+      "bitbucket.org",
+    ];
     for (const entry of BUILTIN_PRESET_ALLOWED_DOMAINS) {
       const host = entry.replace(/^\*\./, "");
-      for (const provider of providerDomains) {
+      for (const provider of [...providerDomains, ...outOfScopeDomains]) {
         assert.notEqual(host, provider);
         assert.ok(
           !host.endsWith(`.${provider}`),
@@ -276,6 +295,29 @@ describe("decideEgress 直喂合并结果 (T1 判定层钉子)", () => {
   it("registry.npmjs.org 命中而 npmjs.org apex 不命中 (清单只写 registry 子域, 钉住不误扩)", () => {
     assert.deepEqual(decide("registry.npmjs.org"), { outcome: "allow" });
     assert.deepEqual(decide("npmjs.org"), {
+      outcome: "deny",
+      reason: "not-in-allowlist",
+    });
+  });
+
+  it("ADR-0107 扩表命中: pypi / crates / golang 主路径域 allow", () => {
+    assert.deepEqual(decide("pypi.org"), { outcome: "allow" });
+    assert.deepEqual(decide("files.pythonhosted.org"), { outcome: "allow" });
+    assert.deepEqual(decide("crates.io"), { outcome: "allow" });
+    assert.deepEqual(decide("static.crates.io"), { outcome: "allow" });
+    assert.deepEqual(decide("index.crates.io"), { outcome: "allow" });
+    assert.deepEqual(decide("proxy.golang.org"), { outcome: "allow" });
+    assert.deepEqual(decide("sum.golang.org"), { outcome: "allow" });
+    assert.deepEqual(decide("registry.yarnpkg.com"), { outcome: "allow" });
+  });
+
+  it("ADR-0107 扩表 apex/子域不对称: golang.org apex 与 pypi 子域不命中 (只写登记面, 不误扩整域)", () => {
+    // 清单只列 proxy./sum. 两个 golang 子域与 pypi.org apex 本身:
+    assert.deepEqual(decide("golang.org"), {
+      outcome: "deny",
+      reason: "not-in-allowlist",
+    });
+    assert.deepEqual(decide("test.pypi.org"), {
       outcome: "deny",
       reason: "not-in-allowlist",
     });
