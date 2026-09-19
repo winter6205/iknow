@@ -60,8 +60,9 @@ export type HarnessStreamEvent =
   // AgentStatusSnapshot(不内联重声明,单一真源;per-field 文档见
   // agent-status.ts,本处不重复)。spec agent-status-instruction-echo T3:
   // Pick 随快照加性扩 instruction / reconcile 两槽 —— 条件在场语义沿用快照
-  // 字段本身(缺席 → key 不出现,F1 形态退回旧三件);reconcile 结算接线
-  // 归子弹 4,T3 期间该槽恒缺席。
+  // 字段本身(缺席 → key 不出现,F1 形态退回旧三件);reconcile 结算已经
+  // loop-engine run 作用域装箱接线(子弹 4 完成):事件 reconcile 槽随结算
+  // 条件在场(本栏已结算 → key 在场,含 false;无判定对象 → 槽缺席)。
   | ({
       type: "agent_status";
     } & Pick<

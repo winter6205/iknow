@@ -303,7 +303,7 @@ describe("extractLatestRealUserInstruction", () => {
     assert.equal(extractLatestRealUserInstruction(msgs)?.instruction, line);
   });
 
-  it("返回命中的消息对象引用（T3 reconcile 以对象同一性为相关号）", () => {
+  it("返回命中的消息对象引用（T3 reconcile 相关号 = 对象同一性或 re-freeze 同内容克隆判同）", () => {
     const m = userMsg("逐字对象同一性");
     const r = extractLatestRealUserInstruction([m]);
     assert.equal(r?.message, m);
