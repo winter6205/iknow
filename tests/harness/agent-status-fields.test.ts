@@ -18,6 +18,7 @@ import {
   buildAgentStatusText,
   parseAgentStatusText,
   agentStatusFromMessages,
+  pickPresentAgentStatusSlots,
   AGENT_STATUS_RECONCILE_LINE,
 } from "../../src/harness/agent-status.ts";
 
@@ -267,5 +268,28 @@ describe("parse result immutability contract", () => {
     expect(parsed).not.toBeNull();
     expect(Object.isFrozen(parsed)).toBe(true);
     expect(Object.isFrozen(parsed!.openTodoLines)).toBe(true);
+  });
+});
+
+// -- 条件在场投影 SSOT（review 修复弹 Standards-Med#2 收敛点） ----------------------
+
+describe("pickPresentAgentStatusSlots: instruction/reconcile 条件在场 → key 缺席 的单点规则", () => {
+  it("两槽均 undefined（未提供）→ key 全缺席（F1 旧字段集形态）", () => {
+    expect(Object.keys(pickPresentAgentStatusSlots({}))).toEqual([]);
+  });
+
+  it("undefined=未提供不落 key；已提供的值逐字透传（缺席≠null/false 契约）", () => {
+    expect(pickPresentAgentStatusSlots({ instruction: null })).toEqual({
+      instruction: null,
+    });
+    expect(pickPresentAgentStatusSlots({ reconcile: false })).toEqual({
+      reconcile: false,
+    });
+    expect(
+      pickPresentAgentStatusSlots({ instruction: "换方向", reconcile: true })
+    ).toEqual({ instruction: "换方向", reconcile: true });
+    expect(
+      pickPresentAgentStatusSlots({ instruction: "x", reconcile: undefined })
+    ).toEqual({ instruction: "x" });
   });
 });

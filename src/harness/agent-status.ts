@@ -192,6 +192,25 @@ export async function readOpenTodoLines(
 }
 
 /**
+ * instruction / reconcile 两槽「条件在场 → key 缺席」投影的 SSOT
+ * (spec agent-status-instruction-echo;快照装配 compute、流事件发射
+ * loop-engine、TUI 事件映射 agent-status-line 三个消费点共用,防 spread
+ * 守卫手抄漂移)。统一语义一条规则:槽传 undefined = 未提供 → key 缺席;
+ * 其余值(含 null / false)逐字在场 —— 缺席 ≠ null/false 的契约不变。
+ * 「空槽不广告」的 instruction null 归一(→ 未提供)属调用侧字段语义,
+ * 由 compute 入口完成;事件 / TUI 透传面保留事件实际值不在此列。
+ */
+export function pickPresentAgentStatusSlots(slots: {
+  readonly instruction?: string | null;
+  readonly reconcile?: boolean;
+}): { instruction?: string | null; reconcile?: boolean } {
+  const present: { instruction?: string | null; reconcile?: boolean } = {};
+  if (slots.instruction !== undefined) present.instruction = slots.instruction;
+  if (slots.reconcile !== undefined) present.reconcile = slots.reconcile;
+  return present;
+}
+
+/**
  * 组合计算:读 todos.md 投影未勾行 + last_tool (+ T3 instruction 透传 +
  * T4 reconcile 结算字段透传) → 快照数据与栏文本。T3(TUI 只读订阅)从同一份
  * 数据 / 文本派生 UI,不另建账本。instruction 由调用侧(loop-engine 经 T2
@@ -216,10 +235,12 @@ export async function computeAgentStatusSnapshot(opts: {
   const snapshot: AgentStatusSnapshot = {
     lastTool: opts.lastTool,
     openTodoLines: await readOpenTodoLines(opts.todoDir, opts.conversationId),
-    ...(opts.instruction !== undefined && opts.instruction !== null
-      ? { instruction: opts.instruction }
-      : {}),
-    ...(opts.reconcile !== undefined ? { reconcile: opts.reconcile } : {}),
+    // instruction null = 「空槽不广告」(F1) → 归一为未提供;key 投影规则
+    // 本身归 pickPresentAgentStatusSlots SSOT(review 修复弹收敛)。
+    ...pickPresentAgentStatusSlots({
+      instruction: opts.instruction ?? undefined,
+      reconcile: opts.reconcile,
+    }),
   };
   return { ...snapshot, text: buildAgentStatusText(snapshot) };
 }

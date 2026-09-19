@@ -116,6 +116,7 @@ import type { SecretRegistry } from "./secret-roundtrip/index.js";
 import {
   AGENT_STATUS_IDLE_TOOL,
   computeAgentStatusSnapshot,
+  pickPresentAgentStatusSlots,
 } from "./agent-status.js";
 import { extractLatestRealUserInstruction } from "./agent-status-instruction.js";
 import { readEnvSnapshot } from "./env-snapshot.js";
@@ -673,13 +674,9 @@ async function appendAgentStatusBar(
     type: "agent_status",
     lastTool: snapshot.lastTool,
     openTodoLines: snapshot.openTodoLines,
-    // 条件在场:缺席 → key 不出现(与栏文本"空槽不广告"同一形态)。
-    ...(snapshot.instruction !== undefined
-      ? { instruction: snapshot.instruction }
-      : {}),
-    ...(snapshot.reconcile !== undefined
-      ? { reconcile: snapshot.reconcile }
-      : {}),
+    // 条件在场:投影规则 = pickPresentAgentStatusSlots SSOT(与快照装配、
+    // TUI 事件映射同源;缺席 → key 不出现,与栏文本"空槽不广告"同一形态)。
+    ...pickPresentAgentStatusSlots(snapshot),
   });
   const msg = deps.adapter.encodeUserText(snapshot.text);
   pendingInjected.record(msg);
