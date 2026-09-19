@@ -62,6 +62,34 @@ socket.write(
 );
 
 let head = "";
+// 挂死防线（review 修复 [Medium]）：头部解析完成前代理可能优雅 FIN /
+// 半关闭 / 直接 close —— 旧实现只挂 error + 上限，此形态下进程永挂 stdin，
+// 表现为 ssh ProxyCommand 挂死 = git push 无限 hang。end/close 一律
+// 诊断到 stderr + 非零退出；隧道建立后这两个 once 监听器撤除。
+let established = false;
+const onEarlyClose = () => {
+  if (established) return;
+  process.stderr.write(
+    "egress-http-connect: proxy closed before CONNECT response completed\n"
+  );
+  socket.destroy();
+  process.exit(1);
+};
+socket.once("end", onEarlyClose);
+socket.once("close", onEarlyClose);
+// 隧道模式下 stdout 是到 ssh 的 pipe：退出前必须等缓冲 flush 完，
+// 否则 banner / 数据尾部被截断（end 回调后再退）。exiting 旗标防止
+// end→close 连发时第二次调用绕过在途 flush 立刻硬退出。
+let exiting = false;
+const flushExit = (code) => {
+  if (exiting) return;
+  exiting = true;
+  try {
+    process.stdout.end(() => process.exit(code));
+  } catch {
+    process.exit(code);
+  }
+};
 const onData = (chunk) => {
   head += chunk.toString("latin1");
   const end = head.indexOf("\r\n\r\n");
@@ -76,12 +104,19 @@ const onData = (chunk) => {
     return;
   }
   // 隧道建立：stdio ↔ socket 双向 pipe（stdin 为 blocking fd，pipe 语义成立）。
+  established = true;
+  socket.removeListener("end", onEarlyClose);
+  socket.removeListener("close", onEarlyClose);
+  // 头部阶段的 die-on-error 监听换成 flush-exit：隧道期错误退出前也要
+  // 让已写 stdout 完成 flush（banner 截断 = ssh kex 假失败，难排查）。
+  socket.removeAllListeners("error");
   const rest = head.slice(end + 4);
   head = "";
   if (rest.length > 0) process.stdout.write(rest);
   socket.on("data", (buf) => process.stdout.write(buf));
-  socket.on("end", () => process.exit(0));
-  socket.on("error", () => process.exit(1));
+  socket.on("end", () => flushExit(0));
+  socket.once("close", () => flushExit(0));
+  socket.on("error", () => flushExit(1));
   process.stdin.on("error", () => socket.destroy());
   process.stdin.pipe(socket);
   process.stdout.on("error", () => {

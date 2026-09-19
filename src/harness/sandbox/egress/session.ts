@@ -33,9 +33,20 @@
  *   - 异常路径与正常路径同一释放通道（finally-safe dispose）。
  *   - dispose 幂等（重复调用不抛、不告警）。
  *   - token 每 session 独立（防宿主其他进程直连代理绕过 filter）。
+ *
+ * 威胁模型 —— 本地暴露面（end-of-round review 裁定登记）：
+ *   - 代理 unix socket 落共享 /tmp，node listen 默认 mode = 0777 & ~umask
+ *     （常见 0755）→ listen 成功后立即 chmod 0600（`listenOnUnixSocket`），
+ *     使本地他用户即使知道路径也无法 connect。
+ *   - **已知残余面**：token 经 fence 的 `bwrap --setenv HTTP_PROXY …`
+ *     argv 透传，fence 启动窗口内可被本地他用户经 /proc/<pid>/cmdline
+ *     短暂读到（socket 路径同理经内层前导 argv）。本缝不为此改 bwrap env
+ *     通道（--setenv 是 env 注入 SSOT，改传递面属 fence 架构变更）；
+ *     实际防线 = 上述 socket 0600 —— 拿到 token 但连不上 socket 仍无法
+ *     绕 filter。残余风险接受并在此显式登记。
  */
 
-import { existsSync, rmSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, rmSync, unlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -671,6 +682,11 @@ function removeSocketFile(socketPath: string): void {
 /**
  * 内部辅助 —— 让裸 node:http server 直接 listen unix socket 路径
  * （ADR-0107：宿主侧去 socat 桥；包内先例 mux-proxy.js listenHttpBackend）。
+ *
+ * listen 成功后立即 chmod 0600：共享 /tmp 下 node 默认 socket mode
+ * （0777 & ~umask）对本地其他用户可 connect，配合「token 经 --setenv
+ * argv 短暂可见」的残余面就是 filter 旁路洞（见文件头威胁模型登记）。
+ * chmod 失败 = listen 失败对待（reject → 调用方同一清理通道），不裸奔。
  */
 function listenOnUnixSocket(server: Server, socketPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -680,6 +696,12 @@ function listenOnUnixSocket(server: Server, socketPath: string): Promise<void> {
     };
     const onListening = (): void => {
       server.off("error", onError);
+      try {
+        chmodSync(socketPath, 0o600);
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
       resolve();
     };
     server.once("error", onError);

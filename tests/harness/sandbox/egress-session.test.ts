@@ -28,7 +28,7 @@
  * node:http listen unix socket）。
  */
 
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, writeFileSync, statSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -238,6 +238,30 @@ describe("createEgressSession — lifecycle", () => {
       expect(session.spec.unixSocketPath).toBe(stalePath);
       const reply = await probeSocketReply(stalePath);
       expect(reply).toMatch(/^HTTP\/1\.[01] /);
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it("tightens the unix socket to 0600 after listen (local exposure hardening)", async () => {
+    // review 修复（安全 Medium）：socket 落共享 /tmp，node 默认 mode =
+    // 0777 & ~umask（常为 0755/0777），本地他用户可 connect。token 经
+    // bwrap --setenv argv 短暂全局可见（/proc cmdline，已知残余面，见
+    // session.ts 威胁模型注释），所以 socket 文件权限是 filter 旁路的
+    // **唯一有效防线** —— 必须收紧到仅 owner 可读写。
+    const dir = scratchDir();
+    const session = await createEgressSession({
+      policy: {
+        allowedDomains: ["github.com"],
+        deniedDomains: [],
+        commandLabel: "test:socket-mode",
+      },
+      relayResolver: () => fakeRelay(dir),
+      socketPathFactory: (id) => join(dir, `egress-${id}.sock`),
+    });
+    try {
+      const mode = statSync(session.spec.unixSocketPath).mode & 0o777;
+      expect(mode).toBe(0o600);
     } finally {
       await session.dispose();
     }
