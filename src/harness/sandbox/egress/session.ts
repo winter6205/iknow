@@ -35,11 +35,15 @@ import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import type { Server } from "node:http";
+import type { IncomingHttpHeaders, Server } from "node:http";
 import { ToolExecutionError } from "../../errors.js";
 import {
   createHttpProxyServer,
   createResolvedAddressGuard,
+  disposeMitmCA,
+  matchesDomainPattern,
+  type HttpProxyServerOptions,
+  type MitmCA,
 } from "./upstream.js";
 import {
   createEgressViolationSink,
@@ -174,6 +178,20 @@ export interface EgressSessionOptions {
    * 假凭据 fixture 从此注入，真值 / `.env*` 不经测试面。
    */
   readonly hostEnv?: Record<string, string | undefined>;
+  /**
+   * egress-credential-sentinel T3 / F6（OQ2 留形的操作员退出口 seam）：
+   * 免除 TLS 终止的域 pattern 集（`shouldTerminateTLS` 豁免钩子的输入）。
+   * 缺省空 = 全放行域终止（Assumption 5）。豁免域上若存在配置了注入的
+   * 凭据条目 → 记 `tls-exempt-injectable` 诊断痕（代换在该域必然失效，
+   * 方向 fail-safe）。settings 化与否归 OQ2，本弹只留注入点。
+   */
+  readonly tlsExemptHosts?: readonly string[];
+  /**
+   * egress-credential-sentinel T3 测试 seam：铸造成功后观测 session 私有
+   * 的 registry / masked store / CA（dispose 三资源释放判据用）。生产
+   * 装配不传。
+   */
+  readonly onCredentialMint?: (cred: EgressCredentialResources) => void;
 }
 
 /**
@@ -206,6 +224,16 @@ export interface EgressFenceSpec {
    * 围栏内不可达（F8）。
    */
   readonly binds?: readonly EgressFenceBind[];
+}
+
+/**
+ * egress-credential-sentinel T2/T3：session 私有凭据资源包 —— T2 铸造产物
+ * （`EgressCredentialMint`）+ 其消费的 `MitmCA`（CA 引用需存活到 T3 代理
+ * options 接线与 dispose 的 bundle 清理）。
+ */
+export interface EgressCredentialResources {
+  readonly mint: EgressCredentialMint;
+  readonly ca: MitmCA;
 }
 
 /**
@@ -400,11 +428,91 @@ function createFilterCallback(
 }
 
 /**
+ * T3 凭据代换接线（spec §T3：接线形状 = 包 manager 现成闭包的
+ * `sandbox-manager.js:282/:293/:389-394` 本仓等价自装配）。返回的 partial
+ * options 仅在凭据资源在场时并入代理：
+ *   - `mitmCA`：session 装载的持久 CA（invariant 7：CA 缺席时凭据层在
+ *     Step 1.5 已 typed 失败，走不到这里）；
+ *   - `shouldTerminateTLS`：缺省全终止（Assumption 5）；`tlsExemptHosts`
+ *     命中 → 落 opaque tunnel，且该域有可注入凭据时记
+ *     `tls-exempt-injectable`（F6，经本仓 violationSink，不用包私有
+ *     logger —— Assumption 13）；
+ *   - `mutateHeaders` = `registry.substituteInHeaders`（per-sentinel
+ *     injectHosts 门在 registry 内部，invariant 2/3）；调用前先按包内
+ *     skip 判据镜像记 F5 痕（Content-Encoding ∧ 声明体 ∧ 该域有注入对）；
+ *   - `getBodySubstitutions` = `registry.sentinelsForHost`。
+ *
+ * 刻意不配（invariant 5 / Assumption 7）：`mutateHeadersPlaintext` /
+ * `getBodySubstitutionsPlaintext`（明文臂 `allowPlaintextInject` 永假）、
+ * `planSigv4`（远期）、`getMitmSocketPath`（CONNECT 非 TLS 字节 →
+ * opaque tunnel 臂不动 —— ssh-bridge 并行 spec 的依赖声明）。
+ * host→port 映射借 `shouldTerminateTLS`（包内每 CONNECT 先于转发腿调用，
+ * 次序 = http-proxy.js:234-302 → tls-terminate-proxy.js:304）为 F5 痕
+ * 携带真实端口，查不到落 0（不伪造）。
+ */
+function buildCredentialProxyOptions(
+  cred: EgressCredentialResources,
+  sink: EgressViolationSink,
+  commandLabel: string,
+  tlsExemptHosts: readonly string[]
+): Partial<HttpProxyServerOptions> {
+  const { registry } = cred.mint;
+  const portByHost = new Map<string, number>();
+  return {
+    mitmCA: cred.ca,
+    shouldTerminateTLS: (hostname: string, port: number): boolean => {
+      portByHost.set(hostname, port);
+      const exempt = tlsExemptHosts.some((pattern) =>
+        matchesDomainPattern(hostname, pattern)
+      );
+      // F6 痕 = 「豁免 ∧ 该域有配置了注入的凭据」——豁免本身不是违例。
+      if (
+        exempt &&
+        registry.namesInjectableAt(hostname, matchesDomainPattern).length > 0
+      ) {
+        sink.record({
+          kind: "egress_violation",
+          host: hostname,
+          port,
+          reason: "tls-exempt-injectable",
+          command: commandLabel,
+        });
+      }
+      return !exempt;
+    },
+    mutateHeaders: (headers: IncomingHttpHeaders, destHost: string): void => {
+      // F5 诊断（包内 body-substitution.js:40-58 的 skip 判据镜像：声明体
+      // ∧ Content-Encoding ∧ 该域有注入对 → 体代换被跳，假值原样到上游）。
+      if (
+        headers["content-encoding"] !== undefined &&
+        (headers["content-length"] !== undefined ||
+          headers["transfer-encoding"] !== undefined) &&
+        registry.sentinelsForHost(destHost, matchesDomainPattern).length > 0
+      ) {
+        sink.record({
+          kind: "egress_violation",
+          host: destHost,
+          port: portByHost.get(destHost) ?? 0,
+          reason: "substitution-skipped",
+          command: commandLabel,
+        });
+      }
+      registry.substituteInHeaders(headers, destHost, matchesDomainPattern);
+    },
+    getBodySubstitutions: (destHost: string) =>
+      registry.sentinelsForHost(destHost, matchesDomainPattern),
+  };
+}
+
+/**
  * Step 2:起 HTTP 代理 server（filter = decideEgress 域判定;lookupFor =
  * 上游 ResolvedAddressGuard 做 DNS 解析守卫）。
  *
  * 抽离以控制 `createEgressSession` 复杂度（S5 门）。返回 server 实例
  * 供 caller 调 `listenOnFreePort` 拿端口，再传给 socat 桥。
+ *
+ * credential-sentinel T3：凭据资源在场时并入代换接线 options（filter
+ * 回调不动 —— 0097 违例所有权；代换只发生在放行之后的转发腿）。
  */
 function startHttpProxyStep(
   policyInput: EgressPolicyInput,
@@ -416,6 +524,8 @@ function startHttpProxyStep(
     readonly createHttpProxy: (
       proxyOpts: Parameters<typeof createHttpProxyServer>[0]
     ) => Server;
+    readonly credential?: EgressCredentialResources;
+    readonly tlsExemptHosts?: readonly string[];
   }
 ): Server {
   // 地址守卫（DNS 解析 + 拒 loopback / 私网 / metadata 等）。
@@ -433,6 +543,16 @@ function startHttpProxyStep(
     localAddresses: () => [],
   });
 
+  const credentialOptions =
+    decideDeps.credential !== undefined
+      ? buildCredentialProxyOptions(
+          decideDeps.credential,
+          sink,
+          policyInput.commandLabel,
+          decideDeps.tlsExemptHosts ?? []
+        )
+      : {};
+
   return decideDeps.createHttpProxy({
     filter: createFilterCallback(
       policyInput,
@@ -442,6 +562,7 @@ function startHttpProxyStep(
     ),
     proxyAuthToken: token,
     lookupFor: (port: number) => guard.lookupFor(port),
+    ...credentialOptions,
   });
 }
 
@@ -485,8 +606,9 @@ function startSocatBridgeStep(
 function assembleFenceSpec(
   socketPath: string,
   httpPort: number,
-  mint: EgressCredentialMint | undefined
+  credential: EgressCredentialResources | undefined
 ): EgressFenceSpec {
+  const mint = credential?.mint;
   return {
     unixSocketPath: socketPath,
     sandboxLocalPort: httpPort,
@@ -504,18 +626,52 @@ function assembleFenceSpec(
  * undefined（不装载、不铸造，yolo/skipped 姿态显式归 T6）。
  * 装配期防线（invariant 1 / F4）失败 = typed 错误向上抛，调用方在此步
  * 之后不得起代理（「不起带部分代换的 session」）。
+ * T3 起返回 CA 引用（代理 mitmCA 接线 + dispose bundle 清理消费）。
  */
 function mintCredentialsStep(
   opts: EgressSessionOptions
-): EgressCredentialMint | undefined {
+): EgressCredentialResources | undefined {
   if (opts.policy.credentials === undefined) return undefined;
   const loadCa = opts.loadEgressCa ?? loadEgressCa;
   const caLoad = loadCa({ caDir: opts.caDir });
-  return mintEgressCredentials({
+  const mint = mintEgressCredentials({
     roster: opts.policy.credentials,
     ca: caLoad.ca,
     env: opts.hostEnv ?? process.env,
   });
+  const resources: EgressCredentialResources = { mint, ca: caLoad.ca };
+  // T3 观测 seam（仅测试）：铸造成功即上报，spawn 失败路径同样经此观测
+  // 三资源释放。
+  opts.onCredentialMint?.(resources);
+  return resources;
+}
+
+/**
+ * T3 dispose 凭据段（0097 生命周期表「正常 / 异常同一释放通道」逐字沿用）：
+ * `registry.clear()` + `MaskedFileStore.dispose()` + trust bundle 临时件
+ * 清理（`disposeMitmCA`：bundle 目录恒删，持久 CA 非 ephemeral 不受影响，
+ * Assumption 4）。逐步 best-effort 吞异常 —— 释放通道不得抛污染调用方
+ * finally / 不得因单步失败跳过后续资源。
+ */
+async function releaseCredentialResources(
+  cred: EgressCredentialResources | undefined
+): Promise<void> {
+  if (cred === undefined) return;
+  try {
+    cred.mint.registry.clear();
+  } catch {
+    // best-effort
+  }
+  try {
+    cred.mint.store.dispose();
+  } catch {
+    // best-effort
+  }
+  try {
+    await disposeMitmCA(cred.ca);
+  } catch {
+    // best-effort
+  }
 }
 
 /**
@@ -569,14 +725,17 @@ export async function createEgressSession(
   // Step 1.5 (credential-sentinel T2): 启动期铸造 —— 必须在起代理（Step 2）
   // 之前：F4 子串契约 / invariant 1 假值空间 assert 失败 = typed 错误直接
   // throw，代理未起、session 不存在（「不起带部分代换的 session」）。
-  const credentialMint = mintCredentialsStep(opts);
+  const credentialResources = mintCredentialsStep(opts);
 
   // Step 2: 起 HTTP 代理 server。T6 测试 seam:createHttpProxyServer 注入
   // 让单测捕获 filter 回调直接驱动;生产走默认 createHttpProxyServer。
+  // T3：凭据资源在场时代理并入代换接线（mitmCA + 转发腿钩子）。
   const httpServer = startHttpProxyStep(opts.policy, token, sink, {
     defaultDeniedRanges: DEFAULT_PRIVATE_DENIED_RANGES,
     decideEgress,
     createHttpProxy: opts.createHttpProxyServer ?? createHttpProxyServer,
+    credential: credentialResources,
+    tlsExemptHosts: opts.tlsExemptHosts,
   });
 
   // 监听端口（0 = OS 分配）。
@@ -591,8 +750,10 @@ export async function createEgressSession(
   );
 
   if (!socatProc.pid) {
-    // spawn 失败：清理 server。
+    // spawn 失败：清理 server + 凭据三资源（T3「异常路径同一释放通道」——
+    // registry / masked store / trust bundle 不留 stale）。
     closeServerQuietly(httpServer);
+    await releaseCredentialResources(credentialResources);
     throw new SocatUnavailableError(
       socatCommand,
       "Failed to spawn socat. Verify socat is installed and executable."
@@ -600,7 +761,7 @@ export async function createEgressSession(
   }
 
   // Step 4: 构造 fence spec。
-  const spec = assembleFenceSpec(socketPath, httpListen.port, credentialMint);
+  const spec = assembleFenceSpec(socketPath, httpListen.port, credentialResources);
 
   let disposed = false;
   const dispose = async (): Promise<void> => {
@@ -610,6 +771,8 @@ export async function createEgressSession(
     await teardownSocat(socatProc);
     closeServerQuietly(httpServer);
     removeSocketFile(socketPath);
+    // T3：凭据层同一通道释放（registry.clear + store.dispose + bundle 清理）。
+    await releaseCredentialResources(credentialResources);
   };
 
   return Object.freeze({ id, spec, violationSink: sink, dispose });

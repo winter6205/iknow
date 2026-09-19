@@ -45,7 +45,21 @@ export type EgressViolationReason =
    *  §三类信号可区分纪律:infra / 用户拒 / 未配置三类信号修复动作不同)。 */
   | "denied-by-user"
   /** 基础设施故障（代理 / 桥进程死 / socat 缺失）—— 非域判定拒绝 */
-  | "infra-unavailable";
+  | "infra-unavailable"
+  /**
+   * egress-credential-sentinel T3 / F5（旁路诊断档）：请求体带
+   * `Content-Encoding`，包内字节扫描看不穿压缩体 → 体代换跳过，假值原样
+   * 到上游（fail-safe 方向 = 401 可诊断，非泄露）。**不是**域判定拒绝，
+   * 不给 allowlist 修复指引。
+   */
+  | "substitution-skipped"
+  /**
+   * egress-credential-sentinel T3 / F6（旁路诊断档）：域名被
+   * `shouldTerminateTLS` 豁免（不终止 TLS → 代换必然无法运行）且该域上
+   * 存在配置了注入的凭据条目（`namesInjectableAt` 非空）。豁免本身不是
+   * 违例；「豁免 ∧ 有可注入凭据 = 该域凭据不可用」才是本痕要说的。
+   */
+  | "tls-exempt-injectable";
 
 export interface EgressViolation {
   readonly kind: "egress_violation";
@@ -129,11 +143,48 @@ export function renderEgressViolations(
   return lines.join("\n");
 }
 
+/**
+ * T3 旁路诊断档（credential-sentinel F5/F6）：与域判定拒绝 / infra 故障
+ * 分前缀（`[egress_diagnostic]`），四类信号互不混淆 —— 修复动作是
+ * 「让体可扫描 / 复核豁免名单」，与 allowlist 无关。
+ */
+type EgressDiagnosticReason =
+  | "substitution-skipped"
+  | "tls-exempt-injectable";
+
+/** 判定 / infra 档 reason（诊断档之外全集，穷尽性由编译器保证）。 */
+type EgressDomainReason = Exclude<EgressViolationReason, EgressDiagnosticReason>;
+
+const DIAGNOSTIC_RENDERERS: Record<
+  EgressDiagnosticReason,
+  (target: string, cmd: string) => string
+> = {
+  "substitution-skipped": (target, cmd) =>
+    `[egress_diagnostic] ${target} request body carried Content-Encoding; masked-credential substitution skipped and the fake value reaches upstream unchanged (fail-safe direction: auth fails, no secret leaks; not a domain decision) (command: ${cmd})`,
+  "tls-exempt-injectable": (target, cmd) =>
+    `[egress_diagnostic] ${target} is exempted from TLS termination while masked credentials are configured for injection there — substitution cannot run on exempted hosts, so those credentials are unusable at this host (fail-safe; not a domain decision) (command: ${cmd})`,
+};
+
 function renderSingleViolation(v: EgressViolation): string {
   const cmd =
     v.command.length > 80 ? `${v.command.slice(0, 77)}...` : v.command;
   const target = `${v.host}:${v.port}`;
+  // default 分支里 TS 把 reason 收窄为诊断档之外的全集（穷尽性编译器钉）。
   switch (v.reason) {
+    case "substitution-skipped":
+    case "tls-exempt-injectable":
+      return DIAGNOSTIC_RENDERERS[v.reason](target, cmd);
+    default:
+      return renderDomainViolation(v.reason, target, cmd);
+  }
+}
+
+function renderDomainViolation(
+  reason: EgressDomainReason,
+  target: string,
+  cmd: string
+): string {
+  switch (reason) {
     case "not-in-allowlist":
       return `[network_denied] ${target} not in allowed domains (command: ${cmd}); configure isolation.network.allowedDomains or approve this domain interactively`;
     case "denied":

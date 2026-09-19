@@ -41,8 +41,14 @@ export {
  * egress-credential-sentinel T2 / SC10：domain-pattern 匹配器收口。
  * `domain-matcher.ts` 是既有深路径 import 点，按 0097「文件承载纪律」并入
  * 本适配层，使 `src/` 的包深路径 import 只剩 upstream.ts 一处。
+ * `matchesDomainPattern`（无端口档）= sentinel registry 的 HostMatcher
+ * （T3 代换门接线用，包 manager 同件，`sandbox-manager.js:282`）；
+ * `matchesDomainPatternWithPort` = 允许集判定用（T2 收口）。
  */
-export { matchesDomainPatternWithPort } from "@anthropic-ai/sandbox-runtime/dist/sandbox/domain-pattern.js";
+export {
+  matchesDomainPattern,
+  matchesDomainPatternWithPort,
+} from "@anthropic-ai/sandbox-runtime/dist/sandbox/domain-pattern.js";
 
 /**
  * egress-credential-sentinel T4（Assumption 3 收口纪律）：MITM CA 件 ——
@@ -50,10 +56,13 @@ export { matchesDomainPatternWithPort } from "@anthropic-ai/sandbox-runtime/dist
  * bundle**（`trustBundlePath` = 包内 writeTrustBundle 的产物，每次调用新
  * temp 文件；只含 CERTIFICATE 块的 PEM 过滤在包内，mitm-ca.js:166-175，
  * 本仓不复刻）。`generateCa` 是纯生成原语（无 FS 副作用），持久层落盘
- * 归本仓 `ca-store.ts`。`disposeMitmCA` 归 T3 dispose 接线时再收口。
+ * 归本仓 `ca-store.ts`。`disposeMitmCA` = T3 dispose 接线的 trust bundle
+ * 临时件清理通道（bundle 目录恒删；持久 CA 非 ephemeral 不受影响，
+ * mitm-ca.js:111-125）。
  */
 export {
   createMitmCA,
+  disposeMitmCA,
   generateCa,
   validateCaPair,
   type CaPairValidation,
