@@ -62,6 +62,58 @@ describe("toAciToolDef", () => {
     expect("exemptFromOutputCap" in definition).toBe(false);
   });
 
+  it("剥掉顶层 $schema —— 宿主 Ajv 仅 bundle draft-07 元模式，带 2020-12 anchor 的 schema 无法 compile", () => {
+    const definition = toAciToolDef({
+      server: "server",
+      tool: tool({
+        inputSchema: {
+          $schema: "https://json-schema.org/draft/2020-12/schema",
+          type: "object",
+          properties: {
+            value: { type: "string" },
+            // 非顶层的 $schema 出现处必须原样保留，只剥顶层一处
+            nested: {
+              type: "object",
+              properties: {
+                $schema: { type: "string" },
+              },
+            },
+          },
+          required: ["value"],
+        },
+      }),
+      call: vi.fn(),
+      timeoutMs: 1234,
+    });
+
+    expect(definition.inputSchema).toEqual({
+      type: "object",
+      properties: {
+        value: { type: "string" },
+        nested: {
+          type: "object",
+          properties: {
+            $schema: { type: "string" },
+          },
+        },
+      },
+      required: ["value"],
+    });
+    expect("$schema" in definition.inputSchema).toBe(false);
+  });
+
+  it("无顶层 $schema 的 inputSchema 保留原对象引用（不 spread 复制）", () => {
+    const inputSchema = tool().inputSchema!;
+    const definition = toAciToolDef({
+      server: "server",
+      tool: tool({ inputSchema }),
+      call: vi.fn(),
+      timeoutMs: 1234,
+    });
+
+    expect(definition.inputSchema).toBe(inputSchema);
+  });
+
   it("uses an empty object schema when inputSchema is absent", () => {
     const definition = toAciToolDef({
       server: "server",

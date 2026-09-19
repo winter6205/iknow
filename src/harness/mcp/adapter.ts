@@ -26,13 +26,30 @@ export interface ToAciToolDefOptions {
 
 const EMPTY_INPUT_SCHEMA = { type: "object", properties: {} } as const;
 
+// 宿主 registry 的 Ajv 只 bundle draft-07 元模式；zod4 / MCP SDK 2.0 生成的
+// inputSchema 带顶层 2020-12 `$schema`，compile 会被拒（#1058）。只剥顶层这
+// 一处；无该键时返回原引用，保对象身份与 EMPTY_INPUT_SCHEMA 兜底语义。
+// 已知限制：其余 2020-12 特有关键字（如 tuple 的 `prefixItems`）原样透传，
+// draft-07 视角下可能被误读；当前已知消费方（zod4 常规关键字）不受影响。
+function stripTopLevelSchemaKeyword(
+  schema: Record<string, unknown>
+): Record<string, unknown> {
+  if (!("$schema" in schema)) {
+    return schema;
+  }
+  const { $schema: _meta, ...rest } = schema;
+  return Object.freeze(rest);
+}
+
 export function toAciToolDef(opts: ToAciToolDefOptions): AciToolDef {
   const { server, tool, call, timeoutMs } = opts;
 
   return Object.freeze({
     name: `mcp__${sanitizeSegment(server)}__${sanitizeSegment(tool.name)}`,
     description: tool.description ?? "",
-    inputSchema: tool.inputSchema ?? EMPTY_INPUT_SCHEMA,
+    inputSchema: stripTopLevelSchemaKeyword(
+      (tool.inputSchema ?? EMPTY_INPUT_SCHEMA) as Record<string, unknown>
+    ),
     aci: {
       category: "write" as const,
       lazy: true,

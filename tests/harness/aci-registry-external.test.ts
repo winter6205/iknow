@@ -3,6 +3,7 @@ import { describe, it } from "vitest";
 import { createAciRegistry } from "../../src/harness/aci/aci-registry.ts";
 import type { AciToolDef } from "../../src/harness/aci/types.ts";
 import { RegistryConstructionError } from "../../src/harness/errors.ts";
+import { toAciToolDef } from "../../src/harness/mcp/adapter.ts";
 
 function makeTool(name: string, lazy = false): AciToolDef {
   return Object.freeze({
@@ -197,5 +198,40 @@ describe("ACI registry external registration", () => {
 
     // 未注册的名字也返 false（不抛）
     assert.equal(registry.isDiscovered("mcp__ghost__unknown"), false);
+  });
+});
+
+describe("2020-12 $schema inputSchema — 经 adapter 剥顶层后可过宿主 draft-07-only Ajv 编译闸", () => {
+  const schema2020 = {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object" as const,
+    properties: { value: { type: "string" } },
+    required: ["value"],
+    additionalProperties: false,
+  };
+
+  it("raw 带顶层 $schema 的 def 被 compile 闸拒；toAciToolDef 转换后的同名 def 注册成功", () => {
+    const registry = createAciRegistry([makeTool("read_file")]);
+
+    // 负对照：证明拒因就是 $schema（同名尚未占用，非 duplicate 路径）。
+    const raw = makeTool("mcp__server__lookup");
+    assert.throws(
+      () =>
+        registry.registerExternal([
+          Object.freeze({ ...raw, inputSchema: schema2020 }) as AciToolDef,
+        ]),
+      RegistryConstructionError
+    );
+
+    const def = toAciToolDef({
+      server: "server",
+      tool: { name: "lookup", description: "d", inputSchema: schema2020 },
+      call: async () => ({ content: [] }),
+      timeoutMs: 1000,
+    });
+
+    assert.doesNotThrow(() => registry.registerExternal([def]));
+    assert.equal(registry.catalog.get(def.name), def);
+    assert.equal("$schema" in def.inputSchema, false);
   });
 });
