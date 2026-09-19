@@ -51,7 +51,7 @@ import {
 } from "./violations.js";
 import type { EgressApprovalGate } from "./approval.js";
 import {
-  mintEgressCredentials,
+  mintEgressCredentialLayer,
   type EgressCredentialMint,
   type EgressCredentialRoster,
   type EgressFenceBind,
@@ -620,10 +620,12 @@ function assembleFenceSpec(
 }
 
 /**
- * Step 1.5 (credential-sentinel T2): 启动期铸造 —— 抽离以控制
+ * Step 1.5 (credential-sentinel T2/T6): 启动期铸造 —— 抽离以控制
  * `createEgressSession` 复杂度（S5 门）。名册在场 → 装载持久 CA（T4）+
- * 铸造假值（registry / masked store / bind 表 / env 增量）；缺席 →
- * undefined（不装载、不铸造，yolo/skipped 姿态显式归 T6）。
+ * 经凭据装配入口 `mintEgressCredentialLayer`（T6）以 `fenced` 档铸造假值
+ * （registry / masked store / bind 表 / env 增量）；session 在场 ⇔ 围栏
+ * 在场，故姿态恒 `fenced`（yolo / isolation OFF 无 session，skipped 痕
+ * 归装配入口的 `no-fence` 档）。名册缺席 → undefined（不装载、不铸造）。
  * 装配期防线（invariant 1 / F4）失败 = typed 错误向上抛，调用方在此步
  * 之后不得起代理（「不起带部分代换的 session」）。
  * T3 起返回 CA 引用（代理 mitmCA 接线 + dispose bundle 清理消费）。
@@ -634,7 +636,8 @@ function mintCredentialsStep(
   if (opts.policy.credentials === undefined) return undefined;
   const loadCa = opts.loadEgressCa ?? loadEgressCa;
   const caLoad = loadCa({ caDir: opts.caDir });
-  const mint = mintEgressCredentials({
+  const mint = mintEgressCredentialLayer({
+    posture: "fenced",
     roster: opts.policy.credentials,
     ca: caLoad.ca,
     env: opts.hostEnv ?? process.env,

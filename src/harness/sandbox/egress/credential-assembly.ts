@@ -486,3 +486,77 @@ export function mintEgressCredentials(
     denyTraces: Object.freeze(denyTraces),
   });
 }
+
+// ── T6：装配入口姿态分支（yolo / isolation OFF → 不铸造、不注入）──────────
+
+/**
+ * 围栏姿态（spec F9 / Assumption 9）：`fenced` = 正常铸造档；
+ * `no-fence` = yolo / isolation OFF（围栏整体退场）—— 入口显式分支
+ * 「不铸造、不注入」，返回 `skipped` 痕进诊断/日志，离线可查证
+ * 「此时宿主真值直达、无存在面保护」。姿态差异显式登记，不静默。
+ */
+export type EgressFencePosture = "fenced" | "no-fence";
+
+/** `no-fence` 档产物：skipped 标记即离线判据（无 registry/store/envVars）。 */
+export interface EgressCredentialSkipped {
+  readonly skipped: "no-fence";
+}
+
+/** 入口返回联合：消费方必须显式处理 skipped 档（禁静默降级）。 */
+export type EgressCredentialLayer = EgressCredentialMint | EgressCredentialSkipped;
+
+/** `fenced` 档入参 = T2 铸造入参 + 姿态声明。 */
+export interface MintEgressCredentialLayerFencedArgs
+  extends MintEgressCredentialsArgs {
+  readonly posture: "fenced";
+  readonly onDiagnostic?: (message: string) => void;
+}
+
+/** `no-fence` 档入参：结构上不吃 roster / CA —— 不铸造无从消费真值。 */
+export interface MintEgressCredentialLayerNoFenceArgs {
+  readonly posture: "no-fence";
+  readonly onDiagnostic?: (message: string) => void;
+}
+
+export type MintEgressCredentialLayerArgs =
+  | MintEgressCredentialLayerFencedArgs
+  | MintEgressCredentialLayerNoFenceArgs;
+
+/**
+ * no-fence 痕文案 SSOT —— 入口（yolo 接线方）与装配层
+ * （`createEgressPolicyFactory` isolation OFF 分支）共用一条 canonical
+ * 串，离线 grep `skipped: no-fence` 即可查证姿态。文案不含任何凭据材料。
+ */
+export function noFenceCredentialTrace(): string {
+  return (
+    `[egress-credential] skipped: no-fence — credential layer not minted and ` +
+    `not injected; with the fence absent host real values reach children ` +
+    `directly with no existence-plane protection (declared posture per spec ` +
+    `F9 / Assumption 9 — registered, not silent)`
+  );
+}
+
+/**
+ * 凭据装配入口（T6）：三装配点经 `createEgressSession` 走到铸造时以
+ * `fenced` 档委托 `mintEgressCredentials`（T2 形状逐字）；yolo /
+ * isolation OFF 的接线方以 `no-fence` 档调用 —— 不构造 registry /
+ * store、不装载 CA、不产出 env 增量，返回 `skipped` 痕并落诊断通道
+ * （invariant 7 禁静默）。加性形状：ssh-bridge plan 可沿同一入口接线。
+ */
+export function mintEgressCredentialLayer(
+  args: MintEgressCredentialLayerFencedArgs
+): EgressCredentialMint;
+export function mintEgressCredentialLayer(
+  args: MintEgressCredentialLayerNoFenceArgs
+): EgressCredentialSkipped;
+export function mintEgressCredentialLayer(
+  args: MintEgressCredentialLayerArgs
+): EgressCredentialLayer {
+  if (args.posture === "no-fence") {
+    const onDiagnostic =
+      args.onDiagnostic ?? ((m: string): void => console.warn(m));
+    onDiagnostic(noFenceCredentialTrace());
+    return Object.freeze({ skipped: "no-fence" });
+  }
+  return mintEgressCredentials(args);
+}

@@ -63,7 +63,7 @@ OVERALL: PASS（rev 2，返工点已按审查方清单落实）
    - **Inherits:** spec T6（三装配点 `bash.ts` 前台 / `background/manager.ts` / `verify/sandbox-run.ts` 经同一 `createEgressSession` 获得凭据层、「无各面分支」，worker 走这三条；background 挂 `settle()` 释放通道覆盖 registry/store；yolo / isolation OFF「凭据装配函数入口显式分支『不铸造、不注入』，返回结构带 `skipped: \"no-fence\"` 之类别名进诊断/日志——离线可查证『此时宿主真值直达、无存在面保护』」）；Assumption 9（「姿态差异显式登记……不静默」）；Assumption 10 + F9（session 起不来 → 凭据层随 session 缺席，「infra 文案不变（不新增冒充）」）；invariant 7（fail-closed 全覆盖沿用）；SC9（yolo 断言 + SocatUnavailableError 无假值半注入）。
    - **Surface:** `src/harness/aci/tools/bash.ts`、`src/harness/background/manager.ts`、`src/harness/verify/sandbox-run.ts`（装配接线）、`credential-assembly.ts` 入口分支。
    - **Acceptance:** 三装配点 wiring 测试（工厂注入 seam）——各面对凭据零分支代码，差异只在生命周期表既有档位；yolo / isolation OFF 路径断言 = registry 未构造 + fence env 无假值键 + `skipped` 痕可离线查证（SC9，「看起来有保护实则无」的反命门闭合）；`SocatUnavailableError` 路径凭据层缺席且无假值半注入（wiring 测试）；`build-engine-egress-wiring.test.ts` 同族回归绿；**`createEgressSession` 缝扩展保持 ssh-bridge plan 可按同缝接线的形状（spec 依赖声明），本弹与对方 plan 对三装配点 / `session.ts` 的改动串行落地、合并冲突主会话裁**；`npm test` 绿。
-   - Status: [ ] pending
+   - Status: [x] pending
    - [blocks: T3]
 
 7. **T7 测试矩阵收口 + probe + TUI pty 实测（完成 = 实测过）** — tag: `[implementation]`

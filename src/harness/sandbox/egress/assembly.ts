@@ -29,6 +29,7 @@ import type {
 } from "../../../config/settings.js";
 import {
   assembleEgressCredentials,
+  noFenceCredentialTrace,
   type EgressCredentialRoster,
 } from "./credential-assembly.js";
 import type { EgressPolicyInput } from "./session.js";
@@ -101,6 +102,12 @@ export function createEgressPolicyFactory(
     // 无 network 配置 → 本次调用不起 session,fence 走纯断网。
     // 这是 spec 要求的 fail-closed 合法态,不是缺陷:settings 段缺席
     // = 用户未声明出网边界 = 默认拒绝。
+    // T6 / F9（Assumption 9）：出网缝与凭据层整体缺席的姿态显式登记 ——
+    // canonical `skipped: no-fence` 痕进诊断/日志（invariant 7 禁静默，
+    // 离线可查证「无存在面保护」），SC9 反命门闭合。
+    const onDiagnostic =
+      onWarn ?? ((m: string): void => { console.warn(m); });
+    onDiagnostic(noFenceCredentialTrace());
     return () => undefined;
   }
 
