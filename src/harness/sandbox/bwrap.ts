@@ -208,20 +208,32 @@ function baseArgs(
 }
 
 /**
- * ADR-0097 / T4:egress 缝 unix socket `--bind` argv 段。
+ * ADR-0097 / T4 + egress-ssh-bridge T6：egress 缝 unix socket `--bind` argv 段。
  *
  * `unixSocketPath` 为空 / 缺席 → 不发射任何 argv(`--unshare-net` 仍恒在,
  * 无 host-net 直连分支)。三元组形态 `--bind <src> <dest>` ——
  * `src=dest=unixSocketPath`,与既有工作区档两层写白名单(`bindArgs`)同形态,
  * 但不并入 `bindArgs`(后者语义是「工作区写白名单的省略是收紧方向」,本函数
  * 语义是「出口代理缝的省略是 fail-closed 但**不**回退到 host-net」—— 两者不混)。
+ *
+ * T6 条件凭据缝:`spec.sshAuthSockPath` 在场(开态)才在同一 egress bind 段
+ * **追加**第二条 `--bind <agentSocket> <agentSocket>`(src=dest 同值,沙箱内
+ * 路径不变,配 `spec.env` 的 `SSH_AUTH_SOCK` 同值引用);关态字段缺席 → 本
+ * 段与 T4 逐字节一致。两条 bind 都保持在 workspaceMounts 之后、cwdReadonly
+ * 之前 —— 段内相对次序 = egress socket 先、agent socket 后(观测者读序即
+ * 装配因果序:桥是缝,凭据是挂在缝上的条件分支)。
  */
 function egressBindArgs(spec: EgressFenceSpec | undefined): string[] {
   if (spec === undefined) return [];
-  const { unixSocketPath } = spec;
-  if (typeof unixSocketPath !== "string" || unixSocketPath.length === 0)
-    return [];
-  return ["--bind", unixSocketPath, unixSocketPath];
+  const { unixSocketPath, sshAuthSockPath } = spec;
+  const out: string[] = [];
+  if (typeof unixSocketPath === "string" && unixSocketPath.length > 0) {
+    out.push("--bind", unixSocketPath, unixSocketPath);
+  }
+  if (typeof sshAuthSockPath === "string" && sshAuthSockPath.length > 0) {
+    out.push("--bind", sshAuthSockPath, sshAuthSockPath);
+  }
+  return out;
 }
 
 export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {

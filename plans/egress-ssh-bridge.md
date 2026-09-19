@@ -65,7 +65,7 @@ OVERALL: PASS（rev 2，返工点已按审查方清单落实）
    - **Inherits:** ADR-0105 §Decision 5 逐字「**SSH 凭据不在本决策内**：私钥可读性与 `SSH_AUTH_SOCK` 形态归出口 ssh 桥……key 进围栏的姿态沿用『出口域限制兜底』（key 只能用于向放行域认证）」；invariant 6（凭据姿态 = 出口域限制兜底）；spec T6 + assumption 5（`SSH_AUTH_SOCK` bind 仅条件分支、默认**关**）；F5 / F8 文案与归类纪律（passphrase/无 agent 失败含指引一行；agent socket 连不上归类 infra 非域拒绝）。
    - **Surface:** `src/harness/sandbox/bwrap.ts`（条件 `SSH_AUTH_SOCK` bind 同段落位）、`session.ts`（开态 env 注入、同 dispose 通道）、失败指引文案面。
    - **Acceptance:** global / workspace 两档围栏内 `test -r ~/.ssh/id_ed25519`（fixture key）可读、workspace 档对 key 的**写**必败（ro-bind）；关态断言 `SSH_AUTH_SOCK` 在围栏 env 中不存在，开态断言 `--bind` + env 注入 + 与 egress 桥同 dispose，各有单测；passphrase/无 agent 失败信息含「宿主侧 `ssh-add` 或无口令 key」一行；`npm test` 绿。
-   - Status: [ ] pending
+   - Status: [x] done（两档 key 可读 + workspace 写必败 = 真 bwrap 实测绿（fixture key 生成于 tmpdir、HOME 重定向，不碰真 `~/.ssh`）；关态零注入 / 开态 `--bind` 段内落位 + `SSH_AUTH_SOCK` env + 与桥同 dispose / 缺失 fail-closed 含指引行 = `tests/harness/sandbox/egress-ssh-authsock.test.ts` 5 条单测；`npm run probe:sandbox` 全类别绿）
    - [blocks: T1, T3]
 
 7. **探针扩展 + TUI / 真 push 实测（验收面）** — tag: `[implementation]`

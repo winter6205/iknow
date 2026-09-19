@@ -104,6 +104,16 @@ export interface EgressPolicyInput {
 export interface EgressSessionOptions {
   readonly policy: EgressPolicyInput;
   /**
+   * egress-ssh-bridge T6 凭据可用性分支（默认**关**，assumption 5）：
+   * 宿主 SSH agent socket 绝对路径。显式传入 = 开态 —— session 把它经
+   * `EgressFenceSpec.sshAuthSockPath` 交 fence 做同段 `--bind` 并在
+   * `spec.env` 注入 `SSH_AUTH_SOCK`；缺省 = 关态，两者都不出现（宿主
+   * agent 值恒不进围栏）。路径缺失 / stale 到不存在 → fail-closed 抛
+   * `SshAgentUnavailableError`（infra 归类，含 F5 指引；不起桥不留半开
+   * 形态）。agent socket 非 session 所有 —— dispose 不删该路径。
+   */
+  readonly sshAuthSockPath?: string;
+  /**
    * socat 可执行路径或命令名。注入便于测试 —— 测试可用假 socat 或
    * skip 桥；生产传 `'socat'` 或绝对路径。
    */
@@ -177,6 +187,15 @@ export interface EgressFenceSpec {
    * background / verify 两形态的接线归子弹 5。
    */
   readonly innerBridgeScript: string;
+  /**
+   * egress-ssh-bridge T6 条件形态（缺省 = 关态，字段缺席）：宿主 SSH
+   * agent socket 绝对路径。在场时 fence 在既有 egress bind 段追加
+   * `--bind <path> <path>`（src=dest 同值，位置纪律与 `unixSocketPath`
+   * bind 同段：workspaceMounts 之后、cwdReadonly 之前），且 `spec.env`
+   * 含 `SSH_AUTH_SOCK`（值 = 同一路径 —— bind 后沙箱内路径不变）。
+   * 该路径非 session 所有，dispose 通道只收桥与自有 socket，不删它。
+   */
+  readonly sshAuthSockPath?: string;
 }
 
 /**
@@ -213,6 +232,26 @@ export class SocatUnavailableError extends ToolExecutionError {
     if (cause !== undefined) {
       (this as { cause?: unknown }).cause = cause;
     }
+  }
+}
+
+/**
+ * egress-ssh-bridge T6 / F5：开态但宿主 agent socket 不可用（缺失 /
+ * 路径不存在）的 typed 错误 —— **infra 归类，非域拒绝**（F8 同款：
+ * agent 连不上不记 egress 违例、不走 filter）。消息带 F5 钉死的指引一
+ * 行：passphrase 私钥 + 无 agent = 围栏内 ssh 提示口令而 fence 无 tty
+ * 必败；本 spec 不做口令回传面，修复只有一条路 = 宿主侧把 key 交给
+ * agent（`ssh-add`）或换无口令 key。
+ */
+export class SshAgentUnavailableError extends ToolExecutionError {
+  override readonly name: string = "SshAgentUnavailableError";
+  readonly sshAuthSockPath: string;
+  constructor(sshAuthSockPath: string) {
+    super(
+      `egress: SSH agent socket "${sshAuthSockPath}" not found (agent absent or stale path; infra failure, not a domain denial). ` +
+        "指引：宿主侧 `ssh-add` 或无口令 key（passphrase 私钥 + 无 agent 在围栏内必败——fence 无 tty 可输口令）。"
+    );
+    this.sshAuthSockPath = sshAuthSockPath;
   }
 }
 
@@ -523,17 +562,33 @@ function startSocatBridgeStep(
  * `SANDBOX_HTTP_PROXY_PORT`（宿主 OS 分配端口不出现在 spec —— 它只活在
  * 宿主 socat 桥的 `TCP:127.0.0.1:<hostPort>` 一端，同号耦合已解除）；
  * 沙箱内侧半桥由 `innerBridgeScript` 前导承载（消费面 bash.ts 命令链）。
+ *
+ * T6：`sshAuthSockPath` 在场（开态）才加 `SSH_AUTH_SOCK` env 与 spec
+ * 字段 —— env 注入仍走 `assembleFenceSpec` 单点（invariant 4：代理 env
+ * 与凭据 env 同一构造处，三消费面零复制）；bind 发射面在 bwrap.ts 的
+ * `egressBindArgs`（同段落位）。缺省 = 关态，两处都不出现。
  */
 function assembleFenceSpec(
   socketPath: string,
   socatCommand: string,
-  token: string
+  token: string,
+  sshAuthSockPath: string | undefined
 ): EgressFenceSpec {
+  const env = buildProxyEnv(SANDBOX_HTTP_PROXY_PORT, token);
+  if (sshAuthSockPath === undefined) {
+    return {
+      unixSocketPath: socketPath,
+      sandboxLocalPort: SANDBOX_HTTP_PROXY_PORT,
+      env,
+      innerBridgeScript: buildInnerBridgeScript(socatCommand, socketPath),
+    };
+  }
   return {
     unixSocketPath: socketPath,
     sandboxLocalPort: SANDBOX_HTTP_PROXY_PORT,
-    env: buildProxyEnv(SANDBOX_HTTP_PROXY_PORT, token),
+    env: { ...env, SSH_AUTH_SOCK: sshAuthSockPath },
     innerBridgeScript: buildInnerBridgeScript(socatCommand, socketPath),
+    sshAuthSockPath,
   };
 }
 
@@ -566,6 +621,16 @@ export async function createEgressSession(
       socatCommand,
       "Install socat (Debian/Ubuntu: `sudo apt install socat`; Fedora/RHEL: `sudo dnf install socat`; macOS: `brew install socat`) and retry."
     );
+  }
+
+  // T6 凭据可用性分支（默认关）：开态先验 agent socket 存在性 ——
+  // 缺失 = fail-closed 抛 infra 类错误（F5/F8），且发生在起 server / 起
+  // 桥之前（不留「有 bind 无桥」「bind 指向不存在路径」的半开形态）。
+  // stale-but-present（文件在、agent 亡）无法低成本探测，留给围栏内 ssh
+  // 报 agent refused —— 归类 infra，本缝不经 filter，不产域拒绝记录。
+  const sshAuthSockPath = opts.sshAuthSockPath;
+  if (sshAuthSockPath !== undefined && !existsSync(sshAuthSockPath)) {
+    throw new SshAgentUnavailableError(sshAuthSockPath);
   }
 
   const id = newSessionId();
@@ -610,8 +675,9 @@ export async function createEgressSession(
     );
   }
 
-  // Step 4: 构造 fence spec（沙箱内固定端口 + auth env + 内层桥前导）。
-  const spec = assembleFenceSpec(socketPath, socatCommand, token);
+  // Step 4: 构造 fence spec（沙箱内固定端口 + auth env + 内层桥前导 +
+  // T6 条件凭据缝——sshAuthSockPath 缺席即关态，spec 不带该字段）。
+  const spec = assembleFenceSpec(socketPath, socatCommand, token, sshAuthSockPath);
 
   let disposed = false;
   const dispose = async (): Promise<void> => {
