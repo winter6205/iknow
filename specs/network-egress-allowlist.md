@@ -1,6 +1,6 @@
 # Spec: 出口代理缝 —— 域白名单网络边界
 
-**Status:** ready for review (rev 2，ACR 三项 `no` 已收敛)
+**Status:** ready for review (rev 2；桥接实现以 ADR-0107 为准：无宿主 socat)
 **Surface:** `src/harness/sandbox/`（bwrap argv、egress 新目录）、`src/harness/aci/tools/bash.ts`、`src/harness/permission/`（删 ask 轴）、`src/harness/background/`、`src/harness/verify/`、`src/config/settings.ts`、`scripts/sandbox-probe.ts`
 
 ## Goal

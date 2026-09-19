@@ -1,6 +1,6 @@
 # Spec: 出口 ssh 桥（传输面）—— 沙箱内 git-over-SSH 可达（补完 ADR-0097 T7/T8 形态扩展）
 
-**Status:** rev 2（ACR PASS——complexity-anti-drift 返工已落，见 ACR Verdict 段；assumptions 全部**待确认**，人类 gate 另行走）
+**Status:** rev 2（实现改为自带中继，禁止 socat；ADR-0107）
 **Basis:** ADR-0097（代理缝结构、生命周期表三形态、「HTTP CONNECT + SOCKS5」原设计、T7/T8 欠账）；ADR-0104（preset 六域；`github.com` apex 与 `*.github.com` 并列）；ADR-0105 §Decision 5（SSH 凭据归本 spec；key 进围栏姿态 = 出口域限制兜底）；承接 `specs/network-egress-allowlist.md`（rev 2）与 `specs/egress-preset-allowlist.md`（rev 1）
 **Surface:** `src/harness/sandbox/egress/session.ts`、`upstream.ts`、`src/harness/sandbox/bwrap.ts`（egress bind 段扩多 socket）、`src/harness/aci/tools/bash.ts`（fence 内命令链接线）、`src/harness/background/manager.ts` / `src/harness/verify/sandbox-run.ts`（同规则接线确认）、`scripts/sandbox-probe.ts`（egress 分支重写 + ssh 探针类别）；**不改** `specs/egress-preset-allowlist.md` / preset 清单 / `domain-matcher.ts` 判定语义
 

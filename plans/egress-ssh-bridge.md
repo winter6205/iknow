@@ -1,5 +1,7 @@
 # Plan: egress-ssh-bridge —— 出口 ssh 桥（传输面）
 
+> **Halt（ADR-0107，2026-09-19）：停写宿主 `socat`。** 允许集、`--unshare-net`、HTTP 代理、`GIT_SSH_COMMAND`、内层半桥仍要；凡 `apt install socat` / `which socat` / 两侧 socat argv 改为本仓自带中继后再继续。未改中继前不要合入。
+
 **Goal:** 让沙箱内 `git push`（SSH remote）经出口代理缝可达：补齐沙箱内侧半桥 + auth 闭环、`GIT_SSH_COMMAND` 注入、`:22` 域判定钉子、三形态生命周期与 SSH 凭据可用性分支，顺带清偿 O1（407 死路）/O2（NO_PROXY 自噬）/O3（内层监听缺失 + probe 假绿）；未放行域 :22 被拒且违例回灌可区分。
 **Approach:** T1（内层桥 + auth 闭环）是前提性子弹——HTTP 面端到端不闭合则其余全是假绿；注入面与判定层钉子随后叠加 / 并行；SOCKS 面是独立可摘的翼（assumption 2 门控），后续子弹的判据一律写成「T2 在场」条件形态（照抄 spec rev 2 的 T5/SC5 返工文字）；生命周期与凭据分支收口三形态；最后以探针 + TUI/真 push 实测做验收面。姊妹面边界一句：凭据面（TLS 终止 + sentinel 代换）在 `specs/egress-credential-sentinel.md` / `plans/egress-credential-sentinel.md`，本 plan 只保证 `createEgressSession` 共享缝的可加性、不设计对方范围。
 **Spec link:** `specs/egress-ssh-bridge.md`（rev 2）
