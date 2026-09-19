@@ -42,6 +42,16 @@ export const PRODUCT_ROOT_ENV_KEY = "IKNOW_PRODUCT_ROOT";
  */
 export const FS_MODE_ENV_KEY = "IKNOW_FS_MODE";
 
+/**
+ * issue 1059: env var carrying the worktree-on-mutate gate's live state
+ * across the same parent → worker boundary. Like `FS_MODE_ENV_KEY` it is a
+ * posture token (`"1" | "0"`), not a path — the worker turns it into a
+ * static holder consumed by its bash fence (UNBOUND_FENCE). Absent key =
+ * wire not connected (legacy / test spawn) → the worker never emits the
+ * ro-bind segment, byte-identical to the pre-wire shape.
+ */
+export const WORKTREE_GATE_ON_ENV_KEY = "IKNOW_WORKTREE_GATE_ON";
+
 /** SessionFile / PUT path cap (serve-workspace T1). Overflow → schema_invalid. */
 export const MAX_WORKSPACE_ROOT_CHARS = 4096;
 

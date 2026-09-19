@@ -4,8 +4,9 @@
  * `write_file` 的 last-read 账本要从「成功的 bash 读」入账，但 `bash.ts`
  * 只把命令当不透明字符串交给沙箱 —— 没有任何现成组件返回被读的 path。
  * `validateReadonlyCommand` 是只读**模式**的准入闸（只回答「准不准跑」），
- * `classifyBashWorkspaceWrite` 是工作区写判定（只回答 read/mutate），二者
- * 都不返回 path，故不复用（spec D1 明说）。本模块是专用的小提取器。
+ * `classifyCall` 的 bash 分支自 issue 1059 起只回答 read/mutate（物理
+ * ro-bind 围栏接管写判定），二者都不返回 path，故不复用（spec D1 明说）。
+ * 本模块是专用的小提取器。
  *
  * 判定（全部满足才返回 path，否则 `undefined`）：
  *   1. 恰好一个顶层段（`;` / `&&` / `||` / `|` 都算分段）—— 排除管道与串联；

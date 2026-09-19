@@ -23,6 +23,7 @@
  * runInSandbox 构造)。verify-loop 不 import loop-engine 的 deps, 保持可测性。
  */
 import { randomUUID } from "node:crypto";
+import type { WorktreeGateReader } from "../isolation/worktree-gate.js";
 import type { HarnessStreamEvent } from "../stream.js";
 import type {
   AnthropicContentBlock,
@@ -180,6 +181,12 @@ export interface VerifyLoopOptions {
    */
   readonly fsMode?: import("../sandbox/fs-mode.js").FsIsolationMode;
   readonly homeRoot?: string;
+  /**
+   * issue 1059:worktree-on-mutate holder(只读视图)—— 透传给
+   * `makeDefaultRunVerify`,验证命令 fence 与 bash 工具面在 UNBOUND_FENCE
+   * 轴上判定同源(G3)。缺席 → 不发段(V1 baseline)。
+   */
+  readonly worktreeOnMutate?: WorktreeGateReader;
   /**
    * ADR-0092 / SC12:验证命令的会话 tmp 宿主路径 —— 既是围栏内 `$TMPDIR` 的
    * 值,也是工作区档 `--bind <tmpRoot>` 的源端(两者必须同一份)。调用方经
@@ -1174,10 +1181,14 @@ function buildVerifyRunnerArgs(options: VerifyLoopOptions): {
   homeRoot?: string;
   tmpDir?: string;
   egressPolicy?: VerifyLoopOptions["egressPolicy"];
+  worktreeOnMutate?: VerifyLoopOptions["worktreeOnMutate"];
 } {
   return {
     cwd: options.cwd,
     ...(options.fsMode !== undefined ? { fsMode: options.fsMode } : {}),
+    ...(options.worktreeOnMutate !== undefined
+      ? { worktreeOnMutate: options.worktreeOnMutate }
+      : {}),
     ...(options.homeRoot !== undefined ? { homeRoot: options.homeRoot } : {}),
     ...(options.tmpDir !== undefined ? { tmpDir: options.tmpDir } : {}),
     ...(options.egressPolicy !== undefined

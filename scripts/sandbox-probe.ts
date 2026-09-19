@@ -40,6 +40,12 @@
  *  - **ADR-0097**：`--unshare-net` 是常量；网路轴探针由「opt-in 共享宿主
  *    netns」转为「egress 缝可达」。`spawnFenceSync` / `spawnFenceAsync`
  *    无 `network` 参数 —— 出网能力只经 egress 缝，无 per-call opt-in 面。
+ *  - **issue 1059 / ADR-0109**：worktree 档新增物理类「unbound workspace
+ *    ro-bind (physical)」——门禁 ON ∧ unbound 时 argv 末端
+ *    `--ro-bind <mainCheckout>` + `--bind <tmpPad>`（所有可写 bind 之后、
+ *    `--proc` 之前）。全量类别计数由 13（10 物理 + 3 violation）进到
+ *    14（11 物理 + 3 violation）；bound / gate-OFF 档不发段，argv
+ *    byte-identical 承诺不变。
  */
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -125,28 +131,46 @@ function fenceEnv(profile: ProbeProfile): NodeJS.ProcessEnv {
 
 function spawnFenceSync(
   profile: ProbeProfile,
-  command: string
+  command: string,
+  /**
+   * issue 1059：unbound 形态检查的逐次 fence 覆盖 —— cwd 改到主 checkout
+   * （unbound 会话的 waveRoot 就是主仓）并挂 `unboundFence` 段。缺省 = 既有
+   * 装配逐字节不变（其余检查零影响）。
+   */
+  overrides?: {
+    readonly cwd?: string;
+    readonly unboundFence?: {
+      readonly mainCheckout: string;
+      readonly tmpPad?: string;
+    };
+  }
 ): ReturnType<typeof spawnSync> {
   const env = fenceEnv(profile);
+  const fenceCwd = overrides?.cwd ?? profile.cwd;
   const fence = createBwrapFence({
     command: "bash",
     args: ["-c", command],
     fsPolicy: profile.fsPolicy,
     env,
-    cwd: profile.cwd,
+    cwd: fenceCwd,
     // workspace 档三层 mount 的源端绝对路径（ADR-0092 Amendment / SC11/SC12）；
     // global 档传了也不发射 —— 与生产 bash.ts 装配同款（只判 fsMode）,
     // 顺带把 bwrap 的 global 档 byte-identical 回归钉带进物理验收。
     ...(profile.fsMode === "workspace"
       ? {
           homeRoot: profile.home,
-          workspaceRoot: profile.cwd,
+          workspaceRoot: fenceCwd,
           tmpRoot: profile.pad,
         }
       : {}),
+    // 生产装配同款：段位由 createBwrapFence 钉在 mount 链最末（所有可写
+    // bind 之后、--proc/--dev-bind 之前），探针不手排 argv。
+    ...(overrides?.unboundFence
+      ? { unboundFence: overrides.unboundFence }
+      : {}),
   });
   return spawnSync(fence.argv[0], fence.argv.slice(1), {
-    cwd: profile.cwd,
+    cwd: fenceCwd,
     encoding: "utf8",
     env,
   });
@@ -902,6 +926,58 @@ function buildChecks(
           ok: r.status === 0 && content === "global-main",
           detail: `fence-exit=${r.status} host-persisted=${persisted} content="${content}"`,
         };
+      },
+    });
+    // issue 1059 / ADR-0109：门禁 ON 且 unbound（waveRoot = 主 checkout）时
+    // 生产 argv 末端追加 `--ro-bind <mainCheckout> <mainCheckout>` +
+    // `--bind <tmpPad>`（所有可写 bind 之后、--proc 之前）。物理双重钉，仿
+    // "home write denied (workspace)" 纪律：
+    //   ① 写主仓 = EROFS —— exit≠0 ∧ stderr 命中 rofs ∧ 宿主不落盘（只看
+    //      退出码会把静默丢写判绿）；
+    //   ② pad 落在主仓子树内（生产形态：会话文件夹在项目树下）且写成功、
+    //      落宿主 —— 若 pad 重绑段没坐在 ro-bind 之后，这条会连带 EROFS，
+    //      所以它同时钉住 mount 序的 last-mount-wins 段位。
+    // 与上条 "main repo write allowed" 构成同一 fixture 的两态对照：无
+    // unboundFence 段 → 可写；有段 → 主仓只读、pad 可写。
+    checks.push({
+      name: "unbound workspace ro-bind (physical)",
+      run: async () => {
+        const pad = mkdtempSync(join(main, "probe-session-tmp-"));
+        try {
+          const fenceOverrides = {
+            cwd: main,
+            unboundFence: { mainCheckout: main, tmpPad: pad },
+          } as const;
+          const hostTarget = join(main, `${TOKEN}.unbound`);
+          const padTarget = join(pad, `${TOKEN}.pad`);
+          if (existsSync(hostTarget)) rmSync(hostTarget, { force: true });
+          const r = spawnFenceSync(
+            profile,
+            `touch "${hostTarget}"`,
+            fenceOverrides
+          );
+          const persisted = existsSync(hostTarget);
+          const stderr = r.stderr?.trim() ?? "";
+          const rofs = /Read-only file system/.test(stderr);
+          const rp = spawnFenceSync(
+            profile,
+            `touch "${padTarget}"`,
+            fenceOverrides
+          );
+          const padPersisted = existsSync(padTarget);
+          if (persisted) rmSync(hostTarget, { force: true });
+          return {
+            ok:
+              r.status !== 0 &&
+              !persisted &&
+              rofs &&
+              rp.status === 0 &&
+              padPersisted,
+            detail: `main: fence-exit=${r.status} host-persisted=${persisted} rofs=${rofs}; pad: fence-exit=${rp.status} host-persisted=${padPersisted} stderr="${stderr}"`,
+          };
+        } finally {
+          rmSync(pad, { recursive: true, force: true });
+        }
       },
     });
   }

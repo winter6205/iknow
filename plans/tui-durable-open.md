@@ -40,6 +40,7 @@ minimal-change-verifier: yes — one task (durable TUI open + no unbounded find 
    - **Surface:** isolation worktree gate (bash workspace-write classifier + readonly segment policy it already borrows)
    - **Acceptance:** unbound + isolation ON: `cd <main> && head …` and `cd <main> && sed -n …` execute (or at least are not isolation-blocked); `cd <main> && sed -i …` and unknown first tokens still isolation-block with the existing unbound-mutate notice
    - Status: [x] done — T3 落地：gate 专属 read 臂（`cd` 单操作数 + quiet-mode print-only `sed`）先于共享表查表；readonly 模式未被放宽；顺带关掉 `splitShellSegments` 不切换行导致的 `head a\nrm -rf b` fail-open。
+   - 沿革注记：`classifyBashWorkspaceWrite` 与 bash 预测拦截已被 issue #1059 / ADR-0109 的物理 ro-bind 围栏取代（历史记录，引用不作恢复）。
    - [blocks: T1]
 
 4. **[parallel] Root `find` is hard-wall denied before spawn** — tag: `[implementation]`

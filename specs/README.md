@@ -14,6 +14,7 @@
 - `egress-preset-allowlist.md` — 出厂 defaults 清单（ADR-0104，扩表见 ADR-0107）
 - `egress-ssh-bridge.md` — SSH 走同一允许集；实现改为自带中继，禁止 socat 依赖（ADR-0107）
 - `egress-credential-sentinel.md` — sentinel 可选，0107 不自动启用（ADR-0105）
+- `worktree-unbound-ro-bind.md` — worktree 门禁 unbound bash 物理 ro-bind + EROFS 回灌，替代预测拦截（ADR-0109，supersedes ADR-0037 bash 预测条款）
 - `subagent-layers-worktree-deps.md` — subagent 三层 + worktree 项目依赖
 
 ### harness / 状态与传输

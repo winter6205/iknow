@@ -40,7 +40,10 @@ import {
   writeOut,
 } from "./session-io.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
-import { mainCheckoutOf } from "../harness/isolation/worktree-gate.js";
+import {
+  mainCheckoutOf,
+  type WorktreeGateReader,
+} from "../harness/isolation/worktree-gate.js";
 import { writeSituation } from "../harness/isolation/write-situation.js";
 import {
   renderTranscript,
@@ -180,6 +183,14 @@ export type ChatSessionOpts = {
    * （无 fs 档 → `/config` 提示未接线）。
    */
   fsMode?: FsModeContext;
+  /**
+   * issue 1059 (G3):worktree-on-mutate 活 holder —— host 传
+   * `BuiltEngine.worktreeOnMutate`（引擎装配透出的单例，bash 门禁读同一个
+   * 它）。chat 的 verify 围栏经 `chatVerifyFenceOpts` 透传给 runVerifyLoop，
+   * 与 bash 工具面在 UNBOUND_FENCE 轴上判定同源。缺席（ask / 未接线的 host
+   * 注入缝）→ key 不产出，verify 走 V1 baseline，逐字节不变。
+   */
+  worktreeOnMutate?: WorktreeGateReader;
   /**
    * D-α T3: graph 装配快照（`BuiltEngine.graphAssembly`）。chat 的一个
    * round = 一条用户查询行；host 在跑 run() 之前拍一次快照，翻键因此
@@ -335,6 +346,10 @@ export type ChatLineContext = {
   /** ADR-0092 / SC13: filesystem isolation 档 holder(由 runChatSession
    *  透传,/config 翻它)。 */
   fsMode?: FsModeContext;
+  /** issue 1059 (G3): worktree-on-mutate 活 holder(同
+   *  ChatSessionOpts.worktreeOnMutate,runChatSession 透传)。verify 围栏与
+   *  bash 门禁的 UNBOUND_FENCE 轴同源判定;缺席 → key 不产出。 */
+  worktreeOnMutate?: WorktreeGateReader;
   /** D-α T3: graph 装配快照(由 runChatSession 透传;查询行开跑前拍一次)。 */
   graphAssembly?: GraphAssembly;
   /**
@@ -1307,11 +1322,17 @@ function chatPrefetchExcludeIds(ctx: ChatLineContext): Set<string> {
  * 即 registry 喂给 bash 的 `projectDir`），叶子取 `state.conversationId`。
  * 宿主是 null/缺失（ask / tests / 未接线）→ 不产出该 key，verify-loop 回退
  * 进程 `tmpdir()`（fallback 不是目标态）。
+ *
+ * issue 1059 (G3)：`worktreeOnMutate` holder 与上面三缝正交、按 key 独立
+ * 产出 —— 它是引擎装配透出的单例（chat host 传 `built.worktreeOnMutate`），
+ * verify 围栏经 `makeDefaultRunVerify` 与 bash 工具面在 UNBOUND_FENCE 轴上
+ * 判定同源。缺席（host 未透传 / 旧注入缝）→ key 不出现，逐字节不变。
  */
 function chatVerifyFenceOpts(ctx: ChatLineContext): {
   readonly fsMode?: FsIsolationMode;
   readonly homeRoot?: string;
   readonly tmpDir?: string;
+  readonly worktreeOnMutate?: WorktreeGateReader;
 } {
   const holder = ctx.fsMode;
   const tmpDir = resolveSessionFenceTmp({
@@ -1323,6 +1344,9 @@ function chatVerifyFenceOpts(ctx: ChatLineContext): {
       ? {}
       : { fsMode: holder.get(), homeRoot: homedir() }),
     ...(tmpDir !== undefined ? { tmpDir } : {}),
+    ...(ctx.worktreeOnMutate !== undefined
+      ? { worktreeOnMutate: ctx.worktreeOnMutate }
+      : {}),
   };
 }
 
@@ -2483,6 +2507,11 @@ function assembleChatSessionContext(input: {
     // writable_main，与改造前 byte-equal）。
     ...(opts.isolationOn !== undefined
       ? { isolationOn: opts.isolationOn }
+      : {}),
+    // issue 1059 (G3)：门禁 holder —— 缺席（ask / host 未透传 built 句柄）
+    // → 键不出现，chatVerifyFenceOpts 不产出 worktreeOnMutate。
+    ...(opts.worktreeOnMutate !== undefined
+      ? { worktreeOnMutate: opts.worktreeOnMutate }
       : {}),
     // spec skill-index-increment T3：可加载技能面 —— 缺席（ask / 旧测试）
     // → slash 技能名落未知命令，行为逐字节不变。可变：rebind 换血见

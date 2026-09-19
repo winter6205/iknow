@@ -71,6 +71,25 @@ export interface BwrapFenceOptions {
    * envArgs 机制（与 `--clearenv` 共用：clearenv 在前、setenv 在后）。
    */
   readonly egress?: EgressFenceSpec;
+  /**
+   * issue 1059 UNBOUND_FENCE:worktree isolation gate ON 且 wave root 是主
+   * checkout(未绑定 task worktree)时,调用方给出主 checkout 绝对路径 ——
+   * fence 发射 `--ro-bind <mainCheckout> <mainCheckout>`,把「主仓只读」从
+   * 预测拦截升级为物理保证。紧跟其后再 `--bind <tmpPad> <tmpPad>` 把会话
+   * tmp pad 盖回可写(ADR 裁定:scratch 写一律走 pad)。
+   *
+   * **mount 序**:整段落所有可写 bind 之后、`--proc`/`--dev-bind` 之前
+   * (last-mount-wins 末端),所以即便 cwdReadonly / 工作区档写白名单先出现,
+   * ro 覆盖恒在其上、pad rw 恒在 ro 之上。
+   *
+   * 缺席 = 不发任何一段(bound / gate-OFF 会话 argv 逐字节不变)。
+   * `mainCheckout` 空串 = typed fail-loud —— 静默跳过是放宽方向(主仓恢复
+   * 可写且调用方无信号),与 `workspaceHomeRoBindArgs` 同纪律。
+   */
+  readonly unboundFence?: {
+    readonly mainCheckout: string;
+    readonly tmpPad?: string;
+  };
 }
 
 export interface BwrapFence {
@@ -143,6 +162,29 @@ function workspaceMountArgs(
 }
 
 /**
+ * issue 1059 UNBOUND_FENCE argv 段:`--ro-bind <mainCheckout>` 后立即
+ * `--bind <tmpPad>`(pad 缺席/空串 → 不发 pad 段,是收紧方向:scratch 写
+ * 落到只读主仓被 EROFS 挡下,有信号、无静默洞)。
+ */
+function unboundFenceArgs(
+  unboundFence: BwrapFenceOptions["unboundFence"]
+): string[] {
+  if (unboundFence === undefined) return [];
+  const { mainCheckout, tmpPad } = unboundFence;
+  if (mainCheckout.length === 0) {
+    throw new ToolExecutionError(
+      "bwrap: unbound fence requires mainCheckout; refusing to build a fence that would silently leave the main checkout writable"
+    );
+  }
+  return [
+    "--ro-bind",
+    mainCheckout,
+    mainCheckout,
+    ...bindArgs(tmpPad),
+  ];
+}
+
+/**
  * Global-mode argv (ADR-0092): bind the host root `/` first (real paths
  * visible and writable), then re-bind the system prefixes read-only, then the
  * read-only cwd override, then proc/dev.
@@ -161,7 +203,12 @@ function workspaceMountArgs(
  *    block and the cwd override — see `workspaceMountArgs` for its order;
  *  - the egress socket bind (`--bind <unixSocket> <unixSocket>`) sits
  *    between workspaceMounts and cwdReadonly/proc/dev — it is the last
- *    writable mount in the chain (ADR-0097 / T4);
+ *    writable mount of the pre-cwd block (ADR-0097 / T4);
+ *  - the unbound fence block (issue 1059: `--ro-bind <mainCheckout>` then
+ *    `--bind <tmpPad>`) sits at the very end of the mount chain, after
+ *    cwdReadonly and before proc/dev — the read-only main checkout is the
+ *    physical guarantee that replaces prediction-based bash blocking, and
+ *    the session tmp pad re-binds writable on top of it;
  *  - there is no session-tmp bind at guest `/tmp` and no per-root writable
  *    bind list — the session tmp keeps its host path (ADR-0092).
  */
@@ -169,7 +216,8 @@ function baseArgs(
   cwd: string,
   cwdReadonly: boolean,
   workspaceMounts: readonly string[],
-  egressBind: readonly string[]
+  egressBind: readonly string[],
+  unboundBind: readonly string[]
 ): string[] {
   return [
     "--unshare-user-try",
@@ -199,9 +247,12 @@ function baseArgs(
     // socket CONNECT,见 egress/session.ts buildInnerBridgeScript) 连该
     // socket → 把 127.0.0.1:3128 的流量转回宿主代理(ADR-0107:无 socat)。
     ...egressBind,
-    // cwdReadonly: EROFS override after the `/` bind (与工作区档三层正交,
-    // 即使工作区档三层叠加,cwdReadonly 仍在最末;后者按字面是 mount 序最末)。
+    // cwdReadonly: EROFS override after the `/` bind (与工作区档三层正交;
+    // issue 1059 后 unbound 段若在场,它坐在本行与 proc/dev 之间的最末段)。
     ...(cwdReadonly ? ["--ro-bind", cwd, cwd] : []),
+    // issue 1059 UNBOUND_FENCE:主 checkout ro 覆盖 + 会话 tmp pad rw 复盖,
+    // 恒在 mount 链最末(所有可写 bind 之后、--proc/--dev-bind 之前)。
+    ...unboundBind,
     "--proc",
     "/proc",
     "--dev-bind",
@@ -296,7 +347,9 @@ export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
         opts.workspaceRoot,
         opts.tmpRoot
       ),
-      egressBindArgs(opts.egress)
+      egressBindArgs(opts.egress),
+      // issue 1059:UNBOUND_FENCE 段(mount 链最末,proc/dev 之前)。
+      unboundFenceArgs(opts.unboundFence)
     ),
     // --clearenv must precede every --setenv so the sandbox inherits only the
     // whitelisted entries, never the host env (bwrap otherwise copies the whole

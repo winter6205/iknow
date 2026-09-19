@@ -60,6 +60,8 @@ export const CI_EXCLUDES: readonly string[] = [
   // ADR-0092 Round 2 SC11/SC12：工作区档围栏的真实 bwrap 行为认证
   // （home 读成功 / home 写 EROFS / 两处白名单可写 + S2 五类越界写）。
   "tests/harness/aci/bash-workspace-mode-fence.test.ts",
+  // ADR-0109：unbound 主 checkout 物理 ro-bind 围栏（真 spawn bwrap）。
+  "tests/harness/aci/bash-unbound-fence.test.ts",
   // ADR-0092（全局档）：闭世界读根测试已归档，同族不变式改由本文件认证。
   "tests/harness/aci/bash-global-mode-visibility.test.ts",
   "tests/harness/aci/bash-main-session-fence-tmp.test.ts",

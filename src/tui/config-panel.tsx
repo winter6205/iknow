@@ -37,6 +37,7 @@ import type {
   FsIsolationMode,
   FsModeContext,
 } from "../harness/sandbox/fs-mode.js";
+import type { WorktreeGateReader } from "../harness/isolation/worktree-gate.js";
 import { tuiPalette } from "./theme.js";
 import { BORDER_CYCLE_MS, flowBorderColor } from "./designs/_color.js";
 
@@ -203,7 +204,7 @@ export function configRowKindFor(focusedIndex: 0 | 1 | 2): ConfigRowKind {
  * 无 hint + read-only（T1 形态，`row()` 渲染「(仅显示)」）。
  */
 function worktreeRowDisplay(props: {
-  readonly worktreeOnMutateHolder?: { readonly get: () => boolean };
+  readonly worktreeOnMutateHolder?: WorktreeGateReader;
   readonly worktreeOn?: boolean;
 }): {
   readonly value: string;
@@ -243,9 +244,7 @@ export function ConfigPicker(props: {
    * 在场时该行读 `holder.get()` 现值（每次 render 现读）且 Enter 激活；缺席
    * 时退回 `worktreeOn` 静态快照（T1 形态，仍为 read-only）。
    */
-  readonly worktreeOnMutateHolder?: {
-    readonly get: () => boolean;
-  };
+  readonly worktreeOnMutateHolder?: WorktreeGateReader;
   /**
    * worktree 门禁启动期快照（T1 display-only；T3 由 holder 在场时覆盖）。
    * undefined → "OFF" 占位。

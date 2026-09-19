@@ -21,6 +21,10 @@ import {
   runInSandbox,
   wrapCommandWithInnerBridge,
 } from "../sandbox/index.js";
+import {
+  unboundFenceMainCheckout,
+  type WorktreeGateReader,
+} from "../isolation/worktree-gate.js";
 
 /**
  * 验证执行体: command → 沙箱执行 → { exitCode, stdout, stderr }。
@@ -76,12 +80,24 @@ export function makeDefaultRunVerify(opts: {
    * 恒在)。**生产装配 TODO**:hub / chat-session 装配点本票后接。
    */
   readonly egressPolicy?: EgressPolicyInput;
+  /**
+   * issue 1059:worktree-on-mutate holder(只读视图)。本闭包由 verify-loop
+   * 每轮现造 → 工厂期 `get()` 即该轮快照(与上方 fsMode 快照同 vintage)。
+   * gate ON ∧ cwd 是主 checkout → 验证命令 fence 叠 UNBOUND_FENCE ro-bind
+   * 段,与 bash 工具面判定同源(G3)。缺席 → 不发段(V1 baseline 字节不变)。
+   */
+  readonly worktreeOnMutate?: WorktreeGateReader;
 }): RunVerifyFn {
   // 注意:调用方(verify-loop.ts)每轮现造本闭包,故此处工厂期快照 == 该轮
   // 的 per-call 快照 —— 与 bash handler 入口 D2 snapshot 同 vintage。
   const tmpDir = opts.tmpDir ?? tmpdir();
   const fsMode = opts.fsMode ?? "global";
   const homeRoot = opts.homeRoot;
+  // issue 1059:工厂期读 holder 一次 —— 与 fsMode 快照同 vintage。
+  const unboundMainCheckout = unboundFenceMainCheckout({
+    gateOn: opts.worktreeOnMutate?.get() === true,
+    root: opts.cwd,
+  });
   const fsPolicy = createFsPolicy({ tmpDir, mode: fsMode });
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   // ADR-0097 / T7:模块级 session 单例 —— 首次调用时 lazy start。
@@ -138,6 +154,15 @@ export function makeDefaultRunVerify(opts: {
         : {}),
       // ADR-0097 / T7:egress 缝(per-call fence argv,module-level session)。
       ...(session !== undefined ? { egress: session.spec } : {}),
+      // issue 1059:UNBOUND_FENCE 段 —— 与 bash 工具面同段同序(G3)。
+      ...(unboundMainCheckout !== undefined
+        ? {
+            unboundFence: {
+              mainCheckout: unboundMainCheckout,
+              tmpPad: tmpDir,
+            },
+          }
+        : {}),
     });
     return runInSandbox({
       fence,

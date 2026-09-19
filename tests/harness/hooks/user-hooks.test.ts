@@ -286,14 +286,19 @@ describe("createUserHookRouter — SC3: PreWrite 只拦 classify=mutate", () => 
     });
   });
 
-  it("bash classify=mutate 的命令可被拦（真 classifyCall）", () => {
+  it("issue 1059 反转：bash 任意写形 classify=read，PreWrite 永不再经 classify 拦 bash；fail-closed 形仍 mutate", () => {
     const hook = makeHook({
       enabled: true,
       rules: [{ id: "w", event: "PreWrite", reason: "no writes" }],
     });
-    assertBlocked(hook, "bash", { command: "echo x > f.txt" }, "no writes");
-    // bash 只读命令（read）不拦
+    // 翻转后 bash 写保护是物理 fence（bwrap --ro-bind），预测式 classify
+    // 不再把写形 bash 判为 mutate → PreWrite 不拦。
+    assertPassthrough(hook, "bash", { command: "echo x > f.txt" });
+    assertPassthrough(hook, "bash", { command: "touch f.txt" });
     assertPassthrough(hook, "bash", { command: "ls -la" });
+    // 真 classifyCall 的 fail-closed 面:非字符串/空白 command 仍 mutate。
+    assertBlocked(hook, "bash", { command: "   " }, "no writes");
+    assertBlocked(hook, "bash", { command: 42 }, "no writes");
   });
 
   it("PreWrite 上 pattern matcher 在 classify 通过后再匹配", () => {

@@ -503,6 +503,11 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // 启动期一次性读，硬要求 9）。OFF → rebind 通知走 `writable_main` 旧形
     // 态；ON → rebind 后根是树形 → `writable_tree`，与改造前 byte-equal。
     isolationOn: built.isolationOn ?? false,
+    // issue 1059:门禁活 holder 单例 —— chat REPL 的 verify 围栏与 build-engine
+    // bash 工厂读同一个实例（G3 同源）；缺席 → 键不出现，字节不变。
+    ...(built.worktreeOnMutate !== undefined
+      ? { worktreeOnMutate: built.worktreeOnMutate }
+      : {}),
     // #152 T5:thinking 可见面(env flag → chat-session → format-run-human)。
     // env.ts SSOT;默认 off。
     showThinking: bundle.env.chat.showThinking,

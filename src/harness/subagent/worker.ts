@@ -36,6 +36,7 @@ import { loadIknowSettings } from "../../config/settings.js";
 import {
   FS_MODE_ENV_KEY,
   WORKSPACE_ROOT_ENV_KEY,
+  WORKTREE_GATE_ON_ENV_KEY,
   resolveWorkspaceRoot,
 } from "../../config/workspace-root.js";
 import {
@@ -67,7 +68,10 @@ import {
   createPluginHooksFromCatalog,
   createUserHookRouter,
 } from "../hooks/index.js";
-import { classifyCall } from "../isolation/worktree-gate.js";
+import {
+  classifyCall,
+  type WorktreeGateReader,
+} from "../isolation/worktree-gate.js";
 import { createIknowSystemResolver } from "../identity/index.js";
 import { createGitSnapshotProvider } from "../identity/git-snapshot.js";
 import { createSkillScanner, type PluginSkillDir } from "../skill/scanner.js";
@@ -259,6 +263,14 @@ export interface CreateWorkerDepsOptions {
    */
   readonly fsMode?: import("../sandbox/fs-mode.js").FsModeContext;
   /**
+   * issue 1059:worktree-on-mutate 开关的进程内重建 holder —— 生产入口由
+   * `worktreeGateOptionFromEnv(process.env)` 从父进程写的
+   * `IKNOW_WORKTREE_GATE_ON`("1"/"0")造。worker 无门禁 executor,此 holder
+   * 只喂 bash 工厂的 UNBOUND_FENCE 判定;键缺席 / 非法 → 键缺席 = bash 工厂
+   * 无 holder → 永不发段(legacy 父进程字节不变)。
+   */
+  readonly worktreeOnMutate?: WorktreeGateReader;
+  /**
    * #556 T2: 来自 envelope.role 的 seam 副本 (runSubagentWorker 透传)。
    * worker 装配期查 catalog 取 body 注入 persona 段; 缺省 / 未知 → 走 V1
    * baseline (不入 persona 段, 不注入额外 deny, 详见 plan T2 防御契约)。
@@ -395,6 +407,22 @@ export function fsModeOptionFromEnv(
 ): { readonly fsMode?: FsModeContext } {
   const mode = parseFsModeFlag(env[FS_MODE_ENV_KEY]);
   return mode !== undefined ? { fsMode: createFsModeContext(mode) } : {};
+}
+
+/**
+ * issue 1059:与 `fsModeOptionFromEnv` 同纪律的开关过界重建 —— 值域是
+ * "1"/"0" 两枚,非法值 → 键缺席(下游 spread-guard 丢弃,等同通道未接),
+ * 不在 worker 里猜父进程意图。
+ */
+export function worktreeGateOptionFromEnv(
+  env: Readonly<Record<string, string | undefined>>
+): {
+  readonly worktreeOnMutate?: WorktreeGateReader;
+} {
+  const token = env[WORKTREE_GATE_ON_ENV_KEY];
+  if (token !== "1" && token !== "0") return {};
+  const on = token === "1";
+  return { worktreeOnMutate: Object.freeze({ get: () => on }) };
 }
 
 function resolveWorkerFenceTmp(
@@ -643,6 +671,10 @@ export async function createWorkerRuntime(
     // `homedir()` 一次 —— 与主链同款:测试缝必须能改到围栏源端。
     fsMode: opts.fsMode,
     homeRoot: userHome,
+    // issue 1059:开关 holder 透传给 worker bash 工厂(缺席 = 不发段)。
+    ...(opts.worktreeOnMutate !== undefined
+      ? { worktreeOnMutate: opts.worktreeOnMutate }
+      : {}),
     ...(bashMode !== undefined ? { bashMode } : {}),
     ...(workerFenceTmp !== undefined ? { tmpDir: workerFenceTmp } : {}),
     ...todoLedgerRegistryOpts(opts.todoLedger),
@@ -1046,7 +1078,10 @@ export function priorMessagesFromEnvelope(
  */
 export interface WorkerTranscriptIO {
   readonly loadMessages: () => Promise<
-    | { readonly status: "present"; readonly messages: ReadonlyArray<AnthropicNativeMessage> }
+    | {
+        readonly status: "present";
+        readonly messages: ReadonlyArray<AnthropicNativeMessage>;
+      }
     | { readonly status: "absent" }
   >;
   readonly appendMessages: (
@@ -1086,10 +1121,13 @@ async function wireWorkerTranscript(opts: {
   readonly deps: LoopEngineDeps;
   readonly ioFactory: WorkerTranscriptIOFactory | undefined;
   readonly segments: ReadonlyArray<AnthropicNativeMessage>;
-}): Promise<{
-  readonly deps: LoopEngineDeps;
-  readonly priorMessages: ReadonlyArray<AnthropicNativeMessage> | undefined;
-} | undefined> {
+}): Promise<
+  | {
+      readonly deps: LoopEngineDeps;
+      readonly priorMessages: ReadonlyArray<AnthropicNativeMessage> | undefined;
+    }
+  | undefined
+> {
   const transcriptPath = opts.env.transcriptPath;
   if (transcriptPath === undefined || transcriptPath.length === 0) {
     return undefined;
@@ -1097,7 +1135,9 @@ async function wireWorkerTranscript(opts: {
   if (opts.ioFactory === undefined) {
     // 装配漏接线（测试直调 / 旧 cli）：账不写，任务照跑 —— 与旧形态一致，
     // 但留一行 stderr 观测，不静默丢「该写没写」。
-    log("envelope carries transcriptPath but no transcript IO injected; worker transcript disabled");
+    log(
+      "envelope carries transcriptPath but no transcript IO injected; worker transcript disabled"
+    );
     return undefined;
   }
   const io = opts.ioFactory({
@@ -1121,9 +1161,7 @@ async function wireWorkerTranscript(opts: {
     return { deps, priorMessages: loaded.messages };
   }
   const seed =
-    opts.segments.length > 0
-      ? [...opts.segments, taskEvent]
-      : [taskEvent];
+    opts.segments.length > 0 ? [...opts.segments, taskEvent] : [taskEvent];
   await io.appendMessages(seed);
   return {
     deps,
@@ -1204,9 +1242,7 @@ export async function runWorkerOnce(opts: {
       segments: envelopePrior ?? [],
     });
     const runDeps = wired?.deps ?? baseRunDeps;
-    const priorMessages = wired
-      ? wired.priorMessages
-      : envelopePrior;
+    const priorMessages = wired ? wired.priorMessages : envelopePrior;
     const { result } = await run(
       env.task,
       runDeps,
@@ -1397,6 +1433,8 @@ export async function runSubagentWorker(
     // fs 隔离档 → worker 的 bash 工厂 holder。缺席 / 非法 → 键缺席 =
     // 全局档(bash handler 入口缺省回落),legacy 父进程(不写该键)字节不变。
     ...fsModeOptionFromEnv(process.env),
+    // issue 1059:父进程 IKNOW_WORKTREE_GATE_ON → 本进程 holder(缺席 = 不发段)。
+    ...worktreeGateOptionFromEnv(process.env),
     // T5 (ADR-0071 / SC8 + L2): 父 manager
     // 已经在 spawn 期替这个 taskId 建好 `<父会话文件夹>/subagents/agent-<taskId>.jsonl`,
     // 把 traceFilePath + taskId 经 envelope 透传过来 ——

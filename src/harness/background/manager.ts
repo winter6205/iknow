@@ -195,6 +195,16 @@ export interface BackgroundSpawnRequest {
    * 不填此字段**;只有 manager.spawn 与 spawn 工厂之间的内部约定。
    */
   readonly egressSpec?: EgressFenceSpec;
+  /**
+   * issue 1059:UNBOUND_FENCE 段 —— bash handler 入口冻结的主 checkout +
+   * 会话 tmp pad 透传,defaultBackgroundSpawn 装配 fence 时消费(与前台
+   * fence 同段同序,G3 集合相等)。缺席 = 不发段,bound / gate-OFF 的
+   * 后台 argv 逐字节不变。
+   */
+  readonly unboundFence?: {
+    readonly mainCheckout: string;
+    readonly tmpPad?: string;
+  };
 }
 
 export type BackgroundSpawnResult =
@@ -347,6 +357,9 @@ export async function defaultBackgroundSpawn(
     // egressSpec 在此消费（socket --bind + spec.env --setenv 由 bwrap 单点
     // 发射）；缺席 = 纯断网 baseline。
     ...(egressSpec !== undefined ? { egress: egressSpec } : {}),
+    // issue 1059:UNBOUND_FENCE 段透传 —— 与前台 buildForegroundFence 同值
+    // 同序(前后台集合相等,G3);缺席 = 不发段,后台 argv 逐字节不变。
+    ...(req.unboundFence !== undefined ? { unboundFence: req.unboundFence } : {}),
   });
   // ADR-0045 T8(a): consumer 形态下(manager.spawn 调用方)不再直调
   // node:child_process —— server.spawn 长生命周期 task-handle 协议暴露

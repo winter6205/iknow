@@ -23,8 +23,10 @@ import {
   FS_MODE_ENV_KEY,
   PRODUCT_ROOT_ENV_KEY,
   WORKSPACE_ROOT_ENV_KEY,
+  WORKTREE_GATE_ON_ENV_KEY,
 } from "../../config/workspace-root.js";
 import type { FsModeContext } from "../sandbox/fs-mode.js";
+import type { WorktreeGateReader } from "../isolation/worktree-gate.js";
 import type { SubAgentSpawn } from "./manager.js";
 
 const requireFromSpawn = createRequire(import.meta.url);
@@ -170,6 +172,13 @@ export interface DefaultSubAgentSpawnOpts {
    * 该键,子进程 env 与今日字节一致。
    */
   readonly fsMode?: FsModeContext;
+  /**
+   * issue 1059:父会话 worktree-on-mutate 活开关 holder → 子进程
+   * `IKNOW_WORKTREE_GATE_ON`(同 fsMode 的 spawn-time 读法:运行期面板翻转
+   * 对下一次 spawn 生效)。holder 在场即写线("1"/"0" 都写,键缺席 = 通道
+   * 未接 → worker 永不发 UNBOUND_FENCE 段,字节不变)。
+   */
+  readonly worktreeGate?: WorktreeGateReader;
 }
 
 export function createDefaultSubAgentSpawn(
@@ -181,6 +190,7 @@ export function createDefaultSubAgentSpawn(
     sessionRoot,
     installRoot,
     fsMode,
+    worktreeGate,
   } = opts;
   const resolvedTraceDir = resolveSubagentTraceDir(opts.traceDir);
   return (_def, _taskId, _stdinPayload) => {
@@ -192,6 +202,8 @@ export function createDefaultSubAgentSpawn(
     // `/config` 翻档对下一次 spawn 生效(镜像 sessionRoot 的 spawn-time 读法);
     // holder 缺席 → 不写该 env 键(legacy 子进程 env 字节不变)。
     const fsModeToken = fsMode?.get();
+    // issue 1059:开关同 fsMode 在 spawn 期读,holder 缺席 → 不写该 env 键。
+    const worktreeGateOn = worktreeGate?.get();
     const child = spawn(
       process.execPath,
       resolveSubagentWorkerSpawnArgs({
@@ -212,6 +224,9 @@ export function createDefaultSubAgentSpawn(
             : {}),
           ...(fsModeToken !== undefined
             ? { [FS_MODE_ENV_KEY]: fsModeToken }
+            : {}),
+          ...(worktreeGateOn !== undefined
+            ? { [WORKTREE_GATE_ON_ENV_KEY]: worktreeGateOn ? "1" : "0" }
             : {}),
         },
         ...(cwd !== undefined ? { cwd } : {}),

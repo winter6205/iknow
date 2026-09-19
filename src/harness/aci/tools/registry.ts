@@ -47,6 +47,7 @@ import {
 } from "../last-read-ledger.js";
 import type { SubAgentManager } from "../../subagent/manager.js";
 import type { SubagentCapacityHolder } from "../../subagent/manager.js";
+import type { WorktreeGateReader } from "../../isolation/worktree-gate.js";
 import type { BackgroundTaskManager } from "../../background/manager.js";
 import type { McpManager } from "../../mcp/manager.js";
 import type { AgentCatalogResolver } from "../../subagent/catalog.js";
@@ -434,6 +435,13 @@ export interface CreateDefaultAciRegistryOptions {
    */
   readonly homeRoot?: string;
   /**
+   * issue 1059:worktree-on-mutate 活开关 holder(只读视图)—— bash 工厂
+   * 透传,handler 入口与 waveRoot 同 vintage 读一次。gate ON ∧ waveRoot 是
+   * 主 checkout → 前台 / 后台 fence 叠 UNBOUND_FENCE 物理 ro-bind 段;
+   * 缺席 → 永不发段(V1 baseline 逐字节不变)。
+   */
+  readonly worktreeOnMutate?: WorktreeGateReader;
+  /**
    * ADR-0097 / T7:egress 允许集策略工厂 —— 透传给 bash 工厂
    * (`createBashTool({ egressPolicyFactory })`)。生产由 build-engine 经
    * `createEgressPolicyFactory({ settings })` 构造;缺席 = 本次装配无
@@ -647,6 +655,10 @@ export function createDefaultAciRegistry(
         // (V1 baseline)。homeRoot 装配层从 userHome 派生。
         ...(opts.fsMode !== undefined ? { fsMode: opts.fsMode } : {}),
         ...(opts.homeRoot !== undefined ? { homeRoot: opts.homeRoot } : {}),
+        // issue 1059:UNBOUND_FENCE holder 透传(缺席 = 不发段)。
+        ...(opts.worktreeOnMutate !== undefined
+          ? { worktreeOnMutate: opts.worktreeOnMutate }
+          : {}),
         // ADR-0097 / T7:egress 数据面 + 批准 ask 面。二者都由装配层
         // (build-engine)注入;缺席 = 无缝断网 / 无 ask 面 fail-closed,
         // 与 worker / hub-less 入口的「非交互 = 拒绝」语义一致。

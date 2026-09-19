@@ -71,6 +71,7 @@ import {
 import type { ProjectDepProvisioner } from "./worktree-deps.js";
 import type {
   TaskWorktreeInfo,
+  WorktreeGateReader,
   WorktreeProvisionContext,
   WorktreeRemoval,
   WorktreeRemoveContext,
@@ -778,6 +779,12 @@ export type SessionHubOptions = {
        */
       skillCatalog?: SkillCatalog;
       skillRescanner?: SkillRescanner;
+      /**
+       * issue 1059 (G3)：`BuiltEngine.worktreeOnMutate` 活 holder 透出缝。
+       * 生产 `buildHarnessEngine` 在场；测试注入缝可省略（缺席 → verify
+       * 调用点不产出该 key，围栏走 V1 baseline，逐字节不变）。
+       */
+      worktreeOnMutate?: WorktreeGateReader;
     }
   >;
   /**
@@ -821,6 +828,8 @@ type HubEngineEntry = EngineBundle & {
   /** SC8（slash 侧当场热）：装配期 skill catalog + rescan 缝（见 buildEngine）。 */
   skillCatalog?: SkillCatalog;
   skillRescanner?: SkillRescanner;
+  /** issue 1059 (G3)：worktree-on-mutate 活 holder（见 buildEngine 缝）。 */
+  worktreeOnMutate?: WorktreeGateReader;
 };
 
 // -- stop-reason persistence decision (decideCheckpointPersist) --------------
@@ -951,6 +960,15 @@ export class SessionHub {
    * deps 路径缺席 → `listSkills` 退缓存 catalog（旧行为逐字节不变）。
    */
   private skillRescanner: SkillRescanner | undefined;
+  /**
+   * issue 1059 (G3)：worktree-on-mutate 活 holder —— 引擎装配面
+   * （`BuiltEngine.worktreeOnMutate`）透出的单例，bash 工具门禁与本 hub 的
+   * verify 围栏读同一个它，两执行面在 UNBOUND_FENCE 轴上判定同源。
+   * 懒取形态与 `skillRescanner` 同款（per-root `getOrBuildEngine` 与兜底
+   * lazy `ensureDeps` 两处一起写）；注入 deps 宿主（TUI）未走 hub 装配 →
+   * 缺席 → verify 调用点不产出该 key（V1 baseline，逐字节不变）。
+   */
+  private worktreeOnMutate: WorktreeGateReader | undefined;
   private mcpManager: McpManager | undefined;
   private aciCatalog: AciCatalog | undefined;
   private mcpHome: string | undefined;
@@ -1010,6 +1028,8 @@ export class SessionHub {
           /** SC8：装配期 skill 面（catalog + rescan 缝）透出。 */
           skillCatalog?: SkillCatalog;
           skillRescanner?: SkillRescanner;
+          /** issue 1059 (G3)：worktree-on-mutate 活 holder（见 buildEngine 缝）。 */
+          worktreeOnMutate?: WorktreeGateReader;
         }
       >)
     | undefined;
@@ -1969,6 +1989,17 @@ export class SessionHub {
                           projectDir: this.store.getProjectDir(),
                           conversationId,
                         })
+                      ),
+                      // issue 1059 (G3)：worktree-on-mutate 活 holder —— 引擎
+                      // 装配面懒取的**同一个**单例（bash 门禁读的就是它）。
+                      // verify 围栏与 bash 在 UNBOUND_FENCE 轴上判定同源；
+                      // holder 经 options 透传，`makeDefaultRunVerify` 在本次
+                      // verify 闭环构造时现读 get() 一次（工厂期快照，与
+                      // fsMode 值面同款）。缺席（注入 deps 宿主 / 未装配门禁）
+                      // → key 不出现，verify-loop 走 V1 baseline，逐字节不变。
+                      ...presentFields(
+                        "worktreeOnMutate",
+                        this.worktreeOnMutate
                       ),
                       // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
                       // (command 缺失/空串时分类器接管, spec Objective);缺席
@@ -3263,6 +3294,11 @@ export class SessionHub {
       // 兜底路径发布）→ serve 绑根后 `listSkills` 恒空且无 rescan 缝。
       // `EngineBundle` 之外的可选面，经 structural assignability 透传。
       ...skillFaceOf(built),
+      // issue 1059 (G3)：门禁 holder 同为 `EngineBundle` 之外的装配面，
+      // 缺席（测试注入缝）不落键。
+      ...(built.worktreeOnMutate
+        ? { worktreeOnMutate: built.worktreeOnMutate }
+        : {}),
     };
     this.engineByRoot.set(root, entry);
     this.activeEngineRoot = root;
@@ -3272,6 +3308,9 @@ export class SessionHub {
     this.autoMemory = this.autoMemory ?? built.autoMemory;
     this.overlayMemoryPrefetch =
       this.overlayMemoryPrefetch ?? built.overlayMemoryPrefetch;
+    // issue 1059 (G3)：holder 是全局门禁轴（非 per-root 面），首见即锚定；
+    // TUI 宿主经 `worktreeOnMutateHolder` 注入时各引擎本就是同一个实例。
+    this.worktreeOnMutate = this.worktreeOnMutate ?? built.worktreeOnMutate;
     return entry;
   }
 
@@ -3296,6 +3335,8 @@ export class SessionHub {
       catalog?: AciCatalog;
       skillCatalog?: SkillCatalog;
       skillRescanner?: SkillRescanner;
+      /** issue 1059 (G3)：`BuiltEngine.worktreeOnMutate` 全量视图字段。 */
+      worktreeOnMutate?: WorktreeGateReader;
     }
   > {
     if (!this.askUser) {
@@ -3570,6 +3611,8 @@ export class SessionHub {
     this.autoMemory = this.autoMemory ?? built.autoMemory;
     this.overlayMemoryPrefetch =
       this.overlayMemoryPrefetch ?? built.overlayMemoryPrefetch;
+    // issue 1059 (G3)：兜底 lazy 路径与 per-root 路径同源锚定门禁 holder。
+    this.worktreeOnMutate = this.worktreeOnMutate ?? built.worktreeOnMutate;
     // #356 High#4 (SC12/SC3):缓存 built.shutdown(组合句柄 mcpManager first →
     // subagentManager second)。serve 入口退出前经 hub.shutdown() 触发 —
     // cli.ts runServe 挂 registerShutdown(hub),进程退出时清理 MCP 连接 +

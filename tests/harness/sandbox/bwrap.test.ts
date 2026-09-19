@@ -11,6 +11,8 @@ import {
   READ_ONLY_SYSTEM_PATHS,
   createFsPolicy,
 } from "../../../src/harness/sandbox/fs-policy.js";
+import { ToolExecutionError } from "../../../src/harness/errors.js";
+import type { EgressFenceSpec } from "../../../src/harness/sandbox/egress/session.js";
 
 /**
  * ADR-0092 全局档 bwrap argv 形态。
@@ -212,5 +214,128 @@ describe("createBwrapFence — 全局档 argv 形态 (ADR-0092)", () => {
     );
     assert.ok(argv.includes("--die-with-parent"));
     assert.equal(assertTriple(argv, "--bind", "/", "host root bind"), 4);
+  });
+});
+
+// ── issue 1059 / ADR-0109:UNBOUND_FENCE 段 ──────────────────────────────────
+
+const MAIN = mkdtempSync(join(tmpdir(), "bwrap-unbound-main-"));
+const PAD = mkdtempSync(join(tmpdir(), "bwrap-unbound-pad-"));
+
+afterAll(() => {
+  rmSync(MAIN, { recursive: true, force: true });
+  rmSync(PAD, { recursive: true, force: true });
+});
+
+type UnboundSpec = {
+  readonly cwdReadonly?: boolean;
+  readonly egress?: boolean;
+  readonly unboundFence?: { mainCheckout: string; tmpPad?: string } | undefined;
+};
+
+function unboundArgv(spec: UnboundSpec): readonly string[] {
+  const fakeEgress: EgressFenceSpec = {
+    unixSocketPath: "/tmp/iknow-bwrap-unbound-test.sock",
+    sandboxLocalPort: 19099,
+    env: {},
+    innerBridgeScript: "",
+    relayAssetsDir: "/tmp/iknow-bwrap-unbound-relay",
+  };
+  return createBwrapFence({
+    command: "bash",
+    args: ["-c", "echo hi"],
+    fsPolicy: createFsPolicy({ tmpDir: TMP }),
+    env: { PATH: "/bin" },
+    cwd: TASK,
+    ...(spec.cwdReadonly ? { cwdReadonly: true } : {}),
+    ...(spec.egress ? { egress: fakeEgress } : {}),
+    ...(spec.unboundFence !== undefined
+      ? { unboundFence: spec.unboundFence }
+      : {}),
+  }).argv;
+}
+
+describe("createBwrapFence — UNBOUND_FENCE 段 (issue 1059)", () => {
+  it("emits --ro-bind main after every writable bind, then re-binds the tmp pad writable, all before --proc/--dev-bind", () => {
+    const argv = unboundArgv({ unboundFence: { mainCheckout: MAIN, tmpPad: PAD } });
+    const rootBindIdx = assertTriple(argv, "--bind", "/", "host root bind");
+    const roMainIdx = assertTriple(argv, "--ro-bind", MAIN, "unbound main ro-bind");
+    const padIdx = assertTriple(argv, "--bind", PAD, "tmp pad rw rebind");
+    const procIdx = argv.indexOf("--proc");
+    const devIdx = argv.indexOf("--dev-bind");
+    assert.ok(procIdx > 0 && devIdx > procIdx);
+    // last-mount-wins 合同:rw 打底 → 主 checkout 覆盖为 ro → pad 再翻回 rw → proc/dev
+    assert.ok(rootBindIdx < roMainIdx, "main ro-bind follows the writable host-root bind");
+    assert.ok(roMainIdx < padIdx, "the tmp pad rebind sits ON TOP of the main ro-bind");
+    assert.ok(padIdx < procIdx, "the whole unbound block precedes --proc/--dev-bind");
+    // exactly one of each — no duplicate segments
+    assert.equal(tripleIndices(argv, "--ro-bind", MAIN).length, 1);
+    assert.equal(tripleIndices(argv, "--bind", PAD).length, 1);
+  });
+
+  it("with cwdReadonly the unbound block still lands last (after the cwd ro override, before proc/dev)", () => {
+    const argv = unboundArgv({
+      cwdReadonly: true,
+      unboundFence: { mainCheckout: MAIN, tmpPad: PAD },
+    });
+    const roCwdIdx = assertTriple(argv, "--ro-bind", TASK, "cwd ro override");
+    const roMainIdx = assertTriple(argv, "--ro-bind", MAIN, "main ro-bind");
+    const padIdx = assertTriple(argv, "--bind", PAD, "pad rw rebind");
+    const procIdx = argv.indexOf("--proc");
+    assert.ok(roCwdIdx < roMainIdx, "cwdReadonly mount precedes the unbound block");
+    assert.ok(roMainIdx < padIdx && padIdx < procIdx);
+  });
+
+  it("with an egress socket bind the unbound block lands after it (last writable mount stays inside the block)", () => {
+    const argv = unboundArgv({
+      egress: true,
+      unboundFence: { mainCheckout: MAIN, tmpPad: PAD },
+    });
+    const socketIdx = assertTriple(
+      argv,
+      "--bind",
+      "/tmp/iknow-bwrap-unbound-test.sock",
+      "egress socket bind"
+    );
+    const roMainIdx = assertTriple(argv, "--ro-bind", MAIN, "main ro-bind");
+    const padIdx = assertTriple(argv, "--bind", PAD, "pad rw rebind");
+    const procIdx = argv.indexOf("--proc");
+    assert.ok(socketIdx < roMainIdx, "egress bind precedes the unbound block");
+    assert.ok(roMainIdx < padIdx && padIdx < procIdx);
+  });
+
+  it("absent unboundFence → argv byte-identical to the pre-flip baseline", () => {
+    const withOpt = unboundArgv({});
+    const baseline = fenceArgv();
+    assert.deepEqual([...withOpt], [...baseline]);
+    assert.equal(withOpt.includes(MAIN), false);
+    assert.equal(withOpt.includes(PAD), false);
+  });
+
+  it("empty mainCheckout → typed fail-loud (silent skip would leave the main checkout writable)", () => {
+    assert.throws(
+      () => unboundArgv({ unboundFence: { mainCheckout: "", tmpPad: PAD } }),
+      (err: unknown) =>
+        err instanceof ToolExecutionError &&
+        /mainCheckout/.test(err.message) &&
+        /silently leave the main checkout writable/.test(err.message),
+      "unbound fence with an empty mainCheckout must refuse to build"
+    );
+  });
+
+  it("absent / empty tmpPad → ro-bind segment only, no pad bind (tightening direction, never a silent hole)", () => {
+    for (const spec of [
+      { mainCheckout: MAIN },
+      { mainCheckout: MAIN, tmpPad: "" },
+      { mainCheckout: MAIN, tmpPad: undefined },
+    ]) {
+      const argv = unboundArgv({ unboundFence: spec });
+      assertTriple(argv, "--ro-bind", MAIN, "main ro-bind still emitted");
+      assert.equal(
+        tripleIndices(argv, "--bind", PAD).length,
+        0,
+        `no pad bind may be emitted for ${JSON.stringify(spec)}`
+      );
+    }
   });
 });

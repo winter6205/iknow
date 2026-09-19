@@ -13,6 +13,12 @@
  *     onto one adjudication; failures stay typed and fail-closed).
  *   - OFF → byte-identical to today (gate transparent).
  *
+ * issue 1059 / ADR-0109: bash left the gate's enforcement surface — in the
+ * unbound state every string bash command passes and the main checkout is
+ * protected physically by the fence's `--ro-bind` (argv + EROFS reflow are
+ * pinned in tests/harness/sandbox/ and tests/harness/aci/). The clauses
+ * above apply to the remaining FILE_WRITE-class / root_flip semantics.
+ *
  * The git layer (`createTaskWorktree`) is unchanged and stays covered with
  * real git — it serves the session-api provisioner and the T4 ACI tool.
  */
@@ -37,6 +43,9 @@ import {
   taskWorktreeLabelOf,
   taskWorktreePath,
   taskWorktreeOwnerOf,
+  unboundFenceErofsGuidance,
+  unboundFenceBackgroundNotice,
+  unboundFenceMainCheckout,
   unboundMutateNotice,
   WORKTREE_ISOLATION_PREFIX,
 } from "../../../src/harness/isolation/worktree-gate.ts";
@@ -47,6 +56,9 @@ import {
   validateReadonlyCommand,
 } from "../../../src/harness/aci/tools/bash-readonly.ts";
 import { createLiveTaskRoot } from "../../../src/harness/session-roots.ts";
+// issue 1059: the EROFS guidance reuses the violation-prefix SSOT — pin it
+// from the same source, never a drifted literal.
+import { VIOLATION_PREFIXES } from "../../../src/harness/permission/prefixes.ts";
 import type {
   Executor,
   ToolCall,
@@ -515,154 +527,71 @@ describe("classifyCall", () => {
     );
   });
 
-  // Invariant (spec casual-ask-context-hygiene Does/classifyCall): the gate
-  // adjudicates "will this bash call write the workspace", NOT the readonly
-  // bash-mode table. Read-only allowlisted segments compose freely through
-  // pipes, `&&`, and stderr merges (`2>&1`); only workspace writes (file
-  // redirects, mutating commands) or unknown commands fail closed to mutate.
-  it("classifies bash by whether it writes the workspace", () => {
+  // issue 1059 / ADR-0109 FLIP: the gate no longer prediction-blocks bash in
+  // the unbound state. Write protection moved to the physical `--ro-bind`
+  // fence (argv assembly pinned in tests/harness/sandbox/bwrap.test.ts and
+  // tests/harness/aci/bash-unbound-fence.test.ts), so as far as classifyCall
+  // is concerned EVERY string command — writes, redirects, bare `&`,
+  // `sed -i`, unknown commands — classifies `read`. Only a blank or
+  // non-string command fails closed to `mutate`: it carries no provable
+  // intent to reason about at all. The old per-segment prediction table
+  // (classifyBashWorkspaceWrite) and its cd/sed read-arm tests were deleted
+  // here: the invariant they certified ("a predicted-write bash never
+  // executes") no longer exists — the filesystem fence answers that now.
+  it("classifies every string bash command as read; blank / non-string fail closed (issue 1059 flip)", () => {
     const read = (command: string) =>
       classifyCall({ id: "r", name: "bash", input: { command } });
-    const mutate = (command: string) =>
-      classifyCall({ id: "m", name: "bash", input: { command } });
+    const mutate = (input: unknown) =>
+      classifyCall({ id: "m", name: "bash", input: input as never });
 
-    // SC5 exact case: pipes + && + 2>&1 over read-only commands stay read.
+    // Former fail-closed prediction samples — ALL pass now (the main
+    // checkout is physically read-only inside the fence; real writes die
+    // with EROFS and get the guidance reflow instead).
+    expect(read("echo x > f.txt")).toBe("read");
+    expect(read("echo x >> f.txt")).toBe("read");
+    expect(read("touch new.txt")).toBe("read");
+    expect(read("mkdir d")).toBe("read");
+    expect(read("rm -rf build")).toBe("read");
+    expect(read("mv a b")).toBe("read");
+    expect(read("npm install")).toBe("read");
+    expect(read("git commit -m x")).toBe("read");
+    // unknown command → prediction-based fail-closed is retired
+    expect(read("somecustomtool --flag")).toBe("read");
+    // bare `&` background compound → retired too
+    expect(read("ls & touch new.txt")).toBe("read");
+    expect(read("ls & git push")).toBe("read");
+    expect(read("cd /main && sed -i 's/a/b/' README.md")).toBe("read");
+    expect(read("cd /main && echo x > f.txt")).toBe("read");
     expect(read("date '+%Y-%m-%d' && ls -la /tmp 2>&1 | head -30")).toBe(
       "read"
     );
-    expect(read("ls 2>&1")).toBe("read");
-    expect(read("ls 2>/dev/null")).toBe("read");
-    expect(read("ls &> /dev/null")).toBe("read");
-    expect(read("cat a.txt | grep x")).toBe("read");
-    expect(read("git status")).toBe("read");
-    expect(read("git diff")).toBe("read");
-    expect(read("ls -la src")).toBe("read");
-    expect(read("cat a.txt")).toBe("read");
-    expect(read("ls && cat b.txt; echo done")).toBe("read");
-    // T3 (plans/tui-durable-open.md sentence 3): `cd` + a read-only rest is a
-    // read. `cd` writes nothing itself, and every segment after it is still
-    // adjudicated on its own first token, so a write behind the cd
-    // (`cd <main> && rm -rf <main>`) stays a mutate. What a bare allow does
-    // NOT prove is path CONFINEMENT — after `cd /elsewhere` a later relative
-    // operand resolves outside the workspace. That is the bwrap fence's and
-    // the permission layer's question, not this classifier's.
+    // the issue #1059 misfire cohort (cd / curl / gh / sleep) must never
+    // receive a gate notice again
+    expect(read("curl -s https://example.invalid")).toBe("read");
+    expect(read("gh pr list")).toBe("read");
+    expect(read("sleep 3")).toBe("read");
     expect(read("cd /main && head -5 README.md")).toBe("read");
-    expect(read("cd /main && grep -n export README.md | head -3")).toBe("read");
-    expect(read("cd .. && head -5 README.md")).toBe("read");
-    expect(read("cd src && head -5 index.ts")).toBe("read");
-    // `sed` read forms: a quiet-mode script made only of line-range print
-    // items. The grammar is deliberately narrow — an unparsed sed script is
-    // not provably non-writing, because `sed -n '1w out.txt' f` writes a file
-    // with no `-i` in sight and `sed -n '1e cmd' f` spawns a command (both
-    // verified against GNU sed 4.9). Pattern-addressed reads (`/re/p`) and
-    // substitution previews are therefore mutate; `grep` / `head` remain the
-    // read paths for those.
-    expect(read("sed -n '1,20p' README.md")).toBe("read");
-    expect(read("cd /main && sed -n '1,20p' README.md")).toBe("read");
-    expect(read("cd /main && sed -n -e '1,20p' README.md")).toBe("read");
-    expect(read("sed -n --expression=1,20p README.md")).toBe("read");
-    expect(read("sed -n --expression 1,20p README.md")).toBe("read");
-    expect(read("sed -n -e '1,20p' -e '2,3p' README.md")).toBe("read");
-    expect(read("cd /main && sed -n '$p' README.md")).toBe("read");
-    expect(read("cd /main && sed -n '2,$p' README.md")).toBe("read");
-    expect(read("cd /main && sed -n '1,20p' README.md 2>/dev/null")).toBe(
+
+    // fail-closed residue: blank and non-string commands
+    expect(mutate({ command: "" })).toBe("mutate");
+    expect(mutate({ command: "   " })).toBe("mutate");
+    expect(mutate({ command: 42 })).toBe("mutate");
+    expect(mutate({ command: null })).toBe("mutate");
+    expect(mutate({})).toBe("mutate");
+  });
+
+  // ADR-0109 sub-decision 5: the flip is bash-only. root_flip and the
+  // FILE_WRITE family keep their pre-execution classification.
+  it("root_flip tools stay root_flip; create-worktree stays a control read (ADR-0109 sub-decision 5)", () => {
+    expect(classifyCall({ id: "f1", name: "enter-worktree", input: {} })).toBe(
+      "root_flip"
+    );
+    expect(classifyCall({ id: "f2", name: "exit-worktree", input: {} })).toBe(
+      "root_flip"
+    );
+    expect(classifyCall({ id: "f3", name: "create-worktree", input: {} })).toBe(
       "read"
     );
-    // KNOWN LIMITATION (pinned, not widened): `splitShellSegments` is not
-    // quote-aware, so a `;` INSIDE a quoted sed script splits the segment and
-    // the script's tail becomes an unknown command. `sed -n '1,20p;30,40p' f`
-    // therefore fails closed to mutate. Deny-by-default direction, and the
-    // model can split it into two `-e` scripts instead.
-    expect(mutate("cd /main && sed -n '1,20p;30,40p' README.md")).toBe(
-      "mutate"
-    );
-
-    // workspace writes → mutate
-    expect(mutate("echo x > f.txt")).toBe("mutate");
-    expect(mutate("echo x >> f.txt")).toBe("mutate");
-    expect(mutate("ls >> f.txt")).toBe("mutate");
-    expect(mutate("cat a.txt > b.txt")).toBe("mutate");
-    expect(mutate("rm -rf build")).toBe("mutate");
-    expect(mutate("mv a b")).toBe("mutate");
-    expect(mutate("touch new.txt")).toBe("mutate");
-    expect(mutate("mkdir d")).toBe("mutate");
-    expect(mutate("npm install")).toBe("mutate");
-    expect(mutate("git commit -m x")).toBe("mutate");
-    // bare `&` background compound → mutate: splitShellSegments does NOT
-    // split on bare `&`, so the second command would otherwise ride inside a
-    // policy-passing first segment and dodge both checks (review High fix).
-    expect(mutate("ls & touch new.txt")).toBe("mutate");
-    expect(mutate("ls & git push")).toBe("mutate");
-    expect(mutate("ls & npm install")).toBe("mutate");
-    // unknown command → fail-closed mutate
-    expect(mutate("somecustomtool --flag")).toBe("mutate");
-    // T3 fail-closed arm: every in-place / file-writing sed form stays mutate.
-    // `-i` is refused in all its spellings (glued `.bak` suffix included), and
-    // a script carrying sed's `w` (write) / `e` (execute) commands is refused
-    // even without `-i` — both were verified against GNU sed 4.9 to touch the
-    // filesystem / spawn a command from a `-n` read form.
-    expect(mutate("cd /main && sed -i 's/a/b/' README.md")).toBe("mutate");
-    expect(mutate("cd /main && sed -i.bak 's/a/b/' README.md")).toBe("mutate");
-    expect(mutate("sed --in-place 's/a/b/' README.md")).toBe("mutate");
-    expect(mutate("sed --in-place=.bak 's/a/b/' README.md")).toBe("mutate");
-    expect(mutate("sed -ni '1,2p' README.md")).toBe("mutate");
-    expect(mutate("sed -in '1,2p' README.md")).toBe("mutate");
-    expect(mutate("sed -n '1w out.txt' README.md")).toBe("mutate");
-    expect(mutate("sed -n '1e echo pwned' README.md")).toBe("mutate");
-    expect(mutate("sed -n 's/a/b/w out.txt' README.md")).toBe("mutate");
-    expect(mutate("sed -n 's/a/b/e' README.md")).toBe("mutate");
-    // Everything the narrow grammar cannot parse is denied, not guessed at:
-    // pattern addressing, substitution previews, `-f` script files, `--version`
-    // (prints usage without touching the operand), and a script token that is
-    // really a typo'd command would all run with semantics this classifier
-    // has not read.
-    expect(mutate("cd /main && sed -n '/export/p' README.md")).toBe("mutate");
-    expect(mutate("cd /main && sed 's/old/new/' README.md")).toBe("mutate");
-    expect(mutate("cd /main && sed -n 's/old/new/p' README.md")).toBe("mutate");
-    expect(mutate("sed -n 'gp' README.md")).toBe("mutate");
-    expect(mutate("sed -n grep -n x README.md")).toBe("mutate");
-    expect(mutate("sed -n -f script.sed README.md")).toBe("mutate");
-    // Glued and stdin `-f` spellings are the same script-from-file: GNU sed
-    // tolerates `-fFILE` and `-f-`, and a piped `w <path>` script reached
-    // through them writes with no `-i` — reading them as a print grammar would
-    // be the fail-open this clause exists to close.
-    expect(mutate("sed -n -f- 1,2p README.md")).toBe("mutate");
-    expect(mutate("sed -n -f/tmp/scr.sed 1,2p README.md")).toBe("mutate");
-    expect(mutate("printf 'w /tmp/x' | sed -n -f- 1,2p README.md")).toBe(
-      "mutate"
-    );
-    expect(mutate("sed --version")).toBe("mutate");
-    expect(mutate("sed -n")).toBe("mutate");
-    // `cd` changes the meaning of later RELATIVE operands, so it is a read
-    // only when this classifier can still see the whole command; a redirect
-    // on the cd segment itself, or a write in any later segment, fails closed.
-    expect(mutate("cd /main > out.txt")).toBe("mutate");
-    expect(mutate("cd /main && rm -rf /main")).toBe("mutate");
-    expect(mutate("cd /main && tee out.txt")).toBe("mutate");
-    expect(mutate("cd /main && npm install")).toBe("mutate");
-    expect(mutate("cd /main && echo x > f.txt")).toBe("mutate");
-    // `cd` without an operand is shell-noise, not a read: fail closed
-    // (`cd; ls` gives an empty operand segment).
-    expect(mutate("cd; ls")).toBe("mutate");
-    expect(mutate("cd && ls")).toBe("mutate");
-    // Fence identity markers are still unknown tokens → mutate.
-    expect(mutate("cd -- /main && head -5 README.md")).toBe("mutate");
-    expect(mutate("cd --help")).toBe("mutate");
-    expect(mutate("cd -")).toBe("mutate");
-    expect(mutate("cd ~ && head -5 README.md")).toBe("mutate");
-    // Newlines are separators for this classifier (the same split the hard-wall
-    // scan uses): `head a\nrm -rf b` is two segments, and the second one is an
-    // unknown command, so the compound fails closed instead of riding out on
-    // the first segment's read verdict.
-    expect(mutate("head -5 README.md\nrm -rf /main")).toBe("mutate");
-    expect(read("head -5 README.md\ncat package.json")).toBe("read");
-    // empty / non-string command → fail-closed mutate
-    expect(
-      classifyCall({ id: "e", name: "bash", input: { command: "" } })
-    ).toBe("mutate");
-    expect(
-      classifyCall({ id: "7", name: "bash", input: { command: 42 } })
-    ).toBe("mutate");
   });
 
   // SC6 guard: the readonly bash-mode SSOT is a separate consumer with
@@ -742,6 +671,118 @@ describe("classifyCall", () => {
     expect(classifyCall({ id: "bash-undef", name: "bash", input: {} })).toBe(
       "mutate"
     );
+  });
+});
+
+// -- unbound fence helpers (issue 1059 / ADR-0109) ----------------------------
+
+describe("unboundFenceMainCheckout — UNBOUND_FENCE state predicate", () => {
+  it("gate OFF → undefined (fence shape byte-identical to pre-flip)", () => {
+    expect(
+      unboundFenceMainCheckout({ gateOn: false, root: "/main" })
+    ).toBeUndefined();
+  });
+
+  it("gate ON + main-checkout root → the root itself (fence must ro-bind it)", () => {
+    expect(unboundFenceMainCheckout({ gateOn: true, root: "/main" })).toBe(
+      "/main"
+    );
+  });
+
+  it("gate ON + task-worktree-shaped root → undefined (bound session stays byte-identical)", () => {
+    expect(
+      unboundFenceMainCheckout({
+        gateOn: true,
+        root: "/main/.iknow/worktrees/conv-1",
+      })
+    ).toBeUndefined();
+  });
+});
+
+describe("unboundFenceErofsGuidance — EROFS reflow builder (ADR-0109)", () => {
+  it("stderr without an EROFS line → undefined (caller keeps the result byte-identical)", () => {
+    expect(
+      unboundFenceErofsGuidance("bash: line 1: frobnicate: not found\n")
+    ).toBeUndefined();
+    expect(unboundFenceErofsGuidance("")).toBeUndefined();
+  });
+
+  it("typed [fs_denied] prefix + create-worktree + re-issue-this-call semantics + attempted paths", () => {
+    const guidance = unboundFenceErofsGuidance(
+      "touch: cannot touch '/repo/f.txt': Read-only file system\n"
+    );
+    expect(guidance).toBeDefined();
+    // prefix comes from the VIOLATION_PREFIXES SSOT, never a drifted literal
+    expect(guidance!.startsWith(`${VIOLATION_PREFIXES.fsDenied} `)).toBe(true);
+    expect(guidance).toContain("create-worktree");
+    expect(guidance).toContain(CREATE_WORKTREE_TOOL_HINT);
+    expect(guidance).toContain("re-issue this same command");
+    expect(guidance).toContain("next wave of tool calls in this run");
+    // the attempted path rides verbatim — the model sees WHICH path was hit
+    expect(guidance).toContain("/repo/f.txt");
+    // ADR-0037 §7.5 wording discipline
+    expect(guidance!.toLowerCase()).not.toContain("next turn");
+  });
+
+  it(".git-targeted EROFS gets the distinct git-metadata wording (ADR-0109 子决策 4)", () => {
+    const guidance = unboundFenceErofsGuidance(
+      "fatal: Unable to create '/repo/.git/index.lock': Read-only file system\n"
+    );
+    // path clue rides verbatim
+    expect(guidance).toContain("/repo/.git/index.lock");
+    // 文案区分:gitdir 命中给专属指引(先建树、在 task 树提交),
+    // 不与普通文件写共用含糊文案。
+    expect(guidance).toContain("git metadata");
+    expect(guidance).toContain("git command from inside the task tree");
+    expect(guidance).not.toContain("re-issue this same command");
+  });
+
+  it("relative `.git/...` paths are detected; `.gitignore` / `.github` are not", () => {
+    expect(
+      unboundFenceErofsGuidance(
+        "fatal: could not lock .git/HEAD: Read-only file system"
+      )
+    ).toContain("git metadata");
+    expect(
+      unboundFenceErofsGuidance(
+        "touch: cannot touch '/repo/.gitignore': Read-only file system"
+      )
+    ).not.toContain("git metadata");
+    expect(
+      unboundFenceErofsGuidance(
+        "touch: cannot touch '/repo/.github/workflows': Read-only file system"
+      )
+    ).not.toContain("git metadata");
+  });
+
+  it("caps the attempted-path lines at 5 and reports the remainder count", () => {
+    const lines = Array.from(
+      { length: 7 },
+      (_, i) => `touch '/repo/f${i}.txt': Read-only file system`
+    );
+    const guidance = unboundFenceErofsGuidance(lines.join("\n"));
+    expect(guidance).toContain("f4.txt");
+    expect(guidance).not.toContain("f5.txt");
+    expect(guidance).not.toContain("f6.txt");
+    expect(guidance).toContain("(+2 more EROFS lines)");
+  });
+
+  it("non-EROFS lines in mixed stderr are not echoed as attempted paths", () => {
+    const guidance = unboundFenceErofsGuidance(
+      "some unrelated noise\nls: cannot open '/repo/x': Permission denied\ntouch '/repo/y': Read-only file system"
+    );
+    expect(guidance).toContain("/repo/y");
+    expect(guidance).not.toContain("Permission denied");
+  });
+});
+
+describe("unboundFenceBackgroundNotice — background preflight notice (ADR-0109)", () => {
+  it("[fs_denied]-prefixed, names create-worktree, English-only copy", () => {
+    const notice = unboundFenceBackgroundNotice();
+    expect(notice.startsWith(`${VIOLATION_PREFIXES.fsDenied} `)).toBe(true);
+    expect(notice).toContain("create-worktree");
+    expect(notice).toContain("Read-only file system");
+    expect(notice.toLowerCase()).not.toContain("next turn");
   });
 });
 
@@ -930,53 +971,66 @@ describe("createWorktreeIsolationExecutor", () => {
     expect(calls).toHaveLength(0);
   });
 
-  // T3 acceptance (plans/tui-durable-open.md, T1 sentence 3): with isolation
-  // ON and the session still unbound, reading the main checkout through
-  // `cd <main> && <read>` must reach the tool — ADR-0037 §1 keeps read paths
-  // on the main checkout — while any write behind the same `cd`, and any
-  // unknown first token, still hits the unbound-mutate notice verbatim.
-  it("T3 acceptance — unbound session runs `cd <main> && head/sed -n …` but still blocks `cd <main> && sed -i …` and unknown tokens", async () => {
+  // issue 1059 / ADR-0109 — the executor-face counterpart of the flip: in
+  // the unbound state the gate does NOT prediction-block any bash call (the
+  // write question moved to the physical `--ro-bind` fence; argv-level
+  // coverage lives in tests/harness/sandbox/bwrap.test.ts and
+  // tests/harness/aci/bash-unbound-fence.test.ts). The gate's remaining
+  // enforcement here is FILE_WRITE-class blocking with the verbatim
+  // unboundMutateNotice, control tools (create-worktree) passing through,
+  // and zero provisioning on the blocked path.
+  it("issue 1059 acceptance — unbound session passes ALL bash through (writes included) but still blocks write_file without provisioning", async () => {
     const bashCall = (id: string, command: string): ToolCall => ({
       id,
       name: "bash",
       input: { command },
     });
     const { inner, calls } = fakeInner();
+    let provisioned = 0;
     const gate = createWorktreeIsolationExecutor({
       enabled: { get: () => true },
       liveTaskRoot: createLiveTaskRoot("/main"),
       provision: async () => {
-        throw new Error("must not provision for reads");
+        provisioned += 1;
+        return "/wt";
       },
       inner,
     });
 
-    const reads = await gate.executeAll([
-      bashCall("r1", "cd /main && head -5 README.md"),
-      bashCall("r2", "cd /main && sed -n '1,20p' README.md"),
+    // write forms, sed -i, unknown tokens, bare `&` — none are blocked any
+    // more; every one reaches the tool (the fence, not the gate, owns the
+    // write answer)
+    const passed = await gate.executeAll([
+      bashCall("b1", "cd /main && head -5 README.md"),
+      bashCall("b2", "echo x > f.txt"),
+      bashCall("b3", "sed -i 's/a/b/' README.md"),
+      bashCall("b4", "frobnicate --now"),
+      bashCall("b5", "ls & touch new.txt"),
     ]);
-    expect(reads.map((r) => r.kind)).toEqual(["ok", "ok"]);
-    // the read calls reached the tools — they are not isolation-blocked
+    expect(passed.map((r) => r.kind)).toEqual(["ok", "ok", "ok", "ok", "ok"]);
     expect(calls.flatMap((c) => c.calls.map((x) => x.id))).toEqual([
-      "r1",
-      "r2",
+      "b1",
+      "b2",
+      "b3",
+      "b4",
+      "b5",
     ]);
 
-    const blocked = await gate.executeAll([
-      bashCall("m1", "cd /main && sed -i 's/a/b/' README.md"),
-      bashCall("m2", "cd /main && frobnicate --now"),
+    // the control tool of the unbind path stays reachable (create-worktree
+    // is how the session gets a writable root — the gate must never eat it)
+    const control = await gate.executeAll([
+      { id: "cw", name: "create-worktree", input: { name: "task-x" } },
     ]);
-    for (const result of blocked) {
-      expect(result.kind).toBe("execution_failed");
-    }
-    // existing unbound-mutate notice, verbatim (pinned by the text test above)
+    expect(control[0]!.kind).toBe("ok");
+
+    // FILE_WRITE-class mutates keep the pre-execution block, verbatim
+    // notice, zero provisioning, inner never reached for them
+    const before = calls.length;
+    const blocked = await gate.executeAll([writeCall("m1")]);
+    expect(blocked[0]!.kind).toBe("execution_failed");
     expect(blocked[0]!.message).toBe(unboundMutateNotice());
-    expect(blocked[1]!.message).toBe(unboundMutateNotice());
-    // no write behind the cd reached the tools
-    expect(calls.flatMap((c) => c.calls.map((x) => x.id))).toEqual([
-      "r1",
-      "r2",
-    ]);
+    expect(provisioned).toBe(0);
+    expect(calls).toHaveLength(before); // the write_file call never reached inner
   });
 
   it("unboundMutateNotice is actionable: conditional + re-issue-this-call semantics, plus the SC7 substring bans (spec casual-ask-context-hygiene SC7, amended 2026-09-08)", () => {

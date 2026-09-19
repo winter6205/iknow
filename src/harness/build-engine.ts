@@ -78,6 +78,7 @@ import {
   mainCheckoutOf,
   isTaskWorktreePath,
   type MutateClass,
+  type WorktreeGateReader,
   type WorktreeIsolationHostOpts,
   type WorktreeOnMutateHolder,
 } from "./isolation/worktree-gate.js";
@@ -569,6 +570,13 @@ export type BuiltEngine = EngineBundle & {
    */
   readonly isolationOn?: boolean;
   /**
+   * issue 1059:worktree-on-mutate 活 holder 单例 —— 门禁 `enabled`、主/ask
+   * registry 的 bash UNBOUND_FENCE、subagent spawn env 与 host verify 装配
+   * 共用**同一个**实例。透出给 hub 的 verify 缝,使 verify fence 与门禁在
+   * 此轴上判定一致(G3)。缺席(注入 deps 形态)→ 消费面不发段。
+   */
+  readonly worktreeOnMutate?: WorktreeGateReader;
+  /**
    * T2 / plans/worktree-exclusive-lock.md / ADR-0070 — enter-worktree
    * 占用锁档判定结果（装配期一次性读取，`resolveWorktreeExclusive(settings)`，
    * ADR-0037 §5 硬要求 9：开关只在启动加载点读一次，会话根改绑不重载）。
@@ -763,6 +771,12 @@ export async function buildHarnessEngine(
   const isolationHost = opts.worktreeIsolation;
   const isolationEnabled =
     isolationHost !== undefined && resolveWorktreeOnMutate(settings);
+  // issue 1059:holder 单例上移 —— 门禁 `enabled`、bash registry 的
+  // UNBOUND_FENCE holder、subagent spawn 的 env 快照、verify 消费面共用
+  // **同一个**活 holder(缺席时是包裹启动读数的冻结 holder)。若各消费点
+  // 各自调用 `resolveWorktreeOnMutateSource`,holder 缺席路径会建出多个
+  // 独立 cell:面板翻一个、其余不动,门禁与物理围栏判定分裂。
+  const worktreeOnMutateSource = resolveWorktreeOnMutateSource(opts, settings);
   // T2 / plans/worktree-exclusive-lock.md / ADR-0070:enter-worktree
   // 占用锁开关的装配期解析 —— 与 `isolationEnabled` 同款 fail-closed 读取点
   // （缺失 / 非 true → false）。**仅在这里读一次**（ADR-0037 §5 硬要求 9）：
@@ -928,6 +942,10 @@ export async function buildHarnessEngine(
             // 判据是 `fsMode?.get() !== undefined`(spawn.ts),`undefined` 与
             // 「key 缺席」同义 —— 省掉一个三元分支(S5 ratchet 零容忍)。
             fsMode: opts.fsMode,
+            // issue 1059:开关同样 spawn 期读 holder 过界(IKNOW_WORKTREE_GATE_ON)
+            // —— worker bash 围栏的 UNBOUND_FENCE 判定必须与父会话同源,
+            // 透传 holder 单例本身,运行期面板翻转对下一次 spawn 生效。
+            worktreeGate: worktreeOnMutateSource,
           }),
           // T8 (D6): manager 的父 sandboxRoot 上界也走活根 —— 同源逻辑,
           // getter 形态让 buildWorkerPayload 入口读 cell current value,
@@ -1218,6 +1236,8 @@ export async function buildHarnessEngine(
       // persona / state 却改不动工作区档围栏的 home ro-bind 源端。
       fsMode: opts.fsMode,
       homeRoot: userHome,
+      // issue 1059:UNBOUND_FENCE holder 透传给 bash 工厂(单例,见上)。
+      worktreeOnMutate: worktreeOnMutateSource,
       // T3:只读放行项目身份文件所在的主仓（ADR-0037 §1 允许只读主仓）。registry
       // 把它透给 read_file / grep / glob，也传入 bash 工厂作闭世界读白名单成员
       // （ADR-0037 §9.2 #6：registry.ts 的 bash 工厂装配把它接进 createBashTool
@@ -1380,6 +1400,8 @@ export async function buildHarnessEngine(
       // 构造路径取本层 `userHome`。
       fsMode: opts.fsMode,
       homeRoot: userHome,
+      // issue 1059:UNBOUND_FENCE holder(ask 路径,与主构造同一单例)。
+      worktreeOnMutate: worktreeOnMutateSource,
       ...(isolationEnabled ? { projectIdentityRoot } : {}),
       ...(graphAssembly ? { graphAssembly } : {}),
       ...(opts.liveGraphLedger
@@ -1599,6 +1621,8 @@ export async function buildHarnessEngine(
         // homeRoot 同取本层 `userHome`。
         fsMode: opts.fsMode,
         homeRoot: userHome,
+        // issue 1059:UNBOUND_FENCE holder(worker 派生面,同一单例)。
+        worktreeOnMutate: worktreeOnMutateSource,
       }).catalog.all()
     : [];
   // #337:动态 registry 包装 —— 让 inner executor 能解析 registerExternal
@@ -1759,7 +1783,7 @@ export async function buildHarnessEngine(
   const loopExecutor =
     isolationHost !== undefined
       ? createWorktreeIsolationExecutor({
-          enabled: resolveWorktreeOnMutateSource(opts, settings),
+          enabled: worktreeOnMutateSource,
           liveTaskRoot,
           provision: wrappedProvision!,
           // T4: passthrough 锚定交给 provision 按会话裁决（own task tree →
@@ -2277,7 +2301,7 @@ function createEngineSkillRescanner(input: {
 function resolveWorktreeOnMutateSource(
   opts: BuildEngineOpts,
   settings: IknowSettings
-): { readonly get: () => boolean } {
+): WorktreeGateReader {
   return (
     opts.worktreeOnMutateHolder ??
     createWorktreeOnMutateHolder(resolveWorktreeOnMutate(settings))

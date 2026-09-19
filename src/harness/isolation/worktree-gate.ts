@@ -42,12 +42,7 @@ import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { errorMessage } from "../errors.js";
-import { validateSegmentPolicy } from "../aci/tools/bash-readonly.js";
-import {
-  firstToken,
-  splitShellSegments,
-  stripQuoteLayer,
-} from "../permission/hard-walls.js";
+import { VIOLATION_PREFIXES } from "../permission/prefixes.js";
 import { FILE_WRITE_TOOL_NAMES } from "../aci/tools/symbol-mutate.js";
 import type { LiveTaskRoot } from "../session-roots.js";
 import type {
@@ -116,6 +111,85 @@ export function unboundMutateNotice(): string {
     `to put this session on a writable root, then re-issue this same call — it ` +
     `will land in the new root on the next wave of tool calls in this run ` +
     `(no auto-provisioning).`
+  );
+}
+
+/**
+ * issue 1059 — EROFS feedback for the UNBOUND_FENCE state. A bash command
+ * that tried to write the (physically read-only) main checkout fails inside
+ * the fence with `Read-only file system` in stderr; this builder turns that
+ * into one actionable guidance line: the typed `[fs_denied]` prefix
+ * (VIOLATION_PREFIXES SSOT), the state explanation, the create-worktree
+ * unbind path (same ACI-tool hint as the block notice), re-issue guidance,
+ * and the attempted-path clues — the raw stderr lines that carried the
+ * EROFS error (capped, so the model sees WHICH paths were hit). When a clue
+ * targets git metadata (a `.git` path), the action sentence is the distinct
+ * gitdir wording from ADR-0109 子决策 4 (build the tree first, run the git
+ * command from the task tree) instead of the plain-file re-issue text — one
+ * contract, never a shared vague notice. Returns undefined when stderr shows
+ * no EROFS line: the caller then leaves the result byte-identical (never
+ * silent, never noisy).
+ *
+ * The guidance rides in the ok-envelope stderr (F4 ssh-hostkey precedent),
+ * NOT a typed failure: `categorizeResult` only counts `execution_failed`
+ * kinds, so appending here surfaces the state to the model without opening
+ * a new violation-counting tier (DESIGN item 4).
+ */
+const EROFS_UNBOUND_PATTERN = /Read-only file system/;
+
+/**
+ * gitdir path clue: a `.git` path segment bounded on both sides (slash,
+ * quote, bracket, whitespace, comma, colon, or a line edge). The trailing
+ * boundary keeps `.gitignore` / `.github` from a false hit.
+ */
+const GIT_META_PATH_PATTERN = /(^|[\\/[\s"',(=:])\.git($|[\\/)\]\s"',:])/;
+
+function gitMetadataHit(lines: readonly string[]): boolean {
+  return lines.some((line) => GIT_META_PATH_PATTERN.test(line));
+}
+
+export function unboundFenceErofsGuidance(stderr: string): string | undefined {
+  const lines = stderr
+    .split("\n")
+    .filter((line) => EROFS_UNBOUND_PATTERN.test(line));
+  if (lines.length === 0) return undefined;
+  const shown = lines.slice(0, 5);
+  const rest = lines.length - shown.length;
+  const action = gitMetadataHit(shown)
+    ? `This write targets git metadata (a .git path) of the read-only main ` +
+      `checkout: call the ${CREATE_WORKTREE_TOOL_HINT} first, then run the same ` +
+      `git command from inside the task tree — it will land in that tree's own ` +
+      `gitdir on the next wave of tool calls in this run. `
+    : `To write, call the ${CREATE_WORKTREE_TOOL_HINT} ` +
+      `to put this session on a writable root, then re-issue this same command — it ` +
+      `will land in the new root on the next wave of tool calls in this run. `;
+  return (
+    `${VIOLATION_PREFIXES.fsDenied} the workspace is read-only in this session: ` +
+    `worktree isolation is ON and this session is not yet bound to a task worktree, ` +
+    `so the main checkout is mounted read-only inside the sandbox fence and the writes ` +
+    `above failed at the filesystem layer. ${action}` +
+    `Attempted paths (from stderr): ${shown.join(" | ")}` +
+    (rest > 0 ? ` (+${rest} more EROFS lines)` : "")
+  );
+}
+
+/**
+ * issue 1059 (review repair M1) — the background spawn carries the same
+ * physical ro-bind fence, but a detached task's stderr never reaches the
+ * tool result, so the EROFS guidance cannot ride there at runtime. The
+ * state is instead disclosed on the spawn receipt (preflight notice,
+ * appended only in the UNBOUND_FENCE state; bound / gate-OFF receipts stay
+ * byte-identical). A workspace write surfaces verbatim as
+ * “Read-only file system” in the task log; the exit is the same
+ * create-worktree path.
+ */
+export function unboundFenceBackgroundNotice(): string {
+  return (
+    `${VIOLATION_PREFIXES.fsDenied} preflight: the main checkout is mounted ` +
+    `read-only for this background command (worktree isolation ON, session ` +
+    `unbound); writes to the workspace fail inside the task log with ` +
+    `“Read-only file system”. To write, call the ${CREATE_WORKTREE_TOOL_HINT} ` +
+    `first and spawn this command again from the task tree.`
   );
 }
 
@@ -400,350 +474,6 @@ const ROOT_FLIP_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Classify one bash command by whether it writes the workspace. A command is
- * `read` only if EVERY top-level segment (split on newlines, `;`, `&&`, `||`,
- * `|`) passes the readonly command policy AND its redirects write nothing to
- * the filesystem AND it spawns no bare-`&` background job. Fail-closed:
- * unknown commands, mutating commands, any `>` / `>>` redirect to a real
- * file, and any bare `&` classify `mutate`.
- *
- * Redirect rules (the delta vs the readonly bash-mode table, which rejects
- * ALL `>`): stderr→stdout merges and /dev/null sinks are pure stream plumbing
- * — `2>&1`, `2>/dev/null`, `1>&2`, `> /dev/null`, `&> /dev/null` keep the
- * segment `read`; any other `>` / `>>` target means the command's output
- * lands in a workspace file → `mutate` (e.g. `echo x > f.txt`).
- *
- * Bare-`&` rule: `splitShellSegments` splits only on `;` `&&` `||` `|`, so in
- * `ls & touch new.txt` the mutating second command rides inside one segment
- * that the policy check would pass on its first token alone. Any `&` that is
- * not part of a redirect token is therefore a background compound → mutate.
- *
- * Deliberately NOT `validateReadonlyCommand`: that validator is the SSOT for
- * `bashMode === "readonly"` (bash.ts) and fail-closes against `2>&1` / pipes
- * composition — a much stricter question ("is this provably side-effect-free
- * in readonly mode") than the gate's ("does this call write the workspace").
- * Complexity guard (ACR): the two semantics stay in separate functions; the
- * gate borrows the segment splitter and the readonly command policy via
- * `segmentIsPolicyReadonly` so the shared whitelist cannot drift, and puts
- * its own `cd` / `sed` read arms in `segmentIsGateReadonly` in front of it so
- * those widenings never reach readonly mode.
- */
-export function classifyBashWorkspaceWrite(command: string): "read" | "mutate" {
-  const segments = splitBashSegments(command);
-  if (segments.length === 0) return "mutate";
-  return segments.every(
-    (segment) =>
-      segmentIsPolicyReadonly(segment) &&
-      segmentRedirectsNowhere(segment) &&
-      segmentHasNoBareBackground(segment)
-  )
-    ? "read"
-    : "mutate";
-}
-
-/**
- * Segment splitter for the workspace-write question: newlines first (per
- * ADR-0068 「换行只作分段符」), then `splitShellSegments` for `;` / `&&` /
- * `||` / `|`.
- *
- * Why the gate splits newlines even though `splitShellSegments` does not:
- * without it `head a\nrm -rf b` is ONE segment whose first token is `head`,
- * so a mutating second line rides out on the first line's read verdict —
- * the same fail-open shape the bare-`&` rule closes, with a newline instead
- * of `&`. `splitForDangerousScan` (hard-walls.ts) already splits this way for
- * the hard-wall scan; the readonly-mode validator keeps newline-as-metachar
- * semantics so its existing assertions stay green, and this gate does not
- * widen that table.
- */
-function splitBashSegments(command: string): string[] {
-  const normalized = command.replace(/\r\n?/g, "\n");
-  return normalized.split("\n").flatMap((line) => splitShellSegments(line));
-}
-
-/**
- * Reuse the readonly-mode command policy (allowlist + find/sort/git flag
- * tables) for a single segment: true when the segment's command would be
- * accepted by `validateSegmentPolicy`, false when it throws (execution
- * agents, non-allowlisted commands, mutating git subcommands / flags).
- * Unknown commands → false → fail-closed mutate upstream.
- *
- * Two gate-only widenings sit in front of the shared lookup — `cd` and
- * provably-read `sed` — because both are read paths an unbound session needs
- * on the main checkout (ADR-0037 §1) that the readonly-MODE table refuses
- * outright. They are NOT pushed into that table: `validateReadonlyCommand`
- * answers a different, stricter question, and widening it would relax
- * readonly mode (see the SC6 guard in the gate tests). Gate-only rules live
- * in `segmentIsGateReadonly` so the two consumers cannot drift into each
- * other by accident.
- */
-function segmentIsPolicyReadonly(segment: string): boolean {
-  if (segmentIsGateReadonly(segment)) return true;
-  try {
-    validateSegmentPolicy(segment, segment);
-    return true;
-  } catch {
-    // EXIT: segment is not provably read-only for the policy tables (unknown
-    // command, execution agent, mutating git form) → false → mutate upstream.
-    return false;
-  }
-}
-
-/**
- * Gate-only read rules, checked before the shared policy lookup. Every arm
- * must be provably non-writing on its own; anything the rule cannot read
- * falls through to the shared (deny-by-default) lookup rather than guessing.
- *
- *   - `cd <one operand>`: writes nothing. A bare allow is sound for THIS
- *     classifier because the segment is never the whole story — every later
- *     segment is classified on its own first token, so `cd <main> && rm -rf
- *     <main>` still fails closed on the `rm`. What a bare allow does NOT
- *     prove is path confinement: `cd /elsewhere` re-points later RELATIVE
- *     operands. That question belongs to the bwrap fence / permission layer,
- *     not to "does this command write the workspace", so admitting it here
- *     does not widen the write yes/no. `cd` with zero operands, `cd -`,
- *     `cd --`, `cd ~`, `cd --help` all fall through (unknown/multi token) and
- *     stay mutate.
- *   - `sed` read forms: see `isSedReadSegment`.
- */
-function segmentIsGateReadonly(segment: string): boolean {
-  const tokens = segment.trim().split(/\s+/);
-  const token = firstToken(segment);
-  if (token.length === 0) return false;
-  if (token === "cd") return isCdReadSegment(tokens);
-  // EXIT: every other command goes through the shared policy tables below.
-  if (token === "sed") return isSedReadSegment(tokens);
-  return false;
-}
-
-/**
- * `cd` is a read when it carries exactly one operand that is not a shell
- * identity marker: `cd /main`, `cd ..`, `cd src`. Everything else
- * (`cd`, `cd; ls`, `cd -`, `cd --`, `cd ~`) is not a command this classifier
- * has read → mutate. The token check is textual, exactly like the rest of the
- * policy tables: quoted operands (`cd 'a b'`) are over-split by whitespace and
- * therefore fail CLOSED, which is the safe direction.
- */
-function isCdReadSegment(tokens: ReadonlyArray<string>): boolean {
-  if (tokens.length !== 2) return false;
-  const operand = tokens[1]!;
-  if (operand.length === 0) return false;
-  if (/^[-~]/u.test(operand)) return false;
-  // EXIT: `$VAR` would need expansion to know the target; the gate does not
-  // expand, so an unreadable operand is a mutate.
-  return !operand.includes("$");
-}
-
-/**
- * `sed` read rule: quiet mode (`-n` / `--quiet` / `--silent`), script given
- * inline (positionally, `-e`, or `--expression=`), and EVERY command in that
- * script a line-range print (`Xp` / `X,Yp` / `$p` / combinations).
- *
- * Why the grammar has to be this narrow: `-i` is not the only way sed writes.
- * Verified against GNU sed 4.9 — `sed -n '1w out.txt' f` creates a file,
- * `sed -n '1e touch p' f` spawns a command, and `sed -n 's/a/b/w out.txt' f`
- * does both from inside a substitution. None of those contain `-i`, so an
- * `-i`-only ban (plus the two obvious flags) would classify real writes as
- * reads. Everything the grammar cannot parse — pattern addresses, `w` / `e` /
- * `r` commands, `-f` script files, `-i` in any spelling, substitution
- * previews — is denied and falls through to mutate.
- */
-function isSedReadSegment(tokens: ReadonlyArray<string>): boolean {
-  return hasSedNoWriteFlag(tokens) && hasSedReadScript(tokens);
-}
-
-/** True when no `-i` / `--in-place` spelling appears among a `sed` segment's flags. */
-function hasSedNoWriteFlag(tokens: ReadonlyArray<string>): boolean {
-  return !tokens.slice(1).some(isSedInPlaceToken);
-}
-
-/**
- * `-i` in every spelling sed accepts, tested on one FLAG token: `-i`, `-i.bak`
- * (glued suffix — a character walk is what catches this, a token-prefix table
- * cannot), clustered `-ni` / `-in`, `--in-place`, `--in-place=.bak`, and the
- * unambiguous long abbreviations GNU sed resolves to `--in-place` (`--in-pl=…`).
- * Only tokens that start with `-` are inspected, so a script operand that
- * merely contains the letter (`sed -n 'i' f`) is not mistaken for the flag.
- */
-function isSedInPlaceToken(token: string): boolean {
-  if (token.startsWith("--")) {
-    return /^--(?:i|in|in-|in-p|in-pl|in-pla|in-plac|in-place)(?:=|$)/u.test(
-      token
-    );
-  }
-  if (!token.startsWith("-")) return false;
-  return [...token.slice(1)].some((ch) => ch === "i");
-}
-
-/**
- * The script half of the sed read rule: obtain the inline script from its
- * flag or positional slot, then require every `;`-separated item to be a
- * line-range print. Quiet mode is required — without `-n` the script's other
- * effects still run and every line is echoed anyway, so a print item proves
- * nothing. Scripts arriving via `-f` / `--file` are not inspectable → false,
- * and so is a bare `sed -n` with no script at all.
- */
-function hasSedReadScript(tokens: ReadonlyArray<string>): boolean {
-  const scan = scanSedTokens(tokens);
-  if (!scan.quiet || scan.scriptFromFile || scan.failedScript) return false;
-  const script = scan.flagScript ?? scan.positional[0];
-  // EXIT: no inline script at all (bare `sed -n`) → nothing is provably read.
-  if (script === undefined) return false;
-  return script.length > 0 && scriptCoversOnlyPrints(script);
-}
-
-interface SedTokenScan {
-  readonly quiet: boolean;
-  /** A script that already failed the print grammar — decision stays false. */
-  readonly failedScript: boolean;
-  /** `-f` / `--file` present: the script lives in a file we cannot read. */
-  readonly scriptFromFile: boolean;
-  /** Script supplied through `-e` / `--expression[=]`. */
-  readonly flagScript: string | undefined;
-  /** Non-flag operands, in order (the first is the script when no flag gave one). */
-  readonly positional: ReadonlyArray<string>;
-}
-
-/** Single pass over a `sed` segment's tokens, resolving where the script came from. */
-function scanSedTokens(tokens: ReadonlyArray<string>): SedTokenScan {
-  const positional: string[] = [];
-  let quiet = false;
-  let scriptFromFile = false;
-  let failedScript = false;
-  let flagScript: string | undefined;
-  for (let i = 1; i < tokens.length; i += 1) {
-    const token = tokens[i]!;
-    if (!token.startsWith("-")) {
-      positional.push(token);
-      continue;
-    }
-    if (SED_QUIET_FLAGS.has(token)) quiet = true;
-    if (isSedScriptFileFlag(token)) scriptFromFile = true;
-    const hit = sedInlineScriptOf(token, tokens[i + 1]);
-    if (hit.script !== undefined) {
-      flagScript = hit.script;
-      if (!scriptCoversOnlyPrints(hit.script)) failedScript = true;
-      // Separate-token form (`-e <script>`): the value was the NEXT token, so
-      // consume it as well — otherwise it would land in `positional` and be
-      // read as the file operand.
-      if (hit.consumesNext) i += 1;
-    }
-  }
-  return { quiet, failedScript, scriptFromFile, flagScript, positional };
-}
-
-/**
- * `-f` / `--file[=]`: the script is a file this classifier cannot read, so the
- * segment is fail-closed to `mutate`.
- *
- * Glued and stdin spellings count too: GNU sed accepts `-fFILE` and `-f-`
- * (script from stdin), and a piped `w <path>` script executed through them
- * writes without any `-i` — the exact fail-open this grammar exists to stop.
- * Mirrors `hasSedNoWriteFlag`'s glued-suffix handling, with the `-` case kept
- * separate so `-n` / `-e` are not swept up by the `-f` prefix.
- */
-function isSedScriptFileFlag(token: string): boolean {
-  if (token === "-f" || token === "--file") return true;
-  if (token.startsWith("--file=")) return true;
-  // Glued short form `-fFILE` / `-f-`. No other sed flag begins with `-f`, so
-  // the prefix test cannot sweep up a different flag.
-  return token.startsWith("-f") && token.length > 2;
-}
-
-/** Inline script carried by one `sed` flag token, and whether it ate the next token. */
-interface SedInlineScriptHit {
-  /** The inline script, or `undefined` when this flag carries none. */
-  readonly script: string | undefined;
-  /** True when the script was the NEXT token (`-e <script>`) and is now consumed. */
-  readonly consumesNext: boolean;
-}
-
-/**
- * Resolve the inline script a `sed` flag token carries, if any:
- * `-e <script>` / `--expression <script>` take their value from the next token
- * (`consumesNext`), while `--expression=<script>` is already fully consumed.
- * Any other flag carries no script, and a value-taking flag with a missing
- * value yields no script rather than an empty one — the caller then falls back
- * to the positional slot, exactly as a bare `sed -n` would.
- */
-function sedInlineScriptOf(
-  token: string,
-  next: string | undefined
-): SedInlineScriptHit {
-  if (token === "-e" || token === "--expression") {
-    return { script: next, consumesNext: next !== undefined };
-  }
-  if (token.startsWith("--expression=")) {
-    return {
-      script: token.slice("--expression=".length),
-      consumesNext: false,
-    };
-  }
-  return { script: undefined, consumesNext: false };
-}
-
-/** `sed` flags that select quiet mode (`-n` / long spellings). */
-const SED_QUIET_FLAGS: ReadonlySet<string> = Object.freeze(
-  new Set(["-n", "--quiet", "--silent"])
-);
-
-/**
- * True when every `;`-separated item of an inline sed script is a line-range
- * print: `3p`, `1,20p`, `$p`, `2,$p`. The trailing `p` is REQUIRED — a bare
- * address (`sed -n 5 f`, `sed -n $ f`) is a sed syntax error (verified GNU
- * sed 4.9: `missing command`), so accepting it would admit a form that never
- * reads anything. Anything else (`d`, `w`, `e`, `s///`, pattern addresses,
- * `/re/p`) → false, and the caller falls through to mutate.
- */
-function scriptCoversOnlyPrints(script: string): boolean {
-  const items = script.split(";");
-  return (
-    items.length > 0 &&
-    items.every((item) =>
-      SED_LINE_RANGE_PRINT_RE.test(stripQuoteLayer(item.trim()))
-    )
-  );
-}
-
-/** `Xp` / `X,Yp` with `X` / `Y` a line number or `$`. */
-const SED_LINE_RANGE_PRINT_RE = /^(?:\d+|\$)(?:,(?:\d+|\$))?p$/u;
-
-/**
- * Redirect analysis for one policy-passing segment: false when the segment
- * redirects output into a workspace file. `/dev/null` targets and fd merges
- * (`2>&1`, `1>&2`) write nothing to the workspace and stay true. Quoted `>`
- * characters inside the command text are treated as redirects (rare
- * false-positive cost; deny-by-default direction).
- */
-function segmentRedirectsNowhere(segment: string): boolean {
-  const matches = [...segment.matchAll(/&>>?|\d?>>&?|\d?>&?\d?/g)];
-  if (matches.length === 0) return true;
-  return matches.every((match) => {
-    const redirect = match[0];
-    const target = segment
-      .slice((match.index ?? 0) + redirect.length)
-      .trim()
-      .split(/\s+/)[0]!;
-    // fd merge (`2>&1`, `1>&2`) or /dev/null sink — pure stream plumbing,
-    // no workspace file is created or appended
-    return /^\d*>&\d+$/.test(redirect) || target === "/dev/null";
-  });
-}
-
-/**
- * Bare-`&` background detection for one segment: false when the segment
- * contains an `&` that is NOT part of a redirect token (`2>&1`, `>&2`,
- * `&>`, `&>>`). `splitShellSegments` consumes `&&` but passes bare `&`
- * through, so a background compound (`ls & touch new.txt`) would otherwise
- * hide its second command inside one policy-passing segment — fail-closed
- * to mutate instead (mirror of the readonly table's Strictening 1, minus
- * the redirect forms the gate legitimately allows).
- */
-function segmentHasNoBareBackground(segment: string): boolean {
-  const withoutRedirects = segment.replace(/&>>?|\d?>&/g, "");
-  return !withoutRedirects.includes("&");
-}
-
-/**
  * T1 (plans/worktree-live-task-root.md §6 T1) — workspace-mutation classifier
  * SSOT. Single source of truth for "does this tool write to the workspace":
  *
@@ -752,11 +482,13 @@ function segmentHasNoBareBackground(segment: string): boolean {
  *     list the worker deny-list (catalog.ts) uses and the same set the
  *     registry's Gate-3 append-only check enforces — one name → one
  *     classification, no shadow copies;
- *   - bash is adjudicated by `classifyBashWorkspaceWrite` — the gate's own
- *     workspace-write question ("will any segment or redirect write the
- *     workspace"), NOT the readonly bash-mode table: `validateReadonlyCommand`
- *     remains the SSOT only for `bashMode === "readonly"` (bash.ts). Non-
- *     string bash commands fail closed to mutate;
+ *   - bash is adjudicated by issue 1059's physical-guarantee flip: in the
+ *     unbound state bash commands are NO LONGER prediction-blocked — the
+ *     main checkout is mounted read-only inside the bwrap fence, so the
+ *     filesystem itself answers the write question. Every string command
+ *     classifies `read`; only a non-string / blank command fails closed to
+ *     `mutate` (it cannot be reasoned about at all). `validateReadonlyCommand`
+ *     remains untouched as the SSOT for `bashMode === "readonly"` (bash.ts);
  *   - read-only tools (read_file / grep / glob / web_fetch / memory_recall /
  *     etc.) and control / lifecycle tools (create-worktree /
  *     spawn_subagent / todo_write / …) do not write workspace files and
@@ -789,8 +521,11 @@ export function classifyCall(call: ToolCall): MutateClass {
   }
   if (call.name === "bash") {
     const command = (call.input as { command?: unknown } | null)?.command;
+    // issue 1059: prediction is replaced by the physical ro-bind fence, so
+    // any parseable command is a `read` as far as this gate cares. A blank
+    // or non-string command carries no provable intent and stays mutate.
     if (typeof command !== "string") return "mutate";
-    return classifyBashWorkspaceWrite(command);
+    return command.trim().length === 0 ? "mutate" : "read";
   }
   return "read";
 }
@@ -1073,6 +808,25 @@ export function mainCheckoutOf(root: string): string {
   return isTaskWorktreePath(root) ? dirname(dirname(dirname(root))) : root;
 }
 
+/**
+ * issue 1059 — UNBOUND_FENCE decision helper: the exact condition under
+ * which a bash fence must physically `--ro-bind` the main checkout (gate ON
+ * and the live wave root is the main checkout, i.e. NOT a task worktree).
+ * Returns the main checkout path to bind read-only, or undefined when the
+ * session is bound (or the gate is off) and the fence shape stays byte-
+ * identical to before. One predicate, three consumers (foreground bash,
+ * background spawn, verify run) so the assembly seams can never diverge
+ * from the gate's own unbound-state notion (G3 set-equality discipline).
+ */
+export function unboundFenceMainCheckout(args: {
+  gateOn: boolean;
+  root: string;
+}): string | undefined {
+  if (!args.gateOn) return undefined;
+  if (isTaskWorktreePath(args.root)) return undefined;
+  return args.root;
+}
+
 // -- gate executor ----------------------------------------------------------------
 
 /**
@@ -1302,6 +1056,17 @@ export interface WorktreeOnMutateHolder {
 }
 
 /**
+ * Read-only consumer view of the `isolation.worktreeOnMutate` switch cell:
+ * the get()-only half of `WorktreeOnMutateHolder`. Every downstream seam
+ * (bash fence assembly, worker spawn, verify run, hub, TUI panel) declares
+ * this instead of re-spelling the structural type (issue 1059 review M3,
+ * DRY / single source of truth).
+ */
+export interface WorktreeGateReader {
+  readonly get: () => boolean;
+}
+
+/**
  * Construct the switch holder. `initial` is the startup read; non-boolean
  * input falls back to `false` (fail-closed = today's default), and `set`
  * ignores non-boolean input so no caller can push the gate into a
@@ -1334,7 +1099,7 @@ export interface WorktreeIsolationGateOpts {
    * Typed as a read-only view (not `WorktreeOnMutateHolder`): the gate is a
    * consumer, never the setter — the panel / assembly own the write side.
    */
-  readonly enabled: { readonly get: () => boolean };
+  readonly enabled: WorktreeGateReader;
   /**
    * T10 (plans/worktree-live-task-root.md §6 T10 / D1/D2) — live `taskRoot`
    * cell (T4 SSOT). The gate snapshots `cell.read()` ONCE at `executeAll`

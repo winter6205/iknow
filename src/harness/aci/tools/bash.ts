@@ -42,6 +42,12 @@ import { restore, type SecretRegistry } from "../../secret-roundtrip/index.js";
 import type { BackgroundTaskManager } from "../../background/manager.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
+import {
+  unboundFenceErofsGuidance,
+  unboundFenceBackgroundNotice,
+  unboundFenceMainCheckout,
+  type WorktreeGateReader,
+} from "../../isolation/worktree-gate.js";
 import { FENCE_WRITE_GUIDANCE, resolveWithinRoot } from "./helpers.js";
 import { extractSingleReadPath } from "./bash-read-extract.js";
 import type { LastReadLedgerHost } from "../last-read-ledger.js";
@@ -122,6 +128,14 @@ export interface CreateBashToolOptions {
    */
   readonly homeRoot?: string;
   /**
+   * issue 1059:worktree-on-mutate 活开关 holder(只读视图,与 gate 的
+   * `enabled` 同纪律)。handler 入口与 waveRoot 同时读一次冻结为
+   * UNBOUND_FENCE 判定 —— gate ON ∧ waveRoot 是主 checkout → 前台 fence /
+   * 后台 spawn 叠 `--ro-bind <main>` 物理段并在 EROFS 回灌时给可行动文案。
+   * 缺席 = 永不发段(bound / gate-OFF argv 逐字节不变)。
+   */
+  readonly worktreeOnMutate?: WorktreeGateReader;
+  /**
    * ADR-0097 / T4:出口代理缝装配 —— 由调用面注入判定器输入(从 settings
    * `isolation.network` 读),handler 在 fence 装配期起 per-call egress
    * session,然后在 finally 释放。**缺省** = 不起 egress session(fence
@@ -192,6 +206,8 @@ interface FenceSnapshot {
   readonly mode: FsIsolationMode;
   readonly homeRoot: string;
   readonly tmpDir: string;
+  /** issue 1059:handler 入口冻结的 UNBOUND_FENCE 主 checkout(缺席 = 不发段)。 */
+  readonly unboundMainCheckout: string | undefined;
 }
 
 /**
@@ -232,6 +248,7 @@ async function runForegroundBash(
     fsMode,
     homeRoot,
     tmpDir,
+    unboundMainCheckout,
     fsPolicy,
     fenceEnv,
     fenceIsReadonly,
@@ -254,6 +271,7 @@ async function runForegroundBash(
     fsMode,
     homeRoot,
     tmpDir,
+    unboundMainCheckout,
     egressSession: egress.session,
   });
   const result = await runSandboxDisposingEgress(
@@ -280,6 +298,7 @@ async function runForegroundBash(
     egressPolicyInput: egress.policyInput,
     result,
     mask,
+    unboundMainCheckout,
   });
   if (finalPath.kind === "throw") throw finalPath.throwError;
   return finalPath.envelope;
@@ -295,6 +314,8 @@ interface RunForegroundBashArgs {
   fsMode: FsIsolationMode;
   homeRoot: string;
   tmpDir: string;
+  /** issue 1059:入口冻结的 UNBOUND_FENCE 主 checkout(undefined = 不发段)。 */
+  unboundMainCheckout: string | undefined;
   fsPolicy: ReturnType<typeof createFsPolicy>;
   fenceEnv: Record<string, string>;
   fenceIsReadonly: boolean;
@@ -334,6 +355,7 @@ function buildForegroundFence(args: {
   readonly fsMode: FsIsolationMode;
   readonly homeRoot: string;
   readonly tmpDir: string;
+  readonly unboundMainCheckout: string | undefined;
   readonly egressSession: EgressSession | undefined;
 }): ReturnType<typeof createBwrapFence> {
   const payload = wrapCommandWithInnerBridge(
@@ -359,6 +381,16 @@ function buildForegroundFence(args: {
     ),
     ...(args.egressSession !== undefined
       ? { egress: args.egressSession.spec }
+      : {}),
+    // issue 1059:UNBOUND_FENCE 物理段 —— 入口冻结值直用,不重读 holder;
+    // pad=tmpDir 让 scratch 写继续可落(ADR 裁定点)。
+    ...(args.unboundMainCheckout !== undefined
+      ? {
+          unboundFence: {
+            mainCheckout: args.unboundMainCheckout,
+            tmpPad: args.tmpDir,
+          },
+        }
       : {}),
   });
 }
@@ -423,6 +455,7 @@ async function finalizeEgressPath(args: {
   readonly egressPolicyInput: EgressPolicyInput | undefined;
   readonly result: Awaited<ReturnType<typeof runInSandbox>>;
   readonly mask: ReturnType<typeof createOutputMask> | undefined;
+  readonly unboundMainCheckout: string | undefined;
 }): Promise<
   | { readonly kind: "throw"; readonly throwError: ToolExecutionError }
   | {
@@ -440,6 +473,7 @@ async function finalizeEgressPath(args: {
     egressPolicyInput,
     result,
     mask,
+    unboundMainCheckout,
   } = args;
   const violations =
     egressSession !== undefined ? egressSession.violationSink.drain() : [];
@@ -462,10 +496,20 @@ async function finalizeEgressPath(args: {
     egressSession !== undefined && result.exitCode !== 0
       ? sshHostKeyFailureGuidance(result.stderr)
       : undefined;
+  // issue 1059:UNBOUND_FENCE 下 stderr 出现 EROFS → 回灌可行动文案(同 F4
+  // 走 ok-envelope stderr 旁路,不改 exit 语义、不进违例计数 ——
+  // categorizeResult 只认 execution_failed)。非 unbound 态 = 不发段。
+  const erofsGuidance =
+    unboundMainCheckout !== undefined && result.exitCode !== 0
+      ? unboundFenceErofsGuidance(result.stderr)
+      : undefined;
+  const guidanceLines = [f4Guidance, erofsGuidance].filter(
+    (line): line is string => line !== undefined
+  );
   const effectiveResult =
-    f4Guidance === undefined
+    guidanceLines.length === 0
       ? result
-      : { ...result, stderr: `${result.stderr}\n${f4Guidance}` };
+      : { ...result, stderr: `${result.stderr}\n${guidanceLines.join("\n")}` };
   return {
     kind: "ok",
     envelope: assembleBashToolResult(effectiveResult, mask),
@@ -710,6 +754,13 @@ export function createBashTool(
     const waveRoot: string = opts?.liveTaskRoot
       ? opts.liveTaskRoot.read()
       : cwd;
+    // issue 1059:UNBOUND_FENCE 判定与 waveRoot 同 vintage,在 handler 入口
+    // 读活 holder 一次冻结 —— 前台 fence / 后台 spawn / EROFS 回灌共用同一
+    // 份,handler 内 holder 翻转不渗透进本次调用(D2 纪律,同 fsMode 快照)。
+    const unboundMainCheckout = unboundFenceMainCheckout({
+      gateOn: opts?.worktreeOnMutate?.get() === true,
+      root: waveRoot,
+    });
     const { mode: fsMode, homeRoot } = snapshotFenceInputs(opts);
     const tmpDir = resolveBashFenceTmp(opts, ctx?.conversationId, () => {
       if (fallbackFenceTmp === undefined) {
@@ -740,7 +791,7 @@ export function createBashTool(
         },
         opts ?? {},
         ctx,
-        { mode: fsMode, homeRoot, tmpDir },
+        { mode: fsMode, homeRoot, tmpDir, unboundMainCheckout },
         effectiveEgressPolicyFactory
       );
     }
@@ -777,6 +828,7 @@ export function createBashTool(
       fsMode,
       homeRoot,
       tmpDir,
+      unboundMainCheckout,
       fsPolicy,
       fenceEnv,
       fenceIsReadonly,
@@ -845,12 +897,18 @@ async function handleBackground(
   input: BackgroundSpawnInput,
   opts: CreateBashToolOptions,
   ctx: ToolExecutionContext | undefined,
-  { mode: fsMode, homeRoot, tmpDir }: FenceSnapshot,
+  { mode: fsMode, homeRoot, tmpDir, unboundMainCheckout }: FenceSnapshot,
   /** ADR-0097 / T7:per-call egress policy —— closure-derived,已注入
    *  approvalGate。manager.spawn 在装配期起 session,缺省 = 无缝。 */
   effectiveEgressPolicyFactory?:
     (() => EgressPolicyInput | undefined) | undefined
-): Promise<{ task_id: string; log_path: string }> {
+): Promise<{
+  task_id: string;
+  log_path: string;
+  /** issue 1059 (M1):仅 UNBOUND_FENCE 态在场——后台 stderr 不上回执,
+   *  物理只读态在 spawn 时预披露;bound / gate OFF 形状 byte-identical。 */
+  notice?: string;
+}> {
   const manager = opts.backgroundManager;
   if (!manager) {
     throw new ToolExecutionError(
@@ -889,6 +947,16 @@ async function handleBackground(
     ...(effectiveEgressPolicyFactory !== undefined
       ? { egressPolicy: effectiveEgressPolicyFactory() }
       : {}),
+    // issue 1059:UNBOUND_FENCE 入口冻结值透传给后台 fence(前台/后台在
+    // 此轴上集合相等,G3 纪律),tmpPad 与前台同源 = tmpDir。
+    ...(unboundMainCheckout !== undefined
+      ? {
+          unboundFence: {
+            mainCheckout: unboundMainCheckout,
+            tmpPad: tmpDir,
+          },
+        }
+      : {}),
   });
   if (result.status === "spawn_error") {
     // 与 bash 既有错误形态一致:typed-error 渲染（${kind}: ${context}）装进
@@ -904,7 +972,13 @@ async function handleBackground(
       `bash: background spawn failed: ${result.error.kind}: ${detail}`
     );
   }
-  return { task_id: result.task_id, log_path: result.log_path };
+  return unboundMainCheckout !== undefined
+    ? {
+        task_id: result.task_id,
+        log_path: result.log_path,
+        notice: unboundFenceBackgroundNotice(),
+      }
+    : { task_id: result.task_id, log_path: result.log_path };
 }
 
 /**

@@ -277,3 +277,78 @@ describe("makeDefaultRunVerify — egress 缝装配 (ADR-0097 / T7)", () => {
     expect(vi.mocked(sandboxIndex.runInSandbox)).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("makeDefaultRunVerify — UNBOUND_FENCE 段 (issue 1059)", () => {
+  it("holder ON + cwd 是主 checkout → createBwrapFence opts 叠 unboundFence {mainCheckout: cwd, tmpPad}", async () => {
+    captured.length = 0;
+    const cwd = mkdtempSync(join(tmpdir(), "verify-unbound-main-"));
+    const sessionTmp = mkdtempSync(join(tmpdir(), "verify-unbound-tmp-"));
+    try {
+      const runVerify = makeDefaultRunVerify({
+        cwd,
+        tmpDir: sessionTmp,
+        worktreeOnMutate: { get: () => true },
+      });
+      await runVerify("true", {});
+      const opts = captured[0]!;
+      assert.deepEqual(opts.unboundFence, {
+        mainCheckout: cwd,
+        tmpPad: sessionTmp,
+      });
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(sessionTmp, { recursive: true, force: true });
+    }
+  });
+
+  it("holder 缺席 → opts 不含 unboundFence 键 (V1 baseline 字节不变)", async () => {
+    captured.length = 0;
+    const cwd = "/tmp/verify-unbound-absent";
+    const runVerify = makeDefaultRunVerify({ cwd });
+    await runVerify("true", {});
+    assert.equal("unboundFence" in captured[0]!, false);
+  });
+
+  it.each([
+    ["holder OFF", () => ({ get: () => false })],
+    ["bound(task-worktree 形 cwd)", () => ({ get: () => true })],
+  ])("%s → 不发段 (G3: 与 bash 工具面同源判定)", async (_label, holderFactory) => {
+    captured.length = 0;
+    const isBound = _label.startsWith("bound");
+    const cwd = isBound
+      ? join("/tmp/verify-unbound-main", ".iknow", "worktrees", "conv-1")
+      : "/tmp/verify-unbound-main";
+    const runVerify = makeDefaultRunVerify({
+      cwd,
+      ...(isBound
+        ? { worktreeOnMutate: { get: () => true } }
+        : { worktreeOnMutate: holderFactory() }),
+    });
+    await runVerify("true", {});
+    assert.equal("unboundFence" in captured[0]!, false);
+  });
+
+  it("工厂期快照 vintage:闭包造好后翻 holder,本轮 opts 不变 (per-round 快照)", async () => {
+    captured.length = 0;
+    const cwd = "/tmp/verify-unbound-vintage";
+    let on = true;
+    const runVerify = makeDefaultRunVerify({
+      cwd,
+      worktreeOnMutate: { get: () => on },
+    });
+    on = false; // 本轮闭包已建:翻值不得渗透进本轮
+    await runVerify("true", {});
+    assert.deepEqual(captured[0]!.unboundFence, {
+      mainCheckout: cwd,
+      tmpPad: tmpdir(),
+    });
+    // 下一轮(调用方每轮现造)按新值
+    captured.length = 0;
+    const nextRound = makeDefaultRunVerify({
+      cwd,
+      worktreeOnMutate: { get: () => on },
+    });
+    await nextRound("true", {});
+    assert.equal("unboundFence" in captured[0]!, false);
+  });
+});
