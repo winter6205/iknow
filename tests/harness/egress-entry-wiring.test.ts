@@ -84,9 +84,7 @@ vi.mock("../../src/harness/sandbox/runner.ts", async () => {
 });
 
 import { createBashTool } from "../../src/harness/aci/tools/bash.js";
-import {
-  createBackgroundTaskManager,
-} from "../../src/harness/background/manager.js";
+import { createBackgroundTaskManager } from "../../src/harness/background/manager.js";
 import { resolveTasksDir } from "../../src/harness/background/paths.js";
 import {
   mintEgressCredentialLayer,
@@ -160,9 +158,10 @@ function mintedSpec(): EgressSession["spec"] {
   };
 }
 
-function stubSession(opts?: {
-  readonly spec?: EgressSession["spec"];
-}): { session: EgressSession; dispose: ReturnType<typeof vi.fn> } {
+function stubSession(opts?: { readonly spec?: EgressSession["spec"] }): {
+  session: EgressSession;
+  dispose: ReturnType<typeof vi.fn>;
+} {
   const dispose = vi.fn(async () => undefined);
   return {
     session: Object.freeze({

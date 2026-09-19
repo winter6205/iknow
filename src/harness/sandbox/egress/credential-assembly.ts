@@ -190,11 +190,11 @@ export interface EgressCredentialSkipped {
 }
 
 /** 入口返回联合：消费方必须显式处理 skipped 档（禁静默降级）。 */
-export type EgressCredentialLayer = EgressCredentialMint | EgressCredentialSkipped;
+export type EgressCredentialLayer =
+  EgressCredentialMint | EgressCredentialSkipped;
 
 /** `fenced` 档入参 = T2 铸造入参 + 姿态声明。 */
-export interface MintEgressCredentialLayerFencedArgs
-  extends MintEgressCredentialsArgs {
+export interface MintEgressCredentialLayerFencedArgs extends MintEgressCredentialsArgs {
   readonly posture: "fenced";
   readonly onDiagnostic?: (message: string) => void;
 }
@@ -206,8 +206,7 @@ export interface MintEgressCredentialLayerNoFenceArgs {
 }
 
 export type MintEgressCredentialLayerArgs =
-  | MintEgressCredentialLayerFencedArgs
-  | MintEgressCredentialLayerNoFenceArgs;
+  MintEgressCredentialLayerFencedArgs | MintEgressCredentialLayerNoFenceArgs;
 
 /**
  * no-fence 痕文案 SSOT —— 入口（yolo 接线方）与装配层

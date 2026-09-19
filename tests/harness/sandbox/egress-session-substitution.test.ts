@@ -162,8 +162,7 @@ async function openSession(
   let cred: EgressCredentialResources | undefined;
   const session = await createEgressSession({
     policy: {
-      allowedDomains:
-        extra.allowedDomains ?? ["github.com", "api.example.com"],
+      allowedDomains: extra.allowedDomains ?? ["github.com", "api.example.com"],
       deniedDomains: [],
       commandLabel: "test:substitution",
       credentials: f.roster,
@@ -240,7 +239,10 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
     const pairs = opts.getBodySubstitutions?.("github.com") ?? [];
     const reals = pairs.map((p) => p.realValue.toString("utf8"));
     assert.ok(reals.includes(f.realEnvToken));
-    assert.ok(reals.includes(f.realFileToken), "masked 文件条目同样进 body 代换集");
+    assert.ok(
+      reals.includes(f.realFileToken),
+      "masked 文件条目同样进 body 代换集"
+    );
   });
 
   it("批准门新批域不进入任何条目 injectHosts（invariant 3 / SC4 洗出防护）", async () => {
@@ -391,15 +393,12 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
     const all = sink.drain();
     const reasons = new Set(all.map((v) => v.reason));
     // blocked.example 不在允许集且无批准门 → 非交互 fail-closed（no-approval-inlet）。
-    assert.deepEqual(
-      [...reasons].sort(),
-      [
-        "infra-unavailable",
-        "no-approval-inlet",
-        "substitution-skipped",
-        "tls-exempt-injectable",
-      ]
-    );
+    assert.deepEqual([...reasons].sort(), [
+      "infra-unavailable",
+      "no-approval-inlet",
+      "substitution-skipped",
+      "tls-exempt-injectable",
+    ]);
     assert.equal(all.length, 4);
     const text = renderEgressViolations(all);
     // 域判定拒绝走 [network_denied]；两条代换诊断走 [egress_diagnostic] 旁路档。

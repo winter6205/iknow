@@ -206,7 +206,12 @@ function applyEntryCap(
   budget -= keptFiles.length;
   const keptEnvVars = envVars.slice(0, budget);
   for (const dropped of files.slice(keptFiles.length)) {
-    warn(onWarn, "files", dropped, `entry cap ${CREDENTIALS_ENTRY_CAP} exceeded`);
+    warn(
+      onWarn,
+      "files",
+      dropped,
+      `entry cap ${CREDENTIALS_ENTRY_CAP} exceeded`
+    );
   }
   for (const dropped of envVars.slice(keptEnvVars.length)) {
     warn(
@@ -222,7 +227,10 @@ function applyEntryCap(
 /** 单侧列表逐条解析：非数组 → undefined（该字段缺席）；数组 → 保序收集合法条目。 */
 function parseEntryList<T>(
   rawList: unknown,
-  parseEntry: (raw: unknown, onWarn?: (message: string) => void) => T | undefined,
+  parseEntry: (
+    raw: unknown,
+    onWarn?: (message: string) => void
+  ) => T | undefined,
   onWarn?: (message: string) => void
 ): T[] | undefined {
   if (!Array.isArray(rawList)) return undefined;
@@ -266,16 +274,8 @@ export function parseIsolationCredentials(
   const files = parseEntryList(raw.files, parseFileEntry, onWarn);
   const envVars = parseEntryList(raw.envVars, parseEnvVarEntry, onWarn);
   if (files === undefined && envVars === undefined) return undefined;
-  const capped = applyEntryCap(
-    files ?? [],
-    envVars ?? [],
-    onWarn
-  );
-  return synthesizeSection(
-    files !== undefined,
-    envVars !== undefined,
-    capped
-  );
+  const capped = applyEntryCap(files ?? [], envVars ?? [], onWarn);
+  return synthesizeSection(files !== undefined, envVars !== undefined, capped);
 }
 
 /**

@@ -299,7 +299,10 @@ integrationDescribe("egress credential integration arm (T7)", () => {
       raw += `${k}: ${v}\r\n`;
     }
     raw += "\r\n";
-    const payload = body !== undefined ? Buffer.concat([Buffer.from(raw), body]) : Buffer.from(raw);
+    const payload =
+      body !== undefined
+        ? Buffer.concat([Buffer.from(raw), body])
+        : Buffer.from(raw);
     return await new Promise((resolve, reject) => {
       const chunks: Buffer[] = [];
       const onErr = (err: Error): void => reject(err);
@@ -309,9 +312,16 @@ integrationDescribe("egress credential integration arm (T7)", () => {
         sock.off("error", onErr);
         const full = Buffer.concat(chunks);
         const sep = full.indexOf("\r\n\r\n");
-        const headText = full.subarray(0, sep === -1 ? full.length : sep).toString("latin1");
-        const status = Number(/^HTTP\/1\.[01] (\d{3})/.exec(headText)?.[1] ?? 0);
-        resolve({ status, text: full.subarray(sep === -1 ? full.length : sep + 4) });
+        const headText = full
+          .subarray(0, sep === -1 ? full.length : sep)
+          .toString("latin1");
+        const status = Number(
+          /^HTTP\/1\.[01] (\d{3})/.exec(headText)?.[1] ?? 0
+        );
+        resolve({
+          status,
+          text: full.subarray(sep === -1 ? full.length : sep + 4),
+        });
       });
       sock.write(payload);
     });

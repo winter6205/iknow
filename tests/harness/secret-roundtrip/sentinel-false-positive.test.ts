@@ -61,7 +61,11 @@ describe("T5① recognize —— 假值零命中（matched=[] 且 replaced 逐�
   it("三类假值单独喂 recognize() → matched=[] 且 replaced === 输入", () => {
     for (const fake of fakeFixtures()) {
       const r = recognize(`echo ${fake}`);
-      assert.deepEqual([...r.matched], [], `matched 非空：${fake.slice(0, 24)}…`);
+      assert.deepEqual(
+        [...r.matched],
+        [],
+        `matched 非空：${fake.slice(0, 24)}…`
+      );
       assert.equal(r.replaced, `echo ${fake}`);
     }
   });

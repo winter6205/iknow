@@ -194,7 +194,9 @@ describe("createEgressPolicyFactory — credentials 接线", () => {
   it("用户段追加条目进入 policy.credentials（收窄/追加语义透传）", () => {
     const factory = createEgressPolicyFactory({
       settings: settingsWith({
-        envVars: [{ name: "FAKE_APP_TOKEN", injectHosts: ["credtest.example"] }],
+        envVars: [
+          { name: "FAKE_APP_TOKEN", injectHosts: ["credtest.example"] },
+        ],
       }),
       commandLabel: "bash:fg",
     });

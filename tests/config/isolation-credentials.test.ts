@@ -63,7 +63,11 @@ function loadWithWarnings(
   cwd: string
 ): { settings: ReturnType<typeof loadIknowSettings>; warnings: string[] } {
   const warnings: string[] = [];
-  const settings = loadIknowSettings({ home, cwd, onWarn: (m) => warnings.push(m) });
+  const settings = loadIknowSettings({
+    home,
+    cwd,
+    onWarn: (m) => warnings.push(m),
+  });
   return { settings, warnings };
 }
 
@@ -118,7 +122,9 @@ describe("isolation.credentials — 合法形态（正常路径）", () => {
     const { home, cwd } = await makeSettings({
       isolation: {
         credentials: {
-          envVars: [{ name: "FAKE_APP_TOKEN", injectHosts: ["credtest.example"] }],
+          envVars: [
+            { name: "FAKE_APP_TOKEN", injectHosts: ["credtest.example"] },
+          ],
         },
       },
     });
@@ -135,7 +141,9 @@ describe("isolation.credentials — 合法形态（正常路径）", () => {
         fsMode: "workspace",
         network: { allowedDomains: ["example.com"] },
         credentials: {
-          envVars: [{ name: "FAKE_APP_TOKEN", injectHosts: ["credtest.example"] }],
+          envVars: [
+            { name: "FAKE_APP_TOKEN", injectHosts: ["credtest.example"] },
+          ],
         },
       },
     });
@@ -248,7 +256,7 @@ describe("isolation.credentials — 非法处置（丢条目 + 警告，不抛�
     assert.equal(settings.isolation?.credentials?.files?.length, 0);
   });
 
-  it("decode 非 \"jwt\" 字面量 → 丢该条 + 警告", async () => {
+  it('decode 非 "jwt" 字面量 → 丢该条 + 警告', async () => {
     const { home, cwd } = await makeSettings({
       isolation: {
         credentials: {
@@ -306,7 +314,10 @@ describe("isolation.credentials — 条目上限 16（Input-contract overflow �
     });
     const { settings, warnings } = loadWithWarnings(home, cwd);
     assert.equal(settings.isolation?.credentials?.envVars?.length, 16);
-    assert.equal(settings.isolation?.credentials?.envVars?.[15]?.name, "FAKE_TOKEN_16");
+    assert.equal(
+      settings.isolation?.credentials?.envVars?.[15]?.name,
+      "FAKE_TOKEN_16"
+    );
     assert.equal(warnings.length, 1);
     assert.match(warnings[0]!, /16/);
   });

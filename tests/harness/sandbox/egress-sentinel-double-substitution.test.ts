@@ -101,7 +101,10 @@ describe("T5⑤ 双重代换防护 —— 替换产物不回扫、real value 永
   const sentinel = fakeSentinel();
   const real = `${sentinel}_REAL`;
   const pairs = [
-    { sentinel: Buffer.from(sentinel, "utf8"), realValue: Buffer.from(real, "utf8") },
+    {
+      sentinel: Buffer.from(sentinel, "utf8"),
+      realValue: Buffer.from(real, "utf8"),
+    },
   ];
 
   it("body transform 单 chunk：两处 sentinel 各代换一次，real 不回扫", async () => {

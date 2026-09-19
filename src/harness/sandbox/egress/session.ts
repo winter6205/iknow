@@ -768,7 +768,11 @@ export async function createEgressSession(
   }
 
   // Step 4: 构造 fence spec。
-  const spec = assembleFenceSpec(socketPath, httpListen.port, credentialResources);
+  const spec = assembleFenceSpec(
+    socketPath,
+    httpListen.port,
+    credentialResources
+  );
 
   let disposed = false;
   const dispose = async (): Promise<void> => {

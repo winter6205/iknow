@@ -106,7 +106,10 @@ export function createEgressPolicyFactory(
     // canonical `skipped: no-fence` 痕进诊断/日志（invariant 7 禁静默，
     // 离线可查证「无存在面保护」），SC9 反命门闭合。
     const onDiagnostic =
-      onWarn ?? ((m: string): void => { console.warn(m); });
+      onWarn ??
+      ((m: string): void => {
+        console.warn(m);
+      });
     onDiagnostic(noFenceCredentialTrace());
     return () => undefined;
   }

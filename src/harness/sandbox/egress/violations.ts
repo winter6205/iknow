@@ -148,12 +148,13 @@ export function renderEgressViolations(
  * 分前缀（`[egress_diagnostic]`），四类信号互不混淆 —— 修复动作是
  * 「让体可扫描 / 复核豁免名单」，与 allowlist 无关。
  */
-type EgressDiagnosticReason =
-  | "substitution-skipped"
-  | "tls-exempt-injectable";
+type EgressDiagnosticReason = "substitution-skipped" | "tls-exempt-injectable";
 
 /** 判定 / infra 档 reason（诊断档之外全集，穷尽性由编译器保证）。 */
-type EgressDomainReason = Exclude<EgressViolationReason, EgressDiagnosticReason>;
+type EgressDomainReason = Exclude<
+  EgressViolationReason,
+  EgressDiagnosticReason
+>;
 
 const DIAGNOSTIC_RENDERERS: Record<
   EgressDiagnosticReason,
