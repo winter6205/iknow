@@ -18,7 +18,7 @@ import {
   createOutputMask,
   currentSecretValues,
   renderEgressFailureMessage,
-  SocatUnavailableError,
+  EgressRelayUnavailableError,
   type AskApproval,
   type BwrapFenceOptions,
   type EgressApprovalGate,
@@ -127,7 +127,7 @@ export interface CreateBashToolOptions {
    * 测试可注入 fake 工厂。
    *
    * 工厂形态而非 session 实例:per-call 装配,handler 内建 session,
-   * 然后 `finally { await session.dispose() }`。start 失败(SocatUnavailableError
+   * 然后 `finally { await session.dispose() }`。start 失败(EgressRelayUnavailableError
    * 等)→ 按 spec「fail-closed 不静默降级」,本仓 expand 阶段接线为:本
    * 次调用无 egress 缝(沙箱内无代理 env、`--unshare-net` 照旧在,等同
    * 纯断网)+ typed failure 让模型 / TUI 可见 —— 不静默降级。
@@ -135,12 +135,12 @@ export interface CreateBashToolOptions {
   readonly egressPolicyFactory?: () => EgressPolicyInput | undefined;
   /**
    * T5 测试 seam:注入 `createEgressSession` 工厂，让 tier 1→mid 端到端
-   * 测试可在不真起 socat / proxy 的前提下模拟「违例被记录 → drain → typed
+   * 测试可在不真起中继 / proxy 的前提下模拟「违例被记录 → drain → typed
    * failure」路径。生产装配**不传**(走默认 createEgressSession)。
    *
    * why 需要:bash handler 直接 import 真实 `createEgressSession`,而真
-   * 起 socat + http-proxy 需要 node-forge 真实依赖 + 端口资源 + 可执行
-   * socat,CI 上通常不具备。让测试在 stub session 里 record 一条违例 →
+   * 真 http-proxy 需要 unix socket 资源与监听权限,CI 上未必具备。让测试
+   * 在 stub session 里 record 一条违例 →
    * 直接走 drain → typed failure 全管线,验证「message 从 handler 流到
    * categorizeResult」不假绿。
    */
@@ -316,8 +316,9 @@ interface RunForegroundBashArgs {
  * 抽离以控制 `runForegroundBash` 复杂度（S5 门）。workspaceMounts 与
  * egress 字段的填充规则见其注释；本函数仅做组装，不引入逻辑。
  *
- * egress-ssh-bridge T1：egress 在场时命令链前导 `spec.innerBridgeScript`
- * （沙箱内 socat 监听 127.0.0.1:3128 → unix socket + trap 收尾，形态见
+ * egress-ssh-bridge T1（ADR-0107 换装）：egress 在场时命令链前导
+ * `spec.innerBridgeScript`（沙箱内自带 node 中继监听 127.0.0.1:3128 →
+ * unix socket + trap 收尾，形态见
  * session.ts `buildInnerBridgeScript`）——代理 env 指到的是沙箱内这个监听，
  * 没有前导则整条缝只有宿主半场（O3）。无 egress = payload 逐字节不变
  * （byte-identical 回归基线，invariant 3「无缝 = 无桥」）。
@@ -459,7 +460,7 @@ async function finalizeEgressPath(args: {
 
 /**
  * egress session per-call 装配 —— fence 装配前起 session；失败路径
- * （SocatUnavailableError 等）→ 本次调用无 egress 缝（沙箱内无代理 env、
+ * （EgressRelayUnavailableError 等）→ 本次调用无 egress 缝（沙箱内无代理 env、
  * `--unshare-net` 照旧在，等同纯断网）+ 失败文案由调用方进 typed
  * failure 让模型/TUI 可见（T5 起不再走 stderr 旁路）。
  *
@@ -468,8 +469,8 @@ async function finalizeEgressPath(args: {
  * 不持有 policy 的额外引用（已在 filter 闭包里），故由 caller 端缓存。
  *
  * typed-error catch 契约（code-quality.md）：先识别判别联合的具体类型，
- * 对 SocatUnavailableError 这种携带 socatCommand + installHint 的 typed
- * 错误直接构造结构化 `startError`；未知错误走兜底形态但保留「unknown
+ * 对 EgressRelayUnavailableError 这种携带 detail + remediationHint 的
+ * typed 错误直接构造结构化 `startError`；未知错误走兜底形态但保留「unknown
  * cause」标注，避免 plain object 在 `String(err)` 下打成 `[object Object]`
  * 让 `kind` / `installHint` 全部不可见。`infraHint` 由 typed-error
  * 派生并透传给 composeEgressFailure，让 typed failure message 渲染出
@@ -493,15 +494,15 @@ async function startEgressSessionForCall(
     const session = await createEgressSessionFn({ policy: policyInput });
     return { session, policyInput };
   } catch (err) {
-    if (err instanceof SocatUnavailableError) {
-      // typed-error 分支：SocatUnavailableError 携带 socatCommand + installHint,
-      // 用 err.socatCommand + err.installHint 拼结构化 startError;透传
-      // installHint 给 composeEgressFailure → renderEgressFailureMessage,
-      // 让 typed failure message 里出现「socat binary "..." not found —
-      // <installHint>」(SC13 验收 + typed-error catch 契约)。
+    if (err instanceof EgressRelayUnavailableError) {
+      // typed-error 分支：EgressRelayUnavailableError 携带 detail +
+      // remediationHint（本产品依赖指引，ADR-0107），用 err.message 作
+      // 结构化 startError；透传给 composeEgressFailure →
+      // renderEgressFailureMessage，让 typed failure message 里出现
+      // 「缺哪个产品依赖 + 怎么修」(SC13 验收 + typed-error catch 契约)。
       return {
-        startError: `egress: socat "${err.socatCommand}" not found — ${err.installHint}`,
-        infraHint: `egress: socat "${err.socatCommand}" not found — ${err.installHint}`,
+        startError: err.message,
+        infraHint: err.message,
         policyInput,
       };
     }
@@ -524,7 +525,7 @@ async function startEgressSessionForCall(
  * - drain 非空：走 `renderEgressFailureMessage`（typed failure 文案，含
  *   `[network_denied]` 前缀 + 每条一行 + 共享补配指引 + 「命令已跑完」
  *   语义；infra / 域判定绝不混排同一段）。
- * - egressStartError 在场且 drain 空：把 socat 缺失/桥装配失败文案拼成
+ * - egressStartError 在场且 drain 空：把中继依赖缺失/装配失败文案拼成
  *   typed failure（带 `[network_denied]` 前缀 + 「egress seam unavailable」
  *   语义），同时合成一条 `infra-unavailable` violation 走同一渲染管线，
  *   文案一致性归一。**不**给配置键指引（infra ≠ 域判定拒绝）。

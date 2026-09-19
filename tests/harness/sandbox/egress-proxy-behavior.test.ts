@@ -12,12 +12,14 @@
  *   - 节点配置：真起 http-proxy（@anthropic-ai/sandbox-runtime 件）+ filter 用真
  *     decideEgress + 真 allowedDomains 小集。
  *
- * 注：本测试**不**起真 socat 桥——它只验宿主侧代理 + filter 逻辑。沙箱内侧
- * 半桥（O3 欠账）已由 egress-ssh-bridge T1 清偿：内层脚本装配在
+ * 注：本测试**不**经内层中继——它只验宿主侧代理 + filter 逻辑（裸 http
+ * server listen unix socket 的端到端由 probe 承担）。沙箱内侧
+ * 半桥（O3 欠账）已由 egress-ssh-bridge T1 清偿（ADR-0107 换装为自带
+ * node 中继）：内层脚本装配在
  * `egress-session.test.ts`（buildInnerBridgeScript / spec 形状 / auth env）
  * 与 `bash-egress-inner-bridge.test.ts`（前台命令链前导 + 无缝
  * byte-identical 基线）钉形，端到端可达性由 `npm run probe:sandbox`
- * 的 socat-present 分支承担（该分支已重写为经真内层桥的端到端正探针）。
+ * 的 egress 类别承担（经真内层中继的端到端正探针，ADR-0107）。
  */
 
 import { createServer, type Server as HttpServer } from "node:http";

@@ -63,7 +63,7 @@ export interface BwrapFenceOptions {
    * 代理 env（HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY——URL 嵌
    * auth userinfo,指沙箱**固定监听号** `SANDBOX_HTTP_PROXY_PORT`=3128,
    * 不再是宿主 OS 分配端口），沙箱内侧半桥 = 命令链前导的
-   * `spec.innerBridgeScript`（bash.ts 前台接线；socat 把 127.0.0.1:3128
+   * `spec.innerBridgeScript`（bash.ts 前台接线；自带 node 中继把 127.0.0.1:3128
    * 转回该 socket → 宿主代理），见 `src/harness/sandbox/egress/session.ts`。
    *
    * **mount 序**：socket bind 落在 workspaceMounts 之后、cwdReadonly 之前
@@ -192,9 +192,9 @@ function baseArgs(
     ...workspaceMounts,
     // ADR-0097 / T4:出口代理缝 unix socket `--bind` —— 在 workspaceMounts
     // 之后、cwdReadonly 之前;source=dest 同值 (host 路径 → 沙箱内同路径)。
-    // 沙箱内侧半桥 (命令链前导的 socat TCP-LISTEN:3128 → UNIX-CONNECT,
-    // 见 egress/session.ts buildInnerBridgeScript) 读该 socket → 把
-    // 127.0.0.1:3128 的流量转回宿主代理。
+    // 沙箱内侧半桥 (命令链前导的自带 node 中继 TCP-LISTEN:3128 → unix
+    // socket CONNECT,见 egress/session.ts buildInnerBridgeScript) 连该
+    // socket → 把 127.0.0.1:3128 的流量转回宿主代理(ADR-0107:无 socat)。
     ...egressBind,
     // cwdReadonly: EROFS override after the `/` bind (与工作区档三层正交,
     // 即使工作区档三层叠加,cwdReadonly 仍在最末;后者按字面是 mount 序最末)。
@@ -216,19 +216,31 @@ function baseArgs(
  * 但不并入 `bindArgs`(后者语义是「工作区写白名单的省略是收紧方向」,本函数
  * 语义是「出口代理缝的省略是 fail-closed 但**不**回退到 host-net」—— 两者不混)。
  *
+ * ADR-0107 自带中继资产:`spec.relayAssetsDir` 在场(恒在场,session 必带)
+ * 于 egress socket bind 之后追加 `--ro-bind <dir> <dir>`(只读 —— 围栏内
+ * 中继脚本路径可解析,资产不可被围栏内命令改写)。
+ *
  * T6 条件凭据缝:`spec.sshAuthSockPath` 在场(开态)才在同一 egress bind 段
- * **追加**第二条 `--bind <agentSocket> <agentSocket>`(src=dest 同值,沙箱内
+ * **追加**最后一条 `--bind <agentSocket> <agentSocket>`(src=dest 同值,沙箱内
  * 路径不变,配 `spec.env` 的 `SSH_AUTH_SOCK` 同值引用);关态字段缺席 → 本
- * 段与 T4 逐字节一致。两条 bind 都保持在 workspaceMounts 之后、cwdReadonly
- * 之前 —— 段内相对次序 = egress socket 先、agent socket 后(观测者读序即
- * 装配因果序:桥是缝,凭据是挂在缝上的条件分支)。
+ * 段与 T4 逐字节一致(除中继 ro-bind 段)。全部 bind 都保持在 workspaceMounts
+ * 之后、cwdReadonly 之前 —— 段内相对次序 = egress socket 先、中继资产次之、
+ * agent socket 后(观测者读序即装配因果序:缝是主体,中继是缝的自带件,
+ * 凭据是挂在缝上的条件分支)。
  */
 function egressBindArgs(spec: EgressFenceSpec | undefined): string[] {
   if (spec === undefined) return [];
-  const { unixSocketPath, sshAuthSockPath } = spec;
+  const { unixSocketPath, relayAssetsDir, sshAuthSockPath } = spec;
   const out: string[] = [];
   if (typeof unixSocketPath === "string" && unixSocketPath.length > 0) {
     out.push("--bind", unixSocketPath, unixSocketPath);
+  }
+  // ADR-0107 自带中继资产:`--ro-bind <dir> <dir>`(src=dest 同值,独立
+  // argv 项)。围栏内 `innerBridgeScript` / ProxyCommand 引用的脚本路径
+  // 由此可解析 —— 不依赖安装根恰好落在默认可见子树。只读:围栏内中继
+  // 资产永不可被围栏内命令改写。
+  if (typeof relayAssetsDir === "string" && relayAssetsDir.length > 0) {
+    out.push("--ro-bind", relayAssetsDir, relayAssetsDir);
   }
   if (typeof sshAuthSockPath === "string" && sshAuthSockPath.length > 0) {
     out.push("--bind", sshAuthSockPath, sshAuthSockPath);

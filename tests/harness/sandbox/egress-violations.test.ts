@@ -199,7 +199,10 @@ describe("renderEgressFailureMessage (T5 typed failure, spec §Violation feedbac
     expect(out).toContain("egress seam unavailable");
     expect(out).toContain("infrastructure fault");
     // 修复指引分两份:infra 路径
-    expect(out).toContain("check the egress bridge / socat installation");
+    expect(out).toContain("iknow-bundled egress relay");
+    // ADR-0107：装包字样钉死不回潮。
+    expect(out.toLowerCase()).not.toContain("socat");
+    expect(out.toLowerCase()).not.toContain("apt");
     // 域判定拒绝指引**不**出现
     expect(out).not.toContain(
       "add the host to isolation.network.allowedDomains"

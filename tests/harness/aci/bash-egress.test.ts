@@ -6,16 +6,17 @@
  * 钉住的不变式（来自 specs/network-egress-allowlist.md §T4 + §T5 + ADR-0097）：
  *   - egressPolicyFactory 缺席 → handler 不起 session,fence 走 V1 baseline
  *     (无 socket bind,无代理 env);
- *   - egressPolicyFactory 返回 policy + 宿主缺 socat → handler 抛 typed
- *     failure `ToolExecutionError`,message 含 `[network_denied]` 前缀
+ *   - egressPolicyFactory 返回 policy + 中继产品依赖缺席(seam 注入抛
+ *     `EgressRelayUnavailableError`) → handler 抛 typed failure
+ *     `ToolExecutionError`,message 含 `[network_denied]` 前缀
  *     + 「egress seam unavailable」infra 文案（不再走 stderr 旁路 —— T5
  *     升级后走通既有 `categorizeResult` 的 `networkDenied → mid` 分支）;
  *   - egressPolicyFactory 返回 undefined → handler 完全跳过 session 尝试;
  *
  * **不测真实 bwrap+netns 出网**(SC2 真实链路实测由 leader 在收尾阶段用
- * pty 或 probe 承担)。handler 会真起 socat (若 probe 通过) + 真 spawn
- * bwrap —— 这部分在 socat 缺失的 CI 上不会被触发(我们的 probe 走默认
- * `which`, 本机通常无 socat)。
+ * pty 或 probe 承担)。present 路径真起中继 session(裸 http server listen
+ * unix socket, ADR-0107)+ 真 spawn bwrap —— 按 bwrap 在场性 gate(CI
+ * runner 无 user-namespace 时优雅跳过,本机必跑)。
  *
  * tier 1→mid 端到端走读见 `bash-egress-typed-failure.test.ts`(走 bash
  * handler 真实返回 → executor → categorizeResult → mid tier,不直接
@@ -28,6 +29,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterAll, describe, expect, it } from "vitest";
 import { createBashTool } from "../../../src/harness/aci/tools/bash.js";
+import { EgressRelayUnavailableError } from "../../../src/harness/sandbox/egress/session.js";
 import { ToolExecutionError } from "../../../src/harness/errors.js";
 
 const FIX_CWD = mkdtempSync(join(tmpdir(), "bash-egress-cwd-"));
@@ -36,9 +38,10 @@ afterAll(() => {
   rmSync(FIX_CWD, { recursive: true, force: true });
 });
 
-/** 探测宿主是否装了 socat —— 用于 skip 依赖 socat 的 case。 */
-function socatAvailable(): boolean {
-  const probe = spawnSync("which", ["socat"], {
+/** bwrap 在场性 gate —— present 路径真起 fence 子进程（ADR-0107 后
+ * 中继 session 装配本身无宿主装包前提，剩下的机器前提只有 bwrap）。 */
+function bwrapAvailable(): boolean {
+  const probe = spawnSync("which", ["bwrap"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
     timeout: 1000,
@@ -89,24 +92,27 @@ describe("bash handler — egress wiring (T4 expand)", () => {
     expect(env.stderr).not.toContain("egress seam unavailable");
   });
 
-  it("egressPolicyFactory 返 policy + socat 缺失 → 抛 typed failure,message 含 [network_denied] 前缀 (T5 / SC13)", async () => {
-    if (socatAvailable()) {
-      // 宿主有 socat —— 此 case 不适用(应走「成功路径」但本测试不验);
-      // 跳过避免误报。
-      return;
-    }
+  it("egressPolicyFactory 返 policy + 中继依赖缺席 → 抛 typed failure,message 含 [network_denied] 前缀 (T5 / SC13)", async () => {
+    // 缺席路径经 seam 注入必抛，恒可测、不依赖宿主状态（ADR-0107：
+    // 中继缺席是产品依赖语义，不再有「宿主缺包→降级」的可测性分叉）。
     const tool = createBashTool(FIX_CWD, {
       egressPolicyFactory: () => ({
         allowedDomains: ["github.com"],
         deniedDomains: [],
         commandLabel: "test:egress-fail-closed",
       }),
+      createEgressSessionFactory: (async () => {
+        throw new EgressRelayUnavailableError(
+          "this install cannot resolve its bundled egress relay",
+          "repair or reinstall the iknow install root — no extra system package is part of this product"
+        );
+      }) as never,
     });
     let caught: unknown;
     try {
       await tool.handler(
         { command: "true" },
-        { conversationId: "conv-socat-missing" }
+        { conversationId: "conv-relay-missing" }
       );
     } catch (err) {
       caught = err;
@@ -121,16 +127,17 @@ describe("bash handler — egress wiring (T4 expand)", () => {
     expect(message).toContain("infrastructure fault");
     // 修复指引:infra → 不给配置键指引（避免误导）。
     expect(message).not.toContain("isolation.network.allowedDomains");
-    expect(message).toContain("egress bridge");
+    expect(message).toContain("egress relay");
     // 「命令已跑完」语义提示。
     expect(message).toContain("command ran to completion");
   });
 
-  it("egressPolicyFactory 返 policy + socat 存在 → handler 正常走完(占位 smoke)", async () => {
-    if (!socatAvailable()) {
-      return; // 缺 socat 时此 case 不适用
+  it("egressPolicyFactory 返 policy + 中继在场（生产解析路径）→ handler 正常走完(占位 smoke)", async () => {
+    if (!bwrapAvailable()) {
+      return; // 无 bwrap 的 CI runner 上此 case 不适用
     }
-    // 真起 socat + http-proxy —— 消耗端口资源,本测试仅断言 handler 不抛错。
+    // 真中继解析 + 裸 http server listen unix socket + 真 bwrap ——
+    // 消耗 socket 资源,本测试仅断言 handler 不抛 typed error。
     // SC2 真实链路(curl 经代理出网)由 leader 在收尾阶段用 probe 测,本仓
     // 只验装配契约。
     const tool = createBashTool(FIX_CWD, {
@@ -142,10 +149,10 @@ describe("bash handler — egress wiring (T4 expand)", () => {
     });
     const result = (await tool.handler(
       { command: "true" },
-      { conversationId: "conv-socat-present" }
+      { conversationId: "conv-relay-present" }
     )) as BashEnvelope;
     const env = parseBashEnvelope(result);
-    // 真 session 起来后,runInSandbox 会真 spawn bwrap,可能因 bwrap argv
+    // 真 session 起来后,runInSandbox 会真 spawn bwrap,可能因 fence 内
     // 缺可执行程序而失败 —— 我们只断言 handler 不抛 typed error。
     expect(typeof env.code).toBe("number");
     expect(typeof env.stderr).toBe("string");

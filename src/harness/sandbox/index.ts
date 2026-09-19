@@ -42,11 +42,11 @@ export type { OutputMask } from "./output-mask.js";
 export {
   buildProxyEnv,
   createEgressSession,
-  defaultProbeSocat,
+  resolveEgressRelay,
   createEgressViolationSink,
   renderEgressViolations,
   renderEgressFailureMessage,
-  SocatUnavailableError,
+  EgressRelayUnavailableError,
   createEgressApprovalGate,
   type AskApproval,
   type CreateEgressApprovalGateOptions,

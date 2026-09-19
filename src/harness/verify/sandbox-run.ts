@@ -84,7 +84,7 @@ export function makeDefaultRunVerify(opts: {
   const fsPolicy = createFsPolicy({ tmpDir, mode: fsMode });
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   // ADR-0097 / T7:模块级 session 单例 —— 首次调用时 lazy start。
-  // start 失败(典型:socat 缺失 / 端口占用)→ session 保持 undefined,
+  // start 失败(典型:中继产品依赖缺席 / unix socket 占用)→ session 保持 undefined,
   // 后续调用 fence 走纯断网(fail-closed)。调用方经
   // `disposeEgressSessionForVerify` 释放(verify-loop / hub 会话退出时)。
   let egressSession: EgressSession | undefined;

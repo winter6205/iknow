@@ -13,7 +13,7 @@
  *     命令装配点的消费形状（socket bind / --setenv env 注入 / bash -c
  *     payload 内层前导）逐形态相等；
  *   - invariant 3 / F1：yolo（消费面无缝入参）/ 工厂返 undefined /
- *     SocatUnavailableError 三类「session 缺席」路径下，GIT_SSH_COMMAND
+ *     EgressRelayUnavailableError 三类「session 缺席」路径下，GIT_SSH_COMMAND
  *     与内层前导在围栏 argv 中**均缺席**，payload byte-identical；
  *   - 0097 §dispose 契约：per-task settle() 单次释放（exit 重复触发不
  *     二次 dispose）；verify 模块级单例 lazy start 跨调用复用；
@@ -89,8 +89,14 @@ const {
   buildInnerBridgeScript,
   buildProxyEnv,
   SANDBOX_HTTP_PROXY_PORT,
-  SocatUnavailableError,
+  EgressRelayUnavailableError,
 } = sessionMocked;
+const STUB_RELAY = {
+  nodePath: "/test-root/bin/node",
+  relayDir: "/test-root/vendor/egress-relay",
+  bridgeScriptPath: "/test-root/vendor/egress-relay/egress-tcp-relay.mjs",
+  connectScriptPath: "/test-root/vendor/egress-relay/egress-http-connect.mjs",
+} as const;
 const actualSession = await vi.importActual<
   typeof import("../../src/harness/sandbox/egress/session.js")
 >("../../src/harness/sandbox/egress/session.js");
@@ -144,8 +150,13 @@ const STUB_TOKEN = "ab".repeat(32);
 const STUB_SPEC = {
   unixSocketPath: STUB_SOCKET,
   sandboxLocalPort: SANDBOX_HTTP_PROXY_PORT,
-  env: buildProxyEnv(SANDBOX_HTTP_PROXY_PORT, STUB_TOKEN),
-  innerBridgeScript: buildInnerBridgeScript("socat", STUB_SOCKET),
+  env: buildProxyEnv(SANDBOX_HTTP_PROXY_PORT, STUB_TOKEN, STUB_RELAY),
+  innerBridgeScript: buildInnerBridgeScript(
+    STUB_RELAY.nodePath,
+    STUB_RELAY.bridgeScriptPath,
+    STUB_SOCKET
+  ),
+  relayAssetsDir: STUB_RELAY.relayDir,
 };
 
 function stubSession(dispose = vi.fn(async () => undefined)) {
@@ -264,15 +275,18 @@ describe("egress-ssh-bridge T5 — 三形态消费同一份 EgressFenceSpec", ()
     // 活在 env 值里）、innerBridgeScript→bash -c 前导。
     expect([bg, vf]).toEqual([expected, expected]);
     expect(fg).toEqual(expected);
-    // 前导含单桥监听 + trap（形状 SSOT 在 session.ts，此处钉三处接线）。
+    // 前导含单桥中继 + trap（形状 SSOT 在 session.ts，此处钉三处接线；
+    // ADR-0107：自带 node 中继件，旧宿主装包字样不得回潮）。
     for (const f of [fg, bg, vf]) {
-      expect(f.payload).toContain("TCP-LISTEN:3128,fork,reuseaddr");
+      expect(f.payload).toContain("egress-tcp-relay.mjs");
+      expect(f.payload).toContain(" 3128 ");
       expect(f.payload).toContain('trap "kill %1 2>/dev/null; exit" EXIT');
+      expect(f.payload.toLowerCase()).not.toContain("socat");
     }
   });
 });
 
-// ── 2. F1 零注入：yolo / 工厂 undefined / SocatUnavailableError ────────────
+// ── 2. F1 零注入：yolo / 工厂 undefined / EgressRelayUnavailableError ────
 
 describe("egress-ssh-bridge T5 / F1 — session 缺席三路径零注入（invariant 3）", () => {
   it("前台：无 egressPolicyFactory（yolo 姿态 = 无出网资格入参）→ argv 零注入", async () => {
@@ -293,11 +307,11 @@ describe("egress-ssh-bridge T5 / F1 — session 缺席三路径零注入（invar
     expect(fenceFacts(firstSpawnArgv())).toMatchObject(ABSENT);
   });
 
-  it("前台：SocatUnavailableError → 命令照常执行且 argv 零注入（无缝 = 纯断网）", async () => {
+  it("前台：EgressRelayUnavailableError → 命令照常执行且 argv 零注入（无缝 = 纯断网）", async () => {
     const tool = createBashTool(FIX_CWD, {
       egressPolicyFactory: () => ({ ...POLICY }),
       createEgressSessionFactory: (async () => {
-        throw new SocatUnavailableError("socat", "install socat");
+        throw new EgressRelayUnavailableError("relay deps missing", "repair the iknow install root");
       }) as never,
     });
     spawnMock.mockClear();
@@ -313,9 +327,9 @@ describe("egress-ssh-bridge T5 / F1 — session 缺席三路径零注入（invar
     expect(fenceFacts(await driveBackground(false))).toMatchObject(ABSENT);
   });
 
-  it("background：SocatUnavailableError → 任务照常 spawn 且零注入", async () => {
+  it("background：EgressRelayUnavailableError → 任务照常 spawn 且零注入", async () => {
     sessionHolder.impl = async () => {
-      throw new SocatUnavailableError("socat", "install socat");
+      throw new EgressRelayUnavailableError("relay deps missing", "repair the iknow install root");
     };
     expect(fenceFacts(await driveBackground(true))).toMatchObject(ABSENT);
   });
@@ -325,9 +339,9 @@ describe("egress-ssh-bridge T5 / F1 — session 缺席三路径零注入（invar
     expect(sessionHolder.calls).toBe(0);
   });
 
-  it("verify：SocatUnavailableError → 命令照常执行且零注入", async () => {
+  it("verify：EgressRelayUnavailableError → 命令照常执行且零注入", async () => {
     sessionHolder.impl = async () => {
-      throw new SocatUnavailableError("socat", "install socat");
+      throw new EgressRelayUnavailableError("relay deps missing", "repair the iknow install root");
     };
     expect(fenceFacts(await driveVerify(true))).toMatchObject(ABSENT);
   });
@@ -381,44 +395,38 @@ describe("egress-ssh-bridge T5 — settle / verify 单例 / 在场桥释放", ()
     await expect(disposeEgressSessionForVerify(runVerify)).resolves.toBeUndefined();
   });
 
-  it("当前在场的桥（HTTP 桥恒在）：stale socket 启动前清理 + dispose 收全部已起桥且幂等", async () => {
-    // 真 createEgressSession（importActual）+ 注入 seam，不依赖宿主 socat。
+  it("资源在场证据：stale socket 启动前清理 + server 真 listen + dispose 收全部已起资源且幂等", async () => {
+    // 真 createEgressSession（importActual）+ relayResolver / socketPath
+    // 注入 seam（ADR-0107：桥 = 宿主无进程的 unix listen，资源在场性以
+    // socket 文件与真实应答为证据，不依赖任何宿主装包面）。
     const dir = scratchDir("iknow-egress-3f-life-");
     const stalePath = join(dir, "iknow-egress-stale-3f.sock");
     writeFileSync(stalePath, "");
 
-    const startedProcs: Array<ReturnType<typeof makeFakeChild>> = [];
-    let socketGoneAtBridgeStart: boolean | undefined;
     const session = await actualSession.createEgressSession({
       policy: { ...POLICY },
-      socatCommand: "fake-socat",
-      probeSocat: () => true,
-      spawn: (((_cmd: string, args: readonly string[]) => {
-        // 桥 spawn 现场 = 「已起的桥」的全部；启动前清理纪律在调用点验证。
-        socketGoneAtBridgeStart = !existsSync(args[0]!.slice("UNIX-LISTEN:".length).split(",")[0]!);
-        const proc = makeFakeChild(47401 + startedProcs.length);
-        startedProcs.push(proc);
-        return proc as unknown as ChildProcess;
-      }) as unknown) as typeof import("node:child_process").spawn,
+      relayResolver: () => ({
+        nodePath: "/test-root/bin/node",
+        relayDir: "/test-root/vendor/egress-relay",
+        bridgeScriptPath: "/test-root/vendor/egress-relay/egress-tcp-relay.mjs",
+        connectScriptPath: "/test-root/vendor/egress-relay/egress-http-connect.mjs",
+      }),
       socketPathFactory: () => stalePath,
     });
 
-    expect(socketGoneAtBridgeStart).toBe(true);
-    // 默认在场的桥 = 一条（HTTP 桥 iknow-egress-*）；断言从 spawn 现场
-    // 派生而非写死桥数 —— T2 日后在场时本集自然扩容（SC5 条件形态）。
-    expect(startedProcs.length).toBeGreaterThanOrEqual(1);
+    // 启动即在场：stale 空文件被换装成真监听（server 本体 listen unix
+    // socket），默认在场的资源 = HTTP 代理监听一条（SOCKS 桥已被操作员
+    // 裁定摘出本分支，T2 日后在场时本集自然扩容不判红 —— SC5 条件形态）。
+    expect(existsSync(stalePath)).toBe(true);
 
     await session.dispose();
-    // dispose 单通道收「全部已起的桥」：每个已起 proc 都被 kill，socket 被删。
-    for (const proc of startedProcs) {
-      expect(proc.kill).toHaveBeenCalled();
-    }
+    // dispose 单通道收「全部已起的资源」：监听关闭 + socket 删除。
     expect(existsSync(stalePath)).toBe(false);
     // 幂等：重复 dispose 不抛（finally-safe）。
     await session.dispose();
     await session.dispose();
   });
-});
+})
 
 afterAll(() => {
   rmSync(FIX_CWD, { recursive: true, force: true });

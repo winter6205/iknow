@@ -48,12 +48,13 @@ function egressSpec(): EgressFenceSpec {
       // --setenv 单通道（invariant 4），fence 层零复制。
       GIT_SSH_COMMAND:
         "ssh -F /dev/null -o ControlMaster=no -o ControlPath=none " +
-        "-o ProxyCommand='socat - PROXY:127.0.0.1:%h:%p," +
-        "proxyport=3128,proxyauth=iknow:testtoken'",
+        "-o ProxyCommand='/test-root/bin/node " +
+        "/test-root/vendor/egress-relay/egress-http-connect.mjs %h %p'",
     },
     // bwrap 层不消费 innerBridgeScript（消费面是 bash.ts 命令链）；
-    // 这里只需满足 spec 形状。
+    // 这里只需满足 spec 形状。中继资产目录则**由 bwrap 消费**（ro-bind）。
     innerBridgeScript: "",
+    relayAssetsDir: "/test-root/vendor/egress-relay",
   };
 }
 
@@ -148,6 +149,24 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
     assert.ok(argv.includes("--unshare-net"));
   });
 
+  it("relay assets dir is ro-bound in the same egress segment (ADR-0107)", () => {
+    const argv = fenceArgv({ egress: egressSpec() });
+    const dir = "/test-root/vendor/egress-relay";
+    let roIdx = -1;
+    for (let i = 0; i + 2 < argv.length; i++) {
+      if (argv[i] === "--ro-bind" && argv[i + 1] === dir && argv[i + 2] === dir) {
+        roIdx = i;
+        break;
+      }
+    }
+    assert.ok(roIdx > 0, "expected --ro-bind <relayAssetsDir> <relayAssetsDir>");
+    // 独立 argv 项（security-boundaries.md：不许内联语法）——三项形态已
+    // 由上面的索引校验（每项独立元素）。落位 = workspaceMounts 之后、
+    // cwdReadonly/proc 之前：与 socket bind 同段。
+    assert.ok(roIdx < argv.indexOf("--proc"), "relay ro-bind precedes proc/dev");
+    assert.ok(roIdx < argv.indexOf("--clearenv"), "relay ro-bind precedes --clearenv");
+  });
+
   it("socket bind lands AFTER workspaceMounts, BEFORE cwdReadonly/proc", () => {
     const argv = fenceArgv({ egress: egressSpec() });
     const sockPath = "/tmp/iknow-egress-test.sock";
@@ -185,6 +204,7 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
         sandboxLocalPort: 3128,
         env: { HTTP_PROXY: "http://127.0.0.1:3128" },
         innerBridgeScript: "",
+        relayAssetsDir: "/test-root/vendor/egress-relay",
       },
     });
     // 空 socketPath → 不发射 --bind

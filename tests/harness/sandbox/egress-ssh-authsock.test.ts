@@ -9,21 +9,20 @@
  *   - 开态 = 宿主 agent socket 路径经同段 `--bind`（egress bind 段内：
  *     workspaceMounts 之后、cwdReadonly/proc/dev 之前，last-mount-wins 序）+
  *     `SSH_AUTH_SOCK` 入 `spec.env`（`--clearenv` 后 `--setenv` 单通道）；
- *   - 与 egress 桥同 dispose 通道：`session.dispose()` 收桥 + 删自有
- *     egress socket；agent socket 路径**非 session 所有**，dispose 不得
- *     删宿主 agent socket；
+ *   - 与 egress 桥同 dispose 通道：`session.dispose()` 关掉 unix 监听 +
+ *     删自有 egress socket；agent socket 路径**非 session 所有**，dispose
+ *     不得删宿主 agent socket；
  *   - fail-closed + F5 指引：开态但 agent socket 缺失（无 agent / 路径
  *     不存在）→ typed `SshAgentUnavailableError`（infra 归类），失败信息
- *     含「宿主侧 `ssh-add` 或无口令 key」一行；抛错发生在起桥之前
- *     （不留「有 bind 无桥」半开形态）；
+ *     含「宿主侧 `ssh-add` 或无口令 key」一行；抛错发生在起 server /
+ *     listen 之前（不留「有 bind 无缝」半开形态）；
  *   - F8 归类：agent socket 连不上属 infra 非域拒绝——凭据缝不经 filter，
  *     违例 sink 恒空（不开第二违例面）。
  *
- * 注入策略同 `egress-session.test.ts`：probeSocat / spawn /
- * socketPathFactory 全 mock，不依赖宿主真装 socat。
+ * 注入策略同 `egress-session.test.ts`：relayResolver /
+ * socketPathFactory 全 mock，不依赖宿主 node 布局与资产落位。
  */
 
-import { spawn as realSpawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,6 +32,7 @@ import {
   SshAgentUnavailableError,
   type EgressSession,
 } from "../../../src/harness/sandbox/egress/session.js";
+import type { EgressRelayPaths } from "../../../src/harness/sandbox/egress/relay-assets.js";
 import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.js";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.js";
 
@@ -50,16 +50,13 @@ afterEach(() => {
   }
 });
 
-/** 假 socat 进程（形态抄 egress-session.test.ts）。 */
-function fakeSocatProc(pid: number) {
-  const proc = realSpawn("/bin/true", ["--version"], { stdio: "ignore" });
-  try {
-    proc.kill("SIGKILL");
-  } catch {
-    /* */
-  }
-  return Object.assign(proc, { pid });
-}
+/** 固定假中继路径集（形态抄 egress-session.test.ts）。 */
+const STUB_RELAY: EgressRelayPaths = {
+  nodePath: "/test-root/bin/node",
+  relayDir: "/test-root/vendor/egress-relay",
+  bridgeScriptPath: "/test-root/vendor/egress-relay/egress-tcp-relay.mjs",
+  connectScriptPath: "/test-root/vendor/egress-relay/egress-http-connect.mjs",
+};
 
 /** 建一个「存在」的 agent socket fixture（缝形状只需 existsSync 通过）。 */
 function fakeAgentSocket(dir: string): string {
@@ -72,28 +69,20 @@ async function makeSession(opts: {
   readonly sshAuthSockPath?: string;
 }): Promise<{
   readonly session: EgressSession;
-  readonly socatArgs: readonly string[];
 }> {
-  let capturedArgs: readonly string[] = [];
-  const proc = fakeSocatProc(4242);
   const session = await createEgressSession({
     policy: {
       allowedDomains: ["github.com"],
       deniedDomains: [],
       commandLabel: "t6-test",
     },
-    socatCommand: "fake-socat",
-    probeSocat: () => true,
-    spawn: ((_cmd: string, args: readonly string[]) => {
-      capturedArgs = args;
-      return proc;
-    }) as typeof realSpawn,
+    relayResolver: () => STUB_RELAY,
     socketPathFactory: (id) => join(scratchDir(), `egress-${id}.sock`),
     ...(opts.sshAuthSockPath !== undefined
       ? { sshAuthSockPath: opts.sshAuthSockPath }
       : {}),
   });
-  return { session, socatArgs: capturedArgs };
+  return { session };
 }
 
 /**
@@ -151,7 +140,7 @@ describe("SSH_AUTH_SOCK 条件形态 — 关态（默认）", () => {
 describe("SSH_AUTH_SOCK 条件形态 — 开态", () => {
   it("开态：--bind 落 egress 段（workspaceMounts 后、proc/dev 前）+ env 注入走 --clearenv 后 --setenv", async () => {
     const agent = fakeAgentSocket(scratchDir());
-    const { session, socatArgs } = await makeSession({
+    const { session } = await makeSession({
       sshAuthSockPath: agent,
     });
     try {
@@ -165,17 +154,21 @@ describe("SSH_AUTH_SOCK 条件形态 — 开态", () => {
         "--bind",
         session.spec.unixSocketPath
       );
+      const relayRoIdx = tripleIdx(
+        argv,
+        "--ro-bind",
+        session.spec.relayAssetsDir
+      );
       const agentBindIdx = tripleIdx(argv, "--bind", agent);
       const procIdx = argv.indexOf("--proc");
-      // 段内落位：workspaceMounts(home) < egress socket bind < agent bind < proc/dev
+      // 段内落位：workspaceMounts(home) < egress socket bind < 中继资产
+      // ro-bind < agent bind < proc/dev（ADR-0107 段内次序：缝主体 →
+      // 自带件 → 条件凭据）。
       expect(homeRoIdx).toBeGreaterThan(-1);
       expect(egressSocketIdx).toBeGreaterThan(homeRoIdx);
-      expect(agentBindIdx).toBeGreaterThan(egressSocketIdx);
+      expect(relayRoIdx).toBeGreaterThan(egressSocketIdx);
+      expect(agentBindIdx).toBeGreaterThan(relayRoIdx);
       expect(agentBindIdx).toBeLessThan(procIdx);
-      // 与 egress 桥同一 session 装配（桥恒在场，凭据缝不单独开路）
-      expect(socatArgs[0]).toContain(
-        `UNIX-LISTEN:${session.spec.unixSocketPath}`
-      );
 
       const clearenvIdx = argv.indexOf("--clearenv");
       const setenvIdx = argv.findIndex(
@@ -188,16 +181,14 @@ describe("SSH_AUTH_SOCK 条件形态 — 开态", () => {
     }
   });
 
-  it("与 egress 桥同 dispose 通道：dispose 删自有 egress socket、不删宿主 agent socket，且幂等", async () => {
+  it("与 egress 缝同 dispose 通道：dispose 删自有 egress socket、不删宿主 agent socket，且幂等", async () => {
     const agent = fakeAgentSocket(scratchDir());
-    const { session, socatArgs } = await makeSession({
+    const { session } = await makeSession({
       sshAuthSockPath: agent,
     });
     const egressSocketPath = session.spec.unixSocketPath;
-    // 模拟桥真落过 socket 文件（假 spawn 不创建）
-    writeFileSync(egressSocketPath, "", "utf8");
+    // server 本体 listen unix socket —— session 存续期文件真实在场。
     expect(existsSync(egressSocketPath)).toBe(true);
-    expect(socatArgs.length).toBeGreaterThan(0);
 
     await session.dispose();
     expect(existsSync(egressSocketPath)).toBe(false);
@@ -210,9 +201,9 @@ describe("SSH_AUTH_SOCK 条件形态 — 开态", () => {
 });
 
 describe("SSH_AUTH_SOCK 条件形态 — fail-closed 与归类", () => {
-  it("开态但 agent socket 缺失 → SshAgentUnavailableError（infra），含「宿主侧 ssh-add 或无口令 key」指引，且不起桥", async () => {
+  it("开态但 agent socket 缺失 → SshAgentUnavailableError（infra），含「宿主侧 ssh-add 或无口令 key」指引，且不起缝", async () => {
     const missing = join(scratchDir(), "no-such-agent.sock");
-    let spawned = false;
+    let socketPathUsed: string | undefined;
     let err: unknown;
     try {
       await createEgressSession({
@@ -221,13 +212,11 @@ describe("SSH_AUTH_SOCK 条件形态 — fail-closed 与归类", () => {
           deniedDomains: [],
           commandLabel: "t6-missing-agent",
         },
-        socatCommand: "fake-socat",
-        probeSocat: () => true,
-        spawn: ((..._args: never[]) => {
-          spawned = true;
-          return fakeSocatProc(1);
-        }) as unknown as typeof realSpawn,
-        socketPathFactory: (id) => join(scratchDir(), `egress-${id}.sock`),
+        relayResolver: () => STUB_RELAY,
+        socketPathFactory: (id) => {
+          socketPathUsed = join(scratchDir(), `egress-${id}.sock`);
+          return socketPathUsed;
+        },
         sshAuthSockPath: missing,
       });
     } catch (e) {
@@ -237,8 +226,9 @@ describe("SSH_AUTH_SOCK 条件形态 — fail-closed 与归类", () => {
     expect((err as SshAgentUnavailableError).message).toContain(
       "宿主侧 `ssh-add` 或无口令 key"
     );
-    // fail-fast：抛错在起 socat 桥之前（不留「有 bind 无桥」半开形态）
-    expect(spawned).toBe(false);
+    // fail-fast：抛错在 socket 路径分配 / 起 server 之前（不留「有 bind
+    // 无缝」半开形态）。
+    expect(socketPathUsed).toBeUndefined();
   });
 
   it("F8 归类：agent socket 在场但为亡文件（连不上=infra）→ 缝形状照常装配，违例 sink 恒空（不冒充域拒绝）", async () => {

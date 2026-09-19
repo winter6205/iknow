@@ -231,6 +231,7 @@ describe("makeDefaultRunVerify — egress 缝装配 (ADR-0097 / T7)", () => {
       sandboxLocalPort: 19090,
       env: { HTTP_PROXY: "http://127.0.0.1:19090" },
       innerBridgeScript: "",
+      relayAssetsDir: "/test/iknow/vendor/egress-relay",
     };
     vi.mocked(sandboxIndex.createEgressSession).mockReset();
     vi.mocked(sandboxIndex.createEgressSession).mockResolvedValue({
@@ -257,7 +258,7 @@ describe("makeDefaultRunVerify — egress 缝装配 (ADR-0097 / T7)", () => {
   it("createEgressSession 抛错 → fence 不带 egress spec,verify 仍能执行 (fail-closed)", async () => {
     vi.mocked(sandboxIndex.createEgressSession).mockReset();
     vi.mocked(sandboxIndex.createEgressSession).mockRejectedValue(
-      new Error("socat missing")
+      new Error("relay deps missing")
     );
     captured.length = 0;
     const cwd = "/tmp/verify-egress-fail";

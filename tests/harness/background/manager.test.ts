@@ -614,6 +614,7 @@ describe("BackgroundTaskManager egress 缝装配 (ADR-0097 / T7)", () => {
         sandboxLocalPort: 18080,
         env: { HTTP_PROXY: "http://127.0.0.1:18080" },
         innerBridgeScript: "",
+        relayAssetsDir: "/test/iknow/vendor/egress-relay",
       },
       dispose,
     };
@@ -657,11 +658,11 @@ describe("BackgroundTaskManager egress 缝装配 (ADR-0097 / T7)", () => {
   });
 
   it("session.start 抛错 → 无 egressSpec 注入 fence,task 仍能正常 spawn (fail-closed)", async () => {
-    // fail-closed:createEgressSession 抛错(e.g. socat missing) → manager
+    // fail-closed:createEgressSession 抛错(e.g. 中继依赖缺失) → manager
     // 不挂 spec 到 fence request,fence 走纯断网(V1 baseline),任务仍
     // 正常起。
     nextCreateEgressImpl.current = async () => {
-      throw new Error("socat not found");
+      throw new Error("relay deps not found");
     };
     const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-egress-fail-"));
     tempRoots.push(root);

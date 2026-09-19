@@ -12,7 +12,7 @@
  *   - askApproval 抛异常 → fail-closed(等价于拒绝:记 `denied-by-user`);
  *   - 同 host 第二次调用 → 不再调 askApproval(gate 内部集合命中)。
  *
- * 本测试不真起 socat/proxy —— 使用 `createEgressSessionFactory` 注入 stub
+ * 本测试不真起中继/proxy —— 使用 `createEgressSessionFactory` 注入 stub
  * session,stub 内部把 filter 回调提取出来让我们驱动(filter 在 stub session
  * 构造期即被调用一次,暴露给测试断言),直接验 filter→gate→违例的链路。
  */
@@ -37,7 +37,7 @@ afterAll(() => {
 });
 
 /**
- * Stub session —— 暴露一个可在测试里手动触发的 filter 回调(不真起 socat
+ * Stub session —— 暴露一个可在测试里手动触发的 filter 回调(不真起中继
  * / proxy / 路径守卫)。每次 invokeFilter 即模拟一次 CONNECT 请求。
  *
  * 把 policyInput 持有的 approvalGate 直接拉出来调,模拟「代理 filter 看到
@@ -60,6 +60,7 @@ function makeDrivenEgressSessionFactory(): {
         sandboxLocalPort: 0,
         env: {},
         innerBridgeScript: "",
+        relayAssetsDir: "/test/iknow/vendor/egress-relay",
       },
       violationSink: sink,
       dispose: async () => undefined,
@@ -234,6 +235,7 @@ describe("bash handler — egress typed failure 反映 denied-by-user", () => {
           sandboxLocalPort: 0,
           env: {},
           innerBridgeScript: "",
+          relayAssetsDir: "/test/iknow/vendor/egress-relay",
         },
         violationSink: sink,
         dispose: async () => undefined,
@@ -282,6 +284,7 @@ describe("bash handler — egress typed failure 反映 denied-by-user", () => {
           sandboxLocalPort: 0,
           env: {},
           innerBridgeScript: "",
+          relayAssetsDir: "/test/iknow/vendor/egress-relay",
         },
         violationSink: sink,
         dispose: async () => undefined,

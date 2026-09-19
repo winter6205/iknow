@@ -16,13 +16,19 @@
 export {
   buildProxyEnv,
   createEgressSession,
-  defaultProbeSocat,
-  SocatUnavailableError,
+  EgressRelayUnavailableError,
   type EgressFenceSpec,
   type EgressPolicyInput,
   type EgressSession,
   type EgressSessionOptions,
 } from "./session.js";
+
+export {
+  egressRelayPathsFor,
+  resolveEgressRelay,
+  resolveNodeExecutable,
+  type EgressRelayPaths,
+} from "./relay-assets.js";
 
 export {
   createEgressViolationSink,

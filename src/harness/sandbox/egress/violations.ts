@@ -44,7 +44,7 @@ export type EgressViolationReason =
   /** 用户在交互入口明确拒绝批准该域名 —— 与 no-approval-inlet 区分(spec
    *  §三类信号可区分纪律:infra / 用户拒 / 未配置三类信号修复动作不同)。 */
   | "denied-by-user"
-  /** 基础设施故障（代理 / 桥进程死 / socat 缺失）—— 非域判定拒绝 */
+  /** 基础设施故障（代理 / 中继依赖缺席）—— 非域判定拒绝 */
   | "infra-unavailable";
 
 export interface EgressViolation {
@@ -113,7 +113,7 @@ export function createEgressViolationSink(): EgressViolationSink {
  * - no-approval-inlet：含被拒域名 + 非交互入口事实。
  * - denied-by-user：含被拒域名 + 用户明确拒绝事实 + 配置键指引。
  * - infra-unavailable：基础设施故障 —— **不得**与域判定拒绝混排同一段
- *   （修复动作完全不同：infra = 修机器 / 装 socat；域 = 改配置）。
+ *   （修复动作完全不同：infra = 修产品依赖 / 换装自带中继；域 = 改配置）。
  *   本函数只负责逐行渲染；infra/域混排拒绝逻辑在 `renderEgressFailureMessage`。
  *
  * 故意不渲染 secret / token / 命令全文 —— 命令截断到 80 字符。
@@ -155,7 +155,7 @@ function renderSingleViolation(v: EgressViolation): string {
 
 /**
  * 是否归类为「基础设施故障」—— 与域判定拒绝区分（spec §三类信号 + §Failure
- * paths）：infra = 修机器 / 装 socat / 起桥，**不得**给配置键指引；域判定
+ * paths）：infra = 修运行时 / 换装自带中继，**不得**给配置键指引；域判定
  * 拒绝 = 改配置 / 走交互批准入口。
  */
 function isInfraViolation(v: EgressViolation): boolean {
@@ -169,7 +169,7 @@ function isInfraViolation(v: EgressViolation): boolean {
  * 中文说明留给 caller 自己渲染：注释只解释「为什么分两段」—— 修动作不同。
  */
 const REMEDIATION_DOMAIN = `Remediation: add the host to isolation.network.allowedDomains in user settings, or approve it interactively through the permission prompt; the command itself ran to completion inside the sandbox — exit code still reflects the command, not this denial.`;
-const REMEDIATION_INFRA = `Remediation: this is an infrastructure fault, not a domain decision — check the egress bridge / socat installation, not the allowlist; the command itself ran to completion inside the sandbox — exit code still reflects the command, not this denial.`;
+const REMEDIATION_INFRA = `Remediation: this is an infrastructure fault, not a domain decision — check the iknow-bundled egress relay (vendor/egress-relay assets + a Node >=20 runtime in the install root), not the allowlist; the command itself ran to completion inside the sandbox — exit code still reflects the command, not this denial.`;
 const SOURCE_LABEL: Record<EgressAllowlistSource, string> = {
   session: "session-level allowlist",
   persisted: "user-settings persisted allowlist",
@@ -190,8 +190,8 @@ const SOURCE_LABEL: Record<EgressAllowlistSource, string> = {
  * §Failure paths + §三类信号），混排会让模型误读。纯 infra → 不列域名；
  * 纯域判定 → 不说「infra」。
  *
- * `infraHint`：基础设施故障的可选补装/修复片段（bash 装配层在 socat 缺失
- * 等 typed-error 上注入，typed-error catch 契约 code-quality.md）。仅在
+ * `infraHint`：基础设施故障的可选修复片段（bash 装配层在自带中继依赖
+ * 缺失等 typed-error 上注入，typed-error catch 契约 code-quality.md）。仅在
  * infra-only 路径插入一行（位于 REMEDIATION_INFRA 之前），让模型/TUI
  * 看见「是哪个二进制 + 怎么装」；缺省不插入（避免无信息时的重复说明）。
  */
@@ -250,8 +250,9 @@ function appendDomainPortion(
 
 /**
  * 「基础设施故障」段落拼接 —— 公用从 violations 列表渲染每条 + 可选
- * infraHint（typed-error catch 契约落地：SocatUnavailableError 携带的
- * socatCommand + installHint 拼成;让模型/TUI 直接看到「装哪个 + 怎么装」,
+ * infraHint（typed-error catch 契约落地：EgressRelayUnavailableError
+ * 携带的 detail + remediationHint 拼成;让模型/TUI 直接看到「缺哪个产品
+ * 依赖 + 怎么修」(ADR-0107：非系统装包文案),
  * 不再让 typed-error 信息被 [object Object] 吞掉）+ REMEDIATION_INFRA
  * 尾注。抽出以控制 `renderEgressFailureMessage` 复杂度（S5 门）。
  */

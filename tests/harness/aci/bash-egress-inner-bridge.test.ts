@@ -5,9 +5,9 @@
  *
  * 钉住的不变式：
  *   - egress session 在场 → `bash -c` 的 payload =
- *     `<spec.innerBridgeScript>\n<finalCommand>`（前导 = socat TCP-LISTEN
- *     单桥 + trap kill EXIT，O3「全仓无 TCP-LISTEN/UNIX-CONNECT 装配」的
- *     清偿点在消费侧的第一处）；
+ *     `<spec.innerBridgeScript>\n<finalCommand>`（前导 = 自带 node 中继
+ *     单桥 TCP-LISTEN→UNIX + trap kill EXIT，ADR-0107 换装；O3「全仓无
+ *     内层监听装配」的清偿点在消费侧的第一处）；
  *   - 无 egress（factory 缺席 / 返 undefined / session start 失败）→
  *     payload 与 V1 baseline **byte-identical**（`<finalCommand>` 逐字节，
  *     无任何前导残留 —— invariant 3「无缝 = 无桥」的 argv 面）。
@@ -87,7 +87,8 @@ async function driveForeground(
 }
 
 const STUB_SCRIPT = buildInnerBridgeScript(
-  "socat",
+  "/test-root/bin/node",
+  "/test-root/vendor/egress-relay/egress-tcp-relay.mjs",
   "/tmp/iknow-egress-inner-stub.sock"
 );
 
@@ -103,6 +104,7 @@ function stubSessionFactory() {
           NO_PROXY: "127.0.0.1,localhost",
         },
         innerBridgeScript: STUB_SCRIPT,
+        relayAssetsDir: "/test-root/vendor/egress-relay",
       },
       violationSink: createEgressViolationSink(),
       dispose: async () => undefined,
@@ -121,9 +123,12 @@ describe("bash 前台命令链内层桥前导 (egress-ssh-bridge T1)", () => {
     });
     const payload = await driveForeground(tool, "echo hi");
     assert.equal(payload, `${STUB_SCRIPT}\necho hi`);
-    // 前导含单桥监听与 trap（形状 SSOT 在 session.ts 的构建器，此处钉接线）。
-    assert.ok(payload.includes("TCP-LISTEN:3128,fork,reuseaddr"));
+    // 前导含单桥中继与 trap（形状 SSOT 在 session.ts 的构建器，此处钉接线）。
+    assert.ok(payload.includes("egress-tcp-relay.mjs"));
+    assert.ok(payload.includes(" 3128 "));
     assert.ok(payload.includes('trap "kill %1 2>/dev/null; exit" EXIT'));
+    // ADR-0107：旧宿主装包依赖字样不得回潮。
+    assert.ok(!payload.toLowerCase().includes("socat"));
   });
 
   it("无 egress（factory 缺席）→ payload byte-identical 于 V1 baseline", async () => {
