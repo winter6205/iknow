@@ -36,8 +36,8 @@ import {
   EgressCredentialMintError,
   mintEgressCredentials,
   type EgressCredentialMint,
-  type EgressCredentialRoster,
-} from "../../../src/harness/sandbox/egress/credential-assembly.js";
+} from "../../../src/harness/sandbox/egress/credential-mint.js";
+import type { EgressCredentialRoster } from "../../../src/harness/sandbox/egress/credential-assembly.js";
 import {
   CA_TRUST_VARS,
   generateCa,

@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, it } from "vitest";
 import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.js";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.js";
 import type { EgressFenceSpec } from "../../../src/harness/sandbox/egress/session.js";
-import type { EgressFenceBind } from "../../../src/harness/sandbox/egress/credential-assembly.js";
+import type { EgressFenceBind } from "../../../src/harness/sandbox/egress/credential-mint.js";
 
 const FIX_ROOT = mkdtempSync(join(homedir(), ".iknow-egress-binds-"));
 const TASK = join(FIX_ROOT, "task");

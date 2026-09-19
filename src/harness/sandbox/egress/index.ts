@@ -43,18 +43,21 @@ export {
 
 export {
   assembleEgressCredentials,
+  BUILTIN_GITHUB_CREDENTIAL_ROSTER,
+  type EgressCredentialEnvVarEntry,
+  type EgressCredentialFileEntry,
+  type EgressCredentialRoster,
+  type UserCredentialSection,
+} from "./credential-assembly.js";
+
+export {
   assertInjectedEnvInFakeSpace,
   assertSentinelSubstringContract,
-  BUILTIN_GITHUB_CREDENTIAL_ROSTER,
   EgressCredentialMintError,
   mintEgressCredentials,
   type CredentialDenyTrace,
-  type EgressCredentialEnvVarEntry,
-  type EgressCredentialFileEntry,
   type EgressCredentialMint,
   type EgressCredentialMintErrorKind,
-  type EgressCredentialRoster,
   type EgressFenceBind,
   type MintEgressCredentialsArgs,
-  type UserCredentialSection,
-} from "./credential-assembly.js";
+} from "./credential-mint.js";

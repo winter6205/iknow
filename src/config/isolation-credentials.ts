@@ -219,8 +219,39 @@ function applyEntryCap(
   return { files: keptFiles, envVars: keptEnvVars };
 }
 
+/** 单侧列表逐条解析：非数组 → undefined（该字段缺席）；数组 → 保序收集合法条目。 */
+function parseEntryList<T>(
+  rawList: unknown,
+  parseEntry: (raw: unknown, onWarn?: (message: string) => void) => T | undefined,
+  onWarn?: (message: string) => void
+): T[] | undefined {
+  if (!Array.isArray(rawList)) return undefined;
+  const out: T[] = [];
+  for (const entry of rawList) {
+    const parsed = parseEntry(entry, onWarn);
+    if (parsed !== undefined) out.push(parsed);
+  }
+  return out;
+}
+
+/** 段合成：缺席字段不落键（缺席 ≠ 空数组事实，见主函数注释）。 */
+function synthesizeSection(
+  hasFiles: boolean,
+  hasEnvVars: boolean,
+  capped: {
+    files: IknowSettingsCredentialFileEntry[];
+    envVars: IknowSettingsCredentialEnvVarEntry[];
+  }
+): IknowSettingsIsolationCredentials {
+  const out: IknowSettingsIsolationCredentials = {};
+  if (hasFiles) out.files = capped.files;
+  if (hasEnvVars) out.envVars = capped.envVars;
+  return out;
+}
+
 /**
- * 解析 `isolation.credentials` 段 —— 仅用户层。
+ * 解析 `isolation.credentials` 段 —— 仅用户层（编排层：守卫 → 两列表
+ * 解析 → 上限收尾 → 合成；各段私有件）。
  * 非普通对象 → undefined（丢段不警告，同 parseIsolationNetwork）；
  * 两列表各自逐条解析（非法条目丢该条 + 警告）；合计超上限丢尾 + 警告；
  * 两字段皆缺席 → undefined（空段不产出）。
@@ -229,33 +260,22 @@ export function parseIsolationCredentials(
   raw: unknown,
   onWarn?: (message: string) => void
 ): IknowSettingsIsolationCredentials | undefined {
-  if (raw === undefined || raw === null) return undefined;
-  if (!isPlainObject(raw)) return undefined;
-
-  const files: IknowSettingsCredentialFileEntry[] = [];
-  if (Array.isArray(raw.files)) {
-    for (const entry of raw.files) {
-      const parsed = parseFileEntry(entry, onWarn);
-      if (parsed !== undefined) files.push(parsed);
-    }
+  if (raw === undefined || raw === null || !isPlainObject(raw)) {
+    return undefined;
   }
-  const envVars: IknowSettingsCredentialEnvVarEntry[] = [];
-  if (Array.isArray(raw.envVars)) {
-    for (const entry of raw.envVars) {
-      const parsed = parseEnvVarEntry(entry, onWarn);
-      if (parsed !== undefined) envVars.push(parsed);
-    }
-  }
-
-  const hasFiles = Array.isArray(raw.files);
-  const hasEnvVars = Array.isArray(raw.envVars);
-  if (!hasFiles && !hasEnvVars) return undefined;
-  const capped = applyEntryCap(files, envVars, onWarn);
-
-  const out: IknowSettingsIsolationCredentials = {};
-  if (hasFiles) out.files = capped.files;
-  if (hasEnvVars) out.envVars = capped.envVars;
-  return out;
+  const files = parseEntryList(raw.files, parseFileEntry, onWarn);
+  const envVars = parseEntryList(raw.envVars, parseEnvVarEntry, onWarn);
+  if (files === undefined && envVars === undefined) return undefined;
+  const capped = applyEntryCap(
+    files ?? [],
+    envVars ?? [],
+    onWarn
+  );
+  return synthesizeSection(
+    files !== undefined,
+    envVars !== undefined,
+    capped
+  );
 }
 
 /**

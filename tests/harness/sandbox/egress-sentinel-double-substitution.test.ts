@@ -23,7 +23,7 @@ import { describe, it } from "vitest";
 import {
   assertSentinelSubstringContract,
   EgressCredentialMintError,
-} from "../../../src/harness/sandbox/egress/credential-assembly.js";
+} from "../../../src/harness/sandbox/egress/credential-mint.js";
 import { ToolExecutionError } from "../../../src/harness/errors.js";
 import {
   matchesDomainPattern,

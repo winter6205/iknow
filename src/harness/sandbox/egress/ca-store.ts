@@ -118,25 +118,26 @@ export function ensurePersistentCa(opts: {
   readonly onWarn?: (message: string) => void;
 }): PersistentCaState {
   const { caDir, onWarn = (message: string) => console.warn(message) } = opts;
-  const certPath = join(caDir, CA_CERT_FILE);
-  const keyPath = join(caDir, CA_KEY_FILE);
+  const paths: CaPairPaths = {
+    caDir,
+    certPath: join(caDir, CA_CERT_FILE),
+    keyPath: join(caDir, CA_KEY_FILE),
+  };
 
   const dirNotice = ensureCaDirMode(caDir);
   if (dirNotice) {
-    return regenerate(caDir, certPath, keyPath, dirNotice, onWarn);
+    return regenerate(paths, dirNotice, onWarn);
   }
 
-  const cert = readOptional(certPath);
-  const key = readOptional(keyPath);
+  const cert = readOptional(paths.certPath);
+  const key = readOptional(paths.keyPath);
   if (cert === null && key === null) {
-    writeCaPair(certPath, keyPath);
-    return { certPath, keyPath, action: "generated", notice: null };
+    writeCaPair(paths);
+    return persistentCaState(paths, "generated", null);
   }
   if (cert === null || key === null) {
     return regenerate(
-      caDir,
-      certPath,
-      keyPath,
+      paths,
       {
         kind: "ca_pair_incomplete",
         detail: `CA pair half-missing in ${caDir} (${cert === null ? CA_CERT_FILE : CA_KEY_FILE} absent) — regenerating`,
@@ -145,12 +146,10 @@ export function ensurePersistentCa(opts: {
     );
   }
 
-  const keyMode = modeOfOrThrow(keyPath);
+  const keyMode = modeOfOrThrow(paths.keyPath);
   if (keyMode !== CA_KEY_MODE) {
     return regenerate(
-      caDir,
-      certPath,
-      keyPath,
+      paths,
       {
         kind: "ca_permissions",
         detail: `CA key file mode is ${octal(keyMode)} (required ${octal(CA_KEY_MODE)}) — refused, regenerating`,
@@ -162,9 +161,7 @@ export function ensurePersistentCa(opts: {
   const validation = validateCaPair(cert, key);
   if (!validation.ok) {
     return regenerate(
-      caDir,
-      certPath,
-      keyPath,
+      paths,
       {
         kind: "ca_pair_invalid",
         reason: `validateCaPair failed for ${caDir}: ${validation.reason} — regenerating`,
@@ -172,7 +169,7 @@ export function ensurePersistentCa(opts: {
       onWarn
     );
   }
-  return { certPath, keyPath, action: "loaded", notice: null };
+  return persistentCaState(paths, "loaded", null);
 }
 
 /**
@@ -205,17 +202,35 @@ export function egressCaBindSources(ca: MitmCA): readonly EgressCaBindSource[] {
 
 // ── 私有件 ──────────────────────────────────────────────────────────────
 
+/** 持久 CA 路径包（本模块私有布局，随装载动作整体传递，S5 max-params 门）。 */
+interface CaPairPaths {
+  readonly caDir: string;
+  readonly certPath: string;
+  readonly keyPath: string;
+}
+
+function persistentCaState(
+  paths: CaPairPaths,
+  action: PersistentCaAction,
+  notice: CaStoreNotice | null
+): PersistentCaState {
+  return {
+    certPath: paths.certPath,
+    keyPath: paths.keyPath,
+    action,
+    notice,
+  };
+}
+
 function regenerate(
-  caDir: string,
-  certPath: string,
-  keyPath: string,
+  paths: CaPairPaths,
   notice: CaStoreNotice,
   onWarn: (message: string) => void
 ): PersistentCaState {
   onWarn(`[egress-ca-store] ${describeNotice(notice)}`);
-  ensureCaDirMode(caDir);
-  writeCaPair(certPath, keyPath);
-  return { certPath, keyPath, action: "regenerated", notice };
+  ensureCaDirMode(paths.caDir);
+  writeCaPair(paths);
+  return persistentCaState(paths, "regenerated", notice);
 }
 
 /**
@@ -241,10 +256,10 @@ function ensureCaDirMode(caDir: string): CaStoreNotice | null {
   return notice;
 }
 
-function writeCaPair(certPath: string, keyPath: string): void {
+function writeCaPair(paths: CaPairPaths): void {
   const pair = generateCa({ cn: CA_SUBJECT_CN });
-  writeSecretFile(certPath, pair.certPem);
-  writeSecretFile(keyPath, pair.keyPem);
+  writeSecretFile(paths.certPath, pair.certPem);
+  writeSecretFile(paths.keyPath, pair.keyPem);
 }
 
 /**

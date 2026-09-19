@@ -52,10 +52,12 @@ import {
 import type { EgressApprovalGate } from "./approval.js";
 import {
   mintEgressCredentialLayer,
-  type EgressCredentialMint,
   type EgressCredentialRoster,
-  type EgressFenceBind,
 } from "./credential-assembly.js";
+import {
+  type EgressCredentialMint,
+  type EgressFenceBind,
+} from "./credential-mint.js";
 import { loadEgressCa, type EgressCaLoad } from "./ca-store.js";
 
 /**
