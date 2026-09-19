@@ -52,6 +52,7 @@ OVERALL: PASS — hand to writing-plans
    - **Inherits:** spec T5 三条操作、SC6（`npm test` + probe + TUI 实测证据留档）、F1 不对称在文案与测试双向钉住、OQ2（playwright 两域以 webui 浏览器二进制下载实测复核）、Boundaries Out（凭据面未就绪的 `git push` 遗留如实登记，不算本档失败）
    - **Surface:** `mcp__aiterm__pty_*` 起 TUI 的真实装配链（干净 settings：无 `isolation.network` 段）
    - **Acceptance:** 三条操作各有 transcript 屏上证据——①`curl -sI https://github.com` 直通（档内无需批准）；②`curl -sI https://example.com` 触发首见批准门：拒 → tool_result 含 `[network_denied]` + 字面 `Current allowlist source: built-in preset allowlist (github / npm / playwright defaults).`；批 → 同会话再访不再问；③`git push --dry-run`（https remote）档内可达（凭据遗留如实登记）
+   - **实测登记：** T5 首跑发现内层桥冷启动竞态（裸 curl exit 7），前置修复 = `buildInnerBridgeScript` 就绪轮询（spec 登记见 `specs/egress-ssh-bridge.md` T1 段修订注记），T5 以裸 curl 重跑为准。
    - Status: [ ] pending
    - [blocks: T2, T3]
 
@@ -59,4 +60,5 @@ OVERALL: PASS — hand to writing-plans
 
 - **T1/T2 的落地次序留 headroom**：T1 测试钉 `"builtin"` 字面值意味着封闭联合的枚举扩展须随其一 landing——union 改动放 T1 还是 T2 由实现者按「每颗子弹单 commit 且 build 绿」自行裁量，两颗合起来的形状由 Acceptance 钉死。
 - **OQ1（批准写回 settings）不阻塞**：`persisted` 档生产者暂由「settings 段在场」承担；写回 API 落地时若需第四档另裁。
+- **rebase 调和登记（03c6ca0a）**：cherry-pick 到最新 master 时与 credential-sentinel 侧「network 段缺席 → 工厂返 `undefined` + no-fence 痕」语义冲突，按 preset invariant 3 反转（段缺席 = preset-only policy 恒起 session）；no-fence 痕语义只归 yolo 接线方，不再由「settings 段缺席」触发。
 - 全部 bullets 落地后进入 end-of-round code review phase，再按 `docs/guides/prompt-development.md` 之外的常规收尾（`arthurpower:verification-before-completion`）闭轮。

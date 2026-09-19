@@ -11,7 +11,7 @@
 ## Boundaries
 
 - **Does:**
-  - 新增 `preset-domains.ts`：`BUILTIN_PRESET_ALLOWED_DOMAINS`（frozen 数组，**清单 SSOT 仅此一处**）= `github.com`、`*.github.com`、`*.githubusercontent.com`、`registry.npmjs.org`、`playwright.download.prss.microsoft.com`、`cdn.playwright.dev`（apex 与 `*.x` 并列写——`*.x` 严格子域不含 apex 是 0097 实测语义，缺一漏面）。
+  - 新增 `preset-domains.ts`：`BUILTIN_PRESET_ALLOWED_DOMAINS`（frozen 数组，**清单 SSOT 仅此一处**）= `github.com`、`*.github.com`、`*.githubusercontent.com`、`registry.npmjs.org`、`playwright.download.prss.microsoft.com`、`cdn.playwright.dev`（apex 与 `*.x` 并列写——`*.x` 严格子域不含 apex 是 0097 实测语义，缺一漏面）。**登记：现行清单以 ADR-0107 §Decision 2 十四条目为准（扩表 commit 7be192df）；本行 6 条为 ADR-0104 起源形态，保留作沿革。清单 SSOT 仍仅 `preset-domains.ts` 一处。**
   - `createEgressPolicyFactory` 合并语义：`allowedDomains = preset ∪ 用户层 allowedDomains`（去重后顺序：preset 在前、用户增量在后，便于人读）；`deniedDomains` 只取用户层，**deny 优先不变**（用户可用 denied 精确砍掉任一 preset 域）。
   - **配置段缺席也起 session**：`settings.isolation.network === undefined` 时工厂不再返回 `undefined`，改返回 preset-only policy（见 T1；同时修复 0097 生命周期表实现落差，显式引用见下）。
   - `allowlistSource` 标签重定 + 违例文案联动（见 T2）。
@@ -85,6 +85,8 @@
 
 **验收**：三条操作的屏上证据（transcript 片段）入验收报告。
 
+**实测登记（T5 首跑）**：内层桥冷启动竞态——中继 listen 前裸 `curl` 即发起 CONNECT，得 ECONNREFUSED（exit 7）；probe 侧以 `--retry-connrefused` 消化（`sandbox-probe.ts:371`），产品路径无消化件。修复 = `buildInnerBridgeScript` 前导追加就绪轮询行（冻结形态修订登记在 `specs/egress-ssh-bridge.md` T1 段），修复后 T5 以裸 curl 重跑为准。
+
 ## Failure paths
 
 | #   | 路径                                          | 行为                                                                                                                                                         |
@@ -99,7 +101,7 @@
 ## Success criteria
 
 - **SC1**：干净装配（无任何 network 段）下三消费面均起 egress session，允许集 = preset 6 域；`assembly` 返 `undefined` 分支在生产装配路径不可达（wiring 测试）。
-- **SC2**：preset 清单逐字 = ADR-0104 §Decision 1 六条目，SSOT 单文件；含「无已知 LLM provider 域」的反向断言测试。
+- **SC2**：preset 清单逐字 = ADR-0104 §Decision 1 六条目，SSOT 单文件；含「无已知 LLM provider 域」的反向断言测试。（登记：「六条目」为起源形态沿革表述，现行判据 = ADR-0107 §Decision 2 十四条目逐字，见 `preset-domains.ts` 现状。）
 - **SC3**：合并语义四断言：apex+子域并列命中、用户增量并集、deny 优先可砍 preset、用户空列表不缩档。
 - **SC4**：`allowlistSource` 三档 `builtin/persisted/session` 各有生产者与 `SOURCE_LABEL` 渲染钉子；`"preset"` 旧值全仓清零（grep 断言）。
 - **SC5**：首见批准门在干净装配下可触发（交互 ask 一次 / 非交互 `no-approval-inlet`），闭合 ADR-0097 §生命周期表与实现的既有落差（T3 钉子显式引用该表）。
