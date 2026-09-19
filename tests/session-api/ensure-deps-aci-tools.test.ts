@@ -121,6 +121,9 @@ const EXPECTED_TOOLS = [
   // serve 走 build-engine 全装配（自建 subagentManager）→ 末位在场。
   "subagent_stop",
   "subagent_continue",
+  // read-image-vision T2 (spec SC6) read_image append-only:常驻（无缺席条件），
+  // serve 全装配必在场。
+  "read_image",
 ];
 
 let baseDir: string;

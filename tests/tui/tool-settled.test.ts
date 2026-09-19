@@ -17,6 +17,7 @@ import {
   deriveSlot,
   isLiveNoise,
   settledClassOf,
+  TOOL_SETTLED_CLASS,
   type SettledSlot,
 } from "../../src/tui/tool-settled.js";
 import {
@@ -48,6 +49,19 @@ describe("deriveSlot: SC1 单一派生", () => {
   test("read_file 失败 → 失败横切（标题留、error 色、不进计数、无预览）", () => {
     expect(deriveSlot("read_file", { running: false, failed: true })).toEqual(
       ERROR_SHAPE
+    );
+  });
+
+  test("read_image 在 class 表内显式登记为 retract（缺省兜底不算登记）", () => {
+    // spec read-image-vision 假设 11：与 read_file 同类；显式登记以免
+    // summary 消费方（TOOL_SETTLED_CLASS[name] 直取）拿到 undefined 空洞。
+    expect(
+      Object.prototype.hasOwnProperty.call(TOOL_SETTLED_CLASS, "read_image")
+    ).toBe(true);
+    expect(TOOL_SETTLED_CLASS.read_image).toBe("retract");
+    expect(settledClassOf("read_image")).toBe("retract");
+    expect(deriveSlot("read_image", { running: false, failed: false })).toEqual(
+      RETRACT_SHAPE
     );
   });
 });
@@ -219,8 +233,16 @@ describe("isLiveNoise（live 块入场判据，specs live-signal revision #3）"
   // 2 锁）。live 块入场只走 isLiveNoise —— web_* 在 live 阶段不算 noise，进
   // 实卡不进 unanchored 块；其余 retract 名一律进块。
 
-  test("read_file / grep / glob / memory_recall → true（进 unanchored 块）", () => {
-    for (const name of ["read_file", "grep", "glob", "memory_recall"]) {
+  test("read_file / read_image / grep / glob / memory_recall → true（进 unanchored 块）", () => {
+    // read_image 与 read_file 同档（spec read-image-vision 假设 11）：
+    // isLiveNoise 无独立名册、由 settledClassOf 派生，本条锁派生结果。
+    for (const name of [
+      "read_file",
+      "read_image",
+      "grep",
+      "glob",
+      "memory_recall",
+    ]) {
       expect(isLiveNoise(name)).toBe(true);
     }
   });

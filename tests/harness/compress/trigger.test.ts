@@ -82,3 +82,52 @@ describe("evaluateCompactTrigger — 统一触发判据 (plan compress-trigger-g
     });
   });
 });
+
+describe("evaluateCompactTrigger — 仅含嵌套 image 的 tool_result 不崩 (SC9)", () => {
+  it("纯 image tool_result(无 text)→ 不抛且返回合法判定", () => {
+    // SC9 不变式：image-only tool_result 走 compact 判据不得抛异常，
+    // 且必须是三分支 union 之一的合法判定。公式不钉，不 assert 具体分支。
+    const imageData =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==".repeat(
+        64
+      );
+    const messages: AnthropicNativeMessage[] = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "img1",
+            content: [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/png",
+                  data: imageData,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const evaluate = (threshold: number) =>
+      evaluateCompactTrigger(messages, {
+        contextWindow: 200_000,
+        threshold,
+      });
+
+    assert.doesNotThrow(() => evaluate(1));
+    assert.doesNotThrow(() => evaluate(1_000_000));
+    for (const decision of [evaluate(1), evaluate(1_000_000)]) {
+      assert.ok(
+        decision.action === "noop" ||
+          decision.action === "compact_via_full_summary" ||
+          decision.action === "compact_via_window",
+        `非法判定分支: ${JSON.stringify(decision)}`
+      );
+    }
+  });
+});

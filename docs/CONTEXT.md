@@ -98,7 +98,7 @@ _Avoid_: 整轮一行 stub；思考摘要与过程组两套时态叠画；Ctrl+O
 **body slot（正文槽）**: 过程块里唯一给正文的位置。思考仍在流时归思考；**live noise** 接手后归一行 dim 当前预览。有语义工具不占此槽。
 _Avoid_: 思考字里刷工具消息；思考与 `⎿` 混排；web_search 预览塞进思考槽
 
-**live noise（实时噪音）**: live 才进过程块的侦察（`grep` / `glob` / `read_file` / 列举 / 内部查询）。不是整张 retract，也不含 `web_search` / `web_fetch`。
+**live noise（实时噪音）**: live 才进过程块的侦察（`grep` / `glob` / `read_file` / `read_image` / 列举 / 内部查询）。不是整张 retract，也不含 `web_search` / `web_fetch`。
 _Avoid_: 把网络搜索当噪音；live 把所有 retract 折进 `calling`
 
 **live signal（实时有语义）**: live 必须实卡的动作——keep / accent / 失败，以及 `web_search` / `web_fetch`（查询或 URL 一行 dim，不摊长文）。
@@ -113,8 +113,8 @@ _Avoid_: `[运行中]` 前缀；工具还在跑就关仍在流的思考槽；把
 **keep class（留）**: 落定后仍画出标题行的工具类（bash / write / edit / 会话动作）。bash 成功留命令 + 折叠后的 **result preview**；新建走 **write create preview**；编辑走 **edit diff preview**；挤档可只留 `Wrote N lines to path`。
 _Avoid_: 成功 bash 只留标题把 Updating files 藏掉；只留 dim 预览尾巴；把标题藏进折叠计数；把本次改动折没
 
-**retract class（收）**: 落定后不摊正文预览的工具类（读 / 多数搜 / 查询）。live 是否进过程块改问 **live noise**，不是本表整表折进 `calling`。`read_file` 仍不摊文件内容；`web_search` / `web_fetch` 走 **live signal**。
-_Avoid_: 给 `read_file` 加内容预览；失败折进计数；把 retract 等同于 live 全折
+**retract class（收）**: 落定后不摊正文预览的工具类（读 / 多数搜 / 查询）。live 是否进过程块改问 **live noise**，不是本表整表折进 `calling`。`read_file` / `read_image` 仍不摊文件内容（图不摊像素）；`web_search` / `web_fetch` 走 **live signal**。
+_Avoid_: 给 `read_file` / `read_image` 加内容或像素预览；失败折进计数；把 retract 等同于 live 全折
 
 **accent class（点名着色）**: 落定后以非 dim 的 `accent` 色 + 人读表述留在屏幕上的特定能力（skill、task worktree 生命周期工具）。必须进显示注册表。
 _Avoid_: 浅色隐藏；只进计数；用 error 红当点名色
@@ -175,7 +175,7 @@ _Avoid_: 工具自填 structured metadata 进 model tool_result；把 bash 例�
 **observability side-channel**: (#298) 工具观测旁路——handler 返 envelope `{ output, meta? }`；executor 拆分后仅 `output` 字符串化进 model-facing tool_result，`meta`（典型如 edit_file/write_file 的 `oldContent`/`newContent`）经 `PostToolUseHook.payload` → `TuiToolEvent.payload` → `LiveToolRun` 字段供 TUI diff 预览等观测消费者，永不进模型视野。ADR-0004（supersede Y1）。
 _Avoid_: 把 meta 拼入 model tool_result；让 TUI / Web 直接读 handler 原始返回对象
 
-**ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；**基线 8 件**（`bash` / `read_file` / `grep` / `glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`）之后按 append-only 批次增长（memory 2 / skill / subagent / todo / mcp / bg / run_graph / trace 读侧 / **符号工具面** 15 / worktree 5 …）。**当前件数以 `src/harness/aci/tools/registry.ts:ACI_TOOLSET_NAMES` 数组长度为唯一 SSOT，本词条不复述数字**（该文件自己声明「本表长度以数组为 source of truth」）。SSOT 工厂 = 同文件 `createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取（#141 / #191 / a277f68）。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。
+**ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；**基线 8 件**（`bash` / `read_file` / `grep` / `glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`）之后按 append-only 批次增长（memory 2 / skill / subagent / todo / mcp / bg / run_graph / trace 读侧 / **符号工具面** 15 / worktree 5 / `read_image` …）。**当前件数以 `src/harness/aci/tools/registry.ts:ACI_TOOLSET_NAMES` 数组长度为唯一 SSOT，本词条不复述数字**（该文件自己声明「本表长度以数组为 source of truth」）。SSOT 工厂 = 同文件 `createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取（#141 / #191 / a277f68）。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。
 _Avoid_: 在词条或文档里写死「当前 N 件」（必漂——曾写「当前 8 件 / 8+2=10」而数组早已 40+）；在 harness 之外另起 tool 注册表；在 entry point 手写工具数组；让工具返回结构化 metadata
 
 **符号工具面（symbol tool surface）**: 模型面的 15 件 LSP 支撑工具——10 件查（`find_symbol` / `find_declaration` / `find_referencing_symbols` / `find_implementations` / `get_symbols_overview` / `get_hover` / `get_diagnostics_for_file` / `prepare_call_hierarchy` / `list_incoming_calls` / `list_outgoing_calls`）+ 5 件改（`rename_symbol` / `replace_symbol_body` / `insert_before_symbol` / `insert_after_symbol` / `safe_delete_symbol`）；以符号身份 `{ file, symbol_path }` 提问，行列译码封在 `symbol-resolver.ts`。#251 的 10 件坐标面 `lsp_*` 已在 symbol-primary-aci T5 从**模型面**退役，但**没有退役出代码库**——`createLspToolSet` 是 `scripts/lsp-probe.ts:266` 的真实栈烟测仪器（经 `package.json` 的 `probe:lsp` 接线），且 `renderNoServer` / `stringifyResult` / `isLspFailureSentinel` / `getClientForWorkspaceDetailed` 等共享件仍被活的 `symbol.ts` / `symbol-mutate.ts` / `symbol-resolver.ts` import。该文件是**名字起错**，不是死了。
@@ -184,8 +184,11 @@ _Avoid_: 把 `lsp_*` 当现行模型面；把 `createLspToolSet` 当死代码删
 **请求级打开窗口（request-scoped didOpen）**: tsserver 对未打开文件**不建 project**，所以符号类 RPC 必须罩在 `client.withDocumentOpen(file, run)` 里（进入开、退出关，含抛错与超时路径）——**这是 project 上下文的前提，不是性能优化**；请求间不对 server 保持打开，故 version 每次从 1 起算（`symbol-resolver` 缓存键改内容指纹即此推论）。例外只有**首次** `lsp_*` 同族调用触发的 warmup：裸 `ensureOpen` 置 `pinned = true` 永久持有一个**真实样本文件**，理由与本条同（`warmup.ts` / `client.ts`）；装配完成且从未调用这类工具则不起 language server。已知豁免口：`find_symbol` 的 `file` 缺省分岔用伪路径 `<directory>/iknow-workspace.ts` 仅为 spawn，随后裸发请求、不开窗口（`lsp.ts` / `symbol.ts`）。
 _Avoid_: 把 didOpen 当可省的优化；跨请求保持打开（`pinned` 预热除外）；用伪路径当 project 锚点；把无锚点查询的空结果读成「真没这个符号」；用请求级 version 号当跨请求缓存键
 
+**read_image**: ACI 读图工具。围栏内指定 `path`，魔数为 jpeg/png/gif/webp 且不超过 `read_file` 同档体积顶时，把 Anthropic SDK `ImageBlockParam`（base64）放进 `tool_result.content`。不入 last-read；`read_file` 仍拒二进制。
+_Avoid_: 扩 `read_file` 出图；消息顶层 `type: image`；只认扩展名；工具层 vision 能力表；按 path 在 adapter 里 hydrate
+
 **last-read ledger**: 本 conversation 内「看过的规范 path」登记表。**进程内存**，键为 conversationId，不落会话文件夹。入账：成功 `read_file`，或成功且可抽单一 path 的白名单 `bash`（`cat` / `nl` / `bat` / `batcat` / `head` / `tail` / `sed -n 'X,Yp'` / `grep` / `egrep` / `fgrep` / `rg`；单文件、无管道、无重定向）。只供已存在且 size>0 的 `write_file` 查表，没有则硬拒不写盘；新建与空文件免检。`edit_file` 不查表。不扫 `ctx.messages`。无 conversationId 则非空覆写 fail-closed。resume 空表。ADR-0084。
-_Avoid_: 用对话字符串判断读过；进程级全局表；落盘当权威；把任意只读 bash（`ls`/`stat`/管道）当入账；复用 `validateReadonlyCommand` 当入账；把 last-read 当作 `edit_file` 前置
+_Avoid_: 用对话字符串判断读过；进程级全局表；落盘当权威；把任意只读 bash（`ls`/`stat`/管道）当入账；复用 `validateReadonlyCommand` 当入账；把 last-read 当作 `edit_file` 前置；把 `read_image` 成功当入账
 
 **grep output mode**: `grep` 的出法枚举：默认 `paths`（只要相对路径）；`content` 为匹配行；`count` 为每文件条数加全库 total。结果名单条数参数为 `head_limit`（默认 50、顶 2000）。ADR-0084。
 _Avoid_: 默认吐匹配行；把 `limit` 改名为 `grep_limit`

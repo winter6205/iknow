@@ -139,9 +139,8 @@ describe("run_graph — ACI 常驻注册(ADR-0041 关键边界)", () => {
     expect(ACI_TOOLSET_NAMES[40]).toBe("get_record");
     expect(ACI_TOOLSET_NAMES[41]).toBe("list-worktrees");
     expect(ACI_TOOLSET_NAMES[42]).toBe("remove-worktree");
-    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 1]).toBe(
-      "subagent_continue"
-    );
+    expect(ACI_TOOLSET_NAMES[43]).toBe("subagent_stop");
+    expect(ACI_TOOLSET_NAMES[44]).toBe("subagent_continue");
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
       "read_file",

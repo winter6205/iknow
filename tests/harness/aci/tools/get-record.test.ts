@@ -221,22 +221,21 @@ describe("get_record ACI tool", () => {
     });
     const validator = reg.inner.getValidator("get_record");
 
-    // append-only 仍生效：get_record 之后的工具仅限 host 缝条件化装配的
-    // 4 件（task-worktree-lifecycle #869 的 list/remove + ADR-0037 的
-    // create/enter/exit 的可见性变体；本 registry 未供任何 host 缝 → 实际
-    // 入注册表的仅 get_record 自己）。三轴顺序（目录 → 行 → 内容）由 append
-    // 顺序体现，后来者不能悄悄把它打乱。断言用索引而非硬编码下标，从 SSOT
-    // 派生「内容轴之后还有多少条件化工具」。
+    // append-only 仍生效：get_record 之后的工具仅限尾部 append 的常驻读工具
+    // read_image（read-image-vision T2 / SC6）+ host 缝条件化装配的几件
+    // （task-worktree-lifecycle 的 list/remove + subagent stop/continue；
+    // 本 registry 未供任何 host 缝 / manager → 它们全数缺席）。三轴顺序
+    // （目录 → 行 → 内容）由 append 顺序体现，后来者不能悄悄把它打乱。
+    // 断言用索引而非硬编码下标，从 SSOT 派生「内容轴之后还有谁」。
     const getRecordIdx = ACI_TOOLSET_NAMES.indexOf("get_record");
     const afterContentAxis = ACI_TOOLSET_NAMES.slice(getRecordIdx + 1);
-    // 本场景（无 host 缝）下：所有排在 get_record 之后的工具都是 host 缝
-    // 条件化装配的（task-worktree-lifecycle 2 件 + ADR-0037 三件里的可见
-    // 变体不进本 registry），所以尾段在实例里应收敛为空。
+    // 本场景（无 host 缝）下：get_record 之后入注册表的只剩常驻的 read_image。
     assert.ok(getRecordIdx > 0, "get_record 必须在 list_sessions 之后");
-    assert.equal(
-      reg.inner.list().at(-1)?.name,
-      "get_record",
-      "未供 host 缝时 get_record 收尾（条件化件全数缺席）"
+    const presentNames = reg.inner.list().map((d) => d.name);
+    assert.deepEqual(
+      presentNames.slice(presentNames.indexOf("get_record") + 1),
+      ["read_image"],
+      "未供 host 缝时 get_record 后仅剩常驻 read_image（条件化件全数缺席）"
     );
     assert.equal(reg.catalog.get("get_record")?.name, "get_record");
     assert.ok(validator, "the registry must compile a validator for the tool");
@@ -268,22 +267,24 @@ describe("get_record ACI tool", () => {
       validator!({ conversation_id: "c1", record_id: "r", byte_window: 1 }),
       false
     );
-    // append-only SSOT 纪律:内容轴之后还能 append,但只能是条件化装配件
-    // （host 缝 / subagentManager 缝）。此断言让「之后还能 append 但不得插队」
+    // append-only SSOT 纪律:内容轴之后还能 append,但只能是常驻读工具
+    // read_image（read-image-vision T2）或条件化装配件（host 缝 /
+    // subagentManager 缝）。此断言让「之后还能 append 但不得插队」
     // 成为可测不变式。
-    const conditionalTailNames = new Set([
+    const allowedTailNames = new Set([
+      "read_image",
       "list-worktrees",
       "remove-worktree",
       // plan subagent-stop-and-continue T2/T4:stop / continue 与 spawn / result
       // 同门（subagentManager 条件化装配）—— 本 registry 未供 manager，尾段
-      // 收敛为空的下一条断言仍认证「条件化件全数缺席」。
+      // 收敛为 [read_image] 的上文断言仍认证「条件化件全数缺席」。
       "subagent_stop",
       "subagent_continue",
     ]);
     for (const name of afterContentAxis) {
       assert.ok(
-        conditionalTailNames.has(name),
-        `get_record 后只能 append 条件化装配件,unexpected "${name}"`
+        allowedTailNames.has(name),
+        `get_record 后只能 append 常驻读工具或条件化装配件,unexpected "${name}"`
       );
     }
   });

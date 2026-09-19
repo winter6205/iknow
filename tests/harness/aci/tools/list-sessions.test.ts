@@ -247,8 +247,14 @@ describe("list_sessions ACI tool", () => {
       1,
       "list_sessions 必须紧邻 get_record 之前（append-only 不重排）"
     );
-    assert.equal(reg.inner.list().at(-1)?.name, "get_record");
-    assert.equal(reg.inner.list().at(-2)?.name, "list_sessions");
+    // 实例面同锁相邻：get_record 之后允许再 append（read_image 常驻 +
+    // 条件化件），所以用 indexOf 派生相邻关系而非硬编码 at(-N) 尾位。
+    const presentNames = reg.inner.list().map((d) => d.name);
+    assert.equal(
+      presentNames[presentNames.indexOf("get_record") - 1],
+      "list_sessions",
+      "实例装配顺序里 list_sessions 仍紧邻 get_record 之前"
+    );
     assert.equal(reg.catalog.get("list_sessions")?.name, "list_sessions");
     assert.ok(validator, "the registry must compile a validator for the tool");
     // 界真的由 ajv 执行，不只是写在 schema 里：这是 ACI 面拒 `limit: 0` 的那道门。

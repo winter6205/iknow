@@ -127,7 +127,7 @@ const fakeBackgroundManager: BackgroundTaskManager = {
 describe("createDefaultAciRegistry — 正常路径", () => {
   // symbol-primary-aci T5 全条件装配：memoryDir + skillCatalog + subagentManager +
   // todoDir + mcpManager + backgroundManager + graphAssembly 同时在场 → list()
-  // 全量 = ACI_TOOLSET_NAMES 全长（plan subagent-stop-and-continue T2/T4 后 45 件），顺序 append-only。10 件 lsp_*
+  // 全量 = ACI_TOOLSET_NAMES 全长（plan subagent-stop-and-continue T2/T4 + read-image-vision T2 后 46 件），顺序 append-only。10 件 lsp_*
   // 已退役（坐标面 → 符号面接班），lsp.ts 实现的 SSOT 不变。
   it("memoryDir + skillCatalog + subagentManager + todoDir + mcpManager + backgroundManager + graphAssembly 同时在场 → list() 全量 = ACI_TOOLSET_NAMES 全长,顺序 append-only", () => {
     const reg = createDefaultAciRegistry({
@@ -226,14 +226,10 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("bash_stop")).toBeUndefined();
   });
 
-  // task-worktree-lifecycle 后 ACI_TOOLSET_NAMES 长度 43；plan
-  // subagent-stop-and-continue T2/T4 append subagent_stop + subagent_continue → 45。
-  // (T2+T4 末态 31 + 5 件 T4 符号改 - 10 件退役 lsp_* + 1 件 disclosure-index-align
-  //  T2 删 skill_search -1)。
-  // append-only 纪律保留 22 件既有 + 末位 14 件符号面 / 改工具。
-  // 旧 10 件 lsp_* 已退役（spec symbol-primary-aci.md §37-53 + SC2 + SC7）。
-  it("Gate 3:ACI_TOOLSET_NAMES 长度 45,前 8 原序 + memory_* + tool_search + skill + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop + run_graph + query_trace + 10 符号查询 + 5 符号改 + worktree 3 件 + list_sessions + get_record + list/remove worktree + subagent_stop + subagent_continue", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(45);
+  // read-image-vision T2 append read_image（常驻）→ 全长 46。名单顺序是本测试
+  // 钉住的契约：前 8 原序 + 各 append 段按名单尾部顺序逐项锁位，任何重排即红。
+  it("Gate 3:ACI_TOOLSET_NAMES 长度 46,前 8 原序 + memory_* + tool_search + skill + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop + run_graph + query_trace + 10 符号查询 + 5 符号改 + worktree 3 件 + list_sessions + get_record + list/remove worktree + subagent_stop + subagent_continue + read_image", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(46);
     // 前 8 件原序不变(append-only 纪律)。
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -322,6 +318,9 @@ describe("createDefaultAciRegistry — 正常路径", () => {
       "subagent_stop",
       "subagent_continue",
     ]);
+    // read-image-vision T2 (spec SC6) append-only:45→46,末位 1 件常驻
+    // （无缺席条件），不重排既有 45 件。
+    expect(ACI_TOOLSET_NAMES.slice(45, 46)).toEqual(["read_image"]);
   });
 });
 

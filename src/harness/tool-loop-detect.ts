@@ -3,6 +3,8 @@
  * 无法正规化（含不规则 MCP 形状）→ fail-open。
  */
 
+import { createHash } from "node:crypto";
+
 import type { ToolExecutionResult } from "./tools/types.js";
 
 export const LOOP_DETECT_REPEAT = 5;
@@ -39,13 +41,33 @@ function canonicalJson(value: unknown): string | null {
   }
 }
 
+/**
+ * 契约（path-image-vision 修复 R2）：resultKey 不收像素本体 —— read_image
+ * 成功臂的 payload 携带 ≤1.4MB base64 image block（executor 下转型塞进
+ * AnthropicContentBlock[]），整块序列化会随 events 全 run 累积。base64 image
+ * block 按内容哈希指纹化（相同字节 → 相同 resultKey，loop 判等语义不变）；
+ * 其余非 text block 维持既有 JSON.stringify 路径。
+ */
+function imageFingerprint(b: unknown): string | null {
+  if (b === null || typeof b !== "object") return null;
+  const block = b as Record<string, unknown>;
+  if (block.type !== "image") return null;
+  const source = block.source;
+  if (source === null || typeof source !== "object") return null;
+  const src = source as Record<string, unknown>;
+  if (src.type !== "base64" || typeof src.data !== "string") return null;
+  const hash = createHash("sha256").update(src.data, "utf8").digest("hex");
+  return `image:${String(src.media_type)}:${hash}`;
+}
+
 function okPayloadText(
   result: Extract<ToolExecutionResult, { kind: "ok" }>
 ): string {
   return result.payload
-    .map((b) =>
-      b.type === "text" && "text" in b ? String(b.text) : JSON.stringify(b)
-    )
+    .map((b) => {
+      if (b.type === "text" && "text" in b) return String(b.text);
+      return imageFingerprint(b) ?? JSON.stringify(b);
+    })
     .join("\n");
 }
 

@@ -302,13 +302,19 @@ describe("query_trace ACI tool (T7)", () => {
     });
     assert.equal(registry.catalog.get("query_trace")?.name, "query_trace");
     // 读侧三件都无装配条件 → 常驻;两件读轴工具也是 trace 读侧的同门。
-    // 本场景（无 host 缝）下 get_record 收尾（host 缝条件化的 task-worktree
-    // 工具全数缺席）。这取代旧的「末位 = get_record 永远是末位」脆弱断言。
+    // 三轴阅读顺序（行 → 目录 → 内容）在实例装配序里由 indexOf 派生锁死，
+    // 不钉绝对尾位（read_image 等后续 append 件允许排在更后）。
     const presentNames = registry.inner.list().map((d) => d.name);
     assert.ok(presentNames.includes("query_trace"));
     assert.ok(presentNames.includes("list_sessions"));
     assert.ok(presentNames.includes("get_record"));
-    assert.equal(presentNames.at(-1), "get_record");
+    assert.ok(
+      presentNames.indexOf("query_trace") <
+        presentNames.indexOf("list_sessions") &&
+        presentNames.indexOf("list_sessions") <
+          presentNames.indexOf("get_record"),
+      "实例装配顺序必须保持 query_trace → list_sessions → get_record"
+    );
   });
 });
 

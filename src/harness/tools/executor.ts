@@ -13,6 +13,8 @@
  *   - Executor 不读取 / 不构造供应商原生字段,Model Adapter 负责编码。
  */
 
+import type { ImageBlockParam } from "@anthropic-ai/sdk/resources/messages.js";
+import { IMAGE_MEDIA_TYPES } from "../aci/tools/read-image.js";
 import type { AnthropicContentBlock } from "../model-adapter/types.js";
 import type { RegistryImpl } from "./registry.js";
 import type {
@@ -33,10 +35,46 @@ const OUTPUT_HARD_CAP = 20000;
 const TRUNCATION_MARKER_TEMPLATE =
   "…[executor: 输出超长已截断，原长 {original} 字符，保留 {kept} 字符；如需更多信息，用更精确的输入重新调用]";
 
-function safeContent(
-  payload: unknown,
-  exemptFromOutputCap: boolean
-): AnthropicContentBlock[] {
+/**
+ * path-image-vision T1: `safeContent` 的图像直通洞只为 `read_image` 成功臂开
+ * （spec 假设 7），其余工具仍压 text。名字闸 + 形状闸双条件：形状闸防
+ * read_image 之外的畸形 payload 借名穿透，也防同名工具返回非图像形状时
+ * 绕过既有 text 语义。
+ */
+const IMAGE_PASSTHROUGH_TOOL_NAME = "read_image";
+
+/** SDK base64 image source 的合法 media_type：名单 SSOT 在 read-image.ts。 */
+const IMAGE_MEDIA_TYPE_SET: ReadonlySet<string> = new Set<string>(IMAGE_MEDIA_TYPES);
+
+/**
+ * executor 输出侧的内容块联合。image block（SDK `ImageBlockParam`）只活在
+ * `tool_result.content`（协议类型为 `unknown`）内，**不进**顶层
+ * `AnthropicContentBlock` 联合 —— spec 假设 6 / 协议不变。故本联合仅是
+ * executor 内部的组装类型，落 `ToolExecutionResult.payload` 时向下转型
+ * （payload 声明仍是 `AnthropicContentBlock[]`，Adapter 按 `unknown` content
+ * 原样上 wire，不做结构解释）。
+ */
+type ToolResultContentBlock = AnthropicContentBlock | ImageBlockParam;
+
+function isImageBlockParam(v: unknown): v is ImageBlockParam {
+  if (!isNonArrayObject(v) || v.type !== "image") return false;
+  const source = v.source;
+  if (!isNonArrayObject(source) || source.type !== "base64") return false;
+  return (
+    typeof source.data === "string" &&
+    source.data.length > 0 &&
+    IMAGE_MEDIA_TYPE_SET.has(source.media_type as string)
+  );
+}
+
+function safeContent(payload: unknown, def: ToolDefinition): ToolResultContentBlock[] {
+  if (
+    def.name === IMAGE_PASSTHROUGH_TOOL_NAME &&
+    isImageBlockParam(payload)
+  ) {
+    // 像素即 payload 本体，ADR-0006 的字符顶是文本度量，不适用。
+    return [payload];
+  }
   let text: string;
   if (typeof payload === "string") {
     text = payload;
@@ -53,7 +91,7 @@ function safeContent(
   }
   // ADR-0083:装配期声明豁免的工具(工具 def 上的静态字段)不过兜底闸,
   // 原样交付、不追加 marker;其余工具逐字节沿用既有截断语义。
-  const capped = exemptFromOutputCap ? text : applyOutputCap(text);
+  const capped = def.exemptFromOutputCap === true ? text : applyOutputCap(text);
   return [{ type: "text", text: capped }];
 }
 
@@ -266,10 +304,12 @@ function buildOkResult(
     ? extractMeta(out)
     : undefined;
   // meta 为可选字段：`{ meta }`（含 undefined）与条件展开等价，收敛为直写。
+  // payload 向下转型见 `ToolResultContentBlock` 注释：image 块只经
+  // `tool_result.content`(unknown) 上 wire，顶层协议联合不变。
   return {
     kind: "ok",
     toolUseId: call.id,
-    payload: safeContent(out, def.exemptFromOutputCap === true),
+    payload: safeContent(out, def) as AnthropicContentBlock[],
     meta,
   };
 }

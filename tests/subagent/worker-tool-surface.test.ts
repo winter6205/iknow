@@ -158,6 +158,10 @@ const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
   // （任何 surface 都建 traceDir），故不条件化。位置在末位 = registry.list()
   // 跟随 ACI_TOOLSET_NAMES 的 append-only 顺序。
   "get_record",
+  // read-image-vision T2 (spec SC6) — read_image 常驻（category=read-only、
+  // 无装配条件），随 ACI_TOOLSET_NAMES 尾部 append 进 worker 基础面；
+  // 不在默认 deny 名单，worker 不经 disallowedTools 剥离。
+  "read_image",
 ]);
 
 // ---------------------------------------------------------------------------

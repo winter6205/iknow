@@ -8,6 +8,7 @@ import {
   toolLoopEventFromCall,
   type ToolLoopEvent,
 } from "../../src/harness/tool-loop-detect.ts";
+import type { AnthropicContentBlock } from "../../src/harness/model-adapter/types.ts";
 import type { ToolExecutionResult } from "../../src/harness/tools/types.ts";
 
 const fail = (msg: string): ToolExecutionResult => ({
@@ -20,6 +21,24 @@ const okText = (text: string): ToolExecutionResult => ({
   kind: "ok",
   toolUseId: "x",
   payload: [{ type: "text", text }],
+});
+
+/**
+ * read_image 成功臂的 payload 是 executor 下转型（as AnthropicContentBlock[]）
+ * 后携带的 image block —— image 不在该联合内，构造测试数据同样需要下转型。
+ */
+const okImage = (
+  mediaType: string,
+  data: string
+): ToolExecutionResult => ({
+  kind: "ok",
+  toolUseId: "x",
+  payload: [
+    {
+      type: "image",
+      source: { type: "base64", media_type: mediaType, data },
+    } as unknown as AnthropicContentBlock,
+  ],
 });
 
 function ev(
@@ -105,5 +124,64 @@ describe("isStalledToolLoop", () => {
       ev("echo", { n: 1 }, fail("e"), 0)
     );
     assert.equal(isStalledToolLoop(wave), false);
+  });
+});
+
+/**
+ * path-image-vision 修复 R2：read_image 成功臂的 payload 携带 ≤1.4MB base64
+ * image block（executor 下转型塞进 AnthropicContentBlock[]）。resultKey 必须
+ * 仍对「相同图像重复出现」判等（loop 语义不变），但不得携带像素本体。
+ */
+describe("image block resultKey fingerprint", () => {
+  // 256KiB 伪随机像素 → base64 约 341K 字符，模拟 read_image 真实 payload 量级。
+  const bigData = Buffer.alloc(256 * 1024, 0xab).toString("base64");
+  const otherData = Buffer.alloc(256 * 1024, 0xcd).toString("base64");
+
+  it("resultKey 不收像素：data 原文不出现在 resultKey 与 events 序列化中", () => {
+    const e = ev("read_image", { path: "a.png" }, okImage("image/png", bigData), 0);
+    assert.equal(e.normalizable, true);
+    assert.ok(!e.resultKey.includes(bigData));
+    assert.ok(!JSON.stringify(e).includes(bigData));
+    // 指纹仍保留媒体类型信息供判等
+    assert.ok(e.resultKey.includes("image/png"));
+  });
+
+  it("字节相同的图像 → resultKey 相等（loop 判等语义不变）", () => {
+    const a = ev("read_image", { path: "a.png" }, okImage("image/png", bigData), 0);
+    const b = ev("read_image", { path: "a.png" }, okImage("image/png", bigData), 1);
+    assert.equal(a.resultKey, b.resultKey);
+  });
+
+  it("像素不同的图像 → resultKey 不等（内容哈希判等不误伤进展）", () => {
+    const a = ev("read_image", { path: "a.png" }, okImage("image/png", bigData), 0);
+    const b = ev("read_image", { path: "a.png" }, okImage("image/png", otherData), 1);
+    assert.notEqual(a.resultKey, b.resultKey);
+  });
+
+  it("同像素不同 media_type → resultKey 不等（指纹含 media_type）", () => {
+    const a = ev("read_image", { path: "a" }, okImage("image/png", bigData), 0);
+    const b = ev("read_image", { path: "a" }, okImage("image/jpeg", bigData), 1);
+    assert.notEqual(a.resultKey, b.resultKey);
+  });
+
+  it("同一图像重复 R=5 跨 phase → 仍判 stalled（大 payload 不再撑爆 events）", () => {
+    const events = [0, 1, 2, 3, 4].map((p) =>
+      ev("read_image", { path: "a.png" }, okImage("image/png", bigData), p)
+    );
+    assert.equal(isStalledToolLoop(events), true);
+    // events 整体序列化必须远小于 5 份像素本体（不吞 base64 的可观测代理）
+    assert.ok(JSON.stringify(events).length < bigData.length);
+  });
+
+  it("同一图像但像素每轮变化 → 不 stalled（判等基于内容哈希）", () => {
+    const events = [0, 1, 2, 3, 4].map((p) =>
+      ev(
+        "read_image",
+        { path: "a.png" },
+        okImage("image/png", Buffer.alloc(256 * 1024, p).toString("base64")),
+        p
+      )
+    );
+    assert.equal(isStalledToolLoop(events), false);
   });
 });

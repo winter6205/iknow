@@ -79,6 +79,9 @@ export const TOOL_SETTLED_CLASS: Readonly<Record<string, SettledClass>> = {
   memory_save: "keep",
   // retract（收，标题与预览同假，只进折叠计数）
   read_file: "retract",
+  // read-image-vision 假设 11：与 read_file 同类。未注册名虽缺省 retract，
+  // 仍显式登记 —— summary 消费方按 TOOL_SETTLED_CLASS[name] 直取值，缺项即空洞。
+  read_image: "retract",
   grep: "retract",
   glob: "retract",
   web_search: "retract",

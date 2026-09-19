@@ -137,6 +137,37 @@ describe("estimateMessagesTokens", () => {
     );
   });
 
+  it("仅含嵌套 image、无 text 的 tool_result → 估算 > 0（SC9）", () => {
+    // SC9 不变式：纯 image tool_result 不得估成 0，否则满图会话在
+    // compact 判据下被当成无内容。公式不钉，只钉 > 0。
+    const imageData =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==".repeat(
+        64
+      );
+    const messages: AnthropicNativeMessage[] = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "img1",
+            content: [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/png",
+                  data: imageData,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    assert.ok(estimateMessagesTokens(messages) > 0);
+  });
+
   it("超长 text block 数组 → 估算足以跨越 compact threshold", () => {
     const content = [{ type: "text", text: "x".repeat(600_000) }];
     const messages: AnthropicNativeMessage[] = [

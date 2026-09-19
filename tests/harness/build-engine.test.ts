@@ -182,6 +182,9 @@ const EXPECTED_TOOLS = [
   // plan subagent-stop-and-continue T4 (ADR-0102) subagent_continue append-only:
   // 同门条件、stop 之后末位。
   "subagent_continue",
+  // read-image-vision T2 (spec SC6) read_image append-only:常驻（无缺席条件），
+  // 任何 surface 全装配都在场。
+  "read_image",
 ];
 
 /** #440 T4 / #502 T3 条件化缺席视图:todoDir 未透传的 chat surface(默认行为)。

@@ -8,9 +8,15 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createRegistry } from "../../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../../src/harness/tools/executor.ts";
 import { toAnthropicToolResults } from "../../../src/harness/tools/tool-result.ts";
+import { encodeToolResults } from "../../../src/harness/model-adapter/anthropic-adapter.ts";
+import { ToolExecutionError } from "../../../src/harness/errors.ts";
+import { createReadImageTool } from "../../../src/harness/aci/tools/read-image.ts";
 import type { AnthropicContentBlock } from "../../../src/harness/model-adapter/types.ts";
 import type { ToolDef } from "../../../src/harness/tools/types.ts";
 
@@ -1023,5 +1029,149 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
     const text = results[0]!.kind === "ok" && results[0]!.payload[0]!.text;
     // Generic 序列化路径：plain-string 协议，无结构化语义。
     assert.equal(text, JSON.stringify({ code: 0, stdout: "hi", stderr: "" }));
+  });
+});
+
+describe("createExecutor (path-image-vision T1: read_image image 直通臂)", () => {
+  // SDK ImageBlockParam 形状（specs/read-image-vision.md 假设 1/6）：
+  // image block 只活在 tool_result.content，不进顶层 AnthropicContentBlock 联合。
+  const pngBlock = {
+    type: "image",
+    source: { type: "base64", media_type: "image/png", data: "iVBORw0KGg==" },
+  };
+
+  function fakeReadImage(handler: ToolDef["handler"]): ToolDef {
+    return {
+      name: "read_image",
+      description: "fake read_image for executor seam",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler,
+    };
+  }
+
+  it("read_image 成功臂：合法 image block 原样直通，不压 text", async () => {
+    const exec = createExecutor(
+      createRegistry([fakeReadImage(() => pngBlock)])
+    );
+    const results = await exec.executeAll([
+      { id: "c1", name: "read_image", input: {} },
+    ]);
+    assert.equal(results[0]!.kind, "ok");
+    const payload = results[0]!.kind === "ok" ? results[0]!.payload : [];
+    assert.deepEqual(payload, [pngBlock]);
+  });
+
+  it("image 臂不适用 ADR-0006 字符顶：>20000 字符 base64 data 原样保留", async () => {
+    const bigData = "A".repeat(25000);
+    const exec = createExecutor(
+      createRegistry([
+        fakeReadImage(() => ({
+          type: "image",
+          source: { type: "base64", media_type: "image/jpeg", data: bigData },
+        })),
+      ])
+    );
+    const results = await exec.executeAll([
+      { id: "c1", name: "read_image", input: {} },
+    ]);
+    assert.equal(results[0]!.kind, "ok");
+    const payload = results[0]!.kind === "ok" ? results[0]!.payload : [];
+    assert.equal(payload.length, 1);
+    const block = payload[0] as unknown as typeof pngBlock;
+    assert.equal(block.type, "image");
+    assert.equal(block.source.data, bigData);
+    assert.ok(
+      !JSON.stringify(payload).includes("输出超长已截断"),
+      "image 直通不得出现 executor 截断标记"
+    );
+  });
+
+  it("SC5：其它工具返回同形 image 形状 payload → 仍压 text（洞不泄漏）", async () => {
+    const lookalike: ToolDef = {
+      name: "lookalike",
+      description: "returns an image-shaped payload but is not read_image",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: () => pngBlock,
+    };
+    const exec = createExecutor(createRegistry([lookalike]));
+    const results = await exec.executeAll([
+      { id: "c1", name: "lookalike", input: {} },
+    ]);
+    assert.equal(results[0]!.kind, "ok");
+    assert.deepEqual(results[0]!.kind === "ok" && results[0]!.payload, [
+      { type: "text", text: JSON.stringify(pngBlock) },
+    ]);
+  });
+
+  it("read_image 返回非合法 image 形状（字符串）→ 沿用 text 压缩路径", async () => {
+    const exec = createExecutor(
+      createRegistry([fakeReadImage(() => "not an image block")])
+    );
+    const results = await exec.executeAll([
+      { id: "c1", name: "read_image", input: {} },
+    ]);
+    assert.equal(results[0]!.kind, "ok");
+    assert.deepEqual(results[0]!.kind === "ok" && results[0]!.payload, [
+      { type: "text", text: "not an image block" },
+    ]);
+  });
+
+  it("read_image 失败臂仍 text：ToolExecutionError → execution_failed，无 image", async () => {
+    const exec = createExecutor(
+      createRegistry([
+        fakeReadImage(() => {
+          throw new ToolExecutionError("[read_image] unsupported image format");
+        }),
+      ])
+    );
+    const results = await exec.executeAll([
+      { id: "c1", name: "read_image", input: {} },
+    ]);
+    assert.equal(results[0]!.kind, "execution_failed");
+    const blocks = encodeToolResults(results);
+    const b = blocks[0]! as {
+      type: "tool_result";
+      is_error?: boolean;
+      content: AnthropicContentBlock[];
+    };
+    assert.equal(b.is_error, true);
+    assert.deepEqual(b.content, [
+      { type: "text", text: "[execution_failed] [read_image] unsupported image format" },
+    ]);
+  });
+
+  it("全链路：真实 read_image 读 PNG → encodeToolResults 后 tool_result.content 含 image block", async () => {
+    const root = await mkdtemp(join(tmpdir(), "exec-read-image-"));
+    try {
+      await writeFile(
+        join(root, "px.png"),
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+      );
+      const exec = createExecutor(
+        createRegistry([createReadImageTool(root)])
+      );
+      const results = await exec.executeAll([
+        { id: "tu1", name: "read_image", input: { path: "px.png" } },
+      ]);
+      assert.equal(results[0]!.kind, "ok");
+      const blocks = encodeToolResults(results);
+      const b = blocks[0]! as {
+        type: "tool_result";
+        tool_use_id: string;
+        content: Array<{
+          type: string;
+          source?: { type: string; media_type: string; data: string };
+        }>;
+      };
+      assert.equal(b.type, "tool_result");
+      assert.equal(b.tool_use_id, "tu1");
+      assert.equal(b.content.length, 1);
+      assert.equal(b.content[0]!.type, "image");
+      assert.equal(b.content[0]!.source!.type, "base64");
+      assert.equal(b.content[0]!.source!.media_type, "image/png");
+      assert.equal(b.content[0]!.source!.data, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

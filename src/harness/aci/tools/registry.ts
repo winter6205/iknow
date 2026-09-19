@@ -20,6 +20,7 @@ import type { AciToolDef } from "../types.js";
 import { createBashTool } from "./bash.js";
 import type { SecretRegistry } from "../../secret-roundtrip/index.js";
 import { createReadFileTool } from "./read-file.js";
+import { createReadImageTool } from "./read-image.js";
 import { createGrepTool } from "./grep.js";
 import { createGlobTool } from "./glob.js";
 import { createEditFileTool } from "./edit-file.js";
@@ -245,6 +246,10 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // 44→45。同门条件（subagentManager）；死工人 + 有账才再拉起，闸在
   // manager.resumeTask，等待契约与 spawn 相同。
   "subagent_continue",
+  // read-image-vision T2 (spec SC6) read_image append-only:45→46。常驻装配
+  // （无 host 缝可条件化，与 read_file / grep / glob 同门）；围栏内图片按
+  // 魔数读为 SDK image block，不入 last-read ledger（ADR-0084 入账面不变）。
+  "read_image",
 ] as const);
 
 /**
@@ -943,12 +948,18 @@ export function createDefaultAciRegistry(
       ? {
           subagent_stop: () =>
             createSubAgentStopTool({ manager: subagentManager }),
-          // plan subagent-stop-and-continue T4 (ADR-0102)：现在是字面量
+          // plan subagent-stop-and-continue T4 (ADR-0102)：本键曾是字面量
           // 最后一个键。同门条件、尾部追加。
           subagent_continue: () =>
             createSubAgentContinueTool({ manager: subagentManager }),
         }
       : {}),
+    // read-image-vision T2 (spec SC6)：现在是字面量最后一个键（Gate 3 顺序
+    // 契约，见 ACI_TOOLSET_NAMES 尾部注释）。常驻、无缺席条件；root 与
+    // read_file 同一挂法 —— `liveTaskRoot ?? sandboxRoot`，handler 内
+    // cell.read() 取一次 snapshot（D2/D9 同 vintage）。不接 lastReadLedger
+    // （spec 假设 10：读图不入账）。
+    read_image: () => createReadImageTool(opts.liveTaskRoot ?? sandboxRoot),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。
