@@ -17,8 +17,11 @@
  *     PEM 或 key 材料**（security-boundaries「不泄露 key 到可见面」）；
  *   - SC8：CA 私钥路径不进任何 bind 表 —— `egressCaBindSources()` 是信任链
  *     bind 候选的唯一 SSOT，只含 trust bundle 路径；
- *   - invariant 7：本件不静默降级 —— 每次偏离都以 `notice` 返回，由装配面
- *     （T2）接 violationSink 留 infra 痕。
+ *   - invariant 7：本件不静默降级 —— 每次偏离走真实双通道：重生成前经
+ *     `onWarn`（缺省 `console.warn`）实时留痕（`regenerate` 内），同时以
+ *     `PersistentCaState.notice` 随返回值交调用方离线判责。装配面
+ *     `mintCredentialsStep` 现不接 violationSink，notice/denyTraces 的
+ *     sink 消费面为登记 follow-up（plans/egress-credential-sentinel.md Notes）。
  *
  * typed-error 纪律（code-quality.md）：notice 用 kind 判别联合，渲染方
  * 先判 kind；本件对「盘上状态异常」不抛错，只在真正无法写盘（FS 硬故障）

@@ -79,3 +79,4 @@ OVERALL: PASS（rev 2，返工点已按审查方清单落实）
 - **T1 与 T4 并行、T2 汇合**：两颗前置弹无共享 mutable state；T2 同时消费名册（T1）与可装载 CA（T4）。
 - **probe 新类别裁定**：T7 默认不新增探针类别；若实现期加「masked bind 盖过真路径」物理探针，须同步 `security-boundaries` 的 11 类纪律说明（spec T7 原文）。
 - 全部 bullets 落地后进入 end-of-round code review phase，再走 `arthurpower:verification-before-completion` 闭轮；assumption 人类 gate 与 OQ 裁定均由主会话走，不阻塞本 plan 执行、只可能触发 Header 所列局部回退。
+- **follow-up（review 修复弹登记）**：`denyTraces` / `PersistentCaState.notice` 目前只走 `console.warn` 留痕通道，装配面 `mintCredentialsStep` 未接 violationSink——infra 痕进结构化消费面（回灌/审计）为后续弹，不在本 spec 收口。

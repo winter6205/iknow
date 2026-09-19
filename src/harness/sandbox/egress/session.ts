@@ -221,9 +221,11 @@ export interface EgressFenceSpec {
    * egress-credential-sentinel T2 / invariant 9：masked-file 盖 bind +
    * masked store 目录 ro-bind + trust bundle ro-bind + F3 deny 的
    * `/dev/null` 盖 bind。fence 全部发射进 egressBind 段（workspaceMounts
-   * 之后、cwdReadonly 之前，last-mount-wins 盖过根 bind 真路径）；缺席 /
-   * 空 = 不发射额外 bind。宿主 tmpdir 被 `--tmpfs /tmp` 盖掉，漏这条即
-   * 围栏内不可达（F8）。
+   * 之后、cwdReadonly 之前）；缺席 / 空 = 不发射额外 bind。约束真实来源：
+   * 本 fence 不发 `--tmpfs /tmp`（ADR-0092 全局档，resource-limits.ts:16-18），
+   * masked store / socket 所在的宿主 tmpdir 靠「显式逐路径 ro-bind +
+   * last-mount-wins 盖过根 bind 下真路径」进围栏（F8）—— 漏发射即围栏
+   * 内不可达。
    */
   readonly binds?: readonly EgressFenceBind[];
 }
