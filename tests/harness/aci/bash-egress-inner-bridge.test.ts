@@ -146,3 +146,98 @@ describe("bash 前台命令链内层桥前导 (egress-ssh-bridge T1)", () => {
     assert.equal(payload, "echo hi");
   });
 });
+
+/**
+ * F4 known_hosts 指引接线（review Spec Medium）：egress session 在场 +
+ * 命令非零退出 + stderr 命中 ssh 首次未见主机形态 → 框架在回灌 stderr
+ * 末尾补一行宿主侧指引（ssh-keyscan / -o UserKnownHostsFile= 组合写法）。
+ * 不命中 / 无 session = envelope stderr byte-identical（零误报纪律）。
+ */
+function makeFailingChild(args: {
+  readonly stderrText: string;
+  readonly exitCode: number;
+}) {
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    pid: 47182,
+    kill: vi.fn(() => true),
+  });
+  queueMicrotask(() => {
+    child.stderr.write(args.stderrText);
+    child.emit("close", args.exitCode);
+  });
+  return child;
+}
+
+async function driveForegroundResult(
+  tool: ReturnType<typeof createBashTool>,
+  command: string,
+  childFactory: () => EventEmitter & {
+    stdin: PassThrough;
+    stdout: PassThrough;
+    stderr: PassThrough;
+    pid: number;
+    kill: () => boolean;
+  }
+): Promise<string> {
+  spawnMock.mockReset();
+  spawnMock.mockImplementation(() => childFactory());
+  const result = (await tool.handler(
+    { command },
+    { conversationId: "conv-f4-guidance" }
+  )) as { output: string; meta: { stderr: string } };
+  return (JSON.parse(result.output) as { stderr: string }).stderr;
+}
+
+const SSH_UNKNOWN_HOST_STDERR =
+  "git@github.com: Permission denied (publickey).\r\n" +
+  "Host key verification failed.\r\n";
+
+describe("F4 known_hosts 指引回灌（ssh 类失败文案面）", () => {
+  it("egress 在场 + ssh host-key 失败 stderr → 末行补 F4 指引", async () => {
+    const tool = createBashTool(FIX_CWD, {
+      egressPolicyFactory: () => ({
+        allowedDomains: ["github.com"],
+        deniedDomains: [],
+        commandLabel: "test:f4-guidance",
+      }),
+      createEgressSessionFactory: stubSessionFactory(),
+    });
+    const stderr = await driveForegroundResult(tool, "git push", () =>
+      makeFailingChild({ stderrText: SSH_UNKNOWN_HOST_STDERR, exitCode: 255 })
+    );
+    assert.ok(stderr.startsWith(SSH_UNKNOWN_HOST_STDERR));
+    assert.match(stderr, /ssh-keyscan/);
+    assert.match(stderr, /UserKnownHostsFile=/);
+    assert.ok(!stderr.includes("StrictHostKeyChecking=no"));
+    // meta 旁路与 output 同文（TUI 取数面一致）。
+  });
+
+  it("egress 在场 + 非 ssh 失败 stderr → byte-identical（零误报）", async () => {
+    const tool = createBashTool(FIX_CWD, {
+      egressPolicyFactory: () => ({
+        allowedDomains: ["github.com"],
+        deniedDomains: [],
+        commandLabel: "test:f4-miss",
+      }),
+      createEgressSessionFactory: stubSessionFactory(),
+    });
+    const stderr = await driveForegroundResult(tool, "false", () =>
+      makeFailingChild({ stderrText: "bash: line 1: false: error\n", exitCode: 1 })
+    );
+    assert.equal(stderr, "bash: line 1: false: error\n");
+  });
+
+  it("无 egress session + ssh 形态 stderr → byte-identical（缝不在场不指路）", async () => {
+    const tool = createBashTool(FIX_CWD, {});
+    const stderr = await driveForegroundResult(tool, "git push", () =>
+      makeFailingChild({
+        stderrText: SSH_UNKNOWN_HOST_STDERR,
+        exitCode: 255,
+      })
+    );
+    assert.equal(stderr, SSH_UNKNOWN_HOST_STDERR);
+  });
+});

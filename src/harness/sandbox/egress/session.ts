@@ -330,6 +330,23 @@ export function buildInnerBridgeScript(
 }
 
 /**
+ * 内层前导拼接的单点 helper（review Medium：三消费面 + probe 同款复制的
+ * 收敛点）。语义 = egress-ssh-bridge invariant 3 的 argv 面：
+ *   - spec 在场 → `<spec.innerBridgeScript>\n<command>`（沙箱内侧半桥是
+ *     缝的后半场，缺前导则整条缝只有宿主半场，O3）；
+ *   - spec 缺席（undefined，任何无缝原因）→ **byte-identical 返回原命令**
+ *     （「无缝 = 无桥」回归基线，不注入任何残留）。
+ * 消费面：bash.ts 前台 / background manager spawn / verify sandbox-run /
+ * sandbox-probe —— 拼接形态只在此处定义一次。
+ */
+export function wrapCommandWithInnerBridge(
+  spec: EgressFenceSpec | undefined,
+  command: string
+): string {
+  return spec === undefined ? command : `${spec.innerBridgeScript}\n${command}`;
+}
+
+/**
  * 构造 fence env 增量 —— HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY
  * （含小写别名，覆盖 curl / wget / npm 等工具读取差异）+ GIT_SSH_COMMAND
  * （egress-ssh-bridge T3，见下方形态说明）。
@@ -353,11 +370,14 @@ export function buildInnerBridgeScript(
  *   隧道件从继承的 `HTTP_PROXY` env 读 userinfo（token 不外泄于 ps）。
  *   `-F /dev/null` 依 assumption 4（围栏内 /etc/ssh/ssh_config.d/* 报
  *   Bad owner or permissions）；ControlMaster/ControlPath=none 中和 mux
- *   （沙箱内用户 ControlPath 不可 bind，auth 后即退）。ProxyCommand 单引
- *   号对内是安装根派生的受控绝对路径（同 URL userinfo 纪律，不做 shell
- *   级防御）。围栏内用户命令**显式内联** `GIT_SSH_COMMAND=... git ...`
- *   时后者胜 —— POSIX env 前缀赋值优先于继承值（shell 语义，按 spec T3
- *   合并策略不加防御）。
+ *   （沙箱内用户 ControlPath 不可 bind，auth 后即退）。ProxyCommand 路径
+ *   引号策略与 `buildInnerBridgeScript` 统一（review Low 裁定）：node /
+ *   脚本路径逐一走 `shellSingleQuote`，外层双引号由 git `split_cmdline`
+ *   剥除，内层单引号交 ssh ProxyCommand 的 /bin/sh 处理 —— 含空格 / 引号
+ *   的安装根路径不再拆碎。token 仍不在 argv（同 URL userinfo 纪律）。围栏
+ *   内用户命令**显式内联** `GIT_SSH_COMMAND=... git ...` 时后者胜 ——
+ *   POSIX env 前缀赋值优先于继承值（shell 语义，按 spec T3 合并策略不加
+ *   防御）。
  */
 export function buildProxyEnv(
   sandboxLocalPort: number,
@@ -369,7 +389,7 @@ export function buildProxyEnv(
   const noProxy = ["127.0.0.1", "localhost", ...extraNoProxy].join(",");
   const gitSshCommand =
     `ssh -F /dev/null -o ControlMaster=no -o ControlPath=none ` +
-    `-o ProxyCommand='${relay.nodePath} ${relay.connectScriptPath} %h %p'`;
+    `-o ProxyCommand="${shellSingleQuote(relay.nodePath)} ${shellSingleQuote(relay.connectScriptPath)} %h %p"`;
   return {
     HTTP_PROXY: proxyUrl,
     HTTPS_PROXY: proxyUrl,

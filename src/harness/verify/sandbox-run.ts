@@ -19,6 +19,7 @@ import {
   createEnvIsolation,
   createFsPolicy,
   runInSandbox,
+  wrapCommandWithInnerBridge,
 } from "../sandbox/index.js";
 
 /**
@@ -112,12 +113,11 @@ export function makeDefaultRunVerify(opts: {
     // ADR-0097 / T7:egress session lazy start —— 首次调用起,后续复用。
     const session = await ensureEgressSession();
     // egress-ssh-bridge T5：内层监听前导与 bash.ts 前台 / background
-    // spawn factory 同形 —— session 在场时 payload =
-    // `<innerBridgeScript>\n<command>`；缺席 = byte-identical（invariant 3）。
-    const commandPayload =
-      session !== undefined
-        ? `${session.spec.innerBridgeScript}\n${command}`
-        : command;
+    // spawn factory 同形，拼接单点 = egress 模块
+    // `wrapCommandWithInnerBridge`（review Medium 收敛）—— session 在场时
+    // payload = `<innerBridgeScript>\n<command>`；缺席 = byte-identical
+    // （invariant 3）。
+    const commandPayload = wrapCommandWithInnerBridge(session?.spec, command);
     const fenceEnv = {
       ...envIsolation.filter(process.env),
       TMPDIR: tmpDir,

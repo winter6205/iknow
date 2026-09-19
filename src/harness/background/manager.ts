@@ -32,6 +32,7 @@ import {
   createEgressSession,
   createEnvIsolation,
   createFsPolicy,
+  wrapCommandWithInnerBridge,
 } from "../sandbox/index.js";
 import type {
   EgressFenceSpec,
@@ -312,15 +313,13 @@ export async function defaultBackgroundSpawn(
   // egress-ssh-bridge T5：内层监听前导与前台 bash.ts 同形 —— egressSpec
   // 在场时 `bash -c` payload = `<innerBridgeScript>\n<command>`（沙箱内侧
   // 半桥是缝的后半场，缺前导则整条缝只有宿主半场，O3）；缺席 = payload
-  // byte-identical（invariant 3「无缝 = 无桥」）。代理 env（含
-  // GIT_SSH_COMMAND）不在这里 merge —— spec.env 经 createBwrapFence 的
-  // `egress` 字段单点注入 `--setenv`（invariant 4 注入面 SSOT，与 bash.ts
-  // 前台消费面同形）。
+  // byte-identical（invariant 3「无缝 = 无桥」）。拼接形态单点 = egress
+  // 模块 `wrapCommandWithInnerBridge`（review Medium 收敛，三消费面零复制）。
+  // 代理 env（含 GIT_SSH_COMMAND）不在这里 merge —— spec.env 经
+  // createBwrapFence 的 `egress` 字段单点注入 `--setenv`（invariant 4
+  // 注入面 SSOT，与 bash.ts 前台消费面同形）。
   const egressSpec = req.egressSpec;
-  const commandPayload =
-    egressSpec !== undefined
-      ? `${egressSpec.innerBridgeScript}\n${req.command}`
-      : req.command;
+  const commandPayload = wrapCommandWithInnerBridge(egressSpec, req.command);
   const fence = createBwrapFence({
     command: "bash",
     args: ["-c", commandPayload],

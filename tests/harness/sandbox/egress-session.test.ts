@@ -39,6 +39,7 @@ import {
   createEgressSession,
   EgressRelayUnavailableError,
   SANDBOX_HTTP_PROXY_PORT,
+  wrapCommandWithInnerBridge,
   type EgressSession,
 } from "../../../src/harness/sandbox/egress/session.js";
 import type { EgressRelayPaths } from "../../../src/harness/sandbox/egress/relay-assets.js";
@@ -165,10 +166,13 @@ describe("createEgressSession — lifecycle", () => {
       expect(env.https_proxy).toBe(env.HTTPS_PROXY);
       expect(env.no_proxy).toBe(env.NO_PROXY);
 
-      // T3（ADR-0107 新冻结形态）：GIT_SSH_COMMAND 的 ProxyCommand =
-      // 自带 CONNECT 隧道件，token 不进 argv（从 HTTP_PROXY env 走）。
+      // T3（ADR-0107 新冻结形态 + review Low 引号统一）：GIT_SSH_COMMAND 的
+      // ProxyCommand = 自带 CONNECT 隧道件，token 不进 argv（从 HTTP_PROXY
+      // env 走）；node / 脚本路径逐一走 shellSingleQuote（与
+      // buildInnerBridgeScript 同策略），外层双引号由 git split_cmdline
+      // 剥除、内层单引号由 ssh ProxyCommand 的 /bin/sh 处理。
       expect(env.GIT_SSH_COMMAND).toMatch(
-        /^ssh -F \/dev\/null -o ControlMaster=no -o ControlPath=none -o ProxyCommand='\/test-root\/bin\/node .+egress-http-connect\.mjs %h %p'$/
+        /^ssh -F \/dev\/null -o ControlMaster=no -o ControlPath=none -o ProxyCommand="'\/test-root\/bin\/node' '.+egress-http-connect\.mjs' %h %p"$/
       );
       expect(env.GIT_SSH_COMMAND).not.toMatch(/socat|proxyauth/i);
 
@@ -338,7 +342,7 @@ describe("buildProxyEnv", () => {
     const env = buildProxyEnv(3128, "t0k3n", relay);
     expect(env.GIT_SSH_COMMAND).toBe(
       "ssh -F /dev/null -o ControlMaster=no -o ControlPath=none " +
-        `-o ProxyCommand='/test-root/bin/node ${relay.connectScriptPath} %h %p'`
+        `-o ProxyCommand="'/test-root/bin/node' '${relay.connectScriptPath}' %h %p"`
     );
   });
 
@@ -377,5 +381,26 @@ describe("buildInnerBridgeScript", () => {
     expect(script).toContain(`'/usr/bi'\\''n/node'`);
     expect(script).toContain(`'/opt/ev'\\''il/egress-tcp-relay.mjs'`);
     expect(script).toContain(`'/tmp/it'\\''s-a-sock.sock'`);
+  });
+});
+
+describe("wrapCommandWithInnerBridge — 内层前导单点 helper (review Medium 收敛)", () => {
+  const spec = {
+    unixSocketPath: "/tmp/x.sock",
+    sandboxLocalPort: 3128,
+    env: {},
+    innerBridgeScript: "BRIDGE",
+    relayAssetsDir: "/test-root/vendor/egress-relay",
+  } satisfies import("../../../src/harness/sandbox/egress/session.js").EgressFenceSpec;
+
+  it("spec 缺席（undefined）→ 返回原命令 byte-identical（invariant 3 无缝=无桥）", () => {
+    expect(wrapCommandWithInnerBridge(undefined, "git push")).toBe("git push");
+    expect(wrapCommandWithInnerBridge(undefined, "")).toBe("");
+  });
+
+  it("spec 在场 → `<innerBridgeScript>\\n<command>` 单点形态（三消费面共用）", () => {
+    expect(wrapCommandWithInnerBridge(spec, "git push")).toBe(
+      "BRIDGE\ngit push"
+    );
   });
 });

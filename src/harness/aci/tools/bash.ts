@@ -18,6 +18,8 @@ import {
   createOutputMask,
   currentSecretValues,
   renderEgressFailureMessage,
+  sshHostKeyFailureGuidance,
+  wrapCommandWithInnerBridge,
   EgressRelayUnavailableError,
   type AskApproval,
   type BwrapFenceOptions,
@@ -334,10 +336,10 @@ function buildForegroundFence(args: {
   readonly tmpDir: string;
   readonly egressSession: EgressSession | undefined;
 }): ReturnType<typeof createBwrapFence> {
-  const payload =
-    args.egressSession !== undefined
-      ? `${args.egressSession.spec.innerBridgeScript}\n${args.finalCommand}`
-      : args.finalCommand;
+  const payload = wrapCommandWithInnerBridge(
+    args.egressSession?.spec,
+    args.finalCommand
+  );
   return createBwrapFence({
     command: "bash",
     args: ["-c", payload],
@@ -452,9 +454,21 @@ async function finalizeEgressPath(args: {
     });
     return { kind: "throw", throwError };
   }
+  // F4（egress-ssh-bridge §Failure paths）：egress 缝在场 + 命令非零退出 +
+  // stderr 命中 ssh 首次未见主机 key 形态 → 回灌 stderr 末行补一条宿主侧
+  // 指引（ssh-keyscan / UserKnownHostsFile 组合写法）。判定是文案面观测，
+  // 不改 exit 语义、不产 egress 违例；不命中 = byte-identical。
+  const f4Guidance =
+    egressSession !== undefined && result.exitCode !== 0
+      ? sshHostKeyFailureGuidance(result.stderr)
+      : undefined;
+  const effectiveResult =
+    f4Guidance === undefined
+      ? result
+      : { ...result, stderr: `${result.stderr}\n${f4Guidance}` };
   return {
     kind: "ok",
-    envelope: assembleBashToolResult(result, mask),
+    envelope: assembleBashToolResult(effectiveResult, mask),
   };
 }
 

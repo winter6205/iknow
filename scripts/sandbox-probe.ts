@@ -58,6 +58,7 @@ import {
   createBwrapFence,
   createEnvIsolation,
   createFsPolicy,
+  wrapCommandWithInnerBridge,
   type FsIsolationMode,
   type FsPolicy,
 } from "../src/harness/sandbox/index.js";
@@ -358,7 +359,7 @@ async function runEgressSeamCheck(profile: ProbeProfile): Promise<ProbeResult> {
     const userCommand = `curl -sS --max-time 8 --retry 3 --retry-connrefused http://${targetIp}:${port} | grep -q probe-listener-ok`;
     const fence = createBwrapFence({
       command: "bash",
-      args: ["-c", `${session.spec.innerBridgeScript}\n${userCommand}`],
+      args: ["-c", wrapCommandWithInnerBridge(session.spec, userCommand)],
       fsPolicy: profile.fsPolicy,
       env: fenceEnv(profile),
       cwd: profile.cwd,
@@ -517,7 +518,7 @@ async function runSshEgressProbe(
     ].join("\n");
     const fence = createBwrapFence({
       command: "bash",
-      args: ["-c", `${session.spec.innerBridgeScript}\n${userCommand}`],
+      args: ["-c", wrapCommandWithInnerBridge(session.spec, userCommand)],
       fsPolicy: profile.fsPolicy,
       env: fenceEnv(profile),
       cwd: profile.cwd,

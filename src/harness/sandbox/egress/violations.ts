@@ -269,3 +269,37 @@ function appendInfraPortion(
   }
   lines.push(REMEDIATION_INFRA);
 }
+
+/**
+ * egress-ssh-bridge F4（specs/egress-ssh-bridge.md §Failure paths F4）——
+ * ssh 类失败回灌文案面的「首次未见主机 key」指引行。
+ *
+ * 背景：known_hosts 无条目时 ssh 要求确认指纹，fence 无 tty → 认证前失败
+ * （`Host key verification failed.` / `The authenticity of host ... can't
+ * be established.`）。指引 = spec 钉死两选一：宿主侧先 `ssh-keyscan` /
+ * 交互登录确认一次，或围栏内显式 `-o UserKnownHostsFile=` 组合写法
+ * （`GIT_SSH_COMMAND="$GIT_SSH_COMMAND ..."` 引用注入值，spec §T3 合并策
+ * 略同款）。**不**默认注入 / 建议 `StrictHostKeyChecking=no` —— 削弱信任
+ * 面非本 spec 授权（反向钉子钉死字样不回潮）。
+ *
+ * 判定是**文案面观测**而非框架归因：F4 发生在命令层（隧道已通、ssh 自己
+ * 拒），不产 egress 违例、不改 typed-failure 通道；仅当 egress 缝在场且
+ * 命令非零退出且 stderr 命中已知 ssh host-key 形态时由 bash 装配层追加
+ * 一行。纯函数（无 I/O），pattern 集可扩展，miss 形态 = undefined
+ * （宁缺勿误报）。
+ */
+const SSH_HOST_KEY_PATTERNS: readonly RegExp[] = [
+  /Host key verification failed/,
+  /The authenticity of host .* can'?t be established/,
+];
+
+export const SSH_HOST_KEY_GUIDANCE_LINE =
+  "[iknow-egress] ssh first-time unknown host key (no known_hosts entry): the fence has no tty to confirm the fingerprint, so ssh fails before auth. Fix on the host side first: `ssh-keyscan <host> >> ~/.ssh/known_hosts` (verify the fingerprint out-of-band) or confirm once via an interactive login; alternatively pass an explicit known_hosts inside the sandbox with the combined form `GIT_SSH_COMMAND=\"$GIT_SSH_COMMAND -o UserKnownHostsFile=<path>\"`. StrictHostKeyChecking stays at its default (this product does not disable host-key trust).";
+
+export function sshHostKeyFailureGuidance(
+  stderr: string
+): string | undefined {
+  return SSH_HOST_KEY_PATTERNS.some((re) => re.test(stderr))
+    ? SSH_HOST_KEY_GUIDANCE_LINE
+    : undefined;
+}

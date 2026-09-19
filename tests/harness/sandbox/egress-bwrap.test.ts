@@ -48,8 +48,8 @@ function egressSpec(): EgressFenceSpec {
       // --setenv 单通道（invariant 4），fence 层零复制。
       GIT_SSH_COMMAND:
         "ssh -F /dev/null -o ControlMaster=no -o ControlPath=none " +
-        "-o ProxyCommand='/test-root/bin/node " +
-        "/test-root/vendor/egress-relay/egress-http-connect.mjs %h %p'",
+        "-o ProxyCommand=\"'/test-root/bin/node' " +
+        "'/test-root/vendor/egress-relay/egress-http-connect.mjs' %h %p\"",
     },
     // bwrap 层不消费 innerBridgeScript（消费面是 bash.ts 命令链）；
     // 这里只需满足 spec 形状。中继资产目录则**由 bwrap 消费**（ro-bind）。
