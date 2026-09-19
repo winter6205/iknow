@@ -26,6 +26,7 @@ import {
   SKILL_INDEX_DELTA_PREFIX,
   isSkillIndexDeltaText,
 } from "../../src/harness/skill/index-delta.ts";
+import { buildAgentStatusText } from "../../src/harness/agent-status.ts";
 import {
   MAX_THINKING_TEXT_CHARS,
   MAX_TOOL_INPUT_PREVIEW_CHARS,
@@ -591,6 +592,29 @@ describe("isTurnQuery — turn 边界判定（共享 helper）", () => {
         ])
       ),
       false
+    );
+  });
+
+  // spec agent-status-instruction-echo 子弹5 / SC4：栏加性扩 instruction /
+  // reconcile 段后仍是 `<agent_status>` 前缀命中 —— turn 边界谓词零变化。
+  it("含 instruction/reconcile 段的新格式栏 → false；真实消息含该字样不误伤", () => {
+    const bar = buildAgentStatusText({
+      lastTool: "bash",
+      openTodoLines: ["- [ ] 查新闻"],
+      instruction: "pivot：改查天气",
+      reconcile: true,
+    });
+    assert.equal(
+      isTurnQuery(assistant("user", [{ type: "text", text: bar }])),
+      false
+    );
+    assert.equal(
+      isTurnQuery(
+        assistant("user", [
+          { type: "text", text: "instruction: 开头的真实问题" },
+        ])
+      ),
+      true
     );
   });
 

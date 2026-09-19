@@ -28,9 +28,16 @@ export function agentStatusFromEvent(
   event: HarnessStreamEvent
 ): AgentStatusSnapshot | null {
   if (event.type !== "agent_status") return null;
+  // spec agent-status-instruction-echo T4:instruction / reconcile 槽随事件
+  // 透传(与栏同源);缺席 → key 不落,退回旧字段集形态(F1)。显示面不动 ——
+  // agentStatusLines 仍只投影 openTodoLines。
   return Object.freeze({
     lastTool: event.lastTool,
     openTodoLines: Object.freeze([...event.openTodoLines]),
+    ...(event.instruction !== undefined
+      ? { instruction: event.instruction }
+      : {}),
+    ...(event.reconcile !== undefined ? { reconcile: event.reconcile } : {}),
   });
 }
 

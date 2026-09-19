@@ -39,6 +39,7 @@ import {
   SKILL_INDEX_DELTA_PREFIX,
   isSkillIndexDeltaText,
 } from "../../src/harness/skill/index-delta.js";
+import { buildAgentStatusText } from "../../src/harness/agent-status.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 
@@ -424,6 +425,23 @@ describe("session-state: isTuiHiddenUserMessage（host 注入不进 ❯ 气泡�
       )
     ).toBe(true);
     expect(isTuiHiddenUserMessage(msg("真实问题"))).toBe(false);
+  });
+
+  test("含 instruction/reconcile 段的新格式栏仍 hidden（spec 子弹5 前缀判定不变）", () => {
+    const bar = buildAgentStatusText({
+      lastTool: "bash",
+      openTodoLines: ["- [ ] 查新闻"],
+      instruction: "pivot：改查天气",
+      reconcile: true,
+    });
+    expect(isTuiHiddenUserMessage(msg(bar))).toBe(true);
+    // 真实用户消息含 instruction:/reconcile: 字样 → 不误伤（新段不影响前缀判定）
+    expect(isTuiHiddenUserMessage(msg("instruction: 这行开头的真实问题"))).toBe(
+      false
+    );
+    expect(
+      isTuiHiddenUserMessage(msg("reconcile: 先对齐账本是什么意思？"))
+    ).toBe(false);
   });
 
   test("graph_mode 三条现势通知为 hidden（切换 ON/OFF + 每 run presence）；普通 query 否", () => {

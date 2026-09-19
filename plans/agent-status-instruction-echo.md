@@ -52,7 +52,7 @@ minimal-change-verifier: yes — 与 ADR-0103 决策 1-4 一一对应；T5/T6 �
    - **Surface:** `src/tui/agent-status-line.tsx`（事件映射扩）+ `src/tui/session-state.ts` / `src/session-api/turn-projection.ts`（隐藏谓词验证性回归）
    - **Acceptance:** TUI 单测——带 instruction/reconcile 段的事件渲染输出与旧事件逐字节相同；隐藏气泡过滤与 `isAgentStatusText` 前缀判定回归绿；旧 transcript 冷启动 hydrate（`agentStatusFromMessages`）返回合法快照。
    - [blocks: T3] [parallel]（与 T4 各自独立于 T3 之上）
-   - Status: [ ] pending
+   - Status: [x]
 
 6. **黄金集四件（STATIC + SEAM + 轨迹夹具 + 名册回填）** — tag: `[implementation]`
    - **Inherits:** spec T5 / SC7「`<agent_status>` 面 = 缺口 → 按 prompt-development 指南补集：STATIC 栏格式关键行锁、SEAM 结算锁、轨迹夹具与既有轨迹集共处不另开总柜、实现 PR 回填名册表」。
