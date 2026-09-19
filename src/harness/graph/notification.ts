@@ -25,6 +25,11 @@
 
 export type GraphModeChange = "on" | "off";
 
+/** 官方帧开/闭标签字面（ADR-0112 T2：出站投影 TAG 转义名册由此常量拼装；
+ *  三条通知常量以 OPEN_TAG 开头 / CLOSE_TAG 结尾，形态由下方锁测试钉住）。 */
+export const GRAPH_MODE_OPEN_TAG = "<graph_mode>";
+export const GRAPH_MODE_CLOSE_TAG = "</graph_mode>";
+
 /**
  * 人读过滤谓词（specs/tui-human-display.md D8 / SC7）：三条 graph 现势通知
  * 都是 host 注入的机器可读信封，不是操作员键的输入 —— TUI 不得画成 ❯ 气泡。
@@ -35,7 +40,7 @@ export type GraphModeChange = "on" | "off";
  * 模型侧 grep 同款）。前导空白容忍（与 agent_status 一致）。
  */
 export function isGraphModeText(text: string): boolean {
-  return text.trimStart().startsWith("<graph_mode>");
+  return text.trimStart().startsWith(GRAPH_MODE_OPEN_TAG);
 }
 
 /** 开图通知（SSOT，loop-engine 唯一来源）。 */

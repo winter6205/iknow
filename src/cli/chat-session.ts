@@ -58,6 +58,7 @@ import {
   type OverlayPrefetchFn,
 } from "../harness/memory/index.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
+import { stampHostInjected } from "../harness/model-adapter/outbound-projection.js";
 import {
   drainPendingSubagents,
   drainPendingSubagentsBeforeShutdown,
@@ -674,6 +675,23 @@ function acknowledgeChatSubagentDrain(
   }
 }
 
+/**
+ * drain 前缀 user 消息(wake / query 行两处 commit 共用)。
+ * ADR-0112 Does #1:drain 浓缩是宿主注入 commit —— 盖非模型可见出处戳,
+ * 出站投影才按官方帧透传 "## Sub-agent " 前缀锚。段内所有文本块
+ * (drain / 写根通知)都来自宿主,整条盖戳语义成立。
+ */
+function hostDrainMessage(
+  texts: ReadonlyArray<string>
+): AnthropicNativeMessage {
+  return stampHostInjected({
+    role: "user",
+    content: Object.freeze(
+      texts.map((text) => Object.freeze({ type: "text" as const, text }))
+    ),
+  });
+}
+
 export type ProcessChatLineResult = {
   quit: boolean;
   /** Material for stdout (answers, slash info/help/reset). */
@@ -981,14 +999,7 @@ export async function runChatSubagentWake(opts: {
   );
   const priorMessages = Object.freeze([
     ...ctx.state.messages,
-    Object.freeze({
-      role: "user" as const,
-      content: Object.freeze(
-        wakeTailTexts.map((text) =>
-          Object.freeze({ type: "text" as const, text })
-        )
-      ),
-    }),
+    hostDrainMessage(wakeTailTexts),
   ]);
   try {
     const { result, trace } = await runHarness(
@@ -1427,14 +1438,7 @@ async function runChatQueryLine(
           tailTexts.length > 0
             ? Object.freeze([
                 ...ctx.state.messages,
-                Object.freeze({
-                  role: "user" as const,
-                  content: Object.freeze(
-                    tailTexts.map((text) =>
-                      Object.freeze({ type: "text" as const, text })
-                    )
-                  ),
-                }),
+                hostDrainMessage(tailTexts),
               ])
             : ctx.state.messages;
         // #128 T8:verifyConfig 非 undefined (含 command 空串) 时 run 被

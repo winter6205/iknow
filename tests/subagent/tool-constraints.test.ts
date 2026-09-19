@@ -11,8 +11,9 @@
  *     无该段 (V1 baseline / V1 fallback, byte-stable);
  *   - 段内容 = 允许命令族 (coreutils 读族 / git 只读子命令 / rg / jq) +
  *     显式 reject 行为 + 替代工具引导 (read_file / grep / glob / lsp_*)。
- *   - 段位置可选两种形态, 本实现选 persona → constraints → addendum
- *     (constraints 是 persona 的 mode 延伸, addendum 是用户后置追加)。
+ *   - 段位置契约 (ADR-0112 T4 后)：system 内 base < persona < constraints；
+ *     envelope.systemPrompt (addendum) 已降权进 user/untrusted 通道，
+ *     不再占 system 席位（tests/subagent/worker-addendum-untrusted.test.ts）。
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -121,17 +122,20 @@ describe("tool constraints segment: 段位置 (LOCKED 6 段不动)", () => {
     assert.ok(constraintsIdx > personaIdx, "constraints 在 persona 之后");
   });
 
-  it("readonly worker + addendum → 顺序 persona < constraints < addendum", async () => {
-    const deps = await createWorkerDeps(
-      hermeticOpts({ role: "explore", addendum: "MY ADDENDUM" })
-    );
+  it("readonly worker + ghost addendum (cast) → persona < constraints 顺序不变, addendum 不进 system", async () => {
+    // ADR-0112 T4: 旧契约 persona < constraints < addendum 收缩为
+    // persona < constraints —— addendum 降权到 user/untrusted 通道。
+    const poison = {
+      ...hermeticOpts({ role: "explore" }),
+      addendum: "MY ADDENDUM",
+    } as CreateWorkerDepsOptions;
+    const deps = await createWorkerDeps(poison);
     const out = (await deps.system?.()) ?? "";
     const personaIdx = out.indexOf(getAgentEntry("explore").body);
     const constraintsIdx = out.indexOf(CONSTRAINTS_HEADER);
-    const addendumIdx = out.indexOf("MY ADDENDUM");
     assert.ok(personaIdx >= 0);
-    assert.ok(constraintsIdx > personaIdx);
-    assert.ok(addendumIdx > constraintsIdx, "addendum 在 constraints 之后");
+    assert.ok(constraintsIdx > personaIdx, "constraints 在 persona 之后");
+    assert.ok(!out.includes("MY ADDENDUM"), "addendum 不再进 system");
   });
 
   it("readonly worker + base → base (LOCKED 5) < persona < constraints 顺序不变", async () => {

@@ -126,6 +126,13 @@ const ROSTER_RULES: ReadonlyArray<{
     sample: () => buildCompactPrompt(),
   },
   {
+    // ADR-0112 T2:runFullCompact 的 adapter 视图（compress 有界上下文外、
+    // 宿主 commit 方盖戳）；产出文本与 buildCompactPrompt 同缝同名册。
+    label: "compact request（runFullCompact adapter 视图）",
+    match: (s) => s.arg === "compactPromptText",
+    sample: () => buildCompactPrompt(),
+  },
+  {
     label: "stop summary request（SUMMARY_PROMPT）",
     match: (s) => s.arg.startsWith("SUMMARY_PROMPT("),
     sample: () =>

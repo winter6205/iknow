@@ -10,6 +10,7 @@ iknow can read and edit a workspace, run shell commands under a sandbox, search 
 - **Tools** — bash (foreground + background, same bwrap fence), filesystem, grep/glob, web fetch/search, LSP, skills, MCP, memory, subagents
 - **Parallel tools** — consecutive `isConcurrencySafe` calls overlap in one turn; unsafe calls stay serial
 - **Surfaces** — interactive `chat`, OpenTUI `tui`, one-shot `ask` (JSON for scripts), `serve` (Session HTTP + Vite SPA + trace panel)
+- **Instruction channels** — outbound projection separates sources: tool results can't impersonate host frames, and subagent constitutions stay code-locked
 
 ## Requirements
 

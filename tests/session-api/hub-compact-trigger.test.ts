@@ -255,6 +255,8 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
     const firstText = textOf(loaded.messages[0]!);
     assert.ok(firstText.includes("This session is being continued"));
     assert.ok(firstText.includes("sum-body"));
+    // ADR-0112 Does #1:compact 续传摘要在 hub 手动入口同样是宿主 commit。
+    assert.equal(loaded.messages[0]!.hostInjected, true);
   });
 
   it("空会话(0 消息)→ compacted:false + reason:messages_too_few + 不落盘 + updatedAt 不变", async () => {

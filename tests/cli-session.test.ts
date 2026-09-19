@@ -572,6 +572,81 @@ describe("chat subagent wake", () => {
         },
       ]
     );
+    // ADR-0112 Does #1:drain 信封是宿主注入 commit —— 必须带出处戳，
+    // 否则出站投影把 "## Sub-agent " 官方前缀锚按 untrusted 转义。
+    const stampedDrain = seen[0]?.find((message) =>
+      message.content.some(
+        (block) =>
+          block.type === "text" && block.text.startsWith("## Sub-agent ")
+      )
+    );
+    assert.ok(stampedDrain, "wake prior 含 drain 消息");
+    assert.equal(stampedDrain.hostInjected, true);
+  });
+
+  it("query 行 drain 前缀 commit 带 hostInjected 出处戳 (ADR-0112 Does #1)", async () => {
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["answer after drain"] })],
+      stateOverrides: {
+        conversationId: "chat-drain-stamp",
+        messages: [makeNative({ role: "user", text: "original query" })],
+      },
+    });
+    const seen: AnthropicNativeMessage[][] = [];
+    const baseAdapter = ctx.deps.adapter;
+    ctx.subagentManager = {
+      spawn: () => ({ taskId: "unused" }),
+      queryBuffer: () => ({ status: "not_found" as const }),
+      waitFor: async () => {
+        throw new Error("unused");
+      },
+      shutdown: async () => {},
+      drainCompleted: () => [
+        {
+          taskId: "query-task",
+          envelope: {
+            status: "ok",
+            summary: "worker done",
+            result: "worker result",
+          },
+        },
+      ],
+      listActive: () => [],
+      abortTask: () => false,
+      getCapacity: () => 15,
+      listSubagents: () => [],
+      subscribe:
+        (_subscriber: (notice: SubAgentTerminalNotice) => void) => () => {},
+    } as SubAgentManager;
+    ctx.deps = {
+      ...ctx.deps,
+      adapter: {
+        ...ctx.deps.adapter,
+        step: async (state, request, signal) => {
+          seen.push([...state.messages]);
+          return baseAdapter.step(state, request, signal);
+        },
+      },
+    };
+
+    const result = await processChatLine({ line: "next question", ctx });
+    assert.equal(result.ranQuery, true);
+    const drainMsg = seen[0]?.find((message) =>
+      message.content.some(
+        (block) =>
+          block.type === "text" && block.text.startsWith("## Sub-agent ")
+      )
+    );
+    assert.ok(drainMsg, "query 行 prior 含 drain 消息");
+    assert.equal(drainMsg.hostInjected, true);
+    // 操作员原文 query 不被连带盖戳（戳只属于宿主 commit）。
+    const operatorMsg = seen[0]?.find((message) =>
+      message.content.some(
+        (block) => block.type === "text" && block.text === "next question"
+      )
+    );
+    assert.ok(operatorMsg);
+    assert.equal(operatorMsg.hostInjected, undefined);
   });
 
   it("reports a failed silent wake as undelivered and keeps the real task queryable", async () => {

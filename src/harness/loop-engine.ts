@@ -97,6 +97,7 @@ import {
   sleepWithAbort,
   TRANSPORT_MAX_ATTEMPTS,
 } from "./model-adapter/with-transport-retry.js";
+import { stampHostInjected } from "./model-adapter/outbound-projection.js";
 import {
   observeModelIdle,
   resolveModelClocks,
@@ -112,7 +113,7 @@ import {
   runFullCompact,
   splitForCompaction,
 } from "./compress/index.js";
-import type { FullCompactOutcome } from "./compress/index.js";
+import type { FullCompactOutcome, CompactAdapter } from "./compress/index.js";
 import { recognize } from "./secret-roundtrip/index.js";
 import type { SecretRegistry } from "./secret-roundtrip/index.js";
 import {
@@ -471,6 +472,9 @@ function freezeMessage(msg: AnthropicNativeMessage): AnthropicNativeMessage {
   return Object.freeze({
     role: msg.role,
     content: Object.freeze(msg.content.map((b) => Object.freeze({ ...b }))),
+    // ADR-0112 T2:宿主出处戳随冻结存活(compact re-freeze 克隆、priorMessages
+    // 续传都过本缝;丢戳会让已盖戳宿主帧在下次出站被误转译,KV 前缀漂移)。
+    ...(msg.hostInjected === true ? { hostInjected: true } : {}),
   });
 }
 
@@ -680,7 +684,8 @@ async function appendAgentStatusBar(
     // TUI 事件映射同源;缺席 → key 不出现,与栏文本"空槽不广告"同一形态)。
     ...pickPresentAgentStatusSlots(snapshot),
   });
-  const msg = deps.adapter.encodeUserText(snapshot.text);
+  // ADR-0112 T2:宿主注入 commit 时盖非模型可见出处戳;带戳帧在出站投影透传。
+  const msg = stampHostInjected(deps.adapter.encodeUserText(snapshot.text));
   pendingInjected.record(msg);
   return appendMessage({ state, msg });
 }
@@ -762,7 +767,7 @@ async function appendGraphModeChange(
     type: "graph_mode_changed",
     enabled: next,
   });
-  const msg = deps.adapter.encodeUserText(text);
+  const msg = stampHostInjected(deps.adapter.encodeUserText(text));
   pendingInjected.record(msg);
   return {
     state: appendMessage({ state, msg }),
@@ -810,8 +815,8 @@ async function appendGraphModePresence(
   }
   if (!seam.assembly.enabled()) return state;
   latch.value = true;
-  const msg = deps.adapter.encodeUserText(
-    IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION
+  const msg = stampHostInjected(
+    deps.adapter.encodeUserText(IKNOW_GRAPH_MODE_PRESENCE_NOTIFICATION)
   );
   pendingInjected.record(msg);
   return appendMessage({ state, msg });
@@ -887,7 +892,7 @@ function appendMcpReconnect(
       "<server>",
       event.server
     ).replace("<tools>", event.tools.join(", "));
-    const msg = deps.adapter.encodeUserText(text);
+    const msg = stampHostInjected(deps.adapter.encodeUserText(text));
     pendingInjected.record(msg);
     next = appendMessage({ state: next, msg });
   }
@@ -939,7 +944,7 @@ async function appendSkillIndexDelta(
     );
     return state;
   }
-  const msg = deps.adapter.encodeUserText(text);
+  const msg = stampHostInjected(deps.adapter.encodeUserText(text));
   pendingInjected.record(msg);
   return appendMessage({ state, msg });
 }
@@ -964,6 +969,22 @@ function appendSystemInterrupt(state: LoopState): LoopState {
     ]),
     turnCount: state.turnCount,
   };
+}
+
+/**
+ * ADR-0112 T2:runFullCompact 的 adapter 视图。compress 有界上下文不认识
+ * 出处戳,盖戳责任在宿主 commit 方(loop-engine):compact 请求 prompt 是
+ * 宿主注入,须带戳,否则出站投影会把它当 untrusted 转译。本视图是 compact
+ * 请求盖戳的**唯一缝**(trace 用 inputMessages 也经本视图 encodeUserText
+ * 构造,不再各自手盖)。
+ */
+function makeCompactAdapterView(deps: LoopEngineDeps): CompactAdapter {
+  const view: CompactAdapter = {
+    step: (state, request, signal) => deps.adapter.step(state, request, signal),
+    encodeUserText: (compactPromptText) =>
+      stampHostInjected(deps.adapter.encodeUserText(compactPromptText)),
+  };
+  return Object.freeze(view);
 }
 
 /**
@@ -1069,12 +1090,13 @@ async function applyCompactAttachment(
 
   const startedAt = new Date().toISOString();
   const startMono = performance.now();
+  const compactView = makeCompactAdapterView(deps);
   const inputMessages: ReadonlyArray<AnthropicNativeMessage> = Object.freeze([
     ...split.dropped,
-    deps.adapter.encodeUserText(buildCompactPrompt()),
+    compactView.encodeUserText(buildCompactPrompt()),
   ]);
   const outcome = await runFullCompact({
-    adapter: deps.adapter,
+    adapter: compactView,
     dropped: split.dropped,
     signal: opts?.signal,
     onStream: opts?.onStream,
@@ -1108,7 +1130,13 @@ async function applyCompactAttachment(
     });
     return {
       ...state,
-      messages: Object.freeze(composed.map((m) => freezeMessage(m))),
+      // 续传摘要 = 宿主注入 commit(spec Does #1):首条必须盖戳,否则
+      // 出站投影把 COMPACT_SUMMARY 官方前缀按 untrusted 转义剥掉。
+      messages: Object.freeze(
+        composed.map((m, i) =>
+          freezeMessage(i === 0 ? stampHostInjected(m) : m)
+        )
+      ),
     };
   }
 
@@ -1175,12 +1203,13 @@ async function applyFullCompactSummary(
 
   const startedAt = new Date().toISOString();
   const startMono = performance.now();
+  const compactView = makeCompactAdapterView(deps);
   const inputMessages: ReadonlyArray<AnthropicNativeMessage> = Object.freeze([
     ...state.messages,
-    deps.adapter.encodeUserText(buildCompactPrompt()),
+    compactView.encodeUserText(buildCompactPrompt()),
   ]);
   const outcome = await runFullCompact({
-    adapter: deps.adapter,
+    adapter: compactView,
     dropped: state.messages,
     signal: opts?.signal,
     onStream: opts?.onStream,
@@ -1210,7 +1239,13 @@ async function applyFullCompactSummary(
     });
     return {
       ...state,
-      messages: Object.freeze(composed.map((m) => freezeMessage(m))),
+      // full-summary 降级路径与 windowed 分支同一契约:续传摘要首条 =
+      // 宿主注入 commit,盖戳后才进权威历史(spec Does #1 / invariant 2)。
+      messages: Object.freeze(
+        composed.map((m, i) =>
+          freezeMessage(i === 0 ? stampHostInjected(m) : m)
+        )
+      ),
     };
   }
 
@@ -1377,7 +1412,9 @@ async function runSummaryWithTimeout(opts: {
   const messages: ReadonlyArray<AnthropicNativeMessage> = Object.freeze([
     ...opts.messages.map(freezeMessage),
     freezeMessage(
-      opts.deps.adapter.encodeUserText(SUMMARY_PROMPT(opts.reason))
+      stampHostInjected(
+        opts.deps.adapter.encodeUserText(SUMMARY_PROMPT(opts.reason))
+      )
     ),
   ]);
   const summaryState: LoopState = Object.freeze({ messages, turnCount: 0 });
@@ -2475,10 +2512,7 @@ async function stepWithTrace(opts: {
   // ADR-0108:模型在途观察窗 —— 每 step 入口重置缓冲,keep 只针对本步未定稿
   // 输出;已完成回合已随正常路径 append 的 assistant 不会被二次写入。
   const modelStreamRef = opts.modelStreamRef;
-  const modelOnStream = openModelInFlightWindow(
-    modelStreamRef,
-    opts.onStream
-  );
+  const modelOnStream = openModelInFlightWindow(modelStreamRef, opts.onStream);
   const firstPhase = await runModelPhase({
     state: deltaState,
     deps: opts.deps,
@@ -2888,7 +2922,7 @@ async function stepWithTrace(opts: {
     }
     if (isStalledToolLoop(opts.toolLoopRef.events)) {
       const envelope = freezeMessage(
-        opts.deps.adapter.encodeUserText(LOOP_DETECTED_TEXT)
+        stampHostInjected(opts.deps.adapter.encodeUserText(LOOP_DETECTED_TEXT))
       );
       // #888:envelope 自身入盘的批同样先 flush pending 注入(bar 等),
       // 顺序与内存权威历史一致。

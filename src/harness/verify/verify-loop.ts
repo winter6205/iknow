@@ -33,6 +33,7 @@ import type {
 import type { SubagentFailureReason } from "../subagent/envelope.js";
 import type { LoopTrace } from "../loop-trace.js";
 import type { TraceService } from "../trace/index.js";
+import { stampHostInjected } from "../model-adapter/outbound-projection.js";
 import { deriveClaimIndex } from "../last-nonempty-assistant.js";
 import { checkEvidence } from "./evidence-checker.js";
 import { probeVerifyCommand } from "./command-probe.js";
@@ -489,10 +490,15 @@ function buildRecord(opts: {
   return Object.freeze(record);
 }
 
-/** 注入信封作为 user 消息 (append-only, 不伪造 tool 块)。 */
+/**
+ * 注入信封作为 user 消息 (append-only, 不伪造 tool 块)。
+ * ADR-0112 Does #1:信封是宿主注入 commit,盖非模型可见出处戳 —— 三条
+ * 注入缝(失败信封 / 补跑信封 / 升级指令)共用本缝,出站投影按带戳帧
+ * 透传官方前缀锚。
+ */
 function userTextMessage(text: string): AnthropicNativeMessage {
   const block: AnthropicContentBlock = { type: "text", text };
-  return Object.freeze({
+  return stampHostInjected({
     role: "user",
     content: Object.freeze([block]),
   });

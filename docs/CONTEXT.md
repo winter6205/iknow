@@ -677,6 +677,14 @@ _Avoid_: 整表刷新；插进本轮用户消息前面；画成用户气泡；�
 **user-turn keep on protocol failure**: `protocolError` / `emptyFinalResponse` 时仍落下本轮**用户句**，不落下失败的 assistant。与「整轮不落盘」旧读法相对；`timeout` 落盘行为不变。
 _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与 viewport API error「不进 transcript」混成「用户句也不留」
 
+**出站投影（model-facing projection）**: 发给模型的字节是由代码按消息来源投影出的**派生视图**——`buildMessageParams` 是 `LoopState` + `request.system` 的纯函数，同一历史 → 同一 wire 字节（KV 前缀稳定）；**append-only messages** 权威历史本身可以脏，假标签原样留在盘上只被出站转译。投影失败 fail-closed：本跳不发模型请求，不回落原样上脏。ADR-0112；对齐 ADR-0036 observability side-channel / 契约 X（磁盘真源 ≠ 模型可见字节）。
+_Avoid_: 把「解析 XML / 前缀名册」当防伪机制；把转译结果写回权威历史或贴进 TUI 展示原文；指望投影阻止自然语言注入（那是能力面 sink 的事）；靠每跳改 `system` 塞现势
+
+**宿主帧出处戳（host-frame provenance stamp）**: 宿主注入消息（状态栏等同款 `encodeUserText` 注入）在 commit 进 LoopState 时打的**非模型可见**标记，出站序列化时剥掉；它是官方外形的**唯一来源**——wire 上未转义的宿主帧语法只允许出现在带戳帧，无戳载荷一律确定转译到无法冒充。ADR-0112。
+_Avoid_: 把戳当模型可见内容；让无戳 `tool_result` / user 文本复现未转义 host 语法；用 `isHostInjectedUserText`（服务 TUI 藏气泡 / instruction 回显）承担权威判定
+
+**指令权威 vs 能力权威（instruction authority vs capability authority）**: 两层不互替的信任面——**指令面**（模型该认谁说的话是官方指令）靠**出站投影**拆假门牌，只信带戳宿主帧；**能力面**（模型实际能做什么）靠权限 / 沙箱 / egress 执法。拆了假门牌，普通句子里的「去做 X」仍可能被模型执行，那由能力层兜住。ADR-0112；承 ADR-0009 channel-based 信任、ADR-0044 低完整度来源不买 system 席位。
+_Avoid_: 指望投影 / 转义挡住真实能力滥用；用 soul 告诫当验收机制（一行 usage 提示不承担 invariant）；把拆假门牌说成防越狱完成
 **stream_incomplete (fault kind)**: (ADR-0111) `FaultEvent` 词汇表格——上游流结束但未产出完整 assistant message（空流/断流）的瞬时传输故障，**不是**协议损坏。带 `visible` 位（`clock_timeout` 同判据：本次 attempt 是否已有非空模型输出增量）：不可见 → 整 step 重试安全（D8 整回合不提交）；已出字 → 不自动重试，落 typed 失败。`nonClockFaultOf` default 支（protocol_error 压平）不删除只收窄，且命中时发 console.warn 诊断。
 _Avoid_: 把断流归类为 protocol_error / crashed；对已出字的断流自动重试；删 default 支造成新形态静默逃逸；给 withTransportRetry 加第二套重试机（预算/退避全走既有机器）
 

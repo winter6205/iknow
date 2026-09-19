@@ -57,6 +57,7 @@ import type {
 import type { MessageStreamEvent } from "@anthropic-ai/sdk/resources/messages.js";
 import type { HarnessStreamEvent } from "../stream.js";
 import { safeEmitStream } from "../stream.js";
+import { projectMessagesForWire } from "./outbound-projection.js";
 
 /**
  * #176 T3: `client.messages.stream(...)` 返回的 SDK MessageStream 之最小消费面。
@@ -756,11 +757,12 @@ export function buildMessageParams(
   return {
     model: opts.model,
     max_tokens: opts.maxTokens,
-    // invariant (#383 B2 T2 / R1 #385): system 消息绝不上 wire ——
-    // 服务端拒收 + 语义错位。Ctrl+C 打断的 system 项只进 transcript 展示层,
-    // 交给 SDK 前必须先过滤掉。
-    messages: state.messages.filter(
-      (m) => m.role !== "system"
+    // ADR-0112 T2:messages 走出站投影(纯函数)而非直传 —— system-role
+    // 过滤(invariant #383 B2 T2 / R1 #385:system 消息绝不上 wire)、剥
+    // 宿主出处戳(戳非模型可见)、无戳 / tool_result 文本确定转译(untrusted
+    // 不得复现 host 语法)。投影抛 typed 错 → 本跳在触达 SDK 前中止。
+    messages: projectMessagesForWire(
+      state.messages
     ) as unknown as MessageParam[],
     ...(tools !== undefined ? { tools } : {}),
     // #196 IKNOW T1:system 字段条件附加 — undefined 或空串都不发
@@ -845,13 +847,12 @@ export function createRealAnthropicAdapter(
     system?: string;
     messages?: ReadonlyArray<AnthropicNativeMessage>;
   }): Promise<{ inputTokens: number }> {
-    // system 消息绝不上 wire(同 `buildMessageParams` 装配期 invariant
-    // #383 B2 T2 / R1 #385);首轮典型场景 messages 缺席 → undefined → 字段
-    // 省略,SDK 接受空 messages。
+    // ADR-0112 T2:token 数必须对齐 wire —— 与 `buildMessageParams` 消费同一
+    // 出站投影(system-role 过滤 + 剥戳 + untrusted 转译同缝同规则)。
+    // 投影抛 typed 错 → SDK 不调用,由装配层 catch → skip 本会话
+    // (tool-overflow skip 语义不变)。
     const messagesParam: MessageParam[] = input.messages
-      ? (input.messages.filter(
-          (m) => m.role !== "system"
-        ) as unknown as MessageParam[])
+      ? (projectMessagesForWire(input.messages) as unknown as MessageParam[])
       : [];
     const toolsParam = toSdkTools(input.tools);
     // SDK 0.115 `MessageCountTokensParams` 字段:model + messages 必填;

@@ -330,6 +330,10 @@ describe("SC1: 先错后对 — 闭环零人工干预走通", () => {
         )
     );
     assert.ok(envelopeUser !== undefined, "历史必须含验证失败注入信封");
+    // ADR-0112 Does #1 / invariant 2:verify 信封是宿主注入 commit，须带
+    // 非模型可见出处戳（否则出站时 [VALIDATION FAILED] 官方前缀锚被自家
+    // 转译剥掉）。
+    assert.equal(envelopeUser.hostInjected, true);
   });
 
   it("多轮 continue 后历史只含一条信封 (stale 信封收敛, code-review High 修复)", async () => {

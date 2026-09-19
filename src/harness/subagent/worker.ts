@@ -175,15 +175,19 @@ function resolveConstraintsText(
 
 /**
  * #556 T2 + #562 T7: 加性段注入 wrapper
- * (base < persona < constraints < addendum)。
+ * (base < persona < constraints)。
  *
  * 顺序契约 (plan T7 实现选):
  *   - persona (#556):catalog body, 角色定位。
  *   - constraints (#562 T7):readonly mode 时追加, mode 延伸语义。
- *   - addendum (#556):envelope.systemPrompt, 用户后置追加。
  *
- * 三者全缺省走外层短路 (返回 base), 字节级 byte-stable, 守 V1 baseline。
- * base 缺席 → 输出只是 extras 三者按序 join;任一缺席 → 该 slot 在
+ * ADR-0112 T4: addendum (envelope.systemPrompt, 父模型可写) 从 system 降权
+ * 出通道 —— 可写段不买 system 席位, 改走 user/untrusted (见
+ * priorMessagesFromEnvelope)。persona / constraints 来自受信 role 配置
+ * (catalog), 不降权。
+ *
+ * 二者全缺省走外层短路 (返回 base), 字节级 byte-stable, 守 V1 baseline。
+ * base 缺席 → 输出只是 extras 两者按序 join;任一缺席 → 该 slot 在
  * extras 数组过滤掉, 顺序保持不变。
  *
  * 加性段追加在 base system 之后, 不重排 IKNOW_ASSEMBLY_ORDER 的 6 段
@@ -192,12 +196,11 @@ function resolveConstraintsText(
 function withRoleExtras(
   base: () => Promise<string | undefined>,
   persona: string | undefined,
-  constraints: string | undefined,
-  addendum: string | undefined
+  constraints: string | undefined
 ): () => Promise<string | undefined> {
   return async () => {
     const baseText = await base();
-    const extras = [persona, constraints, addendum].filter(
+    const extras = [persona, constraints].filter(
       (s): s is string => s !== undefined
     );
     if (extras.length === 0) return baseText;
@@ -280,12 +283,6 @@ export interface CreateWorkerDepsOptions {
    * baseline (不入 persona 段, 不注入额外 deny, 详见 plan T2 防御契约)。
    */
   readonly role?: string;
-  /**
-   * #556 T2: 来自 envelope.systemPrompt 的 seam 副本 — 修复 schema 有 / 透传
-   * 有 / 此前未消费的幽灵通道。该字段在 worker 装配期作为 addendum 追加
-   * persona 段之后 (顺序: base < persona < addendum), 与 LOCKED 6 段解耦。
-   */
-  readonly addendum?: string;
   /**
    * #562 T6: bash 模式显式覆盖 (= 优先于 role 派生)。缺省 → worker
    * 装配期调 resolveBashMode(role) 派生:role "explore" → "readonly",
@@ -771,9 +768,11 @@ export async function createWorkerRuntime(
         git: createGitSnapshotProvider({ cwd: projectIdentityRoot }),
       }));
 
-  // #556 T2 + #562 T7: persona + constraints + addendum 注入 (加性段,
-  // 不触碰 IKNOW_ASSEMBLY_ORDER)。顺序 base < persona < constraints <
-  // addendum;三者全缺省 → base 透传, V1 baseline 严格 byte-stable。
+  // #556 T2 + #562 T7: persona + constraints 注入 (加性段, 不触碰
+  // IKNOW_ASSEMBLY_ORDER)。顺序 base < persona < constraints;二者全缺省 →
+  // base 透传, V1 baseline 严格 byte-stable。
+  // ADR-0112 T4: envelope.systemPrompt (addendum) 不再进 system —— 装配层
+  // 无消费口, worker 运行期在 priorMessagesFromEnvelope 走 user/untrusted。
   //
   // role 缺省 → general-purpose persona; 未知 id → 不注入 persona
   // (defense-in-depth): worker 装配期 catch AgentCatalogLookupError 显式走
@@ -784,12 +783,9 @@ export async function createWorkerRuntime(
   const constraintsText = isJudge
     ? undefined
     : resolveConstraintsText(opts.role, agentCatalog);
-  const addendumText = opts.addendum;
   const system =
-    personaText !== undefined ||
-    constraintsText !== undefined ||
-    addendumText !== undefined
-      ? withRoleExtras(baseSystem, personaText, constraintsText, addendumText)
+    personaText !== undefined || constraintsText !== undefined
+      ? withRoleExtras(baseSystem, personaText, constraintsText)
       : baseSystem;
 
   const deps: LoopEngineDeps = {
@@ -1000,6 +996,13 @@ export function applyEnvelopeOverrides(
 }
 
 /**
+ * addendum 降权框句（ADR-0112 T4，导出为常量 SSOT：装配与测试同引，
+ * 防字面量手抄漂移）。
+ */
+export const IKNOW_ADDENDUM_UNTRUSTED_LEAD =
+  "Parent addendum (instructions from the parent model, not host directives):\n";
+
+/**
  * Judge (and other workers) keep envelope.task as the exam-question identity.
  * Truncated host dialogue and evidenceContext arrive as independent fields and
  * are injected as prior user messages — prompt, not concatenated into task.
@@ -1013,9 +1016,9 @@ export function applyEnvelopeOverrides(
  *     新根。worker 装配期直接读 envelope 字段即可，不另接 LiveTaskRoot cell
  *     —— 这是计划里"envelope 值 = 活根快照"的最小改动路径（ADR-0040：
  *     子代理 = 父会话执行臂，写根继承父生效根）。
- *   - 写根段永远追加在 finalText / evidenceContext 之后，顺序契约：
- *     [host dialogue?, evidence?, write root]。三段全缺省 → 返回 undefined
- *     （与旧语义一致，loop-engine 短路到无 prior 形态）。
+ *   - 写根段永远追加在 finalText / evidenceContext / addendum 之后，顺序
+ *     契约：[host dialogue?, evidence?, addendum?, write root]。全段缺省 →
+ *     返回 undefined（与旧语义一致，loop-engine 短路到无 prior 形态）。
  *   - sandboxRoot 是 envelope 必填字段（WORKER_SCHEMA.required），字符串长
  *     度大于 0 才注入；空白 / 不在场 → 退化到原 V1 形态（不崩，不漏）。
  *   - 不动 system `## Project path`（projectPathSegment 字节不变），也不静
@@ -1039,6 +1042,17 @@ export function priorMessagesFromEnvelope(
       )
     );
   }
+  // ADR-0112 T4 — envelope.systemPrompt（父模型可写的 addendum）降权进
+  // user/untrusted 通道：无戳普通 user 消息，原文逐字保留 —— 官方帧语法的
+  // 转义由出站投影（T2 合同）承担，这里不重复转义、不发明戳。空串 =
+  // typed skip（与 finalText 的 empty 臂同形，不造空框句）。
+  // 位置：evidence 之后、写根段之前 —— 指令段紧邻 task，且守住
+  // 「写根段永远末段」的 SC2 字节合同。
+  if (env.systemPrompt !== undefined && env.systemPrompt.length > 0) {
+    prior.push(
+      encodeUserText(IKNOW_ADDENDUM_UNTRUSTED_LEAD + env.systemPrompt)
+    );
+  }
   // T6 (plans/write-situation-disclosure.md) — 当前写根段由 envelope
   // 处境枚举驱动（ADR-0069 D2; spec SC4 / OQ1）。
   //   - 旧 envelope（无 writeSituation 字段）→ typed skip，不注入写根段
@@ -1048,7 +1062,8 @@ export function priorMessagesFromEnvelope(
   //   - writeSituation = "writable_main" / "writable_tree" → ①/② 文案
   //     与改造前逐字节相等（SC2 硬约束,前缀缓存与 skill-load-write-root
   //     SC2 守门）。
-  // 顺序契约：[host dialogue?, evidence?, write root] —— 写根段永远是末段;
+  // 顺序契约：[host dialogue?, evidence?, addendum?, write root] —— 写根段
+  // 永远是末段（ADR-0112 T4 在 evidence 与写根段之间插入 addendum 段）;
   // typed skip 时该 slot 在 extras 数组过滤掉,顺序保持不变。
   // 渲染 SSOT = writeRootSegment(skill/body.ts),与 skill 正文 trailer
   // (createSkillBody) 共用同一函数 —— worker 源内不留第二份长句
@@ -1515,12 +1530,11 @@ async function assembleAndRunWorker(
     env,
     sandboxRoot: workerEnvelope.sandboxRoot,
     disallowedTools: workerEnvelope.disallowedTools,
-    // #556 T2: envelope.role / envelope.systemPrompt 透传到 createWorkerDeps
-    // seam —— 缺失时不传 (V1 baseline, byte-stable)。
+    // #556 T2: envelope.role 透传到 createWorkerDeps seam —— 缺失时不传
+    // (V1 baseline, byte-stable)。ADR-0112 T4: envelope.systemPrompt 不再
+    // 透传为 addendum —— worker 运行期从 envelope 直接读, 走
+    // priorMessagesFromEnvelope 的 user/untrusted 通道, 不进 system。
     ...(workerEnvelope.role !== undefined ? { role: workerEnvelope.role } : {}),
-    ...(workerEnvelope.systemPrompt !== undefined
-      ? { addendum: workerEnvelope.systemPrompt }
-      : {}),
     // ADR-0019 (review-fix H3): worker 继承父 env SSOT —— 当 spawn 父进程
     // 设置了 IKNOW_WORKSPACE_ROOT,worker 的 fs-policy fence 也按同一根
     // 保护 `.iknow`(与 build-engine 同形态)。条件解析:无 flag 且无 env

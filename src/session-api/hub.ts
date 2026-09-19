@@ -14,6 +14,7 @@ import {
   createJsonlTraceService,
   compactMessages,
   runFullCompact,
+  buildCompactedMessages,
   splitForCompaction,
   type AnthropicNativeMessage,
   type HarnessStreamEvent,
@@ -46,6 +47,7 @@ import {
   type OverlayPrefetchFn,
 } from "../harness/memory/index.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
+import { stampHostInjected } from "../harness/model-adapter/outbound-projection.js";
 import {
   createSubagentWake,
   queryableSubagentTaskIds,
@@ -1881,10 +1883,12 @@ export class SessionHub {
                   conversationId,
                 }
               );
-              const drainedMsg: AnthropicNativeMessage = {
+              // ADR-0112 Does #1:drain 浓缩是宿主注入 commit —— 盖出处戳,
+              // 出站投影才按官方帧透传 "## Sub-agent " 前缀锚。
+              const drainedMsg: AnthropicNativeMessage = stampHostInjected({
                 role: "user",
                 content: [{ type: "text", text: drained }],
-              };
+              });
               const priorMessages = drained
                 ? [...session.messages, drainedMsg]
                 : session.messages;
@@ -2373,10 +2377,19 @@ export class SessionHub {
         // 路径(不 fallback 截断、不落盘、cancelled:true)对齐 Claude Code。
         let nextMessages: ReadonlyArray<AnthropicNativeMessage> | undefined;
         let cancelled = false;
-        if (this.cachedDeps?.adapter !== undefined) {
+        const hubAdapter = this.cachedDeps?.adapter;
+        if (hubAdapter !== undefined) {
           try {
             const outcome = await runFullCompact({
-              adapter: this.cachedDeps.adapter,
+              // ADR-0112 Does #1:compact 请求 prompt 是宿主注入 —— 经带戳
+              // 视图编码(与 loop-engine makeCompactAdapterView 同法),
+              // 否则这次摘要调用的出站投影会把官方 prompt 转译掉。
+              adapter: {
+                step: (state, request, signal) =>
+                  hubAdapter.step(state, request, signal),
+                encodeUserText: (promptText) =>
+                  stampHostInjected(hubAdapter.encodeUserText(promptText)),
+              },
               dropped: split.dropped,
               ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
               ...(opts?.onStream !== undefined
@@ -2384,17 +2397,15 @@ export class SessionHub {
                 : {}),
             });
             if (outcome.kind === "summarized") {
-              const preamble =
-                "This session is being continued from a previous " +
-                "conversation that ran out of context. The summary below " +
-                "covers the earlier portion of the conversation.\n\n" +
-                "Summary:\n";
+              // 续传摘要走 buildCompactedMessages 同一装配缝(preamble SSOT),
+              // 首条 = 宿主注入 commit,盖出处戳后落盘。
+              const composed = buildCompactedMessages({
+                summaryText: outcome.text,
+                kept: split.kept,
+              });
               nextMessages = [
-                {
-                  role: "user",
-                  content: [{ type: "text", text: preamble + outcome.text }],
-                },
-                ...split.kept,
+                stampHostInjected(composed[0]!),
+                ...composed.slice(1),
               ];
             } else if (outcome.kind === "signal_aborted") {
               // Claude Code 取消语义:会话保持原样,不 fallback 截断、不

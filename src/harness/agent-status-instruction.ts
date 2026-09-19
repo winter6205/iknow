@@ -12,17 +12,22 @@
  *     无有效指令源，继续前扫（F2）；
  *   - 纯读取，零抛错（Input-contract 表）；无任何 LLM / adapter 参与（SC2，
  *     由 tests/harness/agent-status-instruction-seam.test.ts grep 锁钉住）；
- *   - 名册前缀常量（MCP 重连 / LOOP_DETECTED / compact 三缝）在本模块落
- *     字面锚：SEAM 完备性锁测试用产出方真常量（loop-engine / tool-loop-detect /
- *     full-compact）逐条校验不漂移，且新注入缝不挂名册即红；
+ *   - 行首前缀形态名册（MCP 重连 / LOOP_DETECTED / compact 三缝 / drain /
+ *     verify 两信封）在本模块落为**导出 SSOT** `HOST_INJECTION_LINE_ANCHORS`：
+ *     前缀常量取自各产出方，漂移由 import 结构性排除；SEAM 完备性锁测试用
+ *     产出方真常量（loop-engine / tool-loop-detect / full-compact）逐条校验
+ *     不漂移，且新注入缝不挂名册即红；出站投影直接消费同名册（不再手抄副本）；
  *   - 不 import loop-engine（T3 将由 loop-engine 消费本模块，防成环）、
  *     不 import TUI（harness 不反向依赖）。
  */
 import type { AnthropicNativeMessage } from "./model-adapter/types.js";
 import { isAgentStatusText } from "./agent-status.js";
 import { isGraphModeText } from "./graph/notification.js";
-import { isSubagentDrainText } from "./subagent/host-drain.js";
-import { isVerifyInjectedText } from "./verify/inject.js";
+import { SUBAGENT_DRAIN_PREFIX } from "./subagent/host-drain.js";
+import {
+  EVIDENCE_RERUN_PREFIX,
+  VALIDATION_FAILED_PREFIX,
+} from "./verify/inject.js";
 import { isSkillIndexDeltaText } from "./skill/index-delta.js";
 import { isSkillLoadText } from "./skill/body.js";
 import { MEMORY_PREFETCH_END } from "./memory/prefetch.js";
@@ -55,6 +60,21 @@ const PREFIX_ANCHORS: ReadonlyArray<string> = [
 ];
 
 /**
+ * 行首前缀形态宿主注入锚的**单一权威名册**（SSOT，ADR-0112 T2 review 修复）：
+ * 甄别谓词与出站投影（outbound-projection 的 `HOST_LINE_ANCHORS`）共同消费
+ * 本数组，杜绝手工并行副本漂移；名册↔谓词一致性由投影漂移锁测试逐条遍历
+ * 校验。标签形态帧（`<agent_status>` / `<graph_mode>` / `<available_skills>`）
+ * 不在此列 —— 它们的转译走投影 TAG 规则（常量同样取自产出方）。
+ */
+export const HOST_INJECTION_LINE_ANCHORS: ReadonlyArray<string> =
+  Object.freeze([
+    ...PREFIX_ANCHORS,
+    SUBAGENT_DRAIN_PREFIX,
+    VALIDATION_FAILED_PREFIX,
+    EVIDENCE_RERUN_PREFIX,
+  ]);
+
+/**
  * 甄别名册（现行全集，spec T2）：命中任一即宿主注入，不是操作员键入。
  * skill-load 信封**不在**名册内（计入真实用户消息，提取规则另行处理）。
  */
@@ -62,14 +82,12 @@ export function isHostInjectedUserText(text: string): boolean {
   if (
     isAgentStatusText(text) ||
     isGraphModeText(text) ||
-    isSubagentDrainText(text) ||
-    isVerifyInjectedText(text) ||
     isSkillIndexDeltaText(text)
   ) {
     return true;
   }
   const trimmed = text.trimStart();
-  return PREFIX_ANCHORS.some((p) => trimmed.startsWith(p));
+  return HOST_INJECTION_LINE_ANCHORS.some((p) => trimmed.startsWith(p));
 }
 
 /**

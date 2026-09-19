@@ -37,6 +37,14 @@ export type AnthropicRole = "user" | "assistant" | "system";
 export interface AnthropicNativeMessage {
   readonly role: AnthropicRole;
   readonly content: ReadonlyArray<AnthropicContentBlock>;
+  /**
+   * ADR-0112 T2:宿主注入 commit 出处戳。**非模型可见** —— 出站投影
+   * (`outbound-projection.ts`)在序列化前剥除,wire JSON 中绝不出现;
+   * 官方帧外形(`<agent_status>` / 前缀锚)只允许出现在带戳消息。
+   * 盘上真源可携带该字段(store 校验允许未知顶层字段透传),戳随 JSONL
+   * 链存活保证 resume 后同一历史出同一 wire 前缀(KV 稳定)。
+   */
+  readonly hostInjected?: true;
 }
 
 /** Foundation 运行时权威状态(013 冻:唯一事实来源,不许第二份副本)。 */

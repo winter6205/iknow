@@ -330,8 +330,10 @@ export function createSpawnSubAgentTool(
         },
         systemPrompt: {
           type: "string",
+          // ADR-0112 T4: addendum 降权出 system —— 该字段作为 untrusted user
+          // 通道消息传给子代理,不再是 system 段覆盖,描述必须如实。
           description:
-            "Optional override for the sub-agent's system prompt section.",
+            "Optional guidance from the parent, delivered to the sub-agent as a user-channel message alongside the task. The sub-agent's `system` is host-assembled and stays in force; this adds framing, not a replacement constitution.",
         },
         disallowedTools: {
           type: "array",

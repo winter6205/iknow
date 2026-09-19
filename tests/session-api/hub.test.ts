@@ -204,6 +204,15 @@ describe("SessionHub subagent wake", () => {
           )
         )
       ).toBe(true);
+      // ADR-0112 Does #1:drain 宿主 commit 带出处戳且随落盘链存活。
+      const drainMsg = file.messages.find((message) =>
+        message.content.some(
+          (block) =>
+            block.type === "text" &&
+            block.text.includes("## Sub-agent wake-task result")
+        )
+      );
+      expect(drainMsg?.hostInjected).toBe(true);
     });
   });
 

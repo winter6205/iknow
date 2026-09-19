@@ -79,15 +79,23 @@ export interface AgentStatusSnapshot {
  * instruction / reconcile / todo 段都是「空槽不广告」的可选段;标量段
  * (instruction / reconcile)与 last_tool 一律排在 `todos:` 头之前(次序纪律)。
  */
+/** 官方帧开/闭标签字面（ADR-0112 T2：出站投影 TAG 转义名册由此常量拼装，
+ *  产出方与转译方同源，防字面量手抄漂移）。 */
+export const AGENT_STATUS_OPEN_TAG = "<agent_status>";
+export const AGENT_STATUS_CLOSE_TAG = "</agent_status>";
+
 /** 栏文本形态检测（TUI 隐藏注入气泡、turn 边界、测试夹具共用）。 */
 export function isAgentStatusText(text: string): boolean {
-  return text.trimStart().startsWith("<agent_status>");
+  return text.trimStart().startsWith(AGENT_STATUS_OPEN_TAG);
 }
 
 export function buildAgentStatusText(snapshot: AgentStatusSnapshot): string {
   // 次序纪律(spec invariant 5):标量字段行全部先于 `todos:` 头,todo 行
   // 永远占栏末段 —— 这是旧解析器吃新栏仍得正确子集(回滚安全)的根。
-  const lines: string[] = ["<agent_status>", `last_tool: ${snapshot.lastTool}`];
+  const lines: string[] = [
+    AGENT_STATUS_OPEN_TAG,
+    `last_tool: ${snapshot.lastTool}`,
+  ];
   if (snapshot.instruction !== null && snapshot.instruction !== undefined) {
     lines.push(`instruction: ${snapshot.instruction}`);
   }
@@ -98,7 +106,7 @@ export function buildAgentStatusText(snapshot: AgentStatusSnapshot): string {
     lines.push("todos:");
     lines.push(...snapshot.openTodoLines);
   }
-  lines.push("</agent_status>");
+  lines.push(AGENT_STATUS_CLOSE_TAG);
   return lines.join("\n");
 }
 
@@ -115,8 +123,8 @@ export function parseAgentStatusText(text: string): AgentStatusSnapshot | null {
   if (!isAgentStatusText(text)) return null;
   const lines = text.split("\n");
   if (lines.length < 2) return null;
-  if (lines[0] !== "<agent_status>") return null;
-  if (lines[lines.length - 1] !== "</agent_status>") return null;
+  if (lines[0] !== AGENT_STATUS_OPEN_TAG) return null;
+  if (lines[lines.length - 1] !== AGENT_STATUS_CLOSE_TAG) return null;
   const body = lines.slice(1, -1);
   const lastToolLine = body.find((l) => l.startsWith(LAST_TOOL_PREFIX));
   if (lastToolLine === undefined) return null;
