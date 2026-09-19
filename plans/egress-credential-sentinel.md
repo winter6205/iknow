@@ -56,7 +56,7 @@ OVERALL: PASS（rev 2，返工点已按审查方清单落实）
    - **Inherits:** spec T5 三条判据逐项（recognize：「`fake_value_<uuid>`、同形假 JWT、配平长假值喂 `recognize()` → `matched = []` 且 `replaced` 逐字等于输入」；output-mask：「假值 ∉ `currentSecretValues(process.env, registry.values())`……`echo $GH_TOKEN` 经 mask 层输出原样含假值」；secrets guard：「mode:block 下含假值的工具参数不被拦（patterns 同一 SSOT，`src/harness/secret-roundtrip/patterns.ts:23-31` 零命中）」）；invariant 4（「两层并存不互替（ADR-0105 §Decision 6）……三重误报防线各给判据」）；invariant 6（双重代换防护：body transform 替换后从 sentinel 尾后继续、real value 永不回扫；headers split/join 单向）；Assumption 14（「不改 secret-roundtrip mask / output-mask / secrets guard 任何一层的实现，只加……反向钉子测试」）；SC5。
    - **Surface:** `src/harness/secret-roundtrip/` 测试面（三层各一具名钉）、egress 装配层子串契约 fixture 与 body transform 夹具——三层源文件零 diff。
    - **Acceptance:** 以上每条为具名单测/夹具进 `npm test`：①三类假值喂 recognize 零命中且输入逐字回；②假值不进 output-mask 遮蔽集、屏上假值原样可诊断；③mode:block 不拦含假值工具参数；④铸两个嵌套假值 → 装配失败 typed 错误（F4 违例 fixture）；⑤「真值含假值前缀」构造体过 body transform → 替换产物不回扫、real value 永不回扫；⑥Assumption 14 的可核验形态：本弹 diff 仅测试文件，三层实现源文件不变；`npm test` 绿。
-   - Status: [ ] pending
+   - Status: [x] pending
    - [blocks: T2, T3]
 
 6. **T6 入口形态接线 + yolo 姿态显式** — tag: `[implementation]`
