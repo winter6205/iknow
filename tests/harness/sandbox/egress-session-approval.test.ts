@@ -19,7 +19,6 @@
  * 协议 + 处理 auth token 的复杂性(只验判定逻辑,不验真 dial 出网)。
  */
 
-import { spawn as realSpawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -35,6 +34,7 @@ import {
   type EgressViolationSink,
 } from "../../../src/harness/sandbox/egress/violations.js";
 import { createHttpProxyServer as createHttpProxyServerOrig } from "../../../src/harness/sandbox/egress/upstream.js";
+import type { EgressRelayPaths } from "../../../src/harness/sandbox/egress/relay-assets.js";
 
 const scratchPaths: string[] = [];
 
@@ -50,15 +50,12 @@ afterEach(() => {
   }
 });
 
-function fakeSocatProc(pid: number) {
-  const proc = realSpawn("/bin/true", ["--version"], { stdio: "ignore" });
-  try {
-    proc.kill("SIGKILL");
-  } catch {
-    /* */
-  }
-  return Object.assign(proc, { pid });
-}
+const STUB_RELAY: EgressRelayPaths = {
+  nodePath: "/test-root/bin/node",
+  relayDir: "/test-root/vendor/egress-relay",
+  bridgeScriptPath: "/test-root/vendor/egress-relay/egress-tcp-relay.mjs",
+  connectScriptPath: "/test-root/vendor/egress-relay/egress-http-connect.mjs",
+};
 
 /**
  * 在 session 装配期捕获 filter 回调 —— 用注入的假 `createHttpProxyServer`
@@ -78,8 +75,8 @@ function captureFilter(): {
     opts: Parameters<typeof createHttpProxyServerOrig>[0]
   ) => {
     captured.value = { filter: opts.filter };
-    // 返回一个最小 server 形状,让 session 后续 listenOnFreePort 能拿到 port。
-    // server.listen 必须可被监听且 .address() 返回 { port }。
+    // 返回一个最小 server 形状,让 session 后续 listenOnUnixSocket 完成
+    // （裸 http server listen unix socket 路径即可）。
     return createServer();
   };
   return { createHttpProxyServer, captured };
@@ -97,12 +94,9 @@ describe("egress session filter — approvalGate 接线 (T6 SC10)", () => {
       approvalGate: gate,
     };
     const { createHttpProxyServer, captured } = captureFilter();
-    const proc = fakeSocatProc(11111);
     const session = await createEgressSession({
       policy,
-      socatCommand: "fake-socat",
-      probeSocat: () => true,
-      spawn: (() => proc) as typeof realSpawn,
+      relayResolver: () => STUB_RELAY,
       socketPathFactory: (id) => join(scratchDir(), `e-${id}.sock`),
       violationSink: sink,
       createHttpProxyServer,
@@ -131,12 +125,9 @@ describe("egress session filter — approvalGate 接线 (T6 SC10)", () => {
       approvalGate: gate,
     };
     const { createHttpProxyServer, captured } = captureFilter();
-    const proc = fakeSocatProc(22222);
     const session = await createEgressSession({
       policy,
-      socatCommand: "fake-socat",
-      probeSocat: () => true,
-      spawn: (() => proc) as typeof realSpawn,
+      relayResolver: () => STUB_RELAY,
       socketPathFactory: (id) => join(scratchDir(), `e-${id}.sock`),
       violationSink: sink,
       createHttpProxyServer,
@@ -165,12 +156,9 @@ describe("egress session filter — approvalGate 接线 (T6 SC10)", () => {
       // approvalGate 故意缺席
     };
     const { createHttpProxyServer, captured } = captureFilter();
-    const proc = fakeSocatProc(33333);
     const session = await createEgressSession({
       policy,
-      socatCommand: "fake-socat",
-      probeSocat: () => true,
-      spawn: (() => proc) as typeof realSpawn,
+      relayResolver: () => STUB_RELAY,
       socketPathFactory: (id) => join(scratchDir(), `e-${id}.sock`),
       violationSink: sink,
       createHttpProxyServer,
@@ -200,12 +188,9 @@ describe("egress session filter — approvalGate 接线 (T6 SC10)", () => {
       approvalGate: gate,
     };
     const { createHttpProxyServer, captured } = captureFilter();
-    const proc = fakeSocatProc(44444);
     const session = await createEgressSession({
       policy,
-      socatCommand: "fake-socat",
-      probeSocat: () => true,
-      spawn: (() => proc) as typeof realSpawn,
+      relayResolver: () => STUB_RELAY,
       socketPathFactory: (id) => join(scratchDir(), `e-${id}.sock`),
       violationSink: sink,
       createHttpProxyServer,
@@ -233,12 +218,9 @@ describe("egress session filter — approvalGate 接线 (T6 SC10)", () => {
       approvalGate: gate,
     };
     const { createHttpProxyServer, captured } = captureFilter();
-    const proc = fakeSocatProc(55555);
     const session = await createEgressSession({
       policy,
-      socatCommand: "fake-socat",
-      probeSocat: () => true,
-      spawn: (() => proc) as typeof realSpawn,
+      relayResolver: () => STUB_RELAY,
       socketPathFactory: (id) => join(scratchDir(), `e-${id}.sock`),
       violationSink: sink,
       createHttpProxyServer,
@@ -275,12 +257,9 @@ describe("egress session filter — approvalGate 接线 (T6 SC10)", () => {
       approvalGate: gate,
     };
     const { createHttpProxyServer, captured } = captureFilter();
-    const proc = fakeSocatProc(66666);
     const session = await createEgressSession({
       policy,
-      socatCommand: "fake-socat",
-      probeSocat: () => true,
-      spawn: (() => proc) as typeof realSpawn,
+      relayResolver: () => STUB_RELAY,
       socketPathFactory: (id) => join(scratchDir(), `e-${id}.sock`),
       violationSink: sink,
       createHttpProxyServer,

@@ -1,6 +1,6 @@
 # Spec: 出口域名允许集 —— 代码承载的默认预放行档（builtin preset）
 
-**Status:** draft (rev 1, 待 review)
+**Status:** draft (rev 1；defaults 清单以 ADR-0107 扩表为准)
 **Basis:** ADR-0104（推翻 ADR-0097 Decision「不做预置常用域兜底集」，修订「允许集只认用户层 settings」为「preset（代码承载）∪ 用户层增量」）；`docs/CONTEXT.md`「预放行档（builtin preset）」「域名允许集」词条；承接 `specs/network-egress-allowlist.md`
 **Surface:** 新增 `src/harness/sandbox/egress/preset-domains.ts`、`src/harness/sandbox/egress/assembly.ts`（合并语义 + 工厂恒返 policy）、`session.ts` / `violations.ts`（`allowlistSource` 标签重定）、`src/harness/aci/tools/bash.ts`（source fallback 接线）、既有 egress 测试（`tests/harness/sandbox/egress-assembly.test.ts` 等断言反转）
 

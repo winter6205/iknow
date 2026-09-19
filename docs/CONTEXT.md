@@ -196,29 +196,32 @@ _Avoid_: multiline 开关；`.*` 吞整文件
 **install-rooted rg**: 安装根上钉死版本+校验和的搜引擎二进制；生产 `grep` 只 exec 这一路径。起不来走 Node 全语义扫，不回落 PATH `rg`。ADR-0084。
 _Avoid_: which rg；环境依赖当主路径
 
-**ACI network surface**: 装配层网络三职——发现是 `web_search`，阅读是 `web_fetch`，通话不升第 9 件工具、只走 `bash`（经 **出口代理缝**）。形状冻结；发现与阅读的后端选择见 **ACI web backend**。
+**ACI network surface**: 装配层网络三职——发现是 `web_search`，阅读是 `web_fetch`，通话不升第 9 件工具、只走 `bash`（经 **出口代理缝** + **域名允许集**）。形状冻结；发现与阅读的后端选择见 **ACI web backend**。
 _Avoid_: curl 工具; http_request; HTTP 原语; 把 method / headers 并进 web_fetch
 
 **ACI web backend**: 发现与阅读共用一个后端名；该后端缺搜索或缺抓取时，缺的那一头回落到内建默认（搜索走现行默认检索，阅读走本机 `web_fetch` + `network-guard`）。
 _Avoid_: 分设 search_backend 与 fetch_backend; 把缺的能力当成已接通; 缺抓取时改走 bash curl
 
-**host-net amplify**: 已退役的出口语义（旧 ADR-0022）——`bash` 带 `network: true` 且 ask 被同意后，该次调用宿主网零过滤。终态 = **出口代理缝**：`--unshare-net` 恒在，唯一出网通路是域白名单代理（ADR-0097）。
-_Avoid_: 把 `network: true` 当现行输入字段；批完再滤; 一等 curl 工具
+**host-net amplify**: 已退役的 per-call 出口语义（旧 ADR-0022）——`bash` 带 `network: true` 且 ask 被同意后才摘 `--unshare-net`。现行默认见 **出口代理缝**。ADR-0022 / ADR-0097 / ADR-0107。
+_Avoid_: 把 `network: true` 当现行输入字段；把 0106 围栏宿主网当现行默认
 
-**出口代理缝（egress proxy seam）**: bash 围栏恒 `--unshare-net` 之下唯一的出网通路——宿主出口代理的 unix socket bind 进沙箱、沙箱内 socat 转成本地端口，`HTTP_PROXY` 系环境变量指过去；域判定在宿主代理做（HTTPS 只看 CONNECT host，不解密）。ADR-0097。
-_Avoid_: 把 `--unshare-net` 当可摘除项；per-call 全开放行当逃生门；沙箱内自建 DNS / 路由
+**围栏宿主网（fenced host-net）**: 已退役（ADR-0106，被 0107 取代）——曾把 bash 出网做成无域名闸的宿主直连。
+_Avoid_: 当现行出口
 
-**域名允许集（domain allowlist）**: **出口代理缝**的放行判据——CONNECT host 命中才转发；`*.x` 严格子域（不含 apex）、可选 `:port` 后缀、deny 优先；全集 = **预放行档**（代码承载）∪ 用户层 `allowedDomains` 增量，项目文件不采纳（ADR-0084 纪律不变）。地址守卫（拒 loopback / 私网 / link-local / metadata）与域名集正交。ADR-0097 / ADR-0104。
-_Avoid_: 内核 IP 白名单当域名白名单；项目仓自授允许集；把 domain fronting 当已防住；预放行模型供应商 API 域
+**出口代理缝（egress proxy seam）**: bash 围栏 `--unshare-net` 之下唯一出网通路——宿主域名过滤代理；unix socket bind 进沙箱；**中继自带，不依赖宿主 socat**。`HTTP_PROXY` 系与 SSH ProxyCommand 都指这条缝。ADR-0097 / ADR-0107。
+_Avoid_: apt 装 socat 当产品前置；名单内直连公网当过滤器；per-call 全开放行
 
-**预放行档（builtin preset）**: 域名允许集的代码承载默认域清单，收口在可重复构建/交付流的高频域（`github.com` 与 `*.github.com` / `*.githubusercontent.com`、`registry.npmjs.org`、playwright 下载面）；模型供应商 API 域显式不入档（围栏内有 key，预放行 = secret 直传通道），走首见域名批准门。ADR-0104。
-_Avoid_: 预置兜底集（0097 旧表述已废，勿复用）；把文档推荐配置当 preset；preset 取代批准门；脱离「构建/交付流」收口原则新增 preset 域
+**域名允许集（domain allowlist）**: 出口代理缝的放行判据——CONNECT/SSH 目标 host 命中才转发。全集 = **预放行档** ∪ 用户层 `isolation.network.allowedDomains`，`deniedDomains` 优先。ADR-0097 / ADR-0104 / ADR-0107。
+_Avoid_: 删掉 settings 网络段当幽灵清理；与 network-guard 混成一条栈；开网无闸当允许集
 
-**凭据 sentinel（credential sentinel）**: 围栏内替代真凭据的同形假值（`[a-z0-9_-]` 精确匹配字节串，可原样穿过 JSON / form / multipart 等编码）；真值仅在宿主出口代理，出口处仅对放行域假换真（需 TLS 终止），代换方向恒 fake→real——漏代换 = 认证失败而非真值泄露。ADR-0105。
-_Avoid_: 掩码 / mask（那是可见面的 secret-roundtrip mask）；把 sentinel 当加密或 tokenization；期待压缩 / 编码体内还能代换；让真值凭据文件进围栏
+**预放行档（builtin preset）**: 允许集的代码承载 defaults（GitHub 族、npm/yarn、PyPI、crates、Go module 代理、Playwright 下载）。模型供应商 API 与 Docker/GitLab 不入档。ADR-0104 / ADR-0107。
+_Avoid_: 文档推荐配置当 preset；用「不进 preset」当唯一防 LLM key 手段却让 bash 无闸
 
-**yolo 模式**: 用户显式确认进入的无沙箱姿态（TUI-only 入口 `--yolo` / 会话内 `/yolo` + 危险确认）——fence 产出 bare argv（无 bwrap / netns / mount / env 隔离），权限面 `full_auto`，fsMode 暂 `global`（进入快照、退出即恢复）；是**沙箱纪律**与**出口代理缝**的唯一具名豁免面：无 fence 即无 egress 缝，凭据 sentinel 层随之跳过并留痕（真值直达属声明姿态非缺陷）。#1035。
-_Avoid_: 把 yolo 理解成仅「免审批」（消失的不只 ask 面，是物理隔离）；把 yolo 下 egress / 凭据层缺席写成 fail-open 缺陷；给非 TUI 公开命令开 yolo 入口
+**凭据 sentinel（credential sentinel）**: 围栏内假值、真值只在出口代理对放行域假换真（需 TLS 终止）。0107 **不自动启用**；可见面仍走 secret-roundtrip mask。ADR-0105。
+_Avoid_: 与 mask 混名；当成 0107 必做面
+
+**yolo 模式**: 用户显式确认的无沙箱姿态（TUI `--yolo` / `/yolo`）——无 bwrap 则无出口缝、无域名闸。`full_auto` 只免 ask，不免域闸。#1035 / ADR-0107。
+_Avoid_: 把 yolo 当关域名闸；把 `full_auto` 当开网无闸
 
 **声明工具面 vs 实际工具面**: `SubAgentDefinition.disallowedTools` 写进 `WorkerEnvelope` 的是声明面；worker 进程装配后真正可被模型调用的工具集是实际面，二者必须相等——裁剪发生在 `createAciRegistry(tools)` **之前**的 def-list 期（`createDefaultAciRegistry` 工厂内），由构造期快照保证，不事后修补（`AciRegistry.inner` 是冻结快照）。
 _Avoid_: 给 `AciRegistry` 加 `.tools` 字段在产物上事后裁剪；声明 deny-list 但 worker 不消费（#468 修复对象）
@@ -349,8 +352,8 @@ _Avoid_: 把清单并进 `run_graph`；进 plan 相位写计划再执行；同�
 **环境现势**: 给人看的工作区快照（至少 cwd / git 摘要 / diff 要点），投放在 TUI（或等价）人读面；**不**写入 ADR-0028 状态栏 user 消息，也**不**充当 verify 输入。#655（G1）验收画像锁定。
 _Avoid_: 状态栏；agent-status；把 cwd/git/diff 每跳追加进 `messages`；与 context usage (display) 混名
 
-**沙箱纪律**: 同一 `bash` 调用输入下，前台执行与 `background:true` spawn 共用同一套 bwrap 围栏参数（FS / 网络 / env 隔离 / rlimit / cwdReadonly）；产品路径不得提供无围栏的后台裸跑。#653 G3。
-_Avoid_: 把后台当成逃出 bwrap；与 #440 bash 产品面混名；与 spawn_subagent 前景/后景混名
+**沙箱纪律**: 同一 `bash` 调用输入下，前台执行与 `background:true` spawn 共用同一套 bwrap 围栏参数（FS / `--unshare-net` / env / rlimit / cwdReadonly；出网为 **出口代理缝**）；产品路径不得提供无围栏的后台裸跑。#653 G3 / ADR-0107。
+_Avoid_: 把后台当成逃出 bwrap；与 #440 bash 产品面混名；与 spawn_subagent 前景/后景混名；把出网理解成 0106 直连无闸
 
 **config 面板**: TUI 无参 `/config` 打开的设置浮层，交互同 `/model`（选行改值、Esc 落盘）。首版行：文件系统隔离档、worktree isolation mode、子代理并发上限预设。有参 `/config` 仍走 chat/serve。后续设置只加行。ADR-0096。
 _Avoid_: 每个开关一个 slash；把面板当 loop-engine 热替换；把上限写进 system 前缀
@@ -734,11 +737,12 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **会话 tmp vs taskRoot**: 会话 tmp 是当前身份草稿，不是交付；要留下的写 `taskRoot`，不自动从垫底拷进仓库
 - **会话 tmp vs Linux /tmp**: 草稿走会话文件夹宿主路径与 `$TMPDIR`；不把垫底 bind 成 `/tmp`（ADR-0092）
 - **文件系统隔离档 vs PermissionMode**: 前者是进程能碰哪些路径；后者是问不问人。全局档仍走权限链
-- **出口代理缝 vs 文件系统隔离档**: 正交两轴。FS 档决定围栏内能读写哪些路径；出口代理缝决定能否出网、能连哪些域。两档 FS 的网络行为相同
-- **出口代理缝 vs host-net amplify**: 前者是现行唯一出网通路（域白名单代理）；后者是已退役的 per-call 全放行语义
-- **域名允许集 vs network-guard**: 前者管 bash 出网（代理层判定）；后者是 `web_fetch` / `web_search` 的六层 SSRF 防线，两条栈互不替代
-- **预放行档 vs 域名允许集**: preset 是代码承载的默认底档；允许集是判定全集（preset ∪ 用户层增量，deny 优先）；批准门只管档外首见域
-- **凭据 sentinel vs secret-roundtrip mask**: sentinel 管存在面（真值不进围栏，代理出口假换真，ADR-0105）；mask 管可见面（真值在围栏内但不进模型上下文 / trace，#406）。两层并存不互替；sentinel 假值不得触发 mask 识别
+- **出口代理缝 vs 文件系统隔离档**: 正交。FS 档管路径；代理缝 + 允许集管 bash 出网。两档 FS 网络行为相同（ADR-0107）
+- **出口代理缝 vs host-net amplify**: 前者是现行唯一 bash 出网通路；后者是已退役的 per-call `network: true`
+- **围栏宿主网 vs 出口代理缝**: 0106 直连无闸已废；现行是有闸的代理缝
+- **network-guard vs 域名允许集**: `web_fetch` / `web_search` 的 SSRF；bash `curl`/`git`/`ssh` 走允许集
+- **预放行档 vs 域名允许集**: defaults 是代码底档；允许集 = defaults ∪ 用户增量，deny 优先
+- **secret-roundtrip mask vs 凭据 sentinel**: mask 管可见面；sentinel 需代理且 0107 不自动启用
 - **文件系统隔离档 vs worktree isolation mode**: 前者是 bash FS 围栏档；后者是写主仓门禁 / 建树改绑
 - **全局档 vs 工作区档**: 默认真路径读写；工作区档收紧为写 taskRoot + 会话 tmp，home 其余不能写
 - **config 面板 vs `/model`**: 同族浮层；`/config` 管隔离与并发等运行档，`/model` 管路由

@@ -3,18 +3,24 @@
  *
  * T4 egress 会话生命周期件（ADR-0097「代理生命周期 / dispose 契约」前台形态落地）。
  *
- * 单一职责：把「起 HTTP 代理（token 隔离 + filter 回调）→ 起 socat 桥
- * （宿主侧 unix socket ↔ 代理 TCP 端口）→ 暴露给 bwrap fence 装配用的
- * spec → 收尾释放」封装成一个 session 形状，前台 per-call 调用。
+ * 单一职责：把「解析自带中继依赖 → 起 HTTP 代理（token 隔离 + filter 回调，
+ * 直接 listen unix socket）→ 暴露给 bwrap fence 装配用的 spec → 收尾释放」
+ * 封装成一个 session 形状，前台 per-call 调用。
+ *
+ * ADR-0107 换装：**socat 不再是产品依赖，两侧都不是**。宿主侧旧「socat 桥
+ * （unix socket ↔ 代理 TCP 端口）」删除 —— `createHttpProxyServer` 返回裸
+ * node:http Server，直接 `listen(<unixSocketPath>)`（包内先例：
+ * sandbox-runtime dist/sandbox/mux-proxy.js 的 stale unlink + listen(sockPath)）。
+ * 围栏内侧半桥换成本仓自带 node 中继资产（relay-assets.ts 解析；
+ * `EgressFenceSpec.relayAssetsDir` 供 fence `--ro-bind`）。缺中继依赖
+ * （node 运行时 / 自带资产）= fail-closed 抛 `EgressRelayUnavailableError`
+ * —— 指引是**本产品依赖**（重装 iknow / 修复安装根），不含任何 socat/apt
+ * 装包字样（ADR-0107 §Decision 5）。
  *
  * T1 契约已钉：socket 路径带 per-session 随机 id + 启动前清理 stale socket
- * （详见 docs/adr/0097-*.md §Decision）。spec / spawn 结构参考
- * `node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/linux-sandbox-utils.js`
- * 的 `initializeLinuxNetworkBridge`。
- *
- * 本仓前台形态最小可用面：HTTP 代理 + address guard lookupFor（DNS 解析
- * 守卫先于 dial）。SOCKS5 / git-over-SOCKS 不在 T4 范围（spec §Settled
- * invariants 不要求 git 走 SOCKS；T7/T8 形态扩展时按 mux 形态补）。
+ * （详见 docs/adr/0097-*.md §Decision）。SOCKS5 / git-over-SOCKS 面（1080
+ * 段）已被操作员裁定摘出当前分支（plans/egress-ssh-bridge.md 子弹 2），
+ * 按 mux 形态补时在此追加第二枚 socket。
  *
  * T6：filter 回调与 approvalGate 接线（specs §首次域名批准流 + SC10 +
  * ADR-0097 §批准持久化粒度）—— `decideEgress` 返回 `not-in-allowlist` 且
@@ -27,14 +33,23 @@
  *   - 异常路径与正常路径同一释放通道（finally-safe dispose）。
  *   - dispose 幂等（重复调用不抛、不告警）。
  *   - token 每 session 独立（防宿主其他进程直连代理绕过 filter）。
+ *
+ * 威胁模型 —— 本地暴露面（end-of-round review 裁定登记）：
+ *   - 代理 unix socket 落共享 /tmp，node listen 默认 mode = 0777 & ~umask
+ *     （常见 0755）→ listen 成功后立即 chmod 0600（`listenOnUnixSocket`），
+ *     使本地他用户即使知道路径也无法 connect。
+ *   - **已知残余面**：token 经 fence 的 `bwrap --setenv HTTP_PROXY …`
+ *     argv 透传，fence 启动窗口内可被本地他用户经 /proc/<pid>/cmdline
+ *     短暂读到（socket 路径同理经内层前导 argv）。本缝不为此改 bwrap env
+ *     通道（--setenv 是 env 注入 SSOT，改传递面属 fence 架构变更）；
+ *     实际防线 = 上述 socket 0600 —— 拿到 token 但连不上 socket 仍无法
+ *     绕 filter。残余风险接受并在此显式登记。
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, rmSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, rmSync, unlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
 import type { Server } from "node:http";
 import { ToolExecutionError } from "../../errors.js";
 import {
@@ -46,6 +61,10 @@ import {
   type EgressViolationSink,
 } from "./violations.js";
 import type { EgressApprovalGate } from "./approval.js";
+import {
+  resolveEgressRelay,
+  type EgressRelayPaths,
+} from "./relay-assets.js";
 
 /**
  * 判定器输入 —— 由 bash handler 从 settings 读出后注入（依赖注入，
@@ -94,36 +113,35 @@ export interface EgressPolicyInput {
 }
 
 /**
- * 工厂可选入参。所有 probe / socat / spawn 行为都可注入，便于测试
- * 不依赖宿主真实装 socat / 起真 server（SC2 实测链路由 leader 在
- * 收尾阶段承担，本仓只验代码契约）。
+ * 工厂可选入参。中继解析 / socket 路径 / server 工厂 / 违例 sink 全部可
+ * 注入，便于测试不依赖宿主 node 布局与真资产落位（ADR-0107：无任何宿主
+ * 装包面可探测）。
  */
 export interface EgressSessionOptions {
   readonly policy: EgressPolicyInput;
   /**
-   * socat 可执行路径或命令名。注入便于测试 —— 测试可用假 socat 或
-   * skip 桥；生产传 `'socat'` 或绝对路径。
+   * egress-ssh-bridge T6 凭据可用性分支（默认**关**，assumption 5）：
+   * 宿主 SSH agent socket 绝对路径。显式传入 = 开态 —— session 把它经
+   * `EgressFenceSpec.sshAuthSockPath` 交 fence 做同段 `--bind` 并在
+   * `spec.env` 注入 `SSH_AUTH_SOCK`；缺省 = 关态，两者都不出现（宿主
+   * agent 值恒不进围栏）。路径缺失 / stale 到不存在 → fail-closed 抛
+   * `SshAgentUnavailableError`（infra 归类，含 F5 指引；不起中继不留半开
+   * 形态）。agent socket 非 session 所有 —— dispose 不删该路径。
    */
-  readonly socatCommand?: string;
+  readonly sshAuthSockPath?: string;
   /**
-   * socat 是否存在的探测函数。默认 `defaultProbeSocat` —— 暴露为注入
-   * 点便于单测伪造缺 socat 场景（SC13 验收）。
+   * 中继依赖解析器（默认 `resolveEgressRelay` 生产实现）。test seam：
+   * 注入固定假路径集让单测不依赖宿主 node 布局 / 资产落位；注入
+   * `() => undefined` 伪造「本产品依赖缺失」fail-closed 路径
+   * （SC13 验收 / probe 边界分支）。
    */
-  readonly probeSocat?: (cmd: string) => boolean;
-  /**
-   * spawn 工厂（默认 `node:child_process.spawn`）。test seam：可换成
-   * 不真起进程的 fake spawn。
-   */
-  readonly spawn?: typeof spawn;
+  readonly relayResolver?: () => EgressRelayPaths | undefined;
   /**
    * unix socket 路径工厂 —— 默认 `join(tmpdir(), iknow-egress-<id>.sock)`，
-   * 测试可注入固定路径。
+   * 测试可注入固定路径。代理 server 直接 listen 该路径（宿主侧无 TCP、
+   * 无桥进程）。
    */
   readonly socketPathFactory?: (id: string) => string;
-  /**
-   * 监听端口 —— 默认 0 = OS 分配。
-   */
-  readonly proxyPort?: number;
   /**
    * 当前命令违例记录器 —— 缺省 = session 内部创建一个。
    * bash handler 可注入共享 sink（多 session 合并观察）。
@@ -137,9 +155,9 @@ export interface EgressSessionOptions {
    *
    * why 需要:T6 首次域名批准流的判定侧测试想验证「filter 在
    * not-in-allowlist 时调 gate + 批准/拒绝分支 → sink 记对应 reason」,
-   * 不依赖真 dial 出网 / socat / DNS / proxyAuthToken 协商。注入点
-   * 与 `spawn` / `probeSocat` / `socketPathFactory` 同形态(S5
-   * complexity 门,纯注入点,不引入逻辑分支)。
+   * 不依赖真 dial 出网 / DNS / proxyAuthToken 协商。注入点与
+   * `relayResolver` / `socketPathFactory` 同形态（S5 complexity 门，
+   * 纯注入点，不引入逻辑分支）。
    */
   readonly createHttpProxyServer?: (
     opts: Parameters<typeof createHttpProxyServer>[0]
@@ -147,23 +165,51 @@ export interface EgressSessionOptions {
 }
 
 /**
- * 装配给 bwrap fence 的 spec —— fence 拿到这个 shape 后挂 socket bind
- * + 注入代理环境变量（详见 `createBwrapFence` 的 `egress` 字段）。
+ * 装配给 bwrap fence 的 spec —— fence 拿到这个 shape 后挂 socket bind +
+ * 中继资产 ro-bind + 注入代理环境变量（详见 `createBwrapFence` 的
+ * `egress` 字段）。
  *
  * last-mount-wins 顺序纪律（bwrap.ts:152-185 注释）：
- *  socket bind 落位 = workspaceMounts 之后、cwdReadonly 之前。
+ *  socket / 中继 bind 落位 = workspaceMounts 之后、cwdReadonly 之前。
  *  --setenv 三键走 fence env 注入（bwrap.ts:188-190 `--setenv`）。
  */
 export interface EgressFenceSpec {
-  /** 宿主 socket 绝对路径（fence 用作 `--bind src dest`，dest = 同值）。 */
+  /** 宿主 socket 绝对路径（fence 用作 `--bind src dest`，dest = 同值）。代理 server 直接 listen 于此。 */
   readonly unixSocketPath: string;
   /**
-   * 沙箱内 socat 暴露的代理端口。fence 注入
-   * `HTTP_PROXY=http://127.0.0.1:<port>` 等 env。
+   * **沙箱内固定监听号**（= `SANDBOX_HTTP_PROXY_PORT`）。egress-ssh-bridge
+   * T1 起语义从「与宿主代理 TCP 端口同号」改为固定值 —— 宿主/沙箱同号是
+   * 巧合式耦合（O3），固定端口让 env 与后续 `GIT_SSH_COMMAND` 可预先拼装
+   * （specs/egress-ssh-bridge.md assumption 3）。fence 注入
+   * `HTTP_PROXY=http://<user>:<token>@127.0.0.1:<port>` 等 env。
    */
   readonly sandboxLocalPort: number;
-  /** 已含代理三键 + NO_PROXY 的 env 增量 —— fence 拼到自己的 envArgs。 */
+  /** 已含代理三键（嵌 auth userinfo，O1）+ NO_PROXY 族 + `GIT_SSH_COMMAND`（T3）的 env 增量 —— fence 拼到自己的 envArgs。 */
   readonly env: Readonly<Record<string, string>>;
+  /**
+   * 沙箱内侧半桥的前导脚本（session 装配期算好）：自带 node 中继把
+   * `127.0.0.1:<sandboxLocalPort>` 转到 `unixSocketPath` + trap 收尾
+   * （ADR-0107 换装：`<node绝对路径> <中继脚本绝对路径> <sock> <port> &`）。
+   * 消费面 = bash.ts 前台命令链（`bash -c "<script>\n<command>"`）；
+   * background / verify 两形态的接线归子弹 5。
+   */
+  readonly innerBridgeScript: string;
+  /**
+   * ADR-0107 自带中继资产目录（宿主绝对路径）。fence 在既有 egress bind
+   * 段对此发 `--ro-bind <dir> <dir>`（src=dest 同值），使围栏内
+   * `innerBridgeScript` / `GIT_SSH_COMMAND` 引用的脚本路径可解析 ——
+   * 不依赖安装根恰好落在某档默认可见子树内。
+   */
+  readonly relayAssetsDir: string;
+  /**
+   * egress-ssh-bridge T6 条件形态（缺省 = 关态，字段缺席）：宿主 SSH
+   * agent socket 绝对路径。在场时 fence 在既有 egress bind 段追加
+   * `--bind <path> <path>`（src=dest 同值，位置纪律与 `unixSocketPath`
+   * bind 同段：workspaceMounts 之后、cwdReadonly 之前），且 `spec.env`
+   * 含 `SSH_AUTH_SOCK`（值 = 同一路径 —— bind 后沙箱内路径不变）。
+   * 该路径非 session 所有，dispose 通道只收 server 与自有 socket，不删它。
+   */
+  readonly sshAuthSockPath?: string;
 }
 
 /**
@@ -175,28 +221,30 @@ export interface EgressSession {
   readonly spec: EgressFenceSpec;
   readonly violationSink: EgressViolationSink;
   /**
-   * 收尾：kill 代理进程 + socat 进程 + 删 socket。**幂等**，可重复
-   * 调用（finally-safe）；任何错误吞掉（不污染调用方 finally）。
+   * 收尾：关代理 server + 删 socket。**幂等**，可重复调用
+   * （finally-safe）；任何错误吞掉（不污染调用方 finally）。
    */
   dispose(): Promise<void>;
 }
 
 /**
- * socat 缺失 / 不可执行 的 typed 错误 —— 携带补装指引文案。
+ * 本产品依赖缺失的 typed 错误（ADR-0107 §Decision 5「缺中继 = 出网
+ * fail-closed，提示本产品依赖而非 socat」）：node 运行时或随仓中继资产
+ * 解析不到。**消息禁含 socat / apt 装包字样**（测试反向钉死）。
  *
  * SC13 验收点：bash 装配层收到此错误时按「本次调用无 egress 缝」处理，
  * 不静默降级为「有缝但不可用」。
  */
-export class SocatUnavailableError extends ToolExecutionError {
-  override readonly name: string = "SocatUnavailableError";
-  readonly socatCommand: string;
-  readonly installHint: string;
-  constructor(socatCommand: string, installHint: string, cause?: unknown) {
-    super(
-      `egress: socat binary "${socatCommand}" not found or not executable. ${installHint}`
-    );
-    this.socatCommand = socatCommand;
-    this.installHint = installHint;
+export class EgressRelayUnavailableError extends ToolExecutionError {
+  override readonly name: string = "EgressRelayUnavailableError";
+  /** 缺什么（node 运行时 / 随仓中继资产），观测面字段。 */
+  readonly detail: string;
+  /** 本产品依赖指引（重装 iknow / 修复安装根），非系统装包文案。 */
+  readonly remediationHint: string;
+  constructor(detail: string, remediationHint: string, cause?: unknown) {
+    super(`egress relay unavailable: ${detail}. ${remediationHint}`);
+    this.detail = detail;
+    this.remediationHint = remediationHint;
     if (cause !== undefined) {
       (this as { cause?: unknown }).cause = cause;
     }
@@ -204,22 +252,23 @@ export class SocatUnavailableError extends ToolExecutionError {
 }
 
 /**
- * 通用：探测 socat 可执行性 —— 用 `which` 调用，与 upstream
- * linux-sandbox-utils.js:437 的语义对齐（`whichSync('socat')`）。
- *
- * 暴露成 named export 便于测试注入 —— 单测不希望真起 `which`。
+ * egress-ssh-bridge T6 / F5：开态但宿主 agent socket 不可用（缺失 /
+ * 路径不存在）的 typed 错误 —— **infra 归类，非域拒绝**（F8 同款：
+ * agent 连不上不记 egress 违例、不走 filter）。消息带 F5 钉死的指引一
+ * 行：passphrase 私钥 + 无 agent = 围栏内 ssh 提示口令而 fence 无 tty
+ * 必败；本 spec 不做口令回传面，修复只有一条路 = 宿主侧把 key 交给
+ * agent（`ssh-add`）或换无口令 key。
  */
-export function defaultProbeSocat(cmd: string): boolean {
-  const probe = spawnSync("which", [cmd], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-    timeout: 1000,
-  });
-  return (
-    probe.status === 0 &&
-    typeof probe.stdout === "string" &&
-    probe.stdout.trim().length > 0
-  );
+export class SshAgentUnavailableError extends ToolExecutionError {
+  override readonly name: string = "SshAgentUnavailableError";
+  readonly sshAuthSockPath: string;
+  constructor(sshAuthSockPath: string) {
+    super(
+      `egress: SSH agent socket "${sshAuthSockPath}" not found (agent absent or stale path; infra failure, not a domain denial). ` +
+        "指引：宿主侧 `ssh-add` 或无口令 key（passphrase 私钥 + 无 agent 在围栏内必败——fence 无 tty 可输口令）。"
+    );
+    this.sshAuthSockPath = sshAuthSockPath;
+  }
 }
 
 /**
@@ -232,20 +281,115 @@ function newSessionId(): string {
 }
 
 /**
- * 构造 fence env 增量 —— HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY
- * （含小写别名，覆盖 curl / wget / npm 等工具读取差异）。
+ * 沙箱内代理固定监听号（HTTP 面）。why 固定：沙箱 netns 号段私有，固定
+ * 端口使代理 env 与后续 `GIT_SSH_COMMAND` 能在装配期预拼装，解除
+ * 「宿主/沙箱同号」的巧合式耦合（specs/egress-ssh-bridge.md T1 /
+ * assumption 3）。ADR-0107 换装后宿主侧无 TCP 监听 —— server 直接
+ * listen unix socket，固定内端口由自带中继转接到该 socket。
+ */
+export const SANDBOX_HTTP_PROXY_PORT = 3128;
+
+/**
+ * 代理 auth 用户名 —— 纯 label，credential 是 token（密码位）。上游
+ * `checkAuth`（http-proxy.js）只校验密码 == proxyAuthToken 且用户名非空。
+ * 依赖包同款形态是 `PROXY_AUTH_USER = 'srt'`（+可选 encodedCommand 后缀
+ * 做归因）；本仓归因已有 `commandLabel` sink 通道，故取不带后缀的固定名。
+ */
+export const PROXY_AUTH_USER = "iknow";
+
+/**
+ * POSIX 单引号包裹 —— 内嵌 `'` 以 `'\''` 断开重开。内层前导脚本会整段
+ * 进 `bash -c` 的双引号 payload，node / 中继脚本 / 宿主 socket 路径必须
+ * 经此 escape 才不破坏命令链（上游 `quote()` 同款语义）。
+ */
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * 构造沙箱内侧半桥前导脚本（ADR-0107 换装：中继 = 自带 node 件）。
  *
- * - 三键统一指向 `http://127.0.0.1:<sandboxLocalPort>`，原因：sandbox
- *   内 socat 监听该端口并把流量转回 unix socket → 宿主代理。
+ * 形态 = 旧依赖包 `buildSandboxCommand` 单桥裁剪版的换装对应物：
+ * `<node> <egress-tcp-relay.mjs> <sock> <port> >/dev/null 2>&1 &` +
+ * `trap kill EXIT`（中继 = TCP-LISTEN <port> → UNIX-CONNECT <sock> 双向
+ * pipe，多连接并发由 net.Server 天然支持）。1080/SOCKS 段已被操作员裁定
+ * 摘出当前分支（plans 子弹 2）。前导与用户命令以 `\n` 拼接进同一
+ * `bash -c` payload（消费面 bash.ts；background / verify 接线归子弹 5）。
+ */
+export function buildInnerBridgeScript(
+  nodePath: string,
+  relayScriptPath: string,
+  socketPath: string,
+  sandboxPort: number = SANDBOX_HTTP_PROXY_PORT
+): string {
+  const parts = [nodePath, relayScriptPath, socketPath].map(shellSingleQuote);
+  return [
+    `${parts[0]} ${parts[1]} ${parts[2]} ${sandboxPort} >/dev/null 2>&1 &`,
+    `trap "kill %1 2>/dev/null; exit" EXIT`,
+  ].join("\n");
+}
+
+/**
+ * 内层前导拼接的单点 helper（review Medium：三消费面 + probe 同款复制的
+ * 收敛点）。语义 = egress-ssh-bridge invariant 3 的 argv 面：
+ *   - spec 在场 → `<spec.innerBridgeScript>\n<command>`（沙箱内侧半桥是
+ *     缝的后半场，缺前导则整条缝只有宿主半场，O3）；
+ *   - spec 缺席（undefined，任何无缝原因）→ **byte-identical 返回原命令**
+ *     （「无缝 = 无桥」回归基线，不注入任何残留）。
+ * 消费面：bash.ts 前台 / background manager spawn / verify sandbox-run /
+ * sandbox-probe —— 拼接形态只在此处定义一次。
+ */
+export function wrapCommandWithInnerBridge(
+  spec: EgressFenceSpec | undefined,
+  command: string
+): string {
+  return spec === undefined ? command : `${spec.innerBridgeScript}\n${command}`;
+}
+
+/**
+ * 构造 fence env 增量 —— HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY
+ * （含小写别名，覆盖 curl / wget / npm 等工具读取差异）+ GIT_SSH_COMMAND
+ * （egress-ssh-bridge T3，见下方形态说明）。
+ *
+ * - 三键统一指向 `http://<PROXY_AUTH_USER>:<token>@127.0.0.1:<sandboxLocalPort>`：
+ *   沙箱内自带中继监听该端口并把流量转回 unix socket → 宿主代理；URL 嵌
+ *   auth userinfo 是 O1（407 死路）的清偿 —— 宿主代理配了 proxyAuthToken
+ *   后无条件校验 Proxy-Authorization，无凭据的 URL 让全部出网请求 407。
+ *   token 是 hex，URL-safe，无需 percent-encode。
  * - NO_PROXY 默认包含 `127.0.0.1,localhost`（代理自指回环不应绕自己），
  *   不覆盖用户既有 NO_PROXY —— 调用方可自行扩，本仓只设最低限。
+ *   代价（O2）：目标是 loopback 字面的请求会绕代理直连（沙箱 netns 内
+ *   必败）—— 出口可达性探针的正样本因此必须用**非 loopback** 可寻址
+ *   fixture（scripts/sandbox-probe.ts egress 端到端注释）。
+ * - T3（ADR-0107 换装）：同处注入 `GIT_SSH_COMMAND`（invariant 4 注入面
+ *   SSOT 单点 —— 与代理三键共享同一 session 的代理 env，bash /
+ *   background / verify 三消费面零复制）。新冻结形态 =
+ *   `ssh -F /dev/null -o ControlMaster=no -o ControlPath=none ` +
+ *   `-o ProxyCommand='<node绝对路径> <egress-http-connect.mjs绝对路径> %h %p'`：
+ *   ssh 经沙箱内 3128 中继走 HTTP CONNECT 隧道；认证材料**不进 argv**，
+ *   隧道件从继承的 `HTTP_PROXY` env 读 userinfo（token 不外泄于 ps）。
+ *   `-F /dev/null` 依 assumption 4（围栏内 /etc/ssh/ssh_config.d/* 报
+ *   Bad owner or permissions）；ControlMaster/ControlPath=none 中和 mux
+ *   （沙箱内用户 ControlPath 不可 bind，auth 后即退）。ProxyCommand 路径
+ *   引号策略与 `buildInnerBridgeScript` 统一（review Low 裁定）：node /
+ *   脚本路径逐一走 `shellSingleQuote`，外层双引号由 git `split_cmdline`
+ *   剥除，内层单引号交 ssh ProxyCommand 的 /bin/sh 处理 —— 含空格 / 引号
+ *   的安装根路径不再拆碎。token 仍不在 argv（同 URL userinfo 纪律）。围栏
+ *   内用户命令**显式内联** `GIT_SSH_COMMAND=... git ...` 时后者胜 ——
+ *   POSIX env 前缀赋值优先于继承值（shell 语义，按 spec T3 合并策略不加
+ *   防御）。
  */
 export function buildProxyEnv(
   sandboxLocalPort: number,
+  proxyAuthToken: string,
+  relay: EgressRelayPaths,
   extraNoProxy: readonly string[] = []
 ): Record<string, string> {
-  const proxyUrl = `http://127.0.0.1:${sandboxLocalPort}`;
+  const proxyUrl = `http://${PROXY_AUTH_USER}:${proxyAuthToken}@127.0.0.1:${sandboxLocalPort}`;
   const noProxy = ["127.0.0.1", "localhost", ...extraNoProxy].join(",");
+  const gitSshCommand =
+    `ssh -F /dev/null -o ControlMaster=no -o ControlPath=none ` +
+    `-o ProxyCommand="${shellSingleQuote(relay.nodePath)} ${shellSingleQuote(relay.connectScriptPath)} %h %p"`;
   return {
     HTTP_PROXY: proxyUrl,
     HTTPS_PROXY: proxyUrl,
@@ -255,6 +399,7 @@ export function buildProxyEnv(
     https_proxy: proxyUrl,
     all_proxy: proxyUrl,
     no_proxy: noProxy,
+    GIT_SSH_COMMAND: gitSshCommand,
   };
 }
 
@@ -362,7 +507,7 @@ function createFilterCallback(
  * 上游 ResolvedAddressGuard 做 DNS 解析守卫）。
  *
  * 抽离以控制 `createEgressSession` 复杂度（S5 门）。返回 server 实例
- * 供 caller 调 `listenOnFreePort` 拿端口，再传给 socat 桥。
+ * 供 caller 直接 `listenOnUnixSocket`（ADR-0107：宿主无 TCP、无桥进程）。
  */
 function startHttpProxyStep(
   policyInput: EgressPolicyInput,
@@ -404,46 +549,47 @@ function startHttpProxyStep(
 }
 
 /**
- * Step 3:起 socat 桥（unix socket → 127.0.0.1:proxyPort）。
- *
- * 抽离以控制 `createEgressSession` 复杂度（S5 门）。spawn 失败（无 pid）
- * 时 caller 负责关闭已起 server + 抛 typed 错误；本函数不抛。
- */
-function startSocatBridgeStep(
-  socatCommand: string,
-  socketPath: string,
-  httpPort: number,
-  spawnFn: typeof spawn
-): ChildProcess {
-  const socatArgs = [
-    `UNIX-LISTEN:${socketPath},fork,reuseaddr`,
-    `TCP:127.0.0.1:${httpPort},keepalive`,
-  ];
-  const socatProc = spawnFn(socatCommand, socatArgs, { stdio: "ignore" });
-
-  // 错误 / 退出 监听 —— spec §Failure paths 「stale socket」防线需要。
-  socatProc.on("error", () => {
-    // 兜底：spawn 期错误由 !pid 检查捕获；运行期 error 留观测通道。
-  });
-  return socatProc;
-}
-
-/**
  * Step 4:装配 bwrap fence spec。
  *
- * 抽离以控制 `createEgressSession` 复杂度（S5 门）。sandbox 内的代理端口
- * = 沙箱内 socat 监听端口。本仓固定 = httpListen.port（与宿主代理 TCP
- * 端口同号）；沙箱内命令链通过 `buildSandboxInnerCommand` 把 unix socket
- * 转回该本地端口。
+ * 抽离以控制 `createEgressSession` 复杂度（S5 门）。沙箱内监听号 = 固定
+ * `SANDBOX_HTTP_PROXY_PORT`（宿主不再有 TCP 端口 —— 代理 server 直接
+ * listen unix socket，同号耦合随 ADR-0107 一并消失）；沙箱内侧半桥由
+ * `innerBridgeScript` 前导承载（消费面 bash.ts 命令链）；中继资产目录经
+ * `relayAssetsDir` 交 fence ro-bind。
+ *
+ * T6：`sshAuthSockPath` 在场（开态）才加 `SSH_AUTH_SOCK` env 与 spec
+ * 字段 —— env 注入仍走 `assembleFenceSpec` 单点（invariant 4：代理 env
+ * 与凭据 env 同一构造处，三消费面零复制）；bind 发射面在 bwrap.ts 的
+ * `egressBindArgs`（同段落位）。缺省 = 关态，两处都不出现。
  */
 function assembleFenceSpec(
   socketPath: string,
-  httpPort: number
+  relay: EgressRelayPaths,
+  token: string,
+  sshAuthSockPath: string | undefined
 ): EgressFenceSpec {
+  const env = buildProxyEnv(SANDBOX_HTTP_PROXY_PORT, token, relay);
+  const innerBridgeScript = buildInnerBridgeScript(
+    relay.nodePath,
+    relay.bridgeScriptPath,
+    socketPath
+  );
+  if (sshAuthSockPath === undefined) {
+    return {
+      unixSocketPath: socketPath,
+      sandboxLocalPort: SANDBOX_HTTP_PROXY_PORT,
+      env,
+      innerBridgeScript,
+      relayAssetsDir: relay.relayDir,
+    };
+  }
   return {
     unixSocketPath: socketPath,
-    sandboxLocalPort: httpPort,
-    env: buildProxyEnv(httpPort),
+    sandboxLocalPort: SANDBOX_HTTP_PROXY_PORT,
+    env: { ...env, SSH_AUTH_SOCK: sshAuthSockPath },
+    innerBridgeScript,
+    relayAssetsDir: relay.relayDir,
+    sshAuthSockPath,
   };
 }
 
@@ -451,10 +597,10 @@ function assembleFenceSpec(
  * 主入口：建一个 per-call egress session。
  *
  * 步骤（异常路径与正常路径同一释放通道）：
- *   1) 探测 socat（注入探测函数决定成败）；
+ *   1) 解析自带中继依赖（node + vendor/egress-relay 资产；resolver 可注入）；
  *   2) 启动 HTTP 代理 server（filter = decideEgress 域判定；
  *      lookupFor = 上游 ResolvedAddressGuard 做 DNS 解析守卫）；
- *   3) 起 socat 桥（unix socket → 127.0.0.1:proxyPort）；
+ *   3) server 直接 listen unix socket（ADR-0107：宿主无 socat 桥）；
  *   4) 构造 fence spec 并返回。
  *
  * 任意步骤失败 → 清理已起资源 + 抛 typed 错误（不静默）。
@@ -462,27 +608,38 @@ function assembleFenceSpec(
 export async function createEgressSession(
   opts: EgressSessionOptions
 ): Promise<EgressSession> {
-  const socatCommand = opts.socatCommand ?? "socat";
-  const probeSocat = opts.probeSocat ?? defaultProbeSocat;
-  const spawnFn = opts.spawn ?? spawn;
+  const relayResolver = opts.relayResolver ?? resolveEgressRelay;
   const socketPathFactory =
     opts.socketPathFactory ??
     ((id) => join(tmpdir(), `iknow-egress-${id}.sock`));
   const sink = opts.violationSink ?? createEgressViolationSink();
 
-  // Step 1: socat 探测（注入可让测试伪造「缺 socat」）。
-  if (!probeSocat(socatCommand)) {
-    throw new SocatUnavailableError(
-      socatCommand,
-      "Install socat (Debian/Ubuntu: `sudo apt install socat`; Fedora/RHEL: `sudo dnf install socat`; macOS: `brew install socat`) and retry."
+  // Step 1: 中继依赖解析（注入可让测试伪造「本产品依赖缺失」）。
+  // fail-closed：解析不到 = 无缝可用，抛产品语义 typed 错误（ADR-0107）。
+  const relay = relayResolver();
+  if (relay === undefined) {
+    throw new EgressRelayUnavailableError(
+      "this install cannot resolve its bundled egress relay (a Node runtime plus vendor/egress-relay assets)",
+      "The relay ships with iknow; repair or reinstall the iknow install root (npm) so vendor/egress-relay and a Node >=20 runtime are present — no extra system package is part of this product."
     );
+  }
+
+  // T6 凭据可用性分支（默认关）：开态先验 agent socket 存在性 ——
+  // 缺失 = fail-closed 抛 infra 类错误（F5/F8），且发生在起 server / listen
+  // 之前（不留「有 bind 无缝」半开形态）。
+  // stale-but-present（文件在、agent 亡）无法低成本探测，留给围栏内 ssh
+  // 报 agent refused —— 归类 infra，本缝不经 filter，不产域拒绝记录。
+  const sshAuthSockPath = opts.sshAuthSockPath;
+  if (sshAuthSockPath !== undefined && !existsSync(sshAuthSockPath)) {
+    throw new SshAgentUnavailableError(sshAuthSockPath);
   }
 
   const id = newSessionId();
   const socketPath = socketPathFactory(id);
 
   // Stale socket 清理（spec §Failure paths：socket 路径带 per-session 随机 id
-  // + 启动前清理）。任意残留 socket = 来自前次未释放会话，删掉避免误连。
+  // + 启动前清理）。任意残留 socket = 来自前次未释放会话，删掉避免误连
+  // （listen 前 unlink 同款语义，包内 mux-proxy.js 先例）。
   removeSocketFile(socketPath);
 
   // 共享 token —— 防宿主其他进程直连代理绕过 filter（ADR-0097 §Decision）。
@@ -500,62 +657,29 @@ export async function createEgressSession(
     createHttpProxy: opts.createHttpProxyServer ?? createHttpProxyServer,
   });
 
-  // 监听端口（0 = OS 分配）。
-  const httpListen = await listenOnFreePort(httpServer, "127.0.0.1");
-
-  // Step 3: socat 桥。
-  const socatProc = startSocatBridgeStep(
-    socatCommand,
-    socketPath,
-    httpListen.port,
-    spawnFn
-  );
-
-  if (!socatProc.pid) {
-    // spawn 失败：清理 server。
+  // Step 3: server 直接 listen unix socket（失败 = 清理不留半资源）。
+  try {
+    await listenOnUnixSocket(httpServer, socketPath);
+  } catch (err) {
     closeServerQuietly(httpServer);
-    throw new SocatUnavailableError(
-      socatCommand,
-      "Failed to spawn socat. Verify socat is installed and executable."
-    );
+    removeSocketFile(socketPath);
+    throw err;
   }
 
-  // Step 4: 构造 fence spec。
-  const spec = assembleFenceSpec(socketPath, httpListen.port);
+  // Step 4: 构造 fence spec（沙箱内固定端口 + auth env + 内层中继前导 +
+  // 资产 ro-bind 目录 + T6 条件凭据缝——sshAuthSockPath 缺席即关态）。
+  const spec = assembleFenceSpec(socketPath, relay, token, sshAuthSockPath);
 
   let disposed = false;
   const dispose = async (): Promise<void> => {
     // 幂等：重复 dispose 不抛、不报错。
     if (disposed) return;
     disposed = true;
-    await teardownSocat(socatProc);
     closeServerQuietly(httpServer);
     removeSocketFile(socketPath);
   };
 
   return Object.freeze({ id, spec, violationSink: sink, dispose });
-}
-
-/**
- * socat 进程收尾 —— kill(SIGTERM) → 2s grace → kill(SIGKILL)。逐段
- * best-effort：dispose 不得因单步失败而抛（T1 契约「异常路径同一释放
- * 通道」，finally 语义）。独立成函数（S5 complexity 门）。
- */
-async function teardownSocat(proc: ChildProcess): Promise<void> {
-  if (proc.pid === undefined || proc.killed) return;
-  try {
-    proc.kill("SIGTERM");
-  } catch {
-    // best-effort
-  }
-  await waitForExit(proc, 2000);
-  if (!proc.killed) {
-    try {
-      proc.kill("SIGKILL");
-    } catch {
-      // best-effort
-    }
-  }
 }
 
 /**
@@ -576,12 +700,15 @@ function removeSocketFile(socketPath: string): void {
 }
 
 /**
- * 内部辅助 —— 让 server.listen(0, ...) 拿到实际端口。
+ * 内部辅助 —— 让裸 node:http server 直接 listen unix socket 路径
+ * （ADR-0107：宿主侧去 socat 桥；包内先例 mux-proxy.js listenHttpBackend）。
+ *
+ * listen 成功后立即 chmod 0600：共享 /tmp 下 node 默认 socket mode
+ * （0777 & ~umask）对本地其他用户可 connect，配合「token 经 --setenv
+ * argv 短暂可见」的残余面就是 filter 旁路洞（见文件头威胁模型登记）。
+ * chmod 失败 = listen 失败对待（reject → 调用方同一清理通道），不裸奔。
  */
-function listenOnFreePort(
-  server: Server,
-  host: string
-): Promise<{ port: number }> {
+function listenOnUnixSocket(server: Server, socketPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const onError = (err: Error): void => {
       server.off("listening", onListening);
@@ -589,16 +716,17 @@ function listenOnFreePort(
     };
     const onListening = (): void => {
       server.off("error", onError);
-      const addr = server.address();
-      if (addr === null || typeof addr === "string") {
-        reject(new Error("egress: server address unavailable"));
+      try {
+        chmodSync(socketPath, 0o600);
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
         return;
       }
-      resolve({ port: addr.port });
+      resolve();
     };
     server.once("error", onError);
     server.once("listening", onListening);
-    server.listen(0, host);
+    server.listen(socketPath);
   });
 }
 
@@ -608,18 +736,4 @@ function closeServerQuietly(server: Server): void {
   } catch {
     // best-effort
   }
-}
-
-function waitForExit(proc: ChildProcess, ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve();
-    };
-    proc.once("exit", finish);
-    const timer = setTimeout(finish, ms);
-  });
 }

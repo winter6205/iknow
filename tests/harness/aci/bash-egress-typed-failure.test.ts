@@ -13,7 +13,7 @@
  *     bash handler 的真实返回流出来（spec 点名
  *     `violation-handling.test.ts:269-279` 为反面教材）。
  *
- * 测试不依赖真实 socat / bwrap：使用 bash tool 的
+ * 测试不依赖真中继 / bwrap：使用 bash tool 的
  * `createEgressSessionFactory` 测试 seam（生产不传）注入 stub session，
  * stub 在构造时主动 record 一条违例；bash handler drain → throw → executor
  * 包装 → categorizeResult 全链路。
@@ -26,7 +26,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { createBashTool } from "../../../src/harness/aci/tools/bash.js";
 import {
-  SocatUnavailableError,
+  EgressRelayUnavailableError,
   type EgressSession,
   type EgressSessionOptions,
 } from "../../../src/harness/sandbox/egress/session.js";
@@ -48,7 +48,7 @@ afterAll(() => {
 });
 
 /**
- * 构造 stub `createEgressSession` —— 不真起 socat / proxy，直接构造一个
+ * 构造 stub `createEgressSession` —— 不真起中继 / proxy，直接构造一个
  * session 形状，spec 用空 fence 占位（bash handler 在 fence 装配期会读
  * `spec` 的 `unixSocketPath` / `sandboxLocalPort` / `env`；不真起桥仍
  * 满足装配要求，因为 runSandbox 不会去 dial）。
@@ -77,6 +77,9 @@ function makeStubEgressSessionFactory(args: {
       unixSocketPath: "/tmp/iknow-egress-stub.sock",
       sandboxLocalPort: 0,
       env: {},
+      // T1 起 EgressFenceSpec 必含内层桥前导；stub 不真监听，前导置空。
+      innerBridgeScript: "",
+      relayAssetsDir: "/test/iknow/vendor/egress-relay",
     };
     return Object.freeze({
       id,
@@ -155,7 +158,7 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
   });
 
   it("infra failure (egressStartError) → handler 抛 ToolExecutionError,message 显式标 'infrastructure fault' 不给配置键指引", async () => {
-    // 让 stub 在构造时抛 SocatUnavailableError 形态 —— bash handler
+    // 让 stub 在构造时抛 EgressRelayUnavailableError 形态 —— bash handler
     // 把它当 startError 走 infra 路径。
     const stub = (async () => {
       throw new Error(
@@ -220,6 +223,7 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
           unixSocketPath: "/tmp/iknow-egress-empty.sock",
           sandboxLocalPort: 0,
           env: {},
+          innerBridgeScript: "",
         },
         violationSink: sink,
         dispose: async () => undefined,
@@ -255,16 +259,19 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
     expect(parsed.stderr).not.toContain("[network_denied]");
   });
 
-  it("SocatUnavailableError typed-error catch 契约 → typed failure message 含 socat 命令名 + 补装指引(apt install 字样)", async () => {
+  it("EgressRelayUnavailableError typed-error catch 契约 → typed failure message 含产品依赖指引，且不含 socat/apt 装包字样 (ADR-0107)", async () => {
     // typed-error catch 契约(code-quality.md):startEgressSessionForCall 的 catch
-    // 必须先识别判别联合的具体类型。对 SocatUnavailableError 这种携带 socatCommand
-    // + installHint 的 typed 错误直接构造结构化 startError / infraHint;透传到
-    // renderEgressFailureMessage 的 infraHint 后,typed failure message 必须
-    // 让模型/TUI 看到「装哪个 + 怎么装」(SC13 验收点 + spec §三类信号可区分)。
-    const stubThrowSocatUnavailable = (async () => {
-      throw new SocatUnavailableError(
-        "socat",
-        "Install socat (Debian/Ubuntu: `sudo apt install socat`; macOS: `brew install socat`)"
+    // 必须先识别判别联合的具体类型。对 EgressRelayUnavailableError 这种携带
+    // detail + remediationHint 的 typed 错误直接构造结构化 startError /
+    // infraHint;透传到 renderEgressFailureMessage 的 infraHint 后,typed
+    // failure message 必须让模型/TUI 看到「缺哪个产品依赖 + 怎么修」
+    // (SC13 验收点 + spec §三类信号可区分)。ADR-0107 换装:指引是产品依赖
+    // 语义（重装 iknow / 修复安装根），**旧「apt install socat」文案不得回潮**
+    // —— 本钉子由「含装包字样」反转为「绝不含装包字样」。
+    const stubThrowRelayUnavailable = (async () => {
+      throw new EgressRelayUnavailableError(
+        "this install cannot resolve its bundled egress relay (node runtime or vendor/egress-relay assets missing)",
+        "The relay ships with iknow; repair or reinstall the iknow install root — no extra system package is part of this product."
       );
     }) as never;
 
@@ -274,7 +281,7 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
         deniedDomains: [],
         commandLabel: "curl https://example.com/x",
       }),
-      createEgressSessionFactory: stubThrowSocatUnavailable,
+      createEgressSessionFactory: stubThrowRelayUnavailable,
     });
 
     const registry = createRegistry([tool]);
@@ -295,13 +302,15 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
     expect(r.kind).toBe("execution_failed");
     const message = (r as { message: string }).message;
 
-    // typed-error 渲染契约:typed failure message 必须含 socat 命令名 + 补装指引,
+    // typed-error 渲染契约:typed failure message 必须含产品依赖指引,
     // 不被 plain object 的 [object Object] 吞掉。
     expect(message).toContain("[network_denied]");
-    // socat 命令名显式出现(非 [object Object])
-    expect(message).toContain("socat");
-    // 补装指引 —— 「sudo apt install socat」字样直接出现
-    expect(message).toContain("sudo apt install socat");
+    // 产品依赖语义显式出现(非 [object Object])
+    expect(message).toContain("bundled egress relay");
+    expect(message).toContain("no extra system package");
+    // ADR-0107:旧装包文案钉死不回潮
+    expect(message.toLowerCase()).not.toContain("socat");
+    expect(message.toLowerCase()).not.toContain("apt install");
     // infra/域判定分离仍然成立:不出现域判定修复指引
     expect(message).not.toContain("isolation.network.allowedDomains");
     expect(message).not.toContain("configure isolation.network");

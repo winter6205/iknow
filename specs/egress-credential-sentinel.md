@@ -1,6 +1,6 @@
 # Spec: 出口凭据 sentinel 代换层 —— 假值进围栏，真值只在宿主代理出口对放行域假换真
 
-**Status:** rev 2（ACR PASS——minimal-change 返工已落，见 ACR verdict 段；assumptions 14 条全部**待确认**，人类 gate 另行走）
+**Status:** rev 2（ADR-0107 不自动启用本 spec）
 **Basis:** ADR-0105（本 spec 的主决策）；ADR-0097（代理缝结构、filter 回调语义、违例文案所有权在本仓、node-forge 硬依赖实测、生命周期表）；ADR-0104（放行域全集 = preset ∪ 用户层增量，deny 优先）；`docs/CONTEXT.md`「凭据 sentinel」「secret-roundtrip mask（#406）」「secrets guard」「域名允许集」「出口代理缝」词条（逐字引用，不重新定义）
 **Surface:** `src/harness/sandbox/egress/`（新增 `credential-assembly.ts`，扩 `session.ts` / `assembly.ts` / `upstream.ts`）、`src/harness/sandbox/bwrap.ts`（EgressFenceSpec 扩 binds 段）、`src/harness/aci/tools/bash.ts`（装配接线）、`src/harness/background/manager.ts`、`src/harness/verify/sandbox-run.ts`（同一 factory 消费面）、`src/config/settings.ts`（用户层新段 `isolation.credentials`）、`scripts/sandbox-probe.ts`（可选探针类）、`package-lock.json`（零新增第三方依赖，见 invariant 8）
 

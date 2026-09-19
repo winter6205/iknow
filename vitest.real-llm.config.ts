@@ -30,6 +30,8 @@ export default defineConfig({
     // worktree tool names (ADR-0082): 建树/列出首工具轨迹，同 HAS_KEY 守卫。
     // agent_status pivot reconcile (spec agent-status-instruction-echo T5):
     // <agent_status> 黄金集真模型半边（首工具 todo_write 判定），同守卫。
+    // egress real push (ssh-bridge 子弹 7): 非 LLM 面但同目录纪律——默认
+    // skip，仅 IKNOW_EGRESS_REAL_PUSH_E2E=1 显式开启（spec assumption 9）。
     include: [
       "archive/tests-real-llm/t8-live-subagent-routing.test.ts",
       "archive/tests-real-llm/model-prefix-layering-e2e.test.ts",
@@ -37,6 +39,7 @@ export default defineConfig({
       "archive/tests-real-llm/graph-mode-notification.test.ts",
       "archive/tests-real-llm/worktree-tool-names.test.ts",
       "archive/tests-real-llm/agent-status-instruction-echo.test.ts",
+      "archive/tests-real-llm/egress-real-git-push.test.ts",
     ],
     exclude: ["**/node_modules/**"],
     pool: "forks",

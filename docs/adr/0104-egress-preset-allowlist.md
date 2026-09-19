@@ -3,6 +3,8 @@
 Date: 2026-09-19
 Status: accepted
 
+> **Amended（ADR-0107）**：defaults 清单扩到 git + 主流包管理 + Playwright（见 0107 §Decision 2）。曾被 0106 标 superseded，0107 恢复执法。
+
 ## Context
 
 ADR-0097 建成出口代理缝，但裁定「**不做**『预置常用域兜底集』——等于静默放宽边界」，默认姿态为空集 fail-closed，且允许集只认用户层 settings。实现上 `createEgressPolicyFactory` 在用户层 `isolation.network` 段缺席时直接返回 `undefined` = 本次调用不起 egress session（沙箱内无代理 env，`assembly.ts:84-89`）——即使交互入口的批准流明明可问，首见域名批准门（T6）也无从触发（与 0097 生命周期表「允许集非空**或批准流可问**才起」存在实现落差）。实测会话（2026-09-18，conversation `ee13c787`）证实后果：`git push` / `gh` 全部 DNS 失败，模型做了 6 条死路 workaround（SSH 参数、找代理 env、tool_search、curl 探测）烧约 12 分钟，PR 未开出。「默认安全」在实际使用中退化为「默认不可达」：用户不会预先配置允许集，批准门死在入口。
