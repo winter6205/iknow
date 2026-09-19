@@ -1,3 +1,5 @@
+> **ARCHIVED** — 只读留档；活契约见 `docs/archive/027-retire-wayfinder-charts/README.md`。
+
 # wayfinder:map — 子代理父可见暂存与空交差补救
 
 > Tracker: 本地 markdown（本 run 未点名 GitHub issue）

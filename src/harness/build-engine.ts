@@ -62,7 +62,7 @@ import {
   composePostHooks,
   composePreHooks,
   createPluginHooksFromCatalog,
-  createUserHookRouter,
+  createSettingsHookContribution,
 } from "./hooks/index.js";
 import {
   loadIknowSettings,
@@ -1670,21 +1670,18 @@ export async function buildHarnessEngine(
           ...(opts.onHookError ? { onHookError: opts.onHookError } : {}),
         })
       : undefined;
-  // user-hook-router（specs/user-hook-router.md / ADR-0055）: 用户钩子（user hooks）
-  // 装配 —— settings.hooks.enabled 时把声明式 deny-only 规则编进 Pre 缝，
-  // 与 内置钩子（builtin hooks）（secrets guard）经 multiplexer 组合（builtin 在前、
-  // user 在后，先拦先赢）。enabled 缺席/false → createUserHookRouter 返回
-  // 透明 hook（SC1）：内置钩子（builtin hooks） 不受 hooks 总闸影响（正交条款 SC7/SC8）。
-  // TUI Post 观测（opts.hooks）是 Step 5，与 Step 1 的 Pre 组合互不覆盖
-  // （SC9）。classifyCall 注入 = mutate SSOT 复用（PreWrite，SC3）。
-  const userHook = createUserHookRouter(settings.hooks, {
-    classify: classifyCall,
-    ...(opts.onHookError ? { onHookError: opts.onHookError } : {}),
+  // 用户 command 钩子：settings.hooks（Claude PreToolUse/PostToolUse）编进
+  // Pre/Post 缝，与 secrets guard 经 multiplexer 组合（builtin 在前）。
+  // 段缺席 → 空贡献。TUI Post 观测（opts.hooks）是 Step 5，与 Pre 互不覆盖。
+  const settingsHooks = createSettingsHookContribution({
+    hooks: settings.hooks,
+    userHome,
+    projectDir: projectIdentityRoot,
+    cwd: sandboxRoot,
+    env: process.env,
+    ...(opts.onHookError ? { onError: opts.onHookError } : {}),
   });
-  // #global-plugins T2（plans/global-plugins-loading.md §5.2/§6）:插件
-  // hooks（hook）文件源 —— hooksEntries 来自 T1 catalog（与 skill 装配同一
-  // 次插件解析、同一 disabled 过滤）。链序 = builtin（secrets guard）→
-  // user（settings.hooks）→ plugin（本文件源），先拦先赢不变：插件放最后，
+  // 插件 hooks 文件源。链序 = builtin → settings command → plugin。
   // 前两者命中时插件 hook 不 spawn（少一次 I/O，也不改变既有拦截归属）。
   // 无 hooksFiles → 不构造插件贡献（贡献恒为空对象），pre/post 逐字节与
   // 今日一致（既有测试零回归）。cwd = taskRoot（§5.6；装配期冻结的
@@ -1703,12 +1700,17 @@ export async function buildHarnessEngine(
   const pluginHooks = createPluginHooksFromCatalog(pluginHooksOpts);
   // 组合器跳过 undefined 槽（未配的源），装配层无需条件展开 —— 含插件贡献
   // 空时的 `.pre` / `.post`（双缺席 = 本源无声明）。
-  const preToolUse = composePreHooks([secretsGuard, userHook, pluginHooks.pre]);
-  // Post: TUI 观测（opts.hooks，Step 5）与插件 Post 并存 —— TUI 在前
-  // （归属顺序：先给宿主观测，再跑插件 hook），两者都 await 完才返回
-  // （permission-executor 已 await + catch → 拒绝不逃逸；插件 post 自身
-  // never-throw）。两者皆缺席 → undefined → postToolUse 字段整体缺席。
-  const postToolUse = composePostHooks([opts.hooks, pluginHooks.post]);
+  const preToolUse = composePreHooks([
+    secretsGuard,
+    settingsHooks.pre,
+    pluginHooks.pre,
+  ]);
+  // Post: TUI 观测（opts.hooks，Step 5）→ settings command Post → 插件 Post。
+  const postToolUse = composePostHooks([
+    opts.hooks,
+    settingsHooks.post,
+    pluginHooks.post,
+  ]);
   const executor = createAciExecutor({
     inner: baseExecutor,
     catalog: reg.catalog,

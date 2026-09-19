@@ -1,3 +1,5 @@
+> **ARCHIVED** — 只读留档；活契约见 `docs/archive/027-retire-wayfinder-charts/README.md`。
+
 # wayfinder:map — 轻量只读问句的上下文卫生
 
 > Tracker: 本地 markdown（用户裁定不开 GitHub issue；skill 默认 tracker 的 fallback 形态）

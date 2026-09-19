@@ -61,4 +61,4 @@ minimal-change-verifier: yes — 单任务「路径读图经 Anthropic native to
 - **review follow-up（登记不修）:** ① executor 名字闸 `IMAGE_PASSTHROUGH_TOOL_NAME` 为可辩护 containment（SC5 背书）；第二个直通内容类型出现时收敛为 ToolDefinition 声明式字段（如 `contentShape`）。② `readRoot`/1MB 常量与 read-file.ts 轻度重复，可在后续 cleanup 上收 helpers。
 - **真实交互证据（TUI + 真实模型，Opus 4.8 经网关）:** 模型自主选型调用 read_image；会话权威历史落盘 image block（media_type=image/png, data 232 chars）；trace llm_call 捕获的上 wire 请求原文含 SDK ImageBlockParam；TUI retract 生效（屏上仅 `called read_image × 1`，无像素摊屏）；`npm run test:real-llm` 17 passed / 1 skipped（egress push 环境门控）。
 - **环境差异登记:** 本机 `ANTHROPIC_BASE_URL` 第三方中继把 tool_result 内 image block 降级为文本 base64 交给模型（tool_use id 为 OpenAI 风格 `call_*`），模型可见 base64 但无像素——非产品缺陷（spec 假设 8：非 vision 走既有 API error 面；该中继不 4xx 而文本化）。
-- **附带观察（非本轮引入）:** 运行中 Escape 中断的回合以 protocolError 收尾且该轮历史回滚（ctx 26.8k→18.9k），与主仓在途 interrupt-round-visibility 调查同域。
+- **附带观察（非本轮引入）:** 运行中 Escape 中断的回合以 protocolError 收尾且该轮历史回滚（ctx 26.8k→18.9k）；打断 keep 已由 ADR-0108 / `specs/interrupt-frozen-prefix-keep.md` 收口。

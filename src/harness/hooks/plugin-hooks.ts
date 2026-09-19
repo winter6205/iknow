@@ -58,6 +58,7 @@ import { dirname, join } from "node:path";
 import type { PostToolUseHook, PreToolUseHook } from "../permission/types.js";
 import type { HookErrorEvent } from "../permission/permission-executor.js";
 import type { HookContribution } from "./index.js";
+import type { IknowSettingsHooks } from "../../config/settings.js";
 
 /** hooks.json 绝对路径 + 所属插件名（plugin/catalog.ts `hooksEntries` 同形）。 */
 export interface PluginHookFile {
@@ -242,6 +243,57 @@ export function createPluginHooksFromCatalog(params: {
   });
 }
 
+/**
+ * 用户 `settings.hooks`（Claude PreToolUse/PostToolUse map）→ 同一套命令钩子
+ * 编译器。无组 → 空贡献。占位符里没有插件根（plugin 名固定 "user"）。
+ */
+export function createSettingsHookContribution(params: {
+  readonly hooks: IknowSettingsHooks | undefined;
+  readonly userHome: string;
+  readonly projectDir: string;
+  readonly cwd: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly warn?: (message: string) => void;
+  readonly onError?: (e: HookErrorEvent) => void;
+}): HookContribution {
+  const hooksRaw = settingsHooksAsMap(params.hooks);
+  if (hooksRaw === undefined) return Object.freeze({});
+  const opts: CreatePluginHookContributionOpts = {
+    files: [],
+    roots: new Map(),
+    userHome: params.userHome,
+    projectDir: params.projectDir,
+    cwd: params.cwd,
+    ...(params.env !== undefined ? { env: params.env } : {}),
+    ...(params.warn !== undefined ? { warn: params.warn } : {}),
+    ...(params.onError !== undefined ? { onError: params.onError } : {}),
+  };
+  const report = makeHookReport(opts);
+  const compiled = compileHooksMap(
+    {
+      file: join(params.userHome, ".iknow", "settings.json"),
+      plugin: "user",
+    },
+    hooksRaw,
+    report,
+    new Set()
+  );
+  return contributionFromCompiled(compiled, opts, report);
+}
+
+function settingsHooksAsMap(
+  hooks: IknowSettingsHooks | undefined
+): Record<string, unknown> | undefined {
+  if (hooks === undefined) return undefined;
+  const out: Record<string, unknown> = {};
+  if (hooks.PreToolUse !== undefined) out.PreToolUse = hooks.PreToolUse;
+  if (hooks.PostToolUse !== undefined) out.PostToolUse = hooks.PostToolUse;
+  if (out.PreToolUse === undefined && out.PostToolUse === undefined) {
+    return undefined;
+  }
+  return out;
+}
+
 // ─── 编译产物 ────────────────────────────────────────────────────────────────
 
 interface CompiledHandler {
@@ -280,10 +332,14 @@ export function createPluginHookContribution(
   // 无文件 → 空贡献，装配层无需自己判空（`{pre?, post?}` 双缺席 = 「本源无
   // 声明」，与传空 files 逐字节同形；也免去每个装配点各写一遍守卫）。
   if (opts.files.length === 0) return Object.freeze({});
+  const report = makeHookReport(opts);
+  const compiled = compileAllFiles(opts.files, report);
+  return contributionFromCompiled(compiled, opts, report);
+}
+
+function makeHookReport(opts: CreatePluginHookContributionOpts): ReportFn {
   const warn = opts.warn ?? ((message: string) => console.warn(message));
-  // typed 通道在场 → 走 typed（phase 闭集）；缺席 → warn 兜底（不静默，
-  // design §7「至少一条 warn」）。单一出口：不双报。
-  const report = (
+  return (
     phase: "plugin-init" | "plugin-exec",
     message: string,
     tool?: string
@@ -294,8 +350,13 @@ export function createPluginHookContribution(
     }
     warn(message);
   };
+}
 
-  const compiled = compileAllFiles(opts.files, report);
+function contributionFromCompiled(
+  compiled: CompiledHooks,
+  opts: CreatePluginHookContributionOpts,
+  report: ReportFn
+): HookContribution {
   const runner = createCommandRunner({
     opts,
     report,
@@ -468,17 +529,25 @@ function compileFile(
   report: ReportFn,
   seenHandlers: Set<string>
 ): { pre: CompiledGroup[]; post: CompiledGroup[] } {
+  const hooksRaw = readHooksJson(entry, report);
+  if (hooksRaw === undefined) return emptyCompiled();
+  return compileHooksMap(entry, hooksRaw, report, seenHandlers);
+}
+
+/** 已解析的 Claude event map → CompiledHooks（settings 与 hooks.json 共用）。 */
+function compileHooksMap(
+  entry: PluginHookFile,
+  hooksRaw: Record<string, unknown>,
+  report: ReportFn,
+  seenHandlers: Set<string>
+): { pre: CompiledGroup[]; post: CompiledGroup[] } {
   const { file, plugin } = entry;
-  // 每文件一次的去重告警（未知事件名 / 非 command 类型等可能重复出现）。
   const reportedInFile = new Set<string>();
   const reportOnce = (message: string): void => {
     if (reportedInFile.has(message)) return;
     reportedInFile.add(message);
     report("plugin-init", message);
   };
-
-  const hooksRaw = readHooksJson(entry, report);
-  if (hooksRaw === undefined) return emptyCompiled();
 
   const pre: CompiledGroup[] = [];
   const post: CompiledGroup[] = [];

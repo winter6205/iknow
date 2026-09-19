@@ -8,7 +8,7 @@
 
 ## 一、一句话总结
 
-**所有模型 / 密钥配置都写在 `settings.json` 一个地方，且只写用户层 `~/.iknow/settings.json`**。共享项目层 `<cwd>/.iknow/settings.json` 只采纳 `hooks` / `verify` / `secrets` / `permissions` 四段；`llm`（以及 `web` / `isolation` / `memory` / `subagent` / `lsp` / `loop` / `graph`）是**用户层键**，写进项目文件会被丢弃且不覆盖用户值，启动时打警告（ADR-0084）。`.env.local` 退化为**纯 env var 装载器**——只负责提供占位符 `${VAR}` 的真值，不再直接当配置口。
+**所有模型 / 密钥配置都写在 `settings.json` 一个地方，且只写用户层 `~/.iknow/settings.json`**。共享项目层 `<cwd>/.iknow/settings.json` 只采纳 `verify` / `secrets` / `permissions`；`hooks` 与 `llm`（以及 `web` / `isolation` / `memory` / `subagent` / `lsp` / `loop` / `graph`）是**用户层键**，写进项目文件会被丢弃且不覆盖用户值，启动时打警告（ADR-0084）。`.env.local` 退化为**纯 env var 装载器**——只负责提供占位符 `${VAR}` 的真值，不再直接当配置口。
 
 ---
 

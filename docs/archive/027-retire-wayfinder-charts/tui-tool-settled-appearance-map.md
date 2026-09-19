@@ -1,3 +1,5 @@
+> **ARCHIVED** — 只读留档；活契约见 `docs/archive/027-retire-wayfinder-charts/README.md`。
+
 # wayfinder:map — TUI 工具落定态：哪些留、哪些收、哪些点名着色
 
 > Tracker: 本地 markdown（用户裁定不开 GitHub issue；skill 默认 tracker 的 fallback 形态）

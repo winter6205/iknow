@@ -55,7 +55,7 @@ fi
 
 # ADR-0015 + ADR-0084 + ADR-0093: llm is user-layer only, and model must
 # hit llm.providers (bare model → provider_model_not_registered). Project
-# `<cwd>/.iknow/settings.json` only carries hooks/verify/secrets/permissions
+# `<cwd>/.iknow/settings.json` only carries verify/secrets/permissions
 # — seeding llm there is silently ignored. Seed ~/.iknow/settings.json when
 # missing so a Cloud Agent with only ANTHROPIC_AUTH_TOKEN can talk to the
 # official MiniMax Anthropic node; never overwrite an operator-scp'd file.

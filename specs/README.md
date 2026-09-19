@@ -33,4 +33,4 @@
 
 - `251-lsp-tool.md` — LSP 工具（连接卫生增量）
 - `skill-index-increment.md` — 技能模型索引增量 + 人侧 slash 收口（ADR-0098）
-- `read-image-vision.md` — 围栏内指定路径读图，经 `tool_result` 送达 Anthropic vision（wayfinder 路径读图进 Anthropic vision；ACR PASS）
+- `read-image-vision.md` — 围栏内指定路径读图，经 `tool_result` 送达 Anthropic vision（ACR PASS）

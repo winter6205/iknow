@@ -1,6 +1,6 @@
 # Spec: model-prefix-layering — 模型面前缀分层与缓存兑现
 
-> 来源：wayfinder 图「模型面前缀分层与缓存兑现」（`docs/wayfinder/model-prefix-layering-map.md`，决策 D1~D10 已全部收口）。本 spec 为该图全部剩余工作的可建契约；实施按 `plans/model-prefix-layering.md`。
+> 来源：wayfinder 图「模型面前缀分层与缓存兑现」（决策 D1~D10 已全部收口；过程留档 `docs/archive/027-retire-wayfinder-charts/model-prefix-layering-map.md`）。本 spec 为该图全部剩余工作的可建契约；实施按 `plans/model-prefix-layering.md`。
 
 ## Objective
 

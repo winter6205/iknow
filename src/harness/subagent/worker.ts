@@ -66,12 +66,9 @@ import {
   composePostHooks,
   composePreHooks,
   createPluginHooksFromCatalog,
-  createUserHookRouter,
+  createSettingsHookContribution,
 } from "../hooks/index.js";
-import {
-  classifyCall,
-  type WorktreeGateReader,
-} from "../isolation/worktree-gate.js";
+import { type WorktreeGateReader } from "../isolation/worktree-gate.js";
 import { createIknowSystemResolver } from "../identity/index.js";
 import { createGitSnapshotProvider } from "../identity/git-snapshot.js";
 import { createSkillScanner, type PluginSkillDir } from "../skill/scanner.js";
@@ -699,29 +696,18 @@ export async function createWorkerRuntime(
       knownToolNames: new Set(reg.inner.list().map((def) => def.name)),
     }),
   });
-  // user-hook-router（specs/user-hook-router.md / ADR-0055）: 子代理引擎经
-  // 同一份 merged settings 装配 user rules（spec Does #6 —— 无第二套后门）。
-  // settings 读根用 projectIdentityRoot（缺席回落 cwd，与 T3 身份发现同
-  // 款回落）：改绑后 worker cwd 是没有 `.iknow` 的裸 task worktree，项目级
-  // settings 只在主仓身份根上 —— 读身份根是两条引擎看到同一份 user rules
-  // 的前提。enabled 缺席/false → 透明 hook（SC1）。onHookError 落 stderr：
-  // worker 无 host 观测信道，非法 pattern 剔除至少有日志出口（SC6 等价观测）。
-  const userHook = createUserHookRouter(
-    loadIknowSettings({
+  const settingsHooks = createSettingsHookContribution({
+    hooks: loadIknowSettings({
       cwd: projectIdentityRoot,
       home: userHome,
     }).hooks,
-    {
-      classify: classifyCall,
-      onHookError: (e) =>
-        process.stderr.write(`[worker user-rule-init] ${e.message}\n`),
-    }
-  );
-  // #global-plugins T2（design §6/§7）: worker 同构装配插件 hooks 文件源 ——
-  // 与父引擎同一份 catalog（同根解析、同 disabled 过滤），链序 user → plugin
-  // （worker 无 TUI post，无 post 组合面）。onError 落 stderr，与
-  // user-rule-init 同款形态（worker 无 host 观测信道）。cwd = sandboxRoot
-  // （§5.6 taskRoot）；entries 为空 → 贡献双缺席（零行为变化）。
+    userHome,
+    projectDir: projectIdentityRoot,
+    cwd: sandboxRoot,
+    env: process.env,
+    onError: (e) => process.stderr.write(`[worker ${e.phase}] ${e.message}\n`),
+  });
+  // 插件 hooks 文件源 —— 与父引擎同一份 catalog。链序 settings → plugin。
   const pluginHooksOpts: Parameters<typeof createPluginHooksFromCatalog>[0] = {
     entries: pluginCatalog.hooksEntries,
     installations: enabledInstallations,
@@ -735,14 +721,14 @@ export async function createWorkerRuntime(
   // 组合器跳过 undefined 槽（未配的源）；worker 无 TUI post，插件 Post 若在
   // 场则单独成链。全缺席 → undefined → postToolUse 字段整体缺席（executor
   // 侧 `?? no-op` 同形，条件展开可省）。
-  const postToolUse = composePostHooks([pluginHooks.post]);
+  const postToolUse = composePostHooks([settingsHooks.post, pluginHooks.post]);
   const executor = createAciExecutor({
     inner: baseExecutor,
     catalog: reg.catalog,
     policy,
     askUser,
     hooks: {
-      preToolUse: composePreHooks([userHook, pluginHooks.pre]),
+      preToolUse: composePreHooks([settingsHooks.pre, pluginHooks.pre]),
       postToolUse,
     },
   });

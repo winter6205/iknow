@@ -1,12 +1,10 @@
 /**
  * #353: settings 文件机制 —— user/project 双层加载 + 非法值回退。
  *
- * ADR-0084 项目允许名单：项目文件只贡献 hooks / verify / secrets /
- * permissions 四个顶层键，其余顶层键（llm / isolation / subagent / ...）整段
- * 丢弃并告警。因此双层纪律分两类：
- *   - 允许名单键（verify / secrets / hooks / permissions）→ project 逐字段覆盖
- *     user（同字段替换，非 merge 残留）；
- *   - 名单外键（llm / isolation / subagent / ...）→ project 值被丢弃，user 值胜出。
+ * ADR-0084 项目允许名单：项目文件只贡献 verify / secrets / permissions
+ * 三个顶层键（hooks 仅用户层）。其余顶层键整段丢弃并告警。双层纪律：
+ *   - 允许名单键（verify / secrets / permissions）→ project 逐字段覆盖 user；
+ *   - 名单外键（llm / isolation / hooks / ...）→ project 值被丢弃，user 值胜出。
  *
  * 覆盖：
  *  - 文件不存在 → 空对象（不抛错）；
@@ -1634,23 +1632,20 @@ describe("loadIknowSettings — 项目 allowlist / permissions（ADR-0084 / SC4 
     assert.deepEqual(loadIknowSettings({ home, cwd }), {});
   });
 
-  it("允许名单键（verify / secrets / hooks / permissions）仍按 project 覆盖 user 合并", async () => {
+  it("允许名单键（verify / secrets / permissions）仍按 project 覆盖 user 合并", async () => {
     const { home, cwd } = await makeSettings(
       {
         verify: { command: "user-test", timeoutSec: 300 },
         secrets: { enabled: true },
-        hooks: { enabled: true, rules: [] },
       },
       {
         verify: { command: "project-test" },
         secrets: { enabled: false },
-        hooks: { enabled: false },
       }
     );
     assert.deepEqual(loadIknowSettings({ home, cwd }), {
       verify: { command: "project-test", timeoutSec: 300 },
       secrets: { enabled: false },
-      hooks: { enabled: false },
     });
   });
 

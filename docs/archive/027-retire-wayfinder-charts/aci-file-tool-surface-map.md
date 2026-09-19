@@ -1,3 +1,5 @@
+> **ARCHIVED** — 只读留档；活契约见 `docs/archive/027-retire-wayfinder-charts/README.md`。
+
 # wayfinder:map — ACI 文件/搜索工具面（整体升级决策）
 
 > Tracker: 本地 markdown（沿用本仓既有 wayfinder 惯例，不开 GitHub issue）

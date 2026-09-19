@@ -10,6 +10,8 @@
 
 ### Breaking
 
+- **`settings.hooks` 改为 Claude command 形态（2026-09-20）**: 用户层 `~/.iknow/settings.json` 的 `hooks` 只认 `PreToolUse` / `PostToolUse`（`matcher` + `type: command`），与 Claude Code / 插件 `hooks.json` 同形；Pre exit 2 拦截。旧 `{ enabled, rules }` deny-only（含 `PreWrite` / `PreCommit`）拆除、不再生效。`hooks` 退出项目允许名单（项目文件写了会 warn 丢弃）。指南 `docs/guides/user-hooks.md`；ADR-0055 / 0084 amendment。
+
 - **worktree 门禁 bash 预测拦截 → 物理 ro-bind（ADR-0109，2026-09-19）**: 门禁 ON 且未绑 task 树（unbound，waveRoot = 主 checkout）时，bash 不再按「会不会写工作区」预测拦——围栏对主 checkout 追加 `--ro-bind`（置于可写 bind 后、`--proc` 前，last-mount-wins；session fence tmp pad 在其后重绑 rw，scratch 写走 pad），unbound bash 一律放行执行；真写主仓（含 `.git`，命中 gitdir 路径线索时给 git 元数据专属指引）以 EROFS typed 违例回灌、含 `create-worktree` 与重发指引，后台 detached 命令因 stderr 不上回执、改在 spawn 回执带只读 preflight notice（仅 unbound 态在场，bound / OFF 形状不变），出路复用既有重绑机器（建树成功后本 run 下一波在新根重发）。`write_file` / `edit_file` 与 root_flip（enter/exit）拦前不变；bound / gate OFF 装配 byte-identical。行为变更：对 bash 的「未知命令 fail-closed 拦截」条款作废（ADR-0037 Amendment 2026-09-04 bash 判定核心 superseded，in-place 注记见 0037）；trace 实测误触面（23 会话：cd 15 / curl 10 / gh 4 / sleep 3 等）归零。ADR `docs/adr/0109-worktree-unbound-ro-bind.md`；spec `specs/worktree-unbound-ro-bind.md`。
 
 - **项目记忆落 home 项目树（ADR-0099，2026-09-18）**: 项目记忆库从 `<workspaceRoot>/.iknow/memory/<slug>/` 改到与会话、tasks 同棵的 `<dataDir 或 ~/.iknow>/projects/<slug>/memory/`。`--workspace-root` 不再隔离项目记忆；另池用 `--data-dir`。工作区存量不自动迁移。

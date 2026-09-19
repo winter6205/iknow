@@ -86,7 +86,7 @@ export interface SubagentCapPersistPatch {
  * resolveThinkingSettingsPath 的注入选项（ADR-0084 写回落对层）。
  *
  * ADR-0084：thinking / memory 是**用户层键**（`llm` / `memory` 段），项目文件
- * 不再采纳这两段（项目允许名单 = hooks / verify / secrets / permissions）。
+ * 不再采纳这两段（项目允许名单 = verify / secrets / permissions）。
  * 因此写回目标恒为用户层文件 `<home>/.iknow/settings.json`，与「项目文件是否
  * 存在」解耦 —— 旧 ADR-0019 D1.3 的「project 存在写 project」在允许名单下会把
  * 用户层键写进一个不再被读取的项目文件（静默无效 + 污染共享仓库），故退役。

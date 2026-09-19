@@ -419,7 +419,7 @@ _Avoid_: hub 构造期 `overrideEnv` 快照；第二套 thinking client；serve 
 **声明式权限规则**: 项目 `<仓>/.iknow/settings.json` 的 `permissions` 段用 `Tool` / `Tool(specifier)` 字符串（`allow` / `ask` / `deny` 三档 + 可选 `defaultMode`，值域 `default` | `plan`）；同项目层评估序 deny → ask → allow；编译为既有 `NormalRuleSpec` 进项目权限层，不新开决策轴。旧形态（`schema_version` + `rule[]` 谓词 DSL）加载 typed fail-loud、错误含新形态示例。模式名到 ACI 工具的映射、glob / param:value / Bash 复合命令分段 / 路径 specifier 形态见 `specs/declarative-project-permissions.md` Does。ADR-0090 / #1004。
 _Avoid_: 沿用 `schema_version` + `rule[]` 谓词 DSL；写 toml 当并存 SSOT；项目层写 `full_auto`（加载 fail-loud）；让用户层接 `permissions`；用 param:value 匹配 Bash `command` / Read/Edit 路径 / WebFetch `url`；给规则手写 `id` / `reason`
 
-**项目 settings 允许名单**: 共享项目 `<仓>/.iknow/settings.json` 只采纳 `hooks` / `verify` / `secrets` / `permissions`；其余顶层段丢弃、不覆盖用户层。权限 SSOT = 项目 `settings.permissions`，规则形态 = **声明式权限规则**（ADR-0090 取代旧 toml 谓词 DSL），用户层不接；toml 与 json 并存 fail-loud。ADR-0084 / ADR-0090。
+**项目 settings 允许名单**: 共享项目 `<仓>/.iknow/settings.json` 只采纳 `verify` / `secrets` / `permissions`；`hooks` 仅用户层（command 钩子 = 任意 shell）。其余顶层段丢弃、不覆盖用户层。权限 SSOT = 项目 `settings.permissions`，规则形态 = **声明式权限规则**（ADR-0090 取代旧 toml 谓词 DSL），用户层不接；toml 与 json 并存 fail-loud。ADR-0084 / ADR-0090。
 _Avoid_: 第三层 local settings；项目文件盖 isolation / llm / memory / subagent；用户 settings 写 permissions；继续读 `permissions.toml` 当并存 SSOT
 
 **前景 spawn / 后景 spawn**: `spawn_subagent` 的两种结果契约（#361 裁决，ADR-0014）——前景（`wait:true`，默认）= handler 同步等 worker 到终态、envelope 直接作 tool_result 返回，当回合闭环；后景（`wait:false`，显式选项）= 立即返回 task_id，结果经 host 唤醒/drain 通道回传。worker 恒为独立进程，与前景/后景正交。
@@ -542,17 +542,17 @@ _Avoid_: 与 hard-wall 职责混同；Pre 缝保持零产品消费者；把它�
 **hook router**: (ADR-0055) 同进程工厂：把内置钩子（builtin hooks）与用户钩子（user hooks）编成挂上 permission-executor 第 1/5 步的纯 Pre/Post 函数。形态对齐 sandbox 执行面的 in-process router（ADR-0045），不是 OS 进程、不是 HTTP daemon、不并入 sandbox server。
 _Avoid_: fork/Unix socket 钩子进程；把 hook router 叫成 `iknow serve`；一个 Policy server 吞 isolation/hard-wall/secrets
 
-**内置钩子（builtin hooks）**: harness 用代码装配的拦截或观测（如 `secrets.mode=block` 的 secrets-guard、TUI `onToolEvent` Post、violation 杀会话观察者）。不出现在 `settings.hooks`，`hooks.enabled` 卸不掉。各自仍走原产品开关（`settings.secrets`、host 是否传 Post 等）。
-_Avoid_: 把 auto-memory / isolation / hard-wall 改挂成 settings.hooks 条目；用钩子总闸关掉 `/memory`
+**内置钩子（builtin hooks）**: harness 用代码装配的拦截或观测（如 `secrets.mode=block` 的 secrets-guard、TUI `onToolEvent` Post、violation 杀会话观察者）。不出现在 `settings.hooks`。各自仍走原产品开关（`settings.secrets`、host 是否传 Post 等）。
+_Avoid_: 把 auto-memory / isolation / hard-wall 改挂成 settings.hooks 条目；用卸掉 settings.hooks 关掉 `/memory`
 
-**用户钩子（user hooks）**: 操作员声明的 deny-only 规则（V1 = `settings.hooks.rules`；目录文件源是后续贡献，不自动执行）。默认关（`enabled` 缺席=关）。只拦、不改参数/结果、不跑外壳命令。
-_Avoid_: 与内置钩子共用一个 enable 字段；目录落盘即生效；同义词 lane / 两车道
+**用户钩子（user hooks）**: 用户层 `settings.hooks` 的 Claude command 组（`PreToolUse` / `PostToolUse`，`type: command`）。与插件 `hooks/hooks.json` 同一编译器；Pre exit 2 拦。项目层不采纳。不扫描 `~/.iknow/hooks/`。
+_Avoid_: 与内置钩子共用 enable；项目 settings 写 command；旧 `{enabled, rules}` deny-only
 
-**PreWrite (user hook event)**: 用户钩子事件名——同一条引擎内 Pre 缝，仅当 `classifyCall` 判定 mutate 时匹配。不是第 6 步链。
-_Avoid_: 第二套「会不会写」分类器；与 worktree isolation 门禁混成一个开关
+**PreWrite (retired settings event)**: 曾为 deny-only 用户钩子事件（仅 mutate 调用）。已从 `settings.hooks` 移除；写拦截改由 command 脚本或 isolation 门禁承担。
+_Avoid_: 在 settings.hooks 里再写 PreWrite
 
-**PreCommit (user hook event)**: 用户钩子事件名——工具调用形态为 `git commit`（含 `git -C … commit`；第一个非 option 子命令为 `commit`）。不是 session JSONL 落盘（`createChatSessionCommitHook`）。
-_Avoid_: 拦 `git status` / `git commit --help`；把 transcript commit 当 PreCommit
+**PreCommit (retired settings event)**: 曾拦 `git commit` 形态。已从 `settings.hooks` 移除；改由 PreToolUse matcher + 脚本判断。
+_Avoid_: 把 transcript commit 当 PreCommit
 
 **渐进式披露 (progressive disclosure)**: (#631 / ADR-0046) 便宜索引常驻 + 重载荷按需：索引有描述则按精确名加载（`skill({name})` / 直呼 `discover`）；索引没有描述才 `tool_search`。机制仍是 lazy + `discover()` 尾部追加以保 KV 前缀；`<mcp_tools_overview>` 已撤。
 _Avoid_: 有描述仍强制先 search；把发现的工具插回注册序中部；概览段发空串占位
@@ -799,10 +799,9 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **索引进场史 vs skill-load 信封**: 进场史只记模型索引名；信封灌正文不算进场
 - **技能索引增量 vs 索引降档**: 降档只剥开场冻表；增量行带完整 description
 - **写处境告知面 vs skill 正文**: 告知走 worker prior / 改绑一次；技能程序不附 trailer；写工具成功路径不另注写处境
-- **hook router vs sandbox server**: 都是同进程 router；sandbox 管围栏执行，hook router 管声明式拦截组合，不共用一个 server
-- **内置钩子（builtin hooks） vs 用户钩子（user hooks）**: 代码装配 vs `settings.hooks`；用户总闸卸不掉 builtin
-- **用户钩子（user hooks） vs 产品开关（memory / secrets / graph / isolation）**: 正交；`hooks.enabled` 不代管 `/memory` 或 `settings.secrets`
-- **PreWrite vs worktree isolation mode**: PreWrite 是用户 deny 事件；isolation 是写主仓门禁，不是 `settings.hooks` 条目
+- **hook router vs sandbox server**: 都是同进程装配；sandbox 管围栏执行，hook router 组合 builtin + settings command + plugin command
+- **内置钩子（builtin hooks） vs 用户钩子（user hooks）**: 代码装配 vs `settings.hooks` command 组；卸 settings.hooks 卸不掉 builtin
+- **用户钩子（user hooks） vs 产品开关（memory / secrets / graph / isolation）**: 正交；无 hooks.enabled 总闸
 - **PreCommit vs session transcript 落盘**: PreCommit 拦 git commit 形态；JSONL append 仍是 host commit hook，不是 user 事件
 - **闭世界围栏 vs 工作区档**: 闭世界是旧默认（home 不可见）；工作区档 home 可见、只收紧写
 - **符号工具面 vs 坐标面 `lsp_*`**: 前者是现行模型面（符号身份提问）；后者已从模型面退役，但仍是 `probe:lsp` 的仪器（`createLspToolSet`），故测 `lsp_*` 的断言不构成 `find_symbol` 等活路径的覆盖

@@ -3,11 +3,12 @@
  *
  * 两层文件：user 级 `~/.iknow/settings.json` 与 project 级
  * `<cwd>/.iknow/settings.json`。ADR-0084 项目允许名单：项目文件**只采纳**
- * `hooks` / `verify` / `secrets` / `permissions` 四段 —— 这四段仍是 project
- * 覆盖 user（段内逐字段：project 只覆盖其实际出现的合法字段，未覆盖的 user
- * 字段保留）。其余顶层段（`llm` / `isolation` / `subagent` / `web` / `lsp` /
- * `memory` / `loop` / `graph`）为用户层键：出现在项目文件即丢弃并告警
- * （`filterProjectSettingsKeys`），只有 user 层能提供。
+ * `verify` / `secrets` / `permissions` 三段 —— 这三段仍是 project 覆盖
+ * user（段内逐字段：project 只覆盖其实际出现的合法字段，未覆盖的 user
+ * 字段保留）。`hooks` 仅用户层（Claude command 钩子 = 任意 shell，与
+ * `plugins` 同款供应链）。其余顶层段（`llm` / `isolation` / `subagent` /
+ * `web` / `lsp` / `memory` / `loop` / `graph` / `hooks`）出现在项目文件
+ * 即丢弃并告警（`filterProjectSettingsKeys`），只有 user 层能提供。
  *
  * `secrets` 段（#126 hook-system）：
  *  - `secrets.enabled`：是否启用 hook 敏感信息脱敏，boolean 才合法；缺失 → 消费方按
@@ -363,47 +364,34 @@ export interface IknowSettingsIsolation {
 export type FsIsolationMode = "global" | "workspace";
 
 /**
- * user-hook-router（specs/user-hook-router.md）: 用户钩子（user hooks） 规则条目。
- *
- * 仅承载声明式 deny-only 规则（deny-only、无 allow[]）；内置钩子（builtin hooks） 不经
- * settings 装配（代码挂上），本段不承载 memory / secrets 等产品开关。
- *
- * 校验纪律（镜像 secrets.patterns）：单条结构性非法 → 丢弃该条（不抛）；
- * `pattern` 的正则可编译性不在 settings 层判定 —— 由 hook router 构造期
- * 编译，非法 pattern 剔除 + onHookError（SC6），settings 只做字符串透传。
+ * 用户 command 钩子 handler（Claude settings.json / 插件 hooks.json 同形）。
+ * 只认 `type: "command"`；timeout 为秒（可选）。
  */
-export interface IknowSettingsHookRule {
-  /** 规则 id（trace / reason 归因用）；非空串才合法。 */
-  id: string;
-  /** 触发事件；仅三值闭集（V1），非法值 → 丢弃该条。 */
-  event: "PreToolUse" | "PreWrite" | "PreCommit";
-  /** deny 回灌给模型的理由；非空串才合法。 */
-  reason: string;
-  /** 可选 matcher：精确工具名（如 "bash"）。 */
-  tool?: string;
-  /** 可选 matcher：工具名前缀（如 "mcp__github"）。字段名即事件名 `PreToolUse` 的小写形态。 */
-  pretooluse?: string;
-  /** 可选 matcher：对工具调用扫描串（stringify 截断后）的正则源串。 */
-  pattern?: string;
+export interface IknowSettingsHookHandler {
+  type: "command";
+  command: string;
+  timeout?: number;
+}
+
+/** 一组 matcher + handlers。matcher 缺席 = 通配。 */
+export interface IknowSettingsHookGroup {
+  matcher?: string;
+  hooks: IknowSettingsHookHandler[];
 }
 
 /**
- * user-hook-router: `settings.hooks` 段（用户钩子（user hooks） only）。
- *
- * `enabled` 缺席 / 非 boolean → 消费方按 false 处理（默认关，fail-closed）；
- * `rules` 非数组 → 丢弃该字段。段缺席 = 用户钩子（user hooks） 关，不影响 内置钩子（builtin hooks）
- * （自动记忆、secrets 等产品开关与 hooks 总闸正交，ADR-0055）。
+ * `settings.hooks`：Claude 形态（仅用户层）。段缺席 = 无用户 command 钩子。
+ * 未知事件名忽略。内置钩子不经本段。
  */
 export interface IknowSettingsHooks {
-  enabled?: boolean;
-  rules?: IknowSettingsHookRule[];
+  PreToolUse?: IknowSettingsHookGroup[];
+  PostToolUse?: IknowSettingsHookGroup[];
 }
 
-/** 用户钩子（user hooks） 事件闭集（V1）。 */
-export const HOOK_EVENT_VALUES: readonly IknowSettingsHookRule["event"][] = [
+/** 用户 command 钩子事件闭集（与插件 hooks.json 同集）。 */
+export const HOOK_EVENT_VALUES: readonly (keyof IknowSettingsHooks)[] = [
   "PreToolUse",
-  "PreWrite",
-  "PreCommit",
+  "PostToolUse",
 ];
 
 /**
@@ -550,7 +538,7 @@ export interface IknowSettings {
   isolation?: IknowSettingsIsolation;
   /** lsp-optimization 二期 B7: LSP 配置段（全部可选，缺省走消费方默认值）。 */
   lsp?: IknowLspSettings;
-  /** user-hook-router: 用户钩子（user hooks） 段（声明式 deny-only，默认关）。 */
+  /** 用户 command 钩子（Claude PreToolUse/PostToolUse；仅用户层）。 */
   hooks?: IknowSettingsHooks;
   /** Web 工具配置段（web_search 后端选择等）。 */
   web?: IknowSettingsWeb;
@@ -586,13 +574,12 @@ export interface IknowSettingsPlugins {
 
 /**
  * ADR-0084: 共享项目 settings 文件的顶层键允许名单 —— 项目文件只采纳
- * 「团队契约」四段；其余顶层键（isolation / llm / memory / subagent / web /
- * lsp / loop / graph ...）出现在项目文件即丢弃、不覆盖用户层值，并经
- * `LoadSettingsOpts.onWarn` 告警。用户层键不得写进项目文件（写回落对层见
- * `persist-settings.ts`）。
+ * 「团队契约」三段；`hooks` 不进名单（command 钩子 = 任意 shell，与
+ * `plugins` 同款供应链：项目可配即 clone 即执行）。其余顶层键（isolation /
+ * llm / memory / subagent / web / lsp / loop / graph / hooks ...）出现在
+ * 项目文件即丢弃、不覆盖用户层值，并经 `LoadSettingsOpts.onWarn` 告警。
  */
 export const PROJECT_SETTINGS_ALLOWED_KEYS = [
-  "hooks",
   "verify",
   "secrets",
   "permissions",
@@ -1416,61 +1403,71 @@ function mergeWeb(
 }
 
 /**
- * user-hook-router: 校验单个 `hooks` 层 —— 非法字段 / 条目丢弃（不抛）。
- * 非普通对象 → undefined；enabled 非 boolean → 丢弃该字段；rules 非数组 →
- * 丢弃该字段；单条规则 id/event/reason 结构非法 → 丢弃该条（其余保留）；
- * 全部条目非法 → rules 不产出（enabled 合法仍保留）。
+ * 校验用户 `hooks` 层（Claude 形态）。非法组/handler 丢弃不抛。
+ * 非普通对象 → undefined；未知事件忽略；两事件皆空 → undefined。
  */
 function parseHooks(raw: unknown): IknowSettingsHooks | undefined {
   if (!isPlainObject(raw)) return undefined;
   const out: IknowSettingsHooks = {};
-  if (typeof raw.enabled === "boolean") out.enabled = raw.enabled;
-  if (Array.isArray(raw.rules)) {
-    const rules: IknowSettingsHookRule[] = [];
-    for (const entry of raw.rules) {
-      if (!isPlainObject(entry)) continue;
-      if (
-        !isNonEmptyString(entry.id) ||
-        !(HOOK_EVENT_VALUES as readonly string[]).includes(
-          typeof entry.event === "string" ? entry.event : ""
-        ) ||
-        !isNonEmptyString(entry.reason)
-      ) {
-        continue;
-      }
-      const rule: IknowSettingsHookRule = {
-        id: entry.id.trim(),
-        event: entry.event as IknowSettingsHookRule["event"],
-        reason: entry.reason.trim(),
-      };
-      if (isNonEmptyString(entry.tool)) rule.tool = entry.tool.trim();
-      if (isNonEmptyString(entry.pretooluse)) {
-        rule.pretooluse = entry.pretooluse.trim();
-      }
-      if (typeof entry.pattern === "string" && entry.pattern.length > 0) {
-        rule.pattern = entry.pattern;
-      }
-      rules.push(rule);
-    }
-    if (rules.length > 0) out.rules = rules;
+  const pre = parseHookEventGroups(raw.PreToolUse);
+  const post = parseHookEventGroups(raw.PostToolUse);
+  if (pre !== undefined) out.PreToolUse = pre;
+  if (post !== undefined) out.PostToolUse = post;
+  if (out.PreToolUse === undefined && out.PostToolUse === undefined) {
+    return undefined;
   }
-  if (out.enabled === undefined && out.rules === undefined) return undefined;
   return out;
 }
 
-/** user-hook-router: 逐层合并 hooks —— project 字段优先，未覆盖的 user 字段保留。 */
+function parseHookEventGroups(
+  raw: unknown
+): IknowSettingsHookGroup[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const groups: IknowSettingsHookGroup[] = [];
+  for (const entry of raw) {
+    const group = parseHookGroup(entry);
+    if (group !== undefined) groups.push(group);
+  }
+  return groups.length > 0 ? groups : undefined;
+}
+
+function parseHookGroup(raw: unknown): IknowSettingsHookGroup | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  if (raw.matcher !== undefined && !isNonEmptyString(raw.matcher)) {
+    return undefined;
+  }
+  if (!Array.isArray(raw.hooks)) return undefined;
+  const handlers: IknowSettingsHookHandler[] = [];
+  for (const handlerRaw of raw.hooks) {
+    const handler = parseHookHandler(handlerRaw);
+    if (handler !== undefined) handlers.push(handler);
+  }
+  if (handlers.length === 0) return undefined;
+  const group: IknowSettingsHookGroup = { hooks: handlers };
+  if (isNonEmptyString(raw.matcher)) group.matcher = raw.matcher;
+  return group;
+}
+
+function parseHookHandler(raw: unknown): IknowSettingsHookHandler | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  if (raw.type !== "command") return undefined;
+  if (!isNonEmptyString(raw.command)) return undefined;
+  const handler: IknowSettingsHookHandler = {
+    type: "command",
+    command: raw.command,
+  };
+  if (typeof raw.timeout === "number" && Number.isFinite(raw.timeout)) {
+    handler.timeout = raw.timeout;
+  }
+  return handler;
+}
+
+/** hooks 仅用户层：项目层已被 allowlist 丢弃，merge 只透传 user。 */
 function mergeHooks(
   user: IknowSettingsHooks | undefined,
-  project: IknowSettingsHooks | undefined
+  _project: IknowSettingsHooks | undefined
 ): IknowSettingsHooks | undefined {
-  if (!user && !project) return undefined;
-  const out: IknowSettingsHooks = {};
-  if (project?.enabled !== undefined) out.enabled = project.enabled;
-  else if (user?.enabled !== undefined) out.enabled = user.enabled;
-  if (project?.rules !== undefined) out.rules = project.rules;
-  else if (user?.rules !== undefined) out.rules = user.rules;
-  if (out.enabled === undefined && out.rules === undefined) return undefined;
-  return out;
+  return user;
 }
 
 /**
@@ -1588,8 +1585,8 @@ function mergeSecrets(
  * （llm / isolation / subagent / web / lsp / memory / loop / graph）恒为空对象
  * —— 各 `mergeXxx` 的 `project > user` 分支对这些段当前不可达（保留以维持
  * 合并函数自身语义完整，不删分支）。
- * 允许名单四段（hooks / verify / secrets / permissions）不受影响，project 仍按
- * 字段覆盖 user。
+ * 允许名单三段（verify / secrets / permissions）不受影响，project 仍按
+ * 字段覆盖 user。`hooks` 仅用户层。
  */
 function mergeSettings(
   userRaw: Record<string, unknown>,
@@ -1632,7 +1629,7 @@ function mergeSettings(
   const lsp = mergeLsp(parseLsp(userRaw.lsp), parseLsp(projectRaw.lsp));
   // Web 工具配置段（web_search 后端选择；env > settings 回退链在 env.ts）。
   const web = mergeWeb(parseWeb(userRaw.web), parseWeb(projectRaw.web));
-  // user-hook-router: 用户钩子（user hooks） 段（默认关 —— 段缺席即关）。
+  // 用户 command 钩子（仅 userRaw；项目 hooks 已在 allowlist 丢弃）。
   const hooks = mergeHooks(
     parseHooks(userRaw.hooks),
     parseHooks(projectRaw.hooks)

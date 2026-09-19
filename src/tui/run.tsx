@@ -426,7 +426,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     const traceOut = resolveTraceRoot(options.traceOut, dataDir);
     // settings 双向持久化（T4）：/thinking /effort 面板 Esc → 写回 settings.json。
     // ADR-0084 写回落对层：thinking / memory 是**用户层键**（llm / memory 段），
-    // 项目文件不再采纳这两段（项目允许名单 = hooks / verify / secrets /
+    // 项目文件不再采纳这两段（项目允许名单 = verify / secrets /
     // permissions），故写回目标恒为 <home>/.iknow/settings.json，与「项目文件
     // 是否存在」解耦（旧 ADR-0019 D1.3 的 project 优先档会把用户层键写进不再被
     // 读取的项目文件）。写回后登记 self-write 哨兵

@@ -1,7 +1,7 @@
 # Spec: 路径读图进 Anthropic vision
 
 **Status:** draft
-**Basis:** wayfinder 地图 [路径读图进 Anthropic vision（决策）](../docs/wayfinder/path-image-vision-map.md)（G1–G3 已裁）；操作员授权代理裁 + 本回合要求写 spec/plan
+**Basis:** 操作员授权代理裁 + 本回合要求写 spec/plan（决策过程已归档于 `docs/archive/027-retire-wayfinder-charts/`，不作引用依据）
 **Surface:** ACI 读工具 + tools executor + session 落盘（`tool_result.content`）+ Anthropic adapter 原样上 wire
 
 ## Objective
