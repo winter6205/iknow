@@ -91,8 +91,9 @@
 ### T3 — `GIT_SSH_COMMAND` 注入与 env 策略
 
 - 注入串（钉死形态，rev 2 = ADR-0107 中继换装）：
-  `ssh -F /dev/null -o ControlMaster=no -o ControlPath=none -o ProxyCommand='<node绝对路径> <本仓自带 vendor/egress-relay/egress-http-connect.mjs绝对路径> %h %p'`
+  `ssh -F /dev/null -o ControlMaster=no -o ControlPath=none -o ProxyCommand="'<node绝对路径>' '<本仓自带 vendor/egress-relay/egress-http-connect.mjs绝对路径>' %h %p"`
   ADR-0107 中继换装一行注记：socat 被禁止作为产品依赖，ProxyCommand 由随仓最小 CONNECT 隧道件承担；认证材料不进 argv（旧 `proxyauth=` 内联退役），隧道件从继承的 `HTTP_PROXY` env 读 userinfo，与代理三键同源。
+  review 修复注记：路径引号统一为 `shellSingleQuote`（node / 脚本路径各自单引号 + 外层双引号，与 `buildInnerBridgeScript` 同策略；外层双引号由 git `split_cmdline` 剥除、内层单引号交 ssh ProxyCommand 的 `/bin/sh` 处理），与 `tests/harness/sandbox/egress-session.test.ts` 逐字断言一致。
   依据：mux 中和理由 `sandbox-utils.js:516-524`（用户 config 的 ControlPath 在沙箱内不可 bind、auth 后即退）；`-F /dev/null` 依 assumption 4。旧「Linux 形态选型 `sandbox-utils.js:536-540`（`PROXY:` 跨 socat 版本可移植）」依据随换装失效。
 - 覆盖/合并策略：注入值只在 session 在场时存在；围栏内用户命令**显式内联** `GIT_SSH_COMMAND=...` 时后者胜（shell 语义，不加防御）；推荐组合写法 `GIT_SSH_COMMAND="$GIT_SSH_COMMAND -i <key>"` 写进指引文案（既有 `$GIT_SSH_COMMAND` 逐字引用）。known_hosts 不受 `-F` 影响（ssh 独立路径），首次未见主机 key 的失败面归 Failure paths F4。
 - env 白名单关系：`GIT_SSH_COMMAND` **不入** `BASE_ENV_WHITELIST`（宿主值不进围栏，invariant 3）；注入经 `spec.env` → `mergedEnv`（`bwrap.ts:224-239`），与 `--clearenv` 序不变。
