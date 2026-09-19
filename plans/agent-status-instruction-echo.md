@@ -66,7 +66,7 @@ minimal-change-verifier: yes — 与 ADR-0103 决策 1-4 一一对应；T5/T6 �
    - **Surface:** `mcp__aiterm__pty_*` 真实 TUI 会话（预期零代码改动；实测暴露缺陷回写对应 bullet 重跑）
    - **Acceptance:** 实测走读——多步任务 `todo_write` 入账后中途 pivot；读 trace 证据：pivot 后首跳栏含 `instruction:`（= pivot 首行逐字）+ reconcile 行，次跳 reconcile 消失、instruction 仍在；屏上无注入气泡回潮、todo footer 投影不劣化；transcript 片段 + trace 行号写进验收报告。
    - [blocks: T4, T5, T6]
-   - Status: [ ] pending
+   - Status: [x]
 
 ---
 
