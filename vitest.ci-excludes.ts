@@ -105,6 +105,8 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/harness/aci/bash-egress-typed-failure.test.ts",
   "tests/harness/aci/bash-egress.test.ts",
   "tests/harness/build-engine-egress-wiring.test.ts",
+  // ADR-0105 sentinel：三装配点入口 wiring 经 fence 装配 → requireBwrap。
+  "tests/harness/egress-entry-wiring.test.ts",
   "tests/harness/aci/registry-workspace-root.test.ts",
   "tests/harness/aci/tools/d9-description-guard.test.ts",
   "tests/harness/aci/tools/registry.test.ts",
