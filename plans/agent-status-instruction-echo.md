@@ -59,7 +59,7 @@ minimal-change-verifier: yes — 与 ADR-0103 决策 1-4 一一对应；T5/T6 �
    - **Surface:** `tests/harness` agent-status 区（夹具落点参照 `graph-mode-notification.fixtures.ts` 共处纪律）+ `docs/guides/prompt-development.md` 名册 `<agent_status>` 行
    - **Acceptance:** STATIC 测试锁 `last_tool:` / `instruction:` / reconcile 前缀与 `todos:` 头次序及常量句；SEAM 由 T3/T4 集成断言承担可指认；轨迹夹具固定输入 = 非空账本 + pivot 指令进场，可判定行为 = 模型下一跳首工具为 `todo_write`，真模型半边过 `npm run test:real-llm`（缺 key → 如实 Not run，不以离线绿冒充）；名册行回填为集路径。
    - [blocks: T4, T5]
-   - Status: [ ] pending
+   - Status: [x]
 
 7. **TUI pty 实测证据留档** — tag: `[implementation]`
    - **Inherits:** spec T6 步骤①–④ + SC8 + 仓规「凡进会话的改动必须上屏，chat REPL / TUI 单测不能代替」。

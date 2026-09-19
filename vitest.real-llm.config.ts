@@ -28,12 +28,15 @@ export default defineConfig({
     // graph mode notification: 同一形态的集（ADR-0041 / 0080 通知文是否
     // 真把模型转向 run_graph vs spawn_subagent；有 key 跑同一集，缺 key skip）。
     // worktree tool names (ADR-0082): 建树/列出首工具轨迹，同 HAS_KEY 守卫。
+    // agent_status pivot reconcile (spec agent-status-instruction-echo T5):
+    // <agent_status> 黄金集真模型半边（首工具 todo_write 判定），同守卫。
     include: [
       "archive/tests-real-llm/t8-live-subagent-routing.test.ts",
       "archive/tests-real-llm/model-prefix-layering-e2e.test.ts",
       "archive/tests-real-llm/web-discover-vs-read.test.ts",
       "archive/tests-real-llm/graph-mode-notification.test.ts",
       "archive/tests-real-llm/worktree-tool-names.test.ts",
+      "archive/tests-real-llm/agent-status-instruction-echo.test.ts",
     ],
     exclude: ["**/node_modules/**"],
     pool: "forks",
