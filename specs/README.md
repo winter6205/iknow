@@ -19,6 +19,7 @@
 
 ### harness / 状态与传输
 
+- `session-list-title.md` — 列表标题：独立 transcript 事件 + lite model 生成（ADR-0113）
 - `agent-status-instruction-echo.md` — 状态栏复诵升级：`instruction:` 逐字回显段 + pivot reconcile 一次性标记（ADR-0103 修订 ADR-0028；ACR PASS）
 - `instruction-authority-projection.md` — 指令权威出站投影：宿主帧盖戳 + untrusted 转译（#1066；ADR-0112）
 - `transport-continue-persist.md` — transport retry / continue / failure persist

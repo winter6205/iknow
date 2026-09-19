@@ -9,12 +9,13 @@
  */
 import { afterAll, describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionHub } from "../../src/session-api/hub.ts";
 import {
   CURRENT_SCHEMA_VERSION,
+  extractTitle,
   SessionStore,
   type SessionFileV1,
 } from "../../src/session-api/store/index.ts";
@@ -414,5 +415,79 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
       typeof loaded.updatedAt === "string" && loaded.updatedAt.length > 0,
       "updatedAt 必须有 ISO 时间戳(serialize 队列最终 save)"
     );
+  });
+});
+
+// -- compact 不回盖标题事件 (session-list-title T3 / ADR-0113) -----------------
+
+describe("compact 与标题事件: header title 只做缓存", () => {
+  it("有 title 事件: compact 后 header/读路径仍为事件正文, preamble 不成标题", async () => {
+    const { store } = await storeFor();
+    const id = "compact-title-event";
+    const messages = Array.from({ length: 8 }, (_, i) => ({
+      role: "user" as const,
+      content: [{ type: "text" as const, text: `msg-${i}` }],
+    }));
+    await seedSession(store, id, messages);
+    await store.save({
+      id,
+      file: {
+        ...(await store.load(id)),
+        title: "msg-0", // 占位 = extractTitle(首条 user)
+      },
+    });
+    await store.appendTitle({ id, text: "事件标题" });
+    assert.equal((await store.load(id)).title, "事件标题");
+
+    const hub = new SessionHub({
+      store,
+      deps: {
+        ...makeCompactDeps({
+          adapter: makeSummarizeAdapter({ summaryText: "摘要内容" }),
+        }),
+      },
+    });
+    const res = await hub.compactSession(id);
+    expect(res.compacted).toBe(true);
+
+    // compact 后首条 user 是 SUMMARY_PREAMBLE；标题必须仍是事件正文。
+    const loaded = await store.load(id);
+    assert.equal(loaded.title, "事件标题");
+    const firstText = textOf(loaded.messages[0]!);
+    assert.notEqual(loaded.title, extractTitle(loaded.messages));
+    assert.ok(!loaded.title.includes(firstText.slice(0, 20)));
+    // 盘上 header 缓存同样未被 extractTitle 回盖，且 title 记录存活。
+    const lines = (
+      await readFile(join(store.getProjectDir(), id, `${id}.jsonl`), "utf8")
+    )
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    assert.equal(lines[0]?.["title"], "事件标题");
+    assert.ok(
+      lines.some((l) => l["type"] === "title" && l["text"] === "事件标题")
+    );
+  });
+
+  it("回归: 无 title 事件时 compact 行为与今日一致 (title = extractTitle(before))", async () => {
+    const { store } = await storeFor();
+    const id = "compact-title-noevent";
+    const messages = Array.from({ length: 8 }, (_, i) => ({
+      role: "user" as const,
+      content: [{ type: "text" as const, text: `msg-${i}` }],
+    }));
+    await seedSession(store, id, messages);
+    const hub = new SessionHub({
+      store,
+      deps: {
+        ...makeCompactDeps({
+          adapter: makeSummarizeAdapter({ summaryText: "摘要内容" }),
+        }),
+      },
+    });
+    const res = await hub.compactSession(id);
+    expect(res.compacted).toBe(true);
+    const loaded = await store.load(id);
+    assert.equal(loaded.title, "msg-0");
   });
 });

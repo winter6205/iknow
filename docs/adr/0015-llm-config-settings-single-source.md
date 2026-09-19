@@ -3,6 +3,8 @@
 Date: 2026-08-12
 Status: accepted
 
+> **Amendment 2026-09-19**（ADR-0113）：§1 仍是**主会话** `settings.llm.model` 缺失 fail-fast。可选 `settings.llm.liteModel` 不改变本条。
+>
 > **Amendment 2026-09-12**（ADR-0084 / `specs/agent-control-surface.md` Slice B）：§1 与 §2 引用的守卫文案中指向 `<cwd>/.iknow/settings.json` 的尾句 **superseded**——`llm` 是用户层键，项目文件只采纳 `hooks` / `verify` / `secrets` / `permissions`，文案只指向 `~/.iknow/settings.json`（`src/config/messages.ts`）。§1 model 字面唯一来源、§2 apiKey 单字段与占位符语义、§5 不动范围均不变。
 >
 > **Amendment 2026-09-13**（ADR-0093 / #1010）：§2「取代 `apiKeyEnv` 间接寻址」**重开**——`settings.llm.providers[i].apiKeyEnv` 在**用户层注册表内**重新引入 per-provider 变量名（只直读 `process.env[apiKeyEnv]`，不回落 `.env.local` / `.env` fileMap；env 缺席 → typed 抛错，不回退字面 `apiKey`）。§2 其余条款不变：全局 `IKNOW_LLM_API_KEY_ENV`、`LlmEnv.apiKeyEnv` 字段、未命中 provider 路径的 `settings.llm.apiKey` 占位符链路均仍如原文。§1 model 字面唯一来源与缺失 fail-fast 不变，该字面现可读作 `provider/model` 路由 ID。
@@ -26,7 +28,7 @@ iknow 历史上 LLM 配置存在多个并存入口（ADR-0001 substack 的体现
 
 ### 1. `settings.llm.model` 字面值唯一来源
 
-- **SSOT** = `settings.llm.model`（trim 后非空字符串）
+- **SSOT** = `settings.llm.model`（trim 后非空字符串）——**主会话**路由。后台无工具补全另见可选 `settings.llm.liteModel`（ADR-0113）；lite 缺席不改变本条 fail-fast。
 - **缺失 → fail-fast**：`loadIknowEnv` 抛「iknow: no LLM model configured in settings.llm.model. Set it in ~/.iknow/settings.json (or <cwd>/.iknow/settings.json).」
 - **退役**：`process.env[IKNOW_LLM_MODEL]` 不再被任何代码读取（含 env.ts / scripts / i135 smoke / 4 个 serve-path 测试 fixture）
 - **不写占位符**：model 字段不展开 `${VAR}`，model 路由 ID 是声明的、字面的、可读代码评审的

@@ -199,6 +199,11 @@ import {
   sumAssistantThinkingMsInRange,
   TASK_EXCERPT_PREFIX,
 } from "./turn-projection.js";
+import {
+  collectTitleSource,
+  sanitizeSessionTitle,
+  type TitleGenerator,
+} from "./title-generation.js";
 import type { WorkspaceResponse } from "./contract.js";
 import {
   withThinkingOverride,
@@ -426,6 +431,16 @@ function isSessionStoreError(err: unknown): err is SessionStoreError {
   if (err instanceof Error) return false;
   const k = (err as { kind?: unknown }).kind;
   return typeof k === "string" && k in STORE_ERROR_MAP;
+}
+
+/**
+ * ADR-0113 T4 log-and-continue 渲染：typed store 错误先按 kind 识别
+ * （code-quality「typed-error catch 契约」——plain object 走 instanceof 会
+ * 打成 [object Object]，kind/context 全灭）；非 store 错误才退回 Error 文本。
+ */
+function describeTitleError(err: unknown): string {
+  if (isSessionStoreError(err)) return `${err.kind}: ${err.conversation_id}`;
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**
@@ -817,6 +832,14 @@ export type SessionHubOptions = {
    * 测试注入脚本化实现，保证没有用例真的 shell out 到安装器。
    */
   readonly projectDepProvisioner?: ProjectDepProvisioner;
+  /**
+   * ADR-0113 session-list-title T4: lite 标题生成器（可选）。host 在
+   * `env.llm.liteModel` 在场时注入（`buildLiteTitleGenerator`）；hub 在
+   * 实质 user 文本后的第一次 `StopReason=completed` fire-and-forget 调用，
+   * 结果 sanitize 后经 serialize 队列 `appendTitle` 落盘。缺席 → 永不
+   * 触发，hub 行为与今日逐字节一致（lite 缺席 = 增强缺席，不 fail-fast）。
+   */
+  readonly titleGenerator?: TitleGenerator;
 };
 
 /**
@@ -1078,6 +1101,13 @@ export class SessionHub {
   private readonly prefetchInjectedIds = new Map<string, Set<string>>();
   /** auto-memory T4: host 钩子（默认缺席 = 自动记忆关）。 */
   private autoMemory: AutoMemoryHook | undefined;
+  /** ADR-0113 T4: lite 标题生成器（缺席 = 本入口未接 lite，永不触发）。 */
+  private readonly titleGenerator: TitleGenerator | undefined;
+  /**
+   * ADR-0113 T4: 本进程内已触发过标题生成的会话集合 —— 第一次 completed
+   * 只烧一次 lite；跨进程形态由 store.hasTitleEvent 磁盘闸兜住。
+   */
+  private readonly titleFiredConversations = new Set<string>();
   /** auto-memory low-trust read: per-turn user overlay (same gate as autoMemory). */
   private overlayMemoryPrefetch: OverlayPrefetchFn | undefined;
 
@@ -1113,6 +1143,7 @@ export class SessionHub {
     }
     this.autoMemory = opts.autoMemory;
     this.overlayMemoryPrefetch = opts.overlayMemoryPrefetch;
+    this.titleGenerator = opts.titleGenerator;
     // review-fix (M1 / H1): per-root state anchor 缓存。
     this.workspaceRoot = opts.workspaceRoot;
     // T6:稳定 productRoot（缺席 → workspaceRoot，保持单根形态可编译可跑）。
@@ -2087,6 +2118,12 @@ export class SessionHub {
                 boundRoot,
                 conversationId
               );
+              // ADR-0113 T4: 第一次 completed + 实质 user 文本后 fire-and-forget
+              // lite 标题生成(不 await,主回合不被生成阻塞)。
+              this.maybeFireTitleGeneration({
+                conversationId,
+                result: s.finalResult,
+              });
               // #458 T5 (SC8): goal.status write-back on verify-loop terminal
               // outcome. The hub is the only writer of goal.status. Target status
               // is looked up from OUTCOME_TO_STATUS; applyTransition runs only
@@ -3220,6 +3257,71 @@ export class SessionHub {
     ) {
       this.dirtyWorktreeRoots.delete(conversationId);
     }
+  }
+
+  /**
+   * ADR-0113 T4 / spec Does 5: lite 标题生成的 hub 触发点。同步部分只做
+   * 闸（generator 在场 / 第一次 completed / 实质 user 文本），LLM 调用与
+   * 落盘挂在未 await 的异步尾巴上 —— postMessage 主回合不为生成等待。
+   */
+  private maybeFireTitleGeneration(opts: {
+    readonly conversationId: string;
+    readonly result: RunResult;
+  }): void {
+    const generator = this.titleGenerator;
+    // EXIT: lite 缺席（generator 未注入）→ 永不触发，hub 行为与今日逐字节一致。
+    if (generator === undefined) return;
+    if (opts.result.stopReason !== "completed") return;
+    // EXIT: 本会话本进程已烧过一次 lite → 第二次 completed 不再触发（spec Does「一次」）。
+    if (this.titleFiredConversations.has(opts.conversationId)) return;
+    const source = collectTitleSource(
+      opts.result.messages,
+      opts.result.finalText ?? ""
+    );
+    // EXIT: 寒暄-only / 过短且无助手文本 → 本轮不标记已触发，下个 completed 回合再判。
+    if (source === undefined) return;
+    this.titleFiredConversations.add(opts.conversationId);
+    const conversationId = opts.conversationId;
+    void (async () => {
+      try {
+        // 磁盘闸预筛（(d) 跨进程形态）：已有标题事件 → 连 lite 都不烧。这是
+        // 队列外的 best-effort 省钱闸，不作正确性依据 —— 权威判定在下方
+        // serialize 槽位内（check 与 append 同槽位，见 review-fix Medium）。
+        if (await this.store.hasTitleEvent(conversationId)) return;
+        const raw = await generator(source);
+        const title = sanitizeSessionTitle(raw ?? "");
+        // EXIT: 生成失败 / 超时 / 空结果 → log-and-continue，header title 留 extractTitle 占位。
+        if (title.length === 0) {
+          console.warn(
+            `[session-title] generation produced no title for ${conversationId}; placeholder kept`
+          );
+          return;
+        }
+        // appendTitle MUST 走 hub serialize 队列（与 appendEvents 同 posture）。
+        // 本 IIFE 在当前 serialize 槽位之外排队 —— 只 enqueue 不等待，不复现
+        // hub.ts 内层触发警告的「槽位内 await 外层队列」死锁形态。
+        // check-then-act 同槽位（review-fix Medium）：hasTitleEvent 的权威判
+        // 定与 appendTitle 在同一 work 回调内顺序执行 —— 预筛之后、enqueue
+        // 之前若有其它操作（save / appendEvents / 另一条标题尾巴）排进本 id
+        // 的队列，其结果对槽位内的判定可见，不会被重排到 check 与 append
+        // 之间而写出第二条标题事件。
+        await this.serialize({
+          conversationId,
+          work: async () => {
+            if (await this.store.hasTitleEvent(conversationId)) return;
+            await this.store.appendTitle({
+              id: conversationId,
+              text: title,
+            });
+          },
+        });
+      } catch (err) {
+        // EXIT: 任何未预期失败（store typed error / generator 抛错）→ log-and-continue，占位保留。
+        console.warn(
+          `[session-title] generation skipped: ${describeTitleError(err)}`
+        );
+      }
+    })();
   }
 
   /**

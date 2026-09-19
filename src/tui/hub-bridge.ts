@@ -18,6 +18,7 @@
  */
 import { SessionStore } from "../session-api/store/session-store.js";
 import { SessionHub } from "../session-api/hub.js";
+import { liteTitleGeneratorOptions } from "../session-api/title-generation.js";
 import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
 import type { EngineBundle } from "../harness/build-engine.js";
 import type {
@@ -311,6 +312,12 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     deps: opts.deps,
     defaultJsonMode: opts.defaultJsonMode ?? false,
     traceOut: opts.traceOut,
+    // ADR-0113 T4: lite 槽在场才注入标题生成器（envProvider 优先、
+    // overrideEnv 兜底的双源解析收敛在共享装配缝；缺席 → 键不出现不触发）。
+    ...liteTitleGeneratorOptions({
+      envProvider: opts.envProvider,
+      env: opts.overrideEnv,
+    }),
     // subagentManager 由 buildTuiDeps 经 buildHarnessEngine SSOT 装配，
     // hub-bridge 透传给 SessionHub。
     subagentManager: opts.subagentManager,

@@ -54,14 +54,18 @@ import type {
   ParsedSessionLog,
   SessionEventRecord,
   SessionHeadRecord,
+  SessionTitleRecord,
+  SessionTailRecord,
 } from "./jsonl.js";
 import {
   chainFromHead,
   headChainEvents,
   jsonDeepEqual,
+  latestTitleText,
   messageEventId,
   parseSessionJsonl,
   projectSessionLog,
+  resolveTitleText,
   serializeSessionLog,
   SESSION_JSONL_EXT,
   sessionFileToJsonl,
@@ -101,7 +105,8 @@ export interface SessionListEntry {
   readonly updatedAt: string;
   /** Text excerpt from the most recent assistant turn ("" if none). */
   readonly lastFinalText: string;
-  /** UI title excerpt (#467 renamed from `summary`). */
+  /** UI 标题（#467 由 `summary` 改名）。ADR-0113：= 最新标题事件正文；
+   *  无标题事件时 = extractTitle 占位（header `title` 只是缓存）。 */
   readonly title: string;
   /** Whether the persisted workspace binding is executable as-is. */
   readonly bindingStatus: SessionBindingStatus;
@@ -380,7 +385,7 @@ export class SessionStore {
         if ((err as { kind?: string }).kind === "io_error") throw err;
         log = null;
       }
-      const plan = planSessionSave(file, log);
+      const plan = planSessionSave(gateTitleToEvent(file, log), log);
       await writeFile(jsonlTmp, plan.jsonl, "utf8");
       await rename(jsonlTmp, jsonlPath);
     } catch (err) {
@@ -473,6 +478,62 @@ export class SessionStore {
         cause: errMsg(err),
       } satisfies SessionStoreError;
     }
+  }
+
+  /**
+   * ADR-0113 (session-list-title T3): 追加一条标题事件(`{type:"title",
+   * text}`)到 JSONL 尾部 —— 纯 append,单行,不触碰 message 链与 head 指针
+   * (projectSessionLog 沿链走,天然不投影 title 事件)。标题权威即事件正文;
+   * header `title` 只是缓存,下一次 save 时由回盖闸回刷,读路径
+   * (load/list)已经通过投影覆盖立即反映事件正文。
+   *
+   * 供标题生成模块(T4)调用。JSONL-only:legacy `.json`-only 会话先
+   * save() 一次迁移(同 appendEvents 的迁移信号)。MUST be called under
+   * the hub serialize queue —— store 保持无锁(与 appendEvents/writeHead
+   * 同一 posture,spec Testing Decisions concurrent 类)。
+   * Throws: not_found | write_failed (legacy-only / IO) | parse_failed |
+   *   schema_invalid (field "title": 空/纯空白 text; corrupt log) | io_error
+   */
+  async appendTitle(opts: {
+    readonly id: string;
+    readonly text: string;
+  }): Promise<void> {
+    const { id, text } = opts;
+    if (typeof text !== "string" || text.trim().length === 0) {
+      throw {
+        kind: "schema_invalid",
+        conversation_id: id,
+        field: "title",
+      } satisfies SessionStoreError;
+    }
+    const path = this.jsonlPath(id);
+    // readJsonlLog: not_found / legacy→write_failed / corrupt→typed error。
+    await this.readJsonlLog(id, path, { legacyIsWriteFailed: true });
+    const record: SessionTitleRecord = { type: "title", text };
+    try {
+      await appendFile(path, `${JSON.stringify(record)}\n`, "utf8");
+    } catch (err) {
+      throw {
+        kind: "write_failed",
+        conversation_id: id,
+        cause: errMsg(err),
+      } satisfies SessionStoreError;
+    }
+  }
+
+  /**
+   * ADR-0113 T4 support: 标题生成触发前的只读判定 —— JSONL log 上是否
+   * 已有标题事件（spec Does「已有标题事件 → 跳过，第二次 completed 不写
+   * 第二条」的跨进程形态；进程内由 hub 侧 fired-set 兜住）。
+   * legacy-only 会话（无 JSONL）→ not_found（与 readHead 同形态；标题生成
+   * 只在 completed persist 之后触发，彼时 migrate-on-save 已落 JSONL）。
+   * Throws: not_found | parse_failed | schema_invalid | io_error
+   */
+  async hasTitleEvent(id: string): Promise<boolean> {
+    const log = await this.readJsonlLog(id, this.jsonlPath(id), {
+      legacyIsWriteFailed: false,
+    });
+    return latestTitleText(log) !== null;
   }
 
   /**
@@ -637,7 +698,9 @@ export class SessionStore {
       ...meta,
       messages: keptMessages,
       turnCount,
-      title: extractTitle(keptMessages),
+      // ADR-0113 回盖闸:有标题事件时 header 缓存 = 事件正文,rewind 的
+      // extractTitle 重算不得覆写;无事件 → 今日行为不变。
+      title: resolveTitleText(log, extractTitle(keptMessages)),
       updatedAt: new Date().toISOString(),
       checkpoints: withCheckpointAnchors(survivors, keptIds),
     });
@@ -969,6 +1032,20 @@ export class SessionStore {
 
 // -- module-level helpers ----------------------------------------------------
 
+/**
+ * ADR-0113 回盖闸(save 咽喉点):盘上 log 已有标题事件时,header `title`
+ * 缓存一律写最新事件正文 —— hub conditionalSave / compact、CLI 等所有调用
+ * 方传入的 extractTitle 重算值在此被拦下,覆不到盘。无标题事件(log 为
+ * null / 旧文件)→ 原样透传,与今日行为逐字节一致。
+ */
+function gateTitleToEvent(
+  file: SessionFileV1,
+  log: ParsedSessionLog | null
+): SessionFileV1 {
+  const title = resolveTitleText(log, file.title);
+  return title === file.title ? file : { ...file, title };
+}
+
 /** T5 save plan: the JSONL text to persist. The mirror `.json` file was
  *  removed in #629, so the save plan now only carries the JSONL bytes. */
 interface SavePlan {
@@ -1005,9 +1082,7 @@ function planSessionSave(
   ) {
     prefixLen++;
   }
-  const records: Array<SessionEventRecord | SessionHeadRecord> = [
-    ...log.records,
-  ];
+  const records: SessionTailRecord[] = [...log.records];
   let finalIds: string[];
   if (prefixLen === chain.length && messages.length === chain.length) {
     // Identical projection: header-refresh only, no new records.

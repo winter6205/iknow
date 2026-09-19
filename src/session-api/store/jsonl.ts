@@ -13,6 +13,10 @@
  *   3. head record:`{type:"head", id:"e<N>"|null}` —— 落盘的 rewind 头指针
  *      (spec:头指针落盘)。最后一条 head record 生效;缺省时取最后一个事件
  *      (容错:崩溃可能落在 event 已写、head 未写之间)。
+ *   4. title record(ADR-0113):`{type:"title", text:string}` —— 标题事件,
+ *      标题的权威形态(不进 messages 投影 / 模型 prior)。header `title`
+ *      降级为其缓存:projectSessionLog 读路径覆盖 + save/rewind 写路径
+ *      用最新事件正文回刷缓存,extractTitle 只在无事件时充当占位。
  *
  * 命名 EXIT(spec Testing Decisions exception 类,T1 锁定其一):
  *   `drop-trailing-corrupt-line` —— 最后一个非空行 JSON.parse 失败 → 丢弃
@@ -49,6 +53,8 @@ export interface SessionHeaderRecord {
   readonly type: "session";
   readonly schemaVersion: number;
   readonly conversation_id: string;
+  /** ADR-0113: 缓存 = 最新 title record 正文;无标题事件时才是
+   *  extractTitle 占位。权威在 title 事件本身,读路径投影时覆盖此缓存。 */
   readonly title: string;
   readonly cwd: string;
   readonly sanitized_at: string;
@@ -85,8 +91,20 @@ export interface SessionHeadRecord {
   readonly id: string | null;
 }
 
-export type SessionJsonlRecord =
-  SessionHeaderRecord | SessionEventRecord | SessionHeadRecord;
+/** ADR-0113 (session-list-title T3): 标题事件 —— 标题的权威形态。
+ *  不进 message 链、不投影进 messages、不进模型 prior;header `title`
+ *  降级为其缓存(最新事件正文,无事件时才是 extractTitle 占位)。
+ *  文件序 = 追加序,读路径取最后一条生效。 */
+export interface SessionTitleRecord {
+  readonly type: "title";
+  readonly text: string;
+}
+
+/** header 之后的全部记录形态(文件序)。 */
+export type SessionTailRecord =
+  SessionEventRecord | SessionHeadRecord | SessionTitleRecord;
+
+export type SessionJsonlRecord = SessionHeaderRecord | SessionTailRecord;
 
 /** parseSessionJsonl / projectSessionLog 抛出的结构化错误(不含
  *  conversation_id —— 纯函数不携带 store 身份,由 store 捕获后补上,
@@ -109,9 +127,9 @@ export interface ParsedSessionLog {
   readonly head: string | null;
   /** 事件中最大 `e<N>` 的 N;无事件为 -1(appendEvents 从 +1 继续编号)。 */
   readonly maxEventIndex: number;
-  /** T5:header 之后的全部记录(event + head),按文件序。save 的
+  /** T5:header 之后的全部记录(event / head / title),按文件序。save 的
    *  header-refresh 重写依赖它原样保留既有记录(含历史 head 记录)。 */
-  readonly records: ReadonlyArray<SessionEventRecord | SessionHeadRecord>;
+  readonly records: ReadonlyArray<SessionTailRecord>;
 }
 
 /**
@@ -184,30 +202,15 @@ export function parseSessionJsonl(raw: string): ParsedSessionLog {
     throw { kind: "schema_invalid", field: "root" } satisfies SessionJsonlError;
   }
   const events: SessionEventRecord[] = [];
-  const tail: Array<SessionEventRecord | SessionHeadRecord> = [];
+  const tail: SessionTailRecord[] = [];
   const ids = new Set<string>();
   let head: string | null = null;
   let headSeen = false;
   let maxEventIndex = -1;
   for (const rec of rest) {
     if (isEventRecord(rec)) {
-      const match = EVENT_ID_RE.exec(rec.id);
-      if (match === null || ids.has(rec.id)) {
-        throw {
-          kind: "schema_invalid",
-          field: "events",
-        } satisfies SessionJsonlError;
-      }
-      // append-only 不变式:parent 必须先于子事件出现(崩溃尾部丢弃后
-      // 仍成立 —— 被引用的 parent 一定在更早的行)。
-      if (rec.parent !== null && !ids.has(rec.parent)) {
-        throw {
-          kind: "schema_invalid",
-          field: "events",
-        } satisfies SessionJsonlError;
-      }
+      maxEventIndex = Math.max(maxEventIndex, validatedEventIndex(rec, ids));
       ids.add(rec.id);
-      maxEventIndex = Math.max(maxEventIndex, Number(match[1]));
       events.push(rec);
       tail.push(rec);
       continue;
@@ -215,6 +218,12 @@ export function parseSessionJsonl(raw: string): ParsedSessionLog {
     if (isHeadRecord(rec)) {
       head = rec.id; // 最后一条 head record 生效
       headSeen = true;
+      tail.push(rec);
+      continue;
+    }
+    if (isTitleRecord(rec)) {
+      // ADR-0113: 标题事件不在 message 链上,不改 head/maxEventIndex,
+      // 只随 records 原样保留并被 latestTitleText 消费。
       tail.push(rec);
       continue;
     }
@@ -227,6 +236,31 @@ export function parseSessionJsonl(raw: string): ParsedSessionLog {
     throw { kind: "schema_invalid", field: "head" } satisfies SessionJsonlError;
   }
   return { header: first, events, head, maxEventIndex, records: tail };
+}
+
+/** 事件形状校验(从 parseSessionJsonl 主循环抽出,保持其环复杂度不随
+ *  title record 分支上涨):id 形态非法 / 重复 id / parent 未先出现 →
+ *  schema_invalid "events"。通过则返回 `e<N>` 的 N。parent 先现是
+ *  append-only 不变式(崩溃尾部丢弃后仍成立 —— 被引用的 parent 一定在
+ *  更早的行)。调用方在校验通过后才把 rec.id 加进 ids。 */
+function validatedEventIndex(
+  rec: SessionEventRecord,
+  ids: Set<string>
+): number {
+  const match = EVENT_ID_RE.exec(rec.id);
+  if (match === null || ids.has(rec.id)) {
+    throw {
+      kind: "schema_invalid",
+      field: "events",
+    } satisfies SessionJsonlError;
+  }
+  if (rec.parent !== null && !ids.has(rec.parent)) {
+    throw {
+      kind: "schema_invalid",
+      field: "events",
+    } satisfies SessionJsonlError;
+  }
+  return Number(match[1]);
 }
 
 /**
@@ -308,12 +342,40 @@ export function projectSessionLog(log: ParsedSessionLog): SessionFileV1 {
   if (!hasAnyThinking) {
     delete meta.thinkingMs;
   }
+  // ADR-0113: 标题事件的正文是标题权威,header `title` 只是缓存 —— 投影时
+  // 用最新事件正文覆盖缓存值,使 load()/list() 读路径立即反映事件(不依赖
+  // 下一次 save 刷新缓存)。无标题事件 → header 缓存原样,旧文件行为不变。
   return sanitizeSessionFile({
     ...meta,
+    title: resolveTitleText(log, meta.title),
     messages,
     ...(hasAny ? { messageCreatedAt: createdAtList } : {}),
     ...(hasAnyThinking ? { thinkingMs: thinkingMsList } : {}),
   });
+}
+
+/**
+ * 读路径标题解析(SSOT:`latestTitleText ?? fallback` 形态的唯一定义处):
+ * 最新标题事件正文优先;无标题事件 → 调用方兜底值(header 缓存 /
+ * extractTitle 占位)。log 为 null(legacy-only 无 JSONL)同样回退。纯函数。
+ */
+export function resolveTitleText(
+  log: ParsedSessionLog | null,
+  fallback: string
+): string {
+  return (log === null ? null : latestTitleText(log)) ?? fallback;
+}
+
+/**
+ * ADR-0113: log 中最新一条标题事件的正文(文件序最后一条 title record);
+ * 无标题事件 → null(调用方回退 extractTitle 占位)。纯函数。
+ */
+export function latestTitleText(log: ParsedSessionLog): string | null {
+  for (let i = log.records.length - 1; i >= 0; i--) {
+    const rec = log.records[i]!;
+    if (rec.type === "title") return rec.text;
+  }
+  return null;
 }
 
 /**
@@ -372,7 +434,7 @@ export function chainFromHead(
  */
 export function serializeSessionLog(
   file: Omit<SessionFileV1, "messages">,
-  records: ReadonlyArray<SessionEventRecord | SessionHeadRecord>
+  records: ReadonlyArray<SessionTailRecord>
 ): string {
   const lines: string[] = [JSON.stringify({ type: "session", ...file })];
   for (const record of records) {
@@ -437,5 +499,13 @@ function isHeadRecord(value: unknown): value is SessionHeadRecord {
     isRecord(value) &&
     value["type"] === "head" &&
     (value["id"] === null || typeof value["id"] === "string")
+  );
+}
+
+function isTitleRecord(value: unknown): value is SessionTitleRecord {
+  return (
+    isRecord(value) &&
+    value["type"] === "title" &&
+    typeof value["text"] === "string"
   );
 }

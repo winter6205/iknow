@@ -37,6 +37,7 @@ export {
   chainFromHead,
   headChainEvents,
   jsonDeepEqual,
+  latestTitleText,
   messageEventId,
   parseSessionJsonl,
   projectSessionLog,
@@ -49,6 +50,7 @@ export {
   type SessionHeaderRecord,
   type SessionJsonlError,
   type SessionJsonlRecord,
+  type SessionTitleRecord,
 } from "./jsonl.js";
 export {
   buildRewindTargetsFromLog,

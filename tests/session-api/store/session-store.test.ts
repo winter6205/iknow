@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import {
   CURRENT_SCHEMA_VERSION,
+  extractTitle,
   resolveConversationDir,
   resolveProjectSessionDir,
   SessionStore,
@@ -1066,3 +1067,238 @@ async function readJsonlLinesById(id: string): Promise<ReadonlyArray<unknown>> {
     .filter((l) => l.trim().length > 0)
     .map((l) => JSON.parse(l) as unknown);
 }
+
+// -- appendTitle (session-list-title T3 / ADR-0113) ---------------------------
+
+describe("SessionStore.appendTitle (标题事件权威, header title 缓存)", () => {
+  it("appendTitle 后 load().title = 事件正文; messages 不含事件", async () => {
+    const id = "t3-append-basic";
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: { title: "占位", messages: [userMsgShape("q")] },
+      }),
+    });
+    await store.appendTitle({ id, text: "事件标题" });
+    const loaded = await store.load(id);
+    assert.equal(loaded.title, "事件标题");
+    assert.equal(loaded.messages.length, 1);
+    assert.ok(
+      !JSON.stringify(loaded.messages).includes("事件标题"),
+      "title 事件不得进入 messages 投影"
+    );
+    // 盘上只追加一行 title 记录，事件/head 记录不变。
+    const lines = await readJsonlLinesById(id);
+    assert.equal(lines.length, 4); // header + e0 + head + title
+    assert.deepEqual(lines[3], { type: "title", text: "事件标题" });
+  });
+
+  it("appendTitle 后 list().title 立即反映事件正文", async () => {
+    const id = "t3-append-list";
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: {
+          title: "占位",
+          messages: [userMsgShape("q"), assistantMsgShape("a")],
+        },
+      }),
+    });
+    const before = await store.list();
+    assert.equal(before.find((e) => e.conversation_id === id)?.title, "占位");
+    await store.appendTitle({ id, text: "列表标题" });
+    const after = await store.list();
+    assert.equal(
+      after.find((e) => e.conversation_id === id)?.title,
+      "列表标题"
+    );
+  });
+
+  it("回盖闸: 有事件后 save 携带 extractTitle 重算值, header 缓存仍为事件正文", async () => {
+    const id = "t3-save-gate";
+    const messages = [userMsgShape("真正的问题"), assistantMsgShape("a")];
+    await store.save({
+      id,
+      file: sampleFile({ id, overrides: { title: "真正的问题", messages } }),
+    });
+    await store.appendTitle({ id, text: "lite 生成标题" });
+    // 模拟 hub conditionalSave: 每轮用 extractTitle 重算并传入 save。
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: {
+          title: extractTitle([
+            { role: "user", content: [{ type: "text", text: "真正的问题" }] },
+          ]),
+          messages: [...messages, userMsgShape("q2")],
+        },
+      }),
+    });
+    const header = (await readJsonlLinesById(id))[0] as { title: string };
+    assert.equal(header.title, "lite 生成标题");
+    assert.equal((await store.load(id)).title, "lite 生成标题");
+  });
+
+  it("回盖闸: rewind 不用 extractTitle 覆写 header", async () => {
+    const id = "t3-rewind-gate";
+    const messages = [
+      userMsgShape("q1"),
+      assistantMsgShape("a1"),
+      userMsgShape("q2"),
+      assistantMsgShape("a2"),
+    ];
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: { title: "q1", messages, turnCount: 2 },
+      }),
+    });
+    await store.appendTitle({ id, text: "事件标题" });
+    const { file } = await store.rewindToAnchor({ id, keepTurns: 1 });
+    assert.equal(file.title, "事件标题");
+    const header = (await readJsonlLinesById(id))[0] as { title: string };
+    assert.equal(header.title, "事件标题");
+    // title 记录跨 rewind 重写存活。
+    assert.equal((await store.load(id)).title, "事件标题");
+  });
+
+  it("多条 title 事件取最新; 再 append 更新缓存语义", async () => {
+    const id = "t3-multi";
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: { title: "占位", messages: [userMsgShape("q")] },
+      }),
+    });
+    await store.appendTitle({ id, text: "第一版" });
+    assert.equal((await store.load(id)).title, "第一版");
+    await store.appendTitle({ id, text: "第二版" });
+    assert.equal((await store.load(id)).title, "第二版");
+  });
+
+  it("空/纯空白 text → typed schema_invalid field title（不落盘）", async () => {
+    const id = "t3-empty";
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: { title: "占位", messages: [userMsgShape("q")] },
+      }),
+    });
+    for (const text of ["", "   ", "\t\n"]) {
+      await assert.rejects(
+        () => store.appendTitle({ id, text }),
+        (err: unknown) => {
+          const e = err as SessionStoreError;
+          return (
+            e.kind === "schema_invalid" &&
+            "field" in e &&
+            e.field === "title" &&
+            "conversation_id" in e &&
+            e.conversation_id === id
+          );
+        }
+      );
+    }
+    assert.equal((await store.load(id)).title, "占位");
+  });
+
+  it("未知 id → not_found", async () => {
+    await assert.rejects(
+      () => store.appendTitle({ id: "t3-missing", text: "标题" }),
+      (err: unknown) => (err as SessionStoreError).kind === "not_found"
+    );
+  });
+
+  it("legacy .json-only → write_failed（迁移信号，同 appendEvents）", async () => {
+    const id = "t3-legacy";
+    await mkdir(sessionDirFor(id), { recursive: true });
+    await writeFile(
+      join(sessionDirFor(id), `${id}.json`),
+      JSON.stringify(sampleFile({ id })),
+      "utf8"
+    );
+    await assert.rejects(
+      () => store.appendTitle({ id, text: "标题" }),
+      (err: unknown) => (err as SessionStoreError).kind === "write_failed"
+    );
+  });
+
+  it("回归: 无 title 事件的旧文件 save/rewind 行为与今日一致 (extractTitle)", async () => {
+    const id = "t3-noevent";
+    const messages = [
+      userMsgShape("首条问题"),
+      assistantMsgShape("a1"),
+      userMsgShape("q2"),
+      assistantMsgShape("a2"),
+    ];
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: { title: "首条问题", messages, turnCount: 2 },
+      }),
+    });
+    // save 无事件 → header 原样携带调用者 title（extractTitle 语义）。
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: { title: "重算值", messages, turnCount: 2 },
+      }),
+    });
+    let header = (await readJsonlLinesById(id))[0] as { title: string };
+    assert.equal(header.title, "重算值");
+    // rewind 无事件 → title = extractTitle(kept)。
+    const { file } = await store.rewindToAnchor({ id, keepTurns: 0 });
+    assert.equal(file.title, "");
+    header = (await readJsonlLinesById(id))[0] as { title: string };
+    assert.equal(header.title, "");
+  });
+});
+
+// -- hasTitleEvent (session-list-title T4 / ADR-0113 触发前磁盘闸) -------------
+
+describe("SessionStore.hasTitleEvent", () => {
+  it("无标题事件 → false; appendTitle 后 → true（多条仍 true）", async () => {
+    const id = "t4-hastitle";
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: { title: "占位", messages: [userMsgShape("q")] },
+      }),
+    });
+    assert.equal(await store.hasTitleEvent(id), false);
+    await store.appendTitle({ id, text: "事件标题" });
+    assert.equal(await store.hasTitleEvent(id), true);
+    await store.appendTitle({ id, text: "第二版" });
+    assert.equal(await store.hasTitleEvent(id), true);
+  });
+
+  it("未知 id → typed not_found（调用方 log-and-continue，不静默生成）", async () => {
+    await assert.rejects(
+      () => store.hasTitleEvent("t4-hastitle-missing"),
+      (err: unknown) => (err as SessionStoreError).kind === "not_found"
+    );
+  });
+
+  it("legacy .json-only → typed not_found（无 JSONL log 即无标题事件可查，readHead 同形态）", async () => {
+    const id = "t4-hastitle-legacy";
+    await mkdir(sessionDirFor(id), { recursive: true });
+    await writeFile(
+      join(sessionDirFor(id), `${id}.json`),
+      JSON.stringify(sampleFile({ id })),
+      "utf8"
+    );
+    await assert.rejects(
+      () => store.hasTitleEvent(id),
+      (err: unknown) => (err as SessionStoreError).kind === "not_found"
+    );
+  });
+});

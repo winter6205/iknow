@@ -1081,6 +1081,102 @@ describe("loadIknowEnv — model source: settings.llm.model 唯一承载 (settin
   });
 });
 
+describe("loadIknowEnv — llm.liteModel 路由（ADR-0113）", () => {
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  const settingsWithLite = (liteModel?: string): IknowSettings => ({
+    llm: {
+      model: "test/model",
+      ...(liteModel === undefined ? {} : { liteModel }),
+      providers: [TEST_LLM_PROVIDER],
+    },
+  });
+
+  it("合法 liteModel → 走同一 providers[] 查表，transport 三元组与主模型一致", () => {
+    const env = loadIknowEnv(
+      process.cwd(),
+      settingsWithLite("test/lite-model")
+    );
+    assert.ok(env.llm.liteModel);
+    assert.equal(env.llm.liteModel.model, "test/lite-model");
+    assert.equal(env.llm.liteModel.baseUrl, env.llm.baseUrl);
+    assert.equal(env.llm.liteModel.apiKey, "test-key");
+  });
+
+  it("provider 配了 headers → lite headers 与主模型同源", () => {
+    const provider = {
+      ...TEST_LLM_PROVIDER,
+      headers: { "X-Route": "lite" },
+    };
+    const env = loadIknowEnv(process.cwd(), {
+      llm: {
+        model: "test/model",
+        liteModel: "test/lite-model",
+        providers: [provider],
+      },
+    });
+    assert.deepEqual(env.llm.liteModel?.headers, { "X-Route": "lite" });
+    assert.deepEqual(env.llm.headers, env.llm.liteModel?.headers);
+  });
+
+  it("liteModel 未配置 → env.llm 不产出 liteModel 键（headers 同款缺席纪律）", () => {
+    const env = loadIknowEnv(process.cwd(), settingsWithLite());
+    assert.equal("liteModel" in env.llm, false);
+    assert.equal(env.llm.model, "test/model");
+  });
+
+  it("非法 liteModel（空串 / 全空白 / 无 slash / 尾段空 / provider 未注册）→ 静默丢弃，主会话装配正常", () => {
+    for (const bad of ["", "   ", "bare-model", "test/", "unknown/lite"]) {
+      const env = loadIknowEnv(process.cwd(), settingsWithLite(bad));
+      assert.equal(
+        "liteModel" in env.llm,
+        false,
+        `liteModel=${JSON.stringify(bad)} 应不产出键`
+      );
+      assert.equal(env.llm.model, "test/model");
+    }
+  });
+
+  it("lite 命中的 provider apiKeyEnv 未设 → lite 静默丢弃，不抛（主模型不受影响）", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: {
+        model: "test/model",
+        liteModel: "keyless/lite-model",
+        providers: [
+          TEST_LLM_PROVIDER,
+          {
+            id: "keyless",
+            baseUrl: "http://localhost:20129/v1",
+            apiKeyEnv: "IKNOW_TEST_LITE_KEY_NEVER_SET",
+            models: [{ id: "lite-model" }],
+          },
+        ],
+      },
+    });
+    assert.equal("liteModel" in env.llm, false);
+    assert.equal(env.llm.model, "test/model");
+    assert.equal(env.llm.apiKey, "test-key");
+  });
+
+  it("主模型缺失但 liteModel 合法 → 仍 fail-fast（lite 不救主模型，ADR-0113）", () => {
+    assert.throws(
+      () =>
+        loadIknowEnv(process.cwd(), {
+          llm: {
+            liteModel: "test/lite-model",
+            providers: [TEST_LLM_PROVIDER],
+          },
+        }),
+      { message: /no LLM model configured in settings\.llm\.model/ }
+    );
+  });
+});
+
 describe("loadIknowEnv — llm.fallback (settings-model-extension)", () => {
   beforeEach(() => {
     for (const k of ENV_KEYS) delete process.env[k];

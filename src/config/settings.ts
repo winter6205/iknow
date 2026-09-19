@@ -160,6 +160,12 @@ export interface IknowSettingsLlm {
   /** 模型路由 ID（9router）；非空串字符串才合法。 */
   model?: string;
   /**
+   * ADR-0113: lite 模型路由 ID，与 `model` 同形（`provider/model`），共用
+   * `providers[]` 查表；目前唯一消费方是会话标题生成。非空串字符串才合法，
+   * 非法值丢弃；缺席 / 配置错误不 fail-fast（装配见 env.ts `resolveLlmLite`）。
+   */
+  liteModel?: string;
+  /**
    * 模型 fallback 路由 ID 列表（用户自配，代码不预置任何默认）。
    * 非空串字符串数组才合法（至少 1 项）；非法 → 丢弃该字段。
    */
@@ -923,46 +929,60 @@ function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
     out.thinkingEffort = raw.thinkingEffort;
   }
   if (isNonEmptyString(raw.model)) out.model = raw.model.trim();
+  if (isNonEmptyString(raw.liteModel)) out.liteModel = raw.liteModel.trim();
   if (isNonEmptyStringArray(raw.fallback)) {
     out.fallback = raw.fallback.map((s) => s.trim());
   }
   if (isApiKeyOrPlaceholder(raw.apiKey)) out.apiKey = raw.apiKey.trim();
   // ADR-0093 / #1010: providers 数组解析——非数组 / 空数组 → 字段缺席。
   applyLlmProviders(out, raw.providers);
-  if (isPlainObject(raw.compress)) {
-    const compress: IknowSettingsLlmCompress = {};
-    if (isPositiveFinite(raw.compress.contextWindow)) {
-      compress.contextWindow = raw.compress.contextWindow;
-    }
-    if (isPositiveFinite(raw.compress.thresholdTokens)) {
-      compress.thresholdTokens = raw.compress.thresholdTokens;
-    }
-    if (
-      compress.contextWindow !== undefined ||
-      compress.thresholdTokens !== undefined
-    ) {
-      out.compress = compress;
-    }
-  }
+  applyLlmCompress(out, raw.compress);
   if (isEmptyLlm(out)) return undefined;
   return out;
 }
 
-/** ADR-0093: IknowSettingsLlm 全字段 undefined 判定 —— 整段 drop 时使用。 */
+/**
+ * parseLlm 的 compress 子层校验（自 parseLlm 等价搬移，控复杂度）：
+ * 非普通对象 → 不产出；普通对象但字段全部非法 → 不产出 compress（丢弃该字段）。
+ */
+function applyLlmCompress(out: IknowSettingsLlm, raw: unknown): void {
+  if (!isPlainObject(raw)) return;
+  const compress: IknowSettingsLlmCompress = {};
+  if (isPositiveFinite(raw.contextWindow)) {
+    compress.contextWindow = raw.contextWindow;
+  }
+  if (isPositiveFinite(raw.thresholdTokens)) {
+    compress.thresholdTokens = raw.thresholdTokens;
+  }
+  if (
+    compress.contextWindow !== undefined ||
+    compress.thresholdTokens !== undefined
+  ) {
+    out.compress = compress;
+  }
+}
+
+/**
+ * ADR-0093: IknowSettingsLlm 全字段 undefined 判定 —— 整段 drop 时使用。
+ * 字面量 Record<keyof …> 提供编译期穷举：类型新增字段必须同步登记，
+ * 否则 typecheck 报错（与原 && 链同语义，防漂移由编译器强制）。
+ */
 function isEmptyLlm(out: IknowSettingsLlm): boolean {
-  return (
-    out.maxTurns === undefined &&
-    out.timeoutMs === undefined &&
-    out.idleTimeoutMs === undefined &&
-    out.hardCapMs === undefined &&
-    out.compress === undefined &&
-    out.thinking === undefined &&
-    out.thinkingEffort === undefined &&
-    out.model === undefined &&
-    out.fallback === undefined &&
-    out.apiKey === undefined &&
-    out.providers === undefined
-  );
+  const fieldPresence: Record<keyof IknowSettingsLlm, boolean> = {
+    maxTurns: out.maxTurns !== undefined,
+    timeoutMs: out.timeoutMs !== undefined,
+    idleTimeoutMs: out.idleTimeoutMs !== undefined,
+    hardCapMs: out.hardCapMs !== undefined,
+    compress: out.compress !== undefined,
+    thinking: out.thinking !== undefined,
+    thinkingEffort: out.thinkingEffort !== undefined,
+    model: out.model !== undefined,
+    liteModel: out.liteModel !== undefined,
+    fallback: out.fallback !== undefined,
+    apiKey: out.apiKey !== undefined,
+    providers: out.providers !== undefined,
+  };
+  return !Object.values(fieldPresence).some(Boolean);
 }
 
 /**
@@ -1471,6 +1491,21 @@ function mergeHooks(
 }
 
 /**
+ * mergeLlm 的单字段 project > user 优先级（自 mergeLlm 逐字段 if/else-if 对
+ * 等价搬移，控复杂度）：project 有值取 project，否则 user 有值取 user，
+ * 两者皆无 → 字段缺席。
+ */
+function pickLlmField<K extends keyof IknowSettingsLlm>(
+  out: IknowSettingsLlm,
+  key: K,
+  project: IknowSettingsLlm | undefined,
+  user: IknowSettingsLlm | undefined
+): void {
+  if (project?.[key] !== undefined) out[key] = project[key];
+  else if (user?.[key] !== undefined) out[key] = user[key];
+}
+
+/**
  * 逐层合并 llm：project 字段优先，未覆盖的 user 字段保留。
  * ADR-0084: `llm` 是用户层键 —— 生产路径上 `project` 恒为空对象（见
  * `mergeSettings`），实际只有 user 值生效。
@@ -1481,32 +1516,18 @@ function mergeLlm(
 ): IknowSettingsLlm | undefined {
   if (!user && !project) return undefined;
   const out: IknowSettingsLlm = {};
-  if (project?.maxTurns !== undefined) out.maxTurns = project.maxTurns;
-  else if (user?.maxTurns !== undefined) out.maxTurns = user.maxTurns;
-  // #358 T1: per-call LLM 调用竞速上限（per-field project > user）。
-  if (project?.timeoutMs !== undefined) out.timeoutMs = project.timeoutMs;
-  else if (user?.timeoutMs !== undefined) out.timeoutMs = user.timeoutMs;
-  // #742 T1: 流式臂双钟同款 per-field project > user。
-  if (project?.idleTimeoutMs !== undefined) {
-    out.idleTimeoutMs = project.idleTimeoutMs;
-  } else if (user?.idleTimeoutMs !== undefined) {
-    out.idleTimeoutMs = user.idleTimeoutMs;
-  }
-  if (project?.hardCapMs !== undefined) out.hardCapMs = project.hardCapMs;
-  else if (user?.hardCapMs !== undefined) out.hardCapMs = user.hardCapMs;
-  if (project?.thinking !== undefined) out.thinking = project.thinking;
-  else if (user?.thinking !== undefined) out.thinking = user.thinking;
-  if (project?.thinkingEffort !== undefined) {
-    out.thinkingEffort = project.thinkingEffort;
-  } else if (user?.thinkingEffort !== undefined) {
-    out.thinkingEffort = user.thinkingEffort;
-  }
-  if (project?.model !== undefined) out.model = project.model;
-  else if (user?.model !== undefined) out.model = user.model;
-  if (project?.fallback !== undefined) out.fallback = project.fallback;
-  else if (user?.fallback !== undefined) out.fallback = user.fallback;
-  if (project?.apiKey !== undefined) out.apiKey = project.apiKey;
-  else if (user?.apiKey !== undefined) out.apiKey = user.apiKey;
+  // #358 T1 / #742 T1: per-field project > user（含 timeoutMs / 流式臂双钟），
+  // 统一走 pickLlmField；liteModel 为 ADR-0113 可选键。
+  pickLlmField(out, "maxTurns", project, user);
+  pickLlmField(out, "timeoutMs", project, user);
+  pickLlmField(out, "idleTimeoutMs", project, user);
+  pickLlmField(out, "hardCapMs", project, user);
+  pickLlmField(out, "thinking", project, user);
+  pickLlmField(out, "thinkingEffort", project, user);
+  pickLlmField(out, "model", project, user);
+  pickLlmField(out, "liteModel", project, user);
+  pickLlmField(out, "fallback", project, user);
+  pickLlmField(out, "apiKey", project, user);
   // ADR-0093 / #1010: providers 用户层键 → 直接 user 透传。
   mergeLlmProviders(out, user);
   if (project?.compress !== undefined || user?.compress !== undefined) {

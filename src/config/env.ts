@@ -30,6 +30,20 @@ import {
   WORKSPACE_ROOT_ENV_KEY,
 } from "./workspace-root.js";
 
+/**
+ * ADR-0113: `settings.llm.liteModel` 命中 providers 注册表后的路由结果 ——
+ * transport 三元组（baseUrl/apiKey/headers）与主模型同源同链路。
+ * `apiKey` 在成功路径必有值（`resolveLlmTransport` 对缺失密钥抛 typed 错，
+ * lite 侧捕获后整键丢弃，故这里不会出现 undefined）。
+ */
+export interface LiteModelEnv {
+  /** 路由 ID（settings.llm.liteModel trim 后字面值，原样透传给消费方）。 */
+  model: string;
+  baseUrl: string;
+  apiKey: string;
+  headers?: Readonly<Record<string, string>>;
+}
+
 export interface LlmEnv {
   baseUrl: string;
   /**
@@ -37,6 +51,13 @@ export interface LlmEnv {
    * env loader fail-fast 保证有值（settings 唯一来源，无任何代码默认）。
    */
   model: string;
+  /**
+   * ADR-0113: `settings.llm.liteModel` 的路由结果（provider/model 同形，
+   * 走同一 `providers[]` 查表）。未配置 / 非法形态 / provider 未注册 /
+   * provider 密钥未设 → **键缺席**（headers 同款「缺席=不产出」纪律），
+   * 不 fail-fast；主模型装配不受影响。
+   */
+  liteModel?: LiteModelEnv;
   /**
    * ADR-0093 provider 命中时的额外请求头（settings.llm.providers[i].headers）。
    * 只有 `provider/model` 命中注册表且该 provider 配了非空 headers 才有值；
@@ -374,7 +395,7 @@ function resolveLlmProvider(
  */
 interface ResolvedLlmTransport {
   readonly baseUrl: string;
-  readonly apiKey: string | undefined;
+  readonly apiKey: string;
   readonly headers: Readonly<Record<string, string>> | undefined;
 }
 
@@ -411,6 +432,45 @@ function resolveLlmTransport(
     // 保持 undefined，不写 `{}`（spec 行为契约 5）。
     headers: provider.headers,
   };
+}
+
+/**
+ * ADR-0113: `settings.llm.liteModel` → 路由结果。与主模型共用
+ * `resolveLlmTransport`（同一 providers[] 查表），但任何配置非法态
+ * （缺席 / 空串 / 无 slash / provider 未注册 / provider 密钥未设）一律
+ * 静默丢弃返回 undefined —— 标题生成是增强，lite 不得 fail-fast 主会话；
+ * 主模型的 SC4 抛错路径不经此处。
+ */
+function resolveLlmLite(
+  mergedSettings: IknowSettings
+): LiteModelEnv | undefined {
+  const route = mergedSettings.llm?.liteModel?.trim();
+  if (!route) return undefined;
+  let transport: ResolvedLlmTransport;
+  try {
+    transport = resolveLlmTransport(mergedSettings, route);
+  } catch (err) {
+    if (isLlmProviderConfigError(err)) return undefined;
+    throw err;
+  }
+  return {
+    model: route,
+    baseUrl: transport.baseUrl,
+    apiKey: transport.apiKey,
+    // headers 缺席 → 不产出键（与 LlmEnv.headers 同款纪律）。
+    ...(transport.headers === undefined ? {} : { headers: transport.headers }),
+  };
+}
+
+/**
+ * ADR-0113: lite 路由结果存在才产出 `{ liteModel }`，缺席产出 `{}`（不写键）。
+ * 从 loadIknowEnv 的等价搬移 —— 条件 spread 收进单一职责 helper，
+ * 控制 loadIknowEnv 复杂度不再随可选臂增长。
+ */
+function spreadLiteModel(
+  liteModel: LiteModelEnv | undefined
+): Pick<LlmEnv, "liteModel"> {
+  return liteModel === undefined ? {} : { liteModel };
 }
 
 export interface WebEnv {
@@ -901,6 +961,9 @@ export function loadIknowEnv(
   // provider 三元组；未命中 / providers 缺席 → typed 抛。apiKeyEnv 缺席 → SC4。
   const transport = resolveLlmTransport(mergedSettings, modelRaw);
 
+  // ADR-0113: lite 路由结果（可选键）——非法态静默缺席，不影响上面的主模型 fail-fast。
+  const liteModel = resolveLlmLite(mergedSettings);
+
   return {
     llm: {
       baseUrl: transport.baseUrl,
@@ -909,6 +972,7 @@ export function loadIknowEnv(
       ...(transport.headers === undefined
         ? {}
         : { headers: transport.headers }),
+      ...spreadLiteModel(liteModel),
       fallback: mergedSettings.llm?.fallback ?? [],
       // settings-model-extension：apiKey 来源 = settings.llm.apiKey（字面或 ${VAR}
       // 占位符）经 expandPlaceholders 解析；未配 / 解析不到 → undefined（消费点守卫）。

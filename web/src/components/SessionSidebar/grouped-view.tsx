@@ -39,11 +39,10 @@ import type { SessionListItem } from "../../api/types";
 import {
   groupSessionsByWorkspace,
   isCurrentSession,
-  truncateExcerpt,
+  sidebarLineText,
   type WorkspaceGroup,
 } from "../../lib/session-list";
 import { CollapsedStateStore } from "../../lib/workspace-groups";
-import { shortId } from "../../lib/format";
 import { traceDeepLink } from "../../lib/trace-entry";
 import { FOCUS_RING } from "../../lib/ui";
 import { plusButtonLabel, shouldShowPlusButton } from "../../lib/sidebar-plus";
@@ -268,11 +267,9 @@ function SessionItem({
   onSelect: (id: string) => void;
 }) {
   const active = isCurrentSession(session.conversation_id, currentId);
-  // If the session has no captured final text, fall back to the conversation
-  // id prefix rather than the literal "(无消息)" — looks cleaner in the list.
-  const excerpt =
-    truncateExcerpt(session.lastFinalText, 32) ||
-    shortId(session.conversation_id, 8);
+  // 主行 = header title（空/缺席时 sidebarLineText 走 id 前缀空态，
+  // 不回落 lastFinalText — spec session-list-title）。
+  const excerpt = sidebarLineText(session);
   return (
     <li className="group relative">
       <button

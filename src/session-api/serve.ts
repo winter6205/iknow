@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 import { join } from "node:path";
 import { SessionHub, type SessionHubOptions } from "./hub.js";
+import { liteTitleGeneratorOptions } from "./title-generation.js";
 import { listenSessionServer, type ListeningServer } from "./http.js";
 import { SessionStore } from "./store/index.js";
 import { loadIknowEnv } from "../config/env.js";
@@ -222,6 +223,8 @@ export async function startSessionServe(
     ...(worktreeExclusive ? { worktreeExclusive: true } : {}),
     // live-graph-phase1 T1:账本 host 注入 hub。
     liveGraphLedger,
+    // ADR-0113 T4: lite 槽在场才注入标题生成器（缺席 → 键不出现，hub 永不触发）。
+    ...liteTitleGeneratorOptions({ envProvider: () => envLoader.get() }),
     ...opts?.hubOptions,
     // review-fix (M1 / H1) + T6:启动 bind root 透传 —— bash fence / identity
     // 与稳定 productRoot（MCP config）同源；rebind 不改 productRoot。

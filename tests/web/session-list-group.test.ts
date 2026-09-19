@@ -26,6 +26,7 @@ function item(opts: {
     conversation_id: opts.id,
     updatedAt: opts.updatedAt,
     lastFinalText: "",
+    title: "",
     workspaceRoot: opts.workspaceRoot,
   };
 }

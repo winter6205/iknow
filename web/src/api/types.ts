@@ -84,6 +84,9 @@ export type SessionListItem = {
   readonly conversation_id: string;
   readonly updatedAt: string;
   readonly lastFinalText: string;
+  /** UI title excerpt — sidebar 主行字段（spec session-list-title）。
+   *  服务端 SessionListEntry 一直返回；空串 = 尚无标题，渲染走空态。 */
+  readonly title: string;
   readonly workspaceRoot?: string;
   /** Additive binding health from the session store. */
   readonly bindingStatus?: "unbound" | "invalid" | "bound";

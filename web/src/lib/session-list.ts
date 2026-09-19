@@ -5,6 +5,7 @@
  */
 import type { SessionListItem } from "../api/types";
 import { basename } from "../components/WorkspaceChip";
+import { shortId } from "./format";
 
 /**
  * Return a new array sorted by updatedAt descending (most recent first).
@@ -31,6 +32,22 @@ export function truncateExcerpt(text: string, max: number): string {
   const collapsed = text.replace(/\s+/g, " ").trim();
   if (collapsed.length <= max) return collapsed;
   return `${collapsed.slice(0, max).trimEnd()}…`;
+}
+
+/** Sidebar 主行截断宽度（视觉契约：单行不换行，32 字符 + 省略号）。 */
+const SIDEBAR_LINE_MAX = 32;
+
+/**
+ * 侧栏单条会话的主行文案（spec session-list-title Does #1/#6）：
+ * 主文案 = header `title`（截断折叠）；title 空 / 纯空白时
+ * 走既有空态（conversation id 前缀），**绝不**回退到 lastFinalText —
+ * lastFinalText 只作搜索/过滤命中面，不显示为主行。
+ */
+export function sidebarLineText(session: SessionListItem): string {
+  return (
+    truncateExcerpt(session.title, SIDEBAR_LINE_MAX) ||
+    shortId(session.conversation_id, 8)
+  );
 }
 
 /**

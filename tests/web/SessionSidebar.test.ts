@@ -10,6 +10,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   isCurrentSession,
+  sidebarLineText,
   sortSessionsByUpdatedDesc,
   truncateExcerpt,
 } from "../../web/src/lib/session-list.ts";
@@ -19,9 +20,10 @@ function item(opts: {
   readonly id: string;
   readonly updatedAt: string;
   readonly lastFinalText?: string;
+  readonly title?: string;
 }): SessionListItem {
-  const { id, updatedAt, lastFinalText = "" } = opts;
-  return { conversation_id: id, updatedAt, lastFinalText };
+  const { id, updatedAt, lastFinalText = "", title = "" } = opts;
+  return { conversation_id: id, updatedAt, lastFinalText, title };
 }
 
 describe("sortSessionsByUpdatedDesc", () => {
@@ -144,5 +146,53 @@ describe("isCurrentSession", () => {
 
   it("is false for undefined inputs", () => {
     assert.equal(isCurrentSession(undefined, undefined), false);
+  });
+});
+
+// spec session-list-title Does #1/#6 + Does not「把 lastFinalText 显示为主行」:
+// 侧栏主行 = header title（截断 32）；title 空/纯空白走既有空态（conversation id
+// 前缀），绝不回退到 lastFinalText。
+describe("sidebarLineText", () => {
+  it("有 title 时主行 = title", () => {
+    const s = item({
+      id: "conv-abc-123",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+      title: "重构会话列表标题",
+      lastFinalText: "已完成重构",
+    });
+    assert.equal(sidebarLineText(s), "重构会话列表标题");
+  });
+
+  it("长 title 折叠空白并截断到 32 字符加省略号", () => {
+    const s = item({
+      id: "conv-abc-123",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+      title: "a   b\n\t" + "x".repeat(40),
+    });
+    const out = sidebarLineText(s);
+    assert.ok(out.endsWith("…"));
+    assert.equal(out.length, 33); // 32 + ellipsis
+  });
+
+  it("title 为空串时走空态（id 前缀），不 fallback 到 lastFinalText", () => {
+    const s = item({
+      id: "conv-abc-1234567890",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+      title: "",
+      lastFinalText: "助手的最终回复内容",
+    });
+    const out = sidebarLineText(s);
+    assert.equal(out, "conv-abc…");
+    assert.ok(!out.includes("助手的最终回复内容"));
+  });
+
+  it("title 为纯空白时同样走空态", () => {
+    const s = item({
+      id: "conv-abc-1234567890",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+      title: "   \n\t ",
+      lastFinalText: "some answer",
+    });
+    assert.equal(sidebarLineText(s), "conv-abc…");
   });
 });

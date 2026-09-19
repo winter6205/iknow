@@ -34,12 +34,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CURRENT_SCHEMA_VERSION,
+  latestTitleText,
   messageEventId,
   parseSessionJsonl,
   projectSessionLog,
   resolveConversationDir,
   resolveProjectSessionDir,
   SESSION_JSONL_EXT,
+  serializeSessionLog,
   SessionStore,
   sessionFileToJsonl,
 } from "../../../src/session-api/store/index.ts";
@@ -1156,5 +1158,163 @@ describe("SessionStore.list/delete with both on-disk shapes", () => {
     );
     await store.delete("jl-del-legacy");
     await assert.rejects(stat(jsonPath("jl-del-legacy")));
+  });
+});
+
+// -- title events (session-list-title T3 / ADR-0113) --------------------------
+
+describe("title event records (ADR-0113: 标题事件权威, header title 缓存)", () => {
+  const headerLine = (title: string): string =>
+    JSON.stringify({
+      type: "session",
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      conversation_id: "t3-pure",
+      title,
+      cwd: "/tmp/test",
+      sanitized_at: "2026-01-01T00:00:00.000Z",
+      jsonMode: false,
+      turnCount: 1,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      checkpoints: [],
+    });
+  const eventLine = (
+    id: string,
+    parent: string | null,
+    message: AnthropicNativeMessage
+  ): string => JSON.stringify({ type: "message", id, parent, message });
+  const headLine = (id: string | null): string =>
+    JSON.stringify({ type: "head", id });
+  const titleLine = (text: string): string =>
+    JSON.stringify({ type: "title", text });
+
+  it("parseSessionJsonl 接受 title 记录并进 records 尾部（不影响 head 链）", () => {
+    const raw = [
+      headerLine("占位"),
+      eventLine("e0", null, userMsg("q")),
+      headLine("e0"),
+      titleLine("事件标题"),
+      headLine("e0"),
+    ].join("\n");
+    const log = parseSessionJsonl(`${raw}\n`);
+    assert.equal(log.head, "e0");
+    assert.equal(log.events.length, 1);
+    assert.equal(latestTitleText(log), "事件标题");
+    // records 原样保留 title 记录（serializeSessionLog round-trip 依赖）。
+    const kinds = log.records.map((r) => r.type);
+    assert.deepEqual(kinds, ["message", "head", "title", "head"]);
+  });
+
+  it("latestTitleText: 无 title 事件 → null; 多事件取文件序最后一条", () => {
+    const noTitle = parseSessionJsonl(
+      [
+        headerLine("占位"),
+        eventLine("e0", null, userMsg("q")),
+        headLine("e0"),
+      ].join("\n") + "\n"
+    );
+    assert.equal(latestTitleText(noTitle), null);
+    const twoTitles = parseSessionJsonl(
+      [
+        headerLine("占位"),
+        eventLine("e0", null, userMsg("q")),
+        headLine("e0"),
+        titleLine("第一版"),
+        titleLine("第二版"),
+      ].join("\n") + "\n"
+    );
+    assert.equal(latestTitleText(twoTitles), "第二版");
+  });
+
+  it("title 记录 text 非 string → schema_invalid field type（未知形状拒绝纪律）", () => {
+    assert.throws(
+      () =>
+        parseSessionJsonl(
+          [
+            headerLine("占位"),
+            eventLine("e0", null, userMsg("q")),
+            headLine("e0"),
+            JSON.stringify({ type: "title", text: 42 }),
+          ].join("\n") + "\n"
+        ),
+      (err: unknown) => {
+        const e = err as { kind: string; field: string };
+        return e.kind === "schema_invalid" && e.field === "type";
+      }
+    );
+  });
+
+  it("projectSessionLog: title 事件覆盖 header title 且不进 messages", () => {
+    const log = parseSessionJsonl(
+      [
+        headerLine("旧缓存"),
+        eventLine("e0", null, userMsg("q")),
+        eventLine("e1", "e0", assistantMsg("a")),
+        headLine("e1"),
+        titleLine("事件标题"),
+      ].join("\n") + "\n"
+    );
+    const file = projectSessionLog(log);
+    assert.equal(file.title, "事件标题");
+    assert.equal(file.messages.length, 2);
+    // 事件正文绝不混入 transcript 消息。
+    assert.ok(
+      !JSON.stringify(file.messages).includes("事件标题"),
+      "title 事件不得投影进 messages"
+    );
+  });
+
+  it("projectSessionLog: 无 title 事件 → header title 原样（旧文件行为不变）", () => {
+    const file = sampleFile({
+      id: "codec-empty",
+      overrides: { title: "占位标题", messages: [userMsg("q")] },
+    });
+    const projected = projectSessionLog(
+      parseSessionJsonl(sessionFileToJsonl(file))
+    );
+    assert.equal(projected.title, "占位标题");
+    assert.deepEqual(projected, file);
+  });
+
+  it("serializeSessionLog 原样透传 title 记录（字节稳定）", () => {
+    const records = [
+      {
+        type: "message",
+        id: "e0",
+        parent: null,
+        message: userMsg("q"),
+      },
+      { type: "head", id: "e0" },
+      { type: "title", text: "事件标题" },
+    ] as const;
+    const text = serializeSessionLog(
+      {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversation_id: "t3-ser",
+        title: "缓存",
+        cwd: "/tmp/test",
+        sanitized_at: "2026-01-01T00:00:00.000Z",
+        jsonMode: false,
+        turnCount: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        checkpoints: [],
+      },
+      records as unknown as Parameters<typeof serializeSessionLog>[1]
+    );
+    assert.equal(
+      text.split("\n")[3],
+      JSON.stringify({ type: "title", text: "事件标题" })
+    );
+  });
+
+  it("title 行作为损坏前一行时 drop-trailing-corrupt-line 仍生效", () => {
+    const raw = [
+      headerLine("占位"),
+      eventLine("e0", null, userMsg("q")),
+      headLine("e0"),
+      titleLine("事件标题"),
+      "{bad",
+    ].join("\n");
+    const log = parseSessionJsonl(`${raw}\n`);
+    assert.equal(latestTitleText(log), "事件标题");
   });
 });

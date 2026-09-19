@@ -375,6 +375,47 @@ describe("loadIknowSettings — settings 文件机制 (#353)", () => {
     assert.deepEqual(loadIknowSettings({ home, cwd }), {});
   });
 
+  it("user 写 llm.liteModel → 读到该路由 ID（trim 后透传，ADR-0113）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { model: "m", liteModel: "  test/lite  " } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { model: "m", liteModel: "test/lite" },
+    });
+  });
+
+  it("llm.liteModel 空串 / 全空白 / 非 string → 丢弃该字段，其余字段保留", async () => {
+    for (const bad of ["", "   ", 123, true, null, []]) {
+      const { home, cwd } = await makeSettings(
+        { llm: { model: "m", liteModel: bad } },
+        {}
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        { llm: { model: "m" } },
+        `liteModel=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("project 写 llm.liteModel → 随 llm 段丢弃，不覆盖 user（ADR-0084/0109）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { model: "y", liteModel: "test/user-lite" } },
+      { llm: { liteModel: "test/project-lite" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { model: "y", liteModel: "test/user-lite" },
+    });
+  });
+
+  it("user/project 都没 liteModel → 返回对象无 liteModel 字段", async () => {
+    const { home, cwd } = await makeSettings({ llm: { model: "m" } }, {});
+    const s = loadIknowSettings({ home, cwd });
+    assert.deepEqual(s, { llm: { model: "m" } });
+    assert.equal("liteModel" in s.llm!, false);
+  });
+
   it("user/project 都没 model → 返回对象无 model 字段（maxTurns 取 user）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { maxTurns: 5 } },
