@@ -33,28 +33,45 @@ export const storeWorkerTranscriptIo: WorkerTranscriptIOFactory = (loc) => {
       field: "transcript_path",
     } satisfies SessionStoreError;
   }
+  // WHY: appendWorkerTranscript 是 read-modify-write（读全文件 → 算 next
+  // event id → appendFile）且 store 层刻意无锁（架构纪律：锁在装配边界）。
+  // worker loop 的 flushPrefix 可被并发回调重入，交错时两批读到同一 head →
+  // 重复 event id → schema_invalid → worker exit 2。装配点在此串行化
+  // （同主会话 hub serialize queue 对 appendEvents 的保护）。reject 后链
+  // 继续（前序错误只回给该调用方，不卡死队列）。
+  let queue: Promise<unknown> = Promise.resolve();
+  const serialize = <T>(task: () => Promise<T>): Promise<T> => {
+    const run = queue.then(task, task);
+    queue = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  };
   return {
-    loadMessages: async () => {
-      try {
-        const file = await loadWorkerTranscript({
-          transcriptPath: loc.transcriptPath,
-          taskId: loc.taskId,
-        });
-        return { status: "present", messages: file.messages };
-      } catch (err) {
-        if ((err as { kind?: string }).kind === "not_found") {
-          return { status: "absent" };
+    loadMessages: () =>
+      serialize(async () => {
+        try {
+          const file = await loadWorkerTranscript({
+            transcriptPath: loc.transcriptPath,
+            taskId: loc.taskId,
+          });
+          return { status: "present", messages: file.messages };
+        } catch (err) {
+          if ((err as { kind?: string }).kind === "not_found") {
+            return { status: "absent" };
+          }
+          throw err;
         }
-        throw err;
-      }
-    },
-    appendMessages: async (events, thinkingMs) => {
-      await appendWorkerTranscript({
-        location: { transcriptPath: loc.transcriptPath, taskId: loc.taskId },
-        events,
-        ...(thinkingMs !== undefined ? { thinkingMs } : {}),
-        cwd: loc.cwd,
-      });
-    },
+      }),
+    appendMessages: (events, thinkingMs) =>
+      serialize(async () => {
+        await appendWorkerTranscript({
+          location: { transcriptPath: loc.transcriptPath, taskId: loc.taskId },
+          events,
+          ...(thinkingMs !== undefined ? { thinkingMs } : {}),
+          cwd: loc.cwd,
+        });
+      }),
   };
 };

@@ -2086,17 +2086,28 @@ async function executeWaveAndCommit(opts: {
     () => undefined
   );
   let next = 0;
+  // WHY: onSettled 回调会并发重入 flushPrefix,而 worker transcript 路径没有
+  // hub serialize queue 兜底 → 重叠 commit 产生重复 event id。门闩让重入方
+  // 直接返回;持有方 while 每轮重查 slots[next] 会顺带冲掉新到的 slot,
+  // 已退出循环的残量由 executeAll 返回后的最终 flush 兜底。
+  let flushing = false;
   const flushPrefix = async (): Promise<void> => {
-    while (next < slots.length && slots[next] !== undefined) {
-      const result = slots[next]!;
-      next += 1;
-      opts.results.push(result);
-      const encoded = opts.deps.adapter.encodeToolResults([result]);
-      opts.blocks.push(...encoded);
-      await commitMessagesOrThrow(opts.deps, [
-        ...opts.pendingInjected.take(),
-        { role: "user", content: encoded },
-      ]);
+    if (flushing) return;
+    flushing = true;
+    try {
+      while (next < slots.length && slots[next] !== undefined) {
+        const result = slots[next]!;
+        next += 1;
+        opts.results.push(result);
+        const encoded = opts.deps.adapter.encodeToolResults([result]);
+        opts.blocks.push(...encoded);
+        await commitMessagesOrThrow(opts.deps, [
+          ...opts.pendingInjected.take(),
+          { role: "user", content: encoded },
+        ]);
+      }
+    } finally {
+      flushing = false;
     }
   };
   const waveResults = await opts.deps.executor.executeAll(

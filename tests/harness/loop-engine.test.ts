@@ -4242,4 +4242,90 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
       `expected tr_a commit (${trACommit}) before slow settle (${slowSettle})`
     );
   });
+
+  it("并发 onSettled 重入: commit 不重叠、批次不丢 (worker transcript race 回归)", async () => {
+    // 复现 worker 崩溃根因: 同一 assistant 消息的并行 tool_use 让两个 onSettled
+    // 回调各自触发 flushPrefix, 在 commit 的 await 处交叠 → 并发 read-modify-write.
+    // 主会话有 hub serialize queue 兜底, worker transcript 没有 → 重复 event id.
+    const tools = [makeSafeTool("s_a"), makeSafeTool("s_b")];
+    const reg = createRegistry(tools);
+    const executor = Object.freeze({
+      executeAll: async (
+        batch: ReadonlyArray<
+          import("../../src/harness/tools/types.ts").ToolCall
+        >,
+        _signal?: AbortSignal,
+        _timeoutMs?: number,
+        _conversationId?: string,
+        onSettled?: (
+          result: ToolExecutionResult,
+          index: number
+        ) => void | Promise<void>
+      ): Promise<ReadonlyArray<ToolExecutionResult>> => {
+        const results: ToolExecutionResult[] = batch.map((c) => ({
+          kind: "ok" as const,
+          toolUseId: c.id,
+          payload: [{ type: "text" as const, text: `executed:${c.name}` }],
+        }));
+        // 故意交错: 回调 A 挂起在 commit 的 await 时让回调 B settle。
+        const pA = onSettled?.(results[0]!, 0);
+        await new Promise((r) => setTimeout(r, 10));
+        const pB = onSettled?.(results[1]!, 1);
+        await Promise.all([pA, pB]);
+        return results;
+      },
+    });
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "a", name: "s_a", input: {} },
+            { id: "b", name: "s_b", input: {} },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const committedToolResults: string[] = [];
+    const commitMessages = async (
+      messages: ReadonlyArray<AnthropicNativeMessage>
+    ): Promise<void> => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      const ids = messages
+        .flatMap((m) => m.content.filter((b) => b.type === "tool_result"))
+        .map(
+          (b) => (b as { type: "tool_result"; tool_use_id: string }).tool_use_id
+        );
+      if (ids.length > 0) {
+        // tool_result commit 挂起 20ms, 给交错窗口。
+        await new Promise((r) => setTimeout(r, 20));
+        committedToolResults.push(...ids);
+      }
+      inFlight -= 1;
+    };
+    const { result } = await run("go", {
+      adapter: model,
+      executor,
+      registry: reg,
+      maxTurns: 5,
+      commitMessages,
+    });
+    assert.equal(result.stopReason, "completed");
+    // 核心不变式: commit 永不并发重叠。
+    assert.equal(
+      maxInFlight,
+      1,
+      `expected serial commits, got maxInFlight=${maxInFlight}`
+    );
+    // 不丢批次且按 tool_use 顺序。
+    assert.deepEqual(committedToolResults, ["a", "b"]);
+  });
 });

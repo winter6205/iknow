@@ -9,13 +9,17 @@
  * kind 原样上抛（损坏的账不得被读成无账）。
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "vitest";
 
 import { storeWorkerTranscriptIo } from "../../src/cli/worker-transcript.ts";
-import type { SessionStoreError } from "../../src/session-api/store/index.ts";
+import {
+  parseSessionJsonl,
+  type SessionStoreError,
+} from "../../src/session-api/store/index.ts";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.ts";
 
 function user(text: string): AnthropicNativeMessage {
@@ -91,5 +95,70 @@ describe("storeWorkerTranscriptIo — 合法绝对路径形态", () => {
     await io.appendMessages([user("hello")]);
     const loaded = await io.loadMessages();
     assert.equal(loaded.status, "present");
+  });
+});
+
+describe("storeWorkerTranscriptIo — 并发 append 串行化", () => {
+  /**
+   * 钉住的不变式：worker loop 的 flushPrefix 可被并发回调重入，同一实例的
+   * appendMessages/loadMessages 必须按调用顺序串行执行 —— store 的
+   * appendWorkerTranscript 是 read-modify-write 且无内部锁（架构纪律：锁在
+   * 装配边界，不在 store）。交错实现下两批读到同一 head → 重复 event id →
+   * parseSessionJsonl 抛 schema_invalid，或首批交错 → 先批被覆盖丢失。
+   */
+  it("不 await 地并发发起多批 append，全部完成后账上无重复 id、链合法、批次按入队顺序齐全", async () => {
+    const transcriptPath = join(dir, "t-race", "t-race.jsonl");
+    const io = storeWorkerTranscriptIo({
+      transcriptPath,
+      taskId: "t-race",
+      cwd: dir,
+    });
+    const batches: string[][] = [
+      ["a1", "a2"],
+      ["b1"],
+      ["c1", "c2"],
+    ];
+    const inFlight = batches.map((texts) =>
+      io.appendMessages(texts.map(user))
+    );
+    await Promise.all(inFlight);
+
+    const raw = await readFile(transcriptPath, "utf8");
+    const log = parseSessionJsonl(raw); // 重复 id / 断链会在此抛 schema_invalid
+    const ids = log.events.map((e) => e.id);
+    assert.equal(new Set(ids).size, ids.length, "event id 不得重复");
+    let parent: string | null = null;
+    for (const ev of log.events) {
+      assert.equal(ev.parent, parent, "事件链必须按文件序衔接");
+      parent = ev.id;
+    }
+    assert.equal(log.head, parent, "生效 head 指向链尾");
+    const texts = log.events.flatMap((e) =>
+      e.message.content
+        .filter((b): b is { type: "text"; text: string } => b.type === "text")
+        .map((b) => b.text)
+    );
+    assert.deepEqual(texts, batches.flat(), "三批事件齐全且按入队顺序");
+  });
+
+  it("某批 append 失败后队列不卡死：后续 append/load 仍按序执行", async () => {
+    const transcriptPath = join(dir, "t-recover", "t-recover.jsonl");
+    const io = storeWorkerTranscriptIo({
+      transcriptPath,
+      taskId: "t-recover",
+      cwd: dir,
+    });
+    // 往路径里塞一本无法解析的坏账：append / load 都必须 typed reject
+    // （store 折叠后的 schema_invalid），且队列不被前序 reject 卡死。
+    mkdirSync(join(dir, "t-recover"), { recursive: true });
+    await writeFile(transcriptPath, "not-a-jsonl-line\n", "utf8");
+    await assert.rejects(
+      () => io.appendMessages([user("bad")]),
+      (err: unknown) => (err as { kind?: string }).kind === "schema_invalid"
+    );
+    await assert.rejects(
+      () => io.loadMessages(),
+      (err: unknown) => (err as { kind?: string }).kind === "schema_invalid"
+    );
   });
 });
