@@ -186,10 +186,19 @@ describe("buildHarnessEngine — egress 装配接线 (ADR-0097 / T7)", () => {
   });
 
   it("settings.isolation.network 缺省 → factory 恒返 preset-only policy（断言反转：旧行为 undefined；ADR-0104 生命周期落差闭合）", async () => {
+    // T3 臂③ / spec SC5 生命周期表闭合钉（invariant 3 显式引用，不另立
+    // 文字例外）：ADR-0097 §生命周期表「允许集非空或批准流可问才起」+
+    // ADR-0104 §Consequences「副作用（正向）」——旧实现在无 network 段时
+    // 工厂返 undefined ⇒ session 不起 ⇒ 首见批准门「死在入口」。本测试是
+    // 该旧行为的回归反转记录：非 `undefined` 断言 + 下方 askApproval 在岗
+    // 接线共同钉死落差已闭合，不得回退。
     await buildChat({});
     const calls = engineBashCallOpts();
     expect(calls.length).toBeGreaterThan(0);
     const factory = calls[0]!.egressPolicyFactory as () => unknown;
+    // ADR-0097 §生命周期表条件一「允许集非空」经 preset 恒真 ⇒ 生产装配
+    // 路径不可达 undefined 分支（spec invariant 3）。
+    expect(factory()).not.toBeUndefined();
     const policy = factory() as {
       allowedDomains: string[];
       deniedDomains: string[];

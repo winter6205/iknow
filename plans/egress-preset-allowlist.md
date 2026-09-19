@@ -38,7 +38,7 @@ OVERALL: PASS — hand to writing-plans
    - **Inherits:** spec invariant 3（本条以测试显式引用 ADR-0097 §生命周期表「允许集非空或批准流可问才起」+ ADR-0104 §Consequences「副作用（正向）」闭合实现落差，不另立文字例外）、invariant 5（fail-closed 面不缩：批准门非交互拒、代理死 fail-closed、地址守卫正交逐字继承）、T3（三臂验收）、SC5
    - **Surface:** `src/harness/sandbox/egress`（批准缝，复用注入 filter 驱动 seam、不真起代理）、`build-engine-egress-wiring.test.ts`（既有装配接线测试面）
    - **Acceptance:** 三条单测——①干净装配（无 settings 网络段）交互前台访问档外域触发首见批准门（ask 一次），批准 → 本会话放行，拒绝 → `denied-by-user` 违例回灌 `execution_failed`；②干净装配非交互面（background / verify）档外域 → `no-approval-inlet` fail-closed，违例回灌有名字（区别于旧「session 不起、静默 DNS 失败」）；③wiring 断言 `settings` 无 `isolation.network` 时 `egressPolicyFactory()` 返回非 `undefined`；「批准门死在入口」旧行为有回归反转记录；`npm test` 绿
-   - Status: [ ] pending
+   - Status: [x]
    - [blocks: T1, T2]
 
 4. **probe 物理面回归 + 不加真网 probe 的裁定维持** — tag: `[implementation]`
