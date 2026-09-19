@@ -30,7 +30,7 @@ OVERALL: PASS（rev 2，返工点已按审查方清单落实）
    - **Inherits:** spec T1「沙箱内侧半桥补齐（本 spec 的前提性欠账）」：fence 命令链前导 `socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:<httpSocket>` + `trap kill EXIT` 形态、代理 env 三键改指沙箱固定端口、`HTTP_PROXY` URL 嵌 auth userinfo；invariant 7 逐字「所有新增 bind 落 egress bind 段、新增 env 落 `--clearenv` 后 `--setenv` 段；改 `bwrap.ts` 前后必跑 `npm run probe:sandbox` 全类别全绿」；清偿对象 = O1「注入的代理 URL 不含 userinfo——沙箱内 CONNECT 必 407」、O2「正探针目标形态须避开 loopback 字面目标」、O3「全仓 src 无 `TCP-LISTEN`/`UNIX-CONNECT` 装配……本 spec 的 T1 即清偿」。
    - **Surface:** `src/harness/sandbox/egress`（session.ts 的 `buildProxyEnv` / `assembleFenceSpec` / `EgressFenceSpec` 扩字段）、`src/harness/sandbox/bwrap.ts`（`sandboxLocalPort` 语义改「沙箱内固定监听号」）、`src/harness/aci/tools/bash.ts`（前台命令链前导）、`scripts/sandbox-probe.ts`（egress「socat present」分支重写）。
    - **Acceptance:** 单测经注入 `spawn` / `socketPathFactory` seam 钉 spec 形状 + 前导脚本字符串（不断言真监听）；probe「socat present」分支改为经真链路的端到端——正探针以**非 loopback** 可寻址 fixture 落地并拿到响应（O2 纪律），实现期实测结论钉进测试注释；无 egress 时命令链 byte-identical 回归基线（零改动）；`npm test` 绿 + `npm run probe:sandbox` 全类别全绿。本子弹改 `session.ts`，与 credential-sentinel plan 的 `session.ts` 子弹串行落地，合并冲突主会话裁。
-   - Status: [x] done（实现机无 socat → probe present 分支 Not run，absent 分支全绿；单测 + typecheck 绿）
+   - Status: [x] done（实现机无 socat → probe present 分支 Not run，absent 分支全绿；单测 + typecheck 绿）0107 换装：本条 socat 半桥形态与 present/absent 分支已被自带 node 中继替换，probe 真端到端全绿
 
 2. **宿主 SOCKS 面 + 第二桥（可整体裁剪）** — tag: `[implementation]`
    - **裁剪判定点（assumption 2，待人类确认，本子弹唯一门）:** 若裁定「git 不用的面先不建」，本子弹**整颗摘除**——git 路径不依赖它（子弹 3 走 HTTP CONNECT），摘除后子弹 5/7 的 SOCKS 相关断言按 spec SC5 条件形态自动退化为单桥不判红；未裁定前本子弹不进实施。
@@ -44,7 +44,7 @@ OVERALL: PASS（rev 2，返工点已按审查方清单落实）
    - **Inherits:** spec T3 钉死注入串（Surface 引用）；invariant 3 逐字「egress session 缺席（任何原因）时 `GIT_SSH_COMMAND` 不注入——git-over-SSH 与全部非代理感知程序同态 fail-closed（纯断网），杜绝『有注入无桥』的半开形态」；invariant 4「代理 env（三键 + `GIT_SSH_COMMAND` + NO_PROXY 族）只在 `buildProxyEnv`/`assembleFenceSpec` 一处构造……三消费面零复制」；assumption 4（注入形态必含 `-F /dev/null`，本子弹含围栏内复验探针）。
    - **Surface:** `src/harness/sandbox/egress/session.ts`（注入经 `spec.env` → `mergedEnv`）；`env-isolation.ts` 面为**确认不改**（`GIT_SSH_COMMAND` 不入 `BASE_ENV_WHITELIST`，宿主值恒不进围栏）；TUI pty 实测面。
    - **Acceptance:** 注入串形态 = `ssh -F /dev/null -o ControlMaster=no -o ControlPath=none -o ProxyCommand='socat - PROXY:127.0.0.1:%h:%p,proxyport=3128,proxyauth=<user>:<token>'`（spec 冻结形态），单测逐字符断言（token 位以注入 seam 固定值）；围栏内复验 `ssh -G github.com` 不报 `Bad owner or permissions`；session 缺席时该 env 在围栏 env 中不存在；围栏内用户命令显式内联 `GIT_SSH_COMMAND=...` 时后者胜（shell 语义，不加防御）；`npm test` 绿 + TUI 实测 `echo $GIT_SSH_COMMAND` 屏上值可见。
-   - Status: [x] done（逐字符注入串 + token 同源 + 缺席不注入 + 白名单钉 + 后者胜注释全落；围栏内 `ssh -G github.com` 复验与 TUI `echo $GIT_SSH_COMMAND` deferred 到子弹 7——实现机无 socat 起不了真围栏，仓内无先例可自动化）
+   - Status: [x] done（逐字符注入串 + token 同源 + 缺席不注入 + 白名单钉 + 后者胜注释全落；围栏内 `ssh -G github.com` 复验与 TUI `echo $GIT_SSH_COMMAND` deferred 到子弹 7——实现机无 socat 起不了真围栏，仓内无先例可自动化）0107 换装：注入串换新冻结形态（ProxyCommand=自带 CONNECT 件，token 走 env 不进 argv），spec §T3 同步修订
    - [blocks: T1]
 
 4. **SSH 域判定语义钉子（preset 零改动）** — tag: `[implementation]`
@@ -58,7 +58,7 @@ OVERALL: PASS（rev 2，返工点已按审查方清单落实）
    - **Inherits:** spec T5/SC5 条件形态照抄：「stale socket 清理与 dispose 幂等测试覆盖**当前在场的全部桥**——HTTP 桥（`iknow-egress-*`）恒在，SOCKS 桥（`iknow-egress-socks-*`）在 T2 在场时才进『双文件启动前清理 + 亡桥归类 infra』断言集；T2 被裁剪（assumption 2）时本断言退化为单桥，不得因缺 SOCKS socket 而红」；invariant 4（沙箱纪律 env 轴）；F1（yolo / 工厂 `undefined` / `SocatUnavailableError` → 零注入）；0097 §dispose 契约逐字沿用。
    - **Surface:** `src/harness/background/manager.ts`、`src/harness/verify/sandbox-run.ts`、`src/harness/aci/tools/bash.ts` 三消费面（内层监听前导脚本在各自命令装配点接线，若已收敛公共 helper 则一处改）。
    - **Acceptance:** wiring 测试（`build-engine-egress-wiring.test.ts` 形制）断言三形态 spec 字段集相等；双桥 / 单桥断言依子弹 2 在场与否条件化（不写死）；yolo / 工厂 undefined / SocatUnavailableError 三路径各断言 `GIT_SSH_COMMAND` 与内层前导均缺席；per-task `settle()` / verify 单例释放通道零新代码只加断言；`npm test` 绿。本子弹触 `session.ts` 相关字段消费面时与 credential-sentinel 子弹串行落地，合并冲突主会话裁。
-   - Status: [x] done（三形态消费同一 spec：background spawn factory 补 egress 缝 + 内层前导、verify 命令包装补前导、bash.ts 前台 T1 已在；wiring/三路径/生命周期测试落 `tests/harness/egress-three-form-lifecycle.test.ts`，在场桥断言从 spawn 现场派生不写死桥数）
+   - Status: [x] done（三形态消费同一 spec：background spawn factory 补 egress 缝 + 内层前导、verify 命令包装补前导、bash.ts 前台 T1 已在；wiring/三路径/生命周期测试落 `tests/harness/egress-three-form-lifecycle.test.ts`，在场桥断言从 spawn 现场派生不写死桥数）0107 换装：SocatUnavailableError 三路径断言换为 EgressRelayUnavailableError；在场资源断言改 unix listen 现场（宿主无桥进程）
    - [blocks: T1, T3]
 
 6. **凭据可用性分支** — tag: `[implementation]`
@@ -72,5 +72,5 @@ OVERALL: PASS（rev 2，返工点已按审查方清单落实）
    - **Inherits:** spec T7 新增 2 类探针与 SC1/SC2 判据（「probe 正探针 exit 0」/「沙箱内命令失败 **且** 框架 drain 到 `{host, port:22, reason:"not-in-allowlist"}`，tool_result 呈 `execution_failed` 含 `[network_denied]` 前缀（测试走 bash 真实返回形状，禁直接构造 typed failure——前 spec 假绿纪律）」）；assumption 9 逐字「真实 `git push` e2e 仅对**操作员自有远端 + 非破坏性 ref**……默认 skip、显式环境变量开启」；SC6「`npm run probe:sandbox` 既有全类别 + 新 2 类全绿；`npm test` 全绿（含反转的 `egress-proxy-behavior` / `egress-assembly` / wiring 系列迁移）」；SC8（LSP 零新增错误 + argv 顺序纪律回归）；OQ3（类别数 11→13 的数字表述漂移登记主会话裁，**不碰 `.qoder/rules/`**）。
    - **Surface:** `scripts/sandbox-probe.ts`、TUI pty 实测面（`mcp__aiterm__pty_*`）、`archive/` 真 push e2e（显式 skip 纪律同 `tests-real-llm`）。
    - **Acceptance:** `npm run probe:sandbox` 既有全类别 + 新 2 类全绿——正探针 = 放行 fixture 域 :22 握手到 banner（非 loopback 字面目标，O2）、违例探针 = 未放行域 :22 沙箱内失败且 sink 记 `not-in-allowlist`(port=22)，两信号可区分；TUI 三条操作屏上证据齐（`git push --dry-run` 到认证层 / 未放行域 `[network_denied]` 含 `host:22` / `echo $GIT_SSH_COMMAND` = 子弹 3 钉死形态）；真 push e2e 开启环境 exit 0、默认环境显式 skip + Not run；SOCKS 探针断言仅当子弹 2 在场时纳入；`npm test` 全绿且改动文件 `get_diagnostics_for_file` 零新增错误。
-   - Status: [ ] pending
+   - Status: [ ] pending 0107 换装：probe 侧 socat present/absent 两分支已退役，egress 类别改经自带中继真端到端（本机三档全绿）；TUI pty 实测与真 push e2e 面仍待做
    - [blocks: T1, T3, T5, T6]

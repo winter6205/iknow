@@ -286,88 +286,60 @@ function setupWorktreeFixture(): {
 }
 
 // ---------------------------------------------------------------------------
-// Egress seam 检查分支（socat 缺失 / 在场 两路）。
-// 抽成命名 helper 是为了让 buildChecks 的箭头函数本身落在 complexity ≤ 10
-// (S5 硬门)。两路都钉 SC2 + SC13:egress seam 是出网唯一通路。
+// Egress seam 检查（ADR-0107 换装：中继 = 本仓自带 node 件，无宿主装包面）。
+// 单一类别内钉两路：①中继依赖缺席 = fail-closed typed error（seam 注入，
+// 边界语义）；②生产解析成功 → 经**真内层中继**端到端正探针（O2/O3 纪律
+// 保留：正探针目标 = 非 loopback 可寻址 fixture）。socat present/absent
+// 两分支随 ADR-0107 退役。
 // ---------------------------------------------------------------------------
 
-/**
- * socat 缺失分支:验证 `createEgressSession` 抛 `SocatUnavailableError`
- * (fail-closed typed error,非静默降级)。这是「边界语义正确」的硬证 —
- * 即使宿主没有 socat,探针仍能验证 fence 的网络闭合不依赖 socat 在场。
- */
-async function runEgressSocatAbsentCheck(): Promise<ProbeResult> {
-  const { createEgressSession, SocatUnavailableError } =
+async function runEgressSeamCheck(profile: ProbeProfile): Promise<ProbeResult> {
+  const { createEgressSession, EgressRelayUnavailableError } =
     await import("../src/harness/sandbox/egress/session.js");
+  const { resolveEgressRelay } =
+    await import("../src/harness/sandbox/egress/relay-assets.js");
+
+  // ① 边界路：relayResolver 注入 undefined → 必须抛产品依赖 typed error。
   try {
     await createEgressSession({
       policy: {
         allowedDomains: [],
         deniedDomains: [],
-        commandLabel: "probe-socat-absent",
+        commandLabel: "probe-relay-absent",
       },
-      socatCommand: "socat",
+      relayResolver: () => undefined,
     });
     return {
       ok: false,
       detail:
-        "socat missing branch FAILED: createEgressSession returned without throwing",
+        "relay-absent boundary FAILED: createEgressSession returned without throwing",
     };
   } catch (err) {
-    if (err instanceof SocatUnavailableError) {
+    if (!(err instanceof EgressRelayUnavailableError)) {
       return {
-        ok: true,
-        detail: `socat absent branch: fail-closed typed error raised (${err.socatCommand})`,
+        ok: false,
+        detail: `relay-absent boundary: wrong error type: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
       };
     }
+  }
+
+  // ② 端到端路：生产解析（node + vendor/egress-relay 自带资产）解析不到 =
+  // 本安装坏了 → fail-loud（换装后这是硬前提，不再有「宿主缺包 → 降级报绿」
+  // 的 absent 分支）。
+  if (resolveEgressRelay() === undefined) {
     return {
       ok: false,
-      detail: `socat missing branch: wrong error type: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      detail: "bundled egress relay unresolvable on this install (node or vendor/egress-relay missing)",
     };
   }
-}
-
-/**
- * socat 在场分支:经**真内层桥**的端到端正探针（egress-ssh-bridge T1 重写,
- * 清偿 O2/O3——旧形态 `curl http://127.0.0.1:<port>` 在 NO_PROXY 含
- * `127.0.0.1` 时绕代理直连、netns 内必败,从未真正走通过这条缝;且旧代码
- * 只把 HTTP_PROXY 交给沙箱,而代理配了 proxyAuthToken、注入 URL 无
- * userinfo → 必 407,即 O1）。
- *
- * 现形态:
- *   1. 正探针 target = 宿主**非 loopback** NIC IPv4 上的真 listener
- *      （O2:loopback 字面会命中 NO_PROXY;地址守卫对「allowlist 上的 IP
- *      字面」不再复核——upstream resolved-address-guard.js:14-18 "An IP
- *      literal on the allowlist is an explicit choice and is never
- *      re-judged here"——所以私网 NIC 地址字面进 allowedDomains 即可达）;
- *   2. fence 命令链前导 = `session.spec.innerBridgeScript`（沙箱内 socat
- *      TCP-LISTEN:3128 → unix socket + trap 收尾）——与 bash.ts 前台装配
- *      同款拼接;
- *   3. curl 读注入的 `HTTP_PROXY=http://iknow:<token>@127.0.0.1:3128`
- *      （auth userinfo,O1 闭环）→ 内层桥 → 宿主代理 → filter 放行 →
- *      dial NIC listener → 200 body 匹配才算绿;
- *   4. 附加 assert:sink drain 为空（放行路径不得留违例）。
- *
- * 实测状态注记:本探针 present 分支要求宿主装有 socat。起草/实现环境
- * （WSL,`which socat` = 无）走的是 absent 分支——present 分支的形态以
- * 依赖包 linux-sandbox-utils.js `buildSandboxCommand` 实证为据,首次
- * 真机全绿由带 socat 的操作机承担（specs/egress-ssh-bridge.md O3:
- * 「本机无 socat → absent 分支报绿掩盖缺口」正是本次重写要消除的假绿面;
- * 无 NIC 地址时本分支 fail-loud 不报绿）。
- */
-async function runEgressSocatPresentCheck(
-  profile: ProbeProfile
-): Promise<ProbeResult> {
-  const { createEgressSession } =
-    await import("../src/harness/sandbox/egress/session.js");
   const targetIp = pickNonLoopbackNicIPv4();
   if (targetIp === null) {
     return {
       ok: false,
       detail:
-        "socat present branch: no non-loopback NIC IPv4 for the positive fixture (O2: loopback literal bypasses proxy via NO_PROXY)",
+        "egress e2e: no non-loopback NIC IPv4 for the positive fixture (O2: loopback literal bypasses proxy via NO_PROXY)",
     };
   }
   const listener = await startProbeListener(targetIp);
@@ -378,12 +350,11 @@ async function runEgressSocatPresentCheck(
       policy: {
         allowedDomains: [`${targetIp}:${port}`],
         deniedDomains: [],
-        commandLabel: "probe-socat-present",
+        commandLabel: "probe-relay-e2e",
       },
-      socatCommand: "socat",
     });
-    // 与 bash.ts 前台装配同款:前导内层桥 + 用户命令同一 `bash -c` payload。
-    // --retry-connrefused 消化前导 socat 与 curl 之间的启动竞态。
+    // 与 bash.ts 前台装配同款:前导内层中继 + 用户命令同一 `bash -c` payload。
+    // --retry-connrefused 消化前导中继与 curl 之间的启动竞态。
     const userCommand = `curl -sS --max-time 8 --retry 3 --retry-connrefused http://${targetIp}:${port} | grep -q probe-listener-ok`;
     const fence = createBwrapFence({
       command: "bash",
@@ -409,10 +380,7 @@ async function runEgressSocatPresentCheck(
     child.stderr.on("data", (c: Buffer) => {
       stderr += c.toString("utf8");
     });
-    const exitCode: number | null = await new Promise((resolve) => {
-      child.on("close", (code) => resolve(code));
-      child.on("error", () => resolve(null));
-    });
+    const exitCode: number | null = await newPromiseResolveChild(child);
     const violations = session.violationSink.drain();
     return {
       ok: exitCode === 0 && violations.length === 0,
@@ -421,7 +389,7 @@ async function runEgressSocatPresentCheck(
   } catch (err) {
     return {
       ok: false,
-      detail: `socat present branch threw: ${
+      detail: `egress e2e threw: ${
         err instanceof Error ? err.message : String(err)
       }`,
     };
@@ -431,6 +399,14 @@ async function runEgressSocatPresentCheck(
     }
     listener.stop();
   }
+}
+
+/** 等 fence 子进程 close（exit code 或 spawn error = null）。 */
+function newPromiseResolveChild(child: ReturnType<typeof spawn>): Promise<number | null> {
+  return new Promise((resolve) => {
+    child.on("close", (code) => resolve(code));
+    child.on("error", () => resolve(null));
+  });
 }
 
 /** 取宿主第一个非 internal 的 IPv4 NIC 地址;无 → null（fail-loud 交给调用方）。 */
@@ -662,24 +638,14 @@ function buildChecks(
       return { ok, detail: rest.join("|").trim() };
     },
   });
-  // SC2 + SC13 (ADR-0097 §T4 egress 缝):socat 在场 → 起 egress session,
-  // 沙箱内 curl 经代理打宿主 NIC listener;允许集含 IP 字面量 → 命中并回包。
-  // socat 缺失 → `createEgressSession` 抛 `SocatUnavailableError`(fail-closed)
-  // —— 这条路径同样报绿,证明「边界语义正确」(非静默降级)。两类分支都钉住
-  // SC1 + SC13 的不变式。
+  // SC2 + SC13 (ADR-0097 §T4 egress 缝 / ADR-0107 换装):自带中继在场 →
+  // 沙箱内 curl 经内层中继 + 宿主代理打 NIC listener;允许集含 IP 字面量 →
+  // 命中并回包。中继依赖缺席(seam 注入)→ `createEgressSession` 抛
+  // `EgressRelayUnavailableError`(fail-closed 产品依赖指引,非装包文案)。
+  // 两路同钉 SC1 + SC13;类别数不变(socat present/absent 两分支合一)。
   push("both", {
-    name: "egress seam reachable (socat present = full integration; absent = fail-closed)",
-    run: async () => {
-      // 动态 import 避免探针启动期就加载 egress 模块,且能拿到 typed 错误
-      // 的实际类(socat 缺失分支必依赖此处的 import)。
-      const { defaultProbeSocat } =
-        await import("../src/harness/sandbox/egress/session.js");
-      const socatCommand = "socat";
-      if (!defaultProbeSocat(socatCommand)) {
-        return runEgressSocatAbsentCheck();
-      }
-      return runEgressSocatPresentCheck(profile);
-    },
+    name: "egress seam reachable (bundled relay e2e; relay deps absent = fail-closed)",
+    run: () => runEgressSeamCheck(profile),
   });
 
   // —— git 全局配置读（宿主 home 可见，§9.2 #7 语义在全局档仍成立；
