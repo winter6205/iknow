@@ -389,6 +389,11 @@ function shellSingleQuote(value: string): string {
  * pipe，多连接并发由 net.Server 天然支持）。1080/SOCKS 段已被操作员裁定
  * 摘出当前分支（plans 子弹 2）。前导与用户命令以 `\n` 拼接进同一
  * `bash -c` payload（消费面 bash.ts；background / verify 接线归子弹 5）。
+ *
+ * 末尾就绪轮询的 why：T5 TUI 实测发现 fence 内 `bridge &` 后立即跑用户命令
+ * 时 node 中继冷启动竞态会让裸 curl 首发 ECONNREFUSED exit 7（sleep 1 后即
+ * 直通）；轮询 `/dev/tcp` 消化之，与 scripts/sandbox-probe.ts 的端口等待同
+ * 款先例。探测耗尽不拦截 payload（fail-closed 语义不变）。
  */
 export function buildInnerBridgeScript(
   nodePath: string,
@@ -400,6 +405,8 @@ export function buildInnerBridgeScript(
   return [
     `${parts[0]} ${parts[1]} ${parts[2]} ${sandboxPort} >/dev/null 2>&1 &`,
     `trap "kill %1 2>/dev/null; exit" EXIT`,
+    `for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/${sandboxPort}) ` +
+      '2>/dev/null && break; sleep 0.1; done',
   ].join("\n");
 }
 
