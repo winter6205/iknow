@@ -16,7 +16,7 @@
  *     对凭据零分支代码（policy.credentials 恒等透传）；
  *   - background 挂 settle() 的释放通道（dispose 生产实现覆盖
  *     registry/store 已由 T3 session 测试钉）；
- *   - SocatUnavailableError 路径：凭据层随 session 缺席（缝未被调 /
+ *   - EgressRelayUnavailableError 路径：凭据层随 session 缺席（缝未被调 /
  *     egress spec 不落 fence），fence env 无假值键，infra 文案不变
  *     （不新增冒充）；
  *   - `createEgressSession` 缝扩展保持加性形状：三面对 opts 的期望只有
@@ -93,7 +93,7 @@ import {
 } from "../../src/harness/sandbox/egress/credential-assembly.js";
 import type { MitmCA } from "../../src/harness/sandbox/egress/upstream.js";
 import { createEgressPolicyFactory } from "../../src/harness/sandbox/egress/assembly.js";
-import { SocatUnavailableError } from "../../src/harness/sandbox/egress/session.js";
+import { EgressRelayUnavailableError } from "../../src/harness/sandbox/egress/session.js";
 import type {
   EgressPolicyInput,
   EgressSession,
@@ -149,6 +149,9 @@ function mintedSpec(): EgressSession["spec"] {
   return {
     unixSocketPath: "/tmp/iknow-t6-stub.sock",
     sandboxLocalPort: 18080,
+    innerBridgeScript:
+      "/test-root/bin/node /test-root/vendor/egress-relay/egress-tcp-relay.mjs '/tmp/iknow-t6-stub.sock' 18080",
+    relayAssetsDir: "/test-root/vendor/egress-relay",
     env: {
       HTTP_PROXY: "http://127.0.0.1:18080",
       HTTPS_PROXY: "http://127.0.0.1:18080",
@@ -310,22 +313,25 @@ describe("T6 前台 bash 装配点", () => {
     );
   });
 
-  it("SocatUnavailableError → 凭据层随 session 缺席（fence 无 egress / env 无假值键）+ infra 文案不变不新增冒充", async () => {
+  it("EgressRelayUnavailableError → 凭据层随 session 缺席（fence 无 egress / env 无假值键）+ infra 文案不变不新增冒充", async () => {
     const seam = vi.fn(async () => {
-      throw new SocatUnavailableError("socat", "install it");
+      throw new EgressRelayUnavailableError(
+        "relay assets missing",
+        "repair the iknow install root"
+      );
     });
     const tool = createBashTool(scratchDir(), {
       egressPolicyFactory: () => ({
         allowedDomains: ["github.com"],
         deniedDomains: [],
-        commandLabel: "bash:t6-socat",
+        commandLabel: "bash:t6-relay",
         credentials: rosterFixture(),
       }),
       createEgressSessionFactory: seam as never,
     });
     await expect(
-      tool.handler({ command: "true" }, { conversationId: "conv-t6-socat" })
-    ).rejects.toThrow(/socat/);
+      tool.handler({ command: "true" }, { conversationId: "conv-t6-relay" })
+    ).rejects.toThrow(/egress relay unavailable/);
     assert.equal(h.fenceOpts.length, 1);
     assert.equal("egress" in h.fenceOpts[0]!, false);
     const env = h.fenceOpts[0]!.env as Record<string, string>;
@@ -423,16 +429,19 @@ describe("T6 verify 装配点（模块级单例）", () => {
     void session;
   });
 
-  it("SocatUnavailableError（session 起不来）→ 凭据层缺席：fenceEnv 无假值键、fence 无 egress 段、既有 catch 语义不变", async () => {
+  it("EgressRelayUnavailableError（session 起不来）→ 凭据层缺席：fenceEnv 无假值键、fence 无 egress 段、既有 catch 语义不变", async () => {
     h.egressImpl = async () => {
-      throw new SocatUnavailableError("socat", "install it");
+      throw new EgressRelayUnavailableError(
+        "relay assets missing",
+        "repair the iknow install root"
+      );
     };
     const runVerify = makeDefaultRunVerify({
       cwd: scratchDir(),
       egressPolicy: {
         allowedDomains: ["example.com"],
         deniedDomains: [],
-        commandLabel: "verify:t6-socat",
+        commandLabel: "verify:t6-relay",
         credentials: rosterFixture(),
       },
     });

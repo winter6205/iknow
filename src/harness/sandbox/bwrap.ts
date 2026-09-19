@@ -60,9 +60,11 @@ export interface BwrapFenceOptions {
    *
    * 缺席 → 不发射 unix socket `--bind`、不注入代理 env（`--unshare-net`
    * 仍恒在,无 host-net 直连分支）。fence 装配期注入 socket bind 与
-   * 代理 env（HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY），沙箱
-   * 内命令链（host bwrap 内部拉起的 socat）转 unix socket 回本地端口，
-   * 见 `src/harness/sandbox/egress/session.ts`。
+   * 代理 env（HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY——URL 嵌
+   * auth userinfo,指沙箱**固定监听号** `SANDBOX_HTTP_PROXY_PORT`=3128,
+   * 不再是宿主 OS 分配端口），沙箱内侧半桥 = 命令链前导的
+   * `spec.innerBridgeScript`（bash.ts 前台接线；自带 node 中继把 127.0.0.1:3128
+   * 转回该 socket → 宿主代理），见 `src/harness/sandbox/egress/session.ts`。
    *
    * **mount 序**：socket bind 落在 workspaceMounts 之后、cwdReadonly 之前
    * —— 与既有 mount 块同段（last-mount-wins）。`--setenv` 走既有
@@ -189,11 +191,13 @@ function baseArgs(
     // 之前(mount 序在此处是最末一段可写 bind)。
     ...workspaceMounts,
     // ADR-0097 / T4 + credential-sentinel T2（invariant 9）:出口代理缝 unix
-    // socket `--bind` 与凭据围栏 binds（masked store / trust bundle /
-    // masked-file 盖真路径 / deny 盖 /dev/null）—— 在 workspaceMounts
-    // 之后、cwdReadonly 之前;socket 段 source=dest 同值 (host 路径 → 沙箱内
-    // 同路径)。沙箱内 socat (在 fence 内部命令链拉起) 读该 socket → 把流量
-    // 转回 本地 TCP 端口 → 走 HTTP_PROXY 出口。
+    // socket `--bind`、自带中继资产 ro-bind、凭据围栏 binds（masked store /
+    // trust bundle / masked-file 盖真路径 / deny 盖 /dev/null）与条件
+    // SSH agent socket bind —— 全在 workspaceMounts 之后、cwdReadonly 之前;
+    // socket 段 source=dest 同值 (host 路径 → 沙箱内同路径)。
+    // 沙箱内侧半桥 (命令链前导的自带 node 中继 TCP-LISTEN:3128 → unix
+    // socket CONNECT,见 egress/session.ts buildInnerBridgeScript) 连该
+    // socket → 把 127.0.0.1:3128 的流量转回宿主代理(ADR-0107:无 socat)。
     ...egressBind,
     // cwdReadonly: EROFS override after the `/` bind (与工作区档三层正交,
     // 即使工作区档三层叠加,cwdReadonly 仍在最末;后者按字面是 mount 序最末)。
@@ -207,11 +211,12 @@ function baseArgs(
 }
 
 /**
- * ADR-0097 / T4:egress 缝 unix socket `--bind` argv 段 +
- * egress-credential-sentinel T2 / invariant 9:凭据围栏 bind 表
- * （masked-file 盖 bind、masked store 目录、trust bundle、F3 deny 的
- * `/dev/null` 盖 bind）—— 全部落本段，位置不变：workspaceMounts 之后、
- * cwdReadonly 之前，last-mount-wins 盖过根 bind / home ro-bind 下的真路径。
+ * ADR-0097 / T4 + egress-ssh-bridge T6 + egress-credential-sentinel T2
+ * （invariant 9）：egress 缝 unix socket `--bind` argv 段、ADR-0107 自带
+ * 中继资产 ro-bind、凭据围栏 bind 表（masked-file 盖 bind、masked store
+ * 目录、trust bundle、F3 deny 的 `/dev/null` 盖 bind）与条件 SSH agent
+ * socket bind —— 全部落本段，位置不变：workspaceMounts 之后、cwdReadonly
+ * 之前，last-mount-wins 盖过根 bind / home ro-bind 下的真路径。
  *
  * `unixSocketPath` 为空 / 缺席 → 不发射 socket 三元组（`--unshare-net`
  * 仍恒在,无 host-net 直连分支）。`binds` 缺席 / 空 → 不发射额外 bind。
@@ -220,16 +225,41 @@ function baseArgs(
  * 「工作区写白名单的省略是收紧方向」,本函数语义是「出口代理缝的省略是
  * fail-closed 但**不**回退到 host-net」—— 两者不混)。
  * 凭据 binds 恒 `--ro-bind`(read-only:store 目录 INVARIANT = 围栏内不可写)。
+ *
+ * ADR-0107 自带中继资产:`spec.relayAssetsDir` 在场(恒在场,session 必带)
+ * 于 egress socket bind 之后追加 `--ro-bind <dir> <dir>`(只读 —— 围栏内
+ * 中继脚本路径可解析,资产不可被围栏内命令改写)。
+ *
+ * T6 条件凭据缝:`spec.sshAuthSockPath` 在场(开态)才在同一 egress bind 段
+ * **追加**最后一条 `--bind <agentSocket> <agentSocket>`(src=dest 同值,沙箱内
+ * 路径不变,配 `spec.env` 的 `SSH_AUTH_SOCK` 同值引用);关态字段缺席 → 本
+ * 段与 T4 逐字节一致(除中继 ro-bind 段)。全部 bind 都保持在 workspaceMounts
+ * 之后、cwdReadonly 之前 —— 段内相对次序 = egress socket 先、中继资产次之、
+ * 凭据围栏 binds 第三、agent socket 后(观测者读序即装配因果序:缝是主体,
+ * 中继是缝的自带件,凭据 binds 是缝上的数据面,agent socket 是条件凭据缝)。
  */
 function egressBindArgs(spec: EgressFenceSpec | undefined): string[] {
   if (spec === undefined) return [];
+  const { unixSocketPath, relayAssetsDir, sshAuthSockPath, binds } = spec;
   const out: string[] = [];
-  const { unixSocketPath, binds } = spec;
   if (typeof unixSocketPath === "string" && unixSocketPath.length > 0) {
     out.push("--bind", unixSocketPath, unixSocketPath);
   }
+  // ADR-0107 自带中继资产:`--ro-bind <dir> <dir>`(src=dest 同值,独立
+  // argv 项)。围栏内 `innerBridgeScript` / ProxyCommand 引用的脚本路径
+  // 由此可解析 —— 不依赖安装根恰好落在默认可见子树。只读:围栏内中继
+  // 资产永不可被围栏内命令改写。
+  if (typeof relayAssetsDir === "string" && relayAssetsDir.length > 0) {
+    out.push("--ro-bind", relayAssetsDir, relayAssetsDir);
+  }
+  // credential-sentinel T2 / invariant 9:凭据围栏 binds（masked store /
+  // trust bundle / masked-file 盖真路径 / deny 盖 /dev/null）恒 `--ro-bind`，
+  // 逐条发独立 argv 项。
   for (const bind of binds ?? []) {
     out.push("--ro-bind", bind.src, bind.dest);
+  }
+  if (typeof sshAuthSockPath === "string" && sshAuthSockPath.length > 0) {
+    out.push("--bind", sshAuthSockPath, sshAuthSockPath);
   }
   return out;
 }

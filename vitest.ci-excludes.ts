@@ -102,11 +102,14 @@ export const CI_EXCLUDES: readonly string[] = [
   // ADR-0097 egress 缝：批准 gate / typed failure / 代理接线三条 bash 面
   // 与 build-engine 装配源头接线测试都经 createBashTool → requireBwrap。
   "tests/harness/aci/bash-egress-approval.test.ts",
+  "tests/harness/aci/bash-egress-inner-bridge.test.ts",
   "tests/harness/aci/bash-egress-typed-failure.test.ts",
   "tests/harness/aci/bash-egress.test.ts",
   "tests/harness/build-engine-egress-wiring.test.ts",
   // ADR-0105 sentinel：三装配点入口 wiring 经 fence 装配 → requireBwrap。
   "tests/harness/egress-entry-wiring.test.ts",
+  // ADR-0107 ssh 桥：三形态生命周期 wiring 经 fence 装配 → requireBwrap。
+  "tests/harness/egress-three-form-lifecycle.test.ts",
   "tests/harness/aci/registry-workspace-root.test.ts",
   "tests/harness/aci/tools/d9-description-guard.test.ts",
   "tests/harness/aci/tools/registry.test.ts",

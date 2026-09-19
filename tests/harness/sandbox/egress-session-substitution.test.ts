@@ -17,14 +17,14 @@
  *     进 violationSink 旁路诊断档，与域判定拒绝 / infra 故障四类信号互不
  *     混淆（SC6 方向断言：真值绝不入违例记录）；
  *   - dispose：registry.clear() + MaskedFileStore.dispose() + trust bundle
- *     临时件清理；正常 / 异常（spawn 失败先起代理）同一释放通道；幂等。
+ *     临时件清理；正常 / 异常（unix socket listen 失败先起代理）同一释放
+ *     通道；幂等。
  *
  * 注入策略沿用 egress-session-credential.test.ts：createHttpProxyServer
  * seam 捕获 options 不真起代理；onCredentialMint seam 观测 session 私有
  * registry / store。fixture 全为生成假凭据，真值不经测试面。
  */
 import assert from "node:assert/strict";
-import { spawn as realSpawn } from "node:child_process";
 import { createServer } from "node:http";
 import {
   existsSync,
@@ -38,15 +38,16 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, it } from "vitest";
 import {
   createEgressSession,
-  SocatUnavailableError,
   type EgressCredentialResources,
   type EgressSession,
   type EgressSessionOptions,
 } from "../../../src/harness/sandbox/egress/session.js";
+import type { EgressRelayPaths } from "../../../src/harness/sandbox/egress/relay-assets.js";
 import {
   createEgressViolationSink,
   renderEgressViolations,
 } from "../../../src/harness/sandbox/egress/violations.js";
+import { createEgressApprovalGate } from "../../../src/harness/sandbox/egress/approval.js";
 import type { EgressCredentialRoster } from "../../../src/harness/sandbox/egress/credential-assembly.js";
 import type {
   HttpProxyServerOptions,
@@ -71,14 +72,15 @@ afterEach(async () => {
     rmSync(p, { recursive: true, force: true });
 });
 
-function fakeSocatProc(pid: number | undefined) {
-  const proc = realSpawn("/bin/true", ["--version"], { stdio: "ignore" });
-  try {
-    proc.kill("SIGKILL");
-  } catch {
-    /* */
-  }
-  return Object.assign(proc, { pid });
+/** 固定假中继路径集 —— 单测不查宿主存在性（resolver seam 直给）。 */
+function fakeRelay(): EgressRelayPaths {
+  const relayDir = "/test-root/vendor/egress-relay";
+  return {
+    nodePath: "/test-root/bin/node",
+    relayDir,
+    bridgeScriptPath: join(relayDir, "egress-tcp-relay.mjs"),
+    connectScriptPath: join(relayDir, "egress-http-connect.mjs"),
+  };
 }
 
 interface Fixture {
@@ -170,8 +172,7 @@ async function openSession(
         ? { approvalGate: extra.approvalGate }
         : {}),
     },
-    probeSocat: () => true,
-    spawn: (() => fakeSocatProc(4242)) as typeof realSpawn,
+    relayResolver: fakeRelay,
     socketPathFactory: (id) => join(scratchDir(), `egress-${id}.sock`),
     createHttpProxyServer: (opts) => {
       captured = opts;
@@ -250,7 +251,9 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
     const { opts, cred } = await openSession(f, {
       // 非空基底（allowlist-empty 档不配批准语义）；evil.example.com 为首见新域。
       allowedDomains: ["api.example.com"],
-      approvalGate: { askIfUnknown: async () => true },
+      approvalGate: createEgressApprovalGate({
+        askApproval: async () => true,
+      }),
     });
     const fake = cred.mint.envVars.GH_TOKEN ?? "";
 
@@ -415,8 +418,7 @@ describe("T3 代换接线 —— filter 与代换正交（捕获 options，不�
         deniedDomains: [],
         commandLabel: "test:no-cred",
       },
-      probeSocat: () => true,
-      spawn: (() => fakeSocatProc(4242)) as typeof realSpawn,
+      relayResolver: fakeRelay,
       socketPathFactory: (id) => join(scratchDir(), `egress-${id}.sock`),
       createHttpProxyServer: (opts) => {
         captured = opts;
@@ -460,7 +462,7 @@ describe("T3 dispose —— registry / masked store / trust bundle 三资源同�
     await session.dispose(); // 幂等：不抛
   });
 
-  it("异常路径（spawn 失败、代理已起）→ 三资源同样释放，不留 stale", async () => {
+  it("异常路径（unix socket listen 失败、代理已起）→ 三资源同样释放，不留 stale", async () => {
     const f = fixture();
     let captured: HttpProxyServerOptions | undefined;
     let cred: EgressCredentialResources | undefined;
@@ -469,12 +471,13 @@ describe("T3 dispose —— registry / masked store / trust bundle 三资源同�
         policy: {
           allowedDomains: ["github.com"],
           deniedDomains: [],
-          commandLabel: "test:spawn-fail",
+          commandLabel: "test:listen-fail",
           credentials: f.roster,
         },
-        probeSocat: () => true,
-        spawn: (() => fakeSocatProc(undefined)) as typeof realSpawn,
-        socketPathFactory: (id) => join(scratchDir(), `egress-${id}.sock`),
+        relayResolver: fakeRelay,
+        // listen 必然失败：socket 父目录不存在（ENOENT）→ Step 3 typed 清理通道。
+        socketPathFactory: (id) =>
+          join(scratchDir(), "no-such-dir", `egress-${id}.sock`),
         createHttpProxyServer: (opts) => {
           captured = opts;
           return createServer();
@@ -485,9 +488,9 @@ describe("T3 dispose —— registry / masked store / trust bundle 三资源同�
           cred = c;
         },
       }),
-      SocatUnavailableError
+      /listen E(ACCES|NOENT)/
     );
-    assert.ok(captured, "代理 Step 2 先于失败发生（spawn 失败 = Step 3）");
+    assert.ok(captured, "代理 Step 2 先于失败发生（listen 失败 = Step 3）");
     assert.ok(cred);
     assert.equal(cred.mint.registry.size, 0);
     const storeDir = cred.mint.store.dirPath;

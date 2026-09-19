@@ -22,8 +22,11 @@ export {
   type HttpProxyServerOptions,
 } from "@anthropic-ai/sandbox-runtime/dist/sandbox/http-proxy.js";
 
-// SOCKS5 / git-over-SOCKS 不在 T4 范围（T7/T8 形态扩展时按 mux 形态补）。
-// 仍在此文件 re-export 一份以备未来用，避免新增 import 直接打到包内路径。
+// SOCKS5 / git-over-SOCKS 面（1080 段）已被操作员裁定摘出当前分支
+// （plans/egress-ssh-bridge.md 子弹 2）；ssh 传输面按 ADR-0107 §Decision 5
+// 「实现里钉死一种」钉死为 HTTP CONNECT（session.ts `GIT_SSH_COMMAND`
+// 冻结形态）。仍在此文件 re-export 一份以备未来 mux 形态补时消费，避免
+// 新增 import 直接打到包内路径；届时在此追加第二枚 socket。
 export {
   createSocksProxyServer,
   type SocksProxyServerOptions,

@@ -11,24 +11,26 @@
  *   - 铸造在起代理之前：CA 装载 / 装配期 assert 失败 = 代理未起、
  *     session 不存在（F4「不起带部分代换的 session」的 session 面判据）；
  *   - 名册缺席 → 不装载 CA、不铸造（spec.binds 缺席）；
- *   - SC9 后半：socat 缺失（Step 1 失败）→ 凭据层随 session 整体缺席，
- *     无假值半注入（loadEgressCa 未被调 = registry/store 未构造）。
+ *   - SC9 后半：中继依赖缺席（Step 1 失败，ADR-0107）→ 凭据层随 session
+ *     整体缺席，无假值半注入（loadEgressCa 未被调 = registry/store 未构造）。
  *
- * 注入策略沿用 egress-session.test.ts：假 socat spawn / createHttpProxyServer
- * seam；loadEgressCa / hostEnv 为 T2 新增 seam。fixture 全为生成假凭据。
+ * 注入策略沿用 egress-session.test.ts：relayResolver 假路径集 /
+ * createHttpProxyServer seam；loadEgressCa / hostEnv 为 T2 新增 seam。
+ * fixture 全为生成假凭据。
  */
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { spawn as realSpawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "vitest";
 import {
   createEgressSession,
-  SocatUnavailableError,
+  EgressRelayUnavailableError,
+  SANDBOX_HTTP_PROXY_PORT,
   type EgressSession,
 } from "../../../src/harness/sandbox/egress/session.js";
+import type { EgressRelayPaths } from "../../../src/harness/sandbox/egress/relay-assets.js";
 import type { EgressCredentialRoster } from "../../../src/harness/sandbox/egress/credential-assembly.js";
 import {
   CA_TRUST_VARS,
@@ -51,14 +53,15 @@ afterEach(async () => {
     rmSync(p, { recursive: true, force: true });
 });
 
-function fakeSocatProc(pid: number) {
-  const proc = realSpawn("/bin/true", ["--version"], { stdio: "ignore" });
-  try {
-    proc.kill("SIGKILL");
-  } catch {
-    /* */
-  }
-  return Object.assign(proc, { pid });
+/** 固定假中继路径集 —— 单测不查宿主存在性（resolver seam 直给）。 */
+function fakeRelay(): EgressRelayPaths {
+  const relayDir = "/test-root/vendor/egress-relay";
+  return {
+    nodePath: "/test-root/bin/node",
+    relayDir,
+    bridgeScriptPath: join(relayDir, "egress-tcp-relay.mjs"),
+    connectScriptPath: join(relayDir, "egress-http-connect.mjs"),
+  };
 }
 
 /** 生成的假凭据 + 假 CA（trust bundle 文件真写，路径消费面用）。 */
@@ -121,8 +124,7 @@ describe("createEgressSession — T2 铸造步骤", () => {
         commandLabel: "test:credential",
         credentials: f.roster,
       },
-      probeSocat: () => true,
-      spawn: (() => fakeSocatProc(4242)) as typeof realSpawn,
+      relayResolver: fakeRelay,
       socketPathFactory: (id) => join(scratchDir(), `egress-${id}.sock`),
       createHttpProxyServer: () => createServer(),
       loadEgressCa: () => f.caLoad,
@@ -133,7 +135,7 @@ describe("createEgressSession — T2 铸造步骤", () => {
     // 代理键仍在（buildProxyEnv 之上追加，不替换）。
     assert.match(
       session.spec.env.HTTP_PROXY ?? "",
-      /^http:\/\/127\.0\.0\.1:\d+$/
+      new RegExp(`^http://[^@]+@127\\.0\\.0\\.1:${SANDBOX_HTTP_PROXY_PORT}$`)
     );
     // invariant 1 通道：GH_TOKEN = 假值，真值不进。
     assert.match(session.spec.env.GH_TOKEN ?? "", /^fake_value_/);
@@ -170,8 +172,7 @@ describe("createEgressSession — T2 铸造步骤", () => {
           commandLabel: "test:mint-fail",
           credentials: fixture().roster,
         },
-        probeSocat: () => true,
-        spawn: (() => fakeSocatProc(4242)) as typeof realSpawn,
+        relayResolver: fakeRelay,
         createHttpProxyServer: (opts) => {
           proxyStarted = true;
           return createHttpProxyServerStub(opts);
@@ -194,8 +195,7 @@ describe("createEgressSession — T2 铸造步骤", () => {
         deniedDomains: [],
         commandLabel: "test:no-roster",
       },
-      probeSocat: () => true,
-      spawn: (() => fakeSocatProc(4242)) as typeof realSpawn,
+      relayResolver: fakeRelay,
       socketPathFactory: (id) => join(scratchDir(), `egress-${id}.sock`),
       createHttpProxyServer: () => createServer(),
       loadEgressCa: () => {
@@ -209,7 +209,7 @@ describe("createEgressSession — T2 铸造步骤", () => {
     assert.equal(session.spec.env.GH_TOKEN, undefined);
   });
 
-  it("SC9 后半：socat 缺失（Step 1 失败）→ 凭据层整体缺席，无假值半注入", async () => {
+  it("SC9 后半：中继依赖缺席（Step 1 失败）→ 凭据层整体缺席，无假值半注入", async () => {
     const f = fixture();
     let caCalled = false;
     await assert.rejects(
@@ -217,18 +217,17 @@ describe("createEgressSession — T2 铸造步骤", () => {
         policy: {
           allowedDomains: ["github.com"],
           deniedDomains: [],
-          commandLabel: "test:no-socat",
+          commandLabel: "test:no-relay",
           credentials: f.roster,
         },
-        socatCommand: "socat-this-does-not-exist",
-        probeSocat: () => false,
+        relayResolver: () => undefined,
         loadEgressCa: () => {
           caCalled = true;
           return f.caLoad;
         },
         hostEnv: { GH_TOKEN: f.realEnvToken },
       }),
-      SocatUnavailableError
+      EgressRelayUnavailableError
     );
     // Step 1 先于 Step 1.5：registry/store 根本未构造 = 无半注入态。
     assert.equal(caCalled, false);
