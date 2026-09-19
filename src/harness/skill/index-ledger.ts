@@ -41,6 +41,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { sanitizeConversationSegment } from "../session-roots.js";
+import { createSerialQueue } from "../../util/serial-queue.js";
 
 /** 会话文件夹里的叶子名（唯一字面量声明点，与 todos.md / trace.jsonl 同级）。 */
 export const SKILL_INDEX_LEDGER_FILE = "skill-index.json";
@@ -241,19 +242,6 @@ function serializeLedger(names: Iterable<string>): string {
     null,
     2
   )}\n`;
-}
-
-/**
- * 串行队列：read-modify-write 不互踩（并发 addMany 各自拿到确定回执）。
- * 前一个任务失败不阻断后一个（`then(task, task)`）。
- */
-function createSerialQueue(): <T>(task: () => Promise<T>) => Promise<T> {
-  let queue: Promise<unknown> = Promise.resolve();
-  return <T>(task: () => Promise<T>): Promise<T> => {
-    const next = queue.then(task, task);
-    queue = next.catch(() => undefined);
-    return next;
-  };
 }
 
 /**

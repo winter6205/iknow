@@ -23,6 +23,7 @@ import {
   loadWorkerTranscript,
   type SessionStoreError,
 } from "../session-api/store/index.js";
+import { createSerialQueue } from "../util/serial-queue.js";
 import type { WorkerTranscriptIOFactory } from "../harness/subagent/worker.js";
 
 export const storeWorkerTranscriptIo: WorkerTranscriptIOFactory = (loc) => {
@@ -33,21 +34,11 @@ export const storeWorkerTranscriptIo: WorkerTranscriptIOFactory = (loc) => {
       field: "transcript_path",
     } satisfies SessionStoreError;
   }
-  // WHY: appendWorkerTranscript 是 read-modify-write（读全文件 → 算 next
-  // event id → appendFile）且 store 层刻意无锁（架构纪律：锁在装配边界）。
-  // worker loop 的 flushPrefix 可被并发回调重入，交错时两批读到同一 head →
-  // 重复 event id → schema_invalid → worker exit 2。装配点在此串行化
-  // （同主会话 hub serialize queue 对 appendEvents 的保护）。reject 后链
-  // 继续（前序错误只回给该调用方，不卡死队列）。
-  let queue: Promise<unknown> = Promise.resolve();
-  const serialize = <T>(task: () => Promise<T>): Promise<T> => {
-    const run = queue.then(task, task);
-    queue = run.then(
-      () => undefined,
-      () => undefined
-    );
-    return run;
-  };
+  // WHY: appendWorkerTranscript 是 read-modify-write 且 store 层刻意无锁
+  // （架构纪律：锁在装配边界，ADR-0110 单写者契约），worker loop 的并发
+  // flushPrefix 交错会造出重复 event id → worker exit 2。装配点在此串行化，
+  // 队列语义（FIFO、reject 不卡链）见 util/serial-queue。
+  const serialize = createSerialQueue();
   return {
     loadMessages: () =>
       serialize(async () => {
