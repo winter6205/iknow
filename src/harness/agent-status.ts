@@ -192,10 +192,12 @@ export async function readOpenTodoLines(
 }
 
 /**
- * 组合计算:读 todos.md 投影未勾行 + last_tool (+ T3 instruction 透传) →
- * 快照数据与栏文本。T3(TUI 只读订阅)从同一份数据 / 文本派生 UI,不另建
- * 账本。instruction 由调用侧(loop-engine 经 T2 提取器)传入;null / 缺席 →
- * 字段不落 key(事件面保持 F1 的旧字段集形态)。永不 throw(读取失败由
+ * 组合计算:读 todos.md 投影未勾行 + last_tool (+ T3 instruction 透传 +
+ * T4 reconcile 结算字段透传) → 快照数据与栏文本。T3(TUI 只读订阅)从同一份
+ * 数据 / 文本派生 UI,不另建账本。instruction 由调用侧(loop-engine 经 T2
+ * 提取器)传入;null / 缺席 → 字段不落 key(事件面保持 F1 的旧字段集形态)。
+ * reconcile 由调用侧 run 作用域装箱结算后传入;缺席(无判定对象)→ 同样不落
+ * key,false → 行缺席但事件 key 在场(结算已发生)。永不 throw(读取失败由
  * readOpenTodoLines 收敛为空列表)。
  */
 export async function computeAgentStatusSnapshot(opts: {
@@ -205,6 +207,11 @@ export async function computeAgentStatusSnapshot(opts: {
   readonly conversationId?: string;
   /** spec T3:最新真实用户指令首行(T2 提取器产物);null → 段缺席。 */
   readonly instruction?: string | null;
+  /**
+   * spec T4:本栏 reconcile 标记结算结果(loop-engine run 作用域装箱算出);
+   * 缺席 = 无判定对象(F1),字段不落 key(事件面退回旧字段集形态)。
+   */
+  readonly reconcile?: boolean;
 }): Promise<AgentStatusSnapshot & { readonly text: string }> {
   const snapshot: AgentStatusSnapshot = {
     lastTool: opts.lastTool,
@@ -212,6 +219,7 @@ export async function computeAgentStatusSnapshot(opts: {
     ...(opts.instruction !== undefined && opts.instruction !== null
       ? { instruction: opts.instruction }
       : {}),
+    ...(opts.reconcile !== undefined ? { reconcile: opts.reconcile } : {}),
   };
   return { ...snapshot, text: buildAgentStatusText(snapshot) };
 }

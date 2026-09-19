@@ -233,7 +233,7 @@ describe("agent_status stream event T3: gating follows the bar", () => {
 // ---------------------------------------------------------------------------
 
 describe("agent_status stream event T3: bar purity", () => {
-  it("④ 事件恰带 {type,lastTool,openTodoLines,instruction}(无 text / in-flight);栏文本 === buildAgentStatusText(事件字段)", async () => {
+  it("④ 事件恰带 {type,lastTool,openTodoLines,instruction,reconcile}(无 text / in-flight);栏文本 === buildAgentStatusText(事件字段)", async () => {
     const todoDir = await makeTodoDir("- [ ] only open task\n");
     const echo = okEchoTool();
     const reg = createRegistry([echo]);
@@ -271,11 +271,13 @@ describe("agent_status stream event T3: bar purity", () => {
     for (let i = 0; i < probe.agentStatusEvents.length; i++) {
       const ev = probe.agentStatusEvents[i]!;
       // run("go") 的 prompt 即最新真实用户消息 → spec T3 后事件加性带
-      // instruction 字段;字段恰为栏的数据字段(不含栏 text、不含 in-flight)。
+      // instruction 字段;子弹 4 后 reconcile 结算在场(首跳 true、次跳
+      // false)——字段恰为栏的数据字段(不含栏 text、不含 in-flight)。
       assert.equal(ev.instruction, "go");
+      assert.equal(ev.reconcile, i === 0, "reconcile 一次性结算同源同形");
       assert.deepEqual(
         Object.keys(ev).sort(),
-        ["instruction", "lastTool", "openTodoLines", "type"],
+        ["instruction", "lastTool", "openTodoLines", "reconcile", "type"],
         "event carries exactly the bar's data fields"
       );
       // 栏文本逐字节 === T1 构造器对同一份事件字段的重放输出。
@@ -283,6 +285,7 @@ describe("agent_status stream event T3: bar purity", () => {
         lastTool: ev.lastTool,
         openTodoLines: ev.openTodoLines,
         instruction: ev.instruction,
+        reconcile: ev.reconcile,
       });
       assert.equal(
         tailBar(captured[i]!),

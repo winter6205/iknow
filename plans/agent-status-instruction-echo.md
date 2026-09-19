@@ -45,7 +45,7 @@ minimal-change-verifier: yes — 与 ADR-0103 决策 1-4 一一对应；T5/T6 �
    - **Surface:** `src/harness/loop-engine.ts`（正常 step 与 compact 重试两处调用点同形接线）
    - **Acceptance:** trace 双轨 assert——新消息进场首跳栏含 reconcile 行、次跳起消失；第二波消息（新 run）再标记一次；todo 段为空时标记独立在场；两处调用点（含 reactive-compact 重试）结算行为同形；常量行跨回合字节一致。
    - [blocks: T3]
-   - Status: [ ] pending
+   - Status: [x]
 
 5. **TUI 投影纪律回归** — tag: `[implementation]`
    - **Inherits:** spec T4「显示面不动：`agentStatusLines` 继续只投影未勾 todo 行、`clipOneLineVisual` 规则不变；`agentStatusFromEvent` 容忍并透传新字段；replace-on-event 语义不变」+ SC4 + Out-of-scope「TUI chrome 不加 instruction 行」。
