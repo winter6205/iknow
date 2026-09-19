@@ -20,6 +20,8 @@ import {
   SubagentPanel,
   elapsedSec,
   projectSubagentLines,
+  visibleLiveRowCount,
+  SUBAGENT_PANEL_MAX_ROWS,
 } from "../../src/tui/subagent-panel.js";
 import { visualWidth } from "../../src/tui/tool-summary.js";
 import type { SubagentInfo } from "../../src/harness/subagent/manager.js";
@@ -656,5 +658,105 @@ describe("SubagentPanel focusedRow 渲染（OpenTUI）", () => {
     const frame = setup.captureCharFrame();
     expect(frame).not.toContain("> ");
     await setup.renderer.destroy();
+  });
+});
+
+// ============================================================================
+// #1044：maxRows 折叠 + 焦点环可见行数上界
+// ============================================================================
+
+describe("projectSubagentLines maxRows 折叠（#1044）", () => {
+  function liveN(n: number): SubagentInfo[] {
+    return Array.from({ length: n }, (_, i) =>
+      makeSubagent({
+        taskId: `t-max-${i}`,
+        state: "running",
+        taskPreview: `任务-${i}`,
+        startedAt: iso(-1000),
+      })
+    );
+  }
+
+  test("未超限 / 恰好等于 / undefined → 原样返回（不含折叠行）", () => {
+    for (const [n, maxRows] of [
+      [3, 5],
+      [5, 5],
+      [3, undefined],
+    ] as const) {
+      const lines = projectSubagentLines(liveN(n), T0, 80, undefined, maxRows);
+      expect(lines).toHaveLength(n);
+      expect(lines.some((l) => l.icon === "…")).toBe(false);
+    }
+  });
+
+  test("超限 → 截到 maxRows，末行 `… +N`，N = 被隐藏行数", () => {
+    // 8 live、maxRows=5 → 前 4 行原样 + 折叠行（隐藏 8-4=4）
+    const lines = projectSubagentLines(liveN(8), T0, 80, undefined, 5);
+    expect(lines).toHaveLength(5);
+    expect(lines[4]?.text).toBe("… +4");
+    // 前 4 行仍是 live 行、聚焦语义未被折叠破坏
+    expect(
+      lines.slice(0, 4).every((l) => l.icon === "●" || l.icon === "○")
+    ).toBe(true);
+    expect(lines.slice(0, 4).every((l) => l.text.includes("任务-"))).toBe(true);
+  });
+
+  test("maxRows ≤ 0 → 不折叠（防御：非法值不吞行）", () => {
+    const lines = projectSubagentLines(liveN(3), T0, 80, undefined, 0);
+    expect(lines).toHaveLength(3);
+  });
+});
+
+describe("visibleLiveRowCount（#1044 焦点环上界）", () => {
+  test("未超限 → 等于 live 行数；超限 → maxRows-1", () => {
+    expect(visibleLiveRowCount([], T0, 80, 5)).toBe(0);
+    expect(visibleLiveRowCount([makeSubagent({})], T0, 80, 5)).toBe(1);
+    const many = Array.from({ length: 9 }, (_, i) =>
+      makeSubagent({ taskId: `t-v-${i}`, state: "running" })
+    );
+    expect(visibleLiveRowCount(many, T0, 80, 5)).toBe(4);
+  });
+
+  test("completed / 过期 failed 不计入（与面板可见性同口径）", () => {
+    const subs = [
+      makeSubagent({ state: "running" }),
+      makeSubagent({ state: "completed", endedAt: iso(-1000) }),
+      makeSubagent({ state: "failed", endedAt: iso(-60_000) }), // >30s 窗口
+    ];
+    expect(visibleLiveRowCount(subs, T0, 80, 5)).toBe(1);
+  });
+
+  test("缺省 maxRows = SUBAGENT_PANEL_MAX_ROWS（组件与行账同源）", () => {
+    const many = Array.from({ length: 20 }, (_, i) =>
+      makeSubagent({ taskId: `t-d-${i}`, state: "running" })
+    );
+    expect(visibleLiveRowCount(many, T0, 80)).toBe(SUBAGENT_PANEL_MAX_ROWS - 1);
+  });
+
+  test("窗口内 failed 行穿插占可见槽位 → 不虚报（焦点不落隐藏行）", () => {
+    // 反例钉住：min(live, maxRows-1) 公式会返 4 —— [✗, ●, ●, ●, ●] 折叠后
+    // 可见前 4 行是 [✗, ●, ●, ●]，实际可见 live 只有 3。
+    const subs = [
+      makeSubagent({ state: "failed", endedAt: iso(-5_000), reason: "boom" }),
+      ...Array.from({ length: 5 }, (_, i) =>
+        makeSubagent({ taskId: `t-il-${i}`, state: "running" })
+      ),
+    ];
+    expect(visibleLiveRowCount(subs, T0, 80, 5)).toBe(3);
+    // 与渲染投影逐行同口径：可见 ●/○ 行数恒等。
+    const projected = projectSubagentLines(subs, T0, 80, undefined, 5);
+    expect(
+      projected.filter((l) => l.icon === "●" || l.icon === "○").length
+    ).toBe(visibleLiveRowCount(subs, T0, 80, 5));
+  });
+
+  test("failed 穿插但未超限 → 全可见，live 计数不缩水", () => {
+    const subs = [
+      makeSubagent({ state: "failed", endedAt: iso(-5_000), reason: "boom" }),
+      ...Array.from({ length: 3 }, (_, i) =>
+        makeSubagent({ taskId: `t-in-${i}`, state: "running" })
+      ),
+    ];
+    expect(visibleLiveRowCount(subs, T0, 80, 5)).toBe(3);
   });
 });

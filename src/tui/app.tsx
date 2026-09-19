@@ -268,6 +268,9 @@ import {
 } from "./tool-summary.js";
 import {
   SubagentPanel,
+  projectSubagentLines,
+  visibleLiveRowCount,
+  SUBAGENT_PANEL_MAX_ROWS,
   FAILED_VISIBLE_WINDOW_S,
   DONE_FADE_WINDOW_S,
 } from "./subagent-panel.js";
@@ -844,6 +847,28 @@ export function subagentRowBudget(
 }
 
 /**
+ * SubagentPanel 的 chrome 行账（#1044，取代「恒 0」，见 subagentRowBudget）。
+ * 投影带 maxRows 折叠后取行数 —— 面板占几行就入账几行，Yoga 负空间不再摊到
+ * 输入框；上限（SUBAGENT_PANEL_MAX_ROWS，与组件同源）保证账目有界（与终端高、
+ * live 数解耦）。
+ * 非 chat 视图 → 0（面板渲染 null）。
+ */
+function subagentPanelRowBudget(
+  view: TuiView,
+  subagents: ReadonlyArray<SubagentInfo>,
+  cols: number
+): number {
+  if (view !== "chat") return 0;
+  return projectSubagentLines(
+    subagents,
+    Date.now(),
+    cols,
+    undefined,
+    SUBAGENT_PANEL_MAX_ROWS
+  ).length;
+}
+
+/**
  * `/graph` case 体：翻 graph holder（与 Shift+Tab 同源）并同步 chrome 状态。
  *
  * 抽到模块级：case 内的 `if (!holder)` 分支若留在 handleSubmit 内，会把后者
@@ -929,14 +954,15 @@ export function chromeReserveRows(opts: {
   readonly inputRows?: number;
   readonly modalRows?: number;
   readonly pickerRows?: number;
-  /** 子代理状态面板行数。产品路径恒 0：面板画在输入框下方，不挤 transcript /
-   *   不把输入框往上顶。函数仍接受显式值（单测 / 旧调用兼容）。 */
+  /** 子代理状态面板行数（#1044：折叠后实际行数，上限 SUBAGENT_PANEL_MAX_ROWS；
+   *   与面板渲染高度恒等）。函数仍接受显式值（单测 / 旧调用兼容）。 */
   readonly panelRows?: number;
   /**
    * specs/tui-subagent-transcript-live.md：prompt 上方身份条已拆除 —— 两行
    * 改画在会话 transcript 的 spawn 卡上（滚动区内，不吃 chrome 预留）。
-   * 产品路径恒 0（`subagentRowBudget` 返回值）；与 `panelRows` 同款约定，
-   * 显式值只留给单测 / 旧调用兼容。缺省 0 → 不占行。
+   * 产品路径恒 0（`subagentRowBudget` 返回值）；显式值只留给单测 / 旧调用
+   * 兼容。缺省 0 → 不占行。（#1044 起 `panelRows` 走面板折叠后行数，两槽
+   * 不再同款。）
    */
   readonly subagentRows?: number;
   /** agent 现势显示行数（agentStatusLines 实际产出，0-1）。缺省 0 →
@@ -2189,15 +2215,18 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     activeToolName !== undefined && !isSubagentTool(activeToolName)
       ? activeToolName
       : undefined;
-  // T7: chrome-focus reducer 输入 —— `liveSubagentCount` 是「当前 live
-  // 子代理行数」（starting + running；与 projectSubagentLines 投影同源口径）。
+  // T7 + #1044: chrome-focus reducer 输入 —— `visibleLiveRowCount` 是
+  // 「折叠后仍可见的 live 行数」（starting + running，且受
+  // SUBAGENT_PANEL_MAX_ROWS 上限约束；与 projectSubagentLines 投影同源）。
   // 用于 reduceChromeFocus 的 subagentCount 与 SubagentPanel 的 focusedRow
-  // 越界 clamp。
-  const liveSubagentCount = subagents.filter(isLiveSubagent).length;
-  // plans T7：chrome-focus 焦点 clamp —— subagent 行数变化（live 子代理退出
-  // / 新增 / 完成窗口过期）时，chromeFocus.kind === "subagent" 的 row 可能
-  // 越界。Reducer 在 key press 时做 clamp，但本 effect 兜底无键位下的 stale
-  // 状态：focus 越界 → 回 input（reducer 同款语义：subagent 环不可达）。
+  // 越界 clamp —— 不能用原始 live 数：面板折叠（>maxRows）时后者会把焦点
+  // 移到被隐藏的行上。
+  const liveSubagentCount = visibleLiveRowCount(subagents, Date.now(), cols);
+  // plans T7：chrome-focus 焦点 clamp —— 可见 subagent 行数变化（live 子代理
+  // 退出 / 新增 / 完成窗口过期 / 折叠边界跨越）时，chromeFocus.kind ===
+  // "subagent" 的 row 可能越界。Reducer 在 key press 时做 clamp，但本 effect
+  // 兜底无键位下的 stale 状态：focus 越界 → 回 input（reducer 同款语义：
+  // subagent 环不可达）。
   // graph 焦点在 snapshot 消失时由上方 graphProgresses 的 nextGraph === null
   // 分支 setGraphChromeFocus("input") 兜底（T3 既有），此处不重复。
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3977,12 +4006,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 「输入多少都是一行」：长文本无 `\n` 时按 cols 折行计视觉行数）。封顶由
   // chromeReserveRows 内部做（SSOT 防误传）；超出部分 textarea 内部滚动。
   const inputContentRows = inputWrapLineCount(inputValue, cols);
-  // 子代理面板在输入框下方渲染，但不计入 chrome：计入会把 ChatView 变矮、
-  // 输入框上移。终端装不下的行溢到屏幕下方。
+  // 子代理面板在输入框下方渲染。#1044 前不入账（panelRows 恒 0）——「终端装
+  // 不下的行溢到屏幕下方」假设不成立：底部 chrome 无显式高度、默认
+  // flexShrink=1，总高超出时 Yoga 把负空间按比例摊给输入框等，内容行被压进
+  // 边框（live 子代理 ≥7 时必现，与终端高无关）。#1044 起面板行数（折叠上限
+  // SUBAGENT_PANEL_MAX_ROWS）入账 —— 输入框正常上移且始终完整显示。
   // agent 现势：mode 行上方未勾待办单行（0-1）。
   // 非 chat 视图 / 尚无快照 → 0（组件渲染 null）。
   const agentStatusRowBudget =
     view === "chat" ? agentStatusLines(agentStatus, cols).length : 0;
+  const subagentPanelRows = subagentPanelRowBudget(view, subagents, cols);
   // 环境现势事件仍收（harness 给人不给模型）。D7 / SC6:envPaneRows 槽位现渲染
   // **常驻**会话位置行（0/1 行）—— 主仓 / 非 task 路径照样画,绑任务树只把
   // 同一行路径换成树上根(活 taskRoot 优先),显隐不再由绑定决定。分支取
@@ -4030,7 +4063,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           view === "chat" && activeCompact !== undefined
             ? compactProgressRows()
             : 0,
-        panelRows: 0,
+        // #1044：SubagentPanel 行数入账（折叠上限内，与渲染高度恒等）——
+        // 取代「恒 0」；取代记录见 specs/tui-subagent-transcript-live.md。
+        panelRows: subagentPanelRows,
         // specs/tui-subagent-transcript-live.md：两行已改画在会话 transcript
         // 的 spawn 卡上（滚动区内）—— 不再吃 chrome 预留，`subagentRowBudget`
         // 恒 0。调用点保留：入参形状是「这条预算曾是 view/subagents 的函数」
@@ -4368,7 +4403,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             {line.text}
           </text>
         ))}
-      {/* 子代理状态：路径行之下。不计入 chrome 行账（panelRows=0）。
+      {/* 子代理状态：路径行之下。#1044 起计入 chrome 行账（panelRows =
+          折叠后行数，上限 SUBAGENT_PANEL_MAX_ROWS）。
           T7：传 focusedRow —— chrome-focus subagent(row) 焦点时该行展开 taskPreview
           （不再截断）+ 加 `> ` 前缀；其余行保持原截断。focusedRow 仅作用于 live 行
           （reducer 圈定的子集），SubagentPanel 内部按 liveIndex 投影。 */}
@@ -4376,6 +4412,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         <SubagentPanel
           subagents={subagents}
           cols={cols}
+          maxRows={SUBAGENT_PANEL_MAX_ROWS}
           focusedRow={
             chromeFocus.kind === "subagent" ? chromeFocus.row : undefined
           }

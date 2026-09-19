@@ -18,11 +18,14 @@
  *   4. 无任何活跃行且存在 DONE_FADE_WINDOW_S 内完成的 → 单行 `✓ N 完成`
  *      淡出提示；
  *   5. 全空 → return null；
- *   6. 活跃行全量列出（不折叠 footer）。不计入 chrome 行账，画在输入框下方。
+ *   6. 活跃行全量列出，但受 SUBAGENT_PANEL_MAX_ROWS 上限约束 —— 超限时前
+ *      maxRows-1 行原样、末行折叠为 `… +N`（#1044）。折叠后行数即 chrome 行账
+ *      （app.tsx subagentPanelRowBudget → chromeReserveRows.panelRows），
+ *      画在输入框下方且不再被 Yoga 比例压缩。
  *
  * 窄列分支（cols < 40）说明：产品路径 cols 下限 40（见 app.tsx cols =
  * Math.max(width ?? 80, 40)），本分支属防御 / 测试 fixture 路径；保留是为
- * 让 cols=30 fixture 的单测能直驱可见性（行账由 app 产品路径恒 panelRows=0）。
+ * 让 cols=30 fixture 的单测能直驱可见性（行账同源走 panelRows）。
  *
  * 字形纪律（spec #146:86 无 emoji UI 字形）：只用几何字形 `● ○ ✓ ✗`
  * （项目既有惯例，见 context-bar 的 █░ / tool-summary 的 …），禁止 emoji。
@@ -49,6 +52,9 @@ export interface SubagentPanelProps {
    * 越界或 undefined → 无聚焦（等价原行为）。
    */
   readonly focusedRow?: number;
+  /** 面板行数上限（#1044，超出折叠为 `… +N`）。缺省 SUBAGENT_PANEL_MAX_ROWS ——
+   *  调用方（app.tsx）与本组件同源取值，行账与渲染高度恒等。 */
+  readonly maxRows?: number;
 }
 
 export interface SubagentLine {
@@ -69,6 +75,23 @@ export const DONE_FADE_WINDOW_S = 5;
 const DECOR_RESERVE = 14;
 const NAME_BUDGET = 20;
 
+/** live 行首字形（starting ○ / running ●）—— 投影与 visibleLiveRowCount 同源。 */
+const ICON_STARTING = "○";
+const ICON_RUNNING = "●";
+const LIVE_LINE_ICONS: ReadonlySet<string> = new Set([
+  ICON_STARTING,
+  ICON_RUNNING,
+]);
+
+/**
+ * 面板行数上限（#1044 SSOT）：SubagentPanel 渲染与 chromeReserveRows 的
+ * panelRows 行账共用同一值 —— 超限折叠为「… +N」一行后，行账与实际渲染
+ * 高度恒等，Yoga 负空间不再按 flexShrink 比例摊到输入框（底部 chrome 无显式
+ * 高度、默认 flexShrink=1，见 issue #1044 根因）。app.tsx 经 subagentPanelRowBudget
+ * 与本常量接线，不得另立数字。
+ */
+export const SUBAGENT_PANEL_MAX_ROWS = 5;
+
 /**
  * startedAt(ISO) → nowMs 的整秒 elapsed。非法 ISO / nowMs 早于 startedAt
  * （时钟漂移）→ 0（防 NaN 上行到渲染层）。
@@ -87,12 +110,59 @@ function subagentDisplayName(info: SubagentInfo): string {
 }
 
 /**
+ * 行数上限折叠（#1044）—— lines 超过 maxRows 时截到 maxRows-1 行，末行换成
+ * `… +N`（N = 被隐藏行数，dim 色）。maxRows 缺省 / ≤0 / 未超限 → 原样返回。
+ * 模块级纯函数：projectSubagentLines 已顶 S5 ratchet 基线，分支外移不抬其
+ * 复杂度。
+ */
+function collapseToMaxRows(
+  lines: SubagentLine[],
+  maxRows?: number
+): ReadonlyArray<SubagentLine> {
+  if (maxRows === undefined || maxRows <= 0 || lines.length <= maxRows) {
+    return lines;
+  }
+  const hidden = lines.length - (maxRows - 1);
+  return [
+    ...lines.slice(0, maxRows - 1),
+    {
+      icon: "…",
+      fg: tuiPalette.dim,
+      text: `… +${hidden}`,
+    },
+  ];
+}
+
+/**
+ * 折叠后仍可见的 live 行数（#1044 焦点环上界 SSOT）。复用与渲染完全同一份
+ * projectSubagentLines 投影（含 failed 行穿插 + collapseToMaxRows 尾部裁剪 +
+ * `… +N` 折叠行），再数其中的 live 字形（○/●）—— 可见行数与渲染行集恒等。
+ *
+ * 不能用 `min(live 行数, maxRows-1)` 公式：failed(✗) 行与 live 行穿插进同一
+ * 序列参与折叠裁剪，failed 行占据可见槽位时实际可见 live 行数更少，公式会
+ * 高估 → focusedRow 落到被隐藏的行上（`> ` 前缀画在不可见行）。
+ *
+ * `cols` 只影响行文本截断、不影响行集组成；`nowMs` 决定 failed 30s 窗口，
+ * 必须与渲染同源传入。reducer（reduceChromeFocus.subagentCount）与越界
+ * clamp（app.tsx useEffect）用本函数而不是原始 live 数。纯函数可单测直驱。
+ */
+export function visibleLiveRowCount(
+  subagents: ReadonlyArray<SubagentInfo>,
+  nowMs: number,
+  cols: number,
+  maxRows: number = SUBAGENT_PANEL_MAX_ROWS
+): number {
+  return projectSubagentLines(subagents, nowMs, cols, undefined, maxRows)
+    .filter((line) => LIVE_LINE_ICONS.has(line.icon)).length;
+}
+
+/**
  * 纯函数投影：可见性过滤 + 行文本生成（不 touch OpenTUI，可单测直驱）。
  *
  *   - 活跃行：`{icon} {name} {taskPreview} · {elapsed}`；窄列无 preview；
  *   - 失败行：`✗ {name} {preview} · {reason}`；
  *   - 完成淡出行：`✓ {N} 完成`；
- *   - 全量列出，不折叠 footer；不计入 chrome 行账。
+ *   - 受 maxRows 上限约束（超限末行折 `… +N`，#1044）。
  *
  * `focusedRow`（可选，T7 接线）：当 `live[i]` 的下标 `i === focusedRow` 时，
  * taskPreview 不再截断（仍按 cols 视觉宽度兜底），并加 `> ` 前缀标记聚焦；
@@ -104,7 +174,8 @@ export function projectSubagentLines(
   subagents: ReadonlyArray<SubagentInfo>,
   nowMs: number,
   cols: number,
-  focusedRow?: number
+  focusedRow?: number,
+  maxRows?: number
 ): ReadonlyArray<SubagentLine> {
   if (subagents.length === 0) return [];
   const narrow = cols < 40;
@@ -118,7 +189,7 @@ export function projectSubagentLines(
     const narrowReasonBudget = Math.max(4, cols - (2 + nameWidth + 3));
     if (isLiveSubagent(s)) {
       liveIndex += 1;
-      const icon = s.state === "starting" ? "○" : "●";
+      const icon = s.state === "starting" ? ICON_STARTING : ICON_RUNNING;
       const fg = s.state === "starting" ? tuiPalette.dim : tuiPalette.running;
       const elapsed = formatRunDuration(elapsedSec(s.startedAt, nowMs));
       // 聚焦判定：仅 live 行参与；聚焦行 → 不截断 preview（仍按 cols 兜底）+
@@ -184,7 +255,7 @@ export function projectSubagentLines(
     }
   }
 
-  const lines: SubagentLine[] = [...live];
+  let lines: SubagentLine[] = [...live];
   if (lines.length === 0 && doneCount > 0) {
     lines.push({
       icon: "✓",
@@ -192,7 +263,7 @@ export function projectSubagentLines(
       text: `✓ ${doneCount} 完成`,
     });
   }
-  return lines;
+  return collapseToMaxRows(lines, maxRows);
 }
 
 export function SubagentPanel(props: SubagentPanelProps): ReactNode {
@@ -200,7 +271,8 @@ export function SubagentPanel(props: SubagentPanelProps): ReactNode {
     props.subagents,
     props.nowMs ?? Date.now(),
     props.cols,
-    props.focusedRow
+    props.focusedRow,
+    props.maxRows
   );
   if (lines.length === 0) return null;
   return (

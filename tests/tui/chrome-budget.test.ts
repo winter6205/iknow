@@ -476,13 +476,17 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
     expect(withPanel - base).toBe(4);
   });
 
-  test("app 产品路径 panelRows 恒 0（子代理不挤输入框）", () => {
+  // #1044（取代原「panelRows 恒 0」守卫）：底部 chrome 无显式高度、默认
+  // flexShrink=1，面板行不入账时总高超出终端 → Yoga 把负空间按比例摊给输入框
+  // （live 子代理 ≥7 必现）。现行合同：panelRows = 折叠后实际行数（有界，
+  // 上限 SUBAGENT_PANEL_MAX_ROWS），与渲染高度恒等 —— 输入框正常上移且完整。
+  test("app 产品路径 panelRows 入账且有界（subagentPanelRows 接线，#1044）", () => {
     const src = readFileSync(
       join(import.meta.dir, "..", "..", "src/tui/app.tsx"),
       "utf8"
     );
-    expect(src).toMatch(/panelRows:\s*0/);
-    expect(src).not.toMatch(/panelRows:\s*subagentPanelRows/);
+    expect(src).toMatch(/panelRows:\s*subagentPanelRows/);
+    expect(src).not.toMatch(/panelRows:\s*0/);
   });
 
   // #647 T3: agent 现势显示行数入账（与 panelRows 同款：缺省不占行，显式
