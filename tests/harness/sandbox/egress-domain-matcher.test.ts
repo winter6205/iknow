@@ -21,6 +21,7 @@ import {
   isAddressGuardDenied,
   DEFAULT_PRIVATE_DENIED_RANGES,
 } from "../../../src/harness/sandbox/egress/domain-matcher.js";
+import { BUILTIN_PRESET_ALLOWED_DOMAINS } from "../../../src/harness/sandbox/egress/preset-domains.js";
 
 describe("decideEgress — 域名匹配", () => {
   it("精确匹配 allow list 中的域名", () => {
@@ -387,6 +388,87 @@ describe("decideEgress — 地址守卫正交", () => {
       deniedDomains: denied,
     });
     expect(result.outcome).toBe("allow");
+  });
+});
+
+describe("decideEgress — F5: preset 域命中不豁免地址守卫（rebinding）", () => {
+  // spec egress-preset-allowlist invariant 5 / F5：允许集换为 builtin preset
+  // 后，地址守卫正交性不缩——preset 命中的域被 rebinding 解析到
+  // loopback / 私网 / metadata 时照拒（address-denied）。
+  // 与上方「地址守卫正交」段的区别：allowedDomains 直接吃 preset SSOT 常量，
+  // 钉的是「合并后的真实出厂集」而非手写单域表。
+  const preset = BUILTIN_PRESET_ALLOWED_DOMAINS;
+
+  it("对照：preset 域 + 公网地址 → allow（证明拒绝源自地址档而非域表）", () => {
+    expect(
+      decideEgress({
+        host: "github.com",
+        port: 443,
+        allowedDomains: preset,
+        deniedDomains: [],
+        resolvedAddresses: ["140.82.121.4"],
+      })
+    ).toEqual({ outcome: "allow" });
+  });
+
+  it("preset apex github.com rebinding 到 loopback → address-denied", () => {
+    const result = decideEgress({
+      host: "github.com",
+      port: 443,
+      allowedDomains: preset,
+      deniedDomains: [],
+      resolvedAddresses: ["127.0.0.1"],
+    });
+    expect(result.outcome).toBe("deny");
+    expect(result.reason).toBe("address-denied");
+  });
+
+  it("preset 通配子域 objects.githubusercontent.com → 私网 10/8 → address-denied", () => {
+    const result = decideEgress({
+      host: "objects.githubusercontent.com",
+      port: 443,
+      allowedDomains: preset,
+      deniedDomains: [],
+      resolvedAddresses: ["10.1.2.3"],
+    });
+    expect(result.outcome).toBe("deny");
+    expect(result.reason).toBe("address-denied");
+  });
+
+  it("preset registry.npmjs.org → metadata 169.254.169.254 → address-denied", () => {
+    const result = decideEgress({
+      host: "registry.npmjs.org",
+      port: 443,
+      allowedDomains: preset,
+      deniedDomains: [],
+      resolvedAddresses: ["169.254.169.254"],
+    });
+    expect(result.outcome).toBe("deny");
+    expect(result.reason).toBe("address-denied");
+  });
+
+  it("preset cdn.playwright.dev → 192.168/16 → address-denied", () => {
+    const result = decideEgress({
+      host: "cdn.playwright.dev",
+      port: 443,
+      allowedDomains: preset,
+      deniedDomains: [],
+      resolvedAddresses: ["192.168.0.1"],
+    });
+    expect(result.outcome).toBe("deny");
+    expect(result.reason).toBe("address-denied");
+  });
+
+  it("preset 域多地址混合（公网 + ULA v6）→ address-denied（任一命中即拒）", () => {
+    const result = decideEgress({
+      host: "github.com",
+      port: 443,
+      allowedDomains: preset,
+      deniedDomains: [],
+      resolvedAddresses: ["140.82.121.4", "fd12:3456::1"],
+    });
+    expect(result.outcome).toBe("deny");
+    expect(result.reason).toBe("address-denied");
   });
 });
 

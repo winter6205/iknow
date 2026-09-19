@@ -362,7 +362,7 @@ describe("buildProxyEnv", () => {
 });
 
 describe("buildInnerBridgeScript", () => {
-  it("pins the single-bridge leading script verbatim (T1 前导形态，0107 换装)", () => {
+  it("pins the single-bridge leading script verbatim (T1 前导形态，0107 换装 + 就绪轮询)", () => {
     const script = buildInnerBridgeScript(
       "/usr/bin/node",
       "/opt/iknow/vendor/egress-relay/egress-tcp-relay.mjs",
@@ -373,8 +373,23 @@ describe("buildInnerBridgeScript", () => {
         "'/usr/bin/node' '/opt/iknow/vendor/egress-relay/egress-tcp-relay.mjs' " +
           "'/tmp/e-abc.sock' 3128 >/dev/null 2>&1 &",
         'trap "kill %1 2>/dev/null; exit" EXIT',
+        // 就绪轮询消化 node 中继冷启动竞态（T5 实测：裸 curl 首发
+        // ECONNREFUSED exit 7）；探测失败不拦截用户命令（fail-closed 保持）。
+        "for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/3128) " +
+          '2>/dev/null && break; sleep 0.1; done',
       ].join("\n")
     );
+  });
+
+  it("就绪轮询端口跟随 sandboxPort 入参（非硬编码 3128）", () => {
+    const script = buildInnerBridgeScript(
+      "/usr/bin/node",
+      "/opt/iknow/vendor/egress-relay/egress-tcp-relay.mjs",
+      "/tmp/e-abc.sock",
+      4128
+    );
+    expect(script).toContain("/dev/tcp/127.0.0.1/4128");
+    expect(script).toContain("'/tmp/e-abc.sock' 4128 >/dev/null 2>&1 &");
   });
 
   it("shell-quotes hostile node / relay / socket paths so the chain stays one command", () => {

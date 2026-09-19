@@ -76,6 +76,7 @@
 
 - `EgressFenceSpec` 扩字段（形状示意，非实现）：`sandboxProxyPorts: { http: 3128, socks?: 1080 }`、`innerBridgeScript: string`（宿主 session 装配期算好的监听前导命令）；`buildProxyEnv` 的 URL host 改 `127.0.0.1:3128` 并嵌 `http://<user>:<token>@` userinfo（token = session 现成 `randomBytes` 值，user 取 `sandbox-utils.js:712-722` 的固定名形态，本仓自定名不带 encodedCommand——归因已有 `commandLabel` sink 通道）。
 - fence 命令链接线：`bash.ts` `buildForegroundFence` 的 `args: ["-c", finalCommand]` 在 egress 在场时改为 `-c "<bridge 前导>\n<finalCommand>"`（前导 = `linux-sandbox-utils.js:626-632` 形态：`socat … & trap …`）；无 egress = 零改动（byte-identical 回归基线）。
+  就绪轮询修订注记（T5 实测）：前导脚本冻结形态追加第三行 `for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/<port>) 2>/dev/null && break; sleep 0.1; done`——why = T5 首跑发现裸 curl 与内层中继冷启动竞态（ECONNREFUSED exit 7；probe 以 `--retry-connrefused` 消化、产品路径无消化件）；`/dev/tcp` 轮询先例同款见 `sandbox-probe.ts`（socket 就绪轮询）。`bash-egress-inner-bridge.test.ts` / `egress-session.test.ts` verbatim 钉子已同步。
 - bwrap 层端口耦合解除：`sandboxLocalPort` 语义从「与宿主同号」改「沙箱内固定监听号」。
 
 **验收**：单测（注入 `spawn` / `socketPathFactory` seam，不断言真监听）钉 spec 形状 + 前导脚本字符串；`egress-proxy-behavior.test.ts` 的「不起真桥」注释改写为覆盖内层脚本装配；probe「socat present」分支重写为经真链路的端到端（放行 loopback NIC IP → 拿到响应；注意 O2：目标 IP 若落 NO_PROXY 需选 NIC 地址而非 `127.0.0.1` 字面，且地址守卫档对 loopback 的拒绝意味着该正探针须以**非 loopback** 的可寻址 fixture 落地，或把正探针挪到 T5 真域层——实现期以实测为准并在测试注释钉结论）。

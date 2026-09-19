@@ -13,8 +13,9 @@
  *  - invariant 3 数据形状钉：批准门新批域不进任何条目 injectHosts ——
  *    名册只来自「内置常量 + settings 段」两源，装配函数无 allowedDomains
  *    / 批准集入参（签名面即防线）；
- *  - EgressPolicyInput.credentials 接线：network 在场才产 policy（fail-closed
- *    语义不变），credentials 为纯数据注入（egress 域不反向 import config）。
+ *  - EgressPolicyInput.credentials 接线：生产装配恒产 policy（preset spec
+ *    invariant 3：段缺席 = builtin preset-only，session 必起），credentials
+ *    不决定起停、只随 policy 数据形状走（egress 域不反向 import config）。
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -24,6 +25,7 @@ import {
   BUILTIN_GITHUB_CREDENTIAL_ROSTER,
 } from "../../../src/harness/sandbox/egress/credential-assembly.js";
 import { createEgressPolicyFactory } from "../../../src/harness/sandbox/egress/assembly.js";
+import { BUILTIN_PRESET_ALLOWED_DOMAINS } from "../../../src/harness/sandbox/egress/preset-domains.js";
 import type { IknowSettings } from "../../../src/config/settings.js";
 
 const GITHUB_INJECT_HOSTS = [
@@ -175,7 +177,7 @@ describe("createEgressPolicyFactory — credentials 接线", () => {
     assert.deepEqual(policy!.credentials, BUILTIN_GITHUB_CREDENTIAL_ROSTER);
   });
 
-  it("network 缺席 → 工厂仍返 undefined（credentials 不开 session，fail-closed 不变）", () => {
+  it("network 缺席 → builtin preset policy（credentials 不开 session，只随 policy 数据形状走）", () => {
     const factory = createEgressPolicyFactory({
       settings: {
         isolation: {
@@ -188,7 +190,15 @@ describe("createEgressPolicyFactory — credentials 接线", () => {
       } as unknown as IknowSettings,
       commandLabel: "bash:fg",
     });
-    assert.equal(factory(), undefined);
+    // preset spec invariant 3：段缺席不再返 undefined —— builtin 窄集
+    // session 必起；credentials 仍不决定起停，随 policy 注入。
+    const policy = factory();
+    assert.ok(policy !== undefined);
+    assert.equal(policy!.allowlistSource, "builtin");
+    assert.deepEqual(policy!.allowedDomains, [
+      ...BUILTIN_PRESET_ALLOWED_DOMAINS,
+    ]);
+    assert.equal(policy!.credentials?.envVars.length, 2);
   });
 
   it("用户段追加条目进入 policy.credentials（收窄/追加语义透传）", () => {
@@ -210,9 +220,13 @@ describe("createEgressPolicyFactory — credentials 接线", () => {
       commandLabel: "bash:fg",
     });
     const policy = factory();
-    assert.deepEqual(policy!.allowedDomains, ["example.com"]);
+    // 段在场 = 去重(preset ∪ 用户增量)，preset 前置（spec T1 合并语义）。
+    assert.deepEqual(policy!.allowedDomains, [
+      ...BUILTIN_PRESET_ALLOWED_DOMAINS,
+      "example.com",
+    ]);
     assert.deepEqual(policy!.deniedDomains, []);
     assert.equal(policy!.commandLabel, "bash:fg");
-    assert.equal(policy!.allowlistSource, "preset");
+    assert.equal(policy!.allowlistSource, "persisted");
   });
 });

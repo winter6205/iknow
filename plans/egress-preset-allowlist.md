@@ -25,38 +25,42 @@ OVERALL: PASS — hand to writing-plans
    - **Inherits:** spec invariant 1（preset 是代码常量不是配置，无「关档」开关）、invariant 2（判定输入构造只发生在 assembly 一处，SSOT）、invariant 3（生产装配恒返 policy，`undefined` 分支仅留给测试/yolo 显式豁免路径）、T1（`BUILTIN_PRESET_ALLOWED_DOMAINS` frozen 6 条目逐字 = Boundaries 清单；段缺席 → preset-only；段在场 → 去重(preset ∪ 用户 `allowedDomains`)、`deniedDomains` 只取用户层；在场但两列表皆空 → 同「在场」路径不缩档）、SC1/SC2/SC3、F2（`allowlist-empty` 经工厂路径不可达但判定/渲染件不删）、F3（settings 段非法被丢弃 → preset-only）、ADR-0104 §Decision 1–2
    - **Surface:** `src/harness/sandbox/egress`（新增 `preset-domains.ts`——spec 已冻结此文件名，清单 SSOT 仅此一处；改既有 `assembly.ts`）
    - **Acceptance:** `egress-assembly.test.ts` 断言反转——旧「段缺席 → undefined」改为「段缺席 → preset-only policy，source 为 builtin 档」；合并去重且 preset 前置次序可测；`decideEgress` 直喂合并结果：`github.com` apex 与 `*.github.com` 子域双命中、`registry.npmjs.org` 命中而 `npmjs.org` apex 不命中（钉住不误扩）、`evil-github.com` / `github.com.evil.io` 不命中（后缀锚定回归）；preset 清单不含已知模型供应商域的反向断言；F1 不对称单测（用户 deny `*.github.com` 砍子域后 apex 仍在）；工厂返回类型保持 `() => EgressPolicyInput | undefined` 不缩（background/verify 消费面类型零改动）；`npm test` 绿
-   - Status: [ ] pending
+   - Status: [x]
 
 2. **`allowlistSource` 三档清算 + 违例文案联动** — tag: `[implementation]`
    - **Inherits:** spec invariant 4（封闭三档 `"builtin" | "persisted" | "session"`，全链一次改齐、不留旧值别名）、invariant 6（纯 infra 文案不掺配置指引，source 标签只出现在域判定段）、T2 钉死表（三档生产者归属与 `SOURCE_LABEL` 渲染行不变格式）、SC4、联动点 grep 实证全集（`violations.ts` 类型与标签、`session.ts` inline union 收敛为引用消双处漂移、`assembly.ts` 注释+赋值、`bash.ts` 工厂包装层 fallback）
    - **Surface:** `src/harness/sandbox/egress`（`violations.ts`、`session.ts`、`assembly.ts`）、`src/harness/aci/tools/bash.ts`（source fallback 接线）、既有 egress 测试面
    - **Acceptance:** 三档各有真生产者与消费渲染测试（`persisted` 档自始有真生产者，消灭零生产者占位）；grep 断言全仓无字符串 `"preset"` 残留在 source 语义位（渲染文案 `"built-in preset allowlist (github / npm / playwright defaults)"` 除外）；`not-in-allowlist` / `no-approval-inlet` / `denied-by-user` 行文案结构不变、配置键指引仍指 `isolation.network.allowedDomains`；`bash-egress-typed-failure.test.ts` / `egress-violations.test.ts` 迁移后 source 标注逐字钉子绿；`npm test` 绿
-   - Status: [ ] pending
+   - Status: [x]
    - [blocks: T1]
 
 3. **批准门恢复在岗 + 生命周期落差闭合的测试钉** — tag: `[implementation]`
    - **Inherits:** spec invariant 3（本条以测试显式引用 ADR-0097 §生命周期表「允许集非空或批准流可问才起」+ ADR-0104 §Consequences「副作用（正向）」闭合实现落差，不另立文字例外）、invariant 5（fail-closed 面不缩：批准门非交互拒、代理死 fail-closed、地址守卫正交逐字继承）、T3（三臂验收）、SC5
    - **Surface:** `src/harness/sandbox/egress`（批准缝，复用注入 filter 驱动 seam、不真起代理）、`build-engine-egress-wiring.test.ts`（既有装配接线测试面）
    - **Acceptance:** 三条单测——①干净装配（无 settings 网络段）交互前台访问档外域触发首见批准门（ask 一次），批准 → 本会话放行，拒绝 → `denied-by-user` 违例回灌 `execution_failed`；②干净装配非交互面（background / verify）档外域 → `no-approval-inlet` fail-closed，违例回灌有名字（区别于旧「session 不起、静默 DNS 失败」）；③wiring 断言 `settings` 无 `isolation.network` 时 `egressPolicyFactory()` 返回非 `undefined`；「批准门死在入口」旧行为有回归反转记录；`npm test` 绿
-   - Status: [ ] pending
+   - Status: [x]
    - [blocks: T1, T2]
 
 4. **probe 物理面回归 + 不加真网 probe 的裁定维持** — tag: `[implementation]`
    - **Inherits:** spec T4（默认不新增真域 probe 类别避免 CI 抖动，登记于此；若实现期新增须同步 `security-boundaries` 的 11 类探针纪律说明）、F4（宿主缺 socat → `SocatUnavailableError` infra 文案不冒充域判定拒绝，既有面回归即可）、F5（preset 命中不豁免地址守卫，invariant 5）、仓规「动 fence 相关必跑 probe」
    - **Surface:** `src/harness/sandbox`（fence 装配面）、`scripts/sandbox-probe.ts`
    - **Acceptance:** `npm run probe:sandbox` 全部类别全绿（11 类探针维持）；F5 单测钉住 preset 域解析到私网/loopback（rebinding）照拒、`address-denied` 文案不变；F4 既有面回归绿；未新增真网 probe 类别（或已按纪律同步登记）
-   - Status: [ ] pending
+   - Status: [x]
    - [blocks: T1]
 
 5. **TUI pty 实测：三操作屏上证据（仓规地面）** — tag: `[implementation]`
    - **Inherits:** spec T5 三条操作、SC6（`npm test` + probe + TUI 实测证据留档）、F1 不对称在文案与测试双向钉住、OQ2（playwright 两域以 webui 浏览器二进制下载实测复核）、Boundaries Out（凭据面未就绪的 `git push` 遗留如实登记，不算本档失败）
    - **Surface:** `mcp__aiterm__pty_*` 起 TUI 的真实装配链（干净 settings：无 `isolation.network` 段）
    - **Acceptance:** 三条操作各有 transcript 屏上证据——①`curl -sI https://github.com` 直通（档内无需批准）；②`curl -sI https://example.com` 触发首见批准门：拒 → tool_result 含 `[network_denied]` + 字面 `Current allowlist source: built-in preset allowlist (github / npm / playwright defaults).`；批 → 同会话再访不再问；③`git push --dry-run`（https remote）档内可达（凭据遗留如实登记）
-   - Status: [ ] pending
+   - **实测登记：** T5 首跑发现内层桥冷启动竞态（裸 curl exit 7），前置修复 = `buildInnerBridgeScript` 就绪轮询（spec 登记见 `specs/egress-ssh-bridge.md` T1 段修订注记），T5 以裸 curl 重跑为准。
+   - **实测结果（重跑，pty 会话 t5-preset / TUI 会话 d8ab7675 + 33983ed7）：三条操作全 PASS。** ①裸 `curl -sI https://github.com` 直通（`HTTP/1.1 200`，无 sleep/retry，竞态修复生效）；②`curl -sI https://example.com` 首见批准门弹出，拒 → tool_result 含 `[network_denied]` + 字面 `Current allowlist source: built-in preset allowlist (github / npm / playwrig…`；批（新会话按 `a`）→ 直通 200 + 第三次运行零弹窗；③`git push --dry-run https://github.com/winter6205/iknow.git` 完整成功（`[new branch]` dry-run，认证可用，无凭据面遗留）。差异登记两处：a) 拒绝按 `example.com:443` 键做会话级缓存，同会话重跑不重弹门（既有批准门语义），批准路径以新会话复跑覆盖；b) 操作③命令字面为 https URL，宿主全局 `url.git@github.com:.insteadOf` 改写后实际走 SSH 传输（ssh-bridge 隧道）——https :443 档内可达判据由操作①独立覆盖。OQ2 playwright 两域复核未在本轮 TUI 执行（webui 浏览器下载不在三操作内），维持 spec 登记不阻塞。
+   - Status: [x] done
    - [blocks: T2, T3]
 
 ## Notes
 
 - **T1/T2 的落地次序留 headroom**：T1 测试钉 `"builtin"` 字面值意味着封闭联合的枚举扩展须随其一 landing——union 改动放 T1 还是 T2 由实现者按「每颗子弹单 commit 且 build 绿」自行裁量，两颗合起来的形状由 Acceptance 钉死。
 - **OQ1（批准写回 settings）不阻塞**：`persisted` 档生产者暂由「settings 段在场」承担；写回 API 落地时若需第四档另裁。
+- **rebase 调和登记（03c6ca0a）**：cherry-pick 到最新 master 时与 credential-sentinel 侧「network 段缺席 → 工厂返 `undefined` + no-fence 痕」语义冲突，按 preset invariant 3 反转（段缺席 = preset-only policy 恒起 session）；no-fence 痕语义只归 yolo 接线方，不再由「settings 段缺席」触发。
+- **follow-up（end-of-round review Medium，advisory 不阻塞）**：`SOURCE_LABEL.builtin` 文案 `(github / npm / playwright defaults)` 是 6 条目时代的手抄摘要，扩表 14 条后未含 pypi/crates/go/yarn——现文案逐字忠于 spec T2 钉死表与 T5 字面验收，故保持现状；若 spec owner 裁定修订，须三处同步（spec T2 表 + T5 验收字面 + 三处测试钉），或改为渲染期从 `BUILTIN_PRESET_ALLOWED_DOMAINS` 派生 / 类目中性文案。
 - 全部 bullets 落地后进入 end-of-round code review phase，再按 `docs/guides/prompt-development.md` 之外的常规收尾（`arthurpower:verification-before-completion`）闭轮。

@@ -209,9 +209,10 @@ export type MintEgressCredentialLayerArgs =
   MintEgressCredentialLayerFencedArgs | MintEgressCredentialLayerNoFenceArgs;
 
 /**
- * no-fence 痕文案 SSOT —— 入口（yolo 接线方）与装配层
- * （`createEgressPolicyFactory` isolation OFF 分支）共用一条 canonical
- * 串，离线 grep `skipped: no-fence` 即可查证姿态。文案不含任何凭据材料。
+ * no-fence 痕文案 SSOT —— yolo / isolation OFF 接线方（`mintEgressCredentialLayer`
+ * no-fence 姿态档）专用；生产装配的 network 段缺席已改走 builtin preset
+ * policy（fence 在场，preset spec invariant 3），不再登记本痕。离线 grep
+ * `skipped: no-fence` 即可查证姿态。文案不含任何凭据材料。
  */
 export function noFenceCredentialTrace(): string {
   return (

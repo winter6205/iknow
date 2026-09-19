@@ -654,10 +654,11 @@ export function createBashTool(
   // `approvalGate`(若 gate 在场)。把 gate 注入放在 bash 工厂侧而不是
   // 调用面,保证「egressPolicyFactory 提供数据、bash 工厂注入门件」的关
   // 注点分离,egress 域不反向依赖 permission AskUser 装配。
-  // 「批准成功后 allowlistSource 标注为 session」:bash 装配层把 gate 的
-  // allowedThisSession 视为 session 级(批准 = 用户交互颁发的会话级放行),
-  // 当 caller 没显式设 allowlistSource 时,fallback 为 "session" 以
-  // 渲染「Current allowlist source: session-level allowlist」。
+  // 「session 档生产者」（spec egress-preset-allowlist T2 钉死表）：装配面
+  // 只产 builtin / persisted 两档；caller 未显式设 allowlistSource 且交互
+  // 批准面（approvalGate）在场时，包装层补 "session" 档 —— 批准流颁发的
+  // 会话级放行，渲染「Current allowlist source: session-level allowlist」。
+  // caller 已设档时不覆盖。
   const wrappedEgressPolicyFactory:
     (() => EgressPolicyInput | undefined) | undefined =
     opts?.egressPolicyFactory !== undefined

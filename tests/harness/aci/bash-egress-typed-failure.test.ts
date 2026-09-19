@@ -32,6 +32,7 @@ import {
 } from "../../../src/harness/sandbox/egress/session.js";
 import {
   createEgressViolationSink,
+  type EgressAllowlistSource,
   type EgressViolation,
 } from "../../../src/harness/sandbox/egress/violations.js";
 import type { ToolExecutionContext } from "../../../src/harness/tools/types.js";
@@ -61,7 +62,7 @@ function makeStubEgressSessionFactory(args: {
   readonly port: number;
   readonly command: string;
   readonly reason: EgressViolation["reason"];
-  readonly allowlistSource?: "session" | "persisted" | "preset";
+  readonly allowlistSource?: EgressAllowlistSource;
 }): (opts: EgressSessionOptions) => Promise<EgressSession> {
   return async () => {
     const sink = createEgressViolationSink();
@@ -367,6 +368,49 @@ describe("bash handler → executor → categorizeResult → mid tier (T5 typed 
     const message = (r as { message: string }).message;
     expect(message).toContain(
       "Current allowlist source: session-level allowlist"
+    );
+  });
+
+  it("session 档真生产者：caller 未设 source + 交互批准面在场 → 包装层 fallback 标注 session (T2 钉死表)", async () => {
+    // bash 工厂包装层是 "session" 档的唯一真生产者：caller（assembly）
+    // 只产 builtin / persisted 两档，未显式设 source 且 askApproval 在场
+    // 时由包装层补 "session"。
+    const stub = makeStubEgressSessionFactory({
+      host: "evil.example",
+      port: 443,
+      command: "curl",
+      reason: "not-in-allowlist",
+    });
+
+    const tool = createBashTool(FIX_CWD, {
+      egressPolicyFactory: () => ({
+        allowedDomains: ["github.com"],
+        deniedDomains: [],
+        commandLabel: "curl",
+      }),
+      askApproval: async () => true,
+      createEgressSessionFactory: stub as never,
+    });
+
+    const registry = createRegistry([tool]);
+    const inner = createExecutor(registry);
+    const { executor } = buildViolationWiring(inner, {
+      sink: () => undefined,
+    });
+
+    const calls: ReadonlyArray<ToolCall> = [
+      Object.freeze({
+        id: "u4",
+        name: "bash",
+        input: { command: "curl" },
+      }) as ToolCall,
+    ];
+    const results = await executor.executeAll(calls);
+    const r = results[0]!;
+    expect(r.kind).toBe("execution_failed");
+    const message = (r as { message: string }).message;
+    expect(message).toContain(
+      "Current allowlist source: session-level allowlist."
     );
   });
 });
