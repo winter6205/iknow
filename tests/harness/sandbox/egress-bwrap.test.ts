@@ -154,17 +154,30 @@ describe("createBwrapFence — egress spec 扩展 (ADR-0097 / T4)", () => {
     const dir = "/test-root/vendor/egress-relay";
     let roIdx = -1;
     for (let i = 0; i + 2 < argv.length; i++) {
-      if (argv[i] === "--ro-bind" && argv[i + 1] === dir && argv[i + 2] === dir) {
+      if (
+        argv[i] === "--ro-bind" &&
+        argv[i + 1] === dir &&
+        argv[i + 2] === dir
+      ) {
         roIdx = i;
         break;
       }
     }
-    assert.ok(roIdx > 0, "expected --ro-bind <relayAssetsDir> <relayAssetsDir>");
+    assert.ok(
+      roIdx > 0,
+      "expected --ro-bind <relayAssetsDir> <relayAssetsDir>"
+    );
     // 独立 argv 项（security-boundaries.md：不许内联语法）——三项形态已
     // 由上面的索引校验（每项独立元素）。落位 = workspaceMounts 之后、
     // cwdReadonly/proc 之前：与 socket bind 同段。
-    assert.ok(roIdx < argv.indexOf("--proc"), "relay ro-bind precedes proc/dev");
-    assert.ok(roIdx < argv.indexOf("--clearenv"), "relay ro-bind precedes --clearenv");
+    assert.ok(
+      roIdx < argv.indexOf("--proc"),
+      "relay ro-bind precedes proc/dev"
+    );
+    assert.ok(
+      roIdx < argv.indexOf("--clearenv"),
+      "relay ro-bind precedes --clearenv"
+    );
   });
 
   it("socket bind lands AFTER workspaceMounts, BEFORE cwdReadonly/proc", () => {

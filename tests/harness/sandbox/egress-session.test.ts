@@ -28,7 +28,13 @@
  * node:http listen unix socket）。
  */
 
-import { mkdtempSync, rmSync, existsSync, writeFileSync, statSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  existsSync,
+  writeFileSync,
+  statSync,
+} from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

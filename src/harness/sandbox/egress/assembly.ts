@@ -27,6 +27,11 @@ import type {
   IknowSettings,
   IknowSettingsIsolationNetwork,
 } from "../../../config/settings.js";
+import {
+  assembleEgressCredentials,
+  noFenceCredentialTrace,
+  type EgressCredentialRoster,
+} from "./credential-assembly.js";
 import type { EgressPolicyInput } from "./session.js";
 
 /**
@@ -44,6 +49,11 @@ import type { EgressPolicyInput } from "./session.js";
 export interface CreateEgressPolicyFactoryOptions {
   readonly settings: IknowSettings;
   readonly commandLabel: string;
+  /**
+   * egress-credential-sentinel T1：拒铸留痕通道（无 injectHosts 条目的
+   * warn 痕，invariant 7 禁静默）。缺省 = 静默跳过（调用面不关心时）。
+   */
+  readonly onWarn?: (message: string) => void;
 }
 
 /**
@@ -75,16 +85,32 @@ export interface CreateEgressPolicyFactoryOptions {
 export function createEgressPolicyFactory(
   opts: CreateEgressPolicyFactoryOptions
 ): () => EgressPolicyInput | undefined {
-  const { settings, commandLabel } = opts;
+  const { settings, commandLabel, onWarn } = opts;
   // 读 settings 一次（settings 在 build-engine 主链是 module-load 期
   // resolve 的 freeze 对象,跨调用安全;hot-reload 由调用方重造工厂）
   // —— 此处取一次网络段缓存到闭包,fail-closed 缺省 = 直接返 undefined。
   const network = settings.isolation?.network;
+  // egress-credential-sentinel T1：凭据名册装配（内置 github 两条目 + 用户段
+  // 收窄/追加）。凭据段**不**开启 session —— network 缺席仍是 fail-closed
+  // 纯断网（下方 undefined 分支优先），credentials 只随 policy 数据形状走。
+  const credentials = assembleEgressCredentials(
+    settings.isolation?.credentials,
+    onWarn
+  );
 
   if (network === undefined) {
     // 无 network 配置 → 本次调用不起 session,fence 走纯断网。
     // 这是 spec 要求的 fail-closed 合法态,不是缺陷:settings 段缺席
     // = 用户未声明出网边界 = 默认拒绝。
+    // T6 / F9（Assumption 9）：出网缝与凭据层整体缺席的姿态显式登记 ——
+    // canonical `skipped: no-fence` 痕进诊断/日志（invariant 7 禁静默，
+    // 离线可查证「无存在面保护」），SC9 反命门闭合。
+    const onDiagnostic =
+      onWarn ??
+      ((m: string): void => {
+        console.warn(m);
+      });
+    onDiagnostic(noFenceCredentialTrace());
     return () => undefined;
   }
 
@@ -92,7 +118,8 @@ export function createEgressPolicyFactory(
   // 段已深 frozen,reference safe）。`deniedResolvedAddresses` 留
   // undefined,让 session.ts 内部走 `DEFAULT_PRIVATE_DENIED_RANGES`
   // 默认私网拒档(spec §SC4 验收前提)。
-  return (): EgressPolicyInput => buildEgressPolicy(network, commandLabel);
+  return (): EgressPolicyInput =>
+    buildEgressPolicy(network, commandLabel, credentials);
 }
 
 /**
@@ -107,7 +134,8 @@ export function createEgressPolicyFactory(
  */
 function buildEgressPolicy(
   network: IknowSettingsIsolationNetwork,
-  commandLabel: string
+  commandLabel: string,
+  credentials: EgressCredentialRoster
 ): EgressPolicyInput {
   return {
     allowedDomains: network.allowedDomains ?? [],
@@ -117,5 +145,7 @@ function buildEgressPolicy(
     // 用户层 settings 是"预置配置"路径;会话级批准由 bash 工厂的
     // approvalGate 决定,不在本 helper 范围内)。
     allowlistSource: "preset",
+    // T1 数据形状注入：铸造消费归 T2，本层不参与判定。
+    credentials,
   };
 }

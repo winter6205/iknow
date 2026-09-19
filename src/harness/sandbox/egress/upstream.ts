@@ -39,3 +39,79 @@ export {
   type ResolvedAddressGuard,
   type ResolvedAddressGuardOptions,
 } from "@anthropic-ai/sandbox-runtime/dist/sandbox/resolved-address-guard.js";
+
+/**
+ * egress-credential-sentinel T2 / SC10：domain-pattern 匹配器收口。
+ * `domain-matcher.ts` 是既有深路径 import 点，按 0097「文件承载纪律」并入
+ * 本适配层，使 `src/` 的包深路径 import 只剩 upstream.ts 一处。
+ * `matchesDomainPattern`（无端口档）= sentinel registry 的 HostMatcher
+ * （T3 代换门接线用，包 manager 同件，`sandbox-manager.js:282`）；
+ * `matchesDomainPatternWithPort` = 允许集判定用（T2 收口）。
+ */
+export {
+  matchesDomainPattern,
+  matchesDomainPatternWithPort,
+} from "@anthropic-ai/sandbox-runtime/dist/sandbox/domain-pattern.js";
+
+/**
+ * egress-credential-sentinel T4（Assumption 3 收口纪律）：MITM CA 件 ——
+ * `createMitmCA({caCertPath, caKeyPath})` 装载持久 CA 并**顺带现写 trust
+ * bundle**（`trustBundlePath` = 包内 writeTrustBundle 的产物，每次调用新
+ * temp 文件；只含 CERTIFICATE 块的 PEM 过滤在包内，mitm-ca.js:166-175，
+ * 本仓不复刻）。`generateCa` 是纯生成原语（无 FS 副作用），持久层落盘
+ * 归本仓 `ca-store.ts`。`disposeMitmCA` = T3 dispose 接线的 trust bundle
+ * 临时件清理通道（bundle 目录恒删；持久 CA 非 ephemeral 不受影响，
+ * mitm-ca.js:111-125）。
+ */
+export {
+  createMitmCA,
+  disposeMitmCA,
+  generateCa,
+  validateCaPair,
+  type CaPairValidation,
+  type GeneratedCa,
+  type MitmCA,
+} from "@anthropic-ai/sandbox-runtime/dist/sandbox/mitm-ca.js";
+
+/**
+ * 信任注入名册全集（Assumption 11：env 注入面 = 该 roster 全量，值指向
+ * trust bundle）。逐客户端三臂常量在 `ca-store.ts` 另行钉死。
+ * `normalizePathForSandbox` = 凭据条目 path 的 tilde 展开 + realpath 归一，
+ * T2 文件预检（F2/F3）与包内 masking 用同一归一形态，deny/binding 落点对齐。
+ */
+export {
+  CA_TRUST_VARS,
+  normalizePathForSandbox,
+} from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-utils.js";
+
+/**
+ * egress-credential-sentinel T2（Assumption 3 收口纪律）：sentinel 铸造与
+ * 掩码流程件 —— `SentinelRegistry`（假值空间，per-session）、
+ * `buildMaskedEnvVars` / `buildMaskedFileBinds`（env / 文件掩码流程）。
+ * 本仓偏离点集中在装配层入参：`onExtractNoMatch` 显式传 `"deny"`
+ * （Assumption 8，不吃包默认 `"warn"` fail-open）；`allowedDomains` 入参
+ * 恒传 `[]`（Assumption 6，条目 injectHosts 必为显式值，不吃缺省扩张）。
+ * 非 UTF-8 / 二进制的包内行为是静默 skip（fail-open），本仓在调用前
+ * 预检并降级 deny —— 见 `credential-assembly.ts`。
+ */
+export {
+  SentinelRegistry,
+  SENTINEL_PREFIX,
+} from "@anthropic-ai/sandbox-runtime/dist/sandbox/credential-sentinel.js";
+
+export {
+  buildMaskedEnvVars,
+  type MaskedEnvBuildResult,
+} from "@anthropic-ai/sandbox-runtime/dist/sandbox/credential-mask-env.js";
+
+export {
+  buildMaskedFileBinds,
+  MaskedFileStore,
+  type MaskedFileBind,
+  type MaskedFileBuildResult,
+} from "@anthropic-ai/sandbox-runtime/dist/sandbox/credential-mask-files.js";
+
+export type {
+  CredentialEnvVarConfig,
+  CredentialFileConfig,
+} from "@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-config.js";

@@ -33,8 +33,7 @@ try {
   process.stderr.write("egress-http-connect: HTTP_PROXY is not a URL\n");
   process.exit(2);
 }
-const proxyPort =
-  proxy.port.length > 0 ? Number.parseInt(proxy.port, 10) : 80;
+const proxyPort = proxy.port.length > 0 ? Number.parseInt(proxy.port, 10) : 80;
 // userinfo 是 percent-encoded（buildProxyEnv 生成 hex token，无需转义，但
 // URL 语义下解码保持正确）。Proxy-Authorization 走 Basic。
 const credentials = Buffer.from(

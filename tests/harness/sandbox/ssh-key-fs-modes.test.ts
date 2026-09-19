@@ -118,10 +118,7 @@ describe("T6 私钥两档可读性（真 bwrap，fixture key 生成于 tmpdir）
   it.skipIf(skip)(
     "workspace 档：对 key 的写必败（ro-bind EROFS），宿主侧文件内容逐字节不变",
     () => {
-      const r = runFence(
-        "workspace",
-        'echo tamper >> "$HOME/.ssh/id_ed25519"'
-      );
+      const r = runFence("workspace", 'echo tamper >> "$HOME/.ssh/id_ed25519"');
       assert.notEqual(r.status, 0, "write to ro-bound key must fail");
       assert.match(
         r.stderr.toLowerCase(),

@@ -22,7 +22,10 @@ import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
 const CONNECT_SCRIPT = fileURLToPath(
-  new URL("../../../vendor/egress-relay/egress-http-connect.mjs", import.meta.url)
+  new URL(
+    "../../../vendor/egress-relay/egress-http-connect.mjs",
+    import.meta.url
+  )
 );
 
 interface ChildResult {
@@ -144,10 +147,10 @@ describe("egress-http-connect.mjs — pre-header hang surfaces (review Medium)",
     const payload = "SSH-2.0-fake-banner\r\n";
     const proxy = await startFakeProxy((sock) => {
       sock.once("data", (req) => {
-        expect(req.toString("latin1")).toMatch(/^CONNECT example\.test:22 HTTP\/1\.1/);
-        sock.write(
-          "HTTP/1.1 200 Connection established\r\n\r\n" + payload
+        expect(req.toString("latin1")).toMatch(
+          /^CONNECT example\.test:22 HTTP\/1\.1/
         );
+        sock.write("HTTP/1.1 200 Connection established\r\n\r\n" + payload);
         sock.end();
       });
     });

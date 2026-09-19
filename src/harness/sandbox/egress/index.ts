@@ -49,3 +49,24 @@ export {
   type CreateEgressApprovalGateOptions,
   type EgressApprovalGate,
 } from "./approval.js";
+
+export {
+  assembleEgressCredentials,
+  BUILTIN_GITHUB_CREDENTIAL_ROSTER,
+  type EgressCredentialEnvVarEntry,
+  type EgressCredentialFileEntry,
+  type EgressCredentialRoster,
+  type UserCredentialSection,
+} from "./credential-assembly.js";
+
+export {
+  assertInjectedEnvInFakeSpace,
+  assertSentinelSubstringContract,
+  EgressCredentialMintError,
+  mintEgressCredentials,
+  type CredentialDenyTrace,
+  type EgressCredentialMint,
+  type EgressCredentialMintErrorKind,
+  type EgressFenceBind,
+  type MintEgressCredentialsArgs,
+} from "./credential-mint.js";

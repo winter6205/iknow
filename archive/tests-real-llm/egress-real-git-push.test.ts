@@ -53,18 +53,18 @@ function sshRemoteHost(remote: string): string | undefined {
   return m ? m[1].toLowerCase() : undefined;
 }
 
-runOrSkip("egress real git push --dry-run e2e (SSH remote, egress fence)", () => {
-  const pads: string[] = [];
+runOrSkip(
+  "egress real git push --dry-run e2e (SSH remote, egress fence)",
+  () => {
+    const pads: string[] = [];
 
-  afterAll(async () => {
-    await Promise.all(
-      pads.splice(0).map((p) => rm(p, { recursive: true, force: true }))
-    );
-  });
+    afterAll(async () => {
+      await Promise.all(
+        pads.splice(0).map((p) => rm(p, { recursive: true, force: true }))
+      );
+    });
 
-  it(
-    "git push --dry-run 经放行域 :22 隧道走通到认证层（非破坏性 ref）",
-    async () => {
+    it("git push --dry-run 经放行域 :22 隧道走通到认证层（非破坏性 ref）", async () => {
       const override = process.env.IKNOW_EGRESS_PUSH_REMOTE?.trim();
       let remote = override ?? "";
       if (remote === "") {
@@ -76,9 +76,7 @@ runOrSkip("egress real git push --dry-run e2e (SSH remote, egress fence)", () =>
           );
           let so = "";
           child.stdout.on("data", (c: Buffer) => (so += c.toString("utf8")));
-          child.on("close", (code) =>
-            resolve(code === 0 ? so.trim() : "")
-          );
+          child.on("close", (code) => resolve(code === 0 ? so.trim() : ""));
           child.on("error", () => resolve(""));
         });
         remote = r;
@@ -145,7 +143,9 @@ runOrSkip("egress real git push --dry-run e2e (SSH remote, egress fence)", () =>
           let se = "";
           child.stdout.on("data", (c: Buffer) => (so += c.toString("utf8")));
           child.stderr.on("data", (c: Buffer) => (se += c.toString("utf8")));
-          child.on("error", () => resolve({ code: null, stdout: so, stderr: se }));
+          child.on("error", () =>
+            resolve({ code: null, stdout: so, stderr: se })
+          );
           child.on("close", (code) =>
             resolve({ code, stdout: so, stderr: se })
           );
@@ -167,7 +167,6 @@ runOrSkip("egress real git push --dry-run e2e (SSH remote, egress fence)", () =>
       } finally {
         await session.dispose().catch(() => undefined);
       }
-    },
-    180_000
-  );
-});
+    }, 180_000);
+  }
+);

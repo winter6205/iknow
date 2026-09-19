@@ -48,8 +48,16 @@ export function egressRelayPathsFor(installRoot: string): {
 } {
   return {
     relayDir: join(installRoot, EGRESS_RELAY_DIR_REL),
-    bridgeScriptPath: join(installRoot, EGRESS_RELAY_DIR_REL, EGRESS_TCP_RELAY_FILE),
-    connectScriptPath: join(installRoot, EGRESS_RELAY_DIR_REL, EGRESS_HTTP_CONNECT_FILE),
+    bridgeScriptPath: join(
+      installRoot,
+      EGRESS_RELAY_DIR_REL,
+      EGRESS_TCP_RELAY_FILE
+    ),
+    connectScriptPath: join(
+      installRoot,
+      EGRESS_RELAY_DIR_REL,
+      EGRESS_HTTP_CONNECT_FILE
+    ),
   };
 }
 
@@ -85,11 +93,13 @@ export function resolveNodeExecutable(): string | undefined {
  * `resolveInstallRoot()` 抛错（裸环境）同样收敛为 `undefined` —— 本产品
  * 依赖缺失语义。
  */
-export function resolveEgressRelay(deps: {
-  readonly installRoot?: string;
-  readonly resolveNode?: () => string | undefined;
-  readonly exists?: (path: string) => boolean;
-} = {}): EgressRelayPaths | undefined {
+export function resolveEgressRelay(
+  deps: {
+    readonly installRoot?: string;
+    readonly resolveNode?: () => string | undefined;
+    readonly exists?: (path: string) => boolean;
+  } = {}
+): EgressRelayPaths | undefined {
   const nodePath = (deps.resolveNode ?? resolveNodeExecutable)();
   if (nodePath === undefined) return undefined;
   let installRoot: string;

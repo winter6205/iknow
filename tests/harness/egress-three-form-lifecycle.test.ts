@@ -32,7 +32,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -70,21 +78,17 @@ vi.mock(
 );
 
 const childProcessMock = await import("node:child_process");
-const spawnMock = childProcessMock.spawn as unknown as ReturnType<
-  typeof vi.fn
->;
+const spawnMock = childProcessMock.spawn as unknown as ReturnType<typeof vi.fn>;
 
-const { createBashTool } =
-  await import("../../src/harness/aci/tools/bash.ts");
+const { createBashTool } = await import("../../src/harness/aci/tools/bash.ts");
 const { createBackgroundTaskManager, defaultBackgroundSpawn } =
   await import("../../src/harness/background/manager.ts");
 const { resolveTasksDir } =
   await import("../../src/harness/background/paths.ts");
 const { makeDefaultRunVerify, disposeEgressSessionForVerify } =
   await import("../../src/harness/verify/sandbox-run.ts");
-const sessionMocked = await import(
-  "../../src/harness/sandbox/egress/session.js"
-);
+const sessionMocked =
+  await import("../../src/harness/sandbox/egress/session.js");
 const {
   buildInnerBridgeScript,
   buildProxyEnv,
@@ -100,9 +104,8 @@ const STUB_RELAY = {
 const actualSession = await vi.importActual<
   typeof import("../../src/harness/sandbox/egress/session.js")
 >("../../src/harness/sandbox/egress/session.js");
-const { createEgressViolationSink } = await import(
-  "../../src/harness/sandbox/egress/violations.ts"
-);
+const { createEgressViolationSink } =
+  await import("../../src/harness/sandbox/egress/violations.ts");
 
 const FIX_CWD = mkdtempSync(join(tmpdir(), "iknow-egress-3f-"));
 const scratchDirs: string[] = [];
@@ -214,8 +217,7 @@ const ABSENT: Partial<Facts> = {
 async function driveForegroundBash(): Promise<readonly string[]> {
   const tool = createBashTool(FIX_CWD, {
     egressPolicyFactory: () => ({ ...POLICY }),
-    createEgressSessionFactory: (async () =>
-      stubSession()) as never,
+    createEgressSessionFactory: (async () => stubSession()) as never,
   });
   spawnMock.mockClear();
   await tool.handler({ command: WIRE_CMD }, { conversationId: "conv-3f-fg" });
@@ -299,8 +301,7 @@ describe("egress-ssh-bridge T5 / F1 — session 缺席三路径零注入（invar
   it("前台：工厂返 undefined → argv 零注入", async () => {
     const tool = createBashTool(FIX_CWD, {
       egressPolicyFactory: () => undefined,
-      createEgressSessionFactory: (async () =>
-        stubSession()) as never,
+      createEgressSessionFactory: (async () => stubSession()) as never,
     });
     spawnMock.mockClear();
     await tool.handler({ command: WIRE_CMD }, { conversationId: "conv-3f-u" });
@@ -311,7 +312,10 @@ describe("egress-ssh-bridge T5 / F1 — session 缺席三路径零注入（invar
     const tool = createBashTool(FIX_CWD, {
       egressPolicyFactory: () => ({ ...POLICY }),
       createEgressSessionFactory: (async () => {
-        throw new EgressRelayUnavailableError("relay deps missing", "repair the iknow install root");
+        throw new EgressRelayUnavailableError(
+          "relay deps missing",
+          "repair the iknow install root"
+        );
       }) as never,
     });
     spawnMock.mockClear();
@@ -329,7 +333,10 @@ describe("egress-ssh-bridge T5 / F1 — session 缺席三路径零注入（invar
 
   it("background：EgressRelayUnavailableError → 任务照常 spawn 且零注入", async () => {
     sessionHolder.impl = async () => {
-      throw new EgressRelayUnavailableError("relay deps missing", "repair the iknow install root");
+      throw new EgressRelayUnavailableError(
+        "relay deps missing",
+        "repair the iknow install root"
+      );
     };
     expect(fenceFacts(await driveBackground(true))).toMatchObject(ABSENT);
   });
@@ -341,7 +348,10 @@ describe("egress-ssh-bridge T5 / F1 — session 缺席三路径零注入（invar
 
   it("verify：EgressRelayUnavailableError → 命令照常执行且零注入", async () => {
     sessionHolder.impl = async () => {
-      throw new EgressRelayUnavailableError("relay deps missing", "repair the iknow install root");
+      throw new EgressRelayUnavailableError(
+        "relay deps missing",
+        "repair the iknow install root"
+      );
     };
     expect(fenceFacts(await driveVerify(true))).toMatchObject(ABSENT);
   });
@@ -391,8 +401,12 @@ describe("egress-ssh-bridge T5 — settle / verify 单例 / 在场桥释放", ()
     await runVerify("echo b", {});
     expect(sessionHolder.calls).toBe(1);
     // 0097 §dispose 契约：释放调用幂等（未起 / 已释放静默成功）。
-    await expect(disposeEgressSessionForVerify(runVerify)).resolves.toBeUndefined();
-    await expect(disposeEgressSessionForVerify(runVerify)).resolves.toBeUndefined();
+    await expect(
+      disposeEgressSessionForVerify(runVerify)
+    ).resolves.toBeUndefined();
+    await expect(
+      disposeEgressSessionForVerify(runVerify)
+    ).resolves.toBeUndefined();
   });
 
   it("资源在场证据：stale socket 启动前清理 + server 真 listen + dispose 收全部已起资源且幂等", async () => {
@@ -409,7 +423,8 @@ describe("egress-ssh-bridge T5 — settle / verify 单例 / 在场桥释放", ()
         nodePath: "/test-root/bin/node",
         relayDir: "/test-root/vendor/egress-relay",
         bridgeScriptPath: "/test-root/vendor/egress-relay/egress-tcp-relay.mjs",
-        connectScriptPath: "/test-root/vendor/egress-relay/egress-http-connect.mjs",
+        connectScriptPath:
+          "/test-root/vendor/egress-relay/egress-http-connect.mjs",
       }),
       socketPathFactory: () => stalePath,
     });
@@ -426,7 +441,7 @@ describe("egress-ssh-bridge T5 — settle / verify 单例 / 在场桥释放", ()
     await session.dispose();
     await session.dispose();
   });
-})
+});
 
 afterAll(() => {
   rmSync(FIX_CWD, { recursive: true, force: true });

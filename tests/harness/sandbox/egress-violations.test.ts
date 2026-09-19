@@ -264,8 +264,12 @@ describe("renderEgressFailureMessage (T5 typed failure, spec §Violation feedbac
 describe("sshHostKeyFailureGuidance — F4 known_hosts 指引 (spec §Failure paths F4)", () => {
   it("returns undefined for empty / non-ssh stderr（无误报，命令正常路径不变形）", () => {
     expect(sshHostKeyFailureGuidance("")).toBeUndefined();
-    expect(sshHostKeyFailureGuidance("fatal: not a git repository")).toBeUndefined();
-    expect(sshHostKeyFailureGuidance("Permission denied (publickey).")).toBeUndefined();
+    expect(
+      sshHostKeyFailureGuidance("fatal: not a git repository")
+    ).toBeUndefined();
+    expect(
+      sshHostKeyFailureGuidance("Permission denied (publickey).")
+    ).toBeUndefined();
   });
 
   it("detects the first-time unknown-host fingerprint prompt", () => {
