@@ -1795,10 +1795,11 @@ export class SessionHub {
           }
           return deps.adapter.encodeUserText(effective);
         };
-        // T6: wrap the executor with the violation kill-session hook. Serve is
-        // long-running and multi-conversation, so on kill we (a) write the
-        // violation event to the JSONL trace and (b) report `protocolError`
-        // as the turn stop reason — we do NOT touch process.exitCode.
+        // T6: wrap the executor with the violation kill-session hook. Serve/TUI
+        // is long-running, so on kill we write the violation event to the JSONL
+        // trace and do NOT touch process.exitCode. hard_wall already failed the
+        // tool; remapping stopReason to protocolError would drop the assistant
+        // delta on persist (SC4) and undo ADR-0108 interrupt keep.
         let killed = false;
         const counter = createViolationCounter();
         const onKill = (reason: string): void => {
@@ -2084,13 +2085,9 @@ export class SessionHub {
                       records: runOutcome.records,
                     })
                   : undefined;
-              // Violation kill → surface protocolError so the SPA client can
-              // attribute the stop; decideCheckpointPersist then persists only
-              // the turn's user query (partial_user_only) and drops the failed
-              // assistant turn — spec invariant 8 / SC4.
-              finalResult = killed
-                ? { ...result, stopReason: "protocolError" }
-                : result;
+              // Violation kill is a trace latch only. Engine stopReason (and
+              // therefore checkpoint persist) stays as run() returned it.
+              finalResult = result;
               return {
                 finalResult,
                 verifyView,

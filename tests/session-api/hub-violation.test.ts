@@ -1,9 +1,11 @@
 /**
- * SessionHub T6 test: violation kill-session wiring on the serve entry.
+ * SessionHub T6 test: violation kill-session wiring on the serve/TUI entry.
  *
- * Serve is long-running, so a violation kill must NOT set process.exitCode;
- * instead the turn reports stopReason=protocolError (OQ4 frozen shape) and
- * the violation event is written to the JSONL trace when traceOut is set.
+ * Serve/TUI is long-running, so a mid-tier escalation must NOT set
+ * process.exitCode. hard_wall already returns execution_failed to the model;
+ * the kill latch must not remap the engine stopReason to protocolError
+ * (that persist path drops the assistant delta and undoes ADR-0108 keep).
+ * The violation event is still written to the JSONL trace when traceOut is set.
  *
  * SC-W 6/7 (v2): serve 产品路径注入 agentVersion → run 末尾写 session 根记录
  * (含 agent_version 字段)。本文件是 serve 产品路径集成断言的落点。
@@ -21,7 +23,7 @@ import {
   resolveProjectSessionDir,
   SessionStore,
 } from "../../src/session-api/store/index.ts";
-import type { LoopEngineDeps } from "../../src/harness/index.ts";
+import type { LoopAdapter, LoopEngineDeps } from "../../src/harness/index.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
@@ -76,8 +78,41 @@ function makeViolationDeps(): LoopEngineDeps {
   return { adapter, executor, registry, maxTurns: 8 };
 }
 
+/** Same denials as makeViolationDeps; abort on the 4th model step (after kill). */
+function makeViolationDepsAbortOnFourthStep(
+  controller: AbortController
+): LoopEngineDeps {
+  const base = makeViolationDeps();
+  const inner = base.adapter;
+  let steps = 0;
+  const adapter: LoopAdapter = {
+    encodeUserText: (t) => inner.encodeUserText(t),
+    encodeToolResults: (r) => inner.encodeToolResults(r),
+    async step(state, request, signal) {
+      steps += 1;
+      if (steps === 4) {
+        queueMicrotask(() => controller.abort());
+        await new Promise<never>((_, reject) => {
+          const fail = (): void => {
+            reject(
+              new DOMException("This operation was aborted", "AbortError")
+            );
+          };
+          if (signal?.aborted) {
+            fail();
+            return;
+          }
+          signal?.addEventListener("abort", fail, { once: true });
+        });
+      }
+      return inner.step(state, request, signal);
+    },
+  };
+  return { ...base, adapter };
+}
+
 describe("SessionHub violation kill (serve entry)", () => {
-  it("mid-tier escalation surfaces protocolError and does not touch exitCode", async () => {
+  it("mid-tier escalation keeps engine stopReason and assistant history; does not touch exitCode", async () => {
     const savedExitCode = process.exitCode;
     process.exitCode = 0;
     try {
@@ -93,8 +128,15 @@ describe("SessionHub violation kill (serve entry)", () => {
         conversationId: convId,
         text: "do something dangerous",
       });
-      // The kill must propagate protocolError as the stop reason (OQ4 shape).
-      assert.equal(res.turn.answer.stopReason, "protocolError");
+      // Kill latch is observability only: engine completed; remapping to
+      // protocolError would drop this assistant delta on persist (SC4).
+      assert.equal(res.turn.answer.stopReason, "completed");
+      assert.equal(res.turn.answer.finalText, "final answer");
+      const loaded = await store.load(convId);
+      assert.ok(
+        loaded.messages.some((m) => m.role === "assistant"),
+        "assistant turns after hard_wall must remain on disk"
+      );
       // Serve must never kill the process: exitCode stays 0.
       assert.equal(process.exitCode, 0);
       // T3 (SC6): violation 写 `<projectDir>/<convId>/trace.jsonl`,
@@ -125,11 +167,32 @@ describe("SessionHub violation kill (serve entry)", () => {
       const root = JSON.parse(roots[0]!) as Record<string, unknown>;
       assert.equal(root["conversation_id"], convId);
       assert.equal(root["agent_version"], getVersion());
-      // 注:violation kill 是 hub 层后处理,只重映射 DTO 的 stopReason;run 实际
-      // 停因仍是 completed,故 session 根 status 为 "ok" —— 不在此断言状态。
     } finally {
       process.exitCode = savedExitCode;
     }
+  });
+
+  it("Esc after mid-tier latch keeps cancelled persist (does not strip assistant)", async () => {
+    const controller = new AbortController();
+    const hub = new SessionHub({
+      store,
+      workspaceRoot: process.cwd(),
+      deps: makeViolationDepsAbortOnFourthStep(controller),
+      traceOut: traceDir,
+    });
+    const { session } = await hub.createSession();
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "do something dangerous then stop",
+      signal: controller.signal,
+    });
+    assert.equal(res.turn.answer.stopReason, "cancelled");
+    const loaded = await store.load(session.conversation_id);
+    assert.ok(
+      loaded.messages.some((m) => m.role === "assistant"),
+      "tool rounds before Esc must remain on disk"
+    );
+    assert.equal(loaded.checkpoints?.[0]?.interruptReason, "cancelled");
   });
 
   it("non-violation turns keep their natural stop reason", async () => {
