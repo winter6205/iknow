@@ -45,7 +45,7 @@ OVERALL: PASS — hand to writing-plans
    - **Inherits:** spec T4（默认不新增真域 probe 类别避免 CI 抖动，登记于此；若实现期新增须同步 `security-boundaries` 的 11 类探针纪律说明）、F4（宿主缺 socat → `SocatUnavailableError` infra 文案不冒充域判定拒绝，既有面回归即可）、F5（preset 命中不豁免地址守卫，invariant 5）、仓规「动 fence 相关必跑 probe」
    - **Surface:** `src/harness/sandbox`（fence 装配面）、`scripts/sandbox-probe.ts`
    - **Acceptance:** `npm run probe:sandbox` 全部类别全绿（11 类探针维持）；F5 单测钉住 preset 域解析到私网/loopback（rebinding）照拒、`address-denied` 文案不变；F4 既有面回归绿；未新增真网 probe 类别（或已按纪律同步登记）
-   - Status: [ ] pending
+   - Status: [x]
    - [blocks: T1]
 
 5. **TUI pty 实测：三操作屏上证据（仓规地面）** — tag: `[implementation]`

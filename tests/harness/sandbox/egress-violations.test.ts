@@ -121,6 +121,13 @@ describe("renderEgressViolations", () => {
     expect(out).toContain("[network_denied]");
     expect(out).toContain("loopback.example:443");
     expect(out).toContain("denied address");
+    // F5（egress-preset-allowlist spec）：preset 在场后 address-denied 文案逐字
+    // 不变——整行精确钉子防渲染漂移。
+    expect(out).toBe(
+      "[network_denied] loopback.example:443 resolved to a denied address " +
+        "(command: echo hi); an allowed hostname must not resolve into " +
+        "loopback / private / metadata IP space"
+    );
   });
 
   it("renders no-approval-inlet with non-interactive caveat", () => {
