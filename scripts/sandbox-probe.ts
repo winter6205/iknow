@@ -294,13 +294,13 @@ function setupWorktreeFixture(): {
 // 两分支随 ADR-0107 退役。
 // ---------------------------------------------------------------------------
 
-async function runEgressSeamCheck(profile: ProbeProfile): Promise<ProbeResult> {
+/**
+ * ① 边界路：relayResolver 注入 undefined → 必须抛产品依赖 typed error。
+ * 返回 undefined = 边界通过；返回 ProbeResult = 失败档（caller 直接短路）。
+ */
+async function checkRelayAbsentBoundary(): Promise<ProbeResult | undefined> {
   const { createEgressSession, EgressRelayUnavailableError } =
     await import("../src/harness/sandbox/egress/session.js");
-  const { resolveEgressRelay } =
-    await import("../src/harness/sandbox/egress/relay-assets.js");
-
-  // ① 边界路：relayResolver 注入 undefined → 必须抛产品依赖 typed error。
   try {
     await createEgressSession({
       policy: {
@@ -325,6 +325,17 @@ async function runEgressSeamCheck(profile: ProbeProfile): Promise<ProbeResult> {
       };
     }
   }
+  return undefined;
+}
+
+async function runEgressSeamCheck(profile: ProbeProfile): Promise<ProbeResult> {
+  const { createEgressSession } =
+    await import("../src/harness/sandbox/egress/session.js");
+  const { resolveEgressRelay } =
+    await import("../src/harness/sandbox/egress/relay-assets.js");
+
+  const boundaryFailure = await checkRelayAbsentBoundary();
+  if (boundaryFailure !== undefined) return boundaryFailure;
 
   // ② 端到端路：生产解析（node + vendor/egress-relay 自带资产）解析不到 =
   // 本安装坏了 → fail-loud（换装后这是硬前提，不再有「宿主缺包 → 降级报绿」
@@ -332,7 +343,8 @@ async function runEgressSeamCheck(profile: ProbeProfile): Promise<ProbeResult> {
   if (resolveEgressRelay() === undefined) {
     return {
       ok: false,
-      detail: "bundled egress relay unresolvable on this install (node or vendor/egress-relay missing)",
+      detail:
+        "bundled egress relay unresolvable on this install (node or vendor/egress-relay missing)",
     };
   }
   const targetIp = pickNonLoopbackNicIPv4();
@@ -403,7 +415,9 @@ async function runEgressSeamCheck(profile: ProbeProfile): Promise<ProbeResult> {
 }
 
 /** 等 fence 子进程 close（exit code 或 spawn error = null）。 */
-function newPromiseResolveChild(child: ReturnType<typeof spawn>): Promise<number | null> {
+function newPromiseResolveChild(
+  child: ReturnType<typeof spawn>
+): Promise<number | null> {
   return new Promise((resolve) => {
     child.on("close", (code) => resolve(code));
     child.on("error", () => resolve(null));
@@ -585,7 +599,8 @@ async function runSshDeniedProbe(profile: ProbeProfile): Promise<ProbeResult> {
   // 在场且相互区分：只有命令失败没有 drain 记录 = 归因缺口；只有 drain 没有
   // 失败 = 假拒。drain reason 取域判定拒绝家族（本探针无 gate → 具体为
   // `no-approval-inlet`），infra-unavailable 不算通过。
-  const ok = r.exit !== 0 && hit !== undefined && hit.reason !== "infra-unavailable";
+  const ok =
+    r.exit !== 0 && hit !== undefined && hit.reason !== "infra-unavailable";
   return {
     ok,
     detail: `exit=${r.exit} drain=${JSON.stringify(hit ?? null)} cmd_out="${r.stdout.split("\n").slice(0, 2).join(" / ")}"`,
@@ -1091,9 +1106,7 @@ function loadProfiles(): ProbeProfile[] | null {
   return profiles;
 }
 
-async function startProbeListener(
-  host = "127.0.0.1"
-): Promise<{
+async function startProbeListener(host = "127.0.0.1"): Promise<{
   port: number;
   stop: () => void;
 }> {

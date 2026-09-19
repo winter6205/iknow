@@ -23,8 +23,10 @@
  * 消费本层；输入是纯数据。
  */
 
-import { matchesDomainPatternWithPort } from "@anthropic-ai/sandbox-runtime/dist/sandbox/domain-pattern.js";
-import { createResolvedAddressGuard } from "@anthropic-ai/sandbox-runtime/dist/sandbox/resolved-address-guard.js";
+import {
+  createResolvedAddressGuard,
+  matchesDomainPatternWithPort,
+} from "./upstream.js";
 
 /**
  * 私网拒绝档（RFC 1918 + ULA + CGNAT）。

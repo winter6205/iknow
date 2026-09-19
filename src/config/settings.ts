@@ -56,8 +56,18 @@ import {
   mergeIsolationNetwork,
   type IknowSettingsIsolationNetwork,
 } from "./isolation-network.js";
+import {
+  parseIsolationCredentials,
+  mergeIsolationCredentials,
+  type IknowSettingsIsolationCredentials,
+} from "./isolation-credentials.js";
 
 export type { IknowSettingsIsolationNetwork } from "./isolation-network.js";
+export type {
+  IknowSettingsIsolationCredentials,
+  IknowSettingsCredentialFileEntry,
+  IknowSettingsCredentialEnvVarEntry,
+} from "./isolation-credentials.js";
 
 export interface IknowSettingsLlmCompress {
   contextWindow?: number;
@@ -337,6 +347,16 @@ export interface IknowSettingsIsolation {
    * `src/config/isolation-network.ts`。
    */
   network?: IknowSettingsIsolationNetwork;
+  /**
+   * egress-credential-sentinel T1：凭据名册段 —— **仅用户层键**（ADR-0084，
+   * 项目文件出现 isolation 即整段丢弃）。承载 `files[]`（path / 可选 extract
+   * 须含捕获组 1 / 可选 decode:"jwt" / injectHosts 必填）与 `envVars[]`
+   * （name / injectHosts 必填）；非法条目丢该条 + 警告不抛；用户层条目总数
+   * 上限 16 超出丢尾 + 警告。github 两条目由代码内置名册提供
+   * （`harness/sandbox/egress/credential-assembly.ts` SSOT），本段只做
+   * 收窄/追加。详见 `src/config/isolation-credentials.ts`。
+   */
+  credentials?: IknowSettingsIsolationCredentials;
 }
 
 /** ADR-0092 / SC13：filesystem isolation 档值域。 */
@@ -1161,7 +1181,8 @@ function mergeMemory(
  * worktreeExclusive 非 boolean → 丢弃该字段（不转型）；fsMode 非
  * `"global"` | `"workspace"` 字面量 → 丢弃（大小写敏感，与 `worktreeOnMutate`
  * boolean-only 纪律一致）；network 段走 `parseIsolationNetwork` 独立解析
- * （SC12 配置层契约）。四字段独立校验、互不影响——任一合法即保留段。
+ * （SC12 配置层契约）；credentials 段走 `parseIsolationCredentials` 独立解析
+ * （egress-credential-sentinel T1）。各字段独立校验、互不影响——任一合法即保留段。
  *
  * onWarn 透传给 `parseIsolationNetwork`，让非法网络条目留痕（与文件加载
  * 阶段 `[settings] ...` 警告通道共用一份 caller-supplied sink）。
@@ -1175,6 +1196,10 @@ function parseIsolation(
   const network = parseIsolationNetwork(raw.network, onWarn);
   if (network !== undefined) {
     out.network = network;
+  }
+  const credentials = parseIsolationCredentials(raw.credentials, onWarn);
+  if (credentials !== undefined) {
+    out.credentials = credentials;
   }
   return undefinedWhenEmpty(out);
 }
@@ -1217,6 +1242,11 @@ function mergeIsolation(
   const out = mergeIsolationLegacyFields(user, project);
   const network = mergeIsolationNetwork(user?.network, project?.network);
   if (network !== undefined) out.network = network;
+  const credentials = mergeIsolationCredentials(
+    user?.credentials,
+    project?.credentials
+  );
+  if (credentials !== undefined) out.credentials = credentials;
   return undefinedWhenEmpty(out);
 }
 

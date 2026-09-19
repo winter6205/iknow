@@ -33,9 +33,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 });
 
 const childProcessMock = await import("node:child_process");
-const spawnMock = childProcessMock.spawn as unknown as ReturnType<
-  typeof vi.fn
->;
+const spawnMock = childProcessMock.spawn as unknown as ReturnType<typeof vi.fn>;
 
 const { createBashTool } =
   await import("../../../src/harness/aci/tools/bash.ts");
@@ -225,7 +223,10 @@ describe("F4 known_hosts 指引回灌（ssh 类失败文案面）", () => {
       createEgressSessionFactory: stubSessionFactory(),
     });
     const stderr = await driveForegroundResult(tool, "false", () =>
-      makeFailingChild({ stderrText: "bash: line 1: false: error\n", exitCode: 1 })
+      makeFailingChild({
+        stderrText: "bash: line 1: false: error\n",
+        exitCode: 1,
+      })
     );
     assert.equal(stderr, "bash: line 1: false: error\n");
   });
