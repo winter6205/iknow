@@ -16,8 +16,8 @@
 export {
   buildProxyEnv,
   createEgressSession,
-  defaultProbeSocat,
-  SocatUnavailableError,
+  EgressRelayUnavailableError,
+  wrapCommandWithInnerBridge,
   type EgressFenceSpec,
   type EgressPolicyInput,
   type EgressSession,
@@ -25,9 +25,18 @@ export {
 } from "./session.js";
 
 export {
+  egressRelayPathsFor,
+  resolveEgressRelay,
+  resolveNodeExecutable,
+  type EgressRelayPaths,
+} from "./relay-assets.js";
+
+export {
   createEgressViolationSink,
   renderEgressViolations,
   renderEgressFailureMessage,
+  sshHostKeyFailureGuidance,
+  SSH_HOST_KEY_GUIDANCE_LINE,
   type EgressAllowlistSource,
   type EgressViolation,
   type EgressViolationReason,

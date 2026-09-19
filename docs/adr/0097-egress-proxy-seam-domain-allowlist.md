@@ -3,6 +3,8 @@
 Date: 2026-09-16
 Status: accepted
 
+> **Amended（ADR-0104 / 0107）**：预放行/defaults 在场。**0106 曾整份取代本决策，0107 已推翻 0106。** 现行：`--unshare-net` + 域白名单代理仍成立；**废除「socat 是宿主前置依赖」**（中继自带，见 ADR-0107）。首次批准流、地址守卫、违例回灌仍在。
+
 ## Context
 
 bash 围栏的出口语义长期是二值的：`--unshare-net` 默认断网（`src/harness/sandbox/bwrap.ts:162`），`network:true` per-call opt-in 摘除它 = 宿主网**零过滤**全放行（ADR-0022）；中间没有任何可表达「允许这几个域」的档位。与此同时 `STATIC_NETWORK_WHITELIST` / `NetworkPolicy.assertDomain`（`src/harness/sandbox/network-policy.ts:4`）是**声明了但从未实施**的死码（`bwrap.ts:224` 直接 `void opts.networkPolicy`）——仓库里挂着一个不存在的机制的名字。

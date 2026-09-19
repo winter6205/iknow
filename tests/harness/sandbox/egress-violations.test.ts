@@ -21,6 +21,7 @@ import {
   createEgressViolationSink,
   renderEgressViolations,
   renderEgressFailureMessage,
+  sshHostKeyFailureGuidance,
   type EgressViolation,
 } from "../../../src/harness/sandbox/egress/violations.js";
 
@@ -199,7 +200,10 @@ describe("renderEgressFailureMessage (T5 typed failure, spec §Violation feedbac
     expect(out).toContain("egress seam unavailable");
     expect(out).toContain("infrastructure fault");
     // 修复指引分两份:infra 路径
-    expect(out).toContain("check the egress bridge / socat installation");
+    expect(out).toContain("iknow-bundled egress relay");
+    // ADR-0107：装包字样钉死不回潮。
+    expect(out.toLowerCase()).not.toContain("socat");
+    expect(out.toLowerCase()).not.toContain("apt");
     // 域判定拒绝指引**不**出现
     expect(out).not.toContain(
       "add the host to isolation.network.allowedDomains"
@@ -254,5 +258,36 @@ describe("renderEgressFailureMessage (T5 typed failure, spec §Violation feedbac
     });
     expect(persisted).toContain("user-settings persisted allowlist");
     expect(preset).toContain("preset allowlist");
+  });
+});
+
+describe("sshHostKeyFailureGuidance — F4 known_hosts 指引 (spec §Failure paths F4)", () => {
+  it("returns undefined for empty / non-ssh stderr（无误报，命令正常路径不变形）", () => {
+    expect(sshHostKeyFailureGuidance("")).toBeUndefined();
+    expect(sshHostKeyFailureGuidance("fatal: not a git repository")).toBeUndefined();
+    expect(sshHostKeyFailureGuidance("Permission denied (publickey).")).toBeUndefined();
+  });
+
+  it("detects the first-time unknown-host fingerprint prompt", () => {
+    const stderr =
+      "The authenticity of host 'github.com (140.82.116.4)' can't be established.\n" +
+      "ED25519 key fingerprint is SHA256:+DiG....\n" +
+      "This key is not known by any other names.\n";
+    const g = sshHostKeyFailureGuidance(stderr);
+    expect(g).toBeDefined();
+    // F4 钉死要素：宿主侧 ssh-keyscan / 登录确认 + -o UserKnownHostsFile= 组合写法。
+    expect(g).toMatch(/ssh-keyscan/);
+    expect(g).toMatch(/UserKnownHostsFile=/);
+    // 不默认注入 StrictHostKeyChecking=no（削弱信任面非 spec 授权）。
+    expect(g).not.toMatch(/StrictHostKeyChecking=no/);
+  });
+
+  it("detects the batch-mode 'Host key verification failed' refusal", () => {
+    const g = sshHostKeyFailureGuidance(
+      "git@github.com: Permission denied (publickey).\r\n" +
+        "Host key verification failed.\r\n"
+    );
+    expect(g).toBeDefined();
+    expect(g).toMatch(/ssh-keyscan/);
   });
 });

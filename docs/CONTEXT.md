@@ -196,20 +196,32 @@ _Avoid_: multiline 开关；`.*` 吞整文件
 **install-rooted rg**: 安装根上钉死版本+校验和的搜引擎二进制；生产 `grep` 只 exec 这一路径。起不来走 Node 全语义扫，不回落 PATH `rg`。ADR-0084。
 _Avoid_: which rg；环境依赖当主路径
 
-**ACI network surface**: 装配层网络三职——发现是 `web_search`，阅读是 `web_fetch`，通话不升第 9 件工具、只走 `bash`（经 **出口代理缝**）。形状冻结；发现与阅读的后端选择见 **ACI web backend**。
+**ACI network surface**: 装配层网络三职——发现是 `web_search`，阅读是 `web_fetch`，通话不升第 9 件工具、只走 `bash`（经 **出口代理缝** + **域名允许集**）。形状冻结；发现与阅读的后端选择见 **ACI web backend**。
 _Avoid_: curl 工具; http_request; HTTP 原语; 把 method / headers 并进 web_fetch
 
 **ACI web backend**: 发现与阅读共用一个后端名；该后端缺搜索或缺抓取时，缺的那一头回落到内建默认（搜索走现行默认检索，阅读走本机 `web_fetch` + `network-guard`）。
 _Avoid_: 分设 search_backend 与 fetch_backend; 把缺的能力当成已接通; 缺抓取时改走 bash curl
 
-**host-net amplify**: 已退役的出口语义（旧 ADR-0022）——`bash` 带 `network: true` 且 ask 被同意后，该次调用宿主网零过滤。终态 = **出口代理缝**：`--unshare-net` 恒在，唯一出网通路是域白名单代理（ADR-0097）。
-_Avoid_: 把 `network: true` 当现行输入字段；批完再滤; 一等 curl 工具
+**host-net amplify**: 已退役的 per-call 出口语义（旧 ADR-0022）——`bash` 带 `network: true` 且 ask 被同意后才摘 `--unshare-net`。现行默认见 **出口代理缝**。ADR-0022 / ADR-0097 / ADR-0107。
+_Avoid_: 把 `network: true` 当现行输入字段；把 0106 围栏宿主网当现行默认
 
-**出口代理缝（egress proxy seam）**: bash 围栏恒 `--unshare-net` 之下唯一的出网通路——宿主出口代理的 unix socket bind 进沙箱、沙箱内 socat 转成本地端口，`HTTP_PROXY` 系环境变量指过去；域判定在宿主代理做（HTTPS 只看 CONNECT host，不解密）。ADR-0097。
-_Avoid_: 把 `--unshare-net` 当可摘除项；per-call 全开放行当逃生门；沙箱内自建 DNS / 路由
+**围栏宿主网（fenced host-net）**: 已退役（ADR-0106，被 0107 取代）——曾把 bash 出网做成无域名闸的宿主直连。
+_Avoid_: 当现行出口
 
-**域名允许集（domain allowlist）**: **出口代理缝**的放行判据——CONNECT host 命中才转发；`*.x` 严格子域（不含 apex）、可选 `:port` 后缀、deny 优先；只认**用户层** settings，项目文件不采纳（ADR-0084 纪律）。地址守卫（拒 loopback / 私网 / link-local / metadata）与域名集正交。ADR-0097。
-_Avoid_: 内核 IP 白名单当域名白名单；项目仓自授允许集；把 domain fronting 当已防住
+**出口代理缝（egress proxy seam）**: bash 围栏 `--unshare-net` 之下唯一出网通路——宿主域名过滤代理；unix socket bind 进沙箱；**中继自带，不依赖宿主 socat**。`HTTP_PROXY` 系与 SSH ProxyCommand 都指这条缝。ADR-0097 / ADR-0107。
+_Avoid_: apt 装 socat 当产品前置；名单内直连公网当过滤器；per-call 全开放行
+
+**域名允许集（domain allowlist）**: 出口代理缝的放行判据——CONNECT/SSH 目标 host 命中才转发。全集 = **预放行档** ∪ 用户层 `isolation.network.allowedDomains`，`deniedDomains` 优先。ADR-0097 / ADR-0104 / ADR-0107。
+_Avoid_: 删掉 settings 网络段当幽灵清理；与 network-guard 混成一条栈；开网无闸当允许集
+
+**预放行档（builtin preset）**: 允许集的代码承载 defaults（GitHub 族、npm/yarn、PyPI、crates、Go module 代理、Playwright 下载）。模型供应商 API 与 Docker/GitLab 不入档。ADR-0104 / ADR-0107。
+_Avoid_: 文档推荐配置当 preset；用「不进 preset」当唯一防 LLM key 手段却让 bash 无闸
+
+**凭据 sentinel（credential sentinel）**: 围栏内假值、真值只在出口代理对放行域假换真（需 TLS 终止）。0107 **不自动启用**；可见面仍走 secret-roundtrip mask。ADR-0105。
+_Avoid_: 与 mask 混名；当成 0107 必做面
+
+**yolo 模式**: 用户显式确认的无沙箱姿态（TUI `--yolo` / `/yolo`）——无 bwrap 则无出口缝、无域名闸。`full_auto` 只免 ask，不免域闸。#1035 / ADR-0107。
+_Avoid_: 把 yolo 当关域名闸；把 `full_auto` 当开网无闸
 
 **声明工具面 vs 实际工具面**: `SubAgentDefinition.disallowedTools` 写进 `WorkerEnvelope` 的是声明面；worker 进程装配后真正可被模型调用的工具集是实际面，二者必须相等——裁剪发生在 `createAciRegistry(tools)` **之前**的 def-list 期（`createDefaultAciRegistry` 工厂内），由构造期快照保证，不事后修补（`AciRegistry.inner` 是冻结快照）。
 _Avoid_: 给 `AciRegistry` 加 `.tools` 字段在产物上事后裁剪；声明 deny-list 但 worker 不消费（#468 修复对象）
@@ -331,8 +343,8 @@ _Avoid_: 按 token 或字数切窗；拆开一对 `tool_use`/`tool_result`
 **任务摘录**: 仅 compact 发生时从当时 `messages` 现抽现贴的最近至多 3 句合格用户任务原话；不进会话字段；goal 功能续跑时不贴。
 _Avoid_: taskFocus；当前任务卡；每回合或压缩时让 LLM 填卡；把摘录自己再抽成用户任务句
 
-**状态栏**: 每次即将调模型前由 harness 算出的现势，以 **user** 消息追加在 `messages` 末尾（含同一用户回合内 tool loop）；旧栏留在历史上，不替换、不写 `deps.system`；UI 只读同一份，in-flight 只给 TUI。字段仅 `last_tool`（本回合尚未跑过工具则为 idle）以及有未勾项时才出现的 todo 段（只投影现行 todo 账本的未完成项，带 id 的 `- [ ]` / `- [~]` 行；文件缺席 / 空 / 全勾则整段缺席）。ADR-0028；todo 账本见 ADR-0085。
-_Avoid_: 每轮替换/删除旧栏；写进 system；把 TUI 当主物；与 context usage (display) 混名；让 LLM 维护栏；把栏接入 verify；每跳塞任务摘录/cwd/技能清单；把调模型时的 in-flight 写进栏；taskFocus / 当前任务卡；空清单仍印 todo 段；全勾后栏里带 `- [x]`；用「本跳是否调用过 todo_write」当在场条件；政策散文进栏；把 **环境现势**（cwd/git/diff）塞进本栏；replace 当跳把新列表再灌进 messages
+**状态栏**: 每次即将调模型前由 harness 算出的现势，以 **user** 消息追加在 `messages` 末尾（含同一用户回合内 tool loop）；旧栏留在历史上，不替换、不写 `deps.system`；UI 只读同一份，in-flight 只给 TUI。字段：`last_tool`（本回合尚未跑过工具则为 idle）、`instruction:`（最新用户指令首行逐字回显，截断约 100 字符，代码计算不摘要）、有未勾项时才出现的 todo 段（只投影现行 todo 账本的未完成项，带 id 的 `- [ ]` / `- [~]` 行；文件缺席 / 空 / 全勾则整段缺席）、以及新用户消息进场后的一次性 reconcile 标记（提示模型先经 todo_write 对齐账本，仅该跳出现）。ADR-0028 / ADR-0103；todo 账本见 ADR-0085。
+_Avoid_: 每轮替换/删除旧栏；写进 system；把 TUI 当主物；与 context usage (display) 混名；让 LLM 维护栏；把栏接入 verify；每跳塞任务摘录/cwd/技能清单；把用户指令摘要/改写进栏；reconcile 标记每跳重复；把调模型时的 in-flight 写进栏；taskFocus / 当前任务卡；空清单仍印 todo 段；全勾后栏里带 `- [x]`；用「本跳是否调用过 todo_write」当在场条件；政策散文进栏；把 **环境现势**（cwd/git/diff）塞进本栏；replace 当跳把新列表再灌进 messages
 
 **todo 账本**: 同一**主会话**里可修订的任务清单；每条有稳定 id，状态 `pending` | `in_progress` | `completed`。三件事：批量添加、按 id 更新（含完成与删除）、读取现行。子代理与父共用这份账本（worker 可读取/更新，添加仅父会话）。`replace` 只是整表逃生口。现行文件仍是会话目录 `todos.md`。ADR-0085（修正 `0046-todo-ledger-replace-and-snapshots` 主路径）。
 _Avoid_: 把清单并进 `run_graph`；进 plan 相位写计划再执行；同一文件里两套未勾项并存；换表当跳把全文追加进 messages；删掉旧账本文件；跨主会话共用账本；worker 静默丢弃 add
@@ -340,8 +352,8 @@ _Avoid_: 把清单并进 `run_graph`；进 plan 相位写计划再执行；同�
 **环境现势**: 给人看的工作区快照（至少 cwd / git 摘要 / diff 要点），投放在 TUI（或等价）人读面；**不**写入 ADR-0028 状态栏 user 消息，也**不**充当 verify 输入。#655（G1）验收画像锁定。
 _Avoid_: 状态栏；agent-status；把 cwd/git/diff 每跳追加进 `messages`；与 context usage (display) 混名
 
-**沙箱纪律**: 同一 `bash` 调用输入下，前台执行与 `background:true` spawn 共用同一套 bwrap 围栏参数（FS / 网络 / env 隔离 / rlimit / cwdReadonly）；产品路径不得提供无围栏的后台裸跑。#653 G3。
-_Avoid_: 把后台当成逃出 bwrap；与 #440 bash 产品面混名；与 spawn_subagent 前景/后景混名
+**沙箱纪律**: 同一 `bash` 调用输入下，前台执行与 `background:true` spawn 共用同一套 bwrap 围栏参数（FS / `--unshare-net` / env / rlimit / cwdReadonly；出网为 **出口代理缝**）；产品路径不得提供无围栏的后台裸跑。#653 G3 / ADR-0107。
+_Avoid_: 把后台当成逃出 bwrap；与 #440 bash 产品面混名；与 spawn_subagent 前景/后景混名；把出网理解成 0106 直连无闸
 
 **config 面板**: TUI 无参 `/config` 打开的设置浮层，交互同 `/model`（选行改值、Esc 落盘）。首版行：文件系统隔离档、worktree isolation mode、子代理并发上限预设。有参 `/config` 仍走 chat/serve。后续设置只加行。ADR-0096。
 _Avoid_: 每个开关一个 slash；把面板当 loop-engine 热替换；把上限写进 system 前缀
@@ -725,9 +737,12 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **会话 tmp vs taskRoot**: 会话 tmp 是当前身份草稿，不是交付；要留下的写 `taskRoot`，不自动从垫底拷进仓库
 - **会话 tmp vs Linux /tmp**: 草稿走会话文件夹宿主路径与 `$TMPDIR`；不把垫底 bind 成 `/tmp`（ADR-0092）
 - **文件系统隔离档 vs PermissionMode**: 前者是进程能碰哪些路径；后者是问不问人。全局档仍走权限链
-- **出口代理缝 vs 文件系统隔离档**: 正交两轴。FS 档决定围栏内能读写哪些路径；出口代理缝决定能否出网、能连哪些域。两档 FS 的网络行为相同
-- **出口代理缝 vs host-net amplify**: 前者是现行唯一出网通路（域白名单代理）；后者是已退役的 per-call 全放行语义
-- **域名允许集 vs network-guard**: 前者管 bash 出网（代理层判定）；后者是 `web_fetch` / `web_search` 的六层 SSRF 防线，两条栈互不替代
+- **出口代理缝 vs 文件系统隔离档**: 正交。FS 档管路径；代理缝 + 允许集管 bash 出网。两档 FS 网络行为相同（ADR-0107）
+- **出口代理缝 vs host-net amplify**: 前者是现行唯一 bash 出网通路；后者是已退役的 per-call `network: true`
+- **围栏宿主网 vs 出口代理缝**: 0106 直连无闸已废；现行是有闸的代理缝
+- **network-guard vs 域名允许集**: `web_fetch` / `web_search` 的 SSRF；bash `curl`/`git`/`ssh` 走允许集
+- **预放行档 vs 域名允许集**: defaults 是代码底档；允许集 = defaults ∪ 用户增量，deny 优先
+- **secret-roundtrip mask vs 凭据 sentinel**: mask 管可见面；sentinel 需代理且 0107 不自动启用
 - **文件系统隔离档 vs worktree isolation mode**: 前者是 bash FS 围栏档；后者是写主仓门禁 / 建树改绑
 - **全局档 vs 工作区档**: 默认真路径读写；工作区档收紧为写 taskRoot + 会话 tmp，home 其余不能写
 - **config 面板 vs `/model`**: 同族浮层；`/config` 管隔离与并发等运行档，`/model` 管路由
@@ -735,7 +750,7 @@ _Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与
 - **子代理并发上限 vs system 前缀**: N 会变，不进稳前缀；description 插值 + 超限回执是模型通道
 - **图节点 vs 子代理并发上限**: 活图格子是同一顶上的 worker，不另起每图预算（ADR-0077）
 - **说明书静态层 vs memory_layer 整段开关**: 通用 worker 要说明书、不要记忆工具；禁止再靠 memoryEnabled=false 把 AGENTS.md 一起跳过
-- **状态栏 vs 任务摘录**: 摘录只在 compact 时贴用户原话；状态栏每轮由代码现算并追加
+- **状态栏 vs 任务摘录**: 摘录只在 compact 发生时现抽现贴至多 3 句用户原话；状态栏每跳由代码现算并追加，instruction 段只回显最新指令首行（截断）——两者都贴用户原话，但触发面与量级不同，均不经 LLM 改写（ADR-0103）
 - **状态栏 vs append-only messages**: 栏走同一条追加纪律；纠错靠新栏，不靠从历史上抠掉旧栏
 - **`memory_save`（显式写） vs auto_extract（自动写）**: 两条写路径共用同一套肯定句门禁、**runtime capability persist gate** 与 tmp+rename 原子写；显式写是模型当场决定的一次工具调用，自动写是 host 在 turn 完成后异步跑的一趟 ingest。差别只在触发方式与 `source: auto` 标记，不在信任通道——两者都只经 tool_result / prefetch 回到模型
 - **runtime capability persist gate vs capability memory sweep**: 闸挡新写；sweep 软禁已有条；读滤在两步之间让模型当下看不见

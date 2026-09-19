@@ -19,6 +19,7 @@ import {
   createEnvIsolation,
   createFsPolicy,
   runInSandbox,
+  wrapCommandWithInnerBridge,
 } from "../sandbox/index.js";
 
 /**
@@ -84,7 +85,7 @@ export function makeDefaultRunVerify(opts: {
   const fsPolicy = createFsPolicy({ tmpDir, mode: fsMode });
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   // ADR-0097 / T7:模块级 session 单例 —— 首次调用时 lazy start。
-  // start 失败(典型:socat 缺失 / 端口占用)→ session 保持 undefined,
+  // start 失败(典型:中继产品依赖缺席 / unix socket 占用)→ session 保持 undefined,
   // 后续调用 fence 走纯断网(fail-closed)。调用方经
   // `disposeEgressSessionForVerify` 释放(verify-loop / hub 会话退出时)。
   let egressSession: EgressSession | undefined;
@@ -111,6 +112,12 @@ export function makeDefaultRunVerify(opts: {
     // 值被有意覆盖(生产装配的会话 tmp 由调用方给,不由宿主 env 决定)。
     // ADR-0097 / T7:egress session lazy start —— 首次调用起,后续复用。
     const session = await ensureEgressSession();
+    // egress-ssh-bridge T5：内层监听前导与 bash.ts 前台 / background
+    // spawn factory 同形，拼接单点 = egress 模块
+    // `wrapCommandWithInnerBridge`（review Medium 收敛）—— session 在场时
+    // payload = `<innerBridgeScript>\n<command>`；缺席 = byte-identical
+    // （invariant 3）。
+    const commandPayload = wrapCommandWithInnerBridge(session?.spec, command);
     const fenceEnv = {
       ...envIsolation.filter(process.env),
       TMPDIR: tmpDir,
@@ -118,7 +125,7 @@ export function makeDefaultRunVerify(opts: {
     };
     const fence = createBwrapFence({
       command: "bash",
-      args: ["-c", command],
+      args: ["-c", commandPayload],
       fsPolicy,
       env: fenceEnv,
       cwd: opts.cwd,

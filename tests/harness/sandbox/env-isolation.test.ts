@@ -73,6 +73,20 @@ describe("createEnvIsolation", () => {
     );
     assert.deepEqual(filtered, {});
   });
+
+  it("keeps host GIT_SSH_COMMAND out of the fence (ssh-bridge T3 白名单钉)", () => {
+    // specs/egress-ssh-bridge.md §T3：GIT_SSH_COMMAND 不入
+    // BASE_ENV_WHITELIST —— 宿主值恒不进围栏，围栏内该 env 只可能来自
+    // egress spec.env（invariant 3：无缝 = 无注入 = 纯断网同态）。
+    assert.ok(!BASE_ENV_WHITELIST.includes("GIT_SSH_COMMAND"));
+    const isolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
+    const filtered = isolation.filter({
+      PATH: "/bin",
+      GIT_SSH_COMMAND: "ssh -o ProxyCommand=host-evilsocat",
+    });
+    assert.equal(filtered.GIT_SSH_COMMAND, undefined);
+    assert.deepEqual(Object.keys(filtered), ["PATH"]);
+  });
 });
 
 describe("configuredSecretNames — settings.llm.apiKey 占位符语义 (settings-model-extension)", () => {
