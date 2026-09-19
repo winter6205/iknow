@@ -1,7 +1,7 @@
 # 027 — 已落地 wayfinder 图（只读归档）
 
 > **ARCHIVED 2026-09-19**。本目录是决策过程留档，**不是 SSOT**。
-> 产品行为以 `specs/`、`plans/`、`docs/adr/`、`docs/CONTEXT.md` 为准；**不要**在活文档、spec Basis、STATUS 里再链到这些地图。
+> 产品行为以 `specs/`、`docs/adr/`、`docs/CONTEXT.md` 为准；已落地 plan 在 `docs/archive/025-retire-completed-specs-and-plans/plans/`。**不要**在活文档、spec Basis、STATUS、**产品代码**里再链到这些地图或对应 plan 路径。
 
 ## 为何归档
 
@@ -18,6 +18,7 @@ wayfinder 图在「地图到达 → spec/plan 落地」后只保留审计价值�
 | `tui-tool-settled-appearance-map.md`    | `specs/tui-tool-settled-appearance.md`                        |
 | `casual-ask-context-hygiene-map.md`     | `specs/casual-ask-context-hygiene.md`（归档于 025）           |
 | `parent-visible-scratch-salvage-map.md` | ADR-0074 等子代理 `/tmp` 决策                                 |
+| `session-list-label-map.md`             | `specs/session-list-title.md`、ADR-0113（#1072）              |
 
 票体在 `tickets/`（与图同批归档）。
 

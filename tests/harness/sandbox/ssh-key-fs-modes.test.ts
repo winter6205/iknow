@@ -9,7 +9,7 @@
  *     fixture key **可读**（可见非闭世界）、对 key 的**写**必败（EROFS），
  *     且宿主侧文件内容事后逐字节不变（写没有旁路落到别的副本）。
  *
- * 纪律（plans/egress-ssh-bridge.md 子弹 6 CONSTRAINTS）：
+ * 纪律（specs/egress-ssh-bridge.md / ADR-0107）：
  *   - fixture key 一律 `ssh-keygen -t ed25519 -N ""` 生成于 tmpdir，
  *     **绝不使用 / 读取 / 复制操作员真实 `~/.ssh` 私钥**；HOME 经围栏
  *     env 显式重定向到 fixture home，不动真 home；

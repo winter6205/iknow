@@ -5,7 +5,7 @@ Status: accepted
 
 Amends ADR-0094（transport cause 摘要面扩到带 cause 的模型流瞬断；viewport 纪律不变）。Amends ADR-0101 / ADR-0102 的父侧终态归因词汇（envelope reason 联合 4 值 → 5 值，见 Decision 2 对 SC9 冻结的显式修订）。成文化归档 spec `docs/archive/025-retire-completed-specs-and-plans/specs/356-subagent-v1.md` assumption 16（:34）/ SC13（:361）的 worker exit-code 语义，并裁决两处原文微差（见 Decision 3）。**修订 SC9「reason 枚举 V1 冻结四值」**：本 ADR 显式批准追加第五值 `modelTransient`（envelope-freeze.test.ts 期望随之更新，属契约变更而非断言削弱）。
 
-关联：issue #1065；plan `plans/model-stream-incomplete-fault.md`（T1 [decision] 载体）；证据 `plans/model-stream-incomplete-fault.evidence.md`。
+关联：issue #1065；实施 plan 已归档于 `docs/archive/025-retire-completed-specs-and-plans/plans/model-stream-incomplete-fault.md`（T1 载体）；证据 `…/model-stream-incomplete-fault.evidence.md`。
 
 ## Context
 
@@ -43,10 +43,11 @@ Amends ADR-0094（transport cause 摘要面扩到带 cause 的模型流瞬断；
 `FaultEvent` union（fault-class.ts:71-99）追加 `| { readonly kind: "stream_incomplete"; readonly visible: boolean }`；`classifyFault`（:146-162）照 `clock_timeout` 格（:155-156）加同判据支：`visible ? "none" : "retry"`。default 支 `{kind:"protocol_error"}` **不删除、只收窄**：精确判据（含本类 instanceof 支）插在其前（nonClockFaultOf 判别顺序契约见 anthropic-adapter.ts:881-896 doc），default 只剩真·未知形态。
 
 **不变式 (b)：worker exit-code 语义。**
+
 - **exit 2 = 仅信封协议错误**：`parseWorkerEnvelope` 抛 `ProtocolError`（stdin JSON parse 失败 / WorkerEnvelope 字段缺失）→ 无信封可写 → `[subagent-worker] fatal` + exit 2（cli.ts:615-626 现状即此语义，本 ADR 成文化并收窄 catch 面）。
 - **run 阶段逃逸错误 → best-effort failed envelope（stdout）+ exit 1**：不再冒用 2。结构化 typed 逃逸按 reason 映射（Decision 2(b)）；**非结构化逃逸**（装配/收尾等 loop 收口面之外的 unknown 错误）→ best-effort envelope reason=`crashed`（进程以错误结束 = 本 ADR 收窄后的「进程级异常死亡」词汇）+ exit 1——与父侧 SC16「exit≠0 无信封 → crashed」分层不矛盾：有信封按信封 reason。
 - exit 0 + failed 信封 = run() 派生的结构化失败（reason ∈ 5 值枚举），父侧按信封归因。
-- **SC13 / assumption 16 微差裁决**：两处原文都只钉「exit ≠ 0」，**未钉死码值 2**；微差在父侧标记——SC13 说父管理标 `crashed`，assumption 16 说 `reason=protocolError`。实现现状采 assumption 16 侧的**信封派生面**（worker.ts:1141-1148 doc + :1289：run() 抛 ProtocolError → 信封 reason=protocolError），父侧对 **exit≠0 无信封** 的崩溃标 `crashed`（manager.ts:1512-1543 SC16 + :1205-1214 settleCrash，即 SC13 侧）——二者不矛盾，分层成立：*协议层崩溃（无信封）→ 父侧 crashed；有信封 → 按信封 reason*。本 ADR 把该分层定为契约正文；「exit 2 归还」的准确表述是「归还 assumption 16 的协议层崩溃**专码**」，`crashed` 语义收窄回「进程级异常死亡（非 0 无信封 / 信号杀）」。
+- **SC13 / assumption 16 微差裁决**：两处原文都只钉「exit ≠ 0」，**未钉死码值 2**；微差在父侧标记——SC13 说父管理标 `crashed`，assumption 16 说 `reason=protocolError`。实现现状采 assumption 16 侧的**信封派生面**（worker.ts:1141-1148 doc + :1289：run() 抛 ProtocolError → 信封 reason=protocolError），父侧对 **exit≠0 无信封** 的崩溃标 `crashed`（manager.ts:1512-1543 SC16 + :1205-1214 settleCrash，即 SC13 侧）——二者不矛盾，分层成立：_协议层崩溃（无信封）→ 父侧 crashed；有信封 → 按信封 reason_。本 ADR 把该分层定为契约正文；「exit 2 归还」的准确表述是「归还 assumption 16 的协议层崩溃**专码**」，`crashed` 语义收窄回「进程级异常死亡（非 0 无信封 / 信号杀）」。
 - **ADR-0094 引用写法**（钉清 evidence §5.2 漂移）：ADR-0094 正文无字面 SC4/SC5 编号（单段 Decision，docs/adr/0094-…md:6）。代码注释「ADR-0094 SC4-SC5」所指为其中两句：「供应商/API 失败对人画在对话流（薄外壳 `API error (status):` + 原文），不追加进 session transcript（#120）；`StopReason` / `protocolError` 不当 UX 文案」。字面 SC4/SC5 编号的出处是活跃 spec `specs/transport-continue-persist.md:43-44`（回合落盘 + sticky notice，另一面）。新文档/注释引用时写「ADR-0094 viewport API error 段（对应 `specs/transport-continue-persist.md` SC4/SC5）」，不再裸写「ADR-0094 SC4-SC5」。
 
 ### 4. default 支可观测性 = `nonClockFaultOf` default 内 console.warn 诊断

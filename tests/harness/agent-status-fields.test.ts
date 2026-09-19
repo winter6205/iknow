@@ -1,4 +1,4 @@
-// plans/agent-status-instruction-echo.md T1 / spec invariant 5+7 / F3+F4+F5:
+// specs/agent-status-instruction-echo.md invariant 5+7 / ADR-0103 / F3+F4+F5:
 // `buildAgentStatusText` / `parseAgentStatusText` 纯函数对的双向兼容扩展 ——
 // instruction + reconcile 字段进栏，标量段全部先于 `todos:` 头（次序纪律是
 // 双向兼容的根：旧解析器吃新栏得正确子集，新解析器吃旧栏得合法缺省）。
@@ -82,7 +82,13 @@ describe("empty slots are not advertised", () => {
       openTodoLines: ["- [ ] [t1] a"],
     });
     expect(text).toBe(
-      ["<agent_status>", "last_tool: echo", "todos:", "- [ ] [t1] a", "</agent_status>"].join("\n")
+      [
+        "<agent_status>",
+        "last_tool: echo",
+        "todos:",
+        "- [ ] [t1] a",
+        "</agent_status>",
+      ].join("\n")
     );
   });
 });
@@ -221,10 +227,16 @@ describe("instruction containing wrapper substrings (F3)", () => {
 
 describe("malformed bars still parse to null", () => {
   const cases: ReadonlyArray<[string, string]> = [
-    ["missing last_tool even with new fields", "<agent_status>\ninstruction: x\n</agent_status>"],
+    [
+      "missing last_tool even with new fields",
+      "<agent_status>\ninstruction: x\n</agent_status>",
+    ],
     ["bad opening wrapper", "agent_status>\nlast_tool: echo\n</agent_status>"],
     ["bad closing wrapper", "<agent_status>\nlast_tool: echo\nagent_status>"],
-    ["trailing junk after closing line", "<agent_status>\nlast_tool: echo\n</agent_status>\nextra"],
+    [
+      "trailing junk after closing line",
+      "<agent_status>\nlast_tool: echo\n</agent_status>\nextra",
+    ],
   ];
   it.each(cases)("returns null without throwing: %s", (_name, text) => {
     expect(() => parseAgentStatusText(text)).not.toThrow();
@@ -239,11 +251,18 @@ describe("AGENT_STATUS_RECONCILE_LINE", () => {
     expect(typeof AGENT_STATUS_RECONCILE_LINE).toBe("string");
     expect(AGENT_STATUS_RECONCILE_LINE.startsWith("reconcile: ")).toBe(true);
     expect(AGENT_STATUS_RECONCILE_LINE).not.toContain("\n");
-    expect(AGENT_STATUS_RECONCILE_LINE.slice("reconcile: ".length).trim()).not.toBe("");
+    expect(
+      AGENT_STATUS_RECONCILE_LINE.slice("reconcile: ".length).trim()
+    ).not.toBe("");
   });
 
   it("parses back to reconcile true when the constant line is present", () => {
-    const bar = ["<agent_status>", "last_tool: echo", AGENT_STATUS_RECONCILE_LINE, "</agent_status>"].join("\n");
+    const bar = [
+      "<agent_status>",
+      "last_tool: echo",
+      AGENT_STATUS_RECONCILE_LINE,
+      "</agent_status>",
+    ].join("\n");
     expect(parseAgentStatusText(bar)).toEqual({
       lastTool: "echo",
       instruction: null,

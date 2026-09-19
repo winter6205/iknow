@@ -10,7 +10,7 @@
 
 定位 Esc **前台打断** 之后「本轮从屏幕上没了」分别落在哪一层（TUI 瞬时渲染 / 权威 messages·transcript / **in-flight closeout** keep），并裁定三面可见性：打断当下的 TUI、重开会话、下一句进模型。到达标志：能一句话说清现状组合，以及产品要的 keep 与现状是否一致。不到「已经修好」。
 
-**Handoff（2026-09-19）**：地图到达。keep 已合入 `master`（[#1064](https://github.com/winter6205/iknow/pull/1064)）。契约 [`interrupt-frozen-prefix-keep`](../../specs/interrupt-frozen-prefix-keep.md)；plan [`interrupt-frozen-prefix-keep`](../../plans/interrupt-frozen-prefix-keep.md)；ADR-0108。R1 仍是改前现状备忘。
+**Handoff（2026-09-19）**：地图到达。keep 已合入 `master`（[#1064](https://github.com/winter6205/iknow/pull/1064)）。契约 [`interrupt-frozen-prefix-keep`](../../specs/interrupt-frozen-prefix-keep.md)；plan（归档）[`interrupt-frozen-prefix-keep`](../025-retire-completed-specs-and-plans/plans/interrupt-frozen-prefix-keep.md)；ADR-0108。R1 仍是改前现状备忘。
 
 ## Notes
 
@@ -30,7 +30,7 @@
 - **interrupt system message** —— 盘上可留 `Interrupted by user.`；`/continue` 本次 prior 可去掉末尾这句
 - **user-turn keep on protocol failure** —— 只覆盖 protocolError / emptyFinalResponse，不自动覆盖 cancelled
 - **TUI 工具落定态** —— 已清图；本图不重开留/收/点名着色
-- **handoff** —— 已合入 `master`（#1064）：`specs/interrupt-frozen-prefix-keep.md` + `plans/interrupt-frozen-prefix-keep.md` + ADR-0108
+- **handoff** —— 已合入 `master`（#1064）：`specs/interrupt-frozen-prefix-keep.md` + ADR-0108
 
 **Destination 选定**（2026-09-19 操作员 Confirm Recommend）：定位 + 裁定三面可见性，不是「只要定位」，也不是未定位就当 bug 修。
 

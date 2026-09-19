@@ -23,7 +23,7 @@ export {
 } from "@anthropic-ai/sandbox-runtime/dist/sandbox/http-proxy.js";
 
 // SOCKS5 / git-over-SOCKS 面（1080 段）已被操作员裁定摘出当前分支
-// （plans/egress-ssh-bridge.md 子弹 2）；ssh 传输面按 ADR-0107 §Decision 5
+// ADR-0107 §Decision 5（ssh 传输面）
 // 「实现里钉死一种」钉死为 HTTP CONNECT（session.ts `GIT_SSH_COMMAND`
 // 冻结形态）。仍在此文件 re-export 一份以备未来 mux 形态补时消费，避免
 // 新增 import 直接打到包内路径；届时在此追加第二枚 socket。

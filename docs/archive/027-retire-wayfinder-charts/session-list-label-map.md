@@ -55,7 +55,7 @@
 
 ## Tickets
 
-票体在 `docs/wayfinder/tickets/`。阻塞用正文 `Blocked by:`。
+票体在本目录 `tickets/`。阻塞用正文 `Blocked by:`。
 
 | 票                                                                                | 类型     | 在过程中的位置 | 阻塞       |
 | --------------------------------------------------------------------------------- | -------- | -------------- | ---------- |
@@ -66,4 +66,4 @@
 | [G3 何时写、失败怎么兜、能不能覆盖](tickets/g3-when-and-overwrite.md)             | grilling | 取舍（写策略） | G1         |
 | [G4 独立事件、单独模块、lite model 槽](tickets/g4-lite-model-and-title-events.md) | grilling | 取舍（承载）   | —          |
 
-Frontier：空。handoff：本树 `specs/session-list-title.md` + `plans/session-list-title.md`（分支 `feat/session-list-title`）。
+Frontier：空。handoff：已合入 `master`（#1072）——`specs/session-list-title.md`、ADR-0113。

@@ -11,7 +11,7 @@
 
 走完一次决策：工作区内指定路径的图片，如何作为 **Anthropic 原生 image content** 到达已声明 vision 的模型。到达标志是入口、协议块、非 vision 失败面、历史落盘四条 grilling 都有 Resolution，能交给 spec。不把 TUI/Web 贴图、MCP image 透传、`web_fetch` 放行 `image/*` 当到达。
 
-**Handoff（2026-09-19）**：地图到达。契约 [`路径读图进 Anthropic vision`](../../specs/read-image-vision.md)；plan [`路径读图进 Anthropic vision`](../../plans/read-image-vision.md)。已合入 `master`（[#1067](https://github.com/winter6205/iknow/pull/1067)）。
+**Handoff（2026-09-19）**：地图到达。契约 [`路径读图进 Anthropic vision`](../../specs/read-image-vision.md)；plan（归档）[`read-image-vision`](../025-retire-completed-specs-and-plans/plans/read-image-vision.md)。已合入 `master`（[#1067](https://github.com/winter6205/iknow/pull/1067)）。
 
 ## Notes
 

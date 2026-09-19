@@ -2,7 +2,7 @@
  * egress-ssh-bridge T6 —— `SSH_AUTH_SOCK` 条件形态（默认**关**）的形状钉子。
  *
  * 钉住的不变式（specs/egress-ssh-bridge.md §T6 + ADR-0105 §Decision 5 +
- * plans/egress-ssh-bridge.md 子弹 6 Acceptance）：
+ * ADR-0107 §Decision 5（ssh auth sock 探针）：
  *   - 关态（默认，调用方不传 `sshAuthSockPath`）：`SSH_AUTH_SOCK` 在围栏
  *     env 与 argv 中都不存在——宿主 agent 值恒不进围栏（env 白名单外 +
  *     session 不注入）；

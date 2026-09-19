@@ -19,7 +19,7 @@
  *
  * T1 契约已钉：socket 路径带 per-session 随机 id + 启动前清理 stale socket
  * （详见 docs/adr/0097-*.md §Decision）。SOCKS5 / git-over-SOCKS 面（1080
- * 段）已被操作员裁定摘出当前分支（plans/egress-ssh-bridge.md 子弹 2），
+ * 段）已被操作员裁定摘出当前分支（ADR-0107 §Decision 5；凭据面见 ADR-0105）。
  * 按 mux 形态补时在此追加第二枚 socket。
  *
  * T6：filter 回调与 approvalGate 接线（specs §首次域名批准流 + SC10 +
@@ -406,7 +406,7 @@ export function buildInnerBridgeScript(
     `${parts[0]} ${parts[1]} ${parts[2]} ${sandboxPort} >/dev/null 2>&1 &`,
     `trap "kill %1 2>/dev/null; exit" EXIT`,
     `for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/${sandboxPort}) ` +
-      '2>/dev/null && break; sleep 0.1; done',
+      "2>/dev/null && break; sleep 0.1; done",
   ].join("\n");
 }
 

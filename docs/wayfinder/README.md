@@ -9,6 +9,5 @@
 | 图                                                             | 状态                                               |
 | -------------------------------------------------------------- | -------------------------------------------------- |
 | [`agent-control-surface-map.md`](agent-control-surface-map.md) | 合同 `specs/agent-control-surface.md`；实施按 plan |
-| [`session-list-label-map.md`](session-list-label-map.md)       | 已落地 `specs/session-list-title.md` / ADR-0113    |
 
-票体：`tickets/`（仅属上述活跃图的票）。
+票体：`tickets/`（仅属 agent-control 图）。

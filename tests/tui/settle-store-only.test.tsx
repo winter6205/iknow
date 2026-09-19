@@ -3,7 +3,7 @@
  * tests/tui/settle-store-only.test.tsx
  *
  * 出处: specs/interrupt-frozen-prefix-keep.md invariant 2 + input-contract 表
- * 「TUI settle」行（plans/interrupt-frozen-prefix-keep.md T5）。
+ * 「TUI settle」行（specs/interrupt-frozen-prefix-keep.md / ADR-0108）。
  *
  * 钉住的不变式：SSOT 在 closeout（store），不在 TUI overlay。
  *   1. overlay 空、store 有 freeze prefix → settle 后墙画 store（prefix 看得见）；

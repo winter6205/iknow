@@ -1,6 +1,6 @@
 /**
  * egress credential 集成臂 — T7（specs/egress-credential-sentinel.md §T7 +
- * plans/egress-credential-sentinel.md 子弹 T7）。
+ * specs/egress-credential-sentinel.md / ADR-0105（T7 集成验收）。
  *
  * 钉住的不变式（全真实件，不 mock 上游）：
  *   - 真起代理 = createEgressSession 完整装配链（铸造 → mitmCA → 代换

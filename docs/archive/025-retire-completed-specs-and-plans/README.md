@@ -75,6 +75,16 @@
 - `361-subagent-v1.5-foreground-spawn-contract.md` — 落地完成（契约 C1–C5 全部进 manager / spawn-subagent-tool / host-drain）
 - `467-full-compact-llm-summary.md` — 落地完成（全量压缩走 LLM 结构化摘要；`session.summary` 改名 `title`）
 - `home-project-tree.md` — 落地完成（ADR-0088；工作区 `.iknow` 不再承载会话记录，tasks 登记随会话池落 home 项目树）
+- `agent-status-instruction-echo.md` — 落地完成（#1054；ADR-0103）
+- `network-egress-allowlist.md` — 落地完成（ADR-0097 / ADR-0107 桥接）
+- `egress-preset-allowlist.md` — 落地完成（#1057；ADR-0104）
+- `egress-ssh-bridge.md` — 落地完成（#1055；ADR-0107）
+- `egress-credential-sentinel.md` — 落地完成（#1056；ADR-0105）
+- `read-image-vision.md` — 落地完成（#1067；spec `read-image-vision.md`）
+- `interrupt-frozen-prefix-keep.md` — 落地完成（#1064；ADR-0108）
+- `model-stream-incomplete-fault.md` / `model-stream-incomplete-fault.evidence.md` — 落地完成（#1073；ADR-0111）
+- `instruction-authority-projection.md` — 落地完成（#1071；ADR-0112）
+- `session-list-title.md` — 落地完成（#1072；ADR-0113）
 
 ## docs-plans/
 
