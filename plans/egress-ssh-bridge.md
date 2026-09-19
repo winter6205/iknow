@@ -58,7 +58,7 @@ OVERALL: PASS（rev 2，返工点已按审查方清单落实）
    - **Inherits:** spec T5/SC5 条件形态照抄：「stale socket 清理与 dispose 幂等测试覆盖**当前在场的全部桥**——HTTP 桥（`iknow-egress-*`）恒在，SOCKS 桥（`iknow-egress-socks-*`）在 T2 在场时才进『双文件启动前清理 + 亡桥归类 infra』断言集；T2 被裁剪（assumption 2）时本断言退化为单桥，不得因缺 SOCKS socket 而红」；invariant 4（沙箱纪律 env 轴）；F1（yolo / 工厂 `undefined` / `SocatUnavailableError` → 零注入）；0097 §dispose 契约逐字沿用。
    - **Surface:** `src/harness/background/manager.ts`、`src/harness/verify/sandbox-run.ts`、`src/harness/aci/tools/bash.ts` 三消费面（内层监听前导脚本在各自命令装配点接线，若已收敛公共 helper 则一处改）。
    - **Acceptance:** wiring 测试（`build-engine-egress-wiring.test.ts` 形制）断言三形态 spec 字段集相等；双桥 / 单桥断言依子弹 2 在场与否条件化（不写死）；yolo / 工厂 undefined / SocatUnavailableError 三路径各断言 `GIT_SSH_COMMAND` 与内层前导均缺席；per-task `settle()` / verify 单例释放通道零新代码只加断言；`npm test` 绿。本子弹触 `session.ts` 相关字段消费面时与 credential-sentinel 子弹串行落地，合并冲突主会话裁。
-   - Status: [ ] pending
+   - Status: [x] done（三形态消费同一 spec：background spawn factory 补 egress 缝 + 内层前导、verify 命令包装补前导、bash.ts 前台 T1 已在；wiring/三路径/生命周期测试落 `tests/harness/egress-three-form-lifecycle.test.ts`，在场桥断言从 spawn 现场派生不写死桥数）
    - [blocks: T1, T3]
 
 6. **凭据可用性分支** — tag: `[implementation]`

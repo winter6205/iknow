@@ -111,6 +111,13 @@ export function makeDefaultRunVerify(opts: {
     // 值被有意覆盖(生产装配的会话 tmp 由调用方给,不由宿主 env 决定)。
     // ADR-0097 / T7:egress session lazy start —— 首次调用起,后续复用。
     const session = await ensureEgressSession();
+    // egress-ssh-bridge T5：内层监听前导与 bash.ts 前台 / background
+    // spawn factory 同形 —— session 在场时 payload =
+    // `<innerBridgeScript>\n<command>`；缺席 = byte-identical（invariant 3）。
+    const commandPayload =
+      session !== undefined
+        ? `${session.spec.innerBridgeScript}\n${command}`
+        : command;
     const fenceEnv = {
       ...envIsolation.filter(process.env),
       TMPDIR: tmpDir,
@@ -118,7 +125,7 @@ export function makeDefaultRunVerify(opts: {
     };
     const fence = createBwrapFence({
       command: "bash",
-      args: ["-c", command],
+      args: ["-c", commandPayload],
       fsPolicy,
       env: fenceEnv,
       cwd: opts.cwd,
