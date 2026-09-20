@@ -5,46 +5,54 @@
  * their own tool-name prefix, and their own error mapping; they do not re-do the
  * reading, the ordering, or the paging.
  *
- * 这条轴为什么需要一件独立的工具（`query_trace` 顶不了）：
- *   - `query_trace` 只读**一个**文件（`conversation_id ?? newestConversationId`，
- *     见 query-trace-core.ts），所以它结构上看不见目录里其余的会话；
- *   - 会话根记录要到 run 结束才落盘（src/harness/trace/jsonl.ts:267-282，唯一调用点
- *     src/harness/loop-engine.ts:2149-2158），永远是文件最后一行，crash / 进行中的
- *     会话根本没有根记录；
- *   - `listSessions`（sessions.ts）以 readdir + stat 建索引，正文只在首 64 KiB
- *     窗口内扫一根记录取 `agent_version`（不整文件读入，也不把记录内容带进响应），
- *     两类都发现得到。
- * 所以本工具回答的是「有哪些会话」这一条目录轴，与行轴（`query_trace`）、字节窗轴
- * （`get_record`，T6）正交。
+ * Why this axis needs its own tool (`query_trace` cannot cover it):
+ *   - `query_trace` reads **one** file (`conversation_id ??
+ *     newestConversationId`, see query-trace-core.ts), so it is structurally
+ *     blind to the other sessions in the directory;
+ *   - the session root record only lands at run end (src/harness/trace/jsonl.ts,
+ *     sole caller src/harness/loop-engine.ts) and is always the file's last
+ *     line — crashed or in-progress sessions simply have no root record;
+ *   - `listSessions` (sessions.ts) builds its index from readdir + stat and
+ *     scans for one root record only inside the first 64 KiB window (never
+ *     reading whole files, never carrying record content into the response),
+ *     so it finds both kinds.
+ * Hence this tool answers the "what sessions exist" catalog axis, orthogonal
+ * to the row axis (`query_trace`) and the byte-window axis (`get_record`).
  */
 import { sessionsByRecency, type SessionSummary } from "./sessions.js";
 import { parseInteger } from "./parse-integer.js";
 import { TraceQueryValidationError } from "./query-trace-errors.js";
 
 /**
- * 本轴的读单元 = 一页会话摘要。缺省 100 与 `query_trace` 同量级，名字**故意分开**：
- * 两条轴的单位不同（一条摘要 vs 一行记录），plan T7 只会重新校准 `query_trace`
- * 那一组。
+ * The read unit of this axis = one page of session summaries. Default 100 is
+ * the same magnitude as `query_trace`, but the names are **deliberately
+ * separate**: the two axes count different units (a summary vs a record row).
  *
- * 上限 128 由 `TRACE_OUTPUT_BACKSTOP` 反推，不是取整偏好。一满页必须序列化成帽内
- * 可解析的 JSON，否则截断标记会落在数组中间，调用方拿到的不是一页索引而是一段残文
- * ——而 backstop / executor 帽都按 `text.length` 计，所以这里的预算单位是**字符**不是
- * 字节。实测（主仓 81 个真实会话，一次性探针）：单条摘要的 JSON 本体 71–124 字符
- * （UUID `conversation_id` + `agent_version` 都在 = 124；无 `agent_version` = 71），
- * 页面内连写还要 +1 个条目间逗号 ⇒ 72–125（测试注释用的是后一个口径）。按页内口径：
- * 128 × 125 = 16 000 < 20 000，200 × 125 = 25 000 已越帽；四字段的可打印上限约 126
- * （订正：plan 第 13 条记作「单条约 141 B」，本轮在同一份真实目录上复现不出来——最宽
- * 124 字符且 `agent_version` 全为 `0.1.0`——以本处复测为准）。
- * 「一满页在帽内」由 tests/traceserver/list-sessions-core.test.ts 的实测断言钉住
- * （摘要尺寸会随 `agent_version` 之类字段漂移，光看这个数字不够）。
+ * The 128 cap is derived from `TRACE_OUTPUT_BACKSTOP`, not a rounding
+ * preference. A full page must serialize to parseable JSON under the cap, or
+ * the truncation marker lands mid-array and the caller gets a fragment
+ * instead of an index — and both backstop / executor caps count
+ * `text.length`, so the budget unit here is **characters**, not bytes.
+ * Measured (one-off probe over the main repo's 81 real sessions): one
+ * summary's JSON body is 71–124 characters (UUID `conversation_id` +
+ * `agent_version` present = 124; no `agent_version` = 71), and in-page
+ * joining adds 1 inter-entry comma ⇒ 72–125 (test comments use the latter
+ * caliber). At the in-page caliber: 128 × 125 = 16 000 < 20 000, while
+ * 200 × 125 = 25 000 already breaks the cap; the printable ceiling for the
+ * four fields is ≈126. (An older plan noted "~141 B per entry"; that could
+ * not be reproduced on the same real directory — widest was 124 chars with
+ * `agent_version` uniformly `0.1.0` — so this re-measurement stands.)
+ * "A full page stays under the cap" is pinned by an empirical assertion in
+ * tests/traceserver/list-sessions-core.test.ts — summary size drifts with
+ * fields like `agent_version`, so the raw number alone is not enough.
  */
 export const LIST_SESSIONS_DEFAULT_LIMIT = 100;
 export const LIST_SESSIONS_MAX_LIMIT = 128;
 
 /**
- * The one description text for both faces (spec SC7 / SC18: one source, and it
- * claims no character cap — how much you read is `limit`, never a byte budget).
- * Positive-trigger phrasing per #483 D9, enforced by
+ * The one description text for both faces (one source, and it claims no
+ * character cap — how much you read is `limit`, never a byte budget).
+ * Positive-trigger phrasing, enforced by
  * tests/harness/aci/tools/d9-description-guard.test.ts.
  */
 export const LIST_SESSIONS_DESCRIPTION =
@@ -68,15 +76,19 @@ interface ListSessionsInput {
 }
 
 /**
- * tool face 的线形状：`sessions` + **回显本次真正用到的坐标**。
+ * The tool face's wire shape: `sessions` + **echo of the coordinates
+ * actually used**.
  *
- * 回显坐标不是截断元数据：契约 X 只禁 `truncated` / `total` /
- * `response_truncated`（ADR-0004:23、spec SC7），而 `limit` / `offset` 是调用方
- * 自己给的 read unit。plan §序列化 把 tool face 输出定义为「数组 + 回显调用方给过
- * 的坐标」，边界类表 overflow 格的判据是「只丢尾 + 续取坐标」，T7 同样保留行轴
- * `offset` —— 三处文本同一个形状。回显的是**生效值**（未传时是默认值），所以「这页
- * 是否到底」可由 `sessions.length < limit` 就地判定，续取坐标 = `offset +
- * sessions.length`，调用方不必记住自己传了什么。
+ * Echoing coordinates is not truncation metadata: contract X only forbids
+ * `truncated` / `total` / `response_truncated` (ADR-0004), while `limit` /
+ * `offset` are the read unit the caller itself supplied. The tool-face
+ * output is defined as "array + echo of caller-supplied coordinates"; the
+ * overflow cell of the boundary table says "drop only the tail + a resume
+ * coordinate", and the row axis likewise keeps `offset` — one shape across
+ * all three texts. What is echoed is the **effective value** (defaults when
+ * not passed), so "did this page reach the end" is decided in place by
+ * `sessions.length < limit`, and the resume coordinate = `offset +
+ * sessions.length`; the caller need not remember what it passed.
  */
 export interface ListSessionsPage {
   readonly sessions: ReadonlyArray<SessionSummary>;
@@ -97,8 +109,9 @@ export function createListSessionsCore(
 
   return async (input: unknown): Promise<string> => {
     const { limit, offset } = parseInput(input);
-    // 每次调用重读索引：会话在跑，缓存会把新会话藏起来（与 newestConversationId
-    // 同一个理由）。页序由 sessions.ts 的比较式给，本处只切位置。
+    // Re-read the index on every call: sessions are live and a cache would
+    // hide new ones (same rationale as newestConversationId). Page order
+    // comes from sessions.ts's comparator; this spot only slices a position.
     const page: ListSessionsPage = {
       sessions: sessionsByRecency(traceDir).slice(offset, offset + limit),
       limit,
@@ -113,10 +126,13 @@ function parseInput(input: unknown): { limit: number; offset: number } {
     throw new TraceQueryValidationError("input", "input must be an object");
   }
   const raw = input as ListSessionsInput;
-  // 两张皮各自在自己 schema 上声明同样的界（ACI ajv 编译并强制、MCP zod 强制），
-  // 这里复查是同一条规则的第二道权威，不是第三套语义。上界取本文件常量；下界
-  // （`limit` 1 / `offset` 0）在三处都是字面量，跨面是否漂移由
-  // tests/trace-mcp/server.test.ts 的 SC18 diff 测无条件比对 `minimum` 钉住。
+  // Both faces declare the same bounds on their own schema (ACI ajv
+  // compiles and enforces, MCP zod enforces); re-checking here is the
+  // second authority for the same rule, not a third semantics. The upper
+  // bound is this file's const; the lower bounds (`limit` 1 / `offset` 0)
+  // are literals in three places, and whether they drift across faces is
+  // pinned unconditionally by the minimum-diff test in
+  // tests/trace-mcp/server.test.ts.
   const limit =
     parseInteger(raw.limit, "limit", 1, LIST_SESSIONS_MAX_LIMIT) ??
     LIST_SESSIONS_DEFAULT_LIMIT;

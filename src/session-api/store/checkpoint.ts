@@ -1,18 +1,18 @@
 /**
- * T1 checkpoint data layer — turn boundary projection, persistence predicate,
- * checkpoint appender, and the T5 rewind anchor resolution.
+ * Checkpoint data layer — turn boundary projection, persistence predicate,
+ * checkpoint appender, and rewind anchor resolution.
  *
  * Pure functions, no IO. Shared by:
  *   - checkpoint (interrupt persist): hub.conditionalSave asks
  *     `decideCheckpointPersist(result, priorMessages)` for one of three
  *     outcomes (none / full / partial_user_only) and appends a
  *     CheckpointRecord when a cancelled/interrupt turn made progress.
- *   - TUI rewind (rollback): T5 (#622 / spec session-jsonl-resume) retired
- *     `rewindFile`'s disk truncation — rewind now MOVES the persisted head
- *     pointer to an earlier user-message anchor and the skipped chain stays
- *     in the same JSONL. `resolveRewindAnchor` computes that anchor (the
- *     head-chain index + recomputed turnCount); `withCheckpointAnchors`
- *     re-anchors checkpoint records by event id (spec D3).
+ *   - TUI rewind (rollback): the former `rewindFile` disk truncation is
+ *     retired — rewind now MOVES the persisted head pointer to an earlier
+ *     user-message anchor and the skipped chain stays in the same JSONL.
+ *     `resolveRewindAnchor` computes that anchor (head-chain index +
+ *     recomputed turnCount); `withCheckpointAnchors` re-anchors checkpoint
+ *     records by event id.
  *
  * Turn-boundary rule (SSOT: turn-projection.ts `isTurnQuery`, shared with
  * hub.ts projectMessagesToTurns): a turn starts at a user message that has NO
@@ -74,8 +74,8 @@ export function splitTurns(
 
 /**
  * Tri-state persistence decision returned by `decideCheckpointPersist`
- * (spec invariant 8 / SC4 — protocolError/emptyFinalResponse persist the user
- * message from this turn, not the failed assistant):
+ * (protocolError/emptyFinalResponse persist the user message from this
+ * turn, not the failed assistant):
  *
  *   - `kind: "none"` — skip save entirely. Covers zero-delta cancels and
  *     protocolError/emptyFinalResponse with no user message this turn
@@ -89,8 +89,8 @@ export function splitTurns(
  *     lands after the engine encoded the user message (postMessage path) but
  *     before / without an assistant reply.
  *
- * Replaces the boolean `shouldPersistCheckpoint` (#120 裁决 amended — user
- * is now kept on protocolError/emptyFinalResponse).
+ * Replaces the boolean `shouldPersistCheckpoint` — the user message is now
+ * kept on protocolError/emptyFinalResponse.
  */
 export type CheckpointPersistDecision =
   | { readonly kind: "none" }
@@ -155,8 +155,8 @@ export function decideCheckpointPersist(
  * path consume.
  *
  *   cancelled + delta>0 → true (unchanged)
- *   protocolError / emptyFinalResponse → false (#120 verdict — this predicate
- *     does NOT encode the user-kept rule; callers that need it must use
+ *   protocolError / emptyFinalResponse → false (this predicate does NOT
+ *     encode the user-kept rule; callers that need it must use
  *     decideCheckpointPersist).
  *   every other stopReason → true (unchanged)
  */
@@ -178,9 +178,9 @@ export function shouldPersistCheckpoint(
 
 /**
  * Map a harness StopReason to the checkpoint label. `process` is reserved for
- * a process-level closeout and has no StopReason source; it is part of the
- * InterruptReason union for T2+ wiring. Returns null for stopReasons that do
- * not produce a checkpoint (completed / emptyFinalResponse / nonSuccessStop).
+ * a process-level closeout and has no StopReason source. Returns null for
+ * stopReasons that do not produce a checkpoint (completed /
+ * emptyFinalResponse / nonSuccessStop).
  */
 export function toInterruptReason(
   stopReason: RunResult["stopReason"]
@@ -204,7 +204,7 @@ export function toInterruptReason(
  * messages).
  *
  * Cumulative turnCount is computed by the CALLER and baked into
- * `record.turnIndex` (mirror of hub.ts:739 `session.turnCount +
+ * `record.turnIndex` (mirror of hub.ts `session.turnCount +
  * result.turnCount`); this function only appends.
  */
 export function appendCheckpoint(
@@ -222,9 +222,9 @@ export function appendCheckpoint(
 }
 
 /**
- * T5 (#622): resolve the rewind target for `keepTurns` — the head-chain
- * index of the last kept message plus the recomputed turnCount. Pure.
- * Replaces rewindFile's truncation: the store moves the persisted head
+ * Resolve the rewind target for `keepTurns` — the head-chain index of the
+ * last kept message plus the recomputed turnCount. Pure.
+ * Replaces the retired disk truncation: the store moves the persisted head
  * pointer to `chain[headIndex]` (null when -1) instead of slicing messages
  * off disk, so the skipped chain stays in the same JSONL.
  *
@@ -250,7 +250,7 @@ export function resolveRewindAnchor(
 }
 
 /**
- * T5 (spec D3): re-anchor checkpoint records by event id. The event id is
+ * Re-anchor checkpoint records by event id. The event id is
  * authoritative; `messagesCount` is the derived view the picker joins on.
  * For each record, the anchor resolves to `eventIds[messagesCount - 1]` —
  * the last message of the checkpointed turn on the current head chain.

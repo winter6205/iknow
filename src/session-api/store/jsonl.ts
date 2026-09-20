@@ -1,60 +1,71 @@
 /**
- * T1 (#618 / spec session-jsonl-resume D1–D2, ADR-0027): session 权威历史的
- * 单文件 append-only JSONL 形态 —— 纯 codec + 投影,零 IO。
+ * Append-only single-file JSONL form of the session's authoritative history
+ * (ADR-0027) — pure codec + projection, zero IO.
  *
- * 记录形态(每行一条 JSON):
- *   1. session header(首行):`{type:"session", ...SessionFileV1 metadata}` —
- *      goal/cwd/title/schemaVersion 等元数据(D2),不另开 meta.json。构造时
- *      从 SessionFileV1 spread(去掉 messages),未知字段随之透传(#120
- *      spread-preserve 纪律在 JSONL 形态下同样成立)。
- *   2. message event:`{type:"message", id:"e<N>", parent:"e<N-1>"|null,
- *      message: AnthropicNativeMessage}` —— 每条事件有唯一 id 与 parent,
- *      组成链;tool_result 是 user message 的 content block,不单独成事件。
- *   3. head record:`{type:"head", id:"e<N>"|null}` —— 落盘的 rewind 头指针
- *      (spec:头指针落盘)。最后一条 head record 生效;缺省时取最后一个事件
- *      (容错:崩溃可能落在 event 已写、head 未写之间)。
- *   4. title record(ADR-0113):`{type:"title", text:string}` —— 标题事件,
- *      标题的权威形态(不进 messages 投影 / 模型 prior)。header `title`
- *      降级为其缓存:projectSessionLog 读路径覆盖 + save/rewind 写路径
- *      用最新事件正文回刷缓存,extractTitle 只在无事件时充当占位。
+ * Record shapes (one JSON per line):
+ *   1. session header (first line):
+ *      `{type:"session", ...SessionFileV1 metadata}` — goal/cwd/title/
+ *      schemaVersion metadata; no separate meta.json. Built by spreading
+ *      SessionFileV1 (minus messages), so unknown fields pass through
+ *      (spread-preserve discipline holds in the JSONL form too).
+ *   2. message event: `{type:"message", id:"e<N>", parent:"e<N-1>"|null,
+ *      message: AnthropicNativeMessage}` — every event has a unique id and a
+ *      parent, forming a chain; tool_result is a content block of a user
+ *      message, never its own event.
+ *   3. head record: `{type:"head", id:"e<N>"|null}` — the persisted rewind
+ *      head pointer. The last head record wins; when absent the final event
+ *      is used (tolerance: a crash may land between the event write and the
+ *      head write).
+ *   4. title record (ADR-0113): `{type:"title", text:string}` — the title
+ *      event, the authoritative form of the title (never projected into
+ *      messages or model prior). The header `title` is demoted to its
+ *      cache: the load path overrides it from the latest event and
+ *      save/rewind refresh the cache from event text on the write path, so
+ *      extractTitle only acts as a placeholder when no title event exists.
  *
- * 命名 EXIT(spec Testing Decisions exception 类,T1 锁定其一):
- *   `drop-trailing-corrupt-line` —— 最后一个非空行 JSON.parse 失败 → 丢弃
- *   该行仍 load(崩溃半截 append 的唯一合法形态);任何非末行损坏 →
- *   parse_failed。形状错误(可解析但 wrong-shape)→ schema_invalid。
+ * Named EXIT (exception class): `drop-trailing-corrupt-line` — if the last
+ * non-empty line fails JSON.parse, drop that line and still load (the only
+ * legal form of a crash mid-append); corruption on any other line →
+ * parse_failed. Wrong shape (parses but invalid) → schema_invalid.
  *
- * id 方案:`e<index>`,index 为事件在 messages[] 中的下标;appendEvents 从
- * 盘上 maxEventIndex+1 继续编号,因此 rewind 后 fork 的新事件拿全新 id、
- * parent 指向当前 head,旧链留在文件里(T5 语义的原语底座)。
+ * id scheme: `e<index>`, where index is the event's position in messages[];
+ * appendEvents continues numbering from the on-disk maxEventIndex+1, so
+ * after a rewind the forked new events get fresh ids parented at the current
+ * head while the old chain stays in the file — the primitive base for
+ * rewind/fork semantics.
  *
- * T5 (#622):save 改为 append-only 感知 —— 以盘上 head 链为基准做
- * 最长公共前缀(LCP)对齐:投影一致 → 仅刷新 header(事件/head 记录原样
- * 保留);投影是链的延伸 → 追加尾部事件;投影是链的严格前缀 → 只追加
- * head 记录;分叉 → 从 LCP 边界续写新分支。任何情况下既有事件记录永不
- * 丢弃,rewind 跳过的链因此跨 save 永留同一份文件。
+ * save is append-only aware: align the caller's projection with the on-disk
+ * head chain by longest common prefix (LCP). Identical projection → refresh
+ * the header only (event/head records kept verbatim); projection extends the
+ * chain → append the tail events; projection is a strict prefix → append
+ * only a head record; divergence → continue a new branch from the LCP
+ * boundary. Existing event records are never dropped, so a rewound-away
+ * branch survives every save in the same file.
  */
 import type { AnthropicNativeMessage } from "../../harness/index.js";
 import type { CheckpointRecord, GoalState, SessionFileV1 } from "./schema.js";
 import { sanitizeSessionFile } from "./schema.js";
 
-/** JSONL session log 扩展名。load 按扩展名识别形态:有 `<id>.jsonl` 走
- *  JSONL(权威),否则回退 legacy `<id>.json`。 */
+/** JSONL session-log extension. load picks the shape by extension:
+ *  `<id>.jsonl` is JSONL (authoritative), otherwise legacy `<id>.json`. */
 export const SESSION_JSONL_EXT = ".jsonl";
 
-/** session header record(D2 元数据)。字段镜像 SessionFileV1 减去
- *  messages;optional 字段缺席即省略(spread-discipline)。`messageCreatedAt`
- *  is declared here (despite not being a SessionHeaderRecord-native field
- *  by intent) because the header line is built via `JSON.stringify({
- *  type:"session", ...file_minus_messages })` after a stamped save — the
- *  array carries through to disk and back, so load() must accept it as part
- *  of the header shape. projectSessionLog strips it on the no-stamp branch
- *  so a stale header cannot poison the picker with misaligned timestamps. */
+/** Session header record. Fields mirror SessionFileV1 minus messages;
+ *  optional fields are omitted when absent (spread-discipline).
+ *  `messageCreatedAt` is declared here (despite not being a
+ *  SessionHeaderRecord-native field by intent) because the header line is
+ *  built via `JSON.stringify({ type:"session", ...file_minus_messages })`
+ *  after a stamped save — the array carries through to disk and back, so
+ *  load() must accept it as part of the header shape. projectSessionLog
+ *  strips it on the no-stamp branch so a stale header cannot poison the
+ *  picker with misaligned timestamps. */
 export interface SessionHeaderRecord {
   readonly type: "session";
   readonly schemaVersion: number;
   readonly conversation_id: string;
-  /** ADR-0113: 缓存 = 最新 title record 正文;无标题事件时才是
-   *  extractTitle 占位。权威在 title 事件本身,读路径投影时覆盖此缓存。 */
+  /** ADR-0113: cache of the latest title record's text; an extractTitle
+   *  placeholder only when no title event exists. The title event itself is
+   *  authoritative; the read-path projection overrides this cache. */
   readonly title: string;
   readonly cwd: string;
   readonly sanitized_at: string;
@@ -65,17 +76,19 @@ export interface SessionHeaderRecord {
   readonly goal?: GoalState;
   readonly workspaceRoot?: string;
   readonly messageCreatedAt?: ReadonlyArray<string | null>;
-  /** D2 (tui-display-consistency):assistant 回合思考时长(ms)的并行数组。
-   *  与 SessionFileV1.thinkingMs 同 spread-discipline: 缺席合法。 */
+  /** Parallel array of assistant-turn thinking duration (ms). Same
+   *  spread-discipline as SessionFileV1.thinkingMs: absent is legal. */
   readonly thinkingMs?: ReadonlyArray<number | null>;
 }
 
-/** 一条 message 事件:唯一 id + parent 链 + 原生消息原文。`createdAt` 是
- *  appendEvents 写盘时的入账时刻(ISO);optional for 兼容旧 JSONL——
- *  parseSessionJsonl 不做严格校验(spread 纪律),缺席不 fail validation,
- *  投影时落成 messageCreatedAt[i] = null。`thinkingMs` 是 D2 落盘的
- *  assistant 回合思考时长(ms),仅在 assistant 事件上由 appendEvents
- *  conditional spread 挂上;非 assistant / 流式回合无思考 → 字段缺席。 */
+/** One message event: unique id + parent chain + verbatim native message.
+ *  `createdAt` is the ingest timestamp (ISO) written by appendEvents;
+ *  optional for legacy JSONL compat — parseSessionJsonl does not strictly
+ *  validate it (spread discipline), absence never fails validation, and the
+ *  projection lands it as messageCreatedAt[i] = null. `thinkingMs` is the
+ *  assistant-turn thinking duration in ms, attached by appendEvents via
+ *  conditional spread on assistant events only; non-assistant / streamed
+ *  turns without thinking → field absent. */
 export interface SessionEventRecord {
   readonly type: "message";
   readonly id: string;
@@ -85,56 +98,63 @@ export interface SessionEventRecord {
   readonly thinkingMs?: number;
 }
 
-/** 落盘的 rewind 头指针;id 为 null 表示空 transcript(空会话)。 */
+/** The persisted rewind head pointer; id null means an empty transcript. */
 export interface SessionHeadRecord {
   readonly type: "head";
   readonly id: string | null;
 }
 
-/** ADR-0113 (session-list-title T3): 标题事件 —— 标题的权威形态。
- *  不进 message 链、不投影进 messages、不进模型 prior;header `title`
- *  降级为其缓存(最新事件正文,无事件时才是 extractTitle 占位)。
- *  文件序 = 追加序,读路径取最后一条生效。 */
+/** ADR-0113: title event — the authoritative form of the title. Not part of
+ *  the message chain, never projected into messages or model prior; the
+ *  header `title` is demoted to its cache (latest event text; an
+ *  extractTitle placeholder only when no event exists). File order = append
+ *  order; the read path takes the last one. */
 export interface SessionTitleRecord {
   readonly type: "title";
   readonly text: string;
 }
 
-/** header 之后的全部记录形态(文件序)。 */
+/** All record shapes after the header (in file order). */
 export type SessionTailRecord =
   SessionEventRecord | SessionHeadRecord | SessionTitleRecord;
 
 export type SessionJsonlRecord = SessionHeaderRecord | SessionTailRecord;
 
-/** parseSessionJsonl / projectSessionLog 抛出的结构化错误(不含
- *  conversation_id —— 纯函数不携带 store 身份,由 store 捕获后补上,
- *  与 sanitizeSessionFile 的 {kind:"schema_invalid", field} 约定一致)。 */
+/** Structured error thrown by parseSessionJsonl / projectSessionLog (no
+ *  conversation_id — pure functions carry no store identity; the store
+ *  catches and attaches it, matching sanitizeSessionFile's
+ *  {kind:"schema_invalid", field} convention). */
 export type SessionJsonlError =
   | { kind: "parse_failed"; reason: string }
   | { kind: "schema_invalid"; field: string };
 
-/** 事件 id 方案:`e<index>`。appendEvents 依赖该形态恢复下一个编号。 */
+/** Event id scheme: `e<index>`. appendEvents depends on this shape to
+ *  recover the next index. */
 export function messageEventId(index: number): string {
   return `e${index}`;
 }
 
 const EVENT_ID_RE = /^e(\d+)$/;
 
-/** 解析后的 JSONL log:header + 文件序事件 + 生效 head + 最大事件下标。 */
+/** Parsed JSONL log: header + file-order events + effective head + max
+ *  event index. */
 export interface ParsedSessionLog {
   readonly header: SessionHeaderRecord;
   readonly events: ReadonlyArray<SessionEventRecord>;
   readonly head: string | null;
-  /** 事件中最大 `e<N>` 的 N;无事件为 -1(appendEvents 从 +1 继续编号)。 */
+  /** N of the largest `e<N>` among events; -1 when there are none
+   *  (appendEvents continues numbering from +1). */
   readonly maxEventIndex: number;
-  /** T5:header 之后的全部记录(event / head / title),按文件序。save 的
-   *  header-refresh 重写依赖它原样保留既有记录(含历史 head 记录)。 */
+  /** All records after the header (event / head / title), in file order.
+   *  The save header-refresh rewrite relies on them being preserved verbatim
+   *  (including historical head records). */
   readonly records: ReadonlyArray<SessionTailRecord>;
 }
 
 /**
  * Serialize a SessionFileV1 to JSONL text (header + chained events + head).
- * Pure. 未知顶层字段经 spread 进 header 透传;`messages` 不进 header。
+ * Pure. Unknown top-level fields pass through into the header via spread;
+ * `messages` never enters the header.
  */
 export function sessionFileToJsonl(file: SessionFileV1): string {
   const { messages, messageCreatedAt, thinkingMs, ...meta } = file;
@@ -148,8 +168,9 @@ export function sessionFileToJsonl(file: SessionFileV1): string {
       parent: index === 0 ? null : messageEventId(index - 1),
       message,
       ...(typeof stamp === "string" ? { createdAt: stamp } : {}),
-      // D2: thinkingMs 仅在 assistant 事件上挂值(消费者侧 ?? undefined 兜底
-      // 已经为非 assistant 元素填 null,但为避免噪声,只在有值时挂 key)。
+      // thinkingMs is only attached on assistant events (the consumer-side
+      // ?? fallback already yields null for non-assistant elements, but skip
+      // the key when there is no value to avoid noise).
       ...(typeof think === "number" && Number.isFinite(think) && think > 0
         ? { thinkingMs: think }
         : {}),
@@ -167,13 +188,15 @@ export function sessionFileToJsonl(file: SessionFileV1): string {
 /**
  * Parse JSONL text into a structured log. Pure, no IO.
  *
- * Corrupt-tail EXIT `drop-trailing-corrupt-line`:仅当最后一个非空行
- * JSON.parse 失败时丢弃该行(崩溃半截 append);其余行损坏 →
- * throw {kind:"parse_failed"}。形状错误 → throw {kind:"schema_invalid"}:
- *   - 首记录不是 session header → field "root"
- *   - 未知 record type → field "type"
- *   - 事件形状 / id 形态 / 重复 id / parent 未先出现 → field "events"
- *   - head 引用未知事件 id → field "head"
+ * Corrupt-tail EXIT `drop-trailing-corrupt-line`: the line is dropped only
+ * when the last non-empty line fails JSON.parse (crash mid-append);
+ * corruption on any other line → throw {kind:"parse_failed"}. Shape errors
+ * → throw {kind:"schema_invalid"}:
+ *   - first record is not a session header → field "root"
+ *   - unknown record type → field "type"
+ *   - event shape / id format / duplicate id / parent not seen earlier
+ *     → field "events"
+ *   - head references an unknown event id → field "head"
  */
 export function parseSessionJsonl(raw: string): ParsedSessionLog {
   const lines = raw.split("\n");
@@ -188,8 +211,9 @@ export function parseSessionJsonl(raw: string): ParsedSessionLog {
     try {
       records.push(JSON.parse(line));
     } catch {
-      // Named EXIT: drop-trailing-corrupt-line — 崩溃只可能在 append 尾部
-      // 留下半截行;丢掉它,前面的 log 仍完整。
+      // Named EXIT: drop-trailing-corrupt-line — a crash can only leave a
+      // half-written line at the append tail; dropping it keeps the rest of
+      // the log intact.
       if (i === lastNonEmpty) break;
       throw {
         kind: "parse_failed",
@@ -216,14 +240,15 @@ export function parseSessionJsonl(raw: string): ParsedSessionLog {
       continue;
     }
     if (isHeadRecord(rec)) {
-      head = rec.id; // 最后一条 head record 生效
+      head = rec.id; // the last head record wins
       headSeen = true;
       tail.push(rec);
       continue;
     }
     if (isTitleRecord(rec)) {
-      // ADR-0113: 标题事件不在 message 链上,不改 head/maxEventIndex,
-      // 只随 records 原样保留并被 latestTitleText 消费。
+      // ADR-0113: title events are off the message chain; they do not change
+      // head/maxEventIndex, only ride along in records and are consumed by
+      // latestTitleText.
       tail.push(rec);
       continue;
     }
@@ -238,11 +263,13 @@ export function parseSessionJsonl(raw: string): ParsedSessionLog {
   return { header: first, events, head, maxEventIndex, records: tail };
 }
 
-/** 事件形状校验(从 parseSessionJsonl 主循环抽出,保持其环复杂度不随
- *  title record 分支上涨):id 形态非法 / 重复 id / parent 未先出现 →
- *  schema_invalid "events"。通过则返回 `e<N>` 的 N。parent 先现是
- *  append-only 不变式(崩溃尾部丢弃后仍成立 —— 被引用的 parent 一定在
- *  更早的行)。调用方在校验通过后才把 rec.id 加进 ids。 */
+/** Event shape validation (extracted from the parseSessionJsonl main loop so
+ *  its cyclomatic complexity does not grow with the title-record branch):
+ *  illegal id format / duplicate id / parent not seen earlier →
+ *  schema_invalid "events". On success returns N of `e<N>`. Parent-first is
+ *  the append-only invariant (it still holds after the corrupt-tail drop — a
+ *  referenced parent is always on an earlier line). The caller adds rec.id to
+ *  ids only after validation passes. */
 function validatedEventIndex(
   rec: SessionEventRecord,
   ids: Set<string>
@@ -265,22 +292,23 @@ function validatedEventIndex(
 
 /**
  * Project a parsed log to the current-head transcript as SessionFileV1.
- * 从 head 沿 parent 走回根再反转;不在链上的事件(fork 分支 / 孤儿)留在
- * 盘上但不进投影。元数据校验复用 sanitizeSessionFile(schema SSOT)。
- * Pure.
+ * Walks head → root via parent, then reverses; events off the chain (fork
+ * branches / orphans) stay on disk but are not projected. Metadata
+ * validation reuses sanitizeSessionFile (schema SSOT). Pure.
  */
 export function projectSessionLog(log: ParsedSessionLog): SessionFileV1 {
   const byId = new Map(log.events.map((e) => [e.id, e]));
   const messages: AnthropicNativeMessage[] = [];
   const createdAtList: Array<string | null> = [];
-  // D2 (tui-display-consistency):并行重建 thinkingMs 数组 —— 与
-  // createdAtList 同 spread-discipline 纪律(全链无 thinkingMs → 不挂 key)。
+  // Rebuild the thinkingMs array in parallel — same spread-discipline as
+  // createdAtList (no thinkingMs on the whole chain → no key).
   const thinkingMsList: Array<number | null> = [];
   const seen = new Set<string>();
   let cur = log.head;
   while (cur !== null) {
     if (seen.has(cur)) {
-      // 防御:append-only + parent-先现 不变式下不可能成环;成环即真损坏。
+      // Defense: a cycle is impossible under the append-only + parent-first
+      // invariants; one means real corruption.
       throw {
         kind: "schema_invalid",
         field: "events",
@@ -300,10 +328,11 @@ export function projectSessionLog(log: ParsedSessionLog): SessionFileV1 {
     // would serialize to null via JSON.stringify anyway). Validator accepts
     // only `null` holes — never `undefined`.
     createdAtList.push(event.createdAt ?? null);
-    // D2: `event.thinkingMs` 是 `number | undefined` in-memory(appendEvents
-    // 仅在 assistant + thinkingMs 有效时挂上)。事件无 thinkingMs → 填 null
-    // (与 JSON round-trip 形态对齐);number → 原样透传(appendEvents 入口已
-    // 过滤 ≤ 0 / 非有限数,此处不再校验)。
+    // `event.thinkingMs` is `number | undefined` in-memory (appendEvents only
+    // attaches it for assistant events with a valid value). No thinkingMs →
+    // null (aligned with the JSON round-trip shape); a number passes through
+    // verbatim (appendEvents' entry already filtered <= 0 / non-finite, so no
+    // re-check here).
     thinkingMsList.push(
       typeof event.thinkingMs === "number" ? event.thinkingMs : null
     );
@@ -313,15 +342,17 @@ export function projectSessionLog(log: ParsedSessionLog): SessionFileV1 {
   createdAtList.reverse();
   thinkingMsList.reverse();
   const { type: _type, ...meta } = log.header;
-  // spread-discipline: 全链都无 createdAt(纯旧文件 / 未经过 appendEvents
-  // stamping 的 fork 旧分支)时省略 key,与 sanitize.ts 的 conditional-goal-
-  // key 纪律一致(never emit `field: undefined` keys)。这样旧文件
-  // sessionFileToJsonl → parseSessionJsonl → projectSessionLog 整对象
-  // round-trip 字节不变(既有 deepEqual 测试锚定契约)。任一事件带
-  // createdAt → 发 key,数组内 null 元素来自该位置事件无 createdAt
-  // (旧链 / fork 旧分支),picker 用 ?? "" 兜底渲染。
+  // spread-discipline: when no event on the chain has createdAt (pure legacy
+  // file / a fork branch never stamped by appendEvents), omit the key —
+  // consistent with sanitizeSessionFile's conditional-goal-key discipline
+  // (never emit `field: undefined` keys). This keeps the whole-object
+  // round-trip sessionFileToJsonl → parseSessionJsonl → projectSessionLog
+  // byte-stable for legacy files (anchored by existing deepEqual tests).
+  // Any event with createdAt → emit the key; null elements mark positions
+  // whose event lacks createdAt (old chain / fork branch), and the picker
+  // renders them with the ?? "" fallback.
   const hasAny = createdAtList.some((c) => c !== null);
-  // Stale-header guard (#622 review-fix Medium): when the current head chain
+  // Stale-header guard: when the current head chain
   // carries no createdAt (rewind back into a pre-stamping fork branch, or a
   // legacy chain), a previously-stamped save left the header's
   // messageCreatedAt at its OLD length. Spread via `...meta` would leak that
@@ -333,18 +364,21 @@ export function projectSessionLog(log: ParsedSessionLog): SessionFileV1 {
   if (!hasAny) {
     delete meta.messageCreatedAt;
   }
-  // D2 (tui-display-consistency):thinkingMs 与 messageCreatedAt 完全镜像的
-  // spread-discipline —— 全链均无 thinkingMs 时不挂 key,任一事件带值则发
-  // key,数组内 null 元素 = 该位置事件无 thinkingMs(非 assistant / 流式回合
-  // 无思考 / legacy 文件)。同 stale-header guard:全链无 thinkingMs 时显式
-  // 从 meta 删除,避免 picker 读到错位数组。
+  // thinkingMs mirrors messageCreatedAt's spread-discipline exactly: no
+  // thinkingMs on the whole chain → no key; any event carrying a value →
+  // emit the key, with null elements marking positions whose event has no
+  // thinkingMs (non-assistant / streamed turn without thinking / legacy
+  // file). Same stale-header guard: delete from meta explicitly when the
+  // chain has no thinkingMs so the picker cannot read a misaligned array.
   const hasAnyThinking = thinkingMsList.some((c) => c !== null);
   if (!hasAnyThinking) {
     delete meta.thinkingMs;
   }
-  // ADR-0113: 标题事件的正文是标题权威,header `title` 只是缓存 —— 投影时
-  // 用最新事件正文覆盖缓存值,使 load()/list() 读路径立即反映事件(不依赖
-  // 下一次 save 刷新缓存)。无标题事件 → header 缓存原样,旧文件行为不变。
+  // ADR-0113: the title event's text is authoritative and header `title` is
+  // only a cache — projection overrides the cache with the latest event text
+  // so the load()/list() read paths reflect events immediately (not waiting
+  // for the next save to refresh the cache). No title event → header cache
+  // as-is, legacy behavior unchanged.
   return sanitizeSessionFile({
     ...meta,
     title: resolveTitleText(log, meta.title),
@@ -355,9 +389,11 @@ export function projectSessionLog(log: ParsedSessionLog): SessionFileV1 {
 }
 
 /**
- * 读路径标题解析(SSOT:`latestTitleText ?? fallback` 形态的唯一定义处):
- * 最新标题事件正文优先;无标题事件 → 调用方兜底值(header 缓存 /
- * extractTitle 占位)。log 为 null(legacy-only 无 JSONL)同样回退。纯函数。
+ * Title resolution for read paths (SSOT — the single definition of the
+ * `latestTitleText ?? fallback` shape): the latest title event's text wins;
+ * no title event → the caller's fallback (header cache / extractTitle
+ * placeholder). A null log (legacy-only, no JSONL) also falls back.
+ * Pure function.
  */
 export function resolveTitleText(
   log: ParsedSessionLog | null,
@@ -367,8 +403,9 @@ export function resolveTitleText(
 }
 
 /**
- * ADR-0113: log 中最新一条标题事件的正文(文件序最后一条 title record);
- * 无标题事件 → null(调用方回退 extractTitle 占位)。纯函数。
+ * ADR-0113: the text of the latest title event in the log (the last title
+ * record in file order); no title events → null (caller falls back to the
+ * extractTitle placeholder). Pure function.
  */
 export function latestTitleText(log: ParsedSessionLog): string | null {
   for (let i = log.records.length - 1; i >= 0; i--) {
@@ -379,7 +416,7 @@ export function latestTitleText(log: ParsedSessionLog): string | null {
 }
 
 /**
- * T5: the current-head chain as EVENTS, root → head order (the same walk
+ * The current-head chain as EVENTS, root → head order (the same walk
  * projectSessionLog does, but keeping id/parent). Fork branches / orphans
  * are not included. Throws schema_invalid on a cycle or a dangling head,
  * same as projectSessionLog. Pure.
@@ -426,7 +463,7 @@ export function chainFromHead(
 }
 
 /**
- * T5: serialize a header + record list back to JSONL text (one record per
+ * Serialize a header + record list back to JSONL text (one record per
  * line, trailing newline). The header is built from SessionFileV1 metadata
  * (spread-preserve, minus messages); records pass through verbatim — the
  * append-only save relies on this to keep existing event/head records
@@ -444,7 +481,7 @@ export function serializeSessionLog(
 }
 
 /**
- * T5: structural deep-equal over JSON-shaped values (message content blocks
+ * Structural deep-equal over JSON-shaped values (message content blocks
  * included). Used by the append-only save to align the caller's projection
  * with the persisted head chain. Treats absent vs undefined as equal only
  * when the key is absent in BOTH (plain JSON semantics); arrays are

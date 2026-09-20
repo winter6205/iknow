@@ -1,7 +1,8 @@
 /**
- * Rewind picker 锚点从当前 head 祖先链投影（Claude Code：回到所选
- * 用户消息之前）。head 指到该句 parent；fillInput 把提示词填回输入框。
- * 跳过分支仍留在 JSONL，但不进默认 picker，所以时间戳不会留在面板里。
+ * Rewind picker anchors are projected from the current head's ancestor
+ * chain: head points at the chosen user message's parent (rewind lands
+ * before it); fillInput puts the prompt back into the input box. Skipped
+ * branches stay in the JSONL but are not listed in the default picker.
  */
 import { isTurnQuery } from "../turn-projection.js";
 import type { AnthropicNativeMessage } from "../../harness/index.js";

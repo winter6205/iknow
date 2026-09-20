@@ -13,12 +13,13 @@
  */
 
 /**
- * 读侧共用的校验错误，三条轴都抛它（`query_trace` 的 limit / detail，
- * `list_sessions` 的 limit / offset，`get_record` 的窗坐标与越界的
- * `message_index` / `part_index`）：ACI 薄皮的 catch arm 按 `instanceof` 认它，
- * spec SC20 按 `kind` 计数，所以两张皮共用一份、不各立一个同形类。
- * 类名里的 `QueryTrace` 是历史名，重命名另开票（plan `trace-mcp-read-side-split`
- * §待写入），不在本轮中途改判别名的字符串面。
+ * Validation error shared by all three read axes (`query_trace` limit /
+ * detail, `list_sessions` limit / offset, `get_record` window coordinates
+ * and out-of-range `message_index` / `part_index`): the ACI thin-shell catch
+ * arm identifies it by `instanceof` and the contract counts by `kind`, so
+ * both faces share one class instead of two same-shape ones.
+ * `QueryTrace` in the class name is historical; renaming needs its own
+ * change — the discriminator string literals stay untouched mid-flight.
  */
 export class TraceQueryValidationError extends Error {
   override readonly name = "TraceQueryValidationError";
@@ -47,9 +48,10 @@ export class TraceQueryRecordScanError extends Error {
 }
 
 /**
- * `record_id` 扫完了整个会话仍无命中。与 `record_scan` 是两件事：那条说「没扫
- * 完」，这条说「扫完了，没有」。`get_record` 抛它取代行轴现状的静默
- * `records: []`（plan T6 AC）。
+ * `record_id` found no match after scanning the whole conversation. This is
+ * distinct from `record_scan`: that says "scan did not finish", this says
+ * "scan finished, nothing there". `get_record` throws it instead of the
+ * row axis's silent `records: []`.
  */
 export class TraceRecordNotFoundError extends Error {
   override readonly name = "TraceRecordNotFoundError";
@@ -63,9 +65,10 @@ export class TraceRecordNotFoundError extends Error {
 }
 
 /**
- * 必填 `conversation_id` 在该 traceDir 下没有对应文件。它**不等于**
- * `record_not_found`：那条记录可能存在，只是本面根本没去看（第 14 条把它从 T7
- * 前移到 T6，因为 `get_record` 是第一个 `conversation_id` 必填的面）。
+ * The required `conversation_id` has no matching file under this traceDir.
+ * It is **not** the same as `record_not_found`: the record may exist and
+ * this face simply never looked at it (raised ahead of envelope work because
+ * `get_record` is the first face where `conversation_id` is required).
  */
 export class TraceSessionNotFoundError extends Error {
   override readonly name = "TraceSessionNotFoundError";
@@ -79,12 +82,15 @@ export class TraceSessionNotFoundError extends Error {
 }
 
 /**
- * 调用方给的窗越出了该 part 末尾（`from_char + count > part_chars`）。
+ * The caller's window passes the end of the part (`from_char + count >
+ * part_chars`).
  *
- * 消息带 `part_chars` 与剩余量、**不回传任何 part 字节**：判据是「窗必须整个落在
- * part 内」（第 14 条），所以这里的正确回答是「你这么改坐标就能读全」，不是「顺手
- * 给你一页截好的」——后者正是本 kind 存在的理由被自己推翻。`remaining` 让调用方一次
- * 就能算出末页的 `count`。
+ * The message carries `part_chars` and the remaining length, and returns
+ * **no part bytes**: the rule is "the window must lie entirely inside the
+ * part", so the right answer is "adjust your coordinates and read fully",
+ * not "here, a clipped page for you" — the latter would contradict the very
+ * reason this kind exists. `remaining` lets the caller compute the last
+ * page's `count` in one step.
  */
 export class TraceWindowOverflowError extends Error {
   override readonly name = "TraceWindowOverflowError";

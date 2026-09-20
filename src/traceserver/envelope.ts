@@ -1,13 +1,14 @@
 /**
  * The read side's shared response envelope (wire shape, snake_case).
  *
- * panel face (`http.ts` → Web UI) 与 tool face (`query-trace-core.ts` → ACI /
- * MCP) **不再共用**信封构造：从 plan `trace-mcp-read-side-split` T7 起，
- * `total` / `truncated` 是面板分页语义（ADR-0020 D1.1），不再出现在工具面
- * （契约 X / ADR-0004:23 / spec SC7）。本文件仍留下 `ResponseEnvelope` /
- * `toResponseEnvelope` 给面板沿用；工具面改用 `QueryTracePage` /
- * `toQueryTracePage`（plan §序列化 对 T7 的硬约束：另立一个构造，**不得**
- * 给 `toResponseEnvelope` 加「哪张皮」的开关）。
+ * The panel face (`http.ts` → Web UI) and the tool face
+ * (`query-trace-core.ts` → ACI / MCP) **no longer share** envelope
+ * construction: `total` / `truncated` are panel pagination semantics
+ * (ADR-0020) and no longer appear on the tool face (contract X / ADR-0004).
+ * This file keeps `ResponseEnvelope` / `toResponseEnvelope` for the panel;
+ * the tool face uses `QueryTracePage` / `toQueryTracePage` — a separate
+ * construction, deliberately **not** a "which face" switch added to
+ * `toResponseEnvelope`.
  */
 import type { TraceRecordRow, TraceQueryResult } from "./types.js";
 
@@ -20,9 +21,11 @@ export interface ResponseEnvelope {
 }
 
 /**
- * reader 结果 → 面板信封。`records` 用于替换成投影后的记录，省略则原样带上
- * reader 的原始行。键序固定为 records / total / skipped_lines / truncated /
- * offset：键序不影响序列化长度，但面板输出哪些字节由它决定。
+ * reader result → panel envelope. `records` replaces the rows with
+ * projected records; when omitted the reader's raw rows pass through. Key
+ * order is fixed as records / total / skipped_lines / truncated / offset:
+ * key order does not affect serialized length, but it decides which bytes
+ * the panel emits.
  */
 export function toResponseEnvelope(
   result: TraceQueryResult,
@@ -37,7 +40,7 @@ export function toResponseEnvelope(
   };
 }
 
-/** 无数据可读时的面板信封：目录里还没有会话。 */
+/** Panel envelope when there is nothing to read: the directory has no sessions yet. */
 export function emptyResponseEnvelope(): ResponseEnvelope {
   return toResponseEnvelope({
     records: [],
@@ -49,18 +52,22 @@ export function emptyResponseEnvelope(): ResponseEnvelope {
 }
 
 /**
- * tool face 的 `query_trace` 信封形状：行筛选 + 行分页的一页，
- * **不含** `total` / `truncated`。
+ * The tool face's `query_trace` envelope shape: one page of row filtering +
+ * row pagination, **without** `total` / `truncated`.
  *
- * - `records`：投影后的记录数组（list 路径）。
- * - `limit` / `offset`：生效坐标（即「调用方实际用到的值」—— 缺省也物化），续
- *   取 = `offset + records.length`，`records.length < limit` 即「到底」信号。
- * - 不带 `skipped_lines`：JSONL 解析失败条数对工具面无意义（行轴的续取是 row
- *   级而非字节级，且工具面删除了字节轮询 `resume_offset`），把它混进 envelope
- *   会把面板读侧的诊断字段错认作工具契约的一部分。
+ * - `records`: projected record array (list path).
+ * - `limit` / `offset`: effective coordinates (the values the caller
+ *   actually used — defaults are materialized too); resume =
+ *   `offset + records.length`, and `records.length < limit` is the
+ *   "reached the end" signal.
+ * - No `skipped_lines`: the count of JSONL parse failures is meaningless on
+ *   the tool face (row-axis resume is row-level, not byte-level, and the
+ *   byte polling `resume_offset` was removed from the tool face); mixing it
+ *   into the envelope would mistake panel read-side diagnostics for part of
+ *   the tool contract.
  *
- * 同形判据：plan §序列化 + 第 12 条的 `ListSessionsPage` 同款语义，「records 数
- * 组 + 回显生效坐标」是三轴工具面的统一形状。
+ * Same-shape rationale: mirrors `ListSessionsPage` — "records array +
+ * echoed effective coordinates" is the unified shape of the tool face.
  */
 export interface QueryTracePage {
   readonly records: ReadonlyArray<Record<string, unknown> | TraceRecordRow>;

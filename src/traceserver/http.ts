@@ -4,9 +4,9 @@
  * Routes (all GET):
  *   /api/v1/traces         — query JSONL trace rows (filter + pagination + poll)
  *   /api/v1/traces/fields  — field declaration table (panel column SSOT)
- *   /api/v1/sessions       — 会话列表 (conversation_id / mtime / size / agent_version)
+ *   /api/v1/sessions       — session list (conversation_id / mtime / size / agent_version)
  *
- * T6 (ADR-0071 / SC14–SC17): traceDir is the
+ * ADR-0071: traceDir is the
  * **baseDir**; sessions live at
  * `<baseDir>/projects/<project-slug>/<convId>/trace.jsonl`.
  * Wire params stay snake_case; `conversation_id` walks the project tree via
@@ -37,8 +37,9 @@ export interface TracesRequestOpts {
   readonly res: http.ServerResponse;
   readonly url: URL;
   /**
-   * trace 目录 (v2 每会话一文件: `<traceDir>/<convId>.jsonl`)。缺省 →
-   * /api/v1/traces 返回 404 no trace file configured (与 v0 单文件语义一致)。
+   * Trace directory (one file per conversation under the projects tree).
+   * Absent -> /api/v1/traces returns 404 no trace file configured (same as
+   * the single-file semantics).
    */
   readonly traceDir?: string;
   /**
@@ -61,7 +62,7 @@ function parseConversationId(value: string | null): string | undefined {
   return value;
 }
 
-/** T5 (#358): 非空字符串过滤值 (task_id / parent_turn_id 共用 parseConversationId 形状)。 */
+/** Non-empty string filter value (task_id / parent_turn_id share parseConversationId's shape). */
 function parseStringParam(
   value: string | null,
   field: string
@@ -121,12 +122,13 @@ function parseOffset(value: string | null): number | undefined {
 }
 
 /**
- * ?poll=<ms> — 前端轮询间隔 (spec def-ior: 非负整数, 0 = 停轮询)。
- * http.ts 不阻塞也不实现服务端轮询: 本参数只做校验并原样透传,
- * 响应里恒带 `offset` 供前端组织下一轮请求。
+ * ?poll=<ms> — frontend polling interval (non-negative integer, 0 = stop
+ * polling). http.ts neither blocks nor implements server-side polling: the
+ * param is only validated and passed through; responses always carry
+ * `offset` so the frontend can build the next request.
  */
 function parsePoll(value: string | null): number {
-  if (value === null) return 1000; // 缺省 1000ms
+  if (value === null) return 1000; // default 1000ms
   const n = Number(value);
   if (!Number.isInteger(n) || n < 0) {
     throw new ValidationError("poll must be a non-negative integer", {
@@ -137,8 +139,9 @@ function parsePoll(value: string | null): number {
 }
 
 /**
- * ?resume_offset=<n> — 增量轮询恢复字节偏移 (非负整数)。不传 = 0 (从头全读)。
- * 由前端把上一轮响应里的 `offset` 原样传回。
+ * ?resume_offset=<n> — incremental-polling resume byte offset (non-negative
+ * integer). Absent = 0 (full read from head). The frontend passes the
+ * previous response's `offset` back verbatim.
  */
 function parseResumeOffset(value: string | null): number {
   if (value === null) return 0;
@@ -187,12 +190,13 @@ function sendNoTraceFile(res: http.ServerResponse): void {
   });
 }
 
-// -- 会话文件解析 ---------------------------------------------------------------
+// -- session file resolution -----------------------------------------------------
 
 /**
- * 由 conversation_id 解析到 trace 文件的读侧路径。Walk 两级树
- * `<baseDir>/projects/<project-slug>/<convId>/trace.jsonl`;`conversation_id`
- * 必须不含路径分隔符（防目录穿越）。未命中 → undefined,调用方转 404。
+ * Read-side path from conversation_id to the trace file. Walks the
+ * two-level tree `<baseDir>/projects/<project-slug>/<convId>/trace.jsonl`;
+ * `conversation_id` must contain no path separators (directory-traversal
+ * guard). Miss -> undefined, caller turns it into 404.
  */
 function sessionFilePath(
   traceDir: string,
@@ -210,10 +214,11 @@ function sessionFilePath(
 // -- handlers ------------------------------------------------------------------
 
 /**
- * Handle GET /api/v1/sessions — 会话目录列表 (SC-R 10 / SC-R 17 / SC-R 18)。
- * traceDir 未配置 → 404 (与 /api/v1/traces 的 no-trace-out 契约一致)；
- * 目录不存在 → listSessions 返回空列表 (非 500)；单个会话 stat ENOENT 已由
- * listSessions 内部跳过。
+ * Handle GET /api/v1/sessions — session directory listing.
+ * traceDir unconfigured -> 404 (same no-trace-out contract as
+ * /api/v1/traces); missing directory -> listSessions returns an empty list
+ * (not 500); single-session stat ENOENT is already skipped inside
+ * listSessions.
  */
 export function handleSessionsRequest(opts: TracesRequestOpts): void {
   const { res, traceDir } = opts;
@@ -230,8 +235,9 @@ export function handleSessionsRequest(opts: TracesRequestOpts): void {
  * Throws ValidationError on bad query params (caller maps to 400);
  * TraceReadError on IO failure (caller maps to 500 internal).
  *
- * v2 下钻 (SC-R 11/12): conversation_id → `<traceDir>/<id>.jsonl`；缺省 →
- * 最近活跃会话 (readdir+stat 按 mtime)，不 400、不混看。
+ * Drill-down: conversation_id -> that session's file; absent -> most
+ * recently active session (readdir+stat by mtime) — never a 400 and never
+ * a mixed view.
  */
 export function handleTracesRequest(opts: TracesRequestOpts): void {
   const { res, url, traceDir } = opts;
@@ -247,12 +253,14 @@ export function handleTracesRequest(opts: TracesRequestOpts): void {
       return;
     }
     const query = parseTraceQuery(url);
-    // poll 只做校验并透传——面板据此决定是否发起下一轮请求 (SC-V 26)。
+    // poll is only validated and passed through — the panel decides whether
+    // to issue the next round based on it.
     parsePoll(url.searchParams.get("poll"));
 
     let conversationId = query.conversationId;
     if (conversationId === undefined) {
-      // 缺省 → 最近活跃会话 (SC-R 12)。目录为空 (尚无会话) → 空结果 200。
+      // Default -> most recently active session. Empty directory (no
+      // sessions yet) -> empty result, 200.
       conversationId = newestConversationId(traceDir);
       if (conversationId === undefined) {
         sendJson(res, 200, emptyResponseEnvelope());
@@ -262,7 +270,8 @@ export function handleTracesRequest(opts: TracesRequestOpts): void {
 
     const filePath = sessionFilePath(traceDir, conversationId);
     if (filePath === undefined) {
-      // 未命中会话文件夹 → 404 (与 /api/v1/sessions 的 no-trace-out 契约一致)。
+      // No matching conversation folder -> 404 (same no-trace-out contract
+      // as /api/v1/sessions).
       sendNoTraceFile(res);
       return;
     }

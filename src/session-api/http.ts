@@ -1,8 +1,8 @@
 /**
  * Minimal node:http router for Session API + static web UI.
- * 022 T5: nested ApiErrorBody, hub error mapping, GET /sessions list.
+ * Nested ApiErrorBody, hub error mapping, GET /sessions list.
  * ADR-0020: the trace inspection read API is MOUNTED in-process (reverses
- * #183 R3's standalone split): `opts.trace` mounts `/api/v1/traces*` via
+ * the earlier standalone split): `opts.trace` mounts `/api/v1/traces*` via
  * traceserver's createTraceRouter + the trace SPA under `/trace`; write-side
  * `--trace-out` on serve/chat/ask remains unchanged.
  * Static-asset serving extracted to `src/web/serve-static.ts` so traceserver
@@ -55,7 +55,8 @@ import {
 
 export { resolveDefaultWebRoot };
 
-/** **策略预算窗口**缺省（ADR-0100）：health 显示分母引用 env 层的同一常量。 */
+/** Default strategy context-window (ADR-0100): health's display denominator
+ *  references the same constant from the env layer. */
 export const DEFAULT_CONTEXT_WINDOW = DEFAULT_STRATEGY_CONTEXT_WINDOW;
 
 export type SessionHttpServerOptions = {
@@ -64,23 +65,24 @@ export type SessionHttpServerOptions = {
   webRoot?: string;
   host?: string;
   port?: number;
-  /** **策略预算窗口**大小（token），用量显示分母。缺省
-   *  `DEFAULT_STRATEGY_CONTEXT_WINDOW = 256_000`（ADR-0100）。
-   *  HealthResponse 字段；由 serve.ts 从 loadIknowEnv().compress.contextWindow 透传。 */
+  /** Strategy context-window size in tokens; denominator for usage display.
+   *  Default `DEFAULT_STRATEGY_CONTEXT_WINDOW = 256_000` (ADR-0100).
+   *  HealthResponse field; serve.ts passes it through from
+   *  loadIknowEnv().compress.contextWindow. */
   contextWindow?: number;
-  /** 模型路由 ID（settings.llm.model）。HealthResponse 字段；
-   *  由 serve.ts 透传；缺席 → health 不带 model（byte-stable）。 */
+  /** Model routing ID (settings.llm.model). HealthResponse field; passed
+   *  through by serve.ts; absent → health omits model (byte-stable). */
   model?: string;
-  /** Trace 写盘失败计数读取器；缺席时 health 返回 0。 */
+  /** Trace write-failure counter reader; health returns 0 when absent. */
   traceWriteFailures?: number | (() => number);
-  /** 可变 permission mode holder（与 hub 共用同一 context 实例）。
-   *  在场 → GET/POST /api/v1/permission-mode 可用；缺席 → 两端点 404。 */
+  /** Mutable permission-mode holder (same context instance as the hub).
+   *  Present → GET/POST /api/v1/permission-mode; absent → both endpoints 404. */
   permissionMode?: PermissionModeContext;
-  /** D-α V1 / ADR-0030:可变 graph overlay holder（与 hub 共用同一实例）。
-   *  在场 → GET/POST /api/v1/graph-mode 可用；缺席 → 两端点 404。 */
+  /** ADR-0030: mutable graph-overlay holder (same instance as the hub).
+   *  Present → GET/POST /api/v1/graph-mode; absent → both endpoints 404. */
   graphMode?: GraphModeContext;
-  /** ADR-0092 / SC13：可变 fs isolation 档 holder（与 hub 共用同一实例）。
-   *  在场 → GET/POST /api/v1/fs-mode 可用；缺席 → 两端点 404。 */
+  /** ADR-0092: mutable fs-isolation-mode holder (same instance as the hub).
+   *  Present → GET/POST /api/v1/fs-mode; absent → both endpoints 404. */
   fsMode?: FsModeContext;
   /**
    * ADR-0020: mount the trace inspection read API in-process. When present,
@@ -174,14 +176,14 @@ interface HandleOpts {
   readonly hub: SessionHub;
   readonly webRoot: string;
   readonly contextWindow: number;
-  /** HealthResponse 模型名字段（缺席 → 不下发）。 */
+  /** HealthResponse model field (omitted from the payload when absent). */
   readonly model?: string;
   readonly traceWriteFailures?: number | (() => number);
-  /** 可变 permission mode holder（缺席 → permission-mode 端点 404）。 */
+  /** Mutable permission-mode holder (absent → permission-mode endpoint 404). */
   readonly permissionMode?: PermissionModeContext;
-  /** 可变 graph overlay holder（缺席 → graph-mode 端点 404）。 */
+  /** Mutable graph-overlay holder (absent → graph-mode endpoint 404). */
   readonly graphMode?: GraphModeContext;
-  /** ADR-0092 / SC13：可变 fs isolation 档 holder（缺席 → fs-mode 端点 404）。 */
+  /** ADR-0092: mutable fs-isolation holder (absent → fs-mode endpoint 404). */
   readonly fsMode?: FsModeContext;
   /** ADR-0020: mounted trace router (undefined = trace not mounted). */
   readonly traceRouter?: (
@@ -255,10 +257,11 @@ async function handle(opts: HandleOpts): Promise<void> {
       });
     }
 
-    // 三条 holder 路由（permission-mode / graph-mode / fs-mode）同形状：
-    // 一次派发代替三段 if（S5 complexity ratchet：handle 每加一条路由的
-    // 分支都要还债）。handler 自带的 validation 语义（graph 的非法 args、
-    // browse 的 422）不变 —— 它们的 catch 见各自 handler。
+    // The three holder routes (permission-mode / graph-mode / fs-mode) share
+    // one shape: a single dispatch replaces three if-blocks (complexity
+    // ratchet — every branch added to handle() must be paid back). Handler-
+    // level validation semantics (invalid graph args, browse 422) are
+    // unchanged; their catches live in each handler.
     const holderRoute = matchHolderRoute(pathname);
     if (holderRoute !== undefined) {
       return await holderRoute({
@@ -271,7 +274,7 @@ async function handle(opts: HandleOpts): Promise<void> {
       });
     }
 
-    // serve-workspace T3: picker bind state + recents/trust roster.
+    // Workspace picker bind state + recents/trust roster.
     if (pathname === "/api/v1/workspace") {
       if (method === "GET") {
         return sendJson({
@@ -304,10 +307,10 @@ async function handle(opts: HandleOpts): Promise<void> {
         } satisfies WorkspacesResponse,
       });
     }
-    // serve-workspace T2: subdirectory probe for the workspace picker
-    // breadcrumb. Pure-function gated; any failure (missing / empty /
-    // relative / not_found / not_a_dir / EACCES) collapses to a typed
-    // 422 `validation` so the SPA's caller contract is predictable.
+    // Subdirectory probe for the workspace picker breadcrumb. Pure-function
+    // gated; any failure (missing / empty / relative / not_found / not_a_dir /
+    // EACCES) collapses to a typed 422 `validation` so the SPA's caller
+    // contract is predictable.
     if (pathname === "/api/v1/workspaces/browse") {
       if (method !== "GET") {
         return sendMethodNotAllowed(res, method, pathname);
@@ -436,21 +439,22 @@ type HolderRouteContext = {
 };
 
 /**
- * 三条 holder 路由的 handler 签名。
+ * Handler signature shared by the three holder routes.
  *
- * 契约：三者都在 `handle` 的 try 内被 **`await`** 调用，所以 handler 抛出
- * 的 `ValidationError` 会落进 `handle` 的 catch → `sendError`（非法 args
- * → 400）。裸 `return promise`（不 await）会让 rejection 发生在 try 之外：
- * 响应永远不写、请求挂死 —— 派发点必须保持 `return await`。
+ * Contract: all three are `await`ed inside handle()'s try, so a thrown
+ * ValidationError lands in handle()'s catch → sendError (invalid args → 400).
+ * A bare `return promise` would reject outside the try: the response is never
+ * written and the request hangs — dispatch sites must keep `return await`.
  */
 type HolderRoute = (ctx: HolderRouteContext) => Promise<void>;
 
 /**
- * pathname → holder 路由 handler（无匹配 → undefined）。
+ * pathname → holder-route handler (no match → undefined).
  *
- * 路由表是数据而非分支：`handle` 每条路由只付一次判空，加第四条 holder
- * 端点不再增加它的分支数（S5 complexity ratchet）。查询走 `Map.get`：
- * `in` 也会被 complexity 计一个分支，`get` 不会。
+ * The route table is data, not branches: handle() pays one null check per
+ * request, so a fourth holder endpoint adds no branch count (complexity
+ * ratchet). Lookups use `Map.get` — `in` counts as a complexity branch,
+ * `get` does not.
  */
 const HOLDER_ROUTES: ReadonlyMap<string, HolderRoute> = new Map<
   string,
@@ -466,9 +470,9 @@ function matchHolderRoute(pathname: string): HolderRoute | undefined {
 }
 
 /**
- * GET → 当前 mode；POST（空 body）→ cycle 语义走 SSOT nextShiftTabMode
- * （与 TUI/REPL 同一映射）并写回共享 holder（hub 运行时即时生效）。
- * holder 缺席 / 其它 method → 404。
+ * GET → current mode; POST (empty body) → cycle via SSOT nextShiftTabMode
+ * (same mapping as TUI/REPL) and write back to the shared holder so the hub
+ * picks it up at runtime immediately. Holder absent / other methods → 404.
  */
 async function handlePermissionModeRoute(
   ctx: HolderRouteContext
@@ -483,7 +487,7 @@ async function handlePermissionModeRoute(
     return sendJson({ res, status: 200, body });
   }
   if (method === "POST") {
-    await readJsonBody(req); // 消费 body（允许空）；切换无参数
+    await readJsonBody(req); // drain body (may be empty); toggling takes no params
     const next = nextShiftTabMode(permissionMode.get());
     permissionMode.set(next);
     const body: PermissionModeResponse = { mode: next };
@@ -493,10 +497,12 @@ async function handlePermissionModeRoute(
 }
 
 /**
- * POST body 取 args：缺省 = 空数组（等价于裸 holder 查询）。
+ * Extract `args` from the POST body: default = empty array (equivalent to a
+ * bare holder query).
  *
- * `/graph-mode` 与 `/fs-mode` 两条路由同形共用（两处值域/文案各自走 SSOT，
- * body 形状是同一套 wire 契约）——不要按路由复制第二份。
+ * Shared verbatim by /graph-mode and /fs-mode: value ranges and copy each
+ * live in their own SSOT, but the body shape is one wire contract — do not
+ * duplicate it per route.
  */
 function parseHolderArgs(body: unknown): ReadonlyArray<string> {
   if (body === undefined || body === null) return [];
@@ -514,10 +520,11 @@ function parseHolderArgs(body: unknown): ReadonlyArray<string> {
 }
 
 /**
- * GET → 当前 overlay 状态；POST（body `{ args }`）→ 走 SSOT
- * `applyGraphCommand`（与 chat / TUI 的 `/graph` 同一套值域与文案）。
- * 非法 args 是 typed 拒绝（ValidationError → 400），holder 不动 —— serve
- * 侧「猜用户意思」比报错更糟。holder 缺席 / 其它 method → 404。
+ * GET → current overlay state; POST (body `{ args }`) → SSOT
+ * `applyGraphCommand` (same value range and copy as chat/TUI `/graph`).
+ * Invalid args are a typed rejection (ValidationError → 400) and the holder
+ * stays untouched — guessing user intent on the serve side is worse than an
+ * error. Holder absent / other methods → 404.
  */
 async function handleGraphModeRoute(ctx: HolderRouteContext): Promise<void> {
   const { method, req, res, graphMode } = ctx;
@@ -544,13 +551,14 @@ async function handleGraphModeRoute(ctx: HolderRouteContext): Promise<void> {
 }
 
 /**
- * GET → 当前 fs isolation 档；POST（body `{ args }`）→ 走 SSOT
- * `applyFsModeCommand`（与 chat / TUI 的 `/config` 同一套值域与文案）。
- * 非法 args 是 typed 拒绝（ValidationError → 400），holder 不动 —— serve
- * 侧「猜用户意思」比报错更糟。holder 缺席 / 其它 method → 404。
+ * GET → current fs isolation mode; POST (body `{ args }`) → SSOT
+ * `applyFsModeCommand` (same value range and copy as chat/TUI `/config`).
+ * Invalid args are a typed rejection (ValidationError → 400) and the holder
+ * stays untouched — guessing user intent on the serve side is worse than an
+ * error. Holder absent / other methods → 404.
  *
- * 与 graph 同理：本 handler 的 ValidationError 必须落进 `handle` 的
- * catch（400）—— 派发点保持 `return await`，理由见 HolderRoute。
+ * Same as graph: this handler's ValidationError must land in handle()'s catch
+ * (400) — dispatch keeps `return await`, see HolderRoute.
  */
 async function handleFsModeRoute(ctx: HolderRouteContext): Promise<void> {
   const { method, req, res, fsMode } = ctx;
@@ -596,7 +604,7 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
   if (method === "POST" && rest === "/messages") {
     const body = await readJsonBody(req);
     const text = extractTextField(body);
-    // T2: parse + validate the optional per-turn thinking override; invalid
+    // Parse + validate the optional per-turn thinking override; invalid
     // values throw ValidationError → 400 (fail loud, no silent fallback).
     const thinking = parseThinkingOverride(extractThinkingField(body));
     sendJson({
@@ -635,12 +643,13 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
     });
     return true;
   }
-  // POST /compact — 手动压缩会话（web 压缩按钮 / TUI /compact 的 HTTP 侧）。
-  // body 可空；无 body / 空 body 等价 {}（压缩本身无参数）。
-  // #548:把 req 关闭事件绑到 AbortController,客户端断连 → 自动 signal_aborted
-  // → hub 走 keep-state 路径 + 响应 cancelled:true(契约同步 #548)。
+  // POST /compact — manual compaction (HTTP side of the web compact button /
+  // TUI /compact). Body may be empty; missing/empty body ≡ {} (compaction
+  // itself takes no params). Bind the req close event to an AbortController:
+  // client disconnect → signal aborted → hub keeps state and responds
+  // cancelled:true.
   if (method === "POST" && rest === "/compact") {
-    await readJsonBody(req); // 消费 body（允许空），压缩本身无参数
+    await readJsonBody(req); // drain body (may be empty); compaction takes no params
     const compactController = new AbortController();
     req.once("close", () => compactController.abort());
     sendJson({
@@ -650,9 +659,9 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
     });
     return true;
   }
-  // POST /continue — HITL skip-append 续跑（CLI/TUI/Web /continue 的 HTTP 侧）。
-  // 镜像 POST /compact：body 可空；无 busy_stop_first（hub serialize/queue）。
-  // 禁止用空 POST /messages 冒充 continue。
+  // POST /continue — resume after a HITL skip-append (HTTP side of CLI/TUI/Web
+  // /continue). Mirrors POST /compact: body may be empty; no busy_stop_first
+  // (the hub serializes/queues). Do not fake continue with an empty POST /messages.
   if (method === "POST" && rest === "/continue") {
     await readJsonBody(req);
     const continueController = new AbortController();
@@ -673,9 +682,10 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
     sendJson({ res, status: 200, body: { asks: hub.listPendingAsks() } });
     return true;
   }
-  // #358 T7: GET /sessions/:id/subagents — 只读子代理状态投影(running/
-  // completed/failed 合一)。hub 先做会话存在性门(未知会话 → typed 404 via
-  // 已有多层 sendError 收编);列表包裹 {subagents:[...]} 镜像 {asks:[...]} 先例。
+  // GET /sessions/:id/subagents — read-only sub-agent status projection
+  // (running/completed/failed unified). The hub gates on session existence
+  // first (unknown session → typed 404 via the existing sendError mapping);
+  // the {subagents:[...]} wrapper mirrors the {asks:[...]} precedent.
   if (method === "GET" && rest === "/subagents") {
     sendJson({
       res,
@@ -760,7 +770,7 @@ function extractTextField(raw: unknown): string {
   return "text" in o ? String(o.text ?? "") : "";
 }
 
-/** T2: extract the optional `thinking` field raw value (validation happens
+/** Extract the optional `thinking` field raw value (validation happens
  * in parseThinkingOverride, which throws ValidationError on invalid values). */
 function extractThinkingField(raw: unknown): unknown {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
@@ -780,7 +790,7 @@ function extractBoolField(opts: ExtractBoolFieldOpts): boolean {
   return Boolean(o[key]);
 }
 
-/** serve-workspace T3: parse PUT /api/v1/workspace body. */
+/** Parse PUT /api/v1/workspace body. */
 function parsePutWorkspaceBody(raw: unknown): PutWorkspaceRequest {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new ValidationError("body must be a JSON object");
@@ -797,7 +807,7 @@ function parsePutWorkspaceBody(raw: unknown): PutWorkspaceRequest {
 }
 
 /**
- * serve-workspace T2: handle `GET /api/v1/workspaces/browse?root=<abs>`.
+ * Handle `GET /api/v1/workspaces/browse?root=<abs>`.
  * The query-string root is forwarded as-is to `listSubdirectories`;
  * every failure collapses to 422 typed validation. Kept tiny to keep
  * the route table's complexity budget under control.
@@ -846,7 +856,7 @@ function handleBrowseWorkspaces(
   });
 }
 
-/** serve-workspace T3: 405 for exact path with the wrong method. */
+/** 405 for exact path with the wrong method. */
 function sendMethodNotAllowed(
   res: http.ServerResponse,
   method: string,
@@ -926,8 +936,8 @@ function isSessionStoreError(err: unknown): err is SessionStoreError {
 }
 
 /**
- * serve-workspace T3: recents/trust file errors → HTTP status + fixed wire
- * message. Mirrors the store error map's data-table shape; entries must NOT
+ * Recents/trust file errors → HTTP status + fixed wire message.
+ * Mirrors the store error map's data-table shape; entries must NOT
  * carry a conversation_id (recents errors are home/file-level).
  */
 const RECENTS_ERROR_MAP = {
@@ -958,9 +968,8 @@ interface SendErrorOpts {
 
 function sendError(opts: SendErrorOpts): void {
   const { res, err } = opts;
-  // serve-workspace T3: WorkspaceRootError MUST be checked before the
-  // SessionStoreError guard — the `not_found` kind exists in both unions
-  // with different HTTP targets (400 validation vs 404 not_found). The
+  // WorkspaceRootError MUST be checked before the SessionStoreError guard —
+  // the `not_found` kind exists in both unions with different HTTP targets (400 validation vs 404 not_found). The
   // resolver's not_found is ADR-0023 EXIT.
   if (isWorkspaceRootError(err)) {
     const werr = err as WorkspaceRootError;
@@ -977,9 +986,9 @@ function sendError(opts: SendErrorOpts): void {
     });
     return;
   }
-  // serve-workspace T3: recents/trust IO errors are plain objects with
-  // overlapping kinds (parse_failed / concurrent_write) that the
-  // SessionStoreError guard would otherwise misclassify. Map each kind to
+  // Recents/trust IO errors are plain objects with overlapping kinds
+  // (parse_failed / concurrent_write) that the SessionStoreError guard would
+  // otherwise misclassify. Map each kind to
   // its own status; messages are fixed text (no conversation_id — these
   // errors are file-level, not session-level).
   if (isWorkspacesRecentsError(err)) {

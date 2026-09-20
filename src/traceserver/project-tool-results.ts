@@ -13,12 +13,14 @@ export interface ToolResultProjection {
 }
 
 /**
- * 一条投影后的 tool_result，带**全文**。
+ * One projected tool_result with the **full text**.
  *
- * 与 `ToolResultProjection` 分成两个类型是为了把两件不同的事说清楚：本类型是
- * 「读侧对一次工具输出的完整重建」（`get_record` 的窗按它寻址），那个类型是行轴
- * 给调用方看的一页摘要（`preview` 受 `TOOL_RESULT_PREVIEW_CAP` 管）。顺序、去重、
- * 同 id 合并只在这里实现一次。
+ * Split from `ToolResultProjection` on purpose to say two different things:
+ * this type is "the read side's complete reconstruction of one tool output"
+ * (`get_record`'s window addresses against it); that type is the row axis's
+ * one-page summary for callers (`preview` governed by
+ * `TOOL_RESULT_PREVIEW_CAP`). Ordering, dedup, and same-id merging are
+ * implemented once, here.
  */
 export interface ProjectedToolResult {
   readonly tool_use_id: string;
@@ -56,12 +58,13 @@ export type ReadBlob = (
 
 export interface TraceMessageDereferenceOptions {
   /**
-   * 主会话 trace 文件绝对路径。T3 (SC7, ADR-0071 /
-   * ADR-0071 Decision 4) 起 `traceDir` 退役:blob 目录 = `dirname(traceFilePath) +
-   * "/blobs"`,与 `<baseDir>/projects/<slug>/<convId>/blobs` 同源派生
-   * (JsonlTraceService 在 blob 模式下的默认写盘位置)。传 `traceFilePath` 即隐含
-   * 接受该 blob 路径;读侧禁止 `traceDir` 单独存在 —— 仅文件路径足以承载 blob
-   * 解析的全部信息。
+   * Absolute path of the main session's trace file. Since ADR-0071
+   * `traceDir` is retired: blob directory = `dirname(traceFilePath) +
+   * "/blobs"`, derived from the same source as
+   * `<baseDir>/projects/<slug>/<convId>/blobs` (JsonlTraceService's default
+   * write location in blob mode). Passing `traceFilePath` implicitly accepts
+   * that blob path; a standalone `traceDir` is forbidden on the read side —
+   * the file path alone carries all information needed for blob resolution.
    */
   readonly traceFilePath?: string;
   readonly readBlob?: ReadBlob;
@@ -160,10 +163,11 @@ export async function dereferenceTraceMessages(
     return await Promise.all(
       messages.map(async (message) => {
         // Two valid blob-ref shapes coexist:
-        //   (a) whole-message ref (T4 之前的整条 message 替换, 旧 fixture 残留):
-        //         { sha, bytes }  — message 整体作为 blob 写入
-        //   (b) content-level ref (T4, SC10):
-        //         { role, content: { sha, bytes } }  — role 内联, content 走 blob
+        //   (a) whole-message ref (the historical full-message replacement,
+        //         legacy fixture residue):
+        //         { sha, bytes }  — the whole message stored as one blob
+        //   (b) content-level ref:
+        //         { role, content: { sha, bytes } }  — role inline, content in a blob
         // The deref point descends into (b)'s `content` so the post-derf shape
         // matches the inline form: `{role, content}` where `content` is a
         // string (kind="str") or array (kind="blocks"). Whole-message (a) keeps
@@ -187,10 +191,10 @@ export async function dereferenceTraceMessages(
 }
 
 /**
- * T4 (SC10): `content` field shaped `{ sha, bytes }` — the message is a
- * content-level ref, the surrounding `role` is inline. Detected by **field
- * shape**, not by `("sha" in message)` (which would also fire on whole-message
- * refs and skip the role).
+ * `content` field shaped `{ sha, bytes }` — the message is a content-level
+ * ref, the surrounding `role` is inline. Detected by **field shape**, not by
+ * `("sha" in message)` (which would also fire on whole-message refs and skip
+ * the role).
  */
 function isContentBlobReference(
   message: Record<string, unknown>
@@ -215,9 +219,10 @@ async function readBlobContent(
   ref: { sha: string; bytes: number },
   options: TraceMessageDereferenceOptions
 ): Promise<unknown> {
-  // 写侧 toBlobReferences 形状: {kind:"str"|"blocks", v: content}。
-  // 读侧还原两条: kind="str" → 字符串; kind="blocks" → 数组(原样 v)。
-  // 损坏/缺失/形状不符 → 一律 throw 给外层 try/catch 降级到空数组。
+  // Writer's toBlobReferences shape: {kind:"str"|"blocks", v: content}.
+  // Reader restores both: kind="str" → string; kind="blocks" → array (v as-is).
+  // Corrupt / missing / shape-mismatch → throw to the outer try/catch,
+  // degrading to an empty array.
   const payload = await readBlobPayload(ref.sha, options);
   if (
     isRecord(payload) &&
@@ -225,7 +230,8 @@ async function readBlobContent(
   ) {
     return payload.v;
   }
-  // 不是 T4 形状 — 可能是整条 message ref 与本函数错配,直接 JSON.parse 原文。
+  // Not the content-level shape — possibly a whole-message ref mis-routed
+  // here; return the JSON.parsed payload as-is.
   return payload;
 }
 

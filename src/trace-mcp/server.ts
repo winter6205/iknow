@@ -38,10 +38,12 @@ const queryTraceInputSchema = z
   .strict();
 
 /**
- * 声明界与 ACI 面逐字段同值（spec SC18）：两个必填 id 只声明 string，长度界由核
- * 统一给（核里 `conversation_id` / `record_id` 必须非空）；三个坐标 minimum 0；
- * `count` 1..GET_RECORD_MAX_COUNT。两面的差异只剩 schema 语言的表达法，不再有第二
- * 套数值。
+ * Declared bounds match the ACI face field by field: the two required ids
+ * declare only string, with length bounds given uniformly by the core (the
+ * core requires non-empty `conversation_id` / `record_id`); the three
+ * coordinates have minimum 0; `count` is 1..GET_RECORD_MAX_COUNT. The two
+ * faces then differ only in schema language, never in a second set of
+ * numbers.
  */
 const getRecordInputSchema = z
   .object({
@@ -67,25 +69,31 @@ export interface TraceMcpServerOptions {
 }
 
 /**
- * 两张皮共用的 handler：成功 = core 的序列化文本；失败 = 本工具名 + core 的
- * message（SC16 锁定的可见形状）。三件工具同形，故只写一次。
+ * Handler shared by both thin faces: success = the core's serialized text;
+ * failure = this tool's name + the core's message (the locked visible
+ * shape). All three tools are same-shaped, so it is written once.
  *
- * 读侧核抛出的域内错误都是 Error 子类（`TraceQueryValidationError` /
- * `TraceWindowOverflowError` / `TraceRecordNotFoundError` /
- * `TraceSessionNotFoundError` / `TraceQueryRecordScanError` / `TraceReadError`），
- * 所以 `String(error)` 只在非 Error 抛出时到达 —— 那是程序缺陷，兜成一条
- * `isError` 文本好过让 stdio 进程崩。
- * 仓库的 typed-error 渲染规则要求带 `kind`：本面**故意不带**。MCP 没有 ACI
- * `ToolExecutionError.kind` 那样的结构化通道，把 kind 拼进文本会改掉 SC16 的形状
- * （记为后续票，见 plan `trace-mcp-read-side-split` §执行期前提修正）。
+ * Every domain error thrown by the read-side core is an Error subclass
+ * (`TraceQueryValidationError` / `TraceWindowOverflowError` /
+ * `TraceRecordNotFoundError` / `TraceSessionNotFoundError` /
+ * `TraceQueryRecordScanError` / `TraceReadError`), so `String(error)` is
+ * only reached on a non-Error throw — a program defect; degrading it to an
+ * `isError` text beats crashing the stdio process.
+ * The repo's typed-error rendering rule demands `kind`; this face
+ * **deliberately omits it**: MCP has no structured channel like ACI's
+ * `ToolExecutionError.kind`, and splicing kind into the text would change
+ * the locked shape (tracked as a follow-up).
  *
- * `applyTraceOutputBackstop` 是本面自己的帽，两条臂（成功文本与错误文本）都过它。
- * 为什么这里必须有、而 ACI 面没有：进程内那条路有 executor 的 `OUTPUT_HARD_CAP`
- * 兜底（契约 X 的唯一截断权威），stdio 这条路没有任何东西在它之后再看一眼文本。
- * 标记计入预算，所以返回长度**严格 ≤ `TRACE_OUTPUT_BACKSTOP`**。刻意**不**抄
- * executor 的 8 轮收敛循环：那个循环要处理的是任意 payload 结构（envelope、多
- * content block、对象图）反复序列化后的尺寸，本面每次只发一个已经序列化好的字符串，
- * 一次定长切分就是它的完整语义。
+ * `applyTraceOutputBackstop` is this face's own cap; both arms (success text
+ * and error text) pass through it. Why it must live here but not on the ACI
+ * face: the in-process path is backstopped by executor's `OUTPUT_HARD_CAP`
+ * (the single truncation authority); on the stdio path nothing looks at the
+ * text afterwards. The marker counts against the budget, so the returned
+ * length is **strictly ≤ `TRACE_OUTPUT_BACKSTOP`**. Deliberately **not** the
+ * executor's 8-round convergence loop: that loop handles re-serialized sizes
+ * of arbitrary payload structures (envelopes, multi content blocks, object
+ * graphs); this face emits one already-serialized string per call, so a
+ * single fixed-width cut is its complete semantics.
  */
 function readOnlyToolHandler(
   toolName: string,
@@ -127,7 +135,8 @@ export function createTraceMcpServer(
     version: "0.1.0",
   });
 
-  // 注册顺序 = tools/list 顺序，按读侧三轴排列：目录轴先于记录轴。
+  // Registration order = tools/list order, arranged by the read-side axes:
+  // catalog before records.
   server.registerTool(
     LIST_SESSIONS_TOOL_NAME,
     {
@@ -148,8 +157,9 @@ export function createTraceMcpServer(
     readOnlyToolHandler(QUERY_TRACE_TOOL_NAME, queryTrace)
   );
 
-  // 内容轴最后注册：tools/list 的顺序就是三轴的阅读顺序（目录 → 行 → 内容），
-  // 白名单仍然只有这三件（spec SC6）。
+  // The content axis registers last: tools/list order is the reading order
+  // of the three axes (catalog -> rows -> content), and the whitelist stays
+  // exactly these three tools.
   server.registerTool(
     GET_RECORD_TOOL_NAME,
     {

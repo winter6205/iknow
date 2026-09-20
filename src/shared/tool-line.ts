@@ -1,38 +1,43 @@
 /**
  * src/shared/tool-line.ts
  *
- * D1（specs/tui-human-display.md）人读过程行 SSOT：**CLI 与 TUI 共用摘要
- * 函数**（plans/tui-human-display.md T1「CLI 与 TUI 同一套 detail」）。
- * 两侧各抄一份模板字符串必然漂移，故文本层整体落在中立模块：
+ * Human-readable tool-line SSOT: CLI and TUI share the same summary functions.
+ * Two copies of the templates would drift, so the text layer lives in this
+ * neutral module:
  *
- *   - 本模块只依赖 `string-width`（无 React / @opentui / TUI 内部模块），
- *     因此 `src/cli/*` 可安全 import —— CLI → TUI 的 import 是反向分层，
- *     禁止（R9 依赖倒置）；
- *   - `src/tui/tool-summary.ts` 对本模块做 re-export，既有 TUI 调用方与
- *     tests/tui/* 的 import 路径不变（工具行字节零变化）；
- *   - 文本收口助手（visualWidth / clipOneLine / clipOneLineVisual）：归档
- *     时代 SSOT 在 text.ts，随摘要函数一并搬入，双方共用同一预算公式。
+ *   - depends only on `string-width` (no React / @opentui / TUI internals), so
+ *     `src/cli/*` can import it safely — CLI → TUI imports would invert the
+ *     layering;
+ *   - `src/tui/tool-summary.ts` re-exports this module, keeping existing TUI
+ *     call sites and tests/tui/* import paths unchanged;
+ *   - line-shaping helpers (visualWidth / clipOneLine / clipOneLineVisual):
+ *     moved here together with the summaries so both faces use one budget
+ *     formula.
  *
- * 人读合同（docs/CONTEXT.md `live tool line`）：进行中英文「名 + 本轮要点」
- * （search=query、fetch=url、read=path、grep=pattern）；bash 命令可见，前缀
- * `Running 1 shell command…`；思考 `Thinking…`。无 `[运行中]` / `[完成]`。
+ * Display contract (docs/CONTEXT.md `live tool line`): while running, an
+ * English "name + key point" line (search=query, fetch=url, read=path,
+ * grep=pattern); bash commands stay visible behind the
+ * `Running 1 shell command…` prefix; thinking shows `Thinking…`.
+ * There are no `[运行中]` ("running") / `[完成]` ("done") status brackets.
  */
 import stringWidth from "string-width";
 
-/** 视觉列宽（CJK / 全角按 2 列，string-width 口径）。 */
+/** Visual column width (CJK / full-width characters count as 2 columns). */
 export function visualWidth(s: string): number {
   return stringWidth(s);
 }
 
-/** 单行裁剪（字符数口径）：折叠空白，超长按字符数截断补 `…`。 */
+/** Clip to one line by character count: collapse whitespace, truncate to
+ *  `max` and append `…` when longer. */
 export function clipOneLine(s: string, max: number): string {
   const oneLine = s.replace(/\s+/g, " ").trim();
   return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }
 
 /**
- * 按**视觉宽度**截断单行（CJK 占 2 列）。保证结果 `visualWidth <= maxWidth`；
- * 省略号预留 1 列。maxWidth <= 0 返回空串。
+ * Clip one line by **visual width** (CJK takes 2 columns). Guarantees the
+ * result has `visualWidth <= maxWidth`; the ellipsis reserves 1 column.
+ * Returns an empty string when maxWidth <= 0.
  */
 export function clipOneLineVisual(s: string, maxWidth: number): string {
   const oneLine = s.replace(/\s+/g, " ").trim();
@@ -51,10 +56,12 @@ export function clipOneLineVisual(s: string, maxWidth: number): string {
 }
 
 const MAX_DETAIL = 80;
-/** 装饰预留（形态见 `formatToolStatusLine`）：最长前缀是失败态的
- *  `[失败] ` + 工具名，historically 定为 12 列（`[运行中] ` 9 列 + ` · `
- *  3 列的旧口径，D1 废状态括号后保留为保守常量——工具名在此预算内）。
- *  detail 收口后单行不折；running bash 的前缀另在拼装处整行兜底收口。 */
+/** Chrome reserve (shape see `formatToolStatusLine`): the longest prefix is
+ *  `[失败] ` ("failed") + the tool name; historically fixed at 12 columns (the old
+ *  `[运行中] ` ("running") 9 + ` · ` 3 accounting, kept as a conservative constant after
+ *  status brackets were dropped — tool names fit in this budget).
+ *  Once detail is clipped the line never wraps; the running-bash prefix is
+ *  clipped as a full line at the assembly site. */
 const CHROME_RESERVE = 12;
 
 function inputRecord(input: unknown): Record<string, unknown> {
@@ -68,14 +75,16 @@ function countLines(s: unknown): number {
   return s.split("\n").length;
 }
 
-/** detail 截断：给了 cols 走视觉宽度收口（保证单行不折），否则 legacy 80。 */
+/** Detail clipping: with `cols`, clip by visual width (the line never
+ *  wraps); otherwise legacy 80 characters. */
 function clipDetail(s: string, name: string, cols: number | undefined): string {
   if (cols === undefined) return clipOneLine(s, MAX_DETAIL);
   const budget = Math.max(4, cols - visualWidth(name) - CHROME_RESERVE);
   return clipOneLineVisual(s, Math.min(MAX_DETAIL, budget));
 }
 
-/** 字段提取辅助：string 字段（缺失 → fallback），避免逐 case 重复防御。 */
+/** Field-extraction helper: string field (missing → fallback), so each case
+ *  need not repeat the same defense. */
 function pickString(
   rec: Record<string, unknown>,
   key: string,
@@ -85,40 +94,41 @@ function pickString(
   return typeof v === "string" ? v : fallback;
 }
 
-/** 字段提取辅助：number 字段（缺失/非有限数 → null）。 */
+/** Field-extraction helper: number field (missing / non-finite → null). */
 function pickNumber(rec: Record<string, unknown>, key: string): number | null {
   const v = rec[key];
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
-/** LSP 工具：共享「file[:line]」模板（definition/references/hover/...）。 */
+/** LSP tools: shared "file[:line]" template (definition/references/hover/...). */
 function lspAt(rec: Record<string, unknown>, name: string): string {
   const file = pickString(rec, "file");
   const line = pickNumber(rec, "line");
   return `LSP ${name.replace("lsp_", "")} ${file}${line !== null ? `:${line}` : ""}`;
 }
 
-/** 子代理工具专属显示（与普通工具行区分；主流 Agent 惯例：子代理调用有独立
- *  视觉，不与普通工具共用 `name · detail` 过程行形态）。几何字形，无 emoji
- *  （spec #146:86）。 */
+/** Dedicated display label for subagent tools, set apart from ordinary tool
+ *  lines (common agent convention: subagent invocations get their own visual,
+ *  not the plain `name · detail` tool-line shape). Geometric glyph, no emoji. */
 export const SUBAGENT_TOOL_LABEL = "子代理";
 
-/** 子代理工具判定：spawn_subagent（派发）+ subagent_result（轮询）。 */
+/** Subagent tool predicate: spawn_subagent (dispatch) + subagent_result (poll). */
 export function isSubagentTool(name: string): boolean {
   return name === "spawn_subagent" || name === "subagent_result";
 }
 
-/** 子代理工具状态字形：running → ▣，ok → ✓，failed → ✗。 */
+/** Subagent tool status glyph: running → ▣, ok → ✓, failed → ✗. */
 export function subagentDisplayMark(kind: "running" | "ok" | "failed"): string {
   if (kind === "ok") return "✓";
   if (kind === "failed") return "✗";
   return "▣";
 }
 
-/** spawn 工具 input 的 catalog role 投影（与卡级两行投影同源 fallback）。 */
+/** Catalog-role projection of the spawn tool input (same fallback as the
+ *  card's two-line projection). */
 export const SUBAGENT_ROLE_FALLBACK = "general-purpose";
 
-/** 从 spawn_subagent tool_use input 解析 catalog id（`subagent_type` → `role` → fallback）。 */
+/** Resolve the catalog id from a spawn_subagent tool_use input (`subagent_type` → `role` → fallback). */
 export function resolveSubagentRoleFromInput(
   rec: Record<string, unknown>
 ): string {
@@ -137,15 +147,16 @@ function spawnSubagentRunningSummary(rec: Record<string, unknown>): string {
   return `${resolveSubagentRoleFromInput(rec)} running`;
 }
 
-/** write_file 摘要：`Wrote <path> (N lines)`。N = `content` 行数（空串 →
- *  真实的 0 行，区别于运行中「未知」）。 */
+/** write_file summary: `Wrote <path> (N lines)`. N = line count of `content`
+ *  (empty string → a real 0 lines, distinct from "unknown" while running). */
 function wroteLinesSummary(rec: Record<string, unknown>): string {
   return `Wrote ${pickString(rec, "path")} (${countLines(rec.content)} lines)`;
 }
 
-/** edit_file 摘要：`Edited <path> (N → M lines)`。行数取 old_str / new_str
- *  自身行数（本次改动片段的规模，不是整文件）—— 改动本身由 **edit diff
- *  preview** 承担，标题行不再夹 old→new 片段。 */
+/** edit_file summary: `Edited <path> (N → M lines)`. Line counts come from
+ *  old_str / new_str themselves (the size of this change fragment, not the
+ *  whole file) — the change content is carried by the edit diff preview, so
+ *  the title line no longer squeezes in an old→new snippet. */
 function editedFileSummary(rec: Record<string, unknown>): string {
   const all = rec.replace_all === true;
   const oldLines = countLines(rec.old_str);
@@ -153,14 +164,18 @@ function editedFileSummary(rec: Record<string, unknown>): string {
   return `Edited ${pickString(rec, "path")}${all ? " (all)" : ""} (${oldLines} → ${newLines} lines)`;
 }
 
-/** write_file 运行中摘要：路径与行数都只在**已知**时出现。运行中的 input 是
- *  流式半成品 —— `content` 缺失 / 非 string / 空串都只说明「还没到」，不是
- *  「文件有 0 行」，此时只画路径；连 `path` 都还没到 → 空串（调用方落到裸
- *  `write_file` 过程行，不画 `Wrote ?`）。落定态（summary）的空 content 才
- *  是真实的空文件，仍显示 `(0 lines)`。
+/** Running write_file summary: path and line count appear only when **known**.
+ *  While running the input is a streaming half-product — missing / non-string
+ *  / empty `content` all mean "not arrived yet", not "the file has 0 lines",
+ *  so only the path is drawn; if even `path` has not arrived → empty string
+ *  (the caller falls back to the bare `write_file` line, no `Wrote ?`).
+ *  Only an empty content in the settled state (summary) is a genuinely empty
+ *  file, which still shows `(0 lines)`.
  *
- *  运行中文案 = 挤档形态 `Wrote <path> (<N> lines)`：与默认预览并存 ——
- *  预览画正文，行数在标题行；子代理/多写挤视图时预览让位，标题行仍在。 */
+ *  Running wording = the squeezed shape `Wrote <path> (<N> lines)`: coexists
+ *  with the default preview — the preview draws the body, the line count
+ *  stays on the title line; when subagents/many writes squeeze the view, the
+ *  preview yields but the title line remains. */
 function writeFileRunningSummary(r: Record<string, unknown>): string {
   const path = r.path;
   if (typeof path !== "string" || path.length === 0) return "";
@@ -170,25 +185,30 @@ function writeFileRunningSummary(r: Record<string, unknown>): string {
   return `Wrote ${path} (${countLines(content)} lines)`;
 }
 
-/** 单件工具的文本显示声明：摘要 + 运行中摘要（可选）。 */
+/** Text display for one tool: summary + optional running summary. */
 interface ToolSummaryDisplay {
   readonly summary: (rec: Record<string, unknown>) => string;
-  /** 运行中摘要（可选）。字段缺席 = 运行态与落定态同文案；声明它的工具，
-   *  其落定摘要含「只有 input 齐了才可信的量」（write_file 的行数）——
-   *  运行中 input 是流式半成品，该量必须省略而不是显示成 0。 */
+  /** Running summary (optional). Absent field = running and settled share the
+   *  same text; tools that declare it have a settled summary containing a
+   *  quantity that is only trustworthy once the input is complete (write_file
+   *  line count) — while running the input is a streaming half-product, so
+   *  that quantity must be omitted rather than shown as 0. */
   readonly runningSummary?: (rec: Record<string, unknown>) => string;
 }
 
-/** 工具 → 文本摘要 lookup table（SSOT）。每项返回未 clip 的 detail 文本。
+/** Tool → text summary lookup table (SSOT). Each entry returns un-clipped
+ *  detail text.
  *
- *  含 CLI 侧不再有「display 注册表」可查的工具（会话动作、MCP、worktree
- *  生命周期五件）—— 摘要文本单源，避免 CLI/TUI 各留一份 fallback。
- *  人读合同（specs/tui-human-display.md D1 + docs/CONTEXT.md `live tool line`）：
- *  detail 是英文「工具名 + 本轮要点」（search=query、fetch=url、read=path、
- *  grep=pattern）。
+ *  Includes tools whose CLI side no longer has a "display registry" to query
+ *  (session actions, MCP, and the five worktree-lifecycle tools) — summary
+ *  text is single-sourced, so CLI/TUI cannot each keep a fallback.
+ *  Display contract (docs/CONTEXT.md `live tool line`): detail is an English
+ *  "tool name + key point of this call" (search=query, fetch=url, read=path,
+ *  grep=pattern).
  *
- *  task worktree 生命周期五件（specs/create-worktree-tools.md D5：人读过程行
- *  用新注册名）—— 语义仍是 task worktree，措辞只点名动作与目标 id，不写政策。 */
+ *  The five task-worktree lifecycle tools use their registered names in the
+ *  human-readable line — the semantics are still task worktrees; the wording
+ *  names only the action and the target id, no policy. */
 export const TOOL_SUMMARIES: Readonly<Record<string, ToolSummaryDisplay>> = {
   write_file: {
     summary: wroteLinesSummary,
@@ -199,7 +219,7 @@ export const TOOL_SUMMARIES: Readonly<Record<string, ToolSummaryDisplay>> = {
   read_file: { summary: (r) => `Read ${pickString(r, "path")}` },
   grep: { summary: (r) => `Search ${pickString(r, "pattern")}` },
   glob: { summary: (r) => `Glob ${pickString(r, "pattern")}` },
-  // web / memory / search 类：聚焦首个关键字段，避免 JSON 全文外露。
+  // web / memory / search tools: focus the first key field, keep raw JSON out.
   web_search: { summary: (r) => `Search ${pickString(r, "query")}` },
   web_fetch: { summary: (r) => `Fetch ${pickString(r, "url")}` },
   memory_recall: { summary: (r) => `Recall ${pickString(r, "query")}` },
@@ -221,7 +241,7 @@ export const TOOL_SUMMARIES: Readonly<Record<string, ToolSummaryDisplay>> = {
     runningSummary: spawnSubagentRunningSummary,
   },
   subagent_result: { summary: (r) => `Poll ${pickString(r, "task_id")}` },
-  // LSP 工具集：10 件。8 件共享 file[:line] 模板；documentSymbol / workspaceSymbol 走各自形态。
+  // LSP tool set: 10 tools. 8 share the file[:line] template; documentSymbol / workspaceSymbol have their own shapes.
   lsp_definition: { summary: (r) => lspAt(r, "lsp_definition") },
   lsp_references: { summary: (r) => lspAt(r, "lsp_references") },
   lsp_hover: { summary: (r) => lspAt(r, "lsp_hover") },
@@ -241,7 +261,7 @@ export const TOOL_SUMMARIES: Readonly<Record<string, ToolSummaryDisplay>> = {
     summary: (r) => `LSP workspaceSymbol ${pickString(r, "query")}`,
   },
   // bash_output / bash_stop / todo_write / list_mcp_resources /
-  // read_mcp_resource / query_trace：无内容可预览 —— 仅摘要，模型视野与现状一致。
+  // read_mcp_resource / query_trace: nothing previewable — summary only, model view unchanged.
   bash_output: {
     summary: (r) => `Bash output ${pickString(r, "task_id", "?")}`,
   },
@@ -252,7 +272,7 @@ export const TOOL_SUMMARIES: Readonly<Record<string, ToolSummaryDisplay>> = {
     summary: (r) => `MCP resource ${pickString(r, "uri", "?")}`,
   },
   query_trace: { summary: () => "Trace query" },
-  // task worktree 生命周期五件（spec D5）：人读过程行用新注册名，动作 + 目标 id。
+  // The five task-worktree lifecycle tools: registered names in the human line, action + target id.
   "create-worktree": { summary: () => "Created worktree" },
   "enter-worktree": {
     summary: (r) => `Entered worktree ${pickString(r, "conversationId", "?")}`,
@@ -265,16 +285,19 @@ export const TOOL_SUMMARIES: Readonly<Record<string, ToolSummaryDisplay>> = {
 };
 
 /**
- * 单个工具调用的参数摘要。`cols` = 终端列宽：提供时 detail 按视觉宽度
- * 收口到「装饰 + 工具名 + detail」单行放得下（窄终端不折行，行账不漂移）。
+ * Argument summary for one tool call. `cols` = terminal width: when given,
+ * detail is clipped by visual width so "chrome + tool name + detail" fits one
+ * line (narrow terminals never wrap, line accounting does not drift).
  *
- * `opts.running` = 该调用的 input 还是流式半成品（运行中）：声明了
- * `runningSummary` 的工具走运行态摘要，省略「只有 input 齐了才可信的量」
- * （write_file 行数）。未声明 → 与落定态同文案，行为不变。
+ * `opts.running` = this call's input is still a streaming half-product: tools
+ * that declare a `runningSummary` use it, omitting quantities that are only
+ * trustworthy once the input is complete (write_file line count).
+ * Undeclared → same text as settled, behavior unchanged.
  *
- * lookup table（TOOL_SUMMARIES）dispatch：每个工具独立摘要器，函数体保持
- * ≤10 行 / 圈复杂度 ≤10（complexity-anti-drift）；未知工具走 `(name)`
- * 占位符（2026-08-13 用户反馈 tool fold 不该 JSON 全文外露）。
+ * Lookup table (TOOL_SUMMARIES) dispatch: one summarizer per tool, bodies
+ * kept ≤10 lines / cyclomatic complexity ≤10; unknown tools fall to a
+ * `(name)` placeholder (2026-08-13 user feedback: tool folds must not expose
+ * the full input JSON).
  */
 export function summarizeToolCall(
   name: string,
@@ -292,27 +315,32 @@ export function summarizeToolCall(
         : declared.summary;
     return { detail: clip(summarize(rec)) };
   }
-  // 真未知工具：仅显示工具名占位，避免 JSON 全文外露
-  // （2026-08-13 用户反馈 tool fold 不该把 input args 全 JSON stringify）。
+  // Genuinely unknown tool: show only the name placeholder, never dump the
+  // full input JSON (2026-08-13 user feedback: tool folds must not stringify
+  // all input args).
   return { detail: clip(`(${name})`) };
 }
 
 /**
- * T5:运行中 partial JSON 文本的摘要。对逐段累积的 `partialJson` 尽力
- * `JSON.parse`：
- *  - parse 成功 → 走 `summarizeToolCall`（运行语义：注册表声明了
- *    `runningSummary` 的工具省略未知量 —— partial 里的 `content` 可能只是
- *    「还没到」，不能显示成 `（0 行）`）；
- *  - parse 失败（partial 不完整 JSON，如 `{"command":"l`）或 primitive 形态
- *    （null / 数字 / 布尔）→ `clipDetail` 原样截断显示（单源，视觉宽度纪律）；
- *  - 空串 → 空串。
+ * Summary for the partial JSON text of a running call. Best-effort
+ * `JSON.parse` on the accumulating `partialJson`:
+ *  - parse succeeds → `summarizeToolCall` in running semantics: registry
+ *    entries declaring a `runningSummary` omit not-yet-trustworthy
+ *    quantities — `content` inside a partial may simply have "not arrived",
+ *    so it must not render as `(0 lines)`;
+ *  - parse fails (incomplete JSON, e.g. `{"command":"l`) or primitive shape
+ *    (null / number / boolean) → show the raw text clipped via `clipDetail`
+ *    (single source, visual-width discipline);
+ *  - empty string → empty string.
  *
- * 遮蔽说明：partial 里可能含密钥形态，但增量只服务展示层中间态——完成后的
- * 权威完整 input 才进模型；此处仅视觉截断，不接 output mask（风险低，保持
- * 单行收口简单）。
+ * Masking note: a partial may contain secret-shaped text, but this increment
+ * only serves a display-layer intermediate state — only the authoritative
+ * complete input after finishing reaches the model; this is visual clipping
+ * only, no output mask wired in (low risk, keeps the single-line clip simple).
  *
- * 消费方：TUI live 行 + CLI stream preview sink（CLI 无 input-complete 事件，
- * 只能拿累积的 partialJson 求 detail —— 同一函数保证两侧字节一致）。
+ * Consumers: TUI live line + CLI stream preview sink (CLI has no
+ * input-complete event and must derive detail from the accumulated
+ * partialJson — the same function guarantees byte-identical text on both).
  */
 export function summarizePartialInput(
   name: string,
@@ -326,9 +354,10 @@ export function summarizePartialInput(
   } catch {
     parsed = undefined;
   }
-  // 不完整 JSON（parse 失败）或 primitive 形态（null / 数字 / 布尔 —— 工具参数
-  // 语义上只有 object/array）→ 原样截断显示。截断口径 = clipDetail 单源
-  // （与完成态摘要同一视觉宽度纪律，避免预算公式漂移）。
+  // Incomplete JSON (parse failed) or primitive shape (null / number /
+  // boolean — tool arguments are semantically object/array only) → show the
+  // raw text clipped. Clipping goes through clipDetail as single source (same
+  // visual-width discipline as the settled summary, no budget-formula drift).
   if (
     parsed === undefined ||
     (typeof parsed !== "object" && typeof parsed !== "boolean")
@@ -338,31 +367,38 @@ export function summarizePartialInput(
   return summarizeToolCall(name, parsed, cols, { running: true }).detail;
 }
 
-/** 运行中 bash 过程行的人读前缀：`Running 1 shell command…`。命令可见时
- *  拼 ` · <command>`（分隔符只在有 detail 时出现 —— input 未到 / 命令为空
- *  的过程行不留悬空 ` ·`）。
- *  `1%`→`100%` 这类进度流按**同一行原地更新**（spec D6 / progress tick），
- *  不按行追加进气泡 —— 本函数只产一行，历史不存百分比。 */
+/** Human prefix for the running bash line: `Running 1 shell command…`. When
+ *  the command is visible it is appended as ` · <command>` (the separator only
+ *  appears with a detail — no dangling ` ·` when input has not arrived or the
+ *  command is empty).
+ *  Progress streams like `1%`→`100%` update **in place on the same line**
+ *  (progress tick), not appended line by line into the bubble — this function
+ *  produces one line, history keeps no percentages. */
 export const BASH_RUNNING_PREFIX = "Running 1 shell command…";
 
-/** 工具状态行文案 SSOT（#693 T1 D1/D7 + #tui-render-overhaul T3 +
- *  specs/tui-human-display.md D1）。
+/** Tool status line text SSOT.
  *
- * 历史与 live 两侧的「工具状态行」拼装收敛到本函数（CLI stream preview 同源）：
- *  - 普通工具成功：`name · detail`（无状态括号，状态由颜色/glyph 表达）；
- *  - 普通工具运行中：**live tool line** —— 英文过程行，`name · detail`
- *    （detail 由 TOOL_SUMMARIES 给英文要点）；运行中的 shell 语义只体现在
- *    bash 命令前的 `Running N shell command(s)…` 段，命令本身可见；
- *  - 失败：`[失败] name · detail`（failure overlay 不在本票改动面）。
- *  - 子代理工具（spawn_subagent / subagent_result）独立形态：只画 detail
- *    （glyph / 身份行由 spawn 卡两行投影 + SubagentPanel 承担）。
+ *  Both history and live tool status lines are assembled through this function
+ *  (CLI stream preview shares it):
+ *  - ordinary tool, success: `name · detail` (no status bracket; state is
+ *    expressed by color/glyph);
+ *  - ordinary tool, running: **live tool line** — an English process line,
+ *    `name · detail` (detail is the English key point from TOOL_SUMMARIES);
+ *    running shell semantics only appear in the `Running N shell command(s)…`
+ *    segment before the bash command, which itself stays visible;
+ *  - failure: `[失败] name · detail` ("failed"; the failure overlay is out of scope here).
+ *  - subagent tools (spawn_subagent / subagent_result) have their own shape:
+ *    detail only (glyph / identity line are carried by the spawn card's
+ *    two-line projection + SubagentPanel).
  *
- * `[运行中]` / `[完成]` 前缀整体作废（D1）—— 进行中由英文过程行表达，
- * 落定由颜色/glyph 表达。cols 透传（与 `summarizeToolCall(cols)` 同纪律）：
- * 给定时 detail 按视觉宽度收口到单行放得下；缺省 → legacy 80 字符截断
- * （既有调用方字节兼容）。`detail` 可选 override：装配层已完成事件携带
- * precomputed detail（liveToolReducer 落地）时，通过显式 detail 跳过
- * `summarizeToolCall` 重算，保证 reducer state.detail 字节一致。 */
+ *  `[运行中]` / `[完成]` ("running"/"done") prefixes are retired overall — running is expressed
+ *  by the English process line, settled by color/glyph. cols is passed through
+ *  (same discipline as `summarizeToolCall(cols)`): when given, detail is
+ *  clipped by visual width to fit one line; absent → legacy 80-char truncation
+ *  (byte-compatible with existing callers). `detail` is an optional override:
+ *  when the assembly layer's complete event carries a precomputed detail
+ *  (liveToolReducer landing), the explicit detail skips the `summarizeToolCall`
+ *  recompute, keeping it byte-identical to reducer state.detail. */
 export function formatToolStatusLine(opts: {
   readonly toolName: string;
   readonly input: unknown;
@@ -375,12 +411,12 @@ export function formatToolStatusLine(opts: {
     summarizeToolCall(opts.toolName, opts.input, opts.cols, {
       running: opts.status === "running",
     }).detail;
-  // plans/tui-chrome-interaction.md T7：子代理工具（spawn_subagent /
-  // subagent_result）不再以 `▣ 子代理 · detail` 形态作为 live / history 工具
-  // 卡 —— 子代理状态由 spawn 卡两行投影（`{role} running...` + 预览 / done）
-  // + SubagentPanel（输入框下方 task list）单独表达，避免 dual render。
-  // 工具卡仅保留 `detail`（spawn → `{role} running` / `{role}`；task 正文
-  // 只在 SubagentPanel；subagent_result → `Poll <task_id>`）。
+  // Subagent tools (spawn_subagent / subagent_result) no longer render as a
+  // `▣ 子代理 · detail` ("subagent") live/history card — subagent state is expressed by the
+  // spawn card's two-line projection (`{role} running...` + preview / done)
+  // plus SubagentPanel (task list under the input box), avoiding dual render.
+  // The tool card keeps only `detail` (spawn → `{role} running` / `{role}`;
+  // task body lives only in SubagentPanel; subagent_result → `Poll <task_id>`).
   if (isSubagentTool(opts.toolName)) {
     return detail;
   }
@@ -389,10 +425,12 @@ export function formatToolStatusLine(opts: {
     return `[失败] ${opts.toolName} · ${detail}`;
   }
   if (opts.status === "running" && opts.toolName === "bash") {
-    // 运行中 bash：`Running 1 shell command… · <command>` —— 前缀给 shell
-    // 语义，命令保持可见（D1「Running 的命令可见」）。detail 空（input 未到）
-    // → 只有前缀（过程行仍立得住，不退化成裸工具名），不画 `· ?`、
-    // 也不留悬空分隔符（单行视觉宽度收口也在下面兜底）。
+    // Running bash: `Running 1 shell command… · <command>` — the prefix gives
+    // the shell semantics, the command stays visible ("keep running commands
+    // visible"). Empty detail (input not arrived) → prefix only (the process
+    // line still stands; it does not degrade to the bare tool name), no `· ?`
+    // and no dangling separator (single-line visual-width clipping is
+    // backstopped below too).
     if (detail.length === 0) return BASH_RUNNING_PREFIX;
     const joined = `${BASH_RUNNING_PREFIX} · ${detail}`;
     return opts.cols !== undefined
@@ -403,33 +441,38 @@ export function formatToolStatusLine(opts: {
   return `${opts.toolName} · ${detail}`;
 }
 
-/** 运行时 postToolUse 事件的摘要行文案（turn 进行中逐条出现）。
- *  委托 `formatToolStatusLine`（#693 T1 D7 SSOT）—— live 完成行 / 历史
- *  完成行 / running 行共用同一文案契约，避免复制粘贴模板。
+/** Summary line for the runtime postToolUse event (appears one by one while a
+ *  turn is in progress). Delegates to `formatToolStatusLine` — the live
+ *  complete line / history complete line / running line share one text
+ *  contract, no copy-pasted templates.
  *
- *  字节规则（spec D7 + #tui-render-overhaul T3）：
- *   - 普通工具成功：detail 非空 → `name · detail`；detail 空 → `name`。
- *     完成前缀已去掉（状态由颜色/glyph 表达），行首不残留多余空格。
- *   - 普通工具失败：`[失败] name · detail` / `[失败] name`（保留明示前缀）。
- *   - 子代理工具（spawn_subagent / subagent_result）独立形态：
- *     `✓|✗ 子代理 · detail` / `✓|✗ 子代理`（glyph 已表状态，不拼 [xxx] 前缀）。
+ *  Byte rules:
+ *   - ordinary tool, success: detail non-empty → `name · detail`; empty →
+ *     `name`. The completion prefix is gone (state shown by color/glyph), so
+ *     no stray leading space remains.
+ *   - ordinary tool, failure: `[失败] name · detail` / `[失败] name` ("failed"; the
+ *     explicit prefix is kept).
+ *   - subagent tools (spawn_subagent / subagent_result) own shape:
+ *     `✓|✗ 子代理 · detail` / `✓|✗ 子代理` ("subagent"; the glyph already shows state, no [xxx] prefix).
  *
- *  kind 入参兼容 history 用例：仅识别 `"ok"`（→ ok），其它任意值按
- *  failed 处理。
+ *  The kind parameter stays compatible with history call sites: only `"ok"`
+ *  is recognized (→ ok); any other value is treated as failed.
  *
- *  `detail` 可选 override：装配层已完成事件携带 precomputed detail
- *  （如 liveToolReducer 落地）时，通过显式 detail 跳过 summarizeToolCall
- *  重算，保证完成事件渲染与 reducer state.detail 字节一致。
+ *  `detail` is an optional override: when the assembly layer's complete event
+ *  carries a precomputed detail (liveToolReducer landing), the explicit detail
+ *  skips the summarizeToolCall recompute, keeping the complete-event render
+ *  byte-identical to reducer state.detail.
  *
- *  `cols` 透传：提供时 detail 按视觉宽度收口（与 summarizeToolCall 同纪律）；
- *  缺省 → legacy 80 字符截断（与既有调用方字节兼容）。 */
+ *  `cols` pass-through: when given, detail is clipped by visual width (same
+ *  discipline as summarizeToolCall); absent → legacy 80-char truncation
+ *  (byte-compatible with existing callers). */
 export function formatLiveToolEvent(opts: {
   readonly toolName: string;
   readonly input: unknown;
   readonly kind: string;
-  /** 显式 detail override；提供时跳过 summarizeToolCall 重算。 */
+  /** Explicit detail override; when provided, skips the summarizeToolCall recompute. */
   readonly detail?: string;
-  /** 终端列宽（可选）：提供时 detail 按视觉宽度收口；缺省 legacy 80 截断。 */
+  /** Terminal width (optional): when given, detail is clipped by visual width; absent → legacy 80-char truncation. */
   readonly cols?: number;
 }): string {
   const status: "ok" | "failed" = opts.kind === "ok" ? "ok" : "failed";
@@ -442,9 +485,10 @@ export function formatLiveToolEvent(opts: {
   });
 }
 
-/** 流式折叠行文案（恒 `Thinking…`，无实时秒数 —— 见 think-fold.ts 模块注释）。
- *  放在本模块是因为 CLI 的「思考中…」spinner 与 TUI 的折叠行必须同一文案
- *  （D1：CLI 与 TUI 共用；CLI import src/tui 是反向分层，禁止）。 */
+/** Streaming fold line text (always `Thinking…`, no live seconds — see the
+ *  think-fold.ts module comment). It lives here because the CLI's "thinking"
+ *  spinner and the TUI fold line must share one text; importing src/tui from
+ *  the CLI would invert the layering. */
 export function formatThinkingLive(): string {
   return "Thinking…";
 }

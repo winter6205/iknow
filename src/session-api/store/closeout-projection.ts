@@ -1,25 +1,29 @@
 /**
- * T4 (#621 / spec session-jsonl-resume D5–D6): process closeout 投影 ——
- * load 投影时为未配对 tool_use 补 synthetic tool_result,保证任何 consumer
- * (hub/chat/serve)拿到的 transcript 不含孤儿 tool_use(API 合法)。
+ * Process-closeout projection: at load time, backfill synthetic
+ * tool_results for unpaired tool_uses so every consumer (hub/chat/serve)
+ * receives a transcript free of orphan tool_uses (API-valid).
  *
- * 纯投影,零额外 IO:盘上 JSONL 不变,每次 load 重新推导;下一次 save 会把
- * 补上的结果落成真实事件(self-healing)。
+ * Pure projection, zero extra IO: the on-disk JSONL is unchanged and each
+ * load re-derives the backfill; the next save persists the synthesized
+ * results as real events (self-healing).
  *
- * 补洞走现有 `encodeToolResults`(adapter encoder SSOT,不新写编码器),
- * kind = execution_failed,reason 语义 = `process`(InterruptReason 预留值:
- * 进程死在 turn 中途)。spec D5 三分:本路径不得附带 `Interrupted by
- * user.` —— 那句 system 文案属于 harness 的 `cancelled` 路径。
+ * Backfill goes through the existing `encodeToolResults` (adapter encoder
+ * SSOT — no new encoder), kind = execution_failed, reason semantics =
+ * `process` (a reserved InterruptReason value: the process died mid-turn).
+ * This path must NOT carry the `Interrupted by user.` system text — that
+ * belongs to the harness `cancelled` path.
  *
- * spec D6:mutating 工具(bash / edit_file / write_file,spec 点名集合)
- * 的 process 文案须指示模型「先检查副作用是否已生效,未生效再重跑」;
- * 只读工具(grep / read_file / glob / …)不含该句。
+ * The closeout text for mutating tools (bash / edit_file / write_file)
+ * instructs the model to check whether side effects already took effect
+ * before re-running; read-only tools (grep / read_file / glob / …) omit it.
  *
- * 孤儿检测:assistant 事件的 tool_use 须由紧随其后、连续的纯 tool_result
- * user 消息覆盖(answer window);未覆盖者补在该 window 之后。append-only
- * 不变式下孤儿只可能出现在头链尾部(崩溃点在 assistant 已 append、
- * tool_result 未 append 之间),但投影对一般形状(多孤儿、mid-chain)同样
- * 成立。
+ * Orphan detection: an assistant event's tool_use blocks must be covered by
+ * the immediately following, consecutive tool_result-only user messages
+ * (answer window); uncovered ones get a synthetic result appended right
+ * after the window. Under the append-only invariant orphans can only appear
+ * at the head-chain tail (crash between assistant append and tool_result
+ * append), but the projection also handles general shapes (multiple
+ * orphans, mid-chain).
  */
 import { encodeToolResults } from "../../harness/model-adapter/anthropic-adapter.js";
 import type {
@@ -29,19 +33,20 @@ import type {
 
 type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
 
-/** spec D6 点名的 mutating 工具集合。 */
+/** Mutating tools whose closeout text carries the side-effect check. */
 const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "bash",
   "edit_file",
   "write_file",
 ]);
 
-/** process closeout 基底文案:reason 语义 = `process`;不得含
- *  `Interrupted by user.`(spec D5 negative 类)。 */
+/** Process-closeout base text: reason semantics = `process`; must never
+ *  contain `Interrupted by user.` (that belongs to the cancelled path). */
 const PROCESS_CLOSEOUT_TEXT =
   "process exited before this tool's result was recorded; the tool's actual outcome is unknown (process closeout).";
 
-/** mutating 工具追加句:先检查副作用是否已生效,未生效再重跑(spec D6)。 */
+/** Mutating-tool suffix: check whether side effects already took effect
+ *  before re-running. */
 const MUTATING_SUFFIX =
   " This tool may have side effects: before re-running it, check whether the intended change already took effect, and re-run it only if it did not.";
 
@@ -63,7 +68,7 @@ export function closeoutOrphanToolUses(
     );
     if (toolUses.length === 0) continue;
     // Answer window: the immediately following consecutive tool_result-only
-    // user messages (T3's per-tool commit shape produces one per result).
+    // user messages (the per-tool commit shape produces one per result).
     const answered = new Set<string>();
     let j = i + 1;
     while (j < messages.length && isToolResultOnlyUserMessage(messages[j]!)) {

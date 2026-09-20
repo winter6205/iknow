@@ -1,17 +1,18 @@
 /**
- * T9a (serve-workspace-folder-browse): default workspace path & eager mkdir.
+ * Default workspace path & eager mkdir.
  *
  * When `iknow serve` starts without `--workspace-root` flag / `IKNOW_WORKSPACE_ROOT`
  * env, the bootstrap auto-binds to `<homedir()>/.iknow/default` so the first
  * new session lands somewhere stable (`workspaceRoot` on `SessionFileV1`,
  * `ws.bound === true` on UI mount). User-preference paths stay explicit
- * (rule 3: explicit bind = explicit trust).
+ * (explicit bind = explicit trust).
  *
- * resolveSessionDefaultWorkspace() 是 single source of truth — runtime
- * $HOME 解析,让 test fixture (installTestSettingsSource 在 beforeAll 重定
- * HOME) 也能命中 tmp home。早期 export 的 `DEFAULT_SESSION_WORKSPACE` const
- * 在 module load 时锁定 $HOME,无法被 test 改写;review L2 反馈后删除
- * 冗余 const,只留 function。
+ * resolveSessionDefaultWorkspace() is the single source of truth —
+ * runtime $HOME resolution, so test fixtures that redirect HOME in
+ * beforeAll also hit the tmp home. An earlier exported
+ * `DEFAULT_SESSION_WORKSPACE` const froze $HOME at module load and
+ * could not be overridden by tests; the redundant const was removed,
+ * leaving only the function.
  */
 import { homedir } from "node:os";
 import { mkdir } from "node:fs/promises";

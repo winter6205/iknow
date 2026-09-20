@@ -1,20 +1,22 @@
 /**
- * ADR-0102 / plan subagent-stop-and-continue T3 — 工人 transcript 的嵌套
- * load / append 缝。
+ * Nested load / append seam for worker transcripts (ADR-0102).
  *
- * 为什么单独一个模块而不是 SessionStore 方法：SessionStore 的键空间是
- * 「项目池里的一棵会话叶子」（`<projectDir>/<id>/<id>.jsonl`），而工人
- * transcript 的键是 `(父 conversationId, task_id)`、落点在**父会话文件夹内**
- * `subagents/<taskId>/<taskId>.jsonl`（ADR-0102 Decision 3：不在项目池另开
- * 叶子，`listSessions` 因此不收录）。形状却是同一套 —— header +
- * parent-chained message events + trailing head 的 append-only JSONL，
- * 读路径复用 `parseSessionJsonl` / `projectSessionLog`（SessionFileV1 读
- * 路径原样能吃），写路径复刻 `appendEvents` 的编号 / 链 / 尾部丢弃语义。
- * 复用 codec 缝而不复制逻辑：SSOT 在 jsonl.ts。
+ * Why a separate module instead of SessionStore methods: SessionStore's key
+ * space is "a session leaf in the project pool"
+ * (`<projectDir>/<id>/<id>.jsonl`), while a worker transcript is keyed by
+ * `(parent conversationId, task_id)` and lives inside the parent session
+ * folder at `subagents/<taskId>/<taskId>.jsonl` (ADR-0102: no extra leaf in
+ * the project pool, so `listSessions` does not pick it up). The shape is the
+ * same — header + parent-chained message events + trailing head in
+ * append-only JSONL — so the read path reuses `parseSessionJsonl` /
+ * `projectSessionLog` and the write path mirrors `appendEvents`' numbering /
+ * chaining / tail-drop semantics. The codec seam is reused rather than the
+ * logic copied: SSOT is jsonl.ts.
  *
- * typed-error 词汇与 SessionStoreError 同 kind（not_found / write_failed /
- * parse_failed / schema_invalid / io_error）；`conversation_id` 槽承载
- * task_id —— 嵌套键语境里它就是这条账的对外句柄。
+ * Typed-error vocabulary matches SessionStoreError kinds (not_found /
+ * write_failed / parse_failed / schema_invalid / io_error); the
+ * `conversation_id` slot carries task_id — in the nested-key context it is
+ * this ledger's external handle.
  */
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
@@ -37,16 +39,19 @@ import {
   type SessionFileV1,
 } from "./schema.js";
 
-/** 一条工人账的落点：嵌套路径 + 对外句柄 task_id（typed error 的身份槽）。 */
+/** Location of one worker ledger: nested path + external handle task_id
+ *  (the identity slot for typed errors). */
 export interface WorkerTranscriptLocation {
   readonly transcriptPath: string;
   readonly taskId: string;
 }
 
 /**
- * 读工人 transcript 的当前 head 投影（与 SessionStore.load 的 JSONL 臂同形：
- * orphan tool_use 补 synthetic tool_result，consumer 永远拿到 API 合法的
- * 对话链）。文件缺失 → not_found（续跑闸据此拒「无 transcript 的旧工人」）。
+ * Read the worker transcript's current-head projection (same shape as
+ * SessionStore.load's JSONL arm: orphan tool_uses get synthetic
+ * tool_results, so consumers always receive an API-valid chain).
+ * Missing file → not_found (the continue gate rejects legacy workers
+ * without a transcript accordingly).
  */
 export async function loadWorkerTranscript(
   loc: WorkerTranscriptLocation
@@ -57,7 +62,10 @@ export async function loadWorkerTranscript(
     raw = await readFile(transcriptPath, "utf8");
   } catch (err) {
     if (isEnoent(err)) {
-      throw { kind: "not_found", conversation_id: taskId } satisfies SessionStoreError;
+      throw {
+        kind: "not_found",
+        conversation_id: taskId,
+      } satisfies SessionStoreError;
     }
     throw {
       kind: "io_error",
@@ -77,19 +85,22 @@ export async function loadWorkerTranscript(
 }
 
 /**
- * 边跑边 append：一批已进权威历史的消息链到盘上 head 之后 + 一条新 head
- * （同 SessionStore.appendEvents 的编号 / 链 / createdAt stamping 纪律）。
- * 文件不存在 → 首批建账：header + events + head 一次写入（工人 transcript
- * 的出生批 = 初始历史 seed）。
+ * Append-as-you-run: chain a batch of messages already in the authoritative
+ * history onto the on-disk head plus one new head record (same numbering /
+ * chaining / createdAt stamping discipline as SessionStore.appendEvents).
+ * Missing file → the first batch creates the ledger: header + events + head
+ * in one write (a worker transcript's birth batch = its initial-history
+ * seed).
  *
- * 空批 = no-op。`thinkingMs` 与 appendEvents 同边界：仅 assistant 事件 +
- * >0 有限数才挂 key。
+ * Empty batch = no-op. `thinkingMs` shares appendEvents' boundary: the key
+ * is attached only for assistant events with a finite >0 value.
  */
 export async function appendWorkerTranscript(opts: {
   readonly location: WorkerTranscriptLocation;
   readonly events: ReadonlyArray<AnthropicNativeMessage>;
   readonly thinkingMs?: number;
-  /** 首批建账时落进 header 的工作根（工人 = envelope.sandboxRoot）。 */
+  /** Working root written into the header when creating the ledger
+   *  (worker = envelope.sandboxRoot). */
   readonly cwd?: string;
 }): Promise<void> {
   const { location, events } = opts;
@@ -193,15 +204,18 @@ function isEnoent(err: unknown): boolean {
   );
 }
 
-/** 仅用于原生 fs 错误；typed 错误（判别联合）须先按 kind 分流再消费本 helper。 */
+/** For native fs errors only; typed errors (discriminated union) must be
+ *  routed by kind before this helper is used. */
 function fsErrMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
 /**
- * 路径护栏：工人账路径来自父进程算好的绝对路径（envelope 是 untrusted
- * 输入面 —— 只有 manager 生产它，worker 消费前校验形态，拒绝相对路径 /
- * 空串，不给「父没算好」留静默写到 cwd 的通道）。
+ * Path guard: the worker ledger path is an absolute path computed by the
+ * parent (the envelope is an untrusted input surface — only the manager
+ * produces it; the worker validates shape before consuming and rejects
+ * relative paths / empty strings, leaving no silent write-to-cwd channel
+ * when the parent failed to compute it).
  */
 export function isWorkerTranscriptPathSafe(transcriptPath: string): boolean {
   return transcriptPath.length > 0 && isAbsolute(transcriptPath);

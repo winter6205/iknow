@@ -1,13 +1,14 @@
 /**
- * SessionStore typed IO error contract (022 spec §SessionStore IO 错误契约).
+ * SessionStore typed IO error contract.
  *
- * Why typed: hub maps each kind to a distinct HTTP status / wire ApiErrorBody
- * (spec 错误映射契约 table). Bare `throw new Error(...)` collapses everything
- * into a single 500 and is forbidden by spec.
+ * Why typed: hub maps each kind to a distinct HTTP status / wire
+ * ApiErrorBody. Bare `throw new Error(...)` collapses everything into a
+ * single 500.
  */
 
 /**
- * SessionStore 错误分类。hub 在 IO 失败时抛此类型，http 层映射到 wire ApiErrorBody。
+ * SessionStore error classification. Hub throws this on IO failure; the
+ * http layer maps each kind to a wire ApiErrorBody.
  */
 export type SessionStoreError =
   | { kind: "not_found"; conversation_id: string }

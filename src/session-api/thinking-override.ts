@@ -1,5 +1,5 @@
 /**
- * Per-turn thinking override for the Session API (T2 / #complexity anti-drift).
+ * Per-turn thinking override for the Session API.
  *
  * Pure module, no I/O:
  *   - `parseThinkingOverride`: wire parse + value-range validation of the
@@ -7,8 +7,9 @@
  *     ValidationError (wire surface fails loud, no silent fallback).
  *   - `withThinkingOverride`: per-turn one-shot deps rebuild — the override
  *     only replaces `adapter`; registry / executor / maxTurns / timeoutMs
- *     are reused from the cached deps. ADR-0094 SC7：adapter 构造单点委托
- *     `createAdapterFromEnv`（thinking 只作入参覆盖，不另建 client 字段表）。
+ *     are reused from the cached deps. ADR-0094: adapter construction
+ *     delegates to `createAdapterFromEnv` alone (thinking is only an input
+ *     override, no second client-field table).
  *
  * hub.ts / http.ts stay thin: they call into these functions only.
  */
@@ -23,7 +24,7 @@ import {
   type WireThinkingOverride,
 } from "./contract.js";
 
-/** Wire override shape — re-exported from contract.ts (SSOT; M1). */
+/** Wire override shape — re-exported from contract.ts (SSOT). */
 export type ThinkingOverride = WireThinkingOverride;
 
 /**
@@ -64,7 +65,7 @@ export function parseThinkingOverride(
   if (effort === undefined) {
     return { mode };
   }
-  // Validation values come from the SSOT readonly array in contract.ts (M1);
+  // Validation values come from the SSOT readonly array in contract.ts;
   // no second hard-coded list lives here.
   if (typeof effort !== "string" || !isThinkingEffortWire(effort)) {
     throw new ValidationError(
@@ -81,9 +82,11 @@ export function parseThinkingOverride(
  * timeoutMs are taken from `deps` unchanged. `env` is injected so callers
  * (and tests) can pin the LLM config instead of re-reading process.env.
  *
- * ADR-0094 SC7：adapter 构造单点委托 `createAdapterFromEnv` —— thinking
- * 覆盖只作为 `overrides.thinking` 入参并入，client（apiKey / baseUrl /
- * headers）与 wire model 解析同无覆盖路径**逐字节同形**，禁止第二套字段表。
+ * ADR-0094: adapter construction delegates to `createAdapterFromEnv`
+ * alone — the thinking override is merged only as the
+ * `overrides.thinking` input, so client (apiKey / baseUrl / headers)
+ * and wire-model resolution stay byte-identical with the no-override
+ * path; no second field table allowed.
  */
 export function withThinkingOverride(opts: {
   readonly deps: LoopEngineDeps;
@@ -93,8 +96,8 @@ export function withThinkingOverride(opts: {
   const { deps, override } = opts;
   const env = opts.env ?? loadIknowEnv();
   if (!env.llm.apiKey) {
-    // settings-model-extension：key 来源 = settings.llm.apiKey（字面或 ${VAR}）。
-    // fail-fast 守卫与 ensureDeps / reloadFromEnv 对齐（先于 createAdapterFromEnv）。
+    // Key source = settings.llm.apiKey (literal or ${VAR}).
+    // This fail-fast guard aligns with ensureDeps / reloadFromEnv (runs before createAdapterFromEnv).
     throw new ValidationError(LLM_API_KEY_MISSING_MESSAGE);
   }
   const { adapter } = createAdapterFromEnv(env, {

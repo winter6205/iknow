@@ -1,28 +1,26 @@
 /**
- * T6 (ADR-0071 / SC16): read-side two-level tree
- * discovery.
+ * ADR-0071: read-side two-level tree discovery.
  *
  * Layout: `<baseDir>/projects/<project-slug>/<conversationId>/trace.jsonl`.
- * The read side has no `projectIdentityRoot` at hand (T1's store does, but
- * it's the writer), so conversationId lookup is a walk under
+ * The read side has no `projectIdentityRoot` at hand (the writer-side store
+ * does, but it's the writer), so conversationId lookup is a walk under
  * `<baseDir>/projects/<project-slug>/<convId>/`. Multiple projects may have folders
  * named the same way — the read side picks the **latest mtime** and treats
  * any other matches as shadow copies of the same conversation.
  *
- * 写侧的 SSOT (`src/session-api/store/session-store.ts:resolveProjectSessionDir`
+ * The writer-side SSOT (`src/session-api/store/session-store.ts:resolveProjectSessionDir`
  * + `resolveConversationTraceFilePath`) is **not** imported here on purpose:
  * this file is a read-side helper, and the read side must not import the
  * writer-side path keys — coupling would mean a writer-side change could
  * silently flip read-side file lookups. Two layouts agree on the directory
  * shape, not on the same parse function.
  *
- * review-fix (M2/M3):本文件被三处调用方消费 ——
- *   - `get-record-core.ts:findConversationTraceFile`;
- *   - `query-trace-core.ts:findConversationTraceFile`;
- *   - `http.ts:findConversationTraceFile`。
- * 曾经存在的 `listConversations` / `agentVersionFromTracePath` / `ConversationHit`
- * 三个零调用方导出已被删,文件头也不再谎称「Behavior pinned by t6-two-level-
- * tree.test.ts」—— 该测试只覆盖 `dereferenceTraceMessages`,不测本文件。
+ * Consumers: `findConversationTraceFile` in `get-record-core.ts`,
+ * `query-trace-core.ts`, and `http.ts`. The formerly exported
+ * `listConversations` / `agentVersionFromTracePath` / `ConversationHit` had
+ * zero consumers and were deleted; this header no longer claims coverage by
+ * `t6-two-level-tree.test.ts` — that test only covers
+ * `dereferenceTraceMessages`, not this file.
  */
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";

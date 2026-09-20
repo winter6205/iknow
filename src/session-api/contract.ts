@@ -2,9 +2,7 @@
  * Session HTTP API DTOs (host surface; not tool schema).
  *
  * TurnDto.answer is the harness RunResult projection (TurnAnswerDto);
- * ApiErrorBody
- * is nested under { error: { kind, message, ... } }. http.ts / hub.ts still
- * reference the old shapes — they will be rewritten in T4/T5.
+ * ApiErrorBody is nested under { error: { kind, message, ... } }.
  */
 import type { StopReason, TokenUsage } from "../harness/index.js";
 import type { FsIsolationMode } from "../harness/sandbox/fs-mode.js";
@@ -15,56 +13,67 @@ import type { SessionStoreErrorKind } from "./store/errors.js";
 /** Max user message length (code units). */
 export const MAX_MESSAGE_CHARS = 8000;
 
-/** 022 Q1: Session API 消息返回壳。harness RunResult 投影，wire 不外露 messages/trace。 */
+/** Session API message-return shell: projection of harness RunResult;
+ *  messages/trace are never exposed on the wire. */
 export interface TurnAnswerDto {
-  readonly finalText: string; // 映射 RunResult.finalText
-  readonly stopReason: StopReason; // 复用 harness 8 类 StopReason 类型（含 fused）
-  readonly turnCount: number; // 映射 RunResult.turnCount（每次 run() 从 0 起）
-  /** T1: 单回合内所有非空 assistant thinking 文本（按块序）。空 thinking 跳过；无任何 thinking 时整字段省略。 */
+  readonly finalText: string; // maps RunResult.finalText
+  readonly stopReason: StopReason; // reuses the harness StopReason union (incl. fused)
+  readonly turnCount: number; // maps RunResult.turnCount (starts at 0 per run())
+  /** All non-empty assistant thinking texts within the turn, in block order.
+   *  Empty thinking skipped; whole field omitted when there is none. */
   readonly thinking?: ThinkingView;
-  /** T1: 单回合内所有 tool_use，按 tool_use_id 配对 tool_result。无 tool_use 时整字段省略。 */
+  /** All tool_use in the turn, paired with tool_result by tool_use_id.
+   *  Whole field omitted when there is no tool_use. */
   readonly toolCalls?: readonly ToolCallView[];
   /** Ordered assistant content used by clients that need text/tool placement. */
   readonly activity?: readonly ActivityItem[];
-  /** 上下文用量显示：该回合最后一次成功模型调用的 token usage。
-   *  映射 RunResult.lastUsage（ADR-0008 D5）；null → 字段缺席（byte-stable，
-   *  与 thinking/toolCalls 同模式）。contextWindow 经 HealthResponse 下发。 */
+  /** Context-usage display: token usage of the turn's last successful model
+   *  call. Maps RunResult.lastUsage (ADR-0008); null → field absent
+   *  (byte-stable, same pattern as thinking/toolCalls). contextWindow ships
+   *  via HealthResponse. */
   readonly lastUsage?: TokenUsage;
   /**
-   * plan T6 / ADR-0011：异常停（maxTurns 等）后的 best-effort 收尾摘要文本。
-   * 仅 hub 捕获 MaxTurnsExceeded 时填充；无摘要 / 正常停 → 字段缺席
-   * （byte-stable，与 thinking/toolCalls/lastUsage 同模式）。
+   * Best-effort wrap-up summary after an abnormal stop (maxTurns, etc.) —
+   * ADR-0011. Filled only when the hub catches MaxTurnsExceeded; no summary /
+   * normal stop → field absent (byte-stable, same pattern as
+   * thinking/toolCalls/lastUsage).
    */
   readonly stopSummary?: string;
   /**
-   * B1：Ctrl+C 打断反馈 —— 仅 stopReason === "cancelled" 时存在：
-   * true = checkpoint 已保存（cancelled + delta>0）；false = 无新内容未落盘
-   * （cancelled + delta=0）。其它 stopReason → 字段缺席（byte-stable）。
+   * Ctrl+C interrupt feedback — present only when stopReason === "cancelled":
+   * true = checkpoint saved (cancelled + delta>0); false = nothing new to
+   * persist (cancelled + delta=0). Other stopReasons → field absent
+   * (byte-stable).
    */
   readonly interrupted?: boolean;
   /**
-   * #128 失败自动修正闭环（M3 surface）：verify 配置且最终判定为
-   * 真失败 / 不稳定 / 升级后仍失败 / 通过时存在。disabled / aborted → 字段缺席
-   * （byte-stable，与 stopSummary / interrupted 同模式）。
+   * Automatic failure-repair loop: present when verify is configured and the
+   * final verdict is true failure / unstable / still failing after
+   * escalation / passed. disabled / aborted → field absent (byte-stable,
+   * same pattern as stopSummary / interrupted).
    */
   readonly verify?: VerifyAnswerView;
   /**
-   * D2 (tui-display-consistency) wire surface: 单回合 assistant 思考时长
-   * (ms)。hub `projectMessagesToTurns` / `toTurnDto` 求和本 turn slice 内
-   * 所有 assistant 消息对应的落盘 thinkingMs (per-message index → 并行数组);
-   * sum > 0 时挂上本字段 (byte-stable, 与 thinking/toolCalls/lastUsage 同模式)。
-   * 旧会话无 thinkingMs / 非 assistant turn / sum = 0 → 字段缺席。
-   * UI 消费: web AgentCard thinking 块显示「思考了 N 秒」(spec SC8 / D6)。
+   * Wire surface for the turn's total assistant thinking time (ms). The hub
+   * (projectMessagesToTurns / toTurnDto) sums the persisted per-message
+   * thinkingMs (index → parallel array) across this turn's slice; attached
+   * when sum > 0 (byte-stable, same pattern as
+   * thinking/toolCalls/lastUsage). Old sessions without thinkingMs /
+   * non-assistant turns / sum = 0 → field absent.
+   * UI: the web AgentCard thinking block renders the "thought for N seconds"
+   * label from this.
    */
   readonly thinkingMs?: number;
   /**
-   * ADR-0094 SC4-SC5 (viewport API error): transport 失败时的网关侧摘要
-   * (HTTP status + 消息文本)。hub 在 `result.apiError` 存在时透传
-   * (TransportRetryExhaustedError catch 路径);非 transport 失败 / 无 cause
-   * → 字段缺席(byte-stable,与 thinking/toolCalls/lastUsage/thinkingMs 同模式)。
+   * ADR-0094 (viewport API error): gateway-side summary of a transport
+   * failure (HTTP status + message text). The hub passes it through when
+   * `result.apiError` exists (TransportRetryExhaustedError catch path);
+   * non-transport failure / no cause → field absent (byte-stable, same
+   * pattern as thinking/toolCalls/lastUsage/thinkingMs).
    *
-   * UI 消费: chat-flow viewport surface(TUI notice / web AgentCard 错误态)
-   * 落"API error (status): message"提示;不带 status 时落"API error: message"。
+   * UI: chat-flow viewport surfaces (TUI notice / web AgentCard error state)
+   * render "API error (status): message", or "API error: message" when
+   * status is absent.
    */
   readonly apiError?: {
     readonly status?: number;
@@ -72,31 +81,33 @@ export interface TurnAnswerDto {
   };
 }
 
-/** #128：验证闭环最终判定的 wire 视图（rounds + outcome，供 UI surface）。
- * T2 (#458)：outcome 增加 "passed" 成功态；abort / disabled 仍不进 wire。 */
+/** Wire view of the verification loop's final verdict (rounds + outcome)
+ *  for UI surfaces. "passed" is a success state; abort / disabled never
+ *  enter the wire. */
 export interface VerifyAnswerView {
   readonly outcome: "failed" | "unstable" | "escalated" | "passed";
   readonly rounds: number;
 }
 
-/** T1: 单条 thinking 文本视图（redacted_thinking 仅计数，data 永不上 wire）。 */
+/** Single thinking text view (redacted_thinking is counted only; its data
+ *  never goes on the wire). */
 export interface ThinkingEntryView {
   readonly text: string;
 }
 
 export interface ThinkingView {
-  readonly entries: readonly ThinkingEntryView[]; // 按块序，空 thinking 文本跳过
-  readonly redactedCount: number; // redacted_thinking block 计数
+  readonly entries: readonly ThinkingEntryView[]; // block order; empty thinking texts skipped
+  readonly redactedCount: number; // count of redacted_thinking blocks
 }
 
-/** T1: 工具调用视图（input/output 走 preview + 截断，data 永不暴露原始 input）。 */
+/** Tool-call view (input/output are previews with truncation; raw input is never exposed). */
 export interface ToolCallView {
   readonly id: string; // tool_use.id
   readonly name: string;
-  readonly inputPreview: string; // JSON.stringify(input)，截断 MAX_TOOL_INPUT_PREVIEW_CHARS
-  readonly outputPreview: string; // tool_result text 拼接，截断 MAX_TOOL_OUTPUT_PREVIEW_CHARS
+  readonly inputPreview: string; // JSON.stringify(input), truncated at MAX_TOOL_INPUT_PREVIEW_CHARS
+  readonly outputPreview: string; // concatenated tool_result text, truncated at MAX_TOOL_OUTPUT_PREVIEW_CHARS
   readonly isError: boolean; // tool_result.is_error === true
-  readonly truncated: boolean; // output 是否被截断
+  readonly truncated: boolean; // whether the output was truncated
 }
 
 /** Ordered assistant content used by clients that need text/tool placement. */
@@ -104,14 +115,14 @@ export type ActivityItem =
   | { readonly type: "text"; readonly text: string }
   | { readonly type: "tool"; readonly tool: ToolCallView };
 
-/** 022 Q1: 单次消息往返的 wire 形状。 */
+/** Wire shape of a single message round-trip. */
 export interface TurnDto {
-  readonly query: string; // 用户输入文本
-  readonly answer: TurnAnswerDto; // harness 投影，不含 messages/trace
-  readonly human_text?: string; // host 投影（jsonMode=false 时填充）
+  readonly query: string; // user input text
+  readonly answer: TurnAnswerDto; // harness projection, no messages/trace
+  readonly human_text?: string; // host projection (filled when jsonMode=false)
 }
 
-/** 022 Q2-G4: 移除 caller_role 字段。caller_role 已在 harness 路径退役。 */
+/** caller_role was retired on the harness path and removed from this DTO. */
 export interface SessionSummary {
   readonly conversation_id: string;
   readonly json_mode: boolean;
@@ -120,7 +131,7 @@ export interface SessionSummary {
 }
 
 export interface CreateSessionRequest {
-  // caller_role 已在 harness 路径退役（Q2-G4）；wire 不再接受
+  // caller_role retired on the harness path; no longer accepted on the wire
   json_mode?: boolean;
 }
 
@@ -134,7 +145,7 @@ export type GetSessionResponse = {
   turns: TurnDto[];
 };
 
-/** T2: per-request thinking effort value range (SSOT). */
+/** Per-request thinking effort value range (SSOT). */
 export const THINKING_EFFORT_VALUES = [
   "",
   "low",
@@ -145,7 +156,7 @@ export const THINKING_EFFORT_VALUES = [
 ] as const;
 export type ThinkingEffortWire = (typeof THINKING_EFFORT_VALUES)[number];
 
-/** T2: per-request thinking override (mode + optional effort). */
+/** Per-request thinking override (mode + optional effort). */
 export interface WireThinkingOverride {
   readonly mode: "off" | "adaptive";
   readonly effort?: ThinkingEffortWire;
@@ -153,7 +164,8 @@ export interface WireThinkingOverride {
 
 export type PostMessageRequest = {
   text: string;
-  /** T2: 该回合覆盖 harness 的 thinking 控制臂。缺省 → 沿用 ensureDeps 的缓存配置（行为不变）。 */
+  /** Per-turn override of the harness thinking control arm. Default → reuse
+   *  the cached ensureDeps configuration (behavior unchanged). */
   readonly thinking?: WireThinkingOverride;
 };
 
@@ -172,53 +184,56 @@ export type ResetSessionResponse = {
 };
 
 /**
- * 手动压缩会话响应（web 按钮 / TUI /compact 共用 wire 形状）。
- * 压缩后 session 保持同一 conversation_id；turns 为压缩后消息投影。
- * `compacted`：true 表示实际发生了裁剪（消息数减少）；false 表示无可压缩
- * 上下文（空会话幂等或压缩整体失败；manual-compact-trigger T1 后手动路径
- * 不再有 token 门 no-op）。
- * `cancelled`：#548 — 仅在 opts.signal 中途 abort、压缩未完成时为 true；
- * 会话保持原样（messages/turnCount/updatedAt 均不动），与
- * compacted=false 的”未达阈值”语义区分(web/TUI 渲染区分)。
- * `reason`：plan compress-trigger-gate T2 — 触发判据分类标识,SSOT 见
- * `src/harness/compress/index.ts:evaluateCompactTrigger`。客户端据此区分
- * 文案(`below_token_threshold` / `messages_too_few` / `windowed` /
- * `full_summary`)。
+ * Manual compaction response (wire shape shared by the web button and TUI
+ * /compact). The session keeps the same conversation_id; turns are the
+ * post-compaction message projection.
+ * `compacted`: true = messages were actually trimmed; false = nothing to
+ * compact (empty-session idempotency or overall compaction failure; manual
+ * paths no longer have a token-gate no-op).
+ * `cancelled`: true only when opts.signal aborted mid-compaction and it did
+ * not finish; the session stays untouched (messages/turnCount/updatedAt all
+ * kept), distinct from `compacted=false`'s "below threshold" semantics (the
+ * web/TUI render them differently).
+ * `reason`: trigger-verdict classification; SSOT is `evaluateCompactTrigger`
+ * in `src/harness/compress/index.ts`. Clients pick copy from it
+ * (`below_token_threshold` / `messages_too_few` / `windowed` /
+ * `full_summary`).
  */
 export type CompactSessionResponse = {
   session: SessionSummary;
   turns: TurnDto[];
   compacted: boolean;
-  /** #548:signal abort → true,会话保持原样;其余时刻缺席 = false。 */
+  /** signal abort → true, session untouched; absent at other times = false. */
   cancelled?: boolean;
-  /** plan T2:触发判据分类标识(4 选 1);T4 据此分文案分支。 */
+  /** Trigger-verdict classification (1 of 4); consumers branch copy on it. */
   readonly reason: CompactReason;
-  /** 压缩前的消息条数（DEFAULT_KEEP_RECENT 尾窗保留判定用）。 */
+  /** Message count before compaction (basis of the DEFAULT_KEEP_RECENT tail-window decision). */
   beforeCount: number;
-  /** 压缩后的消息条数（no-op 时 === beforeCount）。 */
+  /** Message count after compaction (=== beforeCount on no-op). */
   afterCount: number;
 };
 
 /**
- * 手动压缩调用方 opts (#548) — hub.compactSession 与 TuiBridge.compactSession
- * 共享同一 shape(本文件导出避免 3 处独立声明 drift,Standards review
- * Low#1 数据团)。
+ * Caller opts for manual compaction — hub.compactSession and
+ * TuiBridge.compactSession share this shape; exported from this file to
+ * avoid drift between independent declarations.
  */
 export type CompactCallerOpts = {
   readonly signal?: AbortSignal;
   readonly onStream?: (event: HarnessStreamEvent) => void;
 };
 
-/** POST /api/v1/sessions/:id/rewind — 对齐 TUI rewindSession（#624: head）。 */
+/** POST /api/v1/sessions/:id/rewind — mirrors TUI rewindSession (head-based). */
 export type RewindSessionResponse = {
   session: SessionSummary;
   turns: TurnDto[];
   head: string | null;
 };
 
-/** GET /api/v1/sessions/:id/rewind-targets — 当前 head 链上的用户消息锚点。
- *  `head` = 该句 parent（回退到发送这句之前）。`fillInput` 对列出的行恒为 true。
- *  跳过分支不进默认 picker。 */
+/** GET /api/v1/sessions/:id/rewind-targets — user-message anchors on the
+ *  current head chain. `head` = that message's parent (rewind to just before
+ *  it was sent). `fillInput` is always true for listed rows; skipped-branch
+ *  messages do not enter the default picker. */
 export type RewindTargetDto = {
   readonly head: string | null;
   readonly userMessageText: string;
@@ -233,10 +248,11 @@ export type RewindTargetsResponse = {
 };
 
 /**
- * GET /api/v1/skills — TUI `skillCatalog.loadable()` 投影（可加载技能面）。
- * `description` 允许缺席：人侧技能可以没有 description（spec
- * skill-index-increment SC5/SC9），强转 `""` 会把「无描述」与「空描述」
- * 混为一谈，宿主也就无法把它渲染成「无描述」形态。
+ * GET /api/v1/skills — projection of TUI `skillCatalog.loadable()` (the
+ * loadable-skills surface). `description` may be absent: a human-side skill
+ * can lack one, and coercing it to `""` would conflate "no description" with
+ * "empty description", leaving the host unable to render the former as a
+ * distinct "no description" form.
  */
 export type SkillSummaryDto = {
   readonly name: string;
@@ -252,7 +268,7 @@ export type SkillBodyResponse = {
   readonly body: string;
 };
 
-/** GET /api/v1/mcp — TUI mcp.status() 投影。 */
+/** GET /api/v1/mcp — projection of TUI mcp.status(). */
 export type McpServerStatusDto = {
   readonly name: string;
   readonly state: string;
@@ -278,57 +294,64 @@ export type HealthResponse = {
   ok: true;
   service: "iknow-session-api";
   version: string;
-  /** **策略预算窗口**大小（token）。来源 env.compress.contextWindow（IKNOW_MODEL_CONTEXT_WINDOW），
-   *  默认 256000（ADR-0100）。上下文用量显示的百分比分母，与 auto-compact 闸同一数字。 */
+  /** Strategy context-window size in tokens. Source:
+   *  env.compress.contextWindow (IKNOW_MODEL_CONTEXT_WINDOW), default 256000
+   *  (ADR-0100). Denominator for the context-usage percentage, the same
+   *  number the auto-compact gate uses. */
   contextWindow: number;
-  /** 模型路由 ID（settings.llm.model）。未配置 → 字段缺席（byte-stable，
-   *  与 lastUsage 同模式）。web 输入框下方状态条显示用。 */
+  /** Model routing ID (settings.llm.model). Unconfigured → field absent
+   *  (byte-stable, same pattern as lastUsage). Shown in the web status bar
+   *  under the input box. */
   model?: string;
-  /** Trace 写盘失败次数；由 HTTP 层读取写侧实例的当前计数。 */
+  /** Trace write-failure count; the HTTP layer reads the live counter from
+   *  the write-side instance. */
   traceWriteFailures: number;
 };
 
-/** GET/POST /api/v1/permission-mode 响应（web Shift+Tab 模式切换）。 */
+/** GET/POST /api/v1/permission-mode response (web Shift+Tab mode cycling). */
 export type PermissionModeResponse = {
   mode: "default" | "plan" | "full_auto";
 };
 
 /**
- * D-α V1 / ADR-0030：GET/POST /api/v1/graph-mode 响应（serve 侧的 `/graph`
- * 对等物）。`message` 是三入口共用的那一行状态文案（chat 打到 stdout、TUI
- * 落 notice、web 直接渲染这段）。
+ * ADR-0030: GET/POST /api/v1/graph-mode response — the serve-side counterpart
+ * of `/graph`. `message` is the single status line shared by all three entry
+ * points (chat prints to stdout, TUI shows a notice, web renders it directly).
  */
 export type GraphModeResponse = {
   enabled: boolean;
   message: string;
 };
 
-/** POST /api/v1/graph-mode 请求体：`/graph` 的 args（已切词）。缺省 = 查询。 */
+/** POST /api/v1/graph-mode body: tokenized `/graph` args. Default = query. */
 export interface GraphModeRequest {
   readonly args?: ReadonlyArray<string>;
 }
 
 /**
- * ADR-0092 / SC13：GET/POST /api/v1/fs-mode 响应（serve 侧的 `/config`
- * 对等物）。`message` 是三入口共用的那一行状态文案（chat 打到 stdout、TUI
- * 落 notice、web 直接渲染这段）。
+ * ADR-0092: GET/POST /api/v1/fs-mode response — the serve-side counterpart
+ * of `/config`. `message` is the single status line shared by all three
+ * entry points (chat prints to stdout, TUI shows a notice, web renders it
+ * directly).
  *
- * `mode` 复用 `harness/sandbox/fs-mode.ts` 的 `FsIsolationMode`（SSOT）——
- * 本文件不再自带一份字面量拷贝，避免闭集扩档时两处漂移。
+ * `mode` reuses `FsIsolationMode` from `harness/sandbox/fs-mode.ts` (SSOT) —
+ * no literal copy here, so widening the closed set cannot drift between two
+ * places.
  */
 export type FsModeResponse = {
   mode: FsIsolationMode;
   message: string;
 };
 
-/** POST /api/v1/fs-mode 请求体：`/config` 的 args（已切词）。缺省 = 查询。 */
+/** POST /api/v1/fs-mode body: tokenized `/config` args. Default = query. */
 export interface FsModeRequest {
   readonly args?: ReadonlyArray<string>;
 }
 
 /**
- * 022 D1.1: wire 错误响应。嵌套形：`error.kind` 是 SessionStoreErrorKind 或
- * `validation` / `internal`；旧扁平形（`{ error: string; message; details? }`）退役。
+ * Wire error response, nested form: `error.kind` is SessionStoreErrorKind or
+ * `validation` / `internal`; the old flat form
+ * (`{ error: string; message; details? }`) is retired.
  */
 export interface ApiErrorBody {
   readonly error: {
@@ -339,22 +362,22 @@ export interface ApiErrorBody {
   };
 }
 
-/** serve-workspace T3: GET /api/v1/workspace response. */
+/** GET /api/v1/workspace response. */
 export type WorkspaceResponse = {
   readonly bound: boolean;
   readonly root?: string;
 };
 
-/** serve-workspace T3: PUT /api/v1/workspace request body. */
+/** PUT /api/v1/workspace request body. */
 export interface PutWorkspaceRequest {
   readonly path: string;
   readonly confirmTrust?: boolean;
 }
 
-/** serve-workspace T3: PUT /api/v1/workspace response body. */
+/** PUT /api/v1/workspace response body. */
 export type PutWorkspaceResponse = WorkspaceResponse;
 
-/** serve-workspace T3: GET /api/v1/workspaces response (recents / trusted). */
+/** GET /api/v1/workspaces response (recents / trusted). */
 export type WorkspacesResponse = {
   readonly workspaces: readonly { readonly root: string }[];
 };

@@ -1,5 +1,5 @@
 /**
- * continue_pending T2 (#688): transcript predicate P0–P7 + CLI/TUI whole-line NL.
+ * continue_pending: transcript predicate + CLI/TUI whole-line NL.
  *
  * Host (hub / CLI / TUI) evaluates load+closeout messages + goal. Classification
  * may ignore a trailing interrupt system message; callers must not mutate disk
@@ -24,7 +24,7 @@ export type ContinuePendingVerdict =
   | { readonly ok: true }
   | { readonly ok: false; readonly exit: ContinuePendingExit };
 
-/** Spec table: exact whole-line hits after trim; English compared case-insensitively. */
+/** Exact whole-line hits after trim; English compared case-insensitively. */
 const CONTINUE_PENDING_NL_LINES: ReadonlySet<string> = new Set([
   "please continue",
   "continue please",
@@ -83,8 +83,9 @@ export function evaluateContinuePending(opts: {
   if (classified.length === 0) {
     return { ok: false, exit: "nothing_pending" };
   }
-  // stripTrailingInterrupt 只在末尾确实是 interrupt system 消息时切片,
-  // 长度差即「本次分类是否削掉了 interrupt」的判据。
+  // stripTrailingInterrupt only slices when the tail really is an interrupt
+  // system message, so the length difference is exactly "did this
+  // classification strip a trailing interrupt".
   const strippedTrailingInterrupt = classified.length !== messages.length;
   return classifyLastMessage(
     classified[classified.length - 1]!,
@@ -134,10 +135,11 @@ function classifyLastMessage(
   if (last.role === "assistant") {
     if (hasToolUse(last)) return { ok: true };
     if (hasNonEmptyText(last)) {
-      // ADR-0108：文本 assistant 紧跟 interrupt = 模型在途被打断、盘上留着
-      // freeze 前缀 —— 终答后不会再有 interrupt，所以这不是完整终答，本轮仍
-      // pending，/continue 得以从前缀续跑（transport-continue-persist SC3）。
-      // 无 interrupt 的文本终答维持 nothing_pending（P3 合同不变）。
+      // ADR-0108: a text assistant immediately followed by an interrupt means
+      // the model was cut off mid-flight and the frozen prefix stays on disk —
+      // a complete final answer is never followed by an interrupt, so this
+      // turn is still pending and /continue can resume from the prefix.
+      // A text final answer with no interrupt stays nothing_pending.
       return strippedTrailingInterrupt
         ? { ok: true }
         : { ok: false, exit: "nothing_pending" };

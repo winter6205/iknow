@@ -1,19 +1,24 @@
 /**
- * 串行队列 — 会话数据文件写路径的进程内唯一锁层（中立底层工具）。
+ * Serial queue — the in-process sole lock layer for session-data file write
+ * paths (a neutral low-level utility).
  *
- * 存在理由：transcript / skill-index ledger 等会话数据文件的 append 都是
- * read-modify-write（读全文件 → 算下一状态 → 写回），而 store 层刻意无锁
- * —— 架构纪律是「锁在装配边界」（对照 session-store.ts `appendEvents` 的
- * hub serialize queue 注释、ADR-0110 单写者契约）。各装配点手写 Promise 链
- * 曾出现两份逐字节同构的实现，收敛到此单一来源。
+ * Why: appends to session-data files (transcript, skill-index ledger) are
+ * read-modify-write (read full file -> compute next state -> write back),
+ * while the store layer is deliberately lock-free — the architectural rule
+ * is "locks at the assembly boundary" (see the hub serialize queue on
+ * `appendEvents` in session-store.ts and the single-writer contract in
+ * ADR-0110). Assembly points had hand-rolled byte-identical Promise chains;
+ * converged here as the single source.
  *
- * 语义：
- *  - 严格 FIFO：任务按入队顺序开始执行，不并发交叠；
- *  - 前序 reject 只回给该调用方，不卡链：`then(task, task)` 让后序任务在
- *    前序失败时照常执行（失败不污染队列）。
+ * Semantics:
+ *  - strict FIFO: tasks start in enqueue order and never overlap;
+ *  - a prior rejection reaches only its own caller and never stalls the
+ *    chain: `then(task, task)` lets later tasks run even when the prior one
+ *    failed (failure does not poison the queue).
  *
- * 注意：队列只保证「不交叠」，不提供重入安全 —— 在任务内部 await 同队列
- * 的后续任务会死锁，fire-and-forget 入队则安全（排到当前任务之后）。
+ * Note: the queue guarantees non-overlap, not reentrancy — awaiting a later
+ * task of the same queue from inside a task deadlocks; fire-and-forget
+ * enqueue is safe (it serializes after the current task).
  */
 export function createSerialQueue(): <T>(task: () => Promise<T>) => Promise<T> {
   let queue: Promise<unknown> = Promise.resolve();

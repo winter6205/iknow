@@ -12,9 +12,10 @@
  */
 
 /**
- * T5: 白名单派生 union — 新 record 类型只在此追加, reader/http/fields 全部
- * 从该白名单联动 (不硬编码 record 名单)。声明顺序被既有消费者依赖, 新成员
- * 只能 APPEND 到末尾。
+ * Whitelist-derived union — new record types are only appended here;
+ * reader/http/fields all follow this whitelist (no hardcoded record-name
+ * lists). Declaration order is relied on by existing consumers; new members
+ * must be APPENDed at the end.
  */
 export type TraceRecordType =
   | "llm_call"
@@ -57,33 +58,40 @@ export interface TraceQuery {
   readonly limit?: number;
   readonly offset?: number;
   /**
-   * T5 (#358): 精确匹配 task_id (JSONL 顶层 snake_case key)。
-   * undefined = 不参与过滤。Exact-match 只做, 时间窗查询不在本轮 (spec Open Question 1)。
+   * Exact match on task_id (top-level snake_case JSONL key).
+   * undefined = not part of the filter. Exact-match only; time-window
+   * queries are out of scope.
    */
   readonly taskId?: string;
   /**
-   * T5 (#358): 精确匹配 parent_turn_id。undefined = 不参与过滤。
-   * v1 写侧 SubagentDefinition 尚无 parentTurnId 来源, 该字段当前不落盘;
-   * 读侧先就位, spec 升级 child 留位时即可查。
+   * Exact match on parent_turn_id. undefined = not part of the filter.
+   * The v1 writer's SubagentDefinition has no parentTurnId source yet, so
+   * the field is currently not persisted; the reader is in place first and
+   * can query as soon as the writer starts emitting it.
    */
   readonly parentTurnId?: string;
   /** Exact-match turn association filter. */
   readonly turnId?: string;
   /**
-   * 增量轮询恢复字节偏移 (SC-R 14): 只读文件 resumeOffset 之后的追加行。
-   * 与行分页 `offset` 正交 — 行分页是「从第 N 行开始」, 这是「从第 N 字节之后读新增」。
-   * 缺省 0 = 从文件头全读。由前端把上一轮响应里的 `offset` 原样传回。
+   * Incremental-polling resume byte offset: reads only lines appended after
+   * resumeOffset. Orthogonal to the row pagination `offset` — row pagination
+   * means "start from row N", this means "read new data after byte N".
+   * Default 0 = read everything from the file head. The frontend passes
+   * back the previous response's `offset` verbatim.
    */
   readonly resumeOffset?: number;
   /**
-   * 大小写敏感的原始行子串匹配 (trace-mcp-args-search task): 命中
-   * JSONL 行级全文 — llm_call 命中其 messages 序列化字段、tool_call 命中其
-   * arguments (待写侧 tool_call 落盘 arguments 后)。与 record_type/status 等
-   * 精确 filter AND 组合, 与 limit/offset 分页正交。
+   * Case-sensitive raw-line substring match: hits full JSONL line text —
+   * for llm_call its serialized messages field, for tool_call its
+   * arguments (once the writer persists tool_call arguments). AND-combined
+   * with exact filters like record_type/status; orthogonal to limit/offset
+   * pagination.
    *
-   * 提供 contains 时绕过 8 MiB 现状查询截断, 改走 `MAX_TRACE_BYTES_FOR_CONTAINS`
-   * 上限, 避免 39 MB 级别 trace 上的「只扫前 8 MB」盲区。`undefined` / 缺省
-   * = 行为完全不变 (现状查询走 8 MiB 帽, 不接 raw line 过滤)。
+   * When contains is provided, the 8 MiB status-quo query byte cap is
+   * bypassed in favor of the `MAX_TRACE_BYTES_FOR_CONTAINS` bound, to avoid
+   * a "scan only the first 8 MB" blind spot on ~39 MB traces.
+   * `undefined` / absent = behavior completely unchanged (status-quo queries
+   * keep the 8 MiB cap and no raw-line filtering).
    */
   readonly contains?: string;
 }
@@ -97,8 +105,9 @@ export interface TraceQueryResult {
   /** True when the file was truncated by the byte cap. */
   readonly truncated: boolean;
   /**
-   * 本次读取结束的字节偏移 (按行边界对齐)。前端下一轮轮询把它作为
-   * `resume_offset` 传回, 只拉新增行。0 = 本次读到空文件 / 文件头。
+   * Byte offset where this read ended (aligned to line boundaries). The
+   * frontend passes it back as `resume_offset` next poll to fetch only new
+   * lines. 0 = this read hit an empty file / file head.
    */
   readonly offset: number;
 }

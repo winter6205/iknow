@@ -25,13 +25,13 @@ export const QUERY_TRACE_MAX_LIMIT = 200;
 export const QUERY_TRACE_PREVIEW_CAP = 400;
 
 /**
- * The one description text for both faces (spec SC7 / SC18: one source, and it
- * claims no character cap — the 4000-character sentence this replaces described
- * a budget the read side stopped owning in plan `trace-mcp-read-side-split` T6).
+ * The one description text for both faces (one source, and it claims no
+ * character cap — the 4000-character sentence this replaces described a
+ * budget the read side stopped owning).
  * What the row axis really guarantees is stated in its own terms: rows come back
  * as projections, list pagination is `limit` + `offset`, `records.length <
  * limit` is the end-of-data signal, and span-level reads on one record live on
- * `get_record`. Positive-trigger phrasing per #483 D9, enforced by
+ * `get_record`. Positive-trigger phrasing, enforced by
  * tests/harness/aci/tools/d9-description-guard.test.ts.
  */
 export const QUERY_TRACE_DESCRIPTION =
@@ -78,10 +78,9 @@ export function createQueryTraceCore(
 
   return async (input: unknown): Promise<string> => {
     const parsed = parseInput(input);
-    // T7: `conversation_id` is required on the tool face (Assumption 4). A
-    // missing file raises `session_not_found`, not the silent empty envelope the
-    // pre-T7 default returned when the implicit "newest session" was also
-    // missing.
+    // `conversation_id` is required on the tool face. A missing file raises
+    // `session_not_found`, not the silent empty envelope the earlier default
+    // returned when the implicit "newest session" was also missing.
     const filePath = findConversationTraceFile(traceDir, parsed.conversationId);
     if (filePath === undefined) {
       throw new TraceSessionNotFoundError(parsed.conversationId);
@@ -132,7 +131,7 @@ function parseInput(input: unknown): ParsedQueryTraceInput {
     throw new TraceQueryValidationError("input", "input must be an object");
   }
   const raw = input as QueryTraceInput;
-  // T7: required. Empty string still fails before the path-separator check, so
+  // Required. Empty string still fails before the path-separator check, so
   // the path-separator rule continues to run on a non-empty value.
   const conversationId = requireNonEmptyString(
     raw.conversation_id,
@@ -168,9 +167,10 @@ function parseInput(input: unknown): ParsedQueryTraceInput {
     ...(raw.turn_id !== undefined
       ? { turnId: requireNonEmptyString(raw.turn_id, "turn_id") }
       : {}),
-    // contains: 大小写敏感的原始行子串。空串视为非法输入 (与 task_id 等
-    // 字符串轴的 requireNonEmptyString 校验风格一致) — 「匹配所有行」由
-    // 不传 contains 表达, 不给空串第二种歧义语义。
+    // contains: case-sensitive raw-line substring. An empty string is invalid
+    // input (same requireNonEmptyString style as the other string axes) —
+    // "match every line" is expressed by omitting contains; no second
+    // ambiguous meaning for the empty string.
     ...(raw.contains !== undefined
       ? { contains: requireNonEmptyString(raw.contains, "contains") }
       : {}),
@@ -222,17 +222,18 @@ async function projectRecord(
   if (row["record_type"] !== "llm_call") return projected;
 
   const rawMessages = Array.isArray(row["messages"]) ? row["messages"] : [];
-  // T7 (SC18 实跑暴露的 SC14 残余): blob 模式下 `messages[i]` 形态是
-  // `{role, content:{sha,bytes}}`(SC10) 或整条 `{sha,bytes}`(T4 前残留);
-  // 读侧 `messageRole()` 对前者的 role 仍内联可读, 但 `preview()`
-  // 直接 `JSON.stringify` 整条 message 会把 `{"sha":...}` 塞进 preview 正文
-  // —— SC14 「preview 为正文且不含 sha 字面量」之前是 inline 形态才满足,
-  // blob 模式实跑下露馅。先 `dereferenceTraceMessages` 把 messages 还原成
-  // inline 形态 (`{role, content}` 二键, content 是字符串或数组), 后续
-  // `messageRole` / `preview` / `projectToolResultsFromTrace` 全部走还原后
-  // 形态。`dereferenceTraceMessages` 自己有「缺失/损坏不抛进 turn」的 try/catch
-  // 降级到 `[]`, 失败时 messages_count=0, 三个 preview 字段缺席 —— 与 empty
-  // 边界同形, 合法态。
+  // In blob mode `messages[i]` is either `{role, content:{sha,bytes}}` or a
+  // whole `{sha,bytes}` (legacy residue). The read side's `messageRole()` can
+  // still read the former's inline role, but `preview()` JSON.stringify-ing
+  // the whole message would stuff `{"sha":...}` into the preview body — the
+  // "preview is content, never sha literals" rule only held for the inline
+  // shape and surfaced under real blob runs. Dereference first so messages
+  // return to inline shape (`{role, content}` where content is a string or
+  // array); `messageRole` / `preview` / `projectToolResultsFromTrace` all
+  // then operate on the restored form. `dereferenceTraceMessages` has its own
+  // "missing/corrupt blob must not throw into the caller turn" try/catch
+  // degrading to `[]`: on failure messages_count=0 and the three preview
+  // fields are absent — same shape as the empty boundary, a legal state.
   const messages = await dereferenceTraceMessages(rawMessages, {
     traceFilePath,
   });
@@ -240,13 +241,16 @@ async function projectRecord(
   if (messages.length > 0) {
     projected.first_message_preview = preview(messages[0]);
     projected.last_message_preview = preview(messages[messages.length - 1]);
-    // v1.2 判据 (b): 外部 agent 取最终 assistant 结论的动线
+    // Why a dedicated last_assistant_preview: the external-agent flow for
+    // fetching the final assistant conclusion
     // (list_sessions(limit:1) -> query_trace(record_type:"llm_call", limit:1))
-    // 需要**最后一条** role==="assistant" 消息的预览. last_message_preview
-    // 对 loop-engine 尾部追加的 <agent_status> user 注入消息是死预览,
-    // 故本字段专答「结论」一问. 与 first_message_preview / last_message_preview
-    // 同源 (复用 preview(), 同一 cap, 同一截断语义). 字段缺席 = 合法态 (无
-    // assistant 消息), 不是 empty string.
+    // needs the preview of the **last** role==="assistant" message.
+    // last_message_preview is a dead preview against the <agent_status> user
+    // messages loop-engine appends at the tail, so this field answers the
+    // "conclusion" question specifically. Same source as
+    // first_message_preview / last_message_preview (reuses preview(), same
+    // cap, same truncation semantics). Absent field = legal state (no
+    // assistant message), not an empty string.
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const message = messages[i];
       if (messageRole(message) === "assistant") {
@@ -255,7 +259,7 @@ async function projectRecord(
       }
     }
   }
-  // T3 (SC7): 传 traceFilePath, blob 目录由 dirname(filePath)/blobs 派生。
+  // Pass traceFilePath; the blob directory is derived as dirname(filePath)/blobs.
   const toolResults = await projectToolResultsFromTrace(rawMessages, {
     traceFilePath,
   });
@@ -292,14 +296,16 @@ function preview(value: unknown): string {
  * record fits, that record is returned whole and the response overshoots the
  * backstop rather than lying about it.
  *
- * 锚在 `TRACE_OUTPUT_BACKSTOP` 而不是一个更小的自有数字：本核的目的只是「让一页
- * 到调用方手里时仍是可解析的 JSON」，而帽的值与 MCP 面那层具名 backstop 同源于
- * executor 的 `OUTPUT_HARD_CAP`。整条 4000 字符红线随 plan
- * `trace-mcp-read-side-split` T6 离开代码库——它既不是读单元也不是可声明的合同。
+ * Anchored on `TRACE_OUTPUT_BACKSTOP` rather than a smaller private number:
+ * this core's only goal is "a page still parses as JSON when it reaches the
+ * caller", and the cap's value shares executor's `OUTPUT_HARD_CAP` through
+ * the named MCP-face backstop. The whole 4000-character red line left the
+ * codebase with the read-side split — it was neither a read unit nor a
+ * declarable contract.
  *
  * The end-of-data signal is implicit (`records.length < limit`), so no
- * metadata field accompanies this. `total` and `truncated` left the tool face
- * in T7 — they belonged to the panel's byte-paging semantics, not to the
+ * metadata field accompanies this. `total` and `truncated` left the tool
+ * face — they belonged to the panel's byte-paging semantics, not to the
  * row-axis page the caller asked for.
  */
 function serializeListPage(

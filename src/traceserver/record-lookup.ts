@@ -1,25 +1,30 @@
 /**
- * `record_id` 查找 —— 读侧两条内容轴共用的**唯一**一份扫描实现。
+ * `record_id` lookup — the **single** scan implementation shared by both
+ * read-side content axes.
  *
- * 为什么必须单一实现（plan `trace-mcp-read-side-split` T6 AC）：`query_trace`
- * 的下钻与 `get_record` 都要「在同一会话里按 10 个 id 字段找一个 id」。两处各写
- * 一遍，扫描上限、字段顺序、以及「扫到上限」与「扫完了没有」这两种失败就会各自漂
- * 移 —— 而它们是调用方据以决定下一步的事实，不是实现细节。T7 把行轴瘦成
- * 「行筛选 + 行分页」后，本文件是唯一的 `record_id` 入口。
+ * Why it must be single: `query_trace` drill-down and `get_record` both
+ * need "find one id among 10 id fields in the same conversation". Written
+ * twice, the scan limit, field order, and the distinction between "hit the
+ * scan cap" vs "scanned everything, no match" would drift independently —
+ * and those are facts the caller uses to decide its next step, not
+ * implementation details. After the row axis slimmed to "row filtering +
+ * row pagination", this file is the only `record_id` entry point.
  *
- * 归属边界：本文件只做「定位到哪一行 + 它的标量投影」。线形状（行轴的
- * envelope vs 内容轴的 `{record, matched_on}`）、错误类型选择（行轴现状的静默空
- * 列表 vs 内容轴的 `record_not_found`）都留在各自核里。
+ * Scope boundary: this file only answers "which row + its scalar
+ * projection". Wire shapes (row-axis envelope vs content-axis
+ * `{record, matched_on}`) and error choices (the row axis's silent empty
+ * list vs the content axis's `record_not_found`) stay in each core.
  */
 import { TraceQueryRecordScanError } from "./query-trace-errors.js";
 import type { JsonlTraceReader } from "./reader.js";
 import type { TraceQuery, TraceRecordRow } from "./types.js";
 
 /**
- * 一行可能携带 id 的 10 个字段（写侧 src/harness/trace/ 各 record 类型的 *_id
- * 键）。**顺序即优先级**：一行同时带 `llm_call_id` 与 `turn_id` 时 `matched_on`
- * 报前者，而 `get_record` 会把它回给调用方 —— 所以这份名单是答案的一部分，不是
- * 内部细节。
+ * The 10 fields a row may carry an id in (the *_id keys of each record type
+ * in the writer, src/harness/trace/). **Order is priority**: when a row has
+ * both `llm_call_id` and `turn_id`, `matched_on` reports the former and
+ * `get_record` echoes it back to the caller — this list is part of the
+ * answer, not an internal detail.
  */
 export const TRACE_RECORD_ID_KEYS = [
   "llm_call_id",
@@ -35,28 +40,30 @@ export const TRACE_RECORD_ID_KEYS = [
 ] as const;
 
 /**
- * 一次 `record_id` 查找最多读多少条记录。10 000 是「一次调用可接受的解析量」，
- * 不是某个实测分布：到量即停止翻页，好把 `record_scan`（没扫完）与
- * `record_not_found`（扫完了，没有）分开 —— 合并这两者会让调用方以为一个存在的
- * id 不存在。
+ * Max records one `record_id` lookup will read. 10 000 is "an acceptable
+ * parse volume per call", not a measured distribution: stop paging at the
+ * cap so `record_scan` (did not finish) stays distinct from
+ * `record_not_found` (finished, nothing there) — merging the two would make
+ * callers believe an existing id does not exist.
  */
 export const TRACE_RECORD_ID_SCAN_LIMIT = 10_000;
 
 /**
- * 扫描内部的 reader 分页大小。与 `QUERY_TRACE_MAX_LIMIT`（调用方可请求的页面上
- * 限）是两个概念，只是当前取同一个数字；本文件刻意不 import 那一侧，免得
- * query-trace-core ↔ record-lookup 互相依赖。
+ * Internal reader page size for the scan. A different concept from
+ * `QUERY_TRACE_MAX_LIMIT` (the caller-requestable page cap) that merely
+ * shares the same number today; this file deliberately does not import that
+ * side to keep query-trace-core ↔ record-lookup acyclic.
  */
 const SCAN_PAGE_SIZE = 200;
 
 export interface RecordMatch {
   readonly row: TraceRecordRow;
-  /** 命中它的那个 id 字段名；调用方靠它回答「我给的 id 是哪条轴」。 */
+  /** The id field name that matched; the caller answers "which axis my id belongs to" from it. */
   readonly matchedOn: string;
 }
 
 export interface RecordLookupResult {
-  /** undefined = 扫完了整个会话仍无命中。 */
+  /** undefined = the whole conversation was scanned with no match. */
   readonly match?: RecordMatch;
   readonly skippedLines: number;
   readonly truncated: boolean;
@@ -64,15 +71,17 @@ export interface RecordLookupResult {
 }
 
 /**
- * 按 `record_id` 找一行：分页读到命中、或读到文件末尾、或读到
- * `TRACE_RECORD_ID_SCAN_LIMIT`。
+ * Find a row by `record_id`: page-read until a hit, the file end, or
+ * `TRACE_RECORD_ID_SCAN_LIMIT`.
  *
- * `query` 让调用方带上既有筛选（行轴下钻沿用其筛选条件），本函数只覆写 `limit` /
- * `offset` 这两个自己管辖的分页坐标。
+ * `query` lets the caller keep its existing filters (the row-axis drill-down
+ * reuses them); this function only overrides the two pagination coordinates
+ * it owns, `limit` / `offset`.
  *
- * 两种「没找到」在此分道：扫到上限仍未命中 → 抛 `TraceQueryRecordScanError`
- * （`record_scan`）；扫完了没有 → 返回无 `match`，由调用方决定那是静默空列表
- * （行轴现状）还是 `record_not_found`（内容轴，plan T6）。
+ * The two "not found" outcomes diverge here: cap reached without a hit ->
+ * throw `TraceQueryRecordScanError` (`record_scan`); scanned everything with
+ * no hit -> return no `match`, and the caller decides whether that is a
+ * silent empty list (row axis) or `record_not_found` (content axis).
  */
 export function lookupRecordById(
   reader: JsonlTraceReader,
@@ -119,9 +128,11 @@ export function lookupRecordById(
 }
 
 /**
- * 记录的标量投影：丢掉 `messages`（体积来源，交给行轴的预览或内容轴的窗）与
- * `raw`（reader 为未知字段另加的副本，正文已在行上）。两条轴都用它，所以
- * 「record 标量里有什么」只有一处定义。
+ * Scalar projection of a record: drops `messages` (the size source, handled
+ * by the row axis's preview or the content axis's window) and `raw` (the
+ * reader's copy for unknown fields, whose content already lives on the
+ * row). Both axes use it, so "what a record's scalars contain" is defined
+ * once.
  */
 export function projectRecordBase(
   row: TraceRecordRow

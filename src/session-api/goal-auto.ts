@@ -1,5 +1,5 @@
 /**
- * Plan T3 / issue 574: shared `/goal` auto-loop fields and stop rules.
+ * Shared `/goal` auto-loop fields and stop rules.
  *
  * Slash parse, hub postMessage, and chat processChatLine must use this
  * module — one idle streak, one optional maxTurns, one Impossible/error
@@ -11,7 +11,7 @@ import type { GoalState, SessionFileV1 } from "./store/schema.js";
 import { CURRENT_SCHEMA_VERSION } from "./store/schema.js";
 import type { VerifyLoopOutcome } from "../harness/verify/index.js";
 
-/** Frozen plan: idle = 3 consecutive `completed` turns with no `tool_use`. */
+/** Idle = 3 consecutive `completed` turns with no `tool_use`. */
 export const IDLE_COMPLETED_STOP = 3;
 
 export type ParseGoalPinResult =
@@ -243,8 +243,9 @@ export type GoalAutoLoadErrorHandler = (err: unknown) => void;
  * stderr wire is byte-identical between the two entry points.
  *
  * Why a stderr-only render (no rethrow, no save): the auto-loop is best-effort
- * — a load fault on the persist side must not change T3 continue/stop. The
- * helper discriminates by `kind` (per code-quality.md typed-error catch 契约):
+ * — a load fault on the persist side must not change the continue/stop
+ * decision. The helper discriminates by `kind` (per the code-quality.md
+ * typed-error catch contract):
  * `not_found` = silent (no goal state to persist on a missing file), all other
  * kinds → render. Non-typed throws fall through unchanged so the store contract
  * remains authoritative (defensive — store is contracted to throw only typed).
@@ -329,7 +330,7 @@ function decideFromPinnedGoal(
 
 /**
  * Run-side payload for `applyGoalAutoContinue`. Composed so the public opts
- * stays ≤4 fields (S5 soft cap); the host passes this instead of
+ * stays ≤4 fields (max-params soft cap); the host passes this instead of
  * `{result, priorCount, verifyOutcome, records}` individually.
  */
 export type RunResultSummary = {

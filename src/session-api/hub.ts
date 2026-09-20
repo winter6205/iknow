@@ -1,10 +1,10 @@
 /**
  * In-process multi-conversation host over harness foundation runtime.
- * 022 T4: load → run(priorMessages) → conditional save → wire projection.
+ * Flow: load → run(priorMessages) → conditional save → wire projection.
  * Messages single-source is the session file; hub holds no messages copy.
- * 064 T5: per-session JSONL trace when traceOut is configured (ADR-0003 D4).
+ * Per-session JSONL trace when traceOut is configured (ADR-0003).
  *
- * 162: askUser is required at engine construction. Hub accepts `askUser`
+ * askUser is required at engine construction. Hub accepts `askUser`
  * via SessionHubOptions (tests inject createNoAskUser()); production callers
  * (serve.ts) supply the SPA-channel implementation or a v0 stub.
  */
@@ -64,7 +64,7 @@ import {
   type SubagentManagerRegistry,
 } from "../harness/subagent/manager-registry.js";
 import type { SubAgentTerminalSubscriber } from "../harness/subagent/mailbox.js";
-import { getVersion } from "../cli/usage.js"; // SC-W 6/7: agentVersion 注入(与 session-api/http.ts 同向 import,无循环)
+import { getVersion } from "../cli/usage.js"; // agentVersion injection (same import direction as session-api/http.ts, no cycle)
 import {
   createTaskWorktreeProvisioner,
   mainCheckoutOf,
@@ -279,7 +279,7 @@ function requireBoundRoot(root: unknown): string {
 }
 
 /**
- * #408 T3: detect a goal re-pin directive at the very start of a message.
+ * Detect a goal re-pin directive at the very start of a message.
  *
  * Matches only a **leading** `## GOAL:` marker (after trim). Returns the
  * trimmed goal text, or null when the marker is absent / mid-message. A
@@ -297,14 +297,16 @@ export function parseGoalCommand(text: string): string | null {
 }
 
 /**
- * settings-hot-reload（reviewer major）:热重建去重的关键字段值比较。
+ * Key-field value comparison for hot-reload rebuild dedup.
  *
- * EnvLoader.get() 每次 reload 都返回**新对象**（loadIknowEnv 每次全新构造），
- * 对象身份比较不可用。判定「settings 文件 touch 但内容没变」必须以字段值比较：
- * 全部 createAdapterFromEnv 入参：model / apiKey / baseUrl / headers /
- * maxOutputTokens / temperature / stream + thinking 控制器 thinking /
- * thinkingEffort。fallback 与 adapter 无关但反映配置变更，也纳入比较
- * （数组逐元素、顺序敏感）。
+ * EnvLoader.get() returns a **new object** on every reload (loadIknowEnv
+ * builds a fresh one each time), so identity comparison is useless.
+ * "settings file touched but content unchanged" must be decided by value
+ * across all createAdapterFromEnv inputs: model / apiKey / baseUrl /
+ * headers / maxOutputTokens / temperature / stream + thinking controller's
+ * thinking / thinkingEffort. fallback is unrelated to the adapter but
+ * reflects config changes, so it is compared too (element-wise,
+ * order-sensitive).
  */
 function sameHotReloadKeyFields(a: LlmEnv, b: LlmEnv): boolean {
   if (a.model !== b.model) return false;
@@ -320,13 +322,15 @@ function sameHotReloadKeyFields(a: LlmEnv, b: LlmEnv): boolean {
 }
 
 /**
- * headers 逐键比较（两轴 review Medium：headers 已是 createAdapterFromEnv
- * 入参，漏比较会让「只改 provider.headers」被判成 touch 未变内容 → adapter
- * 不重建 → 新头不上 wire）。
+ * Per-key headers comparison: headers are a createAdapterFromEnv input, so
+ * skipping them would let "provider.headers edited only" read as
+ * touched-but-unchanged → no adapter rebuild → new headers never reach the
+ * wire.
  *
- * 缺席 ⇔ 无键（env 层保证「有值才有该键」，见 LlmEnv.headers 注释），故
- * `undefined` 与 `undefined` 相等、`undefined` 与任何映射不等；键集合与每个
- * 键的值都比较（顺序无关）。
+ * Absence ⇔ key missing (the env layer guarantees "key exists only when a
+ * value exists" — see the LlmEnv.headers note), so `undefined` equals only
+ * `undefined` and never any map; the key set and every value are compared
+ * (order-insensitive).
  */
 function sameHotReloadHeaders(
   a: Readonly<Record<string, string>> | undefined,
@@ -338,18 +342,18 @@ function sameHotReloadHeaders(
   return aKeys.every((key) => a[key] === b[key]);
 }
 
-/** 字符串数组逐元素、顺序敏感比较（fallback 与 headers 同一判定形态）。 */
+/** Element-wise, order-sensitive string-array comparison. */
 function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
   if (a.length !== b.length) return false;
   return a.every((value, i) => value === b[i]);
 }
 
-// -- error mapping (裁决#10: pure function, http.ts T5 consumes) ---------------
+// -- error mapping (pure function; http.ts consumes) ---------------------------
 
 /**
  * Status + message per SessionStoreError kind. Data table replaces the prior
- * 6-case switch so mapStoreError stays a flat lookup (SC24 >60 hard-split gate).
- * retryable is implicit via 5xx status (D1.2: not in wire).
+ * 6-case switch so mapStoreError stays a flat lookup.
+ * retryable is implicit via 5xx status (not in wire).
  */
 type StoreErrorEntry = {
   status: number;
@@ -357,16 +361,17 @@ type StoreErrorEntry = {
 };
 
 /**
- * plan compress-trigger-gate T2 review fix:压缩失败的 reason SSOT。三处失败分支
- * (signal_aborted / 占位 fallback 也无效 / 防御兜底)收敛到一字面量,避免
- * divergent-change drift。
+ * Reason SSOT for compaction failure: the three failure branches (signal
+ * aborted / placeholder fallback also ineffective / defensive catch-all)
+ * converge on one literal to avoid divergent-change drift.
  */
 const REASON_NO_COMPRESS: CompactReason = "messages_too_few";
 
 /**
- * plan compress-trigger-gate T2 review fix:reason 决定 SSOT。窗口压缩成功 →
- * "windowed";LLM 摘要成功 → "full_summary"(无论判据 action,因 nextMessages
- * 实际是 SUMMARY_PREAMBLE + 摘要,用户应看到"摘要"文案,而不是"裁早期"文案)。
+ * Reason-decision SSOT. Windowed compaction success → "windowed"; LLM
+ * summary success → "full_summary" regardless of the triggering action,
+ * because nextMessages really is SUMMARY_PREAMBLE + summary — the user
+ * should see "summary" wording, not "trimmed early turns" wording.
  */
 function compactReasonFor(args: {
   readonly useCompactMessages: boolean;
@@ -434,9 +439,10 @@ function isSessionStoreError(err: unknown): err is SessionStoreError {
 }
 
 /**
- * ADR-0113 T4 log-and-continue 渲染：typed store 错误先按 kind 识别
- * （code-quality「typed-error catch 契约」——plain object 走 instanceof 会
- * 打成 [object Object]，kind/context 全灭）；非 store 错误才退回 Error 文本。
+ * Log-and-continue rendering (ADR-0113): typed store errors are identified
+ * by `kind` first — routing a plain object through `instanceof Error` would
+ * render "[object Object]" and hide kind/context entirely; only non-store
+ * errors fall back to Error text.
  */
 function describeTitleError(err: unknown): string {
   if (isSessionStoreError(err)) return `${err.kind}: ${err.conversation_id}`;
@@ -444,12 +450,13 @@ function describeTitleError(err: unknown): string {
 }
 
 /**
- * 可选 opts 字段的缺席/在场壳（tui/deps.ts:presentFields 同款，memory-toggle-live
- * S5 整改的既有先例）：值在场才产出 `{ [key]: value }`，缺席产出空对象。
- * 取代 `...(x ? { k: x } : {})` —— 后者两个分支都进 complexity 计数，而
- * 宿主侧解构语义不变（缺席 = key 不出现）。
+ * Absence/presence shell for optional opts fields: emits `{ [key]: value }`
+ * only when the value is present, `{}` when absent. Replaces
+ * `...(x ? { k: x } : {})` — both branches of that form count toward
+ * complexity metrics, while host-side destructuring semantics stay the same
+ * (absent = key does not appear).
  *
- * `=== undefined` 是唯一判据：null / false / 0 都算「值在场」。
+ * `=== undefined` is the only test: null / false / 0 all count as present.
  */
 function presentFields<V>(
   key: string,
@@ -460,11 +467,13 @@ function presentFields<V>(
 }
 
 /**
- * 非空文本字段的在场壳 —— `undefined` 与 `""` 都算缺席。
+ * Presence shell for non-empty text fields — both `undefined` and `""`
+ * count as absent.
  *
- * 与 `presentFields` 分开而不是合并成一个「falsy 即缺席」的松散版：`""`
- * 是缺席还是合法值属于**调用方的契约**（`stopSummary` 是前者），合并会
- * 让另一个调用方把 `false` / `0` 这类合法值悄悄丢掉。
+ * Kept separate from `presentFields` instead of merging into one loose
+ * "falsy means absent" variant: whether `""` is absent or a legal value is
+ * the **caller's contract** (`stopSummary` treats it as absent); merging
+ * would let another caller silently drop legal `false` / `0` values.
  */
 function presentText<V extends string>(
   key: string,
@@ -476,11 +485,10 @@ function presentText<V extends string>(
 
 /**
  * Auto-loop persist is best-effort. Typed load faults skip persist without
- * changing T3 continue/stop; unknown throws rethrow (store contract).
+ * changing continue/stop behavior; unknown throws rethrow (store contract).
  *
  * Render contract: typed kinds other than `not_found` are echoed to stderr as
- * `${kind}: ${conversation_id}` — mirrors chat's `skipChatAutoOnLoadError`
- * (code-quality.md typed-error catch 契约; chat-session.ts:961-967).
+ * `${kind}: ${conversation_id}` — mirrors chat's `skipChatAutoOnLoadError`.
  */
 function skipAutoPersistOnLoadError(
   err: unknown,
@@ -492,20 +500,20 @@ function skipAutoPersistOnLoadError(
   reportGoalAutoStoreLoadErr(err, conversationId);
 }
 
-// -- verify outcome → goal status (#458 T5 SC8) ------------------------------
+// -- verify outcome → goal status ---------------------------------------------
 
 /**
  * Verify-loop terminal outcome → goal status write-back target.
  *
- * `undefined` = no status change (only trace 留痕 via recordGoal).
- * Mimics STORE_ERROR_MAP's data-table shape (ACR #4 thin wiring).
+ * `undefined` = no status change (trace record only, via recordGoal).
+ * Mimics STORE_ERROR_MAP's data-table shape.
  *
  * - `passed`     → "achieved"
  * - `aborted`    → "aborted"
- * - `escalated`  → "aborted"  (NEW in #458 SC8; pre-#458 kept active)
- * - `failed`     → "active"   (result stays active; trace 留痕)
- * - `unstable`   → "active"   (result stays active; trace 留痕)
- * - `disabled`   → undefined  (no status change; trace 留痕)
+ * - `escalated`  → "aborted"
+ * - `failed`     → "active"   (result stays active; trace record only)
+ * - `unstable`   → "active"   (result stays active; trace record only)
+ * - `disabled`   → undefined  (no status change; trace record only)
  */
 const OUTCOME_TO_STATUS: Record<VerifyLoopOutcome, GoalStatus | undefined> = {
   passed: "achieved",
@@ -516,35 +524,38 @@ const OUTCOME_TO_STATUS: Record<VerifyLoopOutcome, GoalStatus | undefined> = {
   disabled: undefined,
 } as const;
 
-// -- history projection (裁决#11: getSession turns) -----------------------------
-// 文本拼接 messageText 与 turn 边界判定 isTurnQuery 收敛在 turn-projection.ts
-//（store/checkpoint.ts 共用同一 SSOT）。
+// -- history projection (getSession turns) -------------------------------------
+// Text joining (messageText) and turn-boundary detection (isTurnQuery)
+// converge in turn-projection.ts (store/checkpoint.ts share the same SSOT).
 
 /**
  * Project raw AnthropicNativeMessage[] → display-form TurnDto[] for wire.
  * Pairs each user message with its subsequent assistant message.
- * Projection is non-authoritative: stopReason/turnCount are lossy (裁决#11).
+ * Projection is non-authoritative: stopReason/turnCount are lossy.
  *
- * T1: also projects thinking/toolCalls per turn (messages between this user
- * query and the next real query message, per `isTurnQuery`). Mask = SC20
- * boundary.
+ * Also projects thinking/toolCalls per turn (messages between this user
+ * query and the next real query message, per `isTurnQuery`). Output is
+ * secret-masked.
  *
- * D2 (tui-display-consistency) wire surface: `thinkingMs` 是与 `messages`
- * 一一对应的并行数组 (SessionFileV1.thinkingMs). 求和每个 turn slice 内
- * 所有 assistant 消息对应的 thinkingMs 值; sum > 0 时挂到 TurnAnswerDto
- * `thinkingMs` (ms) 字段. 缺席 = 旧会话 / 非 assistant turn / sum = 0,
- * 与 thinking/toolCalls/lastUsage 同 byte-stable 模式.
+ * Wire surface: `thinkingMs` is a parallel array aligned 1:1 with `messages`
+ * (SessionFileV1.thinkingMs). Sum the thinkingMs values of every assistant
+ * message inside each turn slice; when sum > 0 attach it to the
+ * TurnAnswerDto `thinkingMs` (ms) field. Absent = legacy session /
+ * non-assistant turn / sum = 0 — same byte-stable pattern as
+ * thinking/toolCalls/lastUsage.
  */
 /**
- * review-fix (M5):serve 路径子代理记录落点 —— hub engine 跨会话共享
- * (不重建 per-conversationId,见 cachedDeps 注释),装配期拿不到单会话
- * conversationId。改走两段式缝:装配期传 `projectDir`
- * (`<baseDir>/projects/<slug>`),manager 在 spawn 期按 `def.conversationId`
- * 派生 per-conversation 叶子 `<projectDir>/<convId>/subagents/`
- * (与 todo-write 的 `resolveConversationTodoPath` 同构)。会话删除时
- * `SessionStore.delete` 整删 `<convId>/` 文件夹,子代理记录同灭,
- * 不在项目层留孤儿 —— 旧的项目层平铺形状(假注释「spec SC8 操作员补丁
- * 接受」)已退役。
+ * Subagent record placement on the serve path: the hub engine is shared
+ * across conversations (not rebuilt per conversationId — see the cachedDeps
+ * note), so assembly time cannot know a single session's conversationId.
+ * Two-stage seam instead: assembly passes `projectDir`
+ * (`<baseDir>/projects/<slug>`), and the manager derives the
+ * per-conversation leaf `<projectDir>/<convId>/subagents/` from
+ * `def.conversationId` at spawn time (same shape as todo-write's
+ * `resolveConversationTodoPath`). On session deletion, `SessionStore.delete`
+ * removes the whole `<convId>/` folder, subagent records included — no
+ * orphans at the project level; the old flat project-level layout is
+ * retired.
  */
 
 export function projectMessagesToTurns(
@@ -592,7 +603,7 @@ export function projectMessagesToTurns(
  * index of the next real query message (per `isTurnQuery`), or
  * `messages.length` when the turn runs to the end of history. Pulled out to
  * keep `projectMessagesToTurns` ≤10 cyclomatic and the slice-bounds logic in
- * one place (M2 / ACR complexity anti-drift).
+ * one place.
  */
 function findTurnSliceEnd(
   messages: ReadonlyArray<AnthropicNativeMessage>,
@@ -632,11 +643,11 @@ export type SessionHubOptions = {
   deps?: LoopEngineDeps;
   defaultJsonMode?: boolean;
   /** JSONL trace file path; when set, postMessage creates a per-session
-   * JsonlTraceService bound to session.conversation_id (ADR-0003 D4).
+   * JsonlTraceService bound to session.conversation_id (ADR-0003).
    * Per-session instance -> cachedDeps does not cache the trace. */
   traceOut?: string;
-  /** askUser inlet (#162). Required when not injecting `deps`; the
-   * construction-time check below throws otherwise (#162 / SC18).
+  /** askUser inlet. Required when not injecting `deps`; the
+   * construction-time check below throws otherwise.
    * Tests injecting `deps` are unaffected. */
   askUser?: AskUser;
   /** Full serve AskUser handle (ask + resolveAsk + pendingAll). When provided,
@@ -645,39 +656,43 @@ export type SessionHubOptions = {
   /** Session allow-list source. "always-allow" decisions from the web UI land
    * here so subsequent identical tool calls are not re-confirmed. Memory-only. */
   sessionGrants?: SessionGrants;
-  /** W2: permission mode context (default / plan / full_auto). Absent →
+  /** Permission mode context (default / plan / full_auto). Absent →
    *  buildHarnessEngine defaults to "default". */
   permissionMode?: PermissionModeContext;
   /**
-   * D-α T3 / ADR-0030: graph 编排 overlay 的会话 holder（serve / TUI 与 CLI
-   * 共用同一形态）。透传给 buildHarnessEngine —— `run_graph` 与编排段按
-   * 每条 postMessage 拍下的快照 gate。缺席 = 本入口未接 overlay。
+   * ADR-0030: session holder for the graph-orchestration overlay (serve /
+   * TUI and CLI share one shape). Passed through to buildHarnessEngine —
+   * `run_graph` and the orchestration segment gate on the snapshot taken
+   * per postMessage. Absent = this entrypoint has no overlay wired.
    */
   graphMode?: GraphModeContext;
   /**
-   * ADR-0092 / SC13: filesystem isolation 档 holder（serve / TUI 与 CLI 共用
-   * 同一形态）。透传给 buildHarnessEngine —— bash 工厂 per-call 读
-   * （`BuildEngineOpts.fsMode`）。缺席 = 本入口未接 fs 档（引擎按全局档）。
+   * ADR-0092: filesystem isolation mode holder (serve / TUI and CLI share
+   * the same shape). Passed through to buildHarnessEngine — the bash
+   * factory reads it per call (`BuildEngineOpts.fsMode`). Absent = this
+   * entrypoint has no fs mode wired (engine follows the global mode).
    */
   fsMode?: FsModeContext;
   /**
-   * D-α T5:已建好 engine 的 host（TUI 在 run.tsx 就装配完）把
-   * `BuiltEngine.graphAssembly` 直接交进来 —— 这类 host 走注入 deps 路径，
-   * hub 自己不 build，拿不到快照句柄。缺席 = 未接 overlay（行为零变化）。
+   * Hosts that already built the engine (TUI assembles it in run.tsx) hand
+   * `BuiltEngine.graphAssembly` in directly — such hosts use the injected
+   * deps path, so the hub itself never builds and cannot get the snapshot
+   * handle. Absent = overlay not wired (zero behavior change).
    */
   graphAssembly?: GraphAssembly;
   /**
-   * live-graph-phase1 T1 / ADR-0047 / ADR-0051:活图账本 host。hub 跨多
-   * 会话持有同一份账本 host,按 `ctx.conversationId` 解析。`resetSession`
-   * 销毁单会话账本；`shutdown` 销毁全部。缺省 = `run_graph` handler 不
-   * 建账（与 graphAssembly 缺省同形态）。
+   * ADR-0047: live-graph ledger host. The hub holds one shared ledger host
+   * across conversations, resolved by `ctx.conversationId`. `resetSession`
+   * destroys a single session's ledger; `shutdown` destroys all.
+   * Default = the `run_graph` handler keeps no ledger (same shape as the
+   * graphAssembly default).
    */
   liveGraphLedger?: LiveGraphLedgerHost;
-  /** T2: env source for per-turn thinking override (test seam; production
+  /** Env source for per-turn thinking override (test seam; production
    * omits it → withThinkingOverride falls back to loadIknowEnv()). */
   overrideEnv?: { readonly llm: LlmEnv };
   /**
-   * Sandbox root for fs-tool access (code-review 2026-08-05). When omitted,
+   * Sandbox root for fs-tool access. When omitted,
    * `buildHarnessEngine` defaults to `process.cwd()` — see that module's
    * sandboxRoot note (CLI: project root; serve: server-launch dir, which
    * is NOT equivalent to user project root). Production callers should pass
@@ -686,22 +701,25 @@ export type SessionHubOptions = {
    */
   sandboxRoot?: string;
   /**
-   * #196 IKNOW T5:入口 surface — 决定 BOOTSTRAP 是否激活。serve 路径固定传
-   * "serve"（skip BOOTSTRAP，spec A12 矩阵）；测试可省略 → 默认 "chat"。
+   * Entry surface — decides whether BOOTSTRAP is active. The serve path
+   * always passes "serve" (skipping BOOTSTRAP); tests may omit → default "chat".
    */
   surface?: "chat" | "tui" | "ask" | "serve";
   /**
-   * #356 T7:subagent manager — host drain 消费面。serve 入口经
-   * buildHarnessEngine 自建 (surface !== "ask");hub 构造时未注入时,
-   * ensureDeps() 后从 built.subagentManager 懒取。未配置 (ask 形态) →
-   * 无 drain,行为零变化。
+   * Subagent manager — host drain consumption surface. The serve entrypoint
+   * builds one via buildHarnessEngine (surface !== "ask"); if not injected
+   * at hub construction, it is lazily taken from built.subagentManager
+   * after ensureDeps(). Unconfigured (ask form) → no drain, zero behavior
+   * change.
    */
   readonly subagentManager?: SubAgentManager;
   /**
-   * auto-memory T4 / ADR-0031 D1:自动记忆 host 钩子。serve 入口经
-   * `buildHarnessEngine` 自建(memory 层在场且非 ask);
-   * 构造时未注入则 `ensureDeps()` 后从 `built.autoMemory` 懒取。缺席
-   * (memory 层关 / ask / 注入 deps 的测试)→ 不调; 两个开关全关时钩子仍在场,只跑零 LLM 机械段。
+   * ADR-0031: auto-memory host hook. The serve entrypoint builds one via
+   * `buildHarnessEngine` (memory layer present and non-ask); if not
+   * injected at construction, it is lazily taken from `built.autoMemory`
+   * after `ensureDeps()`. Absent (memory layer off / ask / tests injecting
+   * deps) → never called; with both memory switches off the hook is still
+   * present and runs only the zero-LLM mechanical segment.
    */
   readonly autoMemory?: AutoMemoryHook;
   /**
@@ -710,159 +728,174 @@ export type SessionHubOptions = {
    * requires `autoExtract` at assembly (TUI may instead hold it with live
    * flags and re-check `memoryFlags.autoExtract` each turn). Host prepends
    * onto the user payload; never deps.system.
-   * T1: hosts pass `excludeIds` (session-level dedup) via the second arg.
+   * Hosts pass `excludeIds` (session-level dedup) via the second arg.
    */
   readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
   /**
-   * review-fix (M1 / H1): per-root state anchor。serve 入口解析后
-   * 透传 —— 让 hub 的 buildHarnessEngine 走 entry-resolved workspaceRoot,
-   * 保证 serve 与 CLI flag 路径同形态(per-root 状态锚 = 记忆库 / skill
-   * seam / 项目 `AGENTS.md` 发现)。seed 落 `~/.iknow`(#196 T5,与
-   * workspaceRoot 无关);会话池 / tasks 落点见 ADR-0087 / ADR-0088。
-   * 缺席 → build-engine 走 cwd fallback(legacy 默认)。
+   * Per-root state anchor. Resolved by the serve entrypoint and passed
+   * through — so the hub's buildHarnessEngine uses the entry-resolved
+   * workspaceRoot, keeping serve and the CLI flag path in the same shape
+   * (per-root state anchor = memory library / skill seam / project
+   * `AGENTS.md` discovery). Seed files land in `~/.iknow` regardless of
+   * workspaceRoot; session-pool / tasks locations per ADR-0087 / ADR-0088.
+   * Absent → build-engine falls back to cwd (legacy default).
    */
   readonly workspaceRoot?: string;
   /**
-   * T6 / worktree-mcp-rebind-lifecycle:稳定主 checkout / bind root。
-   * 首次装配捕获后跨 rebind 不变；`buildProductionEngine` 透传给
-   * `buildHarnessEngine.productRoot`，由此派生 `mcpConfigRoot`。缺席 →
-   * 回退 `workspaceRoot` / 当前装配 root（T6 前单根形态）。
+   * Stable main checkout / bind root. Captured at first assembly and
+   * unchanged across rebinds; `buildProductionEngine` passes it to
+   * `buildHarnessEngine.productRoot`, from which `mcpConfigRoot` derives.
+   * Absent → fall back to `workspaceRoot` / current assembly root.
    */
   readonly productRoot?: string;
   /**
-   * Review round 3 (ADR-0037 §4): 项目身份根 —— 宿主启动时钉一次，跨 rebind
-   * 不变。`buildProductionEngine` 透传给 `buildHarnessEngine`。
+   * ADR-0037: project identity root — pinned once at host startup,
+   * unchanged across rebinds. `buildProductionEngine` passes it to
+   * `buildHarnessEngine`.
    *
-   * 缺席回退链是 `boundRoot`（picker / `--workspace-root` 绑定的那个路径）再到
-   * `mainCheckoutOf(root)`：`bindWorkspace` 只校验绝对且存在，**不**要求是仓根，
-   * 所以绑到 `/repo/packages/app` 完全合法；改绑后拿 `root` 现算会让身份与记忆
-   * 库命名空间从子目录跳到仓根。
+   * Absent fallback chain: `boundRoot` (the path bound via picker /
+   * `--workspace-root`) then `mainCheckoutOf(root)`. `bindWorkspace` only
+   * checks absolute-and-existing, it does **not** require a repo root, so
+   * binding `/repo/packages/app` is perfectly legal; recomputing from `root`
+   * after a rebind would jump the identity and memory-library namespace from
+   * the subdirectory to the repo root.
    */
   readonly projectIdentityRoot?: string;
   /**
-   * #128 T8:验证闭环配置 (settings.verify 段经 serve.ts 构造传入)。
-   * 缺席 = 透明关闭, postMessage 走原 run 路径逐字节不变 (SC7);
-   * 配置时每轮 run 被 runVerifyLoop 包裹 (仅 StopReason=completed 触发
-   * 验证; trace 仅 traceOut 配置时注入, 否则 VerificationRecord 不落盘)。
+   * Verify-loop config (settings.verify section, passed in via serve.ts
+   * construction). Absent = transparently disabled: postMessage takes the
+   * original run path byte-for-byte unchanged; when configured, every run
+   * is wrapped by runVerifyLoop (verification triggers only on
+   * StopReason=completed; trace is injected only when traceOut is
+   * configured, otherwise VerificationRecord is not persisted).
    */
   readonly verifyConfig?: VerifyConfig;
   /**
-   * settings-hot-reload（T3）:env 源 — 构造 opts 可选。传入后 ensureDeps /
-   * reloadFromEnv 用它拿 env（替代内部 loadIknowEnv()）。T2 EnvLoader.get 是
-   * 天然实现。缺省 → 行为零变化（仍内部 loadIknowEnv）。向后兼容：既有
-   * overrideEnv / deps 注入路径均不受影响。
+   * settings-hot-reload: env source — optional constructor opt. Once
+   * provided, ensureDeps / reloadFromEnv read env through it (replacing the
+   * internal loadIknowEnv()). Absent → zero behavior change (still internal
+   * loadIknowEnv). Existing overrideEnv / deps injection paths unaffected.
    */
   readonly envProvider?: () => IknowEnv;
-  /** settings-hot-reload（T3）:env 变化回调 — 构造 opts 可选。hub 在
-   *  reloadFromEnv 成功替换 adapter 后调用一次（新 env 为参数）。首次
-   *  ensureDeps 不算「变化」→ 不触发。T4 用它驱动 TUI 显示层刷新。 */
+  /** settings-hot-reload: env-change callback — optional constructor opt.
+   *  The hub calls it once after reloadFromEnv successfully replaces the
+   *  adapter (new env as argument). The first ensureDeps is not a "change"
+   *  → not triggered. Drives TUI display-layer refresh. */
   readonly onEnvChange?: (env: IknowEnv) => void;
   /**
-   * Review High-1 (2026-08-29): root the constructor-injected `deps` were
-   * built at (TUI). Declared → ensureDeps falls through to per-root engine
-   * rebuild when a session's root left this root (worktree rebind). Absent →
-   * injected deps short-circuit exactly as today.
+   * Root the constructor-injected `deps` were built at (TUI). Declared →
+   * ensureDeps falls through to per-root engine rebuild when a session's
+   * root left this root (worktree rebind). Absent → injected deps
+   * short-circuit exactly as before.
    */
   readonly injectedEngineRoot?: string;
   /**
-   * Review High-2 (2026-08-29 / hard req 9): settings object assembled at the
-   * startup load point (serve.ts). Reused for EVERY engine this hub builds —
-   * rebind-rebuilt worktree-rooted engines included — so project settings
-   * never silently reload (they are absent inside the gitignored worktree).
-   * Absent → build-engine's own default load (behavior unchanged for
-   * tests / non-rebinding hosts).
+   * Settings object assembled at the startup load point (serve.ts). Reused
+   * for EVERY engine this hub builds — rebind-rebuilt worktree-rooted
+   * engines included — so project settings never silently reload (they are
+   * absent inside the gitignored worktree). Absent → build-engine's own
+   * default load (behavior unchanged for tests / non-rebinding hosts).
    */
   readonly settings?: IknowSettings;
   /**
-   * serve-workspace T2 测试缝：按根装配 engine，避免单测走真实 LLM。
-   * 生产省略 → `buildHarnessEngine` 且 cwd/workspaceRoot/sandboxRoot 三等。
-   *
-   * T11: 返回 bundle 在 `EngineBundle` 之上扩展 `mcpRoots?` / `mcpManager?` /
-   * `catalog?` —— hub 的 per-root MCP face 切换需要这三字段;其余字段由
-   * `EngineBundle` SSOT 锁定。
+   * serve-workspace test seam: assemble the engine per root so unit tests
+   * avoid a real LLM. Production omits it → `buildHarnessEngine` with
+   * cwd/workspaceRoot/sandboxRoot all equal. The returned bundle extends
+   * `EngineBundle` with `mcpRoots?` / `mcpManager?` / `catalog?` — the
+   * hub's per-root MCP face switch needs these three; remaining fields are
+   * locked by the `EngineBundle` SSOT.
    */
   readonly buildEngine?: (root: string) => Promise<
     EngineBundle & {
-      /** T6/T7：生产装配透出的双根；reload 事务只消费 active engine 的这份。 */
+      /** Dual roots surfaced by production assembly; the reload
+       *  transaction consumes only the active engine's copy. */
       mcpRoots?: McpRoots;
-      /** T7：per-engine MCP manager；激活时收口旧 face 再公开。 */
+      /** Per-engine MCP manager; on activation, close the old face
+       *  before publishing. */
       mcpManager?: McpManager;
-      /** T7：与 mcpManager 同源的 ACI catalog（listMcpTools 可见面）。 */
+      /** ACI catalog sharing the same source as mcpManager
+       *  (listMcpTools visible surface). */
       catalog?: AciCatalog;
       /**
-       * SC8（slash 侧当场热）：装配期 skill catalog + rescan 缝。生产
-       * `buildHarnessEngine` 的 `BuiltEngine` 两者都在场；测试缝可省略
-       * （缺席 → listSkills 退缓存 catalog / 空清单，旧行为逐字节不变）。
+       * Assembly-time skill catalog + rescan seam (hot-on-slash side).
+       * Production `buildHarnessEngine`'s `BuiltEngine` carries both; the
+       * test seam may omit them (absent → listSkills falls back to the
+       * cached catalog / empty list, old behavior byte-for-byte unchanged).
        */
       skillCatalog?: SkillCatalog;
       skillRescanner?: SkillRescanner;
       /**
-       * issue 1059 (G3)：`BuiltEngine.worktreeOnMutate` 活 holder 透出缝。
-       * 生产 `buildHarnessEngine` 在场；测试注入缝可省略（缺席 → verify
-       * 调用点不产出该 key，围栏走 V1 baseline，逐字节不变）。
+       * Surfacing seam for the `BuiltEngine.worktreeOnMutate` live holder.
+       * Present in production `buildHarnessEngine`; the test injection seam
+       * may omit it (absent → verify call sites emit no such key and the
+       * fence uses the V1 baseline, byte-for-byte unchanged).
        */
       worktreeOnMutate?: WorktreeGateReader;
     }
   >;
   /**
-   * serve-workspace T3: recents/trust 名单的 home 根（落
-   * `<recentsHome>/.iknow/workspaces.json`）。生产 serve.ts 传 `homedir()`；
-   * 缺席 → bindWorkspace 保持 T2 语义（无 trust gate、不落 recents）。
+   * Home root for the recents/trust roster (stored at
+   * `<recentsHome>/.iknow/workspaces.json`). Production serve.ts passes
+   * `homedir()`; absent → bindWorkspace keeps its original semantics (no
+   * trust gate, no recents persistence).
    */
   readonly recentsHome?: string;
   /**
-   * T3 / plans/worktree-exclusive-lock.md / ADR-0070 —
-   * `isolation.worktreeExclusive` 装配期解析结果。**只在启动加载点解析一次**
-   * （ADR-0037 §5 硬要求 9 / `resolveWorktreeExclusive` 单读点同款形状）：
-   * 该值在 hub 构造时透传给 `createTaskWorktreeProvisioner`，后者闭包冻结
-   * 贯穿本 engine 寿命，rebind 不重读。
+   * ADR-0037 / ADR-0070 — assembly-time resolution of
+   * `isolation.worktreeExclusive`. **Resolved exactly once at the startup
+   * load point** (single-read-point shape, as in
+   * `resolveWorktreeExclusive`): the value is passed to
+   * `createTaskWorktreeProvisioner` at hub construction, whose closure
+   * freezes it for this engine's lifetime — rebinds never re-read it.
    *
-   * OFF 档（缺席 / 非 `true`）→ provisioner 完全跳过占用检查，enter 行为
-   * 与今日逐字节一致（SC2）。生产 caller（serve.ts）从 `startupSettings`
-   * 一次解析后传入。
+   * OFF (absent / not `true`) → the provisioner skips occupancy checks
+   * entirely and `enter` keeps the zero-regression path. Production callers
+   * (serve.ts) resolve once from `startupSettings` and pass in.
    */
   readonly worktreeExclusive?: boolean;
   /**
-   * Layer 1 (specs/subagent-layers-worktree-deps.md items 2–3) — 建树后的
-   * project 依赖安装缝。hub 把它透传给 `createTaskWorktreeProvisioner`，
-   * 后者在 `provision`（建树后）与 `enter`（幂等 ensure）两条路径上调用，
-   * 结果以一行文字进 tool 回执。
+   * Post-tree-build project dependency installation seam. The hub passes it
+   * to `createTaskWorktreeProvisioner`, which calls it on both the
+   * `provision` (after tree build) and `enter` (idempotent ensure) paths;
+   * the result enters the tool receipt as one text line.
    *
-   * 生产省略 → provisioner 内建默认（lockfile 驱动、fail-open、async）；
-   * 测试注入脚本化实现，保证没有用例真的 shell out 到安装器。
+   * Omitted in production → provisioner's built-in default (lockfile-driven,
+   * fail-open, async); tests inject scripted implementations so no case
+   * really shells out to an installer.
    */
   readonly projectDepProvisioner?: ProjectDepProvisioner;
   /**
-   * ADR-0113 session-list-title T4: lite 标题生成器（可选）。host 在
-   * `env.llm.liteModel` 在场时注入（`buildLiteTitleGenerator`）；hub 在
-   * 实质 user 文本后的第一次 `StopReason=completed` fire-and-forget 调用，
-   * 结果 sanitize 后经 serialize 队列 `appendTitle` 落盘。缺席 → 永不
-   * 触发，hub 行为与今日逐字节一致（lite 缺席 = 增强缺席，不 fail-fast）。
+   * ADR-0113: lite title generator (optional). The host injects it
+   * (`buildLiteTitleGenerator`) when `env.llm.liteModel` is present; the
+   * hub fires it fire-and-forget on the first `StopReason=completed` after
+   * substantial user text; the sanitized result is persisted through the
+   * serialize queue's `appendTitle`. Absent → never triggered, hub behavior
+   * byte-for-byte unchanged (lite absent = enhancement absent, no
+   * fail-fast).
    */
   readonly titleGenerator?: TitleGenerator;
 };
 
 /**
- * Per-root BuiltEngine cache entry (Map value + activateMcpFace 输入).
- * T11: 在 `EngineBundle` SSOT 之上扩展 `mcpRoots?` / `mcpManager?` / `catalog?`。
+ * Per-root BuiltEngine cache entry (Map value + activateMcpFace input).
+ * Extends the `EngineBundle` SSOT with `mcpRoots?` / `mcpManager?` / `catalog?`.
  */
 type HubEngineEntry = EngineBundle & {
   mcpRoots?: McpRoots;
   mcpManager?: McpManager;
   catalog?: AciCatalog;
-  /** SC8（slash 侧当场热）：装配期 skill catalog + rescan 缝（见 buildEngine）。 */
+  /** Assembly-time skill catalog + rescan seam (see buildEngine). */
   skillCatalog?: SkillCatalog;
   skillRescanner?: SkillRescanner;
-  /** issue 1059 (G3)：worktree-on-mutate 活 holder（见 buildEngine 缝）。 */
+  /** worktree-on-mutate live holder (see the buildEngine seam). */
   worktreeOnMutate?: WorktreeGateReader;
 };
 
 // -- stop-reason persistence decision (decideCheckpointPersist) --------------
 //
 // The previous design used a static DROP_REASONS set to skip certain stop
-// reasons (cancelled / protocolError / emptyFinalResponse); T1 replaced that
-// with a boolean `shouldPersistCheckpoint`, and T4 (transport-continue-persist
-// spec invariant 8 / SC4) raised it to the tri-state
+// reasons (cancelled / protocolError / emptyFinalResponse); that became a
+// boolean `shouldPersistCheckpoint`, later raised to the tri-state
 // `decideCheckpointPersist(result, priorMessages)` in ./store/checkpoint.ts:
 //   - `cancelled` WITH delta>0 persists the full result (the user query
 //     landed; record a checkpoint so the interrupted turn is recoverable /
@@ -876,10 +909,11 @@ type HubEngineEntry = EngineBundle & {
 // -- SessionHub ----------------------------------------------------------------
 
 /**
- * 可加载技能面（含无 description、含 disable）—— 算法 SSOT 收敛在 harness
- * `loadableOf`（plan T3「harness 可复用的 slash 投影」）；本包装只补 hub 的
- * `catalog === undefined` 态（测试注入 deps 路径）。**不再**用
- * `available()`（模型索引的 deprecated 别名）。
+ * Loadable-skills surface (entries without description included, disabled
+ * ones too) — the algorithm's SSOT converges in harness `loadableOf`; this
+ * wrapper only covers the hub's `catalog === undefined` state (tests
+ * injecting deps). **No longer** uses `available()` (a deprecated alias of
+ * the model index).
  */
 function loadableOf(
   catalog: SkillCatalog | undefined
@@ -889,10 +923,11 @@ function loadableOf(
 }
 
 /**
- * 可加载面条目 → `SkillSummaryDto`（SC5/SC8/SC9 同一投影）：无描述条目保留
- * undefined（不补 ""）—— DTO 允许缺席，宿主据此渲染「无描述」而非空描述。
- * `listSkills` 的两条出口（现行 rescan 面 / 缓存面）共用，避免两条路径各写
- * 一遍投影后漂移。
+ * Loadable entries → `SkillSummaryDto`: entries without a description keep
+ * it undefined (never coerced to "") — the DTO allows absence so hosts
+ * render "no description" rather than an empty one. Shared by the two
+ * `listSkills` exits (current rescan surface / cached surface) so the two
+ * projection paths cannot drift.
  */
 function toSkillSummaries(
   entries: ReadonlyArray<SkillEntry>
@@ -906,11 +941,14 @@ function toSkillSummaries(
 }
 
 /**
- * SC8（slash 侧）：装配结果的 skill 面（catalog + rescan 缝）→
- * `HubEngineEntry` 的可选字段投影；缺席不落键（测试注入的 buildEngine 缝
- * 通常只回 deps，旧行为逐字节不变）。两条装配路径（per-root / 兜底 lazy）
- * 同源发布 —— 此前 per-root 路径整体丢掉 skill 面，serve 绑根后
- * `listSkills` 恒空且无 rescan 缝，SC8 在人侧不可达。
+ * Projection of the assembly result's skill face (catalog + rescan seam)
+ * onto `HubEngineEntry`'s optional fields; absent values emit no key (a
+ * test-injected buildEngine usually returns only deps → old behavior
+ * byte-for-byte unchanged). Both assembly paths (per-root and fallback
+ * lazy) publish from the same source — previously the per-root path
+ * dropped the skill face wholesale, so after serve bound a root,
+ * `listSkills` was always empty with no rescan seam and stayed
+ * user-invisible.
  */
 function skillFaceOf(built: {
   readonly skillCatalog?: SkillCatalog;
@@ -924,9 +962,9 @@ function skillFaceOf(built: {
 
 export class SessionHub {
   private readonly store: SessionStore;
-  /** ADR-0037 T3:task worktree 建树 + 仅本会话根改绑的 host 缝。 */
+  /** ADR-0037: task-worktree build + this-session-only root rebind host seam. */
   private readonly worktreeProvisioner: TaskWorktreeProvisioner;
-  /** T3: roots returned by provision but not yet persisted with the turn. */
+  /** Roots returned by provision but not yet persisted with the turn. */
   private readonly dirtyWorktreeRoots = new Map<string, string>();
   private cachedDeps: LoopEngineDeps | undefined;
   private readonly defaults: {
@@ -936,176 +974,193 @@ export class SessionHub {
   private readonly traceOut: string | undefined;
   /** All JSONL services created by this hub, including the shared subagent trace. */
   private readonly traceServices = new Set<TraceServiceWithHealth>();
-  /** askUser inlet (#162); required unless deps are pre-built. */
+  /** askUser inlet; required unless deps are pre-built. */
   private readonly askUser: AskUser | undefined;
   /** Full serve AskUser handle (when provided, SPA can list + resolve asks). */
   private readonly askHandle: ServeAskUserHandle | undefined;
   /** Session allow-list source ("always-allow" from web UI lands here). */
   private readonly sessionGrants: SessionGrants | undefined;
   private readonly permissionMode: PermissionModeContext | undefined;
-  /** T2: env source for the per-turn thinking override (test seam). */
+  /** Env source for the per-turn thinking override (test seam). */
   private readonly overrideEnv: { readonly llm: LlmEnv } | undefined;
-  /** Sandbox root for fs-tool access (code-review 2026-08-05). Undefined
+  /** Sandbox root for fs-tool access. Undefined
    *  → `buildHarnessEngine` defaults to `process.cwd()`. Production callers
    *  in serve mode should pass an explicit root (CLI flag wiring tracked). */
   private readonly sandboxRoot: string | undefined;
-  /** #196 IKNOW T5: 入口 surface；默认 "chat"（tests 兼容）。serve 路径
-   *  由 serve.ts 显式传 "serve"。 */
+  /** Entry surface; default "chat" (test compat). The serve path
+   *  explicitly passes "serve" from serve.ts. */
   private readonly surface: "chat" | "tui" | "ask" | "serve" | undefined;
-  /** #356 T7: subagent manager（host drain 消费面；懒取见 ensureDeps）。 */
+  /** Subagent manager (host drain consumption surface; lazy acquisition see ensureDeps). */
   private subagentManager: SubAgentManager | undefined;
-  /** T1: all per-root managers remain in the host read aggregation surface. */
+  /** All per-root managers remain in the host read aggregation surface. */
   private readonly subagentManagers: SubagentManagerRegistry;
-  /** T4: serve-only terminal wake subscription; TUI owns its UI-aware wake. */
+  /** Serve-only terminal wake subscription; TUI owns its UI-aware wake. */
   private subagentWake: SubagentWake | undefined;
   /** Coarse serve target: the most recently addressed conversation. */
   private lastConversationId: string | undefined;
-  /** review-fix (M1 / H1): per-root state anchor 缓存；serve 入口解析后透传。 */
+  /** Per-root state anchor cache; resolved by the serve entrypoint and passed through. */
   private readonly workspaceRoot: string | undefined;
   /**
-   * T6:稳定 productRoot（启动 bind root）。跨 per-root 重建不变；
-   * `buildProductionEngine` / reload 只消费它派生的 mcpConfigRoot。
+   * Stable productRoot (startup bind root). Unchanged across per-root
+   * rebuilds; `buildProductionEngine` / reload consume only the
+   * mcpConfigRoot derived from it.
    */
   private readonly productRoot: string | undefined;
   private readonly projectIdentityRoot: string | undefined;
-  /** #128 T8: 验证闭环配置（settings.verify 段；缺席 = 透明关闭）。 */
+  /** Verify-loop config (settings.verify section; absent = transparently disabled). */
   private readonly verifyConfig: VerifyConfig | undefined;
-  /** #356 High#4: built.shutdown 缓存（组合句柄；ensureDeps 懒取，hub.shutdown 触发）。 */
+  /** built.shutdown cache (composite handle; lazily taken in ensureDeps, triggered by hub.shutdown). */
   private cachedShutdown: (() => Promise<void>) | undefined;
-  /** TUI TuiExtensions 同源：lazy ensureDeps 后才有；deps 注入测试路径保持缺席。 */
+  /** Same source as TUI TuiExtensions: only present after lazy ensureDeps; stays absent on the deps-injection test path. */
   private skillCatalog: SkillCatalog | undefined;
   /**
-   * SC8（slash 侧「当场热」）：装配期 rescan 缝 —— 与引擎
-   * `deps.skillIndexDelta` **同一个**持有者（build-engine 透出的
-   * `BuiltEngine.skillRescanner`）。`listSkills` 用它重扫现行技能根，
-   * 会话中途落盘的 SKILL.md 不必等下一 turn 就进可加载面。
+   * Assembly-time rescan seam (hot-on-slash side) — the **same** holder as
+   * the engine's `deps.skillIndexDelta` (surfaced by build-engine as
+   * `BuiltEngine.skillRescanner`). `listSkills` uses it to re-scan the
+   * current skill roots, so a SKILL.md saved mid-session enters the
+   * loadable surface without waiting for the next turn.
    *
-   * 两处一起写（与 `skillCatalog` 同源）：per-root 引擎路径
-   * （`getOrBuildEngine`）与兜底 lazy 路径（`ensureDeps`）；ask / 测试注入
-   * deps 路径缺席 → `listSkills` 退缓存 catalog（旧行为逐字节不变）。
+   * Written in two places (same source as `skillCatalog`): the per-root
+   * engine path (`getOrBuildEngine`) and the fallback lazy path
+   * (`ensureDeps`); absent on ask / test-injected-deps paths → `listSkills`
+   * falls back to the cached catalog (old behavior byte-for-byte unchanged).
    */
   private skillRescanner: SkillRescanner | undefined;
   /**
-   * issue 1059 (G3)：worktree-on-mutate 活 holder —— 引擎装配面
-   * （`BuiltEngine.worktreeOnMutate`）透出的单例，bash 工具门禁与本 hub 的
-   * verify 围栏读同一个它，两执行面在 UNBOUND_FENCE 轴上判定同源。
-   * 懒取形态与 `skillRescanner` 同款（per-root `getOrBuildEngine` 与兜底
-   * lazy `ensureDeps` 两处一起写）；注入 deps 宿主（TUI）未走 hub 装配 →
-   * 缺席 → verify 调用点不产出该 key（V1 baseline，逐字节不变）。
+   * worktree-on-mutate live holder — the singleton surfaced by the engine
+   * assembly face (`BuiltEngine.worktreeOnMutate`); the bash tool gate and
+   * this hub's verify fence read the same instance, so both execution
+   * surfaces decide identically on the UNBOUND_FENCE axis.
+   * Lazy shape mirrors `skillRescanner` (written in both per-root
+   * `getOrBuildEngine` and fallback lazy `ensureDeps`); hosts injecting
+   * deps (TUI) skip hub assembly → absent → verify call sites emit no such
+   * key (V1 baseline, byte-for-byte unchanged).
    */
   private worktreeOnMutate: WorktreeGateReader | undefined;
   private mcpManager: McpManager | undefined;
   private aciCatalog: AciCatalog | undefined;
   private mcpHome: string | undefined;
   /**
-   * T7：当前对外可见的 active engine 双根（per-engine，非含糊单 cwd）。
-   * reload 只读这份；切 engine 时由 activateMcpFace 更新。
+   * Dual roots of the currently externally-visible active engine
+   * (per-engine, not an ambiguous single cwd). reload reads only this;
+   * activateMcpFace updates it on engine switch.
    */
   private activeMcpRoots: McpRoots | undefined;
   /**
-   * T7：MCP reload 串行链。并发 reloadMcp coalesce 到同一队列，
-   * 每个 promise 都有明确成功/失败终点（不悬挂）。
+   * MCP reload serialization chain. Concurrent reloadMcp calls coalesce
+   * into one queue; every promise has a definite success/failure endpoint
+   * (no dangling).
    */
   private mcpReloadChain: Promise<unknown> = Promise.resolve();
   /**
-   * settings-hot-reload（T3）:env 源（缺省 → ensureDeps 内部 loadIknowEnv）。
-   * reloadFromEnv 用它拿新 env 重建 adapter；onEnvChange 在成功替换后触发。
+   * settings-hot-reload: env source (default → ensureDeps' internal
+   * loadIknowEnv). reloadFromEnv reads the new env through it to rebuild
+   * the adapter; onEnvChange fires after a successful replacement.
    */
   private readonly envProvider: (() => IknowEnv) | undefined;
-  /** settings-hot-reload（T3）:env 变化回调（reloadFromEnv 成功后触发一次）。 */
+  /** settings-hot-reload: env-change callback (fires once after reloadFromEnv succeeds). */
   private readonly onEnvChange: ((env: IknowEnv) => void) | undefined;
   /**
-   * settings-hot-reload（reviewer major）:上次 reloadFromEnv 重建 adapter 时用的
-   * env 快照（关键字段值比较去重基准）。EnvLoader.get() 每次返回新对象，对象身份
-   * 比较不可用，必须以它做「touch 未变内容」判定。首次成功重建后赋值。
+   * settings-hot-reload: env snapshot used at the last successful adapter
+   * rebuild in reloadFromEnv (baseline for key-field value comparison
+   * dedup). EnvLoader.get() returns a new object each time, so identity
+   * comparison is useless and this snapshot decides "touched but unchanged".
+   * Assigned after the first successful rebuild.
    */
   private lastReloadedEnv: IknowEnv | undefined;
   /** Constructor-injected deps (tests). Distinct from lazy/Map cache. */
   private readonly injectedDeps: LoopEngineDeps | undefined;
   /**
-   * Review High-1 (2026-08-29): the root the injected deps were built at.
-   * Injected-deps hosts that support isolation (TUI) declare it so ensureDeps
-   * can detect a session root that LEFT the injected engine's root (rebind)
-   * and fall through to per-root engine rebuild — without it, a rebound
-   * session would stay on the stale engine and its mutates would be blocked
-   * forever. Absent (tests / ask) → injected branch behaves exactly as today.
+   * The root the injected deps were built at. Injected-deps hosts that
+   * support isolation (TUI) declare it so ensureDeps can detect a session
+   * root that LEFT the injected engine's root (rebind) and fall through to
+   * per-root engine rebuild — without it, a rebound session would stay on
+   * the stale engine and its mutates would be blocked forever. Absent
+   * (tests / ask) → injected branch behaves exactly as before.
    */
   private readonly injectedEngineRoot: string | undefined;
   /**
-   * Review High-2 (2026-08-29 / hard req 9): the settings object assembled at
-   * the startup load point. Every engine this hub builds (main-root production
-   * path, fallback path, rebind-rebuilt worktree-rooted engines) reuses THIS
-   * object via buildHarnessEngine's `settings` opt — `.iknow/` is gitignored
-   * so a worktree-rooted `loadIknowSettings({cwd})` would silently drop
-   * project settings. Absent → build-engine keeps its own default load
-   * (tests / hosts that never rebind are unchanged).
+   * The settings object assembled at the startup load point (hard
+   * requirement: single read point). Every engine this hub builds
+   * (main-root production path, fallback path, rebind-rebuilt
+   * worktree-rooted engines) reuses THIS object via buildHarnessEngine's
+   * `settings` opt — `.iknow/` is gitignored so a worktree-rooted
+   * `loadIknowSettings({cwd})` would silently drop project settings.
+   * Absent → build-engine keeps its own default load (tests / hosts that
+   * never rebind are unchanged).
    */
   private readonly startupSettings: IknowSettings | undefined;
-  /** serve-workspace T2: test seam; production omits → buildHarnessEngine.
-   * T11: 返回 bundle 形状由 `EngineBundle` SSOT 锁定,在其上扩展
-   * `mcpRoots?` / `mcpManager?` / `catalog?`(hub per-root MCP face 切换)。 */
+  /** serve-workspace test seam; production omits → buildHarnessEngine.
+   * The returned bundle shape is locked by the `EngineBundle` SSOT,
+   * extended with `mcpRoots?` / `mcpManager?` / `catalog?` (hub per-root
+   * MCP face switch). */
   private readonly buildEngine:
     | ((root: string) => Promise<
         EngineBundle & {
           mcpRoots?: McpRoots;
           mcpManager?: McpManager;
           catalog?: AciCatalog;
-          /** SC8：装配期 skill 面（catalog + rescan 缝）透出。 */
+          /** Assembly-time skill face (catalog + rescan seam) surfaced. */
           skillCatalog?: SkillCatalog;
           skillRescanner?: SkillRescanner;
-          /** issue 1059 (G3)：worktree-on-mutate 活 holder（见 buildEngine 缝）。 */
+          /** worktree-on-mutate live holder (see the buildEngine seam). */
           worktreeOnMutate?: WorktreeGateReader;
         }
       >)
     | undefined;
-  /** serve picker bind (T2); session file workspaceRoot is the engine Map key. */
+  /** serve picker bind; session file workspaceRoot is the engine Map key. */
   private boundRoot: string | undefined;
   /**
-   * T7：最近一次 activate 的 engine root。listMcp / reload 走 ensureDeps 时
-   * 优先用它，避免 bindRoot（主 checkout）把已激活的 worktree face 抢回去。
+   * Most recently activated engine root. listMcp / reload prefer it when
+   * going through ensureDeps, so bindRoot (main checkout) does not snatch
+   * back an already-activated worktree face.
    */
   private activeEngineRoot: string | undefined;
-  /** D-α T3 / ADR-0030: graph 编排 overlay holder（serve / TUI 注入；缺席 =
-   *  本入口未接 overlay → run_graph 与编排段都不存在）。 */
+  /** ADR-0030: graph-orchestration overlay holder (injected by serve / TUI;
+   *  absent = this entrypoint has no overlay → neither run_graph nor the
+   *  orchestration segment exist). */
   private readonly graphMode: GraphModeContext | undefined;
-  /** ADR-0092 / SC13: fs isolation 档 holder（serve / TUI 注入；缺席 = 本
-   *  入口未接 fs 档 → 引擎按全局档缺省）。 */
+  /** ADR-0092: fs isolation mode holder (injected by serve / TUI; absent =
+   *  this entrypoint has no fs mode → engine follows the global default). */
   private readonly fsMode: FsModeContext | undefined;
-  /** D-α T5: 注入 deps 的 host（TUI）自带的装配快照句柄（构造 opts 传入）。 */
+  /** Assembly snapshot handle carried by deps-injecting hosts (TUI),
+   *  passed via constructor opts. */
   private readonly injectedGraphAssembly: GraphAssembly | undefined;
-  /** D-α T3: 最近一次 ensureDeps 返回的那台 engine 的装配快照。postMessage
-   *  紧接 ensureDeps 调 beginRound() —— 两者在同一串行槽位里，per-root
-   *  多引擎时也不会拍错那一台。缺席 = 该 engine 未接 overlay。 */
+  /** Assembly snapshot of the engine returned by the most recent ensureDeps.
+   *  postMessage calls beginRound() right after ensureDeps — both in the same
+   *  serialized slot, so per-root multi-engine setups never snapshot the
+   *  wrong one. Absent = that engine has no overlay wired. */
   private activeGraphAssembly: GraphAssembly | undefined;
   /**
-   * live-graph-phase1 T1 / ADR-0047 / ADR-0051:活图账本 host —— 多会话
-   * 共享同一 host，按 `ctx.conversationId` 解析。`resetSession` 销毁单会
-   * 话账本；`shutdown` 销毁全部。缺席 → `run_graph` handler 不建账
-   * （与 graphAssembly 缺席同形态）。
+   * ADR-0047: live-graph ledger host — shared across conversations,
+   * resolved by `ctx.conversationId`. `resetSession` destroys a single
+   * session's ledger; `shutdown` destroys all. Absent → the `run_graph`
+   * handler keeps no ledger (same shape as the graphAssembly absence).
    */
   private readonly liveGraphLedger: LiveGraphLedgerHost | undefined;
-  /** serve-workspace T3: recents/trust roster home (absent → T2 behavior). */
+  /** serve-workspace: recents/trust roster home (absent → roster-less behavior). */
   private readonly recentsHome: string | undefined;
   /** Per-root BuiltEngine cache (same root shared across sessions). */
   private readonly engineByRoot = new Map<string, HubEngineEntry>();
-  /** Per-conversation serialization (spec A15). */
+  /** Per-conversation serialization. */
   private readonly inflight = new Map<string, Promise<void>>();
   /** Actual active work count; `inflight` retains resolved chain sentinels. */
   private readonly activeTurnCounts = new Map<string, number>();
   /**
-   * auto-memory T1: session-level prefetch dedup — per-conversation sets of
+   * auto-memory: session-level prefetch dedup — per-conversation sets of
    * already-injected memory ids. Host-side state only (never loop-engine).
    * Lazily recovered from the loaded history on first attach (empty set is
    * cached too), then grown by the ids each turn actually injects.
    */
   private readonly prefetchInjectedIds = new Map<string, Set<string>>();
-  /** auto-memory T4: host 钩子（默认缺席 = 自动记忆关）。 */
+  /** auto-memory: host hook (default absent = auto-memory off). */
   private autoMemory: AutoMemoryHook | undefined;
-  /** ADR-0113 T4: lite 标题生成器（缺席 = 本入口未接 lite，永不触发）。 */
+  /** ADR-0113: lite title generator (absent = this entrypoint has no lite wired; never triggered). */
   private readonly titleGenerator: TitleGenerator | undefined;
   /**
-   * ADR-0113 T4: 本进程内已触发过标题生成的会话集合 —— 第一次 completed
-   * 只烧一次 lite；跨进程形态由 store.hasTitleEvent 磁盘闸兜住。
+   * ADR-0113: conversations that already triggered title generation in this
+   * process — the first completed turn burns lite only once; the
+   * cross-process shape is covered by the store.hasTitleEvent disk gate.
    */
   private readonly titleFiredConversations = new Set<string>();
   /** auto-memory low-trust read: per-turn user overlay (same gate as autoMemory). */
@@ -1144,9 +1199,9 @@ export class SessionHub {
     this.autoMemory = opts.autoMemory;
     this.overlayMemoryPrefetch = opts.overlayMemoryPrefetch;
     this.titleGenerator = opts.titleGenerator;
-    // review-fix (M1 / H1): per-root state anchor 缓存。
+    // Per-root state anchor cache.
     this.workspaceRoot = opts.workspaceRoot;
-    // T6:稳定 productRoot（缺席 → workspaceRoot，保持单根形态可编译可跑）。
+    // Stable productRoot (absent → workspaceRoot, keeping the single-root shape compilable and runnable).
     this.productRoot = opts.productRoot ?? opts.workspaceRoot;
     this.projectIdentityRoot = opts.projectIdentityRoot;
     // An entry-resolved root is already a valid bind for hosts that assemble
@@ -1160,22 +1215,25 @@ export class SessionHub {
     this.defaults = {
       jsonMode: opts.defaultJsonMode ?? false,
     };
-    // ADR-0037 T3:worktree isolation host 缝 —— 建树 + 仅本会话根改绑。
-    // 开关本体由 build-engine 在启动加载点读取（硬要求 9）；hub 只在
-    // buildProductionEngine / ensureDeps 兜底路径注入 provision 缝。T4:
-    // 会话已在本会话 task worktree 的 passthrough / 外来根 fail-closed
-    // 都由 provision 按会话锚定，hub 不传 conversation-agnostic 标记。
+    // ADR-0037: worktree isolation host seam — tree build + this-session-only
+    // root rebind. The switch itself is read by build-engine at the startup
+    // load point; the hub only injects the provision seam on the
+    // buildProductionEngine / ensureDeps fallback paths. A session already on
+    // its own task worktree passes through; a foreign root fails closed — all
+    // anchored per-session by provision, so the hub passes no
+    // conversation-agnostic flag.
     // Root persistence belongs to this Hub's dirty-root conditional-save
     // protocol. The provisioner only creates/returns the task worktree here.
     //
-    // T3 / plans/worktree-exclusive-lock.md / ADR-0070：把装配期冻结的
-    // `worktreeExclusive` 值透传到 provisioner 闭包——后者 `enter()` 据此
-    // 走 ON 档占用检查（typed worktree_claimed）或 OFF 档零回归路径（SC2）。
-    // 透传是单点：buildHarnessEngine 在 build-engine.ts:586 resolve 后透到
-    // BuiltEngine.worktreeExclusive（build-engine.ts:409），本 hub opts 取
-    // 这个 boolean 后直接喂给 provisioner。listSessions 由 hub 的 store
-    // 直接绑——store 是 SessionStore 实例，自带 list() 方法（spec 输入五类
-    // 表入口）。**不**新增任何写盘路径（SC7 审查项：list 是只读）。
+    // ADR-0070: pass the assembly-time-frozen `worktreeExclusive` value into
+    // the provisioner closure — its `enter()` uses it to take either the ON
+    // occupancy check (typed worktree_claimed) or the OFF zero-regression
+    // path. The pass-through is single-point: buildHarnessEngine resolves the
+    // value in build-engine and surfaces it on BuiltEngine.worktreeExclusive;
+    // this hub's opts takes that boolean and feeds it straight to the
+    // provisioner. listSessions binds directly to the hub's store
+    // (SessionStore already exposes list()). Adds **no** new disk-write path
+    // — listing stays read-only.
     this.worktreeProvisioner = createTaskWorktreeProvisioner({
       ...(this.projectIdentityRoot !== undefined
         ? { projectIdentityRoot: this.projectIdentityRoot }
@@ -1199,7 +1257,7 @@ export class SessionHub {
    * successful changed result is recorded for this conversation and is
    * persisted only by the next conditional save.
    *
-   * T7 adoption anchor: the conversation's PERSISTED workspaceRoot is loaded
+   * Adoption anchor: the conversation's PERSISTED workspaceRoot is loaded
    * here and handed to the provisioner — a session durably anchored at the
    * engine's (task-worktree-shaped) root has explicitly entered it, so
    * provision adopts it even on another conversation's tree. An unknown
@@ -1225,7 +1283,7 @@ export class SessionHub {
     return provisionedRoot;
   }
 
-  /** Best-effort persisted workspaceRoot read for the T7 adoption anchor. */
+  /** Best-effort persisted workspaceRoot read for the adoption anchor. */
   private async loadSessionWorkspaceRoot(
     conversationId: string | undefined
   ): Promise<string | undefined> {
@@ -1241,7 +1299,7 @@ export class SessionHub {
   }
 
   /**
-   * T7 Hub-visible enter seam (serve/chat harness hosts; TUI wires
+   * Hub-visible enter seam (serve/chat harness hosts; TUI wires
    * provision-only): move this conversation onto an EXISTING task worktree
    * of this repository (owner = targetConversationId). The provisioner
    * validates the tree (exists /
@@ -1267,7 +1325,7 @@ export class SessionHub {
   }
 
   /**
-   * T8 Hub-visible exit seam (serve/chat harness hosts; TUI wires
+   * Hub-visible exit seam (serve/chat harness hosts; TUI wires
    * provision-only): move this conversation back to its main repo root from
    * the task worktree it is currently on. The provisioner derives the main
    * root from the tree
@@ -1337,10 +1395,10 @@ export class SessionHub {
   }
 
   /**
-   * #358 T7: Session API GET /sessions/:id/subagents 数据源。先经 store.load
-   * 做会话存在性门 —— 未知会话 → 抛 typed not_found(由 http 层 sendError
-   * 收编成 404, 不在 hub 裸抛);manager 缺席(ask 形态) → 200 空列表。
-   * 只读投影, 无写路径。
+   * Data source for Session API GET /sessions/:id/subagents. store.load
+   * gates on session existence — unknown session → typed not_found (the
+   * http layer maps it to 404; never thrown raw here). Missing manager
+   * (ask shape) → empty list. Read-only projection, no write path.
    */
   async listSubagentsForSession(
     conversationId: string
@@ -1363,7 +1421,7 @@ export class SessionHub {
   }
 
   /**
-   * Slice D / SC14: host-initiated hard kill of one worker (TUI Ctrl+X on a
+   * Host-initiated hard kill of one worker (TUI Ctrl+X on a
    * chrome-focused subagent row). Settles that task's in-flight `waitFor`
    * with `SubAgentAbortError` first (the parent turn reads `cancelled`), then
    * signals the worker. Returns true only when the task was still live;
@@ -1379,34 +1437,31 @@ export class SessionHub {
   }
 
   /**
-   * plans/session-fg-handoff-interrupt Locked sentence 3 / T5: Ctrl+C 的
-   * 本会话前台扇出 —— 父 turn 由 app 层的 aborter 停,本方法停「本会话所有
-   * 前景子代理」。判据 = `SubagentInfo.foreground === true`(即父侧 in-band
-   * 等待 / judge / graph-node 同一 population;见 manager.ts 的 Postel 注释)
-   * ∧ live(starting|running)。
+   * Ctrl+C fan-out for this session's foreground subagents. The parent turn
+   * is stopped by the app-layer aborter; this method stops every
+   * foreground child of this session. Criterion: `SubagentInfo.foreground ===
+   * true` (same population as parent-side in-band wait / judge / graph-node)
+   * and live (starting|running).
    *
-   * 为什么读 manager 的**新鲜**投影而不是 TUI 的 React 态:app 的 subagents
-   * 来自 1Hz 轮询,最多陈旧 1s —— 刚 spawn 的子代理会被漏杀。这里在按下
-   * Ctrl+C 的一刻现拉,枚举与 abort 同一趟,消除那个窗口。
+   * Why the manager's fresh projection instead of TUI React state: the app's
+   * subagent list comes from 1 Hz polling and can be up to 1 s stale, so a
+   * just-spawned child would be missed. Here we re-list at keypress time and
+   * enumerate + abort in one pass, closing that window.
    *
-   * 作用域:按 conversationId 过滤,故 `wait:false` 后景(foreground 缺席)与
-   * 其它会话的 `running-bg` 天然不在集合内(调用方传本会话 id)。
+   * Scope: filtered by conversationId, so `wait:false` background children
+   * and other sessions' running-bg tasks are naturally excluded.
    *
-   * 返回真正被 abort 的 taskId(abortTask 返回 false 的竞态终态不列入),
-   * 便于调用方/log 归因;无 manager(ask 形态)→ 空数组,不抛错。
+   * Returns the taskIds actually aborted (races where abortTask returns false
+   * are excluded) for attribution; no manager (ask shape) → empty array,
+   * never throws.
    *
-   * **已知缺口(后续切片,不在此修)**:上面那句「judge / graph-node 同一
-   * population」指的是 `foreground === true` 这个**判据**,不是本方法**可达**
-   * 的集合 —— 本方法按 `listSubagents(conversationId)` 取账,只看得见会话
-   * 可归属的任务。而 `judge`(`verify/run-classifier-adapter.ts`)与
-   * graph-node(`graph/node-executor.ts`)的 def 都置了
-   * `excludeFromHostDrain: true`,却**从未设 `conversationId`** → 它们是前景
-   * population 的成员,却不在任何会话账上,会话作用域的这次扫描扫不到,
-   * Ctrl+C 停不掉这两个正在跑的 judge / graph-node。
-   * 归属信息今天不存在(不是本方法漏读),故这里不做 carve-out、不改行为 ——
-   * 修法是让这两个 def 带上 conversationId(或另开一条会话无关的前台停法),
-   * 属独立切片,不在 plans/session-fg-handoff-interrupt.md Locked sentence 3
-   * 的验收面内。
+   * Known gap (separate slice, not fixed here): judge
+   * (`verify/run-classifier-adapter.ts`) and graph-node
+   * (`graph/node-executor.ts`) set `excludeFromHostDrain: true` but never set
+   * `conversationId`, so they belong to the foreground population yet appear
+   * on no session ledger and this scan cannot stop them. The ownership data
+   * does not exist today; the fix is to give those defs a conversationId (or
+   * add a session-independent foreground stop), out of scope here.
    */
   abortSessionForegroundWork(conversationId: string): ReadonlyArray<string> {
     const aborted: string[] = [];
@@ -1421,16 +1476,16 @@ export class SessionHub {
   }
 
   /**
-   * #356 High#4 (SC12/SC3):serve 长程入口的清理句柄 —— 转发 ensureDeps 缓存
-   * 的 built.shutdown（组合句柄 mcpManager first → subagentManager second）。
-   * cli.ts runServe 用 registerShutdown(hub) 把本方法挂到 SIGINT/SIGTERM,
-   * 进程退出前关闭 MCP 后台连接 + SIGTERM subagent stdio 子进程(SC11/SC16)。
-   * ask/deps-injected 形态无 built → 缓存缺席 → no-op(行为零变化)。
+   * Cleanup handle for the serve entrypoint — forwards the built.shutdown
+   * cached by ensureDeps (composite handle: mcpManager first, then
+   * subagentManager). cli.ts runServe registers it on SIGINT/SIGTERM so the
+   * process closes MCP background connections and SIGTERMs subagent stdio
+   * children before exit. ask/deps-injected shapes have no built → no-op.
    */
   async shutdown(): Promise<void> {
     this.subagentWake?.dispose();
-    // live-graph-phase1 T1 / ADR-0051:会话结束（hub 释放）销毁全部活图账本
-    // —— 无账本泄漏到后续新会话（SC3 后半句）。
+    // Session end (hub release) destroys all live-graph ledgers so none
+    // leak into later sessions.
     this.liveGraphLedger?.destroyAll();
     await this.cachedShutdown?.();
     for (const entry of this.engineByRoot.values()) {
@@ -1448,42 +1503,45 @@ export class SessionHub {
   }
 
   /**
-   * SC10 / spec tui-model-command：per-turn thinking override 重建 adapter 时
-   * 用的 env —— **最新值优先**。
+   * Env used when rebuilding the adapter for a per-turn thinking override —
+   * latest value wins.
    *
-   * `overrideEnv` 是 bridge 构造期的启动快照（run.tsx 透传），一次赋值后再不
-   * 刷新；`/model` 切换只经 `envProvider`（EnvLoader.get）反映。override 分支
-   * 用快照会让带 thinking 的轮次悄悄退回切换前的 baseUrl/apiKey/model
-   * （headers 同理），与「新 turn 走新 provider/model」的验收相悖。
-   * envProvider 缺席（只传 overrideEnv 的测试缝）→ 保持快照语义。
+   * `overrideEnv` is a startup snapshot captured at bridge construction and
+   * never refreshed; `/model` switching only shows up via `envProvider`
+   * (EnvLoader.get). Using the snapshot in the override branch would silently
+   * revert baseUrl/apiKey/model (and headers) on thinking turns. When
+   * envProvider is absent (test seams passing only overrideEnv), keep the
+   * snapshot semantics.
    *
-   * 只在 override 分支被调用：无 thinking 的轮次不因本方法多读一次 env。
+   * Called only from the override branch: turns without thinking never read
+   * env an extra time because of this method.
    */
   private overrideEnvForTurn(): { readonly llm: LlmEnv } | undefined {
     return this.envProvider ? this.envProvider() : this.overrideEnv;
   }
 
   /**
-   * settings-hot-reload（T3）:env 源热重建 —— 用最新 env（envProvider()）走
-   * createAdapterFromEnv 重建 adapter 替换 `cachedDeps.adapter`。**不重跑**
-   * buildHarnessEngine 整条装配链（MCP / subagent / skill 都跳过，见
-   * plans/settings-hot-reload.md 决策 4）。registry / executor / maxTurns /
-   * timeoutMs 等字段复用旧 cachedDeps。
+   * Hot rebuild from env: recreate the adapter via createAdapterFromEnv with
+   * the latest envProvider() value and replace `cachedDeps.adapter`. Does NOT
+   * rerun the whole buildHarnessEngine assembly (MCP / subagent / skill are
+   * skipped). registry / executor / maxTurns / timeoutMs reuse the old
+   * cachedDeps.
    *
-   * 语义：
-   *   - env 关键字段（model / apiKey / fallback / thinking / thinkingEffort）
-   *     与上次重建时**值相同** → 视为「touch 未变内容」，跳过 adapter 重建且
-   *     不触发 onEnvChange（reviewer major：settings 文件 touch 但内容没变 →
-   *     不重建 adapter、不通知显示层）。注意 EnvLoader.get() 每次返回**新对象**，
-   *     对象身份比较不可用，必须做关键字段值比较。
-   *   - 成功（值变化）→ 替换 adapter，且以新 env 触发 onEnvChange（若注册）一次。
-   *   - envProvider 未注入 / cachedDeps 尚未构建（首次 postMessage 前）→
-   *     no-op（行为零变化）。
-   *   - apiKey 缺失 / 解析失败（settings `${VAR}` 解析不到 → apiKey=undefined）
-   *     → 抛 ValidationError（对齐 buildHarnessEngine 守卫），cachedDeps 保持
-   *     旧 adapter（reviewer major：降级保留旧 env，不在 SDK 层才炸）。
-   *   - envProvider() 抛错（坏 JSON / model 缺失）→ 抛错且 cachedDeps 不动，
-   *     不崩进程 —— 由调用方（T4 EnvLoader.subscribe 链路）负责降级通知。
+   * Semantics:
+   *   - If the key env fields (model / apiKey / fallback / thinking /
+   *     thinkingEffort) are value-identical to the last rebuild, treat it as
+   *     "touched unchanged content": skip adapter rebuild and do not fire
+   *     onEnvChange. EnvLoader.get() returns a new object each call, so
+   *     identity comparison is useless — compare field values.
+   *   - On change → replace adapter and fire onEnvChange (if registered)
+   *     once with the new env.
+   *   - envProvider not injected / cachedDeps not yet built → no-op.
+   *   - Missing apiKey (settings `${VAR}` unresolved → apiKey=undefined) →
+   *     throw ValidationError (aligned with the buildHarnessEngine guard);
+   *     cachedDeps keeps the old adapter rather than degrading at the SDK
+   *     layer.
+   *   - envProvider() throws (bad JSON / missing model) → throw and leave
+   *     cachedDeps untouched; the caller owns the degraded notification.
    */
   async reloadFromEnv(): Promise<void> {
     if (!this.envProvider) return;
@@ -1492,8 +1550,8 @@ export class SessionHub {
     if (!env.llm.apiKey) {
       throw new ValidationError(LLM_API_KEY_MISSING_MESSAGE);
     }
-    // 关键字段值比较去重（model / apiKey / fallback / thinking / thinkingEffort）。
-    // 任一变化 → 重建 + 通知；全同 → 跳过（touch 未变内容不触发）。
+    // Dedupe by key field values (model / apiKey / fallback / thinking /
+    // thinkingEffort): any change → rebuild + notify; all equal → skip.
     const prev = this.lastReloadedEnv;
     if (prev && sameHotReloadKeyFields(prev.llm, env.llm)) return;
     const { adapter } = createAdapterFromEnv(env);
@@ -1554,12 +1612,13 @@ export class SessionHub {
    * onto the session file so postMessage can key the engine Map.
    *
    * T3 trust gate: when `recentsHome` is wired, a root NOT in the recents/
-   * trust roster requires `{ confirmTrust: true }` (rule 3: 新绝对路径 →
-   * 确认信任；recents 已信任). On trust, the root is upserted into
-   * `<recentsHome>/.iknow/workspaces.json` (home). When `recentsHome` is
-   * absent (tests / legacy) T2 behavior is preserved.
+   * trust roster requires `{ confirmTrust: true }` (a new absolute path must
+   * be explicitly trusted; roots already in recents are trusted). On trust,
+   * the root is upserted into `<recentsHome>/.iknow/workspaces.json` (home).
+   * When `recentsHome` is absent (tests / legacy) the previous behavior is
+   * preserved.
    *
-   * Errors (plan T3 ACR verdict):
+   * Errors:
    *   - `WorkspaceRootError` (resolver: empty_explicit / non_absolute /
    *     not_found; overflow pre-check) — plain object, kind-only.
    *   - `ValidationError` field=path when confirmTrust is required and
@@ -1740,8 +1799,9 @@ export class SessionHub {
           };
           await this.store.save({ id: conversationId, file: pinned });
           session = await this.store.load(conversationId);
-          // #458 T5/T12: pin 发射点 — 文本截 200 防 jsonl 行膨胀;
-          // 状态机转移由 hub 唯一持有, trace 仅记录生命周期事件。
+          // Goal pin emission point — text truncated to 200 chars to keep
+          // jsonl lines bounded; the hub solely owns state-machine
+          // transitions, the trace only records lifecycle events.
           await trace?.recordGoal({
             id: randomUUID(),
             sessionId: conversationId,
@@ -1752,16 +1812,18 @@ export class SessionHub {
           });
         }
         const baseDeps = await this.ensureDeps(boundRoot);
-        // D-α T3 / ADR-0030:round 边界 —— 一条 postMessage = 一次 run()。
-        // 在这里拍 graph 装配快照（紧接 ensureDeps，同一串行槽位内，拍的
-        // 一定是本次要用的那台 engine），overlay 翻键因此「下一条消息才
-        // 生效」，与 chat 的「下一条查询行」同语义。
+        // Round boundary (ADR-0030): one postMessage = one run(). Take the
+        // graph assembly snapshot right after ensureDeps, inside the same
+        // serialized slot, so it is always the engine this turn will use;
+        // overlay key flips therefore "take effect on the next message",
+        // matching chat's "next query line" semantics.
         this.activeGraphAssembly?.beginRound();
         // T2: per-turn override — rebuild deps with a one-shot adapter only;
         // executor / registry / maxTurns / timeoutMs are reused from the
         // cached deps. When absent, the cached path is unchanged.
-        // SC10：override 分支经 overrideEnvForTurn 取**最新** env（切换后的
-        // provider/model 下一轮生效；构造期快照只作 envProvider 缺席时的缝）。
+        // The override branch reads the latest env via overrideEnvForTurn
+        // (switched provider/model takes effect next turn; the construction
+        // snapshot is only a fallback when envProvider is absent).
         const deps =
           opts.thinking !== undefined
             ? withThinkingOverride({
@@ -1770,19 +1832,21 @@ export class SessionHub {
                 env: this.overrideEnvForTurn(),
               })
             : baseDeps;
-        // #622 T5: 懒提交 user query。engine 自己不 commit query（只 commit
-        // assistant / tool_result），若链上缺 query，投影与链永远差一条，
-        // 每次 post-turn save 都被迫走 re-root fork（rewind 后新链也无法
-        // parent 在 rewind 锚点上）。改为把 query 前缀进本 postMessage 的
-        // 第一次 engine commit：链与投影对齐（save 走 identical /
-        // extension）。
-        // T4 (transport-continue-persist): 零进展 turn（protocolError /
-        // emptyFinalResponse 在首次 commit 前停止）本 commit 钩子不触发,
-        // 但收尾的 conditionalSave 会以 partial_user_only 把本 turn 的 user
-        // query 落盘（drop 失败的 assistant）— spec invariant 8 / SC4。
-        // queryMessage 必须与 engine 的构造逐字节一致（secrets 占位符替换
-        // + adapter.encodeUserText，loop-engine.ts run() 同款逻辑），否则
-        // save 的 LCP 对齐会在 query 处分叉。
+        // Lazy commit of the user query: the engine itself never commits the
+        // query (only assistant / tool_result), so if the chain lacks the
+        // query, the projection and the chain always differ by one entry and
+        // every post-turn save is forced through a re-root fork (even a new
+        // chain after rewind cannot parent onto the rewind anchor). Instead,
+        // prefix the query into this postMessage's first engine commit:
+        // chain and projection align (save takes identical / extension).
+        // Zero-progress turns (protocolError / emptyFinalResponse stopping
+        // before the first commit) never fire this commit hook, but the
+        // closing conditionalSave persists the turn's user query as
+        // partial_user_only (dropping the failed assistant).
+        // queryMessage must match the engine's construction byte-for-byte
+        // (secret placeholder substitution + adapter.encodeUserText, same
+        // logic as loop-engine.ts run()), otherwise the save's LCP alignment
+        // forks at the query.
         let queryCommitPending = true;
         let queryCommitPrefix: ReadonlyArray<AnthropicNativeMessage> = [];
         const buildUserCommit = (userText: string): AnthropicNativeMessage => {
@@ -1799,7 +1863,7 @@ export class SessionHub {
         // is long-running, so on kill we write the violation event to the JSONL
         // trace and do NOT touch process.exitCode. hard_wall already failed the
         // tool; remapping stopReason to protocolError would drop the assistant
-        // delta on persist (SC4) and undo ADR-0108 interrupt keep.
+        // delta on persist and undo ADR-0108 interrupt keep.
         let killed = false;
         const counter = createViolationCounter();
         const onKill = (reason: string): void => {
@@ -1815,30 +1879,35 @@ export class SessionHub {
           onKill,
         });
         // Per-session trace: new JsonlTraceService each postMessage (not cached
-        // in cachedDeps) because conversationId differs per session (ADR-0003 D4).
-        // T2: traceOut 是目录, JsonlTraceService 写 <traceOut>/<conversationId>.jsonl。
-        // SC-W 6/7 (v2 spec):serve 路径注入 agentVersion。runDeps 只在
-        // traceOut 配置时落 session 根记录(与既有 trace 注入同条件);
-        // agentVersion 恒定注入,loop-engine 要求 trace 与 agentVersion
-        // 同时存在才写,故未配 traceOut 时无副作用。
+        // in cachedDeps) because conversationId differs per session (ADR-0003).
+        // traceOut is a directory; JsonlTraceService writes
+        // <traceOut>/<conversationId>.jsonl. The serve path injects
+        // agentVersion: runDeps only lands the session root record when
+        // traceOut is configured (same condition as existing trace
+        // injection); agentVersion is injected unconditionally, and
+        // loop-engine requires both trace and agentVersion to write it, so
+        // an unset traceOut has no side effect.
         const runDeps: LoopEngineDeps = {
           ...deps,
           executor: wrappedExecutor,
           agentVersion: getVersion(),
-          // #502 T5 / ADR-0021 D1.4:per-postMessage conversationId 注入 deps。
-          // serve cachedDeps 跨会话共享（hub.ts:1287 注），此处 per-run 注入会话
-          // 锚点，bash_output / bash_stop 的 scope 过滤才能按会话闭环。
+          // Per-postMessage conversationId injection (ADR-0021): serve
+          // cachedDeps is shared across sessions, so this per-run session
+          // anchor lets bash_output / bash_stop scope filtering close the
+          // loop per session.
           conversationId,
-          // #620 T3 (spec session-jsonl-resume D4):turn 内 commit 钩子 ——
-          // assistant / 每个 tool_result 进权威历史后立刻 append 到会话
-          // JSONL log（边跑边写，崩溃可续）。
-          // 队列纪律（spec concurrent 决策）:本闭包由 run() 在 postMessage
-          // 的 serialize work 槽位内同步触发,已在同会话串行队列里 —— 绝不
-          // 能再经 this.serialize 包裹（内层槽位排队等外层释放,外层正等
-          // run() 返回 → 自等死锁）。不绕开,也不重入。
+          // In-turn commit hook: as soon as an assistant or each tool_result
+          // enters the authoritative history, append it to the session JSONL
+          // log (write while running, resumable after crash).
+          // Queue discipline: this closure is invoked synchronously by run()
+          // inside the postMessage serialize slot — already in the per-session
+          // serial queue — so it must never wrap itself in this.serialize
+          // (the inner slot would wait for the outer one, which is waiting on
+          // run() returning → self-deadlock). Neither bypass nor re-enter.
           commitMessages: (messages, thinkingMs) => {
-            // T5: 首次 commit 带上 query 前缀（含 host drain 的子代理浓缩
-            // 消息，若本轮有）；之后逐次 commit 原样透传。
+            // The first commit carries the query prefix (including the
+            // subagent digest messages from host drain, if this turn has
+            // them); later commits pass through unchanged.
             const events = queryCommitPending
               ? [...queryCommitPrefix, ...messages]
               : messages;
@@ -1851,19 +1920,22 @@ export class SessionHub {
             });
           },
           ...(trace !== undefined ? { trace } : {}),
-          // #604 T1 (SC1-SC5): compact 边界渲染缝 — 把会话里最近合格用户
-          // 任务原话(纯函数 over session.messages,现抽现贴)注入为
-          // boundaryAttachment 闭包;compact 触发时在 placeholder 后追加一条
-          // user 消息。约束:
-          //   - 自动模式(goal.text 非空)→ return undefined,绝不贴(spec: 自
-          //     动模式不贴任务摘录);
-          //   - 0 句合格 → renderRecentUserTasksBoundary return undefined,
-          //     闭包产出 undefined,helper 早退(行为 byte-stable,不影响停止
-          //     语义 ADR-0011);
-          //   - 不读 session.taskFocus (#605 T2 已退休; 渲染源是
-          //     session.messages 内的合格用户任务原话);
-          //   - renderRecentUserTasksBoundary 是 hub 内私有 closure — harness
-          //     域独立原则,harness 不 import session-api,零反向依赖。
+          // Compact-boundary rendering seam: inject a boundaryAttachment
+          // closure that renders the session's most recent qualifying user
+          // task quotes verbatim (a pure function over session.messages,
+          // sampled at use time); on compact it appends one user message
+          // after the placeholder. Constraints:
+          //   - auto mode (goal.text non-empty) → return undefined, never
+          //     attach (auto mode attaches no task excerpt);
+          //   - zero qualifying sentences → renderRecentUserTasksBoundary
+          //     returns undefined, the closure yields undefined, the helper
+          //     early-exits (byte-stable behavior, stop semantics unaffected
+          //     per ADR-0011);
+          //   - does not read session.taskFocus (retired; the render source
+          //     is qualifying user task quotes inside session.messages);
+          //   - renderRecentUserTasksBoundary is a private hub closure —
+          //     harness-domain independence: harness never imports
+          //     session-api, zero reverse dependency.
           ...(!(session.goal !== undefined && session.goal.text.length > 0)
             ? {
                 boundaryAttachment: () =>
@@ -1871,10 +1943,12 @@ export class SessionHub {
               }
             : {}),
         };
-        // plan T6 / ADR-0011:异常停前 loop-engine 通过 onStream emit
-        // stop_summary。包一层 wrapper 捕获 stop_summary 文本(无条件 — 即使
-        // 宿主没传 onStream,DTO 也要带 stopSummary;byte-stable 有则进、无则缺)
-        // 并**原样转发**给宿主 onStream(TUI 用它做 notice 呈现,见 app.tsx)。
+        // Before an abnormal stop, loop-engine emits stop_summary via
+        // onStream (ADR-0011). Wrap it to capture the stop_summary text
+        // unconditionally — even when the host passes no onStream, the DTO
+        // must carry stopSummary; byte-stable: present goes in, absent stays
+        // out — and forward it verbatim to the host onStream (the TUI uses
+        // it for notice rendering, see app.tsx).
         let capturedStopSummary: string | undefined;
         const wrappedOnStream = (event: HarnessStreamEvent): void => {
           if (event.type === "stop_summary") {
@@ -1906,17 +1980,20 @@ export class SessionHub {
         try {
           return await runAutoLoopSteps({
             run: async () => {
-              // #356 T7 (SC7):host drain — serve 入口每轮 run() 前,把 manager 内
-              // completed 子代理结果浓缩成 user message,拼入 priorMessages 末尾。
-              // 空 manager / 无 completed → priorMessages 不变 (行为零变化)。
+              // Host drain: before each run() at the serve entrypoint, digest
+              // completed subagent results from the manager into a user
+              // message and append it to priorMessages. Empty manager /
+              // nothing completed → priorMessages unchanged (zero behavior
+              // change).
               const drained = await drainPendingSubagents(
                 this.subagentManagers,
                 {
                   conversationId,
                 }
               );
-              // ADR-0112 Does #1:drain 浓缩是宿主注入 commit —— 盖出处戳,
-              // 出站投影才按官方帧透传 "## Sub-agent " 前缀锚。
+              // ADR-0112: the drained digest is a host-injected commit — stamp
+              // its provenance so the outbound projection passes the "##
+              // Sub-agent " prefix anchor through as an official frame.
               const drainedMsg: AnthropicNativeMessage = stampHostInjected({
                 role: "user",
                 content: [{ type: "text", text: drained }],
@@ -1924,8 +2001,10 @@ export class SessionHub {
               const priorMessages = drained
                 ? [...session.messages, drainedMsg]
                 : session.messages;
-              // T5: query 提交前缀与本轮实际进 engine 的 user 消息对齐
-              // （drain 浓缩消息在内存历史里先于 query，链上也须同序）。
+              // Keep the query commit prefix aligned with the user messages
+              // actually entering the engine this round (the drained digest
+              // precedes the query in in-memory history, so it must too in
+              // the chain).
               queryCommitPrefix = [
                 ...(drained ? [drainedMsg] : []),
                 ...(query.length > 0 ? [buildUserCommit(query)] : []),
@@ -1940,13 +2019,15 @@ export class SessionHub {
                 readonly reason?: string;
                 readonly missing?: readonly string[];
               }> = [];
-              // #128 T8:verifyConfig 非 undefined (含 command 空串) 时 run 被
-              // runVerifyLoop 包裹 (advisor 形态, 引擎零改动);缺席 → 原 run 调用
-              // 逐字节不变 (仅未接线路径)。
-              // runVerifyLoop 的 runFn 透传 onStream → wrappedOnStream 语义保持;
-              // trace 仅在 traceOut 配置时注入 (records 落盘, T7 已处理可选)。
-              // 注意: runVerifyLoop 的首轮 runFn 不带 priorMessages / onStream,
-              // 闭包必须兜底 hub 侧的 priorMessages 与 wrappedOnStream。
+              // When verifyConfig is present (even with an empty command), run
+              // is wrapped by runVerifyLoop (advisor shape, engine untouched);
+              // absent → the plain run call stays byte-identical (unwired
+              // path only). runVerifyLoop's runFn forwards onStream so
+              // wrappedOnStream semantics hold; trace is injected only when
+              // traceOut is configured (records land on disk, optionality
+              // already handled). Note: runVerifyLoop's first-round runFn
+              // omits priorMessages / onStream, so the closure must fall back
+              // to hub-side priorMessages and wrappedOnStream.
               const runOutcome =
                 !silent && this.verifyConfig
                   ? await runVerifyLoop({
@@ -1980,45 +2061,53 @@ export class SessionHub {
                       signal: opts.signal,
                       trace: runDeps.trace,
                       cwd: boundRoot,
-                      // ADR-0092 Amendment / SC11–SC13:verify 命令的围栏与
-                      // bash 工具同档 —— snapshot 在本次调用现读(翻档下一次
-                      // 调用生效,不重建引擎);缺席 → verify-loop 全局档
-                      // baseline,且 key 不出现。
+                      // ADR-0092 Amendment: verify commands share the bash
+                      // tool's fence tier — the snapshot is read fresh per
+                      // call (a tier flip takes effect next call, no engine
+                      // rebuild); absent → verify-loop global-tier baseline
+                      // and the key does not appear.
                       ...presentFields("fsMode", this.fsModeSnapshot()),
-                      // homeRoot 取本进程 homedir() —— 本调用点独立于
-                      // build-engine,缺省语义 = 那边的 `opts.userHome ??
-                      // homedir()` 的后者。
+                      // homeRoot is this process's homedir() — this call site
+                      // is independent of build-engine, whose default is the
+                      // `opts.userHome ?? homedir()` fallback branch.
                       //
-                      // 已知限制(有意的同源假设,不是巧合):两处仅在
-                      // 「宿主不注入 userHome」时同源。生产三入口(serve /
-                      // chat / TUI)都不注入(session-api/serve.ts、cli 的
-                      // buildHarnessEngine 调用点、tui/run.tsx 的 depsOpts),
-                      // 故今天两处 home ro-bind 源端一致。
+                      // Known limitation (a deliberate same-source
+                      // assumption): the two sites agree only while the host
+                      // injects no userHome. All three production entrypoints
+                      // (serve / chat / TUI) do not inject one, so today both
+                      // home ro-bind sources match.
                       //
-                      // 漂移条件:userHome 是 TUI deps 的测试缝
-                      // (src/tui/deps.ts)。一旦某个宿主把这同一个值也注入
-                      // 引擎装配,而本调用点仍取真实 homedir(),工作区档下
-                      // bash 的 home ro-bind 会指向注入 home、verify 指向真
-                      // home —— 两条执行面的 home 可见面分裂。
+                      // Drift condition: userHome exists as a TUI deps test
+                      // seam (src/tui/deps.ts). If some host ever injects
+                      // that value into engine assembly while this call site
+                      // keeps real homedir(), then under the workspace tier
+                      // bash's home ro-bind points at the injected home and
+                      // verify's at the real home — the two execution faces
+                      // diverge on home visibility.
                       //
-                      // 为何不在此收口:hub 拿不到引擎 home ——
-                      // SessionHubOptions 没有 userHome(既有 recentsHome /
-                      // mcpHome 分别是信任名单根与 MCP 配置根,不是引擎
-                      // home 缝,不能挪用)。真收口要把同一值经 hub-bridge /
-                      // run.tsx 透传进来,那是 TUI 接线所有权(另有任务在
-                      // 改这两个文件);且当前无生产 caller 注入,先加 option
-                      // 只会是零调用者的死面。接 TUI 的 userHome 缝到 hub
-                      // 路径时,请一并给 SessionHubOptions 加 home 并改本行为
-                      // 现读(或经 fsModeSnapshot 同款 per-call helper 收口),
-                      // 而不是继续靠「生产恰好不注入」。
+                      // Why not converge here: the hub cannot reach the
+                      // engine's home — SessionHubOptions has no userHome
+                      // (recentsHome / mcpHome are the trust roster root and
+                      // the MCP config root, not engine-home seams). A real
+                      // fix threads the same value through hub-bridge /
+                      // run.tsx, which is TUI wiring ownership, and no
+                      // production caller injects it today. When connecting
+                      // the TUI userHome seam to the hub path, also add a
+                      // home option to SessionHubOptions and read it fresh
+                      // here (or via an fsModeSnapshot-style per-call
+                      // helper) instead of relying on "production happens not
+                      // to inject".
                       homeRoot: homedir(),
-                      // ADR-0092 / SC12:会话 tmp 宿主真路径 —— `$TMPDIR`
-                      // 与工作区档 `--bind <tmpRoot>` 同源。经 bash 工具面
-                      // **同一个** helper 解析(不在此独立推导第三份):
-                      // `<projectDir>/<sanitized convId>/fence-tmp`,与
-                      // registry 的 bash `projectDir: opts.todoDir` 同池同叶。
-                      // 缺 projectDir / conversationId → undefined,verify-loop
-                      // 回退进程 tmpdir()(fallback 不是目标态,见 VerifyLoopOptions.tmpDir)。
+                      // ADR-0092: real host path of the session tmp — the same
+                      // source as the workspace tier's `--bind <tmpRoot>`.
+                      // Resolved through the very same helper the bash tool
+                      // surface uses (no third derivation here):
+                      // `<projectDir>/<sanitized convId>/fence-tmp`, same pool
+                      // and leaf as registry bash's `projectDir: opts.todoDir`.
+                      // Missing projectDir / conversationId → undefined and
+                      // verify-loop falls back to process tmpdir() (the
+                      // fallback is not the target state, see
+                      // VerifyLoopOptions.tmpDir).
                       ...presentFields(
                         "tmpDir",
                         resolveSessionFenceTmp({
@@ -2026,20 +2115,25 @@ export class SessionHub {
                           conversationId,
                         })
                       ),
-                      // issue 1059 (G3)：worktree-on-mutate 活 holder —— 引擎
-                      // 装配面懒取的**同一个**单例（bash 门禁读的就是它）。
-                      // verify 围栏与 bash 在 UNBOUND_FENCE 轴上判定同源；
-                      // holder 经 options 透传，`makeDefaultRunVerify` 在本次
-                      // verify 闭环构造时现读 get() 一次（工厂期快照，与
-                      // fsMode 值面同款）。缺席（注入 deps 宿主 / 未装配门禁）
-                      // → key 不出现，verify-loop 走 V1 baseline，逐字节不变。
+                      // The live worktree-on-mutate holder — the same lazily
+                      // created singleton the engine assembly uses (what the
+                      // bash gate reads). verify's fence and bash judge from
+                      // one source on the UNBOUND_FENCE axis; the holder is
+                      // passed via options and `makeDefaultRunVerify` reads
+                      // get() once when building this verify loop
+                      // (factory-time snapshot, same pattern as the fsMode
+                      // value surface). Absent (injected-deps hosts / gate not
+                      // assembled) → key omitted and verify-loop keeps the
+                      // byte-identical V1 baseline.
                       ...presentFields(
                         "worktreeOnMutate",
                         this.worktreeOnMutate
                       ),
-                      // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
-                      // (command 缺失/空串时分类器接管, spec Objective);缺席
-                      // (ask 形态) → undefined, verify-loop 自然走透明关闭向后兼容。
+                      // Production assembly: subagentManager present → enable
+                      // classifier fill-in (the classifier takes over when
+                      // command is missing/empty); absent (ask shape) →
+                      // undefined, so verify-loop transparently disables
+                      // itself for backward compatibility.
                       runClassifier:
                         this.subagentManager === undefined
                           ? undefined
@@ -2074,9 +2168,11 @@ export class SessionHub {
               verifyOutcome =
                 "outcome" in runOutcome ? runOutcome.outcome : undefined;
               verifyRecords = "records" in runOutcome ? runOutcome.records : [];
-              // #128 M3: verify 最终判定 (failed / unstable / escalated / passed)
-              // surface 到 DTO。T3: HITL + INSUFFICIENT + skip 完成向判官
-              // 不上 passed 绿勾; SUFFICIENT 短路仍上 wire。abort/disabled 缺席。
+              // Surface the verify final verdict (failed / unstable /
+              // escalated / passed) to the DTO. HITL + INSUFFICIENT + skip
+              // completing toward the judge does not raise a passed checkmark;
+              // the SUFFICIENT short circuit still goes on the wire.
+              // abort/disabled stay absent.
               verifyView =
                 "outcome" in runOutcome
                   ? projectVerifyHumanView({
@@ -2106,40 +2202,45 @@ export class SessionHub {
                 priorMessages: session.messages,
               });
               void saved;
-              // auto-memory T4 / ADR-0031 D1:每轮把结果交给钩子,由钩子决定
-              // completed 闸 + N 轮闸。钩子缺席(默认 OFF / ask / 注入 deps 的
-              // 测试)→ 整句 no-op,行为逐字节不变。
+              // Each turn hands the result to the auto-memory hook, which owns
+              // the completed gate and the N-turn gate. Hook absent (default
+              // OFF / ask / injected-deps tests) → whole call is a no-op,
+              // byte-identical behavior.
               this.notifyAutoMemory(
                 s.finalResult,
                 s.priorCount,
                 boundRoot,
                 conversationId
               );
-              // ADR-0113 T4: 第一次 completed + 实质 user 文本后 fire-and-forget
-              // lite 标题生成(不 await,主回合不被生成阻塞)。
+              // ADR-0113: after the first completed turn with substantive user
+              // text, fire-and-forget lite title generation (not awaited; the
+              // main turn is never blocked by it).
               this.maybeFireTitleGeneration({
                 conversationId,
                 result: s.finalResult,
               });
-              // #458 T5 (SC8): goal.status write-back on verify-loop terminal
-              // outcome. The hub is the only writer of goal.status. Target status
-              // is looked up from OUTCOME_TO_STATUS; applyTransition runs only
-              // when target is a valid forward edge from current status
-              // (T3 assertValidTransition rejects self-transitions, so
+              // Goal write-back on verify-loop terminal outcome. The hub is
+              // the only writer of goal.status. Target status is looked up from
+              // OUTCOME_TO_STATUS; applyTransition runs only when target is a
+              // valid forward edge from current status
+              // (assertValidTransition rejects self-transitions, so
               // active→active / achieved→achieved are no-ops and the goal stays
               // put). recordGoal fires for every outcome with a goal present
-              // (write-back trace 留痕 even when no status change). Placed
-              // AFTER conditionalSave so a T2-seeded goal on this same turn is
-              // promoted in the same persistence round.
+              // (a trace entry is kept even when no status change happens).
+              // Placed AFTER conditionalSave so a goal seeded on this same turn
+              // is promoted in the same persistence round.
               if (s.verifyOutcome !== undefined && saved) {
                 const justSaved = await this.store.load(conversationId);
                 if (justSaved.goal !== undefined) {
                   const target = OUTCOME_TO_STATUS[s.verifyOutcome];
                   const now = new Date().toISOString();
-                  // T3 assertValidTransition 守门: OUTCOME_TO_STATUS 的 target 值域
-                  // 含 "active"（failed/unstable 保持态），对已处于 achieved/aborted
-                  // 的 goal 属非法反向边（achieved→active 不在白名单）——守卫拦截，
-                  // goal 不变，仅 recordGoal trace 留痕（与 failed/unstable 行为对齐）。
+                  // assertValidTransition guards the edge set:
+                  // OUTCOME_TO_STATUS targets include "active" (the
+                  // failed/unstable keep-state), which is an illegal reverse
+                  // edge for a goal already achieved/aborted (achieved→active
+                  // is not whitelisted) — the guard blocks it, the goal is
+                  // unchanged, and only the recordGoal trace remains (aligned
+                  // with failed/unstable behavior).
                   const transition =
                     target === undefined
                       ? undefined
@@ -2164,8 +2265,9 @@ export class SessionHub {
                       file: writeback,
                     });
                   }
-                  // T12 writeback 发射点: status ?? "active" 覆盖 disabled(无
-                  // target) 与 failed/unstable/自转移/非法反向边场景。
+                  // Write-back emission point: status ?? "active" covers the
+                  // disabled (no target) case as well as failed/unstable,
+                  // self-transitions and illegal reverse edges.
                   await runDeps.trace?.recordGoal({
                     id: randomUUID(),
                     sessionId: conversationId,
@@ -2191,9 +2293,11 @@ export class SessionHub {
                   }),
             buildStop: async (s) => {
               // D2 (tui-display-consistency): load once, reuse for session
-              // summary + per-turn thinkingMs sum. 同一 `loadedFile.thinkingMs`
-              // 是 store 落盘后与 loadedFile.messages 对齐的并行数组,起点
-              // s.priorCount (= session.messages.length) 即本轮新增起点。
+              // summary + per-turn thinkingMs sum. The same
+              // `loadedFile.thinkingMs` is a parallel array aligned with
+              // loadedFile.messages after the store save, so the start index
+              // s.priorCount (= session.messages.length) marks this turn's
+              // additions.
               const loadedFile = await this.store.load(conversationId);
               const turnMs = s.finalResult.messages.slice(s.priorCount);
               const turnThinkingMs = sumAssistantThinkingMsInRange({
@@ -2209,14 +2313,16 @@ export class SessionHub {
                   turnMessages: turnMs,
                   // B1: rendered interrupted is decided against the SAME priorMessages
                   // as conditionalSave — byte-identical boolean verdict
-                  // (saved 只在 cancelled 时消费;completed 等 stopReason 不读它)。
+                  // (saved is consumed only on cancelled; other stopReasons
+                  // like completed do not read it).
                   priorMessages: session.messages,
                   ...presentText("stopSummary", capturedStopSummary),
-                  // #128 M3: 验证最终判定 (failed/unstable/escalated) surface 到 DTO。
+                  // Surface the verify final verdict (failed/unstable/
+                  // escalated) to the DTO.
                   ...(s.verifyView !== undefined
                     ? { verify: s.verifyView }
                     : {}),
-                  // D2 wire surface: 本回合 assistant 思考时长 (ms)。
+                  // D2 wire surface: this turn's assistant thinking time (ms).
                   ...(turnThinkingMs > 0 ? { thinkingMs: turnThinkingMs } : {}),
                 }),
               };
@@ -2230,11 +2336,13 @@ export class SessionHub {
         } catch (err) {
           if (!silent) await this.applyHubAutoError(conversationId, err);
           if (err instanceof MaxTurnsExceeded) {
-            // ADR-0011:不 save — run 前 session 已在盘上,throw 路径不产出
-            // 可落盘的新 messages,故不调 conditionalSave(否则会写空 messages
-            // 把已被 disk-SSOT 守门的不变式擦掉)。turnCount 透传 err.turnsRan
-            // (已跑轮数);finalText 用空串(没有 completed 文本)。摘要若有则
-            // 附 TurnAnswerDto.stopSummary(additive, byte-stable)。
+            // ADR-0011: do not save — the session was already on disk before
+            // run(), and the throw path produces no new persistable messages,
+            // so conditionalSave is not called (it would write empty messages
+            // and wipe the invariant the disk-SSOT guard protects). turnCount
+            // passes through err.turnsRan (turns actually run); finalText is
+            // empty (no completed text). If a summary exists, attach it as
+            // TurnAnswerDto.stopSummary (additive, byte-stable).
             return {
               session: this.summarize({ file: session }),
               turn: {
@@ -2302,8 +2410,8 @@ export class SessionHub {
     return this.serialize({
       conversationId,
       work: async () => {
-        // live-graph-phase1 T1 / ADR-0051:reset 销毁活图账本 —— 之后同一
-        // 会话再 run_graph 可重用旧 id 并真正 spawn（SC3）。账本缺席 → no-op。
+        // Reset destroys the live-graph ledger, so a later run_graph in the
+        // same session can reuse old ids and really spawn. No ledger → no-op.
         this.liveGraphLedger?.destroy(conversationId);
         const session = await this.store.load(conversationId);
         const reset: SessionFileV1 = {
@@ -2333,28 +2441,32 @@ export class SessionHub {
   }
 
   /**
-   * 手动压缩会话（TUI /compact、web 压缩按钮共用落点）。
-   * 与 resetSession 同模式走 serialize 队列：load → compact → save。
+   * Manual session compaction (shared landing point for TUI /compact and the
+   * web compact button). Same serialize pattern as resetSession:
+   * load → compact → save.
    *
-   * #467 step 2: 优先尝试 LLM 结构化摘要(`runFullCompact` best-effort)。
-   * `cachedDeps` 缺席(ask / worker / oneshot 等无 harness 装配)或 adapter
-   * 不可用 → 跳过 LLM 路径,走 `compactMessages` 纯截断路径。LLM 摘要失败
-   * (empty_response / timeout / adapter_failed)同样回退 placeholder。
-   * title 字段由 `extractTitle` 取首条 user 文本派生(#467 改名,原
-   * `summary`;两条路径的 messages[0] 都是 user 文本消息,派生语义一致)。
+   * Prefers the LLM structured summary (runFullCompact, best-effort). When
+   * cachedDeps is absent (ask / worker / oneshot — no harness assembly) or
+   * the adapter is unusable, skip the LLM path and use the pure truncation of
+   * compactMessages. LLM summary failures (empty_response / timeout /
+   * adapter_failed) also fall back to the placeholder. The title field is
+   * derived from the first user text via extractTitle (both paths keep a user
+   * text message at messages[0], so the derivation is consistent).
    *
-   * 幂等 no-op: 消息条数未减少(已低于压缩窗口或本就 ≤ keepRecent 或
-   * 无 dropped 前缀)时不落盘、不 bump updatedAt,返回 compacted=false。
-   * 实际压缩 → 落盘并重算 title。
+   * Idempotent no-op: when the message count does not drop (already below the
+   * compact window, or ≤ keepRecent, or no dropped prefix), nothing is saved
+   * and updatedAt is not bumped; returns compacted=false. Actual compaction →
+   * save + recompute title.
    *
-   * #548:`opts.signal` / `opts.onStream` 透传到 `runFullCompact`,让宿主
-   * 看到压缩期间的全套事件(compaction_started / completed / failed /
-   * cancelled + compaction_text_delta)并支持中途取消。**取消语义对齐
-   * Claude Code**:opts.signal abort → `signal_aborted` outcome → 不走
-   * fallback 截断、会话保持原样、不 bump updatedAt,返回
-   * `{ compacted: false, cancelled: true }`(additive 字段,与"无可压缩
-   * 上下文"的 compacted=false 区分)。host observer 与 adapter 错误均经
-   * runFullCompact safeEmitStream 吞咽,本函数不另行暴露。
+   * `opts.signal` / `opts.onStream` are threaded into runFullCompact so the
+   * host sees the full event set during compaction (compaction_started /
+   * completed / failed / cancelled + compaction_text_delta) and can cancel
+   * mid-flight. Cancellation matches Claude Code: aborting opts.signal yields
+   * the signal_aborted outcome → no fallback truncation, session kept as-is,
+   * updatedAt not bumped, returns { compacted: false, cancelled: true } (an
+   * additive field, distinguishing it from "nothing to compact"). Host
+   * observer and adapter errors are swallowed by runFullCompact's
+   * safeEmitStream; this function does not re-expose them.
    */
   async compactSession(
     conversationId: string,
@@ -2366,24 +2478,28 @@ export class SessionHub {
         const session = await this.store.load(conversationId);
         const before = session.messages;
 
-        // plan manual-compact-trigger T1: 手动 /compact 视作已过
-        // `evaluateCompactTrigger` 的 token 门(spec 672 Boundaries Out)。
-        // 执行体仍复用既有 runFullCompact / compactMessages 回退,与 proactive
-        // auto-compact 已开火之后共用同一对 dropped/kept 决策:
-        //   - empty → 幂等 noop(reason=messages_too_few),不落盘、不 bump updatedAt;
-        //   - 不可压缩(消息数 ≤ keepRecent,无 dropped 前缀)→ full_summary 支
-        //     (整段视为 dropped,kept=[]),与 auto 开火后行为相同;
-        //   - 有 dropped 前缀 → windowed 支。
-        // proactive 阈值公式 / getAutoCompactThreshold / IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS
-        // / estimateMessagesTokens / DEFAULT_KEEP_RECENT 全部不动 — 仅 hub 手动
-        // 入口跳过 token 判据;loop-engine 仍走 evaluateCompactTrigger。
+        // Manual /compact is treated as having already passed
+        // evaluateCompactTrigger's token gate. The body still reuses the
+        // existing runFullCompact / compactMessages fallback, sharing the same
+        // dropped/kept decision as proactive auto-compact after it fires:
+        //   - empty → idempotent noop (reason=messages_too_few), no save, no
+        //     updatedAt bump;
+        //   - incompressible (messages ≤ keepRecent, no dropped prefix) →
+        //     full_summary branch (the whole span counts as dropped, kept=[]),
+        //     same behavior as after auto fires;
+        //   - dropped prefix present → windowed branch.
+        // The proactive threshold formula / getAutoCompactThreshold /
+        // IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS / estimateMessagesTokens /
+        // DEFAULT_KEEP_RECENT are untouched — only the hub manual entry skips
+        // the token criterion; loop-engine still runs evaluateCompactTrigger.
         let split: {
           readonly dropped: ReadonlyArray<AnthropicNativeMessage>;
           readonly kept: ReadonlyArray<AnthropicNativeMessage>;
         };
         if (before.length === 0) {
-          // 空会话:幂等 noop,reason 字面沿用 messages_too_few
-          // (plan Harvest Open 折进本票:below_token_threshold 仅保留给 auto 路径)。
+          // Empty session: idempotent noop; the reason literal stays
+          // messages_too_few (below_token_threshold is reserved for the auto
+          // path).
           return {
             session: this.summarize({ file: session }),
             turns: projectMessagesToTurns(before),
@@ -2395,29 +2511,31 @@ export class SessionHub {
         }
         const windowSplit = splitForCompaction(before);
         if (windowSplit === undefined) {
-          // 非空但消息数 ≤ keepRecent,无 dropped 前缀 → full_summary 支
-          // (与 auto 路径 evaluateCompactTrigger 返 compact_via_full_summary 同效)。
+          // Non-empty but messages ≤ keepRecent with no dropped prefix →
+          // full_summary branch (equivalent to evaluateCompactTrigger
+          // returning compact_via_full_summary on the auto path).
           split = { dropped: before, kept: [] };
         } else {
           split = windowSplit;
         }
 
-        // #467 step 2: 优先 LLM 结构化摘要(best-effort,失败回退 placeholder)。
-        // cachedDeps 缺席(ask / oneshot 等无 harness 装配)→ adapter 不可用,
-        // 跳过 LLM 路径,直接 placeholder。
-        // #548:opts.signal / opts.onStream 透传到 runFullCompact — 宿主可看
-        // 到 compaction_started/completed/failed/cancelled + compaction_text_delta
-        // 全套事件并支持中途取消。signal_aborted outcome 走 keep-state
-        // 路径(不 fallback 截断、不落盘、cancelled:true)对齐 Claude Code。
+        // Prefer the LLM structured summary (best-effort, falls back to the
+        // placeholder on failure). cachedDeps absent (ask / oneshot, no
+        // harness assembly) → adapter unusable, skip LLM, placeholder direct.
+        // opts.signal / opts.onStream thread into runFullCompact so the host
+        // sees the full compaction event set and can cancel mid-flight; the
+        // signal_aborted outcome takes the keep-state path (no fallback
+        // truncation, no save, cancelled:true) to match Claude Code.
         let nextMessages: ReadonlyArray<AnthropicNativeMessage> | undefined;
         let cancelled = false;
         const hubAdapter = this.cachedDeps?.adapter;
         if (hubAdapter !== undefined) {
           try {
             const outcome = await runFullCompact({
-              // ADR-0112 Does #1:compact 请求 prompt 是宿主注入 —— 经带戳
-              // 视图编码(与 loop-engine makeCompactAdapterView 同法),
-              // 否则这次摘要调用的出站投影会把官方 prompt 转译掉。
+              // ADR-0112: the compact request prompt is host-injected — encode
+              // through the stamped view (same technique as loop-engine's
+              // makeCompactAdapterView), otherwise this summary call's outbound
+              // projection would translate away the official prompt.
               adapter: {
                 step: (state, request, signal) =>
                   hubAdapter.step(state, request, signal),
@@ -2431,8 +2549,9 @@ export class SessionHub {
                 : {}),
             });
             if (outcome.kind === "summarized") {
-              // 续传摘要走 buildCompactedMessages 同一装配缝(preamble SSOT),
-              // 首条 = 宿主注入 commit,盖出处戳后落盘。
+              // The resume summary goes through the same buildCompactedMessages
+              // assembly seam (preamble SSOT); the first message is a
+              // host-injected commit, stamped before persisting.
               const composed = buildCompactedMessages({
                 summaryText: outcome.text,
                 kept: split.kept,
@@ -2442,14 +2561,16 @@ export class SessionHub {
                 ...composed.slice(1),
               ];
             } else if (outcome.kind === "signal_aborted") {
-              // Claude Code 取消语义:会话保持原样,不 fallback 截断、不
-              // bump updatedAt;cancelled:true 区分"无可压缩上下文"的
-              // compacted=false(web/TUI 渲染区分)。
+              // Claude Code cancellation semantics: keep the session as-is,
+              // no fallback truncation, no updatedAt bump; cancelled:true
+              // distinguishes this from plain compacted=false ("nothing to
+              // compact") for web/TUI rendering.
               cancelled = true;
             }
           } catch {
-            // runFullCompact 自身已收敛所有错误到 FullCompactOutcome;
-            // 此处 catch 是防御性兜底,任何意外抛出都视作失败 → placeholder。
+            // runFullCompact already converges all errors into
+            // FullCompactOutcome; this catch is a defensive floor — any
+            // unexpected throw is treated as failure → placeholder.
           }
         }
 
@@ -2465,7 +2586,7 @@ export class SessionHub {
           };
         }
 
-        // 回退 / LLM 跳过 → 纯截断 + boundary placeholder。
+        // Fallback / LLM skipped → pure truncation + boundary placeholder.
         const useCompactMessages = nextMessages === undefined;
         const compacted = useCompactMessages
           ? compactMessages(before)
@@ -2486,20 +2607,23 @@ export class SessionHub {
           turnCount: session.turnCount,
           updatedAt: new Date().toISOString(),
           schemaVersion: CURRENT_SCHEMA_VERSION,
-          // 用首条 user 文本派生 session title 字段(#467 改名,原 summary;
-          // 便于会话列表快速展示):
-          //   - 摘要轮:messages[0] = SUMMARY_PREAMBLE + 摘要内容 user 消息,
-          //     extractTitle(compacted) 会拿到 preamble 前缀,而不是用户原话。
-          //   - placeholder 路径:messages[0] = "[compaction boundary ...]" user 消息。
-          // 用 pre-compact 的 `before` 派生,标题保留原会话首条 user 意图(对齐
-          // 旧 placeholder 时代的行为),而不是被 preamble / placeholder 污染
-          // (#467 review-fix Medium:之前用 compacted,标题退化为通用 preamble)。
+          // Derive the session title from the first user text (for fast
+          // session-list display):
+          //   - summary turn: messages[0] = SUMMARY_PREAMBLE + summary user
+          //     message, so extractTitle(compacted) would pick up the preamble
+          //     prefix instead of the user's original words;
+          //   - placeholder path: messages[0] = "[compaction boundary ...]"
+          //     user message.
+          // Deriving from the pre-compact `before` keeps the title at the
+          // original first-user intent (matching placeholder-era behavior)
+          // instead of being polluted by preamble / placeholder.
           title: extractTitle(before),
         };
         await this.store.save({ id: conversationId, file: updated });
-        // reason:LLM 摘要成功 → 'full_summary'(无论判据 action,因 nextMessages
-        // 实际是 SUMMARY_PREAMBLE + 摘要);placeholder fallback → 'windowed'。
-        // SSOT:helper 把 4 取值决策收敛到一处,避免 3 处 inline 字面量 drift。
+        // reason: LLM summary succeeded → 'full_summary' (regardless of the
+        // trigger's action, since nextMessages really is SUMMARY_PREAMBLE +
+        // summary); placeholder fallback → 'windowed'. SSOT: the helper keeps
+        // the 4-way decision in one place, avoiding inline-literal drift.
         const reason: CompactReason = compactReasonFor({
           useCompactMessages,
         });
@@ -2516,7 +2640,7 @@ export class SessionHub {
   }
 
   /**
-   * continue_pending T2 (#688): reload → predicate → skip-append run.
+   * continue_pending: reload → predicate → skip-append run.
    * Same serialize queue as compactSession; HTTP has no busy_stop_first.
    * Does not run goal-auto. Success wire reuses PostMessageResponse.
    */
@@ -2569,7 +2693,7 @@ export class SessionHub {
       opts?.onStream?.(event);
     };
     try {
-      // /continue (spec invariant 5–7, SC3): the model prior for THIS run omits
+      // /continue: the model prior for THIS run omits
       // a trailing `Interrupted by user.` system message. Disk still contains
       // it — the persist predicate's prior is the ORIGINAL `session.messages`
       // so `conditionalSave` keeps the interrupt on disk, and the loaded file
@@ -2595,9 +2719,10 @@ export class SessionHub {
       // so slicing it by session.messages.length would drop the first new
       // assistant message whenever a trailing interrupt was stripped.
       const turnMs = loaded.messages.slice(session.messages.length);
-      // D2 (tui-display-consistency): per-turn thinkingMs from disk-SSOT
-      // parallel array. continue_pending 路径直接读到 loadedFile.thinkingMs
-      // (本轮新增 = session.messages.length 起点);与 buildStop 路径同模式。
+      // D2 (tui-display-consistency): per-turn thinkingMs from the disk-SSOT
+      // parallel array. The continue_pending path reads
+      // loadedFile.thinkingMs directly (this turn's additions start at
+      // session.messages.length), same pattern as the buildStop path.
       const turnThinkingMs = sumAssistantThinkingMsInRange({
         messages: turnMs,
         thinkingMs: loaded.thinkingMs,
@@ -2642,9 +2767,10 @@ export class SessionHub {
   }
 
   /**
-   * 回退会话：把持久化 head 指到 `head`（null = 空 transcript）。
-   * 走 serialize 队列。#624 起入参是事件 id，不再是 keepTurns。
-   * legacy .json-only 先 load+save 迁 JSONL 再重试。
+   * Rewind a session: point the persisted head at `head` (null = empty
+   * transcript). Runs through the serialize queue. Input is an event id, no
+   * longer keepTurns. Legacy .json-only sessions are load+save migrated to
+   * JSONL first, then the rewind is retried.
    */
   async rewindSession(
     conversationId: string,
@@ -2691,17 +2817,21 @@ export class SessionHub {
   }
 
   /**
-   * GET /api/v1/skills — 可加载技能面（spec skill-index-increment SC5/SC8/
-   * SC9）：含无 description 与 `disable-model-invocation` 条目，人侧 `/`
-   * 必须都能进候选。catalog 缺席（测试注入 deps）→ 空清单。
+   * GET /api/v1/skills — the loadable-skill surface: includes entries without
+   * a description and `disable-model-invocation` entries, because human-side
+   * `/` must offer all of them as candidates. Catalog absent (test-injected
+   * deps) → empty list.
    *
-   * SC8（「安装 / reload 当下 slash 候选已含可加载新条目，不必等下一
-   * turn」）：装配期缓存的 catalog 是**当时快照**，调用期先用 rescan 缝重扫
-   * 现行技能根，取这一拍的 `loadable()`。rescan 失败（typed
-   * `SkillRescanError`）→ 退回缓存 catalog 的可加载面 —— 人侧 slash 是宽松
-   * 面，一次 IO 故障不该让候选变空（与模型侧 `computeSkillIndexDelta` 必须
-   * 上抛的取舍刻意相反，见 rescan.ts 文件头）。缝缺席（测试注入 deps /
-   * ask）→ 用缓存 catalog，旧行为逐字节不变。
+   * Slash candidates must contain freshly loadable entries at install/reload
+   * time, without waiting for the next turn: the assembly-time cached catalog
+   * is only a snapshot from then, so at call time we re-scan the current skill
+   * roots through the rescan seam and take this beat's `loadable()`. Rescan
+   * failure (typed `SkillRescanError`) → fall back to the cached catalog's
+   * loadable surface — the human-side slash is a lenient surface and one IO
+   * fault must not empty the candidates (deliberately opposite to the
+   * model-side `computeSkillIndexDelta`, which must propagate; see the header
+   * of rescan.ts). Seam absent (test-injected deps / ask) → cached catalog,
+   * byte-identical old behavior.
    */
   async listSkills(): Promise<readonly SkillSummaryDto[]> {
     await this.ensureDeps();
@@ -2710,26 +2840,29 @@ export class SessionHub {
   }
 
   /**
-   * SC8：**现行**可加载技能面（读取调用期的那一拍）。rescan 缝在场 →
-   * 重扫现行技能根（装配期缓存的 catalog 是当时快照，会话中途落盘的
-   * SKILL.md / 插件根换血都不在里面）；失败 → 退回缓存 catalog —— 人侧是
-   * 宽松面：一次 IO 故障不清空候选，也不让候选里看得见的名字点下去 404
-   * （与模型侧 `computeSkillIndexDelta` 必须上抛的取舍刻意相反，见
-   * rescan.ts 文件头「读的人是谁」）。缝缺席（测试注入 deps / ask）→ 缓存
-   * catalog，旧行为逐字节不变。
+   * The current loadable-skill surface, sampled at read time. Rescan seam
+   * present → re-scan the current skill roots (the assembly-time cached
+   * catalog is a snapshot: SKILL.md files landed mid-session or swapped plugin
+   * roots are not in it); failure → fall back to the cached catalog — the
+   * human side is a lenient surface: one IO fault neither empties the
+   * candidates nor lets a visible name 404 on click (deliberately opposite to
+   * model-side `computeSkillIndexDelta` propagating; see "who is the reader"
+   * in the rescan.ts header). Seam absent (test-injected deps / ask) → cached
+   * catalog, byte-identical old behavior.
    */
   private async currentSkillCatalog(): Promise<SkillCatalog | undefined> {
     if (this.skillRescanner !== undefined) {
       try {
-        // 现行面（含插件根换血后 / 会话中途新落的 SKILL.md）。
+        // Current surface (after plugin-root swaps / mid-session new SKILL.md).
         return await this.skillRescanner.rescan();
       } catch (err) {
-        // EXIT: 只吞 typed rescan 失败 —— 编程错误（非 SkillRescanError）
-        // 继续上抛，不静默降级成过期目录。判别走 `instanceof`
-        // （SkillRescanError 是类，`kind` 同时在场供跨进程面使用）。
+        // EXIT: swallow only typed rescan failures — programming errors (not
+        // SkillRescanError) keep propagating instead of silently degrading to
+        // a stale catalog. Discrimination via `instanceof` (SkillRescanError
+        // is a class; `kind` is also present for cross-process surfaces).
         if (!(err instanceof SkillRescanError)) throw err;
-        // 渲染归 `errorMessage`（code-quality typed-error catch 契约禁止
-        // `instanceof Error ? … : String(…)`）。
+        // Rendering goes through `errorMessage` (the typed-error catch
+        // contract forbids `instanceof Error ? … : String(…)`).
         const reason = errorMessage(err);
         console.warn(
           `[serve] skill rescan failed, falling back to cached catalog: ${reason}`
@@ -2740,22 +2873,26 @@ export class SessionHub {
   }
 
   /**
-   * 读取技能正文。SC6：`disable-model-invocation` 只闸模型索引与 `skill()`，
-   * **不**闸人侧 slash 读盘 —— 只有 `get` miss 才算未找到。
+   * Load a skill body. `disable-model-invocation` gates only the model index
+   * and `skill()`, NOT human-side slash reads from disk — only a `get` miss
+   * counts as not-found.
    */
   async loadSkillBody(name: string): Promise<{ name: string; body: string }> {
     await this.ensureDeps();
-    // SC8：候选面「当场热」的另一半 —— 新进候选的名字必须点得动。取同一
-    // 个现行面（rescan 失败退缓存），否则 listSkills 刚给出的条目会在
-    // loadSkillBody 上 404（候选可见 / 正文不可达的分裂）。
+    // The other half of "candidates are hot at once": a name that just entered
+    // the candidate list must be clickable. Take the same current surface
+    // (cached fallback on rescan failure), otherwise an entry just returned by
+    // listSkills would 404 in loadSkillBody (visible candidates / unreachable
+    // bodies split).
     const entry = (await this.currentSkillCatalog())?.get(name);
     if (entry === undefined) {
       throw new NotFoundError(`skill not found: ${name}`);
     }
-    // ADR-0079 — skill 正文不再挂写根 trailer（与 #337 SC6 逐字节一致）。
-    // 写处境披露的权威路径在 worker prior + chat-session rebind 一次性
-    // 通知，共用 writeRootSegment helper；hub 侧不消费 liveTaskRoot /
-    // isolationOn（改绑通知走 chat-session，不经 hub）。
+    // ADR-0079 — skill bodies no longer carry the write-root trailer. The
+    // authoritative path for write-location disclosure is worker prior +
+    // chat-session one-shot rebind notification sharing the
+    // writeRootSegment helper; the hub does not consume liveTaskRoot /
+    // isolationOn (rebind notifications go through chat-session, not hub).
     const body = await createSkillBody({ entry, dir: entry.dir });
     return { name: entry.name, body };
   }
@@ -2771,7 +2908,8 @@ export class SessionHub {
   }
 
   async reloadMcp(): Promise<readonly McpServerStatusDto[]> {
-    // T7:串行化 / coalesce——每个调用方 promise 都有 typed 成功或失败终点。
+    // Serialize / coalesce: every caller's promise has a typed success or
+    // failure terminus.
     const run = this.mcpReloadChain.then(
       () => this.reloadMcpTransaction(),
       () => this.reloadMcpTransaction()
@@ -2784,13 +2922,15 @@ export class SessionHub {
   }
 
   /**
-   * T7 active-root reload 事务：先校验 active engine 的 mcpRoots，再加载
-   * config / 调 manager.reload。失败路径不得让旧+新 manager 同时成为对外
-   * 成功面；坏根在 shutdown 好 manager 之前拒绝。
+   * Active-root reload transaction: validate the active engine's mcpRoots
+   * first, then load config / call manager.reload. Failure paths must not
+   * leave old+new managers both serving as the outward success surface; bad
+   * roots are rejected before the good manager is shut down.
    */
   private async reloadMcpTransaction(): Promise<readonly McpServerStatusDto[]> {
-    // 已有可见 face 时不再 ensureDeps：避免 cache-hit activate 覆盖本事务
-    // 要校验的 active mcpRoots，也缩小 rebind∩reload 窗口。
+    // With a visible face already present, skip ensureDeps: it avoids
+    // cache-hit activate overwriting the active mcpRoots this transaction
+    // validates, and shrinks the rebind∩reload window.
     if (!this.mcpManager || this.activeMcpRoots === undefined) {
       await this.ensureDeps();
     }
@@ -2799,7 +2939,7 @@ export class SessionHub {
       return this.listMcpServers();
     }
 
-    // Root 校验必须先于 manager.reload（后者会 shutdown 旧 slots）。
+    // Root validation must precede manager.reload (the latter shuts down old slots).
     let validated: McpRoots;
     try {
       const roots = this.activeMcpRoots;
@@ -2809,7 +2949,7 @@ export class SessionHub {
           "active engine mcpRoots are required for MCP reload"
         );
       }
-      // mcpConfigRoot 合同上等于稳定 productRoot；用 resolver 再验一次。
+      // mcpConfigRoot is contractually the stable productRoot; re-verify via the resolver.
       validated = resolveMcpRoots({
         workspaceRoot: roots.workspaceRoot,
         productRoot: roots.mcpConfigRoot,
@@ -2876,10 +3016,10 @@ export class SessionHub {
   private recordViolationTrace(conversationId: string, reason: string): void {
     if (!this.traceOut) return;
     try {
-      // T3 (ADR-0071 Decision 4):
-      // violation 与主会话 trace 同域,锚在 `<projectDir>/<convId>/trace.jsonl`。
-      // 派生复用 `resolveConversationTraceFilePath`,与 `createTrace` 同源 →
-      // 同一会话的两条写入路径不会漂到不同文件。
+      // ADR-0071: violations share the main-session trace domain,
+      // anchored at `<projectDir>/<convId>/trace.jsonl`. Derivation reuses
+      // `resolveConversationTraceFilePath`, same source as `createTrace` →
+      // the two write paths of one session cannot drift to different files.
       const filePath = resolveConversationTraceFilePath({
         projectDir: this.store.getProjectDir(),
         conversationId,
@@ -2906,11 +3046,13 @@ export class SessionHub {
         field: "text",
       });
     }
-    // 机器装配的 skill-load 消息跳过用户输入长度上限（与模型侧 tool result
-    // 通道无字符上限对称 —— 都是机器装配而非手打用户文本）。78KB SKILL.md
-    // 一次性加载会撞 8000 上限；不豁免则 skill-load slash 路径不可用。
-    // 三处共用组合守卫 `exceedsUserInputCap`：hub.validateText / chat-session
-    // processChatLine / 同侧谓词单测。
+    // Machine-assembled skill-load messages skip the user-input length cap
+    // (symmetric with the model-side tool-result channel having no char cap —
+    // both are machine-assembled, not hand-typed user text). Loading a 78KB
+    // SKILL.md at once would hit the 8000 cap; without the exemption the
+    // skill-load slash path is unusable. The combined guard
+    // `exceedsUserInputCap` is shared by hub.validateText, chat-session
+    // processChatLine and the same-side predicate unit test.
     if (exceedsUserInputCap(text, MAX_MESSAGE_CHARS)) {
       throw new ValidationError(
         `message text exceeds max length ${MAX_MESSAGE_CHARS}`,
@@ -2919,26 +3061,27 @@ export class SessionHub {
     }
   }
 
-  /** #458 T5/T12: per-postMessage trace service (undefined when traceOut is
+  /** Per-postMessage trace service (undefined when traceOut is
    *  not configured). Hoisted at the start of serialize's work so the pin /
-   *  seed / writeback 发射点 and runDeps share one instance. */
+   *  seed / writeback emission points and runDeps share one instance. */
   private createTrace(
     conversationId: string
   ): TraceServiceWithHealth | undefined {
     if (!this.traceOut) return undefined;
-    // T3 (ADR-0071 Decision 4):
-    // 主会话 + violation 共用同一 `resolveConversationTraceFilePath` 派生,
-    // 确保两条写入路径落 `<projectDir>/<conversationId>/trace.jsonl`。
+    // ADR-0071: main session + violation share one
+    // `resolveConversationTraceFilePath` derivation, ensuring both write
+    // paths land in `<projectDir>/<conversationId>/trace.jsonl`.
     //
-    // T5 (ADR-0071 / SC8 + L2): 子代理聚合流
-    // (`createTrace("subagent")` 字面 conversationId 假 scope, `<traceOut>/subagent.jsonl`)
-    // 已退役 —— 子代理 lifecycle / content trace 由 manager 经
-    // review-fix (M5) `projectDir` 两段式缝派生 per-agent
-    // `<projectDir>/<convId>/subagents/agent-<taskId>.jsonl`,见
-    // buildProductionEngine / rebuildEngine 路径的 projectDir 注入。
-    // 本函数调用点不再传 conversationId="subagent"
-    // —— 残留调用(若有)会让 ajv 接受 `conversationId:"subagent"`,但
-    // 写入路径已不存在,无副作用,仅 spec 一致性提示。
+    // The subagent aggregation stream (`createTrace("subagent")` with a fake
+    // literal-conversationId scope writing `<traceOut>/subagent.jsonl`) is
+    // retired — subagent lifecycle / content trace is now derived per agent by
+    // the manager through the two-segment `projectDir` seam as
+    // `<projectDir>/<convId>/subagents/agent-<taskId>.jsonl`, see the
+    // projectDir injection on the buildProductionEngine / rebuildEngine paths.
+    // Call sites no longer pass conversationId="subagent" — a residual call
+    // (if any) would still be accepted by ajv as `conversationId:"subagent"`,
+    // but the write path no longer exists, so it is side-effect-free and only
+    // a spec-consistency note.
     const trace = createJsonlTraceService({
       traceFilePath: resolveConversationTraceFilePath({
         projectDir: this.store.getProjectDir(),
@@ -2950,21 +3093,25 @@ export class SessionHub {
     return trace;
   }
 
-  /** #604 T1 (SC1-SC5):compact 边界渲染 — 把 session.messages 内最近 ≤3 句
-   *  合格用户任务原话渲染为单段文本,由 runDeps.boundaryAttachment 闭包
-   *  注入 loop-engine,compact 触发时追加为一条 user 消息(放在 boundary
-   *  placeholder 之后)。
+  /** Compact-boundary rendering: render the latest ≤3 qualifying
+   *  user task quotes from session.messages into one text block, injected
+   *  into loop-engine via the runDeps.boundaryAttachment closure and appended
+   *  as one user message when compact fires (after the boundary placeholder).
    *
-   *  约束:
-   *    - 0 句合格 → return undefined,helper 早退(行为 byte-stable,等价
-   *      旧 taskFocus undefined → 字段缺席的语义；#605 T2 已退休该字段)。
-   *    - 自动模式不再由本函数拦截 — 由 boundaryAttachment 闭包上游在
-   *      `session.goal.text.length > 0` 时整段不注入闭包;此处只管 messages。
-   *    - 单句上限不限(spec 旧 240 cap 不再现)— 直接整句进入摘录。
-   *    - 渲染形态:`<prefix> — N\n1. t1\n2. t2\n…`(数字编号,chronological,
-   *      最新交代在末尾,与 extractRecentUserTasks 输出顺序一致)。
-   *    - 纯字符串派生,零 IO / 零 LLM 调用;消息结构由 turn-projection.ts
-   *      `extractRecentUserTasks` 守门。
+   *  Constraints:
+   *    - 0 qualifying sentences → return undefined, the helper early-exits
+   *      (byte-stable behavior, equivalent to the old semantics of taskFocus
+   *      undefined → field absent; that field is retired).
+   *    - auto mode is no longer intercepted here — upstream the
+   *      boundaryAttachment closure skips injection entirely when
+   *      `session.goal.text.length > 0`; this function only handles messages.
+   *    - no per-sentence cap (the old 240-char spec cap is gone) — full
+   *      sentences enter the excerpt directly.
+   *    - render shape: `<prefix> — N\n1. t1\n2. t2\n…` (numbered,
+   *      chronological, newest last, matching extractRecentUserTasks' output
+   *      order).
+   *    - pure string derivation, zero IO / zero LLM calls; message structure
+   *      is guarded by turn-projection.ts `extractRecentUserTasks`.
    */
   private renderRecentUserTasksBoundary(
     messages: ReadonlyArray<AnthropicNativeMessage>
@@ -3016,9 +3163,9 @@ export class SessionHub {
     });
   }
 
-  /** #458 T5/T12: `/goal clear` 占位 helper (T6 slash + chat-session 调用)。
-   *  Clears the pinned goal (SC: goal 一并清空), records the trace clear event,
-   *  and persists atomically through the same serialize queue. */
+  /** `/goal clear` helper (called by the slash layer + chat-session).
+   *  Clears the pinned goal (the goal goes away entirely), records the trace
+   *  clear event, and persists atomically through the same serialize queue. */
   async clearGoal(conversationId: string): Promise<void> {
     await this.serialize({
       conversationId,
@@ -3097,20 +3244,24 @@ export class SessionHub {
   }
 
   /**
-   * #620 T3:commit 钩子的 store 落点(仅在 postMessage serialize 槽位内被
-   * 调,见 runDeps 处注释 —— 直调 store,不重入队列)。直追 appendEvents;
-   * typed store 失败(legacy .json-only 会话升级后首跑 → write_failed;
-   * 文件被外部删除 → not_found 等)→ 以当前 session 全量 save 一次
-   * bootstrap(save 权威 JSONL 形态;legacy 即 T2 migrate-on-save 语义的提前
-   * 触发)后重试一次。非 typed 异常原样上抛;bootstrap / 重试仍败也上抛
-   * —— 不静默吞咽(loop-engine 包 MessageCommitError 中止本次 run)。
+   * Store landing point for the commit hook (only called inside postMessage's
+   * serialize slot, see the runDeps comment — direct store calls, no queue
+   * re-entry). Try appendEvents first; on a typed store failure (first run of
+   * a legacy .json-only session after upgrade → write_failed; file deleted
+   * externally → not_found, etc.) bootstrap once by saving the full current
+   * session (save writes the authoritative JSONL form; for legacy sessions
+   * this is an early trigger of migrate-on-save semantics), then retry once.
+   * Non-typed exceptions propagate as-is; bootstrap/retry failures also
+   * propagate — never swallowed silently (loop-engine wraps into
+   * MessageCommitError and aborts the run).
    */
   private async appendSessionEvents(opts: {
     readonly conversationId: string;
     readonly session: SessionFileV1;
     readonly events: ReadonlyArray<AnthropicNativeMessage>;
-    /** D2 (tui-display-consistency):assistant commit 携带的思考时长(ms)。
-     *  tool_result / 其它批次 = undefined,appendEvents 不挂 key。 */
+    /** D2 (tui-display-consistency): thinking duration (ms) carried by an
+     *  assistant commit. tool_result / other batches = undefined, and
+     *  appendEvents omits the key. */
     readonly thinkingMs?: number;
   }): Promise<void> {
     try {
@@ -3134,14 +3285,14 @@ export class SessionHub {
     }
   }
 
-  /** 裁决#8 + T1 + T4: save condition based on stopReason and progress delta.
+  /** Save condition based on stopReason and progress delta.
    *  `priorMessages` = messages the model saw at the start of THIS run
    *  (delta = result.messages.length - priorMessages.length drives the
    *  cancelled-delta check and the appendCheckpoint messagesCount). Disk
    *  persistence uses `diskPrior` (defaults to priorMessages for the
    *  postMessage path; /continue sets it to session.messages so the trailing
    *  interrupt system message stays on disk even though the model prior
-   *  omitted it — spec invariant 5–7 / SC3).
+   *  omitted it).
    *
    *  decideCheckpointPersist picks one of three outcomes:
    *    "none"              — skip save entirely
@@ -3149,16 +3300,17 @@ export class SessionHub {
    *                          maxTurns / timeout / nonSuccessStop /
    *                          cancelled-with-delta)
    *    "partial_user_only" — splice ONLY user-role messages from this run's
-   *                          delta onto disk (spec invariant 8 / SC4 —
+   *                          delta onto disk (spec:
    *                          protocolError / emptyFinalResponse keep the
    *                          user message, drop the failed assistant).
    *
    *  Interrupting stops (cancelled with delta>0) also append a checkpoint
    *  record so the interrupted turn is recoverable / rewind-able.
    *
-   *  B1: 返回值 = true 实际落盘 / false 未落盘(decideCheckpointPersist 拒绝
-   *  或 store.save 抛错)。错误处理语义与改前一致 —— save 失败向上传播,
-   *  由 postMessage 的 serialize 队列收口,不在此处 warn。*/
+   *  B1: return value = true when actually persisted / false when not
+   *  (decideCheckpointPersist declined or store.save threw). Error-handling
+   *  semantics unchanged — save failures propagate upward and are settled by
+   *  postMessage's serialize queue; no warn here. */
   private async conditionalSave(opts: {
     readonly conversationId: string;
     readonly session: SessionFileV1;
@@ -3257,51 +3409,60 @@ export class SessionHub {
   }
 
   /**
-   * ADR-0113 T4 / spec Does 5: lite 标题生成的 hub 触发点。同步部分只做
-   * 闸（generator 在场 / 第一次 completed / 实质 user 文本），LLM 调用与
-   * 落盘挂在未 await 的异步尾巴上 —— postMessage 主回合不为生成等待。
+   * ADR-0113: hub trigger point for lite title generation. The synchronous
+   * part only checks the gates (generator present / first completed turn /
+   * substantive user text); the LLM call and persistence ride an un-awaited
+   * async tail — the postMessage main turn never waits on generation.
    */
   private maybeFireTitleGeneration(opts: {
     readonly conversationId: string;
     readonly result: RunResult;
   }): void {
     const generator = this.titleGenerator;
-    // EXIT: lite 缺席（generator 未注入）→ 永不触发，hub 行为与今日逐字节一致。
+    // EXIT: lite absent (generator not injected) → never fire; hub behavior
+    // byte-identical to today.
     if (generator === undefined) return;
     if (opts.result.stopReason !== "completed") return;
-    // EXIT: 本会话本进程已烧过一次 lite → 第二次 completed 不再触发（spec Does「一次」）。
+    // EXIT: this process already burned one lite title for this session →
+    // the second completed turn does not re-fire (fire once per session).
     if (this.titleFiredConversations.has(opts.conversationId)) return;
     const source = collectTitleSource(
       opts.result.messages,
       opts.result.finalText ?? ""
     );
-    // EXIT: 寒暄-only / 过短且无助手文本 → 本轮不标记已触发，下个 completed 回合再判。
+    // EXIT: greeting-only / too short with no assistant text → do not mark
+    // fired this turn; re-evaluate on the next completed turn.
     if (source === undefined) return;
     this.titleFiredConversations.add(opts.conversationId);
     const conversationId = opts.conversationId;
     void (async () => {
       try {
-        // 磁盘闸预筛（(d) 跨进程形态）：已有标题事件 → 连 lite 都不烧。这是
-        // 队列外的 best-effort 省钱闸，不作正确性依据 —— 权威判定在下方
-        // serialize 槽位内（check 与 append 同槽位，见 review-fix Medium）。
+        // Disk-gate pre-filter (cross-process shape): an existing title event
+        // → don't even burn the lite call. This is a best-effort cost gate
+        // outside the queue, not a correctness basis — the authoritative check
+        // runs inside the serialize slot below (check and append in one slot).
         if (await this.store.hasTitleEvent(conversationId)) return;
         const raw = await generator(source);
         const title = sanitizeSessionTitle(raw ?? "");
-        // EXIT: 生成失败 / 超时 / 空结果 → log-and-continue，header title 留 extractTitle 占位。
+        // EXIT: generation failed / timed out / empty → log-and-continue;
+        // the header title keeps its extractTitle placeholder.
         if (title.length === 0) {
           console.warn(
             `[session-title] generation produced no title for ${conversationId}; placeholder kept`
           );
           return;
         }
-        // appendTitle MUST 走 hub serialize 队列（与 appendEvents 同 posture）。
-        // 本 IIFE 在当前 serialize 槽位之外排队 —— 只 enqueue 不等待，不复现
-        // hub.ts 内层触发警告的「槽位内 await 外层队列」死锁形态。
-        // check-then-act 同槽位（review-fix Medium）：hasTitleEvent 的权威判
-        // 定与 appendTitle 在同一 work 回调内顺序执行 —— 预筛之后、enqueue
-        // 之前若有其它操作（save / appendEvents / 另一条标题尾巴）排进本 id
-        // 的队列，其结果对槽位内的判定可见，不会被重排到 check 与 append
-        // 之间而写出第二条标题事件。
+        // appendTitle MUST go through the hub serialize queue (same posture
+        // as appendEvents). This IIFE queues outside the current serialize
+        // slot — enqueue only, never await, so it cannot reproduce the
+        // "await the outer queue from inside a slot" deadlock that the
+        // in-file warning describes. Check-then-act in one slot: the
+        // authoritative hasTitleEvent check and appendTitle run sequentially
+        // inside the same work callback — if another operation (save /
+        // appendEvents / another title tail) enters this id's queue between
+        // the pre-filter and the enqueue, its result is visible to the
+        // in-slot check and cannot be reordered between check and append to
+        // write a second title event.
         await this.serialize({
           conversationId,
           work: async () => {
@@ -3313,7 +3474,8 @@ export class SessionHub {
           },
         });
       } catch (err) {
-        // EXIT: 任何未预期失败（store typed error / generator 抛错）→ log-and-continue，占位保留。
+        // EXIT: any unexpected failure (store typed error / generator throw)
+        // → log-and-continue, placeholder kept.
         console.warn(
           `[session-title] generation skipped: ${describeTitleError(err)}`
         );
@@ -3322,13 +3484,16 @@ export class SessionHub {
   }
 
   /**
-   * SC8（slash 侧）：切换对外可见的 skill 面。与 `activateMcpFace` 同形
-   * （per-root 引擎切换时活跃面跟着走），但**不**收口任何东西 —— catalog /
-   * rescanner 无资源句柄，纯引用替换。旧引擎的 rescan 缝被换下后不再对外
-   * 可见（它仍可被其它持有者引用，但不经本 hub）。
+   * Switch the outward-visible skill face (slash side). Same shape as
+   * `activateMcpFace` (the active face follows per-root engine switches), but
+   * nothing is closed out — catalog / rescanner hold no resources, this is a
+   * pure reference swap. The old engine's rescan seam is no longer visible
+   * outward after replacement (other holders may still reference it, just not
+   * through this hub).
    *
-   * 缺席字段不覆盖（沿用旧面）：测试注入的 `buildEngine` 缝通常只回 deps，
-   * 旧行为逐字节不变。
+   * Absent fields do not overwrite (the old face stays): test-injected
+   * `buildEngine` seams usually return only deps, keeping old behavior
+   * byte-identical.
    */
   private activateSkillFace(entry: {
     readonly skillCatalog?: SkillCatalog;
@@ -3343,8 +3508,9 @@ export class SessionHub {
   }
 
   /**
-   * T7：切换对外可见的 MCP face。旧 manager 先 shutdown（或保持为唯一失败面），
-   * 再公开新 manager / roots / catalog——禁止旧+新同时成功。
+   * Switch the outward-visible MCP face. The old manager is shut down first
+   * (or kept as the sole failure surface), then the new manager / roots /
+   * catalog are published — old+new must never both be "success".
    */
   private async activateMcpFace(entry: {
     readonly mcpManager?: McpManager;
@@ -3400,12 +3566,14 @@ export class SessionHub {
       ...("catalog" in built && built.catalog
         ? { catalog: built.catalog }
         : {}),
-      // SC8（slash 侧）：per-root 引擎路径此前丢掉 skill 面（catalog 只在
-      // 兜底路径发布）→ serve 绑根后 `listSkills` 恒空且无 rescan 缝。
-      // `EngineBundle` 之外的可选面，经 structural assignability 透传。
+      // Skill face (slash side): the per-root engine path used to drop the
+      // skill surface (catalog only published on the fallback path) → after
+      // serve binds a root, `listSkills` was always empty with no rescan seam.
+      // An optional face beyond `EngineBundle`, passed through via structural
+      // assignability.
       ...skillFaceOf(built),
-      // issue 1059 (G3)：门禁 holder 同为 `EngineBundle` 之外的装配面，
-      // 缺席（测试注入缝）不落键。
+      // The worktree gate holder is likewise an assembly face beyond
+      // `EngineBundle`; absent (test injection seam) → key omitted.
       ...(built.worktreeOnMutate
         ? { worktreeOnMutate: built.worktreeOnMutate }
         : {}),
@@ -3418,15 +3586,17 @@ export class SessionHub {
     this.autoMemory = this.autoMemory ?? built.autoMemory;
     this.overlayMemoryPrefetch =
       this.overlayMemoryPrefetch ?? built.overlayMemoryPrefetch;
-    // issue 1059 (G3)：holder 是全局门禁轴（非 per-root 面），首见即锚定；
-    // TUI 宿主经 `worktreeOnMutateHolder` 注入时各引擎本就是同一个实例。
+    // The holder is a global gate axis (not a per-root face), so the first
+    // sighting anchors it; when the TUI host injects it via
+    // `worktreeOnMutateHolder`, all engines already share one instance.
     this.worktreeOnMutate = this.worktreeOnMutate ?? built.worktreeOnMutate;
     return entry;
   }
 
   /**
-   * fs 档 holder 当前快照（holder 缺席 → undefined）。**每次调用现读**：
-   * 翻档只影响之后的调用，不重建引擎（ADR-0092 SC11–SC13）。
+   * Current snapshot of the fs-tier holder (holder absent → undefined). Read
+   * fresh on every call: a tier flip only affects later calls and never
+   * rebuilds engines (ADR-0092).
    */
   private fsModeSnapshot(): FsIsolationMode | undefined {
     if (this.fsMode === undefined) return undefined;
@@ -3445,7 +3615,7 @@ export class SessionHub {
       catalog?: AciCatalog;
       skillCatalog?: SkillCatalog;
       skillRescanner?: SkillRescanner;
-      /** issue 1059 (G3)：`BuiltEngine.worktreeOnMutate` 全量视图字段。 */
+      /** Full-view field of `BuiltEngine.worktreeOnMutate`. */
       worktreeOnMutate?: WorktreeGateReader;
     }
   > {
@@ -3455,18 +3625,23 @@ export class SessionHub {
       );
     }
     const env = this.envProvider ? this.envProvider() : loadIknowEnv();
-    // T6:productRoot 稳定；workspaceRoot/cwd/sandboxRoot 跟随当前 task root。
-    // 末档从 `root` 改为 `mainCheckoutOf(root)`（T6 / ADR-0037 §4）：宿主没显式
-    // 传两个根时（serve 默认、TUI 之外的调用方），改绑后 root 就是 task 树，
-    // 直接当 productRoot 会把项目身份与 per-root 状态一起搬到裸树上。树是
-    // `<main>/.iknow/worktrees/<conv>`，主 checkout 由同一命名 SSOT 派生，
-    // 重启后恢复到树上的会话同样得到主仓。
+    // productRoot is stable; workspaceRoot/cwd/sandboxRoot follow the current
+    // task root. The last fallback changed from `root` to
+    // `mainCheckoutOf(root)` (ADR-0037): when the host passes neither root
+    // explicitly (serve default, callers beyond the TUI), after a rebind the
+    // root IS the task tree, and using it directly as productRoot would move
+    // project identity and per-root state onto the bare tree. Trees live at
+    // `<main>/.iknow/worktrees/<conv>`; the main checkout is derived from the
+    // same naming SSOT, so a session restored onto a tree after restart still
+    // resolves to the main repo.
     const productRoot =
       this.productRoot ?? this.workspaceRoot ?? mainCheckoutOf(root);
-    // Review round 3:项目身份根与 productRoot 分开 —— 后者服务 mcpConfigRoot /
-    // 状态锚，取自宿主的 workspaceRoot；身份要的是操作员绑定的那个项目。
-    // `bindWorkspace` 不要求绑定路径是仓根（只校验绝对且存在），所以
-    // `boundRoot` 可能是 `/repo/packages/app`；拿 `root` 现算会在改绑后跳到仓根。
+    // The project identity root is separate from productRoot — the latter
+    // serves mcpConfigRoot / state anchoring and comes from the host's
+    // workspaceRoot, while identity wants the project the operator bound.
+    // `bindWorkspace` does not require the bound path to be a repo root (only
+    // absolute + existing), so `boundRoot` may be `/repo/packages/app`;
+    // computing from `root` fresh would jump to the repo root after a rebind.
     const projectIdentityRoot =
       this.projectIdentityRoot ?? this.boundRoot ?? mainCheckoutOf(root);
     const built = await buildHarnessEngine({
@@ -3477,24 +3652,28 @@ export class SessionHub {
       workspaceRoot: root,
       productRoot,
       projectIdentityRoot,
-      // Review High-2 (hard req 9): reuse the startup settings object — a
-      // worktree-rooted loadIknowSettings({cwd}) would silently drop project
-      // settings (`.iknow/` is gitignored inside the worktree).
+      // Reuse the startup settings object — a worktree-rooted
+      // loadIknowSettings({cwd}) would silently drop project settings
+      // (`.iknow/` is gitignored inside the worktree).
       ...(this.startupSettings ? { settings: this.startupSettings } : {}),
-      // ADR-0037 T3:mutate 门禁 host 缝 —— 开关读取在 build-engine 启动加载点;
-      // provision 负责建树 + 仅本会话根改绑。T4:passthrough 不经
-      // conversation-agnostic 的 initiallyBound —— 会话已在本会话自己的 task
-      // worktree 时由 provision 幂等放行（返回同根），别会话的树 / 无关
-      // worktree 由 provision fail-closed（typed foreign_worktree）。
+      // ADR-0037: mutate-gate host seam — the switch is read at the
+      // build-engine startup load point; provision builds the tree and rebinds
+      // only this session's root. Passthrough does not go through
+      // conversation-agnostic `initiallyBound` — when the session already
+      // lives in its own task worktree, provision lets it through idempotently
+      // (returning the same root); another session's tree or an unrelated
+      // worktree fails closed (typed foreign_worktree).
       worktreeIsolation: {
-        // 纯透传走共享 SSOT worktree-host.ts（PR #869/#881 与 2026-09-05
-        // TUI 缝两次手工解构丢 name 之后的一致性收敛：入口禁止手写
-        // 逐字段解构 wrapper）。
+        // Pure pass-through lives in the shared SSOT worktree-host.ts
+        // (consistency convergence after two manual per-field destructuring
+        // wrappers dropped `name`): entry points must not hand-roll
+        // field-by-field wrappers.
         ...createWorktreeHostProvision({
           provisionWorktree: (ctx) => this.provisionWorktree(ctx),
         }),
-        // T7:enter-worktree 工具缝 —— 会话显式进入本仓已存在的 task
-        // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
+        // enter-worktree tool seam — a session explicitly enters an existing
+        // task worktree of this repo (including another session's tree); the
+        // authorization anchor is the persisted session.workspaceRoot.
         worktreeEnter: ({
           conversationId,
           root: sessionRoot,
@@ -3505,7 +3684,8 @@ export class SessionHub {
             root: sessionRoot,
             targetConversationId,
           }),
-        // T8:exit-worktree 工具缝 —— 会话回到主仓根，树保留不删。
+        // exit-worktree tool seam — the session returns to the main-repo
+        // root; the tree is kept, not deleted.
         worktreeExit: ({ conversationId, root: sessionRoot }) =>
           this.exitWorktree({ conversationId, root: sessionRoot }),
         // task-worktree-lifecycle: read-only discovery and explicit cleanup
@@ -3520,35 +3700,39 @@ export class SessionHub {
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
       ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),
-      // D-α T3 / ADR-0030:overlay holder 透传 —— serve / TUI 的 `/graph` 与
-      // Shift+Tab 翻的是同一个它（SC3 三入口同 holder）。
+      // ADR-0030: overlay holder pass-through — serve / TUI `/graph` and
+      // Shift+Tab flip the same instance (all entrypoints share one holder).
       ...(this.graphMode ? { graphMode: this.graphMode } : {}),
-      // ADR-0092 / SC13:fs isolation holder 透传 —— `/config` 翻的是同一个
-      // 它（bash 工厂 per-call 读）。holder 缺席 → key 不出现（引擎侧
-      // `opts.fsMode?.get() ?? "global"` 与静态字符串默认同解析）。
+      // ADR-0092: fs isolation holder pass-through — `/config` flips the same
+      // instance (the bash factory reads per call). Holder absent → key
+      // omitted (engine-side `opts.fsMode?.get() ?? "global"` resolves the
+      // same as a static string default).
       ...presentFields("fsMode", this.fsMode),
-      // #950 T2 / session-folder-consolidation / ADR-0071 Decision 2:
-      // todos 落「会话文件夹」—— `todoDir` 改为「会话项目目录」
-      // (由 SessionStore.getProjectDir() 暴露的 read-only 投影)。三入口
-      // (cli / serve / TUI) 共享同一对 `(baseDir, projectIdentityRoot)` →
-      // 同一会话解析到同一 projectDir(`<surface>` 分裂消除)。
+      // ADR-0071: todos land in the "session folder" — `todoDir`
+      // is the "session project directory" (the read-only projection exposed
+      // by SessionStore.getProjectDir()). All three entrypoints (cli / serve /
+      // TUI) share the same `(baseDir, projectIdentityRoot)` pair → one
+      // session resolves to one projectDir (the `<surface>` split is gone).
       todoDir: this.store.getProjectDir(),
-      // ADR-0088:后台任务登记根 = 同一项目树的兄弟 `tasks/`。store 的
-      // projectDir 已是 `<poolRoot>/projects/<slug>`(ADR-0071 公式),故
-      // 任务登记与会话文件夹同 slug,不锚 workspaceRoot。
+      // ADR-0088: background-task registry root = sibling `tasks/` of the
+      // same project tree. The store's projectDir is already
+      // `<poolRoot>/projects/<slug>` (the ADR-0071 formula), so task registry
+      // and session folder share one slug instead of anchoring workspaceRoot.
       tasksDir: join(this.store.getProjectDir(), TASKS_DIR_NAME),
       memoryDir: join(this.store.getProjectDir(), MEMORY_DIR_NAME),
-      // review-fix (M5): 两段式缝 —— 装配期只传 projectDir
-      // (`<baseDir>/projects/<slug>`),manager spawn 期按 def.conversationId
-      // 派生 per-conversation 叶子 `<projectDir>/<convId>/subagents/`
-      // (与 todoDir 的 resolveConversationTodoPath 同构)。会话删除时
-      // SessionStore.delete 整删 `<convId>/` 文件夹,子代理记录同灭,
-      // 不在项目层留孤儿。旧的项目层平铺 `<projectDir>/subagents/`
-      // (`resolveSubagentTraceDirShared`)已退役。
-      // `createTrace("subagent")` (conversationId 聚合单文件) 已退役。
+      // Two-segment seam — at assembly time only projectDir is passed
+      // (`<baseDir>/projects/<slug>`); the manager derives the
+      // per-conversation leaf `<projectDir>/<convId>/subagents/` at spawn
+      // time from def.conversationId (isomorphic to todoDir's
+      // resolveConversationTodoPath). When a session is deleted,
+      // SessionStore.delete removes the whole `<convId>/` folder, subagent
+      // records included, leaving no project-level orphan. The old flat
+      // project-level `<projectDir>/subagents/`
+      // (`resolveSubagentTraceDirShared`) is retired, as is
+      // `createTrace("subagent")` (the conversationId-aggregated single file).
       projectDir: this.store.getProjectDir(),
-      // live-graph-phase1 T1:账本 host 透传 —— 按 ctx.conversationId 解析会话
-      // 账本；resetSession / shutdown 销毁。
+      // Live-graph ledger host pass-through — resolve the per-session ledger
+      // by ctx.conversationId; destroyed on resetSession / shutdown.
       ...(this.liveGraphLedger
         ? { liveGraphLedger: this.liveGraphLedger }
         : {}),
@@ -3557,8 +3741,9 @@ export class SessionHub {
         : {}),
     });
     this.mcpHome = homedir();
-    // T7:mcpManager / catalog / mcpRoots 由 getOrBuildEngine → activateMcpFace
-    // 统一切换，避免此处抢先覆盖导致旧 manager 未收口。
+    // mcpManager / catalog / mcpRoots are switched uniformly via
+    // getOrBuildEngine → activateMcpFace, so an eager overwrite here cannot
+    // leave the old manager unclosed.
     return built;
   }
 
@@ -3572,12 +3757,14 @@ export class SessionHub {
    */
   private async ensureDeps(sessionRoot?: string): Promise<LoopEngineDeps> {
     if (this.injectedDeps) {
-      // 注入 deps 的 host 自己 build 了 engine（TUI），快照句柄经构造 opts
-      // 进来;纯测试注入路径没有 engine → undefined,行为零变化。
-      // Review High-1 (2026-08-29):host 声明 injectedEngineRoot 且会话根已
-      // 离开该根（worktree rebind）→ 落到 per-root 引擎重建（buildEngine 缝
-      // / 生产装配），与 hub.ts 两条装配路径行为一致；未声明 → 短路语义与
-      // 今日逐字节一致。
+      // Injected-deps hosts build the engine themselves (TUI); the snapshot
+      // handle comes in via constructor opts. Pure test-injection paths have
+      // no engine → undefined, zero behavior change.
+      // When the host declares injectedEngineRoot and the session root has
+      // left that root (worktree rebind), fall through to per-root engine
+      // rebuild (buildEngine seam / production assembly) so behavior matches
+      // hub.ts's two assembly paths; undeclared → short-circuit semantics
+      // byte-identical to before.
       const mapRoot = sessionRoot ?? this.activeEngineRoot ?? this.boundRoot;
       if (
         mapRoot !== undefined &&
@@ -3593,8 +3780,9 @@ export class SessionHub {
     }
     const mapRoot = sessionRoot ?? this.activeEngineRoot ?? this.boundRoot;
     if (mapRoot !== undefined) {
-      // D-α T3:per-root 多引擎时,活跃快照跟着本次解析到的那台走。
-      // T7:优先 activeEngineRoot，避免 MCP list/reload 被 bindRoot 抢回主仓 face。
+      // With per-root multi-engine, the active snapshot follows the engine
+      // resolved this time. Prefer activeEngineRoot so MCP list/reload is not
+      // pulled back to the main-repo face by bindRoot.
       const entry = await this.getOrBuildEngine(mapRoot);
       this.activeGraphAssembly = entry.graphAssembly;
       return entry.deps;
@@ -3605,8 +3793,9 @@ export class SessionHub {
         "ask_inlet_missing: SessionHub lazy deps require AskUser (#162)"
       );
     }
-    // settings-hot-reload（T3）:envProvider 注入后用它拿 env（替代内部
-    // loadIknowEnv()）。缺省 → 既有行为零变化（仍内部 loadIknowEnv）。
+    // After envProvider is injected, use it to obtain env (replacing the
+    // internal loadIknowEnv()). Default → existing behavior zero change (still
+    // internal loadIknowEnv).
     const env = this.envProvider ? this.envProvider() : loadIknowEnv();
     // Delegate validation and assembly to the SSOT. `buildHarnessEngine`
     // validates apiKey/askUser through the shared fail-loud path, preserving
@@ -3614,16 +3803,19 @@ export class SessionHub {
     // The returned `engine` is built once (code-review 2026-08-05) and
     // discarded — serve only consumes `deps`, and the cost is a single
     // `createLoopEngine` allocation, not a per-message re-construction.
-    // #440 T1-fix + #950 T2:serve 入口注入 session-folder todoDir
-    // (`this.store.getProjectDir()`),per-conversationId 解析在调用期由
-    // todo-write.ts:resolveConversationTodoPath 派生 —— 不再需要 per-session
-    // engine 重建(cachedDeps 共享的只是「根」,叶子按 ctx.conversationId 分)。
-    // review-fix (Fix 1): subagent 生命周期事件落盘（spec SC1 生产装配）——
-    // hub 的 subagentManager 是单例共享（surface!=="ask" 在 build-engine.ts:307-320
-    // 自建一次）, 所有 serve 会话的 subagent 事件聚合到 <traceOut>/subagent.jsonl
-    // (conversationId="subagent")；reader 侧按 per-record task_id 过滤。
-    // 仅当 this.traceOut 配置（serve.ts 总会传 resolveTracePath 解析值）才注入；
-    // 缺席 → manager 走 build-engine 默认 NoopTraceService (byte-stable)。
+    // The serve entry injects the session-folder todoDir
+    // (`this.store.getProjectDir()`); per-conversationId resolution happens at
+    // call time in todo-write.ts:resolveConversationTodoPath — no per-session
+    // engine rebuild needed (what cachedDeps shares is only the "root"; the
+    // leaf branches by ctx.conversationId).
+    // Subagent lifecycle events land on disk (production assembly): the hub's
+    // subagentManager is a shared singleton (build-engine.ts self-builds it
+    // once when surface!=="ask"), aggregating all serve sessions' subagent
+    // events into <traceOut>/subagent.jsonl (conversationId="subagent"); the
+    // reader side filters per-record by task_id. Injected only when this
+    // traceOut is configured (serve.ts always passes the resolveTracePath
+    // result); absent → the manager uses build-engine's default
+    // NoopTraceService (byte-stable).
     const built = await buildHarnessEngine({
       env,
       askUser: this.askUser,
@@ -3631,19 +3823,22 @@ export class SessionHub {
       // Review High-2 (hard req 9): fallback path reuses the startup settings
       // object too (rebind-rebuilt engines must not reload settings).
       ...(this.startupSettings ? { settings: this.startupSettings } : {}),
-      // ADR-0037 T3:未 bind 根的兜底路径同样接 isolation host 缝
-      // （repoRoot = sandboxRoot ?? process.cwd();session workspaceRoot 缺席
-      // 的会话在 rebind 后下一回合走 per-root 引擎路径）。T4:同上——
-      // passthrough 由 provision 按会话锚定，不设 initiallyBound。
+      // ADR-0037: the un-bound-root fallback path also wires the isolation
+      // host seam (repoRoot = sandboxRoot ?? process.cwd(); sessions lacking a
+      // workspaceRoot take the per-root engine path on the turn after a
+      // rebind). As above: passthrough is anchored per session by provision,
+      // no initiallyBound.
       worktreeIsolation: {
-        // 纯透传走共享 SSOT worktree-host.ts（PR #869/#881 与 2026-09-05
-        // TUI 缝两次手工解构丢 name 之后的一致性收敛：入口禁止手写
-        // 逐字段解构 wrapper）。
+        // Pure pass-through lives in the shared SSOT worktree-host.ts
+        // (consistency convergence after two manual per-field destructuring
+        // wrappers dropped `name`): entry points must not hand-roll
+        // field-by-field wrappers.
         ...createWorktreeHostProvision({
           provisionWorktree: (ctx) => this.provisionWorktree(ctx),
         }),
-        // T7:enter-worktree 工具缝 —— 会话显式进入本仓已存在的 task
-        // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
+        // enter-worktree tool seam — a session explicitly enters an existing
+        // task worktree of this repo (including another session's tree); the
+        // authorization anchor is the persisted session.workspaceRoot.
         worktreeEnter: ({
           conversationId,
           root: sessionRoot,
@@ -3654,7 +3849,8 @@ export class SessionHub {
             root: sessionRoot,
             targetConversationId,
           }),
-        // T8:exit-worktree 工具缝 —— 会话回到主仓根，树保留不删。
+        // exit-worktree tool seam — the session returns to the main-repo
+        // root; the tree is kept, not deleted.
         worktreeExit: ({ conversationId, root: sessionRoot }) =>
           this.exitWorktree({ conversationId, root: sessionRoot }),
         // task-worktree-lifecycle: read-only discovery and explicit cleanup.
@@ -3668,44 +3864,47 @@ export class SessionHub {
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
       ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),
-      // D-α T3 / ADR-0030:overlay holder 透传 —— serve / TUI 的 `/graph` 与
-      // Shift+Tab 翻的是同一个它（SC3 三入口同 holder）。
+      // ADR-0030: overlay holder pass-through — serve / TUI `/graph` and
+      // Shift+Tab flip the same instance (all entrypoints share one holder).
       ...(this.graphMode ? { graphMode: this.graphMode } : {}),
-      // ADR-0092 / SC13:fs isolation holder 透传 —— `/config` 翻的是同一个
-      // 它（bash 工厂 per-call 读）。holder 缺席 → key 不出现（引擎侧
-      // `opts.fsMode?.get() ?? "global"` 与静态字符串默认同解析）。
+      // ADR-0092: fs isolation holder pass-through — `/config` flips the same
+      // instance (the bash factory reads per call). Holder absent → key
+      // omitted (engine-side `opts.fsMode?.get() ?? "global"` resolves the
+      // same as a static string default).
       ...presentFields("fsMode", this.fsMode),
-      // live-graph-phase1 T1:账本 host 透传 —— 同 production 路径形态。
+      // Live-graph ledger host pass-through — same shape as the production path.
       ...(this.liveGraphLedger
         ? { liveGraphLedger: this.liveGraphLedger }
         : {}),
-      // review-fix (M1 / H1): serve entry 已解析的 workspaceRoot 透传 —
-      // 让 build-engine 的 bash fence 对齐 serve 的 identity seed / dataDir
-      // (同一 per-root 锚点,不落回 sandboxRoot|cwd)。
+      // Pass the workspaceRoot already resolved by the serve entry so
+      // build-engine's bash fence aligns with serve's identity seed / dataDir
+      // (the same per-root anchor, no fallback to sandboxRoot|cwd).
       ...(this.workspaceRoot ? { workspaceRoot: this.workspaceRoot } : {}),
-      // T6:稳定 productRoot（缺席时 build-engine 桥接为 workspaceRoot）。
+      // Stable productRoot (absent → build-engine bridges it to workspaceRoot).
       ...(this.productRoot ? { productRoot: this.productRoot } : {}),
-      // #950 T2 / session-folder-consolidation / ADR-0071 Decision 2:
-      // todos 落「会话文件夹」—— `todoDir` 取 store 投影的 projectDir,与
-      // 上面 `buildProductionEngine` 路径同源(`<surface>` 分裂消除)。
+      // ADR-0071: todos land in the session folder — `todoDir`
+      // takes the store-projected projectDir, same source as the
+      // `buildProductionEngine` path above (the `<surface>` split is gone).
       todoDir: this.store.getProjectDir(),
-      // ADR-0088:同 `buildProductionEngine` 路径 —— 登记根 = 项目树兄弟
-      // `tasks/`(store 投影同一 slug)。
+      // ADR-0088: same as the `buildProductionEngine` path — registry root =
+      // sibling `tasks/` of the project tree (same store-projected slug).
       tasksDir: join(this.store.getProjectDir(), TASKS_DIR_NAME),
       memoryDir: join(this.store.getProjectDir(), MEMORY_DIR_NAME),
-      // review-fix (M5): 同 buildProductionEngine 路径 —— 两段式缝,装配期
-      // 传 projectDir,manager spawn 期按 def.conversationId 派生
-      // per-conversation 叶子(见 resolveSubagentTraceDirShared 退役注释)。
+      // Same as buildProductionEngine: two-segment seam — projectDir at
+      // assembly time, per-conversation leaf derived by the manager at spawn
+      // via def.conversationId (see the resolveSubagentTraceDirShared
+      // retirement note).
       projectDir: this.store.getProjectDir(),
       ...(this.traceOut !== undefined
         ? { subagentDiagnosticsDir: this.traceOut }
         : {}),
     });
     this.cachedDeps = built.deps;
-    // D-α T3:单引擎（未 bind 根）路径的活跃快照。
+    // Active snapshot for the single-engine (unbound root) path.
     this.activeGraphAssembly = built.graphAssembly;
-    // SC8：catalog 与 rescan 缝同源发布（不可只是 catalog —— 缝缺席则
-    // `listSkills` 永远读装配期快照，slash 面不会「当场热」）。
+    // Catalog and rescan seam are published together (catalog alone is not
+    // enough — without the seam, `listSkills` forever reads the
+    // assembly-time snapshot and the slash face never goes hot in-place).
     this.activateSkillFace(built);
     this.mcpHome = homedir();
     await this.activateMcpFace({
@@ -3713,21 +3912,23 @@ export class SessionHub {
       ...(built.mcpRoots ? { mcpRoots: built.mcpRoots } : {}),
       ...(built.catalog ? { catalog: built.catalog } : {}),
     });
-    // #356 T7: serve 懒取 subagent manager — buildHarnessEngine 在 surface !==
-    // "ask" 时自建;每次装配的 manager 都进入永久聚合面，active manager
-    // 则只服务 spawn / verify classifier。
+    // Serve lazily takes the subagent manager — buildHarnessEngine
+    // self-builds one when surface !== "ask"; every assembly's manager joins
+    // the permanent aggregation face, while the active manager only serves
+    // spawn / the verify classifier.
     this.activateSubagentManager(built.subagentManager);
-    // auto-memory T4:与 subagentManager 同形态懒取(构造注入优先)。
+    // Auto-memory: lazily taken like subagentManager (constructor injection wins).
     this.autoMemory = this.autoMemory ?? built.autoMemory;
     this.overlayMemoryPrefetch =
       this.overlayMemoryPrefetch ?? built.overlayMemoryPrefetch;
-    // issue 1059 (G3)：兜底 lazy 路径与 per-root 路径同源锚定门禁 holder。
+    // The fallback lazy path anchors the gate holder from the same source as
+    // the per-root path.
     this.worktreeOnMutate = this.worktreeOnMutate ?? built.worktreeOnMutate;
-    // #356 High#4 (SC12/SC3):缓存 built.shutdown(组合句柄 mcpManager first →
-    // subagentManager second)。serve 入口退出前经 hub.shutdown() 触发 —
-    // cli.ts runServe 挂 registerShutdown(hub),进程退出时清理 MCP 连接 +
-    // subagent stdio 子进程(SC11/SC16)。测试注入 deps 路径无 built →
-    // shutdown 缺席 → hub.shutdown() no-op。
+    // Cache built.shutdown (composite handle: mcpManager first, then
+    // subagentManager). The serve entry triggers it via hub.shutdown() before
+    // exit — cli.ts runServe registers registerShutdown(hub), cleaning up MCP
+    // connections and subagent stdio children at process exit. Test-injected
+    // deps paths have no built → shutdown absent → hub.shutdown() is a no-op.
     this.cachedShutdown = this.cachedShutdown ?? built.shutdown;
     return this.cachedDeps;
   }
@@ -3781,7 +3982,7 @@ export class SessionHub {
   }
 
   /**
-   * auto-memory T4 / ADR-0031 D5: hand a finished turn to the auto-memory
+   * ADR-0031: hand a finished turn to the auto-memory
    * hook. The hook owns the `completed` gate and the N-turn gate; the hub
    * only reports. A hook failure must never fail postMessage.
    */
@@ -3836,24 +4037,26 @@ export class SessionHub {
     /** T1: this run's own messages (priorMessages sliced away); used for
      * the per-turn thinking/toolCalls projection. */
     readonly turnMessages?: ReadonlyArray<AnthropicNativeMessage>;
-    /** T6: best-effort 收尾摘要文本(异常停时由 postMessage 捕获)。 */
+    /** T6: best-effort closing summary text (captured by postMessage on abnormal stops). */
     readonly stopSummary?: string;
-    /** B1: run 前 session.messages —— 与 conditionalSave 同源,供 cancelled
-     * 判定 shouldPersistCheckpoint(delta>0 → interrupted=true)。非 cancelled
-     * 不消费;缺席(catch 分支等)时 cancelled 缺省判定 false。 */
+    /** B1: session.messages before the run — same source as conditionalSave,
+     * used for the cancelled decision shouldPersistCheckpoint (delta>0 →
+     * interrupted=true). Ignored for non-cancelled; absent (catch branches
+     * etc.) → cancelled defaults to false. */
     readonly priorMessages?: ReadonlyArray<AnthropicNativeMessage>;
-    /** #128 M3: verify 最终判定视图 (failed/unstable/escalated)。缺席 = 无 verify
-     * 或判定为 passed/disabled/aborted (byte-stable)。 */
+    /** Verify final verdict view (failed/unstable/escalated). Absent = no
+     * verify, or the verdict is passed/disabled/aborted (byte-stable). */
     readonly verify?: VerifyAnswerView;
-    /** D2 (tui-display-consistency) wire surface: 本回合 assistant 思考时长
-     * (ms)。postMessage / continuePending 路径在 commitMessages 拿到
-     * turnResult.thinkingMs 后写入; > 0 时挂到 TurnAnswerDto `thinkingMs`
-     * 字段。缺席 = 旧会话 / 无思考 / 边界非法 (byte-stable, 与
-     // thinking/toolCalls/lastUsage 同模式)。 */
+    /** D2 (tui-display-consistency) wire surface: this turn's assistant
+     *  thinking time (ms). Written on the postMessage / continuePending paths
+     *  once commitMessages receives turnResult.thinkingMs; attached to the
+     *  TurnAnswerDto `thinkingMs` field when > 0. Absent = old session / no
+     *  thinking / invalid bounds (byte-stable, same pattern as
+     *  thinking/toolCalls/lastUsage). */
     readonly thinkingMs?: number;
   }): TurnDto {
     const { query, result } = opts;
-    // SC20: serve SPA output boundary — mask known secret values in the
+    // Serve SPA output boundary — mask known secret values in the
     // final text before it leaves the hub. The mask is rebuilt per call so
     // it sees the env snapshot at serve-time (cheap; a few short regexes).
     const mask = createOutputMask(currentSecretValues()).mask;
@@ -3872,19 +4075,22 @@ export class SessionHub {
         // for turns without thinking or tool use).
         ...(thinking !== undefined ? { thinking } : {}),
         ...(toolCalls !== undefined ? { toolCalls } : {}),
-        // 上下文用量显示：result.lastUsage 非 null 时透传；null → 字段缺席
-        // (byte-stable；与 thinking/toolCalls 同模式；ADR-0008 D5)。
+        // Context-usage display: pass through result.lastUsage when non-null;
+        // null → field absent (byte-stable; same pattern as
+        // thinking/toolCalls; ADR-0008).
         ...(result.lastUsage !== null ? { lastUsage: result.lastUsage } : {}),
-        // T6: 收尾摘要仅在异常停时挂上;completed 永不 emit stop_summary,
-        // 即使宿主传了 stopSummary 也不会误附(byte-stable,正常停缺席)。
+        // The closing summary attaches only on abnormal stops; completed never
+        // emits stop_summary, so a host-provided stopSummary is never
+        // mis-attached (byte-stable: absent on normal stops).
         ...(opts.stopSummary !== undefined &&
         opts.stopSummary.length > 0 &&
         result.stopReason !== "completed"
           ? { stopSummary: opts.stopSummary }
           : {}),
-        // B1: 打断反馈 —— 仅 cancelled 时带上 interrupted(布尔:true=已保存
-        // checkpoint / false=无新内容未落盘)。其它 stopReason 字段缺席
-        // (byte-stable,与 thinking/toolCalls/lastUsage 同模式)。
+        // B1: interruption feedback — `interrupted` only on cancelled
+        // (true = checkpoint saved / false = no new content, not persisted).
+        // Other stopReasons omit the field (byte-stable, same pattern as
+        // thinking/toolCalls/lastUsage).
         ...(result.stopReason === "cancelled"
           ? {
               interrupted: shouldPersistCheckpoint(
@@ -3893,16 +4099,19 @@ export class SessionHub {
               ),
             }
           : {}),
-        // #128 M3: verify 最终判定 (failed/unstable/escalated) surface。
-        // 仅 verify 配置且判定非 passed/disabled/aborted 时存在 (byte-stable)。
+        // Surface the verify final verdict (failed/unstable/escalated).
+        // Present only when verify is configured and the verdict is not
+        // passed/disabled/aborted (byte-stable).
         ...(opts.verify !== undefined ? { verify: opts.verify } : {}),
-        // D2 (tui-display-consistency): thinkingMs (ms) 透传。> 0 才挂,
-        // 缺席 = 旧会话 / 无思考回合 / 边界非法 (byte-stable)。
+        // D2 (tui-display-consistency): pass through thinkingMs (ms). Attached
+        // only when > 0; absent = old session / no thinking turn / invalid
+        // bounds (byte-stable).
         ...(opts.thinkingMs !== undefined && opts.thinkingMs > 0
           ? { thinkingMs: opts.thinkingMs }
           : {}),
-        // ADR-0094 SC4-SC5: transport 失败时的网关侧摘要透传。undefined → 字段
-        // 缺席 (byte-stable);TUI 据此渲染「API error (status): message」。
+        // ADR-0094: pass through the gateway-side summary on transport
+        // failure. undefined → field absent (byte-stable); the TUI renders
+        // "API error (status): message" from it.
         ...withApiError({}, result.apiError),
       },
     };

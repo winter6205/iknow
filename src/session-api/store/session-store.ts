@@ -1,31 +1,31 @@
 /**
- * Stateless filesystem-backed session store (022 spec §Session Store).
+ * Stateless filesystem-backed session store.
  *
- * Why stateless: concurrency serialization is the hub's responsibility
- * (spec A15). This class is a thin typed-IO wrapper over
+ * Why stateless: concurrency serialization is the hub's responsibility.
+ * This class is a thin typed-IO wrapper over
  * `<baseDir>/projects/<slug>/<conversationId>/` (ADR-0071 / ADR-0087).
  * Every failure path throws a typed SessionStoreError — never a bare Error.
  *
- * #618 T1 (spec session-jsonl-resume / ADR-0027): single on-disk shape.
+ * ADR-0027: single on-disk shape.
  *   - Authority: `<id>.jsonl` — single-file append-only JSONL (session header
  *     record, id/parent message events, trailing head record; codec in
  *     jsonl.ts). save() writes ONLY this; load() prefers it.
  *   - Read fallback: `<id>.json` — legacy SessionFileV1 JSON, ONLY read by
- *     load() during the migration window (#619 T2: legacy-only `.json` →
- *     load → save → JSONL authority on the next save). save() does NOT
- *     write the legacy mirror (#629: expand-phase compat ended, tests
- *     migrated off direct `.json` reads).
+ *     load() during the migration window (legacy-only `.json` → load → save
+ *     → JSONL authority on the next save). save() does NOT write the legacy
+ *     mirror (expand-phase compat ended; tests migrated off direct `.json`
+ *     reads).
  *   - Detection is by EXTENSION: load prefers `<id>.jsonl`, falls back to
  *     `<id>.json` (legacy path unchanged).
- *   - appendEvents/readHead/writeHead are JSONL-only primitives (T3's commit
- *     hooks and T5's rewind build on them). They MUST be called under the
+ *   - appendEvents/readHead/writeHead are JSONL-only primitives (the commit
+ *     hooks and rewind layers build on them). They MUST be called under the
  *     hub serialize queue — the store stays stateless, no in-store locking
- *     (same posture as save(); spec Testing Decisions concurrent 类).
- *   - #622 T5: save() is append-only AWARE — it aligns the caller's
- *     projection with the persisted head chain (longest common prefix) and
- *     only appends the divergent tail, so a rewound-away branch survives
- *     every subsequent save. rewindToAnchor() moves the persisted head to
- *     an earlier turn boundary WITHOUT truncating the log.
+ *     (same posture as save()).
+ *   - save() is append-only AWARE — it aligns the caller's projection with
+ *     the persisted head chain (longest common prefix) and only appends the
+ *     divergent tail, so a rewound-away branch survives every subsequent
+ *     save. rewindToAnchor() moves the persisted head to an earlier turn
+ *     boundary WITHOUT truncating the log.
  */
 import {
   appendFile,
@@ -105,8 +105,9 @@ export interface SessionListEntry {
   readonly updatedAt: string;
   /** Text excerpt from the most recent assistant turn ("" if none). */
   readonly lastFinalText: string;
-  /** UI 标题（#467 由 `summary` 改名）。ADR-0113：= 最新标题事件正文；
-   *  无标题事件时 = extractTitle 占位（header `title` 只是缓存）。 */
+  /** UI title (renamed from `summary`). ADR-0113: = the latest title
+   *  event's text; with no title event = the extractTitle placeholder
+   *  (header `title` is only a cache). */
   readonly title: string;
   /** Whether the persisted workspace binding is executable as-is. */
   readonly bindingStatus: SessionBindingStatus;
@@ -119,18 +120,18 @@ export interface SessionListEntry {
 /**
  * Project namespace under the shared pool root.
  *
- * T1 (ADR-0071 Decision 1/2) — the
+ * ADR-0071: the
  * grouping key is `projectIdentityRoot`, not `cwd`. cwd moves with worktree
  * rebinds; the identity root is stable across rebinds (per
- * `docs/CONTEXT.md`), which is the grouping semantic the spec requires.
+ * `docs/CONTEXT.md`).
  *
  * Layout: `<baseDir>/projects/<basename(root)>-<sha1(root)[:12]>`.
  * basename keeps it human-browsable; the sha1 suffix disambiguates same-named
  * projects at different paths. Pure: no IO, no `process.cwd()` fallback.
  *
- * SC4: empty / blank / relative / non-normalizable inputs fail closed with a
+ * Empty / blank / relative / non-normalizable inputs fail closed with a
  * typed `SessionRootError` (same kind vocabulary as `resolveSessionRoots`).
- * The default-cwd fallback of the pre-T1 contract was removed: a caller
+ * The default-cwd fallback of the earlier contract was removed: a caller
  * without an explicit root must decide where the namespace belongs.
  */
 export function resolveProjectSessionDir(
@@ -138,8 +139,9 @@ export function resolveProjectSessionDir(
   projectIdentityRoot: string
 ): string {
   requireValidRoot(projectIdentityRoot, "projectIdentityRoot");
-  // review-fix (M1/M2/M3): slug 公式与上限的单一来源 = shared/project-slug.ts
-  // （harness/background/paths.ts 的 resolveTasksDir 消费同一函数与同一上限）。
+  // Slug formula and cap SSOT: shared/project-slug.ts
+  // (harness/background/paths.ts resolveTasksDir consumes the same function
+  // and the same cap).
   return join(
     baseDir,
     PROJECTS_DIR_NAME,
@@ -153,8 +155,8 @@ export function resolveProjectSessionDir(
  * `conversationId` verbatim, so a UUID-shaped id passes through unchanged
  * (sanitize is the identity on `[A-Za-z0-9_-]`).
  *
- * SC2 (folder name = `conversationId` UUID verbatim) + SC4 (pure function,
- * no IO, no `process.cwd()` fallback). Path-hostile inputs (containing `/`
+ * Folder name = `conversationId` verbatim; pure function,
+ * no IO, no `process.cwd()` fallback. Path-hostile inputs (containing `/`
  * / `..` / `\0`) are sanitized so they CANNOT escape `projectDir` — `..`
  * becomes `__`, slashes become `_`. Over-length inputs (>255 bytes single
  * segment) fail closed without silent truncation.
@@ -183,14 +185,16 @@ export function resolveConversationDir(opts: {
 }
 
 /**
- * T3 (ADR-0071 Decision 4):
- * per-conversation trace 锚点 = `<projectDir>/<conversationId>/trace.jsonl`。
- * 同一 baseDir + 同一 projectIdentityRoot + 同一 conversationId 必然派生出
- * 同一绝对文件路径 —— 不同 cwd 启动同一仓的同一会话,文件路径稳定
- * (跨 cwd 一致性 = ADR-0071 SC6 的核心不变式)。
+ * ADR-0071: per-conversation trace anchor =
+ * `<projectDir>/<conversationId>/trace.jsonl`. The same baseDir + the same
+ * projectIdentityRoot + the same conversationId always derive the same
+ * absolute file path — starting the same session of the same repo from a
+ * different cwd keeps the path stable (cross-cwd consistency is ADR-0071's
+ * core invariant).
  *
- * 派生而不是字符串拼接:复用 `resolveConversationDir` 的 sanitize 与长度边界,
- * 避免在调用方各自重写 path-join 导致 `..` / `/` 逃逸的回退风险。
+ * Derived rather than string-concatenated: reuses `resolveConversationDir`'s
+ * sanitize and length bounds, so callers can't each re-implement path-join
+ * and regress into `..` / `/` escapes.
  */
 export const TRACE_FILE_NAME = "trace.jsonl";
 
@@ -202,11 +206,11 @@ export function resolveConversationTraceFilePath(opts: {
 }
 
 /**
- * review-fix (M2/M3):re-export 自 `shared/session-tree-names.ts` ——
- * 单一字面量 SSOT 在 shared 层(session-store / harness manager /
- * traceserver 三方中立层)。本 re-export 保向下兼容(老 callers
- * `import { SUBAGENT_TRACE_DIR_NAME } from "...store/session-store"`
- * 不破)。
+ * Re-exported from `shared/session-tree-names.ts` —
+ * the single-literal SSOT lives in the shared layer (neutral to
+ * session-store / harness manager / traceserver). This re-export preserves
+ * back-compat for older callers importing
+ * `SUBAGENT_TRACE_DIR_NAME` from here.
  */
 export { SUBAGENT_TRACE_DIR_NAME } from "../../shared/session-tree-names.js";
 
@@ -233,9 +237,10 @@ function requireValidRoot(value: string, label: string): void {
     );
   }
   const trimmed = value.trim();
-  // review-fix (M1/M2/M3): 上限来自 shared/project-slug.ts —— 与
-  // harness/background/paths.ts 的 resolveTasksDir 同一常量,121–255 字符的
-  // 根两边都接受(此前 paths.ts 用 120 会在该区间抛错 → 登记表孤儿)。
+  // The cap comes from shared/project-slug.ts — the same constant as
+  // harness/background/paths.ts resolveTasksDir, so roots of 121–255 chars
+  // are accepted on both sides (a divergent local cap would throw in that
+  // range and orphan registry entries).
   if (trimmed === "" || trimmed.length > MAX_PROJECT_IDENTITY_ROOT_BYTES) {
     throw new SessionRootError(
       "missing_root",
@@ -258,11 +263,11 @@ export class SessionStore {
   }
 
   /**
-   * #950 T2 (ADR-0071):read-only projection of
+   * ADR-0071: read-only projection of
    * the resolved session project directory
    * (`<baseDir>/projects/<basename>-<sha1[:12]>`). Consumers whose per-call
    * leaf lives INSIDE the session folder — the todo ledger `todoDir` seam
-   * (`resolveConversationTodoPath`) and, from T3, the trace anchor — take
+   * (`resolveConversationTodoPath`) and the trace anchor — take
    * this same root from the store instead of recomputing
    * `resolveProjectSessionDir` at their own assembly sites, so there is
    * exactly one `(baseDir, projectIdentityRoot)` decision per host process
@@ -287,7 +292,7 @@ export class SessionStore {
    * Detection by extension: `<id>.jsonl` (JSONL authority, projected to the
    * current-head transcript) wins; otherwise legacy `<id>.json`.
    * The JSONL projection backfills synthetic tool_result(s) for orphan
-   * tool_use(s) — process closeout, #621 T4 — so consumers never receive an
+   * tool_use(s) — process closeout — so consumers never receive an
    * API-illegal transcript.
    * Throws: not_found | parse_failed | schema_invalid | io_error
    */
@@ -302,7 +307,7 @@ export class SessionStore {
       }
       try {
         const file = projectSessionLog(log);
-        // T5 (spec D3): migrate messagesCount-only checkpoints to their
+        // Migrate messagesCount-only checkpoints to their
         // event-id anchor against the current head chain.
         const anchored = withDerivedAnchors(
           file,
@@ -320,7 +325,7 @@ export class SessionStore {
     const parsed = this.parseJson({ id, raw });
     try {
       const file = sanitizeSessionFile(parsed);
-      // T5 (spec D3): a legacy file's message order is exactly what the
+      // A legacy file's message order is exactly what the
       // JSONL migration writes (e0..e{N-1}), so the anchor derives from the
       // message position.
       return withDerivedAnchors(
@@ -341,13 +346,13 @@ export class SessionStore {
   /**
    * Atomic write: tmp file then rename, so a crash never leaves a half-written file.
    * Writes ONLY the JSONL authority (`<id>.jsonl`). The legacy `.json` mirror
-   * is NOT written (#629: expand-phase compat ended; tests migrated off
+   * is NOT written (expand-phase compat ended; tests migrated off
    * direct `.json` reads). Load still falls back to a legacy-only `.json`,
    * so a legacy-only session's first save migrates it to JSONL authority
    * (`fullRewritePlan` is the natural migrator — the `readJsonlLog` not_found
    * branch sets `log = null` and triggers it).
    *
-   * #622 T5: the JSONL write is append-only AWARE (planSessionSave). The
+   * The JSONL write is append-only AWARE (planSessionSave). The
    * caller's `file.messages` projection is aligned with the persisted head
    * chain by longest common prefix:
    *   - identical projection → header-refresh only (records preserved
@@ -360,8 +365,8 @@ export class SessionStore {
    *     at the LCP boundary (fork; the abandoned suffix stays in the file).
    * Existing event/head records are NEVER dropped, so a rewound-away branch
    * survives every subsequent save. A fresh session, a legacy-only mirror,
-   * or a corrupt log falls back to a full rewrite (self-heal; the pre-T5
-   * shape).
+   * or a corrupt log falls back to a full rewrite (self-heal; the
+   * simple non-append-aware shape).
    * Throws: write_failed
    */
   async save(opts: {
@@ -403,32 +408,34 @@ export class SessionStore {
 
   /**
    * Append message events to the JSONL log WITHOUT rewriting the file
-   * (#618 T1; T3's host-injected commit hooks call this mid-turn). Each event
+   * (host-injected commit hooks call this mid-turn). Each event
    * gets a fresh `e<maxIndex+1>` id chained from the persisted head, followed
    * by a new head record — so a backward head (rewind) forks a new branch and
    * the old chain stays in the file.
    *
    * Cheap = append-only (one read of the log + one append syscall); safe to
    * call repeatedly. MUST be called under the hub serialize queue (the store
-   * is stateless; no in-store locking — spec Testing Decisions concurrent 类).
+   * is stateless; no in-store locking).
    *
    * JSONL-only: a legacy `.json`-only session must be save()d once first
-   * (T2 migration-on-save). Empty `events` is a no-op.
+   * (migration-on-save). Empty `events` is a no-op.
    * Throws: not_found | write_failed | parse_failed | schema_invalid | io_error
    *
-   * D2 (tui-display-consistency):`thinkingMs` 是 assistant 回合落盘的思考
-   * 时长(ms)。仅当 (a) 入参 `opts.thinkingMs` 提供 + (b) 事件 role 为
-   * assistant 时挂到 event record 上;`thinkingMs <= 0` 或非有限数视为无效,
-   * 字段缺席(spec 钉死边界形态)。tool_result / user / system 事件一律不挂
-   * `thinkingMs` key(commit 缝是按 batch 传单值,只在 assistant commit 处
-   * 携带;tool_result commit 时入参 undefined,即使 message.role 偶然是
-   * assistant 也不挂,因为 hub 的 commit 闭包只在 stepWithTrace 主路径
-   * 1746 处传 turnResult.thinkingMs)。
+   * `thinkingMs` is the assistant-turn thinking duration (ms) persisted to
+   * disk. The key is attached only when (a) `opts.thinkingMs` is provided
+   * AND (b) the event role is assistant; `thinkingMs <= 0` or non-finite is
+   * invalid → field absent (a pinned boundary shape). tool_result / user /
+   * system events never carry the key (the commit seam passes one value per
+   * batch, carried only at assistant commits; tool_result commits pass
+   * undefined — even if a message happens to be assistant the key stays
+   * off, since the hub's commit closure passes thinkingMs only on the main
+   * stepWithTrace path).
    */
   async appendEvents(opts: {
     readonly id: string;
     readonly events: ReadonlyArray<AnthropicNativeMessage>;
-    /** D2: assistant commit 携带的思考时长(ms);tool_result / 其它批次 = undefined。 */
+    /** Thinking duration (ms) carried by assistant commits; tool_result /
+     *  other batches = undefined. */
     readonly thinkingMs?: number;
   }): Promise<void> {
     const { id, events, thinkingMs } = opts;
@@ -437,7 +444,8 @@ export class SessionStore {
     const log = await this.readJsonlLog(id, path, {
       legacyIsWriteFailed: true,
     });
-    // D2: 仅在 thinkingMs 边界形态合法时才落盘(> 0 且有限数)。
+    // Only persist thinkingMs when its boundary shape is valid (> 0 and
+    // finite).
     const stampableThinkingMs =
       typeof thinkingMs === "number" &&
       Number.isFinite(thinkingMs) &&
@@ -449,18 +457,20 @@ export class SessionStore {
     const lines: string[] = [];
     for (const message of events) {
       const eventId = messageEventId(next++);
-      // 每条事件自己的入账时刻(T3 commit pattern 下 user/assistant/tool
-      // 各自的时间戳彼此接近但可分辨 — plan Open questions #3)。
+      // Each event carries its own ingest timestamp (under the per-tool
+      // commit pattern the user/assistant/tool stamps are close but
+      // distinguishable).
       const record: SessionEventRecord = {
         type: "message",
         id: eventId,
         parent,
         message,
         createdAt: new Date().toISOString(),
-        // D2: 仅 assistant 事件 + stampableThinkingMs 有效时挂 key。
-        // batch 内 assistant 数量 = 1(loop-engine 一次 commit 恰好一
-        // 条 assistant 消息),所以 conditional spread 不在 batch 内多
-        // 事件场景下分叉 —— 所有事件同 key 表现。
+        // Attach the key only for assistant events + a valid
+        // stampableThinkingMs. A batch contains exactly one assistant
+        // message (loop-engine commits one assistant message at a time), so
+        // the conditional spread never forks across events within a batch —
+        // uniform key behavior per batch.
         ...(message.role === "assistant" && stampableThinkingMs !== undefined
           ? { thinkingMs: stampableThinkingMs }
           : {}),
@@ -481,18 +491,22 @@ export class SessionStore {
   }
 
   /**
-   * ADR-0113 (session-list-title T3): 追加一条标题事件(`{type:"title",
-   * text}`)到 JSONL 尾部 —— 纯 append,单行,不触碰 message 链与 head 指针
-   * (projectSessionLog 沿链走,天然不投影 title 事件)。标题权威即事件正文;
-   * header `title` 只是缓存,下一次 save 时由回盖闸回刷,读路径
-   * (load/list)已经通过投影覆盖立即反映事件正文。
+   * ADR-0113: append one title event (`{type:"title", text}`) to the JSONL
+   * tail — pure append, single line, does not touch the message chain or the
+   * head pointer (projectSessionLog walks the chain and naturally never
+   * projects title events). The event text is the title's authority; the
+   * header `title` is only a cache, refreshed on the next save by the
+   * overwrite gate, and the read paths (load/list) already reflect the event
+   * text immediately via projection.
    *
-   * 供标题生成模块(T4)调用。JSONL-only:legacy `.json`-only 会话先
-   * save() 一次迁移(同 appendEvents 的迁移信号)。MUST be called under
-   * the hub serialize queue —— store 保持无锁(与 appendEvents/writeHead
-   * 同一 posture,spec Testing Decisions concurrent 类)。
+   * Called by the title-generation module. JSONL-only: a legacy
+   * `.json`-only session must be save()d once first to migrate (same
+   * migration signal as appendEvents). MUST be called under the hub
+   * serialize queue — the store stays lock-free (same posture as
+   * appendEvents/writeHead).
    * Throws: not_found | write_failed (legacy-only / IO) | parse_failed |
-   *   schema_invalid (field "title": 空/纯空白 text; corrupt log) | io_error
+   *   schema_invalid (field "title": empty / whitespace-only text; corrupt
+   *   log) | io_error
    */
   async appendTitle(opts: {
     readonly id: string;
@@ -522,11 +536,13 @@ export class SessionStore {
   }
 
   /**
-   * ADR-0113 T4 support: 标题生成触发前的只读判定 —— JSONL log 上是否
-   * 已有标题事件（spec Does「已有标题事件 → 跳过，第二次 completed 不写
-   * 第二条」的跨进程形态；进程内由 hub 侧 fired-set 兜住）。
-   * legacy-only 会话（无 JSONL）→ not_found（与 readHead 同形态；标题生成
-   * 只在 completed persist 之后触发，彼时 migrate-on-save 已落 JSONL）。
+   * ADR-0113: read-only pre-check before title generation fires — does the
+   * JSONL log already carry a title event (the cross-process form of "an
+   * existing title event → skip; a second completed does not write a second
+   * one"; in-process the hub's fired-set covers it). A legacy-only session
+   * (no JSONL) → not_found (same form as readHead; title generation fires
+   * only after completed persist, by which time migrate-on-save has written
+   * the JSONL).
    * Throws: not_found | parse_failed | schema_invalid | io_error
    */
   async hasTitleEvent(id: string): Promise<boolean> {
@@ -538,7 +554,8 @@ export class SessionStore {
 
   /**
    * Read the persisted rewind head (event id, null = empty transcript).
-   * JSONL-only primitive (T5 consumes it; legacy sessions have no persisted
+   * JSONL-only primitive (the rewind layer consumes it; legacy sessions
+   * have no persisted
    * head until migrated by a save).
    * Throws: not_found | parse_failed | schema_invalid | io_error
    */
@@ -552,7 +569,7 @@ export class SessionStore {
   /**
    * Persist a new rewind head by APPENDING a head record (append-only; the
    * old chain is never truncated). `head` must be null or an existing event
-   * id in the log. T5 owns the rewind semantics built on this primitive.
+   * id in the log. The rewind semantics are built on this primitive.
    * Throws: not_found | schema_invalid (unknown head id) | write_failed | io_error
    */
   async writeHead(opts: {
@@ -587,12 +604,12 @@ export class SessionStore {
   }
 
   /**
-   * T5 (#622 / spec session-jsonl-resume): rewind = MOVE the persisted head
+   * Rewind = MOVE the persisted head
    * pointer to an earlier turn-boundary anchor. The skipped chain STAYS in
    * the same JSONL — the write is a header-refresh (recomputed
    * turnCount/title, pruned + event-id-re-anchored checkpoints) plus one
    * trailing head record; no event record is ever dropped. The legacy
-   * `.json` mirror is NOT refreshed (#629: mirror write removed); the
+   * `.json` mirror is NOT refreshed (mirror write removed); the
    * returned projection is recomputed from the JSONL head chain.
    *
    * `keepTurns` is clamped to [0, availableTurns]; a target at/above the
@@ -630,7 +647,7 @@ export class SessionStore {
   }
 
   /**
-   * #624: move the persisted head to an event id (or null). The target may
+   * Move the persisted head to an event id (or null). The target may
    * be off the current chain — skipped-branch undo. Unknown ids are
    * schema_invalid. Same append-only write as rewindToAnchor.
    */
@@ -698,8 +715,9 @@ export class SessionStore {
       ...meta,
       messages: keptMessages,
       turnCount,
-      // ADR-0113 回盖闸:有标题事件时 header 缓存 = 事件正文,rewind 的
-      // extractTitle 重算不得覆写;无事件 → 今日行为不变。
+      // ADR-0113 overwrite gate: with a title event present the header cache
+      // = event text, and rewind's extractTitle recomputation must not
+      // overwrite it; no title event → today's behavior unchanged.
       title: resolveTitleText(log, extractTitle(keptMessages)),
       updatedAt: new Date().toISOString(),
       checkpoints: withCheckpointAnchors(survivors, keptIds),
@@ -730,7 +748,7 @@ export class SessionStore {
   /**
    * List all session files sorted by updatedAt descending.
    * Corrupt / unreadable files are silently skipped (sidebar must not break).
-   * Sessions with no assistant text are skipped too (issue #96): bootstrap
+   * Sessions with no assistant text are skipped too: bootstrap
    * creates an empty session file before the user ever sends a message, and an
    * interrupted sendMessage can leave one with no assistant reply — neither has
    * anything to show in the sidebar. Single-session load()/get() is unaffected.
@@ -738,7 +756,7 @@ export class SessionStore {
    */
   async list(): Promise<SessionListEntry[]> {
     const names = await this.readDir();
-    // T1 (session-folder-consolidation): the project dir holds one folder
+    // Session-folder consolidation: the project dir holds one folder
     // per conversationId. Each folder contains the JSONL authority and the
     // legacy mirror (same on-disk shape contract as before; only the layout
     // changed). Sub-folder names are conversationId-shaped (sanitized) —
@@ -766,10 +784,10 @@ export class SessionStore {
    * Throws: not_found | io_error
    */
   async delete(id: string): Promise<void> {
-    // T1 (session-folder-consolidation): delete the entire conversation
+    // Session-folder consolidation: delete the entire conversation
     // folder under <projectDir>/<id>/. The folder may contain both the
-    // JSONL authority and the legacy mirror (older #629-mirror-removed
-    // callers could still leave one behind); rmdir recursive removes
+    // JSONL authority and the legacy mirror (callers from before the mirror
+    // removal could still leave one behind); rmdir recursive removes
     // them atomically.
     const dir = this.conversationDir(id);
     // Probe presence BEFORE rm — force:true would otherwise silently
@@ -832,7 +850,7 @@ export class SessionStore {
    * Read + parse the JSONL log for the append/head primitives. JSONL-only:
    * missing log → not_found when no session file exists at all; when only the
    * legacy `.json` mirror exists, write paths ask for write_failed (migration
-   * hint: save once to rewrite as JSONL, T2), read paths ask for not_found
+   * hint: save once to rewrite as JSONL), read paths ask for not_found
    * (a legacy session has no persisted head).
    */
   private async readJsonlLog(
@@ -1033,10 +1051,12 @@ export class SessionStore {
 // -- module-level helpers ----------------------------------------------------
 
 /**
- * ADR-0113 回盖闸(save 咽喉点):盘上 log 已有标题事件时,header `title`
- * 缓存一律写最新事件正文 —— hub conditionalSave / compact、CLI 等所有调用
- * 方传入的 extractTitle 重算值在此被拦下,覆不到盘。无标题事件(log 为
- * null / 旧文件)→ 原样透传,与今日行为逐字节一致。
+ * ADR-0113 overwrite gate (save choke point): when the on-disk log already
+ * has a title event, the header `title` cache is always written as the
+ * latest event text — the extractTitle recomputations passed in by every
+ * caller (hub conditionalSave / compact, CLI, …) are intercepted here and
+ * cannot reach disk. No title event (log null / legacy file) → pass through
+ * verbatim, byte-identical to the previous behavior.
  */
 function gateTitleToEvent(
   file: SessionFileV1,
@@ -1046,14 +1066,14 @@ function gateTitleToEvent(
   return title === file.title ? file : { ...file, title };
 }
 
-/** T5 save plan: the JSONL text to persist. The mirror `.json` file was
- *  removed in #629, so the save plan now only carries the JSONL bytes. */
+/** Save plan: the JSONL text to persist. The mirror `.json` file write was
+ *  removed, so the save plan now only carries the JSONL bytes. */
 interface SavePlan {
   readonly jsonl: string;
 }
 
 /**
- * T5 (#622): append-only aware save planning. Aligns `file.messages` with
+ * Append-only aware save planning. Aligns `file.messages` with
  * the persisted head chain by longest common prefix (LCP) and picks the
  * cheapest write that keeps every existing record:
  *   identical      → header-refresh only;
@@ -1121,14 +1141,14 @@ function planSessionSave(
 }
 
 /** Full-rewrite plan (fresh session / legacy migration / corrupt-log
- *  self-heal): the pre-T5 shape — header + one event per message + head. */
+ *  self-heal): header + one event per message + head. */
 function fullRewritePlan(file: SessionFileV1): SavePlan {
   const ids = file.messages.map((_, i) => messageEventId(i));
   const finalFile = withDerivedAnchors(file, ids);
   return { jsonl: sessionFileToJsonl(finalFile) };
 }
 
-/** T5 (spec D3): derive checkpoint `anchorEventId`s against a chain's event
+/** Derive checkpoint `anchorEventId`s against a chain's event
  *  ids. Files without a checkpoints key pass through untouched (the key is
  *  not materialized). */
 function withDerivedAnchors(

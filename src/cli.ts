@@ -4,13 +4,13 @@
  *   iknow                         → chat (TTY) / usage (pipe)
  *   iknow chat [options]
  *   iknow serve [options]         → HTTP session API + web UI
- *   iknow tui [session-id]        → 终端多会话交互界面（#146）
+ *   iknow tui [session-id]        → terminal multi-session interactive UI
  *   iknow ask "<query>" [options] → one-shot JSON
  *   iknow "<query>" [options]     → one-shot JSON
  */
 import { parseArgs, type ParsedCli } from "./cli/parse-args.js";
 import { runChatSession } from "./cli/chat-session.js";
-// #356 subagent worker headless 重入: 子代理进程 main dispatch 早返回。
+// Subagent worker headless re-entry: the child process returns early from main dispatch.
 import {
   renderWorkerError,
   runEscapeEnvelope,
@@ -56,9 +56,10 @@ import {
   resolveWorkspaceRoot,
 } from "./config/workspace-root.js";
 export { isWorkspaceRootError, renderWorkspaceRootError };
-// ADR-0093 / SC4：provider 命中但 apiKeyEnv 未设 → `loadIknowEnv` 抛 plain
-// object。与上方 WorkspaceRootError 同款：必须走判别守卫 + typed 渲染，
-// `String(err)` 会打成 `[object Object]`（providerId / env 名全不可见）。
+// ADR-0093: provider matched but apiKeyEnv unset → `loadIknowEnv` throws a
+// plain object. Same shape as WorkspaceRootError above: it needs a discriminated
+// guard + typed rendering, since `String(err)` would print `[object Object]`
+// (providerId / env name both invisible).
 import {
   formatLlmProviderConfigError,
   isLlmProviderConfigError,
@@ -75,8 +76,7 @@ import {
   analyzePlaceholderSyntax,
   resolveFsIsolationMode,
 } from "./config/settings.js";
-// ADR-0037 review High-1/High-2 (2026-08-29): chat 入口的 worktree isolation
-// host 缝与启动 settings 钉住。
+// ADR-0037: the chat entry's worktree isolation host seam, and settings pinned at startup.
 import { SessionStore } from "./session-api/store/index.js";
 import {
   resolveProjectSessionDir,
@@ -89,19 +89,21 @@ import { createWorktreeIsolationHost } from "./cli/worktree-host.js";
 import { deriveProjectIdentityRoot } from "./harness/session-roots.js";
 import { resolveTasksDir } from "./harness/background/paths.js";
 import { MEMORY_DIR_NAME } from "./shared/session-tree-names.js";
-// 共享装配 (cli / serve / tui 三入口共用, SSOT): settings.verify → VerifyConfig。
+// Shared assembly (used by the cli / serve / tui entries, SSOT): settings.verify → VerifyConfig.
 import { resolveVerifyConfig } from "./config/verify-config.js";
 import { resolveTraceRoot } from "./cli/trace-root.js";
-// T5 / ADR-0090:项目 permissions.defaultMode 启动种子 —— chat 入口从项目身份根读,
-// 缺省 undefined。fail-loud (legacy / full_auto) 原路上抛,启动错误路径呈现。
+// ADR-0090: project permissions.defaultMode startup seed — the chat entry reads it from the
+// project identity root, default undefined. fail-loud cases (legacy / full_auto) rethrow
+// as-is so the startup error path renders them.
 import { readProjectDefaultMode } from "./harness/permission/project-settings.js";
 
 /**
- * review-fix (M5): WorkspaceRootError type guard —— resolver 抛的是 plain
- * object（`satisfies WorkspaceRootError`,非 Error 实例）,必须按判别联合
- * `kind` 识别,不能用 `instanceof Error ? err.message : String(err)`
- * （后者打 plain object 会成 `[object Object]`,kind/path 全部不可见）。
- * 真实定义见 `./config/workspace-root.ts`;此处 re-export 保持 CLI 公开 API 不变。
+ * WorkspaceRootError type guard — the resolver throws a plain object
+ * (`satisfies WorkspaceRootError`, not an Error instance), so it must be
+ * recognized by the discriminated `kind` field, not via
+ * `instanceof Error ? err.message : String(err)` (stringifying a plain object
+ * yields `[object Object]`, hiding kind/path). The real definition lives in
+ * `./config/workspace-root.ts`; this re-export keeps the CLI public API stable.
  */
 
 function printCliError(err: unknown): void {
@@ -190,23 +192,25 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
   }
 
   const bundle: RuntimeBundle = await prepareRuntime();
-  // 写侧数据根同源:ask 入口 store 池 = `resolveServeDataDir(parsed.dataDir)`
-  // (与 workspaceRoot 无关),读侧缺省根跟同一池。
-  // review-fix (M2 / ADR-0087): 显式 `--data-dir` 透传 —— `--data-dir <alt>`
-  // 开启独立池,trace / 未来任何 store 路径同款走 `<alt>`。
+  // Writer-side data root, single source: the ask entry's store pool =
+  // `resolveServeDataDir(parsed.dataDir)` (independent of workspaceRoot); the
+  // reader-side default root follows the same pool. ADR-0087: explicit
+  // `--data-dir` is passed through — `--data-dir <alt>` opens an isolated
+  // pool, and trace / any future store paths resolve under `<alt>` too.
   const dataDir = resolveServeDataDir(parsed.dataDir);
   const tracePath = resolveTraceRoot(parsed.traceOut, dataDir);
 
   let built: { deps: LoopEngineDeps };
   try {
     // ask oneshot: no interactive user → fail-closed askUser (always deny).
-    // #196 A12:ask 跳过 BOOTSTRAP 段(surface="ask" → bootstrapActive=false)。
-    // #194 T6 (SC15):ask 显式 memory:{enabled:false} — registry 剥离 memory
-    // 工具(8 件) + memory_layer 段不装配;identity 其他 4 段照常(deps.system
-    // 仍挂 createIknowSystemResolver)。
-    // W2: ask 入口从 env IKNOW_PERMISSION_MODE 读静态 mode;oneshot 不暴露
-    // 切换(context 不会被 set,等同于静态)。
-    // ADR-0019 (T2):`--workspace-root` flag 透传,ask 也是 per-root 状态消费方。
+    // The ask surface skips the BOOTSTRAP section (surface="ask" → bootstrapActive=false).
+    // Ask explicitly sets memory:{enabled:false}: the registry strips the 8 memory
+    // tools and the memory_layer section is not assembled; the other 4 identity
+    // sections stay as-is (deps.system still wires createIknowSystemResolver).
+    // The ask entry reads the static mode from env IKNOW_PERMISSION_MODE; oneshot
+    // exposes no switching (the context is never set, equivalent to static).
+    // ADR-0019: the `--workspace-root` flag is passed through — ask is also a
+    // per-root state consumer.
     built = await buildHarnessEngine(bundle, {
       askUser: createFailClosedAskUser(),
       surface: "ask",
@@ -215,10 +219,10 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
         (process.env.IKNOW_PERMISSION_MODE as PermissionMode | undefined) ??
           "default"
       ),
-      // review-fix (M1/M5): 用 `!== undefined` 而非 truthy 守门 —— 空字符串
-      // 必须显式传到 buildHarnessEngine 才能触发 resolver 的 empty_explicit。
-      // truthy 守门会把 `""` 当作「未设」吞掉,用户从 CLI 看到的就不是
-      // typed error 而是 REPL 静默回 cwd fallback —— 与 DELIVERABLE 不符。
+      // Gate on `!== undefined`, not truthiness — an empty string must reach
+      // buildHarnessEngine explicitly to trigger the resolver's empty_explicit.
+      // A truthy gate would swallow `""` as "unset", and the CLI would show a
+      // silent cwd fallback instead of the typed error — not what was promised.
       ...(parsed.workspaceRoot !== undefined
         ? { workspaceRoot: parsed.workspaceRoot }
         : {}),
@@ -226,11 +230,12 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     });
   } catch (err) {
     if (err instanceof Error && err.message.includes("LLM mode needs")) {
-      // settings-model-extension：ask 错误 envelope 不再承载 env 变量名（apiKeyEnv
-      // 字段已退役）；改成 `apiKey` 携带 settings.llm.apiKey 的原始形态（None 或
-      // 占位符字符串如 "${ANTHROPIC_AUTH_TOKEN}"），便于上游告诉调用方原因。
-      // L5: `apiKey_placeholder` 标记让消费方识别 `apiKey: "${VAR}"` 是占位符非真值
-      // （true=占位符 / false=字面 / undefined 时字段省略）。
+      // The ask error envelope no longer carries an env-var name (the apiKeyEnv
+      // field was retired); instead `apiKey` holds the raw settings.llm.apiKey
+      // shape (None or a placeholder string like "${ANTHROPIC_AUTH_TOKEN}") so
+      // callers can be told why. `apiKey_placeholder` lets consumers tell that
+      // `apiKey: "${VAR}"` is a placeholder, not a real value
+      // (true=placeholder / false=literal / omitted when undefined).
       const rawApiKey = loadIknowSettings().llm?.apiKey;
       const apiKeyIsPlaceholder =
         rawApiKey !== undefined &&
@@ -250,7 +255,7 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     }
     throw err;
   }
-  // ask path: each invocation gets its own conversation_id (ADR-0003 D4).
+  // ask path: each invocation gets its own conversation_id (ADR-0003).
   const conversationId = randomUUID();
   const traceService = createJsonlTraceService({
     filePath: tracePath,
@@ -259,10 +264,11 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
   // T6: wrap the executor with the violation kill-session hook so the ask
   // entry point surfaces violation escalations on stderr + exits with code 1.
   const { executor } = buildViolationWiring(built.deps.executor);
-  // plan T6:--max-turns flag 优先,未设时回退装配层 env 值(undefined = 无限)。
-  // SC-W 6/7 (v2 spec):agentVersion 由 CLI 侧注入 getVersion() 值,run 末尾才会
-  // 落 session L1 根记录。Loop Engine 不 import cli/usage.ts(C2 决议:注入而非
-  // harness 层 import,避免写侧←cli 反向依赖)。
+  // The `--max-turns` flag wins; otherwise fall back to the assembly-layer env
+  // value (undefined = unlimited). agentVersion is injected CLI-side from
+  // getVersion() so the session L1 root record lands at the end of the run.
+  // The Loop Engine must not import cli/usage.ts — inject instead of importing
+  // at the harness layer, to avoid a writer-side ← cli reverse dependency.
   const askDeps: LoopEngineDeps = {
     ...built.deps,
     executor,
@@ -288,9 +294,10 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     loopTrace = out.trace;
   } catch (err) {
     if (err instanceof MaxTurnsExceeded) {
-      // plan T3 + T6 / ADR-0011:maxTurns 超限 → JSON envelope(stderr) +
-      // exitCode=1。stopSummary 由上面的 onStream wrapper 捕获(loop-engine 在
-      // 重抛前 emit stop_summary;摘要轮不计 maxTurns)。
+      // ADR-0011: maxTurns exceeded → JSON envelope on stderr + exitCode=1.
+      // stopSummary is captured by the onStream wrapper above (loop-engine
+      // emits stop_summary before rethrowing; the summary turn is not counted
+      // toward maxTurns).
       writeErr(maxTurnsEnvelope(err, stopSummary));
       process.exitCode = 1;
       return;
@@ -321,44 +328,49 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  // T5 (ADR-0071 / SC8 + L2): chat 入口
-  // 锁定本次 conversationId —— 子代理 lifecycle / content trace 归属目录
-  // = `<父会话文件夹>/subagents/`,文件名 = agent-<taskId>.jsonl。
-  // rebuildDeps(改绑时)复用同一 conversationId,不另起(rebuild 不换会话)。
+  // ADR-0071: the chat entry pins this conversationId — the subagent
+  // lifecycle / content trace directory = `<parent conversation folder>/subagents/`,
+  // file name = agent-<taskId>.jsonl. rebuildDeps (on rebind) reuses the same
+  // conversationId instead of minting a new one (a rebuild is not a new session).
   //
-  // review-fix (H2): --resume <id> 时 conversationId = resumeId 而非随机 —
-  // 子代理目录、checkpoint 文件、trace 锚点必须全部锚到被 resume 的会话文
-  // 件夹,否则 --resume 后子代理目录会落在全新随机 UUID 的文件夹下,既与
-  // 父会话脱钩,也会让 SC8 操作员补丁的「per-agent 文件集合 == 两次 spawn
-  // 的 taskId 集合」按不同会话分散两处。
+  // With --resume <id>, conversationId = resumeId rather than a random UUID —
+  // subagent directories, checkpoint files and trace anchors must all bind to
+  // the resumed session's folder; otherwise a resumed run's subagent directory
+  // lands under a fresh random UUID folder, detached from the parent session,
+  // and the per-agent file set would scatter across two sessions.
   const conversationId = parsed.resumeId ?? randomUUID();
 
-  // ADR-0035:生命周期 trace 与 content trace 解耦。chat 不装配 content
-  // trace，但 subagent 的 spawn/state_change/stop 永久写入默认 trace 目录。
-  // T5 (ADR-0071 / SC8 + L2): 聚合单文件
-  // `subagent.jsonl` (conversationId:"subagent") 已退役 —— 改由
-  // buildHarnessEngine(opts.subagentsDir) 派生 per-agent `<父会话文件夹>/subagents/agent-<taskId>.jsonl`。
-  // 解析顺序保持(traceOut flag > IKNOW_TRACE_OUT env > 默认)只服务于
-  // 其余子代理相关形态(stderr pointer 退路)。默认与 chat 写侧数据根同源
-  // (chat-session.ts 的 store 池 = `resolveServeDataDir(parsed.dataDir)`,与
-  // workspaceRoot 无关;workspaceRoot 变量只喂 identity 派生)。
-  // review-fix (M2 / ADR-0087): 显式 `--data-dir` 透传到 trace / store /
-  // checkpointStore,与 runServe 同款解析 —— 「显式 dataDir = 独立池」对
-  // chat 同样适用(否则 `--data-dir <alt>` 静默写 `~/.iknow`)。
+  // ADR-0035: lifecycle trace and content trace are decoupled. chat does not
+  // assemble a content trace, but subagent spawn/state_change/stop records are
+  // permanently written to the default trace directory. Per ADR-0071, the
+  // aggregated single file `subagent.jsonl` (conversationId:"subagent") is
+  // retired — buildHarnessEngine(opts.subagentsDir) now derives per-agent
+  // `<parent conversation folder>/subagents/agent-<taskId>.jsonl`.
+  // The resolution order (traceOut flag > IKNOW_TRACE_OUT env > default) stays
+  // and serves the remaining subagent-related shapes (the stderr pointer fallback).
+  // The default shares the chat writer-side data root (chat-session.ts's store
+  // pool = `resolveServeDataDir(parsed.dataDir)`, independent of workspaceRoot;
+  // the workspaceRoot variable only feeds identity derivation).
+  // Per ADR-0087, an explicit `--data-dir` passes through to trace / store /
+  // checkpointStore, parsed the same way as in runServe — "explicit dataDir =
+  // isolated pool" applies to chat too (otherwise `--data-dir <alt>` would
+  // silently write into `~/.iknow`).
   const dataDir = resolveServeDataDir(parsed.dataDir);
   const tracePath = resolve(resolveTraceRoot(parsed.traceOut, dataDir));
 
   let built: import("./harness/build-engine.js").BuiltEngine;
-  // Review High-2 (2026-08-29 / 硬要求 9):settings 只在启动加载点读一次，
-  // 同一对象驱动 graph / verify 装配与引擎构建 —— rebind 后 per-root 重建
-  // 复用它，worktree 内 `.iknow/` 缺席（gitignore）也绝不隐式重载 settings。
+  // Settings are read exactly once at the startup load point; the same object
+  // drives graph / verify assembly and engine build — rebind's per-root rebuild
+  // reuses it, and a missing `.iknow/` inside the worktree (gitignored) must
+  // never trigger an implicit settings reload.
   const startupSettings = loadIknowSettings();
-  // W2 + T5 (ADR-0090):chat REPL 持一个可变 PermissionModeContext ——
-  // /permissions 命令在 REPL 里就地翻转它,引擎不重建。启动初值优先级
-  // CLI flag(tui only) > env IKNOW_PERMISSION_MODE > 项目 permissions.defaultMode
-  // > "default"。项目 settings 读根 = projectIdentityRoot(不是 cwd):改绑后
-  // cwd 是没有 `.iknow` 的裸 task worktree,项目契约只在身份根上。
-  // fail-loud 原路上抛(legacy 形态 / full_auto)→ 启动错误路径呈现,不吞。
+  // ADR-0090: the chat REPL holds one mutable PermissionModeContext —
+  // the /permissions command flips it in place without rebuilding the engine.
+  // Startup precedence: CLI flag (tui only) > env IKNOW_PERMISSION_MODE >
+  // project permissions.defaultMode > "default". Project settings read from
+  // projectIdentityRoot (not cwd): after a rebind the cwd is a bare task
+  // worktree without `.iknow`, while the project contract lives on the identity root.
+  // fail-loud cases (legacy shape / full_auto) rethrow to the startup error path.
   const projectDefaultMode = readProjectDefaultMode({
     cwd: deriveProjectIdentityRoot({ cwd: workspaceRoot }),
   });
@@ -370,93 +382,98 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   const graphMode = createGraphModeContext(
     resolveGraphMode({ settings: startupSettings.graph })
   );
-  // ADR-0092 / SC13:filesystem isolation 档 holder —— 初值走 settings
-  // （缺省 global），chat REPL 的 `/config` 就地翻。与 graphMode 同款：
-  // 引擎（build-engine 经 opts.fsMode，bash 工厂 per-call 读）与 REPL host
-  // 共用同一实例（SC3 三入口同 holder）。与 permissionMode 正交。
+  // ADR-0092: filesystem isolation mode holder — initial value from settings
+  // (default global), flipped in place by chat REPL's `/config`. Same shape as
+  // graphMode: the engine (build-engine via opts.fsMode, bash factory reads
+  // per-call) and the REPL host share one instance (same holder across all
+  // three entries). Orthogonal to permissionMode.
   const fsMode = createFsModeContext(resolveFsIsolationMode(startupSettings));
-  // live-graph-phase1 T1 / ADR-0051:活图账本 host —— 单会话,生命周期与
-  // chat REPL 同寿（reset / 进程退出销毁）。CLI 不需要按 conversationId
-  // 区分,但仍走同一 host 形状（统一 build-engine 接线,不解分叉类型）。
+  // Live-graph ledger host — single session, same lifetime as the chat REPL
+  // (destroyed on reset / process exit). The CLI does not need per-conversationId
+  // distinction but keeps the same host shape (unified build-engine wiring, no
+  // type fork).
   const liveGraphLedger = createLiveGraphLedgerHost();
-  // Review High-1 (2026-08-29):worktree isolation host 缝 —— provision 负责
-  // 建 task worktree + 仅本会话根改绑（session-api worktree-rebind SSOT）。
-  // store 与 chat-session 的 checkpointStore 同池（review-fix M2:`dataDir`
-  // = `resolveServeDataDir(parsed.dataDir)`,显式 `--data-dir` 时落 `<alt>`)。
-  // 开关读取在 build-engine 启动加载点（经 startupSettings）；OFF → 不包装。
+  // Worktree isolation host seam — provision creates the task worktree and
+  // rebinds only this session's root (session-api worktree-rebind SSOT).
+  // The store shares the pool with chat-session's checkpointStore (per
+  // ADR-0087: `dataDir` = `resolveServeDataDir(parsed.dataDir)`, landing in
+  // `<alt>` when `--data-dir` is explicit). The switch is read at the
+  // build-engine startup load point (via startupSettings); OFF → no wrapping.
   const worktreeProvisioner = createTaskWorktreeProvisioner({
     store: new SessionStore(
       dataDir,
-      // T1 (session-folder-consolidation): store namespace keys by
-      // projectIdentityRoot, not cwd. mirror build-engine.ts:523.
+      // The store namespace keys by projectIdentityRoot, not cwd
+      // (mirrors build-engine.ts).
       deriveProjectIdentityRoot({ cwd: workspaceRoot })
     ),
   });
-  // worktree-host.ts 工厂装配（PR #869 name 透传修复点；可单测）。
+  // Factory assembly from worktree-host.ts (name pass-through fix point; unit-testable).
   const worktreeIsolation: WorktreeIsolationHostOpts =
     createWorktreeIsolationHost({ worktreeProvisioner });
-  // T6:启动 workspace 即稳定 productRoot —— rebind 只换 workspaceRoot，
-  // MCP 项目配置根跨 rebuild 保持本值。
+  // The workspace at startup is the stable productRoot — rebind only swaps
+  // workspaceRoot; the MCP project-config root keeps this value across rebuilds.
   const productRoot = workspaceRoot;
-  // #950 T2 / session-folder-consolidation:chat 入口注入「会话项目目录」作
-  // todoDir —— 与上面 SessionStore 用同一对 `(dataDir,
-  // deriveProjectIdentityRoot(...))`,保证同一会话在 chat / serve / TUI 三
-  // 入口解析到同一 projectDir(`<surface>` 分裂消除)。per-conversationId
-  // 文件路径在调用期由 todo-write.ts:resolveConversationTodoPath 派生。
-  // review-fix (M2): `dataDir` 已含显式 `--data-dir`(见上 tracePath 处)。
+  // The chat entry injects the "session project directory" as todoDir — the
+  // same `(dataDir, deriveProjectIdentityRoot(...))` pair as the SessionStore
+  // above, so one conversation resolves to the same projectDir across the chat /
+  // serve / TUI entries (the `<surface>` split is eliminated). Per-conversationId
+  // file paths derive at call time via todo-write.ts:resolveConversationTodoPath.
+  // `dataDir` already includes an explicit `--data-dir` (see tracePath above).
   const todoProjectDir = resolveProjectSessionDir(
     dataDir,
     deriveProjectIdentityRoot({ cwd: workspaceRoot })
   );
-  // ADR-0088:后台任务登记跟**同一个** `(dataDir, projectIdentityRoot)` 的
-  // 项目树 —— 与会话文件夹同一 slug,与 workspaceRoot 解耦(throwaway
-  // `--workspace-root` 不再另开活账本)。rebuild 复用 chatEngineOpts,故
-  // rebind 后 tasksDir 不变(登记表不是 per-root 状态)。
+  // ADR-0088: background-task registration follows the **same** project tree at
+  // `(dataDir, projectIdentityRoot)` — same slug as the session folder, decoupled
+  // from workspaceRoot (a throwaway `--workspace-root` no longer opens a second
+  // live ledger). rebuild reuses chatEngineOpts, so tasksDir is unchanged after
+  // rebind (the registry is not per-root state).
   const tasksDir = resolveTasksDir({
     dataDir,
     projectIdentityRoot: deriveProjectIdentityRoot({ cwd: workspaceRoot }),
   });
   const memoryDir = join(todoProjectDir, MEMORY_DIR_NAME);
-  // 初始装配与 rebind 重建共用的装配 opts（同一 askUser/holder/settings）。
+  // Assembly opts shared by the initial build and rebind rebuilds (same askUser/holders/settings).
   const chatEngineOpts = {
     askUser: createTtyAskUser(),
     surface: "chat" as const,
     memory: { enabled: true } as const,
     permissionMode,
     graphMode,
-    // ADR-0092 / SC13:fs isolation holder 进引擎装配（bash 工厂 per-call 读）。
+    // ADR-0092: fs isolation holder enters engine assembly (bash factory reads per-call).
     fsMode,
     liveGraphLedger,
     todoDir: todoProjectDir,
-    // ADR-0088:登记根随会话池,不随 workspaceRoot。
+    // ADR-0088: registration root follows the session pool, not workspaceRoot.
     tasksDir,
-    // ADR-0099:项目记忆同棵,不随 workspaceRoot。
+    // ADR-0099: project memory follows the same tree, not workspaceRoot.
     memoryDir,
-    // T5 (ADR-0071 / SC8 + L2): subagentsDir
-    // 由 (projectDir, conversationId) 经 `resolveSubagentTraceDir` 派生 —— 与
-    // 上面 SessionStore 同源(`todoProjectDir === store.projectDir`,见 #950 T2)。
-    // build-engine 内部把 subagentsDir 同时传给 SubAgentManager(opts.subagentsDir)
-    // 与 traceFilePath 入 envelope —— 替代旧 `subagentTrace` (conversationId:"subagent"
-    // 聚合单文件,已退役)。
+    // ADR-0071: subagentsDir derives from (projectDir, conversationId) via
+    // `resolveSubagentTraceDir` — same source as the SessionStore above
+    // (`todoProjectDir === store.projectDir`). build-engine passes subagentsDir
+    // to both SubAgentManager (opts.subagentsDir) and the traceFilePath entry in
+    // the envelope — replacing the old `subagentTrace` aggregated single file
+    // (conversationId:"subagent", retired).
     subagentsDir: resolveSubagentTraceDir({
       projectDir: todoProjectDir,
       conversationId,
     }),
     subagentDiagnosticsDir: tracePath,
-    // review-fix (M1/M5): `!== undefined` 守门 — 空字符串透传触 empty_explicit。
+    // Gate on `!== undefined` — an empty string passes through to trigger empty_explicit.
     workspaceRoot,
     productRoot,
-    // Review High-2 / High-1 (2026-08-29):启动 settings 对象 + isolation 缝。
+    // Startup settings object + isolation seam (see notes above).
     settings: startupSettings,
     worktreeIsolation,
   };
   try {
     // chat TTY REPL: interactive y/N prompt via stdin/stdout.
-    // #196 A12:chat 激活 BOOTSTRAP(surface="chat" → bootstrapActive=true)。
-    // #194 T6:chat 显式 memory:{enabled:true} — 10 件工具 + memory_layer 装配。
-    // #440 T1-fix + #950 T2:chat 入口注入 session-folder todoDir,per-conversationId 解析在
-    // todo-write.ts:resolveConversationTodoPath(SSOT 一处钉死,见上 todoProjectDir)。
-    // ADR-0019 (T2):`--workspace-root` flag 透传到 per-root identity / memory seam。
+    // chat activates BOOTSTRAP (surface="chat" → bootstrapActive=true) and
+    // explicitly sets memory:{enabled:true} — 10 tools + memory_layer assembly.
+    // The chat entry injects the session-folder todoDir; per-conversationId
+    // resolution lives in todo-write.ts:resolveConversationTodoPath (one SSOT
+    // anchor, see todoProjectDir above).
+    // ADR-0019: `--workspace-root` passes through to the per-root identity / memory seam.
     built = await buildHarnessEngine(bundle, chatEngineOpts);
   } catch (err) {
     printChatError(err);
@@ -464,37 +481,43 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     return;
   }
 
-  // plan T6:--max-turns flag 优先,未设时回退装配层 env 值(undefined = 无限)。
-  // SC-W 6/7 (v2 spec):chat 路径同样注入 agentVersion,与 ask/serve 一致,
-  // 使 chat 会话文件也产出 session 根记录。
+  // The `--max-turns` flag wins; otherwise the assembly-layer env value (undefined = unlimited).
+  // The chat path injects agentVersion the same way as ask/serve, so chat session
+  // files also produce the session root record.
   const chatDeps: LoopEngineDeps = {
     ...built.deps,
     agentVersion: getVersion(),
     maxTurns: parsed.maxTurns ?? built.deps.maxTurns,
   };
-  // #356 High#4 (SC12/SC3):chat REPL 是长程入口 —— SIGINT/SIGTERM 前必须
-  // 触发 built.shutdown(组合句柄:mcpManager first → subagentManager second),
-  // 否则父死子继,subagent 子进程不被 SIGTERM 清理(SC11/SC16)。chat-session
-  // 自身的二次 SIGINT process.exit(130) 保留(用户强杀语义):首次信号走本钩子
-  // dispose,二次直接 exit。
+  // The chat REPL is a long-running entry — before SIGINT/SIGTERM it must call
+  // built.shutdown (composed handle: mcpManager first → subagentManager second),
+  // otherwise the parent dies and subagent child processes never receive
+  // SIGTERM cleanup. chat-session's own second SIGINT → process.exit(130) is
+  // kept (user force-kill semantics): first signal runs this dispose hook, the
+  // second exits directly.
   //
-  // 收敛修复 (2026-08-29 第二轮 review):活跃引擎 shutdown 句柄盒 ——
-  // registerShutdown 只挂一次信号钩子,闭包读 activeEngineShutdown.current;
-  // rebind 重建切换点 (refreshChatDepsForRebind) 收口旧引擎后把重建引擎
-  // shutdown 写入 current。否则重建引擎的 mcpManager/subagentManager 永不
-  // 收口 (信号路径停留在初始引擎)。
+  // Shutdown handle box for the active engine: registerShutdown installs the
+  // signal hooks only once, and the closure reads
+  // activeEngineShutdown.current; the rebind rebuild switch point
+  // (refreshChatDepsForRebind) closes the old engine then writes the rebuilt
+  // engine's shutdown into current. Otherwise the rebuilt engine's
+  // mcpManager/subagentManager never close (the signal path stays on the
+  // initial engine).
   const activeEngineShutdown: { current?: () => Promise<void> } = {
     current: built.shutdown,
   };
-  // chat 进程退出缝（信号 + REPL 自然退出共用）：引擎收口之外,还必须终结
-  // 共享 LSP 池 —— warmup / lsp_* spawn 的 language server 子进程 stdio 管道
-  // 不释放,事件循环排不空,进程（EOF 后）永不退出。引擎 shutdown 不负责此项
-  // （rebind 中途会调用,不得 latch 进程级共享池,见 client.ts
-  // shutdownDefaultLspPool 注释）。
+  // Chat process exit seam (shared by signals and natural REPL exit): besides
+  // engine shutdown it must also terminate the shared LSP pool — language
+  // server children spawned by warmup / lsp_* hold stdio pipes open, the event
+  // loop never drains, and the process (after EOF) never exits. Engine
+  // shutdown does not cover this (it runs mid-rebind too and must not latch
+  // the process-level shared pool; see the shutdownDefaultLspPool comment in
+  // client.ts).
   const chatProcessShutdown = async (): Promise<void> => {
     await activeEngineShutdown.current?.();
-    // live-graph-phase1 T1 / ADR-0051:会话结束销毁活图账本（SC3）。对象
-    // 本随进程回收,这里显式清掉冻结语义,不留"半活"引用。
+    // Destroy the live-graph ledger at session end. The object would be GC'd
+    // with the process anyway; clearing explicitly removes the freeze semantics
+    // and leaves no half-alive reference.
     liveGraphLedger.destroyAll();
     await shutdownDefaultLspPool();
   };
@@ -504,79 +527,89 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     session: bundle.session,
     jsonMode: parsed.json,
     workspaceRoot,
-    // T4 (write-situation-disclosure)：rebind 一次性写根段的处境判定源
-    // —— 与 build-engine `isolationEnabled` 同一读取点（`startupSettings`
-    // 启动期一次性读，硬要求 9）。OFF → rebind 通知走 `writable_main` 旧形
-    // 态；ON → rebind 后根是树形 → `writable_tree`，与改造前 byte-equal。
+    // Source of truth for the one-time root-section write after rebind: same
+    // read point as build-engine's `isolationEnabled` (`startupSettings` read
+    // once at startup).
+    // OFF → rebind notification keeps the old `writable_main` shape;
+    // ON → the post-rebind root is tree-shaped → `writable_tree`, byte-equal to pre-change.
     isolationOn: built.isolationOn ?? false,
-    // issue 1059:门禁活 holder 单例 —— chat REPL 的 verify 围栏与 build-engine
-    // bash 工厂读同一个实例（G3 同源）；缺席 → 键不出现，字节不变。
+    // The gate's live holder singleton — chat REPL's verify fence and the
+    // build-engine bash factory read the same instance; absent → key omitted,
+    // bytes unchanged.
     ...(built.worktreeOnMutate !== undefined
       ? { worktreeOnMutate: built.worktreeOnMutate }
       : {}),
-    // #152 T5:thinking 可见面(env flag → chat-session → format-run-human)。
-    // env.ts SSOT;默认 off。
+    // Thinking visibility surface (env flag → chat-session → format-run-human).
+    // env.ts is the SSOT; default off.
     showThinking: bundle.env.chat.showThinking,
-    // W2: 传给 REPL host,host 的 /permissions 斜杠命令就地翻 mode。
+    // Passed to the REPL host; its /permissions slash command flips the mode in place.
     permissionMode,
-    // D-α: 同一个 graph holder —— Shift+Tab 三态轮与 /graph 都翻它,
-    // build-engine 的装配快照读的也是它（SC3 三入口同 holder）。
+    // The same graph holder — Shift+Tab's three-state cycle and /graph both
+    // flip it, and build-engine's assembly snapshot reads it too (one holder across entries).
     graphMode,
-    // ADR-0092 / SC13: 同一个 fs holder —— chat REPL 的 /config 翻它,
-    // build-engine 的 bash 工厂（经 chatEngineOpts.fsMode）per-call 读的也
-    // 是它（SC3 三入口同 holder）。
+    // ADR-0092: the same fs holder — chat REPL's /config flips it, and
+    // build-engine's bash factory (via chatEngineOpts.fsMode) reads it
+    // per-call (one holder across entries).
     fsMode,
-    // D-α T3: 每条查询行开跑前拍一次快照 —— 翻键「下一次 run() 生效」。
+    // A snapshot taken before each query line starts running — flipping the key
+    // means "effective from the next run()".
     graphAssembly: built.graphAssembly,
-    // live-graph-phase1 T1:账本 host 传给 chat-session —— 与 graphMode
-    // 平行,reset / 进程退出销毁。
+    // The ledger host passes to chat-session — parallel to graphMode,
+    // destroyed on reset / process exit.
     liveGraphLedger,
-    // T4: `--resume <id>` 续跑锚点。仅 chat 消费;ask/serve/tui 入口
-    // 不传(解析虽 command-agnostic,host 各自决策)。undefined = 新开会话。
+    // `--resume <id>` continuation anchor. Only chat consumes it; ask/serve/tui
+    // entries do not pass it (parsing is command-agnostic, each host decides).
+    // undefined = start a new session.
     resumeId: parsed.resumeId,
-    // review-fix (H2):REPL 级 conversationId 单一来源 —— cli.ts 入口算一次
-    // (resume 时 = resumeId,否则随机生成)并显式传入,checkpoint / 子代理
-    // 目录 / trace 锚点从同一值派生。runChatSession 内部不再二次生成。
+    // Single REPL-level conversationId source — computed once at the cli.ts
+    // entry (= resumeId when resuming, else random) and passed explicitly;
+    // checkpoint / subagent dir / trace anchors all derive from it.
+    // runChatSession no longer generates a second one internally.
     conversationId,
-    // review-fix (M2 / ADR-0087): `--data-dir` 透传,使 chat-session 的
-    // checkpointStore 走同一池(否则 resolveServeDataDir() zero-arg 静默回
-    // ~/.iknow,与 runServe 不一致)。`undefined` → 缺省 `~/.iknow` 行为不变。
+    // ADR-0087: `--data-dir` is passed through so chat-session's checkpointStore
+    // uses the same pool (otherwise resolveServeDataDir() with zero args silently
+    // falls back to ~/.iknow, inconsistent with runServe).
+    // `undefined` → default `~/.iknow`, behavior unchanged.
     dataDir: parsed.dataDir,
-    // #356 T7:host drain — chat 入口每轮 runHarness 前把 completed 子代理
-    // 结果拼入 priorMessages。ask 入口无 manager(surface 门控),不传。
+    // Host drain — before each runHarness round, the chat entry folds completed
+    // subagent results into priorMessages. The ask entry has no manager
+    // (surface-gated), so it does not pass this.
     subagentManager: built.subagentManager,
-    // spec skill-index-increment T3：可加载技能面 —— CLI 与 TUI / Web
-    // 同一 slash 入口。`/skill-name [remainder]` 走 skill-load 信封装配
-    // （buildSkillLoadText + createSkillBody，与 TUI 同源）。
+    // The loadable-skills surface — CLI, TUI and Web share one slash entry.
+    // `/skill-name [remainder]` goes through the skill-load envelope assembly
+    // (buildSkillLoadText + createSkillBody, same source as the TUI).
     skillCatalog: built.skillCatalog,
-    // spec skill-index-increment SC8：可加载面「当场热」的重扫缝 —— 每条
-    // 非空 slash 行以现行技能根重扫一次，装配后新装的技能当场进 `/` 候选
-    // （不必等下一个 turn）。ask 面不装配该缝（`built.skillRescanner` 缺席）。
+    // The rescan seam that makes the loadable surface "hot in place" — every
+    // non-empty slash line rescans the current skill roots, so a just-installed
+    // skill enters `/` candidates immediately (no waiting for the next turn).
+    // The ask surface does not assemble this seam (`built.skillRescanner` absent).
     ...(built.skillRescanner !== undefined
       ? { skillRescanner: built.skillRescanner }
       : {}),
-    // auto-memory T4 / ADR-0031 D1:自动记忆钩子。仅
-    // `settings.memory.autoExtract === true` 时 build-engine 才装配;
-    // 缺席(默认 OFF)→ chat host 不调,行为逐字节不变。
+    // ADR-0031: automatic memory hooks. build-engine only assembles them when
+    // `settings.memory.autoExtract === true`; absent (default OFF) → the chat
+    // host never calls it, behavior byte-for-byte unchanged.
     autoMemory: built.autoMemory,
     overlayMemoryPrefetch: built.overlayMemoryPrefetch,
-    // #128 T8:settings.verify 段 → 闭环配置。command 缺失 (含 verify 段缺失)
-    // → { command: "" }, subagentManager 在场 (chat) 时 runClassifier 接管
-    // 分类器判官 (spec #128 Objective); ask 形态无 manager → verify-loop
-    // 透明关闭向后兼容 (SC7)。其余字段随行透传。
-    // Review High-2:同一启动装配 settings 对象（不重读 settings 文件）。
+    // settings.verify section → closed-loop config. Missing command (including
+    // a missing verify section) → { command: "" }; when subagentManager is
+    // present (chat), runClassifier takes over as the classifier judge; the
+    // ask shape has no manager → verify-loop stays transparently off
+    // (backward compatible). Remaining fields pass through verbatim.
+    // Same startup-assembly settings object (no re-read of the settings file).
     verifyConfig: resolveVerifyConfig(startupSettings.verify),
-    // 收敛修复 (2026-08-29):活跃引擎 shutdown 盒 —— rebind 切换点由
-    // refreshChatDepsForRebind 换血 (见上方 activeEngineShutdown 注释)。
+    // Active-engine shutdown box — swapped at the rebind switch point by
+    // refreshChatDepsForRebind (see the activeEngineShutdown note above).
     engineShutdown: activeEngineShutdown,
-    // Review High-1 (2026-08-29):rebind 后 per-root 引擎重建缝 —— 用同一
-    // chatEngineOpts + 同一启动 settings 重跑 buildHarnessEngine，根切到
-    // task worktree（cwd / workspaceRoot 锚随改绑移动，ADR-0037 §4）。
-    // T6:productRoot 经 chatEngineOpts 原样保留；只换 workspaceRoot/cwd。
-    // 收敛修复 (2026-08-29):返回完整句柄 bundle (RebuiltChatEngine, 对齐
-    // TUI buildEngine 缝形状) —— deps 之外的 shutdown / subagentManager /
-    // graphAssembly / autoMemory / overlayMemoryPrefetch 由 refresh rewire
-    // 进 ctx;只回 deps 会把重建引擎句柄丢在缝里 (split-brain + 泄漏)。
+    // The per-root engine rebuild seam after rebind — rerun buildHarnessEngine
+    // with the same chatEngineOpts + same startup settings, root switched to
+    // the task worktree (cwd / workspaceRoot anchors move with the rebind,
+    // ADR-0037). productRoot is kept verbatim via chatEngineOpts; only
+    // workspaceRoot/cwd change. Returns the full handle bundle (RebuiltChatEngine,
+    // matching the TUI buildEngine seam shape) — besides deps, the shutdown /
+    // subagentManager / graphAssembly / autoMemory / overlayMemoryPrefetch of
+    // the rebuilt engine are rewired into ctx by refresh; returning only deps
+    // would strand the rebuilt engine's handles in the seam (split-brain + leak).
     engineRoot: productRoot,
     rebuildDeps: async (root: string) => {
       const rebuilt = await buildHarnessEngine(bundle, {
@@ -596,37 +629,44 @@ async function runChat(parsed: ParsedCli): Promise<void> {
         graphAssembly: rebuilt.graphAssembly,
         autoMemory: rebuilt.autoMemory,
         overlayMemoryPrefetch: rebuilt.overlayMemoryPrefetch,
-        // spec skill-index-increment T3：slash 技能面随活跃引擎换血 ——
-        // rebind 到 task worktree 后技能候选 / 正文读的是新根的 catalog。
+        // The slash skill surface swaps with the active engine — after
+        // rebinding to the task worktree, skill candidates / bodies read the
+        // new root's catalog.
         skillCatalog: rebuilt.skillCatalog,
-        // spec skill-index-increment SC8：重扫台与 catalog **同台**换血 ——
-        // 只换 catalog 会让「当场热」的候选来自旧根的扫描台。
+        // The rescanner swaps **together with** the catalog — replacing only
+        // the catalog would serve "hot in place" candidates from the old root's
+        // scanner.
         skillRescanner: rebuilt.skillRescanner,
       };
     },
   });
-  // REPL 终点（EOF / 管道耗尽）走同一退出缝：引擎收口 + LSP 池终止（TUI
-  // /quit 挂死同根因,自然退出路径原来无人收口）。
+  // REPL end point (EOF / pipe drained) goes through the same exit seam:
+  // engine shutdown + LSP pool termination (same root cause as the TUI /quit
+  // hang — the natural-exit path previously had nobody closing it).
   await chatProcessShutdown();
 }
 
 /**
- * #356 subagent worker dispatch (cli main 早分支) —— 子代理进程 headless 重入：
- * stdin 信封 → run() → stdout envelope。早于产品形态 dispatch (chat/ask/serve/
- * tui/oneshot)，该命令只由父代理 child_process.spawn 触发,operator 不直调。
+ * Subagent worker dispatch (early branch in cli main) — the subagent process
+ * re-enters headlessly: stdin envelope → run() → stdout envelope. Earlier than
+ * the product-shape dispatch (chat/ask/serve/tui/oneshot); this command is only
+ * triggered by the parent agent's child_process.spawn, never called directly
+ * by an operator.
  *
- * exit-code 语义成文化 (ADR-0111 不变式 (b), 裁决 assumption 16 / SC13 微差):
- *   - exit 2 = **仅**信封协议错误 —— parseWorkerEnvelope 的 ProtocolError
- *     (stdin JSON 失败 / 信封字段缺失), 无信封可写, 协议层崩溃专码;
- *   - run 阶段逃逸 (runSubagentWorker 内已收口为 failed envelope + exit 1;
- *     此处是 stdin/stdout 缝等进程级最后防线) → best-effort envelope + exit 1,
- *     不冒用 2;
- *   - 模块级 main().catch 兜所有产品形态错误 → exit 1, 与 worker 专码区分。
+ * Exit-code semantics codified (ADR-0111):
+ *   - exit 2 = envelope protocol errors **only** — ProtocolError from
+ *     parseWorkerEnvelope (stdin JSON failure / missing envelope fields); no
+ *     envelope can be written, a dedicated code for protocol-layer crashes;
+ *   - run-phase escape (runSubagentWorker already closes it into a failed
+ *     envelope + exit 1; this is the process-level last line of defense for the
+ *     stdin/stdout seam) → best-effort envelope + exit 1, never borrowing 2;
+ *   - module-level main().catch covers all product-shape errors → exit 1,
+ *     distinct from the worker's dedicated code.
  */
 async function runSubagentWorkerCommand(): Promise<void> {
   try {
-    // ADR-0102 T3: 工人 transcript IO 在此注入（Gate B: codec 归
-    // session-api，harness 只见窄接口）。
+    // ADR-0102: worker transcript IO is injected here (the codec belongs to
+    // session-api; the harness only sees the narrow interface).
     await runSubagentWorker(storeWorkerTranscriptIo);
   } catch (err) {
     if (err instanceof ProtocolError) {
@@ -634,15 +674,16 @@ async function runSubagentWorkerCommand(): Promise<void> {
       process.stderr.write(`[subagent-worker] fatal: ${msg}\n`);
       process.exit(WORKER_EXIT_ENVELOPE_PROTOCOL);
     }
-    // 最后防线 (信封协议面之外的进程级异常): 同样不冒用 exit 2。
+    // Last line of defense (process-level exceptions outside the envelope protocol): never borrow exit 2.
     process.stderr.write(
       `[subagent-worker] run-phase error: ${renderWorkerError(err)}\n`
     );
     try {
       process.stdout.write(JSON.stringify(runEscapeEnvelope(err)) + "\n");
     } catch {
-      // EXIT: stdout 已不可写 → 无信封可落, 按 run 阶段逃逸退 exit 1
-      // (ADR-0111 不变式 b: best-effort 信封缺席不改变 exit-code 语义)。
+      // EXIT: stdout already unwritable → no envelope can land; exit 1 as a
+      // run-phase escape (ADR-0111: a missing best-effort envelope does not
+      // change exit-code semantics).
     }
     process.exit(WORKER_EXIT_RUN_PHASE);
   }
@@ -694,12 +735,11 @@ async function main(): Promise<void> {
 }
 
 async function runTui(parsed: ParsedCli): Promise<void> {
-  // 动态 import：与 serve 同款 lazy 路径，chat/ask 不背 opentui 依赖树。
-  // #343 T1：OpenTUI 渲染入口；runTui 返回退出码（E1/E2 类型化错误在
-  // tui/run.tsx 单一 catch 点收口，这里不再包 try/catch）。
-  // 运行时守卫：OpenTUI 0.5.1 仅在 Bun（~/.bun/bin/bun）下可用；Node 无
-  // node:ffi（Node 26 才有），tsx+Node 跑 tui 必然 FFI 失败。提前拦截并
-  // 指引 npm run dev:tui，避免绕 FFI 报错（#321 实测）。
+  // Dynamic import: same lazy path as serve, so chat/ask do not carry the opentui dependency tree.
+  // The OpenTUI render entry; runTui returns an exit code (typed errors converge at the single
+  // catch point in tui/run.tsx, no try/catch here). Runtime guard: OpenTUI 0.5.1 only works under
+  // Bun (~/.bun/bin/bun); Node lacks node:ffi (only Node 26 has it), so tsx+Node running tui
+  // inevitably fails FFI. Intercept early and point to npm run dev:tui instead of surfacing an FFI stack.
   if (process.versions.bun === undefined) {
     process.stderr.write(
       `TUI 需用 Bun 运行（OpenTUI 原生 FFI 仅 Bun 支持，Node 22 无 node:ffi）。\n` +
@@ -712,13 +752,14 @@ async function runTui(parsed: ParsedCli): Promise<void> {
   const exitCode = await startTui({
     sessionId: parsed.sessionId,
     dataDir: parsed.dataDir,
-    // ADR-0019 (T2):`--workspace-root` flag 透传到 TUI 装配层。
-    // review-fix (M1/M5): `!== undefined` 守门 — 空字符串透传触 empty_explicit。
+    // ADR-0019: `--workspace-root` passes through to the TUI assembly layer.
+    // Gate on `!== undefined` — an empty string passes through to trigger empty_explicit.
     ...(parsed.workspaceRoot !== undefined
       ? { workspaceRoot: parsed.workspaceRoot }
       : {}),
-    // traceOut 缺省派生放 run.tsx：会话池 = 显式 `--data-dir` 否则 `~/.iknow`
-    // (与 runTui 自己的 `dataDir` 同源,两侧都解析成同一池根,review-fix M2)。
+    // traceOut default derivation lives in run.tsx: session pool = explicit
+    // `--data-dir`, else `~/.iknow` (same source as runTui's own `dataDir`;
+    // both sides resolve to the same pool root).
     traceOut: resolveTraceRoot(
       parsed.traceOut,
       resolveServeDataDir(parsed.dataDir)
@@ -729,7 +770,7 @@ async function runTui(parsed: ParsedCli): Promise<void> {
 }
 
 async function runServe(parsed: ParsedCli): Promise<void> {
-  // ADR-0087:读侧面板根与写侧会话池同源 = 显式 dataDir 否则 ~/.iknow。
+  // ADR-0087: reader-side panel root and writer-side session pool share one source = explicit dataDir, else ~/.iknow.
   const serveDataDir = resolveServeDataDir(parsed.dataDir);
   const tracePath = resolveTraceRoot(parsed.traceOut, serveDataDir);
   const { startSessionServe } = await import("./session-api/serve.js");
@@ -746,8 +787,8 @@ async function runServe(parsed: ParsedCli): Promise<void> {
       port: parsed.port,
       json_mode: parsed.json,
       dataDir: parsed.dataDir,
-      // ADR-0019:`--workspace-root` 透传到 serve 入口（memory / bind），
-      // 不改变会话池根（ADR-0087）。
+      // ADR-0019: `--workspace-root` passes through to the serve entry (memory / bind)
+      // without changing the session pool root (ADR-0087).
       ...(parsed.workspaceRoot !== undefined
         ? { workspaceRoot: parsed.workspaceRoot }
         : {}),
@@ -759,16 +800,18 @@ async function runServe(parsed: ParsedCli): Promise<void> {
       },
     });
     writeErr(`iknow serve  http://${listening.host}:${listening.port}/`);
-    // ADR-0020: 读侧同进程挂载 —— 面板直接在本端口 /trace，无需另起进程。
+    // ADR-0020: reader side mounts in the same process — the panel serves /trace on this
+    // port directly, no separate process needed.
     writeErr(
       `Trace 面板: http://${listening.host}:${listening.port}/trace` +
         (parsed.traceOut ? `（写目录 ${parsed.traceOut}）` : "")
     );
     writeErr("API: /api/v1/health  ·  UI: /  ·  Ctrl+C to stop");
-    // #356 High#4 (SC12/SC3):serve 是长程入口 —— hub.ensureDeps 内
-    // buildHarnessEngine 自建 MCP + subagent manager,built.shutdown 缓存在
-    // hub 上(SC12 顺序 mcpManager first → subagentManager second)。进程退出前
-    // 挂 registerShutdown(hub) → 触发同一组合清理,不留下 stdio 子进程。
+    // serve is a long-running entry — inside hub.ensureDeps, buildHarnessEngine
+    // creates its own MCP + subagent manager, and built.shutdown is cached on the
+    // hub (order: mcpManager first → subagentManager second). Registering
+    // registerShutdown(hub) before process exit triggers the same composed
+    // cleanup, leaving no stdio child processes behind.
     registerShutdown(hub);
     await new Promise<void>(() => {
       /* keep process alive until signal */
@@ -780,18 +823,20 @@ async function runServe(parsed: ParsedCli): Promise<void> {
 }
 
 async function runTrace(parsed: ParsedCli): Promise<void> {
-  // T3 (SC6): 读侧与写侧同源 —— flag > env > serve 写侧数据根
-  // (`iknow trace` 缺省探测的是同进程 `iknow serve` 的 /trace 面板,所以
-  // 缺省根复刻 serve 的解析链:explicit workspaceRoot > env > ~/.iknow;
-  // 与 runServe 同构)。旧单文件 fail-fast(`detectLegacyTrace`)随 SC6 退役;
-  // 两级树 discovery 由 T6 承接。
+  // Reader side shares the writer's root — flag > env > serve writer-side data
+  // root. `iknow trace` with defaults probes the same-process `iknow serve`
+  // /trace panel, so the default root replicates serve's resolution chain
+  // (explicit workspaceRoot > env > ~/.iknow, same shape as runServe). The old
+  // single-file fail-fast (`detectLegacyTrace`) is retired; two-level tree
+  // discovery is handled by the trace server's session discovery.
   const traceOut = resolveTraceRoot(
     parsed.traceOut,
     resolveServeDataDir(parsed.dataDir)
   );
 
-  // ADR-0020 D2.1 默认模式：不起进程，探测 iknow serve health 后指向同进程
-  // /trace 面板。探测目标 host/port 来自 --host/--port（缺省 127.0.0.1:8787）。
+  // ADR-0020 default mode: no new process — probe iknow serve health, then point
+  // at the same-process /trace panel. Probe target host/port come from
+  // --host/--port (default 127.0.0.1:8787).
   if (!parsed.separate) {
     const host = parsed.host;
     const port = parsed.port;
@@ -799,7 +844,7 @@ async function runTrace(parsed: ParsedCli): Promise<void> {
       const url = `http://${host}:${port}/trace`;
       writeErr(`iknow trace  ${url}`);
       writeErr("Trace 检测面板（与 iknow serve 同进程，ADR-0020）");
-      // SC-C 19: 默认自动打开浏览器；--no-open 关闭（CI/headless）。
+      // Default: open the browser automatically; --no-open disables it (CI/headless).
       if (!parsed.noOpen) {
         openBrowser(url);
       }
@@ -815,7 +860,7 @@ async function runTrace(parsed: ParsedCli): Promise<void> {
     return;
   }
 
-  // ADR-0020 D2.2 --separate escape hatch：保留 #183 独立进程模式。
+  // ADR-0020: the --separate escape hatch keeps the standalone-process mode.
   const { startTraceServe } = await import("./traceserver/serve.js");
   const serveOpts: TraceServeOptions = {
     traceOut,
@@ -844,8 +889,8 @@ async function runTrace(parsed: ParsedCli): Promise<void> {
 }
 
 /**
- * ADR-0020 D2.1: probe `iknow serve` health on host:port. 2s timeout；
- * 任何网络/解析失败都按「未检测到」处理（探测不是错误路径，是分支信号）。
+ * ADR-0020: probe `iknow serve` health on host:port. 2s timeout; any network/parse
+ * failure counts as "not detected" (probing is a branch signal, not an error path).
  */
 async function probeServeHealth(host: string, port: number): Promise<boolean> {
   const controller = new AbortController();

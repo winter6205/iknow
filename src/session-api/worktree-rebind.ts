@@ -1,19 +1,18 @@
 /**
  * src/session-api/worktree-rebind.ts
  *
- * ADR-0037 / plans/worktree-isolation-on-mutate.md T3 — the session-api host
- * seam of the worktree isolation pipeline: create a per-conversation task
- * worktree (via the harness git layer) and rebind the CURRENT session's
- * workspaceRoot to it, so the next turn's per-root engine cache resolves an
- * engine rooted at the task worktree.
+ * ADR-0037 — the session-api host seam of the worktree isolation pipeline:
+ * create a per-conversation task worktree (via the harness git layer) and
+ * rebind the CURRENT session's workspaceRoot to it, so the next turn's
+ * per-root engine cache resolves an engine rooted at the task worktree.
  *
- * Module boundary (ACR bounded-context-guardian):
+ * Module boundary:
  *   - owns ONLY the host-side rebind: per-conversation naming, the session
  *     file update, and the bound-root registry. No LLM/session-runtime
  *     imports; the git worktree creation is delegated to
  *     `harness/isolation/worktree-gate.ts` (single git-layer SSOT).
  *
- * Deterministic naming (ADR-0037 §3):
+ * Deterministic naming (ADR-0037):
  *   - worktree path `<repoRoot>/.iknow/worktrees/<label>--<conversationId>` or
  *     the historical `<conversationId>` leaf (`.iknow` is the per-root state
  *     anchor and gitignored, so the nested checkout never pollutes the main
@@ -23,17 +22,16 @@
  *   The naming makes ownership unambiguous, but a pre-existing branch /
  *   worktree path is still fail-closed (`branch_exists` / `worktree_exists`
  *   from the git layer) — no silent overwrite, no reuse of unknown trees,
- *   no checkout of other sessions' HEADs (hard req ①③).
+ *   no checkout of other sessions' HEADs.
  *
- * Failure semantics (hard req ⑥): every failure exits typed
- * (`WorktreeIsolationError`) and the session file is left untouched — the
- * rebind happens only after the tree was created successfully.
+ * Failure semantics: every failure exits typed (`WorktreeIsolationError`)
+ * and the session file is left untouched — the rebind happens only after
+ * the tree was created successfully.
  *
- * T4 (passthrough): the per-conversation passthrough decision lives HERE —
- * a mutate arriving while the session is already on its own task worktree
- * (deterministic naming, restart-safe) is a zero-side-effect no-op; a root
- * belonging to another conversation or an unrelated linked worktree fails
- * closed with `foreign_worktree`.
+ * Passthrough: a mutate arriving while the session is already on its own
+ * task worktree (deterministic naming, restart-safe) is a zero-side-effect
+ * no-op; a root belonging to another conversation or an unrelated linked
+ * worktree fails closed with `foreign_worktree`.
  */
 import { copyFile, lstat, mkdir, readFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
@@ -94,36 +92,39 @@ export interface TaskWorktreeProvisionerOpts {
    */
   readonly projectIdentityRoot?: string;
   /**
-   * T3 / plans/worktree-exclusive-lock.md / ADR-0070 — enter-worktree
-   * 占用锁档。boolean-only；缺失 / 非 `true` 一律按 OFF（fail-closed，
-   * 与 `worktreeOnMutate` 同款值域纪律）。OFF 时 `enter()` 行为与今日
-   * 逐字节一致——四道检查不变、不新增任何拒绝路径（SC2）。
+   * ADR-0070 — enter-worktree exclusive-claim (occupancy lock) switch.
+   * Boolean-only; missing or non-`true` is OFF (fail-closed, same value
+   * discipline as `worktreeOnMutate`). When OFF, `enter()` behaves exactly
+   * as before: same checks, no new rejection path.
    *
-   * 该字段**只**在装配期读取一次：缺失语义与 `isolation.worktreeExclusive`
-   * 设置项缺席等价 → OFF；后续 `enter()` 调用沿用本闭包冻结的值，**绝不**
-   * 在每次 enter 时重新判定（ADR-0037 §5 硬要求 9）。
+   * Read exactly once at assembly time: absence is equivalent to the
+   * `isolation.worktreeExclusive` setting being absent → OFF; later
+   * `enter()` calls reuse this frozen closure value and never re-evaluate
+   * per entry (ADR-0037).
    */
   readonly worktreeExclusive?: boolean;
   /**
-   * T3 / ADR-0070 — 占用检查的会话枚举入口。`worktreeExclusive === true`
-   * 时必须提供；返回 `SessionStore.list()` 的同形态（`workspaceRoot` 缺席
-   * 即视为「该会话未占用任何 worktree」——empty 臂按无占用放行）。
+   * ADR-0070 — session enumerator for the occupancy check. Required when
+   * `worktreeExclusive === true`; returns the same shape as
+   * `SessionStore.list()` (an absent `workspaceRoot` means the session
+   * claims no worktree → passes as unclaimed).
    *
-   * I/O 故障语义（exception 臂，spec 输入五类表）：
-   *   - 抛非 ENOENT I/O → typed `rebind_failed`（host-side rerun_after_change）。
-   *     **绝不**静默放行——那会让锁在管理员最需要它时自动解除。
+   * I/O failure: a non-ENOENT throw becomes typed `rebind_failed`
+   * (host-side rerun_after_change). Never silently passed — that would
+   * auto-release the lock exactly when an admin needs it most.
    *
-   * L1 弱档披露：当前实现只扫**本进程 dataDir 单一项目命名空间**
-   * （`SessionStore` 单进程单 cwd）；跨进程 / 跨 CLI 实例的占用看不见。
-   * 这是 SC3 / L1 的已决弱档语义，**不**是 bug——披露在设置项文档 + 回执文案 +
-   * spec 三处同时在场（spec Changes 段）。
+   * Weak-mode disclosure: the check only scans this process's single dataDir
+   * project namespace (`SessionStore` is single-process, single cwd);
+   * claims held by other processes or CLI instances are invisible. This is
+   * decided semantics, not a bug — disclosed in the settings doc, the
+   * receipt text, and the spec.
    */
   readonly listSessions?: () => Promise<ReadonlyArray<SessionListEntry>>;
   /**
-   * Layer 1 (specs/subagent-layers-worktree-deps.md items 2–3) — project
-   * dependency install seam. Default = `createProjectDepProvisioner()`
-   * (lockfile-driven, fail-open, async). Tests inject a scripted provisioner
-   * so no case shells out to a real installer.
+   * Project dependency install seam. Default =
+   * `createProjectDepProvisioner()` (lockfile-driven, fail-open, async).
+   * Tests inject a scripted provisioner so no case shells out to a real
+   * installer.
    *
    * The install runs on TWO paths, both fail-open:
    *   - `provision` right after the tree exists (beside the worktreeinclude
@@ -143,14 +144,14 @@ export interface TaskWorktreeProvisioner {
    * without running `git worktree add` again (same-process concurrency latch
    * lives in the harness gate; this covers engine rebuilds).
    *
-   * T4 passthrough anchoring: when `ctx.root` IS this conversation's own task
+   * Passthrough: when `ctx.root` IS this conversation's own task
    * worktree (deterministic naming, restart-safe), `provision` is a no-op
    * that returns the same root — zero git calls, zero rebind writes. When
    * `ctx.root` is another conversation's task worktree or an unrelated
    * linked worktree, it rejects with a typed `foreign_worktree`
    * (fail-closed; ADR-0037 defines only the main repo and the own task tree).
    *
-   * T7 adoption anchor: `anchor.sessionWorkspaceRoot` (the caller's PERSISTED
+   * Adoption anchor: `anchor.sessionWorkspaceRoot` (the caller's PERSISTED
    * workspaceRoot, loaded by the hub) equal to `ctx.root` on a
    * task-worktree-shaped root admits the mutate even when the tree belongs
    * to ANOTHER conversation — that durable record is written only by an
@@ -162,7 +163,7 @@ export interface TaskWorktreeProvisioner {
     anchor?: WorktreeProvisionAnchor
   ): Promise<string>;
   /**
-   * T7 explicit enter: move a session anchored at the MAIN repo onto an
+   * Explicit enter: move a session anchored at the MAIN repo onto an
    * EXISTING task worktree of THIS repository (listing/path SSOT, selector =
    * `targetConversationId`). Creates no tree and touches no foreign
    * HEAD — the only effect is the caller's own rebind (store-mode persists
@@ -176,7 +177,7 @@ export interface TaskWorktreeProvisioner {
    */
   enter(req: WorktreeEnterRequest): Promise<WorktreeEnterResult>;
   /**
-   * T8 symmetric exit: return the conversation to its MAIN repo root. No
+   * Symmetric exit: return the conversation to its MAIN repo root. No
    * tree is deleted (orphan cleanup is an explicit plan non-goal) and no
    * foreign HEAD is touched — the only effect is the caller's own rebind
    * back (store-mode persists workspaceRoot; hub-mode returns the root for
@@ -196,7 +197,7 @@ export interface TaskWorktreeProvisioner {
   remove(ctx: WorktreeRemoveContext): Promise<WorktreeRemoval>;
   /**
    * True when `root` is a task worktree this provisioner created (or
-   * recognized as a conversation's own tree — T4 passthrough registration).
+   * recognized as a conversation's own tree — passthrough registration).
    * Ownership-AGNOSTIC introspection: it does NOT answer "is this root
    * conversation X's own tree" — the per-conversation passthrough anchor is
    * `provision` itself, never this predicate.
@@ -205,21 +206,22 @@ export interface TaskWorktreeProvisioner {
 }
 
 /**
- * T7 adoption input: the caller's persisted workspace root (loaded from the
+ * Adoption input: the caller's persisted workspace root (loaded from the
  * session file by the hub before invoking `provision`). Undefined / absent
- * = no durable record → the T4 fail-closed contract stands unchanged.
+ * = no durable record → the fail-closed passthrough contract stands
+ * unchanged.
  */
 export interface WorktreeProvisionAnchor {
   readonly sessionWorkspaceRoot?: string;
 }
 
 /**
- * T7 enter request — the harness `WorktreeEnterContext` SSOT (no local copy).
+ * Enter request — the harness `WorktreeEnterContext` SSOT (no local copy).
  */
 export type WorktreeEnterRequest = WorktreeEnterContext;
 
 /**
- * T8 exit request: the harness `WorktreeExitContext` SSOT (engine root is
+ * Exit request: the harness `WorktreeExitContext` SSOT (engine root is
  * `root`) plus the durable rebind anchor.
  */
 export interface WorktreeExitRequest extends WorktreeExitContext {
@@ -231,17 +233,16 @@ export interface WorktreeExitRequest extends WorktreeExitContext {
 }
 
 /**
- * T4 ownership anchor: decompose a root against the deterministic naming.
+ * Ownership anchor: decompose a root against the deterministic naming.
  * The implementation is kept in the harness isolation module so the gate,
  * provisioner, and read-only display consumers cannot disagree.
  *
  * Single SSOT lives in `harness/isolation/worktree-gate.ts` (the mutate gate
- * routes on the same predicate — T3 model-provision contract); re-exported
- * here for the provisioner and read-only display consumers (TUI environment
- * pane, review Medium-2): "workspaceRoot looks like a task worktree" is the
- * display condition, NOT "workspaceRoot is any non-empty string" — serve's
- * `bindWorkspace` legitimately persists the MAIN root as workspaceRoot, and
- * that must never render as a worktree binding.
+ * routes on the same predicate); re-exported here for the provisioner and
+ * read-only display consumers (TUI environment pane): "workspaceRoot looks
+ * like a task worktree" is the display condition, NOT "workspaceRoot is any
+ * non-empty string" — serve's `bindWorkspace` legitimately persists the MAIN
+ * root as workspaceRoot, and that must never render as a worktree binding.
  */
 export {
   isTaskWorktreePath,
@@ -254,9 +255,9 @@ export {
 };
 
 /**
- * Review Medium-1 (2026-08-29): the conversationId is concatenated verbatim
- * into the worktree path (`<repoRoot>/.iknow/worktrees/<id>`) and the branch
- * name (`iknow/task-<id>`). The store layer has no id-shape contract (ids are
+ * The conversationId is concatenated verbatim into the worktree path
+ * (`<repoRoot>/.iknow/worktrees/<id>`) and the branch name
+ * (`iknow/task-<id>`). The store layer has no id-shape contract (ids are
  * host-generated UUIDs joined into file paths as-is), so the provisioner owns
  * the segment-safety gate: fail closed on anything that is not a single safe
  * path/branch segment, BEFORE any git call or store write.
@@ -265,9 +266,9 @@ export {
  * This rejects path traversal (`..`, `a/b`), leading dashes/dots (option or
  * glob ambiguity in `git worktree add -b`), whitespace / shell metacharacters,
  * and empty strings. The regex SSOT lives in
- * `harness/isolation/worktree-gate.ts` (the T7 enter-worktree tool
- * validates its model-supplied id against the same contract); re-exported
- * here for existing importers.
+ * `harness/isolation/worktree-gate.ts` (the enter-worktree tool validates its
+ * model-supplied id against the same contract); re-exported here for existing
+ * importers.
  */
 export { SAFE_CONVERSATION_ID_RE };
 
@@ -691,21 +692,21 @@ function escapeRegExpChar(ch: string): string {
 }
 
 /**
- * write-situation-disclosure T9 (SC10): compose the enter success receipt.
- * The tree's owner sidecar (via `taskWorktreeOwnerOf`) discloses WHO created
- * the tree being entered — disclosure, never authorization (ADR-0069). The
- * read is a single best-effort fs access: `taskWorktreeOwnerOf` already
- * degrades missing / empty / unreadable sidecars to `undefined` (typed catch:
- * an absent owner record is a legal legacy state, not an I/O fault), so the
- * ownership sentence is simply omitted — no throw, no placeholder.
+ * Compose the enter success receipt. The tree's owner sidecar (via
+ * `taskWorktreeOwnerOf`) discloses WHO created the tree being entered —
+ * disclosure, never authorization. The read is a single best-effort fs
+ * access: `taskWorktreeOwnerOf` already degrades missing / empty /
+ * unreadable sidecars to `undefined` (typed catch: an absent owner record
+ * is a legal legacy state, not an I/O fault), so the ownership sentence is
+ * simply omitted — no throw, no placeholder.
  *
- * Constant-on: this path reads no setting (specs/worktree-exclusive-lock.md
- * SC10 — the exclusive-lock gate is a separate PR and must not gate this).
+ * Constant-on: this path reads no setting — the exclusive-lock gate is a
+ * separate concern and must not gate this.
  */
 function enterResultOf(
   path: string,
   /**
-   * Layer 1 project-dep outcome, already rendered by `projectDepsLine` (the
+   * Project-dep outcome, already rendered by `projectDepsLine` (the
    * one place that turns an install attempt into text); a no-op skip
    * contributes no line. The separator lives here so the caller never has to
    * know whether the line exists.
@@ -734,13 +735,13 @@ export function createTaskWorktreeProvisioner(
   const now = opts.now ?? (() => new Date().toISOString());
   const projectIdentityRoot = opts.projectIdentityRoot;
   /**
-   * Layer 1 project-dep seam. Frozen at assembly time (same discipline as
+   * Project-dep seam. Frozen at assembly time (same discipline as
    * `worktreeExclusive`): `provision` / `enter` never re-read opts.
    */
   const installProjectDeps: ProjectDepProvisioner =
     opts.projectDepProvisioner ?? createProjectDepProvisioner();
   /**
-   * Layer 1 — the SINGLE point where an install attempt becomes model-facing
+   * The SINGLE point where an install attempt becomes model-facing
    * TEXT. Both seams consume this one function and differ only in what they do
    * with the string (`provision` reports it, `enter` appends it to a receipt),
    * so the skip/failure wording cannot drift between the two.
@@ -781,16 +782,18 @@ export function createTaskWorktreeProvisioner(
     if (line !== undefined) report?.(line);
   }
   /**
-   * T3 / ADR-0070 — enter-worktree 占用锁档。装配期一次性读取
-   * （ADR-0037 §5 硬要求 9 / `resolveWorktreeExclusive` 单读点同款形状）：
-   * 闭包冻结值贯穿本 provisioner 寿命，`enter()` 不重读 opts。缺失 /
-   * 非 `true` 一律 OFF（fail-closed）。
+   * ADR-0070 — enter-worktree exclusive-claim switch. Read once at
+   * assembly time (ADR-0037): the frozen closure value spans this
+   * provisioner's lifetime and `enter()` never re-reads opts. Missing /
+   * non-`true` is OFF (fail-closed).
    */
   const worktreeExclusive = opts.worktreeExclusive === true;
   /**
-   * T3 / ADR-0070 — 占用枚举入口。`worktreeExclusive === false` 时**绝不**
-   * 调用（OFF 档零回归 SC2）。`true` 时必须提供；缺席 → 装配期抛错（fail-
-   * closed：开锁却没装锁孔 = 锁无效，直接报错不让它跑起来）。
+   * ADR-0070 — occupancy enumerator. NEVER called while
+   * `worktreeExclusive === false` (OFF must not regress). When ON it is
+   * required; absence throws at assembly time (fail-closed: an enabled
+   * lock without its enumerator would silently behave like OFF, so refuse
+   * to construct the provisioner).
    */
   const listSessions = opts.listSessions;
   if (worktreeExclusive && listSessions === undefined) {
@@ -914,9 +917,9 @@ export function createTaskWorktreeProvisioner(
         "worktree isolation: the mutate call carried no conversation id; cannot rebind a session root without one"
       );
     }
-    // Review Medium-1: segment-safety gate BEFORE path/branch construction —
-    // an unsafe id must never reach `git worktree add`, the worktree path, or
-    // a session-file write (typed rebind_failed, zero side effects).
+    // Segment-safety gate BEFORE path/branch construction — an unsafe id
+    // must never reach `git worktree add`, the worktree path, or a
+    // session-file write (typed rebind_failed, zero side effects).
     if (!SAFE_CONVERSATION_ID_RE.test(conversationId)) {
       throw new WorktreeIsolationError(
         "rebind_failed",
@@ -929,7 +932,7 @@ export function createTaskWorktreeProvisioner(
       return existing; // idempotent rebind (no second `worktree add`, no second install)
     }
 
-    // T7 — adoption via the durable enter record: a session whose PERSISTED
+    // Adoption via the durable enter record: a session whose PERSISTED
     // workspaceRoot equals this engine's root has explicitly entered (or
     // created) this tree — the anchor is written only by a tool success plus
     // a session save, so it is the restart-safe explicit opt-in. Admit the
@@ -945,10 +948,10 @@ export function createTaskWorktreeProvisioner(
       return ctx.root;
     }
 
-    // T4 — passthrough anchored to THIS conversation's own task worktree
+    // Passthrough anchored to THIS conversation's own task worktree
     // (deterministic naming is the ownership anchor, valid across restarts):
     //   - own tree → no-op passthrough: return the same root with zero git
-    //     calls and zero rebind writes (no second tree, hard req ⑦ idempotency);
+    //     calls and zero rebind writes (no second tree, idempotent);
     //   - another session's tree / any other linked worktree → typed
     //     `foreign_worktree` fail-closed (ADR-0037 covers only the main repo
     //     and the session's own task tree; a foreign root never gets a nested
@@ -1008,8 +1011,8 @@ export function createTaskWorktreeProvisioner(
       runGit,
     });
 
-    // Layer 1 (spec items 2–3): make the new tree runnable without the model
-    // inventing an install. Best-effort and fail-open — the tree is already
+    // Make the new tree runnable without the model inventing an install.
+    // Best-effort and fail-open — the tree is already
     // created, so a missing manager / lockfile only changes the reported line
     // (never the outcome). The line reaches the model through `ctx.report`
     // (the create-worktree tool supplies it); absence of the seam — the gate,
@@ -1027,16 +1030,17 @@ export function createTaskWorktreeProvisioner(
   }
 
   /**
-   * T3 / ADR-0070 — enter 前置占用检查纯函数式 helper。**只读**——
-   * 绝不调 store.save / mkdir / writeFile 等任何写盘动作（SC7 审查项）。
-   * 设计选择：
-   *   - 路径比较走 `resolve()` 单次归一化（化解尾随分隔符 / 长绝对路径），
-   *     两侧解析到绝对路径后再 `===` 裁决（overflow 臂）；
-   *   - 自占用（`entry.conversation_id === conversationId`）跳过——同一
-   *     会话自己点过自己不算占用（fresh 进程 bound Map 为空时尤其重要）；
-   *   - 缺 `workspaceRoot` / 空串 → 视为无占用放行（empty 臂，spec 显式要求）；
-   *   - listSessions 抛 → typed `rebind_failed`（exception 臂；host-side
-   *     rerun_after_change，绝不静默当成无占用）。
+   * ADR-0070 — pure functional helper for enter's pre-claim occupancy check.
+   * Strictly READ-ONLY: never calls store.save / mkdir / writeFile or any
+   * other disk write. Design choices:
+   *   - path comparison normalizes once via `resolve()` on both sides
+   *     (absorbing trailing separators / long absolute paths) before `===`;
+   *   - self-claims (`entry.conversation_id === conversationId`) are
+   *     skipped — a session pointing at its own tree is not a conflict
+   *     (especially when a fresh process has an empty bound Map);
+   *   - missing / empty `workspaceRoot` → treated as unclaimed (pass);
+   *   - listSessions throwing → typed `rebind_failed` (host-side
+   *     rerun_after_change; never silently treated as unclaimed).
    */
   async function assertNotClaimed(
     target: string,
@@ -1048,10 +1052,10 @@ export function createTaskWorktreeProvisioner(
     try {
       entries = await list();
     } catch (err) {
-      // exception 臂 — typed fail-closed. 不重新 throw 原始错误对象（避免
-      // 把 SessionStoreError 形状泄漏进 WorktreeIsolationError.message）；
-      // errorMessage 抽 plain string 上下文（spec 输入五类表「原样 rethrow
-      // 或 typed fail-closed」二选一——这里选 typed fail-closed 一致性）。
+      // Exception arm — typed fail-closed. The original error object is not
+      // rethrown (that would leak SessionStoreError's shape into
+      // WorktreeIsolationError.message); errorMessage extracts a plain-string
+      // context, keeping the typed fail-closed path consistent.
       throw new WorktreeIsolationError(
         "rebind_failed",
         `worktree isolation: cannot enumerate sessions for occupancy check: ${errorMessage(err)}`
@@ -1062,16 +1066,16 @@ export function createTaskWorktreeProvisioner(
         entry.workspaceRoot === undefined ||
         entry.workspaceRoot.length === 0
       ) {
-        continue; // empty 臂 — 缺字段 / 空串视为无占用放行
+        continue; // empty arm — missing field / empty string = unclaimed
       }
       if (entry.conversation_id === selfConversationId) {
-        continue; // 自占用不算占用（fresh 进程 bound Map 为空时尤其重要）
+        continue; // a self-claim is not a conflict (fresh process has an empty bound Map)
       }
       if (resolve(entry.workspaceRoot) === normalizedTarget) {
-        // 回执点名占用者 + 释放路径（spec SC3 / SC9）。
-        // L1 披露：占用枚举仅本进程可见，跨进程 / 跨 CLI 实例的占用看不见
-        // （spec L1「弱档」已决；该披露在设置项文档 + 回执文案 + spec 三处
-        // 同时在场，本句为回执处的强制披露点）。
+        // The receipt names the claimer and the release path.
+        // Weak-mode disclosure: occupancy is visible only within this
+        // process; claims held by other CLI processes are invisible to this
+        // check — this is the mandatory disclosure point in the receipt.
         throw new WorktreeIsolationError(
           "worktree_claimed",
           `worktree isolation: task worktree ${target} is already claimed by session '${entry.conversation_id}'; release it by resuming that session and calling exit-worktree, or by deleting the session record. Note: occupancy is visible only within the current process — other CLI processes' claims on the same tree are not visible to this check`
@@ -1090,8 +1094,8 @@ export function createTaskWorktreeProvisioner(
         "worktree isolation: the enter call carried no conversation id; cannot rebind a session root without one"
       );
     }
-    // Segment-safety gate BEFORE path construction — both ids are joined into
-    // the target path verbatim (Review Medium-1 discipline).
+    // Segment-safety gate BEFORE path construction — both ids are joined
+    // into the target path verbatim.
     if (!SAFE_CONVERSATION_ID_RE.test(conversationId)) {
       throw new WorktreeIsolationError(
         "rebind_failed",
@@ -1129,18 +1133,24 @@ export function createTaskWorktreeProvisioner(
       return enterResultOf(target); // idempotent re-enter (zero writes)
     }
 
-    // T3 / ADR-0070 — ON 档 enter 前置占用检查（spec SC3 / SC4 / SC5）。
-    // 位置在幂等 re-enter 之后、四道目标校验之前：
-    //   - 同进程 bound Map 已认领（同会话自占用）→ 上面已早返回，零 list 开销；
-    //   - 别的现存会话记录占用 → typed worktree_claimed（fail-closed，归
-    //     operator_required，回执自带停止指令 + 释放路径，spec SC3 / SC6）。
+    // ADR-0070 — ON-mode pre-enter occupancy check. Placed after the
+    // idempotent re-enter and before the four target validations:
+    //   - already claimed in this process's bound Map (self) → the early
+    //     return above costs zero listing overhead;
+    //   - another persisted session claims the tree → typed
+    //     worktree_claimed (fail-closed; the receipt carries the stop
+    //     instruction and the release path).
     //
-    // 输入五类表（spec 输入五类 + SC7 零新写盘）：
-    //   - empty          listSessions 空 / 记录缺 workspaceRoot / 字段空串 → 视为无占用放行（不 throw）；
-    //   - negative       OFF 档 → 完全跳过本检查（早返回前已断 worktreeExclusive；SC2）；
-    //   - overflow       路径比较走 `resolve()` 归一化（尾随分隔符 / 长绝对路径均正确裁决）；
-    //   - exception      listSessions 抛 → typed `rebind_failed`（**绝不**静默放行）；
-    //   - concurrent     双 enter 同窗双双成功（spec L2，本 ticket 不测，T4 留测试钉住）。
+    // Input classes:
+    //   - empty      listSessions empty / record missing workspaceRoot /
+    //                empty field → treated as unclaimed (no throw);
+    //   - negative   OFF mode skips this check entirely;
+    //   - overflow   paths compared after `resolve()` normalization
+    //                (trailing separators / long absolute paths);
+    //   - exception  listSessions throws → typed `rebind_failed`, never
+    //                silently passed;
+    //   - concurrent two enters in the same window can both pass
+    //                (check-then-act is not atomic here).
     if (worktreeExclusive && listSessions !== undefined) {
       await assertNotClaimed(target, conversationId, listSessions);
     }
@@ -1176,7 +1186,7 @@ export function createTaskWorktreeProvisioner(
     // store and persists the returned root through conditionalSave.
     await persistWorkspaceRoot(conversationId, target, "enter rebind");
 
-    // D5 — register the boundary BEFORE the (bounded but slow) install. `enter`
+    // Register the boundary BEFORE the (bounded but slow) install. `enter`
     // has no in-flight map of its own (unlike `provision`'s `pending`), so the
     // re-enter guard above is the only coalescing point: with the ensure still
     // ahead of `bound.set`, two concurrent enters of the same tree both missed
@@ -1191,8 +1201,9 @@ export function createTaskWorktreeProvisioner(
     bound.set(conversationId, target);
     taskRoots.add(target);
 
-    // Layer 1 idempotent ensure: entering a tree created before this feature
-    // (or created by a session whose install failed) still ends with resolvable
+    // Idempotent project-deps ensure: entering a tree created before this
+    // feature (or created by a session whose install failed) still ends with
+    // resolvable
     // project deps. Same fail-open contract as `provision` — the enter itself
     // has already succeeded and no outcome depends on this. The receipt carries
     // the line because enter's model-facing text comes from this seam.

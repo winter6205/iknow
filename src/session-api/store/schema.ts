@@ -1,53 +1,50 @@
 /**
- * SessionFileV1 schema (022 spec L183-192) + sanitize (#120 T1).
+ * SessionFileV1 schema + sanitize.
  *
  * Why a separate validator: JSON.parse success != schema success. parse_failed
  * is for malformed JSON; schema_invalid is for well-formed but wrong-shape
  * data. Hub maps these to different wire kinds (422 + 422, but distinct).
  *
- * #120 adds: schemaVersion range check (≤ CURRENT accepted → sanitize, >
+ * v2 adds: schemaVersion range check (≤ CURRENT accepted → sanitize, >
  * CURRENT rejected); sanitizeSessionFile (pure, backfills title/cwd/sanitized_at
  * for v1 inputs and validates message element shape); extractTitle (first
  * user message's first text block, trimmed, truncated to 80 chars).
  *
- * v3 (T1 checkpoint data layer): SessionFileV1 gains the optional
- * `checkpoints` array of per-turn interrupt snapshots, shared by the
- * checkpoint (interrupt persist) and TUI rewind (rollback) paths. v1/v2 files
- * sanitize to `checkpoints: []` (spread-preserve forward-compat discipline
- * intact — the field is a derived add-on, not a mutation of authoritative
- * history).
+ * v3: SessionFileV1 gains the optional `checkpoints` array of per-turn
+ * interrupt snapshots, shared by the checkpoint (interrupt persist) and TUI
+ * rewind (rollback) paths. v1/v2 files sanitize to `checkpoints: []`
+ * (spread-preserve forward-compat discipline intact — the field is a derived
+ * add-on, not a mutation of authoritative history).
  *
- * v4 (#383 B2 / #392, additive): the `system` role joins the validate-time
- * whitelist so Ctrl+C interrupts can persist as transcript-resident
+ * v4 (additive): the `system` role joins the validate-time whitelist so
+ * Ctrl+C interrupts can persist as transcript-resident
  * {role:"system", content:[{type:"text", text:"Interrupted by user."}]}
  * entries. No new fields, no migration: v3 files re-sanitize unchanged (the
  * additive change only lifts the bar for `system`). System messages never
- * reach the provider — buildMessageParams filters them before the SDK call
- * (T2). System messages are not a turn for checkpoint rewind (splitTurns stays
+ * reach the provider — buildMessageParams filters them before the SDK call.
+ * System messages are not a turn for checkpoint rewind (splitTurns stays
  * `role === "user"`-anchored and skips tool_result-only user messages); v3
  * rewind semantics are byte-identical with a system entry present.
  *
- * v5 (#408, additive): optional `goal?: GoalState` field carries the session-
- * level goal (user's intent for the whole session). Additive: v4 files
- * sanitize to `goal: undefined` (absent) and the field round-trips byte-
- * identical for v5 files. Source union is `user_initial | user_pin`; status
- * union is `active | achieved | aborted | superseded`. The hub owns the only
- * write path; `goal.text` is the verify-loop's task field when present.
+ * v5 (additive): optional `goal?: GoalState` field carries the session-level
+ * goal (user's intent for the whole session). Additive: v4 files sanitize to
+ * `goal: undefined` (absent) and the field round-trips byte-identical for v5
+ * files. Source union is `user_initial | user_pin`; status union is
+ * `active | achieved | aborted | superseded`. The hub owns the only write
+ * path; `goal.text` is the verify-loop's task field when present.
  *
- * #458 T2 (goal/taskFocus split, SC1/SC2/SC4): `GoalSource` is shrunk to
- * `user_initial | user_pin` — the removed model-propose slot has no writer
- * (T6 model-propose/confirm channel is zero-landing). Legacy disk values
- * that carried the removed slot now fail `isValidGoal` → sanitize throws
- * `schema_invalid` (an executable migrate — never silently dropped).
- * `MAX_GOAL_CHARS` + `validateGoalText` gate the /goal and `## GOAL:` write
- * paths at 2000 chars.
+ * Later revision: `GoalSource` was shrunk to `user_initial | user_pin` — the
+ * removed model-propose slot has no writer. Legacy disk values that carried
+ * the removed slot now fail `isValidGoal` → sanitize throws `schema_invalid`
+ * (an executable migrate — never silently dropped). `MAX_GOAL_CHARS` +
+ * `validateGoalText` gate the /goal and `## GOAL:` write paths at 2000 chars.
  *
- * #605 T2 (recent-user-tasks): `session.taskFocus` retired. Old disk files
- * carrying the optional `taskFocus?: TaskFocusState` field are sanitized by
- * stripping the key on load (sanitize-drop; no migration, no validation —
- * unknown/deprecated field, deleted unconditionally). v5 files without the
- * key round-trip byte-identical. The greeting filter that fed the old seed
- * path (`shouldSeedTaskFocus` + `TASK_FOCUS_GREETING_RE`) moves to
+ * Later revision: `session.taskFocus` retired. Old disk files carrying the
+ * optional `taskFocus?: TaskFocusState` field are sanitized by stripping the
+ * key on load (sanitize-drop; no migration, no validation — unknown /
+ * deprecated field, deleted unconditionally). v5 files without the key
+ * round-trip byte-identical. The greeting filter that fed the old seed path
+ * (`shouldSeedTaskFocus` + `TASK_FOCUS_GREETING_RE`) moves to
  * turn-projection.ts — its only remaining consumer is
  * `extractRecentUserTasks` (compact-boundary recent-tasks excerpt).
  */
@@ -67,31 +64,31 @@ export type InterruptReason =
  *  `lastUsage` carries the last successful model-call usage when known
  *  (mirrors RunResult.lastUsage; absent → the interrupt saw no usage).
  *
- *  T5 (#622 / spec session-jsonl-resume D3): `anchorEventId` is the
- *  authoritative anchor — the id of the JSONL event at chain position
- *  `messagesCount - 1` (the last message of the checkpointed turn).
- *  `messagesCount` stays as the derived view the picker joins on. The store
- *  resolves the anchor at save (against the final chain) and at load
- *  (migrating legacy messagesCount-only records); unresolvable records
- *  (messagesCount beyond the chain) keep whatever anchor they carried. */
+ *  `anchorEventId` is the authoritative anchor — the id of the JSONL event
+ *  at chain position `messagesCount - 1` (the last message of the
+ *  checkpointed turn). `messagesCount` stays as the derived view the picker
+ *  joins on. The store resolves the anchor at save (against the final chain)
+ *  and at load (migrating legacy messagesCount-only records); unresolvable
+ *  records (messagesCount beyond the chain) keep whatever anchor they
+ *  carried. */
 export interface CheckpointRecord {
   readonly turnIndex: number;
   readonly messagesCount: number;
   readonly interruptedAt: string;
   readonly interruptReason: InterruptReason;
   readonly lastUsage?: unknown;
-  /** T5: authoritative event-id anchor (derived from messagesCount at
+  /** Authoritative event-id anchor (derived from messagesCount at
    *  save/load; absent when the position is beyond the head chain). */
   readonly anchorEventId?: string;
 }
 
-/** v5 (#408): session-level goal — the user's intent for the whole session.
+/** v5: session-level goal — the user's intent for the whole session.
  *  Carries the active goal (the verify-loop's task field binds here when
  *  present, falling back to the current-turn query otherwise) plus a history
  *  of superseded goals from prior re-pins. The hub owns the only write path;
- *  `goal.text` is read-only to all other code. (#458 T2: source union shrunk
- *  to `user_initial | user_pin`; legacy disk values carrying the removed
- *  slot fail validation and sanitize throws `schema_invalid`.) */
+ *  `goal.text` is read-only to all other code. The source union is
+ *  `user_initial | user_pin`; legacy disk values carrying a removed slot
+ *  fail validation and sanitize throws `schema_invalid`. */
 export type GoalSource = "user_initial" | "user_pin";
 export type GoalStatus = "active" | "achieved" | "aborted" | "superseded";
 
@@ -110,7 +107,7 @@ export interface GoalState {
   readonly updatedAt: string;
   readonly history?: ReadonlyArray<GoalHistoryEntry>;
   /**
-   * Plan T3: optional host auto-loop cap from `/goal --max-turns N`.
+   * Optional host auto-loop cap from `/goal --max-turns N`.
    * Omit = no hard cap. Shared by slash, hub, and chat.
    */
   readonly maxTurns?: number;
@@ -120,18 +117,17 @@ export interface GoalState {
   readonly idleCompletedStreak?: number;
 }
 
-/** v5 (#458 T2): deterministic task focus (#459 term A) — RETIRED in #605 T2.
- *  The session-level task focus used to be carried on the file as
- *  `taskFocus?: TaskFocusState` and seeded/cleared by the hub via the pure
- *  `seedTaskFocus` helper. Per `specs/recent-user-tasks.md` / ADR-0026 the
- *  compact-boundary payload was replaced by a recent-tasks excerpt
- *  (`extractRecentUserTasks` over session.messages) — the taskFocus lifecycle
- *  is gone. Sanitize drops any pre-existing `taskFocus` key from legacy
- *  disk; runtime never reads or writes the field. The greeting filter that
- *  once guarded `seedTaskFocus` is preserved as `shouldSeedTaskFocus` in
- *  turn-projection.ts (only consumer is `extractRecentUserTasks`). */
+/** The deterministic task focus (`taskFocus?: TaskFocusState`) is RETIRED.
+ *  It used to be carried on the file and seeded/cleared by the hub via the
+ *  pure `seedTaskFocus` helper. Per ADR-0026 the compact-boundary payload was
+ *  replaced by a recent-tasks excerpt (`extractRecentUserTasks` over
+ *  session.messages) — the taskFocus lifecycle is gone. Sanitize drops any
+ *  pre-existing `taskFocus` key from legacy disk; runtime never reads or
+ *  writes the field. The greeting filter that once guarded `seedTaskFocus`
+ *  is preserved as `shouldSeedTaskFocus` in turn-projection.ts (only
+ *  consumer is `extractRecentUserTasks`). */
 
-/** Session file shape (#120 schema v2, v3 = +checkpoints). Loaders sanitize
+/** Session file shape (v2 baseline, v3 = +checkpoints). Loaders sanitize
  *  legacy v1 files. */
 export interface SessionFileV1 {
   readonly schemaVersion: number;
@@ -141,7 +137,8 @@ export interface SessionFileV1 {
   readonly turnCount: number;
   readonly updatedAt: string;
   /** v2: first user message text, trimmed, truncated to 80 chars.
-   *  (#467: renamed from `summary` — it is a UI title excerpt, not an LLM summary.) */
+   *  (Renamed from `summary` — it is a UI title excerpt, not an LLM
+   *  summary.) */
   readonly title: string;
   /** v2: working directory the session was created in. */
   readonly cwd: string;
@@ -149,34 +146,39 @@ export interface SessionFileV1 {
   readonly sanitized_at: string;
   /** v3: interrupt snapshots for checkpoint / TUI rewind ([] until a save). */
   readonly checkpoints?: ReadonlyArray<CheckpointRecord>;
-  /** v5: session-level goal (#408). Absent on legacy files (loads as
+  /** v5: session-level goal. Absent on legacy files (loads as
    *  `undefined`); the hub is the only writer and re-pins via `## GOAL:` /
-   *  `/goal`. `#605 T2`: legacy `user_initial` source now passes
-   *  sanitize verbatim (the retired `user_initial → taskFocus` migration
-   *  is gone with the field); both `user_pin` and `user_initial` survive
-   *  load — see `sanitizeSessionFile`. */
+   *  `/goal`. Legacy `user_initial` source now passes sanitize verbatim
+   *  (the retired `user_initial → taskFocus` migration is gone with the
+   *  field); both `user_pin` and `user_initial` survive load — see
+   *  `sanitizeSessionFile`. */
   readonly goal?: GoalState;
   /** Additive (CURRENT stays 5): serve/session bind root. Absent = unbound;
    *  sanitize never backfills cwd or process.cwd(). Illegal present values
    *  fail validate with field `"workspaceRoot"` (not silently dropped). */
   readonly workspaceRoot?: string;
-  /** 与 messages 一一对应的入账时刻(ISO)。undefined 元素 = 该条事件无
-   *  createdAt(appendEvents stamping 之前写入的旧文件 / fork 旧链分支)。
-   *  整个 key 缺席 = 链上所有事件均无时间戳(条件输出，避免旧文件 round-trip
-   *  多出全-undefined 数组；详见 jsonl.ts:projectSessionLog 的
-   *  spread-discipline 纪律)。appendEvents stamp 后写入的事件自带
-   *  createdAt,projectSessionLog 才会挂上这个并行数组。picker 消费侧
-   *  (rewind-picker.tsx anchoredAtFor) 用 ?? "" 兜底，undefined / 缺席
-   *  同语义。 */
+  /** Parallel array (index-aligned with messages) of event ingest times
+   *  (ISO). An undefined element = that event carries no createdAt (legacy
+   *  file written before appendEvents stamping / an old fork branch). Whole
+   *  key absent = no event on the chain has a timestamp (conditional output
+   *  so a legacy file does not round-trip into an all-undefined array; see
+   *  the spread-discipline in jsonl.ts projectSessionLog). Events written
+   *  after appendEvents stamping carry createdAt, which is when
+   *  projectSessionLog attaches this array. The consumer
+   *  (rewind-picker anchoredAtFor) falls back with ?? "" — undefined and
+   *  absent mean the same. */
   readonly messageCreatedAt?: ReadonlyArray<string | null>;
-  /** D2 (tui-display-consistency): 与 messages 一一对应的 assistant 回合思考
-   *  时长(ms)。element = `number | null`,null = 该位置事件无 thinkingMs(非
-   *  assistant / 流式回合无思考 / legacy 文件)。整个 key 缺席 = 整链均无
-   *  thinkingMs(条件输出，与 messageCreatedAt 同 spread-discipline 纪律)。
-   *  测量点:anthropic-adapter 流式臂 stepStreamArm 首条 thinking_delta 至
-   * 首个非思考增量的时长;非流式 / 边界形态(thinkingMs <= 0 或非有限数)
-   *  → 字段缺席，appendEvents 不挂 key。schema additive(CURRENT 保持 5)。
-   *  数组长度不强制(消费侧 ?? undefined 兜底,与 messageCreatedAt 现状一致)。 */
+  /** Parallel array (index-aligned with messages) of assistant-turn
+   *  thinking duration in ms. Element = `number | null`; null = that event
+   *  has no thinkingMs (non-assistant / streamed turn without thinking /
+   *  legacy file). Whole key absent = no thinkingMs anywhere on the chain
+   *  (conditional output, same spread-discipline as messageCreatedAt).
+   *  Measured by the anthropic-adapter streaming arm (stepStreamArm) from
+   *  the first thinking_delta to the first non-thinking delta;
+   *  non-streaming or boundary shapes (thinkingMs <= 0 / non-finite) →
+   *  field absent, appendEvents does not attach the key. Additive (CURRENT
+   *  stays 5). Array length is not enforced (consumers fall back with
+   *  ?? undefined, as today for messageCreatedAt). */
   readonly thinkingMs?: ReadonlyArray<number | null>;
 }
 
@@ -185,7 +187,7 @@ export const CURRENT_SCHEMA_VERSION = 5 as const;
 /**
  * Validate parsed JSON against the session-file shape.
  * schemaVersion uses a range check (≤ CURRENT accepted → sanitize, > CURRENT
- * rejected) so old files load and future files fail loudly (#120 Boundaries).
+ * rejected) so old files load and future files fail loudly.
  * Returns the failed field name, or null when valid.
  */
 export function validateSessionFile(value: unknown): string | null {
@@ -247,13 +249,14 @@ export function validateSessionFile(value: unknown): string | null {
   ) {
     return "messageCreatedAt";
   }
-  // D2 (tui-display-consistency):optional parallel array over messages for
-  // assistant 回合思考时长(ms)。element 必须是 number 或 null(运行时
-  // `undefined` 在 JSON 序列化为 null,只接受 null 不接受 undefined —— 与
-  // messageCreatedAt 同 posture)。值不再做边界判断(appendEvents 入口已
-  // 过滤 thinkingMs <= 0 / 非有限数,不会把 0/NaN/Infinity 落盘)。
-  // 数组长度不强制,缺齐以消费侧 ?? undefined 兜底(与 messageCreatedAt
-  // 现状一致)。
+  // Optional parallel array over messages for assistant-turn thinking
+  // duration (ms). Elements must be number or null — runtime `undefined`
+  // serializes to null via JSON.stringify, so only null holes are accepted
+  // (same posture as messageCreatedAt). No value-bound checks here:
+  // appendEvents already filters thinkingMs <= 0 / non-finite, so 0/NaN/
+  // Infinity never reach disk. Array length is not enforced; short arrays
+  // fall back to ?? undefined on the consumer side (as with
+  // messageCreatedAt).
   if (
     obj["thinkingMs"] !== undefined &&
     !isValidThinkingMs(obj["thinkingMs"])
@@ -269,8 +272,8 @@ export function isSessionFileV1(value: unknown): value is SessionFileV1 {
 }
 
 /**
- * Extract a one-line UI title (#467: renamed from the pre-#467 summary helper —
- * it is a title excerpt for the session list, not an LLM summary): the first
+ * Extract a one-line UI title (renamed from the `summary` helper — it is a
+ * title excerpt for the session list, not an LLM summary): the first
  * text block of the first user message that has one, trimmed then truncated to
  * 80 chars. Markdown is NOT stripped — the storage layer stays format-agnostic.
  * "" if no user message has a text block (skips pure tool_result user messages).
@@ -290,7 +293,7 @@ export function extractTitle(
 
 /**
  * Extract the full first user message text — no truncation, just trimmed.
- * Used to seed the session-level goal (#408 T2) where the full intent matters;
+ * Used to seed the session-level goal where the full intent matters;
  * `extractTitle` truncates to 80 chars and would lose the tail. "" if no user
  * message has a text block (skips pure tool_result user messages, mirrors
  * extractTitle's skip rule).
@@ -309,7 +312,7 @@ export function extractGoal(
 }
 
 /**
- * #408 T3: re-pin the session-level goal.
+ * Re-pin the session-level goal.
  *
  * Pure — given the current `GoalState` (or `undefined` for a fresh session)
  * and the new `text`, build the new active goal and prepend the prior goal
@@ -358,11 +361,11 @@ export function pinGoal(opts: {
   };
 }
 
-/** #458 T2 (SC5): goal text is capped at 2000 chars on both write entries
+/** Goal text is capped at 2000 chars on both write entries
  *  (`/goal <text>` in cli and the `## GOAL:` directive path in the hub). */
 export const MAX_GOAL_CHARS = 2000;
 
-/** #458 T2 (SC5): validate a goal text string. Returns `null` when valid,
+/** Validate a goal text string. Returns `null` when valid,
  *  or an error-description string when not. Invalid = empty after trim, or
  *  raw length > MAX_GOAL_CHARS. The caller passes the raw (untrimmed) text —
  *  `## GOAL:` directives feed the original body here — so trim is applied
@@ -389,15 +392,15 @@ export function validateGoalText(text: string): string | null {
  *
  * Backfills v2 fields (title/cwd/sanitized_at) for v1 inputs; preserves
  * unknown top-level fields on ≤ CURRENT files so future versions round-trip
- * (#120 Boundaries Never: future fields must be preserved, not dropped).
+ * (future fields must be preserved, not dropped).
  *
- * Throws { kind: "schema_invalid", field } (matches session-store.ts:49-53
- * `satisfies SessionStoreError` style — structured object literal, not a bare
- * Error) so the caller can attach `conversation_id` and rethrow a full
- * SessionStoreError.
+ * Throws { kind: "schema_invalid", field } (same style as the
+ * `satisfies SessionStoreError` object literals in session-store.ts —
+ * structured object literal, not a bare Error) so the caller can attach
+ * `conversation_id` and rethrow a full SessionStoreError.
  *
- * Why sanitize never repairs `messages`: authoritative history is immutable
- * (#120 Boundaries Never). A malformed message element is a hard reject.
+ * Why sanitize never repairs `messages`: authoritative history is immutable.
+ * A malformed message element is a hard reject.
  */
 export function sanitizeSessionFile(raw: unknown): SessionFileV1 {
   const field = validateSessionFile(raw);
@@ -416,18 +419,20 @@ export function sanitizeSessionFile(raw: unknown): SessionFileV1 {
   // v5 `goal` is optional and additive — preserved verbatim via `...obj`
   // when present (validated by validateSessionFile above), omitted when
   // absent, keeping v4 → v5 round-trip byte-identical. The hub owns the
-  // only write path. `#605 T2`: the retired `user_initial → taskFocus`
-  // migration is gone with the field's retirement; legacy `user_initial`
-  // goals now pass sanitize verbatim alongside `user_pin`.
+  // only write path. The retired `user_initial → taskFocus` migration is
+  // gone with the field's retirement; legacy `user_initial` goals now pass
+  // sanitize verbatim alongside `user_pin`.
   // Build the result with the conditional goal key to preserve
   // byte-identical round-trip for v4/v5 files that lack the field
   // (spread-discipline: never emit `field: undefined` keys).
-  // #467 T3: title 字段迁移。legacy 命名 `summary` 是首条 user 文本的 UI
-  // 标题摘录(非 LLM 摘要),现改名 `title`。迁移规则:优先取遗留 `summary`
-  // (旧盘文件),其次取已写的 `title`,都没有则从
-  // 首条 user 文本重算(extractTitle,语义与旧命名时代的计算完全一致)。
-  // 输出 key 恒为 `title` —— 遗留 `summary` key 在迁移后删除,绝不存活进
-  // 新文件(spread-preserve 纪律:未知字段保留,但旧名字是已知过期字段)。
+  // Title-field migration: the legacy name `summary` was a UI title excerpt
+  // of the first user text (not an LLM summary), now renamed `title`.
+  // Precedence: legacy `summary` (old disk) > already-written `title` >
+  // recompute from the first user text (extractTitle — identical semantics
+  // to the calculation used back when the old name was current). The output
+  // key is always `title`: the legacy `summary` key is deleted after
+  // migration and never survives into a new file (spread-preserve: unknown
+  // fields are kept, but `summary` is a known-deprecated field).
   const title: string =
     typeof obj["summary"] === "string"
       ? (obj["summary"] as string)
@@ -446,16 +451,16 @@ export function sanitizeSessionFile(raw: unknown): SessionFileV1 {
     checkpoints,
   };
   if ("summary" in obj) {
-    // 不管 value 类型(string / null / number / object)都删除:
-    // legacy `summary` 是过期字段,迁移后绝不存活进新文件
-    // (#467 review-fix Medium:之前用 typeof === 'string' 判,非 string 值会漏过)。
+    // Delete regardless of value type (string / null / number / object):
+    // legacy `summary` is a deprecated field and must never survive into a
+    // new file after migration.
     delete result["summary"];
   }
-  // #605 T2: sanitize-drop the retired `taskFocus` key. Any value (object /
+  // Sanitize-drop the retired `taskFocus` key. Any value (object /
   // string / number / null) on a legacy file is silently dropped — the field
   // no longer exists in the runtime SessionFileV1 shape and the hub does not
   // write it. This keeps existing-session files loadable without a schema
-  // bump, matching the spec's "load 旧字段 sanitize drop 不抛" constraint.
+  // bump (loading old fields sanitizes away without throwing).
   // Unconditional delete — same spread-discipline posture as legacy `summary`.
   delete result["taskFocus"];
   return result as unknown as SessionFileV1;
@@ -484,12 +489,13 @@ function isValidMessagesList(messages: ReadonlyArray<unknown>): boolean {
 function isValidMessage(m: unknown): boolean {
   if (m === null || typeof m !== "object") return false;
   const msg = m as Record<string, unknown>;
-  // schema v4 (#383 B2): `system` role 进入白名单 —— Ctrl+C 打断作为
-  // transcript 事件持久化（仅展示层，绝不喂 provider）。`system` 消息与
-  // turn 切片正交：splitTurns 按 turn-projection.ts `isTurnQuery` 规则切片
-  // （`role === "user"` 且无 tool_result 块且非 subagent drain summary，
-  // 与 checkpoint.ts / hub.ts 同一 SSOT），system 项自然落在相邻 turn 的
-  // 间隙，不影响 rewind 锚点。
+  // schema v4: the `system` role joins the whitelist — Ctrl+C interrupts
+  // persist as transcript events (display layer only, never fed to the
+  // provider). `system` messages are orthogonal to turn slicing: splitTurns
+  // follows turn-projection.ts `isTurnQuery` (`role === "user"`, no
+  // tool_result block, not a subagent drain summary — same SSOT as
+  // checkpoint.ts / hub.ts), so system entries fall into the gaps between
+  // adjacent turns and never move rewind anchors.
   if (
     msg["role"] !== "user" &&
     msg["role"] !== "assistant" &&
@@ -515,12 +521,10 @@ function isValidContentBlock(b: unknown): boolean {
       );
     case "tool_result":
       return typeof block["tool_use_id"] === "string" && "content" in block;
-    // thinking / redacted_thinking：harness 权威消息可含（#151 thinking
-    // 启用后 anthropic-adapter 原样保留）；形状对齐 AnthropicContentBlock。
-    // T1: harness retains thinking blocks (with signature) in the
-    // authoritative history. The session store must accept them on save
-    // and replay them verbatim — otherwise the wire thinking view has
-    // nothing to project after a real thinking turn.
+    // thinking / redacted_thinking: the harness retains thinking blocks
+    // (with signature) in the authoritative history. The session store must
+    // accept them on save and replay them verbatim — otherwise the wire
+    // thinking view has nothing to project after a real thinking turn.
     case "thinking":
       return (
         typeof block["thinking"] === "string" &&
@@ -565,7 +569,7 @@ function isValidCheckpoint(c: unknown): boolean {
     typeof r["interruptedAt"] === "string" &&
     typeof r["interruptReason"] === "string" &&
     VALID_INTERRUPT_REASONS.has(r["interruptReason"] as InterruptReason) &&
-    // T5: optional event-id anchor — present values must be strings.
+    // Optional event-id anchor — present values must be strings.
     (r["anchorEventId"] === undefined || typeof r["anchorEventId"] === "string")
   );
 }
@@ -654,13 +658,13 @@ function isValidMessageCreatedAt(value: unknown): boolean {
   return true;
 }
 
-/** D2 (tui-display-consistency):Optional `thinkingMs` parallel array over
- *  messages. elements are `number | null`(appendEvents 入口已过滤
- *  `thinkingMs <= 0` / 非有限数,不会把 0/NaN/Infinity 落盘;此 validator
- *  不重复边界判定 —— 它只检查元素类型,允许任意正 number,接受 null 孔洞)。
- *  数组长度不强制,与 messageCreatedAt 现状一致。运行时 `undefined` 经
- *  JSON.stringify 序列化为 null,因此 validator 接受 null 而不接受 undefined
- *  —— 与 messageCreatedAt 同 posture。 */
+/** Optional `thinkingMs` parallel array over messages. Elements are
+ *  `number | null` — appendEvents already filters `thinkingMs <= 0` /
+ *  non-finite, so 0/NaN/Infinity never reach disk; this validator does not
+ *  repeat boundary checks, it only checks element types (any positive
+ *  number accepted, null holes allowed). Array length is not enforced, same
+ *  posture as messageCreatedAt. Runtime `undefined` serializes to null via
+ *  JSON.stringify, so the validator accepts null but never undefined. */
 function isValidThinkingMs(value: unknown): boolean {
   if (!Array.isArray(value)) return false;
   for (const el of value) {

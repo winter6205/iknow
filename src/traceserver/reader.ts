@@ -1,19 +1,22 @@
 /**
  * JSONL trace file reader (read side of the trace inspection panel).
  *
- * 同步读取的理由: 写侧用 appendFileSync (ADR-0003 D11)，读侧与之对称；
- * 面板查询量级是「单次点击拉一页」而非持续流式读取，8MB 上限内同步
- * readFileSync 的延迟可忽略，且避免引入异步状态管理。
+ * Why synchronous reads: the writer uses appendFileSync (ADR-0003) and the
+ * reader mirrors it; panel queries are "fetch one page per click", not a
+ * continuous stream, so sync readFileSync latency within the 8 MiB cap is
+ * negligible and async state management is avoided.
  *
- * Overflow 护栏: 文件超过 maxBytes 时只读前 maxBytes 字节，按行边界截断
- * (丢弃最后一个不完整行)，并置 truncated=true — 不抛错。上限可经工厂
- * opts 注入覆盖 (测试用小值，避免写 8MB)。contains 查询例外：改走
- * MAX_TRACE_BYTES_FOR_CONTAINS (256MB) 上限，见 readLinesFrom。
+ * Overflow guardrail: past maxBytes only the first maxBytes are read, cut
+ * at a line boundary (last incomplete line dropped), truncated=true — no
+ * throw. The cap is injectable via factory opts (tests use small values
+ * instead of writing 8 MB). contains queries are the exception: they use
+ * MAX_TRACE_BYTES_FOR_CONTAINS (256 MB), see readLinesFrom.
  *
- * 增量读取 (SC-R 14): `?poll=<ms>` 轮询场景下前端把上一轮响应里的 `offset`
- * 作为 `resumeOffset` 传回 — reader 只读该字节偏移之后的追加行，避免重复
- * 解析历史。若文件被替换 (resumeOffset 落在新文件大小之外) → 从文件头召回
- * 全量。语义详见 readLinesFrom。
+ * Incremental reads: under `?poll=<ms>` polling the frontend passes the
+ * previous response's `offset` back as `resumeOffset` — the reader only
+ * reads lines appended after that byte offset, avoiding re-parsing
+ * history. If the file was replaced (resumeOffset beyond the new size) ->
+ * refetch everything from the head. Details in readLinesFrom.
  */
 import { openSync, readSync, closeSync, statSync } from "node:fs";
 import {
@@ -29,18 +32,22 @@ import { isEnoent, wrapIoError } from "./io.js";
 export const MAX_TRACE_BYTES = 8 * 1024 * 1024;
 
 /**
- * contains 查询的读窗上限 (256 MiB)。contains 提供时绕过 8 MiB 现状帽全文件
- * 扫描 — 39 MB 级 trace 找「哪条记录提到 X」正是本参数的存在理由；帽只防
- * 失控 (误把 GB 级文件喂进来)，超限时**抛 TraceReadError** 而不是静默截断
- * (静默截断会让 contains 在大 trace 上悄悄变成「只扫前半段」的盲查询 —
- * 与本参数要解决的问题同形)。可经工厂 opts.containsMaxBytes 注入覆盖 (测试用)。
+ * Read-window cap for contains queries (256 MiB). When contains is given,
+ * the 8 MiB status-quo cap is bypassed for a full scan — finding "which
+ * records mention X" in a 39 MB trace is precisely why this knob exists;
+ * the cap only guards against runaway input (a GB-scale file fed in by
+ * mistake), and over the cap it **throws TraceReadError** rather than
+ * silently truncating (a silent cut would turn contains into a blind
+ * "scan only the first half" query on big traces — the same failure this
+ * parameter exists to fix). Injectable via factory opts.containsMaxBytes
+ * (for tests).
  */
 export const MAX_TRACE_BYTES_FOR_CONTAINS = 256 * 1024 * 1024;
 
 export interface JsonlTraceReaderOptions {
   readonly filePath: string;
   readonly maxBytes?: number;
-  /** contains 查询的读窗上限; 缺省 MAX_TRACE_BYTES_FOR_CONTAINS (测试注入小值)。 */
+  /** Read-window cap for contains queries; default MAX_TRACE_BYTES_FOR_CONTAINS (tests inject small values). */
   readonly containsMaxBytes?: number;
 }
 
@@ -52,7 +59,7 @@ export interface JsonlTraceReader {
 
 interface RawLines {
   readonly lines: ReadonlyArray<string>;
-  /** 本段读到的最后一个完整行**结尾**的字节偏移 (含换行符)，供下轮轮询续读。 */
+  /** Byte offset at the **end** of the last complete line read in this segment (incl. newline), for the next poll to resume from. */
   readonly nextOffset: number;
   readonly truncated: boolean;
 }
@@ -60,21 +67,24 @@ interface RawLines {
 /**
  * Read the file from byte `startOffset` up to maxBytes.
  *
- * 增量语义: 从 startOffset 处定位 (pread)，只读 startOffset 之后的字节。
- * 文件被替换 (startOffset > stat.size 且 startOffset > 0) → 从文件头召回
- * 全量 (写侧 appendFileSync 只增长，startOffset 越过 size 只可能是文件被
- * 整个替换/重建)。ENOENT → 空段 (文件被删/未创建，轮询静默)。
- * Size - startOffset > maxBytes → 只读该窗口的前 maxBytes 字节，按行边界
- * 截断 (truncated=true)。其它 IO 错误 (EISDIR 等) → TraceReadError。
+ * Incremental semantics: seek to startOffset (pread), read only bytes after
+ * it. File replaced (startOffset > stat.size and startOffset > 0) -> refetch
+ * everything from the head (the writer's appendFileSync only grows, so
+ * startOffset beyond size can only mean the file was wholly replaced /
+ * rebuilt). ENOENT -> empty segment (file deleted / not yet created;
+ * polling stays silent). size - startOffset > maxBytes -> read only the
+ * first maxBytes of that window, cut at a line boundary (truncated=true).
+ * Other IO errors (EISDIR etc.) -> TraceReadError.
  *
- * nextOffset 计算: 当前段若以完整换行结尾 → 直接取绝对结尾；否则去掉末尾
- * 未终结行 (半行，可能是截断或写入进行中) — 下轮续读时重新读该行，保证
- * 每条 JSONL 只被消费一次。
+ * nextOffset: if the segment ends with a complete newline -> take the
+ * absolute end directly; otherwise drop the unterminated trailing partial
+ * line (half line — either a cut or an in-flight write) so the next round
+ * re-reads it, guaranteeing each JSONL line is consumed exactly once.
  *
- * contains (trace-mcp-args-search task): 提供时对**原始行文本**做大小写敏感
- * 子串预过滤 — raw 不命中的行直接丢弃，不进 parseLines (省 JSON.parse CPU)。
- * 过滤发生在行边界切分之后、解析之前，所以 nextOffset / truncated 等字节级
- * 语义不受影响。
+ * contains: when given, a case-sensitive substring prefilter runs on the
+ * **raw line text** — lines that miss are dropped before parseLines (saves
+ * JSON.parse CPU). The filter sits after line splitting and before parsing,
+ * so byte-level semantics (nextOffset / truncated) are unaffected.
  */
 function readLinesFrom(
   filePath: string,
@@ -82,13 +92,14 @@ function readLinesFrom(
   startOffset: number,
   contains?: string
 ): RawLines {
-  // ENOENT 判定收敛在 statSize: 不存在的文件 → size=0，走下方空段分支
-  // (轮询静默，与本函数既有的静默降级语义一致)。
+  // ENOENT handling converges in statSize: a missing file -> size=0, falling
+  // into the empty-segment branch below (silent polling, consistent with this
+  // function's existing degradation semantics).
   const size = statSize(filePath);
   if (startOffset > size) {
-    // 文件被替换 (resumeOffset 落在新文件之外) → 召回，从文件头重读。
-    // startOffset > 0 且 > size 才能判定替换；若 startOffset === 0 则本就在
-    // 文件头，没有替换语义。
+    // File replaced (resumeOffset beyond the new file) -> refetch from head.
+    // Only startOffset > 0 and > size proves replacement; startOffset === 0
+    // is already at the head, no replacement semantics.
     if (startOffset > 0) return readLinesFrom(filePath, maxBytes, 0, contains);
     return { lines: [], nextOffset: 0, truncated: false };
   }
@@ -109,8 +120,10 @@ function readLinesFrom(
     throw wrapIoError(err);
   }
   const raw = splitLines(buf.toString("utf8"), startOffset, truncated);
-  // 空串 contains 视为未提供 (includes("") 恒真等于无过滤，却会错误绕过
-  // 现状帽) — 「空串 = 未提供」在此层与 query-trace-core 的校验层同义。
+  // An empty-string contains is treated as absent (includes("") is always
+  // true = no filter, but would wrongly bypass the status-quo cap) —
+  // "empty string = absent" means the same here and in query-trace-core's
+  // validation layer.
   if (!contains) return raw;
   return { ...raw, lines: raw.lines.filter((line) => line.includes(contains)) };
 }
@@ -121,21 +134,26 @@ function splitLines(
   truncated: boolean
 ): RawLines {
   if (content.length === 0) {
-    // 空段: 空文件，或无新增 (size === startOffset)。nextOffset 保持起点，
-    // 下轮轮询从同一偏移继续，不回头重读。
+    // Empty segment: file is empty, or no new bytes (size === startOffset).
+    // nextOffset stays at the start point so the next poll continues from
+    // the same offset without re-reading.
     return { lines: [], nextOffset: startOffset, truncated };
   }
   let usable: string;
   if (content.endsWith("\n")) {
-    // 完整终结段: 每个字符都是完整行。段内行分隔 \n 为单字节，非 \n 的
-    // UTF-8 多字节序列不会跨行，故 Buffer.byteLength(content) 即绝对偏移。
+    // Fully terminated segment: every character belongs to complete lines.
+    // In-segment line separators \n are single bytes and UTF-8 multibyte
+    // sequences never span lines, so Buffer.byteLength(content) is the
+    // absolute offset.
     usable = content;
   } else {
-    // 段未以换行结尾: 最后一行不完整 (写入进行中或被 maxBytes 截断)。
-    // 只保留此前完整行；末行留到下轮从头重读。
+    // Segment does not end with a newline: the last line is incomplete (an
+    // in-flight write or a maxBytes cut). Keep only the complete lines
+    // before it; the tail is re-read in full next round.
     const nl = content.lastIndexOf("\n");
     if (nl === -1) {
-      // 一段内连一个完整行都没有 → 无可解析行，nextOffset 保持起点。
+      // Not a single complete line in this segment → nothing parseable,
+      // nextOffset stays at the start point.
       return { lines: [], nextOffset: startOffset, truncated };
     }
     usable = content.slice(0, nl + 1);
@@ -173,9 +191,11 @@ function parseLines(lines: ReadonlyArray<string>): ParsedLines {
 /**
  * Parse a single line into a TraceRecordRow.
  *
- * 未知字段兜底 (SC-R 15): 行内不在 TRACE_FIELD_DEFS 声明 (jsonlKey) 的顶层
- * 键收进 `raw.unmapped` 数组 (面板「其他字段」渲染)。只有存在未知字段时才
- * 添加 `raw` 键，避免污染每一行；已知字段的 key 不受影响。
+ * Unknown-field fallback: top-level keys in the row not declared by
+ * TRACE_FIELD_DEFS (jsonlKey) are collected into a `raw.unmapped` array
+ * (the panel renders them under "other fields"). The `raw` key is added
+ * only when unknown fields exist, keeping every other row clean; keys of
+ * known fields are untouched.
  */
 function parseOneLine(line: string): TraceRecordRow | undefined {
   let parsed: unknown;
@@ -202,7 +222,8 @@ function parseOneLine(line: string): TraceRecordRow | undefined {
 
 /**
  * Exact-match filter on conversation_id / record_type / status +
- * task_id / parent_turn_id / turn_id. 全部 AND 组合, 缺省 undefined 的被滤条件不生效。
+ * task_id / parent_turn_id / turn_id. All AND-combined; conditions left
+ * undefined do not take effect.
  */
 function applyFilter(
   rows: ReadonlyArray<TraceRecordRow>,
@@ -220,9 +241,10 @@ function applyFilter(
     if (recordType !== undefined && row["record_type"] !== recordType)
       return false;
     if (status !== undefined && row["status"] !== status) return false;
-    // T5 (#358): task_id / parent_turn_id 精确匹配。缺省 undefined 时跳过
-    // (缺失 key 的行视为不匹配, 不参与成功判定)。空字符串值已在上游
-    // http.ts parseStringParam 拒绝 400, 不会到达 filter。
+    // Exact match on task_id / parent_turn_id. When undefined, skipped (a
+    // row missing the key counts as non-matching, never as success). Empty
+    // string values were already rejected upstream with 400 in http.ts
+    // parseStringParam and never reach the filter.
     if (query.taskId !== undefined && row["task_id"] !== query.taskId)
       return false;
     if (
@@ -286,16 +308,20 @@ export function createJsonlTraceReader(
   return {
     query(query: TraceQuery = {}): TraceQueryResult {
       const startOffset = Math.max(0, query.resumeOffset ?? 0);
-      // contains 提供时绕过 8 MiB 现状帽, 改走 containsMaxBytes (缺省 256 MiB)
-      // 上限 — 这就是为什么 39 MB 级 trace 上找「哪条记录提到 X」需要这一档
-      // 帽: 8 MiB 帽会把整个 trace 的后半段挡在门外。文件超过该上限 → 抛
-      // TraceReadError 而不是静默截断, 因为截断后的 contains 是一个不诚实的
-      // 搜索结果 (与本参数要解决的问题同形)。未提供时行为完全不变 (走
-      // `maxBytes`, 即 8 MiB 默认)。
+      // With contains, the 8 MiB status-quo cap is bypassed for
+      // containsMaxBytes (default 256 MiB) — that is why finding "which
+      // records mention X" on a 39 MB trace needs this tier: an 8 MiB cap
+      // would shut out the whole second half of the trace. File above the
+      // cap -> throw TraceReadError instead of silent truncation, because a
+      // truncated contains is a dishonest search result (the same failure
+      // this knob exists to fix). Without contains, behavior is completely
+      // unchanged (uses `maxBytes`, the 8 MiB default).
       if (query.contains !== undefined) {
-        // 预检与读窗用同一上限 (containsMaxBytes): 读窗若取 max(contains, max)
-        // 反而制造两个上限互相矛盾 — containsMaxBytes < maxBytes 时读窗更大
-        // 却仍按 containsMaxBytes 拒查。
+        // The precheck and the read window use the same cap
+        // (containsMaxBytes): letting the read window take
+        // max(contains, max) would create two contradictory caps — with
+        // containsMaxBytes < maxBytes the window would be larger yet the
+        // query still refused at containsMaxBytes.
         const size = statSize(filePath);
         if (size > containsMaxBytes) {
           throw new TraceReadError(
@@ -332,8 +358,8 @@ export function createJsonlTraceReader(
 }
 
 /**
- * stat size helper for the contains cap check. ENOENT → 0 (不存在的文件由
- * readLinesFrom 的既有静默降级处理, 不在这里抛)。
+ * stat size helper for the contains cap check. ENOENT -> 0 (a missing file
+ * is handled by readLinesFrom's existing silent degradation; no throw here).
  */
 function statSize(filePath: string): number {
   try {

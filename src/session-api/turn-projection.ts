@@ -1,10 +1,10 @@
 /**
- * Per-turn wire projection for thinking / tool calls (T1) +
- * compact-boundary recent-user-tasks excerpt (#604 T1).
+ * Per-turn wire projection for thinking / tool calls + compact-boundary
+ * recent-user-tasks excerpt.
  *
  * Pure functions, no I/O. Both projectors accept a `mask` function applied
- * to any text written to the wire before truncation (SC20 boundary,
- * consistent with `finalText` masking on `toTurnDto`).
+ * to any text written to the wire before truncation (consistent with
+ * `finalText` masking on `toTurnDto`).
  *
  * Caller responsibility: pass the message slice for the turn only (not the
  * full session history). `toTurnDto` uses `result.messages.slice(priorCount)`
@@ -22,23 +22,24 @@ import { isSkillIndexDeltaText } from "../harness/skill/index-delta.js";
 import type { ActivityItem, ThinkingView, ToolCallView } from "./contract.js";
 
 /**
- * D2 (tui-display-consistency) wire surface: sum assistant 消息的 thinkingMs
- * (ms) over a message slice. 给定 `messages` 切片 + 与 messages 一一对应的
- * `thinkingMs` 并行数组 + 切片起点 `startIndex` (默认 0), 求和区间内
- * `role === "assistant"` 消息对应的 thinkingMs 值。
+ * Wire surface: sum `thinkingMs` (ms) over assistant messages in a slice.
+ * Given a `messages` slice, a parallel `thinkingMs` array aligned to
+ * messages, and a slice start `startIndex` (default 0), add up the
+ * thinkingMs of in-range messages with `role === "assistant"`.
  *
- * 边界形态 (spec D2 / schema validate钉死):
- *  - `thinkingMs` undefined (整链无数据 / 旧会话) → 0;
- *  - 索引越界 (thinkingMs[index] === undefined) → 该位置按 0 计入;
- *  - `null` 元素 (该位置无 thinkingMs) → 0;
- *  - 非有限数 / `<= 0` (appendEvents 入口已过滤, 此处防御) → 0;
- *  - 非整数 / 负索引 → 0.
+ * Edge cases (pinned by schema validation):
+ *  - `thinkingMs` undefined (no data anywhere / legacy sessions) → 0;
+ *  - out-of-range index (thinkingMs[index] === undefined) → counted as 0;
+ *  - `null` element (no thinkingMs at that position) → 0;
+ *  - non-finite / `<= 0` (already filtered at appendEvents; defensive here) → 0;
+ *  - non-integer / negative index → 0.
  *
- * 输出: ms 累加值. 字节/秒换算由调用方决定 (Math.ceil(ms / 1000)).
+ * Output: accumulated ms. Byte/second conversion is the caller's decision
+ * (Math.ceil(ms / 1000)).
  *
- * 不 import 跨模块: 语义镜像 src/tui/turn-activity.ts sumThinkingMsInRange,
- * 但 hub 侧 web wire 不依赖 TUI, 因此这里独立一份 (D6 与 D3 共享语义但
- * 不同落点).
+ * No cross-module import: semantically mirrors src/tui/turn-activity.ts
+ * sumThinkingMsInRange, but the hub-side web wire must not depend on the
+ * TUI, so this is an independent copy.
  */
 export function sumAssistantThinkingMsInRange(opts: {
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
@@ -68,7 +69,7 @@ export function sumAssistantThinkingMsInRange(opts: {
  * Joined text of a message's text blocks (" "-separated; "" when none).
  * Single shared implementation — previously duplicated verbatim as hub.ts
  * `textOf` and store/checkpoint.ts `joinedText`; keep every consumer on this
- * one helper (修改此处即双侧生效，禁止再复制第二份).
+ * one helper (fixes here apply to both sides; do not copy again).
  */
 export function messageText(msg: AnthropicNativeMessage): string {
   return msg.content
@@ -81,21 +82,22 @@ export function messageText(msg: AnthropicNativeMessage): string {
 }
 
 /**
- * Turn-boundary rule SSOT (hub.ts projectMessagesToTurns 与
- * store/checkpoint.ts splitTurns 共用；原 hub `isQueryMessage` / checkpoint
- * `isQuery` 三条件收敛于此): a turn starts at a user message that carries NO
- * tool_result block and is NOT a subagent drain summary, an agent_status
- * bar injection, a graph_mode notification (切换 ON/OFF + ADR-0081 每
- * run() 一条短现势), nor a skill-index delta listing (ADR-0098 的
- * `<available_skills>` 增量); user messages with only tool_result blocks are
- * continuation, not queries. Drain / agent_status / graph_mode /
- * skill-index-delta messages are host-injected — they neither surface as a
- * turn nor bound the preceding turn's slice.
+ * Turn-boundary rule SSOT (shared by hub.ts projectMessagesToTurns and
+ * store/checkpoint.ts splitTurns; the former hub `isQueryMessage` /
+ * checkpoint `isQuery` conditions converge here): a turn starts at a user
+ * message that carries NO tool_result block and is NOT a subagent drain
+ * summary, an agent_status bar injection, a graph_mode notification (ON/OFF
+ * toggle + ADR-0081 one short presence note per run()), nor a skill-index
+ * delta listing (ADR-0098 `<available_skills>` increment); user messages
+ * with only tool_result blocks are continuation, not queries. Drain /
+ * agent_status / graph_mode / skill-index-delta messages are host-injected —
+ * they neither surface as a turn nor bound the preceding turn's slice.
  *
- * 五类注入信封与 TUI `isTuiHiddenUserMessage` 同一份名单（spec D8 / SC7：
- * 「hidden 注入」两条消费面不得各自漂移）；谓词一律取自生产者本家
+ * The five injected-envelope kinds share one list with TUI
+ * `isTuiHiddenUserMessage` (the "hidden injection" consumers must not drift
+ * apart); predicates always come from each producer's own module
  * (`isSubagentDrainText` / `isAgentStatusText` / `isGraphModeText` /
- * `isSkillIndexDeltaText`)。
+ * `isSkillIndexDeltaText`).
  */
 export function isTurnQuery(msg: AnthropicNativeMessage): boolean {
   const text = messageText(msg);
@@ -111,8 +113,8 @@ export function isTurnQuery(msg: AnthropicNativeMessage): boolean {
 
 /**
  * External signal (ADR-0024): greetings never become a compact-boundary
- * recent-tasks excerpt entry. #605 T2 moved this predicate from
- * `store/schema.ts` to here — its only remaining consumer is
+ * recent-tasks excerpt entry. This predicate moved here from
+ * `store/schema.ts` — its only remaining consumer is
  * `extractRecentUserTasks` (the seed path that wrote `session.taskFocus` is
  * gone with the field's retirement). Keeping the predicate in the
  * turn-projection layer removes the historical cross-layer import (schema
@@ -200,7 +202,7 @@ export function projectToolCalls(
   messages: ReadonlyArray<AnthropicNativeMessage>,
   mask: TextMask
 ): readonly ToolCallView[] | undefined {
-  // M2 / ACR complexity anti-drift: collect + build split keeps each pass
+  // Complexity anti-drift: the collect + build split keeps each pass
   // single-purpose and both below the 30-line / ≤10-branch threshold.
   const resultsById = collectToolResults(messages);
   return buildToolCallViews(messages, resultsById, mask);
@@ -465,51 +467,57 @@ function serializeToolInput(input: unknown): string {
   }
 }
 
-// -- #604 T1: 任务摘录（compact 边界现抽现贴） -------------------------------
+// -- Recent user tasks (extracted fresh at the compact boundary) -----------
 //
-// 把会话里**最近几句合格用户任务原话**纯函数式抽出，供 hub 注入到 compact
-// 边界 placeholder 之后。取代旧 `renderTaskFocusBoundary` 的 240+history+cap720
-// 焦点渲染（taskFocus 字段仍由 conditionalSave seed，T2 才删 — 本轮只换边界
-// 渲染源）。
+// Pure-function extraction of the most recent qualifying user task texts,
+// which the hub injects after the compact-boundary placeholder. Replaces the
+// old `renderTaskFocusBoundary` focus rendering (240+history+cap720).
 //
-// 契约:
-//   - 倒序遍历 messages，按时间倒序取至多 limit(=3)条合格 user-turn 原文(trim)。
-//   - 合格谓词：role === "user" ∧ 非纯 tool_result（isTurnQuery）∧ 寒暄过滤
-//     (shouldSeedTaskFocus,同 SSOT) ∧ 非 self-reference (TASK_EXCERPT_PREFIX
-//     前缀 — 上一轮摘录段本身不得被下一轮抽到,concurrent 隔离)。
-//   - 0 句 → []。assistant / 寒暄 / drain / whitespace 一律不取。
-//   - 返回 chronological 顺序（最早→最新），latest 在末尾。
-//   - 不截断、不调 LLM：纯函数 over messages。
+// Contract:
+//   - Walk messages backwards, taking at most limit(=3) qualifying user-turn
+//     originals (trimmed), newest first.
+//   - Qualifying predicate: role === "user" ∧ not a pure tool_result
+//     (isTurnQuery) ∧ not a greeting (shouldSeedTaskFocus, same SSOT) ∧ not a
+//     self-reference (TASK_EXCERPT_PREFIX — a previous excerpt must not be
+//     picked up by the next round).
+//   - 0 matches → []. assistant / greeting / drain / whitespace never taken.
+//   - Returned in chronological order (oldest → newest), latest last.
+//   - No truncation, no LLM: pure function over messages.
 
-/** SSOT:compact 边界附件任务摘录的前缀。自身不会被下一轮抽取视为合格用户
- *  任务(concurrent 隔离)，见 `isTaskExcerptText`。 */
+/** SSOT: prefix of the compact-boundary task excerpt. Text carrying it is
+ *  never treated as a qualifying user task by the next extraction round,
+ *  see `isTaskExcerptText`. */
 export const TASK_EXCERPT_PREFIX = "[Recent user tasks]";
 
-/** 单轮默认抽取上限。spec 写明 ≤3。 */
+/** Default per-round extraction limit. */
 export const MAX_RECENT_USER_TASKS = 3;
 
 /**
- * Pred:文本是否是上一轮 compact 注入的「任务摘录」段本身。
+ * Pred: is this text the task-excerpt section injected by the previous
+ * compact pass?
  *
- * 谓词必须 trimStart 比对(plan: 摘录段可能被前置空白包裹,但前缀哨兵仍识别);
- * 反向:用户真发的用户任务原文若意外以 `[Recent user tasks]` 字面开头,
- * 也会被排除 — 这是 spec 接受的代价(摘录哨兵与用户文本语义上不重叠)。
+ * Comparison trims leading start (the excerpt may be wrapped in leading
+ * whitespace but the prefix sentinel still identifies it). Side effect: a
+ * genuine user task that happens to start with the `[Recent user tasks]`
+ * literal is also excluded — an accepted cost (the excerpt sentinel and
+ * user text do not overlap semantically).
  */
 export function isTaskExcerptText(text: string): boolean {
   return text.trimStart().startsWith(TASK_EXCERPT_PREFIX);
 }
 
 /**
- * 抽取会话里最近几句合格用户任务原文 — compact 边界摘录段的数据源。
+ * Extract the most recent qualifying user task originals — the data source
+ * for the compact-boundary excerpt.
  *
- * 遍历方向:倒序取够 limit 条即停。返回结果再 reverse 为 chronological
- * 顺序(最早→最新)，与 renderRecentUserTasksBoundary 的 `1. 2. 3.` 列表
- * 一致(最新交代在末尾)。
+ * Direction: walk backwards, stop once limit entries are collected, then
+ * reverse to chronological order (oldest → newest), consistent with the
+ * `1. 2. 3.` list of renderRecentUserTasksBoundary (latest last).
  *
- * 调用方对 messages 内容负全责:hub.postMessage 已在 messages 内追加了本轮
- * query,本函数读取 session.messages 即可拿到「含本轮的视图」;若调用方需要
- * 「取摘录前一刻」的视图,请传入 priorMessages(= conditionalSave 内
- * `session.messages`)。
+ * Callers own the messages content: hub.postMessage has already appended
+ * the current query, so reading session.messages yields a "current turn
+ * included" view; pass the pre-turn view (e.g. the conditionalSave-time
+ * `session.messages`) if that is what you need.
  */
 export function extractRecentUserTasks(
   messages: ReadonlyArray<AnthropicNativeMessage>,
@@ -523,7 +531,7 @@ export function extractRecentUserTasks(
     const text = messageText(msg).trim();
     if (text.length === 0) continue;
     if (isTaskExcerptText(text)) continue;
-    // shouldSeedTaskFocus 已包含寒暄过滤(plan §"抽取")。
+    // shouldSeedTaskFocus already applies the greeting filter.
     if (!shouldSeedTaskFocus(text)) continue;
     out.push(text);
   }

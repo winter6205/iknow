@@ -1,9 +1,10 @@
 /**
- * Human-facing verify wire projection (verify-claim-window T3 / SC2 / SC5).
+ * Human-facing verify wire projection.
  *
  * Loop outcome may still be `passed` when HITL skips the completion judge
- * after INSUFFICIENT or CONTRADICTED evidence. Humans must not see
- * 「验证通过」 for those shapes. SUFFICIENT short-circuit stays on the wire.
+ * after INSUFFICIENT or CONTRADICTED evidence. Humans must not see a
+ * "verification passed" verdict for those shapes. SUFFICIENT short-circuit
+ * stays on the wire.
  */
 import {
   REASON_HITL_SKIP_COMPLETION_JUDGE,

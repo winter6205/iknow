@@ -1,8 +1,9 @@
 /**
  * src/shared/streaming-block-freeze.ts
  *
- * 会变长的 markdown：钉住除最后一个顶层非空块以外的前缀。
- * 纯函数、无模块级可变边界；调用方（Markdown）保存 boundary。
+ * For growing markdown: freeze as a stable prefix every top-level non-empty
+ * block except the last. Pure function, no module-level mutable state; the
+ * caller (Markdown) stores the boundary.
  */
 import { marked } from "marked";
 
@@ -16,7 +17,7 @@ function isNonEmptyTopLevel(type: string): boolean {
   return type !== "space" && type !== "hr";
 }
 
-/** 按 previousBoundary 只 lexer 后缀；新闭合块使边界单调前进。 */
+/** Lex only the suffix after previousBoundary; newly closed blocks move the boundary forward monotonically. */
 export function splitStreamingMarkdown(
   text: unknown,
   previousBoundary = 0

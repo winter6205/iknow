@@ -1,9 +1,9 @@
 /**
- * Trace inspection HTTP layer (#183 standalone → ADR-0020 mountable router).
+ * Trace inspection HTTP layer (standalone shell → ADR-0020 mountable router).
  *
  * Two surfaces:
  *
- * 1. `createTraceRouter(opts)` — the reusable mountable router (ADR-0020 D1.5).
+ * 1. `createTraceRouter(opts)` — the reusable mountable router (ADR-0020).
  *    Returns `(req, res) => Promise<boolean>`: `true` = handled (response
  *    written), `false` = not a trace route (caller keeps dispatching). Mounted
  *    by `iknow serve` (src/session-api/http.ts) at `/api/v1/traces*` on the
@@ -11,23 +11,24 @@
  *      GET /api/v1/traces             -> delegated to handleTracesRequest
  *      GET /api/v1/traces/fields      -> delegated to handleTracesRequest
  *      GET /api/v1/traces/sessions    -> delegated to handleSessionsRequest
- *                                        (ADR-0020 D1.1: sessions live under
+ *                                        (ADR-0020: sessions live under
  *                                        the traces prefix in mounted mode to
  *                                        avoid colliding with chat sessions)
  *    The router does NOT serve /api/v1/health or static files — mounted mode
  *    gets health from session-api and the trace SPA from the caller's static
- *    layer (`/trace` mount, ADR-0020 D1.2). Error mapping lives here (S3):
+ *    layer (`/trace` mount, ADR-0020). Error mapping lives here:
  *      ValidationError -> 400 validation
  *      TraceReadError  -> 500 internal (no fs detail leak)
  *      unknown         -> 500 internal
  *
  * 2. `startTraceServe(opts)` — the standalone `iknow trace --separate` shell.
  *    Owns its own http.Server, health endpoint, trace SPA static hosting, and
- *    the back-compat `/api/v1/sessions` alias (one release, ADR-0020 D1.1).
+ *    the back-compat `/api/v1/sessions` alias (one release, ADR-0020).
  *
- * v2 目录语义: traceOut 是「每会话一文件」的目录 `<traceDir>/<convId>.jsonl`
- * (写侧 T2 jsonl.ts 目录语义)。serve 仅解析并透传 traceDir, 路由/解析都在
- * http.ts。
+ * Directory semantics: traceOut is a "one file per conversation" directory,
+ * `<traceDir>/<convId>.jsonl` (same layout as the writer's jsonl layer).
+ * serve only resolves and passes through traceDir; routing and parsing all
+ * live in http.ts.
  */
 import * as http from "node:http";
 import * as path from "node:path";

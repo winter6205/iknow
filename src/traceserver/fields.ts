@@ -1,9 +1,11 @@
 /**
  * Trace field declaration table (SSOT for the inspection panel's columns).
  *
- * 新增 trace 字段 = src/harness/trace/types.ts 加类型 + 此表加一行, 面板自动生效。
+ * Adding a trace field = declare its type in src/harness/trace/types.ts + add
+ * a row here; the panel picks it up automatically.
  *
- * 嵌套字段如 `error` / `messages` 暂不入表 (行展开原始 JSON 可见)。
+ * Nested fields like `error` / `messages` are deliberately not tabled (visible
+ * via the raw-JSON row expansion).
  *
  * Module-load self-check: `key` and `jsonlKey` must be globally unique.
  * Duplicates throw at import time — this prevents silent column collisions
@@ -17,7 +19,7 @@ export interface TraceFieldDef {
   /** JSONL row key (snake_case). The reader returns rows by this key. */
   readonly jsonlKey: string;
   readonly type: "string" | "number" | "boolean" | "enum" | "datetime";
-  /** Display label (matches existing UI文案风格, 中英混合). */
+  /** Display label (matches existing UI style: mixed Chinese/English). */
   readonly label: string;
   /** Which record_types this column applies to. */
   readonly recordTypes: ReadonlyArray<TraceRecordType>;
@@ -32,16 +34,18 @@ export interface TraceFieldDef {
 }
 
 /**
- * T5 (#358) subagent 生命周期列。
- * jsonlKey 对齐 src/harness/trace/types.ts 三类 Subagent*Record + jsonl.ts
- * camelToSnake: subagent_id 是显式 id 载体 (= manager taskId), task_id /
- * parent_turn_id / from_state / to_state / final_state / exit_code 来自顶层
- * camelCase key 的 snake 化。Postel: 可选字段 (parent_turn_id 等) 仅存在时
- * 落盘, 列定义按 schema 声明不受写入侧缺席影响。
+ * Subagent lifecycle columns.
+ * jsonlKey aligns with the three Subagent*Record types in
+ * src/harness/trace/types.ts + jsonl.ts camelToSnake: subagent_id is the
+ * explicit id carrier (= manager taskId); task_id / parent_turn_id /
+ * from_state / to_state / final_state / exit_code are snake_case forms of the
+ * top-level camelCase keys. Postel: optional fields (parent_turn_id etc.) are
+ * persisted only when present; column definitions follow the schema
+ * declaration and are unaffected by writer-side absence.
  *
- * 三类 record 共用列 (subagentId / taskId / origin / parentTurnId / startedAt /
- * status / ts) 直接列全三 type; 单类列 (fromState / toState / finalState) 只列
- * 对应 type。
+ * Columns shared by the three record kinds (subagentId / taskId / origin /
+ * parentTurnId / startedAt / status / ts) list all three types; single-kind
+ * columns (fromState / toState / finalState) list only their type.
  */
 const SUBAGENT_TYPES: ReadonlyArray<TraceRecordType> = [
   "subagent_spawn",
@@ -50,9 +54,11 @@ const SUBAGENT_TYPES: ReadonlyArray<TraceRecordType> = [
 ] as const;
 
 /**
- * subagent_step 的关联列 (taskId / origin / parentTurnId) 与前三类同列, 但 id
- * 列不同: step 的 id 载体是 subagent_step_id, 故 subagentId 列刻意只挂
- * SUBAGENT_TYPES —— 见 src/harness/trace/types.ts SubagentStepRecord 注释。
+ * subagent_step's association columns (taskId / origin / parentTurnId) match
+ * the three lifecycle types, but its id column differs: the step's id carrier
+ * is subagent_step_id, so the subagentId column deliberately covers only
+ * SUBAGENT_TYPES — see the SubagentStepRecord comment in
+ * src/harness/trace/types.ts.
  */
 const SUBAGENT_TYPES_WITH_STEP: ReadonlyArray<TraceRecordType> = [
   ...SUBAGENT_TYPES,
@@ -69,7 +75,7 @@ const SUBAGENT_STOP_REASON_OPTIONS: ReadonlyArray<string> = [
   "maxTurnsExceeded",
   "timeout",
   "protocolError",
-  // ADR-0111 Decision 2: envelope reason 联合第五值，筛选词汇表对齐同步。
+  // ADR-0111: fifth envelope reason value; the filter vocabulary is kept in sync.
   "modelTransient",
   "cancelled",
 ] as const;

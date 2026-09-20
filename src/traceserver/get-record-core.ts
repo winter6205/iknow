@@ -5,16 +5,20 @@
  * `query_trace` / `list_sessions` contract: `options` in, one serialized JSON
  * string out; the faces add schema, tool-name prefix, and error mapping.
  *
- * 三条轴的读单元各不同，这件工具的存在理由就在其中：
- *   - `list_sessions` 的单位是一页会话摘要（目录轴）；
- *   - `query_trace` 的单位是一行（行轴：筛选 + 分页，记录整体返回）；
- *   - `get_record` 的单位是**一个 part 的一段字符窗**（内容轴）。
- * 前两者都无法回答「这条 43 KB 的 tool result 的第 9000 到 10000 个字符是什么」，
- * 而把整条塞进一次输出正是 executor 帽存在的原因。本轴让调用方自己给坐标，于是
- * 「读多少」第一次成为合同的显式部分，而不是输出的偶然属性。
+ * The three axes have different read units, and this tool's reason to exist
+ * lies right there:
+ *   - `list_sessions`: one page of session summaries (catalog axis);
+ *   - `query_trace`: one row (row axis: filter + pagination, whole records);
+ *   - `get_record`: **one character window inside one part** (content axis).
+ * Neither of the first two can answer "what are characters 9000-10000 of
+ * this 43 KB tool result", and cramming a whole record into one output is
+ * exactly why the executor cap exists. This axis lets the caller supply the
+ * coordinates, making "how much to read" an explicit part of the contract
+ * for the first time instead of an accidental property of the output.
  *
- * `conversation_id` 在本面**必填**（Assumption 4）：`query_trace` 的「缺省=最近活
- * 跃会话」是外部 agent 读到过一个它从未点名的文件的根因，内容轴第一个把它关掉。
+ * `conversation_id` is **required** on this face: `query_trace`'s
+ * "default = newest session" was the root cause of external agents reading
+ * files they never named; the content axis closes that first.
  */
 import {
   collectToolResults,
@@ -40,26 +44,32 @@ import { parseInteger } from "./parse-integer.js";
 import type { TraceRecordRow } from "./types.js";
 
 /**
- * 缺省窗与窗上限（plan T6 实测：message p50 = 393，part p99 = 13 848，part
- * max = 43 174 字符）。
+ * Default window and window cap (measured: message p50 = 393, part p99 =
+ * 13 848, part max = 43 174 characters).
  *
- * 400 让一次缺省调用装得下一条中位 message，也与行轴 `TOOL_RESULT_PREVIEW_CAP`
- * 同一个量级，调用方在两面之间换轴时不必换算。16 000 只由 part 分布决定（p99 一窗
- * 装得下，max 需 3 窗），**不**承诺「最大合法窗也落在 `TRACE_OUTPUT_BACKSTOP` 之内」
- * ——实测反证：`record` 标量投影序列化后 max = 6 025（5 546 条记录），且 `text` 经
- * `JSON.stringify` 会转义膨胀（p99 = 1.21，max = 1.30 倍），两条都足以单独越帽。所以
- * `count` 预算的是**正文字符数**，不是响应大小；核在两种情况下都不裁任何东西，越帽
- * 时唯一动手的是 face 的 backstop（MCP）或 executor 帽（ACI，同值）。
+ * 400 lets one default call hold a median message and matches the row axis's
+ * `TOOL_RESULT_PREVIEW_CAP` order of magnitude, so callers switching axes
+ * need no conversion. 16 000 is set by the part distribution alone (p99
+ * fits one window, max needs three) and **does not** promise "the largest
+ * legal window also lands inside `TRACE_OUTPUT_BACKSTOP`" — measured
+ * counterexample: the `record` scalar projection serializes to max 6 025
+ * (over 5 546 records), and `text` inflates through `JSON.stringify`
+ * escaping (p99 = 1.21, max = 1.30 times); either alone can cross the cap.
+ * So the `count` budget is about **content characters**, not response size;
+ * the core trims nothing in either case, and when the cap is crossed the
+ * only thing that acts is the face's backstop (MCP) or the executor cap
+ * (ACI, same value).
  *
- * 界在核（`parseInteger`）与两张皮的 schema 里各自声明一次且同值（spec SC18）。
+ * Bounds are declared once each — in the core (`parseInteger`) and in both
+ * faces' schemas — with identical values.
  */
 export const GET_RECORD_DEFAULT_COUNT = 400;
 export const GET_RECORD_MAX_COUNT = 16_000;
 
 /**
- * The one description text for both faces (spec SC7 / SC18: one source, and it
+ * The one description text for both faces (one source, and it
  * claims no character cap — the budget on this axis is the caller's own `count`).
- * Positive-trigger phrasing per #483 D9, enforced by
+ * Positive-trigger phrasing, enforced by
  * tests/harness/aci/tools/d9-description-guard.test.ts.
  */
 export const GET_RECORD_DESCRIPTION =
@@ -107,27 +117,31 @@ export function createGetRecordCore(
 
   return async (input: unknown): Promise<string> => {
     const parsed = parseInput(input);
-    // T6 (SC14–SC17): read 走两级树 `<baseDir>/projects/<slug>/<convId>/trace.jsonl`,
-    // 由 session-discovery.ts 的 findConversationTraceFile 解析。未命中 →
-    // TraceSessionNotFoundError（与缺记录分开，「会话文件夹不存在」和「读完无
-    // 该条」是两条不同的主张，合成一个 record_not_found 会把前者说成后者）。
+    // Reads walk the two-level tree
+    // `<baseDir>/projects/<slug>/<convId>/trace.jsonl`, resolved by
+    // session-discovery.ts's findConversationTraceFile. Miss ->
+    // TraceSessionNotFoundError (kept distinct from a missing record: "the
+    // session folder doesn't exist" and "read everything, no such record" are
+    // different claims; merging them into one record_not_found would report
+    // the former as the latter).
     const filePath = findConversationTraceFile(traceDir, parsed.conversationId);
     if (filePath === undefined) {
       throw new TraceSessionNotFoundError(parsed.conversationId);
     }
     const reader = createJsonlTraceReader({ filePath });
-    // 与行轴同一份扫描实现（record-lookup.ts）：上限、id 字段顺序、
-    // `record_scan` 的判据都只有一处定义。
+    // Same scan implementation as the row axis (record-lookup.ts): the limit,
+    // id-field order, and the `record_scan` criterion all defined once.
     const found = lookupRecordById(reader, {}, parsed.recordId);
     if (found.match === undefined) {
       throw new TraceRecordNotFoundError(parsed.recordId);
     }
 
-    // T3 (SC7, ADR-0071): blob dereference 接收 `traceFilePath` 而非
-    // `traceDir` —— `dirname(traceFilePath)` = blobs 兄弟目录, 与 T3 主会话
-    // 写侧(`<baseDir>/projects/<slug>/<convId>/trace.jsonl` + 同目录 blobs/)
-    // 共派生。读侧寻址已切两级树 (T6, SC14–SC17): filePath 来自
-    // findConversationTraceFile。
+    // Blob dereference receives `traceFilePath`, not `traceDir` (ADR-0071) —
+    // `dirname(traceFilePath)` is the blobs sibling directory, co-derived
+    // with the main-session writer layout
+    // (`<baseDir>/projects/<slug>/<convId>/trace.jsonl` + a sibling blobs/).
+    // Read-side addressing already walks the two-level tree: filePath comes
+    // from findConversationTraceFile.
     const parts = await addressParts(found.match.row, parsed.detail, filePath);
     return JSON.stringify(
       parsed.partIndex === undefined
@@ -138,9 +152,10 @@ export function createGetRecordCore(
 }
 
 /**
- * 解析后的坐标：`fromChar` / `count` 是**生效值**（未传时是缺省值），
- * `messageIndex` / `partIndex` 保留「有没有传」这一档信息 —— 臂的选择和「哪个坐标
- * 参与了寻址」都依赖它。
+ * Resolved coordinates: `fromChar` / `count` are **effective values** (the
+ * defaults when not passed); `messageIndex` / `partIndex` keep the
+ * passed-or-not distinction — both arm selection and "which coordinates
+ * took part in addressing" depend on it.
  */
 interface ResolvedRequest {
   readonly detail: Detail;
@@ -174,8 +189,10 @@ function parseInput(input: unknown): ResolvedRequest & {
   }
   const recordId = requireNonEmptyString(raw.record_id, "record_id");
   const detail = parseDetail(raw.detail);
-  // 坐标的**界**在这里查（负数、小数、超限）；坐标的**可达性**（这一条记录到底有
-  // 几条 message / 几个 part）在下面寻址时查，因为那要读到记录才知道。
+  // Coordinate **bounds** (negative, fractional, over-cap) are checked here;
+  // coordinate **reachability** (how many messages / parts this record
+  // actually has) is checked during addressing below, since that requires
+  // reading the record first.
   const messageIndex = parseInteger(raw.message_index, "message_index", 0);
   const partIndex = parseInteger(raw.part_index, "part_index", 0);
   const fromChar = parseInteger(raw.from_char, "from_char", 0) ?? 0;
@@ -190,8 +207,9 @@ function parseInput(input: unknown): ResolvedRequest & {
     ...(partIndex === undefined ? {} : { partIndex }),
     fromChar,
     count,
-    // 「调用方给了窗坐标」与「窗坐标等于缺省值」是两件事：清单臂要拒的是前者，
-    // 所以这里留一份 presence，而不是回头比对数值。
+    // "The caller supplied window coordinates" and "window coordinates equal
+    // the defaults" are different facts: the manifest arm rejects the former,
+    // so a presence record is kept here rather than re-comparing values.
     windowCoordinatesGiven: {
       fromChar: raw.from_char !== undefined,
       count: raw.count !== undefined,
@@ -220,27 +238,31 @@ function parseDetail(value: unknown): Detail {
   return value;
 }
 
-/** 一个可寻址的 part：坐标 + 全文。窗与清单都从这一份列表回答，两者因此不可能对不上。 */
+/** One addressable part: coordinates + full text. Both the window arm and the manifest arm answer from this single list, so they cannot disagree. */
 interface AddressablePart {
   readonly messageIndex?: number;
   readonly partIndex: number;
   readonly text: string;
   readonly identity?: Record<string, unknown>;
-  // v1.2 判据 (a): detail=messages 清单臂的 part 携带所属 message 的 role
-  // (ADR-0003 messages[].role 值域: user / assistant / tool / system). 投影层
-  // 字段, 仅清单臂使用, 不进窗臂, 也不进 detail=tool_results parts (tool_result
-  // 按定义在 user 侧, 加 role 是冗余且易混淆 user-message 与其中嵌套的
-  // tool_result — 参 CONTEXT.md tool_result projection 词条).
+  // Under detail=messages the manifest arm's parts carry their message's
+  // role (ADR-0003 messages[].role domain: user / assistant / tool / system).
+  // A projection-layer field: used only by the manifest arm, never in the
+  // window arm, and never in detail=tool_results parts (a tool_result is by
+  // definition on the user side; adding role would be redundant and confuse
+  // the user message with the tool_results nested in it — see the
+  // "tool_result projection" entry in CONTEXT.md).
   readonly role?: string;
 }
 
 /**
- * 一条记录里可寻址的 part 列表，按 `detail` 二选一。
+ * The addressable parts of one record, chosen by `detail`.
  *
- * `messages` 取 message 的 content blocks（先经 ADR-0036 的 blob 解引用，所以
- * blob 存的 message 与内联的同法寻址）；`tool_results` 取投影后的 tool_result
- * **全文**，顺序与投影一致 —— 行轴那份 `preview` 受 400 字符帽管，拿它的长度当
- * 本轴的尺寸会告诉调用方「一条装得下」而实际要三窗。
+ * `messages` takes the messages' content blocks (after ADR-0036 blob
+ * dereference, so blob-stored and inline messages address identically);
+ * `tool_results` takes the **full text** of projected tool_results, in
+ * projection order — the row axis's `preview` is under a 400-character cap,
+ * and using its length as this axis's size would tell callers "one window
+ * holds it" when three are needed.
  */
 async function addressParts(
   row: TraceRecordRow,
@@ -251,7 +273,7 @@ async function addressParts(
   readonly messageCount: number;
 }> {
   const messages = Array.isArray(row["messages"]) ? row["messages"] : [];
-  // T3 (SC7): 传 traceFilePath 而非 traceDir —— blob 目录 = dirname(filePath)/blobs。
+  // Pass traceFilePath, not traceDir — blob directory = dirname(filePath)/blobs.
   const dereferenced = await dereferenceTraceMessages(messages, {
     traceFilePath,
   });
@@ -273,10 +295,11 @@ async function addressParts(
   }
   const parts: AddressablePart[] = [];
   dereferenced.forEach((message, messageIndex) => {
-    // v1.2 判据 (a): 解引用后的 message 上读 role (string 时). 不可读时
-    // (例如解引用降级到空数组已由 dereferenceTraceMessages 处理, 正常路径
-    // 上不会出现) 不带 role -- 与 detail=tool_results parts 行为一致:
-    // 字段缺席而非 null/undefined.
+    // Read role (when a string) off the dereferenced message. When
+    // unreadable, omit role — dereference degradation to an empty array is
+    // already handled inside dereferenceTraceMessages and cannot occur on the
+    // normal path. Consistent with detail=tool_results parts: the field is
+    // absent, never null/undefined.
     const role = messageRole(message);
     messageContentBlocks(message).forEach((block, partIndex) => {
       parts.push({
@@ -291,15 +314,16 @@ async function addressParts(
 }
 
 /**
- * part 的正文：存的什么形态就是什么文本 —— 裸字符串按自身，其余（content block
- * 对象等）按其 JSON 文本。这是第 14 条留给实现的那条渲染规则，写成一处以免清单的
- * `chars` 与窗的 `text` 各自演算。
+ * A part's text: whatever form it was stored in — a bare string as itself,
+ * everything else (content block objects etc.) as its JSON text. This is
+ * the single rendering rule: one place, so the manifest's `chars` and the
+ * window's `text` cannot evolve apart.
  */
 function renderPart(part: unknown): string {
   return typeof part === "string" ? part : JSON.stringify(part);
 }
 
-/** 清单臂：记录标量 + 可寻址 part 的坐标与尺寸，不带任何正文。 */
+/** Manifest arm: record scalars + coordinates and sizes of addressable parts, no content. */
 function manifestOf(
   match: RecordMatch,
   parsed: ResolvedRequest,
@@ -323,16 +347,16 @@ function manifestOf(
       part_index: part.partIndex,
       chars: part.text.length,
       ...(part.identity ?? {}),
-      // v1.2 判据 (a): detail=messages 的 part 携带所属 message 的 role;
-      // tool_results parts 上无 role (AddressablePart.role 不带, 见
-      // addressParts 的 detail === "tool_results" 分支). 字段缺席 = 不
-      // 渲染空键, 与本文件其他 part 字段保持一致.
+      // Under detail=messages parts carry their message's role;
+      // detail=tool_results parts have none (AddressablePart.role unset in
+      // the tool_results branch of addressParts). Field absent = key not
+      // rendered, consistent with the other part fields in this file.
       ...(part.role === undefined ? {} : { role: part.role }),
     })),
   };
 }
 
-/** 窗臂：记录标量 + 命中轴 + 生效坐标 + 该 part 尺寸 + 恰好 count 个字符。 */
+/** Window arm: record scalars + matched axis + effective coordinates + part size + exactly `count` characters. */
 function windowOf(
   match: RecordMatch,
   parsed: ResolvedRequest,
@@ -350,8 +374,10 @@ function windowOf(
       partChars: part.text.length,
     });
   }
-  // `text` 必须是最后一个键：face 的 backstop 从尾部切，键序因此决定了被切到的是正文
-  // 还是回显坐标（后者留下，调用方才能只改小 `count` 重发，不必重新寻址）。
+  // `text` must be the last key: the face's backstop cuts from the tail, so
+  // key order decides whether the cut hits the content or the echoed
+  // coordinates (the latter surviving so the caller can resend with only a
+  // smaller `count`, without re-addressing).
   return {
     record: projectRecordBase(match.row),
     matched_on: match.matchedOn,
@@ -368,13 +394,15 @@ function windowOf(
 }
 
 /**
- * 把坐标收成一条 part —— 两臂共用同一条判据，所以「参与寻址的坐标必须被回答，
- * 不被使用的坐标必须被拒」只有一处实现。
+ * Narrow coordinates to one part — both arms share one criterion, so
+ * "coordinates that took part in addressing must be answered; unused
+ * coordinates must be rejected" is implemented once.
  *
- * 越界的 `message_index` / `part_index` 报 `validation` 并带上**真实可寻址条数**
- * （SC20 只有五类，不第六类）；`detail=tool_results` 根本不按 message 寻址，传了
- * 就是拒；`detail=messages` 的窗必须有 `message_index`，缺省成 0 会把「没点名的
- * 那条」答成「第 0 条」。
+ * Out-of-range `message_index` / `part_index` report `validation` with the
+ * **real addressable count** (the error kind set stays at five, no sixth);
+ * `detail=tool_results` does not address by message at all, so passing one
+ * is rejected; a `detail=messages` window requires `message_index` —
+ * defaulting it to 0 would answer "the message nobody named" as "message 0".
  */
 function selectParts(
   parts: ReadonlyArray<AddressablePart>,
@@ -439,7 +467,7 @@ function outOfRange(
   );
 }
 
-/** 清单臂上没有 `part_index` 就没有窗可读：窗坐标因此是被拒，不是被忽略。 */
+/** Without `part_index` the manifest arm has no window to read, so window coordinates are rejected there, not ignored. */
 function rejectUnusedWindowCoordinates(parsed: ResolvedRequest): void {
   if (parsed.partIndex !== undefined) return;
   for (const [field, given] of [

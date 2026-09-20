@@ -1,5 +1,5 @@
 /**
- * #458 T3: typed errors for goal status transitions.
+ * Typed errors for goal status transitions.
  *
  * Shape mirrors the existing `{ kind: "schema_invalid", field }` contract
  * (schema.ts) so hub-side catch sites can log the kind without parsing
@@ -7,16 +7,16 @@
  * (a union type, no third-party lib) so the fail-closed paths are
  * explicit, never silent.
  *
- * ACR #1 (PLAN 建议)裁剪：本模块只服务于 assertValidTransition（status
- * 转移守卫）和共享给 validateGoalText / hub 的 `empty_text` 语义。T6-only
- * 错误 kinds（#432 旧 confirm 通道的 auto-rejected / timeout / mismatch
- * 区分态）按 #461 决议整体不落地。`GoalSource` 收缩后的 goal lifecycle
- * 也不再需要 confirm 通道的区分态。
+ * Scope: this module only backs assertValidTransition (the status
+ * transition guard) and the `empty_text` semantics shared with
+ * validateGoalText / hub. Former confirm-channel error kinds
+ * (auto-rejected / timeout / mismatch) were dropped outright — the
+ * narrowed GoalSource lifecycle no longer needs them.
  */
 export type GoalErrorKind =
-  /** assertValidTransition 拒绝的非法状态转移（如 achieved→active）。 */
+  /** Illegal status transition rejected by assertValidTransition (e.g. achieved→active). */
   | "invalid_transition"
-  /** 空 text 不写 goal（与 #458 T2 的 validateGoalText 复用同一 kind）。 */
+  /** Empty text never writes a goal (same kind as validateGoalText). */
   | "empty_text";
 
 export interface GoalError {
@@ -25,7 +25,7 @@ export interface GoalError {
   readonly context?: Readonly<Record<string, unknown>>;
 }
 
-/** 一元结果类型：成功为 value，失败为 GoalError。 */
+/** Result type: success carries value, failure carries GoalError. */
 export type Result<T, E extends GoalError = GoalError> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: E };
