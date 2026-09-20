@@ -4,7 +4,7 @@
  * Pre/PostToolUse hook pair (plan T2). v0 is no-op; production callers can
  * replace either side by passing a custom pair via `createHooksPair(custom)`.
  *
- * Spec: "Hook v0 no-op but调用位存在且可替换" (SC4 / Q1 / D3).
+ * Hooks are no-ops by default, but the call sites exist and are replaceable.
  */
 
 import type { PreToolUseHook, PostToolUseHook } from "./types.js";

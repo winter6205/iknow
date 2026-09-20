@@ -163,7 +163,7 @@ export function isAllowedCommand(command: string): boolean {
  * per-segment scan surface used by `findDangerousPattern` only — the
  * allowlist / readonly-mode code paths keep their existing
  * newline-as-metachar semantics so existing allowlist assertions stay green.
- * Newlines are segment separators per ADR-0068 (换行只作分段符); they are NOT
+ * Newlines are segment separators per ADR-0068; they are NOT
  * dangerous patterns. The order is what the root-find fold needs: `cd /` and
  * the `find` it arms must be judged in sequence, across newlines too (one
  * bash invocation is one shell, so a `cd /` on an earlier line still sets the

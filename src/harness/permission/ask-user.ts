@@ -1,7 +1,7 @@
 /**
  * src/harness/permission/ask-user.ts
  *
- * AskUser implementations for the three CLI inlets (#162 平权装配).
+ * AskUser implementations for the three CLI inlets (equal footing).
  *  - chat TTY REPL: createTtyAskUser (readline y/N prompt).
  *  - ask oneshot:   createFailClosedAskUser (always false; user can't interact).
  *  - serve SPA:     createServeAskUser (queue-based; fail-closed after

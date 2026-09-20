@@ -1,16 +1,19 @@
 /**
- * Executor (015 拥有) — Foundation 的工具执行器。
+ * Tool executor.
  *
- * 边界:
- *   - 接收 014 合法有序 tool-call 投影(身份 + 工具名 + 原始 input);
- *   - 串行执行(无并行、无短路、无自动重试);
- *   - 严格校验走 Registry 暴露的已编译 validator(`registry.getValidator`),
- *     与构造期同源 schema,绝不二次编译;
- *   - 严格校验失败 / 工具不存在 / 工具运行时异常 三类失败统一形成结构化
- *     ToolExecutionResult,而非抛出(以保证 Assistant 不污染权威历史);
- *   - 工具返回值规范化为 model-facing payload(允许字符串或 JSON-compatible
- *     结构化值);未知异常被净化为通用失败,绝不暴露 stack / 内部路径 / 凭据;
- *   - Executor 不读取 / 不构造供应商原生字段,Model Adapter 负责编码。
+ * Boundaries:
+ *   - Takes ordered valid tool-call projections (id + name + raw input);
+ *   - serial execution (no parallelism, short-circuit, or auto-retry);
+ *   - validation reuses the Registry's pre-compiled validator
+ *     (`registry.getValidator`) — same schema as construction, never recompiled;
+ *   - validation failure / missing tool / runtime exception all converge to a
+ *     structured ToolExecutionResult instead of throwing (so the Assistant
+ *     turn cannot pollute the authoritative history);
+ *   - handler returns are normalized into model-facing payload (string or
+ *     JSON-compatible value); unknown errors are sanitized to a generic
+ *     failure — never stack / internal paths / credentials;
+ *   - the Executor never reads or builds provider-native fields; the Model
+ *     Adapter owns encoding.
  */
 
 import type { ImageBlockParam } from "@anthropic-ai/sdk/resources/messages.js";
@@ -28,31 +31,35 @@ import type {
 
 const TIMEOUT = Symbol("executor-timeout");
 
-/** T3: ADR-0006 — executor 兜底截断阈值。字符级 = 当前唯一可行度量(token 核算等 #136)。 */
+/** ADR-0006 — last-resort truncation threshold; char-level is the only practical measure. */
 const OUTPUT_HARD_CAP = 20000;
 
-/** T3: ADR-0006 + 计划 T1-1 — 截断标记模板。{original} / {kept} 占位。 */
+/** ADR-0006 — truncation marker template with {original} / {kept} placeholders. */
 const TRUNCATION_MARKER_TEMPLATE =
   "…[executor: 输出超长已截断，原长 {original} 字符，保留 {kept} 字符；如需更多信息，用更精确的输入重新调用]";
 
 /**
- * path-image-vision T1: `safeContent` 的图像直通洞只为 `read_image` 成功臂开
- * （spec 假设 7），其余工具仍压 text。名字闸 + 形状闸双条件：形状闸防
- * read_image 之外的畸形 payload 借名穿透，也防同名工具返回非图像形状时
- * 绕过既有 text 语义。
+ * The image-passthrough hole in `safeContent` opens only for the successful
+ * `read_image` arm; every other tool stays text. Dual condition of name gate
+ * + shape gate: the shape check stops malformed payloads from slipping
+ * through under the name, and stops a same-named tool returning a non-image
+ * shape from bypassing the existing text semantics.
  */
 const IMAGE_PASSTHROUGH_TOOL_NAME = "read_image";
 
-/** SDK base64 image source 的合法 media_type：名单 SSOT 在 read-image.ts。 */
-const IMAGE_MEDIA_TYPE_SET: ReadonlySet<string> = new Set<string>(IMAGE_MEDIA_TYPES);
+/** Legal media_types for SDK base64 image sources; the list SSOT is read-image.ts. */
+const IMAGE_MEDIA_TYPE_SET: ReadonlySet<string> = new Set<string>(
+  IMAGE_MEDIA_TYPES
+);
 
 /**
- * executor 输出侧的内容块联合。image block（SDK `ImageBlockParam`）只活在
- * `tool_result.content`（协议类型为 `unknown`）内，**不进**顶层
- * `AnthropicContentBlock` 联合 —— spec 假设 6 / 协议不变。故本联合仅是
- * executor 内部的组装类型，落 `ToolExecutionResult.payload` 时向下转型
- * （payload 声明仍是 `AnthropicContentBlock[]`，Adapter 按 `unknown` content
- * 原样上 wire，不做结构解释）。
+ * Executor-side output content-block union. Image blocks (SDK
+ * `ImageBlockParam`) live only inside `tool_result.content` (protocol type
+ * `unknown`) and never enter the top-level `AnthropicContentBlock` union —
+ * the protocol stays unchanged. This union is an internal assembly type,
+ * downcast when landing in `ToolExecutionResult.payload` (declared as
+ * `AnthropicContentBlock[]`; the Adapter ships `unknown` content verbatim
+ * without structural interpretation).
  */
 type ToolResultContentBlock = AnthropicContentBlock | ImageBlockParam;
 
@@ -67,52 +74,54 @@ function isImageBlockParam(v: unknown): v is ImageBlockParam {
   );
 }
 
-function safeContent(payload: unknown, def: ToolDefinition): ToolResultContentBlock[] {
-  if (
-    def.name === IMAGE_PASSTHROUGH_TOOL_NAME &&
-    isImageBlockParam(payload)
-  ) {
-    // 像素即 payload 本体，ADR-0006 的字符顶是文本度量，不适用。
+function safeContent(
+  payload: unknown,
+  def: ToolDefinition
+): ToolResultContentBlock[] {
+  if (def.name === IMAGE_PASSTHROUGH_TOOL_NAME && isImageBlockParam(payload)) {
+    // Pixels are the payload; ADR-0006's char cap is a text measure, N/A here.
     return [payload];
   }
   let text: string;
   if (typeof payload === "string") {
     text = payload;
   } else if (isEnvelope(payload)) {
-    // T4 #298:handler 返回结构化 envelope `{ output, meta? }` — 仅取 output
-    // 字符串进 model tool_result;meta 走观测侧信道,不进模型可见 payload。
-    // 其余调用面(普通 JSON-compatible 对象)不受影响。
+    // Structured envelope `{ output, meta? }`: only the output string reaches
+    // the model tool_result; meta rides the observation side-channel, never
+    // the model-visible payload. Plain JSON-compatible callers unaffected.
     text = payload.output;
   } else if (isJsonCompatible(payload)) {
     text = JSON.stringify(payload);
   } else {
-    // Tool/Adapter 越界:Executor 兜底,不抛错,只形成可修正信号(ADR-0005 L22)。
+    // Tool/Adapter boundary breach: converge to a correctable signal instead of throwing (ADR-0005).
     text = "[executor: payload not JSON-compatible]";
   }
-  // ADR-0083:装配期声明豁免的工具(工具 def 上的静态字段)不过兜底闸,
-  // 原样交付、不追加 marker;其余工具逐字节沿用既有截断语义。
+  // ADR-0083: tools declared exempt at assembly time (static field on the
+  // def) skip the cap untouched and without a marker; all others keep the
+  // existing truncation semantics byte for byte.
   const capped = def.exemptFromOutputCap === true ? text : applyOutputCap(text);
   return [{ type: "text", text: capped }];
 }
 
 /**
- * 对象守卫：null / 数组 / 原始值都不算。只查这三样、**不**查原型链 ——
- * 与 isJsonCompatible 不同，Date / Map 之类的 class instance 在此放行
- * （字段守卫随后自会判定其承载字段缺失）。
+ * Object guard: rejects null / arrays / primitives only — deliberately no
+ * prototype-chain check (unlike isJsonCompatible), so Date / Map instances
+ * pass and the field guards below report the missing fields themselves.
  */
 function isNonArrayObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
-/** meta 可选字段守卫：undefined（缺席）或 string 都合法。 */
+/** Optional-meta guard: undefined (absent) or string both legal. */
 function isOptionalString(v: unknown): boolean {
   return v === undefined || typeof v === "string";
 }
 
 /**
- * `meta` 形状守卫：非数组对象，且 `ToolResultMeta` 的四个已知字段若在场必须
- * 是 string（未知字段不查 —— 与 `isJsonCompatible` 的白名单取向不同）。
- * reject-fast 的落点 —— 任一已知字段非法即整体不算 envelope。
+ * `meta` shape guard: non-array object whose four known ToolResultMeta
+ * fields, when present, are strings (unknown fields unchecked — opposite of
+ * isJsonCompatible's whitelist stance). Reject-fast: one illegal known field
+ * means the whole value is not an envelope.
  */
 function isMetaShape(v: unknown): boolean {
   if (!isNonArrayObject(v)) return false;
@@ -125,11 +134,11 @@ function isMetaShape(v: unknown): boolean {
 }
 
 /**
- * T4 #298 + review-Low:envelope 单一判别 — 必须是纯对象、带 string `output`，
- * 且可选 `meta` 必须为纯对象（字段仅限 string oldContent / newContent /
- * stdout / stderr）。形状以 `ToolOutputEnvelope`（types.ts SSOT）为准，杜绝
- * 3 处独立 shape-check 各自漂移；reject-fast：meta 形状非法 → 整体不算
- * envelope（meta 被丢弃）。
+ * Single envelope discriminator: plain object with a string `output`, and an
+ * optional plain-object `meta` (fields limited to string oldContent /
+ * newContent / stdout / stderr). Shape follows `ToolOutputEnvelope`
+ * (types.ts SSOT) so shape checks cannot drift; reject-fast: illegal meta
+ * shape → not an envelope at all (meta dropped).
  */
 function isEnvelope(v: unknown): v is ToolOutputEnvelope {
   if (!isNonArrayObject(v)) return false;
@@ -138,8 +147,8 @@ function isEnvelope(v: unknown): v is ToolOutputEnvelope {
   return m === undefined || isMetaShape(m); // undefined = envelope with no meta
 }
 
-/** T4 #298:从已通过 isEnvelope 判别的 envelope 提取 side-channel meta。
- *  meta 形状已由守卫验证，此处仅做平凡取值（单次遍历收敛）。 */
+/** Extract the side-channel meta from a value already passed isEnvelope
+ *  (shape verified by the guard; plain read here). */
 function extractMeta(v: ToolOutputEnvelope): ToolResultMeta | undefined {
   const m = (v as unknown as Record<string, unknown>).meta as
     ToolResultMeta | undefined;
@@ -147,13 +156,15 @@ function extractMeta(v: ToolOutputEnvelope): ToolResultMeta | undefined {
 }
 
 /**
- * T3: ADR-0006 — 序列化后 > OUTPUT_HARD_CAP 字符 → 硬截断 + 追加 marker。
- * marker 本身计入 OUTPUT_HARD_CAP 预算(kept = OUTPUT_HARD_CAP - marker.length)。
- * 不落盘(ADR-0006 L14)。契约 X:executor 永远按实际序列化长度重新测量,
- * 不信任 payload 内声称字段(truncated / total 等都可能是 MCP 第三方伪造)。
+ * ADR-0006 — serialized text longer than OUTPUT_HARD_CAP → hard truncate +
+ * append marker (the marker itself counts against the cap). Never persisted.
+ * The executor always re-measures the actual serialized length; self-declared
+ * fields inside a payload (truncated / total / ...) may be forged by
+ * third-party MCP servers and are not trusted.
  *
- * 注:`kept` 的位数(1~5)会让最终 marker 长度在 ±4 字符内浮动,因此走
- * "先估 → 验 → 不满足则收敛"的两阶段,保证最终总长严格 <= OUTPUT_HARD_CAP。
+ * `kept`'s digit count (1~5) makes the final marker vary ±4 chars, so this
+ * runs estimate → verify → shrink-until-fit to guarantee the assembled total
+ * stays strictly within the cap.
  */
 function applyOutputCap(text: string): string {
   if (text.length <= OUTPUT_HARD_CAP) return text;
@@ -161,12 +172,11 @@ function applyOutputCap(text: string): string {
     "{original}",
     String(text.length)
   );
-  // 第一阶段:用占位长度估算 kept(把 "{kept}" 视作最长的 5 字符,
-  // 等价于"按最坏情况预留",得到一个不会越界的下界)。
+  // Phase 1: estimate kept worst-case ("{kept}" as 5 digits) → a safe lower bound.
   const estimateKept =
     OUTPUT_HARD_CAP - markerTemplate.replace("{kept}", "99999").length;
   let kept = Math.max(0, estimateKept);
-  // 第二阶段:用真实位数替换并验证;若总长越界则逐步缩减 kept 直到满足。
+  // Phase 2: substitute the real digit count; shrink kept while the total overflows.
   for (let i = 0; i < 8; i++) {
     const finalMarker = markerTemplate.replace("{kept}", String(kept));
     const totalLen = kept + finalMarker.length;
@@ -176,16 +186,16 @@ function applyOutputCap(text: string): string {
     kept -= totalLen - OUTPUT_HARD_CAP;
     if (kept < 0) kept = 0;
   }
-  // 极端边界兜底(几乎不可达):截断到 OUTPUT_HARD_CAP,不加 marker。
+  // Extreme edge (near-unreachable): truncate to the cap without a marker.
   return text.slice(0, OUTPUT_HARD_CAP);
 }
 
 /**
- * T3: ADR-0005 B-2 — JSON 兼容性严格白名单。
- *   - 放行:null / string / boolean / 有限 number / Array / 纯对象
- *     (原型 === Object.prototype)。
- *   - 拒绝:NaN / ±Infinity / Date / Map / Set / 类实例 / 循环引用。
- *   - 防栈溢出:WeakSet 记录已访问对象,重复访问即拒绝。
+ * ADR-0005 — strict JSON-compatibility whitelist.
+ *   - Allow: null / string / boolean / finite number / Array / plain object
+ *     (prototype === Object.prototype).
+ *   - Reject: NaN / ±Infinity / Date / Map / Set / class instances / cycles.
+ *   - Stack-overflow guard: a WeakSet of visited objects rejects re-entry.
  */
 function isJsonCompatible(v: unknown): boolean {
   return isJsonCompatibleInner(v, new WeakSet());
@@ -266,7 +276,8 @@ function validateCall(registry: RegistryImpl, call: ToolCall): CallValidation {
   }
   const validator = registry.getValidator(call.name);
   if (!validator) {
-    // Registry 必须为其 get() 的工具暴露 validator;这是契约保证,不可达。
+    // Contract: the Registry always exposes a validator for tools its get()
+    // returns; unreachable.
     return {
       ok: false,
       failure: {
@@ -290,22 +301,22 @@ function validateCall(registry: RegistryImpl, call: ToolCall): CallValidation {
 }
 
 /**
- * ok 路径归档：envelope 的 meta 提升为可选 side-channel(类型已由 T2 在
- * `ToolExecutionResult.ok` 声明),非 envelope 路径 meta 缺席;payload 一律
- * 经 `safeContent`(截断豁免由 def 的装配期声明决定,ADR-0083)。
+ * Ok-path assembly: an envelope's meta is lifted to the optional
+ * side-channel; non-envelope paths have no meta. Payload always goes through
+ * `safeContent` (cap exemption decided by the def's assembly-time field,
+ * ADR-0083).
  */
 function buildOkResult(
   call: ToolCall,
   out: unknown,
   def: ToolDefinition
 ): ToolExecutionResult {
-  // T4 #298:meta 先于 payload 求值,与提升引入前的求值顺序逐字节一致。
+  // Evaluate meta before payload to keep the pre-lifting evaluation order byte-identical.
   const meta: ToolResultMeta | undefined = isEnvelope(out)
     ? extractMeta(out)
     : undefined;
-  // meta 为可选字段：`{ meta }`（含 undefined）与条件展开等价，收敛为直写。
-  // payload 向下转型见 `ToolResultContentBlock` 注释：image 块只经
-  // `tool_result.content`(unknown) 上 wire，顶层协议联合不变。
+  // Downcast rationale in the ToolResultContentBlock note: image blocks reach
+  // the wire only via tool_result.content (unknown); top-level union unchanged.
   return {
     kind: "ok",
     toolUseId: call.id,
@@ -315,9 +326,10 @@ function buildOkResult(
 }
 
 /**
- * 失败路径归档：abort 优先于 timeout,其余异常净化后透出(绝不暴露 stack /
- * 内部路径 / 凭据)。判定用的是**外层** signal —— 超时走 `stop.abort` 产生的
- * 内部 signal 不算 caller 取消,归为 timeout。
+ * Failure-path assembly: abort outranks timeout; other errors are sanitized
+ * (never stack / internal paths / credentials). The check uses the outer
+ * signal — a timeout aborts via the internal controller and must not be
+ * reported as caller cancellation.
  */
 function buildFailureResult(
   call: ToolCall,
@@ -336,9 +348,10 @@ function buildFailureResult(
 }
 
 /**
- * 构造 Executor。Executor 持有 Registry,通过 `registry.getValidator` 复用
- * 构造期已编译的 ajv ValidateFunction(015 同源 schema 强制);Executor 本体
- * 不再创建任何 ajv 实例,Registry 不可变,Executor 也不持有任何可变状态。
+ * Build the Executor. It holds the Registry and reuses the construction-time
+ * compiled ajv validators via `registry.getValidator` (same-source schema
+ * enforcement); it creates no ajv instance itself. The Registry is immutable
+ * and the Executor holds no mutable state.
  */
 export function createExecutor(registry: RegistryImpl): Executor {
   async function runOne(
@@ -353,19 +366,20 @@ export function createExecutor(registry: RegistryImpl): Executor {
     const validation = validateCall(registry, call);
     if (!validation.ok) return validation.failure;
     const stop = buildStopSignal(signal, timeoutMs);
-    // 017 T5: conversationId 并进 ctx —— tool handler（bash-output / bash-stop）
-    // 读 ctx.conversationId 透传给 manager 做 scope filter。字段缺省 = 不过滤。
-    // F-4: turnId 同形态 —— spawn_subagent 读它写进 def.parentTurnId。
+    // conversationId flows into ctx so scope-filtering handlers
+    // (bash-output / bash-stop) pass it to the manager; absent = no filter.
+    // turnId works the same way — spawn_subagent records it as def.parentTurnId.
     const ctx: ToolExecutionContext = {
       signal: stop.signal,
       ...(conversationId !== undefined ? { conversationId } : {}),
       ...(turnId !== undefined ? { turnId } : {}),
       ...(onStream !== undefined ? { onStream } : {}),
-      // T5 (ADR-0071 / SC8): 来自 call.id 的
-      // Anthropic tool_use_id (模型那侧 wire id) —— 与返回 ToolExecutionResult
-      // 顶上的 toolUseId 同源 (handler 自填 .toolUseId 字段不依赖此 ctx);
-      // spawn_subagent 消费后写进 def.toolUseId → manager 抄进 .meta.json。
-      // 直接调 handler / 测试注入不走 executeAll 的路径不填,Postel(meta 键省略)。
+      // Anthropic tool_use_id from call.id (the model-side wire id) — same
+      // source as the toolUseId on the returned ToolExecutionResult, so
+      // handlers need not rely on ctx for it. ADR-0071: spawn_subagent
+      // consumes it into def.toolUseId → the manager copies it into
+      // .meta.json. Paths calling the handler directly (tests) leave it
+      // unfilled.
       toolUseId: call.id,
       ...(messages !== undefined ? { messages } : {}),
     };
@@ -395,7 +409,8 @@ export function createExecutor(registry: RegistryImpl): Executor {
     ) => void | Promise<void>,
     turnId?: string,
     onStream?: ToolExecutionContext["onStream"],
-    // skill() 二次短路:模型可见历史只读快照,原样透传进 ctx.messages。
+    // skill() second pass-through: a read-only snapshot of the model-visible
+    // history, forwarded verbatim into ctx.messages.
     messages?: ToolExecutionContext["messages"]
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
@@ -428,8 +443,8 @@ function formatAjvError(errors: unknown): string {
   };
   const where =
     e.instancePath && e.instancePath.length > 0 ? e.instancePath : "(root)";
-  // SC1/grep-wave-survive: enum violations must name the accepted values so
-  // the model can self-correct. Other keywords keep the prior shape.
+  // Enum violations must name the accepted values so the model can
+  // self-correct. Other keywords keep the prior shape.
   if (e.keyword === "enum" && Array.isArray(e.params?.allowedValues)) {
     return `invalid input at ${where}: ${e.message ?? "schema violation"} (${e.params.allowedValues.join(" / ")})`;
   }

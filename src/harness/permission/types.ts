@@ -1,29 +1,27 @@
 /**
  * src/harness/permission/types.ts
  *
- * v0 permission three-layer graduation types (#115 / #122).
+ * Permission model types: three decision values, layered rules, hooks.
  *
- * Spec references:
- *  - PermissionDecision "allow" | "deny" | "ask" (replaces prototype "pass_through").
- *  - PermissionOutcome carries reason; deny reasons are prefixed at the call sites
- *    (hook_blocked / permission_denied / user_denied) so the loop / trace can
- *    attribute the source without losing the structured outcome.
- *  - ToolCategory is the surface the executor uses for category defaults; AciMeta.category
- *    maps 1:1 — see aci/types.ts AciCategory.
- *  - HardRuleSpec implements the un-overrideable security backstop (execute dangerous
- *    commands, sensitive paths).
- *  - Normal rules are layered: session > project > code; first hit from highest layer
- *    wins (per "上层覆盖下层"; see spec §plan T2).
- *  - Policy sources are pluggable; v0 ships three: CodeBuiltInPolicySource (always),
- *    ProjectSettingsPolicySource (loader in T6), SessionGrantsPolicySource (in-memory).
- *  - AskUser / Pre/Post hook interfaces: askUser is mandatory at construction time
- *    (ask_inlet_missing fail-loud per #162).
+ * - PermissionDecision is "allow" | "deny" | "ask".
+ * - PermissionOutcome carries reason; deny reasons are prefixed at the call
+ *   sites (hook_blocked / permission_denied / user_denied) so the loop / trace
+ *   can attribute the source without losing the structured outcome.
+ * - ToolCategory is the surface the executor uses for category defaults;
+ *   AciMeta.category maps 1:1 — see aci/types.ts AciCategory.
+ * - HardRuleSpec implements the un-overrideable security backstop (dangerous
+ *   commands, sensitive paths).
+ * - Normal rules are layered: session > project > code; first hit from the
+ *   highest layer wins (higher layer overrides lower).
+ * - Policy sources are pluggable; three ship here: CodeBuiltInPolicySource
+ *   (always), ProjectSettingsPolicySource, SessionGrantsPolicySource (in-memory).
+ * - askUser is mandatory at construction time (ask_inlet_missing fail-loud).
  */
 
 import type { AciCategory } from "../aci/types.js";
 import type { ToolResultMeta } from "../tools/types.js";
 
-/** Decision triple (spec Q1). Replaces prototype "pass_through". */
+/** Decision triple: "allow" | "deny" | "ask". */
 export type PermissionDecision = "allow" | "deny" | "ask";
 
 /** Surface returned from any check; consumers reason about decision + reason. */
@@ -53,11 +51,10 @@ export interface HardRuleSpec {
   readonly reason: string;
   readonly tier: "hard-wall";
   /**
-   * Optional input-specific reason override (SC3,
-   * specs/mutate-write-contract.md): when present and it returns a string,
-   * that string replaces the static `reason` in the deny outcome so the
-   * message can carry the specific matched pattern id. Falls back to the
-   * static `reason` when absent or undefined.
+   * Optional input-specific reason override (specs/mutate-write-contract.md):
+   * when present and it returns a string, that string replaces the static
+   * `reason` in the deny outcome so the message can carry the specific
+   * matched pattern id. Falls back to the static `reason` otherwise.
    */
   readonly reasonFor?: (input: {
     readonly tool: string;
@@ -85,7 +82,7 @@ export interface CodeBuiltInPolicySource {
   readonly rules: ReadonlyArray<NormalRuleSpec>;
 }
 
-/** Project settings layer; the actual loader is T6 (#122 Q2b). */
+/** Project settings layer. */
 export interface ProjectSettingsPolicySource {
   readonly kind: "project";
   readonly filePath: string;
@@ -99,7 +96,7 @@ export interface ProjectSettingsPolicySource {
   readonly defaultMode?: "default" | "plan";
 }
 
-/** Session grants layer (in-memory, no persistence in v0). */
+/** Session grants layer (in-memory). */
 export interface SessionGrantsPolicySource {
   readonly kind: "session";
   readonly rules: () => ReadonlyArray<NormalRuleSpec>;
@@ -109,8 +106,8 @@ export type PermissionSource = "code" | "project" | "session";
 
 /**
  * askUser inlet: true = approve, false = deny (fail-closed).
- * Mandatory at engine construction time (#162); missing at startup throws
- * with `ask_inlet_missing` substring so call sites can detect.
+ * Mandatory at engine construction time; missing at startup throws with the
+ * `ask_inlet_missing` substring so call sites can detect.
  */
 export interface AskUser {
   (ctx: {
@@ -123,26 +120,28 @@ export interface AskUser {
 }
 
 /**
- * Pre 钩子的拦截语义（#126 D1 类型收窄）。
+ * Pre-hook blocking semantics.
  *
- * 钩子只表达「拦」：返回 PreHookBlock = 拦下该调用（reason 被 executor 包装为
- * `[hook_blocked] <reason>` 回灌模型）；返回 undefined = 放行（进入 checkPermission）。
- * 特意不复用 PermissionOutcome —— 后者属于权限层（policy/checkPermission），
- * 钩子从未实现 ask/allow 语义，用专用类型让「deny-only」成为编译期事实。
+ * The hook expresses only "block": returning PreHookBlock stops the call
+ * (the executor wraps reason as `[hook_blocked] <reason>` back to the
+ * model); returning undefined lets it through to checkPermission.
+ * PermissionOutcome is deliberately not reused — it belongs to the
+ * permission layer; the hook never implements ask/allow, so a dedicated
+ * type makes "deny-only" a compile-time fact.
  */
 export interface PreHookBlock {
   readonly reason: string;
 }
 
 /**
- * PreToolUse hook (chain step 1)。
- * deny-only：返回 PreHookBlock = 拦截（executor 包装 `[hook_blocked] <reason>`）；
- * 返回 undefined = 放行。异常语义（#126 D3）由 executor 调用点承载（fail-closed）。
+ * PreToolUse hook (chain step 1). Deny-only: returning PreHookBlock blocks
+ * (executor wraps `[hook_blocked] <reason>`); undefined passes through.
+ * Throwing is handled fail-closed at the executor call site.
  *
- * #global-plugins T2 加性放宽：返回类型加 `Promise<PreHookBlock | undefined>`
- * —— 插件 hook 需异步 spawn 子进程。既有同步实现零改动（同步返回仍是该联合
- * 的成员，赋值兼容）；调用点必须 await（不 await 会拿到恒 truthy 的 Promise
- * 而不是 block —— gateOne 已 await）。
+ * May be async (returns `Promise<PreHookBlock | undefined>`) because plugin
+ * hooks spawn subprocesses. Existing sync implementations stay compatible;
+ * call sites must await — an un-awaited Promise is always truthy and would
+ * be mistaken for a block.
  */
 export interface PreToolUseHook {
   (ctx: {
@@ -154,10 +153,11 @@ export interface PreToolUseHook {
 /**
  * PostToolUse hook (chain step 5). Observability only; cannot influence outcome.
  *
- * #global-plugins T2 加性放宽：返回类型加 `Promise<void>` —— 插件 hook 异步
- * 执行。异步拒绝由调用点收口（permission-executor `runAllowed` 的
- * `await post(...)` + try/catch；sandbox/violation-executor `observe` 同款），
- * 不让 rejected promise 逃逸成 unhandledRejection；「不改变工具结果」不变量不变。
+ * May be async (`Promise<void>`) for the same reason. Async rejections are
+ * collected at the call sites (permission-executor `runAllowed` awaits
+ * `post(...)` in try/catch; sandbox/violation-executor `observe` does the
+ * same) so no rejected promise escapes as unhandledRejection; the "never
+ * changes the tool result" invariant is unchanged.
  */
 export interface PostToolUseHook {
   (result: {
@@ -169,7 +169,7 @@ export interface PostToolUseHook {
       "ok" | "validation_failed" | "tool_not_found" | "execution_failed";
     readonly message?: string;
     readonly payload?: unknown;
-    /** T4 #298:ok 变体的观测 side-channel；模型不可见。 */
+    /** Observation side-channel of the ok variant; invisible to the model. */
     readonly meta?: ToolResultMeta;
   }): void | Promise<void>;
 }

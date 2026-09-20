@@ -1,17 +1,16 @@
 /**
- * Signal-aware stub tool (S17 守门 vehicle)。
+ * Signal-aware stub tool.
  *
- * 示例 stub:响应 ctx.signal —— abort 立即或等待期间打断,handler
- * reject DOMException("AbortError")。Executor 捕获后会把它收敛为
- * 统一的 execution_failed 标签。不进生产装配路径,仅供测试断言
- * "abort → 失败标签" 这条端到端链路。
+ * Honors ctx.signal: aborts immediately or mid-wait, rejecting with
+ * DOMException("AbortError"), which the Executor converges to the unified
+ * execution_failed label. Test-only; never wired into production assembly.
  */
 
 import type { ToolDef } from "../tools/types.js";
 
 export interface StubSignalToolOptions {
   readonly name?: string;
-  /** 等待时长(ms);用于"等待期间 abort"的测试用例。默认 0(立刻 resolve)。 */
+  /** Wait duration in ms (for "abort during wait" cases). Default 0. */
   readonly delayMs?: number;
 }
 
@@ -26,7 +25,7 @@ export function createStubSignalTool(
     inputSchema: { type: "object" },
     handler: (async (input: unknown, ctx?: { signal?: AbortSignal }) => {
       const signal = ctx?.signal;
-      // 入口已 abort:立刻拒绝,不允许执行业务逻辑。
+      // Already aborted at entry: reject before running any logic.
       if (signal?.aborted) {
         throw new DOMException("This operation was aborted", "AbortError");
       }

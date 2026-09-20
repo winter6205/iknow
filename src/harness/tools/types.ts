@@ -1,14 +1,14 @@
 /**
- * Foundation 公共工具类型 (015 拥有)。
+ * Shared tool types: the boundary shapes between Tool / Registry / Executor.
+ *   - A Tool owns the model-visible name, description, input JSON Schema and
+ *     the real call entry;
+ *   - the Registry holds the full registration set, validates at construction
+ *     and locates by name; it knows nothing about the Loop;
+ *   - the Executor carries call identity + raw input, locates, strictly
+ *     validates, invokes, and returns an identity-matched ToolExecutionResult.
  *
- * 工具 / Registry / Executor 之间的边界形状。015 明确:
- *   - Tool 拥有模型可见的名称、描述、参数 JSON Schema、真实调用入口;
- *   - Registry 保存完整注册集合,负责构造期校验和按名定位,不知道 Loop;
- *   - Executor 持有调用身份与原始 input,完成定位、严格校验和真实调用,
- *     再返回匹配身份的 ToolExecutionResult。
- *
- * 公共错误类型与 ToolExecutionResult 的具体字段拼写在 015 不予过早固定;
- * 此处给出稳定可区分、对模型可操作、可无损编码且默认不泄露的最小形状。
+ * Error types stay minimal here: distinguishable, actionable by the model,
+ * losslessly encodable, and non-leaking by default, without premature fixation.
  */
 
 import type {
@@ -18,83 +18,89 @@ import type {
 import type { HarnessStreamEvent } from "../stream.js";
 
 /**
- * 工具运行时入口签名:接收严格校验后的输入,返回 model-facing payload。
+ * Runtime entry signature: takes strictly validated input, returns a
+ * model-facing payload.
  *
- * Tool/Adapter 成功时返回已经过字段选择 / 排序 / 截断的 JSON-compatible
- * model-facing payload。允许字符串或结构化 JSON 值;不允许 undefined /
- * BigInt / 循环对象 / Map / Date / class instance。
+ * On success the payload is already field-selected / ordered / truncated and
+ * JSON-compatible: a string or structured JSON value. No undefined / BigInt /
+ * cyclic objects / Map / Date / class instances.
  */
 export type ToolHandler = (
   input: unknown,
-  ctx?: ToolExecutionContext // 017 新增;015 老 handler (input) => ... 继续合法
+  ctx?: ToolExecutionContext // optional; legacy (input) => ... handlers stay legal
 ) => Promise<unknown> | unknown;
 
-/** 017: Executor 透传给 handler 的执行上下文;含 signal + conversationId。timeoutMs 由 Executor Promise.race 外包不在此。T5: conversationId 注入用于 bash background conversation scope 过滤（bash-output / bash-stop handler 读 ctx 交给 manager；缺省 = 不过滤，向后兼容，ADR-0021 D1.4）。 */
+/** Execution context the Executor passes through to the handler: signal +
+ *  conversation/turn attribution + stream observer. timeoutMs is not here —
+ *  the Executor wraps Promise.race itself. conversationId feeds bash
+ *  background scope filtering (ADR-0021); absent = no filter. */
 export interface ToolExecutionContext {
   readonly signal?: AbortSignal;
   readonly conversationId?: string;
   /**
-   * 本次调用所属回合的 trace turn id（F-4）。`conversationId` 回答"哪个会话"、
-   * 装配期定死;`turnId` 回答"哪一回合"、每回合翻新,所以只能顺着 executeAll 走。
-   * 消费方 = `spawn_subagent`(写进 def.parentTurnId → 子代理三类 record)。
-   * 缺省 = 无归属回合(worker / ask / 直接调 handler),下游按 Postel 不落该键。
+   * Trace turn id owning this call. conversationId answers "which session"
+   * (fixed at assembly); turnId answers "which turn" (refreshed per turn), so
+   * it can only travel through executeAll. Consumer: spawn_subagent writes it
+   * into def.parentTurnId → the child's three record kinds. Absent = no
+   * owning turn (worker / ask / direct handler calls); downstream omits the key.
    */
   readonly turnId?: string;
   /**
-   * 本回合宿主流观察者（F 图进度）。`run_graph` 经 safeEmitStream 推
-   * `graph_progress`；缺席 = 不发事件（ask / 直调 handler 默认）。
+   * Host stream observer for this turn (graph progress etc.). `run_graph`
+   * pushes `graph_progress` via safeEmitStream; absent = no events.
    */
   readonly onStream?: (event: HarnessStreamEvent) => void;
   /**
-   * T5 (ADR-0071 / SC8):本次 tool_call 的
-   * Anthropic tool_use_id(模型那侧的 wire id) —— `spawn_subagent` 工具消费
-   * 后写入 def.toolUseId,manager 抄进 `.meta.json` 的 `toolUseId` 字段,
-   * 用于反查父 loop 的那一次工具调用。缺席 = Postel(meta 键省略),兼容
-   * 直接调 handler / 测试注入。
+   * Anthropic tool_use_id of this tool_call (the model-side wire id), from
+   * call.id (ADR-0071). spawn_subagent writes it into def.toolUseId and the
+   * manager copies it into `.meta.json` to back-reference the parent loop's
+   * call. Absent → key omitted; direct-handler / test paths stay compatible.
    */
   readonly toolUseId?: string;
   /**
-   * 本回合模型可见历史的只读快照（append-only messages 的引用）。skill() 据此
-   * 判「该名成功全文是否仍在可见上下文」做二次短路；快照缺席（slash / 直调
-   * handler / 未接缝的路径）→ 消费方 fail-closed，行为与缺席前逐字节一致。
+   * Read-only snapshot of this turn's model-visible history. skill() uses it
+   * to decide whether a name's full body is still visible (second
+   * short-circuit). Snapshot absent (slash / direct handler / unsewn paths) →
+   * consumers fail closed.
    */
   readonly messages?: ReadonlyArray<AnthropicNativeMessage>;
 }
 
 /**
- * 工具描述符:模型可见名称 + JSON Schema(给模型与 Executor 同源校验用)
- * + 真实调用入口。015 强制:工具 input_schema 与 Executor 校验用同一份
- * 权威 JSON Schema,不允许分别维护。
+ * Tool descriptor: model-visible name + JSON Schema + real call entry.
+ * Enforced: the schema advertised to the model and the Executor's validation
+ * schema are the same authoritative object — never maintained separately.
  */
 export interface ToolDef {
   readonly name: string;
   readonly description: string;
-  /** JSON Schema(与 Executor 严格校验同源;015 冻)。 */
+  /** JSON Schema, same-source as Executor validation. */
   readonly inputSchema: Record<string, unknown>;
   readonly handler: ToolHandler;
   /**
-   * 装配期静态声明(ADR-0083):本工具输出不进 Executor 兜底输出闸
-   * (`OUTPUT_HARD_CAP`),executor 原样交付、不追加截断标记。
+   * Static assembly-time declaration (ADR-0083): this tool's output skips the
+   * Executor's fallback output cap; delivered as-is with no truncation marker.
    *
-   * 为什么存在:ADR-0006 的兜底闸以「输出是可再生查询」为前提;`skill()`
-   * 正文是一次装配产物(单一来源、整份语义),截断后没有「换更精确的输入
-   * 重调」这条恢复路径,半份技能程序反而更危险。
+   * Rationale: the cap (ADR-0006) presumes output is a re-derivable query; a
+   * skill body is one assembly product (single source, whole semantics) — no
+   * "retry with a more precise input" recovery path exists, and a half skill
+   * is more dangerous than none.
    *
-   * 边界:声明写在 `ToolDef` 上、由工具工厂装配期落值,不是任何一次输出
-   * 的元数据,也**不是**截断元数据声称 —— 契约 X(executor 是截断元数据
-   * 唯一权威、永不信任 payload 内声称字段)不受影响。MCP 转换路径不落此
-   * 声明(不可自称取得)。
+   * Boundary: the flag lives on the ToolDef set by the tool factory, not on
+   * any single output, and is not a truncation-metadata claim — the executor
+   * remains the sole authority on truncation metadata. MCP conversion paths
+   * never set it (tools cannot self-grant).
    */
   readonly exemptFromOutputCap?: boolean;
 }
 
-/** Registry 公共接口:构造期校验、不可变、按名定位(015 拥有)。 */
+/** Registry public interface: construction-time validation, immutable, locate by name. */
 export interface Registry {
   readonly list: () => ReadonlyArray<ToolDef>;
   readonly get: (name: string) => ToolDef | undefined;
 }
 
-/** 工具调用身份 + 输入:由 Model Adapter 投影消费后交给 Executor。 */
+/** Tool call identity + input: projected from the Model Adapter, consumed by the Executor. */
 export interface ToolCall {
   readonly id: string;
   readonly name: string;
@@ -102,21 +108,21 @@ export interface ToolCall {
 }
 
 /**
- * 工具执行结果(015 拥有):一次执行的确定性结果/收据。
+ * Tool execution result: the deterministic receipt of one call.
  *
- * 承载调用身份、成功 payload 或失败标签。失败标签在字段上结构化,
- * 区分"业务公开失败"(可向模型暴露)与"未知异常"(已净化为通用失败)。
+ * Carries call identity, success payload or failure label. Failure labels are
+ * structured at the field level, distinguishing business-visible failures
+ * (exposable to the model) from unknown errors (sanitized to generic failure).
  *
- * 不携带 Anthropic 原生编码;由 Model Adapter 负责原生 tool_result 编码。
+ * No Anthropic-native encoding here; the Model Adapter encodes tool_result.
  */
 /**
- * ToolExecutionResult `ok` 变体的可选 side-channel (#298):不改模型可见
- * payload 的前提下,为宿主携带 diff 类的 old/new 内容。仅在有内容时存在;
- * additive，不破坏既有 `payload` 契约。
- *
- * T4 (#693) D4:扩 bash 输出承载字段 `stdout` / `stderr`（显示层投影）——
- * 走观测旁路，永不进模型 tool_result。`executor.ts` 形状守卫仅校验字段
- * 类型（string），其它 host 用途字段如需加入按 SSOT 走同套纪律。
+ * Optional side-channel of the ok variant: carries diff old/new content for
+ * the host without touching the model-visible payload. Present only when
+ * non-empty; additive. Bash display fields stdout / stderr follow the same
+ * rule — observation bypass only, never into the model's tool_result; the
+ * executor shape guard checks field types (string) only, and further host-use
+ * fields must join through the same SSOT discipline.
  */
 export interface ToolResultMeta {
   readonly oldContent?: string;
@@ -126,12 +132,12 @@ export interface ToolResultMeta {
 }
 
 /**
- * #298 handler 可返回的结构化 envelope 形状（T4 side-channel SSOT）：
- * `{ output: string, meta?: ToolResultMeta }`。Executor 仅取 `output` 进
- * model-facing tool_result；`meta` 走观测侧信道，不进模型可见 payload。
+ * Structured envelope a handler may return: `{ output: string, meta?:
+ * ToolResultMeta }`. The Executor takes only `output` into the model-facing
+ * tool_result; `meta` rides the observation side-channel.
  *
- * 单一权威形状：executor 落址此处（不再在各处内联重写 shape-check），
- * 类型守卫与取值共用同一接口（#298 review-Low：3 处独立 shape-check 收敛）。
+ * Single authoritative shape: the executor's type guard and extractor share
+ * this interface, ending duplicated shape-checks.
  */
 export interface ToolOutputEnvelope {
   readonly output: string;
@@ -143,13 +149,13 @@ export type ToolExecutionResult =
       readonly kind: "ok";
       readonly toolUseId: string;
       readonly payload: AnthropicContentBlock[];
-      /** 可选 typed envelope(#298):宿主侧消费 diff old/new;模型不可见。 */
+      /** Optional typed envelope: host-side diff old/new; invisible to the model. */
       readonly meta?: ToolResultMeta;
     }
   | {
       readonly kind: "validation_failed";
       readonly toolUseId: string;
-      /** 人类可读的安全错误摘要(可向模型暴露)。 */
+      /** Human-readable safe error summary (exposable to the model). */
       readonly message: string;
     }
   | {
@@ -160,42 +166,44 @@ export type ToolExecutionResult =
   | {
       readonly kind: "execution_failed";
       readonly toolUseId: string;
-      /** 净化后的安全错误摘要(可向模型暴露)。 */
+      /** Sanitized safe error summary (exposable to the model). */
       readonly message: string;
       /**
-       * 可选 partial stdout/stderr — 由被中断/超时的 handler 在 #124 SC13
-       * 下产出，便于模型在收到 cancelled/timeout 后看到已有输出。仅在
-       * 真实产生过输出时存在;additive，不破坏 `message` 的 strict-equal
-       * 比对契约(loop-engine 仍按 message 判定 stopReason)。
+       * Partial stdout/stderr from a handler that produced output before
+       * being cancelled/timed out, so the model sees what exists already.
+       * Present only when output actually happened; additive — loop-engine
+       * still decides stopReason by strict `message` equality.
        */
       readonly partial?: { readonly stdout?: string; readonly stderr?: string };
       /**
-       * caller 已经收到 cancelled，但 handler 未响应 signal，仍在后台运行。
-       * 仅在 ACI detach 该 handler 时出现；真正收尾的取消不带此字段。
+       * The caller already got "cancelled" but the handler ignored the signal
+       * and is still running. Only set when the ACI detaches that handler;
+       * clean cancellations omit the field.
        */
       readonly background?: true;
     };
 
-/** Executor 接口:接收 014 合法有序 tool-call 投影,返回匹配身份的 ToolExecutionResult。 */
+/** Executor interface: takes ordered valid tool-call projections, returns identity-matched results. */
 export interface Executor {
   /**
-   * 执行一序列调用。基础 executor 串行;ACI 调度层可对 isConcurrencySafe
-   * 批次重叠。无短路、无自动重试。onSettled 按输入下标在每个结果 settle
-   * 时回调(#620),缺省不调用。
+   * Execute a sequence of calls. The base executor is serial; the ACI
+   * scheduling layer may overlap isConcurrencySafe batches. No
+   * short-circuit, no auto-retry. onSettled fires per result in input order;
+   * omitted = never called.
    */
   readonly executeAll: (
     calls: ReadonlyArray<ToolCall>,
-    signal?: AbortSignal, // 017: 原样透传到 ctx.signal
-    timeoutMs?: number, // 017: 单 handler Promise.race 超时;undefined = 不 race(015 语义)
-    conversationId?: string, // 017 T5: 原样透传到 ctx.conversationId;缺省 = 不过滤(向后兼容)
-    /** #653 / #620:each result as it settles (index = input order). Optional. */
+    signal?: AbortSignal, // forwarded to ctx.signal
+    timeoutMs?: number, // per-handler Promise.race timeout; undefined = no race
+    conversationId?: string, // forwarded to ctx.conversationId; absent = no filter
+    /** Each result as it settles (index = input order). Optional. */
     onSettled?: (
       result: ToolExecutionResult,
       index: number
     ) => void | Promise<void>,
-    turnId?: string, // F-4: 原样透传到 ctx.turnId;缺省 = 无归属回合
-    onStream?: (event: HarnessStreamEvent) => void, // 图进度等工具内 emit
-    /** skill() 二次短路:本回合模型可见历史只读快照;缺省 = handler 拿不到(fail-closed)。 */
+    turnId?: string, // forwarded to ctx.turnId; absent = no owning turn
+    onStream?: (event: HarnessStreamEvent) => void, // in-tool emits (graph progress etc.)
+    /** Read-only model-visible history snapshot for this turn; absent → handler fails closed. */
     messages?: ReadonlyArray<AnthropicNativeMessage>
   ) => Promise<ReadonlyArray<ToolExecutionResult>>;
 }

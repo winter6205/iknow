@@ -49,12 +49,13 @@ function codeBuiltInRules(): ReadonlyArray<NormalRuleSpec> {
         "code built-in: memory_save writes into the agent memory library, not user workspace",
     },
     {
-      // #440 D7 / ADR-0085: todo_write category="write" → 默认 ask;read 子模式
-      // 仅读,应 bypass ask 走 allow。规则在 code 层,project/session 仍可
-      // escalate 为 ask/deny;hard-wall 仍不可 override。匹配条件:tool 名 +
-      // input.mode === "read"。非对象 / 缺 mode / mode 非 read → 不命中,
-      // 继续走默认 write → ask(defense in depth,handler 层
-      // ToolExecutionError 兜底)。
+      // ADR-0085: todo_write is category="write" → defaults to ask, but the
+      // read sub-mode only reads and should bypass ask → allow. The rule sits
+      // at the code layer; project/session can still escalate to ask/deny,
+      // hard-walls remain non-overridable. Match: tool name +
+      // input.mode === "read". Non-object input / missing mode / other mode →
+      // no match, falls through to the default write → ask (the handler-layer
+      // ToolExecutionError stays as defense in depth).
       id: "code-allow-todo-write-read",
       match: ({ tool, input }) =>
         tool === "todo_write" &&
@@ -169,7 +170,7 @@ export function checkPermission(opts: CheckPermissionInput): PermissionOutcome {
   }
   if (mode === "plan" && category !== "read-only") {
     // Plan mode treats mutating tools as denied without asking — useful for
-    // "只看不改" planning sessions.
+    // "read, never write" planning sessions.
     return {
       decision: "deny",
       reason: `mode: plan blocks mutating tools (${category})`,

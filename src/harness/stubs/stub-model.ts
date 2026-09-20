@@ -1,15 +1,16 @@
 /**
- * Stub model (T4):Foundation 的替身 ModelAdapter。
+ * Stub model: test double for the ModelAdapter interface.
  *
- * 接受脚本化 AssistantTurnResult 数组,每次 step 消费下一条,确定性、
- * 无时间 / 随机 / IO 依赖。响应耗尽时抛 ProtocolError(模拟"模型回应
- * 不再可用")。替身不进生产装配路径。
+ * Consumes a scripted AssistantTurnResult array one entry per step;
+ * deterministic, no time/random/IO dependencies. Exhausted responses throw
+ * ProtocolError. Never wired into production assembly. Also provides the
+ * minimal encodeUserText / encodeToolResults entry points so the Loop
+ * Engine can run a full closed loop (the stub does not model the real
+ * Anthropic wire format).
  *
- * 同时提供 encodeUserText / encodeToolResults 两个最小编码入口,让
- * Loop Engine 跑完 S1 完整闭环(替身不解释真实 Anthropic wire 格式)。
- *
- * 017:可选注入 step 返回前的延迟(delayMs),用来验证 S17 守门
- * (abort → AbortError)。替身允许时间依赖,因为测试控制时间。
+ * An optional injected delay before each step return (delayMs) supports
+ * abort-during-wait tests; time dependence is allowed here because tests
+ * control time.
  */
 
 import { ProtocolError } from "../errors.js";
@@ -26,10 +27,10 @@ import type { HarnessStreamEvent } from "../stream.js";
 
 export interface StubModelOptions {
   readonly responses: ReadonlyArray<AssistantTurnResult>;
-  /** 017: step 返回前的可注入延迟(ms)。测试替身允许时间依赖,因为测试控制时间。 */
+  /** Injectable delay (ms) before each step return. Allowed because tests control time. */
   readonly delayMs?: number;
-  /** 测试专用:每次 step 在返回 scripted response 前同步 emit 对应事件序列。
-   * 与 `responses` 按 step 下标一一配对;缺省时该 step 不 emit(如队列更短)。 */
+  /** Test-only: per-step event sequences emitted synchronously before the scripted
+   *  response, index-paired with `responses`; a step without an entry emits nothing. */
   readonly streamEventsByStep?: ReadonlyArray<
     ReadonlyArray<HarnessStreamEvent>
   >;
@@ -43,31 +44,30 @@ export interface StubModelFull extends ModelAdapter {
 }
 
 /**
- * 模块私有:可被 AbortSignal 中断的延时。中断时 reject DOMException
- * ("AbortError"),与 Web/Node 平台约定一致,Executor / Promise.race
- * 会把它收敛为统一的失败标签。
+ * Module-private abortable delay; rejects with DOMException("AbortError")
+ * on abort, matching the Web/Node convention the Executor collapses into
+ * its unified failure label.
  */
 function delay(opts: {
   readonly ms: number;
   readonly signal?: AbortSignal;
 }): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    // 入口已 abort:立即拒绝,不必启动 timer。
+    // Already aborted at entry: reject without starting a timer.
     if (opts.signal?.aborted) {
       reject(new DOMException("This operation was aborted", "AbortError"));
       return;
     }
     const timer = setTimeout(() => {
-      // 正常 resolve:主动撤销监听,避免内存泄漏。
+      // Normal resolve: drop the listener to avoid a leak.
       opts.signal?.removeEventListener("abort", onAbort);
       resolve();
     }, opts.ms);
     const onAbort = (): void => {
-      // 中断:清 timer + 拒绝同样的 AbortError。
       clearTimeout(timer);
       reject(new DOMException("This operation was aborted", "AbortError"));
     };
-    // { once: true } 确保监听只触发一次,自然清理。
+    // { once: true } keeps the listener single-fire.
     opts.signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
@@ -83,26 +83,25 @@ export function createStubModel(opts: StubModelOptions): StubModelFull {
         tools?: unknown;
         onStream?: (event: HarnessStreamEvent) => void;
       },
-      signal?: AbortSignal // 017:与 Adapter.step / LoopAdapter.step 对齐,可选。
+      signal?: AbortSignal // optional, aligned with Adapter.step / LoopAdapter.step
     ): Promise<AssistantTurnResult> {
-      // 017 S17 守门:可选注入延迟 + abort 透传。
+      // Optional injected delay + abort pass-through.
       if (delayMs > 0) {
         await delay({ ms: delayMs, signal });
       } else if (signal?.aborted) {
-        // 无延迟配置但 signal 已 abort:立即拒绝,保持行为一致。
         throw new DOMException("This operation was aborted", "AbortError");
       }
-      // 延迟之后再次确认:可能在 await 期间(无延迟但信号被外部触发)变 abort。
+      // Re-check: the signal may have fired while awaiting.
       if (signal?.aborted) {
         throw new DOMException("This operation was aborted", "AbortError");
       }
-      // #467 step 2:full-compact 摘要轮无 tools(request.tools === undefined),
-      // 与收尾摘要 epilogue(runSummaryWithTimeout)同形。用 state 最后一条
-      // user 文本区分:full-compact prompt 含 BASE_COMPACT_PROMPT 的标题句,
-      // SUMMARY_PROMPT 不含。full-compact 替身不模拟摘要内容 → 返回 empty text,
-      // 让 runFullCompact 报 empty_response → fallback placeholder。否则
-      // scripted responses 会被摘要步提前耗尽,主循环后续 turn 拿到
-      // ProtocolError(预期外)。既有 fallback 行为测试与 step 计数假设保持稳定。
+      // The full-compact summary round carries no tools — same request shape
+      // as the closing-summary epilogue (runSummaryWithTimeout). Distinguish
+      // them by the last user text: only the full-compact prompt contains the
+      // BASE_COMPACT_PROMPT title line. For full-compact the stub returns
+      // empty text (runFullCompact then reports empty_response and uses its
+      // placeholder fallback) so the scripted queue is not drained early,
+      // which would hand later main-loop turns an unexpected ProtocolError.
       if (request.tools === undefined) {
         const lastUserText = [..._state.messages]
           .reverse()
@@ -133,7 +132,7 @@ export function createStubModel(opts: StubModelOptions): StubModelFull {
             isEmptyFinalResponse: true,
           };
         }
-        // 收尾摘要(same no-tools shape)→ 消费 queued response(normal path)。
+        // Closing summary (same no-tools shape) → consume the queued response normally.
       }
       const next = queue.shift();
       if (!next) {
@@ -145,7 +144,7 @@ export function createStubModel(opts: StubModelOptions): StubModelFull {
         try {
           request.onStream?.(event);
         } catch {
-          // 测试替身遵守 D3:观察者异常不得反向破坏模型回合。
+          // The stub honors the observer rule: a throwing observer must not break the model turn.
         }
       }
       return next;

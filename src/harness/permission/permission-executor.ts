@@ -1,7 +1,7 @@
 /**
  * src/harness/permission/permission-executor.ts
  *
- * 5-step middleware executor (spec plan T2 D1 / D2):
+ * 5-step middleware executor:
  *
  *   1. preToolUse(call, def)           [hook — may short-circuit; throw → fail-closed]
  *   2. checkPermission({def, input})   [pure resolver: hard-walls → layers → default]
@@ -10,8 +10,9 @@
  *   5. postToolUse(result)             [hook — observability only; throw → fire-and-forget]
  *
  * deny → push execution_failed, never call inner (zero side effect).
- * 钩子异常语义（#126 D3）:pre 抛异常 fail-closed（execution_failed + [hook_error]，
- * inner 零调用，loop 继续）;post 抛异常 fire-and-forget（结果不变，仅 onHookError 观测）。
+ * Hook failure semantics: a throwing pre hook is fail-closed
+ * (execution_failed + [hook_error], inner untouched, loop continues); a
+ * throwing post hook is fire-and-forget (result unchanged, onHookError only).
  */
 
 import type {
@@ -42,16 +43,18 @@ const HOOK_ERROR_PREFIX = VIOLATION_PREFIXES.hookError;
 const CANCELLED_RESULT_MESSAGE = "cancelled";
 
 /**
- * Hook-error 载荷（#126 D3 异常语义的观测侧信道）。phase 区分异常来源：
- *   - "pre"：PreToolUseHook 抛异常 → fail-closed（调用判 execution_failed）
- *   - "post"：PostToolUseHook 抛异常 → fire-and-forget（结果不变，仅观测）
- *   - "guard-init"：secrets-guard 构造期 pattern 编译失败（T3 消费者）
- *   - "user-rule-init"：用户钩子（user hooks） 规则 pattern 构造期编译失败（hook router
- *     消费者，specs/user-hook-router.md SC6 —— 规则整条剔除 + 告警）
- *   - "plugin-init"：插件 hooks.json 扫描 / 解析期降级（根不可读、非法
- *     JSON、缺 hooks 键、未知事件、matcher 编译失败；design §7）
- *   - "plugin-exec"：插件 hook 执行期降级（spawn 失败、超时、非 0/2 退出码、
- *     输出截断、Post exit 2 诊断复述；fail-open，design §5.5/§5.6）
+ * Hook-error payload (observation side-channel of the failure semantics
+ * above). phase identifies the source:
+ *   - "pre" / "post": hook threw (fail-closed / fire-and-forget)
+ *   - "guard-init": secrets-guard pattern compile failure
+ *   - "user-rule-init": user-hook rule pattern compile failure
+ *     (specs/user-hook-router.md — whole rule dropped + warning)
+ *   - "plugin-init": plugin hooks.json scan/parse degradation (unreadable
+ *     root, invalid JSON, missing hooks key, unknown event, matcher compile
+ *     failure)
+ *   - "plugin-exec": plugin hook runtime degradation (spawn failure, timeout,
+ *     exit code other than 0/2, output truncation, Post exit-2 echo;
+ *     fail-open)
  */
 export interface HookErrorEvent {
   readonly phase:
@@ -66,24 +69,24 @@ export interface HookErrorEvent {
 }
 
 /**
- * Build an AciCatalog from a ToolRegistry by name. v0 the catalog is
+ * Build an AciCatalog from a ToolRegistry by name. The catalog is
  * "ACI-aware" only via category / interruptBehavior / isConcurrencySafe;
  * tools lacking AciMeta are treated as read-only safe-by-default.
  *
- * `get` 动态委托 registry.get — 兼容构造后通过 `reg.registerExternal`
- * 动态注册的 mcp__ 工具（#337）。`all()` 仍返回构造期快照，供权限层
- * 遍历 enumerate 用。
+ * `get` delegates dynamically to registry.get so mcp__ tools registered
+ * after construction (registerExternal) stay visible; `all()` still returns
+ * the construction-time snapshot for permission-layer enumeration.
  *
- * B4 / ADR-0043 §2 + T3 / ADR-0046 §3:第二参 `isDiscovered`(可选)是
- * 「未加载即调用」闸门的数据源 —— 装配层把 AciRegistry.isDiscovered
- * 注入到这,gateOne 据此对未 discover() 的 mcp__ 工具调用走 hydrate
- * 路径(本轮 discover + input 校验 → 执行或投影,详见 gateOne)。第三
- * 参 `discover`(可选)是 hydrate 副作用入口 —— 闸门对未 discover 的
- * mcp__ 工具调用此函数把名字纳入 discovered set(下一轮 visibleSchemas
- * 尾部追加 schema)。
+ * ADR-0043 §2 + ADR-0114 §3: the optional `isDiscovered` is the data source
+ * for the "called-without-loading" gate — assembly injects
+ * AciRegistry.isDiscovered and gateOne routes undiscovered mcp__ calls
+ * through the hydrate path (discover + input validation this round →
+ * execute or project, see gateOne). The optional `discover` is the hydrate
+ * side-effect entry: it adds the name to the discovered set so the next
+ * round's visibleSchemas appends its schema.
  *
- * 缺席(`undefined`)→ 闸门放过(非 ACI registry 装配的路径,如 worker
- * 子代理或 stub 测试,行为与 T3 之前一致,byte-stable)。
+ * Both absent → the gate passes through (non-ACI assembly paths such as
+ * worker subagents or stub tests; byte-stable behavior).
  */
 export function createAciCatalog(
   registry: Registry,
@@ -101,7 +104,7 @@ export function createAciCatalog(
     get: (name: string) => {
       const hit = byName.get(name);
       if (hit !== undefined) return hit;
-      // 动态源兜底：registerExternal 注册的 mcp__ 工具不在构造期快照里
+      // Dynamic fallback: registerExternal tools are not in the snapshot.
       const dynamic = registry.get(name);
       if (!dynamic) return undefined;
       const aci = (dynamic as { aci?: AciToolDef["aci"] }).aci;
@@ -115,12 +118,13 @@ export function createAciCatalog(
 }
 
 /**
- * ToolDef → AciToolDef 投影(SSOT)。构造期快照路径与动态 get 兜底共用,
- * 避免投影字段漂移(注释、name/description/inputSchema/handler + aci 三元组)。
+ * ToolDef → AciToolDef projection (SSOT), shared by the construction-time
+ * snapshot and the dynamic get fallback so projected fields cannot drift.
  *
- * T4 / ADR-0046 §3:`lazy` 必须穿过投影 —— gateOne 的 hydrate 判定读
- * `def.aci.lazy`(schema 退场的内建件靠这个字段被识别,名字上没有 `mcp__`
- * 前缀可认)。仅 `true` 时写入,让常驻件的投影形状字节级不变。
+ * ADR-0114 §3: `lazy` must survive the projection — gateOne's hydrate
+ * decision reads `def.aci.lazy` to recognize retired builtins (no `mcp__`
+ * prefix to identify them by name). Written only when `true`, keeping the
+ * projection of resident tools byte-identical.
  */
 function project(def: ToolDef): AciToolDef {
   const aci = (def as { aci?: AciToolDef["aci"] }).aci!;
@@ -145,21 +149,20 @@ export interface PermissionExecutorOptions {
   readonly askUser: AskUser;
   readonly preToolUse?: PreToolUseHook;
   readonly postToolUse?: PostToolUseHook;
-  /** 钩子异常观测回调（#126 D3）。默认不传 = 静默吞（post）/
-   *  无告警渠道（pre 仍 fail-closed，仅缺观测）。 */
+  /** Hook-error observation callback. Default = silent (post) / no warning
+   *  channel (pre still fail-closed, just unobserved). */
   readonly onHookError?: (e: HookErrorEvent) => void;
   /**
-   * B4 / ADR-0043 §2:「已加载」检查入口 —— permission-executor 据此拒绝
-   * 未 discover 即调的 mcp__ 工具调用。装配层 (build-engine) 把
-   * `AciRegistry.isDiscovered` 注入;缺席 = 闸门放过(非 ACI registry 装
-   * 配的路径或 stub 测试,行为与 B4 之前 byte-stable)。
+   * ADR-0043 §2: "already loaded" check — the gate rejects mcp__ calls that
+   * were never discovered. build-engine injects `AciRegistry.isDiscovered`;
+   * absent = gate passes through (non-ACI assembly or stub tests).
    */
   readonly isDiscovered?: (name: string) => boolean;
   /**
-   * T3 / ADR-0046 §3:hydrate 副作用入口 —— 闸门对未 discover 的 mcp__
-   * 工具调用此函数把名字纳入 discovered set(下一轮 visibleSchemas 尾部
-   * 追加 schema,自动复制 ACI 纪律)。缺席(`undefined`)→ 闸门视作「非
-   * ACI registry 装配的路径」,行为与 T3 之前一致(直接交给 inner)。
+   * ADR-0114 §3: hydrate side-effect entry — the gate calls this for an
+   * undiscovered mcp__ tool so the next round's visibleSchemas appends its
+   * schema (ACI discipline replicated automatically). Absent → treated as a
+   * non-ACI assembly path (handed straight to inner).
    */
   readonly discover?: (name: string) => void;
 }
@@ -194,8 +197,9 @@ export interface PermissionRuntime {
  *  - ask → await askUser; false → execution_failed [user_denied] prefix.
  *  - allow → inner.executeAll([call]) and return its single result.
  *
- * #653:gateOne / runAllowed 拆开,ACI 可先串行闸门再并行 inner
- * (pre-hook → permission 不与其它 call 的 inner 重叠)。
+ * gateOne / runAllowed are split so the ACI layer can gate serially then
+ * run inner in parallel (pre-hook → permission never overlaps another
+ * call's inner).
  */
 export function createPermissionRuntime(
   opts: PermissionExecutorOptions
@@ -223,40 +227,41 @@ export function createPermissionRuntime(
     const def = catalog.get(call.name);
     if (!def) return { kind: "proceed", def: undefined };
 
-    // T3 / T4 / ADR-0046 §3:未 discover 的 lazy 工具被直呼 → hydrate(本轮
-    // discover(name) → 下一轮 visibleSchemas 尾部追加 schema);input 通过
-    // 该工具 inputSchema → 直接执行;否则返非 error 文本投影
-    // {name, description, inputSchema},引导模型补齐 input。
-    //   - 判定 = 「`mcp__` 前缀(MCP 工具天然 lazy,即使 catalog 未带 aci.lazy
-    //     也按 T3 原样识别)**或** `def.aci.lazy === true`(T4:schema 溢出
-    //     退场的内建件被 `retireBuiltin` stamp lazy,名字上无前缀可认)」且
-    //     `isDiscovered` 在场且返 false。核心七件永不 lazy(退场候选
-    //     derivation 层剔除 CORE_TOOL_NAMES),故常驻件永不进本分支。
-    //   - 闸门顺序在 pre-hook 之前:hydrate 不是用户权限问题,pre-hook 不该
-    //     拦;input 校验就地做(ajv 编译用 def.inputSchema 一次性编 + WeakMap
-    //     缓存,后续直呼复用)。
-    //   - `catalog.discover` / `catalog.isDiscovered` 缺席 → 闸门放过
-    //     (非 ACI registry 装配的路径或 stub 测试,行为与 T3 之前一致
-    //     —— 不破坏 worker / hub runDeps)。
+    // ADR-0114 §3: a direct call to an undiscovered lazy tool → hydrate
+    // (discover this round → next round's visibleSchemas appends the
+    // schema); if input passes the tool's inputSchema → execute; otherwise
+    // return a non-error text projection of {name, description,
+    // inputSchema} so the model can fill in the input.
+    //   - Trigger = (`mcp__` prefix — MCP tools are inherently lazy even
+    //     without aci.lazy) **or** `def.aci.lazy === true` (builtins retired
+    //     by schema overflow are stamped lazy by `retireBuiltin`, no name
+    //     prefix to recognize them) **and** `isDiscovered` present and
+    //     false. The core tools are never lazy (the derivation layer strips
+    //     CORE_TOOL_NAMES), so resident tools never enter this branch.
+    //   - The gate runs before the pre-hook: hydrate is not a user-permission
+    //     question; input validation happens inline (ajv compiled once per
+    //     def.inputSchema, WeakMap-cached for later direct calls).
+    //   - Missing `catalog.discover` / `catalog.isDiscovered` → gate passes
+    //     (non-ACI assembly or stub tests; worker / hub runDeps unaffected).
     if (
       (def.name.startsWith("mcp__") || def.aci.lazy === true) &&
       catalog.isDiscovered !== undefined &&
       !catalog.isDiscovered(def.name)
     ) {
-      // hydrate 副作用(在 input 校验前):即使 input 不合法,discover 也照发
-      // —— spec:discover 必须发生在执行前;下一轮 tools 尾部可见该 schema,
-      // 模型有 schema 后才能正确补 input。
+      // Hydrate side effect before input validation: discover fires even for
+      // invalid input — the schema must be visible next round before the
+      // model can correct the input.
       catalog.discover?.(def.name);
       const validator = getOrCompileValidator(def);
       if (validator(call.input)) {
         return { kind: "proceed", def };
       }
-      // input 不通过 schema → 非 error 文本投影(model-facing OK,把
-      // schema 显式送回,引导模型补 input;is_error = false 因为 kind 是 ok)。
-      // 形态 = gateOne 既有二值契约(blocked = 裁决完成、inner 不执行,
-      // result 原样透传为 tool result)内携带 ok result:消费面
-      // (aci-executor)对 blocked.result.kind 无假设,加第三 arm 只为
-      // 类型可读性会迫使全部闸门调用点适配,收益不成比例。
+      // Input fails the schema → non-error text projection: hand the schema
+      // back explicitly so the model can complete the input (kind "ok", so
+      // is_error stays false). Shape stays inside gateOne's two-valued
+      // contract (blocked = decision done, inner not executed, result passed
+      // through); a third arm for type readability would force every gate
+      // call site to adapt — not worth it.
       return {
         kind: "blocked",
         result: {
@@ -278,8 +283,9 @@ export function createPermissionRuntime(
 
     let hookDecision: PreHookBlock | undefined;
     try {
-      // #global-plugins T2：await 覆盖同步与异步 hook（同步实现 await 无代价）。
-      // 既有 try/catch 同时收 async 拒绝 → fail-closed 语义不变。
+      // await covers both sync and async hooks (awaiting a sync hook is
+      // free); the existing try/catch also collects async rejections, so
+      // fail-closed semantics are unchanged.
       hookDecision = await pre({ tool: def.name, input: call.input });
     } catch (err) {
       const sanitized = errMsg(err, call.input);
@@ -404,9 +410,10 @@ export function createPermissionRuntime(
     const payload = r.kind === "ok" ? r.payload : undefined;
     const meta = r.kind === "ok" ? r.meta : undefined;
     try {
-      // #global-plugins T2：必须 await —— 异步 post 的 rejected promise 若
-      // 逃出 try 会成 unhandledRejection。结果不变（fire-and-forget 语义；
-      // 仅把拒绝收进既有 catch → onHookError）。
+      // Must await: an un-awaited rejected promise from an async post hook
+      // would escape as unhandledRejection. The result is unchanged
+      // (fire-and-forget); the rejection just folds into the existing
+      // catch → onHookError.
       await post({
         toolUseId: r.toolUseId,
         name: def.name,
@@ -490,19 +497,17 @@ function isAborted(signal: AbortSignal | undefined): boolean {
 }
 
 /**
- * Hook 异常的脱敏消息（spec Constraints (b)）：只含异常类名 + 截断后的
- * message，≤200 字符，绝不回灌原始 input 内容（security-boundaries
- * 「错误信息不泄露敏感细节」）。
+ * Sanitized hook-error message: class name + truncated message only, ≤200
+ * chars, never echoing raw input (error text must not leak sensitive detail).
  *
- * 任何 throw 都拿到（非 Error 抛掷物如 string/number 走 String()），
- * `Error.prototype.toString` 类名优先；超长 message 硬截断到 200 字符封顶。
- * 若 error message 内嵌了 input 的序列化原文，先整段剔除再截断——仅截断
- * 不足以兑现「不回灌 input」，敏感串可能落在截断窗口内（如下述测试把
- * input JSON 放在 message 开头）。
+ * Any throw is handled (non-Error throws go through String()); the message
+ * is hard-truncated at the cap. If the error message embeds the serialized
+ * input, the whole embedding is replaced first — truncation alone is not
+ * enough, since the sensitive string may sit inside the kept window.
  *
- * 截断上限要「预留前缀余量」：pre fail-closed 会再包一层
- * `[hook_error] pre-hook threw: `（29 字符），若 errMsg 本身占满 200，
- * 组装后的 message 会超 200。按静态前缀长度预留，确保组装结果始终 ≤200。
+ * The cap reserves room for the wrapper: pre fail-closed prepends
+ * `[hook_error] pre-hook threw: `, so the budget is reduced by that prefix
+ * length and the assembled message still fits ≤200.
  */
 function errMsg(err: unknown, input?: unknown): string {
   let raw: string;
@@ -518,17 +523,17 @@ function errMsg(err: unknown, input?: unknown): string {
         raw = raw.split(serialized).join("[input]");
       }
     } catch {
-      // 序列化失败（循环引用等）→ 保持原样，截断兜底
+      // Serialization failed (cycles etc.) → keep raw, truncation is the backstop.
     }
   }
-  // 静态前缀余量：`${HOOK_ERROR_PREFIX} pre-hook threw: ` 的固定开销
+  // Static-prefix reserve: fixed cost of `${HOOK_ERROR_PREFIX} pre-hook threw: `.
   const prefixOverhead = HOOK_ERROR_PREFIX.length + " pre-hook threw: ".length;
   const max = 200 - prefixOverhead;
   return raw.length <= max ? raw : raw.slice(0, max - 1) + "…";
 }
 
 // ---------------------------------------------------------------------------
-// T3 / ADR-0046 §3 — 直呼加载 ajv 校验
+// ADR-0114 §3 — ajv validation for the hydrate direct-call path
 // ---------------------------------------------------------------------------
 
 import Ajv from "ajv";
@@ -536,16 +541,14 @@ import addFormats from "ajv-formats";
 import type { ValidateFunction } from "ajv";
 
 /**
- * T3 直呼加载的 input 校验:为 def.inputSchema 编一份 ajv validator,
- * 按 def 实例缓存(WeakMap)。与 inner executor 持有的 validator 是两份
- * 独立 ajv 实例 —— T3 这条路径走闸门同步校验,inner 仍按既有路径异步
- * 校验一次(success 路径 ajv 双跑可接受:单 tool call per turn,mcp__ 默认
- * lazy 不进 prompt schema,本路径极少触发)。
+ * Input validation for the hydrate direct-call path: one ajv validator per
+ * def.inputSchema, WeakMap-cached by def instance. Independent of the inner
+ * executor's validators — this gate validates synchronously while inner
+ * still validates asynchronously (the double ajv run on the success path is
+ * acceptable: mcp__ tools are lazy and rarely reach this prompt path).
  *
- * `strict: true` 沿用 aci-registry 同源配置(spawn_subagent / read_file
- * 等已有 schema 已通过该 strict 校验,本路径不应引入新错误)。
- *
- * `addFormats` 同步注册 `date-time` / `uri` 等格式 —— 与 registry 一致。
+ * `strict: true` and addFormats mirror the aci-registry configuration so
+ * existing schemas validate identically.
  */
 const HYDRATE_AJV = new Ajv.default({ strict: true, allErrors: true });
 addFormats.default(HYDRATE_AJV);
@@ -554,9 +557,10 @@ const HYDRATE_VALIDATOR_CACHE = new WeakMap<AciToolDef, ValidateFunction>();
 function getOrCompileValidator(def: AciToolDef): ValidateFunction {
   let v = HYDRATE_VALIDATOR_CACHE.get(def);
   if (v !== undefined) return v;
-  // 编译失败(inputSchema 非法):走 typed-error 路径与 aci-registry 一致;
-  // 当前只会在构造期未校验过的动态 def 出现 —— 已知 mcp__ 经
-  // `registerExternal` 已 ajv 编译过,本路径仅复用,不重新发现错误。
+  // Compile failure (invalid inputSchema) throws like in aci-registry; only
+  // reachable for dynamic defs never validated at construction — known
+  // mcp__ tools were already ajv-compiled via `registerExternal`, so this
+  // path reuses rather than re-discovers.
   v = HYDRATE_AJV.compile(def.inputSchema);
   HYDRATE_VALIDATOR_CACHE.set(def, v);
   return v;

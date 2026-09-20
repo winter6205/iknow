@@ -11,7 +11,7 @@
  *   - "default":   read-only → allow; mutating → ask user.
  *                  (Today's behavior — preserves y/N safety net.)
  *   - "plan":      read-only → allow; mutating → deny (without asking).
- *                  For "只看不改" planning sessions.
+ *                  For "read, never write" planning sessions.
  *   - "full_auto": read-only → allow; mutating → allow (no prompt).
  *                  User explicitly opted in; useful for autonomous batches
  *                  and startup scripts. Hard-walls still block sensitive

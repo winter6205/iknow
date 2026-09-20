@@ -1,36 +1,39 @@
 /**
  * src/harness/permission/secrets-guard.ts
  *
- * T3 secrets-guard：deny-only PreToolUseHook 工厂（内置模式集 + 自定义 pattern）。
+ * Deny-only PreToolUseHook factory (built-in pattern set + custom patterns).
  *
- * 职责：在调用进入权限层之前，把工具 input 里携带的密钥形态拦下来
- * （executor 会把 PreHookBlock.reason 包装成 `[hook_blocked] ...` 回灌模型）。
+ * Blocks secret-shaped strings carried in tool input before the call reaches
+ * the permission layer (the executor wraps PreHookBlock.reason as
+ * `[hook_blocked] ...` back to the model).
  *
- * 设计决策（spec Decisions 定稿）：
- *  - 占位形态 only：内置模式全是正则占位符，绝不含真实密钥。
- *  - 全 case-sensitive：不做 i 标志，避免误拦放大。
- *  - Constraints (a)：构造期逐条 `new RegExp` 编译；非法正则条目剔除 + guard-init
- *    告警，其余正常生效 —— 绝不允许坏 pattern 拦死所有调用。
- *  - Constraints (c)（ADR-0006 封顶精神）：运行期 `JSON.stringify(input)` 截断至
- *    20000 字符后扫描；超长 input 的尾部密钥特征不参与匹配，宁可漏拦不误拦、
- *    不抛异常。
- *  - 返回的 hook 是纯函数、无状态：编译产物在构造期固化，运行期只读 → 并发安全。
+ * Design decisions:
+ *  - Placeholder shapes only: built-in patterns are regex placeholders, never real keys.
+ *  - Case-sensitive throughout: no `i` flag, to avoid widening false positives.
+ *  - Compile each pattern at construction; invalid regex entries are dropped
+ *    with a guard-init warning while the rest stay active — a broken pattern
+ *    must never block every call.
+ *  - At runtime `JSON.stringify(input)` is truncated to 20000 chars before
+ *    scanning; secret shapes in the tail of an over-long input are not
+ *    matched — prefer a miss over a false block, never throw.
+ *  - The returned hook is pure and stateless: compiled artifacts are frozen
+ *    at construction, read-only at runtime → concurrency-safe.
  */
 
 import type { PreToolUseHook } from "./types.js";
 import type { HookErrorEvent } from "./permission-executor.js";
 import { DEFAULT_SECRET_PATTERNS } from "../secret-roundtrip/index.js";
 
-// #406: 模式 SSOT 迁出到 src/harness/secret-roundtrip/patterns.ts，
-// 本文件继续维护 `mode:"block"` 兼容路径（创建 deny-only preToolUse hook）。
-// 模式内容字节级等价 — 7 条默认占位正则原样搬移，未改一字。
+// Pattern SSOT lives in src/harness/secret-roundtrip/patterns.ts; this file
+// keeps the `mode:"block"` compatibility path (creating the deny-only
+// preToolUse hook). The 7 default placeholder patterns were moved verbatim.
 export { DEFAULT_SECRET_PATTERNS };
 
-/** stringify 截断上界（ADR-0006 封顶精神；spec Constraints (c)）。
- *  导出共享：user-hooks（hooks）的 pattern 扫描沿同一截断纪律，单一常量源。 */
+/** stringify truncation cap. Shared: user-hooks (hooks) pattern scanning
+ *  follows the same truncation discipline from this single constant. */
 export const MAX_SCAN_LENGTH = 20_000;
 
-/** guard-init 告警载荷（phase 统一 "guard-init"，无 tool 归属）。 */
+/** guard-init warning payload (phase is always "guard-init", no tool attribution). */
 export interface SecretsGuardHookOpts {
   readonly patterns?: ReadonlyArray<string>;
   readonly enabled?: boolean;
@@ -38,14 +41,18 @@ export interface SecretsGuardHookOpts {
 }
 
 /**
- * 构造 secrets-guard PreToolUseHook。
+ * Build the secrets-guard PreToolUseHook.
  *
- *  - enabled 默认 true；false → 返回透明 hook（恒 undefined，不做任何编译/扫描）。
- *  - 构造期把 `[...DEFAULT_SECRET_PATTERNS, ...(opts.patterns ?? [])]` 逐个编译；
- *    非法正则剔除并触发 guard-init 告警，其余正常生效（Constraints (a)）。
- *  - 运行期：input stringify 截断 20000 字符后逐模式匹配；命中 →
- *    `{ reason: "secret pattern matched: <pattern源串>" }`，未命中 → undefined。
- *  - stringify 失败（循环引用等）按「无可扫描内容」处理 → 放行，不抛异常。
+ *  - enabled defaults to true; false → transparent hook (always undefined,
+ *    no compiling/scanning at all).
+ *  - At construction `[...DEFAULT_SECRET_PATTERNS, ...(opts.patterns ?? [])]`
+ *    is compiled one by one; invalid regexes are dropped with a guard-init
+ *    warning, the rest stay active.
+ *  - At runtime: stringify input, truncate to MAX_SCAN_LENGTH, match each
+ *    pattern; hit → `{ reason: "secret pattern matched: <pattern source>" }`,
+ *    miss → undefined.
+ *  - stringify failure (cycles, BigInt...) counts as "nothing to scan" →
+ *    pass through, never throw.
  */
 export function createSecretsGuardHook(
   opts?: SecretsGuardHookOpts
@@ -54,7 +61,8 @@ export function createSecretsGuardHook(
     return Object.freeze(() => undefined);
   }
 
-  // 编译产物固化在构造期；源串保留用于 reason 与告警（RegExp.toString 会加 / 定界符）。
+  // Compiled artifacts are frozen at construction; the source string is kept
+  // for the reason + warning (RegExp.toString would add /delimiters/).
   const compiled: ReadonlyArray<{
     readonly source: string;
     readonly re: RegExp;
@@ -84,7 +92,7 @@ export function createSecretsGuardHook(
       scanned =
         raw.length > MAX_SCAN_LENGTH ? raw.slice(0, MAX_SCAN_LENGTH) : raw;
     } catch {
-      // stringify 失败（循环引用 / BigInt 等）→ 无可扫描内容，放行不抛。
+      // stringify failed → nothing to scan; pass through without throwing.
       return undefined;
     }
 

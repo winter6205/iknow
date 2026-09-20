@@ -3,11 +3,11 @@
  *
  * #406 secret-roundtrip: replaces a destructive mask with a
  * placeholder + restore table. Patterns here are the SINGLE place secret
- * shapes live — secrets-guard.ts (#126 legacy `mode:"block"` path) and
+ * shapes live — secrets-guard.ts (legacy `mode:"block"` path) and
  * recognize.ts (roundtrip default) both consume them, so adding a pattern
  * here automatically extends both layers.
  *
- * 占位形态 only (never real keys): 7 placeholders lifted from secrets-guard.ts
+ * Placeholder shapes only (never real keys): 7 placeholders lifted from secrets-guard.ts
  *   1. Private key blocks (RSA/EC/OPENSSH/DSA/PGP, prefix optional)
  *   2. sk- prefixed API keys (≥20 base64url chars)
  *   3. AWS access keys (AKIA + 16 uppercase alphanum)

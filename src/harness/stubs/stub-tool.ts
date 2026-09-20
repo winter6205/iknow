@@ -1,18 +1,18 @@
 /**
- * Stub tool (T4):Foundation 的替身 ToolDef。
+ * Stub tool: test double for the ToolDef interface.
  *
- * 接受 next() 回调生成返回值或抛出,完全确定性,无时间 / 随机 / IO 依赖;
- * 仅供测试。`next` 与 Tool/Adapter 接口一致,Executor 把它当作真实工具
- * 来严格校验 + 执行。
+ * A `next()` callback produces the return value or throws; fully
+ * deterministic, no time/random/IO dependencies, test-only. `next` matches
+ * the real Tool/Adapter shape so the Executor validates and runs it strictly.
  */
 
 import type { ToolDef } from "../tools/types.js";
 
 export interface StubToolOptions {
   readonly name: string;
-  /** 接收 input 返回值或抛出,完全确定性。 */
+  /** Returns or throws from input; fully deterministic. */
   readonly next: (input: unknown) => unknown;
-  /** 可选 JSON Schema。默认接受任意对象(测试替身不在 Gate A 严管之列)。 */
+  /** Optional JSON Schema; defaults to accepting any object. */
   readonly inputSchema?: Record<string, unknown>;
 }
 

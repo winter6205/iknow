@@ -1,22 +1,20 @@
 /**
- * ToolExecutionResult 帮助函数:015 拥有。
+ * ToolExecutionResult helpers.
  *
- * Registry / Executor 把 ToolExecutionResult 视为一次性匹配身份的确定
- * 性收据,无状态、无副作用、可丢弃。Model Adapter 负责把它编码成原生
- * tool_result 消息。
+ * Registry / Executor treat a result as a one-shot identity-matched receipt:
+ * stateless, side-effect-free, discardable. Encoding into a native
+ * tool_result message is the Model Adapter's job.
  */
 
-import type {
-  AnthropicContentBlock,
-} from "../model-adapter/types.js";
+import type { AnthropicContentBlock } from "../model-adapter/types.js";
 import type { ToolExecutionResult } from "./types.js";
 
 /**
- * 把 ToolExecutionResult 转成 Anthropic tool_result content blocks 列表。
- * 失败标签统一渲染为 `is_error: true` 的原生 tool_result,身份匹配 tool_use_id。
+ * Convert ToolExecutionResults into Anthropic tool_result content blocks.
+ * All failure labels render uniformly as `is_error: true`, matched to tool_use_id.
  */
 export function toAnthropicToolResults(
-  results: ReadonlyArray<ToolExecutionResult>,
+  results: ReadonlyArray<ToolExecutionResult>
 ): AnthropicContentBlock[] {
   return results.map((r) => {
     if (r.kind === "ok") {
