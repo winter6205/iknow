@@ -50,6 +50,7 @@ import {
 } from "../../isolation/worktree-gate.js";
 import { FENCE_WRITE_GUIDANCE, resolveWithinRoot } from "./helpers.js";
 import { extractSingleReadPath } from "./bash-read-extract.js";
+import { assertNoBashGrepSubstitution } from "./role-substitution.js";
 import type { LastReadLedgerHost } from "../last-read-ledger.js";
 
 interface BashInput {
@@ -807,6 +808,10 @@ export function createBashTool(
     if (opts?.bashMode === "readonly") {
       validateReadonlyCommand(command);
     }
+    // ADR-0117 role-substitution gate: placed before the foreground /
+    // background split so both arms are covered. Not a hard-wall — the
+    // rules and refusal shape live in role-substitution.ts.
+    assertNoBashGrepSubstitution(command);
     if (commandContainsSensitivePath(command))
       throw new ToolExecutionError(
         `bash: command targets a sensitive path: ${command}`

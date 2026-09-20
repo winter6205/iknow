@@ -33,6 +33,8 @@ export default defineConfig({
     // <agent_status> golden-set real-model half (first-tool todo_write verdict), same guard.
     // egress real push (ssh-bridge bullet 7): non-LLM surface but same directory discipline —
     // default skip; only enabled explicitly by IKNOW_EGRESS_REAL_PUSH_E2E=1 (spec assumption 9).
+    // soul/usage trace set (ADR-0117 / #1078): structural-question first-tool ∈ symbol-query
+    // surface + bash role-substitution refusal verdict, same HAS_KEY guard (no key → Not run).
     include: [
       "archive/tests-real-llm/t8-live-subagent-routing.test.ts",
       "archive/tests-real-llm/model-prefix-layering-e2e.test.ts",
@@ -41,6 +43,7 @@ export default defineConfig({
       "archive/tests-real-llm/worktree-tool-names.test.ts",
       "archive/tests-real-llm/agent-status-instruction-echo.test.ts",
       "archive/tests-real-llm/egress-real-git-push.test.ts",
+      "archive/tests-real-llm/tool-role-substitution.test.ts",
     ],
     exclude: ["**/node_modules/**"],
     pool: "forks",

@@ -22,6 +22,7 @@ import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import { createBashTool } from "../../../../src/harness/aci/tools/bash.ts";
 import { createLastReadLedgerHost } from "../../../../src/harness/aci/last-read-ledger.ts";
 import { createWriteFileTool } from "../../../../src/harness/aci/tools/write-file.ts";
+import { ROLE_SUBSTITUTION_PREFIX } from "../../../../src/harness/aci/tools/role-substitution.ts";
 import type { AciToolDef } from "../../../../src/harness/aci/types.ts";
 import type { ToolExecutionContext } from "../../../../src/harness/tools/types.ts";
 
@@ -80,7 +81,12 @@ describe("bash — last-read 入账", () => {
     assert.equal(await readFile(target, "utf8"), "rewritten\n");
   });
 
-  it("grep 单文件成功（pattern + 文件）→ 入账文件是第二个操作数", async () => {
+  it("grep 单文件命令被替岗闸先拒（ADR-0117）→ 不执行、不入账", async () => {
+    // ADR-0117 supersedes the bash-side grep booking route: bash must not
+    // impersonate the grep family, so the command never reaches the
+    // extractor. The read-shape invariant itself (pattern + single file →
+    // second operand) is pinned at the extractor level in
+    // bash-read-extract.test.ts; here the handler-level truth is refusal.
     const cwd = await makeScratch("bash-last-read-grep-");
     const target = join(cwd, "a.ts");
     await writeFile(target, "needle\n");
@@ -88,12 +94,15 @@ describe("bash — last-read 入账", () => {
     const ledger = createLastReadLedgerHost();
     const bash = createBashTool(cwd, { lastReadLedger: ledger });
 
-    await bash.handler(
-      { command: "grep needle a.ts" },
-      { conversationId: "conv-a" }
+    await assert.rejects(
+      async () => {
+        await bash.handler({ command: "grep needle a.ts" }, { conversationId: "conv-a" });
+      },
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.startsWith(ROLE_SUBSTITUTION_PREFIX)
     );
-
-    assert.equal(ledger.ledgerFor("conv-a")?.has(target), true);
+    assert.equal(ledger.ledgerFor("conv-a")?.size(), 0);
   });
 
   it("head -n 成功 → 入账", async () => {
@@ -193,7 +202,12 @@ describe("bash — last-read 入账", () => {
     assert.equal(await readFile(note, "utf8"), "rewritten\n");
   });
 
-  it("grep -q 成功但 stdout 为空（没看到内容）→ 不入账，随后覆写被拒", async () => {
+  it("grep 抑制内容旗标（-q / --qui）与 rg 计数别名（--c）在 handler 层即被替岗拒绝 → 不入账且覆写仍被拒", async () => {
+    // ADR-0117 moved the verdict upstream: the whole grep family (whatever
+    // flags) is refused before execution, so the ledger can never be
+    // booked through bash and a later non-empty overwrite stays refused.
+    // The per-flag shape analysis (which suppressions fabricate a "read")
+    // is pinned at the extractor level in bash-read-extract.test.ts.
     const cwd = await makeScratch("bash-last-read-quiet-");
     const target = join(cwd, "cfg.ts");
     await writeFile(target, "SECRET\n");
@@ -202,93 +216,25 @@ describe("bash — last-read 入账", () => {
     const bash = createBashTool(cwd, { lastReadLedger: ledger });
     const writer = createWriteFileTool(cwd, { lastReadLedger: ledger });
 
-    const result = await runBash(
-      bash,
-      { command: "grep -q SECRET cfg.ts" },
-      { conversationId: "conv-a" }
-    );
-    assert.equal(result.code, 0);
-    assert.equal(result.stdout, "");
-    assert.equal(
-      ledger.ledgerFor("conv-a")?.has(target),
-      false,
-      "-q 抑制内容输出，模型没看到现态 → 不得入账"
-    );
+    for (const command of [
+      "grep -q SECRET cfg.ts",
+      "grep --qui SECRET cfg.ts",
+      "rg --c SECRET cfg.ts",
+    ]) {
+      await assert.rejects(
+        async () => {
+          await bash.handler({ command }, { conversationId: "conv-a" });
+        },
+        (error: unknown) =>
+          error instanceof ToolExecutionError &&
+          error.message.startsWith(ROLE_SUBSTITUTION_PREFIX),
+        `${command} → 替岗拒绝（fail-closed，不执行）`
+      );
+    }
+    assert.equal(ledger.ledgerFor("conv-a")?.size(), 0);
 
     await assert.rejects(
       () =>
-        writer.handler(
-          { path: "cfg.ts", content: "rewritten\n" },
-          { conversationId: "conv-a" }
-        ),
-      (error: unknown) =>
-        error instanceof ToolExecutionError &&
-        error.message.includes("refusing to overwrite")
-    );
-    assert.equal(await readFile(target, "utf8"), "SECRET\n");
-  });
-
-  it("grep --qui（GNU 长旗标无歧义前缀 = --quiet）成功但 stdout 为空 → 不入账，随后覆写被拒且字节不变", async () => {
-    const cwd = await makeScratch("bash-last-read-quiet-prefix-");
-    const target = join(cwd, "cfg.ts");
-    await writeFile(target, "SECRET\n");
-
-    const ledger = createLastReadLedgerHost();
-    const bash = createBashTool(cwd, { lastReadLedger: ledger });
-    const writer = createWriteFileTool(cwd, { lastReadLedger: ledger });
-
-    const result = await runBash(
-      bash,
-      { command: "grep --qui SECRET cfg.ts" },
-      { conversationId: "conv-a" }
-    );
-    // GNU grep 3.12 inside real bwrap accepts the `--qui` prefix: exit 0, no output.
-    assert.equal(result.code, 0);
-    assert.equal(result.stdout, "");
-    assert.equal(
-      ledger.ledgerFor("conv-a")?.has(target),
-      false,
-      "--qui 等价 --quiet，模型没看到现态 → 不得入账"
-    );
-
-    await assert.rejects(
-      () =>
-        writer.handler(
-          { path: "cfg.ts", content: "rewritten\n" },
-          { conversationId: "conv-a" }
-        ),
-      (error: unknown) =>
-        error instanceof ToolExecutionError &&
-        error.message.includes("refusing to overwrite")
-    );
-    assert.equal(await readFile(target, "utf8"), "SECRET\n");
-  });
-
-  it("rg --c（ripgrep 单字母双横线别名 = -c，只打印条数）成功但没看到内容 → 不入账，随后覆写被拒且字节不变", async () => {
-    const cwd = await makeScratch("bash-last-read-rg-alias-");
-    const target = join(cwd, "cfg.ts");
-    await writeFile(target, "SECRET\n");
-
-    const ledger = createLastReadLedgerHost();
-    const bash = createBashTool(cwd, { lastReadLedger: ledger });
-    const writer = createWriteFileTool(cwd, { lastReadLedger: ledger });
-
-    const result = await runBash(
-      bash,
-      { command: "rg --c SECRET cfg.ts" },
-      { conversationId: "conv-a" }
-    );
-    // Measured vendored rg 15.1.0: `rg --c` equals `-c` — prints only the count, exit 0.
-    assert.equal(result.code, 0);
-    assert.equal(result.stdout.trim(), "1");
-    assert.equal(
-      ledger.ledgerFor("conv-a")?.has(target),
-      false,
-      "--c 等价 -c，模型没看到文件内容 → 不得入账"
-    );
-
-    await assert.rejects(
-      async () =>
         writer.handler(
           { path: "cfg.ts", content: "rewritten\n" },
           { conversationId: "conv-a" }
@@ -458,20 +404,14 @@ describe("bash — last-read 入账", () => {
     assert.equal(await readFile(target, "utf8"), "rewritten\n");
   });
 
-  it("rg --pre COMMAND（伪造视图）成功但 stdout 不是磁盘现态 → 不入账，随后覆写被拒", async () => {
-    // End-to-end exploit surface: `rg --pre rev <PATTERN> a.txt` makes rg
-    // run `rev a.txt` and search its output — stdout holds **reversed file
-    // bytes**, so the model thinks it read the file while seeing a view
-    // transformed by a model-chosen command. Measured with vendored rg
-    // 15.1.0 in a real bwrap sandbox (on-disk a.txt = `PRECIOUS_DISK_CONTENT`):
-    //   `rg --pre rev TNETNOC_KSID_SUOICERP a.txt`   rc=0 stdout=TNETNOC_KSID_SUOICERP
-    //   `rg --pre=rev TNETNOC_KSID_SUOICERP a.txt`   rc=0 same (the `=` spelling is equivalent)
-    //   `rg --pre cat PRECIOUS_DISK a.txt`          rc=0 stdout=PRECIOUS_DISK_CONTENT
-    // All three spellings must be rejected: `--pre cat` is an identity
-    // preprocessor that happens to match the disk bytes, but the same slot
-    // filled with `rev` fabricates a view — the verdict is by **shape**
-    // (same family as `-r`), not by one run happening to be equal. A miss
-    // would ledger a never-read nonempty file and let write_file clobber it.
+  it("rg --pre 伪造视图命令在 handler 层即被替岗拒绝 → 不执行、不入账、覆写仍被拒", async () => {
+    // ADR-0117 moved this verdict upstream: every rg spelling — fabricated
+    // view (`--pre rev`), the `=` form, the identity `--pre cat`, and the
+    // plain read alike — is refused at the gate, so none can book the
+    // ledger through bash and a later non-empty overwrite stays refused.
+    // The per-shape analysis (why --pre fabricates a view, why --pre-glob
+    // alone is exempt, why the plain rg shape is a read) is pinned at the
+    // extractor level in bash-read-extract.test.ts.
     const cwd = await makeScratch("bash-last-read-rg-pre-");
     const target = join(cwd, "a.txt");
     await writeFile(target, "PRECIOUS_DISK_CONTENT\n");
@@ -480,65 +420,26 @@ describe("bash — last-read 入账", () => {
     const bash = createBashTool(cwd, { lastReadLedger: ledger });
     const writer = createWriteFileTool(cwd, { lastReadLedger: ledger });
 
-    const cases: ReadonlyArray<{
-      command: string;
-      fakeInStdout: string;
-      /** Whether the on-disk text appears in stdout — `rev` fabricates a view (absent), `cat` is identity (present). */
-      diskContentInStdout: boolean;
-    }> = [
-      // Reversed fabricated text (the fake view `rev` produces for the pattern).
-      {
-        command: "rg --pre rev TNETNOC_KSID_SUOICERP a.txt",
-        fakeInStdout: "TNETNOC_KSID_SUOICERP",
-        diskContentInStdout: false,
-      },
-      // The `=` spelling is equivalent.
-      {
-        command: "rg --pre=rev TNETNOC_KSID_SUOICERP a.txt",
-        fakeInStdout: "TNETNOC_KSID_SUOICERP",
-        diskContentInStdout: false,
-      },
-      // `cat` is an identity preprocessor: the output really is the disk
-      // text, but the "read" passes through an arbitrary model-chosen
-      // command — the same seam could carry `rev`/`sed`/any script.
-      // Rejected by **shape** (same family as `-r`: what is printed is not
-      // guaranteed to be the current disk state), not by one run happening
-      // to be equal.
-      {
-        command: "rg --pre cat PRECIOUS_DISK a.txt",
-        fakeInStdout: "PRECIOUS_DISK",
-        diskContentInStdout: true,
-      },
-    ];
-    for (const { command, fakeInStdout, diskContentInStdout } of cases) {
-      const result = await runBash(
-        bash,
-        { command },
-        { conversationId: "conv-a" }
-      );
-      assert.equal(
-        result.code,
-        0,
-        `前提：${command} 必须 exit 0（否则 fail-closed 失效）`
-      );
-      assert.equal(
-        result.stdout.includes(fakeInStdout),
-        true,
-        `前提：${command} 的 stdout 含 ${fakeInStdout} —— 锁定「模型自选内容能进 stdout」的形态`
-      );
-      assert.equal(
-        result.stdout.includes("PRECIOUS_DISK_CONTENT"),
-        diskContentInStdout,
-        `前提：${command} 的 stdout 磁盘原文可见性必须与预处理命令语义一致（rev 不可见 / cat 恒等可见）`
-      );
-      assert.equal(
-        ledger.ledgerFor("conv-a")?.has(target),
-        false,
-        `${command} → --pre 让 rg 搜 COMMAND 的输出而非文件原文，模型没看到磁盘现态 → 不得入账`
+    for (const command of [
+      "rg --pre rev TNETNOC_KSID_SUOICERP a.txt",
+      "rg --pre=rev TNETNOC_KSID_SUOICERP a.txt",
+      "rg --pre cat PRECIOUS_DISK a.txt",
+      // Role-based, not exploit-based: the plain rg read form is refused too.
+      "rg PRECIOUS_DISK_CONTENT a.txt",
+    ]) {
+      await assert.rejects(
+        async () => {
+          await bash.handler({ command }, { conversationId: "conv-a" });
+        },
+        (error: unknown) =>
+          error instanceof ToolExecutionError &&
+          error.message.startsWith(ROLE_SUBSTITUTION_PREFIX),
+        `${command} → 替岗拒绝（fail-closed，不执行）`
       );
     }
+    assert.equal(ledger.ledgerFor("conv-a")?.size(), 0);
 
-    // All three rejected: the following write_file in the same conversation
+    // All refused: the following write_file in the same conversation
     // must be refused, bytes unchanged.
     await assert.rejects(
       () =>
@@ -553,11 +454,12 @@ describe("bash — last-read 入账", () => {
     assert.equal(await readFile(target, "utf8"), "PRECIOUS_DISK_CONTENT\n");
   });
 
-  it("正向对照：同一条命令去掉 --pre（真读）→ 入账且覆写放行", async () => {
-    // Same file and tool as the previous case, minus only `--pre`. If the
-    // reject set hit a real read, the model would be forced to re-read and
-    // the ledger's usefulness would be destroyed.
-    const cwd = await makeScratch("bash-last-read-rg-pre-control-");
+  it("正向对照：职分闸没有吃掉读族——白名单行窗读照常执行且入账、覆写放行", async () => {
+    // The old control used the plain rg read; ADR-0117 refuses that form at
+    // the gate, so the over-tightening guard moves to the read forms the
+    // policy keeps (cat line read). If the gate ate these too, the ledger's
+    // usefulness would be destroyed.
+    const cwd = await makeScratch("bash-last-read-role-sub-control-");
     const target = join(cwd, "a.txt");
     await writeFile(target, "PRECIOUS\n");
 
@@ -567,7 +469,7 @@ describe("bash — last-read 入账", () => {
 
     const result = await runBash(
       bash,
-      { command: "rg PRECIOUS a.txt" },
+      { command: "cat a.txt" },
       { conversationId: "conv-a" }
     );
     assert.equal(result.code, 0);
