@@ -20,6 +20,8 @@ docs/iknow-spec/docs/eval/results/
 
 # Node / TypeScript build
 node_modules/
+# hand-moved workspace artifact (was a symlink committed as plain file); kept arborist from resolving workspaces
+node_modules-empty/
 dist/
 *.tsbuildinfo
 coverage/
