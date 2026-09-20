@@ -1,25 +1,24 @@
 /**
- * Trace Service bounded context — interface contract (GH #64, T2).
+ * Trace Service bounded context — interface contract.
  *
- * 决策: conversationId 不进 record 参数。
- *   - 原因: loop-engine 016/017 不持 conversation 概念;逐条传会逼 LoopEngineDeps 加字段,
- *     违反 spec 判据 17 (LoopEngineDeps 只能加 `trace?` 可选字段)。
- *   - 实例绑定: T3 的 JsonlTraceService 构造参数收 conversationId,每条 JSONL 记录写入它。
- *     满足 ADR-0003 Decision 4 (conversation_id 永远存在于 JSONL)。
+ * conversationId is deliberately not a record parameter: the loop engine has
+ * no conversation concept, and per-record passing would force an extra field
+ * onto LoopEngineDeps. Instead the instance binds it — JsonlTraceService
+ * takes conversationId at construction and stamps every JSONL record with it
+ * (conversation_id is always present in JSONL, ADR-0003).
  *
- * 字段集决策 (Postel's Law, 2026-07-31 grilling):
- *   - TraceErrorType 复用 StopReason + ToolExecutionResult.kind + unknown 兜底;
- *     不含 api_error / rate_limit / context_length_exceeded / content_filter / internal
- *     (源码无现成 union, ADR Decision 6 文本与 repo 不符时以 repo 实际值为 SSOT)。
- *   - supplierStop 值域同 LoopTrace TurnTrace (4 值 camelCase union)。
- *   - toolKind 值域同 LoopTrace TurnTrace (4 值 camelCase union)。
- *   - decision 值域 = StopReason 去掉 maxTurns (6 值 camelCase union)。
- *     maxTurns 被移除原因 (Postel's Law): maxTurns 早停分支在 stepWithTrace
- *     入口即返回 turn: null, 从不 recordTurn, 该值永远不会写入 decision;
- *     留在 union 里只是死值, 故删。
+ * Field-set decisions (Postel's Law):
+ *   - TraceErrorType reuses StopReason + ToolExecutionResult.kind + an
+ *     "unknown" fallback; no api_error/rate_limit/... — where an ADR text and
+ *     the repo's actual unions disagree, the repo values are SSOT;
+ *   - supplierStop / toolKind domains mirror the LoopTrace TurnTrace unions;
+ *   - decision = StopReason minus maxTurns: the early-stop branch returns
+ *     before any recordTurn call, so the value could never be written — dead
+ *     union member, removed.
  *
- * 不依赖 model-adapter / tools 的类型,通过重定义字面量联合 + JSDoc 标注源文件保持
- * trace bounded context 的独立松耦合 (follow loop-trace.ts:17 注释 + loop-trace.ts:22-23 注释先例)。
+ * No imports from model-adapter / tools: literal unions are redefined with
+ * JSDoc pointers to the source files, keeping this bounded context decoupled
+ * (same precedent as loop-trace.ts).
  */
 
 export type TraceStatus = "ok" | "error";
@@ -46,48 +45,42 @@ export interface LlmCallRecord {
   supplierStop?: "success" | "truncation" | "refusal" | "other";
   stream: boolean;
   /**
-   * #361 / ADR-0014 Decision 6:loop-engine 在 model 阶段成功 / 错误 / 摘要
-   * 三处(recordLlmCall @ 427 / 948 / 970)首次填充 messages 字段 —— 语义
-   * 即"模型本步实际看到的 messages"(effectiveState.messages, 含 reactive
-   * 压缩后形态;摘要轮为 outcome.inputMessages = truncateTailForSummary
-   * 截尾 + 收尾 user prompt)。
+   * ADR-0014: loop-engine fills `messages` at the model-stage success /
+   * error / summary call sites — the semantics are "the messages the model
+   * actually saw this step" (effectiveState.messages, post reactive
+   * compression; for the summary round, the truncated history + closing
+   * prompt).
    *
-   * **无 size cap**(review-fix S6):全量 messages 进 trace 会膨胀 jsonl
-   * 行体积 —— 长会话持续累积,行字节数随 turn 线性增长。决策:不在写入
-   * 侧裁剪(避免与 messages_captured 验收 6 矛盾 —— 验收 6 要求 messages
-   * 数组含 coordinator 段 proactive 关键词等完整 system 文本,截断会破坏
-   * "模型实际所见"不变量);如未来需控容,由 trace 消费端(IDE 调试器 /
-   * 上层观测工具)按 IKNOW_TRACE_MAX_CONTENT_BYTES 类策略裁剪,loop-engine
-   * 保持"所见即所填"的真值纪律。Postel(ADR-0003 D9):messagesCaptured
-   * 独立布尔开关,字段填充由 loop-engine 决定;trace 服务不裁剪。
+   * No size cap on the write side: trimming would break the "what the model
+   * saw" invariant (the full system text matters). If capacity ever needs
+   * control, the trace consumer trims; loop-engine keeps fill-as-seen.
+   * messagesCaptured is the independent boolean switch (ADR-0003
+   * Postel); the trace service never mutates content.
    */
   messagesCaptured: boolean;
   messages?: ReadonlyArray<unknown>;
   status: TraceStatus;
   error?: TraceError;
   /**
-   * #160 / ADR-0008 Decision 2: 顶层平铺的 token 四字段。
-   * 形状对齐 SDK `Usage` 与 model-adapter 域类型 `TokenUsage`,
-   * 但 trace bounded context 遵循先例(文件头注释 + loop-trace.ts:17/22-23)
-   * **不 import** model-adapter 类型 —— 通过字面量联合 + JSDoc 标注源
-   * 文件保持独立松耦合;loop-engine 在 `recordLlmCall` 抄入时做结构赋值。
+   * ADR-0008: top-level flat token quartet. Shape mirrors the SDK `Usage`
+   * and model-adapter `TokenUsage`, but this bounded context does not import
+   * those types (header precedent) — loop-engine structurally assigns at
+   * recordLlmCall.
    *
-   * Postel 语义(ADR-0003 Decision 9 + ADR-0008 Decision 3):
-   *   - success 分支填全四字段(SDK 保证存在);
-   *   - error 分支(整条缺席)不写任何 *_tokens 键,JSON.stringify
-   *     自然丢弃 undefined,字段缺席 = 调用未产生 token 计数(不可猜测)。
+   * Postel semantics: the success branch fills all four (SDK guarantees);
+   * the error branch writes no *_tokens keys at all — undefined drops out of
+   * JSON.stringify, and absence means "no token accounting happened"
+   * (never guess).
    */
   inputTokens?: number;
   outputTokens?: number;
   cacheCreationInputTokens?: number | null;
   cacheReadInputTokens?: number | null;
   /**
-   * #286 补字段（spec 欠账）。
-   * 模型调用经适配器路由到实际供应商模型时记录：
-   *   - modelRequested — 请求侧申报的模型（resolve 到实际路由模型）；
-   *   - modelActual — 响应侧实际模型（request.model ≠ response.model 双字段）；
-   *   - provider — 供应商名（= gen_ai.provider.name 类比）。
-   * Postel（ADR-0003 D9 + ADR-0008 D3）:成功分支填，错误分支缺席。
+   * Routed-model accounting: modelRequested — the model declared on the
+   * request side; modelActual — the supplier model in the response (differs
+   * via adapters); provider — supplier name. Postel: filled on success,
+   * absent on error.
    */
   modelRequested?: string;
   modelActual?: string;
@@ -111,12 +104,11 @@ export interface ToolCallRecord {
 
 export interface TurnRecord {
   /**
-   * 调用方预生成的 turn id (可选)。缺席 → 实现生成 UUID (原行为)。
-   *
-   * 存在的理由只有一个: 回合内派出的子代理要把 `parentTurnId` 指回本回合,
-   * 而 recordTurn 在回合末尾才发 —— 那时工具阶段早已跑完。loop-engine 因此
-   * 在回合入口先生成 id, 一份给 tool ctx (顺着 executeAll 到 spawn_subagent),
-   * 一份在回合末尾交给 recordTurn, 两侧同源。
+   * Optional caller-pregen turn id; absent → the implementation generates a
+   * UUID. It exists for one reason: subagents spawned mid-turn must point
+   * parentTurnId back at this turn, but recordTurn only fires at turn end —
+   * so loop-engine generates the id at turn entry, gives one copy to the
+   * tool ctx (traveling to spawn_subagent) and hands the other to recordTurn.
    */
   id?: string;
   turnIndex: number;
@@ -137,17 +129,17 @@ export interface TurnRecord {
 }
 
 /**
- * #285/#286 会话级 L1 根记录（v2）。
- * loop-engine 入口埋点，表示一次完整运行的根；所有 turn/llm/tool 记录
- * 通过 conversation_id 关联到它。
+ * Session-level L1 root record: one complete run; all turn/llm/tool records
+ * attach to it via conversation_id.
  */
 export interface SessionRecord {
   startedAt: string;
   endedAt: string;
   durationMs: number;
   /**
-   * 由 writer/CLI 侧在构造时注入（C2 决议：注入而非 harness 层 import
-   * cli/usage.ts，避免写侧←cli 反向依赖，遵循 ADR-0003 文件头先例）。
+   * Injected by the writer/CLI side at construction — the harness layer does
+   * not import cli/usage.ts (no reverse dependency on the write side),
+   * per the file-header precedent (ADR-0003).
    */
   agentVersion: string;
   status: TraceStatus;
@@ -155,18 +147,18 @@ export interface SessionRecord {
 }
 
 /**
- * #285/#286 沙箱命令执行记录（v2）。
- * schema 就位、埋点留 pendingRuntime（sandbox 只有 violation，无独立命令
- * 执行记录能力；Postel 例外论证见 spec）。当前不产生任何 JSONL 行。
+ * Sandbox command-execution record. Schema is in place but the emitter stays
+ * pendingRuntime (the sandbox currently records violations only, not
+ * standalone command records) — no JSONL lines of this kind are produced yet.
  */
 export interface SandboxCmdRecord {
-  /** 单值 parent（#286 决议：新 record 统一 parent_*_id 单值）。 */
+  /** Single-valued parent (new records uniformly use one parent_*_id). */
   parentTurnId: string;
   command: string;
   exitCode: number;
-  /** Postel：布尔开关，内容仅 true 时落盘。 */
+  /** Postel: boolean switch; content persisted only when true. */
   stdoutCaptured: boolean;
-  /** 限长（C 方案：IKNOW_TRACE_MAX_CONTENT_BYTES）。 */
+  /** Length-capped (IKNOW_TRACE_MAX_CONTENT_BYTES). */
   stdout?: string;
   startedAt: string;
   endedAt: string;
@@ -176,11 +168,11 @@ export interface SandboxCmdRecord {
 }
 
 /**
- * 分类器 (子代理 LLM 判官, #128) 单条证据: 判官跑了什么 + 跑出了什么。
- * 语义同 verify 域 `ClassifierCheck` (spec A4); trace bounded context 遵循文件头
- * 先例 (loop-trace.ts:17/22-23 注释) **不 import** verify 域类型 —— 通过形状重定义
- * + JSDoc 标注源文件保持独立松耦合; verify-loop 抄入时做结构赋值。
- * 无 command 的 check 算 skip 不算 pass (spec A4)。
+ * One classifier (subagent LLM judge) evidence item: what the judge ran and
+ * what it produced. Semantics mirror the verify-domain ClassifierCheck; this
+ * bounded context does not import verify types — shape redefined with a JSDoc
+ * pointer, verify-loop structurally assigns. A check without a command counts
+ * as skip, not pass.
  */
 export interface VerificationCheck {
   readonly command: string;
@@ -189,36 +181,36 @@ export interface VerificationCheck {
 }
 
 /**
- * 验证判定记录（#128 自动修正闭环观测落点）。
- * 与既有 record 的关键差异: id/sessionId/ts 由调用方提供 (plan §Decisions 定稿),
- * 不依赖 turn 树 —— 以自有 id 关联整条验证轨迹。
- * sessionId 关联会话根; round 为闭环轮次; verdict 三态判定; action 为策略动作。
- * Postel: failedCount / signature / finalOutcome 可选, 仅存在时落盘。
+ * Verification verdict record (auto-fix loop observability).
+ * Key difference from the other records: id/sessionId/ts are caller-provided;
+ * it does not hang off the turn tree — its own id links the whole
+ * verification trail. sessionId links the session root; round is the loop
+ * iteration; verdict is the three-state call; action the policy step.
+ * Postel: failedCount / signature / finalOutcome persisted only when present.
  */
 export interface VerificationRecord {
-  /** 自有 id (#286 决议：新 record 统一 parent_*_id 单值；VerificationRecord 以自有 id 关联整条验证轨迹，不依赖 turn 树）。 */
+  /** Own id; new records uniformly carry a single parent_*_id, while this one links via its own id. */
   readonly id: string;
   readonly sessionId: string;
   readonly round: number;
   readonly verdict: VerificationVerdict;
   readonly exitCode: number;
-  /** Postel：布尔开关，内容仅存在时落盘。 */
+  /** Postel: persisted only when present. */
   readonly failedCount?: number;
   readonly signature?: string;
   readonly action: VerificationAction;
   readonly finalOutcome?: string;
   readonly ts: string;
-  /** 分类器分支字段: 语义同 verify 域 VerificationRecord (spec A4 / SC10)。 */
+  /** Classifier branch fields: semantics identical to the verify-domain record. */
   readonly reason?: string;
   readonly evidence?: ReadonlyArray<VerificationCheck>;
   readonly missing?: ReadonlyArray<string>;
   /**
-   * 证据优先前级字段 (#449b B3, 镜像 verify 域 VerificationRecord.evidenceVerdict / .gamingSignals)。
-   * trace bounded context 遵循文件头注释 (types.ts:21-23) **不 import** verify 域类型;
-   * 通过同名字面字符串联合保持独立松耦合, verify-loop 在 buildRecord 处做结构赋值。
-   * evidenceVerdict 三值: EVIDENCE_SUFFICIENT / EVIDENCE_CONTRADICTED / EVIDENCE_INSUFFICIENT
-   * (与 src/harness/verify/types.ts `EvidenceVerdict` 同值域)。
-   * Postel: 可选字段仅存在时落盘。
+   * Evidence-first upstream fields, mirroring the verify-domain
+   * VerificationRecord.evidenceVerdict / .gamingSignals. No import of verify
+   * types (header precedent) — same-valued literal unions keep the
+   * decoupling; verify-loop structurally assigns in buildRecord.
+   * Postel: optional, persisted only when present.
    */
   readonly evidenceVerdict?:
     "EVIDENCE_SUFFICIENT" | "EVIDENCE_CONTRADICTED" | "EVIDENCE_INSUFFICIENT";
@@ -229,26 +221,29 @@ export type VerificationVerdict = "pass" | "true-failure" | "unstable";
 export type VerificationAction = "continue" | "stop" | "escalate";
 
 /**
- * 子代理生命周期状态机（T4，#358）— 与 manager 内部 `TaskState` 同构（"starting" |
- * "running" | "completed" | "failed"）。trace 域独立松耦合（文件头注释 21-23），
- * 不 import manager.ts；通过重定义字面联合保持字面描述一致（byte-stable 对齐）。
+ * Subagent lifecycle state machine — isomorphic with the manager-internal
+ * TaskState. The trace domain stays decoupled (header note): no import of
+ * manager.ts; the literal union is redefined to keep descriptions aligned.
  */
 export type SubagentState = "starting" | "running" | "completed" | "failed";
 
 /**
- * 子代理生命周期 trace record (T4, #358) — 子代理生命周期三类事件落盘。
+ * Subagent spawn trace record — lifecycle events persisted.
  *
- * 与 VerificationRecord / GoalRecord 同形态：id 由调用方提供（= manager 的 taskId），
- * 实现不做 ID 生成 —— 成功返回 record.id, 失败返回 undefined。
+ * Same shape as VerificationRecord: id is caller-provided (= the manager
+ * taskId); the implementation never generates ids — success returns
+ * record.id, failure undefined.
  *
- * Postel (ADR-0003 D9): 可选字段仅存在时落盘（JSON.stringify 自动丢弃 undefined）。
- * 可选字段 model / taskPreview / maxTurns / timeoutMs / error 等仅当调用方有可填
- * 来源时才在 record 上存在。`parentTurnId` 的来源是 `SubAgentDefinition.parentTurnId`
- * （F-4）：`spawn_subagent` 从 `ctx.turnId` 抄、graph node-executor 从派发方抄；
- * 派发方无归属回合（如回合之外的 `/graph run`）→ 该键缺席。
+ * Postel (ADR-0003): optional fields persist only when present
+ * (JSON.stringify drops undefined). Optional model / taskPreview / maxTurns /
+ * timeoutMs / error exist only when the caller has a real source.
+ * `parentTurnId` comes from SubAgentDefinition.parentTurnId —
+ * `spawn_subagent` copies it from `ctx.turnId`, the graph node-executor from
+ * its dispatcher; dispatchers outside a turn (e.g. `/graph run`) leave it absent.
  *
- * Origin 留位 v1 恒 "parent"（子代理生命周期状态机完全在父 manager 内；worker 只
- * 写 stdout 信封，schema 不变即可升级 child 留位）。
+ * Origin is reserved; v1 is always "parent" (the whole lifecycle state
+ * machine lives in the parent manager; workers only write the stdout
+ * envelope, and the schema can grow a "child" value unchanged).
  */
 export interface SubagentSpawnRecord {
   readonly id: string;
@@ -266,10 +261,10 @@ export interface SubagentSpawnRecord {
 }
 
 /**
- * SubagentStopRecord — 任务终态（含 completed / failed）时落盘一次。
- * durationMs = endedAt − startedAt（ms）；finalState ∈ {"completed","failed"}。
- * reason 域对齐 envelope reason union + "cancelled"（waitFor abort 路径延伸）；
- * ADR-0111 Decision 2：envelope 联合追加第五值 modelTransient，此处对齐同步。
+ * SubagentStopRecord — persisted once at terminal state (completed / failed).
+ * durationMs = endedAt − startedAt; finalState ∈ {"completed","failed"};
+ * reason aligns with the envelope reason union plus "cancelled" (waitFor
+ * abort path); ADR-0111 added modelTransient to that union — mirrored here.
  */
 export interface SubagentStopRecord {
   readonly id: string;
@@ -298,8 +293,9 @@ export interface SubagentStopRecord {
 }
 
 /**
- * SubagentStateChangeRecord — task.state 每次迁移时落一条（含 starting→running、
- * *→completed、*→failed）。fromState / toState 必有；reason 仅 failed 时填。
+ * SubagentStateChangeRecord — one line per task.state transition (including
+ * starting→running, *→completed, *→failed). fromState / toState required;
+ * reason only on failed.
  */
 export interface SubagentStateChangeRecord {
   readonly id: string;
@@ -322,36 +318,40 @@ export interface SubagentStateChangeRecord {
 }
 
 /**
- * 子代理执行步骤的两个观测点 —— 派发（把一步交给子代理）与落定（该步拿到终局）。
- * 与 SubagentState 四态刻意不同名：状态机描述「子代理实例现在处于什么状态」，
- * 步骤描述「父侧第 N 步在做什么」，两者在多步编排里不是一一对应。
+ * The two observation points of a subagent step — dispatch (handing one step
+ * to the subagent) and settle (that step reaching its final state).
+ * Deliberately not named after SubagentState: the state machine says "what
+ * state is the subagent instance in", the step says "what is parent-side step
+ * N doing"; multi-step orchestration has no 1:1 mapping between them.
  */
 export type SubagentStepPhase = "dispatch" | "settle";
 
 /**
- * SubagentStepRecord — 子代理执行步骤（D-α 观测地板第 4 件）。
+ * SubagentStepRecord — one subagent execution step.
  *
- * 与 spawn / stop / state_change 三类同形态（id 由调用方提供、Postel 可选字段、
- * @throws never），**唯一形态差异**是 id 载体为 `subagent_step_id` 而非
- * `subagent_id`：前三类的 `id === taskId`（同一个子代理实例），step 的 id 每步
- * 唯一，塞进 `subagent_id` 会让该列在 step 行上变成「步骤 id」，与其余三类的
- * 「子代理 id」语义打架。配对键仍是 `taskId` —— `?taskId=` 过滤照常把 step 与
- * spawn / stop 收在一起。
+ * Same shape as spawn / stop / state_change (caller-provided id, Postel
+ * optionals, @throws never); the one structural difference is that its id
+ * carrier is `subagent_step_id`, not `subagent_id`: for the other three
+ * `id === taskId` (one subagent instance), while step ids are per-step —
+ * reusing `subagent_id` would make that column mean "step id" on step rows
+ * and clash with "subagent id" elsewhere. Pairing still goes through
+ * `taskId`, so `?taskId=` filters keep step and spawn/stop rows together.
  *
- * dispatch 行只有 startedAt；settle 行补 endedAt / durationMs，失败时补 error。
+ * dispatch rows carry only startedAt; settle rows add endedAt / durationMs,
+ * plus error on failure.
  */
 export interface SubagentStepRecord {
   readonly id: string;
   readonly taskId: string;
   readonly parentTurnId?: string;
   readonly origin: "parent" | "child";
-  /** 0-based，父侧该任务内单调递增。 */
+  /** 0-based, monotonically increasing per task on the parent side. */
   readonly stepIndex: number;
   readonly phase: SubagentStepPhase;
-  /** 人读步骤名（如编排节点 id）。Postel: 无来源时缺席。 */
+  /** Human-readable step name (e.g. an orchestration node id); absent without a source. */
   readonly label?: string;
   readonly startedAt: string;
-  /** Postel: 仅 settle 有终局时间。 */
+  /** Postel: final time exists only on settle. */
   readonly endedAt?: string;
   readonly durationMs?: number;
   readonly status: TraceStatus;
@@ -360,49 +360,43 @@ export interface SubagentStepRecord {
 }
 
 /**
- * Goal 生命周期 trace action (T4, #458).
- *
- * 自包含字面量联合 —— trace bounded context 遵循文件头注释 (types.ts:21-23)
- * 与 VerificationRecord 同模式, **不 import** session-api 的 GoalAction 类型;
- * 通过重定义字面量 + JSDoc 标注源文件保持 trace 域独立松耦合.
- * 源文件对照: plans/458-goal-lifecycle-taskfocus.md T4 Acceptance.
+ * Goal lifecycle trace action. Self-contained literal union — no import of
+ * the session-api GoalAction (header precedent); redefined with a JSDoc
+ * pointer to keep the trace domain decoupled.
  */
 export type GoalAction = "seed" | "pin" | "clear" | "writeback";
 
 /**
- * Goal 生命周期 trace status (T4, #458).
- *
- * 刻意 **不含** 已删的模型提议槽位 (SC1 防回归, ACR #2 协同: T6 模型提议/确认通道
- * 零落地, 删除该字面值避免死值). 包含 `cleared` 是 /goal clear 命令的终态,
- * 与 applyTransition 五态 (active/achieved/aborted/superseded) 区分 —— 清除态
- * 不走状态机转移, 仅 trace 留痕.
- *
- * 自包含字面量联合 —— 不 import session-api 类型.
+ * Goal lifecycle trace status. Deliberately excludes the removed
+ * model-proposal slot (that channel never landed; dropping the literal
+ * avoids a dead value). `cleared` is the terminal state of the /goal clear
+ * command — distinct from the applyTransition state machine: clearing does
+ * not go through transitions, it just leaves a trace. Self-contained union —
+ * no session-api imports.
  */
 export type GoalTraceStatus =
   "active" | "achieved" | "aborted" | "superseded" | "cleared";
 
 /**
- * Goal 生命周期 trace record (T4, #458 — T12 数据契约落定).
+ * Goal lifecycle trace record.
  *
- * 与 VerificationRecord 同形态: id/sessionId/ts/conversationId 由调用方提供;
- * 实现不做 ID 生成 —— 成功返回 record.id, 失败返回 undefined.
- * sessionId 关联会话根; action 区分生命周期节点 (seed/pin/clear/writeback);
- * status 可选 (clear 与 seed 不一定带 status); text 与 textLen 二选一 (seed
- * 路径只带 textLen 不带 text 明文, 减少日志膨胀 — 与 hub.ts:1061 seed 发射点对齐).
- *
- * Postel: status / text / textLen 可选, 仅存在时落盘 (JSON.stringify 自动丢弃 undefined).
+ * Same shape as VerificationRecord: id/sessionId/ts/conversationId are
+ * caller-provided; no ID generation — success returns record.id, failure
+ * undefined. sessionId links the session root; action distinguishes lifecycle
+ * nodes (seed/pin/clear/writeback); status optional (clear and seed may omit
+ * it); text vs textLen is either/or — the seed path carries only textLen to
+ * keep logs lean. Postel: optionals persisted only when present.
  */
 export interface GoalRecord {
-  /** 自有 id (调用方提供, 实现不做 ID 生成). */
+  /** Own id (caller-provided; implementation generates nothing). */
   readonly id: string;
   readonly sessionId: string;
   readonly action: GoalAction;
-  /** Postel: 可选 (clear/seed 不一定带). */
+  /** Postel: optional (clear/seed may omit). */
   readonly status?: GoalTraceStatus;
-  /** Postel: 可选 (seed 路径只带 textLen). */
+  /** Postel: optional (seed path carries only textLen). */
   readonly text?: string;
-  /** Postel: 可选 (Pin/writeback 路径通常不带). */
+  /** Postel: optional (pin/writeback usually omit). */
   readonly textLen?: number;
   readonly ts: string;
   readonly conversationId: string;
@@ -410,67 +404,58 @@ export interface GoalRecord {
 
 export interface TraceService {
   /**
-   * 记录一次 LLM 调用; 由实现生成 llmCallId。
-   * @throws never — 实现必须捕获 IO 错误并返回 undefined (spec 判据 4/13)。
+   * Record one LLM call; the implementation generates llmCallId.
+   * @throws never — implementations must catch IO errors and return undefined.
    */
   recordLlmCall(record: LlmCallRecord): Promise<string | undefined>;
   /**
-   * 记录一次工具调用; parentLlmCallId 为必填槽 (undefined → 孤儿记录)。
+   * Record one tool call; parentLlmCallId is a mandatory slot
+   * (undefined → orphan record).
    * @throws never.
    */
   recordToolCall(record: ToolCallRecord): Promise<string | undefined>;
-  /**
-   * 记录一次 turn; 由实现生成 turnId。
-   * @throws never.
-   */
+  /** Record one turn; the implementation generates turnId. @throws never. */
   recordTurn(record: TurnRecord): Promise<string | undefined>;
-  /**
-   * 记录一次会话根 (L1, v2); 由实现生成 sessionId。
-   * @throws never.
-   */
+  /** Record one session root; the implementation generates sessionId. @throws never. */
   recordSession(record: SessionRecord): Promise<string | undefined>;
-  /**
-   * 记录一次沙箱命令执行 (v2, schema 就位埋点留 pendingRuntime)。
-   * @throws never.
-   */
+  /** Record one sandbox command execution (schema ready, emitter pendingRuntime). @throws never. */
   recordSandboxCmd(record: SandboxCmdRecord): Promise<string | undefined>;
   /**
-   * 记录一次验证判定（#128 闭环）。
-   * 注意: 与既有 record 不同, VerificationRecord 的 id/sessionId/ts 由调用方提供,
-   * 实现不做 ID 生成 —— 成功返回 record.id, 失败返回 undefined。
-   * @throws never — 实现必须捕获 IO 错误并返回 undefined。
+   * Record one verification verdict. Unlike the others, id/sessionId/ts come
+   * from the caller; success returns record.id, failure undefined.
+   * @throws never.
    */
   recordVerification(record: VerificationRecord): Promise<string | undefined>;
   /**
-   * 记录一次 goal 生命周期事件 (#458 T12 数据契约).
-   * 注意: 与 VerificationRecord 同形态 —— id/sessionId/ts 由调用方提供,
-   * 实现不做 ID 生成 —— 成功返回 record.id, 失败返回 undefined.
-   * record.conversationId 是冗余字段 (工厂构造时已实例绑定), 实现从 snake
-   * 副本剔除以保证工厂 binding 胜出 (对齐 recordVerification 语义).
-   * @throws never — 实现必须捕获 IO 错误并返回 undefined。
+   * Record one goal lifecycle event. Caller-provided ids like
+   * recordVerification. record.conversationId is redundant (the factory binds
+   * one at construction); the implementation strips it from the snake-case
+   * copy so the factory binding always wins.
+   * @throws never.
    */
   recordGoal(record: GoalRecord): Promise<string | undefined>;
   /**
-   * 记录一次子代理 spawn (#358 T4) — 调用方提供 id (= manager taskId), 实现不做 ID 生成。
-   * @throws never — 调用方应经 safeTrace 包裹, 实现失败返回 undefined。
+   * Record one subagent spawn — caller-provided id (= manager taskId).
+   * @throws never — callers wrap in safeTrace; failure returns undefined.
    */
   recordSubagentSpawn(record: SubagentSpawnRecord): Promise<string | undefined>;
   /**
-   * 记录一次子代理终态 (completed / failed) (#358 T4) — 单点 single-emit,
-   * 父 manager 内置 stoppedEmitted flag 保证不重复落盘。
+   * Record one subagent terminal state (completed / failed) — single-emit;
+   * the parent manager's stoppedEmitted flag prevents duplicates.
    * @throws never.
    */
   recordSubagentStop(record: SubagentStopRecord): Promise<string | undefined>;
   /**
-   * 记录一次子代理状态迁移 (#358 T4) — fromState/toState 必有; reason 仅 failed 时填。
+   * Record one subagent state transition — fromState/toState required;
+   * reason only on failed.
    * @throws never.
    */
   recordSubagentStateChange(
     record: SubagentStateChangeRecord
   ): Promise<string | undefined>;
   /**
-   * 记录一次子代理执行步骤 (D-α 观测地板) — 调用方提供 id (每步唯一),
-   * 实现不做 ID 生成。dispatch / settle 各一行。
+   * Record one subagent execution step — caller-provided id (unique per
+   * step); dispatch / settle each emit a row.
    * @throws never.
    */
   recordSubagentStep(record: SubagentStepRecord): Promise<string | undefined>;
